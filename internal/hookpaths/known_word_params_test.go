@@ -213,3 +213,27 @@ func TestCopyWordValueIsKnownOnlyWhenEveryBindingGivesTheSameValue(t *testing.T)
 		t.Errorf("literal operands of a known destination word = %v", got)
 	}
 }
+
+// BD-BATCH3a merge of rel-1-0-6:GAP-0235 (known copy words) with
+// rel-1-0-6:GAP-0228 (brace operands of every writer): a cp call with a
+// known parameter word and a brace word lists the keys file the brace word
+// names, and the known word stays a copy-only reading (a tee operand named
+// by a parameter keeps the GAP-2514 reader).
+func TestKnownCopyWordNextToABraceOperand(t *testing.T) {
+	const home = "/home/u"
+	const keys = "/home/u/.ssh/authorized_keys"
+	for _, command := range []string{
+		`f=a.pub; cp $f {,"$HOME"/.ssh/authorized_keys}`,
+		`f=a.pub; cp "$f" "$HOME"/.ssh/{,authorized_key"s"}`,
+		`f=/home/u/.ssh/authorized_keys; cp {a,b}.pub $f`,
+		`f=/home/u/.ssh/authorized_keys; tee $f {,out.txt}`,
+	} {
+		if got := LiteralWriteOperands(command, "/p", home); !slices.Contains(got, keys) {
+			t.Errorf("%s: literal operands %v, want %s", command, got, keys)
+		}
+	}
+	// An unknown parameter word keeps the cp call dynamic, as before.
+	if got := LiteralWriteOperands(`cp $g {,"$HOME"/.ssh/authorized_keys}`, "/p", home); slices.Contains(got, keys) {
+		t.Errorf("unknown copy word: literal operands %v list the keys file", got)
+	}
+}
