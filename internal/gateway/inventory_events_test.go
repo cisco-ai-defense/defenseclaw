@@ -1057,6 +1057,91 @@ func TestEndpointMCPComponentsRetainOnlyBoundedIdentifiersBasenamesAndHosts(t *t
 	}
 }
 
+func TestEndpointLocalMCPIdentityUsesCommandAndOrderedArguments(t *testing.T) {
+	key := []byte("0123456789abcdef0123456789abcdef")
+	component := func(name, command string, args ...string) endpointInventoryComponent {
+		t.Helper()
+		components := endpointMCPComponentsFromServers([]config.MCPServerEntry{{
+			Name: name, Command: command, Args: args,
+		}}, key)
+		if len(components) != 1 {
+			t.Fatalf("components=%d", len(components))
+		}
+		return components[0]
+	}
+	base := component("alias-a", "/private/bin/mcp", "--mode", "safe")
+	if renamed := component("alias-b", "/private/bin/mcp", "--mode", "safe"); renamed.id != base.id {
+		t.Fatalf("renaming a local server changed identity: %q / %q", base.id, renamed.id)
+	}
+	if changed := component("alias-a", "/other/bin/mcp", "--mode", "safe"); changed.id == base.id {
+		t.Fatal("changing the full command did not change identity")
+	}
+	if reordered := component("alias-a", "/private/bin/mcp", "safe", "--mode"); reordered.id == base.id {
+		t.Fatal("changing argument order did not change identity")
+	}
+	if strings.Contains(base.id, "/private") || strings.Contains(base.id, "--mode") {
+		t.Fatalf("local component ID disclosed raw identity material: %q", base.id)
+	}
+}
+
+func TestPerConnectorMCPInventoryDistinguishesIdenticalCommandsWithDifferentAliases(t *testing.T) {
+	withManagedEnterprise(t, true)
+	home := t.TempDir()
+	t.Setenv("HOME", t.TempDir())
+	t.Setenv("CODEX_HOME", t.TempDir())
+	if err := os.MkdirAll(filepath.Join(home, ".codex"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(home, ".codex", "config.toml")
+	write := func(first, second string) {
+		t.Helper()
+		body := fmt.Sprintf("[mcp_servers.%s]\ncommand = 'uvx'\nargs = ['notes-mcp']\n[mcp_servers.%s]\ncommand = 'uvx'\nargs = ['notes-mcp']\n", first, second)
+		if err := os.WriteFile(path, []byte(body), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	cfg := &config.Config{AIDiscovery: config.AIDiscoveryConfig{HomeDirs: []string{home}}, Gateway: config.GatewayConfig{Token: "test-identity-key"}}
+	registry := connector.NewRegistry()
+	if err := registry.RegisterPlugin(&endpointInventoryPluginConnector{name: "codex", description: "test"}); err != nil {
+		t.Fatal(err)
+	}
+	ids := func() map[string]string {
+		t.Helper()
+		rows, partial := perConnectorMCPEntriesWithStatus(cfg, registry)
+		if partial || len(rows) != 2 {
+			t.Fatalf("colliding server rows=%+v partial=%v", rows, partial)
+		}
+		return map[string]string{rows[0].itemName: rows[0].id, rows[1].itemName: rows[1].id}
+	}
+	write("alpha", "beta")
+	initial := ids()
+	if initial["alpha"] == "" || initial["beta"] == "" || initial["alpha"] == initial["beta"] {
+		t.Fatalf("colliding commands lost alias identity: %v", initial)
+	}
+	write("beta", "alpha")
+	reordered := ids()
+	if !reflect.DeepEqual(initial, reordered) {
+		t.Fatalf("reordered config changed colliding IDs: %v / %v", initial, reordered)
+	}
+}
+
+func TestMCPHomeReaderMarksDanglingConfigSymlinkPartial(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("symlink creation requires elevated Windows permissions")
+	}
+	home := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(home, ".codex"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(filepath.Join(home, "missing.toml"), filepath.Join(home, ".codex", "config.toml")); err != nil {
+		t.Fatal(err)
+	}
+	_, partial := readMCPServersUnderHomeForOSWithStatus("codex", home, runtime.GOOS)
+	if !partial {
+		t.Fatal("dangling MCP config symlink was treated as an authoritative empty listing")
+	}
+}
+
 func TestEmitEndpointInventoryPreservesPR471SafeMCPFields(t *testing.T) {
 	withManagedEnterprise(t, true)
 	t.Setenv("PATH", t.TempDir())
