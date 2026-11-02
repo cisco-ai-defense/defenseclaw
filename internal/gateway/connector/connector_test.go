@@ -11996,8 +11996,21 @@ func TestHardening_SweepRunsOnlyOnAFallbackCall(t *testing.T) {
 	if err := os.WriteFile(helperPath, helperBytes, 0o600); err != nil {
 		t.Fatalf("write helper: %v", err)
 	}
-	// A non-directory TMPDIR makes mktemp fail even when Git Bash can
-	// find its own copy outside the PATH passed to the child process.
+	// The fallback call needs a failing mktemp. On Windows a non-directory
+	// TMPDIR makes it fail even when Git Bash finds its own copy outside the
+	// PATH passed to the child process. macOS mktemp ignores a bad TMPDIR and
+	// uses the account's temp folder, so on Unix the call starts from a
+	// folder whose only program is mkdir and has no mktemp at all.
+	noMktemp := filepath.Join(tmp, "bin-without-mktemp")
+	if runtime.GOOS != "windows" {
+		if err := os.MkdirAll(noMktemp, 0o700); err != nil {
+			t.Fatal(err)
+		}
+		mkdir, _ := exec.LookPath("mkdir")
+		if err := os.Symlink(mkdir, filepath.Join(noMktemp, "mkdir")); err != nil {
+			t.Fatal(err)
+		}
+	}
 	const script = `source "$0"
 seed=0
 while :; do RANDOM=$seed; [ $((RANDOM % 32)) -eq 0 ] && break; seed=$((seed + 1)); done
@@ -12016,8 +12029,12 @@ printf '%s\n' "$HOME"`
 		}
 		cmd := exec.Command(bash, "-c", script, helperPath)
 		// Git Bash and Go can spell the same Windows path with different separators.
-		cmd.Env = []string{"PATH=/usr/local/bin:/usr/bin:/bin", "HOME=" + filepath.ToSlash(tmp), "DEFENSECLAW_HOME=" + filepath.ToSlash(home)}
-		if tmpdir != "" {
+		path := "/usr/local/bin:/usr/bin:/bin"
+		if tmpdir != "" && runtime.GOOS != "windows" {
+			path = noMktemp
+		}
+		cmd.Env = []string{"PATH=" + path, "HOME=" + filepath.ToSlash(tmp), "DEFENSECLAW_HOME=" + filepath.ToSlash(home)}
+		if tmpdir != "" && runtime.GOOS == "windows" {
 			cmd.Env = append(cmd.Env, "TMPDIR="+tmpdir)
 		}
 		out, err := cmd.CombinedOutput()
