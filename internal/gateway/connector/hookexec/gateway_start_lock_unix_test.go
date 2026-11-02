@@ -265,13 +265,38 @@ func TestPerUserGatewayRestartProvenReadsTheConnectedPeer(t *testing.T) {
 	// The proof that runs after the deadline has one budget: a proof not
 	// done in it is no proof (review r3 finding 3).
 	t.Run("lock held, proof budget spent", func(t *testing.T) {
-		previous := perUserRestartProofBudget
-		perUserRestartProofBudget = time.Nanosecond
-		t.Cleanup(func() { perUserRestartProofBudget = previous })
+		// Deterministic (review r4): the look at the start lock blocks until
+		// the test ends, so only the outer budget can end the proof. The
+		// peer would prove a restart if the proof ever finished.
+		previous, previousOpen := perUserRestartProofBudget, perUserStartLockOpen
+		perUserRestartProofBudget = 50 * time.Millisecond
+		release, entered := make(chan struct{}), make(chan struct{})
+		perUserStartLockOpen = func(string) (*os.File, error) {
+			close(entered)
+			<-release
+			// The TempDir is gone by then: touch nothing of it.
+			return nil, os.ErrNotExist
+		}
+		t.Cleanup(func() {
+			close(release)
+			<-entered // orders the proof goroutine's read of the seam before the restore (-race, review r5)
+			perUserRestartProofBudget, perUserStartLockOpen = previous, previousOpen
+		})
 		dir := t.TempDir()
 		holdStartLock(t, dir)
-		if PerUserGatewayRestartProven(dir, knownPeer(1<<22+12345, "1 2", server)) {
-			t.Fatal("a proof past its budget read as a restart")
+		got := make(chan bool, 1)
+		start := time.Now()
+		go func() { got <- PerUserGatewayRestartProven(dir, knownPeer(1<<22+12345, "1 2", server)) }()
+		select {
+		case ok := <-got:
+			if ok {
+				t.Fatal("a proof past its budget read as a restart")
+			}
+			if d := time.Since(start); d > time.Second {
+				t.Fatalf("the proof took %v, want about its 50 ms budget", d)
+			}
+		case <-time.After(2 * time.Second):
+			t.Fatal("the proof ran past its budget")
 		}
 	})
 	// Another process holds a dup of the live gateway's listener (review r3
@@ -338,4 +363,32 @@ func TestPerUserGatewayRestartProvenReadsTheConnectedPeer(t *testing.T) {
 			t.Fatal("restart not proven with another process on the port")
 		}
 	})
+}
+
+// TestPerUserGatewayStartInProgressDoesNotWaitOnAFIFO pins the O_NONBLOCK
+// open of the start lock (review r4): a FIFO in the lock's place, which an
+// open without O_NONBLOCK waits on until a writer appears, is no start and
+// is answered at once.
+func TestPerUserGatewayStartInProgressDoesNotWaitOnAFIFO(t *testing.T) {
+	dir := t.TempDir()
+	lock := filepath.Join(dir, perUserGatewayStartLockName)
+	if err := syscall.Mkfifo(lock, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		// Frees a reader still waiting in the open (the old behavior).
+		if f, err := os.OpenFile(lock, os.O_WRONLY|syscall.O_NONBLOCK, 0); err == nil {
+			_ = f.Close()
+		}
+	})
+	got := make(chan bool, 1)
+	go func() { got <- PerUserGatewayStartInProgress(dir) }()
+	select {
+	case held := <-got:
+		if held {
+			t.Fatal("a FIFO in the start lock's place read as a start")
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("the look at the start lock waited on a FIFO")
+	}
 }
