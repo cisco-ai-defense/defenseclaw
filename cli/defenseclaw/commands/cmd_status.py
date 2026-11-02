@@ -521,6 +521,7 @@ def status(app: AppContext, as_json: bool) -> None:
             )
         _print_policy(health)
         _print_audit_log_health(cfg, health)
+        _print_retention_cap_warning(health)
         _print_agent_identity_ledger(health)
         _print_agents(cfg, health=health)
         _print_guardrail_profile(cfg)
@@ -1698,6 +1699,13 @@ def _print_audit_log_health(cfg, health: dict | None) -> None:
         _status_row("Audit log", ux._style(value[0].upper() + value[1:], fg="yellow"))
 
 
+def _print_retention_cap_warning(health: dict | None) -> None:
+    from defenseclaw.observability.v8_status import retention_cap_warning_from_gateway
+
+    if value := retention_cap_warning_from_gateway(health):
+        _status_row("Audit retention", ux._style("Warning: " + value, fg="yellow"))
+
+
 def _print_agent_identity_ledger(health: dict | None) -> None:
     """Warn when the gateway cannot save agent identities (GAP-0393)."""
     from defenseclaw.commands.cmd_doctor import agent_identity_ledger_failure
@@ -2317,6 +2325,10 @@ def _status_payload(app) -> dict:
         )
         if failure := _gateway_audit_write_failure(health):
             payload["audit_write_failure"] = failure
+        from defenseclaw.observability.v8_status import retention_cap_warning_from_gateway
+
+        if warning := retention_cap_warning_from_gateway(health):
+            payload["audit_store_cap_warning"] = warning
     if (policy := _policy_status(health)) is not None:
         payload["policy"] = policy
     payload["connectors"] = _connector_roster(cfg, health=health)

@@ -553,6 +553,7 @@ def retention_health_from_gateway(health: Mapping[str, Any] | None) -> tuple[str
     if state not in {
         "waiting_for_readiness",
         "healthy",
+        "warning",
         "degraded",
         "disabled",
         "stopped",
@@ -562,6 +563,33 @@ def retention_health_from_gateway(health: Mapping[str, Any] | None) -> tuple[str
         return "", ""
     failure = _safe_health_token(details.get("retention_failure", details.get("failure")))
     return state, failure
+
+
+def retention_cap_warning_from_gateway(health: Mapping[str, Any] | None) -> str:
+    """Return one bounded, actionable line for a completed cap shortfall."""
+
+    if not isinstance(health, Mapping):
+        return ""
+    telemetry: Any = health.get("telemetry", health)
+    details = telemetry.get("details") if isinstance(telemetry, Mapping) else None
+    if not isinstance(details, Mapping) or details.get("retention_state") != "warning":
+        return ""
+    fallback = "audit store cap not reached; inspect the gateway retention health"
+    used = _nonnegative_int(details.get("retention_cap_used_bytes"))
+    cap = _nonnegative_int(details.get("retention_cap_bytes"))
+    if used is None or cap is None or not 0 < cap < used <= 1 << 53 or cap > 1 << 40:
+        return fallback
+    reason = _safe_health_token(details.get("retention_cap_reason"))
+    if reason == "active_correlation_state":
+        advice = "active correlation state is retained; end unused sessions or raise observability.local.max_store_mb"
+    elif reason == "retained_history_or_pending_work":
+        advice = (
+            "recent history or pending retention work remains; "
+            "allow another pass or raise observability.local.max_store_mb"
+        )
+    else:
+        return fallback
+    return f"audit store cap not reached: {used / (1 << 20):.1f} MiB used, cap {cap / (1 << 20):.1f} MiB; {advice}"
 
 
 def _bucket_status(item: Mapping[str, Any]) -> V8BucketStatus:
@@ -758,6 +786,7 @@ __all__ = [
     "destination_health_from_gateway",
     "inspect_v8_operator_status",
     "operator_status_from_effective",
+    "retention_cap_warning_from_gateway",
     "retention_health_from_gateway",
     "source_is_v8",
 ]

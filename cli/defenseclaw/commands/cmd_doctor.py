@@ -13972,8 +13972,14 @@ def _check_observability_v8_status(
         detail = retention_state
         if retention_failure:
             detail += f"; failure={retention_failure}"
+        if retention_state == "warning":
+            from defenseclaw.observability.v8_status import retention_cap_warning_from_gateway
+
+            detail = retention_cap_warning_from_gateway(live_health) or (
+                "audit store cap not reached; inspect gateway status"
+            )
         _emit(
-            "warn" if retention_state in {"degraded", "stopped"} else "pass",
+            "warn" if retention_state in {"warning", "degraded", "stopped"} else "pass",
             "Retention controller",
             detail,
             r=r,

@@ -7,6 +7,9 @@ import (
 	"errors"
 	"sync/atomic"
 	"testing"
+	"time"
+
+	"github.com/defenseclaw/defenseclaw/internal/audit"
 )
 
 // cappedFakeRetentionReaper is a fake reaper with the opt-in size cap.
@@ -116,4 +119,95 @@ func TestRetentionControllerPublishesALooserPolicyWithoutARun(t *testing.T) {
 		t.Fatalf("a looser policy started a run: %d runs, want 1", runs)
 	}
 	stopRetentionControllerTest(t, controller)
+}
+
+func TestRetentionControllerWarnsForUnmetCapAndClearsWhenMet(t *testing.T) {
+	reaper := &cappedFakeRetentionReaper{fakeRetentionReaper: newFakeRetentionReaper(7)}
+	reaper.maxStoreMB.Store(1)
+	reporter := &recordingRetentionReporter{statuses: make(chan RetentionControllerStatus, 4)}
+	controller, err := newRetentionController(reaper, RetentionControllerOptions{Reporter: reporter})
+	if err != nil {
+		t.Fatal(err)
+	}
+	reaper.responses <- fakeRetentionResponse{result: audit.RetentionRunResult{
+		CompletedAt: time.Now().UTC(), CapNotReached: true, StoreSizeBytes: 2 << 20,
+		StoreCapBytes: 1 << 20, CapReason: audit.RetentionCapRetainedHistory,
+	}}
+	if !controller.runOnce(t.Context()) {
+		t.Fatal("cap pass did not finish")
+	}
+	warning := receiveRetentionTest(t, reporter.statuses)
+	if warning.State != RetentionStateWarning || warning.Failure != RetentionFailureNone ||
+		warning.CapReason != audit.RetentionCapRetainedHistory || warning.StoreSizeBytes != 2<<20 ||
+		warning.StoreCapBytes != 1<<20 || warning.FailureCount != 0 {
+		t.Fatalf("shortfall status = %+v", warning)
+	}
+	controller.lifecycleMu.Lock()
+	err = controller.applyPolicyLocked(7, 0)
+	controller.lifecycleMu.Unlock()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cleared := controller.Status(); cleared.State != RetentionStateHealthy ||
+		cleared.StoreSizeBytes != 0 || cleared.CapReason != "" || cleared.MaxStoreMB != 0 {
+		t.Fatalf("warning after cap removed = %+v", cleared)
+	}
+	controller.lifecycleMu.Lock()
+	err = controller.applyPolicyLocked(7, 1)
+	controller.lifecycleMu.Unlock()
+	if err != nil {
+		t.Fatal(err)
+	}
+	reaper.responses <- fakeRetentionResponse{result: successfulRetentionResult()}
+	if !controller.runOnce(t.Context()) {
+		t.Fatal("follow-up cap pass did not finish")
+	}
+	healthy := receiveRetentionTest(t, reporter.statuses)
+	if healthy.State != RetentionStateHealthy || healthy.CapReason != "" ||
+		healthy.StoreSizeBytes != 0 || healthy.StoreCapBytes != 0 {
+		t.Fatalf("met-cap status = %+v", healthy)
+	}
+}
+
+func TestRetentionControllerRerunsWhenWarningCapIsRaisedButStillUnmet(t *testing.T) {
+	reaper := &cappedFakeRetentionReaper{fakeRetentionReaper: newFakeRetentionReaper(7)}
+	reaper.maxStoreMB.Store(1)
+	scheduler := newScriptedRetentionScheduler()
+	reporter := &recordingRetentionReporter{statuses: make(chan RetentionControllerStatus, 4)}
+	controller, err := newRetentionController(reaper, RetentionControllerOptions{
+		Scheduler: scheduler, Reporter: reporter,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := controller.Start(t.Context()); err != nil {
+		t.Fatal(err)
+	}
+	defer stopRetentionControllerTest(t, controller)
+	receiveRetentionTest(t, reaper.started)
+	reaper.responses <- fakeRetentionResponse{result: audit.RetentionRunResult{
+		CompletedAt: time.Now().UTC(), CapNotReached: true, StoreSizeBytes: 3 << 20,
+		StoreCapBytes: 1 << 20, CapReason: audit.RetentionCapRetainedHistory,
+	}}
+	if got := receiveRetentionTest(t, reporter.statuses); got.State != RetentionStateWarning {
+		t.Fatalf("initial cap status = %+v, want warning", got)
+	}
+	receiveRetentionTest(t, scheduler.waits)
+
+	controller.lifecycleMu.Lock()
+	err = controller.applyPolicyLocked(7, 2)
+	controller.lifecycleMu.Unlock()
+	if err != nil {
+		t.Fatal(err)
+	}
+	receiveRetentionTest(t, reaper.started)
+	reaper.responses <- fakeRetentionResponse{result: audit.RetentionRunResult{
+		CompletedAt: time.Now().UTC(), CapNotReached: true, StoreSizeBytes: 3 << 20,
+		StoreCapBytes: 2 << 20, CapReason: audit.RetentionCapRetainedHistory,
+	}}
+	if got := receiveRetentionTest(t, reporter.statuses); got.State != RetentionStateWarning ||
+		got.MaxStoreMB != 2 || got.StoreSizeBytes != 3<<20 || got.StoreCapBytes != 2<<20 ||
+		got.RunCount != 2 {
+		t.Fatalf("status after a pass with the raised cap = %+v, want measured warning", got)
+	}
 }

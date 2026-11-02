@@ -72,3 +72,21 @@ def test_status_reports_live_audit_failure_and_block_after_recovery(tmp_path):
         assert "audit_db_error" not in recovered
         assert "audit_write_failure" not in recovered
         assert recovered["tool_blocks"] == 1
+
+        health["telemetry"] = {"state": "running", "details": {
+            "retention_state": "warning", "retention_cap_used_bytes": 2 << 20,
+            "retention_cap_bytes": 1 << 20, "retention_cap_reason": "active_correlation_state",
+        }}
+        capped = CliRunner().invoke(main.cli, ["status", "--json"], obj=AppContext())
+        assert capped.exit_code == 0, capped.output
+        assert "cap not reached: 2.0 MiB used, cap 1.0 MiB" in json.loads(capped.output)["audit_store_cap_warning"]
+        human = CliRunner().invoke(main.cli, ["status"], obj=AppContext())
+        assert human.exit_code == 0, human.output
+        assert "Audit retention:" in human.output
+        assert "Warning:" in human.output
+        assert "cap not reached" in human.output
+
+        health["telemetry"] = {"state": "running", "details": {"retention_state": "healthy"}}
+        met = CliRunner().invoke(main.cli, ["status", "--json"], obj=AppContext())
+        assert met.exit_code == 0, met.output
+        assert "audit_store_cap_warning" not in json.loads(met.output)

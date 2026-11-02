@@ -531,6 +531,32 @@ func TestPrintSubsystemShowsTheAuditStoreSizeCap(t *testing.T) {
 	}
 }
 
+func TestPrintSubsystemWarnsWhenRetentionCapIsNotReached(t *testing.T) {
+	h := gateway.SubsystemHealth{State: gateway.StateRunning, Details: map[string]interface{}{
+		"retention_state": "warning", "retention_days": float64(7),
+		"retention_max_store_mb": float64(1), "retention_cap_used_bytes": float64(2 << 20),
+		"retention_cap_bytes":  float64(1 << 20),
+		"retention_cap_reason": "active_correlation_state",
+	}}
+	out := captureStdout(t, func() { printSubsystem("Telemetry", h, 0) })
+	if !strings.Contains(out, "warning:") || !strings.Contains(out, "cap not reached: 2.0 MiB used, cap 1.0 MiB") ||
+		!strings.Contains(out, "end unused sessions") || strings.Contains(out, "retention_state: healthy") {
+		t.Fatalf("cap warning absent: %s", out)
+	}
+	h.Details["retention_cap_reason"] = "private/path"
+	if out := captureStdout(t, func() { printSubsystem("Telemetry", h, 0) }); !strings.Contains(out, "cap not reached; inspect the gateway retention health") ||
+		strings.Contains(out, "private/path") {
+		t.Fatalf("unbounded cap reason rendered: %s", out)
+	}
+	h.Details["retention_state"] = "healthy"
+	delete(h.Details, "retention_cap_used_bytes")
+	delete(h.Details, "retention_cap_bytes")
+	delete(h.Details, "retention_cap_reason")
+	if out := captureStdout(t, func() { printSubsystem("Telemetry", h, 0) }); strings.Contains(out, "cap not reached") {
+		t.Fatalf("cap warning after a met pass: %s", out)
+	}
+}
+
 // TestPrintSubsystemExplainsFailingJudge pins GAP-1288: gateway status says
 // in words that the LLM judge is failing.
 func TestPrintSubsystemExplainsFailingJudge(t *testing.T) {
