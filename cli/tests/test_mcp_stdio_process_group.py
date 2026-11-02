@@ -324,8 +324,6 @@ def test_control_close_error_cannot_retain_child_or_reaper(
 
     try:
         with monkeypatch.context() as fault:
-            if write_fails:
-                fault.setattr(mcp, "_MCP_POSIX_GUARDIAN_MAX_AGE_SECONDS", 0.8)
             fault.setattr(mcp.os, "pipe", tracked_pipe)
             fault.setattr(mcp.os, "write", fail_write)
             fault.setattr(mcp.os, "close", fail_close)
@@ -335,7 +333,7 @@ def test_control_close_error_cannot_retain_child_or_reaper(
             )
         assert result == [] and close_failed and control_fd is not None
         child_pid = int(child_pid_file.read_text(encoding="ascii"))
-        deadline = time.monotonic() + 3
+        deadline = time.monotonic() + 1.5
         while (_running(child_pid) or any(g.poll() is None for g in guardians)
                or reaper_count() > before_reapers) and time.monotonic() < deadline:
             time.sleep(0.02)
@@ -353,6 +351,60 @@ def test_control_close_error_cannot_retain_child_or_reaper(
                 pid = int(pid_file.read_text(encoding="ascii"))
                 if _running(pid):
                     os.kill(pid, signal.SIGKILL)
+
+
+@pytest.mark.skipif(os.name == "nt", reason="Windows uses a Job Object")
+def test_failed_launch_close_error_reaps_guardian_synchronously(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import mcp.client.stdio as sdk
+    from defenseclaw.scanner import mcp
+
+    original_pipe, original_close = os.pipe, os.close
+    control_fds: set[int] = set()
+    guardians: list[subprocess.Popen[bytes]] = []
+    original_reap = mcp._reap_mcp_posix_guardian
+
+    def tracked_pipe() -> tuple[int, int]:
+        pair = original_pipe()
+        if inspect.currentframe().f_back.f_code.co_name == "create":
+            control_fds.add(pair[1])
+        return pair
+
+    def fail_close(fd: int) -> None:
+        if fd in control_fds:
+            raise OSError(errno.EIO, "injected close error leaving descriptor open")
+        original_close(fd)
+
+    def tracked_reap(guardian: subprocess.Popen[bytes], *args: object) -> None:
+        guardians.append(guardian)
+        original_reap(guardian, *args)
+
+    async def launch() -> None:
+        with mcp._contained_mcp_posix_process_factory("missing fixture"):
+            await sdk._create_platform_compatible_process(
+                "/cf499/nonexistent-mcp-server", [], errlog=subprocess.DEVNULL,
+            )
+
+    try:
+        with monkeypatch.context() as fault:
+            fault.setattr(mcp.os, "pipe", tracked_pipe)
+            fault.setattr(mcp.os, "close", fail_close)
+            fault.setattr(mcp, "_reap_mcp_posix_guardian", tracked_reap)
+            with pytest.raises(FileNotFoundError):
+                asyncio.run(launch())
+        assert len(guardians) == 1
+        assert guardians[0].poll() is not None
+    finally:
+        for fd in control_fds:
+            try:
+                original_close(fd)
+            except OSError:
+                pass
+        for guardian in guardians:
+            if guardian.poll() is None:
+                guardian.kill()
+            guardian.wait(timeout=2)
 
 
 @pytest.mark.skipif(os.name == "nt", reason="Windows uses a Job Object")
