@@ -517,6 +517,13 @@ func agentAssetPolicySubject(reason string) string {
 		return kind + " " + name + " is denied by the default asset policy"
 	case "admin-deny":
 		return kind + " " + name + " is denied by asset policy"
+	case "plugin-owner-unknown":
+		// The owner of a plugin MCP server the registry could not prove is
+		// unknown: never name a plugin read off the server name as the
+		// owner (rel-1-0-6:GAP-0293).
+		if values["asset_type"] == "plugin" {
+			return "the plugin that owns this MCP server is unknown, and a plugin it can belong to is refused by security policy"
+		}
 	case "install-block":
 		if values["asset_type"] == "plugin" {
 			return kind + " " + name + " was blocked by install admission"

@@ -833,7 +833,7 @@ Two kinds of verb look alike and differ in where they keep state:
 | Verbs | State | Gateway call |
 | --- | --- | --- |
 | `block`, `allow`, `unblock` on `skill`, `mcp`, `plugin` and `tool` | `asset_policy.<type>.denied` and `asset_policy.<type>.allowed` in `config.yaml`, written through the config writer. The explicit lists apply in every `asset_policy.mode`. The running gateway applies the change on its next reload, so the effect needs no restart. | None. With the gateway stopped, the change is still saved and the command warns that the audit event was not recorded. |
-| `disable`, `enable`, `quarantine`, `restore` on `skill` and `plugin` | Runtime state: the enforcement journal in `audit.db`, plus the files a quarantine moves. These are not block or allow lists and are not in `config.yaml`. | `disable` and `enable` call the running gateway and fail when it cannot be reached. |
+| `disable`, `enable`, `quarantine`, `restore` on `skill` and `plugin` | Runtime state: the enforcement journal in `audit.db`, plus the files a quarantine moves. These are not block or allow lists and are not in `config.yaml`. A Claude Code plugin quarantine also turns the plugin's `enabledPlugins` entries in `~/.claude/settings.json` off, so `claude plugin list` shows it disabled; `restore` turns those entries back on and leaves the others as they are. | `disable` and `enable` call the running gateway and fail when it cannot be reached. |
 
 Nothing reads the `actions` table of `audit.db` as a block or allow list any
 more. A `config_version` 8 install that has operator block or allow entries

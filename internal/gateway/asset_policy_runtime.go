@@ -908,7 +908,7 @@ func (a *APIServer) claudeCodePluginAssetDecision(ctx context.Context, req claud
 	if cfg == nil || cfg.SecureClientIntegration() {
 		return config.AssetPolicyDecision{}, false
 	}
-	owners, guesses := a.claudeCodeToolPlugins(ctx, req)
+	owners, candidates := a.claudeCodeToolPlugins(ctx, req)
 	for _, plugin := range owners {
 		probe := skillRuntimeProbe{
 			TargetType: "plugin", SkillName: plugin, ToolName: req.ToolName, Surface: "hook", Matched: true,
@@ -917,11 +917,41 @@ func (a *APIServer) claudeCodePluginAssetDecision(ctx context.Context, req claud
 			return decision, true
 		}
 	}
-	// A plugin server whose owner the plugin registry could not prove may
-	// belong to any plugin its name starts with. Only an explicit deny or
-	// block of one of them refuses it: registry and default-deny rules need
-	// the plugin proven (GAP-1198).
-	for _, plugin := range guesses {
+	if len(candidates) > 0 {
+		return a.claudeCodePluginOwnerUnknownDecision(ctx, req, candidates)
+	}
+	return config.AssetPolicyDecision{}, false
+}
+
+// claudeCodePluginOwnerUnknownSource is the decision source of a plugin MCP
+// call whose owner plugin the registry could not prove (GAP-0293).
+const claudeCodePluginOwnerUnknownSource = "plugin-owner-unknown"
+
+// claudeCodePluginOwnerUnknownDecision decides a plugin MCP call whose owner
+// the plugin registry could not prove. The owner is reported as unknown,
+// never as a plugin read off the server name: a quarantined or blocked plugin
+// whose name is a prefix of the real owner was named as the owner and its
+// refusal shown for the other plugin's tool (rel-1-0-6:GAP-0293).
+//
+// The decision is the one the policy gives an unknown owner. A refusal
+// (admin deny, install block, runtime disable, quarantine) of a plugin the
+// name can belong to cannot be ruled out without the owner, so the call is
+// refused as owner unknown, as a deny that cannot be evaluated is
+// (mcp-definition-unproven, GAP-1187) and as before (GAP-1198). Otherwise
+// asset_policy.plugin decides an unknown plugin: default-deny and
+// registry_required refuse it where they are on, and the default profile
+// lets it run. Secure Client never reaches this function.
+func (a *APIServer) claudeCodePluginOwnerUnknownDecision(
+	ctx context.Context, req claudeCodeHookRequest, candidates []string,
+) (config.AssetPolicyDecision, bool) {
+	server := strings.TrimSpace(req.MCPServerName)
+	if server == "" {
+		server = serverFromMCPToolName(req.ToolName)
+	}
+	unknown := skillRuntimeProbe{
+		TargetType: "plugin", SkillName: "unknown", RawName: server, ToolName: req.ToolName, Surface: "hook", Matched: true,
+	}
+	for _, plugin := range candidates {
 		probe := skillRuntimeProbe{
 			TargetType: "plugin", SkillName: plugin, ToolName: req.ToolName, Surface: "hook", Matched: true,
 		}
@@ -931,19 +961,39 @@ func (a *APIServer) claudeCodePluginAssetDecision(ctx context.Context, req claud
 		}
 		switch decision.Source {
 		case "admin-deny", "install-block", "runtime-disable":
-			a.emitRuntimeSkillAssetPolicyDecision(ctx, decision, "claudecode", req.HookEventName, probe)
+			decision.Reason = fmt.Sprintf("plugin owner of mcp server %q is unknown: the plugin registry does not prove it, "+
+				"and a refusal of a plugin the name can belong to cannot be ruled out (%s)", server, decision.Source)
+			decision.Source = claudeCodePluginOwnerUnknownSource
+			decision.TargetName = "unknown"
+			decision.RegistryStatus = "unknown"
+			a.emitRuntimeSkillAssetPolicyDecision(ctx, decision, "claudecode", req.HookEventName, unknown)
 			return decision, true
 		}
 	}
-	return config.AssetPolicyDecision{}, false
+	cfg := a.requestConfig(ctx)
+	if cfg == nil {
+		return config.AssetPolicyDecision{}, false
+	}
+	decision, applies := runtimeSkillPathDecision(cfg, "plugin", "claudecode", "hook", "", skillRuntimeProbe{
+		TargetType: "plugin", SkillName: "", Surface: "hook", Matched: true,
+	})
+	if !applies || !decision.Enabled || decision.RawAction != "block" {
+		return config.AssetPolicyDecision{}, false
+	}
+	decision.TargetName = "unknown"
+	decision.Reason = appendVerdictReason(decision.Reason,
+		fmt.Sprintf("plugin owner of mcp server %q is unknown: the plugin registry does not prove it", server))
+	a.emitRuntimeSkillAssetPolicyDecision(ctx, decision, "claudecode", req.HookEventName, unknown)
+	return decision, true
 }
 
 // claudeCodeToolPlugins obtains MCP plugin ownership from the configured
 // server. An underscore split is only usable when it has one boundary;
-// otherwise plugin and server names cannot be distinguished from the hook,
-// and every plugin name the server name could start with is returned in
-// guesses instead (GAP-1198).
-func (a *APIServer) claudeCodeToolPlugins(ctx context.Context, req claudeCodeHookRequest) (owners, guesses []string) {
+// otherwise plugin and server names cannot be distinguished from the hook:
+// the owner is unknown, and every plugin name the server name could start
+// with is returned in candidates, never reported as the owner (GAP-1198,
+// rel-1-0-6:GAP-0293).
+func (a *APIServer) claudeCodeToolPlugins(ctx context.Context, req claudeCodeHookRequest) (owners, candidates []string) {
 	var out []string
 	add := func(name string) {
 		if name = strings.TrimSpace(name); validNativeSkillSelectionName(name) && !slices.Contains(out, name) {
@@ -972,8 +1022,8 @@ func (a *APIServer) claudeCodeToolPlugins(ctx context.Context, req claudeCodeHoo
 			add(plugin)
 		} else if !resolved {
 			for i := strings.Index(rest, "_"); i > 0; {
-				if name := rest[:i]; validNativeSkillSelectionName(name) && !slices.Contains(guesses, name) {
-					guesses = append(guesses, name)
+				if name := rest[:i]; validNativeSkillSelectionName(name) && !slices.Contains(candidates, name) {
+					candidates = append(candidates, name)
 				}
 				next := strings.Index(rest[i+1:], "_")
 				if next < 0 {
@@ -995,7 +1045,7 @@ func (a *APIServer) claudeCodeToolPlugins(ctx context.Context, req claudeCodeHoo
 			add(plugin)
 		}
 	}
-	return out, guesses
+	return out, candidates
 }
 
 // pluginJournalBlockDecision refuses a plugin whose journal entry, under
