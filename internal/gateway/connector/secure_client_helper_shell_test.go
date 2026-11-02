@@ -21,6 +21,8 @@ const secureClientHelperScript = `DEFENSECLAW_MANAGED_HOOK=1
 export DEFENSECLAW_MANAGED_HOOK
 [ "$2" = baked ] && _DC_SECURE_CLIENT_HOOK=1
 [ "$2" = standalone ] && _DC_SECURE_CLIENT_HOOK=0
+shopt -s xpg_echo
+shopt -q xpg_echo || exit 1
 . "$1"
 defenseclaw_harden_env
 if shopt -q xpg_echo; then echo xpg=on; else echo xpg=off; fi
@@ -54,7 +56,7 @@ func TestSecureClientHelperKeepsItsPrePerfShellBehaviour(t *testing.T) {
 	run := func(mode string, extra ...string) string {
 		t.Helper()
 		cmd := exec.Command("/bin/bash", "-c", secureClientHelperScript, "bash", helperPath, mode, fnHome)
-		cmd.Env = append(sanitizedTestEnv(), "HOME="+dir, "BASHOPTS=xpg_echo", "FUNCNEST=50",
+		cmd.Env = append(sanitizedTestEnv(), "HOME="+dir, "FUNCNEST=50",
 			"BASH_FUNC_mktemp%%=() {  mkdir -p '"+fnHome+"' && echo '"+fnHome+"'; }",
 			"BASH_FUNC_stat%%=() {  echo 777; }")
 		cmd.Env = append(cmd.Env, extra...)

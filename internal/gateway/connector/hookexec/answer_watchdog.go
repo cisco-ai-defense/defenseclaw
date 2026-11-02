@@ -99,6 +99,7 @@ type answerWatchdog struct {
 	// answerWatchdogLogPrepareLead before the deadline (watch).
 	failureLog     *preparedFailureLog
 	failureLogHome func() string
+	prepareLead    time.Duration
 }
 
 // AnswerWatchdog is the answer watchdog of one tool call that the hook
@@ -172,7 +173,7 @@ func startAnswerWatchdog(opts *Options, sp spec, failMode string, deadline, ceil
 // output.
 func prepareAnswerWatchdog(opts *Options, sp spec, failMode string, ceiling time.Time) *answerWatchdog {
 	w := &answerWatchdog{stdout: opts.Stdout, stderr: opts.Stderr, exit: opts.Exit, ceiling: ceiling, waiter: newAnswerDeadlineWaiter(),
-		failureLog: newPreparedFailureLog()}
+		failureLog: newPreparedFailureLog(), prepareLead: answerWatchdogLogPrepareLead}
 	w.cacheFailureLogHome(opts)
 	opts.failureLog = w.failureLog
 	w.failureLogHome = failureLogHomeOf(*opts)
@@ -493,7 +494,7 @@ func (w *answerWatchdog) hold(opts *Options) {
 func (w *answerWatchdog) watch(deadline time.Time) {
 	// A call still waiting answerWatchdogLogPrepareLead before its deadline
 	// opens its log now, so the line of the answer below is one append.
-	prepare := time.AfterFunc(time.Until(deadline.Add(-answerWatchdogLogPrepareLead)), func() {
+	prepare := time.AfterFunc(time.Until(deadline.Add(-w.prepareLead)), func() {
 		w.failureLog.prepare(w.failureLogHome)
 	})
 	if !w.waiter.wait(deadline) {
