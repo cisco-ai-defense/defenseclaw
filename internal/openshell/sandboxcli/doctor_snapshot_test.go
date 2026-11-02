@@ -26,7 +26,7 @@ func TestDoctorReadsCurrentStatusAndReusesSandboxList(t *testing.T) {
 	if got := len(ta.daemon.callsTo("GET", sandboxapi.PathSandboxes)); got != 1 {
 		t.Fatalf("sandbox list reads = %d, want 1", got)
 	}
-	var daemon, hooks int = -1, -1
+	daemon, hooks := -1, -1
 	for i, check := range report.Checks {
 		if check.ID == CheckIDDaemon {
 			daemon = i
