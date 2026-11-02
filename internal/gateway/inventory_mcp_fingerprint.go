@@ -68,3 +68,14 @@ func mcpInventoryLocalFingerprints(key []byte, server config.MCPServerEntry) (st
 	return mcpInventoryFingerprint(key, "command", []string{server.Command}),
 		mcpInventoryFingerprint(key, "arguments", server.Args)
 }
+
+// mcpInventoryLocalIdentity identifies a configured local server by its full
+// command and ordered arguments. The HMAC values keep command paths and
+// argument values out of the component ID, including low-entropy secrets.
+// The caller adds connector and user scope for endpoint component identity.
+func mcpInventoryLocalIdentity(commandFingerprint, argumentsFingerprint string) string {
+	if commandFingerprint == "" || argumentsFingerprint == "" {
+		return ""
+	}
+	return "local\x00" + commandFingerprint + "\x00" + argumentsFingerprint
+}

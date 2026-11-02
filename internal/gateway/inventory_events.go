@@ -379,6 +379,13 @@ func perConnectorMCPEntriesForOSWithHomeGuard(cfg *config.Config, reg *connector
 	appendServers := func(connectorName, homeScope, home string, servers []config.MCPServerEntry) {
 		slug := inventoryStableToken(connectorName, 128)
 		owner := ownerFor(connectorName, home)
+		identityCounts := make(map[string]int, len(servers))
+		for _, server := range servers {
+			commandFingerprint, argumentsFingerprint := mcpInventoryLocalFingerprints(fingerprintKey, server)
+			if identity := mcpInventoryLocalIdentity(commandFingerprint, argumentsFingerprint); identity != "" && inventorySafeItemName(server.Name, 256) != "" {
+				identityCounts[identity]++
+			}
+		}
 		for _, server := range servers {
 			command := inventorySafeBasename(server.Command)
 			commandFingerprint, argumentsFingerprint := mcpInventoryLocalFingerprints(fingerprintKey, server)
@@ -394,13 +401,20 @@ func perConnectorMCPEntriesForOSWithHomeGuard(cfg *config.Config, reg *connector
 			if product == "" {
 				product = host
 			}
-			// Identity + dedup key both carry the home scope so two
-			// users' same-named MCP servers (e.g. `codex/webex` in
-			// each user's ~/.codex/config.toml) get distinct
-			// component ids AND both survive the seenComponent
-			// dedup. Empty homeScope (Pass 1 — daemon's own HOME)
-			// keeps the historical shape.
-			identity := connectorName + "/" + homeScope + "/" + server.Name
+			// The HMAC of the full local command and ordered arguments
+			// identifies the server. Connector and user scope keep two
+			// installations on this endpoint distinct. Remote servers and
+			// configurations without a valid fingerprint retain the name
+			// identity until their own identity contract is applied.
+			serverIdentity := mcpInventoryLocalIdentity(commandFingerprint, argumentsFingerprint)
+			if serverIdentity == "" {
+				serverIdentity = server.Name
+			} else if identityCounts[serverIdentity] > 1 {
+				// Identical commands can be configured under distinct aliases.
+				// Use the alias only for this collision so both rows survive.
+				serverIdentity += "/" + name
+			}
+			identity := connectorName + "/" + homeScope + "/" + serverIdentity
 			if _, seen := seenComponent[identity]; seen {
 				continue
 			}
@@ -852,7 +866,10 @@ func endpointMCPComponentsFromServers(servers []config.MCPServerEntry, fingerpri
 		if product == "" {
 			product = host
 		}
-		identity := server.Name
+		identity := mcpInventoryLocalIdentity(commandFingerprint, argumentsFingerprint)
+		if identity == "" {
+			identity = server.Name
+		}
 		if strings.TrimSpace(identity) == "" {
 			identity = strings.Join([]string{command, host}, "\x00")
 		}

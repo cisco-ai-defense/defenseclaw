@@ -197,6 +197,7 @@ DefenseClaw 1.0.8 follows 1.0.7. It brings Claude Cowork protection, a faster Cl
 ## [Unreleased] — 1.0.6
 
 ### Changed
+- **Local MCP server IDs follow the configured command and ordered arguments.** Managed inventory uses the keyed fingerprints as its identity material; changing only a display alias keeps the ID, while a command or argument change moves it (AIFW-37476).
 - **Managed local MCP inventory exports keyed command and argument fingerprints.** Per-component records retain safe name, transport, connector, scope, and discovery source fields without exposing raw command paths, arguments, environment, headers, or OAuth material (AIFW-37475).
 - **Managed MCP inventory keeps the last complete snapshot when a connector config cannot be read, contains malformed server data, or discovery is partial.** The gateway retains valid entries from other sources in a local redacted diagnostic and waits for a complete retry before publishing removals (AIFW-37474).
 - **The docs say which `hook_contract_lock.json` fields change on their own.** The gateway rewrites the lock each time it starts and on every upgrade or rollback, so a restored copy did not stay byte for byte and nothing said why. Only `updated_at` and `defenseclaw_version` change; compare a restored lock without them. A test keeps the rule and the page in step (GAP-0284).
