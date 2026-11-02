@@ -2752,3 +2752,11 @@ describe('macOS account join key while the domain is away (rel-1-0-6:GAP-0447)',
       'identity_spool_macos.go no longer separates an unreachable domain node (exit 69) from a definitive record-not-found (exit 56)');
   });
 });
+
+describe('GAP-0372 documented reader limit', () => {
+  it('names the dynamic destination limit and a fixed destination option', () => {
+    const matrix = page('support-matrix.mdx');
+    assert.match(matrix, /GAP-0372[^\n]*dynamic destination can still be refused/);
+    assert.match(matrix, /Run them yourself or name a fixed destination/);
+  });
+});
