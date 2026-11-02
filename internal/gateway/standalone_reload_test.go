@@ -95,6 +95,7 @@ func TestStandaloneStartupReconcilesUnmigratedV8File(t *testing.T) {
 	}
 	fixture.sidecar.configMgr = mgr
 	fixture.sidecar.watchGenerationAssets()
+	recordStandaloneStartupGeneration(t, fixture.configPath)
 	mgr.setStartupSource(fixture.sidecar.bootConfigSourceName, fixture.sidecar.bootConfigSource)
 	ctx, cancel := context.WithCancel(t.Context())
 	ready := make(chan error, 1)
@@ -179,6 +180,7 @@ func TestStandaloneConfigManagerStartupAndAssetEventsProveGeneration(t *testing.
 	}
 	fixture.sidecar.configMgr = mgr
 	fixture.sidecar.watchGenerationAssets()
+	recordStandaloneStartupGeneration(t, fixture.configPath)
 	mgr.setStartupSource(fixture.configPath, raw)
 	ctx, cancel := context.WithCancel(t.Context())
 	ready := make(chan error, 1)
@@ -614,7 +616,7 @@ func TestConfigManagerReloadRefusesUnbundledEnterpriseOnlyStandaloneChanges(t *t
 		cfg.Enterprise.Inspection.AIDefense = config.EnterpriseAIDefenseConfig{Enabled: true, Credential: "ai-defense-api-key"}
 		return cfg, nil
 	}
-	if err := mgr.Reload(context.Background(), "test"); err == nil || !strings.Contains(err.Error(), "signed policy bundle") {
+	if err := mgr.Reload(context.Background(), "test"); err == nil || !strings.Contains(err.Error(), "lifecycle-recorded generation") {
 		t.Fatalf("unbundled enterprise-only reload = %v, want signed-bundle refusal", err)
 	}
 	if calls != 0 || mgr.Current().Enterprise.Inspection.AIDefense.Enabled {
@@ -670,7 +672,7 @@ func TestConfigManagerReloadProfileGuard(t *testing.T) {
 				}
 				return
 			}
-			if err == nil || !strings.Contains(err.Error(), "signed policy bundle") {
+			if err == nil || !strings.Contains(err.Error(), "lifecycle-recorded generation") {
 				t.Fatalf("unmanaged to managed reload = %v, want signed-bundle refusal", err)
 			}
 			if applied != nil {

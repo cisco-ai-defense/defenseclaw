@@ -208,8 +208,7 @@ func TestGenerationOptionsRecordsTheVersionDirectory(t *testing.T) {
 // The record names the version directory (bundle_dir), or, written by an
 // earlier build, only the bundle (its first delivery's directory); a retry
 // directory an old record cannot name is found through the public receipt
-// event. With none of these the edited config is kept and reported, as
-// when no signed bundle passes.
+// event. Without a findable signed bundle, startup refuses the edited file.
 func TestManagedStartupRunsTheSignedBundleInAnUnlistableStore(t *testing.T) {
 	const id = "b-01J9ZZZZZZZZZZZZZZZZZZZZZ1"
 	const retry = "r-01M67QDN97GZ201W27K06BENYT"
@@ -282,16 +281,18 @@ func TestManagedStartupRunsTheSignedBundleInAnUnlistableStore(t *testing.T) {
 			mgr.setStartupSource(path, edited)
 			clearGenerationBuildError()
 			t.Cleanup(clearGenerationBuildError)
-			if err := mgr.ReloadAssets(t.Context(), "startup_reconcile"); err != nil {
-				t.Fatalf("startup: %v", err)
+			startupErr := mgr.ReloadAssets(t.Context(), "startup_reconcile")
+			if !tc.runsSigned {
+				if startupErr == nil || !strings.Contains(startupErr.Error(), "activation_not_signed") || appliedRaw != nil {
+					t.Fatalf("unfindable bundle startup = %v, applied=%q; want signed refusal before apply", startupErr, appliedRaw)
+				}
+			} else if startupErr != nil {
+				t.Fatalf("startup: %v", startupErr)
 			}
 			if got := liveReloadErrorText(); !strings.Contains(got, "activation_not_signed") {
 				t.Fatalf("startup refusal not reported: %q", got)
 			}
 			if !tc.runsSigned {
-				if (appliedRaw != nil && !bytes.Equal(appliedRaw, edited)) || mgr.Current().Guardrail.Mode != "action" {
-					t.Fatalf("no findable signed bundle: applied %q mode %q, want the boot config kept", appliedRaw, mgr.Current().Guardrail.Mode)
-				}
 				return
 			}
 			if !strings.Contains(liveReloadErrorText(), "activation_not_signed (config)") {
