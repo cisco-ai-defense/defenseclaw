@@ -190,14 +190,23 @@ func (a *App) runDoctor(ctx context.Context) *openshell.DoctorReport {
 		}
 		rep.Checks = append(rep.Checks, st.check)
 		if st.available {
-			rep.Checks = append(rep.Checks, a.hooksCheck(ctx, st.ingress))
-			if c := a.legacySandboxCheck(ctx); c != nil {
+			// All four rows describe the same daemon generation. Read its
+			// sandbox list once, and use the status already read above.
+			snapshot := &doctorSnapshot{status: st.status}
+			api, err := a.api()
+			if err != nil {
+				snapshot.apiErr = err
+			} else {
+				snapshot.list, snapshot.err = api.List(ctx)
+			}
+			rep.Checks = append(rep.Checks, a.hooksCheck(ctx, st.ingress, snapshot))
+			if c := a.legacySandboxCheck(ctx, snapshot); c != nil {
 				rep.Checks = append(rep.Checks, *c)
 			}
-			if c := a.containedSandboxCheck(ctx); c != nil {
+			if c := a.containedSandboxCheck(ctx, snapshot); c != nil {
 				rep.Checks = append(rep.Checks, *c)
 			}
-			if c := a.unknownSandboxCheck(ctx); c != nil {
+			if c := a.unknownSandboxCheck(ctx, snapshot); c != nil {
 				rep.Checks = append(rep.Checks, *c)
 			}
 		}
@@ -305,6 +314,7 @@ func managedRenderedDoctorDriver(paths *openshell.RenderedPaths) (openshell.Comp
 }
 
 type statusProbe struct {
+	status *sandboxapi.Status
 	// A configured port is not proof the daemon holds it.
 	ingressListening, egressListening bool
 	// listenersProven: the daemon's status names only the ports it holds
@@ -323,6 +333,16 @@ type statusProbe struct {
 	// (sandboxapi.Status.GatewayElsewhere).
 	elsewhere bool
 	check     openshell.Check
+}
+
+// doctorSnapshot is confined to one read-only doctor run. Its error is
+// retained so an unavailable list produces the same hooks warning while
+// the dependent legacy row stays absent.
+type doctorSnapshot struct {
+	status *sandboxapi.Status
+	list   []sandboxapi.Sandbox
+	err    error
+	apiErr error
 }
 
 // isAre is " is" for one name, " are" for more.
@@ -348,14 +368,22 @@ func itsTheir(names []string) string {
 // the daemon creates and starts no sandbox while it runs. DefenseClaw stops
 // none itself, so the fix names the command that ends each. nil when none
 // runs, or when the list cannot be read (the hooks check says so).
-func (a *App) legacySandboxCheck(ctx context.Context) *openshell.Check {
-	api, err := a.api()
-	if err != nil {
-		return nil
-	}
-	list, err := api.List(ctx)
-	if err != nil {
-		return nil
+func (a *App) legacySandboxCheck(ctx context.Context, cached ...*doctorSnapshot) *openshell.Check {
+	var list []sandboxapi.Sandbox
+	if len(cached) != 0 {
+		if cached[0].err != nil || cached[0].apiErr != nil {
+			return nil
+		}
+		list = cached[0].list
+	} else {
+		api, err := a.api()
+		if err != nil {
+			return nil
+		}
+		list, err = api.List(ctx)
+		if err != nil {
+			return nil
+		}
 	}
 	// In name order, whatever order the daemon lists them in.
 	slices.SortFunc(list, func(a, b sandboxapi.Sandbox) int { return strings.Compare(a.Name, b.Name) })
@@ -389,13 +417,24 @@ func (a *App) legacySandboxCheck(ctx context.Context) *openshell.Check {
 // until it is gone. DefenseClaw stops none itself, so the fix names the
 // command that ends each. nil when none runs, or when the status cannot be
 // read (the daemon row says so).
-func (a *App) containedSandboxCheck(ctx context.Context) *openshell.Check {
-	api, err := a.api()
-	if err != nil {
-		return nil
+func (a *App) containedSandboxCheck(ctx context.Context, cached ...*doctorSnapshot) *openshell.Check {
+	var st *sandboxapi.Status
+	if len(cached) != 0 {
+		if cached[0].apiErr != nil {
+			return nil
+		}
+		st = cached[0].status
+	} else {
+		api, err := a.api()
+		if err != nil {
+			return nil
+		}
+		st, err = api.Status(ctx)
+		if err != nil {
+			return nil
+		}
 	}
-	st, err := api.Status(ctx)
-	if err != nil {
+	if st == nil {
 		return nil
 	}
 	var names, ways []string
@@ -470,13 +509,24 @@ func (a *App) everyRunCopies(managed bool, driver string) bool {
 // the run refusal give too): DefenseClaw creates and starts no sandbox
 // until it does. The fix is the daemon's detail for each. nil when there is
 // none, or when the status cannot be read (the daemon row says so).
-func (a *App) unknownSandboxCheck(ctx context.Context) *openshell.Check {
-	api, err := a.api()
-	if err != nil {
-		return nil
+func (a *App) unknownSandboxCheck(ctx context.Context, cached ...*doctorSnapshot) *openshell.Check {
+	var st *sandboxapi.Status
+	if len(cached) != 0 {
+		if cached[0].apiErr != nil {
+			return nil
+		}
+		st = cached[0].status
+	} else {
+		api, err := a.api()
+		if err != nil {
+			return nil
+		}
+		st, err = api.Status(ctx)
+		if err != nil {
+			return nil
+		}
 	}
-	st, err := api.Status(ctx)
-	if err != nil {
+	if st == nil {
 		return nil
 	}
 	var names, ways []string
@@ -515,14 +565,28 @@ func legacyStopWay(sb *sandboxapi.Sandbox) string {
 
 // hooksCheck reports the sandboxes whose current session's hooks do not
 // reach DefenseClaw, with the daemon's reason for each.
-func (a *App) hooksCheck(ctx context.Context, ingress string) openshell.Check {
+func (a *App) hooksCheck(ctx context.Context, ingress string, cached ...*doctorSnapshot) openshell.Check {
 	c := openshell.Check{ID: CheckIDHooks, Title: "Sandbox hooks", Status: openshell.StatusPass}
-	api, err := a.api()
-	if err != nil {
-		c.Status, c.Detail = openshell.StatusSkip, err.Error()
-		return c
+	var list []sandboxapi.Sandbox
+	var st *sandboxapi.Status
+	var err error
+	if len(cached) != 0 {
+		if cached[0].apiErr != nil {
+			c.Status, c.Detail = openshell.StatusSkip, cached[0].apiErr.Error()
+			return c
+		}
+		list, st, err = cached[0].list, cached[0].status, cached[0].err
+	} else {
+		api, apiErr := a.api()
+		if apiErr != nil {
+			c.Status, c.Detail = openshell.StatusSkip, apiErr.Error()
+			return c
+		}
+		list, err = api.List(ctx)
+		if err == nil {
+			st, _ = api.Status(ctx)
+		}
 	}
-	list, err := api.List(ctx)
 	if err != nil {
 		c.Status, c.Detail = openshell.StatusWarn, "could not list the sandboxes: "+apiError(err).Error()
 		return c
@@ -534,7 +598,7 @@ func (a *App) hooksCheck(ctx context.Context, ingress string) openshell.Check {
 	// container stopped or Docker restarted (GAP-0455). A gateway older than
 	// openshell.SupportedMin can neither stop nor start a sandbox in that state.
 	liveDriver, oldGateway, managed := "", false, false
-	if st, serr := api.Status(ctx); serr == nil && st.Gateway != nil {
+	if st != nil && st.Gateway != nil {
 		liveDriver = st.Gateway.Driver
 		oldGateway = !openshell.RunsSandboxes(st.Gateway.Version)
 		managed = st.Managed != nil
@@ -710,6 +774,7 @@ func (a *App) probeDaemon(ctx context.Context, managed bool) *statusProbe {
 	if err == nil {
 		st, serr := api.Status(ctx)
 		if serr == nil {
+			p.status = st
 			p.daemonUID = st.DaemonUID
 			p.managed = st.Managed
 			p.ingressListening = st.IngressAddr != ""

@@ -53,6 +53,7 @@ import urllib.error
 import urllib.parse
 import urllib.request
 import uuid
+from concurrent.futures import Future, ThreadPoolExecutor
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -1248,7 +1249,27 @@ def _sandbox_checks_by_root_cause(checks: list) -> list[dict]:
     return rows
 
 
-def _check_sandbox(cfg, r: _DoctorResult) -> None:
+def _prefetch_sandbox_report(
+    cfg,
+) -> tuple[ThreadPoolExecutor | None, tuple[str, Future[tuple[dict | None, str]]] | None]:
+    """Start the read-only Go probe without letting a worker emit doctor rows."""
+    if getattr(getattr(cfg, "openshell", None), "enabled", False) is not True:
+        return None, None
+    from defenseclaw.gateway import resolve_gateway_binary
+    from defenseclaw.platform_support import host_os
+
+    if host_os() == "windows" or not (binary := resolve_gateway_binary()):
+        return None, None
+    pool = ThreadPoolExecutor(max_workers=1, thread_name_prefix="doctor-sandbox")
+    return pool, (binary, pool.submit(sandbox_doctor_report, binary))
+
+
+def _check_sandbox(
+    cfg,
+    r: _DoctorResult,
+    *,
+    prefetched: tuple[str, Future[tuple[dict | None, str]]] | None = None,
+) -> None:
     """The Sandbox section: the Go ``sandbox doctor`` checks, one row each.
 
     Skipped (one row) while ``openshell.enabled`` is off, so hosts that never
@@ -1283,7 +1304,7 @@ def _check_sandbox(cfg, r: _DoctorResult) -> None:
             reason_code="sandbox-disabled",
         )
         return
-    binary = resolve_gateway_binary()
+    binary = prefetched[0] if prefetched is not None else resolve_gateway_binary()
     if not binary:
         _emit(
             "fail",
@@ -1295,7 +1316,10 @@ def _check_sandbox(cfg, r: _DoctorResult) -> None:
             remediation="run 'defenseclaw upgrade' to install the gateway binary",
         )
         return
-    report, problem = sandbox_doctor_report(binary)
+    if prefetched is not None:
+        report, problem = prefetched[1].result()
+    else:
+        report, problem = sandbox_doctor_report(binary)
     if report is None:
         _emit(
             "warn",
@@ -14479,6 +14503,13 @@ def doctor(
             )
         )
 
+    # Sandbox doctor is an independent, read-only subprocess. Start it while
+    # the earlier sections run, then render its rows at the usual position.
+    # Repairs can change the gateway, so only ordinary checks prefetch it.
+    sandbox_pool, sandbox_probe = (
+        _prefetch_sandbox_report(cfg) if not do_fix else (None, None)
+    )
+
     # Repair first, then diagnose the resulting state.  The former ordering
     # ran fixers after every check, leaving already-repaired failures in the
     # result and forcing a misleading exit 1 until the operator ran Doctor a
@@ -14704,7 +14735,11 @@ def doctor(
     if not json_out:
         _doctor_subsection("Sandbox")
     r.set_section("sandbox")
-    _check_sandbox(cfg, r)
+    try:
+        _check_sandbox(cfg, r, prefetched=sandbox_probe)
+    finally:
+        if sandbox_pool is not None:
+            sandbox_pool.shutdown(wait=True)
     _check_sandbox_kernel_feed(cfg, r)
 
     # Surface any DEFENSECLAW_* env-var bypass that's currently active.
