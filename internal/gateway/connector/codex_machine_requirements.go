@@ -214,7 +214,28 @@ func windowsCodexMachineHash(data []byte) string {
 	return hex.EncodeToString(sum[:])
 }
 
+// windowsCodexManagedHookCommand is the machine-wide Codex hook command. It
+// starts the GUI-subsystem launcher through the awaited Process.Start
+// statements (windowsAwaitedHookStatements) so both its exit code and its
+// stdout reach Codex. allow_managed_hooks_only leaves this the only Codex
+// hook, so a fail-closed exit 2 (a disabled or missing home, an unreachable
+// gateway) must not be lost.
 func windowsCodexManagedHookCommand(hookBinary string) string {
+	script := strings.Join(append([]string{
+		"$ErrorActionPreference='Stop'",
+		"$env:NoDefaultCurrentDirectoryInExePath='1'",
+	}, windowsAwaitedHookStatements(hookBinary, windowsCodexManagedHookArguments)...), "; ")
+	return windowsSystemPowerShellExe() + " -NoLogo -NoProfile -NonInteractive -EncodedCommand " + powershellEncodedCommand(script)
+}
+
+var windowsCodexManagedHookArguments = []string{"hook", "--connector", "codex", "--enterprise-managed"}
+
+// legacyCallOperatorWindowsCodexManagedHookCommand reconstructs the machine
+// command earlier 26.8.x releases wrote. It ran the launcher with the call
+// operator, which does not await a GUI-subsystem process, so $LASTEXITCODE
+// was stale and a fail-closed exit 2 was lost. It is never generated:
+// reconcile replaces it and removal takes it (windowsCodexMachineGroupOwned).
+func legacyCallOperatorWindowsCodexManagedHookCommand(hookBinary string) string {
 	script := strings.Join([]string{
 		"$ErrorActionPreference='Stop'",
 		"$env:NoDefaultCurrentDirectoryInExePath='1'",
@@ -349,17 +370,31 @@ func reconcileWindowsCodexRequirements(
 				return nil, false, fmt.Errorf("hooks.%s has unsupported type %T", expected.eventType, rawGroups)
 			}
 		}
+		// An earlier release's group is replaced in place by the current
+		// one, so an upgrade migrates it instead of leaving both.
 		found := false
+		kept := make([]interface{}, 0, len(groups)+1)
 		for _, candidate := range groups {
 			if windowsCodexMachineGroupMatches(candidate, expected, opts.HookBinary) {
-				found = true
-				break
+				if !found {
+					kept = append(kept, candidate)
+					found = true
+				}
+				continue
 			}
+			if windowsCodexMachineGroupOwned(candidate, expected, opts.HookBinary) {
+				if !found {
+					kept = append(kept, windowsCodexExpectedMachineGroup(expected, opts.HookBinary))
+					found = true
+				}
+				continue
+			}
+			kept = append(kept, candidate)
 		}
 		if !found {
-			groups = append(groups, windowsCodexExpectedMachineGroup(expected, opts.HookBinary))
+			kept = append(kept, windowsCodexExpectedMachineGroup(expected, opts.HookBinary))
 		}
-		hooks[expected.eventType] = groups
+		hooks[expected.eventType] = kept
 	}
 	cfg["hooks"] = hooks
 
@@ -445,6 +480,34 @@ func windowsCodexMachineGroupMatches(
 	},
 	hookBinary string,
 ) bool {
+	return windowsCodexMachineGroupHasCommand(raw, expected, windowsCodexManagedHookCommand(hookBinary))
+}
+
+// windowsCodexMachineGroupOwned reports a DefenseClaw managed group of the
+// current or of an earlier release (legacyCallOperatorWindowsCodexManagedHookCommand).
+// Reconcile replaces an earlier one, and removal takes both.
+func windowsCodexMachineGroupOwned(
+	raw interface{},
+	expected struct {
+		eventType string
+		matcher   string
+		timeout   int
+	},
+	hookBinary string,
+) bool {
+	return windowsCodexMachineGroupMatches(raw, expected, hookBinary) ||
+		windowsCodexMachineGroupHasCommand(raw, expected, legacyCallOperatorWindowsCodexManagedHookCommand(hookBinary))
+}
+
+func windowsCodexMachineGroupHasCommand(
+	raw interface{},
+	expected struct {
+		eventType string
+		matcher   string
+		timeout   int
+	},
+	command string,
+) bool {
 	group, ok := raw.(map[string]interface{})
 	if !ok || len(group) != 1 && len(group) != 2 {
 		return false
@@ -465,7 +528,6 @@ func windowsCodexMachineGroupMatches(
 	if !ok || len(handler) != 4 {
 		return false
 	}
-	command := windowsCodexManagedHookCommand(hookBinary)
 	if handler["type"] != "command" || handler["command"] != command ||
 		handler["command_windows"] != command {
 		return false
@@ -481,6 +543,9 @@ func sameWindowsCodexMachinePath(left, right string) bool {
 	return strings.EqualFold(filepath.Clean(left), filepath.Clean(right))
 }
 
+// windowsCodexRequirementsContainExactManagedHook reports whether raw holds a
+// DefenseClaw managed group, current or of an earlier release
+// (windowsCodexMachineGroupOwned).
 func windowsCodexRequirementsContainExactManagedHook(
 	raw []byte,
 	opts WindowsCodexMachineRequirementsOptions,
@@ -496,7 +561,7 @@ func windowsCodexRequirementsContainExactManagedHook(
 	for _, expected := range codexHookGroups {
 		groups, _ := hooks[expected.eventType].([]interface{})
 		for _, candidate := range groups {
-			if windowsCodexMachineGroupMatches(candidate, expected, opts.HookBinary) {
+			if windowsCodexMachineGroupOwned(candidate, expected, opts.HookBinary) {
 				return true, nil
 			}
 		}
@@ -526,13 +591,13 @@ func removeWindowsCodexRequirementsOwnedChanges(
 			baselineGroups, _ := baseHooks[expected.eventType].([]interface{})
 			baselineCount := 0
 			for _, candidate := range baselineGroups {
-				if windowsCodexMachineGroupMatches(candidate, expected, opts.HookBinary) {
+				if windowsCodexMachineGroupOwned(candidate, expected, opts.HookBinary) {
 					baselineCount++
 				}
 			}
 			currentCount := 0
 			for _, candidate := range groups {
-				if windowsCodexMachineGroupMatches(candidate, expected, opts.HookBinary) {
+				if windowsCodexMachineGroupOwned(candidate, expected, opts.HookBinary) {
 					currentCount++
 				}
 			}
@@ -543,7 +608,7 @@ func removeWindowsCodexRequirementsOwnedChanges(
 			filtered := make([]interface{}, 0, len(groups)-removeCount)
 			for index := len(groups) - 1; index >= 0; index-- {
 				candidate := groups[index]
-				if removeCount > 0 && windowsCodexMachineGroupMatches(candidate, expected, opts.HookBinary) {
+				if removeCount > 0 && windowsCodexMachineGroupOwned(candidate, expected, opts.HookBinary) {
 					removeCount--
 					continue
 				}

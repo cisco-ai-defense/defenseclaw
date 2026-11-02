@@ -267,6 +267,12 @@ def test_uninstall_removes_only_its_gateway_sid_from_the_shared_ipc_dacl() -> No
     assert "$matchingIndexes.Count -ne 1" in matcher
     assert "duplicate ACEs" in matcher
     assert "non-canonical ACE" in matcher
+    # Outside the strict pin every retired-SID ACE is removed and logged; the
+    # shared directory's group and inheritance never block the cleanup.
+    assert "Test-DefenseClawTrustStrictAncestors" in matcher
+    assert "defenseclaw_accept" in matcher
+    assert "Test-DefenseClawTrustStrictAncestors" in descriptor_guard
+    assert "untrusted group" not in descriptor_guard
     assert "Get-DefenseClawServiceSIDForRecovery" in resolver
     assert "Resolve-DefenseClawRetiredGatewayServiceSID" in cleanup
     assert "Remove-DefenseClawSIDFromRawDACL" in cleanup
@@ -471,7 +477,12 @@ def test_every_managed_path_kind_has_an_exact_descriptor(engine: str) -> None:
         timeout=90,
     )
     assert completed.returncode == 0, completed.stderr or completed.stdout
-    payload = json.loads(completed.stdout)
+    # The module's resilience events (defenseclaw_accept and friends) go to
+    # the warning stream, which Windows PowerShell writes to stdout under
+    # -File; the smoke's result is the last line, one compressed JSON object.
+    lines = [line for line in completed.stdout.splitlines() if line.strip()]
+    assert lines, completed.stderr or completed.stdout
+    payload = json.loads(lines[-1])
     assert payload == {
         "ok": True,
         "schema_version": 1,
@@ -530,6 +541,25 @@ def test_nuclear_purge_is_bounded_scoped_and_truthful() -> None:
     assert '"*-$purgeScope.*"' in nuclear
     assert ".retired-" in nuclear
     assert "Get-DefenseClawNuclearUserDataPaths" in nuclear
+    # Users are listed before any teardown step can touch the manifest.
+    assert nuclear.index("Get-DefenseClawNuclearUserDataPaths") < nuclear.index("# 1a. Disarm SCM FIRST")
+    user_data = _extract_function_body(
+        source,
+        "function Get-DefenseClawNuclearUserDataPaths",
+        "function Invoke-DefenseClawNuclearUninstall",
+    )
+    # The manifest's data_dir rows are optional; managed-runtime evidence in
+    # a registered interactive profile also counts.
+    assert "Get-DefenseClawNuclearRegisteredProfiles" in user_data
+    assert "Test-DefenseClawNuclearManagedUserDataFolder" in user_data
+    evidence = _extract_function_body(
+        source,
+        "function Test-DefenseClawNuclearManagedUserDataFolder",
+        "function Get-DefenseClawNuclearRegisteredProfiles",
+    )
+    assert "ReparsePoint" in evidence
+    assert "'.managed-runtime-*.json'" in evidence
+    assert '"managed_gateway_service_name"' in evidence
     assert "ok                                       = ($incomplete.Count -eq 0)" in nuclear
     assert "reboot_required" in nuclear
     assert "1072" in nuclear

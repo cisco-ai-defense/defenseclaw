@@ -442,7 +442,7 @@ func TestWindowsEnterpriseSelfUpgradeRequiresExternalReleaseCLI(t *testing.T) {
 	root := t.TempDir()
 	explicitInstallRoot := filepath.Join(root, "explicit-install")
 	defaultProgramFiles := filepath.Join(root, "default-program-files")
-	defaultInstallRoot := filepath.Join(defaultProgramFiles, "Cisco", "DefenseClaw")
+	defaultInstallRoot := filepath.Join(defaultProgramFiles, "Cisco", "Cisco Secure Client", "DefenseClaw")
 	explicitInstalledCLI := filepath.Join(
 		explicitInstallRoot,
 		"bin",
@@ -636,7 +636,7 @@ func TestRunWindowsEnterpriseLifecycleSelfUpgradeConflictStopsBeforeRunnerAndEmi
 	root := t.TempDir()
 	explicitInstallRoot := filepath.Join(root, "explicit-install")
 	defaultProgramFiles := filepath.Join(root, "default-program-files")
-	defaultInstallRoot := filepath.Join(defaultProgramFiles, "Cisco", "DefenseClaw")
+	defaultInstallRoot := filepath.Join(defaultProgramFiles, "Cisco", "Cisco Secure Client", "DefenseClaw")
 	externalInstaller := filepath.Join(root, "release", "install-enterprise.ps1")
 	replacement := filepath.Join(root, "release", "defenseclaw.exe")
 	windowsEnterpriseScriptFinder = func(string) (string, error) {

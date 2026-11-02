@@ -37,6 +37,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strconv"
 	"strings"
 	"time"
@@ -252,7 +253,7 @@ func Run(ctx context.Context, opts Options) int {
 		// so it surfaces in tests / setup rather than silently disabling the
 		// guardrail. The CLI validates --connector against the registry, so
 		// this is unreachable in normal operation.
-		fmt.Fprintf(opts.Stderr, "defenseclaw: unknown hook connector %q\n", opts.Connector)
+		writeFailureDiagnostic(opts, true, "defenseclaw: unknown hook connector %q\n", opts.Connector)
 		return blockExit
 	}
 	failMode := normalizeFailMode(opts.FailMode)
@@ -293,6 +294,9 @@ func Run(ctx context.Context, opts Options) int {
 		overflow = true
 	}
 	if overflow {
+		if strings.TrimSpace(opts.Event) == "" && err == nil {
+			opts.Event = oversizedHookEvent(payload)
+		}
 		return handleOversized(opts, sp, failMode)
 	}
 	opts.Event = resolveHookEvent(opts.Event, payload)
@@ -647,17 +651,17 @@ func handleMissingToken(opts Options, sp spec, failMode string) int {
 	blocked := opts.ManagedEnterprise || opts.StrictAvailability || failMode == "closed"
 	logHookFailure(opts, sp, reason, "transport", failMode, blocked)
 	if blocked {
-		fmt.Fprintf(opts.Stderr,
+		writeFailureDiagnostic(opts, true,
 			"defenseclaw: %s, blocking %s (fail mode closed)\n", reason, sp.subject)
-		return emit(opts.Stdout, sp.unreachableStrict)
+		return emitClosed(opts, sp, sp.unreachableStrict)
 	}
 	return emit(opts.Stdout, sp.openAllow)
 }
 
 func handleUnavailableHome(opts Options, sp spec, reason string) int {
 	if opts.StrictAvailability || opts.ManagedEnterprise {
-		fmt.Fprintf(opts.Stderr, "defenseclaw: %s, blocking %s (managed/strict availability)\n", reason, sp.subject)
-		return emit(opts.Stdout, sp.unreachableStrict)
+		writeFailureDiagnostic(opts, true, "defenseclaw: %s, blocking %s (managed/strict availability)\n", reason, sp.subject)
+		return emitClosed(opts, sp, sp.unreachableStrict)
 	}
 	return emit(opts.Stdout, sp.openAllow)
 }
@@ -671,11 +675,56 @@ func handleOversized(opts Options, sp spec, failMode string) int {
 		failMode = "closed"
 	}
 	logHookFailure(opts, sp, managedHookOversizedReason, "transport", failMode, failMode == "closed")
-	fmt.Fprintf(opts.Stderr, "defenseclaw: %s hook refusing oversized payload\n", sp.connector)
+	writeFailureDiagnostic(opts, failMode == "closed", "defenseclaw: %s hook refusing oversized payload\n", sp.connector)
 	if failMode == "closed" {
+		// A managed Codex hook denies with the event's own block when the
+		// event could be read from the payload's prefix: a top-level decision
+		// does not deny a PreToolUse or PermissionRequest.
+		if sp.style == styleCodex && opts.ManagedEnterprise &&
+			emitCodexBlock(opts.Stdout, opts.Event, tooLarge) {
+			return 0
+		}
 		return emit(opts.Stdout, sp.oversizedClosed)
 	}
 	return emit(opts.Stdout, sp.openAllow)
+}
+
+// oversizedHookEventPattern finds the hook_event_name field in the prefix of
+// a payload too large to parse; the agents send it near the start.
+var oversizedHookEventPattern = regexp.MustCompile(`"hook_event_name"\s*:\s*"([A-Za-z]{1,64})"`)
+
+// oversizedHookEvent recovers the hook event from the first 64 KiB of an
+// oversized payload, or "" when it is not there.
+func oversizedHookEvent(prefix []byte) string {
+	const window = 64 << 10
+	if len(prefix) > window {
+		prefix = prefix[:window]
+	}
+	match := oversizedHookEventPattern.FindSubmatch(prefix)
+	if match == nil {
+		return ""
+	}
+	return string(match[1])
+}
+
+// ManagedHookBlockMessage is the only text a managed hook writes to stderr,
+// and only when it blocks on a failure rather than a gateway verdict. Agents
+// surface hook stderr to the user (Claude Code makes it the block message),
+// so managed failures carry no diagnostics there: every decision is already
+// in the durable record (recordManagedHookDecision).
+const ManagedHookBlockMessage = "Cisco AI Defense could not verify this request; it was blocked by your organization's policy."
+
+// writeFailureDiagnostic writes a failure path's stderr line. Unmanaged hooks
+// keep their diagnostic; a managed hook writes ManagedHookBlockMessage when it
+// blocks and nothing when it allows.
+func writeFailureDiagnostic(opts Options, blocked bool, format string, args ...any) {
+	if opts.ManagedEnterprise {
+		if blocked {
+			fmt.Fprintln(opts.Stderr, ManagedHookBlockMessage)
+		}
+		return
+	}
+	fmt.Fprintf(opts.Stderr, format, args...)
 }
 
 // failUnreachable applies the connector's effective fail mode to native hook
@@ -685,11 +734,11 @@ func failUnreachable(opts Options, sp spec, failMode, reason string) int {
 	blocked := opts.StrictAvailability || failMode == "closed"
 	logHookFailure(opts, sp, reason, "transport", failMode, blocked)
 	if blocked {
-		fmt.Fprintf(opts.Stderr,
+		writeFailureDiagnostic(opts, true,
 			"defenseclaw: gateway unreachable, blocking %s (fail mode closed): %s\n", sp.subject, reason)
-		return emit(opts.Stdout, sp.unreachableStrict)
+		return emitClosed(opts, sp, sp.unreachableStrict)
 	}
-	fmt.Fprintf(opts.Stderr, "defenseclaw: gateway unreachable, allowing %s: %s\n", sp.subject, reason)
+	writeFailureDiagnostic(opts, false, "defenseclaw: gateway unreachable, allowing %s: %s\n", sp.subject, reason)
 	return emit(opts.Stdout, sp.openAllow)
 }
 
@@ -707,13 +756,17 @@ func rawString(fields map[string]json.RawMessage, key string) (string, bool) {
 
 // failResponse mirrors the response-layer failure path: honor FAIL_MODE.
 func failResponse(opts Options, sp spec, failMode, reason string) int {
-	reason = responseFailureReason(reason)
+	if !opts.ManagedEnterprise {
+		// Managed endpoints are repaired by the installer and the Guardian,
+		// not by the user, so they get no remediation advice.
+		reason = responseFailureReason(reason)
+	}
 	logHookFailure(opts, sp, reason, "response", failMode, failMode != "open")
-	fmt.Fprintf(opts.Stderr, "defenseclaw: %s hook error: %s\n", sp.errLabel, reason)
+	writeFailureDiagnostic(opts, failMode != "open", "defenseclaw: %s hook error: %s\n", sp.errLabel, reason)
 	if failMode == "open" {
 		return emit(opts.Stdout, sp.openAllow)
 	}
-	return emit(opts.Stdout, sp.responseClosed)
+	return emitClosed(opts, sp, sp.responseClosed)
 }
 
 func responseFailureReason(reason string) string {
@@ -721,6 +774,47 @@ func responseFailureReason(reason string) string {
 		return reason + " (gateway auth failed; possible token drift. Run `defenseclaw doctor --fix` or `defenseclaw-gateway restart`.)"
 	}
 	return reason
+}
+
+// emitClosed writes a closed failure result. A managed Codex hook answers with
+// Codex's own block for the event instead of the bare exit 2: Codex treats a
+// non-zero exit as "hook failed" and then runs the prompt or tool unchecked.
+func emitClosed(opts Options, sp spec, r failResult) int {
+	if sp.style != styleCodex || !opts.ManagedEnterprise {
+		return emit(opts.Stdout, r)
+	}
+	if strings.TrimSpace(opts.Event) == "" {
+		// The runtime and home checks fail before the payload is read.
+		if payload, overflow, err := readCapped(opts.Stdin, opts.MaxBody); err == nil && !overflow {
+			opts.Event = resolveHookEvent("", payload)
+		}
+	}
+	if !emitCodexBlock(opts.Stdout, opts.Event, failedClosed) {
+		return emit(opts.Stdout, r)
+	}
+	return 0
+}
+
+// emitCodexBlock writes the block the gateway sends for the same event
+// (gateway codexOutput) and reports whether the event has one. Other events
+// keep the bare exit code.
+func emitCodexBlock(out io.Writer, event, reason string) bool {
+	encoded := mustJSONString(reason)
+	switch strings.TrimSpace(event) {
+	case "UserPromptSubmit", "PostToolUse", "Stop":
+		fmt.Fprintf(out, "{\"decision\":\"block\",\"reason\":%s}\n", encoded)
+	case "PreToolUse":
+		fmt.Fprintf(out,
+			"{\"hookSpecificOutput\":{\"hookEventName\":\"PreToolUse\",\"permissionDecision\":\"deny\",\"permissionDecisionReason\":%s}}\n",
+			encoded)
+	case "PermissionRequest":
+		fmt.Fprintf(out,
+			"{\"hookSpecificOutput\":{\"hookEventName\":\"PermissionRequest\",\"decision\":{\"behavior\":\"deny\",\"message\":%s}}}\n",
+			encoded)
+	default:
+		return false
+	}
+	return true
 }
 
 // emit writes a fail-closed JSON body (if any) and returns its exit code.
@@ -741,7 +835,9 @@ func withDefaults(o Options) Options {
 	if o.Stderr == nil {
 		o.Stderr = os.Stderr
 	}
-	if o.MaxBody <= 0 {
+	// A managed hook never reads less than the fixed cap, so an oversized
+	// payload's event can always be recovered from its prefix.
+	if o.MaxBody <= 0 || (o.ManagedEnterprise && o.MaxBody < defaultMaxBody) {
 		o.MaxBody = defaultMaxBody
 	}
 	if o.Now == nil {

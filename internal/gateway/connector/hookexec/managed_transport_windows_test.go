@@ -183,6 +183,7 @@ func TestManagedEnterpriseRunStoppedGatewayFollowsFailMode(t *testing.T) {
 			stoppedManagedGatewaySeams(t)
 			stubManagedTransportListening(t, tc.listening, true)
 
+			records := captureManagedHookDecisions(t)
 			home := t.TempDir()
 			token := "authenticated-token"
 			var out, errb bytes.Buffer
@@ -203,8 +204,19 @@ func TestManagedEnterpriseRunStoppedGatewayFollowsFailMode(t *testing.T) {
 			if code != tc.wantCode {
 				t.Fatalf("code = %d, want %d; stdout=%q stderr=%q", code, tc.wantCode, out.String(), errb.String())
 			}
-			if !strings.Contains(errb.String(), tc.wantReason) {
-				t.Fatalf("stderr = %q, want %q", errb.String(), tc.wantReason)
+			// A managed hook keeps its reason off the agent's stderr; it is
+			// in the durable decision record.
+			found := false
+			for _, record := range *records {
+				if strings.Contains(record.line, tc.wantReason) {
+					found = true
+				}
+			}
+			if !found {
+				t.Fatalf("durable records = %+v, want reason %q", *records, tc.wantReason)
+			}
+			if strings.Contains(errb.String(), tc.wantReason) {
+				t.Fatalf("stderr = %q carries the internal reason", errb.String())
 			}
 		})
 	}

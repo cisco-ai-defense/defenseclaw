@@ -3417,6 +3417,19 @@
         {"location": "cmd/windows-avc-assembler/signature.go", "description": "readSignerSubjectCN sets this in cmd.Env before invoking powershell.exe, and the script reads $env:DEFENSECLAW_ASSEMBLER_PAYLOAD_PATH to feed Get-AuthenticodeSignature -FilePath"}
       ],
       "since": "0.8.6"
+    },
+    {
+      "name": "DEFENSECLAW_HOOK_PREMAIN_HELPER",
+      "category": "test_fixture",
+      "purpose": "Selects the child-process mode of the defenseclaw-hook test binary (1 = stderr before main, panic = a recovered panic) so the parent test can assert nothing reaches the agent's stderr.",
+      "default": "unset",
+      "accepted_values": ["1", "panic", "unset"],
+      "security_impact": "none",
+      "surface_in_doctor": false,
+      "consumers": [
+        {"location": "cmd/defenseclaw-hook/premain_stderr_test.go", "description": "Re-executes the test binary as the hook to check pre-main stderr and panic recovery"}
+      ],
+      "since": "0.8.6"
     }
   ]
 }

@@ -479,6 +479,98 @@ func powershellQuoteLiteral(value string) string {
 	return "'" + strings.ReplaceAll(value, "'", "''") + "'"
 }
 
+// windowsAwaitedHookStatements returns the PowerShell statements that run the
+// hook launcher with arguments, wait for it and exit with its status.
+// Release launchers use the Windows GUI subsystem, which the PowerShell call
+// operator does not await, so the statements start the launcher with
+// Process.Start. Windows PowerShell 5.1 implements Start-Process -Wait
+// -PassThru by closing the handle CreateProcess returned and opening the
+// child again by process ID, so a launcher that exits at once can make
+// Start-Process fail and PowerShell exit 1, losing a block (exit 2) and the
+// hook's output. Process.Start keeps the handle CreateProcess returns, so
+// the exit status is always there to read. Redirecting stderr makes .NET
+// pass the agent's own stdin and stdout to the launcher (a GUI-subsystem
+// child gets no standard handles otherwise); the script copies the
+// launcher's stderr to its own unchanged.
+//
+// Constrained Language mode (WDAC or AppLocker script enforcement) refuses
+// the .NET calls. In that mode the statements run the launcher with the call
+// operator and pipe its stdout to Out-Host: a piped GUI-subsystem launcher is
+// awaited on the handle PowerShell started it with, and $LASTEXITCODE is its
+// status. Continue keeps a host that turns native stderr into error records
+// from ending the script with 1. When the launcher cannot start at all (it
+// is missing, or WDAC/AppLocker blocks it) the call operator raises an error
+// that Continue lets pass and $LASTEXITCODE stays $null; exit $null is 0,
+// which agents read as allow, so that case exits 1 instead.
+//
+// Outside Constrained Language mode the statements call no cmdlet, and
+// Out-Host is module-qualified, so a fresh Windows PowerShell process does
+// not run a broad first-use module discovery scan.
+func windowsAwaitedHookStatements(hookBinary string, arguments []string) []string {
+	quoted := make([]string, len(arguments))
+	escaped := make([]string, len(arguments))
+	for i, argument := range arguments {
+		quoted[i] = powershellQuoteLiteral(argument)
+		escaped[i] = windowsCommandLineArgument(argument)
+	}
+	return []string{
+		"if ($ExecutionContext.SessionState.LanguageMode -ne 'FullLanguage') { $ErrorActionPreference='Continue'; & " +
+			powershellQuoteLiteral(hookBinary) + " " + strings.Join(quoted, " ") + " | Microsoft.PowerShell.Core\\Out-Host; if ($null -eq $LASTEXITCODE) { exit 1 }; exit $LASTEXITCODE }",
+		"$hookStart=[System.Diagnostics.ProcessStartInfo]::new(" + powershellQuoteLiteral(hookBinary) + "," +
+			powershellQuoteLiteral(strings.Join(escaped, " ")) + ")",
+		"$hookStart.UseShellExecute=$false",
+		"$hookStart.RedirectStandardError=$true",
+		"$hookProcess=[System.Diagnostics.Process]::Start($hookStart)",
+		"$hookProcess.StandardError.BaseStream.CopyTo([Console]::OpenStandardError())",
+		"$hookProcess.WaitForExit()",
+		"exit $hookProcess.ExitCode",
+	}
+}
+
+// windowsCommandLineArgument quotes one argument for
+// ProcessStartInfo.Arguments the way syscall.EscapeArg does, so the launcher
+// parses it back unchanged (Windows PowerShell 5.1 has no argument list).
+// The fixed hook tokens need no quoting and pass through as they are.
+func windowsCommandLineArgument(argument string) string {
+	if argument == "" {
+		return `""`
+	}
+	hasSpace := strings.ContainsAny(argument, " \t")
+	if !strings.ContainsAny(argument, `"\`) {
+		if hasSpace {
+			return `"` + argument + `"`
+		}
+		return argument
+	}
+	var b strings.Builder
+	if hasSpace {
+		b.WriteByte('"')
+	}
+	slashes := 0
+	for i := 0; i < len(argument); i++ {
+		c := argument[i]
+		switch c {
+		case '\\':
+			slashes++
+		case '"':
+			for ; slashes > 0; slashes-- {
+				b.WriteByte('\\')
+			}
+			b.WriteByte('\\')
+		default:
+			slashes = 0
+		}
+		b.WriteByte(c)
+	}
+	if hasSpace {
+		for ; slashes > 0; slashes-- {
+			b.WriteByte('\\')
+		}
+		b.WriteByte('"')
+	}
+	return b.String()
+}
+
 func windowsAntigravityHookCommand() string {
 	return windowsNativePowerShellHookCommand("antigravity")
 }
@@ -491,7 +583,24 @@ func windowsNativePowerShellHookCommand(connector string) string {
 	return windowsNativePowerShellHookCommandForBinary(connector, defenseclawHookBinary())
 }
 
+// windowsNativePowerShellHookCommandForBinary is the per-user Codex and
+// Antigravity hook command. Release launchers use the Windows GUI subsystem,
+// which Windows PowerShell does not await through its call operator, so the
+// command runs them through windowsAwaitedHookStatements, as the machine-wide
+// Codex command does: an immediately exiting launcher keeps its exit status
+// and output, which Start-Process -Wait -PassThru could lose.
 func windowsNativePowerShellHookCommandForBinary(connector, hookBinary string) string {
+	script := strings.Join(append([]string{
+		"$ErrorActionPreference='Stop'",
+		"$env:NoDefaultCurrentDirectoryInExePath='1'",
+	}, windowsAwaitedHookStatements(hookBinary, []string{"hook", "--connector", connector})...), "; ")
+	return windowsSystemPowerShellExe() + " -NoLogo -NoProfile -NonInteractive -EncodedCommand " + powershellEncodedCommand(script)
+}
+
+// legacyStartProcessWindowsNativePowerShellHookCommandForBinary reconstructs
+// the exact Start-Process -Wait -PassThru command earlier releases wrote. It
+// remains owned for repair and teardown, but is never generated.
+func legacyStartProcessWindowsNativePowerShellHookCommandForBinary(connector, hookBinary string) string {
 	arguments := []string{
 		powershellQuoteLiteral("hook"),
 		powershellQuoteLiteral("--connector"),
@@ -500,12 +609,6 @@ func windowsNativePowerShellHookCommandForBinary(connector, hookBinary string) s
 	script := strings.Join([]string{
 		"$ErrorActionPreference='Stop'",
 		"$env:NoDefaultCurrentDirectoryInExePath='1'",
-		// Release builds use the Windows GUI subsystem, which Windows PowerShell
-		// does not synchronously await through its native call operator. Start the
-		// launcher without a new window so it inherits the agent's standard
-		// handles, waits, and returns the process exit code instead of stale
-		// LASTEXITCODE. Qualify the built-in module so a fresh PowerShell 5.1
-		// process does not perform a broad first-use module discovery scan.
 		"$hookProcess=Microsoft.PowerShell.Management\\Start-Process -FilePath " + powershellQuoteLiteral(hookBinary) +
 			" -ArgumentList @(" + strings.Join(arguments, ",") + ") -NoNewWindow -Wait -PassThru",
 		"exit $hookProcess.ExitCode",
@@ -589,6 +692,7 @@ func isNativeHookCommand(cmd string) bool {
 	for _, connectorName := range []string{"codex", "antigravity"} {
 		for _, hookBinary := range uniqueNonEmptyStrings(hookBinaries) {
 			if cmd == windowsNativePowerShellHookCommandForBinary(connectorName, hookBinary) ||
+				cmd == legacyStartProcessWindowsNativePowerShellHookCommandForBinary(connectorName, hookBinary) ||
 				cmd == legacyUnqualifiedWindowsNativePowerShellHookCommandForBinary(connectorName, hookBinary) ||
 				cmd == legacyWindowsNativePowerShellHookCommandForBinary(connectorName, hookBinary) {
 				return true

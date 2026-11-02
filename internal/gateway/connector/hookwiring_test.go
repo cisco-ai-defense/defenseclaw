@@ -66,9 +66,11 @@ func decodePowerShellEncodedCommandForTest(t *testing.T, command string) string 
 	return ""
 }
 
+// windowsNativePowerShellStartForTest is the Full Language launcher start of
+// the per-user Codex and Antigravity command (windowsAwaitedHookStatements).
 func windowsNativePowerShellStartForTest(hookBinary, connector string) string {
-	return "$hookProcess=Microsoft.PowerShell.Management\\Start-Process -FilePath " + powershellQuoteLiteral(hookBinary) +
-		" -ArgumentList @('hook','--connector'," + powershellQuoteLiteral(connector) + ") -NoNewWindow -Wait -PassThru"
+	return "$hookStart=[System.Diagnostics.ProcessStartInfo]::new(" + powershellQuoteLiteral(hookBinary) +
+		",'hook --connector " + connector + "')"
 }
 
 func TestWindowsSystemPowerShellExeIgnoresMutableEnvironment(t *testing.T) {
@@ -803,6 +805,7 @@ func TestCodexSetupRepairsLegacyNonWaitingPowerShellCommand(t *testing.T) {
 	}{
 		{name: "non-waiting", command: legacyWindowsNativePowerShellHookCommandForBinary("codex", hookBinary)},
 		{name: "unqualified-start-process", command: legacyUnqualifiedWindowsNativePowerShellHookCommandForBinary("codex", hookBinary)},
+		{name: "start-process", command: legacyStartProcessWindowsNativePowerShellHookCommandForBinary("codex", hookBinary)},
 	}
 	for _, testCase := range legacyCommands {
 		t.Run(testCase.name, func(t *testing.T) {
@@ -845,11 +848,13 @@ func TestCodexSetupRepairsLegacyNonWaitingPowerShellCommand(t *testing.T) {
 		})
 	}
 	decoded := decodePowerShellEncodedCommandForTest(t, current)
-	if strings.Contains(decoded, "$LASTEXITCODE") {
-		t.Fatalf("repaired command still depends on stale LASTEXITCODE: %s", decoded)
+	fullLanguage := decoded[strings.Index(decoded, "$hookStart="):]
+	if strings.Contains(fullLanguage, "$LASTEXITCODE") || strings.Contains(decoded, "Start-Process") {
+		t.Fatalf("repaired command still depends on stale LASTEXITCODE or Start-Process: %s", decoded)
 	}
-	if !strings.Contains(decoded, "Microsoft.PowerShell.Management\\Start-Process") {
-		t.Fatalf("repaired command does not bypass broad module discovery: %s", decoded)
+	if !strings.Contains(decoded, windowsNativePowerShellStartForTest(hookBinary, "codex")) ||
+		!strings.Contains(decoded, "Microsoft.PowerShell.Core\\Out-Host") {
+		t.Fatalf("repaired command does not await the launcher through Process.Start: %s", decoded)
 	}
 }
 
@@ -971,12 +976,10 @@ func TestWindowsNativeHookCommandPreservesConnectorSpecificPayload(t *testing.T)
 			if want := windowsNativeHookCommand(connector); got != want {
 				t.Fatalf("wrapper command = %q, want shared builder output %q", got, want)
 			}
-			wantScript := strings.Join([]string{
+			wantScript := strings.Join(append([]string{
 				"$ErrorActionPreference='Stop'",
 				"$env:NoDefaultCurrentDirectoryInExePath='1'",
-				windowsNativePowerShellStartForTest(windowsExe, connector),
-				"exit $hookProcess.ExitCode",
-			}, "; ")
+			}, windowsAwaitedHookStatements(windowsExe, []string{"hook", "--connector", connector})...), "; ")
 			if decoded := decodePowerShellEncodedCommandForTest(t, got); decoded != wantScript {
 				t.Fatalf("decoded command = %q, want %q", decoded, wantScript)
 			}
@@ -1359,7 +1362,7 @@ func TestCodexWindowsHookCommandRunsAsSingleCmdArgument(t *testing.T) {
 	command := hookInvocationCommandFor("windows", "codex", "")
 	decoded := decodePowerShellEncodedCommandForTest(t, command)
 	wantInvocation := windowsNativePowerShellStartForTest(defenseclawHookBinary(), "codex")
-	probeInvocation := "$hookProcess=Microsoft.PowerShell.Management\\Start-Process -FilePath 'where.exe' -ArgumentList @('cmd.exe') -NoNewWindow -Wait -PassThru"
+	probeInvocation := "$hookStart=[System.Diagnostics.ProcessStartInfo]::new('where.exe','cmd.exe')"
 	probeScript := strings.Replace(decoded, wantInvocation, probeInvocation, 1)
 	if probeScript == decoded {
 		t.Fatalf("decoded Codex command %q did not contain %q", decoded, wantInvocation)

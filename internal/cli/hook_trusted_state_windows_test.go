@@ -175,7 +175,13 @@ func TestBuildHookOptionsEnterpriseManagedUsesInvokingUserRuntime(t *testing.T) 
 	if enterpriseManagedHookRuntimeNoop("claudecode") {
 		t.Fatal("registered enterprise runtime was treated as a no-op")
 	}
+	// A project-inherited one-byte cap must not make every managed payload
+	// oversized before its event can be read.
+	t.Setenv("DEFENSECLAW_HOOK_MAX_BODY", "1")
 	opts := buildHookOptionsForRuntime("claudecode", "PreToolUse", "", "", true)
+	if opts.MaxBody != 0 {
+		t.Fatalf("MaxBody = %d, an inherited cap applied to a managed hook", opts.MaxBody)
+	}
 	if opts.Home != userRuntime || opts.HookDir != hookDir ||
 		opts.APIAddr != "127.0.0.1:18977" ||
 		opts.ManagedGatewayServiceName != "DefenseClawGateway" ||

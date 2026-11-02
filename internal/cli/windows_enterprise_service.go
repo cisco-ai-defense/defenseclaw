@@ -524,7 +524,8 @@ func resolveWindowsEnterpriseSelfUpgradeInstallRoot(explicit string) (string, er
 				"the trusted default Windows Program Files directory is not an absolute path",
 			)
 		}
-		root = filepath.Join(programFiles, "Cisco", "DefenseClaw")
+		// The installer's default InstallRoot (install-enterprise.ps1).
+		root = filepath.Join(programFiles, "Cisco", "Cisco Secure Client", "DefenseClaw")
 	}
 	root, err := filepath.Abs(root)
 	if err != nil {

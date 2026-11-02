@@ -1193,10 +1193,12 @@ function Get-CodexWindowsHookCommand([string]$Config) {
 }
 
 function Assert-CodexSynchronousWindowsHookCommand([object]$CodexCommand, [string]$Context) {
-    $startProcessPattern = '(?i)\$hookProcess=Microsoft\.PowerShell\.Management\\Start-Process\s+-FilePath\s+''(?:''''|[^''])*defenseclaw-hook\.exe''\s+-ArgumentList\s+@\(''hook'',''--connector'',''codex''\)\s+-NoNewWindow\s+-Wait\s+-PassThru'
+    $startProcessPattern = '(?i)\$hookStart=\[System\.Diagnostics\.ProcessStartInfo\]::new\(''(?:''''|[^''])*defenseclaw-hook\.exe'',''hook --connector codex''\)'
     if ($CodexCommand.Script -notmatch $startProcessPattern -or
         $CodexCommand.Script -notmatch '(?i)exit\s+\$hookProcess\.ExitCode' -or
-        $CodexCommand.Script -match '(?i)\$LASTEXITCODE') {
+        $CodexCommand.Script -notmatch '(?i)if \(\$null -eq \$LASTEXITCODE\) \{ exit 1 \}' -or
+        $CodexCommand.Script -match '(?i)Start-Process' -or
+        $CodexCommand.Script -match '(?i)hook --connector codex;\s*exit\s+\$LASTEXITCODE') {
         throw "$Context does not use the exact synchronous native hook command"
     }
 }

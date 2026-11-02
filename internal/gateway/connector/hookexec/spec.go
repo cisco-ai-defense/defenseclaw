@@ -100,9 +100,13 @@ var specs = map[string]spec{
 		subject: "codex tool", endpoint: "/api/v1/codex/hook",
 		outputField: "codex_output", style: styleCodex,
 		defaultBlockReason: "Blocked by DefenseClaw Codex policy.",
-		oversizedClosed:    failResult{body: `{"decision":"block","reason":"` + tooLarge + `"}`, exit: blockExit},
-		unreachableStrict:  failResult{exit: blockExit},
-		responseClosed:     failResult{exit: blockExit},
+		// Codex treats a non-zero exit as "hook failed" and continues. A
+		// managed hook's transport and response failures answer with Codex's
+		// own block for the event (emitClosed); an oversized payload, whose
+		// event is unknown, blocks with the structured decision and exit 0.
+		oversizedClosed:   failResult{body: `{"decision":"block","reason":"` + tooLarge + `"}`, exit: 0},
+		unreachableStrict: failResult{exit: blockExit},
+		responseClosed:    failResult{exit: blockExit},
 	},
 	"cursor": {
 		connector: "cursor", hookName: "cursor-hook", errLabel: "cursor",

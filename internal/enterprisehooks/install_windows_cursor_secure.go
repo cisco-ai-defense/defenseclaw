@@ -424,7 +424,9 @@ func verifyWindowsCursorMachineTarget(target windowsGenericManagedTarget) error 
 	if err != nil {
 		return err
 	}
-	artifacts, err = validateWindowsCursorManagedArtifacts(artifacts)
+	// hooks.json content drift is a machine-scoped repair that needs no user
+	// session, so it heals here rather than failing into a full repair.
+	artifacts, err = validateWindowsCursorManagedArtifactsHealingHooks(artifacts)
 	if err != nil {
 		return err
 	}

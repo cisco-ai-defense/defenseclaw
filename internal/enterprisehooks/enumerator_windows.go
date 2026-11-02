@@ -257,11 +257,18 @@ func WriteTargetsManifestAtomic(path string, m Manifest) (changed bool, err erro
 	}
 	path = filepath.Clean(path)
 	dir := filepath.Dir(path)
-	if err := windowsTargetsManifestAncestorTrust(dir); err != nil {
+	// Repair the folder before judging it: the trust walk keeps the named
+	// folder's verdicts fatal, so validating first would refuse drift the
+	// repair below exists to fix. The reparse chain is refused before any
+	// descriptor is written.
+	if err := winpath.RejectReparseChain(dir); err != nil {
 		return false, fmt.Errorf("enterprise hooks: validate hook guardian manifest parent ancestry: %w", err)
 	}
 	if err := ensureWindowsTargetsManifestParentProtected(dir); err != nil {
 		return false, fmt.Errorf("enterprise hooks: validate protected hook guardian manifest parent: %w", err)
+	}
+	if err := windowsTargetsManifestAncestorTrust(dir); err != nil {
+		return false, fmt.Errorf("enterprise hooks: validate hook guardian manifest parent ancestry: %w", err)
 	}
 
 	serialised, err := marshalTargetsManifest(m)
@@ -355,11 +362,14 @@ func WriteTargetsManifestAtomic(path string, m Manifest) (changed bool, err erro
 	if err := validateWindowsTargetsManifestObject(tmpPath, false); err != nil {
 		return false, fmt.Errorf("enterprise hooks: validate protected temp manifest %s: %w", tmpPath, err)
 	}
-	if err := windowsTargetsManifestAncestorTrust(dir); err != nil {
+	if err := winpath.RejectReparseChain(dir); err != nil {
 		return false, fmt.Errorf("enterprise hooks: revalidate hook guardian manifest parent ancestry: %w", err)
 	}
 	if err := ensureWindowsTargetsManifestParentProtected(dir); err != nil {
 		return false, fmt.Errorf("enterprise hooks: revalidate protected hook guardian manifest parent: %w", err)
+	}
+	if err := windowsTargetsManifestAncestorTrust(dir); err != nil {
+		return false, fmt.Errorf("enterprise hooks: revalidate hook guardian manifest parent ancestry: %w", err)
 	}
 	// A destination can appear between the initial absence check and staging.
 	// It must already be an exact AdminFile before ReplaceFileW may preserve it.

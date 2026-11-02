@@ -18,7 +18,6 @@ package hookexec
 
 import (
 	"encoding/json"
-	"fmt"
 	"io"
 	"os"
 	"path/filepath"
@@ -38,7 +37,9 @@ func readCapped(r io.Reader, max int64) (payload []byte, overflow bool, err erro
 		return nil, false, err
 	}
 	if int64(len(data)) > max {
-		return nil, true, nil
+		// The prefix is returned so an oversized payload's event can still be
+		// recovered (oversizedHookEvent); it is never sent anywhere.
+		return data[:max], true, nil
 	}
 	return data, false, nil
 }
@@ -115,7 +116,9 @@ func logHookFailure(opts Options, sp spec, reason, category, failMode string, bl
 		outcome = "fail_open"
 		// Quote diagnostics so an unexpected transport error cannot forge lines.
 		// Never include request/response bodies or authentication credentials.
-		fmt.Fprintf(opts.Stderr, "defenseclaw: WARNING hook fail-open; inspection bypassed (connector=%s hook=%s category=%s): %q\n", sp.connector, sp.hookName, category, reason)
+		// A managed fail-open is in the durable record only; it would print
+		// on every call while the account is not enrolled yet.
+		writeFailureDiagnostic(opts, false, "defenseclaw: WARNING hook fail-open; inspection bypassed (connector=%s hook=%s category=%s): %q\n", sp.connector, sp.hookName, category, reason)
 	}
 	if opts.Home == "" {
 		return

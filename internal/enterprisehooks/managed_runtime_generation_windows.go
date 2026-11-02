@@ -49,7 +49,42 @@ var (
 	windowsManagedRuntimeSelectorLockRetry                   = 50 * time.Millisecond
 	windowsManagedRuntimeSelectorMutationAuthorize           = requireWindowsEnterpriseAdministrator
 	windowsManagedRuntimeSelectorVerifyAuthorize             = requireWindowsEnterpriseAdministrator
+	// Generation GC deletes under the selector lock, which concurrent
+	// selector transactions wait on for windowsManagedRuntimeSelectorLockTimeout.
+	// Its DELETE opens therefore retry a sharing violation at most once, after
+	// windowsManagedRuntimeGCOpenRetryDelay, and spend no more than
+	// windowsManagedRuntimeGCOpenRetryBudget sleeping across the whole pass; a
+	// bundle still held is left for the next pass.
+	windowsManagedRuntimeGCOpenRetryDelay  = 100 * time.Millisecond
+	windowsManagedRuntimeGCOpenRetryBudget = 1 * time.Second
+	windowsManagedRuntimeGCOpenSleep       = time.Sleep
 )
+
+// windowsManagedRuntimeGCOpenRetry is the GC pass's shared retry budget for
+// DELETE opens; see windowsManagedRuntimeGCOpenRetryDelay.
+type windowsManagedRuntimeGCOpenRetry struct {
+	remaining time.Duration
+}
+
+func newWindowsManagedRuntimeGCOpenRetry() *windowsManagedRuntimeGCOpenRetry {
+	return &windowsManagedRuntimeGCOpenRetry{remaining: windowsManagedRuntimeGCOpenRetryBudget}
+}
+
+func (r *windowsManagedRuntimeGCOpenRetry) open(
+	open func() (windows.Handle, error),
+) (windows.Handle, error) {
+	handle, err := open()
+	if err == nil || !managed.IsTransientWindowsError(err) || r.remaining <= 0 {
+		return handle, err
+	}
+	delay := windowsManagedRuntimeGCOpenRetryDelay
+	if delay > r.remaining {
+		delay = r.remaining
+	}
+	r.remaining -= delay
+	windowsManagedRuntimeGCOpenSleep(delay)
+	return open()
+}
 
 type windowsManagedRuntimeSelector struct {
 	SchemaVersion int                                   `json:"schema_version"`
@@ -1012,6 +1047,7 @@ func garbageCollectWindowsManagedRuntimeGenerationsPlatform(
 		// folder with more candidates than the bound collects the first
 		// batch and leaves the rest for the next pass.
 		candidates := 0
+		gcRetry := newWindowsManagedRuntimeGCOpenRetry()
 		for _, directoryEntry := range entries {
 			connectorName, generationID, ok := parseWindowsManagedRuntimeBundleLeaf(
 				directoryEntry.Name(),
@@ -1041,7 +1077,7 @@ func garbageCollectWindowsManagedRuntimeGenerationsPlatform(
 				generationID,
 			)
 			if err == nil {
-				err = deleteWindowsManagedRuntimeBundle(entry, target, data)
+				err = deleteWindowsManagedRuntimeBundleWithOpenRetry(entry, target, data, gcRetry.open)
 			}
 			if err != nil {
 				managed.EmitResilienceEvent(managed.MarkerSkip, map[string]string{
@@ -2513,6 +2549,19 @@ func deleteWindowsManagedRuntimeBundle(
 	target *windows.SID,
 	expected []byte,
 ) error {
+	return deleteWindowsManagedRuntimeBundleWithOpenRetry(entry, target, expected, managed.RetryTransientOpen)
+}
+
+// deleteWindowsManagedRuntimeBundleWithOpenRetry is deleteWindowsManagedRuntimeBundle
+// with the DELETE open's sharing-violation retry supplied by the caller:
+// single deletions keep managed.RetryTransientOpen's budget, generation GC
+// passes its own bounded one.
+func deleteWindowsManagedRuntimeBundleWithOpenRetry(
+	entry windowsManagedRuntimeSelectorTarget,
+	target *windows.SID,
+	expected []byte,
+	retryOpen func(func() (windows.Handle, error)) (windows.Handle, error),
+) error {
 	if err := validateWindowsManagedRuntimeGenerationRoots(entry.DataDir, target); err != nil {
 		return err
 	}
@@ -2534,16 +2583,20 @@ func deleteWindowsManagedRuntimeBundle(
 	if err != nil {
 		return err
 	}
-	handle, err := windows.CreateFile(
-		pathPtr,
-		windows.GENERIC_READ|windows.DELETE|windows.READ_CONTROL|
-			windows.FILE_READ_ATTRIBUTES|windows.SYNCHRONIZE,
-		windows.FILE_SHARE_READ|windows.FILE_SHARE_WRITE|windows.FILE_SHARE_DELETE,
-		nil,
-		windows.OPEN_EXISTING,
-		windows.FILE_FLAG_OPEN_REPARSE_POINT,
-		0,
-	)
+	// A hook still reading this generation holds it without FILE_SHARE_DELETE,
+	// so the DELETE open briefly sees a sharing violation; retry it.
+	handle, err := retryOpen(func() (windows.Handle, error) {
+		return windows.CreateFile(
+			pathPtr,
+			windows.GENERIC_READ|windows.DELETE|windows.READ_CONTROL|
+				windows.FILE_READ_ATTRIBUTES|windows.SYNCHRONIZE,
+			windows.FILE_SHARE_READ|windows.FILE_SHARE_WRITE|windows.FILE_SHARE_DELETE,
+			nil,
+			windows.OPEN_EXISTING,
+			windows.FILE_FLAG_OPEN_REPARSE_POINT,
+			0,
+		)
+	})
 	if errors.Is(err, windows.ERROR_FILE_NOT_FOUND) || errors.Is(err, windows.ERROR_PATH_NOT_FOUND) {
 		return nil
 	}

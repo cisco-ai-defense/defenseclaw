@@ -780,3 +780,47 @@ func TestWindowsManagedRuntimeGenerationEqualityRejectsEveryAuthenticatedContrac
 		})
 	}
 }
+
+// Generation GC deletes under the selector lock, so its DELETE opens retry a
+// sharing violation at most once each and share one bounded sleep budget per
+// pass instead of managed.RetryTransientOpen's multi-second backoff.
+func TestWindowsManagedRuntimeGCOpenRetryIsBounded(t *testing.T) {
+	originalSleep := windowsManagedRuntimeGCOpenSleep
+	t.Cleanup(func() { windowsManagedRuntimeGCOpenSleep = originalSleep })
+	var slept time.Duration
+	windowsManagedRuntimeGCOpenSleep = func(d time.Duration) { slept += d }
+
+	retry := newWindowsManagedRuntimeGCOpenRetry()
+	opens := 0
+	held := func() (windows.Handle, error) {
+		opens++
+		return windows.InvalidHandle, windows.ERROR_SHARING_VIOLATION
+	}
+	if _, err := retry.open(held); !errors.Is(err, windows.ERROR_SHARING_VIOLATION) {
+		t.Fatalf("held bundle open = %v, want the sharing violation", err)
+	}
+	if opens != 2 || slept != windowsManagedRuntimeGCOpenRetryDelay || slept > 250*time.Millisecond {
+		t.Fatalf("one held bundle: opens = %d, slept = %v; want one retry within 250ms", opens, slept)
+	}
+
+	// Many held bundles in one pass never sleep past the pass budget.
+	for i := 0; i < windowsManagedRuntimeGenerationGCMaxCandidates; i++ {
+		_, _ = retry.open(held)
+	}
+	if slept != windowsManagedRuntimeGCOpenRetryBudget {
+		t.Fatalf("pass slept %v, want the %v budget", slept, windowsManagedRuntimeGCOpenRetryBudget)
+	}
+	if windowsManagedRuntimeGCOpenRetryBudget >= windowsManagedRuntimeSelectorLockTimeout {
+		t.Fatal("GC retry budget does not fit inside the selector lock timeout")
+	}
+
+	// Anything but a sharing or lock violation is returned without a retry.
+	opens = 0
+	denied := func() (windows.Handle, error) {
+		opens++
+		return windows.InvalidHandle, windows.ERROR_ACCESS_DENIED
+	}
+	if _, err := newWindowsManagedRuntimeGCOpenRetry().open(denied); !errors.Is(err, windows.ERROR_ACCESS_DENIED) || opens != 1 {
+		t.Fatalf("access denied: err = %v, opens = %d; want one attempt", err, opens)
+	}
+}

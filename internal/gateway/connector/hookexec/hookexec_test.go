@@ -185,6 +185,7 @@ func TestRunUsesAuthenticatedManagedTokenSnapshotWithoutRereadingSidecars(t *tes
 }
 
 func TestRunAuthenticatedManagedTokenSnapshotEmptyFailsClosedWithoutFallback(t *testing.T) {
+	records := captureManagedHookDecisions(t)
 	result := run(t, "codex", ok(`{"action":"allow"}`), func(opts *Options) {
 		path := filepath.Join(opts.HookDir, ".hook-codex.token")
 		if err := os.WriteFile(path, []byte("valid-but-different-generation-token\n"), 0o600); err != nil {
@@ -195,15 +196,15 @@ func TestRunAuthenticatedManagedTokenSnapshotEmptyFailsClosedWithoutFallback(t *
 		empty := "  "
 		opts.AuthenticatedManagedToken = &empty
 	})
-	if result.code != blockExit {
-		t.Fatalf("Run code = %d, want fail-closed %d; stderr=%s", result.code, blockExit, result.stderr)
+	// A managed Codex hook blocks with Codex's PreToolUse deny, not a bare exit.
+	if result.code != 0 || result.stdout != codexClosedPreTool {
+		t.Fatalf("Run code = %d stdout = %q, want the Codex PreToolUse deny; stderr=%s", result.code, result.stdout, result.stderr)
 	}
 	if result.rt.requests != 0 {
 		t.Fatalf("gateway requests = %d, want 0", result.rt.requests)
 	}
-	if !strings.Contains(result.stderr, "authenticated managed runtime token is empty") {
-		t.Fatalf("stderr = %q, want authenticated-snapshot diagnostic", result.stderr)
-	}
+	requireManagedStderr(t, result.stderr, true)
+	requireManagedRecordReason(t, *records, managedRuntimeTokenEmptyReason)
 }
 
 // TestRunCodexNotifyUsesAuthenticatedManagedTokenSnapshot mirrors the Run
@@ -658,7 +659,7 @@ func TestOversizedPayload(t *testing.T) {
 	}{
 		"amp":        {stdout: "", code: 2},
 		"claudecode": {stdout: `{"decision":"block","reason":"DefenseClaw hook payload too large"}` + "\n", code: 2},
-		"codex":      {stdout: `{"decision":"block","reason":"DefenseClaw hook payload too large"}` + "\n", code: 2},
+		"codex":      {stdout: `{"decision":"block","reason":"DefenseClaw hook payload too large"}` + "\n", code: 0},
 		"openhands":  {stdout: `{"decision":"deny","reason":"DefenseClaw hook payload too large"}` + "\n", code: 2},
 		"cursor":     {stdout: cursorDeny("DefenseClaw hook payload too large") + "\n", code: 2},
 		"copilot":    {stdout: "", code: 2},
@@ -725,8 +726,8 @@ func TestUnreachable(t *testing.T) {
 		r := run(t, "codex", &stubRT{status: 503, body: "boom"}, func(o *Options) {
 			o.StrictAvailability = true
 		})
-		if r.code != 2 {
-			t.Fatalf("code = %d, want 2", r.code)
+		if r.code != blockExit {
+			t.Fatalf("code = %d, want %d", r.code, blockExit)
 		}
 	})
 }
@@ -903,8 +904,8 @@ func TestResponseFailure(t *testing.T) {
 		r := run(t, "codex", ok("this is not json"), func(o *Options) {
 			o.FailMode = "closed"
 		})
-		if r.code != 2 {
-			t.Fatalf("code = %d, want 2", r.code)
+		if r.code != blockExit {
+			t.Fatalf("code = %d, want %d", r.code, blockExit)
 		}
 		if !strings.Contains(r.stderr, "invalid JSON response") {
 			t.Errorf("stderr = %q, want invalid JSON", r.stderr)
@@ -1384,6 +1385,7 @@ func TestManagedEnterpriseMissingOrDisabledHomeFailsClosed(t *testing.T) {
 			}, diagnostic: "enterprise_managed_runtime_home_missing"},
 		} {
 			t.Run(connectorName+"/"+tc.name, func(t *testing.T) {
+				records := captureManagedHookDecisions(t)
 				rt := ok(`{"action":"allow"}`)
 				var out, errb bytes.Buffer
 				home := tc.home(t)
@@ -1401,15 +1403,14 @@ func TestManagedEnterpriseMissingOrDisabledHomeFailsClosed(t *testing.T) {
 					Stderr:             &errb,
 					HTTPClient:         &http.Client{Transport: rt},
 				})
-				if code != blockExit {
-					t.Fatalf("code = %d, want fail-closed %d; stdout=%q stderr=%q", code, blockExit, out.String(), errb.String())
+				if code != failClosedExit(connectorName) {
+					t.Fatalf("code = %d, want fail-closed %d; stdout=%q stderr=%q", code, failClosedExit(connectorName), out.String(), errb.String())
 				}
 				if rt.requests != 0 {
 					t.Fatalf("gateway called %d times, want 0", rt.requests)
 				}
-				if !strings.Contains(errb.String(), tc.diagnostic) {
-					t.Fatalf("stderr = %q, want stable diagnostic %q", errb.String(), tc.diagnostic)
-				}
+				requireManagedStderr(t, errb.String(), true)
+				requireManagedRecordReason(t, *records, tc.diagnostic)
 			})
 		}
 	}
@@ -1431,6 +1432,7 @@ func TestManagedEnterpriseResolverFailureBeforeRuntimeOrGateway(t *testing.T) {
 		{name: "state-invalid/open", reason: "enterprise_managed_runtime_state_invalid", failMode: "open", wantCode: blockExit},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
+			records := captureManagedHookDecisions(t)
 			rt := ok(`{"action":"allow"}`)
 			var out, errb bytes.Buffer
 			home := t.TempDir()
@@ -1449,15 +1451,15 @@ func TestManagedEnterpriseResolverFailureBeforeRuntimeOrGateway(t *testing.T) {
 				Stderr:                &errb,
 				HTTPClient:            &http.Client{Transport: rt},
 			})
-			if code != tc.wantCode {
-				t.Fatalf("code = %d, want %d; stdout=%q stderr=%q", code, tc.wantCode, out.String(), errb.String())
+			want := tc.wantCode
+			if code != want {
+				t.Fatalf("code = %d, want %d; stdout=%q stderr=%q", code, want, out.String(), errb.String())
 			}
 			if rt.requests != 0 {
 				t.Fatalf("gateway called %d times, want 0", rt.requests)
 			}
-			if !strings.Contains(errb.String(), tc.reason) {
-				t.Fatalf("stderr = %q, want stable diagnostic %q", errb.String(), tc.reason)
-			}
+			requireManagedStderr(t, errb.String(), tc.wantCode != 0)
+			requireManagedRecordReason(t, *records, tc.reason)
 		})
 	}
 }
@@ -1645,4 +1647,12 @@ func TestDefaultHTTPClientDoesNotFollowRedirects(t *testing.T) {
 	if resp.StatusCode != http.StatusFound {
 		t.Fatalf("status = %d, want 302 (redirect surfaced, not followed)", resp.StatusCode)
 	}
+}
+
+// failClosedExit is the exit a fail-closed result uses when the hook event
+// is unknown: the bare block exit for every connector. A managed Codex hook
+// with a known event answers with Codex's block for it instead (see
+// codex_fail_closed_test.go).
+func failClosedExit(string) int {
+	return blockExit
 }

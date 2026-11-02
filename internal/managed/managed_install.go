@@ -75,6 +75,7 @@ func (layout ManagedInstallLayout) targets() []managedDataTarget {
 			"codex-requirements-ownership.json",
 			"codex-requirements-acl-backup.json",
 			"managed-hooks-teardown-journal.json",
+			"managed-hooks-lifecycle-journal.json",
 		} {
 			add(ObjectAdminFile, root, "install", name)
 		}
@@ -96,7 +97,14 @@ func RepairWindowsManagedInstall(layout ManagedInstallLayout, opts CanonicalOpti
 	targets := layout.targets()
 	results := make([]CanonicalResult, 0, len(targets))
 	for _, target := range targets {
-		result, _ := EnsureCanonical(target.path, target.kind, opts)
+		result, err := EnsureCanonical(target.path, target.kind, opts)
+		if err == nil && result.Outcome != CanonicalBoundary && !target.kind.Directory() {
+			// ReadOnly, Hidden or System set by a user or a hardening tool
+			// stops the next managed write, so the guardian clears them too.
+			// Only after the structural check and descriptor repair accepted
+			// the object; the repair may restore FILE_WRITE_ATTRIBUTES.
+			clearManagedFileRestrictiveAttributes(target.path)
+		}
 		results = append(results, result)
 	}
 	return results

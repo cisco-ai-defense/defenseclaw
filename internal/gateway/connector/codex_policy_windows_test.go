@@ -16,8 +16,32 @@ import (
 	"testing"
 	"time"
 
+	"github.com/defenseclaw/defenseclaw/internal/managed"
 	"github.com/defenseclaw/defenseclaw/internal/testenv"
 )
+
+// With requirements.toml absent, permission drift on its parent (here: a
+// test user owns the folder) is accepted like the machine requirements writer
+// accepts it; structure stays fatal.
+func TestReadCodexSystemRequirementsToleratesParentPermissionDrift(t *testing.T) {
+	// The tolerance is the default trust mode; an inherited strict pin would
+	// correctly refuse the drift this test expects to be accepted.
+	t.Setenv(managed.TrustStrictAncestorsEnv, "")
+	parent := t.TempDir()
+	path := filepath.Join(parent, "requirements.toml")
+	body, exists, err := readCodexSystemRequirements(path, true)
+	if err != nil || exists || body != nil {
+		t.Fatalf("readCodexSystemRequirements = %q, %v, %v; want absent and no error", body, exists, err)
+	}
+
+	notDir := filepath.Join(parent, "file")
+	if err := os.WriteFile(notDir, []byte("x"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := readCodexSystemRequirements(filepath.Join(notDir, "requirements.toml"), true); err == nil {
+		t.Fatal("non-directory parent was accepted")
+	}
+}
 
 func TestInspectCodexPolicyRequiresFreshSetupSelectionBeforeMutation(t *testing.T) {
 	dir := testenv.PrivateTempDir(t)

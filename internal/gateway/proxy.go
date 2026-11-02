@@ -1989,10 +1989,20 @@ var ollamaPorts []int
 // as last loaded, for serving GET /v1/config/providers.
 var providerRegistry *configs.ProvidersConfig
 
-func init() {
-	if err := ReloadProviderRegistry(); err != nil {
-		panic("gateway: failed to load embedded providers.json: " + err.Error())
-	}
+// providerRegistryOnce loads the registry on first use rather than at
+// package init. Every binary that links this package (the hook included)
+// would otherwise open the operator overlay, and report its errors,
+// before main runs.
+var providerRegistryOnce sync.Once
+
+// ensureProviderRegistry loads the registry once, before the first reader
+// takes providerRegistryMu. An explicit ReloadProviderRegistry satisfies it.
+func ensureProviderRegistry() {
+	providerRegistryOnce.Do(func() {
+		if err := loadProviderRegistry(); err != nil {
+			panic("gateway: failed to load embedded providers.json: " + err.Error())
+		}
+	})
 }
 
 // ReloadProviderRegistry re-reads the embedded providers.json and merges
@@ -2000,6 +2010,33 @@ func init() {
 // call at runtime; concurrent readers of providerDomains / ollamaPorts
 // see a consistent snapshot.
 func ReloadProviderRegistry() error {
+	if err := loadProviderRegistry(); err != nil {
+		return err
+	}
+	providerRegistryOnce.Do(func() {})
+	return nil
+}
+
+// setProviderRegistryManagedEnterprise applies the managed posture to the
+// overlay lookup: managed processes ignore DEFENSECLAW_CUSTOM_PROVIDERS_PATH.
+// A registry already loaded under the other posture is rebuilt.
+func setProviderRegistryManagedEnterprise(managedEnterprise bool) {
+	configs.SetIgnoreCustomProvidersPathEnv(managedEnterprise)
+	providerRegistryMu.Lock()
+	changed := providerRegistryManagedEnterprise != managedEnterprise
+	providerRegistryManagedEnterprise = managedEnterprise
+	loaded := providerRegistry != nil
+	providerRegistryMu.Unlock()
+	if changed && loaded {
+		_ = ReloadProviderRegistry()
+	}
+}
+
+// providerRegistryManagedEnterprise is the posture last applied by
+// setProviderRegistryManagedEnterprise. Guarded by providerRegistryMu.
+var providerRegistryManagedEnterprise bool
+
+func loadProviderRegistry() error {
 	cfg, err := configs.LoadProviders()
 	if err != nil {
 		return err
@@ -2043,6 +2080,7 @@ func SeedCustomProvidersFromLLMBaseURL(llmBaseURL string) error {
 	}
 
 	// Check if the domain is already known — avoid writing a redundant overlay.
+	ensureProviderRegistry()
 	providerRegistryMu.RLock()
 	for _, pd := range providerDomains {
 		if strings.EqualFold(pd.domain, host) {
@@ -2085,6 +2123,7 @@ func SeedCustomProvidersFromLLMBaseURL(llmBaseURL string) error {
 // under the read lock. The returned slice is safe to iterate but not to
 // mutate.
 func providerRegistrySnapshot() (*configs.ProvidersConfig, []providerDomainEntry, []int) {
+	ensureProviderRegistry()
 	providerRegistryMu.RLock()
 	defer providerRegistryMu.RUnlock()
 	return providerRegistry, providerDomains, ollamaPorts
@@ -2100,6 +2139,7 @@ func inferProviderFromURL(targetURL string) string {
 		return ""
 	}
 	host := strings.ToLower(u.Hostname())
+	ensureProviderRegistry()
 	providerRegistryMu.RLock()
 	domains := providerDomains
 	providerRegistryMu.RUnlock()
@@ -4182,6 +4222,7 @@ func isOllamaLoopback(targetURL string, guardrailPort int) bool {
 	if err != nil {
 		return false
 	}
+	ensureProviderRegistry()
 	providerRegistryMu.RLock()
 	ports := ollamaPorts
 	providerRegistryMu.RUnlock()
@@ -4222,6 +4263,7 @@ func isKnownProviderDomain(targetURL string) bool {
 		return false
 	}
 	host := strings.ToLower(u.Hostname())
+	ensureProviderRegistry()
 	providerRegistryMu.RLock()
 	domains := providerDomains
 	providerRegistryMu.RUnlock()

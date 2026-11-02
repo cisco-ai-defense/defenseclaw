@@ -3103,10 +3103,12 @@ function Assert-WizardHookRegistration(
         if (-not $encoded.Success) { throw 'wizard-selected Codex registration does not use EncodedCommand' }
         try { $script = [Text.Encoding]::Unicode.GetString([Convert]::FromBase64String($encoded.Groups[1].Value)) }
         catch { throw "wizard-selected Codex command is not valid UTF-16LE Base64: $($_.Exception.Message)" }
-        $startProcessPattern = '(?i)\$hookProcess=Microsoft\.PowerShell\.Management\\Start-Process\s+-FilePath\s+''(?:''''|[^''])*defenseclaw-hook\.exe''\s+-ArgumentList\s+@\(''hook'',''--connector'',''codex''\)\s+-NoNewWindow\s+-Wait\s+-PassThru'
+        $startProcessPattern = '(?i)\$hookStart=\[System\.Diagnostics\.ProcessStartInfo\]::new\(''(?:''''|[^''])*defenseclaw-hook\.exe'',''hook --connector codex''\)'
         if ($script -notmatch $startProcessPattern -or
             $script -notmatch '(?i)exit\s+\$hookProcess\.ExitCode' -or
-            $script -match '(?i)\$LASTEXITCODE') {
+            $script -notmatch '(?i)if \(\$null -eq \$LASTEXITCODE\) \{ exit 1 \}' -or
+            $script -match '(?i)Start-Process' -or
+            $script -match '(?i)hook --connector codex;\s*exit\s+\$LASTEXITCODE') {
             throw "wizard-selected Codex registration does not use its exact synchronous native hook command: $($Specification.ConfigPath)"
         }
     } elseif ($Specification.Connector -eq 'claudecode') {
@@ -3222,15 +3224,15 @@ function Set-WizardCodexLegacyNonWaitingHook([object]$Specification) {
     try { $script = [Text.Encoding]::Unicode.GetString([Convert]::FromBase64String($currentEncoded)) }
     catch { throw "cannot stage legacy Codex hook: invalid encoded command: $($_.Exception.Message)" }
 
-    $startPattern = '(?i)\$hookProcess=Microsoft\.PowerShell\.Management\\Start-Process\s+-FilePath\s+(?<file>''(?:''''|[^''])*defenseclaw-hook\.exe'')\s+-ArgumentList\s+@\(''hook'',''--connector'',''codex''\)\s+-NoNewWindow\s+-Wait\s+-PassThru'
+    $startPattern = '(?i)\$hookStart=\[System\.Diagnostics\.ProcessStartInfo\]::new\((?<file>''(?:''''|[^''])*defenseclaw-hook\.exe''),''hook --connector codex''\)'
     $start = [regex]::Match($script, $startPattern)
     if (-not $start.Success) {
         throw 'cannot stage legacy Codex hook: synchronous launcher expression is missing'
     }
-    $legacyScript = $script.Replace(
-        $start.Value,
-        ('& ' + $start.Groups['file'].Value + ' hook --connector codex')
-    ).Replace('exit $hookProcess.ExitCode', 'exit $LASTEXITCODE')
+    $legacyScript = (
+        "`$ErrorActionPreference='Stop'; `$env:NoDefaultCurrentDirectoryInExePath='1'; " +
+        '& ' + $start.Groups['file'].Value + ' hook --connector codex; exit $LASTEXITCODE'
+    )
     if ($legacyScript -ceq $script) {
         throw 'cannot stage legacy Codex hook: generated command did not change'
     }

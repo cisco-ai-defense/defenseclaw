@@ -1148,7 +1148,7 @@ func TestWindowsCertificationHarnessFixesAreFailClosedAndBounded(t *testing.T) {
 	}
 	fingerprint := windowsPowerShellFunction(t, harness, "Get-CodexManagedHookFingerprint")
 	for _, contract := range []string{
-		"Microsoft\\.PowerShell\\.Management\\\\Start-Process",
+		"\\[System\\.Diagnostics\\.Process\\]::Start\\(\\$hookStart\\)",
 		"$actualHook",
 		"$expectedCanonicalHook",
 		"[StringComparison]::OrdinalIgnoreCase",
