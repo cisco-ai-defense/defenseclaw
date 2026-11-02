@@ -256,10 +256,15 @@ func (controller *RetentionController) applyPolicyLocked(retentionDays, maxStore
 	}
 	if capper, ok := controller.reaper.(retentionStoreCapper); ok {
 		previousCap := capper.MaxStoreMB()
+		lastStatus := controller.status.Load()
+		wasWarning := maxStoreMB > 0 && previousCap != maxStoreMB &&
+			lastStatus != nil && lastStatus.State == RetentionStateWarning
 		if err := capper.UpdateMaxStoreMB(maxStoreMB); err != nil {
 			return errors.New("observability retention policy is invalid")
 		}
-		if maxStoreMB > 0 && (previousCap == 0 || maxStoreMB < previousCap) {
+		// A raised cap also needs a pass when the last measurement was warning:
+		// the new cap may still be below the used size.
+		if maxStoreMB > 0 && (previousCap == 0 || maxStoreMB < previousCap || wasWarning) {
 			controller.promptRun = true
 		}
 	} else if maxStoreMB != 0 {
@@ -472,8 +477,8 @@ func (controller *RetentionController) run(ctx context.Context) {
 					return
 				}
 			} else {
-				// A looser age or cap needs no run, but the health still has
-				// to show the policy now in force (a cap set back to 0).
+				// A looser age or a disabled cap needs no run, but health
+				// still has to show the policy now in force.
 				controller.publishStatus(controller.Status())
 			}
 		default:
