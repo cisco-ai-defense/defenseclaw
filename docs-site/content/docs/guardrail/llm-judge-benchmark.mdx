@@ -33,7 +33,7 @@ coverage, but it adds model latency to every eligible call.
 
 <Flow
   direction="TB"
-  caption="The recommended regex_judge path for one proposed tool call. Local rules run first; a result that already blocks or is CRITICAL skips the judge. Otherwise the judge sees the call together with the user's latest prompt and this session's recent tool calls, kept in gateway memory only. Model-generated text never becomes the user's intent. Only a connector with a synchronous pre-tool hook can block; event-stream connectors get the same judgment as an observation."
+  caption="The recommended regex_judge path for one proposed tool call. Local rules run first; a result that already blocks, or has a CRITICAL finding the rules can enforce, skips the judge. A finding the rules flag but cannot block on their own (detection-only) goes to the judge. Otherwise the judge sees the call together with the user's latest prompt and this session's recent tool calls, kept in gateway memory only. Model-generated text never becomes the user's intent. Only a connector with a synchronous pre-tool hook can block; event-stream connectors get the same judgment as an observation."
 >
   <Node id="intent" kind="operator">{`User's latest prompt\nfrom the prompt hook`}</Node>
   <Node id="tool" kind="agent">{`Agent proposes a tool call\npre-tool hook`}</Node>

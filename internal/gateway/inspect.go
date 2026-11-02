@@ -1574,6 +1574,9 @@ func meetMemberJudgeCurrent(ctx context.Context, connector string, current *Tool
 	return &ToolInspectVerdict{
 		Action:   profileMeetActionForFindings(ctx, memberConfig, connector, own, true, true),
 		Severity: HighestSeverity(own),
+		// The member's own findings decide whether its verdict is decisive
+		// (regexJudgeLocalVerdictDecisive), as for a single profile.
+		DetailedFindings: own,
 	}
 }
 
@@ -1600,13 +1603,7 @@ func (a *APIServer) runHookJudgeSingle(ctx context.Context, strategyDirection, j
 	case "judge_first":
 		// Judge always runs.
 	case "regex_judge":
-		// A regex/AID verdict that already blocks, or is CRITICAL, is
-		// decisive: the judge cannot raise it. A HIGH verdict that only
-		// alerts (block-at CRITICAL) is not, so the judge still runs and
-		// the stronger verdict wins; skipping it let a prompt with more
-		// sensitive data through where the judge blocked less (GAP-1677).
-		if current != nil && (strings.EqualFold(current.Action, "block") ||
-			severityRank[strings.ToUpper(current.Severity)] >= severityRank["CRITICAL"]) {
+		if regexJudgeLocalVerdictDecisive(cfg, current) {
 			return nil
 		}
 	default: // regex_only / unset
@@ -1726,6 +1723,29 @@ func (a *APIServer) runHookJudgeSingle(ctx context.Context, strategyDirection, j
 	return nil
 }
 
+// regexJudgeLocalVerdictDecisive reports whether the rule/AID verdict settles
+// the call under regex_judge, so the judge is not asked: the verdict already
+// blocks, or a finding that can enforce is CRITICAL. A HIGH verdict that only
+// alerts (block_at CRITICAL) is not decisive, so the judge runs and the
+// stronger verdict wins (GAP-1677). Neither is a CRITICAL finding that cannot
+// block: a detection-only or alert-only tool-call finding (a pattern match
+// whose effect the parser did not prove) left the judge out of exactly the
+// calls the rules flag but cannot decide, and they ran. Secure Client keeps
+// the verdict severity (issue #1092).
+func regexJudgeLocalVerdictDecisive(cfg *config.Config, current *ToolInspectVerdict) bool {
+	if current == nil {
+		return false
+	}
+	if strings.EqualFold(current.Action, guardrailActionBlock) {
+		return true
+	}
+	severity := current.Severity
+	if len(current.DetailedFindings) > 0 && (cfg == nil || !cfg.SecureClientIntegration()) {
+		severity = HighestSeverity(enforceableRuleFindings(current.DetailedFindings))
+	}
+	return severityRank[strings.ToUpper(severity)] >= severityRank["CRITICAL"]
+}
+
 // meetDecisionConfirm is the decisionConfirm of a profile meet after member
 // verdict v: v's own when v raises the action to a confirm, cleared when v
 // confirms at the same action for another reason, else unchanged. Only the
@@ -1748,7 +1768,8 @@ func meetDecisionConfirm(current bool, action string, v *ScanVerdict, raises boo
 //     strategy;
 //   - else, for a tool call of a connector in decision_model.hook_connectors,
 //     the decision model alone (cascade 2). It runs like regex_judge: a rule
-//     verdict that already blocks or is CRITICAL is decisive; judge_first
+//     verdict that already blocks, or has a CRITICAL finding that can
+//     enforce, is decisive (regexJudgeLocalVerdictDecisive); judge_first
 //     runs it on every call;
 //   - else nothing (rules only).
 func (a *APIServer) hookLaneJudge(ctx context.Context, cfg *config.Config, strategyDirection, connector string) (*LLMJudge, string) {
