@@ -6,34 +6,55 @@
 package hookexec
 
 import (
-	"fmt"
+	"errors"
+	"net"
 	"syscall"
 	"testing"
+	"time"
 )
 
-// refusingLoopbackAddr is a 127.0.0.1 port held for the whole test by a TCP
-// socket that is bound and never listens: every connect to it is refused,
-// and no other process can bind it while the test runs. A port that was only
-// freed (reservedLoopbackAddr) could be taken by another test process of the
-// same account on a busy build box, and the per-user owner proof accepted
-// that listener (rel-1-0-6 GAP-0406).
+// refusingLoopbackAddr is a 127.0.0.1 port held for the whole test on which
+// every connect is refused. The port is the local end of a loopback
+// connection the test keeps open: no socket listens on it, so a connect is
+// refused at once, and while it is in use the kernel gives it to no other
+// port-0 bind or outgoing connection. A port that was only freed
+// (reservedLoopbackAddr) could be taken by another test process of the same
+// account on a busy build box, and the per-user owner proof accepted that
+// listener (rel-1-0-6 GAP-0406).
+//
+// A socket that is bound and never listens does not do on macOS: Linux
+// refuses a connect to it, but the BSD stack drops the SYN, so the connect
+// hangs until the hook's budget ends and the call reads as a gateway that
+// took it and did not answer, not as one that is down.
 func refusingLoopbackAddr(t *testing.T) string {
 	t.Helper()
-	fd, err := syscall.Socket(syscall.AF_INET, syscall.SOCK_STREAM, 0)
+	peer, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
 		t.Fatal(err)
 	}
-	t.Cleanup(func() { _ = syscall.Close(fd) })
-	if err := syscall.Bind(fd, &syscall.SockaddrInet4{Addr: [4]byte{127, 0, 0, 1}}); err != nil {
-		t.Fatal(err)
-	}
-	bound, err := syscall.Getsockname(fd)
+	hold, err := net.Dial("tcp", peer.Addr().String())
 	if err != nil {
+		_ = peer.Close()
 		t.Fatal(err)
 	}
-	inet, ok := bound.(*syscall.SockaddrInet4)
-	if !ok || inet.Port == 0 {
-		t.Fatalf("bound address %#v", bound)
+	accepted, err := peer.Accept()
+	_ = peer.Close()
+	if err != nil {
+		_ = hold.Close()
+		t.Fatal(err)
 	}
-	return fmt.Sprintf("127.0.0.1:%d", inet.Port)
+	t.Cleanup(func() {
+		_ = hold.Close()
+		_ = accepted.Close()
+	})
+	addr := hold.LocalAddr().String()
+	probe, err := net.DialTimeout("tcp", addr, time.Second)
+	if err == nil {
+		_ = probe.Close()
+		t.Fatalf("held port %s accepted a connection", addr)
+	}
+	if !errors.Is(err, syscall.ECONNREFUSED) {
+		t.Fatalf("held port %s: connect = %v, want it refused", addr, err)
+	}
+	return addr
 }
