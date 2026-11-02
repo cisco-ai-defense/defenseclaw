@@ -16,6 +16,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"regexp"
 	"sort"
 	"strings"
 
@@ -277,7 +278,9 @@ var claudeEventsWithoutMatcher = map[string]bool{
 
 // claudeEntryCovers reports whether an entry's matcher selects every
 // occurrence the contract's matcher does: an omitted, "" or "*" matcher
-// matches all, any other value must equal the contract's.
+// matches all. A restricted unanchored regex that matches the empty string
+// also matches every tool name. Other expressions must equal the contract's
+// matcher.
 func claudeEntryCovers(entry any, group connector.ManagedHookGroup) bool {
 	if claudeEventsWithoutMatcher[group.Event] {
 		return true
@@ -296,7 +299,28 @@ func claudeEntryCovers(entry any, group connector.ManagedHookGroup) bool {
 		return true
 	}
 	matcher, ok := raw.(string)
-	return ok && (matcher == "" || matcher == "*" || matcher == group.Matcher)
+	return ok && (matcher == "" || matcher == "*" || matcher == group.Matcher || claudeMatcherMatchesAll(matcher))
+}
+
+// Keep this proof within regex syntax shared by Go and JavaScript. Without
+// anchors or lookarounds, an empty match is available at every input start.
+func claudeMatcherMatchesAll(matcher string) bool {
+	if matcher == "^" || matcher == "$" {
+		return true
+	}
+	if strings.ContainsAny(matcher, `^$\[]{}\/`) {
+		return false
+	}
+	if strings.Contains(strings.ReplaceAll(matcher, "(?:", ""), "(?") {
+		return false
+	}
+	for _, char := range matcher {
+		if !strings.ContainsRune("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789._*+?|():", char) {
+			return false
+		}
+	}
+	compiled, err := regexp.Compile(matcher)
+	return err == nil && compiled.MatchString("")
 }
 
 // claudeHandlerRuns reports whether Claude Code runs a handler as a command
@@ -328,12 +352,14 @@ func claudeHandlerRuns(raw any, group connector.ManagedHookGroup) bool {
 	return true
 }
 
-// claudeHasPolicyKey reports whether doc carries a key other than the two
-// control keys. Claude Code skips a source without one.
+// claudeHasPolicyKey reports whether doc carries a non-null policy value.
+// Claude Code skips a source with only control keys or null policy values.
 func claudeHasPolicyKey(doc *object) bool {
 	for _, key := range doc.keys {
 		if key != "managedSourcesBehavior" && key != "wslInheritsWindowsSettings" {
-			return true
+			if value, present := doc.get(key); present && value != nil {
+				return true
+			}
 		}
 	}
 	return false

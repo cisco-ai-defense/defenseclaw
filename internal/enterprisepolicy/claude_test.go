@@ -600,6 +600,10 @@ var claudeHookRunCases = []struct {
 }{
 	{"rendered", true, func(map[string]any, map[string]any) {}},
 	{"match-all star matcher", true, func(entry map[string]any, _ map[string]any) { entry["matcher"] = "*" }},
+	{"match-all regex matcher", true, func(entry map[string]any, _ map[string]any) { entry["matcher"] = ".*" }},
+	{"match-all regex group", true, func(entry map[string]any, _ map[string]any) { entry["matcher"] = "(?:.*)" }},
+	{"match-all regex alternative", true, func(entry map[string]any, _ map[string]any) { entry["matcher"] = "Bash|.*" }},
+	{"match-all optional regex", true, func(entry map[string]any, _ map[string]any) { entry["matcher"] = "a*" }},
 	{"omitted matcher", true, func(entry map[string]any, _ map[string]any) { delete(entry, "matcher") }},
 	{"explicit async false", true, func(_ map[string]any, handler map[string]any) { handler["async"] = false }},
 	{"prompt handler type", false, func(_ map[string]any, handler map[string]any) {
@@ -608,6 +612,7 @@ var claudeHookRunCases = []struct {
 	}},
 	{"missing handler type", false, func(_ map[string]any, handler map[string]any) { delete(handler, "type") }},
 	{"nonmatching tool matcher", false, func(entry map[string]any, _ map[string]any) { entry["matcher"] = "^$" }},
+	{"unsupported inline flag", false, func(entry map[string]any, _ map[string]any) { entry["matcher"] = "(?i)" }},
 	{"non-string matcher", false, func(entry map[string]any, _ map[string]any) { entry["matcher"] = 1 }},
 	{"if filter", false, func(_ map[string]any, handler map[string]any) { handler["if"] = "Bash(git *)" }},
 	{"async handler", false, func(_ map[string]any, handler map[string]any) { handler["async"] = true }},
@@ -706,6 +711,27 @@ func TestClaudeControlOnlyHigherSourceKeepsFilePrefixCheck(t *testing.T) {
 			writeFile(t, path, `{"env":{"CLAUDE_CODE_SHELL_PREFIX":""}}`)
 			if state, err = (claudeTarget{}).Verify(opts); err != nil || !state.Covered {
 				t.Fatalf("an empty later prefix must stay covered: %v %+v", err, state)
+			}
+		})
+	}
+}
+
+func TestClaudeNullOnlyHigherSourceKeepsFilePolicy(t *testing.T) {
+	for _, raw := range []string{
+		`{"hooks":null}`,
+		`{"hooks":null,"env":null,"managedSourcesBehavior":"first-wins"}`,
+	} {
+		t.Run(raw, func(t *testing.T) {
+			opts := withPolicy(testOptions(t), "claudecode", func(p *config.EnterpriseConnectorPolicy) {
+				p.HigherPrecedenceSources = config.HigherPrecedenceFail
+			})
+			opts.GOOS = "darwin"
+			opts.ClaudeVersionFloor = "off"
+			opts.AgentVersions = map[string]string{"claudecode": "2.1.286"}
+			withHigherSources(t, higherSource(t, "managed preferences", raw))
+			state, err := (claudeTarget{}).Reconcile(opts)
+			if err != nil || !state.Covered {
+				t.Fatalf("null-only source should leave file policy active: %v %+v", err, state)
 			}
 		})
 	}
