@@ -290,6 +290,9 @@ func dispatchTrustedAction(
 		request.targetMemo = hookpaths.NewTargetMemo()
 	}
 	request.Input.ActiveStateTreeNames = clientStateTreeNames(request.ResolvedWriteTargets)
+	if request.EnforcementCapable && request.ResolvedWriteTargets[hookpaths.UnprovenReasonKey] == "shell-parse-bound" {
+		return trustedActionLimitFindings(true)
+	}
 	if trustedActionCommandTooDeep(request.Input) {
 		// Past the reading bounds: no reader below parses it, and the call
 		// takes the over-limit path (GAP-2537).
