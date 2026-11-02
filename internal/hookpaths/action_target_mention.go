@@ -194,6 +194,7 @@ func actionPosixTargetMention(command, cwd, home string, depth int, stateOnly bo
 		// replacedEntries: the link entries plain mv calls replaced so far,
 		// in the order the walk reads the statements.
 		var replacedEntries []string
+		copyOptionCandidate := !stateOnly && strings.Contains(command, "cp") && strings.Contains(command, "$")
 		// A brace word of fixed text is the words bash makes of it
 		// (rel-1-0-6:GAP-0233, GAP-0255): each is judged as if it were
 		// spelled out. A redirect word counts only when it makes one word
@@ -272,6 +273,13 @@ func actionPosixTargetMention(command, cwd, home string, depth int, stateOnly bo
 				}
 			}
 			if call, ok := stmt.Cmd.(*syntax.CallExpr); ok {
+				if copyOptionCandidate {
+					if destination, ok := actionPosixCopyVariableTarget(call, values, effectiveCWD, home); ok &&
+						check(destination, false, effectiveCWD) {
+						found = true
+						return false
+					}
+				}
 				for _, assign := range call.Assigns {
 					if assign.Value != nil && checkWord(assign.Value) {
 						found = true
