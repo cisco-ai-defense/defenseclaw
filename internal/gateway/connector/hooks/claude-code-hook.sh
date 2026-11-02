@@ -43,6 +43,7 @@ DEFENSECLAW_MANAGED_HOOK=1
 export DEFENSECLAW_MANAGED_HOOK
 DEFENSECLAW_HOME="$(cd "${HOOK_DIR}/.." && pwd -P)"
 export DEFENSECLAW_HOME
+{{if .ManagedShellGuard}}{{template "managed-prologue" .}}{{end}}
 {{else}}
 DEFENSECLAW_HOME="${DEFENSECLAW_HOME:-${HOME}/.defenseclaw}"
 if [ ! -d "${DEFENSECLAW_HOME}" ] || [ -f "${DEFENSECLAW_HOME}/.disabled" ]; then
@@ -60,7 +61,8 @@ fi
 . "${HOOK_DIR}/_hardening.sh"
 defenseclaw_harden_resources
 defenseclaw_harden_env
-
+{{if .ManagedShellGuard}}trap '_dc_managed_on_exit' EXIT
+{{end}}
 # Fail mode set BEFORE the missing-token check so the helper has a
 # stable FAIL_MODE to log against. See codex-hook.sh for the full
 # response-layer and transport-layer rationale.
@@ -236,7 +238,7 @@ if [ "$ACTION" = "block" ]; then
   if [ -z "$REASON" ]; then
     REASON="Blocked by DefenseClaw Claude Code policy."
   fi
-  printf '%s\n' "$REASON" >&2
+  {{if .ManagedShellGuard}}_dc_managed_block_reason "$REASON"{{else}}printf '%s\n' "$REASON" >&2{{end}}
   exit 2
 fi
 exit 0
