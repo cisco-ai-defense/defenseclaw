@@ -73,6 +73,16 @@ func (m *TargetMemo) ActionCommandDecisionInShell(command, cwd, home string, fac
 }
 
 func actionTargetDecision(command, cwd, home string, dialect actionfacts.Dialect, posixShell bool, facts map[string]string, memo *TargetMemo) string {
+	// A Git Bash home glob in an entirely read-only compound names no
+	// protected write in either Windows or POSIX syntax. Keep the proof
+	// syntactic so a later redirect or copy still reaches all target scans.
+	if dialect == actionfacts.DialectPOSIX && actionWindowsHome(home) && strings.Contains(command, "*/*") {
+		if file, parsed := parseShell(command); parsed &&
+			(actionKnownReadOnlyShell(file, home) ||
+				strings.Contains(command, "pwd") && actionHomeGlobHeadThenPWD(file, home)) {
+			return ""
+		}
+	}
 	if strings.HasPrefix(strings.TrimSpace(command), "bash -c ") {
 		if file, parsed := parseShell(command); parsed && len(file.Stmts) == 1 &&
 			len(file.Stmts[0].Redirs) == 0 && !file.Stmts[0].Background && !file.Stmts[0].Coprocess &&

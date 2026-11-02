@@ -90,7 +90,8 @@ func actionPosixTargetMention(command, cwd, home string, depth int, stateOnly bo
 	file, parsed := parseShell(command)
 	if depth == 0 && parsed && (actionKnownReadOnlyShell(file, home) ||
 		!stateOnly && (actionSSHSetupAndReadsOnly(file, cwd, home) ||
-			strings.Contains(command, "pwd") && actionSSHListingThenPWD(file, cwd, home))) {
+			strings.Contains(command, "pwd") &&
+				(actionSSHListingThenPWD(file, cwd, home) || actionHomeGlobHeadThenPWD(file, home)))) {
 		return false
 	}
 	// A function the command never calls never runs (GAP-1535).
@@ -2377,6 +2378,10 @@ func actionKnownReadOnlyShellDepth(file *syntax.File, home string, depth int) bo
 			// readers: du reports sizes, readlink and realpath print a
 			// resolved name; none has an output option.
 			"grep", "egrep", "fgrep", "wc", "du", "readlink", "realpath":
+		case "echo":
+			// The literal */* operand prints expanded names. Every other
+			// statement remains subject to the same read-only walk.
+			safe = len(call.Args) == 2 && call.Args[0].Lit() == "echo" && call.Args[1].Lit() == "*/*"
 		case "ssh-keygen":
 			if !actionSSHKeygenListsOnly(call.Args[1:], home) {
 				safe = false
@@ -2497,6 +2502,43 @@ func actionSSHListingThenPWD(file *syntax.File, cwd, home string) bool {
 		}
 	}
 	return false
+}
+
+// actionHomeGlobHeadThenPWD accepts one exact home-relative listing and
+// a bare pwd statement. A later write or extra statement stays in the
+// normal target scan.
+func actionHomeGlobHeadThenPWD(file *syntax.File, home string) bool {
+	var read, print *syntax.Stmt
+	switch len(file.Stmts) {
+	case 1:
+		outer := file.Stmts[0]
+		if outer.Background || outer.Negated || outer.Coprocess || len(outer.Redirs) != 0 {
+			return false
+		}
+		pair, ok := outer.Cmd.(*syntax.BinaryCmd)
+		if !ok || pair.Op != syntax.AndStmt {
+			return false
+		}
+		read, print = pair.X, pair.Y
+	case 2:
+		read, print = file.Stmts[0], file.Stmts[1]
+	default:
+		return false
+	}
+	if read == nil || print == nil || read.Background || read.Negated || read.Coprocess ||
+		print.Background || print.Negated || print.Coprocess || len(print.Redirs) != 0 {
+		return false
+	}
+	readCall, ok := read.Cmd.(*syntax.CallExpr)
+	if !ok || len(readCall.Assigns) != 0 || len(readCall.Args) != 4 ||
+		readCall.Args[0].Lit() != "head" || readCall.Args[1].Lit() != "-n" ||
+		readCall.Args[2].Lit() != "1" || readCall.Args[3].Lit() != "*/*" ||
+		!actionKnownReadOnlyShell(&syntax.File{Stmts: []*syntax.Stmt{read}}, home) {
+		return false
+	}
+	printCall, ok := print.Cmd.(*syntax.CallExpr)
+	return ok && len(printCall.Assigns) == 0 && len(printCall.Args) == 1 &&
+		printCall.Args[0].Lit() == "pwd"
 }
 
 // actionFixedTextEchoes returns the echo calls of a command that print fixed
