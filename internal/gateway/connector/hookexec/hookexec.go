@@ -835,7 +835,9 @@ func withDefaults(o Options) Options {
 	if o.Stderr == nil {
 		o.Stderr = os.Stderr
 	}
-	if o.MaxBody <= 0 {
+	// A managed hook never reads less than the fixed cap, so an oversized
+	// payload's event can always be recovered from its prefix.
+	if o.MaxBody <= 0 || (o.ManagedEnterprise && o.MaxBody < defaultMaxBody) {
 		o.MaxBody = defaultMaxBody
 	}
 	if o.Now == nil {

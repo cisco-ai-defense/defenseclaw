@@ -184,7 +184,9 @@ func TestCodexFailClosedReplyLeavesOtherPathsUnchanged(t *testing.T) {
 // PermissionRequest or PreToolUse. With no event in the prefix it falls back
 // to the structured decision.
 func TestManagedCodexOversizedAnswersWithCodexBlockForEvent(t *testing.T) {
-	big := strings.Repeat("x", 64)
+	// A managed hook always reads the fixed 1 MiB cap, so the payload must
+	// exceed it.
+	big := strings.Repeat("x", int(defaultMaxBody))
 	for _, tc := range []struct {
 		name    string
 		payload string
@@ -213,7 +215,7 @@ func TestManagedCodexOversizedAnswersWithCodexBlockForEvent(t *testing.T) {
 				o.FailMode = "open"
 				token := "authenticated-token"
 				o.AuthenticatedManagedToken = &token
-				o.MaxBody = 48
+				o.MaxBody = 1 // an inherited tiny cap is raised for a managed hook
 				o.Stdin = strings.NewReader(tc.payload)
 			})
 			if r.rt.requests != 0 {
@@ -232,5 +234,25 @@ func TestOversizedHookEventReadsThePrefix(t *testing.T) {
 	}
 	if got := oversizedHookEvent([]byte(`{"tool_input":"…`)); got != "" {
 		t.Fatalf("event = %q, want none", got)
+	}
+}
+
+// An inherited one-byte cap (DEFENSECLAW_HOOK_MAX_BODY=1) never applies to a
+// managed hook: an ordinary payload is still read, its event resolved and
+// sent to the gateway instead of being refused as oversized.
+func TestManagedHookIgnoresTinyBodyCap(t *testing.T) {
+	r := run(t, "codex", ok(`{"action":"allow"}`), func(o *Options) {
+		o.Event = ""
+		o.ManagedEnterprise = true
+		token := "authenticated-token"
+		o.AuthenticatedManagedToken = &token
+		o.MaxBody = 1
+		o.Stdin = strings.NewReader(`{"hook_event_name":"PreToolUse","tool_name":"Bash"}`)
+	})
+	if r.rt.requests != 1 {
+		t.Fatalf("gateway requests = %d, want 1 (the payload was refused as oversized)", r.rt.requests)
+	}
+	if r.code != 0 {
+		t.Fatalf("code = %d, want 0; stdout=%q stderr=%q", r.code, r.stdout, r.stderr)
 	}
 }

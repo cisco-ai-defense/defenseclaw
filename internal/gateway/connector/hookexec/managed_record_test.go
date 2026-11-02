@@ -219,7 +219,8 @@ func TestOversizedPayloadManagedForcesClosed(t *testing.T) {
 					token := "authenticated-token"
 					opts.AuthenticatedManagedToken = &token
 				}
-				opts.Stdin = strings.NewReader(`{"tool_input":"private-payload-marker"}`)
+				// Over the fixed cap a managed hook always applies.
+				opts.Stdin = strings.NewReader(`{"tool_input":"private-payload-marker` + strings.Repeat("x", int(defaultMaxBody)) + `"}`)
 			})
 			if r.rt.requests != 0 {
 				t.Fatalf("oversized payload reached the gateway")
@@ -471,7 +472,7 @@ func TestManagedFailurePathsWriteOnlyTheFixedBlockSentence(t *testing.T) {
 		{name: "auth/open", rt: &stubRT{status: 401}, failMode: "open"},
 		{name: "auth/closed", rt: &stubRT{status: 403}, failMode: "closed", blocked: true},
 		{name: "invalid-json/open", rt: ok("not json"), failMode: "open"},
-		{name: "oversized", rt: ok(`{"action":"allow"}`), failMode: "open", stdin: strings.Repeat("x", 64), blocked: true},
+		{name: "oversized", rt: ok(`{"action":"allow"}`), failMode: "open", stdin: strings.Repeat("x", int(defaultMaxBody)+1), blocked: true},
 	} {
 		for _, managedHook := range []bool{true, false} {
 			t.Run(tc.name+"/managed="+map[bool]string{true: "1", false: "0"}[managedHook], func(t *testing.T) {
