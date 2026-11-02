@@ -2965,6 +2965,7 @@ func runEnterpriseHookReconcileOnce(ctx context.Context) (enterpriseHookReconcil
 		}
 		recheck := false
 		var recheckOpts enterprisehooks.InstallOptions
+		var watchPathErr error
 		row := enterpriseHookReconcileRow{
 			User:      strings.TrimSpace(target.User),
 			UserHome:  strings.TrimSpace(target.UserHome),
@@ -3042,6 +3043,8 @@ func runEnterpriseHookReconcileOnce(ctx context.Context) (enterpriseHookReconcil
 					for _, dir := range dirs {
 						watchDirs[dir] = struct{}{}
 					}
+				} else if runtime.GOOS == "windows" && cfg.StandaloneEnterprise() {
+					watchPathErr = fmt.Errorf("list watch directories: %w", watchErr)
 				}
 			}
 			if own, filesErr := enterprisehooks.WatchOwnedFiles(opts); filesErr == nil {
@@ -3058,6 +3061,8 @@ func runEnterpriseHookReconcileOnce(ctx context.Context) (enterpriseHookReconcil
 						enterpriseHookWatchAddPathOwner(watchPathOwners, f, owner)
 					}
 				}
+			} else if runtime.GOOS == "windows" && cfg.StandaloneEnterprise() {
+				watchPathErr = errors.Join(watchPathErr, fmt.Errorf("list owned watch files: %w", filesErr))
 			}
 			platformDirs, platformFiles := enterpriseHookPlatformWatchFiles(target.Connector, resolved.home)
 			for _, dir := range platformDirs {
@@ -3115,6 +3120,10 @@ func runEnterpriseHookReconcileOnce(ctx context.Context) (enterpriseHookReconcil
 			pendingTargets = append(pendingTargets, target)
 			rows = append(rows, row)
 			continue
+		}
+		if watchPathErr != nil {
+			err = errors.Join(err, fmt.Errorf("watch target paths: %w", watchPathErr))
+			recheck = false
 		}
 		if err != nil {
 			failures++
