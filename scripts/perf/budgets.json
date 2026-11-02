@@ -7,6 +7,7 @@
   "linux-per-user-arm64-2cpu inherits the released-build seeds and scales five CPU-sensitive latency gates by the measured CPU score ratio against the seed host. The 20% tolerance and all other gates remain unchanged.",
   "gate false: reported next to its budget but not gated, with the reason in why (max is a single-sample tail; burst latency depends on the runner CPU).",
   "TODO: no baseline measurement for this cell yet; fill it from a dcperf run on that OS and mode.",
+  "burst seeds re-measured on the dcperf harness from published 1.0.6 by owner decision 2026-11-02; the earlier 863 ms seed came from the TST-7591 Pre+Post-pair harness. linux-per-user hook.claudecode.burst.p95_ms and hook.codex.burst.p95_ms are the worst of 9 runs plus 20% (the windows-per-user and macos-per-user seed rule), so the 20% tolerance comes on top.",
   "windows-per-user and macos-per-user hold the seeds of their PERF-BASELINE.md sections: the worst of three runs plus 20% (the Windows restart seed is a single fresh-store sample), so the gate's tolerance comes on top. windows-per-user is report-only (every entry gate false): it was measured with a Windows port of this harness that is not in the repo.",
   "windows-per-user host: dc-win2 (Windows Server 2025, 16 vCPU, shared), cpu_score_ms 251.8 / 259.1 against dev 102 and dc-mac 110, so single-thread CPU there is about 2.4x slower than dev; the seeds are kept as measured on it, not scaled. Compare a result's host.cpu_score_ms before reading a Windows regression."
  ],
@@ -36,8 +37,8 @@
     "why": "not gated: burst latency is CPU-bound (32 hook shells on 4 vCPUs) and GitHub runners vary in CPU. CI run 41255145781 on ubuntu-latest: claudecode burst p50 774 / p95 1074 ms. Same harness on the build box pinned to 4 CPUs (taskset): rc23 710e2cc0d8 p50 477-502 / p95 680-746 ms, 1.0.7 tip 94d60a0462 p50 457-465 / p95 652-685 ms, so no regression. Gate it once dcperf has run on dc-rhel (rel-1-0-6:GAP-0239 sweep recipe); not_allowed stays gated."
    },
    "hook.claudecode.burst.p95_ms": {
-    "budget": 863,
-    "source": "same, p95 840-863 ms",
+    "budget": 1388,
+    "source": "published DefenseClaw 1.0.6 (tag 1.0.6, commit 7dca866aba, release assets with checksums verified), dcperf run --only hook,execs, dc-rhel (RHEL 9.8, 4 vCPU Xeon 8375C, cpu_score_ms 162.7, shared host, load1 < 1.0 before each run), fresh install per trial, 3 trials x 3 runs on 2026-11-02 (TST-16087..16089): p95 1039.2-1156.9 ms, worst 1156.9 ms + 20%",
     "gate": false,
     "why": "see hook.claudecode.burst.p50_ms"
    },
@@ -67,8 +68,10 @@
     "source": "no Codex burst baseline"
    },
    "hook.codex.burst.p95_ms": {
-    "budget": "TODO",
-    "source": "no Codex burst baseline"
+    "budget": 1737,
+    "source": "published DefenseClaw 1.0.6 (tag 1.0.6, commit 7dca866aba, release assets with checksums verified), dcperf run --only hook,execs, dc-rhel (RHEL 9.8, 4 vCPU Xeon 8375C, cpu_score_ms 162.7, shared host, load1 < 1.0 before each run), fresh install per trial, 3 trials x 3 runs on 2026-11-02 (TST-16087..16089): p95 1306.1-1447.5 ms, worst 1447.5 ms + 20%",
+    "gate": false,
+    "why": "see hook.claudecode.burst.p50_ms"
    },
    "hook.codex.burst.not_allowed": {
     "budget": 0,
