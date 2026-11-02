@@ -88,7 +88,9 @@ func actionPosixTargetMention(command, cwd, home string, depth int, stateOnly bo
 		return false
 	}
 	file, parsed := parseShell(command)
-	if depth == 0 && parsed && (actionKnownReadOnlyShell(file, home) || !stateOnly && actionSSHSetupAndReadsOnly(file, cwd, home)) {
+	if depth == 0 && parsed && (actionKnownReadOnlyShell(file, home) ||
+		!stateOnly && (actionSSHSetupAndReadsOnly(file, cwd, home) ||
+			strings.Contains(command, "pwd") && actionSSHListingThenPWD(file, cwd, home))) {
 		return false
 	}
 	// A function the command never calls never runs (GAP-1535).
@@ -2446,6 +2448,55 @@ func actionBashCLiteralBody(word *syntax.Word) bool {
 		}
 	}
 	return true
+}
+
+// actionSSHListingThenPWD accepts the two-statement form where an SSH
+// directory listing is followed by a bare working-directory print. The
+// listing and print have no writer operands; other compound forms continue
+// through the target scan so a later keys mutation remains visible.
+func actionSSHListingThenPWD(file *syntax.File, cwd, home string) bool {
+	var listing, print *syntax.Stmt
+	switch len(file.Stmts) {
+	case 1:
+		outer := file.Stmts[0]
+		if outer.Background || outer.Negated || outer.Coprocess || len(outer.Redirs) != 0 {
+			return false
+		}
+		pair, ok := outer.Cmd.(*syntax.BinaryCmd)
+		if !ok || pair.Op != syntax.AndStmt {
+			return false
+		}
+		listing, print = pair.X, pair.Y
+	case 2:
+		listing, print = file.Stmts[0], file.Stmts[1]
+	default:
+		return false
+	}
+	if listing == nil || print == nil || listing.Background || listing.Negated || listing.Coprocess ||
+		print.Background || print.Negated || print.Coprocess || len(print.Redirs) != 0 {
+		return false
+	}
+	listCall, ok := listing.Cmd.(*syntax.CallExpr)
+	if !ok || len(listCall.Assigns) != 0 || len(listCall.Args) < 2 {
+		return false
+	}
+	program, known := staticProgramWord(listCall.Args[0], home)
+	if !known || programBase(program) != "ls" ||
+		!actionKnownReadOnlyShell(&syntax.File{Stmts: []*syntax.Stmt{listing}}, home) {
+		return false
+	}
+	printCall, ok := print.Cmd.(*syntax.CallExpr)
+	if !ok || len(printCall.Assigns) != 0 || len(printCall.Args) != 1 || printCall.Args[0].Lit() != "pwd" {
+		return false
+	}
+	ssh := filepath.Join(home, ".ssh")
+	for _, word := range listCall.Args[1:] {
+		value, known := actionWordValue(word, actionValues{"HOME": home}, cwd, home)
+		if known && samePathName(filepath.Clean(OperandPath(value, cwd)), ssh) {
+			return true
+		}
+	}
+	return false
 }
 
 // actionFixedTextEchoes returns the echo calls of a command that print fixed

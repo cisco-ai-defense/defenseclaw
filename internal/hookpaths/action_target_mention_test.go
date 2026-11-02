@@ -370,6 +370,9 @@ func TestR104ActionSSHDirectoryOnlyMentions(t *testing.T) {
 		// command gets the verdict of ls ~/.ssh alone (lead ruling
 		// 2026-10-31 18:34 EDT, rel-1-0-6:GAP-0225).
 		`ls ~/.ssh && echo done`,
+		`ls ~/.ssh; pwd`,
+		`ls ~/.ssh && pwd`,
+		`ls -la ~/.ssh; pwd`,
 	} {
 		t.Run(command, func(t *testing.T) {
 			if got := posixShellDecision(command, cwd, home); got != "" {
@@ -378,7 +381,6 @@ func TestR104ActionSSHDirectoryOnlyMentions(t *testing.T) {
 		})
 	}
 	for _, command := range []string{
-		`ls -la ~/.ssh; pwd`,
 		`find ~/.ssh -name '*.pub' -delete`,
 		`cd ~/.ssh && pwd`,
 		// An echo that expands keeps the mention (rel-1-0-6:GAP-0225).
