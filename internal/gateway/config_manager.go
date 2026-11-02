@@ -1160,7 +1160,7 @@ func (m *ConfigManager) activationInput() (enterprisebundle.ActivationInput, boo
 	return in, true
 }
 
-// startupActivationRefusal checks the boot bytes of a managed standalone
+// startupActivationRefusal checks config bytes of a managed standalone
 // computer with trust anchors: they must be what a signed bundle in the
 // store renders for the bundle the generation record names. A computer that
 // has trust anchors but holds no signed bundle yet runs its lifecycle config
@@ -1458,8 +1458,9 @@ func (m *ConfigManager) reload(ctx context.Context, reason string, assets bool, 
 	var startupFallback *enterprisebundle.SignedVersion
 	startupRefused := false
 	// A gateway with policy assets reconciles its start with ReloadAssets
-	// (assets set), so the check does not depend on that flag.
-	if !m.rejected && reason == "startup_reconcile" && m.appliedRaw == nil && m.startupKnown &&
+	// (assets set), so the check does not depend on that flag. An earlier
+	// reload may have set rejected before this startup pass runs.
+	if reason == "startup_reconcile" && m.appliedRaw == nil && m.startupKnown &&
 		sha256.Sum256(source.raw) == m.startupSource && (oldCfg.StandaloneEnterprise() || next.StandaloneEnterprise()) {
 		if refusal := m.startupActivationRefusal(source.raw); refusal != nil {
 			startupRefused = true
@@ -1626,6 +1627,9 @@ func (m *ConfigManager) reload(ctx context.Context, reason string, assets bool, 
 	if (oldCfg.StandaloneEnterprise() || next.StandaloneEnterprise()) && !startupBoot &&
 		!pendingGeneration && !proveUnchanged &&
 		(assets || m.rejected || !bytes.Equal(m.appliedRaw, source.raw) || len(diff.Changed) > 0) {
+		if activationRefusal == nil {
+			activationRefusal = m.startupActivationRefusal(source.raw)
+		}
 		err := fmt.Errorf("config reload refused: this managed computer requires a lifecycle-recorded generation, or a signed policy bundle when trust anchors are installed; run enterprise ensure or apply a new signed bundle")
 		if activationRefusal != nil {
 			err = fmt.Errorf("config reload refused: %w; the live policy is unchanged; run enterprise ensure or apply a new signed bundle", activationRefusal)
@@ -1636,7 +1640,13 @@ func (m *ConfigManager) reload(ctx context.Context, reason string, assets bool, 
 			m.alertActivation(ctx, class, source.raw, activationRefusal, nil)
 		}
 		m.rejected = true
-		recordGenerationBuildError(err)
+		// Keep the signed activation reason in policy.last_reload_error even
+		// when the caller receives the broader managed reload instruction.
+		if activationRefusal != nil {
+			recordGenerationBuildError(activationRefusal)
+		} else {
+			recordGenerationBuildError(err)
+		}
 		m.recordLoadError(ctx, "managed_unbundled_reload", err)
 		if m.health != nil {
 			m.setConfigHealth(StateError, err.Error(), map[string]interface{}{
