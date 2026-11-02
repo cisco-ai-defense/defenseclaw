@@ -363,3 +363,26 @@ func TestParseIntegrityManifestAcceptsShasumForms(t *testing.T) {
 		t.Fatalf("entries = %v skipped = %v", entries, skipped)
 	}
 }
+
+func TestHostChecksRunsProcessProbesAtMostEveryInterval(t *testing.T) {
+	probes := healthyHostProbes()
+	curls := 0
+	probes.RunCurl = func(context.Context) error { curls++; return nil }
+	now := time.Unix(1000, 0)
+	checks := &HostChecks{
+		opts:      HostCheckOptions{InstallRoot: t.TempDir()},
+		probes:    probes,
+		integrity: NewIntegrityChecker(t.TempDir()),
+		now:       func() time.Time { return now },
+	}
+	checks.Run()
+	checks.Run()
+	if curls != 1 {
+		t.Fatalf("curl ran %d times on back-to-back ticks, want 1", curls)
+	}
+	now = now.Add(hostPrereqInterval)
+	checks.Run()
+	if curls != 2 {
+		t.Fatalf("curl ran %d times after the interval, want 2", curls)
+	}
+}

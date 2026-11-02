@@ -22,16 +22,15 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/managed"
 )
 
-// enterpriseHookGatewayPorts lists the gateway's loopback ports from config.
+// enterpriseHookGatewayPorts lists the loopback ports a managed gateway
+// binds: only the API port. In managed_enterprise mode the guardrail proxy
+// port is never bound (hooks talk to the API), so checking it would report
+// whatever else happens to listen there.
 func enterpriseHookGatewayPorts(c *config.Config) []int {
 	if c == nil {
 		return nil
 	}
-	ports := []int{c.Gateway.APIPort}
-	if c.Guardrail.Enabled {
-		ports = append(ports, c.Guardrail.Port)
-	}
-	return ports
+	return []int{c.Gateway.APIPort}
 }
 
 // newEnterpriseHookHostChecks returns the guardian's per-tick host checks

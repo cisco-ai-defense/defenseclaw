@@ -103,3 +103,14 @@ func TestLoadManifestStillRejectsUnusableDocumentOnDarwin(t *testing.T) {
 		t.Fatal("a document that does not parse at all was accepted")
 	}
 }
+
+func TestLoadManifestRejectsUnknownTopLevelKeyOnDarwin(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "targets.yaml")
+	body := "version: 1\ntargetz:\n  - user: \"alice\"\n    connector: \"claudecode\"\n"
+	if err := os.WriteFile(path, []byte(body), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if manifest, err := LoadManifest(path); err == nil {
+		t.Fatalf("a manifest with an unknown top-level key was accepted: %+v", manifest)
+	}
+}

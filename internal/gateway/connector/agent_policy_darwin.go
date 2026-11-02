@@ -481,10 +481,10 @@ func PreinspectCodexPolicy(ctx context.Context, executable, home string, uid, gi
 		}
 		cmd.SysProcAttr.Credential = &syscall.Credential{Uid: uint32(uid), Gid: uint32(gid), Groups: []uint32{}}
 		cmd.Dir = home
-		env := cmd.Env
-		if env == nil {
-			env = os.Environ()
-		}
+		// The child runs with the user's credentials: it gets an allowlisted
+		// environment, never the root guardian's (which can hold the gateway
+		// token).
+		env := codexPreinspectionEnv(os.LookupEnv)
 		env = replaceProcessEnv(env, "HOME", home)
 		if username != "" {
 			env = replaceProcessEnv(env, "USER", username)
@@ -505,6 +505,25 @@ func PreinspectCodexPolicy(ctx context.Context, executable, home string, uid, gi
 	codexPreinspections.entries[key] = codexPreinspection{policy: policy, at: time.Now()}
 	codexPreinspections.Unlock()
 	return nil
+}
+
+// codexPreinspectionEnvKeys are the only variables passed from the guardian
+// to the user-credential Codex child: what a launcher and a proxied cloud
+// requirements read need.
+var codexPreinspectionEnvKeys = []string{
+	"PATH", "LANG", "LC_ALL", "LC_CTYPE",
+	"HTTPS_PROXY", "https_proxy", "HTTP_PROXY", "http_proxy", "NO_PROXY", "no_proxy",
+	"SSL_CERT_FILE", "SSL_CERT_DIR",
+}
+
+func codexPreinspectionEnv(lookup func(string) (string, bool)) []string {
+	var env []string
+	for _, key := range codexPreinspectionEnvKeys {
+		if value, ok := lookup(key); ok {
+			env = append(env, key+"="+value)
+		}
+	}
+	return env
 }
 
 // codexPreinspectedPolicy returns a fresh answer PreinspectCodexPolicy
@@ -535,6 +554,21 @@ const cursorHooksLockedWriter = true
 // tests.
 var cursorMachineHooksPath = "/Library/Application Support/Cursor/hooks.json"
 
+// cursorEventHasHooks reports whether one event's value registers at least
+// one hook. null and an empty array (however it is spaced) register none; a
+// value that is not an array is counted, since Cursor may still read it.
+func cursorEventHasHooks(raw json.RawMessage) bool {
+	trimmed := bytes.TrimSpace(raw)
+	if len(trimmed) == 0 || string(trimmed) == "null" {
+		return false
+	}
+	var entries []json.RawMessage
+	if err := json.Unmarshal(trimmed, &entries); err == nil {
+		return len(entries) > 0
+	}
+	return true
+}
+
 // ReportCursorMachineHooksPolicy reports a machine-wide Cursor hooks.json
 // that registers hooks for the events DefenseClaw uses. Whether Cursor lets
 // it suppress user hooks is not established, so the target is not failed;
@@ -558,7 +592,7 @@ func ReportCursorMachineHooksPolicy() {
 	}
 	var conflicts []string
 	for _, event := range cursorHookEvents {
-		if raw, ok := document.Hooks[event]; ok && len(bytes.TrimSpace(raw)) > 0 && string(bytes.TrimSpace(raw)) != "[]" {
+		if raw, ok := document.Hooks[event]; ok && cursorEventHasHooks(raw) {
 			conflicts = append(conflicts, event)
 		}
 	}

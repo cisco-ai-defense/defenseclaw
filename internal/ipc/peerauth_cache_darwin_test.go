@@ -7,6 +7,7 @@
 package ipc
 
 import (
+	"os"
 	"strings"
 	"testing"
 	"time"
@@ -69,6 +70,35 @@ func TestPeerCodesignCacheReusesIdentityPerProcessStart(t *testing.T) {
 	cache.read(42)
 	if *calls != 3 {
 		t.Fatalf("an exec'd process was served from the cache (calls = %d)", *calls)
+	}
+	key.exe = "/tmp/other/" + key.comm // exec of a different binary with the same basename
+	cache.read(42)
+	if *calls != 4 {
+		t.Fatalf("a same-named exec was served from the cache (calls = %d)", *calls)
+	}
+	key.exeIno++ // the file at the same path was replaced
+	cache.read(42)
+	if *calls != 5 {
+		t.Fatalf("a replaced executable was served from the cache (calls = %d)", *calls)
+	}
+}
+
+func TestPeerProcessIdentityNamesThisExecutable(t *testing.T) {
+	key, ok := peerProcessIdentity(int32(os.Getpid()))
+	if !ok {
+		t.Fatal("this process was not keyed")
+	}
+	self, err := os.Executable()
+	if err != nil {
+		t.Fatal(err)
+	}
+	selfInfo, err := os.Stat(self)
+	if err != nil {
+		t.Fatal(err)
+	}
+	exeInfo, err := os.Stat(key.exe)
+	if err != nil || !os.SameFile(selfInfo, exeInfo) || key.exeIno == 0 {
+		t.Fatalf("key.exe = %q (ino %d), want this test binary %q: %v", key.exe, key.exeIno, self, err)
 	}
 }
 

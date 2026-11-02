@@ -246,8 +246,15 @@ func TestCodexPreinspectedPolicyIsUsedAndNoChildStartsInsideTheDrop(t *testing.T
 		t.Fatal(err)
 	}
 	t.Setenv("CODEX_HOME", filepath.Join(home, ".codex"))
+	// The attribution must not depend on the host's /etc/codex.
+	previousPath := codexSystemRequirementsPathForInspection
+	codexSystemRequirementsPathForInspection = func() (string, error) {
+		return filepath.Join(t.TempDir(), "absent", "requirements.toml"), nil
+	}
+	t.Cleanup(func() { codexSystemRequirementsPathForInspection = previousPath })
 	blocked := true
 	codexPreinspections.Lock()
+	previousEntries := codexPreinspections.entries
 	codexPreinspections.entries = map[string]codexPreinspection{
 		codexPreinspectionKey(executable, filepath.Join(home, ".codex")): {
 			policy: codexEffectivePolicy{AllowManagedHooksOnly: &blocked, Source: "app-server"},
@@ -255,6 +262,11 @@ func TestCodexPreinspectedPolicyIsUsedAndNoChildStartsInsideTheDrop(t *testing.T
 		},
 	}
 	codexPreinspections.Unlock()
+	t.Cleanup(func() {
+		codexPreinspections.Lock()
+		codexPreinspections.entries = previousEntries
+		codexPreinspections.Unlock()
+	})
 	previous := codexAppServerCommand
 	codexAppServerCommand = func(context.Context, string) *exec.Cmd {
 		t.Fatal("a Codex child was started although a preinspected answer existed")
@@ -268,6 +280,24 @@ func TestCodexPreinspectedPolicyIsUsedAndNoChildStartsInsideTheDrop(t *testing.T
 	}
 	if policy.SourceKind != "server" {
 		t.Fatalf("an app-server answer without a file or MDM source should be attributed to server: %+v", policy)
+	}
+}
+
+func TestCodexPreinspectionEnvIsAllowlisted(t *testing.T) {
+	values := map[string]string{
+		"PATH": "/usr/bin", "HTTPS_PROXY": "http://proxy:8080",
+		"DEFENSECLAW_GATEWAY_TOKEN": "secret", "HOME": "/var/root",
+	}
+	env := codexPreinspectionEnv(func(key string) (string, bool) {
+		value, ok := values[key]
+		return value, ok
+	})
+	joined := strings.Join(env, "\n")
+	if !strings.Contains(joined, "PATH=/usr/bin") || !strings.Contains(joined, "HTTPS_PROXY=http://proxy:8080") {
+		t.Fatalf("env = %q", env)
+	}
+	if strings.Contains(joined, "DEFENSECLAW_GATEWAY_TOKEN") || strings.Contains(joined, "HOME=") {
+		t.Fatalf("guardian environment leaked to the user child: %q", env)
 	}
 }
 
@@ -309,6 +339,17 @@ func TestCodexSystemRequirementsUserOwnedFolderIsReportedOnce(t *testing.T) {
 	if len(lines) != 1 || !strings.HasPrefix(lines[0], "defenseclaw_boundary ") ||
 		!strings.Contains(lines[0], `connector="codex"`) || !strings.Contains(lines[0], `path="`+parent+`"`) {
 		t.Fatalf("lines = %v", lines)
+	}
+}
+
+func TestCursorEventHasHooksIgnoresEmptyValues(t *testing.T) {
+	for raw, want := range map[string]bool{
+		`null`: false, `[]`: false, `[ ]`: false, "[\n]": false, ``: false,
+		`[{"command":"x"}]`: true, `{"command":"x"}`: true,
+	} {
+		if got := cursorEventHasHooks([]byte(raw)); got != want {
+			t.Errorf("cursorEventHasHooks(%q) = %v, want %v", raw, got, want)
+		}
 	}
 }
 
@@ -376,5 +417,49 @@ func TestCursorManagedWriterUsesLockAndCompareAndSwap(t *testing.T) {
 	hooks, _ := cfg["hooks"].(map[string]interface{})
 	if stop, _ := hooks["stop"].([]interface{}); len(stop) < 1 {
 		t.Fatalf("user stop hook lost: %#v", hooks["stop"])
+	}
+}
+
+func TestCursorLockedWriterMatchesPlainWriter(t *testing.T) {
+	dir := t.TempDir()
+	original := []byte(`{"version":1,"hooks":{"stop":[{"command":"/usr/local/bin/user-hook"}]},"userKey":"keep"}`)
+	plain := filepath.Join(dir, "plain.json")
+	locked := filepath.Join(dir, "locked.json")
+	for _, path := range []string{plain, locked} {
+		if err := os.WriteFile(path, original, 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := patchCursorHooks(plain, "/hooks/cursor-hook.sh", "", true); err != nil {
+		t.Fatal(err)
+	}
+	if err := patchCursorHooksLocked(locked, filepath.Join(dir, "state"), "/hooks/cursor-hook.sh", "", true); err != nil {
+		t.Fatal(err)
+	}
+	want, _ := os.ReadFile(plain)
+	got, _ := os.ReadFile(locked)
+	if string(got) != string(want) {
+		t.Fatalf("locked writer output differs:\n%s\nwant:\n%s", got, want)
+	}
+}
+
+func TestCursorLockedWriterRejectsMalformedAndCreatesMissing(t *testing.T) {
+	dir := t.TempDir()
+	malformed := filepath.Join(dir, "malformed.json")
+	if err := os.WriteFile(malformed, []byte(`{"hooks":`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := patchCursorHooksLocked(malformed, filepath.Join(dir, "state"), "/hooks/cursor-hook.sh", "", true); err == nil {
+		t.Fatal("malformed hooks.json was accepted")
+	}
+	if data, _ := os.ReadFile(malformed); string(data) != `{"hooks":` {
+		t.Fatalf("malformed hooks.json was rewritten: %q", data)
+	}
+	missing := filepath.Join(dir, "missing.json")
+	if err := patchCursorHooksLocked(missing, filepath.Join(dir, "state"), "/hooks/cursor-hook.sh", "", true); err != nil {
+		t.Fatalf("missing hooks.json: %v", err)
+	}
+	if data, err := os.ReadFile(missing); err != nil || !strings.Contains(string(data), "/hooks/cursor-hook.sh") {
+		t.Fatalf("missing hooks.json not created with the hook: %q %v", data, err)
 	}
 }

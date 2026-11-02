@@ -154,14 +154,18 @@ t_purge_skips_symlinked_home() {
 
 t_clean_purge_removes_log_folder() {
   local b; b="$(fixture_bundle)"
-  fixture_install "${b}" --connector codex >/dev/null 2>&1 || true
+  local rc=0
+  fixture_install "${b}" --connector codex >/dev/null 2>&1 || rc=$?
+  assert_status "${rc}" 0 "fixture install"
   local logs="${b}/root/Library/Logs/Cisco/SecureClient/DefenseClaw"
   printf 'log\n' > "${logs}/gateway.log"
-  local out rc=0
+  [[ -f "${logs}/gateway.log" ]] || _fail "fixture log folder missing before the purge"
+  local out
+  rc=0
   out="$(fixture_uninstall "${b}" --purge -y 2>&1)" || rc=$?
   assert_status "${rc}" 0 "clean purge exits 0"
   assert_contains "${out}" "[uninstall] done." "clean purge reports done"
-  [[ ! -e "${logs}" ]] || _fail "a clean purge removes the log folder, uninstall.log included ($(ls -A "${logs}"))"
+  [[ ! -e "${logs}" && ! -L "${logs}" ]] || _fail "a clean purge removes the log folder, uninstall.log included ($(ls -A "${logs}" 2>&1))"
   fixture_cleanup "${b}"
 }
 

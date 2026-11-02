@@ -13,6 +13,8 @@
 package ipc
 
 import (
+	"bytes"
+	"path/filepath"
 	"sync"
 	"time"
 
@@ -21,19 +23,25 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/managed"
 )
 
-// peerProcessKey identifies one process image: the pid, its start time, and
-// its command name. A reused pid has a different start time, and an exec in
-// the same process changes the command name, so neither reuses a cached
-// identity.
+// peerProcessKey identifies one process image: the pid, its start time, its
+// command name, and the executable it runs (path plus the file's device,
+// inode and modification time). A reused pid has a different start time; an
+// exec in the same process, or a replaced file at the same path, changes the
+// executable fields, so none of them reuses a cached identity.
 type peerProcessKey struct {
 	pid       int32
 	startSec  int64
 	startUsec int64
 	comm      string
+	exe       string
+	exeDev    int32
+	exeIno    uint64
+	exeMtime  int64
 }
 
-// peerProcessIdentity reads the process start time and command name for pid.
-// Overridable in tests.
+// peerProcessIdentity reads the process start time, command name and
+// executable for pid. A process whose executable cannot be identified is not
+// keyed, so its identity is never cached. Overridable in tests.
 var peerProcessIdentity = func(pid int32) (peerProcessKey, bool) {
 	info, err := unix.SysctlKinfoProc("kern.proc.pid", int(pid))
 	if err != nil || info == nil || info.Proc.P_pid != pid {
@@ -46,13 +54,44 @@ var peerProcessIdentity = func(pid int32) (peerProcessKey, bool) {
 		}
 		comm = append(comm, byte(c))
 	}
+	exe, ok := peerExecutablePath(pid)
+	if !ok {
+		return peerProcessKey{}, false
+	}
+	var st unix.Stat_t
+	if err := unix.Stat(exe, &st); err != nil {
+		return peerProcessKey{}, false
+	}
 	start := info.Proc.P_starttime
 	return peerProcessKey{
 		pid:       pid,
 		startSec:  int64(start.Sec),
 		startUsec: int64(start.Usec),
 		comm:      string(comm),
+		exe:       exe,
+		exeDev:    st.Dev,
+		exeIno:    st.Ino,
+		exeMtime:  st.Mtim.Nano(),
 	}, true
+}
+
+// peerExecutablePath reads the executable path the kernel recorded for pid
+// from kern.procargs2 (a 4-byte argc, then the NUL-terminated exec path).
+// Only an absolute path is returned.
+func peerExecutablePath(pid int32) (string, bool) {
+	raw, err := unix.SysctlRaw("kern.procargs2", int(pid))
+	if err != nil || len(raw) < 5 {
+		return "", false
+	}
+	path := raw[4:]
+	if end := bytes.IndexByte(path, 0); end >= 0 {
+		path = path[:end]
+	}
+	exe := string(path)
+	if !filepath.IsAbs(exe) {
+		return "", false
+	}
+	return filepath.Clean(exe), true
 }
 
 type peerCodesignIdentity struct {

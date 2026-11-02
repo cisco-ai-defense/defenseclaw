@@ -3175,6 +3175,19 @@ func mergeProtectedEnterpriseHookTargets(previous, current []enterpriseHookRecon
 		}
 		if prior, ok := previousByKey[key]; ok {
 			merged[key] = prior
+			continue
+		}
+		// A ledger row written before platform identities existed has no SID
+		// and is keyed by user name; carry it forward under the current
+		// identity so the first failed repair after an upgrade keeps it.
+		for _, prior := range previous {
+			if prior.OK && strings.TrimSpace(prior.SID) == "" &&
+				strings.EqualFold(strings.TrimSpace(prior.Connector), strings.TrimSpace(row.Connector)) &&
+				enterpriseHookLegacyLedgerRowMatchesPlatform(prior, row.User, row.UserHome, row.SID) {
+				prior.SID = row.SID
+				merged[key] = prior
+				break
+			}
 		}
 	}
 	out := make([]enterpriseHookReconcileRow, 0, len(merged))

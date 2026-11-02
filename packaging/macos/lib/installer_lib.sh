@@ -2677,14 +2677,15 @@ dc_run_prereq_checks() {
       remedy="reinstall DefenseClaw; the gateway binary is missing or not executable"
     return 0
   fi
-  if ! "${bin}" enterprise prereq-check --install-root "${root}" --ports "${ports}" --exec-probe >/dev/null 2>&1; then
-    # Re-run once to capture the markers in the log; the command itself
-    # always exits 0, so a failure here means the binary did not run.
+  # One run: its findings (stderr) go to the install output, its JSON-free
+  # stdout is dropped. The command always exits 0, so a non-zero status
+  # means the binary itself did not run.
+  local rc=0
+  { "${bin}" enterprise prereq-check --install-root "${root}" --ports "${ports}" --exec-probe >/dev/null; } 2>&1 || rc=$?
+  if (( rc != 0 )); then
     dc_marker defenseclaw_prereq check=binary_exec_allowed path="${bin}" \
       remedy="allow the DefenseClaw gateway in the endpoint security or app control policy"
-    return 0
   fi
-  "${bin}" enterprise prereq-check --install-root "${root}" --ports "${ports}" 2>&1 >/dev/null || true
   return 0
 }
 

@@ -320,8 +320,12 @@ extract_connectors() {
 # local account out, or nothing when it looks eligible (which means the
 # enumeration itself was inconsistent).
 classify_dropped_user() {
-  local name="$1" home
-  home="$(dscl . -read "/Users/${name}" NFSHomeDirectory 2>/dev/null | sed -n 's/^NFSHomeDirectory: //p')"
+  local name="$1" home out
+  # The name came from a successful listing, so a failed read is a
+  # directory-service failure, not an ineligible home: print nothing and
+  # the caller keeps the previous manifest.
+  out="$(dscl . -read "/Users/${name}" NFSHomeDirectory 2>/dev/null)" || return 0
+  home="$(printf '%s\n' "${out}" | sed -n 's/^NFSHomeDirectory: //p')"
   if [[ -z "${home}" ]]; then
     printf 'home_missing\t'
     return 0

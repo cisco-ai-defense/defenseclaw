@@ -229,7 +229,10 @@ func decodeManifestRowByRow(data []byte) (Manifest, bool) {
 		Version int         `yaml:"version"`
 		Targets []yaml.Node `yaml:"targets"`
 	}
+	// Only the rows are isolated: an unknown top-level key (a typo such as
+	// "targetz") still rejects the document rather than loading it as empty.
 	decoder := yaml.NewDecoder(bytes.NewReader(data))
+	decoder.KnownFields(true)
 	if err := decoder.Decode(&loose); err != nil {
 		return Manifest{}, false
 	}

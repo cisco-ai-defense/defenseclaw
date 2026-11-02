@@ -139,11 +139,11 @@ func inspectCodexEffectivePolicy(ctx context.Context, opts SetupOpts) (codexEffe
 			executable = filepath.Clean(executable)
 		}
 		if err := validateCodexManagedAgentExecutable(executable, opts.ManagedEnterprise); err != nil {
-			return codexEffectivePolicy{}, err
+			return codexEffectivePolicy{Source: executable}, err
 		}
 		policy, err := inspectCodexPolicyWithAppServer(ctx, executable, codexHomeDir())
 		if err != nil {
-			return codexEffectivePolicy{}, fmt.Errorf("%s configRequirements/read: %w", executable, err)
+			return codexEffectivePolicy{Source: executable}, fmt.Errorf("%s configRequirements/read: %w", executable, err)
 		}
 		return codexAttributePolicy(policy), nil
 	}
@@ -266,19 +266,19 @@ func inspectCodexSystemRequirementsForMode(managedEnterprise bool) (codexEffecti
 	}
 	raw, exists, err := readCodexSystemRequirements(path, managedEnterprise)
 	if err != nil {
-		return codexEffectivePolicy{}, fmt.Errorf("read %s: %w", path, err)
+		return codexEffectivePolicy{Source: path}, fmt.Errorf("read %s: %w", path, err)
 	}
 	if !exists {
 		return codexEffectivePolicy{Source: path}, nil
 	}
 	if len(raw) > codexPolicyMessageLimit {
-		return codexEffectivePolicy{}, fmt.Errorf("%s exceeds %d bytes", path, codexPolicyMessageLimit)
+		return codexEffectivePolicy{Source: path}, fmt.Errorf("%s exceeds %d bytes", path, codexPolicyMessageLimit)
 	}
 	var requirements struct {
 		AllowManagedHooksOnly *bool `toml:"allow_managed_hooks_only"`
 	}
 	if err := toml.Unmarshal(raw, &requirements); err != nil {
-		return codexEffectivePolicy{}, fmt.Errorf("parse %s: %w", path, err)
+		return codexEffectivePolicy{Source: path}, fmt.Errorf("parse %s: %w", path, err)
 	}
 	return codexEffectivePolicy{
 		AllowManagedHooksOnly: requirements.AllowManagedHooksOnly,

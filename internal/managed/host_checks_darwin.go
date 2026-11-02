@@ -6,6 +6,14 @@
 
 package managed
 
+import "time"
+
+// hostPrereqInterval bounds how often the guardian's ticks re-run the
+// prerequisite probes, which start processes (curl, lsof, xcode-select) that
+// an endpoint agent can stall. Findings are advisory, so a few minutes of
+// latency is harmless; the first pass always runs.
+const hostPrereqInterval = 5 * time.Minute
+
 // HostCheckOptions configures the per-tick host checks.
 type HostCheckOptions struct {
 	InstallRoot string
@@ -23,6 +31,10 @@ type HostChecks struct {
 	probes    HostPrereqProbes
 	prereqs   PrereqReporter
 	integrity *IntegrityChecker
+
+	now         func() time.Time
+	lastPrereq  time.Time
+	lastFinding []PrereqFinding
 }
 
 // NewHostChecks returns host checks that act on the real host.
@@ -31,20 +43,30 @@ func NewHostChecks(opts HostCheckOptions) *HostChecks {
 		opts:      opts,
 		probes:    DefaultHostPrereqProbes(),
 		integrity: NewIntegrityChecker(opts.InstallRoot),
+		now:       time.Now,
 	}
 }
 
 // Run performs one pass and returns the missing prerequisites and the code
-// integrity findings it found (logged or already logged in this streak).
+// integrity findings it found (logged or already logged in this streak). The
+// prerequisite probes re-run at most every hostPrereqInterval; in between the
+// last findings are returned.
 func (h *HostChecks) Run() ([]PrereqFinding, []IntegrityFinding) {
 	if h == nil {
 		return nil, nil
 	}
-	prereqs := CheckHostPrerequisites(HostPrereqInput{
-		InstallRoot: h.opts.InstallRoot,
-		Ports:       h.opts.Ports,
-		ExecProbe:   h.opts.ExecProbe,
-	}, h.probes)
-	h.prereqs.Report(prereqs)
-	return prereqs, h.integrity.Check()
+	now := time.Now()
+	if h.now != nil {
+		now = h.now()
+	}
+	if h.lastPrereq.IsZero() || now.Sub(h.lastPrereq) >= hostPrereqInterval {
+		h.lastFinding = CheckHostPrerequisites(HostPrereqInput{
+			InstallRoot: h.opts.InstallRoot,
+			Ports:       h.opts.Ports,
+			ExecProbe:   h.opts.ExecProbe,
+		}, h.probes)
+		h.lastPrereq = now
+		h.prereqs.Report(h.lastFinding)
+	}
+	return h.lastFinding, h.integrity.Check()
 }

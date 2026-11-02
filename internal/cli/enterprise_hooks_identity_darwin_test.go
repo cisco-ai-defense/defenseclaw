@@ -150,3 +150,20 @@ func TestDarwinWatchFailureIsDegradedNotFatal(t *testing.T) {
 		t.Fatalf("lines = %v", got)
 	}
 }
+
+func TestLegacyLedgerRowSurvivesTheFirstFailedRepairAfterUpgrade(t *testing.T) {
+	legacy := enterpriseHookReconcileRow{User: "alice", UserHome: "/Users/alice", Connector: "codex", OK: true}
+	current := enterpriseHookReconcileRow{
+		User: "alice", UserHome: "/Users/alice", SID: "uid:501/guid:ABC", Connector: "codex",
+		OK: false, Error: "repair failed",
+	}
+	merged := mergeProtectedEnterpriseHookTargets([]enterpriseHookReconcileRow{legacy}, []enterpriseHookReconcileRow{current})
+	if len(merged) != 1 || !merged[0].OK || merged[0].SID != current.SID {
+		t.Fatalf("merged = %+v, want the legacy protected row under the current identity", merged)
+	}
+	other := current
+	other.User, other.UserHome = "bob", "/Users/bob"
+	if merged := mergeProtectedEnterpriseHookTargets([]enterpriseHookReconcileRow{legacy}, []enterpriseHookReconcileRow{other}); len(merged) != 0 {
+		t.Fatalf("a legacy row must not protect another user: %+v", merged)
+	}
+}

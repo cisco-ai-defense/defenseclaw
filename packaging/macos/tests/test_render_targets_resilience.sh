@@ -26,6 +26,7 @@ fi
 case "\$2" in
   -list) cat "\${state}/list" ;;
   -read)
+    [[ -f "\${state}/readfail" ]] && exit 56
     name="\${3##*/}"
     case "\$4" in
       NFSHomeDirectory) [[ -f "\${state}/home/\${name}" ]] && printf 'NFSHomeDirectory: %s\n' "\$(cat "\${state}/home/\${name}")" ;;
@@ -43,6 +44,7 @@ EOF
 _rt_run() {
   local dir="$1" err rc
   err="$(PATH="${dir}/bin:${PATH}" SUPPORT_DIR="${dir}/support" \
+    DEFENSECLAW_CONFIG="${dir}/support/etc/config.yaml" \
     DC_ENUMERATOR_TEST_UNPRIVILEGED=1 DC_ENUMERATOR_CONSOLE_USER="" \
     bash "${RT_SH}" 2>&1 >/dev/null)"
   rc=$?
@@ -152,6 +154,24 @@ t_rt_missing_library_is_degraded_not_fatal() {
   assert_contains "${err}" 'installer library missing' "degraded reason"
 }
 
+t_rt_dscl_read_failure_keeps_previous_manifest() {
+  _rt_skip_unless_darwin || return 0
+  local dir result rc err previous
+  dir="$(mktest_tmp)"
+  _rt_fixture "${dir}"
+  mkdir -p "${dir}/support/hook-guardian"
+  previous=$'version: 1\ntargets:\n  - user: "alice"\n    connector: "claudecode"\n'
+  printf '%s' "${previous}" > "${dir}/support/hook-guardian/targets.yaml"
+  printf 'root 0\nalice 501\n' > "${dir}/dscl/list"
+  touch "${dir}/dscl/readfail"
+  result="$(_rt_run "${dir}")"
+  rc="${result%%$'\t'*}"; err="${result#*$'\t'}"
+  assert_status "${rc}" 0 "dscl read failure exit"
+  assert_eq "$(cat "${dir}/support/hook-guardian/targets.yaml")" "${previous%$'\n'}" "previous manifest kept"
+  assert_contains "${err}" 'defenseclaw_degraded' "degraded marker"
+  assert_not_contains "${err}" 'home_missing' "a failed read is not a missing home"
+}
+
 t_rt_filtered_user_skip_once_per_streak() {
   _rt_skip_unless_darwin || return 0
   local dir result err
@@ -173,6 +193,7 @@ t_rt_filtered_user_skip_once_per_streak() {
 
 run_case "rt_marker prints the Go resilience format" t_rt_marker_matches_go_format
 run_case "dscl failure keeps the previous manifest" t_rt_dscl_failure_keeps_previous_manifest
+run_case "dscl read failure keeps the previous manifest" t_rt_dscl_read_failure_keeps_previous_manifest
 run_case "unchanged targets.yaml is re-stamped" t_rt_unchanged_manifest_is_restamped
 run_case "symlinked hook-guardian folder is never followed" t_rt_symlinked_manifest_dir_is_never_followed
 run_case "missing config is degraded, not exit 1" t_rt_missing_config_is_degraded_not_fatal

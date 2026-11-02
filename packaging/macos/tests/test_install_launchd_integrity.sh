@@ -106,6 +106,14 @@ t_prereq_checks_never_fail() {
   out="$(dc_run_prereq_checks "${dir}/gw" "${dir}" 18970 2>&1)" || rc=$?
   assert_status "${rc}" 0 "prerequisite findings never fail the install"
   assert_contains "${out}" 'hook_transport_tools' "the gateway's findings reach the install log"
+
+  # A finding only the exec probe produces must reach the log too.
+  printf '#!/bin/bash\ncase " $* " in *" --exec-probe "*) echo "defenseclaw_prereq check=\\"binary_exec_allowed\\" detail=\\"version probe failed\\"" >&2 ;; esac\nexit 0\n' >"${dir}/gw-probe"
+  chmod 0755 "${dir}/gw-probe"
+  rc=0
+  out="$(dc_run_prereq_checks "${dir}/gw-probe" "${dir}" 18970 2>&1)" || rc=$?
+  assert_status "${rc}" 0 "an exec-probe finding never fails the install"
+  assert_contains "${out}" 'version probe failed' "the exec probe's findings reach the install log"
   rm -rf "${dir}"
 }
 

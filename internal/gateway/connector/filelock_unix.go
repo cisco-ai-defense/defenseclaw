@@ -66,6 +66,14 @@ func withFileLockMode(path string, _ bool, fn func() error) error {
 	}
 	defer lockFile.Close()
 	defer func() {
+		if boundedUserLocks {
+			// Unlink while still holding the lock: a waiter that then wins
+			// the flock finds the path gone or replaced and retries, so two
+			// writers never hold "the" lock on different inodes.
+			_ = os.Remove(lockPath)
+			_ = syscall.Flock(int(lockFile.Fd()), syscall.LOCK_UN)
+			return
+		}
 		_ = syscall.Flock(int(lockFile.Fd()), syscall.LOCK_UN)
 		_ = os.Remove(lockPath)
 	}()
