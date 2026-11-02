@@ -64,6 +64,15 @@ func TestSkillFolderRefsPreservesQuotedPathWithSpaces(t *testing.T) {
 	}
 }
 
+func TestGAP0535SkillFolderRefsExpandsCallerAccount(t *testing.T) {
+	home := t.TempDir()
+	want := filepath.Join(home, ".claude", "skills", "folder")
+	refs := SkillFolderRefs("cat ~fixture/.claude/skills/folder/SKILL.md", home, t.TempDir(), "fixture")
+	if len(refs) != 1 || refs[0].Dir != want || !refs[0].Manifest {
+		t.Fatalf("caller skill path = %#v, want %s", refs, want)
+	}
+}
+
 func TestSkillFolderRefsResolvesParentBeforeSelectingSkill(t *testing.T) {
 	home := t.TempDir()
 	dir := filepath.Join(home, ".claude", "skills", "denied")

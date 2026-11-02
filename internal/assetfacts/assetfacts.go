@@ -332,14 +332,18 @@ type FolderRef struct {
 // into: every distinct path with a "skills/<name>" pair of components, in a command
 // line, a file path or a working folder. "~" and $HOME expand to home and
 // a relative path resolves against cwd.
-func SkillFolderRefs(input any, home, cwd string) []FolderRef {
+func SkillFolderRefs(input any, home, cwd string, caller ...string) []FolderRef {
 	var values []string
 	collectStrings(input, 0, &values)
+	account := ""
+	if len(caller) > 0 {
+		account = caller[0]
+	}
 	seen := map[string]int{}
 	var refs []FolderRef
 	for _, value := range values {
 		for _, token := range commandPathTokens(value) {
-			for _, ref := range skillFolderRefs(token, home, cwd) {
+			for _, ref := range skillFolderRefs(token, home, cwd, account) {
 				if index, ok := seen[ref.Dir]; ok {
 					refs[index].Manifest = refs[index].Manifest || ref.Manifest
 					continue
@@ -469,11 +473,14 @@ func msysDriveSpelling(path string) string {
 	return actionfacts.MSYSDrivePath(path)
 }
 
-func skillFolderRefs(token, home, cwd string) []FolderRef {
+func skillFolderRefs(token, home, cwd, caller string) []FolderRef {
 	if !strings.ContainsAny(token, "/\\") {
 		return nil
 	}
 	path := strings.ReplaceAll(token, "\\", "/")
+	if caller != "" && !strings.ContainsAny(caller, "/\\") && strings.HasPrefix(path, "~"+caller+"/") && home != "" {
+		path = filepath.ToSlash(home) + "/" + strings.TrimPrefix(path, "~"+caller+"/")
+	}
 	for _, prefix := range []string{"~/", "$HOME/", "${HOME}/"} {
 		if strings.HasPrefix(path, prefix) && home != "" {
 			path = filepath.ToSlash(home) + "/" + strings.TrimPrefix(path, prefix)

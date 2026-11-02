@@ -305,7 +305,11 @@ func (a *APIServer) skillFolderAccessDecision(
 	}
 	facts := claimedAssetFactsFromContext(ctx)
 	home := hookActiveHome(ctx)
-	refs := assetfacts.SkillFolderRefs(toolInput, home, cwd)
+	caller := ""
+	if peer, ok := managedHookPeerFromContext(ctx); ok {
+		caller = peer.Name
+	}
+	refs := assetfacts.SkillFolderRefs(toolInput, home, cwd, caller)
 	if len(refs) == 0 {
 		return config.AssetPolicyDecision{}, false
 	}
@@ -327,42 +331,53 @@ func (a *APIServer) skillFolderAccessDecision(
 		if len(cfg.AssetPolicy.Skill.Denied) == 0 {
 			continue
 		}
-		declared := facts.DeclaredFor(ref.Name)
-		claimed := len(declared) > 0
-		if gatewaySkillPathCheck(ref.Dir) == nil {
-			if name := assetfacts.DeclaredSkillName(ref.Dir); name != "" {
-				declared = append(declared, name)
+		claimedNames := facts.DeclaredFor(ref.Name)
+		claimed := len(claimedNames) > 0
+		candidates := []string{ref.Dir}
+		if _, err := os.Lstat(ref.Dir); errors.Is(err, fs.ErrNotExist) {
+			for _, root := range roots {
+				candidate := filepath.Join(root, ref.Name)
+				if candidate != ref.Dir {
+					candidates = append(candidates, candidate)
+				}
 			}
 		}
-		input := config.AssetPolicyInput{
-			TargetType: "skill", Name: ref.Name, DeclaredNames: declared,
-			Connector: connector, SourcePath: ref.Dir, RuntimeSurface: "skill_folder",
-		}
-		if verdict, _ := cfg.AssetListDecision(input); verdict != config.AssetListDeny {
-			// The hook sends at most maxSkills name claims. A folder past
-			// them that this gateway cannot read may declare a denied
-			// name, so it is refused as unproven (fail closed, GAP-1303).
-			if facts.SkillsTruncated && !claimed && skillManifestUnreadable(ref.Dir) {
-				decision := runtimeAssetDisableBlockDecision("skill", ref.Name, connector, "skill_folder", fmt.Sprintf(
-					"skill folder %s: DefenseClaw cannot read its SKILL.md and the hook reported more skill names than it sends, "+
-						"so the folder cannot be shown not to be a denied skill; name fewer skill folders in one call", ref.Dir),
-					"skill-facts-truncated")
-				decision.RegistryStatus = "unknown"
-				a.emitRuntimeSkillAssetPolicyDecision(ctx, decision, connector, hookEvent, skillRuntimeProbe{
+		for _, dir := range candidates {
+			declared := append([]string(nil), claimedNames...)
+			if gatewaySkillPathCheck(dir) == nil {
+				if name := assetfacts.DeclaredSkillName(dir); name != "" {
+					declared = append(declared, name)
+				}
+			}
+			input := config.AssetPolicyInput{
+				TargetType: "skill", Name: ref.Name, DeclaredNames: declared,
+				Connector: connector, SourcePath: dir, RuntimeSurface: "skill_folder",
+			}
+			if verdict, _ := cfg.AssetListDecision(input); verdict == config.AssetListDeny {
+				decision := cfg.EvaluateAssetPolicy(input)
+				probe := skillRuntimeProbe{
 					TargetType: "skill", SkillName: ref.Name, ToolName: toolName,
-					SourcePath: ref.Dir, Surface: "skill_folder", Matched: true,
-				})
+					SourcePath: dir, Surface: "skill_folder", Matched: true,
+				}
+				a.emitRuntimeSkillAssetPolicyDecision(ctx, decision, connector, hookEvent, probe)
 				return decision, true
 			}
-			continue
 		}
-		decision := cfg.EvaluateAssetPolicy(input)
-		probe := skillRuntimeProbe{
-			TargetType: "skill", SkillName: ref.Name, ToolName: toolName,
-			SourcePath: ref.Dir, Surface: "skill_folder", Matched: true,
+		// The hook sends at most maxSkills name claims. A folder past
+		// them that this gateway cannot read may declare a denied
+		// name, so it is refused as unproven (fail closed, GAP-1303).
+		if facts.SkillsTruncated && !claimed && skillManifestUnreadable(ref.Dir) {
+			decision := runtimeAssetDisableBlockDecision("skill", ref.Name, connector, "skill_folder", fmt.Sprintf(
+				"skill folder %s: DefenseClaw cannot read its SKILL.md and the hook reported more skill names than it sends, "+
+					"so the folder cannot be shown not to be a denied skill; name fewer skill folders in one call", ref.Dir),
+				"skill-facts-truncated")
+			decision.RegistryStatus = "unknown"
+			a.emitRuntimeSkillAssetPolicyDecision(ctx, decision, connector, hookEvent, skillRuntimeProbe{
+				TargetType: "skill", SkillName: ref.Name, ToolName: toolName,
+				SourcePath: ref.Dir, Surface: "skill_folder", Matched: true,
+			})
+			return decision, true
 		}
-		a.emitRuntimeSkillAssetPolicyDecision(ctx, decision, connector, hookEvent, probe)
-		return decision, true
 	}
 	return config.AssetPolicyDecision{}, false
 }
