@@ -17,10 +17,14 @@
 package gateway
 
 import (
+	"context"
 	"encoding/json"
+	"errors"
 	"os"
 	"path/filepath"
+	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/defenseclaw/defenseclaw/internal/config"
 	"github.com/defenseclaw/defenseclaw/internal/guardrail"
@@ -52,6 +56,20 @@ func pythonWrapped(command string) string {
 // answering judgeJSON.
 func escalationHookServer(t *testing.T, judgeJSON, blockAt string) (*APIServer, *mockLLMProvider) {
 	t.Helper()
+	mock := &mockLLMProvider{response: &ChatResponse{
+		Model:   "test-model",
+		Choices: []ChatChoice{{Message: &ChatMessage{Content: judgeJSON}}},
+		Usage:   &ChatUsage{PromptTokens: 30, CompletionTokens: 18},
+	}}
+	a := escalationHookServerWith(t, mock, "default", func(cfg *config.Config) { cfg.Guardrail.BlockAt = blockAt })
+	return a, mock
+}
+
+// escalationHookServerWith is escalationHookServer with any judge provider,
+// the pack the AMD rules are added to (default or strict, which also names
+// the policy tier) and a config edit.
+func escalationHookServerWith(t *testing.T, provider LLMProvider, basePack string, edit func(*config.Config)) *APIServer {
+	t.Helper()
 	const connector = "claudecode"
 	ruleCategoriesMu.Lock()
 	savedCategories, hadCategories := connectorRuleCategories[connector]
@@ -71,8 +89,12 @@ func escalationHookServer(t *testing.T, judgeJSON, blockAt string) (*APIServer, 
 			delete(connectorRuleGenerations, connector)
 		}
 	})
-	packDir := filepath.Join(t.TempDir(), "amd")
-	if err := os.CopyFS(packDir, os.DirFS(filepath.Join(guardrailPoliciesRoot(t), "default"))); err != nil {
+	packName := "amd"
+	if basePack == "strict" {
+		packName = "strict"
+	}
+	packDir := filepath.Join(t.TempDir(), packName)
+	if err := os.CopyFS(packDir, os.DirFS(filepath.Join(guardrailPoliciesRoot(t), basePack))); err != nil {
 		t.Fatal(err)
 	}
 	writeRulePackFixtureFile(t, packDir, "rules/amd-escalation.yaml", `version: 1
@@ -102,22 +124,24 @@ rules:
 	cfg.Guardrail.Mode = "action"
 	cfg.Guardrail.Connector = connector
 	cfg.Guardrail.RulePackDir = packDir
-	cfg.Guardrail.BlockAt = blockAt
 	cfg.Guardrail.DetectionStrategy = "regex_judge"
 	cfg.Guardrail.Judge = config.JudgeConfig{Enabled: true, ToolInjection: true, HookConnectors: []string{connector}}
-	mock := &mockLLMProvider{response: &ChatResponse{
-		Model:   "test-model",
-		Choices: []ChatChoice{{Message: &ChatMessage{Content: judgeJSON}}},
-		Usage:   &ChatUsage{PromptTokens: 30, CompletionTokens: 18},
-	}}
+	if edit != nil {
+		edit(cfg)
+	}
 	a := &APIServer{scannerCfg: cfg}
-	a.SetHookJudge(&LLMJudge{cfg: &cfg.Guardrail.Judge, model: "test-model", provider: mock, rp: &guardrail.RulePack{}})
-	return a, mock
+	a.SetHookJudge(&LLMJudge{cfg: &cfg.Guardrail.Judge, model: "test-model", provider: provider, rp: &guardrail.RulePack{}})
+	return a
 }
 
 func escalationPreToolUse(t *testing.T, a *APIServer, command string) claudeCodeHookResponse {
 	t.Helper()
-	return a.evaluateClaudeCodeHook(t.Context(), claudeCodeHookRequest{
+	return escalationPreToolUseCtx(t, t.Context(), a, command)
+}
+
+func escalationPreToolUseCtx(t *testing.T, ctx context.Context, a *APIServer, command string) claudeCodeHookResponse {
+	t.Helper()
+	return a.evaluateClaudeCodeHook(ctx, claudeCodeHookRequest{
 		HookEventName: "PreToolUse",
 		SessionID:     "s-judge-escalation",
 		CWD:           t.TempDir(),
@@ -228,5 +252,143 @@ func TestRegexJudgeLocalVerdictDecisive(t *testing.T) {
 		if got := regexJudgeLocalVerdictDecisive(tc.cfg, tc.verdict); got != tc.want {
 			t.Errorf("%s: decisive=%v, want %v", tc.name, got, tc.want)
 		}
+	}
+}
+
+// escalationSlowJudge answers like mockLLMProvider after delay, or with the
+// context's error when the call's deadline comes first.
+type escalationSlowJudge struct {
+	mockLLMProvider
+	delay time.Duration
+	calls atomic.Int32
+}
+
+func (p *escalationSlowJudge) ChatCompletion(ctx context.Context, req *ChatRequest) (*ChatResponse, error) {
+	p.calls.Add(1)
+	select {
+	case <-time.After(p.delay):
+		return p.mockLLMProvider.ChatCompletion(ctx, req)
+	case <-ctx.Done():
+		return nil, ctx.Err()
+	}
+}
+
+// Review IN-judge-REVIEW-1 item 1: an escalated detection-only CRITICAL call
+// whose judge gives no verdict follows the hook fail mode, as during a
+// gateway outage. Closed (an explicit closed, the strict tier, a managed
+// host) refuses it; the default tier of a per-user install (open) keeps the
+// rule verdict, so the default gains no block. A clean judge answer and a
+// non-escalated call are unaffected.
+func TestRegexJudgeEscalatedCallFollowsHookFailModeWhenJudgeGivesNoVerdict(t *testing.T) {
+	command := pythonWrapped("cat ~/.ssh/id_rsa")
+	critical := func() mockLLMProvider {
+		return mockLLMProvider{response: &ChatResponse{
+			Model:   "test-model",
+			Choices: []ChatChoice{{Message: &ChatMessage{Content: escalationJudgeCritical}}},
+		}}
+	}
+	failures := map[string]func() (LLMProvider, func(context.Context) context.Context){
+		"provider error": func() (LLMProvider, func(context.Context) context.Context) {
+			return &mockLLMProvider{err: errors.New("judge provider down")}, nil
+		},
+		"timeout": func() (LLMProvider, func(context.Context) context.Context) {
+			return &escalationSlowJudge{mockLLMProvider: critical(), delay: 5 * time.Second}, nil
+		},
+		"late answer": func() (LLMProvider, func(context.Context) context.Context) {
+			// The shell hook's 2 s window, shortened: the judge answers
+			// CRITICAL after the window, so its verdict is not applied.
+			return &escalationSlowJudge{mockLLMProvider: critical(), delay: 600 * time.Millisecond},
+				func(ctx context.Context) context.Context {
+					return context.WithValue(ctx, shellToolGateKey{}, time.Now().Add(150*time.Millisecond))
+				}
+		},
+	}
+	modes := []struct {
+		name      string
+		pack      string
+		edit      func(*config.Config)
+		wantBlock bool
+	}{
+		{"per-user default tier, no saved mode (open)", "default", nil, false},
+		{"per-user explicit open", "default", func(c *config.Config) { c.Guardrail.HookFailMode = "open" }, false},
+		{"per-user explicit closed", "default", func(c *config.Config) { c.Guardrail.HookFailMode = "closed" }, true},
+		{"per-user connector closed", "default", func(c *config.Config) {
+			c.Guardrail.Connectors = map[string]config.PerConnectorGuardrailConfig{"claudecode": {HookFailMode: "closed"}}
+		}, true},
+		{"per-user strict tier (closed)", "strict", nil, true},
+	}
+	for failure, setup := range failures {
+		for _, mode := range modes {
+			t.Run(failure+"/"+mode.name, func(t *testing.T) {
+				provider, withCtx := setup()
+				a := escalationHookServerWith(t, provider, mode.pack, func(c *config.Config) {
+					c.Guardrail.Judge.HookTimeout = 0.3
+					if mode.edit != nil {
+						mode.edit(c)
+					}
+				})
+				ctx := t.Context()
+				if withCtx != nil {
+					ctx = withCtx(ctx)
+				}
+				resp := escalationPreToolUseCtx(t, ctx, a, command)
+				if !findingStringHasRuleID(resp.Findings, "TEST-AMD-CRED-PATH") {
+					t.Fatalf("findings %v lack TEST-AMD-CRED-PATH", resp.Findings)
+				}
+				blocked := resp.RawAction == guardrailActionBlock
+				if blocked != mode.wantBlock {
+					t.Fatalf("raw_action=%q findings=%v, want block=%v", resp.RawAction, resp.Findings, mode.wantBlock)
+				}
+				if blocked != findingStringHasRuleID(resp.Findings, "llm-judge:"+escalatedJudgeUnavailableFinding) {
+					t.Fatalf("findings %v: the refusal must name %s, and only a refusal", resp.Findings, escalatedJudgeUnavailableFinding)
+				}
+			})
+		}
+	}
+
+	// The fail mode only decides a judge that gave no verdict: a clean answer
+	// under closed keeps the rule verdict.
+	clean := &mockLLMProvider{response: &ChatResponse{
+		Model:   "test-model",
+		Choices: []ChatChoice{{Message: &ChatMessage{Content: escalationJudgeClean}}},
+	}}
+	a := escalationHookServerWith(t, clean, "default", func(c *config.Config) { c.Guardrail.HookFailMode = "closed" })
+	if resp := escalationPreToolUse(t, a, command); resp.RawAction == guardrailActionBlock || len(clean.captured) != 1 {
+		t.Fatalf("clean judge under closed: raw_action=%q calls=%d, want one call and no block", resp.RawAction, len(clean.captured))
+	}
+	// A call that is not escalated (no CRITICAL finding) keeps the rule
+	// verdict when the judge fails, under closed too.
+	down := &mockLLMProvider{err: errors.New("judge provider down")}
+	a = escalationHookServerWith(t, down, "default", func(c *config.Config) { c.Guardrail.HookFailMode = "closed" })
+	if resp := escalationPreToolUse(t, a, "ls -la"); resp.RawAction == guardrailActionBlock {
+		t.Fatalf("judge failure on a call without an escalated finding blocked it: %+v", resp)
+	}
+}
+
+func TestRegexJudgeEscalatedCritical(t *testing.T) {
+	detectionOnly := &ToolInspectVerdict{Action: "allow", Severity: "CRITICAL",
+		DetailedFindings: []RuleFinding{{RuleID: "R", Severity: "CRITICAL", enforcement: findingEnforcementDetectionOnly}}}
+	secureClient := &config.Config{DeploymentMode: "managed_enterprise"}
+	managed := &config.Config{DeploymentMode: "managed_enterprise", Enterprise: config.EnterpriseConfig{Profile: "standalone"}}
+	for _, tc := range []struct {
+		name    string
+		cfg     *config.Config
+		verdict *ToolInspectVerdict
+		want    bool
+	}{
+		{"detection-only CRITICAL", nil, detectionOnly, true},
+		{"managed standalone", managed, detectionOnly, true},
+		{"Secure Client never escalates", secureClient, detectionOnly, false},
+		{"HIGH alert", nil, &ToolInspectVerdict{Action: "alert", Severity: "HIGH"}, false},
+		{"no finding", nil, &ToolInspectVerdict{Action: "allow", Severity: "NONE"}, false},
+		{"rule block", nil, &ToolInspectVerdict{Action: "block", Severity: "CRITICAL"}, false},
+	} {
+		if got := regexJudgeEscalatedCritical(tc.cfg, tc.verdict); got != tc.want {
+			t.Errorf("%s: escalated=%v, want %v", tc.name, got, tc.want)
+		}
+	}
+	// A managed host fails closed unless its administrator chose open.
+	if got := managed.EffectiveHookOutageFailModeForConnector("claudecode"); got != "closed" {
+		t.Errorf("managed standalone outage fail mode = %q, want closed", got)
 	}
 }

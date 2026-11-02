@@ -1580,7 +1580,7 @@ func meetMemberJudgeCurrent(ctx context.Context, connector string, current *Tool
 	}
 }
 
-func (a *APIServer) runHookJudgeSingle(ctx context.Context, strategyDirection, judgeDirection, connector, content, toolName string, current *ToolInspectVerdict) *ScanVerdict {
+func (a *APIServer) runHookJudgeSingle(ctx context.Context, strategyDirection, judgeDirection, connector, content, toolName string, current *ToolInspectVerdict) (out *ScanVerdict) {
 	if content == "" {
 		return nil
 	}
@@ -1620,6 +1620,26 @@ func (a *APIServer) runHookJudgeSingle(ctx context.Context, strategyDirection, j
 		fmt.Fprintf(os.Stderr, "[inspect] hook judge skipped (deadline too short) connector=%s direction=%s; keeping regex/AID verdict\n",
 			connector, strategyDirection)
 		return nil
+	}
+
+	if strategy == "regex_judge" && regexJudgeEscalatedCritical(cfg, current) &&
+		sandboxHookMode(ctx, connector, cfg.HookModeForConnector(connector)) == "action" &&
+		cfg.EffectiveHookOutageFailModeForConnector(connector) == "closed" {
+		// The call is here only because its CRITICAL finding cannot block on
+		// its own: the judge is what decides it. When the judge gives no
+		// verdict (an error, a timeout, a late answer, no capacity or hook
+		// budget left), the call follows the connector's hook fail mode, as
+		// for a gateway outage: closed (strict tier, managed hosts, or an
+		// explicit closed) refuses it; open (the default and permissive
+		// tiers of a per-user install) keeps the rule verdict with the
+		// fallback warning and metric below. Secure Client never escalates.
+		defer func() {
+			if out == nil {
+				fmt.Fprintf(os.Stderr, "[inspect] hook judge gave no verdict on an escalated CRITICAL finding connector=%s direction=%s; hook_fail_mode closed: refusing\n",
+					connector, strategyDirection)
+				out = escalatedJudgeFailClosedVerdict()
+			}
+		}()
 	}
 
 	timeout := hookJudgeTimeout(cfg)
@@ -1744,6 +1764,33 @@ func regexJudgeLocalVerdictDecisive(cfg *config.Config, current *ToolInspectVerd
 		severity = HighestSeverity(enforceableRuleFindings(current.DetailedFindings))
 	}
 	return severityRank[strings.ToUpper(severity)] >= severityRank["CRITICAL"]
+}
+
+// regexJudgeEscalatedCritical reports a call that reaches the judge under
+// regex_judge only because its CRITICAL findings cannot enforce
+// (regexJudgeLocalVerdictDecisive): before that rule the call was decisive
+// and skipped the judge.
+func regexJudgeEscalatedCritical(cfg *config.Config, current *ToolInspectVerdict) bool {
+	if current == nil || (cfg != nil && cfg.SecureClientIntegration()) || regexJudgeLocalVerdictDecisive(cfg, current) {
+		return false
+	}
+	return severityRank[strings.ToUpper(current.Severity)] >= severityRank["CRITICAL"]
+}
+
+// escalatedJudgeUnavailableFinding names the refusal of an escalated call
+// whose judge gave no verdict under hook_fail_mode closed.
+const escalatedJudgeUnavailableFinding = "JUDGE-UNAVAILABLE-ESCALATED"
+
+func escalatedJudgeFailClosedVerdict() *ScanVerdict {
+	return &ScanVerdict{
+		Action:   guardrailActionBlock,
+		Severity: "CRITICAL",
+		Reason: "judge-unavailable: a CRITICAL finding the rules cannot prove needs the LLM judge, " +
+			"which gave no verdict; hook_fail_mode is closed",
+		Findings:       []string{escalatedJudgeUnavailableFinding},
+		Scanner:        "llm-judge",
+		ScannerSources: []string{"llm-judge"},
+	}
 }
 
 // meetDecisionConfirm is the decisionConfirm of a profile meet after member
