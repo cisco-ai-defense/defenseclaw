@@ -19,6 +19,8 @@ package gateway
 import (
 	"context"
 	"fmt"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -32,10 +34,23 @@ import (
 )
 
 func TestEvaluateClaudeCodeHook_CapturesExactEventContentSentToInspection(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"is_safe":true,"action":"Allow"}`))
+	}))
+	t.Cleanup(server.Close)
+
 	cfg := &config.Config{}
 	cfg.Guardrail.Mode = "action"
 	cfg.Guardrail.Connector = "claudecode"
-	api := &APIServer{scannerCfg: cfg}
+	api := &APIServer{
+		scannerCfg: cfg,
+		ciscoInspector: &CiscoInspectClient{
+			apiKey:   "test-key",
+			endpoint: server.URL,
+			client:   server.Client(),
+		},
+	}
 
 	for _, hookEvent := range []string{
 		"TaskCreated", "TaskCompleted", "TeammateIdle", "PreCompact", "PostCompact",
@@ -54,6 +69,55 @@ func TestEvaluateClaudeCodeHook_CapturesExactEventContentSentToInspection(t *tes
 				t.Fatalf("InspectedContent = %q, want %q", resp.InspectedContent, want)
 			}
 		})
+	}
+}
+
+func TestEvaluateClaudeCodeHook_LocalInspectionDoesNotClaimAIDSubmission(t *testing.T) {
+	cfg := &config.Config{}
+	cfg.Guardrail.Mode = "action"
+	cfg.Guardrail.Connector = "claudecode"
+	api := &APIServer{scannerCfg: cfg}
+
+	resp := api.evaluateClaudeCodeHook(t.Context(), claudeCodeHookRequest{
+		HookEventName: "Notification",
+		Message:       "local PII finding alice@example.com",
+	})
+
+	if resp.InspectedContentPresent || resp.InspectedContent != "" {
+		t.Fatalf("local-only inspection reported AI Defense content: %+v", resp)
+	}
+}
+
+func TestEvaluateClaudeCodeHook_AIDSubmissionDoesNotRequireVerdict(t *testing.T) {
+	var calls int
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		calls++
+		http.Error(w, "unavailable", http.StatusServiceUnavailable)
+	}))
+	t.Cleanup(server.Close)
+
+	cfg := &config.Config{}
+	cfg.Guardrail.Mode = "action"
+	cfg.Guardrail.Connector = "claudecode"
+	api := &APIServer{
+		scannerCfg: cfg,
+		ciscoInspector: &CiscoInspectClient{
+			apiKey:   "test-key",
+			endpoint: server.URL,
+			client:   server.Client(),
+		},
+	}
+
+	resp := api.evaluateClaudeCodeHook(t.Context(), claudeCodeHookRequest{
+		HookEventName: "Notification",
+		Message:       "submitted event content",
+	})
+
+	if calls != 1 {
+		t.Fatalf("AI Defense calls = %d, want 1", calls)
+	}
+	if !resp.InspectedContentPresent || resp.InspectedContent != "submitted event content" {
+		t.Fatalf("submitted content provenance was lost after nil verdict: %+v", resp)
 	}
 }
 
