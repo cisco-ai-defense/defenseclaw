@@ -6,12 +6,17 @@
 package hookexec
 
 import (
+	"encoding/base64"
+	"encoding/binary"
 	"path/filepath"
 	"strings"
 	"time"
+	"unicode/utf16"
 	"unsafe"
 
 	"golang.org/x/sys/windows"
+
+	"github.com/defenseclaw/defenseclaw/internal/agentprocess"
 )
 
 // processStartTimeKnown reports a system that names the process start.
@@ -22,16 +27,17 @@ const processStartTimeKnown = true
 // stable launcher.
 const hookWrapperHops = 2
 
-// maxHookWrapperLead is how much earlier than the process it launched a
-// wrapper may have started and still count as part of the same call; an
-// older one is a long-running shell, not a per-call wrapper.
+// maxHookWrapperLead bounds the time a verified one-call wrapper can add to
+// the hook's start. A script that starts several hooks is never a wrapper.
 const maxHookWrapperLead = 10 * time.Second
 
-// hookWrapperProcess is one launching process of the hook: its image and
-// when the system created it.
+// hookWrapperProcess is one launching process of the hook: its image, start
+// and command line. Only a recognized one-call PowerShell bridge contributes
+// its start to the hook budget.
 type hookWrapperProcess struct {
 	image   string
 	created time.Time
+	argv    []string
 }
 
 func processStartTime(time.Time) (time.Time, bool) {
@@ -63,9 +69,49 @@ func callStartBehindWrappers(created time.Time, chain []hookWrapperProcess, powe
 			start.Sub(parent.created) > maxHookWrapperLead {
 			break
 		}
+		if powerShell != "" && strings.EqualFold(filepath.Clean(parent.image), filepath.Clean(powerShell)) &&
+			!oneCallPowerShellBridge(parent.argv) {
+			break
+		}
 		start = parent.created
 	}
 	return start
+}
+
+// oneCallPowerShellBridge recognizes the PowerShell command emitted for one
+// registered hook call. A PowerShell -File driver may launch many hooks from
+// the same process; charging every call for that process's age made new calls
+// fail immediately after the first few and recover at maxHookWrapperLead.
+// An unreadable or unfamiliar command line does not shorten this call's
+// budget. The hook's own process creation still bounds it.
+func oneCallPowerShellBridge(argv []string) bool {
+	if len(argv) != 6 || !strings.EqualFold(argv[1], "-NoLogo") ||
+		!strings.EqualFold(argv[2], "-NoProfile") || !strings.EqualFold(argv[3], "-NonInteractive") ||
+		!strings.EqualFold(argv[4], "-EncodedCommand") || len(argv[5]) > 64<<10 {
+		return false
+	}
+	data, err := base64.StdEncoding.DecodeString(argv[5])
+	if err != nil || len(data) == 0 || len(data)&1 != 0 {
+		return false
+	}
+	units := make([]uint16, len(data)/2)
+	for i := range units {
+		units[i] = binary.LittleEndian.Uint16(data[i*2:])
+	}
+	script := string(utf16.Decode(units))
+	const nativePrefix = "$ErrorActionPreference='Stop'; $env:NoDefaultCurrentDirectoryInExePath='1'; "
+	if strings.HasPrefix(script, nativePrefix) {
+		if strings.HasSuffix(script, "; exit $hookProcess.ExitCode") {
+			return strings.Contains(script, "$hookProcess=[System.Diagnostics.Process]::Start($hookStart)") &&
+				strings.Contains(script, "$hookProcess.WaitForExit()") ||
+				strings.Contains(script, "Start-Process -FilePath") && strings.Contains(script, " -Wait -PassThru")
+		}
+		return strings.HasSuffix(script, "; exit $LASTEXITCODE") && strings.Contains(script, "defenseclaw-hook")
+	}
+	// Cursor's registered adapter reads stdin itself and invokes one adapter
+	// script. It has no explicit exit line but PowerShell exits after the call.
+	return strings.HasPrefix(script, "$reader=[IO.StreamReader]::new([Console]::OpenStandardInput(),") &&
+		strings.Contains(script, "$payload | & ") && strings.Contains(strings.ToLower(script), "cursor-hook.ps1")
 }
 
 // hookWrapperImage reports a wrapper the registrations launch the hook
@@ -114,7 +160,11 @@ func hookWrapperChain() []hookWrapperProcess {
 		if err != nil {
 			break
 		}
-		chain = append(chain, hookWrapperProcess{image: image, created: created})
+		var argv []string
+		if strings.EqualFold(filepath.Base(image), "powershell.exe") {
+			argv, _ = agentprocess.CommandLineForPID(int(parentID))
+		}
+		chain = append(chain, hookWrapperProcess{image: image, created: created, argv: argv})
 		child = parent
 	}
 	return chain
