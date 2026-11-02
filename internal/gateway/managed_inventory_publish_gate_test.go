@@ -496,8 +496,8 @@ func TestEmitEndpointInventoryGateEmptyPerConnectorMCPStillPublishes(t *testing.
 	// fails loudly if the fixture ever stops being empty.
 	cfg := &config.Config{Claw: config.ClawConfig{Mode: config.ClawMode("codex")}}
 	registry := connector.NewRegistry()
-	if entries := perConnectorMCPEntries(cfg, registry); len(entries) != 0 {
-		t.Fatalf("fixture is not empty: %d per-connector MCP entries", len(entries))
+	if entries, partial := perConnectorMCPEntriesWithStatus(cfg, registry); partial || len(entries) != 0 {
+		t.Fatalf("fixture is not empty: %d per-connector MCP entries, partial=%t", len(entries), partial)
 	}
 
 	// Both cycles carry a complete report: only such a cycle stamps the bundle
