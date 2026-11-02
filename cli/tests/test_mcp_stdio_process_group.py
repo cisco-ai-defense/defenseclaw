@@ -35,6 +35,8 @@ from defenseclaw.config import MCPScannerConfig, MCPServerEntry
 from defenseclaw.scanner.mcp import MCPScannerWrapper
 
 _STDIO_SERVER = """import json, os, signal, subprocess, sys, time
+if os.environ.get('MCP_FIXTURE_IGNORE_TERM'):
+    signal.signal(signal.SIGTERM, signal.SIG_IGN)
 child = subprocess.Popen(
     [sys.executable, '-c', 'import signal, time; signal.signal(signal.SIGTERM, signal.SIG_IGN); time.sleep(300)'],
     stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
@@ -267,20 +269,35 @@ def test_local_stdio_scan_allows_long_valid_session(
                 os.kill(child_pid, signal.SIGKILL)
 
 
+def _inject_linux_worker_signal_error(monkeypatch: pytest.MonkeyPatch, mcp: object) -> None:
+    perl_signal = "sub signal_child { kill $_[0], $_[1] }"
+    assert perl_signal in mcp._MCP_LINUX_PERL_WORKER
+    monkeypatch.setattr(
+        mcp, "_MCP_LINUX_PERL_WORKER",
+        mcp._MCP_LINUX_PERL_WORKER.replace(perl_signal, "sub signal_child { $! = 1; 0 }"),
+    )
+    monkeypatch.setattr(
+        mcp, "_MCP_LINUX_WORKER_SCRIPT",
+        "kill() { return 1; }\n" + mcp._MCP_LINUX_WORKER_SCRIPT,
+    )
+
+
 @pytest.mark.skipif(os.name == "nt", reason="Windows uses a Job Object")
-def test_group_signal_eperm_warns_once_and_keeps_scan_result(
+def test_cleanup_signal_error_warns_once_and_keeps_scan_result(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture,
 ) -> None:
     mcpscanner = pytest.importorskip("mcpscanner")
     from defenseclaw.scanner import mcp
     from mcpscanner.core.models import AnalyzerEnum
 
-    # Run the normal guardian code with group signals unavailable.
-    monkeypatch.setattr(
-        mcp, "_MCP_POSIX_GUARDIAN_SCRIPT",
-        "kill() { printf 'injected EPERM\\n'; return 1; }\n"
-        + mcp._MCP_POSIX_GUARDIAN_SCRIPT,
-    )
+    if sys.platform == "linux":
+        _inject_linux_worker_signal_error(monkeypatch, mcp)
+    else:
+        monkeypatch.setattr(
+            mcp, "_MCP_POSIX_GUARDIAN_SCRIPT",
+            "kill() { printf 'injected EPERM\\n'; return 1; }\n"
+            + mcp._MCP_POSIX_GUARDIAN_SCRIPT,
+        )
     entry, child_pid_file = _fixture_entry(tmp_path, monkeypatch)
     wrapper = MCPScannerWrapper(MCPScannerConfig(analyzers="yara"))
     try:
@@ -295,13 +312,13 @@ def test_group_signal_eperm_warns_once_and_keeps_scan_result(
                 time.sleep(0.02)
         warnings = [m for m in caplog.messages if "a child may still be running" in m]
         assert len(warnings) == 1
-        assert "fixture" in warnings[0] and "EPERM" in warnings[0]
+        assert "fixture" in warnings[0]
         child_pid = int(child_pid_file.read_text(encoding="ascii"))
         if sys.platform == "linux":
-            # The child outlived the exited server, so the scanner adopted
-            # it as subreaper and ended it although group signals failed.
+            assert "cleanup signal failed" in warnings[0]
             assert not _running(child_pid)
         else:
+            assert "EPERM" in warnings[0]
             assert _running(child_pid)
     finally:
         for pid_file in (child_pid_file, tmp_path / "server.pid"):
@@ -329,6 +346,46 @@ def test_control_close_error_cannot_retain_child_or_reaper(
 
     before_reapers = reaper_count()
     before_watchers = watcher_count()
+    if sys.platform == "linux":
+        entry.env["MCP_FIXTURE_DELAY"] = "0.5"
+        if write_fails:
+            _inject_linux_worker_signal_error(monkeypatch, mcp)
+        worker_pids: list[int] = []
+
+        def observe_worker() -> None:
+            server_file = tmp_path / "server.pid"
+            deadline = time.monotonic() + 5
+            while not server_file.exists() and time.monotonic() < deadline:
+                time.sleep(0.01)
+            if server_file.exists():
+                server_pid = int(server_file.read_text(encoding="ascii"))
+                try:
+                    stat = Path(f"/proc/{server_pid}/stat").read_text(encoding="ascii")
+                    worker_pids.append(int(stat.rsplit(") ", 1)[1].split()[1]))
+                except (FileNotFoundError, IndexError, ValueError):
+                    pass
+
+        observer = threading.Thread(target=observe_worker)
+        observer.start()
+        try:
+            assert wrapper._scan_local(
+                mcpscanner.Scanner(mcpscanner.Config()), entry, [AnalyzerEnum.YARA],
+            ) == []
+            observer.join(timeout=5)
+            assert not observer.is_alive() and worker_pids
+            child_pid = int(child_pid_file.read_text(encoding="ascii"))
+            assert not _running(child_pid)
+            assert not _running(worker_pids[0])
+            assert reaper_count() <= before_reapers
+            assert watcher_count() <= before_watchers
+        finally:
+            observer.join(timeout=5)
+            for pid_file in (child_pid_file, tmp_path / "server.pid"):
+                if pid_file.exists():
+                    pid = int(pid_file.read_text(encoding="ascii"))
+                    if _running(pid):
+                        os.kill(pid, signal.SIGKILL)
+        return
     original_pipe, original_write, original_close = os.pipe, os.write, os.close
     control_fd: int | None = None
     close_failed = False
@@ -422,6 +479,14 @@ def test_failed_launch_close_error_reaps_guardian_synchronously(
             await sdk._create_platform_compatible_process(
                 "/cf499/nonexistent-mcp-server", [], errlog=subprocess.DEVNULL,
             )
+
+    if sys.platform == "linux":
+        children_file = Path(f"/proc/{os.getpid()}/task/{os.getpid()}/children")
+        before = children_file.read_text(encoding="ascii")
+        with pytest.raises(FileNotFoundError):
+            asyncio.run(launch())
+        assert children_file.read_text(encoding="ascii") == before
+        return
 
     try:
         with monkeypatch.context() as fault:
@@ -560,3 +625,101 @@ def test_local_stdio_scan_ends_short_helper_descendant(tmp_path: Path) -> None:
             child_pid = int(pidfile.read_text(encoding="ascii"))
             if _running(child_pid):
                 os.kill(child_pid, signal.SIGKILL)
+
+
+@pytest.mark.skipif(sys.platform != "linux", reason="Linux child subreaper scope")
+@pytest.mark.parametrize("mode", ["direct", "reparented"])
+@pytest.mark.parametrize("worker_mode", ["preferred", "fallback", "fallback-stuck", "relative-path"])
+def test_local_stdio_scan_keeps_concurrent_unrelated_child(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, mode: str, worker_mode: str,
+) -> None:
+    """A child started by another scanner thread stays outside this scan."""
+    mcpscanner = pytest.importorskip("mcpscanner")
+    from defenseclaw.scanner import mcp
+    from mcpscanner.core.models import AnalyzerEnum
+
+    if worker_mode in {"fallback", "fallback-stuck"}:
+        original_access = os.access
+        monkeypatch.setattr(
+            mcp.os, "access",
+            lambda path, mode: False if path == "/usr/bin/perl" else original_access(path, mode),
+        )
+    entry, child_pid_file = _fixture_entry(
+        tmp_path, monkeypatch, stuck=worker_mode == "fallback-stuck",
+    )
+    if worker_mode == "relative-path":
+        monkeypatch.setenv("PATH", f".{os.pathsep}{os.environ['PATH']}")
+    entry.env["MCP_FIXTURE_DELAY"] = "1"
+    if worker_mode == "fallback-stuck":
+        entry.env["MCP_FIXTURE_IGNORE_TERM"] = "1"
+    entry.env["PERL5OPT"] = "-MNonexistent"
+    server_pid_file = tmp_path / "server.pid"
+    outside_pid_file = tmp_path / "outside.pid"
+    outside: list[subprocess.Popen[bytes]] = []
+    errors: list[BaseException] = []
+
+    def start_unrelated() -> None:
+        try:
+            deadline = time.monotonic() + 5
+            while not server_pid_file.exists() and time.monotonic() < deadline:
+                time.sleep(0.01)
+            assert server_pid_file.exists()
+            if mode == "direct":
+                process = subprocess.Popen(
+                    [sys.executable, "-c", "import time; time.sleep(30)"],
+                    stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+                    stderr=subprocess.DEVNULL, start_new_session=True,
+                )
+                outside.append(process)
+                outside_pid_file.write_text(str(process.pid), encoding="ascii")
+            else:
+                parent = subprocess.Popen(
+                    [sys.executable, "-c",
+                     "import os,sys,time; p=os.fork(); "
+                     "os._exit(0) if p else None; "
+                     "open(sys.argv[1], 'w').write(str(os.getpid())); time.sleep(30)",
+                     str(outside_pid_file)],
+                    stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+                    stderr=subprocess.DEVNULL, start_new_session=True,
+                )
+                outside.append(parent)
+                parent.wait(timeout=3)
+        except BaseException as exc:
+            errors.append(exc)
+
+    thread = threading.Thread(target=start_unrelated)
+    thread.start()
+    try:
+        wrapper = MCPScannerWrapper(MCPScannerConfig(analyzers="yara"))
+        assert wrapper._scan_local(
+            mcpscanner.Scanner(mcpscanner.Config()), entry, [AnalyzerEnum.YARA],
+        ) == []
+        thread.join(timeout=5)
+        assert not thread.is_alive() and not errors, errors
+        outside_pid = int(outside_pid_file.read_text(encoding="ascii"))
+        assert _running(outside_pid), "concurrent unrelated child ended during scan"
+        for pid_file in (child_pid_file, server_pid_file):
+            pid = int(pid_file.read_text(encoding="ascii"))
+            deadline = time.monotonic() + 3
+            while _running(pid) and time.monotonic() < deadline:
+                time.sleep(0.02)
+            assert not _running(pid), f"scanned process {pid} survived the scan"
+    finally:
+        thread.join(timeout=5)
+        for pid_file in (child_pid_file, server_pid_file):
+            if pid_file.exists():
+                pid = int(pid_file.read_text(encoding="ascii"))
+                if _running(pid):
+                    os.kill(pid, signal.SIGKILL)
+        if outside_pid_file.exists():
+            outside_pid = int(outside_pid_file.read_text(encoding="ascii"))
+            if _running(outside_pid):
+                os.kill(outside_pid, signal.SIGKILL)
+            try:
+                os.waitpid(outside_pid, os.WNOHANG)
+            except ChildProcessError:
+                pass
+        for process in outside:
+            if process.poll() is None:
+                process.kill()
+            process.wait(timeout=3)

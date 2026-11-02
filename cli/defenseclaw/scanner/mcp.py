@@ -578,6 +578,99 @@ _MCP_POSIX_PROCESS_FACTORY_LOCK = threading.Lock()
 _MCP_POSIX_GROUP_GRACE_SECONDS = 0.25
 _MCP_POSIX_SESSION_CLEANUP_SECONDS = 3.0
 _MCP_POSIX_SCANNER_PGID = os.getpgrp() if os.name != "nt" else -1
+_MCP_LINUX_PRCTL_SYSCALL = (
+    {"x86_64": 157, "aarch64": 167}.get(os.uname().machine)
+    if sys.platform == "linux" else None
+)
+_MCP_LINUX_PERL_WORKER = r'''
+my $prctl_syscall = shift @ARGV;
+$prctl_syscall =~ /\A(157|167)\z/ or die "child tracking unavailable\n";
+$prctl_syscall = 0 + $1;
+syscall($prctl_syscall, 36, 1, 0, 0, 0) == 0 or die "child tracking unavailable: $!\n";
+my $path = $ENV{PATH} // '/usr/bin:/bin';
+$path =~ /\A([^\0]*)\z/s or die "server path unavailable\n";
+$ENV{PATH} = $1;
+my $server = fork();
+defined $server or die "server fork failed: $!\n";
+if ($server == 0) {
+    my $command = shift @ARGV;
+    $command =~ /\A([^\0]*)\z/s or die "server command unavailable\n";
+    $command = $1;
+    @ARGV = map { /\A([^\0]*)\z/s ? $1 : die "server argument unavailable\n" } @ARGV;
+    exec { $command } $command, @ARGV;
+    die "server launch failed: $!\n";
+}
+close STDIN;
+$SIG{TERM} = sub {
+    CORE::kill 'KILL', $server if grep { $_ == $server } children();
+};
+my $status;
+while (1) {
+    my $done = waitpid($server, 0);
+    if ($done == $server) { $status = $?; last; }
+    if ($done == -1 && !$!{EINTR}) { $status = 1 << 8; last; }
+}
+sub children {
+    open my $stream, '<', "/proc/$$/task/$$/children" or return ();
+    my $line = <$stream> // '';
+    close $stream;
+    return map { /\A(\d+)\z/ && $1 > 1 ? $1 : () } split /\s+/, $line;
+}
+sub signal_child { kill $_[0], $_[1] }
+my $failed = 0;
+for my $round (1 .. 4) {
+    my @children = children();
+    last unless @children;
+    my $sig = $round == 1 ? 'TERM' : 'KILL';
+    for my $pid (@children) {
+        if (!signal_child($sig, $pid) && !$!{ESRCH}) {
+            $failed = 1;
+            CORE::kill 'KILL', $pid;
+        }
+    }
+    select undef, undef, undef, 0.25 if $round < 4;
+    while (waitpid(-1, 1) > 0) {}
+}
+$failed = 1 if children();
+exit($failed ? 70 : (($status & 127) ? 128 + ($status & 127) : ($status >> 8)));
+'''
+_MCP_LINUX_WORKER_SCRIPT = r'''
+server=
+signal_server() {
+    [ -n "$server" ] || return
+    children=
+    IFS= read -r children < "/proc/$$/task/$$/children" || return
+    for pid in $children; do
+        if [ "$pid" = "$server" ]; then
+            builtin kill -KILL "$server" 2>/dev/null || :
+            return
+        fi
+    done
+}
+trap signal_server TERM
+"$@" <&0 >&1 2>&2 &
+server=$!
+exec 0<&-
+wait "$server"
+status=$?
+failed=0
+for round in 1 2 3 4; do
+    children=
+    IFS= read -r children < "/proc/$$/task/$$/children" || :
+    [ -n "$children" ] || break
+    sig=KILL
+    [ "$round" = 1 ] && sig=TERM
+    for pid in $children; do
+        if ! kill -"$sig" "$pid" 2>/dev/null; then
+            failed=1
+            builtin kill -KILL "$pid" 2>/dev/null || :
+        fi
+    done
+    [ "$round" = 4 ] || sleep 0.25
+done
+[ "$failed" = 0 ] || exit 70
+exit "$status"
+'''
 _MCP_POSIX_GUARDIAN_SCRIPT = r'''
 trap '' TERM
 printf R
@@ -594,33 +687,6 @@ sleep "$3"
 if ! group_owned; then printf 'group ownership lost before SIGKILL\n'; exit 1; fi
 if ! kill -KILL -- "-$$" 2>&1; then printf 'SIGKILL failed\n'; fi
 '''
-
-
-def _mcp_linux_stat(pid: int) -> tuple[int, int, str] | None:
-    try:
-        with open(f"/proc/{pid}/stat", encoding="ascii") as stat_file:
-            fields = stat_file.read().rsplit(") ", 1)[1].split()
-        if fields[0] != "Z":
-            return int(fields[1]), int(fields[2]), fields[19]
-    except (OSError, IndexError, ValueError):
-        pass
-    return None
-
-
-def _mcp_linux_children(pid: int) -> set[int]:
-    """Read children of every server thread without scanning other processes."""
-    found: set[int] = set()
-    try:
-        tasks = os.listdir(f"/proc/{pid}/task")
-    except OSError:
-        return found
-    for task in tasks:
-        try:
-            with open(f"/proc/{pid}/task/{task}/children", encoding="ascii") as children:
-                found.update(int(child) for child in children.read().split())
-        except (OSError, ValueError):
-            continue
-    return found
 
 
 def _mcp_posix_processes() -> dict[int, tuple[int, int, str]]:
@@ -647,8 +713,6 @@ class _MCPPosixDescendants:
     def __init__(self, root_pid: int, group_pid: int) -> None:
         self.root_pid = root_pid
         self.group_pid = group_pid
-        root_stat = _mcp_linux_stat(root_pid) if sys.platform == "linux" else None
-        self._root_birth = root_stat[2] if root_stat is not None else None
         self._known: dict[int, str] = {}
         self._lock = threading.Lock()
         self._stop = threading.Event()
@@ -656,27 +720,6 @@ class _MCPPosixDescendants:
         self._thread.start()
 
     def capture(self) -> None:
-        if sys.platform == "linux":
-            with self._lock:
-                known = dict(self._known)
-            roots = {self.root_pid: self._root_birth, **known}
-            found: dict[int, str] = {}
-            pending = set(roots)
-            while pending:
-                pid = pending.pop()
-                stat = _mcp_linux_stat(pid)
-                if stat is None or stat[2] != roots[pid]:
-                    continue
-                for child in _mcp_linux_children(pid):
-                    child_stat = _mcp_linux_stat(child)
-                    if child_stat is None or child_stat[0] != pid or child in roots:
-                        continue
-                    roots[child] = child_stat[2]
-                    found[child] = child_stat[2]
-                    pending.add(child)
-            with self._lock:
-                self._known.update(found)
-            return
         try:
             processes = _mcp_posix_processes()
         except (OSError, subprocess.SubprocessError) as exc:
@@ -707,14 +750,11 @@ class _MCPPosixDescendants:
         self.capture()
         with self._lock:
             known = dict(self._known)
-        if sys.platform == "linux":
-            processes = {pid: stat for pid in known if (stat := _mcp_linux_stat(pid)) is not None}
-        else:
-            try:
-                processes = _mcp_posix_processes()
-            except (OSError, subprocess.SubprocessError) as exc:
-                _LOGGER.warning("MCP stdio descendant inspection failed: %s", exc)
-                return
+        try:
+            processes = _mcp_posix_processes()
+        except (OSError, subprocess.SubprocessError) as exc:
+            _LOGGER.warning("MCP stdio descendant inspection failed: %s", exc)
+            return
         for pid, birth in known.items():
             current = processes.get(pid)
             if (current is None or current[2] != birth or current[1] == self.group_pid
@@ -730,89 +770,6 @@ class _MCPPosixDescendants:
     def close(self) -> None:
         self._stop.set()
         self._thread.join(timeout=1)
-
-
-_PR_SET_CHILD_SUBREAPER = 36
-_PR_GET_CHILD_SUBREAPER = 37
-_MCP_LINUX_ORPHAN_REAP_SECONDS = 1.0
-
-
-class _MCPLinuxOrphans:
-    """End processes orphaned inside the scanned server tree (Linux).
-
-    For the scan the scanner is a child subreaper (prctl
-    PR_SET_CHILD_SUBREAPER): a process whose parent exits, such as the
-    detached child of a short-lived helper or of the exited server, is
-    reparented to the scanner instead of init, whatever group or session it
-    moved to. Scans hold _MCP_POSIX_PROCESS_FACTORY_LOCK, so a new child the
-    scanner did not launch itself is such an orphan.
-    """
-
-    def __init__(self) -> None:
-        self._prctl: Any = None
-        self._previous: int | None = None
-        self._before: set[int] = set()
-        if sys.platform != "linux":
-            return
-        try:
-            import ctypes
-
-            prctl = ctypes.CDLL(None, use_errno=True).prctl
-            previous = ctypes.c_int(0)
-            if prctl(_PR_GET_CHILD_SUBREAPER, ctypes.byref(previous), 0, 0, 0) != 0:
-                raise OSError(ctypes.get_errno(), "PR_GET_CHILD_SUBREAPER")
-            self._before = _mcp_linux_children(os.getpid())
-            if prctl(_PR_SET_CHILD_SUBREAPER, 1, 0, 0, 0) != 0:
-                raise OSError(ctypes.get_errno(), "PR_SET_CHILD_SUBREAPER")
-        except (OSError, AttributeError) as exc:
-            _LOGGER.warning("MCP stdio orphan tracking unavailable: %s", exc)
-            return
-        self._prctl = prctl
-        self._previous = previous.value
-
-    def sweep(self, launched: set[int]) -> None:
-        """TERM, then KILL, and reap every adopted orphan; restore the flag."""
-        if self._prctl is None:
-            return
-        try:
-            deadline = time.monotonic() + _MCP_LINUX_ORPHAN_REAP_SECONDS
-            while time.monotonic() < deadline:
-                orphans = _mcp_linux_children(os.getpid()) - self._before - launched
-                if not orphans:
-                    return
-                for sig in (signal.SIGTERM, signal.SIGKILL):
-                    for pid in orphans:
-                        try:
-                            os.kill(pid, sig)
-                        except ProcessLookupError:
-                            pass
-                    grace = time.monotonic() + (
-                        _MCP_POSIX_GROUP_GRACE_SECONDS if sig == signal.SIGTERM
-                        else max(0.0, deadline - time.monotonic())
-                    )
-                    while orphans:
-                        for pid in list(orphans):
-                            try:
-                                if os.waitpid(pid, os.WNOHANG)[0] == pid:
-                                    orphans.discard(pid)
-                            except ChildProcessError:
-                                orphans.discard(pid)
-                        if not orphans or time.monotonic() >= grace:
-                            break
-                        time.sleep(0.01)
-                    if not orphans:
-                        break
-            remaining = _mcp_linux_children(os.getpid()) - self._before - launched
-            if remaining:
-                _LOGGER.warning(
-                    "MCP stdio cleanup may be incomplete; orphaned server processes %s are still running",
-                    sorted(remaining),
-                )
-        except OSError as exc:
-            _LOGGER.warning("MCP stdio orphan cleanup failed: %s", exc)
-        finally:
-            if self._prctl(_PR_SET_CHILD_SUBREAPER, self._previous, 0, 0, 0) != 0:
-                _LOGGER.warning("MCP stdio orphan tracking could not restore the subreaper flag")
 
 
 class _MCPPosixInput:
@@ -943,14 +900,97 @@ def _close_mcp_posix_control(fd: int) -> bool:
         return False
 
 
+def _enable_mcp_linux_subreaper() -> None:
+    # This runs only in the just-forked child, before exec. Resolve prctl in
+    # the parent so the child makes no dynamic-library lookups here.
+    if _MCP_LINUX_PRCTL(36, 1, 0, 0, 0) != 0:
+        os._exit(127)
+
+
+if sys.platform == "linux":
+    import ctypes
+
+    _MCP_LINUX_PRCTL = ctypes.CDLL(None, use_errno=True).prctl
+
+
+@contextmanager
+def _contained_mcp_linux_process_factory(server_name: str) -> Iterator[None]:
+    """Run each Linux server under its own child subreaper."""
+    import mcp.client.stdio as mcp_stdio
+    from anyio._core._eventloop import get_async_backend
+
+    started: dict[int, Any] = {}
+    original_create = mcp_stdio._create_platform_compatible_process
+    original_terminate = mcp_stdio._terminate_process_tree
+
+    async def create(
+        command: str, args: list[str], env: dict[str, str] | None = None,
+        errlog: Any = sys.stderr, cwd: Any = None,
+    ) -> Any:
+        if os.path.isabs(command) and not os.path.exists(command):
+            raise FileNotFoundError(2, os.strerror(2), command)
+        worker_env = os.environ if env is None else env
+        path = worker_env.get("PATH", os.defpath)
+        perl_path_usable = all(os.path.isabs(part) for part in path.split(os.pathsep))
+        if (_MCP_LINUX_PRCTL_SYSCALL is not None
+                and os.access("/usr/bin/perl", os.X_OK) and perl_path_usable):
+            argv = ["/usr/bin/perl", "-T", "-e", _MCP_LINUX_PERL_WORKER, "--",
+                    str(_MCP_LINUX_PRCTL_SYSCALL), command, *args]
+            setup: dict[str, Any] = {}
+        else:
+            argv = ["/bin/bash", "-p", "-c", _MCP_LINUX_WORKER_SCRIPT,
+                    "mcp-stdio-worker", command, *args]
+            setup = {"preexec_fn": _enable_mcp_linux_subreaper}
+        process = await get_async_backend().open_process(
+            argv,
+            stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=errlog,
+            env=env, cwd=cwd, start_new_session=True,
+            **setup,
+        )
+        started[process.pid] = process
+        return process
+
+    async def terminate(process: Any) -> None:
+        if process.pid not in started:
+            await original_terminate(process)
+        elif process.returncode is None:
+            process.terminate()
+            try:
+                with asyncio.timeout(_MCP_POSIX_SESSION_CLEANUP_SECONDS):
+                    await process.wait()
+            except TimeoutError:
+                process.kill()
+                await process.wait()
+
+    with _MCP_POSIX_PROCESS_FACTORY_LOCK:
+        mcp_stdio._create_platform_compatible_process = create
+        mcp_stdio._terminate_process_tree = terminate
+        try:
+            yield
+        finally:
+            mcp_stdio._create_platform_compatible_process = original_create
+            mcp_stdio._terminate_process_tree = original_terminate
+            for process in started.values():
+                if process.returncode is None:
+                    process.terminate()
+                if process.returncode == 70:
+                    _LOGGER.warning(
+                        "MCP stdio cleanup for server %r may be incomplete; "
+                        "a child may still be running (cleanup signal failed)", server_name,
+                    )
+
+
 @contextmanager
 def _contained_mcp_posix_process_factory(server_name: str = "stdio server") -> Iterator[None]:
     """Track SDK stdio launches and end their groups on every scan exit."""
+    if sys.platform == "linux":
+        with _contained_mcp_linux_process_factory(server_name):
+            yield
+        return
     import mcp.client.stdio as mcp_stdio
     from anyio._core._eventloop import get_async_backend
 
     started_groups: dict[int, tuple[subprocess.Popen[bytes], int, threading.Event, _MCPPosixDescendants]] = {}
-    launched: set[int] = set()
     notified_groups: set[int] = set()
     session_closed = threading.Event()
 
@@ -990,7 +1030,6 @@ def _contained_mcp_posix_process_factory(server_name: str = "stdio server") -> I
                 stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
                 stderr=subprocess.DEVNULL, pass_fds=(control_read,), process_group=0,
             )
-            launched.add(guardian.pid)
             if (guardian.stdout is None
                     or not select.select([guardian.stdout], [], [], 1.0)[0]
                     or os.read(guardian.stdout.fileno(), 1) != b"R"):
@@ -1016,7 +1055,6 @@ def _contained_mcp_posix_process_factory(server_name: str = "stdio server") -> I
                 [command, *args], stdin=subprocess.PIPE, stdout=subprocess.PIPE,
                 env=env, stderr=errlog, cwd=cwd, process_group=guardian.pid,
             )
-            launched.add(process.pid)
         except BaseException:
             _close_mcp_posix_control(control_write)
             emergency.set()
@@ -1052,7 +1090,6 @@ def _contained_mcp_posix_process_factory(server_name: str = "stdio server") -> I
             await original_terminate(process)
 
     with _MCP_POSIX_PROCESS_FACTORY_LOCK:
-        orphans = _MCPLinuxOrphans()
         original_create = mcp_stdio._create_platform_compatible_process
         original_terminate = mcp_stdio._terminate_process_tree
         mcp_stdio._create_platform_compatible_process = create
@@ -1064,7 +1101,6 @@ def _contained_mcp_posix_process_factory(server_name: str = "stdio server") -> I
             mcp_stdio._terminate_process_tree = original_terminate
             for pid in started_groups:
                 notify(pid)
-            orphans.sweep(launched)
             session_closed.set()
 
 
