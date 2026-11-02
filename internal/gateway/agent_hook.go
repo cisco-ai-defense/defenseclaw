@@ -502,6 +502,28 @@ func (a *APIServer) handleAgentHook(connectorName string) http.HandlerFunc {
 			})
 			return
 		}
+		// An old registration may call while setup is pending, or after this
+		// process skipped its absent agent. Deny both until a fresh gateway
+		// process admits the connector and publishes its own policy.
+		// This check precedes every path that can answer allow.
+		if reason := a.health.connectorHookAdmissionReason(connectorName); reason != "" {
+			// Health may include the executable path; this hook reason does not.
+			resp := agentHookResponseForProfile(profile, req, "block", "block", "HIGH", reason,
+				nil, "action", false, profile.Capabilities)
+			// The reason is gateway-authored and contains no user text or path.
+			// Preserve it in the native answer; generic scan-reason redaction
+			// would otherwise hide the restart instruction.
+			resp.Reason = reason
+			if profile.Respond != nil {
+				resp.HookOutput = profile.Respond(connector.HookRespondInput{
+					Req: hookProfileRequestFromAgentHook(req), Action: "block", RawAction: "block",
+					Reason: reason, Caps: profile.Capabilities,
+				}).Output
+			}
+			resp.RuleIDs = []string{"CONNECTOR-NOT-STARTED"}
+			writeHookAnswer(w, a.hookAnswerBody(r.Context(), profile, connectorName, req, resp, ""))
+			return
+		}
 		// A connector the administrator's config turns off is answered allow
 		// here, before anything about the call is recorded (rel-1-0-6:GAP-0325).
 		if a.answerDisabledConnectorHook(r.Context(), w, r.Header, profile, connectorName, req) {

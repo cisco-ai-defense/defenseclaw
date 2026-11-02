@@ -10978,9 +10978,21 @@ def _check_connector_skipped_at_start(connector: str, live_health: dict | None, 
     The gateway can skip a connector whose setup it refused while its
     old hook file still passes the hook row, so name the fix here.
     """
-    from defenseclaw.commands.cmd_status import _connectors_not_started
+    from defenseclaw.commands.cmd_status import _connectors_not_started, _connectors_refused_by_agent_settings
 
     if connector not in _connectors_not_started(live_health):
+        return
+    if (reason := _connectors_refused_by_agent_settings(live_health).get(connector)) and reason.startswith(
+        "the agent is not installed for this account"
+    ):
+        # Setup cannot restore an agent removed outside DefenseClaw.
+        _emit(
+            "warn",
+            "Connector setup",
+            f"{_CONNECTOR_LABELS.get(connector, connector)} was skipped when the gateway started, so it is not "
+            f"enforced: {reason}",
+            r=r,
+        )
         return
     _emit(
         "warn",

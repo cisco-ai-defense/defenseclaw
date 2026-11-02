@@ -18,6 +18,7 @@ package gateway
 
 import (
 	"context"
+	"fmt"
 	"sort"
 	"strings"
 	"sync"
@@ -228,7 +229,14 @@ const (
 )
 
 type SidecarHealth struct {
-	mu                                     sync.RWMutex
+	mu sync.RWMutex
+	// skippedAtStart blocks retained hook registrations until a restart can
+	// finish connector setup and publish its own policy.
+	skippedAtStart map[string]string
+	// connectorSetupPending blocks old registrations while this process is
+	// deciding which connectors can be admitted. A successful setup clears
+	// only this pending state; an absent-agent skip stays blocked for life.
+	connectorSetupPending                  map[string]struct{}
 	gateway                                SubsystemHealth
 	watcher                                SubsystemHealth
 	config                                 SubsystemHealth
@@ -797,6 +805,70 @@ func (h *SidecarHealth) SetGuardrail(state SubsystemState, lastErr string, detai
 	}
 	h.mu.Unlock()
 	h.notifySubscribers()
+}
+
+func (h *SidecarHealth) markConnectorSkippedAtStart(name, reason string) {
+	h.mu.Lock()
+	if h.skippedAtStart == nil {
+		h.skippedAtStart = make(map[string]string)
+	}
+	h.skippedAtStart[connName(name)] = reason
+	h.mu.Unlock()
+}
+
+func (h *SidecarHealth) connectorSkippedAtStartReason(name string) string {
+	if h == nil {
+		return ""
+	}
+	h.mu.RLock()
+	reason := h.skippedAtStart[connName(name)]
+	h.mu.RUnlock()
+	return reason
+}
+
+func (h *SidecarHealth) beginConnectorSetup(names []string) {
+	if h == nil {
+		return
+	}
+	h.mu.Lock()
+	if h.connectorSetupPending == nil {
+		h.connectorSetupPending = make(map[string]struct{}, len(names))
+	}
+	for _, name := range names {
+		if key := connName(name); key != "" {
+			h.connectorSetupPending[key] = struct{}{}
+		}
+	}
+	h.mu.Unlock()
+}
+
+func (h *SidecarHealth) finishConnectorSetup(names []string) {
+	if h == nil {
+		return
+	}
+	h.mu.Lock()
+	for _, name := range names {
+		delete(h.connectorSetupPending, connName(name))
+	}
+	h.mu.Unlock()
+}
+
+func (h *SidecarHealth) connectorHookAdmissionReason(name string) string {
+	if h == nil {
+		return ""
+	}
+	key := connName(name)
+	h.mu.RLock()
+	skipped := h.skippedAtStart[key] != ""
+	_, pending := h.connectorSetupPending[key]
+	h.mu.RUnlock()
+	if skipped {
+		return fmt.Sprintf("the %s agent is not installed for this account; reinstall it and run defenseclaw-gateway restart, or run defenseclaw setup remove %s", key, key)
+	}
+	if pending {
+		return fmt.Sprintf("%s connector setup is pending; wait for the gateway to finish or run defenseclaw-gateway restart", key)
+	}
+	return ""
 }
 
 // RecordInterceptionResult stores the plugin's sentinel self-test.

@@ -886,6 +886,11 @@ def _print_agents(
     health_map = _fetch_health_connectors(health=health)
     not_started = _connectors_not_started(health)
     refused_by_agent_settings = _connectors_refused_by_agent_settings(health)
+    removed_agent_reasons = {
+        name: reason
+        for name, reason in refused_by_agent_settings.items()
+        if name in not_started and reason.startswith("the agent is not installed for this account")
+    }
     state = _application_protection_status(cfg, health=health)
 
     roster: dict[str, dict] = {}
@@ -942,7 +947,7 @@ def _print_agents(
     not_running_count = sum(
         1 for c in actives if _is_enabled(c) and (
             c in agent_missing
-            or c not in health_map and c in not_started
+            or c in not_started
         )
     )
     header = f"{enabled_count - not_running_count} active"
@@ -1010,7 +1015,9 @@ def _print_agents(
         if hc:
             runtime_detail = ""
             runtime_state = str(hc.get("state") or "")
-            if conn in agent_missing:
+            if conn in removed_agent_reasons:
+                runtime_state, runtime_detail = "not running", removed_agent_reasons[conn]
+            elif conn in agent_missing:
                 # The gateway registers a staged connector, but no agent
                 # runs its hooks (GAP-0513).
                 runtime_state, runtime_detail = "off", _agent_missing_detail(conn)
@@ -1041,7 +1048,12 @@ def _print_agents(
             dim_text = ux.dim(
                 f"{friendly} ({conn}) — mode={mode or '?'}{fail_mode_suffix}{source_suffix}{disclosure_suffix}"
             )
-            if conn in agent_missing:
+            if conn in removed_agent_reasons:
+                suffix = _connector_state_verb("not running") + ux.dim(
+                    f" (not enforced: {removed_agent_reasons[conn]})"
+                )
+                _echo_wrapped(f"                {dim_text}{suffix}", 18)
+            elif conn in agent_missing:
                 suffix = _connector_state_verb("off") + ux.dim(f" ({_agent_missing_detail(conn)})")
                 _echo_wrapped(f"                {dim_text}{suffix}", 18)
             elif conn == "opencode" and not sidecar_down:
@@ -1390,8 +1402,9 @@ def _connectors_not_started(health: dict | None) -> set[str]:
 
 def _connectors_refused_by_agent_settings(health: dict | None) -> dict[str, str]:
     """Connectors the gateway left unguarded because their agent's own settings
-    turn its hooks off or do not parse, each with the gateway's reason, which
-    names the fix (GAP-0578)."""
+    turn its hooks off or do not parse (GAP-0578), or because the agent is no
+    longer installed (GAP-0492), each with the gateway's reason, which names
+    the fix."""
     guardrail = health.get("guardrail") if isinstance(health, dict) else None
     details = guardrail.get("details") if isinstance(guardrail, dict) else None
     refused = details.get("connectors_refused_by_agent_settings") if isinstance(details, dict) else None
@@ -2162,6 +2175,11 @@ def _connector_roster(cfg, health: dict | None = None) -> list[dict]:
         )
     health_map = _fetch_health_connectors(health=health)
     not_started = _connectors_not_started(health)
+    removed_agent_reasons = {
+        name: reason
+        for name, reason in _connectors_refused_by_agent_settings(health).items()
+        if name in not_started and reason.startswith("the agent is not installed for this account")
+    }
     refused_credentials = _refused_scoped_hook_credentials(cfg, health)
     for name, row in rows.items():
         # The text roster already uses this authenticated runtime state. Keep
@@ -2178,7 +2196,7 @@ def _connector_roster(cfg, health: dict | None = None) -> list[dict]:
             row["runtime_detail"] = _agent_missing_detail(name)
         if row.get("enabled") and name in not_started:
             row["state"] = "not running"
-            row["runtime_detail"] = (
+            row["runtime_detail"] = removed_agent_reasons.get(name) or (
                 "setup failed when the gateway started, so it is not enforced; "
                 f"run defenseclaw setup {'claude-code' if name == 'claudecode' else name}"
             )

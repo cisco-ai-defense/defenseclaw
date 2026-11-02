@@ -1012,6 +1012,9 @@ func (s *Sidecar) Run(ctx context.Context) (runErr error) {
 	if err := s.beginObservabilityV8Run(); err != nil {
 		return err
 	}
+	// The API starts independently of connector setup. Mark every per-user
+	// connector pending before it can answer a retained native hook.
+	s.beginPerUserConnectorHookSetup()
 	s.carryObservabilityV8ShutdownDrops()
 	// Report the records an earlier run lost from the local history; the loss
 	// journal kept them across the restart (GAP-1129).
@@ -1558,6 +1561,22 @@ func (s *Sidecar) runActiveGuardrail(ctx context.Context) error {
 		s.health.SetGuardrail(StateError, err.Error(), guardrailFailureDetails(err))
 	}
 	return err
+}
+
+func (s *Sidecar) beginPerUserConnectorHookSetup() {
+	if s == nil || s.health == nil {
+		return
+	}
+	cfg := s.currentConfig()
+	if cfg == nil || !cfg.Guardrail.Enabled || cfg.SecureClientIntegration() ||
+		managed.IsManagedEnterprise(cfg.DeploymentMode) {
+		return
+	}
+	names := cfg.ActiveConnectors()
+	if len(names) < 2 {
+		return
+	}
+	s.health.beginConnectorSetup(names)
 }
 
 // runGuardrailRestartable runs the guardrail and runs it again when a reload
@@ -2299,6 +2318,13 @@ func (s *Sidecar) applyConfigReloadSnapshot(
 	}
 
 	appliedCfg := current
+	// A config reload can restart connector setup while the API keeps its
+	// existing hook routes. Close those routes before the new config and rule
+	// generation become visible, then release only successful setups.
+	if guardrailRestart && s.health != nil && next.Guardrail.Enabled &&
+		!next.SecureClientIntegration() && !nextManagedEnterprise && len(next.ActiveConnectors()) > 1 {
+		s.health.beginConnectorSetup(next.ActiveConnectors())
+	}
 	if !onlyReloadModeChange {
 		appliedCfg = s.publishConfig(&next)
 	}
@@ -5175,6 +5201,7 @@ func (s *Sidecar) reconcileUnconfiguredConnectors(ctx context.Context, registry 
 // hook lane (the only lane active in multi) uses the per-connector rule sets
 // described above.
 func (s *Sidecar) runGuardrailMulti(ctx context.Context) error {
+	s.beginPerUserConnectorHookSetup()
 	if s.currentConfig() == nil || !s.currentConfig().HasConnectorConfigured() {
 		return s.waitForConnectorSetup(ctx)
 	}
@@ -5507,6 +5534,9 @@ func (s *Sidecar) runGuardrailMulti(ctx context.Context) error {
 		s.health.SetGuardrail(StateRunning, "", guardrailDetails)
 	}
 	publishHealth()
+	// The hook path may now use the published per-connector rule packs for
+	// successful setups. Skips remain blocked until a new process starts.
+	s.health.finishConnectorSetup(succeeded)
 	_, anyEnforcement := liveModes()
 	fmt.Fprintf(os.Stderr, "[guardrail] multi-connector direct-upstream mode: %d active connector(s): %s; enforcement=%t — proxy port intentionally not bound\n", len(succeeded), strings.Join(succeeded, ", "), anyEnforcement)
 	s.republishGuardrailOnModeChange(ctx, func() string {
@@ -6053,7 +6083,8 @@ type multiConnectorSetupTransaction struct {
 	// table for an agent an earlier release admitted.
 	releaseRefused bool
 	// agentSettingsRefused maps each connector whose agent's own settings
-	// refused DefenseClaw hooks to the reason, which names the fix.
+	// refused DefenseClaw hooks, or whose agent is no longer installed, to the
+	// reason, which names the fix.
 	agentSettingsRefused map[string]string
 	// notStartedReasons maps each connector this start skipped to the reason,
 	// so setup and status name it instead of only a roster mismatch
@@ -6302,6 +6333,13 @@ func (s *Sidecar) setupConnectorsIsolatedTransaction(ctx context.Context, conns 
 	if len(registrations) == 0 {
 		return transaction, nil
 	}
+	if s.health != nil && !registrations[0].opts.ManagedEnterprise {
+		names := make([]string, 0, len(registrations))
+		for _, registration := range registrations {
+			names = append(names, registration.conn.Name())
+		}
+		s.health.beginConnectorSetup(names)
+	}
 
 	dataDir := registrations[0].opts.DataDir
 	if transaction.activeState == nil {
@@ -6339,6 +6377,20 @@ func (s *Sidecar) setupConnectorsIsolatedTransaction(ctx context.Context, conns 
 			})
 		}
 		previousLock := transaction.hookLockState.RawEntry(registration.conn.Name())
+		// A config reload may rerun this transaction in the same gateway
+		// process. An absent-agent skip is rechecked only by a new process;
+		// keep its earlier registration denied and its health reason visible.
+		if reason := s.health.connectorSkippedAtStartReason(registration.conn.Name()); reason != "" {
+			if transaction.agentSettingsRefused == nil {
+				transaction.agentSettingsRefused = map[string]string{}
+			}
+			transaction.agentSettingsRefused[registration.conn.Name()] = reason
+			transaction.noteNotStarted(registration.conn.Name(), errors.New(reason))
+			if strings.TrimSpace(previousLock.Connector) != "" {
+				transaction.keptRegistrations = append(transaction.keptRegistrations, registration.conn.Name())
+			}
+			continue
+		}
 		var pluginSnapshot *connector.PluginArtifactRegistrationSnapshot
 		var pluginLockSnapshot *connector.HookContractLockSnapshot
 		name := strings.ToLower(strings.TrimSpace(registration.conn.Name()))
@@ -6415,13 +6467,38 @@ func (s *Sidecar) setupConnectorsIsolatedTransaction(ctx context.Context, conns 
 		}
 		if err != nil {
 			if wasActive && !registration.opts.ManagedEnterprise {
+				unchanged := setupRefusedBeforeAnyChange(err)
+				if why := agentNotInstalledReason(registration.opts, registration.conn.Name()); unchanged && why != "" {
+					// The agent was removed outside DefenseClaw (its package
+					// deleted, its binary gone from PATH). Setup refused before
+					// it changed anything, and neither a rollback nor an
+					// upgrade can guard an agent that is not there: failing the
+					// start left every other connector unchecked (GAP-0492).
+					// Skip only this connector, keep its registration and lock
+					// entry for when the agent comes back, and name the fix.
+					reason := agentNotInstalledRefusal(registration.conn.Name(), why)
+					// A retained native hook can call this gateway before the next
+					// restart. Refuse it until setup publishes this connector's own
+					// rule pack and runtime policy on a fresh start.
+					if s.health != nil {
+						s.health.markConnectorSkippedAtStart(registration.conn.Name(), reason)
+					}
+					fmt.Fprintf(os.Stderr, "[guardrail] WARNING: connector %s not started, its agent is not installed (other connectors unaffected): %v\n", registration.conn.Name(), err)
+					if transaction.agentSettingsRefused == nil {
+						transaction.agentSettingsRefused = map[string]string{}
+					}
+					transaction.agentSettingsRefused[registration.conn.Name()] = reason
+					transaction.noteNotStarted(registration.conn.Name(), errors.New(reason))
+					if strings.TrimSpace(previousLock.Connector) != "" {
+						transaction.keptRegistrations = append(transaction.keptRegistrations, registration.conn.Name())
+					}
+					continue
+				}
 				// A refresh is an upgrade of an existing guard. Teardown restores
 				// the pre-install, possibly hookless settings, not that guard.
 				// Restore its prior posture with the rest of this transaction and
 				// fail startup, even if peers succeeded: installer readiness must
 				// never accept a gateway with fewer protected connectors.
-				unchanged := errors.Is(err, ErrHookContractAdmission) || errors.Is(err, connector.ErrAgentVersionProbeTimeout) ||
-					errors.Is(err, connector.ErrExecutableAdmission) || errors.Is(err, connector.ErrSetupRefusedUnchanged)
 				if !unchanged {
 					transaction.applied = append(transaction.applied, multiConnectorSetupRollbackPoint{
 						conn: registration.conn, opts: registration.opts, previouslyActive: true,
@@ -8207,8 +8284,10 @@ func refreshRefusalNextStep(err error) string {
 }
 
 // GuardrailAgentSettingsRefused is the guardrail health detail that maps each
-// connector the agent's own settings refused (connector.ErrAgentConfigRefusal)
-// to the reason, so status can name that agent's fix (GAP-0578).
+// connector rerunning setup cannot start to the reason, so status can name
+// the fix: the agent's own settings refused the hooks
+// (connector.ErrAgentConfigRefusal, GAP-0578), or the agent is no longer
+// installed for this account (GAP-0492). The key keeps its released name.
 const GuardrailAgentSettingsRefused = "connectors_refused_by_agent_settings"
 
 // GuardrailNotStartedReasons is the guardrail health detail that maps each
