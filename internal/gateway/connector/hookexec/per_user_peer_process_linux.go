@@ -105,44 +105,60 @@ func procSocketInode(table, state, local, remote string) string {
 }
 
 // procSocketHolders is every process of this account that holds socket
-// inode, until ctx ends.
+// inode, until ctx ends, in no particular order.
+//
+// Every per-user hook call runs it once, when its connection is proven
+// (PerUserPeerRecord.capture), so it reads only names: no sorting of /proc or
+// of a process's fd folder and no FileInfo per entry, which were a third of
+// its CPU in a 32-way hook burst (rel-1-0-6 GAP-0381). The holders are the
+// same: an unreadable /proc gives none, and a process whose folder or fd
+// list cannot be read is skipped.
 func procSocketHolders(ctx context.Context, inode string) []int {
 	if inode == "" {
 		return nil
 	}
 	want := "socket:[" + inode + "]"
-	entries, err := os.ReadDir("/proc")
+	names, err := readDirNames("/proc")
 	if err != nil {
 		return nil
 	}
 	uid := uint32(os.Geteuid())
 	var holders []int
-	for _, entry := range entries {
+	for _, name := range names {
 		if ctx.Err() != nil {
 			return nil
 		}
-		pid, err := strconv.Atoi(entry.Name())
+		pid, err := strconv.Atoi(name)
 		if err != nil || pid <= 0 {
 			continue
 		}
-		dir := filepath.Join("/proc", entry.Name())
-		info, err := os.Stat(dir)
-		if err != nil {
+		dir := "/proc/" + name
+		var st syscall.Stat_t
+		if err := syscall.Stat(dir, &st); err != nil || st.Uid != uid {
 			continue
 		}
-		if st, ok := info.Sys().(*syscall.Stat_t); !ok || st.Uid != uid {
-			continue
-		}
-		fds, err := os.ReadDir(filepath.Join(dir, "fd"))
+		fdDir := dir + "/fd/"
+		fds, err := readDirNames(fdDir)
 		if err != nil {
 			continue
 		}
 		for _, fd := range fds {
-			if link, err := os.Readlink(filepath.Join(dir, "fd", fd.Name())); err == nil && link == want {
+			if link, err := os.Readlink(fdDir + fd); err == nil && link == want {
 				holders = append(holders, pid)
 				break
 			}
 		}
 	}
 	return holders
+}
+
+// readDirNames is the names in dir, unsorted; an error for a folder that
+// cannot be read to its end (os.ReadDir also fails then).
+func readDirNames(dir string) ([]string, error) {
+	f, err := os.Open(dir)
+	if err != nil {
+		return nil, err
+	}
+	defer f.Close()
+	return f.Readdirnames(-1)
 }
