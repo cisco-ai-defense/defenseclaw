@@ -833,7 +833,7 @@ _run_scrub() {
   fi
 }
 
-# scrub_agent_config CONNECTOR CFG USER [AUTHORITY]
+# scrub_agent_config CONNECTOR CFG USER [AUTHORITY] [HOME]
 #
 # Scrubs one user × connector. The first attempt runs as the user. A
 # failure gets one retry as root: user immutable/append flags on the
@@ -847,6 +847,7 @@ scrub_agent_config() {
   local cfg="$2"
   local run_as_user="$3"   # empty ⇒ run as caller (root)
   local authority="${4:-}"
+  local home="${5:-}"      # the user's home: bounds the root retry
   if [[ "${connector}" == "amp" ]]; then
     if [[ ! -e "${cfg}" && ! -L "${cfg}" ]]; then
       return 0
@@ -920,6 +921,21 @@ scrub_agent_config() {
     warn "  scrub exited ${rc} for ${cfg}; it is a symlink, so it is not retried as root"
     return 1
   fi
+  # Root must never follow a user-controlled symlink in the folders between
+  # the home and the config either: they could point root at another
+  # principal's files. (Not atomic; it narrows the window to a race.)
+  if [[ -z "${home}" || "${cfg}" != "${home}"/* ]]; then
+    warn "  scrub exited ${rc} for ${cfg}; it is outside the user home, so it is not retried as root"
+    return 1
+  fi
+  local _dir="${cfg%/*}"
+  while [[ "${_dir}" != "${home}" && -n "${_dir}" ]]; do
+    if [[ -L "${_dir}" ]]; then
+      warn "  scrub exited ${rc} for ${cfg}; ${_dir} is a symlink, so it is not retried as root"
+      return 1
+    fi
+    _dir="${_dir%/*}"
+  done
   warn "  scrub exited ${rc} for ${cfg} as ${as_user}; retrying once as root"
   local flags=""
   flags="$(stat -f '%Sf' "${cfg}" 2>/dev/null || echo '-')"
@@ -959,9 +975,9 @@ purge_user() {
       if [[ "${connector}" == "amp" ]]; then
         scrub_agent_config amp \
           "${home}/.config/amp/plugins/defenseclaw.ts" "${user}" \
-          "${home}/.defenseclaw/connector_backups/amp/config.json" && continue
+          "${home}/.defenseclaw/connector_backups/amp/config.json" "${home}" && continue
       else
-        scrub_agent_config "${connector}" "${cfg}" "${user}" "${authority}" && continue
+        scrub_agent_config "${connector}" "${cfg}" "${user}" "${authority}" "${home}" && continue
       fi
       leftover "${cfg}" scrub_failed \
         defenseclaw_skip unit="user:${user}" connector="${connector}" path="${cfg}" reason=scrub_failed

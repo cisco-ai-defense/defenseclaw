@@ -210,7 +210,9 @@ func recreateOwnedDirectory(object OwnedObject, opts CanonicalOptions, why strin
 		return result
 	}
 	stamped, err := EnsureCanonical(object.Path, object.Kind, opts)
-	if err != nil {
+	// Only a folder that now has its canonical form counts as repaired; an
+	// accepted, boundary or vanished result is reported as what it is.
+	if err != nil || (stamped.Outcome != CanonicalOK && stamped.Outcome != CanonicalRepaired) {
 		reportCanonicalResult(stamped, CanonicalOptions{})
 		return stamped
 	}

@@ -2459,6 +2459,19 @@ _dc_mode_norm() {
   printf '%s' "${m}"
 }
 
+# _dc_restamp_step TAG CMD...: one dc_restamp repair step, with retry. On
+# failure it adds TAG to the caller's `failed` and appends the command's
+# output to the caller's `err` (bash dynamic scope), so a later successful
+# step never erases why an earlier one failed.
+_dc_restamp_step() {
+  local tag="$1" out
+  shift
+  out="$(dc_retry "$@" 2>&1)" && return 0
+  failed="${failed},${tag}"
+  err="${err:+${err} }${out}"
+  return 0
+}
+
 # dc_restamp PATH OWNER:GROUP MODE [-R] [-d|-f] [-q]
 #
 # Re-stamp a DefenseClaw-owned PATH to its canonical form, in order:
@@ -2546,7 +2559,7 @@ dc_restamp() {
   local flags
   flags="$(stat -f '%Sf' "${path}" 2>/dev/null || echo '-')"
   if [[ "${flags}" == *uchg* || "${flags}" == *uappnd* ]]; then
-    err="$(dc_retry chflags -h nouchg,nouappnd "${path}" 2>&1)" || failed="${failed},flags"
+    _dc_restamp_step flags chflags -h nouchg,nouappnd "${path}"
   fi
   if [[ "${flags}" == *schg* || "${flags}" == *sappnd* ]]; then
     if ! chflags -h noschg,nosappnd "${path}" 2>/dev/null; then
@@ -2556,22 +2569,22 @@ dc_restamp() {
     fi
   fi
   if [[ "${recursive}" == "true" ]]; then
-    err="$(dc_retry chflags -R -P nouchg,nouappnd "${path}" 2>&1)" || failed="${failed},flags"
+    _dc_restamp_step flags chflags -R -P nouchg,nouappnd "${path}"
   fi
 
   # ACL, owner, mode.
-  err="$(dc_retry chmod -h -N "${path}" 2>&1)" || failed="${failed},acl"
+  _dc_restamp_step acl chmod -h -N "${path}"
   if [[ "${recursive}" == "true" ]]; then
-    err="$(dc_retry chmod -R -P -N "${path}" 2>&1)" || failed="${failed},acl"
-    err="$(dc_retry chown -R -h "${owner_group}" "${path}" 2>&1)" || failed="${failed},owner"
+    _dc_restamp_step acl chmod -R -P -N "${path}"
+    _dc_restamp_step owner chown -R -h "${owner_group}" "${path}"
     # Sockets keep their mode: the gateway binds its IPC socket with the
     # mode its peers need and re-applies it on every bind.
-    err="$(dc_retry /usr/bin/find "${path}" -mindepth 1 ! -type l ! -type s -perm +022 \
-      -exec chmod -h go-w {} + 2>&1)" || failed="${failed},mode"
+    _dc_restamp_step mode /usr/bin/find "${path}" -mindepth 1 ! -type l ! -type s -perm +022 \
+      -exec chmod -h go-w {} +
   else
-    err="$(dc_retry chown -h "${owner_group}" "${path}" 2>&1)" || failed="${failed},owner"
+    _dc_restamp_step owner chown -h "${owner_group}" "${path}"
   fi
-  err="$(dc_retry chmod -h "${mode}" "${path}" 2>&1)" || failed="${failed},mode"
+  _dc_restamp_step mode chmod -h "${mode}" "${path}"
 
   after="$(_dc_meta "${path}")"
   if [[ "${before}" != "${after}" ]]; then

@@ -27,15 +27,6 @@ type darwinACLEntry struct {
 	Permissions []string
 }
 
-// darwinACLInheritFlags are the inheritance tokens `ls -le` prints in the
-// permission list. They describe propagation, not access.
-var darwinACLInheritFlags = map[string]bool{
-	"file_inherit":      true,
-	"directory_inherit": true,
-	"limit_inherit":     true,
-	"only_inherit":      true,
-}
-
 // darwinACLWritePermissions are the rights that let a principal change an
 // object or the entries of a folder.
 var darwinACLWritePermissions = map[string]bool{

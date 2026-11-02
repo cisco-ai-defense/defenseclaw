@@ -324,6 +324,13 @@ install_file_no_replace() {
       dc_marker defenseclaw_recover what=leftover_file path="${destination}"
     fi
     dc_restamp "${destination}" "${owner}:${group}" "${mode}" -f || true
+    # A symlink or wrong-type object that could not be moved aside must
+    # never be published over: mv onto a folder would land inside it.
+    if [[ -L "${destination}" || ( -e "${destination}" && ! -f "${destination}" ) ]]; then
+      dc_warn "could not clear structural install destination ${destination}" \
+        defenseclaw_accept path="${destination}" reason=replace_failed
+      return 1
+    fi
   fi
   temporary="$(dc_retry mktemp "${destination}.new.XXXXXX" 2>/dev/null)" || temporary=""
   if [[ -z "${temporary}" ]]; then

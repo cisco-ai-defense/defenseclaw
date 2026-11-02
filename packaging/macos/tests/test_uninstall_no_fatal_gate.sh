@@ -152,6 +152,25 @@ t_purge_skips_symlinked_home() {
   fixture_cleanup "${b}"
 }
 
+t_root_retry_refuses_symlinked_parent() {
+  local b; b="$(_purge_fixture)"
+  local me; me="$(id -un)"
+  local home="${b}/root/Users/${me}"
+  # The user swaps ~/.claude for a link to a folder holding someone else's
+  # settings; the user-run scrub fails there, and root must not retry.
+  mkdir -p "${b}/victim"
+  printf '{"FAIL_AS_USER":1}\n' > "${b}/victim/settings.json"
+  rm -rf "${home}/.claude"
+  ln -s "${b}/victim" "${home}/.claude"
+  local out rc=0
+  out="$(fixture_uninstall "${b}" --purge -y 2>&1)" || rc=$?
+  assert_status "${rc}" 0 "purge exits 0"
+  assert_contains "$(cat "${b}/victim/settings.json")" "FAIL_AS_USER" "root never edits through a symlinked parent"
+  assert_contains "${out}" "is a symlink, so it is not retried as root" "the refusal is logged"
+  fixture_cleanup "${b}"
+}
+
 run_case "purge completes, isolates users and summarises leftovers" t_purge_completes_and_isolates_users
 run_case "purge without the library still finds every user"         t_purge_without_library_still_finds_users
+run_case "root retry refuses a symlinked parent folder"          t_root_retry_refuses_symlinked_parent
 run_case "purge never follows a symlinked home"                     t_purge_skips_symlinked_home
