@@ -19,6 +19,7 @@
 package managed
 
 import (
+	"errors"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -147,7 +148,8 @@ func TestHostOwnerUIDRejectsHostSocketWithParentPID1(t *testing.T) {
 			if output, err := middle.CombinedOutput(); err != nil {
 				t.Fatalf("start reparented host helper: %v: %s", err, output)
 			}
-			for deadline := time.Now().Add(5 * time.Second); ; time.Sleep(20 * time.Millisecond) {
+			deadline := time.Now().Add(5 * time.Second)
+			for ; ; time.Sleep(20 * time.Millisecond) {
 				if raw, err := os.ReadFile(marker); err == nil {
 					got := strings.TrimSpace(string(raw))
 					if adopter, ok := strings.CutPrefix(got, "subreaper "); ok {
@@ -163,8 +165,55 @@ func TestHostOwnerUIDRejectsHostSocketWithParentPID1(t *testing.T) {
 				}
 			}
 			events := []unix.PollFd{{Fd: int32(peer.Fd()), Events: unix.POLLIN}}
-			if n, err := unix.Poll(events, 0); err != nil || n != 0 {
+			if n, err := pollHostSocketPeer(events, deadline, unix.Poll); err != nil || n != 0 {
 				t.Fatalf("host process sent a request to an unrelated socket: poll=%d err=%v", n, err)
+			}
+		})
+	}
+}
+
+func pollHostSocketPeer(events []unix.PollFd, deadline time.Time, poll func([]unix.PollFd, int) (int, error)) (int, error) {
+	for {
+		n, err := poll(events, 0)
+		if !errors.Is(err, unix.EINTR) || !time.Now().Before(deadline) {
+			return n, err
+		}
+	}
+}
+
+func TestHostSocketPollRetriesInterruptedCall(t *testing.T) {
+	calls := 0
+	n, err := pollHostSocketPeer(nil, time.Now().Add(time.Second), func([]unix.PollFd, int) (int, error) {
+		calls++
+		if calls == 1 {
+			return -1, unix.EINTR
+		}
+		return 0, nil
+	})
+	if n != 0 || err != nil || calls != 2 {
+		t.Fatalf("poll after interruption = (%d, %v), calls=%d; want (0, nil), calls=2", n, err, calls)
+	}
+}
+
+func TestHostSocketPollKeepsReadyPeerAndDeadline(t *testing.T) {
+	for _, tc := range []struct {
+		name     string
+		deadline time.Time
+		result   int
+		err      error
+	}{
+		{name: "quiet peer", deadline: time.Now().Add(time.Second)},
+		{name: "ready peer", deadline: time.Now().Add(time.Second), result: 1},
+		{name: "interrupted at deadline", deadline: time.Now().Add(-time.Second), result: -1, err: unix.EINTR},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			calls := 0
+			n, err := pollHostSocketPeer(nil, tc.deadline, func([]unix.PollFd, int) (int, error) {
+				calls++
+				return tc.result, tc.err
+			})
+			if n != tc.result || !errors.Is(err, tc.err) || calls != 1 {
+				t.Fatalf("poll = (%d, %v), calls=%d; want (%d, %v), calls=1", n, err, calls, tc.result, tc.err)
 			}
 		})
 	}
