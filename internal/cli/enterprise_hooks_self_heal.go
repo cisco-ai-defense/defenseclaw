@@ -10,12 +10,6 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/managed"
 )
 
-// Service environment the installer pins on every managed service.
-const (
-	enterpriseHookServiceNameEnv        = "DEFENSECLAW_WINDOWS_SERVICE_NAME"
-	enterpriseHookGatewayServiceNameEnv = "DEFENSECLAW_WINDOWS_GATEWAY_SERVICE_NAME"
-)
-
 // enterpriseHookManagedInstallLayout derives the installed tree the guardian
 // keeps protected from where it runs: InstallRoot is the parent of the bin
 // folder holding the guardian executable, and StateRoot the parent of the

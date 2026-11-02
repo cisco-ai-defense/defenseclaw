@@ -17,6 +17,12 @@ import (
 	"golang.org/x/sys/windows"
 )
 
+// Service environment the installer pins on every managed service.
+const (
+	enterpriseHookServiceNameEnv        = "DEFENSECLAW_WINDOWS_SERVICE_NAME"
+	enterpriseHookGatewayServiceNameEnv = "DEFENSECLAW_WINDOWS_GATEWAY_SERVICE_NAME"
+)
+
 // The guardian's self-heal steps. Overridable by tests.
 var (
 	enterpriseWindowsManagedInstallRepair         = managed.RepairWindowsManagedInstall

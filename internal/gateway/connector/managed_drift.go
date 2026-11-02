@@ -345,12 +345,6 @@ type managedTransientRetry struct {
 	Max      time.Duration
 }
 
-var defaultManagedTransientRetry = managedTransientRetry{
-	Attempts: 8,
-	Initial:  25 * time.Millisecond,
-	Max:      800 * time.Millisecond,
-}
-
 // delay returns the wait before retry number attempt (zero based).
 func (r managedTransientRetry) delay(attempt int) time.Duration {
 	d := r.Initial
@@ -392,17 +386,6 @@ func (r managedTransientRetry) run(
 // most once per managedBoundaryWindow, so a writer that keeps coming back does
 // not flood the log while a new path or reason is still logged at once.
 // Repairs are actions and always logged.
-// emitManagedRepairResilience logs a completed repair. The re-stamp itself is
-// always a MarkerRepair line, so every repair is visible under one marker; an
-// untrusted writer on policy or code is additionally reported as a boundary
-// finding first, as managedDriftMarker decides.
-func emitManagedRepairResilience(drift managedDrift, policyOrCode bool, path, reason string, extra map[string]string) {
-	if marker := managedDriftMarker(drift, true, policyOrCode); marker != managed.MarkerRepair {
-		emitManagedResilience(marker, path, reason, extra)
-	}
-	emitManagedResilience(managed.MarkerRepair, path, reason, extra)
-}
-
 func emitManagedResilience(marker, path, reason string, extra map[string]string) {
 	if marker == managed.MarkerAccept && !managedAcceptDedupe.first(path, reason) {
 		return
@@ -528,20 +511,6 @@ func managedTargetRuntimeCanonicalModel(target string) managedDescriptor {
 			{SID: target, Mask: managedFileGenericRead | managedFileGenericWrite | managedFileGenericExec | managedDelete},
 			{SID: managedSIDLocalSystem, Mask: managedFileAllAccess},
 			{SID: managedSIDAdministrators, Mask: managedFileAllAccess},
-		},
-	}
-}
-
-// managedPrivateCanonicalModel is the private per-user descriptor used for
-// configuration transaction state: owned by the user, protected, full control
-// for LocalSystem and the user only.
-func managedPrivateCanonicalModel(user string) managedDescriptor {
-	return managedDescriptor{
-		Owner:     user,
-		Protected: true,
-		ACEs: []managedACE{
-			{SID: managedSIDLocalSystem, Mask: managedFileAllAccess},
-			{SID: user, Mask: managedFileAllAccess},
 		},
 	}
 }
