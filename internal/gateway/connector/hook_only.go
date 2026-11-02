@@ -1201,6 +1201,16 @@ func (c *hookOnlyConnector) patchConfig(opts SetupOpts, hookScript string) error
 	case "hermes":
 		err = patchHermesHooks(path, hookScript)
 	case "cursor":
+		if cursorHooksLockedWriter && opts.ManagedEnterprise {
+			err = patchCursorHooksLocked(
+				path,
+				opts.DataDir,
+				hookScript,
+				filepath.Join(opts.DataDir, "hooks", c.scriptName),
+				c.effectiveFailClosed(opts),
+			)
+			break
+		}
 		err = patchCursorHooks(
 			path,
 			hookScript,
@@ -1628,6 +1638,31 @@ func patchCursorHooks(path, hookScript, legacyShellScript string, failClosed boo
 	if err != nil {
 		return err
 	}
+	renderCursorHooks(cfg, hookScript, legacyShellScript, failClosed)
+	return writeJSONObject(path, cfg)
+}
+
+// patchCursorHooksLocked is patchCursorHooks under the config lock with a
+// compare-and-swap replace, as the Claude and Codex writers do, so a
+// concurrent Cursor or user edit is never silently overwritten.
+func patchCursorHooksLocked(path, stateDir, hookScript, legacyShellScript string, failClosed bool) error {
+	return withFileLock(path, func() error {
+		return atomicTransformFileWithStateDir(path, stateDir, 0o600, func(data []byte, _ bool) (atomicTransformResult, error) {
+			cfg, err := decodeJSONObject(path, data)
+			if err != nil {
+				return atomicTransformResult{}, err
+			}
+			renderCursorHooks(cfg, hookScript, legacyShellScript, failClosed)
+			out, err := json.MarshalIndent(cfg, "", "  ")
+			if err != nil {
+				return atomicTransformResult{}, err
+			}
+			return atomicTransformResult{Data: append(out, '\n')}, nil
+		})
+	})
+}
+
+func renderCursorHooks(cfg map[string]interface{}, hookScript, legacyShellScript string, failClosed bool) {
 	hooks := ensureJSONObject(cfg, "hooks")
 	cfg["version"] = 1
 	for _, event := range cursorHookEvents {
@@ -1647,7 +1682,6 @@ func patchCursorHooks(path, hookScript, legacyShellScript string, failClosed boo
 		// Entries not owned by DefenseClaw are preserved in their original order.
 		hooks[event] = replaceManagedCursorHooks(hooks[event], hookScript, legacyShellScript, entry)
 	}
-	return writeJSONObject(path, cfg)
 }
 
 func replaceManagedCursorHooks(raw interface{}, hookScript, legacyShellScript string, entry map[string]interface{}) []interface{} {
@@ -2033,6 +2067,10 @@ func readJSONObject(path string) (map[string]interface{}, error) {
 		}
 		return nil, err
 	}
+	return decodeJSONObject(path, data)
+}
+
+func decodeJSONObject(path string, data []byte) (map[string]interface{}, error) {
 	if len(bytes.TrimSpace(data)) == 0 {
 		return map[string]interface{}{}, nil
 	}

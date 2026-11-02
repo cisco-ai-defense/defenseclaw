@@ -178,6 +178,7 @@ func Verify(ctx context.Context, opts InstallOptions) (InstallResult, error) {
 
 	var result InstallResult
 	err = connector.WithUserHomeDir(home, func() error {
+		platformPrepareAgentPolicy(ctx, conn.Name(), home, dataDir, uid, gid, &setupOpts)
 		setupOpts, err = prepareHookContract(opts.GuardrailMode, conn, setupOpts)
 		if err != nil {
 			return err
@@ -344,6 +345,7 @@ func Install(ctx context.Context, opts InstallOptions) (InstallResult, error) {
 
 	var result InstallResult
 	err = connector.WithUserHomeDir(home, func() error {
+		platformPrepareAgentPolicy(ctx, conn.Name(), home, dataDir, uid, gid, &setupOpts)
 		requestedHookFailMode := canonicalHookFailMode(setupOpts.HookFailMode)
 		setupOpts, err = prepareHookContract(opts.GuardrailMode, conn, setupOpts)
 		if err != nil {
