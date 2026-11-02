@@ -4436,7 +4436,7 @@ func actionSpelledWindowsTarget(value string, tilde bool, base, home string, sta
 	if strings.ContainsAny(value, "*?[]") {
 		return !stateOnly && actionWindowsProtectedGlobReach(value, base, home)
 	}
-	resolved, ok := actionWindowsPath(value, base, home)
+	resolved, ok := actionWindowsPathFromPOSIX(value, base, home)
 	if !ok {
 		return false
 	}
@@ -4448,8 +4448,15 @@ func actionSpelledWindowsTarget(value string, tilde bool, base, home string, sta
 		return strings.HasPrefix(resolved, root+"/") &&
 			actionProtectedStateRelative(strings.TrimPrefix(resolved, root+"/"))
 	}
-	protected, _ := actionWindowsProtected(value, base, home, false)
-	return resolved == root+"/.ssh" || protected
+	if resolved == root+"/.ssh" {
+		return true
+	}
+	for _, name := range AuthorizedKeysFiles {
+		if resolved == root+"/.ssh/"+name {
+			return true
+		}
+	}
+	return false
 }
 
 // actionStateEntryMayDiffer reports that the entry reading of value (its

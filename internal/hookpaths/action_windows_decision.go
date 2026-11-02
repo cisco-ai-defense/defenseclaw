@@ -19,7 +19,19 @@ func actionWindowsHome(home string) bool {
 }
 
 func actionWindowsPath(value, cwd, home string) (string, bool) {
-	value = strings.TrimSpace(strings.ReplaceAll(value, `\`, "/"))
+	return actionWindowsPathWithTrim(value, cwd, home, true)
+}
+
+// POSIX word expansion preserves whitespace inside a quoted or unsplit path.
+func actionWindowsPathFromPOSIX(value, cwd, home string) (string, bool) {
+	return actionWindowsPathWithTrim(value, cwd, home, false)
+}
+
+func actionWindowsPathWithTrim(value, cwd, home string, trim bool) (string, bool) {
+	value = strings.ReplaceAll(value, `\`, "/")
+	if trim {
+		value = strings.TrimSpace(value)
+	}
 	if value == "" || strings.ContainsAny(value, "\x00\r\n`") {
 		return "", false
 	}

@@ -36,7 +36,9 @@ func actionPosixCopyVariableTarget(call *syntax.CallExpr, values actionValues, c
 				if _, simple := actionSimpleProgramParameter(word); !simple {
 					return "", false
 				}
-				fields := strings.Fields(value)
+				fields := strings.FieldsFunc(value, func(r rune) bool {
+					return r == ' ' || r == '\t' || r == '\n'
+				})
 				if len(fields) < 1 || len(fields) > 8 {
 					return "", false
 				}
