@@ -88,7 +88,8 @@ _YES = _Flag("yes", "bool", "answer every question with its default", short="y")
 _SESSION_YES = _Flag(
     "yes",
     "bool",
-    "take the defaults at the end of the session (mount: keep the changes; copy: leave them in the sandbox for later pull --apply, --branch or --patch-out FILE)",
+    "take the defaults at the end of the session (mount: keep the changes; copy: leave them in the sandbox for later "
+    "pull --apply, --branch or --patch-out FILE)",
     short="y",
 )
 
@@ -200,7 +201,8 @@ SANDBOX_COMMANDS: tuple[_Cmd, ...] = (
             "--safe keeps the harness's own prompts. The harness gets your terminal; when it exits "
             "you get a summary, a review of changed files that can run code on your machine, and "
             "the choice to keep or undo the changes (from a copy: to bring them back, or leave them "
-            "in the sandbox for later pull --apply, --branch or --patch-out FILE). Arguments after -- go to the harness. A headless run in the "
+            "in the sandbox for later pull --apply, --branch or --patch-out FILE). Arguments after -- go to the "
+            "harness. A headless run in the "
             "foreground (--prompt, or the harness's own print flag after --) deletes its sandbox when "
             "it ends and nothing is left in it to bring back or undo, as --rm does; --keep (or "
             "openshell.keep_headless) keeps it. Interactive sessions and --detach runs keep their sandbox."
@@ -216,7 +218,8 @@ SANDBOX_COMMANDS: tuple[_Cmd, ...] = (
             _Flag(
                 "copy",
                 "bool",
-                "work on a copy of the folder with secrets held back; bring changes back with pull --apply (or --branch or --patch-out FILE)",
+                "work on a copy of the folder with secrets held back; bring changes back with pull --apply (or "
+                "--branch or --patch-out FILE)",
             ),
             _Flag("safe", "bool", "keep the harness's own permission prompts (skip-permissions off)"),
             _Flag(
