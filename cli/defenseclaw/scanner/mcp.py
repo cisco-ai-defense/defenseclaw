@@ -2475,6 +2475,7 @@ class MCPScannerWrapper:
                 )
             )
         )
+        self._advertised_tool_names, self._advertised_tool_names_partial = _safe_inventory_tool_names(tool_results)
         for tr in tool_results:
             entity_name = getattr(tr, "tool_name", "")
             for finding in _extract_findings(tr):
