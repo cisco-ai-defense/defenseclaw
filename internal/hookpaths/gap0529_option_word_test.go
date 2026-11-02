@@ -50,3 +50,25 @@ func TestGAP0529POSIXCopyOptionVariableDefaultIFS(t *testing.T) {
 		})
 	}
 }
+
+func TestGAP0529POSIXCopyDestinationVariableDefaultIFS(t *testing.T) {
+	home := "C:/Users/Alice"
+	cwd := home + "/project"
+	for _, row := range []struct {
+		name, separator string
+		protected       bool
+	}{
+		{"leading space", " ", true},
+		{"leading tab", "\t", true},
+		{"nonbreaking space", "\u00a0", false},
+		{"em space", "\u2003", false},
+	} {
+		t.Run(row.name, func(t *testing.T) {
+			command := `t="` + row.separator + `$HOME/.ssh"; cp a.txt $t`
+			mention := actionPosixTargetMention(command, cwd, home, 0, false, nil)
+			if mention != row.protected {
+				t.Errorf("mention=%t, want protected=%t", mention, row.protected)
+			}
+		})
+	}
+}
