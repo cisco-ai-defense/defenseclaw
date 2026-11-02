@@ -58,12 +58,14 @@ request that builds the install assets (job `perf-budget` in
 `.github/workflows/ci.yml`).
 
 `budgets.json` holds columns by OS, mode, and measured host class. On Linux,
-`--column linux-per-user` selects the measured arm64 2-CPU column when the
-result names that host class. Its idle hook, status, and doctor latency seeds
-come from the three quiet runs linked by `rel-1-0-6:GAP-0519`; the 20% tolerance
-and the common correctness, process-count, restart, and RSS gates are inherited
-without change. An arm64 result with another CPU count needs its own measured
-column and exits with a no-baseline error.
+`--column linux-per-user` selects the arm64 2-CPU column when the result names
+that host class. It inherits the published 1.0.4 seeds from `dc-rhel`. The four
+idle hook latency gates and status p50 use the result's `host.cpu_score_ms`
+relative to the seed host's median score, 162.2 ms, measured in the three
+`vsweep9/oss-rhel/GAP-0239` runs on that same host. Doctor, the 20% tolerance,
+and the correctness, process-count, restart, and RSS gates retain their
+original values. A missing CPU score or a different arm64 CPU count exits
+with a no-baseline error.
 
 Entries with a number are
 gated, entries with `"gate": false` are shown but not gated, and `"TODO"`

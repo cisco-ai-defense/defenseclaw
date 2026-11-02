@@ -48,6 +48,7 @@ import argparse
 import calendar
 import concurrent.futures
 import json
+import math
 import os
 import platform
 import re
@@ -139,7 +140,7 @@ def budget_column_for_result(result: dict, column: str) -> str:
 
 
 def budget_entries(budgets: dict, column: str) -> dict:
-    """Expand one measured column over its common, machine-independent gates."""
+    """Expand one measured column over its common gates."""
     columns = budgets.get("columns", {})
     entries = columns.get(column)
     if entries is None:
@@ -150,7 +151,10 @@ def budget_entries(budgets: dict, column: str) -> dict:
     base = columns.get(base_name)
     if base is None or "extends" in base:
         raise ValueError(f"budgets.json has no direct base for {column!r}")
-    return {**base, **{metric: entry for metric, entry in entries.items() if metric != "extends"}}
+    return {
+        **base,
+        **{metric: entry for metric, entry in entries.items() if metric not in ("extends", "cpu_normalization")},
+    }
 
 
 def compare(result: dict, budgets: dict, column: str) -> dict:
@@ -165,6 +169,27 @@ def compare(result: dict, budgets: dict, column: str) -> dict:
     tolerance = float(budgets.get("tolerance", 0.20))
     column = budget_column_for_result(result, column)
     col = budget_entries(budgets, column)
+    normalization = budgets.get("columns", {}).get(column, {}).get("cpu_normalization")
+    ratio = 1.0
+    normalized_metrics: set[str] = set()
+    if normalization is not None:
+        seed_score = normalization.get("seed_host_score_ms")
+        host_score = result.get("host", {}).get("cpu_score_ms")
+        if (
+            not isinstance(seed_score, (int, float))
+            or not isinstance(host_score, (int, float))
+            or isinstance(seed_score, bool)
+            or isinstance(host_score, bool)
+            or not math.isfinite(seed_score)
+            or not math.isfinite(host_score)
+            or seed_score <= 0
+            or host_score <= 0
+        ):
+            raise ValueError(f"no valid CPU score for {column!r} budget normalization")
+        normalized_metrics = set(normalization["metrics"])
+        if not normalized_metrics <= col.keys():
+            raise ValueError(f"unknown CPU-normalized metric in {column!r}")
+        ratio = host_score / seed_score
     values = flatten(result)
     rows = []
     for metric, entry in sorted(col.items()):
@@ -176,16 +201,32 @@ def compare(result: dict, budgets: dict, column: str) -> dict:
         if isinstance(entry, dict) and entry.get("gate") is False:
             rows.append({"metric": metric, "value": value, "budget": budget, "status": "info"})
             continue
-        limit = float(budget) * (1.0 + tolerance)
+        effective_budget = float(budget) * ratio if metric in normalized_metrics else float(budget)
+        limit = effective_budget * (1.0 + tolerance)
         if value is None:
             status = "missing"
         elif value > limit:
             status = "regression"
         else:
             status = "ok"
-        rows.append({"metric": metric, "value": value, "budget": budget, "limit": round(limit, 1), "status": status})
+        rows.append(
+            {
+                "metric": metric,
+                "value": value,
+                "budget": round(effective_budget, 1),
+                "limit": round(limit, 1),
+                "status": status,
+            }
+        )
     failed = [r for r in rows if r["status"] in ("regression", "missing")]
-    return {"column": column, "tolerance": tolerance, "rows": rows, "failed": len(failed), "ok": not failed}
+    return {
+        "column": column,
+        "tolerance": tolerance,
+        "cpu_ratio": ratio,
+        "rows": rows,
+        "failed": len(failed),
+        "ok": not failed,
+    }
 
 
 def merge_results(results: list[dict]) -> dict:
@@ -223,6 +264,8 @@ def compare_text(report: dict) -> str:
         f"budget check [{report['column']}] tolerance {report['tolerance']:.0%}: "
         f"{'PASS' if report['ok'] else 'FAIL'} ({report['failed']} failed)"
     )
+    if report.get("cpu_ratio", 1.0) != 1.0:
+        head += f"; selected latency budgets scaled by CPU score x{report['cpu_ratio']:.2f}"
     return "\n".join([head] + lines)
 
 

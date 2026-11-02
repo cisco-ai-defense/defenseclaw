@@ -75,7 +75,7 @@ def test_a_benign_call_that_is_not_allowed_fails_a_zero_budget() -> None:
     assert not report["ok"]
 
 
-def test_arm64_two_cpu_budget_uses_its_measured_seed_and_keeps_the_zero_budget() -> None:
+def test_arm64_two_cpu_budget_selects_its_column_and_keeps_the_zero_budget() -> None:
     budgets = {
         "tolerance": 0.20,
         "columns": {
@@ -107,11 +107,65 @@ def test_arm64_two_cpu_budget_uses_its_measured_seed_and_keeps_the_zero_budget()
 
     arm_entries = dcperf.budget_entries(BUDGETS, "linux-per-user-arm64-2cpu")
     x86_entries = BUDGETS["columns"]["linux-per-user"]
-    assert arm_entries["hook.claudecode.idle.p50_ms"]["budget"] == 99.6
-    for metric in ("hook.claudecode.idle.not_allowed", "hook_execs.claudecode.per_call_p50"):
+    for metric in (
+        "hook.claudecode.idle.p50_ms",
+        "hook.claudecode.idle.not_allowed",
+        "hook_execs.claudecode.per_call_p50",
+        "cli.doctor.p50_ms",
+    ):
         assert arm_entries[metric] == x86_entries[metric]
+    assert arm_entries["hook.claudecode.idle.p50_ms"]["budget"] == 79.8
     result["host"]["cpus"] = 4
     with pytest.raises(ValueError, match="no seeded"):
+        dcperf.compare(result, budgets, "linux-per-user")
+
+
+def test_arm64_two_cpu_budget_normalizes_selected_latencies_from_release_seed() -> None:
+    column = BUDGETS["columns"]["linux-per-user-arm64-2cpu"]
+    normalization = column["cpu_normalization"]
+    assert normalization["seed_host_score_ms"] == 162.2
+    assert len(normalization["metrics"]) == 5
+    assert "cli.doctor.p50_ms" not in normalization["metrics"]
+    assert "GAP-0519" not in normalization["source"]
+
+    budgets = {
+        "tolerance": 0.2,
+        "columns": {
+            "linux-per-user": {
+                "hook.claudecode.idle.p50_ms": {"budget": 80},
+                "hook.claudecode.idle.not_allowed": {"budget": 0},
+                "cli.doctor.p50_ms": {"budget": 100},
+            },
+            "linux-per-user-arm64-2cpu": {
+                "extends": "linux-per-user",
+                "cpu_normalization": {
+                    "seed_host_score_ms": 100,
+                    "metrics": ["hook.claudecode.idle.p50_ms"],
+                },
+            },
+        },
+    }
+    result = {
+        "host": {"system": "Linux", "machine": "aarch64", "cpus": 2, "cpu_score_ms": 200},
+        "metrics": {
+            "hook": {"claudecode": {"idle": {"p50_ms": 192, "not_allowed": 0}}},
+            "cli": {"doctor": {"p50_ms": 120}},
+        },
+    }
+    within = dcperf.compare(result, budgets, "linux-per-user")
+    assert within["ok"]
+    rows = {row["metric"]: row for row in within["rows"]}
+    assert rows["hook.claudecode.idle.p50_ms"]["limit"] == 192
+    assert rows["cli.doctor.p50_ms"]["limit"] == 120
+    assert rows["hook.claudecode.idle.not_allowed"]["limit"] == 0
+
+    result["metrics"]["hook"]["claudecode"]["idle"]["p50_ms"] = 192.1
+    assert not dcperf.compare(result, budgets, "linux-per-user")["ok"]
+    result["metrics"]["hook"]["claudecode"]["idle"]["p50_ms"] = 100
+    result["metrics"]["hook"]["claudecode"]["idle"]["not_allowed"] = 1
+    assert not dcperf.compare(result, budgets, "linux-per-user")["ok"]
+    del result["host"]["cpu_score_ms"]
+    with pytest.raises(ValueError, match="no valid CPU score"):
         dcperf.compare(result, budgets, "linux-per-user")
 
 
