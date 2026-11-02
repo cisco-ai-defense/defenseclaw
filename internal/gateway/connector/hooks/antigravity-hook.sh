@@ -400,12 +400,12 @@ readonly FAIL_MODE{{else}}FAIL_MODE="{{.FailMode}}"
 # an unreachable DefenseClaw, a request it refused, a reply that is no
 # verdict. The tool call is blocked either way.
 {{end}}antigravity_emit_fallback() {
-  local closed="${1:-0}"{{if .Sandbox}}
+  local closed="${1:-0}"{{if or .Sandbox (not .SecureClient)}}
   local reason="${2:-DefenseClaw policy service is unavailable.}"{{end}}
   case "$HOOK_EVENT" in
     PreToolUse)
       if [ "$closed" = "1" ]; then
-{{if .Sandbox}}        printf '{"decision":"deny","reason":"%s"}\n' "$(defenseclaw_json_escape "$reason")"
+{{if or .Sandbox (not .SecureClient)}}        printf '{"decision":"deny","reason":"%s"}\n' "$(defenseclaw_json_escape "$reason")"
 {{else}}        printf '%s\n' '{"decision":"deny","reason":"DefenseClaw policy service is unavailable."}'
 {{end}}      else
         printf '%s\n' '{"decision":"allow"}'
@@ -495,12 +495,21 @@ API_TOKEN="${DEFENSECLAW_GATEWAY_TOKEN:-}"
 # cold-started gateway) inherits the bearer in its environment.
 unset DEFENSECLAW_GATEWAY_TOKEN{{end}}
 
-fail_unreachable() {
+{{if and (not .Sandbox) (not .SecureClient)}}antigravity_outage_block_reason() {
+  local reason="$1" next=""
+  if [ "$reason" = "gateway unreachable" ]; then
+    next="$(defenseclaw_unreachable_next_step)"
+    [ -z "$next" ] || reason="$next"
+  fi
+  printf 'DefenseClaw blocked this tool call: %s' "$reason"
+}
+
+{{end}}fail_unreachable() {
 {{if and (not .Managed) (not .Sandbox)}}  defenseclaw_close_during_install
 {{end}}  defenseclaw_log_hook_delivery_failure antigravity antigravity-hook "$1" transport "$FAIL_MODE"
   defenseclaw_emit_unreachable_stderr "antigravity tool" "$1"
   if defenseclaw_should_fail_closed_on_unreachable; then
-    antigravity_emit_fallback 1
+    antigravity_emit_fallback 1{{if and (not .Sandbox) (not .SecureClient)}} "$(antigravity_outage_block_reason "$1")"{{end}}
   else
     antigravity_emit_fallback 0
   fi
