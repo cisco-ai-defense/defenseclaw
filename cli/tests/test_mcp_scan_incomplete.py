@@ -8,13 +8,16 @@ instead, so the gateway blocks the server as not scanned (fail closed).
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
+from datetime import datetime, timezone
 from types import SimpleNamespace
 from unittest.mock import patch
 
 import pytest
 from defenseclaw.config import MCPScannerConfig, MCPServerEntry
 from defenseclaw.scanner import mcp
+from defenseclaw.models import ScanResult
 
 from tests.os_view import os_view
 
@@ -105,6 +108,37 @@ def test_windows_scan_that_inspected_every_tool_returns_its_findings() -> None:
     ):
         found = wrapper._scan_local(SimpleNamespace(), MCPServerEntry(name="ok", command="npx", args=["pkg"]), [])
     assert found == [finding]
+    assert wrapper._advertised_tool_names == ["ping"]
+
+
+def test_windows_clean_listing_retains_names_without_findings() -> None:
+    wrapper = mcp.MCPScannerWrapper(MCPScannerConfig(analyzers="yara"))
+    plan = mcp._StdioLaunchPlan("resolved", (), {}, "npx")
+
+    async def scan(*_args, **_kwargs):
+        return [_tool_result("ping", ["yara"])], 0
+
+    with (
+        patch.object(mcp.os, "name", "nt"),
+        patch.object(mcp, "_windows_stdio_launch_plan", return_value=plan),
+        patch.object(mcp, "_scan_windows_stdio_tools", scan),
+    ):
+        findings = wrapper._scan_local(SimpleNamespace(), MCPServerEntry(name="ok", command="npx", args=["pkg"]), [])
+    assert findings == []
+    assert wrapper._advertised_tool_names == ["ping"]
+
+
+def test_clean_and_partial_tool_names_survive_scan_json_without_content() -> None:
+    names, partial = mcp._safe_inventory_tool_names([
+        _tool_result("search", []), _tool_result("search", []), _tool_result("bad/name", []),
+    ])
+    assert names == ["search"] and partial
+    result = ScanResult(scanner="mcp-scanner", target="notes", timestamp=datetime.now(timezone.utc),
+                        advertised_tools=names, advertised_tools_partial=partial)
+    payload = json.loads(result.to_json())
+    assert payload["advertised_tools"] == ["search"]
+    assert payload["advertised_tools_partial"] is True
+    assert "description" not in payload and "input_schema" not in payload
 
 
 def test_local_scan_with_a_failed_analyzer_fails_instead_of_clean() -> None:

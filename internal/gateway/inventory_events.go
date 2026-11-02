@@ -87,6 +87,10 @@ type endpointInventoryComponent struct {
 	mcpArgumentsFingerprint     string
 	mcpSourceScope              string
 	mcpServerURL                string
+	mcpIsRemote                 bool
+	mcpToolParentID             string
+	mcpToolSource               string
+	mcpToolObservedAt           string
 	mcpURLHost                  string
 	mcpAuthProviderType         string
 	mcpDisabled                 *bool
@@ -191,6 +195,7 @@ func emitEndpointInventory(
 	connectorDiscoveryPartial bool,
 	discoveryReport *inventory.AIDiscoveryReport,
 	gate *managedInventoryPublishState,
+	toolStates ...*mcpToolInventory,
 ) error {
 	if !ManagedEnterpriseActive() || ctx == nil || emitter == nil {
 		return nil
@@ -288,6 +293,27 @@ func emitEndpointInventory(
 		config.ObservabilityV8ManagedMCPInventoryAction, publish,
 	); err != nil && firstErr == nil {
 		firstErr = err
+	}
+	if len(toolStates) > 0 && toolStates[0] != nil {
+		if !perConnectorPartial && !connectorDiscoveryPartial {
+			toolStates[0].refreshParents(perConnectorMCP)
+		}
+		rows, toolPartial := toolStates[0].components(perConnectorMCP, false)
+		err := emitEndpointInventorySnapshot(ctx, emitter, "endpoint_local_mcp_tool_inventory", rows, perConnectorPartial || toolPartial,
+			config.ObservabilityV8ManagedMCPInventoryAction, publish)
+		if err != nil && firstErr == nil {
+			firstErr = err
+		}
+		outcome, reason := "submitted", "none"
+		switch {
+		case err != nil:
+			outcome, reason = "error", "publish_error"
+		case perConnectorPartial || toolPartial:
+			outcome, reason = "partial", "incomplete"
+		case len(rows) == 0:
+			outcome = "empty"
+		}
+		toolStates[0].recordMetric(ctx, "export", outcome, reason)
 	}
 	return firstErr
 }
@@ -440,6 +466,7 @@ func perConnectorMCPEntriesForOSWithHomeGuard(cfg *config.Config, reg *connector
 				mcpArgumentsFingerprint: argumentsFingerprint,
 				mcpSourceScope:          inventoryStableToken(server.SourceScope, 64),
 				mcpServerURL:            serverURL,
+				mcpIsRemote:             server.URL != "",
 				mcpURLHost:              host,
 				mcpAuthProviderType:     inventoryStableToken(server.AuthProviderType, 64),
 				mcpDisabled:             &disabled,
@@ -788,6 +815,7 @@ func makeEndpointInventoryEmitter(
 	emitter sidecarRuntimeEmitter,
 	snapshotFn func() inventory.AIDiscoveryReport,
 	gate *managedInventoryPublishState,
+	tools *mcpToolInventory,
 ) func(context.Context) {
 	return func(ctx context.Context) {
 		reg := connector.NewDefaultRegistry()
@@ -809,7 +837,7 @@ func makeEndpointInventoryEmitter(
 				report = &snap
 			}
 		}
-		_ = emitEndpointInventory(ctx, cfg, reg, emitter, partial, report, gate)
+		_ = emitEndpointInventory(ctx, cfg, reg, emitter, partial, report, gate, tools)
 	}
 }
 
@@ -921,6 +949,7 @@ func endpointMCPComponentsFromServers(servers []config.MCPServerEntry, fingerpri
 			mcpArgumentsFingerprint: argumentsFingerprint,
 			mcpSourceScope:          inventoryStableToken(server.SourceScope, 64),
 			mcpServerURL:            serverURL,
+			mcpIsRemote:             server.URL != "",
 			mcpURLHost:              host,
 			mcpAuthProviderType:     inventoryStableToken(server.AuthProviderType, 64),
 			mcpDisabled:             &disabled,
@@ -975,6 +1004,9 @@ func emitInventorySnapshot(
 	}
 	limit := managedInventoryLimit(managedAction)
 	carrier, carrierOK := endpointInventoryCarrierFor(managedAction, components)
+	if len(components) == 0 && strings.HasSuffix(source, "_mcp_tool_inventory") {
+		carrier, carrierOK = endpointInventoryCarrier{}, true
+	}
 	action := managedAction
 	if partial || limit == 0 || len(components) > limit || !carrierOK {
 		partial = true
@@ -1080,6 +1112,14 @@ func endpointInventoryCarrierFor(
 			connectorContent:     observability.Present(observability.TelemetryStructuredDefenseClawInventoryConnectorContent{Items: content}),
 		}, true
 	case config.ObservabilityV8ManagedMCPInventoryAction:
+		if len(components) > 0 && components[0].componentType == "mcp_tool" {
+			for _, component := range components {
+				if component.componentType != "mcp_tool" || component.mcpToolParentID == "" || component.mcpToolSource == "" {
+					return endpointInventoryCarrier{}, false
+				}
+			}
+			return endpointInventoryCarrier{}, true
+		}
 		identifiers := make([]observability.TelemetryStructuredDefenseClawInventoryMcpIdentifier, 0, len(components))
 		metadata := make([]observability.TelemetryStructuredDefenseClawInventoryMcpMetadataItem, 0, len(components))
 		for _, component := range components {
@@ -1281,6 +1321,9 @@ func emitEndpointInventoryComponent(
 			DefenseClawInventoryMcpArgumentsFingerprint:     aiDiscoveryV8OptionalText(component.mcpArgumentsFingerprint),
 			DefenseClawInventoryMcpSourceScope:              aiDiscoveryV8OptionalText(component.mcpSourceScope),
 			DefenseClawInventoryMcpServerURL:                aiDiscoveryV8OptionalText(component.mcpServerURL),
+			DefenseClawInventoryMcpToolParentID:             aiDiscoveryV8OptionalText(component.mcpToolParentID),
+			DefenseClawInventoryMcpToolSource:               aiDiscoveryV8OptionalText(component.mcpToolSource),
+			DefenseClawInventoryMcpToolObservedAt:           aiDiscoveryV8OptionalText(component.mcpToolObservedAt),
 			DefenseClawInventoryMcpURLHost:                  aiDiscoveryV8OptionalText(component.mcpURLHost),
 			DefenseClawInventoryMcpAuthProviderType:         aiDiscoveryV8OptionalText(component.mcpAuthProviderType),
 			DefenseClawInventoryMcpDisabled:                 inventoryOptionalBool(component.mcpDisabled),

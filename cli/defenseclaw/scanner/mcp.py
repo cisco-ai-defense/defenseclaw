@@ -1991,6 +1991,28 @@ async def _run_with_pinned_dns(make_scan: Callable[[], Awaitable[_T]]) -> _T:
         return await make_scan()
 
 
+def _safe_inventory_tool_names(results: object) -> tuple[list[str], bool]:
+    """Keep only bounded, single-component names from tools/list results."""
+    names: list[str] = []
+    seen: set[str] = set()
+    partial = False
+    for result in results:
+        name = getattr(result, "tool_name", None)
+        if not isinstance(name, str) or not name or len(name.encode("utf-8")) > 256:
+            partial = True
+            continue
+        if name != name.strip() or any(ord(ch) < 32 or ord(ch) == 127 or ch in "/\\" for ch in name):
+            partial = True
+            continue
+        if name not in seen:
+            if len(names) >= 256:
+                partial = True
+                break
+            seen.add(name)
+            names.append(name)
+    return names, partial
+
+
 class MCPScannerWrapper:
     """Wraps the cisco-ai-mcp-scanner SDK.
 
@@ -2206,6 +2228,8 @@ class MCPScannerWrapper:
         except ImportError:
             pass
         self._llm_skipped = ""
+        self._advertised_tool_names: list[str] = []
+        self._advertised_tool_names_partial = False
         start = time.monotonic()
 
         # Settings come from config (sdk_config above); inherited
@@ -2225,6 +2249,8 @@ class MCPScannerWrapper:
 
         elapsed = time.monotonic() - start
         result = self._convert(all_findings, target, elapsed)
+        result.advertised_tools = list(self._advertised_tool_names)
+        result.advertised_tools_partial = self._advertised_tool_names_partial
         if self._llm_skipped:
             result.notes.append(self._llm_skipped)
         return result
@@ -2336,6 +2362,7 @@ class MCPScannerWrapper:
                 self._warn_llm_skipped(entry.name, llm_errors[0])
 
             all_findings: list[object] = []
+            self._advertised_tool_names, self._advertised_tool_names_partial = _safe_inventory_tool_names(results)
             for tool_result in results:
                 entity_name = getattr(tool_result, "tool_name", "")
                 for finding in _extract_findings(tool_result):
@@ -2406,6 +2433,7 @@ class MCPScannerWrapper:
             _raise_if_analysis_incomplete(entry.name, errors, list(results or []), scanner)
 
             all_findings: list[object] = []
+            self._advertised_tool_names, self._advertised_tool_names_partial = _safe_inventory_tool_names(results)
             for tr in results:
                 entity_name = getattr(tr, "tool_name", "")
                 for finding in _extract_findings(tr):
