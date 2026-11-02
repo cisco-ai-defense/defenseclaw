@@ -230,10 +230,11 @@ func TestOversizedPayloadManagedForcesClosed(t *testing.T) {
 				}
 				return
 			}
-			// The event of an oversized payload is unknown, so Codex gets the
-			// structured block with exit 0 rather than a bare exit it ignores.
-			if r.code != 0 || !codexBlocked(r.stdout) {
-				t.Fatalf("managed oversized code = %d stdout = %q, want Codex's structured block", r.code, r.stdout)
+			// Codex gets its own block for the event (here PreToolUse) with
+			// exit 0, never a bare exit it would treat as a hook failure.
+			want := `{"hookSpecificOutput":{"hookEventName":"PreToolUse","permissionDecision":"deny","permissionDecisionReason":"DefenseClaw hook payload too large"}}` + "\n"
+			if r.code != 0 || r.stdout != want {
+				t.Fatalf("managed oversized code = %d stdout = %q, want %q", r.code, r.stdout, want)
 			}
 			requireOneManagedRecord(t, *records, managed.MarkerBoundary,
 				`reason="`+managedHookOversizedReason+`"`,

@@ -178,3 +178,59 @@ func TestCodexFailClosedReplyLeavesOtherPathsUnchanged(t *testing.T) {
 		}
 	})
 }
+
+// An oversized managed Codex payload is denied with the event's own block,
+// recovered from the payload's prefix: a top-level decision does not deny a
+// PermissionRequest or PreToolUse. With no event in the prefix it falls back
+// to the structured decision.
+func TestManagedCodexOversizedAnswersWithCodexBlockForEvent(t *testing.T) {
+	big := strings.Repeat("x", 64)
+	for _, tc := range []struct {
+		name    string
+		payload string
+		want    string
+	}{
+		{
+			name:    "PermissionRequest",
+			payload: `{"hook_event_name":"PermissionRequest","tool_input":"` + big + `"}`,
+			want:    `{"hookSpecificOutput":{"hookEventName":"PermissionRequest","decision":{"behavior":"deny","message":"DefenseClaw hook payload too large"}}}` + "\n",
+		},
+		{
+			name:    "PreToolUse",
+			payload: `{"hook_event_name":"PreToolUse","tool_input":"` + big + `"}`,
+			want:    `{"hookSpecificOutput":{"hookEventName":"PreToolUse","permissionDecision":"deny","permissionDecisionReason":"DefenseClaw hook payload too large"}}` + "\n",
+		},
+		{
+			name:    "no event",
+			payload: `{"tool_input":"` + big + `"}`,
+			want:    `{"decision":"block","reason":"DefenseClaw hook payload too large"}` + "\n",
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			r := run(t, "codex", ok(`{"action":"allow"}`), func(o *Options) {
+				o.Event = ""
+				o.ManagedEnterprise = true
+				o.FailMode = "open"
+				token := "authenticated-token"
+				o.AuthenticatedManagedToken = &token
+				o.MaxBody = 48
+				o.Stdin = strings.NewReader(tc.payload)
+			})
+			if r.rt.requests != 0 {
+				t.Fatal("oversized payload reached the gateway")
+			}
+			if r.code != 0 || r.stdout != tc.want {
+				t.Fatalf("code = %d stdout = %q, want 0 and %q", r.code, r.stdout, tc.want)
+			}
+		})
+	}
+}
+
+func TestOversizedHookEventReadsThePrefix(t *testing.T) {
+	if got := oversizedHookEvent([]byte(`{"session_id":"s","hook_event_name" : "PermissionRequest","tool_input":"…`)); got != "PermissionRequest" {
+		t.Fatalf("event = %q", got)
+	}
+	if got := oversizedHookEvent([]byte(`{"tool_input":"…`)); got != "" {
+		t.Fatalf("event = %q, want none", got)
+	}
+}

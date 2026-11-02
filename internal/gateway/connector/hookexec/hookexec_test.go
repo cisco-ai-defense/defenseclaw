@@ -1656,8 +1656,3 @@ func TestDefaultHTTPClientDoesNotFollowRedirects(t *testing.T) {
 func failClosedExit(string) int {
 	return blockExit
 }
-
-// codexBlocked reports whether stdout carries Codex's structured block.
-func codexBlocked(stdout string) bool {
-	return strings.Contains(stdout, `"decision":"block"`)
-}

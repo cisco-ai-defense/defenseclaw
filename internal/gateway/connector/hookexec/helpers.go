@@ -37,7 +37,9 @@ func readCapped(r io.Reader, max int64) (payload []byte, overflow bool, err erro
 		return nil, false, err
 	}
 	if int64(len(data)) > max {
-		return nil, true, nil
+		// The prefix is returned so an oversized payload's event can still be
+		// recovered (oversizedHookEvent); it is never sent anywhere.
+		return data[:max], true, nil
 	}
 	return data, false, nil
 }

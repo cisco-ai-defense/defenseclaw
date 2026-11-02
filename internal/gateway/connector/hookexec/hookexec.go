@@ -37,6 +37,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strconv"
 	"strings"
 	"time"
@@ -293,6 +294,9 @@ func Run(ctx context.Context, opts Options) int {
 		overflow = true
 	}
 	if overflow {
+		if strings.TrimSpace(opts.Event) == "" && err == nil {
+			opts.Event = oversizedHookEvent(payload)
+		}
 		return handleOversized(opts, sp, failMode)
 	}
 	opts.Event = resolveHookEvent(opts.Event, payload)
@@ -673,9 +677,34 @@ func handleOversized(opts Options, sp spec, failMode string) int {
 	logHookFailure(opts, sp, managedHookOversizedReason, "transport", failMode, failMode == "closed")
 	writeFailureDiagnostic(opts, failMode == "closed", "defenseclaw: %s hook refusing oversized payload\n", sp.connector)
 	if failMode == "closed" {
+		// A managed Codex hook denies with the event's own block when the
+		// event could be read from the payload's prefix: a top-level decision
+		// does not deny a PreToolUse or PermissionRequest.
+		if sp.style == styleCodex && opts.ManagedEnterprise &&
+			emitCodexBlock(opts.Stdout, opts.Event, tooLarge) {
+			return 0
+		}
 		return emit(opts.Stdout, sp.oversizedClosed)
 	}
 	return emit(opts.Stdout, sp.openAllow)
+}
+
+// oversizedHookEventPattern finds the hook_event_name field in the prefix of
+// a payload too large to parse; the agents send it near the start.
+var oversizedHookEventPattern = regexp.MustCompile(`"hook_event_name"\s*:\s*"([A-Za-z]{1,64})"`)
+
+// oversizedHookEvent recovers the hook event from the first 64 KiB of an
+// oversized payload, or "" when it is not there.
+func oversizedHookEvent(prefix []byte) string {
+	const window = 64 << 10
+	if len(prefix) > window {
+		prefix = prefix[:window]
+	}
+	match := oversizedHookEventPattern.FindSubmatch(prefix)
+	if match == nil {
+		return ""
+	}
+	return string(match[1])
 }
 
 // ManagedHookBlockMessage is the only text a managed hook writes to stderr,
