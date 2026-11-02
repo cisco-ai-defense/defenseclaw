@@ -1068,6 +1068,8 @@ structured_types:
     fields:
       - {name: name, required: true, type: string, field_class: identifier, sensitivity: internal, normalization: {id: bounded-v1, overrides: {max_utf8_bytes: 256, pattern: '^[^/\\]*$'}}}
       - {name: url_host, required: false, type: string, field_class: identifier, sensitivity: internal, normalization: {id: bounded-v1, overrides: {max_utf8_bytes: 256, pattern: '^([A-Za-z0-9][A-Za-z0-9._:-]*|\\[[0-9A-Fa-f:.]+\\](:[0-9]+)?)$'}}}
+      - {name: command_fingerprint, required: false, type: string, field_class: identifier, sensitivity: internal, normalization: {id: bounded-v1, overrides: {max_utf8_bytes: 76, pattern: '^hmac-sha256:[0-9a-f]{64}$'}}}
+      - {name: arguments_fingerprint, required: false, type: string, field_class: identifier, sensitivity: internal, normalization: {id: bounded-v1, overrides: {max_utf8_bytes: 76, pattern: '^hmac-sha256:[0-9a-f]{64}$'}}}
   - id: defenseclaw.inventory.mcp_identifiers
     kind: array
     introduced_in: telemetry-registry-v1
@@ -1081,6 +1083,7 @@ structured_types:
     fields:
       - {name: transport, required: false, type: string, field_class: metadata, sensitivity: internal, normalization: {id: bounded-v1, overrides: {max_utf8_bytes: 64, pattern: '^[a-z0-9][a-z0-9_.-]*$'}}}
       - {name: command_basename, required: false, type: string, field_class: metadata, sensitivity: internal, normalization: {id: bounded-v1, overrides: {max_utf8_bytes: 256, pattern: '^[A-Za-z0-9][A-Za-z0-9._+@-]*$'}}}
+      - {name: source_scope, required: false, type: string, field_class: metadata, sensitivity: internal, normalization: {id: bounded-v1, overrides: {max_utf8_bytes: 64, pattern: '^[a-z][a-z0-9_-]*$'}}}
       - {name: auth_provider_type, required: false, type: string, field_class: metadata, sensitivity: internal, normalization: {id: bounded-v1, overrides: {max_utf8_bytes: 64, pattern: '^[a-z0-9][a-z0-9_.-]*$'}}}
       - {name: disabled, required: true, type: boolean, field_class: metadata, sensitivity: safe, normalization: {id: identity-v1}}
   - id: defenseclaw.inventory.mcp_metadata

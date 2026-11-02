@@ -1034,7 +1034,7 @@ func TestEndpointMCPComponentsRetainOnlyBoundedIdentifiersBasenamesAndHosts(t *t
 			URL:       "https://user:password@mcp.example.com:8443/v1?token=secret#fragment",
 			Transport: "http", AuthProviderType: "oauth", Disabled: true,
 		},
-	})
+	}, []byte("0123456789abcdef0123456789abcdef"))
 	if len(components) != 1 {
 		t.Fatalf("components=%d want=1", len(components))
 	}
@@ -1074,7 +1074,10 @@ func TestEmitEndpointInventoryPreservesPR471SafeMCPFields(t *testing.T) {
 }`), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	cfg := &config.Config{Claw: config.ClawConfig{Mode: config.ClawMode("openclaw"), ConfigFile: configPath}}
+	cfg := &config.Config{
+		Claw:    config.ClawConfig{Mode: config.ClawMode("openclaw"), ConfigFile: configPath},
+		Gateway: config.GatewayConfig{Token: "inventory-test-installation"},
+	}
 	capture := &endpointInventoryCapture{}
 	if err := EmitEndpointInventory(t.Context(), cfg, connector.NewDefaultRegistry(), capture); err != nil {
 		t.Fatal(err)
@@ -1111,6 +1114,40 @@ func TestEmitEndpointInventoryPreservesPR471SafeMCPFields(t *testing.T) {
 		if got := mcpBody[field]; got != expected {
 			t.Fatalf("MCP field %s=%T(%v) want=%T(%v)", field, got, got, expected, expected)
 		}
+	}
+	for _, field := range []string{
+		observability.TelemetryAttributeDefenseClawInventoryMcpCommandFingerprint,
+		observability.TelemetryAttributeDefenseClawInventoryMcpArgumentsFingerprint,
+	} {
+		if got, ok := mcpBody[field].(string); !ok || !strings.HasPrefix(got, "hmac-sha256:") || len(got) != 76 {
+			t.Fatalf("MCP field %s=%v, want keyed fingerprint", field, mcpBody[field])
+		}
+	}
+	var mcpSummary map[string]any
+	for _, record := range capture.snapshot() {
+		if record.EventName() != "ai.discovery.completed" {
+			continue
+		}
+		body, ok := record.Body()
+		if !ok {
+			continue
+		}
+		bodyMap, err := body.Object()
+		if err != nil {
+			t.Fatal(err)
+		}
+		if bodyMap[observability.TelemetryAttributeDefenseClawAIDiscoverySource] == endpointMCPInventorySource {
+			mcpSummary = bodyMap
+			break
+		}
+	}
+	if mcpSummary == nil {
+		t.Fatal("no managed MCP summary")
+	}
+	identifiers := canonicalObjectArray(t, mcpSummary[observability.TelemetryAttributeDefenseClawInventoryMcpIdentifiers])
+	if len(identifiers) != 1 || identifiers[0]["command_fingerprint"] != mcpBody[observability.TelemetryAttributeDefenseClawInventoryMcpCommandFingerprint] ||
+		identifiers[0]["arguments_fingerprint"] != mcpBody[observability.TelemetryAttributeDefenseClawInventoryMcpArgumentsFingerprint] {
+		t.Fatalf("MCP aggregate identifiers do not match per-component fingerprints: %+v", identifiers)
 	}
 	encoded, err := json.Marshal(mcpBody)
 	if err != nil {
