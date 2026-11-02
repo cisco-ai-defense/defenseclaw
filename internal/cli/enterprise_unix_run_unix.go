@@ -725,15 +725,17 @@ func removeUnixSecret(env *enterpriseunix.Env, opts *enterpriseSecretOptions) er
 		}
 	}
 	if opts.undoRotation != "" {
-		if installed, err := os.ReadFile(env.P(env.Layout.ConfigPath)); err == nil {
-			if at := config.InstalledCredentialReference(env.Layout.ConfigPath, installed, env.Layout.DataDir, opts.name); at != "" {
-				if !undoRotationOnConfig(opts, installed) {
-					return &enterprisebundle.Error{Code: "credential_in_use", Detail: fmt.Sprintf(
-						"the installed config references credential %s at %s and is not the config installed before the rotation (--undo-config), so it may use the value stored now; credential %s was not removed", opts.name, at, opts.name)}
-				}
-				return env.RemoveRotatedSecret(opts.name)
+		installed, err := env.InstalledSecretConfig(opts.undoConfig == "none")
+		if err != nil {
+			return err
+		}
+		if at := config.InstalledCredentialReference(env.Layout.ConfigPath, installed, env.Layout.DataDir, opts.name); at != "" {
+			if !undoRotationOnConfig(opts, installed) {
+				return &enterprisebundle.Error{Code: "credential_in_use", Detail: fmt.Sprintf(
+					"the installed config references credential %s at %s and is not the config installed before the rotation (--undo-config), so it may use the value stored now; credential %s was not removed", opts.name, at, opts.name)}
 			}
 		}
+		return env.RemoveRotatedSecret(opts.name)
 	}
 	return env.RemoveSecret(opts.name)
 }

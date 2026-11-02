@@ -22,6 +22,7 @@ import (
 	"testing"
 
 	"github.com/defenseclaw/defenseclaw/internal/enterprisebundle"
+	"github.com/defenseclaw/defenseclaw/internal/managed"
 )
 
 // A credential change runs inside the lifecycle lock: an apply watcher that
@@ -55,6 +56,109 @@ func TestSecretChangeIsWrittenAndAppliedUnderOneLock(t *testing.T) {
 			}
 			if !h.run(Options{Action: ActionEnsure}).Noop {
 				t.Fatal("the watcher's follow-up ensure should find nothing left to apply")
+			}
+		})
+	}
+}
+
+// A config that cannot be inspected gives no proof that a stored credential
+// is unused. Remove must leave the credential in place for both Unix layouts.
+func TestRemoveSecretRefusesAnUnprovenInstalledConfig(t *testing.T) {
+	for _, goos := range []string{"linux", "darwin"} {
+		for _, tc := range []struct {
+			name, want string
+			makeConfig func(string) error
+			untrusted  bool
+		}{
+			{name: "missing", want: "cannot read the installed config"},
+			{name: "not a file", want: "cannot read the installed config", makeConfig: func(path string) error { return os.Mkdir(path, 0o700) }},
+			{name: "malformed", want: "cannot load the installed config", makeConfig: func(path string) error {
+				return os.WriteFile(path, []byte("guardrail: [\n"), 0o600)
+			}},
+			{name: "untrusted", want: "cannot trust the installed config", makeConfig: func(path string) error {
+				return os.WriteFile(path, []byte("config_version: 9\n"), 0o600)
+			}, untrusted: true},
+		} {
+			t.Run(goos+"/"+tc.name, func(t *testing.T) {
+				layout, err := managed.StandaloneLayoutFor(goos)
+				if err != nil {
+					t.Fatal(err)
+				}
+				env := &Env{GOOS: goos, Root: t.TempDir(), Layout: layout, Trust: func(string, TrustKind) error { return nil }}
+				configPath := env.P(layout.ConfigPath)
+				if err := os.MkdirAll(filepath.Dir(configPath), 0o700); err != nil {
+					t.Fatal(err)
+				}
+				if tc.makeConfig != nil {
+					if err := tc.makeConfig(configPath); err != nil {
+						t.Fatal(err)
+					}
+				}
+				if tc.untrusted {
+					env.Trust = func(path string, kind TrustKind) error {
+						if path == configPath && kind == TrustAdminFile {
+							return errors.New("administrator trust check failed")
+						}
+						return nil
+					}
+				}
+				secret := filepath.Join(env.P(layout.SecretsDir), "ai-key")
+				if err := os.MkdirAll(filepath.Dir(secret), 0o700); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.WriteFile(secret, []byte("stored-value"), 0o600); err != nil {
+					t.Fatal(err)
+				}
+				err = env.RemoveSecret("ai-key")
+				if err == nil || !strings.Contains(err.Error(), tc.want) || !strings.Contains(err.Error(), "nothing was removed") {
+					t.Fatalf("remove with %s config = %v", tc.name, err)
+				}
+				if code := enterprisebundle.CodeOf(err); code != enterprisebundle.CodeStateInvalid {
+					t.Fatalf("refusal code = %q, want state_invalid", code)
+				}
+				if got, readErr := os.ReadFile(secret); readErr != nil || string(got) != "stored-value" {
+					t.Fatalf("credential changed on refusal: %q, %v", got, readErr)
+				}
+			})
+		}
+	}
+}
+
+func TestSecretRemoveWithMissingConfigKeepsTheGatewayRunning(t *testing.T) {
+	for _, goos := range []string{"linux", "darwin"} {
+		t.Run(goos, func(t *testing.T) {
+			h := newTestHost(t, goos)
+			requireOK(t, h.run(Options{Action: ActionInstall, PayloadDir: h.payload("1.0.0")}))
+			secret := filepath.Join(h.env.P(h.env.Layout.SecretsDir), "ai-key")
+			if err := os.WriteFile(secret, []byte("stored-value"), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			configPath := h.env.P(h.env.Layout.ConfigPath)
+			if err := os.Rename(configPath, configPath+".held"); err != nil {
+				t.Fatal(err)
+			}
+			before := len(h.services.calls)
+			r := h.run(Options{Action: ActionEnsure, Reason: "secret", Mutate: func(context.Context) error {
+				return h.env.RemoveSecret("ai-key")
+			}})
+			requireError(t, r, string(enterprisebundle.CodeStateInvalid))
+			if got, err := os.ReadFile(secret); err != nil || string(got) != "stored-value" {
+				t.Fatalf("credential changed: %q, %v", got, err)
+			}
+			if exists(configPath) {
+				t.Fatal("the refused remove regenerated the config")
+			}
+			gateway := unitGateway
+			if goos == "darwin" {
+				gateway = labelGateway
+			}
+			if !h.services.isActive(gateway) {
+				t.Fatal("the refused remove stopped the gateway")
+			}
+			for _, call := range h.services.calls[before:] {
+				if strings.Contains(call, gateway) {
+					t.Fatalf("the refused remove touched the gateway: %v", h.services.calls[before:])
+				}
 			}
 		})
 	}

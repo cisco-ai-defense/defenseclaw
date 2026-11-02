@@ -61,7 +61,17 @@ func TestRefusedUnixSecretChangeLeavesTheCredentialStoreAsItWas(t *testing.T) {
 	} {
 		t.Run(tc.test, func(t *testing.T) {
 			env := &enterpriseunix.Env{GOOS: enterpriseunix.CurrentGOOS(), Root: t.TempDir(), Layout: layout, Accounts: noServiceAccount{},
-				Lchown: func(string, int, int) error { return nil }, Fchown: func(*os.File, int, int) error { return nil }}
+				Lchown: func(string, int, int) error { return nil }, Fchown: func(*os.File, int, int) error { return nil },
+				Trust: func(string, enterpriseunix.TrustKind) error { return nil }}
+			if tc.action == "remove" {
+				configPath := env.P(layout.ConfigPath)
+				if err := os.MkdirAll(filepath.Dir(configPath), 0o700); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.WriteFile(configPath, enterpriseunix.DefaultConfig(layout), 0o600); err != nil {
+					t.Fatal(err)
+				}
+			}
 			path := filepath.Join(env.P(layout.SecretsDir), name)
 			if tc.before != nil {
 				if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {

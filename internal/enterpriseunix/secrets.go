@@ -25,6 +25,7 @@ import (
 	"time"
 
 	"github.com/defenseclaw/defenseclaw/internal/config"
+	"github.com/defenseclaw/defenseclaw/internal/enterprisebundle"
 	"github.com/defenseclaw/defenseclaw/internal/managed"
 )
 
@@ -204,12 +205,52 @@ func (e *Env) RemoveSecret(name string) error {
 	if !config.ValidEnterpriseCredentialName(name) {
 		return fmt.Errorf("credential name %q is not valid", name)
 	}
-	if raw, err := readBounded(e.P(e.Layout.ConfigPath), maxInputBytes); err == nil {
-		if at := config.InstalledCredentialReference(e.Layout.ConfigPath, raw, e.Layout.DataDir, name); at != "" {
-			return fmt.Errorf("the installed config still references credential %s at %s; remove that reference and apply the config first", name, at)
-		}
+	raw, err := e.InstalledSecretConfig(false)
+	if err != nil {
+		return err
+	}
+	if at := config.InstalledCredentialReference(e.Layout.ConfigPath, raw, e.Layout.DataDir, name); at != "" {
+		return fmt.Errorf("the installed config still references credential %s at %s; remove that reference and apply the config first", name, at)
 	}
 	return removeFile(filepath.Join(e.P(e.Layout.SecretsDir), name))
+}
+
+// InstalledSecretConfig checks the config used to decide whether a credential
+// can be removed. Only a rotation put-back that recorded no earlier config
+// may treat an absent file as having no references. Every other read, trust,
+// or load failure leaves the credential in place.
+func (e *Env) InstalledSecretConfig(allowAbsent bool) ([]byte, error) {
+	e.fillDefaults()
+	if strings.TrimSpace(e.Layout.ConfigPath) == "" {
+		return nil, &enterprisebundle.Error{Code: enterprisebundle.CodeStateInvalid,
+			Detail: "cannot locate the installed config; nothing was removed: restore the config and run secret remove again"}
+	}
+	path := e.P(e.Layout.ConfigPath)
+	if _, err := os.Lstat(path); err != nil {
+		if allowAbsent && errors.Is(err, os.ErrNotExist) {
+			if trustErr := e.Trust(filepath.Dir(path), TrustAdminDir); trustErr != nil {
+				return nil, &enterprisebundle.Error{Code: enterprisebundle.CodeStateInvalid,
+					Detail: fmt.Sprintf("cannot trust the directory of the absent installed config %s (%v); nothing was removed: restore trusted access and run secret remove again", e.Layout.ConfigPath, trustErr)}
+			}
+			return nil, nil
+		}
+		return nil, &enterprisebundle.Error{Code: enterprisebundle.CodeStateInvalid,
+			Detail: fmt.Sprintf("cannot read the installed config %s (%v); nothing was removed: restore the config or its read access and run secret remove again", e.Layout.ConfigPath, err)}
+	}
+	if err := e.Trust(path, TrustAdminFile); err != nil {
+		return nil, &enterprisebundle.Error{Code: enterprisebundle.CodeStateInvalid,
+			Detail: fmt.Sprintf("cannot trust the installed config %s (%v); nothing was removed: restore trusted ownership and run secret remove again", e.Layout.ConfigPath, err)}
+	}
+	raw, err := readBounded(path, maxInputBytes)
+	if err != nil {
+		return nil, &enterprisebundle.Error{Code: enterprisebundle.CodeStateInvalid,
+			Detail: fmt.Sprintf("cannot read the installed config %s (%v); nothing was removed: restore read access to the config and run secret remove again", e.Layout.ConfigPath, err)}
+	}
+	if _, err := e.loadConfigCandidate(raw); err != nil {
+		return nil, &enterprisebundle.Error{Code: enterprisebundle.CodeStateInvalid,
+			Detail: fmt.Sprintf("cannot load the installed config %s (%v); nothing was removed: correct the config and run secret remove again", e.Layout.ConfigPath, err)}
+	}
+	return raw, nil
 }
 
 // RemoveRotatedSecret removes credential name although the installed config
