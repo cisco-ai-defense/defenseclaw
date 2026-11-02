@@ -1043,10 +1043,9 @@ jobs:
     if: ${{ !cancelled() && needs.changes.outputs.core != 'false' }}
     runs-on: ubuntu-latest
     timeout-minutes: 20
-    # The connector package alone took 16 of the 20 minutes (the job was
-    # cancelled at its budget with every test passed), so its matrix tests
-    # run in two parts beside the other packages (Makefile
-    # CONNECTOR_MATRIX_PART).
+    # The connector package runs longer than the PR job budget as one job.
+    # Its matrix tests run in four parts beside the other packages
+    # (Makefile CONNECTOR_MATRIX_PART).
     strategy:
       fail-fast: false
       matrix:
@@ -1054,9 +1053,13 @@ jobs:
           - part: packages
             label: packages and CLI
           - part: "0"
-            label: connector 1 of 2
+            label: connector 1 of 4
           - part: "1"
-            label: connector 2 of 2
+            label: connector 2 of 4
+          - part: "2"
+            label: connector 3 of 4
+          - part: "3"
+            label: connector 4 of 4
     steps:
       - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
         with:
@@ -1075,7 +1078,7 @@ jobs:
           save-cache: ${{ github.ref == 'refs/heads/main' }}
       - run: make plugin
       - run: make dev-pycli
-      - run: make connector-matrix-test CONNECTOR_MATRIX_PART=${{ matrix.part }} CONNECTOR_MATRIX_CONNECTOR_PARTS=2
+      - run: make connector-matrix-test CONNECTOR_MATRIX_PART=${{ matrix.part }} CONNECTOR_MATRIX_CONNECTOR_PARTS=4
 
   # The Secure Client profile hook hardening flow (a synthetic target home and
   # a TCP fake gateway) runs only on macOS. Linux has only the standalone

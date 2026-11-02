@@ -442,6 +442,10 @@ func TestCheckpointWALIfLargeHookCommitDoesNotWaitOnTheCheckpoint(t *testing.T) 
 			store, cleanup := newTestStore(t)
 			defer cleanup()
 			logWALGuardEvents(t, store, 200)
+			// This case pins phase order and hook commits during each copy and
+			// sync. The production writer cap is covered by the budget tests;
+			// give the final copy room on slower CI disks.
+			overrideWALDuration(t, &walSettledHoldCap, overLimitTestHoldCap)
 			clock := useFakeWALClock(t)
 			var steps []string
 			var hookCommits int
@@ -468,7 +472,7 @@ func TestCheckpointWALIfLargeHookCommitDoesNotWaitOnTheCheckpoint(t *testing.T) 
 				hookCall("sync")
 			}
 			walWriterPhaseHook = func(context.Context) { steps = append(steps, "writer") }
-			pass, err := store.CheckpointWALIfLarge(context.Background(), catchUpLimit(t, store), testWALWriterBudget)
+			pass, err := store.CheckpointWALIfLarge(context.Background(), catchUpLimit(t, store), overLimitTestHoldCap)
 			if err != nil {
 				t.Fatal(err)
 			}
