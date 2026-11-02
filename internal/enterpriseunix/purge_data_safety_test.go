@@ -44,7 +44,7 @@ func TestUninstallPurgeNamesTheKeptPerUserInstall(t *testing.T) {
 					bob = change
 				}
 			}
-			if !strings.HasPrefix(alice, "kept the DefenseClaw per-user data of user alice (~/.defenseclaw) as it is") ||
+			if !strings.HasPrefix(alice, "kept the DefenseClaw per-user data of user alice (~/.defenseclaw) and its per-user binaries in ~/.local/bin as they are") ||
 				strings.Contains(alice, "backup") || strings.Contains(alice, "moved to") {
 				t.Fatalf("the purge does not name alice's kept install: %q", alice)
 			}
