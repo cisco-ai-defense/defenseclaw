@@ -142,6 +142,9 @@ func TestGAP0448AndGAP0462Round9StateReadings(t *testing.T) {
 	}{
 		{"block comment separator", psPad + "Get-Content " + state + " <# harmless ; note #>", true, false},
 		{"block comment then writer", psPad + "Get-Content " + state + " <# harmless ; note #>; Set-Content -Path " + state + " -Value x", true, true},
+		{"first block terminator then writer", psPad + "Get-Content " + state + " <# outer <# inner #>; Set-Content -Path " + state + " -Value x; #> Get-Content " + state, true, true},
+		{"first block terminator then newline writer", psPad + "Get-Content " + state + " <# outer <# inner #>\nSet-Content -Path " + state + " -Value x\n#> Get-Content " + state, true, true},
+		{"first block terminator then read", psPad + "Get-Content " + state + " <# outer <# inner #>; Get-Content notes.txt; #> Get-Content " + state, true, false},
 		{"line comment separator", psPad + "Get-Content notes.txt # ; Set-Content " + state + " -Value x", true, false},
 		{"line comment after list separator", psPad + "Get-Content notes.txt;# ; Set-Content " + state + " -Value x", true, false},
 		{"line comment then writer", psPad + "Get-Content notes.txt # ; ignored\nSet-Content -Path " + state + " -Value x", true, true},

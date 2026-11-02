@@ -5511,7 +5511,7 @@ func powerShellStateSegments(command string) []powerShellStateSegment {
 	start := 0
 	previous := byte(0)
 	quote := byte(0)
-	blockDepth := 0
+	blockComment := false
 	lineComment := false
 	for i := 0; i < len(command); i++ {
 		c := command[i]
@@ -5521,13 +5521,9 @@ func powerShellStateSegments(command string) []powerShellStateSegment {
 			}
 			lineComment = false
 		}
-		if blockDepth > 0 {
-			switch {
-			case i+1 < len(command) && command[i:i+2] == "<#":
-				blockDepth++
-				i++
-			case i+1 < len(command) && command[i:i+2] == "#>":
-				blockDepth--
+		if blockComment {
+			if i+1 < len(command) && command[i:i+2] == "#>" {
+				blockComment = false
 				i++
 			}
 			continue
@@ -5557,7 +5553,7 @@ func powerShellStateSegments(command string) []powerShellStateSegment {
 			continue
 		}
 		if c == '<' && i+1 < len(command) && command[i+1] == '#' {
-			blockDepth = 1
+			blockComment = true
 			i++
 			continue
 		}
@@ -5772,24 +5768,12 @@ func powerShellStripBlockComments(text string) string {
 	for i := 0; i < len(text); {
 		if quote == 0 && strings.HasPrefix(text[i:], "<#") {
 			start := i
-			depth := 1
-			i += 2
-			for i < len(text) && depth > 0 {
-				switch {
-				case strings.HasPrefix(text[i:], "<#"):
-					depth++
-					i += 2
-				case strings.HasPrefix(text[i:], "#>"):
-					depth--
-					i += 2
-				default:
-					i++
-				}
-			}
-			if depth > 0 {
+			end := strings.Index(text[i+2:], "#>")
+			if end < 0 {
 				out.WriteString(text[start:])
 				break
 			}
+			i += end + 4
 			out.WriteByte(' ')
 			continue
 		}
