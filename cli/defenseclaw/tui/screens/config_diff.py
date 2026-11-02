@@ -19,10 +19,10 @@ from textual import events, on
 from textual.app import ComposeResult
 from textual.binding import Binding
 from textual.containers import Horizontal, Vertical, VerticalScroll
-from textual.screen import ModalScreen
 from textual.widgets import Button, Static
 
 from defenseclaw.config_writer import restart_required
+from defenseclaw.tui.modal import GuardedModalScreen
 from defenseclaw.tui.services.setup_state import ConfigDiffEntry
 from defenseclaw.tui.theme import DEFAULT_TOKENS
 
@@ -91,7 +91,7 @@ class ConfigDiffModalModel:
         return "\n".join(lines)
 
 
-class ConfigDiffScreen(ModalScreen[ConfigDiffResult | None]):
+class ConfigDiffScreen(GuardedModalScreen[ConfigDiffResult | None]):
     """Rounded config diff modal returning a save intent."""
 
     CSS = f"""
