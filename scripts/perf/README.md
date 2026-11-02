@@ -60,3 +60,7 @@ request that builds the install assets (job `perf-budget` in
 `budgets.json` holds one column per OS and mode. Entries with a number are
 gated, entries with `"gate": false` are shown but not gated, and `"TODO"`
 entries have no baseline yet. Each entry names the measurement it came from.
+The budgets were measured on the install `provision` makes (Claude Code and
+Codex, observe mode). Measure that shape: every other connector enrolled
+in config.yaml adds gateway work, and `setup` runs its agent CLI again
+after that CLI changed, so a result from another install is not comparable.
