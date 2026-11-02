@@ -117,7 +117,7 @@ async def _assert_listener_owned(port: int, pid: int, data_dir: Path, *, budget_
     last_error: OSError | ValueError | None = None
     while (remaining := deadline - time.monotonic()) > 0:
         try:
-            status = await asyncio.to_thread(_gateway_status, port, timeout=remaining)
+            status = await asyncio.to_thread(_gateway_status, port, timeout=min(0.4, remaining))
         except (OSError, ValueError) as exc:
             last_error = exc
         else:
@@ -150,7 +150,7 @@ async def test_listener_readiness_retries_within_status_budget(tmp_path: Path, m
 
     def status(_port: int, *, timeout: float) -> dict[str, object]:
         nonlocal calls
-        assert timeout <= 2
+        assert timeout <= 0.4
         calls += 1
         if calls == 1:
             raise urllib.error.URLError("listener not ready")
@@ -159,6 +159,28 @@ async def test_listener_readiness_retries_within_status_budget(tmp_path: Path, m
     monkeypatch.setattr(sys.modules[__name__], "_gateway_status", status)
     await _assert_listener_owned(1, 42, tmp_path)
     assert calls == 2
+
+
+@pytest.mark.asyncio
+async def test_listener_readiness_retries_after_first_status_timeout(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    calls = 0
+
+    def status(_port: int, *, timeout: float) -> dict[str, object]:
+        nonlocal calls
+        calls += 1
+        assert 0 < timeout <= 0.4
+        if calls == 1:
+            time.sleep(timeout)
+            raise TimeoutError("status request timed out")
+        return {"runtime": {"pid": 42, "data_dir": str(tmp_path)}}
+
+    monkeypatch.setattr(sys.modules[__name__], "_gateway_status", status)
+    started = time.monotonic()
+    await _assert_listener_owned(1, 42, tmp_path)
+    assert calls == 2
+    assert time.monotonic() - started < 2
 
 
 @pytest.mark.asyncio
