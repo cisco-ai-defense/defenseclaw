@@ -4,10 +4,13 @@
 package connector
 
 import (
+	"crypto/rand"
+	"encoding/hex"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"runtime"
+	"strconv"
 	"testing"
 )
 
@@ -135,15 +138,20 @@ func TestAccountAgentProcessMayRunSeesTheAgentsProcess(t *testing.T) {
 	if runtime.GOOS != "linux" {
 		t.Skip("the account's processes are read from /proc on Linux only")
 	}
+	suffix := make([]byte, 8)
+	if _, err := rand.Read(suffix); err != nil {
+		t.Fatal(err)
+	}
+	agent := "dcagentprobe-" + strconv.Itoa(os.Getpid()) + "-" + hex.EncodeToString(suffix)
 	dataDir := t.TempDir()
-	if accountAgentProcessMayRun(dataDir, "dcagentprobe") {
+	if accountAgentProcessMayRun(dataDir, agent) {
 		t.Fatal("a process was found for an agent nothing runs")
 	}
 	sleep, err := exec.LookPath("sleep")
 	if err != nil {
 		t.Skip("no sleep")
 	}
-	link := filepath.Join(t.TempDir(), "dcagentprobe")
+	link := filepath.Join(t.TempDir(), agent)
 	if err := os.Symlink(sleep, link); err != nil {
 		t.Fatal(err)
 	}
@@ -152,7 +160,7 @@ func TestAccountAgentProcessMayRunSeesTheAgentsProcess(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer func() { _ = cmd.Process.Kill(); _ = cmd.Wait() }()
-	if !accountAgentProcessMayRun(dataDir, "dcagentprobe") {
+	if !accountAgentProcessMayRun(dataDir, agent) {
 		t.Fatal("the running agent process was not found")
 	}
 }
