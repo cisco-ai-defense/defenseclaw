@@ -1003,11 +1003,24 @@ func TestReadMCPServersForConnector_AntigravityMissingAndMalformedSafeNoOpenClaw
 		t.Fatal(err)
 	}
 	entries, err = cfg.ReadMCPServersForConnector("antigravity")
-	if err != nil {
-		t.Fatalf("malformed antigravity config returned error: %v", err)
+	if err == nil {
+		t.Fatal("malformed antigravity config did not report a read error")
 	}
 	if hasMCPEntry(entries, "leaked") || len(entries) != 0 {
 		t.Fatalf("malformed antigravity config entries = %+v, want empty without OpenClaw fallback", entries)
+	}
+
+	workspace := filepath.Join(home, "repo")
+	if err := os.MkdirAll(filepath.Join(workspace, ".agents"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(workspace, ".agents", "mcp_config.json"), []byte(`{"mcpServers":{"valid":{"command":"node"}}}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	cfg.Claw.WorkspaceDir = workspace
+	entries, err = cfg.ReadMCPServersForConnector("antigravity")
+	if err == nil || !hasMCPEntry(entries, "valid") || hasMCPEntry(entries, "leaked") {
+		t.Fatalf("mixed Antigravity sources: entries=%+v err=%v, want valid entry and partial error", entries, err)
 	}
 }
 
