@@ -16,7 +16,6 @@ import (
 	"bytes"
 	"encoding/json"
 	"fmt"
-	"net"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -48,21 +47,6 @@ func requireShellHookToolsForTest(t *testing.T) {
 			t.Skipf("%s is required to run the shell hooks", tool)
 		}
 	}
-}
-
-// closedLoopbackAddrForTest is a loopback address nothing listens on: a
-// gateway that is down.
-func closedLoopbackAddrForTest(t *testing.T) string {
-	t.Helper()
-	listener, err := net.Listen("tcp", "127.0.0.1:0")
-	if err != nil {
-		t.Fatal(err)
-	}
-	addr := listener.Addr().String()
-	if err := listener.Close(); err != nil {
-		t.Fatal(err)
-	}
-	return addr
 }
 
 // runOutageToolCall runs the hook in dataDir/hooks for one tool call while
@@ -105,7 +89,7 @@ func runOutageToolCall(t *testing.T, home, dataDir string, call outageToolCall) 
 // run, in observe and action mode alike. The rendered mode does not decide.
 func TestPerUserHooksBlockAToolCallWhileTheGatewayIsDown(t *testing.T) {
 	requireShellHookToolsForTest(t)
-	addr := closedLoopbackAddrForTest(t)
+	addr := freeLoopbackAddrForOutageTest(t)
 	for _, test := range []struct {
 		name, connector string
 		opts            SetupOpts
@@ -170,7 +154,7 @@ func TestPerUserHooksBlockAToolCallWhileTheGatewayIsDown(t *testing.T) {
 // from the runtime record.
 func TestRefreshMakesReleasedHooksBlockWhileTheGatewayIsDown(t *testing.T) {
 	requireShellHookToolsForTest(t)
-	addr := closedLoopbackAddrForTest(t)
+	addr := freeLoopbackAddrForOutageTest(t)
 	for _, release := range []string{"0.8.10", "1.0.0", "1.0.3"} {
 		for _, connector := range []string{"copilot", "cursor", "antigravity"} {
 			for _, mode := range []string{"closed", "open"} {

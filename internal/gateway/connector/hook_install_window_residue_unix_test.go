@@ -218,7 +218,7 @@ func TestCodexShellHookBlocksEveryEventItCanBlockInCodexsShape(t *testing.T) {
 				t.Run(event+"/"+failure.name+"/"+mode.name, func(t *testing.T) {
 					t.Parallel()
 					data := t.TempDir()
-					addr := freeAPIAddr(t)
+					addr := refusingAPIAddr(t)
 					if failure.answer != nil {
 						server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { failure.answer(w) }))
 						t.Cleanup(server.Close)

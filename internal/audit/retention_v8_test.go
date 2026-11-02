@@ -923,13 +923,16 @@ func TestRetentionStartupRetriesTransientCrossProcessBusy(t *testing.T) {
 	if err := locker.Rollback(); err != nil {
 		t.Fatal(err)
 	}
-	select {
-	case err := <-done:
-		if err != nil {
-			t.Fatalf("startup verification did not recover after the lock cleared: %v", err)
-		}
-	case <-time.After(2 * time.Second):
-		t.Fatal("startup verification did not complete after the lock cleared")
+	// The retry window decides the outcome: a lock that clears inside it
+	// lets a later attempt commit, so the result is nil, and a lock that
+	// outlasts it returns the busy error. Wait for that result itself. The
+	// attempt that commits rewrites the retention triggers and flushes the
+	// file, which on a slow hosted Windows disk took longer than the 2 s
+	// this test used to give it (rel-1-0-6:GAP-0388: 5.4 s for the whole
+	// test against 0.33-0.41 s on dc-win2); the go test timeout bounds a
+	// hang.
+	if err := <-done; err != nil {
+		t.Fatalf("startup verification did not recover after the lock cleared: %v", err)
 	}
 }
 

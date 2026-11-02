@@ -157,7 +157,11 @@ func refuseAuditInserts(t *testing.T, f managedHookAuditFixture, table, when str
 // it.
 func refuseAuditWrites(t *testing.T, f managedHookAuditFixture, kind, table, when string) func() {
 	t.Helper()
-	database, err := sql.Open("sqlite", f.path)
+	// The same lock wait as every audit connection (audit
+	// auditBusyTimeoutMillis): without it, creating or dropping the trigger
+	// while the gateway's recovery pass writes failed at once with
+	// SQLITE_BUSY (rel-1-0-6 GAP-0365, TestPendingHookFullJournalAnswersClosedAndDrains).
+	database, err := sql.Open("sqlite", f.path+"?_pragma=busy_timeout(750)")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -917,11 +921,19 @@ func TestPendingHookRemoteDestinationsGetOneDecisionPerRecord(t *testing.T) {
 // resolves closed, and nothing is journaled for it. The refusal starts a
 // recovery pass in this process, so once the store takes records again the
 // rows its handlers left are audited with the answers the hooks
-// acknowledged, the journal empties, and calls are answered again.
+// acknowledged, the journal empties, and calls are answered again. A row
+// that pass cannot take (a write the loaded store refused once) is the
+// running gateway recovery loop work, as in production: the drain pass
+// wakes it, and the test serves the gateway (Run) for that, with a short
+// retry interval. Before, nothing ran that loop, and once the journal was
+// below its limit no pass took such a row (rel-1-0-6:GAP-0423).
 func TestPendingHookFullJournalAnswersClosedAndDrains(t *testing.T) {
 	f := newManagedHookAuditFixture(t, nil)
-	limits, interval := pendingHookJournalLimits, pendingHookDrainInterval
-	t.Cleanup(func() { pendingHookJournalLimits, pendingHookDrainInterval = limits, interval })
+	limits, interval, retry := pendingHookJournalLimits, pendingHookDrainInterval, pendingHookRecoveryRetryInterval
+	t.Cleanup(func() {
+		pendingHookJournalLimits, pendingHookDrainInterval, pendingHookRecoveryRetryInterval = limits, interval, retry
+	})
+	pendingHookRecoveryRetryInterval = 300 * time.Millisecond
 	awaitPendingHookDrain(t)
 	pendingHookJournalLimits.Rows, pendingHookDrainInterval = 2, 0
 	pendingHookDrainAt.Store(0)
@@ -948,15 +960,19 @@ func TestPendingHookFullJournalAnswersClosedAndDrains(t *testing.T) {
 	}
 
 	lift()
-	deadline := time.Now().Add(10 * time.Second)
-	for retry := 0; len(pendingEntries(t, f)) != 0; retry++ {
-		if time.Now().After(deadline) {
-			t.Fatalf("journal rows left after the store recovered: %v", pendingEntries(t, f))
+	// The journal is still full: this call is refused too, and starts the
+	// drain pass.
+	ackedHookCall(t, f.api, "full-retry-0", &recordFullDuplexStatusWriter{ResponseRecorder: httptest.NewRecorder()})
+	retries := 1
+	runAPIUntil(t, f.api, func() bool {
+		if len(pendingEntries(t, f)) == 0 {
+			return true
 		}
 		reply := &recordFullDuplexStatusWriter{ResponseRecorder: httptest.NewRecorder()}
-		ackedHookCall(t, f.api, fmt.Sprintf("full-retry-%d", retry), reply)
-		time.Sleep(20 * time.Millisecond)
-	}
+		ackedHookCall(t, f.api, fmt.Sprintf("full-retry-%d", retries), reply)
+		retries++
+		return false
+	})
 	audited := f.audited(t, sessions...)
 	for _, session := range sessions {
 		if audited[session] != "allow" || f.hookRows(t, session) != 1 {

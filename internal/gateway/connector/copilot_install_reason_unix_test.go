@@ -38,7 +38,7 @@ func TestRefreshedReleasedCopilotHookNamesTheInstallWhileTheLockIsHeld(t *testin
 		t.Fatal("copilotInstallWindowReason is not the reason this release's copilot-hook.sh gives during an install")
 	}
 	const generic = "DefenseClaw hook failed closed"
-	addr := closedLoopbackAddrForTest(t)
+	addr := freeLoopbackAddrForOutageTest(t)
 	for _, release := range []string{"1.0.0", "1.0.3"} {
 		t.Run(release, func(t *testing.T) {
 			home := t.TempDir()
