@@ -116,6 +116,53 @@ func TestR107CopyOfAPlainExtractionIsPlain(t *testing.T) {
 	}, setup)
 }
 
+// Per-user shell hooks post the agent's payload without a resolved-writes
+// header. The installed hooks use this route for both Claude Code and Codex.
+func TestR107PlainArchiveRewriteViaShellHook(t *testing.T) {
+	rows := []struct {
+		name, command, want string
+	}{
+		{"plain extraction", `tar -xf plain.tar -C d1 && echo k >> d1/p`, "allow/block"},
+		{"archive rewritten first", `cp link.tar plain.tar; tar -xf plain.tar -C d1 && cp -a d1 e3 && echo k >> e3/p`, "block"},
+		{"archive rewritten through hard link", `cp link.tar alias.tar; tar -xf plain.tar -C d1 && echo k >> d1/p`, "block"},
+	}
+	for _, connector := range []string{"claudecode", "codex"} {
+		for _, row := range rows {
+			t.Run(connector+"/"+row.name, func(t *testing.T) {
+				f := newB36ManagedHookFixture(t)
+				r107WriteTar(t, filepath.Join(f.project, "plain.tar"), false,
+					tar.Header{Name: "p", Typeflag: tar.TypeReg})
+				r107WriteTar(t, filepath.Join(f.project, "link.tar"), false,
+					tar.Header{Name: "p", Typeflag: tar.TypeSymlink, Linkname: "../../.ssh/authorized_keys"})
+				if err := os.Link(filepath.Join(f.project, "plain.tar"), filepath.Join(f.project, "alias.tar")); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.Mkdir(filepath.Join(f.project, "d1"), 0o700); err != nil {
+					t.Fatal(err)
+				}
+				payload := mustJSON(t, map[string]any{
+					"session_id": "r107-cpa480", "hook_event_name": "PreToolUse",
+					"tool_name": "Bash", "tool_use_id": "toolu_r107_cpa480",
+					"cwd": f.project, "permission_mode": "default",
+					"transcript_path": "/tmp/none.jsonl",
+					"tool_input":      map[string]any{"command": row.command},
+				})
+				wantPerUser, wantManaged, split := strings.Cut(row.want, "/")
+				if !split {
+					wantManaged = wantPerUser
+				}
+				if got := r106PerUserVerdict(t, connector, payload, ""); got != wantPerUser {
+					t.Errorf("per-user shell %s: got %s, want %s", row.name, got, row.want)
+				}
+				header := f.clientHeader(t, payload)
+				if got := f.post(t, connector, payload, header); got != wantManaged {
+					t.Errorf("managed native %s: got %s, want %s", row.name, got, row.want)
+				}
+			})
+		}
+	}
+}
+
 // The archive reader's byte and member limits keep these extractions opaque.
 func TestR107Review8TarPlainBounds(t *testing.T) {
 	r106Reader2CheckWith(t, []r106Reader2Row{
