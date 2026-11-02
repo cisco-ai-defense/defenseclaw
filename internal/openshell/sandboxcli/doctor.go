@@ -190,23 +190,27 @@ func (a *App) runDoctor(ctx context.Context) *openshell.DoctorReport {
 		}
 		rep.Checks = append(rep.Checks, st.check)
 		if st.available {
-			// All four rows describe the same daemon generation. Read its
-			// sandbox list once, and use the status already read above.
-			snapshot := &doctorSnapshot{status: st.status}
+			// Host checks can take long enough for the daemon's sandbox state
+			// to change. Read the hooks/list snapshot at the Sandbox section.
+			// Containment rows read status again when each check runs.
+			snapshot := &doctorSnapshot{}
 			api, err := a.api()
 			if err != nil {
 				snapshot.apiErr = err
 			} else {
 				snapshot.list, snapshot.err = api.List(ctx)
+				if snapshot.err == nil {
+					snapshot.status, _ = api.Status(ctx)
+				}
 			}
 			rep.Checks = append(rep.Checks, a.hooksCheck(ctx, st.ingress, snapshot))
 			if c := a.legacySandboxCheck(ctx, snapshot); c != nil {
 				rep.Checks = append(rep.Checks, *c)
 			}
-			if c := a.containedSandboxCheck(ctx, snapshot); c != nil {
+			if c := a.containedSandboxCheck(ctx); c != nil {
 				rep.Checks = append(rep.Checks, *c)
 			}
-			if c := a.unknownSandboxCheck(ctx, snapshot); c != nil {
+			if c := a.unknownSandboxCheck(ctx); c != nil {
 				rep.Checks = append(rep.Checks, *c)
 			}
 		}
