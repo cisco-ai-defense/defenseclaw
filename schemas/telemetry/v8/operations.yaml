@@ -2127,6 +2127,22 @@ attributes:
       pattern: '^([A-Za-z0-9][A-Za-z0-9._:-]*|\[[0-9A-Fa-f:.]+\](:[0-9]+)?)$'
     notes: Host only; URL userinfo, path, query, and fragment are forbidden
   introduced_in: telemetry-registry-v1
+- id: defenseclaw.inventory.mcp.server_url
+  type: string
+  brief: Sanitized configured remote MCP endpoint URL
+  examples: [https://mcp.example.com/v1]
+  stability: stable
+  owner: defenseclaw
+  field_class: identifier
+  sensitivity: internal
+  cardinality: bounded
+  normalization:
+    id: bounded-v1
+    overrides:
+      max_utf8_bytes: 1024
+      pattern: '^https?://[^/?#@ ]+(/[^?# ]*)?$'
+    notes: Scheme, host, port, and escaped path only; userinfo, query, and fragment are forbidden
+  introduced_in: telemetry-registry-v1
 - id: defenseclaw.inventory.mcp.auth_provider_type
   type: string
   brief: Bounded MCP authentication provider type
@@ -2209,8 +2225,8 @@ attributes:
   cardinality: bounded
   normalization:
     id: structured-content-v1
-    overrides: {max_utf8_bytes: 262144, max_item_utf8_bytes: 512, max_items: 1280, max_depth: 2, max_properties: 1024}
-    notes: Sealed typed array aligned by index with the MCP metadata section; flattened limits cover 256 four-property records
+    overrides: {max_utf8_bytes: 262144, max_item_utf8_bytes: 1024, max_items: 1536, max_depth: 2, max_properties: 1280}
+    notes: Sealed typed array aligned by index with the MCP metadata section; flattened limits cover 256 five-property records
   introduced_in: telemetry-registry-v1
 - id: defenseclaw.inventory.mcp.metadata
   type: array
@@ -6438,6 +6454,8 @@ groups:
   - ref: defenseclaw.inventory.mcp.source_scope
     requirement_level: recommended
   - ref: defenseclaw.inventory.mcp.url_host
+    requirement_level: recommended
+  - ref: defenseclaw.inventory.mcp.server_url
     requirement_level: recommended
   - ref: defenseclaw.inventory.mcp.auth_provider_type
     requirement_level: recommended
