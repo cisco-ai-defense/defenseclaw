@@ -18,11 +18,13 @@ package otlp
 
 import (
 	"bytes"
+	"fmt"
 	"io"
 	"net/http"
 	"net/url"
 	"os"
 	"strings"
+	"sync/atomic"
 	"testing"
 
 	collectortracepb "go.opentelemetry.io/proto/otlp/collector/trace/v1"
@@ -34,13 +36,50 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/observability/delivery"
 )
 
+func setRejectionLogTestWriter(t *testing.T, writer io.Writer) {
+	t.Helper()
+	rejectionLogLimiter.Lock()
+	clear(rejectionLogLimiter.last)
+	clear(rejectionLogLimiter.suppressed)
+	rejectionLogLimiter.Unlock()
+
+	previous := rejectionLogWriter
+	rejectionLogWriter = writer
+	t.Cleanup(func() { rejectionLogWriter = previous })
+}
+
+// GAP-0543: repeated test runs start with an independent rejection log limit.
+func TestRejectionLogTestStateAcrossRuns(t *testing.T) {
+	var out bytes.Buffer
+	setRejectionLogTestWriter(t, &out)
+
+	logTransportFailure("otlp-repeated-run", observability.SignalLogs,
+		delivery.FailureCodeConnectionFailed, 1, "", false)
+	if got := out.String(); !strings.Contains(got, "otlp-repeated-run logs export failed") {
+		t.Fatalf("repeated test run omitted the log line: %q", got)
+	}
+}
+
+var rejectionLogTestSequence atomic.Uint64
+
+func TestRejectionLogLimiterSeparatesKeysAndThrottlesRepeats(t *testing.T) {
+	key := fmt.Sprintf("otlp-test-%d", rejectionLogTestSequence.Add(1))
+	if suppressed, admitted := rejectionLogAdmit(key); !admitted || suppressed != 0 {
+		t.Fatalf("first event admitted=%t suppressed=%d", admitted, suppressed)
+	}
+	if suppressed, admitted := rejectionLogAdmit(key); admitted || suppressed != 0 {
+		t.Fatalf("repeat event admitted=%t suppressed=%d", admitted, suppressed)
+	}
+	if suppressed, admitted := rejectionLogAdmit(key + "-other"); !admitted || suppressed != 0 {
+		t.Fatalf("distinct event admitted=%t suppressed=%d", admitted, suppressed)
+	}
+}
+
 // GAP-2299: an export that gets no HTTP response names the failure code and
 // the gateway's proxy path in gateway.log, at most once a minute per code.
 func TestLogTransportFailureNamesCodeAndProxyPath(t *testing.T) {
 	var out bytes.Buffer
-	previous := rejectionLogWriter
-	rejectionLogWriter = &out
-	t.Cleanup(func() { rejectionLogWriter = previous })
+	setRejectionLogTestWriter(t, &out)
 
 	logTransportFailure("galileo-gap2299", observability.SignalTraces, delivery.FailureCodeConnectionFailed, 5, "api.example.test:443", true)
 	logTransportFailure("galileo-gap2299", observability.SignalTraces, delivery.FailureCodeConnectionFailed, 5, "api.example.test:443", true)
@@ -72,9 +111,7 @@ func (d *proxyReportingDialer) Proxies(*url.URL) (bool, error) { return d.proxie
 // the endpoint keeps the proxy advice.
 func TestLogTransportFailureNamesDirectRouteWithoutProxyAdvice(t *testing.T) {
 	var out bytes.Buffer
-	previous := rejectionLogWriter
-	rejectionLogWriter = &out
-	t.Cleanup(func() { rejectionLogWriter = previous })
+	setRejectionLogTestWriter(t, &out)
 
 	endpoint, _ := url.Parse("http://127.0.0.1:19998")
 	for _, dialer := range []any{nil, &recordingDialer{}, &proxyReportingDialer{}} {
@@ -110,9 +147,7 @@ func TestLogTransportFailureNamesDirectRouteWithoutProxyAdvice(t *testing.T) {
 // the os.Stderr of the moment (the daemon's time-stamping pipe), not the
 // os.Stderr captured at package init.
 func TestLogTransportFailureSingularAndCurrentStderr(t *testing.T) {
-	previous := rejectionLogWriter
-	rejectionLogWriter = nil
-	t.Cleanup(func() { rejectionLogWriter = previous })
+	setRejectionLogTestWriter(t, nil)
 	r, w, err := os.Pipe()
 	if err != nil {
 		t.Fatal(err)
@@ -135,9 +170,7 @@ func TestLogTransportFailureSingularAndCurrentStderr(t *testing.T) {
 // the refused span names in gateway.log, at most once a minute per status.
 func TestLogHTTPRejectionNamesStatusReasonAndSpans(t *testing.T) {
 	var out bytes.Buffer
-	previous := rejectionLogWriter
-	rejectionLogWriter = &out
-	t.Cleanup(func() { rejectionLogWriter = previous })
+	setRejectionLogTestWriter(t, &out)
 
 	token := strings.Repeat("a1B2", 12)
 	response := func(contentType string, body []byte) *http.Response {
