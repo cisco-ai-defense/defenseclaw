@@ -34,7 +34,7 @@ import pytest
 from defenseclaw.config import MCPScannerConfig, MCPServerEntry
 from defenseclaw.scanner.mcp import MCPScannerWrapper
 
-_STDIO_SERVER = """import json, os, signal, subprocess, sys
+_STDIO_SERVER = """import json, os, signal, subprocess, sys, time
 child = subprocess.Popen(
     [sys.executable, '-c', 'import signal, time; signal.signal(signal.SIGTERM, signal.SIG_IGN); time.sleep(300)'],
     stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
@@ -55,6 +55,8 @@ for line in sys.stdin:
                           'error': {'code': -32601, 'message': 'Method not found'}}), flush=True)
         continue
     elif message.get('method') == 'tools/list':
+        if os.environ.get('MCP_FIXTURE_DELAY'):
+            time.sleep(float(os.environ['MCP_FIXTURE_DELAY']))
         result = {'tools': [{'name': 'echo', 'description': 'Echo text',
                             'inputSchema': {'type': 'object', 'properties': {}}}]}
     else:
@@ -111,7 +113,7 @@ def test_cleanup_rejects_reserved_process_groups(
 
     signals: list[tuple[int, int]] = []
     monkeypatch.setattr(mcp.os, "killpg", lambda group, sig: signals.append((group, sig)))
-    mcp._terminate_mcp_posix_group(pgid)
+    mcp._signal_owned_mcp_posix_group(pgid, signal.SIGTERM, lambda _message: None)
     assert signals == []
 
 
@@ -121,7 +123,9 @@ def test_cleanup_rejects_scanner_process_group(monkeypatch: pytest.MonkeyPatch) 
 
     signals: list[tuple[int, int]] = []
     monkeypatch.setattr(mcp.os, "killpg", lambda group, sig: signals.append((group, sig)))
-    mcp._terminate_mcp_posix_group(mcp._MCP_POSIX_SCANNER_PGID)
+    mcp._signal_owned_mcp_posix_group(
+        mcp._MCP_POSIX_SCANNER_PGID, signal.SIGTERM, lambda _message: None,
+    )
     assert signals == []
 
 
@@ -132,11 +136,10 @@ def test_cleanup_skips_reused_group_before_kill(monkeypatch: pytest.MonkeyPatch)
     pgid = 424242
     groups = iter((pgid, pgid + 1))
     signals: list[int] = []
-    monkeypatch.setattr(mcp.os, "getpid", lambda: pgid)
-    monkeypatch.setattr(mcp.os, "getpgrp", lambda: next(groups))
+    monkeypatch.setattr(mcp.os, "getpgid", lambda _pid: next(groups))
     monkeypatch.setattr(mcp.os, "killpg", lambda _group, sig: signals.append(sig))
-    monkeypatch.setattr(mcp.time, "sleep", lambda _seconds: None)
-    mcp._terminate_mcp_posix_group(pgid)
+    mcp._signal_owned_mcp_posix_group(pgid, signal.SIGTERM, lambda _message: None)
+    mcp._signal_owned_mcp_posix_group(pgid, signal.SIGKILL, lambda _message: None)
     assert signals == [signal.SIGTERM]
 
 
@@ -151,9 +154,7 @@ def test_cleanup_signal_error_does_not_escape(
     pgid = 424242
     signals: list[int] = []
     reports: list[str] = []
-    monkeypatch.setattr(mcp.os, "getpid", lambda: pgid)
-    monkeypatch.setattr(mcp.os, "getpgrp", lambda: pgid)
-    monkeypatch.setattr(mcp.time, "sleep", lambda _seconds: None)
+    monkeypatch.setattr(mcp.os, "getpgid", lambda _pid: pgid)
 
     def signal_group(_group: int, sig: int) -> None:
         signals.append(sig)
@@ -161,7 +162,11 @@ def test_cleanup_signal_error_does_not_escape(
             raise error_type("simulated cleanup error")
 
     monkeypatch.setattr(mcp.os, "killpg", signal_group)
-    mcp._terminate_mcp_posix_group(pgid, report_error=reports.append)
+    term_needs_kill = mcp._signal_owned_mcp_posix_group(
+        pgid, signal.SIGTERM, reports.append,
+    )
+    if term_needs_kill:
+        mcp._signal_owned_mcp_posix_group(pgid, signal.SIGKILL, reports.append)
     assert len(reports) == 1
     assert signal.Signals(failed_signal).name in reports[0]
     if failed_signal == signal.SIGTERM and error_type is ProcessLookupError:
@@ -235,25 +240,45 @@ def test_local_stdio_scan_ends_child_on_success_or_timeout(
 
 
 @pytest.mark.skipif(os.name == "nt", reason="Windows uses a Job Object")
-def test_group_signal_eperm_warns_once_and_keeps_scan_result(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture,
+def test_local_stdio_scan_allows_long_valid_session(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     mcpscanner = pytest.importorskip("mcpscanner")
     from mcpscanner.core.models import AnalyzerEnum
 
-    # The guardian is a fresh interpreter. sitecustomize injects the reviewer's
-    # macOS-style group-signal denial there, without changing the scanner.
-    (tmp_path / "sitecustomize.py").write_text(
-        "import os, signal\n"
-        "original = os.killpg\n"
-        "def deny(pgid, sig):\n"
-        "    if sig in (signal.SIGTERM, signal.SIGKILL):\n"
-        "        raise PermissionError(1, 'injected EPERM')\n"
-        "    return original(pgid, sig)\n"
-        "os.killpg = deny\n",
-        encoding="utf-8",
+    entry, child_pid_file = _fixture_entry(tmp_path, monkeypatch)
+    entry.env["MCP_FIXTURE_DELAY"] = "3.2"
+    wrapper = MCPScannerWrapper(MCPScannerConfig(analyzers="yara"))
+    try:
+        assert wrapper._scan_local(
+            mcpscanner.Scanner(mcpscanner.Config()), entry, [AnalyzerEnum.YARA],
+        ) == []
+        child_pid = int(child_pid_file.read_text(encoding="ascii"))
+        deadline = time.monotonic() + 3
+        while _running(child_pid) and time.monotonic() < deadline:
+            time.sleep(0.02)
+        assert not _running(child_pid)
+    finally:
+        if child_pid_file.exists():
+            child_pid = int(child_pid_file.read_text(encoding="ascii"))
+            if _running(child_pid):
+                os.kill(child_pid, signal.SIGKILL)
+
+
+@pytest.mark.skipif(os.name == "nt", reason="Windows uses a Job Object")
+def test_group_signal_eperm_warns_once_and_keeps_scan_result(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture,
+) -> None:
+    mcpscanner = pytest.importorskip("mcpscanner")
+    from defenseclaw.scanner import mcp
+    from mcpscanner.core.models import AnalyzerEnum
+
+    # Run the normal guardian code with group signals unavailable.
+    monkeypatch.setattr(
+        mcp, "_MCP_POSIX_GUARDIAN_SCRIPT",
+        "kill() { printf 'injected EPERM\\n'; return 1; }\n"
+        + mcp._MCP_POSIX_GUARDIAN_SCRIPT,
     )
-    monkeypatch.setenv("PYTHONPATH", str(tmp_path))
     entry, child_pid_file = _fixture_entry(tmp_path, monkeypatch)
     wrapper = MCPScannerWrapper(MCPScannerConfig(analyzers="yara"))
     try:
@@ -419,8 +444,12 @@ def test_reaper_ends_guardian_that_misses_its_deadline(
         process_group=0,
     )
     try:
+        session_closed = threading.Event()
+        session_closed.set()
         with caplog.at_level(logging.WARNING, logger="defenseclaw.scanner.mcp"):
-            mcp._reap_mcp_posix_guardian(guardian, "fixture", 0.01)
+            mcp._reap_mcp_posix_guardian(
+                guardian, "fixture", session_closed, cleanup_seconds=0.01,
+            )
             deadline = time.monotonic() + 4
             while guardian.poll() is None and time.monotonic() < deadline:
                 time.sleep(0.02)

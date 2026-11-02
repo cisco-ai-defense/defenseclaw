@@ -576,126 +576,78 @@ def _contained_mcp_windows_process_factory(started: list[object] | None = None) 
 
 _MCP_POSIX_PROCESS_FACTORY_LOCK = threading.Lock()
 _MCP_POSIX_GROUP_GRACE_SECONDS = 0.25
-_MCP_POSIX_GUARDIAN_MAX_AGE_SECONDS = 2.0
+_MCP_POSIX_SESSION_CLEANUP_SECONDS = 3.0
 _MCP_POSIX_SCANNER_PGID = os.getpgrp() if os.name != "nt" else -1
+_MCP_POSIX_GUARDIAN_SCRIPT = r'''
+trap '' TERM
+printf R
+IFS= read -r -n 1 -u "$1" _ || :
+group_owned() {
+    [ "$$" -gt 1 ] && [ "$$" != "$2" ] || return 1
+    pgid=$(/bin/ps -o pgid= -p "$$") || return 1
+    pgid=${pgid//[[:space:]]/}
+    [ "$pgid" = "$$" ]
+}
+if ! group_owned; then printf 'group ownership lost before SIGTERM\n'; exit 1; fi
+if ! kill -TERM -- "-$$" 2>&1; then printf 'SIGTERM failed\n'; fi
+sleep "$3"
+if ! group_owned; then printf 'group ownership lost before SIGKILL\n'; exit 1; fi
+if ! kill -KILL -- "-$$" 2>&1; then printf 'SIGKILL failed\n'; fi
+'''
 
 
-def _terminate_mcp_posix_group(
-    pgid: int, parent_pgid: int | None = None,
-    report_error: Callable[[str], None] | None = None,
-) -> None:
-    """Signal a group only while this process is its original leader."""
-    if parent_pgid is None:
-        parent_pgid = _MCP_POSIX_SCANNER_PGID
-
-    def owned(stage: str) -> bool:
-        if pgid <= 1 or pgid == parent_pgid:
+def _signal_owned_mcp_posix_group(
+    guardian_pid: int, sig: signal.Signals, report_error: Callable[[str], None],
+) -> bool:
+    """Signal only the still-reserved guardian group."""
+    if guardian_pid <= 1 or guardian_pid == _MCP_POSIX_SCANNER_PGID:
+        return False
+    try:
+        if os.getpgid(guardian_pid) != guardian_pid:
+            report_error(f"group ownership lost before {sig.name}")
             return False
-        try:
-            same_group = os.getpid() == pgid and os.getpgrp() == pgid
-        except OSError as exc:
-            if report_error is not None:
-                report_error(f"identity before {stage}: {exc}")
-            return False
-        if not same_group and report_error is not None:
-            report_error(f"group ownership lost before {stage}")
-        return same_group
-
-    if not owned("SIGTERM"):
-        _LOGGER.debug("MCP stdio group %s is no longer owned; skipping TERM", pgid)
-        return
-    try:
-        os.killpg(pgid, signal.SIGTERM)
     except OSError as exc:
-        if report_error is not None:
-            report_error(f"SIGTERM: {exc}")
-        if isinstance(exc, ProcessLookupError):
-            return
-
-    time.sleep(_MCP_POSIX_GROUP_GRACE_SECONDS)
-    if not owned("SIGKILL"):
-        _LOGGER.debug("MCP stdio group %s is no longer owned; skipping KILL", pgid)
-        return
+        report_error(f"identity before {sig.name}: {exc}")
+        return False
     try:
-        os.killpg(pgid, signal.SIGKILL)
+        os.killpg(guardian_pid, sig)
     except OSError as exc:
-        if report_error is not None:
-            report_error(f"SIGKILL: {exc}")
-
-
-def _mcp_posix_group_guardian(
-    control_fd: int, parent_pgid: int, max_age_seconds: float,
-) -> None:
-    """Keep the group ID reserved until notification or an independent deadline."""
-    def report_error(message: str) -> None:
-        try:
-            os.write(sys.stdout.fileno(), (message[:512] + "\n").encode("utf-8"))
-        except OSError:
-            pass
-
-    signal.signal(signal.SIGTERM, signal.SIG_IGN)
-    try:
-        os.set_blocking(sys.stdout.fileno(), False)
-    except OSError:
-        pass
-    deadline = time.monotonic() + max_age_seconds
-    try:
-        while True:
-            remaining = deadline - time.monotonic()
-            if remaining <= 0:
-                report_error("guardian deadline expired")
-                break
-            if select.select([control_fd], [], [], remaining)[0]:
-                # A byte requests cleanup immediately; EOF also handles caller exit.
-                os.read(control_fd, 1)
-                break
-    except (OSError, ValueError) as exc:
-        report_error(f"control pipe: {exc}")
-    finally:
-        try:
-            os.close(control_fd)
-        except OSError:
-            pass
-    _terminate_mcp_posix_group(os.getpid(), parent_pgid, report_error)
+        report_error(f"{sig.name}: {exc}")
+        return not isinstance(exc, ProcessLookupError)
+    return True
 
 
 def _reap_mcp_posix_guardian(
     guardian: subprocess.Popen[bytes], server_name: str,
-    max_age_seconds: float,
+    session_closed: threading.Event,
     emergency: threading.Event | None = None,
     completed: threading.Event | None = None,
+    cleanup_seconds: float = _MCP_POSIX_SESSION_CLEANUP_SECONDS,
 ) -> None:
-    """Reap with a deadline and report any incomplete group cleanup."""
+    """Reap after scan closure, with a bounded fallback for cleanup faults."""
     def reap() -> None:
         problems: list[str] = []
 
-        def signal_owned_group(sig: signal.Signals) -> None:
-            # Only this thread reaps the leader. Its PID remains reserved while
-            # the group identity is checked and the signal is sent.
-            try:
-                if (guardian.pid <= 1 or guardian.pid == _MCP_POSIX_SCANNER_PGID
-                        or os.getpgid(guardian.pid) != guardian.pid):
-                    problems.append(f"group ownership lost before {sig.name}")
-                    return
-                os.killpg(guardian.pid, sig)
-            except OSError as exc:
-                problems.append(f"{sig.name}: {exc}")
-
         try:
-            deadline = time.monotonic() + max_age_seconds + _MCP_POSIX_GROUP_GRACE_SECONDS + 2
+            deadline: float | None = None
             while True:
                 if emergency is not None and emergency.is_set():
                     # The control descriptor may still be open after both a
                     # failed write and close. Signal the reserved group here.
-                    signal_owned_group(signal.SIGTERM)
-                    time.sleep(_MCP_POSIX_GROUP_GRACE_SECONDS)
-                    signal_owned_group(signal.SIGKILL)
+                    if _signal_owned_mcp_posix_group(guardian.pid, signal.SIGTERM, problems.append):
+                        time.sleep(_MCP_POSIX_GROUP_GRACE_SECONDS)
+                        _signal_owned_mcp_posix_group(guardian.pid, signal.SIGKILL, problems.append)
                     break
-                remaining = deadline - time.monotonic()
-                if remaining <= 0:
-                    problems.append("guardian exceeded cleanup deadline")
-                    signal_owned_group(signal.SIGKILL)
-                    break
+                if session_closed.is_set():
+                    if deadline is None:
+                        deadline = time.monotonic() + cleanup_seconds
+                    remaining = deadline - time.monotonic()
+                    if remaining <= 0:
+                        problems.append("guardian exceeded cleanup deadline")
+                        _signal_owned_mcp_posix_group(guardian.pid, signal.SIGKILL, problems.append)
+                        break
+                else:
+                    remaining = 0.05
                 try:
                     guardian.wait(timeout=min(0.05, remaining))
                     break
@@ -755,6 +707,7 @@ def _contained_mcp_posix_process_factory(server_name: str = "stdio server") -> I
 
     started_groups: dict[int, tuple[subprocess.Popen[bytes], int, threading.Event]] = {}
     notified_groups: set[int] = set()
+    session_closed = threading.Event()
 
     def notify(pid: int) -> bool:
         group = started_groups.get(pid)
@@ -784,17 +737,19 @@ def _contained_mcp_posix_process_factory(server_name: str = "stdio server") -> I
         try:
             guardian = subprocess.Popen(
                 [
-                    "/bin/sh", "-c", "trap '' TERM; exec \"$@\"", "mcp-group-guardian",
-                    sys.executable, "-c",
-                    "from defenseclaw.scanner.mcp import _mcp_posix_group_guardian as run; "
-                    "run(int(__import__('sys').argv[1]), int(__import__('sys').argv[2]), "
-                    "float(__import__('sys').argv[3]))",
-                    str(control_read), str(os.getpgrp()),
-                    str(_MCP_POSIX_GUARDIAN_MAX_AGE_SECONDS),
+                    "/bin/bash", "-p", "-c", _MCP_POSIX_GUARDIAN_SCRIPT,
+                    "mcp-group-guardian", str(control_read), str(os.getpgrp()),
+                    str(_MCP_POSIX_GROUP_GRACE_SECONDS),
                 ],
                 stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
                 stderr=subprocess.DEVNULL, pass_fds=(control_read,), process_group=0,
             )
+            if (guardian.stdout is None
+                    or not select.select([guardian.stdout], [], [], 1.0)[0]
+                    or os.read(guardian.stdout.fileno(), 1) != b"R"):
+                guardian.kill()
+                guardian.wait(timeout=1)
+                raise RuntimeError("MCP stdio group owner did not start")
         except BaseException:
             _close_mcp_posix_control(control_read)
             _close_mcp_posix_control(control_write)
@@ -803,8 +758,7 @@ def _contained_mcp_posix_process_factory(server_name: str = "stdio server") -> I
         emergency = threading.Event()
         completed = threading.Event()
         _reap_mcp_posix_guardian(
-            guardian, server_name, _MCP_POSIX_GUARDIAN_MAX_AGE_SECONDS,
-            emergency, completed,
+            guardian, server_name, session_closed, emergency, completed,
         )
         try:
             # AnyIO's public open_process omits Python's process_group option;
@@ -816,7 +770,7 @@ def _contained_mcp_posix_process_factory(server_name: str = "stdio server") -> I
         except BaseException:
             _close_mcp_posix_control(control_write)
             emergency.set()
-            if not completed.wait(_MCP_POSIX_GUARDIAN_MAX_AGE_SECONDS + 2):
+            if not completed.wait(_MCP_POSIX_SESSION_CLEANUP_SECONDS + 2):
                 _LOGGER.warning("MCP stdio guardian for server %r did not finish failed-launch cleanup", server_name)
             raise
         started_groups[process.pid] = (guardian, control_write, emergency)
@@ -840,6 +794,7 @@ def _contained_mcp_posix_process_factory(server_name: str = "stdio server") -> I
             mcp_stdio._terminate_process_tree = original_terminate
             for pid in started_groups:
                 notify(pid)
+            session_closed.set()
 
 
 def _trusted_codex_runtime_roots() -> tuple[str, ...]:
