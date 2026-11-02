@@ -1824,6 +1824,48 @@ func TestSandboxIngressReceiptsHaveTheirOwnBudget(t *testing.T) {
 	}
 }
 
+func TestSandboxIngressUnclassifiedHooksSpendTheirBudget(t *testing.T) {
+	const hookPath = "/api/v1/claude-code/hook"
+	for _, tc := range []struct {
+		name        string
+		firstStatus int
+		request     func(*testing.T, *sandboxIngressFixture) *httptest.ResponseRecorder
+	}{
+		{"oversized", http.StatusRequestEntityTooLarge, func(t *testing.T, f *sandboxIngressFixture) *httptest.ResponseRecorder {
+			return f.do(t, http.MethodPost, hookPath, f.claudeTok, strings.Repeat("x", int(apiRequestBodyMaxBytes)+1))
+		}},
+		{"method", http.StatusMethodNotAllowed, func(t *testing.T, f *sandboxIngressFixture) *httptest.ResponseRecorder {
+			return f.do(t, http.MethodGet, hookPath, f.claudeTok, "")
+		}},
+		{"read_error", http.StatusBadRequest, func(t *testing.T, f *sandboxIngressFixture) *httptest.ResponseRecorder {
+			r := httptest.NewRequest(http.MethodPost, hookPath, nil)
+			r.Body = &oneShotTruncatedSandboxHookBody{data: []byte(`{}`)}
+			r.ContentLength = 10
+			r.Header.Set("Authorization", "Bearer "+f.claudeTok)
+			r.Header.Set("Content-Type", "application/json")
+			r.Header.Set("X-DefenseClaw-Client", "sandbox-hook/1.0")
+			w := httptest.NewRecorder()
+			f.handler.ServeHTTP(w, r)
+			return w
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			f := newSandboxIngressFixture(t, func(c *SandboxIngressConfig) {
+				c.Limiter = sandboxauth.NewLimiter(sandboxauth.LimiterConfig{HookRPS: 0.001, HookBurst: 2})
+			})
+			if got := tc.request(t, f).Code; got != tc.firstStatus {
+				t.Fatalf("first status %d, want %d", got, tc.firstStatus)
+			}
+			if got := f.do(t, http.MethodPost, hookPath, f.claudeTok, `{}`).Code; got == http.StatusTooManyRequests {
+				t.Fatal("ordinary hook was refused before the budget was spent")
+			}
+			if got := tc.request(t, f).Code; got != http.StatusTooManyRequests {
+				t.Fatalf("third status %d, want 429", got)
+			}
+		})
+	}
+}
+
 type stalledSandboxHookBody struct {
 	readCalled chan struct{}
 	release    chan struct{}

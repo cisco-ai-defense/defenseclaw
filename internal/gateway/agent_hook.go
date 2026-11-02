@@ -293,7 +293,18 @@ func contextWithCancelGrace(parent context.Context, grace time.Duration) (contex
 
 func (a *APIServer) handleAgentHook(connectorName string) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
+		chargeBudget := func(receipt bool) bool {
+			if err := chargeSandboxHookBudget(r.Context(), receipt); err != nil {
+				w.Header().Set("Retry-After", "1")
+				a.writeJSON(w, http.StatusTooManyRequests, map[string]string{"error": err.Error()})
+				return false
+			}
+			return true
+		}
 		if r.Method != http.MethodPost {
+			if !chargeBudget(false) {
+				return
+			}
 			a.recordConnectorHookRejection(r.Context(), connectorName, "unknown", "method", 0)
 			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 			return
@@ -330,6 +341,9 @@ func (a *APIServer) handleAgentHook(connectorName string) http.HandlerFunc {
 			rawBody, err = io.ReadAll(r.Body)
 		}
 		if err != nil {
+			if !chargeBudget(false) {
+				return
+			}
 			var maxBytesError *http.MaxBytesError
 			if errors.As(err, &maxBytesError) {
 				a.recordConnectorHookRejection(
@@ -346,9 +360,7 @@ func (a *APIServer) handleAgentHook(connectorName string) http.HandlerFunc {
 			return
 		}
 		receiptID, receiptBody, receiptLike := classifySandboxHookReceiptBody(rawBody)
-		if err := chargeSandboxHookBudget(r.Context(), receiptLike); err != nil {
-			w.Header().Set("Retry-After", "1")
-			a.writeJSON(w, http.StatusTooManyRequests, map[string]string{"error": err.Error()})
+		if !chargeBudget(receiptLike) {
 			return
 		}
 		invalidReceipt := receiptLike && !receiptBody
