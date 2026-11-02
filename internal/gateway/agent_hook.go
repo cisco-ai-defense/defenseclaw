@@ -745,6 +745,7 @@ func (a *APIServer) handleAgentHook(connectorName string) http.HandlerFunc {
 		// identity. The request-scoped projection is re-bound to the exact
 		// native tool name by each typed evaluator below.
 		ctx = withAuthenticatedToolResource(ctx, req, rawBody)
+		a.recordObservedMCPTool(ctx, req, time.Now())
 		// Capture trusted ActionFacts even when correlation persistence is
 		// degraded. Durable cross-call joins require correlation, but the
 		// experimental final-artifact execution gate is a same-request
