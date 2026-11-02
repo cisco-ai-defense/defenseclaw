@@ -4688,7 +4688,10 @@ def _claude_show_quarantined_disabled(plugin_name: str, quarantine_dir: str, con
 
     try:
         keys = claude_plugin_enablement.disable_for_quarantine(plugin_name, quarantine_dir)
-    except OSError as exc:
+    except claude_plugin_enablement.SettingsNotChanged as exc:
+        click.echo(f"[plugin] Claude Code settings: {exc}; 'claude plugin list' may still show {plugin_name!r} enabled, the hook still refuses it")
+        return
+    except (OSError, claude_plugin_enablement.MCPWriteUnsupportedError) as exc:
         ux.warn(f"could not mark {plugin_name!r} disabled in Claude Code settings: {exc}; the hook still refuses it")
         return
     for key in keys:
@@ -4703,7 +4706,10 @@ def _claude_show_restored_enabled(plugin_name: str, quarantine_dir: str, connect
 
     try:
         keys = claude_plugin_enablement.restore_after_quarantine(plugin_name, quarantine_dir)
-    except OSError as exc:
+    except claude_plugin_enablement.SettingsNotChanged as exc:
+        click.echo(f"[plugin] Claude Code settings: {exc}; enable {plugin_name!r} there yourself if it shows disabled")
+        return
+    except (OSError, claude_plugin_enablement.MCPWriteUnsupportedError) as exc:
         ux.warn(f"could not enable {plugin_name!r} again in Claude Code settings: {exc}")
         return
     for key in keys:

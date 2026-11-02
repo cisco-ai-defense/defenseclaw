@@ -110,5 +110,57 @@ class ClaudePluginQuarantineShowsDisabled(PluginCommandTestBase):
             self.assertEqual(handle.read(), "{not json")
 
 
+    def test_settings_of_another_account_are_not_replaced(self):
+        # sudo with HOME kept: the settings belong to the user, the command
+        # runs as root. Replacing them would leave a root-owned file.
+        before = os.stat(self.settings)
+        with patch("os.geteuid", return_value=before.st_uid + 1):
+            result = self.invoke(["quarantine", "usm-kit", "--connector", "claudecode"])
+        self.assertEqual(result.exit_code, 0, result.output)
+        self.assertIn("belongs to another user; not changed", result.output)
+        self.assertNotIn("disabled in Claude Code settings;", result.output)
+        after = os.stat(self.settings)
+        self.assertEqual((after.st_ino, after.st_uid), (before.st_ino, before.st_uid))
+        self.assertIs(self.read_settings()["enabledPlugins"]["usm-kit@vs7mp"], True)
+        self.assertFalse(os.path.exists(enablement._record_path(self.app.cfg.quarantine_dir, "usm-kit")))
+
+    @unittest.skipIf(os.name == "nt", "symlinks need privileges on Windows")
+    def test_a_linked_settings_file_is_skipped_with_a_message(self):
+        target = os.path.join(self.tmp_dir, "dotfiles-settings.json")
+        os.replace(self.settings, target)
+        os.symlink(target, self.settings)
+        result = self.invoke(["quarantine", "usm-kit", "--connector", "claudecode"])
+        self.assertEqual(result.exit_code, 0, result.output)
+        self.assertIn("is a link; not changed", result.output)
+        self.assertTrue(os.path.islink(self.settings))
+        with open(target) as handle:
+            self.assertIs(json.load(handle)["enabledPlugins"]["usm-kit@vs7mp"], True)
+
+    def test_a_failed_or_lost_settings_write_puts_the_record_back(self):
+        quarantine_dir = self.app.cfg.quarantine_dir
+        record = enablement._record_path(quarantine_dir, "usm-kit")
+        with patch.object(enablement, "_write_settings", side_effect=OSError("disk full")):
+            with self.assertRaises(OSError):
+                enablement.disable_for_quarantine("usm-kit", quarantine_dir)
+        self.assertFalse(os.path.exists(record))
+        with patch.object(enablement, "_write_settings", return_value=False):
+            with self.assertRaises(enablement.SettingsNotChanged):
+                enablement.disable_for_quarantine("usm-kit", quarantine_dir)
+        self.assertFalse(os.path.exists(record))
+        # An earlier record stays exactly as it was.
+        self.assertEqual(enablement.disable_for_quarantine("usm-kit", quarantine_dir), ["usm-kit@vs7mp"])
+        with open(record, "rb") as handle:
+            kept = handle.read()
+        doc = self.read_settings()
+        doc["enabledPlugins"]["usm-kit@other"] = True
+        self.write_settings(doc)
+        with patch.object(enablement, "_write_settings", return_value=False):
+            with self.assertRaises(enablement.SettingsNotChanged):
+                enablement.disable_for_quarantine("usm-kit", quarantine_dir)
+        with open(record, "rb") as handle:
+            self.assertEqual(handle.read(), kept)
+        self.assertIs(self.read_settings()["enabledPlugins"]["usm-kit@other"], True)
+
+
 if __name__ == "__main__":
     unittest.main()
