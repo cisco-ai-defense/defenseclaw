@@ -6,10 +6,13 @@
 package connector
 
 import (
+	"bufio"
 	"bytes"
 	"encoding/json"
 	"errors"
+	"io"
 	"net"
+	"net/http"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -81,6 +84,7 @@ if [ "$1" = hook-post ]; then
     fi
     # The installer lets go of its lock while the request waits (GAP-2443).
     [ "${DC_COLD_RELEASE_INSTALL_LOCK:-0}" != 1 ] || rmdir "$DEFENSECLAW_HOME/.install.lock"
+    [ -z "${DC_COLD_FIRST_DELAY:-}" ] || sleep "$DC_COLD_FIRST_DELAY"
     exit "${DC_COLD_FIRST_RC:-7}"
   fi
   # Every later try fails with DC_COLD_THEN_RC when it is set (a gateway that
@@ -167,11 +171,36 @@ func runHookForColdStartWithManaged(t *testing.T, c Connector, script string, ar
 		prepare(dataDir)
 	}
 	capDir := t.TempDir()
-	dropListener := false
+	dropListener, acceptDrop := false, false
 	for _, entry := range extraEnv {
 		if entry == "DC_COLD_DROP_LISTENER=1" {
 			dropListener = true
+		} else if entry == "DC_COLD_ACCEPT_DROP=1" {
+			acceptDrop = true
 		}
+	}
+	if acceptDrop {
+		// A restarting gateway can take the connection and close before it
+		// sends any status. Keep the listener bound while the hook decides.
+		done := make(chan struct{})
+		go func() {
+			defer close(done)
+			for {
+				conn, acceptErr := listener.Accept()
+				if acceptErr != nil {
+					return
+				}
+				_ = conn.SetReadDeadline(time.Now().Add(5 * time.Second))
+				request, readErr := http.ReadRequest(bufio.NewReader(conn))
+				if readErr == nil {
+					_, _ = io.Copy(io.Discard, request.Body)
+					_ = request.Body.Close()
+					time.Sleep(300 * time.Millisecond)
+				}
+				_ = conn.Close()
+			}
+		}()
+		t.Cleanup(func() { _ = listener.Close(); <-done })
 	}
 	if dropListener {
 		stop, done := make(chan struct{}), make(chan struct{})

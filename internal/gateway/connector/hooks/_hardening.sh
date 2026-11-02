@@ -3797,6 +3797,11 @@ _dc_gateway_post_once() {
       # and stays closed (defenseclaw_gateway_post).
       case "$?" in
         7) _dc_post_refused=1 ;;
+        # 11: the connection was refused or closed before a status while
+        # this account's gateway start lock was held. The new listener may
+        # appear before gateway.pid, so a later socket-table or PID read
+        # must not change the outage decision (rel-1-0-6 GAP-0497).
+        11) return 7 ;;
         126|127) ;;
         9) _dc_post_sent_noanswer=1; return 28 ;;
         # 10 (hookexec.PerUserPostRestartNoAnswerExit): no status while a

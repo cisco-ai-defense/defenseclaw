@@ -162,6 +162,12 @@ const PerUserPostNoAnswerExit = 9
 // PerUserPostNoAnswerExit: a gateway that is up and slow stays closed.
 const PerUserPostRestartNoAnswerExit = 10
 
+// PerUserPostRestartOutageExit is the exit status for a connection that was
+// refused or closed before any HTTP status while this account's gateway
+// start lock was held. The shell reads it as a restart outage before a later
+// socket-table or gateway.pid look can race the new listener (GAP-0497).
+const PerUserPostRestartOutageExit = 11
+
 // PerUserPostNoAnswer reports whether err, from PostPerUserHook, is a request
 // that ended at its deadline with no status: not an outage the transport
 // proved, not a listener it could not verify, not a cut-off or invalid answer.

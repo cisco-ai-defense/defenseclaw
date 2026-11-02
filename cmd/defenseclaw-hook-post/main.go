@@ -155,6 +155,12 @@ func runMain(args []string, input io.Reader, output, errOutput io.Writer) int {
 	fmt.Fprintf(errOutput, "defenseclaw-hook-post: %v\n", err)
 	switch {
 	case hookexec.PerUserPostOutage(err):
+		// A refusal or a connection closed before any HTTP status while the
+		// start lock is held is a restart outage. Decide it before the new
+		// listener appears or gateway.pid is published (GAP-0497).
+		if hookexec.PerUserGatewayStartInProgress(dataDir) {
+			return hookexec.PerUserPostRestartOutageExit
+		}
 		return hookexec.PerUserPostOutageExit
 	case hookexec.PerUserPostPeerUnverified(err):
 		// Nothing of the call was sent: the one failure the OpenCode and
