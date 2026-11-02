@@ -391,9 +391,14 @@ defenseclaw_harden_env() {
   # and on systems without mktemp every hook invocation creates
   # hook-tmp.<PID>. Without this sweep those orphans accumulate
   # forever. Runs AFTER PATH lockdown so we don't pick up an attacker-
-  # planted `find`. Orphans come only from a killed hook, so one call in 32
-  # keeps them bounded without a find on every call (issue #1130).
-  [ $((${RANDOM:-1} % 32)) -ne 0 ] || _defenseclaw_sweep_stale_hook_dirs
+  # planted `find`. Orphans come only from a killed hook that used the
+  # fallback folder, so only a call that used it too (no mktemp, or mktemp
+  # failed) sweeps, on one call in 32 (issue #1130). A call that got its
+  # folder from mktemp never starts find, so a warm hook runs the same
+  # programs on every call (rel-1-0-6 GAP-0266).
+  if [ -z "$_DEFENSECLAW_HOOK_HOME_OWNED" ] && [ $((${RANDOM:-1} % 32)) -eq 0 ]; then
+    _defenseclaw_sweep_stale_hook_dirs
+  fi
 }
 
 # Resolve optional connector identity for the shared inspect-* scripts.  The
@@ -3953,27 +3958,24 @@ _dc_gateway_post_once() {
   esac
   if [ "$_dc_native_post" -eq 1 ]; then
     # The agent's deadline includes shell preparation and starting the native
-    # helper. Give the helper only the time still left, reserving one second
-    # for process startup on short tool-call budgets. Its own timeout starts
-    # after startup, so passing the original four seconds could hold a tool
-    # call beyond the agent's answer window on a busy host.
+    # helper. Give the helper only the time still left. The millisecond
+    # deadline reserves 250 ms for its startup on short tool-call budgets;
+    # whole-second --max-time rounds down for older helpers. The original
+    # four seconds is still the outer bound of the shell request.
     case "$_dc_post_max_time" in ""|*[!0-9]*) return 1 ;; esac
     _dc_hook_elapsed_ms
     [ "$_DC_ELAPSED_MS" -ge 0 ] || _DC_ELAPSED_MS=0
     local _dc_post_remaining=$(( _dc_post_max_time - (_DC_ELAPSED_MS + 999) / 1000 ))
     [ "$_dc_post_remaining" -gt 0 ] || return 28
-    if [ "$_dc_post_max_time" -le 4 ] && [ "$_dc_post_remaining" -gt 2 ]; then
-      _dc_post_remaining=$((_dc_post_remaining - 1))
-    fi
     # The same bound in milliseconds, for the helper (GAP-2279): the whole
     # seconds above round the shell's own time up, so a call that spent
-    # 0.4 s reading a large body gave the helper 2 s of the 2.6 s left after
-    # the startup reserve, and was closed at 2.4 s. The helper gets the time
-    # left after that reserve, never less than the whole seconds above and
-    # never a whole second more; an older helper reads only --max-time.
+    # 0.4 s reading a large body gave the helper only 2 s of its available
+    # time and could close a healthy gateway under host load. The helper gets
+    # the time left after the startup reserve, never less than the rounded
+    # whole seconds above; an older helper reads only --max-time.
     local _dc_post_remaining_ms=$(( _dc_post_max_time * 1000 - _DC_ELAPSED_MS ))
     if [ "$_dc_post_max_time" -le 4 ]; then
-      _dc_post_remaining_ms=$(( _dc_post_remaining_ms - 1000 ))
+      _dc_post_remaining_ms=$(( _dc_post_remaining_ms - 250 ))
     fi
     if [ "$_dc_post_remaining_ms" -lt $(( _dc_post_remaining * 1000 )) ]; then
       _dc_post_remaining_ms=$(( _dc_post_remaining * 1000 ))
@@ -4118,6 +4120,11 @@ _dc_gateway_post_once() {
       # and stays closed (defenseclaw_gateway_post).
       case "$?" in
         7) _dc_post_refused=1 ;;
+        # 11: the connection was refused or closed before a status while
+        # this account's gateway start lock was held. The new listener may
+        # appear before gateway.pid, so a later socket-table or PID read
+        # must not change the outage decision (rel-1-0-6 GAP-0497).
+        11) return 7 ;;
         126|127) ;;
         9) _dc_post_sent_noanswer=1; return 28 ;;
         # 10 (hookexec.PerUserPostRestartNoAnswerExit): no status while a

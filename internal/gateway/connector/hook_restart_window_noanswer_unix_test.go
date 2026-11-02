@@ -11,6 +11,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"syscall"
 	"testing"
 )
 
@@ -76,6 +77,60 @@ func TestShellHookRestartWindowNoAnswerFollowsTheOutageMode(t *testing.T) {
 			}
 			if got := records[0]["outcome"]; got != want {
 				t.Fatalf("row %+v, want outcome %s (the answer the call got)", records[0], want)
+			}
+		})
+	}
+}
+
+// TestShellHookRestartTransportOutageBeforePIDPublication holds the restart
+// lock while a real helper posts through the installed Claude hook to a
+// listener that takes the call, waits 300 ms (the loaded timing in GAP-0497),
+// then closes before a status. The listener remains bound before gateway.pid
+// is published. The installed hook must follow the outage mode then.
+func TestShellHookRestartTransportOutageBeforePIDPublication(t *testing.T) {
+	for _, tc := range []struct {
+		name, outageMode string
+		lock             bool
+		allow            bool
+	}{
+		{"default tier, restart lock held", "open", true, true},
+		{"strict tier, restart lock held", "closed", true, false},
+		{"default tier, no restart lock", "open", false, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			prepare := func(dataDir string) {
+				installNativeHookPostForHookTest(t, filepath.Dir(dataDir))
+				if !tc.lock {
+					return
+				}
+				f, err := os.OpenFile(filepath.Join(dataDir, "gateway.start.lock"), os.O_CREATE|os.O_RDONLY, 0o600)
+				if err != nil {
+					t.Fatal(err)
+				}
+				t.Cleanup(func() { _ = f.Close() })
+				if err := syscall.Flock(int(f.Fd()), syscall.LOCK_EX|syscall.LOCK_NB); err != nil {
+					t.Fatal(err)
+				}
+			}
+			env := []string{"DEFENSECLAW_FAIL_MODE=" + tc.outageMode, "DC_COLD_OUTAGE_MODE=" + tc.outageMode,
+				"DC_COLD_ACCEPT_DROP=1", "DEFENSECLAW_GATEWAY_AUTOSTART=0"}
+			run := runHookForColdStart(t, NewClaudeCodeConnector(), "claude-code-hook.sh", nil, prepare, env...)
+			if got := exitCodeOf(run.err) == 0 && !strings.Contains(run.stdout, `"deny"`); got != tc.allow {
+				t.Fatalf("call allowed=%v, want %v: stdout %q stderr %q", got, tc.allow, run.stdout, run.stderr)
+			}
+			records := hookFailureRecords(t, run.dataDir)
+			if len(records) != 1 {
+				t.Fatalf("hook-failures rows %+v, want one", records)
+			}
+			want := "fail_closed"
+			if tc.allow {
+				want = "fail_open"
+			}
+			if records[0]["outcome"] != want {
+				t.Fatalf("outcome %q, want %s: %+v", records[0]["outcome"], want, records[0])
+			}
+			if tc.allow && !strings.Contains(run.stdout, "restarting or not running") {
+				t.Fatalf("outage warning missing restart: %q", run.stdout)
 			}
 		})
 	}

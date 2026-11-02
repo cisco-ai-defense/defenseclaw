@@ -8,6 +8,7 @@ package main
 import (
 	"bufio"
 	"bytes"
+	"io"
 	"net"
 	"net/http"
 	"net/http/httptest"
@@ -129,3 +130,69 @@ func startListenHelper(t *testing.T, addr string) {
 }
 
 func itoa(n int) string { return strconv.Itoa(n) }
+
+func TestHookPostRefusedWithStartLock(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv(hookPostDataDirEnv, dir)
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	addr := listener.Addr().String()
+	_ = listener.Close()
+	frame := []byte("DCPOST1\x00/api/v1/claude-code/hook\x00{\"hook_event_name\":\"PreToolUse\"}\x00Content-Type\x00application/json\x00")
+	check := func(want int) {
+		t.Helper()
+		args := []string{"hook-post", "--api-addr", addr, "--max-time", "1", "--curl-output"}
+		if got := runMain(args, bytes.NewReader(frame), io.Discard, io.Discard); got != want {
+			t.Fatalf("refused hook-post exit %d, want %d", got, want)
+		}
+	}
+	check(hookexec.PerUserPostOutageExit)
+	f, err := os.OpenFile(filepath.Join(dir, "gateway.start.lock"), os.O_CREATE|os.O_RDONLY, 0o600)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer f.Close()
+	check(hookexec.PerUserPostOutageExit)
+	if err := syscall.Flock(int(f.Fd()), syscall.LOCK_EX|syscall.LOCK_NB); err != nil {
+		t.Fatal(err)
+	}
+	check(hookexec.PerUserPostRestartOutageExit)
+	t.Setenv(hookPostDataDirEnv, "")
+	check(hookexec.PerUserPostOutageExit)
+}
+
+// A gateway that accepts a call and then closes before a status can be the
+// stopping side of the same restart. The helper classifies it while the
+// start lock is held, before the new listener or PID record can race it.
+func TestHookPostDroppedCallWithStartLock(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv(hookPostDataDirEnv, dir)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		conn, _, err := w.(http.Hijacker).Hijack()
+		if err == nil {
+			_ = conn.Close()
+		}
+	}))
+	defer server.Close()
+	addr := strings.TrimPrefix(server.URL, "http://")
+	frame := []byte("DCPOST1\x00/api/v1/claude-code/hook\x00{\"hook_event_name\":\"PreToolUse\"}\x00Content-Type\x00application/json\x00")
+	check := func(want int) {
+		t.Helper()
+		args := []string{"hook-post", "--api-addr", addr, "--max-time", "1", "--curl-output"}
+		if got := runMain(args, bytes.NewReader(frame), io.Discard, io.Discard); got != want {
+			t.Fatalf("dropped hook-post exit %d, want %d", got, want)
+		}
+	}
+	check(hookexec.PerUserPostOutageExit)
+	f, err := os.OpenFile(filepath.Join(dir, "gateway.start.lock"), os.O_CREATE|os.O_RDONLY, 0o600)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer f.Close()
+	if err := syscall.Flock(int(f.Fd()), syscall.LOCK_EX|syscall.LOCK_NB); err != nil {
+		t.Fatal(err)
+	}
+	check(hookexec.PerUserPostRestartOutageExit)
+}

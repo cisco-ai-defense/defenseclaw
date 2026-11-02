@@ -153,14 +153,20 @@ const PerUserPostPeerUnverifiedExit = 8
 const PerUserPostNoAnswerExit = 9
 
 // PerUserPostRestartNoAnswerExit is the exit status of `hook-post` for such a
-// call while a start or restart of this account's gateway holds its start
-// lock and the process behind the call's connection changed during the call
+// call while a start or restart of this account's gateway holds or held its
+// start lock during the call and the process behind the call's connection changed
 // (PerUserGatewayRestartProven, Linux and macOS): the gateway that took the
 // call is gone or no longer owns the port. The shell hooks read it as the
 // restart outage (7, restart waited), whatever the call's first try was
 // (rel-1-0-6 GAP-0295). A held lock alone, with the same gateway up, is
 // PerUserPostNoAnswerExit: a gateway that is up and slow stays closed.
 const PerUserPostRestartNoAnswerExit = 10
+
+// PerUserPostRestartOutageExit is the exit status for a connection that was
+// refused or closed before any HTTP status while this account's gateway
+// start lock was held. The shell reads it as a restart outage before a later
+// socket-table or gateway.pid look can race the new listener (GAP-0497).
+const PerUserPostRestartOutageExit = 11
 
 // PerUserPostNoAnswer reports whether err, from PostPerUserHook, is a request
 // that ended at its deadline with no status: not an outage the transport
