@@ -2219,6 +2219,13 @@ func actionWordHasUnquotedGlob(word *syntax.Word, command string) bool {
 }
 
 func actionKnownReadOnlyShell(file *syntax.File, home string) bool {
+	return actionKnownReadOnlyShellDepth(file, home, 0)
+}
+
+func actionKnownReadOnlyShellDepth(file *syntax.File, home string, depth int) bool {
+	if depth >= 8 {
+		return false
+	}
 	seen, safe := false, true
 	status := map[string]bool{"?": true}
 	syntax.Walk(file, func(node syntax.Node) bool {
@@ -2312,12 +2319,51 @@ func actionKnownReadOnlyShell(file *syntax.File, home string) bool {
 				body, static = StaticWord(call.Args[j], home)
 			}
 			safe = static && actionPowerShellListOnlyBody(body, home)
+		case "bash":
+			// A literal bash -c body that only reads is still read-only when
+			// the outer call is judged from a home containing protected files.
+			// The exact launch and every child statement are checked below.
+			safe = actionReadOnlyBashCLaunch(call, home, depth)
 		default:
 			safe = false
 		}
 		return safe
 	})
 	return seen && safe
+}
+
+func actionReadOnlyBashCLaunch(call *syntax.CallExpr, home string, depth int) bool {
+	if len(call.Assigns) != 0 || len(call.Args) != 3 || depth+1 >= 8 {
+		return false
+	}
+	option, optionKnown := StaticWord(call.Args[1], home)
+	if !optionKnown || option != "-c" || !actionBashCLiteralBody(call.Args[2]) {
+		return false
+	}
+	body := actionWordLiteralText(call.Args[2])
+	if strings.ContainsAny(body, "$`\\%!^\"'\r\n") {
+		// The Windows outer shell can expand variables or escapes before
+		// bash receives the body, so only a literal cross-shell body qualifies.
+		return false
+	}
+	child, parsed := parseShell(body)
+	return parsed && actionKnownReadOnlyShellDepth(child, home, depth+1)
+}
+
+func actionBashCLiteralBody(word *syntax.Word) bool {
+	if word == nil || len(word.Parts) != 1 {
+		return false
+	}
+	quoted, ok := word.Parts[0].(*syntax.DblQuoted)
+	if !ok {
+		return false
+	}
+	for _, part := range quoted.Parts {
+		if _, ok := part.(*syntax.Lit); !ok {
+			return false
+		}
+	}
+	return true
 }
 
 // actionDiscardRedirect reports a redirect that writes no file: output or
