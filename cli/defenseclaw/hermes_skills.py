@@ -14,32 +14,20 @@
 #
 # SPDX-License-Identifier: Apache-2.0
 
-"""Hermes installer-managed skill provenance.
-
-Hermes copies its bundled skill library into ``HERMES_HOME/skills`` alongside
-hub-installed and operator-authored skills.  The adjacent
-``.bundled_manifest`` maps each bundled skill's frontmatter name to the MD5
-tree hash that Hermes recorded when it last synchronized that copy. A skill is
-vendor-bundled only when the manifest, installed user copy, and matching source
-under the exact ``hermes-agent/skills`` checkout all agree. Modified,
-untracked, and manifest-only copies remain ordinary scanable assets.
-"""
+"""Hermes skill provenance using pinned vendor tree digests."""
 
 from __future__ import annotations
 
 import hashlib
 import os
-import re
 import stat
 
 from defenseclaw.file_permissions import open_regular_file_no_follow
+from defenseclaw.hermes_vendor_digests import VENDOR_DIGESTS
 
-HERMES_BUNDLED_MANIFEST = ".bundled_manifest"
-_MANIFEST_MAX_BYTES = 2 * 1024 * 1024
 _SKILL_MARKER_MAX_BYTES = 64 * 1024
 _SKILL_FILE_MAX_BYTES = 64 * 1024 * 1024
 _SKILL_TREE_MAX_BYTES = 256 * 1024 * 1024
-_MANIFEST_HASH_RE = re.compile(r"^[0-9a-fA-F]{32}$")
 
 
 def _filesystem_identity(info: os.stat_result) -> tuple[int, int, int, int, int]:
@@ -105,28 +93,6 @@ def _read_regular_file(path: str, *, max_bytes: int) -> bytes | None:
         os.close(fd)
 
 
-def _manifest_for_root(skill_root: str) -> dict[str, str]:
-    payload = _read_regular_file(
-        os.path.join(skill_root, HERMES_BUNDLED_MANIFEST),
-        max_bytes=_MANIFEST_MAX_BYTES,
-    )
-    if payload is None:
-        return {}
-    try:
-        text = payload.decode("utf-8")
-    except UnicodeDecodeError:
-        return {}
-    entries: dict[str, str] = {}
-    for raw_line in text.splitlines():
-        line = raw_line.strip()
-        if not line or ":" not in line:
-            continue
-        name, digest = (part.strip() for part in line.split(":", 1))
-        if name and _MANIFEST_HASH_RE.fullmatch(digest):
-            entries[name] = digest.lower()
-    return entries
-
-
 def skill_name(skill_dir: str) -> str:
     """Return Hermes's manifest identity from ``SKILL.md`` frontmatter."""
 
@@ -153,8 +119,8 @@ def skill_name(skill_dir: str) -> str:
     return fallback
 
 
-def _tree_md5(skill_dir: str) -> str | None:
-    """Compute the exact tree hash used by Hermes's ``skills_sync.py``."""
+def _tree_sha256(skill_dir: str) -> str | None:
+    """Hash the complete skill tree for comparison with the vendor digest."""
 
     root = os.path.abspath(skill_dir)
     try:
@@ -193,9 +159,7 @@ def _tree_md5(skill_dir: str) -> str | None:
     except OSError:
         return None
 
-    digest = hashlib.md5()  # noqa: S324 -- compatibility with Hermes manifest.
-    # ``pathlib.WindowsPath`` sorts case-insensitively; Hermes hashes files in
-    # ``sorted(directory.rglob("*"))`` order, so mirror the host path flavour.
+    digest = hashlib.sha256()
     for relative, full, size in sorted(
         files,
         key=lambda item: os.path.normcase(item[0]),
@@ -236,9 +200,8 @@ def is_bundled_skill_dir(
     *,
     name: str | None = None,
     skill_root: str | None = None,
-    manifest: dict[str, str] | None = None,
 ) -> bool:
-    """Return True only for an unchanged source-bound Hermes skill."""
+    """Return True only for an unchanged skill in the pinned vendor library."""
 
     root = os.path.abspath(skill_root or _hermes_skill_root())
     candidate = os.path.abspath(skill_dir)
@@ -254,27 +217,13 @@ def is_bundled_skill_dir(
     except ValueError:
         return False
     identity = name or skill_name(candidate)
-    entries = manifest if manifest is not None else _manifest_for_root(root)
-    origin_hash = entries.get(identity, "").lower()
-    if not origin_hash or _tree_md5(candidate) != origin_hash:
+    relative = os.path.relpath(candidate, root)
+    if identity != os.path.basename(relative):
         return False
-
-    # The manifest is user-writable and is therefore not a sufficient trust
-    # boundary by itself. Bind the origin hash to the matching skill shipped in
-    # the exact Hermes installation checkout. If that source is unavailable,
-    # moved, linked, modified, or mismatched, fail open to scanning.
-    try:
-        relative = os.path.relpath(candidate, root)
-        source_root = os.path.join(os.path.dirname(root), "hermes-agent", "skills")
-        source = os.path.abspath(os.path.join(source_root, relative))
-        source_root = os.path.abspath(source_root)
-        if os.path.normcase(os.path.commonpath((source, source_root))) != os.path.normcase(
-            source_root
-        ):
-            return False
-    except ValueError:
+    want = VENDOR_DIGESTS.get(relative.replace(os.sep, "/"))
+    if not want:
         return False
-    return skill_name(source) == identity and _tree_md5(source) == origin_hash
+    return _tree_sha256(candidate) == want
 
 
 def is_bundled_skill_path(path: str) -> bool:
@@ -298,31 +247,15 @@ def is_bundled_skill_path(path: str) -> bool:
     except ValueError:
         return False
 
-    manifest = _manifest_for_root(root)
     current = candidate
     while os.path.normcase(current) != os.path.normcase(root):
         if os.path.isfile(os.path.join(current, "SKILL.md")):
             return is_bundled_skill_dir(
                 current,
                 skill_root=root,
-                manifest=manifest,
             )
         parent = os.path.dirname(current)
         if parent == current:
             break
         current = parent
     return False
-
-
-def manifest_for_root(skill_root: str) -> dict[str, str]:
-    """Expose a snapshot for one bounded discovery pass."""
-
-    if not is_hermes_skill_root(skill_root):
-        return {}
-    return _manifest_for_root(os.path.abspath(skill_root))
-
-
-def directory_md5(skill_dir: str) -> str | None:
-    """Testable compatibility wrapper for Hermes's manifest hash."""
-
-    return _tree_md5(skill_dir)

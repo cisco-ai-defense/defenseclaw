@@ -103,7 +103,7 @@ Disable removes only DefenseClaw's entries and approvals. Settings and comments 
 
 ### Inventory
 
-Read-only and bounded to the resolved default profile: configured MCP, local skills and `skills.external_dirs`, `SOUL.md`, `memories/MEMORY.md` and `memories/USER.md`, `memory.provider` provenance, and bundled, Nix, user and pip `hermes_agent.plugins` with activation provenance. Hermes keeps installer-synced and operator-authored skills in one tree. A skill is vendor-bundled only while its manifest hash, installed copy and matching `hermes-agent/skills` source agree. Those are listed but never scanned, blocked, disabled or quarantined. Modified, untracked, linked or unverifiable copies are ordinary scannable skills.
+Read-only and bounded to the resolved default profile: configured MCP, local skills and `skills.external_dirs`, `SOUL.md`, `memories/MEMORY.md` and `memories/USER.md`, `memory.provider` provenance, and bundled, Nix, user and pip `hermes_agent.plugins` with activation provenance. Hermes keeps installer-synced and operator-authored skills in one tree. A skill is vendor-bundled only while its complete tree matches a vendor digest shipped with DefenseClaw. Those are listed but never scanned, blocked, disabled or quarantined. Modified, unlisted, linked or unverifiable copies are ordinary scannable skills.
 
 ## Hook capabilities
 

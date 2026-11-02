@@ -10,39 +10,31 @@ import (
 	"testing"
 )
 
-func TestDiscoverClassifiesOnlyUnchangedManifestTrackedSkillsBundled(t *testing.T) {
+func TestDiscoverClassifiesOnlyPinnedVendorTreesBundled(t *testing.T) {
 	home, err := filepath.EvalSymlinks(t.TempDir())
 	if err != nil {
 		t.Fatal(err)
 	}
 	t.Setenv("HERMES_HOME", home)
 	root := filepath.Join(home, "skills")
-	bundled := writeTestSkill(t, root, filepath.Join("productivity", "vendor-docs"), "vendor-docs")
+	bundled := filepath.Join(root, "media", "songsee")
+	if err := os.MkdirAll(bundled, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	marker, err := os.ReadFile(filepath.Join("testdata", "vendor", "media", "songsee", "SKILL.md"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(bundled, "SKILL.md"), marker, 0o600); err != nil {
+		t.Fatal(err)
+	}
 	modified := writeTestSkill(t, root, filepath.Join("software-development", "modified-vendor"), "modified-vendor")
 	forged := writeTestSkill(t, root, filepath.Join("productivity", "manifest-only"), "manifest-only")
 	user := writeTestSkill(t, root, "operator-skill", "operator-skill")
 	sourceRoot := filepath.Join(home, "hermes-agent", "skills")
-	writeTestSkill(t, sourceRoot, filepath.Join("productivity", "vendor-docs"), "vendor-docs")
 	writeTestSkill(t, sourceRoot, filepath.Join("software-development", "modified-vendor"), "modified-vendor")
-	bundledHash, err := treeMD5(bundled)
-	if err != nil {
-		t.Fatalf("hash bundled skill: %v", err)
-	}
-	modifiedHash, err := treeMD5(modified)
-	if err != nil {
-		t.Fatalf("hash modified skill baseline: %v", err)
-	}
-	forgedHash, err := treeMD5(forged)
-	if err != nil {
-		t.Fatalf("hash forged skill baseline: %v", err)
-	}
-	manifest := fmt.Sprintf(
-		"vendor-docs:%s\nmodified-vendor:%s\nmanifest-only:%s\n",
-		bundledHash,
-		modifiedHash,
-		forgedHash,
-	)
-	if err := os.WriteFile(filepath.Join(root, ManifestName), []byte(manifest), 0o600); err != nil {
+	writeTestSkill(t, sourceRoot, filepath.Join("productivity", "manifest-only"), "manifest-only")
+	if err := os.WriteFile(filepath.Join(root, ".bundled_manifest"), []byte("modified-vendor:local\nmanifest-only:local\n"), 0o600); err != nil {
 		t.Fatalf("write manifest: %v", err)
 	}
 	if err := os.WriteFile(
@@ -61,13 +53,13 @@ func TestDiscoverClassifiesOnlyUnchangedManifestTrackedSkillsBundled(t *testing.
 	for _, entry := range entries {
 		got[entry.Name] = entry
 	}
-	for _, name := range []string{"vendor-docs", "modified-vendor", "manifest-only", "operator-skill"} {
+	for _, name := range []string{"songsee", "modified-vendor", "manifest-only", "operator-skill"} {
 		if _, ok := got[name]; !ok {
 			t.Fatalf("missing %q from %+v", name, entries)
 		}
 	}
-	if !got["vendor-docs"].Bundled {
-		t.Fatal("unchanged manifest-tracked skill was not bundled")
+	if !got["songsee"].Bundled {
+		t.Fatal("pinned vendor skill was not bundled before a manifest exists")
 	}
 	if got["modified-vendor"].Bundled || got["manifest-only"].Bundled || got["operator-skill"].Bundled {
 		t.Fatalf("modified/untracked skills became bundled: %+v", got)
@@ -77,6 +69,12 @@ func TestDiscoverClassifiesOnlyUnchangedManifestTrackedSkillsBundled(t *testing.
 	}
 	if IsBundledPath(modified) || IsBundledPath(forged) || IsBundledPath(user) {
 		t.Fatal("modified/untracked skill bypassed scanning")
+	}
+	if err := os.WriteFile(filepath.Join(bundled, "SKILL.md"), append(marker, []byte("\nlocal change\n")...), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if IsBundledPath(bundled) {
+		t.Fatal("changed pinned skill remained bundled")
 	}
 }
 
