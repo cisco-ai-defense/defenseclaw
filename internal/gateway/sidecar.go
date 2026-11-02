@@ -2238,6 +2238,9 @@ func (s *Sidecar) logCMIDBuildError(stage string, err error) {
 	if err == nil {
 		return
 	}
+	// A library the code-signing policy refuses is a host prerequisite, logged
+	// once per streak with its remedy.
+	managed.ReportCMIDLibraryLoadError(err)
 	now := time.Now()
 	if stage == s.cmidBuildLastKind && now.Sub(s.cmidBuildLastLog) < cmidBuildLogCooldown {
 		return
@@ -2256,6 +2259,7 @@ func (s *Sidecar) logCMIDBuildError(stage string, err error) {
 // token; logCMIDBuildError only fires on failure, so without this line
 // success is indistinguishable across lanes.
 func (s *Sidecar) logCMIDBuildLane(lane string) {
+	managed.ReportCMIDLibraryLoadError(nil)
 	fmt.Fprintf(os.Stderr,
 		"[managed-cloud] CMID provider using %s credential lane\n",
 		lane)

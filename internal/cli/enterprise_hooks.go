@@ -2017,6 +2017,8 @@ func runEnterpriseHooksWatch(cmd *cobra.Command, _ []string) error {
 		// (spec 003 REQ-19) can collapse to overall `ready`.
 		writeGuardianStateOrLog(cmd.ErrOrStderr(), guardianstate.StateReady)
 	}
+	hostChecks := newEnterpriseHookHostChecks(cfg)
+	hostChecks.Run()
 
 	ticker := time.NewTicker(enterpriseHookWatchInterval)
 	defer ticker.Stop()
@@ -2182,6 +2184,7 @@ func runEnterpriseHooksWatch(cmd *cobra.Command, _ []string) error {
 			if _, err := reconcile("interval"); err != nil {
 				fmt.Fprintf(cmd.ErrOrStderr(), "[hook-guardian] interval reconcile failed: %s\n", err)
 			}
+			hostChecks.Run()
 			if repairRetryNeeded {
 				scheduleRepairRetry()
 			} else {

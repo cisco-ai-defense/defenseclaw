@@ -2070,6 +2070,7 @@ func (s *ContinuousDiscoveryService) signalFromDirectoryChildren(sig AISignature
 	fi, statErr := os.Stat(path)
 	switch {
 	case statErr != nil && os.IsPermission(statErr):
+		managed.ReportInventoryScanDenial(path, statErr)
 		partial = true
 		coverageReason = CoverageReasonPermissionDenied
 	case statErr != nil && !os.IsNotExist(statErr):
@@ -2079,6 +2080,7 @@ func (s *ContinuousDiscoveryService) signalFromDirectoryChildren(sig AISignature
 		entries, readErr := os.ReadDir(path)
 		switch {
 		case readErr != nil && os.IsPermission(readErr):
+			managed.ReportInventoryScanDenial(path, readErr)
 			partial = true
 			coverageReason = CoverageReasonPermissionDenied
 		case readErr != nil:
@@ -2650,7 +2652,9 @@ func (s *ContinuousDiscoveryService) detectPackageManifests(ctx context.Context)
 				// Permission errors / vanished entries are
 				// expected in long-running scans; record one bump
 				// per error so dashboards see the regression but
-				// keep going. Walking is best-effort.
+				// keep going. Walking is best-effort. A TCC denial
+				// is also reported once as a skipped root.
+				managed.ReportInventoryScanDenial(path, err)
 				walkErrs++
 				if d != nil && d.IsDir() {
 					return filepath.SkipDir
