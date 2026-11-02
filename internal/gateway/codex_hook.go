@@ -257,7 +257,7 @@ func (a *APIServer) evaluateCodexHookForProfile(
 		}
 	case "UserPromptSubmit":
 		if !a.managedAIDOnly() && (cfg == nil || !cfg.SecureClientIntegration()) {
-			if judge := a.judgeFor(ctx); judge != nil {
+			for _, judge := range a.hookSessionJudges(ctx) {
 				judge.ObserveSessionPrompt(ctx, req.Prompt)
 			}
 			a.observeUserDownloadRequest(ctx, req.Prompt)
@@ -1087,6 +1087,7 @@ func mergeCodexToolResultVerdicts(
 	}
 	merged.WouldBlock = source.WouldBlock || untrusted.WouldBlock
 	merged.laneVerdict = source.laneVerdict || untrusted.laneVerdict
+	merged.decisionConfirm = mergedDecisionConfirm(merged.Action, source, untrusted)
 	if source.RedactionEnabled != nil || untrusted.RedactionEnabled != nil {
 		enabled := source.RedactionEnabled != nil && *source.RedactionEnabled ||
 			untrusted.RedactionEnabled != nil && *untrusted.RedactionEnabled

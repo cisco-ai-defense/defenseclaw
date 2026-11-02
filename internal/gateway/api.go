@@ -395,6 +395,9 @@ type APIServer struct {
 	// boot via SetHookJudge. Per-connector gating happens in
 	// hookJudgeInspect via guardrail.judge.hook_connectors.
 	hookJudge atomic.Pointer[LLMJudge]
+	// hookDecisionJudge is the decision-model-only judge of cascade 2 for an
+	// API server outside a gateway (a gateway reads its generation's).
+	hookDecisionJudge atomic.Pointer[LLMJudge]
 
 	// userDownloads remembers the hosts recent user prompts ask to download
 	// from and run (#1390), per session, judge or not.
@@ -442,6 +445,36 @@ func (a *APIServer) judgeFor(ctx context.Context) *LLMJudge {
 		return nil
 	}
 	return judgeOf(pinnedGeneration(ctx), a.hookJudge.Load())
+}
+
+// decisionJudgeFor is the cascade-2 judge (decision model, no LLM) of the
+// generation ctx pinned, else the server's own.
+func (a *APIServer) decisionJudgeFor(ctx context.Context) *LLMJudge {
+	if a == nil {
+		return nil
+	}
+	if g := pinnedGeneration(ctx); g.published() {
+		return g.decisionJudge
+	}
+	return a.hookDecisionJudge.Load()
+}
+
+// SetHookDecisionJudge wires the cascade-2 judge (newDecisionOnlyJudge);
+// nil turns cascade 2 off.
+func (a *APIServer) SetHookDecisionJudge(j *LLMJudge) {
+	a.hookDecisionJudge.Store(j)
+}
+
+// hookSessionJudges are the hook-lane judges that keep a session's user
+// intent and recent tool calls: the LLM judge and the cascade-2 judge.
+func (a *APIServer) hookSessionJudges(ctx context.Context) []*LLMJudge {
+	var out []*LLMJudge
+	for _, j := range []*LLMJudge{a.judgeFor(ctx), a.decisionJudgeFor(ctx)} {
+		if j != nil {
+			out = append(out, j)
+		}
+	}
+	return out
 }
 
 // SetHookJudge wires the LLM judge onto the API server so the hook

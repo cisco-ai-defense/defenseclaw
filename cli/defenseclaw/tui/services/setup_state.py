@@ -1678,6 +1678,7 @@ _CSV_FIELD_KEYS = frozenset(
         "cisco_ai_defense.enabled_rules",
         "claude_code.scan_paths",
         "codex.scan_paths",
+        "decision_model.hook_connectors",
     }
 )
 

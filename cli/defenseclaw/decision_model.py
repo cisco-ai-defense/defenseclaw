@@ -6,10 +6,12 @@ TUI and the skill scanner.
 
 The decision model is a small, fast model that speaks the System One
 protocol (``POST {model, state, questions}``; answers carry calibrated
-probabilities). The gateway runs it in front of the LLM judge on tool calls
-(internal/gateway/decision_model.go); ``skill scan`` passes it to the skill
-scanner's advisory System One tier. Settings live in ``decision_model:``;
-the bearer token lives in the environment or ``~/.defenseclaw/.env``.
+probabilities). The gateway runs it on hook-lane tool calls
+(internal/gateway/decision_model.go), per connector, in one of three
+cascades: rules only, rules -> decision model, or rules -> decision model ->
+LLM judge. ``skill scan`` passes it to the skill scanner's advisory System
+One tier. Settings live in ``decision_model:``; the bearer token lives in the
+environment or ``~/.defenseclaw/.env``.
 """
 
 from __future__ import annotations
@@ -19,6 +21,7 @@ import time
 from dataclasses import dataclass
 from typing import Any
 
+from defenseclaw import connector_paths
 from defenseclaw.config import (
     DECISION_MODEL_KEY_ENV,
     Config,
@@ -32,6 +35,12 @@ BENCHMARK_URL = "https://huggingface.co/spaces/Vineethsain/defenseclaw-system-on
 DOCS_URL = "https://cisco-ai-defense.github.io/defenseclaw/docs/guardrail/decision-model/"
 
 # A benign probe for --ping and doctor: the disposition question only.
+CASCADE_RULES_ONLY = "rules only"
+CASCADE_RULES_MODEL = "rules -> decision model"
+CASCADE_RULES_JUDGE = "rules -> LLM judge"
+CASCADE_RULES_MODEL_JUDGE = "rules -> decision model -> LLM judge"
+_ALL = "*"
+
 _PING_STATE = {"current_tool_call": {"tool": "Read", "arguments": '{"file_path": "README.md"}'}}
 _PING_QUESTIONS = {
     "disposition": {
@@ -61,6 +70,7 @@ def apply_settings(
     allow_threshold: float | None = None,
     block_threshold: float | None = None,
     on_confident_block: str | None = None,
+    hook_connectors: list[str] | None = None,
 ) -> DecisionModelConfig:
     """Apply the given fields to ``cfg.decision_model`` and validate the
     result. Raises DecisionModelError and leaves cfg unchanged on a bad
@@ -86,11 +96,125 @@ def apply_settings(
         updated.block_threshold = float(block_threshold)
     if on_confident_block is not None:
         updated.on_confident_block = on_confident_block.strip().lower()
+    if hook_connectors is not None:
+        updated.hook_connectors = parse_connectors(hook_connectors)
     problem = updated.validation_error()
     if problem:
         raise DecisionModelError(f"decision_model: {problem}")
     cfg.decision_model = updated
     return updated
+
+
+def parse_connectors(value: str | list[str] | tuple[str, ...]) -> list[str]:
+    """Connector names from a comma-separated string or a list: trimmed,
+    lowercased, deduplicated, blanks dropped; ``*`` stands for all of them."""
+    items = value.replace(";", ",").split(",") if isinstance(value, str) else list(value)
+    names: list[str] = []
+    for item in items:
+        name = "*" if str(item).strip() == _ALL else connector_paths.normalize(str(item))
+        if name and name not in names:
+            names.append(name)
+    return [_ALL] if _ALL in names else names
+
+
+def _listed(names: list[str], connector: str) -> bool:
+    """Case-insensitive membership in a connector gate list; ``*`` = all."""
+    wanted = connector_paths.normalize(connector)
+    for entry in names:
+        entry = str(entry).strip()
+        if entry == _ALL or (wanted and connector_paths.normalize(entry) == wanted):
+            return True
+    return False
+
+
+def judge_runs_for(cfg: Config, connector: str) -> bool:
+    """Whether the LLM judge reviews this connector's hook-lane tool calls.
+    Mirrors the gateway (hookLaneJudge): the judge is built (on, with a model
+    and, unless its provider signs without one, an API key), the connector is
+    in guardrail.judge.hook_connectors and the effective tool-call strategy is
+    not regex_only."""
+    guardrail = cfg.guardrail
+    if not guardrail.judge.enabled or not _listed(list(guardrail.judge.hook_connectors or []), connector):
+        return False
+    if not _judge_builds(cfg):
+        return False
+    strategy = (
+        (guardrail.detection_strategy_tool_call or "").strip()
+        or (guardrail.detection_strategy or "").strip()
+        or "regex_judge"
+    )
+    return strategy.lower() != "regex_only"
+
+
+def _judge_builds(cfg: Config) -> bool:
+    """Whether the gateway can build the LLM judge (newLLMJudgeWithReason):
+    a model, and a key unless the provider needs none."""
+    try:
+        llm = cfg.resolve_llm("guardrail.judge")
+    except Exception:  # noqa: BLE001 - a config the CLI cannot resolve has no judge
+        return False
+    if not (llm.model or "").strip():
+        return False
+    if _judge_allows_empty_key(cfg, llm) or llm.resolved_api_key():
+        return True
+    from defenseclaw import credentials
+
+    env = (llm.api_key_env or "").strip() or "DEFENSECLAW_LLM_KEY"
+    return bool(credentials.resolve(env, cfg.data_dir).value)
+
+
+def _judge_allows_empty_key(cfg: Config, llm: Any) -> bool:
+    """Mirrors internal/gateway/llm_judge.go llmJudgeAllowsEmptyAPIKey: a local
+    provider, or Bedrock (by provider, by the base type of a custom provider
+    instance, or by the model's provider prefix) builds without a key."""
+    if llm.is_local_provider():
+        return True
+    provider = (llm.provider or "").strip().lower()
+    instance = (getattr(llm, "instance_name", "") or "").strip().lower()
+    if provider in ("", "custom") and instance:
+        for entry in _provider_instances(cfg):
+            if str(entry.get("name", "")).strip().lower() == instance:
+                provider = str(entry.get("base_provider_type", "")).strip().lower()
+                break
+    if not provider:
+        provider = (llm.provider_prefix() or "").strip().lower()
+    return provider in ("bedrock", "amazon-bedrock")
+
+
+def _provider_instances(cfg: Config) -> list[dict]:
+    """The custom provider instances (llm_providers, else a legacy
+    custom-providers.json), as the gateway reads them; empty when none."""
+    try:
+        from defenseclaw import derived_providers
+
+        return [dict(p) for p in derived_providers.configured_providers(cfg)]
+    except Exception:  # noqa: BLE001 - no registry means no instance
+        return []
+
+
+def answers_alone_for(cfg: Config, connector: str) -> bool:
+    """Whether the decision model answers this connector's tool calls with no
+    judge behind it (cascade 2)."""
+    dm = cfg.decision_model
+    return (
+        dm.active()
+        and not judge_runs_for(cfg, connector)
+        and _listed(list(dm.hook_connectors or []), connector)
+    )
+
+
+def cascade_for(cfg: Config, connector: str) -> str:
+    """The tool-call cascade this connector runs, in words."""
+    judge = judge_runs_for(cfg, connector)
+    model = cfg.decision_model.active()
+    if judge:
+        return CASCADE_RULES_MODEL_JUDGE if model else CASCADE_RULES_JUDGE
+    return CASCADE_RULES_MODEL if answers_alone_for(cfg, connector) else CASCADE_RULES_ONLY
+
+
+def cascade_lines(cfg: Config) -> list[str]:
+    """One ``connector: cascade`` entry per active connector."""
+    return [f"{name}: {cascade_for(cfg, name)}" for name in cfg.active_connectors()]
 
 
 @dataclass(frozen=True)
@@ -196,21 +320,25 @@ def summary_rows(cfg: Config) -> list[tuple[str, str]]:
         ("decision_model.allow_threshold", f"{dm.effective_allow_threshold():.2f}"),
         ("decision_model.block_threshold", f"{dm.effective_block_threshold():.2f}"),
         ("decision_model.on_confident_block", dm.effective_on_confident_block()),
+        ("decision_model.hook_connectors", ", ".join(dm.hook_connectors) or "(none: only in front of the LLM judge)"),
     ]
     return rows
 
 
 def judge_note(cfg: Config) -> str:
-    """Say when the guardrail cannot use the decision model yet."""
+    """Say which active connectors get no decision model, and how to add them."""
     if not cfg.decision_model.active():
         return ""
-    if not cfg.guardrail.judge.enabled:
-        return (
-            "The guardrail runs the decision model in front of the LLM judge, which is off: "
-            "tool calls keep today's rule verdicts until you turn the judge on "
-            "(defenseclaw setup guardrail --detection-strategy regex_judge). skill scan uses it now."
-        )
-    return ""
+    bare = [c for c in cfg.active_connectors() if cascade_for(cfg, c) == CASCADE_RULES_ONLY]
+    if not bare:
+        return ""
+    listed = [c for c in cfg.decision_model.hook_connectors if c != _ALL]
+    suggestion = ",".join([*listed, *[c for c in bare if c not in listed]])
+    return (
+        f"The decision model answers no tool calls for {', '.join(bare)} (rules only there: the LLM judge is off "
+        f"for them). Add them with: defenseclaw setup decision-model --connectors {suggestion}. "
+        "skill scan records its advisory score either way."
+    )
 
 
 def skill_scanner_options(cfg: Config) -> tuple[dict[str, Any], dict[str, str]]:

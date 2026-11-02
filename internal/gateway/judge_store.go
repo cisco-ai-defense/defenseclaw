@@ -614,7 +614,7 @@ func (j *JudgeStore) fanoutAudit(jb judgePersistJob) error {
 	audit.ApplyEnvelope(&evt, env)
 	return j.logger.LogJudgeCompletion(judgePersistContext(jb.ctx), evt, audit.JudgeCompletionInput{
 		Kind:         jb.payload.Kind,
-		Action:       jb.payload.Action,
+		Action:       judgeCompletionAction(jb.payload.Kind, jb.payload.Action),
 		LatencyMS:    jb.payload.LatencyMs,
 		InputBytes:   int64(jb.payload.InputBytes),
 		FailureClass: jb.payload.FailureClass,

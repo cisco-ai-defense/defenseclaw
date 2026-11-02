@@ -2487,20 +2487,21 @@ type JudgeConfig struct {
 
 // HookConnectorEnabled reports whether the hook-lane judge is enabled
 // for the named connector. Requires the judge itself to be enabled;
-// matching against HookConnectors is case-insensitive and the "*"
+// matching against HookConnectors is in canonical form (case and the
+// claude-code alias folded, as the CLI does) and the "*"
 // entry matches every connector. Empty list (the default) keeps the
 // hook lane off so existing deployments see no behavior change.
 func (c *JudgeConfig) HookConnectorEnabled(name string) bool {
 	if c == nil || !c.Enabled {
 		return false
 	}
-	name = strings.TrimSpace(name)
+	name = normalizeConnectorKey(name)
 	if name == "" {
 		return false
 	}
 	for _, entry := range c.HookConnectors {
 		entry = strings.TrimSpace(entry)
-		if entry == "*" || strings.EqualFold(entry, name) {
+		if entry == "*" || (entry != "" && normalizeConnectorKey(entry) == name) {
 			return true
 		}
 	}

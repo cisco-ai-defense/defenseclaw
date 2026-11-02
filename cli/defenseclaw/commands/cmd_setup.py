@@ -1447,6 +1447,14 @@ def setup_llm(
     help="escalate (default): the judge still checks a confident block. decide: the block stands without the judge.",
 )
 @click.option(
+    "--connectors",
+    default=None,
+    help=(
+        "Connectors the decision model answers on its own where the LLM judge does not run: "
+        "comma-separated names, or * for all. An empty string clears it."
+    ),
+)
+@click.option(
     "--ping/--no-ping", "run_ping", default=False, help="After saving, send one benign request to check the endpoint."
 )
 @click.option("--non-interactive", "--accept-defaults", is_flag=True, help="Use flags instead of prompts.")
@@ -1462,16 +1470,23 @@ def setup_decision_model(
     allow_threshold: float | None,
     block_threshold: float | None,
     on_confident_block: str | None,
+    connectors: str | None,
     run_ping: bool,
     non_interactive: bool,
 ) -> None:
     """Configure the unified decision model (``decision_model:``).
 
-    A small, fast model that speaks the System One protocol. The guardrail
-    runs it in front of the LLM judge on tool calls: it allows the clear
-    benign calls itself and sends the rest to the judge. ``skill scan``
-    records its advisory score. Off by default; when it is down, the judge
-    decides as before. The token, if any, goes in ~/.defenseclaw/.env with
+    A small, fast model that speaks the System One protocol. Per connector
+    the guardrail runs tool calls through one of three cascades: rules only,
+    rules -> decision model, or rules -> decision model -> LLM judge. Where
+    the judge runs, the model sits in front of it: it allows the clear
+    benign calls and sends the rest to the judge. Where it does not, list the
+    connector with ``--connectors`` and the model answers alone: a confident
+    allow is allowed, a confident block is denied, anything else asks (Claude
+    Code, Copilot, Amp, Antigravity) or raises a HIGH alert (strict: blocks).
+    ``skill scan`` records its advisory score. Off by default; when it is
+    down, the rules verdict (and the judge, where it runs) stands. The token,
+    if any, goes in ~/.defenseclaw/.env with
     ``defenseclaw keys set DEFENSECLAW_DECISION_MODEL_KEY``.
     """
     from defenseclaw import decision_model as dmod
@@ -1485,6 +1500,8 @@ def setup_decision_model(
         ux.section("Decision model")
         for label, value in dmod.summary_rows(cfg):
             click.echo(f"    {ux.dim(label + ':')} {value}")
+        for line in dmod.cascade_lines(cfg):
+            click.echo(f"    {ux.dim('cascade ' + line.split(': ', 1)[0] + ':')} {line.split(': ', 1)[1]}")
         note = dmod.judge_note(cfg)
         if note:
             ux.subhead(note)
@@ -1496,14 +1513,15 @@ def setup_decision_model(
             api_key_env, "'--api-key-env'", dmod.DECISION_MODEL_KEY_ENV
         )
     flags_given = any(v is not None for v in (enabled, model, base_url, api_key_env, timeout,
-                                              allow_threshold, block_threshold, on_confident_block))
+                                              allow_threshold, block_threshold, on_confident_block, connectors))
     if not non_interactive and not flags_given:
         dm = cfg.decision_model
         click.echo()
         terminal_checkbox.restore_line_prompt_mode()
         ux.section("Decision model")
-        ux.subhead("A fast model in front of the LLM judge: it allows the clear benign tool calls")
-        ux.subhead("itself and sends the rest to the judge. Benchmarks: " + dmod.BENCHMARK_URL)
+        ux.subhead("A fast model for tool calls: in front of the LLM judge it allows the clear benign")
+        ux.subhead("calls and sends the rest on; where the judge is off it can answer alone.")
+        ux.subhead("Benchmarks: " + dmod.BENCHMARK_URL)
         click.echo()
         enabled = click.confirm(f"  {dmod.INIT_QUESTION}", default=dm.enabled)
         if enabled:
@@ -1513,6 +1531,7 @@ def setup_decision_model(
                 "  Token env var (leave the default for a local server)",
                 default=dm.effective_api_key_env(),
             ).strip()
+            connectors = _prompt_decision_model_connectors(cfg)
     elif enabled is None and (base_url or model):
         # Naming an endpoint or model on the command line turns it on.
         enabled = True
@@ -1528,6 +1547,7 @@ def setup_decision_model(
             allow_threshold=allow_threshold,
             block_threshold=block_threshold,
             on_confident_block=on_confident_block,
+            hook_connectors=None if connectors is None else dmod.parse_connectors(connectors),
         )
     except dmod.DecisionModelError as exc:
         raise click.ClickException(str(exc)) from exc
@@ -1547,6 +1567,8 @@ def setup_decision_model(
     ux.ok(f"Saved to {config_path_for_data_dir(cfg.data_dir)}")
     for label, value in dmod.summary_rows(cfg):
         ux.kv(label, value)
+    for line in dmod.cascade_lines(cfg) if updated.active() else ():
+        ux.kv("cascade " + line.split(": ", 1)[0], line.split(": ", 1)[1])
     note = dmod.judge_note(cfg)
     if note:
         ux.subhead(note)
@@ -1557,7 +1579,30 @@ def setup_decision_model(
         if result.ok:
             ux.ok(f"Decision model reachable: {result.detail}")
         else:
-            ux.warn(f"Decision model not reachable: {result.detail}; the LLM judge decides alone until it is reachable")
+            ux.warn(
+                f"Decision model not reachable: {result.detail}; "
+                "tool calls are decided without it until it is reachable"
+            )
+
+
+def _prompt_decision_model_connectors(cfg) -> str:
+    """Ask which connectors the decision model answers for on its own where
+    the LLM judge does not run. Enter keeps the saved list, or offers the
+    active connectors that have no judge."""
+    from defenseclaw import decision_model as dmod
+
+    active = cfg.active_connectors()
+    without_judge = [c for c in active if not dmod.judge_runs_for(cfg, c)]
+    default = ",".join(cfg.decision_model.hook_connectors or without_judge)
+    click.echo()
+    if active:
+        ux.subhead("Active connectors: " + ", ".join(f"{c} ({dmod.cascade_for(cfg, c)})" for c in active))
+    answer = click.prompt(
+        "  Connectors the decision model answers alone where the LLM judge is off (names, * for all, - for none)",
+        default=default,
+        show_default=bool(default),
+    )
+    return answer.strip() if answer.strip() != "-" else ""
 
 
 @setup.command("skill-scanner")

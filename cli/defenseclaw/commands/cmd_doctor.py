@@ -11944,9 +11944,10 @@ def _llm_identity(llm) -> tuple[str, str, str, str]:
 
 def _check_decision_model(cfg, r: _DoctorResult) -> None:
     """``Decision model`` row: one benign System One request when
-    ``decision_model`` is on. Silent while it is off (the default). An
-    unreachable model warns, never fails: the LLM judge then decides alone,
-    as it does without one."""
+    ``decision_model`` is on. Silent while it is off (the default). It names
+    the tool-call cascade each active connector runs. An unreachable model
+    warns, never fails: tool calls are then decided without it (the rules
+    verdict, and the LLM judge where it runs)."""
     dm = getattr(cfg, "decision_model", None)
     if dm is None or not dm.enabled:
         return
@@ -11958,6 +11959,8 @@ def _check_decision_model(cfg, r: _DoctorResult) -> None:
         return
     if dmod.managed_host(cfg) and dm.credential:
         detail = f"{dm.model}: token from the managed credential {dm.credential} (the gateway checks it)"
+        if dmod.cascade_lines(cfg):
+            detail += "; " + "; ".join(dmod.cascade_lines(cfg))
         _emit("pass", "Decision model", detail, r=r)
         return
     result = dmod.ping(dm, cfg.data_dir, send_token=not dmod.managed_host(cfg))
@@ -11965,15 +11968,19 @@ def _check_decision_model(cfg, r: _DoctorResult) -> None:
         _emit(
             "warn",
             "Decision model",
-            f"{dm.model}: {result.detail}; the LLM judge decides alone until it is reachable",
+            f"{dm.model}: {result.detail}; tool calls are decided without it until it is reachable",
             r=r,
             remediation="defenseclaw setup decision-model --show --ping",
         )
         return
     detail = f"{dm.model}: {result.detail}"
-    note = dmod.judge_note(cfg)
-    if note:
-        _emit("warn", "Decision model", detail + "; " + note, r=r)
+    cascades = dmod.cascade_lines(cfg)
+    if cascades:
+        detail += "; " + "; ".join(cascades)
+    cascade_names = {dmod.cascade_for(cfg, c) for c in cfg.active_connectors()}
+    if cascade_names == {dmod.CASCADE_RULES_ONLY}:
+        # Reachable, but it answers no connector's tool calls.
+        _emit("warn", "Decision model", detail + "; " + dmod.judge_note(cfg), r=r)
         return
     _emit("pass", "Decision model", detail, r=r)
 
