@@ -82,6 +82,55 @@ func TestEnterpriseHookWatchOwnedFileChangedSeesInPlaceRewrites(t *testing.T) {
 	}
 }
 
+func TestEnterpriseHookWatchWindowsCaseVariantOwnedPathRouting(t *testing.T) {
+	dir := t.TempDir()
+	config := filepath.Join(dir, "hooks.json")
+	token := filepath.Join(dir, ".hook-devin.token")
+	exclusive := map[string]struct{}{token: {}}
+	shared := map[string]struct{}{config: {}}
+	ownedPaths := enterpriseHookWatchCaseFoldedOwnedPaths(exclusive, shared)
+	left := map[string]string{config: "config-original", token: "token-original"}
+	current := map[string]string{config: "config-updated", token: "token-updated"}
+	fingerprint := func(path string) string { return current[path] }
+	now := time.Now()
+	for _, tc := range []struct {
+		name  string
+		owned string
+		event fsnotify.Event
+	}{
+		{name: "shared config", owned: config, event: fsnotify.Event{Name: filepath.Join(dir, "HOOKS.JSON"), Op: fsnotify.Write}},
+		{name: "scoped token", owned: token, event: fsnotify.Event{Name: filepath.Join(dir, ".HOOK-DEVIN.TOKEN"), Op: fsnotify.Write}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			event := tc.event
+			event.Name = enterpriseHookWatchOwnedPath(event.Name, ownedPaths)
+			if event.Name != tc.owned {
+				t.Fatalf("event path = %q, want owned path %q", event.Name, tc.owned)
+			}
+			if drop, _ := enterpriseHookWatchEventDropped(now, now.Add(time.Second), event, false,
+				exclusive, shared, left, left, fingerprint, true); drop {
+				t.Fatal("changed owned file did not schedule a reconcile")
+			}
+			if securePath := enterpriseHookWatchOwnedPath(tc.event.Name, nil); securePath != tc.event.Name {
+				t.Fatal("the legacy watch path changed")
+			}
+		})
+	}
+	other := fsnotify.Event{Name: filepath.Join(dir, "session.log"), Op: fsnotify.Write}
+	other.Name = enterpriseHookWatchOwnedPath(other.Name, ownedPaths)
+	if drop, _ := enterpriseHookWatchEventDropped(now, now.Add(time.Second), other, false,
+		exclusive, shared, left, left, fingerprint, true); !drop {
+		t.Fatal("an unrelated file scheduled a reconcile")
+	}
+	current[config] = left[config]
+	unchanged := fsnotify.Event{Name: filepath.Join(dir, "HOOKS.JSON"), Op: fsnotify.Write}
+	unchanged.Name = enterpriseHookWatchOwnedPath(unchanged.Name, ownedPaths)
+	if drop, _ := enterpriseHookWatchEventDropped(now, now.Add(time.Second), unchanged, false,
+		exclusive, shared, left, left, fingerprint, true); !drop {
+		t.Fatal("an unchanged shared config scheduled a reconcile")
+	}
+}
+
 // A token can be overwritten after its target was checked but before a
 // retry pass for another target takes its final owned-file snapshot. The
 // queued Write must start another pass even inside the widened settle

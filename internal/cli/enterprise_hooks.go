@@ -3300,6 +3300,7 @@ func runEnterpriseHooksWatch(cmd *cobra.Command, _ []string) error {
 	// / WatchSharedFiles after each reconcile.
 	exclusiveOwned := map[string]struct{}{} // DC-only writers — any event triggers
 	sharedOwned := map[string]struct{}{}    // agent + DC writers — Create/Remove/Rename trigger
+	var windowsOwnedPaths map[string]string
 	// ownedSnapshot is each owned file's fingerprint as the last reconcile
 	// left it. A Write or Chmod that the writer policy or the settle window
 	// drops still counts when the file no longer matches it.
@@ -3395,6 +3396,10 @@ func runEnterpriseHooksWatch(cmd *cobra.Command, _ []string) error {
 		}
 		for _, f := range run.WatchSharedFiles {
 			sharedOwned[filepath.Clean(f)] = struct{}{}
+		}
+		windowsOwnedPaths = nil
+		if runtime.GOOS == "windows" && cfg != nil && cfg.StandaloneEnterprise() {
+			windowsOwnedPaths = enterpriseHookWatchCaseFoldedOwnedPaths(exclusiveOwned, sharedOwned)
 		}
 		for k := range foundSnapshot {
 			delete(foundSnapshot, k)
@@ -3590,6 +3595,7 @@ func runEnterpriseHooksWatch(cmd *cobra.Command, _ []string) error {
 				}
 				return errors.New("enterprise hooks watch: fsnotify event channel closed unexpectedly")
 			}
+			event.Name = enterpriseHookWatchOwnedPath(event.Name, windowsOwnedPaths)
 			if !enterpriseHookWatchEventRelevant(event) {
 				continue
 			}
@@ -4192,6 +4198,29 @@ func enterpriseHookWatchEventRelevant(event fsnotify.Event) bool {
 		return false
 	}
 	return !strings.HasSuffix(filepath.Base(event.Name), ".lock")
+}
+
+// Windows directory events use the stored filename spelling. Keep the watch
+// loop's path keys aligned with its owned-file lists for standalone installs.
+func enterpriseHookWatchCaseFoldedOwnedPaths(exclusiveOwned, sharedOwned map[string]struct{}) map[string]string {
+	paths := make(map[string]string, len(exclusiveOwned)+len(sharedOwned))
+	for path := range sharedOwned {
+		paths[strings.ToLower(filepath.Clean(path))] = path
+	}
+	for path := range exclusiveOwned {
+		paths[strings.ToLower(filepath.Clean(path))] = path
+	}
+	return paths
+}
+
+func enterpriseHookWatchOwnedPath(path string, caseFolded map[string]string) string {
+	if len(caseFolded) == 0 {
+		return path
+	}
+	if owned, ok := caseFolded[strings.ToLower(filepath.Clean(path))]; ok {
+		return owned
+	}
+	return path
 }
 
 // enterpriseHookWatchOwnedEventActionable applies the expected-writer
