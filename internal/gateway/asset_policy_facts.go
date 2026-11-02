@@ -334,7 +334,7 @@ func (a *APIServer) skillFolderAccessDecision(
 		claimedNames := facts.DeclaredFor(ref.Name)
 		claimed := len(claimedNames) > 0
 		candidates := []string{ref.Dir}
-		if _, err := os.Lstat(ref.Dir); errors.Is(err, fs.ErrNotExist) {
+		if _, err := os.Lstat(ref.Dir); !ref.ExplicitDirectory && errors.Is(err, fs.ErrNotExist) {
 			for _, root := range roots {
 				candidate := filepath.Join(root, ref.Name)
 				if candidate != ref.Dir {

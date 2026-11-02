@@ -73,6 +73,15 @@ func TestGAP0535SkillFolderRefsExpandsCallerAccount(t *testing.T) {
 	}
 }
 
+func TestGAP0535SkillFolderRefsFollowsLeadingDirectory(t *testing.T) {
+	home, cwd := t.TempDir(), t.TempDir()
+	other := filepath.Join(home, "other")
+	refs := SkillFolderRefs("cd "+other+" && cat skills/folder/SKILL.md", home, cwd)
+	if len(refs) != 1 || refs[0].Dir != filepath.Join(other, "skills", "folder") || !refs[0].ExplicitDirectory {
+		t.Fatalf("changed-directory skill path = %#v", refs)
+	}
+}
+
 func TestSkillFolderRefsResolvesParentBeforeSelectingSkill(t *testing.T) {
 	home := t.TempDir()
 	dir := filepath.Join(home, ".claude", "skills", "denied")

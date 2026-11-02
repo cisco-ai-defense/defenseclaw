@@ -326,6 +326,9 @@ type FolderRef struct {
 	Name string
 	// Manifest is set when the call names the folder's SKILL.md itself.
 	Manifest bool
+	// ExplicitDirectory means a leading static cd fixed the directory for
+	// this reference, so a missing folder must not be resolved in other roots.
+	ExplicitDirectory bool
 }
 
 // SkillFolderRefs lists the skill folders the strings of a tool input reach
@@ -341,11 +344,13 @@ func SkillFolderRefs(input any, home, cwd string, caller ...string) []FolderRef 
 	}
 	seen := map[string]int{}
 	var refs []FolderRef
-	for _, value := range values {
+	add := func(value, dir string, explicit bool) {
 		for _, token := range commandPathTokens(value) {
-			for _, ref := range skillFolderRefs(token, home, cwd, account) {
+			for _, ref := range skillFolderRefs(token, home, dir, account) {
+				ref.ExplicitDirectory = explicit
 				if index, ok := seen[ref.Dir]; ok {
 					refs[index].Manifest = refs[index].Manifest || ref.Manifest
+					refs[index].ExplicitDirectory = refs[index].ExplicitDirectory && explicit
 					continue
 				}
 				seen[ref.Dir] = len(refs)
@@ -353,7 +358,77 @@ func SkillFolderRefs(input any, home, cwd string, caller ...string) []FolderRef 
 			}
 		}
 	}
+	for _, value := range values {
+		dir, explicit := cwd, false
+		for i := 0; i < 8; i++ {
+			prefix, rest, next, ok := leadingSkillDirectoryChange(value, dir, home, account)
+			if !ok {
+				break
+			}
+			add(prefix, dir, explicit)
+			value, dir, explicit = rest, next, true
+		}
+		add(value, dir, explicit)
+	}
 	return refs
+}
+
+// leadingSkillDirectoryChange follows a literal cd in an AND chain. The
+// following command runs only in that directory when the cd succeeds.
+func leadingSkillDirectoryChange(value, cwd, home, caller string) (prefix, rest, dir string, ok bool) {
+	value = strings.TrimSpace(value)
+	if !strings.HasPrefix(value, "cd ") && !strings.HasPrefix(value, "cd\t") {
+		return "", "", "", false
+	}
+	var quote rune
+	escaped := false
+	for i, ch := range value {
+		if escaped {
+			escaped = false
+			continue
+		}
+		if ch == '\\' && quote != '\'' {
+			escaped = true
+			continue
+		}
+		switch {
+		case ch == '\'' || ch == '"':
+			if quote == 0 {
+				quote = ch
+			} else if quote == ch {
+				quote = 0
+			}
+		case ch == '&' && quote == 0 && i+1 < len(value) && value[i+1] == '&':
+			prefix = value[:i]
+			words := commandPathTokens(prefix)
+			if len(words) != 2 || words[0] != "cd" || words[1] == "-" ||
+				strings.ContainsAny(words[1], "*?[]{}$`") {
+				return "", "", "", false
+			}
+			dir = words[1]
+			if dir == "~" {
+				dir = home
+			} else if strings.HasPrefix(dir, "~/") {
+				dir = filepath.Join(home, dir[2:])
+			} else if caller != "" && strings.HasPrefix(dir, "~"+caller+"/") {
+				dir = filepath.Join(home, strings.TrimPrefix(dir, "~"+caller+"/"))
+			}
+			if dir == "" || strings.HasPrefix(dir, "~") {
+				return "", "", "", false
+			}
+			if !filepath.IsAbs(dir) {
+				dir = filepath.Join(cwd, dir)
+			}
+			resolved, err := filepath.EvalSymlinks(dir)
+			if err == nil {
+				dir = resolved
+			} else if !os.IsNotExist(err) {
+				return "", "", "", false
+			}
+			return prefix, value[i+2:], filepath.Clean(dir), true
+		}
+	}
+	return "", "", "", false
 }
 
 func collectStrings(value any, depth int, out *[]string) {
