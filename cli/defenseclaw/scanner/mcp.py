@@ -35,10 +35,12 @@ import ntpath
 import os
 import re
 import shutil
+import signal
 import subprocess
 import sys
 import tempfile
 import threading
+import time
 from collections import Counter
 from collections.abc import Awaitable, Callable, Iterator
 from contextlib import contextmanager
@@ -569,6 +571,62 @@ def _contained_mcp_windows_process_factory(started: list[object] | None = None) 
             mcp_stdio._create_platform_compatible_process = original_create
             mcp_stdio._terminate_process_tree = original_terminate
             mcp_stdio.close_process_job = original_close_job
+
+
+_MCP_POSIX_PROCESS_FACTORY_LOCK = threading.Lock()
+_MCP_POSIX_GROUP_GRACE_SECONDS = 0.25
+
+
+def _terminate_mcp_posix_group(pgid: int) -> None:
+    """End only the group created for this stdio server, even if its leader exited."""
+    try:
+        os.killpg(pgid, signal.SIGTERM)
+    except ProcessLookupError:
+        return
+
+    deadline = time.monotonic() + _MCP_POSIX_GROUP_GRACE_SECONDS
+    while time.monotonic() < deadline:
+        try:
+            os.killpg(pgid, 0)
+        except ProcessLookupError:
+            return
+        time.sleep(0.025)
+    try:
+        os.killpg(pgid, signal.SIGKILL)
+    except ProcessLookupError:
+        pass
+
+
+@contextmanager
+def _contained_mcp_posix_process_factory() -> Iterator[None]:
+    """Track SDK stdio launches and end their groups on every scan exit."""
+    import anyio
+    import mcp.client.stdio as mcp_stdio
+
+    started_groups: list[int] = []
+
+    async def create(
+        command: str, args: list[str], env: dict[str, str] | None = None,
+        errlog: Any = sys.stderr, cwd: Any = None,
+    ) -> Any:
+        # A new session makes the server PID its group ID. The SDK normally
+        # does this too, but its clean-exit path waits only for the server.
+        process = await anyio.open_process(
+            [command, *args], env=env, stderr=errlog, cwd=cwd,
+            start_new_session=True,
+        )
+        started_groups.append(process.pid)
+        return process
+
+    with _MCP_POSIX_PROCESS_FACTORY_LOCK:
+        original_create = mcp_stdio._create_platform_compatible_process
+        mcp_stdio._create_platform_compatible_process = create
+        try:
+            yield
+        finally:
+            mcp_stdio._create_platform_compatible_process = original_create
+            for pgid in started_groups:
+                _terminate_mcp_posix_group(pgid)
 
 
 def _trusted_codex_runtime_roots() -> tuple[str, ...]:
@@ -1795,7 +1853,7 @@ class MCPScannerWrapper:
                 scan_kwargs["analyzers"] = analyzers
 
             errors: list[tuple[str, str]] = []
-            with _capture_sdk_error_logs(errors):
+            with _contained_mcp_posix_process_factory(), _capture_sdk_error_logs(errors):
                 results = asyncio.run(scanner.scan_mcp_config_file(**scan_kwargs))
 
             # Partition captured ERROR logs. An unreachable *LLM backend*
