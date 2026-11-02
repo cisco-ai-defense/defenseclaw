@@ -79,3 +79,92 @@ func TestGAP0343SimpleCommandFastPathKeepsBudgetAndSideEffects(t *testing.T) {
 		t.Fatal("opaque assignments escaped statement budget")
 	}
 }
+
+func TestGAP0343PowerShellCommentAndStopParsingTokenBoundaries(t *testing.T) {
+	const tail = `Remove-Item -Recurse -Force C:\`
+	for _, row := range []struct{ name, prefix string }{
+		{"mixed double quote", `Write-Output a"b"#; `},
+		{"mixed single quote", `Write-Output a'b'#; `},
+		{"right bracket", `Write-Output a]#; `},
+		{"left bracket", `Write-Output a[#; `},
+		{"type name", `Write-Output [int]#; `},
+		{"format", `git log -1 --format="%h"#; `},
+		{"path", `Get-ChildItem .\a[1]#; `},
+		{"call target", `& $x=#; `},
+		{"glued call target", `&$x=#; `},
+		{"variable argument", `Write-Output $x=#; `},
+		{"glued block opener", `Write-Output a"b"<#x#>; `},
+		{"bracket block opener", `Write-Output a]<#x#>; `},
+		{"quoted only block comment", `Write-Output "a"<#x#>; `},
+		{"equals stop parsing lookalike", `cmd /c echo a=--% ; `},
+		{"comma stop parsing lookalike", `cmd /c echo a,--% ; `},
+		{"stop parsing chain", `cmd.exe /c echo --% a && `},
+		{"stop parsing or chain", `cmd.exe /c echo --% a || `},
+		{"stop parsing pipe", `cmd.exe /c echo --% a | `},
+		{"stop parsing glued pipe", `cmd.exe /c echo --% a|`},
+		{"quoted pipe in stop parsing argument", `cmd.exe /c echo --% "a | b" | `},
+		{"quoted chain in stop parsing argument", `cmd.exe /c echo --% "a && b" && `},
+		{"mixed quote inside array command", `$x = @(Write-Output a"b"#; Write-Output ok); `},
+		{"bracket inside array command", `$x = @(Write-Output a]#; Write-Output ok); `},
+		{"block marker inside array command", `$x = @(Write-Output a"b"<#x#>; Write-Output ok); `},
+	} {
+		t.Run(row.name, func(t *testing.T) {
+			command := row.prefix + tail
+			out := parsePowerShell(command, 1, 0)
+			if !hasExecutable(out.commands, "remove-item") {
+				t.Fatalf("destructive command hidden: status=%s commands=%#v", out.status, out.commands)
+			}
+			if count, _ := powerShellStatements(command, 128); count < 2 {
+				t.Fatalf("budget scanner counted %d statements, want at least 2", count)
+			}
+			input := Input{Tool: "PowerShell", Command: command, DialectHint: DialectPowerShell}
+			var splitTail bool
+			for _, simple := range SimpleCommands(input, Analyze(input)) {
+				if strings.Contains(simple.Text, "Remove-Item") {
+					splitTail = true
+				}
+			}
+			if !splitTail {
+				t.Fatal("simple-command splitter hid the destructive tail")
+			}
+		})
+	}
+	for _, row := range []struct {
+		name, source string
+		index        int
+		expression   bool
+		want         bool
+	}{
+		{"quoted only", `'a'#`, 3, false, true},
+		{"quoted segment", `a'b'#`, 4, false, false},
+		{"bracket argument", `a]#`, 2, false, false},
+		{"bracket expression", `a]#`, 2, true, true},
+		{"assignment target", `$x=#`, 3, false, true},
+		{"call target", `& $x=#`, 5, false, false},
+		{"argument target", `Write-Output $x=#`, 16, false, false},
+	} {
+		t.Run(row.name, func(t *testing.T) {
+			if got := windowsPowerShellCommentStarts([]rune(row.source), row.index, row.expression); got != row.want {
+				t.Fatalf("comment start=%t, want %t", got, row.want)
+			}
+		})
+	}
+	for _, row := range []struct{ name, prefix string }{
+		{"semicolon stays in stop parsing span", `cmd.exe /c echo --% a ; `},
+		{"single ampersand stays in stop parsing span", `cmd.exe /c echo --% a & `},
+		{"quoted ampersands stay in stop parsing span", `cmd.exe /c echo --% "a && b" ; `},
+		{"dynamic call keeps single ampersand in stop parsing span", `& cmd.exe --% a & `},
+		{"quoted-only block comment keeps its text inert", `Write-Output "a"<#; Remove-Item -Recurse -Force C:\ #> # `},
+	} {
+		t.Run(row.name, func(t *testing.T) {
+			command := row.prefix + tail
+			out := parsePowerShell(command, 1, 0)
+			if hasExecutable(out.commands, "remove-item") {
+				t.Fatalf("stop parsing span ended early: %#v", out.commands)
+			}
+			if count, _ := powerShellStatements(command, 128); count != 1 {
+				t.Fatalf("budget scanner counted %d statements, want 1", count)
+			}
+		})
+	}
+}

@@ -4434,6 +4434,10 @@ type exactFallbackContract struct {
 	detectionOnly               bool
 	codeOwnedDetection          bool
 	alertOnly                   bool
+	// boundedRequiresActiveExpression keeps the bounded lane off for a pack
+	// that disables the rule with expression: false, so the lane never adds
+	// a finding the pack turned off (rel-1-0-6:GAP-0419).
+	boundedRequiresActiveExpression bool
 }
 
 var exactFallbackContracts = map[string]exactFallbackContract{
@@ -4933,6 +4937,14 @@ var exactFallbackContracts = map[string]exactFallbackContract{
 		proves: func(_ actionfacts.Input, facts actionfacts.Facts) bool {
 			return crontabInstallPrerequisite(facts)
 		},
+		// A crontab fed a heredoc it installs keeps the action partial (its
+		// stdin is code ActionFacts does not read); its argv still proves
+		// the install (rel-1-0-6:GAP-0419).
+		boundedSubgraphProves: func(_ actionfacts.Input, facts actionfacts.Facts) bool {
+			return crontabInstallPrerequisite(certainControlFlowCommands(facts))
+		},
+		codeOwnedDetection:              true,
+		boundedRequiresActiveExpression: true,
 		// The fallback has the same dual-use boundary as the semantic owner:
 		// retain the signal, but do not block without scheduled-payload proof.
 		detectionOnly: true,
@@ -5088,6 +5100,14 @@ var exactFallbackContracts = map[string]exactFallbackContract{
 		proves: func(_ actionfacts.Input, facts actionfacts.Facts) bool {
 			return semanticReconImpactOwners["CMD-SUDO"].prerequisite(facts)
 		},
+		// sudo sh fed a heredoc or a stdin redirect keeps the action partial
+		// (its stdin runs as root code ActionFacts does not read); the sudo
+		// argv still proves the elevated shell (rel-1-0-6:GAP-0419).
+		boundedSubgraphProves: func(_ actionfacts.Input, facts actionfacts.Facts) bool {
+			return sudoOrRootPrivilegeDiscoveryPrerequisite(certainControlFlowCommands(facts))
+		},
+		codeOwnedDetection:              true,
+		boundedRequiresActiveExpression: true,
 	},
 	"privilege.host_namespace_entry": {
 		proves: func(_ actionfacts.Input, facts actionfacts.Facts) bool {
@@ -6124,6 +6144,20 @@ func exactNonEmptyTrustedJSONString(raw json.RawMessage) (string, bool) {
 // Most recoveries require both the active profile's regex and deterministic
 // contract. A contract may explicitly declare a code-owned detection grammar;
 // that lane still requires the rule to exist in the active profile catalog.
+// certainControlFlowCommands is facts with only the commands outside
+// uncertain control flow, so a bounded proof over a partial action is as
+// precise as the owner on a complete one.
+func certainControlFlowCommands(facts actionfacts.Facts) actionfacts.Facts {
+	kept := make([]actionfacts.CommandFact, 0, len(facts.Commands))
+	for _, command := range facts.Commands {
+		if !command.ControlFlowUncertain {
+			kept = append(kept, command)
+		}
+	}
+	facts.Commands = kept
+	return facts
+}
+
 func appendTrustedBoundedExactFallbackFindings(
 	findings []RuleFinding,
 	generation *compiledRulePackCategories,
@@ -6148,6 +6182,10 @@ func appendTrustedBoundedExactFallbackFindings(
 			(strings.TrimSpace(commandText) == "" || rule.Pattern == nil || !rule.Pattern.MatchString(commandText))) {
 			continue
 		}
+		if contract.boundedRequiresActiveExpression &&
+			strings.TrimSpace(rule.Expression) == "false" {
+			continue
+		}
 		evidence := commandText
 		if strings.TrimSpace(evidence) == "" {
 			evidence = input.Tool
@@ -6161,6 +6199,9 @@ func appendTrustedBoundedExactFallbackFindings(
 			Tags:        append([]string(nil), rule.Tags...),
 			LineNumber:  1,
 			enforcement: findingEnforcementAllowed,
+		}
+		if contract.boundedRequiresActiveExpression && contract.detectionOnly {
+			finding.enforcement = findingEnforcementDetectionOnly
 		}
 		findings = append(findings, adjustConfidence(input.Tool, finding))
 		seen[ruleID] = struct{}{}
@@ -8671,12 +8712,12 @@ func withOverBudgetStateMutation(parent context.Context, request trustedActionRe
 			findings = append(findings, found...)
 		}
 	}
-	return withReducedStateReading(parent, request, findings)
+	return withReducedStateReading(parent, request, facts, findings)
 }
 
 // withReducedStateReading adds the state-write finding of the reduced
 // reading of an over-budget call (withOverBudgetStateMutation).
-func withReducedStateReading(parent context.Context, request trustedActionRequest, findings []RuleFinding) []RuleFinding {
+func withReducedStateReading(parent context.Context, request trustedActionRequest, facts actionfacts.Facts, findings []RuleFinding) []RuleFinding {
 	if slices.ContainsFunc(findings, func(f RuleFinding) bool { return f.RuleID == "tamper.detector_state_write" }) {
 		return findings
 	}
@@ -8684,7 +8725,11 @@ func withReducedStateReading(parent context.Context, request trustedActionReques
 	if !known || !hookpaths.MayNameState(command) {
 		return findings
 	}
-	reduced, overflow, ok := hookpaths.StateNamingStatements(command, request.Input.ActiveHome)
+	// A PowerShell call is kept whole and held behind ProtectHome: the
+	// POSIX read-only proof is not its reading (rel-1-0-6:GAP-0413).
+	powershell := trustedPowerShellExecutionTool(request.Input.Tool) || request.Input.DialectHint == actionfacts.DialectPowerShell ||
+		facts.Parse.Dialect == actionfacts.DialectPowerShell
+	reduced, overflow, ok := hookpaths.StateNamingReading(command, request.Input.ActiveHome, powershell)
 	if !ok {
 		return findings
 	}

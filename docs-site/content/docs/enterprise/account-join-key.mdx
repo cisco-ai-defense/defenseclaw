@@ -43,7 +43,7 @@ It is off unless you turn it on. It is not available under Secure Client. It nee
 
 ## What the device reports
 
-Your management agent reads the keys with `enterprise account-keys`, as root or from an elevated administrator prompt (on macOS the binary is `/opt/cisco/defenseclaw/bin/defenseclaw-gateway`):
+Your management agent reads the keys with `enterprise account-keys`, as root or from an elevated administrator prompt (on macOS the binary is `/opt/cisco/defenseclaw/bin/defenseclaw-gateway`). A standard account gets `not_root`. On a computer with only a per-user install there are no account join keys, and the command says so (`not_installed`):
 
 ```bash
 sudo /opt/defenseclaw/bin/defenseclaw-gateway enterprise account-keys

@@ -122,31 +122,40 @@ func platformLocalAccounts(ctx context.Context) (map[string]int, error) {
 	return parseDSCLLocalAccounts(string(result.stdout)), nil
 }
 
-// platformLocalAccountRecords lists the local node's accounts with the
-// attributes that change when an account is replaced or moved: uid,
-// GeneratedUID, home and primary group. Any account may list them.
 // platformLocalDatabaseAccounts has no other local account database here.
 func platformLocalDatabaseAccounts(ctx context.Context) (map[string]int, error) {
 	return platformLocalAccounts(ctx)
 }
 
+// dsclAccountRecordsOutputLimit bounds the plist of the local node's
+// account records: about 520 bytes a record, 76 KB for the 146 records of a
+// stock macOS 15 node, so room for some 8,000.
+const dsclAccountRecordsOutputLimit = 4 << 20
+
+// platformLocalAccountRecords lists the local node's accounts with the
+// attributes that change when an account is replaced or moved: uid,
+// GeneratedUID, home and primary group, in one dscl process. Any account
+// may list them. The gateway lists them about every 2 s while hooks come in
+// (managedHookPeerListedStampInterval), and the hook that finds the last
+// listing expired waits for the next one: one `dscl . -list` per attribute,
+// four processes and four process-group watchdog shells, took about 95 ms on
+// an M1, a hook call every 2 s that was slower by that much, and 12 to 20
+// processes on every second hook call of a per-user gateway (rel-1-0-6
+// GAP-0326). One `dscl -readall` answers the same records in about 21 ms.
 func platformLocalAccountRecords(ctx context.Context) (map[string]LocalAccountRecord, error) {
 	if err := validateTrustedTool(darwinDSCL); err != nil {
 		return nil, err
 	}
-	attributes := []string{"UniqueID", "GeneratedUID", "NFSHomeDirectory", "PrimaryGroupID"}
-	listed := make([]map[string]string, len(attributes))
-	for i, attribute := range attributes {
-		result, err := runTrustedCommand(ctx, darwinDSCL, []string{".", "-list", "/Users", attribute})
-		if err != nil {
-			return nil, err
-		}
-		if result.exitCode != 0 {
-			return nil, fmt.Errorf("unixidentity: dscl exited %d", result.exitCode)
-		}
-		listed[i] = parseDSCLAttribute(string(result.stdout))
+	result, err := runTrustedCommandLimit(ctx, darwinDSCL,
+		[]string{"-plist", ".", "-readall", "/Users", "UniqueID", "GeneratedUID", "NFSHomeDirectory", "PrimaryGroupID"},
+		dsclAccountRecordsOutputLimit)
+	if err != nil {
+		return nil, err
 	}
-	return mergeDSCLAccountRecords(listed[0], listed[1], listed[2], listed[3]), nil
+	if result.exitCode != 0 {
+		return nil, fmt.Errorf("unixidentity: dscl exited %d", result.exitCode)
+	}
+	return parseDSCLAccountRecordsPlist(result.stdout)
 }
 
 // parseDSCLRead parses `dscl . -read /Users/<name> <attributes>` output

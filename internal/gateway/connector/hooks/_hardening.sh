@@ -3592,7 +3592,7 @@ _dc_gateway_post_once() {
   local _dc_post_url="$1" _dc_post_max_time="$2" _dc_post_body="$3"
   local _dc_post_auth="" _dc_post_arg
   local _dc_native_post=0 _dc_post_bin _dc_post_prefix _dc_post_path _dc_legacy_post=1
-  local _dc_header_name _dc_header_value _dc_post_output _dc_post_headers _dc_post_sep _dc_field_index
+  local _dc_header_name _dc_header_value _dc_post_output _dc_post_headers _dc_post_sep _dc_field_index _dc_post_data=""
   local -a _dc_post_args _dc_post_auth_args _dc_post_fields
   # A per-user post reads no socket table before it sends (GAP-1453): the
   # native helper proves the owner of the very connection it sends on, with
@@ -3635,27 +3635,24 @@ _dc_gateway_post_once() {
   esac
   if [ "$_dc_native_post" -eq 1 ]; then
     # The agent's deadline includes shell preparation and starting the native
-    # helper. Give the helper only the time still left, reserving one second
-    # for process startup on short tool-call budgets. Its own timeout starts
-    # after startup, so passing the original four seconds could hold a tool
-    # call beyond the agent's answer window on a busy host.
+    # helper. Give the helper only the time still left. The millisecond
+    # deadline reserves 250 ms for its startup on short tool-call budgets;
+    # whole-second --max-time rounds down for older helpers. The original
+    # four seconds is still the outer bound of the shell request.
     case "$_dc_post_max_time" in ""|*[!0-9]*) return 1 ;; esac
     _dc_hook_elapsed_ms
     [ "$_DC_ELAPSED_MS" -ge 0 ] || _DC_ELAPSED_MS=0
     local _dc_post_remaining=$(( _dc_post_max_time - (_DC_ELAPSED_MS + 999) / 1000 ))
     [ "$_dc_post_remaining" -gt 0 ] || return 28
-    if [ "$_dc_post_max_time" -le 4 ] && [ "$_dc_post_remaining" -gt 2 ]; then
-      _dc_post_remaining=$((_dc_post_remaining - 1))
-    fi
     # The same bound in milliseconds, for the helper (GAP-2279): the whole
     # seconds above round the shell's own time up, so a call that spent
-    # 0.4 s reading a large body gave the helper 2 s of the 2.6 s left after
-    # the startup reserve, and was closed at 2.4 s. The helper gets the time
-    # left after that reserve, never less than the whole seconds above and
-    # never a whole second more; an older helper reads only --max-time.
+    # 0.4 s reading a large body gave the helper only 2 s of its available
+    # time and could close a healthy gateway under host load. The helper gets
+    # the time left after the startup reserve, never less than the rounded
+    # whole seconds above; an older helper reads only --max-time.
     local _dc_post_remaining_ms=$(( _dc_post_max_time * 1000 - _DC_ELAPSED_MS ))
     if [ "$_dc_post_max_time" -le 4 ]; then
-      _dc_post_remaining_ms=$(( _dc_post_remaining_ms - 1000 ))
+      _dc_post_remaining_ms=$(( _dc_post_remaining_ms - 250 ))
     fi
     if [ "$_dc_post_remaining_ms" -lt $(( _dc_post_remaining * 1000 )) ]; then
       _dc_post_remaining_ms=$(( _dc_post_remaining * 1000 ))
@@ -3754,6 +3751,11 @@ _dc_gateway_post_once() {
       _dc_header_value="${_dc_header_value# }"
       _dc_post_fields+=("Authorization" "$_dc_header_value")
     fi
+    # The helper's data folder is the one above the hooks folder. It is read
+    # here, not inside the command substitution below: bash 3.2 (macOS
+    # /bin/bash) ends a $( ) at the ")" of a case pattern, so a case there
+    # made the whole file a syntax error and every hook call failed.
+    case "${HOOK_DIR:-}" in /*/hooks) _dc_post_data="${HOOK_DIR%/hooks}" ;; esac
     _dc_post_output="$(
       if [ "$_dc_legacy_post" -eq 1 ]; then
         # A hook can run during an upgrade before the small helper exists.
@@ -3780,8 +3782,6 @@ _dc_gateway_post_once() {
             # 126, as for a helper that cannot run: nothing was sent.
             ulimit -S -v "$_DC_HOOK_NATIVE_VMEM_LIMIT" 2>/dev/null || exit 126
           fi
-          _dc_post_data=""
-          case "${HOOK_DIR:-}" in /*/hooks) _dc_post_data="${HOOK_DIR%/hooks}" ;; esac
           _DC_HOOK_POST_DATA_DIR="$_dc_post_data" _DC_HOOK_POST_DEADLINE_MS="$_dc_post_remaining_ms" exec "$_dc_post_bin" hook-post --api-addr "$API_ADDR" --max-time "$_dc_post_remaining" --curl-output
         ) 2>/dev/null |
         defenseclaw_keep_nul_visible

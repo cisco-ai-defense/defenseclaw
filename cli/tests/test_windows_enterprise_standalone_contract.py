@@ -1418,6 +1418,160 @@ if (@(Get-ChildItem $root -Filter 'hook.exe.backup.*').Count) { throw 'replaceme
 """, replacements=[("[IO.File]::Replace($temporary, $Destination, $backup, $true)", "Invoke-TestMappedImageReplace")])
 
 
+_PURGE_DELETED_ACCOUNT_HARNESS = r"""
+$script:UninstallDeletedAccountWaitSeconds = 20
+$script:UninstallDeletedAccountPollSeconds = 0
+$script:log = [Collections.Generic.List[string]]::new()
+$script:checks = [Collections.Generic.Queue[string]]::new()
+$script:syncs = [Collections.Generic.Queue[string]]::new()
+function Write-DefenseClawLifecyclePhase { param($Stage) $script:log.Add("phase: $Stage") }
+function Get-DefenseClawEnumeratorServiceName { param($GuardianServiceName) return 'Enum' }
+$script:enumeratorExists = $true
+function Test-DefenseClawServiceExists { param($Name) return $script:enumeratorExists }
+function Stop-DefenseClawService { param($Name) $script:log.Add("stop $Name") }
+function Start-DefenseClawService { param($Name) $script:log.Add("start $Name") }
+function Invoke-DefenseClawManagedHooksTeardownCommand {
+    param($Layout, $GatewayServiceName, $GuardianServiceName, $Action, $TimeoutSeconds)
+    $answer = if ($script:checks.Count) { $script:checks.Dequeue() } else { 'ok' }
+    $script:log.Add("check $answer")
+    if ($answer -cne 'ok') { throw $answer }
+}
+function Sync-DefenseClawStandaloneManagedHooksActivationBinding {
+    param($Layout, $GatewayServiceName, $GatewaySource)
+    $answer = if ($script:syncs.Count) { $script:syncs.Dequeue() } else { 'same' }
+    $script:log.Add("sync $answer")
+    if ($answer -ceq 'rebound') { return $true }
+    if ($answer -cne 'same') { throw $answer }
+    return $false
+}
+$deleted = 'managed-hook teardown check failed: protected Guardian state still lists an enrolled local account that no longer exists; the hook enumerator revokes its rows on its next pass: claudecode target S-1-5-21-1-2-3-1137'
+function Invoke-Case([string[]]$Checks, [string[]]$Syncs) {
+    $script:log.Clear(); $script:checks.Clear(); $script:syncs.Clear()
+    foreach ($c in $Checks) { $script:checks.Enqueue($c) }
+    foreach ($c in $Syncs) { $script:syncs.Enqueue($c) }
+    try {
+        $script:rebound = @(Invoke-DefenseClawUninstallPrecommitHookCheck -Layout @{} -GatewayServiceName Gateway -GuardianServiceName Guardian)[-1]
+        return 'passed'
+    }
+    catch { return "refused: $($_.Exception.Message)" }
+}
+"""
+
+
+def test_uninstall_after_a_deleted_enrolled_account_passes_on_the_first_call(tmp_path) -> None:
+    # rel-1-0-6:GAP-0346: the enumerator pass the check starts drops the
+    # deleted account's rows and publishes a new targets.yaml; until the
+    # guardian adopts it and the activation evidence is rebound, the check
+    # refuses the old binding. That state is asked again (and rebound), so
+    # the PURGE passes without Setup /repair.
+    _run_lifecycle_functions(tmp_path, [
+        "Test-DefenseClawDeletedAccountTeardownRefusal",
+        "Test-DefenseClawManifestCatchUpTeardownRefusal",
+        "Invoke-DefenseClawUninstallPrecommitHookCheck",
+    ], _PURGE_DELETED_ACCOUNT_HARNESS + r"""
+$stale = 'managed-hook teardown check failed: protected managed-hook activation evidence does not match the current manifest'
+$outside = 'managed-hook teardown check failed: protected Guardian state contains a target outside the deployment manifest'
+$notAdopted = 'deployment managed-hook activation evidence does not bind installed targets.yaml (guardian has not activated it)'
+$result = Invoke-Case @($deleted, $deleted, $outside, 'ok') @($notAdopted, 'same', 'rebound')
+if ($result -cne 'passed') { throw "catch-up states were not asked again: $result / $($script:log -join ' | ')" }
+if ($script:rebound -ne $true) { throw 'the check did not report that it rebound the activation evidence' }
+$order = $script:log -join ' | '
+if ($order -notmatch 'stop Enum \| start Enum') { throw "the enumerator was not restarted: $order" }
+if ($order -notmatch 'sync rebound \| phase: hook targets changed: activation evidence rebound') { throw "the rebinding was not reported: $order" }
+if (@($script:log | Where-Object { $_ -like 'sync *' }).Count -ne 4) { throw "sync did not run in every wait round: $order" }
+# The stale binding after the guardian adopted the manifest: rebound, then passes.
+$result = Invoke-Case @($deleted, $stale, 'ok') @('same', 'rebound')
+if ($result -cne 'passed' -or $script:rebound -ne $true) { throw "a stale activation binding was not rebound: $result" }
+# A first check that passes rebinds nothing.
+$result = Invoke-Case @('ok') @()
+if ($result -cne 'passed' -or $script:rebound -ne $false) { throw "a passing first check reported a rebinding: $result" }
+# rel-1-0-6:GAP-0319: the scheduled enumerator pass ran before the check, so
+# the first refusal is the stale binding: rebound and asked again, no restart.
+$result = Invoke-Case @($stale, 'ok') @('rebound')
+if ($result -cne 'passed' -or $script:rebound -ne $true -or ($script:log -join '|') -match 'stop Enum') { throw "a stale first binding was not rebound without a restart: $result / $($script:log -join ' | ')" }
+# Still stale at the deadline: the first refusal comes back.
+$script:UninstallDeletedAccountWaitSeconds = 1
+$script:UninstallDeletedAccountPollSeconds = 1
+$result = Invoke-Case @($outside, $outside, $outside, $outside) @()
+if ($result -notlike 'refused: *outside the deployment manifest*' -or ($script:log -join '|') -match 'stop Enum') { throw "a catch-up refusal was not given back at the deadline: $result" }
+$script:UninstallDeletedAccountWaitSeconds = 20
+$script:UninstallDeletedAccountPollSeconds = 0
+# Any other first refusal is given back at once, nothing restarted.
+$result = Invoke-Case @('managed-hook teardown check failed: runtime selector is untrusted') @()
+if ($result -notlike 'refused: *runtime selector is untrusted*' -or ($script:log -join '|') -match 'stop Enum|sync') { throw "an unrelated first refusal was retried: $result" }
+# Another refusal during the wait is given back at once.
+$result = Invoke-Case @($deleted, 'managed-hook teardown check failed: runtime selector is untrusted') @()
+if ($result -notlike 'refused: *runtime selector is untrusted*') { throw "an unrelated refusal was swallowed: $result" }
+# Rows still listed at the deadline: the deleted-account refusal comes back.
+$script:UninstallDeletedAccountWaitSeconds = 1
+$script:UninstallDeletedAccountPollSeconds = 1
+$result = Invoke-Case @($deleted, $deleted, $deleted, $deleted, $deleted) @()
+if ($result -notlike 'refused: *no longer exists*') { throw "the deadline did not give back the deleted-account refusal: $result" }
+""")
+
+
+
+def test_uninstall_restarts_the_enumerator_on_a_later_deleted_account(tmp_path) -> None:
+    # rel-1-0-6:GAP-0450: when the first refusal is the stale binding and a
+    # deleted-account refusal comes only inside the wait, the enumerator is
+    # still restarted (once), instead of the wait resting on the scheduled pass.
+    _run_lifecycle_functions(tmp_path, [
+        "Test-DefenseClawDeletedAccountTeardownRefusal",
+        "Test-DefenseClawManifestCatchUpTeardownRefusal",
+        "Invoke-DefenseClawUninstallPrecommitHookCheck",
+    ], _PURGE_DELETED_ACCOUNT_HARNESS + r"""
+$stale = 'managed-hook teardown check failed: protected managed-hook activation evidence does not match the current manifest'
+$result = Invoke-Case @($stale, $deleted, $deleted, 'ok') @()
+$order = $script:log -join ' | '
+if ($result -cne 'passed') { throw "a later deleted account did not pass: $result / $order" }
+if ($order -notmatch "check $([regex]::Escape($deleted)) \| phase: deleted enrolled account: running a hook enumerator pass before the uninstall \| stop Enum \| start Enum") { throw "the enumerator was not restarted on the later deleted-account refusal: $order" }
+if (@($script:log | Where-Object { $_ -ceq 'stop Enum' }).Count -ne 1) { throw "the enumerator was restarted more than once: $order" }
+# A deleted account first: one restart, not one per deleted-account refusal.
+$result = Invoke-Case @($deleted, $deleted, $deleted, 'ok') @()
+if ($result -cne 'passed' -or @($script:log | Where-Object { $_ -ceq 'stop Enum' }).Count -ne 1) { throw "a first deleted account was not restarted exactly once: $result / $($script:log -join ' | ')" }
+# A stale binding that clears without a deleted account: no restart.
+$result = Invoke-Case @($stale, $stale, 'ok') @()
+if ($result -cne 'passed' -or ($script:log -join '|') -match 'stop Enum') { throw "a stale binding alone restarted the enumerator: $result" }
+# No enumerator service: the later deleted-account refusal comes back at once.
+$script:enumeratorExists = $false
+$result = Invoke-Case @($stale, $deleted, 'ok') @()
+$script:enumeratorExists = $true
+if ($result -notlike 'refused: *no longer exists*' -or ($script:log -join '|') -match 'stop Enum') { throw "a later deleted account without an enumerator was not refused at once: $result / $($script:log -join ' | ')" }
+# Still listed at the deadline after the later restart: the deleted-account refusal comes back.
+$script:UninstallDeletedAccountWaitSeconds = 1
+$script:UninstallDeletedAccountPollSeconds = 1
+$result = Invoke-Case @($stale, $deleted, $deleted, $deleted, $deleted) @()
+if ($result -notlike 'refused: *no longer exists*' -or @($script:log | Where-Object { $_ -ceq 'stop Enum' }).Count -ne 1) { throw "the deadline after a later restart did not give back the deleted-account refusal: $result / $($script:log -join ' | ')" }
+""")
+
+
+def test_uninstall_precommit_wait_rebinds_like_the_lifecycle() -> None:
+    module = _text(MODULE)
+    check = _function_body(module, "Invoke-DefenseClawUninstallPrecommitHookCheck")
+    assert check.index("Sync-DefenseClawStandaloneManagedHooksActivationBinding") < check.index("-TimeoutSeconds $left")
+    assert "Test-DefenseClawManifestCatchUpTeardownRefusal -Message $message" in check
+    # rel-1-0-6:GAP-0450: a deleted-account refusal inside the wait asks for the one restart.
+    assert check.index("Stop-DefenseClawService -Name $enumerator") > check.index("while ($true) {")
+    assert "$restartEnumerator = $true" in check
+    assert "$script:UninstallDeletedAccountWaitSeconds = 180" in module
+    # The tombstone is written from metadata read after a rebinding check.
+    uninstall = _function_body(module, "Invoke-DefenseClawUninstallLifecycle")
+    reread = uninstall.index("if ($precheckRebound) {")
+    assert uninstall.index("$precheckRebound = [bool](Invoke-DefenseClawUninstallPrecommitHookCheck") < reread
+    block = uninstall[reread: uninstall.index("\n    }\n", reread)]
+    assert "$metadata = Get-DefenseClawDeploymentMetadata -Layout $Layout -Required" in block
+    assert "$managedHooksActivation =" in block
+    assert reread < uninstall.index("-ManagedHooksActivation $managedHooksActivation")
+    catchup = _function_body(module, "Test-DefenseClawManifestCatchUpTeardownRefusal")
+    for needle in (
+        "protected managed-hook activation evidence does not match the current manifest",
+        "contains a target outside the deployment manifest",
+        "does not exactly bind the legacy deployment manifest and authorization",
+        "deployment managed-hook activation evidence does not bind installed targets.yaml",
+    ):
+        assert needle in catchup
+        assert needle in module.replace(catchup, "") or needle in _text(ROOT / "internal" / "cli" / "windows_managed_hooks_teardown.go") or needle in _text(ROOT / "internal" / "cli" / "windows_managed_hooks_lifecycle.go")
+
 
 def test_standalone_replacement_swaps_the_launcher_in_one_step(tmp_path) -> None:
     # GAP-0240: File.Replace held the new hook open for writing and had a
@@ -1472,6 +1626,8 @@ class FakeSwapNative {
     }
 }
 function Initialize-DefenseClawNativeSecurity { return [FakeSwapNative] }
+$script:phases = [Collections.Generic.List[string]]::new()
+function Write-DefenseClawLifecyclePhase { param($Stage) $script:phases.Add($Stage) }
 function Invoke-Case([string[]]$Answers) {
     [FakeSwapNative]::Answers.Clear()
     foreach ($answer in $Answers) { [FakeSwapNative]::Answers.Enqueue($answer) }
@@ -1481,14 +1637,24 @@ function Invoke-Case([string[]]$Answers) {
 if (-not (Invoke-Case @('rename:32', 'link:5', 'rename:33', ''))) { throw 'busy files were not retried to success' }
 if ([FakeSwapNative]::Calls -ne 4) { throw "busy retry made $([FakeSwapNative]::Calls) calls" }
 foreach ($refusal in @('link:1', 'link:17', 'link:50', 'link:1142', 'rename:1', 'rename:50', 'rename:87', 'dacl:null')) {
+    $script:phases.Clear()
     if (Invoke-Case @($refusal)) { throw "$refusal did not fall back to File.Replace" }
+    # GAP-0369: the fallback is in the lifecycle log, with the file and the refusal.
+    if (@($script:phases | Where-Object { $_ -like "*C:\b\hook.exe ($refusal)*File.Replace*" }).Count -ne 1) { throw "$refusal fallback was not logged: $($script:phases -join ' | ')" }
 }
-foreach ($fatal in @('dacl:1307', 'rename:2', 'link:183', 'rename:32;backup-kept')) {
+if (-not (Invoke-Case @('open:32', ''))) { throw 'a busy replacement open was not retried' }
+foreach ($fatal in @('dacl:1307', 'open:2', 'rename:2', 'link:183')) {
     $thrown = $null
     try { [void](Invoke-Case @($fatal)) } catch { $thrown = $_.Exception }
     if ($null -eq $thrown -or $thrown -isnot [IO.IOException]) { throw "$fatal was not thrown as an IOException" }
-    if ($thrown.Message -notlike "*$($fatal.Split(';')[0])*") { throw "$fatal message lost the stage and code: $($thrown.Message)" }
+    if ($thrown.Message -notlike "*$fatal*") { throw "$fatal message lost the stage and code: $($thrown.Message)" }
 }
+# A backup link the swap could not remove is not an IOException, so the
+# GAP-0852 catch does not call it a file another program holds open.
+$thrown = $null
+try { [void](Invoke-Case @('rename:32;backup-kept')) } catch { $thrown = $_.Exception }
+if ($null -eq $thrown -or $thrown -is [IO.IOException] -or $thrown -isnot [InvalidOperationException]) { throw 'backup-kept was not thrown as its own error' }
+if ($thrown.Message -notlike '*rename:32;backup-kept*C:\b\hook.exe.backup.1*') { throw "backup-kept message lost the result or the backup: $($thrown.Message)" }
 """)
 
 
@@ -1506,6 +1672,7 @@ def test_launchable_swap_links_the_old_file_before_one_posix_rename() -> None:
         "CreateHardLinkNative(backup, destination, IntPtr.Zero)",
         "FILE_RENAME_REPLACE_IF_EXISTS | FILE_RENAME_POSIX_SEMANTICS",
         "const int FileRenameInfoEx = 22;",
+        'return "open:" + Marshal.GetLastWin32Error()',
         "FILE_SHARE_READ | FILE_SHARE_DELETE,",
     ):
         assert needle in swap, needle

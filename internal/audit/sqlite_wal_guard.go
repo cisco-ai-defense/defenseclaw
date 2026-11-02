@@ -90,12 +90,14 @@ const walCatchUpFraction = 2
 // end at walSettledSpan, after which the hold took 118-204 ms; a round that
 // does not shorten the span walSettleStalls times in a row, or
 // walSettleRounds rounds, end them without the writer. walSettledHoldCap
-// caps that hold within the caller's writer budget. Variables so tests can
+// caps that hold a little under the gateway's 200 ms writer budget: the held
+// time also counts the ROLLBACK after the cap, so a 200 ms cap read 200-205 ms
+// and every capped hold logged as over the budget. Variables so tests can
 // change them.
 var (
 	walSettleRounds   = 16
 	walSettledSpan    = 150 * time.Millisecond
-	walSettledHoldCap = 200 * time.Millisecond
+	walSettledHoldCap = 180 * time.Millisecond
 )
 
 const walSettleStalls = 2

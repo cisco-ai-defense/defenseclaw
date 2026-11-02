@@ -42,3 +42,16 @@ func TestReadGatewayTokenDotenvRejectsOversizeInsteadOfParsingPrefix(t *testing.
 		t.Fatalf("oversized dotenv produced gateway tokens: %#v", got)
 	}
 }
+
+func TestReadGatewayTokenDotenvSkipsSecretRefText(t *testing.T) {
+	path := filepath.Join(t.TempDir(), ".env")
+	body := "OPENCLAW_GATEWAY_TOKEN={source: store, provider: default, id: OPENCLAW_GATEWAY_TOKEN}\n" +
+		"DEFENSECLAW_GATEWAY_TOKEN=real-token-1404\n"
+	if err := os.WriteFile(path, []byte(body), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	got := readGatewayTokenDotenv(path)
+	if _, ok := got["OPENCLAW_GATEWAY_TOKEN"]; ok || got["DEFENSECLAW_GATEWAY_TOKEN"] != "real-token-1404" {
+		t.Fatalf("got %#v, want only the real DEFENSECLAW_GATEWAY_TOKEN", got)
+	}
+}

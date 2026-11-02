@@ -25,6 +25,7 @@ import (
 	"strings"
 	"sync"
 
+	"github.com/defenseclaw/defenseclaw/internal/envvars"
 	"github.com/defenseclaw/defenseclaw/internal/managed"
 )
 
@@ -55,10 +56,12 @@ func EnsureGatewayToken(dotenvPath string) (string, error) {
 	// is gated by localKeyResolutionDisabled). In enterprise/sidecar mode
 	// the gateway token is injected via ConfigMap envFrom and must be
 	// respected even when local key resolution is disabled for LLM keys.
-	if t := strings.TrimSpace(os.Getenv("DEFENSECLAW_GATEWAY_TOKEN")); t != "" {
+	// SecretRef text an earlier build saved as a token is never one (#1404).
+	usable := func(t string) bool { return t != "" && !envvars.IsSecretRefText(t) }
+	if t := strings.TrimSpace(os.Getenv("DEFENSECLAW_GATEWAY_TOKEN")); usable(t) {
 		return t, nil
 	}
-	if t := strings.TrimSpace(os.Getenv("OPENCLAW_GATEWAY_TOKEN")); t != "" {
+	if t := strings.TrimSpace(os.Getenv("OPENCLAW_GATEWAY_TOKEN")); usable(t) {
 		return t, nil
 	}
 
@@ -66,10 +69,10 @@ func EnsureGatewayToken(dotenvPath string) (string, error) {
 	// where the token lives in ~/.defenseclaw/.env).
 	if dotenvPath != "" {
 		if dotenv, err := loadDotEnv(dotenvPath); err == nil {
-			if t := strings.TrimSpace(dotenv["DEFENSECLAW_GATEWAY_TOKEN"]); t != "" {
+			if t := strings.TrimSpace(dotenv["DEFENSECLAW_GATEWAY_TOKEN"]); usable(t) {
 				return t, nil
 			}
-			if t := strings.TrimSpace(dotenv["OPENCLAW_GATEWAY_TOKEN"]); t != "" {
+			if t := strings.TrimSpace(dotenv["OPENCLAW_GATEWAY_TOKEN"]); usable(t) {
 				return t, nil
 			}
 		}

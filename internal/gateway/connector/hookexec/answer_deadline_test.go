@@ -22,8 +22,60 @@ import (
 func shortAnswerBudget(t *testing.T, budget time.Duration) {
 	t.Helper()
 	previous := hookAnswerBudget
+	previousCodex := perUserCodexAnswerBudget
 	hookAnswerBudget = budget
-	t.Cleanup(func() { hookAnswerBudget = previous })
+	perUserCodexAnswerBudget = budget
+	t.Cleanup(func() {
+		hookAnswerBudget = previous
+		perUserCodexAnswerBudget = previousCodex
+	})
+}
+
+// A per-user Codex tool call can receive a gateway answer in the last half
+// second of the local answer window, within its registered host timeout.
+func TestCertfixGAP0485PerUserCodexAnswerWindow(t *testing.T) {
+	started := time.Now()
+	for _, row := range []struct {
+		name string
+		opts Options
+		want time.Duration
+	}{
+		{"per-user Codex", Options{Connector: "codex", Event: "PreToolUse"}, 4 * time.Second},
+		{"managed Codex", Options{Connector: "codex", Event: "PreToolUse", ManagedEnterprise: true}, 3500 * time.Millisecond},
+		{"per-user Claude Code", Options{Connector: "claudecode", Event: "PreToolUse"}, 3500 * time.Millisecond},
+		{"Secure Client", Options{Connector: "codex", Event: "PreToolUse", SecureClient: true}, 0},
+	} {
+		t.Run(row.name, func(t *testing.T) {
+			deadline := answerDeadline(row.opts, started)
+			if row.want == 0 {
+				if !deadline.IsZero() {
+					t.Fatalf("deadline = %s, want none", deadline)
+				}
+				return
+			}
+			if got := deadline.Sub(started); got != row.want {
+				t.Fatalf("answer window = %s, want %s", got, row.want)
+			}
+		})
+	}
+}
+
+// A healthy answer just after the previous 3.5 s cutoff must reach a
+// per-user Codex tool call. The gateway is real loopback HTTP; its decision
+// is delayed to model a loaded host, not replaced by a deadline stub.
+func TestCertfixGAP0485LatePerUserCodexAllow(t *testing.T) {
+	addr := gatewayAt(t, func(w http.ResponseWriter, _ *http.Request) {
+		time.Sleep(3600 * time.Millisecond)
+		_, _ = w.Write([]byte(`{"action":"allow"}`))
+	})
+	result, elapsed := runAgainstGateway(t, "codex", addr, func(opts *Options) {
+		opts.FailMode = "closed"
+		opts.Event = "PreToolUse"
+		opts.Stdin = strings.NewReader(`{"hook_event_name":"PreToolUse","tool_name":"apply_patch","tool_input":{"patch":"*** Begin Patch\n*** Add File: project/notes.txt\n+ok\n*** End Patch"}}`)
+	})
+	if blocked(result) || result.code != 0 {
+		t.Fatalf("after %s code=%d stdout=%q stderr=%q, want the gateway allow", elapsed, result.code, result.stdout, result.stderr)
+	}
 }
 
 // gatewayAt serves every hook call with handle on a real loopback listener,

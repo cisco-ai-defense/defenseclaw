@@ -197,16 +197,16 @@ func claudeCodeSettingsHookShellEnv(sources []*claudeCodeSettingsSource) ([]stri
 
 // hookShellEnvRisk is what name does to a hook command, for the messages.
 func hookShellEnvRisk(name string) string {
-	switch {
-	case name == "SHELLOPTS":
+	switch name {
+	case "SHELLOPTS":
 		return "SHELLOPTS (with noexec, /bin/sh runs none of the hook command)"
-	case name == "CLAUDE_CODE_SHELL_PREFIX":
+	case "CLAUDE_CODE_SHELL_PREFIX":
 		return "CLAUDE_CODE_SHELL_PREFIX (Claude Code runs that program in place of each hook command)"
-	case name == "BASH_ENV":
+	case "BASH_ENV":
 		return "BASH_ENV (a #!/bin/bash hook script runs that file first, and it can exit before the hook)"
-	case name == "BASHOPTS":
+	case "BASHOPTS":
 		return "BASHOPTS (sets options of a #!/bin/bash hook script)"
-	case name == "FUNCNEST":
+	case "FUNCNEST":
 		return "FUNCNEST (makes the hook script's nested helper calls fail)"
 	default:
 		command := strings.TrimSuffix(strings.TrimPrefix(name, hookShellEnvFunctionPrefix), "%%")

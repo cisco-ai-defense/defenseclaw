@@ -6,6 +6,7 @@
 package enterprisehooks
 
 import (
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
@@ -40,7 +41,20 @@ func setNamespacePurgeTestSecurity(t *testing.T, path, sddl string, info windows
 	if info&windows.DACL_SECURITY_INFORMATION == 0 {
 		dacl = nil
 	}
-	if err := windows.SetNamedSecurityInfo(extended, windows.SE_FILE_OBJECT, info, owner, group, dacl, nil); err != nil {
+	set := func() error {
+		return windows.SetNamedSecurityInfo(extended, windows.SE_FILE_OBJECT, info, owner, group, dacl, nil)
+	}
+	err = set()
+	if errors.Is(err, windows.ERROR_INVALID_OWNER) {
+		// SYSTEM as the owner needs SeRestorePrivilege, which an elevated
+		// GitHub runner token holds disabled: enable it on a locked thread,
+		// as the native OTLP fixtures do (rel-1-0-6:GAP-0385).
+		var held bool
+		if err, held = runWithFixtureRestorePrivilege(set); !held {
+			t.Fatalf("set %s on %s: this token does not hold SeRestorePrivilege, which a SYSTEM-owned fixture needs (run the package as an elevated administrator): %v", sddl, path, err)
+		}
+	}
+	if err != nil {
 		t.Fatalf("set %s on %s: %v", sddl, path, err)
 	}
 }

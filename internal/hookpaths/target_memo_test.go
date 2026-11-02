@@ -199,6 +199,30 @@ func TestClientStatementBudgetHeader(t *testing.T) {
 		}
 		return true
 	}
+	// Review r5 mutation MW1: an over-budget call whose naming statements
+	// only read sends the incomplete marker, not a description of an empty
+	// reduced call.
+	if got := header(gap0568Assignments(200) + strings.Repeat("; cat ~/.defenseclaw/config.yaml 2>/dev/null", 130)); !incomplete(got) {
+		t.Errorf("read-only over-budget call: header %v, want only the incomplete marker and cwd", got)
+	}
+	// rel-1-0-6:GAP-0413: a PowerShell-tool call is not reduced by the
+	// POSIX read-only proof; over the budget the client sends only the
+	// incomplete marker, even where the POSIX reading would keep a writer.
+	psPad := make([]string, 0, 330)
+	for i := range 200 {
+		psPad = append(psPad, fmt.Sprintf("$a%d=1", i))
+	}
+	for i := range 130 {
+		psPad = append(psPad, fmt.Sprintf(`echo "claw%d"`, i))
+	}
+	psBody, err := json.Marshal(map[string]any{"hook_event_name": "PreToolUse", "session_id": "budget", "cwd": cwd,
+		"tool_name": "PowerShell", "tool_input": map[string]any{"command": strings.Join(psPad, "; ") + "; Set-Content -Path ~/.defenseclaw/config.yaml -Value x"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got, ok := Decode(Resolve(psBody)); !ok || !incomplete(got) {
+		t.Errorf("PowerShell-tool over-budget state write: header %v, want only the incomplete marker and cwd", got)
+	}
 	if got := header(gap0568Assignments(129)); !incomplete(got) {
 		t.Errorf("129 assignments: header %v, want only the incomplete marker and cwd", got)
 	}
@@ -206,7 +230,11 @@ func TestClientStatementBudgetHeader(t *testing.T) {
 		t.Errorf("128 assignments: header %v, want the full map", got)
 	}
 	state := filepath.Join(home, ".defenseclaw", "config.yaml")
-	got := header(gap0568Assignments(200) + "; printf changed >> " + state)
+	// The path is single-quoted in the shell command: a Windows path is
+	// written with backslashes, which an unquoted Bash word reads as
+	// escapes (rel-1-0-6:GAP-0440). The header still names the path itself.
+	stateWord := "'" + state + "'"
+	got := header(gap0568Assignments(200) + "; printf changed >> " + stateWord)
 	if incomplete(got) {
 		t.Fatalf("over-budget state write: header %v, want the call described", got)
 	}
@@ -220,7 +248,7 @@ func TestClientStatementBudgetHeader(t *testing.T) {
 	for i := range 30000 {
 		writes = append(writes, fmt.Sprintf("echo x > ordinary/f%d.txt", i))
 	}
-	reducedHeader := header(strings.Join(writes, "; ") + "; printf changed >> " + state)
+	reducedHeader := header(strings.Join(writes, "; ") + "; printf changed >> " + stateWord)
 	if _, listed := reducedHeader[state]; !listed || reducedHeader[TruncatedKey] != "1" {
 		t.Errorf("over-budget state write after 30000 writes: header %v, want the state listed and the truncated marker", reducedHeader)
 	}
@@ -238,10 +266,10 @@ func TestClientStatementBudgetHeader(t *testing.T) {
 		writers = append(writers, fmt.Sprintf("echo claw%d >> notes.txt", i))
 		reads = append(reads, fmt.Sprintf("echo claw%d", i))
 	}
-	if got := header(gap0568Assignments(200) + "; " + strings.Join(writers, "; ") + "; printf changed >> " + state); !incomplete(got) {
+	if got := header(gap0568Assignments(200) + "; " + strings.Join(writers, "; ") + "; printf changed >> " + stateWord); !incomplete(got) {
 		t.Errorf("over-budget call past the bound of writing statements: header %v, want only the incomplete marker and cwd", got)
 	}
-	if got := header(gap0568Assignments(200) + "; " + strings.Join(reads, "; ") + "; printf changed >> " + state); incomplete(got) {
+	if got := header(gap0568Assignments(200) + "; " + strings.Join(reads, "; ") + "; printf changed >> " + stateWord); incomplete(got) {
 		t.Errorf("over-budget state write after 130 read-only naming statements: header %v, want the write described", got)
 	} else if _, listed := got[state]; !listed {
 		t.Errorf("over-budget state write after 130 read-only naming statements: header %v does not list %s", got, state)
@@ -279,11 +307,9 @@ func TestClientStateStatementsAreBounded(t *testing.T) {
 	if !ok || overflow {
 		t.Fatalf("POSIX call: ok %t overflow %t, want ok and no overflow (the dropped statements only print)", ok, overflow)
 	}
-	if got := len(strings.Split(reduced, "; ")); got != StateNamingStatementsMax {
-		t.Errorf("%d statements described, want %d", got, StateNamingStatementsMax)
-	}
-	if !strings.HasPrefix(reduced, "cd sub; echo claw0; ") || !strings.HasSuffix(reduced, "; "+state) {
-		t.Errorf("reduced call %.60q: want the directory change, the state write and the naming statements, no assignments", reduced)
+	// Reads are never kept: only the directory change and the write.
+	if want := "cd sub; " + state; reduced != want {
+		t.Errorf("reduced call %.80q: want %q (no assignments, no prints)", reduced, want)
 	}
 	// Statements that may write are kept first, in order: a delete after
 	// 3000 printing statements is kept (review r4 finding 2).
@@ -315,6 +341,29 @@ func TestClientStateStatementsAreBounded(t *testing.T) {
 		if stateStatementReadOnly(write, "/home/u") {
 			t.Errorf("%q: proven read-only", write)
 		}
+	}
+	// Review r5 mutation MP: a directory change is kept before the reads
+	// that fill the bound, so the relative write it places stays placed.
+	stateReads := make([]string, StateNamingStatementsMax-1)
+	for i := range stateReads {
+		stateReads[i] = "cat ~/.defenseclaw/config.yaml 2>/dev/null"
+	}
+	placed, overflow, _ := StateNamingStatements(gap0568Assignments(200)+"; "+strings.Join(stateReads, "; ")+"; cd ~/.defenseclaw; printf c >> ../.defenseclaw/config.yaml", "/home/u")
+	if overflow || placed != "cd ~/.defenseclaw; printf c >> ../.defenseclaw/config.yaml" {
+		t.Errorf("cd after 127 reads: overflow %t, reduced ends %q; want the cd kept with the write", overflow, placed[max(0, len(placed)-60):])
+	}
+	// rel-1-0-6:GAP-0414: a kept call of a function the call defines is not
+	// reducible.
+	for _, call := range []string{
+		gap0568Assignments(200) + "; " + strings.Join(stateReads, "; ") + `; f() { printf c >> "$1"; }; f ~/.defenseclaw/config.yaml`,
+		gap0568Assignments(200) + `; function f { printf c >> "$1"; }; f ~/.defenseclaw/config.yaml`,
+	} {
+		if _, overflow, ok := StateNamingStatements(call, "/home/u"); !ok || !overflow {
+			t.Errorf("%.60q...: ok %t overflow %t, want an overflow (the definition holds the write)", call[len(call)-60:], ok, overflow)
+		}
+	}
+	if _, overflow, _ := StateNamingStatements(gap0568Assignments(200)+`; f() { echo hi; }; f; printf c >> ~/.defenseclaw/config.yaml`, "/home/u"); overflow {
+		t.Error("a defined function the kept statements do not call made an overflow")
 	}
 	state = "printf c >> ~/.defense''claw/config.yaml"
 	if reduced, overflow, _ := StateNamingStatements(gap0568Assignments(200)+"; "+state, "/home/u"); reduced != state || overflow {

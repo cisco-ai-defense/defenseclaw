@@ -3,7 +3,11 @@
 
 package actionfacts
 
-import "unicode"
+import (
+	"regexp"
+	"strings"
+	"unicode"
+)
 
 // ShellStatementsOverBudget reports whether a POSIX shell command has more
 // statements than one action evaluates (maxStatementsAlone, 128), counted
@@ -82,6 +86,15 @@ func powerShellStatements(command string, limit int) (int, bool) {
 	)
 	runes := []rune(command)
 	frames := []int{frameCode}
+	argumentMode := []bool{true}
+	push := func(frame int) {
+		frames = append(frames, frame)
+		argumentMode = append(argumentMode, false)
+	}
+	pop := func() {
+		frames = frames[:len(frames)-1]
+		argumentMode = argumentMode[:len(argumentMode)-1]
+	}
 	statements := 0
 	inStatement := false
 	opaque := false
@@ -89,7 +102,12 @@ func powerShellStatements(command string, limit int) (int, bool) {
 	// line end right after a comma continues the statement (a multi-line
 	// array). Comment text never sets it (commentEnd).
 	lastSignificant := rune(0)
+	lastSignificantAt := -1
 	commentEnd := -1
+	// stmtStart is where the current statement's text begins: an & after
+	// an = is the call operator only when the text from here to the = is
+	// an assignment target (powerShellAssignmentTarget).
+	stmtStart := 0
 	boundary := func() {
 		if inStatement {
 			statements++
@@ -110,39 +128,46 @@ func powerShellStatements(command string, limit int) (int, bool) {
 				if i+1 < len(runes) && windowsPowerShellQuoteDelimiter(runes[i+1]) == '"' {
 					i++ // a doubled quote is one quote character
 				} else {
-					frames = frames[:len(frames)-1]
+					pop()
 				}
 			case r == '$' && i+1 < len(runes) && runes[i+1] == '(':
-				frames = append(frames, frameCode)
+				push(frameCode)
 				i++
 			}
 			continue
 		case frameVariable:
-			if r == '`' {
+			switch r {
+			case '`':
 				i++
-			} else if r == '}' {
-				frames = frames[:len(frames)-1]
+			case '}':
+				pop()
 			}
 			continue
 		}
 		// Code, paren and hashtable frames.
+		if !argumentMode[len(argumentMode)-1] && windowsPowerShellCommandWordBeforeBlank(runes, i) {
+			argumentMode[len(argumentMode)-1] = true
+		}
+		if r == '&' && (i == 0 || runes[i-1] != '>') {
+			argumentMode[len(argumentMode)-1] = false
+		}
 		if i > 0 && i-1 != commentEnd && !unicode.IsSpace(runes[i-1]) {
-			lastSignificant = runes[i-1]
+			lastSignificant, lastSignificantAt = runes[i-1], i-1
 		}
 		next := rune(0)
 		if i+1 < len(runes) {
 			next = runes[i+1]
 		}
 		switch {
-		case r == '#' && windowsPowerShellCommentStarts(runes, i):
+		case r == '#' && windowsPowerShellCommentStarts(runes, i, len(frames) > 1 && !argumentMode[len(argumentMode)-1]):
 			// A line comment: the line goes on as the code before it ends.
 			// A comma inside the comment does not continue the line
 			// (review r3 finding 1: `Write-Output 1 # note,` lines hid
 			// their statements from the count).
-			lastSignificant = 0
+			lastSignificant, lastSignificantAt = 0, -1
 			for j := i - 1; j >= 0 && runes[j] != '\n' && runes[j] != '\r'; j-- {
 				if !unicode.IsSpace(runes[j]) {
-					lastSignificant = runes[j]
+					lastSignificant, lastSignificantAt = runes[j], j
 					break
 				}
 			}
@@ -150,7 +175,7 @@ func powerShellStatements(command string, limit int) (int, bool) {
 				i++
 			}
 			commentEnd = i
-		case r == '<' && next == '#' && windowsPowerShellCommentStarts(runes, i):
+		case r == '<' && next == '#' && windowsPowerShellCommentStarts(runes, i, len(frames) > 1 && !argumentMode[len(argumentMode)-1]):
 			end, ok := windowsPowerShellBlockCommentEnd(runes, i)
 			if !ok {
 				return statements, opaque
@@ -162,7 +187,7 @@ func powerShellStatements(command string, limit int) (int, bool) {
 			commentEnd = end
 		case r == '-' && next == '-' && i+2 < len(runes) && runes[i+2] == '%' &&
 			(i+3 == len(runes) || unicode.IsSpace(runes[i+3])) && windowsPowerShellTokenStart(runes, i):
-			// The stop-parsing arguments end at an unquoted pipe or line end.
+			// The stop-parsing arguments end at an unquoted pipe, &&, or line end.
 			opaque, inStatement = true, true
 			i = windowsPowerShellStopParsingEnd(runes, i+3) - 1
 		case r == '`':
@@ -196,56 +221,70 @@ func powerShellStatements(command string, limit int) (int, bool) {
 			}
 		case windowsPowerShellQuoteDelimiter(r) == '"':
 			inStatement = true
-			frames = append(frames, frameDouble)
+			push(frameDouble)
 		case r == '$' && next == '{':
 			inStatement, opaque = true, true
-			frames = append(frames, frameVariable)
+			push(frameVariable)
 			i++
 		case r == '@' && next == '{':
 			inStatement, opaque = true, true
-			frames = append(frames, frameHashtable)
+			push(frameHashtable)
 			i++
 		case (r == '$' || r == '@') && next == '(':
-			frames = append(frames, frameCode)
+			push(frameCode)
 			inStatement, opaque = false, true
 			i++
+			stmtStart = i + 1
 		case r == '(':
-			frames = append(frames, frameParen)
+			push(frameParen)
 			inStatement = false
+			stmtStart = i + 1
 		case r == '{':
-			frames = append(frames, frameCode)
+			push(frameCode)
 			inStatement = false
+			stmtStart = i + 1
 		case r == ')' || r == '}':
 			// The statement around the bracket goes on; the last statement
 			// inside it is counted with it.
 			if len(frames) > 1 {
-				frames = frames[:len(frames)-1]
+				pop()
 			}
 			inStatement = true
 		case top == frameHashtable && (r == ';' || r == '\n' || r == '\r'):
 			// Entry separators of a hashtable, not statements.
+			argumentMode[len(argumentMode)-1] = false
 		case (r == '\n' || r == '\r') && (top == frameParen || lastSignificant == ','):
 			// A line end inside a bare ( ) or after a trailing comma
 			// continues the statement.
 		case r == ';' || r == '|' || r == '\n' || r == '\r':
 			boundary()
+			argumentMode[len(argumentMode)-1] = false
+			stmtStart = i + 1
 		case r == '&' && next == '&':
 			boundary()
 			i++
+			stmtStart = i + 1
 		case r == '&' && (i == 0 || runes[i-1] != '>'):
-			// After a complete command, the PowerShell 7 background
-			// operator ends it; at a statement start or right after an
-			// assignment or a comma ($x = & git ..., @(1, & f)), the call
-			// operator, which ends nothing (review r3 finding 2). Only those
-			// characters decide: a bare argument ending in * / % - + ! < >
-			// (Get-ChildItem *, Write-Output 50%) completes a command
-			// (review r4 finding 1). The Windows lexer stops at a call whose
+			// At a statement start, or right after an assignment operator
+			// ($x = & git ..., $x += & f, $a[0]= & f, ${x}= & f, a
+			// hashtable value), the call operator, which ends nothing
+			// (review r3 finding 2). After anything else the PowerShell 7
+			// background operator ends the command: a bare argument ending
+			// in * / % - + ! < > (review r4 finding 1), and an = or a comma
+			// in or at the end of a bare word (Write-Output key=, a base64
+			// value ending in ==), which command mode reads as part of the
+			// argument (rel-1-0-6:GAP-0412). A comma before & is a
+			// PowerShell parse error (MissingExpression) in every mode, so it
+			// never makes a call. The Windows lexer stops at a call whose
 			// target is not quoted.
 			opaque = true
-			if inStatement && lastSignificant != '=' && lastSignificant != ',' {
-				boundary()
-			} else {
+			call := !inStatement || lastSignificant == '=' && lastSignificantAt >= stmtStart &&
+				(top == frameHashtable || powerShellAssignmentTarget(runes[stmtStart:lastSignificantAt]))
+			if call {
 				inStatement = true
+			} else {
+				boundary()
+				stmtStart = i + 1
 			}
 		case !unicode.IsSpace(r):
 			inStatement = true
@@ -255,6 +294,27 @@ func powerShellStatements(command string, limit int) (int, bool) {
 		statements++
 	}
 	return statements, opaque
+}
+
+// powerShellAssignable matches an assignable PowerShell expression with an
+// optional compound operator before its =: $x, $env:X, ${x}, $a[0], $o.p,
+// [int]$n, $x + (for +=), $x ?? (for ??=).
+var powerShellAssignable = regexp.MustCompile(`^(\[[^\]]+\]\s*)*(\$\{[^}]+\}|\$[A-Za-z_][\w:]*)(\[[^\]]*\]|\.[A-Za-z_]\w*)*\s*(\?\?|[-+*/%])?$`)
+
+var powerShellBlockComment = regexp.MustCompile(`<#[\s\S]*?#>`)
+
+// powerShellAssignmentTarget reports that target, the text of a statement
+// before an =, is an assignable expression, so the = is the assignment
+// operator. A statement that begins with a bare word is in command mode,
+// where = is part of an argument (Write-Output key=, Write-Output =). A
+// target is short: past 256 characters it is not one, which keeps the count
+// linear.
+func powerShellAssignmentTarget(target []rune) bool {
+	if len(target) > 256 {
+		return false
+	}
+	text := strings.TrimSpace(powerShellBlockComment.ReplaceAllString(string(target), " "))
+	return powerShellAssignable.MatchString(text)
 }
 
 // powerShellHereStringOpens reports that only blanks follow position i up to

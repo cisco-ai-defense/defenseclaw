@@ -12,11 +12,29 @@ import (
 	"strings"
 )
 
-// PluginLaunchCoverage reports a launch that can omit a managed in-agent
-// plugin. It examines only the process's own argv and environment, never a
+// PluginLaunchCoverage reports a launch that can omit a managed hook or
+// in-agent plugin. It examines only the process's own argv and environment, never a
 // prompt, and returns a fixed reason so neither can leak into a status or
 // audit record. An unreadable environment is unknown, not proof of coverage.
 func PluginLaunchCoverage(connector string, argv []string, env map[string]string, envKnown bool, accountHome string) string {
+	if connector == "devin" {
+		for _, arg := range launchOptions(argv) {
+			if arg == "--config" || strings.HasPrefix(arg, "--config=") {
+				return "devin_config_override"
+			}
+		}
+	}
+	if runtime.GOOS != "windows" && (connector == "devin" || connector == "copilot" || connector == "codex") {
+		if !envKnown {
+			return "launch_environment_unverified"
+		}
+		if env["BASH_ENV"] != "" {
+			return "bash_hook_startup"
+		}
+		if env["SHELLOPTS"] == "noexec" {
+			return "bash_hook_noexec"
+		}
+	}
 	switch connector {
 	case "opencode":
 		args := argv
@@ -54,11 +72,6 @@ func PluginLaunchCoverage(connector string, argv []string, env map[string]string
 	case "amp":
 		return userConfigLaunchCoverage(env, envKnown, accountHome, "amp_plugin_config_relocated")
 	case "devin":
-		for _, arg := range launchOptions(argv) {
-			if arg == "--config" || strings.HasPrefix(arg, "--config=") {
-				return "devin_config_override"
-			}
-		}
 		if launchWindowsAppDataRelocated(env, accountHome, "APPDATA", "Roaming") {
 			return "user_config_relocated"
 		}

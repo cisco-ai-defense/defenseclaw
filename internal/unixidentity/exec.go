@@ -109,6 +109,12 @@ func (b *limitedBuffer) Write(p []byte) (int, error) {
 // bound. A non-zero exit is returned in the result, not as an error, so
 // callers can map tool-specific exit codes.
 func runTrustedCommand(ctx context.Context, path string, args []string, filters ...outputFilter) (commandResult, error) {
+	return runTrustedCommandLimit(ctx, path, args, defaultOutputLimit, filters...)
+}
+
+// runTrustedCommandLimit is runTrustedCommand with a stdout bound of limit
+// bytes, for a tool whose answer is known to be larger than the default.
+func runTrustedCommandLimit(ctx context.Context, path string, args []string, limit int, filters ...outputFilter) (commandResult, error) {
 	if ctx == nil {
 		ctx = context.Background()
 	}
@@ -117,7 +123,7 @@ func runTrustedCommand(ctx context.Context, path string, args []string, filters 
 	cmd := exec.CommandContext(ctx, path, args...)
 	cmd.Env = []string{"PATH=/usr/bin:/bin", "LC_ALL=C", "LANG=C"}
 	cmd.Dir = "/"
-	stdout := &limitedBuffer{limit: defaultOutputLimit}
+	stdout := &limitedBuffer{limit: limit}
 	stderr := &limitedBuffer{limit: stderrLimit}
 	var out io.Writer = stdout
 	for _, filter := range filters {

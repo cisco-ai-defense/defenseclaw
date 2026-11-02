@@ -39,6 +39,12 @@ import (
 // (HookProgressHeader); the call then waits up to hookProgressCeiling.
 var hookAnswerBudget = 3500 * time.Millisecond
 
+// Codex registers per-user PreToolUse command hooks with a 30-second host
+// timeout. Give an otherwise healthy local gateway another half-second under
+// host load; the managed hook and the other connectors keep the
+// shorter answer budget. This meets the four-second progress ceiling.
+var perUserCodexAnswerBudget = 4 * time.Second
+
 // hookProgressCeiling is how long, from the start of the hook process, a
 // tool call whose gateway reported (102) that it waits on a remote scanner
 // may wait for the decision. The 102 only moves the answer deadline to it:
@@ -157,7 +163,12 @@ func answerDeadline(opts Options, startedAt time.Time) time.Time {
 	if opts.SecureClient || startedAt.IsZero() || !bounded {
 		return time.Time{}
 	}
-	return startedAt.Add(hookAnswerBudget)
+	budget := hookAnswerBudget
+	if !opts.ManagedEnterprise && strings.EqualFold(strings.TrimSpace(opts.Connector), "codex") &&
+		perUserCodexAnswerBudget > budget {
+		budget = perUserCodexAnswerBudget
+	}
+	return startedAt.Add(budget)
 }
 
 // progressCeiling is the latest answer deadline of a tool call that started

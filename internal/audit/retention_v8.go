@@ -1458,6 +1458,14 @@ func materializeRetentionACKBaselines(
 }
 
 func migrateRetentionTimestampUnixNano(ex dbExecer) error {
+	// The store's form (storeMigrationTx): bound outside Secure Client,
+	// main's on a Secure Client store, which therefore never carries the
+	// bound trigger, not even until Init. An executor that does not say
+	// gets main's form; Init then installs the store's.
+	bound := false
+	if form, ok := ex.(interface{ secureClientMigration() bool }); ok {
+		bound = !form.secureClientMigration()
+	}
 	for _, spec := range retentionTimestampRegistry {
 		present, err := tableExists(ex, spec.table)
 		if err != nil {
@@ -1483,15 +1491,39 @@ func migrateRetentionTimestampUnixNano(ex dbExecer) error {
 		)); err != nil {
 			return fmt.Errorf("create exact retention timestamp index: %w", err)
 		}
-		if err := installRetentionTimestampTriggers(ex, spec); err != nil {
+		// Installing the store's form here means Init finds it in place and
+		// writes no schema, so the purge's VACUUM leaves no free page behind.
+		if err := installRetentionTimestampTriggers(ex, spec, bound); err != nil {
 			return err
 		}
 	}
 	return nil
 }
 
-func installRetentionTimestampTriggers(ex dbExecer, spec retentionTimestampSpec) error {
-	insertTrigger, updateTrigger, insertSQL, updateSQL := retentionTimestampTriggerDDL(spec)
+func installRetentionTimestampTriggers(ex dbExecer, spec retentionTimestampSpec, bound bool) error {
+	insertTrigger, updateTrigger, insertSQL, updateSQL := retentionTimestampTriggerDDL(spec, bound)
+	// Both already as required: rewriting them would only churn the schema
+	// (and free a page of the longer bound form's text on every open).
+	installed := true
+	for _, trigger := range []struct {
+		name string
+		sql  string
+	}{{insertTrigger, insertSQL}, {updateTrigger, updateSQL}} {
+		var actual string
+		err := ex.QueryRow(`SELECT sql FROM sqlite_master WHERE type='trigger' AND name=?`, trigger.name).Scan(&actual)
+		// Exact text: the store wrote it, so anything else (also a change
+		// of whitespace inside a literal) is replaced.
+		if errors.Is(err, sql.ErrNoRows) || (err == nil && actual != trigger.sql) {
+			installed = false
+			break
+		}
+		if err != nil {
+			return fmt.Errorf("read exact retention timestamp trigger: %w", err)
+		}
+	}
+	if installed {
+		return nil
+	}
 	if _, err := ex.Exec(fmt.Sprintf(`DROP TRIGGER IF EXISTS %s; DROP TRIGGER IF EXISTS %s`,
 		insertTrigger, updateTrigger)); err != nil {
 		return fmt.Errorf("replace exact retention timestamp triggers: %w", err)
@@ -1517,7 +1549,11 @@ func installRetentionTimestampTriggers(ex dbExecer, spec retentionTimestampSpec)
 	return nil
 }
 
-func retentionTimestampTriggerDDL(spec retentionTimestampSpec) (string, string, string, string) {
+// retentionTimestampTriggerDDL is the pair of retention triggers of spec's
+// table. bound is the form of a store outside Secure Client, whose insert
+// trigger skips a row that already carries the exact instant; a Secure
+// Client store keeps main's form, which rewrites every new row.
+func retentionTimestampTriggerDDL(spec retentionTimestampSpec, bound bool) (string, string, string, string) {
 	expression := `CASE
 		WHEN timestamp GLOB '????-??-??T??:??:??*' THEN
 			CAST(strftime('%s', substr(timestamp, 1, 19) ||
@@ -1563,12 +1599,40 @@ func retentionTimestampTriggerDDL(spec retentionTimestampSpec) (string, string, 
 		BEGIN
 			UPDATE %s SET retention_timestamp_unix_nano = %s WHERE id = NEW.id;
 		END`, insertTrigger, spec.table, spec.table, expression)
+	if bound {
+		// The bound form rewrites a new row only when its insert did not
+		// carry the exact instant. The hook path's writers bind it
+		// (retentionInstantOf), so each of their audit_events and
+		// scan_results rows is written once instead of inserted and then
+		// updated with a second retention index entry: about 3% of the WAL
+		// a hook call writes (rel-1-0-6:GAP-0267). Any other writer (the
+		// Python CLI, an older binary), or a wrong value, still gets the
+		// computed instant.
+		insertSQL = fmt.Sprintf(`CREATE TRIGGER %s
+		AFTER INSERT ON %s
+		WHEN NEW.retention_timestamp_unix_nano IS NOT (%s)
+		BEGIN
+			UPDATE %s SET retention_timestamp_unix_nano = %s WHERE id = NEW.id;
+		END`, insertTrigger, spec.table, strings.ReplaceAll(expression, "timestamp", "NEW.timestamp"),
+			spec.table, expression)
+	}
 	updateSQL := fmt.Sprintf(`CREATE TRIGGER %s
 		AFTER UPDATE OF timestamp ON %s
 		BEGIN
 			UPDATE %s SET retention_timestamp_unix_nano = %s WHERE id = NEW.id;
 		END`, updateTrigger, spec.table, spec.table, expression)
 	return insertTrigger, updateTrigger, insertSQL, updateSQL
+}
+
+// retentionInstantOf is the retention_timestamp_unix_nano the insert
+// trigger computes for timestamp, an RFC 3339 text the writer binds, or nil
+// when it is not one (the trigger then computes it).
+func retentionInstantOf(timestamp string) any {
+	instant, err := time.Parse(time.RFC3339Nano, timestamp)
+	if err != nil {
+		return nil
+	}
+	return instant.UnixNano()
 }
 
 type retentionScanIntegrityTrigger struct {
@@ -1643,13 +1707,13 @@ func installRetentionScanIntegrityTriggers(ex dbExecer) error {
 	return nil
 }
 
-func ensureRetentionTimestampInfrastructure(db *sql.DB) error {
+func ensureRetentionTimestampInfrastructure(db *sql.DB, bound bool) error {
 	return retryBusy(context.Background(), "ensure-retention-timestamp-infrastructure", func() error {
-		return ensureRetentionTimestampInfrastructureOnce(db)
+		return ensureRetentionTimestampInfrastructureOnce(db, bound)
 	})
 }
 
-func ensureRetentionTimestampInfrastructureOnce(db *sql.DB) error {
+func ensureRetentionTimestampInfrastructureOnce(db *sql.DB, bound bool) error {
 	tx, err := db.Begin()
 	if err != nil {
 		return fmt.Errorf("begin retention timestamp infrastructure verification: %w", err)
@@ -1666,7 +1730,7 @@ func ensureRetentionTimestampInfrastructureOnce(db *sql.DB) error {
 			// than synthesizing unrelated historical tables.
 			continue
 		}
-		if err := installRetentionTimestampTriggers(tx, spec); err != nil {
+		if err := installRetentionTimestampTriggers(tx, spec, bound); err != nil {
 			return err
 		}
 		if err := verifyRetentionTimestampIndex(tx, spec); err != nil {

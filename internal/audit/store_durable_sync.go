@@ -22,14 +22,17 @@ import (
 // last commits. On the durable connection SQLite flushes the whole WAL at
 // every commit (with F_FULLFSYNC on macOS), which makes every commit before
 // it durable too.
-var auditDurablePragmas = buildAuditDurablePragmas()
+var (
+	auditDurablePragmas             = buildAuditDurablePragmas(auditPragmas)
+	secureClientAuditDurablePragmas = buildAuditDurablePragmas(secureClientAuditPragmas)
+)
 
-func buildAuditDurablePragmas() string {
+func buildAuditDurablePragmas(pragmas string) string {
 	const normal, full = "&_pragma=synchronous(NORMAL)", "&_pragma=synchronous(FULL)"
-	if strings.Count(auditPragmas, normal) != 1 {
+	if strings.Count(pragmas, normal) != 1 {
 		panic("audit: the audit pragmas do not set synchronous=NORMAL once")
 	}
-	return strings.Replace(auditPragmas, normal, full, 1) + "&_pragma=fullfsync(1)"
+	return strings.Replace(pragmas, normal, full, 1) + "&_pragma=fullfsync(1)"
 }
 
 // SyncCommittedWrites makes every audit write committed before the call
@@ -82,7 +85,11 @@ func (s *Store) durableConn() (*sql.DB, error) {
 	if s.durableDB != nil {
 		return s.durableDB, nil
 	}
-	db, err := openSQLiteWithPragmas(s.dbPath, auditDurablePragmas)
+	pragmas := auditDurablePragmas
+	if s.secureClientSchema {
+		pragmas = secureClientAuditDurablePragmas
+	}
+	db, err := openSQLiteWithPragmas(s.dbPath, pragmas)
 	if err != nil {
 		return nil, fmt.Errorf("audit: open SQLite durable connection: %w", err)
 	}

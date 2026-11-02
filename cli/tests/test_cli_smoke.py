@@ -596,7 +596,7 @@ class CliSmokeTests(unittest.TestCase):
         self.assertIn("config_version: 9", config_text)
         self.assertNotIn("emit_otel", config_text)
         self.assertTrue(audit_db_exists)
-        self.assertIn("Config saved to ~/.defenseclaw/config.yaml", result.output)
+        self.assertIn(f"Config saved to {data_dir / 'config.yaml'}", result.output)
 
 
 if __name__ == "__main__":

@@ -210,3 +210,28 @@ func TestRunGuardrail_OpenClaw_CredentialsBeforeProbe(t *testing.T) {
 		t.Errorf("count = %d, want 1", count)
 	}
 }
+
+// Issue #1404: DefenseClaw 1.0.5 and 1.0.6 left SecretRef text in .env as the
+// OpenClaw gateway token. It must never become the gateway token.
+func TestEnsureGatewayToken_IgnoresSecretRefText(t *testing.T) {
+	const stale = "{source: store, provider: default, id: OPENCLAW_GATEWAY_TOKEN}"
+	tmp := t.TempDir()
+	dotenv := filepath.Join(tmp, ".env")
+	if err := os.WriteFile(dotenv, []byte("OPENCLAW_GATEWAY_TOKEN="+stale+"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("DEFENSECLAW_GATEWAY_TOKEN", "")
+	t.Setenv("OPENCLAW_GATEWAY_TOKEN", stale)
+
+	tok, err := EnsureGatewayToken(dotenv)
+	if err != nil {
+		t.Fatalf("EnsureGatewayToken: %v", err)
+	}
+	if tok == stale || len(tok) != 64 {
+		t.Fatalf("got %q, want a generated 64-char token", tok)
+	}
+	again, err := EnsureGatewayToken(dotenv)
+	if err != nil || again != tok {
+		t.Fatalf("second call = (%q, %v), want the generated token", again, err)
+	}
+}
