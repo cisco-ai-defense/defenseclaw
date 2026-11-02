@@ -406,7 +406,7 @@ func TestRepairUserTargetRepairsAgentConfigFlagsAndMode(t *testing.T) {
 	}
 }
 
-func TestRepairUserTargetSkipsSymlinkedAgentConfig(t *testing.T) {
+func TestRepairUserTargetLeavesSymlinkedAgentConfigToSetup(t *testing.T) {
 	f := newPerUserRepairFixture(t)
 	dotfiles := filepath.Join(t.TempDir(), "settings.json")
 	if err := os.WriteFile(dotfiles, []byte("{}"), 0o666); err != nil {
@@ -421,10 +421,9 @@ func TestRepairUserTargetSkipsSymlinkedAgentConfig(t *testing.T) {
 	if err := os.Symlink(dotfiles, f.config); err != nil {
 		t.Fatal(err)
 	}
-	err := f.repair()
-	var skip *UserSkipError
-	if !errors.As(err, &skip) || skip.Reason != "symlink" || skip.Path != f.config {
-		t.Fatalf("repair error = %v, want symlink skip", err)
+	// The user is not skipped: Setup replaces the link with a real config.
+	if err := f.repair(); err != nil {
+		t.Fatalf("repair error = %v, want the symlinked config left to Setup", err)
 	}
 	if _, err := os.Lstat(f.config); err != nil {
 		t.Fatalf("the user's symlink was removed: %v", err)

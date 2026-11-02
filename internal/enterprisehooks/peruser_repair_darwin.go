@@ -75,8 +75,9 @@ var userRepairNow = time.Now
 //
 // The home folder itself is never re-permissioned. A symlinked,
 // non-directory, group- or other-writable, foreign-owned or non-local home,
-// and an agent config that is a symlink or cannot be repaired, return a
-// *UserSkipError and log defenseclaw_skip once per streak. Every object is
+// a symlinked folder above an agent config, and an agent config that cannot
+// be repaired, return a *UserSkipError (a symlinked config file itself is left
+// for Setup to replace) and log defenseclaw_skip once per streak. Every object is
 // opened relative to a descriptor of its parent, without following links,
 // so a component the user swaps for a symlink can never redirect a root
 // write. It does nothing unless the caller is root.
@@ -462,6 +463,13 @@ func (r *userRepairer) repairAgentConfig(homeFD int, configPath string) error {
 		case errors.Is(err, unix.ENOENT):
 			return nil
 		case errors.Is(err, unix.ELOOP):
+			if leaf {
+				// A symlinked config is not followed here. The connector's
+				// Setup replaces it with a real file without touching the
+				// target, so the user stays protected; only a symlinked folder
+				// above the config skips the user.
+				return nil
+			}
 			return r.skip("symlink", path, nil)
 		case errors.Is(err, unix.ENOTDIR):
 			return r.skip("not_directory", path, nil)
