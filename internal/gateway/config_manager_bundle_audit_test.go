@@ -255,6 +255,15 @@ func TestConfigManagerHotPolicyOnlyBundleGenerationEventAudited(t *testing.T) {
 	}
 	initial.DeploymentMode = "managed_enterprise"
 	initial.Enterprise.Profile = "standalone"
+	// The gateway boots a managed standalone computer from a file that is
+	// already managed, so its omitted paths take the standalone defaults (on
+	// Windows an omitted policy_dir is cleared: standalonePolicyDirDefault).
+	// Re-base the patched snapshot as the reload candidate is re-based, or
+	// the startup reconcile sees a policy_dir change the boot never made and
+	// refuses it as an unrecorded edit.
+	if err := config.ApplyRuntimeV8DataDirDefaultsFromBytes(initial, path, raw, initial.DataDir); err != nil {
+		t.Fatal(err)
+	}
 	_, logger := newNativeSkillRuntimeTestStore(t)
 	capture := &captureJudgeRuntimeV8Emitter{}
 	logger.SetRuntimeV8Emitter(capture)
