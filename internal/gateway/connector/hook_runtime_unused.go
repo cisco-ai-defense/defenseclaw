@@ -32,8 +32,41 @@ func RemoveUnusedSharedHookRuntime(dataDir string) error {
 	if dataDir == "" {
 		return nil
 	}
-	lockPath := filepath.Join(dataDir, hookContractLockFile)
-	if data, err := readConnectorStateFile(lockPath); err == nil {
+	dataRoot, hooks, err := openPinnedHookRuntime(dataDir)
+	if errors.Is(err, os.ErrNotExist) {
+		return nil
+	}
+	if err != nil {
+		return fmt.Errorf("open hook runtime folder: %w", err)
+	}
+	defer dataRoot.Close()
+	defer hooks.Close()
+	// The runtime writer uses this lock for sidecars and shared scripts.
+	// Keep it held while checking use and removing the unused runtime.
+	err = withFileLock(filepath.Join(dataDir, "hooks", hookConfigSidecarName), func() error {
+		return removeUnusedSharedHookRuntimeLocked(dataRoot, hooks)
+	})
+	RemoveIdleFileLockSentinels()
+	if err == nil {
+		bound, statErr := dataRoot.Lstat("hooks")
+		opened, openErr := hooks.Stat(".")
+		if statErr == nil && openErr == nil && os.SameFile(bound, opened) {
+			_ = dataRoot.Remove("hooks") // only an empty folder goes
+		}
+	}
+	return err
+}
+
+func removeUnusedSharedHookRuntimeLocked(dataRoot, hooks *os.Root) error {
+	bound, err := dataRoot.Lstat("hooks")
+	if err != nil {
+		return err
+	}
+	opened, err := hooks.Stat(".")
+	if err != nil || !os.SameFile(bound, opened) {
+		return fmt.Errorf("hook runtime folder changed before removal")
+	}
+	if data, err := readPinnedRegularFile(dataRoot, hookContractLockFile, hookContractLockMaxBytes); err == nil {
 		var lock hookContractLock
 		if json.Unmarshal(data, &lock) != nil || len(lock.Connectors) > 0 {
 			return nil
@@ -41,17 +74,21 @@ func RemoveUnusedSharedHookRuntime(dataDir string) error {
 	} else if !errors.Is(err, os.ErrNotExist) {
 		return fmt.Errorf("read hook contract lock: %w", err)
 	}
-	hookDir := filepath.Join(dataDir, "hooks")
-	entries, err := os.ReadDir(hookDir)
-	if err != nil && !errors.Is(err, os.ErrNotExist) {
+	dir, err := hooks.Open(".")
+	if err != nil {
+		return fmt.Errorf("read hook runtime folder: %w", err)
+	}
+	entries, err := dir.ReadDir(-1)
+	_ = dir.Close()
+	if err != nil {
 		return fmt.Errorf("read hook runtime folder: %w", err)
 	}
 	for _, entry := range entries {
-		if strings.HasPrefix(entry.Name(), hookConfigSidecarName+".") {
+		if entry.Name() != hookConfigSidecarName+".lock" && strings.HasPrefix(entry.Name(), hookConfigSidecarName+".") {
 			return nil // a connector's runtime record: still in use
 		}
 	}
-	if data, err := readConnectorStateFile(filepath.Join(hookDir, hookConfigSidecarName)); err == nil {
+	if data, err := readPinnedRegularFile(hooks, hookConfigSidecarName, hookRuntimeRenderMaxBytes); err == nil {
 		var state hookConfigSidecar
 		if json.Unmarshal(data, &state) != nil || len(state.FailModes) > 0 {
 			return nil
@@ -62,20 +99,29 @@ func RemoveUnusedSharedHookRuntime(dataDir string) error {
 	names := append(append([]string{hookConfigSidecarName, ".gateway-helper"}, genericHookScripts...), hookHelperScripts...)
 	var errs []error
 	for _, name := range names {
-		if err := os.Remove(filepath.Join(hookDir, name)); err != nil && !errors.Is(err, os.ErrNotExist) {
+		info, err := hooks.Lstat(name)
+		if errors.Is(err, os.ErrNotExist) {
+			continue
+		}
+		if err == nil && !info.Mode().IsRegular() {
+			err = fmt.Errorf("hook runtime file is not regular: %s", name)
+		}
+		if err == nil {
+			err = removePinnedRegularFile(hooks, name, info)
+		}
+		if err != nil {
 			errs = append(errs, err)
 		}
 	}
-	if err := os.RemoveAll(filepath.Join(hookDir, ".outage-warnings")); err != nil {
+	if err := hooks.RemoveAll(".outage-warnings"); err != nil {
 		errs = append(errs, err)
 	}
-	errs = append(errs, removeIdleConnectorLeftovers(dataDir, hookDir)...)
+	errs = append(errs, removeIdleConnectorLeftovers(dataRoot, hooks)...)
 	if len(errs) == 0 {
-		if err := os.Remove(lockPath); err != nil && !errors.Is(err, os.ErrNotExist) {
+		if err := dataRoot.Remove(hookContractLockFile); err != nil && !errors.Is(err, os.ErrNotExist) {
 			errs = append(errs, err)
 		}
 	}
-	_ = os.Remove(hookDir) // only an empty folder goes
 	return errors.Join(errs...)
 }
 
@@ -100,44 +146,57 @@ var agentProcessMayRun = accountAgentProcessMayRun
 // restarts. A tombstone that blocks on purpose (Devin's, the failed-setup
 // placeholder), any other script and a backup folder that holds a receipt
 // stay.
-func removeIdleConnectorLeftovers(dataDir, hookDir string) []error {
+func removeIdleConnectorLeftovers(dataDir, hookDir *os.Root) []error {
 	var errs []error
-	remove := func(path string) {
-		if err := os.Remove(path); err != nil && !errors.Is(err, os.ErrNotExist) {
+	remove := func(root *os.Root, name string) {
+		if err := root.Remove(name); err != nil && !errors.Is(err, os.ErrNotExist) {
 			errs = append(errs, err)
 		}
 	}
-	entries, err := os.ReadDir(hookDir)
-	if err != nil && !errors.Is(err, os.ErrNotExist) {
+	dir, err := hookDir.Open(".")
+	if err != nil {
+		return []error{fmt.Errorf("read hook runtime folder: %w", err)}
+	}
+	entries, err := dir.ReadDir(-1)
+	_ = dir.Close()
+	if err != nil {
 		return []error{fmt.Errorf("read hook runtime folder: %w", err)}
 	}
 	for _, entry := range entries {
 		if !entry.Type().IsRegular() {
 			continue
 		}
-		path := filepath.Join(hookDir, entry.Name())
-		body, err := readConnectorStateFile(path)
+		body, err := readPinnedRegularFile(hookDir, entry.Name(), hookRuntimeRenderMaxBytes)
 		if err != nil {
 			continue
 		}
-		if agent, ok := plainDisabledHookTombstoneAgent(string(body)); ok && !agentProcessMayRun(dataDir, agent) {
-			remove(path)
+		if agent, ok := plainDisabledHookTombstoneAgent(string(body)); ok && !agentProcessMayRun(dataDir.Name(), agent) {
+			remove(hookDir, entry.Name())
 		}
 	}
 	for _, name := range connectorStateLeftovers {
-		path := filepath.Join(dataDir, name)
-		if info, err := os.Lstat(path); err == nil && info.Mode().IsRegular() {
-			remove(path)
+		if info, err := dataDir.Lstat(name); err == nil && info.Mode().IsRegular() {
+			remove(dataDir, name)
 		}
 	}
-	backups := filepath.Join(dataDir, "connector_backups")
-	if folders, err := os.ReadDir(backups); err == nil {
-		for _, folder := range folders {
-			if folder.IsDir() {
-				_ = os.Remove(filepath.Join(backups, folder.Name())) // only an empty folder goes
+	if info, err := dataDir.Lstat("connector_backups"); err == nil && info.IsDir() {
+		backups, err := dataDir.OpenRoot("connector_backups")
+		if err == nil {
+			folder, openErr := backups.Open(".")
+			if openErr == nil {
+				entries, readErr := folder.ReadDir(-1)
+				_ = folder.Close()
+				if readErr == nil {
+					for _, entry := range entries {
+						if entry.IsDir() {
+							_ = backups.Remove(entry.Name()) // only an empty folder goes
+						}
+					}
+				}
 			}
+			_ = backups.Close()
 		}
-		_ = os.Remove(backups)
+		_ = dataDir.Remove("connector_backups")
 	}
 	return errs
 }

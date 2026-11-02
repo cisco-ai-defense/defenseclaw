@@ -12,6 +12,7 @@ import (
 	"runtime"
 	"strconv"
 	"testing"
+	"time"
 )
 
 // writeUnusedSharedHookRuntime lays out the shared hook runtime of an account
@@ -41,8 +42,12 @@ func TestRemoveUnusedSharedHookRuntimeRemovesAnUnusedRuntime(t *testing.T) {
 	dataDir, scripts := writeUnusedSharedHookRuntime(t)
 	hookDir := filepath.Join(dataDir, "hooks")
 	record := filepath.Join(hookDir, ".gateway-helper")
+	lockSentinel := filepath.Join(hookDir, hookConfigSidecarName+".lock")
 	markers := filepath.Join(hookDir, ".outage-warnings")
 	if err := os.WriteFile(record, []byte("helper\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(lockSentinel, nil, 0o600); err != nil {
 		t.Fatal(err)
 	}
 	if err := os.Mkdir(markers, 0o700); err != nil {
@@ -54,10 +59,121 @@ func TestRemoveUnusedSharedHookRuntimeRemovesAnUnusedRuntime(t *testing.T) {
 	if err := RemoveUnusedSharedHookRuntime(dataDir); err != nil {
 		t.Fatalf("RemoveUnusedSharedHookRuntime: %v", err)
 	}
-	for _, path := range append(scripts, record, markers, filepath.Join(dataDir, hookContractLockFile)) {
+	for _, path := range append(scripts, record, lockSentinel, markers, filepath.Join(dataDir, hookContractLockFile)) {
 		if _, err := os.Stat(path); !os.IsNotExist(err) {
 			t.Fatalf("%s survived an unused runtime's removal: %v", path, err)
 		}
+	}
+}
+
+func TestRemoveUnusedSharedHookRuntimeKeepsLinkedHookDirectory(t *testing.T) {
+	dataDir := t.TempDir()
+	outside := t.TempDir()
+	script := filepath.Join(outside, "inspect-tool.sh")
+	if err := os.WriteFile(script, []byte("kept\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(outside, filepath.Join(dataDir, "hooks")); err != nil {
+		t.Skipf("directory links are unavailable: %v", err)
+	}
+	if err := RemoveUnusedSharedHookRuntime(dataDir); err == nil {
+		t.Fatal("linked hook directory was accepted for cleanup")
+	}
+	registry := NewDefaultRegistry()
+	removed, _ := registry.Get("devin")
+	if err := RemovePerUserConnectorHookFiles(SetupOpts{DataDir: dataDir}, removed, nil); err == nil {
+		t.Fatal("linked hook directory was accepted for connector cleanup")
+	}
+	if body, err := os.ReadFile(script); err != nil || string(body) != "kept\n" {
+		t.Fatalf("linked directory target changed: %q, %v", body, err)
+	}
+}
+
+func TestRemoveUnusedSharedHookRuntimeWaitsForHookWriter(t *testing.T) {
+	dataDir, scripts := writeUnusedSharedHookRuntime(t)
+	path := filepath.Join(dataDir, "hooks", hookConfigSidecarName)
+	held := make(chan struct{})
+	release := make(chan struct{})
+	writer := make(chan error, 1)
+	go func() {
+		writer <- withFileLock(path, func() error {
+			close(held)
+			<-release
+			return nil
+		})
+	}()
+	<-held
+	removed := make(chan error, 1)
+	go func() { removed <- RemoveUnusedSharedHookRuntime(dataDir) }()
+	select {
+	case err := <-removed:
+		t.Fatalf("cleanup returned while the hook writer held its lock: %v", err)
+	case <-time.After(100 * time.Millisecond):
+	}
+	for _, script := range scripts {
+		if _, err := os.Stat(script); err != nil {
+			t.Fatalf("hook script changed while the writer held its lock: %v", err)
+		}
+	}
+	close(release)
+	if err := <-writer; err != nil {
+		t.Fatal(err)
+	}
+	if err := <-removed; err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestRemovePerUserConnectorHookFilesWaitsForHookWriter(t *testing.T) {
+	dataDir := t.TempDir()
+	opts := SetupOpts{DataDir: dataDir, APIAddr: "127.0.0.1:18970", APIToken: "test-token", HookAPIToken: "test-token", HookAPITokenScoped: true}
+	registry := NewDefaultRegistry()
+	removed, _ := registry.Get("devin")
+	hookDir := filepath.Join(dataDir, "hooks")
+	if err := WriteHookScriptsForConnectorObjectWithOpts(hookDir, opts, removed); err != nil {
+		t.Fatal(err)
+	}
+	script := filepath.Join(hookDir, "devin-hook.sh")
+	if _, err := os.Stat(script); err != nil {
+		t.Fatalf("premise: setup did not write the connector hook: %v", err)
+	}
+	lockPath := filepath.Join(hookDir, hookConfigSidecarName)
+	held := make(chan struct{})
+	release := make(chan struct{})
+	writer := make(chan error, 1)
+	go func() {
+		writer <- withFileLock(lockPath, func() error {
+			close(held)
+			<-release
+			return nil
+		})
+	}()
+	select {
+	case <-held:
+	case err := <-writer:
+		t.Fatalf("hook writer did not take its lock: %v", err)
+	case <-time.After(2 * time.Second):
+		t.Fatal("hook writer did not take its lock")
+	}
+	removedDone := make(chan error, 1)
+	go func() { removedDone <- RemovePerUserConnectorHookFiles(opts, removed, nil) }()
+	select {
+	case err := <-removedDone:
+		t.Fatalf("connector cleanup returned while the hook writer held its lock: %v", err)
+	case <-time.After(100 * time.Millisecond):
+	}
+	if _, err := os.Stat(script); err != nil {
+		t.Fatalf("connector hook changed while the writer held its lock: %v", err)
+	}
+	close(release)
+	if err := <-writer; err != nil {
+		t.Fatal(err)
+	}
+	if err := <-removedDone; err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(script); !os.IsNotExist(err) {
+		t.Fatalf("connector hook remained after cleanup: %v", err)
 	}
 }
 
