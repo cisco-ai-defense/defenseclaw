@@ -596,6 +596,163 @@ if ! kill -KILL -- "-$$" 2>&1; then printf 'SIGKILL failed\n'; fi
 '''
 
 
+def _mcp_linux_stat(pid: int) -> tuple[int, int, str] | None:
+    try:
+        with open(f"/proc/{pid}/stat", encoding="ascii") as stat_file:
+            fields = stat_file.read().rsplit(") ", 1)[1].split()
+        if fields[0] != "Z":
+            return int(fields[1]), int(fields[2]), fields[19]
+    except (OSError, IndexError, ValueError):
+        pass
+    return None
+
+
+def _mcp_linux_children(pid: int) -> set[int]:
+    """Read children of every server thread without scanning other processes."""
+    found: set[int] = set()
+    try:
+        tasks = os.listdir(f"/proc/{pid}/task")
+    except OSError:
+        return found
+    for task in tasks:
+        try:
+            with open(f"/proc/{pid}/task/{task}/children", encoding="ascii") as children:
+                found.update(int(child) for child in children.read().split())
+        except (OSError, ValueError):
+            continue
+    return found
+
+
+def _mcp_posix_processes() -> dict[int, tuple[int, int, str]]:
+    """Return PID to (parent, group, birth marker) on macOS."""
+    found: dict[int, tuple[int, int, str]] = {}
+    output = subprocess.check_output(
+        ["/bin/ps", "-A", "-o", "pid=", "-o", "ppid=", "-o", "pgid=", "-o", "lstart="],
+        text=True, timeout=1,
+    )
+    for line in output.splitlines():
+        fields = line.split(maxsplit=3)
+        if len(fields) != 4:
+            continue
+        try:
+            found[int(fields[0])] = (int(fields[1]), int(fields[2]), fields[3])
+        except ValueError:
+            continue
+    return found
+
+
+class _MCPPosixDescendants:
+    """Remember server descendants across process-group and parent changes."""
+
+    def __init__(self, root_pid: int, group_pid: int) -> None:
+        self.root_pid = root_pid
+        self.group_pid = group_pid
+        root_stat = _mcp_linux_stat(root_pid) if sys.platform == "linux" else None
+        self._root_birth = root_stat[2] if root_stat is not None else None
+        self._known: dict[int, str] = {}
+        self._lock = threading.Lock()
+        self._stop = threading.Event()
+        self._thread = threading.Thread(target=self._watch, name="mcp-stdio-descendants", daemon=True)
+        self._thread.start()
+
+    def capture(self) -> None:
+        if sys.platform == "linux":
+            with self._lock:
+                known = dict(self._known)
+            roots = {self.root_pid: self._root_birth, **known}
+            found: dict[int, str] = {}
+            pending = set(roots)
+            while pending:
+                pid = pending.pop()
+                stat = _mcp_linux_stat(pid)
+                if stat is None or stat[2] != roots[pid]:
+                    continue
+                for child in _mcp_linux_children(pid):
+                    child_stat = _mcp_linux_stat(child)
+                    if child_stat is None or child_stat[0] != pid or child in roots:
+                        continue
+                    roots[child] = child_stat[2]
+                    found[child] = child_stat[2]
+                    pending.add(child)
+            with self._lock:
+                self._known.update(found)
+            return
+        try:
+            processes = _mcp_posix_processes()
+        except (OSError, subprocess.SubprocessError) as exc:
+            _LOGGER.warning("MCP stdio descendant inspection failed: %s", exc)
+            return
+        with self._lock:
+            parents = {self.root_pid}
+            parents.update(
+                pid for pid, birth in self._known.items()
+                if pid in processes and processes[pid][2] == birth
+            )
+            pending = set(parents)
+            while pending:
+                children = {
+                    pid for pid, (parent, _group, _birth) in processes.items()
+                    if parent in pending and pid not in parents
+                }
+                for pid in children:
+                    self._known[pid] = processes[pid][2]
+                parents.update(children)
+                pending = children
+
+    def _watch(self) -> None:
+        while not self._stop.wait(0.25):
+            self.capture()
+
+    def signal(self, sig: signal.Signals) -> None:
+        self.capture()
+        with self._lock:
+            known = dict(self._known)
+        if sys.platform == "linux":
+            processes = {pid: stat for pid in known if (stat := _mcp_linux_stat(pid)) is not None}
+        else:
+            try:
+                processes = _mcp_posix_processes()
+            except (OSError, subprocess.SubprocessError) as exc:
+                _LOGGER.warning("MCP stdio descendant inspection failed: %s", exc)
+                return
+        for pid, birth in known.items():
+            current = processes.get(pid)
+            if (current is None or current[2] != birth or current[1] == self.group_pid
+                    or pid <= 1 or pid == os.getpid()):
+                continue
+            try:
+                os.kill(pid, sig)
+            except ProcessLookupError:
+                pass
+            except OSError as exc:
+                _LOGGER.warning("MCP stdio descendant cleanup for pid %d failed: %s", pid, exc)
+
+    def close(self) -> None:
+        self._stop.set()
+        self._thread.join(timeout=1)
+
+
+class _MCPPosixInput:
+    """Capture the server tree before the SDK closes its input stream."""
+
+    def __init__(self, stream: Any, descendants: _MCPPosixDescendants) -> None:
+        self._stream = stream
+        self._descendants = descendants
+        self._closed = False
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(self._stream, name)
+
+    async def send(self, item: bytes) -> None:
+        await self._stream.send(item)
+
+    async def aclose(self) -> None:
+        if not self._closed:
+            self._closed = True
+            self._descendants.capture()
+        await self._stream.aclose()
+
+
 def _signal_owned_mcp_posix_group(
     guardian_pid: int, sig: signal.Signals, report_error: Callable[[str], None],
 ) -> bool:
@@ -623,6 +780,7 @@ def _reap_mcp_posix_guardian(
     emergency: threading.Event | None = None,
     completed: threading.Event | None = None,
     cleanup_seconds: float = _MCP_POSIX_SESSION_CLEANUP_SECONDS,
+    descendants: list[_MCPPosixDescendants] | None = None,
 ) -> None:
     """Reap after scan closure, with a bounded fallback for cleanup faults."""
     def reap() -> None:
@@ -660,6 +818,9 @@ def _reap_mcp_posix_guardian(
         except OSError as exc:
             problems.append(f"guardian reaping: {exc}")
         finally:
+            if descendants:
+                descendants[0].signal(signal.SIGKILL)
+                descendants[0].close()
             if guardian.stdout is not None:
                 try:
                     if select.select([guardian.stdout], [], [], 0)[0]:
@@ -705,7 +866,7 @@ def _contained_mcp_posix_process_factory(server_name: str = "stdio server") -> I
     import mcp.client.stdio as mcp_stdio
     from anyio._core._eventloop import get_async_backend
 
-    started_groups: dict[int, tuple[subprocess.Popen[bytes], int, threading.Event]] = {}
+    started_groups: dict[int, tuple[subprocess.Popen[bytes], int, threading.Event, _MCPPosixDescendants]] = {}
     notified_groups: set[int] = set()
     session_closed = threading.Event()
 
@@ -715,6 +876,7 @@ def _contained_mcp_posix_process_factory(server_name: str = "stdio server") -> I
             return False
         if pid not in notified_groups:
             notified_groups.add(pid)
+            group[3].signal(signal.SIGTERM)
             written = False
             try:
                 os.write(group[1], b"x")
@@ -757,8 +919,10 @@ def _contained_mcp_posix_process_factory(server_name: str = "stdio server") -> I
         _close_mcp_posix_control(control_read)
         emergency = threading.Event()
         completed = threading.Event()
+        tracked_descendants: list[_MCPPosixDescendants] = []
         _reap_mcp_posix_guardian(
             guardian, server_name, session_closed, emergency, completed,
+            descendants=tracked_descendants,
         )
         try:
             # AnyIO's public open_process omits Python's process_group option;
@@ -773,7 +937,26 @@ def _contained_mcp_posix_process_factory(server_name: str = "stdio server") -> I
             if not completed.wait(_MCP_POSIX_SESSION_CLEANUP_SECONDS + 2):
                 _LOGGER.warning("MCP stdio guardian for server %r did not finish failed-launch cleanup", server_name)
             raise
-        started_groups[process.pid] = (guardian, control_write, emergency)
+        try:
+            descendants = _MCPPosixDescendants(process.pid, guardian.pid)
+            tracked_descendants.append(descendants)
+            if process.stdin is not None:
+                if not hasattr(process, "_stdin"):
+                    raise RuntimeError("MCP stdio process has no tracked input stream")
+                process._stdin = _MCPPosixInput(process.stdin, descendants)
+        except BaseException:
+            _close_mcp_posix_control(control_write)
+            emergency.set()
+            try:
+                process.kill()
+            except ProcessLookupError:
+                pass
+            except OSError as exc:
+                _LOGGER.warning("MCP stdio process cleanup failed: %s", exc)
+            await process.wait()
+            completed.wait(_MCP_POSIX_SESSION_CLEANUP_SECONDS + 2)
+            raise
+        started_groups[process.pid] = (guardian, control_write, emergency, descendants)
         return process
 
     async def terminate(process: Any) -> None:

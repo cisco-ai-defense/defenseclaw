@@ -38,6 +38,7 @@ _STDIO_SERVER = """import json, os, signal, subprocess, sys, time
 child = subprocess.Popen(
     [sys.executable, '-c', 'import signal, time; signal.signal(signal.SIGTERM, signal.SIG_IGN); time.sleep(300)'],
     stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+    start_new_session=os.environ.get('MCP_FIXTURE_DETACHED') == '1',
 )
 with open(os.environ['MCP_FIXTURE_CHILD_PID'], 'w') as output:
     output.write(str(child.pid))
@@ -70,7 +71,7 @@ if os.environ.get('MCP_FIXTURE_IGNORE_STDIN'):
 
 
 def _fixture_entry(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, *, stuck: bool = False,
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, *, stuck: bool = False, detached: bool = False,
 ) -> tuple[MCPServerEntry, Path]:
     server = tmp_path / "server.py"
     server.write_text(_STDIO_SERVER, encoding="utf-8")
@@ -85,6 +86,7 @@ def _fixture_entry(
             "MCP_FIXTURE_CHILD_PID": str(child_pid_file),
             "MCP_FIXTURE_SERVER_PID": str(tmp_path / "server.pid"),
             "MCP_FIXTURE_IGNORE_STDIN": "1" if stuck else "",
+            "MCP_FIXTURE_DETACHED": "1" if detached else "",
         },
     )
     return entry, child_pid_file
@@ -176,7 +178,7 @@ def test_cleanup_signal_error_does_not_escape(
 
 
 @pytest.mark.skipif(os.name == "nt", reason="Windows uses a Job Object")
-@pytest.mark.parametrize("mode", ["normal-exit", "scan-timeout", "server-stuck"])
+@pytest.mark.parametrize("mode", ["normal-exit", "detached-normal-exit", "scan-timeout", "server-stuck"])
 def test_local_stdio_scan_ends_child_on_success_or_timeout(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, mode: str,
 ) -> None:
@@ -184,7 +186,7 @@ def test_local_stdio_scan_ends_child_on_success_or_timeout(
     from mcpscanner.core.models import AnalyzerEnum
 
     entry, child_pid_file = _fixture_entry(
-        tmp_path, monkeypatch, stuck=mode == "server-stuck",
+        tmp_path, monkeypatch, stuck=mode == "server-stuck", detached=mode == "detached-normal-exit",
     )
     if mode == "scan-timeout":
         class TimedOutScanner:
@@ -316,8 +318,11 @@ def test_control_close_error_cannot_retain_child_or_reaper(
     wrapper = MCPScannerWrapper(MCPScannerConfig(analyzers="yara"))
     def reaper_count() -> int:
         return sum(t.name == "mcp-stdio-guardian-reaper" for t in threading.enumerate())
+    def watcher_count() -> int:
+        return sum(t.name == "mcp-stdio-descendants" for t in threading.enumerate())
 
     before_reapers = reaper_count()
+    before_watchers = watcher_count()
     original_pipe, original_write, original_close = os.pipe, os.write, os.close
     control_fd: int | None = None
     close_failed = False
@@ -343,9 +348,9 @@ def test_control_close_error_cannot_retain_child_or_reaper(
             raise OSError(errno.EIO, "injected control close error")
         original_close(fd)
 
-    def tracked_reap(guardian: subprocess.Popen[bytes], *args: object) -> None:
+    def tracked_reap(guardian: subprocess.Popen[bytes], *args: object, **kwargs: object) -> None:
         guardians.append(guardian)
-        original_reap(guardian, *args)
+        original_reap(guardian, *args, **kwargs)
 
     try:
         with monkeypatch.context() as fault:
@@ -360,11 +365,12 @@ def test_control_close_error_cannot_retain_child_or_reaper(
         child_pid = int(child_pid_file.read_text(encoding="ascii"))
         deadline = time.monotonic() + 1.5
         while (_running(child_pid) or any(g.poll() is None for g in guardians)
-               or reaper_count() > before_reapers) and time.monotonic() < deadline:
+               or reaper_count() > before_reapers or watcher_count() > before_watchers) and time.monotonic() < deadline:
             time.sleep(0.02)
         assert not _running(child_pid)
         assert all(g.poll() is not None for g in guardians)
         assert reaper_count() <= before_reapers
+        assert watcher_count() <= before_watchers
     finally:
         if control_fd is not None:
             try:
@@ -401,9 +407,9 @@ def test_failed_launch_close_error_reaps_guardian_synchronously(
             raise OSError(errno.EIO, "injected close error leaving descriptor open")
         original_close(fd)
 
-    def tracked_reap(guardian: subprocess.Popen[bytes], *args: object) -> None:
+    def tracked_reap(guardian: subprocess.Popen[bytes], *args: object, **kwargs: object) -> None:
         guardians.append(guardian)
-        original_reap(guardian, *args)
+        original_reap(guardian, *args, **kwargs)
 
     async def launch() -> None:
         with mcp._contained_mcp_posix_process_factory("missing fixture"):
