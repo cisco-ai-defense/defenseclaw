@@ -83,6 +83,42 @@ func TestAnalyzeApplyPatchEnvelopeProjectsExactChanges(t *testing.T) {
 	}
 }
 
+func TestShellHeredocApplyPatchProjectsNativePathFacts(t *testing.T) {
+	patch := "*** Begin Patch\n" +
+		"*** Add File: src/new.go\n+package src\n" +
+		"*** Update File: ../.zshrc\n@@\n-old\n+new\n" +
+		"*** Update File: src/old.go\n*** Move to: src/moved.go\n@@\n-old\n+new\n" +
+		"*** Delete File: /etc/sudoers\n*** End Patch\n"
+	nativeArgs, err := json.Marshal(map[string]any{"command": patch})
+	if err != nil {
+		t.Fatal(err)
+	}
+	native := Analyze(Input{Tool: "apply_patch", Args: nativeArgs, CWD: "/home/alice/proj"})
+	for _, tool := range []string{"exec_command", "Bash"} {
+		shellArgs, err := json.Marshal(map[string]any{"command": "apply_patch <<'PATCH'\n" + patch + "PATCH"})
+		if err != nil {
+			t.Fatal(err)
+		}
+		shell := Analyze(Input{Tool: tool, Args: shellArgs, CWD: "/home/alice/proj"})
+		if !shell.Authoritative() || !shell.EnforcementEligible() {
+			t.Fatalf("%s parse=%#v commands=%#v", tool, shell.Parse, shell.Commands)
+		}
+		if len(shell.Paths) != len(native.Paths) {
+			t.Fatalf("%s paths=%#v, native=%#v", tool, shell.Paths, native.Paths)
+		}
+		for _, want := range native.Paths {
+			if !patchFactsHavePath(shell, want.Value, want.Resolved, want.Access) {
+				t.Fatalf("%s missing native path %#v in %#v", tool, want, shell.Paths)
+			}
+		}
+		for _, op := range []OperationKind{OperationWrite, OperationDelete, OperationMove} {
+			if !factsHaveOperation(shell, op) {
+				t.Fatalf("%s missing %s in %#v", tool, op, shell.Commands)
+			}
+		}
+	}
+}
+
 func TestAnalyzeApplyPatchRejectsUncertainEnvelopes(t *testing.T) {
 	valid := "*** Begin Patch\n*** Add File: safe.go\n+safe\n*** End Patch"
 	many := strings.Builder{}

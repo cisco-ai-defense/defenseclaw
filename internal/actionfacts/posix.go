@@ -967,7 +967,6 @@ func projectPOSIXLiteralHeredoc(
 		return
 	}
 	delimiter := projectPOSIXWord(redirection.Word)
-	body := projectPOSIXWord(redirection.Hdoc)
 	if !delimiter.Expands && delimiter.Value != "" && delimiter.Quote != QuoteSingle &&
 		posixHeredocBodyRunsNothing(redirection.Hdoc) {
 		// An expanding body whose only expansions are parameters runs no
@@ -980,14 +979,39 @@ func projectPOSIXLiteralHeredoc(
 		command.LiteralStdinAmbiguous = true
 		return
 	}
+	body, exact := literalPOSIXHeredocBody(redirection.Hdoc)
+	limit := maxScalarBytes
+	if command.Program == "apply_patch" {
+		// Patch envelopes can contain ordinary file content beyond the
+		// scalar operand bound; the shell command itself remains bounded.
+		limit = maxCommandBytes
+	}
 	if delimiter.Expands || delimiter.Quote != QuoteSingle ||
-		delimiter.Value == "" || body.Expands || len(body.Value) > maxScalarBytes ||
-		strings.ContainsRune(body.Value, '\x00') {
+		delimiter.Value == "" || !exact || len(body) > limit ||
+		strings.ContainsRune(body, '\x00') {
 		out.markPartial(IssueUnsupportedConstruct)
 		return
 	}
-	command.LiteralStdin = body.Value
+	command.LiteralStdin = body
 	command.LiteralStdinComplete = true
+}
+
+// A quoted delimiter leaves the here-document body byte-for-byte literal.
+// The generic word projection treats '*' as a pathname pattern, which is
+// correct for command operands but not for a patch's *** directive lines.
+func literalPOSIXHeredocBody(word *syntax.Word) (string, bool) {
+	if word == nil {
+		return "", false
+	}
+	var text strings.Builder
+	for _, part := range word.Parts {
+		literal, ok := part.(*syntax.Lit)
+		if !ok {
+			return "", false
+		}
+		text.WriteString(literal.Value)
+	}
+	return text.String(), true
 }
 
 // posixHeredocBodyRunsNothing reports an unquoted heredoc body that expands
