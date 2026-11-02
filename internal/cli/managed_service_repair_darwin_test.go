@@ -18,6 +18,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/defenseclaw/defenseclaw/internal/audit"
 	"github.com/defenseclaw/defenseclaw/internal/config"
 	"github.com/defenseclaw/defenseclaw/internal/gateway/connector"
 	"github.com/defenseclaw/defenseclaw/internal/managed"
@@ -469,5 +470,35 @@ func TestDarwinEnvConfigOnlyLosesGroupAndOtherWrite(t *testing.T) {
 	repairManagedEnvConfig(link)
 	if countMarker(markers(), managed.MarkerBoundary) != 1 {
 		t.Fatalf("markers = %q, want one boundary line for the symlink", markers())
+	}
+}
+
+func TestDarwinGatewayAuditOpenRepairsBeforeEachAttempt(t *testing.T) {
+	layout := managedTestLayout(t)
+	captureMarkers(t)
+	mkdirMode(t, layout.RuntimeDir, 0o750)
+	path := filepath.Join(layout.RuntimeDir, "audit.db")
+	writeMode(t, path, 0o666)
+	chflags(t, "uchg", path)
+
+	previousAttempt := gatewayAuditOpenAttempt
+	previousInitial, previousMax := gatewayAuditOpenInitialDelay, gatewayAuditOpenMaxDelay
+	t.Cleanup(func() {
+		gatewayAuditOpenAttempt = previousAttempt
+		gatewayAuditOpenInitialDelay, gatewayAuditOpenMaxDelay = previousInitial, previousMax
+	})
+	gatewayAuditOpenInitialDelay, gatewayAuditOpenMaxDelay = time.Millisecond, time.Millisecond
+	gatewayAuditOpenAttempt = func(_ string, p string) (*audit.Store, error) {
+		if modeOf(t, p) != 0o600 {
+			return nil, errors.New("audit: database file is group- or other-writable")
+		}
+		return &audit.Store{}, nil
+	}
+	store, err := openGatewayAuditStore(context.Background(), managed.DeploymentModeManagedEnterprise, path, true)
+	if err != nil || store == nil {
+		t.Fatalf("open = %v, %v; want the store after the gateway repaired it", store, err)
+	}
+	if !gatewayAuditOpenUnbounded {
+		t.Fatal("the macOS gateway gives up on its audit store")
 	}
 }

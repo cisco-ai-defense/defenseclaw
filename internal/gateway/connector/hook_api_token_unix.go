@@ -46,10 +46,10 @@ func hookAPIValidateOwner(path string, info os.FileInfo) error {
 	if hookAPITrustedOwner(stat.Uid) {
 		return nil
 	}
-	return fmt.Errorf(
+	return tokenPermissionVerdict(fmt.Errorf(
 		"hook API token %s uid %d is not root, effective uid %d, real uid %d, or the defenseclaw service uid",
 		path, stat.Uid, os.Geteuid(), os.Getuid(),
-	)
+	))
 }
 
 func hookAPIValidateDirectory(path string) error {
@@ -169,7 +169,7 @@ func hookAPIValidateDirectoryMetadata(path string, info os.FileInfo, allowSticky
 		if err := managed.RelaxAncestorTrustVerdict(advisory, path, label, fmt.Errorf(
 			"%s has group/other writable mode %04o", path, mode,
 		)); err != nil {
-			return err
+			return tokenPermissionVerdict(err)
 		}
 	}
 	if !hookAPITrustedOwner(stat.Uid) {
@@ -177,7 +177,7 @@ func hookAPIValidateDirectoryMetadata(path string, info os.FileInfo, allowSticky
 			"%s uid %d is not root, effective uid %d, real uid %d, or the defenseclaw service uid",
 			path, stat.Uid, os.Geteuid(), os.Getuid(),
 		)); err != nil {
-			return err
+			return tokenPermissionVerdict(err)
 		}
 	}
 	return managed.RelaxAncestorTrustJudgement(advisory, path, label, hookAPIValidateDirectoryACL(path))

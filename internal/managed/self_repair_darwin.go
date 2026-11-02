@@ -52,6 +52,13 @@ func selfRepairOptions(mode os.FileMode) CanonicalOptions {
 	return opts
 }
 
+// IsAdministratorUID reports whether uid is root or a member of the admin
+// group. Validators accept an administrator owner as drift, never as an
+// untrusted principal.
+func IsAdministratorUID(uid uint32) bool {
+	return uid == 0 || darwinAdminMember(uid)
+}
+
 // RepairOwnedObject re-stamps one DefenseClaw-owned object through
 // EnsureCanonical and logs the result once: MarkerRepair for a repair,
 // MarkerBoundary when an untrusted principal owned or could write it, and

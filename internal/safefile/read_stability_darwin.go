@@ -22,3 +22,8 @@ func readStabilitySnapshot(file *os.File) (readStability, error) {
 		changed:  status.Ctim.Sec*1_000_000_000 + status.Ctim.Nsec,
 	}, nil
 }
+
+// A change-time-only difference during a read is a metadata update (a root
+// repair, Spotlight or an antivirus scanner adding an xattr), so the read is
+// repeated a bounded number of times instead of failing.
+const readStabilityRetriesMetadataChange = true

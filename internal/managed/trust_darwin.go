@@ -309,3 +309,25 @@ func darwinElementStructure(path string, info os.FileInfo, wantDir bool, label s
 	}
 	return nil
 }
+
+// AcceptTrustedFileDrift is the read-only judgement a reader applies to a
+// root-owned trust record it cannot repair, such as the gateway reading the
+// guardian's authorization record. The strict ValidateTrustedFilePath verdict
+// is tried first; drift that grants no untrusted principal write (an
+// administrator owner, wheel or admin group write, a read ACL entry, a
+// write-blocking flag) is then accepted and logged once. An untrusted owner
+// or writer and every structural failure keep the strict error.
+func AcceptTrustedFileDrift(path, label string) error {
+	err := ValidateTrustedFilePath(path, label)
+	if err == nil || trustStrictAncestors() {
+		return err
+	}
+	if structureErr := ValidateTrustedFileStructureTolerant(path, label); structureErr != nil {
+		return err
+	}
+	result, assessErr := AssessCanonical(path, ObjectAdminFile, CanonicalOptions{})
+	if assessErr != nil || result.Outcome == CanonicalBoundary || result.Outcome == CanonicalMissing {
+		return err
+	}
+	return nil
+}

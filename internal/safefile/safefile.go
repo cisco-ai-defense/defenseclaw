@@ -287,7 +287,26 @@ func ReadRegularFileBounded(path string, maxBytes int64) ([]byte, error) {
 	return readRegularFileBounded(path, maxBytes, nil)
 }
 
+// readStabilityMetadataRetries bounds how often a read is repeated when only
+// the file's change time moved during it (a chmod, chown, ACL or xattr update
+// by a repair or a scanner), on platforms where that is retried.
+const readStabilityMetadataRetries = 3
+
+var errReadMetadataChanged = errors.New("safefile: file metadata changed while reading")
+
 func readRegularFileBounded(path string, maxBytes int64, afterRead func()) ([]byte, error) {
+	for attempt := 1; ; attempt++ {
+		data, err := readRegularFileBoundedOnce(path, maxBytes, afterRead)
+		if !errors.Is(err, errReadMetadataChanged) {
+			return data, err
+		}
+		if !readStabilityRetriesMetadataChange || attempt >= readStabilityMetadataRetries {
+			return nil, fmt.Errorf("safefile: file changed while reading: %s", path)
+		}
+	}
+}
+
+func readRegularFileBoundedOnce(path string, maxBytes int64, afterRead func()) ([]byte, error) {
 	if maxBytes <= 0 {
 		return nil, errors.New("safefile: read limit must be positive")
 	}
@@ -332,6 +351,11 @@ func readRegularFileBounded(path string, maxBytes int64, afterRead func()) ([]by
 		return nil, fmt.Errorf("safefile: snapshot file after reading %s: %w", path, err)
 	}
 	if before != after || int64(len(data)) != before.size {
+		metadataOnly := int64(len(data)) == before.size && before.size == after.size &&
+			before.modified == after.modified && before.attributes == after.attributes
+		if metadataOnly {
+			return nil, errReadMetadataChanged
+		}
 		return nil, fmt.Errorf("safefile: file changed while reading: %s", path)
 	}
 	current, err := validateRegularFilePath(path)

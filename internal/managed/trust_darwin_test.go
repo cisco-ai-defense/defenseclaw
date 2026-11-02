@@ -219,3 +219,30 @@ func TestWriteServiceRuntimeFileReplacesDriftedFileDarwin(t *testing.T) {
 		t.Fatal("a directory in place of the file was accepted")
 	}
 }
+
+func TestAcceptTrustedFileDriftDarwin(t *testing.T) {
+	t.Setenv(TrustStrictAncestorsEnv, "")
+	captureResilienceEvents(t)
+	path := filepath.Join(t.TempDir(), "protected_targets.json")
+	writeTestFile(t, path, 0o640)
+	addDarwinACL(t, path, "everyone allow read")
+	previous := darwinAdminMember
+	t.Cleanup(func() { darwinAdminMember = previous })
+
+	darwinAdminMember = func(uint32) bool { return true }
+	if err := AcceptTrustedFileDrift(path, "hook guardian authorization"); err != nil {
+		t.Fatalf("administrator-owned record with a read ACL entry refused: %v", err)
+	}
+	darwinAdminMember = func(uint32) bool { return false }
+	if err := AcceptTrustedFileDrift(path, "hook guardian authorization"); err == nil {
+		t.Fatal("a record owned by an untrusted user was accepted")
+	}
+	link := filepath.Join(filepath.Dir(path), "link.json")
+	if err := os.Symlink(path, link); err != nil {
+		t.Fatal(err)
+	}
+	darwinAdminMember = func(uint32) bool { return true }
+	if err := AcceptTrustedFileDrift(link, "hook guardian authorization"); err == nil {
+		t.Fatal("a symlinked record was accepted")
+	}
+}

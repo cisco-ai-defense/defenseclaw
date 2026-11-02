@@ -61,7 +61,7 @@ import (
 )
 
 var launchConfigRestartHelper = defaultLaunchConfigRestartHelper
-var validateManagedGuardianAuthorization = managed.ValidateTrustedFilePath
+var validateManagedGuardianAuthorization = managed.AcceptTrustedFileDrift
 
 // Sidecar is the long-running process that connects to the agent gateway,
 // watches for skill installs, and exposes a local REST API.
