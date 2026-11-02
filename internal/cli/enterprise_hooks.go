@@ -1556,6 +1556,7 @@ func runEnterpriseHookReconcileOnce(ctx context.Context) (enterpriseHookReconcil
 	if err != nil {
 		return run, err
 	}
+	reportEnterpriseHookManifestSkippedRowsPlatform(enterpriseHookManifest, manifest.Skipped)
 	run.ManifestSHA256 = manifestSHA256
 	apiAddr := strings.TrimSpace(enterpriseHookAPIAddr)
 	if apiAddr == "" {
@@ -1726,11 +1727,12 @@ func runEnterpriseHookReconcileOnce(ctx context.Context) (enterpriseHookReconcil
 				// profile detached, a renamed folder). Look the target up by
 				// its manifest identity so a protected user keeps protection.
 				var ledgerErr error
+				row.SID = enterpriseHookUnresolvedTargetIdentity(cfg.DataDir, target)
 				protected, ledgerErr = previousEnterpriseHookSuccess(
 					cfg.DataDir,
 					target.User,
 					target.UserHome,
-					target.SID,
+					row.SID,
 					target.Connector,
 				)
 				if ledgerErr != nil {
@@ -1888,7 +1890,8 @@ func runEnterpriseHooksWatch(cmd *cobra.Command, _ []string) error {
 			writeGuardianStateOrLog(cmd.ErrOrStderr(), guardianstate.StateReady)
 		}
 		dirs := append([]string{filepath.Dir(filepath.Clean(enterpriseHookManifest))}, run.WatchDirs...)
-		if err := syncEnterpriseHookWatchDirs(fsw, watched, dirs); err != nil {
+		if err := syncEnterpriseHookWatchDirs(fsw, watched, dirs); err != nil &&
+			!enterpriseHookWatchFailureToleratedPlatform(err) {
 			// Match the runEnterpriseHookReconcileOnce error path: mark
 			// retry so the caller schedules a backoff attempt rather than
 			// waiting for the periodic interval to recover.
@@ -3218,6 +3221,9 @@ func enterpriseHookRowMatches(row enterpriseHookReconcileRow, userName, userHome
 	}
 	rowSID := strings.TrimSpace(row.SID)
 	sid = strings.TrimSpace(sid)
+	if rowSID == "" && enterpriseHookLegacyLedgerRowMatchesPlatform(row, userName, userHome, sid) {
+		return true
+	}
 	if rowSID != "" || sid != "" {
 		if rowSID == "" || sid == "" || !strings.EqualFold(rowSID, sid) {
 			return false
@@ -3305,6 +3311,15 @@ func resolveEnterpriseHookTargetValues(userName, userHome string, uid, gid int, 
 	}
 	if dataDir := strings.TrimSpace(dataDir); dataDir != "" && !filepath.IsAbs(dataDir) {
 		return target, fmt.Errorf("enterprise hooks: --data-dir must be absolute")
+	}
+	if target.sid == "" {
+		// Where accounts have a stable identity beyond the short name, key
+		// the ledger on it so a reused name never inherits protection.
+		identity, err := enterpriseHookPlatformTargetIdentity(strings.TrimSpace(userName), target.uid)
+		if err != nil {
+			return target, err
+		}
+		target.sid = identity
 	}
 	return target, nil
 }
