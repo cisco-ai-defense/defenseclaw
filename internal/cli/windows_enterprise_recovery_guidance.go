@@ -28,6 +28,51 @@ import (
 
 const windowsEnterpriseStandaloneSetupName = "DefenseClawSetup-Enterprise-Standalone-x64.exe"
 
+type windowsEnterpriseIgnoredDeploymentRecord struct {
+	profile string
+	path    string
+	reason  string
+}
+
+// An owner mismatch on the standalone record left under StateRoot can make a
+// later ensure refuse its probe. A forced metadata-free purge may leave that
+// record behind, so the owner has to be restored before the last resort.
+func windowsEnterpriseDeploymentRecordOwnerNextStep() string {
+	return " Next step: as an administrator, inspect the deployment record owner and restore its expected owner and group (BUILTIN\\Administrators) if this record belongs to the DefenseClaw deployment." +
+		" If /ensure still refuses, as a last resort run " + windowsEnterpriseStandaloneSetupName +
+		" /uninstall FORCE=1 PURGE=1 JSON=1 as LocalSystem, then run " +
+		windowsEnterpriseStandaloneSetupName + " /ensure CONFIG=<config.yaml> JSON=1 with an administrator-only config."
+}
+
+func windowsEnterpriseUntrustedDeploymentRecordMessage(record windowsEnterpriseIgnoredDeploymentRecord) string {
+	// The Secure Client warning must retain the original text, including the
+	// validator's path, without sending its operator to Standalone Setup.
+	if record.profile == "secure_client" {
+		return "ignored a deployment record an administrator did not write: " + record.path + ": " + record.reason
+	}
+	detail := record.path + ": " + record.reason
+	if strings.Contains(strings.ToLower(record.reason), strings.ToLower(record.path)) {
+		detail = record.reason
+	}
+	if strings.HasPrefix(strings.ToLower(record.reason), strings.ToLower(record.path)+": owner ") &&
+		strings.Contains(record.reason, " is not trusted") {
+		return "ignored a deployment record an administrator did not write: " + detail +
+			windowsEnterpriseDeploymentRecordOwnerNextStep()
+	}
+	return "ignored an untrusted deployment record: " + detail +
+		" Next step: as an administrator, inspect the named trust failure. For this standalone deployment, remove the untrusted deployment record after confirming its origin, replace any reparse point with a regular path, and correct unsafe permissions on the named path and affected ancestors." +
+		" A forced /uninstall FORCE=1 PURGE=1 can keep StateRoot and the bad record, so remove or fix those paths before running " +
+		windowsEnterpriseStandaloneSetupName + " /ensure CONFIG=<config.yaml> JSON=1 with an administrator-only config."
+}
+
+func windowsEnterpriseRecordOwnerMismatchNextStep(message string) string {
+	if strings.Contains(message, "managed path owner/group do not match the exact canonical descriptor after ACL replacement:") &&
+		strings.Contains(strings.ToLower(message), `\install\deployment.json`) {
+		return windowsEnterpriseDeploymentRecordOwnerNextStep()
+	}
+	return ""
+}
+
 // windowsEnterpriseRecoveryGatewayRun is one managed-hook lifecycle step
 // that a pending transaction's recovery ran with the running Setup's
 // verified gateway because the transaction's staged gateway failed it.
