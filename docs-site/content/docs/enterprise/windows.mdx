@@ -1004,6 +1004,10 @@ not remove a lock an earlier uninstall left.
   example). `(Get-Acl "<path>").AreAccessRulesProtected` is `True` for each one that
   still has the list.
 
+### 1.0.7 purge limit
+
+On some Windows hosts, new objects are owned by the administrator who created them instead of the Administrators group. After a first install is interrupted, an elevated Setup process that is not LocalSystem can refuse to purge those objects. The refusal preserves ownership checks. Run the recovery or purge as LocalSystem after reviewing the named objects.
+
 ## Payload trust
 
 The lifecycle refuses any payload file it cannot trust:

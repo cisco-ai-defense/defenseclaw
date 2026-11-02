@@ -380,6 +380,10 @@ observability:
 
 On per-user and standalone installs, if a completed retention pass still leaves the used pages of `audit.db` above `max_store_mb`, gateway health reports `retention_state: warning`, `retention_cap_used_bytes`, `retention_cap_bytes`, and a bounded `retention_cap_reason`. `defenseclaw status`, `defenseclaw doctor`, and `defenseclaw-gateway status` show the size, cap, reason, and one suggested step. Active correlation cursors and pending operations can keep old graph rows for a long session, and the newest hour is always kept. End unused sessions or raise `observability.local.max_store_mb` if the warning persists. This is a warning only; it does not block tool calls. A later pass that meets the cap clears the warning.
 
+### 1.0.7 retention and memory limits
+
+GAP-0408: active correlation state or recent history can keep used pages above `max_store_mb` after retention. The warning names the used size, configured cap, and reason; it does not stop tool calls. GAP-0327: on a per-user macOS install, idle gateway memory can grow gradually with the audit store even while performance remains within its release budget. Retention bounds the stored history, but does not immediately return all memory.
+
 From 1.0.6, a standalone install stores the field classes of a record (the redaction class of each field) once per set in `audit.db`, and each row names its set by digest. The row hash and signature cover that digest, so a row whose set is missing or changed fails the integrity check. Destinations still get the full record. Releases 1.0.4 and 1.0.5 read these rows after a rollback. A Secure Client install keeps the classes in each row.
 
 If a write to local history fails, for example on a full disk, the record still goes to destinations and health counts it as `dropped` on `local-sqlite`. When writes resume, the gateway writes one `sqlite.write_failed` record with the number of missing records. The count survives a crash in `local-write-losses.journal` in the data directory (64 KiB, reserved in advance, counts and failure classes only). If the journal cannot be written, `status` and `doctor` report the in-memory count.

@@ -2717,3 +2717,24 @@ describe('account-keys refusal on a per-user install (rel-1-0-6:GAP-0417)', () =
       'enterprise_account_keys_unix.go no longer refuses a per-user install with not_installed');
   });
 });
+
+describe('1.0.7 ruled limits are visible on their affected pages (GAP-0539)', () => {
+  it('lists the remaining reader, platform, and audit limits while omitting the repaired hook cleanup', () => {
+    const matrix = page('support-matrix.mdx').split('### 1.0.7 deterministic reader limits')[1]?.split('## Claude Code shell')[0] ?? '';
+    for (const id of ['0339', '0347', '0350', '0354', '0355', '0367', '0372', '0379', '0390', '0391', '0425', '0429', '0327', '0482', '0495', '0519', '0524']) {
+      assert.ok(matrix.includes(`GAP-${id}`), `GAP-${id} missing from the 1.0.7 known limits`);
+    }
+    assert.ok(!matrix.includes('GAP-0510'), 'repaired connector cleanup is still listed as a limit');
+    for (const [name, id] of [
+      ['reference/fail-modes.mdx', '0524'],
+      ['observability/index.mdx', '0327'],
+      ['connectors/hermes.mdx', '0486'],
+      ['scanning/mcp-scanner.mdx', '0499'],
+      ['get-started/windows/paths-troubleshooting.mdx', '0495'],
+      ['enterprise/troubleshooting.mdx', '0409'],
+    ] as const) {
+      assert.ok(page(name).includes(`GAP-${id}`), `${name} lacks GAP-${id}`);
+    }
+    assert.match(page('enterprise/windows.mdx'), /### 1\.0\.7 purge limit/);
+  });
+});

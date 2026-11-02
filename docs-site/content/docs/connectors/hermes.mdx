@@ -25,6 +25,10 @@ On a per-user install, an explicitly saved `guardrail.hook_fail_mode` takes prec
 
 Hermes can refuse a foreground terminal command that it classifies as a long-running server or watcher, including an ordinary `npm start`, before DefenseClaw receives a shell-hook event. This is a Hermes terminal decision; no DefenseClaw verdict or rule ID is available for that refusal.
 
+### 1.0.7 skill inventory limit
+
+GAP-0486: in a per-user Hermes install using the action profile, vendor skills synchronized by a Hermes store, Nix, or Homebrew install can be treated as user-installed skills and quarantined. Allow a trusted skill by name, or use the observe profile for Hermes. The inventory does not yet have a trusted vendor-hash source for these installs.
+
 At startup, Hermes can ask for approval separately for each shell-hook event registered in its profile. A retained registration pointing at a disabled DefenseClaw hook can therefore produce repeated native approval prompts even though DefenseClaw is not evaluating calls. Check the profile's registered hook commands and the connector's setup/teardown status before approving a stale command; the prompts themselves are issued by Hermes.
 
 ## Setup

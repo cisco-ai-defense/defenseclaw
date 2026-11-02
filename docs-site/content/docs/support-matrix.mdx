@@ -109,6 +109,30 @@ Their pages are listed under [Connectors](/docs/connectors).
 
 These are the agent, operating system, local Splunk bridge, sandbox, upgrade and policy limits that DefenseClaw cannot remove.
 
+### 1.0.7 deterministic reader limits
+
+The deterministic hook reader covers common command forms. The optional [LLM judge](/docs/policies/deterministic-detection#optional-llm-judge) is the second layer for the remaining forms below. These limits apply to the rule layer in 1.0.7; a managed host's operating-system controls still apply independently.
+
+| Ruling | Limit |
+| --- | --- |
+| GAP-0347, GAP-0354 | On Windows, statements after a subexpression prefix and junction references inside a Bash wrapper are outside the reader's proof. |
+| GAP-0350 | A long script can exceed the self-protection reader's bounded analysis. |
+| GAP-0339, GAP-0391 | Some archive entries and later file moves cannot be tied together by the deterministic archive proof. |
+| GAP-0355, GAP-0390 | A path held in a shell variable populated by `read` is not fully resolved through a later write or copy, including on managed macOS. |
+| GAP-0367, GAP-0425 | A PowerShell scriptblock or leading unquoted call, and a shell function defined in an `&&` list after a directory change, can hide later statements from the reader. |
+| GAP-0429 | Case modification or pattern substitution used as a redirect target is outside the reader's proof. |
+| GAP-0372 | Two ordinary copy commands with options and a dynamic destination can still be refused because the destination cannot be proved. Run them yourself or name a fixed destination. |
+
+Long PowerShell pipelines now receive the same bounded treatment as POSIX pipelines and can be refused when the reader cannot prove the full command. The GAP-0379 MCP refusal wording can still be less specific than the underlying reason; a refusal remains a refusal. See [Fail modes](/docs/reference/fail-modes) for what the agent receives.
+
+### Other 1.0.7 limits
+
+- **GAP-0327:** On macOS per-user installs, idle gateway memory can grow gradually with the audit store. Retention bounds the store, but does not immediately return all memory; see [Local history](/docs/observability#local-history).
+- **GAP-0482:** On per-user Windows, a redirect to a network share that responds slowly can receive a conservative reader decision. Check the destination and retry from a terminal when appropriate.
+- **GAP-0495:** On per-user Windows, replacing the DefenseClaw home with a junction can leave the copied launcher unable to start doctor, setup or status. Restore a regular home folder before rerunning the command; the gateway refuses to start in this state. See [Windows paths](/docs/get-started/windows/paths-troubleshooting).
+- **GAP-0519:** Per-user Linux performance budgets were measured on x86 hosts with four vCPUs. A two-vCPU arm64 host can exceed hook latency and command-time budgets while remaining inside memory and restart bounds.
+- **GAP-0524:** During a sustained per-user Windows hook flood, some calls can lack a completed audit row even when the agent received a decision. See [Audit completeness](/docs/reference/fail-modes#audit-completeness-under-windows-floods).
+
 ## Claude Code shell
 
 Claude Code does not run its hook for a command you type with `!` in shell mode. DefenseClaw's hook cannot inspect or block that command, so there is no hook decision and no hook audit row for it. This applies on every OS, to per-user and managed installs, in observe and action mode. On managed Linux the Tetragon runtime layer can still record it (`hook_seen=false`), see [Coverage by layer](/docs/segmentation). It is a Claude Code limit: shell mode runs no `PreToolUse` hook. Use a normal Claude Code tool action when you need DefenseClaw to check a command. See [Claude Code](/docs/connectors/claudecode#limits).
