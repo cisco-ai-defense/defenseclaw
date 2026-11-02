@@ -276,7 +276,8 @@ func agentHookPersistenceContext(ctx context.Context) (context.Context, context.
 // finalization and batch close. Secure Client retains its existing grace.
 func (a *APIServer) hookPersistenceContext(ctx context.Context) (context.Context, context.CancelFunc) {
 	if cfg := a.decisionConfig(ctx); cfg != nil && cfg.SecureClientIntegration() {
-		return agentHookPersistenceContext(ctx)
+		persistCtx, cancel := agentHookPersistenceContext(ctx)
+		return audit.WithCallWriteAfterCancel(persistCtx), cancel
 	}
 	return context.WithTimeout(context.WithoutCancel(ctx), agentHookPersistGrace)
 }

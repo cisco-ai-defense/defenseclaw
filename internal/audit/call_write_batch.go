@@ -150,6 +150,15 @@ func (outcome *CallWriteOutcome) record(err error) {
 
 type callWriteBatchKey struct{}
 
+type callWriteAfterCancelKey struct{}
+
+// WithCallWriteAfterCancel preserves Secure Client's existing batch-write
+// lifetime when its request ends during a temporary store hold. Other hook
+// batches continue to use their persistence deadline.
+func WithCallWriteAfterCancel(ctx context.Context) context.Context {
+	return context.WithValue(ctx, callWriteAfterCancelKey{}, true)
+}
+
 type callWriteOutcomeKey struct{}
 
 // WithCallWriteBatch opens a write batch for the call that ctx carries.
@@ -284,7 +293,11 @@ func runCallWriteFollowUp(fn func()) {
 // with the flushes of concurrent calls, then retries uncommitted writes on
 // their own only while the persistence context is live.
 func (s *Store) writeCallBatch(ctx context.Context, writes []*deferredCallWrite) {
-	call := &groupedWrite{ctx: ctx, run: func(ctx context.Context, tx *sql.Tx) error {
+	writeCtx := ctx
+	if afterCancel, _ := ctx.Value(callWriteAfterCancelKey{}).(bool); afterCancel {
+		writeCtx = context.WithoutCancel(ctx)
+	}
+	call := &groupedWrite{ctx: writeCtx, run: func(ctx context.Context, tx *sql.Tx) error {
 		for _, write := range writes {
 			write.ran = false
 			if _, err := tx.ExecContext(ctx, `SAVEPOINT call_write`); err != nil {
@@ -341,9 +354,9 @@ func (s *Store) writeCallBatch(ctx context.Context, writes []*deferredCallWrite)
 			write.report.done(nil)
 			continue
 		}
-		err := ctx.Err()
+		err := writeCtx.Err()
 		if err == nil {
-			err = write.alone(groupedWriteCtx{Context: ctx, values: write.ctx})
+			err = write.alone(groupedWriteCtx{Context: writeCtx, values: write.ctx})
 		}
 		write.outcome.record(err)
 		write.report.done(err)
