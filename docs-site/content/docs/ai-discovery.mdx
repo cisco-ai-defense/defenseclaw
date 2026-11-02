@@ -1000,8 +1000,13 @@ source. For command-based entries, when the gateway has its installation token,
 it also exports separate keyed HMAC fingerprints of the full command and ordered arguments. The token
 never leaves the gateway through these fields; raw command paths, arguments,
 environment variables, headers, and OAuth material are not exported. A gateway
-token rotation changes these fingerprints, while the existing component ID and
-endpoint relationship remain unchanged.
+token rotation changes these fingerprints. A local MCP component ID derives
+from the command and ordered-argument fingerprints, so rotating the token also
+changes that ID. Renaming a server without changing its command or arguments
+does not change its ID; the connector and user scope still distinguish separate
+installations on one endpoint. If two aliases in the same connector and scope
+use identical commands and ordered arguments, the alias distinguishes their
+IDs so both configured rows remain visible.
 
 The release-owned managed agent, connector, MCP, skill, and plugin inventory
 actions are blocked from operator-configured remote destinations. Mandatory
