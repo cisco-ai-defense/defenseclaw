@@ -96,8 +96,8 @@ func TestConfigManagerHotBundleAuditWaitsForWriterAndEmitsOnce(t *testing.T) {
 	go func() { reloaded <- mgr.ReloadAssets(context.Background(), "api:policy_reload") }()
 	select {
 	case err := <-reloaded:
-		if err == nil || !strings.Contains(err.Error(), "activation_not_signed (signature)") {
-			t.Fatalf("reload before the bundle generation receipt = %v; want missing-trust refusal", err)
+		if err == nil || !strings.Contains(err.Error(), "signed policy bundle") {
+			t.Fatalf("reload before the bundle generation receipt = %v; want signed-bundle refusal", err)
 		}
 	case <-time.After(10 * time.Second):
 		t.Fatal("reload while the bundle writer is paused did not refuse")
@@ -124,12 +124,7 @@ func TestConfigManagerHotBundleAuditWaitsForWriterAndEmitsOnce(t *testing.T) {
 	}
 	check := func(want int, id string, restart bool, changedPath string) {
 		t.Helper()
-		var records []observability.Record
-		for _, record := range capture.snapshot() {
-			if record.EventName() == observability.EventName(observability.TelemetryEventConfigChangeApplied) {
-				records = append(records, record)
-			}
-		}
+		records := capture.snapshot()
 		if len(records) != want {
 			t.Fatalf("audit records = %d, want %d", len(records), want)
 		}
@@ -216,14 +211,8 @@ func TestConfigManagerHotBundleAuditWaitsForWriterAndEmitsOnce(t *testing.T) {
 		t.Fatal(err)
 	}
 	records := capture.snapshot()
-	receipts := 0
-	for _, record := range records {
-		if record.EventName() == observability.EventName(observability.TelemetryEventConfigBundleReceipt) {
-			receipts++
-		}
-	}
-	if receipts != 1 {
-		t.Fatalf("receipt produced %d config.bundle.receipt records, want one", receipts)
+	if len(records) != 4 || records[3].EventName() != observability.EventName(observability.TelemetryEventConfigBundleReceipt) {
+		t.Fatalf("receipt produced %d records, want one separate config.bundle.receipt", len(records))
 	}
 }
 

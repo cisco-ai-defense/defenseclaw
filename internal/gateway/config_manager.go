@@ -1160,27 +1160,31 @@ func (m *ConfigManager) activationInput() (enterprisebundle.ActivationInput, boo
 	return in, true
 }
 
-// startupActivationRefusal checks config bytes of a managed standalone
+// startupActivationRefusal checks the boot bytes of a managed standalone
 // computer with trust anchors: they must be what a signed bundle in the
-// store renders for the bundle the generation record names. Without a
-// verifiable bundle, startup refuses before serving. nil admits the bytes.
+// store renders for the bundle the generation record names. A computer that
+// has trust anchors but holds no signed bundle yet runs its lifecycle config
+// (nothing signed exists to run instead). nil admits the boot bytes.
 func (m *ConfigManager) startupActivationRefusal(raw []byte) *enterprisebundle.ActivationRefusal {
 	in, anchored := m.activationInput()
-	state, err := configwrite.ReadGenerationState(m.path)
 	if !anchored {
-		if err == nil && state.BundleID != "" {
-			return &enterprisebundle.ActivationRefusal{Cause: enterprisebundle.ActivationSignature,
-				BundleID: state.BundleID, Version: state.BundleVersion, Detail: "trust anchors are unavailable"}
-		}
 		return nil
 	}
+	state, err := configwrite.ReadGenerationState(m.path)
 	if err == nil && state.BundleID != "" {
 		_, refusal := enterprisebundle.CheckSignedActivation(in, state.BundleID, state.BundleVersion, state.BundleDir, state.SignerKeyID, raw)
 		return refusal
 	}
+	if err == nil && state.Actor == configwrite.ActorLifecycle && state.BundleVersion == 0 && state.SignerKeyID == "" &&
+		strings.EqualFold(strings.TrimPrefix(state.ConfigSHA256, "sha256:"), configwrite.SHA256Hex(raw)) {
+		// The lifecycle installed these bytes without a bundle: a computer
+		// that took anchors before its first bundle, or the rollback of a
+		// first bundle that did not confirm. Running a stored bundle instead
+		// could run the one that failed; the start keeps today's rule.
+		return nil
+	}
 	if len(enterprisebundle.SignedVersions(in)) == 0 {
-		return &enterprisebundle.ActivationRefusal{Cause: enterprisebundle.ActivationNotStored,
-			Detail: "no verified signed policy bundle is available for managed startup"}
+		return nil
 	}
 	return &enterprisebundle.ActivationRefusal{Cause: enterprisebundle.ActivationNotStored,
 		Detail: "the installed config.yaml names no signed policy bundle while this computer holds one"}
@@ -1273,9 +1277,6 @@ func (m *ConfigManager) alertActivation(ctx context.Context, class string, raw [
 // with one always reloads.
 func (m *ConfigManager) startupSourceUnchanged(ctx context.Context) bool {
 	if m == nil || !m.startupKnown || m.readSnapshot == nil || m.getEnvConfigPath() != "" || ManagedEnterpriseActive() {
-		return false
-	}
-	if cfg := m.Current(); cfg != nil && cfg.StandaloneEnterprise() {
 		return false
 	}
 	m.mu.Lock()
@@ -1448,34 +1449,20 @@ func (m *ConfigManager) reload(ctx context.Context, reason string, assets bool, 
 		m.recordLoadError(ctx, "enterprise_profile_change", nil)
 		return fmt.Errorf("config reload cannot change the enterprise profile from %q to %q; reinstall through the lifecycle", oldCfg.EnterpriseProfile(), next.EnterpriseProfile())
 	}
-	// Once trust anchors are installed, a managed standalone gateway can
-	// serve a refused boot edit only after a verified signed bundle replaces
-	// it in memory. If no bundle verifies, startup stops before serving.
+	// private #7: once trust anchors are installed, the boot bytes of a
+	// managed standalone computer must be a signed bundle in the store. When
+	// they are not, the gateway runs that signed bundle in memory (never
+	// rewriting config.yaml) and reports the refusal; when no signed bundle
+	// passes, it keeps the boot config it already runs, so hooks keep their
+	// fail-mode table, and reports not ok with a HIGH alert.
 	var startupFallback *enterprisebundle.SignedVersion
-	var startupRefusal *enterprisebundle.ActivationRefusal
-	var bootCandidate *config.Config
-	// An asset or watcher reload may arrive before startup reconciliation.
-	// It cannot prove the unsigned boot snapshot unchanged and mark it as
-	// applied before the startup gate gets its turn.
-	if reason != "startup_reconcile" && m.appliedRaw == nil && m.startupKnown &&
-		sha256.Sum256(source.raw) == m.startupSource && (oldCfg.StandaloneEnterprise() || next.StandaloneEnterprise()) {
-		if refusal := m.startupActivationRefusal(source.raw); refusal != nil {
-			m.alertActivation(ctx, "startup", source.raw, refusal, nil)
-			m.rejected = true
-			recordGenerationBuildError(refusal)
-			err := fmt.Errorf("config reload refused: %w; startup reconciliation has not activated a signed policy", refusal)
-			m.recordLoadError(ctx, "managed_unsigned_startup", err)
-			return err
-		}
-	}
+	startupRefused := false
 	// A gateway with policy assets reconciles its start with ReloadAssets
-	// (assets set), so the check does not depend on that flag. An earlier
-	// reload may have set rejected before this startup pass runs.
-	if reason == "startup_reconcile" && m.appliedRaw == nil && m.startupKnown &&
+	// (assets set), so the check does not depend on that flag.
+	if !m.rejected && reason == "startup_reconcile" && m.appliedRaw == nil && m.startupKnown &&
 		sha256.Sum256(source.raw) == m.startupSource && (oldCfg.StandaloneEnterprise() || next.StandaloneEnterprise()) {
 		if refusal := m.startupActivationRefusal(source.raw); refusal != nil {
-			startupRefusal = refusal
-			bootCandidate = next
+			startupRefused = true
 			bootRaw := source.raw
 			if v := m.startupFallbackVersion(); v != nil {
 				if fallbackNext, fallbackSource, fallbackErr := m.buildCandidate(v.Rendered); fallbackErr == nil &&
@@ -1499,12 +1486,6 @@ func (m *ConfigManager) reload(ctx context.Context, reason string, assets bool, 
 				}
 			}()
 		}
-	}
-	if startupRefusal != nil && startupFallback == nil {
-		m.rejected = true
-		err := fmt.Errorf("managed startup refused: %w; no verified signed policy bundle is available", startupRefusal)
-		m.recordLoadError(ctx, "managed_unsigned_startup", err)
-		return err
 	}
 	// AVC env_config.json overlay. When present and well-formed the
 	// endpoint from env_config wins over whatever the installer wrote
@@ -1572,15 +1553,7 @@ func (m *ConfigManager) reload(ctx context.Context, reason string, assets bool, 
 	// exercise the exact production preservation path via Reload
 	// (rather than duplicating the logic locally, which would let a
 	// regression here slip past the test suite).
-	// A token supplied by the refused boot file cannot become the token of
-	// a signed fallback. A token synthesized at process start is runtime
-	// state and may be carried when the boot file did not supply one.
-	runtimeOld := oldCfg
-	if bootCandidate != nil && bootCandidate.Gateway.Token != "" && next.Gateway.Token == "" {
-		runtimeOld = cloneConfig(oldCfg)
-		runtimeOld.Gateway.Token = ""
-	}
-	preserveManagedGatewayRuntimeFields(runtimeOld, next)
+	preserveManagedGatewayRuntimeFields(oldCfg, next)
 	// Inject the release-owned managed destination NOW, after the
 	// env_config overlay above has resolved next.CiscoAIDefense.Endpoint
 	// and preserveManagedGatewayRuntimeFields has settled any oldCfg
@@ -1609,16 +1582,6 @@ func (m *ConfigManager) reload(ctx context.Context, reason string, assets bool, 
 		}
 	}
 	diff := diffConfigs(oldCfg, next)
-	// A process-level value from the boot snapshot was already captured by
-	// Sidecar construction. Holding it would publish the signed source while
-	// continuing to enforce the unsigned value. Stop before the serving gate
-	// instead of treating the held snapshot as a signed generation.
-	if startupFallback != nil && len(diff.RestartRequired) > 0 {
-		m.rejected = true
-		err := fmt.Errorf("managed startup refused: %w; verified signed policy requires restart for %s", startupRefusal, strings.Join(diff.RestartRequired, ", "))
-		m.recordLoadError(ctx, "managed_unsigned_startup", err)
-		return err
-	}
 	// In hot mode a restart-required edit (a listener, the hook settings
 	// setup bakes in, the resource identity, a section still read once at
 	// start) keeps its running value and is reported as pending, so the rest
@@ -1663,9 +1626,6 @@ func (m *ConfigManager) reload(ctx context.Context, reason string, assets bool, 
 	if (oldCfg.StandaloneEnterprise() || next.StandaloneEnterprise()) && !startupBoot &&
 		!pendingGeneration && !proveUnchanged &&
 		(assets || m.rejected || !bytes.Equal(m.appliedRaw, source.raw) || len(diff.Changed) > 0) {
-		if activationRefusal == nil {
-			activationRefusal = m.startupActivationRefusal(source.raw)
-		}
 		err := fmt.Errorf("config reload refused: this managed computer requires a lifecycle-recorded generation, or a signed policy bundle when trust anchors are installed; run enterprise ensure or apply a new signed bundle")
 		if activationRefusal != nil {
 			err = fmt.Errorf("config reload refused: %w; the live policy is unchanged; run enterprise ensure or apply a new signed bundle", activationRefusal)
@@ -1676,13 +1636,7 @@ func (m *ConfigManager) reload(ctx context.Context, reason string, assets bool, 
 			m.alertActivation(ctx, class, source.raw, activationRefusal, nil)
 		}
 		m.rejected = true
-		// Keep the signed activation reason in policy.last_reload_error even
-		// when the caller receives the broader managed reload instruction.
-		if activationRefusal != nil {
-			recordGenerationBuildError(activationRefusal)
-		} else {
-			recordGenerationBuildError(err)
-		}
+		recordGenerationBuildError(err)
 		m.recordLoadError(ctx, "managed_unbundled_reload", err)
 		if m.health != nil {
 			m.setConfigHealth(StateError, err.Error(), map[string]interface{}{
@@ -1865,7 +1819,7 @@ func (m *ConfigManager) reload(ctx context.Context, reason string, assets bool, 
 		m.v8Plan = source.compiledV8.Plan
 	}
 	version.SetContentHash(source.raw)
-	if next.StandaloneEnterprise() && !bytes.Equal(m.appliedRaw, source.raw) && startupRefusal == nil {
+	if next.StandaloneEnterprise() && !bytes.Equal(m.appliedRaw, source.raw) && !startupRefused {
 		// The start fallback's bytes are in memory only, and refused boot
 		// bytes are not the recorded ones: no record will bind them.
 		awaitRecordedConfigBytes(ctx, m.path, source.raw)

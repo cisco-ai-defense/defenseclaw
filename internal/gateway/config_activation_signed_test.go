@@ -252,9 +252,10 @@ func mustReadDir(t *testing.T, s *signedStore, id string, version uint64) *enter
 	return b
 }
 
-// Boot bytes that are not the signed bundle the record names run the stored
-// signed bundle in memory (config.yaml untouched). Without one, startup
-// refuses before serving the edited policy.
+// private #7, start: boot bytes that are not the signed bundle the record
+// names run the stored signed bundle in memory (config.yaml untouched) and
+// report the refusal; with no signed bundle that passes, the gateway keeps
+// the boot config (hooks keep their fail-mode table) and reports not ok.
 func TestManagedStartupRunsTheSignedBundleInMemory(t *testing.T) {
 	for _, damaged := range []bool{false, true} {
 		t.Run(fmt.Sprintf("store_damaged=%t", damaged), func(t *testing.T) {
@@ -308,13 +309,8 @@ func TestManagedStartupRunsTheSignedBundleInMemory(t *testing.T) {
 			mgr.setStartupSource(path, edited)
 			clearGenerationBuildError()
 			t.Cleanup(clearGenerationBuildError)
-			startupErr := mgr.ReloadAssets(t.Context(), "startup_reconcile")
-			if damaged {
-				if startupErr == nil || !strings.Contains(startupErr.Error(), "activation_not_signed") || appliedRaw != nil {
-					t.Fatalf("damaged store startup = %v, applied=%q; want signed refusal before apply", startupErr, appliedRaw)
-				}
-			} else if startupErr != nil {
-				t.Fatalf("startup: %v", startupErr)
+			if err := mgr.ReloadAssets(t.Context(), "startup_reconcile"); err != nil {
+				t.Fatalf("startup: %v", err)
 			}
 			if got := liveReloadError.Load(); got == nil || !strings.Contains(fmt.Sprint(got), "activation_not_signed") {
 				t.Fatalf("startup refusal not reported: %v", got)
@@ -324,6 +320,9 @@ func TestManagedStartupRunsTheSignedBundleInMemory(t *testing.T) {
 				t.Fatal("the start fallback rewrote config.yaml")
 			}
 			if damaged {
+				if (appliedRaw != nil && !bytes.Equal(appliedRaw, edited)) || mgr.Current().Guardrail.Mode != "action" {
+					t.Fatalf("no signed bundle passes: applied %q mode %q, want the boot config kept", appliedRaw, mgr.Current().Guardrail.Mode)
+				}
 				return
 			}
 			if !bytes.Equal(appliedRaw, rendered) || mgr.Current().Guardrail.Mode != "observe" {
@@ -339,260 +338,6 @@ func TestManagedStartupRunsTheSignedBundleInMemory(t *testing.T) {
 			}
 			if err := mgr.Reload(t.Context(), "watch"); err != nil || liveReloadErrorText() != "" {
 				t.Fatalf("after the repair: err=%v last reload error %q", err, liveReloadErrorText())
-			}
-		})
-	}
-}
-
-// A watcher event buffered during startup can cause a second reload after
-// the signed fallback, and an external reload can arrive before startup
-// reconciliation. Both orders must report the signed activation refusal.
-func TestManagedStartupActivationRefusalWinsReloadOrders(t *testing.T) {
-	for _, order := range [][]string{
-		{"startup_reconcile", "watch"},
-		{"watch", "startup_reconcile"},
-		{"watch_assets", "startup_reconcile"},
-	} {
-		t.Run(strings.Join(order, "_then_"), func(t *testing.T) {
-			_, _, path, _, _ := managedSignedManager(t)
-			signed, err := os.ReadFile(path)
-			if err != nil {
-				t.Fatal(err)
-			}
-			edited := bytes.Replace(signed, []byte("mode: observe"), []byte("mode: action"), 1)
-			if bytes.Equal(edited, signed) {
-				t.Fatal("fixture did not change the signed config")
-			}
-			if err := os.WriteFile(path, edited, 0o600); err != nil {
-				t.Fatal(err)
-			}
-			initial, err := config.LoadRuntimeV8File(path)
-			if err != nil {
-				t.Fatal(err)
-			}
-			initial.DeploymentMode, initial.Enterprise.Profile = "managed_enterprise", "standalone"
-			applied := 0
-			mgr := newConfigManagerWithSnapshot(path, initial, nil, nil, "", func(context.Context, *config.Config, *config.Config, ConfigDiff, configReloadSource) error {
-				applied++
-				return nil
-			})
-			loader := mgr.loadSnapshot
-			mgr.loadSnapshot = func(source string, raw []byte) (*config.Config, error) {
-				candidate, err := loader(source, raw)
-				if err == nil {
-					candidate.DeploymentMode, candidate.Enterprise.Profile = "managed_enterprise", "standalone"
-				}
-				return candidate, err
-			}
-			mgr.setStartupSource(path, edited)
-			want := mgr.startupActivationRefusal(edited)
-			if want == nil || want.Cause != enterprisebundle.ActivationConfig {
-				t.Fatalf("fixture activation refusal = %v", want)
-			}
-			clearGenerationBuildError()
-			t.Cleanup(clearGenerationBuildError)
-			for _, step := range order {
-				switch step {
-				case "startup_reconcile":
-					err = mgr.ReloadAssets(t.Context(), step)
-					if err != nil {
-						t.Fatalf("%s: %v", step, err)
-					}
-				case "watch":
-					err = mgr.Reload(t.Context(), step)
-					if err == nil {
-						t.Fatal("unsigned edit was accepted")
-					}
-				case "watch_assets":
-					err = mgr.ReloadAssets(t.Context(), step)
-					if err == nil {
-						t.Fatal("unsigned asset reload was accepted")
-					}
-				}
-				if got := liveReloadErrorText(); got != want.Error() {
-					t.Fatalf("after %s: last_reload_error = %q, want %q", step, got, want.Error())
-				}
-			}
-			if mgr.Current().Guardrail.Mode != "observe" || applied != 1 {
-				t.Fatalf("stored signed bundle not kept: mode=%q applies=%d", mgr.Current().Guardrail.Mode, applied)
-			}
-		})
-	}
-}
-
-// A boot edit to a process-level setting must not survive the signed
-// fallback. If that setting cannot be restored before serving, startup must
-// fail closed. A watcher reload before reconciliation cannot change this.
-func TestManagedStartupUnsignedRestartSettingNeverServes(t *testing.T) {
-	for _, order := range [][]string{
-		{"startup_reconcile", "watch"},
-		{"watch", "startup_reconcile"},
-		{"watch_assets", "startup_reconcile"},
-	} {
-		t.Run(strings.Join(order, "_then_"), func(t *testing.T) {
-			clearGenerationBuildError()
-			t.Cleanup(clearGenerationBuildError)
-			dir := t.TempDir()
-			path := filepath.Join(dir, config.DefaultConfigName)
-			writeConfigForManagerTest(t, path, dir, "observe")
-			source, err := os.ReadFile(path)
-			if err != nil {
-				t.Fatal(err)
-			}
-			source = bytes.Replace(source, []byte("  mode: observe"), []byte("  enabled: true\n  mode: observe"), 1)
-			store := newSignedStore(t, dir)
-			signed := store.store(t, "b-01J9ZZZZZZZZZZZZZZZZZZZZZ1", 1, source)
-			if _, err := configwrite.ReplaceDocument(t.Context(), path, signed, bundleWrite("b-01J9ZZZZZZZZZZZZZZZZZZZZZ1", 1)); err != nil {
-				t.Fatal(err)
-			}
-			edited := bytes.Replace(signed, []byte("enabled: true"), []byte("enabled: false"), 1)
-			if bytes.Equal(edited, signed) {
-				t.Fatal("fixture did not edit guardrail.enabled")
-			}
-			if err := os.WriteFile(path, edited, 0o600); err != nil {
-				t.Fatal(err)
-			}
-			initial, err := config.LoadRuntimeV8File(path)
-			if err != nil {
-				t.Fatal(err)
-			}
-			initial.DeploymentMode, initial.Enterprise.Profile = "managed_enterprise", "standalone"
-			if initial.Guardrail.Enabled {
-				t.Fatal("boot edit did not disable guardrail")
-			}
-			applied := 0
-			var effectiveEnabled bool
-			mgr := newConfigManagerWithSnapshot(path, initial, nil, nil, "", func(_ context.Context, _, next *config.Config, _ ConfigDiff, source configReloadSource) error {
-				if source.proveUnchanged {
-					return errGenerationUnchanged
-				}
-				applied++
-				effectiveEnabled = next.Guardrail.Enabled
-				return nil
-			})
-			loader := mgr.loadSnapshot
-			mgr.loadSnapshot = func(source string, raw []byte) (*config.Config, error) {
-				candidate, err := loader(source, raw)
-				if err == nil {
-					candidate.DeploymentMode, candidate.Enterprise.Profile = "managed_enterprise", "standalone"
-				}
-				return candidate, err
-			}
-			mgr.assetDirs = func() []string { return nil }
-			mgr.setStartupSource(path, edited)
-			for _, step := range order {
-				if step != "startup_reconcile" {
-					var err error
-					if step == "watch_assets" {
-						err = mgr.ReloadAssets(t.Context(), step)
-					} else {
-						err = mgr.Reload(t.Context(), step)
-					}
-					if err == nil {
-						t.Fatalf("%s accepted unsigned boot edit", step)
-					}
-					continue
-				}
-				err := mgr.ReloadAssets(t.Context(), step)
-				if err != nil {
-					if !strings.Contains(err.Error(), "activation_not_signed") || applied != 0 ||
-						!strings.Contains(liveReloadErrorText(), "activation_not_signed") {
-						t.Fatalf("startup refusal = %v, applied=%d, status=%q; want signed refusal before apply", err, applied, liveReloadErrorText())
-					}
-					return
-				}
-				if applied != 1 || !effectiveEnabled || !mgr.Current().Guardrail.Enabled || !bytes.Equal(mgr.appliedRaw, signed) {
-					t.Fatalf("startup applied unsigned setting: applied=%d callback_enabled=%t current_enabled=%t raw_signed=%t",
-						applied, effectiveEnabled, mgr.Current().Guardrail.Enabled, bytes.Equal(mgr.appliedRaw, signed))
-				}
-			}
-		})
-	}
-}
-
-func TestManagedStartupWithoutVerifiableBundleRefusesUnsignedBootEdit(t *testing.T) {
-	clearGenerationBuildError()
-	t.Cleanup(clearGenerationBuildError)
-	dir := t.TempDir()
-	path := filepath.Join(dir, config.DefaultConfigName)
-	writeConfigForManagerTest(t, path, dir, "observe")
-	source, err := os.ReadFile(path)
-	if err != nil {
-		t.Fatal(err)
-	}
-	source = bytes.Replace(source, []byte("  mode: observe"), []byte("  enabled: true\n  mode: observe"), 1)
-	store := newSignedStore(t, dir)
-	signed := store.store(t, "b-01J9ZZZZZZZZZZZZZZZZZZZZZ1", 1, source)
-	if _, err := configwrite.ReplaceDocument(t.Context(), path, signed, bundleWrite("b-01J9ZZZZZZZZZZZZZZZZZZZZZ1", 1)); err != nil {
-		t.Fatal(err)
-	}
-	edited := bytes.Replace(signed, []byte("enabled: true"), []byte("enabled: false"), 1)
-	if err := os.WriteFile(path, edited, 0o600); err != nil {
-		t.Fatal(err)
-	}
-	public, _, err := ed25519.GenerateKey(rand.Reader)
-	if err != nil {
-		t.Fatal(err)
-	}
-	store.writeAnchors(t, "k9", public)
-	initial, err := config.LoadRuntimeV8File(path)
-	if err != nil {
-		t.Fatal(err)
-	}
-	initial.DeploymentMode, initial.Enterprise.Profile = "managed_enterprise", "standalone"
-	applied := 0
-	mgr := newConfigManagerWithSnapshot(path, initial, nil, nil, "", func(context.Context, *config.Config, *config.Config, ConfigDiff, configReloadSource) error {
-		applied++
-		return nil
-	})
-	loader := mgr.loadSnapshot
-	mgr.loadSnapshot = func(source string, raw []byte) (*config.Config, error) {
-		candidate, err := loader(source, raw)
-		if err == nil {
-			candidate.DeploymentMode, candidate.Enterprise.Profile = "managed_enterprise", "standalone"
-		}
-		return candidate, err
-	}
-	mgr.assetDirs = func() []string { return nil }
-	mgr.setStartupSource(path, edited)
-	ctx, cancel := context.WithCancel(t.Context())
-	defer cancel()
-	ready := make(chan error, 1)
-	done := make(chan error, 1)
-	go func() { done <- mgr.runWithStartupReconcile(ctx, ready) }()
-	err = <-ready
-	cancel()
-	<-done
-	if err == nil || !strings.Contains(err.Error(), "activation_not_signed") || applied != 0 ||
-		!strings.Contains(liveReloadErrorText(), "activation_not_signed") {
-		t.Fatalf("unsigned boot with no verifiable bundle: ready=%v applied=%d status=%q, want refusal before serving", err, applied, liveReloadErrorText())
-	}
-}
-
-func TestManagedStartupRefusesMissingBundleTrust(t *testing.T) {
-	for _, cause := range []string{"anchors_removed", "no_stored_version"} {
-		t.Run(cause, func(t *testing.T) {
-			dir := t.TempDir()
-			path := filepath.Join(dir, config.DefaultConfigName)
-			writeConfigForManagerTest(t, path, dir, "observe")
-			raw, err := os.ReadFile(path)
-			if err != nil {
-				t.Fatal(err)
-			}
-			store := newSignedStore(t, dir)
-			if cause == "anchors_removed" {
-				raw = store.store(t, "b-01J9ZZZZZZZZZZZZZZZZZZZZZ1", 1, raw)
-				if _, err := configwrite.ReplaceDocument(t.Context(), path, raw, bundleWrite("b-01J9ZZZZZZZZZZZZZZZZZZZZZ1", 1)); err != nil {
-					t.Fatal(err)
-				}
-				if err := os.Remove(filepath.Join(dir, "trust", enterprisebundle.AnchorsName)); err != nil {
-					t.Fatal(err)
-				}
-			}
-			mgr := &ConfigManager{path: path}
-			refusal := mgr.startupActivationRefusal(raw)
-			if refusal == nil || !strings.Contains(refusal.Error(), "activation_not_signed") {
-				t.Fatalf("%s: missing signed trust admitted: %v", cause, refusal)
 			}
 		})
 	}
@@ -639,10 +384,11 @@ func liveReloadErrorText() string {
 	return ""
 }
 
-// With trust anchors installed, a lifecycle record without a signed bundle
-// does not authorize startup. The gateway cannot assume a stored bundle
-// that is not named by the record is the right one to run.
-func TestManagedStartupRefusesUnbundledLifecycleBootBytes(t *testing.T) {
+// A start on lifecycle-recorded bytes with trust anchors and a signed bundle
+// in the store (anchors installed before the first bundle, or the rollback
+// of a first bundle that did not confirm) keeps the boot config: running the
+// stored bundle could run one that failed.
+func TestManagedStartupKeepsLifecycleRecordedBootBytes(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, config.DefaultConfigName)
 	writeConfigForManagerTest(t, path, dir, "observe")
@@ -654,8 +400,8 @@ func TestManagedStartupRefusesUnbundledLifecycleBootBytes(t *testing.T) {
 		t.Fatal(err)
 	}
 	mgr := &ConfigManager{path: path}
-	if refusal := mgr.startupActivationRefusal(raw); refusal == nil {
-		t.Fatal("unbundled lifecycle boot bytes were admitted with trust anchors")
+	if refusal := mgr.startupActivationRefusal(raw); refusal != nil {
+		t.Fatalf("lifecycle-recorded boot bytes refused: %v", refusal)
 	}
 	if refusal := mgr.startupActivationRefusal(append([]byte("# edited while stopped\n"), raw...)); refusal == nil {
 		t.Fatal("unrecorded boot bytes with a signed bundle in the store were admitted")

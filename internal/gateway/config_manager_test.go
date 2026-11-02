@@ -885,10 +885,8 @@ func TestStandaloneStartupReconcilesLifecycleGenerationCommittedAfterBootRead(t 
 				if err := os.WriteFile(path, append([]byte("# unrecorded edit\n"), nextRaw...), 0o600); err != nil {
 					t.Fatal(err)
 				}
-				if err := mgr.Reload(t.Context(), "fsnotify"); err == nil ||
-					(signed && !strings.Contains(err.Error(), "activation_not_signed (config)")) ||
-					(!signed && !strings.Contains(err.Error(), "lifecycle-recorded generation")) {
-					t.Fatalf("unrecorded edit after startup = %v, want signed activation or lifecycle cause", err)
+				if err := mgr.Reload(t.Context(), "fsnotify"); err == nil || !strings.Contains(err.Error(), "lifecycle-recorded generation") {
+					t.Fatalf("unrecorded edit after startup = %v, want lifecycle cause", err)
 				}
 				if applied != 1 || mgr.appliedGeneration != nextGeneration {
 					t.Fatalf("unrecorded edit applied: applies=%d generation=%d", applied, mgr.appliedGeneration)
