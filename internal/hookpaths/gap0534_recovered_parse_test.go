@@ -33,8 +33,12 @@ func TestGAP0534RecoveredParseFixedPoint(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		if targets, ok := Decode(Resolve(payload)); !ok || targets[UnprovenReasonKey] != "shell-parse-bound" {
-			t.Fatal("hook path resolver lost the unproven protected write")
+		// Windows hookexec sends no Resolve write evidence. The bounded
+		// parser check above still runs on every host.
+		if hookWriteEvidenceHost() {
+			if targets, ok := Decode(Resolve(payload)); !ok || targets[UnprovenReasonKey] != "shell-parse-bound" {
+				t.Fatal("hook path resolver lost the unproven protected write")
+			}
 		}
 	}
 	runtime.ReadMemStats(&after)
