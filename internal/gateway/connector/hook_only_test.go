@@ -1376,12 +1376,16 @@ func TestHookOnlyConnector_SetupTeardown_BackupRestore(t *testing.T) {
 				}
 				ownedCommands := []string{conn.hookCommand(opts)}
 				if conn.Name() == "antigravity" {
-					ownedCommands = antigravityOwnedHookCommands(conn.hookCommand(opts))
-					// The first entry is the generic pre-event command retained
-					// only for legacy ownership cleanup. Current Antigravity
-					// registration always carries one of its five trusted
-					// --event bindings.
-					ownedCommands = ownedCommands[1:]
+					// Current Antigravity registration carries one of its five
+					// trusted --event bindings. The owned list also keeps the
+					// generic pre-event command and the 1.0.x renders, for
+					// teardown only.
+					ownedCommands = make([]string, 0, len(antigravityLifecycleEvents))
+					for _, event := range antigravityLifecycleEvents {
+						ownedCommands = append(ownedCommands, antigravityHookInvocationCommandForEvent(
+							runtime.GOOS, event, conn.hookCommand(opts),
+						))
+					}
 				} else if conn.Name() == "copilot" {
 					ownedCommands = make([]string, 0, len(copilotCurrentHookEvents))
 					for _, event := range copilotCurrentHookEvents {
