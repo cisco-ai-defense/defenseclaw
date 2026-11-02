@@ -28,6 +28,7 @@ import unittest
 from unittest.mock import patch
 
 from defenseclaw.enforce import claude_plugin_enablement as enablement
+
 from tests.test_cmd_plugin import PluginCommandTestBase
 
 
@@ -114,7 +115,16 @@ class ClaudePluginQuarantineShowsDisabled(PluginCommandTestBase):
         # sudo with HOME kept: the settings belong to the user, the command
         # runs as root. Replacing them would leave a root-owned file.
         before = os.stat(self.settings)
-        with patch("os.geteuid", return_value=before.st_uid + 1):
+        check_settings_file = enablement._check_settings_file
+
+        def check_as_another_account(path):
+            # Exercise the POSIX guard without changing the command's platform.
+            with patch.object(os, "name", "posix"), patch.object(
+                os, "geteuid", return_value=before.st_uid + 1, create=True
+            ):
+                return check_settings_file(path)
+
+        with patch.object(enablement, "_check_settings_file", side_effect=check_as_another_account):
             result = self.invoke(["quarantine", "usm-kit", "--connector", "claudecode"])
         self.assertEqual(result.exit_code, 0, result.output)
         self.assertIn("belongs to another user; not changed", result.output)
