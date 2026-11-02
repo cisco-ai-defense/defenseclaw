@@ -422,6 +422,10 @@ func Install(ctx context.Context, opts InstallOptions) (InstallResult, error) {
 						failures = append(failures, fmt.Errorf("enterprise hooks: restore previous hook contract lock: %w", lockErr))
 					}
 				}
+				if keepProtectedHooksOnRepairFailure(previousLockEntry) {
+					reportProtectedHookRepairFailure(dataDir, conn.Name(), cause)
+					return errors.Join(failures...)
+				}
 				if teardownErr := conn.Teardown(ctx, setupOpts); teardownErr != nil {
 					failures = append(failures, fmt.Errorf("enterprise hooks: connector %s rollback failed: %w", conn.Name(), teardownErr))
 				}
@@ -476,6 +480,7 @@ func Install(ctx context.Context, opts InstallOptions) (InstallResult, error) {
 					return rollback(fmt.Errorf("enterprise hooks: publish connector-scoped hook token: %w", err))
 				}
 			}
+			clearProtectedHookRepairFailure(dataDir, conn.Name())
 			result = InstallResult{
 				Connector:       conn.Name(),
 				UserHome:        home,
