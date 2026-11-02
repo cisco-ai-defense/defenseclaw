@@ -52,7 +52,7 @@ func TestShellHookOutageDenyReasonsNameTheGatewayAndNextStep(t *testing.T) {
 				t.Fatalf("missing %s connector", connector)
 			}
 			call := hookArgvConnectorCase(t, connector)
-			opts := SetupOpts{DataDir: dataDir, APIAddr: closedLoopbackAddrForTest(t), HookAPIToken: "outage-test-token", HookFailMode: "closed", GuardrailMode: "action"}
+			opts := SetupOpts{DataDir: dataDir, APIAddr: freeLoopbackAddrForOutageTest(t), HookAPIToken: "outage-test-token", HookFailMode: "closed", GuardrailMode: "action"}
 			if err := WriteHookScriptsForConnectorObjectWithOpts(filepath.Join(dataDir, "hooks"), opts, conn); err != nil {
 				t.Fatal(err)
 			}
