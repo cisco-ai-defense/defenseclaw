@@ -53,6 +53,7 @@ import urllib.error
 import urllib.parse
 import urllib.request
 import uuid
+from concurrent.futures import Future, ThreadPoolExecutor
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -1248,7 +1249,57 @@ def _sandbox_checks_by_root_cause(checks: list) -> list[dict]:
     return rows
 
 
-def _check_sandbox(cfg, r: _DoctorResult) -> None:
+def _sandbox_state_signature(cfg) -> str | None:
+    """A cheap fingerprint of the daemon state used by the sandbox checks.
+
+    When it cannot be read, a prefetched passing report needs a fresh run at
+    the Sandbox section. The gateway client verifies the local listener before
+    sending the token.
+    """
+    gateway = getattr(cfg, "gateway", None)
+    if gateway is None or not callable(getattr(gateway, "resolved_token", None)):
+        return None
+    try:
+        from defenseclaw.gateway import OrchestratorClient
+
+        token = _daemon_effective_gateway_token(cfg)[0]
+        port = _gateway_api_port(cfg)
+        if not token or not port:
+            return None
+        client = OrchestratorClient(host=_gateway_api_host(cfg), port=port, timeout=0.25, token=token)
+        try:
+            status = client.sandbox_status()
+            sandboxes = client.list_sandboxes()
+        finally:
+            client._session.close()
+        snapshot = json.dumps((status, sandboxes), sort_keys=True, separators=(",", ":"))
+        return hashlib.sha256(snapshot.encode("utf-8")).hexdigest()
+    except Exception:  # noqa: BLE001 - an unverifiable snapshot triggers a fresh check.
+        return None
+
+
+def _prefetch_sandbox_report(
+    cfg,
+) -> tuple[ThreadPoolExecutor | None, tuple[str, Future[tuple[dict | None, str]], str | None] | None]:
+    """Start the read-only Go probe without letting a worker emit doctor rows."""
+    if getattr(getattr(cfg, "openshell", None), "enabled", False) is not True:
+        return None, None
+    from defenseclaw.gateway import resolve_gateway_binary
+    from defenseclaw.platform_support import host_os
+
+    if host_os() == "windows" or not (binary := resolve_gateway_binary()):
+        return None, None
+    signature = _sandbox_state_signature(cfg)
+    pool = ThreadPoolExecutor(max_workers=1, thread_name_prefix="doctor-sandbox")
+    return pool, (binary, pool.submit(sandbox_doctor_report, binary), signature)
+
+
+def _check_sandbox(
+    cfg,
+    r: _DoctorResult,
+    *,
+    prefetched: tuple[str, Future[tuple[dict | None, str]], str | None] | None = None,
+) -> None:
     """The Sandbox section: the Go ``sandbox doctor`` checks, one row each.
 
     Skipped (one row) while ``openshell.enabled`` is off, so hosts that never
@@ -1295,7 +1346,23 @@ def _check_sandbox(cfg, r: _DoctorResult) -> None:
             remediation="run 'defenseclaw upgrade' to install the gateway binary",
         )
         return
-    report, problem = sandbox_doctor_report(binary)
+    if prefetched is not None:
+        report, problem = prefetched[1].result()
+        current_signature = _sandbox_state_signature(cfg)
+        has_failure = isinstance(report, dict) and any(
+            check.get("status") == "fail"
+            for check in _sandbox_checks_by_root_cause(
+                [dict(c) for c in report.get("checks", []) if isinstance(c, dict)]
+            )
+        )
+        if (
+            binary != prefetched[0]
+            or current_signature != prefetched[2]
+            or (current_signature is None and not has_failure)
+        ):
+            report, problem = sandbox_doctor_report(binary)
+    else:
+        report, problem = sandbox_doctor_report(binary)
     if report is None:
         _emit(
             "warn",
@@ -14492,6 +14559,13 @@ def doctor(
             )
         )
 
+    # Sandbox doctor is an independent, read-only subprocess. Start it while
+    # the earlier sections run, then render its rows at the usual position.
+    # Repairs can change the gateway, so only ordinary checks prefetch it.
+    sandbox_pool, sandbox_probe = (
+        _prefetch_sandbox_report(cfg) if not do_fix else (None, None)
+    )
+
     # Repair first, then diagnose the resulting state.  The former ordering
     # ran fixers after every check, leaving already-repaired failures in the
     # result and forcing a misleading exit 1 until the operator ran Doctor a
@@ -14717,7 +14791,11 @@ def doctor(
     if not json_out:
         _doctor_subsection("Sandbox")
     r.set_section("sandbox")
-    _check_sandbox(cfg, r)
+    try:
+        _check_sandbox(cfg, r, prefetched=sandbox_probe)
+    finally:
+        if sandbox_pool is not None:
+            sandbox_pool.shutdown(wait=True)
     _check_sandbox_kernel_feed(cfg, r)
 
     # Surface any DEFENSECLAW_* env-var bypass that's currently active.
