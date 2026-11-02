@@ -3586,6 +3586,9 @@ var actionWindowsPrintParameters = map[string]bool{
 // delay-bound -Path {$_} take the printed text as a path).
 func actionWindowsPrintOnlyDisplays(scan actionWindowsScanResult, start, end int) bool {
 	words := scan.words
+	if actionWindowsPipelineShellReader(words, end) {
+		return false
+	}
 	for j := start + 1; j < end; j++ {
 		word := words[j]
 		if operator := actionWindowsRedirectOperator(word); operator != "" {
@@ -3638,6 +3641,41 @@ func actionWindowsPrintOnlyDisplays(scan actionWindowsScanResult, start, end int
 		}
 	}
 	return true
+}
+
+// actionWindowsPipelineShellReader identifies a later stage that interprets
+// the printed text, including a shell launched through env. Its input must
+// remain part of the command reading.
+func actionWindowsPipelineShellReader(words []string, end int) bool {
+	for i := end; i < len(words) && words[i] == "|"; {
+		i++
+		if i >= len(words) {
+			return false
+		}
+		program := strings.TrimSuffix(strings.ToLower(programBase(words[i])), ".exe")
+		if program == "env" {
+			i++
+			for i < len(words) && words[i] != "|" && words[i] != ";" && words[i] != "&" && words[i] != "&&" && words[i] != "||" &&
+				(strings.Contains(words[i], "=") || strings.HasPrefix(words[i], "-")) {
+				// These env options consume the following word.
+				if words[i] == "-u" || words[i] == "--unset" || words[i] == "-C" || words[i] == "--chdir" {
+					i++
+				}
+				i++
+			}
+			if i >= len(words) {
+				return false
+			}
+			program = strings.TrimSuffix(strings.ToLower(programBase(words[i])), ".exe")
+		}
+		switch program {
+		case "sh", "bash", "zsh", "fish", "pwsh", "powershell", "cmd", "iex", "invoke-expression":
+			return true
+		}
+		for i++; i < len(words) && words[i] != "|" && words[i] != ";" && words[i] != "&" && words[i] != "&&" && words[i] != "||"; i++ {
+		}
+	}
+	return false
 }
 
 // actionWindowsNestedArgument reports a statement words[start:end] with an
