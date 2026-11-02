@@ -853,7 +853,10 @@ func EnumerateUnix(ctx context.Context, cfg *config.Config, registry *connector.
 						Reason: fmt.Sprintf("installed at %s, a prefix DefenseClaw does not search for agents; add %s to enterprise.enrollment.agent_prefixes. Until then %s",
 							binary, prefix, consequence),
 					})
-				} else {
+				} else if !discoveryFailed {
+					// A failed or budget-spent worker inspected nothing: the
+					// account is reported as install_scan_incomplete, not as
+					// having no agent installed.
 					notInstalled = append(notInstalled, conn)
 				}
 				logfSafely(opts.Logger, name, fmt.Sprintf("new (%s, %s) row skipped: %s", name, conn, reason))

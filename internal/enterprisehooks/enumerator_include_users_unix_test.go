@@ -14,10 +14,12 @@ package enterprisehooks
 
 import (
 	"context"
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/defenseclaw/defenseclaw/internal/gateway/connector"
 	"github.com/defenseclaw/defenseclaw/internal/unixidentity"
@@ -98,6 +100,69 @@ func TestEnumerateUnixIncludeUsersNamesAnIncludedAccountWithoutAgent(t *testing.
 			}
 			if strings.Join(noted, "|") != strings.Join(want, "|") {
 				t.Fatalf("include_users notes = %q, want %q", noted, want)
+			}
+		})
+	}
+}
+
+// A worker that failed, or a cycle whose discovery time ran out, inspected
+// nothing: an included account must not be told it has no agent installed
+// while it is reported as install_scan_incomplete.
+func TestEnumerateUnixIncludeUsersNoteNeedsAnInspectedAccount(t *testing.T) {
+	for _, tc := range []struct {
+		name     string
+		budget   time.Duration
+		discover UnixDiscoverSurfacesFunc
+	}{
+		{name: "worker error", discover: func(context.Context, unixidentity.Account, []string) (UnixDiscovery, error) {
+			return UnixDiscovery{}, errors.New("worker exited with status 1")
+		}},
+		// The budget is spent before the first account is inspected, so the
+		// wrapper answers errUnixDiscoveryBudgetSpent without calling discover.
+		{name: "budget spent", budget: time.Nanosecond, discover: func(context.Context, unixidentity.Account, []string) (UnixDiscovery, error) {
+			return UnixDiscovery{Reasons: map[string]string{"codex": "no codex installation found for this user"}}, nil
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			root := trustedTestDir(t)
+			homes := filepath.Join(root, "Users")
+			if err := os.MkdirAll(homes, 0o755); err != nil {
+				t.Fatal(err)
+			}
+			uid, gid := os.Getuid(), os.Getgid()
+			accounts := map[string]unixidentity.Account{
+				"bare": {Name: "bare", UID: uid, GID: gid, Home: makeHome(t, homes, "bare"), Shell: "/bin/zsh"},
+			}
+			opts := UnixEnumerateOptions{
+				Resolver:         &fakeResolver{accounts: accounts, listed: []string{"bare"}},
+				HomeRoots:        []string{homes},
+				UIDMin:           uid,
+				UIDMax:           uid + 1,
+				DiscoveryBudget:  tc.budget,
+				DiscoverSurfaces: tc.discover,
+			}
+			cfg := enumeratorConfig("codex")
+			cfg.Enterprise.Enrollment.IncludeUsers = []string{"bare"}
+			manifest, report, err := EnumerateUnix(context.Background(), cfg, connector.NewDefaultRegistry(), opts)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if len(manifest.Targets) != 0 {
+				t.Fatalf("rows = %v, want none", manifest.Targets)
+			}
+			for _, skipped := range report.Skipped {
+				if strings.Contains(skipped, "include_users") {
+					t.Fatalf("an account that was not inspected got the include_users note: %q", skipped)
+				}
+			}
+			incomplete := false
+			for _, agent := range report.Unprotected {
+				if agent.User == "bare" && agent.Code == UnprotectedCodeInstallScanIncomplete {
+					incomplete = true
+				}
+			}
+			if !incomplete {
+				t.Fatalf("the account must stay reported as install_scan_incomplete: %+v", report.Unprotected)
 			}
 		})
 	}
