@@ -70,7 +70,7 @@ func TestClaudeReconcilePublishesLockedDropIn(t *testing.T) {
 		t.Fatalf("enforce must lock managed hooks: %v", doc)
 	}
 	pre := doc["hooks"].(map[string]any)["PreToolUse"].([]any)[0].(map[string]any)["hooks"].([]any)[0].(map[string]any)
-	if pre["command"] != "'"+testHookBinary+"' hook --connector claudecode --enterprise-managed" {
+	if pre["command"] != testHookBinary || !reflect.DeepEqual(pre["args"], []any{"hook", "--connector", "claudecode", "--enterprise-managed"}) {
 		t.Fatalf("PreToolUse handler = %v", pre)
 	}
 	if readFile(t, filepath.Join(claudeDir(t, opts), "managed-settings.json")) != adminSettings ||
@@ -286,12 +286,9 @@ func TestCompareVersions(t *testing.T) {
 	}
 }
 
-// rel-1-0-6:GAP-0322: outside Windows the drop-in's handlers are shell-form
-// commands Claude Code starts through /bin/sh with the merged settings env,
-// so the drop-in pins the variables that stop or replace them to "" (managed
-// env outranks user, project and process values). Windows starts the
-// launcher in the exec form and keeps its drop-in unchanged.
-func TestClaudeDropInPinsHookShellEnvOutsideWindows(t *testing.T) {
+// rel-1-0-6:GAP-0322: every managed handler starts the native hook directly.
+// No process-wide env pin is needed for its launch.
+func TestClaudeDropInUsesExecFormOutsideWindows(t *testing.T) {
 	for _, goos := range []string{"linux", "darwin", "windows"} {
 		t.Run(goos, func(t *testing.T) {
 			opts := testOptions(t)
@@ -307,29 +304,20 @@ func TestClaudeDropInPinsHookShellEnvOutsideWindows(t *testing.T) {
 			if err := json.Unmarshal(data, &doc); err != nil {
 				t.Fatal(err)
 			}
-			env, hasEnv := doc["env"].(map[string]any)
-			if goos == "windows" {
-				if hasEnv {
-					t.Fatalf("windows drop-in carries env %v", env)
-				}
-				return
+			if _, hasEnv := doc["env"]; hasEnv {
+				t.Fatalf("%s drop-in sets process env: %v", goos, doc["env"])
 			}
-			// Only what can stop the native hook command and is safe for
-			// every process: managed env is process-wide (review finding 4),
-			// and a pinned SHELLOPTS broke every script the Bash tool ran
-			// (rel-1-0-6:GAP-0465).
-			want := map[string]any{"CLAUDE_CODE_SHELL_PREFIX": ""}
-			if !reflect.DeepEqual(env, want) {
-				t.Fatalf("%s drop-in env = %v, want %v", goos, env, want)
+			pre := doc["hooks"].(map[string]any)["PreToolUse"].([]any)[0].(map[string]any)["hooks"].([]any)[0].(map[string]any)
+			if pre["command"] != opts.HookBinary || !reflect.DeepEqual(pre["args"], []any{"hook", "--connector", "claudecode", "--enterprise-managed"}) {
+				t.Fatalf("%s PreToolUse handler = %v", goos, pre)
 			}
 		})
 	}
 }
 
-// rel-1-0-6:GAP-0322 review finding 4: a pinned name set by another managed
-// source is named, before the drop-in (overridden) and after it (applies),
-// and a higher-precedence source with the hooks but not the pins is named.
-func TestClaudeInspectNamesHookShellEnvOverrides(t *testing.T) {
+// A managed shell setting can affect Bash tool scripts, while an administrator
+// prefix remains available because the native hook uses exec form.
+func TestClaudeInspectNamesShelloptsWithoutOverridingPrefix(t *testing.T) {
 	withHigherSources(t)
 	opts := testOptions(t)
 	dir := claudeDir(t, opts)
@@ -341,34 +329,30 @@ func TestClaudeInspectNamesHookShellEnvOverrides(t *testing.T) {
 	}
 	details := strings.Join(state.Details, "\n")
 	for _, want := range []string{
-		"managed-settings.json sets env CLAUDE_CODE_SHELL_PREFIX; DefenseClaw's drop-in sets it to \"\" later in merge order",
-		"99-late.json sets env SHELLOPTS, which Claude Code passes to the managed hook commands and every Bash tool command",
+		"99-late.json sets env SHELLOPTS, which Claude Code passes to Bash tool commands",
 	} {
 		if !strings.Contains(details, want) {
 			t.Fatalf("details lack %q:\n%s", want, details)
 		}
+	}
+	if strings.Contains(details, "managed-settings.json sets env CLAUDE_CODE_SHELL_PREFIX") {
+		t.Fatalf("prefix was treated as a hook conflict:\n%s", details)
 	}
 
 	rendered, err := renderClaudeDropIn(opts, opts.PolicyFor("claudecode"))
 	if err != nil {
 		t.Fatal(err)
 	}
-	var doc map[string]any
-	if err := json.Unmarshal(rendered, &doc); err != nil {
-		t.Fatal(err)
-	}
-	delete(doc, "env")
-	withoutPins, _ := json.Marshal(doc)
-	withHigherSources(t, higherSource(t, "macOS managed preferences", string(withoutPins)), higherSource(t, "HKLM Settings", string(rendered)))
+	withHigherSources(t, higherSource(t, "macOS managed preferences", string(rendered)), higherSource(t, "HKLM Settings", string(rendered)))
 	state, err = claudeTarget{}.Verify(opts)
 	if err != nil {
 		t.Fatal(err)
 	}
 	details = strings.Join(state.Details, "\n")
-	if !strings.Contains(details, "macOS managed preferences carries DefenseClaw's hooks but does not set CLAUDE_CODE_SHELL_PREFIX to") {
-		t.Fatalf("details lack the unpinned higher source:\n%s", details)
+	if strings.Contains(details, "does not set CLAUDE_CODE_SHELL_PREFIX") {
+		t.Fatalf("native hook incorrectly needs a prefix pin:\n%s", details)
 	}
 	if strings.Contains(details, "HKLM Settings carries DefenseClaw's hooks but does not set") {
-		t.Fatalf("a pinned higher source was reported:\n%s", details)
+		t.Fatalf("a higher source was reported as missing a shell pin:\n%s", details)
 	}
 }

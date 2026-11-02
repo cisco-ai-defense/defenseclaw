@@ -15,7 +15,7 @@ import (
 // Agent settings that stop or subvert a shell-form hook command
 // (rel-1-0-6:GAP-0322).
 //
-// Claude Code starts a hook command without "args" through /bin/sh -c with
+// Per-user Claude Code starts a hook command without "args" through /bin/sh -c with
 // process.env after it applied the env block of each settings source, lowest
 // first: ~/.claude.json, user, project, local, --settings, managed. On RHEL
 // and macOS /bin/sh is bash. What a source's env can do there:
@@ -58,14 +58,9 @@ import (
 // .claude/settings.json), parent-directory settings or the local settings
 // Claude Code reads at the git root of a worktree. doctor and status also
 // check the folder they run in. That part stays a documented limit
-// (docs-site reference/fail-modes.mdx). The managed Claude Code drop-in pins
-// CLAUDE_CODE_SHELL_PREFIX (ManagedHookShellEnvPins), which closes that one on
-// a managed host (enterprisepolicy). It does not pin SHELLOPTS
-// (rel-1-0-6:GAP-0465), and the gateway does not check settings on a managed
-// host (claudeCodeHookShellEnvApplies): there a user or project
-// SHELLOPTS=noexec, or one the agent inherits, stops the managed hook
-// commands in every tier, with no refusal and no alert, as in 1.0.5 and
-// 1.0.6. doctor and status only warn about it.
+// (docs-site reference/fail-modes.mdx). The managed Claude Code drop-in uses
+// the native hook binary in exec form, so agent shell options do not govern
+// that hook. The gateway does not apply this settings check on managed hosts.
 
 // hookShellEnvNames are the env names a settings file must not set for a
 // shell-form hook command; a BASH_FUNC_ name (an exported function) counts too.
@@ -77,23 +72,6 @@ var hookShellEnvNames = []string{
 	"SHELLOPTS",
 }
 
-// managedHookShellEnvNames are the names the managed Claude Code drop-in pins
-// to "" for its Unix hook command, the absolute path of the native
-// defenseclaw-hook binary started by /bin/sh -c: a non-interactive POSIX sh
-// ignores BASH_ENV and ENV, a command word with a slash is never looked up as
-// a function, and BASHOPTS and FUNCNEST do not stop it.
-//
-// SHELLOPTS is left out although SHELLOPTS=noexec stops that command
-// (rel-1-0-6:GAP-0465). Managed env is process-wide, and a bash that finds
-// SHELLOPTS in its environment, even as "", exports it and keeps it current.
-// Claude Code's Bash tool shell sources its shell snapshot, which runs
-// `set -o onecmd` (and `set -o monitor`), so a pinned SHELLOPTS reaches every
-// script the tool starts and each runs its first command only. Nothing checks
-// SHELLOPTS on a managed host in its place: a user or project
-// SHELLOPTS=noexec stops the managed hook commands (claudeCodeHookShellEnvApplies).
-// The class fix is the exec form (command plus args, no shell) on Unix.
-var managedHookShellEnvNames = []string{"CLAUDE_CODE_SHELL_PREFIX"}
-
 const hookShellEnvFunctionPrefix = "BASH_FUNC_"
 
 // HookShellEnvPins returns hookShellEnvNames, the names a settings document
@@ -101,16 +79,6 @@ const hookShellEnvFunctionPrefix = "BASH_FUNC_"
 // sandbox run drop-in pins those its image drop-in does not).
 func HookShellEnvPins() []string {
 	return append([]string(nil), hookShellEnvNames...)
-}
-
-// ManagedHookShellEnvPins returns the names the managed Claude Code drop-in
-// pins to "" on Linux and macOS: only what can stop its native hook command
-// and is safe to set for every process. Managed env is process-wide, so
-// pinning more would strip a developer's BASH_ENV from every Bash tool
-// command for nothing, and a pinned SHELLOPTS breaks every script the Bash
-// tool runs (managedHookShellEnvNames).
-func ManagedHookShellEnvPins() []string {
-	return append([]string(nil), managedHookShellEnvNames...)
 }
 
 func isHookShellEnvName(name string) bool {
@@ -253,10 +221,7 @@ func claudeCodeHookShellEnvProblem(names []string, from []*claudeCodeSettingsSou
 
 // claudeCodeHookShellEnvApplies reports whether opts registers shell-form
 // Claude Code hooks this check covers: a per-user install outside Windows.
-// Windows runs the native launcher without /bin/sh. A managed install is not
-// checked: its drop-in pins only CLAUDE_CODE_SHELL_PREFIX, so a user or
-// project SHELLOPTS=noexec stops the managed hook commands with no refusal
-// and no alert in any tier (rel-1-0-6:GAP-0465), as in 1.0.5 and 1.0.6.
+// Windows and managed Unix run the native hook in exec form.
 func claudeCodeHookShellEnvApplies(opts SetupOpts) bool {
 	return !opts.ManagedEnterprise && runtime.GOOS != "windows"
 }

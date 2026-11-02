@@ -20,7 +20,6 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
-
 from defenseclaw import hook_integrity
 from defenseclaw.commands import cmd_doctor, cmd_status
 
@@ -216,7 +215,7 @@ def test_managed_claude_code_warns_on_shellopts_noexec_and_never_refuses(tmp_pat
         project = _settings(repo / ".claude" / "settings.json", {"SHELLOPTS": "noexec"})
         warnings = hook_integrity.agent_hook_env_warnings(cfg, "claudecode", workspace_dir=str(repo), environ={})
         assert len(warnings) == 1 and str(project) in warnings[0], (tier, warnings)
-        assert "does not refuse or alert" in warnings[0] and warnings[0].repair.startswith("remove SHELLOPTS")
+        assert "Bash tool scripts may stop early" in warnings[0] and warnings[0].repair.startswith("remove SHELLOPTS")
         assert hook_integrity.agent_hook_switch_problems(cfg, "claudecode", workspace_dir=str(repo)) == []
         project.unlink()
         inherited = hook_integrity.agent_hook_env_warnings(

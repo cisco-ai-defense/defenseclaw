@@ -62,15 +62,10 @@ func (claudeTarget) Paths(opts Options) ([]string, error) {
 func claudeHandler(opts Options, group connector.ManagedHookGroup) *object {
 	handler := newObject()
 	handler.set("type", "command")
-	if opts.goos() == "windows" {
-		// Claude's exec form starts the native launcher directly, with no
-		// shell parsing of a path that may contain spaces (the Secure Client
-		// profile certifies the same form).
-		handler.set("command", opts.HookBinary)
-		handler.set("args", []any{"hook", "--connector", "claudecode", "--enterprise-managed"})
-	} else {
-		handler.set("command", shellQuote(opts.HookBinary)+" hook --connector claudecode --enterprise-managed")
-	}
+	// Claude starts the native binary directly on every platform. The
+	// registered command does not inherit shell options from the agent.
+	handler.set("command", opts.HookBinary)
+	handler.set("args", []any{"hook", "--connector", "claudecode", "--enterprise-managed"})
 	handler.set("timeout", json.Number(fmt.Sprint(group.Timeout)))
 	if group.Async {
 		handler.set("async", true)
@@ -87,26 +82,6 @@ func renderClaudeDropIn(opts Options, policy config.ResolvedConnectorPolicy) ([]
 	doc := newObject()
 	if policy.ManagedHooksOnly == config.ManagedHooksOnlyEnforce {
 		doc.set("allowManagedHooksOnly", true)
-	}
-	if opts.goos() != "windows" {
-		// Outside Windows each handler is a shell-form command, the native
-		// hook binary's absolute path, that Claude Code starts through
-		// /bin/sh with the merged settings env. A user or project env block
-		// with SHELLOPTS=noexec made bash as /bin/sh run none of it, and
-		// CLAUDE_CODE_SHELL_PREFIX replaces it (rel-1-0-6:GAP-0322). Managed
-		// env outranks every user, project and process value, and "" turns
-		// the prefix off. Only the prefix is pinned: managed env is
-		// process-wide, and a pinned SHELLOPTS reaches every script the Bash
-		// tool runs, which then stops after its first command
-		// (rel-1-0-6:GAP-0465, connector.ManagedHookShellEnvPins). Nothing
-		// checks SHELLOPTS on a managed host instead: a user or project
-		// SHELLOPTS=noexec stops these commands, as in 1.0.5 and 1.0.6.
-		// Windows starts the launcher in the exec form, with no shell.
-		env := newObject()
-		for _, name := range connector.ManagedHookShellEnvPins() {
-			env.set(name, "")
-		}
-		doc.set("env", env)
 	}
 	hooks := newObject()
 	for _, group := range groups {
@@ -150,29 +125,33 @@ func renderClaudeHigherPrecedence(opts Options, policy config.ResolvedConnectorP
 // claudeHandlerIsOwned reports whether a decoded handler is DefenseClaw's.
 func claudeHandlerIsOwned(opts Options, raw any) bool {
 	command := stringField(raw, "command")
+	if opts.goos() != "windows" && command == shellQuote(opts.HookBinary)+" hook --connector claudecode --enterprise-managed" {
+		return true // retained for cleanup of an earlier managed drop-in
+	}
 	if opts.goos() == "windows" {
 		if !strings.EqualFold(command, opts.HookBinary) {
 			return false
 		}
-		var args []any
-		switch v := raw.(type) {
-		case *object:
-			args, _ = v.values["args"].([]any)
-		case map[string]any:
-			args, _ = v["args"].([]any)
-		}
-		want := []string{"hook", "--connector", "claudecode", "--enterprise-managed"}
-		if len(args) != len(want) {
+	} else if command != opts.HookBinary {
+		return false
+	}
+	var args []any
+	switch v := raw.(type) {
+	case *object:
+		args, _ = v.values["args"].([]any)
+	case map[string]any:
+		args, _ = v["args"].([]any)
+	}
+	want := []string{"hook", "--connector", "claudecode", "--enterprise-managed"}
+	if len(args) != len(want) {
+		return false
+	}
+	for i := range want {
+		if s, _ := args[i].(string); s != want[i] {
 			return false
 		}
-		for i := range want {
-			if s, _ := args[i].(string); s != want[i] {
-				return false
-			}
-		}
-		return true
 	}
-	return command == shellQuote(opts.HookBinary)+" hook --connector claudecode --enterprise-managed"
+	return true
 }
 
 // claudeEnvValue returns doc's env value for name.
@@ -191,46 +170,13 @@ func claudeEnvValue(doc *object, name string) (any, bool) {
 	return nil, false
 }
 
-// claudeEnvUnpinned lists the ManagedHookShellEnvPins doc does not set to "".
-func claudeEnvUnpinned(doc *object) []string {
-	var out []string
-	for _, name := range connector.ManagedHookShellEnvPins() {
-		if value, ok := claudeEnvValue(doc, name); !ok || value != "" {
-			out = append(out, name)
-		}
-	}
-	return out
-}
-
-// inspectClaudeHookShellEnvPins reports another file-based managed source
-// that sets a pinned name. Before DefenseClaw's drop-in in merge order its
-// value is overridden, which also turns an administrator's
-// CLAUDE_CODE_SHELL_PREFIX wrapper off for Bash tool commands; after it, its
-// value applies to the managed hook commands.
-func inspectClaudeHookShellEnvPins(opts Options, sources []claudeSource, state *State) {
-	dropIn, _ := claudeDropInPath(opts)
-	seenDropIn := false
+// inspectClaudeShellopts reports a managed source whose shell options can
+// affect Bash tool scripts. The native DefenseClaw hook uses exec form.
+func inspectClaudeShellopts(sources []claudeSource, state *State) {
 	for _, source := range sources {
-		if source.name == dropIn {
-			seenDropIn = true
-			continue
-		}
-		for _, name := range connector.ManagedHookShellEnvPins() {
-			value, ok := claudeEnvValue(source.doc, name)
-			if !ok || value == "" {
-				continue
-			}
-			if seenDropIn {
-				state.detail("%s sets env %s after DefenseClaw's drop-in, so its value applies to the managed hook commands too (rel-1-0-6:GAP-0322)", source.name, name)
-			} else {
-				state.detail("%s sets env %s; DefenseClaw's drop-in sets it to \"\" later in merge order, so that value no longer applies, also to Bash tool commands (rel-1-0-6:GAP-0322)", source.name, name)
-			}
-		}
-		// SHELLOPTS is not pinned (rel-1-0-6:GAP-0465), so a managed source
-		// that sets it applies wherever it sits in merge order.
 		if value, ok := claudeEnvValue(source.doc, "SHELLOPTS"); ok {
 			if text, isText := value.(string); !isText || strings.TrimSpace(text) != "" {
-				state.detail("%s sets env SHELLOPTS, which Claude Code passes to the managed hook commands and every Bash tool command; with noexec no hook runs (rel-1-0-6:GAP-0322)", source.name)
+				state.detail("%s sets env SHELLOPTS, which Claude Code passes to Bash tool commands; review shell startup options if scripts stop early (rel-1-0-6:GAP-0465)", source.name)
 			} else {
 				// An empty value is exported by bash, so the options of
 				// Claude Code's shell snapshot (onecmd) reach every script.
@@ -433,7 +379,7 @@ func inspectClaude(opts Options, policy config.ResolvedConnectorPolicy, state *S
 		state.detail("managed_hooks_only: preserve — user and project Claude Code hooks still run and can rewrite tool input (updatedInput) after DefenseClaw approves it")
 	}
 	if opts.goos() != "windows" {
-		inspectClaudeHookShellEnvPins(opts, sources, state)
+		inspectClaudeShellopts(sources, state)
 	}
 	if value, from := claudeEffectiveScalar(sources, "policyHelper"); value != nil {
 		state.conflict("%s configures policyHelper, which lets an external helper decide managed policy; DefenseClaw cannot verify the effective hooks", from)
@@ -450,11 +396,6 @@ func inspectClaude(opts Options, policy config.ResolvedConnectorPolicy, state *S
 		switch {
 		case len(missing) == 0:
 			state.detail("%s embeds DefenseClaw's hook matrix", source.name)
-			if opts.goos() != "windows" {
-				if unpinned := claudeEnvUnpinned(source.doc); len(unpinned) > 0 {
-					state.detail("%s carries DefenseClaw's hooks but does not set %s to \"\" in its env, and it is used instead of the drop-in that does: a user or project env block can stop the managed hook commands (rel-1-0-6:GAP-0322); deploy the current `defenseclaw-gateway enterprise policy export --connector claudecode` through it", source.name, strings.Join(unpinned, " and "))
-				}
-			}
 		case behavior == "merge":
 			state.detail("%s sets managedSourcesBehavior: merge, so Claude Code %s and later also apply DefenseClaw's drop-in", source.name, claudeMergeMinimumVersion)
 			if version := opts.agentVersion(claudeConnector); version != "" && compareVersions(version, claudeMergeMinimumVersion) < 0 {
