@@ -399,6 +399,19 @@ func dispatchTrustedAction(
 		facts = actionfacts.Analyze(request.Input)
 		analyzed = true
 	}
+	// A managed gateway with ProtectHome cannot resolve the caller's project
+	// directory, so the original facts have no CWD. Judge Git hook mutations
+	// once more in the directory the hook client recorded for this call. Keep
+	// only this rule's finding from that reading; other rules retain their
+	// existing managed-directory proof boundaries.
+	if twin, ok := protectedHomeGitHookTwinRequest(request); ok {
+		defer func() {
+			found := slices.DeleteFunc(dispatchTrustedAction(parent, twin), func(f RuleFinding) bool {
+				return f.RuleID != "persistence.git_hook_write"
+			})
+			findings = withTwinProvenBlocks(findings, found)
+		}()
+	}
 	if twin, ok := overLimitWriteBoundedTwinRequest(request, facts); ok {
 		defer func() {
 			findings = withOverLimitTwinFindings(findings, dispatchTrustedAction(parent, twin))
@@ -3317,6 +3330,23 @@ func protectedHomePrivateKeyTwinRequest(request trustedActionRequest) (trustedAc
 	text := strings.ToLower(trustedActionInputText(request.Input, request.LegacyText))
 	if !strings.Contains(text, "id_rsa") && !strings.Contains(text, "id_ed25519") &&
 		!strings.Contains(text, "id_ecdsa") && !strings.Contains(text, "id_dsa") {
+		return trustedActionRequest{}, false
+	}
+	twin := request
+	twin.record, twin.recordTelemetry = nil, nil
+	twin.conflictSource = nil
+	twin.Input.CWD = cwd
+	return twin, true
+}
+
+// protectedHomeGitHookTwinRequest places a managed action in the hook
+// client's project directory only when the action names a .git path. The
+// verified peer's home bounds that directory (protectedHomeClientDirectory).
+// The caller retains only persistence.git_hook_write from this reading.
+func protectedHomeGitHookTwinRequest(request trustedActionRequest) (trustedActionRequest, bool) {
+	cwd, ok := protectedHomeClientDirectory(request)
+	if !ok || request.SkipLocalFilesystemResolution ||
+		!strings.Contains(strings.ToLower(trustedActionInputText(request.Input, request.LegacyText)), ".git") {
 		return trustedActionRequest{}, false
 	}
 	twin := request
