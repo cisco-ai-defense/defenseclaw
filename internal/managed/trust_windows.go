@@ -794,7 +794,31 @@ func trustedMachineInstallBases() []string {
 			bases = append(bases, dir)
 		}
 	}
-	return bases
+	testMachineInstallBases.Lock()
+	defer testMachineInstallBases.Unlock()
+	return append(bases, testMachineInstallBases.bases...)
+}
+
+var testMachineInstallBases struct {
+	sync.Mutex
+	bases []string
+}
+
+// AddTrustedMachineInstallBaseForTest makes base count as a registered machine
+// base (ProgramData, Program Files) for PlatformInstallerOwnedRoots and the
+// OS-root ancestor scope, so a test can stand a temporary folder in for one:
+// the process environment no longer adds a base. Production code never calls
+// it. restore removes base again.
+func AddTrustedMachineInstallBaseForTest(base string) (restore func()) {
+	testMachineInstallBases.Lock()
+	defer testMachineInstallBases.Unlock()
+	previous := testMachineInstallBases.bases
+	testMachineInstallBases.bases = append(append([]string(nil), previous...), base)
+	return func() {
+		testMachineInstallBases.Lock()
+		defer testMachineInstallBases.Unlock()
+		testMachineInstallBases.bases = previous
+	}
 }
 
 func validateTrustedWindowsPathElementWithWriter(

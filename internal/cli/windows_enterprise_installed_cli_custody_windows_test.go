@@ -83,9 +83,9 @@ func TestWindowsEnterpriseInstalledCLICustodyRefusesAReplaceableFolder(t *testin
 	if err := icacls(root, "/setowner", "*S-1-5-32-544", "/T", "/C"); err != nil {
 		t.Skip("setting the Administrators owner needs an elevated shell")
 	}
-	// The fixture stands for Program Files: its Cisco folder is an
-	// installer-owned root, as on a real host.
-	t.Setenv("ProgramFiles", root)
+	// The fixture stands for the registered Program Files: its Cisco folder
+	// is an installer-owned root, as on a real host.
+	t.Cleanup(managed.AddTrustedMachineInstallBaseForTest(root))
 	if !managed.PlatformInstallerOwnedPath(filepath.Join(root, "Cisco")) {
 		t.Fatalf("%s must be installer-owned for this test", filepath.Join(root, "Cisco"))
 	}
