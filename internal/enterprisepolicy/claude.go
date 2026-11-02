@@ -29,9 +29,11 @@ import (
 // Higher-ranked admin sources (server-managed, MDM plist / HKLM) are used
 // instead of the files unless the highest source sets
 // managedSourcesBehavior: "merge" (Claude Code 2.1.242 and later).
+// Env variables merge across admin sources from Claude Code 2.1.223.
 const (
-	claudeConnector           = ConnectorClaudeCode
-	claudeMergeMinimumVersion = "2.1.242"
+	claudeConnector              = ConnectorClaudeCode
+	claudeMergeMinimumVersion    = "2.1.242"
+	claudeEnvMergeMinimumVersion = "2.1.223"
 )
 
 type claudeTarget struct{}
@@ -198,15 +200,17 @@ func claudeEnvValue(doc *object, name string) (any, bool) {
 }
 
 // inspectClaudeShellEnvironment reports managed env values that affect Bash
-// tool scripts. The native DefenseClaw hook uses exec form.
-func inspectClaudeShellEnvironment(opts Options, sources []claudeSource, state *State) {
+// tool scripts and returns the effective file-based prefix. The native
+// DefenseClaw hook uses exec form.
+func inspectClaudeShellEnvironment(opts Options, sources []claudeSource, state *State) (any, bool) {
 	dropIn, _ := claudeDropInPath(opts)
-	prefixPinned := false
+	var prefix any
+	var prefixSet bool
 	for _, source := range sources {
 		if value, ok := claudeEnvValue(source.doc, "CLAUDE_CODE_SHELL_PREFIX"); ok {
-			if prefix, isText := value.(string); isText {
-				prefixPinned = prefix == ""
-				if source.name != dropIn && prefix != "" {
+			prefix, prefixSet = value, true
+			if text, isText := value.(string); isText {
+				if source.name != dropIn && text != "" {
 					state.detail("%s sets env CLAUDE_CODE_SHELL_PREFIX; verify the effective managed value is empty for Bash tool commands (rel-1-0-6:GAP-0322)", source.name)
 				}
 			}
@@ -221,9 +225,7 @@ func inspectClaudeShellEnvironment(opts Options, sources []claudeSource, state *
 			}
 		}
 	}
-	if !prefixPinned {
-		state.conflict("managed Claude Code settings do not keep CLAUDE_CODE_SHELL_PREFIX empty for Bash tool commands (rel-1-0-6:GAP-0322)")
-	}
+	return prefix, prefixSet
 }
 
 // countClaudeHooks counts DefenseClaw and foreign handlers in a settings
@@ -406,8 +408,10 @@ func inspectClaude(opts Options, policy config.ResolvedConnectorPolicy, state *S
 	if policy.ManagedHooksOnly == config.ManagedHooksOnlyPreserve && lockValue != true {
 		state.detail("managed_hooks_only: preserve — user and project Claude Code hooks still run and can rewrite tool input (updatedInput) after DefenseClaw approves it")
 	}
+	var filePrefix any
+	var filePrefixSet bool
 	if opts.goos() != "windows" {
-		inspectClaudeShellEnvironment(opts, sources, state)
+		filePrefix, filePrefixSet = inspectClaudeShellEnvironment(opts, sources, state)
 	}
 	if value, from := claudeEffectiveScalar(sources, "policyHelper"); value != nil {
 		state.conflict("%s configures policyHelper, which lets an external helper decide managed policy; DefenseClaw cannot verify the effective hooks", from)
@@ -417,20 +421,34 @@ func inspectClaude(opts Options, policy config.ResolvedConnectorPolicy, state *S
 	if err != nil {
 		state.conflict("inspect higher-precedence Claude Code policy: %v", err)
 	}
+	if opts.goos() != "windows" && len(higher) == 0 {
+		prefix, isText := filePrefix.(string)
+		if !filePrefixSet || !isText || prefix != "" {
+			state.conflict("managed Claude Code settings do not keep CLAUDE_CODE_SHELL_PREFIX empty for Bash tool commands (rel-1-0-6:GAP-0322)")
+		}
+	}
 	for _, source := range higher {
 		hooks, _ := source.doc.get("hooks")
 		_, _, missing := countClaudeHooks(opts, hooks, events)
 		behavior, _ := source.doc.get("managedSourcesBehavior")
+		if value, _ := source.doc.get("policyHelper"); value != nil {
+			state.conflict("%s configures policyHelper, which lets an external helper decide managed policy; DefenseClaw cannot verify the effective hooks", source.name)
+		}
+		if opts.goos() != "windows" && (len(missing) == 0 || behavior == "merge") {
+			value, ok := claudeEnvValue(source.doc, "CLAUDE_CODE_SHELL_PREFIX")
+			version := opts.agentVersion(claudeConnector)
+			if !ok && version != "" && compareVersions(version, claudeEnvMergeMinimumVersion) >= 0 {
+				// Higher sources own keys they set; file sources supply the rest.
+				value, ok = filePrefix, filePrefixSet
+			}
+			prefix, isText := value.(string)
+			if !ok || !isText || prefix != "" {
+				state.conflict("effective managed policy from %s does not keep CLAUDE_CODE_SHELL_PREFIX empty for Bash tool commands (rel-1-0-6:GAP-0322)", source.name)
+			}
+		}
 		switch {
 		case len(missing) == 0:
 			state.detail("%s embeds DefenseClaw's hook matrix", source.name)
-			if opts.goos() != "windows" {
-				value, ok := claudeEnvValue(source.doc, "CLAUDE_CODE_SHELL_PREFIX")
-				prefix, isText := value.(string)
-				if !ok || !isText || prefix != "" {
-					state.conflict("%s carries DefenseClaw's hooks but does not keep CLAUDE_CODE_SHELL_PREFIX empty for Bash tool commands (rel-1-0-6:GAP-0322)", source.name)
-				}
-			}
 		case behavior == "merge":
 			state.detail("%s sets managedSourcesBehavior: merge, so Claude Code %s and later also apply DefenseClaw's drop-in", source.name, claudeMergeMinimumVersion)
 			if version := opts.agentVersion(claudeConnector); version != "" && compareVersions(version, claudeMergeMinimumVersion) < 0 {

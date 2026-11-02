@@ -447,3 +447,127 @@ func TestClaudeManagedExecFormAndProjectPrefixPin(t *testing.T) {
 		t.Fatalf("managed hook must use the native command: %v", handler)
 	}
 }
+
+func TestClaudeHigherSourceUsesEffectiveMergedPrefix(t *testing.T) {
+	for _, tc := range []struct {
+		name      string
+		prefix    any
+		noHooks   bool
+		noMerge   bool
+		version   string
+		wantCover bool
+	}{
+		{name: "file prefix", wantCover: true},
+		{name: "file prefix without policy merge", noMerge: true, wantCover: true},
+		{name: "first env merge version", noMerge: true, version: "2.1.223", wantCover: true},
+		{name: "older client without policy merge", noMerge: true, version: "2.1.222"},
+		{name: "higher empty prefix", prefix: "", wantCover: true},
+		{name: "higher nonempty prefix", prefix: "/usr/local/bin/managed-wrapper"},
+		{name: "higher nonempty prefix with file hooks", prefix: "/usr/local/bin/managed-wrapper", noHooks: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			opts := testOptions(t)
+			opts.GOOS = "darwin"
+			version := tc.version
+			if version == "" {
+				version = "2.1.286"
+			}
+			opts.AgentVersions = map[string]string{"claudecode": version}
+			exported, err := (claudeTarget{}).Export(opts, "claude-hklm-json")
+			if err != nil {
+				t.Fatal(err)
+			}
+			var higher map[string]any
+			if err := json.Unmarshal(exported, &higher); err != nil {
+				t.Fatal(err)
+			}
+			delete(higher, "env")
+			if tc.noHooks {
+				delete(higher, "hooks")
+			}
+			if tc.prefix != nil {
+				higher["env"] = map[string]any{"CLAUDE_CODE_SHELL_PREFIX": tc.prefix}
+			}
+			if !tc.noMerge {
+				higher["managedSourcesBehavior"] = "merge"
+			}
+			raw, err := json.Marshal(higher)
+			if err != nil {
+				t.Fatal(err)
+			}
+			withHigherSources(t, higherSource(t, "managed preferences", string(raw)))
+			state, err := (claudeTarget{}).Reconcile(opts)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if state.Covered != tc.wantCover {
+				t.Fatalf("covered = %t, conflicts = %v", state.Covered, state.Conflicts)
+			}
+			if !tc.wantCover && !hasConflict(state, "CLAUDE_CODE_SHELL_PREFIX empty") {
+				t.Fatalf("missing effective prefix conflict: %v", state.Conflicts)
+			}
+		})
+	}
+}
+
+func TestClaudeHigherSourcePrefixWithoutFileMerge(t *testing.T) {
+	opts := testOptions(t)
+	opts.GOOS = "darwin"
+	dir := claudeDir(t, opts)
+	writeFile(t, filepath.Join(dir, "managed-settings.d", "99-late.json"), `{"env":{"CLAUDE_CODE_SHELL_PREFIX":"/usr/local/bin/file-wrapper"}}`)
+	exported, err := (claudeTarget{}).Export(opts, "claude-hklm-json")
+	if err != nil {
+		t.Fatal(err)
+	}
+	withHigherSources(t, higherSource(t, "managed preferences", string(exported)))
+	state, err := (claudeTarget{}).Reconcile(opts)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !state.Covered {
+		t.Fatalf("higher source supplies the effective prefix: %v", state.Conflicts)
+	}
+}
+
+func TestClaudeHigherSourcePolicyHelperNeedsReview(t *testing.T) {
+	opts := testOptions(t)
+	opts.GOOS = "darwin"
+	opts.AgentVersions = map[string]string{"claudecode": "2.1.286"}
+	exported, err := (claudeTarget{}).Export(opts, "claude-hklm-json")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var higher map[string]any
+	if err := json.Unmarshal(exported, &higher); err != nil {
+		t.Fatal(err)
+	}
+	delete(higher, "env")
+	higher["managedSourcesBehavior"] = "merge"
+	higher["policyHelper"] = "/usr/local/bin/policy-helper"
+	raw, err := json.Marshal(higher)
+	if err != nil {
+		t.Fatal(err)
+	}
+	withHigherSources(t, higherSource(t, "managed preferences", string(raw)))
+	state, err := (claudeTarget{}).Reconcile(opts)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if state.Covered || !hasConflict(state, "configures policyHelper") {
+		t.Fatalf("higher policy helper was accepted: %v", state.Conflicts)
+	}
+}
+
+func TestClaudeFilePrefixRequiresTextValue(t *testing.T) {
+	withHigherSources(t)
+	opts := testOptions(t)
+	dir := claudeDir(t, opts)
+	writeFile(t, filepath.Join(dir, "managed-settings.d", "99-late.json"), `{"env":{"CLAUDE_CODE_SHELL_PREFIX":false}}`)
+	state, err := (claudeTarget{}).Reconcile(opts)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if state.Covered || !hasConflict(state, "do not keep CLAUDE_CODE_SHELL_PREFIX empty") {
+		t.Fatalf("invalid effective prefix was accepted: %v", state.Conflicts)
+	}
+}
