@@ -7,6 +7,9 @@ import (
 	"regexp"
 	"strings"
 	"unicode"
+
+	"github.com/defenseclaw/defenseclaw/internal/shellparse"
+	"mvdan.cc/sh/v3/syntax"
 )
 
 // ShellStatementsOverBudget reports whether a POSIX shell command has more
@@ -22,22 +25,219 @@ func ShellStatementsOverBudget(command string) bool {
 		return false
 	}
 	statements, _, ok := sequenceStatementDetails(command, true, true)
-	return ok && len(statements) > maxStatementsAlone
+	if ok {
+		if len(statements) > maxStatementsAlone {
+			// The semantic splitter also accepts Bash-only syntax. The
+			// analyzer counts POSIX syntax, so a Bash-only split is not a
+			// statement-budget result for this reading.
+			_, parsed := budgetPOSIXParse(command)
+			return parsed
+		}
+		// The flattened outer call can be short while a static shell -c
+		// or eval body in it exceeds the same budget.
+		if !strings.Contains(command, " -c") && !strings.Contains(command, " --command") &&
+			!strings.Contains(command, "eval ") && !strings.Contains(command, "trap ") {
+			return false
+		}
+	}
+	// The evaluator can decline a dynamic function invocation (for
+	// example run() { "$@"; }). That does not make the surrounding
+	// statements disappear. Count their syntax without resolving the
+	// function's dynamic command name.
+	return posixStructuralStatementsOverBudget(command)
+}
+
+// posixStructuralStatementsOverBudget is the count-only fallback when the
+// evaluator cannot flatten a valid POSIX call. Function definitions are
+// inert; their bodies count when an earlier definition is invoked. Compound
+// statements are replaced by their children, as in SimpleCommands.
+func posixStructuralStatementsOverBudget(command string) bool {
+	file, ok := budgetPOSIXParse(command)
+	if !ok {
+		return false
+	}
+	functions := make(map[string]*syntax.Stmt)
+	variables := make(map[string]string)
+	var forwardedArgs []*syntax.Word
+	count := 0
+	var statements func([]*syntax.Stmt, int)
+	var statement func(*syntax.Stmt, int)
+	statements = func(list []*syntax.Stmt, depth int) {
+		for _, stmt := range list {
+			if count > maxStatementsAlone {
+				return
+			}
+			statement(stmt, depth)
+		}
+	}
+	statement = func(stmt *syntax.Stmt, depth int) {
+		if stmt == nil || count > maxStatementsAlone {
+			return
+		}
+		switch cmd := stmt.Cmd.(type) {
+		case *syntax.FuncDecl:
+			if cmd.Name != nil && cmd.Body != nil {
+				functions[cmd.Name.Value] = cmd.Body
+			}
+			return
+		case *syntax.BinaryCmd:
+			statement(cmd.X, depth)
+			statement(cmd.Y, depth)
+			return
+		case *syntax.Subshell:
+			statements(cmd.Stmts, depth)
+			return
+		case *syntax.Block:
+			statements(cmd.Stmts, depth)
+			return
+		case *syntax.IfClause:
+			for clause := cmd; clause != nil; clause = clause.Else {
+				statements(clause.Cond, depth)
+				statements(clause.Then, depth)
+			}
+			return
+		case *syntax.WhileClause:
+			statements(cmd.Cond, depth)
+			statements(cmd.Do, depth)
+			return
+		case *syntax.ForClause:
+			statements(cmd.Do, depth)
+			return
+		case *syntax.CaseClause:
+			for _, item := range cmd.Items {
+				statements(item.Stmts, depth)
+			}
+			return
+		case *syntax.TimeClause:
+			statement(cmd.Stmt, depth)
+			return
+		case *syntax.CallExpr:
+			count++
+			if len(cmd.Args) == 0 {
+				for _, assign := range cmd.Assigns {
+					if assign.Name == nil {
+						continue
+					}
+					value, known := simpleStaticWord(assign.Value, variables)
+					if known {
+						variables[assign.Name.Value] = value
+					} else {
+						delete(variables, assign.Name.Value)
+					}
+				}
+			}
+			syntax.Walk(cmd, func(node syntax.Node) bool {
+				switch nested := node.(type) {
+				case *syntax.CmdSubst:
+					statements(nested.Stmts, depth)
+					return false
+				case *syntax.ProcSubst:
+					statements(nested.Stmts, depth)
+					return false
+				}
+				return count <= maxStatementsAlone
+			})
+			if len(cmd.Args) > 0 {
+				forwardedCall := budgetForwardedArgv(cmd.Args[0]) && len(cmd.Args) == 1
+				if len(cmd.Args) == 2 && budgetForwardedArgv(cmd.Args[1]) {
+					forwardedCall = cmd.Args[0].Lit() == "command" || cmd.Args[0].Lit() == "exec"
+				}
+				if forwardedCall && len(forwardedArgs) > 0 && depth < 8 {
+					if script, _, nested, static := simpleNestedScriptArgs(forwardedArgs, variables, 0, nil, nil); nested && static {
+						if child, parsed := budgetPOSIXParse(script); parsed {
+							prior := forwardedArgs
+							forwardedArgs = nil
+							statements(child.Stmts, depth+1)
+							forwardedArgs = prior
+						}
+					}
+				}
+				name, known := simpleFunctionCallName(cmd)
+				if !known {
+					name, known = simpleStaticWord(cmd.Args[0], variables)
+				}
+				if known && depth < 8 {
+					if body := functions[name]; body != nil {
+						prior := forwardedArgs
+						forwardedArgs = cmd.Args[1:]
+						if len(cmd.Args) == 2 && budgetForwardedArgv(cmd.Args[1]) {
+							forwardedArgs = prior
+						}
+						statement(body, depth+1)
+						forwardedArgs = prior
+					}
+				}
+			}
+			if depth < 8 {
+				if script, _, nested, static := simpleNestedScript(cmd, nil, nil, nil); nested && static {
+					if child, ok := budgetPOSIXParse(script); ok {
+						prior := forwardedArgs
+						forwardedArgs = nil
+						statements(child.Stmts, depth+1)
+						forwardedArgs = prior
+					}
+				}
+			}
+		default:
+			count++
+		}
+	}
+	statements(file.Stmts, 0)
+	return count > maxStatementsAlone
+}
+
+// budgetForwardedArgv recognizes the unchanged argv used by a function
+// wrapper. An unquoted $@ is not an unchanged argv because it can split.
+func budgetForwardedArgv(word *syntax.Word) bool {
+	if word == nil || len(word.Parts) != 1 {
+		return false
+	}
+	quoted, ok := word.Parts[0].(*syntax.DblQuoted)
+	if !ok || len(quoted.Parts) != 1 {
+		return false
+	}
+	param, ok := quoted.Parts[0].(*syntax.ParamExp)
+	return ok && param.Param != nil && param.Param.Value == "@"
+}
+
+func budgetPOSIXParse(command string) (*syntax.File, bool) {
+	file, err := syntax.NewParser(syntax.Variant(syntax.LangPOSIX)).Parse(shellparse.Reader(command), "")
+	if err == nil {
+		return file, true
+	}
+	// Match the analyzer's narrow normalization for aggregate redirects.
+	// Other Bash syntax remains invalid in a POSIX reading.
+	normalized, valid := normalizePOSIXAggregateRedirects(command, true)
+	if !valid {
+		return nil, false
+	}
+	file, err = syntax.NewParser(syntax.Variant(syntax.LangPOSIX)).Parse(shellparse.Reader(normalized), "")
+	return file, err == nil
 }
 
 // ShellStatementTexts returns the statements of a POSIX command as the
 // statement budget counts them (ShellStatementsOverBudget), in order; ok is
 // false when the command does not parse.
 func ShellStatementTexts(command string) ([]string, bool) {
+	texts, _, ok := ShellStatementTextsWithOffsets(command)
+	return texts, ok
+}
+
+// ShellStatementTextsWithOffsets also reports each statement's start in
+// command. A function body can be read after its source position, so callers
+// use the offsets only for top-level statements executed in source order.
+func ShellStatementTextsWithOffsets(command string) ([]string, []int, bool) {
 	statements, _, ok := sequenceStatementDetails(command, true, true)
 	if !ok {
-		return nil, false
+		return nil, nil, false
 	}
 	texts := make([]string, len(statements))
+	offsets := make([]int, len(statements))
 	for i, statement := range statements {
 		texts[i] = statement.text
+		offsets[i] = statement.sourceStart
 	}
-	return texts, true
+	return texts, offsets, true
 }
 
 // PowerShellStatementsOverBudget reports whether a command has more
@@ -296,10 +496,17 @@ func powerShellStatements(command string, limit int) (int, bool) {
 	return statements, opaque
 }
 
-// powerShellAssignable matches an assignable PowerShell expression with an
-// optional compound operator before its =: $x, $env:X, ${x}, $a[0], $o.p,
-// [int]$n, $x + (for +=), $x ?? (for ??=).
-var powerShellAssignable = regexp.MustCompile(`^(\[[^\]]+\]\s*)*(\$\{[^}]+\}|\$[A-Za-z_][\w:]*)(\[[^\]]*\]|\.[A-Za-z_]\w*)*\s*(\?\?|[-+*/%])?$`)
+// powerShellAssignable matches the targets of a PowerShell assignment with
+// an optional compound operator before its =: $x, $env:X, ${x}, $a[0],
+// $o.p, [int]$n, [string[]]$s and [List[string]]$l (one level of nested
+// type brackets), $a, $b (multiple assignment), $x = $y (a chain), and
+// $x + (for +=), $x ?? (for ??=). Review r6 finding 5: the nested types,
+// the list and the chain counted two statements a line.
+var powerShellAssignable = func() *regexp.Regexp {
+	target := `(\[(?:[^\[\]]|\[[^\[\]]*\])+\]\s*)*(\$\{[^}]+\}|\$[A-Za-z_][\w:]*)(\[[^\]]*\]|\.[A-Za-z_]\w*)*`
+	list := target + `(\s*,\s*` + target + `)*`
+	return regexp.MustCompile(`^(` + list + `\s*=\s*)*` + list + `\s*(\?\?|[-+*/%])?$`)
+}()
 
 var powerShellBlockComment = regexp.MustCompile(`<#[\s\S]*?#>`)
 

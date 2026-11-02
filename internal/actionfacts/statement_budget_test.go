@@ -9,6 +9,66 @@ import (
 	"testing"
 )
 
+func budgetAssignments(n int) string {
+	parts := make([]string, n)
+	for i := range parts {
+		parts[i] = fmt.Sprintf("a%d=1", i)
+	}
+	return strings.Join(parts, "; ")
+}
+
+func TestShellStatementsOverBudgetDynamicFunctions(t *testing.T) {
+	assignments := func(n int) string {
+		parts := make([]string, n)
+		for i := range parts {
+			parts[i] = fmt.Sprintf("a%d=1", i)
+		}
+		return strings.Join(parts, "; ")
+	}
+	for _, tc := range []struct {
+		name, command string
+		over          bool
+	}{
+		{"at bound", `run() { "$@"; }; ` + assignments(126) + "; run git status", false},
+		{"past bound", `run() { "$@"; }; ` + assignments(127) + "; run git status", true},
+		{"nested wrapper", `outer() { inner "$@"; }; inner() { "$@"; }; ` + assignments(200) + "; outer sh -c 'printf c >> state'", true},
+		{"invoked body", "run() { " + assignments(129) + "; }; run", true},
+		{"unused body", "run() { " + assignments(129) + "; }; echo done", false},
+		{"nested shell", "sh -c '" + assignments(129) + "'", true},
+		{"normalized aggregate redirect", `run() { "$@"; }; ` + assignments(200) + "; run echo ok &>/dev/null", true},
+		{"bash-only fork bomb", ":(){ :|:& };:", false},
+		{"POSIX bracket command words", strings.Repeat("[[ 1 == 1 ]]; ", 129), true},
+	} {
+		if got := ShellStatementsOverBudget(tc.command); got != tc.over {
+			t.Errorf("%s: budget=%t, want %t", tc.name, got, tc.over)
+		}
+	}
+}
+
+func TestShellStatementsOverBudgetForwardedStaticChild(t *testing.T) {
+	for _, tc := range []struct {
+		name, command string
+		over          bool
+	}{
+		{"forwarded at bound", `run() { "$@"; }; ` + budgetAssignments(125) + `; run sh -c 'echo ok'`, false},
+		{"forwarded beyond bound", `run() { "$@"; }; ` + budgetAssignments(126) + `; run sh -c 'echo ok'`, true},
+		{"forwarded state write", `run() { "$@"; }; ` + budgetAssignments(126) + `; run sh -c 'printf c >> ~/.defenseclaw/config.yaml'`, true},
+		{"variable call at bound", `run() { "$@"; }; f=run; ` + budgetAssignments(124) + `; "$f" sh -c 'echo ok'`, false},
+		{"variable call beyond bound", `run() { "$@"; }; f=run; ` + budgetAssignments(125) + `; "$f" sh -c 'printf c >> ~/.defenseclaw/config.yaml'`, true},
+		{"nested wrappers at bound", `outer() { inner "$@"; }; inner() { "$@"; }; ` + budgetAssignments(124) + `; outer sh -c 'echo ok'`, false},
+		{"nested wrappers beyond bound", `outer() { inner "$@"; }; inner() { "$@"; }; ` + budgetAssignments(125) + `; outer sh -c 'echo ok'`, true},
+		{"command wrapper beyond bound", `run() { command "$@"; }; ` + budgetAssignments(126) + `; run sh -c 'echo ok'`, true},
+		{"multi-step wrapper at bound", `run() { :; "$@"; }; ` + budgetAssignments(124) + `; run sh -c 'echo ok'`, false},
+		{"multi-step wrapper beyond bound", `run() { :; "$@"; }; ` + budgetAssignments(125) + `; run sh -c 'printf c >> ~/.defenseclaw/config.yaml'`, true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := ShellStatementsOverBudget(tc.command); got != tc.over {
+				t.Errorf("over budget = %t, want %t", got, tc.over)
+			}
+		})
+	}
+}
+
 // TestPowerShellStatementsOverBudget is rel-1-0-6:GAP-0318: the PowerShell
 // split's statement budget, counted past the Windows lexer's token bound,
 // with quoted and here-string separators not counted.
@@ -103,6 +163,23 @@ func TestPowerShellStatementsOverBudget(t *testing.T) {
 		{"background chain after == and a block comment, 3000", strings.Repeat("Write-Output YWJjZA== <#c#> & ", 3000) + "Remove-Item -Recurse -Force x", true},
 		{"background chain after a lone = argument", strings.Repeat("Write-Output = & ", 200) + "Remove-Item -Recurse -Force x", true},
 		{"background chain after key= in an assigned command", strings.Repeat("$x = Write-Output key= & ", 200) + "Remove-Item -Recurse -Force x", true},
+		// Review r6 finding 4: the statement start is reset at { and (
+		// (MT7, MT7b) and after a background & (MT10), and a block comment
+		// inside the target is not part of it (MT8).
+		{"call operator in an if block, 128 lines", strings.ReplaceAll(statements(128, "if ($c) { $o%d = & git rev-parse HEAD }"), "; ", "\n"), false},
+		{"call operator in an if block, 129 lines", strings.ReplaceAll(statements(129, "if ($c) { $o%d = & git rev-parse HEAD }"), "; ", "\n"), true},
+		{"call operator in parentheses, 128 lines", strings.ReplaceAll(statements(128, "($o%d = & git rev-parse HEAD)"), "; ", "\n"), false},
+		{"call operator in a foreach block, 128 lines", strings.ReplaceAll(statements(128, "foreach ($i in $l) { $o%d = & git rev-parse HEAD }"), "; ", "\n"), false},
+		{"block comment inside the target, 128 lines", strings.ReplaceAll(statements(128, "$o%d <#c#> = & git rev-parse HEAD"), "; ", "\n"), false},
+		{"call operator after a background job, 64 lines", strings.ReplaceAll(statements(64, "Get-Date & $o%d = & git rev-parse HEAD"), "; ", "\n"), false},
+		{"call operator after a background job, 65 lines", strings.ReplaceAll(statements(65, "Get-Date & $o%d = & git rev-parse HEAD"), "; ", "\n"), true},
+		// Review r6 finding 5: nested type literals, multiple and chained
+		// assignment are one statement each.
+		{"nested array type target, 128 lines", strings.ReplaceAll(statements(128, "[string[]]$s%d = & git rev-parse HEAD"), "; ", "\n"), false},
+		{"generic type target, 128 lines", strings.ReplaceAll(statements(128, "[System.Collections.Generic.List[string]]$l%d = & git rev-parse HEAD"), "; ", "\n"), false},
+		{"multiple assignment target, 128 lines", strings.ReplaceAll(statements(128, "$a%d, $b = & git rev-parse HEAD"), "; ", "\n"), false},
+		{"chained assignment target, 128 lines", strings.ReplaceAll(statements(128, "$x%d = $y = & git rev-parse HEAD"), "; ", "\n"), false},
+		{"chained assignment target, 129 lines", strings.ReplaceAll(statements(129, "$x%d = $y = & git rev-parse HEAD"), "; ", "\n"), true},
 		// Assignment operators: the & after them is the call operator.
 		{"call operator after =, no blank", strings.ReplaceAll(statements(70, "$o%d=& git rev-parse HEAD"), "; ", "\n"), false},
 		{"call operator after +=", strings.ReplaceAll(statements(70, "$o%d += & git rev-parse HEAD"), "; ", "\n"), false},

@@ -204,6 +204,7 @@ func sequenceStatements(source string, compound bool) (statements []string, redu
 
 type sequenceStatement struct {
 	text, scope string
+	sourceStart int
 }
 
 // sequenceStatementDetails is the one full-parser flattening step. The
@@ -275,7 +276,7 @@ func sequenceStatementDetails(source string, compound, allSimple bool) (statemen
 		for index := len(redirects) - 1; index >= 0; index-- {
 			statement += " " + redirects[index]
 		}
-		statements = append(statements, sequenceStatement{text: statement, scope: scope})
+		statements = append(statements, sequenceStatement{text: statement, scope: scope, sourceStart: int(from.Offset())})
 		return true
 	}
 	subshells := 0
