@@ -316,11 +316,22 @@ func TestCompleteWindowsManagedHooksTeardownUserCleanupIsStandaloneOnly(t *testi
 		t.Fatalf("Secure Client finalize ran the per-user cleanup: calls=%d", calls)
 	}
 
+	originalCursor := windowsManagedHooksStandaloneCursorTombstonePurger
+	t.Cleanup(func() { windowsManagedHooksStandaloneCursorTombstonePurger = originalCursor })
+	cursorPurges := 0
+	windowsManagedHooksStandaloneCursorTombstonePurger = func() error {
+		cursorPurges++
+		return nil
+	}
+	report.Action = "finalize"
 	t.Setenv(managed.EnterpriseProfileEnv, managed.ProfileStandalone)
 	completeWindowsManagedHooksTeardownUserCleanup(&report, `C:\ProgramData\DefenseClaw\runtime`, manifest)
 	if calls != 1 || report.UserRegistrationsRemoved != 2 ||
 		strings.Join(report.UserRegistrationsPending, ",") != "hermes/"+userCleanupSIDB {
 		t.Fatalf("standalone finalize report = %+v", report)
+	}
+	if cursorPurges != 1 {
+		t.Fatalf("an unrelated pending registration kept the Cursor tombstone: removals=%d", cursorPurges)
 	}
 	body, err := json.Marshal(report)
 	if err != nil {
@@ -341,17 +352,10 @@ func TestCompleteWindowsManagedHooksTeardownUserCleanupIsStandaloneOnly(t *testi
 
 	// A purge removes each folder as LocalSystem, whether or not the account
 	// is signed in, and names each one that stays with the reason.
-	// GAP-1567: only a purge removes the Cursor hook tombstone.
-	originalCursor := windowsManagedHooksStandaloneCursorTombstonePurger
-	t.Cleanup(func() { windowsManagedHooksStandaloneCursorTombstonePurger = originalCursor })
-	cursorPurges := 0
-	windowsManagedHooksStandaloneCursorTombstonePurger = func() error {
-		cursorPurges++
-		return nil
-	}
+	// A purge also removes the Cursor hook tombstone for a pending account.
 	completeWindowsManagedHooksTeardownUserCleanup(&report, `C:\ProgramData\DefenseClaw\runtime`, manifest)
-	if cursorPurges != 0 {
-		t.Fatal("an uninstall without purge removed the Cursor hook tombstone")
+	if cursorPurges != 2 {
+		t.Fatalf("repeated uninstall did not remove the Cursor tombstone: removals=%d", cursorPurges)
 	}
 	t.Setenv(windowsManagedHooksPurgeUserStateEnv, "1")
 	originalIdentity, originalPurger := enterpriseHookWindowsUserCleanupIdentity, windowsManagedHooksStandaloneUserStatePurger
@@ -380,7 +384,7 @@ func TestCompleteWindowsManagedHooksTeardownUserCleanupIsStandaloneOnly(t *testi
 	if purged != 1 || binaries != 1 || len(report.UserStateRemaining) != 0 {
 		t.Fatalf("purge ran %d/%d time(s), remaining %v", purged, binaries, report.UserStateRemaining)
 	}
-	if cursorPurges != 1 {
+	if cursorPurges != 3 {
 		t.Fatalf("the purge removed the Cursor hook tombstone %d time(s)", cursorPurges)
 	}
 	windowsManagedHooksStandaloneCursorTombstonePurger = func() error { return errors.New("access denied") }
@@ -444,6 +448,37 @@ func TestCompleteWindowsManagedHooksTeardownUserCleanupIsStandaloneOnly(t *testi
 	}
 }
 
+func TestFinishWindowsCursorTombstoneCleanupReportsRemainingFiles(t *testing.T) {
+	oldPurger, oldFiles := windowsManagedHooksStandaloneCursorTombstonePurger, windowsManagedHooksCursorTombstoneFiles
+	t.Cleanup(func() {
+		windowsManagedHooksStandaloneCursorTombstonePurger = oldPurger
+		windowsManagedHooksCursorTombstoneFiles = oldFiles
+	})
+	files := []string{`C:\ProgramData\Cursor\defenseclaw-hook.ps1`, `C:\ProgramData\Cursor\.defenseclaw-managed-hooks.lock`}
+	windowsManagedHooksCursorTombstoneFiles = func() ([]string, error) { return files, nil }
+	removed := 0
+	windowsManagedHooksStandaloneCursorTombstonePurger = func() error { removed++; return nil }
+
+	var report windowsManagedHooksTeardownReport
+	finishWindowsCursorTombstoneCleanup(&report, []string{"copilot/S-1", "devin/S-2"}, nil, false)
+	if removed != 1 || len(report.MachineStateRemaining) != 0 {
+		t.Fatalf("unrelated pending registrations kept Cursor files: removed=%d remaining=%v", removed, report.MachineStateRemaining)
+	}
+	finishWindowsCursorTombstoneCleanup(&report, []string{"cursor/S-3"}, nil, false)
+	if removed != 1 || len(report.MachineStateRemaining) != len(files) {
+		t.Fatalf("pending Cursor files not reported: removed=%d remaining=%v", removed, report.MachineStateRemaining)
+	}
+	for i, path := range files {
+		if !strings.Contains(report.MachineStateRemaining[i], path) {
+			t.Fatalf("writer file %s not reported: %v", path, report.MachineStateRemaining)
+		}
+	}
+	finishWindowsCursorTombstoneCleanup(&report, []string{"cursor/S-3"}, nil, true)
+	if removed != 2 {
+		t.Fatalf("purge left Cursor tombstone: removed=%d", removed)
+	}
+}
+
 // Finalize removes the users' registrations before the journal records the
 // phase finalized, so an uninstall interrupted during that cleanup, or one
 // failing before it, stays prepared and its rerun runs finalize again.
@@ -482,6 +517,21 @@ func TestFinalizeWindowsManagedHooksTeardownCleansUpUsersWhilePrepared(t *testin
 	windowsManagedHooksTeardownStandaloneMachineFinalizer = func() error { return nil }
 	if err := finalize(); err != nil || cleanedUpAt != "prepared" || written != "finalized" {
 		t.Fatalf("finalize: err=%v phase=%s, users cleaned up at phase %q", err, written, cleanedUpAt)
+	}
+}
+
+func TestCompleteWindowsManagedHooksTeardownAmpCleanupIsStandaloneOnly(t *testing.T) {
+	previous := windowsManagedHooksTeardownAmpFolderCleaner
+	t.Cleanup(func() { windowsManagedHooksTeardownAmpFolderCleaner = previous })
+	calls := 0
+	windowsManagedHooksTeardownAmpFolderCleaner = func() error { calls++; return nil }
+	t.Setenv(managed.EnterpriseProfileEnv, managed.ProfileSecureClient)
+	if err := finalizeWindowsManagedHooksTeardownAmpFolder(); err != nil || calls != 0 {
+		t.Fatalf("Secure Client Amp cleanup: calls=%d err=%v", calls, err)
+	}
+	t.Setenv(managed.EnterpriseProfileEnv, managed.ProfileStandalone)
+	if err := finalizeWindowsManagedHooksTeardownAmpFolder(); err != nil || calls != 1 {
+		t.Fatalf("standalone Amp cleanup: calls=%d err=%v", calls, err)
 	}
 }
 

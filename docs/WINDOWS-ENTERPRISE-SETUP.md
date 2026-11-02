@@ -159,7 +159,7 @@ It differs from the Secure Client Setup in these ways:
 | Lifecycle engine | Windows PowerShell 5.1 | PowerShell 7 x64 (see `WINDOWS-MACHINE-INSTALLER-INTERFACE.md`) |
 | Actions | The seven above | The seven above plus `/ensure` |
 | Exit codes | `0`, `1603` | `0`, `1603`, `1618`, `1639`; `3010` is reserved and never returned |
-| `/uninstall` | Keeps the machine state unless `PURGE=1` | Always removes the machine state; `PURGE=1` also removes each enrolled account's per-user data and binaries |
+| `/uninstall` | Keeps the machine state unless `PURGE=1` | Removes deployment machine roots; a pending Cursor registration can retain an allow-only hook tombstone and lock. `PURGE=1` also removes each enrolled account's per-user data and binaries |
 
 ### Invocation
 
@@ -194,6 +194,26 @@ folder for you.
 
 `/ensure` installs, upgrades or repairs as needed and does nothing when the
 device is compliant. The first `/ensure` without `CONFIG=` exits `1639`.
+
+On standalone `/uninstall`, the Cursor machine hook adapter
+(`C:\ProgramData\Cursor\defenseclaw-hook.ps1`) and its
+`.defenseclaw-managed-hooks.lock` are removed when no Cursor user registration
+is pending. If a signed-out Cursor account still has a registration, Setup
+keeps the adapter as a credential-free allow-only tombstone and names both
+existing files in `machine_state_kept`. Run `/ensure` and then `/uninstall`
+while that account has an active session to clear its registration, or use
+`/uninstall PURGE=1` to remove the tombstone and lock. Pending registrations
+for other connectors do not keep Cursor machine files. Restart already-running
+Cursor clients after uninstall because they may have cached the retired hook
+command.
+
+The guardian reserves `C:\ProgramData\ampcode` while installed because Amp
+reads that machine folder for every account. Setup records when it created the
+folder and removes it on uninstall if it holds only Setup's ownership marker.
+An Amp or administrator folder that predates Setup, and any folder with other
+content, remains. An older installation without that ownership marker cannot
+prove who created an empty folder, so uninstall leaves it intact.
+
 Setup's own checks run before the lifecycle: a malformed command line (an
 unknown property, a missing, relative, padded or environment-expanded
 `CONFIG=` or `MANIFEST=` path, `/install` without `CONFIG=` and `MANIFEST=`,

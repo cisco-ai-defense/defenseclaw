@@ -1940,10 +1940,10 @@ func windowsEnterprisePurgeRerunFindsAccounts(report *windowsEnterpriseInstaller
 }
 
 // addWindowsEnterpriseMachineStateWarning names the machine folders outside
-// StateRoot that the uninstall could not remove. Every standalone uninstall
-// removes them, not only --purge, so the MDM default uninstall reports them
-// too (GAP-1734). A retained selector shared with another deployment is
-// intentional, and two cleanup steps can report the same path (GAP-0571).
+// StateRoot that the uninstall could not remove. The default standalone
+// uninstall also reports intentional machine file retention, including a
+// Cursor tombstone for a pending Cursor registration. Two cleanup steps can
+// report the same path (GAP-0571).
 func addWindowsEnterpriseMachineStateWarning(result *enterprisestatus.Result, report *windowsEnterpriseInstallerReport) {
 	var failed, kept []string
 	seen := map[string]bool{}

@@ -20,6 +20,7 @@ import (
 	"strings"
 
 	"github.com/defenseclaw/defenseclaw/internal/enterprisehooks"
+	"github.com/defenseclaw/defenseclaw/internal/enterprisepolicy"
 	"github.com/defenseclaw/defenseclaw/internal/gateway/connector"
 	"github.com/defenseclaw/defenseclaw/internal/managed"
 	"github.com/defenseclaw/defenseclaw/internal/safefile"
@@ -166,12 +167,40 @@ func completeWindowsManagedHooksTeardownUserCleanup(
 			report.UserRegistrationsFailed = append(report.UserRegistrationsFailed,
 				"claudecode/machine policy: the Claude Code version floor: "+boundedEnterpriseHookUserCleanupText(err.Error()))
 		}
-		// The default uninstall keeps an allow-only Cursor hook tombstone for
-		// Cursor processes still running; the purge removes it (GAP-1567).
-		if err := windowsManagedHooksStandaloneCursorTombstonePurger(); err != nil {
-			report.UserRegistrationsFailed = append(report.UserRegistrationsFailed,
-				"cursor/machine policy: the Cursor hook tombstone in ProgramData\\Cursor: "+boundedEnterpriseHookUserCleanupText(err.Error()))
+	}
+	if report.Action == "finalize" || report.Action == windowsManagedHooksUserStatePurgeAction {
+		finishWindowsCursorTombstoneCleanup(report, cleanup.Pending, cleanup.Failed, purge)
+	}
+}
+
+var windowsManagedHooksCursorTombstoneFiles = enterprisehooks.WindowsCursorManagedTombstoneFilePaths
+
+// A pending Cursor registration can still invoke a cached hook command.
+// Keep its allow-only adapter until that registration is cleared or purge
+// is requested. Other connectors' pending registrations do not need a
+// Cursor adapter and must not leave that machine file behind.
+func finishWindowsCursorTombstoneCleanup(report *windowsManagedHooksTeardownReport, pending, failed []string, purge bool) {
+	cursorPending := false
+	for _, entry := range append(append([]string(nil), pending...), failed...) {
+		if strings.HasPrefix(strings.ToLower(entry), "cursor/") {
+			cursorPending = true
+			break
 		}
+	}
+	if cursorPending && !purge {
+		paths, err := windowsManagedHooksCursorTombstoneFiles()
+		if err != nil {
+			report.MachineStateRemaining = append(report.MachineStateRemaining,
+				"Cursor hook tombstone: "+boundedEnterpriseHookUserCleanupText(err.Error()))
+		} else {
+			for _, path := range paths {
+				report.MachineStateRemaining = append(report.MachineStateRemaining,
+					path+": kept: pending Cursor registration; clear it with Setup /ensure and /uninstall in an active session, or use Setup /uninstall PURGE=1")
+			}
+		}
+	} else if err := windowsManagedHooksStandaloneCursorTombstonePurger(); err != nil {
+		report.UserRegistrationsFailed = append(report.UserRegistrationsFailed,
+			"cursor/machine policy: the Cursor hook tombstone in ProgramData\\Cursor: "+boundedEnterpriseHookUserCleanupText(err.Error()))
 	}
 }
 
@@ -1906,7 +1935,26 @@ func finalizeWindowsManagedHooksTeardownStandaloneMachineState() error {
 	if _, err := enterprisehooks.RemoveWindowsSecureClientPerUserRuntimeDirectories(); err != nil {
 		return fmt.Errorf("finalize the GitHub Copilot runtime folder: %w", err)
 	}
+	if err := finalizeWindowsManagedHooksTeardownAmpFolder(); err != nil {
+		return fmt.Errorf("finalize the Setup-created Amp machine folder: %w", err)
+	}
 	return nil
+}
+
+var windowsManagedHooksTeardownAmpFolderCleaner = func() error {
+	layout, programFiles, programData, err := standaloneEnterprisePolicyLayout()
+	if err != nil {
+		return fmt.Errorf("resolve standalone machine policy for Amp cleanup: %w", err)
+	}
+	return enterprisepolicy.RemoveWindowsAmpMachineFolderIfCreated(
+		enterprisepolicy.LayoutOptions(layout, programFiles, programData))
+}
+
+func finalizeWindowsManagedHooksTeardownAmpFolder() error {
+	if !enterprisehooks.WindowsStandaloneProcess() {
+		return nil
+	}
+	return windowsManagedHooksTeardownAmpFolderCleaner()
 }
 
 func windowsManagedHooksTeardownTargetForSelector(
