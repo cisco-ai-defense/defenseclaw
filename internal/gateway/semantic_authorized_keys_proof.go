@@ -17,7 +17,6 @@ import (
 	"unicode/utf8"
 
 	"github.com/defenseclaw/defenseclaw/internal/actionfacts"
-	"github.com/defenseclaw/defenseclaw/internal/gateway/connector"
 	"github.com/defenseclaw/defenseclaw/internal/hookpaths"
 	"github.com/defenseclaw/defenseclaw/internal/lazyregexp"
 	"github.com/defenseclaw/defenseclaw/internal/shellparse"
@@ -1099,7 +1098,6 @@ func trustedExistingAuthorizedKeysSymlinkWrite(request trustedActionRequest, fac
 				}
 			}
 			if strings.HasPrefix(operand, "/proc/self/cwd/") ||
-				strings.HasPrefix(operand, hookpaths.SourceRedirectFactPrefix) ||
 				strings.HasPrefix(operand, hookpaths.SourceLinkFactPrefix) ||
 				strings.HasPrefix(operand, hookpaths.SourceLinksFactPrefix) ||
 				strings.HasPrefix(operand, hookpaths.CdEnterableFactPrefix) ||
@@ -1181,11 +1179,7 @@ func trustedExistingAuthorizedKeysSymlinkWrite(request trustedActionRequest, fac
 		// cwd) is placed in the client's cwd, as the client keyed it.
 		target = hookpaths.OperandPath(target, clientCWD)
 		if request.patchTarget && (request.SandboxGuestCWD == "" || request.patchHostView) {
-			if _, ok := hookpaths.ResolvePatchWriteTarget(target); !ok &&
-				(!cannotResolveLocally || !filepath.IsAbs(request.ResolvedWriteTargets[target])) {
-				// A managed gateway may be unable to walk the user's home.
-				// Its client's resolved patch target fills that one missing
-				// view. A target unresolved in both views stays closed.
+			if _, ok := hookpaths.ResolvePatchWriteTarget(target); !ok {
 				return true
 			}
 		}
@@ -1343,18 +1337,6 @@ func trustedExistingAuthorizedKeysSymlinkWrite(request trustedActionRequest, fac
 		// found a protected target, as a per-user gateway does (GAP-2514,
 		// GAP-2515).
 		return true
-	}
-	if sourceKey := hookpaths.SimpleSourceRedirectFactKey(input.Command); sourceKey != "" {
-		// The single sourced file contains only one literal assignment, as
-		// checked by the user-side hook. A managed gateway reads that bound
-		// result; a per-user gateway reads the same file directly. An absent
-		// or unresolved result keeps the write closed.
-		if request.ProtectedHomeHook {
-			resolved := clientTargets[sourceKey]
-			return clientTargets[hookpaths.CWDKey] != input.CWD || !filepath.IsAbs(resolved) || isProtected(resolved)
-		}
-		resolved, ok := hookpaths.SimpleSourceRedirectTarget(input.Command, input.CWD, facts.ActiveHome)
-		return !ok || isProtected(resolved)
 	}
 	if hookpaths.DynamicCopyProtectedBasename(input.Command, facts.ActiveHome) {
 		return true
@@ -1603,23 +1585,6 @@ func trustedExistingAuthorizedKeysSymlinkWrite(request trustedActionRequest, fac
 		}
 	}
 	if !patchKnown {
-		if request.Connector == "hermes" && request.Input.Tool == "apply_patch" {
-			original := json.RawMessage(request.LegacyText)
-			if targets, noEffect := connector.HermesNoEffectPatchTargets(original); noEffect {
-				// Hermes rejects these calls before opening a file. Keep the
-				// old refusal for a protected name or a link the hook resolved
-				// to one, including a no-hunk Update's named target.
-				if hookpaths.PatchCallNamesProtectedTarget("apply_patch", original, "", clientCWD, facts.ActiveHome, clientTargets) {
-					return true
-				}
-				for _, target := range targets {
-					if writeTarget(target, false, false) {
-						return true
-					}
-				}
-				return false
-			}
-		}
 		// Unknown targets (no readable envelope, apply_patch --help, a
 		// lookup of the program) reach the rule only when the call names a
 		// protected target: no protected-named word is never blocked

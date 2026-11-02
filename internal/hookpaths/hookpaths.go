@@ -1066,12 +1066,10 @@ func ResolveConnector(connector, surface, event string, payload []byte) string {
 		}
 	}
 	if tool == "patch" && strings.EqualFold(strings.TrimSpace(connector), "hermes") {
-		// Describe the write the gateway judges, including V4A directive
-		// targets that a managed gateway cannot resolve under ProtectHome.
+		// The gateway judges a Hermes replace patch as the edit it makes:
+		// describe that call, as write_file is described (GAP-0680).
 		if edit, ok := hermesReplaceEditArgs(args); ok {
 			tool, args = "edit", edit
-		} else if patch, ok := hermesV4AApplyPatchArgs(args); ok {
-			tool, args = "apply_patch", patch
 		}
 	}
 	input := actionfacts.Input{Tool: tool, Args: args, CWD: cwd, ActiveHome: home}
@@ -1197,11 +1195,6 @@ func ResolveConnector(connector, surface, event string, payload []byte) string {
 				}
 				if !isApplyPatchToolName(tool) && !protectedDecision {
 					protectedDecision = actionConcreteProtectedWrite(command, cwd, home)
-				}
-				if sourceKey := SimpleSourceRedirectFactKey(command); sourceKey != "" {
-					if target, ok := SimpleSourceRedirectTarget(command, cwd, home); ok {
-						sourceFacts[sourceKey] = target
-					}
 				}
 				fallback := input
 				fallback.Tool, fallback.Args, fallback.Command = "Bash", nil, command
@@ -1979,9 +1972,6 @@ func Decode(value string) (map[string]string, bool) {
 		}
 	}
 	for key, value := range targets {
-		if strings.HasPrefix(key, SourceRedirectFactPrefix) && !validSourceRedirectFact(key, value) {
-			return nil, false
-		}
 		if strings.HasPrefix(key, WriteIdentityPrefix) &&
 			(!filepath.IsAbs(strings.TrimPrefix(key, WriteIdentityPrefix)) ||
 				len(key) > MaxWriteTargetPathBytes+len(WriteIdentityPrefix) || !validFileIdentity(value)) {
