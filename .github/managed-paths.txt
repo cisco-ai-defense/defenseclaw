@@ -109,6 +109,7 @@ internal/gateway/api.go
 internal/gateway/config_manager.go
 internal/gateway/api_sandbox_ingress.go
 internal/gateway/sandbox_daemon_runtime.go
+internal/gateway/inventory_events.go
 internal/gateway/connector/hookexec/
 internal/hookpaths/hookpaths.go
 internal/hookpaths/action_client_overwritten.go
