@@ -2817,6 +2817,13 @@ func agentIdentityForGenericHook(ctx context.Context, req agentHookRequest) Agen
 	newSession, subagentInstance := false, ""
 	if reg := SharedAgentRegistry(); reg != nil {
 		resolved, minted := reg.ResolveForAgentIdentity(ctx, facts.ID, req.SessionID, identity.AgentID)
+		if strings.EqualFold(req.ConnectorName, "hermes") {
+			// Hermes reports its logical id on a session's first events but
+			// often omits it on later events of that same session.
+			if id := reg.hermesAgentIDForSession(ctx, facts.ID, req.SessionID, identity.AgentID); identity.AgentID == "" && id != "" {
+				resolved.AgentID = id
+			}
+		}
 		if identity.AgentID == "" {
 			identity.AgentID = resolved.AgentID
 		}
