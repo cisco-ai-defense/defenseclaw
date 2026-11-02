@@ -230,7 +230,9 @@ func TestOversizedPayloadManagedForcesClosed(t *testing.T) {
 				}
 				return
 			}
-			if r.code != failClosedExit("codex") || !codexBlocked(r.stdout) {
+			// The event of an oversized payload is unknown, so Codex gets the
+			// structured block with exit 0 rather than a bare exit it ignores.
+			if r.code != 0 || !codexBlocked(r.stdout) {
 				t.Fatalf("managed oversized code = %d stdout = %q, want Codex's structured block", r.code, r.stdout)
 			}
 			requireOneManagedRecord(t, *records, managed.MarkerBoundary,

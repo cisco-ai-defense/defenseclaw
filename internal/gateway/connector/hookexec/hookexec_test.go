@@ -196,8 +196,9 @@ func TestRunAuthenticatedManagedTokenSnapshotEmptyFailsClosedWithoutFallback(t *
 		empty := "  "
 		opts.AuthenticatedManagedToken = &empty
 	})
-	if result.code != failClosedExit("codex") || !codexBlocked(result.stdout) {
-		t.Fatalf("Run code = %d stdout = %q, want Codex's structured fail-closed block; stderr=%s", result.code, result.stdout, result.stderr)
+	// A managed Codex hook blocks with Codex's PreToolUse deny, not a bare exit.
+	if result.code != 0 || result.stdout != codexClosedPreTool {
+		t.Fatalf("Run code = %d stdout = %q, want the Codex PreToolUse deny; stderr=%s", result.code, result.stdout, result.stderr)
 	}
 	if result.rt.requests != 0 {
 		t.Fatalf("gateway requests = %d, want 0", result.rt.requests)
@@ -725,8 +726,8 @@ func TestUnreachable(t *testing.T) {
 		r := run(t, "codex", &stubRT{status: 503, body: "boom"}, func(o *Options) {
 			o.StrictAvailability = true
 		})
-		if r.code != failClosedExit("codex") || !codexBlocked(r.stdout) {
-			t.Fatalf("code = %d stdout = %q, want Codex's structured fail-closed block", r.code, r.stdout)
+		if r.code != blockExit {
+			t.Fatalf("code = %d, want %d", r.code, blockExit)
 		}
 	})
 }
@@ -903,8 +904,8 @@ func TestResponseFailure(t *testing.T) {
 		r := run(t, "codex", ok("this is not json"), func(o *Options) {
 			o.FailMode = "closed"
 		})
-		if r.code != failClosedExit("codex") || !codexBlocked(r.stdout) {
-			t.Fatalf("code = %d stdout = %q, want Codex's structured fail-closed block", r.code, r.stdout)
+		if r.code != blockExit {
+			t.Fatalf("code = %d, want %d", r.code, blockExit)
 		}
 		if !strings.Contains(r.stderr, "invalid JSON response") {
 			t.Errorf("stderr = %q, want invalid JSON", r.stderr)
@@ -1405,9 +1406,6 @@ func TestManagedEnterpriseMissingOrDisabledHomeFailsClosed(t *testing.T) {
 				if code != failClosedExit(connectorName) {
 					t.Fatalf("code = %d, want fail-closed %d; stdout=%q stderr=%q", code, failClosedExit(connectorName), out.String(), errb.String())
 				}
-				if connectorName == "codex" && !codexBlocked(out.String()) {
-					t.Fatalf("stdout = %q, want Codex's structured block", out.String())
-				}
 				if rt.requests != 0 {
 					t.Fatalf("gateway called %d times, want 0", rt.requests)
 				}
@@ -1454,12 +1452,6 @@ func TestManagedEnterpriseResolverFailureBeforeRuntimeOrGateway(t *testing.T) {
 				HTTPClient:            &http.Client{Transport: rt},
 			})
 			want := tc.wantCode
-			if want == blockExit {
-				want = failClosedExit("codex")
-				if !codexBlocked(out.String()) {
-					t.Fatalf("stdout = %q, want Codex's structured block", out.String())
-				}
-			}
 			if code != want {
 				t.Fatalf("code = %d, want %d; stdout=%q stderr=%q", code, want, out.String(), errb.String())
 			}
@@ -1657,13 +1649,11 @@ func TestDefaultHTTPClientDoesNotFollowRedirects(t *testing.T) {
 	}
 }
 
-// failClosedExit is the exit a connector's fail-closed result uses. Codex
-// treats a non-zero exit on UserPromptSubmit as "hook failed" and continues,
-// so it blocks with the structured decision and exit 0 instead.
-func failClosedExit(connector string) int {
-	if connector == "codex" {
-		return 0
-	}
+// failClosedExit is the exit a fail-closed result uses when the hook event
+// is unknown: the bare block exit for every connector. A managed Codex hook
+// with a known event answers with Codex's block for it instead (see
+// codex_fail_closed_test.go).
+func failClosedExit(string) int {
 	return blockExit
 }
 

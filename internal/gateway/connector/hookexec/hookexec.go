@@ -649,7 +649,7 @@ func handleMissingToken(opts Options, sp spec, failMode string) int {
 	if blocked {
 		writeFailureDiagnostic(opts, true,
 			"defenseclaw: %s, blocking %s (fail mode closed)\n", reason, sp.subject)
-		return emit(opts.Stdout, sp.unreachableStrict)
+		return emitClosed(opts, sp, sp.unreachableStrict)
 	}
 	return emit(opts.Stdout, sp.openAllow)
 }
@@ -657,7 +657,7 @@ func handleMissingToken(opts Options, sp spec, failMode string) int {
 func handleUnavailableHome(opts Options, sp spec, reason string) int {
 	if opts.StrictAvailability || opts.ManagedEnterprise {
 		writeFailureDiagnostic(opts, true, "defenseclaw: %s, blocking %s (managed/strict availability)\n", reason, sp.subject)
-		return emit(opts.Stdout, sp.unreachableStrict)
+		return emitClosed(opts, sp, sp.unreachableStrict)
 	}
 	return emit(opts.Stdout, sp.openAllow)
 }
@@ -707,7 +707,7 @@ func failUnreachable(opts Options, sp spec, failMode, reason string) int {
 	if blocked {
 		writeFailureDiagnostic(opts, true,
 			"defenseclaw: gateway unreachable, blocking %s (fail mode closed): %s\n", sp.subject, reason)
-		return emit(opts.Stdout, sp.unreachableStrict)
+		return emitClosed(opts, sp, sp.unreachableStrict)
 	}
 	writeFailureDiagnostic(opts, false, "defenseclaw: gateway unreachable, allowing %s: %s\n", sp.subject, reason)
 	return emit(opts.Stdout, sp.openAllow)
@@ -737,7 +737,7 @@ func failResponse(opts Options, sp spec, failMode, reason string) int {
 	if failMode == "open" {
 		return emit(opts.Stdout, sp.openAllow)
 	}
-	return emit(opts.Stdout, sp.responseClosed)
+	return emitClosed(opts, sp, sp.responseClosed)
 }
 
 func responseFailureReason(reason string) string {
@@ -745,6 +745,47 @@ func responseFailureReason(reason string) string {
 		return reason + " (gateway auth failed; possible token drift. Run `defenseclaw doctor --fix` or `defenseclaw-gateway restart`.)"
 	}
 	return reason
+}
+
+// emitClosed writes a closed failure result. A managed Codex hook answers with
+// Codex's own block for the event instead of the bare exit 2: Codex treats a
+// non-zero exit as "hook failed" and then runs the prompt or tool unchecked.
+func emitClosed(opts Options, sp spec, r failResult) int {
+	if sp.style != styleCodex || !opts.ManagedEnterprise {
+		return emit(opts.Stdout, r)
+	}
+	if strings.TrimSpace(opts.Event) == "" {
+		// The runtime and home checks fail before the payload is read.
+		if payload, overflow, err := readCapped(opts.Stdin, opts.MaxBody); err == nil && !overflow {
+			opts.Event = resolveHookEvent("", payload)
+		}
+	}
+	if !emitCodexBlock(opts.Stdout, opts.Event, failedClosed) {
+		return emit(opts.Stdout, r)
+	}
+	return 0
+}
+
+// emitCodexBlock writes the block the gateway sends for the same event
+// (gateway codexOutput) and reports whether the event has one. Other events
+// keep the bare exit code.
+func emitCodexBlock(out io.Writer, event, reason string) bool {
+	encoded := mustJSONString(reason)
+	switch strings.TrimSpace(event) {
+	case "UserPromptSubmit", "PostToolUse", "Stop":
+		fmt.Fprintf(out, "{\"decision\":\"block\",\"reason\":%s}\n", encoded)
+	case "PreToolUse":
+		fmt.Fprintf(out,
+			"{\"hookSpecificOutput\":{\"hookEventName\":\"PreToolUse\",\"permissionDecision\":\"deny\",\"permissionDecisionReason\":%s}}\n",
+			encoded)
+	case "PermissionRequest":
+		fmt.Fprintf(out,
+			"{\"hookSpecificOutput\":{\"hookEventName\":\"PermissionRequest\",\"decision\":{\"behavior\":\"deny\",\"message\":%s}}}\n",
+			encoded)
+	default:
+		return false
+	}
+	return true
 }
 
 // emit writes a fail-closed JSON body (if any) and returns its exit code.
