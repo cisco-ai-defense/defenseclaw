@@ -408,7 +408,7 @@ func Install(ctx context.Context, opts InstallOptions) (InstallResult, error) {
 			return err
 		}
 
-		return withOwnerCredentials(uid, gid, func() error {
+		if err := withOwnerCredentials(uid, gid, func() error {
 			conn.SetCredentials(setupOpts.APIToken, opts.MasterKey)
 			previousLockEntry := connector.LoadHookContractLockEntry(dataDir, conn.Name())
 			lockWriteAttempted := false
@@ -496,7 +496,11 @@ func Install(ctx context.Context, opts InstallOptions) (InstallResult, error) {
 				HookContractID:  lockEntry.ContractID,
 			}
 			return nil
-		})
+		}); err != nil {
+			return err
+		}
+		platformRepairAfterOwnerInstall(home, dataDir, uid, gid)
+		return nil
 	})
 	if err != nil {
 		return InstallResult{}, err

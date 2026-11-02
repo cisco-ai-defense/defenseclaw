@@ -224,8 +224,27 @@ func canonicalizeDarwin(path string, kind ObjectKind, opts CanonicalOptions, rep
 		return fail(fmt.Errorf("resolve %s: %w", path, err))
 	}
 	result.Path = clean
-
 	object, err := openDarwinObject(clean, kind)
+	return canonicalizeOpenedDarwin(result, form, object, err, opts, repair)
+}
+
+// canonicalizeOpenedDarwin assesses and, when repair is set, re-stamps an
+// object canonicalizeDarwin or EnsureCanonicalAt opened. openErr is the
+// error from opening it.
+func canonicalizeOpenedDarwin(
+	result CanonicalResult,
+	form darwinCanonicalForm,
+	object *darwinObject,
+	err error,
+	opts CanonicalOptions,
+	repair bool,
+) (CanonicalResult, error) {
+	fail := func(err error) (CanonicalResult, error) {
+		result.Outcome = CanonicalStructural
+		result.Err = err
+		reportCanonicalResult(result, opts)
+		return result, err
+	}
 	if errors.Is(err, unix.ENOENT) {
 		result.Outcome = CanonicalMissing
 		return result, nil
@@ -317,6 +336,11 @@ type darwinObject struct {
 	fd   int
 	dev  int32
 	ino  uint64
+	// parentFD and name are set for an object opened relative to a pinned
+	// parent (EnsureCanonicalAt); the identity re-check and the ACL strip
+	// then go through descriptors instead of the path.
+	parentFD int
+	name     string
 }
 
 func openDarwinObject(path string, kind ObjectKind) (*darwinObject, error) {
@@ -333,7 +357,7 @@ func openDarwinObject(path string, kind ObjectKind) (*darwinObject, error) {
 	case err != nil:
 		return nil, fmt.Errorf("open %s: %w", path, err)
 	}
-	object := &darwinObject{path: path, kind: kind, fd: fd}
+	object := &darwinObject{path: path, kind: kind, fd: fd, parentFD: -1}
 	var st unix.Stat_t
 	if err := unix.Fstat(fd, &st); err != nil {
 		object.close()
@@ -382,7 +406,16 @@ func (o *darwinObject) sameObject() bool {
 	if err := unix.Lstat(o.path, &st); err != nil {
 		return false
 	}
-	return st.Dev == o.dev && st.Ino == o.ino
+	if st.Dev != o.dev || st.Ino != o.ino {
+		return false
+	}
+	if o.parentFD >= 0 {
+		if err := unix.Fstatat(o.parentFD, o.name, &st, unix.AT_SYMLINK_NOFOLLOW); err != nil {
+			return false
+		}
+		return st.Dev == o.dev && st.Ino == o.ino
+	}
+	return true
 }
 
 func (o *darwinObject) read() (darwinObjectState, error) {
@@ -427,7 +460,11 @@ func (o *darwinObject) stamp(state darwinObjectState, form darwinCanonicalForm) 
 		}
 	}
 	if state.ACL.Entries > 0 || state.ACLError != "" {
-		if err := stripDarwinACL(o.path); err != nil {
+		strip := func() error { return stripDarwinACL(o.path) }
+		if o.parentFD >= 0 {
+			strip = func() error { return stripDarwinACLFD(o.fd) }
+		}
+		if err := strip(); err != nil {
 			errs = append(errs, "strip ACL: "+err.Error())
 		}
 		if !o.sameObject() {

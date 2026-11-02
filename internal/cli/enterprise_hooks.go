@@ -1667,6 +1667,8 @@ func runEnterpriseHookReconcileOnce(ctx context.Context) (enterpriseHookReconcil
 				RecoveryHookContractLockUpdatedAt:  previousProtection.HookContractLockUpdatedAt,
 				RecoveryHookContractEntryUpdatedAt: previousProtection.HookContractEntryUpdatedAt,
 			}
+			// Repair the user's objects as root before anything validates them.
+			err = repairEnterpriseHookUserTargetPlatform(target, opts)
 			if err == nil {
 				if dirs, watchErr := enterprisehooks.WatchDirs(opts); watchErr == nil {
 					for _, dir := range dirs {
@@ -1694,6 +1696,7 @@ func runEnterpriseHookReconcileOnce(ctx context.Context) (enterpriseHookReconcil
 				if err == nil {
 					if repaired {
 						repairs++
+						reportEnterpriseHookTargetRepairedPlatform(target, result)
 					}
 					row.OK = true
 					row.UserHome = result.UserHome
