@@ -82,6 +82,9 @@ func TestManagedHookAcknowledgesItsCommittedAnswerOnTheSameRequest(t *testing.T)
 func TestManagedHookReceiptSurvivesAnswerDeadlineAfterAllowIsWritten(t *testing.T) {
 	const budget = 1500 * time.Millisecond
 	shortAnswerBudget(t, budget)
+	// The answer window ends before the full process cap. The receipt may
+	// finish after the answer window when the agent has accepted the verdict.
+	managedAnswerDeadlineCap = 3 * time.Second
 	received := make(chan string, 1)
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		controller := http.NewResponseController(w)
