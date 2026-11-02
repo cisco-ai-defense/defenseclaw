@@ -384,12 +384,19 @@ func TestBuildHookOptionsEnterpriseManagedFailsClosedOnOwnershipError(t *testing
 
 func TestEnterpriseManagedHookRuntimeFailsClosedForUnregisteredSID(t *testing.T) {
 	_, _ = stageTrustedNativeHookForTest(t, "closed")
+	// Outside Secure Client: TestSecureClientUnenrolledAccountTakesTheOpenDefault
+	// covers that profile.
+	savedSecureClient := secureClientHost
+	t.Cleanup(func() { secureClientHost = savedSecureClient })
+	secureClientHost = func() bool { return false }
+	unregistered := fmt.Errorf("%w: connector claudecode current SID S-1-5-21-1 is absent from the protected target set",
+		enterprisehooks.ErrWindowsManagedSIDUnregistered)
 	stubEnterpriseManagedRuntimeResolver(t, func(string, string) (enterprisehooks.WindowsManagedHookRuntime, error) {
 		return enterprisehooks.WindowsManagedHookRuntime{
 			Connector:    "claudecode",
 			DataDir:      filepath.Join(t.TempDir(), ".defenseclaw"),
 			PolicyActive: true,
-		}, errors.New(enterprisehooks.WindowsManagedSIDUnregisteredReason)
+		}, unregistered
 	})
 	if prepareEnterpriseManagedHookRuntime("claudecode") {
 		t.Fatal("unregistered SID was incorrectly treated as a no-op")
@@ -401,8 +408,9 @@ func TestEnterpriseManagedHookRuntimeFailsClosedForUnregisteredSID(t *testing.T)
 	}
 
 	// A registered account that has not signed in since it was enrolled has
-	// no runtime generation yet: the standalone hook says it is not enrolled
-	// yet instead of "gateway unreachable"; Secure Client keeps its reason.
+	// no runtime generation yet. The machine-side selector says so, so every
+	// managed profile reports the pending enrollment; the standalone hook
+	// then says it is not enrolled yet instead of "gateway unreachable".
 	previousStandalone := standaloneEnterpriseHookCheck
 	t.Cleanup(func() { standaloneEnterpriseHookCheck = previousStandalone })
 	for _, standalone := range []bool{false, true} {
@@ -417,11 +425,8 @@ func TestEnterpriseManagedHookRuntimeFailsClosedForUnregisteredSID(t *testing.T)
 			t.Fatal("a registered account without a runtime was treated as a no-op")
 		}
 		opts = buildHookOptionsForRuntime("claudecode", "PreToolUse", "", "open", true)
-		want := "enterprise_managed_runtime_state_invalid"
-		if standalone {
-			want = enterprisehooks.WindowsManagedEnrollmentPendingReason
-		}
-		if opts.ManagedRuntimeFailure != want || opts.FailMode != "closed" {
+		want := enterprisehooks.WindowsManagedEnrollmentPendingReason
+		if opts.ManagedRuntimeFailure != want || opts.FailMode != "closed" || !opts.StrictAvailability {
 			t.Fatalf("standalone=%t: runtime failure %q fail mode %q, want %q closed", standalone, opts.ManagedRuntimeFailure, opts.FailMode, want)
 		}
 	}
@@ -431,6 +436,66 @@ func TestEnterpriseManagedHookRuntimeFailsClosedForUnregisteredSID(t *testing.T)
 	if code := hookexec.Run(context.Background(), opts); code == 0 ||
 		!strings.Contains(stderr.String(), "this account is not enrolled") || strings.Contains(stderr.String(), "gateway unreachable") {
 		t.Fatalf("pending account: code %d stderr %q, want a block that names the enrollment", code, stderr.String())
+	}
+}
+
+// A Secure Client account that is not enrolled yet (absent from the target
+// set, or registered without a published runtime) has no authenticated
+// generation to name its mode: it takes the profile's open default (#1163),
+// and only DEFENSECLAW_STRICT_AVAILABILITY closes it. The standalone hook on
+// the same host, an error that only carries the reason text, and every other
+// runtime failure keep the closed, strict contract.
+func TestSecureClientUnenrolledAccountTakesTheOpenDefault(t *testing.T) {
+	_, _ = stageTrustedNativeHookForTest(t, "closed")
+	savedSecureClient := secureClientHost
+	previousStandalone := standaloneEnterpriseHookCheck
+	t.Cleanup(func() {
+		secureClientHost = savedSecureClient
+		standaloneEnterpriseHookCheck = previousStandalone
+	})
+	secureClientHost = func() bool { return true }
+	unregistered := fmt.Errorf("%w: connector claudecode current SID S-1-5-21-1 is absent from the protected target set",
+		enterprisehooks.ErrWindowsManagedSIDUnregistered)
+	pending := fmt.Errorf("enterprise hooks: registered SID is absent from the managed runtime generation selector: %w",
+		enterprisehooks.ErrWindowsManagedRuntimeGenerationPending)
+	for _, tc := range []struct {
+		name       string
+		err        error
+		standalone bool
+		strict     string
+		wantReason string
+		wantOpen   bool
+	}{
+		{"unregistered", unregistered, false, "0", enterprisehooks.WindowsManagedSIDUnregisteredReason, true},
+		{"pending", pending, false, "0", enterprisehooks.WindowsManagedEnrollmentPendingReason, true},
+		{"unregistered strict", unregistered, false, "1", enterprisehooks.WindowsManagedSIDUnregisteredReason, false},
+		{"pending strict", pending, false, "true", enterprisehooks.WindowsManagedEnrollmentPendingReason, false},
+		{"pending standalone", pending, true, "0", enterprisehooks.WindowsManagedEnrollmentPendingReason, false},
+		{"reason text without the sentinel", errors.New(enterprisehooks.WindowsManagedSIDUnregisteredReason + `: C:\Users\x`), false, "0", "enterprise_managed_runtime_state_invalid", false},
+		{"state invalid", errors.New("tampered managed ownership state"), false, "0", "enterprise_managed_runtime_state_invalid", false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			standalone, err := tc.standalone, tc.err
+			standaloneEnterpriseHookCheck = func(string) bool { return standalone }
+			t.Setenv("DEFENSECLAW_STRICT_AVAILABILITY", tc.strict)
+			stubEnterpriseManagedRuntimeResolver(t, func(string, string) (enterprisehooks.WindowsManagedHookRuntime, error) {
+				return enterprisehooks.WindowsManagedHookRuntime{
+					Connector:    "claudecode",
+					DataDir:      filepath.Join(t.TempDir(), ".defenseclaw"),
+					PolicyActive: true,
+				}, err
+			})
+			if prepareEnterpriseManagedHookRuntime("claudecode") {
+				t.Fatal("a runtime failure was treated as a no-op")
+			}
+			opts := buildHookOptionsForRuntime("claudecode", "PreToolUse", "", "open", true)
+			if opts.ManagedRuntimeFailure != tc.wantReason || !opts.ManagedEnterprise || !opts.SecureClient {
+				t.Fatalf("runtime failure %q, want %q: %+v", opts.ManagedRuntimeFailure, tc.wantReason, opts)
+			}
+			if gotOpen := opts.FailMode == "open" && !opts.StrictAvailability; gotOpen != tc.wantOpen {
+				t.Fatalf("fail mode %q strict %v, want open=%v", opts.FailMode, opts.StrictAvailability, tc.wantOpen)
+			}
+		})
 	}
 }
 
@@ -510,6 +575,10 @@ func TestRecognizedPerUserLauncherWithCachedManagedArgsNoopsAfterTombstone(t *te
 
 func TestRetainedActiveRuntimeFailsAsUnregisteredBeforeGatewayLookup(t *testing.T) {
 	executable, dataRoot := stageTrustedNativeHookForTest(t, "closed")
+	savedSecureClient := secureClientHost
+	t.Cleanup(func() { secureClientHost = savedSecureClient })
+	secureClientHost = func() bool { return false }
+	t.Setenv("DEFENSECLAW_STRICT_AVAILABILITY", "0")
 	stubEnterpriseManagedRuntimeResolver(t, func(string, string) (enterprisehooks.WindowsManagedHookRuntime, error) {
 		return enterprisehooks.WindowsManagedHookRuntime{Connector: "claudecode"}, nil
 	})
@@ -545,6 +614,14 @@ func TestRetainedActiveRuntimeFailsAsUnregisteredBeforeGatewayLookup(t *testing.
 	if opts.ManagedRuntimeFailure != enterprisehooks.WindowsManagedSIDUnregisteredReason ||
 		opts.APIAddr != "" || opts.FailMode != "closed" || !opts.StrictAvailability {
 		t.Fatalf("de-enrolled runtime was not rejected before gateway lookup: %+v", opts)
+	}
+	// Under Secure Client the de-enrolled account takes the profile's open
+	// default, still before any gateway lookup.
+	secureClientHost = func() bool { return true }
+	opts = buildHookOptionsForRuntime("claudecode", "PreToolUse", "", "open", true)
+	if opts.ManagedRuntimeFailure != enterprisehooks.WindowsManagedSIDUnregisteredReason ||
+		opts.APIAddr != "" || opts.FailMode != "open" || opts.StrictAvailability {
+		t.Fatalf("de-enrolled Secure Client runtime: %+v, want open before gateway lookup", opts)
 	}
 }
 
