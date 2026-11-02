@@ -13,6 +13,7 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/audit"
 	"github.com/defenseclaw/defenseclaw/internal/observability"
 	oteltrace "go.opentelemetry.io/otel/trace"
+	collectorlogspb "go.opentelemetry.io/proto/otlp/collector/logs/v1"
 )
 
 func TestHookDecisionMetricsV8ExportCompleteCompatibilitySetWithoutLegacyProvider(t *testing.T) {
@@ -170,8 +171,7 @@ func TestHookDecisionMetricsV8ExportCompleteCompatibilitySetWithoutLegacyProvide
 }
 
 func TestHookDecisionLogV8IncludesInspectedEventContent(t *testing.T) {
-	capture := &hookDecisionRecordCapture{}
-	api := &APIServer{observabilityV8: capture}
+	api, capture := bindHookModelV8Runtime(t, []string{"logs"})
 	req := agentHookRequest{ConnectorName: "claudecode", HookEventName: "TaskCreated"}
 	resp := agentHookResponse{
 		Action: "block", RawAction: "block", Severity: "HIGH", Mode: "action",
@@ -180,20 +180,28 @@ func TestHookDecisionLogV8IncludesInspectedEventContent(t *testing.T) {
 
 	api.emitHookDecisionObservabilityV8(t.Context(), req, resp, HookAuditEnvelope{Result: "ok"}, false)
 
-	if len(capture.records) != 1 {
-		t.Fatalf("generated hook decision records=%d want=1", len(capture.records))
+	deadline := time.Now().Add(3 * time.Second)
+	var logs []*collectorlogspb.ExportLogsServiceRequest
+	for time.Now().Before(deadline) {
+		logs = capture.logSnapshot()
+		if len(hookModelV8CapturedLogs(logs)) == 1 {
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
 	}
-	body, present := capture.records[0].Body()
-	if !present {
-		t.Fatal("hook decision body is absent")
+	records := hookModelV8CapturedLogs(logs)
+	if len(records) != 1 {
+		t.Fatalf("generated hook decision logs=%d want=1", len(records))
 	}
-	fields, err := body.Object()
-	if err != nil {
-		t.Fatal(err)
+	var wire struct {
+		Body map[string]interface{} `json:"body"`
 	}
-	messages, ok := fields["gen_ai.input.messages"].([]interface{})
+	if err := json.Unmarshal([]byte(records[0].Body.GetStringValue()), &wire); err != nil {
+		t.Fatalf("decode generated hook decision body: %v", err)
+	}
+	messages, ok := wire.Body["gen_ai.input.messages"].([]interface{})
 	if !ok || len(messages) != 1 {
-		t.Fatalf("gen_ai.input.messages=%v, want one message", fields["gen_ai.input.messages"])
+		t.Fatalf("gen_ai.input.messages=%v, want one message", wire.Body["gen_ai.input.messages"])
 	}
 	message, ok := messages[0].(map[string]interface{})
 	if !ok {
