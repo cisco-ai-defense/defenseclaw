@@ -3006,9 +3006,10 @@ func commandLinksRead(command, cwd, home string, facts map[string]string, record
 			globSafe := len(file.Stmts) == 1 && file.Stmts[0].Cmd == call &&
 				len(file.Stmts[0].Redirs) == 0 && len(callDirs) > 0
 			for _, dir := range callDirs {
-				// An unproved reading is recorded for the gateway but keeps
-				// the general copy reading below.
-				paths, proved, safe := copySourceGlobDestinations(call, dir, home, facts, record)
+				// An unproved reading keeps the general copy reading below;
+				// the client's protected-target decision covers an unscannable
+				// destination.
+				paths, proved, safe, _ := copySourceGlobDestinations(call, dir, home, facts, record)
 				if !safe || !proved {
 					globSafe = false
 					break

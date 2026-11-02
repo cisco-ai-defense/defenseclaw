@@ -200,7 +200,10 @@ func actionConcreteProtectedWriteOnWithOperands(command, cwd, home string, windo
 	}
 	loopWrites := BoundedLoopCopyDestinations(command, cwd, home)
 	writes = append(writes, loopWrites...)
-	sourceGlobWrites := CopySourceGlobDestinations(command, cwd, home, nil)
+	sourceGlobWrites, sourceGlobUnknown := CopySourceGlobDestinationsAndUnknown(command, cwd, home, nil)
+	if sourceGlobUnknown {
+		return true
+	}
 	writes = append(writes, sourceGlobWrites...)
 	globLoopWrites := boundedGlobLoopCopyDestinationsWithFile(command, cwd, home, nil, file)
 	writes = append(writes, globLoopWrites...)

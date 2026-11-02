@@ -30,7 +30,7 @@ const CopySourceGlobFactPrefix = "\x00copy-source-glob:"
 // Bounds of the copy source reading (rel-1-0-6:GAP-0396). A reading past
 // them is not proved; the destination is still judged, see copyChildScan.
 const (
-	maxCopySourceChildren = 32   // destination children one call may name
+	maxCopySourceChildren = 32   // destination children one fact may carry
 	maxCopySourceReads    = 16   // directories one call's patterns may list
 	maxCopySourceNames    = 4096 // names read from one directory
 )
@@ -138,42 +138,43 @@ func copySourceOf(word *syntax.Word, home string, env expand.Environ) (copySourc
 // writes DEST/NAME through an existing link at that name. The hook client
 // expands each pattern as the user; a managed gateway reads the client's
 // fact. proved is false when a pattern could not be expanded within the
-// bounds; the destination and its matching link children are then still
-// listed, so an unproved expansion never drops the protected-target check.
-func copySourceGlobDestinations(call *syntax.CallExpr, dir, home string, facts map[string]string, record bool) (paths []string, proved, ok bool) {
+// bounds; the destination and its matching link or hardlink children are
+// then listed. If those children cannot be checked within the bounds,
+// unknown keeps the protected-target decision.
+func copySourceGlobDestinations(call *syntax.CallExpr, dir, home string, facts map[string]string, record bool) (paths []string, proved, ok, unknown bool) {
 	if !filepath.IsAbs(dir) {
-		return nil, false, false
+		return nil, false, false, false
 	}
 	reading, ok := readCopyCall(call, home)
 	if !ok || !reading.patterns {
-		return nil, false, false
+		return nil, false, false, false
 	}
 	destination := OperandPath(reading.destination, dir)
 	key := copySourceGlobFactKey(call, dir)
 	if !record && facts != nil {
 		encoded := facts[key]
 		if encoded == "" {
-			return nil, false, false
+			return nil, false, false, false
 		}
 		decoded, ok := decodeCopySourceGlobFact(encoded)
 		if !ok || decoded[0] != destination {
-			return nil, false, false
+			return nil, false, false, false
 		}
 		for _, path := range decoded[1:] {
 			if name, child := copyChildName(destination, path); !child || strings.HasPrefix(name, "-") {
-				return nil, false, false
+				return nil, false, false, false
 			}
 		}
 		switch {
 		case strings.HasPrefix(encoded, copySourceUnprovedChildrenMark):
-			return decoded[1:], false, true
+			return decoded[1:], false, true, false
 		case strings.HasPrefix(encoded, copySourceUnprovedMark):
-			return decoded, false, true
+			return decoded, false, true, false
 		}
-		return decoded, true, true
+		return decoded, true, true, false
 	}
 	if actionGlobViewHidden(dir, home) {
-		return nil, false, false
+		return nil, false, false, false
 	}
 	userView := actionProcessOwnsHome(home)
 	names := map[string]bool{}
@@ -192,7 +193,7 @@ func copySourceGlobDestinations(call *syntax.CallExpr, dir, home string, facts m
 		for _, match := range matches {
 			if strings.HasPrefix(match.word, "-") {
 				// An expanded option changes what cp writes.
-				return nil, false, false
+				return nil, false, false, false
 			}
 			addCopyChildName(names, filepath.Base(match.path))
 		}
@@ -223,16 +224,25 @@ func copySourceGlobDestinations(call *syntax.CallExpr, dir, home string, facts m
 				patterns = append(patterns, name)
 			}
 		}
-		links, scanned := copyLinkChildren(destination, patterns)
+		// A source listing can be complete even when it names more children
+		// than the fact can carry. Probe those exact child names instead of
+		// listing a destination that may be past its entry bound.
+		var links []string
+		var scanned bool
+		if len(unproved) == 0 {
+			links, scanned = copyNamedLinkChildren(destination, names)
+		} else {
+			links, scanned = copyLinkChildren(destination, patterns)
+		}
 		if !scanned {
-			return nil, false, false
+			return nil, false, true, true
 		}
 		children = links
 		info, err := pathLstat(destination)
 		includeDestination = err != nil || info.Mode()&(os.ModeSymlink|os.ModeIrregular) != 0
 	}
 	if len(children) > maxCopySourceChildren {
-		return nil, false, false
+		return nil, false, true, true
 	}
 	slices.Sort(children)
 	paths = append([]string{destination}, children...)
@@ -250,9 +260,9 @@ func copySourceGlobDestinations(call *syntax.CallExpr, dir, home string, facts m
 		}
 	}
 	if !includeDestination {
-		return paths[1:], proved, true
+		return paths[1:], proved, true, false
 	}
-	return paths, proved, true
+	return paths, proved, true, false
 }
 
 // copyLiteralDestinations reads a plain copy of fixed sources (cp src/a.md
@@ -343,7 +353,7 @@ func expandCopySourcePattern(pattern, dir string, userView bool, reads *int) ([]
 	}
 	current := []copySourceMatch{{path: start, word: word}}
 	components := strings.Split(rest, "/")
-	for i, component := range components {
+	for _, component := range components {
 		if component == "" {
 			continue
 		}
@@ -364,7 +374,6 @@ func expandCopySourcePattern(pattern, dir string, userView bool, reads *int) ([]
 		if !ok {
 			return nil, false
 		}
-		last := i == len(components)-1
 		var next []copySourceMatch
 		for _, m := range current {
 			if *reads++; *reads > maxCopySourceReads {
@@ -379,7 +388,7 @@ func expandCopySourcePattern(pattern, dir string, userView bool, reads *int) ([]
 					continue
 				}
 				next = append(next, join(m, name))
-				if len(next) > maxCopySourceChildren && last {
+				if len(next) > maxCopySourceNames {
 					return nil, false
 				}
 			}
@@ -417,7 +426,36 @@ func readCopyDirNames(path string, userView bool) ([]string, bool) {
 	return names, len(names) <= maxCopySourceNames
 }
 
-// copyLinkChildren lists the links (and Windows junctions) in destination
+// copyNamedLinkChildren checks exact source basenames without reading the
+// destination directory. It is used when a complete source listing exceeds
+// the smaller child-fact bound.
+func copyNamedLinkChildren(destination string, names map[string]bool) ([]string, bool) {
+	var links []string
+	for name := range names {
+		path := copyChild(destination, name)
+		info, err := pathLstat(path)
+		if err != nil {
+			if errors.Is(err, fs.ErrNotExist) || errors.Is(err, syscall.ENOTDIR) {
+				continue
+			}
+			return nil, false
+		}
+		if copyPotentialLink(path, info) {
+			links = append(links, path)
+			if len(links) > maxCopySourceChildren {
+				return nil, false
+			}
+		}
+	}
+	return links, true
+}
+
+func copyPotentialLink(path string, info os.FileInfo) bool {
+	return info.Mode()&(os.ModeSymlink|os.ModeIrregular) != 0 ||
+		info.Mode().IsRegular() && linkCount(path, info) > 1
+}
+
+// copyLinkChildren lists links, hardlinks and Windows junctions in destination
 // that one of patterns may name: the children an unproved source expansion
 // may write through. A destination that cannot be read within the bounds
 // is not scanned; one that does not exist or is not a directory has none.
@@ -426,7 +464,13 @@ func copyLinkChildren(destination string, patterns []string) ([]string, bool) {
 	for _, pattern := range patterns {
 		matcher, ok := bashGlobComponent(pattern)
 		if !ok {
-			matcher = "*"
+			// Even when a class cannot be translated, each bracket names
+			// one character. Keep the surrounding literals and extension;
+			// widening the whole basename to * includes disjoint links.
+			matcher, ok = copyGlobShape(pattern)
+			if !ok {
+				matcher = "*"
+			}
 		}
 		matchers = append(matchers, matcher)
 	}
@@ -447,13 +491,17 @@ func copyLinkChildren(destination string, patterns []string) ([]string, bool) {
 	}
 	var links []string
 	for _, entry := range entries {
-		if entry.Type()&(os.ModeSymlink|os.ModeIrregular) == 0 {
-			continue
-		}
 		name := entry.Name()
 		for _, matcher := range matchers {
 			if copyGlobNameMatch(matcher, name) {
-				links = append(links, copyChild(destination, name))
+				path := copyChild(destination, name)
+				info, err := entry.Info()
+				if err != nil {
+					return nil, false
+				}
+				if copyPotentialLink(path, info) {
+					links = append(links, path)
+				}
 				break
 			}
 		}
@@ -462,7 +510,7 @@ func copyLinkChildren(destination string, patterns []string) ([]string, bool) {
 }
 
 // bashGlobComponent translates one bash pattern component to the
-// filepath.Match syntax, in lower case: [!x] is [^x], and the POSIX classes
+// filepath.Match syntax: [!x] is [^x], and the POSIX classes
 // the reader knows become ranges. An escape, another class, an unterminated
 // bracket or a bracket body filepath.Match may read otherwise is not
 // translated.
@@ -502,12 +550,47 @@ func bashGlobComponent(component string) (string, bool) {
 			b.WriteByte(c)
 		}
 	}
-	return strings.ToLower(b.String()), true
+	return b.String(), true
+}
+
+// copyGlobShape preserves the width of a bracket the exact reader cannot
+// translate, including a POSIX class. It only narrows an unproved link scan;
+// the source expansion itself remains unproved.
+func copyGlobShape(component string) (string, bool) {
+	var b strings.Builder
+	for i := 0; i < len(component); i++ {
+		switch component[i] {
+		case '\\', ']':
+			return "", false
+		case '[':
+			j := i + 1
+			for j < len(component) && component[j] != ']' {
+				if strings.HasPrefix(component[j:], "[:") {
+					end := strings.Index(component[j+2:], ":]")
+					if end < 0 {
+						return "", false
+					}
+					j += 2 + end + 2
+					continue
+				}
+				j++
+			}
+			if j == len(component) {
+				return "", false
+			}
+			b.WriteByte('?')
+			i = j
+		default:
+			b.WriteByte(component[i])
+		}
+	}
+	return b.String(), true
 }
 
 var posixGlobClasses = map[string]string{
 	"digit": "0-9", "lower": "a-z", "upper": "A-Z", "alpha": "a-zA-Z",
 	"alnum": "0-9a-zA-Z", "xdigit": "0-9a-fA-F", "space": " \t", "blank": " \t",
+	"punct": "!-/:-@[-`{-~",
 }
 
 func bashBracketBody(body string) (string, bool) {
@@ -542,10 +625,15 @@ func bashBracketBody(body string) (string, bool) {
 	return b.String(), true
 }
 
-// copyGlobNameMatch matches a translated (lower-case) component without
-// case. A dot name matches as with dotglob.
+// copyGlobNameMatch accepts both the ordinary case-sensitive Bash match and
+// the nocaseglob match. Folding alone is unsound for negated brackets: [!A]
+// matches a when nocaseglob is off. A dot name matches as with dotglob.
 func copyGlobNameMatch(matcher, name string) bool {
-	matched, err := filepath.Match(matcher, strings.ToLower(name))
+	matched, err := filepath.Match(matcher, name)
+	if err != nil || matched {
+		return err == nil && matched
+	}
+	matched, err = filepath.Match(strings.ToLower(matcher), strings.ToLower(name))
 	return err == nil && matched
 }
 
@@ -582,23 +670,30 @@ func decodeCopySourceGlobFact(encoded string) ([]string, bool) {
 // through, for pattern sources (copySourceGlobDestinations) and for fixed
 // sources (copyLiteralDestinations), rel-1-0-6:GAP-0396.
 func CopySourceGlobDestinations(command, cwd, home string, facts map[string]string) []string {
+	paths, _ := CopySourceGlobDestinationsAndUnknown(command, cwd, home, facts)
+	return paths
+}
+
+// CopySourceGlobDestinationsAndUnknown also reports an expansion whose
+// destination children cannot be judged within the reader's bounds.
+func CopySourceGlobDestinationsAndUnknown(command, cwd, home string, facts map[string]string) ([]string, bool) {
 	if !strings.Contains(command, "cp") || strings.HasPrefix(strings.TrimSpace(command), "for ") {
-		return nil
+		return nil, false
 	}
 	file, ok := parseShell(command)
 	if !ok || len(file.Stmts) != 1 || len(file.Stmts[0].Redirs) != 0 {
-		return nil
+		return nil, false
 	}
 	call, ok := file.Stmts[0].Cmd.(*syntax.CallExpr)
 	if !ok {
-		return nil
+		return nil, false
 	}
 	if paths := copyLiteralDestinations(call, cwd, home, facts); paths != nil {
-		return paths
+		return paths, false
 	}
-	paths, _, ok := copySourceGlobDestinations(call, cwd, home, facts, false)
+	paths, _, ok, unknown := copySourceGlobDestinations(call, cwd, home, facts, false)
 	if !ok {
-		return nil
+		return nil, false
 	}
-	return paths
+	return paths, unknown
 }
