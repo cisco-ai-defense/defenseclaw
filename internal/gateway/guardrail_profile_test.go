@@ -382,9 +382,14 @@ type testVerifiedSubjectKey struct{}
 
 // stubProfileSources replaces the verified-identity sources for one test:
 // only a subject placed under testVerifiedSubjectKey is verified, and the
-// gateway's process owner is not.
+// gateway's process owner is not. The test also starts without a
+// process-wide profile set. An API server of an earlier test (NewAPIServer
+// publishes its set) would otherwise be the set snapshotRulePackGenerationFor
+// re-resolves the requests of this test against, so the rules of its own
+// profiles never fired on the next -count iteration (rel-1-0-6 GAP-0335).
 func stubProfileSources(t *testing.T) {
 	t.Helper()
+	liveGuardrailProfiles.Store(nil)
 	prevSubject, prevAgent, prevOwner := profileSubjectSource, profileAgentSource, processOwnerProfileSubject
 	profileSubjectSource = func(ctx context.Context) (profileSubject, bool) {
 		subject, ok := ctx.Value(testVerifiedSubjectKey{}).(profileSubject)

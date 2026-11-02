@@ -55,7 +55,12 @@ func meetVerdictFixtureSelected(t *testing.T, a, b config.GuardrailProfile, aRul
 	}
 	set.missing = nil
 	api := &APIServer{scannerCfg: cfg, health: NewSidecarHealth()}
-	api.guardrailProfiles.set.Store(set)
+	// Publish the fixture's set as a gateway does and put the process-wide
+	// set back after: a set another test's API server had left there was
+	// resolved instead on later -count runs (rel-1-0-6 GAP-0335).
+	previous := liveGuardrailProfiles.Load()
+	t.Cleanup(func() { liveGuardrailProfiles.Store(previous) })
+	api.setGuardrailProfiles(set)
 	subject := context.WithValue(t.Context(), testVerifiedSubjectKey{}, identityTestSubject(p, p.providers[0], stateProven, true))
 	ctx := api.withGuardrailProfileDecision(withProfilePath(subject, profilePathHook), "codex")
 	if got := resolvedGuardrailProfileFrom(ctx).decision; got.Name != wantSelection || got.Refused != "" {

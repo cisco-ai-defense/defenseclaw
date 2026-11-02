@@ -235,6 +235,10 @@ func newRelayFixtureWith(t *testing.T, routes map[string]sandboxRelayRoute, muta
 		sandboxAuthorityKey = prevKey
 		sandboxBudgetLimits[sandboxBudgetHook] = prevHook
 	})
+	// NewAPIServer publishes the config's profile set process-wide; the next
+	// test must not resolve against it (rel-1-0-6 GAP-0335).
+	previousProfiles := liveGuardrailProfiles.Load()
+	t.Cleanup(func() { liveGuardrailProfiles.Store(previousProfiles) })
 	api := NewAPIServer("127.0.0.1:18970", NewSidecarHealth(), nil, nil, nil, cfg)
 	auth, err := api.sandboxAuth()
 	if err != nil {
