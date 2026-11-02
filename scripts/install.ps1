@@ -129,16 +129,17 @@ $SetupDelegatedHooks = Join-Path $env:LOCALAPPDATA "DefenseClaw\HookRuntime\dele
 # defenseclaw-hook-guard.exe is the Claude Code PreToolUse guard, a small
 # GUI-subsystem program, so a tool call never opens a console window (GAP-2467).
 $ManagedBinaries = @("defenseclaw-gateway.exe", "defenseclaw-hook.exe", "defenseclaw-hook-guard.exe", "defenseclaw-acp.exe")
-# .cmd shims in BinDir for console scripts in the venv; the gateway runs them by name.
+# .cmd shims in BinDir for console scripts; the gateway runs them by name.
 $ManagedShims = @("defenseclaw", "skill-scanner", "mcp-scanner")
 # Git Bash does not run a .cmd file by its bare name, so `defenseclaw` there
 # runs this extensionless script. cmd.exe and PowerShell ignore it: it has no
 # PATHEXT extension.
 $PosixShim = "defenseclaw"
-# PowerShell and cmd.exe run `defenseclaw` through this copy of the venv's
-# native console-script launcher: PATHEXT puts .exe before .cmd. Through the
+# PowerShell and cmd.exe run `defenseclaw` through the native CLI launcher:
+# PATHEXT puts .exe before .cmd. Through the
 # .cmd shim, cmd.exe asked "Terminate batch job (Y/N)?" after every Ctrl+C
-# (GAP-2237); defenseclaw.cmd stays for callers that name it.
+# (GAP-2237); defenseclaw.cmd stays for callers that name it and enters the
+# same native launcher.
 $CliLauncher = "defenseclaw.exe"
 # defenseclaw-hook.exe reads its data dir from the state file beside it, never
 # from the environment an agent runs it with (a custom DEFENSECLAW_HOME too).
@@ -3575,23 +3576,24 @@ function Install-New {
         if (Test-Path -LiteralPath $staged) { Install-File $staged (Join-Path $BinDir $name) }
     }
     Save-HelperRecoveryCopy
-    foreach ($name in $ManagedShims) {
+    foreach ($name in @($ManagedShims | Where-Object { $_ -ne "defenseclaw" })) {
         $target = Join-Path $Venv "Scripts\$name.exe"
         if (Test-Path -LiteralPath $target) { Write-Shim $name $target }
         elseif (Test-Path -LiteralPath (Join-Path $BinDir "$name.cmd")) { Remove-Aside (Join-Path $BinDir "$name.cmd") }
     }
+    Write-HookState
     $target = Join-Path $Venv "Scripts\defenseclaw.exe"
     if (Test-Path -LiteralPath $target) {
         Write-PosixShim (Join-Path $BinDir $CliLauncher)
         # The native CLI entry checks the recorded data root before uv starts.
         Install-File (Join-Path $BinDir "defenseclaw-gateway.exe") (Join-Path $BinDir $CliLauncher)
+        Write-Shim "defenseclaw" (Join-Path $BinDir $CliLauncher)
     }
     else {
-        foreach ($name in @($PosixShim, $CliLauncher)) {
+        foreach ($name in @($PosixShim, $CliLauncher, "defenseclaw.cmd")) {
             if (Test-Path -LiteralPath (Join-Path $BinDir $name)) { Remove-Aside (Join-Path $BinDir $name) }
         }
     }
-    Write-HookState
     if ((Test-Path -LiteralPath (Join-Path $DataDir "config.yaml")) -or $env:DEFENSECLAW_CONFIG) {
         Write-Info "Migrating config and data"
         Find-RetiredConnectors

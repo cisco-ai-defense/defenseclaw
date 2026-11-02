@@ -650,6 +650,29 @@ def test_cli_shim_is_the_one_uninstall_recognizes() -> None:
     assert f'"{target}" %*'.lower() in shim.lower()
 
 
+def test_installer_cmd_uses_native_launcher_and_uninstall_accepts_upgrade_shim(tmp_path: Path) -> None:
+    source = _text()
+    start = source.index("function Install-New {")
+    install = source[start : source.index("\n}\n", start)]
+    native = 'Install-File (Join-Path $BinDir "defenseclaw-gateway.exe") (Join-Path $BinDir $CliLauncher)'
+    shim = 'Write-Shim "defenseclaw" (Join-Path $BinDir $CliLauncher)'
+    assert install.index(native) < install.index(shim)
+    assert 'Write-Shim $name $target' in install
+    assert '$_ -ne "defenseclaw"' in install
+
+    command_dir = tmp_path / ".local" / "bin"
+    command_dir.mkdir(parents=True)
+    command = command_dir / "defenseclaw.cmd"
+    legacy = tmp_path / ".defenseclaw" / ".venv" / "Scripts" / "defenseclaw.exe"
+    for target in (command_dir / "defenseclaw.exe", legacy):
+        command.write_bytes(f'@echo off\r\n"{target}" %*\r\n'.encode("utf-8"))
+        assert windows_uninstall_helper.shim_runs(str(command), str(legacy))
+    command.write_bytes(b'@echo off\r\n"C:\\other\\defenseclaw.exe" %*\r\n')
+    assert not windows_uninstall_helper.shim_runs(str(command), str(legacy))
+    command.write_bytes(f'@echo off\r\n"{command_dir / "defenseclaw.exe"}" %*\r\nexit /b 0\r\n'.encode("utf-8"))
+    assert not windows_uninstall_helper.shim_runs(str(command), str(legacy))
+
+
 @pytest.mark.skipif(POWERSHELL is None, reason="PowerShell is not installed")
 def test_powershell_parses_the_scripts_and_help_runs(tmp_path: Path) -> None:
     script = rf"""

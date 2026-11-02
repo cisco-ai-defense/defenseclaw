@@ -142,7 +142,7 @@ def _shim_encodings() -> list[str]:
 
 
 def shim_runs(path: str, executable: str) -> bool:
-    """Report whether the .cmd shim at path runs executable with its arguments.
+    """Report whether the .cmd shim runs an owned CLI launcher with its arguments.
 
     The CLI uses this check too. A non-ASCII profile path is encoded
     differently in each code page (install.ps1 writes "\u00e9" as byte 0x82
@@ -155,13 +155,17 @@ def shim_runs(path: str, executable: str) -> bool:
         data = stream.read(_SHIM_MAX_BYTES + 1)
     if len(data) > _SHIM_MAX_BYTES:
         raise ValueError("Windows CLI shim is oversized")
-    invocation = f'"{executable}" %*'.lower()
+    invocations = (
+        f'"{executable}" %*'.lower(),  # Earlier installer releases.
+        f'"{os.path.join(os.path.dirname(path), "defenseclaw.exe")}" %*'.lower(),
+    )
     for encoding in _shim_encodings():
         try:
             text = data.decode(encoding, errors="replace")
         except LookupError:
             continue
-        if invocation in text.lower():
+        lines = text.splitlines()
+        if len(lines) == 2 and lines[0].lower() == "@echo off" and lines[1].lower() in invocations:
             return True
     return False
 
