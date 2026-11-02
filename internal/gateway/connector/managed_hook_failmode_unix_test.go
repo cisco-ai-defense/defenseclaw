@@ -144,7 +144,7 @@ func TestManagedShellHookUnexpectedFailureFollowsFailMode(t *testing.T) {
 			}
 		},
 		"helper has an unbound variable": func(t *testing.T, hookDir string) {
-			if err := os.WriteFile(filepath.Join(hookDir, "_hardening.sh"), []byte("echo \"$DEFENSECLAW_NOT_SET_ANYWHERE\"\n"), 0o600); err != nil {
+			if err := os.WriteFile(filepath.Join(hookDir, "_hardening.sh"), []byte("echo \"$_DC_TEST_UNSET_VARIABLE\"\n"), 0o600); err != nil {
 				t.Fatal(err)
 			}
 		},

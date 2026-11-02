@@ -52,7 +52,7 @@ const managedHookBlockSentence = "DefenseClaw blocked this action because its ho
 const managedHookPrologueTemplate = `{{define "managed-prologue"}}
 unset DEFENSECLAW_HOOK_MAX_BODY DEFENSECLAW_HOOK_HOME DEFENSECLAW_FAIL_MODE \
   DEFENSECLAW_CONNECTOR DEFENSECLAW_HOOK_PATH DEFENSECLAW_HOOK_PATH_TRUSTED
-DEFENSECLAW_MANAGED_FAIL_MODE="{{.FailMode}}"
+_DC_MANAGED_FAIL_MODE="{{.FailMode}}"
 _DC_BLOCK_REASON_SENT=0
 _DC_EXIT_INTENDED=0
 exec 6>&2
@@ -76,15 +76,15 @@ _dc_managed_fail() {
   set +e
   trap - ERR EXIT
   local outcome=fail_open
-  [ "$DEFENSECLAW_MANAGED_FAIL_MODE" = "closed" ] && outcome=fail_closed
+  [ "$_DC_MANAGED_FAIL_MODE" = "closed" ] && outcome=fail_closed
   printf 'defenseclaw: {{.ConnectorName}} hook unexpected failure (%s); fail mode %s\n' \
-    "$1" "$DEFENSECLAW_MANAGED_FAIL_MODE" >&2 2>/dev/null
+    "$1" "$_DC_MANAGED_FAIL_MODE" >&2 2>/dev/null
   if declare -F defenseclaw_log_hook_failure >/dev/null 2>&1; then
     defenseclaw_log_hook_failure "{{.ConnectorName}}" "${DEFENSECLAW_HOOK_NAME:-{{.ConnectorName}}-hook}" \
-      "unexpected hook failure: $1" internal "$DEFENSECLAW_MANAGED_FAIL_MODE" "$outcome" >/dev/null 2>&1
+      "unexpected hook failure: $1" internal "$_DC_MANAGED_FAIL_MODE" "$outcome" >/dev/null 2>&1
   fi
   _dc_managed_cleanup
-  if [ "$DEFENSECLAW_MANAGED_FAIL_MODE" = "closed" ]; then
+  if [ "$_DC_MANAGED_FAIL_MODE" = "closed" ]; then
 {{- if eq .ConnectorName "cursor"}}
     printf '%s\n' '{"continue":false,"permission":"deny","user_message":"DefenseClaw hook failed closed","agent_message":"DefenseClaw hook failed closed"}'
 {{- else}}
