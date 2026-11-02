@@ -153,8 +153,8 @@ const PerUserPostPeerUnverifiedExit = 8
 const PerUserPostNoAnswerExit = 9
 
 // PerUserPostRestartNoAnswerExit is the exit status of `hook-post` for such a
-// call while a start or restart of this account's gateway holds its start
-// lock and the process behind the call's connection changed during the call
+// call while a start or restart of this account's gateway holds or held its
+// start lock during the call and the process behind the call's connection changed
 // (PerUserGatewayRestartProven, Linux and macOS): the gateway that took the
 // call is gone or no longer owns the port. The shell hooks read it as the
 // restart outage (7, restart waited), whatever the call's first try was

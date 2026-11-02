@@ -17,6 +17,7 @@ import (
 	"io"
 	"os"
 	"strconv"
+	"sync/atomic"
 	"time"
 
 	"github.com/defenseclaw/defenseclaw/internal/gateway/connector/hookexec"
@@ -135,6 +136,67 @@ func requestTimeout(maxTime int) time.Duration {
 	return time.Duration(ms) * time.Millisecond
 }
 
+type gatewayStartObservation struct {
+	start   bool
+	changed bool
+}
+
+// observeGatewayStartDuringCall samples the account-owned start lock after
+// the request reaches a verified gateway socket. Once that lock is released,
+// it checks whether the connected peer gave up the port. Both signals may be
+// gone by the time an unanswered call reaches its deadline.
+func observeGatewayStartDuringCall(dataDir string, peer *hookexec.PerUserPeerRecord) func() gatewayStartObservation {
+	if dataDir == "" || peer == nil {
+		return func() gatewayStartObservation { return gatewayStartObservation{} }
+	}
+	stop := make(chan struct{})
+	var start, changed atomic.Bool
+	go func() {
+		select {
+		case <-peer.Connected():
+		case <-stop:
+			return
+		}
+		ticker := time.NewTicker(25 * time.Millisecond)
+		defer ticker.Stop()
+		for {
+			if hookexec.PerUserGatewayStartInProgress(dataDir) {
+				start.Store(true)
+				break
+			}
+			select {
+			case <-ticker.C:
+			case <-stop:
+				return
+			}
+		}
+		for hookexec.PerUserGatewayStartInProgress(dataDir) {
+			select {
+			case <-ticker.C:
+			case <-stop:
+				return
+			}
+		}
+		proofTicker := time.NewTicker(100 * time.Millisecond)
+		defer proofTicker.Stop()
+		for {
+			if hookexec.PerUserGatewayRestartProvenDuringCall(dataDir, peer, true) {
+				changed.Store(true)
+				return
+			}
+			select {
+			case <-proofTicker.C:
+			case <-stop:
+				return
+			}
+		}
+	}()
+	return func() gatewayStartObservation {
+		close(stop)
+		return gatewayStartObservation{start: start.Load(), changed: changed.Load()}
+	}
+}
+
 func main() {
 	os.Exit(runMain(os.Args[1:], os.Stdin, os.Stdout, os.Stderr))
 }
@@ -148,7 +210,9 @@ func runMain(args []string, input io.Reader, output, errOutput io.Writer) int {
 	// folder.
 	dataDir := os.Getenv(hookPostDataDirEnv)
 	peer := hookexec.NewPerUserPeerRecord()
+	stopObservingStart := observeGatewayStartDuringCall(dataDir, peer)
 	err := runWithPeer(args, input, output, peer)
+	startObservation := stopObservingStart()
 	if err == nil {
 		return 0
 	}
@@ -168,10 +232,10 @@ func runMain(args []string, input io.Reader, output, errOutput io.Writer) int {
 		return hookexec.PerUserPostPeerUnverifiedExit
 	case hookexec.PerUserPostNoAnswer(err):
 		// No status before the deadline: the shell hook reads it as a
-		// timeout, or as the restart outage while a start or restart of
-		// this account's gateway holds its start lock and the gateway
-		// process changed during the call (rel-1-0-6 GAP-0295).
-		if hookexec.PerUserGatewayRestartProven(dataDir, peer) {
+		// timeout, or as the restart outage when this account's start lock
+		// was held after the call reached its gateway and that gateway gave
+		// up the port during the call (rel-1-0-6 GAP-0498).
+		if startObservation.changed || hookexec.PerUserGatewayRestartProvenDuringCall(dataDir, peer, startObservation.start) {
 			return hookexec.PerUserPostRestartNoAnswerExit
 		}
 		return hookexec.PerUserPostNoAnswerExit

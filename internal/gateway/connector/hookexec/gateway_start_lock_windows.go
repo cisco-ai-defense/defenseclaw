@@ -11,3 +11,6 @@ func PerUserGatewayStartInProgress(string) bool { return false }
 
 // PerUserGatewayRestartProven is false on Windows.
 func PerUserGatewayRestartProven(string, *PerUserPeerRecord) bool { return false }
+
+// PerUserGatewayRestartProvenDuringCall is unused by Windows hooks.
+func PerUserGatewayRestartProvenDuringCall(string, *PerUserPeerRecord, bool) bool { return false }

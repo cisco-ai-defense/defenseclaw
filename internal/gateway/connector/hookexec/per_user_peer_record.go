@@ -30,15 +30,26 @@ type perUserPeerProcess struct {
 // agent cannot write it. Read in the background from the moment the
 // connection's owner is proven, while the connection is open.
 type PerUserPeerRecord struct {
-	once sync.Once
-	done chan struct{}
-	peer perUserPeerProcess
-	ok   bool
+	once      sync.Once
+	connected chan struct{}
+	done      chan struct{}
+	peer      perUserPeerProcess
+	ok        bool
 }
 
 // NewPerUserPeerRecord returns an empty record for one request.
 func NewPerUserPeerRecord() *PerUserPeerRecord {
-	return &PerUserPeerRecord{done: make(chan struct{})}
+	return &PerUserPeerRecord{connected: make(chan struct{}), done: make(chan struct{})}
+}
+
+// Connected closes when the transport has verified the socket that carries
+// this request. A caller can observe a gateway restart only from that point
+// onward, rather than from before the call was sent.
+func (r *PerUserPeerRecord) Connected() <-chan struct{} {
+	if r == nil {
+		return nil
+	}
+	return r.connected
 }
 
 type perUserPeerRecordKey struct{}
@@ -58,6 +69,7 @@ func (r *PerUserPeerRecord) capture(local, remote net.Addr) {
 		return
 	}
 	r.once.Do(func() {
+		close(r.connected)
 		client, okc := local.(*net.TCPAddr)
 		server, oks := remote.(*net.TCPAddr)
 		go func() {

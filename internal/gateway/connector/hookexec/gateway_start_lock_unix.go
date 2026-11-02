@@ -61,8 +61,8 @@ func PerUserGatewayStartInProgress(dataDir string) bool {
 
 // PerUserGatewayRestartProven reports a no-answer of a per-user call that a
 // restart of this account's gateway explains (rel-1-0-6 GAP-0295, lead
-// ruling): a start, restart or hook cold start holds the start lock now
-// (PerUserGatewayStartInProgress), and the process that owned the server
+// ruling): a start, restart or hook cold start holds the start lock at the
+// deadline, and the process that owned the server
 // end of the connection this call was sent on (peer, read from the kernel
 // when the call connected) is gone, was replaced (its pid now names another
 // process), or no longer owns the gateway port because another process
@@ -75,10 +75,18 @@ func PerUserGatewayStartInProgress(dataDir string) bool {
 // deadline (review r3 finding 3): a proof that is not done by then is no
 // proof, and hook-post exits 9.
 func PerUserGatewayRestartProven(dataDir string, peer *PerUserPeerRecord) bool {
+	return PerUserGatewayRestartProvenDuringCall(dataDir, peer, false)
+}
+
+// PerUserGatewayRestartProvenDuringCall also accepts a start lock observed
+// after this request reached its verified socket. The lock may have been
+// released by the time the unanswered request reaches its deadline. A changed
+// peer is still required; a gateway that remains up and slow stays closed.
+func PerUserGatewayRestartProvenDuringCall(dataDir string, peer *PerUserPeerRecord, startObserved bool) bool {
 	ctx, cancel := context.WithTimeout(context.Background(), perUserRestartProofBudget)
 	defer cancel()
 	proven := make(chan bool, 1)
-	go func() { proven <- perUserGatewayRestartProof(ctx, dataDir, peer) }()
+	go func() { proven <- perUserGatewayRestartProof(ctx, dataDir, peer, startObserved) }()
 	select {
 	case ok := <-proven:
 		return ok && ctx.Err() == nil
@@ -90,8 +98,8 @@ func PerUserGatewayRestartProven(dataDir string, peer *PerUserPeerRecord) bool {
 // perUserRestartProofBudget bounds PerUserGatewayRestartProven.
 var perUserRestartProofBudget = 300 * time.Millisecond
 
-func perUserGatewayRestartProof(ctx context.Context, dataDir string, peer *PerUserPeerRecord) bool {
-	if !PerUserGatewayStartInProgress(dataDir) {
+func perUserGatewayRestartProof(ctx context.Context, dataDir string, peer *PerUserPeerRecord, startObserved bool) bool {
+	if !startObserved && !PerUserGatewayStartInProgress(dataDir) {
 		return false
 	}
 	wait := perUserPeerReadWait
