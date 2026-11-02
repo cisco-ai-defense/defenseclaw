@@ -73,6 +73,18 @@ func (m *TargetMemo) ActionCommandDecisionInShell(command, cwd, home string, fac
 }
 
 func actionTargetDecision(command, cwd, home string, dialect actionfacts.Dialect, posixShell bool, facts map[string]string, memo *TargetMemo) string {
+	if strings.HasPrefix(strings.TrimSpace(command), "bash -c ") {
+		if file, parsed := parseShell(command); parsed && len(file.Stmts) == 1 &&
+			len(file.Stmts[0].Redirs) == 0 && !file.Stmts[0].Background && !file.Stmts[0].Coprocess &&
+			!file.Stmts[0].Negated {
+			if call, ok := file.Stmts[0].Cmd.(*syntax.CallExpr); ok && len(call.Args) > 0 {
+				if program, known := StaticWord(call.Args[0], home); known && programBase(program) == "bash" &&
+					actionReadOnlyBashCLaunch(call, home, 0) {
+					return ""
+				}
+			}
+		}
+	}
 	if memo == nil {
 		// Every reading of this decision shares one memo.
 		memo = NewTargetMemo()
