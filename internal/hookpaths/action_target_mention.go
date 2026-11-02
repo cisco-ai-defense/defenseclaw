@@ -3992,7 +3992,7 @@ func actionStaticWords(args []*syntax.Word, home string) ([]string, bool) {
 // (-t, --list) with only archive, directory, compression and verbosity
 // options: both read their operands and write no file, so a link operand to
 // a protected file or directory is a read there (GAP-2590); so is a find
-// that only lists (actionFindListsOnly). words starts with the program.
+// whose actions only read (actionFindListsOnly). words starts with the program.
 func actionReadsOnlyWords(words []string) bool {
 	if len(words) == 0 {
 		return false
@@ -4006,15 +4006,42 @@ func actionReadsOnlyWords(words []string) bool {
 	return actionTarListsOnly(words[1:])
 }
 
-// actionFindListsOnly reports a find that only prints names to standard
-// output: no action that deletes, runs a program or writes a file (-delete,
-// -exec, -execdir, -ok, -okdir, -fprint, -fprint0, -fprintf, -fls). A
-// listing of the SSH folder (find ~/.ssh -maxdepth 1 -type f) reads, as ls
-// does (rel-1-0-6:GAP-0119). args are the words after the program.
+// actionFindListsOnly reports a find whose actions only read. A child run by
+// -exec, -execdir, -ok or -okdir is read-only only when its complete static
+// argv names one of the supported readers. Other child commands keep the
+// existing conservative verdict. args are the words after the program.
 func actionFindListsOnly(args []string) bool {
-	for _, arg := range args {
-		switch strings.ToLower(arg) {
-		case "-delete", "-exec", "-execdir", "-ok", "-okdir", "-fprint", "-fprint0", "-fprintf", "-fls":
+	for i := 0; i < len(args); i++ {
+		switch strings.ToLower(args[i]) {
+		case "-delete", "-fprint", "-fprint0", "-fprintf", "-fls":
+			return false
+		case "-exec", "-execdir", "-ok", "-okdir":
+			start := i + 1
+			i = start
+			for i < len(args) && args[i] != ";" && args[i] != "+" {
+				i++
+			}
+			if i == len(args) || !actionFindReadOnlyChild(args[start:i]) {
+				return false
+			}
+		}
+	}
+	return true
+}
+
+// find invokes its child directly, without shell aliases or functions. Only
+// these static programs and arguments are known not to mutate their inputs.
+func actionFindReadOnlyChild(words []string) bool {
+	if len(words) == 0 {
+		return false
+	}
+	switch words[0] {
+	case "ls", "stat", "cat", "wc", "head":
+	default:
+		return false
+	}
+	for _, word := range words[1:] {
+		if actionReadOptionMayWrite(word) {
 			return false
 		}
 	}
