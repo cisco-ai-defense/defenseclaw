@@ -331,6 +331,8 @@ func classifyCommand(out *parseOutput, command *CommandFact) {
 	case "cat":
 		addOperation(command, OperationRead)
 		addPathOperands(out, command, PathAccessRead, optionValues())
+	case "apply_patch":
+		classifyPOSIXApplyPatchStdin(out, command)
 	case "head", "tail":
 		addOperation(command, OperationRead)
 		addPathOperands(out, command, PathAccessRead, optionValues(

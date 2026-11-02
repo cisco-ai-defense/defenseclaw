@@ -274,3 +274,36 @@ func parsePatchEnvelope(text string) patchEnvelopeResult {
 		status:  StatusComplete,
 	}
 }
+
+// classifyPOSIXApplyPatchStdin gives a shell-fed, literal patch the same
+// path operations as the native apply_patch tool. A quoted heredoc preserves
+// the envelope bytes; other stdin forms have no authoritative patch text.
+func classifyPOSIXApplyPatchStdin(out *parseOutput, command *CommandFact) {
+	if command.Dialect != DialectPOSIX || command.Executable != "apply_patch" ||
+		!command.ArgvComplete || len(command.Argv) != 1 ||
+		!command.LiteralStdinComplete || command.LiteralStdinAmbiguous {
+		out.markPartial(IssueUnknownOperandGrammar)
+		return
+	}
+	patch := parsePatchEnvelope(command.LiteralStdin)
+	if patch.status != StatusComplete {
+		if patch.status == StatusLimitExceeded {
+			out.markLimit(patch.issue)
+		} else {
+			out.markPartial(patch.issue)
+		}
+		return
+	}
+	for _, change := range patch.changes {
+		switch change.access {
+		case PathAccessWrite:
+			addOperation(command, OperationWrite)
+		case PathAccessDelete:
+			addOperation(command, OperationDelete)
+		}
+		appendCommandPath(out, command, change.access, change.path)
+	}
+	if patch.hasMove {
+		addOperation(command, OperationMove)
+	}
+}
