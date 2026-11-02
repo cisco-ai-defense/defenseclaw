@@ -6813,7 +6813,8 @@ func powerShellReadOnlySubexpressions(text string) (string, bool) {
 			}
 			inner := strings.TrimSpace(text[start : j-1])
 			literal := len(inner) >= 2 && inner[0] == '\'' && inner[len(inner)-1] == '\''
-			if !literal && (strings.Contains(inner, "$(") || !powerShellSegmentReadOnly(inner)) {
+			if !literal && (len(powerShellStateSegments(inner)) != 1 ||
+				strings.Contains(inner, "$(") || !powerShellSegmentReadOnly(inner)) {
 				return "", false
 			}
 			out.WriteString("value")
