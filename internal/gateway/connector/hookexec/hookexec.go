@@ -316,6 +316,9 @@ type Options struct {
 	// (startAnswerWatchdog); doRequest stands it down once the gateway's
 	// decision is in.
 	answerWatch *answerWatchdog
+	// failureLog is the hook-failure log the answer watchdog opens ahead of
+	// its deadline (preparedFailureLog); the first failure line takes it.
+	failureLog *preparedFailureLog
 	// AnswerWatchdog is the answer watchdog the hook command armed for this
 	// call before Run (ArmAnswerWatchdog). Run adopts it: it holds all of
 	// Run's output and gives the call's fail-closed answer at the answer

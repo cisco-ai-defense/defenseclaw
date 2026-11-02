@@ -95,6 +95,10 @@ type answerWatchdog struct {
 
 	ceiling time.Time
 	waiter  *answerDeadlineWaiter
+	// failureLog is the call's hook-failure log, opened
+	// answerWatchdogLogPrepareLead before the deadline (watch).
+	failureLog     *preparedFailureLog
+	failureLogHome func() string
 }
 
 // AnswerWatchdog is the answer watchdog of one tool call that the hook
@@ -167,8 +171,11 @@ func startAnswerWatchdog(opts *Options, sp spec, failMode string, deadline, ceil
 // deadline: it renders the watchdog's answer and points opts at the held
 // output.
 func prepareAnswerWatchdog(opts *Options, sp spec, failMode string, ceiling time.Time) *answerWatchdog {
-	w := &answerWatchdog{stdout: opts.Stdout, stderr: opts.Stderr, exit: opts.Exit, ceiling: ceiling, waiter: newAnswerDeadlineWaiter()}
+	w := &answerWatchdog{stdout: opts.Stdout, stderr: opts.Stderr, exit: opts.Exit, ceiling: ceiling, waiter: newAnswerDeadlineWaiter(),
+		failureLog: newPreparedFailureLog()}
 	w.cacheFailureLogHome(opts)
+	opts.failureLog = w.failureLog
+	w.failureLogHome = failureLogHomeOf(*opts)
 	w.fallbackOut, w.fallbackErr, w.fallbackCode, w.logFailure = renderNoAnswer(*opts, sp, failMode)
 	w.installCheck, w.installOut, w.installErr, w.installCode, w.installLogFailure = renderInstallAnswer(*opts, sp, failMode)
 	opts.Stdout, opts.Stderr = &w.out, &w.err
@@ -253,6 +260,7 @@ func (w *answerWatchdog) adopt(opts *Options, sp spec, failMode string) {
 	if closed {
 		failMode = "closed"
 	}
+	opts.failureLog = w.failureLog
 	stdout, stderr, code, logFailure := renderNoAnswer(*opts, sp, failMode)
 	installCheck, installOut, installErr, installCode, installLogFailure := renderInstallAnswer(*opts, sp, failMode)
 	w.mu.Lock()
@@ -479,10 +487,18 @@ func (w *answerWatchdog) hold(opts *Options) {
 	w.cacheFailureLogHome(opts)
 	opts.Stdout, opts.Stderr = &w.out, &w.err
 	opts.answerWatch = w
+	opts.failureLog = w.failureLog
 }
 
 func (w *answerWatchdog) watch(deadline time.Time) {
+	// A call still waiting answerWatchdogLogPrepareLead before its deadline
+	// opens its log now, so the line of the answer below is one append.
+	prepare := time.AfterFunc(time.Until(deadline.Add(-answerWatchdogLogPrepareLead)), func() {
+		w.failureLog.prepare(w.failureLogHome)
+	})
 	if !w.waiter.wait(deadline) {
+		prepare.Stop()
+		w.failureLog.close()
 		return
 	}
 	w.mu.Lock()
@@ -629,6 +645,9 @@ func (w *answerWatchdog) finish(code int) int {
 	w.waiter.cancel()
 	w.mu.Lock()
 	defer w.mu.Unlock()
+	if !w.fired {
+		w.failureLog.close()
+	}
 	if w.fired {
 		if w.deliveryReceipt != nil {
 			w.deliveryReceipt(false, true)

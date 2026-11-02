@@ -134,10 +134,19 @@ type correlationMatchRow struct {
 func (repo *CorrelationRepository) MatchOccurrence(
 	ctx context.Context,
 	input CorrelationMatchInput,
-) (CorrelationMatchResult, error) {
+) (result CorrelationMatchResult, err error) {
 	if repo == nil || repo.store == nil {
 		return CorrelationMatchResult{}, errors.New("audit: correlation repository is not initialized")
 	}
+	defer func() {
+		// An occurrence that failed for another reason than a competing
+		// write or its own deadline may have met a connector instance the
+		// table no longer holds as resolved: resolve it again next time.
+		if err != nil && !errors.Is(err, ErrCorrelationStale) && !IsSQLiteBusy(err) &&
+			!errors.Is(err, context.Canceled) && !errors.Is(err, context.DeadlineExceeded) {
+			repo.store.forgetConnectorInstances()
+		}
+	}()
 	if ctx == nil {
 		return CorrelationMatchResult{}, errors.New("audit: correlation context is required")
 	}

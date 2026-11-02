@@ -357,6 +357,11 @@ func (writer *EventHistoryWriter) deferAppend(
 		return false
 	}
 	outcomes := make([]eventHistoryAppendOutcome, len(records))
+	// Before the batch waits for the store's connection (rel-1-0-6 GAP-0381).
+	prepared := make([]*preparedEventHistoryAppend, len(records))
+	for index := range records {
+		prepared[index] = writer.prepareAppend(ctx, records[index], projections[index])
+	}
 	outcome, _ := ctx.Value(callWriteOutcomeKey{}).(*CallWriteOutcome)
 	report, _ := ctx.Value(callWriteReportKey{}).(*CallWriteReport)
 	if !report.claim() {
@@ -366,7 +371,7 @@ func (writer *EventHistoryWriter) deferAppend(
 		ctx: ctx, outcome: outcome, report: report,
 		run: func(ctx context.Context, tx *sql.Tx) error {
 			for index := range records {
-				appended, err := writer.appendContextTx(ctx, tx, records[index], projections[index])
+				appended, err := writer.appendPreparedTx(ctx, tx, records[index], projections[index], prepared[index])
 				if err != nil {
 					return err
 				}
