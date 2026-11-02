@@ -49,6 +49,7 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/managed"
 	"github.com/defenseclaw/defenseclaw/internal/managed/mcpasuser"
 	"github.com/defenseclaw/defenseclaw/internal/observability"
+	observabilityruntime "github.com/defenseclaw/defenseclaw/internal/observability/runtime"
 	"github.com/defenseclaw/defenseclaw/internal/redaction"
 	"github.com/defenseclaw/defenseclaw/internal/sandboxrelay"
 	"go.opentelemetry.io/otel/attribute"
@@ -248,8 +249,8 @@ type hookClientContextKey struct{}
 // records whether the agent took the answer.
 type hookDeliveryReceiptContextKey struct{}
 
-// agentHookPersistGrace bounds the terminal audit, hook_decision and receipt
-// writes once the hook's own work has been cancelled.
+// agentHookPersistGrace is the maximum lifetime of a persistence attempt.
+// A live request must not hold a stalled SQLite writer without a deadline.
 const agentHookPersistGrace = 10 * time.Second
 
 // agentHookCompletionContext keeps the request's values, but not its
@@ -265,11 +266,19 @@ func agentHookCompletionContext(parent context.Context) (context.Context, contex
 	return context.WithValue(ctx, hookClientContextKey{}, parent), cancel
 }
 
-// agentHookPersistenceContext carries the terminal persistence of a verdict.
-// It outlives the completion context by agentHookPersistGrace, so a hook whose
-// work the disconnect grace cut off still records the verdict it returned.
+// agentHookPersistenceContext keeps the existing cancellation grace for
+// Secure Client finalization and sandbox receipts.
 func agentHookPersistenceContext(ctx context.Context) (context.Context, context.CancelFunc) {
 	return contextWithCancelGrace(ctx, agentHookPersistGrace)
+}
+
+// hookPersistenceContext gives ordinary hooks one deadline across telemetry,
+// finalization and batch close. Secure Client retains its existing grace.
+func (a *APIServer) hookPersistenceContext(ctx context.Context) (context.Context, context.CancelFunc) {
+	if cfg := a.decisionConfig(ctx); cfg != nil && cfg.SecureClientIntegration() {
+		return agentHookPersistenceContext(ctx)
+	}
+	return context.WithTimeout(context.WithoutCancel(ctx), agentHookPersistGrace)
 }
 
 // contextWithCancelGrace keeps parent's values and is cancelled grace after
@@ -687,9 +696,26 @@ func (a *APIServer) handleAgentHook(connectorName string) http.HandlerFunc {
 		// instead of one per row (GAP-1303, GAP-1791, GAP-0614). What the call
 		// writes after its verdict commits when the handler returns.
 		ctx = audit.WithCallWriteBatch(ctx, a.store)
+		var cancelTelemetry context.CancelFunc
+		var telemetryPersistenceCtx context.Context
+		var finalPersistenceCtx context.Context
+		var cancelFinalPersistence context.CancelFunc
 		defer func() {
-			closeCtx, cancelClose := agentHookPersistenceContext(ctx)
-			defer cancelClose()
+			if cancelTelemetry != nil {
+				defer cancelTelemetry()
+			}
+			if cancelFinalPersistence != nil {
+				defer cancelFinalPersistence()
+			}
+			closeCtx := finalPersistenceCtx
+			if closeCtx == nil {
+				closeCtx = telemetryPersistenceCtx
+			}
+			if closeCtx == nil {
+				var cancelClose context.CancelFunc
+				closeCtx, cancelClose = a.hookPersistenceContext(ctx)
+				defer cancelClose()
+			}
 			audit.CloseCallWrites(closeCtx)
 		}()
 		ctx, correlatedReq, correlationErr := a.correlateHookOccurrence(
@@ -781,8 +807,19 @@ func (a *APIServer) handleAgentHook(connectorName string) http.HandlerFunc {
 				// span keeps their result, and the late panic is on
 				// defenseclaw.panics.total and the gateway log (GAP-1014).
 				if !finalized {
-					persistCtx, cancelPersist := agentHookPersistenceContext(ctx)
-					defer cancelPersist()
+					persistCtx := telemetryPersistenceCtx
+					var cancelPersist context.CancelFunc
+					if persistCtx == nil {
+						persistCtx, cancelPersist = a.hookPersistenceContext(ctx)
+					}
+					if cfg := a.decisionConfig(ctx); cfg == nil || !cfg.SecureClientIntegration() {
+						finalPersistenceCtx = persistCtx
+						if cancelPersist != nil {
+							cancelFinalPersistence = cancelPersist
+						}
+					} else {
+						defer cancelPersist()
+					}
 					// The panic is on the row either way (the hook's panic
 					// capture); only a fail-mode verdict is a panic verdict.
 					finalization := a.finalizeAgentHookAnswer(a.pendingHookDecidedContext(persistCtx, pending, resp),
@@ -853,11 +890,20 @@ func (a *APIServer) handleAgentHook(connectorName string) http.HandlerFunc {
 		// managed_enterprise we defer the emit until after safeEvaluateHook
 		// stamps the directive onto ctx (see below), so the event's own
 		// directive governs its content fields. Outside managed_enterprise
-		// the emit stays BEFORE the evaluator (audit-honest ordering) and
-		// behavior is byte-for-byte unchanged.
+		// the emit stays BEFORE the evaluator (audit-honest ordering).
 		deferManagedHookEmit := managedEnterpriseActive.Load()
 		if !deferManagedHookEmit && hookLLMEventExportable(req) && !hookSideRefusal(ctx) {
-			runtime.EmitLLMEvent(a, ctx, req, b, payload, rawEventIDs)
+			// An expired client must not erase the attempted tool call while
+			// the verdict can still persist. Give emission the verdict's
+			// persistence grace and defer cancellation until the batch flush.
+			// Secure Client retains its existing telemetry lifetime.
+			telemetryCtx := ctx
+			if cfg := a.decisionConfig(ctx); cfg == nil || !cfg.SecureClientIntegration() {
+				telemetryCtx, cancelTelemetry = a.hookPersistenceContext(ctx)
+				telemetryCtx = observabilityruntime.WithDeadlineLossReporting(telemetryCtx)
+				telemetryPersistenceCtx = telemetryCtx
+			}
+			runtime.EmitLLMEvent(a, telemetryCtx, req, b, payload, rawEventIDs)
 		}
 
 		// Dispatch evaluation through the profile runtime. Connector-
@@ -1024,7 +1070,13 @@ func (a *APIServer) handleAgentHook(connectorName string) http.HandlerFunc {
 		// ordering. Fails closed to redact when the AID lane returned no
 		// directive (resp.RedactionEnabled == nil).
 		if deferManagedHookEmit && hookLLMEventExportable(req) && !hookSideRefusal(ctx) {
-			runtime.EmitLLMEvent(a, ctx, req, b, payload, rawEventIDs)
+			telemetryCtx := ctx
+			if cfg := a.decisionConfig(ctx); cfg == nil || !cfg.SecureClientIntegration() {
+				telemetryCtx, cancelTelemetry = a.hookPersistenceContext(ctx)
+				telemetryCtx = observabilityruntime.WithDeadlineLossReporting(telemetryCtx)
+				telemetryPersistenceCtx = telemetryCtx
+			}
+			runtime.EmitLLMEvent(a, telemetryCtx, req, b, payload, rawEventIDs)
 		}
 
 		// A managed answer is only an evaluated proposal until the hook
@@ -1054,11 +1106,23 @@ func (a *APIServer) handleAgentHook(connectorName string) http.HandlerFunc {
 				// No answer leaves this process unjournaled. The 503
 				// closes the managed hook before the proposal is offered.
 				resp = pendingFailureHookDecision(resp)
-				persistCtx, cancelPersist := agentHookPersistenceContext(ctx)
+				persistCtx := telemetryPersistenceCtx
+				var cancelPersist context.CancelFunc
+				if persistCtx == nil {
+					persistCtx, cancelPersist = a.hookPersistenceContext(ctx)
+				}
+				if cfg := a.decisionConfig(ctx); cfg == nil || !cfg.SecureClientIntegration() {
+					finalPersistenceCtx = persistCtx
+					if cancelPersist != nil {
+						cancelFinalPersistence = cancelPersist
+					}
+				}
 				finalization := a.finalizeAgentHookAnswer(a.pendingHookDecidedContext(persistCtx, pending, resp),
 					connectorName, req, resp, rawEventIDs, b, time.Since(t0), panicked, auditExtra, false)
 				a.settlePendingHook(persistCtx, pending, finalization)
-				cancelPersist()
+				if cancelPersist != nil && finalPersistenceCtx == nil {
+					cancelPersist()
+				}
 				finalized = true
 				attemptedWrite = true
 				a.writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": "hook audit is unavailable"})
@@ -1115,8 +1179,19 @@ func (a *APIServer) handleAgentHook(connectorName string) http.HandlerFunc {
 		}
 		elapsed := time.Since(t0)
 		enrichAgentHookSpan(ctx, req, resp, elapsed)
-		persistCtx, cancelPersist := agentHookPersistenceContext(ctx)
-		defer cancelPersist()
+		persistCtx := telemetryPersistenceCtx
+		var cancelPersist context.CancelFunc
+		if persistCtx == nil {
+			persistCtx, cancelPersist = a.hookPersistenceContext(ctx)
+		}
+		if cfg := a.decisionConfig(ctx); cfg == nil || !cfg.SecureClientIntegration() {
+			finalPersistenceCtx = persistCtx
+			if cancelPersist != nil {
+				cancelFinalPersistence = cancelPersist
+			}
+		} else {
+			defer cancelPersist()
+		}
 		if delivery != nil {
 			// The receipt decided what the agent got (delivered or
 			// unconfirmed); a hang-up after it is not a missed answer.
