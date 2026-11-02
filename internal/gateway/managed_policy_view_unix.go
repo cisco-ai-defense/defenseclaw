@@ -65,22 +65,25 @@ func (s managedPolicyViewConnector) anyUnproven() bool {
 // path of every call.
 type managedPolicyViewWatch struct {
 	api            *APIServer
+	authorizer     *managedHookAuthorizer
 	goos           string
 	opts           enterprisepolicy.Options
 	descriptorPath string
 	connectors     []string
+	authorized     []string
 	stamp          string
+	generation     *Generation
 	computed       bool
 }
 
 // startManagedPolicyView publishes the view once before the hook socket
 // serves its first call, then checks for changes until ctx ends.
-func (a *APIServer) startManagedPolicyView(ctx context.Context, goos string) {
+func (a *APIServer) startManagedPolicyView(ctx context.Context, goos string, authorizer *managedHookAuthorizer) {
 	opts, descriptorPath, ok := managedPolicyViewOptions(goos)
 	if !ok {
 		return
 	}
-	watch := &managedPolicyViewWatch{api: a, goos: goos, opts: opts, descriptorPath: descriptorPath}
+	watch := &managedPolicyViewWatch{api: a, authorizer: authorizer, goos: goos, opts: opts, descriptorPath: descriptorPath}
 	watch.refresh()
 	go watch.run(ctx)
 }
@@ -102,8 +105,9 @@ func (w *managedPolicyViewWatch) run(ctx context.Context) {
 // and of the descriptor moved. The stamp is taken before the sources are
 // read, so a change made while they are read moves the next stamp too.
 func (w *managedPolicyViewWatch) refresh() {
+	generation := w.api.generation()
 	stamp := enterprisepolicy.PolicyViewStamp(w.opts, w.connectors, w.descriptorPath)
-	if w.computed && stamp == w.stamp {
+	if w.computed && stamp == w.stamp && generation == w.generation {
 		return
 	}
 	descriptor, err := loadStandaloneRuntimeDescriptor(w.goos)
@@ -114,13 +118,47 @@ func (w *managedPolicyViewWatch) refresh() {
 	if descriptor != nil {
 		connectors = append(connectors, descriptor.MachinePolicyConnectors...)
 	}
+	if w.authorizer != nil {
+		// A descriptor may be published before the gateway accepts the new
+		// config. Only connectors in the live, recorded generation can widen
+		// machine-policy authorization. A rejected reload keeps the previous
+		// generation and therefore cannot authorize a new connector.
+		w.authorized = admittedMachinePolicyConnectors(w.goos, generation, w.authorized, connectors)
+		w.authorizer.setMachinePolicy(w.authorized)
+	}
 	if !slices.Equal(connectors, w.connectors) {
 		// Another connector set: stamp its sources before they are read.
 		w.connectors = connectors
 		stamp = enterprisepolicy.PolicyViewStamp(w.opts, w.connectors, w.descriptorPath)
 	}
-	w.stamp, w.computed = stamp, true
+	w.stamp, w.generation, w.computed = stamp, generation, true
 	w.api.publishManagedPolicyView(computeManagedPolicyViewFor(w.opts, descriptor))
+}
+
+func admittedMachinePolicyConnectors(goos string, generation *Generation, previous, descriptor []string) []string {
+	if generation == nil || generation.Config == nil || !generation.Config.StandaloneEnterprise() || !generation.ConfigGenRecorded {
+		return nil
+	}
+	layout, err := managed.StandaloneLayoutFor(goos)
+	if err != nil {
+		return nil
+	}
+	opts, err := enterprisepolicy.StandaloneOptions(layout, "", "", generation.Config)
+	if err != nil {
+		return nil
+	}
+	opts.OpenCodePluginPlanned = true
+	intended := enterprisepolicy.MachinePolicyConnectors(opts, enterprisepolicy.StandaloneConnectors(generation.Config))
+	var admitted []string
+	// A descriptor written ahead of the gateway's config reload cannot
+	// remove authorization that the still-live generation already admitted.
+	// Once that generation changes, its intended set removes retired names.
+	for _, name := range append(slices.Clone(previous), descriptor...) {
+		if slices.Contains(intended, name) && !slices.Contains(admitted, name) {
+			admitted = append(admitted, name)
+		}
+	}
+	return admitted
 }
 
 // publishManagedPolicyView stores view for the hook calls and queues one

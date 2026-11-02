@@ -18,9 +18,11 @@ import (
 	"io"
 	"net/http"
 	"os"
+	"runtime"
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/defenseclaw/defenseclaw/internal/audit"
@@ -45,10 +47,23 @@ const (
 	managedHookReasonConnectorUnknown  = "enterprise_managed_connector_unknown"
 	managedHookReasonSurfaceUnverified = "enterprise_managed_surface_unverified"
 	managedHookReasonGuardianOnly      = "enterprise_managed_guardian_only"
+	managedHookReasonPolicyTransition  = "enterprise_managed_policy_transition"
 	// managedHookReasonTrustedConnectorRoute refuses a trusted connector's
 	// service account on any route but agent-gateway.
 	managedHookReasonTrustedConnectorRoute = "enterprise_managed_trusted_connector_route_only"
 )
+
+// The lifecycle holds this marker while the config, vendor hooks, and
+// descriptor move to one generation. A disabled connector cannot receive
+// its uninspected answer until that publication has finished.
+var managedHookLifecycleMarkerHeld = func() bool {
+	layout, err := managed.StandaloneLayoutFor(runtime.GOOS)
+	if err != nil || layout.LifecycleMarkerPath == "" {
+		return false
+	}
+	_, err = os.Lstat(layout.LifecycleMarkerPath)
+	return err == nil || !errors.Is(err, os.ErrNotExist)
+}
 
 // managedHookPeer is the kernel-verified identity of a caller on the
 // standalone hook socket. It comes from SO_PEERCRED / LOCAL_PEERCRED, never
@@ -225,24 +240,35 @@ func denyManagedHook(status int, reason string) managedHookDecision {
 //     anyone (GAP-0328), and every call is logged.
 type managedHookAuthorizer struct {
 	enrollment    config.EnterpriseEnrollmentConfig
-	machinePolicy map[string]bool
+	machinePolicy atomic.Pointer[managedHookMachinePolicy]
 	loadLedger    func() (managedHookLedger, error)
 	// loadRefused reads the refused surfaces; nil means none.
 	loadRefused func() (managedHookLedger, error)
 }
+
+type managedHookMachinePolicy struct{ connectors map[string]bool }
 
 func newManagedHookAuthorizer(
 	enrollment config.EnterpriseEnrollmentConfig,
 	machinePolicyConnectors []string,
 	loadLedger func() (managedHookLedger, error),
 ) *managedHookAuthorizer {
+	z := &managedHookAuthorizer{enrollment: enrollment, loadLedger: loadLedger}
+	z.setMachinePolicy(machinePolicyConnectors)
+	return z
+}
+
+// setMachinePolicy publishes the connector set admitted by the descriptor
+// watcher and the live config generation. A hook request loads one immutable
+// snapshot; the file reads and validation stay off the hook path.
+func (z *managedHookAuthorizer) setMachinePolicy(machinePolicyConnectors []string) {
 	machine := make(map[string]bool, len(machinePolicyConnectors))
 	for _, name := range machinePolicyConnectors {
 		if name = strings.ToLower(strings.TrimSpace(name)); name != "" {
 			machine[name] = true
 		}
 	}
-	return &managedHookAuthorizer{enrollment: enrollment, machinePolicy: machine, loadLedger: loadLedger}
+	z.machinePolicy.Store(&managedHookMachinePolicy{connectors: machine})
 }
 
 // exempt reports whether enterprise.enrollment.exempt_users names the
@@ -415,7 +441,10 @@ func (z *managedHookAuthorizer) decideFor(peer managedHookPeer, connectorName, s
 		decision.Disabled = true
 		return decision
 	}
-	machine := z.machinePolicy[connectorName]
+	machine := false
+	if policy := z.machinePolicy.Load(); policy != nil {
+		machine = policy.connectors[connectorName]
+	}
 	strict := strings.EqualFold(strings.TrimSpace(z.enrollment.UnenrolledUsers), config.EnterpriseUnenrolledDeny)
 	if machine && !strict {
 		return allowManagedHook()
@@ -765,6 +794,12 @@ func (a *APIServer) managedHookPeerAuth(authorizer *managedHookAuthorizer, next 
 		// answer and keep the enrollment check.
 		disabled := !inspect && exemptAuditedHookPath(r.URL.Path) &&
 			a.hookEnablementConfig(r.Context()).ConnectorDisabled(connectorName)
+		if disabled && managedHookLifecycleMarkerHeld() {
+			decision := denyManagedHook(http.StatusServiceUnavailable, managedHookReasonPolicyTransition)
+			a.emitHTTPAuthFailureForConnector(r.Context(), r, route, gatewaylog.ErrCodeAuthInvalidToken, decision.Reason, connectorName)
+			writeManagedHookDecisionRefusal(w, decision)
+			return
+		}
 		decision := authorizer.decideFor(peer, connectorName, r.Header.Get(hookexec.AgentSurfaceHeader), disabled)
 		if !decision.Allow {
 			fmt.Fprintf(os.Stderr,

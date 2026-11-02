@@ -493,6 +493,19 @@ func (l *lifecycle) run(ctx context.Context) (failure int) {
 	if readOnly {
 		return l.readOnly(ctx)
 	}
+	if l.opts.Action == ActionEnsure && l.opts.Reason == ApplyTriggerReason && l.opts.ConfigFile == "" && env.ApplyTriggerDebounce != nil {
+		waitCtx, stop := l.untilInterrupted(ctx)
+		err := env.ApplyTriggerDebounce(waitCtx, env.P(env.Layout.ConfigPath))
+		stop()
+		if err != nil {
+			if l.interrupted() || errors.Is(err, context.Canceled) {
+				r.AddError(codeInterrupted, "the run stopped while it waited for the config push to settle; nothing was changed")
+			} else {
+				r.AddError(codeState, "wait for config push: "+err.Error())
+			}
+			return 0
+		}
+	}
 	// Before the lock, which another run can hold for the readiness timeout.
 	env.closePrivateDirs(ctx)
 

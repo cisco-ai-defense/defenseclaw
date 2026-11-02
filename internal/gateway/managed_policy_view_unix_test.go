@@ -14,6 +14,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/defenseclaw/defenseclaw/internal/config"
 	"github.com/defenseclaw/defenseclaw/internal/enterprisepolicy"
 	"github.com/defenseclaw/defenseclaw/internal/managed"
 )
@@ -123,6 +124,60 @@ func TestManagedPolicyViewProvesTheVendorView(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestManagedHookAuthorizerFollowsAdmittedConnectorSet(t *testing.T) {
+	opts, _ := claudePolicyViewTestRoot(t, "linux")
+	descriptorPath := filepath.Join(t.TempDir(), "runtime.json")
+	descriptor := &managed.RuntimeDescriptor{}
+	oldConfig := &config.Config{DeploymentMode: "managed_enterprise"}
+	oldConfig.Enterprise.Profile = managed.ProfileStandalone
+	oldConfig.Guardrail.Enabled = true
+	oldConfig.Guardrail.Connectors = map[string]config.PerConnectorGuardrailConfig{"codex": {}}
+	newConfig := &config.Config{DeploymentMode: "managed_enterprise"}
+	newConfig.Enterprise.Profile = managed.ProfileStandalone
+	newConfig.Guardrail.Enabled = true
+	newConfig.Guardrail.Connectors = map[string]config.PerConnectorGuardrailConfig{"codex": {}, "claudecode": {}}
+	live := &Generation{N: 1, ConfigGen: 1, ConfigGenRecorded: true, Config: oldConfig}
+	saved := loadStandaloneRuntimeDescriptor
+	loadStandaloneRuntimeDescriptor = func(string) (*managed.RuntimeDescriptor, error) {
+		copy := *descriptor
+		return &copy, nil
+	}
+	t.Cleanup(func() { loadStandaloneRuntimeDescriptor = saved })
+	authorizer := newManagedHookAuthorizer(config.EnterpriseEnrollmentConfig{}, nil,
+		func() (managedHookLedger, error) { return managedHookLedger{}, nil })
+	api := &APIServer{}
+	api.SetGenerationSource(func() *Generation { return live })
+	watch := &managedPolicyViewWatch{api: api, authorizer: authorizer, goos: "linux", opts: opts, descriptorPath: descriptorPath}
+	peer := managedHookPeer{UID: 1001, Name: "alice"}
+	check := func(want bool) {
+		t.Helper()
+		watch.refresh()
+		if got := authorizer.decide(peer, "claudecode", "").Allow; got != want {
+			t.Fatalf("machine-policy authorization = %t, want %t", got, want)
+		}
+	}
+	if err := os.WriteFile(descriptorPath, []byte("v1"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	check(false)
+	descriptor.MachinePolicyConnectors = []string{"claudecode"}
+	if err := os.WriteFile(descriptorPath, []byte("version two"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	check(false) // The descriptor moved, but the live config has not.
+	live = &Generation{N: 2, ConfigGen: 2, ConfigGenRecorded: false, Config: newConfig}
+	check(false) // An unrecorded generation cannot widen authorization.
+	live = &Generation{N: 3, ConfigGen: 2, ConfigGenRecorded: true, Config: newConfig}
+	check(true)
+	descriptor.MachinePolicyConnectors = nil
+	if err := os.WriteFile(descriptorPath, []byte("version three"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	check(true) // A descriptor-only removal leaves the admitted snapshot live.
+	live = &Generation{N: 4, ConfigGen: 3, ConfigGenRecorded: true, Config: oldConfig}
+	check(false)
 }
 
 // On macOS each account's own managed preference is proven by content
@@ -238,7 +293,7 @@ func TestManagedPolicyViewRecomputesOnlyWhenTheVendorPolicyChanges(t *testing.T)
 	ctx, cancel := context.WithCancel(context.Background())
 	t.Cleanup(cancel)
 	running := &APIServer{}
-	running.startManagedPolicyView(ctx, "linux")
+	running.startManagedPolicyView(ctx, "linux", nil)
 	waitFor := func(what string, want bool) {
 		t.Helper()
 		for deadline := time.Now().Add(5 * time.Second); running.managedPolicyView.Load().unproven(enterprisepolicy.ConnectorClaudeCode, "") != want; time.Sleep(10 * time.Millisecond) {

@@ -199,7 +199,9 @@ type hookSocketTestServer struct {
 // the socket path, the API server and the audit store.
 func startTestHookSocketServer(t *testing.T, opts hookSocketTestServer) (string, *APIServer, *audit.Store) {
 	t.Helper()
-	withoutManagedPolicyView(t)
+	if len(opts.machinePolicy) == 0 {
+		withoutManagedPolicyView(t)
+	}
 	dir := shortGatewaySocketDir(t)
 	socket := filepath.Join(dir, "hook.sock")
 	dataDir := filepath.Join(dir, "data")
@@ -254,11 +256,23 @@ func startTestHookSocketServer(t *testing.T, opts hookSocketTestServer) (string,
 	cfg := &config.Config{DeploymentMode: "managed_enterprise", DataDir: dataDir}
 	cfg.Enterprise.Profile = managed.ProfileStandalone
 	cfg.Guardrail.Mode = "observe"
+	if len(opts.machinePolicy) > 0 {
+		cfg.Guardrail.Enabled = true
+		cfg.Guardrail.Connectors = make(map[string]config.PerConnectorGuardrailConfig, len(opts.machinePolicy))
+		for _, name := range opts.machinePolicy {
+			cfg.Guardrail.Connectors[name] = config.PerConnectorGuardrailConfig{}
+		}
+	}
 	health := opts.health
 	if health == nil {
 		health = NewSidecarHealth()
 	}
 	api := NewAPIServer("127.0.0.1:0", health, nil, store, logger, cfg)
+	if len(opts.machinePolicy) > 0 {
+		api.SetGenerationSource(func() *Generation {
+			return &Generation{N: 1, ConfigGen: 1, ConfigGenRecorded: true, Config: cfg}
+		})
+	}
 	api.SetConnectorRegistry(connector.NewDefaultRegistry())
 	// The refusal rows come from the API's own canonical runtime binding.
 	api.bindOTLPObservabilityRuntime(fixture.runtime)

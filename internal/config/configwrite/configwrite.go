@@ -689,7 +689,72 @@ func ManagedConfigRestartRequired(before, after []byte, defaults ManagedDefaults
 	if err != nil {
 		return nil, err
 	}
-	return ManagedRestartRequired(defaults.dropUnchanged(before, after, changed)), nil
+	restart := ManagedRestartRequired(defaults.dropUnchanged(before, after, changed))
+	if defaults.GOOS != "linux" && defaults.GOOS != "darwin" {
+		return restart, nil
+	}
+	var installed, candidate any
+	if yaml.Unmarshal(before, &installed) != nil || yaml.Unmarshal(after, &candidate) != nil {
+		// A malformed installed document is replaced wholesale. Keep its
+		// conservative restart prediction until the lifecycle validates it.
+		return restart, nil
+	}
+	// Unix publishes vendor machine policy in the same lifecycle transaction,
+	// and the running gateway follows the updated runtime descriptor. Windows
+	// keeps these paths so its hot path refreshes the guardian targets.
+	out := restart[:0]
+	for _, path := range restart {
+		if !managedConnectorSetPath(path) {
+			out = append(out, path)
+		}
+	}
+	out = append(out, PrimaryConnectorChange(before, after)...)
+	return out, nil
+}
+
+// PrimaryConnectorChange reports a start-only change to the gateway's
+// primary connector. When guardrail.connector is omitted, the first key in
+// guardrail.connectors supplies it. A connector set can therefore be hot
+// applied only while that primary stays the same.
+func PrimaryConnectorChange(before, after []byte) []string {
+	b, errB := primaryConnector(before)
+	a, errA := primaryConnector(after)
+	if errB == nil && errA == nil && a == b {
+		return nil
+	}
+	return []string{"guardrail.connector"}
+}
+
+func primaryConnector(raw []byte) (string, error) {
+	var doc struct {
+		Guardrail struct {
+			Connector  string               `yaml:"connector"`
+			Connectors map[string]yaml.Node `yaml:"connectors"`
+		} `yaml:"guardrail"`
+	}
+	if err := yaml.Unmarshal(raw, &doc); err != nil {
+		return "", err
+	}
+	if primary := strings.ToLower(strings.TrimSpace(doc.Guardrail.Connector)); primary != "" {
+		return primary, nil
+	}
+	keys := make([]string, 0, len(doc.Guardrail.Connectors))
+	for key := range doc.Guardrail.Connectors {
+		keys = append(keys, strings.ToLower(strings.TrimSpace(key)))
+	}
+	sort.Strings(keys)
+	if len(keys) == 0 {
+		return "", nil
+	}
+	return keys[0], nil
+}
+
+// managedConnectorSetPath names membership or enabled changes only. Other
+// per-connector settings keep their own restart classification.
+func managedConnectorSetPath(path string) bool {
+	segments := restartSegments(path)
+	return len(segments) >= 2 && segments[0] == "guardrail" && segments[1] == "connectors" &&
+		(len(segments) == 2 || len(segments) == 3 || (len(segments) == 4 && segments[3] == "enabled"))
 }
 
 // RestartRequired returns the paths in changed that need a gateway restart.

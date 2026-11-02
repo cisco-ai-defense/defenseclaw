@@ -314,6 +314,9 @@ type Env struct {
 	// Yield lowers the priority of the lifecycle run (yieldToHooks) before
 	// it does any work; tests leave it nil.
 	Yield func()
+	// ApplyTriggerDebounce waits for a quiet config push before a path-triggered
+	// ensure plans it. Production sets it; rooted tests may replace it.
+	ApplyTriggerDebounce func(context.Context, string) error
 
 	LockTimeout  time.Duration
 	ReadyTimeout time.Duration
@@ -350,6 +353,7 @@ func NewEnv(goos, productVersion string) (*Env, error) {
 		Yield:          yieldToHooks,
 	}
 	env.fillDefaults()
+	env.ApplyTriggerDebounce = debounceApplyTrigger
 	env.SelfUnit = selfUnitFromEnv(env.Services, os.Getenv(LifecycleUnitEnv))
 	env.StartTransactionWatch = env.startTransactionWatch
 	return env, nil

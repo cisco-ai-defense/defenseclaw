@@ -1069,8 +1069,13 @@ func TestSandboxRelayThroughTheHookSocketServer(t *testing.T) {
 	cfg := &config.Config{DeploymentMode: "managed_enterprise", DataDir: dataDir}
 	cfg.Enterprise.Profile = managed.ProfileStandalone
 	cfg.Guardrail.Mode = "observe"
+	cfg.Guardrail.Enabled = true
+	cfg.Guardrail.Connectors = map[string]config.PerConnectorGuardrailConfig{"claudecode": {}}
 	cfg.OpenShell.Enabled = true
 	api := NewAPIServer("127.0.0.1:0", NewSidecarHealth(), nil, nil, nil, cfg)
+	api.SetGenerationSource(func() *Generation {
+		return &Generation{N: 1, ConfigGen: 1, ConfigGenRecorded: true, Config: cfg}
+	})
 	api.SetConnectorRegistry(connector.NewDefaultRegistry())
 	api.bindOTLPObservabilityRuntime(newSidecarRuntimeFixture(t, true).runtime)
 	auth, err := api.sandboxAuth()

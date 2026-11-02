@@ -98,6 +98,40 @@ func postDisabledConnectorHook(t *testing.T, handler http.Handler, path, body st
 	return w
 }
 
+func TestManagedHookSocketHoldsDisabledAnswerDuringConfigApply(t *testing.T) {
+	previous := managedHookLifecycleMarkerHeld
+	held := false
+	managedHookLifecycleMarkerHeld = func() bool { return held }
+	t.Cleanup(func() { managedHookLifecycleMarkerHeld = previous })
+	peer := managedHookPeer{UID: 1001, Name: "alice"}
+	disabled := disabledConnectorSocketAPI(t, false, config.EnterpriseEnrollmentConfig{})
+	enabled := disabledConnectorSocketAPI(t, true, config.EnterpriseEnrollmentConfig{})
+	call := func(handler http.Handler) *httptest.ResponseRecorder {
+		t.Helper()
+		return postDisabledConnectorHook(t, handler, "/api/v1/codex/hook", disabledCodexPreToolUse, disabledCodexHeaders, peer)
+	}
+	if w := call(disabled); w.Code != http.StatusOK {
+		t.Fatalf("settled disabled connector = %d: %s", w.Code, w.Body.String())
+	}
+	held = true
+	if w := call(disabled); w.Code != http.StatusServiceUnavailable || !strings.Contains(w.Body.String(), managedHookReasonPolicyTransition) {
+		t.Fatalf("enable transition before gateway reload = %d: %s", w.Code, w.Body.String())
+	}
+	if w := call(enabled); w.Code != http.StatusForbidden || !strings.Contains(w.Body.String(), managedHookReasonUIDUnregistered) {
+		t.Fatalf("enable transition after gateway reload = %d: %s", w.Code, w.Body.String())
+	}
+	if w := call(enabled); w.Code != http.StatusForbidden {
+		t.Fatalf("disable transition before gateway reload = %d: %s", w.Code, w.Body.String())
+	}
+	if w := call(disabled); w.Code != http.StatusServiceUnavailable {
+		t.Fatalf("disable transition after gateway reload = %d: %s", w.Code, w.Body.String())
+	}
+	held = false
+	if w := call(disabled); w.Code != http.StatusOK {
+		t.Fatalf("settled disabled connector = %d: %s", w.Code, w.Body.String())
+	}
+}
+
 const disabledCodexPreToolUse = `{"hook_event_name":"PreToolUse","session_id":"s1","turn_id":"t1","tool_name":"Bash","tool_use_id":"u1","tool_input":{"command":"echo marker >> report.txt"},"cwd":"/tmp"}`
 
 var disabledCodexHeaders = map[string]string{"X-DefenseClaw-Hook-Event": "PreToolUse", "X-DefenseClaw-Hook-Contract": defaultTestCodexHookContract}
