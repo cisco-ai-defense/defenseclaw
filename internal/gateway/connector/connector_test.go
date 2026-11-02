@@ -12015,7 +12015,8 @@ printf '%s\n' "$HOME"`
 			t.Fatal(err)
 		}
 		cmd := exec.Command(bash, "-c", script, helperPath)
-		cmd.Env = []string{"PATH=/usr/local/bin:/usr/bin:/bin", "HOME=" + tmp, "DEFENSECLAW_HOME=" + home}
+		// Git Bash and Go can spell the same Windows path with different separators.
+		cmd.Env = []string{"PATH=/usr/local/bin:/usr/bin:/bin", "HOME=" + filepath.ToSlash(tmp), "DEFENSECLAW_HOME=" + filepath.ToSlash(home)}
 		if tmpdir != "" {
 			cmd.Env = append(cmd.Env, "TMPDIR="+tmpdir)
 		}
@@ -12023,7 +12024,7 @@ printf '%s\n' "$HOME"`
 		if err != nil {
 			t.Fatalf("harden_env: %v\n%s", err, out)
 		}
-		return strings.TrimSpace(string(out))
+		return filepath.Clean(strings.TrimSpace(string(out)))
 	}
 	withMktemp := filepath.Join(tmp, "home-mktemp")
 	if got := run(withMktemp, ""); strings.HasPrefix(got, withMktemp) {
