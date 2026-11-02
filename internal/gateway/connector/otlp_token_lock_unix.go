@@ -7,6 +7,7 @@
 package connector
 
 import (
+	"errors"
 	"fmt"
 	"os"
 	"syscall"
@@ -24,17 +25,24 @@ func withOTLPPathTokenLock(path string, fn func() error) error {
 // pair it with their subsystem mutex: flock semantics for separately opened
 // descriptors differ across Unix variants.
 func withOwnedFileLock(lockPath string, fn func() error) error {
-	file, err := os.OpenFile(lockPath, os.O_CREATE|os.O_RDWR|otlpOpenNoFollow(), 0o600)
-	if err != nil {
-		return fmt.Errorf("open DefenseClaw lock: %w", err)
+	for attempt := 0; ; attempt++ {
+		file, err := os.OpenFile(lockPath, os.O_CREATE|os.O_RDWR|otlpOpenNoFollow(), 0o600)
+		if err != nil {
+			return fmt.Errorf("open DefenseClaw lock: %w", err)
+		}
+		if err := validateOwnedLockFile(lockPath, file); err != nil {
+			file.Close()
+			return err
+		}
+		if err := acquireFlock(file, lockPath); err != nil {
+			file.Close()
+			if errors.Is(err, errLockReplaced) && attempt < 8 {
+				continue
+			}
+			return fmt.Errorf("acquire DefenseClaw lock: %w", err)
+		}
+		defer file.Close()
+		defer syscall.Flock(int(file.Fd()), syscall.LOCK_UN) //nolint:errcheck // best-effort unlock on close
+		return fn()
 	}
-	defer file.Close()
-	if err := validateOwnedLockFile(lockPath, file); err != nil {
-		return err
-	}
-	if err := syscall.Flock(int(file.Fd()), syscall.LOCK_EX); err != nil {
-		return fmt.Errorf("acquire DefenseClaw lock: %w", err)
-	}
-	defer syscall.Flock(int(file.Fd()), syscall.LOCK_UN) //nolint:errcheck // best-effort unlock on close
-	return fn()
 }
