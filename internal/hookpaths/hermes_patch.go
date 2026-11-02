@@ -46,3 +46,21 @@ func hermesReplaceEditArgs(args json.RawMessage) (json.RawMessage, bool) {
 	encoded, err := json.Marshal(edit)
 	return encoded, err == nil
 }
+
+// hermesV4AApplyPatchArgs gives the hook client the standard V4A envelope
+// as an apply_patch call. Its target reader resolves each directive before
+// the managed gateway loses access to the user's home. An envelope outside
+// that reader's contract remains unproved and gets no ordinary-path claim.
+func hermesV4AApplyPatchArgs(args json.RawMessage) (json.RawMessage, bool) {
+	var fields map[string]json.RawMessage
+	if json.Unmarshal(args, &fields) != nil || fields == nil {
+		return nil, false
+	}
+	var mode, patch string
+	if json.Unmarshal(fields["mode"], &mode) != nil || mode != "patch" ||
+		json.Unmarshal(fields["patch"], &patch) != nil || patch == "" {
+		return nil, false
+	}
+	encoded, err := json.Marshal(map[string]string{"patch": patch})
+	return encoded, err == nil
+}

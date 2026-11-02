@@ -1098,6 +1098,7 @@ func trustedExistingAuthorizedKeysSymlinkWrite(request trustedActionRequest, fac
 				}
 			}
 			if strings.HasPrefix(operand, "/proc/self/cwd/") ||
+				strings.HasPrefix(operand, hookpaths.SourceRedirectFactPrefix) ||
 				strings.HasPrefix(operand, hookpaths.SourceLinkFactPrefix) ||
 				strings.HasPrefix(operand, hookpaths.SourceLinksFactPrefix) ||
 				strings.HasPrefix(operand, hookpaths.CdEnterableFactPrefix) ||
@@ -1179,7 +1180,11 @@ func trustedExistingAuthorizedKeysSymlinkWrite(request trustedActionRequest, fac
 		// cwd) is placed in the client's cwd, as the client keyed it.
 		target = hookpaths.OperandPath(target, clientCWD)
 		if request.patchTarget && (request.SandboxGuestCWD == "" || request.patchHostView) {
-			if _, ok := hookpaths.ResolvePatchWriteTarget(target); !ok {
+			if _, ok := hookpaths.ResolvePatchWriteTarget(target); !ok &&
+				(!cannotResolveLocally || !filepath.IsAbs(request.ResolvedWriteTargets[target])) {
+				// A managed gateway may be unable to walk the user's home.
+				// Its client's resolved patch target fills that one missing
+				// view. A target unresolved in both views stays closed.
 				return true
 			}
 		}
@@ -1337,6 +1342,18 @@ func trustedExistingAuthorizedKeysSymlinkWrite(request trustedActionRequest, fac
 		// found a protected target, as a per-user gateway does (GAP-2514,
 		// GAP-2515).
 		return true
+	}
+	if sourceKey := hookpaths.SimpleSourceRedirectFactKey(input.Command); sourceKey != "" {
+		// The single sourced file contains only one literal assignment, as
+		// checked by the user-side hook. A managed gateway reads that bound
+		// result; a per-user gateway reads the same file directly. An absent
+		// or unresolved result keeps the write closed.
+		if request.ProtectedHomeHook {
+			resolved := clientTargets[sourceKey]
+			return clientTargets[hookpaths.CWDKey] != input.CWD || !filepath.IsAbs(resolved) || isProtected(resolved)
+		}
+		resolved, ok := hookpaths.SimpleSourceRedirectTarget(input.Command, input.CWD, facts.ActiveHome)
+		return !ok || isProtected(resolved)
 	}
 	if hookpaths.DynamicCopyProtectedBasename(input.Command, facts.ActiveHome) {
 		return true

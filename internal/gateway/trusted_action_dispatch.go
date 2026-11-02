@@ -472,6 +472,13 @@ func dispatchTrustedActionWith(
 			checkedWholeWrite := false
 			wholeWriteSafe := false
 			wholeCommand, wholeCommandKnown := trustedBashCommandInput(request.Input)
+			// The split echo loses the value assigned by the sourced file. The
+			// complete call has checked that the source contains one literal
+			// assignment and resolved its sole redirect. Keep that finding for
+			// protected targets, and do not reintroduce an unknown-target SSH
+			// finding from the context-free child (GAP-0481).
+			sourceWriteSafe := wholeCommandKnown && hookpaths.SimpleSourceRedirectFactKey(wholeCommand) != "" &&
+				!trustedExistingAuthorizedKeysSymlinkWrite(request, facts)
 			simples := actionfacts.SimpleCommands(request.Input, facts)
 			if len(simples) == 0 && wholeCommandKnown && trustedStatementBudgetExceeded(request.Input, facts, wholeCommand) {
 				// The analysis stopped at its node or input bound before the
@@ -549,7 +556,11 @@ func dispatchTrustedActionWith(
 						return f.RuleID == "integrity.history_tamper"
 					})
 				}
-				if simple.UnresolvedBoundVariable {
+				if sourceWriteSafe {
+					childFindings = slices.DeleteFunc(childFindings, func(f RuleFinding) bool {
+						return f.RuleID == "persistence.ssh_authorized_keys_command"
+					})
+				} else if simple.UnresolvedBoundVariable {
 					if !checkedWholeWrite {
 						checkedWholeWrite = true
 						wholeWriteSafe = wholeCommandKnown &&
