@@ -82,6 +82,38 @@ func TestEnterpriseHookWatchOwnedFileChangedSeesInPlaceRewrites(t *testing.T) {
 	}
 }
 
+// A token can be overwritten after its target was checked but before a
+// retry pass for another target takes its final owned-file snapshot. The
+// queued Write must start another pass even inside the widened settle
+// window; otherwise the damaged snapshot hides the overwrite until retry.
+func TestEnterpriseHookWatchReplaysOverwriteQueuedDuringAnotherTargetsRetry(t *testing.T) {
+	dir := t.TempDir()
+	token := filepath.Join(dir, ".hook-hermes.token")
+	if err := os.WriteFile(token, []byte("issued\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	exclusive := map[string]struct{}{token: {}}
+	found, left := map[string]string{}, map[string]string{}
+	takeEnterpriseHookOwnedSnapshot(found, exclusive, nil, enterprisehooks.OwnedFileFingerprint)
+	if err := os.WriteFile(token, []byte("overwritten\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	takeEnterpriseHookOwnedSnapshot(left, exclusive, nil, enterprisehooks.OwnedFileFingerprint)
+	now := time.Now()
+	drop, _ := enterpriseHookWatchEventDropped(now, now.Add(6*time.Second),
+		fsnotify.Event{Name: token, Op: fsnotify.Write}, false, exclusive, nil,
+		found, left, enterprisehooks.OwnedFileFingerprint, true)
+	if drop {
+		t.Fatal("a healthy target's queued token overwrite was dropped during another target's retry")
+	}
+	legacyDrop, _ := enterpriseHookWatchEventDropped(now, now.Add(6*time.Second),
+		fsnotify.Event{Name: token, Op: fsnotify.Write}, false, exclusive, nil,
+		found, left, enterprisehooks.OwnedFileFingerprint, false)
+	if !legacyDrop {
+		t.Fatal("the Secure Client event classifier changed")
+	}
+}
+
 // GAP-0030: while a Hermes repair kept failing, each pass wrote the
 // allowlist backup receipt and its rollback removed it again; the receipt's
 // Create|Remove armed the next pass a second later, so the repair backoff
@@ -180,7 +212,7 @@ func TestEnterpriseHookWatchDeleteRightAfterARepairArmsThePass(t *testing.T) {
 	settleUntil := now.Add(2 * time.Second)
 	dropped := func(path string, op fsnotify.Op, lastPassFailed bool) (bool, bool) {
 		return enterpriseHookWatchEventDropped(now, settleUntil, fsnotify.Event{Name: path, Op: op}, lastPassFailed,
-			exclusive, shared, found, left, enterprisehooks.OwnedFileFingerprint)
+			exclusive, shared, found, left, enterprisehooks.OwnedFileFingerprint, true)
 	}
 	for _, op := range []fsnotify.Op{fsnotify.Remove, fsnotify.Create | fsnotify.Remove} {
 		if drop, _ := dropped(hook, op, false); drop {
