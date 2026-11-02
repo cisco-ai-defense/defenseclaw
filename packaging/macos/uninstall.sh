@@ -29,6 +29,15 @@
 #                                     backup identity + post hash still match)
 #     Non-DefenseClaw user entries in those files are preserved verbatim.
 #     Pass --keep-agent-configs to skip the scrub.
+#
+# Purge always completes. Every step is attempted for every user and
+# every object; a step that still fails after repair and a bounded retry
+# is logged with a marker (defenseclaw_skip / defenseclaw_prereq) in
+# uninstall.log, the purge carries on, and the last line of the log
+# summarises what was left. The purge exits 0 once it has done everything
+# it can; a later install clears any leftover. The order makes a re-run
+# safe: users are purged before the install tree (which holds the scrub
+# binary and the manifest), and the log folder keeps only uninstall.log.
 
 set -euo pipefail
 
@@ -44,25 +53,42 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # runtime dependency). See scrub_agent_config() below for the split.
 SCRUB_PY="${SCRIPT_DIR}/lib/scrub_agent_configs.py"
 
-INSTALL_PREFIX="/opt/cisco/secureclient/defenseclaw"
+# DC_UNINSTALL_TEST_ROOT re-roots every machine path below under a
+# fixture tree so the packaging tests can drive a whole purge
+# unprivileged. It is honoured only with DC_UNINSTALL_SKIP_ROOT_CHECK=1
+# and never when run as root.
+DC_ROOT=""
+DC_OWNER="root"
+DC_GROUP="wheel"
+if [[ -n "${DC_UNINSTALL_TEST_ROOT:-}" && "${DC_UNINSTALL_SKIP_ROOT_CHECK:-}" == "1" && "${EUID}" -ne 0 ]]; then
+  DC_ROOT="${DC_UNINSTALL_TEST_ROOT%/}"
+  DC_OWNER="$(id -un)"
+  DC_GROUP="$(id -gn)"
+fi
+
+INSTALL_PREFIX="${DC_ROOT}/opt/cisco/secureclient/defenseclaw"
 SUPPORT_DIR="${INSTALL_PREFIX}"
-LOGS_DIR="/Library/Logs/Cisco/SecureClient/DefenseClaw"
-PLIST_DST="/Library/LaunchDaemons/com.cisco.secureclient.defenseclaw.plist"
+LOGS_DIR="${DC_ROOT}/Library/Logs/Cisco/SecureClient/DefenseClaw"
+PLIST_DST="${DC_ROOT}/Library/LaunchDaemons/com.cisco.secureclient.defenseclaw.plist"
 LAUNCHD_LABEL="com.cisco.secureclient.defenseclaw"
-GUARDIAN_PLIST_DST="/Library/LaunchDaemons/com.cisco.secureclient.defenseclaw.hook-guardian.plist"
+GUARDIAN_PLIST_DST="${DC_ROOT}/Library/LaunchDaemons/com.cisco.secureclient.defenseclaw.hook-guardian.plist"
 GUARDIAN_LAUNCHD_LABEL="com.cisco.secureclient.defenseclaw.hook-guardian"
-ENUMERATOR_PLIST_DST="/Library/LaunchDaemons/com.cisco.secureclient.defenseclaw.hook-enumerator.plist"
+ENUMERATOR_PLIST_DST="${DC_ROOT}/Library/LaunchDaemons/com.cisco.secureclient.defenseclaw.hook-enumerator.plist"
 ENUMERATOR_LAUNCHD_LABEL="com.cisco.secureclient.defenseclaw.hook-enumerator"
+GUARDIAN_MANIFEST_PATH="${INSTALL_PREFIX}/hook-guardian/targets.yaml"
+GUARDIAN_AUTH_DIR="${INSTALL_PREFIX}/hook-guardian-state"
+USERS_ROOT="${DC_ROOT}/Users"
+UNINSTALL_LOG="${LOGS_DIR}/uninstall.log"
 
 # Legacy paths + labels from pre-managed-layout DefenseClaw installs.
 # Kept so that running the new uninstall.sh on an old-layout host
 # cleans up everything in one pass.
-LEGACY_INSTALL_PREFIX="/Library/DefenseClaw"
-LEGACY_SUPPORT_DIR="/Library/Application Support/DefenseClaw"
-LEGACY_LOGS_DIR="/Library/Logs/DefenseClaw"
-LEGACY_PLIST_DST="/Library/LaunchDaemons/com.defenseclaw.gateway.plist"
+LEGACY_INSTALL_PREFIX="${DC_ROOT}/Library/DefenseClaw"
+LEGACY_SUPPORT_DIR="${DC_ROOT}/Library/Application Support/DefenseClaw"
+LEGACY_LOGS_DIR="${DC_ROOT}/Library/Logs/DefenseClaw"
+LEGACY_PLIST_DST="${DC_ROOT}/Library/LaunchDaemons/com.defenseclaw.gateway.plist"
 LEGACY_LAUNCHD_LABEL="com.defenseclaw.gateway"
-LEGACY_GUARDIAN_PLIST_DST="/Library/LaunchDaemons/com.defenseclaw.hook-guardian.plist"
+LEGACY_GUARDIAN_PLIST_DST="${DC_ROOT}/Library/LaunchDaemons/com.defenseclaw.hook-guardian.plist"
 LEGACY_GUARDIAN_LAUNCHD_LABEL="com.defenseclaw.hook-guardian"
 
 # Legacy service-user names swept on --purge. Pre-root DefenseClaw
@@ -74,20 +100,26 @@ PURGE="false"
 ASSUME_YES="false"
 TARGET_USER=""
 KEEP_AGENT_CONFIGS="false"
-SCRUB_FAILED="false"
 
-# Source enumerate_local_users + home_perms_ok if the library is present.
-# uninstall.sh runs in three contexts: from a shipped bundle (SCRIPT_DIR
-# has lib/ beside it), from the managed install tree (SUPPORT_DIR/lib/),
-# and from the repo tree during tests. Try each; a missing lib just
-# means multi-user iteration falls back to the single-user SUDO_USER
-# path below.
+# Everything the purge could not finish, one "path|reason" entry each,
+# summarised on the last line of uninstall.log.
+LEFTOVERS=()
+
+# Source enumerate_local_users and the resilience helpers if the library
+# is present. uninstall.sh runs in three contexts: from a shipped bundle
+# (SCRIPT_DIR has lib/ beside it), from the managed install tree
+# (SUPPORT_DIR/lib/), and from the repo tree during tests. Try each; a
+# missing library (a re-run after a partial purge from a copy without
+# lib/) falls back to the minimal helpers below, and the purge target set
+# is still built from dscl, the manifest, the ledger and a home scan.
+DC_MARKER_COMPONENT="uninstall"
+DC_MARKER_LOG_FILE=""
 _UNINSTALL_LIB=""
 for _c in \
   "${SCRIPT_DIR}/lib/installer_lib.sh" \
   "${SUPPORT_DIR}/lib/installer_lib.sh" \
   "${SCRIPT_DIR}/../lib/installer_lib.sh"; do
-  if [[ -f "${_c}" ]]; then _UNINSTALL_LIB="${_c}"; break; fi
+  if [[ -f "${_c}" && ! -L "${_c}" ]]; then _UNINSTALL_LIB="${_c}"; break; fi
 done
 unset _c
 if [[ -n "${_UNINSTALL_LIB}" ]]; then
@@ -95,11 +127,118 @@ if [[ -n "${_UNINSTALL_LIB}" ]]; then
   . "${_UNINSTALL_LIB}"
 fi
 
+# ---- fallbacks when the library is missing -------------------------------
+#
+# Same contracts as the installer_lib.sh helpers, reduced to what purge
+# needs. Marker values are quoted with backslash, quote and newline
+# escaped, which matches the Go format for the paths and tokens purge logs.
+if ! command -v dc_marker >/dev/null 2>&1; then
+  DC_RETRY_ATTEMPTS="${DC_RETRY_ATTEMPTS:-3}"
+  DC_RETRY_SLEEP="${DC_RETRY_SLEEP:-0.5}"
+  _dc_emit() {
+    printf '%s\n' "$1" >&2
+    if [[ -n "${DC_MARKER_LOG_FILE}" ]]; then
+      printf '%s\n' "$1" >> "${DC_MARKER_LOG_FILE}" 2>/dev/null || true
+    fi
+    return 0
+  }
+  dc_marker() {
+    local marker="$1" arg key val line pairs=""
+    shift
+    for arg in "component=${DC_MARKER_COMPONENT}" "$@"; do
+      key="${arg%%=*}"
+      val="${arg#*=}"
+      val="${val//\\/\\\\}"
+      val="${val//\"/\\\"}"
+      val="${val//$'\n'/\\n}"
+      pairs="${pairs}${key}=\"${val}\""$'\n'
+    done
+    line="${marker}"
+    while IFS= read -r arg; do
+      [[ -n "${arg}" ]] && line="${line} ${arg}"
+    done < <(printf '%s' "${pairs}" | LC_ALL=C sort -t= -k1,1 -u)
+    _dc_emit "${line}"
+  }
+  dc_warn() {
+    local message="${1:-}"
+    shift || true
+    _dc_emit "[${DC_MARKER_COMPONENT}] WARN: ${message}"
+    if (( $# > 0 )); then dc_marker "$@"; fi
+    return 0
+  }
+  dc_retry() {
+    local attempt=1 rc=0
+    while :; do
+      rc=0
+      "$@" || rc=$?
+      (( rc == 0 )) && return 0
+      (( attempt >= DC_RETRY_ATTEMPTS )) && return "${rc}"
+      attempt=$((attempt + 1))
+      sleep "${DC_RETRY_SLEEP}" 2>/dev/null || true
+    done
+  }
+fi
+if ! command -v dc_remove_path >/dev/null 2>&1; then
+  dc_remove_path() {
+    local path="${1:-}"
+    [[ -n "${path}" && "${path}" != "/" ]] || return 2
+    [[ -e "${path}" || -L "${path}" ]] || return 0
+    if [[ -L "${path}" || ! -d "${path}" ]]; then
+      chflags -h nouchg,nouappnd "${path}" 2>/dev/null || true
+      dc_retry /bin/rm -f -- "${path}" 2>/dev/null || true
+    else
+      chflags -R -P nouchg,nouappnd "${path}" 2>/dev/null || true
+      chflags -R -P noschg,nosappnd "${path}" 2>/dev/null || true
+      chmod -R -P -N "${path}" 2>/dev/null || true
+      dc_retry /bin/rm -rf -- "${path}" 2>/dev/null || true
+    fi
+    [[ ! -e "${path}" && ! -L "${path}" ]]
+  }
+fi
+
 # ---- helpers ------------------------------------------------------------
 
-log()  { printf '[uninstall] %s\n' "$*"; }
-warn() { printf '[uninstall] WARN: %s\n' "$*" >&2; }
-die()  { printf '[uninstall] ERROR: %s\n' "$*" >&2; exit 1; }
+# Every line also goes to uninstall.log once it is open (see below).
+_ulog() {
+  if [[ -n "${DC_MARKER_LOG_FILE}" ]]; then
+    printf '%s\n' "$1" >> "${DC_MARKER_LOG_FILE}" 2>/dev/null || true
+  fi
+}
+log()  { printf '[uninstall] %s\n' "$*"; _ulog "[uninstall] $*"; }
+warn() { printf '[uninstall] WARN: %s\n' "$*" >&2; _ulog "[uninstall] WARN: $*"; }
+# die is reserved for usage errors, a declined confirmation, and not
+# running as root on macOS; nothing found on disk is ever fatal.
+die()  { printf '[uninstall] ERROR: %s\n' "$*" >&2; _ulog "[uninstall] ERROR: $*"; exit 1; }
+
+# leftover PATH REASON [MARKER key=value ...]: record something the purge
+# could not finish and log it with a marker (a defenseclaw_skip naming
+# the path and reason by default).
+leftover() {
+  local path="$1" reason="$2"
+  shift 2
+  LEFTOVERS+=("${path}|${reason}")
+  if (( $# > 0 )); then
+    dc_warn "left behind: ${path} (${reason})" "$@"
+  else
+    dc_warn "left behind: ${path} (${reason})" defenseclaw_skip unit="path:${path}" path="${path}" reason="${reason}"
+  fi
+}
+
+# purge_remove PATH [UNIT]: delete one DefenseClaw-owned path (flags and
+# ACLs cleared first, links never followed, bounded retry). A failure is
+# recorded as a leftover; the purge continues.
+purge_remove() {
+  local path="$1" unit="${2:-path:$1}"
+  [[ -e "${path}" || -L "${path}" ]] || return 0
+  log "removing ${path}"
+  if dc_remove_path "${path}"; then
+    return 0
+  fi
+  LEFTOVERS+=("${path}|remove_failed")
+  dc_warn "could not remove ${path}; a later install clears it" \
+    defenseclaw_skip unit="${unit}" path="${path}" reason=remove_failed
+  return 1
+}
 
 usage() {
   cat <<EOF
@@ -112,7 +251,7 @@ Options:
                           Legacy pre-Cisco-path locations if present:
                             /Library/Application Support/DefenseClaw/
                             /Library/Logs/DefenseClaw/
-                          ~/.defenseclaw/ for the target user (hook scripts)
+                          ~/.defenseclaw/ for every managed user (hook scripts)
                           Any legacy /Users/defenseclaw + /Groups/defenseclaw
                               dscl records from pre-root DefenseClaw installs
                         AND scrub DefenseClaw entries from:
@@ -128,7 +267,8 @@ Options:
                         scripts will be deleted, leaving dangling references
                         that fail-close every agent tool call. Use only if
                         you intend to immediately reinstall.
-  --user USER           Per-user cleanup target for --purge (default: \$SUDO_USER)
+  --user USER           Per-user cleanup target for --purge (default: every
+                        managed user)
   -y, --yes             Don't prompt for --purge confirmation
   -h, --help            Show this help
 
@@ -169,39 +309,199 @@ done
 # ---- preflight ----------------------------------------------------------
 
 [[ "$(uname -s)" == "Darwin" ]] || die "macOS only"
-[[ $EUID -eq 0 ]] || die "must run as root (try: sudo $0 $*)"
+if [[ "${DC_UNINSTALL_SKIP_ROOT_CHECK:-}" != "1" ]]; then
+  [[ $EUID -eq 0 ]] || die "must run as root (try: sudo $0 $*)"
+fi
 
-# Purge targets: newline-separated user:uid:gid:home lines. When --user
-# is passed explicitly, resolve that one user; otherwise iterate every
-# eligible local user via enumerate_local_users (falls back to SUDO_USER
-# if the library isn't sourced in this environment).
+# ---- uninstall.log ------------------------------------------------------
+#
+# Every line from here on is also appended to uninstall.log beside the
+# other DefenseClaw logs. Purge keeps that one file (and its folder) so
+# the record of what was removed and what was left survives the purge.
+# The log is never written through a link; without a usable log folder
+# the uninstall runs with console output only.
+open_uninstall_log() {
+  if [[ ! -e "${LOGS_DIR}" && ! -L "${LOGS_DIR}" && -d "$(dirname "${LOGS_DIR}")" ]]; then
+    mkdir "${LOGS_DIR}" 2>/dev/null || true
+    chown "${DC_OWNER}:${DC_GROUP}" "${LOGS_DIR}" 2>/dev/null || true
+    chmod 0750 "${LOGS_DIR}" 2>/dev/null || true
+  fi
+  [[ -d "${LOGS_DIR}" && ! -L "${LOGS_DIR}" ]] || return 0
+  if [[ -L "${UNINSTALL_LOG}" || ( -e "${UNINSTALL_LOG}" && ! -f "${UNINSTALL_LOG}" ) ]]; then
+    dc_remove_path "${UNINSTALL_LOG}" || return 0
+  fi
+  chflags -h nouchg,nouappnd "${UNINSTALL_LOG}" 2>/dev/null || true
+  ( umask 077; : >> "${UNINSTALL_LOG}" ) 2>/dev/null || return 0
+  chown -h "${DC_OWNER}:${DC_GROUP}" "${UNINSTALL_LOG}" 2>/dev/null || true
+  chmod -h 0640 "${UNINSTALL_LOG}" 2>/dev/null || true
+  DC_MARKER_LOG_FILE="${UNINSTALL_LOG}"
+  _ulog "===== uninstall.sh start $(date -u +%FT%TZ) (purge=${PURGE}) ====="
+}
+open_uninstall_log
+
+# ---- purge target set ---------------------------------------------------
+#
+# Newline-separated user:uid:gid:home lines, one per home. With --user,
+# that one user. Otherwise the union of:
+#   1. enumerate_local_users (when the library is present);
+#   2. every dscl user with uid >= 500 and a real home folder, including
+#      homes the enumerator filters out (group-writable, outside /Users);
+#   3. the hook-guardian manifest rows (targets.yaml);
+#   4. the guardian ledger rows (user_home / data_dir in the
+#      hook-guardian-state JSON records);
+#   5. every <users root>/*/.defenseclaw holding a managed hook script,
+#      which also covers a user deleted with their home kept.
+# Built before any service teardown, while the manifest and ledger exist,
+# and without the library when it is missing. A symlinked home is never
+# followed: that user is skipped with a marker.
+
 PURGE_TARGETS=""
+
+# _purge_add_home HOME [USER UID GID]: add one home to PURGE_TARGETS.
+_purge_add_home() {
+  local home="${1%/}" user="${2:-}" uid="${3:-}" gid="${4:-}"
+  [[ -n "${home}" ]] || return 0
+  case "${home}" in
+    /*) ;;
+    *) return 0 ;;
+  esac
+  case "/${home}/" in
+    */../*|*/./*) return 0 ;;
+  esac
+  [[ "${home}" != "/" && "${home}" != "${DC_ROOT}" ]] || return 0
+  if [[ -L "${home}" ]]; then
+    dc_marker defenseclaw_skip unit="user:${user:-${home##*/}}" path="${home}" reason=home_symlink
+    return 0
+  fi
+  [[ -d "${home}" ]] || return 0
+  # One line per home.
+  if [[ -n "${PURGE_TARGETS}" ]] && printf '%s\n' "${PURGE_TARGETS}" | awk -F: -v h="${home}" '
+      { rest = $0; for (i = 0; i < 3; i++) sub(/^[^:]*:/, "", rest); if (rest == h) found = 1 }
+      END { exit found ? 0 : 1 }'; then
+    return 0
+  fi
+  if [[ -z "${user}" || -z "${uid}" || -z "${gid}" ]]; then
+    local owner
+    owner="$(stat -f '%Su:%u:%g' "${home}" 2>/dev/null || echo '')"
+    [[ -n "${user}" ]] || user="${owner%%:*}"
+    owner="${owner#*:}"
+    [[ -n "${uid}" ]] || uid="${owner%%:*}"
+    [[ -n "${gid}" ]] || gid="${owner#*:}"
+  fi
+  [[ -n "${user}" ]] || user="${home##*/}"
+  PURGE_TARGETS="${PURGE_TARGETS:+${PURGE_TARGETS}$'\n'}${user}:${uid}:${gid}:${home}"
+}
+
+# _yaml_scalar VALUE: strip the double quotes and the \\ / \" escapes the
+# installer and the enumerator write.
+_yaml_scalar() {
+  local v="$1"
+  v="${v#"${v%%[![:space:]]*}"}"
+  v="${v%"${v##*[![:space:]]}"}"
+  if [[ "${v}" == \"*\" ]]; then
+    v="${v#\"}"
+    v="${v%\"}"
+    v="${v//\\\"/\"}"
+    v="${v//\\\\/\\}"
+  fi
+  printf '%s' "${v}"
+}
+
+_collect_from_dscl() {
+  local names line name uid record home gid
+  names="$(dscl . -list /Users UniqueID 2>/dev/null || true)"
+  while IFS= read -r line; do
+    name="$(printf '%s' "${line}" | awk '{print $1}')"
+    uid="$(printf '%s' "${line}" | awk '{print $2}')"
+    [[ -n "${name}" && "${uid}" =~ ^[0-9]+$ ]] || continue
+    (( uid >= 500 )) || continue
+    case "${name}" in _*|daemon|nobody|root) continue ;; esac
+    record="$(dscl . -read "/Users/${name}" NFSHomeDirectory PrimaryGroupID 2>/dev/null || true)"
+    home="$(printf '%s\n' "${record}" | sed -n 's/^NFSHomeDirectory: //p' | head -1)"
+    gid="$(printf '%s\n' "${record}" | sed -n 's/^PrimaryGroupID: //p' | head -1)"
+    [[ -n "${home}" ]] || continue
+    [[ "${gid}" =~ ^[0-9]+$ ]] || gid=""
+    _purge_add_home "${home}" "${name}" "${uid}" "${gid}"
+  done <<< "${names}"
+}
+
+_collect_from_manifest() {
+  [[ -f "${GUARDIAN_MANIFEST_PATH}" && ! -L "${GUARDIAN_MANIFEST_PATH}" ]] || return 0
+  local line user="" home="" uid="" gid=""
+  while IFS= read -r line; do
+    case "${line}" in
+      *"- user:"*)
+        _purge_add_home "${home}" "${user}" "${uid}" "${gid}"
+        user="$(_yaml_scalar "${line#*- user:}")"; home=""; uid=""; gid=""
+        ;;
+      *"user_home:"*) home="$(_yaml_scalar "${line#*user_home:}")" ;;
+      *" uid:"*) uid="$(_yaml_scalar "${line#*uid:}")" ;;
+      *" gid:"*) gid="$(_yaml_scalar "${line#*gid:}")" ;;
+      *" data_dir:"*)
+        local data_dir
+        data_dir="$(_yaml_scalar "${line#*data_dir:}")"
+        [[ -n "${home}" || "${data_dir}" != */.defenseclaw ]] || home="${data_dir%/.defenseclaw}"
+        ;;
+    esac
+  done < "${GUARDIAN_MANIFEST_PATH}"
+  _purge_add_home "${home}" "${user}" "${uid}" "${gid}"
+}
+
+_collect_from_ledger() {
+  [[ -d "${GUARDIAN_AUTH_DIR}" && ! -L "${GUARDIAN_AUTH_DIR}" ]] || return 0
+  local file value
+  for file in "${GUARDIAN_AUTH_DIR}"/*.json; do
+    [[ -f "${file}" && ! -L "${file}" ]] || continue
+    while IFS= read -r value; do
+      value="${value#*:}"
+      value="$(_yaml_scalar "${value}")"
+      case "${value}" in
+        */.defenseclaw) value="${value%/.defenseclaw}" ;;
+      esac
+      _purge_add_home "${value}"
+    done < <(grep -oE '"(user_home|data_dir)"[[:space:]]*:[[:space:]]*"([^"\\]|\\.)*"' "${file}" 2>/dev/null || true)
+  done
+}
+
+_collect_from_home_scan() {
+  local dc_dir home script
+  for dc_dir in "${USERS_ROOT}"/*/.defenseclaw; do
+    [[ -d "${dc_dir}" && ! -L "${dc_dir}" ]] || continue
+    home="${dc_dir%/.defenseclaw}"
+    [[ "${home##*/}" != "Deleted Users" ]] || continue
+    # Managed-runtime evidence: a guardian-rendered hook script. A
+    # per-user (unmanaged) DefenseClaw install writes none, so its data
+    # stays.
+    for script in "${dc_dir}"/hooks/*.sh; do
+      [[ -f "${script}" && ! -L "${script}" ]] || continue
+      if grep -qx 'DEFENSECLAW_MANAGED_HOOK=1' "${script}" 2>/dev/null; then
+        _purge_add_home "${home}"
+        break
+      fi
+    done
+  done
+}
+
 if [[ "${PURGE}" == "true" ]]; then
   if [[ -n "${TARGET_USER}" ]]; then
-    TARGET_HOME="$(dscl . -read "/Users/${TARGET_USER}" NFSHomeDirectory 2>/dev/null | awk '{print $2}')"
+    TARGET_HOME="$(dscl . -read "/Users/${TARGET_USER}" NFSHomeDirectory 2>/dev/null \
+      | sed -n 's/^NFSHomeDirectory: //p' | head -1 || true)"
     if [[ -z "${TARGET_HOME}" || ! -d "${TARGET_HOME}" ]]; then
       die "could not resolve home for --user ${TARGET_USER} (dscl returned '${TARGET_HOME}'); refusing to purge without a valid target"
     fi
-    _tuid="$(id -u "${TARGET_USER}" 2>/dev/null || echo "")"
-    _tgid="$(id -g "${TARGET_USER}" 2>/dev/null || echo "")"
-    PURGE_TARGETS="${TARGET_USER}:${_tuid}:${_tgid}:${TARGET_HOME}"
-    unset _tuid _tgid
-  elif command -v enumerate_local_users >/dev/null 2>&1; then
-    PURGE_TARGETS="$(enumerate_local_users || true)"
+    _purge_add_home "${TARGET_HOME}" "${TARGET_USER}" \
+      "$(id -u "${TARGET_USER}" 2>/dev/null || echo "")" "$(id -g "${TARGET_USER}" 2>/dev/null || echo "")"
   else
-    # Library not sourced — fall back to the legacy SUDO_USER single-user path.
-    _fallback_user="${SUDO_USER:-}"
-    if [[ -n "${_fallback_user}" ]]; then
-      TARGET_USER="${_fallback_user}"
-      TARGET_HOME="$(dscl . -read "/Users/${_fallback_user}" NFSHomeDirectory 2>/dev/null | awk '{print $2}')"
-      if [[ -n "${TARGET_HOME}" && -d "${TARGET_HOME}" ]]; then
-        _tuid="$(id -u "${_fallback_user}" 2>/dev/null || echo "")"
-        _tgid="$(id -g "${_fallback_user}" 2>/dev/null || echo "")"
-        PURGE_TARGETS="${_fallback_user}:${_tuid}:${_tgid}:${TARGET_HOME}"
-        unset _tuid _tgid
-      fi
+    if command -v enumerate_local_users >/dev/null 2>&1; then
+      while IFS=: read -r _u _uid _gid _h; do
+        [[ -n "${_u}" ]] && _purge_add_home "${_h}" "${_u}" "${_uid}" "${_gid}"
+      done < <(DC_INSTALLER_USERS_ROOT="${USERS_ROOT}" enumerate_local_users 2>/dev/null || true)
+      unset _u _uid _gid _h
     fi
-    unset _fallback_user
+    _collect_from_dscl
+    _collect_from_manifest
+    _collect_from_ledger
+    _collect_from_home_scan
   fi
 
   if [[ "${ASSUME_YES}" != "true" ]]; then
@@ -228,7 +528,8 @@ if [[ "${PURGE}" == "true" ]]; then
       fi
     fi
     printf '[uninstall] type yes to continue: '
-    read -r REPLY
+    REPLY=""
+    read -r REPLY || true
     [[ "${REPLY}" == "yes" ]] || die "purge declined"
   fi
 fi
@@ -251,10 +552,11 @@ stop_daemon() {
     # moment. For hook-guardian this matters: while alive, its
     # fsnotify handler re-heals the very agent-config files the
     # subsequent scrub is about to strip, silently undoing the
-    # uninstall.
+    # uninstall. The label can exit between the probe above and this
+    # read, so an empty answer is fine.
     local pid=""
-    pid="$(launchctl print "system/${label}" 2>/dev/null \
-      | awk '/^[[:space:]]*pid = / {print $3; exit}')"
+    pid="$( (launchctl print "system/${label}" 2>/dev/null || true) \
+      | awk '/^[[:space:]]*pid = / {print $3; exit}' || true)"
 
     # Try both bootout forms (target vs plist path); either works and
     # both are safe when the target is already gone.
@@ -270,6 +572,18 @@ stop_daemon() {
       sleep 1
       settle=$((settle + 1))
     done
+    # Verify the label is gone; one more bootout through the other form,
+    # then record it if it is still loaded (its plist is removed below,
+    # so it will not come back at the next boot).
+    if launchctl print "system/${label}" >/dev/null 2>&1; then
+      launchctl bootout system "${plist}" >/dev/null 2>&1 || true
+      launchctl bootout "system/${label}" >/dev/null 2>&1 || true
+      sleep 1
+      if launchctl print "system/${label}" >/dev/null 2>&1; then
+        leftover "system/${label}" label_still_loaded \
+          defenseclaw_skip unit="label:${label}" reason=label_still_loaded
+      fi
+    fi
 
     # Now wait for the child process itself to exit. bootout sends
     # SIGTERM; escalate to SIGKILL after 10s in case the process is
@@ -296,6 +610,7 @@ stop_daemon() {
       fi
     fi
   fi
+  return 0
 }
 
 # Stop the hook-guardian FIRST — it's the fsnotify-driven reconciler
@@ -380,7 +695,6 @@ _scrub_bin_trusted() {
     return 1
   fi
   if [[ ! -f "${path}" ]]; then
-    warn "${label} is not a regular file: ${path}; ignoring"
     return 1
   fi
   if [[ ! -x "${path}" ]]; then
@@ -403,7 +717,7 @@ _scrub_bin_trusted() {
     warn "${label} is group/other writable (mode ${_mode}): ${path}; ignoring"
     return 1
   fi
-  if [[ "${allow_non_root_owner}" != "true" && "${_own}" != "root" ]]; then
+  if [[ "${allow_non_root_owner}" != "true" && "${_own}" != "${DC_OWNER}" ]]; then
     warn "${label} must be owned by root (got: ${_own}): ${path}; ignoring"
     return 1
   fi
@@ -424,7 +738,7 @@ _scrub_bin_trusted() {
     fi
     _dir_own="${_dir_own_mode%% *}"
     _dir_mode="${_dir_own_mode##* }"
-    if [[ "${_dir_own}" != "root" ]]; then
+    if [[ "${_dir_own}" != "${DC_OWNER}" ]]; then
       warn "${label} containing dir must be owned by root (got: ${_dir_own}): ${_dir}; ignoring"
       return 1
     fi
@@ -439,12 +753,16 @@ _scrub_bin_trusted() {
 
 # _scrub_bin resolves the scrub-binary path by trying, in order:
 #   1. DEFENSECLAW_SCRUB_BIN (operator override — strict trust)
-#   2. INSTALL_PREFIX/bin/defenseclaw-gateway (managed install — strict trust)
-#   3. SCRIPT_DIR/defenseclaw           (bundle default — relaxed owner tier)
-#   4. SCRIPT_DIR/defenseclaw-gateway   (bundle/dev — relaxed owner tier)
+#   2. SCRIPT_DIR/defenseclaw           (bundle default — relaxed owner tier)
+#   3. SCRIPT_DIR/defenseclaw-gateway   (bundle/dev — relaxed owner tier)
+#   4. INSTALL_PREFIX/bin/defenseclaw-gateway (managed install — strict trust)
 #
-# Any candidate that fails the trust check prints a WARN and is
-# skipped; discovery falls through to the next candidate.
+# The bundle's own binary comes first so a re-run after a partial purge
+# (install tree already gone) scrubs with the same binary as the first
+# run. The installed binary and its folder are re-stamped root:wheel 0755
+# before the strict check, so permission drift on them never disables
+# the scrub. Any candidate that fails the trust check prints a WARN and
+# is skipped; discovery falls through to the next candidate.
 _scrub_bin() {
   local resolved=""
   if [[ -n "${DEFENSECLAW_SCRUB_BIN:-}" ]]; then
@@ -455,16 +773,7 @@ _scrub_bin() {
     fi
     # Fall through: warn already printed by helper.
   fi
-  # Managed-install location: strict trust (root-owned + mode
-  # tightened). If someone dropped an untrusted binary here they've
-  # already compromised the managed tree, but we still don't want
-  # uninstall.sh to launch it as root.
-  resolved="$(_scrub_bin_trusted "${INSTALL_PREFIX}/bin/defenseclaw-gateway" "managed install gateway binary" || true)"
-  if [[ -n "${resolved}" ]]; then
-    printf '%s' "${resolved}"
-    return
-  fi
-  # Bundle-fixture / dev-tree fallbacks: relaxed owner tier because
+  # Bundle-fixture / dev-tree candidates: relaxed owner tier because
   # the bundle unpacks under the caller's uid. Mode + symlink checks
   # still apply.
   for cand in \
@@ -476,10 +785,25 @@ _scrub_bin() {
       return
     fi
   done
+  # Managed-install location: strict trust (root-owned + mode
+  # tightened). Repair the metadata first; the content is never
+  # changed here.
+  if command -v dc_restamp >/dev/null 2>&1; then
+    dc_restamp "${INSTALL_PREFIX}/bin" "${DC_OWNER}:${DC_GROUP}" 0755 -d >/dev/null || true
+    dc_restamp "${INSTALL_PREFIX}/bin/defenseclaw-gateway" "${DC_OWNER}:${DC_GROUP}" 0755 -f >/dev/null || true
+  fi
+  resolved="$(_scrub_bin_trusted "${INSTALL_PREFIX}/bin/defenseclaw-gateway" "managed install gateway binary" || true)"
+  if [[ -n "${resolved}" ]]; then
+    printf '%s' "${resolved}"
+    return
+  fi
   printf ''
 }
 
-SCRUB_BIN="$(_scrub_bin)"
+SCRUB_BIN=""
+if [[ "${PURGE}" == "true" && "${KEEP_AGENT_CONFIGS}" != "true" ]]; then
+  SCRUB_BIN="$(_scrub_bin)"
+fi
 
 # python3 resolver — used only by the `amp` connector's scrub path.
 # The other three connectors (codex / claudecode / cursor) route
@@ -491,11 +815,39 @@ SCRUB_BIN="$(_scrub_bin)"
 # Amp uninstall.
 PY="$(command -v python3 || printf '/usr/bin/python3')"
 
+# _run_scrub CONNECTOR CFG AUTHORITY [USER]: one scrub attempt, as USER
+# when given, else as the caller (root). Prints the scrubber's output.
+_run_scrub() {
+  local connector="$1" cfg="$2" authority="$3" run_as="${4:-}"
+  local -a cmd=()
+  if [[ "${connector}" == "amp" ]]; then
+    cmd=("${PY}" "${SCRUB_PY}" "${connector}" "${cfg}")
+    [[ -z "${authority}" ]] || cmd+=("${authority}")
+  else
+    cmd=("${SCRUB_BIN}" enterprise hooks scrub --connector "${connector}" --file "${cfg}" --quiet-missing)
+  fi
+  if [[ -n "${run_as}" ]]; then
+    sudo -u "${run_as}" "${cmd[@]}" 2>&1
+  else
+    "${cmd[@]}" 2>&1
+  fi
+}
+
+# scrub_agent_config CONNECTOR CFG USER [AUTHORITY] [HOME]
+#
+# Scrubs one user × connector. The first attempt runs as the user. A
+# failure gets one retry as root: user immutable/append flags on the
+# exact file are cleared (no-follow) and restored afterwards, and the
+# scrubber, run as root, edits through its own no-follow handle and keeps
+# the file's owner. A config that is a symlink is never retried as root.
+# Returns 1 when the user × connector is left unscrubbed; the caller
+# logs it and carries on with everyone else.
 scrub_agent_config() {
   local connector="$1"
   local cfg="$2"
   local run_as_user="$3"   # empty ⇒ run as caller (root)
   local authority="${4:-}"
+  local home="${5:-}"      # the user's home: bounds the root retry
   if [[ "${connector}" == "amp" ]]; then
     if [[ ! -e "${cfg}" && ! -L "${cfg}" ]]; then
       return 0
@@ -504,7 +856,6 @@ scrub_agent_config() {
       return 0
   fi
   log "  scrubbing ${connector} entries from ${cfg}"
-  local rc=0
 
   # Split-route: `amp` uses the Python scrubber (signed-backup
   # restore of ~/.config/amp/plugins/defenseclaw.ts requires SHA-256
@@ -525,61 +876,135 @@ scrub_agent_config() {
     # is shipped 0755, so the -x check is a positive assertion that
     # the tarball extraction preserved the mode.
     if ! _scrub_bin_trusted "${SCRUB_PY}" "python scrub helper" --allow-non-root-owner >/dev/null; then
-      SCRUB_FAILED="true"
-      return 0
+      dc_marker defenseclaw_skip unit="user:${run_as_user}" connector=amp path="${cfg}" reason=scrub_helper_untrusted
+      return 1
     fi
-    if [[ -n "${run_as_user}" && $(id -u "${run_as_user}" 2>/dev/null) != "0" ]]; then
-      if [[ -n "${authority}" ]]; then
-        sudo -u "${run_as_user}" "${PY}" "${SCRUB_PY}" "${connector}" "${cfg}" "${authority}" || rc=$?
-      else
-        sudo -u "${run_as_user}" "${PY}" "${SCRUB_PY}" "${connector}" "${cfg}" || rc=$?
-      fi
-    else
-      if [[ -n "${authority}" ]]; then
-        "${PY}" "${SCRUB_PY}" "${connector}" "${cfg}" "${authority}" || rc=$?
-      else
-        "${PY}" "${SCRUB_PY}" "${connector}" "${cfg}" || rc=$?
-      fi
+    if ! "${PY}" -c 'import sys' >/dev/null 2>&1; then
+      dc_marker defenseclaw_prereq check=python3_available connector=amp path="${cfg}" \
+        remedy="install the Xcode Command Line Tools (xcode-select --install) and rerun the purge"
+      return 1
     fi
-  else
-    if [[ -z "${SCRUB_BIN}" ]]; then
-      warn "defenseclaw binary not found; skipping scrub of ${cfg}"
-      SCRUB_FAILED="true"
-      return 0
-    fi
-    # --quiet-missing lets rc=2 (file missing) still count as success:
-    # the outer if-guard already handled the "file doesn't exist" case,
-    # but between that check and the scrub call the file could vanish
-    # (rare, but possible), and treating it as clean is the right move.
-    if [[ -n "${run_as_user}" && $(id -u "${run_as_user}" 2>/dev/null) != "0" ]]; then
-      sudo -u "${run_as_user}" "${SCRUB_BIN}" enterprise hooks scrub \
-        --connector "${connector}" --file "${cfg}" --quiet-missing || rc=$?
-    else
-      "${SCRUB_BIN}" enterprise hooks scrub \
-        --connector "${connector}" --file "${cfg}" --quiet-missing || rc=$?
+  elif [[ -z "${SCRUB_BIN}" ]]; then
+    warn "defenseclaw binary not found; skipping scrub of ${cfg}"
+    dc_marker defenseclaw_skip unit="user:${run_as_user}" connector="${connector}" path="${cfg}" reason=scrub_binary_missing
+    return 1
+  fi
+
+  # Run as the user only when the account still exists and is not root;
+  # a deleted user's leftover home is scrubbed as root directly.
+  local as_user=""
+  if [[ -n "${run_as_user}" ]]; then
+    local _uid
+    _uid="$(id -u "${run_as_user}" 2>/dev/null || echo "")"
+    if [[ -n "${_uid}" && "${_uid}" != "0" ]]; then
+      as_user="${run_as_user}"
     fi
   fi
-  case "${rc}" in
-    0) ;;
-    *)
-      warn "  scrub exited ${rc} for ${cfg} (left unmodified)"
-      SCRUB_FAILED="true"
-      ;;
-  esac
+
+  # --quiet-missing lets rc=2 (file missing) still count as success:
+  # the outer if-guard already handled the "file doesn't exist" case,
+  # but between that check and the scrub call the file could vanish
+  # (rare, but possible), and treating it as clean is the right move.
+  local rc=0 output=""
+  output="$(_run_scrub "${connector}" "${cfg}" "${authority}" "${as_user}")" || rc=$?
+  [[ -z "${output}" ]] || log "    ${output//$'\n'/$'\n'    }"
+  if (( rc == 0 )); then
+    return 0
+  fi
+  if [[ -z "${as_user}" ]]; then
+    warn "  scrub exited ${rc} for ${cfg} (left unmodified)"
+    return 1
+  fi
+
+  # One retry as root.
+  if [[ -L "${cfg}" ]]; then
+    warn "  scrub exited ${rc} for ${cfg}; it is a symlink, so it is not retried as root"
+    return 1
+  fi
+  # Root must never follow a user-controlled symlink in the folders between
+  # the home and the config either: they could point root at another
+  # principal's files. (Not atomic; it narrows the window to a race.)
+  if [[ -z "${home}" || "${cfg}" != "${home}"/* ]]; then
+    warn "  scrub exited ${rc} for ${cfg}; it is outside the user home, so it is not retried as root"
+    return 1
+  fi
+  local _dir="${cfg%/*}"
+  while [[ "${_dir}" != "${home}" && -n "${_dir}" ]]; do
+    if [[ -L "${_dir}" ]]; then
+      warn "  scrub exited ${rc} for ${cfg}; ${_dir} is a symlink, so it is not retried as root"
+      return 1
+    fi
+    _dir="${_dir%/*}"
+  done
+  warn "  scrub exited ${rc} for ${cfg} as ${as_user}; retrying once as root"
+  local flags=""
+  flags="$(stat -f '%Sf' "${cfg}" 2>/dev/null || echo '-')"
+  if [[ "${flags}" == *uchg* || "${flags}" == *uappnd* ]]; then
+    chflags -h nouchg,nouappnd "${cfg}" 2>/dev/null || true
+  fi
+  rc=0
+  output="$(_run_scrub "${connector}" "${cfg}" "${authority}")" || rc=$?
+  [[ -z "${output}" ]] || log "    ${output//$'\n'/$'\n'    }"
+  if [[ "${flags}" == *uchg* || "${flags}" == *uappnd* ]] && [[ -e "${cfg}" && ! -L "${cfg}" ]]; then
+    chflags -h "${flags}" "${cfg}" 2>/dev/null || true
+  fi
+  if (( rc == 0 )); then
+    dc_marker defenseclaw_repair unit="user:${run_as_user}" connector="${connector}" path="${cfg}" reason=scrub_root_retry
+    return 0
+  fi
+  warn "  scrub exited ${rc} for ${cfg} as root (left unmodified)"
+  return 1
 }
 
-if [[ "${PURGE}" == "true" \
-   && "${KEEP_AGENT_CONFIGS}" != "true" \
-   && -n "${PURGE_TARGETS}" ]]; then
+# purge_user USER HOME: scrub every connector, then delete ~/.defenseclaw.
+# Each user is isolated: nothing here can stop the next user, and the
+# per-user delete runs whatever the scrub outcome.
+purge_user() {
+  local user="$1" home="$2"
+  if [[ "${KEEP_AGENT_CONFIGS}" != "true" ]]; then
+    log "scrubbing per-user hook configs for ${user} (${home})"
+    local spec connector cfg authority
+    for spec in \
+      "codex|${home}/.codex/config.toml|" \
+      "claudecode|${home}/.claude/settings.json|" \
+      "cursor|${home}/.cursor/hooks.json|" \
+      "amp|${home}/.config/amp/plugins/defenseclaw.ts|${home}/.defenseclaw/connector_backups/amp/config.json"; do
+      connector="${spec%%|*}"
+      cfg="${spec#*|}"; cfg="${cfg%%|*}"
+      authority="${spec##*|}"
+      if [[ "${connector}" == "amp" ]]; then
+        scrub_agent_config amp \
+          "${home}/.config/amp/plugins/defenseclaw.ts" "${user}" \
+          "${home}/.defenseclaw/connector_backups/amp/config.json" "${home}" && continue
+      else
+        scrub_agent_config "${connector}" "${cfg}" "${user}" "${authority}" "${home}" && continue
+      fi
+      leftover "${cfg}" scrub_failed \
+        defenseclaw_skip unit="user:${user}" connector="${connector}" path="${cfg}" reason=scrub_failed
+    done
+  fi
+  purge_remove "${home}/.defenseclaw" "user:${user}" || true
+  if [[ "${KEEP_AGENT_CONFIGS}" == "true" ]]; then
+    for cfg in "${home}/.codex/config.toml" \
+               "${home}/.claude/settings.json" \
+               "${home}/.cursor/hooks.json" \
+               "${home}/.config/amp/plugins/defenseclaw.ts"; do
+      if [[ -f "${cfg}" ]]; then
+        warn "--keep-agent-configs: ${cfg} remains after DefenseClaw runtime deletion (its managed hook/plugin may fail closed)"
+      fi
+    done
+  fi
+  return 0
+}
+
+# ---- per-user phase (purge) ----------------------------------------------
+#
+# Runs before the install tree is removed, so the managed scrub binary
+# and the manifest are still there for a re-run of this phase.
+if [[ "${PURGE}" == "true" && -n "${PURGE_TARGETS}" ]]; then
   while IFS=: read -r _pu _puid _pgid _phome; do
     [[ -z "${_pu}" || -z "${_phome}" ]] && continue
-    log "scrubbing per-user hook configs for ${_pu} (${_phome})"
-    scrub_agent_config codex      "${_phome}/.codex/config.toml"    "${_pu}"
-    scrub_agent_config claudecode "${_phome}/.claude/settings.json" "${_pu}"
-    scrub_agent_config cursor     "${_phome}/.cursor/hooks.json"    "${_pu}"
-    scrub_agent_config amp \
-      "${_phome}/.config/amp/plugins/defenseclaw.ts" "${_pu}" \
-      "${_phome}/.defenseclaw/connector_backups/amp/config.json"
+    purge_user "${_pu}" "${_phome}" || true
   done <<< "${PURGE_TARGETS}"
   unset _pu _puid _pgid _phome
 fi
@@ -594,10 +1019,7 @@ for plist in \
   "${ENUMERATOR_PLIST_DST}" \
   "${LEGACY_PLIST_DST}" \
   "${LEGACY_GUARDIAN_PLIST_DST}"; do
-  if [[ -f "${plist}" ]]; then
-    log "removing ${plist}"
-    rm -f "${plist}"
-  fi
+  purge_remove "${plist}" || true
 done
 
 # INSTALL_PREFIX is /opt/cisco/secureclient/defenseclaw/ — a
@@ -605,42 +1027,43 @@ done
 # etc/ + runtime/ + hook-guardian-state/. The default (non-purge)
 # uninstall preserves runtime state so a reinstall keeps audit history
 # (see usage text above), so on the non-purge path only the binary
-# subtree is removed; the full tree drops on --purge.
+# subtree is removed; the full tree drops on --purge, after the
+# per-user phase above.
 #
 # LEGACY_INSTALL_PREFIX is /Library/DefenseClaw/ — binary-only in the
 # old layout (runtime lived under LEGACY_SUPPORT_DIR), so it's safe to
 # remove wholesale in either mode.
 # `${var:?}` on the rm targets is defence-in-depth against an empty/unset
 # INSTALL_PREFIX after a future refactor — a bare `rm -rf /` or `rm -rf
-# /bin` would be catastrophic. Shellcheck SC2115. The `[[ -d ]]` guards
-# already handle the empty case at runtime, but the shell-parameter form
-# turns any unset-variable slip into a hard error instead of a delete.
+# /bin` would be catastrophic. Shellcheck SC2115.
 if [[ "${PURGE}" == "true" ]]; then
-  if [[ -d "${INSTALL_PREFIX:?}" ]]; then
-    log "removing ${INSTALL_PREFIX}"
-    rm -rf "${INSTALL_PREFIX:?}"
-  fi
-elif [[ -d "${INSTALL_PREFIX:?}/bin" ]]; then
-  log "removing ${INSTALL_PREFIX}/bin (runtime/config preserved for reinstall)"
-  rm -rf "${INSTALL_PREFIX:?}/bin"
+  purge_remove "${INSTALL_PREFIX:?}" || true
+else
+  purge_remove "${INSTALL_PREFIX:?}/bin" || true
 fi
-if [[ -d "${LEGACY_INSTALL_PREFIX:?}" ]]; then
-  log "removing ${LEGACY_INSTALL_PREFIX}"
-  rm -rf "${LEGACY_INSTALL_PREFIX:?}"
-fi
+purge_remove "${LEGACY_INSTALL_PREFIX:?}" || true
 
 # ---- runtime state ------------------------------------------------------
 
 if [[ "${PURGE}" == "true" ]]; then
   # SUPPORT_DIR equals INSTALL_PREFIX under the managed layout and was
   # already removed above on --purge, so we only need to sweep LOGS_DIR
-  # here. For legacy installs, SUPPORT_DIR and LOGS_DIR are separate
-  # trees that still need explicit removal.
-  for d in "${LOGS_DIR}" "${LEGACY_SUPPORT_DIR}" "${LEGACY_LOGS_DIR}"; do
-    if [[ -d "${d}" ]]; then
-      log "purging ${d}"
-      rm -rf "${d}"
-    fi
+  # here — everything in it except this run's uninstall.log. For legacy
+  # installs, SUPPORT_DIR and LOGS_DIR are separate trees that still
+  # need explicit removal.
+  if [[ -L "${LOGS_DIR}" ]]; then
+    purge_remove "${LOGS_DIR}" || true
+  elif [[ -d "${LOGS_DIR}" ]]; then
+    log "purging ${LOGS_DIR} (keeping uninstall.log)"
+    for _entry in "${LOGS_DIR}"/* "${LOGS_DIR}"/.[!.]*; do
+      [[ -e "${_entry}" || -L "${_entry}" ]] || continue
+      [[ "${_entry}" != "${UNINSTALL_LOG}" ]] || continue
+      purge_remove "${_entry}" || true
+    done
+    unset _entry
+  fi
+  for d in "${LEGACY_SUPPORT_DIR}" "${LEGACY_LOGS_DIR}"; do
+    purge_remove "${d}" || true
   done
 
   # Modern (root-mode) installs let the managed cloud auth provider
@@ -649,9 +1072,9 @@ if [[ "${PURGE}" == "true" ]]; then
   # file with defenseclaw ownership, so remove it if present. Never
   # rm the parent dir — it's shared.
   CMID_LOG_FILE="/Library/Logs/Cisco/SecureClient/CloudManagement/defenseclaw-gateway_cmidapi.log"
-  if [[ -f "${CMID_LOG_FILE}" ]]; then
+  if [[ -f "${DC_ROOT}${CMID_LOG_FILE}" ]]; then
     log "removing legacy managed-auth log file: ${CMID_LOG_FILE}"
-    rm -f "${CMID_LOG_FILE}"
+    purge_remove "${DC_ROOT}${CMID_LOG_FILE}" || true
   fi
 
   # NOTE: the daemon runs as root, so no service-user cleanup is
@@ -660,45 +1083,19 @@ if [[ "${PURGE}" == "true" ]]; then
   # + a matching group. If this uninstall runs on a machine still
   # carrying those records, sweep them so the next re-install starts
   # clean and no orphan uid remains.
-  for legacy_name in "${SERVICE_USER_KNOWN[@]}"; do
-    if dscl /Local/Default -read "/Groups/${legacy_name}" >/dev/null 2>&1; then
-      log "removing legacy DefenseClaw group ${legacy_name} (pre-root install)"
-      /usr/sbin/dseditgroup -o delete "${legacy_name}" >/dev/null 2>&1 \
-        || warn "dseditgroup delete ${legacy_name} failed"
-    fi
-    if dscl /Local/Default -read "/Users/${legacy_name}" >/dev/null 2>&1; then
-      log "removing legacy DefenseClaw user ${legacy_name} (pre-root install)"
-      /usr/sbin/sysadminctl -deleteUser "${legacy_name}" >/dev/null 2>&1 \
-        || warn "sysadminctl deleteUser ${legacy_name} failed"
-    fi
-  done
-
-  if [[ -n "${PURGE_TARGETS}" ]]; then
-    if [[ "${SCRUB_FAILED}" == "true" && "${KEEP_AGENT_CONFIGS}" != "true" ]]; then
-      # We're about to delete the hook scripts, but at least one agent
-      # config still references them. Deleting now would leave every
-      # future agent tool call fail-closed (exit 127 → block). Refuse
-      # rather than paint the operator into that corner.
-      die "one or more agent-config scrubs failed; refusing to delete per-user .defenseclaw dirs (rerun with --keep-agent-configs to force the delete, then repair or reinstall)"
-    fi
-    while IFS=: read -r _pu _puid _pgid _phome; do
-      [[ -z "${_pu}" || -z "${_phome}" ]] && continue
-      if [[ -d "${_phome}/.defenseclaw" ]]; then
-        log "purging ${_phome}/.defenseclaw"
-        rm -rf "${_phome}/.defenseclaw"
+  if [[ -z "${DC_ROOT}" ]]; then
+    for legacy_name in "${SERVICE_USER_KNOWN[@]}"; do
+      if dscl /Local/Default -read "/Groups/${legacy_name}" >/dev/null 2>&1; then
+        log "removing legacy DefenseClaw group ${legacy_name} (pre-root install)"
+        /usr/sbin/dseditgroup -o delete "${legacy_name}" >/dev/null 2>&1 \
+          || warn "dseditgroup delete ${legacy_name} failed"
       fi
-      if [[ "${KEEP_AGENT_CONFIGS}" == "true" ]]; then
-        for cfg in "${_phome}/.codex/config.toml" \
-                   "${_phome}/.claude/settings.json" \
-                   "${_phome}/.cursor/hooks.json" \
-                   "${_phome}/.config/amp/plugins/defenseclaw.ts"; do
-          if [[ -f "${cfg}" ]]; then
-            warn "--keep-agent-configs: ${cfg} remains after DefenseClaw runtime deletion (its managed hook/plugin may fail closed)"
-          fi
-        done
+      if dscl /Local/Default -read "/Users/${legacy_name}" >/dev/null 2>&1; then
+        log "removing legacy DefenseClaw user ${legacy_name} (pre-root install)"
+        /usr/sbin/sysadminctl -deleteUser "${legacy_name}" >/dev/null 2>&1 \
+          || warn "sysadminctl deleteUser ${legacy_name} failed"
       fi
-    done <<< "${PURGE_TARGETS}"
-    unset _pu _puid _pgid _phome
+    done
   fi
 else
   log "preserving ${SUPPORT_DIR} (config + audit DB)"
@@ -708,30 +1105,93 @@ fi
 
 # ---- sanity check -------------------------------------------------------
 
+# _logs_dir_leftover: LOGS_DIR counts as left behind only when it holds
+# anything besides uninstall.log.
+_logs_dir_leftover() {
+  [[ -e "${LOGS_DIR}" || -L "${LOGS_DIR}" ]] || return 1
+  [[ -d "${LOGS_DIR}" && ! -L "${LOGS_DIR}" ]] || return 0
+  local entry
+  for entry in "${LOGS_DIR}"/* "${LOGS_DIR}"/.[!.]*; do
+    [[ -e "${entry}" || -L "${entry}" ]] || continue
+    [[ "${entry}" == "${UNINSTALL_LOG}" ]] || return 0
+  done
+  return 1
+}
+
 REMAINING=()
-[[ -e "${PLIST_DST}" ]]                 && REMAINING+=("${PLIST_DST}")
-[[ -e "${GUARDIAN_PLIST_DST}" ]]        && REMAINING+=("${GUARDIAN_PLIST_DST}")
-[[ -e "${ENUMERATOR_PLIST_DST}" ]]      && REMAINING+=("${ENUMERATOR_PLIST_DST}")
-[[ -e "${LEGACY_PLIST_DST}" ]]          && REMAINING+=("${LEGACY_PLIST_DST}")
-[[ -e "${LEGACY_GUARDIAN_PLIST_DST}" ]] && REMAINING+=("${LEGACY_GUARDIAN_PLIST_DST}")
-[[ -e "${INSTALL_PREFIX}" ]]            && REMAINING+=("${INSTALL_PREFIX}")
-[[ -e "${LEGACY_INSTALL_PREFIX}" ]]     && REMAINING+=("${LEGACY_INSTALL_PREFIX}")
+for _path in "${PLIST_DST}" "${GUARDIAN_PLIST_DST}" "${ENUMERATOR_PLIST_DST}" \
+             "${LEGACY_PLIST_DST}" "${LEGACY_GUARDIAN_PLIST_DST}" \
+             "${INSTALL_PREFIX}" "${LEGACY_INSTALL_PREFIX}"; do
+  if [[ -e "${_path}" || -L "${_path}" ]]; then
+    if [[ "${_path}" == "${INSTALL_PREFIX}" && "${PURGE}" != "true" ]]; then
+      [[ -e "${INSTALL_PREFIX}/bin" ]] || continue
+      _path="${INSTALL_PREFIX}/bin"
+    fi
+    REMAINING+=("${_path}")
+  fi
+done
 if [[ "${PURGE}" == "true" ]]; then
-  [[ -e "${LOGS_DIR}" ]]         && REMAINING+=("${LOGS_DIR}")
+  _logs_dir_leftover && REMAINING+=("${LOGS_DIR}")
   [[ -e "${LEGACY_SUPPORT_DIR}" ]] && REMAINING+=("${LEGACY_SUPPORT_DIR}")
   [[ -e "${LEGACY_LOGS_DIR}" ]]    && REMAINING+=("${LEGACY_LOGS_DIR}")
   if [[ -n "${PURGE_TARGETS}" ]]; then
     while IFS=: read -r _pu _puid _pgid _phome; do
       [[ -z "${_phome}" ]] && continue
-      [[ -e "${_phome}/.defenseclaw" ]] && REMAINING+=("${_phome}/.defenseclaw")
+      [[ -e "${_phome}/.defenseclaw" || -L "${_phome}/.defenseclaw" ]] && REMAINING+=("${_phome}/.defenseclaw")
     done <<< "${PURGE_TARGETS}"
     unset _pu _puid _pgid _phome
   fi
 fi
-if (( ${#REMAINING[@]} > 0 )); then
-  warn "the following paths still exist (manual cleanup needed):"
-  printf '  - %s\n' "${REMAINING[@]}" >&2
-  exit 1
+unset _path
+
+if [[ "${PURGE}" != "true" ]]; then
+  # The non-purge path keeps its original contract: a leftover is an
+  # error the operator resolves by hand.
+  if (( ${#REMAINING[@]} > 0 )); then
+    warn "the following paths still exist (manual cleanup needed):"
+    printf '  - %s\n' "${REMAINING[@]}" >&2
+    exit 1
+  fi
+  log "done."
+  exit 0
 fi
 
-log "done."
+# Purge: every leftover was already logged with its marker where it
+# happened; list anything the final sweep still sees, then summarise on
+# the last line and exit 0.
+_summary=()
+if (( ${#LEFTOVERS[@]} > 0 )); then
+  for _item in "${LEFTOVERS[@]}"; do
+    _summary+=("${_item%%|*} (${_item#*|})")
+  done
+fi
+if (( ${#REMAINING[@]} > 0 )); then
+  warn "the following paths still exist; a later install clears them:"
+  for _path in "${REMAINING[@]}"; do
+    printf '  - %s\n' "${_path}" >&2
+    _ulog "  - ${_path}"
+    _already="false"
+    if (( ${#LEFTOVERS[@]} > 0 )); then
+      for _item in "${LEFTOVERS[@]}"; do
+        [[ "${_item%%|*}" == "${_path}" ]] && _already="true"
+      done
+    fi
+    if [[ "${_already}" != "true" ]]; then
+      dc_marker defenseclaw_skip unit="path:${_path}" path="${_path}" reason=still_present
+      _summary+=("${_path} (still_present)")
+    fi
+  done
+  unset _path _already
+fi
+unset _item
+
+if (( ${#_summary[@]} > 0 )); then
+  _joined=""
+  for _item in "${_summary[@]}"; do
+    _joined="${_joined:+${_joined}; }${_item}"
+  done
+  log "done with ${#_summary[@]} warning(s); left behind: ${_joined}"
+else
+  log "done."
+fi
+exit 0

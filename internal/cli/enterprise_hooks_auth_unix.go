@@ -54,9 +54,3 @@ func setEnterpriseHookAuthorizationOwnership(path string) error {
 func setEnterpriseHookGuardianStateOwnership(path string) error {
 	return setEnterpriseHookAuthorizationOwnership(path)
 }
-
-// repairEnterpriseHookGuardianLedgerObjectPlatform is Windows-only. POSIX
-// ledgers are protected by root ownership and modes the writer re-applies.
-func repairEnterpriseHookGuardianLedgerObjectPlatform(string, bool) error {
-	return errors.New("hook guardian ledger repair is not supported on this platform")
-}

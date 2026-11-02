@@ -285,7 +285,7 @@ func TestLoadFromFile_ManagedEnterpriseUntrustedWriterOnConfigPath(t *testing.T)
 		}
 		return
 	}
-	if err != nil {
+	if !configTrustAccepted(err) {
 		t.Fatalf("LoadFromFile error = %v, want drifted managed config accepted", err)
 	}
 	if !boundaryNamesPath(boundaries(), path) {

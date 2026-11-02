@@ -47,7 +47,13 @@ func validateJudgeBodyPlatformTrust(path string, info os.FileInfo, directory, st
 	effectiveUser := os.Geteuid()
 	trustedOwner := owner == effectiveUser || directory && owner == 0
 	if !trustedOwner {
-		return errors.New("judge_body: database path has an untrusted owner")
+		verdict := errors.New("judge_body: database path has an untrusted owner")
+		if !auditDBAncestorOwnerAdvisory(path, directory, strict) {
+			return verdict
+		}
+		if err := managed.RelaxAncestorTrustVerdict(true, path, "judge body database directory", verdict); err != nil {
+			return err
+		}
 	}
 	if info.Mode().Perm()&0o022 != 0 {
 		// Root-owned sticky directories such as /tmp are safe ancestors: the
@@ -60,7 +66,7 @@ func validateJudgeBodyPlatformTrust(path string, info os.FileInfo, directory, st
 			kind = "directory"
 		}
 		verdict := managed.NewTrustVerdict("judge_body: database %s is group- or other-writable", kind)
-		advisory := !strict && managed.PlatformInstallerOwnedPath(path)
+		advisory := !strict && managed.AdvisoryAncestorPath(path)
 		label := fmt.Sprintf("judge body database %s", kind)
 		return managed.RelaxAncestorTrustVerdict(advisory, path, label, verdict)
 	}

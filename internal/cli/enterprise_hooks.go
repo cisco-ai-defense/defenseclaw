@@ -124,7 +124,7 @@ var (
 		if err := managed.ValidateTrustedFilePath(path, label); err == nil {
 			return nil
 		}
-		if enterpriseHooksRuntimeGOOS() == "windows" &&
+		if (enterpriseHooksRuntimeGOOS() == "windows" || enterpriseHooksRuntimeGOOS() == "darwin") &&
 			enterpriseHookManifestACLRepair(path) == nil &&
 			managed.ValidateTrustedFilePath(path, label) == nil {
 			return nil

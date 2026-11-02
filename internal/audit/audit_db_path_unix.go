@@ -65,7 +65,13 @@ func validateAuditDBPlatformTrust(path string, info os.FileInfo, directory, stri
 	owner := int(stat.Uid)
 	effectiveUser := os.Geteuid()
 	if owner != effectiveUser && !(directory && owner == 0) {
-		return errors.New("audit: database path has an untrusted owner")
+		verdict := errors.New("audit: database path has an untrusted owner")
+		if !auditDBAncestorOwnerAdvisory(path, directory, strict) {
+			return verdict
+		}
+		if err := managed.RelaxAncestorTrustVerdict(true, path, "audit store database directory", verdict); err != nil {
+			return err
+		}
 	}
 	if info.Mode().Perm()&0o022 != 0 {
 		if directory && owner == 0 && info.Mode()&os.ModeSticky != 0 {
@@ -76,7 +82,7 @@ func validateAuditDBPlatformTrust(path string, info os.FileInfo, directory, stri
 			kind = "directory"
 		}
 		verdict := managed.NewTrustVerdict("audit: database %s is group- or other-writable", kind)
-		advisory := !strict && managed.PlatformInstallerOwnedPath(path)
+		advisory := !strict && managed.AdvisoryAncestorPath(path)
 		label := fmt.Sprintf("audit store database %s", kind)
 		return managed.RelaxAncestorTrustVerdict(advisory, path, label, verdict)
 	}
