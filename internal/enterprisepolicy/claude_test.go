@@ -15,6 +15,7 @@ import (
 	"encoding/xml"
 	"path/filepath"
 	"reflect"
+	"runtime"
 	"strings"
 	"testing"
 
@@ -79,6 +80,53 @@ func TestClaudeReconcilePublishesLockedDropIn(t *testing.T) {
 	}
 	if again, err := (claudeTarget{}).Reconcile(opts); err != nil || again.Changed {
 		t.Fatalf("second reconcile must be a no-op: %v %+v", err, again)
+	}
+}
+
+func TestClaudeVerifyRequiresCurrentManagedHandler(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("earlier Unix handler form")
+	}
+	withHigherSources(t)
+	opts := withPolicy(testOptions(t), "claudecode", func(p *config.EnterpriseConnectorPolicy) {
+		p.Ownership = config.MachinePolicyOwnershipVerifyOnly
+	})
+	rendered, err := renderClaudeDropIn(opts, opts.PolicyFor("claudecode"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	path := claudeDropIn(t, opts)
+	writeFile(t, path, string(rendered))
+	current, err := (claudeTarget{}).Verify(opts)
+	if err != nil || !current.Covered {
+		t.Fatalf("current managed handler must verify: %v %+v", err, current)
+	}
+
+	var doc map[string]any
+	if err := json.Unmarshal(rendered, &doc); err != nil {
+		t.Fatal(err)
+	}
+	for _, entries := range doc["hooks"].(map[string]any) {
+		for _, entry := range entries.([]any) {
+			for _, raw := range entry.(map[string]any)["hooks"].([]any) {
+				handler := raw.(map[string]any)
+				handler["command"] = shellQuote(opts.HookBinary) + " hook --connector claudecode --enterprise-managed"
+				delete(handler, "args")
+			}
+		}
+	}
+	legacy, err := json.Marshal(doc)
+	if err != nil {
+		t.Fatal(err)
+	}
+	writeFile(t, path, string(legacy))
+	stale, err := (claudeTarget{}).Verify(opts)
+	if err != nil || stale.Covered || !hasConflict(stale, "has no DefenseClaw managed hook") {
+		t.Fatalf("earlier managed handler must require refresh: %v %+v", err, stale)
+	}
+	remaining, owned, err := claudeStrip(opts)(legacy)
+	if err != nil || !owned || len(remaining) != 0 {
+		t.Fatalf("earlier managed handler must stay recognizable for owned-file cleanup: %v owned=%t remaining=%q", err, owned, remaining)
 	}
 }
 

@@ -122,12 +122,10 @@ func renderClaudeHigherPrecedence(opts Options, policy config.ResolvedConnectorP
 	return encodeOrdered(doc)
 }
 
-// claudeHandlerIsOwned reports whether a decoded handler is DefenseClaw's.
+// claudeHandlerIsOwned reports whether a decoded handler uses the current
+// managed form. Earlier forms need a policy refresh before they count.
 func claudeHandlerIsOwned(opts Options, raw any) bool {
 	command := stringField(raw, "command")
-	if opts.goos() != "windows" && command == shellQuote(opts.HookBinary)+" hook --connector claudecode --enterprise-managed" {
-		return true // retained for cleanup of an earlier managed drop-in
-	}
 	if opts.goos() == "windows" {
 		if !strings.EqualFold(command, opts.HookBinary) {
 			return false
@@ -152,6 +150,28 @@ func claudeHandlerIsOwned(opts Options, raw any) bool {
 		}
 	}
 	return true
+}
+
+// claudeHandlerIsLegacyOwned keeps earlier drop-ins recognizable for cleanup.
+func claudeHandlerIsLegacyOwned(opts Options, raw any) bool {
+	return opts.goos() != "windows" && stringField(raw, "command") == shellQuote(opts.HookBinary)+" hook --connector claudecode --enterprise-managed"
+}
+
+func claudeEventLists(hooks any) map[string][]any {
+	eventLists := map[string][]any{}
+	switch v := hooks.(type) {
+	case *object:
+		for _, key := range v.keys {
+			list, _ := v.values[key].([]any)
+			eventLists[key] = list
+		}
+	case map[string]any:
+		for key, value := range v {
+			list, _ := value.([]any)
+			eventLists[key] = list
+		}
+	}
+	return eventLists
 }
 
 // claudeEnvValue returns doc's env value for name.
@@ -189,25 +209,13 @@ func inspectClaudeShellopts(sources []claudeSource, state *State) {
 // countClaudeHooks counts DefenseClaw and foreign handlers in a settings
 // "hooks" value and reports which contracted events lack DefenseClaw.
 func countClaudeHooks(opts Options, hooks any, events []string) (owned, foreign int, missing []string) {
-	eventLists := map[string][]any{}
-	switch v := hooks.(type) {
-	case *object:
-		for _, key := range v.keys {
-			list, _ := v.values[key].([]any)
-			eventLists[key] = list
-		}
-	case map[string]any:
-		for key, value := range v {
-			list, _ := value.([]any)
-			eventLists[key] = list
-		}
-	}
+	eventLists := claudeEventLists(hooks)
 	for _, list := range eventLists {
 		for _, entry := range list {
 			for _, handler := range handlersOf(entry) {
 				if claudeHandlerIsOwned(opts, handler) {
 					owned++
-				} else {
+				} else if !claudeHandlerIsLegacyOwned(opts, handler) {
 					foreign++
 				}
 			}
@@ -549,7 +557,19 @@ func claudeStrip(opts Options) stripFunc {
 		}
 		hooks, _ := doc.get("hooks")
 		owned, _, _ := countClaudeHooks(opts, hooks, nil)
-		return owned > 0
+		if owned > 0 {
+			return true
+		}
+		for _, list := range claudeEventLists(hooks) {
+			for _, entry := range list {
+				for _, handler := range handlersOf(entry) {
+					if claudeHandlerIsLegacyOwned(opts, handler) {
+						return true
+					}
+				}
+			}
+		}
+		return false
 	})
 }
 
