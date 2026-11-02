@@ -236,6 +236,9 @@ func Verify(ctx context.Context, opts InstallOptions) (InstallResult, error) {
 				canonicalHookFailMode(lock.HookFailMode) != canonicalHookFailMode(current.HookFailMode) {
 				return fmt.Errorf("enterprise hooks: connector %s hook contract lock drift detected", conn.Name())
 			}
+			if err := connector.VerifyManagedHookRender(setupOpts, conn); err != nil {
+				return fmt.Errorf("enterprise hooks: connector %s: %w", conn.Name(), err)
+			}
 			result = InstallResult{
 				Connector:       conn.Name(),
 				UserHome:        home,

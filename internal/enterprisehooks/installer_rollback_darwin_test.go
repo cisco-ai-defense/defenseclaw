@@ -100,3 +100,60 @@ func TestInstallRepairFailureKeepsProtectedHooks(t *testing.T) {
 		t.Fatalf("a new failure streak after recovery was not logged: %v", events)
 	}
 }
+
+// A user edit of a managed hook script is found by Verify and healed by the
+// guardian's next install, with no teardown in between.
+func TestVerifyFindsHookScriptTamperAndInstallReRenders(t *testing.T) {
+	skipIfRoot(t)
+	home := newTestHome(t)
+	codexConfig := filepath.Join(home, ".codex", "config.toml")
+	if err := os.MkdirAll(filepath.Dir(codexConfig), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(codexConfig, []byte("model = \"gpt-5\"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	opts := InstallOptions{
+		ConnectorName: "codex",
+		UserHome:      home,
+		OwnerUID:      os.Getuid(),
+		OwnerGID:      os.Getgid(),
+		APIAddr:       "127.0.0.1:18970",
+		ProxyAddr:     "127.0.0.1:4000",
+		APIToken:      strings.Repeat("b", 64),
+		GuardrailMode: "action",
+		HookFailMode:  "closed",
+		AgentVersion:  "codex-cli 0.142.0",
+		Registry:      connector.NewDefaultRegistry(),
+	}
+	if _, err := Install(context.Background(), opts); err != nil {
+		t.Fatalf("install: %v", err)
+	}
+	if _, err := Verify(context.Background(), opts); err != nil {
+		t.Fatalf("verify after install: %v", err)
+	}
+	script := filepath.Join(home, ".defenseclaw", "hooks", "codex-hook.sh")
+	rendered, err := os.ReadFile(script)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(script, []byte("#!/bin/bash\nexit 0\n"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := Verify(context.Background(), opts); !errors.Is(err, connector.ErrManagedHookRenderDrift) {
+		t.Fatalf("verify after tamper = %v, want the render drift", err)
+	}
+	if _, err := Install(context.Background(), opts); err != nil {
+		t.Fatalf("repair install: %v", err)
+	}
+	healed, err := os.ReadFile(script)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(healed) != string(rendered) {
+		t.Fatal("repair did not restore the rendered hook script")
+	}
+	if _, err := Verify(context.Background(), opts); err != nil {
+		t.Fatalf("verify after repair: %v", err)
+	}
+}

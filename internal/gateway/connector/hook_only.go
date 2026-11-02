@@ -833,7 +833,11 @@ func (c *hookOnlyConnector) Setup(ctx context.Context, opts SetupOpts) error {
 // is present in the installed regular file.
 func (c *hookOnlyConnector) ownedHookContractPresent(opts SetupOpts) (bool, error) {
 	if !c.pluginArtifact {
-		return ownedHooksPresentInConfig(c, opts)
+		present, err := ownedHooksPresentInConfig(c, opts)
+		if err != nil || !present {
+			return present, err
+		}
+		return c.cursorUserHooksMatrixPresent(opts)
 	}
 	path := c.configPath(opts)
 	const maxManagedPluginBytes = 4 << 20

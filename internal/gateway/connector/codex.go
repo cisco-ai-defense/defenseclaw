@@ -722,6 +722,7 @@ func (c *CodexConnector) checkOwnedHookContract(opts SetupOpts) (bool, string, e
 	if verifyErr != nil {
 		return false, fmt.Sprintf("Codex hook matrix in %s (%s): %v", configPath, resolution.Contract.ContractID, verifyErr), nil
 	}
+	noteCodexTrustVerification(opts, resolution)
 	return true, "", nil
 }
 
