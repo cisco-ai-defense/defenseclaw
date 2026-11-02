@@ -575,58 +575,150 @@ def _contained_mcp_windows_process_factory(started: list[object] | None = None) 
 
 _MCP_POSIX_PROCESS_FACTORY_LOCK = threading.Lock()
 _MCP_POSIX_GROUP_GRACE_SECONDS = 0.25
+_MCP_POSIX_SCANNER_PGID = os.getpgrp() if os.name != "nt" else -1
 
 
-def _terminate_mcp_posix_group(pgid: int) -> None:
-    """End only the group created for this stdio server, even if its leader exited."""
+def _terminate_mcp_posix_group(pgid: int, parent_pgid: int | None = None) -> None:
+    """Signal a group only while this process is its original leader."""
+    if parent_pgid is None:
+        parent_pgid = _MCP_POSIX_SCANNER_PGID
+
+    def owned() -> bool:
+        if pgid <= 1 or pgid == parent_pgid:
+            return False
+        try:
+            return os.getpid() == pgid and os.getpgrp() == pgid
+        except (PermissionError, ProcessLookupError) as exc:
+            _LOGGER.debug("MCP stdio group identity check failed: %s", exc)
+            return False
+
+    if not owned():
+        _LOGGER.debug("MCP stdio group %s is no longer owned; skipping TERM", pgid)
+        return
     try:
         os.killpg(pgid, signal.SIGTERM)
-    except ProcessLookupError:
+    except ProcessLookupError as exc:
+        _LOGGER.debug("MCP stdio group %s disappeared before TERM: %s", pgid, exc)
         return
+    except PermissionError as exc:
+        _LOGGER.debug("MCP stdio group %s denied TERM: %s", pgid, exc)
 
-    deadline = time.monotonic() + _MCP_POSIX_GROUP_GRACE_SECONDS
-    while time.monotonic() < deadline:
-        try:
-            os.killpg(pgid, 0)
-        except ProcessLookupError:
-            return
-        time.sleep(0.025)
+    time.sleep(_MCP_POSIX_GROUP_GRACE_SECONDS)
+    if not owned():
+        _LOGGER.debug("MCP stdio group %s is no longer owned; skipping KILL", pgid)
+        return
     try:
         os.killpg(pgid, signal.SIGKILL)
-    except ProcessLookupError:
-        pass
+    except (PermissionError, ProcessLookupError) as exc:
+        _LOGGER.debug("MCP stdio group %s could not receive KILL: %s", pgid, exc)
+
+
+def _mcp_posix_group_guardian(control_fd: int, parent_pgid: int) -> None:
+    """Keep the group ID reserved until the scan asks for bounded cleanup."""
+    signal.signal(signal.SIGTERM, signal.SIG_IGN)
+    try:
+        while os.read(control_fd, 1024):
+            pass
+    except OSError as exc:
+        _LOGGER.debug("MCP stdio group control pipe closed: %s", exc)
+    finally:
+        try:
+            os.close(control_fd)
+        except OSError as exc:
+            _LOGGER.debug("MCP stdio group control pipe release failed: %s", exc)
+    _terminate_mcp_posix_group(os.getpid(), parent_pgid)
+
+
+def _reap_mcp_posix_guardian(guardian: subprocess.Popen[bytes]) -> None:
+    """Reap in the background without delaying a scan or process exit."""
+    try:
+        threading.Thread(target=guardian.wait, daemon=True).start()
+    except (OSError, RuntimeError) as exc:
+        _LOGGER.debug("MCP stdio group guardian reaper unavailable: %s", exc)
+
+
+def _close_mcp_posix_control(fd: int) -> None:
+    try:
+        os.close(fd)
+    except OSError as exc:
+        _LOGGER.debug("MCP stdio group control pipe release failed: %s", exc)
 
 
 @contextmanager
 def _contained_mcp_posix_process_factory() -> Iterator[None]:
     """Track SDK stdio launches and end their groups on every scan exit."""
-    import anyio
     import mcp.client.stdio as mcp_stdio
+    from anyio._core._eventloop import get_async_backend
 
-    started_groups: list[int] = []
+    started_groups: dict[int, tuple[subprocess.Popen[bytes], int]] = {}
+    notified_groups: set[int] = set()
+
+    def notify(pid: int) -> bool:
+        group = started_groups.get(pid)
+        if group is None:
+            return False
+        if pid not in notified_groups:
+            notified_groups.add(pid)
+            _close_mcp_posix_control(group[1])
+        return True
 
     async def create(
         command: str, args: list[str], env: dict[str, str] | None = None,
         errlog: Any = sys.stderr, cwd: Any = None,
     ) -> Any:
-        # A new session makes the server PID its group ID. The SDK normally
-        # does this too, but its clean-exit path waits only for the server.
-        process = await anyio.open_process(
-            [command, *args], env=env, stderr=errlog, cwd=cwd,
-            start_new_session=True,
-        )
-        started_groups.append(process.pid)
+        # The SDK reaps the server before this scope exits. A separate group
+        # leader stays alive until it sends TERM and KILL, so its ID cannot
+        # be recycled while either signal is pending.
+        control_read, control_write = os.pipe()
+        try:
+            guardian = subprocess.Popen(
+                [
+                    "/bin/sh", "-c", "trap '' TERM; exec \"$@\"", "mcp-group-guardian",
+                    sys.executable, "-c",
+                    "from defenseclaw.scanner.mcp import _mcp_posix_group_guardian as run; "
+                    "run(int(__import__('sys').argv[1]), int(__import__('sys').argv[2]))",
+                    str(control_read), str(os.getpgrp()),
+                ],
+                stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL, pass_fds=(control_read,), process_group=0,
+            )
+        except BaseException:
+            _close_mcp_posix_control(control_read)
+            _close_mcp_posix_control(control_write)
+            raise
+        _close_mcp_posix_control(control_read)
+        _reap_mcp_posix_guardian(guardian)
+        try:
+            # AnyIO's public open_process omits Python's process_group option;
+            # its active backend forwards it to the same asyncio subprocess.
+            process = await get_async_backend().open_process(
+                [command, *args], stdin=subprocess.PIPE, stdout=subprocess.PIPE,
+                env=env, stderr=errlog, cwd=cwd, process_group=guardian.pid,
+            )
+        except BaseException:
+            _close_mcp_posix_control(control_write)
+            raise
+        started_groups[process.pid] = (guardian, control_write)
         return process
+
+    async def terminate(process: Any) -> None:
+        # The SDK assumes the server PID is its group ID. Here the guardian
+        # owns the group, so let it perform both signals before SDK reaping.
+        if not notify(process.pid):
+            await original_terminate(process)
 
     with _MCP_POSIX_PROCESS_FACTORY_LOCK:
         original_create = mcp_stdio._create_platform_compatible_process
+        original_terminate = mcp_stdio._terminate_process_tree
         mcp_stdio._create_platform_compatible_process = create
+        mcp_stdio._terminate_process_tree = terminate
         try:
             yield
         finally:
             mcp_stdio._create_platform_compatible_process = original_create
-            for pgid in started_groups:
-                _terminate_mcp_posix_group(pgid)
+            mcp_stdio._terminate_process_tree = original_terminate
+            for pid in started_groups:
+                notify(pid)
 
 
 def _trusted_codex_runtime_roots() -> tuple[str, ...]:

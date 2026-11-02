@@ -46,9 +46,74 @@ def _running(pid: int) -> bool:
 
 
 @pytest.mark.skipif(os.name == "nt", reason="Windows uses a Job Object")
-@pytest.mark.parametrize("timeout", [False, True], ids=["normal-exit", "scan-timeout"])
+@pytest.mark.parametrize("pgid", [0, 1])
+def test_cleanup_rejects_reserved_process_groups(
+    monkeypatch: pytest.MonkeyPatch, pgid: int,
+) -> None:
+    from defenseclaw.scanner import mcp
+
+    signals: list[tuple[int, int]] = []
+    monkeypatch.setattr(mcp.os, "killpg", lambda group, sig: signals.append((group, sig)))
+    mcp._terminate_mcp_posix_group(pgid)
+    assert signals == []
+
+
+@pytest.mark.skipif(os.name == "nt", reason="Windows uses a Job Object")
+def test_cleanup_rejects_scanner_process_group(monkeypatch: pytest.MonkeyPatch) -> None:
+    from defenseclaw.scanner import mcp
+
+    signals: list[tuple[int, int]] = []
+    monkeypatch.setattr(mcp.os, "killpg", lambda group, sig: signals.append((group, sig)))
+    mcp._terminate_mcp_posix_group(mcp._MCP_POSIX_SCANNER_PGID)
+    assert signals == []
+
+
+@pytest.mark.skipif(os.name == "nt", reason="Windows uses a Job Object")
+def test_cleanup_skips_reused_group_before_kill(monkeypatch: pytest.MonkeyPatch) -> None:
+    from defenseclaw.scanner import mcp
+
+    pgid = 424242
+    groups = iter((pgid, pgid + 1))
+    signals: list[int] = []
+    monkeypatch.setattr(mcp.os, "getpid", lambda: pgid)
+    monkeypatch.setattr(mcp.os, "getpgrp", lambda: next(groups))
+    monkeypatch.setattr(mcp.os, "killpg", lambda _group, sig: signals.append(sig))
+    monkeypatch.setattr(mcp.time, "sleep", lambda _seconds: None)
+    mcp._terminate_mcp_posix_group(pgid)
+    assert signals == [signal.SIGTERM]
+
+
+@pytest.mark.skipif(os.name == "nt", reason="Windows uses a Job Object")
+@pytest.mark.parametrize("error_type", [PermissionError, ProcessLookupError])
+@pytest.mark.parametrize("failed_signal", [signal.SIGTERM, signal.SIGKILL])
+def test_cleanup_signal_error_does_not_escape(
+    monkeypatch: pytest.MonkeyPatch, failed_signal: int, error_type: type[OSError],
+) -> None:
+    from defenseclaw.scanner import mcp
+
+    pgid = 424242
+    signals: list[int] = []
+    monkeypatch.setattr(mcp.os, "getpid", lambda: pgid)
+    monkeypatch.setattr(mcp.os, "getpgrp", lambda: pgid)
+    monkeypatch.setattr(mcp.time, "sleep", lambda _seconds: None)
+
+    def signal_group(_group: int, sig: int) -> None:
+        signals.append(sig)
+        if sig == failed_signal:
+            raise error_type("simulated cleanup error")
+
+    monkeypatch.setattr(mcp.os, "killpg", signal_group)
+    mcp._terminate_mcp_posix_group(pgid)
+    if failed_signal == signal.SIGTERM and error_type is ProcessLookupError:
+        assert signals == [signal.SIGTERM]
+    else:
+        assert signals == [signal.SIGTERM, signal.SIGKILL]
+
+
+@pytest.mark.skipif(os.name == "nt", reason="Windows uses a Job Object")
+@pytest.mark.parametrize("mode", ["normal-exit", "scan-timeout", "server-stuck"])
 def test_local_stdio_scan_ends_child_on_success_or_timeout(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, timeout: bool,
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, mode: str,
 ) -> None:
     mcpscanner = pytest.importorskip("mcpscanner")
     from mcpscanner.core.models import AnalyzerEnum
@@ -79,6 +144,10 @@ for line in sys.stdin:
     else:
         result = {}
     print(json.dumps({'jsonrpc': '2.0', 'id': message['id'], 'result': result}), flush=True)
+if os.environ.get('MCP_FIXTURE_IGNORE_STDIN'):
+    signal.signal(signal.SIGTERM, signal.SIG_IGN)
+    while True:
+        signal.pause()
 """,
         encoding="utf-8",
     )
@@ -89,9 +158,12 @@ for line in sys.stdin:
     monkeypatch.setenv("PATH", f"{tmp_path}{os.pathsep}{os.environ['PATH']}")
     entry = MCPServerEntry(
         name="fixture", command="uvx", args=["fixture-package"],
-        env={"MCP_FIXTURE_CHILD_PID": str(child_pid_file)},
+        env={
+            "MCP_FIXTURE_CHILD_PID": str(child_pid_file),
+            "MCP_FIXTURE_IGNORE_STDIN": "1" if mode == "server-stuck" else "",
+        },
     )
-    if timeout:
+    if mode == "scan-timeout":
         class TimedOutScanner:
             async def scan_mcp_config_file(self, **_kwargs):
                 from mcp import StdioServerParameters
@@ -119,7 +191,7 @@ for line in sys.stdin:
     )
 
     try:
-        if timeout:
+        if mode == "scan-timeout":
             with pytest.raises(BaseException) as caught:
                 wrapper._scan_local(scanner, entry, [AnalyzerEnum.YARA])
             assert any(
