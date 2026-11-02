@@ -141,6 +141,28 @@ func TestParseMCPOutput_EmptyFindings(t *testing.T) {
 	}
 }
 
+func TestParseMCPOutputPreservesCleanToolList(t *testing.T) {
+	findings, names, partial, err := parseMCPOutputWithTools([]byte(`{"scanner":"mcp-scanner","target":"notes","findings":[],"advertised_tools":["search","search","read","bad/name","secret\n"]}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(findings) != 0 || !partial || !reflect.DeepEqual(names, []string{"search", "read"}) {
+		t.Fatalf("clean listing findings=%v names=%v", findings, names)
+	}
+	_, names, partial, err = parseMCPOutputWithTools([]byte(`{"scanner":"mcp-scanner","findings":[],"advertised_tools":[]}`))
+	if err != nil || partial || names == nil || len(names) != 0 {
+		t.Fatalf("empty listing names=%v err=%v", names, err)
+	}
+	_, names, partial, err = parseMCPOutputWithTools([]byte(`{"scanner":"mcp-scanner","findings":[]}`))
+	if err != nil || !partial || names != nil {
+		t.Fatalf("missing listing names=%v partial=%v err=%v", names, partial, err)
+	}
+	_, names, partial, err = parseMCPOutputWithTools([]byte(`{"scanner":"mcp-scanner","findings":[],"advertised_tools":["search"],"advertised_tools_partial":true}`))
+	if err != nil || !partial || !reflect.DeepEqual(names, []string{"search"}) {
+		t.Fatalf("partial listing names=%v partial=%v err=%v", names, partial, err)
+	}
+}
+
 // ---------------------------------------------------------------------------
 // validateMCPScanTargetURL — SSRF guard for the MCP scanner's remote-URL
 // targets. The default rejects loopback / private / link-local / cloud-

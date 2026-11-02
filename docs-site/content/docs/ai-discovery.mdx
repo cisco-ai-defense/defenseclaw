@@ -1017,6 +1017,28 @@ configuration. Operators should keep credentials out of URL paths because the
 path is part of the exported server identity. Renaming a remote server alias
 does not change its component ID; changing the sanitized endpoint URL does.
 
+When a local MCP admission scan completes, DefenseClaw preserves the bounded tool
+names returned by its existing `tools/list` request even if the scanner reports
+zero findings. Authenticated agent hooks also record the names of MCP tools
+called at runtime. Managed local inventory emits these as `mcp_tool` components with
+the current parent server component ID, `advertised` or `observed` source, and
+the UTC observation time. It exports names only: tool descriptions, input
+schemas, call arguments, and results are excluded. A completed empty listing
+clears previously advertised names in the gateway's process memory; an
+incomplete listing produces a local partial diagnostic. An ambiguous server
+alias across user profiles is not attributed to either profile. Tool evidence
+is process-local until the next gateway inventory publication, and this flow
+does not reconcile a central principal catalog. If an older scanner omits the
+tool-list field, the gateway marks the listing unknown and keeps the last
+complete managed snapshot. Only managed enterprise mode records this tool
+inventory; parent identities refresh with inventory publication. After a
+gateway restart, tool collections stay partial until each configured server
+has completed a listing, including an empty listing. An observed call alone
+does not mark a listing complete.
+The `defenseclaw.inventory.mcp_tool_events` counter distinguishes listing
+from export submission using fixed outcome and reason labels; it never uses a
+tool name, server URL, scan error text, or call argument as a label.
+
 The release-owned managed agent, connector, MCP, skill, and plugin inventory
 actions are blocked from operator-configured remote destinations. Mandatory
 SQLite remains authoritative locally, and the generated CMID-authenticated AI

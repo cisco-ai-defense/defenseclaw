@@ -127,9 +127,12 @@ type WebhookDispatcher interface {
 }
 
 type InstallWatcher struct {
-	cfg        *config.Config
-	skillDirs  []string
-	pluginDirs []string
+	// mcpToolObserver receives only the bounded names preserved by a completed
+	// tools/list scan. It does not receive descriptions, schemas, or arguments.
+	mcpToolObserver func(context.Context, string, string, *scanner.ScanResult, error)
+	cfg             *config.Config
+	skillDirs       []string
+	pluginDirs      []string
 	// managedArtifacts are exact connector-owned plugin files. They remain
 	// visible to connector lifecycle/Doctor, but ordinary plugin scanners must
 	// not inspect or quarantine DefenseClaw's own bridge artifact.
@@ -299,6 +302,11 @@ type InstallWatcher struct {
 	// first rescan cycle ended (mcpStartup applies until then).
 	pollMCP        bool
 	firstCycleDone atomic.Bool
+}
+
+// SetMCPToolObserver attaches the managed inventory sink before Run starts.
+func (w *InstallWatcher) SetMCPToolObserver(observer func(context.Context, string, string, *scanner.ScanResult, error)) {
+	w.mcpToolObserver = observer
 }
 
 type rootConnector struct {
@@ -2179,6 +2187,9 @@ func (w *InstallWatcher) runAdmission(ctx context.Context, evt InstallEvent) (re
 		res = AdmissionResult{Event: evt, Verdict: VerdictScanError, Interrupted: true,
 			Reason: "scan interrupted: the watcher is stopping; the next start admits it"}
 		return res
+	}
+	if evt.Type == InstallMCP && w.mcpToolObserver != nil {
+		w.mcpToolObserver(ctx, connector, evt.Name, result, err)
 	}
 	if err != nil {
 		_ = w.logger.LogAction(string(audit.ActionInstallScanError), evt.Path,
