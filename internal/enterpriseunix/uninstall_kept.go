@@ -117,8 +117,14 @@ func (l *lifecycle) reportRetainedEnrolledUserData() {
 		if !before.data || l.perUserStateKept[before.user] || !perUserFilesOf(before.user, before.home).data {
 			continue
 		}
-		if !before.manifest && !holdsOwnInstall(before.home) {
-			policyOnly = append(policyOnly, perUserKept{user: before.user, home: before.home, data: true})
+		if !before.manifest {
+			if !holdsOwnInstall(before.home) {
+				policyOnly = append(policyOnly, perUserKept{user: before.user, home: before.home, data: true})
+				continue
+			}
+			// The enrollment did not name the account, and the folder holds
+			// the account's own install (rel-1-0-6 GAP-0484).
+			l.result.AddWarning(codePerUserState, "kept the own DefenseClaw install of user "+before.user+" (~/.defenseclaw and its binaries in ~/.local/bin) as it is after --purge: the enrollment did not name this account, and a machine uninstall never removes an account's own install; its owner can remove it")
 			continue
 		}
 		l.result.AddWarning(codePerUserState, "kept per-user data (~/.defenseclaw) for enrolled user "+before.user+" after --purge; this account-owned folder still exists and must be reviewed with its owner")

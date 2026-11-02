@@ -91,7 +91,7 @@ const (
 	enterpriseHookWorkerModeBlockPersonalClaude = "block_personal_claude"
 	// enterpriseHookWorkerModeUnblockPersonalClaude removes the
 	// enrollment's Claude Code blocker (standalone uninstall, every
-	// account; enterprisehooks.RemovePersonalClaudeHookBlocker).
+	// account; enterprisehooks.UnblockPersonalClaudeHook).
 	enterpriseHookWorkerModeUnblockPersonalClaude     = "unblock_personal_claude"
 	enterpriseHookWorkerModeRepairManagedCodexFeature = "repair_managed_codex_feature"
 	// enterpriseHookWorkerModeRemoveUserNativeOTLP removes, as the user, a

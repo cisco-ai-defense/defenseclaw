@@ -4592,7 +4592,7 @@ func purgedUserChange(user string, detail purgedUserDetail) string {
 	if detail.Kept {
 		// A machine uninstall never deletes or moves an account's own
 		// data (GAP-0727, owner 2026-10-23).
-		return fmt.Sprintf("kept the DefenseClaw per-user data of user %s (~/.defenseclaw) as it is: it holds the account's own DefenseClaw install from before the managed deployment (config, secrets, audit history, policies), which a machine uninstall never deletes or moves; its owner can remove it", user)
+		return fmt.Sprintf("kept the DefenseClaw per-user data of user %s (~/.defenseclaw) and its per-user binaries in ~/.local/bin as they are: they hold the account's own DefenseClaw install (its program, and any config, secrets, audit history or policies), which a machine uninstall never deletes or moves; its owner can remove it", user)
 	}
 	switch {
 	case detail.Data && detail.Binaries:
