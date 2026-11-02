@@ -286,14 +286,17 @@ func powerShellStatements(command string, limit int) (int, bool) {
 	)
 	runes := []rune(command)
 	frames := []int{frameCode}
-	argumentMode := []bool{true}
+	argumentMode := []bool{false}
+	statementStart := []bool{true}
 	push := func(frame int) {
 		frames = append(frames, frame)
 		argumentMode = append(argumentMode, false)
+		statementStart = append(statementStart, frame != frameHashtable)
 	}
 	pop := func() {
 		frames = frames[:len(frames)-1]
 		argumentMode = argumentMode[:len(argumentMode)-1]
+		statementStart = statementStart[:len(statementStart)-1]
 	}
 	statements := 0
 	inStatement := false
@@ -345,21 +348,27 @@ func powerShellStatements(command string, limit int) (int, bool) {
 			continue
 		}
 		// Code, paren and hashtable frames.
-		if !argumentMode[len(argumentMode)-1] && windowsPowerShellCommandWordBeforeBlank(runes, i) {
-			argumentMode[len(argumentMode)-1] = true
-		}
-		if r == '&' && (i == 0 || runes[i-1] != '>') {
-			argumentMode[len(argumentMode)-1] = false
-		}
-		if i > 0 && i-1 != commentEnd && !unicode.IsSpace(runes[i-1]) {
-			lastSignificant, lastSignificantAt = runes[i-1], i-1
-		}
 		next := rune(0)
 		if i+1 < len(runes) {
 			next = runes[i+1]
 		}
+		comment := (r == '#' || r == '<' && next == '#') &&
+			windowsPowerShellCommentStarts(runes, i, !argumentMode[len(argumentMode)-1])
+		if statementStart[len(statementStart)-1] && windowsPowerShellStatementCommandWord(r) {
+			argumentMode[len(argumentMode)-1] = true
+		}
+		if statementStart[len(statementStart)-1] && !unicode.IsSpace(r) && r != '&' && !comment {
+			statementStart[len(statementStart)-1] = false
+		}
+		if r == '&' && (i == 0 || runes[i-1] != '>') {
+			argumentMode[len(argumentMode)-1] = false
+			statementStart[len(statementStart)-1] = true
+		}
+		if i > 0 && i-1 != commentEnd && !unicode.IsSpace(runes[i-1]) {
+			lastSignificant, lastSignificantAt = runes[i-1], i-1
+		}
 		switch {
-		case r == '#' && windowsPowerShellCommentStarts(runes, i, len(frames) > 1 && !argumentMode[len(argumentMode)-1]):
+		case r == '#' && windowsPowerShellCommentStarts(runes, i, !argumentMode[len(argumentMode)-1]):
 			// A line comment: the line goes on as the code before it ends.
 			// A comma inside the comment does not continue the line
 			// (review r3 finding 1: `Write-Output 1 # note,` lines hid
@@ -375,7 +384,7 @@ func powerShellStatements(command string, limit int) (int, bool) {
 				i++
 			}
 			commentEnd = i
-		case r == '<' && next == '#' && windowsPowerShellCommentStarts(runes, i, len(frames) > 1 && !argumentMode[len(argumentMode)-1]):
+		case r == '<' && next == '#' && windowsPowerShellCommentStarts(runes, i, !argumentMode[len(argumentMode)-1]):
 			end, ok := windowsPowerShellBlockCommentEnd(runes, i)
 			if !ok {
 				return statements, opaque
@@ -453,15 +462,18 @@ func powerShellStatements(command string, limit int) (int, bool) {
 		case top == frameHashtable && (r == ';' || r == '\n' || r == '\r'):
 			// Entry separators of a hashtable, not statements.
 			argumentMode[len(argumentMode)-1] = false
+			statementStart[len(statementStart)-1] = false
 		case (r == '\n' || r == '\r') && (top == frameParen || lastSignificant == ','):
 			// A line end inside a bare ( ) or after a trailing comma
 			// continues the statement.
 		case r == ';' || r == '|' || r == '\n' || r == '\r':
 			boundary()
 			argumentMode[len(argumentMode)-1] = false
+			statementStart[len(statementStart)-1] = true
 			stmtStart = i + 1
 		case r == '&' && next == '&':
 			boundary()
+			statementStart[len(statementStart)-1] = true
 			i++
 			stmtStart = i + 1
 		case r == '&' && (i == 0 || runes[i-1] != '>'):
