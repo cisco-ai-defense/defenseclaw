@@ -44,6 +44,18 @@ func testPowerShellValueFrameCommentBoundaries(t *testing.T, executable bool) {
 		{"single quoted comment", `Write-Output 'a'#; `, false},
 		{"double quoted comment", `"a"#; `, false},
 	}
+	for _, frame := range []struct{ name, prefix string }{
+		{"subexpression", `Write-Output $(`},
+		{"array", `Write-Output @(`},
+		{"parenthesized", `Write-Output (`},
+	} {
+		for _, word := range []string{"/a", "-a", "*a", "%a", "!a", "?a", "=a", "1a", "0x1"} {
+			rows = append(rows, struct {
+				name, prefix string
+				executable   bool
+			}{frame.name + " " + word, frame.prefix + word + `"b"#); `, true})
+		}
+	}
 	tails := []struct{ name, command string }{
 		{"rm-rf", `Remove-Item -Recurse -Force C:\`},
 		{"rm-rf order", `Remove-Item C:\ -Force -Recurse`},

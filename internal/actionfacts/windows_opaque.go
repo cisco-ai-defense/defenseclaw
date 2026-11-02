@@ -4,6 +4,7 @@
 package actionfacts
 
 import (
+	"strconv"
 	"strings"
 	"unicode"
 )
@@ -88,7 +89,7 @@ func windowsPowerShellOpaqueEnd(runes []rune, start int) (int, bool) {
 			}
 			comment := (r == '#' || r == '<' && next == '#') &&
 				windowsPowerShellCommentStarts(runes, i, !argumentMode[len(argumentMode)-1])
-			if statementStart[len(statementStart)-1] && windowsPowerShellStatementCommandWord(r) {
+			if statementStart[len(statementStart)-1] && windowsPowerShellStatementCommandWord(runes, i) {
 				argumentMode[len(argumentMode)-1] = true
 			}
 			if statementStart[len(statementStart)-1] && !unicode.IsSpace(r) && r != '&' && !comment {
@@ -248,18 +249,76 @@ func windowsPowerShellQuotedTokenBoundary(runes []rune, i int) bool {
 	return false
 }
 
-// A bare word or path at the start of a statement puts PowerShell in
-// command argument mode even when a quote or bracket is glued to that word.
-// The first rune is enough; waiting for a following blank misses a"b"#.
-func windowsPowerShellStatementCommandWord(r rune) bool {
-	return !unicode.IsSpace(r) && !unicode.IsDigit(r) &&
-		!strings.ContainsRune("$@(['\"-+*/%!?<>=,;|&{}#)]", r)
+// A command word at statement start puts PowerShell in argument mode. A
+// leading digit or punctuation can also be part of a command word when the
+// rest of that word is not an expression (for example, 1a"b" or -a"b").
+// Read only this word: a later quoted argument cannot change its mode.
+func windowsPowerShellStatementCommandWord(runes []rune, start int) bool {
+	if start < 0 || start >= len(runes) {
+		return false
+	}
+	r := runes[start]
+	if unicode.IsSpace(r) || strings.ContainsRune("$@(['\"+<>,;|&{}#)]", r) {
+		return false
+	}
+	if !unicode.IsDigit(r) && !strings.ContainsRune("-*/%!?=", r) {
+		return true
+	}
+	end := start + 1
+	for end < len(runes) && !unicode.IsSpace(runes[end]) &&
+		!strings.ContainsRune(";|&(){}#<>,", runes[end]) {
+		if windowsPowerShellQuoteDelimiter(runes[end]) != 0 {
+			return true // a quote glued to this token makes a command word
+		}
+		end++
+	}
+	word := string(runes[start:end])
+	if strings.Trim(word, "-*/%!?=") == "" {
+		return false
+	}
+	if unicode.IsDigit(r) || r == '-' {
+		unsigned := strings.TrimPrefix(word, "-")
+		if windowsPowerShellNumericWord(unsigned) {
+			return false
+		}
+	}
+	for _, c := range word {
+		if unicode.IsLetter(c) {
+			return true
+		}
+	}
+	return false
+}
+
+// Numeric literals are expressions, including PowerShell's type and size
+// suffixes. Keep their glued comments in expression mode.
+func windowsPowerShellNumericWord(word string) bool {
+	if _, err := strconv.ParseInt(word, 0, 64); err == nil {
+		return true
+	}
+	if _, err := strconv.ParseFloat(word, 64); err == nil {
+		return true
+	}
+	lower := strings.ToLower(word)
+	for _, suffix := range []string{"uy", "us", "ul", "un", "kb", "mb", "gb", "tb", "pb", "y", "s", "l", "n", "u", "d", "m"} {
+		if !strings.HasSuffix(lower, suffix) {
+			continue
+		}
+		base := word[:len(word)-len(suffix)]
+		if _, err := strconv.ParseInt(base, 0, 64); err == nil {
+			return true
+		}
+		if _, err := strconv.ParseFloat(base, 64); err == nil {
+			return true
+		}
+	}
+	return false
 }
 
 // PowerShellStatementCommandWord shares the statement-start mode choice with
 // the gateway's independent state-write reader.
-func PowerShellStatementCommandWord(r rune) bool {
-	return windowsPowerShellStatementCommandWord(r)
+func PowerShellStatementCommandWord(runes []rune, start int) bool {
+	return windowsPowerShellStatementCommandWord(runes, start)
 }
 
 // A type literal at statement start is an expression. The lexer and simple
@@ -320,7 +379,7 @@ func windowsPowerShellDynamicCallEnd(runes []rune, from int) int {
 		}
 		comment := (r == '#' || r == '<' && next == '#') &&
 			windowsPowerShellCommentStarts(runes, i, len(closes) > 0 && !argumentMode[len(argumentMode)-1])
-		if statementStart[len(statementStart)-1] && windowsPowerShellStatementCommandWord(r) {
+		if statementStart[len(statementStart)-1] && windowsPowerShellStatementCommandWord(runes, i) {
 			argumentMode[len(argumentMode)-1] = true
 		}
 		if statementStart[len(statementStart)-1] && !unicode.IsSpace(r) && r != '&' && !comment {

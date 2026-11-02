@@ -718,7 +718,7 @@ func (s *psStateScan) code(i int, nested bool) int {
 				first := cur[firstScanned]
 				firstScanned++
 				if !unicode.IsSpace(first) {
-					statementArgumentMode = actionfacts.PowerShellStatementCommandWord(first)
+					statementArgumentMode = actionfacts.PowerShellStatementCommandWord(cur, firstScanned-1)
 					statementWordKnown = true
 					break
 				}

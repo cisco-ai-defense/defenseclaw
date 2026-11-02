@@ -354,7 +354,7 @@ func powerShellStatements(command string, limit int) (int, bool) {
 		}
 		comment := (r == '#' || r == '<' && next == '#') &&
 			windowsPowerShellCommentStarts(runes, i, !argumentMode[len(argumentMode)-1])
-		if statementStart[len(statementStart)-1] && windowsPowerShellStatementCommandWord(r) {
+		if statementStart[len(statementStart)-1] && windowsPowerShellStatementCommandWord(runes, i) {
 			argumentMode[len(argumentMode)-1] = true
 		}
 		if statementStart[len(statementStart)-1] && !unicode.IsSpace(r) && r != '&' && !comment {

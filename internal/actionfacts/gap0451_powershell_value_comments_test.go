@@ -8,14 +8,15 @@ import (
 	"testing"
 )
 
-// These rows follow PowerShell 7 Parser::ParseInput: the first 13 have an
-// executable Remove-Item command, while the last three comment it out.
+// These rows follow PowerShell 7 Parser::ParseInput: executable rows expose
+// the Remove-Item tail, while the controls comment it out.
 func TestGAP0451PowerShellStatementStartInsideValues(t *testing.T) {
 	const tail = `Remove-Item -Recurse -Force C:\dccert-block-marker`
-	for _, row := range []struct {
+	type testRow struct {
 		name, prefix string
 		executable   bool
-	}{
+	}
+	rows := []testRow{
 		{"subexpression path", `Write-Output $(.\a[1]#); `, true},
 		{"subexpression glued double quote", `Write-Output $(a"b"#); `, true},
 		{"array glued double quote", `Write-Output @(a"b"#); `, true},
@@ -32,7 +33,19 @@ func TestGAP0451PowerShellStatementStartInsideValues(t *testing.T) {
 		{"type expression comment", `[int]#; `, false},
 		{"single quoted comment", `Write-Output 'a'#; `, false},
 		{"double quoted comment", `"a"#; `, false},
+	}
+	// Parser::ParseInput sees each glued word as a command in all three
+	// value frames; its closing # is part of the command word.
+	for _, frame := range []struct{ name, prefix string }{
+		{"subexpression", `Write-Output $(`},
+		{"array", `Write-Output @(`},
+		{"parenthesized", `Write-Output (`},
 	} {
+		for _, word := range []string{"/a", "-a", "*a", "%a", "!a", "?a", "=a", "1a", "0x1"} {
+			rows = append(rows, testRow{frame.name + " " + word, frame.prefix + word + `"b"#); `, true})
+		}
+	}
+	for _, row := range rows {
 		t.Run(row.name, func(t *testing.T) {
 			command := row.prefix + tail
 			out := parsePowerShell(command, 1, 0)
