@@ -119,10 +119,16 @@ type claudeCodeHookResponse struct {
 	// redaction directive back through the unified dispatch so
 	// finalizeAgentHookAnswer can honor it on the hook_decision event +
 	// audit row. Never serialized on the hook response wire.
-	RedactionEnabled     *bool  `json:"-"`
-	SourceReason         string `json:"-"`
-	SuppressNotification bool   `json:"-"`
-	aiDefenseEnforced    bool
+	RedactionEnabled *bool `json:"-"`
+	// InspectedContent is the exact event content sent to AI Defense when the
+	// hook has no companion canonical prompt/tool event. It stays in-process so
+	// the hook_decision emitter can publish the generated, centrally-redacted
+	// gen_ai.input.messages field without changing the connector response.
+	InspectedContent        string `json:"-"`
+	InspectedContentPresent bool   `json:"-"`
+	SourceReason            string `json:"-"`
+	SuppressNotification    bool   `json:"-"`
+	aiDefenseEnforced       bool
 	// laneVerdict carries ToolInspectVerdict.laneVerdict: a scan lane
 	// (Cisco AI Defense, LLM judge) took part in the verdict. The
 	// sandbox-unblock lift (liftUnblockedDestinations) refuses to lift
@@ -157,6 +163,8 @@ func (a *APIServer) evaluateClaudeCodeHook(ctx context.Context, req claudeCodeHo
 	verdict := &ToolInspectVerdict{Action: "allow", Severity: "NONE", Findings: []string{}}
 	cfg := a.decisionConfig(ctx)
 	var assetDecisions []runtimeAssetDecision
+	var inspectedContent string
+	var inspectedContentPresent bool
 	switch req.HookEventName {
 	case "SessionStart":
 		// The project's skill folders are admitted before the first prompt
@@ -274,7 +282,9 @@ func (a *APIServer) evaluateClaudeCodeHook(ctx context.Context, req claudeCodeHo
 	case "InstructionsLoaded", "ConfigChange", "FileChanged":
 		verdict = a.scanClaudeCodeEventFile(ctx, req)
 		if verdict == nil {
-			inspectReq := claudeCodeContentInspectRequest(claudeCodeEventContent(req), "prompt")
+			inspectedContent = claudeCodeEventContent(req)
+			inspectedContentPresent = strings.TrimSpace(inspectedContent) != ""
+			inspectReq := claudeCodeContentInspectRequest(inspectedContent, "prompt")
 			// A FileChanged note on a state or settings file Claude Code keeps
 			// for itself is housekeeping: the path is the only text, the event
 			// cannot block, and the judge read it as sensitive file access
@@ -282,11 +292,18 @@ func (a *APIServer) evaluateClaudeCodeHook(ctx context.Context, req claudeCodeHo
 			inspectReq.skipJudge = req.HookEventName == "FileChanged" && claudeCodeOwnStateFile(req.FilePath)
 			verdict = a.inspectMessageContent(ctx, inspectReq)
 		}
-	case "SubagentStart", "CwdChanged", "DirectoryAdded", "WorktreeRemove",
-		"TaskCreated", "TaskCompleted", "TeammateIdle",
-		"PreCompact", "PostCompact", "Elicitation", "ElicitationResult", "Notification":
+	case "SubagentStart":
+		// SubagentStart already emits a canonical prompt event for the task.
 		verdict = a.inspectMessageContent(ctx, claudeCodeContentInspectRequest(
 			claudeCodeEventContent(req), "prompt",
+		))
+	case "CwdChanged", "DirectoryAdded", "WorktreeRemove",
+		"TaskCreated", "TaskCompleted", "TeammateIdle",
+		"PreCompact", "PostCompact", "Elicitation", "ElicitationResult", "Notification":
+		inspectedContent = claudeCodeEventContent(req)
+		inspectedContentPresent = strings.TrimSpace(inspectedContent) != ""
+		verdict = a.inspectMessageContent(ctx, claudeCodeContentInspectRequest(
+			inspectedContent, "prompt",
 		))
 	}
 
@@ -367,6 +384,8 @@ func (a *APIServer) evaluateClaudeCodeHook(ctx context.Context, req claudeCodeHo
 	resp.EvaluationID = evalCtx.EvaluationID
 	resp.RuleIDs = hookResponseRuleIDs(evalCtx.RuleIDs, rawActionBeforeAssets, assetDecisions)
 	resp.RedactionEnabled = verdict.RedactionEnabled
+	resp.InspectedContent = inspectedContent
+	resp.InspectedContentPresent = inspectedContentPresent
 	resp.SuppressNotification = hookNotificationCoveredByAssetPolicy(rawActionBeforeAssets, assetDecisions)
 	resp.aiDefenseEnforced = aiDefenseEnforced && resp.Action == "block"
 	resp.laneVerdict = verdict.laneVerdict

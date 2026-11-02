@@ -169,6 +169,46 @@ func TestHookDecisionMetricsV8ExportCompleteCompatibilitySetWithoutLegacyProvide
 	}, 1)
 }
 
+func TestHookDecisionLogV8IncludesInspectedEventContent(t *testing.T) {
+	capture := &hookDecisionRecordCapture{}
+	api := &APIServer{observabilityV8: capture}
+	req := agentHookRequest{ConnectorName: "claudecode", HookEventName: "TaskCreated"}
+	resp := agentHookResponse{
+		Action: "block", RawAction: "block", Severity: "HIGH", Mode: "action",
+		InspectedContent: "create task containing alice@example.com", InspectedContentPresent: true,
+	}
+
+	api.emitHookDecisionObservabilityV8(t.Context(), req, resp, HookAuditEnvelope{Result: "ok"}, false)
+
+	if len(capture.records) != 1 {
+		t.Fatalf("generated hook decision records=%d want=1", len(capture.records))
+	}
+	body, present := capture.records[0].Body()
+	if !present {
+		t.Fatal("hook decision body is absent")
+	}
+	fields, err := body.Object()
+	if err != nil {
+		t.Fatal(err)
+	}
+	messages, ok := fields["gen_ai.input.messages"].([]interface{})
+	if !ok || len(messages) != 1 {
+		t.Fatalf("gen_ai.input.messages=%v, want one message", fields["gen_ai.input.messages"])
+	}
+	message, ok := messages[0].(map[string]interface{})
+	if !ok {
+		t.Fatalf("message=%T, want object", messages[0])
+	}
+	parts, ok := message["parts"].([]interface{})
+	if !ok || len(parts) != 1 {
+		t.Fatalf("parts=%v, want one part", message["parts"])
+	}
+	part, ok := parts[0].(map[string]interface{})
+	if !ok || part["content"] != resp.InspectedContent {
+		t.Fatalf("part=%v, want exact inspected content", parts[0])
+	}
+}
+
 func TestFinalizedBlockPersistsAuditAndActiveAlertBeforeNotification(t *testing.T) {
 	fixture := newSidecarV8BootstrapFixture(t, 8, "")
 	dispatcher, notifications := newWiringDispatcher()

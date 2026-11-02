@@ -211,6 +211,11 @@ type agentHookResponse struct {
 	// ctx-injection is local to evaluate*). Never serialized on the
 	// hook response wire.
 	RedactionEnabled *bool `json:"-"`
+	// InspectedContent carries exact AI Defense input only for hooks without a
+	// companion canonical content event. It is emitted through the generated
+	// telemetry contract and is never serialized to connector clients.
+	InspectedContent        string `json:"-"`
+	InspectedContentPresent bool   `json:"-"`
 	// SourceReason is retained only for canonical v8 routing. Reason remains
 	// the connector-safe response projection and is never reused as source.
 	SourceReason string `json:"-"`
