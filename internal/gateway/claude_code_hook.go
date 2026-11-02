@@ -283,7 +283,6 @@ func (a *APIServer) evaluateClaudeCodeHook(ctx context.Context, req claudeCodeHo
 		verdict = a.scanClaudeCodeEventFile(ctx, req)
 		if verdict == nil {
 			inspectedContent = claudeCodeEventContent(req)
-			inspectedContentPresent = strings.TrimSpace(inspectedContent) != ""
 			inspectReq := claudeCodeContentInspectRequest(inspectedContent, "prompt")
 			// A FileChanged note on a state or settings file Claude Code keeps
 			// for itself is housekeeping: the path is the only text, the event
@@ -301,10 +300,16 @@ func (a *APIServer) evaluateClaudeCodeHook(ctx context.Context, req claudeCodeHo
 		"TaskCreated", "TaskCompleted", "TeammateIdle",
 		"PreCompact", "PostCompact", "Elicitation", "ElicitationResult", "Notification":
 		inspectedContent = claudeCodeEventContent(req)
-		inspectedContentPresent = strings.TrimSpace(inspectedContent) != ""
 		verdict = a.inspectMessageContent(ctx, claudeCodeContentInspectRequest(
 			inspectedContent, "prompt",
 		))
+	}
+	if strings.TrimSpace(inspectedContent) != "" && verdict != nil && verdict.aiDefenseSubmitted {
+		inspectedContentPresent = true
+	} else {
+		// Do not retain or emit content handled only by local rules or the
+		// optional judge. The canonical field is evidence of AID submission.
+		inspectedContent = ""
 	}
 
 	// Inject the cloud-controlled per-inspection redaction directive
