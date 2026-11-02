@@ -1,0 +1,26 @@
+// Copyright 2026 Cisco Systems, Inc. and its affiliates
+// SPDX-License-Identifier: Apache-2.0
+
+//go:build !windows
+
+package managed
+
+// Off Windows the ordinary service-runtime walk is the standalone profile's
+// walk, so the *Standalone validators the cross-platform standalone checks
+// call are the ordinary ones.
+
+// ValidateTrustedServiceRuntimeDirStandalone is ValidateTrustedServiceRuntimeDir.
+func ValidateTrustedServiceRuntimeDirStandalone(path, label, serviceAccount string) error {
+	return ValidateTrustedServiceRuntimeDir(path, label, serviceAccount)
+}
+
+// ValidateTrustedServiceRuntimeTreeStandalone is ValidateTrustedServiceRuntimeTree.
+func ValidateTrustedServiceRuntimeTreeStandalone(path, label, serviceAccount string) error {
+	return ValidateTrustedServiceRuntimeTree(path, label, serviceAccount)
+}
+
+// ValidateTrustedServiceRuntimeFilePathStandalone is
+// ValidateTrustedServiceRuntimeFilePath.
+func ValidateTrustedServiceRuntimeFilePathStandalone(path, label, serviceAccount string) error {
+	return ValidateTrustedServiceRuntimeFilePath(path, label, serviceAccount)
+}

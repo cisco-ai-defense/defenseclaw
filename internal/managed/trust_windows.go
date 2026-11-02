@@ -119,6 +119,18 @@ func ValidateTrustedFilePath(path, label string) error {
 	if label == "" {
 		label = "managed file"
 	}
+	return validateTrustedWindowsFilePath(path, label, nil, windowsTrustLeaf, windowsAncestorScope)
+}
+
+// validateTrustedWindowsFilePath checks a regular file with the leaf scope
+// and every folder above it, the volume root included, with the scope
+// ancestors picks.
+func validateTrustedWindowsFilePath(
+	path, label string,
+	allowedWriter *windows.SID,
+	leaf windowsTrustScope,
+	ancestors func(string) windowsTrustScope,
+) error {
 	if path == "" {
 		return fmt.Errorf("%s path is empty", label)
 	}
@@ -129,11 +141,11 @@ func ValidateTrustedFilePath(path, label string) error {
 	if _, err := winpath.ValidateFixedNTFSMountedPath(clean); err != nil {
 		return fmt.Errorf("%s is not on a trusted mount-manager NTFS drive: %w", label, err)
 	}
-	if err := validateTrustedWindowsPathElementWithWriter(clean, false, label, nil, windowsTrustLeaf); err != nil {
+	if err := validateTrustedWindowsPathElementWithWriter(clean, false, label, allowedWriter, leaf); err != nil {
 		return err
 	}
 	for dir := filepath.Dir(clean); dir != filepath.Dir(dir); dir = filepath.Dir(dir) {
-		if err := validateTrustedWindowsPathElementWithWriter(dir, true, label, nil, windowsAncestorScope(dir)); err != nil {
+		if err := validateTrustedWindowsPathElementWithWriter(dir, true, label, allowedWriter, ancestors(dir)); err != nil {
 			return err
 		}
 	}
@@ -142,8 +154,8 @@ func ValidateTrustedFilePath(path, label string) error {
 		root,
 		true,
 		label,
-		nil,
-		windowsAncestorScope(root),
+		allowedWriter,
+		ancestors(root),
 	)
 }
 
@@ -467,32 +479,7 @@ func ValidateTrustedServiceRuntimeFilePath(path, label, serviceAccount string) e
 	if err != nil {
 		return err
 	}
-	if path == "" {
-		return fmt.Errorf("%s path is empty", label)
-	}
-	clean, err := filepath.Abs(path)
-	if err != nil {
-		return fmt.Errorf("resolve %s path: %w", label, err)
-	}
-	if _, err := winpath.ValidateFixedNTFSMountedPath(clean); err != nil {
-		return fmt.Errorf("%s is not on a trusted mount-manager NTFS drive: %w", label, err)
-	}
-	if err := validateTrustedWindowsPathElementWithWriter(clean, false, label, serviceSID, windowsTrustLeaf); err != nil {
-		return err
-	}
-	for dir := filepath.Dir(clean); dir != filepath.Dir(dir); dir = filepath.Dir(dir) {
-		if err := validateTrustedWindowsPathElementWithWriter(dir, true, label, serviceSID, windowsAncestorScope(dir)); err != nil {
-			return err
-		}
-	}
-	root := filepath.VolumeName(clean) + string(filepath.Separator)
-	return validateTrustedWindowsPathElementWithWriter(
-		root,
-		true,
-		label,
-		serviceSID,
-		windowsAncestorScope(root),
-	)
+	return validateTrustedWindowsFilePath(path, label, serviceSID, windowsTrustLeaf, windowsAncestorScope)
 }
 
 // windowsRulePackTreeMaxEntries bounds the walk of an administrator rule pack.
@@ -512,11 +499,21 @@ var errWindowsRulePackTreeTooLarge = errors.New("too many entries")
 // (GAP-0672). A service account that does not resolve yet (before the first
 // install) is held to the administrator-only rule.
 func ValidateTrustedRulePackTree(dir, label, serviceAccount string) error {
+	return validateTrustedWindowsRulePackTree(dir, label, serviceAccount, windowsTrustLeaf, windowsAncestorScope)
+}
+
+// validateTrustedWindowsRulePackTree checks dir as a runtime folder and every
+// folder and file below it with the leaf scope.
+func validateTrustedWindowsRulePackTree(
+	dir, label, serviceAccount string,
+	leaf windowsTrustScope,
+	ancestors func(string) windowsTrustScope,
+) error {
 	writer, err := windowsVirtualServiceSID(serviceAccount)
 	if err != nil {
 		writer = nil
 	}
-	if err := validateTrustedWindowsRuntimeDir(dir, label, writer); err != nil {
+	if err := validateTrustedWindowsRuntimeDirWith(dir, label, writer, leaf, ancestors); err != nil {
 		return err
 	}
 	root, err := filepath.Abs(dir)
@@ -524,7 +521,7 @@ func ValidateTrustedRulePackTree(dir, label, serviceAccount string) error {
 		return fmt.Errorf("resolve %s path: %w", label, err)
 	}
 	return walkWindowsRulePackTree(root, func(path string, isDir bool) error {
-		return validateTrustedWindowsPathElementWithWriter(path, isDir, label, writer, windowsTrustLeaf)
+		return validateTrustedWindowsPathElementWithWriter(path, isDir, label, writer, leaf)
 	})
 }
 
@@ -577,6 +574,17 @@ func windowsStrictAncestorScope(string) windowsTrustScope { return windowsTrustS
 // validateTrustedWindowsRuntimeDirWithAncestors checks the named folder with
 // the leaf rule and each folder above it with the scope ancestors picks.
 func validateTrustedWindowsRuntimeDirWithAncestors(path, label string, allowedWriter *windows.SID, ancestors func(string) windowsTrustScope) error {
+	return validateTrustedWindowsRuntimeDirWith(path, label, allowedWriter, windowsTrustLeaf, ancestors)
+}
+
+// validateTrustedWindowsRuntimeDirWith checks the named folder with leaf and
+// each folder above it with the scope ancestors picks.
+func validateTrustedWindowsRuntimeDirWith(
+	path, label string,
+	allowedWriter *windows.SID,
+	leaf windowsTrustScope,
+	ancestors func(string) windowsTrustScope,
+) error {
 	if label == "" {
 		label = "managed runtime dir"
 	}
@@ -593,7 +601,7 @@ func validateTrustedWindowsRuntimeDirWithAncestors(path, label string, allowedWr
 	for cur := clean; ; cur = filepath.Dir(cur) {
 		scope := ancestors(cur)
 		if cur == clean {
-			scope = windowsTrustLeaf
+			scope = leaf
 		}
 		if err := validateTrustedWindowsPathElementWithWriter(cur, true, label, allowedWriter, scope); err != nil {
 			return err
@@ -1015,9 +1023,10 @@ func rejectUntrustedWindowsWriteACEsWithWriter(
 // acceptUnreadableDescriptor reports whether an error reading an element's
 // security descriptor is drift rather than a structural failure: access denied
 // on an ancestor inside the platform installer's roots, or on any element of
-// a drift-tolerant walk. Strict mode keeps it fatal.
+// a drift-tolerant walk. Strict mode and the exact principal rule keep it
+// fatal.
 func acceptUnreadableDescriptor(scope windowsTrustScope, err error) bool {
-	if !errors.Is(err, windows.ERROR_ACCESS_DENIED) || trustStrictAncestors() {
+	if !errors.Is(err, windows.ERROR_ACCESS_DENIED) || trustStrictAncestors() || scope.strictPrincipals {
 		return false
 	}
 	return scope.advisory || scope.drift

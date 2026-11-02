@@ -482,7 +482,7 @@ var standaloneSetupDeployment = func() (winpath.EnterpriseDeployment, error) {
 	if err != nil || deployment.State == winpath.EnterpriseDeploymentAbsent {
 		return deployment, err
 	}
-	if err := managed.ValidateTrustedFilePath(deployment.MetadataPath, "standalone deployment record"); err != nil {
+	if err := managed.ValidateTrustedFilePathStandalone(deployment.MetadataPath, "standalone deployment record"); err != nil {
 		return deployment, err
 	}
 	return deployment, nil
@@ -607,7 +607,7 @@ func validateEnterpriseSetupInput(value, label string, standalone bool) (string,
 		return "", enterpriseSetupUntrustedInput{label, full, fmt.Errorf("%s is not a regular non-link file: %s", label, full)}
 	}
 	if standalone {
-		if err := managed.ValidateTrustedFilePath(full, label); err != nil {
+		if err := managed.ValidateTrustedFilePathStandalone(full, label); err != nil {
 			return "", enterpriseSetupUntrustedInput{label, full, fmt.Errorf("refusing untrusted %s: %w", label, err)}
 		}
 		return filepath.Clean(full), nil
@@ -889,9 +889,9 @@ func (stage *enterpriseSetupStage) validate(path, label string, kind managed.Set
 		return managed.ValidateSetupPath(path, label, kind)
 	}
 	if kind == managed.SetupPathDirectory {
-		return managed.ValidateTrustedRuntimeDir(path, label)
+		return managed.ValidateTrustedRuntimeDirStandalone(path, label)
 	}
-	return managed.ValidateTrustedFilePath(path, label)
+	return managed.ValidateTrustedFilePathStandalone(path, label)
 }
 
 // releaseFiles closes the staged-file pins once the lifecycle children
@@ -1029,7 +1029,7 @@ var standaloneSetupTransactionPending = func() bool {
 	if _, err := os.Lstat(path); err != nil {
 		return false
 	}
-	return managed.ValidateTrustedFilePath(path, "standalone pending transaction") == nil
+	return managed.ValidateTrustedFilePathStandalone(path, "standalone pending transaction") == nil
 }
 
 // enterpriseSetupStageSweepAge is how old a staging folder must be before
@@ -1064,7 +1064,7 @@ func cleanupEnterpriseSetupStage(stageRoot, root string) error {
 	} else if err != nil {
 		return err
 	}
-	if err := managed.ValidateTrustedRuntimeDir(cleanStage, "enterprise Setup staging cleanup"); err != nil {
+	if err := managed.ValidateTrustedRuntimeDirStandalone(cleanStage, "enterprise Setup staging cleanup"); err != nil {
 		return fmt.Errorf("refusing enterprise Setup cleanup after trust drift: %w", err)
 	}
 	// Delete the scratch subdirectory (recursively) first. PowerShell and
