@@ -141,6 +141,7 @@ func rootPersistentPreRunE(cmd *cobra.Command, _ []string) error {
 	version.SetBinaryVersion(appVersion)
 	if role == managedServiceGateway {
 		repairGatewayRuntimePlatform(cfg)
+		startManagedPeerHealPlatform(cmd.Context(), role)
 	}
 	// Only the root sidecar command (the gateway service) waits out an audit
 	// store repair; subcommands fail fast.
@@ -373,13 +374,17 @@ func ExecuteContext(ctx context.Context) int {
 	if ctx == nil {
 		ctx = context.Background()
 	}
-	err := rootCmd.ExecuteContext(ctx)
+	executed, err := rootCmd.ExecuteContextC(ctx)
 	if err == nil {
 		return 0
 	}
 	// Cancellation is the expected completion path for an SCM stop. Do not
 	// report it as a service failure or trigger failure-recovery restarts.
 	if errors.Is(err, context.Canceled) {
+		return 0
+	}
+	// A managed service caught in a restart loop stays up degraded instead.
+	if holdManagedServiceAfterFailurePlatform(ctx, managedServiceRoleFor(executed), err) {
 		return 0
 	}
 	// scrubExitError check first (main-branch contract).

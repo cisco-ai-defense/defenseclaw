@@ -57,6 +57,7 @@ func loadGatewayConfigV8ForService(
 	role managedServiceRole,
 ) (*config.Config, *observabilityV8Startup, error) {
 	if role != managedServiceNone {
+		noteManagedServiceStartPlatform(role)
 		repairManagedServicePathsBeforeConfigLoadPlatform(role)
 	}
 	loaded, startup, err := managedServiceConfigLoader(cfgPath)

@@ -12,6 +12,7 @@ import (
 	"path/filepath"
 	"strings"
 	"syscall"
+	"time"
 
 	"github.com/defenseclaw/defenseclaw/internal/config"
 	"github.com/defenseclaw/defenseclaw/internal/gateway/connector"
@@ -23,7 +24,15 @@ import (
 // path is outside the managed install its LaunchDaemon environment pins.
 var errEnterpriseHookSelfRepairUnavailable = errors.New("managed self repair is unavailable to this process for this path")
 
-// repairEnterpriseHookManagedInstallPlatform runs on every guardian pass: it
+// enterpriseHookInstallSweepInterval bounds how often a guardian pass sweeps
+// the whole managed tree. fsnotify can trigger passes in bursts; the objects
+// a pass reads are each repaired right before their own validation anyway.
+var (
+	enterpriseHookInstallSweepInterval = 30 * time.Second
+	enterpriseHookInstallSweepLast     time.Time
+)
+
+// repairEnterpriseHookManagedInstallPlatform runs on the guardian's passes: it
 // re-stamps the managed machine objects (the same set as the pre-config
 // step), the install tree's metadata and the group and other write bits of
 // env_config.json, then heals the LaunchDaemon plists and the log folder.
@@ -32,6 +41,12 @@ func repairEnterpriseHookManagedInstallPlatform() {
 	if !ok || !managed.SelfRepairEnabled() {
 		return
 	}
+	now := time.Now()
+	if !enterpriseHookInstallSweepLast.IsZero() &&
+		now.Sub(enterpriseHookInstallSweepLast) < enterpriseHookInstallSweepInterval {
+		return
+	}
+	enterpriseHookInstallSweepLast = now
 	managed.RepairOwnedObjects(guardianManagedObjects(layout))
 	repairManagedInstallTree(layout)
 	if layout.Within(config.DefaultEnvConfigPath) {
