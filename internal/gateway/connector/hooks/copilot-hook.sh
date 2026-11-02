@@ -29,7 +29,11 @@ copilot_deny() {
   esac
 }
 {{end}}{{if and .Managed (not .SecureClient) (not .Sandbox)}}copilot_managed_failure() {
-  copilot_deny "DefenseClaw hook failed closed"
+  local reason="DefenseClaw hook failed closed"
+  if [ -n "${1:-}" ] && declare -F defenseclaw_json_escape >/dev/null 2>&1; then
+    reason="$(defenseclaw_json_escape "DefenseClaw blocked this tool call: $1")"
+  fi
+  copilot_deny "$reason"
   exit 0
 }
 trap '_dc_copilot_rc=$?; if [ "$_dc_copilot_rc" -ne 0 ]; then copilot_managed_failure; fi' EXIT
@@ -524,7 +528,7 @@ fail_unreachable() {
 {{end}}{{if .Managed}}  defenseclaw_log_hook_failure copilot copilot-hook "$1" transport "$FAIL_MODE" "$(defenseclaw_hook_delivery_outcome response "$FAIL_MODE")"
 {{else}}  defenseclaw_log_hook_delivery_failure copilot copilot-hook "$1" transport "$FAIL_MODE"
 {{end}}  defenseclaw_emit_unreachable_stderr "copilot tool" "$1"
-{{if .Managed}}  {{$failure}}
+{{if .Managed}}  {{$failure}}{{if and (not .SecureClient) (not .Sandbox)}} "$1"{{end}}
 {{else}}  # This account's gateway is down and the policy tier lets an outage
   # through (defenseclaw_per_user_outage_open): the tool runs, with the
   # warning above and a hook-failures.jsonl row.

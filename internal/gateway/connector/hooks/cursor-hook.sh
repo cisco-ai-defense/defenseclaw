@@ -493,7 +493,16 @@ API_TOKEN="${DEFENSECLAW_GATEWAY_TOKEN:-}"
 # cold-started gateway) inherits the bearer in its environment.
 unset DEFENSECLAW_GATEWAY_TOKEN
 
-fail_unreachable() {
+{{if and (not .SecureClient) (not .Sandbox)}}cursor_outage_block_reason() {
+  local reason="$1" next=""
+  if [ "$reason" = "gateway unreachable" ]; then
+    next="$(defenseclaw_unreachable_next_step)"
+    [ -z "$next" ] || reason="$next"
+  fi
+  printf 'DefenseClaw blocked this tool call: %s' "$reason"
+}
+
+{{end}}fail_unreachable() {
 {{if and (not .Managed) (not .Sandbox)}}  defenseclaw_close_during_install
 {{end}}  if defenseclaw_should_fail_closed_on_unreachable; then
     defenseclaw_allow_failed_stop_event cursor cursor-hook "" "${PAYLOAD:-}" "$1" transport
@@ -501,8 +510,9 @@ fail_unreachable() {
   defenseclaw_log_hook_delivery_failure cursor cursor-hook "$1" transport "$FAIL_MODE"
   defenseclaw_emit_unreachable_stderr "cursor tool" "$1"
   if defenseclaw_should_fail_closed_on_unreachable; then
-    emit_cursor_deny "{{if .Managed}}DefenseClaw hook failed closed{{else}}DefenseClaw gateway unreachable; run defenseclaw-gateway start{{end}}"
-    exit 2
+{{if or .SecureClient .Sandbox}}    emit_cursor_deny "{{if .Managed}}DefenseClaw hook failed closed{{else}}DefenseClaw gateway unreachable; run defenseclaw-gateway start{{end}}"
+{{else}}    emit_cursor_deny "$(defenseclaw_json_escape "$(cursor_outage_block_reason "$1")")"
+{{end}}    exit 2
   fi
   emit_cursor_allow
   exit 0

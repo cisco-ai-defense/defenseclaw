@@ -423,8 +423,14 @@ fail_unreachable() {
   defenseclaw_log_hook_delivery_failure devin devin-hook "$1" transport "$FAIL_MODE"
   defenseclaw_emit_unreachable_stderr "devin hook" "$1"
   if defenseclaw_should_fail_closed_on_unreachable; then
-    printf 'DefenseClaw hook failed closed\n'
-    exit 2
+{{if or .SecureClient .Sandbox}}    printf 'DefenseClaw hook failed closed\n'
+{{else}}    local reason="$1" next=""
+    if [ "$reason" = "gateway unreachable" ]; then
+      next="$(defenseclaw_unreachable_next_step)"
+      [ -z "$next" ] || reason="$next"
+    fi
+    printf 'DefenseClaw blocked this tool call: %s\n' "$reason"
+{{end}}    exit 2
   fi
   exit 0
 }
