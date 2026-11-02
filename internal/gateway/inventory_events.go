@@ -86,6 +86,7 @@ type endpointInventoryComponent struct {
 	mcpCommandFingerprint       string
 	mcpArgumentsFingerprint     string
 	mcpSourceScope              string
+	mcpServerURL                string
 	mcpURLHost                  string
 	mcpAuthProviderType         string
 	mcpDisabled                 *bool
@@ -392,6 +393,7 @@ func perConnectorMCPEntriesForOSWithHomeGuard(cfg *config.Config, reg *connector
 		for _, server := range servers {
 			command := inventorySafeBasename(server.Command)
 			commandFingerprint, argumentsFingerprint := mcpInventoryLocalFingerprints(fingerprintKey, server)
+			serverURL := mcpInventoryServerURL(server.URL)
 			host := mcpURLHost(server.URL)
 			name := inventorySafeItemName(server.Name, 256)
 			if name == "" {
@@ -404,13 +406,12 @@ func perConnectorMCPEntriesForOSWithHomeGuard(cfg *config.Config, reg *connector
 			if product == "" {
 				product = host
 			}
-			// The HMAC of the full local command and ordered arguments
-			// identifies the server. Connector and user scope keep two
-			// installations on this endpoint distinct. Remote servers and
-			// configurations without a valid fingerprint retain the name
-			// identity until their own identity contract is applied.
+			// Local IDs use the keyed command and ordered arguments; remote
+			// IDs use the sanitized configured URL. Scope distinguishes users.
 			serverIdentity := mcpInventoryLocalIdentity(commandFingerprint, argumentsFingerprint)
-			if serverIdentity == "" {
+			if serverURL != "" {
+				serverIdentity = "remote\x00" + serverURL
+			} else if serverIdentity == "" {
 				serverIdentity = server.Name
 			} else if len(identityAliases[serverIdentity]) > 1 {
 				// Identical commands can be configured under distinct aliases.
@@ -438,6 +439,7 @@ func perConnectorMCPEntriesForOSWithHomeGuard(cfg *config.Config, reg *connector
 				mcpCommandFingerprint:   commandFingerprint,
 				mcpArgumentsFingerprint: argumentsFingerprint,
 				mcpSourceScope:          inventoryStableToken(server.SourceScope, 64),
+				mcpServerURL:            serverURL,
 				mcpURLHost:              host,
 				mcpAuthProviderType:     inventoryStableToken(server.AuthProviderType, 64),
 				mcpDisabled:             &disabled,
@@ -874,6 +876,7 @@ func endpointMCPComponentsFromServers(servers []config.MCPServerEntry, fingerpri
 	for _, server := range servers {
 		command := inventorySafeBasename(server.Command)
 		commandFingerprint, argumentsFingerprint := mcpInventoryLocalFingerprints(fingerprintKey, server)
+		serverURL := mcpInventoryServerURL(server.URL)
 		host := mcpURLHost(server.URL)
 		name := inventorySafeItemName(server.Name, 256)
 		product := inventoryStableIdentifier(name)
@@ -884,7 +887,9 @@ func endpointMCPComponentsFromServers(servers []config.MCPServerEntry, fingerpri
 			product = host
 		}
 		identity := mcpInventoryLocalIdentity(commandFingerprint, argumentsFingerprint)
-		if identity == "" {
+		if serverURL != "" {
+			identity = "remote\x00" + serverURL
+		} else if identity == "" {
 			identity = server.Name
 		} else if len(identityAliases[identity]) > 1 {
 			identity += "/" + server.Name
@@ -905,6 +910,7 @@ func endpointMCPComponentsFromServers(servers []config.MCPServerEntry, fingerpri
 			mcpCommandFingerprint:   commandFingerprint,
 			mcpArgumentsFingerprint: argumentsFingerprint,
 			mcpSourceScope:          inventoryStableToken(server.SourceScope, 64),
+			mcpServerURL:            serverURL,
 			mcpURLHost:              host,
 			mcpAuthProviderType:     inventoryStableToken(server.AuthProviderType, 64),
 			mcpDisabled:             &disabled,
@@ -1072,6 +1078,7 @@ func endpointInventoryCarrierFor(
 			}
 			identifiers = append(identifiers, observability.TelemetryStructuredDefenseClawInventoryMcpIdentifier{
 				Name: component.itemName, URLHost: aiDiscoveryV8OptionalText(component.mcpURLHost),
+				ServerURL:            aiDiscoveryV8OptionalText(component.mcpServerURL),
 				CommandFingerprint:   aiDiscoveryV8OptionalText(component.mcpCommandFingerprint),
 				ArgumentsFingerprint: aiDiscoveryV8OptionalText(component.mcpArgumentsFingerprint),
 			})
@@ -1263,6 +1270,7 @@ func emitEndpointInventoryComponent(
 			DefenseClawInventoryMcpCommandFingerprint:       aiDiscoveryV8OptionalText(component.mcpCommandFingerprint),
 			DefenseClawInventoryMcpArgumentsFingerprint:     aiDiscoveryV8OptionalText(component.mcpArgumentsFingerprint),
 			DefenseClawInventoryMcpSourceScope:              aiDiscoveryV8OptionalText(component.mcpSourceScope),
+			DefenseClawInventoryMcpServerURL:                aiDiscoveryV8OptionalText(component.mcpServerURL),
 			DefenseClawInventoryMcpURLHost:                  aiDiscoveryV8OptionalText(component.mcpURLHost),
 			DefenseClawInventoryMcpAuthProviderType:         aiDiscoveryV8OptionalText(component.mcpAuthProviderType),
 			DefenseClawInventoryMcpDisabled:                 inventoryOptionalBool(component.mcpDisabled),
@@ -1506,6 +1514,30 @@ func mcpURLHost(raw string) string {
 		return ""
 	}
 	return host
+}
+
+// mcpInventoryServerURL retains the configured remote endpoint's scheme,
+// host, port, and escaped path for inventory identity. URL userinfo, query,
+// and fragment are omitted because those positions commonly hold secrets.
+// It does not contact the endpoint.
+func mcpInventoryServerURL(raw string) string {
+	parsed, err := url.Parse(strings.TrimSpace(raw))
+	if err != nil || parsed.Opaque != "" {
+		return ""
+	}
+	scheme := strings.ToLower(parsed.Scheme)
+	if scheme != "http" && scheme != "https" {
+		return ""
+	}
+	host := strings.ToLower(mcpURLHost(raw))
+	if host == "" {
+		return ""
+	}
+	endpoint := scheme + "://" + host + parsed.EscapedPath()
+	if len(endpoint) > 1024 {
+		return ""
+	}
+	return endpoint
 }
 
 // discoveredEntriesFromReport enumerates per-entry inventory components for a
