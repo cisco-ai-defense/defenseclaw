@@ -39,6 +39,15 @@ func TestHookPostListenHelper(t *testing.T) {
 	}
 	defer l.Close()
 	_, _ = os.Stdout.WriteString("ready\n")
+	go func() {
+		for {
+			conn, err := l.Accept()
+			if err != nil {
+				return
+			}
+			go func() { defer conn.Close(); _, _ = io.Copy(io.Discard, conn) }()
+		}
+	}()
 	time.Sleep(time.Minute)
 	os.Exit(0)
 }
@@ -115,18 +124,19 @@ func TestHookPostNoAnswerExitNamesOnlyAProvenRestart(t *testing.T) {
 	}
 }
 
-func startListenHelper(t *testing.T, addr string) {
+func startListenHelper(t *testing.T, addr string) *exec.Cmd {
 	cmd := exec.Command(os.Args[0], "-test.run=^TestHookPostListenHelper$")
 	cmd.Env = append(os.Environ(), listenHelperEnv+"="+addr)
 	out, err := cmd.StdoutPipe()
 	if err != nil || cmd.Start() != nil {
 		t.Error("cannot start the listen helper")
-		return
+		return nil
 	}
 	t.Cleanup(func() { _ = cmd.Process.Kill(); _ = cmd.Wait() })
 	if line, err := bufio.NewReader(out).ReadString('\n'); err != nil || strings.TrimSpace(line) != "ready" {
 		t.Errorf("listen helper did not listen on %s: %q %v", addr, line, err)
 	}
+	return cmd
 }
 
 func itoa(n int) string { return strconv.Itoa(n) }

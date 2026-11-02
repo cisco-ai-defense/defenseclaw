@@ -8,6 +8,7 @@ package connector
 import (
 	"bufio"
 	"bytes"
+	"encoding/json"
 	"io"
 	"net"
 	"net/http"
@@ -20,6 +21,8 @@ import (
 	"syscall"
 	"testing"
 	"time"
+
+	"github.com/defenseclaw/defenseclaw/internal/procidentity"
 )
 
 const restartBracketListenerEnv = "DC_TEST_RESTART_BRACKET_LISTENER"
@@ -37,7 +40,83 @@ func TestRestartBracketListener(t *testing.T) {
 	}
 	defer listener.Close()
 	_, _ = os.Stdout.WriteString("ready\n")
+	go func() {
+		for {
+			conn, err := listener.Accept()
+			if err != nil {
+				return
+			}
+			go func() { defer conn.Close(); _, _ = io.Copy(io.Discard, conn) }()
+		}
+	}()
 	time.Sleep(time.Minute)
+}
+
+func TestGAP0295FreshGatewayBenignHookFollowsOutageMode(t *testing.T) {
+	for _, tc := range []struct {
+		name, config, mode string
+		allow              bool
+	}{
+		{"default", outageDefaultTierConfig, "open", true},
+		{"strict", outageStrictTierConfig, "closed", false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			home := t.TempDir()
+			dataDir := filepath.Join(home, ".defenseclaw")
+			hookDir := filepath.Join(dataDir, "hooks")
+			free, err := net.Listen("tcp", "127.0.0.1:0")
+			if err != nil {
+				t.Fatal(err)
+			}
+			addr := free.Addr().String()
+			_ = free.Close()
+			if err := WriteHookScriptsForConnectorObjectWithOpts(hookDir, SetupOpts{
+				DataDir: dataDir, APIAddr: addr, APIToken: "scoped-test-token", HookFailMode: tc.mode,
+			}, NewClaudeCodeConnector()); err != nil {
+				t.Fatal(err)
+			}
+			installNativeGatewayForHookTest(t, home, hookDir)
+			installNativeHookPostForHookTest(t, home)
+			writeOutageTierConfig(t, dataDir, tc.config)
+			gateway := exec.Command(os.Args[0], "-test.run=^TestRestartBracketListener$")
+			gateway.Env = append(sanitizedTestEnv(), restartBracketListenerEnv+"="+addr)
+			ready, err := gateway.StdoutPipe()
+			if err != nil || gateway.Start() != nil {
+				t.Fatal("gateway fixture did not start")
+			}
+			t.Cleanup(func() { _ = gateway.Process.Kill(); _ = gateway.Wait() })
+			if line, err := bufio.NewReader(ready).ReadString('\n'); err != nil || line != "ready\n" {
+				t.Fatalf("gateway fixture not ready: %q, %v", line, err)
+			}
+			identity, ok := procidentity.Of(gateway.Process.Pid)
+			if !ok {
+				t.Fatal("gateway fixture identity unavailable")
+			}
+			executable, err := os.Readlink("/proc/" + strconv.Itoa(gateway.Process.Pid) + "/exe")
+			if err != nil {
+				t.Fatal(err)
+			}
+			record, err := json.Marshal(map[string]any{
+				"pid": gateway.Process.Pid, "executable": executable, "data_dir": dataDir,
+				"start_time": time.Now().Add(-time.Second).Unix(), "start_identity": identity,
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(filepath.Join(dataDir, "gateway.pid"), record, 0o600); err != nil {
+				t.Fatal(err)
+			}
+			call := exec.Command("bash", filepath.Join(hookDir, "claude-code-hook.sh"))
+			call.Env = append(sanitizedTestEnv(), "HOME="+home, "DEFENSECLAW_HOME="+dataDir, "DEFENSECLAW_GATEWAY_AUTOSTART=0")
+			call.Stdin = strings.NewReader(`{"hook_event_name":"PreToolUse","tool_name":"Read","tool_input":{"file_path":"ordinary.txt"}}`)
+			var stdout, stderr bytes.Buffer
+			call.Stdout, call.Stderr = &stdout, &stderr
+			runErr := call.Run()
+			if blocked := hookCallBlocked(runErr, stdout.String()); blocked == tc.allow {
+				t.Fatalf("benign hook blocked=%t, want allow=%t; stdout=%q stderr=%q", blocked, tc.allow, stdout.String(), stderr.String())
+			}
+		})
+	}
 }
 
 // TestLinuxShellHookCallBracketingRestartFollowsOutageMode reproduces the

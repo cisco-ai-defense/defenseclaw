@@ -235,7 +235,8 @@ func runMain(args []string, input io.Reader, output, errOutput io.Writer) int {
 		// timeout, or as the restart outage when this account's start lock
 		// was held after the call reached its gateway and that gateway gave
 		// up the port during the call (rel-1-0-6 GAP-0498).
-		if startObservation.changed || hookexec.PerUserGatewayRestartProvenDuringCall(dataDir, peer, startObservation.start) {
+		if startObservation.changed || hookexec.PerUserGatewayRestartProvenDuringCall(dataDir, peer, startObservation.start) ||
+			hookexec.PerUserGatewayFreshStartNoAnswer(dataDir, peer) {
 			return hookexec.PerUserPostRestartNoAnswerExit
 		}
 		return hookexec.PerUserPostNoAnswerExit
