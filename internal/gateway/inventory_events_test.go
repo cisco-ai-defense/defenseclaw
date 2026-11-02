@@ -1209,6 +1209,36 @@ func TestEndpointMCPReadFailureIsPartialNotAuthoritativeEmpty(t *testing.T) {
 	t.Fatal("no partial MCP summary")
 }
 
+func TestPerConnectorMCPInventoryKeepsValidRowsFromPartialNativeRead(t *testing.T) {
+	withManagedEnterprise(t, true)
+	home := t.TempDir()
+	workspace := t.TempDir()
+	t.Setenv("HOME", home)
+	validPath := filepath.Join(home, ".gemini", "config", "mcp_config.json")
+	if err := os.MkdirAll(filepath.Dir(validPath), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(validPath, []byte(`{"mcpServers":{"notes":{"command":"uvx"}}}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	invalidPath := filepath.Join(workspace, ".agents", "mcp_config.json")
+	if err := os.MkdirAll(filepath.Dir(invalidPath), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(invalidPath, []byte("{"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	cfg := &config.Config{Claw: config.ClawConfig{WorkspaceDir: workspace}}
+	registry := connector.NewRegistry()
+	if err := registry.RegisterPlugin(&endpointInventoryPluginConnector{name: "antigravity", description: "test"}); err != nil {
+		t.Fatal(err)
+	}
+	rows, partial := perConnectorMCPEntriesWithStatus(cfg, registry)
+	if !partial || len(rows) != 1 || rows[0].itemName != "notes" {
+		t.Fatalf("partial native read lost valid MCP row: %+v partial=%v", rows, partial)
+	}
+}
+
 func TestEndpointPluginDiscoveryFailureIsPartialAndKeepsBuiltins(t *testing.T) {
 	withManagedEnterprise(t, true)
 	pluginRoot := filepath.Join(t.TempDir(), "configured-plugin-root")
