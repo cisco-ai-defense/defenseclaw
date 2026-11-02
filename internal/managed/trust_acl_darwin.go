@@ -7,52 +7,56 @@
 package managed
 
 import (
+	"context"
 	"fmt"
 	"os/exec"
-	"strconv"
-	"strings"
+	"time"
 )
 
-// validateTrustedPathACL rejects effective macOS ACL entries that grant
-// write-like authority beyond the POSIX owner/group/mode metadata validated by
-// trust_unix.go. macOS keeps those mode bits unchanged when an ACL is added, so
-// ignoring the extended entries would misclassify an attacker-writable path as
-// administrator-trusted.
-func validateTrustedPathACL(path string) error {
-	cmd := exec.Command("/bin/ls", "-lde", "--", path)
+// darwinACLInspectionTimeout bounds one `/bin/ls -lde` run. An Endpoint
+// Security client that stalls the exec, or a hung volume, must not block
+// config load, a guardian tick or the audit open indefinitely.
+const darwinACLInspectionTimeout = 5 * time.Second
+
+// inspectDarwinACL is replaced in tests.
+var inspectDarwinACL = func(ctx context.Context, path string) ([]byte, error) {
+	cmd := exec.CommandContext(ctx, "/bin/ls", "-lde", "--", path)
 	cmd.Env = []string{"LANG=C", "LC_ALL=C"}
-	output, err := cmd.Output()
+	return cmd.Output()
+}
+
+// readDarwinACL returns the `ls -lde` output for path. A timeout or exec
+// failure is transient (a busy Endpoint Security client, a volume waking up),
+// so it is retried once before it is reported.
+func readDarwinACL(path string) ([]byte, error) {
+	var lastErr error
+	for attempt := 0; attempt < 2; attempt++ {
+		ctx, cancel := context.WithTimeout(context.Background(), darwinACLInspectionTimeout)
+		output, err := inspectDarwinACL(ctx, path)
+		timedOut := ctx.Err() == context.DeadlineExceeded
+		cancel()
+		if err == nil {
+			return output, nil
+		}
+		if timedOut {
+			lastErr = fmt.Errorf("inspect macOS ACL for %s: timed out after %s", path, darwinACLInspectionTimeout)
+		} else {
+			lastErr = fmt.Errorf("inspect macOS ACL for %s: %w", path, err)
+		}
+	}
+	return nil, lastErr
+}
+
+// validateTrustedPathACL rejects effective macOS ACL entries that grant
+// write-like authority to a principal other than root, wheel or admin. macOS
+// keeps the mode bits unchanged when an ACL is added, so ignoring the extended
+// entries would misclassify an attacker-writable path as administrator-trusted.
+// Read, deny and inherit-only entries grant no write on the object itself and
+// are not judged.
+func validateTrustedPathACL(path string) error {
+	output, err := readDarwinACL(path)
 	if err != nil {
-		return fmt.Errorf("inspect macOS ACL for %s: %w", path, err)
+		return err
 	}
-	for _, line := range strings.Split(string(output), "\n") {
-		normalized := strings.ToLower(strings.TrimSpace(line))
-		colon := strings.IndexByte(normalized, ':')
-		if colon <= 0 {
-			continue
-		}
-		if _, err := strconv.ParseUint(normalized[:colon], 10, 32); err != nil {
-			continue
-		}
-		allowIndex := strings.Index(normalized, " allow ")
-		if allowIndex < 0 {
-			continue
-		}
-		fields := strings.Fields(normalized[allowIndex+len(" allow "):])
-		if len(fields) == 0 {
-			// An allow entry with no permission list is malformed `ls -lde`
-			// output, not a judgement about the permissions themselves. Keep it
-			// a plain error so the ancestor downgrade cannot swallow an ACL this
-			// code failed to read (see relaxAncestorTrustJudgement).
-			return fmt.Errorf("cannot parse macOS allow ACL on %s", path)
-		}
-		for _, permission := range strings.Split(fields[0], ",") {
-			switch permission {
-			case "write", "add_file", "append", "add_subdirectory", "delete", "delete_child",
-				"writeattr", "writeextattr", "writesecurity", "chown":
-				return newTrustVerdict("%s has write-capable macOS ACL entry", path)
-			}
-		}
-	}
-	return nil
+	return JudgeDarwinACLOutput(path, output)
 }

@@ -53,12 +53,15 @@ func ValidateTrustedFilePath(path, label string) error {
 		return err
 	}
 	for dir := filepath.Dir(clean); dir != filepath.Dir(dir); dir = filepath.Dir(dir) {
-		if err := validateTrustedPathElement(dir, true, label, PlatformInstallerOwnedPath(dir)); err != nil {
+		if trustedRootAlias(dir) {
+			continue
+		}
+		if err := validateTrustedPathElement(dir, true, label, AdvisoryAncestorPath(dir)); err != nil {
 			return err
 		}
 	}
 	root := filepath.VolumeName(clean) + string(filepath.Separator)
-	return validateTrustedPathElement(root, true, label, PlatformInstallerOwnedPath(root))
+	return validateTrustedPathElement(root, true, label, AdvisoryAncestorPath(root))
 }
 
 // ValidateTrustedRuntimeDir rejects managed_enterprise runtime directories that
@@ -78,7 +81,10 @@ func ValidateTrustedRuntimeDir(path, label string) error {
 		return fmt.Errorf("resolve %s path: %w", label, err)
 	}
 	for cur := clean; ; cur = filepath.Dir(cur) {
-		advisory := cur != clean && PlatformInstallerOwnedPath(cur)
+		if cur != clean && trustedRootAlias(cur) {
+			continue
+		}
+		advisory := cur != clean && AdvisoryAncestorPath(cur)
 		if err := validateTrustedRuntimeDirElement(cur, label, advisory); err != nil {
 			return err
 		}
@@ -125,12 +131,15 @@ func ValidateTrustedServiceRuntimeFilePath(path, label, _ string) error {
 		return err
 	}
 	for dir := filepath.Dir(clean); dir != filepath.Dir(dir); dir = filepath.Dir(dir) {
-		if err := validateTrustedRuntimeDirElement(dir, label, PlatformInstallerOwnedPath(dir)); err != nil {
+		if trustedRootAlias(dir) {
+			continue
+		}
+		if err := validateTrustedRuntimeDirElement(dir, label, AdvisoryAncestorPath(dir)); err != nil {
 			return err
 		}
 	}
 	root := filepath.VolumeName(clean) + string(filepath.Separator)
-	return validateTrustedRuntimeDirElement(root, label, PlatformInstallerOwnedPath(root))
+	return validateTrustedRuntimeDirElement(root, label, AdvisoryAncestorPath(root))
 }
 
 func validateTrustedRuntimeFileElement(path, label string) error {
@@ -168,11 +177,13 @@ func validateTrustedRuntimeFileElement(path, label string) error {
 // see AIFW-34262 and TrustStrictAncestorsEnv. Structural failures stay fatal at
 // every element, and the named leaf (advisory=false) keeps every verdict fatal.
 //
-// Callers pass advisory=true only for an ancestor that PlatformInstallerOwnedPath
-// accepts. An ancestor outside those roots — a temp, home, or third-party
-// prefix — keeps its verdicts fatal, because nobody else has a claim on the
-// permissions there and a writable directory above the artifact means the
-// artifact can be swapped.
+// Callers pass advisory=true only for an ancestor that AdvisoryAncestorPath
+// accepts: the platform installer's roots and, on macOS, `/` and `/opt`. An
+// ancestor outside those — a temp, home, or third-party prefix — keeps its
+// verdicts fatal, because nobody else has a claim on the permissions there and
+// a writable directory above the artifact means the artifact can be swapped.
+// Apple's root aliases (`/etc`, `/tmp`, `/var`) are skipped by the walks
+// before they reach this check.
 //
 // Unlike Windows there is no second, narrower ancestor rule here: unix has no
 // equivalent of the stock known-folder create-child grant, so advisory is the
@@ -290,10 +301,6 @@ func ValidateExecutableFilePath(path, label string) error {
 func AcceptServiceRuntimeFileDrift(path, label, serviceAccount string) error {
 	return ValidateTrustedServiceRuntimeFilePath(path, label, serviceAccount)
 }
-
-// osRootAncestor is Windows-only; on Unix only PlatformInstallerOwnedRoots
-// make an ancestor advisory.
-func osRootAncestor(string) bool { return false }
 
 // trustedMachineInstallBases is Windows-only; PlatformInstallerOwnedRoots
 // returns fixed roots on Unix.

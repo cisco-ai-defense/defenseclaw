@@ -95,7 +95,7 @@ func hookAPIValidateDirectoryElement(path string) error {
 // and every structural failure anywhere stay fatal.
 func hookAPIValidateDirectoryChain(clean string) error {
 	for cur := clean; ; cur = filepath.Dir(cur) {
-		advisory := cur != clean && managed.PlatformInstallerOwnedPath(cur)
+		advisory := cur != clean && managed.AdvisoryAncestorPath(cur)
 		info, err := os.Lstat(cur)
 		if err != nil {
 			return err

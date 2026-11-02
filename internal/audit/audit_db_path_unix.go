@@ -76,7 +76,7 @@ func validateAuditDBPlatformTrust(path string, info os.FileInfo, directory, stri
 			kind = "directory"
 		}
 		verdict := managed.NewTrustVerdict("audit: database %s is group- or other-writable", kind)
-		advisory := !strict && managed.PlatformInstallerOwnedPath(path)
+		advisory := !strict && managed.AdvisoryAncestorPath(path)
 		label := fmt.Sprintf("audit store database %s", kind)
 		return managed.RelaxAncestorTrustVerdict(advisory, path, label, verdict)
 	}

@@ -12,7 +12,9 @@ package managed
 
 import (
 	"fmt"
+	"os"
 	"path/filepath"
+	"runtime"
 	"sort"
 	"strings"
 )
@@ -150,6 +152,19 @@ type CanonicalOptions struct {
 	// Quiet suppresses the resilience log line, for callers that log the
 	// result themselves.
 	Quiet bool
+	// UnixOwner overrides the owner and group a kind's macOS canonical form
+	// names (root and wheel, or root and staff for the IPC folder). The hook
+	// guardian sets it for per-user objects, which the target user owns.
+	UnixOwner *UnixOwnership
+	// UnixMode overrides a kind's macOS canonical permission bits, for
+	// per-user objects whose mode depends on the file (a hook script, a token).
+	UnixMode os.FileMode
+}
+
+// UnixOwnership is a uid and gid pair for CanonicalOptions.UnixOwner.
+type UnixOwnership struct {
+	UID uint32
+	GID uint32
 }
 
 // Well-known SID strings the canonical descriptors use.
@@ -771,6 +786,9 @@ func (paths ManagedDataPaths) targets() []managedDataTarget {
 // platforms every result is CanonicalUnsupported.
 func RepairWindowsManagedDataPaths(paths ManagedDataPaths, opts CanonicalOptions) []CanonicalResult {
 	targets := paths.targets()
+	if !windowsDescriptorPlatform() {
+		return unsupportedCanonicalResults(targets)
+	}
 	results := make([]CanonicalResult, 0, len(targets))
 	for _, target := range targets {
 		result, _ := EnsureCanonical(target.path, target.kind, opts)
@@ -784,10 +802,28 @@ func RepairWindowsManagedDataPaths(paths ManagedDataPaths, opts CanonicalOptions
 // untrusted principal can write), and returns the per-object results.
 func AssessWindowsManagedDataPaths(paths ManagedDataPaths, opts CanonicalOptions) []CanonicalResult {
 	targets := paths.targets()
+	if !windowsDescriptorPlatform() {
+		return unsupportedCanonicalResults(targets)
+	}
 	results := make([]CanonicalResult, 0, len(targets))
 	for _, target := range targets {
 		result, _ := AssessCanonical(target.path, target.kind, opts)
 		results = append(results, result)
+	}
+	return results
+}
+
+// windowsDescriptorPlatform gates the Windows-named batch entry points. On
+// macOS EnsureCanonical stamps POSIX forms, but these batches name Windows
+// object layouts and are called from shared code on every platform; macOS
+// repairs are wired explicitly where each object is owned.
+func windowsDescriptorPlatform() bool { return runtime.GOOS == "windows" }
+
+// unsupportedCanonicalResults reports every target as CanonicalUnsupported.
+func unsupportedCanonicalResults(targets []managedDataTarget) []CanonicalResult {
+	results := make([]CanonicalResult, 0, len(targets))
+	for _, target := range targets {
+		results = append(results, CanonicalResult{Path: target.path, Kind: target.kind, Outcome: CanonicalUnsupported})
 	}
 	return results
 }

@@ -60,7 +60,7 @@ func validateJudgeBodyPlatformTrust(path string, info os.FileInfo, directory, st
 			kind = "directory"
 		}
 		verdict := managed.NewTrustVerdict("judge_body: database %s is group- or other-writable", kind)
-		advisory := !strict && managed.PlatformInstallerOwnedPath(path)
+		advisory := !strict && managed.AdvisoryAncestorPath(path)
 		label := fmt.Sprintf("judge body database %s", kind)
 		return managed.RelaxAncestorTrustVerdict(advisory, path, label, verdict)
 	}

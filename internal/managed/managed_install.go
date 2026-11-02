@@ -95,6 +95,9 @@ func (layout ManagedInstallLayout) targets() []managedDataTarget {
 // every result is CanonicalUnsupported.
 func RepairWindowsManagedInstall(layout ManagedInstallLayout, opts CanonicalOptions) []CanonicalResult {
 	targets := layout.targets()
+	if !windowsDescriptorPlatform() {
+		return unsupportedCanonicalResults(targets)
+	}
 	results := make([]CanonicalResult, 0, len(targets))
 	for _, target := range targets {
 		result, err := EnsureCanonical(target.path, target.kind, opts)
