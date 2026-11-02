@@ -1042,11 +1042,11 @@ jobs:
     needs: changes
     if: ${{ !cancelled() && needs.changes.outputs.core != 'false' }}
     runs-on: ubuntu-latest
-    timeout-minutes: 40
-    # The connector package is split into two parts beside the other
-    # packages (Makefile CONNECTOR_MATRIX_PART). The shell-hook golden runs
-    # all cases with a CPU-sized worker pool so each hook keeps its answer
-    # window on a small runner; the job can take longer than 20 minutes.
+    timeout-minutes: 20
+    # The connector package alone took 16 of the 20 minutes (the job was
+    # cancelled at its budget with every test passed), so its matrix tests
+    # run in two parts beside the other packages (Makefile
+    # CONNECTOR_MATRIX_PART).
     strategy:
       fail-fast: false
       matrix:
