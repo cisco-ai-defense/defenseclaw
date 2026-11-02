@@ -20,6 +20,16 @@ import (
 type Manifest struct {
 	Version int              `json:"version" yaml:"version"`
 	Targets []ManifestTarget `json:"targets" yaml:"targets"`
+	// Skipped lists rows left out because they were invalid, where the
+	// platform isolates a bad row instead of rejecting the whole manifest.
+	Skipped []ManifestRowSkip `json:"-" yaml:"-"`
+}
+
+// ManifestRowSkip is one manifest row that was left out, by its index in
+// the file.
+type ManifestRowSkip struct {
+	Index  int
+	Reason string
 }
 
 type ManifestTarget struct {
@@ -134,18 +144,28 @@ func loadManifestWithSHA256(path string, validateTarget func(int, ManifestTarget
 	if decodeErr == io.EOF {
 		return Manifest{}, "", fmt.Errorf("enterprise hooks: manifest %s is empty; refusing to withdraw enrolled hooks", path)
 	}
+	isolated := false
+	if decodeErr != nil && manifestIsolatesBadRows {
+		// One malformed row must not stop every user: decode row by row
+		// and leave out only the rows that do not parse.
+		if rows, ok := decodeManifestRowByRow(data); ok {
+			manifest, decodeErr, isolated = rows, nil, true
+		}
+	}
 	if decodeErr != nil {
 		return Manifest{}, "", fmt.Errorf("enterprise hooks: parse manifest %s: %w", path, decodeErr)
 	}
-	if manifest.Targets == nil {
+	if manifest.Targets == nil && len(manifest.Skipped) == 0 {
 		return Manifest{}, "", fmt.Errorf("enterprise hooks: manifest %s has no explicit targets; refusing to withdraw enrolled hooks", path)
 	}
-	var trailing any
-	if err := decoder.Decode(&trailing); err != io.EOF {
-		if err == nil {
-			err = fmt.Errorf("multiple YAML documents are not allowed")
+	if !isolated {
+		var trailing any
+		if err := decoder.Decode(&trailing); err != io.EOF {
+			if err == nil {
+				err = fmt.Errorf("multiple YAML documents are not allowed")
+			}
+			return Manifest{}, "", fmt.Errorf("enterprise hooks: parse manifest %s: %w", path, err)
 		}
-		return Manifest{}, "", fmt.Errorf("enterprise hooks: parse manifest %s: %w", path, err)
 	}
 	if manifest.Version == 0 {
 		manifest.Version = 1
@@ -154,33 +174,114 @@ func loadManifestWithSHA256(path string, validateTarget func(int, ManifestTarget
 		return Manifest{}, "", fmt.Errorf("enterprise hooks: manifest version %d is not supported", manifest.Version)
 	}
 	seen := map[string]int{}
+	kept := manifest.Targets[:0:0]
+	decodeSkipped := append([]ManifestRowSkip(nil), manifest.Skipped...)
 	for i, target := range manifest.Targets {
-		if target.Deferred && target.Enabled != nil && !*target.Enabled {
-			return Manifest{}, "", fmt.Errorf(
-				"enterprise hooks: target %d cannot be both disabled and deferred",
-				i,
-			)
-		}
-		if target.Enabled != nil && !*target.Enabled {
+		index := manifestRowIndex(decodeSkipped, i)
+		if err := validateManifestRow(index, target, seen, validateTarget); err != nil {
+			if !manifestIsolatesBadRows {
+				return Manifest{}, "", err
+			}
+			manifest.Skipped = append(manifest.Skipped, ManifestRowSkip{Index: index, Reason: err.Error()})
 			continue
 		}
-		if strings.TrimSpace(target.User) == "" && strings.TrimSpace(target.UserHome) == "" && strings.TrimSpace(target.SID) == "" {
-			return Manifest{}, "", fmt.Errorf("enterprise hooks: target %d requires user, user_home, or sid", i)
+		kept = append(kept, target)
+	}
+	if manifestIsolatesBadRows {
+		if len(kept) == 0 && len(manifest.Skipped) > 0 {
+			// Every row was left out: an unusable manifest must not read
+			// as one that withdraws every enrolled user.
+			return Manifest{}, "", fmt.Errorf("enterprise hooks: manifest %s has no valid targets (%s); refusing to withdraw enrolled hooks",
+				path, manifest.Skipped[0].Reason)
 		}
-		if strings.TrimSpace(target.Connector) == "" {
-			return Manifest{}, "", fmt.Errorf("enterprise hooks: target %d requires connector", i)
-		}
-		if err := validateTarget(i, target); err != nil {
-			return Manifest{}, "", err
-		}
-		key := manifestTargetKey(target)
-		if previous, duplicate := seen[key]; duplicate {
-			return Manifest{}, "", fmt.Errorf("enterprise hooks: target %d duplicates enabled target %d", i, previous)
-		}
-		seen[key] = i
+		manifest.Targets = kept
 	}
 	digest := sha256.Sum256(data)
 	return manifest, hex.EncodeToString(digest[:]), nil
+}
+
+// validateManifestRow checks one row with the caller's platform rule
+// (validateTarget) and records an enabled row's key in seen, so a later
+// duplicate is refused.
+func validateManifestRow(i int, target ManifestTarget, seen map[string]int, validateTarget func(int, ManifestTarget) error) error {
+	if target.Deferred && target.Enabled != nil && !*target.Enabled {
+		return fmt.Errorf(
+			"enterprise hooks: target %d cannot be both disabled and deferred",
+			i,
+		)
+	}
+	if target.Enabled != nil && !*target.Enabled {
+		return nil
+	}
+	if strings.TrimSpace(target.User) == "" && strings.TrimSpace(target.UserHome) == "" && strings.TrimSpace(target.SID) == "" {
+		return fmt.Errorf("enterprise hooks: target %d requires user, user_home, or sid", i)
+	}
+	if strings.TrimSpace(target.Connector) == "" {
+		return fmt.Errorf("enterprise hooks: target %d requires connector", i)
+	}
+	if err := validateTarget(i, target); err != nil {
+		return err
+	}
+	key := manifestTargetKey(target)
+	if previous, duplicate := seen[key]; duplicate {
+		return fmt.Errorf("enterprise hooks: target %d duplicates enabled target %d", i, previous)
+	}
+	seen[key] = i
+	return nil
+}
+
+// manifestRowIndex maps a position among the decoded targets back to the
+// row's index in the file when rows were already left out while decoding.
+// skipped is in file order.
+func manifestRowIndex(skipped []ManifestRowSkip, position int) int {
+	index := position
+	for _, row := range skipped {
+		if row.Index <= index {
+			index++
+		}
+	}
+	return index
+}
+
+// decodeManifestRowByRow parses a manifest whose strict decode failed one
+// row at a time, keeping the rows that parse strictly and recording the
+// rest. It reports false when the document itself is unusable.
+func decodeManifestRowByRow(data []byte) (Manifest, bool) {
+	var loose struct {
+		Version int         `yaml:"version"`
+		Targets []yaml.Node `yaml:"targets"`
+	}
+	// Only the rows are isolated: an unknown top-level key (a typo such as
+	// "targetz") still rejects the document rather than loading it as empty.
+	decoder := yaml.NewDecoder(bytes.NewReader(data))
+	decoder.KnownFields(true)
+	if err := decoder.Decode(&loose); err != nil {
+		return Manifest{}, false
+	}
+	var trailing any
+	if err := decoder.Decode(&trailing); err != io.EOF {
+		return Manifest{}, false
+	}
+	manifest := Manifest{Version: loose.Version}
+	for i := range loose.Targets {
+		encoded, err := yaml.Marshal(&loose.Targets[i])
+		if err != nil {
+			manifest.Skipped = append(manifest.Skipped, ManifestRowSkip{Index: i, Reason: err.Error()})
+			continue
+		}
+		var target ManifestTarget
+		rowDecoder := yaml.NewDecoder(bytes.NewReader(encoded))
+		rowDecoder.KnownFields(true)
+		if err := rowDecoder.Decode(&target); err != nil {
+			manifest.Skipped = append(manifest.Skipped, ManifestRowSkip{
+				Index:  i,
+				Reason: fmt.Sprintf("enterprise hooks: target %d does not parse: %v", i, err),
+			})
+			continue
+		}
+		manifest.Targets = append(manifest.Targets, target)
+	}
+	return manifest, true
 }
 
 func manifestTargetKey(target ManifestTarget) string {

@@ -35,7 +35,8 @@ var (
 // repairEnterpriseHookManagedInstallPlatform runs on the guardian's passes: it
 // re-stamps the managed machine objects (the same set as the pre-config
 // step), the install tree's metadata and the group and other write bits of
-// env_config.json, then heals the LaunchDaemon plists and the log folder.
+// env_config.json, heals the LaunchDaemon plists and the log folder, and
+// reports an untrusted /etc/codex.
 func repairEnterpriseHookManagedInstallPlatform() {
 	layout, ok := managed.PinnedManagedServiceLayout()
 	if !ok || !managed.SelfRepairEnabled() {
@@ -53,6 +54,7 @@ func repairEnterpriseHookManagedInstallPlatform() {
 		repairManagedEnvConfig(config.DefaultEnvConfigPath)
 	}
 	healManagedLaunchdPlatform(managedServiceGuardian, layout)
+	connector.ReportCodexSystemRequirementsTrust()
 }
 
 // repairEnterpriseHookManagedRuntimePlatform re-stamps the managed data_dir
@@ -69,9 +71,11 @@ func repairEnterpriseHookManagedRuntimePlatform(dataDir, _ string) error {
 	return nil
 }
 
-// repairEnterpriseHookGatewayDataPathsPlatform re-stamps the runtime hooks
-// folder and the service-side hook and OTLP tokens on every guardian pass.
-// The gateway repairs its databases and key itself.
+// repairEnterpriseHookGatewayDataPathsPlatform re-stamps the gateway's
+// runtime objects on every guardian pass: the databases and their side
+// files, the redaction key, the dotenv, the hooks folder and the
+// service-side hook and OTLP tokens. The gateway only repairs them when it
+// starts, so drift while it runs is healed here. Nothing is moved aside.
 func repairEnterpriseHookGatewayDataPathsPlatform() {
 	if cfg == nil || !managed.IsManagedEnterprise(cfg.DeploymentMode) {
 		return
@@ -80,7 +84,7 @@ func repairEnterpriseHookGatewayDataPathsPlatform() {
 	if !ok || !managed.SelfRepairEnabled() || !enterpriseHookInsideRuntime(layout, cfg.DataDir) {
 		return
 	}
-	managed.RepairOwnedObjects(managedHookTokenObjects(cfg.DataDir))
+	managed.RepairOwnedObjects(gatewayRuntimeObjects(cfg, layout, false))
 }
 
 // repairEnterpriseHookGuardianLedgerObjectPlatform re-stamps one guardian

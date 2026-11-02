@@ -315,7 +315,8 @@ export DEFENSECLAW_MANAGED_HOOK
 _DC_SECURE_CLIENT_DELIVERY={{if .SecureClientDelivery}}1{{else}}0{{end}}
 {{end}}DEFENSECLAW_HOME="$(cd "${HOOK_DIR}/.." && pwd -P)"
 export DEFENSECLAW_HOME
-{{else}}
+{{if .ManagedShellGuard}}{{template "managed-prologue" .}}
+{{end}}{{else}}
 # A per-user render is never a managed or Secure Client hook: those markers
 # come only from a managed render (the branch above), never from the
 # agent's environment, where they would change how the per-user hook answers
@@ -366,6 +367,7 @@ defenseclaw_harden_env
 # answer every block below (exit 2) as Codex reads one for the registered
 # event (codex_closed_answer, GAP-0949).
 trap '_dc_codex_rc=$?; _defenseclaw_hook_cleanup; if [ "$_dc_codex_rc" -eq 2 ]; then codex_closed_answer; fi' EXIT
+{{end}}{{if .ManagedShellGuard}}trap '_dc_managed_on_exit' EXIT
 {{end}}
 # Fail mode governs response-layer failures (4xx, bad JSON, missing
 # action) and transport failures (gateway unreachable / timeout / 5xx).

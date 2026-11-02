@@ -37,7 +37,8 @@
 # summarises what was left. The purge exits 0 once it has done everything
 # it can; a later install clears any leftover. The order makes a re-run
 # safe: users are purged before the install tree (which holds the scrub
-# binary and the manifest), and the log folder keeps only uninstall.log.
+# binary and the manifest). When something was left behind the log folder
+# keeps only uninstall.log; a clean purge removes the folder as well.
 
 set -euo pipefail
 
@@ -1193,5 +1194,14 @@ if (( ${#_summary[@]} > 0 )); then
   log "done with ${#_summary[@]} warning(s); left behind: ${_joined}"
 else
   log "done."
+  # Nothing was left behind, so the record is not needed: the log folder
+  # goes too, as it always did. It stays only when it holds something else,
+  # and after a --user purge, which re-checked one user only: warnings that
+  # earlier runs logged for other users are kept.
+  if [[ -z "${TARGET_USER}" && -n "${DC_MARKER_LOG_FILE}" && -d "${LOGS_DIR}" && ! -L "${LOGS_DIR}" ]]; then
+    DC_MARKER_LOG_FILE=""
+    rm -f "${UNINSTALL_LOG}" 2>/dev/null || true
+    rmdir "${LOGS_DIR}" 2>/dev/null || true
+  fi
 fi
 exit 0

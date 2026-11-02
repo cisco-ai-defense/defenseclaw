@@ -450,6 +450,43 @@ func TestGatewayRuntimeRepairBeforeStoresOpen(t *testing.T) {
 	}
 }
 
+func TestGuardianPassRepairsGatewayStoresWithoutMovingThem(t *testing.T) {
+	layout := managedTestLayout(t)
+	markers := captureMarkers(t)
+	mkdirMode(t, layout.RuntimeDir, 0o750)
+	audit := filepath.Join(layout.RuntimeDir, "audit.db")
+	writeMode(t, audit, 0o622)
+	key := filepath.Join(layout.RuntimeDir, "redaction-correlation.key")
+	writeMode(t, key, 0o622)
+	judge := filepath.Join(layout.RuntimeDir, "judge_bodies.db")
+	writeMode(t, judge, 0o600)
+	if err := os.Link(judge, filepath.Join(t.TempDir(), "judge-link")); err != nil {
+		t.Fatal(err)
+	}
+
+	previous := cfg
+	cfg = &config.Config{
+		DeploymentMode: managed.DeploymentModeManagedEnterprise,
+		DataDir:        layout.RuntimeDir,
+		AuditDB:        audit,
+		JudgeBodiesDB:  judge,
+	}
+	t.Cleanup(func() { cfg = previous })
+	repairEnterpriseHookGatewayDataPathsPlatform()
+
+	for _, path := range []string{audit, key} {
+		if got := modeOf(t, path); got != 0o600 {
+			t.Errorf("%s mode = %04o, want 0600", path, got)
+		}
+	}
+	if _, err := os.Lstat(judge); err != nil {
+		t.Fatalf("an open store must not be moved aside on a guardian pass: %v", err)
+	}
+	if countMarker(markers(), managed.MarkerRepair) < 2 || countMarker(markers(), managed.MarkerBoundary) < 1 {
+		t.Fatalf("markers = %q", markers())
+	}
+}
+
 func TestDarwinEnvConfigOnlyLosesGroupAndOtherWrite(t *testing.T) {
 	managedTestLayout(t)
 	markers := captureMarkers(t)

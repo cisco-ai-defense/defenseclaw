@@ -41,10 +41,7 @@ func TestLoadManifestRejectsUnknownFields(t *testing.T) {
 	if err := os.WriteFile(path, data, 0o600); err != nil {
 		t.Fatalf("write manifest: %v", err)
 	}
-	_, err := LoadManifest(path)
-	if err == nil || !strings.Contains(err.Error(), "field enabld not found") {
-		t.Fatalf("LoadManifest error = %v, want unknown-field rejection", err)
-	}
+	assertManifestRowRejected(t, path, "field enabld not found")
 }
 
 func TestLoadManifestRejectsDisabledDeferredTarget(t *testing.T) {
@@ -53,10 +50,7 @@ func TestLoadManifestRejectsDisabledDeferredTarget(t *testing.T) {
 	if err := os.WriteFile(path, data, 0o600); err != nil {
 		t.Fatalf("write manifest: %v", err)
 	}
-	_, err := LoadManifest(path)
-	if err == nil || !strings.Contains(err.Error(), "cannot be both disabled and deferred") {
-		t.Fatalf("LoadManifest error = %v, want contradictory deferred-state rejection", err)
-	}
+	assertManifestRowRejected(t, path, "cannot be both disabled and deferred")
 }
 
 func TestLoadManifestRejectsTrailingDocument(t *testing.T) {
@@ -113,5 +107,20 @@ func TestLoadManifestRejectsSparseOversizedInput(t *testing.T) {
 	_, err = LoadManifest(path)
 	if err == nil || !strings.Contains(err.Error(), "exceeds") {
 		t.Fatalf("LoadManifest oversized error = %v, want bounded refusal", err)
+	}
+}
+
+// assertManifestRowRejected checks that the only row of the manifest at
+// path is refused with want. The whole manifest fails: where bad rows are
+// isolated, a manifest left with no valid row is refused rather than read as
+// one that withdraws every enrolled user.
+func assertManifestRowRejected(t *testing.T, path, want string) {
+	t.Helper()
+	_, err := LoadManifest(path)
+	if err == nil || !strings.Contains(err.Error(), want) {
+		t.Fatalf("LoadManifest error = %v, want %q", err, want)
+	}
+	if manifestIsolatesBadRows && !strings.Contains(err.Error(), "refusing to withdraw enrolled hooks") {
+		t.Fatalf("LoadManifest error = %v, want the empty result refused", err)
 	}
 }

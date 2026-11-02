@@ -208,7 +208,8 @@ func TestInspectManagedCodexSystemRequirementsUserWritableSource(t *testing.T) {
 	}
 
 	policy, err := inspectCodexSystemRequirementsForMode(true)
-	if runtime.GOOS != "windows" {
+	// Windows and macOS read the vendor file anyway and log a boundary.
+	if runtime.GOOS != "windows" && runtime.GOOS != "darwin" {
 		if err == nil || !strings.Contains(strings.ToLower(err.Error()), "untrusted") {
 			t.Fatalf("managed user-writable requirements error = %v, want untrusted refusal", err)
 		}

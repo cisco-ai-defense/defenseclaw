@@ -152,6 +152,23 @@ t_purge_skips_symlinked_home() {
   fixture_cleanup "${b}"
 }
 
+t_clean_purge_removes_log_folder() {
+  local b; b="$(fixture_bundle)"
+  local rc=0
+  fixture_install "${b}" --connector codex >/dev/null 2>&1 || rc=$?
+  assert_status "${rc}" 0 "fixture install"
+  local logs="${b}/root/Library/Logs/Cisco/SecureClient/DefenseClaw"
+  printf 'log\n' > "${logs}/gateway.log"
+  [[ -f "${logs}/gateway.log" ]] || _fail "fixture log folder missing before the purge"
+  local out
+  rc=0
+  out="$(fixture_uninstall "${b}" --purge -y 2>&1)" || rc=$?
+  assert_status "${rc}" 0 "clean purge exits 0"
+  assert_contains "${out}" "[uninstall] done." "clean purge reports done"
+  [[ ! -e "${logs}" && ! -L "${logs}" ]] || _fail "a clean purge removes the log folder, uninstall.log included ($(ls -A "${logs}" 2>&1))"
+  fixture_cleanup "${b}"
+}
+
 t_root_retry_refuses_symlinked_parent() {
   local b; b="$(_purge_fixture)"
   local me; me="$(id -un)"
@@ -170,7 +187,25 @@ t_root_retry_refuses_symlinked_parent() {
   fixture_cleanup "${b}"
 }
 
+t_user_purge_keeps_earlier_warnings() {
+  local b; b="$(fixture_bundle)"
+  local rc=0
+  fixture_install "${b}" --connector codex >/dev/null 2>&1 || rc=$?
+  assert_status "${rc}" 0 "fixture install"
+  fixture_add_user "${b}" "$(id -un)" "$(id -u)"
+  local logs="${b}/root/Library/Logs/Cisco/SecureClient/DefenseClaw"
+  printf '[uninstall] done with 1 warning(s); left behind: /Users/bob/.cursor/hooks.json (scrub_failed)\n' > "${logs}/uninstall.log"
+  local out
+  rc=0
+  out="$(fixture_uninstall "${b}" --purge -y --user "$(id -un)" 2>&1)" || rc=$?
+  assert_status "${rc}" 0 "a --user purge exits 0"
+  assert_contains "$(cat "${logs}/uninstall.log" 2>&1)" "bob/.cursor/hooks.json (scrub_failed)" "an earlier warning survives a --user purge"
+  fixture_cleanup "${b}"
+}
+
 run_case "purge completes, isolates users and summarises leftovers" t_purge_completes_and_isolates_users
+run_case "a --user purge keeps earlier warnings"                  t_user_purge_keeps_earlier_warnings
+run_case "a clean purge removes the log folder"                     t_clean_purge_removes_log_folder
 run_case "purge without the library still finds every user"         t_purge_without_library_still_finds_users
 run_case "root retry refuses a symlinked parent folder"          t_root_retry_refuses_symlinked_parent
 run_case "purge never follows a symlinked home"                     t_purge_skips_symlinked_home

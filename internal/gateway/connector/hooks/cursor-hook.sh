@@ -283,7 +283,8 @@ export DEFENSECLAW_MANAGED_HOOK
 _DC_SECURE_CLIENT_DELIVERY={{if .SecureClientDelivery}}1{{else}}0{{end}}
 {{end}}DEFENSECLAW_HOME="$(cd "${HOOK_DIR}/.." && pwd -P)"
 export DEFENSECLAW_HOME
-{{else}}
+{{if .ManagedShellGuard}}{{template "managed-prologue" .}}
+{{end}}{{else}}
 # A per-user render is never a managed or Secure Client hook: those markers
 # come only from a managed render (the branch above), never from the
 # agent's environment, where they would change how the per-user hook answers
@@ -364,7 +365,8 @@ readonly FAIL_MODE
 command . "${HOOK_DIR}/_hardening.sh" || exit "$?"
 defenseclaw_harden_resources
 defenseclaw_harden_env
-
+{{if .ManagedShellGuard}}trap '_dc_managed_on_exit' EXIT
+{{end}}
 {{if .Managed}}# Managed hooks use the installer-owned delivery policy; an inherited
 # DEFENSECLAW_FAIL_MODE cannot weaken an explicitly closed managed hook.
 FAIL_MODE="{{.FailMode}}"{{else}}FAIL_MODE="{{.FailMode}}"

@@ -1164,12 +1164,6 @@ for _lbl_plist in \
 done
 unset _lbl_plist _lbl _plist _is_legacy
 
-# ---- host prerequisites --------------------------------------------------
-#
-# Logged as defenseclaw_prereq; a missing prerequisite never stops the
-# install (the affected component runs degraded and the services re-check).
-dc_run_prereq_checks || true
-
 # ---- gateway file install ----------------------------------------------
 
 # clear bootout-restore: past this point we start replacing the gateway
@@ -1798,6 +1792,15 @@ if [[ "${SKIP_CONNECTOR}" != "true" ]]; then
     forget_install_temporary "${MANIFEST_TMP}"
   fi
 fi
+
+# ---- host prerequisites --------------------------------------------------
+#
+# Logged as defenseclaw_prereq; a missing prerequisite never stops the
+# install (the affected component runs degraded and the services re-check
+# on every tick). Run here, with the binary installed and the services
+# quiesced, so the port check never mistakes the previous gateway for a
+# foreign listener.
+dc_run_prereq_checks "${GATEWAY_BIN}" "${INSTALL_PREFIX}" "${API_PORT}" || true
 
 # Bootstrap order: the guardian first (the repair authority must run
 # even when the gateway cannot start), then the gateway, then the
