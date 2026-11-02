@@ -2637,6 +2637,25 @@ dc_remove_path() {
   return 0
 }
 
+# dc_sha256_hex FILE -> stdout: FILE's SHA-256 as bare lowercase hex.
+dc_sha256_hex() {
+  local out
+  out="$(/usr/bin/shasum -a 256 -- "$1" 2>/dev/null)" || return 1
+  out="${out%% *}"
+  [[ "${out}" =~ ^[0-9a-f]{64}$ ]] || return 1
+  printf '%s' "${out}"
+}
+
+# dc_run_prereq_checks: the installer's host prerequisite checks (the
+# gateway may execute, no uncleared system immutable flag, loopback ports
+# free, hook transport tools present, the cloud-auth library loads), run
+# before any mutation. Each finding is logged as defenseclaw_prereq with
+# its remedy and never fails the install. No checks are registered yet,
+# so it currently logs nothing.
+dc_run_prereq_checks() {
+  return 0
+}
+
 # dc_strip_quarantine PATH ...: remove com.apple.quarantine from each
 # installed regular file, so launchd can exec a binary staged from a
 # browser-downloaded bundle. Logs defenseclaw_repair per stripped file;

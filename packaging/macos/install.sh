@@ -1092,6 +1092,12 @@ for _lbl_plist in \
 done
 unset _lbl_plist _lbl _plist _is_legacy
 
+# ---- host prerequisites --------------------------------------------------
+#
+# Logged as defenseclaw_prereq; a missing prerequisite never stops the
+# install (the affected component runs degraded and the services re-check).
+dc_run_prereq_checks || true
+
 # ---- gateway file install ----------------------------------------------
 
 log "installing binary -> ${GATEWAY_BIN}"
@@ -1409,6 +1415,103 @@ log "stripping any legacy UserName/GroupName from installed plist"
 /usr/bin/plutil -remove UserName  "${PLIST_DST}" >/dev/null 2>&1 || true
 /usr/bin/plutil -remove GroupName "${PLIST_DST}" >/dev/null 2>&1 || true
 
+# ---- canonical plist copies and integrity manifest -----------------------
+#
+# Internal reference copies the root services repair from; the bundle
+# file set and the published plists are unchanged.
+#
+#   etc/launchd/<label>.plist         the plist exactly as published here
+#                                     (after the legacy-key strip)
+#   etc/launchd/<label>.plist.sha256  its SHA-256: bare lowercase hex
+#   etc/integrity.sha256              `shasum -a 256` lines ("<hex>  <path>")
+#                                     for every file in bin/, lib/*.sh
+#                                     and libexec/
+#
+# A copy or manifest that cannot be written is logged; never fatal.
+CANONICAL_LAUNCHD_DIR="${CONFIG_DIR}/launchd"
+INTEGRITY_MANIFEST="${CONFIG_DIR}/integrity.sha256"
+
+# write_install_text_file DESTINATION MODE: publish stdin at DESTINATION.
+write_install_text_file() {
+  local destination="$1" mode="$2" staged=""
+  staged="$(mktemp "${TMPDIR:-/tmp}/defenseclaw-install.XXXXXX" 2>/dev/null)" || return 1
+  INSTALL_TEMP_FILES+=("${staged}")
+  if ! cat > "${staged}"; then
+    rm -f -- "${staged}" 2>/dev/null || true
+    forget_install_temporary "${staged}"
+    return 1
+  fi
+  local rc=0
+  install_file_no_replace "${staged}" "${destination}" "${DC_OWNER}" "${DC_GROUP}" "${mode}" || rc=1
+  rm -f -- "${staged}" 2>/dev/null || true
+  forget_install_temporary "${staged}"
+  return "${rc}"
+}
+
+publish_canonical_plists() {
+  create_install_directory_no_replace "${CANONICAL_LAUNCHD_DIR}" "${DC_OWNER}" "${DC_GROUP}" 0755 || return 1
+  local pair label published digest failed=""
+  for pair in \
+    "${LAUNCHD_LABEL}:${PLIST_DST}" \
+    "${GUARDIAN_LAUNCHD_LABEL}:${GUARDIAN_PLIST_DST}" \
+    "${ENUMERATOR_LAUNCHD_LABEL}:${ENUMERATOR_PLIST_DST}"; do
+    label="${pair%%:*}"
+    published="${pair#*:}"
+    if [[ ! -f "${published}" || -L "${published}" ]]; then
+      failed="${failed:+${failed},}${label}"
+      continue
+    fi
+    if ! install_file_no_replace "${published}" "${CANONICAL_LAUNCHD_DIR}/${label}.plist" \
+        "${DC_OWNER}" "${DC_GROUP}" 0644; then
+      failed="${failed:+${failed},}${label}"
+      continue
+    fi
+    digest="$(dc_sha256_hex "${CANONICAL_LAUNCHD_DIR}/${label}.plist")" || digest=""
+    if [[ -z "${digest}" ]] \
+       || ! printf '%s' "${digest}" | write_install_text_file "${CANONICAL_LAUNCHD_DIR}/${label}.plist.sha256" 0644; then
+      failed="${failed:+${failed},}${label}"
+    fi
+  done
+  if [[ -n "${failed}" ]]; then
+    dc_warn "canonical plist copies not written for: ${failed}" \
+      defenseclaw_degraded subsystem=canonical_plists reason=write_failed labels="${failed}" path="${CANONICAL_LAUNCHD_DIR}"
+    return 1
+  fi
+  return 0
+}
+
+publish_integrity_manifest() {
+  local -a files=()
+  local f
+  while IFS= read -r f; do
+    [[ -n "${f}" ]] && files+=("${f}")
+  done < <(
+    {
+      /usr/bin/find "${INSTALL_PREFIX}/bin" -type f 2>/dev/null
+      /usr/bin/find "${INSTALL_PREFIX}/lib" -maxdepth 1 -type f -name '*.sh' 2>/dev/null
+      /usr/bin/find "${INSTALL_PREFIX}/libexec" -type f 2>/dev/null
+    } | LC_ALL=C sort
+  )
+  if (( ${#files[@]} == 0 )); then
+    dc_warn "no installed files found for the integrity manifest" \
+      defenseclaw_degraded subsystem=integrity_manifest reason=no_files path="${INTEGRITY_MANIFEST}"
+    return 1
+  fi
+  local listing=""
+  if ! listing="$(/usr/bin/shasum -a 256 "${files[@]}")" \
+     || ! printf '%s\n' "${listing}" | write_install_text_file "${INTEGRITY_MANIFEST}" 0644; then
+    dc_warn "could not write the integrity manifest ${INTEGRITY_MANIFEST}" \
+      defenseclaw_degraded subsystem=integrity_manifest reason=write_failed path="${INTEGRITY_MANIFEST}"
+    return 1
+  fi
+  return 0
+}
+
+log "recording canonical plist copies -> ${CANONICAL_LAUNCHD_DIR}"
+publish_canonical_plists || true
+log "recording installed file digests -> ${INTEGRITY_MANIFEST}"
+publish_integrity_manifest || true
+
 if [[ "${SKIP_LAUNCHD}" == "true" ]]; then
   log "skipping launchctl bootstrap (--skip-launchd)"
   exit_install_status
@@ -1416,15 +1519,16 @@ fi
 
 # ---- launchd ------------------------------------------------------------
 
-# bootstrap_launchd_job LABEL PLIST: load one LaunchDaemon. Never aborts
-# the install: an already-loaded job (a supervisor re-registered it) is
-# kickstarted; a failure gets `launchctl enable` (a persisted disable
-# override makes bootstrap fail) and one retry, then is logged as
-# defenseclaw_degraded and the remaining jobs are still loaded.
+# bootstrap_launchd_job LABEL PLIST: load one LaunchDaemon. The label is
+# enabled first, because a persisted `launchctl disable` override makes
+# bootstrap fail. Never aborts the install: an already-loaded job (a
+# supervisor re-registered it) is kickstarted; any other failure gets one
+# retry, then is logged as defenseclaw_degraded and the remaining jobs
+# are still loaded.
 bootstrap_launchd_job() {
   local label="$1" plist="$2" err=""
+  launchctl enable "system/${label}" >/dev/null 2>&1 || true
   if err="$(launchctl bootstrap system "${plist}" 2>&1)"; then
-    launchctl enable "system/${label}" >/dev/null 2>&1 || true
     return 0
   fi
   if launchctl print "system/${label}" >/dev/null 2>&1; then
@@ -1432,7 +1536,6 @@ bootstrap_launchd_job() {
     launchctl kickstart -k "system/${label}" >/dev/null 2>&1 || true
     return 0
   fi
-  launchctl enable "system/${label}" >/dev/null 2>&1 || true
   sleep "${DC_RETRY_SLEEP}" 2>/dev/null || true
   if err="$(launchctl bootstrap system "${plist}" 2>&1)"; then
     return 0
@@ -1441,76 +1544,6 @@ bootstrap_launchd_job() {
     defenseclaw_degraded subsystem=launchd label="${label}" reason=bootstrap_failed detail="${err}"
   return 1
 }
-
-log "loading LaunchDaemon"
-bootstrap_launchd_job "${LAUNCHD_LABEL}" "${PLIST_DST}" || true
-
-GATEWAY_WAIT_SECONDS="${DC_INSTALLER_GATEWAY_WAIT_SECONDS:-15}"
-wait_for_launchd_running() {
-  local deadline=$(( $(date +%s) + GATEWAY_WAIT_SECONDS ))
-  while (( $(date +%s) < deadline )); do
-    if launchctl print "system/${LAUNCHD_LABEL}" 2>/dev/null | grep -qE '^[[:space:]]+state = running'; then
-      return 0
-    fi
-    sleep 1
-  done
-  return 1
-}
-
-log "waiting for gateway to come up"
-GATEWAY_VERIFIED="false"
-if wait_for_launchd_running; then
-  GATEWAY_VERIFIED="true"
-else
-  warn "gateway did not reach running state within ${GATEWAY_WAIT_SECONDS}s; recent stderr:"
-  tail -20 "${LOGS_DIR}/gateway.err.log" 2>/dev/null | sed 's/^/    /' >&2 || true
-  # Never abort here: the services were quiesced above, and the guardian
-  # and enumerator below are the repair authority. launchd KeepAlive keeps
-  # retrying the gateway, which starts degraded rather than not at all.
-  #
-  # Do NOT clean the guardrail rescue tree(s) here — if the gateway
-  # did not come up with the freshly-published rule packs, the operator
-  # may want to roll back to the last known-good tree at ${_guardrail_old}
-  # (and to any older `.old-*` trees preserved by prior unverified runs).
-  dc_warn "${LAUNCHD_LABEL} is not running yet; see ${LOGS_DIR}/gateway.err.log — freshly-published guardrail rule packs are at ${POLICIES_DST}/guardrail; prior-run rescue trees preserved under ${POLICIES_DST}/guardrail.old-*" \
-    defenseclaw_degraded subsystem=gateway label="${LAUNCHD_LABEL}" reason=not_running_after_bootstrap
-fi
-
-# Verified live: the gateway is running with the freshly-published
-# rule packs. Only now is it safe to delete the rescue tree(s) —
-# earlier deletion would strand the operator without a rollback path
-# if startup panicked on the new packs.
-#
-# Filter the sweep to trees whose encoded PID is NOT currently alive
-# so a concurrent install.sh whose own `wait_for_launchd_running`
-# hasn't finished yet keeps its rescue tree at `.old-<its-pid>-<its-ts>`.
-# Without this filter, whichever run finishes first would wipe every
-# other in-flight run's rescue.
-#
-# find is used rather than a shell glob so `nullglob` state doesn't
-# matter and unmatched patterns are silent. The rescue tree name
-# format is `guardrail.old-<pid>-<utc-timestamp>` (see the swap block
-# above), so the PID is the first `-`-delimited field after the
-# `guardrail.old-` prefix.
-if [[ "${GATEWAY_VERIFIED}" == "true" && -n "${_guardrail_old:-}" ]]; then
-  while IFS= read -r _rescue; do
-    [[ -n "${_rescue}" ]] || continue
-    _rescue_base="$(/usr/bin/basename -- "${_rescue}")"
-    _rescue_pid="${_rescue_base#guardrail.old-}"
-    _rescue_pid="${_rescue_pid%%-*}"
-    # A tree owned by THIS process is always safe to clean — we've
-    # just verified our own startup. Only other-PID trees need the
-    # liveness check.
-    if [[ "${_rescue_pid}" != "$$" ]] \
-        && [[ "${_rescue_pid}" =~ ^[0-9]+$ ]] \
-        && /bin/kill -0 "${_rescue_pid}" 2>/dev/null; then
-      log "  preserving concurrent-run rescue tree ${_rescue} (pid ${_rescue_pid} still active)"
-      continue
-    fi
-    rm -rf -- "${_rescue}" 2>/dev/null || true
-  done < <(/usr/bin/find "${POLICIES_DST}" -mindepth 1 -maxdepth 1 -type d -name 'guardrail.old-*' 2>/dev/null)
-  unset _guardrail_old _rescue _rescue_base _rescue_pid
-fi
 
 # ---- per-user hook wiring (multi-user, via hook guardian) --------------
 #
@@ -1534,10 +1567,12 @@ fi
 #   1. Render an initial targets.yaml so the guardian's RunAtLoad has
 #      real content to reconcile (avoids a 5-min delay before the first
 #      user's hooks land on a demo box).
-#   2. Bootstrap the hook-enumerator daemon (RunAtLoad will re-render,
-#      but our initial file is already good).
-#   3. Bootstrap the hook-guardian daemon (RunAtLoad triggers immediate
+#   2. Bootstrap the hook-guardian daemon (RunAtLoad triggers immediate
 #      reconcile — hooks land within seconds on the eligible users).
+#   3. Bootstrap the gateway and wait for it.
+#   4. Bootstrap the hook-enumerator daemon (RunAtLoad will re-render,
+#      but our initial file is already good), then confirm the guardian
+#      and enumerator are loaded.
 
 if [[ "${SKIP_CONNECTOR}" != "true" ]]; then
   log "enumerating eligible local users"
@@ -1676,15 +1711,93 @@ if [[ "${SKIP_CONNECTOR}" != "true" ]]; then
     rm -f -- "${MANIFEST_TMP}" 2>/dev/null || true
     forget_install_temporary "${MANIFEST_TMP}"
   fi
+fi
 
-  # Each job is loaded on its own: a failure to load one is logged and
-  # never keeps the next from loading, so the guardian (the repair
-  # authority) is loaded even when the enumerator is not.
-  log "loading hook-enumerator LaunchDaemon"
-  bootstrap_launchd_job "${ENUMERATOR_LAUNCHD_LABEL}" "${ENUMERATOR_PLIST_DST}" || true
-
+# Bootstrap order: the guardian first (the repair authority must run
+# even when the gateway cannot start), then the gateway, then the
+# enumerator. Each job is enabled before its bootstrap (a persisted
+# disable override makes bootstrap fail) and loaded on its own: a
+# failure to load one is logged and never keeps the next from loading.
+if [[ "${SKIP_CONNECTOR}" != "true" ]]; then
   log "loading hook-guardian LaunchDaemon"
   bootstrap_launchd_job "${GUARDIAN_LAUNCHD_LABEL}" "${GUARDIAN_PLIST_DST}" || true
+fi
+
+log "loading LaunchDaemon"
+bootstrap_launchd_job "${LAUNCHD_LABEL}" "${PLIST_DST}" || true
+
+GATEWAY_WAIT_SECONDS="${DC_INSTALLER_GATEWAY_WAIT_SECONDS:-15}"
+wait_for_launchd_running() {
+  local deadline=$(( $(date +%s) + GATEWAY_WAIT_SECONDS ))
+  while (( $(date +%s) < deadline )); do
+    if launchctl print "system/${LAUNCHD_LABEL}" 2>/dev/null | grep -qE '^[[:space:]]+state = running'; then
+      return 0
+    fi
+    sleep 1
+  done
+  return 1
+}
+
+log "waiting for gateway to come up"
+GATEWAY_VERIFIED="false"
+if wait_for_launchd_running; then
+  GATEWAY_VERIFIED="true"
+else
+  warn "gateway did not reach running state within ${GATEWAY_WAIT_SECONDS}s; recent stderr:"
+  tail -20 "${LOGS_DIR}/gateway.err.log" 2>/dev/null | sed 's/^/    /' >&2 || true
+  # Never abort here: the services were quiesced above, and the guardian
+  # and enumerator below are the repair authority. launchd KeepAlive keeps
+  # retrying the gateway, which starts degraded rather than not at all.
+  #
+  # Do NOT clean the guardrail rescue tree(s) here — if the gateway
+  # did not come up with the freshly-published rule packs, the operator
+  # may want to roll back to the last known-good tree at ${_guardrail_old}
+  # (and to any older `.old-*` trees preserved by prior unverified runs).
+  dc_warn "${LAUNCHD_LABEL} is not running yet; see ${LOGS_DIR}/gateway.err.log — freshly-published guardrail rule packs are at ${POLICIES_DST}/guardrail; prior-run rescue trees preserved under ${POLICIES_DST}/guardrail.old-*" \
+    defenseclaw_degraded subsystem=gateway label="${LAUNCHD_LABEL}" reason=not_running_after_bootstrap
+fi
+
+# Verified live: the gateway is running with the freshly-published
+# rule packs. Only now is it safe to delete the rescue tree(s) —
+# earlier deletion would strand the operator without a rollback path
+# if startup panicked on the new packs.
+#
+# Filter the sweep to trees whose encoded PID is NOT currently alive
+# so a concurrent install.sh whose own `wait_for_launchd_running`
+# hasn't finished yet keeps its rescue tree at `.old-<its-pid>-<its-ts>`.
+# Without this filter, whichever run finishes first would wipe every
+# other in-flight run's rescue.
+#
+# find is used rather than a shell glob so `nullglob` state doesn't
+# matter and unmatched patterns are silent. The rescue tree name
+# format is `guardrail.old-<pid>-<utc-timestamp>` (see the swap block
+# above), so the PID is the first `-`-delimited field after the
+# `guardrail.old-` prefix.
+if [[ "${GATEWAY_VERIFIED}" == "true" && -n "${_guardrail_old:-}" ]]; then
+  while IFS= read -r _rescue; do
+    [[ -n "${_rescue}" ]] || continue
+    _rescue_base="$(/usr/bin/basename -- "${_rescue}")"
+    _rescue_pid="${_rescue_base#guardrail.old-}"
+    _rescue_pid="${_rescue_pid%%-*}"
+    # A tree owned by THIS process is always safe to clean — we've
+    # just verified our own startup. Only other-PID trees need the
+    # liveness check.
+    if [[ "${_rescue_pid}" != "$$" ]] \
+        && [[ "${_rescue_pid}" =~ ^[0-9]+$ ]] \
+        && /bin/kill -0 "${_rescue_pid}" 2>/dev/null; then
+      log "  preserving concurrent-run rescue tree ${_rescue} (pid ${_rescue_pid} still active)"
+      continue
+    fi
+    rm -rf -- "${_rescue}" 2>/dev/null || true
+  done < <(/usr/bin/find "${POLICIES_DST}" -mindepth 1 -maxdepth 1 -type d -name 'guardrail.old-*' 2>/dev/null)
+  unset _guardrail_old _rescue _rescue_base _rescue_pid
+fi
+
+# Enumerator last: it re-renders the manifest the guardian already
+# loaded, so it starts once the guardian and gateway are up.
+if [[ "${SKIP_CONNECTOR}" != "true" ]]; then
+  log "loading hook-enumerator LaunchDaemon"
+  bootstrap_launchd_job "${ENUMERATOR_LAUNCHD_LABEL}" "${ENUMERATOR_PLIST_DST}" || true
 
   # Kick both daemons so the first reconcile happens immediately rather
   # than at the next tick (RunAtLoad already fired, but kickstart is a
@@ -1694,6 +1807,16 @@ if [[ "${SKIP_CONNECTOR}" != "true" ]]; then
   log "kickstarting hook-enumerator + hook-guardian for immediate first pass"
   launchctl kickstart -k "system/${ENUMERATOR_LAUNCHD_LABEL}" 2>/dev/null || true
   launchctl kickstart -k "system/${GUARDIAN_LAUNCHD_LABEL}"   2>/dev/null || true
+
+  # The guardian is the repair authority and the enumerator enrolls new
+  # users: a job that is not loaded now is reported, never fatal.
+  for _label in "${GUARDIAN_LAUNCHD_LABEL}" "${ENUMERATOR_LAUNCHD_LABEL}"; do
+    if ! launchctl print "system/${_label}" >/dev/null 2>&1; then
+      dc_warn "${_label} is not loaded after bootstrap" \
+        defenseclaw_degraded subsystem=launchd label="${_label}" reason=not_loaded_after_bootstrap
+    fi
+  done
+  unset _label
 fi
 
 # ---- summary ------------------------------------------------------------

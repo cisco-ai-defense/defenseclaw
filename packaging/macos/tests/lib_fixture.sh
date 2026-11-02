@@ -8,7 +8,8 @@
 #   root/   fixture machine root (DC_INSTALLER_TEST_ROOT /
 #           DC_UNINSTALL_TEST_ROOT); root/Users holds fixture homes
 #   shim/   stub launchctl, dscl and sudo, first on PATH
-#   state/  launchctl stub state: one file per loaded label
+#   state/  launchctl stub state: one file per loaded label, and
+#           state/calls with every launchctl invocation in order
 #   users   "name uid" lines the dscl stub reports
 #   dscl-read-fail  names whose `dscl . -read` fails
 #
@@ -40,6 +41,7 @@ fixture_bundle() {
   cat > "${b}/shim/launchctl" <<EOF
 #!/bin/bash
 state="${b}/state"
+printf '%s\n' "\$*" >> "\${state}/calls"
 case "\$1" in
   print)
     label="\${2#system/}"
