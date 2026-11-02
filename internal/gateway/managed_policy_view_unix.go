@@ -119,11 +119,9 @@ func (w *managedPolicyViewWatch) refresh() {
 		connectors = append(connectors, descriptor.MachinePolicyConnectors...)
 	}
 	if w.authorizer != nil {
-		// A descriptor may be published before the gateway accepts the new
-		// config. Only connectors in the live, recorded generation can widen
-		// machine-policy authorization. A rejected reload keeps the previous
-		// generation and therefore cannot authorize a new connector.
-		w.authorized = admittedMachinePolicyConnectors(w.goos, generation, w.authorized, connectors)
+		// A changed descriptor can add authorization only when its connector
+		// belongs to the recorded config and its published policy is proved.
+		w.authorized = admittedMachinePolicyConnectors(w.goos, w.opts, generation, w.authorized, descriptor, !w.computed)
 		w.authorizer.setMachinePolicy(w.authorized)
 	}
 	if !slices.Equal(connectors, w.connectors) {
@@ -135,7 +133,7 @@ func (w *managedPolicyViewWatch) refresh() {
 	w.api.publishManagedPolicyView(computeManagedPolicyViewFor(w.opts, descriptor))
 }
 
-func admittedMachinePolicyConnectors(goos string, generation *Generation, previous, descriptor []string) []string {
+func admittedMachinePolicyConnectors(goos string, viewOpts enterprisepolicy.Options, generation *Generation, previous []string, descriptor *managed.RuntimeDescriptor, initial bool) []string {
 	if generation == nil || generation.Config == nil || !generation.Config.StandaloneEnterprise() || !generation.ConfigGenRecorded {
 		return nil
 	}
@@ -148,13 +146,38 @@ func admittedMachinePolicyConnectors(goos string, generation *Generation, previo
 		return nil
 	}
 	opts.OpenCodePluginPlanned = true
+	opts.Root = viewOpts.Root
+	opts.SkipTrustChecks = viewOpts.SkipTrustChecks
 	intended := enterprisepolicy.MachinePolicyConnectors(opts, enterprisepolicy.StandaloneConnectors(generation.Config))
 	var admitted []string
 	// A descriptor written ahead of the gateway's config reload cannot
 	// remove authorization that the still-live generation already admitted.
 	// Once that generation changes, its intended set removes retired names.
-	for _, name := range append(slices.Clone(previous), descriptor...) {
+	for _, name := range previous {
 		if slices.Contains(intended, name) && !slices.Contains(admitted, name) {
+			admitted = append(admitted, name)
+		}
+	}
+	if descriptor == nil {
+		return admitted
+	}
+	for _, name := range descriptor.MachinePolicyConnectors {
+		if !slices.Contains(intended, name) || slices.Contains(admitted, name) {
+			continue
+		}
+		if initial {
+			// A gateway starting on an existing deployment keeps the previous
+			// descriptor admission behavior. Hot additions require proof.
+			admitted = append(admitted, name)
+			continue
+		}
+		pin := descriptor.PolicyViewDigests[name]
+		observed, err := enterprisepolicy.PolicyViewDigest(viewOpts, name)
+		if pin == "" || err != nil || observed != pin {
+			continue
+		}
+		present, err := enterprisepolicy.MachinePolicyPresent(opts, name)
+		if err == nil && present {
 			admitted = append(admitted, name)
 		}
 	}

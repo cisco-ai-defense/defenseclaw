@@ -9,6 +9,7 @@ import (
 	"context"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
@@ -66,6 +67,27 @@ func pinPolicyView(t *testing.T, opts enterprisepolicy.Options, descriptor *mana
 			t.Fatal(err)
 		}
 		descriptor.PolicyViewUserSources[name] = pins
+	}
+}
+
+func publishPolicyViewTestConnector(t *testing.T, opts enterprisepolicy.Options, connectors ...string) {
+	t.Helper()
+	layout, err := managed.StandaloneLayoutFor(opts.GOOS)
+	if err != nil {
+		t.Fatal(err)
+	}
+	opts.HookBinary = enterprisepolicy.HookBinaryPath(layout)
+	opts.StateDir = filepath.Join(opts.Root, "machine-policy-state")
+	opts.PublicPolicyPath = filepath.Join(opts.Root, "machine-policy.json")
+	opts.OpenCodePluginPath = enterprisepolicy.OpenCodeManagedPluginPath(layout)
+	result, err := enterprisepolicy.Publish(opts, connectors)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, name := range connectors {
+		if !slices.Contains(result.MachinePolicyConnectors, name) {
+			t.Fatalf("%s was not published: %v", name, result.MachinePolicyConnectors)
+		}
 	}
 }
 
@@ -163,6 +185,8 @@ func TestManagedHookAuthorizerFollowsAdmittedConnectorSet(t *testing.T) {
 	}
 	check(false)
 	descriptor.MachinePolicyConnectors = []string{"claudecode"}
+	publishPolicyViewTestConnector(t, opts, "claudecode")
+	pinPolicyView(t, opts, descriptor)
 	if err := os.WriteFile(descriptorPath, []byte("version two"), 0o600); err != nil {
 		t.Fatal(err)
 	}
@@ -171,13 +195,64 @@ func TestManagedHookAuthorizerFollowsAdmittedConnectorSet(t *testing.T) {
 	check(false) // An unrecorded generation cannot widen authorization.
 	live = &Generation{N: 3, ConfigGen: 2, ConfigGenRecorded: true, Config: newConfig}
 	check(true)
+	live = &Generation{N: 4, ConfigGen: 2, ConfigGenRecorded: false, Config: newConfig}
+	check(false)
+	live = &Generation{N: 5, ConfigGen: 2, ConfigGenRecorded: true, Config: newConfig}
+	check(true) // Restoring the same recorded generation restores its published connector.
 	descriptor.MachinePolicyConnectors = nil
 	if err := os.WriteFile(descriptorPath, []byte("version three"), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	check(true) // A descriptor-only removal leaves the admitted snapshot live.
-	live = &Generation{N: 4, ConfigGen: 3, ConfigGenRecorded: true, Config: oldConfig}
+	live = &Generation{N: 6, ConfigGen: 3, ConfigGenRecorded: true, Config: oldConfig}
 	check(false)
+}
+
+func TestManagedHookAuthorizerKeepsRecordedCoverageOnDescriptorOnlyAddition(t *testing.T) {
+	opts, _ := claudePolicyViewTestRoot(t, "linux")
+	descriptorPath := filepath.Join(t.TempDir(), "runtime.json")
+	descriptor := &managed.RuntimeDescriptor{MachinePolicyConnectors: []string{"codex"}}
+	cfg := &config.Config{DeploymentMode: "managed_enterprise"}
+	cfg.Enterprise.Profile = managed.ProfileStandalone
+	cfg.Guardrail.Enabled = true
+	cfg.Guardrail.Connectors = map[string]config.PerConnectorGuardrailConfig{"codex": {}, "claudecode": {}}
+	live := &Generation{N: 1, ConfigGen: 1, ConfigGenRecorded: true, Config: cfg}
+	saved := loadStandaloneRuntimeDescriptor
+	loadStandaloneRuntimeDescriptor = func(string) (*managed.RuntimeDescriptor, error) {
+		copy := *descriptor
+		return &copy, nil
+	}
+	t.Cleanup(func() { loadStandaloneRuntimeDescriptor = saved })
+	authorizer := newManagedHookAuthorizer(cfg.Enterprise.Enrollment, nil,
+		func() (managedHookLedger, error) { return managedHookLedger{}, nil })
+	api := &APIServer{}
+	api.SetGenerationSource(func() *Generation { return live })
+	watch := &managedPolicyViewWatch{api: api, authorizer: authorizer, goos: "linux", opts: opts, descriptorPath: descriptorPath}
+	peer := managedHookPeer{UID: 1001, Name: "alice"}
+	publishPolicyViewTestConnector(t, opts, "codex")
+	pinPolicyView(t, opts, descriptor)
+	writePolicyViewTestFile(t, descriptorPath, "first")
+	watch.refresh()
+	if !authorizer.decide(peer, "codex", "").Allow || authorizer.decide(peer, "claudecode", "").Allow {
+		t.Fatal("the initial descriptor did not keep the recorded connector set")
+	}
+	descriptor.MachinePolicyConnectors = []string{"codex", "claudecode"}
+	pinPolicyView(t, opts, descriptor)
+	writePolicyViewTestFile(t, descriptorPath, "second descriptor")
+	watch.refresh()
+	if !authorizer.decide(peer, "codex", "").Allow {
+		t.Fatal("the previously admitted connector was refused")
+	}
+	if authorizer.decide(peer, "claudecode", "").Allow {
+		t.Fatal("a descriptor-only addition admitted an unpublished connector")
+	}
+	publishPolicyViewTestConnector(t, opts, "codex", "claudecode")
+	pinPolicyView(t, opts, descriptor)
+	writePolicyViewTestFile(t, descriptorPath, "published descriptor")
+	watch.refresh()
+	if !authorizer.decide(peer, "codex", "").Allow || !authorizer.decide(peer, "claudecode", "").Allow {
+		t.Fatal("the published connector set was not admitted")
+	}
 }
 
 // On macOS each account's own managed preference is proven by content
