@@ -1886,6 +1886,9 @@ func (sp spec) decide(opts Options, body []byte) int {
 		} else {
 			return emitHookResult(opts, sp, sp.openAllow)
 		}
+		if sp.connector == "cursor" && action == "block" {
+			return cursorClosedExit(opts, 0)
+		}
 		return 0
 
 	case styleHookEchoDecision:
@@ -3703,7 +3706,7 @@ func failManagedStandaloneClosed(opts Options, sp spec, result failResult, layer
 		return emitCodexBlock(opts, text)
 	case "cursor":
 		fmt.Fprintln(opts.Stdout, cursorClosedOutput(opts, text))
-		return result.exit
+		return cursorClosedExit(opts, result.exit)
 	case "devin":
 		fmt.Fprintln(opts.Stdout, devinBlockText(text))
 		return result.exit
@@ -4055,6 +4058,9 @@ func emitHookResult(opts Options, sp spec, result failResult) int {
 			fmt.Fprintln(opts.Stdout, cursorClosedOutput(opts, result.body))
 		} else {
 			fmt.Fprintln(opts.Stdout, cursorFallbackOutput(opts.Event, false, result.body))
+		}
+		if result.closed || result.exit != 0 {
+			return cursorClosedExit(opts, result.exit)
 		}
 		return result.exit
 	}

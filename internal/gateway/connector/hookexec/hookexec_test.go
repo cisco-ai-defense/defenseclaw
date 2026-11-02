@@ -119,6 +119,8 @@ func runWithContext(
 	switch connector {
 	case "codex":
 		opts.HookContractID = "codex-hooks-v4"
+	case "cursor":
+		opts.Event = "preToolUse"
 	case "copilot":
 		// Copilot's official registration binds the exact camelCase event
 		// out-of-band because stdin does not carry an event discriminator.
