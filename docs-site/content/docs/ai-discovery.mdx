@@ -1067,6 +1067,14 @@ installations on one endpoint. If two aliases in the same connector and scope
 use identical commands and ordered arguments, the alias distinguishes their
 IDs so both configured rows remain visible.
 
+Remote MCP component records also include the configured server endpoint URL.
+The exported value keeps the HTTP(S) scheme, host, port, and escaped path, but
+omits userinfo, query parameters, and fragments. DefenseClaw does not probe
+the endpoint to collect this value; it comes from native connector
+configuration. Operators should keep credentials out of URL paths because the
+path is part of the exported server identity. Renaming a remote server alias
+does not change its component ID; changing the sanitized endpoint URL does.
+
 The release-owned managed agent, connector, MCP, skill, and plugin inventory
 actions are blocked from operator-configured remote destinations. Mandatory
 SQLite remains authoritative locally, and the generated CMID-authenticated AI

@@ -1042,6 +1042,7 @@ func TestEndpointMCPComponentsRetainOnlyBoundedIdentifiersBasenamesAndHosts(t *t
 	if component.product != "payments-mcp" || component.itemName != "payments-mcp" ||
 		component.mcpTransport != "http" || component.mcpCommandBasename != "mcp-server" ||
 		component.mcpURLHost != "mcp.example.com:8443" || component.mcpAuthProviderType != "oauth" ||
+		component.mcpServerURL != "https://mcp.example.com:8443/v1" ||
 		component.mcpDisabled == nil || !*component.mcpDisabled || component.active {
 		t.Fatalf("sanitized component=%+v", component)
 	}
@@ -1049,6 +1050,7 @@ func TestEndpointMCPComponentsRetainOnlyBoundedIdentifiersBasenamesAndHosts(t *t
 		component.id, component.componentType, component.signal, component.product,
 		component.itemName, component.mcpTransport, component.mcpCommandBasename,
 		component.mcpURLHost, component.mcpAuthProviderType,
+		component.mcpServerURL,
 	}, " ")
 	for _, forbidden := range []string{"/Users/alice", "private", "password", "token", "secret", "--token"} {
 		if strings.Contains(joined, forbidden) {
@@ -1193,6 +1195,40 @@ func TestMCPHomeReaderMarksDanglingConfigSymlinkPartial(t *testing.T) {
 	}
 }
 
+func TestMCPInventoryServerURLDropsCredentialsQueryAndFragment(t *testing.T) {
+	for raw, want := range map[string]string{
+		"HTTPS://user:password@MCP.example.com:8443/v1?token=private#fragment": "https://mcp.example.com:8443/v1",
+		"http://mcp.example.com/stream%2Fv1?key=private":                       "http://mcp.example.com/stream%2Fv1",
+		"file:///private/mcp": "",
+		"https://":            "",
+	} {
+		if got := mcpInventoryServerURL(raw); got != want {
+			t.Fatalf("mcpInventoryServerURL(%q)=%q, want %q", raw, got, want)
+		}
+	}
+}
+
+func TestEndpointRemoteMCPIdentityUsesSanitizedURL(t *testing.T) {
+	component := func(name, url string) endpointInventoryComponent {
+		t.Helper()
+		components := endpointMCPComponentsFromServers([]config.MCPServerEntry{{Name: name, URL: url}}, nil)
+		if len(components) != 1 {
+			t.Fatalf("components=%d", len(components))
+		}
+		return components[0]
+	}
+	base := component("first", "https://user:password@mcp.example.com/v1?token=secret")
+	if renamed := component("second", "https://mcp.example.com/v1?token=other"); renamed.id != base.id {
+		t.Fatalf("alias or removed URL credentials changed remote identity: %q / %q", base.id, renamed.id)
+	}
+	if changed := component("first", "https://mcp.example.com/v2"); changed.id == base.id {
+		t.Fatal("different endpoint path kept the same remote identity")
+	}
+	if strings.Contains(base.id, "password") || strings.Contains(base.id, "secret") {
+		t.Fatalf("component ID disclosed URL credential: %q", base.id)
+	}
+}
+
 func TestEmitEndpointInventoryPreservesPR471SafeMCPFields(t *testing.T) {
 	withManagedEnterprise(t, true)
 	t.Setenv("PATH", t.TempDir())
@@ -1282,6 +1318,8 @@ func TestEmitEndpointInventoryPreservesPR471SafeMCPFields(t *testing.T) {
 	}
 	identifiers := canonicalObjectArray(t, mcpSummary[observability.TelemetryAttributeDefenseClawInventoryMcpIdentifiers])
 	if len(identifiers) != 1 || identifiers[0]["command_fingerprint"] != mcpBody[observability.TelemetryAttributeDefenseClawInventoryMcpCommandFingerprint] ||
+		mcpBody[observability.TelemetryAttributeDefenseClawInventoryMcpServerURL] != "https://mcp.example.com:8443/v1" ||
+		identifiers[0]["server_url"] != "https://mcp.example.com:8443/v1" ||
 		identifiers[0]["arguments_fingerprint"] != mcpBody[observability.TelemetryAttributeDefenseClawInventoryMcpArgumentsFingerprint] {
 		t.Fatalf("MCP aggregate identifiers do not match per-component fingerprints: %+v", identifiers)
 	}
