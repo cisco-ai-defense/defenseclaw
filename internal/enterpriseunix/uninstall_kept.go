@@ -90,6 +90,10 @@ func (l *lifecycle) reportUnenrolledUserData(ctx context.Context) {
 	var others []perUserKept
 	for _, entry := range l.env.perUserFilesOnHost(ctx) {
 		if !l.enrolledHomes[filepath.Clean(entry.home)] {
+			if entry.data && holdsOwnInstall(entry.home) {
+				l.result.AddWarning(codePerUserState, "kept the own DefenseClaw install of user "+entry.user+" after --purge: this deployment did not enroll this account, and a machine uninstall never removes an account's own install; its owner can remove it")
+				continue
+			}
 			others = append(others, entry)
 		}
 	}
@@ -114,7 +118,7 @@ func (l *lifecycle) reportRetainedEnrolledUserData() {
 	for _, before := range l.keptPerUser {
 		// The remove-all worker may already have removed eligible-accounts.json.
 		// Use the home captured before removal to inspect what still exists.
-		if !before.data || l.perUserStateKept[before.user] || !perUserFilesOf(before.user, before.home).data {
+		if !before.data || l.perUserStateKept[before.user] || l.ownInstallRestored[before.user] || !perUserFilesOf(before.user, before.home).data {
 			continue
 		}
 		if !before.manifest {

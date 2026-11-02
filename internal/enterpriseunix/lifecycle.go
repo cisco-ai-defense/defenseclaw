@@ -203,6 +203,8 @@ type lifecycle struct {
 	// needs it, or its home was not available). Their session-facts cache
 	// stays with that state (GAP-0582).
 	perUserStateKept map[string]bool
+	// ownInstallRestored names accounts whose own files the purge put back.
+	ownInstallRestored map[string]bool
 	// perUserRemoved counts the per-user hook registrations an uninstall
 	// removed, for its summary.
 	perUserRemoved int
@@ -4553,6 +4555,10 @@ func (l *lifecycle) removePerUserRegistrations(ctx context.Context) bool {
 	// with a blocker; the uninstall removed it, and the account's own hook
 	// does not guard Claude Code until its owner sets it up again.
 	for _, user := range report.OwnInstallRestored {
+		if l.ownInstallRestored == nil {
+			l.ownInstallRestored = map[string]bool{}
+		}
+		l.ownInstallRestored[user] = true
 		r.Changes = append(r.Changes, fmt.Sprintf("put back the own per-user DefenseClaw files of user %s that the enrollment had changed (hook scripts and hook settings in ~/.defenseclaw/hooks, connector backups, hook contract lock, and the agent configs those backups name), byte for byte as they were before the managed deployment", user))
 	}
 	for _, entry := range report.OwnInstallKeptChanged {
