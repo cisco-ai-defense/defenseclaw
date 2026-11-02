@@ -4,6 +4,7 @@
 package actionfacts
 
 import (
+	"strconv"
 	"strings"
 	"unicode"
 )
@@ -12,20 +13,27 @@ import (
 // interpreting its contents as commands. A failed match leaves the Windows
 // reading at the opener; guessing an end could turn data into a command.
 func windowsPowerShellOpaqueEnd(runes []rune, start int) (int, bool) {
-	if start+1 >= len(runes) {
+	if start >= len(runes) {
 		return 0, false
 	}
-	if runes[start] == '@' && windowsPowerShellQuoteDelimiter(runes[start+1]) != 0 {
+	codeStart := start + 2
+	bareParen := runes[start] == '('
+	if bareParen {
+		codeStart = start + 1
+	} else if start+1 >= len(runes) {
+		return 0, false
+	}
+	if !bareParen && runes[start] == '@' && windowsPowerShellQuoteDelimiter(runes[start+1]) != 0 {
 		if !powerShellHereStringOpens(runes, start+2) {
 			return 0, false
 		}
 		return windowsPowerShellHereStringEnd(runes, start)
 	}
 	var close rune
-	switch runes[start+1] {
-	case '(':
+	switch {
+	case bareParen || runes[start+1] == '(':
 		close = ')'
-	case '{':
+	case runes[start+1] == '{':
 		close = '}'
 	default:
 		return 0, false
@@ -35,15 +43,21 @@ func windowsPowerShellOpaqueEnd(runes []rune, start int) (int, bool) {
 	}
 	frames := []rune{close}
 	argumentMode := []bool{false}
-	push := func(close rune) {
+	hashtable := []bool{runes[start] == '@' && close == '}'}
+	statementStart := []bool{!hashtable[0]}
+	push := func(close rune, table bool) {
 		frames = append(frames, close)
 		argumentMode = append(argumentMode, false)
+		hashtable = append(hashtable, table)
+		statementStart = append(statementStart, !table)
 	}
 	pop := func() {
 		frames = frames[:len(frames)-1]
 		argumentMode = argumentMode[:len(argumentMode)-1]
+		hashtable = hashtable[:len(hashtable)-1]
+		statementStart = statementStart[:len(statementStart)-1]
 	}
-	for i := start + 2; i < len(runes); i++ {
+	for i := codeStart; i < len(runes); i++ {
 		r := runes[i]
 		top := frames[len(frames)-1]
 		switch top {
@@ -59,7 +73,7 @@ func windowsPowerShellOpaqueEnd(runes []rune, start int) (int, bool) {
 			case top == '"' && r == '`':
 				i++
 			case top == '"' && r == '$' && i+1 < len(runes) && runes[i+1] == '(':
-				push(')')
+				push(')', false)
 				i++
 			case windowsPowerShellQuoteDelimiter(r) == top:
 				if i+1 < len(runes) && windowsPowerShellQuoteDelimiter(runes[i+1]) == top {
@@ -69,15 +83,21 @@ func windowsPowerShellOpaqueEnd(runes []rune, start int) (int, bool) {
 				}
 			}
 		default:
-			if !argumentMode[len(argumentMode)-1] && windowsPowerShellCommandWordBeforeBlank(runes, i) {
-				argumentMode[len(argumentMode)-1] = true
-			}
-			if strings.ContainsRune(";|\r\n", r) || r == '&' && (i == 0 || runes[i-1] != '>') {
-				argumentMode[len(argumentMode)-1] = false
-			}
 			next := rune(0)
 			if i+1 < len(runes) {
 				next = runes[i+1]
+			}
+			comment := (r == '#' || r == '<' && next == '#') &&
+				windowsPowerShellCommentStarts(runes, i, !argumentMode[len(argumentMode)-1])
+			if statementStart[len(statementStart)-1] && windowsPowerShellStatementCommandWord(runes, i) {
+				argumentMode[len(argumentMode)-1] = true
+			}
+			if statementStart[len(statementStart)-1] && !unicode.IsSpace(r) && r != '&' && !comment {
+				statementStart[len(statementStart)-1] = false
+			}
+			if strings.ContainsRune(";|\r\n", r) || r == '&' && (i == 0 || runes[i-1] != '>') {
+				argumentMode[len(argumentMode)-1] = false
+				statementStart[len(statementStart)-1] = !hashtable[len(hashtable)-1]
 			}
 			switch {
 			case r == '`':
@@ -106,7 +126,7 @@ func windowsPowerShellOpaqueEnd(runes []rune, start int) (int, bool) {
 				}
 				i = end
 			case r == '$' && next == '{':
-				push('v')
+				push('v', false)
 				i++
 			case windowsPowerShellQuoteDelimiter(r) != 0:
 				// Adjacent delimiters of the same family in an active string
@@ -115,11 +135,11 @@ func windowsPowerShellOpaqueEnd(runes []rune, start int) (int, bool) {
 				if i > 0 && windowsPowerShellQuoteDelimiter(runes[i-1]) == windowsPowerShellQuoteDelimiter(r) {
 					return 0, false
 				}
-				push(windowsPowerShellQuoteDelimiter(r))
+				push(windowsPowerShellQuoteDelimiter(r), false)
 			case r == '(':
-				push(')')
+				push(')', false)
 			case r == '{':
-				push('}')
+				push('}', i > 0 && runes[i-1] == '@')
 			case r == ')' || r == '}':
 				if r != top {
 					return 0, false
@@ -194,6 +214,12 @@ func windowsPowerShellCommentStarts(runes []rune, i int, expressionMode bool) bo
 		windowsPowerShellQuotedTokenBoundary(runes, i)
 }
 
+// PowerShellCommentStarts shares the comment boundary with the gateway's
+// independent state-write reader.
+func PowerShellCommentStarts(runes []rune, i int, expressionMode bool) bool {
+	return windowsPowerShellCommentStarts(runes, i, expressionMode)
+}
+
 // Match the lexer's quotedTokenBoundary rule for a quoted-only word. Walk
 // back through doubled or escaped quote characters to find its opener.
 func windowsPowerShellQuotedTokenBoundary(runes []rune, i int) bool {
@@ -223,24 +249,102 @@ func windowsPowerShellQuotedTokenBoundary(runes []rune, i int) bool {
 	return false
 }
 
-// A bare command name followed by a blank switches a value expression to
-// argument mode. A hashtable key followed by '=' remains an expression.
-func windowsPowerShellCommandWordBeforeBlank(runes []rune, i int) bool {
-	if i == 0 || !unicode.IsSpace(runes[i]) || unicode.IsSpace(runes[i-1]) {
+// A command word at statement start puts PowerShell in argument mode. A
+// leading digit or punctuation can also be part of a command word when the
+// rest of that word is not an expression (for example, 1a"b" or -a"b").
+// Read only this word: a later quoted argument cannot change its mode.
+func windowsPowerShellStatementCommandWord(runes []rune, start int) bool {
+	if start < 0 || start >= len(runes) {
 		return false
 	}
-	start := i - 1
-	for start >= 0 && !unicode.IsSpace(runes[start]) && !strings.ContainsRune(";|&(){}=,", runes[start]) {
-		start--
-	}
-	if start+1 == i || !unicode.IsLetter(runes[start+1]) {
+	r := runes[start]
+	if unicode.IsSpace(r) || strings.ContainsRune("$@(['\"+<>,;|&{}#)]", r) {
 		return false
 	}
-	next := i + 1
-	for next < len(runes) && (runes[next] == ' ' || runes[next] == '\t') {
-		next++
+	if !unicode.IsDigit(r) && !strings.ContainsRune("-*/%!?=", r) {
+		return true
 	}
-	return next >= len(runes) || runes[next] != '='
+	end := start + 1
+	for end < len(runes) && !unicode.IsSpace(runes[end]) &&
+		!strings.ContainsRune(";|&(){}#<>,", runes[end]) {
+		if windowsPowerShellQuoteDelimiter(runes[end]) != 0 {
+			return true // a quote glued to this token makes a command word
+		}
+		end++
+	}
+	word := string(runes[start:end])
+	if strings.Trim(word, "-*/%!?=") == "" {
+		return false
+	}
+	if unicode.IsDigit(r) || r == '-' {
+		unsigned := strings.TrimPrefix(word, "-")
+		if windowsPowerShellNumericWord(unsigned) {
+			return false
+		}
+	}
+	for _, c := range word {
+		if unicode.IsLetter(c) {
+			return true
+		}
+	}
+	return false
+}
+
+// Numeric literals are expressions, including PowerShell's type and size
+// suffixes. Keep their glued comments in expression mode.
+func windowsPowerShellNumericWord(word string) bool {
+	if _, err := strconv.ParseInt(word, 0, 64); err == nil {
+		return true
+	}
+	if _, err := strconv.ParseFloat(word, 64); err == nil {
+		return true
+	}
+	lower := strings.ToLower(word)
+	for _, suffix := range []string{"uy", "us", "ul", "un", "kb", "mb", "gb", "tb", "pb", "y", "s", "l", "n", "u", "d", "m"} {
+		if !strings.HasSuffix(lower, suffix) {
+			continue
+		}
+		base := word[:len(word)-len(suffix)]
+		if _, err := strconv.ParseInt(base, 0, 64); err == nil {
+			return true
+		}
+		if _, err := strconv.ParseFloat(base, 64); err == nil {
+			return true
+		}
+	}
+	return false
+}
+
+// PowerShellStatementCommandWord shares the statement-start mode choice with
+// the gateway's independent state-write reader.
+func PowerShellStatementCommandWord(runes []rune, start int) bool {
+	return windowsPowerShellStatementCommandWord(runes, start)
+}
+
+// A type literal at statement start is an expression. The lexer and simple
+// command splitter read top-level text without expression frames, so they
+// use this local check when a comment is glued to a closing type bracket.
+func windowsPowerShellTypeExpressionBeforeComment(runes []rune, i int) bool {
+	if i < 3 || runes[i-1] != ']' {
+		return false
+	}
+	open := i - 2
+	for open >= 0 && i-open <= 64 && runes[open] != '[' {
+		if !unicode.IsLetter(runes[open]) && !unicode.IsDigit(runes[open]) && runes[open] != '.' {
+			return false
+		}
+		open--
+	}
+	if open < 0 || runes[open] != '[' || open == i-2 || !unicode.IsLetter(runes[open+1]) {
+		return false
+	}
+	for j := open - 1; j >= 0; j-- {
+		if unicode.IsSpace(runes[j]) && runes[j] != '\n' && runes[j] != '\r' {
+			continue
+		}
+		return strings.ContainsRune(";|&({}\r\n", runes[j])
+	}
+	return true
 }
 
 // Keep a dynamic call opaque, but return to the lexer at its next top-level
@@ -249,6 +353,7 @@ func windowsPowerShellDynamicCallEnd(runes []rune, from int) int {
 	var quote rune
 	var closes []rune
 	argumentMode := []bool{true}
+	statementStart := []bool{false}
 	for i := from; i < len(runes); i++ {
 		r := runes[i]
 		if quote != 0 {
@@ -268,8 +373,17 @@ func windowsPowerShellDynamicCallEnd(runes []rune, from int) int {
 			i++
 			continue
 		}
-		if !argumentMode[len(argumentMode)-1] && windowsPowerShellCommandWordBeforeBlank(runes, i) {
+		next := rune(0)
+		if i+1 < len(runes) {
+			next = runes[i+1]
+		}
+		comment := (r == '#' || r == '<' && next == '#') &&
+			windowsPowerShellCommentStarts(runes, i, len(closes) > 0 && !argumentMode[len(argumentMode)-1])
+		if statementStart[len(statementStart)-1] && windowsPowerShellStatementCommandWord(runes, i) {
 			argumentMode[len(argumentMode)-1] = true
+		}
+		if statementStart[len(statementStart)-1] && !unicode.IsSpace(r) && r != '&' && !comment {
+			statementStart[len(statementStart)-1] = false
 		}
 		if r == '-' && i+2 < len(runes) && runes[i+1] == '-' && runes[i+2] == '%' &&
 			(i+3 == len(runes) || unicode.IsSpace(runes[i+3])) && windowsPowerShellTokenStart(runes, i) {
@@ -308,6 +422,7 @@ func windowsPowerShellDynamicCallEnd(runes []rune, from int) int {
 		switch r {
 		case '(', '{':
 			argumentMode = append(argumentMode, false)
+			statementStart = append(statementStart, true)
 			if r == '(' {
 				closes = append(closes, ')')
 			} else {
@@ -319,17 +434,20 @@ func windowsPowerShellDynamicCallEnd(runes []rune, from int) int {
 			}
 			closes = closes[:len(closes)-1]
 			argumentMode = argumentMode[:len(argumentMode)-1]
+			statementStart = statementStart[:len(statementStart)-1]
 		case ';', '|', '\n', '\r':
 			if len(closes) == 0 {
 				return i
 			}
 			argumentMode[len(argumentMode)-1] = false
+			statementStart[len(statementStart)-1] = true
 		case '&':
 			if len(closes) == 0 && (i == 0 || runes[i-1] != '>') {
 				return i
 			}
 			if i == 0 || runes[i-1] != '>' {
 				argumentMode[len(argumentMode)-1] = false
+				statementStart[len(statementStart)-1] = true
 			}
 		}
 	}

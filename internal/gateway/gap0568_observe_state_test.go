@@ -159,6 +159,9 @@ func TestGAP0568ObserveOverBudgetStateWriteBlocks(t *testing.T) {
 		{"130 naming writes to a project file", gap0568Assignments(200) + "; " + strings.Join(writes, "; "), false},
 		{"cd then relative write after 130 reads", gap0568Assignments(200) + "; " + strings.Join(reads, "; ") + "; cd ~/.defenseclaw; printf c >> config.yaml", true},
 		{"cd then relative rm after 130 reads", gap0568Assignments(200) + "; cd ~/.defenseclaw; " + strings.Join(reads, "; ") + "; rm -f config.yaml", true},
+		// rel-1-0-6:GAP-0448 (review r6 finding 2): a print-only helper that
+		// logs a defenseclaw word allows in every cell, as on base.
+		{"print-only helper logging a claw word", `log() { echo "$@"; }; ` + gap0568Assignments(200) + `; log "checking defenseclaw status"`, false},
 		{"function writer after 130 reads", gap0568Assignments(200) + "; " + strings.Join(reads, "; ") + `; f() { printf c >> "$1"; }; f ` + state, false},
 		{"benign 200", gap0568Assignments(200), false},
 		{"keys write after 200", gap0568Assignments(200) + "; echo k >> " + keys, false},
@@ -217,6 +220,11 @@ func TestGAP0413PowerShellOverBudgetStateWriteHolds(t *testing.T) {
 		echoes[i] = fmt.Sprintf(`echo "claw%d"`, i)
 	}
 	pad := strings.Join(assignments, "; ") + "; " + strings.Join(echoes, "; ") + "; "
+	steps := make([]string, 200)
+	for i := range steps {
+		steps[i] = fmt.Sprintf("Write-Host 'step %d'", i)
+	}
+	wh := strings.Join(steps, "\n")
 	api := instructionProtectionTestAPI(t, "claudecode", "observe", "HIGH")
 	for _, row := range []struct {
 		name, command string
@@ -226,6 +234,16 @@ func TestGAP0413PowerShellOverBudgetStateWriteHolds(t *testing.T) {
 		{"absolute Set-Content of the state after 130 echoes", pad + "Set-Content -Path " + state + " -Value x", true},
 		{"quote-split Set-Content after 200", strings.Join(assignments, "; ") + `; echo "claw\"; Set-Content -Path ~/.defenseclaw/config.yaml -Value x; \""`, true},
 		{"benign 200", strings.Join(assignments, "; "), false},
+		// rel-1-0-6:GAP-0448 (review r6 finding 1): long scripts that read,
+		// test or print the state, or only mention defense or claw, allow.
+		{"200 + Get-Content of the state", wh + "\nGet-Content ~/.defenseclaw/config.yaml", false},
+		{"Get-Content $HOME state + 200", "Get-Content $HOME/.defenseclaw/config.yaml\n" + wh, false},
+		{"200 + Test-Path of the state", wh + "\nTest-Path ~/.defenseclaw/config.yaml", false},
+		{"200 + defenseclaw status", wh + "\ndefenseclaw status", false},
+		{"Set-Location a claw repo + 200", "Set-Location ~/src/defenseclaw\n" + wh, false},
+		{"200 defense words", strings.ReplaceAll(wh, "Write-Host 'step", "Write-Output 'defense"), false},
+		{"200 + git log in a claw repo", wh + "\n$l = & git -C ~/src/defenseclaw log -1", false},
+		{"200 + Set-Content of the state", wh + "\nSet-Content -Path ~/.defenseclaw/config.yaml -Value x", true},
 	} {
 		for _, managed := range []bool{false, true} {
 			want := managed && row.managedBlock
@@ -236,6 +254,22 @@ func TestGAP0413PowerShellOverBudgetStateWriteHolds(t *testing.T) {
 	}
 	if reduced, overflow, ok := hookpaths.StateNamingReading(pad+"Set-Content -Path "+state+" -Value x", home, true); !ok || !overflow || !strings.HasSuffix(reduced, " -Value x") {
 		t.Errorf("PowerShell reading: ok %t overflow %t, want the whole call as an overflow", ok, overflow)
+	}
+	// Review r6 mutations MG1 and MG2: each of the three signals alone makes
+	// the gateway read the call as PowerShell.
+	for _, tc := range []struct {
+		input actionfacts.Input
+		facts actionfacts.Facts
+		want  bool
+	}{
+		{actionfacts.Input{Tool: "powershell"}, actionfacts.Facts{}, true},
+		{actionfacts.Input{Tool: "Bash", DialectHint: actionfacts.DialectPowerShell}, actionfacts.Facts{}, true},
+		{actionfacts.Input{Tool: "exec_command"}, actionfacts.Facts{Parse: actionfacts.ParseResult{Dialect: actionfacts.DialectPowerShell}}, true},
+		{actionfacts.Input{Tool: "Bash", DialectHint: actionfacts.DialectPOSIX}, actionfacts.Facts{Parse: actionfacts.ParseResult{Dialect: actionfacts.DialectPOSIX}}, false},
+	} {
+		if got := trustedPowerShellReading(tc.input, tc.facts); got != tc.want {
+			t.Errorf("tool %q hint %q parse %q: PowerShell reading %t, want %t", tc.input.Tool, tc.input.DialectHint, tc.facts.Parse.Dialect, got, tc.want)
+		}
 	}
 }
 

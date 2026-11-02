@@ -167,6 +167,70 @@ func TestTargetMemoAssignmentChainWorkIsLinear(t *testing.T) {
 // at the budget gets the full map, and an over-budget call that names the
 // DefenseClaw state folder is still described in full, so a gateway behind
 // ProtectHome can prove the state write that observe mode blocks.
+// TestPowerShellStateReadingHoldsOnlyAPossibleStateWrite is
+// rel-1-0-6:GAP-0448 (review r6 findings 1 and 2): an over-budget
+// PowerShell call is held only when a segment that names the state folder
+// may write; reading, testing or printing it, or a defense or claw word,
+// keeps nothing. A helper whose body only prints keeps its POSIX call
+// reducible. Also review r6 mutation MC1: the client reads a PowerShell
+// parse as PowerShell whatever the tool.
+func TestPowerShellStateReadingHoldsOnlyAPossibleStateWrite(t *testing.T) {
+	lines := func(n int, form string) string {
+		parts := make([]string, n)
+		for i := range parts {
+			parts[i] = fmt.Sprintf(form, i)
+		}
+		return strings.Join(parts, "\n")
+	}
+	st := "~/.defenseclaw/config.yaml"
+	wh := lines(200, "Write-Host 'step %d'")
+	for _, call := range []string{
+		wh + "\nGet-Content " + st,
+		"Get-Content $HOME/.defenseclaw/config.yaml\n" + wh,
+		wh + "\nTest-Path " + st,
+		wh + "\ndefenseclaw status",
+		"Set-Location ~/src/defenseclaw\n" + lines(200, "Write-Output %d"),
+		lines(200, "Write-Output 'defense %d'"),
+		wh + "\n$l = & git -C ~/src/defenseclaw log -1",
+		wh + "\n$c = Get-Content " + st + " 2>$null",
+	} {
+		if reduced, overflow, ok := StateNamingReading(call, "/home/u", true); !ok || overflow || reduced != "" {
+			t.Errorf("%.50q: ok %t overflow %t reduced %.30q, want nothing kept", call[max(0, len(call)-50):], ok, overflow, reduced)
+		}
+	}
+	for _, call := range []string{
+		wh + "\nSet-Content -Path " + st + " -Value x",
+		wh + "\nRemove-Item " + st,
+		wh + "\n'x' | Out-File ~\\.defenseclaw\\config.yaml",
+		wh + "\nGet-Content " + st + " > " + st + ".bak",
+		wh + "\nGet-Content (Set-Content " + st + " x)",
+		wh + "\n$p = '~/.defense' + 'claw/config.yaml'; Set-Content $p x",
+		wh + `; echo "claw\"; Set-Content -Path ` + st + ` -Value x; \""`,
+		wh + "\nSet-Content ~/.defense?law/config.yaml x",
+		wh + "\nSet-Content ~/.d*claw/config.yaml x",
+		wh + "\nsc " + st + " x",
+	} {
+		if _, overflow, ok := StateNamingReading(call, "/home/u", true); !ok || !overflow {
+			t.Errorf("%.50q: ok %t overflow %t, want the call held", call[max(0, len(call)-50):], ok, overflow)
+		}
+	}
+	pad := gap0568Assignments(200)
+	if _, overflow, _ := StateNamingStatements(`log() { echo "$@"; }; `+pad+`; log "checking defenseclaw status"`, "/home/u"); overflow {
+		t.Error("a call of a print-only helper made an overflow")
+	}
+	if _, overflow, _ := StateNamingStatements(`f() { printf c >> "$1"; }; `+pad+"; f "+st, "/home/u"); !overflow {
+		t.Error("a call of a writing helper did not make an overflow")
+	}
+	for _, tool := range []string{"exec_command", "Bash", "shell"} {
+		if !clientPowerShellReading("codex", tool, actionfacts.Facts{Parse: actionfacts.ParseResult{Dialect: actionfacts.DialectPowerShell}}) {
+			t.Errorf("%s with a PowerShell parse: not read as PowerShell", tool)
+		}
+		if clientPowerShellReading("claudecode", tool, actionfacts.Facts{Parse: actionfacts.ParseResult{Dialect: actionfacts.DialectPOSIX}}) {
+			t.Errorf("%s with a POSIX parse: read as PowerShell", tool)
+		}
+	}
+}
+
 func TestClientStatementBudgetHeader(t *testing.T) {
 	home := t.TempDir()
 	cwd := filepath.Join(home, "project")
