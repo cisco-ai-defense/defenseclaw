@@ -21,6 +21,7 @@ import (
 	"os/user"
 	"path/filepath"
 	"regexp"
+	"runtime"
 	"sort"
 	"strconv"
 	"strings"
@@ -121,7 +122,10 @@ func TestShellHookBehaviourMatchesGolden(t *testing.T) {
 		next     atomic.Int64
 		wg       sync.WaitGroup
 	)
-	workers := 16
+	// A small CI runner cannot give 16 simultaneous shell hooks their
+	// four-second answer windows. Run every case, with concurrency bounded
+	// by the CPUs available to this test process.
+	workers := min(16, runtime.GOMAXPROCS(0))
 	if v, err := strconv.Atoi(os.Getenv("DC_HOOK_GOLDEN_WORKERS")); err == nil && v > 0 {
 		workers = v
 	}
