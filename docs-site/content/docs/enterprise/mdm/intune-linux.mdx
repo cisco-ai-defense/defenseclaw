@@ -20,6 +20,12 @@ differs, and runs `ensure`. Health is the script's run status plus a second root
 platform script with `detect.sh`. Removal is a root platform script with
 `packaging/mdm/linux/uninstall.sh`.
 
+On an enforcing fapolicyd host, use the deb or rpm with this script. Its
+payload-archive path runs one `ensure` and does not update staged-payload and
+installed-tree trust before activation. To use a tarball on such a host, follow
+the [two-stage tarball flow](/docs/enterprise/linux#3b-or-install-from-the-tarball)
+outside this wrapper.
+
 This recipe follows the [MDM contract](/docs/enterprise/mdm); read it first for exit
 codes, detection and logs.
 
@@ -36,8 +42,9 @@ were already open. Those sessions keep running without DefenseClaw until restart
   platforms, enrolled with the Microsoft Intune app, running systemd 239 or later.
 - **Release:** verify `checksums.txt` and read the pin of the artifact you deploy
   ([What you deliver](/docs/enterprise/mdm#what-you-deliver)). Ubuntu needs the
-  `.deb`, RHEL the `.rpm`. Prefer the package on CIS-hardened hosts: the payload
-  archive runs its gateway from `/var/lib/defenseclaw-mdm`, which must allow execution.
+  `.deb`, RHEL the `.rpm`. On an enforcing fapolicyd host use the package with
+  this script. The payload archive runs its gateway from
+  `/var/lib/defenseclaw-mdm`, which must allow execution.
 - **Config:** write the config ([Settings](/docs/enterprise/configuration)),
   without the AI Defense key.
 
@@ -63,7 +70,8 @@ DC_PRODUCT_VERSION="X.Y.Z"
 
 Ubuntu and RHEL need different packages: create one script per distribution and
 assign each to a device group that holds only that distribution, or use the payload
-archive in a single script. For GPG trust, set `DC_TRUST_MODE=signed`, `DC_GPG_KEYRING`
+archive in a single script on hosts without fapolicyd. For GPG trust, set
+`DC_TRUST_MODE=signed`, `DC_GPG_KEYRING`
 and `DC_SIGNATURE_URL` ([reference](/docs/enterprise/mdm#wrapper-options)).
 
 Then paste the config between the `DEFENSECLAW_CONFIG` markers in `dc_inline_config`:
@@ -191,7 +199,9 @@ When you deliver a credential with a bundle, the script first writes what it rep
   `bundle_required` and the installed one stays; deliver a new signed bundle instead.
 - **Upgrade:** host the new artifact, then update `DC_SOURCE_URL`, `DC_SOURCE_SHA256`
   and `DC_PRODUCT_VERSION`. Keep each host on one channel: a host installed from the
-  deb or rpm refuses a payload-archive upgrade.
+  deb or rpm refuses a payload-archive upgrade. For a tarball host with
+  fapolicyd, use the [staged-payload trust and two-stage upgrade](/docs/enterprise/lifecycle#linux-payload-upgrade)
+  outside this wrapper.
 - **Roll back:** `rpm -U` refuses an older rpm. See
   [Roll back](/docs/enterprise/lifecycle).
 

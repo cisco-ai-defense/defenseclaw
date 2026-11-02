@@ -39,7 +39,7 @@ It uses the same packages and config.
 | --- | --- |
 | SELinux | Supported, for unconfined and confined users. Where SELinux is enabled the lifecycle loads a small `defenseclaw` policy module (`semodule -l`) that labels the hook socket `defenseclaw_hook_sock_t` and the gateway binary `defenseclaw_gateway_exec_t`, so the gateway runs in its own domain, `defenseclaw_gateway_t`. Every user domain may connect to that domain and to no other service; the gateway still authorizes each caller by uid. Uninstall removes the module. `status` and `verify` warn `selinux_module_missing` while confined users cannot reach the socket, and the lifecycle warns `selinux_relabel` or `selinux_module` if relabeling or loading fails |
 | FIPS mode | RHEL 9 in FIPS mode is supported with the rpm |
-| Application control | With fapolicyd, the deb and rpm ship every file an agent loads, so package-database trust covers them. After a payload install, add `/opt/defenseclaw/` to a trust file ([Application control](/docs/enterprise/threat-model)) |
+| Application control | With fapolicyd, package-database trust covers the deb and rpm. For a tarball, trust the staged payload, run `ensure --no-start`, add `/opt/defenseclaw/` trust on a fresh install or update its existing entry on an upgrade or rerun, then run `ensure` to start and verify ([Application control](/docs/enterprise/threat-model)) |
 
 If a payload install reports that the staged gateway could not run, check
 fapolicyd trust, SELinux policy, execute permission and `noexec` mount options.
@@ -234,7 +234,64 @@ sudo install -d -o root -g root -m 0700 "$PAYLOAD"
 sudo tar -xzf "defenseclaw-enterprise-${VERSION}-linux-${ARCH}.tar.gz" \
   -C "$PAYLOAD" --no-same-owner --no-same-permissions
 sudo chmod -R go-w "$PAYLOAD"
+```
+
+On hosts with fapolicyd, add the staged payload folder to the trust file after
+its first extraction and before running the gateway:
+
+```bash
+sudo fapolicyd-cli --file add "$PAYLOAD/" --trust-file defenseclaw && sudo fapolicyd-cli --update
+```
+
+On a rerun with the same untouched staged folder, reuse its trust entry. If you
+extract the tarball again into that folder or change its files, update the entry
+before running the gateway:
+
+```bash
+sudo fapolicyd-cli --file update "$PAYLOAD/" --trust-file defenseclaw && sudo fapolicyd-cli --update
+```
+
+For a new payload path, use the `add` command above instead.
+
+Without fapolicyd, run `ensure` once:
+
+```bash
 sudo "$PAYLOAD/defenseclaw-gateway" enterprise linux ensure --payload "$PAYLOAD" --json
+```
+
+With fapolicyd, stage a **fresh install** without starting services, add the
+installed tree to the trust file, check it as the service user, then start and
+verify:
+
+```bash
+sudo "$PAYLOAD/defenseclaw-gateway" enterprise linux ensure --payload "$PAYLOAD" --no-start --json
+sudo fapolicyd-cli --file add /opt/defenseclaw/ --trust-file defenseclaw && sudo fapolicyd-cli --update
+sudo -u defenseclaw /opt/defenseclaw/bin/defenseclaw-gateway --version-json
+sudo "$PAYLOAD/defenseclaw-gateway" enterprise linux ensure --payload "$PAYLOAD" --json
+```
+
+For an **upgrade or rerun** of a tarball installation, begin while the gateway
+service is active. After the staged-payload trust step above, run this complete
+two-stage flow. Update the existing installed-tree entry between the two
+`ensure` calls; `add` would append entries rather than refresh matching paths:
+
+```bash
+sudo "$PAYLOAD/defenseclaw-gateway" enterprise linux ensure --payload "$PAYLOAD" --no-start --json
+sudo fapolicyd-cli --file update /opt/defenseclaw/ --trust-file defenseclaw && sudo fapolicyd-cli --update
+sudo -u defenseclaw /opt/defenseclaw/bin/defenseclaw-gateway --version-json
+sudo "$PAYLOAD/defenseclaw-gateway" enterprise linux ensure --payload "$PAYLOAD" --json
+```
+
+Fapolicyd updates are asynchronous. If the service-user version check is
+denied just after `--update`, retry it after fapolicyd finishes syncing. It
+must succeed before the final `ensure`. Verify the result with
+`sudo /opt/defenseclaw/bin/defenseclaw-gateway enterprise linux verify --json`
+and check that `defenseclaw-gateway.service` is active.
+
+After deleting the payload folder, remove its staged trust entry:
+
+```bash
+sudo fapolicyd-cli --file delete "$PAYLOAD/" --trust-file defenseclaw && sudo fapolicyd-cli --update
 ```
 
 `ensure` installs when nothing is installed, applies a different payload,
@@ -565,9 +622,13 @@ record, config and state so you can fix the cause and rerun. The plain uninstall
 keeps `/etc/defenseclaw/policies` (root-owned, mode `0751`) and removes the vendor
 policies in `/opt/defenseclaw/share/policies`; `--purge` removes your policies too.
 To turn the deployment on again, run `ensure --from-package --config <file>` on a
-package host, or stage the payload and run `"$PAYLOAD/defenseclaw-gateway"
-enterprise linux ensure --payload "$PAYLOAD" --config <file>`. After an uninstall
-or reinstall, ask users to restart their agents (`agent_sessions_restart_required`).
+package host. On a tarball host without fapolicyd, stage the payload and run
+`"$PAYLOAD/defenseclaw-gateway" enterprise linux ensure --payload "$PAYLOAD" --config <file>`.
+With fapolicyd, follow the staged-payload trust and two-stage
+[tarball install](#3b-or-install-from-the-tarball), passing `--config <file>`
+to both `ensure` calls. Add installed-tree trust if there is no prior entry;
+update an existing entry after staging. After an uninstall or reinstall, ask
+users to restart their agents (`agent_sessions_restart_required`).
 
 On a package host `uninstall` leaves the package's binaries and units, so dpkg or
 rpm still lists `defenseclaw-enterprise`. Removing the package runs `uninstall`:
@@ -602,8 +663,10 @@ own host management tools.
 
 ## Upgrades and changes
 
-- **Upgrade.** Install the newer package with apt or dnf, or run `ensure` with the
-  newer tarball. The lifecycle refuses an older release unless you pass
+- **Upgrade.** Install the newer package with apt or dnf. On a tarball host
+  without fapolicyd, run `ensure` with the newer payload. With fapolicyd, use
+  the [staged-payload trust and two-stage flow](#3b-or-install-from-the-tarball).
+  The lifecycle refuses an older release unless you pass
   `--allow-downgrade`, and the package refuses an older package unless
   `/var/lib/defenseclaw-enterprise/allow-downgrade` exists
   ([Upgrade](/docs/enterprise/lifecycle), [Roll back](/docs/enterprise/lifecycle)).

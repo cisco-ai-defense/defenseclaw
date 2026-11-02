@@ -1293,6 +1293,13 @@ deployment. Run `linux` on Linux and `macos` on macOS; the other one exits `2`.
 Every mutating action is a transaction that rolls back on failure. See
 [Upgrade, repair and remove](/docs/enterprise/lifecycle).
 
+On Linux tarball hosts with fapolicyd, trust the staged payload before
+`ensure --no-start`. After staging, add `/opt/defenseclaw/` to the trust file
+for a fresh install or update its existing entry for an upgrade or rerun.
+Check the installed gateway as the service user before the final `ensure`.
+The [tarball steps](/docs/enterprise/linux#3b-or-install-from-the-tarball)
+give the commands.
+
 | Action | Use it for |
 | --- | --- |
 | `install` | Install the deployment. Refuses when one is already installed |

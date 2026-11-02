@@ -334,16 +334,25 @@ one takes DefenseClaw out of that agent's sessions. OpenCode skips a plugin it
 cannot read and runs tool calls without DefenseClaw, and `status` and `verify`
 stay green because they cannot see inside the session.
 
-On Linux with fapolicyd, install with the deb or rpm: the package ships the
-binaries and the OpenCode plugin, so fapolicyd's package-database trust (`rpmdb`
-on RHEL, `debdb` on Debian and Ubuntu) covers them. After a payload (tarball)
-install, trust the install tree, and update the entry after every upgrade:
+On Linux with fapolicyd, deb and rpm package-database trust (`rpmdb` on RHEL,
+`debdb` on Debian and Ubuntu) covers the shipped files. For a tarball, trust
+the staged payload before running its gateway. For an existing, unchanged
+staged folder, reuse its trust entry; update that entry if its files changed.
+Run `ensure --no-start`, then add installed-tree trust on a fresh install or
+update the existing entry on an upgrade or rerun. Do this between the two
+`ensure` calls, before checking the gateway as the service user and running the
+final `ensure` to start and verify ([install steps](/docs/enterprise/linux#3b-or-install-from-the-tarball)).
+
+For a fresh install:
 
 ```bash
-fapolicyd-cli --file add /opt/defenseclaw/ --trust-file defenseclaw
-# after each upgrade:
-fapolicyd-cli --file update /opt/defenseclaw/ --trust-file defenseclaw
-fapolicyd-cli --update
+sudo fapolicyd-cli --file add /opt/defenseclaw/ --trust-file defenseclaw && sudo fapolicyd-cli --update
+```
+
+For an upgrade or rerun of an existing tarball installation:
+
+```bash
+sudo fapolicyd-cli --file update /opt/defenseclaw/ --trust-file defenseclaw && sudo fapolicyd-cli --update
 ```
 
 Trust your agents' own install folders the same way. To confirm, start an
