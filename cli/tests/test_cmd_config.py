@@ -487,6 +487,13 @@ class UndeclaredKeyWordingTests(unittest.TestCase):
         self.assertNotEqual(result.exit_code, 0)
         self.assertIn("auto_sync was retired in config_version 9", result.output)
 
+    def test_config_set_refuses_retired_openshell_middleware(self):
+        for key, value in (("openshell.middleware.enabled", "true"), ("openshell.middleware", "{}")):
+            result = CliRunner().invoke(cmd_config.config_set, [key, value], obj=SimpleNamespace())
+            self.assertNotEqual(result.exit_code, 0)
+            self.assertIn("openshell.middleware was retired", result.output)
+            self.assertIn("config.yaml was not changed", result.output)
+
     def test_config_set_control_character_is_plain(self):
         from defenseclaw.context import AppContext
 

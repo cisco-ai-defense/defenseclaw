@@ -1906,11 +1906,6 @@ class OpenShellMCPConfig:
 
 
 @dataclass
-class OpenShellMiddlewareConfig:
-    enabled: bool = False
-
-
-@dataclass
 class OpenShellAdminConfig:
     """Administrator sandbox constraints (``openshell.admin``).
 
@@ -2031,7 +2026,6 @@ class OpenShellConfig:
     mcp: OpenShellMCPConfig = field(default_factory=OpenShellMCPConfig)
     upstream_telemetry: bool = False
     token_delivery: str = "provider"
-    middleware: OpenShellMiddlewareConfig = field(default_factory=OpenShellMiddlewareConfig)
     # A PEM file of CA certificates sandboxes trust besides the image's public
     # roots (a TLS-inspecting proxy's root): absolute or "~/...". Sandbox images
     # built while it is set carry them; nothing comes from the host's store.
@@ -4909,6 +4903,9 @@ class Config:
             acp_document["default_profile"] = self.acp.default_profile
         if version >= CONFIG_VERSION_V9:
             _project_v9_modeled_keys(merged)
+            openshell = merged.get("openshell")
+            if isinstance(openshell, dict):
+                openshell.pop("middleware", None)
         return merged
 
 
@@ -7240,7 +7237,6 @@ def _merge_openshell(raw: dict[str, Any] | None, data_dir: str = "") -> OpenShel
     image = _openshell_mapping(raw.get("image"))
     approvals = _openshell_mapping(raw.get("approvals"))
     mcp = _openshell_mapping(raw.get("mcp"))
-    middleware = _openshell_mapping(raw.get("middleware"))
     harness_versions = _openshell_mapping(image.get("harness_versions"))
     return OpenShellConfig(
         enabled=_coerce_bool(raw.get("enabled", False)),
@@ -7295,7 +7291,6 @@ def _merge_openshell(raw: dict[str, Any] | None, data_dir: str = "") -> OpenShel
         ),
         upstream_telemetry=_coerce_bool(raw.get("upstream_telemetry", False)),
         token_delivery=_openshell_str(raw.get("token_delivery")) or "provider",
-        middleware=OpenShellMiddlewareConfig(enabled=_coerce_bool(middleware.get("enabled", False))),
         admin=_merge_openshell_admin(raw.get("admin")),
     )
 

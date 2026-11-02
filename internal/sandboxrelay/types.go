@@ -409,7 +409,6 @@ type OperationalSettings struct {
 	Harnesses         []string          `json:"harnesses,omitempty"`
 	Wrappers          []string          `json:"wrappers,omitempty"`
 	TokenDelivery     string            `json:"token_delivery,omitempty"`
-	Middleware        bool              `json:"middleware,omitempty"`
 	LLM               string            `json:"llm,omitempty"`
 	KeepHeadless      bool              `json:"keep_headless,omitempty"`
 	UpstreamTelemetry bool              `json:"upstream_telemetry,omitempty"`

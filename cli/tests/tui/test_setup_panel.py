@@ -1165,6 +1165,7 @@ def test_config_field_catalog_preserves_secret_kind_and_choice_options() -> None
     assert openshell.name == "OpenShell Sandboxes"
     assert not any(field.key == "openshell.mode" for field in openshell.fields)
     assert _field_by_key(sections, "openshell.enabled").kind == "bool"
+    assert not any(field.key == "openshell.middleware.enabled" for field in openshell.fields)
     assert _field_by_key(sections, "openshell.profile").options == ("inherit", "open", "balanced", "strict")
     llm = _field_by_key(sections, "openshell.llm")
     assert llm.kind == "choice"

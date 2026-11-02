@@ -8,6 +8,11 @@ for released versions and assets, and the
 [documentation website](https://cisco-ai-defense.github.io/defenseclaw/docs/)
 for current behavior.
 
+## [Unreleased] — 1.0.8
+
+### Changed
+- **The unused `openshell.middleware.enabled` setting is retired.** Existing 1.0.x config files still load; the setting is ignored and new `config set` writes are refused. Remove the entry before 1.1.0.
+
 ## [Unreleased] — 1.0.7
 
 ### Changed

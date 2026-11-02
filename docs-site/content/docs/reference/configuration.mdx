@@ -762,8 +762,6 @@ openshell:
     host_ports: []             # host ports opened for host-side MCP servers
   upstream_telemetry: false    # OpenShell's own anonymous usage telemetry
   token_delivery: provider     # provider | env
-  middleware:
-    enabled: false             # reserved; nothing reads it yet
   admin: {}                    # administrator limits; see below
 ```
 
@@ -812,7 +810,8 @@ openshell:
 | `mcp.host_ports` | `[]` | Host ports you agreed to open for MCP servers running on your machine, 1–65535, unique, at most 64. Each port is still checked against the pack and `openshell.admin`, and DefenseClaw's own listeners are never opened. |
 | `upstream_telemetry` | `false` | Whether OpenShell's own anonymous usage telemetry stays on. `sandbox setup` turns it off in the OpenShell gateway's environment (`OPENSHELL_TELEMETRY_ENABLED=false`) unless you keep it (`--upstream-telemetry`), and records your choice here, on Linux and on a Mac whose gateway the Homebrew service runs. `sandbox doctor` reports a mismatch, and `--fix` repairs it. |
 | `token_delivery` | `provider` | How a sandbox receives its hook ingress credential. `provider`: as an OpenShell provider credential, so the agent only sees a placeholder, rotated on every start. `env`: as a plain `DEFENSECLAW_SANDBOX_TOKEN` variable the agent can read, kept for the sandbox's life. Both are revoked when the sandbox is deleted. See [Hook ingress](/docs/reference/gateway-api#hook-ingress). |
-| `middleware.enabled` | `false` | Reserved for an experimental supervisor-middleware switch. Nothing reads it yet. |
+
+For upgrades from 1.0.2–1.0.7, an existing `openshell.middleware.enabled` entry still loads in 1.0.x but has no effect. Remove it from `config.yaml`; `config set` no longer accepts it. This compatibility allowance ends in 1.1.0.
 
 **Host patterns** in `egress.block`, `egress.allow`, `egress.unblocked`, `admin.egress_block`, `admin.egress_allow_only` and a pack's egress lists are a host name, `*.<host>` (every subdomain, not the host), an IP address, or a CIDR prefix such as `198.51.100.0/24`. Addresses compare by value, so `2001:db8::1`, its uncompressed spelling and an IPv4-mapped spelling match one entry. A bare `*`, schemes, ports, paths, wildcards inside a name, and host names whose last label does not start with a letter (`127.1`, `0x7f000001`) are refused. Matching ignores case and a trailing dot. Only `admin.egress_block` widens a host name (`example.net` blocks its subdomains too); every other list matches exactly. Lists hold at most 4096 entries.
 

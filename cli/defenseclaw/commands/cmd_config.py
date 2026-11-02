@@ -1179,6 +1179,11 @@ def config_set(app: AppContext, key: str, value: str, as_json: bool, expect_sha2
         raise click.UsageError(str(exc)) from exc
     _refuse_config_version(parts)
     _refuse_retired_scanner_key(key, parts)
+    if parts[:2] == ["openshell", "middleware"]:
+        raise click.ClickException(
+            "openshell.middleware was retired because it had no effect; remove it from config.yaml. "
+            "Existing 1.0.x files with the key still load through 1.0.x. config.yaml was not changed."
+        )
     if (
         len(parts) == 4
         and parts[:2] == ["registries", "sources"]

@@ -925,6 +925,8 @@
           "default": "provider"
         },
         "middleware": {
+          "deprecated": true,
+          "description": "Legacy 1.0.x config only. This field has no effect; remove it. Accepted through 1.0.x for in-place upgrades and scheduled for removal in 1.1.0.",
           "type": "object",
           "additionalProperties": false,
           "properties": {

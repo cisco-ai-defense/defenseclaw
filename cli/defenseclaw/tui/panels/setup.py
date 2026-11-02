@@ -8742,7 +8742,6 @@ def _openshell_section(cfg: object | Mapping[str, Any] | None) -> ConfigSection:
         field("MCP Host Ports", "openshell.mcp.host_ports", hint="Localhost ports opened for host MCP servers, comma-separated."),
         field("Upstream Telemetry", "openshell.upstream_telemetry", "bool", hint="Keep OpenShell's anonymous usage telemetry."),
         field("Token Delivery", "openshell.token_delivery", "choice", ("provider", "env"), hint="How the sandbox token reaches hooks."),
-        field("Middleware (experimental)", "openshell.middleware.enabled", "bool", hint="Supervisor middleware; Phase 3."),
         _header(
             "Organization Policy",
             "openshell.admin",
