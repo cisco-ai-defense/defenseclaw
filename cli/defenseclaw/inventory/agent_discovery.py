@@ -1208,7 +1208,18 @@ def discover_agents(
     # gateway reads each one's version from this cache when setup restarts it,
     # so an enrolled agent that updated itself since the last scan came back
     # unversioned and the gateway could not start (GAP-0547).
-    probe_only = _configured_probe_names(data_dir) | (_PROBE_ONLY.get() or frozenset())
+    restricted = _PROBE_ONLY.get()
+    probe_only = _configured_probe_names(data_dir) | (restricted or frozenset())
+    # A setup of one connector also re-ran the CLI of every enrolled peer (a
+    # node CLI takes about 0.3 s on macOS), so `setup claude-code` with six
+    # connectors took 1.1 s instead of 0.76 s (rel-1-0-6:GAP-0491). A peer
+    # whose binary has not changed since the last scan keeps that scan's
+    # version instead; one that changed is probed as before (GAP-0547).
+    unchanged_peers = (
+        _peers_with_unchanged_binaries(probe_only - restricted, data_dir, require_trusted)
+        if restricted is not None
+        else frozenset()
+    )
     shared = _FRESH_SCANS.get()
     shared_key = (
         str(config_path_for_data_dir(data_dir)),
@@ -1234,7 +1245,7 @@ def discover_agents(
                     data_dir=data_dir,
                     require_trusted_binary_paths=require_trusted,
                     include_workspace_config=False,
-                    probe=name in probe_only,
+                    probe=name in probe_only and name not in unchanged_peers,
                 ),
                 DISCOVERABLE_CONNECTORS,
             )
@@ -1243,6 +1254,25 @@ def discover_agents(
     _keep_versions_of_slow_unchanged_agents(
         agents, data_dir=data_dir, require_trusted_binary_paths=require_trusted
     )
+    # A peer whose last version could not be kept after all (another binary
+    # is first on PATH now, say) is probed, so no enrolled agent ends up
+    # unversioned because it was skipped.
+    unkept = [name for name in DISCOVERABLE_CONNECTORS if name in unchanged_peers and not agents[name].version]
+    if unkept:
+        with ThreadPoolExecutor(max_workers=4) as pool:
+            for signal in pool.map(
+                lambda name: _scan_agent(
+                    name,
+                    data_dir=data_dir,
+                    require_trusted_binary_paths=require_trusted,
+                    include_workspace_config=False,
+                ),
+                unkept,
+            ):
+                agents[signal.name] = signal
+        _keep_versions_of_slow_unchanged_agents(
+            agents, data_dir=data_dir, require_trusted_binary_paths=require_trusted
+        )
     discovery = AgentDiscovery(scanned_at=scanned_at, agents=agents, cache_hit=False)
     if shared is not None:
         shared[shared_key] = discovery
@@ -1375,6 +1405,93 @@ def _keep_versions_of_slow_unchanged_agents(
         signal.error = ""
         signal.installed = True
         signal.skipped_binaries = skipped
+
+
+def _peers_with_unchanged_binaries(
+    names: frozenset[str],
+    data_dir: str | os.PathLike[str] | None,
+    require_trusted_binary_paths: bool,
+) -> frozenset[str]:
+    """Enrolled peers whose binary the last scan (within the cache TTL)
+    versioned and that has not changed since that scan.
+
+    Not on Windows (its protected selection rules always probe) and never for
+    Kiro (several CLI and IDE forms). Anything unreadable counts as changed.
+    """
+    if not names or _is_windows_host():
+        return frozenset()
+    try:
+        with open(_cache_path(data_dir=data_dir), encoding="utf-8") as fh:
+            payload = json.load(fh)
+    except Exception:
+        return frozenset()
+    if not isinstance(payload, dict) or payload.get("version") != CACHE_SCHEMA_VERSION:
+        return frozenset()
+    previous_scan = _parse_rfc3339(str(payload.get("scanned_at") or ""))
+    previous_agents = payload.get("agents")
+    if previous_scan is None or not isinstance(previous_agents, dict):
+        return frozenset()
+    if not timedelta(0) <= _now_utc() - previous_scan <= timedelta(seconds=CACHE_TTL_SECONDS):
+        return frozenset()
+    unchanged = set()
+    for name in names - {"kiro"}:
+        previous = previous_agents.get(name)
+        if not isinstance(previous, dict) or not previous.get("version") or previous.get("error"):
+            continue
+        binary = str(previous.get("binary_path") or "")
+        if not binary or not os.path.isabs(binary):
+            continue
+        if require_trusted_binary_paths and not _is_trusted_binary_path(binary, data_dir=data_dir):
+            continue
+        if _resolves_unchanged_since(binary, previous_scan.timestamp()):
+            unchanged.add(name)
+    return frozenset(unchanged)
+
+
+def _resolves_unchanged_since(path: str, since: float) -> bool:
+    """Whether *path* resolves to a regular file through links none of which,
+    nor the file or its folder, changed (mtime or ctime) at or after *since*.
+
+    Every link on the way counts, also a link in a parent folder: switching a
+    ``current`` link to another version folder, or installing a new version
+    over the old one, makes the agent changed. ctime cannot be set back.
+    """
+    pending = [part for part in reversed(path.split(os.sep)) if part]
+    resolved = os.sep
+    links = 0
+    while pending:
+        part = pending.pop()
+        if part == ".":
+            continue
+        if part == "..":
+            resolved = os.path.dirname(resolved)
+            continue
+        candidate = os.path.join(resolved, part)
+        try:
+            info = os.lstat(candidate)
+        except OSError:
+            return False
+        if not stat.S_ISLNK(info.st_mode):
+            resolved = candidate
+            continue
+        links += 1
+        if links > 40 or max(info.st_mtime, info.st_ctime) >= since:
+            return False
+        try:
+            target = os.readlink(candidate)
+        except OSError:
+            return False
+        if os.path.isabs(target):
+            resolved = os.sep
+        pending.extend(part for part in reversed(target.split(os.sep)) if part)
+    for checked in (resolved, os.path.dirname(resolved)):
+        try:
+            info = os.lstat(checked)
+        except OSError:
+            return False
+        if max(info.st_mtime, info.st_ctime) >= since:
+            return False
+    return stat.S_ISREG(os.lstat(resolved).st_mode)
 
 
 def _recorded_skipped_binaries(previous: dict[str, Any]) -> tuple[str, ...]:
