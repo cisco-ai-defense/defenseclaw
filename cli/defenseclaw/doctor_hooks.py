@@ -1513,7 +1513,8 @@ def _malformed_owned_hook_target(command: str, connector: str) -> str:
                         match = re.fullmatch(
                             r"\$ErrorActionPreference='Stop'; "
                             r"\$env:NoDefaultCurrentDirectoryInExePath='1'; "
-                            r"\$hookProcess=(?:Microsoft\.PowerShell\.Management\\)?Start-Process -FilePath '((?:[^']|'')+)' "
+                            r"\$hookProcess=(?:Microsoft\.PowerShell\.Management\\)?Start-Process "
+                            r"-FilePath '((?:[^']|'')+)' "
                             r"-ArgumentList @\('hook','--connector','"
                             + re.escape(connector)
                             + r"'\) -NoNewWindow -Wait -PassThru; exit \$hookProcess\.ExitCode",

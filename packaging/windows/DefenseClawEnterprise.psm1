@@ -20181,7 +20181,7 @@ function Get-DefenseClawServiceDaclUntrustedWriter {
     $descriptor = [Security.AccessControl.RawSecurityDescriptor]::new($Dacl)
     if ($null -eq $descriptor.DiscretionaryAcl) {
         if ($All) {
-            return , @('null DACL')
+            return @('null DACL')
         }
         return 'null DACL'
     }
@@ -20208,7 +20208,9 @@ function Get-DefenseClawServiceDaclUntrustedWriter {
         }
     }
     if ($All) {
-        return , $writers.ToArray()
+        # Each writer goes down the pipeline on its own, so @(...) around a
+        # call sees every SID rather than one array-valued item.
+        return $writers.ToArray()
     }
     return ''
 }
