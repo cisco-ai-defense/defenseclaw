@@ -45,7 +45,7 @@ RECORD_DIR = "claude-enabled-plugins"
 _MAX_SETTINGS_BYTES = 4 << 20
 
 
-class SettingsNotChanged(Exception):
+class SettingsNotChangedError(Exception):
     """The Claude Code settings were left as they are; the message says why."""
 
 
@@ -59,7 +59,7 @@ def _record_path(quarantine_dir: str, plugin: str) -> str:
 
 
 def _check_settings_file(path: str) -> bool:
-    """False when there is no settings file. Raises SettingsNotChanged for a
+    """False when there is no settings file. Raises SettingsNotChangedError for a
     file this command must not replace: a link (a dotfiles checkout), not a
     regular file, too large, or (POSIX) owned by another account, as under
     sudo with HOME kept: replacing it would leave the user a root-owned
@@ -69,11 +69,11 @@ def _check_settings_file(path: str) -> bool:
     except FileNotFoundError:
         return False
     if stat.S_ISLNK(info.st_mode):
-        raise SettingsNotChanged(f"{path} is a link; not changed")
+        raise SettingsNotChangedError(f"{path} is a link; not changed")
     if not stat.S_ISREG(info.st_mode) or info.st_size > _MAX_SETTINGS_BYTES:
-        raise SettingsNotChanged(f"{path} is not a plain settings file; not changed")
+        raise SettingsNotChangedError(f"{path} is not a plain settings file; not changed")
     if os.name != "nt" and info.st_uid != os.geteuid():
-        raise SettingsNotChanged(f"{path} belongs to another user; not changed")
+        raise SettingsNotChangedError(f"{path} belongs to another user; not changed")
     return True
 
 
@@ -129,7 +129,7 @@ def _put_record_back(record_path: str, previous: bytes | None) -> None:
 def disable_for_quarantine(plugin: str, quarantine_dir: str) -> list[str]:
     """Set the plugin's enabled entries to false; return the keys changed.
 
-    Raises SettingsNotChanged when the settings file must be left alone."""
+    Raises SettingsNotChangedError when the settings file must be left alone."""
     path = settings_path()
     if not _check_settings_file(path):
         return []
@@ -169,13 +169,13 @@ def disable_for_quarantine(plugin: str, quarantine_dir: str) -> list[str]:
             if written:
                 return keys
             _put_record_back(record_path, previous_raw)
-    raise SettingsNotChanged(f"{path} kept changing while it was being updated; not changed")
+    raise SettingsNotChangedError(f"{path} kept changing while it was being updated; not changed")
 
 
 def restore_after_quarantine(plugin: str, quarantine_dir: str) -> list[str]:
     """Set back to true the entries quarantine turned off; return them.
 
-    Raises SettingsNotChanged when the settings file must be left alone."""
+    Raises SettingsNotChangedError when the settings file must be left alone."""
     record_path = _record_path(quarantine_dir, plugin)
     record = _read_record(record_path)
     keys = [key for key in record.get("keys", []) if isinstance(key, str)]
@@ -201,12 +201,12 @@ def restore_after_quarantine(plugin: str, quarantine_dir: str) -> list[str]:
                 except OSError:
                     pass
                 return restored
-    raise SettingsNotChanged(f"{path} kept changing while it was being updated; not changed")
+    raise SettingsNotChangedError(f"{path} kept changing while it was being updated; not changed")
 
 
 __all__ = [
     "MCPWriteUnsupportedError",
-    "SettingsNotChanged",
+    "SettingsNotChangedError",
     "disable_for_quarantine",
     "restore_after_quarantine",
     "settings_path",

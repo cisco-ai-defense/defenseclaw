@@ -144,7 +144,7 @@ class ClaudePluginQuarantineShowsDisabled(PluginCommandTestBase):
                 enablement.disable_for_quarantine("usm-kit", quarantine_dir)
         self.assertFalse(os.path.exists(record))
         with patch.object(enablement, "_write_settings", return_value=False):
-            with self.assertRaises(enablement.SettingsNotChanged):
+            with self.assertRaises(enablement.SettingsNotChangedError):
                 enablement.disable_for_quarantine("usm-kit", quarantine_dir)
         self.assertFalse(os.path.exists(record))
         # An earlier record stays exactly as it was.
@@ -155,7 +155,7 @@ class ClaudePluginQuarantineShowsDisabled(PluginCommandTestBase):
         doc["enabledPlugins"]["usm-kit@other"] = True
         self.write_settings(doc)
         with patch.object(enablement, "_write_settings", return_value=False):
-            with self.assertRaises(enablement.SettingsNotChanged):
+            with self.assertRaises(enablement.SettingsNotChangedError):
                 enablement.disable_for_quarantine("usm-kit", quarantine_dir)
         with open(record, "rb") as handle:
             self.assertEqual(handle.read(), kept)
