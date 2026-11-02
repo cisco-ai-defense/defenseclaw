@@ -226,7 +226,33 @@ func windowsCodexMachineHash(data []byte) string {
 	return hex.EncodeToString(sum[:])
 }
 
+// windowsCodexManagedHookCommand is the unbound machine-wide Codex hook
+// command (no event or hook contract), the form 26.8.4 Secure Client
+// releases write. It starts the GUI-subsystem launcher through the awaited
+// Process.Start statements (windowsAwaitedHookStatements) so both its exit
+// code and its stdout reach Codex: allow_managed_hooks_only leaves this the
+// only Codex hook, so a fail-closed exit 2 must not be lost. Both profiles
+// publish the bound command (windowsCodexManagedHookCommandFor); this one is
+// rendered only for options without a contract, and reconcile and removal
+// own it (windowsCodexRenderedHookCommand) while those releases are upgrade
+// sources.
 func windowsCodexManagedHookCommand(hookBinary string) string {
+	script := strings.Join(append([]string{
+		"$ErrorActionPreference='Stop'",
+		"$env:NoDefaultCurrentDirectoryInExePath='1'",
+	}, windowsAwaitedHookStatements(hookBinary, windowsCodexManagedHookArguments)...), "; ")
+	return windowsSystemPowerShellExe() + " -NoLogo -NoProfile -NonInteractive -EncodedCommand " + powershellEncodedCommand(script)
+}
+
+var windowsCodexManagedHookArguments = []string{"hook", "--connector", "codex", "--enterprise-managed"}
+
+// legacyCallOperatorWindowsCodexManagedHookCommand reconstructs the unbound
+// machine command pre-1.0 and earlier 26.8.x releases wrote. It ran the
+// launcher with the call operator, which does not await a GUI-subsystem
+// process, so $LASTEXITCODE was stale and a fail-closed exit 2 was lost. It is
+// never generated: reconcile replaces it and removal takes it
+// (windowsCodexRenderedHookCommand).
+func legacyCallOperatorWindowsCodexManagedHookCommand(hookBinary string) string {
 	script := strings.Join([]string{
 		"$ErrorActionPreference='Stop'",
 		"$env:NoDefaultCurrentDirectoryInExePath='1'",
@@ -436,12 +462,16 @@ var windowsCodexDirectBoundArgumentsPattern = lazyregexp.New(
 // windowsCodexRenderedHookCommand reports whether command is exactly a
 // managed Codex command DefenseClaw renders for hookBinary, and for which
 // event and hook contract: the unbound form (windowsCodexManagedHookCommand,
-// no event or contract), or the bound form for the event and hook contract
+// no event or contract, or the call-operator form earlier releases wrote,
+// legacyCallOperatorWindowsCodexManagedHookCommand), or the bound form for
+// the event and hook contract
 // the command names, current (windowsCodexBoundManagedHookCommand, direct or
 // bridge), the bridge of releases 1.0.1 to 1.0.4
 // (bridgeWindowsCodexBoundManagedHookCommand), or of the
 // 1.0.0 certification builds
-// (legacyStartProcessWindowsCodexBoundManagedHookCommand). The event and the
+// (legacyStartProcessWindowsCodexBoundManagedHookCommand), each awaited form
+// also as releases up to 1.0.6 rendered it (legacyWindowsAwaitedHookCommand).
+// The event and the
 // contract are read from the script only to render the candidate; ownership
 // is the byte-for-byte equality, so no script that merely mentions the
 // launcher is DefenseClaw's.
@@ -449,7 +479,13 @@ func windowsCodexRenderedHookCommand(command, hookBinary string) (event, contrac
 	if strings.TrimSpace(hookBinary) == "" || strings.TrimSpace(command) == "" {
 		return "", "", false
 	}
-	if command == windowsCodexManagedHookCommand(hookBinary) {
+	// A 1.0.x render of an awaited bridge (legacyWindowsAwaitedHookCommand)
+	// is compared in its current form.
+	if current, ok := currentWindowsAwaitedHookCommand(command); ok {
+		command = current
+	}
+	if command == windowsCodexManagedHookCommand(hookBinary) ||
+		command == legacyCallOperatorWindowsCodexManagedHookCommand(hookBinary) {
 		return "", "", true
 	}
 	if match := windowsCodexDirectBoundArgumentsPattern.FindStringSubmatch(command); match != nil &&

@@ -2472,6 +2472,47 @@ class OrphanCopilotPluginTests(unittest.TestCase):
                     cmd_uninstall._remove_orphan_copilot_plugin()
                 self.assertFalse(plugin.exists(), f"the guarded {platform_name} plugin was DefenseClaw's")
 
+    def test_orphan_cleanup_removes_guarded_windows_plugin_with_and_without_constrained_fail_closed(self):
+        # The guarded render shipped through 1.0.6 exits $LASTEXITCODE in its
+        # Constrained Language branch; the current one exits 1 first when the
+        # launcher never started. An uninstall owns both.
+        fixture = (
+            Path(__file__).resolve().parents[2]
+            / "internal"
+            / "enterprisepolicy"
+            / "testdata"
+            / "copilot-vscode-guarded"
+            / "windows-hooks.json"
+        )
+        fail_closed = "if ($null -eq $LASTEXITCODE) { exit 1 }; "
+        out_host = "| Microsoft.PowerShell.Core\\Out-Host; "
+
+        def with_branch(command: str, *, closed: bool) -> str:
+            prefix, encoded = command.split(" -EncodedCommand ", 1)
+            script = base64.b64decode(encoded).decode("utf-16le").replace(out_host + fail_closed, out_host)
+            if closed:
+                script = script.replace(out_host + "exit $LASTEXITCODE }", out_host + fail_closed + "exit $LASTEXITCODE }")
+            return prefix + " -EncodedCommand " + base64.b64encode(script.encode("utf-16le")).decode("ascii")
+
+        for closed in (False, True):
+            with self.subTest(constrained_fail_closed=closed), tempfile.TemporaryDirectory() as tmp:
+                hooks = json.loads(fixture.read_text(encoding="utf-8"))
+                for group in hooks["hooks"].values():
+                    for handler in group:
+                        handler["command"] = with_branch(handler["command"], closed=closed)
+                        script = base64.b64decode(handler["command"].split(" -EncodedCommand ", 1)[1]).decode("utf-16le")
+                        self.assertEqual(fail_closed in script, closed)
+                plugin = Path(tmp) / ".copilot" / "installed-plugins" / "defenseclaw" / "defenseclaw"
+                (plugin / "hooks").mkdir(parents=True)
+                (plugin / "plugin.json").write_text(json.dumps(cmd_uninstall._COPILOT_PLUGIN_MANIFEST))
+                (plugin / "hooks" / "hooks.json").write_text(json.dumps(hooks))
+                with (
+                    patch.dict(os.environ, {"HOME": tmp, "USERPROFILE": tmp}, clear=False),
+                    patch("defenseclaw.upgrade_shim.managed_deployment", return_value=None),
+                ):
+                    cmd_uninstall._remove_orphan_copilot_plugin()
+                self.assertFalse(plugin.exists(), f"guarded Windows plugin (fail-closed={closed}) was DefenseClaw's")
+
     def test_orphan_cleanup_keeps_edited_windows_handler_with_operator_command(self):
         fixture = Path(__file__).resolve().parents[2] / "internal" / "enterprisepolicy" / "testdata" / "copilot-vscode-1.0.0" / "windows-hooks.json"
         hooks = json.loads(fixture.read_text())

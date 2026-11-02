@@ -1720,6 +1720,85 @@ def _managed_hook_command(command: str, connector: str) -> bool:
     }
 
 
+def _windows_bridge_event_suffixes(connector: str) -> tuple[str, str]:
+    """Return the optional event/contract patterns of an encoded hook bridge.
+
+    The first matches the Start-Process -ArgumentList form, the second the
+    awaited bridge's quoted call-operator arguments; both name the groups
+    ``event`` and ``contract``. Only Antigravity and Codex bind events.
+    """
+    event_suffix = ""
+    awaited_suffix = ""
+    if connector == "antigravity":
+        event_suffix = (
+            r"(?:,'--event','(?P<event>PreInvocation|PreToolUse|"
+            r"PostToolUse|PostInvocation|Stop)')?"
+        )
+        awaited_suffix = (
+            r"(?: '--event' '(?P<event>PreInvocation|PreToolUse|"
+            r"PostToolUse|PostInvocation|Stop)')?"
+        )
+    elif connector == "codex":
+        event_pattern = "|".join(
+            re.escape(event) for event in sorted(_CODEX_KNOWN_HOOK_EVENTS)
+        )
+        contract_pattern = "|".join(
+            re.escape(contract_id) for contract_id in sorted(_CODEX_CONTRACT_EVENTS)
+        )
+        # The optional forms are ownership evidence for registrations
+        # emitted before event/contract binding. Healthy validation
+        # requires both values and checks them against the table row.
+        event_suffix = (
+            r"(?:,'--event','(?P<event>"
+            + event_pattern
+            + r")'(?:,'--hook-contract','(?P<contract>"
+            + contract_pattern
+            + r")')?)?"
+        )
+        awaited_suffix = (
+            r"(?: '--event' '(?P<event>"
+            + event_pattern
+            + r")'(?: '--hook-contract' '(?P<contract>"
+            + contract_pattern
+            + r")')?)?"
+        )
+    return event_suffix, awaited_suffix
+
+
+def _awaited_hook_bridge_match(script: str, connector: str) -> re.Match[str] | None:
+    """Match the encoded bridge the gateway's windowsAwaitedHookStatements renders.
+
+    Process.Start awaits the GUI-subsystem launcher. A Constrained Language
+    host refuses the .NET calls, so the bridge repeats the launcher and its
+    arguments in a call-operator branch, which exits 1 when the launcher
+    never started; ``fail_closed`` is that exit and is absent from bridges
+    rendered before it existed. ``arguments`` is the Process.Start copy of the
+    arguments, which callers compare with the call-operator copy.
+    """
+    _event_suffix, awaited_suffix = _windows_bridge_event_suffixes(connector)
+    return re.fullmatch(
+        r"\$ErrorActionPreference='Stop'; "
+        r"\$env:NoDefaultCurrentDirectoryInExePath='1'; "
+        r"if \(\$ExecutionContext\.SessionState\.LanguageMode -ne 'FullLanguage'\) \{ "
+        r"\$ErrorActionPreference='Continue'; "
+        r"& '(?P<target>(?:[^']|'')+)' 'hook' '--connector' '"
+        + re.escape(connector)
+        + r"'"
+        + awaited_suffix
+        + r" \| Microsoft\.PowerShell\.Core\\Out-Host; "
+        r"(?P<fail_closed>if \(\$null -eq \$LASTEXITCODE\) \{ exit 1 \}; )?"
+        r"exit \$LASTEXITCODE \}; "
+        r"\$hookStart=\[System\.Diagnostics\.ProcessStartInfo\]::new\('(?P=target)','(?P<arguments>[^']*)'\); "
+        r"\$hookStart\.UseShellExecute=\$false; "
+        r"\$hookStart\.RedirectStandardError=\$true; "
+        r"\$hookProcess=\[System\.Diagnostics\.Process\]::Start\(\$hookStart\); "
+        r"\$hookProcess\.StandardError\.BaseStream\.CopyTo\(\[Console\]::OpenStandardError\(\)\); "
+        r"\$hookProcess\.WaitForExit\(\); "
+        r"exit \$hookProcess\.ExitCode",
+        script,
+    )
+
+
 def _malformed_owned_hook_target(command: str, connector: str) -> str:
     """Recover an exact owned target while preserving malformed diagnostics."""
     value = command.strip()
@@ -1755,6 +1834,7 @@ def _malformed_owned_hook_target(command: str, connector: str) -> str:
                     encoded = base64.b64decode(parts[encoded_index + 1], validate=True)
                     if len(encoded) <= 16 * 1024 and len(encoded) % 2 == 0:
                         script = encoded.decode("utf-16-le")
+                        awaited = _awaited_hook_bridge_match(script, connector)
                         event_suffix = ""
                         if connector == "codex":
                             event_pattern = "|".join(
@@ -1791,7 +1871,9 @@ def _malformed_owned_hook_target(command: str, connector: str) -> str:
                                 + r"; exit \$LASTEXITCODE",
                                 script,
                             )
-                        if match:
+                        if awaited:
+                            owned_target = awaited.group("target").replace("''", "'")
+                        elif match:
                             owned_target = match.group(1).replace("''", "'")
                 except (binascii.Error, UnicodeError, ValueError):
                     pass
@@ -3133,63 +3215,11 @@ def _command_target(
                 script = encoded.decode("utf-16-le")
             except (binascii.Error, UnicodeError, ValueError) as exc:
                 raise _InspectionError("malformed", f"PowerShell EncodedCommand hook is invalid: {exc}") from exc
-            event_suffix = ""
-            awaited_suffix = ""
-            if connector == "antigravity":
-                event_suffix = (
-                    r"(?:,'--event','(?P<event>PreInvocation|PreToolUse|"
-                    r"PostToolUse|PostInvocation|Stop)')?"
-                )
-                awaited_suffix = (
-                    r"(?: '--event' '(?P<event>PreInvocation|PreToolUse|"
-                    r"PostToolUse|PostInvocation|Stop)')?"
-                )
-            elif connector == "codex":
-                event_pattern = "|".join(
-                    re.escape(event) for event in sorted(_CODEX_KNOWN_HOOK_EVENTS)
-                )
-                contract_pattern = "|".join(
-                    re.escape(contract_id) for contract_id in sorted(_CODEX_CONTRACT_EVENTS)
-                )
-                # The optional forms are ownership evidence for registrations
-                # emitted before event/contract binding. Healthy validation
-                # requires both values and checks them against the table row.
-                event_suffix = (
-                    r"(?:,'--event','(?P<event>"
-                    + event_pattern
-                    + r")'(?:,'--hook-contract','(?P<contract>"
-                    + contract_pattern
-                    + r")')?)?"
-                )
-                awaited_suffix = (
-                    r"(?: '--event' '(?P<event>"
-                    + event_pattern
-                    + r")'(?: '--hook-contract' '(?P<contract>"
-                    + contract_pattern
-                    + r")')?)?"
-                )
+            event_suffix, _awaited_suffix = _windows_bridge_event_suffixes(connector)
             # The current bridge starts the launcher with Process.Start and
             # repeats the arguments in its Constrained Language branch; both
             # copies must name the same launcher and arguments.
-            match = re.fullmatch(
-                r"\$ErrorActionPreference='Stop'; "
-                r"\$env:NoDefaultCurrentDirectoryInExePath='1'; "
-                r"if \(\$ExecutionContext\.SessionState\.LanguageMode -ne 'FullLanguage'\) \{ "
-                r"\$ErrorActionPreference='Continue'; "
-                r"& '(?P<target>(?:[^']|'')+)' 'hook' '--connector' '"
-                + re.escape(connector)
-                + r"'"
-                + awaited_suffix
-                + r" \| Microsoft\.PowerShell\.Core\\Out-Host; exit \$LASTEXITCODE \}; "
-                r"\$hookStart=\[System\.Diagnostics\.ProcessStartInfo\]::new\('(?P=target)','(?P<arguments>[^']*)'\); "
-                r"\$hookStart\.UseShellExecute=\$false; "
-                r"\$hookStart\.RedirectStandardError=\$true; "
-                r"\$hookProcess=\[System\.Diagnostics\.Process\]::Start\(\$hookStart\); "
-                r"\$hookProcess\.StandardError\.BaseStream\.CopyTo\(\[Console\]::OpenStandardError\(\)\); "
-                r"\$hookProcess\.WaitForExit\(\); "
-                r"exit \$hookProcess\.ExitCode",
-                script,
-            )
+            match = _awaited_hook_bridge_match(script, connector)
             if not match:
                 match = re.fullmatch(
                     r"\$ErrorActionPreference='Stop'; "
@@ -3228,6 +3258,12 @@ def _command_target(
                     raise _InspectionError(
                         "malformed",
                         "PowerShell EncodedCommand hook starts different arguments in its two launch paths",
+                    )
+                if arguments is not None and match.group("fail_closed") is None:
+                    raise _InspectionError(
+                        "stale",
+                        "PowerShell EncodedCommand hook exits 0 in Constrained Language mode "
+                        "when the launcher cannot start",
                     )
                 return target, args, "direct"
             unqualified = re.fullmatch(

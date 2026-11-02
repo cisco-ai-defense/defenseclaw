@@ -128,7 +128,7 @@ func VerifyWindowsCursorManagedPolicyIdentity(
 		if err != nil {
 			return err
 		}
-		artifacts, err = validateWindowsCursorManagedArtifacts(artifacts)
+		artifacts, err = validateWindowsCursorManagedArtifactsRepairingHooks(artifacts)
 		if err != nil {
 			return err
 		}

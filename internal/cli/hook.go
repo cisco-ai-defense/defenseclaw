@@ -81,6 +81,7 @@ func newHookCmd() *cobra.Command {
 		PersistentPreRunE: func(*cobra.Command, []string) error { return nil },
 		PersistentPostRun: func(*cobra.Command, []string) {},
 		RunE: func(cmd *cobra.Command, _ []string) error {
+			defer RecoverHookPanic()
 			if err := validateHookSurface(connector, hookSurface); err != nil {
 				return hookFailure(hookFailureContext{connector: connector}, err)
 			}
@@ -695,7 +696,10 @@ func buildHookOptionsForRuntime(connector, event, apiAddr, _ string, enterpriseM
 		}
 	}
 
-	if v := os.Getenv("DEFENSECLAW_HOOK_MAX_BODY"); v != "" {
+	// A managed hook keeps the fixed cap: the variable comes from the agent's
+	// or project's environment, and a tiny cap would make every payload
+	// oversized, before its event could be read.
+	if v := os.Getenv("DEFENSECLAW_HOOK_MAX_BODY"); v != "" && !opts.ManagedEnterprise {
 		if n, err := strconv.ParseInt(v, 10, 64); err == nil && n > 0 {
 			if !trustedNativeState || n <= 1<<20 {
 				// Packaged hooks allow projects to lower the cap, never raise it.

@@ -178,6 +178,12 @@ func canonicalize(path string, kind ObjectKind, opts CanonicalOptions, repair bo
 		reportCanonicalResult(result, opts)
 		return result, nil
 	}
+	if assessment.Owner == ownerUntrusted && !descriptorUnreadable {
+		// The caller vouched that DefenseClaw created and holds this object,
+		// so the foreign owner is drift. Name it once as a boundary finding
+		// before the canonical owner replaces it.
+		reportUntrustedOwnerTransfer(clean, kind, desc.Owner, opts)
+	}
 	spec := canonicalSpecFor(kind, gatewaySID)
 	if gatewaySID == "" && spec.GatewayNeedsAccess && kind != ObjectConfigFile && kind != ObjectConfigDirectory {
 		// Every runtime form names the gateway service; stamping without it
@@ -229,6 +235,27 @@ func canonicalize(path string, kind ObjectKind, opts CanonicalOptions, repair bo
 	}
 	reportCanonicalResult(result, opts)
 	return result, nil
+}
+
+// reportUntrustedOwnerTransfer logs, as a MarkerBoundary finding, that a
+// privileged repair is taking ownership of path from a principal outside the
+// trusted and administrator-equivalent set.
+func reportUntrustedOwnerTransfer(path string, kind ObjectKind, previousOwner string, opts CanonicalOptions) {
+	if opts.Quiet {
+		return
+	}
+	fields := map[string]string{
+		"path":      path,
+		"object":    string(kind),
+		"principal": ownerText(previousOwner),
+		"reason":    "untrusted owner taken over by the canonical repair",
+	}
+	// A repair that keeps failing retries on every guardian tick; name the
+	// owner once per process.
+	if !advisoryLogDedupe.shouldEmit(path, MarkerBoundary, FormatResilienceEvent(MarkerBoundary, fields)) {
+		return
+	}
+	EmitResilienceEvent(MarkerBoundary, fields)
 }
 
 func canonicalGatewayAccount(opts CanonicalOptions) string {

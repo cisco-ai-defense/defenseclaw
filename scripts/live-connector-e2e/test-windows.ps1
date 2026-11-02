@@ -4982,8 +4982,9 @@ threading.Event().wait()
         $harnessText.Contains('$direct = Get-DirectCodexHookCommand $command') -and
         $harnessText.Contains('function Get-DirectCodexHookCommand') -and
         $harnessText.Contains('function Get-AwaitedHookBridge') -and
-        $harnessText.Contains('\$hookProcess=\[System\.Diagnostics\.Process\]::Start\(\$hookStart\)')) `
-        'Codex Doctor contracts require the direct cmd.exe command (GAP-1908) or the awaited native launcher bridge'
+        $harnessText.Contains('\$hookProcess=\[System\.Diagnostics\.Process\]::Start\(\$hookStart\)') -and
+        $harnessText.Contains('if \(\$null -eq \$LASTEXITCODE\) \{ exit 1 \}; exit \$LASTEXITCODE \}')) `
+        'Codex Doctor contracts require the direct cmd.exe command (GAP-1908) or the awaited native launcher bridge that fails closed when a constrained host cannot start it'
     $doctorRegistration = $doctorContract.IndexOf("Write-Result 'doctor:windows-hook-registration'", [StringComparison]::Ordinal)
     $doctorAmpSelfHeal = $doctorContract.IndexOf('Assert-AmpPluginSelfHeal $configPath $originalConfig', [StringComparison]::Ordinal)
     $doctorStop = $doctorContract.IndexOf("Invoke-Tool 'defenseclaw-gateway' @('stop')", [StringComparison]::Ordinal)

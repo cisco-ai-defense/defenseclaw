@@ -50,7 +50,7 @@ func ResolveDefaultEnvConfigPath() (string, error) {
 // openEnvConfig on Windows opens a pinned kernel handle to the target
 // file FIRST, then validates that same handle for reparse-point flags
 // via GetFileInformationByHandle, then runs the path-based ancestor +
-// DACL walk (managed.ValidateTrustedFilePath) for defense in depth.
+// DACL walk (managed.ValidateTrustedPolicyFilePath) for defense in depth.
 // The bytes returned from the *os.File come from the handle opened in
 // step 1, so an attacker who swaps the leaf file between validation
 // and read cannot influence what we parse — the handle already targets
@@ -69,8 +69,9 @@ func ResolveDefaultEnvConfigPath() (string, error) {
 // for parser tests whose temporary fixtures cannot carry the production ACL.
 //
 // A missing file surfaces as os.ErrNotExist so LoadEnvConfigEndpoint
-// can convert it to ErrEnvConfigMissing (the pre-arrival case). Trust
-// failures surface as the wrapped ValidateTrustedFilePath error, which
+// can convert it to ErrEnvConfigMissing (the pre-arrival case). Structural
+// trust failures (and, under TrustStrictAncestorsEnv, permission verdicts)
+// surface as the wrapped ValidateTrustedPolicyFilePath error, which
 // LoadEnvConfigEndpoint's caller (ConfigManager.Reload) treats the same
 // as a malformed overlay: log + retain the previously-active endpoint.
 func openEnvConfig(path string) (*os.File, error) {
@@ -117,7 +118,12 @@ func openEnvConfig(path string) (*os.File, error) {
 		return nil, errors.New("env_config must not be a reparse point")
 	}
 	if shouldEnforceEnvConfigTrust() {
-		if err := managed.ValidateTrustedFilePath(path, "env_config"); err != nil {
+		// AVC owns and re-ACLs env_config.json, and DefenseClaw cannot
+		// repair it, so permission drift is accepted and logged (an
+		// untrusted writer as a boundary finding) instead of silently
+		// pinning the gateway to the default region. The endpoint it names
+		// is allowlist-validated before use. Structure stays fatal.
+		if err := managed.ValidateTrustedPolicyFilePath(path, "env_config"); err != nil {
 			_ = windows.CloseHandle(handle)
 			return nil, err
 		}
@@ -133,7 +139,7 @@ func openEnvConfig(path string) (*os.File, error) {
 // trustEnvConfigFilePlatform is a no-op on Windows because the full
 // trust check (ancestor chain admin-owned, no reparse point, no world-
 // writable ACLs) already ran inside openEnvConfig via
-// managed.ValidateTrustedFilePath. Splitting the check across
+// managed.ValidateTrustedPolicyFilePath. Splitting the check across
 // openEnvConfig and this hook would double-validate for no gain and
 // diverge from the Unix path structure (see env_config_unix.go).
 func trustEnvConfigFilePlatform(_ os.FileInfo) error {

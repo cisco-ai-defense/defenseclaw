@@ -542,7 +542,7 @@ func runHook(ctx context.Context, opts Options) int {
 		// so it surfaces in tests / setup rather than silently disabling the
 		// guardrail. The CLI validates --connector against the registry, so
 		// this is unreachable in normal operation.
-		fmt.Fprintf(opts.Stderr, "defenseclaw: unknown hook connector %q\n", opts.Connector)
+		writeFailureDiagnostic(opts, true, "defenseclaw: unknown hook connector %q\n", opts.Connector)
 		return blockExit
 	}
 	// A managed hook's FailMode comes from administrator-owned runtime state
@@ -2314,10 +2314,10 @@ func handleMissingToken(opts Options, sp spec, failMode, tokenFile string) int {
 	}
 	if closes {
 		if sp.connector == "antigravity" {
-			fmt.Fprintf(opts.Stderr,
+			writeFailureDiagnostic(opts, true,
 				"defenseclaw: %s, applying Antigravity's event-specific failure response\n", reason)
 		} else {
-			fmt.Fprintf(opts.Stderr,
+			writeFailureDiagnostic(opts, true,
 				"defenseclaw: %s, blocking %s (fail mode closed)\n", reason, sp.subject)
 		}
 		return emitHookResult(opts, sp, sp.unreachableStrict)
@@ -2411,7 +2411,7 @@ func handleOversized(ctx context.Context, opts Options, sp spec, failMode string
 		reportOversizedRefusal(opts, sp, fields)
 		return failManagedStandaloneClosed(opts, sp, sp.oversizedClosed, "oversized", managedHookOversizedReason)
 	}
-	fmt.Fprintf(opts.Stderr, "defenseclaw: %s hook refusing oversized payload\n", sp.connector)
+	writeFailureDiagnostic(opts, closes, "defenseclaw: %s hook refusing oversized payload\n", sp.connector)
 	if code, handled := hermesFailClosed(opts, sp, "oversized", managedHookOversizedReason); handled {
 		return code
 	}
@@ -2422,6 +2422,37 @@ func handleOversized(ctx context.Context, opts Options, sp spec, failMode string
 		return emitHookResult(opts, sp, sp.oversizedClosed)
 	}
 	return emitFailOpenAllow(opts, sp, managedHookOversizedReason)
+}
+
+// ManagedHookBlockMessage is the only text a Secure Client hook
+// (quietManagedFailureStderr) writes to stderr on a failure path, and only
+// when it blocks on a failure rather than a gateway verdict. Agents surface
+// hook stderr to the user (Claude Code makes it the block message), so those
+// failures carry no diagnostics there: every decision is already in the
+// durable record (recordManagedHookDecision).
+const ManagedHookBlockMessage = "Cisco AI Defense could not verify this request; it was blocked by your organization's policy."
+
+// quietManagedFailureStderr reports a hook whose failure paths keep their
+// diagnostics off the agent's stderr: an authenticated Secure Client hook
+// (opts.SecureClient and secureClientHook), whose installer and Guardian
+// repair the endpoint and whose every decision is in the durable record.
+// Per-user hooks and the standalone profiles keep their diagnostics and
+// fail-closed texts, which tell the user what to do.
+func quietManagedFailureStderr(opts Options) bool {
+	return opts.SecureClient && secureClientHook(opts)
+}
+
+// writeFailureDiagnostic writes a failure path's stderr line. A Secure Client
+// hook (quietManagedFailureStderr) writes ManagedHookBlockMessage when it
+// blocks and nothing when it allows; every other hook keeps its diagnostic.
+func writeFailureDiagnostic(opts Options, blocked bool, format string, args ...any) {
+	if quietManagedFailureStderr(opts) {
+		if blocked {
+			fmt.Fprintln(opts.Stderr, ManagedHookBlockMessage)
+		}
+		return
+	}
+	fmt.Fprintf(opts.Stderr, format, args...)
 }
 
 // failUnreachable applies the connector's effective fail mode to native hook
@@ -2523,12 +2554,12 @@ func failUnreachable(opts Options, sp spec, failMode, reason string) int {
 	}
 	if blocked {
 		if sp.connector == "antigravity" {
-			fmt.Fprintf(opts.Stderr,
+			writeFailureDiagnostic(opts, true,
 				"defenseclaw: gateway unreachable, applying Antigravity's event-specific failure response: %s\n", reason)
 		} else if managedPlainFailClosed(opts, sp) {
 			return failManagedStandaloneClosed(opts, sp, sp.unreachableStrict, "transport", reason)
 		} else {
-			fmt.Fprintf(opts.Stderr,
+			writeFailureDiagnostic(opts, true,
 				"defenseclaw: %s (%s): %s\n", unreachableLead(opts, sp, reason, "blocking"), unreachableModeNote(opts, reason),
 				unreachableDetail(opts, reason))
 			if text := perUserGatewayDownText(opts, reason); text != "" {
@@ -2561,7 +2592,8 @@ func failUnreachable(opts Options, sp spec, failMode, reason string) int {
 		}
 	} else {
 		if showWarning {
-			fmt.Fprintf(opts.Stderr, "defenseclaw: %s: %s\n", unreachableLead(opts, sp, reason, "allowing"), unreachableDetail(opts, reason))
+			writeFailureDiagnostic(opts, false,
+				"defenseclaw: %s: %s\n", unreachableLead(opts, sp, reason, "allowing"), unreachableDetail(opts, reason))
 		}
 	}
 	if notice := perUserGatewayDownNotice(opts, sp, reason); notice != "" && showWarning {
@@ -3074,11 +3106,13 @@ func failResponse(opts Options, sp spec, failMode, reason string) int {
 		// As in failUnreachable: a closed result stays closed for Hermes.
 		opts.FailMode = "closed"
 	}
-	if !managedStandaloneHook(opts) && !opts.ExplainUnenrolledAccount {
+	if !managedStandaloneHook(opts) && !opts.ExplainUnenrolledAccount && !quietManagedFailureStderr(opts) {
 		// The standalone hook socket carries no token, so the token-drift
 		// advice does not apply there. The Windows standalone hook runs as
 		// a standard user, who can run neither command (GAP-0680); its
-		// fail-closed text already says to contact the administrator.
+		// fail-closed text already says to contact the administrator. A
+		// Secure Client endpoint is repaired by the installer and the
+		// Guardian, not by the user.
 		reason = responseFailureReason(reason)
 	}
 	closes := !sp.failOpenOnly && failMode != "open"
@@ -3089,7 +3123,7 @@ func failResponse(opts Options, sp spec, failMode, reason string) int {
 	if closes && managedPlainFailClosed(opts, sp) {
 		return failManagedStandaloneClosed(opts, sp, sp.responseClosed, "response", reason)
 	}
-	fmt.Fprintf(opts.Stderr, "defenseclaw: %s hook error: %s\n", sp.errLabel, reason)
+	writeFailureDiagnostic(opts, closes, "defenseclaw: %s hook error: %s\n", sp.errLabel, reason)
 	if code, handled := hermesFailClosed(opts, sp, "response", reason); handled {
 		return code
 	}
@@ -3400,7 +3434,11 @@ func copilotFailClosed(opts Options, sp spec, layer, reason string) (int, bool) 
 			return 0, false
 		}
 	}
-	fmt.Fprintf(opts.Stderr, "defenseclaw: blocking managed %s (fail mode closed): %s\n", sp.subject, reason)
+	if !quietManagedFailureStderr(opts) {
+		// Copilot shows only the structured reason; a Secure Client hook
+		// keeps even this log line off stderr (writeFailureDiagnostic).
+		fmt.Fprintf(opts.Stderr, "defenseclaw: blocking managed %s (fail mode closed): %s\n", sp.subject, reason)
+	}
 	fmt.Fprintln(opts.Stdout, body)
 	return 0, true
 }

@@ -6,6 +6,7 @@ package hookexec
 import (
 	"strings"
 
+	"github.com/defenseclaw/defenseclaw/internal/configs"
 	"github.com/defenseclaw/defenseclaw/internal/managed"
 )
 
@@ -84,11 +85,22 @@ func InstallManagedHookDiagnosticSinks() {
 			map[string]string{"path": path, "label": label, "reason": reason},
 		))
 	}
+	// The provider registry loads lazily and a hook never consults it; if
+	// anything does, its overlay ignores the agent-inherited path override
+	// and reports to the durable record instead of stderr.
+	configs.SetIgnoreCustomProvidersPathEnv(true)
+	configs.SetOverlayReporter(func(msg string) {
+		managedHookDecisionRecorder(source, managed.MarkerDegraded, managed.FormatResilienceEvent(
+			managed.MarkerDegraded,
+			map[string]string{"component": "provider_overlay", "reason": boundedManagedRecordField(msg, 256)},
+		))
+	})
 }
 
 // managedHookBoundaryReason reports the managed failures that are integrity
 // findings: tampered or missing runtime state, an identified foreign
-// listener, a refused credential and a payload over the cap.
+// listener, a refused credential, a payload over the cap and a hook that
+// panicked.
 func managedHookBoundaryReason(reason string) bool {
 	switch reason {
 	case managedRuntimeStateInvalidReason,
@@ -98,6 +110,7 @@ func managedHookBoundaryReason(reason string) bool {
 		managedHookTokenUnreadableReason,
 		managedHookTokenEmptyReason,
 		managedHookOversizedReason,
+		managedHookInternalErrorReason,
 		managedGatewayPortHeldReason,
 		managedGatewayPeerUnverifiedReason:
 		return true

@@ -3845,6 +3845,8 @@ def test_normal_mode_live_repair_uses_an_absent_enterprise_baseline() -> None:
     assert "function Get-AwaitedHookBridge" in live_repair
     assert "$bridge = Get-AwaitedHookBridge $decoded" in live_repair
     assert "(@($bridge.Arguments) -join ' ') -cne 'hook --connector codex'" in live_repair
+    assert "\\$hookProcess=\\[System\\.Diagnostics\\.Process\\]::Start\\(\\$hookStart\\)" in live_repair
+    assert "if \\(\\$null -eq \\$LASTEXITCODE\\) \\{ exit 1 \\}" in live_repair
     assert "$actualHook" in live_repair
     assert "$expectedCanonicalHook" in live_repair
     assert "$privateTrustHashes.Count -ne 0" in live_repair

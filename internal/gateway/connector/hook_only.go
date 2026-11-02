@@ -2413,6 +2413,7 @@ func (c *hookOnlyConnector) VerifyClean(opts SetupOpts) error {
 		ownedCommands = append(ownedCommands,
 			legacyAntigravityWindowsHookCommand(),
 			legacyAntigravityNonWaitingWindowsHookCommand(),
+			legacyAntigravityStartProcessWindowsHookCommand(),
 		)
 		var cfg map[string]interface{}
 		if err := json.Unmarshal(data, &cfg); err == nil &&
@@ -2422,7 +2423,8 @@ func (c *hookOnlyConnector) VerifyClean(opts SetupOpts) error {
 	}
 	if bytes.Contains(data, []byte(needle)) || bytes.Contains(data, []byte(c.scriptName)) ||
 		(c.name == "antigravity" && bytes.Contains(data, []byte(legacyAntigravityWindowsHookCommand()))) ||
-		(c.name == "antigravity" && bytes.Contains(data, []byte(legacyAntigravityNonWaitingWindowsHookCommand()))) {
+		(c.name == "antigravity" && bytes.Contains(data, []byte(legacyAntigravityNonWaitingWindowsHookCommand()))) ||
+		(c.name == "antigravity" && bytes.Contains(data, []byte(legacyAntigravityStartProcessWindowsHookCommand()))) {
 		return fmt.Errorf("%s teardown incomplete: config still references %s", c.name, c.scriptName)
 	}
 	if c.name == "hermes" {
@@ -2923,6 +2925,7 @@ func (c *hookOnlyConnector) removeConfigEntries(path, hookScript string, opts Se
 		ownedCommands = append(ownedCommands,
 			legacyAntigravityWindowsHookCommand(),
 			legacyAntigravityNonWaitingWindowsHookCommand(),
+			legacyAntigravityStartProcessWindowsHookCommand(),
 		)
 		return removeJSONHookReferencesProfile(path, pluginSecureClientProfile(opts), ownedCommands...)
 	default:
@@ -5949,7 +5952,12 @@ func antigravityOwnedHookCommands(hookScript string) []string {
 func antigravityOwnedHookCommandsForOS(goos, hookScript string) []string {
 	commands := []string{hookScript}
 	for _, event := range antigravityLifecycleEvents {
-		commands = append(commands, antigravityHookInvocationCommandForEvent(goos, event, hookScript))
+		command := antigravityHookInvocationCommandForEvent(goos, event, hookScript)
+		commands = append(commands, command)
+		// The 1.0.x render of the Windows bridge stays owned for teardown.
+		if legacy, ok := legacyWindowsAwaitedHookCommand(command); ok {
+			commands = append(commands, legacy)
+		}
 	}
 	return uniqueNonEmptyStrings(commands)
 }
@@ -6438,6 +6446,13 @@ func legacyAntigravityWindowsHookCommand() string {
 
 func legacyAntigravityNonWaitingWindowsHookCommand() string {
 	return legacyWindowsNativePowerShellHookCommandForBinary("antigravity", defenseclawHookBinary())
+}
+
+// legacyAntigravityStartProcessWindowsHookCommand is the 0.8.x Start-Process
+// bridge (legacyStartProcessWindowsNativePowerShellHookCommand), owned for
+// teardown.
+func legacyAntigravityStartProcessWindowsHookCommand() string {
+	return legacyStartProcessWindowsNativePowerShellHookCommand("antigravity", defenseclawHookBinary())
 }
 
 func managedHookCommandEntry(raw interface{}, hookScript string) bool {

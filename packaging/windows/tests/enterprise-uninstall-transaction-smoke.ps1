@@ -3017,7 +3017,8 @@ targets:
                 [switch]$ServicingTransaction,
                 [switch]$AllowTransactionRecordedBrokerAbsence,
                 [switch]$AllowTransactionRecordedEnumeratorAbsence,
-                [string[]]$ExpectedGatewayAccount
+                [string[]]$ExpectedGatewayAccount,
+                [switch]$AcceptDegradedTargets
             )
             if ($null -ne $ExpectedGatewayAccount) {
                 $script:HarnessState.verified_gateway_account = @($ExpectedGatewayAccount)
@@ -3302,7 +3303,8 @@ targets:
                 [Parameter(Mandatory)][string]$Action,
                 [Parameter(Mandatory)][hashtable]$Layout,
                 [Parameter(Mandatory)][string]$GatewayServiceName,
-                [Parameter(Mandatory)][string]$GuardianServiceName
+                [Parameter(Mandatory)][string]$GuardianServiceName,
+                [switch]$AcceptDegradedTargets
             )
             return [ordered]@{
                 ok = $true
@@ -7562,7 +7564,8 @@ targets:
                 [Parameter(Mandatory)][string]$Action,
                 [Parameter(Mandatory)][hashtable]$Layout,
                 [Parameter(Mandatory)][string]$GatewayServiceName,
-                [Parameter(Mandatory)][string]$GuardianServiceName
+                [Parameter(Mandatory)][string]$GuardianServiceName,
+                [switch]$AcceptDegradedTargets
             )
             return [pscustomobject]@{
                 schema_version = 1

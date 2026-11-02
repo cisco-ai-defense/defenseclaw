@@ -160,6 +160,7 @@ func TestManagedInstallLayoutTargets(t *testing.T) {
 		"AdminFile:" + filepath.Join(state, "install", "codex-requirements-ownership.json"),
 		"AdminFile:" + filepath.Join(state, "install", "codex-requirements-acl-backup.json"),
 		"AdminFile:" + filepath.Join(state, "install", "managed-hooks-teardown-journal.json"),
+		"AdminFile:" + filepath.Join(state, "install", "managed-hooks-lifecycle-journal.json"),
 		"AdminFile:" + filepath.Join(state, "logs", "guardian", "hook-guardian.log"),
 		"AdminFile:" + filepath.Join(state, "logs", "cmid-broker", "cmid-broker.log"),
 	}

@@ -36,6 +36,7 @@ foreach ($name in @(
         'Test-DefenseClawCreateChildOnlyRights',
         'ConvertTo-DefenseClawMappedRegistryRights',
         'Get-DefenseClawServiceDaclUntrustedWriter',
+        'Test-DefenseClawBroadUnprivilegedSid',
         'Get-DefenseClawRawDescriptorFindings',
         'Test-DefenseClawTrustStrictAncestors'
     )) {
@@ -61,6 +62,9 @@ $script:AdministratorsSID = 'S-1-5-32-544'
 $script:TrustedInstallerSID = 'S-1-5-80-956008885-3418522649-1831038044-1853292631-2271478464'
 $script:OwnerRightsSID = 'S-1-3-4'
 $script:TrustStrictAncestorsEnv = 'DEFENSECLAW_MANAGED_TRUST_STRICT_ANCESTORS'
+$script:UnprivilegedWriterSIDs = @(
+    'S-1-1-0', 'S-1-5-11', 'S-1-5-32-545', 'S-1-5-4', 'S-1-5-32-546', 'S-1-5-7'
+)
 
 # Log line contract: marker, then sorted keys, values quoted like Go's
 # strconv.Quote.
@@ -90,6 +94,25 @@ Write-DefenseClawResilienceEvent -Marker defenseclaw_accept -Fields @{ path = 'p
 $kept = @(Get-DefenseClawResilienceEvents)
 if ($kept.Count -ne 1 -or $kept[0] -cne 'defenseclaw_accept path="p"') {
     throw 'a written resilience event was not kept for the action result'
+}
+
+# A writer every ordinary or anonymous session holds stays fatal after a failed
+# service ACL repair; a named principal is accepted as a boundary.
+foreach ($sid in @(
+        'S-1-1-0', 'S-1-5-11', 'S-1-5-32-545', 'S-1-5-4', 'S-1-5-32-546',
+        'S-1-5-7', 'S-1-5-21-111-222-333-513', 'null DACL'
+    )) {
+    if (-not (Test-DefenseClawBroadUnprivilegedSid -SID $sid)) {
+        throw "broad writer $sid was not judged unprivileged"
+    }
+}
+foreach ($sid in @(
+        'S-1-5-21-111-222-333-1001', 'S-1-5-21-111-222-333-512',
+        'S-1-5-80-1-2-3-4-5', 'S-1-5-32-544', ''
+    )) {
+    if (Test-DefenseClawBroadUnprivilegedSid -SID $sid) {
+        throw "named principal $sid was judged a broad unprivileged writer"
+    }
 }
 
 # Generic rights are judged exactly like the specific rights they map to.
@@ -157,6 +180,16 @@ if ($aclApis) {
     }
     if ((Get-DefenseClawServiceDaclUntrustedWriter -Dacl 'D:(A;;CCDCLCSWRPWPDTLOCRSDRCWDWO;;;BU)') -cne 'S-1-5-32-545') {
         throw 'a Users service entry with change-config was not reported'
+    }
+    # A named writer listed first must not hide a broad one behind it.
+    $allWriters = @(Get-DefenseClawServiceDaclUntrustedWriter `
+        -Dacl 'D:(A;;CCDCLCSWRPWPDTLOCRSDRCWDWO;;;SY)(A;;DCRPWPDT;;;S-1-5-21-111-222-333-1001)(A;;CCDCLCSWRPWPDTLOCRSDRCWDWO;;;WD)' `
+        -All)
+    if (($allWriters -join ',') -cne 'S-1-5-21-111-222-333-1001,S-1-1-0') {
+        throw "every service DACL writer was not reported: $($allWriters -join ',')"
+    }
+    if (@(Get-DefenseClawServiceDaclUntrustedWriter -Dacl 'D:(A;;CCLCSWLORC;;;BU)' -All).Count -ne 0) {
+        throw 'a query-only service DACL reported a writer with -All'
     }
 }
 

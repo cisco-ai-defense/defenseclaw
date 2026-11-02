@@ -28,6 +28,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"runtime"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -85,7 +86,8 @@ func windowsAwaitedHookScriptForTest(hookBinary string, arguments ...string) str
 		"$ErrorActionPreference='Stop'",
 		"$env:NoDefaultCurrentDirectoryInExePath='1'",
 		"if ($ExecutionContext.SessionState.LanguageMode -ne 'FullLanguage') { $ErrorActionPreference='Continue'; & " +
-			powershellQuoteLiteral(hookBinary) + " " + strings.Join(quoted, " ") + " | Microsoft.PowerShell.Core\\Out-Host; exit $LASTEXITCODE }",
+			powershellQuoteLiteral(hookBinary) + " " + strings.Join(quoted, " ") +
+			" | Microsoft.PowerShell.Core\\Out-Host; if ($null -eq $LASTEXITCODE) { exit 1 }; exit $LASTEXITCODE }",
 		"$hookStart=[System.Diagnostics.ProcessStartInfo]::new(" + powershellQuoteLiteral(hookBinary) + "," +
 			powershellQuoteLiteral(strings.Join(arguments, " ")) + ")",
 		"$hookStart.UseShellExecute=$false",
@@ -972,6 +974,7 @@ func TestCodexSetupRepairsLegacyNonWaitingPowerShellCommand(t *testing.T) {
 		command string
 	}{
 		{name: "1.0.4 awaited bridge", command: bridge},
+		{name: "1.0.6 awaited bridge without the fallback exit check", command: legacyAwaitedForTest(t, bridge)},
 		{name: "non-waiting", command: legacyWindowsNativePowerShellHookCommandForBinary("codex", hookBinary)},
 		{name: "unqualified-start-process", command: legacyUnqualifiedWindowsNativePowerShellHookCommandForBinary("codex", hookBinary)},
 		{name: "start-process", command: legacyStartProcessWindowsNativePowerShellHookCommand("codex", hookBinary)},
@@ -2748,5 +2751,67 @@ func TestWindowsNativeConfigMatrix(t *testing.T) {
 				t.Errorf("shared sidecar %s removed by connector teardown: %v", hookConfigSidecarName, err)
 			}
 		})
+	}
+}
+
+// legacyAwaitedForTest is command as releases up to 1.0.6 rendered it.
+func legacyAwaitedForTest(t *testing.T, command string) string {
+	t.Helper()
+	legacy, ok := legacyWindowsAwaitedHookCommand(command)
+	if !ok || legacy == command {
+		t.Fatalf("no 1.0.x form of %q", command)
+	}
+	return legacy
+}
+
+// Releases up to 1.0.6 ended the Constrained Language fallback with
+// `exit $LASTEXITCODE`, which is 0 (allow) when the launcher never started.
+// The current render exits 1 there, and the 1.0.x render of every awaited
+// bridge stays owned so setup rewrites it and teardown removes it.
+func TestWindowsAwaitedHookLegacyFallbackRenderStaysOwned(t *testing.T) {
+	hookBinary := `C:\Users\Example User\.local\bin\defenseclaw-hook.exe`
+	contract := builtinHookContracts["codex"][0]
+	bridges := map[string]string{
+		"codex bridge":       windowsNativePowerShellHookCommandForCodexEvent(contract.Events[0], contract.ContractID, hookBinary),
+		"antigravity bridge": windowsNativePowerShellHookCommandForEvent("antigravity", "PreToolUse", hookBinary),
+		"unbound bridge":     windowsNativePowerShellHookCommandForBinary("codex", hookBinary),
+		"kiro wrapper":       windowsKiroHookCommandForBinary(hookBinary, KiroHookSurfaceV3, true),
+	}
+	for name, current := range bridges {
+		t.Run(name, func(t *testing.T) {
+			decoded := decodePowerShellEncodedCommandForTest(t, current)
+			if !strings.Contains(decoded, "if ($null -eq $LASTEXITCODE) { exit 1 }; exit $LASTEXITCODE }") {
+				t.Fatalf("current render lacks the fail-closed fallback: %s", decoded)
+			}
+			legacy := legacyAwaitedForTest(t, current)
+			legacyScript := decodePowerShellEncodedCommandForTest(t, legacy)
+			if strings.Contains(legacyScript, "$null -eq $LASTEXITCODE") ||
+				!strings.Contains(legacyScript, " | Microsoft.PowerShell.Core\\Out-Host; exit $LASTEXITCODE }") {
+				t.Fatalf("1.0.x render = %s", legacyScript)
+			}
+			if back, ok := currentWindowsAwaitedHookCommand(legacy); !ok || back != current {
+				t.Fatalf("current form of the 1.0.x render = %q, %v; want %q", back, ok, current)
+			}
+			if name == "codex bridge" || name == "unbound bridge" {
+				if _, owned := nativeHookExactCommands([]string{hookBinary})[legacy]; !owned {
+					t.Fatal("1.0.x render is not an owned native hook command")
+				}
+			}
+		})
+	}
+	// A command whose fallback was edited is not rewritten into ownership.
+	edited := strings.Replace(decodePowerShellEncodedCommandForTest(t, bridges["codex bridge"]),
+		"if ($null -eq $LASTEXITCODE) { exit 1 }; ", "", 1) + "; Write-Host extra"
+	encoded := windowsSystemPowerShellExe() + " -NoLogo -NoProfile -NonInteractive -EncodedCommand " + powershellEncodedCommand(edited)
+	if current, ok := currentWindowsAwaitedHookCommand(encoded); ok && current == bridges["codex bridge"] {
+		t.Fatal("an edited script was recognized as the current render")
+	}
+	// The Antigravity teardown list carries both renders of every event.
+	owned := antigravityOwnedHookCommandsForOS("windows", "antigravity-hook.sh")
+	for _, event := range antigravityLifecycleEvents {
+		current := antigravityHookInvocationCommandForEvent("windows", event, "antigravity-hook.sh")
+		if !slices.Contains(owned, current) || !slices.Contains(owned, legacyAwaitedForTest(t, current)) {
+			t.Fatalf("antigravity owned commands lack a render of %s", event)
+		}
 	}
 }

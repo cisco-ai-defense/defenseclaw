@@ -617,6 +617,7 @@ func NewSidecar(cfg *config.Config, store *audit.Store, logger *audit.Logger) (*
 	SetUserEmailCollectionEnabled(cfg.AIDiscovery.IncludeUserEmail)
 	setAgentIdentityConfig(cfg)
 	applyIdentityPosture(cfg)
+	setProviderRegistryManagedEnterprise(managed.IsManagedEnterprise(cfg.DeploymentMode))
 	return sidecar, nil
 }
 
@@ -2330,6 +2331,7 @@ func (s *Sidecar) applyConfigReloadSnapshot(
 	SetUserEmailCollectionEnabled(next.AIDiscovery.IncludeUserEmail)
 	setAgentIdentityConfig(&next)
 	applyIdentityPosture(&next)
+	setProviderRegistryManagedEnterprise(nextManagedEnterprise)
 
 	// The judge is wired before the generation is published: a request
 	// that pins the next generation runs its judge, already bound to the
@@ -3111,6 +3113,19 @@ func (s *Sidecar) retryManagedInspector(ctx context.Context, api *APIServer) {
 	}
 }
 
+// cmidLibraryName is the Cloud Management identity library the platform's
+// CMID provider loads, for operator-facing diagnostics.
+func cmidLibraryName() string {
+	switch runtime.GOOS {
+	case "windows":
+		return "cmidapi.dll"
+	case "darwin":
+		return "libcmidapi.dylib"
+	default:
+		return "the Cloud Management identity library"
+	}
+}
+
 // newManagedInspector constructs the managed_enterprise Inspector:
 // ensure the cloud auth provider is available, then build a
 // CiscoDefenseClawInspectClient and wire telemetry. Returns nil (and
@@ -3151,8 +3166,8 @@ func (s *Sidecar) newManagedInspector(ctx context.Context, siteLabel string) Ins
 		fmt.Fprintf(os.Stderr,
 			"[managed-cloud] CMID provider constructed but not yet ready (%s): %v — "+
 				"inspector will retry per-inspect; enforcement is fail-open until "+
-				"libcmidapi.dylib becomes loadable\n",
-			siteLabel, err)
+				"%s becomes loadable\n",
+			siteLabel, err, cmidLibraryName())
 	}
 	m := NewCiscoDefenseClawInspectClient(&cfg.CiscoAIDefense, prov)
 	if m == nil {

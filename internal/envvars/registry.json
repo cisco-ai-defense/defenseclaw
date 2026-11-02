@@ -8403,6 +8403,27 @@
         }
       ],
       "since": "1.0.5"
+    },
+    {
+      "name": "DEFENSECLAW_HOOK_PREMAIN_HELPER",
+      "category": "test_fixture",
+      "purpose": "Selects the child-process mode of the defenseclaw-hook test binary (1 = stderr before main, panic = a recovered panic) so the parent test can assert nothing reaches the agent's stderr.",
+      "default": "unset",
+      "accepted_values": [
+        "1",
+        "panic",
+        "unset"
+      ],
+      "security_impact": "none",
+      "surface_in_doctor": false,
+      "managed": "ignore",
+      "consumers": [
+        {
+          "location": "cmd/defenseclaw-hook/premain_stderr_test.go",
+          "description": "Re-executes the test binary as the hook to check pre-main stderr and panic recovery"
+        }
+      ],
+      "since": "1.0.7"
     }
   ]
 }

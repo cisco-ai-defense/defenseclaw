@@ -163,11 +163,34 @@ func CopilotVSCodeLocalManagedHookCommand(goos, hookBinary, event string) string
 // it while 1.0.0 is a supported upgrade source.
 func CopilotVSCodeLocalPriorReleaseHookCommand(goos, hookBinary, event string) string {
 	if goos == "windows" {
-		return windowsNativePowerShellHookCommandForBoundEvent("copilot", event, "", hookBinary,
+		command := windowsNativePowerShellHookCommandForBoundEvent("copilot", event, "", hookBinary,
 			"--enterprise-managed", "--hook-surface", CopilotHookSurfaceVSCodeLocal)
+		// 1.0.0 ended the Constrained Language fallback without the
+		// fail-closed exit (legacyWindowsAwaitedHookCommand).
+		if legacy, ok := legacyWindowsAwaitedHookCommand(command); ok {
+			return legacy
+		}
+		return command
 	}
 	return shellSingleQuote(hookBinary) + " hook --connector copilot --enterprise-managed --event " +
 		shellSingleQuote(event) + " --hook-surface " + CopilotHookSurfaceVSCodeLocal
+}
+
+// CopilotVSCodeLocalGuardedPriorReleaseHookCommand is
+// CopilotVSCodeLocalManagedHookCommand as releases 1.0.1 to 1.0.6 rendered it
+// on Windows: their Constrained Language fallback exited 0 when the launcher
+// never started (legacyWindowsAwaitedHookCommand). Each enrolled user of an
+// upgraded install holds it until the guardian rewrites the files, so it
+// stays DefenseClaw's own, as CopilotVSCodeLocalPriorReleaseHookCommand does.
+// Elsewhere it is the current command.
+func CopilotVSCodeLocalGuardedPriorReleaseHookCommand(goos, hookBinary, event string) string {
+	command := CopilotVSCodeLocalManagedHookCommand(goos, hookBinary, event)
+	if goos == "windows" {
+		if legacy, ok := legacyWindowsAwaitedHookCommand(command); ok {
+			return legacy
+		}
+	}
+	return command
 }
 
 // managedDeploymentMarker is the file whose presence says the managed
@@ -270,7 +293,12 @@ func perUserOwnedHookCommands(connectorName, dataDir, hookBinary string) []strin
 			}
 			if name == "antigravity" {
 				for _, event := range antigravityLifecycleEvents {
-					commands = append(commands, windowsNativePowerShellHookCommandForEvent(name, event, binary))
+					command := windowsNativePowerShellHookCommandForEvent(name, event, binary)
+					commands = append(commands, command)
+					// The 1.0.x render stays DefenseClaw's own.
+					if legacy, ok := legacyWindowsAwaitedHookCommand(command); ok {
+						commands = append(commands, legacy)
+					}
 				}
 			}
 			commands = append(commands, binary)
