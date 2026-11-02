@@ -298,6 +298,10 @@ type Manager struct {
 	// gwErrAt paces reconnects: requests arriving within connectBackoff of
 	// a failed attempt get its error instead of dialing again.
 	gwErrAt time.Time
+	// pendingSeen (under mu) is when this daemon first saw each sandbox
+	// refused for an unsettled OpenShell driver operation while OpenShell
+	// kept it in its error state (pendingRefusal).
+	pendingSeen map[string]time.Time
 	// gwStopped is set while the caller stopped the gateway on purpose
 	// (GatewayStopped): the failed dials until it runs again are no
 	// degraded health.

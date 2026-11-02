@@ -1408,6 +1408,15 @@ func (m *Manager) deleteLocked(ctx context.Context, b *box, req sandboxapi.Delet
 		if err != nil && !openshell.IsNotFound(err) {
 			m.dropGateway(gw, err)
 			m.deleteFailed(ctx, gw, b)
+			if pendingDriverOp(err) {
+				// Retry first; the recovery only once it is provably stuck
+				// (rel-1-0-6:GAP-0446).
+				var phase openshell.SandboxPhase
+				if sb != nil {
+					phase = sb.Status.Phase
+				}
+				return nil, m.pendingRefusal(name, phase, m.managedMode())
+			}
 			return nil, upstream("delete sandbox "+name, err)
 		}
 		err = gw.Client.WaitDeleted(ctx, name)
@@ -1422,6 +1431,7 @@ func (m *Manager) deleteLocked(ctx context.Context, b *box, req sandboxapi.Delet
 			return nil, upstream("wait for sandbox "+name+" deletion", err)
 		}
 	}
+	m.forgetPending(name)
 	// The workload is gone: what it left in the project stays on this
 	// machine, so the guard makes its final pass before it is released.
 	m.finishGuard(ctx, b)
