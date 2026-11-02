@@ -106,7 +106,9 @@ with `mode: enforce` every user falls back to monitor mode (`kernel_enforce_ack_
 until the approval matches: push the old and the new digest as a list while the rings
 upgrade ([Upgrades](/docs/enterprise/tetragon#upgrades)).
 
-For a payload archive, extract the older or newer release into a root-only folder and run `enterprise linux upgrade --payload`.
+For a payload archive, extract the new release into a root-only folder. On hosts
+without fapolicyd, run `enterprise linux upgrade --payload` after extraction.
+On hosts with fapolicyd, use the staged-payload trust and two-stage flow below.
 
 #### Linux payload upgrade
 
@@ -118,6 +120,11 @@ sudo install -d -o root -g root -m 0700 "$PAYLOAD"
 sudo tar -xzf "defenseclaw-enterprise-${VERSION}-linux-${ARCH}.tar.gz" \
   -C "$PAYLOAD" --no-same-owner --no-same-permissions
 sudo chmod -R go-w "$PAYLOAD"
+```
+
+Without fapolicyd:
+
+```bash
 sudo "$PAYLOAD/defenseclaw-gateway" enterprise linux upgrade --payload "$PAYLOAD" --json
 ```
 
@@ -125,6 +132,27 @@ Run the new release's `defenseclaw-gateway` from the extracted folder. The paylo
 must be owned by root and not writable by group or others, so extract it into a
 root-only folder, never a shared one such as `/var/tmp`. The folder must also allow
 execution: on a CIS host `/tmp` and `/var/tmp` are mounted `noexec`.
+
+With fapolicyd, trust the staged payload **before** running its gateway. Add
+the entry for a new payload path; update an existing entry if you extracted
+again into that path or changed its files. Reuse the entry for an unchanged
+staged folder. The [tarball steps](/docs/enterprise/linux#3b-or-install-from-the-tarball)
+give both staged trust commands. Then stage the upgrade without starting
+services, update the existing installed-tree trust entry, check execution as
+the service user, and start and verify:
+
+```bash
+sudo "$PAYLOAD/defenseclaw-gateway" enterprise linux ensure --payload "$PAYLOAD" --no-start --json
+sudo fapolicyd-cli --file update /opt/defenseclaw/ --trust-file defenseclaw && sudo fapolicyd-cli --update
+sudo -u defenseclaw /opt/defenseclaw/bin/defenseclaw-gateway --version-json
+sudo "$PAYLOAD/defenseclaw-gateway" enterprise linux ensure --payload "$PAYLOAD" --json
+sudo /opt/defenseclaw/bin/defenseclaw-gateway enterprise linux verify --json
+```
+
+The fapolicyd update is asynchronous. If the service-user check is denied
+immediately after `--update`, retry it after fapolicyd finishes syncing; it
+must pass before the final `ensure`. Check that `defenseclaw-gateway.service`
+is active afterward.
 
 ### macOS
 
@@ -181,7 +209,7 @@ the older app; otherwise Intune can reapply the newer release.
 | Windows | `/ensure` refuses to install an older version (`downgrade_refused`, exit `1603`). Run the older release's Setup with `/upgrade CONFIG=<version 8 config> JSON=1`: an explicit `upgrade` does not compare versions. A Setup before 1.0.4 tries once to replace the hook program, so while agents run hooks it can stop with `1603` and roll back to the installed release; run it again, or run it while agents are idle. A Setup before 1.0.7 replaces the programs in `bin` with a step that briefly leaves no startable hook, so an agent that starts a hook in that moment gets an error and runs that one tool call with no DefenseClaw decision; Setup 1.0.7 and later swap them in one step. The older release's Setup does the replacing on a rollback, so roll back while agents are idle. Uninstalling and installing the older release also works |
 | Debian and Ubuntu | Create the root-owned rollback marker, then install the older package: `sudo touch /var/lib/defenseclaw-enterprise/allow-downgrade`, then `sudo apt install --allow-downgrades ./defenseclaw-enterprise-<older>-linux-amd64.deb`. Its postinstall applies the installed config if compatible. If it refuses a version 9 config, finish with `sudo /opt/defenseclaw/bin/defenseclaw-gateway enterprise linux ensure --from-package --allow-downgrade --config <version 8 config> --json` |
 | RHEL | Create the same marker, then `sudo dnf downgrade ./defenseclaw-enterprise-<older>-linux-amd64.rpm` (`rpm -U` refuses an older package). If its postinstall refuses a version 9 config, use the same `ensure --from-package --allow-downgrade --config <version 8 config>` recovery |
-| Linux payload | Extract the older release as in [Upgrade](#linux), then run `sudo "$PAYLOAD/defenseclaw-gateway" enterprise linux upgrade --payload "$PAYLOAD" --allow-downgrade --config <compatible config> --json` |
+| Linux payload | Extract the older release as in [Linux payload upgrade](#linux-payload-upgrade), then follow [Linux payload rollback](#linux-payload-rollback) for the fapolicyd or non-fapolicyd path |
 | macOS | Create the root-owned rollback marker, then install the older package: `sudo touch /opt/cisco/defenseclaw/lifecycle/allow-downgrade`, then `sudo installer -pkg ./defenseclaw-enterprise-<older>-darwin-arm64.pkg -target /`. An older release that reads `config_version: 9` applies the installed config and is done (`last-package-result.json` reads `ok`). Only a release that reads version 8 fails on the version 9 config; then run `sudo /opt/cisco/defenseclaw/bin/defenseclaw-gateway enterprise macos ensure --from-package --allow-downgrade --config <version 8 config> --json` |
 
 - **Windows rollback to 1.0.0–1.0.2 from an open-mode deployment:** These published Setups cannot collect a runtime generation with `hook_fail_mode: open`; they may install the older version, then exit `1603` while retiring the previous journal. Before running the older Setup, save the current admin config. Set `guardrail.hook_fail_mode` and each `guardrail.connectors.<name>.hook_fail_mode` to `closed` in a compatible config, then apply it with the installed 1.0.4 Setup `/ensure CONFIG=<closed config> JSON=1`. Run that Setup's `/verify JSON=1` and resolve any pending users before the rollback. Pass the same closed config to the older Setup `/upgrade`; that release cannot provide open-mode managed hooks. If the older Setup already committed with `1603` and reports a journal retirement error, run the 1.0.4 Setup `/ensure CONFIG=<desired admin config> JSON=1`; it recovers the committed journal and validates and collects the old generation. Do not delete the journal or runtime files by hand. Version 1.0.3 understands open-mode generations.
@@ -194,6 +222,35 @@ the older app; otherwise Intune can reapply the newer release.
 - **Rollback from 1.0.6 to 1.0.5 while a user runs OpenCode V2 (macOS pkg, Linux packages):** 1.0.5 guards OpenCode V1 only and cannot be changed. During a package rollback only the older package's scripts run, so 1.0.6 cannot warn or stop it, and the root-owned marker is created by hand. After the rollback that user's OpenCode V2 runs unguarded, and on macOS 1.0.5 gives no warning for it (a Windows 1.0.5 reports `agent_unprotected` for such a user; Linux was not tested). Before you roll back, list the users who run OpenCode V2 (the `opencode` entries in `status`, `npm ls -g @opencode/cli` as each user) and have them put OpenCode V1 back (`npm uninstall -g @opencode/cli && npm install -g opencode-ai@1.18`), or accept that they run unguarded until you go forward again. Going forward again to 1.0.6 guards them without any other step.
 - **Rollback to the published 1.0.2 (Linux packages):** while the older package swaps the gateway, the 1.0.2 managed hook can take longer than 5 seconds to answer a call. In one RHEL test, 26 of 960 Claude Code and Codex calls did so, all during the package downgrade; each was still decided, and no call policy refuses was allowed. Releases from 1.0.3 answer or fail closed within 4 seconds. Roll back while agents are idle.
 - **Rollback to 1.0.3 or 1.0.4 with a large audit store (Linux):** When the 1.0.3 or 1.0.4 gateway first starts on a large audit store (`/var/lib/defenseclaw/audit.db`), it is busy with that store and does not answer hooks in time. On RHEL with a 1.4 GB store this lasted 3.5 to 7.5 minutes after `dnf downgrade` finished. Rolling back to the published 1.0.4 with a 1.5 GB store, it lasted about 4 minutes. Meanwhile managed hooks deny agent tool calls and prompts (`the DefenseClaw gateway did not answer in time` or `the DefenseClaw gateway is not available`), while `enterprise linux status` and `verify` say ok. Roll back while agents are idle, or tell users to retry once the gateway answers.
+
+### Linux payload rollback
+
+After extracting the older payload, choose a config that its release reads.
+On a host without fapolicyd, run:
+
+```bash
+COMPATIBLE_CONFIG=/root/compatible-config.yaml  # set to a config the older release reads
+sudo "$PAYLOAD/defenseclaw-gateway" enterprise linux upgrade --payload "$PAYLOAD" --allow-downgrade --config "$COMPATIBLE_CONFIG" --json
+```
+
+On a host with fapolicyd, first trust the staged older payload. Add trust for
+a new payload path, update it if files at a trusted path changed, or reuse an
+unchanged entry as described in the [tarball steps](/docs/enterprise/linux#3b-or-install-from-the-tarball).
+Then stage the rollback without starting services, update the installed-tree
+entry, check execution as `defenseclaw`, and activate the older release:
+
+```bash
+COMPATIBLE_CONFIG=/root/compatible-config.yaml  # set to a config the older release reads
+sudo "$PAYLOAD/defenseclaw-gateway" enterprise linux ensure --payload "$PAYLOAD" --allow-downgrade --config "$COMPATIBLE_CONFIG" --no-start --json
+sudo fapolicyd-cli --file update /opt/defenseclaw/ --trust-file defenseclaw && sudo fapolicyd-cli --update
+sudo -u defenseclaw /opt/defenseclaw/bin/defenseclaw-gateway --version-json
+sudo "$PAYLOAD/defenseclaw-gateway" enterprise linux ensure --payload "$PAYLOAD" --allow-downgrade --config "$COMPATIBLE_CONFIG" --json
+sudo /opt/defenseclaw/bin/defenseclaw-gateway enterprise linux verify --json
+```
+
+If fapolicyd has not yet applied the trust update, retry the service-user
+check after it finishes syncing. It must pass before the final `ensure`.
+Check that `defenseclaw-gateway.service` is active afterward.
 
 ### Roll back notes per channel
 
@@ -519,7 +576,10 @@ On Windows, `reconcile` restarts the guardian and waits for a fresh reconcile:
   masked is enabled or unmasked again, and the result says so. `verify` names such a unit.
 - **Payload installs (Linux and macOS).** `repair` keeps the installed binaries. If they no
   longer match the deployment record, it stops with `payload_invalid`; run
-  `repair --payload <dir>` with the same release's payload.
+  `repair --payload <dir>` with the same release's payload. On a Linux tarball
+  host with fapolicyd, trust the staged payload and use the
+  [two-stage flow](#linux-payload-upgrade) to restore the installed binaries
+  before starting services.
 - **Linux package installs.** To restore the binaries, reinstall the package:
   `sudo apt install --reinstall ./<package>.deb` or `sudo dnf reinstall ./<package>.rpm`. A
   power loss or reset during a package upgrade can leave the binaries and units the package
@@ -709,8 +769,12 @@ those, install the package or payload again and purge, or delete `/var/lib/defen
 enrolled account's sandboxes and any sandbox work not pulled yet. On Linux, the files in
 `/etc/defenseclaw/policies` stay unless you purge. To turn the deployment on again with the same
 config, run `ensure --from-package --config <file>` on a package host; a payload uninstall removes
-the binaries, so stage the payload again and run its `ensure --payload <dir> --config <file>`. Add
-`--keep-state` to keep the machine state for a reinstall instead.
+the binaries, so stage the payload again and run its `ensure --payload <dir> --config <file>`.
+On a fapolicyd host, follow the staged-payload trust and two-stage
+[tarball install](/docs/enterprise/linux#3b-or-install-from-the-tarball) steps;
+refresh an existing `/opt/defenseclaw/` trust entry with `--file update` after
+staging, or use `--file add` if no entry exists. Add `--keep-state` to keep the
+machine state for a reinstall instead.
 
 ### Uninstall notes
 

@@ -622,9 +622,13 @@ record, config and state so you can fix the cause and rerun. The plain uninstall
 keeps `/etc/defenseclaw/policies` (root-owned, mode `0751`) and removes the vendor
 policies in `/opt/defenseclaw/share/policies`; `--purge` removes your policies too.
 To turn the deployment on again, run `ensure --from-package --config <file>` on a
-package host, or stage the payload and run `"$PAYLOAD/defenseclaw-gateway"
-enterprise linux ensure --payload "$PAYLOAD" --config <file>`. After an uninstall
-or reinstall, ask users to restart their agents (`agent_sessions_restart_required`).
+package host. On a tarball host without fapolicyd, stage the payload and run
+`"$PAYLOAD/defenseclaw-gateway" enterprise linux ensure --payload "$PAYLOAD" --config <file>`.
+With fapolicyd, follow the staged-payload trust and two-stage
+[tarball install](#3b-or-install-from-the-tarball), passing `--config <file>`
+to both `ensure` calls. Add installed-tree trust if there is no prior entry;
+update an existing entry after staging. After an uninstall or reinstall, ask
+users to restart their agents (`agent_sessions_restart_required`).
 
 On a package host `uninstall` leaves the package's binaries and units, so dpkg or
 rpm still lists `defenseclaw-enterprise`. Removing the package runs `uninstall`:
@@ -659,8 +663,10 @@ own host management tools.
 
 ## Upgrades and changes
 
-- **Upgrade.** Install the newer package with apt or dnf, or run `ensure` with the
-  newer tarball. The lifecycle refuses an older release unless you pass
+- **Upgrade.** Install the newer package with apt or dnf. On a tarball host
+  without fapolicyd, run `ensure` with the newer payload. With fapolicyd, use
+  the [staged-payload trust and two-stage flow](#3b-or-install-from-the-tarball).
+  The lifecycle refuses an older release unless you pass
   `--allow-downgrade`, and the package refuses an older package unless
   `/var/lib/defenseclaw-enterprise/allow-downgrade` exists
   ([Upgrade](/docs/enterprise/lifecycle), [Roll back](/docs/enterprise/lifecycle)).
