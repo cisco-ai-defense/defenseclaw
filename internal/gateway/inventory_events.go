@@ -239,23 +239,24 @@ func emitEndpointInventory(
 	// managed_enterprise gates the whole function above, so this whole block
 	// is inert in unmanaged mode.
 	if discoveryReport != nil {
+		discoveryPartial := !aiDiscoveryReportComplete(discoveryReport)
 		mcpEntries := discoveredMCPEntriesFromReport(*discoveryReport)
 		if err := emitEndpointInventorySnapshot(
-			ctx, emitter, "endpoint_discovered_mcp_inventory", mcpEntries, false,
+			ctx, emitter, "endpoint_discovered_mcp_inventory", mcpEntries, discoveryPartial,
 			config.ObservabilityV8ManagedMCPInventoryAction, publish,
 		); err != nil && firstErr == nil {
 			firstErr = err
 		}
 		skillEntries := discoveredEntriesFromReport(*discoveryReport, inventory.SignalSkill, "skill")
 		if err := emitEndpointInventorySnapshot(
-			ctx, emitter, "endpoint_skill_inventory", skillEntries, false,
+			ctx, emitter, "endpoint_skill_inventory", skillEntries, discoveryPartial,
 			config.ObservabilityV8ManagedSkillInventoryAction, publish,
 		); err != nil && firstErr == nil {
 			firstErr = err
 		}
 		pluginEntries := discoveredEntriesFromReport(*discoveryReport, inventory.SignalPlugin, "plugin")
 		if err := emitEndpointInventorySnapshot(
-			ctx, emitter, "endpoint_plugin_inventory", pluginEntries, false,
+			ctx, emitter, "endpoint_plugin_inventory", pluginEntries, discoveryPartial,
 			config.ObservabilityV8ManagedPluginInventoryAction, publish,
 		); err != nil && firstErr == nil {
 			firstErr = err
@@ -277,9 +278,9 @@ func emitEndpointInventory(
 	// Skipping it would leave the cloud holding removed MCP servers forever — the
 	// stored digest would never advance past the last non-empty publish — and
 	// would silently drop the collection from the daily complete bundle.
-	perConnectorMCP := perConnectorMCPEntries(cfg, reg)
+	perConnectorMCP, perConnectorPartial := perConnectorMCPEntriesWithStatus(cfg, reg)
 	if err := emitEndpointInventorySnapshot(
-		ctx, emitter, "endpoint_per_connector_mcp_inventory", perConnectorMCP, false,
+		ctx, emitter, "endpoint_per_connector_mcp_inventory", perConnectorMCP, perConnectorPartial,
 		config.ObservabilityV8ManagedMCPInventoryAction, publish,
 	); err != nil && firstErr == nil {
 		firstErr = err
@@ -303,12 +304,22 @@ func emitEndpointInventory(
 // cfg.AIDiscovery.HomeDirs (populated by the installer's eligible-users
 // enumeration).
 func perConnectorMCPEntries(cfg *config.Config, reg *connector.Registry) []endpointInventoryComponent {
-	return perConnectorMCPEntriesForOS(cfg, reg, runtime.GOOS)
+	entries, _ := perConnectorMCPEntriesWithStatus(cfg, reg)
+	return entries
 }
 
 func perConnectorMCPEntriesForOS(cfg *config.Config, reg *connector.Registry, goos string) []endpointInventoryComponent {
+	entries, _ := perConnectorMCPEntriesForOSWithStatus(cfg, reg, goos)
+	return entries
+}
+
+func perConnectorMCPEntriesWithStatus(cfg *config.Config, reg *connector.Registry) ([]endpointInventoryComponent, bool) {
+	return perConnectorMCPEntriesForOSWithStatus(cfg, reg, runtime.GOOS)
+}
+
+func perConnectorMCPEntriesForOSWithStatus(cfg *config.Config, reg *connector.Registry, goos string) ([]endpointInventoryComponent, bool) {
 	if cfg == nil {
-		return nil
+		return nil, true
 	}
 	// Union of ActiveConnectors() and reg.Available() so every registered
 	// connector is scanned. ActiveConnectors() alone is often narrower than
@@ -342,8 +353,9 @@ func perConnectorMCPEntriesForOS(cfg *config.Config, reg *connector.Registry, go
 		}
 	}
 	if len(connectors) == 0 {
-		return nil
+		return nil, false
 	}
+	partial := false
 	// homes = daemon's own HOME (via ReadMCPServersForConnector) plus every
 	// configured user home (via direct-path readers). Empty homes list falls
 	// back to the single ReadMCPServersForConnector path.
@@ -434,6 +446,8 @@ func perConnectorMCPEntriesForOS(cfg *config.Config, reg *connector.Registry, go
 		// Native readers check each file at its open, including links.
 		if servers, err := cfg.ReadMCPServersForConnector(connectorName); err == nil {
 			appendServers(connectorName, "", daemonHomeForInventoryAttribution(), servers)
+		} else if !errors.Is(err, fs.ErrNotExist) {
+			partial = true
 		}
 	}
 	// Pass 2 — every configured user home via direct-path readers.
@@ -446,12 +460,14 @@ func perConnectorMCPEntriesForOS(cfg *config.Config, reg *connector.Registry, go
 		}
 		homeScope := endpointInventoryScopeKey(home)
 		for _, connectorName := range connectors {
-			for _, servers := range readMCPServersUnderHomeForOS(connectorName, home, goos) {
+			groups, readPartial := readMCPServersUnderHomeForOSWithStatus(connectorName, home, goos)
+			partial = partial || readPartial
+			for _, servers := range groups {
 				appendServers(connectorName, homeScope, home, servers)
 			}
 		}
 	}
-	return components
+	return components, partial
 }
 
 // inventoryHomeOwner resolves who owns one profile directory, and which
@@ -605,25 +621,46 @@ func readMCPServersUnderHome(connectorName, home string) [][]config.MCPServerEnt
 }
 
 func readMCPServersUnderHomeForOS(connectorName, home, goos string) [][]config.MCPServerEntry {
+	entries, _ := readMCPServersUnderHomeForOSWithStatus(connectorName, home, goos)
+	return entries
+}
+
+func readMCPServersUnderHomeForOSWithStatus(connectorName, home, goos string) ([][]config.MCPServerEntry, bool) {
 	if home == "" {
-		return nil
+		return nil, false
 	}
 	var results [][]config.MCPServerEntry
+	partial := false
 	tryFile := func(reader func(string) ([]config.MCPServerEntry, error), relPath string) {
 		full := filepath.Join(home, relPath)
 		if managed.RequireWindowsGatewayPathOutsideUserProfiles(full) != nil {
+			partial = true
+			return
+		}
+		// Some native readers wrap a missing file in a generic error, so
+		// distinguish ordinary absence before asking them to parse it. A file
+		// that disappears between these operations remains partial.
+		if _, err := os.Lstat(full); err != nil {
+			if !errors.Is(err, fs.ErrNotExist) {
+				partial = true
+			}
 			return
 		}
 		if entries, err := reader(full); err == nil && len(entries) > 0 {
 			results = append(results, entries)
+		} else if err != nil && !errors.Is(err, fs.ErrNotExist) {
+			partial = true
 		}
 	}
 	tryHome := func(reader func(string) ([]config.MCPServerEntry, error)) {
 		if managed.RequireWindowsGatewayPathOutsideUserProfiles(home) != nil {
+			partial = true
 			return
 		}
 		if entries, err := reader(home); err == nil && len(entries) > 0 {
 			results = append(results, entries)
+		} else if err != nil && !errors.Is(err, fs.ErrNotExist) {
+			partial = true
 		}
 	}
 	switch strings.ToLower(strings.TrimSpace(connectorName)) {
@@ -685,7 +722,7 @@ func readMCPServersUnderHomeForOS(connectorName, home, goos string) [][]config.M
 	case "amp":
 		tryHome(config.ReadMCPServersAMPUnderHome)
 	}
-	return results
+	return results, partial
 }
 
 // makeEndpointInventoryEmitter rebuilds the connector registry for each
