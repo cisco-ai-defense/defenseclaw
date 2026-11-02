@@ -3698,11 +3698,36 @@ func actionWindowsNestedArgument(scan actionWindowsScanResult, start, end int) b
 // a script: a shell (sh, bash, pwsh, cmd ...) or Invoke-Expression.
 func actionWindowsPipedIntoShell(words []string, end int) bool {
 	for k := end; k < len(words) && words[k] == "|"; {
-		if k+1 < len(words) && actionWindowsScriptReader(words[k+1]) {
+		stage := k + 1
+		if stage >= len(words) {
+			return false
+		}
+		last := stage
+		for last < len(words) && words[last] != ";" && words[last] != "|" && words[last] != "||" && words[last] != "&" && words[last] != "&&" {
+			last++
+		}
+		if strings.TrimSuffix(strings.ToLower(programBase(strings.ReplaceAll(words[stage], `\`, "/"))), ".exe") == "env" {
+			stage++
+			for stage < last {
+				word := words[stage]
+				switch word {
+				case "--":
+					stage++
+				case "-u", "--unset", "-C", "--chdir":
+					stage += 2
+				default:
+					if strings.HasPrefix(word, "-") || strings.Contains(word, "=") {
+						stage++
+						continue
+					}
+				}
+				break
+			}
+		}
+		if stage < last && actionWindowsScriptReader(words[stage]) {
 			return true
 		}
-		for k++; k < len(words) && words[k] != ";" && words[k] != "|" && words[k] != "||" && words[k] != "&" && words[k] != "&&"; k++ {
-		}
+		k = last
 	}
 	return false
 }
