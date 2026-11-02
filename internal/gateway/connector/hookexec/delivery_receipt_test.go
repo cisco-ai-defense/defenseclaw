@@ -190,7 +190,7 @@ func (w *pauseAfterExplicitAllow) unblock() {
 }
 
 // A gateway that receives the receipt but never finishes the HTTP response
-// cannot hold the agent's hook to the longer request timeout.
+// cannot hold the agent's hook beyond its process deadline.
 func TestManagedHookReceiptWaitHasItsOwnDeadline(t *testing.T) {
 	shortAnswerBudget(t, 500*time.Millisecond)
 	release := make(chan struct{})
@@ -237,8 +237,60 @@ func TestManagedHookReceiptWaitHasItsOwnDeadline(t *testing.T) {
 	case <-time.After(5 * time.Second):
 		t.Fatal("gateway did not receive the hook receipt")
 	}
-	if elapsed > 4*time.Second {
-		t.Fatalf("hook waited %s for a missing receipt confirmation, want the separate %s deadline", elapsed, hookDeliveryReceiptTimeout)
+	if elapsed > managedAnswerDeadlineCap+250*time.Millisecond {
+		t.Fatalf("hook waited %s for a missing receipt confirmation, want the %s process deadline", elapsed, managedAnswerDeadlineCap)
+	}
+}
+
+func TestManagedHookProcessCapIncludesReceiptWait(t *testing.T) {
+	const cap = 1500 * time.Millisecond
+	shortAnswerBudget(t, cap)
+	release := make(chan struct{})
+	received := make(chan string, 1)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		controller := http.NewResponseController(w)
+		if err := controller.EnableFullDuplex(); err != nil {
+			received <- err.Error()
+			return
+		}
+		w.Header().Set("Connection", "close")
+		w.WriteHeader(http.StatusEarlyHints)
+		length, _ := strconv.Atoi(r.Header.Get(HookDeliveryPayloadBytesHeader))
+		if _, err := io.ReadFull(r.Body, make([]byte, length)); err != nil {
+			received <- err.Error()
+			return
+		}
+		// The hook has already spent part of its process budget locally.
+		time.Sleep(550 * time.Millisecond)
+		w.Header().Set(HookDeliveryRequiredHeader, "1")
+		_, _ = io.WriteString(w, `{"action":"allow","codex_output":{"hookSpecificOutput":{"hookEventName":"PreToolUse","permissionDecision":"allow"}}}`+"\n")
+		if err := controller.Flush(); err != nil {
+			received <- err.Error()
+			return
+		}
+		ack := make([]byte, len(HookDeliveryReceiptAck))
+		if _, err := io.ReadFull(r.Body, ack); err != nil {
+			received <- err.Error()
+			return
+		}
+		received <- string(ack)
+		<-release
+	}))
+	defer server.Close()
+	defer close(release)
+	started := time.Now().Add(-500 * time.Millisecond)
+	result, elapsed := runAgainstGateway(t, "codex", server.Listener.Addr().String(), func(opts *Options) {
+		managedCodex(opts)
+		opts.StartedAt = started
+	})
+	if result.code != 0 || !strings.Contains(result.stdout, `"permissionDecision":"allow"`) {
+		t.Fatalf("agent answer code=%d stdout=%q stderr=%q, want allow", result.code, result.stdout, result.stderr)
+	}
+	if got := <-received; got != HookDeliveryReceiptAck {
+		t.Fatalf("gateway receipt = %q, want %q", got, HookDeliveryReceiptAck)
+	}
+	if total := time.Since(started); total > cap+200*time.Millisecond {
+		t.Fatalf("hook process took %s including receipt, want at most %s; measured call %s", total, cap+200*time.Millisecond, elapsed)
 	}
 }
 

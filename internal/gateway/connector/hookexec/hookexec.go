@@ -919,15 +919,22 @@ func doRequest(ctx context.Context, opts Options, sp spec, failMode string, payl
 		return failUnreachable(opts, sp, failMode, foreignListenerReason(opts.APIAddr, pid))
 	}
 	restartDeadline := gatewayRestartDeadline(opts, opts.StartedAt)
-	// One deadline bounds every wait of a tool call: the restart tries, the
-	// dials, a gateway that accepted the call but does not answer, and the
-	// resends below (hookAnswerBudget).
-	opts.answerBy = answerDeadline(opts, opts.StartedAt)
+	// Compute the first try's local facts before starting its answer window.
+	// On a loaded managed host the account, session, and write-path reads can
+	// take time after Run, leaving a healthy gateway only a fraction of the
+	// configured answer budget. The early watchdog still caps the whole call.
+	opts.requestFacts = &hookRequestFacts{}
+	if opts.ManagedEnterprise && !opts.SecureClient {
+		opts.requestFacts.set(make(http.Header), opts, payload)
+	}
+	// The managed gateway gets its answer window after local preparation,
+	// within the hook's process cap. Per-user calls keep their existing
+	// invocation-based deadline.
+	opts.answerBy = gatewayAnswerDeadline(opts, opts.StartedAt, time.Now())
 	ctx, stopAnswer, stopResponseDeadline, releaseAnswer := awaitAnswerBy(ctx, opts.answerBy, progressCeiling(opts, opts.StartedAt), opts.answerWatch)
 	ctx, stopWatch, releaseWatch := watchManagedGatewayStarts(ctx, opts, restartDeadline)
-	// The account, its session, the asset facts and the resolved write
-	// paths are computed once, for every try of this call.
-	opts.requestFacts = &hookRequestFacts{}
+	// Reuse the account, session, asset facts and resolved write paths on
+	// every retry of this call.
 	// A try that must have its connection within the restart budget
 	// (connectBy); the response is read under its context.
 	var releases []func()
@@ -1295,11 +1302,18 @@ func doRequest(ctx context.Context, opts Options, sp spec, failMode string, payl
 	if delivery != nil && resp.StatusCode == http.StatusOK && readErr == nil {
 		opts.answerWatch.setDeliveryReceipt(func(answered, localBlock bool) {
 			// finish calls this only after it writes the answer to the agent.
-			// Keep the request alive for the receipt, using its request/HTTP
-			// deadline rather than the already-met answer deadline.
+			// The receipt shares the managed process deadline with the answer.
+			// A late healthy verdict still reaches the agent before this wait.
 			stopAnswer()
 			if answered {
-				receiptTimer := time.AfterFunc(hookDeliveryReceiptTimeout, requestCancel)
+				receiptWait := hookDeliveryReceiptTimeout
+				if cap := answerDeadline(opts, opts.StartedAt); !cap.IsZero() && time.Until(cap) < receiptWait {
+					receiptWait = time.Until(cap)
+				}
+				if receiptWait < 0 {
+					receiptWait = 0
+				}
+				receiptTimer := time.AfterFunc(receiptWait, requestCancel)
 				defer receiptTimer.Stop()
 				if delivery.acknowledge(localBlock) == nil {
 					// Keep the request alive until HTTP has carried the receipt

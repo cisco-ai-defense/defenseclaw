@@ -23,11 +23,14 @@ func shortAnswerBudget(t *testing.T, budget time.Duration) {
 	t.Helper()
 	previous := hookAnswerBudget
 	previousCodex := perUserCodexAnswerBudget
+	previousManagedCap := managedAnswerDeadlineCap
 	hookAnswerBudget = budget
 	perUserCodexAnswerBudget = budget
+	managedAnswerDeadlineCap = budget
 	t.Cleanup(func() {
 		hookAnswerBudget = previous
 		perUserCodexAnswerBudget = previousCodex
+		managedAnswerDeadlineCap = previousManagedCap
 	})
 }
 
@@ -41,7 +44,7 @@ func TestCertfixGAP0485PerUserCodexAnswerWindow(t *testing.T) {
 		want time.Duration
 	}{
 		{"per-user Codex", Options{Connector: "codex", Event: "PreToolUse"}, 4 * time.Second},
-		{"managed Codex", Options{Connector: "codex", Event: "PreToolUse", ManagedEnterprise: true}, 3500 * time.Millisecond},
+		{"managed Codex", Options{Connector: "codex", Event: "PreToolUse", ManagedEnterprise: true}, 4 * time.Second},
 		{"per-user Claude Code", Options{Connector: "claudecode", Event: "PreToolUse"}, 3500 * time.Millisecond},
 		{"Secure Client", Options{Connector: "codex", Event: "PreToolUse", SecureClient: true}, 0},
 	} {
@@ -75,6 +78,30 @@ func TestCertfixGAP0485LatePerUserCodexAllow(t *testing.T) {
 	})
 	if blocked(result) || result.code != 0 {
 		t.Fatalf("after %s code=%d stdout=%q stderr=%q, want the gateway allow", elapsed, result.code, result.stdout, result.stderr)
+	}
+}
+
+func TestManagedGatewayContactGetsAnswerBudgetWithinProcessCap(t *testing.T) {
+	started := time.Now()
+	managed := Options{Connector: "claudecode", Event: "PreToolUse", ManagedEnterprise: true}
+	for _, tc := range []struct {
+		contact time.Time
+		want    time.Time
+	}{
+		{started.Add(200 * time.Millisecond), started.Add(200*time.Millisecond + hookAnswerBudget)},
+		{started.Add(2100 * time.Millisecond), started.Add(managedAnswerDeadlineCap)},
+	} {
+		if got := gatewayAnswerDeadline(managed, started, tc.contact); !got.Equal(tc.want) {
+			t.Fatalf("contact %s: deadline %s, want %s", tc.contact.Sub(started), got.Sub(started), tc.want.Sub(started))
+		}
+	}
+	managed.SecureClient = true
+	if got := gatewayAnswerDeadline(managed, started, started); !got.IsZero() {
+		t.Fatalf("Secure Client deadline = %s, want unchanged zero", got)
+	}
+	managed.ManagedEnterprise, managed.SecureClient = false, false
+	if got := gatewayAnswerDeadline(managed, started, started.Add(time.Second)); !got.Equal(started.Add(hookAnswerBudget)) {
+		t.Fatalf("per-user deadline = %s, want invocation-based %s", got.Sub(started), hookAnswerBudget)
 	}
 }
 
