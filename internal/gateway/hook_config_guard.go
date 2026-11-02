@@ -147,6 +147,10 @@ type HookConfigGuard struct {
 	// alert or audit row until the contract is current or the failure changes:
 	// a Codex update raised a HIGH alert every 30 s (GAP-0132).
 	lastHealFailure string
+	// diagnosticObserver receives a changed policy or heal failure after it
+	// is recorded. Tests wait for the guard's actual evaluation rather than
+	// assuming it finishes within a fixed scheduling window.
+	diagnosticObserver func(string)
 	// lastShellEnvWarning is the agent-settings warning last audited
 	// (connector.HookShellEnvWarning), so one finding writes one alert.
 	lastShellEnvWarning string
@@ -1095,7 +1099,11 @@ func (g *HookConfigGuard) reportPolicyFailure(conn connector.Connector, err erro
 	g.lastPolicyFailure = message
 	logger := g.logger
 	baseCtx := g.ctx
+	observe := g.diagnosticObserver
 	g.mu.Unlock()
+	if observe != nil {
+		observe(message)
+	}
 
 	connName := conn.Name()
 	fmt.Fprintf(os.Stderr, "[hook-guard] effective-policy check for %s: %v\n", connName, err)
@@ -1122,9 +1130,13 @@ func (g *HookConfigGuard) clearPolicyFailure() {
 // one reported, so the caller reports it only once.
 func (g *HookConfigGuard) setHealFailure(failure string) (repeat bool) {
 	g.mu.Lock()
-	defer g.mu.Unlock()
 	repeat = failure != "" && g.lastHealFailure == failure
 	g.lastHealFailure = failure
+	observe := g.diagnosticObserver
+	g.mu.Unlock()
+	if failure != "" && !repeat && observe != nil {
+		observe(failure)
+	}
 	return repeat
 }
 

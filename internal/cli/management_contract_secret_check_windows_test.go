@@ -41,7 +41,7 @@ func TestManagementContractWindowsSecretCheck(t *testing.T) {
 	}{
 		{name: "accepted key", exit: 0, checked: true},
 		{name: "rejected key", setup: func(p *string, _ *error) { *p = "unavailable:auth_failed" },
-			code: "ai_defense_unavailable", exit: windowsSecretExitFailure, checked: true},
+			code: "ai_defense_rejected", exit: windowsSecretExitFailure, checked: true},
 		{name: "ai defense off", setup: func(p *string, _ *error) { *p = "disabled" },
 			code: "ai_defense_disabled", exit: windowsSecretExitFailure, checked: true},
 		{name: "not elevated, managed",

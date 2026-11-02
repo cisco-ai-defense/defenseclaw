@@ -1261,18 +1261,18 @@ off the device. The agent does not read `/health` itself (section 7); the
   no lock) builds the client the gateway builds, from the stored credential and
   the administrator's egress proxy, and makes one authenticated request whose
   only content is a single full stop. It prints `secret-result.schema.json`
-  (the check branch): `ai_defense` is `ok`, `disabled` or `unavailable:<code>`
-  with the codes of the table above (never `unknown`, `not_initialized` or
-  `gateway_not_ready`), `ok` is true only for `ok`, and a key AI Defense
-  rejects is `unavailable:auth_failed` with `errors[0].code`
-  `ai_defense_unavailable`, exit 1. `--name` must be the credential
+  (the check branch): `ai_defense` is `ok`, `rejected`, `disabled` or
+  `unavailable:<code>` (never `unknown`, `not_initialized` or
+  `gateway_not_ready`). `ok` is true only for `ok`. HTTP 401 or 403 is
+  `rejected` with `errors[0].code` `ai_defense_rejected`, exit 1 (Windows
+  1603). Other probe failures use `unavailable:<code>`. `--name` must be the credential
   `enterprise.inspection.ai_defense.credential` names (else `invalid_arguments`,
   exit 2); failures before the request are the failure document of the other
   verbs (`not_root`, `not_installed`, `state_invalid`). It does not change what
   `inspection.ai_defense` reports; the next prompt does that. Builds before
   1.0.6 have no `check` verb (an unknown command, exit 2): read `unknown`
-  until the first prompt, as above. Windows has no `check`: read
-  `inspection.ai_defense` from `enterprise windows status`.
+  until the first prompt, as above. On Windows, run the command from an
+  elevated PowerShell prompt.
 
 The agent holds the value in its own memory and writes it to the child's
 stdin; the examples stand that in with a variable of the agent process
