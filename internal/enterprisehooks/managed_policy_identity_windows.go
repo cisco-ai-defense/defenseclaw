@@ -88,7 +88,7 @@ func VerifyWindowsClaudeManagedPolicyIdentity(
 }
 
 func claudeManagedPolicyMatchesKnownContract(
-	provider *connector.ClaudeCodeConnector,
+	provider connector.ManagedHookPolicyProvider,
 	policy []byte,
 	setup connector.SetupOpts,
 ) bool {

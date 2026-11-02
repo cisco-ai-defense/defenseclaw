@@ -232,7 +232,20 @@ func stageWindowsEnterpriseDeferredPoliciesPlatform(
 			if err := provider.VerifyManagedHookPolicy(body, policySetup); err != nil {
 				return rollback(err)
 			}
-			_, undo, err := installWindowsClaudeManagedPolicy(body, setup, sid)
+			// A pending account with no known Claude version (no client
+			// installed, or a profile whose account no longer resolves)
+			// renders the version-less contract. It must not replace the
+			// body published for enrolled accounts on a newer contract,
+			// which their verification checks byte for byte; a published
+			// body that is this deployment's rendering of a known contract
+			// is kept, and only the SID is added.
+			var keep func([]byte) bool
+			if resolveHookContract(name, setup.AgentVersion).Status != connector.HookCompatibilityKnown {
+				keep = func(published []byte) bool {
+					return claudeManagedPolicyMatchesKnownContract(provider, published, policySetup)
+				}
+			}
+			_, undo, err := installWindowsClaudeManagedPolicyKeepingPublished(body, keep, setup, sid)
 			if err != nil {
 				return rollback(err)
 			}

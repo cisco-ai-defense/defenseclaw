@@ -1515,11 +1515,25 @@ func openWindowsClaudeManagedPolicyLockFile(path string) (windows.Handle, error)
 }
 
 func installWindowsClaudeManagedPolicy(body []byte, opts connector.SetupOpts, targetSID *windows.SID) (path string, rollback func() error, err error) {
+	return installWindowsClaudeManagedPolicyKeepingPublished(body, nil, opts, targetSID)
+}
+
+// installWindowsClaudeManagedPolicyKeepingPublished enrolls targetSID like
+// installWindowsClaudeManagedPolicy, except that a published body keep accepts
+// is kept byte for byte and only the SID is added. The choice is made under
+// the transaction lock, after the published body is checked against its
+// ownership state, so a concurrent publish is never replaced by a stale copy.
+func installWindowsClaudeManagedPolicyKeepingPublished(
+	body []byte,
+	keep func(published []byte) bool,
+	opts connector.SetupOpts,
+	targetSID *windows.SID,
+) (path string, rollback func() error, err error) {
 	var unlockedRollback func() error
 	var installedState []byte
 	err = windowsClaudeManagedPolicyTransaction(func() error {
 		var transactionErr error
-		path, unlockedRollback, transactionErr = installWindowsClaudeManagedPolicyUnlocked(body, opts, targetSID)
+		path, unlockedRollback, transactionErr = installWindowsClaudeManagedPolicyUnlocked(&body, keep, opts, targetSID)
 		if transactionErr == nil {
 			installedState, transactionErr = os.ReadFile(filepath.Join(filepath.Dir(path), windowsClaudeManagedStateFile))
 			if transactionErr != nil && unlockedRollback != nil {
@@ -1545,7 +1559,16 @@ func installWindowsClaudeManagedPolicy(body []byte, opts connector.SetupOpts, ta
 	return path, rollback, err
 }
 
-func installWindowsClaudeManagedPolicyUnlocked(body []byte, opts connector.SetupOpts, targetSID *windows.SID) (string, func() error, error) {
+// installWindowsClaudeManagedPolicyUnlocked publishes *bodyRef, or keeps the
+// published body when keep accepts it, and leaves the body it wrote in
+// *bodyRef.
+func installWindowsClaudeManagedPolicyUnlocked(
+	bodyRef *[]byte,
+	keep func(published []byte) bool,
+	opts connector.SetupOpts,
+	targetSID *windows.SID,
+) (string, func() error, error) {
+	body := *bodyRef
 	if err := windowsClaudeHigherPolicyCheck(); err != nil {
 		return "", nil, err
 	}
@@ -1593,6 +1616,12 @@ func installWindowsClaudeManagedPolicyUnlocked(body []byte, opts connector.Setup
 	}
 	if err != nil {
 		return "", nil, err
+	}
+	// The published body matches its ownership state here, so keeping it
+	// keeps what this deployment published last.
+	if keep != nil && policySnapshot.existed && !recoverMissingPolicy && keep(policySnapshot.data) {
+		body = policySnapshot.data
+		*bodyRef = body
 	}
 	// A configured connector needs a guard before any account enrolls. An
 	// ensure pass must not replace a newer contract another reconcile already
