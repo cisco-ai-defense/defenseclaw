@@ -478,7 +478,7 @@ func hookGoldenCases(t *testing.T, full bool) []hookGoldenCase {
 					// Every answer in every mode for the tool-call event; the
 					// other events in full runs, and with the main answers.
 					main := a.name == "allow" || a.name == "block-output" || a.name == "block-bare" || a.name == "http-500" || a.name == "unreachable"
-					if ei > 0 && !full && !(main && (m.name == "user-default-open" || m.name == "managed-closed")) {
+					if ei > 0 && !full && (!main || m.name != "user-default-open" && m.name != "managed-closed") {
 						continue
 					}
 					if a.unreachable && !full && ei == 0 && m.name != "user-default-open" && m.name != "user-default-closed" &&

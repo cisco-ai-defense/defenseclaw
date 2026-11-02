@@ -6482,9 +6482,10 @@ func powerShellOutputVariableName(segment string) (string, bool) {
 			continue
 		}
 		if c == '\'' || c == '"' {
-			if quote == 0 {
+			switch quote {
+			case 0:
 				quote = c
-			} else if quote == c {
+			case c:
 				quote = 0
 			}
 		}
@@ -6564,7 +6565,7 @@ func powerShellReferencesVariable(segment, variable string) bool {
 		}
 		end := start + index + len(variable)
 		if end == len(text) || !strings.ContainsRune("_:", rune(text[end])) &&
-			!(text[end] >= 'a' && text[end] <= 'z') && !(text[end] >= '0' && text[end] <= '9') {
+			(text[end] < 'a' || text[end] > 'z') && (text[end] < '0' || text[end] > '9') {
 			return true
 		}
 		start = end
@@ -6613,9 +6614,10 @@ func powerShellStripLineComment(text string) string {
 		case '`':
 			i++
 		case '\'', '"':
-			if quote == 0 {
+			switch quote {
+			case 0:
 				quote = text[i]
-			} else if quote == text[i] {
+			case text[i]:
 				quote = 0
 			}
 		case '#':
@@ -6652,9 +6654,10 @@ func powerShellStripBlockComments(text string) string {
 			continue
 		}
 		if c == '\'' || c == '"' {
-			if quote == 0 {
+			switch quote {
+			case 0:
 				quote = c
-			} else if quote == c {
+			case c:
 				if i+1 < len(text) && text[i+1] == c {
 					out.WriteByte(c)
 					i++

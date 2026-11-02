@@ -78,9 +78,10 @@ func TestShellHeredocApplyPatchPathRules(t *testing.T) {
 						command := "apply_patch <<'PATCH'\n" + patch + "PATCH"
 						got, out := postShellApplyPatch(t, f, connector, profile, managed, command)
 						want := row.strict
-						if profile == "default" {
+						switch profile {
+						case "default":
 							want = row.balanced
-						} else if profile == "permissive" {
+						case "permissive":
 							want = row.permissive
 						}
 						if got != want || row.rule != "" && !strings.Contains(out, row.rule) {

@@ -102,7 +102,6 @@ func TestShellHookBlockSurvivesHostileEnvironments(t *testing.T) {
 		names = append(names, n)
 	}
 	sort.Strings(names)
-	type key struct{ hook, mode, answer string }
 	var cases []hookGoldenCase
 	for _, h := range hookGoldenHooks() {
 		for _, m := range []hookGoldenMode{modes[1], modes[5]} {

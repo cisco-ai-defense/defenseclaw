@@ -2335,7 +2335,7 @@ func handleOversized(ctx context.Context, opts Options, sp spec, failMode string
 	// Only a gateway allow permits the call; a transport outage follows the
 	// existing per-user outage rule in sendToGateway.
 	if !opts.ManagedEnterprise && !opts.SecureClient && !opts.StrictAvailability &&
-		!(opts.MaxBodyLowered && opts.MaxBody < perUserHookMaxBody) &&
+		(!opts.MaxBodyLowered || opts.MaxBody >= perUserHookMaxBody) &&
 		opts.OutageFailModeNow != nil && normalizeFailMode(opts.OutageFailModeNow()) == "open" && !perUserInstallWindow(opts) {
 		// A prefix the reducer cannot turn into one request (a duplicated
 		// key) keeps the closed oversize answer below. Every review is marked
