@@ -200,12 +200,12 @@ func TestManagedEnterpriseRunEndpointBuildFailureFollowsFailMode(t *testing.T) {
 	for _, tc := range []struct {
 		failMode     string
 		secureClient bool
-		wantCode     int
+		wantBlock    bool
 		wantReason   string
 	}{
-		{failMode: "open", secureClient: true, wantCode: 0, wantReason: managedGatewayEndpointInvalidReason},
-		{failMode: "closed", secureClient: true, wantCode: blockExit, wantReason: managedGatewayEndpointInvalidReason},
-		{failMode: "open", wantCode: blockExit, wantReason: managedGatewayPeerUnverifiedReason},
+		{failMode: "open", secureClient: true, wantReason: managedGatewayEndpointInvalidReason},
+		{failMode: "closed", secureClient: true, wantBlock: true, wantReason: managedGatewayEndpointInvalidReason},
+		{failMode: "open", wantBlock: true, wantReason: managedGatewayPeerUnverifiedReason},
 	} {
 		t.Run(fmt.Sprintf("%s/secure_client=%t", tc.failMode, tc.secureClient), func(t *testing.T) {
 			records := captureManagedHookDecisions(t)
@@ -214,6 +214,8 @@ func TestManagedEnterpriseRunEndpointBuildFailureFollowsFailMode(t *testing.T) {
 			var out, errb bytes.Buffer
 			code := Run(context.Background(), Options{
 				Connector:                 "codex",
+				Event:                     "PreToolUse",
+				HookContractID:            "codex-hooks-v4",
 				APIAddr:                   "127.0.0.1:18970",
 				Home:                      home,
 				HookDir:                   filepath.Join(home, "hooks"),
@@ -222,18 +224,32 @@ func TestManagedEnterpriseRunEndpointBuildFailureFollowsFailMode(t *testing.T) {
 				SecureClient:              tc.secureClient,
 				ManagedGatewayServiceName: `bad\name`,
 				AuthenticatedManagedToken: &token,
-				Stdin:                     strings.NewReader(`{}`),
+				Stdin:                     strings.NewReader(`{"hook_event_name":"PreToolUse"}`),
 				Stdout:                    &out,
 				Stderr:                    &errb,
 			})
-			if code != tc.wantCode {
-				t.Fatalf("code = %d, want %d; stderr=%q", code, tc.wantCode, errb.String())
+			// A Codex block is Codex's own PreToolUse deny on stdout with
+			// exit 0 (emitCodexBlock); an allow writes no deny.
+			denied := strings.Contains(out.String(), `"permissionDecision":"deny"`)
+			if code != 0 || denied != tc.wantBlock {
+				t.Fatalf("code = %d denied = %t, want 0 and %t; stdout=%q stderr=%q", code, denied, tc.wantBlock, out.String(), errb.String())
 			}
-			marker := managed.MarkerDegraded
 			if !tc.secureClient {
-				marker = managed.MarkerBoundary
+				// The standalone profile keeps main's peer refusal, which also
+				// records its outage probes; only the boundary refusal is
+				// pinned here.
+				found := false
+				for _, record := range *records {
+					if record.marker == managed.MarkerBoundary && strings.Contains(record.line, `reason="`+tc.wantReason+`"`) {
+						found = true
+					}
+				}
+				if !found {
+					t.Fatalf("durable records = %+v, want a boundary record with reason %s", *records, tc.wantReason)
+				}
+				return
 			}
-			requireOneManagedRecord(t, *records, marker, `reason="`+tc.wantReason+`"`)
+			requireOneManagedRecord(t, *records, managed.MarkerDegraded, `reason="`+tc.wantReason+`"`)
 			if (*records)[0].source != managedHookDecisionRecordDefaultSource {
 				t.Fatalf("invalid service name selected event source %q", (*records)[0].source)
 			}
