@@ -854,12 +854,11 @@ func windowsManagedHooksLifecycleCommittedTransactionID(
 		)
 	}
 	activation := metadata.ManagedHooksActivation
-	if activation.SchemaVersion != 1 ||
-		!validWindowsManagedHooksLifecycleTransactionID(activation.DeploymentGenerationID) ||
-		(activation.State != "never_activated" && activation.State != "activated") ||
-		!validWindowsManagedHooksLifecycleHex(activation.ManifestSHA256, sha256.Size) ||
-		activation.TargetCount != len(ctx.targets) {
-		return "", errors.New("deployment managed-hook activation binding is invalid")
+	if err := validateWindowsManagedHooksLifecycleActivationBinding(activation, len(ctx.targets)); err != nil {
+		if !enterprisehooks.WindowsStandaloneProcess() {
+			return "", errors.New("deployment managed-hook activation binding is invalid")
+		}
+		return "", err
 	}
 	manifestSHA256, err := hashWindowsManagedHooksLifecycleTrustedFile(
 		ctx.manifestPath,
@@ -870,11 +869,33 @@ func windowsManagedHooksLifecycleCommittedTransactionID(
 		return "", err
 	}
 	if activation.ManifestSHA256 != manifestSHA256 {
+		if !enterprisehooks.WindowsStandaloneProcess() {
+			return "", errors.New("deployment managed-hook activation binding does not match the protected manifest")
+		}
 		return "", errors.New(
-			"deployment managed-hook activation binding does not match the protected manifest",
+			"deployment managed-hook activation manifest_sha256 does not match the current protected manifest; run Setup /ensure again to reconcile the target roster",
 		)
 	}
 	return activation.DeploymentGenerationID, nil
+}
+
+func validateWindowsManagedHooksLifecycleActivationBinding(activation *windowsManagedHooksActivationRecord, targetCount int) error {
+	if activation.SchemaVersion != 1 {
+		return fmt.Errorf("deployment managed-hook activation schema_version is %d, expected 1; run Setup /repair", activation.SchemaVersion)
+	}
+	if !validWindowsManagedHooksLifecycleTransactionID(activation.DeploymentGenerationID) {
+		return errors.New("deployment managed-hook activation deployment_generation_id is invalid; run Setup /repair")
+	}
+	if activation.State != "never_activated" && activation.State != "activated" {
+		return fmt.Errorf("deployment managed-hook activation state %q is invalid; run Setup /repair", activation.State)
+	}
+	if !validWindowsManagedHooksLifecycleHex(activation.ManifestSHA256, sha256.Size) {
+		return errors.New("deployment managed-hook activation manifest_sha256 is invalid; run Setup /repair")
+	}
+	if activation.TargetCount != targetCount {
+		return fmt.Errorf("deployment managed-hook activation target_count is %d, current protected manifest has %d; run Setup /ensure again to reconcile the target roster", activation.TargetCount, targetCount)
+	}
+	return nil
 }
 
 func retireCommittedWindowsManagedHooksLifecycle(
