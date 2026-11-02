@@ -4,6 +4,8 @@
 package connector
 
 import (
+	"bytes"
+	"context"
 	"crypto/rand"
 	"encoding/hex"
 	"os"
@@ -177,6 +179,50 @@ func TestRemovePerUserConnectorHookFilesWaitsForHookWriter(t *testing.T) {
 	}
 }
 
+func TestRemovePerUserConnectorHookFilesKeepsLiveTeardownTombstones(t *testing.T) {
+	for _, name := range []string{"devin", "kiro"} {
+		t.Run(name, func(t *testing.T) {
+			t.Setenv("HOME", t.TempDir())
+			t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+			dataDir := t.TempDir()
+			opts := SetupOpts{DataDir: dataDir, ConfigHome: t.TempDir(), APIAddr: "127.0.0.1:18970",
+				APIToken: "test-token", HookAPIToken: "test-token", HookAPITokenScoped: true}
+			registry := NewDefaultRegistry()
+			removed, _ := registry.Get(name)
+			owner := removed.(HookScriptOwner)
+			hookDir := filepath.Join(dataDir, "hooks")
+			if err := WriteHookScriptsForConnectorObjectWithOpts(hookDir, opts, removed); err != nil {
+				t.Fatal(err)
+			}
+			if err := removed.Teardown(context.Background(), opts); err != nil {
+				t.Fatalf("real teardown: %v", err)
+			}
+			script := filepath.Join(hookDir, owner.HookScriptNames(opts)[0])
+			before, err := os.ReadFile(script)
+			if err != nil || !bytes.Contains(before, []byte("(disabled tombstone)")) {
+				t.Fatalf("teardown tombstone = %q, %v", before, err)
+			}
+			original := agentProcessMayRun
+			t.Cleanup(func() { agentProcessMayRun = original })
+			agentProcessMayRun = func(string, string) bool { return true }
+			if err := RemovePerUserConnectorHookFiles(opts, removed, nil); err != nil {
+				t.Fatal(err)
+			}
+			after, err := os.ReadFile(script)
+			if err != nil || !bytes.Equal(after, before) {
+				t.Fatalf("cached hook path changed: %q, %v", after, err)
+			}
+			agentProcessMayRun = func(string, string) bool { return false }
+			if err := RemovePerUserConnectorHookFiles(opts, removed, nil); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := os.Lstat(script); !os.IsNotExist(err) {
+				t.Fatalf("idle hook path remains: %v", err)
+			}
+		})
+	}
+}
+
 // A hooks/.hookcfg that cannot be read is not an unused one: the removal
 // fails and keeps the shared scripts and the lock (W16 review). It went on
 // and deleted them.
@@ -207,7 +253,7 @@ func TestRemoveUnusedSharedHookRuntimeRemovesIdleConnectorLeftovers(t *testing.T
 		hookDir := filepath.Join(dataDir, "hooks")
 		files := map[string]string{
 			filepath.Join(hookDir, "hermes-hook.sh"):                                 disabledHookTombstone("hermes"),
-			filepath.Join(hookDir, "devin-hook.sh"):                                  "#!/bin/sh\n# defenseclaw-managed-hook v0 (disabled tombstone)\necho restart >&2\nexit 2\n",
+			filepath.Join(hookDir, "devin-hook.sh"):                                  devinDisabledHookTombstone(),
 			filepath.Join(hookDir, "user-hook.sh"):                                   "#!/bin/sh\nexit 0\n",
 			filepath.Join(dataDir, ".hermes-lifecycle.lock"):                         "",
 			filepath.Join(dataDir, hermesHomeSetUpFileName):                          `{"home":"/h/.hermes"}`,
@@ -237,7 +283,7 @@ func TestRemoveUnusedSharedHookRuntimeRemovesIdleConnectorLeftovers(t *testing.T
 		for path := range files {
 			var want bool // gone after the removal
 			switch filepath.Base(path) {
-			case "hermes-hook.sh":
+			case "hermes-hook.sh", "devin-hook.sh":
 				want = !running
 			case ".hermes-lifecycle.lock", hermesHomeSetUpFileName, "hermes":
 				want = true

@@ -92,6 +92,12 @@ func removePerUserConnectorHookFilesLocked(opts SetupOpts, removed Connector, pe
 			errs = append(errs, fmt.Errorf("refusing to remove hook script without DefenseClaw marker: %s", name))
 			continue
 		}
+		// Teardown may have replaced the script with a disabled tombstone.
+		// A running agent can still call that cached path.
+		if bytes.Contains(body[:min(len(body), 512)], []byte("(disabled tombstone)")) &&
+			agentProcessMayRun(opts.DataDir, hookAgentProcessName(removed.Name())) {
+			continue
+		}
 		if err := removePinnedRegularFile(hooks, name, info); err != nil && !errors.Is(err, os.ErrNotExist) {
 			errs = append(errs, fmt.Errorf("remove hook script %s: %w", name, err))
 		}

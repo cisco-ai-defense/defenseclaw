@@ -2863,15 +2863,19 @@ func writeDisabledHookTombstone(opts SetupOpts, scriptName, vendorLabel string) 
 		// A cached Devin process can still execute the old absolute hook path
 		// after removal. Keep it blocked until that process exits; this path
 		// cannot become an implicit allow when its credential is revoked.
-		body = "#!/bin/sh\n" +
-			"# defenseclaw-managed-hook v0 (disabled tombstone)\n" +
-			"echo 'defenseclaw: Devin hook was removed; restart Devin before using it' >&2\n" +
-			"exit 2\n"
+		body = devinDisabledHookTombstone()
 	}
 	if opts.FailedSetupFailClosed && failedSetupPlaceholderBlocks[scriptName] {
 		body = failedSetupHookPlaceholder(vendorLabel)
 	}
 	return hookRuntimeFileWriter(opts.ManagedEnterprise)(target, []byte(body), 0o700)
+}
+
+func devinDisabledHookTombstone() string {
+	return "#!/bin/sh\n" +
+		"# defenseclaw-managed-hook v0 (disabled tombstone)\n" +
+		"echo 'defenseclaw: Devin hook was removed; restart Devin before using it' >&2\n" +
+		"exit 2\n"
 }
 
 // failedSetupPlaceholderBlocks lists the hook scripts whose agents treat

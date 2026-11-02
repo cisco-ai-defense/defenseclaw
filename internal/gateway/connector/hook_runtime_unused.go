@@ -138,14 +138,13 @@ var agentProcessMayRun = accountAgentProcessMayRun
 // any more, what a connector's setup and teardown leave behind (r102
 // GAP-0430: hermes-hook.sh, .hermes-lifecycle.lock, hermes-home-setup.json
 // and an empty connector_backups/hermes stayed after Hermes left the
-// managed config): the plain exit-0 hook tombstones, the connector state
-// files and empty backup folders. A tombstone stays while a process of the
+// managed config): recognized hook tombstones, the connector state files
+// and empty backup folders. A tombstone stays while a process of the
 // account may still run that agent: such a process can have the hook
 // command cached, and Hermes 0.21 registers it fail closed, so a missing
 // script would block every tool of the running session until the agent
-// restarts. A tombstone that blocks on purpose (Devin's, the failed-setup
-// placeholder), any other script and a backup folder that holds a receipt
-// stay.
+// restarts. A failed-setup placeholder, any other script and a backup folder
+// that holds a receipt stay.
 func removeIdleConnectorLeftovers(dataDir, hookDir *os.Root) []error {
 	var errs []error
 	remove := func(root *os.Root, name string) {
@@ -170,7 +169,11 @@ func removeIdleConnectorLeftovers(dataDir, hookDir *os.Root) []error {
 		if err != nil {
 			continue
 		}
-		if agent, ok := plainDisabledHookTombstoneAgent(string(body)); ok && !agentProcessMayRun(dataDir.Name(), agent) {
+		agent, ok := plainDisabledHookTombstoneAgent(string(body))
+		if !ok && entry.Name() == "devin-hook.sh" && string(body) == devinDisabledHookTombstone() {
+			agent, ok = "devin", true
+		}
+		if ok && !agentProcessMayRun(dataDir.Name(), hookAgentProcessName(agent)) {
 			remove(hookDir, entry.Name())
 		}
 	}
@@ -199,6 +202,13 @@ func removeIdleConnectorLeftovers(dataDir, hookDir *os.Root) []error {
 		_ = dataDir.Remove("connector_backups")
 	}
 	return errs
+}
+
+func hookAgentProcessName(name string) string {
+	if strings.EqualFold(name, "claudecode") || strings.EqualFold(name, "Claude Code") {
+		return "claude"
+	}
+	return name
 }
 
 // plainDisabledHookTombstoneAgent returns the agent of a hook script that is
