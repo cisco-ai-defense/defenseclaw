@@ -399,18 +399,15 @@ func dispatchTrustedAction(
 		facts = actionfacts.Analyze(request.Input)
 		analyzed = true
 	}
-	// A managed gateway with ProtectHome cannot resolve the caller's project
-	// directory, so the original facts have no CWD. Judge Git hook mutations
-	// once more in the directory the hook client recorded for this call. Keep
-	// only this rule's finding from that reading; other rules retain their
-	// existing managed-directory proof boundaries.
-	if twin, ok := protectedHomeGitHookTwinRequest(request); ok {
-		defer func() {
-			found := slices.DeleteFunc(dispatchTrustedAction(parent, twin), func(f RuleFinding) bool {
-				return f.RuleID != "persistence.git_hook_write"
-			})
-			findings = withTwinProvenBlocks(findings, found)
-		}()
+	// Only the Git hook rule uses the hook client's bounded directory. Parse
+	// that view when the action already names a possible active hook mutation;
+	// a text mention or an inactive .sample path needs no second reading.
+	var gitHookFacts *actionfacts.Facts
+	if hasGitHookMutationCandidate(facts) {
+		if twin, ok := protectedHomeGitHookTwinRequest(request); ok {
+			placed := actionfacts.Analyze(twin.Input)
+			gitHookFacts = &placed
+		}
 	}
 	if twin, ok := overLimitWriteBoundedTwinRequest(request, facts); ok {
 		defer func() {
@@ -430,7 +427,7 @@ func dispatchTrustedAction(
 		if budget == nil {
 			budget = newTrustedActionBudget(false)
 		}
-		return dispatchTrustedActionWith(parent, request, facts, generation, budget, &telemetry)
+		return dispatchTrustedActionWith(parent, request, facts, gitHookFacts, generation, budget, &telemetry)
 	}
 	// A strictest combination of profiles judges the call with each
 	// member's own rules within one budget. Each finding keeps its member for
@@ -440,7 +437,7 @@ func dispatchTrustedAction(
 	}
 	for i, member := range generation.members {
 		var memberTelemetry trustedActionTelemetry
-		found := dispatchTrustedActionWith(parent, request, facts, member, budget, &memberTelemetry)
+		found := dispatchTrustedActionWith(parent, request, facts, gitHookFacts, member, budget, &memberTelemetry)
 		if i < len(generation.memberNames) {
 			for j := range found {
 				found[j].profile = generation.memberNames[i]
@@ -459,6 +456,7 @@ func dispatchTrustedActionWith(
 	ctx context.Context,
 	request trustedActionRequest,
 	facts actionfacts.Facts,
+	gitHookFacts *actionfacts.Facts,
 	generation *compiledRulePackCategories,
 	budget *trustedActionBudget,
 	telemetry *trustedActionTelemetry,
@@ -857,6 +855,17 @@ func dispatchTrustedActionWith(
 	) {
 		clear(excluded)
 		semanticFindings = semanticFindings[:0]
+	}
+	// The managed Git-hook reading shares this dispatch and budget. Its CWD
+	// can add only the Git-hook rule's positive semantic finding; all other
+	// rules and fallback lanes keep the gateway's original facts.
+	if gitHookFacts != nil && gitHookFacts.Authoritative() {
+		if projection, code := semantic.Project(*gitHookFacts); code == semantic.ProjectionOK {
+			evaluateSemanticRules(4, *gitHookFacts, projection,
+				func(candidate compiledSemanticRule) bool {
+					return candidate.rule.ID == "persistence.git_hook_write"
+				}, true, nil)
+		}
 	}
 	// The PowerShell body view adds positive argv matches only. A failed
 	// projection there adds nothing and leaves the result above unchanged.
@@ -3337,6 +3346,23 @@ func protectedHomePrivateKeyTwinRequest(request trustedActionRequest) (trustedAc
 	twin.conflictSource = nil
 	twin.Input.CWD = cwd
 	return twin, true
+}
+
+// hasGitHookMutationCandidate avoids a second parse for text mentions and
+// inactive hook names. A CWD changes path placement, not the parsed access
+// or the command's mutation role.
+func hasGitHookMutationCandidate(facts actionfacts.Facts) bool {
+	for _, candidate := range facts.Paths {
+		if !matchesGitHookCandidate(semanticPathValue(candidate)) ||
+			matchesSafeGitHookCandidate(facts, candidate) {
+			continue
+		}
+		command, ok := integrityCommandByID(facts, candidate.CommandID)
+		if ok && integrityCommandMutatesPath(command, candidate) {
+			return true
+		}
+	}
+	return false
 }
 
 // protectedHomeGitHookTwinRequest places a managed action in the hook
