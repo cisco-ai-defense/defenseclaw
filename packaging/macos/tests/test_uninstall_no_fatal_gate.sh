@@ -152,6 +152,19 @@ t_purge_skips_symlinked_home() {
   fixture_cleanup "${b}"
 }
 
+t_clean_purge_removes_log_folder() {
+  local b; b="$(fixture_bundle)"
+  fixture_install "${b}" --connector codex >/dev/null 2>&1 || true
+  local logs="${b}/root/Library/Logs/Cisco/SecureClient/DefenseClaw"
+  printf 'log\n' > "${logs}/gateway.log"
+  local out rc=0
+  out="$(fixture_uninstall "${b}" --purge -y 2>&1)" || rc=$?
+  assert_status "${rc}" 0 "clean purge exits 0"
+  assert_contains "${out}" "[uninstall] done." "clean purge reports done"
+  [[ ! -e "${logs}" ]] || _fail "a clean purge removes the log folder, uninstall.log included ($(ls -A "${logs}"))"
+  fixture_cleanup "${b}"
+}
+
 t_root_retry_refuses_symlinked_parent() {
   local b; b="$(_purge_fixture)"
   local me; me="$(id -un)"
@@ -171,6 +184,7 @@ t_root_retry_refuses_symlinked_parent() {
 }
 
 run_case "purge completes, isolates users and summarises leftovers" t_purge_completes_and_isolates_users
+run_case "a clean purge removes the log folder"                     t_clean_purge_removes_log_folder
 run_case "purge without the library still finds every user"         t_purge_without_library_still_finds_users
 run_case "root retry refuses a symlinked parent folder"          t_root_retry_refuses_symlinked_parent
 run_case "purge never follows a symlinked home"                     t_purge_skips_symlinked_home
