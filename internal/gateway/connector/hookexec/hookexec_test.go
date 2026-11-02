@@ -1105,6 +1105,42 @@ func TestOversizedBalancedPreActionAsksGatewayAboutProtectedTarget(t *testing.T)
 	}
 }
 
+// A cap the agent's environment lowered under the per-user transport's
+// 900 KiB only tightens: a call over it is refused, never sent as a bounded
+// prefix review of a few bytes that the gateway may allow
+// (rel-1-0-6:GAP-0337). The same call with the cap only set by the hook
+// (MaxBodyLowered false) is still reviewed.
+func TestOversizedCallOverAnEnvironmentLoweredCapIsRefused(t *testing.T) {
+	payload := `{"hook_event_name":"PreToolUse","tool_name":"Bash","tool_input":{"command":"cat ./hello.txt"},"padding":"` +
+		strings.Repeat("p", 4096) + `"}`
+	for _, connector := range []string{"claudecode", "codex", "cursor"} {
+		for _, lowered := range []bool{true, false} {
+			t.Run(fmt.Sprintf("%s/lowered=%v", connector, lowered), func(t *testing.T) {
+				rt := ok(`{"action":"allow"}`)
+				r := run(t, connector, rt, func(o *Options) {
+					o.Event = "PreToolUse"
+					o.OutageFailModeNow = func() string { return "open" }
+					o.MaxBody = 16
+					o.MaxBodyLowered = lowered
+					o.Stdin = strings.NewReader(payload)
+				})
+				if !lowered {
+					if rt.requests != 1 || !bytes.Contains(rt.gotBody, []byte(`"bounded_prefix_review":true`)) {
+						t.Fatalf("hook-set cap: requests=%d body=%.300s", rt.requests, rt.gotBody)
+					}
+					return
+				}
+				if rt.requests != 0 {
+					t.Fatalf("a call over a lowered cap reached the gateway %d times: %.300s", rt.requests, rt.gotBody)
+				}
+				if r.code != blockExit && !strings.Contains(r.stdout, "deny") && !strings.Contains(r.stdout, "block") {
+					t.Fatalf("a call over a lowered cap was allowed: code=%d stdout=%q stderr=%q", r.code, r.stdout, r.stderr)
+				}
+			})
+		}
+	}
+}
+
 // Every native connector's oversized call reaches the gateway with its
 // command, wherever the connector puts it, so a protected command blocks.
 func TestOversizedBalancedNativeCallSendsItsCommandToTheGateway(t *testing.T) {

@@ -18,7 +18,10 @@ var nativeGatewayForHookTests struct {
 	sync.Once
 	dir  string
 	path string
-	err  error
+	// accountHome is the account home the binary was linked to read
+	// (cli.outageAccountHomeBake): an empty folder of the test run.
+	accountHome string
+	err         error
 }
 
 var nativeHookPostForHookTests struct {
@@ -70,6 +73,8 @@ func installNativeGatewayForHookTest(t *testing.T, home string, hookDirs ...stri
 		}
 		nativeGatewayForHookTests.path = filepath.Join(nativeGatewayForHookTests.dir, "defenseclaw-gateway")
 		if prebuilt := os.Getenv("DC_TEST_NATIVE_GATEWAY"); filepath.IsAbs(prebuilt) {
+			// CI links the prebuilt binary to the account-home folder beside it.
+			nativeGatewayForHookTests.accountHome = filepath.Join(filepath.Dir(prebuilt), "account-home")
 			body, readErr := os.ReadFile(prebuilt)
 			if readErr == nil {
 				readErr = os.WriteFile(nativeGatewayForHookTests.path, body, 0o700)
@@ -77,7 +82,19 @@ func installNativeGatewayForHookTest(t *testing.T, home string, hookDirs ...stri
 			nativeGatewayForHookTests.err = readErr
 			return
 		}
-		cmd := exec.Command("go", "build", "-o", nativeGatewayForHookTests.path, "./cmd/defenseclaw")
+		// The account home the binary reads for install locks and its
+		// fallback config is an empty folder of this test process, never the
+		// build account's real ~/.defenseclaw, which other tests and builds
+		// on the same computer write (rel-1-0-6:GAP-0345).
+		accountHome := filepath.Join(nativeGatewayForHookTests.dir, "account-home")
+		if err := os.Mkdir(accountHome, 0o700); err != nil {
+			nativeGatewayForHookTests.err = err
+			return
+		}
+		nativeGatewayForHookTests.accountHome = accountHome
+		cmd := exec.Command("go", "build", "-ldflags",
+			"-X github.com/defenseclaw/defenseclaw/internal/cli.outageAccountHomeBake="+accountHome,
+			"-o", nativeGatewayForHookTests.path, "./cmd/defenseclaw")
 		cmd.Dir = filepath.Join("..", "..", "..")
 		if output, buildErr := cmd.CombinedOutput(); buildErr != nil {
 			nativeGatewayForHookTests.err = fmt.Errorf("build native gateway for hook test: %w: %s", buildErr, output)

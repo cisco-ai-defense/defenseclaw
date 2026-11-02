@@ -2761,7 +2761,10 @@ def test_a_rollback_to_an_older_release_drops_the_hook_helper_the_newer_install_
     # writes one, so it refused to start and the rollback undid itself.
     assert 'version_lt "${back_to}" "${current}" && version_lt "${back_to}" 1.0.5; then' in rollback[drop - 200 : drop]
     helper = (ROOT / "internal" / "gateway" / "connector" / "hooks" / "_hardening.sh").read_text(encoding="utf-8")
-    assert helper.splitlines()[1] == "# defenseclaw-managed-hook v10", "a new helper schema must revisit the 1.0.5 floor"
+    # v11 (sandbox-visibility:GAP-0028) only adds readers and keeps every v10
+    # helper, so a 1.0.5 or 1.0.6 gateway runs its own hooks with the v11
+    # helper it keeps after a rollback: the 1.0.5 floor stands.
+    assert helper.splitlines()[1] == "# defenseclaw-managed-hook v11", "a new helper schema must revisit the 1.0.5 floor"
 
 
 def test_hook_fail_modes_are_set_from_the_config_around_the_gateway_stop(tmp_path: Path) -> None:

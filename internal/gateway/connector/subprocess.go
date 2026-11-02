@@ -157,6 +157,11 @@ type templateData struct {
 	SandboxMaxTime           int
 	SandboxRetryMaxTime      int
 	SandboxSessionEndMaxTime int
+	// SandboxHookDirSH is the image's hook folder (SandboxHookDir), shell
+	// quoted: sandbox hooks take it as baked, never from BASH_SOURCE, which
+	// the workload's environment can set (review 2 of
+	// sandbox-visibility:GAP-0028).
+	SandboxHookDirSH string
 
 	// CursorTargetModesJSON64 is the canonical, token-free protected
 	// SID-to-delivery-mode map baked into the managed Windows Cursor adapter;

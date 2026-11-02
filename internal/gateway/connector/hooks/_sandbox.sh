@@ -52,6 +52,11 @@ for _dc_sandbox_var in $_dc_sandbox_vars; do
     DEFENSECLAW_TRACEPARENT|DEFENSECLAW_TRACESTATE|OTEL_TRACEPARENT|OTEL_TRACESTATE|TRACEPARENT|TRACESTATE) ;;
     HOME|PWD|DEFENSECLAW_HOME|DEFENSECLAW_MANAGED_HOOK) ;;
     HOOK_DIR|DEFENSECLAW_BAKED_HOOK_PATH) export -n "$_dc_sandbox_var" ;;
+    # bash's own variables keep their meaning only while set: unsetting an
+    # exported RANDOM made the next $RANDOM fail under set -u and the hook
+    # exit 1 (review 2 of sandbox-visibility:GAP-0028).
+    RANDOM|SRANDOM|SECONDS|LINENO|BASHPID|EPOCHREALTIME|EPOCHSECONDS|BASH_ARGV0|BASH_SOURCE|BASH_LINENO|BASH_ARGC|BASH_ARGV|BASH_SUBSHELL|BASH_COMMAND|BASH_CMDS|BASH_ALIASES|BASH_REMATCH|BASH_VERSINFO|BASH_VERSION|BASH|FUNCNAME|GROUPS|DIRSTACK|PIPESTATUS|HISTCMD|HOSTNAME|OSTYPE|MACHTYPE|HOSTTYPE|UID|EUID|PPID|SHLVL|OPTIND|OPTERR|COLUMNS|LINES)
+      export -n "$_dc_sandbox_var" 2>/dev/null || true ;;
     *) unset -v "$_dc_sandbox_var" 2>/dev/null || export -n "$_dc_sandbox_var" 2>/dev/null || true ;;
   esac
 done

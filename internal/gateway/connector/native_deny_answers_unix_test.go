@@ -52,9 +52,11 @@ func runLoneHook(t *testing.T, name string, data templateData, args ...string) (
 }
 
 // An Antigravity PreToolUse hook that cannot load its hardening helper still
-// answers: a per-user hook in fail mode closed and a standalone managed hook
-// print Antigravity's deny; fail mode open and Secure Client keep the exit
-// status and print no decision.
+// answers: every render but Secure Client prints Antigravity's deny, in every
+// fail mode, since a helper that does not load (an agent-set BASH_SOURCE can
+// move its path) is a local failure, not an outage (review 2 of
+// sandbox-visibility:GAP-0028); Secure Client keeps the exit status and
+// prints no decision.
 func TestAntigravityHookDeniesWhenItsHelpersAreMissing(t *testing.T) {
 	for _, tc := range []struct {
 		name string
@@ -62,7 +64,7 @@ func TestAntigravityHookDeniesWhenItsHelpersAreMissing(t *testing.T) {
 		deny bool
 	}{
 		{"per-user closed", templateData{FailMode: "closed"}, true},
-		{"per-user open", templateData{FailMode: "open"}, false},
+		{"per-user open", templateData{FailMode: "open"}, true},
 		{"managed standalone", templateData{FailMode: "open", Managed: true}, true},
 		{"secure client", templateData{FailMode: "open", Managed: true, SecureClient: true, SecureClientDelivery: true}, false},
 	} {

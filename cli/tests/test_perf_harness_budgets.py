@@ -321,7 +321,8 @@ def test_every_gated_linux_budget_has_a_source_and_names_a_metric_the_harness_wr
         _result(
             hook={"claudecode": hook, "codex": hook},
             hook_execs={
-                "claudecode": {"per_call_p50": 9, "per_call_max": 9, "processes_per_call_p50": 29, "calls": 10}
+                "claudecode": {"per_call_p50": 9, "per_call_max": 9, "processes_per_call_p50": 14, "calls": 10},
+                "codex": {"per_call_p50": 9, "per_call_max": 9, "processes_per_call_p50": 14, "calls": 10},
             },
             cli={name: cli for name in ("status", "doctor", "setup_claudecode", "skill_scan")},
             gateway_restart={"to_api_ready": cli, "command": cli},

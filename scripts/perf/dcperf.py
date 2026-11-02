@@ -939,14 +939,18 @@ def measure(
             hooks[connector] = value
     if hooks:
         metrics["hook"] = hooks
-    execs = None
-    if "execs" in only:
-        execs = attempt("hook_execs", lambda: count_execs(inst, "claudecode", prof["exec_calls"], eslogger_log))
+    execs = {}
     traces = {}
-    if execs and "trace" in execs:
-        traces["claudecode"] = execs.pop("trace")
+    for connector in ("claudecode", "codex") if "execs" in only else ():
+        # The error key of claudecode stays hook_execs, as the budgets read it.
+        name = "hook_execs" if connector == "claudecode" else f"hook_execs.{connector}"
+        value = attempt(name, lambda c=connector: count_execs(inst, c, prof["exec_calls"], eslogger_log))
+        if value and "trace" in value:
+            traces[connector] = value.pop("trace")
+        if value:
+            execs[connector] = value
     if execs:
-        metrics["hook_execs"] = {"claudecode": execs}
+        metrics["hook_execs"] = execs
     cli = {}
     for name, argv, count, ok in (
         ("status", ["status"], prof["status"], (0,)),
@@ -1063,11 +1067,11 @@ def one_line(result: dict) -> str:
             f"{connector} idle p50/p95/max {i['p50_ms']:.0f}/{i['p95_ms']:.0f}/{i['max_ms']:.0f} ms"
             f" burst{b['width']} p95 {b['p95_ms']:.0f} ms"
         )
-    ex = m.get("hook_execs", {}).get("claudecode")
-    if ex and "per_call_p50" in ex:
-        parts.append(f"execs/hook {ex['per_call_p50']:g}")
-    if ex and "gateway_execs_per_call" in ex:
-        parts.append(f"gateway execs/hook {ex['gateway_execs_per_call']:g}")
+    for connector, ex in m.get("hook_execs", {}).items():
+        if "per_call_p50" in ex:
+            parts.append(f"{connector} execs/processes per hook {ex['per_call_p50']:g}/{ex['processes_per_call_p50']:g}")
+        if "gateway_execs_per_call" in ex:
+            parts.append(f"{connector} gateway execs/hook {ex['gateway_execs_per_call']:g}")
     r = m.get("gateway_restart")
     if r:
         parts.append(f"restart {r['to_api_ready']['p50_ms']:.0f} ms")

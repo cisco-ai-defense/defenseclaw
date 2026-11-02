@@ -142,10 +142,12 @@ func TestPerUserShellHookOversizedPayloadClosesWhenAnInstallStartsDuringTheRead(
 							t.Error(err)
 						}
 					}
-					_, _ = io.WriteString(stdin, `{"hook_event_name":"PreToolUse","tool_input":{"command":"echo ok","description":"`+strings.Repeat("a", 16<<10)+`"}}`)
+					// Over the default 1 MiB read cap: a cap lowered under 900 KiB
+					// refuses instead of reviewing (rel-1-0-6:GAP-0337).
+					_, _ = io.WriteString(stdin, `{"hook_event_name":"PreToolUse","tool_input":{"command":"echo ok","description":"`+strings.Repeat("a", 1100<<10)+`"}}`)
 					_ = stdin.Close()
 				}
-				stdout, stderr, err := runInstallInFlightShellHook(t, tc, data, refusingAPIAddr(t), write, "DEFENSECLAW_GATEWAY_AUTOSTART=0")
+				stdout, stderr, err := runInstallInFlightShellHook(t, tc, data, refusingAPIAddr(t), write, "DEFENSECLAW_GATEWAY_AUTOSTART=0", "DEFENSECLAW_HOOK_MAX_BODY=1048576")
 				if got := shellHookBlocked(err, stdout); got != install {
 					t.Fatalf("blocks=%v, want %v (install %v): err=%v stdout=%q stderr=%q", got, install, install, err, stdout, stderr)
 				}
@@ -163,13 +165,17 @@ func TestPerUserShellHookOversizedPayloadClosesWhenAnInstallStartsDuringTheRead(
 	}
 }
 
+// The call is over the default 1 MiB read cap: a cap lowered under the
+// transport's 900 KiB refuses an oversized call instead of reviewing it
+// (rel-1-0-6:GAP-0337, TestShellHookLoweredBodyCapOnlyTightens).
 func TestPerUserShellOversizedProtectedPrefixGetsGatewayBlock(t *testing.T) {
+	pad := strings.Repeat("x", 1100<<10)
 	cases := []struct {
 		name, payload string
 	}{
-		{"cursor", `{"hook_event_name":"beforeReadFile","file_path":"/home/user/.defenseclaw/audit.db","content":"` + strings.Repeat("x", 8192) + `"}`},
-		{"claudecode", `{"hook_event_name":"PreToolUse","tool_name":"Write","tool_input":{"file_path":"/home/user/.ssh/authorized_keys","content":"` + strings.Repeat("x", 8192) + `"}}`},
-		{"codex", `{"hook_event_name":"PreToolUse","tool_name":"apply_patch","tool_input":{"file_path":"/home/user/.defenseclaw/hooks/codex-hook.sh","content":"` + strings.Repeat("x", 8192) + `"}}`},
+		{"cursor", `{"hook_event_name":"beforeReadFile","file_path":"/home/user/.defenseclaw/audit.db","content":"` + pad + `"}`},
+		{"claudecode", `{"hook_event_name":"PreToolUse","tool_name":"Write","tool_input":{"file_path":"/home/user/.ssh/authorized_keys","content":"` + pad + `"}}`},
+		{"codex", `{"hook_event_name":"PreToolUse","tool_name":"apply_patch","tool_input":{"file_path":"/home/user/.defenseclaw/hooks/codex-hook.sh","content":"` + pad + `"}}`},
 	}
 	for _, item := range cases {
 		t.Run(item.name, func(t *testing.T) {
@@ -192,6 +198,7 @@ func TestPerUserShellOversizedProtectedPrefixGetsGatewayBlock(t *testing.T) {
 				tc.conn = NewCodexConnector()
 			}
 			tc.invoke.stdin = item.payload
+			tc.invoke.env = append(tc.invoke.env, "DEFENSECLAW_HOOK_MAX_BODY=1048576")
 			stdout, stderr, err := runInstallInFlightShellHook(t, tc, data, strings.TrimPrefix(server.URL, "http://"), nil)
 			if !shellHookBlocked(err, stdout) || !bytes.Contains(got, []byte(`"bounded_prefix_review":true`)) || !bytes.Contains(got, []byte(`"file_path":`)) {
 				t.Fatalf("protected oversized input must reach gateway and block: err=%v stdout=%q stderr=%q request=%q", err, stdout, stderr, got)
