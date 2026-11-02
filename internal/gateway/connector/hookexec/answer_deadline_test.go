@@ -22,8 +22,42 @@ import (
 func shortAnswerBudget(t *testing.T, budget time.Duration) {
 	t.Helper()
 	previous := hookAnswerBudget
+	previousCodex := perUserCodexAnswerBudget
 	hookAnswerBudget = budget
-	t.Cleanup(func() { hookAnswerBudget = previous })
+	perUserCodexAnswerBudget = budget
+	t.Cleanup(func() {
+		hookAnswerBudget = previous
+		perUserCodexAnswerBudget = previousCodex
+	})
+}
+
+// A per-user Codex tool call can receive a gateway answer in the last half
+// second of the local answer window, within its registered host timeout.
+func TestCertfixGAP0485PerUserCodexAnswerWindow(t *testing.T) {
+	started := time.Now()
+	for _, row := range []struct {
+		name string
+		opts Options
+		want time.Duration
+	}{
+		{"per-user Codex", Options{Connector: "codex", Event: "PreToolUse"}, 4 * time.Second},
+		{"managed Codex", Options{Connector: "codex", Event: "PreToolUse", ManagedEnterprise: true}, 3500 * time.Millisecond},
+		{"per-user Claude Code", Options{Connector: "claudecode", Event: "PreToolUse"}, 3500 * time.Millisecond},
+		{"Secure Client", Options{Connector: "codex", Event: "PreToolUse", SecureClient: true}, 0},
+	} {
+		t.Run(row.name, func(t *testing.T) {
+			deadline := answerDeadline(row.opts, started)
+			if row.want == 0 {
+				if !deadline.IsZero() {
+					t.Fatalf("deadline = %s, want none", deadline)
+				}
+				return
+			}
+			if got := deadline.Sub(started); got != row.want {
+				t.Fatalf("answer window = %s, want %s", got, row.want)
+			}
+		})
+	}
 }
 
 // gatewayAt serves every hook call with handle on a real loopback listener,

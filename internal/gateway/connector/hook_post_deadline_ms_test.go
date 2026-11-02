@@ -14,9 +14,9 @@ import (
 )
 
 // A per-user tool call whose shell spent 0.4 s before the request gives the
-// helper the 2.6 s left after the startup reserve, not the 2 whole seconds
-// that --max-time can carry (GAP-2279: a large benign Bash heredoc was closed
-// at about 2.4 s). --max-time itself is unchanged, for an older helper.
+// helper the 3.35 s left after the startup reserve. The whole-second
+// --max-time rounds down, while the millisecond deadline uses the rest of
+// the four-second shell request (GAP-0483).
 func TestHostHookGivesTheHelperTheMillisecondsLeft(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("shell hooks are not used on Windows")
@@ -57,8 +57,8 @@ func TestHostHookGivesTheHelperTheMillisecondsLeft(t *testing.T) {
 		wantMaxTime  string
 		minMS, maxMS int
 	}{
-		{"tool call, 0.4 s spent", 4, 400, "2", 2500, 2600},
-		{"tool call, 1.2 s spent", 4, 1200, "2", 2000, 2000},
+		{"tool call, 0.4 s spent", 4, 400, "3", 3250, 3350},
+		{"tool call, 1.2 s spent", 4, 1200, "2", 2450, 2550},
 		{"other event, 0.4 s spent", 10, 400, "9", 9500, 9600},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
