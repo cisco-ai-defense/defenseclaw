@@ -656,11 +656,17 @@ func writeWindowsCursorManagedHooksRepair(
 // canonical DefenseClaw entries while keeping every unrelated entry. Orphan
 // hook references are reclaimed first. The caller must hold the Cursor
 // transaction lock. Strict mode keeps the refuse-on-drift posture.
+//
+// The re-merge is the Secure Client repair. A standalone host only reclaims
+// orphans here and reports the drift: its repair paths rebuild the guard from
+// the protected record (restoreWindowsCursorManagedGuard), which keeps a
+// hooks.json that is not JSON byte for byte and reports what it rebuilt.
 func validateWindowsCursorManagedArtifactsRepairingHooks(
 	artifacts windowsCursorManagedArtifacts,
 ) (windowsCursorManagedArtifacts, error) {
 	validated, err := validateWindowsCursorManagedArtifactsReclaimingOrphans(artifacts)
-	if err == nil || !windowsCursorManagedHooksDrifted(err) || managed.TrustStrictAncestors() {
+	if err == nil || !windowsCursorManagedHooksDrifted(err) || managed.TrustStrictAncestors() ||
+		windowsEnterpriseStandaloneProcess() {
 		return validated, err
 	}
 	repaired, repairErr := repairWindowsCursorManagedHooks(validated)
@@ -675,11 +681,14 @@ func validateWindowsCursorManagedArtifactsRepairingHooks(
 // content drift: it takes the lock, re-snapshots and repairs through
 // validateWindowsCursorManagedArtifactsRepairingHooks. The guardian reaches
 // this every tick, so drift heals instead of failing into a full repair.
+// A standalone host keeps the side-effect-free check: its drift is reported
+// and repaired by the guard rebuild.
 func validateWindowsCursorManagedArtifactsHealingHooks(
 	artifacts windowsCursorManagedArtifacts,
 ) (windowsCursorManagedArtifacts, error) {
 	validated, err := validateWindowsCursorManagedArtifacts(artifacts)
-	if !windowsCursorManagedHooksDrifted(err) || managed.TrustStrictAncestors() {
+	if !windowsCursorManagedHooksDrifted(err) || managed.TrustStrictAncestors() ||
+		windowsEnterpriseStandaloneProcess() {
 		return validated, err
 	}
 	err = withWindowsCursorManagedTransaction(func() error {
@@ -692,6 +701,19 @@ func validateWindowsCursorManagedArtifactsHealingHooks(
 		return repairErr
 	})
 	return validated, err
+}
+
+// validateWindowsCursorManagedArtifactsForLockedRead is the check of locked
+// callers that only read the guard (teardown preparation, identity
+// verification). A Secure Client host repairs hooks.json drift there like
+// every locked caller; a standalone host keeps the side-effect-free check.
+func validateWindowsCursorManagedArtifactsForLockedRead(
+	artifacts windowsCursorManagedArtifacts,
+) (windowsCursorManagedArtifacts, error) {
+	if windowsEnterpriseStandaloneProcess() {
+		return validateWindowsCursorManagedArtifacts(artifacts)
+	}
+	return validateWindowsCursorManagedArtifactsRepairingHooks(artifacts)
 }
 
 func repairWindowsCursorManagedHooks(
@@ -2961,7 +2983,7 @@ func PrepareWindowsCursorManagedPolicyTeardown(
 		if err != nil {
 			return err
 		}
-		artifacts, err = validateWindowsCursorManagedArtifactsRepairingHooks(artifacts)
+		artifacts, err = validateWindowsCursorManagedArtifactsForLockedRead(artifacts)
 		if err != nil {
 			return err
 		}
