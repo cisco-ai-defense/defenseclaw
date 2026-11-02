@@ -4,11 +4,40 @@
 package hermesskills
 
 import (
+	"crypto/sha256"
 	"fmt"
 	"os"
 	"path/filepath"
 	"testing"
 )
+
+func TestGAP0486VendorDigestUsesPortableRelativePaths(t *testing.T) {
+	root := t.TempDir()
+	for path, data := range map[string]string{"B/a.txt": "one", "a/z.txt": "two"} {
+		full := filepath.Join(root, filepath.FromSlash(path))
+		if err := os.MkdirAll(filepath.Dir(full), 0o700); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(full, []byte(data), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	want := fmt.Sprintf("%x", sha256.Sum256([]byte("B/a.txtonea/z.txttwo")))
+	got, err := treeSHA256(root)
+	if err != nil || got != want {
+		t.Fatalf("tree digest = %q, %v; want %q", got, err, want)
+	}
+	if got := vendorDigestRelativePath(`a\z.txt`); got != "a/z.txt" {
+		t.Fatalf("native relative path = %q", got)
+	}
+	if err := os.WriteFile(filepath.Join(root, "a", "z.txt"), []byte("changed"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	changed, err := treeSHA256(root)
+	if err != nil || changed == want {
+		t.Fatalf("changed tree digest = %q, %v", changed, err)
+	}
+}
 
 func TestDiscoverClassifiesOnlyPinnedVendorTreesBundled(t *testing.T) {
 	home, err := filepath.EvalSymlinks(t.TempDir())

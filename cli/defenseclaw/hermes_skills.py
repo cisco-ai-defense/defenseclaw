@@ -155,14 +155,14 @@ def _tree_sha256(skill_dir: str) -> str | None:
                 tree_bytes += info.st_size
                 if tree_bytes > _SKILL_TREE_MAX_BYTES:
                     return None
-                files.append((os.path.relpath(full, root), full, info.st_size))
+                files.append((os.path.relpath(full, root).replace("\\", "/"), full, info.st_size))
     except OSError:
         return None
 
     digest = hashlib.sha256()
     for relative, full, size in sorted(
         files,
-        key=lambda item: os.path.normcase(item[0]),
+        key=lambda item: item[0],
     ):
         payload = _read_regular_file(full, max_bytes=size)
         if payload is None:

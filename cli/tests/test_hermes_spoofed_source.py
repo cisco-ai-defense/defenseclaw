@@ -9,8 +9,23 @@ import os
 
 import pytest
 from defenseclaw.enforce.skill_enforcer import SkillEnforcer
-from defenseclaw.hermes_skills import is_bundled_skill_dir, is_bundled_skill_path
+from defenseclaw.hermes_skills import _tree_sha256, is_bundled_skill_dir, is_bundled_skill_path
 from defenseclaw.skill_discovery import discover_skill_directories
+
+
+def test_gap0486_vendor_digest_uses_portable_relative_paths(tmp_path, monkeypatch) -> None:
+    root = tmp_path / "skill"
+    for relative, payload in (("B/a.txt", "one"), ("a/z.txt", "two")):
+        path = root / relative
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(payload, encoding="utf-8")
+    expected = _tree_sha256(os.fspath(root))
+    real_relpath = os.path.relpath
+    monkeypatch.setattr(os.path, "relpath", lambda *args: real_relpath(*args).replace("/", "\\"))
+    monkeypatch.setattr(os.path, "normcase", lambda value: value.lower())
+    assert _tree_sha256(os.fspath(root)) == expected
+    (root / "a" / "z.txt").write_text("changed", encoding="utf-8")
+    assert _tree_sha256(os.fspath(root)) != expected
 
 
 @pytest.mark.parametrize("source", ["launcher", "environment"])

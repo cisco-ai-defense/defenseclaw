@@ -406,11 +406,7 @@ func treeSHA256(root string) (string, error) {
 	sort.Slice(files, func(i, j int) bool {
 		left, _ := filepath.Rel(root, files[i].path)
 		right, _ := filepath.Rel(root, files[j].path)
-		if runtime.GOOS == "windows" {
-			left = strings.ToLower(left)
-			right = strings.ToLower(right)
-		}
-		return left < right
+		return vendorDigestRelativePath(left) < vendorDigestRelativePath(right)
 	})
 	digest := sha256.New()
 	for _, file := range files {
@@ -422,7 +418,7 @@ func treeSHA256(root string) (string, error) {
 		if err != nil {
 			return "", err
 		}
-		_, _ = digest.Write([]byte(relative))
+		_, _ = digest.Write([]byte(vendorDigestRelativePath(relative)))
 		_, _ = digest.Write(payload)
 	}
 	for _, item := range append(dirs, files...) {
@@ -433,6 +429,10 @@ func treeSHA256(root string) (string, error) {
 		}
 	}
 	return fmt.Sprintf("%x", digest.Sum(nil)), nil
+}
+
+func vendorDigestRelativePath(relative string) string {
+	return strings.ReplaceAll(relative, `\`, "/")
 }
 
 func canonicalPath(path string) bool {
