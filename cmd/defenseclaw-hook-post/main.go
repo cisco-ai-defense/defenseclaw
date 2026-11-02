@@ -142,9 +142,10 @@ type gatewayStartObservation struct {
 }
 
 // observeGatewayStartDuringCall samples the account-owned start lock after
-// the request reaches a verified gateway socket. Once that lock is released,
-// it checks whether the connected peer gave up the port. Both signals may be
-// gone by the time an unanswered call reaches its deadline.
+// the request reaches a verified gateway socket. The first held lock starts
+// the read of the connected peer (PerUserPeerRecord.Read). Once that lock is
+// released, it checks whether the connected peer gave up the port. Both
+// signals may be gone by the time an unanswered call reaches its deadline.
 func observeGatewayStartDuringCall(dataDir string, peer *hookexec.PerUserPeerRecord) func() gatewayStartObservation {
 	if dataDir == "" || peer == nil {
 		return func() gatewayStartObservation { return gatewayStartObservation{} }
@@ -162,6 +163,10 @@ func observeGatewayStartDuringCall(dataDir string, peer *hookexec.PerUserPeerRec
 		for {
 			if hookexec.PerUserGatewayStartInProgress(dataDir) {
 				start.Store(true)
+				// The connection is still open: name the process behind it
+				// now, before the restart replaces it (GAP-0381: only a call
+				// that sees a start reads it).
+				peer.Read()
 				break
 			}
 			select {
