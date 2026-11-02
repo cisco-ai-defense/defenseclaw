@@ -19,8 +19,8 @@ shard.
 
 --timings names a JSON file of recorded seconds (scripts/test-timings/,
 refreshed by scripts/update_test_timings.py). Tests stay together by file
-unless a file alone weighs more than half a shard; a test or package with no
-recorded time still runs and weighs the recorded mean of the package's
+unless a file alone weighs more than half a shard or --split-tests is set.
+A test or package with no recorded time still runs and weighs the mean of the package's
 tests under two seconds ("*"), or the median recorded time. Without
 timings a file weighs its source size. --check prints the shard weights and
 fails unless every discovered test (test mode) or package (package mode) is
@@ -98,9 +98,11 @@ def weighted_test_groups(
     files: list[tuple[Path, tuple[str, ...]]],
     shard_count: int,
     test_seconds: dict[str, float] | None,
+    split_tests: bool = False,
 ) -> list[tuple[tuple[str, ...], float]]:
-    """Units to balance: one per file, except that a file heavier than half
-    a shard is split into one unit per test."""
+    """Group by file, splitting heavy files or every test when requested."""
+    if split_tests and not test_seconds:
+        raise ValueError("split_tests requires per-test timings")
     if test_seconds:
         default = float(test_seconds.get("*", _median(v for k, v in test_seconds.items() if k != "*")))
         weigh = lambda name: float(test_seconds.get(name, default))  # noqa: E731
@@ -108,7 +110,7 @@ def weighted_test_groups(
         limit = sum(weight for _, _, weight in file_weights) / shard_count / 2
         groups: list[tuple[tuple[str, ...], float]] = []
         for _, names, weight in file_weights:
-            if weight > limit and len(names) > 1:
+            if (split_tests or weight > limit) and len(names) > 1:
                 groups.extend(((name,), weigh(name)) for name in names)
             else:
                 groups.append((names, weight))
@@ -120,13 +122,17 @@ def partition_test_files(
     files: list[tuple[Path, tuple[str, ...]]],
     shard_count: int,
     test_seconds: dict[str, float] | None = None,
+    split_tests: bool = False,
 ) -> list[list[str]]:
     """Return each shard's sorted test names; every test lands in exactly one."""
     if shard_count <= 0:
         raise ValueError("shard_count must be positive")
-    if len(files) < shard_count:
+    if split_tests:
+        if sum(len(names) for _, names in files) < shard_count:
+            raise ValueError("shard_count cannot exceed discovered tests")
+    elif len(files) < shard_count:
         raise ValueError("shard_count cannot exceed discovered test files")
-    groups = weighted_test_groups(files, shard_count, test_seconds)
+    groups = weighted_test_groups(files, shard_count, test_seconds, split_tests)
     keyed = {f"{index:06d}": names for index, (names, _) in enumerate(groups)}
     items = [(f"{index:06d}", weight) for index, (_, weight) in enumerate(groups)]
     return [sorted(name for key in shard for name in keyed[key]) for shard in balance(items, shard_count)]
@@ -262,6 +268,7 @@ def main() -> int:
     parser.add_argument("--timings", type=Path, help="recorded seconds (scripts/test-timings/*.json)")
     parser.add_argument("--check", action="store_true", help="print every shard and verify the exact cover")
     parser.add_argument("--match", help="test mode: keep only the tests this go test -run pattern selects")
+    parser.add_argument("--split-tests", action="store_true", help="test mode: balance each test separately")
     parser.add_argument("command", nargs=argparse.REMAINDER)
     args = parser.parse_args()
     command = args.command[1:] if args.command[:1] == ["--"] else args.command
@@ -273,6 +280,8 @@ def main() -> int:
                 parser.error("package mode does not run a command")
             if args.match is not None:
                 parser.error("--match is for test mode")
+            if args.split_tests:
+                parser.error("--split-tests is for test mode")
             shards, expected, problems = _package_mode(args, timings)
         else:
             files = discover_test_files(args.package_dir)
@@ -280,7 +289,7 @@ def main() -> int:
                 files = match_test_files(files, args.match)
             package_dir = args.package_dir.resolve()
             key = package_dir.relative_to(ROOT).as_posix() if package_dir.is_relative_to(ROOT) else ""
-            shards = partition_test_files(files, args.shard_count, timings.get("tests", {}).get(key))
+            shards = partition_test_files(files, args.shard_count, timings.get("tests", {}).get(key), args.split_tests)
             expected = sorted({name for _, names in files for name in names})
             problems = check_exact_cover(shards, expected)
     except ValueError as exc:

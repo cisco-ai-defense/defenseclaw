@@ -6,6 +6,7 @@ import sys
 from pathlib import Path
 
 import pytest
+import yaml
 
 from scripts.go_test_shards import (
     check_exact_cover,
@@ -96,6 +97,32 @@ def test_timed_shards_split_a_heavy_file_and_still_run_unrecorded_tests(tmp_path
     # The heavy file outweighs half a shard, so its two tests land apart.
     assert {"TestHeavyA", "TestHeavyB"} not in (set(shards[0]), set(shards[1]))
     assert check_exact_cover(shards, sorted(names)) == []
+
+
+def test_split_tests_bounds_the_selector_even_when_a_file_has_many_fast_tests(tmp_path: Path) -> None:
+    (tmp_path / "many_test.go").write_text(
+        "package sample\n" + "".join(f"func TestFast{i}(t *testing.T) {{}}\n" for i in range(5)),
+        encoding="utf-8",
+    )
+    for file_name, stem in (("heavy", "Heavy"), ("other", "Other")):
+        (tmp_path / f"{file_name}_test.go").write_text(
+            "package sample\n" + "".join(f"func Test{stem}{i}(t *testing.T) {{}}\n" for i in range(5)),
+            encoding="utf-8",
+        )
+    files = discover_test_files(tmp_path)
+    seconds = {"*": 1.0, **{f"Test{stem}{i}": 5.0 for stem in ("Heavy", "Other") for i in range(5)}}
+
+    grouped = partition_test_files(files, 3, seconds)
+    shards = partition_test_files(files, 3, seconds, split_tests=True)
+    assert max(map(len, shards)) < max(map(len, grouped))
+    assert sum(any(name.startswith("TestFast") for name in shard) for shard in shards) >= 2
+    assert check_exact_cover(shards, [name for _, names in files for name in names]) == []
+    one_file = [item for item in files if item[0].name == "many_test.go"]
+    assert sorted(name for shard in partition_test_files(one_file, 2, seconds, split_tests=True) for name in shard) == [
+        f"TestFast{i}" for i in range(5)
+    ]
+    with pytest.raises(ValueError, match="requires per-test timings"):
+        partition_test_files(files, 3, split_tests=True)
 
 
 def test_exact_cover_reports_missing_duplicate_and_unknown_items() -> None:
@@ -218,3 +245,50 @@ def test_match_keeps_the_tests_a_run_pattern_selects_and_still_covers_them(tmp_p
     assert check_exact_cover(shards, ["TestHookOne", "TestModeThree", "TestSetupTwo"]) == []
     with pytest.raises(ValueError):
         match_test_files(files, "Hook/sub")
+
+
+def test_windows_hookexec_matrix_covers_each_test_once_with_time_headroom() -> None:
+    root = Path(__file__).resolve().parents[2]
+    workflow = yaml.safe_load((root / ".github/workflows/windows-native.yml").read_text(encoding="utf-8"))
+    job = workflow["jobs"]["windows-go"]
+    entries = job["strategy"]["matrix"]["include"]
+    hookexec_parts = [(part["shard"], part["index"]) for part in entries if part["kind"] == "hookexec"]
+    assert hookexec_parts == [("hx0", 0), ("hx1", 1), ("hx2", 2)]
+
+    uv_step = next(step for step in job["steps"] if step.get("uses", "").startswith("astral-sh/setup-uv@"))
+    assert "matrix.kind == 'hookexec'" in uv_step["if"]
+    run = next(step["run"] for step in job["steps"] if step.get("name") == "Full native Windows Go test, vet, and build")
+    hookexec = run.split("if ($suiteKind -eq 'hookexec') {", 1)[1].split("if ($suiteKind -eq 'packages') {", 1)[0]
+    packages = run.split("if ($suiteKind -eq 'packages') {", 1)[1].split("if ($suiteKind -eq 'gateway'", 1)[0]
+    assert "$hookexecTestShardCount = 3" in run
+    assert "'--package-dir', 'internal/gateway/connector/hookexec'" in hookexec
+    assert "'--split-tests'" in hookexec
+    assert "'--timings', 'scripts/test-timings/go-windows.json'" in hookexec
+    assert "'-run', $shardPattern" in hookexec
+    assert "'-timeout=11m'" in hookexec
+    assert "-GoTestFailureSummaryPath $goFailureSummary" in hookexec
+    assert "'--exclude', 'github.com/defenseclaw/defenseclaw/internal/gateway/connector/hookexec'" in packages
+
+    timings = json.loads((root / "scripts/test-timings/go-windows.json").read_text(encoding="utf-8"))
+    seconds = timings["tests"]["internal/gateway/connector/hookexec"]
+    files = discover_test_files(root / "internal/gateway/connector/hookexec")
+    shards = partition_test_files(files, len(hookexec_parts), seconds, split_tests=True)
+    discovered = sorted({name for _, names in files for name in names})
+    assert check_exact_cover(shards, discovered) == []
+    assert all(shards)
+    assert max(map(len, shards)) <= 150
+    assert sum("TestPerUserNativeHookOutageOpenOnlyForAnOutage" in shard for shard in shards) == 1
+    assert sum("TestAgentHostHeaderIsSentOnlyByManagedHooks" in shard for shard in shards) == 1
+    estimated = [sum(float(seconds.get(name, seconds["*"])) for name in shard) for shard in shards]
+    assert max(estimated) < 0.6 * 14 * 60, estimated
+
+
+def test_windows_remaining_package_control_stays_covered() -> None:
+    root = Path(__file__).resolve().parents[2]
+    timings = json.loads((root / "scripts/test-timings/go-windows.json").read_text(encoding="utf-8"))
+    prefix = "github.com/defenseclaw/defenseclaw/"
+    excluded = {prefix + path for path in ("internal/gateway", "internal/gateway/connector", "internal/gateway/connector/hookexec")}
+    packages = sorted(set(timings["packages"]) - excluded)
+    shards = partition_packages(packages, 6, timings, root=root)
+    control = prefix + "internal/hookpaths"
+    assert sum(package == control for shard in shards for package, _ in shard) == 1
