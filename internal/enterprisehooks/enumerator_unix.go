@@ -243,8 +243,7 @@ type UnixEligibleAccount struct {
 }
 
 type unixCandidate struct {
-	account  unixidentity.Account
-	included bool
+	account unixidentity.Account
 }
 
 // DefaultUnixHomeRoots are the home parents the guardian units allow.
@@ -738,6 +737,8 @@ func EnumerateUnix(ctx context.Context, cfg *config.Config, registry *connector.
 		if check.State == HomeAvailable {
 			currentInode = check.Inode
 		}
+		rowsBefore := len(targets)
+		var notInstalled []string
 		for _, conn := range perUser {
 			key := unixRowKey(name, conn)
 			_, isMachine := machinePolicy[conn]
@@ -852,6 +853,11 @@ func EnumerateUnix(ctx context.Context, cfg *config.Config, registry *connector.
 						Reason: fmt.Sprintf("installed at %s, a prefix DefenseClaw does not search for agents; add %s to enterprise.enrollment.agent_prefixes. Until then %s",
 							binary, prefix, consequence),
 					})
+				} else if !discoveryFailed {
+					// A failed or budget-spent worker inspected nothing: the
+					// account is reported as install_scan_incomplete, not as
+					// having no agent installed.
+					notInstalled = append(notInstalled, conn)
 				}
 				logfSafely(opts.Logger, name, fmt.Sprintf("new (%s, %s) row skipped: %s", name, conn, reason))
 				continue
@@ -882,6 +888,15 @@ func EnumerateUnix(ctx context.Context, cfg *config.Config, registry *connector.
 			report.New++
 			targets = append(targets, row)
 			emitted[key] = struct{}{}
+		}
+		if explicitlyIncluded && len(targets) == rowsBefore && len(notInstalled) > 0 {
+			// include_users makes an account a candidate and skips its uid
+			// and shell checks, but rows are per installed agent: an
+			// administrator who names an account with none must be told why
+			// it is not enrolled (rel-1-0-6:GAP-0290), on macOS (local and
+			// mobile accounts alike) as on Linux.
+			skip(fmt.Sprintf("named in enterprise.enrollment.include_users but not enrolled: no installation of %s found for this account; it is enrolled on the next cycle after one is installed in it",
+				strings.Join(notInstalled, ", ")))
 		}
 	}
 
@@ -1253,16 +1268,14 @@ func RevokeGoneUnixTargets(ctx context.Context, opts UnixRevokeGoneOptions) (Man
 func collectUnixCandidates(ctx context.Context, opts UnixEnumerateOptions, enrollment config.EnterpriseEnrollmentConfig, homeRoots []string) ([]unixCandidate, bool) {
 	byName := map[string]*unixCandidate{}
 	transient := false
-	add := func(account unixidentity.Account, included bool) {
-		if existing, ok := byName[account.Name]; ok {
-			existing.included = existing.included || included
-			return
+	add := func(account unixidentity.Account) {
+		if _, ok := byName[account.Name]; !ok {
+			byName[account.Name] = &unixCandidate{account: account}
 		}
-		byName[account.Name] = &unixCandidate{account: account, included: included}
 	}
 	if accounts, _, err := opts.Resolver.ListUsers(); err == nil {
 		for _, account := range accounts {
-			add(account, false)
+			add(account)
 		}
 	} else {
 		transient = true
@@ -1277,7 +1290,7 @@ func collectUnixCandidates(ctx context.Context, opts UnixEnumerateOptions, enrol
 			logfSafely(opts.Logger, strconv.Itoa(uid), fmt.Sprintf("%s uid did not resolve: %v", source, err))
 			return
 		}
-		add(account, false)
+		add(account)
 	}
 	if opts.SessionUIDs != nil {
 		for _, uid := range opts.SessionUIDs() {
@@ -1320,7 +1333,7 @@ func collectUnixCandidates(ctx context.Context, opts UnixEnumerateOptions, enrol
 			logfSafely(opts.Logger, name, fmt.Sprintf("included user did not resolve: %v", err))
 			continue
 		}
-		add(account, true)
+		add(account)
 	}
 	out := make([]unixCandidate, 0, len(byName))
 	for _, candidate := range byName {

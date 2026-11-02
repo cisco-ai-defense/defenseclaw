@@ -142,7 +142,7 @@ Every key lives under `enterprise.enrollment`. Defaults and value rules are in [
 | Setting | Linux and macOS | Windows |
 | --- | --- | --- |
 | `mode` | `auto` or `manifest` | `auto` or `manifest` |
-| `include_users` | Adds these accounts even when discovery does not list them, and skips the uid and login-shell checks for them | Accepted. Every profile on the computer is already a candidate, so it adds and removes no one. |
+| `include_users` | Adds these accounts even when discovery does not list them, and skips the uid and login-shell checks for them. An account still gets a row only for an agent installed in it; the enumerator log names an included account that has none | Accepted. Every profile on the computer is already a candidate, so it adds and removes no one. |
 | `exclude_users` | Never enrolled. Wins over every other setting. | Same |
 | `include_groups`, `exclude_groups` | Group filters | Group filters for local and Active Directory groups, and for the Entra ID groups that a built-in local group lists; see [Group filters on Windows](#group-filters-on-windows) |
 | `exempt_users` | Not enrolled, and never refused for enrollment or by a sandbox `required_for`; their calls are still inspected under their guardrail profile and logged | Keeps the rows of the machine-policy agents, so the user is inspected and logged there. Per-user agents get no new rows; rows already enrolled are kept. |
