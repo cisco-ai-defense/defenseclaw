@@ -83,6 +83,13 @@ func renderClaudeDropIn(opts Options, policy config.ResolvedConnectorPolicy) ([]
 	if policy.ManagedHooksOnly == config.ManagedHooksOnlyEnforce {
 		doc.set("allowManagedHooksOnly", true)
 	}
+	if opts.goos() != "windows" {
+		// This env value also governs Bash tool commands. Keep their shell
+		// prefix at the managed default while the hook itself uses exec form.
+		env := newObject()
+		env.set("CLAUDE_CODE_SHELL_PREFIX", "")
+		doc.set("env", env)
+	}
 	hooks := newObject()
 	for _, group := range groups {
 		entry := newObject()
@@ -190,10 +197,20 @@ func claudeEnvValue(doc *object, name string) (any, bool) {
 	return nil, false
 }
 
-// inspectClaudeShellopts reports a managed source whose shell options can
-// affect Bash tool scripts. The native DefenseClaw hook uses exec form.
-func inspectClaudeShellopts(sources []claudeSource, state *State) {
+// inspectClaudeShellEnvironment reports managed env values that affect Bash
+// tool scripts. The native DefenseClaw hook uses exec form.
+func inspectClaudeShellEnvironment(opts Options, sources []claudeSource, state *State) {
+	dropIn, _ := claudeDropInPath(opts)
+	prefixPinned := false
 	for _, source := range sources {
+		if value, ok := claudeEnvValue(source.doc, "CLAUDE_CODE_SHELL_PREFIX"); ok {
+			if prefix, isText := value.(string); isText {
+				prefixPinned = prefix == ""
+				if source.name != dropIn && prefix != "" {
+					state.detail("%s sets env CLAUDE_CODE_SHELL_PREFIX; verify the effective managed value is empty for Bash tool commands (rel-1-0-6:GAP-0322)", source.name)
+				}
+			}
+		}
 		if value, ok := claudeEnvValue(source.doc, "SHELLOPTS"); ok {
 			if text, isText := value.(string); !isText || strings.TrimSpace(text) != "" {
 				state.detail("%s sets env SHELLOPTS, which Claude Code passes to Bash tool commands; review shell startup options if scripts stop early (rel-1-0-6:GAP-0465)", source.name)
@@ -203,6 +220,9 @@ func inspectClaudeShellopts(sources []claudeSource, state *State) {
 				state.detail("%s sets env SHELLOPTS to \"\", which breaks Bash tool scripts: bash exports it, so the onecmd option of Claude Code's shell snapshot reaches every script the Bash tool starts and each runs its first command only; remove SHELLOPTS from that env block (rel-1-0-6:GAP-0465)", source.name)
 			}
 		}
+	}
+	if !prefixPinned {
+		state.conflict("managed Claude Code settings do not keep CLAUDE_CODE_SHELL_PREFIX empty for Bash tool commands (rel-1-0-6:GAP-0322)")
 	}
 }
 
@@ -387,7 +407,7 @@ func inspectClaude(opts Options, policy config.ResolvedConnectorPolicy, state *S
 		state.detail("managed_hooks_only: preserve — user and project Claude Code hooks still run and can rewrite tool input (updatedInput) after DefenseClaw approves it")
 	}
 	if opts.goos() != "windows" {
-		inspectClaudeShellopts(sources, state)
+		inspectClaudeShellEnvironment(opts, sources, state)
 	}
 	if value, from := claudeEffectiveScalar(sources, "policyHelper"); value != nil {
 		state.conflict("%s configures policyHelper, which lets an external helper decide managed policy; DefenseClaw cannot verify the effective hooks", from)
@@ -404,6 +424,13 @@ func inspectClaude(opts Options, policy config.ResolvedConnectorPolicy, state *S
 		switch {
 		case len(missing) == 0:
 			state.detail("%s embeds DefenseClaw's hook matrix", source.name)
+			if opts.goos() != "windows" {
+				value, ok := claudeEnvValue(source.doc, "CLAUDE_CODE_SHELL_PREFIX")
+				prefix, isText := value.(string)
+				if !ok || !isText || prefix != "" {
+					state.conflict("%s carries DefenseClaw's hooks but does not keep CLAUDE_CODE_SHELL_PREFIX empty for Bash tool commands (rel-1-0-6:GAP-0322)", source.name)
+				}
+			}
 		case behavior == "merge":
 			state.detail("%s sets managedSourcesBehavior: merge, so Claude Code %s and later also apply DefenseClaw's drop-in", source.name, claudeMergeMinimumVersion)
 			if version := opts.agentVersion(claudeConnector); version != "" && compareVersions(version, claudeMergeMinimumVersion) < 0 {
