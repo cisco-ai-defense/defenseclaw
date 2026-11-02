@@ -732,6 +732,89 @@ class _MCPPosixDescendants:
         self._thread.join(timeout=1)
 
 
+_PR_SET_CHILD_SUBREAPER = 36
+_PR_GET_CHILD_SUBREAPER = 37
+_MCP_LINUX_ORPHAN_REAP_SECONDS = 1.0
+
+
+class _MCPLinuxOrphans:
+    """End processes orphaned inside the scanned server tree (Linux).
+
+    For the scan the scanner is a child subreaper (prctl
+    PR_SET_CHILD_SUBREAPER): a process whose parent exits, such as the
+    detached child of a short-lived helper or of the exited server, is
+    reparented to the scanner instead of init, whatever group or session it
+    moved to. Scans hold _MCP_POSIX_PROCESS_FACTORY_LOCK, so a new child the
+    scanner did not launch itself is such an orphan.
+    """
+
+    def __init__(self) -> None:
+        self._prctl: Any = None
+        self._previous: int | None = None
+        self._before: set[int] = set()
+        if sys.platform != "linux":
+            return
+        try:
+            import ctypes
+
+            prctl = ctypes.CDLL(None, use_errno=True).prctl
+            previous = ctypes.c_int(0)
+            if prctl(_PR_GET_CHILD_SUBREAPER, ctypes.byref(previous), 0, 0, 0) != 0:
+                raise OSError(ctypes.get_errno(), "PR_GET_CHILD_SUBREAPER")
+            self._before = _mcp_linux_children(os.getpid())
+            if prctl(_PR_SET_CHILD_SUBREAPER, 1, 0, 0, 0) != 0:
+                raise OSError(ctypes.get_errno(), "PR_SET_CHILD_SUBREAPER")
+        except (OSError, AttributeError) as exc:
+            _LOGGER.warning("MCP stdio orphan tracking unavailable: %s", exc)
+            return
+        self._prctl = prctl
+        self._previous = previous.value
+
+    def sweep(self, launched: set[int]) -> None:
+        """TERM, then KILL, and reap every adopted orphan; restore the flag."""
+        if self._prctl is None:
+            return
+        try:
+            deadline = time.monotonic() + _MCP_LINUX_ORPHAN_REAP_SECONDS
+            while time.monotonic() < deadline:
+                orphans = _mcp_linux_children(os.getpid()) - self._before - launched
+                if not orphans:
+                    return
+                for sig in (signal.SIGTERM, signal.SIGKILL):
+                    for pid in orphans:
+                        try:
+                            os.kill(pid, sig)
+                        except ProcessLookupError:
+                            pass
+                    grace = time.monotonic() + (
+                        _MCP_POSIX_GROUP_GRACE_SECONDS if sig == signal.SIGTERM
+                        else max(0.0, deadline - time.monotonic())
+                    )
+                    while orphans:
+                        for pid in list(orphans):
+                            try:
+                                if os.waitpid(pid, os.WNOHANG)[0] == pid:
+                                    orphans.discard(pid)
+                            except ChildProcessError:
+                                orphans.discard(pid)
+                        if not orphans or time.monotonic() >= grace:
+                            break
+                        time.sleep(0.01)
+                    if not orphans:
+                        break
+            remaining = _mcp_linux_children(os.getpid()) - self._before - launched
+            if remaining:
+                _LOGGER.warning(
+                    "MCP stdio cleanup may be incomplete; orphaned server processes %s are still running",
+                    sorted(remaining),
+                )
+        except OSError as exc:
+            _LOGGER.warning("MCP stdio orphan cleanup failed: %s", exc)
+        finally:
+            if self._prctl(_PR_SET_CHILD_SUBREAPER, self._previous, 0, 0, 0) != 0:
+                _LOGGER.warning("MCP stdio orphan tracking could not restore the subreaper flag")
+
+
 class _MCPPosixInput:
     """Capture the server tree before the SDK closes its input stream."""
 
@@ -867,6 +950,7 @@ def _contained_mcp_posix_process_factory(server_name: str = "stdio server") -> I
     from anyio._core._eventloop import get_async_backend
 
     started_groups: dict[int, tuple[subprocess.Popen[bytes], int, threading.Event, _MCPPosixDescendants]] = {}
+    launched: set[int] = set()
     notified_groups: set[int] = set()
     session_closed = threading.Event()
 
@@ -906,6 +990,7 @@ def _contained_mcp_posix_process_factory(server_name: str = "stdio server") -> I
                 stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
                 stderr=subprocess.DEVNULL, pass_fds=(control_read,), process_group=0,
             )
+            launched.add(guardian.pid)
             if (guardian.stdout is None
                     or not select.select([guardian.stdout], [], [], 1.0)[0]
                     or os.read(guardian.stdout.fileno(), 1) != b"R"):
@@ -931,6 +1016,7 @@ def _contained_mcp_posix_process_factory(server_name: str = "stdio server") -> I
                 [command, *args], stdin=subprocess.PIPE, stdout=subprocess.PIPE,
                 env=env, stderr=errlog, cwd=cwd, process_group=guardian.pid,
             )
+            launched.add(process.pid)
         except BaseException:
             _close_mcp_posix_control(control_write)
             emergency.set()
@@ -966,6 +1052,7 @@ def _contained_mcp_posix_process_factory(server_name: str = "stdio server") -> I
             await original_terminate(process)
 
     with _MCP_POSIX_PROCESS_FACTORY_LOCK:
+        orphans = _MCPLinuxOrphans()
         original_create = mcp_stdio._create_platform_compatible_process
         original_terminate = mcp_stdio._terminate_process_tree
         mcp_stdio._create_platform_compatible_process = create
@@ -977,6 +1064,7 @@ def _contained_mcp_posix_process_factory(server_name: str = "stdio server") -> I
             mcp_stdio._terminate_process_tree = original_terminate
             for pid in started_groups:
                 notify(pid)
+            orphans.sweep(launched)
             session_closed.set()
 
 

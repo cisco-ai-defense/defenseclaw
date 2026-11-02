@@ -296,7 +296,13 @@ def test_group_signal_eperm_warns_once_and_keeps_scan_result(
         warnings = [m for m in caplog.messages if "a child may still be running" in m]
         assert len(warnings) == 1
         assert "fixture" in warnings[0] and "EPERM" in warnings[0]
-        assert _running(int(child_pid_file.read_text(encoding="ascii")))
+        child_pid = int(child_pid_file.read_text(encoding="ascii"))
+        if sys.platform == "linux":
+            # The child outlived the exited server, so the scanner adopted
+            # it as subreaper and ended it although group signals failed.
+            assert not _running(child_pid)
+        else:
+            assert _running(child_pid)
     finally:
         for pid_file in (child_pid_file, tmp_path / "server.pid"):
             if pid_file.exists():
@@ -468,3 +474,89 @@ def test_reaper_ends_guardian_that_misses_its_deadline(
         if guardian.poll() is None:
             guardian.kill()
         guardian.wait(timeout=2)
+
+
+_SHORT_HELPER = """import os, signal, sys, time
+child = os.fork()
+if child:
+    os._exit(0)
+os.setsid()
+signal.signal(signal.SIGTERM, signal.SIG_IGN)
+with open(sys.argv[1], "w") as output:
+    output.write(str(os.getpid()))
+time.sleep(300)
+"""
+
+_SHORT_HELPER_SERVER = """import json, os, subprocess, sys, time
+pidfile, helperfile = sys.argv[1:]
+helper = subprocess.Popen(
+    [sys.executable, helperfile, pidfile],
+    stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+    start_new_session=True,
+)
+helper.wait(timeout=2)
+deadline = time.monotonic() + 2
+while not os.path.exists(pidfile) and time.monotonic() < deadline:
+    time.sleep(0.005)
+for line in sys.stdin:
+    message = json.loads(line)
+    if "id" not in message:
+        continue
+    method = message.get("method")
+    if method == "initialize":
+        result = {"protocolVersion": "2024-11-05", "capabilities": {"tools": {}},
+                  "serverInfo": {"name": "fixture", "version": "1.0"}}
+    elif method == "server/discover":
+        print(json.dumps({"jsonrpc": "2.0", "id": message["id"],
+                          "error": {"code": -32601, "message": "Method not found"}}), flush=True)
+        continue
+    elif method == "tools/list":
+        result = {"tools": [{"name": "echo", "description": "Echo text",
+                            "inputSchema": {"type": "object", "properties": {}}}]}
+    else:
+        result = {}
+    print(json.dumps({"jsonrpc": "2.0", "id": message["id"], "result": result}), flush=True)
+"""
+
+
+@pytest.mark.skipif(
+    sys.platform != "linux",
+    reason="needs a child subreaper; macOS keeps the descendant tracker (documented limit)",
+)
+def test_local_stdio_scan_ends_short_helper_descendant(tmp_path: Path) -> None:
+    """rel-1-0-6:GAP-0499 review 3: a helper in its own session forks a
+    child that calls setsid, ignores SIGTERM and outlives the helper. The
+    parent link is gone before any tree capture; the scan still ends it."""
+    mcpscanner = pytest.importorskip("mcpscanner")
+    from mcpscanner.core.models import AnalyzerEnum
+
+    server = tmp_path / "server.py"
+    helper = tmp_path / "helper.py"
+    pidfile = tmp_path / "child.pid"
+    server.write_text(_SHORT_HELPER_SERVER, encoding="utf-8")
+    helper.write_text(_SHORT_HELPER, encoding="utf-8")
+    entry = MCPServerEntry(
+        name="short-helper", command=sys.executable,
+        args=[str(server), str(pidfile), str(helper)], env={},
+    )
+    outside = subprocess.Popen(
+        [sys.executable, "-c", "import time; time.sleep(30)"],
+        stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+        start_new_session=True,
+    )
+    try:
+        wrapper = MCPScannerWrapper(MCPScannerConfig(analyzers="yara"))
+        assert wrapper._scan_local(
+            mcpscanner.Scanner(mcpscanner.Config()), entry, [AnalyzerEnum.YARA],
+        ) == []
+        child_pid = int(pidfile.read_text(encoding="ascii"))
+        # The scan ends and reaps the orphan before it returns.
+        assert not _running(child_pid), f"short-helper descendant {child_pid} survived the scan"
+        assert outside.poll() is None, "a process the scan did not start was ended"
+    finally:
+        outside.kill()
+        outside.wait()
+        if pidfile.exists():
+            child_pid = int(pidfile.read_text(encoding="ascii"))
+            if _running(child_pid):
+                os.kill(child_pid, signal.SIGKILL)
