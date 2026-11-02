@@ -183,6 +183,10 @@ type Service struct {
 	// lastContainerEvents is the container-event count at the previous
 	// poll, for the per-cycle figure. Poll owns it (pollMu).
 	lastContainerEvents int64
+	// kernelTaken (under mu) is set once TakeSnapshot handed the current
+	// snapshot's kernel events to the emitter. Until then a newer poll
+	// carries them forward instead of dropping them (rel-1-0-6:GAP-0148).
+	kernelTaken bool
 }
 
 type episode struct {
@@ -350,6 +354,29 @@ func (s *Service) Snapshot() Snapshot {
 	snapshot := s.snapshot
 	snapshot.Kernel = copyKernelState(s.kernel)
 	s.mu.RUnlock()
+	return s.withLiveState(snapshot)
+}
+
+// TakeSnapshot is Snapshot for the one consumer that reports the kernel
+// events (the gateway's emitter): it also hands them over, so the next poll
+// starts a fresh batch. Polls come from several clocks (the poll interval,
+// the 10 s kernel-status tick, the supervisor, an operator scan) and the
+// emitter reads on its own tick, so two polls can land between two reads; a
+// poll that replaces a snapshot nobody took carries that snapshot's kernel
+// events forward instead of losing them (rel-1-0-6:GAP-0148: would-blocks
+// missing from defenseclaw.kernel.events while the helper counted them).
+func (s *Service) TakeSnapshot() Snapshot {
+	s.mu.Lock()
+	snapshot := s.snapshot
+	snapshot.Kernel = copyKernelState(s.kernel)
+	s.kernelTaken = true
+	s.mu.Unlock()
+	return s.withLiveState(snapshot)
+}
+
+// withLiveState adds what changes between polls: Plane C's current backend
+// and the latest customer kernel events.
+func (s *Service) withLiveState(snapshot Snapshot) Snapshot {
 	if s.hostPlane == nil || len(snapshot.Planes) == 0 {
 		return snapshot
 	}
@@ -845,10 +872,36 @@ func (s *Service) Poll(ctx context.Context) Snapshot {
 	snapshot.Degraded = len(snapshot.DegradedReasons) > 0
 
 	s.mu.Lock()
+	if !s.kernelTaken {
+		// The emitter never read the snapshot this poll replaces: keep its
+		// kernel events, oldest first, within the per-poll bounds.
+		snapshot.KernelEvents, snapshot.KernelEventsDropped = carryForward(
+			s.snapshot.KernelEvents, s.snapshot.KernelEventsDropped,
+			snapshot.KernelEvents, snapshot.KernelEventsDropped, maxKernelEventsPerPoll)
+		snapshot.CustomerKernelEvents, snapshot.CustomerKernelEventsDropped = carryForward(
+			s.snapshot.CustomerKernelEvents, s.snapshot.CustomerKernelEventsDropped,
+			snapshot.CustomerKernelEvents, snapshot.CustomerKernelEventsDropped, maxCustomerRecordsPerPoll)
+	}
+	s.kernelTaken = false
 	s.snapshot = snapshot
 	snapshot.Kernel = copyKernelState(s.kernel)
 	s.mu.Unlock()
 	return snapshot
+}
+
+// carryForward joins the events of a snapshot nobody took with a new poll's,
+// oldest first, at most limit of them; the rest count as dropped.
+func carryForward[T any](older []T, olderDropped int64, newer []T, newerDropped int64, limit int) ([]T, int64) {
+	if len(older) == 0 && olderDropped == 0 {
+		return newer, newerDropped
+	}
+	keptOlder := min(len(older), limit)
+	keptNewer := min(len(newer), limit-keptOlder)
+	joined := make([]T, 0, keptOlder+keptNewer)
+	joined = append(joined, older[:keptOlder]...)
+	joined = append(joined, newer[:keptNewer]...)
+	dropped := olderDropped + newerDropped + int64(len(older)-keptOlder) + int64(len(newer)-keptNewer)
+	return joined, dropped
 }
 
 // degradedReasonsFor renders one operator-facing line per plane that is not

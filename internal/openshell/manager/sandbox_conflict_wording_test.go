@@ -7,7 +7,9 @@ import (
 	"errors"
 	"strings"
 	"testing"
+	"time"
 
+	"github.com/defenseclaw/defenseclaw/internal/openshell"
 	"github.com/defenseclaw/defenseclaw/internal/openshell/sandboxapi"
 )
 
@@ -55,5 +57,103 @@ func TestStopAndSyncConflictsReadInDefenseClawWords(t *testing.T) {
 	other := upstream("stop sandbox vs9-vm2", errors.New("openshell: stop sandbox: disk quota exceeded"))
 	if !errors.As(other, &e) || e.Code != sandboxapi.CodeUpstream || !strings.Contains(e.Error(), "disk quota exceeded") {
 		t.Fatalf("another error was changed: %#v", other)
+	}
+}
+
+// rel-1-0-6:GAP-0446 (review round 2): OpenShell holds the same "previous
+// driver operation" claim during every healthy create or start, so its
+// refusal first reads as "still finishing, retry", with nothing destructive
+// and none of OpenShell's words, on start, stop and delete alike.
+func TestPendingDriverOperationFirstSaysStillFinishingAndRetry(t *testing.T) {
+	for op, raw := range map[string]string{
+		"delete sandbox vs10c-x":            `openshell: delete sandbox "vs10c-x": Conflict: previous driver operation is still pending; retry and deletion are blocked`,
+		"start sandbox vs10c-x":             `openshell: start sandbox "vs10c-x": Conflict: previous driver operation may still complete; retry and deletion are blocked`,
+		"stop sandbox vs10c-x":              `openshell: stop sandbox "vs10c-x": FailedPrecondition: previous driver operation is still pending; retry and deletion are blocked`,
+		"wait for sandbox vs10c-x deletion": `openshell: wait: FailedPrecondition: previous driver operation may still complete; retry and deletion are blocked`,
+	} {
+		var e *sandboxapi.Error
+		if err := upstream(op, errors.New(raw)); !errors.As(err, &e) || e.Code != sandboxapi.CodeConflict {
+			t.Fatalf("%s: refusal = %#v", op, err)
+		}
+		text := e.Error()
+		for _, want := range []string{"sandbox vs10c-x is busy", "OpenShell is still finishing a create or start",
+			"wait a minute and run the command again", "`defenseclaw sandbox list`", "repeated", "may later explain a last resort"} {
+			if !strings.Contains(text, want) {
+				t.Fatalf("%s: %q lacks %q", op, text, want)
+			}
+		}
+		for _, never := range []string{"Conflict", "FailedPrecondition", "openshell:", "retry and deletion are blocked",
+			"openshell.db", "systemctl", "docker rm", "is stuck"} {
+			if strings.Contains(text, never) {
+				t.Fatalf("%s: %q must not say %q while OpenShell may still finish", op, text, never)
+			}
+		}
+	}
+}
+
+// The delete gives the recovery after repeated error-phase refusals in one
+// observed episode spanning pendingStuckAfter. A provisioning or starting
+// sandbox (a slow image pull) never gets it, however long it takes, and the
+// database move comes last, with what it loses. A managed account gets its
+// administrator only.
+func TestPendingDriverOperationRecoveryAfterObservedEpisode(t *testing.T) {
+	now := time.Unix(1_760_000_000, 0)
+	m := &Manager{now: func() time.Time { return now }}
+	text := func(phase openshell.SandboxPhase, managed bool) string {
+		var e *sandboxapi.Error
+		if err := m.pendingRefusal("vs10c-x", phase, managed); !errors.As(err, &e) || e.Code != sandboxapi.CodeConflict {
+			t.Fatalf("refusal = %#v", err)
+		}
+		return e.Error()
+	}
+	for i := 0; i < 4; i++ {
+		if got := text(openshell.PhaseProvisioning, false); !strings.Contains(got, "is busy") || strings.Contains(got, "openshell.db") {
+			t.Fatalf("provisioning after %d min: %q", i*5, got)
+		}
+		now = now.Add(5 * time.Minute)
+	}
+	if got := text(openshell.PhaseError, false); !strings.Contains(got, "is busy") {
+		t.Fatalf("first refusal in error: %q", got)
+	}
+	now = now.Add(pendingStuckAfter - time.Second)
+	if got := text(openshell.PhaseError, false); !strings.Contains(got, "is busy") {
+		t.Fatalf("just under the bound: %q", got)
+	}
+	now = now.Add(time.Second)
+	stuck := text(openshell.PhaseError, false)
+	for _, want := range []string{"sandbox vs10c-x is stuck", "refused deletion in its error state on repeated attempts over 3 minutes",
+		"usually a create or start never finished", "Last resort", "loses OpenShell's record of every sandbox on this gateway",
+		"and any providers, profiles or settings you added to this gateway yourself",
+		"`defenseclaw sandbox list`", "`defenseclaw sandbox pull NAME --apply`", "`--branch`", "`--patch-out FILE`",
+		"check that the work you need is saved in your project before you delete a sandbox or move the gateway database",
+		"`defenseclaw sandbox delete NAME`",
+		"systemctl --user stop openshell-gateway", "openshell.db-wal", "`docker ps -a --filter name=--vs10c-x-`",
+		"`defenseclaw sandbox delete vs10c-x`"} {
+		if !strings.Contains(stuck, want) {
+			t.Fatalf("stuck refusal %q lacks %q", stuck, want)
+		}
+	}
+	confirm := strings.Index(stuck, "check that the work you need is saved in your project")
+	if strings.Index(stuck, "Last resort") > strings.Index(stuck, "openshell.db") ||
+		strings.Index(stuck, "--patch-out FILE") > confirm ||
+		confirm > strings.Index(stuck, "defenseclaw sandbox delete NAME") ||
+		confirm > strings.Index(stuck, "systemctl --user stop openshell-gateway") ||
+		confirm > strings.Index(stuck, "openshell.db") ||
+		strings.Contains(stuck, "gateway knows: pull") {
+		t.Fatalf("the save check must precede deletion and the database move: %q", stuck)
+	}
+	managed := text(openshell.PhaseError, true)
+	if !strings.Contains(managed, "is stuck") || !strings.Contains(managed, "help desk") ||
+		strings.Contains(managed, "systemctl") || strings.Contains(managed, "openshell.db") || strings.Contains(managed, "docker") {
+		t.Fatalf("managed stuck refusal = %q, want the administrator only", managed)
+	}
+	// Leaving the error state starts the count over.
+	_ = text(openshell.PhaseStarting, false)
+	if got := text(openshell.PhaseError, false); !strings.Contains(got, "is busy") {
+		t.Fatalf("after a phase change: %q", got)
+	}
+	m.forgetPending("vs10c-x")
+	if got := text(openshell.PhaseError, false); !strings.Contains(got, "is busy") {
+		t.Fatalf("after a delete: %q", got)
 	}
 }
