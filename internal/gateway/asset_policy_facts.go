@@ -306,10 +306,13 @@ func (a *APIServer) skillFolderAccessDecision(
 	facts := claimedAssetFactsFromContext(ctx)
 	home := hookActiveHome(ctx)
 	caller := ""
+	var refs []assetfacts.FolderRef
 	if peer, ok := managedHookPeerFromContext(ctx); ok {
 		caller = peer.Name
+		refs = assetfacts.SkillFolderRefsForPeer(toolInput, home, cwd, caller, peer.UID, peer.GID)
+	} else {
+		refs = assetfacts.SkillFolderRefs(toolInput, home, cwd, caller)
 	}
-	refs := assetfacts.SkillFolderRefs(toolInput, home, cwd, caller)
 	if len(refs) == 0 {
 		return config.AssetPolicyDecision{}, false
 	}

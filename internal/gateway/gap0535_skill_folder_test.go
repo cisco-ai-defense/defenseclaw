@@ -117,7 +117,9 @@ func TestGAP0535SequentialDirectoryUsesReachedSkillTree(t *testing.T) {
 	cfg := &config.Config{AssetPolicy: config.DefaultAssetPolicy()}
 	cfg.AssetPolicy.Skill.Denied = []config.AssetPolicyRule{{Name: "listed-name"}}
 	api := &APIServer{scannerCfg: cfg}
-	ctx := withManagedHookPeer(context.Background(), managedHookPeer{UID: 1001, Name: "fixture", Home: home})
+	// This fixture represents an entered directory: its mode and owner must
+	// agree with the peer credentials used by the resolver.
+	ctx := withManagedHookPeer(context.Background(), managedHookPeer{UID: os.Geteuid(), GID: os.Getegid(), Name: "fixture", Home: home})
 	for _, separator := range []string{"; ", "\n"} {
 		for _, deniedAtReached := range []bool{false, true} {
 			homeName, otherName := "listed-name", "ordinary-name"
@@ -136,6 +138,63 @@ func TestGAP0535SequentialDirectoryUsesReachedSkillTree(t *testing.T) {
 			})
 			if matched != deniedAtReached || matched && (decision.Action != "block" || decision.Source != "admin-deny") {
 				t.Errorf("separator %q, denied at reached %t: decision=%+v matched=%t", separator, deniedAtReached, decision, matched)
+			}
+		}
+	}
+}
+
+func TestGAP0535UnprovenSequentialDirectoryChecksBothTrees(t *testing.T) {
+	home, cwd, other := t.TempDir(), t.TempDir(), t.TempDir()
+	first := filepath.Join(cwd, "skills", "folder")
+	second := filepath.Join(other, "skills", "folder")
+	for _, dir := range []string{first, second} {
+		if err := os.MkdirAll(dir, 0o700); err != nil {
+			t.Fatal(err)
+		}
+	}
+	cfg := &config.Config{AssetPolicy: config.DefaultAssetPolicy()}
+	cfg.AssetPolicy.Skill.Denied = []config.AssetPolicyRule{{Name: "listed-name"}}
+	api := &APIServer{scannerCfg: cfg}
+	for _, tc := range []struct {
+		name string
+		path string
+		uid  int
+		gid  int
+	}{
+		{"regular-file", filepath.Join(t.TempDir(), "file"), os.Geteuid(), os.Getegid()},
+		{"missing", filepath.Join(t.TempDir(), "missing"), os.Geteuid(), os.Getegid()},
+		// A directory owned by this test process at 0700 is not enterable
+		// by the synthetic managed peer; existence alone proves nothing.
+		{"foreign-0700", other, os.Geteuid() + 1001, os.Getegid() + 1001},
+	} {
+		if tc.name == "regular-file" {
+			if err := os.WriteFile(tc.path, []byte("data"), 0o600); err != nil {
+				t.Fatal(err)
+			}
+		}
+		for _, separator := range []string{"; ", "\n"} {
+			for _, placement := range []string{"ordinary", "cwd-denied", "candidate-denied"} {
+				if placement == "candidate-denied" && tc.name != "foreign-0700" {
+					continue
+				}
+				for _, dir := range []string{first, second} {
+					name := "ordinary-name"
+					if placement == "cwd-denied" && dir == first || placement == "candidate-denied" && dir == second {
+						name = "listed-name"
+					}
+					if err := os.WriteFile(filepath.Join(dir, "SKILL.md"), []byte("---\nname: "+name+"\n---\n"), 0o600); err != nil {
+						t.Fatal(err)
+					}
+				}
+				ctx := withManagedHookPeer(context.Background(), managedHookPeer{UID: tc.uid, GID: tc.gid, Name: "fixture", Home: home})
+				decision, matched := api.claudeCodeSkillAssetDecision(ctx, claudeCodeHookRequest{
+					HookEventName: "PreToolUse", ToolName: "Bash", CWD: cwd,
+					ToolInput: map[string]interface{}{"command": "cd " + tc.path + separator + "cat skills/folder/SKILL.md"},
+				})
+				want := placement != "ordinary"
+				if matched != want || matched && (decision.Action != "block" || decision.Source != "admin-deny") {
+					t.Errorf("%s separator=%q placement=%s: decision=%+v matched=%t", tc.name, separator, placement, decision, matched)
+				}
 			}
 		}
 	}

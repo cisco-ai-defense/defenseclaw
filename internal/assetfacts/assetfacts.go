@@ -336,12 +336,22 @@ type FolderRef struct {
 // line, a file path or a working folder. "~" and $HOME expand to home and
 // a relative path resolves against cwd.
 func SkillFolderRefs(input any, home, cwd string, caller ...string) []FolderRef {
-	var values []string
-	collectStrings(input, 0, &values)
 	account := ""
 	if len(caller) > 0 {
 		account = caller[0]
 	}
+	return skillFolderRefsForCaller(input, home, cwd, account, os.Geteuid(), os.Getegid())
+}
+
+// SkillFolderRefsForPeer resolves a managed hook request using the kernel
+// credentials of the caller, rather than the gateway service account.
+func SkillFolderRefsForPeer(input any, home, cwd, caller string, uid, gid int) []FolderRef {
+	return skillFolderRefsForCaller(input, home, cwd, caller, uid, gid)
+}
+
+func skillFolderRefsForCaller(input any, home, cwd, account string, uid, gid int) []FolderRef {
+	var values []string
+	collectStrings(input, 0, &values)
 	seen := map[string]int{}
 	var refs []FolderRef
 	add := func(value, dir string, explicit bool) {
@@ -359,26 +369,56 @@ func SkillFolderRefs(input any, home, cwd string, caller ...string) []FolderRef 
 		}
 	}
 	for _, value := range values {
-		dir, explicit := cwd, false
+		type position struct {
+			value    string
+			dir      string
+			explicit bool
+		}
+		positions := []position{{value: value, dir: cwd}}
 		for i := 0; i < 8; i++ {
-			prefix, rest, next, ok := leadingSkillDirectoryChange(value, dir, home, account)
-			if !ok {
+			var nextPositions []position
+			changed := false
+			for _, current := range positions {
+				prefix, rest, next, sequential, certain, ok := leadingSkillDirectoryChange(current.value, current.dir, home, account, uid, gid)
+				if !ok {
+					nextPositions = append(nextPositions, current)
+					continue
+				}
+				changed = true
+				add(prefix, current.dir, current.explicit)
+				nextPositions = append(nextPositions, position{rest, next, true})
+				if sequential && !certain {
+					// A sequential successor runs in cwd when cd fails. A
+					// gateway unable to prove entry must check both paths.
+					nextPositions = append(nextPositions, position{rest, current.dir, current.explicit})
+				}
+			}
+			if !changed {
+				positions = nextPositions
 				break
 			}
-			add(prefix, dir, explicit)
-			value, dir, explicit = rest, next, true
+			unique := make(map[position]bool, len(nextPositions))
+			positions = positions[:0]
+			for _, next := range nextPositions {
+				if !unique[next] {
+					unique[next] = true
+					positions = append(positions, next)
+				}
+			}
 		}
-		add(value, dir, explicit)
+		for _, current := range positions {
+			add(current.value, current.dir, current.explicit)
+		}
 	}
 	return refs
 }
 
 // leadingSkillDirectoryChange follows a literal cd before another command.
 // A command after a failed cd in a sequential list runs in the original dir.
-func leadingSkillDirectoryChange(value, cwd, home, caller string) (prefix, rest, dir string, ok bool) {
+func leadingSkillDirectoryChange(value, cwd, home, caller string, uid, gid int) (prefix, rest, dir string, sequential, certain, ok bool) {
 	value = strings.TrimSpace(value)
 	if !strings.HasPrefix(value, "cd ") && !strings.HasPrefix(value, "cd\t") {
-		return "", "", "", false
+		return "", "", "", false, false, false
 	}
 	var quote rune
 	escaped := false
@@ -404,7 +444,7 @@ func leadingSkillDirectoryChange(value, cwd, home, caller string) (prefix, rest,
 			words := commandPathTokens(prefix)
 			if len(words) != 2 || words[0] != "cd" || words[1] == "-" ||
 				strings.ContainsAny(words[1], "*?[]{}$`") {
-				return "", "", "", false
+				return "", "", "", false, false, false
 			}
 			dir = words[1]
 			if dir == "~" {
@@ -415,7 +455,7 @@ func leadingSkillDirectoryChange(value, cwd, home, caller string) (prefix, rest,
 				dir = filepath.Join(home, strings.TrimPrefix(dir, "~"+caller+"/"))
 			}
 			if dir == "" || strings.HasPrefix(dir, "~") {
-				return "", "", "", false
+				return "", "", "", false, false, false
 			}
 			if !filepath.IsAbs(dir) {
 				dir = filepath.Join(cwd, dir)
@@ -424,18 +464,20 @@ func leadingSkillDirectoryChange(value, cwd, home, caller string) (prefix, rest,
 			if ch == '&' {
 				separatorWidth = 2
 			}
+			original := dir
 			resolved, err := filepath.EvalSymlinks(dir)
 			if err == nil {
 				dir = resolved
-			} else if os.IsNotExist(err) && ch != '&' {
-				dir = cwd
-			} else if !os.IsNotExist(err) {
-				return "", "", "", false
 			}
-			return prefix, value[i+separatorWidth:], filepath.Clean(dir), true
+			if err == nil {
+				if info, statErr := os.Stat(dir); statErr == nil && info.IsDir() {
+					certain = callerCanEnterDirectory(original, uid, gid) && callerCanEnterDirectory(dir, uid, gid)
+				}
+			}
+			return prefix, value[i+separatorWidth:], filepath.Clean(dir), ch != '&', certain, true
 		}
 	}
-	return "", "", "", false
+	return "", "", "", false, false, false
 }
 
 func collectStrings(value any, depth int, out *[]string) {
