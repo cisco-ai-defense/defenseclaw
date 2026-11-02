@@ -45,7 +45,7 @@ func TestReadGatewayTokenDotenvRejectsOversizeInsteadOfParsingPrefix(t *testing.
 
 func TestReadGatewayTokenDotenvSkipsSecretRefText(t *testing.T) {
 	path := filepath.Join(t.TempDir(), ".env")
-	body := "OPENCLAW_GATEWAY_TOKEN={source: store, provider: default, id: OPENCLAW_GATEWAY_TOKEN}\n" +
+	body := "OPENCLAW_GATEWAY_TOKEN={'source': 'store', 'provider': 'default', 'id': 'OPENCLAW_GATEWAY_TOKEN'}\n" +
 		"DEFENSECLAW_GATEWAY_TOKEN=real-token-1404\n"
 	if err := os.WriteFile(path, []byte(body), 0o600); err != nil {
 		t.Fatal(err)

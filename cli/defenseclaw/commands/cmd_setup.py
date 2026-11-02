@@ -5287,7 +5287,7 @@ def setup_gateway(
             ux.echo("  ⚠ --remote specified but no auth token configured", err=True)
             click.echo("    Provide --token or --ssm-param, or set OPENCLAW_GATEWAY_TOKEN", err=True)
         elif not gw.resolved_token():
-            detected = _detect_openclaw_gateway_token(app.cfg.claw.config_file)
+            detected = _detect_openclaw_gateway_token(app.cfg.claw.config_file, cfg=app.cfg)
             if detected:
                 _save_secret_to_dotenv("OPENCLAW_GATEWAY_TOKEN", detected, data_dir)
                 gw.token = ""
@@ -5482,16 +5482,18 @@ def _interactive_gateway_remote(gw, data_dir: str) -> None:
 _OPENCLAW_TOKEN_NOTICES_SHOWN: set[str] = set()
 
 
-def _detect_openclaw_gateway_token(openclaw_config_file: str) -> str:
+def _detect_openclaw_gateway_token(openclaw_config_file: str, cfg=None) -> str:
     """Read the gateway auth token from openclaw.json (gateway.auth.token).
 
     A SecretRef token is resolved from the environment when its source is
     ``env``; any other one is never returned as a token, and one notice per
     process asks for the token in an environment variable (issue #1404).
     """
-    from defenseclaw.connector_paths import _read_openclaw_json, openclaw_gateway_token
+    from defenseclaw.connector_paths import _read_openclaw_json, defenseclaw_credential_names, openclaw_gateway_token
 
-    token = openclaw_gateway_token(_read_openclaw_json(openclaw_config_file))
+    token = openclaw_gateway_token(
+        _read_openclaw_json(openclaw_config_file), credential_names=defenseclaw_credential_names(cfg)
+    )
     if token.notice and token.notice not in _OPENCLAW_TOKEN_NOTICES_SHOWN:
         _OPENCLAW_TOKEN_NOTICES_SHOWN.add(token.notice)
         ux.warn(token.notice)
@@ -14898,7 +14900,7 @@ def _adopt_openclaw_gateway_token(app: AppContext, *, restart: bool = False) -> 
     new token to the old gateway's shutdown API, which logged an
     api-auth-failure security event (GAP-2259).
     """
-    detected = (_detect_openclaw_gateway_token(app.cfg.claw.config_file) or "").strip()
+    detected = (_detect_openclaw_gateway_token(app.cfg.claw.config_file, cfg=app.cfg) or "").strip()
     gw = app.cfg.gateway
     previous = gw.resolved_token()
     if not detected or detected == previous:

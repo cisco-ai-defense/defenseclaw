@@ -90,6 +90,8 @@ class BootstrapReport:
     # Set when openclaw.json holds a gateway token DefenseClaw cannot read
     # (a SecretRef, issue #1404); it never contains the token.
     openclaw_token_notice: str = ""
+    # Set when a stale SecretRef gateway token line was removed from .env.
+    gateway_token_cleanup: str = ""
     device_key_file: str = ""
     errors: list[str] = field(default_factory=list)
 
@@ -997,6 +999,8 @@ def run_first_run(options: FirstRunOptions) -> FirstRunReport:
             )
         else:
             setup.append(StepResult("Bootstrap", "pass", cfg.data_dir))
+        if bootstrap.gateway_token_cleanup:
+            setup.append(StepResult("Gateway token", "pass", bootstrap.gateway_token_cleanup))
         if bootstrap.openclaw_token_notice:
             setup.append(
                 StepResult(
@@ -2580,6 +2584,7 @@ def _apply_gateway_defaults(
     token = gw.get("token", "")
     if report is not None:
         report.openclaw_token_notice = str(gw.get("token_notice", "") or "")
+        report.gateway_token_cleanup = str(gw.get("token_cleanup", "") or "")
     if token:
         keep_running_gateway_token(logger, cfg.data_dir, cfg.gateway.resolved_token(), token)
         _save_secret_to_dotenv("OPENCLAW_GATEWAY_TOKEN", token, cfg.data_dir)

@@ -20,12 +20,17 @@ import "testing"
 
 func TestIsSecretRefText(t *testing.T) {
 	for value, want := range map[string]bool{
-		"{source: store, provider: default, id: OPENCLAW_GATEWAY_TOKEN}": true,
-		` {"source":"env","id":"X"} `:                                    true,
-		"0123456789abcdef0123456789abcdef":                               false,
-		"":                                                               false,
-		"source-token":                                                   false,
-		"{not-a-ref}":                                                    false,
+		"{'source': 'store', 'provider': 'default', 'id': 'OPENCLAW_GATEWAY_TOKEN'}": true,
+		` {"source":"env","id":"X"} `:      true,
+		`{"id": "X", "source": "store"}`:   true,
+		"0123456789abcdef0123456789abcdef": false,
+		"":                                 false,
+		"source-token":                     false,
+		"{not-a-ref}":                      false,
+		"{opensource}":                     false,
+		"{xYresourceZ}":                    false,
+		"  {source":                        false,
+		"{source: store}":                  false,
 	} {
 		if got := IsSecretRefText(value); got != want {
 			t.Errorf("IsSecretRefText(%q) = %v, want %v", value, got, want)

@@ -3526,7 +3526,10 @@ def _ensure_device_key(path: str, *, data_dir: str | None = None) -> None:
         )
 
 
-def _resolve_openclaw_gateway(claw_config_file: str) -> dict[str, str | int]:
+def _resolve_openclaw_gateway(
+    claw_config_file: str,
+    credential_names: frozenset[str] | None = None,
+) -> dict[str, str | int]:
     """Read gateway host, port, and token from openclaw.json.
 
     Looks for gateway.port and gateway.auth.token when gateway.mode is 'local'.
@@ -3565,7 +3568,7 @@ def _resolve_openclaw_gateway(claw_config_file: str) -> dict[str, str | int]:
         except (ValueError, TypeError):
             pass
 
-    token = openclaw_gateway_token(oc)
+    token = openclaw_gateway_token(oc, credential_names=credential_names)
     result["token"] = token.value
     result["token_notice"] = token.notice
 
@@ -3584,19 +3587,23 @@ def _resolve_gateway_for_connector(cfg) -> dict[str, str | int]:
     # gateway endpoint and (worse) its token. active_connectors() returns [] for
     # an unconfigured install and the real connector set otherwise, so the
     # phantom can never sneak in.
+    # ``token_cleanup`` is the one-line note that a stale SecretRef line was
+    # removed from .env (issue #1404); it is information, not a warning.
     from defenseclaw.commands.cmd_setup import _drop_secret_ref_gateway_tokens
+    from defenseclaw.connector_paths import defenseclaw_credential_names
 
     dropped = _drop_secret_ref_gateway_tokens(cfg.data_dir)
     if "openclaw" in cfg.active_connectors():
-        resolved = _resolve_openclaw_gateway(cfg.claw.config_file)
-        resolved["token_notice"] = " ".join(n for n in (dropped, str(resolved["token_notice"])) if n)
+        resolved = _resolve_openclaw_gateway(cfg.claw.config_file, defenseclaw_credential_names(cfg))
+        resolved["token_cleanup"] = dropped
         return resolved
 
     return {
         "host": "127.0.0.1",
         "port": 18789,
         "token": "",
-        "token_notice": dropped,
+        "token_notice": "",
+        "token_cleanup": dropped,
     }
 
 
@@ -3668,6 +3675,8 @@ def _setup_gateway_defaults(cfg, logger, is_new_config: bool = True) -> None:
         # per-connector-name token branch was unreachable and is dropped.)
         cfg.gateway.token_env = cfg.gateway.token_env or "DEFENSECLAW_GATEWAY_TOKEN"
         token_configured = bool(cfg.gateway.resolved_token())
+    if gw_info.get("token_cleanup"):
+        click.echo(f"  {gw_info['token_cleanup']}")
     if gw_info.get("token_notice"):
         ux.warn(str(gw_info["token_notice"]))
 
