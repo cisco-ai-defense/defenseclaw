@@ -57,7 +57,15 @@ over its budget, or was not measured. CI runs it on every pull
 request that builds the install assets (job `perf-budget` in
 `.github/workflows/ci.yml`).
 
-`budgets.json` holds one column per OS and mode. Entries with a number are
+`budgets.json` holds columns by OS, mode, and measured host class. On Linux,
+`--column linux-per-user` selects the measured arm64 2-CPU column when the
+result names that host class. Its idle hook, status, and doctor latency seeds
+come from the three quiet runs linked by `rel-1-0-6:GAP-0519`; the 20% tolerance
+and the common correctness, process-count, restart, and RSS gates are inherited
+without change. An arm64 result with another CPU count needs its own measured
+column and exits with a no-baseline error.
+
+Entries with a number are
 gated, entries with `"gate": false` are shown but not gated, and `"TODO"`
 entries have no baseline yet. Each entry names the measurement it came from.
 The budgets were measured on the install `provision` makes (Claude Code and

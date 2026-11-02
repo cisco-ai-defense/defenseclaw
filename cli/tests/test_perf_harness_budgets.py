@@ -13,6 +13,7 @@ import subprocess
 import sys
 from pathlib import Path
 
+import pytest
 import yaml
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -72,6 +73,46 @@ def test_a_benign_call_that_is_not_allowed_fails_a_zero_budget() -> None:
     budgets = _budgets({"hook.claudecode.burst.not_allowed": {"budget": 0}})
     report = dcperf.compare(_result(hook={"claudecode": {"burst": {"not_allowed": 1}}}), budgets, "c")
     assert not report["ok"]
+
+
+def test_arm64_two_cpu_budget_uses_its_measured_seed_and_keeps_the_zero_budget() -> None:
+    budgets = {
+        "tolerance": 0.20,
+        "columns": {
+            "linux-per-user": {
+                "hook.claudecode.idle.p50_ms": {"budget": 80},
+                "hook.claudecode.idle.not_allowed": {"budget": 0},
+            },
+            "linux-per-user-arm64-2cpu": {
+                "extends": "linux-per-user",
+                "hook.claudecode.idle.p50_ms": {"budget": 100},
+            },
+        },
+    }
+    result = {
+        "host": {"system": "Linux", "machine": "aarch64", "cpus": 2},
+        "metrics": {"hook": {"claudecode": {"idle": {"p50_ms": 100, "not_allowed": 0}}}},
+    }
+    arm = dcperf.compare(result, budgets, "linux-per-user")
+    assert arm["ok"] and arm["column"] == "linux-per-user-arm64-2cpu"
+
+    result["host"]["machine"] = "x86_64"
+    x86 = dcperf.compare(result, budgets, "linux-per-user")
+    assert not x86["ok"] and x86["column"] == "linux-per-user"
+
+    result["host"]["machine"] = "arm64"
+    result["metrics"]["hook"]["claudecode"]["idle"]["not_allowed"] = 1
+    denied = dcperf.compare(result, budgets, "linux-per-user")
+    assert not denied["ok"]
+
+    arm_entries = dcperf.budget_entries(BUDGETS, "linux-per-user-arm64-2cpu")
+    x86_entries = BUDGETS["columns"]["linux-per-user"]
+    assert arm_entries["hook.claudecode.idle.p50_ms"]["budget"] == 99.6
+    for metric in ("hook.claudecode.idle.not_allowed", "hook_execs.claudecode.per_call_p50"):
+        assert arm_entries[metric] == x86_entries[metric]
+    result["host"]["cpus"] = 4
+    with pytest.raises(ValueError, match="no seeded"):
+        dcperf.compare(result, budgets, "linux-per-user")
 
 
 def test_strace_parser_joins_interrupted_calls_and_skips_threads_and_failed_execs() -> None:
@@ -390,7 +431,8 @@ def test_the_windows_column_is_report_only_until_a_windows_producer_is_in_the_re
 
 
 def test_every_ungated_budget_other_than_a_max_says_why() -> None:
-    for column, entries in BUDGETS["columns"].items():
+    for column in BUDGETS["columns"]:
+        entries = dcperf.budget_entries(BUDGETS, column)
         for metric, entry in entries.items():
             if entry.get("gate") is False and not metric.endswith(".max_ms"):
                 assert entry.get("why"), f"{column} {metric}"

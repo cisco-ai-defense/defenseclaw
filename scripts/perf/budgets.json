@@ -4,6 +4,7 @@
  "notes": [
   "Budgets for scripts/perf/dcperf.py. A gated metric fails the check when it is over budget * (1 + tolerance) or was not measured.",
   "linux-per-user is seeded from the RHEL 9.8 per-user column of the 1.0.6 performance baseline (~/dc-eh/plans/r107/data/PERF-BASELINE.md, dc-rhel, 4 vCPU). Each entry names its source row.",
+  "linux-per-user-arm64-2cpu inherits the common gates and replaces six latency seeds with the worst of three idle arm64 2-CPU runs in rel-1-0-6:GAP-0519. The 20% tolerance remains unchanged.",
   "gate false: reported next to its budget but not gated, with the reason in why (max is a single-sample tail; burst latency depends on the runner CPU).",
   "TODO: no baseline measurement for this cell yet; fill it from a dcperf run on that OS and mode.",
   "windows-per-user and macos-per-user hold the seeds of their PERF-BASELINE.md sections: the worst of three runs plus 20% (the Windows restart seed is a single fresh-store sample), so the gate's tolerance comes on top. windows-per-user is report-only (every entry gate false): it was measured with a Windows port of this harness that is not in the repo.",
@@ -120,9 +121,36 @@
     "budget": "TODO",
     "source": "no baseline split anon/file before dcperf (1.0.7 build box: anon 90 MiB)"
    },
-   "gateway_rss_kb.file_kb": {
+  "gateway_rss_kb.file_kb": {
     "budget": "TODO",
     "source": "no baseline split anon/file before dcperf (1.0.7 build box: anon 90 MiB)"
+   }
+  },
+  "linux-per-user-arm64-2cpu": {
+   "extends": "linux-per-user",
+   "hook.claudecode.idle.p50_ms": {
+    "budget": 99.6,
+    "source": "rel-1-0-6:GAP-0519 quiet/run1..3, arm64 2 CPU, worst idle p50"
+   },
+   "hook.claudecode.idle.p95_ms": {
+    "budget": 121.9,
+    "source": "rel-1-0-6:GAP-0519 quiet/run1..3, arm64 2 CPU, worst idle p95"
+   },
+   "hook.codex.idle.p50_ms": {
+    "budget": 130.6,
+    "source": "rel-1-0-6:GAP-0519 quiet/run1..3, arm64 2 CPU, worst idle p50"
+   },
+   "hook.codex.idle.p95_ms": {
+    "budget": 151.1,
+    "source": "rel-1-0-6:GAP-0519 quiet/run1..3, arm64 2 CPU, worst idle p95"
+   },
+   "cli.status.p50_ms": {
+    "budget": 1784.5,
+    "source": "rel-1-0-6:GAP-0519 quiet/run1..3, arm64 2 CPU, worst status p50"
+   },
+   "cli.doctor.p50_ms": {
+    "budget": 4147.5,
+    "source": "rel-1-0-6:GAP-0519 quiet/run1..3, arm64 2 CPU, worst doctor p50"
    }
   },
   "macos-per-user": {

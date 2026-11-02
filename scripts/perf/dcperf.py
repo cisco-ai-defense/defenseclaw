@@ -126,6 +126,33 @@ def flatten(result: dict) -> dict[str, float]:
     return out
 
 
+def budget_column_for_result(result: dict, column: str) -> str:
+    """Use a measured Linux arm64 column when the result has that host shape."""
+    if column != "linux-per-user":
+        return column
+    host = result.get("host", {})
+    if host.get("system") != "Linux" or str(host.get("machine", "")).lower() not in ("aarch64", "arm64"):
+        return column
+    if host.get("cpus") == 2:
+        return "linux-per-user-arm64-2cpu"
+    raise ValueError(f"no seeded linux-per-user budget for arm64 with {host.get('cpus')} CPUs")
+
+
+def budget_entries(budgets: dict, column: str) -> dict:
+    """Expand one measured column over its common, machine-independent gates."""
+    columns = budgets.get("columns", {})
+    entries = columns.get(column)
+    if entries is None:
+        raise KeyError(f"budgets.json has no column {column!r}")
+    base_name = entries.get("extends")
+    if base_name is None:
+        return entries
+    base = columns.get(base_name)
+    if base is None or "extends" in base:
+        raise ValueError(f"budgets.json has no direct base for {column!r}")
+    return {**base, **{metric: entry for metric, entry in entries.items() if metric != "extends"}}
+
+
 def compare(result: dict, budgets: dict, column: str) -> dict:
     """Compare a result with one budgets.json column.
 
@@ -136,9 +163,8 @@ def compare(result: dict, budgets: dict, column: str) -> dict:
     it (a measurement that did not run must not pass the gate).
     """
     tolerance = float(budgets.get("tolerance", 0.20))
-    col = budgets.get("columns", {}).get(column)
-    if col is None:
-        raise KeyError(f"budgets.json has no column {column!r}")
+    column = budget_column_for_result(result, column)
+    col = budget_entries(budgets, column)
     values = flatten(result)
     rows = []
     for metric, entry in sorted(col.items()):
@@ -1069,7 +1095,9 @@ def one_line(result: dict) -> str:
         )
     for connector, ex in m.get("hook_execs", {}).items():
         if "per_call_p50" in ex:
-            parts.append(f"{connector} execs/processes per hook {ex['per_call_p50']:g}/{ex['processes_per_call_p50']:g}")
+            parts.append(
+                f"{connector} execs/processes per hook {ex['per_call_p50']:g}/{ex['processes_per_call_p50']:g}"
+            )
         if "gateway_execs_per_call" in ex:
             parts.append(f"{connector} gateway execs/hook {ex['gateway_execs_per_call']:g}")
     r = m.get("gateway_restart")
@@ -1170,7 +1198,10 @@ def main(argv: list[str] | None = None) -> int:
             print(text)
         print(one_line(result))
     if getattr(args, "budgets", None):
-        report = compare(result, json.loads(args.budgets.read_text(encoding="utf-8")), args.column)
+        try:
+            report = compare(result, json.loads(args.budgets.read_text(encoding="utf-8")), args.column)
+        except (KeyError, ValueError) as exc:
+            raise SystemExit(f"dcperf: {exc}") from exc
         print(compare_text(report))
         return 0 if report["ok"] else 1
     return 0
