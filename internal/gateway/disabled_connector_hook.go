@@ -65,6 +65,6 @@ func (a *APIServer) answerDisabledConnectorHook(ctx context.Context, w http.Resp
 	}
 	resp := agentHookResponseForProfile(profile, req, "allow", "allow", "NONE", "", nil,
 		a.agentHookMode(ctx, connectorName), false, profile.Capabilities)
-	writeHookAnswer(w, a.hookAnswerBody(ctx, profile, connectorName, req, resp, ""))
+	a.writeHookAnswer(w, a.hookAnswerBody(ctx, profile, connectorName, req, resp, ""))
 	return true
 }

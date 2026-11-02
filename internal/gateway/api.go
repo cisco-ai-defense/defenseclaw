@@ -90,6 +90,10 @@ type APIServer struct {
 	// install-window warning of strictInstallWindowGate; it clears when a
 	// call finds no install lock.
 	installWindowWarned atomic.Bool
+	// firstHookAnswerRecorded avoids a filesystem check after this process
+	// has sent its first per-user hook verdict.
+	firstHookAnswerRecorded atomic.Bool
+	firstHookAnswerMu       sync.Mutex
 
 	// projectSkills are the project skill folders the install watcher
 	// watches; nil when no watcher shares them (GAP-1063).

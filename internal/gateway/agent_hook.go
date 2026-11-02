@@ -569,7 +569,7 @@ func (a *APIServer) handleAgentHook(connectorName string) http.HandlerFunc {
 					}).Output
 				}
 				resp.RuleIDs = []string{"CONNECTOR-NOT-STARTED"}
-				writeHookAnswer(w, a.hookAnswerBody(r.Context(), profile, connectorName, req, resp, ""))
+				a.writeHookAnswer(w, a.hookAnswerBody(r.Context(), profile, connectorName, req, resp, ""))
 				return
 			}
 		}
@@ -684,7 +684,7 @@ func (a *APIServer) handleAgentHook(connectorName string) http.HandlerFunc {
 		if deduped && a.copilotDedupeReplayable(r.Context(), connectorName, req, requireSandboxSurface(r.Context(), r.Header), earlier) {
 			dedupedResp := copilotDedupedResponse(profile, req, earlier)
 			startVerdictBlocked, startVerdictReason = sessionStartVerdictBlocks(dedupedResp), dedupedResp.Reason
-			writeHookAnswer(w, a.hookAnswerBody(r.Context(), profile, connectorName, req, dedupedResp, ""))
+			a.writeHookAnswer(w, a.hookAnswerBody(r.Context(), profile, connectorName, req, dedupedResp, ""))
 			return
 		}
 		// From here on the hook is accepted. A managed native hook confirms
@@ -847,7 +847,7 @@ func (a *APIServer) handleAgentHook(connectorName string) http.HandlerFunc {
 						defer func() { _ = recover() }()
 						body := a.hookAnswerBody(ctx, profile, connectorName, req, resp, "")
 						attemptedWrite = true
-						writeHookAnswer(w, body)
+						a.writeHookAnswer(w, body)
 					}()
 				}
 			}
@@ -1146,7 +1146,7 @@ func (a *APIServer) handleAgentHook(connectorName string) http.HandlerFunc {
 			pendingHooksInFlight.Delete(pending.ID)
 			finalized = true
 			attemptedWrite = true
-			writeHookAnswer(w, body)
+			a.writeHookAnswer(w, body)
 			return
 		}
 		// Reading or closing the answer can cancel the HTTP request before
@@ -1164,7 +1164,7 @@ func (a *APIServer) handleAgentHook(connectorName string) http.HandlerFunc {
 				resume := pauseHookRunSlot(ctx)
 				defer resume()
 				return delivery.offer(w, func() {
-					writeHookAnswer(w, body)
+					a.writeHookAnswer(w, body)
 				})
 			}()
 			if receipt == hookexec.HookDeliveryReleased {
@@ -1263,7 +1263,7 @@ func (a *APIServer) handleAgentHook(connectorName string) http.HandlerFunc {
 			// response stream may already be partially written, and a
 			// second attempt against the same writer would just re-panic.
 			attemptedWrite = true
-			writeHookAnswer(w, body)
+			a.writeHookAnswer(w, body)
 		}
 	}
 }
@@ -1359,7 +1359,25 @@ func encodeHookAnswer(profile connector.HookProfile, resp agentHookResponse, rec
 }
 
 // writeHookAnswer writes an encoded hook answer.
-func writeHookAnswer(w http.ResponseWriter, body []byte) {
+func (a *APIServer) writeHookAnswer(w http.ResponseWriter, body []byte) {
+	if runtime.GOOS == "linux" && a.scannerCfg != nil && a.scannerCfg.DeploymentMode != "managed_enterprise" &&
+		!a.firstHookAnswerRecorded.Load() {
+		a.firstHookAnswerMu.Lock()
+		if !a.firstHookAnswerRecorded.Load() {
+			dataDir := a.configDataDir()
+			if dataDir != "" {
+				if info, err := os.Lstat(filepath.Join(dataDir, "gateway.pid")); err == nil && info.Mode().IsRegular() {
+					if err := hookexec.PerUserGatewayRecordLocalAnswer(dataDir); err != nil {
+						a.firstHookAnswerMu.Unlock()
+						http.Error(w, "gateway answer unavailable", http.StatusServiceUnavailable)
+						return
+					}
+				}
+			}
+			a.firstHookAnswerRecorded.Store(true)
+		}
+		a.firstHookAnswerMu.Unlock()
+	}
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusOK)
 	_, _ = w.Write(body)
