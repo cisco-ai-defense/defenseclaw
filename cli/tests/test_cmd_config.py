@@ -494,6 +494,33 @@ class UndeclaredKeyWordingTests(unittest.TestCase):
             self.assertIn("openshell.middleware was retired", result.output)
             self.assertIn("config.yaml was not changed", result.output)
 
+    def test_config_set_refuses_retired_openshell_middleware_in_parent_object(self):
+        values = (
+            ('{"middleware":{"enabled":true},"token_delivery":"env"}', ["--json"]),
+            ("{middleware: {enabled: true}, token_delivery: env}", []),
+        )
+        for value, options in values:
+            with self.subTest(value=value), patch.object(cmd_config, "_write_config_change") as writer:
+                result = CliRunner().invoke(
+                    cmd_config.config_set, ["openshell", value, *options], obj=SimpleNamespace()
+                )
+                self.assertNotEqual(result.exit_code, 0)
+                self.assertIn("openshell.middleware was retired", result.output)
+                self.assertIn("config.yaml was not changed", result.output)
+                writer.assert_not_called()
+
+    def test_config_set_allows_openshell_parent_object_without_retired_field(self):
+        with patch.object(cmd_config, "_write_config_change") as writer:
+            result = CliRunner().invoke(
+                cmd_config.config_set,
+                ["openshell", '{"token_delivery":"env"}', "--json"],
+                obj=SimpleNamespace(),
+            )
+        self.assertEqual(result.exit_code, 0, result.output)
+        writer.assert_called_once()
+        self.assertEqual(writer.call_args.args[1][0].path, "openshell")
+        self.assertEqual(writer.call_args.args[1][0].value, {"token_delivery": "env"})
+
     def test_config_set_control_character_is_plain(self):
         from defenseclaw.context import AppContext
 
