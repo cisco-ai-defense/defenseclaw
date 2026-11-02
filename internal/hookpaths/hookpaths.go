@@ -3836,6 +3836,24 @@ func SafeShellRedirectOccurrencesWithFacts(command, cwd, home string, facts map[
 		}
 		site := commandLinksWithFacts(command[start:end], cwd, home, facts, false)
 		seenLink = seenLink || !site.known || len(site.aliases) > 0
+		// Reading this statement alone can see a plain tar file even when
+		// an earlier statement will replace it before extraction. Use the
+		// whole command's prefix rule before treating a later redirect as
+		// safe from links made by the extraction.
+		if call, ok := stmt.Cmd.(*syntax.CallExpr); ok && len(call.Args) > 0 {
+			program, fixed := StaticWord(call.Args[0], home)
+			if fixed && slices.Contains([]string{"tar", "gtar", "bsdtar"}, programBase(program)) &&
+				!onlyDirectoryStatementsBefore(file, call, home) {
+				args := make([]string, 0, len(call.Args)-1)
+				static := make([]bool, 0, len(call.Args)-1)
+				for _, word := range call.Args[1:] {
+					value, known := StaticWord(word, home)
+					args, static = append(args, value), append(static, known)
+				}
+				_, _, extract, ok := tarScan(args, static, cwd)
+				seenLink = seenLink || ok && extract
+			}
+		}
 		// Each statement is read in the starting directory; after a
 		// directory change a copy may read another source (cd ~ && cp -a
 		// linked linked-bak copies a link the starting directory does not
