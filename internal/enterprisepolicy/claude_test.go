@@ -571,3 +571,165 @@ func TestClaudeFilePrefixRequiresTextValue(t *testing.T) {
 		t.Fatalf("invalid effective prefix was accepted: %v", state.Conflicts)
 	}
 }
+
+// mutatePreToolUse applies mutate to every PreToolUse entry and handler of a
+// rendered policy document.
+func mutatePreToolUse(t *testing.T, raw []byte, mutate func(entry, handler map[string]any)) []byte {
+	t.Helper()
+	var doc map[string]any
+	if err := json.Unmarshal(raw, &doc); err != nil {
+		t.Fatal(err)
+	}
+	for _, rawEntry := range doc["hooks"].(map[string]any)["PreToolUse"].([]any) {
+		entry := rawEntry.(map[string]any)
+		for _, rawHandler := range entry["hooks"].([]any) {
+			mutate(entry, rawHandler.(map[string]any))
+		}
+	}
+	out, err := json.Marshal(doc)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return out
+}
+
+var claudeHookRunCases = []struct {
+	name   string
+	runs   bool
+	mutate func(entry, handler map[string]any)
+}{
+	{"rendered", true, func(map[string]any, map[string]any) {}},
+	{"match-all star matcher", true, func(entry map[string]any, _ map[string]any) { entry["matcher"] = "*" }},
+	{"omitted matcher", true, func(entry map[string]any, _ map[string]any) { delete(entry, "matcher") }},
+	{"explicit async false", true, func(_ map[string]any, handler map[string]any) { handler["async"] = false }},
+	{"prompt handler type", false, func(_ map[string]any, handler map[string]any) {
+		handler["type"] = "prompt"
+		handler["prompt"] = "Always approve"
+	}},
+	{"missing handler type", false, func(_ map[string]any, handler map[string]any) { delete(handler, "type") }},
+	{"nonmatching tool matcher", false, func(entry map[string]any, _ map[string]any) { entry["matcher"] = "^$" }},
+	{"non-string matcher", false, func(entry map[string]any, _ map[string]any) { entry["matcher"] = 1 }},
+	{"if filter", false, func(_ map[string]any, handler map[string]any) { handler["if"] = "Bash(git *)" }},
+	{"async handler", false, func(_ map[string]any, handler map[string]any) { handler["async"] = true }},
+	{"asyncRewake handler", false, func(_ map[string]any, handler map[string]any) { handler["asyncRewake"] = true }},
+}
+
+// rel-1-0-6:GAP-0322 review 3 item 2: a DefenseClaw command that Claude Code
+// would not run for PreToolUse, or would run in the background, does not
+// count as the managed hook. Match-all matcher spellings still do.
+func TestClaudeVerifyRequiresRunnableDropInHook(t *testing.T) {
+	for _, tc := range claudeHookRunCases {
+		t.Run(tc.name, func(t *testing.T) {
+			withHigherSources(t)
+			opts := testOptions(t)
+			state, err := (claudeTarget{}).Reconcile(opts)
+			if err != nil || !state.Covered {
+				t.Fatalf("initial policy: %v %+v", err, state)
+			}
+			path := filepath.Join(claudeDir(t, opts), "managed-settings.d", DefenseClawDropInName)
+			writeFile(t, path, string(mutatePreToolUse(t, []byte(readFile(t, path)), tc.mutate)))
+			state, err = (claudeTarget{}).Verify(opts)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if state.Covered != tc.runs {
+				t.Fatalf("covered = %t, want %t; conflicts %v", state.Covered, tc.runs, state.Conflicts)
+			}
+			if !tc.runs && !hasConflict(state, "Claude Code event PreToolUse has no DefenseClaw managed hook that runs") {
+				t.Fatalf("missing PreToolUse conflict: %v", state.Conflicts)
+			}
+		})
+	}
+}
+
+// rel-1-0-6:GAP-0322 review 3 item 2: the same rule for a selected
+// higher-precedence source, which shadows the file drop-in.
+func TestClaudeHigherSelectedHookMustRun(t *testing.T) {
+	for _, tc := range claudeHookRunCases {
+		t.Run(tc.name, func(t *testing.T) {
+			opts := testOptions(t)
+			opts.GOOS = "darwin"
+			opts.AgentVersions = map[string]string{"claudecode": "2.1.286"}
+			exported, err := (claudeTarget{}).Export(opts, "claude-hklm-json")
+			if err != nil {
+				t.Fatal(err)
+			}
+			withHigherSources(t, higherSource(t, "managed preferences", string(mutatePreToolUse(t, exported, tc.mutate))))
+			state, err := (claudeTarget{}).Reconcile(opts)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if state.Covered != tc.runs {
+				t.Fatalf("covered = %t, want %t; conflicts %v", state.Covered, tc.runs, state.Conflicts)
+			}
+			if !tc.runs && !hasConflict(state, "s hooks for PreToolUse; add") {
+				t.Fatalf("missing higher-source conflict: %v", state.Conflicts)
+			}
+		})
+	}
+}
+
+// rel-1-0-6:GAP-0322 review 3 item 1: a higher source with only control keys
+// is not selected, so the file sources stay effective and a later drop-in
+// that sets a shell prefix makes the policy uncovered.
+func TestClaudeControlOnlyHigherSourceKeepsFilePrefixCheck(t *testing.T) {
+	for _, tc := range []struct {
+		name     string
+		behavior string
+		mode     string
+	}{
+		{"first-wins warn", "first-wins", config.HigherPrecedenceWarn},
+		{"first-wins fail", "first-wins", config.HigherPrecedenceFail},
+		{"merge fail", "merge", config.HigherPrecedenceFail},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			opts := withPolicy(testOptions(t), "claudecode", func(p *config.EnterpriseConnectorPolicy) {
+				p.HigherPrecedenceSources = tc.mode
+			})
+			opts.GOOS = "darwin"
+			opts.ClaudeVersionFloor = "off"
+			opts.AgentVersions = map[string]string{"claudecode": "2.1.286"}
+			withHigherSources(t, higherSource(t, "managed preferences", `{"managedSourcesBehavior":"`+tc.behavior+`"}`))
+			state, err := (claudeTarget{}).Reconcile(opts)
+			if err != nil || !state.Covered {
+				t.Fatalf("control-only higher source must leave file policy active: %v %+v", err, state)
+			}
+			path := filepath.Join(claudeDir(t, opts), "managed-settings.d", "99-late.json")
+			writeFile(t, path, `{"env":{"CLAUDE_CODE_SHELL_PREFIX":"/usr/local/bin/wrapper"}}`)
+			state, err = (claudeTarget{}).Verify(opts)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if state.Covered || !hasConflict(state, "do not keep CLAUDE_CODE_SHELL_PREFIX empty") {
+				t.Fatalf("verifier covered a file policy whose effective shell prefix is nonempty: %v", state.Conflicts)
+			}
+			writeFile(t, path, `{"env":{"CLAUDE_CODE_SHELL_PREFIX":""}}`)
+			if state, err = (claudeTarget{}).Verify(opts); err != nil || !state.Covered {
+				t.Fatalf("an empty later prefix must stay covered: %v %+v", err, state)
+			}
+		})
+	}
+}
+
+// An env-only higher source has a policy key, so Claude Code selects it; its
+// empty prefix outranks a later file value under every env rule.
+func TestClaudeEnvOnlyHigherSourcePrefixWins(t *testing.T) {
+	for _, version := range []string{"", "2.1.222", "2.1.286"} {
+		t.Run("version "+version, func(t *testing.T) {
+			opts := testOptions(t)
+			opts.GOOS = "darwin"
+			if version != "" {
+				opts.AgentVersions = map[string]string{"claudecode": version}
+			}
+			writeFile(t, filepath.Join(claudeDir(t, opts), "managed-settings.d", "99-late.json"), `{"env":{"CLAUDE_CODE_SHELL_PREFIX":"/usr/local/bin/wrapper"}}`)
+			withHigherSources(t, higherSource(t, "managed preferences", `{"env":{"CLAUDE_CODE_SHELL_PREFIX":"/usr/local/bin/managed"}}`))
+			state, err := (claudeTarget{}).Reconcile(opts)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if state.Covered || !hasConflict(state, "effective managed policy from managed preferences does not keep CLAUDE_CODE_SHELL_PREFIX empty") {
+				t.Fatalf("nonempty selected prefix was accepted: %v", state.Conflicts)
+			}
+		})
+	}
+}

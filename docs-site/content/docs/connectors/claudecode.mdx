@@ -83,7 +83,7 @@ Setup changes only the files above. DefenseClaw also reads, without changing the
 
 ## Enterprise (standalone profile)
 
-Claude Code gets machine policy instead of the per-user files. The `managed-settings.d` directory holds `90-defenseclaw.json` with the hooks and `00-defenseclaw-version-floor.json`. On Linux and macOS, the drop-in registers the native hook binary in exec form, so shell options from the agent environment do not govern the managed hook. It does not set process-wide shell variables. `enterprise policy show` and `verify` name a managed source that sets `SHELLOPTS` because it can affect Bash tool scripts.
+Claude Code gets machine policy instead of the per-user files. The `managed-settings.d` directory holds `90-defenseclaw.json` with the hooks and `00-defenseclaw-version-floor.json`. On Linux and macOS, the drop-in registers the native hook binary in exec form, so shell options from the agent environment do not govern the managed hook. Its `env` block also sets `CLAUDE_CODE_SHELL_PREFIX` to an empty value, so a user or project setting cannot wrap Bash tool commands in a program the hook does not see. `enterprise policy show` and `verify` report the policy as not covered when the value Claude Code applies across its managed sources is not empty, or when a DefenseClaw hook would not run for its event (another handler `type`, a narrower `matcher`, an `if` filter, or `async`). They name a managed source that sets `SHELLOPTS` because it can affect Bash tool scripts.
 
 | OS | Directory |
 | --- | --- |
