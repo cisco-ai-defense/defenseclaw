@@ -1098,6 +1098,40 @@ func TestEndpointLocalMCPIdentityDistinguishesCollidingAliases(t *testing.T) {
 	}
 }
 
+func TestMCPInventoryServerURLDropsCredentialsQueryAndFragment(t *testing.T) {
+	for raw, want := range map[string]string{
+		"HTTPS://user:password@MCP.example.com:8443/v1?token=private#fragment": "https://mcp.example.com:8443/v1",
+		"http://mcp.example.com/stream%2Fv1?key=private":                       "http://mcp.example.com/stream%2Fv1",
+		"file:///private/mcp": "",
+		"https://":            "",
+	} {
+		if got := mcpInventoryServerURL(raw); got != want {
+			t.Fatalf("mcpInventoryServerURL(%q)=%q, want %q", raw, got, want)
+		}
+	}
+}
+
+func TestEndpointRemoteMCPIdentityUsesSanitizedURL(t *testing.T) {
+	component := func(name, url string) endpointInventoryComponent {
+		t.Helper()
+		components := endpointMCPComponentsFromServers([]config.MCPServerEntry{{Name: name, URL: url}}, nil)
+		if len(components) != 1 {
+			t.Fatalf("components=%d", len(components))
+		}
+		return components[0]
+	}
+	base := component("first", "https://user:password@mcp.example.com/v1?token=secret")
+	if renamed := component("second", "https://mcp.example.com/v1?token=other"); renamed.id != base.id {
+		t.Fatalf("alias or removed URL credentials changed remote identity: %q / %q", base.id, renamed.id)
+	}
+	if changed := component("first", "https://mcp.example.com/v2"); changed.id == base.id {
+		t.Fatal("different endpoint path kept the same remote identity")
+	}
+	if strings.Contains(base.id, "password") || strings.Contains(base.id, "secret") {
+		t.Fatalf("component ID disclosed URL credential: %q", base.id)
+	}
+}
+
 func TestPerConnectorMCPInventoryDistinguishesIdenticalCommandsWithDifferentAliases(t *testing.T) {
 	withManagedEnterprise(t, true)
 	home := t.TempDir()
@@ -1192,40 +1226,6 @@ func TestMCPHomeReaderMarksDanglingConfigSymlinkPartial(t *testing.T) {
 	_, partial := readMCPServersUnderHomeForOSWithStatus("codex", home, runtime.GOOS)
 	if !partial {
 		t.Fatal("dangling MCP config symlink was treated as an authoritative empty listing")
-	}
-}
-
-func TestMCPInventoryServerURLDropsCredentialsQueryAndFragment(t *testing.T) {
-	for raw, want := range map[string]string{
-		"HTTPS://user:password@MCP.example.com:8443/v1?token=private#fragment": "https://mcp.example.com:8443/v1",
-		"http://mcp.example.com/stream%2Fv1?key=private":                       "http://mcp.example.com/stream%2Fv1",
-		"file:///private/mcp": "",
-		"https://":            "",
-	} {
-		if got := mcpInventoryServerURL(raw); got != want {
-			t.Fatalf("mcpInventoryServerURL(%q)=%q, want %q", raw, got, want)
-		}
-	}
-}
-
-func TestEndpointRemoteMCPIdentityUsesSanitizedURL(t *testing.T) {
-	component := func(name, url string) endpointInventoryComponent {
-		t.Helper()
-		components := endpointMCPComponentsFromServers([]config.MCPServerEntry{{Name: name, URL: url}}, nil)
-		if len(components) != 1 {
-			t.Fatalf("components=%d", len(components))
-		}
-		return components[0]
-	}
-	base := component("first", "https://user:password@mcp.example.com/v1?token=secret")
-	if renamed := component("second", "https://mcp.example.com/v1?token=other"); renamed.id != base.id {
-		t.Fatalf("alias or removed URL credentials changed remote identity: %q / %q", base.id, renamed.id)
-	}
-	if changed := component("first", "https://mcp.example.com/v2"); changed.id == base.id {
-		t.Fatal("different endpoint path kept the same remote identity")
-	}
-	if strings.Contains(base.id, "password") || strings.Contains(base.id, "secret") {
-		t.Fatalf("component ID disclosed URL credential: %q", base.id)
 	}
 }
 
@@ -1424,7 +1424,7 @@ func TestEndpointPluginDiscoveryFailureIsPartialAndKeepsBuiltins(t *testing.T) {
 	}
 	cfg := &config.Config{PluginDir: pluginRoot}
 	capture := &endpointInventoryCapture{}
-	makeEndpointInventoryEmitter(cfg, capture, nil, nil)(t.Context())
+	makeEndpointInventoryEmitter(cfg, capture, nil, nil, nil)(t.Context())
 
 	builtinComponents, _ := endpointConnectorComponents(connector.NewDefaultRegistry())
 	wantBuiltins := len(builtinComponents)

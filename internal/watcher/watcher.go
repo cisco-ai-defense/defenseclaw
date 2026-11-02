@@ -149,13 +149,16 @@ type WebhookDispatcher interface {
 }
 
 type InstallWatcher struct {
-	cfg            *config.Config
-	skillDirs      []string
-	pluginDirs     []string
-	rootCoverageMu sync.RWMutex
-	rootNotifyMu   sync.Mutex
-	rootCoverage   map[string]RootCoverageIssue
-	onRootCoverage func([]RootCoverageIssue)
+	// mcpToolObserver receives only the bounded names preserved by a completed
+	// tools/list scan. It does not receive descriptions, schemas, or arguments.
+	mcpToolObserver func(context.Context, string, string, *scanner.ScanResult, error)
+	cfg             *config.Config
+	skillDirs       []string
+	pluginDirs      []string
+	rootCoverageMu  sync.RWMutex
+	rootNotifyMu    sync.Mutex
+	rootCoverage    map[string]RootCoverageIssue
+	onRootCoverage  func([]RootCoverageIssue)
 	// rootWarnings are admitted roots watched closely (RootWarning); the
 	// notify mutex orders the handler calls.
 	rootWarnMu       sync.RWMutex
@@ -579,6 +582,11 @@ func (w *InstallWatcher) setRootCoverage(kind, path string, cause error) {
 	if w.onRootCoverage != nil {
 		w.onRootCoverage(w.RootCoverageIssues())
 	}
+}
+
+// SetMCPToolObserver attaches the managed inventory sink before Run starts.
+func (w *InstallWatcher) SetMCPToolObserver(observer func(context.Context, string, string, *scanner.ScanResult, error)) {
+	w.mcpToolObserver = observer
 }
 
 type rootConnector struct {
@@ -2766,6 +2774,9 @@ func (w *InstallWatcher) runAdmission(ctx context.Context, evt InstallEvent) (re
 		res = AdmissionResult{Event: evt, Verdict: VerdictScanError, Interrupted: true,
 			Reason: "scan interrupted: the watcher is stopping; the next start admits it"}
 		return res
+	}
+	if evt.Type == InstallMCP && w.mcpToolObserver != nil {
+		w.mcpToolObserver(ctx, connector, evt.Name, result, err)
 	}
 	if err != nil {
 		_ = w.logger.LogAction(string(audit.ActionInstallScanError), evt.Path,
