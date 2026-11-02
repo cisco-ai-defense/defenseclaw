@@ -8,6 +8,7 @@ package ipc
 
 import (
 	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -83,22 +84,31 @@ func TestPeerCodesignCacheReusesIdentityPerProcessStart(t *testing.T) {
 	}
 }
 
-func TestPeerProcessIdentityNamesThisExecutable(t *testing.T) {
-	key, ok := peerProcessIdentity(int32(os.Getpid()))
-	if !ok {
-		t.Fatal("this process was not keyed")
+func TestPeerProcessIdentityOnlyKeysImmutableExecutables(t *testing.T) {
+	// This test binary lives in a user-owned temp folder: anyone who owns
+	// that folder could swap the file, so the process is never keyed.
+	if _, ok := peerProcessIdentity(int32(os.Getpid())); ok {
+		t.Fatal("an executable on a user-writable path was keyed")
 	}
+	path, ok := peerExecutablePath(int32(os.Getpid()))
 	self, err := os.Executable()
 	if err != nil {
 		t.Fatal(err)
 	}
-	selfInfo, err := os.Stat(self)
-	if err != nil {
+	selfInfo, _ := os.Stat(self)
+	pathInfo, statErr := os.Stat(path)
+	if !ok || statErr != nil || !os.SameFile(selfInfo, pathInfo) {
+		t.Fatalf("kern.procargs2 path = %q (%v), want this test binary %q", path, statErr, self)
+	}
+	if st, ok := peerImmutableExecutable("/bin/ls"); !ok || st.Ino == 0 {
+		t.Fatal("a root-owned system binary was not accepted")
+	}
+	link := filepath.Join(t.TempDir(), "ls")
+	if err := os.Symlink("/bin/ls", link); err != nil {
 		t.Fatal(err)
 	}
-	exeInfo, err := os.Stat(key.exe)
-	if err != nil || !os.SameFile(selfInfo, exeInfo) || key.exeIno == 0 {
-		t.Fatalf("key.exe = %q (ino %d), want this test binary %q: %v", key.exe, key.exeIno, self, err)
+	if _, ok := peerImmutableExecutable(link); ok {
+		t.Fatal("a symlinked executable path was accepted")
 	}
 }
 

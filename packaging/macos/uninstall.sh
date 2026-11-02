@@ -1195,8 +1195,10 @@ if (( ${#_summary[@]} > 0 )); then
 else
   log "done."
   # Nothing was left behind, so the record is not needed: the log folder
-  # goes too, as it always did. It stays only when it holds something else.
-  if [[ -n "${DC_MARKER_LOG_FILE}" && -d "${LOGS_DIR}" && ! -L "${LOGS_DIR}" ]]; then
+  # goes too, as it always did. It stays only when it holds something else,
+  # and after a --user purge, which re-checked one user only: warnings that
+  # earlier runs logged for other users are kept.
+  if [[ -z "${TARGET_USER}" && -n "${DC_MARKER_LOG_FILE}" && -d "${LOGS_DIR}" && ! -L "${LOGS_DIR}" ]]; then
     DC_MARKER_LOG_FILE=""
     rm -f "${UNINSTALL_LOG}" 2>/dev/null || true
     rmdir "${LOGS_DIR}" 2>/dev/null || true

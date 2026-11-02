@@ -187,7 +187,24 @@ t_root_retry_refuses_symlinked_parent() {
   fixture_cleanup "${b}"
 }
 
+t_user_purge_keeps_earlier_warnings() {
+  local b; b="$(fixture_bundle)"
+  local rc=0
+  fixture_install "${b}" --connector codex >/dev/null 2>&1 || rc=$?
+  assert_status "${rc}" 0 "fixture install"
+  fixture_add_user "${b}" "$(id -un)" "$(id -u)"
+  local logs="${b}/root/Library/Logs/Cisco/SecureClient/DefenseClaw"
+  printf '[uninstall] done with 1 warning(s); left behind: /Users/bob/.cursor/hooks.json (scrub_failed)\n' > "${logs}/uninstall.log"
+  local out
+  rc=0
+  out="$(fixture_uninstall "${b}" --purge -y --user "$(id -un)" 2>&1)" || rc=$?
+  assert_status "${rc}" 0 "a --user purge exits 0"
+  assert_contains "$(cat "${logs}/uninstall.log" 2>&1)" "bob/.cursor/hooks.json (scrub_failed)" "an earlier warning survives a --user purge"
+  fixture_cleanup "${b}"
+}
+
 run_case "purge completes, isolates users and summarises leftovers" t_purge_completes_and_isolates_users
+run_case "a --user purge keeps earlier warnings"                  t_user_purge_keeps_earlier_warnings
 run_case "a clean purge removes the log folder"                     t_clean_purge_removes_log_folder
 run_case "purge without the library still finds every user"         t_purge_without_library_still_finds_users
 run_case "root retry refuses a symlinked parent folder"          t_root_retry_refuses_symlinked_parent

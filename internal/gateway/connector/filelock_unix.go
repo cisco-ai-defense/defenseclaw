@@ -48,12 +48,13 @@ func withFileLockMode(path string, _ bool, fn func() error) error {
 	}
 
 	var lockFile *os.File
+	var deadline time.Time
 	for attempt := 0; ; attempt++ {
 		file, err := os.OpenFile(lockPath, os.O_CREATE|os.O_RDWR, 0o600)
 		if err != nil {
 			return fmt.Errorf("open lock file %s: %w", lockPath, err)
 		}
-		err = acquireFlock(file, lockPath)
+		err = acquireFlock(file, lockPath, &deadline)
 		if err == nil {
 			lockFile = file
 			break

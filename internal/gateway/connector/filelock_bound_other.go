@@ -10,6 +10,7 @@ import (
 	"errors"
 	"os"
 	"syscall"
+	"time"
 )
 
 const boundedUserLocks = false
@@ -19,7 +20,7 @@ var ErrLockBusy = errors.New("lock_busy")
 
 var errLockReplaced = errors.New("lock file was replaced while waiting")
 
-func acquireFlock(file *os.File, _ string) error {
+func acquireFlock(file *os.File, _ string, _ *time.Time) error {
 	return syscall.Flock(int(file.Fd()), syscall.LOCK_EX)
 }
 

@@ -41,8 +41,13 @@ const lockBusyStreakGap = 10 * time.Minute
 // acquireFlock takes an exclusive flock on file with LOCK_NB and a bounded
 // retry. It confirms afterwards that lockPath still names the locked inode,
 // so a lock file unlinked and recreated by another writer is never trusted.
-func acquireFlock(file *os.File, lockPath string) error {
-	deadline := time.Now().Add(userLockWait)
+// deadline is shared by the caller's retries after a replaced lock file, so
+// the whole acquisition waits at most userLockWait; a zero deadline is set on
+// the first attempt.
+func acquireFlock(file *os.File, lockPath string, deadline *time.Time) error {
+	if deadline.IsZero() {
+		*deadline = time.Now().Add(userLockWait)
+	}
 	delay := 25 * time.Millisecond
 	for {
 		err := syscall.Flock(int(file.Fd()), syscall.LOCK_EX|syscall.LOCK_NB)
@@ -56,7 +61,7 @@ func acquireFlock(file *os.File, lockPath string) error {
 		if !errors.Is(err, syscall.EWOULDBLOCK) && !errors.Is(err, syscall.EINTR) {
 			return err
 		}
-		if time.Now().After(deadline) {
+		if time.Now().After(*deadline) {
 			reportLockBusy(lockPath)
 			return fmt.Errorf("%w: %s held by another process for %s", ErrLockBusy, lockPath, userLockWait)
 		}

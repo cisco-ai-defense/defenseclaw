@@ -114,6 +114,7 @@ t_prereq_checks_never_fail() {
   out="$(dc_run_prereq_checks "${dir}/gw-probe" "${dir}" 18970 2>&1)" || rc=$?
   assert_status "${rc}" 0 "an exec-probe finding never fails the install"
   assert_contains "${out}" 'version probe failed' "the exec probe's findings reach the install log"
+
   rm -rf "${dir}"
 }
 

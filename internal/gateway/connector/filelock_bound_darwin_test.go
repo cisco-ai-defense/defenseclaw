@@ -129,3 +129,25 @@ func TestOwnedLockRepairsLooserMode(t *testing.T) {
 		t.Fatalf("want one repair marker, got %v", markers())
 	}
 }
+
+func TestAcquireFlockRetriesShareOneDeadline(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "cfg.lock")
+	release := holdFlock(t, path)
+	defer release()
+	file, err := os.OpenFile(path, os.O_RDWR, 0o600)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer file.Close()
+	// A retry after a replaced lock file carries the first attempt's
+	// deadline: once it has passed, the retry gives up at once instead of
+	// starting a fresh userLockWait.
+	deadline := time.Now().Add(-time.Second)
+	start := time.Now()
+	if err := acquireFlock(file, path, &deadline); !errors.Is(err, ErrLockBusy) {
+		t.Fatalf("err = %v, want lock_busy", err)
+	}
+	if elapsed := time.Since(start); elapsed > time.Second {
+		t.Fatalf("a retry past the shared deadline waited %s", elapsed)
+	}
+}

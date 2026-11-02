@@ -40,8 +40,9 @@ type peerProcessKey struct {
 }
 
 // peerProcessIdentity reads the process start time, command name and
-// executable for pid. A process whose executable cannot be identified is not
-// keyed, so its identity is never cached. Overridable in tests.
+// executable for pid. A process whose executable cannot be identified, or
+// sits on a path a non-administrator could retarget or replace, is not keyed,
+// so its identity is never cached. Overridable in tests.
 var peerProcessIdentity = func(pid int32) (peerProcessKey, bool) {
 	info, err := unix.SysctlKinfoProc("kern.proc.pid", int(pid))
 	if err != nil || info == nil || info.Proc.P_pid != pid {
@@ -58,8 +59,8 @@ var peerProcessIdentity = func(pid int32) (peerProcessKey, bool) {
 	if !ok {
 		return peerProcessKey{}, false
 	}
-	var st unix.Stat_t
-	if err := unix.Stat(exe, &st); err != nil {
+	st, ok := peerImmutableExecutable(exe)
+	if !ok {
 		return peerProcessKey{}, false
 	}
 	start := info.Proc.P_starttime
@@ -73,6 +74,37 @@ var peerProcessIdentity = func(pid int32) (peerProcessKey, bool) {
 		exeIno:    st.Ino,
 		exeMtime:  st.Mtim.Nano(),
 	}, true
+}
+
+// peerImmutableExecutable reports the metadata of exe when only root or an
+// administrator could change what that path names: exe is a regular file, not
+// a symlink, root-owned, and neither it nor any folder above it is a symlink,
+// owned by anyone but root, or writable by a principal other than root, wheel
+// or admin. Only then does the file at exe stay the running image, so the
+// key cannot be pointed at a different binary after the codesign lookup.
+func peerImmutableExecutable(exe string) (unix.Stat_t, bool) {
+	var st unix.Stat_t
+	if err := unix.Lstat(exe, &st); err != nil || st.Mode&unix.S_IFMT != unix.S_IFREG || !peerAdminOnlyWritable(st) {
+		return unix.Stat_t{}, false
+	}
+	for dir := filepath.Dir(exe); ; dir = filepath.Dir(dir) {
+		var parent unix.Stat_t
+		if err := unix.Lstat(dir, &parent); err != nil || parent.Mode&unix.S_IFMT != unix.S_IFDIR || !peerAdminOnlyWritable(parent) {
+			return unix.Stat_t{}, false
+		}
+		if dir == "/" {
+			return st, true
+		}
+	}
+}
+
+// peerAdminOnlyWritable: root-owned, no other-write, and group write only for
+// wheel (0) or admin (80).
+func peerAdminOnlyWritable(st unix.Stat_t) bool {
+	if st.Uid != 0 || st.Mode&0o002 != 0 {
+		return false
+	}
+	return st.Mode&0o020 == 0 || st.Gid == 0 || st.Gid == 80
 }
 
 // peerExecutablePath reads the executable path the kernel recorded for pid

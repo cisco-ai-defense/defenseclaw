@@ -11,6 +11,7 @@ import (
 	"fmt"
 	"os"
 	"syscall"
+	"time"
 )
 
 // withOTLPPathTokenLock uses a persistent lock inode. Unlinking an advisory
@@ -25,6 +26,7 @@ func withOTLPPathTokenLock(path string, fn func() error) error {
 // pair it with their subsystem mutex: flock semantics for separately opened
 // descriptors differ across Unix variants.
 func withOwnedFileLock(lockPath string, fn func() error) error {
+	var deadline time.Time
 	for attempt := 0; ; attempt++ {
 		file, err := os.OpenFile(lockPath, os.O_CREATE|os.O_RDWR|otlpOpenNoFollow(), 0o600)
 		if err != nil {
@@ -34,7 +36,7 @@ func withOwnedFileLock(lockPath string, fn func() error) error {
 			file.Close()
 			return err
 		}
-		if err := acquireFlock(file, lockPath); err != nil {
+		if err := acquireFlock(file, lockPath, &deadline); err != nil {
 			file.Close()
 			if errors.Is(err, errLockReplaced) && attempt < 8 {
 				continue
