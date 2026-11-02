@@ -166,3 +166,18 @@ func TestPeerCodesignCacheSkipsUnsignedPeers(t *testing.T) {
 		t.Fatalf("an empty identity was cached (calls = %d)", *calls)
 	}
 }
+
+func TestParseProcArgsExecPathRejectsNonCanonicalPaths(t *testing.T) {
+	raw := func(path string) []byte { return append([]byte{1, 0, 0, 0}, append([]byte(path), 0, 'x')...) }
+	if got, ok := parseProcArgsExecPath(raw("/bin/ls")); !ok || got != "/bin/ls" {
+		t.Fatalf("canonical path = %q %v", got, ok)
+	}
+	for _, path := range []string{"/bin/../bin/ls", "/bin//ls", "/bin/./ls", "bin/ls", ""} {
+		if got, ok := parseProcArgsExecPath(raw(path)); ok {
+			t.Errorf("%q was accepted as %q", path, got)
+		}
+	}
+	if _, ok := parseProcArgsExecPath([]byte{1, 0}); ok {
+		t.Error("a truncated buffer was accepted")
+	}
+}

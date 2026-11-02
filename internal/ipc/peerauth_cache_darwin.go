@@ -108,11 +108,21 @@ func peerAdminOnlyWritable(st unix.Stat_t) bool {
 }
 
 // peerExecutablePath reads the executable path the kernel recorded for pid
-// from kern.procargs2 (a 4-byte argc, then the NUL-terminated exec path).
-// Only an absolute path is returned.
+// from kern.procargs2.
 func peerExecutablePath(pid int32) (string, bool) {
 	raw, err := unix.SysctlRaw("kern.procargs2", int(pid))
-	if err != nil || len(raw) < 5 {
+	if err != nil {
+		return "", false
+	}
+	return parseProcArgsExecPath(raw)
+}
+
+// parseProcArgsExecPath reads a 4-byte argc, then the NUL-terminated exec
+// path. That path is the one passed to execve, not a resolved one, and the
+// kernel resolves symlinks before "..", so only an absolute path already in
+// canonical form is returned: cleaning it here could name another file.
+func parseProcArgsExecPath(raw []byte) (string, bool) {
+	if len(raw) < 5 {
 		return "", false
 	}
 	path := raw[4:]
@@ -120,10 +130,10 @@ func peerExecutablePath(pid int32) (string, bool) {
 		path = path[:end]
 	}
 	exe := string(path)
-	if !filepath.IsAbs(exe) {
+	if !filepath.IsAbs(exe) || filepath.Clean(exe) != exe {
 		return "", false
 	}
-	return filepath.Clean(exe), true
+	return exe, true
 }
 
 type peerCodesignIdentity struct {
