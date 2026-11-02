@@ -39,7 +39,7 @@ It uses the same packages and config.
 | --- | --- |
 | SELinux | Supported, for unconfined and confined users. Where SELinux is enabled the lifecycle loads a small `defenseclaw` policy module (`semodule -l`) that labels the hook socket `defenseclaw_hook_sock_t` and the gateway binary `defenseclaw_gateway_exec_t`, so the gateway runs in its own domain, `defenseclaw_gateway_t`. Every user domain may connect to that domain and to no other service; the gateway still authorizes each caller by uid. Uninstall removes the module. `status` and `verify` warn `selinux_module_missing` while confined users cannot reach the socket, and the lifecycle warns `selinux_relabel` or `selinux_module` if relabeling or loading fails |
 | FIPS mode | RHEL 9 in FIPS mode is supported with the rpm |
-| Application control | With fapolicyd, the deb and rpm ship every file an agent loads, so package-database trust covers them. After a payload install, add `/opt/defenseclaw/` to a trust file ([Application control](/docs/enterprise/threat-model)) |
+| Application control | With fapolicyd, package-database trust covers the deb and rpm. For a tarball, trust the staged payload, run `ensure --no-start`, trust `/opt/defenseclaw/`, then run `ensure` to start and verify ([Application control](/docs/enterprise/threat-model)) |
 
 If a payload install reports that the staged gateway could not run, check
 fapolicyd trust, SELinux policy, execute permission and `noexec` mount options.
@@ -244,10 +244,38 @@ sudo fapolicyd-cli --file add "$PAYLOAD/" --trust-file defenseclaw && sudo fapol
 ```
 
 If you change the staged files, update their trust entry before running the
-gateway again ([Application control](/docs/enterprise/threat-model)).
+gateway again:
+
+```bash
+sudo fapolicyd-cli --file update "$PAYLOAD/" --trust-file defenseclaw && sudo fapolicyd-cli --update
+```
+
+Without fapolicyd, run `ensure` once:
 
 ```bash
 sudo "$PAYLOAD/defenseclaw-gateway" enterprise linux ensure --payload "$PAYLOAD" --json
+```
+
+With fapolicyd, stage the install without starting services, trust the installed
+tree, then start and verify:
+
+```bash
+sudo "$PAYLOAD/defenseclaw-gateway" enterprise linux ensure --payload "$PAYLOAD" --no-start --json
+sudo fapolicyd-cli --file add /opt/defenseclaw/ --trust-file defenseclaw && sudo fapolicyd-cli --update
+sudo -u defenseclaw /opt/defenseclaw/bin/defenseclaw-gateway --version-json
+sudo "$PAYLOAD/defenseclaw-gateway" enterprise linux ensure --payload "$PAYLOAD" --json
+```
+
+Fapolicyd updates are asynchronous. If either gateway command is denied right
+after `--update`, retry it after fapolicyd finishes syncing. The service-user
+version check must succeed before the final `ensure`. Update the
+`/opt/defenseclaw/` trust entry after an upgrade
+([Application control](/docs/enterprise/threat-model)).
+
+After deleting the payload folder, remove its staged trust entry:
+
+```bash
+sudo fapolicyd-cli --file delete "$PAYLOAD/" --trust-file defenseclaw && sudo fapolicyd-cli --update
 ```
 
 `ensure` installs when nothing is installed, applies a different payload,
