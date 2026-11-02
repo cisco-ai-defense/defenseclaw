@@ -23,6 +23,31 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/enterprisestatus"
 )
 
+func TestWindowsEnterpriseDeploymentRecordOwnerMessages(t *testing.T) {
+	record := `C:\ProgramData\Cisco\DefenseClaw\install\deployment.json`
+	mismatch := "managed path owner/group do not match the exact canonical descriptor after ACL replacement: " + record
+	next := windowsEnterpriseDeploymentRecordOwnerNextStep()
+	for _, message := range []string{
+		windowsEnterpriseUntrustedDeploymentRecordMessage(record),
+		mismatch + windowsEnterpriseRecordOwnerMismatchNextStep(mismatch),
+	} {
+		if !strings.Contains(message, record) || !strings.HasSuffix(message, next) {
+			t.Fatalf("message does not name the record and shared next step: %q", message)
+		}
+	}
+	for _, want := range []string{
+		"inspect the deployment record owner", "restore its expected owner",
+		"/uninstall FORCE=1 PURGE=1 JSON=1", "/ensure CONFIG=<config.yaml> JSON=1",
+	} {
+		if !strings.Contains(next, want) {
+			t.Fatalf("next step %q does not name %q", next, want)
+		}
+	}
+	if got := windowsEnterpriseRecordOwnerMismatchNextStep("managed path owner/group do not match the exact canonical descriptor after ACL replacement: C:\\ProgramData\\Cisco\\DefenseClaw\\etc\\config.yaml"); got != "" {
+		t.Fatalf("unrelated path gained record remedy: %q", got)
+	}
+}
+
 // Verify with the guardian stopped names the repair that starts it again
 // (GAP-1072); with every service running it adds nothing.
 func TestWindowsEnterpriseStoppedServiceNextStep(t *testing.T) {

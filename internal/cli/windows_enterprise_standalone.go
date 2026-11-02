@@ -1516,7 +1516,7 @@ func newWindowsEnterpriseStandaloneResult(action string, opts *windowsEnterprise
 	result := enterprisestatus.New(action, managed.ProfileStandalone, "windows", version)
 	result.Inspection = enterprisestatus.Inspection{Local: "active", AIDefense: "disabled"}
 	for _, record := range opts.ignoredDeploymentRecords {
-		result.AddWarning("untrusted_deployment_record", "ignored a deployment record an administrator did not write: "+record)
+		result.AddWarning("untrusted_deployment_record", windowsEnterpriseUntrustedDeploymentRecordMessage(record))
 	}
 	return result
 }
@@ -4356,6 +4356,7 @@ func windowsEnterpriseEnsureProbeFailure(status *windowsEnterpriseInstallerRepor
 	if strings.Contains(message, windowsEnterpriseUnreadableMetadataMarker) {
 		return fmt.Errorf("ensure_refused: %s", message)
 	}
+	message += windowsEnterpriseRecordOwnerMismatchNextStep(message)
 	return fmt.Errorf("status_failed: ensure could not read the deployment state: %s", message)
 }
 

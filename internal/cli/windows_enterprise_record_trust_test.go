@@ -174,6 +174,18 @@ func TestPlantedDeploymentRecordDoesNotAffectLifecycleProfile(t *testing.T) {
 				if len(result.Warnings) != 1 || result.Warnings[0].Code != "untrusted_deployment_record" {
 					t.Fatalf("standalone warnings %+v", result.Warnings)
 				}
+				message := result.Warnings[0].Message
+				for _, want := range []string{
+					"inspect the deployment record owner", "restore its expected owner",
+					"/uninstall FORCE=1 PURGE=1 JSON=1", "/ensure CONFIG=<config.yaml> JSON=1",
+				} {
+					if !strings.Contains(message, want) {
+						t.Fatalf("warning %q does not name %q", message, want)
+					}
+				}
+				if count := strings.Count(strings.ToLower(message), strings.ToLower(planted)); count != 1 {
+					t.Fatalf("warning names record %d times, want once: %q", count, message)
+				}
 			}
 		})
 	}

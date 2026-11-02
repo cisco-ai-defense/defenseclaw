@@ -1554,6 +1554,41 @@ func TestWindowsEnterpriseEnsureRefusesToPlanFromAFailedProbe(t *testing.T) {
 	}
 }
 
+func TestWindowsEnterpriseEnsureRecordOwnerMismatchNamesRecovery(t *testing.T) {
+	record := `C:\ProgramData\Cisco\DefenseClaw\install\deployment.json`
+	refusal := "managed path owner/group do not match the exact canonical descriptor after ACL replacement: " + record
+	stub := &ensureStub{t: t, replies: []map[string]any{
+		{"schema_version": 1, "ok": false, "action": "status", "error": refusal, "errors": []string{refusal}},
+	}}
+	stub.install(t)
+	command := &cobra.Command{}
+	var stdout bytes.Buffer
+	command.SetOut(&stdout)
+	command.SetErr(&bytes.Buffer{})
+	err := runWindowsEnterpriseStandaloneEnsure(context.Background(), command, ensureTestOptions(), `C:\stage\install-enterprise.ps1`)
+	if got := commandExitCode(err); got != 1603 {
+		t.Fatalf("exit %d (%v), want 1603", got, err)
+	}
+	if len(stub.calls) != 1 {
+		t.Fatalf("ensure ran the installer after a failed probe: %q", stub.calls)
+	}
+	var result enterprisestatus.Result
+	if err := json.Unmarshal(stdout.Bytes(), &result); err != nil {
+		t.Fatal(err)
+	}
+	if result.OK || len(result.Errors) != 1 || result.Errors[0].Code != "status_failed" {
+		t.Fatalf("result %+v", result)
+	}
+	for _, want := range []string{
+		record, "inspect the deployment record owner", "restore its expected owner",
+		"/uninstall FORCE=1 PURGE=1 JSON=1", "/ensure CONFIG=<config.yaml> JSON=1",
+	} {
+		if !strings.Contains(result.Errors[0].Message, want) {
+			t.Fatalf("error %q does not name %q", result.Errors[0].Message, want)
+		}
+	}
+}
+
 func TestWindowsEnterpriseEnsureTimesOutAndRestoresServiceStartModes(t *testing.T) {
 	previousTimeout := windowsEnterpriseEnsureTimeout
 	previousRestore := windowsEnterpriseRestoreStartModes

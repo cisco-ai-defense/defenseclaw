@@ -28,6 +28,29 @@ import (
 
 const windowsEnterpriseStandaloneSetupName = "DefenseClawSetup-Enterprise-Standalone-x64.exe"
 
+// A record with an untrusted owner is ignored, and an owner mismatch on a
+// record left under the state root can make a later ensure refuse its probe. Both
+// messages give the administrator the same recovery path.
+func windowsEnterpriseDeploymentRecordOwnerNextStep() string {
+	return " Next step: as an administrator, inspect the deployment record owner and restore its expected owner and group (BUILTIN\\Administrators) if this record belongs to the DefenseClaw deployment." +
+		" If /ensure still refuses, as a last resort run " + windowsEnterpriseStandaloneSetupName +
+		" /uninstall FORCE=1 PURGE=1 JSON=1 as LocalSystem, then run " +
+		windowsEnterpriseStandaloneSetupName + " /ensure CONFIG=<config.yaml> JSON=1 with an administrator-only config."
+}
+
+func windowsEnterpriseUntrustedDeploymentRecordMessage(record string) string {
+	return "ignored a deployment record an administrator did not write: " + record +
+		windowsEnterpriseDeploymentRecordOwnerNextStep()
+}
+
+func windowsEnterpriseRecordOwnerMismatchNextStep(message string) string {
+	if strings.Contains(message, "managed path owner/group do not match the exact canonical descriptor after ACL replacement:") &&
+		strings.Contains(strings.ToLower(message), `\install\deployment.json`) {
+		return windowsEnterpriseDeploymentRecordOwnerNextStep()
+	}
+	return ""
+}
+
 // windowsEnterpriseRecoveryGatewayRun is one managed-hook lifecycle step
 // that a pending transaction's recovery ran with the running Setup's
 // verified gateway because the transaction's staged gateway failed it.
