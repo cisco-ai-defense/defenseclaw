@@ -425,6 +425,14 @@ Sets `ai_discovery.enabled` to `false` and stops the scanner. Your other `ai_dis
 
 ### Per-user scans in standalone enterprise
 
+Managed MCP inventory treats an unreadable connector configuration or an
+incomplete discovery scan as a partial observation. The gateway emits a local,
+redacted inventory diagnostic and keeps the last complete managed snapshot;
+it does not report the missing entries as removals. A complete scan can publish
+a genuinely empty inventory when servers have been removed. The partial
+summary contains a source and counts; any observed component rows stay on the
+local diagnostic route and are not exported as managed inventory.
+
 In the standalone enterprise profile the gateway runs as a service account
 that cannot read user homes or see other accounts' processes. The hook
 guardian therefore runs the static scan for each user in the target

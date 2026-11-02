@@ -122,6 +122,7 @@ internal/gateway/api_sandbox_ingress.go
 internal/gateway/sandbox_daemon_runtime.go
 internal/gateway/sandbox_authority_routes.go
 internal/gateway/sandbox_availability.go
+internal/gateway/inventory_events.go
 internal/gateway/connector/hookexec/
 internal/gateway/connector/user_state_ownership.go
 internal/gateway/connector/user_state_purge.go
