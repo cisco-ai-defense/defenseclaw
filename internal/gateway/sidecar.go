@@ -5535,8 +5535,8 @@ func (s *Sidecar) runGuardrailMulti(ctx context.Context) error {
 	}
 	publishHealth()
 	// The hook path may now use the published per-connector rule packs for
-	// successful setups. Skips remain blocked until a new process starts.
-	s.health.finishConnectorSetup(succeeded)
+	// successful setups. Skips remain denied until a new process starts.
+	s.health.finishConnectorSetup(succeeded, notStarted)
 	_, anyEnforcement := liveModes()
 	fmt.Fprintf(os.Stderr, "[guardrail] multi-connector direct-upstream mode: %d active connector(s): %s; enforcement=%t — proxy port intentionally not bound\n", len(succeeded), strings.Join(succeeded, ", "), anyEnforcement)
 	s.republishGuardrailOnModeChange(ctx, func() string {

@@ -371,6 +371,7 @@ func (b *waitingAbsentConnector) Setup(ctx context.Context, _ connector.SetupOpt
 func TestPendingAbsentConnectorRetainedHookIsDenied(t *testing.T) {
 	s := multiBootSidecar(t)
 	s.cfg.DataDir = testenv.PrivateTempDir(t)
+	s.cfg.Guardrail.HookFailMode = "closed"
 	s.health = NewSidecarHealth()
 	t.Setenv("PATH", testenv.PrivateTempDir(t))
 	lock := stageAdmissionFixture(t, s.cfg.DataDir)
@@ -441,5 +442,41 @@ func TestPendingAbsentConnectorRetainedHookIsDenied(t *testing.T) {
 			!strings.Contains(verdict.Reason, "defenseclaw-gateway restart") {
 			t.Fatalf("skipped hook for %q = %+v, want absent-agent block", command, verdict)
 		}
+	}
+}
+
+func TestPendingConnectorHookFollowsOutageMode(t *testing.T) {
+	f := newAgentSettingsRefusalFixture(t)
+	f.cfg.Guardrail.Mode = "observe"
+	health := NewSidecarHealth()
+	health.beginConnectorSetup([]string{"claudecode", "codex"})
+	api := NewAPIServer("127.0.0.1:0", health, nil, nil, nil, f.cfg)
+	benign := func() removedAgentVerdict {
+		return removedAgentHookVerdict(t, api, "claudecode", "echo benign")
+	}
+	if got := benign(); got.Action != "allow" || !strings.Contains(got.Reason, "setup is pending") {
+		t.Fatalf("default pending answer = %+v, want allowed with setup notice", got)
+	}
+	if got := removedAgentHookVerdict(t, api, "codex", "echo benign"); got.Action != "allow" {
+		t.Fatalf("peer pending answer = %+v, want allowed", got)
+	}
+	health.finishConnectorSetup(nil, []string{"claudecode"})
+	if got := benign(); got.Action != "allow" || !strings.Contains(got.Reason, "setup did not finish") ||
+		strings.Contains(got.Reason, "setup is pending") {
+		t.Fatalf("failed setup answer = %+v, want the completed state", got)
+	}
+	f.cfg.Guardrail.HookFailMode = "closed"
+	if got := benign(); got.Action != "block" || !strings.Contains(got.Reason, "setup did not finish") {
+		t.Fatalf("saved closed answer = %+v, want block", got)
+	}
+	f.cfg.Guardrail.HookFailMode = ""
+	f.cfg.DeploymentMode = string(config.DeploymentModeManagedEnterprise)
+	if got := benign(); got.Action != "block" {
+		t.Fatalf("managed answer = %+v, want block", got)
+	}
+	f.cfg.DeploymentMode = ""
+	health.finishConnectorSetup([]string{"claudecode", "codex"}, nil)
+	if got := benign(); got.Action != "allow" || strings.Contains(got.Reason, "setup") {
+		t.Fatalf("completed setup answer = %+v, want ordinary allow", got)
 	}
 }
