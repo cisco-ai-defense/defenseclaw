@@ -62,19 +62,24 @@ func TestSandboxRelayNeverAdoptsSandboxTraceParent(t *testing.T) {
 	const path = sandboxrelay.PathHookPrefix + "claudecode"
 	var seen string
 	var forwardedTrace bool
+	var receiptMarker string
 	routes := map[string]sandboxRelayRoute{path: {
 		class: sandboxauth.RouteHook, connector: "claudecode", native: "/api/v1/claudecode/hook",
 		handler: func(w http.ResponseWriter, r *http.Request) {
 			seen = trace.SpanFromContext(r.Context()).SpanContext().TraceID().String()
 			forwardedTrace = r.Header.Get("Traceparent") != "" || r.Header.Get("Tracestate") != ""
+			receiptMarker = r.Header.Get(sandboxrelay.HookReceiptHeader)
 			w.WriteHeader(http.StatusOK)
 		},
 	}}
 	f := newRelayFixtureWith(t, routes)
 	reg := f.register(t, "trace", "claudecode", relayTestBindingID(401))
-	resp, _ := f.post(t, path, reg.ID, `{}`, "Traceparent", wellFormedTraceparent)
-	if resp.StatusCode != http.StatusOK || seen == "0af7651916cd43dd8448eb211c80319c" || forwardedTrace {
-		t.Fatalf("sandbox trace adopted or forwarded: status %d trace %q headers %t", resp.StatusCode, seen, forwardedTrace)
+	resp, _ := f.post(t, path, reg.ID, `{}`, "Traceparent", wellFormedTraceparent,
+		sandboxrelay.HookReceiptHeader, sandboxrelay.HookReceiptHeaderValue)
+	if resp.StatusCode != http.StatusOK || seen == "0af7651916cd43dd8448eb211c80319c" || forwardedTrace ||
+		receiptMarker != sandboxrelay.HookReceiptHeaderValue {
+		t.Fatalf("sandbox trace or receipt marker: status %d trace %q trace headers %t receipt %q",
+			resp.StatusCode, seen, forwardedTrace, receiptMarker)
 	}
 	seen = ""
 	resp, _ = f.post(t, path, "unknown", `{}`, "Traceparent", wellFormedTraceparent)

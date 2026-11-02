@@ -205,7 +205,8 @@ func (l *hookCallerLimiter) acquire(caller string) (release func(), run chan str
 		l.callers[caller] = budget
 	}
 	budget.lastSeen = now
-	if budget.inFlight-budget.parked >= inFlight || !budget.limiter.AllowN(now, 1) {
+	pending := strings.HasSuffix(caller, "|"+sandboxBudgetPending)
+	if budget.inFlight-budget.parked >= inFlight || (!pending && !budget.limiter.AllowN(now, 1)) {
 		logNow = now.Sub(budget.lastLog) >= hookCallerLogInterval
 		if logNow {
 			budget.lastLog = now
@@ -230,6 +231,29 @@ func (l *hookCallerLimiter) acquire(caller string) (release func(), run chan str
 			l.mu.Unlock()
 		})
 	}, budget.running, "", false
+}
+
+// chargeClass spends a classified hook or receipt token after an unmarked
+// request has read its body. Its pending admission already holds the caller
+// and global concurrency slots.
+func (l *hookCallerLimiter) chargeClass(key string) string {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	now := l.clock()
+	budget := l.callers[key]
+	if budget == nil {
+		rps, burst, _, running := l.limits(key)
+		budget = &hookCallerBudget{limiter: rate.NewLimiter(rate.Limit(rps), burst), running: make(chan struct{}, running)}
+		if l.callers == nil {
+			l.callers = make(map[string]*hookCallerBudget)
+		}
+		l.callers[key] = budget
+	}
+	budget.lastSeen = now
+	if !budget.limiter.AllowN(now, 1) {
+		return managedHookReasonRateLimited
+	}
+	return ""
 }
 
 // callerInFlight is the in-flight cap of one caller whose own cap is
@@ -304,15 +328,24 @@ func hookCallerBudgetKey(identity, path string) string {
 // writes' or the host hooks' budgets.
 const hookCallerSandboxRead = "|sandbox-read"
 
-// hookCallerAdmissionKey is hookCallerBudgetKey with the method: a read of
-// the sandbox policy class gets the read budget.
-func hookCallerAdmissionKey(identity, method, path string) string {
-	key := hookCallerBudgetKey(identity, path)
-	if !strings.HasSuffix(key, "|"+sandboxBudgetPolicy) {
-		return key
-	}
-	if method == http.MethodGet || method == http.MethodPost && sandboxPolicyView(path) {
-		return identity + hookCallerSandboxRead
+// hookCallerAdmissionKey is hookCallerBudgetKey for r: a read of the sandbox
+// policy class gets the read budget, and a relayed hook's delivery receipt
+// acknowledgement the sandbox-receipt class (it confirms an answer the
+// sandbox-hook class already admitted; GAP-0490).
+func hookCallerAdmissionKey(identity string, r *http.Request) string {
+	key := hookCallerBudgetKey(identity, r.URL.Path)
+	switch {
+	case strings.HasSuffix(key, "|"+sandboxBudgetHook):
+		if strings.HasPrefix(r.URL.Path, sandboxrelay.PathHookPrefix) && claimsSandboxHookReceipt(r) {
+			return identity + "|" + sandboxBudgetReceipt
+		}
+		if strings.HasPrefix(r.URL.Path, sandboxrelay.PathHookPrefix) && r.Method == http.MethodPost {
+			return identity + "|" + sandboxBudgetPending
+		}
+	case strings.HasSuffix(key, "|"+sandboxBudgetPolicy):
+		if r.Method == http.MethodGet || r.Method == http.MethodPost && sandboxPolicyView(r.URL.Path) {
+			return identity + hookCallerSandboxRead
+		}
 	}
 	return key
 }
@@ -329,7 +362,7 @@ func sandboxPolicyView(path string) bool {
 // function is nil after answering 429 or when the client went away while it
 // waited; hookCallerLeft reports the second.
 func (a *APIServer) admitHookCaller(w http.ResponseWriter, r *http.Request, identity, route string) (*http.Request, func()) {
-	key := hookCallerAdmissionKey(identity, r.Method, r.URL.Path)
+	key := hookCallerAdmissionKey(identity, r)
 	release, run, refusal, logNow := a.hookCallerLimits.acquire(key)
 	if refusal == "" {
 		if r.Context().Err() != nil {
@@ -353,7 +386,20 @@ func (a *APIServer) admitHookCaller(w http.ResponseWriter, r *http.Request, iden
 		select {
 		case run <- struct{}{}:
 			slot := &hookRunSlot{run: run, held: true, park: func() func() { return a.hookCallerLimits.park(key) }}
-			return r.WithContext(context.WithValue(r.Context(), hookRunSlotContextKey{}, slot)), func() {
+			ctx := context.WithValue(r.Context(), hookRunSlotContextKey{}, slot)
+			if strings.HasSuffix(key, "|"+sandboxBudgetPending) {
+				ctx = withSandboxHookBudgetCharge(ctx, func(receipt bool) error {
+					class := sandboxBudgetHook
+					if receipt {
+						class = sandboxBudgetReceipt
+					}
+					if refusal := a.hookCallerLimits.chargeClass(identity + "|" + class); refusal != "" {
+						return fmt.Errorf("%s", refusal)
+					}
+					return nil
+				})
+			}
+			return r.WithContext(ctx), func() {
 				slot.end()
 				release()
 			}

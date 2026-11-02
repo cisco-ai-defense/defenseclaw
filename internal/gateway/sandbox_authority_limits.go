@@ -33,12 +33,18 @@ import (
 // Sizing: a daemon's per-binding limiter (sandboxauth.DefaultLimiterConfig,
 // 25/s burst 100) is the first limit one sandbox meets; sandbox-hook at
 // 100/s carries four sandboxes at that rate and burst 200 lets two burst
-// at once. The 60 s policy/current poll is one call a minute per live
+// at once. The delivery receipt that confirms an allowed answer is a second
+// post on the hook route: sandbox-receipt, the same size, counts those
+// (hookCallerAdmissionKey), so the hook classes carry the documented hook
+// rate and a receipt never waits on or is refused by the evaluations
+// (GAP-0490). The 60 s policy/current poll is one call a minute per live
 // registration.
 const (
-	sandboxBudgetHook   = "sandbox-hook"
-	sandboxBudgetPolicy = "sandbox-policy"
-	sandboxBudgetEvents = "sandbox-events"
+	sandboxBudgetHook    = "sandbox-hook"
+	sandboxBudgetReceipt = "sandbox-receipt"
+	sandboxBudgetPending = "sandbox-pending"
+	sandboxBudgetPolicy  = "sandbox-policy"
+	sandboxBudgetEvents  = "sandbox-events"
 )
 
 // sandboxBudgetLimit is one class's rate, burst and in-flight bound per
@@ -49,8 +55,9 @@ type sandboxBudgetLimit struct {
 
 // sandboxBudgetLimits is the per-class table; tests replace entries.
 var sandboxBudgetLimits = map[string]sandboxBudgetLimit{
-	sandboxBudgetHook:   {Rate: 100, Burst: 200, InFlight: 32},
-	sandboxBudgetPolicy: {Rate: 10, Burst: 20, InFlight: 8},
+	sandboxBudgetHook:    {Rate: 100, Burst: 200, InFlight: 32},
+	sandboxBudgetReceipt: {Rate: 100, Burst: 200, InFlight: 32},
+	sandboxBudgetPolicy:  {Rate: 10, Burst: 20, InFlight: 8},
 	// The daemon posts its lifecycle and egress records every 2 s, one batch
 	// per sandbox (daemonRelayTelemetry), and stops a pass at its first
 	// 429, besides its other records. What a batch costs is bounded by the
@@ -184,6 +191,9 @@ func sandboxBudgetForKey(key string) (sandboxBudgetLimit, bool) {
 	at := strings.LastIndexByte(key, '|')
 	if at < 0 {
 		return sandboxBudgetLimit{}, false
+	}
+	if key[at+1:] == sandboxBudgetPending {
+		return sandboxBudgetLimits[sandboxBudgetHook], true
 	}
 	limit, ok := sandboxBudgetLimits[key[at+1:]]
 	return limit, ok

@@ -947,6 +947,14 @@ describe('1.0.4 operator routes and limits', () => {
     assert.doesNotMatch(row, /hook socket is not owned by root or the gateway account/);
   });
 
+  it('counts a managed sandbox hook receipt apart from the hook budget (GAP-0490)', () => {
+    const api = page('reference/gateway-api.mdx');
+    assert.match(api, /\| Hook, notify and inspect \| 25\/s \| 100 \| 32 \|\s*\| Delivery receipts \| 25\/s \| 100 \| 32 \|/);
+    assert.match(api, /Receipts have the budget of their own above, so a tool\s+call counts once against the hook budget/);
+    const managed = page('enterprise/sandboxes.mdx');
+    assert.match(managed, /per-user budget \(100 per second, burst 200\)\. Each sandbox also has its own budget at the user's daemon \(25 per second, burst 100\)\. The receipt that confirms an allowed call counts apart/);
+  });
+
   it('does not advertise local files as MCP scan targets', () => {
     const api = page('reference/gateway-api.mdx');
     assert.match(api, /`POST`\s*\|\s*`\/v1\/mcp\/scan`[^\n]*Path or JSON-file targets[^\n]*HTTP 400[^\n]*bare identifier without path or file syntax[^\n]*configured server name/i);

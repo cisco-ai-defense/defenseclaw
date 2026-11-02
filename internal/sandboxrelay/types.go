@@ -76,6 +76,11 @@ const (
 	// sends ClientHeaderValue.
 	ClientHeader      = "X-DefenseClaw-Client"
 	ClientHeaderValue = "sandbox-relay"
+	// HookReceiptHeader marks the second post that acknowledges an offered
+	// hook answer. Both admission layers select its budget before reading
+	// the body; the gateway validates the marker and receipt body together.
+	HookReceiptHeader      = "X-Defenseclaw-Hook-Receipt"
+	HookReceiptHeaderValue = "1"
 	// AgentSurfaceHeader is set by the relay to AgentSurfaceValue; the
 	// sandbox's own value is dropped.
 	AgentSurfaceHeader = "X-DefenseClaw-Agent-Surface"
@@ -120,6 +125,7 @@ var ForwardHeaders = [...]string{
 	"Content-Type",
 	"Idempotency-Key",
 	"X-Defenseclaw-Hook-Event",
+	"X-Defenseclaw-Hook-Receipt",
 	"X-Defenseclaw-Hook-Contract",
 	"X-Defenseclaw-Antigravity-Event",
 	"X-Defenseclaw-Copilot-Event",

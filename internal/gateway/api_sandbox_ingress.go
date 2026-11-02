@@ -66,8 +66,8 @@ import (
 //	trace, request ID (always minted), correlation (identity from the
 //	              binding's host user)
 //	authorize     route allowlist and connector match (404/403),
-//	              per-binding limiter with separate hook and OTLP
-//	              slots (429), in-flight tracking
+//	              per-binding limiter with separate hook, delivery
+//	              receipt and OTLP slots (429), in-flight tracking
 //	metrics, CSRF, body limit (OTLP far below the host receiver's cap)
 //	idempotency   replay of a retried hook post by key
 //	mux           hook / notify / inspect / OTLP handlers
@@ -810,7 +810,19 @@ func (a *APIServer) sandboxIngressAuthorize(
 			}
 			return
 		}
-		release, err := st.limiter.Acquire(binding, route.class)
+		// A delivery receipt confirms an answer the hook budget already
+		// admitted: it takes the receipt bucket (GAP-0490).
+		var release func()
+		var err error
+		pendingHook := route.class == sandboxauth.RouteHook && !claimsSandboxHookReceipt(r)
+		switch {
+		case route.class == sandboxauth.RouteHook && claimsSandboxHookReceipt(r):
+			release, err = st.limiter.AcquireReceipt(binding)
+		case pendingHook:
+			release, err = st.limiter.AcquirePendingHook(binding)
+		default:
+			release, err = st.limiter.Acquire(binding, route.class)
+		}
 		if err != nil {
 			w.Header().Set("Retry-After", "1")
 			writeSandboxIngressError(w, http.StatusTooManyRequests, err.Error())
@@ -830,6 +842,11 @@ func (a *APIServer) sandboxIngressAuthorize(
 			r.Header.Del(header)
 		}
 		ctx := withSandboxIngressRoute(r.Context(), route.class)
+		if pendingHook {
+			ctx = withSandboxHookBudgetCharge(ctx, func(receipt bool) error {
+				return st.limiter.ChargeHookBody(binding, receipt)
+			})
+		}
 		ctx, outcome := withSandboxHookOutcome(ctx)
 		switch route.class {
 		case sandboxauth.RouteHook, sandboxauth.RouteNotify:

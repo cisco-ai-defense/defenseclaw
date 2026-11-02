@@ -50,6 +50,7 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/managed/mcpasuser"
 	"github.com/defenseclaw/defenseclaw/internal/observability"
 	"github.com/defenseclaw/defenseclaw/internal/redaction"
+	"github.com/defenseclaw/defenseclaw/internal/sandboxrelay"
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/codes"
 	"go.opentelemetry.io/otel/trace"
@@ -344,7 +345,25 @@ func (a *APIServer) handleAgentHook(connectorName string) http.HandlerFunc {
 			a.writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid JSON body", "reason": hookexec.MalformedHookPayloadReason})
 			return
 		}
-		if receiptID, ok := sandboxHookReceiptID(rawBody); ok {
+		receiptID, receiptBody, receiptLike := classifySandboxHookReceiptBody(rawBody)
+		if err := chargeSandboxHookBudget(r.Context(), receiptLike); err != nil {
+			w.Header().Set("Retry-After", "1")
+			a.writeJSON(w, http.StatusTooManyRequests, map[string]string{"error": err.Error()})
+			return
+		}
+		invalidReceipt := receiptLike && !receiptBody
+		if claimsSandboxHookReceipt(r) {
+			values := r.Header.Values(sandboxrelay.HookReceiptHeader)
+			invalidReceipt = invalidReceipt || len(values) != 1 || values[0] != sandboxrelay.HookReceiptHeaderValue || !receiptBody
+		}
+		if invalidReceipt {
+			a.recordConnectorHookRejection(r.Context(), connectorName, "unknown", "invalid_receipt", int64(len(rawBody)))
+			a.writeJSON(w, http.StatusBadRequest, map[string]string{
+				"error": "invalid sandbox hook receipt", "reason": hookexec.MalformedHookPayloadReason,
+			})
+			return
+		}
+		if receiptBody {
 			a.handleSandboxHookReceipt(w, r, connectorName, receiptID)
 			return
 		}

@@ -310,6 +310,7 @@ defenseclaw_sandbox_confirm_receipt() {
   reply="$(defenseclaw_sandbox_post "$path" "$body" 3 3 \
     -H "Content-Type: application/json" \
     -H "X-DefenseClaw-Client: sandbox-hook/1.0" \
+    -H "X-DefenseClaw-Hook-Receipt: 1" \
     -H "Authorization: Bearer ${DEFENSECLAW_SANDBOX_TOKEN}")" || return 1
   code="${reply##*$'\n'}"
   [ "$code" = 200 ] || return 1

@@ -49,6 +49,7 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/gateway/connector"
 	"github.com/defenseclaw/defenseclaw/internal/observability/destinationtest"
 	"github.com/defenseclaw/defenseclaw/internal/sandboxauth"
+	"github.com/defenseclaw/defenseclaw/internal/sandboxrelay"
 )
 
 const sandboxTestMasterToken = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
@@ -1756,5 +1757,202 @@ func TestSandboxModelErrorKeepsTheClassAndStatus(t *testing.T) {
 		if class != c.class || status != c.status {
 			t.Errorf("%s %v = %q, %d; want %q, %d", c.event, c.payload, class, status, c.class, c.status)
 		}
+	}
+}
+
+// TestSandboxIngressReceiptsHaveTheirOwnBudget: a managed sandbox hook
+// confirms each allowed answer with a second post on its hook route, the
+// delivery receipt. Receipts take a bucket of their own, so parallel tool
+// calls spend the hook budget once each and the receipt of an answer the
+// budget admitted is not refused, which the hook denied closed at half the
+// documented rate (rel-1-0-6 GAP-0490).
+func TestSandboxIngressReceiptsHaveTheirOwnBudget(t *testing.T) {
+	const hookPath = "/api/v1/claude-code/hook"
+	receipt := `{"delivery_receipt":"3f2b8c1e-5d4a-4e6f-9a7b-1c2d3e4f5a6b","result":"ack"}`
+	limited := func(burst int) *sandboxIngressFixture {
+		return newSandboxIngressFixture(t, func(cfg *SandboxIngressConfig) {
+			cfg.Limiter = sandboxauth.NewLimiter(sandboxauth.LimiterConfig{HookRPS: 0.001, HookBurst: burst})
+		})
+	}
+	f := limited(2)
+	for i := 0; i < 2; i++ {
+		if rec := f.do(t, http.MethodPost, hookPath, f.claudeTok, `{}`); rec.Code == http.StatusTooManyRequests {
+			t.Fatalf("hook %d throttled early", i)
+		}
+		if rec := f.do(t, http.MethodPost, hookPath, f.claudeTok, receipt,
+			sandboxrelay.HookReceiptHeader, sandboxrelay.HookReceiptHeaderValue); rec.Code == http.StatusTooManyRequests {
+			t.Fatalf("the receipt of admitted hook %d was refused: %s", i, rec.Body.String())
+		}
+	}
+	if rec := f.do(t, http.MethodPost, hookPath, f.claudeTok, receipt,
+		sandboxrelay.HookReceiptHeader, sandboxrelay.HookReceiptHeaderValue); rec.Code != http.StatusTooManyRequests {
+		t.Fatalf("a receipt past the receipt burst: %d, want 429", rec.Code)
+	}
+	if rec := f.do(t, http.MethodPost, hookPath, f.claudeTok, `{}`); rec.Code != http.StatusTooManyRequests {
+		t.Fatalf("a hook past the hook burst: %d, want 429", rec.Code)
+	}
+	// An unmarked receipt-shaped body, including an invalid one, spends only
+	// the receipt rate budget. The ordinary call beside it still runs.
+	for _, body := range []string{
+		`{"delivery_receipt":"not-a-uuid","result":"ack"}`,
+		`{"delivery_receipt":"3f2b8c1e-5d4a-4e6f-9a7b-1c2d3e4f5a6b","result":"ack","pad":"` + strings.Repeat("a", 300) + `"}`,
+	} {
+		g := limited(1)
+		if rec := g.do(t, http.MethodPost, hookPath, g.claudeTok, body); rec.Code == http.StatusTooManyRequests {
+			t.Fatal("premise: the first call is admitted")
+		}
+		if rec := g.do(t, http.MethodPost, hookPath, g.claudeTok, body); rec.Code != http.StatusTooManyRequests {
+			t.Fatalf("%.40s... did not take the receipt budget: %d", body, rec.Code)
+		}
+		if rec := g.do(t, http.MethodPost, hookPath, g.claudeTok, `{}`); rec.Code == http.StatusTooManyRequests {
+			t.Fatalf("%.40s... spent the ordinary hook budget", body)
+		}
+	}
+	// A receipt marker with a hook body spends the receipt budget, but the
+	// gateway rejects it before evaluating the hook body.
+	g := limited(1)
+	if rec := g.do(t, http.MethodPost, hookPath, g.claudeTok, `{}`,
+		sandboxrelay.HookReceiptHeader, sandboxrelay.HookReceiptHeaderValue); rec.Code != http.StatusBadRequest {
+		t.Fatalf("claimed receipt with a hook body status %d, want 400", rec.Code)
+	}
+	if rec := g.do(t, http.MethodPost, hookPath, g.claudeTok, `{}`,
+		sandboxrelay.HookReceiptHeader, sandboxrelay.HookReceiptHeaderValue); rec.Code != http.StatusTooManyRequests {
+		t.Fatalf("a second invalid claim status %d, want receipt-budget 429", rec.Code)
+	}
+	if rec := g.do(t, http.MethodPost, hookPath, g.claudeTok, `{}`); rec.Code == http.StatusTooManyRequests {
+		t.Fatal("invalid receipt claims spent the hook budget")
+	}
+}
+
+type stalledSandboxHookBody struct {
+	readCalled chan struct{}
+	release    chan struct{}
+	once       sync.Once
+}
+
+func (b *stalledSandboxHookBody) Read([]byte) (int, error) {
+	b.once.Do(func() { close(b.readCalled) })
+	<-b.release
+	return 0, io.EOF
+}
+
+func (*stalledSandboxHookBody) Close() error { return nil }
+
+// Admission must spend the binding's budget before a hook or receipt body can stall.
+func TestSandboxIngressStalledBodiesAreAdmittedBeforeRead(t *testing.T) {
+	for _, claim := range []bool{false, true} {
+		name := "hook"
+		if claim {
+			name = "receipt"
+		}
+		t.Run(name, func(t *testing.T) {
+			f := newSandboxIngressFixture(t, func(c *SandboxIngressConfig) {
+				c.Limiter = sandboxauth.NewLimiter(sandboxauth.LimiterConfig{HookRPS: 0.001, HookBurst: 1, MaxInFlight: 1})
+			})
+			request := func(body *stalledSandboxHookBody) *http.Request {
+				r := httptest.NewRequest(http.MethodPost, "/api/v1/claude-code/hook", nil)
+				r.Body = body
+				r.ContentLength = 73
+				r.Header.Set("Authorization", "Bearer "+f.claudeTok)
+				r.Header.Set("Content-Type", "application/json")
+				r.Header.Set("X-DefenseClaw-Client", "sandbox-hook/1.0")
+				if claim {
+					r.Header.Set("X-DefenseClaw-Hook-Receipt", "1")
+				}
+				return r
+			}
+			first := &stalledSandboxHookBody{readCalled: make(chan struct{}), release: make(chan struct{})}
+			second := &stalledSandboxHookBody{readCalled: make(chan struct{}), release: make(chan struct{})}
+			firstDone, secondDone := make(chan struct{}), make(chan struct{})
+			firstReply, secondReply := httptest.NewRecorder(), httptest.NewRecorder()
+			go func() { f.handler.ServeHTTP(firstReply, request(first)); close(firstDone) }()
+			select {
+			case <-first.readCalled:
+			case <-time.After(2 * time.Second):
+				close(first.release)
+				t.Fatal("first request did not reach its body")
+			}
+			go func() { f.handler.ServeHTTP(secondReply, request(second)); close(secondDone) }()
+			select {
+			case <-secondDone:
+				close(first.release)
+				close(second.release)
+				<-firstDone
+				if secondReply.Code != http.StatusTooManyRequests {
+					t.Fatalf("second request status %d, want immediate 429", secondReply.Code)
+				}
+			case <-time.After(2 * time.Second):
+				close(first.release)
+				close(second.release)
+				<-firstDone
+				<-secondDone
+				t.Fatal("second request waited for its body before admission")
+			}
+		})
+	}
+}
+
+type oneShotTruncatedSandboxHookBody struct {
+	data []byte
+	done bool
+}
+
+func (b *oneShotTruncatedSandboxHookBody) Read(p []byte) (int, error) {
+	if b.done {
+		return 0, io.EOF
+	}
+	b.done = true
+	return copy(p, b.data), io.ErrUnexpectedEOF
+}
+
+func (*oneShotTruncatedSandboxHookBody) Close() error { return nil }
+
+// A reader can report an error with its final bytes and then report EOF.
+func TestSandboxIngressOneShotBodyReadErrorFailsClosed(t *testing.T) {
+	f := newSandboxIngressFixture(t)
+	body := `{"hook_event_name":"PreToolUse","session_id":"truncated-body","tool_name":"Bash","tool_input":{"command":"ls"},"cwd":"/work/app"}`
+	r := httptest.NewRequest(http.MethodPost, "/api/v1/claude-code/hook", nil)
+	r.Body = &oneShotTruncatedSandboxHookBody{data: []byte(body)}
+	r.ContentLength = int64(len(body) + 10)
+	r.Header.Set("Authorization", "Bearer "+f.claudeTok)
+	r.Header.Set("Content-Type", "application/json")
+	r.Header.Set("X-DefenseClaw-Client", "sandbox-hook/1.0")
+	w := httptest.NewRecorder()
+	f.handler.ServeHTTP(w, r)
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("truncated body status %d, want 400; response %s", w.Code, w.Body.String())
+	}
+}
+
+// TestSandboxIngressHookFloodAtTheDocumentedRate is the load shape of
+// rel-1-0-6 GAP-0490 at the daemon's default per-sandbox budget (25 calls a
+// second, burst 100): 20 s of allowed tool calls at 25 a second, each a hook
+// post and its delivery receipt, on a clock the test moves. No call and no
+// receipt may be refused; the lane saw 429s and receipt denials from 17 calls
+// a second.
+func TestSandboxIngressHookFloodAtTheDocumentedRate(t *testing.T) {
+	const hookPath = "/api/v1/claude-code/hook"
+	var mu sync.Mutex
+	now := time.Unix(4_000_000, 0)
+	clock := func() time.Time { mu.Lock(); defer mu.Unlock(); return now }
+	cfg := sandboxauth.DefaultLimiterConfig()
+	cfg.Now = clock
+	f := newSandboxIngressFixture(t, func(ingress *SandboxIngressConfig) { ingress.Limiter = sandboxauth.NewLimiter(cfg) })
+	receipt := `{"delivery_receipt":"3f2b8c1e-5d4a-4e6f-9a7b-1c2d3e4f5a6b","result":"ack"}`
+	refusedHooks, refusedReceipts := 0, 0
+	calls := int(cfg.HookRPS) * 20
+	for i := 0; i < calls; i++ {
+		if rec := f.do(t, http.MethodPost, hookPath, f.claudeTok, `{}`); rec.Code == http.StatusTooManyRequests {
+			refusedHooks++
+		} else if rec := f.do(t, http.MethodPost, hookPath, f.claudeTok, receipt,
+			sandboxrelay.HookReceiptHeader, sandboxrelay.HookReceiptHeaderValue); rec.Code == http.StatusTooManyRequests {
+			refusedReceipts++
+		}
+		mu.Lock()
+		now = now.Add(time.Second / time.Duration(cfg.HookRPS))
+		mu.Unlock()
+	}
+	if refusedHooks != 0 || refusedReceipts != 0 {
+		t.Fatalf("%d calls at %v a second: %d hooks and %d receipts refused", calls, cfg.HookRPS, refusedHooks, refusedReceipts)
 	}
 }
