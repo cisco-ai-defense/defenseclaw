@@ -38,6 +38,15 @@ func TestMCPOutputErrorDropsControlAndFormatCharacters(t *testing.T) {
 	}
 }
 
+func TestScanErrorForAuditKeepsSecureClientFailureText(t *testing.T) {
+	text := "scan failed:\r\n details\x1b\u202e"
+	KeepFullFailureText(true)
+	t.Cleanup(func() { KeepFullFailureText(false) })
+	if got := ScanErrorForAudit(text); got != text {
+		t.Fatalf("Secure Client scan error changed: %q", got)
+	}
+}
+
 // When stderr is empty, ScanResult.ScanError is the stdout error itself,
 // with no "; " separator left at its end.
 func TestMCPScanErrorOfAnEmptyStderrHasNoTrailingSeparator(t *testing.T) {

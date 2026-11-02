@@ -48,7 +48,7 @@ INSERT INTO scan_results (
 		nullStr(runID),
 		nullStr(p.Verdict),
 		p.ExitCode,
-		nullStr(p.ScanError),
+		nullStr(scanner.ScanErrorForAudit(p.ScanError)),
 		nullInt(p.SchemaVersion),
 		nullStr(p.ContentHash),
 		nullUint64(p.Generation),
