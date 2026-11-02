@@ -103,6 +103,17 @@ func (a *APIServer) emitHookDecisionLogV8(
 	result := hookDecisionResult(env, panicked)
 	effectiveAction := normalizeHookActionLabel(resp.Action)
 	auditEnvelope := audit.EnvelopeFromContext(ctx)
+	inputMessages := observability.Absent[observability.TelemetryStructuredGenAIInputMessages]()
+	if resp.InspectedContentPresent {
+		messages, _, reported, _, contentOK := hookModelV8InputMessages(
+			resp.InspectedContent,
+			int64(len(resp.InspectedContent)),
+			false,
+		)
+		if reported && contentOK {
+			inputMessages = observability.Present(messages)
+		}
+	}
 	sandboxID, sandboxName := hookV8Sandbox(auditEnvelope)
 	classification := observability.ClassificationContext{
 		Bucket: observability.BucketGuardrailEvaluation, EventName: observability.EventName(observability.TelemetryEventHookDecision),
@@ -221,6 +232,7 @@ func (a *APIServer) emitHookDecisionLogV8(
 			DefenseClawGuardrailReason:          hookV8OptionalText(hookSourceReason(resp), hookDecisionReasonMaxBytes),
 			DefenseClawGuardrailRuleIds:         hookDecisionV8RuleIDs(resp.RuleIDs),
 			DefenseClawGuardrailRuleNames:       hookDecisionV8RuleNames(resp.RuleNames),
+			GenAIInputMessages:                  inputMessages,
 			DefenseClawGuardrailJudgeFallback:   hookDecisionV8JudgeFallback(env),
 			DefenseClawSandboxID:                sandboxID,
 			DefenseClawSandboxName:              sandboxName,
