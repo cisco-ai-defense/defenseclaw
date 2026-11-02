@@ -6812,7 +6812,7 @@ func powerShellReadOnlySubexpressions(text string) (string, bool) {
 				return "", false
 			}
 			inner := strings.TrimSpace(text[start : j-1])
-			literal := len(inner) >= 2 && inner[0] == '\'' && inner[len(inner)-1] == '\''
+			literal := powerShellSingleQuotedLiteral(inner)
 			if !literal && (len(powerShellStateSegments(inner)) != 1 ||
 				strings.Contains(inner, "$(") || !powerShellSegmentReadOnly(inner)) {
 				return "", false
@@ -6824,6 +6824,22 @@ func powerShellReadOnlySubexpressions(text string) (string, bool) {
 		out.WriteByte(c)
 	}
 	return out.String(), true
+}
+
+func powerShellSingleQuotedLiteral(text string) bool {
+	if len(text) < 2 || text[0] != '\'' || text[len(text)-1] != '\'' {
+		return false
+	}
+	for i := 1; i < len(text)-1; i++ {
+		if text[i] != '\'' {
+			continue
+		}
+		if i+1 >= len(text)-1 || text[i+1] != '\'' {
+			return false
+		}
+		i++
+	}
+	return true
 }
 
 func powerShellStripLineComment(text string) string {
