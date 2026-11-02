@@ -94,10 +94,9 @@ type Options struct {
 	// that the change wakes cannot interleave with it. A Mutate error fails
 	// the run before anything is applied.
 	Mutate func(ctx context.Context) error
-	// MutateUndo puts back what Mutate changed when the run then refuses
-	// the config before it changes anything (Result.ConfigRefused): a
-	// refused secret set left the new credential on disk while the result
-	// said the refused config changed nothing (GAP-1734).
+	// MutateUndo puts back what Mutate changed when the run refuses the
+	// config or fails to apply it. A failed transaction must not leave a
+	// removed credential absent after the previous deployment is restored.
 	MutateUndo func(ctx context.Context) error
 	// Bundle is a signed policy bundle (.dcbundle file or directory, an
 	// absolute path) that an ensure stages, verifies, applies, confirms and
@@ -668,13 +667,16 @@ func (l *lifecycle) run(ctx context.Context) (failure int) {
 		}
 		if undo := l.opts.MutateUndo; undo != nil {
 			defer func() {
-				if !r.ConfigRefused {
+				applyFailed := hasMessageCode(r.Errors, codeApply)
+				if !r.ConfigRefused && !applyFailed {
 					return
 				}
 				resume := l.pauseApplyTrigger(ctx)
 				defer resume()
 				if err := undo(ctx); err != nil {
-					r.AddError(codeChange, "the config was refused, and the change made before the check could not be put back: "+err.Error())
+					r.AddError(codeChange, "the protected-state change could not be put back after the failed apply: "+err.Error())
+				} else if applyFailed {
+					r.AddWarning(codeChange, "the protected-state change was put back after apply failed")
 				}
 			}()
 		}
