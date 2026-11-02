@@ -1056,7 +1056,7 @@ func driverCopyNote(d openshell.Driver) string {
 // folder: the session's end offers to bring it back (endCopy), and a run
 // that does not ask (a headless run, --yes, a skip) leaves it for pull.
 const copyBackText = "the agent works on a copy, and your folder changes only when you bring its work back: " +
-	"at the end of the session, or later with `" + CommandName + " pull`"
+	"at the end of the session, or later with `" + CommandName + " pull NAME --apply`"
 
 func nameTakenError(name string, headless bool) error {
 	resume := "`" + CommandName + " connect " + name + "`"
@@ -1354,7 +1354,7 @@ func (a *App) resolveLiveMount(ctx context.Context, api API, spec *harness.Spec,
 	}
 	switch {
 	case err == nil && key == "c":
-		a.note("working on a copy (--copy): `" + CommandName + " pull NAME` brings the changes back")
+		a.note("working on a copy (--copy): `" + CommandName + " pull NAME --apply` brings the changes back")
 		return true, true, nil
 	case err == nil && key == "d":
 		if err := a.Delete(ctx, DeleteOptions{Names: []string{holder.Name}}); err != nil {
@@ -1484,7 +1484,7 @@ func (a *App) needsCopyText(project string, e *sandboxapi.Error, name string) st
 	if why != "" && !strings.Contains(why, "cannot be mounted live") {
 		msg += " (" + why + ")"
 	}
-	return msg + ", so it runs on a copy: `" + CommandName + " pull " + name + "` brings the changes back"
+	return msg + ", so it runs on a copy: `" + CommandName + " pull " + name + " --apply` brings the changes back"
 }
 
 // warnSecretEnv warns about --env variables whose names say they hold a
@@ -1909,7 +1909,7 @@ func (a *App) banner(sb *sandboxapi.Sandbox, b bannerInfo) {
 	row := func(label, text string) { a.line(fmt.Sprintf("%-10s%s", label+"  ", text)) }
 	switch {
 	case sb.WorkdirMode == config.OpenShellWorkdirCopy:
-		row("Project", a.tildePath(sb.Project)+" → "+sb.Workdir+" (copy)   changes come back with `"+CommandName+" pull "+sb.Name+"`")
+		row("Project", a.tildePath(sb.Project)+" → "+sb.Workdir+" (copy)   changes come back with `"+CommandName+" pull "+sb.Name+" --apply`")
 		row("", "Not visible: everything else on this machine")
 	case sb.Workspace != nil:
 		sum := workspace.Summary{Project: sb.Workspace.Project, Hidden: sb.Workspace.Hidden, Protected: sb.Workspace.Protected,

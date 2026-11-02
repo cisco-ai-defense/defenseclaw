@@ -772,10 +772,10 @@ func (a *App) refreshCopy(ctx context.Context, s *session) error {
 		case errors.Is(err, workspace.ErrUnpulledChanges):
 			// One sentence: connect and run take no flag that discards it.
 			return &wsError{msg: s.sb.Name + " has work that was not pulled: bring it back with `" + CommandName + " pull " + s.sb.Name +
-				" --apply` (or --branch, or --patch-out FILE), or connect without --refresh to go on with the copy as it is", err: err}
+				" --apply` (or --branch, or --patch-out FILE) and confirm the project, branch or patch file contains it before refreshing, or connect without --refresh to go on with the copy as it is", err: err}
 		case errors.Is(err, workspace.ErrUnappliedPull):
 			hint = "bring the work back first (`" + CommandName + " pull " + s.sb.Name + " --apply`, --branch or --patch-out FILE), " +
-				"or connect without --refresh to go on with the copy as it is"
+				"confirm the project, branch or patch file contains it before refreshing, or connect without --refresh to go on with the copy as it is"
 		}
 		return workspaceFailure("refresh the copy", err, hint)
 	}
@@ -1242,7 +1242,7 @@ func overlayDiskFillingText(name string, d overlayDisk, copyMode bool) string {
 	text := fmt.Sprintf("%s's own disk is %d%% full (%s of %s free): a MicroVM stopped with its disk full cannot start again → `%s exec %s -- df -h /` shows it",
 		name, d.percent(), humanBytes(d.avail), humanBytes(d.size), CommandName, name)
 	if copyMode {
-		text += "; `" + CommandName + " pull " + name + "` brings its work back before it fills"
+		text += "; `" + CommandName + " pull " + name + " --apply` brings its work back before it fills"
 	}
 	return text
 }
@@ -1529,7 +1529,9 @@ func (a *App) unhandedWork(ctx context.Context, sb *sandboxapi.Sandbox) string {
 		// run since.
 		return ""
 	}
-	pull := "`" + CommandName + " pull " + sb.Name + " --apply|--branch|--patch-out FILE`"
+	pull := "`" + CommandName + " pull " + sb.Name + " --apply`, `" + CommandName + " pull " + sb.Name +
+		" --branch`, or `" + CommandName + " pull " + sb.Name + " --patch-out FILE`"
+	check := "; inspect the project, branch or patch file before deleting the sandbox"
 	last := ""
 	if h := a.lastHandover(sb); h != nil {
 		last = "its work was last " + a.handoverText(h)
@@ -1548,13 +1550,13 @@ func (a *App) unhandedWork(ctx context.Context, sb *sandboxapi.Sandbox) string {
 	}
 	switch {
 	case err != nil:
-		return "may hold work that was never pulled back" + why("it could not be checked: "+truncate(gatewayTransportText(err.Error()), 120)) + "; " + pull + " brings it back"
+		return "may hold work that was never pulled back" + why("it could not be checked: "+truncate(gatewayTransportText(err.Error()), 120)) + "; use " + pull + " to save it if needed" + check
 	case work == workspace.CopyWorkUnpulled:
-		return "holds work that was never pulled back" + why() + "; " + pull + " brings it back"
+		return "holds work that was never pulled back" + why() + "; use " + pull + " to save it if needed" + check
 	case work == workspace.CopyWorkUnapplied:
-		return "holds a pull that was never applied" + why() + "; " + pull + " applies it"
+		return "holds a pull that was never applied" + why() + "; use " + pull + " to save it" + check
 	case work == workspace.CopyWorkUnknown:
-		return "may hold work that was never pulled back" + why("it is not running, so it was not checked") + "; " + pull + " looks"
+		return "may hold work that was never pulled back" + why("it is not running, so it was not checked") + "; use " + pull + " to save it if needed" + check
 	}
 	return ""
 }

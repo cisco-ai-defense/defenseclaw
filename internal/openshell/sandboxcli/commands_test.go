@@ -675,8 +675,10 @@ func TestDeleteNamesUnpulledCopyWork(t *testing.T) {
 	ta.daemon.add(sb)
 	ta.copy.pending = map[string]workspace.CopyWork{"fix-tests": workspace.CopyWorkUnpulled}
 	ta.ok(t, ta.Delete(bg, DeleteOptions{Names: []string{"fix-tests"}}))
-	has(t, ta.output(), "Sandbox fix-tests holds work that was never pulled back; `defenseclaw sandbox pull fix-tests --apply|--branch|--patch-out FILE` "+
-		"brings it back. Delete it and discard that work? [y/N]")
+	has(t, ta.output(), "Sandbox fix-tests holds work that was never pulled back; use `defenseclaw sandbox pull fix-tests --apply`, "+
+		"`defenseclaw sandbox pull fix-tests --branch`, or `defenseclaw sandbox pull fix-tests --patch-out FILE` to save it if needed; "+
+		"inspect the project, branch or patch file before deleting the sandbox. Delete it and discard that work? [y/N]")
+	lacks(t, ta.output(), "--apply|--branch|--patch-out FILE")
 	if ta.calls("DELETE", "fix-tests") != 0 {
 		t.Fatal("the default deleted the work")
 	}
@@ -697,7 +699,8 @@ func TestDeleteNamesUnpulledCopyWork(t *testing.T) {
 	ta = newTestApp(t, "", copySandbox("fix-tests"))
 	ta.copy.pendingStopped = map[string]workspace.CopyWork{"fix-tests": workspace.CopyWorkUnknown}
 	ta.ok(t, ta.Teardown(bg, TeardownOptions{DryRun: true}))
-	has(t, ta.output(), "sandbox fix-tests may hold work that was never pulled back (it is not running, so it was not checked)", "teardown deletes it")
+	has(t, ta.output(), "sandbox fix-tests may hold work that was never pulled back (it is not running, so it was not checked)",
+		"inspect the project, branch or patch file before deleting the sandbox", "teardown deletes it")
 }
 
 // TestExecStopsItsCommandWhenTheClientEnds pins that a `sandbox exec`

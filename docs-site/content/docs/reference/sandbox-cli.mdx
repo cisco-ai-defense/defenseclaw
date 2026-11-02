@@ -41,7 +41,7 @@ tree, and a test keeps them in step with it. `defenseclaw sandbox <command>
 | [`sandbox approvals`](#sandbox-approvals), [`approve`](#sandbox-approve), [`reject`](#sandbox-reject) | The asks waiting for you, and your answers. |
 | [`sandbox unblock`](#sandbox-unblock) | Lift an egress block. |
 | [`sandbox review`](#sandbox-review), [`undo`](#sandbox-undo) | Review a mounted project's changes, or restore its undo point. |
-| [`sandbox pull`](#sandbox-pull) | Bring a copy-mode sandbox's work back. |
+| [`sandbox pull`](#sandbox-pull) | Use `--apply` to bring a copy's work into the project, or `--branch` / `--patch-out FILE` to save it elsewhere. |
 | [`sandbox discover`](#sandbox-discover), [`ps`](#sandbox-ps) | What runs inside a sandbox: AI components and the process tree. |
 | [`sandbox policy`](#sandbox-policy) | Show, explain, suggest, test and edit the sandbox policy. |
 | [`sandbox pack`](#sandbox-pack) | List, show and validate policy packs. |
@@ -127,7 +127,7 @@ commands change in these ways. Everything else on this page works as written.
   `--copy` requests a copy; the unmanaged default requests a mount where the
   driver supports it. A managed sandbox always works on a copy: a repository
   overlay's `workspace.mode: mount` request is clamped to copy with the reason.
-  Changes come back with [`sandbox pull`](#sandbox-pull).
+  Changes come back with [`sandbox pull`](#sandbox-pull) `--apply`, or are saved with `--branch` or `--patch-out FILE`.
 - **Setup is the administrator's.** `sandbox setup` is hidden from managed
   help and refuses a managed invocation with the administrator's contact.
   The administrator turns sandboxes on with `openshell.enabled` and decides how
@@ -466,10 +466,12 @@ half-installed host.
 
 `defenseclaw uninstall` runs teardown when sandbox state is present, and stops
 if teardown fails (where sandboxes are not supported, such as Windows, it skips
-it). A running sandbox stops `defenseclaw uninstall` before any change. Pull a
-copy-mode sandbox's work with `defenseclaw sandbox pull NAME --branch`, or
-review a mount-mode sandbox with `defenseclaw sandbox review NAME`, then
-`defenseclaw sandbox stop NAME` and uninstall again. `--stop-sandboxes` (also on
+it). A running sandbox stops `defenseclaw uninstall` before any change. For
+a copy-mode sandbox, use `defenseclaw sandbox pull NAME --apply` (or
+`--branch` or `--patch-out FILE`) and confirm the project, branch or patch
+file contains its work. For a mount-mode sandbox, use
+`defenseclaw sandbox review NAME`. Then run `defenseclaw sandbox stop NAME`
+and uninstall again. `--stop-sandboxes` (also on
 `reset`) stops and deletes running sandboxes during teardown, unpulled copy work
 included. This preflight runs only when sandbox teardown is planned. If
 DefenseClaw cannot read the sandbox list because the gateway stopped, the list
@@ -629,7 +631,9 @@ Runs a harness in a new sandbox on the current folder. On Linux (Docker driver)
 the folder is mounted live by default, secret files are masked, `.git/hooks`
 and `.git/config` are read-only, and a snapshot is taken first for `undo`.
 `--copy` works on a copy with secrets held back, and you bring its work back
-with `pull`. On a Mac, or wherever the gateway runs the MicroVM driver, every
+with `defenseclaw sandbox pull NAME --apply` (or save it with `--branch`
+or `--patch-out FILE`). On a Mac, or wherever the gateway runs the MicroVM
+driver, every
 run works on a copy. Skip-permissions mode is on by default and `--safe` keeps
 the harness's own prompts. The harness gets your terminal. Arguments after `--`
 go to the harness. The step-by-step version is
@@ -641,7 +645,7 @@ go to the harness. The step-by-step version is
 | Interrupts | Before the harness runs, Ctrl-C or a closed terminal ends the run and deletes the sandbox it created. While it runs, they end the harness and the session ends normally. At an end-of-session question they leave the changes where they are and `run` exits `130`. |
 | End of session | The sandbox the session started is stopped first. The summary counts tool calls and blocks, new sites contacted, sites blocked and files changed, then names notices and changes that can run code. A mounted folder asks to keep, undo or show the diff. A copy asks to apply, branch, patch or skip. Without a terminal, or with `--yes`, a mount keeps the changes and a copy skips ([review, undo or pull](/docs/sandboxes/guide)). |
 | `--rm` | On a mounted folder it keeps the undo point when the review failed or nobody accepted the changes. In copy mode it is not honored while changes are left in the sandbox. |
-| Full disk | A pull that fails because a MicroVM's own disk is full leaves the MicroVM running: free space (`sandbox connect NAME --shell`), `sandbox pull NAME --apply` (or `--branch`, `--patch-out FILE`), then `sandbox stop NAME`. |
+| Full disk | A pull that fails because a MicroVM's own disk is full leaves the MicroVM running: free space (`sandbox connect NAME --shell`), `sandbox pull NAME --apply` (or `--branch`, `--patch-out FILE`), confirm the project, branch or patch file contains the work, then `sandbox stop NAME`. |
 
 #### The run banner
 
@@ -905,7 +909,7 @@ A few rules the flags follow:
 | --- | --- | --- | --- |
 | `--bedrock-region` | text |  | Amazon Bedrock region for --llm bedrock (default `$AWS_REGION`, then `$AWS_DEFAULT_REGION`, then us-east-1). |
 | `--context` | text, repeatable |  | Extra folder mounted read-only (repeatable; mount mode only). |
-| `--copy` | switch |  | Work on a copy of the folder with secrets held back; bring changes back with pull. |
+| `--copy` | switch |  | Work on a copy of the folder with secrets held back; bring changes back with pull --apply (or --branch or --patch-out FILE). |
 | `--cpu` | text |  | CPU limit, for example 2 or 500m. |
 | `--credential` | text, repeatable |  | NAME=host[:port]: give the sandbox a placeholder for `$NAME` that works only against that host (repeatable). |
 | `-d`, `--detach` | switch |  | Run in the background (needs --prompt); follow with sandbox logs -f. |
@@ -928,7 +932,7 @@ A few rules the flags follow:
 | `--rm` | switch |  | Delete the sandbox when the session ends. |
 | `--safe` | switch |  | Keep the harness's own permission prompts (skip-permissions off). |
 | `--unmask` | text, repeatable |  | Share a masked secret file or glob with the sandbox (repeatable). |
-| `-y`, `--yes` | switch |  | Take the defaults at the end of the session (mount: keep the changes; copy: leave them in the sandbox for pull). |
+| `-y`, `--yes` | switch |  | Take the defaults at the end of the session (mount: keep the changes; copy: leave them in the sandbox for later pull --apply, --branch or --patch-out FILE). |
 {/* AUTOGEN-END: sandbox-flags */}
 
 ### `sandbox connect`
@@ -986,7 +990,7 @@ defenseclaw sandbox connect myapp-7f3a --shell
 | `--refresh` | switch |  | Copy-mode: copy the folder into the sandbox again first. |
 | `--rm` | switch |  | Delete the sandbox when the session ends. |
 | `--shell` | switch |  | Open a shell in the sandbox instead of the harness. |
-| `-y`, `--yes` | switch |  | Take the defaults at the end of the session (mount: keep the changes; copy: leave them in the sandbox for pull). |
+| `-y`, `--yes` | switch |  | Take the defaults at the end of the session (mount: keep the changes; copy: leave them in the sandbox for later pull --apply, --branch or --patch-out FILE). |
 {/* AUTOGEN-END: sandbox-flags */}
 
 ### `sandbox exec`
@@ -1108,7 +1112,7 @@ the destinations by kind (`AI: 1 model provider, 2 shadow AI`):
 
 ### `sandbox stop`
 
-Stops a sandbox. It is kept, so `start` or `connect` can resume it. On a MicroVM, `defenseclaw sandbox stop` syncs the VM's disk before it stops it. If that sync fails, DefenseClaw does not stop the VM: it keeps running with its work, the command says what a stop would lose and, on a terminal, asks whether to stop it anyway (`--yes` does not answer that question); `--discard-unsynced` stops it anyway without asking. Or save the work you need (`defenseclaw sandbox pull NAME --apply` for a copy run, or `--branch` or `--patch-out FILE`) and run `defenseclaw sandbox stop NAME` again; `defenseclaw sandbox delete NAME` ends it without keeping its work. A stop DefenseClaw makes for your organization's policy (a hook alarm, a revoked registration) does not end a MicroVM whose disk could not sync either, and neither does one it makes on its own for repeated foreign network rules or a lost sandbox listener: DefenseClaw contains it instead (it closes its egress proxy, withdraws its network rules and providers, reports it not protected and refuses new DefenseClaw runs), `sandbox status` names it, and it keeps running until you stop it with `--discard-unsynced` or delete it. When a
+Stops a sandbox. It is kept, so `start` or `connect` can resume it. On a MicroVM, `defenseclaw sandbox stop` syncs the VM's disk before it stops it. If that sync fails, DefenseClaw does not stop the VM: it keeps running with its work, the command says what a stop would lose and, on a terminal, asks whether to stop it anyway (`--yes` does not answer that question); `--discard-unsynced` stops it anyway without asking. Or save the work you need (`defenseclaw sandbox pull NAME --apply` for a copy run, or `--branch` or `--patch-out FILE`) and confirm the project, branch or patch file contains it before running `defenseclaw sandbox stop NAME` again; `defenseclaw sandbox delete NAME` ends it without keeping its work. A stop DefenseClaw makes for your organization's policy (a hook alarm, a revoked registration) does not end a MicroVM whose disk could not sync either, and neither does one it makes on its own for repeated foreign network rules or a lost sandbox listener: DefenseClaw contains it instead (it closes its egress proxy, withdraws its network rules and providers, reports it not protected and refuses new DefenseClaw runs), `sandbox status` names it, and it keeps running until you stop it with `--discard-unsynced` or delete it. When a
 detached run is still going, or a session runs in it from another terminal
 (a harness session, or `connect --shell`), `stop` names it and asks first on
 a terminal (`--yes` skips the question; without a terminal it warns), and
@@ -1127,11 +1131,11 @@ instead of starting the sandbox.
 
 A copy-mode MicroVM with a full disk keeps running if its copy holds work not
 yet pulled (exit `5`), even with `--yes`: check it with
-`sandbox exec <name> -- df -h /`, free space, run `sandbox pull <name> --apply` (or `--branch`, `--patch-out FILE`), then
+`sandbox exec <name> -- df -h /`, free space, run `sandbox pull <name> --apply` (or `--branch`, `--patch-out FILE`), confirm the project, branch or patch file contains the work, then
 stop. `sandbox delete <name>` gives up that work. If its disk does not answer
 within 15 seconds, stop asks first; `--yes` skips that question.
 
-Save or sync accessible work first. In copy mode, pull work you need on the host; then stop the guest:
+Save or sync accessible work first. In copy mode, run `defenseclaw sandbox pull NAME --apply` (or `--branch` or `--patch-out FILE`) for work you need on the host; confirm the project, branch or patch file contains it, then stop the guest:
 
 ```bash
 defenseclaw sandbox stop myapp-7f3a
@@ -2049,7 +2053,7 @@ Either have the owner give you write access, or install a Homebrew of your own i
 | Disk use | About 5 GB per image the driver has started, in `~/.local/state/openshell/vm-driver`. `defenseclaw sandbox image prune` and `image rm` remove unused images and their disks. |
 | Per-run settings | Claude Code and Codex settings are baked, root-owned and read-only, into a small run image for each sandbox. A run with other `--env`, credentials or model provider prepares another disk. |
 | Stopping | Save or sync accessible work first, then `defenseclaw sandbox stop NAME` on a running MicroVM; it requests a disk sync before the stop; a failed sync may lose changes since the last successful one. A gateway restart stops every MicroVM on it, so setup asks before it restarts a gateway with sandboxes running. |
-| Disk full | The live session checks overlay use every two minutes and warns once if a check finds at least 90% use. A rapidly filling disk can reach full before that check; the warning cannot prevent a write from failing. Run `defenseclaw sandbox status NAME` for a current check or `defenseclaw sandbox exec NAME -- df -h /` to inspect space in the guest. If it fills, free space in the guest and pull the work before stopping it. |
+| Disk full | The live session checks overlay use every two minutes and warns once if a check finds at least 90% use. A rapidly filling disk can reach full before that check; the warning cannot prevent a write from failing. Run `defenseclaw sandbox status NAME` for a current check or `defenseclaw sandbox exec NAME -- df -h /` to inspect space in the guest. If it fills, free space in the guest, then run `defenseclaw sandbox pull NAME --apply` (or `--branch` or `--patch-out FILE`) and confirm the project, branch or patch file contains the work before stopping it. |
 
 Limits on a Mac: there is no live mount and no pre-session snapshot, `sandbox undo` reverts the last `pull --apply`, `--context` is refused, the copy has no Git LFS, and OpenShell calls the driver experimental. A harness runs only after its image proves its hooks fire in a MicroVM ([which agents run](/docs/sandboxes)).
 

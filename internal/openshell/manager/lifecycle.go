@@ -1963,7 +1963,7 @@ func (m *Manager) ReportDisk(_ context.Context, name string, r sandboxapi.DiskRe
 		msg += " and filling fast"
 	}
 	msg += ": a MicroVM stopped with its disk full cannot start again; `defenseclaw sandbox exec " + name +
-		" -- df -h /` shows it, `defenseclaw sandbox pull " + name + "` brings its work back before it fills"
+		" -- df -h /` shows it, `defenseclaw sandbox pull " + name + " --apply` brings its work back before it fills"
 	m.feed.Publish(sandboxapi.ActivityEvent{Kind: sandboxapi.ActivityLifecycle, Sandbox: name, Reason: sandboxapi.ReasonDiskFilling, Message: msg})
 	return nil
 }

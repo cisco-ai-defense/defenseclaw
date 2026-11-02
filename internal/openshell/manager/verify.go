@@ -438,7 +438,7 @@ func (m *Manager) verifyStarted(ctx context.Context, gw *Gateway, b *box, rec re
 		m.logf("%s: sandbox %s has no workload check in its record; stopping it again", gatewaylog.ErrCodeOpenShellPolicyRejected, rec.Name)
 		refusal := &sandboxapi.Error{Code: sandboxapi.CodePolicyRejected,
 			Message: "sandbox " + rec.Name + " does not run as DefenseClaw prepared it; " + outcome,
-			Detail:  "its record does not say what its create delivered, so it cannot be checked: pull its work, delete it and run it again"}
+			Detail:  "its record does not say what its create delivered, so it cannot be checked: before deleting it, try `defenseclaw sandbox pull " + rec.Name + " --apply` (or --branch or --patch-out FILE) and confirm the work was saved; a fresh pull of this stopped copy may be refused because it must start again. If so, keep the sandbox while you assess recovery; delete it only after saving the work you need, then run it again"}
 		if m.stopUnverified(ctx, gw, b) != nil {
 			return stillRunning(rec.Name, refusal, outcome)
 		}

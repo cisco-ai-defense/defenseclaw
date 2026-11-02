@@ -3943,7 +3943,8 @@ def _running_sandboxes_refusal(plan: UninstallPlan) -> str:
             f"the sandbox list could not be read ({plan.sandbox_list_error}), so this run cannot tell whether "
             "OpenShell sandboxes still run for this account; a running sandbox may hold work never pulled back, "
             "and the sandbox teardown would stop and delete it; nothing was changed. Run `defenseclaw sandbox list` "
-            "to check (`defenseclaw sandbox pull NAME --branch` keeps a copy-mode sandbox's work, "
+            "to check (for copy-mode work, use `defenseclaw sandbox pull NAME --apply`, `--branch`, or "
+            "`--patch-out FILE` and confirm the project, branch or patch file contains it; "
             "`defenseclaw sandbox stop NAME` stops one), then run this command again, or add --stop-sandboxes to "
             "stop and delete any running sandbox with the teardown."
         )
@@ -3957,7 +3958,9 @@ def _running_sandboxes_refusal(plan: UninstallPlan) -> str:
         stop = f"`defenseclaw sandbox stop {quoted}`"
         if mode == "copy":
             steps.append(
-                f"`defenseclaw sandbox pull {quoted} --branch` keeps its work on branch dc/{name}, then {stop}"
+                f"use `defenseclaw sandbox pull {quoted} --apply` to save its work in the project "
+                f"(or `--branch` for a Git branch or `--patch-out FILE` for a patch); "
+                f"confirm the project, branch or patch file contains it, then {stop}"
             )
         elif mode == "mount":
             steps.append(f"`defenseclaw sandbox review {quoted}` shows what it changed in your folder, then {stop}")

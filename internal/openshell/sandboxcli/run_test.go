@@ -315,6 +315,12 @@ func TestRunDetachedStartsInBackground(t *testing.T) {
 		t.Fatalf("detached codex argv = %q", last)
 	}
 	lacks(t, ta.output(), "may leave no saved conversation")
+	ta = newTestApp(t, "")
+	ta.IO.TTY = false
+	ta.ok(t, ta.Run(bg, RunOptions{Harness: "claude", Copy: true, Detach: true, Prompt: "x"}))
+	// Each displayed results line is a runnable pull command.
+	has(t, ta.output(), "results: defenseclaw sandbox pull ", "or:      defenseclaw sandbox pull ", " --apply", " --branch", " --patch-out FILE")
+	lacks(t, ta.output(), "--apply|--branch|--patch-out FILE")
 }
 
 // GAP-0595: a managed run during a directory outage says so once, at its
@@ -925,7 +931,7 @@ func TestRunFallsBackToCopyMode(t *testing.T) {
 		t.Fatalf("copy steps = %v, want %v first", ta.copy.steps, want)
 	}
 	has(t, ta.output(), "⚠ ~/proj can't be mounted live (its git directory lives at ~/main/.git/worktrees/proj, outside the folder "+
-		"(a git worktree or submodule checkout)), so it runs on a copy: `defenseclaw sandbox pull wt` brings the changes back")
+		"(a git worktree or submodule checkout)), so it runs on a copy: `defenseclaw sandbox pull wt --apply` brings the changes back")
 	lacks(t, ta.output(), "with --copy")
 
 	// The daemon's needs-copy answer on a driver without host mounts, to a
@@ -942,7 +948,7 @@ func TestRunFallsBackToCopyMode(t *testing.T) {
 	}
 	ta.ok(t, ta.Run(bg, RunOptions{Harness: "opencode", Name: "vmbox"}))
 	has(t, ta.output(), "⚠ ~/proj can't be mounted live (the OpenShell MicroVM (vm) driver mounts no host folders), so it runs on a copy: "+
-		"`defenseclaw sandbox pull vmbox` brings the changes back")
+		"`defenseclaw sandbox pull vmbox --apply` brings the changes back")
 }
 
 func TestSummaryLine(t *testing.T) {
@@ -1277,7 +1283,7 @@ func TestRunOnTheMicroVMDriver(t *testing.T) {
 	// through `sandbox pull`, while the session's end offers to bring them
 	// back itself.
 	const note = "copy mode: the OpenShell MicroVM (vm) driver mounts no host folders; the agent works on a copy, " +
-		"and your folder changes only when you bring its work back: at the end of the session, or later with `defenseclaw sandbox pull`"
+		"and your folder changes only when you bring its work back: at the end of the session, or later with `defenseclaw sandbox pull NAME --apply`"
 	driver := func(name string, more ...func(*testApp)) func(*testApp) {
 		return func(ta *testApp) {
 			ta.daemon.status.Gateway.Driver = name

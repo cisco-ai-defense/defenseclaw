@@ -5617,7 +5617,7 @@ def sandbox_wizard_fields(
                 hint="Docker Desktop's Linux kernel has no Landlock, so setup switches the OpenShell gateway to "
                 'its MicroVM driver (compute_driver = "vm"; Apple silicon; experimental upstream)'
                 + microvm_restart
-                + ". MicroVMs mount no host folders: the agent works on a copy, and defenseclaw sandbox pull "
+                + ". MicroVMs mount no host folders: the agent works on a copy, and defenseclaw sandbox pull NAME --apply "
                 "brings the changes back. The first run of each image prepares its MicroVM disk (about a minute "
                 "and 5 GB).",
                 visible_when=is_setup,

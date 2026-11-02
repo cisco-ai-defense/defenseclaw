@@ -586,7 +586,7 @@ func TestStartOnVMComparesTheBakedRunConfig(t *testing.T) {
 	// refusal does not send the user to delete before it is pulled.
 	if apiErr := wantCode(t, err, sandboxapi.CodePolicyViolation); !strings.Contains(apiErr.Message, "baked into its image") ||
 		!strings.Contains(apiErr.Message, "deleting it discards what was never pulled") || strings.Contains(apiErr.Message, "delete it and run it again") ||
-		!strings.Contains(apiErr.Detail, "start it under the settings it was made with") || !strings.Contains(apiErr.Detail, "`defenseclaw sandbox pull vm-yolo`, then") {
+		!strings.Contains(apiErr.Detail, "start it under the settings it was made with") || !strings.Contains(apiErr.Detail, "`defenseclaw sandbox pull vm-yolo --apply` (or --branch or --patch-out FILE), confirm the project, branch or patch file contains the work, then") {
 		t.Fatalf("stricter start = %+v", apiErr)
 	}
 }

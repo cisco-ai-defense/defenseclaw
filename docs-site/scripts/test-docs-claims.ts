@@ -350,8 +350,8 @@ describe('recovery and repair advice', () => {
     for (const [name, claim] of [
       ['sandboxes/guide.mdx', 'save or sync its work first, then `defenseclaw sandbox stop NAME`'],
       ['macos-app.mdx', 'save or sync each guest’s work first, then stop it with `defenseclaw sandbox stop NAME`'],
-      ['reference/sandbox-cli.mdx', 'Save or sync accessible work first. In copy mode, pull work you need on the host; then stop the guest'],
-      ['enterprise/sandboxes.mdx', 'Users save or pull accessible work first, then stop a running sandbox with `defenseclaw sandbox stop`'],
+      ['reference/sandbox-cli.mdx', 'Save or sync accessible work first. In copy mode, run `defenseclaw sandbox pull NAME --apply` (or `--branch` or `--patch-out FILE`) for work you need on the host; confirm the project, branch or patch file contains it, then stop the guest'],
+      ['enterprise/sandboxes.mdx', 'Users save accessible work first (`defenseclaw sandbox pull NAME --apply` for a copy, or `--branch` or `--patch-out FILE`) and confirm the project, branch or patch file contains it before stopping a running sandbox with `defenseclaw sandbox stop`'],
       ['sandboxes/guide.mdx', 'Before following a stop step below, save or sync accessible guest work'],
     ] as const) {
       assert.ok(page(name).includes(claim), `${name} must give save-first advice`);

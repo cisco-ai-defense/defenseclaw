@@ -570,7 +570,9 @@ func TestStartRefusesARecordWithoutItsCheck(t *testing.T) {
 	stops := e.fake.Calls(openshelltest.MethodStopSandbox)
 	_, err := e.m.Start(t.Context(), "nocheck", sandboxapi.StartRequest{})
 	if apiErr := wantCode(t, err, sandboxapi.CodePolicyRejected); !strings.HasSuffix(apiErr.Message, "DefenseClaw stopped it again (its work is kept)") ||
-		!strings.Contains(apiErr.Detail, "cannot be checked") {
+		!strings.Contains(apiErr.Detail, "cannot be checked") ||
+		!strings.Contains(apiErr.Detail, "pull nocheck --apply") ||
+		!strings.Contains(apiErr.Detail, "may be refused because it must start again") {
 		t.Fatalf("refusal = %+v", apiErr)
 	}
 	if got, _ := e.client.GetSandbox(t.Context(), "nocheck"); got.Status.Phase != openshell.PhaseStopped ||

@@ -130,7 +130,7 @@ You can also run setup from the TUI (`defenseclaw tui`, `0`, **Sandboxes (OpenSh
     { type: "out", text: "    then restart the gateway (brew services restart nvidia/openshell/openshell) on the vm compute driver; running sandboxes stop, and sandboxes made on the docker driver cannot start again (one gateway runs one driver)" },
     { type: "out", text: "  sandbox_uid and sandbox_gid are gateway-wide: every MicroVM sandbox on this gateway, including ones made outside DefenseClaw with `openshell sandbox create`, then runs as 509:20" },
     { type: "ok", text: "  ✓ gateway configured and restarted: it runs sandboxes in OpenShell MicroVMs" },
-    { type: "out", text: "  every run works on a copy (the MicroVM driver mounts no host folders); `defenseclaw sandbox pull` brings the changes back" },
+    { type: "out", text: "  every run works on a copy (the MicroVM driver mounts no host folders); `defenseclaw sandbox pull NAME --apply` brings the changes back" },
     { type: "out", text: "  Harnesses (add another with `defenseclaw sandbox setup --harness NAME`):" },
     { type: "out", text: "    Claude Code (claude)  model credential AWS_BEARER_TOKEN_BEDROCK ✓" },
     { type: "out", text: "    Codex (codex)         model credential AWS_BEARER_TOKEN_BEDROCK ✓" },

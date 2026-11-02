@@ -105,8 +105,8 @@ func (r *doctorRun) checkDockerNamespace(ctx context.Context) {
 			"on this computer share: when one of them starts, it removes the supervisors of your running sandboxes, and they stop"}
 	uid := r.Geteuid()
 	if r.sandboxesInDefaultNamespace(ctx) {
-		c.Fix = &Fix{Summary: "once no sandbox is left on your gateway (bring back their work with `defenseclaw sandbox pull NAME`, then " +
-			"`defenseclaw sandbox delete NAME`), run `" + setupCommand + "`: it gives your gateway a namespace of its own"}
+		c.Fix = &Fix{Summary: "bring back any copy-mode work with `defenseclaw sandbox pull NAME --apply` (or --branch or --patch-out FILE), " +
+			"confirm the project, branch or patch file contains it, then `defenseclaw sandbox delete NAME`; once no sandbox is left on your gateway, run `" + setupCommand + "`: it gives your gateway a namespace of its own"}
 	} else {
 		c.Fix = r.gatewayChangeFix("give your gateway a sandbox namespace of its own (sandbox_label = \""+AccountDockerNamespace(uid)+"\" in gateway.toml, with a backup)", "",
 			r.applyGateway(GatewayChanges{DockerNamespace: AccountDockerNamespace(uid)}))
