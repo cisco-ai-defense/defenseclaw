@@ -1843,7 +1843,19 @@ def _scan_agent(
         # version (GAP-0895): setup refuses action mode for it instead of
         # treating it as not installed.
         binary_path = kiro_forms[0]["path"]
-    installed = bool(binary_path) and (version_ok or bool(timed_out) or (name == "kiro" and bool(kiro_forms)))
+    path_launcher = (
+        name == "opencode"
+        and _is_windows_host()
+        and bool(binary_path)
+        and os.path.normcase(binary_on_path(name)) == os.path.normcase(binary_path)
+        and (
+            not require_trusted_binary_paths
+            or _is_trusted_binary_path(binary_path, data_dir=data_dir)
+        )
+    )
+    installed = bool(binary_path) and (
+        version_ok or bool(timed_out) or (name == "kiro" and bool(kiro_forms)) or path_launcher
+    )
     return AgentSignal(
         name=name,
         installed=installed,

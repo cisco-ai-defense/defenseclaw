@@ -2485,6 +2485,33 @@ def test_opencode_version_probe_allows_bounded_packaged_binary_startup(monkeypat
     assert calls[0][1]["timeout"] == 10.0
 
 
+def test_windows_opencode_path_launcher_counts_before_first_run(monkeypatch, tmp_path):
+    wrapper = tmp_path / "opencode.cmd"
+    wrapper.write_text("@echo off\r\n", encoding="utf-8")
+    monkeypatch.setattr(ad, "_is_windows_host", lambda: True)
+    monkeypatch.setattr(ad, "_agent_config_path", lambda *_args, **_kwargs: "")
+    monkeypatch.setattr(ad, "_binary_candidates_for_agent", lambda *_args: (str(wrapper),))
+    monkeypatch.setattr(ad, "_missing_probe_state", lambda _name: ([], []))
+    monkeypatch.setattr(ad, "_version_for_agent_binary", lambda *_args, **_kwargs: ("", "version unavailable"))
+    monkeypatch.setattr(ad, "_which", lambda _name: str(wrapper))
+
+    signal = ad._scan_agent("opencode", data_dir=tmp_path)
+    assert signal.installed is True
+    assert signal.binary_path == str(wrapper)
+    assert signal.version == ""
+
+    # A file outside PATH is still not installation evidence from this rule.
+    monkeypatch.setattr(ad, "_which", lambda _name: "")
+    assert ad._scan_agent("opencode", data_dir=tmp_path).installed is False
+
+    # A managed scan that rejects this path keeps that decision.
+    monkeypatch.setattr(ad, "_which", lambda _name: str(wrapper))
+    monkeypatch.setattr(ad, "_is_trusted_binary_path", lambda *_args, **_kwargs: False)
+    assert ad._scan_agent(
+        "opencode", data_dir=tmp_path, require_trusted_binary_paths=True
+    ).installed is False
+
+
 @pytest.mark.skipif(os.name != "nt", reason="Windows PATHEXT regression")
 def test_which_discovers_cmd_wrapper(monkeypatch, tmp_path):
     wrapper = tmp_path / "cursor.CMD"
