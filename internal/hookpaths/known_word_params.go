@@ -14,11 +14,11 @@ import (
 // knownWordPrograms cannot set a variable of the calling shell: external
 // programs and builtins without a binding form. A command that runs any
 // other program (read, wait -p, printf -v, eval, source, trap, command,
-// builtin, exec, env, cd, a function or a dynamic program word) has no known
+// builtin, exec, env, a function or a dynamic program word) has no known
 // parameter words: a wrapper or a deferred string can rebind the name
 // (rel-1-0-2:GAP-0004 review). The list is an allowlist on purpose. test and
 // [ are left out: test -v "a[f=-3]" evaluates the subscript, which assigns
-// (rel-1-0-6:GAP-0235 review).
+// (rel-1-0-6:GAP-0235 review). Static cd and pushd have a separate check.
 var knownWordPrograms = []string{
 	":", "awk", "cat", "chmod", "cmp", "cp", "diff", "echo", "false", "find", "gcp", "git", "go",
 	"grep", "head", "ln", "ls", "make", "mkdir", "mv", "rm", "rmdir", "sed", "sort", "tail", "tar",
@@ -56,17 +56,17 @@ func literalProgramWord(word *syntax.Word, home string) (string, bool) {
 // unknown. command is the text file was parsed from; most commands leave at
 // its cheap gate.
 func knownWordParameterUses(command string, file *syntax.File, home string) map[*syntax.Word]bool {
-	uses, _ := knownWordParameters(command, file, home, nil)
+	uses, _ := knownWordParameters(command, file, home, nil, nil)
 	return uses
 }
 
 // knownWordParameterUsesAt is knownWordParameterUses for a command read in
-// cwd: an assignment right after a leading cd (cd DIR && f=a.txt; cp $f
-// out.txt) always runs when DIR is a directory that exists before the
-// command (cdEnterable), so it binds f for what follows as a top-level
-// assignment does (rel-1-0-6:GAP-0320).
-func knownWordParameterUsesAt(command string, file *syntax.File, home string, cdOK func(string) bool) map[*syntax.Word]bool {
-	uses, _ := knownWordParameters(command, file, home, cdOK)
+// cwd: an assignment right after a leading directory change (cd DIR &&
+// f=a.txt; cp $f out.txt) runs when DIR is enterable (cdEnterable), so it
+// binds f for what follows as a top-level assignment does. The same holds
+// within a sole subshell (rel-1-0-6:GAP-0320, GAP-0362).
+func knownWordParameterUsesAt(command string, file *syntax.File, home string, cdOK func(string) bool, placed map[*syntax.CallExpr][]string) map[*syntax.Word]bool {
+	uses, _ := knownWordParameters(command, file, home, cdOK, placed)
 	return uses
 }
 
@@ -120,11 +120,11 @@ func cdEnterable(cwd string, facts map[string]string, record bool) func(string) 
 // on the hook client and the gateway alike (rel-1-0-6:GAP-0235). A name
 // bound to more than one value has none.
 func knownWordParameterValues(command string, file *syntax.File, home string) map[*syntax.Word]string {
-	_, values := knownWordParameters(command, file, home, nil)
+	_, values := knownWordParameters(command, file, home, nil, nil)
 	return values
 }
 
-func knownWordParameters(command string, file *syntax.File, home string, cdOK func(string) bool) (map[*syntax.Word]bool, map[*syntax.Word]string) {
+func knownWordParameters(command string, file *syntax.File, home string, cdOK func(string) bool, placed map[*syntax.CallExpr][]string) (map[*syntax.Word]bool, map[*syntax.Word]string) {
 	if file == nil || !mayHaveKnownCopyWord(command) {
 		return nil, nil
 	}
@@ -146,7 +146,77 @@ func knownWordParameters(command string, file *syntax.File, home string, cdOK fu
 	}
 	loops := map[string][]loop{}
 	after := map[string]uint{}
+	afterDirectory := map[string]bool{}
 	rejected := false
+	statements := file.Stmts
+	subshellScope := false
+	if cdOK != nil && len(statements) == 1 && len(statements[0].Redirs) == 0 &&
+		!statements[0].Background && !statements[0].Negated && !statements[0].Coprocess {
+		if subshell, ok := statements[0].Cmd.(*syntax.Subshell); ok && len(subshell.Stmts) > 0 {
+			if pair, ok := subshell.Stmts[0].Cmd.(*syntax.BinaryCmd); ok && pair.Op == syntax.AndStmt {
+				if _, valid := leadingDirectoryOperand(pair.X, home); valid {
+					// This binding stays in the sole subshell; it never
+					// applies to a later outer statement.
+					statements = subshell.Stmts
+					subshellScope = true
+				}
+			}
+		}
+	}
+	var leadingPushd *syntax.CallExpr
+	if len(statements) > 0 {
+		if pair, ok := statements[0].Cmd.(*syntax.BinaryCmd); ok && pair.Op == syntax.AndStmt {
+			if call, ok := pair.X.Cmd.(*syntax.CallExpr); ok && len(call.Args) > 0 {
+				program, _ := StaticWord(call.Args[0], home)
+				if _, valid := leadingDirectoryOperand(pair.X, home); valid && program == "pushd" {
+					leadingPushd = call
+				}
+			}
+		}
+	}
+	// A loop list may be the one plain word assigned immediately before
+	// the top-level loop. The shell expands that list before assigning its
+	// iterator; the adjacent binding cannot be changed in between.
+	priorLoopWord := func(loop *syntax.ForClause, item *syntax.Word) (string, bool) {
+		if item == nil || len(item.Parts) != 1 {
+			return "", false
+		}
+		param, ok := item.Parts[0].(*syntax.ParamExp)
+		if !ok || !simpleScalarParameter(param) {
+			return "", false
+		}
+		for i, top := range statements {
+			if top.Cmd != loop || i == 0 || top.Background || top.Negated || len(top.Redirs) != 0 {
+				continue
+			}
+			previous := statements[i-1]
+			if pair, ok := previous.Cmd.(*syntax.BinaryCmd); ok {
+				if i != 1 || pair.Op != syntax.AndStmt || cdOK == nil {
+					return "", false
+				}
+				dir, known := leadingDirectoryOperand(pair.X, home)
+				if !known || !cdOK(dir) {
+					return "", false
+				}
+				previous = pair.Y
+			}
+			if previous.Background || previous.Negated || len(previous.Redirs) != 0 {
+				return "", false
+			}
+			call, ok := previous.Cmd.(*syntax.CallExpr)
+			if !ok || len(call.Args) != 0 || len(call.Assigns) != 1 {
+				return "", false
+			}
+			assign := call.Assigns[0]
+			if assign.Name == nil || assign.Name.Value != param.Param.Value || assign.Value == nil ||
+				assign.Append || assign.Array != nil || assign.Index != nil {
+				return "", false
+			}
+			value, fixed := StaticWord(assign.Value, home)
+			return value, fixed && safe(value)
+		}
+		return "", false
+	}
 	syntax.Walk(file, func(node syntax.Node) bool {
 		if rejected {
 			return false
@@ -196,6 +266,9 @@ func knownWordParameters(command string, file *syntax.File, home string, cdOK fu
 			}
 			for _, item := range iter.Items {
 				value, fixed := StaticWord(item, home)
+				if !fixed {
+					value, fixed = priorLoopWord(node, item)
+				}
 				if !fixed || !safe(value) {
 					unsafeNames[name] = true
 				}
@@ -217,9 +290,9 @@ func knownWordParameters(command string, file *syntax.File, home string, cdOK fu
 				break
 			}
 			program, static := literalProgramWord(node.Args[0], home)
-			if static && program == "cd" && staticCdCall(node, home) {
-				// A cd with fixed words sets only PWD and OLDPWD, which no
-				// use reads (rel-1-0-6:GAP-0320).
+			if static && program == "cd" && staticDirectoryCall(node, home) || node == leadingPushd {
+				// A fixed directory change does not rebind an accepted
+				// parameter word (rel-1-0-6:GAP-0320, GAP-0362).
 				break
 			}
 			if !static || !slices.Contains(knownWordPrograms, programBase(program)) {
@@ -233,25 +306,31 @@ func knownWordParameters(command string, file *syntax.File, home string, cdOK fu
 	}
 	// A top-level assignment statement, or the first statement of a
 	// top-level AND list, always runs before what follows it. So does the
-	// statement right after the leading cd of the command's first AND list
-	// when that cd enters an existing directory (cdOK).
-	var first func(*syntax.Stmt, bool) *syntax.Stmt
-	first = func(stmt *syntax.Stmt, leading bool) *syntax.Stmt {
+	// statement right after the leading directory change of the first AND
+	// list, when that directory is enterable (cdOK).
+	var first func(*syntax.Stmt, bool) (*syntax.Stmt, bool)
+	first = func(stmt *syntax.Stmt, leading bool) (*syntax.Stmt, bool) {
 		if stmt == nil || stmt.Background || stmt.Negated || stmt.Coprocess {
-			return nil
+			return nil, false
 		}
 		if pair, ok := stmt.Cmd.(*syntax.BinaryCmd); ok && pair.Op == syntax.AndStmt {
 			if leading && cdOK != nil {
-				if dir, ok := leadingCdOperand(pair.X, home); ok && cdOK(dir) {
-					return first(pair.Y, false)
+				if dir, ok := leadingDirectoryOperand(pair.X, home); ok && cdOK(dir) {
+					selected, _ := first(pair.Y, false)
+					// Plain cd keeps its earlier binding: the client places
+					// nested copy destinations in the enclosing statement's
+					// directory (rel-1-0-6:GAP-0415).
+					call, _ := pair.X.Cmd.(*syntax.CallExpr)
+					program, _ := StaticWord(call.Args[0], home)
+					return selected, subshellScope || program != "cd" || len(call.Args) != 2
 				}
 			}
 			return first(pair.X, false)
 		}
-		return stmt
+		return stmt, false
 	}
-	for i, top := range file.Stmts {
-		stmt := first(top, i == 0)
+	for i, top := range statements {
+		stmt, fromDirectory := first(top, i == 0)
 		if stmt == nil || len(stmt.Redirs) != 0 {
 			continue
 		}
@@ -263,6 +342,7 @@ func knownWordParameters(command string, file *syntax.File, home string, cdOK fu
 			if assign.Name != nil {
 				if _, seen := after[assign.Name.Value]; !seen {
 					after[assign.Name.Value] = stmt.End().Offset()
+					afterDirectory[assign.Name.Value] = fromDirectory
 				}
 			}
 		}
@@ -275,13 +355,14 @@ func knownWordParameters(command string, file *syntax.File, home string, cdOK fu
 			return true
 		}
 		for _, word := range call.Args[1:] {
-			// $D/ or $D/rest: a known folder value and a plain literal tail
-			// that starts with a slash is that fixed path; it gets a value
-			// only, not the one-word source reading (rel-1-0-6:GAP-0329).
+			// $D/rest or $NAME.tgz: one known value and a plain literal
+			// tail is a fixed path. It gets a value only, not the
+			// one-word source reading (rel-1-0-6:GAP-0329, GAP-0395).
 			suffix := ""
 			if len(word.Parts) == 2 {
 				lit, isLit := word.Parts[1].(*syntax.Lit)
-				if !isLit || !strings.HasPrefix(lit.Value, "/") || !safe(strings.ReplaceAll(lit.Value, "/", "x")) {
+				if !isLit || (!strings.HasPrefix(lit.Value, "/") && !strings.HasPrefix(lit.Value, ".")) ||
+					!safe(strings.ReplaceAll(lit.Value, "/", "x")) {
 					continue
 				}
 				suffix = lit.Value
@@ -302,7 +383,11 @@ func knownWordParameters(command string, file *syntax.File, home string, cdOK fu
 			name, at := param.Param.Value, word.Pos().Offset()
 			known := false
 			if end, bound := after[name]; bound && at > end {
-				known = true
+				// Only placed calls have client destination evidence after a
+				// directory change. A nested use must retain the unknown
+				// reading at a managed gateway (GAP-0402).
+				_, isPlaced := placed[call]
+				known = !afterDirectory[name] || isPlaced
 			}
 			for _, body := range loops[name] {
 				known = known || at > body.from && at < body.to
@@ -356,9 +441,9 @@ func simpleScalarParameter(param *syntax.ParamExp) bool {
 	return true
 }
 
-// staticCdCall reports a cd call whose words are all fixed, with no
-// assignment in front of it.
-func staticCdCall(call *syntax.CallExpr, home string) bool {
+// staticDirectoryCall reports a directory-changing call whose words are all
+// fixed, with no assignment in front of it.
+func staticDirectoryCall(call *syntax.CallExpr, home string) bool {
 	if len(call.Assigns) != 0 {
 		return false
 	}
@@ -370,19 +455,49 @@ func staticCdCall(call *syntax.CallExpr, home string) bool {
 	return true
 }
 
-// leadingCdOperand returns the one operand of stmt when it is a plain
-// static cd DIR call (no option, no redirect).
-func leadingCdOperand(stmt *syntax.Stmt, home string) (string, bool) {
+// directoryChangeOperand is the shared operand parser for the known-word
+// reader and the statement directory walk. Only cd's logical -L and --
+// forms are read; a physical cd or a pushd option stays unknown.
+func directoryChangeOperand(call *syntax.CallExpr, home string) (string, bool) {
+	if call == nil || len(call.Args) < 2 || !staticDirectoryCall(call, home) {
+		return "", false
+	}
+	program, _ := StaticWord(call.Args[0], home)
+	index := 1
+	if program == "cd" {
+		for index < len(call.Args)-1 {
+			option, _ := StaticWord(call.Args[index], home)
+			if option != "-L" && option != "--" {
+				return "", false
+			}
+			index++
+			if option == "--" {
+				break
+			}
+		}
+	} else if program != "pushd" {
+		return "", false
+	}
+	if index+1 != len(call.Args) {
+		return "", false
+	}
+	dir, _ := StaticWord(call.Args[index], home)
+	if dir == "" || strings.HasPrefix(dir, "-") || program == "pushd" &&
+		(strings.HasPrefix(dir, "+") || !pushdBypassesCDPath(dir)) {
+		return "", false
+	}
+	return dir, true
+}
+
+// leadingDirectoryOperand returns the static directory of a leading cd or
+// pushd statement with no redirect or shell control modifier.
+func leadingDirectoryOperand(stmt *syntax.Stmt, home string) (string, bool) {
 	if stmt == nil || len(stmt.Redirs) != 0 || stmt.Background || stmt.Negated || stmt.Coprocess {
 		return "", false
 	}
 	call, ok := stmt.Cmd.(*syntax.CallExpr)
-	if !ok || len(call.Args) != 2 || !staticCdCall(call, home) {
+	if !ok {
 		return "", false
 	}
-	if program, _ := StaticWord(call.Args[0], home); program != "cd" {
-		return "", false
-	}
-	dir, _ := StaticWord(call.Args[1], home)
-	return dir, true
+	return directoryChangeOperand(call, home)
 }

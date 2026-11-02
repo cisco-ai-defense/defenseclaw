@@ -1098,6 +1098,8 @@ func trustedExistingAuthorizedKeysSymlinkWrite(request trustedActionRequest, fac
 				}
 			}
 			if strings.HasPrefix(operand, "/proc/self/cwd/") ||
+				strings.HasPrefix(operand, hookpaths.CopySourceGlobFactPrefix) ||
+				strings.HasPrefix(operand, hookpaths.GlobLoopCopyFactPrefix) ||
 				strings.HasPrefix(operand, hookpaths.SourceLinkFactPrefix) ||
 				strings.HasPrefix(operand, hookpaths.SourceLinksFactPrefix) ||
 				strings.HasPrefix(operand, hookpaths.CdEnterableFactPrefix) ||
@@ -1434,6 +1436,21 @@ func trustedExistingAuthorizedKeysSymlinkWrite(request trustedActionRequest, fac
 			}
 		}
 		for _, operand := range hookpaths.QuotedDynamicCopyDestinations(input.Command, input.CWD, input.ActiveHome) {
+			if writeTarget(operand, false, true) {
+				return true
+			}
+		}
+		for _, operand := range hookpaths.BoundedLoopCopyDestinations(input.Command, input.CWD, input.ActiveHome) {
+			if writeTarget(operand, false, true) {
+				return true
+			}
+		}
+		for _, operand := range hookpaths.CopySourceGlobDestinations(input.Command, input.CWD, input.ActiveHome, request.ResolvedWriteTargets) {
+			if writeTarget(operand, false, true) {
+				return true
+			}
+		}
+		for _, operand := range hookpaths.BoundedGlobLoopCopyDestinations(input.Command, input.CWD, input.ActiveHome, request.ResolvedWriteTargets) {
 			if writeTarget(operand, false, true) {
 				return true
 			}

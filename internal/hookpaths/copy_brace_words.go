@@ -150,3 +150,117 @@ func spliceCopyBraceWords(args []*syntax.Word, words []string, static []bool, fi
 	}
 	return outArgs, outWords, outStatic
 }
+
+// maxMentionBraceFields bounds the words the target scan reads of one brace
+// word. A word whose ranges alone make more is not expanded, so a long
+// benign range stays inside the hook deadline (GAP-0568).
+const maxMentionBraceFields = 256
+
+// actionMentionBraceFields returns the words bash makes of a brace word of
+// fixed text (copyBraceWordFields: plain or quoted literals and a known
+// $HOME, empty fields dropped), for the target scan to judge each one as if
+// it were spelled out: a brace word whose expansion names the keys file
+// (touch <keys>{s,x}, a substitution that prints <keys>{s..s}) was read as
+// its unexpanded text and named no file (rel-1-0-6:GAP-0233, GAP-0255).
+// It returns nil for a word with no brace, a dynamic word, or one past
+// maxMentionBraceFields words.
+func actionMentionBraceFields(word *syntax.Word, home string) []string {
+	if word == nil || !actionWordHasBraceText(word) || shellparse.MinBraceFields(word) > maxMentionBraceFields {
+		return nil
+	}
+	env := expand.ListEnviron("HOME=" + strings.TrimRight(home, "/"))
+	fields := copyBraceWordFields([]*syntax.Word{nil, word}, []bool{true, false}, env)[1]
+	if len(fields) > maxMentionBraceFields {
+		return nil
+	}
+	return fields
+}
+
+// A touch range just past the shared 256-field cap is still cheap enough
+// to read exactly. The same fields feed the client and gateway decisions.
+func actionExactOversizedTouchFields(word *syntax.Word, home string) []string {
+	if word == nil || !actionWordHasBraceText(word) || shellparse.MinBraceFields(word) <= maxMentionBraceFields ||
+		shellparse.MinBraceFields(word) > 1024 {
+		return nil
+	}
+	env := expand.ListEnviron("HOME=" + strings.TrimRight(home, "/"))
+	fields := copyBraceWordFields([]*syntax.Word{nil, word}, []bool{true, false}, env)[1]
+	if len(fields) > 1024 {
+		return nil
+	}
+	return fields
+}
+
+// actionWordHasBraceText reports an unquoted literal part with a {.
+func actionWordHasBraceText(word *syntax.Word) bool {
+	for _, part := range word.Parts {
+		if lit, ok := part.(*syntax.Lit); ok && strings.Contains(lit.Value, "{") {
+			return true
+		}
+	}
+	return false
+}
+
+// touchBraceWriteOperands returns the words bash makes of each brace file
+// operand of a touch (or gtouch) call, for the concrete-write decision the
+// hook client sends as ActionDecisionKey: a brace touch onto the keys file,
+// or onto a project link to it, updates that file as the plain touch does
+// (rel-1-0-6:GAP-0233). They are not listed in the client target map, so a
+// long benign touch cannot overflow it (GAP-0151). The values of -d, -r and
+// -t (and --date, --reference, --time) are not files touch writes.
+func touchBraceWriteOperands(command, home string) []string {
+	if !strings.Contains(command, "touch") || !strings.Contains(command, "{") {
+		return nil
+	}
+	file, ok := parseShell(command)
+	if !ok {
+		return nil
+	}
+	var operands []string
+	syntax.Walk(file, func(node syntax.Node) bool {
+		call, ok := node.(*syntax.CallExpr)
+		if !ok {
+			return true
+		}
+		touchBraceFileOperands(call, home, func(word *syntax.Word) bool {
+			fields := actionMentionBraceFields(word, home)
+			if len(fields) == 0 {
+				fields = actionExactOversizedTouchFields(word, home)
+			}
+			operands = append(operands, fields...)
+			return true
+		})
+		return true
+	})
+	return operands
+}
+
+// touchBraceFileOperands visits file operands once per touch call. Both the
+// concrete brace reader and the over-cap target reader use this option scan.
+func touchBraceFileOperands(call *syntax.CallExpr, home string, visit func(*syntax.Word) bool) {
+	if call == nil || len(call.Args) < 2 {
+		return
+	}
+	program, fixed := StaticWord(call.Args[0], home)
+	if !fixed || programBase(program) != "touch" && programBase(program) != "gtouch" {
+		return
+	}
+	options := true
+	for i := 1; i < len(call.Args); i++ {
+		word := call.Args[i]
+		if options {
+			if value, fixed := StaticWord(word, home); fixed && strings.HasPrefix(value, "-") && value != "-" {
+				switch value {
+				case "--":
+					options = false
+				case "-d", "-r", "-t", "--date", "--reference", "--time":
+					i++
+				}
+				continue
+			}
+		}
+		if !visit(word) {
+			return
+		}
+	}
+}

@@ -132,25 +132,90 @@ func actionConcreteProtectedWriteOn(command, cwd, home string, windowsHome bool)
 // actionConcreteProtectedWriteOnWith is actionConcreteProtectedWriteOn with
 // the evaluation's file system answers (TargetMemo; nil: none).
 func actionConcreteProtectedWriteOnWith(command, cwd, home string, windowsHome bool, memo *TargetMemo) bool {
+	return actionConcreteProtectedWriteOnWithOperands(command, cwd, home, windowsHome, memo, nil)
+}
+
+// actionConcreteOperands holds writer operands already found during one
+// client decision, so its subsequent action description reuses that reading.
+type actionConcreteOperands struct {
+	literal, loop, sourceGlob, globLoop []string
+	shellParsed, ready                  bool
+}
+
+func actionConcreteProtectedWriteOnWithOperands(command, cwd, home string, windowsHome bool, memo *TargetMemo, cache *actionConcreteOperands) bool {
 	if command == "" || home == "" || actionWindowsHome(home) && !windowsHome || !filepath.IsAbs(cwd) {
 		return false
 	}
-	if !windowsHome && actionMoveProtectedEntry(command, cwd, home) {
-		return true
-	}
 	protected := memo.protectedFiles(home)
 	ssh := filepath.Join(home, ".ssh")
-	writes, _, _ := ShellWriteOperands(command, cwd, home)
-	writes = append(writes, LiteralWriteOperands(command, cwd, home)...)
-	writes = append(writes, AdjacentAssignedWriteOperands(command, cwd, home)...)
-	bounded, _ := BoundedShellWriteOperands(command, cwd, home)
-	writes = append(writes, bounded...)
-	directoryWrites, _ := ShellDirectoryWriteOperands(command, cwd, home, nil, false, false)
+	var file *syntax.File
+	var parsed, parsedOnce bool
+	clientCandidate := !windowsHome && len(command) <= MaxPayloadBytes && actionClientWriteCandidate(command)
+	if !windowsHome {
+		file, parsed = parseShell(command)
+		parsedOnce = true
+	}
+	if clientCandidate && parsed && len(file.Stmts) == 1 {
+		stmt := file.Stmts[0]
+		if call, ok := stmt.Cmd.(*syntax.CallExpr); ok && !stmt.Background && !stmt.Negated &&
+			len(stmt.Redirs) == 0 && len(actionSSHDirectorySetupWords(call, actionValues{"HOME": home}, cwd, home)) > 0 {
+			return false
+		}
+	}
+	if clientCandidate && parsed && actionClientResolvedProtectedWrite(file, command, cwd, home, protected, ssh) {
+		return true
+	}
+	if !windowsHome && parsed && actionMoveProtectedEntryWithFile(command, cwd, home, file) {
+		return true
+	}
+	if !windowsHome && actionClientBoundedLoopCopyPotentialProtected(command, cwd, home) {
+		return true
+	}
+	// These readers only return output redirects. A command with no '>'
+	// still needs its copy, mutation and directory-write readings below.
+	hasOutputRedirect := strings.Contains(command, ">")
+	var writes []string
+	if hasOutputRedirect {
+		writes, _, _ = ShellWriteOperands(command, cwd, home)
+	}
+	var literalWrites []string
+	if parsed {
+		literalWrites, _ = literalWriteOperandsWithParsed(command, cwd, home, 0, file)
+	} else {
+		literalWrites = LiteralWriteOperands(command, cwd, home)
+	}
+	writes = append(writes, literalWrites...)
+	if hasOutputRedirect {
+		writes = append(writes, AdjacentAssignedWriteOperands(command, cwd, home)...)
+	}
+	loopWrites := BoundedLoopCopyDestinations(command, cwd, home)
+	writes = append(writes, loopWrites...)
+	sourceGlobWrites := CopySourceGlobDestinations(command, cwd, home, nil)
+	writes = append(writes, sourceGlobWrites...)
+	globLoopWrites := boundedGlobLoopCopyDestinationsWithFile(command, cwd, home, nil, file)
+	writes = append(writes, globLoopWrites...)
+	if cache != nil {
+		*cache = actionConcreteOperands{literal: literalWrites, loop: loopWrites, sourceGlob: sourceGlobWrites, globLoop: globLoopWrites, ready: true}
+	}
+	if hasOutputRedirect {
+		bounded, _ := BoundedShellWriteOperands(command, cwd, home)
+		writes = append(writes, bounded...)
+	}
+	var directoryParsed bool
+	directoryWrites, _ := shellDirectoryWriteOperandsWithFile(command, cwd, home, nil, false, false, &directoryParsed, file)
+	if cache != nil && cache.ready {
+		cache.shellParsed = directoryParsed
+	}
 	for _, occurrence := range directoryWrites {
 		writes = append(writes, occurrence.Path)
 	}
-	patches, _ := ApplyPatchWriteTargets("Bash", nil, command, cwd, home)
-	writes = append(writes, patches...)
+	// A patch envelope and each supported patch program spell "patch".
+	// Other commands cannot contribute patch targets to this writer list.
+	if strings.Contains(strings.ToLower(command), "patch") {
+		patches, _ := ApplyPatchWriteTargets("Bash", nil, command, cwd, home)
+		writes = append(writes, patches...)
+	}
+	writes = append(writes, touchBraceWriteOperands(command, home)...)
 	msys := func(value string) string {
 		if windowsHome && runtime.GOOS == "windows" {
 			return actionMSYSDrivePath(value) // Git Bash /c/... (GAP-0781 RV8-1)
@@ -185,17 +250,77 @@ func actionConcreteProtectedWriteOnWith(command, cwd, home string, windowsHome b
 	if !windowsHome && (len(writes) > 0 || strings.Contains(command, ">")) && diskLinkDotDotReachesState(command, cwd, home) {
 		return true
 	}
-	if file, ok := parseShell(command); ok {
-		values := actionValues{"HOME": home, "PWD": cwd}
-		for _, stmt := range file.Stmts {
-			actionUpdateValues(stmt, values, cwd, home)
-			for _, redirect := range stmt.Redirs {
-				if redirect.Word == nil || redirect.Op == syntax.RdrIn {
+	// All remaining checks in this reader examine output redirects. Every
+	// output redirect spelling contains '>'; copy and other writer operands
+	// have already been checked above.
+	if !strings.Contains(command, ">") {
+		return false
+	}
+	if !parsedOnce {
+		file, parsed = parseShell(command)
+	}
+	if parsed {
+		// The value tracker is needed only for a redirect whose target
+		// expands a shell parameter. Fixed redirects were already checked
+		// among the write operands above. Skipping candidate expansion for
+		// unrelated conditionals keeps this reader bounded.
+		valueRedirect := false
+		if strings.Contains(command, "$") {
+			syntax.Walk(file, func(node syntax.Node) bool {
+				redirect, ok := node.(*syntax.Redirect)
+				if ok && redirect.Word != nil && redirect.Op != syntax.RdrIn && wordExpandsParameter(redirect.Word) {
+					valueRedirect = true
+				}
+				return !valueRedirect
+			})
+		}
+		if valueRedirect {
+			values := actionValues{"HOME": home, "PWD": cwd}
+			trackKept := len(command) < 1024 || !actionfacts.ShellStatementsOverBudget(command)
+			var kept []actionValues
+			if trackKept {
+				kept = []actionValues{{"HOME": home, "PWD": cwd}}
+			}
+			steps := 0
+			for _, stmt := range file.Stmts {
+				actionUpdateValues(stmt, values, cwd, home)
+				if trackKept {
+					kept = actionUpdateValuesKept(stmt, kept, cwd, home, &steps)
+				}
+				if actionKeptSaturated(kept) {
+					uncertainWrite := false
+					syntax.Walk(stmt, func(node syntax.Node) bool {
+						redirect, ok := node.(*syntax.Redirect)
+						if !ok || redirect.Word == nil || redirect.Op == syntax.RdrIn {
+							return true
+						}
+						if values, known := actionSaturatedWordValues(redirect.Word, kept[0], cwd, home); known {
+							for _, value := range values {
+								if protectedReachPath(OperandPath(msys(value), cwd), protected, ssh) {
+									uncertainWrite = true
+									break
+								}
+							}
+						} else if wordExpandsParameter(redirect.Word) {
+							uncertainWrite = true
+						}
+						return !uncertainWrite
+					})
+					if uncertainWrite {
+						return true
+					}
 					continue
 				}
-				if value, known := actionWordValue(redirect.Word, values, cwd, home); known &&
-					protectedReachPathWith(OperandPath(msys(value), cwd), protected, ssh, memo) {
-					return true
+				for _, redirect := range stmt.Redirs {
+					if redirect.Word == nil || redirect.Op == syntax.RdrIn {
+						continue
+					}
+					for _, candidate := range append([]actionValues{values}, kept...) {
+						if value, known := actionWordValue(redirect.Word, candidate, cwd, home); known &&
+							protectedReachPathWith(OperandPath(msys(value), cwd), protected, ssh, memo) {
+							return true
+						}
+					}
 				}
 			}
 		}

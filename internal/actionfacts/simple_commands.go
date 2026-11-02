@@ -62,6 +62,7 @@ type simpleHomeLocal struct {
 const (
 	maxSimpleStates      = 32
 	maxSimpleEvaluations = 512
+	maxCompactionCases   = 8
 )
 
 func (s simpleShellState) clone() simpleShellState {
@@ -124,6 +125,28 @@ func simpleCommands(input Input, facts Facts, depth int, interpreter string) []S
 	if len(parts) > maxStatementsAlone {
 		return []SimpleCommand{{EvaluationFailure: "limit"}}
 	}
+	var futureSafe []bool
+	var checkedCases, tooManyCases bool
+	compact := func(states []simpleShellState, index int) []simpleShellState {
+		if len(states) <= maxSimpleStates {
+			return states
+		}
+		if !checkedCases {
+			checkedCases = true
+			tooManyCases = simpleTooManyCompactionCases(source)
+		}
+		if tooManyCases {
+			return states
+		}
+		if futureSafe == nil {
+			futureSafe = make([]bool, len(parts)+1)
+			futureSafe[len(parts)] = true
+			for at := len(parts) - 1; at >= 0; at-- {
+				futureSafe[at] = simplePartCompactionSafe(parts[at]) && futureSafe[at+1]
+			}
+		}
+		return compactSimpleStatesForFuture(states, parts[index:], futureSafe[index])
+	}
 	if !reduced && len(parts) == 1 {
 		file, parsed := shellparse.Parse(parts[0].text)
 		if !parsed || len(file.Stmts) != 1 {
@@ -152,7 +175,7 @@ func simpleCommands(input Input, facts Facts, depth int, interpreter string) []S
 	changed := reduced || len(parts) != 1
 	unproven := false
 	previousScope := "0"
-	for _, part := range parts {
+	for partIndex, part := range parts {
 		// A conditional or loop body runs in its parent's shell when selected.
 		// Keep both its resulting state and the path that skipped the body.
 		for previousScope != part.scope && !strings.HasPrefix(part.scope, previousScope+"/") {
@@ -173,6 +196,12 @@ func simpleCommands(input Input, facts Facts, depth int, interpreter string) []S
 				if ran {
 					states[parent] = uniqueSimpleStates(simpleEndFunctionBody(body, previousScope))
 				}
+			}
+			// A pipeline sibling may inherit from an ancestor when this
+			// scope has no state of its own. Do not install an empty entry:
+			// it would hide that inherited state from the next child.
+			if parentStates, present := states[parent]; present {
+				states[parent] = compact(parentStates, partIndex)
 			}
 			if len(states[parent]) > maxSimpleStates {
 				return []SimpleCommand{{EvaluationFailure: "limit"}}
@@ -371,7 +400,7 @@ func simpleCommands(input Input, facts Facts, depth int, interpreter string) []S
 			}
 			nextVariants = append(nextVariants, state)
 		}
-		states[part.scope] = uniqueSimpleStates(nextVariants)
+		states[part.scope] = compact(uniqueSimpleStates(nextVariants), partIndex+1)
 		if len(states[part.scope]) > maxSimpleStates {
 			return []SimpleCommand{{EvaluationFailure: "limit"}}
 		}
@@ -718,6 +747,91 @@ func uniqueSimpleStates(states []simpleShellState) []simpleShellState {
 		}
 	}
 	return result
+}
+
+// A branch may produce many distinct assignments that no later command
+// reads. Once the state cap is reached, merge states that differ only in
+// those dead values. Keep shell control variables, and leave indirect name
+// lookup and code evaluation to the existing fail-closed state bound.
+func compactSimpleStatesForFuture(states []simpleShellState, remaining []sequenceStatement, safe bool) []simpleShellState {
+	if !safe {
+		return states
+	}
+	var future strings.Builder
+	for _, part := range remaining {
+		future.WriteString(part.text)
+		future.WriteByte('\n')
+	}
+	text := future.String()
+	for i, state := range states {
+		state = state.clone()
+		for name := range state.vars {
+			switch name {
+			case "HOME", "PWD", "OLDPWD", "IFS", "PATH", "BASH_ENV", "ENV", "SHELLOPTS", "BASHOPTS", "CDPATH", "GLOBIGNORE":
+				continue
+			}
+			if !strings.Contains(text, name) {
+				delete(state.vars, name)
+			}
+		}
+		states[i] = state
+	}
+	return uniqueSimpleStates(states)
+}
+
+func simplePartCompactionSafe(part sequenceStatement) bool {
+	file, ok := shellparse.Parse(part.text)
+	if !ok {
+		return false
+	}
+	indirect := false
+	syntax.Walk(file, func(node syntax.Node) bool {
+		if indirect {
+			return false
+		}
+		switch node := node.(type) {
+		case *syntax.ParamExp:
+			indirect = node.Excl || node.NestedParam != nil || node.Flags != nil
+		case *syntax.CmdSubst, *syntax.ProcSubst, *syntax.ArithmExp, *syntax.ArithmCmd, *syntax.LetClause, *syntax.FuncDecl:
+			indirect = true
+		case *syntax.CallExpr:
+			if len(node.Args) > 0 {
+				program, fixed := simpleStaticProgramWord(node.Args[0], nil)
+				if !fixed {
+					indirect = true
+				} else {
+					switch program {
+					case ":", "[", "test", "true", "false", "echo", "cp", "gcp":
+					default:
+						indirect = true
+					}
+				}
+			}
+		}
+		return !indirect
+	})
+	return !indirect
+}
+
+// Longer case chains retain the original state bound. Repeatedly merging
+// their candidate sets costs more than the bounded analysis is allowed to
+// spend, while the ordinary six-option script stays within this limit.
+func simpleTooManyCompactionCases(source string) bool {
+	if !strings.Contains(source, "case") {
+		return false
+	}
+	file, ok := shellparse.Parse(source)
+	if !ok {
+		return true
+	}
+	cases := 0
+	syntax.Walk(file, func(node syntax.Node) bool {
+		if _, ok := node.(*syntax.CaseClause); ok {
+			cases++
+		}
+		return cases <= maxCompactionCases
+	})
+	return cases > maxCompactionCases
 }
 
 // updateSimpleDeclVariables applies a HOME=value word of an export,
