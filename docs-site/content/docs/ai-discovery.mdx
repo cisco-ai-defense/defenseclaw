@@ -1052,6 +1052,15 @@ On Windows, a LocalSystem gateway cannot read configured user-profile MCP
 files. That collection remains partial until a per-user source provides them;
 the gateway does not replace the last complete cloud snapshot with an empty one.
 
+Local MCP component records include the server name, safe command basename,
+transport, connector, native configuration scope when known, and the discovery
+source. When the gateway has its installation token, it also exports separate
+keyed HMAC fingerprints of the full command and ordered arguments. The token
+never leaves the gateway through these fields; raw command paths, arguments,
+environment variables, headers, and OAuth material are not exported. A gateway
+token rotation changes these fingerprints, while the existing component ID and
+endpoint relationship remain unchanged.
+
 The release-owned managed agent, connector, MCP, skill, and plugin inventory
 actions are blocked from operator-configured remote destinations. Mandatory
 SQLite remains authoritative locally, and the generated CMID-authenticated AI

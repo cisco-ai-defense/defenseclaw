@@ -83,6 +83,9 @@ type endpointInventoryComponent struct {
 	connectorSubprocessPolicy   string
 	mcpTransport                string
 	mcpCommandBasename          string
+	mcpCommandFingerprint       string
+	mcpArgumentsFingerprint     string
+	mcpSourceScope              string
 	mcpURLHost                  string
 	mcpAuthProviderType         string
 	mcpDisabled                 *bool
@@ -350,6 +353,7 @@ func perConnectorMCPEntriesForOSWithHomeGuard(cfg *config.Config, reg *connector
 		return nil, false
 	}
 	partial := false
+	fingerprintKey := mcpInventoryFingerprintKey(cfg)
 	// homes = daemon's own HOME (via ReadMCPServersForConnector) plus every
 	// configured user home (via direct-path readers). Empty homes list falls
 	// back to the single ReadMCPServersForConnector path.
@@ -377,6 +381,7 @@ func perConnectorMCPEntriesForOSWithHomeGuard(cfg *config.Config, reg *connector
 		owner := ownerFor(connectorName, home)
 		for _, server := range servers {
 			command := inventorySafeBasename(server.Command)
+			commandFingerprint, argumentsFingerprint := mcpInventoryLocalFingerprints(fingerprintKey, server)
 			host := mcpURLHost(server.URL)
 			name := inventorySafeItemName(server.Name, 256)
 			if name == "" {
@@ -405,23 +410,26 @@ func perConnectorMCPEntriesForOSWithHomeGuard(cfg *config.Config, reg *connector
 			// Hyphen (not underscore) in the id kind to satisfy the
 			// defenseclaw.ai.component.id pattern.
 			components = append(components, endpointInventoryComponent{
-				id:                  endpointInventoryComponentID("mcp-entry", identity),
-				componentType:       "mcp_server",
-				signal:              "configured_mcp_server",
-				product:             product,
-				active:              !disabled,
-				itemName:            name,
-				mcpTransport:        inventoryStableToken(server.Transport, 64),
-				mcpCommandBasename:  command,
-				mcpURLHost:          host,
-				mcpAuthProviderType: inventoryStableToken(server.AuthProviderType, 64),
-				mcpDisabled:         &disabled,
-				agentConnector:      slug,
-				agentInstalled:      &installed,
-				userID:              owner.ID,
-				userIDKind:          owner.IDKind,
-				userName:            owner.Name,
-				userEmail:           owner.Email,
+				id:                      endpointInventoryComponentID("mcp-entry", identity),
+				componentType:           "mcp_server",
+				signal:                  "configured_mcp_server",
+				product:                 product,
+				active:                  !disabled,
+				itemName:                name,
+				mcpTransport:            inventoryStableToken(server.Transport, 64),
+				mcpCommandBasename:      command,
+				mcpCommandFingerprint:   commandFingerprint,
+				mcpArgumentsFingerprint: argumentsFingerprint,
+				mcpSourceScope:          inventoryStableToken(server.SourceScope, 64),
+				mcpURLHost:              host,
+				mcpAuthProviderType:     inventoryStableToken(server.AuthProviderType, 64),
+				mcpDisabled:             &disabled,
+				agentConnector:          slug,
+				agentInstalled:          &installed,
+				userID:                  owner.ID,
+				userIDKind:              owner.IDKind,
+				userName:                owner.Name,
+				userEmail:               owner.Email,
 			})
 		}
 	}
@@ -827,13 +835,14 @@ func endpointMCPComponents(cfg *config.Config) ([]endpointInventoryComponent, bo
 		// path or parser error.
 		return nil, true
 	}
-	return endpointMCPComponentsFromServers(servers), false
+	return endpointMCPComponentsFromServers(servers, mcpInventoryFingerprintKey(cfg)), false
 }
 
-func endpointMCPComponentsFromServers(servers []config.MCPServerEntry) []endpointInventoryComponent {
+func endpointMCPComponentsFromServers(servers []config.MCPServerEntry, fingerprintKey []byte) []endpointInventoryComponent {
 	components := make([]endpointInventoryComponent, 0, len(servers))
 	for _, server := range servers {
 		command := inventorySafeBasename(server.Command)
+		commandFingerprint, argumentsFingerprint := mcpInventoryLocalFingerprints(fingerprintKey, server)
 		host := mcpURLHost(server.URL)
 		name := inventorySafeItemName(server.Name, 256)
 		product := inventoryStableIdentifier(name)
@@ -849,17 +858,20 @@ func endpointMCPComponentsFromServers(servers []config.MCPServerEntry) []endpoin
 		}
 		disabled := server.Disabled
 		components = append(components, endpointInventoryComponent{
-			id:                  endpointInventoryComponentID("mcp", identity),
-			componentType:       "mcp_server",
-			signal:              "configured_mcp_server",
-			product:             product,
-			active:              !disabled,
-			itemName:            name,
-			mcpTransport:        inventoryStableToken(server.Transport, 64),
-			mcpCommandBasename:  command,
-			mcpURLHost:          host,
-			mcpAuthProviderType: inventoryStableToken(server.AuthProviderType, 64),
-			mcpDisabled:         &disabled,
+			id:                      endpointInventoryComponentID("mcp", identity),
+			componentType:           "mcp_server",
+			signal:                  "configured_mcp_server",
+			product:                 product,
+			active:                  !disabled,
+			itemName:                name,
+			mcpTransport:            inventoryStableToken(server.Transport, 64),
+			mcpCommandBasename:      command,
+			mcpCommandFingerprint:   commandFingerprint,
+			mcpArgumentsFingerprint: argumentsFingerprint,
+			mcpSourceScope:          inventoryStableToken(server.SourceScope, 64),
+			mcpURLHost:              host,
+			mcpAuthProviderType:     inventoryStableToken(server.AuthProviderType, 64),
+			mcpDisabled:             &disabled,
 		})
 	}
 	return components
@@ -1024,10 +1036,13 @@ func endpointInventoryCarrierFor(
 			}
 			identifiers = append(identifiers, observability.TelemetryStructuredDefenseClawInventoryMcpIdentifier{
 				Name: component.itemName, URLHost: aiDiscoveryV8OptionalText(component.mcpURLHost),
+				CommandFingerprint:   aiDiscoveryV8OptionalText(component.mcpCommandFingerprint),
+				ArgumentsFingerprint: aiDiscoveryV8OptionalText(component.mcpArgumentsFingerprint),
 			})
 			metadata = append(metadata, observability.TelemetryStructuredDefenseClawInventoryMcpMetadataItem{
 				Transport:        aiDiscoveryV8OptionalText(component.mcpTransport),
 				CommandBasename:  aiDiscoveryV8OptionalText(component.mcpCommandBasename),
+				SourceScope:      aiDiscoveryV8OptionalText(component.mcpSourceScope),
 				AuthProviderType: aiDiscoveryV8OptionalText(component.mcpAuthProviderType),
 				Disabled:         *component.mcpDisabled,
 			})
@@ -1209,6 +1224,9 @@ func emitEndpointInventoryComponent(
 			DefenseClawInventoryConnectorSubprocessPolicy:   aiDiscoveryV8OptionalText(component.connectorSubprocessPolicy),
 			DefenseClawInventoryMcpTransport:                aiDiscoveryV8OptionalText(component.mcpTransport),
 			DefenseClawInventoryMcpCommandBasename:          aiDiscoveryV8OptionalText(component.mcpCommandBasename),
+			DefenseClawInventoryMcpCommandFingerprint:       aiDiscoveryV8OptionalText(component.mcpCommandFingerprint),
+			DefenseClawInventoryMcpArgumentsFingerprint:     aiDiscoveryV8OptionalText(component.mcpArgumentsFingerprint),
+			DefenseClawInventoryMcpSourceScope:              aiDiscoveryV8OptionalText(component.mcpSourceScope),
 			DefenseClawInventoryMcpURLHost:                  aiDiscoveryV8OptionalText(component.mcpURLHost),
 			DefenseClawInventoryMcpAuthProviderType:         aiDiscoveryV8OptionalText(component.mcpAuthProviderType),
 			DefenseClawInventoryMcpDisabled:                 inventoryOptionalBool(component.mcpDisabled),

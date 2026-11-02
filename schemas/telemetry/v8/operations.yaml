@@ -2063,6 +2063,54 @@ attributes:
       pattern: '^[A-Za-z0-9][A-Za-z0-9._+@-]*$'
     notes: Conservative executable basename only; command arguments and shell syntax are forbidden
   introduced_in: telemetry-registry-v1
+- id: defenseclaw.inventory.mcp.command_fingerprint
+  type: string
+  brief: Keyed fingerprint of the full configured local MCP command
+  examples: ['hmac-sha256:0000000000000000000000000000000000000000000000000000000000000000']
+  stability: stable
+  owner: defenseclaw
+  field_class: identifier
+  sensitivity: internal
+  cardinality: bounded
+  normalization:
+    id: bounded-v1
+    overrides:
+      max_utf8_bytes: 76
+      pattern: '^hmac-sha256:[0-9a-f]{64}$'
+    notes: Per-installation keyed digest; raw command paths are never exported
+  introduced_in: telemetry-registry-v1
+- id: defenseclaw.inventory.mcp.arguments_fingerprint
+  type: string
+  brief: Keyed fingerprint of ordered local MCP arguments
+  examples: ['hmac-sha256:0000000000000000000000000000000000000000000000000000000000000000']
+  stability: stable
+  owner: defenseclaw
+  field_class: identifier
+  sensitivity: internal
+  cardinality: bounded
+  normalization:
+    id: bounded-v1
+    overrides:
+      max_utf8_bytes: 76
+      pattern: '^hmac-sha256:[0-9a-f]{64}$'
+    notes: Per-installation keyed digest over ordered arguments; raw arguments are never exported
+  introduced_in: telemetry-registry-v1
+- id: defenseclaw.inventory.mcp.source_scope
+  type: string
+  brief: Bounded native configuration scope for the MCP server
+  examples: [user]
+  stability: stable
+  owner: defenseclaw
+  field_class: metadata
+  sensitivity: internal
+  cardinality: low
+  normalization:
+    id: bounded-v1
+    overrides:
+      max_utf8_bytes: 64
+      pattern: '^[a-z][a-z0-9_-]*$'
+    notes: Scope token only; source file paths are forbidden
+  introduced_in: telemetry-registry-v1
 - id: defenseclaw.inventory.mcp.url_host
   type: string
   brief: Host and optional port of the configured remote MCP URL
@@ -2161,8 +2209,8 @@ attributes:
   cardinality: bounded
   normalization:
     id: structured-content-v1
-    overrides: {max_utf8_bytes: 262144, max_item_utf8_bytes: 512, max_items: 768, max_depth: 2, max_properties: 512}
-    notes: Sealed typed array aligned by index with the MCP metadata section; flattened limits cover 256 two-property records
+    overrides: {max_utf8_bytes: 262144, max_item_utf8_bytes: 512, max_items: 1280, max_depth: 2, max_properties: 1024}
+    notes: Sealed typed array aligned by index with the MCP metadata section; flattened limits cover 256 four-property records
   introduced_in: telemetry-registry-v1
 - id: defenseclaw.inventory.mcp.metadata
   type: array
@@ -2175,8 +2223,8 @@ attributes:
   cardinality: bounded
   normalization:
     id: structured-content-v1
-    overrides: {max_utf8_bytes: 262144, max_item_utf8_bytes: 512, max_items: 1280, max_depth: 2, max_properties: 1024}
-    notes: Sealed typed array aligned by index with the MCP identifier section; flattened limits cover 256 four-property records
+    overrides: {max_utf8_bytes: 262144, max_item_utf8_bytes: 512, max_items: 1536, max_depth: 2, max_properties: 1280}
+    notes: Sealed typed array aligned by index with the MCP identifier section; flattened limits cover 256 five-property records
   introduced_in: telemetry-registry-v1
 - id: defenseclaw.inventory.agent.identifiers
   type: array
@@ -6382,6 +6430,12 @@ groups:
   - ref: defenseclaw.inventory.mcp.transport
     requirement_level: recommended
   - ref: defenseclaw.inventory.mcp.command_basename
+    requirement_level: recommended
+  - ref: defenseclaw.inventory.mcp.command_fingerprint
+    requirement_level: recommended
+  - ref: defenseclaw.inventory.mcp.arguments_fingerprint
+    requirement_level: recommended
+  - ref: defenseclaw.inventory.mcp.source_scope
     requirement_level: recommended
   - ref: defenseclaw.inventory.mcp.url_host
     requirement_level: recommended
