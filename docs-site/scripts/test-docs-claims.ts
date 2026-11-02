@@ -2738,3 +2738,17 @@ describe('1.0.7 ruled limits are visible on their affected pages (GAP-0539)', ()
     assert.match(page('enterprise/windows.mdx'), /### 1\.0\.7 purge limit/);
   });
 });
+
+describe('macOS account join key while the domain is away (rel-1-0-6:GAP-0447)', () => {
+  it('says the guardian keeps the last SID while the domain does not answer', () => {
+    const text = page('enterprise/account-join-key.mdx');
+    assert.ok(text.includes('While the domain does not answer (off the network, or the domain controller unreachable), it keeps the SID it last read, so the key does not change. An account the domain reports as gone loses its SID and its key.'),
+      'account-join-key.mdx no longer says the macOS SID is kept while the domain is away');
+    assert.ok(!text.includes('a macOS Active Directory account while its domain does not answer'),
+      'account-join-key.mdx again says a macOS AD account gets no key while its domain is away');
+    const go = source('internal/enterprisehooks/identity_spool_macos.go');
+    assert.ok(go.includes('func macOSNodeUnanswered(result macOSToolResult) bool') && go.includes('dsclExitRecordNotFound = 56') &&
+      go.includes('dsclExitNodeNotValid   = 69'),
+      'identity_spool_macos.go no longer separates an unreachable domain node (exit 69) from a definitive record-not-found (exit 56)');
+  });
+});

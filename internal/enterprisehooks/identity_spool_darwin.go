@@ -13,6 +13,7 @@
 package enterprisehooks
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
@@ -83,17 +84,28 @@ func FlushDirectoryCaches(ctx context.Context) error {
 	return errors.Join(errs...)
 }
 
-func runMacOSIdentityTool(ctx context.Context, timeout time.Duration, tool string, args ...string) string {
+// runMacOSIdentityTool runs a root-owned identity tool and returns its
+// bounded stdout and stderr and its exit code: the domain node read tells
+// an account gone from the domain (eDSRecordNotFound, on stderr) from a
+// domain that does not answer (macOSNodeUnanswered).
+func runMacOSIdentityTool(ctx context.Context, timeout time.Duration, tool string, args ...string) macOSToolResult {
 	if trustedIdentityTool(tool) == "" {
-		return ""
+		return macOSToolResult{Code: -1}
 	}
 	runCtx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
 	cmd := exec.CommandContext(runCtx, tool, args...)
 	cmd.Env = []string{"PATH=/usr/bin:/bin:/usr/sbin:/sbin", "LC_ALL=C"}
+	var stderr bytes.Buffer
+	cmd.Stderr = &stderr
 	out, err := cmd.Output()
-	if err != nil && len(out) == 0 {
-		return ""
+	result := macOSToolResult{Stdout: boundedOutput(out), Stderr: boundedOutput(stderr.Bytes())}
+	if err != nil {
+		result.Code = -1
+		var exit *exec.ExitError
+		if errors.As(err, &exit) && runCtx.Err() == nil {
+			result.Code = exit.ExitCode()
+		}
 	}
-	return boundedOutput(out)
+	return result
 }

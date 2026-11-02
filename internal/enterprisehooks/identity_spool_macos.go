@@ -32,9 +32,26 @@ const (
 	macOSDirectoryNodeReadTimeout = 3 * time.Second
 )
 
-// macOSIdentityRunner runs a root-owned macOS identity tool and returns its
-// bounded output, "" when it fails or gives none.
-type macOSIdentityRunner func(ctx context.Context, timeout time.Duration, tool string, args ...string) string
+// macOSToolResult is what a root-owned macOS identity tool gave: its bounded
+// stdout and stderr, and its exit code (-1 when it did not exit on its own:
+// not a root-owned tool, it did not start, or it timed out).
+type macOSToolResult struct {
+	Stdout string
+	Stderr string
+	Code   int
+}
+
+// macOSIdentityRunner runs a root-owned macOS identity tool.
+type macOSIdentityRunner func(ctx context.Context, timeout time.Duration, tool string, args ...string) macOSToolResult
+
+// The exit codes of dscl for a domain node read: 56 is Open Directory's
+// eDSRecordNotFound (the node answered: no such account), 69 a data source
+// that is not valid (the node is not reachable: the domain controller is
+// away).
+const (
+	dsclExitRecordNotFound = 56
+	dsclExitNodeNotValid   = 69
+)
 
 // macOSSearchAttributes are what the /Search read asks for.
 var macOSSearchAttributes = []string{"UniqueID", "AuthenticationAuthority", "OriginalNodeName", "AppleMetaNodeLocation",
@@ -46,9 +63,9 @@ func collectMacOSIdentityRecord(ctx context.Context, run macOSIdentityRunner, ac
 		return IdentitySpoolRecord{}, errors.New("account has no usable name")
 	}
 	in := useridentity.MacOSDirectoryInputs{
-		DSCL:       run(ctx, macOSIdentityToolTimeout, "/usr/bin/dscl", append([]string{"/Search", "-read", "/Users/" + name}, macOSSearchAttributes...)...),
-		DSConfigAD: run(ctx, macOSIdentityToolTimeout, "/usr/sbin/dsconfigad", "-show"),
-		AppSSO:     run(ctx, macOSIdentityToolTimeout, "/usr/bin/app-sso", "platform", "-s"),
+		DSCL:       run(ctx, macOSIdentityToolTimeout, "/usr/bin/dscl", append([]string{"/Search", "-read", "/Users/" + name}, macOSSearchAttributes...)...).Stdout,
+		DSConfigAD: run(ctx, macOSIdentityToolTimeout, "/usr/sbin/dsconfigad", "-show").Stdout,
+		AppSSO:     run(ctx, macOSIdentityToolTimeout, "/usr/bin/app-sso", "platform", "-s").Stdout,
 	}
 	if in.DSCL == "" {
 		return IdentitySpoolRecord{}, errors.New("dscl returned no record")
@@ -57,7 +74,7 @@ func collectMacOSIdentityRecord(ctx context.Context, run macOSIdentityRunner, ac
 		return IdentitySpoolRecord{}, err
 	}
 	facts := useridentity.ParseMacOSDirectoryFacts(in, now)
-	sid, unanswered := macOSAccountSID(facts, in.DSCL, account.UID, func(node string) string {
+	sid, unanswered := macOSAccountSID(facts, in.DSCL, account.UID, func(node string) macOSToolResult {
 		return run(ctx, macOSDirectoryNodeReadTimeout, "/usr/bin/dscl", node, "-read", "/Users/"+name, "UniqueID", "GeneratedUID", "SMBSID")
 	})
 	return IdentitySpoolRecord{
@@ -73,7 +90,7 @@ func collectMacOSIdentityRecord(ctx context.Context, run macOSIdentityRunner, ac
 
 // macOSAccountSID is the SID of a macOS Active Directory account, read from
 // its domain's node (read runs `dscl <node> -read /Users/<name> UniqueID
-// GeneratedUID SMBSID`): the record there must be the uid's
+// GeneratedUID SMBSID`): the record there (its stdout) must be the uid's
 // (checkMacOSRecordUID), carry a GeneratedUID the /Search answer names when
 // both have one, and name exactly one domain account SID. It gives none for
 // any other account or a record that does not match. unanswered reports an
@@ -81,7 +98,7 @@ func collectMacOSIdentityRecord(ctx context.Context, run macOSIdentityRunner, ac
 // whose SID from an earlier pass is kept (carryMacOSAccountSID). This is the
 // directory-verified identifier the account join key uses, as the SSSD SID
 // on Linux (rel-1-0-6:GAP-0275).
-func macOSAccountSID(facts useridentity.DirectoryFacts, search string, uid int, read func(node string) string) (sid string, unanswered bool) {
+func macOSAccountSID(facts useridentity.DirectoryFacts, search string, uid int, read func(node string) macOSToolResult) (sid string, unanswered bool) {
 	if facts.Directory != useridentity.DirectoryActiveDirectory {
 		return "", false
 	}
@@ -89,10 +106,11 @@ func macOSAccountSID(facts useridentity.DirectoryFacts, search string, uid int, 
 	if !ok {
 		return "", false
 	}
-	out := read(node)
-	if out == "" {
+	result := read(node)
+	if macOSNodeUnanswered(result) {
 		return "", true
 	}
+	out := result.Stdout
 	if checkMacOSRecordUID(out, uid) != nil {
 		return "", false
 	}
@@ -108,6 +126,37 @@ func macOSAccountSID(facts useridentity.DirectoryFacts, search string, uid int, 
 		return "", false
 	}
 	return sid, false
+}
+
+// macOSNodeUnanswered reports a domain node read that did not answer for the
+// account: no output (a timeout), or dscl's "Data source (<node>) is not
+// valid." on stdout with exit code 69, its answer at once while the domain
+// controller is unreachable. Read as an answer without a SID, that dropped
+// the SID of every Active Directory account and their account join keys
+// (rel-1-0-6:GAP-0447). Open Directory's eDSRecordNotFound (exit code 56,
+// the text on stderr, nothing on stdout) is a definitive answer: the account
+// is gone from the domain, and nothing is carried. Every other output is an
+// answer, read as before (a record without a UniqueID gives no SID).
+func macOSNodeUnanswered(result macOSToolResult) bool {
+	if result.Code == dsclExitNodeNotValid || macOSNodeNotValid(result.Stdout) {
+		return true
+	}
+	if result.Code == dsclExitRecordNotFound || strings.Contains(result.Stderr, "eDSRecordNotFound") {
+		return false
+	}
+	return strings.TrimSpace(result.Stdout) == ""
+}
+
+// macOSNodeNotValid reports dscl's "Data source (<node>) is not valid." line,
+// at the start of a line (an attribute value is indented or follows its key).
+func macOSNodeNotValid(stdout string) bool {
+	for _, line := range strings.Split(stdout, "\n") {
+		line = strings.TrimRight(line, " \r")
+		if strings.HasPrefix(line, "Data source (") && strings.HasSuffix(line, ") is not valid.") {
+			return true
+		}
+	}
+	return false
 }
 
 // carryMacOSAccountSID keeps the SID of the account's previous record when
