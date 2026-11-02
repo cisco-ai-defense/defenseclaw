@@ -374,6 +374,97 @@ func HermesV4ATargets(body string) ([]HermesPatchTarget, bool) {
 	return targets, true
 }
 
+// HermesNoEffectPatchTargets identifies patch calls Hermes refuses before a
+// file operation. It retains any named target for the gateway's ordinary
+// write-target check, so a protected name or link keeps its verdict. Calls
+// with ambiguous syntax remain unverified.
+func HermesNoEffectPatchTargets(args json.RawMessage) ([]string, bool) {
+	fields, ok := hermesWriteFields(args)
+	if !ok {
+		return nil, false
+	}
+	for key := range fields {
+		if key != "mode" && key != "patch" {
+			return nil, false
+		}
+	}
+	body, present := fields["patch"]
+	var patch string
+	if present && json.Unmarshal(body, &patch) != nil {
+		return nil, false
+	}
+	mode := "replace"
+	if raw, present := fields["mode"]; present {
+		if json.Unmarshal(raw, &mode) != nil {
+			return nil, false
+		}
+	}
+	if mode == "replace" {
+		// Without mode, Hermes defaults to replace, which requires path,
+		// old_string and new_string. A lone V4A patch body supplies none.
+		if _, explicit := fields["mode"]; explicit || !present {
+			return nil, false
+		}
+		targets, parsed := HermesV4ATargets(patch)
+		if !parsed {
+			return nil, false
+		}
+		paths := make([]string, 0, len(targets))
+		for _, target := range targets {
+			paths = append(paths, target.Path)
+		}
+		return paths, true
+	}
+	if mode != "patch" {
+		return nil, false
+	}
+	if !present || patch == "" {
+		return nil, true
+	}
+	raw := strings.Split(patch, "\n")
+	lines := make([]string, len(raw))
+	for i := range raw {
+		lines[i] = strings.TrimSuffix(raw[i], "\r")
+	}
+	start, end := -1, len(lines)
+	for i, line := range lines {
+		if hermesV4ABegin.MatchString(line) {
+			start = i
+		} else if hermesV4AEnd.MatchString(line) {
+			end = i
+			break
+		}
+	}
+	var update string
+	count := 0
+	for _, line := range lines[start+1 : end] {
+		for _, op := range hermesV4AOps {
+			groups := op.re.FindStringSubmatch(line)
+			if groups == nil {
+				continue
+			}
+			count++
+			if op.re == hermesV4AOps[0].re {
+				update = hermesStrip(groups[1])
+			}
+			break
+		}
+	}
+	if count == 0 {
+		// Plain text, an empty envelope and a unified diff have no V4A
+		// operation headers for Hermes to execute.
+		return nil, true
+	}
+	if count == 1 && update != "" && hermesPlainPath(update) && !hermesTraversal(update) {
+		if _, parsed := HermesV4ATargets(patch); !parsed {
+			// A sole Update without a hunk is rejected before the file is
+			// opened. Other invalid operation shapes remain unverified.
+			return []string{update}, true
+		}
+	}
+	return nil, false
+}
+
 // hermesV4ATargets is HermesV4ATargets with the "+" lines of each Add: the
 // lines up to the next operation header that start with "+", read on the
 // line as Hermes splits it (at "\n" only, so a "\r" before it is kept).

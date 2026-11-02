@@ -98,3 +98,53 @@ func TestCertfixGAP0488HermesV4AHiddenHome(t *testing.T) {
 		})
 	}
 }
+
+// Hermes refuses a patch with no executable V4A operation. The managed
+// gateway still checks a named target before permitting that refusal.
+func TestCertfixGAP0488HermesNoEffectPatchHiddenHome(t *testing.T) {
+	home, project := hermesPatchHome(t)
+	parent := filepath.Dir(home)
+	keys := filepath.Join(home, ".ssh", "authorized_keys")
+	if err := os.Symlink(keys, filepath.Join(project, "keylink")); err != nil {
+		t.Fatal(err)
+	}
+	for _, row := range []struct {
+		name string
+		args map[string]any
+		want string
+	}{
+		{"plain-text", map[string]any{"mode": "patch", "patch": "hello world"}, "allow"},
+		{"empty", map[string]any{"mode": "patch", "patch": ""}, "allow"},
+		{"mode-only", map[string]any{"mode": "patch"}, "allow"},
+		{"empty-envelope", map[string]any{"mode": "patch", "patch": "*** Begin Patch\n*** End Patch\n"}, "allow"},
+		{"unified-diff", map[string]any{"mode": "patch", "patch": "--- a/report.txt\n+++ b/report.txt\n@@ -1 +1 @@\n-a\n+b\n"}, "allow"},
+		{"no-hunk-update", map[string]any{"mode": "patch", "patch": "*** Begin Patch\n*** Update File: report.txt\n*** End Patch"}, "allow"},
+		{"no-mode-v4a", map[string]any{"patch": hermesV4AUpdate("report.txt")}, "allow"},
+		{"plain-protected-name", map[string]any{"mode": "patch", "patch": "hello authorized_keys"}, "block"},
+		{"no-hunk-link", map[string]any{"mode": "patch", "patch": "*** Begin Patch\n*** Update File: keylink\n*** End Patch"}, "block"},
+		{"no-mode-link", map[string]any{"patch": hermesV4AUpdate("keylink")}, "block"},
+	} {
+		t.Run(row.name, func(t *testing.T) {
+			body := hermesPatchBody(t, project, "patch", row.args)
+			header := hookpaths.ResolveConnector("hermes", "", "pre_tool_call", []byte(body))
+			if err := os.Chmod(parent, 0); err != nil {
+				t.Fatal(err)
+			}
+			defer os.Chmod(parent, 0o700)
+			cfg := &config.Config{}
+			cfg.Guardrail.Mode = "action"
+			cfg.Guardrail.Connector = "hermes"
+			api := &APIServer{scannerCfg: cfg, health: NewSidecarHealth()}
+			req := httptest.NewRequest(http.MethodPost, "/api/v1/hermes/hook", strings.NewReader(body))
+			req.Header.Set("Content-Type", "application/json")
+			req.Header.Set(hookpaths.Header, header)
+			req = req.WithContext(withManagedHookPeer(req.Context(), managedHookPeer{Home: home}))
+			recorder := httptest.NewRecorder()
+			api.handleAgentHook("hermes").ServeHTTP(recorder, req)
+			got := hermesOutcome(t, recorder.Body.String())
+			if got.action != row.want {
+				t.Fatalf("%s = %s, want %s", row.name, got, row.want)
+			}
+		})
+	}
+}

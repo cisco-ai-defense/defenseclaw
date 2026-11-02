@@ -17,6 +17,7 @@ import (
 	"unicode/utf8"
 
 	"github.com/defenseclaw/defenseclaw/internal/actionfacts"
+	"github.com/defenseclaw/defenseclaw/internal/gateway/connector"
 	"github.com/defenseclaw/defenseclaw/internal/hookpaths"
 	"github.com/defenseclaw/defenseclaw/internal/lazyregexp"
 	"github.com/defenseclaw/defenseclaw/internal/shellparse"
@@ -1602,6 +1603,23 @@ func trustedExistingAuthorizedKeysSymlinkWrite(request trustedActionRequest, fac
 		}
 	}
 	if !patchKnown {
+		if request.Connector == "hermes" && request.Input.Tool == "apply_patch" {
+			original := json.RawMessage(request.LegacyText)
+			if targets, noEffect := connector.HermesNoEffectPatchTargets(original); noEffect {
+				// Hermes rejects these calls before opening a file. Keep the
+				// old refusal for a protected name or a link the hook resolved
+				// to one, including a no-hunk Update's named target.
+				if hookpaths.PatchCallNamesProtectedTarget("apply_patch", original, "", clientCWD, facts.ActiveHome, clientTargets) {
+					return true
+				}
+				for _, target := range targets {
+					if writeTarget(target, false, false) {
+						return true
+					}
+				}
+				return false
+			}
+		}
 		// Unknown targets (no readable envelope, apply_patch --help, a
 		// lookup of the program) reach the rule only when the call names a
 		// protected target: no protected-named word is never blocked

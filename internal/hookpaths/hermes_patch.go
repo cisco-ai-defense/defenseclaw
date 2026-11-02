@@ -57,8 +57,16 @@ func hermesV4AApplyPatchArgs(args json.RawMessage) (json.RawMessage, bool) {
 		return nil, false
 	}
 	var mode, patch string
-	if json.Unmarshal(fields["mode"], &mode) != nil || mode != "patch" ||
-		json.Unmarshal(fields["patch"], &patch) != nil || patch == "" {
+	if raw, present := fields["mode"]; present {
+		if json.Unmarshal(raw, &mode) != nil || mode != "patch" {
+			return nil, false
+		}
+	} else if len(fields) != 1 {
+		// A lone V4A body without mode defaults to replace in Hermes,
+		// which rejects it. The gateway still checks its named paths.
+		return nil, false
+	}
+	if json.Unmarshal(fields["patch"], &patch) != nil || patch == "" {
 		return nil, false
 	}
 	encoded, err := json.Marshal(map[string]string{"patch": patch})

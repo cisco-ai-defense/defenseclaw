@@ -195,9 +195,6 @@ func TestHermesUnverifiablePatchCallsAreBlocked(t *testing.T) {
 		"unknown mode":      {"mode": "diff", "path": "notes.txt", "old_string": "a", "new_string": "b"},
 		"path not a string": {"path": []any{"notes.txt"}, "old_string": "a", "new_string": "b"},
 		"no old string":     {"path": "notes.txt", "new_string": "b"},
-		"empty body":        {"mode": "patch", "patch": ""},
-		"no operations":     {"mode": "patch", "patch": "*** Begin Patch\n*** End Patch\n"},
-		"update no hunk":    {"mode": "patch", "patch": "*** Begin Patch\n*** Update File: notes.txt\n*** End Patch\n"},
 		"body not a string": {"mode": "patch", "patch": []any{"*** Begin Patch"}},
 		"traversal":         {"mode": "patch", "patch": hermesV4A("*** Update File: ../.ssh/authorized_keys")},
 	} {
