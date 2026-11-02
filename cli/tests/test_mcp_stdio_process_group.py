@@ -19,16 +19,73 @@
 from __future__ import annotations
 
 import asyncio
+import errno
+import inspect
+import logging
 import os
 import signal
 import subprocess
 import sys
+import threading
 import time
 from pathlib import Path
 
 import pytest
 from defenseclaw.config import MCPScannerConfig, MCPServerEntry
 from defenseclaw.scanner.mcp import MCPScannerWrapper
+
+_STDIO_SERVER = """import json, os, signal, subprocess, sys
+child = subprocess.Popen(
+    [sys.executable, '-c', 'import signal, time; signal.signal(signal.SIGTERM, signal.SIG_IGN); time.sleep(300)'],
+    stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+)
+with open(os.environ['MCP_FIXTURE_CHILD_PID'], 'w') as output:
+    output.write(str(child.pid))
+with open(os.environ['MCP_FIXTURE_SERVER_PID'], 'w') as output:
+    output.write(str(os.getpid()))
+for line in sys.stdin:
+    message = json.loads(line)
+    if 'id' not in message:
+        continue
+    if message.get('method') == 'initialize':
+        result = {'protocolVersion': '2024-11-05', 'capabilities': {'tools': {}},
+                  'serverInfo': {'name': 'fixture', 'version': '1.0'}}
+    elif message.get('method') == 'server/discover':
+        print(json.dumps({'jsonrpc': '2.0', 'id': message['id'],
+                          'error': {'code': -32601, 'message': 'Method not found'}}), flush=True)
+        continue
+    elif message.get('method') == 'tools/list':
+        result = {'tools': [{'name': 'echo', 'description': 'Echo text',
+                            'inputSchema': {'type': 'object', 'properties': {}}}]}
+    else:
+        result = {}
+    print(json.dumps({'jsonrpc': '2.0', 'id': message['id'], 'result': result}), flush=True)
+if os.environ.get('MCP_FIXTURE_IGNORE_STDIN'):
+    signal.signal(signal.SIGTERM, signal.SIG_IGN)
+    while True:
+        signal.pause()
+"""
+
+
+def _fixture_entry(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, *, stuck: bool = False,
+) -> tuple[MCPServerEntry, Path]:
+    server = tmp_path / "server.py"
+    server.write_text(_STDIO_SERVER, encoding="utf-8")
+    launcher = tmp_path / "uvx"
+    launcher.write_text(f"#!/bin/sh\nexec '{sys.executable}' '{server}'\n", encoding="utf-8")
+    launcher.chmod(0o700)
+    child_pid_file = tmp_path / "child.pid"
+    monkeypatch.setenv("PATH", f"{tmp_path}{os.pathsep}{os.environ['PATH']}")
+    entry = MCPServerEntry(
+        name="fixture", command="uvx", args=["fixture-package"],
+        env={
+            "MCP_FIXTURE_CHILD_PID": str(child_pid_file),
+            "MCP_FIXTURE_SERVER_PID": str(tmp_path / "server.pid"),
+            "MCP_FIXTURE_IGNORE_STDIN": "1" if stuck else "",
+        },
+    )
+    return entry, child_pid_file
 
 
 def _running(pid: int) -> bool:
@@ -84,7 +141,7 @@ def test_cleanup_skips_reused_group_before_kill(monkeypatch: pytest.MonkeyPatch)
 
 
 @pytest.mark.skipif(os.name == "nt", reason="Windows uses a Job Object")
-@pytest.mark.parametrize("error_type", [PermissionError, ProcessLookupError])
+@pytest.mark.parametrize("error_type", [PermissionError, ProcessLookupError, OSError])
 @pytest.mark.parametrize("failed_signal", [signal.SIGTERM, signal.SIGKILL])
 def test_cleanup_signal_error_does_not_escape(
     monkeypatch: pytest.MonkeyPatch, failed_signal: int, error_type: type[OSError],
@@ -93,6 +150,7 @@ def test_cleanup_signal_error_does_not_escape(
 
     pgid = 424242
     signals: list[int] = []
+    reports: list[str] = []
     monkeypatch.setattr(mcp.os, "getpid", lambda: pgid)
     monkeypatch.setattr(mcp.os, "getpgrp", lambda: pgid)
     monkeypatch.setattr(mcp.time, "sleep", lambda _seconds: None)
@@ -103,7 +161,9 @@ def test_cleanup_signal_error_does_not_escape(
             raise error_type("simulated cleanup error")
 
     monkeypatch.setattr(mcp.os, "killpg", signal_group)
-    mcp._terminate_mcp_posix_group(pgid)
+    mcp._terminate_mcp_posix_group(pgid, report_error=reports.append)
+    assert len(reports) == 1
+    assert signal.Signals(failed_signal).name in reports[0]
     if failed_signal == signal.SIGTERM and error_type is ProcessLookupError:
         assert signals == [signal.SIGTERM]
     else:
@@ -118,50 +178,8 @@ def test_local_stdio_scan_ends_child_on_success_or_timeout(
     mcpscanner = pytest.importorskip("mcpscanner")
     from mcpscanner.core.models import AnalyzerEnum
 
-    server = tmp_path / "server.py"
-    server.write_text(
-        """import json, os, signal, subprocess, sys
-child = subprocess.Popen(
-    [sys.executable, '-c', 'import signal, time; signal.signal(signal.SIGTERM, signal.SIG_IGN); time.sleep(300)'],
-    stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-)
-with open(os.environ['MCP_FIXTURE_CHILD_PID'], 'w') as output:
-    output.write(str(child.pid))
-for line in sys.stdin:
-    message = json.loads(line)
-    if 'id' not in message:
-        continue
-    if message.get('method') == 'initialize':
-        result = {'protocolVersion': '2024-11-05', 'capabilities': {'tools': {}},
-                  'serverInfo': {'name': 'fixture', 'version': '1.0'}}
-    elif message.get('method') == 'server/discover':
-        print(json.dumps({'jsonrpc': '2.0', 'id': message['id'],
-                          'error': {'code': -32601, 'message': 'Method not found'}}), flush=True)
-        continue
-    elif message.get('method') == 'tools/list':
-        result = {'tools': [{'name': 'echo', 'description': 'Echo text',
-                            'inputSchema': {'type': 'object', 'properties': {}}}]}
-    else:
-        result = {}
-    print(json.dumps({'jsonrpc': '2.0', 'id': message['id'], 'result': result}), flush=True)
-if os.environ.get('MCP_FIXTURE_IGNORE_STDIN'):
-    signal.signal(signal.SIGTERM, signal.SIG_IGN)
-    while True:
-        signal.pause()
-""",
-        encoding="utf-8",
-    )
-    launcher = tmp_path / "uvx"
-    launcher.write_text(f"#!/bin/sh\nexec '{sys.executable}' '{server}'\n", encoding="utf-8")
-    launcher.chmod(0o700)
-    child_pid_file = tmp_path / "child.pid"
-    monkeypatch.setenv("PATH", f"{tmp_path}{os.pathsep}{os.environ['PATH']}")
-    entry = MCPServerEntry(
-        name="fixture", command="uvx", args=["fixture-package"],
-        env={
-            "MCP_FIXTURE_CHILD_PID": str(child_pid_file),
-            "MCP_FIXTURE_IGNORE_STDIN": "1" if mode == "server-stuck" else "",
-        },
+    entry, child_pid_file = _fixture_entry(
+        tmp_path, monkeypatch, stuck=mode == "server-stuck",
     )
     if mode == "scan-timeout":
         class TimedOutScanner:
@@ -214,3 +232,152 @@ if os.environ.get('MCP_FIXTURE_IGNORE_STDIN'):
             child_pid = int(child_pid_file.read_text(encoding="ascii"))
             if _running(child_pid):
                 os.kill(child_pid, signal.SIGKILL)
+
+
+@pytest.mark.skipif(os.name == "nt", reason="Windows uses a Job Object")
+def test_group_signal_eperm_warns_once_and_keeps_scan_result(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture,
+) -> None:
+    mcpscanner = pytest.importorskip("mcpscanner")
+    from mcpscanner.core.models import AnalyzerEnum
+
+    # The guardian is a fresh interpreter. sitecustomize injects the reviewer's
+    # macOS-style group-signal denial there, without changing the scanner.
+    (tmp_path / "sitecustomize.py").write_text(
+        "import os, signal\n"
+        "original = os.killpg\n"
+        "def deny(pgid, sig):\n"
+        "    if sig in (signal.SIGTERM, signal.SIGKILL):\n"
+        "        raise PermissionError(1, 'injected EPERM')\n"
+        "    return original(pgid, sig)\n"
+        "os.killpg = deny\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("PYTHONPATH", str(tmp_path))
+    entry, child_pid_file = _fixture_entry(tmp_path, monkeypatch)
+    wrapper = MCPScannerWrapper(MCPScannerConfig(analyzers="yara"))
+    try:
+        with caplog.at_level(logging.WARNING, logger="defenseclaw.scanner.mcp"):
+            result = wrapper._scan_local(
+                mcpscanner.Scanner(mcpscanner.Config()), entry, [AnalyzerEnum.YARA],
+            )
+            assert result == []
+            deadline = time.monotonic() + 3
+            while not any("a child may still be running" in m for m in caplog.messages):
+                assert time.monotonic() < deadline, caplog.messages
+                time.sleep(0.02)
+        warnings = [m for m in caplog.messages if "a child may still be running" in m]
+        assert len(warnings) == 1
+        assert "fixture" in warnings[0] and "EPERM" in warnings[0]
+        assert _running(int(child_pid_file.read_text(encoding="ascii")))
+    finally:
+        for pid_file in (child_pid_file, tmp_path / "server.pid"):
+            if pid_file.exists():
+                pid = int(pid_file.read_text(encoding="ascii"))
+                if _running(pid):
+                    os.kill(pid, signal.SIGKILL)
+
+
+@pytest.mark.skipif(os.name == "nt", reason="Windows uses a Job Object")
+@pytest.mark.parametrize("write_fails", [False, True])
+def test_control_close_error_cannot_retain_child_or_reaper(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, write_fails: bool,
+) -> None:
+    mcpscanner = pytest.importorskip("mcpscanner")
+    from defenseclaw.scanner import mcp
+    from mcpscanner.core.models import AnalyzerEnum
+
+    entry, child_pid_file = _fixture_entry(tmp_path, monkeypatch)
+    wrapper = MCPScannerWrapper(MCPScannerConfig(analyzers="yara"))
+    def reaper_count() -> int:
+        return sum(t.name == "mcp-stdio-guardian-reaper" for t in threading.enumerate())
+
+    before_reapers = reaper_count()
+    original_pipe, original_write, original_close = os.pipe, os.write, os.close
+    control_fd: int | None = None
+    close_failed = False
+    guardians: list[subprocess.Popen[bytes]] = []
+    original_reap = mcp._reap_mcp_posix_guardian
+
+    def tracked_pipe() -> tuple[int, int]:
+        nonlocal control_fd
+        pipe = original_pipe()
+        if inspect.currentframe().f_back.f_code.co_name == "create":
+            control_fd = pipe[1]
+        return pipe
+
+    def fail_write(fd: int, data: bytes) -> int:
+        if write_fails and fd == control_fd:
+            raise OSError(errno.EIO, "injected control write error")
+        return original_write(fd, data)
+
+    def fail_close(fd: int) -> None:
+        nonlocal close_failed
+        if fd == control_fd:
+            close_failed = True
+            raise OSError(errno.EIO, "injected control close error")
+        original_close(fd)
+
+    def tracked_reap(guardian: subprocess.Popen[bytes], *args: object) -> None:
+        guardians.append(guardian)
+        original_reap(guardian, *args)
+
+    try:
+        with monkeypatch.context() as fault:
+            if write_fails:
+                fault.setattr(mcp, "_MCP_POSIX_GUARDIAN_MAX_AGE_SECONDS", 0.8)
+            fault.setattr(mcp.os, "pipe", tracked_pipe)
+            fault.setattr(mcp.os, "write", fail_write)
+            fault.setattr(mcp.os, "close", fail_close)
+            fault.setattr(mcp, "_reap_mcp_posix_guardian", tracked_reap)
+            result = wrapper._scan_local(
+                mcpscanner.Scanner(mcpscanner.Config()), entry, [AnalyzerEnum.YARA],
+            )
+        assert result == [] and close_failed and control_fd is not None
+        child_pid = int(child_pid_file.read_text(encoding="ascii"))
+        deadline = time.monotonic() + 3
+        while (_running(child_pid) or any(g.poll() is None for g in guardians)
+               or reaper_count() > before_reapers) and time.monotonic() < deadline:
+            time.sleep(0.02)
+        assert not _running(child_pid)
+        assert all(g.poll() is not None for g in guardians)
+        assert reaper_count() <= before_reapers
+    finally:
+        if control_fd is not None:
+            try:
+                original_close(control_fd)
+            except OSError:
+                pass
+        for pid_file in (child_pid_file, tmp_path / "server.pid"):
+            if pid_file.exists():
+                pid = int(pid_file.read_text(encoding="ascii"))
+                if _running(pid):
+                    os.kill(pid, signal.SIGKILL)
+
+
+@pytest.mark.skipif(os.name == "nt", reason="Windows uses a Job Object")
+def test_reaper_ends_guardian_that_misses_its_deadline(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    from defenseclaw.scanner import mcp
+
+    guardian = subprocess.Popen(
+        [sys.executable, "-c", "import time; time.sleep(300)"],
+        stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
+        process_group=0,
+    )
+    try:
+        with caplog.at_level(logging.WARNING, logger="defenseclaw.scanner.mcp"):
+            mcp._reap_mcp_posix_guardian(guardian, "fixture", 0.01)
+            deadline = time.monotonic() + 4
+            while guardian.poll() is None and time.monotonic() < deadline:
+                time.sleep(0.02)
+            assert guardian.poll() is not None
+            while not any("guardian exceeded cleanup deadline" in m for m in caplog.messages):
+                assert time.monotonic() < deadline, caplog.messages
+                time.sleep(0.02)
+        assert any("server 'fixture'" in m for m in caplog.messages)
+    finally:
+        if guardian.poll() is None:
+            guardian.kill()
+        guardian.wait(timeout=2)

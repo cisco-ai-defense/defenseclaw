@@ -34,6 +34,7 @@ import logging
 import ntpath
 import os
 import re
+import select
 import shutil
 import signal
 import subprocess
@@ -575,66 +576,147 @@ def _contained_mcp_windows_process_factory(started: list[object] | None = None) 
 
 _MCP_POSIX_PROCESS_FACTORY_LOCK = threading.Lock()
 _MCP_POSIX_GROUP_GRACE_SECONDS = 0.25
+_MCP_POSIX_GUARDIAN_MAX_AGE_SECONDS = 600.0
 _MCP_POSIX_SCANNER_PGID = os.getpgrp() if os.name != "nt" else -1
 
 
-def _terminate_mcp_posix_group(pgid: int, parent_pgid: int | None = None) -> None:
+def _terminate_mcp_posix_group(
+    pgid: int, parent_pgid: int | None = None,
+    report_error: Callable[[str], None] | None = None,
+) -> None:
     """Signal a group only while this process is its original leader."""
     if parent_pgid is None:
         parent_pgid = _MCP_POSIX_SCANNER_PGID
 
-    def owned() -> bool:
+    def owned(stage: str) -> bool:
         if pgid <= 1 or pgid == parent_pgid:
             return False
         try:
-            return os.getpid() == pgid and os.getpgrp() == pgid
-        except (PermissionError, ProcessLookupError) as exc:
-            _LOGGER.debug("MCP stdio group identity check failed: %s", exc)
+            same_group = os.getpid() == pgid and os.getpgrp() == pgid
+        except OSError as exc:
+            if report_error is not None:
+                report_error(f"identity before {stage}: {exc}")
             return False
+        if not same_group and report_error is not None:
+            report_error(f"group ownership lost before {stage}")
+        return same_group
 
-    if not owned():
+    if not owned("SIGTERM"):
         _LOGGER.debug("MCP stdio group %s is no longer owned; skipping TERM", pgid)
         return
     try:
         os.killpg(pgid, signal.SIGTERM)
-    except ProcessLookupError as exc:
-        _LOGGER.debug("MCP stdio group %s disappeared before TERM: %s", pgid, exc)
-        return
-    except PermissionError as exc:
-        _LOGGER.debug("MCP stdio group %s denied TERM: %s", pgid, exc)
+    except OSError as exc:
+        if report_error is not None:
+            report_error(f"SIGTERM: {exc}")
+        if isinstance(exc, ProcessLookupError):
+            return
 
     time.sleep(_MCP_POSIX_GROUP_GRACE_SECONDS)
-    if not owned():
+    if not owned("SIGKILL"):
         _LOGGER.debug("MCP stdio group %s is no longer owned; skipping KILL", pgid)
         return
     try:
         os.killpg(pgid, signal.SIGKILL)
-    except (PermissionError, ProcessLookupError) as exc:
-        _LOGGER.debug("MCP stdio group %s could not receive KILL: %s", pgid, exc)
+    except OSError as exc:
+        if report_error is not None:
+            report_error(f"SIGKILL: {exc}")
 
 
-def _mcp_posix_group_guardian(control_fd: int, parent_pgid: int) -> None:
-    """Keep the group ID reserved until the scan asks for bounded cleanup."""
+def _mcp_posix_group_guardian(
+    control_fd: int, parent_pgid: int, max_age_seconds: float,
+) -> None:
+    """Keep the group ID reserved until notification or an independent deadline."""
+    def report_error(message: str) -> None:
+        try:
+            os.write(sys.stdout.fileno(), (message[:512] + "\n").encode("utf-8"))
+        except OSError:
+            pass
+
     signal.signal(signal.SIGTERM, signal.SIG_IGN)
     try:
-        while os.read(control_fd, 1024):
-            pass
-    except OSError as exc:
-        _LOGGER.debug("MCP stdio group control pipe closed: %s", exc)
+        os.set_blocking(sys.stdout.fileno(), False)
+    except OSError:
+        pass
+    deadline = time.monotonic() + max_age_seconds
+    try:
+        while True:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                report_error("guardian deadline expired")
+                break
+            if select.select([control_fd], [], [], remaining)[0]:
+                # A byte requests cleanup immediately; EOF also handles caller exit.
+                os.read(control_fd, 1)
+                break
+    except (OSError, ValueError) as exc:
+        report_error(f"control pipe: {exc}")
     finally:
         try:
             os.close(control_fd)
+        except OSError:
+            pass
+    _terminate_mcp_posix_group(os.getpid(), parent_pgid, report_error)
+
+
+def _reap_mcp_posix_guardian(
+    guardian: subprocess.Popen[bytes], server_name: str,
+    max_age_seconds: float,
+) -> None:
+    """Reap with a deadline and report any incomplete group cleanup."""
+    def reap() -> None:
+        problems: list[str] = []
+        try:
+            guardian.wait(timeout=max_age_seconds + _MCP_POSIX_GROUP_GRACE_SECONDS + 2)
+        except subprocess.TimeoutExpired:
+            problems.append("guardian exceeded cleanup deadline")
+            try:
+                # wait() has not reaped the leader, so its PID cannot be
+                # recycled while this last group signal is attempted.
+                pgid = os.getpgid(guardian.pid)
+                if pgid == guardian.pid and pgid > 1 and pgid != _MCP_POSIX_SCANNER_PGID:
+                    os.killpg(pgid, signal.SIGKILL)
+                else:
+                    guardian.kill()
+            except OSError as exc:
+                problems.append(f"last group signal: {exc}")
+                try:
+                    guardian.kill()
+                except OSError:
+                    pass
+            try:
+                guardian.wait(timeout=1)
+            except (OSError, subprocess.TimeoutExpired) as exc:
+                problems.append(f"guardian reaping: {exc}")
         except OSError as exc:
-            _LOGGER.debug("MCP stdio group control pipe release failed: %s", exc)
-    _terminate_mcp_posix_group(os.getpid(), parent_pgid)
+            problems.append(f"guardian reaping: {exc}")
+        finally:
+            if guardian.stdout is not None:
+                try:
+                    if select.select([guardian.stdout], [], [], 0)[0]:
+                        report = os.read(guardian.stdout.fileno(), 4096).decode(
+                            "utf-8", errors="replace",
+                        ).strip()
+                        if report:
+                            problems.append(report.replace("\n", "; "))
+                except (OSError, ValueError) as exc:
+                    problems.append(f"cleanup report: {exc}")
+                guardian.stdout.close()
+            if not problems and guardian.returncode != -signal.SIGKILL:
+                problems.append(f"guardian exited with status {guardian.returncode}")
+            if problems:
+                _LOGGER.warning(
+                    "MCP stdio cleanup for server %r may be incomplete; "
+                    "a child may still be running (%s)", server_name, "; ".join(problems),
+                )
 
-
-def _reap_mcp_posix_guardian(guardian: subprocess.Popen[bytes]) -> None:
-    """Reap in the background without delaying a scan or process exit."""
     try:
-        threading.Thread(target=guardian.wait, daemon=True).start()
+        threading.Thread(target=reap, name="mcp-stdio-guardian-reaper", daemon=True).start()
     except (OSError, RuntimeError) as exc:
-        _LOGGER.debug("MCP stdio group guardian reaper unavailable: %s", exc)
+        _LOGGER.warning(
+            "MCP stdio cleanup for server %r may be incomplete; "
+            "a child may still be running (guardian reaper unavailable: %s)", server_name, exc,
+        )
 
 
 def _close_mcp_posix_control(fd: int) -> None:
@@ -645,7 +727,7 @@ def _close_mcp_posix_control(fd: int) -> None:
 
 
 @contextmanager
-def _contained_mcp_posix_process_factory() -> Iterator[None]:
+def _contained_mcp_posix_process_factory(server_name: str = "stdio server") -> Iterator[None]:
     """Track SDK stdio launches and end their groups on every scan exit."""
     import mcp.client.stdio as mcp_stdio
     from anyio._core._eventloop import get_async_backend
@@ -659,6 +741,10 @@ def _contained_mcp_posix_process_factory() -> Iterator[None]:
             return False
         if pid not in notified_groups:
             notified_groups.add(pid)
+            try:
+                os.write(group[1], b"x")
+            except OSError as exc:
+                _LOGGER.debug("MCP stdio group notification failed: %s", exc)
             _close_mcp_posix_control(group[1])
         return True
 
@@ -676,10 +762,12 @@ def _contained_mcp_posix_process_factory() -> Iterator[None]:
                     "/bin/sh", "-c", "trap '' TERM; exec \"$@\"", "mcp-group-guardian",
                     sys.executable, "-c",
                     "from defenseclaw.scanner.mcp import _mcp_posix_group_guardian as run; "
-                    "run(int(__import__('sys').argv[1]), int(__import__('sys').argv[2]))",
+                    "run(int(__import__('sys').argv[1]), int(__import__('sys').argv[2]), "
+                    "float(__import__('sys').argv[3]))",
                     str(control_read), str(os.getpgrp()),
+                    str(_MCP_POSIX_GUARDIAN_MAX_AGE_SECONDS),
                 ],
-                stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+                stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
                 stderr=subprocess.DEVNULL, pass_fds=(control_read,), process_group=0,
             )
         except BaseException:
@@ -687,7 +775,9 @@ def _contained_mcp_posix_process_factory() -> Iterator[None]:
             _close_mcp_posix_control(control_write)
             raise
         _close_mcp_posix_control(control_read)
-        _reap_mcp_posix_guardian(guardian)
+        _reap_mcp_posix_guardian(
+            guardian, server_name, _MCP_POSIX_GUARDIAN_MAX_AGE_SECONDS,
+        )
         try:
             # AnyIO's public open_process omits Python's process_group option;
             # its active backend forwards it to the same asyncio subprocess.
@@ -1945,7 +2035,7 @@ class MCPScannerWrapper:
                 scan_kwargs["analyzers"] = analyzers
 
             errors: list[tuple[str, str]] = []
-            with _contained_mcp_posix_process_factory(), _capture_sdk_error_logs(errors):
+            with _contained_mcp_posix_process_factory(entry.name), _capture_sdk_error_logs(errors):
                 results = asyncio.run(scanner.scan_mcp_config_file(**scan_kwargs))
 
             # Partition captured ERROR logs. An unreachable *LLM backend*
