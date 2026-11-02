@@ -503,8 +503,17 @@ func (w *InstallWatcher) enumerateTargets() []InstallEvent {
 		if _, err := os.Lstat(dir); errors.Is(err, os.ErrNotExist) {
 			continue
 		}
+		if !w.secureClientActive() {
+			if err := unlinkedSkillTreePath(dir, dir); err != nil {
+				fmt.Fprintf(os.Stderr, "[rescan] enumerate skills dir %s: %v\n", dir, err)
+				continue
+			}
+		}
 		if discover, trustBundled := hermesSkillsDiscover(dir); discover != nil {
 			entries, err := discover(dir, hermesskills.DefaultDirectoryLimit)
+			if !w.secureClientActive() && errors.Is(err, hermesskills.ErrDirectoryLimit) {
+				entries, err = discover(dir, hermesskills.FullScanDirectoryLimit)
+			}
 			if err == nil {
 				for _, entry := range entries {
 					if (entry.Bundled && trustBundled) || w.inSkillInstallStaging(dir, entry.Path, claudeStagingGrace) {
@@ -520,10 +529,32 @@ func (w *InstallWatcher) enumerateTargets() []InstallEvent {
 				}
 				continue
 			}
-			// Discovery errors deliberately fall through to the ordinary
-			// direct-child scan. Failure to prove vendor provenance must not
-			// turn an untrusted category tree into a scanner bypass.
 			fmt.Fprintf(os.Stderr, "[rescan] enumerate Hermes skills dir %s: %v\n", dir, err)
+			if !w.secureClientActive() {
+				// A category is not the identity of skills below it. Leave
+				// discovery pending for the next cycle if the full walk fails.
+				continue
+			}
+		}
+		if _, connector, recursive := w.recursiveSkillRoot(dir); recursive && connector == "cursor" {
+			paths, err := cursorSkillFolders(dir, dir)
+			if errors.Is(err, hermesskills.ErrDirectoryLimit) {
+				paths, err = cursorSkillFoldersFull(dir, dir)
+			}
+			if err == nil {
+				for _, skill := range paths {
+					if isBundledSkillWatchPath(skill) || w.inSkillInstallStaging(dir, skill, claudeStagingGrace) {
+						continue
+					}
+					targets = append(targets, InstallEvent{
+						Type: InstallSkill, Name: w.assetEventName(skill), Path: skill,
+						Connector: "cursor", Timestamp: time.Now().UTC(),
+					})
+				}
+				continue
+			}
+			fmt.Fprintf(os.Stderr, "[rescan] enumerate Cursor skills dir %s: %v\n", dir, err)
+			continue
 		}
 		entries, err := os.ReadDir(dir)
 		if err != nil {

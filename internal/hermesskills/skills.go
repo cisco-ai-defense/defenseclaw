@@ -40,10 +40,15 @@ import (
 const (
 	ManifestName          = ".bundled_manifest"
 	DefaultDirectoryLimit = 32768
-	manifestMaxBytes      = 2 * 1024 * 1024
-	markerMaxBytes        = 64 * 1024
-	maxSkillFileBytes     = 64 * 1024 * 1024
-	maxSkillTreeBytes     = 256 * 1024 * 1024
+	// FullScanDirectoryLimit is used after a bounded walk reaches its directory,
+	// entry, or depth budget. It keeps the same provenance checks while allowing
+	// the off-reader worker to finish the tree.
+	FullScanDirectoryLimit = int(^uint(0)>>1) / 8
+	DefaultDepthLimit      = 128
+	manifestMaxBytes       = 2 * 1024 * 1024
+	markerMaxBytes         = 64 * 1024
+	maxSkillFileBytes      = 64 * 1024 * 1024
+	maxSkillTreeBytes      = 256 * 1024 * 1024
 )
 
 var ErrDirectoryLimit = errors.New("Hermes skill discovery directory limit exceeded")
@@ -116,7 +121,7 @@ func Discover(root string, directoryLimit int) ([]Entry, error) {
 	if !canonicalPath(root) {
 		return nil, fmt.Errorf("Hermes skills root is linked or unavailable: %s", root)
 	}
-	return discover(root, directoryLimit)
+	return discover(root, root, directoryLimit)
 }
 
 // DiscoverProfileRoot is Discover for the Hermes skills root of a profile
@@ -131,15 +136,39 @@ func DiscoverProfileRoot(root string, directoryLimit int) ([]Entry, error) {
 	if !profileRootUnlinked(root) {
 		return nil, fmt.Errorf("Hermes skills root is linked or unavailable: %s", root)
 	}
-	return discover(root, directoryLimit)
+	return discover(root, root, directoryLimit)
+}
+
+// DiscoverUnder lists only the subtree named by a watcher directory event.
+// The manifest and bundle source still belong to the full profile root. This
+// keeps a move into an existing category from walking every installed skill.
+func DiscoverUnder(root, subtree string, directoryLimit int) ([]Entry, error) {
+	if !IsRoot(root) && !IsProfileRoot(root) {
+		return nil, fmt.Errorf("not a Hermes skills root: %s", root)
+	}
+	if !profileRootUnlinked(root) || !pathAtOrBelow(subtree, root) || samePath(subtree, root) {
+		return nil, fmt.Errorf("invalid Hermes skill subtree: %s", subtree)
+	}
+	for dir := filepath.Clean(subtree); !samePath(dir, root); dir = filepath.Dir(dir) {
+		if !plainDirectory(dir) {
+			return nil, fmt.Errorf("linked or unavailable Hermes skill subtree: %s", subtree)
+		}
+	}
+	return discover(root, subtree, directoryLimit)
+}
+
+// DiscoverUnderFull completes a moved-in subtree after the bounded walk hits
+// its budget. Callers run it off the event reader.
+func DiscoverUnderFull(root, subtree string) ([]Entry, error) {
+	return DiscoverUnder(root, subtree, FullScanDirectoryLimit)
 }
 
 // profileRootUnlinked is canonicalPath for a profile's skills root. The
 // managed Windows gateway runs as a virtual service account that is
 // granted read on the skills folder only, not list on the profile folders
 // above it, so resolving the path is denied and every user's Hermes skills
-// went unlisted (GAP-2263). On that denial the root itself must still be a
-// plain directory; the walk below it skips links.
+// went unlisted (GAP-2263). On that denial every existing ancestor must be
+// a plain directory too, or a linked profile parent could redirect the walk.
 func profileRootUnlinked(root string) bool {
 	absolute, err := filepath.Abs(filepath.Clean(root))
 	if err != nil {
@@ -152,7 +181,22 @@ func profileRootUnlinked(root string) bool {
 	if !errors.Is(err, fs.ErrPermission) {
 		return false
 	}
-	return plainDirectory(absolute)
+	return UnlinkedAncestors(absolute)
+}
+
+// UnlinkedAncestors checks every existing directory up to the volume root.
+// It is the no-link proof used when resolving a readable skills folder is
+// denied by permissions on one of its parents.
+func UnlinkedAncestors(path string) bool {
+	for dir := filepath.Clean(path); ; dir = filepath.Dir(dir) {
+		if !plainDirectory(dir) {
+			return false
+		}
+		parent := filepath.Dir(dir)
+		if parent == dir {
+			return true
+		}
+	}
 }
 
 func plainDirectory(path string) bool {
@@ -160,16 +204,23 @@ func plainDirectory(path string) bool {
 	return err == nil && info.IsDir() && info.Mode()&(os.ModeSymlink|os.ModeIrregular) == 0
 }
 
-func discover(root string, directoryLimit int) ([]Entry, error) {
+func discover(root, subtree string, directoryLimit int) ([]Entry, error) {
 	if directoryLimit <= 0 {
 		directoryLimit = DefaultDirectoryLimit
 	}
 	manifest := readManifest(root)
 	entries := make([]Entry, 0)
 	visited := 0
-	err := filepath.WalkDir(root, func(path string, entry os.DirEntry, walkErr error) error {
+	visitedEntries := 0
+	err := filepath.WalkDir(subtree, func(path string, entry os.DirEntry, walkErr error) error {
 		if walkErr != nil {
 			return walkErr
+		}
+		if !samePath(subtree, root) {
+			visitedEntries++
+			if visitedEntries > 8*directoryLimit {
+				return ErrDirectoryLimit
+			}
 		}
 		if entry.Type()&os.ModeSymlink != 0 {
 			if entry.IsDir() {
@@ -179,6 +230,10 @@ func discover(root string, directoryLimit int) ([]Entry, error) {
 		}
 		if !entry.IsDir() {
 			return nil
+		}
+		if !samePath(subtree, root) && directoryLimit != FullScanDirectoryLimit &&
+			strings.Count(path[len(subtree):], string(filepath.Separator)) > DefaultDepthLimit {
+			return ErrDirectoryLimit
 		}
 		visited++
 		if visited > directoryLimit {
