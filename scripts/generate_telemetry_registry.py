@@ -434,7 +434,7 @@ _GO_RESERVED_IDENTIFIERS: Final = frozenset(
         "uintptr",
     }
 )
-EXPECTED_AUTHORED_STRUCTURED_TYPES_SHA256: Final = "02a5ae18e025b79aae181259acb267665009348fd0398ce4c3092528bb83a756"
+EXPECTED_AUTHORED_STRUCTURED_TYPES_SHA256: Final = "b94cec828f969f73b69fe2882c6b65c272fedccec840a640abdd733c1be1361c"
 EXPECTED_MESSAGE_PART_VARIANTS: Final = (
     ("text", "gen_ai.text_part"),
     ("tool_call", "gen_ai.tool_call_request_part"),
@@ -512,6 +512,7 @@ EXPECTED_STRUCTURED_OBJECT_FIELDS: Final = {
     "defenseclaw.inventory.mcp_identifier": (
         ("name", True, "scalar", "string"),
         ("url_host", False, "scalar", "string"),
+            ("server_url", False, "scalar", "string"),
         ("command_fingerprint", False, "scalar", "string"),
         ("arguments_fingerprint", False, "scalar", "string"),
     ),
