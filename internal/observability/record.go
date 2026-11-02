@@ -974,6 +974,28 @@ func (record Record) IsFloorOnly() bool {
 }
 
 func (record Record) MarshalJSON() ([]byte, error) {
+	wire, err := record.CanonicalWire()
+	if err != nil {
+		return nil, err
+	}
+	encoded, err := marshalMinimalJSON(wire)
+	if err != nil {
+		return nil, err
+	}
+	if len(encoded) > MaxCanonicalRecordBytes {
+		return nil, fmt.Errorf("canonical record exceeds %d encoded bytes", MaxCanonicalRecordBytes)
+	}
+	return encoded, nil
+}
+
+// CanonicalWire is the member map MarshalJSON encodes, a new map for every
+// call: the values are copies (payloads are cloned), so a caller may replace
+// members. A serializer that rewrites some members (the redaction projection)
+// reads it instead of decoding the record's bytes; encoded with the same
+// encoder settings, each member gives the bytes the canonical record has for
+// it (rel-1-0-6 GAP-0381). It refuses a zero record as MarshalJSON does; it
+// does not check the encoded size.
+func (record Record) CanonicalWire() (map[string]any, error) {
 	if record.data.timestamp.IsZero() || record.data.recordID == "" {
 		return nil, fmt.Errorf("cannot marshal a zero or invalid canonical record")
 	}
@@ -1021,14 +1043,7 @@ func (record Record) MarshalJSON() ([]byte, error) {
 	if !record.data.instrumentData.IsZero() {
 		wire["instrument_data"] = record.data.instrumentData.Clone()
 	}
-	encoded, err := marshalMinimalJSON(wire)
-	if err != nil {
-		return nil, err
-	}
-	if len(encoded) > MaxCanonicalRecordBytes {
-		return nil, fmt.Errorf("canonical record exceeds %d encoded bytes", MaxCanonicalRecordBytes)
-	}
-	return encoded, nil
+	return wire, nil
 }
 
 func correlationWire(correlation Correlation) map[string]any {
