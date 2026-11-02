@@ -297,9 +297,14 @@ defenseclaw_harden_env() {
   # and on systems without mktemp every hook invocation creates
   # hook-tmp.<PID>. Without this sweep those orphans accumulate
   # forever. Runs AFTER PATH lockdown so we don't pick up an attacker-
-  # planted `find`. Orphans come only from a killed hook, so one call in 32
-  # keeps them bounded without a find on every call (issue #1130).
-  [ $((RANDOM % 32)) -ne 0 ] || _defenseclaw_sweep_stale_hook_dirs
+  # planted `find`. Orphans come only from a killed hook that used the
+  # fallback folder, so only a call that used it too (no mktemp, or mktemp
+  # failed) sweeps, on one call in 32 (issue #1130). A call that got its
+  # folder from mktemp never starts find, so a warm hook runs the same
+  # programs on every call (rel-1-0-6 GAP-0266).
+  if [ -z "$_DEFENSECLAW_HOOK_HOME_OWNED" ] && [ $((RANDOM % 32)) -eq 0 ]; then
+    _defenseclaw_sweep_stale_hook_dirs
+  fi
 }
 
 # Resolve optional connector identity for the shared inspect-* scripts.  The

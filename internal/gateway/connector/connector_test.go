@@ -11956,6 +11956,80 @@ func TestHardening_SweepStaleHookDirs(t *testing.T) {
 	}
 }
 
+// TestHardening_SweepRunsOnlyOnAFallbackCall pins rel-1-0-6 GAP-0266: the
+// stale-folder sweep (a find) used to run on a random one call in 32, so a
+// warm hook sometimes ran one program more. Only a call that had to use the
+// fallback folder (no mktemp) sweeps now. RANDOM is seeded so that the old
+// one-in-32 draw would sweep on this very call.
+func TestHardening_SweepRunsOnlyOnAFallbackCall(t *testing.T) {
+	bash, err := exec.LookPath("bash")
+	if err != nil {
+		t.Skip("bash not available")
+	}
+	for _, tool := range []string{"find", "mktemp", "mkdir"} {
+		if _, err := exec.LookPath(tool); err != nil {
+			t.Skipf("%s not available", tool)
+		}
+	}
+	helperBytes, err := hookFS.ReadFile("hooks/_hardening.sh")
+	if err != nil {
+		t.Fatalf("read embed: %v", err)
+	}
+	tmp := t.TempDir()
+	helperPath := filepath.Join(tmp, "_hardening.sh")
+	if err := os.WriteFile(helperPath, helperBytes, 0o600); err != nil {
+		t.Fatalf("write helper: %v", err)
+	}
+	// A folder whose only program is mkdir: a call that starts from it has
+	// no mktemp and takes the fallback folder.
+	noMktemp := filepath.Join(tmp, "bin-without-mktemp")
+	if err := os.MkdirAll(noMktemp, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	mkdir, _ := exec.LookPath("mkdir")
+	if err := os.Symlink(mkdir, filepath.Join(noMktemp, "mkdir")); err != nil {
+		t.Fatal(err)
+	}
+	const script = `source "$0"
+seed=0
+while :; do RANDOM=$seed; [ $((RANDOM % 32)) -eq 0 ] && break; seed=$((seed + 1)); done
+RANDOM=$seed
+defenseclaw_harden_env
+printf '%s\n' "$HOME"`
+	run := func(home, path string) string {
+		t.Helper()
+		orphan := filepath.Join(home, "hook-tmp.11111")
+		if err := os.MkdirAll(orphan, 0o700); err != nil {
+			t.Fatal(err)
+		}
+		old := time.Now().Add(-2 * time.Hour)
+		if err := os.Chtimes(orphan, old, old); err != nil {
+			t.Fatal(err)
+		}
+		cmd := exec.Command(bash, "-c", script, helperPath)
+		cmd.Env = []string{"PATH=" + path, "HOME=" + tmp, "DEFENSECLAW_HOME=" + home}
+		out, err := cmd.CombinedOutput()
+		if err != nil {
+			t.Fatalf("harden_env: %v\n%s", err, out)
+		}
+		return strings.TrimSpace(string(out))
+	}
+	withMktemp := filepath.Join(tmp, "home-mktemp")
+	if got := run(withMktemp, "/usr/local/bin:/usr/bin:/bin"); strings.HasPrefix(got, withMktemp) {
+		t.Fatalf("a call with mktemp used the fallback folder %s", got)
+	}
+	if _, err := os.Stat(filepath.Join(withMktemp, "hook-tmp.11111")); err != nil {
+		t.Fatalf("a call that got its folder from mktemp swept the stale folder: %v", err)
+	}
+	fallback := filepath.Join(tmp, "home-fallback")
+	if got := run(fallback, noMktemp); !strings.HasPrefix(got, filepath.Join(fallback, "hook-tmp.")) {
+		t.Fatalf("a call without mktemp used %q, want a hook-tmp folder in %s", got, fallback)
+	}
+	if _, err := os.Stat(filepath.Join(fallback, "hook-tmp.11111")); !os.IsNotExist(err) {
+		t.Fatalf("a fallback call on its sweep draw left the stale folder (err=%v)", err)
+	}
+}
+
 func TestHardening_IgnoresRuntimeHookPathOverride(t *testing.T) {
 	if _, err := exec.LookPath("bash"); err != nil {
 		t.Skip("bash not available")
