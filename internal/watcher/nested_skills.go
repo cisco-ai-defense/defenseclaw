@@ -107,6 +107,9 @@ func cursorSkillFoldersWithLimit(root, subtree string, directoryLimit, entryLimi
 	entries := 0
 	err := filepath.WalkDir(subtree, func(path string, entry fs.DirEntry, walkErr error) error {
 		if walkErr != nil {
+			if !sameWatcherPath(path, subtree) && errors.Is(walkErr, fs.ErrPermission) {
+				return filepath.SkipDir
+			}
 			return walkErr
 		}
 		entries++

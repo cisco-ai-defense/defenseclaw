@@ -207,6 +207,9 @@ func discover(root, subtree string, directoryLimit int) ([]Entry, error) {
 	visitedEntries := 0
 	err := filepath.WalkDir(subtree, func(path string, entry os.DirEntry, walkErr error) error {
 		if walkErr != nil {
+			if !samePath(path, subtree) && errors.Is(walkErr, fs.ErrPermission) {
+				return filepath.SkipDir
+			}
 			return walkErr
 		}
 		if !samePath(subtree, root) {
