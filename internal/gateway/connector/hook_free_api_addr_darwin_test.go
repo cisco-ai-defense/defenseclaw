@@ -22,7 +22,7 @@ func refusingAPIAddr(t *testing.T) string {
 	return freeLoopbackAddrForOutageTest(t)
 }
 
-func TestRefusingAPIAddrHoldsItsPortAndRefuses(t *testing.T) {
+func TestRefusingAPIAddrHoldsItsPortAndRefusesDarwin(t *testing.T) {
 	addr := refusingAPIAddr(t)
 	_, portText, err := net.SplitHostPort(addr)
 	if err != nil {
