@@ -1210,6 +1210,9 @@ func TestEndpointMCPReadFailureIsPartialNotAuthoritativeEmpty(t *testing.T) {
 }
 
 func TestPerConnectorMCPInventoryKeepsValidRowsFromPartialNativeRead(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("Unix HOME-based Antigravity fixture; Windows profile reads are covered separately")
+	}
 	withManagedEnterprise(t, true)
 	home := t.TempDir()
 	workspace := t.TempDir()
