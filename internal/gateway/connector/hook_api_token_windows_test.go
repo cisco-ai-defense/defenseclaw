@@ -724,6 +724,7 @@ func TestHookAPITokenWindowsAcceptsWritableAncestorThroughPublicOperations(t *te
 			if err != nil {
 				t.Fatalf("seed token: %v", err)
 			}
+			setHookAPITokenWindowsUserOwner(t, ancestor)
 			setHookAPITokenWindowsUntrustedDACL(t, ancestor, tc.mask)
 			if token, err := EnsureHookAPIToken(dataDir, "codex"); err != nil || token != seeded {
 				t.Fatalf("ensure = %q, %v; want the seeded token", token, err)
@@ -767,6 +768,7 @@ func TestHookAPITokenWindowsRejectsReplaceGrantOnUserOwnedAncestor(t *testing.T)
 				if _, err := EnsureHookAPIToken(dataDir, "codex"); err != nil {
 					t.Fatalf("seed token: %v", err)
 				}
+				setHookAPITokenWindowsUserOwner(t, ancestor)
 				setHookAPITokenWindowsUntrustedDACL(t, ancestor, tc.mask)
 				return dataDir
 			})
@@ -836,6 +838,29 @@ func TestHookAPITokenWindowsRejectsReparsePointDirectory(t *testing.T) {
 		createTestDirectoryRedirect(t, filepath.Join(dataDir, "hooks"), filepath.Join(targetDataDir, "hooks"))
 		return dataDir
 	})
+}
+
+// setHookAPITokenWindowsUserOwner makes the current user the owner of path.
+// A folder an elevated test creates may be owned by Administrators instead
+// (PrivateTempDir re-owns only its own root), and the drift rule these tests
+// exercise is the one for a folder the user owns.
+func setHookAPITokenWindowsUserOwner(t *testing.T, path string) {
+	t.Helper()
+	currentUser, err := windows.GetCurrentProcessToken().GetTokenUser()
+	if err != nil {
+		t.Fatalf("current token user: %v", err)
+	}
+	if err := windows.SetNamedSecurityInfo(
+		path,
+		windows.SE_FILE_OBJECT,
+		windows.OWNER_SECURITY_INFORMATION,
+		currentUser.User.Sid,
+		nil,
+		nil,
+		nil,
+	); err != nil {
+		t.Fatalf("own ancestor: %v", err)
+	}
 }
 
 func setHookAPITokenWindowsUntrustedDACL(t *testing.T, path string, mask windows.ACCESS_MASK) {
