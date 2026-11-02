@@ -55,10 +55,16 @@ func TestEnterpriseHookPlatformWatchFileHasFailedTargetOwner(t *testing.T) {
 	if _, watched := exclusive[path]; !watched || !failed[path] {
 		t.Fatalf("platform path %q has no failed owner: watched=%v failed=%v", path, watched, failed[path])
 	}
+	// The watch loop judges an event against the snapshots its last pass took
+	// of every owned path (takeEnterpriseHookOwnedSnapshot); an owned path
+	// with no snapshot entry counts as changed, never as the pass's tail.
+	found, left := map[string]string{}, map[string]string{}
+	takeEnterpriseHookOwnedSnapshot(found, exclusive, nil, enterprisehooks.OwnedFileFingerprint)
+	takeEnterpriseHookOwnedSnapshot(left, exclusive, nil, enterprisehooks.OwnedFileFingerprint)
 	now := time.Now()
 	if drop, settling := enterpriseHookWatchEventDropped(now, now.Add(time.Second),
 		fsnotify.Event{Name: path, Op: fsnotify.Create | fsnotify.Remove}, failed[path], exclusive, nil,
-		map[string]string{}, map[string]string{}, enterprisehooks.OwnedFileFingerprint, true); !drop || !settling {
+		found, left, enterprisehooks.OwnedFileFingerprint, true); !drop || !settling {
 		t.Fatalf("failed repair tail: drop=%v settling=%v", drop, settling)
 	}
 }

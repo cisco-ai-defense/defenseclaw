@@ -10,6 +10,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -151,7 +152,9 @@ func testEnterpriseHookWatchRepairBeforeOtherRetry(t *testing.T, shared bool) {
 	if err := <-done; err != nil && !errors.Is(err, context.Canceled) {
 		t.Fatalf("guardian exit: %v", err)
 	}
-	if !strings.Contains(log.String(), "reconcile reason=fsnotify") || !strings.Contains(log.String(), token) {
+	// The guardian logs the trigger path quoted (%q): on Windows its
+	// backslashes are escaped, so match the quoted form on every platform.
+	if !strings.Contains(log.String(), "reconcile reason=fsnotify") || !strings.Contains(log.String(), "trigger_path="+strconv.Quote(token)) {
 		t.Fatalf("repair was not attributed to the token fsnotify event; log: %s", log.String())
 	}
 }

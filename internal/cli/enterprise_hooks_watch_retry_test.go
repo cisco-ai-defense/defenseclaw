@@ -6,6 +6,7 @@ package cli
 import (
 	"os"
 	"path/filepath"
+	"runtime"
 	"slices"
 	"testing"
 	"time"
@@ -27,14 +28,21 @@ func TestEnterpriseHookWatchSharedPathKeepsHealthyOwnerActive(t *testing.T) {
 	failing := enterpriseHookReconcileRow{User: "alice", UserHome: home, Connector: "claudecode", Error: "repair pending"}
 	owners := map[string][]string{}
 	for _, row := range []enterpriseHookReconcileRow{healthy, failing} {
-		own, err := enterprisehooks.WatchOwnedFiles(enterprisehooks.InstallOptions{
-			ConnectorName: row.Connector, UserHome: home, OwnerUID: os.Getuid(), OwnerGID: os.Getgid(),
-		})
-		if err != nil {
-			t.Fatalf("%s owned files: %v", row.Connector, err)
-		}
-		if !slices.Contains(own.ExclusiveWriter, shared) {
-			t.Fatalf("%s does not own the shared hook: %v", row.Connector, own.ExclusiveWriter)
+		// The shared ~/.defenseclaw/hooks script comes from the Unix hook
+		// installer. Native Windows does not install these connectors through
+		// it (requireEnterpriseHookInstaller in internal/enterprisehooks): its
+		// home check is the POSIX mode check, which no Windows directory
+		// passes. The path-owner rules below are the same on every platform.
+		if runtime.GOOS != "windows" {
+			own, err := enterprisehooks.WatchOwnedFiles(enterprisehooks.InstallOptions{
+				ConnectorName: row.Connector, UserHome: home, OwnerUID: os.Getuid(), OwnerGID: os.Getgid(),
+			})
+			if err != nil {
+				t.Fatalf("%s owned files: %v", row.Connector, err)
+			}
+			if !slices.Contains(own.ExclusiveWriter, shared) {
+				t.Fatalf("%s does not own the shared hook: %v", row.Connector, own.ExclusiveWriter)
+			}
 		}
 		enterpriseHookWatchAddPathOwner(owners, shared, enterpriseHookProtectedTargetKey(row))
 	}
