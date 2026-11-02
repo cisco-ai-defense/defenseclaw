@@ -530,7 +530,9 @@ func logAIDToolCallCarried(call aidToolCall, wireID string) {
 		keys = append(keys, key)
 	}
 	sort.Strings(keys)
-	fmt.Fprintf(os.Stderr, "[aid] PreToolUse sent as a tool call: connector=%s event=%s tool=%q id=%s (%s) arg_keys=%v wire=%s messages=[assistant:tool_calls, user:text]\n",
+	// The id and the argument keys come from the agent: quote them so a
+	// crafted value cannot forge a log line.
+	fmt.Fprintf(os.Stderr, "[aid] PreToolUse sent as a tool call: connector=%s event=%s tool=%q id=%q (%s) arg_keys=%q wire=%s messages=[assistant:tool_calls, user:text]\n",
 		call.Connector, aidLogEvent(call.Event), call.Name, wireID, idSource, keys, connector.AIDWireVersionChatToolCalls)
 }
 

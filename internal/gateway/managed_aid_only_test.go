@@ -2760,8 +2760,8 @@ func TestHookManagedAIDOnly_LogsToolCallWire(t *testing.T) {
 		TimeoutMs: 3000,
 	}, newFakeCloudProvider("cmid-token-1"))
 	a := managedHookServer(client)
-	const secret = "s3cr3t-arg-value"
-	args := json.RawMessage(`{"command":"echo ` + secret + `","cwd":"/tmp"}`)
+	const argValue = "s3cr3t-arg-value"
+	args := json.RawMessage(`{"command":"echo ` + argValue + `","cwd":"/tmp"}`)
 
 	carried := captureStderr(t, func() {
 		_ = a.inspectToolPolicy(&ToolInspectRequest{
@@ -2769,7 +2769,7 @@ func TestHookManagedAIDOnly_LogsToolCallWire(t *testing.T) {
 			toolUseID: "toolu_01U3wpX", aidToolCallDeclared: true, hookEvent: "PreToolUse",
 		})
 	})
-	const wantCarried = `[aid] PreToolUse sent as a tool call: connector=claudecode event=PreToolUse tool="Bash" id=toolu_01U3wpX (agent) arg_keys=[command cwd] wire=chat-tool-calls-v1 messages=[assistant:tool_calls, user:text]`
+	const wantCarried = `[aid] PreToolUse sent as a tool call: connector=claudecode event=PreToolUse tool="Bash" id="toolu_01U3wpX" (agent) arg_keys=["command" "cwd"] wire=chat-tool-calls-v1 messages=[assistant:tool_calls, user:text]`
 	if !strings.Contains(carried, wantCarried) {
 		t.Errorf("log = %q, want %q", carried, wantCarried)
 	}
@@ -2779,7 +2779,7 @@ func TestHookManagedAIDOnly_LogsToolCallWire(t *testing.T) {
 			aidToolCallDeclared: true,
 		})
 	})
-	if !strings.Contains(derived, `connector=cursor event=<unknown> tool="run_terminal_cmd" id=dc-`) || !strings.Contains(derived, "(derived)") {
+	if !strings.Contains(derived, `connector=cursor event=<unknown> tool="run_terminal_cmd" id="dc-`) || !strings.Contains(derived, "(derived)") {
 		t.Errorf("log = %q, want a dc- id marked derived", derived)
 	}
 	textOnly := captureStderr(t, func() {
@@ -2804,7 +2804,7 @@ func TestHookManagedAIDOnly_LogsToolCallWire(t *testing.T) {
 		t.Errorf("log = %q, want %q", label, wantLabel)
 	}
 	for _, log := range []string{carried, derived, textOnly, label} {
-		if strings.Contains(log, secret) {
+		if strings.Contains(log, argValue) {
 			t.Fatalf("log carries an argument value: %q", log)
 		}
 	}
