@@ -31,6 +31,75 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/gateway/connector"
 )
 
+func TestEvaluateClaudeCodeHook_CapturesExactEventContentSentToInspection(t *testing.T) {
+	cfg := &config.Config{}
+	cfg.Guardrail.Mode = "action"
+	cfg.Guardrail.Connector = "claudecode"
+	api := &APIServer{scannerCfg: cfg}
+
+	for _, hookEvent := range []string{
+		"TaskCreated", "TaskCompleted", "TeammateIdle", "PreCompact", "PostCompact",
+		"Elicitation", "ElicitationResult", "Notification", "InstructionsLoaded",
+		"ConfigChange", "FileChanged", "CwdChanged", "DirectoryAdded", "WorktreeRemove",
+	} {
+		t.Run(hookEvent, func(t *testing.T) {
+			resp := api.evaluateClaudeCodeHook(t.Context(), claudeCodeHookRequest{
+				HookEventName: hookEvent,
+				Message:       "event content for " + hookEvent,
+			})
+			if !resp.InspectedContentPresent {
+				t.Fatal("InspectedContentPresent = false, want true")
+			}
+			if want := "event content for " + hookEvent; resp.InspectedContent != want {
+				t.Fatalf("InspectedContent = %q, want %q", resp.InspectedContent, want)
+			}
+		})
+	}
+}
+
+func TestEvaluateClaudeCodeHook_DoesNotDuplicateCompanionCanonicalContent(t *testing.T) {
+	cfg := &config.Config{}
+	cfg.Guardrail.Mode = "action"
+	cfg.Guardrail.Connector = "claudecode"
+	api := &APIServer{scannerCfg: cfg}
+
+	for _, req := range []claudeCodeHookRequest{
+		{HookEventName: "UserPromptSubmit", Prompt: "prompt content"},
+		{HookEventName: "UserPromptExpansion", Prompt: "expanded prompt content"},
+		{HookEventName: "MessageDisplay", Delta: "assistant response"},
+		{HookEventName: "SubagentStart", Message: "subagent task"},
+		{HookEventName: "PreToolUse", ToolName: "Read", ToolInput: map[string]interface{}{"file_path": "README.md"}},
+		{HookEventName: "PostToolUse", ToolName: "Read", ToolResponse: "tool result"},
+		{HookEventName: "StopFailure", LastAssistantMessage: "failed response"},
+	} {
+		resp := api.evaluateClaudeCodeHook(t.Context(), req)
+		if resp.InspectedContentPresent || resp.InspectedContent != "" {
+			t.Fatalf("%s captured duplicate inspected content: %+v", req.HookEventName, resp)
+		}
+	}
+}
+
+func TestEvaluateClaudeCodeHook_LocalFileScanDoesNotReportUninspectedEventContent(t *testing.T) {
+	cfg := &config.Config{}
+	cfg.Guardrail.Mode = "action"
+	cfg.Guardrail.Connector = "claudecode"
+	api := &APIServer{scannerCfg: cfg}
+	path := filepath.Join(t.TempDir(), "settings.json")
+	if err := os.WriteFile(path, []byte(`{"enabled":true}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	resp := api.evaluateClaudeCodeHook(t.Context(), claudeCodeHookRequest{
+		HookEventName: "ConfigChange",
+		FilePath:      path,
+		Message:       "this metadata was not submitted to AI Defense",
+	})
+
+	if resp.InspectedContentPresent || resp.InspectedContent != "" {
+		t.Fatalf("local-only scan reported uninspected event content: %+v", resp)
+	}
+}
+
 // TestEvaluateClaudeCodeHook_ActiveConnectorImpliesEnabled documents the
 // invariant that selecting the claudecode connector is the only opt-in
 // an operator should need.

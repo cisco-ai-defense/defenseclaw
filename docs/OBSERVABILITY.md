@@ -21,6 +21,13 @@ assets under `schemas/telemetry/runtime/` are generated outputs. Edit the v8
 registry/domain YAML, run `make telemetry-generate`, review the generated diff,
 and verify it with `make telemetry-check`. Do not hand-edit those outputs.
 
+Connector hook decisions may carry canonical `gen_ai.input.messages` only when
+that exact content was submitted to the inspection lane and no prompt/tool
+companion event represents it. The generated content helper bounds the field,
+and destination projection applies the same request-scoped managed-enterprise
+redaction decision as the verdict. Uninspected lifecycle payloads and raw
+connector envelopes are never promoted into this field.
+
 The exhaustive generated configuration-field reference is
 [`schemas/config/v8/reference/observability.md`](../schemas/config/v8/reference/observability.md).
 It is a schema artifact, not a second operator guide.
