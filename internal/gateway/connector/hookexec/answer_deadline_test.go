@@ -60,6 +60,24 @@ func TestCertfixGAP0485PerUserCodexAnswerWindow(t *testing.T) {
 	}
 }
 
+// A healthy answer just after the previous 3.5 s cutoff must reach a
+// per-user Codex tool call. The gateway is real loopback HTTP; its decision
+// is delayed to model a loaded host, not replaced by a deadline stub.
+func TestCertfixGAP0485LatePerUserCodexAllow(t *testing.T) {
+	addr := gatewayAt(t, func(w http.ResponseWriter, _ *http.Request) {
+		time.Sleep(3600 * time.Millisecond)
+		_, _ = w.Write([]byte(`{"action":"allow"}`))
+	})
+	result, elapsed := runAgainstGateway(t, "codex", addr, func(opts *Options) {
+		opts.FailMode = "closed"
+		opts.Event = "PreToolUse"
+		opts.Stdin = strings.NewReader(`{"hook_event_name":"PreToolUse","tool_name":"apply_patch","tool_input":{"patch":"*** Begin Patch\n*** Add File: project/notes.txt\n+ok\n*** End Patch"}}`)
+	})
+	if blocked(result) || result.code != 0 {
+		t.Fatalf("after %s code=%d stdout=%q stderr=%q, want the gateway allow", elapsed, result.code, result.stdout, result.stderr)
+	}
+}
+
 // gatewayAt serves every hook call with handle on a real loopback listener,
 // so informational responses travel as they do in production.
 func gatewayAt(t *testing.T, handle http.HandlerFunc) string {

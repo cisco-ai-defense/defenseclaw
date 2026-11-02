@@ -42,7 +42,7 @@ var hookAnswerBudget = 3500 * time.Millisecond
 // Codex registers per-user PreToolUse command hooks with a 30-second host
 // timeout. Give an otherwise healthy local gateway another half-second under
 // host load; the managed hook and the other connectors keep the
-// shorter answer budget. This remains below the four-second progress ceiling.
+// shorter answer budget. This meets the four-second progress ceiling.
 var perUserCodexAnswerBudget = 4 * time.Second
 
 // hookProgressCeiling is how long, from the start of the hook process, a
