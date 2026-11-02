@@ -1378,8 +1378,9 @@ func pendingStuck(name string, seen time.Duration, managed bool) *sandboxapi.Err
 	return &sandboxapi.Error{Code: sandboxapi.CodeConflict, Message: message,
 		Detail: "DefenseClaw cannot run anything in it. Last resort, only if you can lose everything this OpenShell " +
 			"gateway knows: list other sandboxes (`defenseclaw sandbox list`); save each one's work with " +
-			"`defenseclaw sandbox pull NAME --apply` (or `--branch` or `--patch-out FILE`), or delete it with " +
-			"`defenseclaw sandbox delete NAME`; then stop the " +
+			"`defenseclaw sandbox pull NAME --apply` (or `--branch` or `--patch-out FILE`); check that the " +
+			"work you need is saved in your project before you delete a sandbox or move the gateway database; " +
+			"delete any sandbox you no longer need with `defenseclaw sandbox delete NAME`; then stop the " +
 			"gateway (on Linux `systemctl --user stop openshell-gateway`), move " +
 			"~/.local/state/openshell/gateway/openshell.db with the openshell.db-wal and openshell.db-shm files " +
 			"beside it to another folder, and start it again (`systemctl --user start openshell-gateway`). This " +

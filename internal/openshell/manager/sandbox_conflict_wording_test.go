@@ -125,6 +125,7 @@ func TestPendingDriverOperationRecoveryAfterObservedEpisode(t *testing.T) {
 		"usually a create or start never finished", "Last resort", "loses OpenShell's record of every sandbox on this gateway",
 		"and any providers, profiles or settings you added to this gateway yourself",
 		"`defenseclaw sandbox list`", "`defenseclaw sandbox pull NAME --apply`", "`--branch`", "`--patch-out FILE`",
+		"check that the work you need is saved in your project before you delete a sandbox or move the gateway database",
 		"`defenseclaw sandbox delete NAME`",
 		"systemctl --user stop openshell-gateway", "openshell.db-wal", "`docker ps -a --filter name=--vs10c-x-`",
 		"`defenseclaw sandbox delete vs10c-x`"} {
@@ -132,10 +133,14 @@ func TestPendingDriverOperationRecoveryAfterObservedEpisode(t *testing.T) {
 			t.Fatalf("stuck refusal %q lacks %q", stuck, want)
 		}
 	}
+	confirm := strings.Index(stuck, "check that the work you need is saved in your project")
 	if strings.Index(stuck, "Last resort") > strings.Index(stuck, "openshell.db") ||
-		strings.Index(stuck, "defenseclaw sandbox pull NAME --apply") > strings.Index(stuck, "openshell.db") ||
+		strings.Index(stuck, "--patch-out FILE") > confirm ||
+		confirm > strings.Index(stuck, "defenseclaw sandbox delete NAME") ||
+		confirm > strings.Index(stuck, "systemctl --user stop openshell-gateway") ||
+		confirm > strings.Index(stuck, "openshell.db") ||
 		strings.Contains(stuck, "gateway knows: pull") {
-		t.Fatalf("the database move is not the last resort: %q", stuck)
+		t.Fatalf("the save check must precede deletion and the database move: %q", stuck)
 	}
 	managed := text(openshell.PhaseError, true)
 	if !strings.Contains(managed, "is stuck") || !strings.Contains(managed, "help desk") ||
