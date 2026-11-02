@@ -3513,16 +3513,17 @@ func (a *APIServer) evaluateAgentHook(ctx context.Context, req agentHookRequest)
 			conflictSource = agentHookConflictSource(ctx, req, actionInput, dialectHint)
 		}
 		verdict = a.inspectHermesWriteToolPolicyCtx(ctx, toolRequest, trustedActionRequest{
-			Input:                actionInput,
-			LegacyText:           string(req.ToolArgs),
-			conflictSource:       conflictSource,
-			Connector:            req.ConnectorName,
-			EnforcementCapable:   enforcementCapable,
-			ResolvedWriteTargets: resolvedWritesFromContext(ctx),
-			patchTarget:          hermesV4APatch,
-			SandboxGuestCWD:      sandboxHookGuestCWD(ctx, req.ReportedCWD, toolCWD),
-			windowsShellDialect:  dialectHint,
-			record:               toolChainRecorder(ctx, req.ConnectorName, req.toolChain),
+			Input:                   actionInput,
+			LegacyText:              string(req.ToolArgs),
+			conflictSource:          conflictSource,
+			Connector:               req.ConnectorName,
+			EnforcementCapable:      enforcementCapable,
+			ManagedHookOverflowHold: managedWindowsHookOverflowHold(ctx, a.scannerCfg, req.ConnectorName, runtime.GOOS),
+			ResolvedWriteTargets:    resolvedWritesFromContext(ctx),
+			patchTarget:             hermesV4APatch,
+			SandboxGuestCWD:         sandboxHookGuestCWD(ctx, req.ReportedCWD, toolCWD),
+			windowsShellDialect:     dialectHint,
+			record:                  toolChainRecorder(ctx, req.ConnectorName, req.toolChain),
 		}, command, commandTool, hermesWriteViews)
 		assetDecisions = a.collectAgentHookAssetDecisions(ctx, req)
 	}
@@ -3867,6 +3868,12 @@ func (a *APIServer) agentHookWindowsDialectHint(ctx context.Context) bool {
 	}
 	cfg := a.decisionConfig(ctx)
 	return cfg == nil || !cfg.SecureClientIntegration()
+}
+
+func managedWindowsHookOverflowHold(ctx context.Context, cfg *config.Config, connector, goos string) bool {
+	return goos == "windows" && cfg != nil && cfg.StandaloneEnterprise() &&
+		!cfg.SecureClientIntegration() && !isSandboxHookRequest(ctx) &&
+		authenticatedHookConnector(ctx) == canonicalConnectorRulePackKey(connector)
 }
 
 // agentHookConflictSource is a structured tool call's arguments as the call

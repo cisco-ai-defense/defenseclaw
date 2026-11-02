@@ -175,6 +175,9 @@ type trustedActionRequest struct {
 	// ProtectedHomeHook is set only from a kernel-verified managed hook peer.
 	// Its gateway cannot inspect the caller's home when ProtectHome is active.
 	ProtectedHomeHook bool
+	// ManagedHookOverflowHold retains a bounded state reading on an
+	// authenticated managed Windows hook without changing path resolution.
+	ManagedHookOverflowHold bool
 	// gitBashDrive marks a gitBashDriveView request (GAP-2577).
 	gitBashDrive bool
 	// staticOperandReading marks a DynamicOperandTwins reading judged behind
@@ -8834,7 +8837,7 @@ func withReducedStateReading(parent context.Context, request trustedActionReques
 	if !ok {
 		return findings
 	}
-	if overflow && request.ProtectedHomeHook {
+	if overflow && (request.ProtectedHomeHook || request.ManagedHookOverflowHold) {
 		// More statements that may name the state and are not proven
 		// read-only than the reduced reading keeps, so the hook client
 		// sent no description (review r3 finding 3, r4 finding 2). Behind
