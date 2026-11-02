@@ -104,3 +104,39 @@ func TestGAP0535ChangedDirectoryUsesReachedSkillTree(t *testing.T) {
 		t.Fatalf("listed skill read = %+v, matched=%v", decision, matched)
 	}
 }
+
+func TestGAP0535SequentialDirectoryUsesReachedSkillTree(t *testing.T) {
+	home, cwd, other := t.TempDir(), t.TempDir(), t.TempDir()
+	homeSkill := filepath.Join(home, ".claude", "skills", "folder")
+	otherSkill := filepath.Join(other, ".claude", "skills", "folder")
+	for _, dir := range []string{homeSkill, otherSkill} {
+		if err := os.MkdirAll(dir, 0o700); err != nil {
+			t.Fatal(err)
+		}
+	}
+	cfg := &config.Config{AssetPolicy: config.DefaultAssetPolicy()}
+	cfg.AssetPolicy.Skill.Denied = []config.AssetPolicyRule{{Name: "listed-name"}}
+	api := &APIServer{scannerCfg: cfg}
+	ctx := withManagedHookPeer(context.Background(), managedHookPeer{UID: 1001, Name: "fixture", Home: home})
+	for _, separator := range []string{"; ", "\n"} {
+		for _, deniedAtReached := range []bool{false, true} {
+			homeName, otherName := "listed-name", "ordinary-name"
+			if deniedAtReached {
+				homeName, otherName = otherName, homeName
+			}
+			for dir, name := range map[string]string{homeSkill: homeName, otherSkill: otherName} {
+				if err := os.WriteFile(filepath.Join(dir, "SKILL.md"), []byte("---\nname: "+name+"\n---\n"), 0o600); err != nil {
+					t.Fatal(err)
+				}
+			}
+			command := "cd " + filepath.Join(other, ".claude") + separator + "cat skills/folder/SKILL.md"
+			decision, matched := api.claudeCodeSkillAssetDecision(ctx, claudeCodeHookRequest{
+				HookEventName: "PreToolUse", ToolName: "Bash", CWD: cwd,
+				ToolInput: map[string]interface{}{"command": command},
+			})
+			if matched != deniedAtReached || matched && (decision.Action != "block" || decision.Source != "admin-deny") {
+				t.Errorf("separator %q, denied at reached %t: decision=%+v matched=%t", separator, deniedAtReached, decision, matched)
+			}
+		}
+	}
+}

@@ -373,8 +373,8 @@ func SkillFolderRefs(input any, home, cwd string, caller ...string) []FolderRef 
 	return refs
 }
 
-// leadingSkillDirectoryChange follows a literal cd in an AND chain. The
-// following command runs only in that directory when the cd succeeds.
+// leadingSkillDirectoryChange follows a literal cd before another command.
+// A command after a failed cd in a sequential list runs in the original dir.
 func leadingSkillDirectoryChange(value, cwd, home, caller string) (prefix, rest, dir string, ok bool) {
 	value = strings.TrimSpace(value)
 	if !strings.HasPrefix(value, "cd ") && !strings.HasPrefix(value, "cd\t") {
@@ -398,7 +398,8 @@ func leadingSkillDirectoryChange(value, cwd, home, caller string) (prefix, rest,
 			} else if quote == ch {
 				quote = 0
 			}
-		case ch == '&' && quote == 0 && i+1 < len(value) && value[i+1] == '&':
+		case quote == 0 && (ch == ';' || ch == '\n' ||
+			ch == '&' && i+1 < len(value) && value[i+1] == '&'):
 			prefix = value[:i]
 			words := commandPathTokens(prefix)
 			if len(words) != 2 || words[0] != "cd" || words[1] == "-" ||
@@ -419,13 +420,19 @@ func leadingSkillDirectoryChange(value, cwd, home, caller string) (prefix, rest,
 			if !filepath.IsAbs(dir) {
 				dir = filepath.Join(cwd, dir)
 			}
+			separatorWidth := 1
+			if ch == '&' {
+				separatorWidth = 2
+			}
 			resolved, err := filepath.EvalSymlinks(dir)
 			if err == nil {
 				dir = resolved
+			} else if os.IsNotExist(err) && ch != '&' {
+				dir = cwd
 			} else if !os.IsNotExist(err) {
 				return "", "", "", false
 			}
-			return prefix, value[i+2:], filepath.Clean(dir), true
+			return prefix, value[i+separatorWidth:], filepath.Clean(dir), true
 		}
 	}
 	return "", "", "", false
