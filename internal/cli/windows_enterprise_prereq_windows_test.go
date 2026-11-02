@@ -15,6 +15,8 @@ import (
 	"encoding/json"
 	"errors"
 	"net"
+	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"testing"
@@ -56,19 +58,26 @@ func TestRunWindowsEnterpriseLifecyclePrerequisiteFailureStopsBeforePowerShell(t
 		t.Fatal("PowerShell ran after a failed prerequisite")
 		return nil
 	}
+	// Main reads --config for its profile before the host preflight, so the
+	// config exists, and the computer's own deployment records are kept out.
+	stubWindowsEnterpriseRecords(t, nil, nil, func(string) error { return nil }, true)
+	configPath := filepath.Join(t.TempDir(), "config.yaml")
+	if err := os.WriteFile(configPath, []byte("config_version: 9\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
 	var output strings.Builder
 	cmd := &cobra.Command{}
 	cmd.SetOut(&output)
 	err := runWindowsEnterpriseLifecycle(context.Background(), cmd, "install", &windowsEnterpriseLifecycleOptions{
 		jsonOutput:  true,
-		configPath:  `C:\in\config.yaml`,
+		configPath:  configPath,
 		installRoot: `C:\root`,
 		stateRoot:   `C:\state`,
 	})
 	if err == nil || scriptLookedUp {
 		t.Fatalf("err=%v scriptLookedUp=%t", err, scriptLookedUp)
 	}
-	if seen.Action != "install" || seen.ConfigPath != `C:\in\config.yaml` ||
+	if seen.Action != "install" || seen.ConfigPath != configPath ||
 		seen.InstallRoot != `C:\root` || seen.StateRoot != `C:\state` {
 		t.Fatalf("preflight input = %#v", seen)
 	}
