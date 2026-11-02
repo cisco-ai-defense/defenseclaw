@@ -178,6 +178,7 @@ func Verify(ctx context.Context, opts InstallOptions) (InstallResult, error) {
 
 	var result InstallResult
 	err = connector.WithUserHomeDir(home, func() error {
+		platformPrepareAgentPolicy(ctx, conn.Name(), home, dataDir, uid, gid, &setupOpts)
 		setupOpts, err = prepareHookContract(opts.GuardrailMode, conn, setupOpts)
 		if err != nil {
 			return err
@@ -235,6 +236,9 @@ func Verify(ctx context.Context, opts InstallOptions) (InstallResult, error) {
 			if connector.HookContractLockDrifted(lock, current) ||
 				canonicalHookFailMode(lock.HookFailMode) != canonicalHookFailMode(current.HookFailMode) {
 				return fmt.Errorf("enterprise hooks: connector %s hook contract lock drift detected", conn.Name())
+			}
+			if err := connector.VerifyManagedHookRender(setupOpts, conn); err != nil {
+				return fmt.Errorf("enterprise hooks: connector %s: %w", conn.Name(), err)
 			}
 			result = InstallResult{
 				Connector:       conn.Name(),
@@ -341,6 +345,7 @@ func Install(ctx context.Context, opts InstallOptions) (InstallResult, error) {
 
 	var result InstallResult
 	err = connector.WithUserHomeDir(home, func() error {
+		platformPrepareAgentPolicy(ctx, conn.Name(), home, dataDir, uid, gid, &setupOpts)
 		requestedHookFailMode := canonicalHookFailMode(setupOpts.HookFailMode)
 		setupOpts, err = prepareHookContract(opts.GuardrailMode, conn, setupOpts)
 		if err != nil {
@@ -405,7 +410,7 @@ func Install(ctx context.Context, opts InstallOptions) (InstallResult, error) {
 			return err
 		}
 
-		return withOwnerCredentials(uid, gid, func() error {
+		if err := withOwnerCredentials(uid, gid, func() error {
 			conn.SetCredentials(setupOpts.APIToken, opts.MasterKey)
 			previousLockEntry := connector.LoadHookContractLockEntry(dataDir, conn.Name())
 			lockWriteAttempted := false
@@ -421,6 +426,10 @@ func Install(ctx context.Context, opts InstallOptions) (InstallResult, error) {
 					if lockErr != nil {
 						failures = append(failures, fmt.Errorf("enterprise hooks: restore previous hook contract lock: %w", lockErr))
 					}
+				}
+				if keepProtectedHooksOnRepairFailure(previousLockEntry) {
+					reportProtectedHookRepairFailure(dataDir, conn.Name(), cause)
+					return errors.Join(failures...)
 				}
 				if teardownErr := conn.Teardown(ctx, setupOpts); teardownErr != nil {
 					failures = append(failures, fmt.Errorf("enterprise hooks: connector %s rollback failed: %w", conn.Name(), teardownErr))
@@ -476,6 +485,7 @@ func Install(ctx context.Context, opts InstallOptions) (InstallResult, error) {
 					return rollback(fmt.Errorf("enterprise hooks: publish connector-scoped hook token: %w", err))
 				}
 			}
+			clearProtectedHookRepairFailure(dataDir, conn.Name())
 			result = InstallResult{
 				Connector:       conn.Name(),
 				UserHome:        home,
@@ -488,7 +498,11 @@ func Install(ctx context.Context, opts InstallOptions) (InstallResult, error) {
 				HookContractID:  lockEntry.ContractID,
 			}
 			return nil
-		})
+		}); err != nil {
+			return err
+		}
+		platformRepairAfterOwnerInstall(home, dataDir, uid, gid)
+		return nil
 	})
 	if err != nil {
 		return InstallResult{}, err

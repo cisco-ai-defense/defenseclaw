@@ -45,6 +45,7 @@ DEFENSECLAW_MANAGED_HOOK=1
 export DEFENSECLAW_MANAGED_HOOK
 DEFENSECLAW_HOME="$(cd "${HOOK_DIR}/.." && pwd -P)"
 export DEFENSECLAW_HOME
+{{if .ManagedShellGuard}}{{template "managed-prologue" .}}{{end}}
 {{else}}
 DEFENSECLAW_HOME="${DEFENSECLAW_HOME:-${HOME}/.defenseclaw}"
 if [ ! -d "${DEFENSECLAW_HOME}" ] || [ -f "${DEFENSECLAW_HOME}/.disabled" ]; then
@@ -67,7 +68,8 @@ fi
 . "${HOOK_DIR}/_hardening.sh"
 defenseclaw_harden_resources
 defenseclaw_harden_env
-
+{{if .ManagedShellGuard}}trap '_dc_managed_on_exit' EXIT
+{{end}}
 {{if .Managed}}FAIL_MODE="{{.FailMode}}"
 {{else}}FAIL_MODE="${DEFENSECLAW_FAIL_MODE:-{{.FailMode}}}"
 {{end}}

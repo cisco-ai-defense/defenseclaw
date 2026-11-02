@@ -722,6 +722,7 @@ func (c *CodexConnector) checkOwnedHookContract(opts SetupOpts) (bool, string, e
 	if verifyErr != nil {
 		return false, fmt.Sprintf("Codex hook matrix in %s (%s): %v", configPath, resolution.Contract.ContractID, verifyErr), nil
 	}
+	noteCodexTrustVerification(opts, resolution)
 	return true, "", nil
 }
 
@@ -895,7 +896,9 @@ func (c *CodexConnector) patchCodexConfig(opts SetupOpts, hookScript string) err
 
 	var transformed []byte
 	var backupToSave codexConfigBackup
+	userDisabledHooks := false
 	render := func(raw []byte) error {
+		userDisabledHooks = false
 		cfg := map[string]interface{}{}
 		if len(raw) > 0 {
 			if err := toml.Unmarshal(raw, &cfg); err != nil {
@@ -994,6 +997,18 @@ func (c *CodexConnector) patchCodexConfig(opts SetupOpts, hookScript string) err
 		features, _ := cfg["features"].(map[string]interface{})
 		if features == nil {
 			features = map[string]interface{}{}
+		}
+		if userDisabledHooksRepairEnabled(opts) {
+			// A managed install turns the user's own hooks switch back on; no
+			// other feature flag is touched.
+			if enabled, explicitlySet := features["hooks"].(bool); explicitlySet && !enabled {
+				features["hooks"] = true
+				userDisabledHooks = true
+			}
+			if enabled, explicitlySet := features["codex_hooks"].(bool); explicitlySet && !enabled {
+				delete(features, "codex_hooks")
+				userDisabledHooks = true
+			}
 		}
 		if enabled, explicitlySet := features["hooks"].(bool); explicitlySet && !enabled {
 			return fmt.Errorf("Codex hooks are disabled in config.toml; enable [features].hooks before installing the Codex connector")
@@ -1120,6 +1135,9 @@ func (c *CodexConnector) patchCodexConfig(opts SetupOpts, hookScript string) err
 				discardManagedFileBackup(opts.DataDir, c.Name(), "config.toml")
 			}
 			return err
+		}
+		if userDisabledHooks {
+			reportUserDisabledHooksRepair(c.Name(), configPath)
 		}
 
 		persisted, err := os.ReadFile(configPath)

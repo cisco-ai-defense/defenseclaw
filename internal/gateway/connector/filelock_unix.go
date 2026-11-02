@@ -19,6 +19,7 @@
 package connector
 
 import (
+	"errors"
 	"fmt"
 	"os"
 	"syscall"
@@ -37,23 +38,43 @@ func withFileLockMode(path string, _ bool, fn func() error) error {
 	lockPath := path + ".lock"
 	const staleLockAge = 60 * time.Second
 
-	// Clean up stale lock files from crashed processes.
-	if info, err := os.Stat(lockPath); err == nil {
+	// Clean up stale lock files from crashed processes. Where locks are
+	// bounded, a lock file is never unlinked before it is acquired: an old
+	// file may still be held, and flock locks die with their process anyway.
+	if info, err := os.Stat(lockPath); err == nil && !boundedUserLocks {
 		if time.Since(info.ModTime()) > staleLockAge {
 			_ = os.Remove(lockPath)
 		}
 	}
 
-	lockFile, err := os.OpenFile(lockPath, os.O_CREATE|os.O_RDWR, 0o600)
-	if err != nil {
-		return fmt.Errorf("open lock file %s: %w", lockPath, err)
-	}
-	defer lockFile.Close()
-
-	if err := syscall.Flock(int(lockFile.Fd()), syscall.LOCK_EX); err != nil {
+	var lockFile *os.File
+	var deadline time.Time
+	for attempt := 0; ; attempt++ {
+		file, err := os.OpenFile(lockPath, os.O_CREATE|os.O_RDWR, 0o600)
+		if err != nil {
+			return fmt.Errorf("open lock file %s: %w", lockPath, err)
+		}
+		err = acquireFlock(file, lockPath, &deadline)
+		if err == nil {
+			lockFile = file
+			break
+		}
+		file.Close()
+		if errors.Is(err, errLockReplaced) && attempt < 8 {
+			continue
+		}
 		return fmt.Errorf("acquire lock %s: %w", lockPath, err)
 	}
+	defer lockFile.Close()
 	defer func() {
+		if boundedUserLocks {
+			// Unlink while still holding the lock: a waiter that then wins
+			// the flock finds the path gone or replaced and retries, so two
+			// writers never hold "the" lock on different inodes.
+			_ = os.Remove(lockPath)
+			_ = syscall.Flock(int(lockFile.Fd()), syscall.LOCK_UN)
+			return
+		}
 		_ = syscall.Flock(int(lockFile.Fd()), syscall.LOCK_UN)
 		_ = os.Remove(lockPath)
 	}()

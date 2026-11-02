@@ -132,7 +132,11 @@ defenseclaw_harden_env() {
   # Per-hook ephemeral HOME so any tool that stores state under $HOME
   # (gh, gcloud, openssl rand state, etc.) writes to a sandbox the
   # hook tears down on exit. Fall back to the gateway data dir if
-  # mktemp is unavailable.
+  # mktemp is unavailable. A managed hook never takes its scratch folder
+  # from the agent's environment.
+  if declare -F _dc_managed_on_exit >/dev/null 2>&1; then
+    DEFENSECLAW_HOOK_HOME=""
+  fi
   if command -v mktemp >/dev/null 2>&1; then
     DEFENSECLAW_HOOK_HOME="$(mktemp -d -t defenseclaw-hook.XXXXXXXX 2>/dev/null || true)"
   fi
@@ -141,7 +145,14 @@ defenseclaw_harden_env() {
     mkdir -p "$DEFENSECLAW_HOOK_HOME" 2>/dev/null || true
   fi
   export HOME="$DEFENSECLAW_HOOK_HOME"
-  trap '_defenseclaw_hook_cleanup' EXIT
+  # A managed hook's exit handler maps unexpected exits to the fail mode and
+  # runs this cleanup itself; replacing it here would let bash's own exit
+  # status decide the outcome.
+  if declare -F _dc_managed_on_exit >/dev/null 2>&1; then
+    trap '_dc_managed_on_exit' EXIT
+  else
+    trap '_defenseclaw_hook_cleanup' EXIT
+  fi
 
   export GIT_CONFIG_NOSYSTEM=1
   export GIT_CONFIG_GLOBAL=/dev/null
@@ -853,6 +864,11 @@ defenseclaw_read_stdin_capped() {
   local connector="${DEFENSECLAW_HOOK_CONNECTOR:-unknown}"
   local hook_name="${DEFENSECLAW_HOOK_NAME:-unknown}"
   local cap="${DEFENSECLAW_HOOK_MAX_BODY:-1048576}"
+  # Managed hooks use the built-in cap; the agent's environment cannot turn
+  # every payload into an oversized one.
+  if declare -F _dc_managed_on_exit >/dev/null 2>&1; then
+    cap=1048576
+  fi
   case "$cap" in
     ''|*[!0-9]*) cap=1048576 ;;
   esac

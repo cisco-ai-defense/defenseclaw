@@ -27,7 +27,6 @@ import (
 	"path/filepath"
 	"runtime"
 	"strings"
-	"text/template"
 
 	"gopkg.in/yaml.v3"
 )
@@ -52,6 +51,7 @@ type templateData struct {
 	TokenFileJS             string // absolute token path, escaped for a JavaScript double-quoted string
 	FailMode                string // "closed" blocks response/transport failures; "open" allows with a warning; strict availability always blocks
 	Managed                 bool
+	ManagedShellGuard       bool // managed shell hook with the fail-mode exit guard and stderr hygiene
 	TokenFile               string
 	ScopedToken             bool
 	ConnectorName           string
@@ -467,46 +467,14 @@ func writeHookScriptsCommonWithOptions(hookDir, apiAddr, token, failMode string,
 		return err
 	}
 
-	connectorData := templateData{
-		APIAddr:       apiAddr,
-		APIToken:      "",
-		FailMode:      normalizeHookFailMode(failMode),
-		Managed:       managed,
-		TokenFile:     tokenFile,
-		ScopedToken:   scopedToken,
-		ConnectorName: strings.ToLower(strings.TrimSpace(connectorName)),
-		HookBinaryPS:  strings.ReplaceAll(defenseclawHookBinary(), "'", "''"),
-		HookTimeoutMS: cursorAdapterTimeoutMS,
+	rendered, err := renderHookScriptSet(apiAddr, tokenFile, failMode, extras, managed, connectorName, scopedToken)
+	if err != nil {
+		return err
 	}
-	// The inspect-* family has one physical copy per data directory.  Its
-	// bytes must therefore depend only on install-wide inputs; connector mode,
-	// identity and scoped credential selection happen at invocation time.  The
-	// connector-owned lifecycle scripts retain the selected connector data.
-	sharedData := templateData{APIAddr: apiAddr, Managed: managed}
-	renderAndWrite := func(name string, renderData templateData) error {
-		content, err := hookFS.ReadFile("hooks/" + name)
-		if err != nil {
-			return fmt.Errorf("read hook template %s: %w", name, err)
-		}
-		rendered, err := renderTemplate(string(content), renderData)
-		if err != nil {
-			return fmt.Errorf("render hook %s: %w", name, err)
-		}
-		hookPath := filepath.Join(hookDir, name)
-		if err := writeFile(hookPath, []byte(rendered), 0o700); err != nil {
-			return fmt.Errorf("write hook %s: %w", name, err)
-		}
-		return nil
-	}
-	for _, name := range genericHookScripts {
-		if err := renderAndWrite(name, sharedData); err != nil {
-			return err
-		}
-	}
-	scripts := hookScriptNamesFromExtras(extras)
-	for _, name := range scripts[len(genericHookScripts):] {
-		if err := renderAndWrite(name, connectorData); err != nil {
-			return err
+	for _, script := range rendered {
+		hookPath := filepath.Join(hookDir, script.name)
+		if err := writeFile(hookPath, script.body, 0o700); err != nil {
+			return fmt.Errorf("write hook %s: %w", script.name, err)
 		}
 	}
 	if err := writeHookConfigSidecarUsing(
@@ -520,6 +488,66 @@ func writeHookScriptsCommonWithOptions(hookDir, apiAddr, token, failMode string,
 		return err
 	}
 	return nil
+}
+
+// renderedHookScript is one generated hook script and its exact bytes.
+type renderedHookScript struct {
+	name string
+	body []byte
+}
+
+// renderHookScriptSet renders the generic inspect-* scripts and the
+// connector's own scripts exactly as Setup publishes them. The writer and the
+// managed tamper check share it, so what is verified is what was written.
+func renderHookScriptSet(
+	apiAddr, tokenFile, failMode string,
+	extras []string,
+	managed bool,
+	connectorName string,
+	scopedToken bool,
+) ([]renderedHookScript, error) {
+	connectorData := templateData{
+		APIAddr:           apiAddr,
+		APIToken:          "",
+		FailMode:          normalizeHookFailMode(failMode),
+		Managed:           managed,
+		ManagedShellGuard: managedShellGuardEnabled(managed),
+		TokenFile:         tokenFile,
+		ScopedToken:       scopedToken,
+		ConnectorName:     strings.ToLower(strings.TrimSpace(connectorName)),
+		HookBinaryPS:      strings.ReplaceAll(defenseclawHookBinary(), "'", "''"),
+		HookTimeoutMS:     cursorAdapterTimeoutMS,
+	}
+	// The inspect-* family has one physical copy per data directory.  Its
+	// bytes must therefore depend only on install-wide inputs; connector mode,
+	// identity and scoped credential selection happen at invocation time.  The
+	// connector-owned lifecycle scripts retain the selected connector data.
+	sharedData := templateData{APIAddr: apiAddr, Managed: managed}
+	render := func(name string, renderData templateData) (renderedHookScript, error) {
+		content, err := hookFS.ReadFile("hooks/" + name)
+		if err != nil {
+			return renderedHookScript{}, fmt.Errorf("read hook template %s: %w", name, err)
+		}
+		rendered, err := renderTemplate(string(content), renderData)
+		if err != nil {
+			return renderedHookScript{}, fmt.Errorf("render hook %s: %w", name, err)
+		}
+		return renderedHookScript{name: name, body: []byte(rendered)}, nil
+	}
+	scripts := hookScriptNamesFromExtras(extras)
+	out := make([]renderedHookScript, 0, len(scripts))
+	for i, name := range scripts {
+		data := connectorData
+		if i < len(genericHookScripts) {
+			data = sharedData
+		}
+		script, err := render(name, data)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, script)
+	}
+	return out, nil
 }
 
 // hookRuntimeFileWriter selects the final-descriptor publication primitive for
@@ -1548,7 +1576,7 @@ func ShimBinaries() []string {
 }
 
 func renderTemplate(tmpl string, data templateData) (string, error) {
-	t, err := template.New("").Parse(tmpl)
+	t, err := parseHookTemplate(tmpl)
 	if err != nil {
 		return "", err
 	}

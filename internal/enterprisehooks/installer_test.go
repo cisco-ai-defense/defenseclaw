@@ -1905,10 +1905,7 @@ targets:
 `), 0o600); err != nil {
 		t.Fatalf("write manifest: %v", err)
 	}
-	_, err := LoadManifest(path)
-	if err == nil || !strings.Contains(err.Error(), "requires connector") {
-		t.Fatalf("LoadManifest error = %v, want connector validation", err)
-	}
+	assertManifestRowRejected(t, path, "requires connector")
 }
 
 func skipIfRoot(t *testing.T) {

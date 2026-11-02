@@ -115,6 +115,14 @@ func repairGatewayRuntimePlatform(cfg *config.Config) {
 	if !ok || !managed.SelfRepairEnabled() {
 		return
 	}
+	managed.RepairOwnedObjects(gatewayRuntimeObjects(cfg, layout, true))
+}
+
+// gatewayRuntimeObjects lists the gateway's runtime objects inside the pinned
+// runtime folder, parents first. moveAside is false on the guardian's passes:
+// the gateway holds the stores open, so a structural finding there is only
+// logged and the gateway moves it aside on its next start.
+func gatewayRuntimeObjects(cfg *config.Config, layout managed.ManagedServiceLayout, moveAside bool) []managed.OwnedObject {
 	inside := func(path string) bool {
 		return strings.TrimSpace(path) != "" && managed.ManagedServiceLayout{Home: layout.RuntimeDir}.Within(path)
 	}
@@ -122,7 +130,7 @@ func repairGatewayRuntimePlatform(cfg *config.Config) {
 	addDir := func(path string, mode os.FileMode) {
 		if inside(path) {
 			objects = append(objects, managed.OwnedObject{
-				Path: path, Kind: managed.ObjectRuntimeDirectory, Mode: mode, MoveAsideStructural: true, Recreate: true,
+				Path: path, Kind: managed.ObjectRuntimeDirectory, Mode: mode, MoveAsideStructural: moveAside, Recreate: moveAside,
 			})
 		}
 	}
@@ -139,18 +147,18 @@ func repairGatewayRuntimePlatform(cfg *config.Config) {
 		if filepath.Clean(filepath.Dir(db)) != filepath.Clean(cfg.DataDir) {
 			addDir(filepath.Dir(db), 0)
 		}
-		addFile(db, managed.ObjectRuntimeFile, 0o600, true)
+		addFile(db, managed.ObjectRuntimeFile, 0o600, moveAside)
 		for _, suffix := range []string{"-wal", "-shm", "-journal"} {
-			addFile(db+suffix, managed.ObjectRuntimeFile, 0o600, true)
+			addFile(db+suffix, managed.ObjectRuntimeFile, 0o600, moveAside)
 		}
 	}
-	addFile(redaction.CorrelationKeyPath(cfg.DataDir), managed.ObjectRuntimeSecretFile, 0o600, true)
+	addFile(redaction.CorrelationKeyPath(cfg.DataDir), managed.ObjectRuntimeSecretFile, 0o600, moveAside)
 	addFile(filepath.Join(cfg.DataDir, ".env"), managed.ObjectRuntimeSecretFile, 0o600, false)
 	if inside(cfg.DataDir) {
 		objects = append(objects, managedHookTokenObjects(cfg.DataDir)...)
 	}
 	sortOwnedObjectsParentsFirst(objects)
-	managed.RepairOwnedObjects(objects)
+	return objects
 }
 
 // sortOwnedObjectsParentsFirst keeps folders ahead of what they contain.

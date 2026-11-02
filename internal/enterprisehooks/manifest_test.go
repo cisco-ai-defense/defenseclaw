@@ -41,10 +41,7 @@ func TestLoadManifestRejectsUnknownFields(t *testing.T) {
 	if err := os.WriteFile(path, data, 0o600); err != nil {
 		t.Fatalf("write manifest: %v", err)
 	}
-	_, err := LoadManifest(path)
-	if err == nil || !strings.Contains(err.Error(), "field enabld not found") {
-		t.Fatalf("LoadManifest error = %v, want unknown-field rejection", err)
-	}
+	assertManifestRowRejected(t, path, "field enabld not found")
 }
 
 func TestLoadManifestRejectsDisabledDeferredTarget(t *testing.T) {
@@ -53,10 +50,7 @@ func TestLoadManifestRejectsDisabledDeferredTarget(t *testing.T) {
 	if err := os.WriteFile(path, data, 0o600); err != nil {
 		t.Fatalf("write manifest: %v", err)
 	}
-	_, err := LoadManifest(path)
-	if err == nil || !strings.Contains(err.Error(), "cannot be both disabled and deferred") {
-		t.Fatalf("LoadManifest error = %v, want contradictory deferred-state rejection", err)
-	}
+	assertManifestRowRejected(t, path, "cannot be both disabled and deferred")
 }
 
 func TestLoadManifestRejectsTrailingDocument(t *testing.T) {
@@ -101,5 +95,25 @@ func TestLoadManifestRejectsSparseOversizedInput(t *testing.T) {
 	_, err = LoadManifest(path)
 	if err == nil || !strings.Contains(err.Error(), "exceeds") {
 		t.Fatalf("LoadManifest oversized error = %v, want bounded refusal", err)
+	}
+}
+
+// assertManifestRowRejected checks that the only row of the manifest at
+// path is refused with want: the whole manifest fails, or, where bad rows
+// are isolated, the row is left out and reported.
+func assertManifestRowRejected(t *testing.T, path, want string) {
+	t.Helper()
+	manifest, err := LoadManifest(path)
+	if !manifestIsolatesBadRows {
+		if err == nil || !strings.Contains(err.Error(), want) {
+			t.Fatalf("LoadManifest error = %v, want %q", err, want)
+		}
+		return
+	}
+	if err != nil {
+		t.Fatalf("LoadManifest error = %v, want the bad row isolated", err)
+	}
+	if len(manifest.Targets) != 0 || len(manifest.Skipped) != 1 || !strings.Contains(manifest.Skipped[0].Reason, want) {
+		t.Fatalf("manifest = %+v, want the row skipped with %q", manifest, want)
 	}
 }

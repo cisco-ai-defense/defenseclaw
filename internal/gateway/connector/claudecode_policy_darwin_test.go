@@ -6,88 +6,152 @@
 package connector
 
 import (
-	"errors"
+	"os"
+	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
+
+	"github.com/defenseclaw/defenseclaw/internal/managed"
 )
 
-func stubClaudeManagedPreferencesCommands(
-	t *testing.T,
-	export func() ([]byte, error),
-	convert func([]byte) ([]byte, error),
-	forced func(string) (bool, error),
-) {
-	t.Helper()
-	previousExport := claudeCodeManagedPreferencesExporter
-	previousConvert := claudeCodeManagedPreferencesConverter
-	previousForced := claudeCodeManagedPreferenceForced
-	claudeCodeManagedPreferencesExporter = export
-	claudeCodeManagedPreferencesConverter = convert
-	claudeCodeManagedPreferenceForced = forced
-	t.Cleanup(func() {
-		claudeCodeManagedPreferencesExporter = previousExport
-		claudeCodeManagedPreferencesConverter = previousConvert
-		claudeCodeManagedPreferenceForced = previousForced
-	})
+// managedPreferencesFixture points the managed-preferences reader at a temp
+// root, makes the converter pass JSON through, names the per-user layer and
+// captures resilience markers.
+type managedPreferencesFixture struct {
+	root    string
+	mu      sync.Mutex
+	markers []string
 }
 
-func TestLoadClaudeCodeDarwinManagedPreferences(t *testing.T) {
-	stubClaudeManagedPreferencesCommands(
-		t,
-		func() ([]byte, error) { return []byte("plist fixture"), nil },
-		func(plist []byte) ([]byte, error) {
-			if string(plist) != "plist fixture" {
-				t.Fatalf("converter input = %q", plist)
-			}
-			return []byte(`{"allowManagedHooksOnly":true}`), nil
-		},
-		func(key string) (bool, error) { return key == "allowManagedHooksOnly", nil },
-	)
+func newManagedPreferencesFixture(t *testing.T, userName string) *managedPreferencesFixture {
+	t.Helper()
+	f := &managedPreferencesFixture{root: t.TempDir()}
+	previousRoot, previousConvert, previousUser := managedPreferencesRoot, managedPreferencesConverter, managedPreferencesUser
+	previousSink := managed.ReportResilienceEvent
+	managedPreferencesRoot = f.root
+	managedPreferencesConverter = func(plist []byte) ([]byte, error) { return plist, nil }
+	managedPreferencesUser = func() string { return userName }
+	managed.ReportResilienceEvent = func(marker string, fields map[string]string) {
+		f.mu.Lock()
+		defer f.mu.Unlock()
+		f.markers = append(f.markers, managed.FormatResilienceEvent(marker, fields))
+	}
+	agentPolicyStreaks.Lock()
+	agentPolicyStreaks.last = map[string]time.Time{}
+	agentPolicyStreaks.Unlock()
+	t.Cleanup(func() {
+		managedPreferencesRoot, managedPreferencesConverter, managedPreferencesUser = previousRoot, previousConvert, previousUser
+		managed.ReportResilienceEvent = previousSink
+	})
+	return f
+}
+
+func (f *managedPreferencesFixture) write(t *testing.T, rel, body string) string {
+	t.Helper()
+	path := filepath.Join(f.root, rel)
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, []byte(body), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	return path
+}
+
+func (f *managedPreferencesFixture) lines() []string {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return append([]string(nil), f.markers...)
+}
+
+func TestLoadClaudeCodeDarwinManagedPreferencesDeviceAndUser(t *testing.T) {
+	f := newManagedPreferencesFixture(t, "alice")
+	f.write(t, "com.anthropic.claudecode.plist", `{"allowManagedHooksOnly":false,"env":{"A":"1"}}`)
+	f.write(t, "alice/com.anthropic.claudecode.plist", `{"allowManagedHooksOnly":true}`)
 	sources, err := loadClaudeCodeOSManagedSettings()
 	if err != nil {
 		t.Fatal(err)
 	}
-	if sources.admin == nil || sources.userFallback != nil || sources.admin.settings["allowManagedHooksOnly"] != true {
-		t.Fatalf("managed preferences sources = %#v", sources)
+	admin := sources.admin
+	if admin == nil || sources.userFallback != nil {
+		t.Fatalf("sources = %#v", sources)
+	}
+	if admin.settings["allowManagedHooksOnly"] != true || admin.settings["env"] == nil {
+		t.Fatalf("merged settings = %#v", admin.settings)
+	}
+	if admin.sourceKind("allowManagedHooksOnly") != "mdm-user" || admin.sourceKind("env") != "mdm-device" {
+		t.Fatalf("origins = %#v", admin.origins)
+	}
+	// The block is reported with its exact source and key.
+	if err := validateClaudeCodeManagedHookControls(admin, false); err == nil {
+		t.Fatal("allowManagedHooksOnly from MDM was not refused")
+	}
+	got := strings.Join(f.lines(), "\n")
+	for _, want := range []string{
+		`defenseclaw_prereq check="agent_policy_blocks_user_hooks" connector="claudecode"`,
+		`key="allowManagedHooksOnly"`,
+		`source="mdm-user"`,
+	} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("missing %s in %s", want, got)
+		}
+	}
+	// Once per streak.
+	_ = validateClaudeCodeManagedHookControls(admin, false)
+	if len(f.lines()) != 1 {
+		t.Fatalf("prereq repeated in one streak: %v", f.lines())
 	}
 }
 
-func TestLoadClaudeCodeDarwinUserDefaultsAreNotAdministratorPolicy(t *testing.T) {
-	stubClaudeManagedPreferencesCommands(
-		t,
-		func() ([]byte, error) { return []byte("user plist fixture"), nil },
-		func([]byte) ([]byte, error) { return []byte(`{"disableAllHooks":true}`), nil },
-		func(string) (bool, error) { return false, nil },
-	)
-	sources, err := loadClaudeCodeOSManagedSettings()
-	if err != nil || sources.admin != nil || sources.userFallback != nil {
-		t.Fatalf("ordinary user defaults classified as managed = (%#v, %v)", sources, err)
-	}
-}
-
-func TestLoadClaudeCodeDarwinManagedPreferencesMissingDomainFallsThrough(t *testing.T) {
-	stubClaudeManagedPreferencesCommands(
-		t,
-		func() ([]byte, error) { return nil, errors.New("Domain com.anthropic.claudecode does not exist") },
-		func([]byte) ([]byte, error) { return nil, errors.New("converter must not run") },
-		func(string) (bool, error) { return false, errors.New("forced checker must not run") },
-	)
+func TestLoadClaudeCodeDarwinManagedPreferencesMissingIsAbsent(t *testing.T) {
+	newManagedPreferencesFixture(t, "alice")
 	sources, err := loadClaudeCodeOSManagedSettings()
 	if err != nil || sources.admin != nil || sources.userFallback != nil {
 		t.Fatalf("missing managed preferences = (%#v, %v)", sources, err)
 	}
 }
 
-func TestLoadClaudeCodeDarwinManagedPreferencesFailsClosed(t *testing.T) {
-	stubClaudeManagedPreferencesCommands(
-		t,
-		func() ([]byte, error) { return nil, errors.New("defaults unavailable") },
-		func([]byte) ([]byte, error) { return nil, nil },
-		func(string) (bool, error) { return false, nil },
-	)
-	if _, err := loadClaudeCodeOSManagedSettings(); err == nil || !strings.Contains(err.Error(), "defaults unavailable") {
-		t.Fatalf("inspection error = %v", err)
+func TestLoadClaudeCodeDarwinManagedPreferencesReadFailureNeverFails(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("root reads a mode 0 file")
+	}
+	f := newManagedPreferencesFixture(t, "alice")
+	f.write(t, "com.anthropic.claudecode.plist", `not json`)
+	unreadable := f.write(t, "alice/com.anthropic.claudecode.plist", `{"disableAllHooks":true}`)
+	if err := os.Chmod(unreadable, 0); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.Chmod(unreadable, 0o644) })
+	sources, err := loadClaudeCodeOSManagedSettings()
+	if err != nil {
+		t.Fatalf("a failed policy read failed the reconcile: %v", err)
+	}
+	if sources.admin != nil {
+		t.Fatalf("unreadable layers produced policy: %#v", sources.admin)
+	}
+	lines := f.lines()
+	if len(lines) != 2 {
+		t.Fatalf("want one skip per unreadable layer, got %v", lines)
+	}
+	for _, line := range lines {
+		if !strings.HasPrefix(line, "defenseclaw_skip ") || !strings.Contains(line, "policy_read_failed") {
+			t.Fatalf("unexpected line %s", line)
+		}
+	}
+	// Once per streak.
+	if _, err := loadClaudeCodeOSManagedSettings(); err != nil || len(f.lines()) != 2 {
+		t.Fatalf("second read: err=%v lines=%v", err, f.lines())
+	}
+}
+
+func TestLoadClaudeCodeDarwinManagedPreferencesAsRootReadsDeviceOnly(t *testing.T) {
+	f := newManagedPreferencesFixture(t, "")
+	f.write(t, "alice/com.anthropic.claudecode.plist", `{"allowManagedHooksOnly":true}`)
+	sources, err := loadClaudeCodeOSManagedSettings()
+	if err != nil || sources.admin != nil {
+		t.Fatalf("per-user layer read without a target user: (%#v, %v)", sources.admin, err)
 	}
 }
 

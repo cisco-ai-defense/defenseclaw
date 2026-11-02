@@ -120,7 +120,7 @@ func validateOwnedLockFile(path string, file *os.File) error {
 	if err := otlpValidateOwner(path, info); err != nil {
 		return err
 	}
-	return otlpValidatePerm(path, info)
+	return ownedLockPermCheck(path, file, info)
 }
 
 // otlpPathTokenFileName returns the on-disk filename for *scope* under

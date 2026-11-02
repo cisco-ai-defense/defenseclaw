@@ -70,6 +70,9 @@ const (
 type codexEffectivePolicy struct {
 	AllowManagedHooksOnly *bool
 	Source                string
+	// SourceKind names the policy tier for reports (file, mdm-device,
+	// mdm-user, server) where it is known.
+	SourceKind string
 }
 
 // codexPolicyInspector is replaceable only by package tests. Production uses
@@ -92,9 +95,13 @@ var codexAppServerCommand = func(ctx context.Context, executable string) *exec.C
 func enforceCodexUserHookPolicy(ctx context.Context, opts SetupOpts) error {
 	policy, err := codexPolicyInspector(ctx, opts)
 	if err != nil {
+		if opts.ManagedEnterprise && agentPolicyReadTolerated("codex", "requirements", policy.Source, err) {
+			return nil
+		}
 		return fmt.Errorf("inspect effective Codex managed requirements: %w", err)
 	}
 	if policy.AllowManagedHooksOnly != nil && *policy.AllowManagedHooksOnly && runtime.GOOS != "windows" {
+		reportAgentPolicyBlocksUserHooks("codex", policy.SourceKind, "allow_managed_hooks_only", policy.Source)
 		return fmt.Errorf(
 			"Codex user hooks are prohibited by allow_managed_hooks_only from %s; deploy the DefenseClaw hook through the administrator-managed Codex requirements source",
 			policy.Source,
@@ -105,6 +112,16 @@ func enforceCodexUserHookPolicy(ctx context.Context, opts SetupOpts) error {
 
 func inspectCodexEffectivePolicy(ctx context.Context, opts SetupOpts) (codexEffectivePolicy, error) {
 	executable := strings.TrimSpace(opts.AgentExecutable)
+	if executable != "" && runtime.GOOS != "windows" {
+		// An answer the guardian obtained as the user before dropping its
+		// euid is used as is; no child is started inside that drop.
+		if policy, ok := codexPreinspectedPolicy(executable, codexHomeDir()); ok {
+			return codexAttributePolicy(policy), nil
+		}
+		if codexPolicySpawnUnsafe() {
+			executable = ""
+		}
+	}
 	if executable != "" {
 		if runtime.GOOS == "windows" {
 			validated, err := validateCodexPolicyExecutable(opts)
@@ -122,13 +139,13 @@ func inspectCodexEffectivePolicy(ctx context.Context, opts SetupOpts) (codexEffe
 			executable = filepath.Clean(executable)
 		}
 		if err := validateCodexManagedAgentExecutable(executable, opts.ManagedEnterprise); err != nil {
-			return codexEffectivePolicy{}, err
+			return codexEffectivePolicy{Source: executable}, err
 		}
 		policy, err := inspectCodexPolicyWithAppServer(ctx, executable, codexHomeDir())
 		if err != nil {
-			return codexEffectivePolicy{}, fmt.Errorf("%s configRequirements/read: %w", executable, err)
+			return codexEffectivePolicy{Source: executable}, fmt.Errorf("%s configRequirements/read: %w", executable, err)
 		}
-		return policy, nil
+		return codexAttributePolicy(policy), nil
 	}
 
 	if runtime.GOOS == "windows" && !opts.ManagedEnterprise {
@@ -158,7 +175,7 @@ func inspectCodexEffectivePolicy(ctx context.Context, opts SetupOpts) (codexEffe
 	// Tests, pre-provisioning, and older Codex installs may not have a runnable
 	// app-server path. In that case still honor the documented system source.
 	// This fallback deliberately does not claim to have inspected cloud policy.
-	return inspectCodexSystemRequirementsForMode(opts.ManagedEnterprise)
+	return codexPlatformManagedPolicy(inspectCodexSystemRequirementsForMode(opts.ManagedEnterprise))
 }
 
 func validateCodexPolicyExecutable(opts SetupOpts) (string, error) {
@@ -249,19 +266,19 @@ func inspectCodexSystemRequirementsForMode(managedEnterprise bool) (codexEffecti
 	}
 	raw, exists, err := readCodexSystemRequirements(path, managedEnterprise)
 	if err != nil {
-		return codexEffectivePolicy{}, fmt.Errorf("read %s: %w", path, err)
+		return codexEffectivePolicy{Source: path}, fmt.Errorf("read %s: %w", path, err)
 	}
 	if !exists {
 		return codexEffectivePolicy{Source: path}, nil
 	}
 	if len(raw) > codexPolicyMessageLimit {
-		return codexEffectivePolicy{}, fmt.Errorf("%s exceeds %d bytes", path, codexPolicyMessageLimit)
+		return codexEffectivePolicy{Source: path}, fmt.Errorf("%s exceeds %d bytes", path, codexPolicyMessageLimit)
 	}
 	var requirements struct {
 		AllowManagedHooksOnly *bool `toml:"allow_managed_hooks_only"`
 	}
 	if err := toml.Unmarshal(raw, &requirements); err != nil {
-		return codexEffectivePolicy{}, fmt.Errorf("parse %s: %w", path, err)
+		return codexEffectivePolicy{Source: path}, fmt.Errorf("parse %s: %w", path, err)
 	}
 	return codexEffectivePolicy{
 		AllowManagedHooksOnly: requirements.AllowManagedHooksOnly,
@@ -340,10 +357,23 @@ type codexRPCEvent struct {
 }
 
 func inspectCodexPolicyWithAppServer(parent context.Context, executable, codexHome string) (policy codexEffectivePolicy, retErr error) {
+	return inspectCodexPolicyWithAppServerPrepared(parent, executable, codexHome, nil)
+}
+
+// inspectCodexPolicyWithAppServerPrepared lets the caller adjust the child
+// (its credentials and environment) before it starts.
+func inspectCodexPolicyWithAppServerPrepared(
+	parent context.Context,
+	executable, codexHome string,
+	prepare func(*exec.Cmd),
+) (policy codexEffectivePolicy, retErr error) {
 	ctx, cancel := context.WithTimeout(parent, codexPolicyInspectionTimeout)
 	defer cancel()
 
 	cmd := codexAppServerCommand(ctx, executable)
+	if prepare != nil {
+		prepare(cmd)
+	}
 	baseEnv := cmd.Env
 	if baseEnv == nil {
 		baseEnv = os.Environ()
