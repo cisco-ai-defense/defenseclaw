@@ -83,9 +83,9 @@ A call whose audit record cannot be written (a full disk, or an audit database t
 
 ### Audit writer holds under a sustained flood
 
-On a per-user Windows install, a sustained flood of about 10 hook calls a second in action mode makes the audit log grow faster than it can be copied into `audit.db`. To restart the log, the gateway holds the audit writer while SQLite flushes `audit.db` to disk, for up to about 1 second. Hook calls that arrive during the hold wait for it. In 30-minute floods at 10 calls a second, the 99th-percentile answer time went over 1 second in 4 to 13 of the 30 minutes.
+On a per-user Windows install, a sustained flood of about 10 hook calls a second in action mode makes the audit log grow faster than it can be copied into `audit.db`. To restart the log, the gateway holds the audit writer while SQLite flushes `audit.db` to disk, for up to about 1 second. Hook calls that arrive during the hold wait for it. In 30-minute floods at 10 calls a second, the 99th-percentile answer time went over 1 second in 4 of 30 minutes in a test that drove the gateway's hook handler directly, and in 9 to 13 of 31 minutes through an installed per-user hook; the second figure includes minutes in which the host itself stalled.
 
-The hold stays under the hook's 3.5-second answer budget, so it does not block a call by itself. A host that stalls for longer (up to 12 seconds was seen on a busy shared Windows host) can still push calls past the budget, and those calls then follow the rules above. A redesign of the audit writes that removes this hold is planned for the next release.
+The hold stays under the hook's 3.5-second answer budget, so it does not block a call by itself. A host that stalls for longer (up to 12 seconds was seen on a busy shared Windows host) can still push calls past the budget, and those calls then follow the rules above. Removing this hold needs a change to how the audit records are written; until then it is a known limit.
 
 ### Secure Client
 
