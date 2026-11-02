@@ -2485,6 +2485,7 @@ groups:
   - ref: defenseclaw.guardrail.rule_ids
     requirement_level: recommended
   - ref: defenseclaw.guardrail.rule_names
+  - ref: gen_ai.input.messages
     requirement_level: recommended
   - ref: defenseclaw.guardrail.judge_fallback
     requirement_level: recommended
@@ -2505,6 +2506,7 @@ groups:
       details:
         evaluation_id: optional because clean and technical hook outcomes may have no guardrail evaluation
         hook_result: ok|panic is independent of the connector-facing policy action
+        input_messages: present only for exact connector event content submitted to inspection when no prompt/tool companion event represents it
         step_idx: optional and one-based when present
 - id: body.approval.requested
   type: body_group
