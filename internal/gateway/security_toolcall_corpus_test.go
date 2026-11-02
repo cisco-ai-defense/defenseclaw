@@ -343,6 +343,13 @@ func runToolCallCorpusProfile(t *testing.T, connector, profile string, cases []t
 
 func installToolCallCorpusProfileConnector(t *testing.T, connector, profile string) {
 	t.Helper()
+	installToolCallCorpusPackDirConnector(t, connector, filepath.Join(guardrailPoliciesRoot(t), profile))
+}
+
+// installToolCallCorpusPackDirConnector is installToolCallCorpusProfileConnector
+// for the rule pack in dir.
+func installToolCallCorpusPackDirConnector(t *testing.T, connector, dir string) {
+	t.Helper()
 	ruleCategoriesMu.Lock()
 	savedCategories, hadCategories := connectorRuleCategories[connector]
 	savedGeneration, hadGeneration := connectorRuleGenerations[connector]
@@ -362,7 +369,7 @@ func installToolCallCorpusProfileConnector(t *testing.T, connector, profile stri
 		}
 	})
 
-	pack := mustLoadRulePack(t, filepath.Join(guardrailPoliciesRoot(t), profile))
+	pack := mustLoadRulePack(t, dir)
 	if err := ApplyConnectorRulePackOverrides(connector, pack); err != nil {
 		t.Fatal(err)
 	}

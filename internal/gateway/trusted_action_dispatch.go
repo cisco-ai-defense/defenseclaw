@@ -4434,9 +4434,10 @@ type exactFallbackContract struct {
 	detectionOnly               bool
 	codeOwnedDetection          bool
 	alertOnly                   bool
-	// boundedRequiresActiveExpression keeps the bounded lane off for a pack
-	// that disables the rule with expression: false, so the lane never adds
-	// a finding the pack turned off (rel-1-0-6:GAP-0419).
+	// boundedRequiresActiveExpression makes the bounded lane also require
+	// the active pack's expression for the rule (boundedRuleExpressionHolds),
+	// so the lane never adds a finding the pack turned off or narrowed away
+	// (rel-1-0-6:GAP-0419).
 	boundedRequiresActiveExpression bool
 }
 
@@ -6137,13 +6138,6 @@ func exactNonEmptyTrustedJSONString(raw json.RawMessage) (string, bool) {
 	return value, true
 }
 
-// appendTrustedBoundedExactFallbackFindings scans the extracted trusted
-// command, not its JSON serialization, for rules whose code-owned contract
-// proves an exact bounded subgraph. Go's JSON encoder escapes shell redirect
-// characters such as '>', which can otherwise hide a valid catalog candidate.
-// Most recoveries require both the active profile's regex and deterministic
-// contract. A contract may explicitly declare a code-owned detection grammar;
-// that lane still requires the rule to exist in the active profile catalog.
 // certainControlFlowCommands is facts with only the commands outside
 // uncertain control flow, so a bounded proof over a partial action is as
 // precise as the owner on a complete one.
@@ -6158,6 +6152,53 @@ func certainControlFlowCommands(facts actionfacts.Facts) actionfacts.Facts {
 	return facts
 }
 
+// boundedRuleExpressionHolds reports whether the active pack's own
+// expression for rule admits facts, the commands the bounded proof read. A
+// pack that turns the rule off (expression: false) or narrows it keeps that
+// meaning on the bounded lane; a rule with no expression is judged by its
+// pattern, as on the complete path (rel-1-0-6:GAP-0419).
+func boundedRuleExpressionHolds(
+	generation *compiledRulePackCategories,
+	rule *PatternRule,
+	commandText string,
+	facts actionfacts.Facts,
+) bool {
+	if strings.TrimSpace(rule.Expression) == "" {
+		return strings.TrimSpace(commandText) != "" && rule.Pattern != nil &&
+			rule.Pattern.MatchString(commandText)
+	}
+	// A partial action can carry issues the projection has no value for
+	// (opaque_artifact); the view the expression judges leaves them out.
+	issues := make([]actionfacts.IssueCode, 0, len(facts.Parse.Issues))
+	for _, issue := range facts.Parse.Issues {
+		if semantic.ProjectableIssue(issue) {
+			issues = append(issues, issue)
+		}
+	}
+	facts.Parse.Issues = issues
+	ruleID := strings.ToUpper(strings.TrimSpace(rule.ID))
+	for _, candidate := range generation.semanticRules {
+		if candidate.program == nil ||
+			strings.ToUpper(strings.TrimSpace(candidate.rule.ID)) != ruleID {
+			continue
+		}
+		projection, code := semantic.Project(facts)
+		if code != semantic.ProjectionOK {
+			return false
+		}
+		result, evalCode := candidate.program.EvalBool(context.Background(), projection)
+		return evalCode == semantic.EvalOK && result.Matched
+	}
+	return false
+}
+
+// appendTrustedBoundedExactFallbackFindings scans the extracted trusted
+// command, not its JSON serialization, for rules whose code-owned contract
+// proves an exact bounded subgraph. Go's JSON encoder escapes shell redirect
+// characters such as '>', which can otherwise hide a valid catalog candidate.
+// Most recoveries require both the active profile's regex and deterministic
+// contract. A contract may explicitly declare a code-owned detection grammar;
+// that lane still requires the rule to exist in the active profile catalog.
 func appendTrustedBoundedExactFallbackFindings(
 	findings []RuleFinding,
 	generation *compiledRulePackCategories,
@@ -6183,7 +6224,7 @@ func appendTrustedBoundedExactFallbackFindings(
 			continue
 		}
 		if contract.boundedRequiresActiveExpression &&
-			strings.TrimSpace(rule.Expression) == "false" {
+			!boundedRuleExpressionHolds(generation, rule, commandText, certainControlFlowCommands(facts)) {
 			continue
 		}
 		evidence := commandText
