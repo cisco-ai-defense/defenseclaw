@@ -337,6 +337,69 @@ class DeferredHelperResultFileTests(unittest.TestCase):
         self.assertEqual(result, {"status": "succeeded"})
 
 
+class DeferredLauncherAncestryTests(unittest.TestCase):
+    def test_direct_cmd_uninstall_waits_for_shell_after_native_launcher(self) -> None:
+        from unittest.mock import patch
+
+        from defenseclaw.commands import windows_uninstall_helper as helper
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            scripts = root / "data" / ".venv" / "Scripts"
+            native = root / "bin" / "defenseclaw.exe"
+            images = {
+                2: str(scripts / "python.exe"),
+                3: str(native),
+                4: str(root / "system" / "cmd.exe"),
+                5: str(root / "system" / "powershell.exe"),
+            }
+
+            class Kernel:
+                def __init__(self) -> None:
+                    self.closed: list[int] = []
+
+                def OpenProcess(self, _rights: int, _inherit: bool, pid: int) -> int:
+                    return pid
+
+                def QueryFullProcessImageNameW(self, handle: int, _flags: int, image, _size) -> bool:
+                    image.value = images[handle]
+                    return True
+
+                def CloseHandle(self, handle: int) -> None:
+                    self.closed.append(handle)
+
+            kernel = Kernel()
+            plan = {"parent_pid": 1, "managed_venv": str(scripts.parent), "install_root": str(native.parent)}
+            with patch.object(helper, "_kernel32", return_value=kernel):
+                for parents, want in (
+                    ({1: 2, 2: 3, 3: 4, 4: 5}, [(2, 15.0), (3, 15.0), (4, 5.0)]),
+                    ({1: 2, 2: 4, 4: 5}, [(2, 15.0), (4, 5.0)]),
+                    ({1: 3, 3: 5}, [(3, 15.0)]),
+                ):
+                    with self.subTest(parents=parents), patch.object(helper, "_parent_pids", return_value=parents):
+                        self.assertEqual(helper._open_launchers(plan), want)
+
+    def test_cmd_resume_window_starts_after_launchers_exit(self) -> None:
+        from unittest.mock import patch
+
+        from defenseclaw.commands import windows_uninstall_helper as helper
+
+        clock = [0.0]
+        waits: list[tuple[int, int]] = []
+
+        class Kernel:
+            def WaitForSingleObject(self, handle: int, timeout: int) -> None:
+                waits.append((handle, timeout))
+                if handle == 2:
+                    clock[0] += 10.0
+                elif handle == 3:
+                    clock[0] += 7.0
+
+        with patch.object(helper.time, "monotonic", side_effect=lambda: clock[0]):
+            helper._wait_launchers(Kernel(), [(2, 15.0), (3, 15.0), (4, 5.0)])
+        self.assertEqual(waits, [(2, 15000), (3, 5000), (4, 5000)])
+
+
 @unittest.skipUnless(sys.platform == "win32", "Windows file locking regression")
 class WindowsManagedVenvResetTests(unittest.TestCase):
     def test_windows_process_access_mask_constants_preserve_required_rights(self) -> None:

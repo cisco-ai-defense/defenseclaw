@@ -261,17 +261,18 @@ def _parent_pids(kernel32) -> dict[int, int]:
 def _open_launchers(plan: dict[str, object]) -> list[tuple[int, float]]:
     """Open the managed-runtime launchers waiting on the uninstall CLI.
 
-    defenseclaw.cmd runs Scripts/defenseclaw.exe, which can start the venv's
-    python.exe launcher, which starts the base interpreter. cmd.exe reads the
+    defenseclaw.cmd runs the installer's defenseclaw.exe, which starts the
+    managed runtime. The runtime can start the venv's python.exe launcher,
+    which starts the base interpreter. cmd.exe reads the
     rest of the shim only after the outermost launcher returns, and that can
     be well after the base interpreter exits. Deleting the shim earlier ends a
     successful uninstall with "The batch file cannot be found" and exit 1.
     Ancestors whose image lives in the managed runtime's Scripts folder are
     opened, then the cmd.exe running the shim (a shorter wait, since an
     interactive prompt stays open); the walk stops at any other process.
-    PowerShell and cmd.exe start the installer's defenseclaw.exe instead of
-    the shim (GAP-2237): it is opened too, and the walk ends there, since no
-    batch file is read after it.
+    PowerShell and cmd.exe can also start the installer's defenseclaw.exe
+    directly. The walk continues through it to find a cmd.exe that may still
+    be reading the shim; any other parent ends the walk.
     Each entry is (handle, seconds to wait at most).
     """
     kernel32 = _kernel32()
@@ -297,13 +298,24 @@ def _open_launchers(plan: dict[str, object]) -> list[tuple[int, float]]:
             continue
         if _norm(image.value) == cli_launcher:
             handles.append((handle, _LAUNCHER_WAIT_SECONDS))
-            break
+            process_id = parents.get(process_id, 0)
+            continue
         if handles and os.path.basename(_norm(image.value)) == "cmd.exe":
             handles.append((handle, _SHIM_SHELL_WAIT_SECONDS))
         else:
             kernel32.CloseHandle(handle)
         break
     return handles
+
+
+def _wait_launchers(kernel32, launchers: list[tuple[int, float]]) -> None:
+    """Bound the launcher wait, then give a shim's shell its own resume window."""
+    started = time.monotonic()
+    for handle, limit in launchers:
+        if limit == _SHIM_SHELL_WAIT_SECONDS:
+            started = time.monotonic()
+        remaining = max(0, int((started + limit - time.monotonic()) * 1000))
+        kernel32.WaitForSingleObject(handle, remaining)
 
 
 def _interpreter_dirs(plan: dict[str, object], data_dir: str) -> list[str]:
@@ -616,10 +628,7 @@ def main() -> int:
             raise TimeoutError("uninstall parent did not exit within 120 seconds")
         # Bounded: a launcher or shell that outlives its wait does not block
         # cleanup.
-        started = time.monotonic()
-        for launcher, limit in launchers:
-            remaining = max(0, int((started + limit - time.monotonic()) * 1000))
-            kernel32.WaitForSingleObject(launcher, remaining)
+        _wait_launchers(kernel32, launchers)
 
         # cmd.exe resumes the shim just after its launcher child exits. Leave a
         # bounded unwind window before removing launcher files; all paths are
