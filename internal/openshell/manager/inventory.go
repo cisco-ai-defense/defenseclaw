@@ -236,7 +236,7 @@ func (m *Manager) proveGuests(ctx context.Context) {
 // (rec is b's record and word its word count, as read).
 func (m *Manager) readGuest(ctx context.Context, gw *Gateway, b *box, rec record, place string, word uint64) guestRead {
 	r := guestRead{place: place, at: m.now(), word: word}
-	sb, err := gw.Client.GetSandbox(ctx, rec.Name)
+	sb, err := m.getSandbox(ctx, gw, rec.Name)
 	switch {
 	case openshell.IsNotFound(err):
 		r.gone = true

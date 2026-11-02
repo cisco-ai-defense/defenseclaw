@@ -77,7 +77,7 @@ func TestPendingDriverOperationFirstSaysStillFinishingAndRetry(t *testing.T) {
 		}
 		text := e.Error()
 		for _, want := range []string{"sandbox vs10c-x is busy", "OpenShell is still finishing a create or start",
-			"wait a minute and run the command again", "`defenseclaw sandbox list`", "after a few minutes"} {
+			"wait a minute and run the command again", "`defenseclaw sandbox list`", "repeated", "may later explain a last resort"} {
 			if !strings.Contains(text, want) {
 				t.Fatalf("%s: %q lacks %q", op, text, want)
 			}
@@ -91,13 +91,12 @@ func TestPendingDriverOperationFirstSaysStillFinishingAndRetry(t *testing.T) {
 	}
 }
 
-// The delete gives the recovery only once the operation is provably stuck:
-// OpenShell kept the sandbox in its error state and refused it for
-// pendingStuckAfter as this daemon saw. A provisioning or starting sandbox
-// (a slow image pull) never gets it, however long it takes, and the
+// The delete gives the recovery after repeated error-phase refusals in one
+// observed episode spanning pendingStuckAfter. A provisioning or starting
+// sandbox (a slow image pull) never gets it, however long it takes, and the
 // database move comes last, with what it loses. A managed account gets its
 // administrator only.
-func TestPendingDriverOperationRecoveryOnlyWhenProvablyStuck(t *testing.T) {
+func TestPendingDriverOperationRecoveryAfterObservedEpisode(t *testing.T) {
 	now := time.Unix(1_760_000_000, 0)
 	m := &Manager{now: func() time.Time { return now }}
 	text := func(phase openshell.SandboxPhase, managed bool) string {
@@ -122,8 +121,9 @@ func TestPendingDriverOperationRecoveryOnlyWhenProvablyStuck(t *testing.T) {
 	}
 	now = now.Add(time.Second)
 	stuck := text(openshell.PhaseError, false)
-	for _, want := range []string{"sandbox vs10c-x is stuck", "for 3 minutes OpenShell has kept it in its error state",
-		"never finished", "Last resort", "loses OpenShell's record of every sandbox on this gateway",
+	for _, want := range []string{"sandbox vs10c-x is stuck", "refused deletion in its error state on repeated attempts over 3 minutes",
+		"usually a create or start never finished", "Last resort", "loses OpenShell's record of every sandbox on this gateway",
+		"and any providers, profiles or settings you added to this gateway yourself",
 		"systemctl --user stop openshell-gateway", "openshell.db-wal", "`docker ps -a --filter name=--vs10c-x-`",
 		"`defenseclaw sandbox delete vs10c-x`"} {
 		if !strings.Contains(stuck, want) {

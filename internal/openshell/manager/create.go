@@ -231,7 +231,7 @@ func (m *Manager) Create(ctx context.Context, req sandboxapi.CreateRequest) (*sa
 	// The sandbox a rolled-back create of this name left behind is removed
 	// first, so a run again right after a Ctrl-C just works (GAP-0557).
 	m.reclaimUndone(ctx, gw, name)
-	if _, err := gw.Client.GetSandbox(ctx, name); err == nil {
+	if _, err := m.getSandbox(ctx, gw, name); err == nil {
 		return nil, sandboxapi.Errorf(sandboxapi.CodeConflict, "an OpenShell sandbox named %s already exists", name)
 	} else if !openshell.IsNotFound(err) {
 		m.dropGateway(gw, err)
@@ -810,7 +810,7 @@ func limitsNote(d openshell.Driver, eff *packs.Effective) string {
 // and leaves a sandbox someone else created under the name alone.
 func (m *Manager) deleteCreated(ctx context.Context, gw *Gateway, name string) error {
 	gw = m.liveGateway(ctx, gw)
-	sb, err := gw.Client.GetSandbox(ctx, name)
+	sb, err := m.getSandbox(ctx, gw, name)
 	switch {
 	case openshell.IsNotFound(err):
 		return nil
@@ -822,6 +822,7 @@ func (m *Manager) deleteCreated(ctx context.Context, gw *Gateway, name string) e
 	if _, err := gw.Client.DeleteSandbox(ctx, name); err != nil && !openshell.IsNotFound(err) {
 		return err
 	}
+	m.forgetPending(name)
 	return gw.Client.WaitDeleted(ctx, name)
 }
 
@@ -1221,6 +1222,7 @@ func stoppedAuditPhase(b *box) bool {
 func (m *Manager) release(name string, b *box) {
 	m.mu.Lock()
 	if m.boxes[name] == b {
+		m.forgetPending(name)
 		delete(m.boxes, name)
 	}
 	m.mu.Unlock()
@@ -1335,12 +1337,10 @@ const (
 	pendingOpMayComplete = "previous driver operation may still complete"
 )
 
-// pendingStuckAfter is how long DefenseClaw must have seen OpenShell keep a
-// sandbox in its error state while refusing it for an unsettled driver
-// operation before it calls the sandbox stuck. OpenShell holds the same
-// claim during every healthy create or start (a slow image pull, the
-// re-provisioning after a normal gateway restart), with the sandbox
-// provisioning or starting, so the claim alone proves nothing.
+// pendingStuckAfter is the minimum span of one observed episode of delete
+// refusals in the error phase, and the longest gap allowed between them.
+// OpenShell also holds the claim during a healthy create, start or recovery,
+// so the stuck verdict is a retry heuristic, not proof of a lost operation.
 const pendingStuckAfter = 3 * time.Minute
 
 // pendingDriverOp reports whether err is OpenShell's refusal of a sandbox
@@ -1354,22 +1354,22 @@ func pendingDriverOp(err error) bool {
 // a create or start: retry first, nothing destructive.
 func pendingRetryWording(name string) (message, detail string) {
 	return "sandbox " + name + " is busy: OpenShell is still finishing a create or start of it",
-		"wait a minute and run the command again (`defenseclaw sandbox list` shows its state). If OpenShell " +
-			"keeps it in its error state and `defenseclaw sandbox delete " + name + "` still says this after a few " +
-			"minutes, the delete then says how to clear it"
+		"wait a minute and run the command again (`defenseclaw sandbox list` shows its state). If repeated " +
+			"`defenseclaw sandbox delete " + name + "` attempts are refused while it remains in its error state, " +
+			"the delete may later explain a last resort"
 }
 
-// pendingStuck is the refusal of a delete once the operation is provably
-// stuck: OpenShell has kept the sandbox in its error state and refused it
-// for at least pendingStuckAfter, as this daemon saw. It states that
-// condition; the database move is the last resort, with what it loses. A
+// pendingStuck is the refusal of a delete after one observed error-phase
+// episode has lasted at least pendingStuckAfter. It states what was seen;
+// the database move is the last resort, with what it loses. A
 // managed account gets its administrator only: its OpenShell gateway is
 // DefenseClaw's own unit, not the commands below.
 func pendingStuck(name string, seen time.Duration, managed bool) *sandboxapi.Error {
 	minutes := int(seen / time.Minute)
-	message := "sandbox " + name + " is stuck: for " + strconv.Itoa(minutes) + " minutes OpenShell has kept it in its " +
-		"error state and refused it, because a create or start of it never finished (its OpenShell gateway was " +
-		"stopped or killed during it); OpenShell does not clear this on its own, and restarting the gateway does not either"
+	message := "sandbox " + name + " is stuck: OpenShell refused deletion in its error state on repeated attempts " +
+		"over " + strconv.Itoa(minutes) + " minutes; usually a create or start never finished (for example, its gateway " +
+		"was stopped or killed during it). When that operation never finishes, OpenShell does not clear the claim on " +
+		"its own, and restarting the gateway does not either"
 	if managed {
 		return &sandboxapi.Error{Code: sandboxapi.CodeConflict, Message: message,
 			Detail: "DefenseClaw cannot run anything in it. The OpenShell gateway on this computer is your organization's: " +
@@ -1382,45 +1382,71 @@ func pendingStuck(name string, seen time.Duration, managed bool) *sandboxapi.Err
 			"~/.local/state/openshell/gateway/openshell.db with the openshell.db-wal and openshell.db-shm files " +
 			"beside it to another folder, and start it again (`systemctl --user start openshell-gateway`). This " +
 			"loses OpenShell's record of every sandbox on this gateway, with their policies, providers and " +
-			"sessions: OpenShell no longer lists, starts, stops or deletes any of them, their containers are left " +
+			"sessions, and any providers, profiles or settings you added to this gateway yourself: OpenShell no longer " +
+			"lists, starts, stops or deletes any of those sandboxes, their containers are left " +
 			"for you to remove with docker, and work in them that was not pulled is reachable only through docker. " +
 			"Then remove this sandbox's container (`docker ps -a --filter name=--" + name + "-` names it, " +
 			"`docker rm -f` removes it) and run `defenseclaw sandbox delete " + name + "`, which releases what " +
 			"DefenseClaw held for it"}
 }
 
+type pendingEpisode struct {
+	first time.Time
+	last  time.Time
+}
+
 // pendingRefusal is the delete's refusal for an unsettled driver operation
-// of sandbox name, whose OpenShell phase is phase: the retry wording until
-// this daemon has seen it in the error state and refused for
-// pendingStuckAfter, then pendingStuck. Any other phase starts the count
-// over.
+// of sandbox name, whose OpenShell phase is phase. A non-error phase, or a
+// gap longer than pendingStuckAfter since the last refusal, starts a new
+// episode. The stuck wording needs refusals spanning pendingStuckAfter.
 func (m *Manager) pendingRefusal(name string, phase openshell.SandboxPhase, managed bool) error {
 	now := m.now()
-	m.mu.Lock()
+	m.pendingMu.Lock()
 	if m.pendingSeen == nil {
-		m.pendingSeen = map[string]time.Time{}
+		m.pendingSeen = map[string]pendingEpisode{}
 	}
-	first, seen := m.pendingSeen[name]
-	switch {
-	case phase != openshell.PhaseError:
+	episode, seen := m.pendingSeen[name]
+	if phase != openshell.PhaseError {
 		delete(m.pendingSeen, name)
-		seen = false
-	case !seen:
-		m.pendingSeen[name] = now
+	} else {
+		if !seen || now.Before(episode.last) || now.Sub(episode.last) > pendingStuckAfter {
+			episode.first = now
+		}
+		episode.last = now
+		m.pendingSeen[name] = episode
 	}
-	m.mu.Unlock()
-	if seen && now.Sub(first) >= pendingStuckAfter {
-		return pendingStuck(name, now.Sub(first), managed)
+	m.pendingMu.Unlock()
+	if phase == openshell.PhaseError && now.Sub(episode.first) >= pendingStuckAfter {
+		return pendingStuck(name, now.Sub(episode.first), managed)
 	}
 	message, detail := pendingRetryWording(name)
 	return &sandboxapi.Error{Code: sandboxapi.CodeConflict, Message: message, Detail: detail}
 }
 
-// forgetPending drops the stuck count of a sandbox that is gone.
+// forgetPending drops the episode of a sandbox that recovered, accepted an
+// operation, or was released.
 func (m *Manager) forgetPending(name string) {
-	m.mu.Lock()
+	m.pendingMu.Lock()
 	delete(m.pendingSeen, name)
-	m.mu.Unlock()
+	m.pendingMu.Unlock()
+}
+
+// getSandbox observes a recovered phase on every successful OpenShell
+// lookup, including lookups made outside the sandbox list and watcher.
+func (m *Manager) getSandbox(ctx context.Context, gw *Gateway, name string) (*openshell.Sandbox, error) {
+	sb, err := gw.Client.GetSandbox(ctx, name)
+	if err == nil && sb != nil && sb.Status.Phase != openshell.PhaseError {
+		m.forgetPending(name)
+	}
+	return sb, err
+}
+
+// forgetAllPending starts a new observation period when the gateway
+// connection is dropped or established.
+func (m *Manager) forgetAllPending() {
+	m.pendingMu.Lock()
+	m.pendingSeen = nil
+	m.pendingMu.Unlock()
 }
 
 // opSandboxName is the sandbox an upstream op names ("delete sandbox X",

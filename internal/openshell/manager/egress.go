@@ -494,7 +494,7 @@ func (m *Manager) withdrawOldSupervisorRules(ctx context.Context, b *box) error 
 	if err != nil {
 		return err
 	}
-	sb, err := gw.Client.GetSandbox(ctx, name)
+	sb, err := m.getSandbox(ctx, gw, name)
 	if err != nil {
 		return err
 	}
@@ -539,7 +539,7 @@ func (m *Manager) withdrawOldSupervisorRules(ctx context.Context, b *box) error 
 	}
 	// Confirmed detached: OpenShell reports no provider attached any more.
 	if len(active) > 0 {
-		if sb, err = gw.Client.GetSandbox(ctx, name); err != nil {
+		if sb, err = m.getSandbox(ctx, gw, name); err != nil {
 			return err
 		}
 		if sb == nil {
@@ -569,7 +569,7 @@ func (m *Manager) withdrawOldSupervisorRules(ctx context.Context, b *box) error 
 	}
 	version := cfg.PolicyVersion
 	if len(cfg.Policy.NetworkPolicies) > 0 {
-		sb, err = gw.Client.GetSandbox(ctx, name)
+		sb, err = m.getSandbox(ctx, gw, name)
 		if err != nil {
 			return err
 		}

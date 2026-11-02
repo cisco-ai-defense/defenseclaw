@@ -298,10 +298,10 @@ type Manager struct {
 	// gwErrAt paces reconnects: requests arriving within connectBackoff of
 	// a failed attempt get its error instead of dialing again.
 	gwErrAt time.Time
-	// pendingSeen (under mu) is when this daemon first saw each sandbox
-	// refused for an unsettled OpenShell driver operation while OpenShell
-	// kept it in its error state (pendingRefusal).
-	pendingSeen map[string]time.Time
+	// pendingSeen records the first and last delete refusals in one observed
+	// error-phase episode. A gap or recovery starts a new episode.
+	pendingMu   sync.Mutex
+	pendingSeen map[string]pendingEpisode
 	// gwStopped is set while the caller stopped the gateway on purpose
 	// (GatewayStopped): the failed dials until it runs again are no
 	// degraded health.
@@ -685,6 +685,8 @@ func (m *Manager) connection(ctx context.Context) (*Gateway, <-chan struct{}, er
 	} else {
 		m.health(ctx, audit.SandboxHealthReady, "", "")
 	}
+	// A new connection may be recovering an earlier error-phase sandbox.
+	m.forgetAllPending()
 	m.gw, m.gwGone, m.gwErr, m.gwStopped = gw, make(chan struct{}), nil, false
 	if m.opts.OnGateway != nil {
 		m.opts.OnGateway(nil)
@@ -820,6 +822,7 @@ func (m *Manager) closeGateway() {
 // goneLocked tells the work living on the connection that was just
 // dropped or closed that it is gone. Callers hold gwMu.
 func (m *Manager) goneLocked() {
+	m.forgetAllPending()
 	if m.gwGone != nil {
 		close(m.gwGone)
 		m.gwGone = nil
