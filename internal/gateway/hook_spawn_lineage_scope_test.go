@@ -15,6 +15,7 @@ import (
 // chat of its own, before and after the call returns. Only the thread the
 // call returns is the caller's child, also when it hooked before the result.
 func TestCodexThreadSpawnLinksOnlyTheReturnedThread(t *testing.T) {
+	freshAgentIdentityLedger(t)
 	api := &APIServer{}
 	const identity = "agt-00000000000004ae"
 	const parentSession = "01a20000-0000-7000-8000-0000000004ae"
