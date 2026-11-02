@@ -41,6 +41,7 @@ foreach ($name in @(
         'Test-DefenseClawGuardianReportErrorsAttributable',
         'Get-DefenseClawGuardianGeneration',
         'Get-DefenseClawGuardianReadinessProbe',
+        'Invoke-DefenseClawGuardianReadinessCommand',
         'Get-DefenseClawGuardianFailedTargets',
         'Get-DefenseClawGuardianPendingTargets',
         'Write-DefenseClawGuardianDegradedTargets',
