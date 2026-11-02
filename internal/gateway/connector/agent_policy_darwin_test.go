@@ -287,6 +287,31 @@ func TestPreinspectCodexPolicyIsRootOnly(t *testing.T) {
 	}
 }
 
+func TestCodexSystemRequirementsUserOwnedFolderIsReportedOnce(t *testing.T) {
+	f := newManagedPreferencesFixture(t, "")
+	parent := filepath.Join(t.TempDir(), "codex")
+	previous := codexSystemRequirementsPathForInspection
+	codexSystemRequirementsPathForInspection = func() (string, error) {
+		return filepath.Join(parent, "requirements.toml"), nil
+	}
+	t.Cleanup(func() { codexSystemRequirementsPathForInspection = previous })
+
+	ReportCodexSystemRequirementsTrust()
+	if len(f.lines()) != 0 {
+		t.Fatalf("absent /etc/codex reported: %v", f.lines())
+	}
+	if err := os.Mkdir(parent, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	ReportCodexSystemRequirementsTrust()
+	ReportCodexSystemRequirementsTrust()
+	lines := f.lines()
+	if len(lines) != 1 || !strings.HasPrefix(lines[0], "defenseclaw_boundary ") ||
+		!strings.Contains(lines[0], `connector="codex"`) || !strings.Contains(lines[0], `path="`+parent+`"`) {
+		t.Fatalf("lines = %v", lines)
+	}
+}
+
 func TestCursorMachineHooksConflictIsReported(t *testing.T) {
 	f := newManagedPreferencesFixture(t, "")
 	path := filepath.Join(t.TempDir(), "hooks.json")

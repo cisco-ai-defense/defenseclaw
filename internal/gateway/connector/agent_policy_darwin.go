@@ -378,6 +378,44 @@ func codexRequirementsUntrustedAccepted(path string, err error) bool {
 	return true
 }
 
+// ReportCodexSystemRequirementsTrust checks /etc/codex and its
+// requirements.toml on the guardian's install sweep. When the guardian asks
+// Codex's app-server for the effective policy, Codex reads those files itself
+// and the strict read above never runs, so an untrusted folder or file would
+// otherwise go unreported. A finding is logged once per streak as a boundary
+// and never fails a target; nothing is changed.
+func ReportCodexSystemRequirementsTrust() {
+	path, err := codexSystemRequirementsPathForInspection()
+	if err != nil {
+		return
+	}
+	parent := filepath.Dir(path)
+	info, err := os.Lstat(parent)
+	if err != nil {
+		agentPolicyEndStreak("untrusted\x00" + parent)
+		agentPolicyEndStreak("untrusted\x00" + path)
+		return
+	}
+	if info.Mode()&os.ModeSymlink != 0 || !info.IsDir() {
+		codexRequirementsUntrustedAccepted(parent, fmt.Errorf("managed Codex requirements parent is not a regular directory: %s", parent))
+		return
+	}
+	if err := managed.ValidateTrustedRuntimeDir(parent, "managed Codex requirements parent"); err != nil {
+		codexRequirementsUntrustedAccepted(parent, err)
+	} else {
+		agentPolicyEndStreak("untrusted\x00" + parent)
+	}
+	if info, err := os.Lstat(path); err != nil || !info.Mode().IsRegular() {
+		agentPolicyEndStreak("untrusted\x00" + path)
+		return
+	}
+	if err := managed.ValidateTrustedFilePath(path, "managed Codex requirements source"); err != nil {
+		codexRequirementsUntrustedAccepted(path, err)
+	} else {
+		agentPolicyEndStreak("untrusted\x00" + path)
+	}
+}
+
 // Codex effective requirements come from `codex app-server`. Inside the
 // guardian's per-user euid drop the real uid stays 0, so a child started
 // there could regain root: the inspection instead runs before the drop,
