@@ -25,6 +25,12 @@ func TestGAP0515SSHListingCompoundHomePaths(t *testing.T) {
 				`ls ~/.ssh && echo done`,
 				`ls ~/.ssh; pwd`,
 				`ls ~/.ssh && pwd`,
+				`ls ~/.ssh; pwd; echo done`,
+				`ls ~/.ssh; stat .; pwd`,
+				`ls ~/.ssh && pwd && echo done`,
+				`ls ~/.ssh || pwd`,
+				`ls -la ~/.ssh; pwd -P`,
+				`ls ~/.ssh; pwd > /dev/null`,
 				`ls "$HOME/.ssh"; pwd`,
 				`ls ` + absolute + `; pwd`,
 			} {
@@ -37,6 +43,8 @@ func TestGAP0515SSHListingCompoundHomePaths(t *testing.T) {
 				`ls ~/.ssh && cp payload ~/.ssh/authorized_keys`,
 				`ls ~/.ssh; pwd > ~/.ssh/authorized_keys`,
 				`ls ~/.ssh && pwd > ~/.ssh/authorized_keys`,
+				`ls ~/.ssh; pwd; echo marker >> ~/.ssh/authorized_keys`,
+				`ls ~/.ssh; stat .; pwd > ~/.ssh/authorized_keys`,
 				`ls ` + absolute + `; pwd; echo marker >> ` + filepath.Join(absolute, "authorized_keys"),
 			} {
 				if got := posixShellDecision(command, cwd, row.home); got != "protected-target" {

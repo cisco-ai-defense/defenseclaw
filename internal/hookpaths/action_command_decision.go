@@ -79,7 +79,7 @@ func actionTargetDecision(command, cwd, home string, dialect actionfacts.Dialect
 	if dialect == actionfacts.DialectPOSIX && actionWindowsHome(home) && strings.Contains(command, "*/*") {
 		if file, parsed := parseShell(command); parsed &&
 			(actionKnownReadOnlyShell(file, home) ||
-				strings.Contains(command, "pwd") && actionHomeGlobHeadThenPWD(file, home)) {
+				strings.Contains(command, "pwd") && actionReadOnlyListingCompound(file, cwd, home)) {
 			return ""
 		}
 	}

@@ -90,8 +90,7 @@ func actionPosixTargetMention(command, cwd, home string, depth int, stateOnly bo
 	file, parsed := parseShell(command)
 	if depth == 0 && parsed && (actionKnownReadOnlyShell(file, home) ||
 		!stateOnly && (actionSSHSetupAndReadsOnly(file, cwd, home) ||
-			strings.Contains(command, "pwd") &&
-				(actionSSHListingThenPWD(file, cwd, home) || actionHomeGlobHeadThenPWD(file, home)))) {
+			strings.Contains(command, "pwd") && actionReadOnlyListingCompound(file, cwd, home))) {
 		return false
 	}
 	// A function the command never calls never runs (GAP-1535).
@@ -2455,90 +2454,112 @@ func actionBashCLiteralBody(word *syntax.Word) bool {
 	return true
 }
 
-// actionSSHListingThenPWD accepts the two-statement form where an SSH
-// directory listing is followed by a bare working-directory print. The
-// listing and print have no writer operands; other compound forms continue
-// through the target scan so a later keys mutation remains visible.
-func actionSSHListingThenPWD(file *syntax.File, cwd, home string) bool {
-	var listing, print *syntax.Stmt
-	switch len(file.Stmts) {
-	case 1:
-		outer := file.Stmts[0]
-		if outer.Background || outer.Negated || outer.Coprocess || len(outer.Redirs) != 0 {
+// actionReadOnlyListingCompound recognizes a directory listing followed by
+// working-directory prints or fixed-text markers. Every statement must have
+// a read-only proof; other commands continue through the target scan.
+func actionReadOnlyListingCompound(file *syntax.File, cwd, home string) bool {
+	if file == nil || len(file.Stmts) == 0 || len(file.Stmts) > 128 {
+		return false
+	}
+	var statements []*syntax.Stmt
+	var collect func(*syntax.Stmt, int) bool
+	collect = func(stmt *syntax.Stmt, depth int) bool {
+		if depth > 128 || len(statements) >= 128 || stmt == nil || stmt.Background ||
+			stmt.Negated || stmt.Coprocess {
 			return false
 		}
-		pair, ok := outer.Cmd.(*syntax.BinaryCmd)
-		if !ok || pair.Op != syntax.AndStmt {
+		if pair, ok := stmt.Cmd.(*syntax.BinaryCmd); ok {
+			return len(stmt.Redirs) == 0 && (pair.Op == syntax.AndStmt || pair.Op == syntax.OrStmt) &&
+				collect(pair.X, depth+1) && collect(pair.Y, depth+1)
+		}
+		statements = append(statements, stmt)
+		return true
+	}
+	for _, stmt := range file.Stmts {
+		if !collect(stmt, 0) {
 			return false
 		}
-		listing, print = pair.X, pair.Y
-	case 2:
-		listing, print = file.Stmts[0], file.Stmts[1]
+	}
+	if len(statements) < 2 {
+		return false
+	}
+	first := statements[0]
+	listing, ok := first.Cmd.(*syntax.CallExpr)
+	if !ok || len(listing.Assigns) != 0 || len(listing.Args) == 0 ||
+		!actionKnownReadOnlyShell(&syntax.File{Stmts: []*syntax.Stmt{first}}, home) {
+		return false
+	}
+	program, known := staticProgramWord(listing.Args[0], home)
+	if !known {
+		return false
+	}
+	switch programBase(program) {
+	case "ls":
+		ssh := filepath.Join(home, ".ssh")
+		found := false
+		for _, word := range listing.Args[1:] {
+			value, known := actionWordValue(word, actionValues{"HOME": home}, cwd, home)
+			if known && samePathName(filepath.Clean(OperandPath(value, cwd)), ssh) {
+				found = true
+			}
+		}
+		if !found {
+			return false
+		}
+	case "head":
+		if len(listing.Args) != 4 || listing.Args[0].Lit() != "head" ||
+			listing.Args[1].Lit() != "-n" || listing.Args[2].Lit() != "1" ||
+			listing.Args[3].Lit() != "*/*" {
+			return false
+		}
+	case "echo":
+		if len(listing.Args) != 2 || listing.Args[0].Lit() != "echo" ||
+			listing.Args[1].Lit() != "*/*" {
+			return false
+		}
 	default:
 		return false
 	}
-	if listing == nil || print == nil || listing.Background || listing.Negated || listing.Coprocess ||
-		print.Background || print.Negated || print.Coprocess || len(print.Redirs) != 0 {
-		return false
-	}
-	listCall, ok := listing.Cmd.(*syntax.CallExpr)
-	if !ok || len(listCall.Assigns) != 0 || len(listCall.Args) < 2 {
-		return false
-	}
-	program, known := staticProgramWord(listCall.Args[0], home)
-	if !known || programBase(program) != "ls" ||
-		!actionKnownReadOnlyShell(&syntax.File{Stmts: []*syntax.Stmt{listing}}, home) {
-		return false
-	}
-	printCall, ok := print.Cmd.(*syntax.CallExpr)
-	if !ok || len(printCall.Assigns) != 0 || len(printCall.Args) != 1 || printCall.Args[0].Lit() != "pwd" {
-		return false
-	}
-	ssh := filepath.Join(home, ".ssh")
-	for _, word := range listCall.Args[1:] {
-		value, known := actionWordValue(word, actionValues{"HOME": home}, cwd, home)
-		if known && samePathName(filepath.Clean(OperandPath(value, cwd)), ssh) {
-			return true
-		}
-	}
-	return false
-}
-
-// actionHomeGlobHeadThenPWD accepts one exact home-relative listing and
-// a bare pwd statement. A later write or extra statement stays in the
-// normal target scan.
-func actionHomeGlobHeadThenPWD(file *syntax.File, home string) bool {
-	var read, print *syntax.Stmt
-	switch len(file.Stmts) {
-	case 1:
-		outer := file.Stmts[0]
-		if outer.Background || outer.Negated || outer.Coprocess || len(outer.Redirs) != 0 {
+	hasPWD := false
+	for _, stmt := range statements[1:] {
+		call, ok := stmt.Cmd.(*syntax.CallExpr)
+		if !ok || len(call.Assigns) != 0 || len(call.Args) == 0 {
 			return false
 		}
-		pair, ok := outer.Cmd.(*syntax.BinaryCmd)
-		if !ok || pair.Op != syntax.AndStmt {
-			return false
+		if call.Args[0].Lit() == "pwd" {
+			for _, redirect := range stmt.Redirs {
+				if !actionDiscardRedirect(redirect, home) {
+					return false
+				}
+			}
+			if len(call.Args) == 2 {
+				option, fixed := StaticWord(call.Args[1], home)
+				if !fixed || option != "-L" && option != "-P" {
+					return false
+				}
+			} else if len(call.Args) != 1 {
+				return false
+			}
+			hasPWD = true
+		} else if len(stmt.Redirs) == 0 && actionFixedTextEcho(call) {
+			continue
+		} else {
+			program, known := staticProgramWord(call.Args[0], home)
+			if !known {
+				return false
+			}
+			switch programBase(program) {
+			case "cat", "head", "tail", "ls", "dir", "stat",
+				"grep", "egrep", "fgrep", "wc", "du", "readlink", "realpath":
+				if !actionKnownReadOnlyShell(&syntax.File{Stmts: []*syntax.Stmt{stmt}}, home) {
+					return false
+				}
+			default:
+				return false
+			}
 		}
-		read, print = pair.X, pair.Y
-	case 2:
-		read, print = file.Stmts[0], file.Stmts[1]
-	default:
-		return false
 	}
-	if read == nil || print == nil || read.Background || read.Negated || read.Coprocess ||
-		print.Background || print.Negated || print.Coprocess || len(print.Redirs) != 0 {
-		return false
-	}
-	readCall, ok := read.Cmd.(*syntax.CallExpr)
-	if !ok || len(readCall.Assigns) != 0 || len(readCall.Args) != 4 ||
-		readCall.Args[0].Lit() != "head" || readCall.Args[1].Lit() != "-n" ||
-		readCall.Args[2].Lit() != "1" || readCall.Args[3].Lit() != "*/*" ||
-		!actionKnownReadOnlyShell(&syntax.File{Stmts: []*syntax.Stmt{read}}, home) {
-		return false
-	}
-	printCall, ok := print.Cmd.(*syntax.CallExpr)
-	return ok && len(printCall.Assigns) == 0 && len(printCall.Args) == 1 &&
-		printCall.Args[0].Lit() == "pwd"
+	return hasPWD
 }
 
 // actionFixedTextEchoes returns the echo calls of a command that print fixed
