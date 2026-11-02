@@ -1000,14 +1000,14 @@ def _configured_probe_names(data_dir: str | os.PathLike[str] | None) -> frozense
 
 
 def restrict_probes(connectors: list[str]) -> Any:
-    """Run only the CLIs of ``connectors`` and of the connectors the config
-    already enrolls in this command's discovery scans.
+    """Limit version probes to ``connectors`` and configured peers.
 
     ``init --connector copilot`` ran every installed agent CLI as a version
     probe, and those CLIs wrote their own config and cache folders
     (~/.codex, ~/.cursor, ~/.config/opencode, ...) into the home of a user
     who never started them (GAP-0901). Configured active peers must also be
-    probed before a setup scan replaces the gateway's version cache. Other
+    checked before a setup scan replaces the gateway's version cache; an
+    unchanged peer keeps its recent version and a changed peer is probed. Other
     agents are still found by binary and config path; their version is the
     last one observed for the same unchanged binary, else unknown. Returns
     the token for :func:`end_probe_restriction`.
@@ -1020,7 +1020,7 @@ def end_probe_restriction(token: Any) -> None:
 
 
 def discover_with_probes(connectors: list[str], **kwargs: Any) -> AgentDiscovery:
-    """Probe selected connectors and configured peers without probing strangers."""
+    """Probe selected connectors and configured peers without reusable versions."""
     token = restrict_probes(connectors)
     try:
         return discover_agents(**kwargs)
@@ -1204,10 +1204,10 @@ def discover_agents(
 
     scanned_at = _format_rfc3339(_now_utc())
     require_trusted, _prefixes = _ai_discovery_trust_config(data_dir)
-    # A restricted scan still probes every connector the config enrolls: the
-    # gateway reads each one's version from this cache when setup restarts it,
-    # so an enrolled agent that updated itself since the last scan came back
-    # unversioned and the gateway could not start (GAP-0547).
+    # A restricted scan checks every connector the config enrolls: the gateway
+    # reads each one's version from this cache when setup restarts it, so an
+    # enrolled agent that updated itself since the last scan must be probed
+    # rather than returned unversioned (GAP-0547).
     restricted = _PROBE_ONLY.get()
     probe_only = _configured_probe_names(data_dir) | (restricted or frozenset())
     # A setup of one connector also re-ran the CLI of every enrolled peer (a
@@ -1491,7 +1491,10 @@ def _resolves_unchanged_since(path: str, since: float) -> bool:
             return False
         if max(info.st_mtime, info.st_ctime) >= since:
             return False
-    return stat.S_ISREG(os.lstat(resolved).st_mode)
+    try:
+        return stat.S_ISREG(os.lstat(resolved).st_mode)
+    except OSError:
+        return False
 
 
 def _recorded_skipped_binaries(previous: dict[str, Any]) -> tuple[str, ...]:
