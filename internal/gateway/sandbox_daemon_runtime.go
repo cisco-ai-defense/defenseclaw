@@ -40,6 +40,7 @@ import (
 
 	"github.com/defenseclaw/defenseclaw/internal/audit"
 	"github.com/defenseclaw/defenseclaw/internal/config"
+	"github.com/defenseclaw/defenseclaw/internal/daemon"
 	"github.com/defenseclaw/defenseclaw/internal/managed"
 	"github.com/defenseclaw/defenseclaw/internal/openshell"
 	"github.com/defenseclaw/defenseclaw/internal/openshell/egress"
@@ -97,6 +98,10 @@ const (
 // another account holds the sandbox ports (D9); the message is Q2's
 // neutral text and names nobody.
 const SandboxAccountBusyReason = "sandbox_account_busy"
+
+// SandboxPortBusyReason is a refusal caused by an ordinary listener on a
+// configured sandbox port. It does not assert that another sandbox runs.
+const SandboxPortBusyReason = "sandbox_port_busy"
 
 // sandboxAccountBusyMessage is Q2's neutral text: it names nobody, says why
 // (one account at a time) and when it clears.
@@ -1755,9 +1760,7 @@ func (d *SandboxDaemon) adoptFloor(name string) {
 }
 
 // ensureListeners binds the ingress and egress ports unless this daemon
-// holds them already. A port another program holds refuses with the
-// account-busy text: on a managed computer that is another account's
-// sandbox daemon (D9).
+// holds them already. An occupied port is classified before refusal.
 func (d *SandboxDaemon) ensureListeners() error {
 	d.listenMu.Lock()
 	defer d.listenMu.Unlock()
@@ -1771,13 +1774,13 @@ func (d *SandboxDaemon) ensureListeners() error {
 	ingress, err := net.Listen("tcp", ingressAddr)
 	if err != nil {
 		d.listenFailed.Store(&listenerFailure{part: "ingress", err: err})
-		return sandboxListenError(err)
+		return d.sandboxListenError("ingress", d.currentSettings().Operational.IngressPort, err)
 	}
 	egressLn, err := egress.Listen(d.rt.egressAddr)
 	if err != nil {
 		_ = ingress.Close()
 		d.listenFailed.Store(&listenerFailure{part: "egress", err: err})
-		return sandboxListenError(err)
+		return d.sandboxListenError("egress", d.currentSettings().Operational.EgressPort, err)
 	}
 	d.listenFailed.Store(nil)
 	ctx, cancel := context.WithCancel(d.runCtx)
@@ -1923,15 +1926,83 @@ func (d *SandboxDaemon) listening() bool {
 	return d.listenCancel != nil
 }
 
-// sandboxListenError is the create refusal of a port the daemon could not
-// bind.
-func sandboxListenError(err error) error {
+// sandboxListenError distinguishes a sandbox daemon from an ordinary port
+// holder. An unknown listener is never called another account's sandbox.
+func (d *SandboxDaemon) sandboxListenError(part string, port int, err error) error {
 	if isAddrInUse(err) {
+		conflict := d.portConflict(part, port)
+		if conflict.Holder != "sandbox_daemon" {
+			return &sandboxapi.Error{Code: sandboxapi.CodeUnavailable, Status: http.StatusServiceUnavailable,
+				Message: conflict.Message(), Detail: SandboxPortBusyReason}
+		}
 		return &sandboxapi.Error{Code: sandboxapi.CodeUnavailable, Status: http.StatusServiceUnavailable,
-			Message: sandboxAccountBusyMessage, Detail: SandboxAccountBusyReason}
+			Message: conflict.Message(), Detail: SandboxAccountBusyReason}
 	}
 	return &sandboxapi.Error{Code: sandboxapi.CodeUnavailable, Status: http.StatusServiceUnavailable,
 		Message: "the sandbox listeners could not start", Detail: err.Error()}
+}
+
+// sandboxIngressOnPort makes one bounded, unauthenticated loopback request.
+// The answer contains only a fixed identity marker, no account state.
+func sandboxIngressOnPort(port int) bool {
+	client := &http.Client{Timeout: 300 * time.Millisecond, Transport: &http.Transport{DisableKeepAlives: true}}
+	resp, err := client.Head("http://127.0.0.1:" + strconv.Itoa(port) + sandboxIngressIdentityPath)
+	if err != nil {
+		return false
+	}
+	_ = resp.Body.Close()
+	return resp.StatusCode == http.StatusNoContent && resp.Header.Get(sandboxIngressIdentityHeader) == sandboxIngressIdentityValue
+}
+
+func (d *SandboxDaemon) portConflict(part string, port int) *sandboxapi.PortConflict {
+	return classifySandboxPort(part, port, d.uid, daemon.FindPortHolder, sandboxIngressOnPort)
+}
+
+func classifySandboxPort(part string, port, ownUID int,
+	find func(string, int) (daemon.PortHolder, error), ingressOnPort func(int) bool) *sandboxapi.PortConflict {
+	c := &sandboxapi.PortConflict{Name: part, Port: port, Holder: "process"}
+	holder, err := find("127.0.0.1", port)
+	if err == nil {
+		switch {
+		case holder.UID == ownUID:
+			c.Holder = "own_process"
+		case holder.UID >= 0:
+			c.Holder = "other_account"
+		}
+	}
+	if part == "ingress" && c.Holder != "own_process" && ingressOnPort(port) {
+		c.Holder = "sandbox_daemon"
+	}
+	return c
+}
+
+// idlePortConflict checks both configured ports while this daemon does not
+// hold them. A concurrent Ready can bind after the probe, so recheck own
+// listener state before reporting an external holder.
+func (d *SandboxDaemon) idlePortConflict() *sandboxapi.PortConflict {
+	if d.listening() {
+		return nil
+	}
+	s := d.currentSettings()
+	for _, p := range []struct {
+		name string
+		port int
+	}{{"ingress", s.Operational.IngressPort}, {"egress", s.Operational.EgressPort}} {
+		addr := net.JoinHostPort("127.0.0.1", strconv.Itoa(p.port))
+		ln, err := net.Listen("tcp", addr)
+		if err == nil {
+			_ = ln.Close()
+			continue
+		}
+		if isAddrInUse(err) {
+			conflict := d.portConflict(p.name, p.port)
+			if !d.listening() {
+				return conflict
+			}
+			return nil
+		}
+	}
+	return nil
 }
 
 // managedStatus is Status.Managed: the caller's own policy and the
@@ -2209,6 +2280,7 @@ func (c *managedSandboxController) Status(ctx context.Context) (*sandboxapi.Stat
 	if st != nil {
 		s := c.d.freshSettings(ctx)
 		st.Managed = c.d.managedStatusFor(ctx, s)
+		st.IngressPort, st.EgressPort = s.Operational.IngressPort, s.Operational.EgressPort
 		// The manager's runtime config can lag a driver switch. Enabled is
 		// the organization's current choice, separate from readiness.
 		st.Enabled = s.Enabled
@@ -2242,12 +2314,22 @@ func (c *managedSandboxController) Status(ctx context.Context) (*sandboxapi.Stat
 // the status cause until ensureListeners successfully binds again. The
 // runtime still clears every address the daemon no longer holds.
 func (d *SandboxDaemon) statusListenerAddresses(st *sandboxapi.Status) {
+	if st == nil {
+		return
+	}
 	if failure := d.lastListenerFailure(); st.Enabled && st.Available && failure != nil {
 		st.Available = false
 		st.Reason = fmt.Sprintf("the sandbox %s listener is not running in this process: %v; check openshell.%s_port, fix the listener error, then restart the DefenseClaw daemon",
 			failure.part, failure.err, failure.part)
 	}
 	d.rt.statusListenerAddresses(st)
+	if st.Enabled && st.Managed != nil {
+		st.PortConflict = d.idlePortConflict()
+		if st.PortConflict != nil {
+			st.Available = false
+			st.Reason = st.PortConflict.Message()
+		}
+	}
 }
 
 // driverInForce makes m name the compute driver the connected gateway runs

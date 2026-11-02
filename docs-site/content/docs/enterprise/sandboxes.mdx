@@ -591,6 +591,8 @@ Sandboxes on a computer serve one account at a time. While one person has a sand
 
 ![A second account on a managed Linux computer is refused: another account is using sandboxes (one account at a time), with the organization's help contacts, then sandbox doctor ending not ready for sandboxes yet](/images/sandboxes/managed/account-busy.png)
 
+`sandbox doctor` checks the configured ingress and egress ports even while your sandbox daemon is idle. If another process occupies either port, doctor fails that port check and `sandbox status` and `sandbox run` name the occupied port. Free the port, or ask your administrator to set a different `openshell.ingress_port` or `openshell.egress_port`. A running sandbox daemon of another account is identified as such without showing that account's name, UID or PID.
+
 ### The managed `defenseclaw` command
 
 Users get a `defenseclaw` command that offers only the `sandbox` commands. Anything else prints "This computer is managed; use `defenseclaw sandbox status` for your read-only status and `defenseclaw sandbox policy explain` for your policy. Other commands require an administrator." and exits 2. The administrator commands remain `defenseclaw-gateway enterprise …`, which only root can use. Run it by its packaged path (`/opt/defenseclaw/bin/defenseclaw-gateway` on Linux, `/opt/cisco/defenseclaw/bin/defenseclaw-gateway` on macOS): the folder is not on the `PATH` of a fresh root login shell. `defenseclaw sandbox setup` is refused: there is nothing for the person to set up. `sandbox enable` records only the shell wrapper in the person's rc file.
@@ -694,6 +696,7 @@ When a sandbox can't run for a person, the refusal says why in words and the rec
 | `driver_unsupported` | The organization's `driver` isn't one this computer can run | Set a driver the OS supports |
 | `prerequisite_missing` | OpenShell or Docker is missing or not set up, or the installed OpenShell is a release the host does not run sandboxes on; the sentence names the piece, and for an OpenShell release that runs no DefenseClaw sandbox it says so (`sandboxes are unavailable: OpenShell 0.1.3 runs no DefenseClaw sandbox: before 0.1.5 its network broker let a sandbox's connections bypass the sandbox policy ... ask your administrator to upgrade OpenShell`) | `status` and `verify` print the fix line (`openshell_prerequisite_missing`) |
 | `account_busy` | Another account holds the sandbox ports | Clears when that account has no sandbox running |
+| `sandbox_port_busy` | An ordinary process holds the configured sandbox ingress or egress port | Free that port, or set a different `openshell.ingress_port` or `openshell.egress_port` in the admin config |
 
 ### Registration alert reasons
 

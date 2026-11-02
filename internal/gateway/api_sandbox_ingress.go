@@ -73,6 +73,12 @@ import (
 //	mux           hook / notify / inspect / OTLP handlers
 
 const (
+	// This fixed, unauthenticated response identifies a sandbox ingress
+	// listener to the local managed daemon when a port bind fails. It carries
+	// no account, sandbox or process state.
+	sandboxIngressIdentityPath   = "/.well-known/defenseclaw-sandbox-ingress"
+	sandboxIngressIdentityHeader = "X-DefenseClaw-Sandbox-Ingress"
+	sandboxIngressIdentityValue  = "1"
 	// SandboxHookIdempotencyHeader carries a retry-stable key on sandbox hook
 	// posts. OpenShell's relay occasionally drops a response after the
 	// gateway processed the request; the hook retries once with the same key
@@ -602,7 +608,15 @@ func (a *APIServer) newSandboxIngressHandler(st *sandboxIngressState) http.Handl
 	h = CorrelationMiddleware(reg)(h)
 	h = sandboxRequestIDMiddleware(h)
 	h = inboundTraceContextMiddleware(h)
-	return a.sandboxIngressAuthenticate(st, h)
+	authenticated := a.sandboxIngressAuthenticate(st, h)
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodHead && r.URL.Path == sandboxIngressIdentityPath {
+			w.Header().Set(sandboxIngressIdentityHeader, sandboxIngressIdentityValue)
+			w.WriteHeader(http.StatusNoContent)
+			return
+		}
+		authenticated.ServeHTTP(w, r)
+	})
 }
 
 // sandboxIngressMux registers the only handlers the ingress serves and

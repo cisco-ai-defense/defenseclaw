@@ -125,14 +125,27 @@ func (a *App) runDoctor(ctx context.Context) *openshell.DoctorReport {
 	managed := onManagedHost()
 	if a.Cfg != nil || managed {
 		st = a.probeDaemon(ctx, managed)
+		if managed && st.status != nil && st.status.IngressPort > 0 && st.status.EgressPort > 0 {
+			d.Ports = []openshell.PortRequirement{
+				{Name: "ingress", Port: st.status.IngressPort},
+				{Name: "egress", Port: st.status.EgressPort},
+			}
+		} else if managed {
+			// Older daemons did not report the administrator's ports. A
+			// per-user config cannot supply their values on a managed host.
+			d.Ports = nil
+		}
 		for i := range d.Ports {
 			// A daemon can hold one port while another program owns the other, and
 			// an advertised address is not proof that this daemon bound it.
 			switch d.Ports[i].Name {
 			case "ingress":
-				d.Ports[i].ServedByDaemon = st.ingressListening
+				d.Ports[i].ServedByDaemon = st.listenersProven && st.ingressListening
 			case "egress":
-				d.Ports[i].ServedByDaemon = st.egressListening
+				d.Ports[i].ServedByDaemon = st.listenersProven && st.egressListening
+			}
+			if st.status != nil && st.status.PortConflict != nil && st.status.PortConflict.Name == d.Ports[i].Name {
+				d.Ports[i].Holder = st.status.PortConflict.Holder
 			}
 		}
 		// The uid the daemon reports (an older one reports none, and the
@@ -805,6 +818,9 @@ func (a *App) probeDaemon(ctx context.Context, managed bool) *statusProbe {
 		case !st.Enabled:
 			c.Status, c.Detail = openshell.StatusWarn, "openshell.enabled is false: sandboxes are off"
 			c.Fix = &openshell.Fix{Summary: "turn sandboxes on", Command: CommandName + " setup"}
+		case st.Managed != nil && st.PortConflict != nil:
+			p.unavailable = true
+			c.Status, c.Detail = openshell.StatusSkip, "running; sandbox port is occupied (see Sandbox "+st.PortConflict.Name+" port)"
 		case !st.Available && st.Managed != nil && st.Managed.Unavailable == "" && st.Running == 0 && st.GatewayElsewhere == "":
 			// Before the first sandbox, and after an idle daemon stopped it,
 			// the account's OpenShell gateway is not running: the next run

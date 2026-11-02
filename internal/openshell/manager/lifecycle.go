@@ -86,6 +86,7 @@ func (m *Manager) Status(ctx context.Context) (*sandboxapi.Status, error) {
 	cfg := m.config()
 	st := &sandboxapi.Status{
 		Enabled: cfg.OpenShell.Enabled, IngressAddr: m.opts.IngressAddr, EgressAddr: m.opts.EgressAddr,
+		IngressPort: m.opts.IngressPort, EgressPort: m.opts.EgressPort,
 	}
 	gw, err := m.gateway(ctx)
 	if err == nil && m.now().Sub(time.Unix(0, m.gwCheckedAt.Load())) >= driverRecheck {

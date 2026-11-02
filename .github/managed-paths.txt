@@ -107,9 +107,17 @@ uv.lock
 internal/gateway/sidecar.go
 internal/gateway/api.go
 internal/gateway/config_manager.go
+internal/gateway/api_sandbox_ingress.go
+internal/gateway/sandbox_daemon_runtime.go
 internal/gateway/connector/hookexec/
 internal/config/config.go
 internal/config/migrate_v9.go
+internal/openshell/doctor.go
+internal/openshell/manager/lifecycle.go
+internal/openshell/sandboxapi/types.go
+internal/openshell/sandboxcli/doctor.go
+internal/openshell/sandboxcli/lifecycle.go
+internal/openshell/sandboxcli/run.go
 
 # The shared OpenCode adapter is embedded into the managed plugin too.
 internal/opencodebridge/

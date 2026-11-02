@@ -642,12 +642,36 @@ func TestSandboxDaemonReadyRefusesBusyIngressBeforeInstall(t *testing.T) {
 	}
 	t.Cleanup(func() { _ = squatter.Close() })
 	f.run(t)
+	st, err := sandboxapi.NewUnixClient(f.socket).Status(context.Background())
+	if err != nil || st.PortConflict == nil || st.PortConflict.Name != "ingress" || st.PortConflict.Port != f.d.currentSettings().Operational.IngressPort ||
+		st.PortConflict.Holder == "sandbox_daemon" || !strings.Contains(st.PortConflict.Message(), "another process") {
+		t.Fatalf("idle status with an ordinary ingress listener = %+v, %v", st, err)
+	}
 	_, err = sandboxapi.NewUnixClient(f.socket).Ready(context.Background(), sandboxapi.ReadyRequest{Harness: "claudecode"})
 	if err == nil {
 		t.Fatalf("busy ingress reported ready after preparing OpenShell %d times", f.os.prepared.Load())
 	}
-	if e := sandboxapi.AsError(err); e.Detail != SandboxAccountBusyReason || f.os.prepared.Load() != 0 {
+	if e := sandboxapi.AsError(err); e.Detail == SandboxAccountBusyReason ||
+		!strings.Contains(e.Message, "another process") || !strings.Contains(e.Message, "openshell.ingress_port") || f.os.prepared.Load() != 0 {
 		t.Fatalf("busy ingress changed account or reported ready: %v (prepared %d)", err, f.os.prepared.Load())
+	}
+	if err := squatter.Close(); err != nil {
+		t.Fatal(err)
+	}
+	egressSquatter, err := net.Listen("tcp", f.d.rt.egressAddr)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = egressSquatter.Close() })
+	st, err = sandboxapi.NewUnixClient(f.socket).Status(context.Background())
+	if err != nil || st.PortConflict == nil || st.PortConflict.Name != "egress" ||
+		!strings.Contains(st.PortConflict.Message(), "openshell.egress_port") {
+		t.Fatalf("idle status with an ordinary egress listener = %+v, %v", st, err)
+	}
+	_, err = sandboxapi.NewUnixClient(f.socket).Ready(context.Background(), sandboxapi.ReadyRequest{Harness: "claudecode"})
+	if e := sandboxapi.AsError(err); e.Detail == SandboxAccountBusyReason ||
+		!strings.Contains(e.Message, "another process") || !strings.Contains(e.Message, "openshell.egress_port") {
+		t.Fatalf("busy egress = %v", err)
 	}
 }
 

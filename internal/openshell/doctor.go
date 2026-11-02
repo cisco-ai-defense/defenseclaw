@@ -381,6 +381,9 @@ type PortRequirement struct {
 	// ServedByDaemon means the running DefenseClaw daemon already listens
 	// there, so the port being taken is expected.
 	ServedByDaemon bool
+	// Holder is a privacy-safe class reported by the managed daemon after
+	// probing a busy port; it is empty when no holder was classified.
+	Holder string
 }
 
 // DockerDesktop are the Docker Desktop settings doctor reads.
@@ -694,6 +697,7 @@ func (d *Doctor) Run(ctx context.Context) *DoctorReport {
 		// The compute driver is the administrator's: the daemon says it.
 		r.report.ConfiguredDriver, r.report.Driver, r.report.Managed = "", "", true
 		r.checkUser()
+		r.checkPorts()
 		return r.report
 	}
 	if st, err := r.Gateway.Read(); err == nil {
@@ -2440,6 +2444,9 @@ func (r *doctorRun) checkPorts() {
 	for _, p := range r.Ports {
 		c := Check{ID: CheckIDPortPrefix + p.Name, Title: fmt.Sprintf("Sandbox %s port", p.Name)}
 		reconfigure := &Fix{Summary: fmt.Sprintf("choose a free port with openshell.%s_port", p.Name)}
+		if r.Managed {
+			reconfigure.Summary = fmt.Sprintf("free the port, or ask your administrator to set a different openshell.%s_port", p.Name)
+		}
 		addr := net.JoinHostPort("127.0.0.1", strconv.Itoa(p.Port))
 		switch {
 		case p.Port < 1 || p.Port > 65535:
@@ -2455,7 +2462,27 @@ func (r *doctorRun) checkPorts() {
 			case p.ServedByDaemon:
 				c.Status, c.Detail = StatusPass, addr+" is served by the DefenseClaw daemon"
 			default:
-				c.Status, c.Detail, c.Fix = StatusFail, addr+" is in use by another process", reconfigure
+				holder := "another process"
+				if r.Managed {
+					switch p.Holder {
+					case "sandbox_daemon":
+						holder = "another account's sandbox daemon"
+					case "other_account":
+						holder = "another account's process"
+					case "own_process":
+						holder = "another process of your account"
+					default:
+						if found, err := r.PortHolder("127.0.0.1", p.Port); err == nil {
+							switch {
+							case found.UID == r.Geteuid():
+								holder = "another process of your account"
+							case found.UID >= 0:
+								holder = "another account's process"
+							}
+						}
+					}
+				}
+				c.Status, c.Detail, c.Fix = StatusFail, addr+" is in use by "+holder, reconfigure
 			}
 		}
 		r.add(c)

@@ -756,6 +756,9 @@ func (a *App) checkSandboxes(ctx context.Context, api API, ready bool, run sandb
 	if st, err = a.readyManaged(ctx, api, st, run, beforeReady); err != nil {
 		return nil, err
 	}
+	if !st.Available && st.Managed != nil && st.PortConflict != nil {
+		return nil, errors.New(st.PortConflict.Message())
+	}
 	if !st.Available && st.Managed != nil && st.GatewayElsewhere != "" {
 		// Another account runs sandboxes on this computer now: the daemon's
 		// one-account-at-a-time text and who to contact (GAP-0461).

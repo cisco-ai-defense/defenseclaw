@@ -710,8 +710,8 @@ func (s *statusOnly) Write(p []byte) (int, error) { return len(p), nil }
 func (s *statusOnly) WriteHeader(code int)        { s.status = code }
 
 // The ports are bound at the first create and released when no sandbox
-// runs; a port another account holds refuses with the neutral text.
-func TestSandboxDaemonLazyPortsAndAccountBusy(t *testing.T) {
+// runs; an ordinary listener on a port gets the process-conflict text.
+func TestSandboxDaemonLazyPortsAndProcessConflict(t *testing.T) {
 	f := newSandboxDaemonFixture(t)
 	f.run(t)
 	ingress, egressAddr := f.d.api.SandboxIngressAddr(), f.d.rt.egressAddr
@@ -723,6 +723,9 @@ func TestSandboxDaemonLazyPortsAndAccountBusy(t *testing.T) {
 	}
 	if !f.d.listening() || portFree(ingress) || portFree(egressAddr) || f.d.rt.listenersReady() != nil {
 		t.Fatal("the ports are not held after ensureListeners")
+	}
+	if c := f.d.idlePortConflict(); c != nil {
+		t.Fatalf("daemon called its own listeners a port conflict: %+v", c)
 	}
 	f.running.Store(1)
 	if stop, _ := f.d.check(context.Background()); stop || !f.d.listening() {
@@ -743,7 +746,7 @@ func TestSandboxDaemonLazyPortsAndAccountBusy(t *testing.T) {
 	defer squatter.Close()
 	err = f.d.ensureListeners()
 	var apiErr *sandboxapi.Error
-	if !errors.As(err, &apiErr) || apiErr.Detail != SandboxAccountBusyReason || apiErr.Message != sandboxAccountBusyMessage {
+	if !errors.As(err, &apiErr) || apiErr.Detail != SandboxPortBusyReason || !strings.Contains(apiErr.Message, "another process") {
 		t.Fatalf("busy port: %v", err)
 	}
 	if strings.Contains(apiErr.Message, "uid") || f.d.listening() || !portFree(egressAddr) {

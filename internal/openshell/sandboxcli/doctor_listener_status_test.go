@@ -15,6 +15,7 @@ import (
 // GAP-0701: each port's readiness comes from that port's own listener.
 func TestDoctorDoesNotClaimAnUnheldEgressPort(t *testing.T) {
 	ta := newTestApp(t, "")
+	ta.daemon.status.ListenersProven = true
 	ta.daemon.status.IngressAddr = "127.0.0.1:18971"
 	ta.daemon.status.EgressAddr = ""
 	var ports []openshell.PortRequirement

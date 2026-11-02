@@ -44,6 +44,7 @@ import (
 	"time"
 
 	"github.com/defenseclaw/defenseclaw/internal/config"
+	"github.com/defenseclaw/defenseclaw/internal/daemon"
 	"github.com/defenseclaw/defenseclaw/internal/enterprisepolicy"
 	"github.com/defenseclaw/defenseclaw/internal/gateway/connector"
 	"github.com/defenseclaw/defenseclaw/internal/observability/destinationtest"
@@ -51,6 +52,39 @@ import (
 )
 
 const sandboxTestMasterToken = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+
+func TestSandboxIngressIdentityHasNoAccountState(t *testing.T) {
+	f := newSandboxIngressFixture(t)
+	srv := httptest.NewServer(f.handler)
+	t.Cleanup(srv.Close)
+	resp, err := http.Head(srv.URL + sandboxIngressIdentityPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_ = resp.Body.Close()
+	if resp.StatusCode != http.StatusNoContent || resp.Header.Get(sandboxIngressIdentityHeader) != sandboxIngressIdentityValue {
+		t.Fatalf("identity response = %d, %v", resp.StatusCode, resp.Header)
+	}
+	_, portText, err := net.SplitHostPort(strings.TrimPrefix(srv.URL, "http://"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	port, _ := strconv.Atoi(portText)
+	if !sandboxIngressOnPort(port) {
+		t.Fatal("sandbox ingress identity probe did not recognize its listener")
+	}
+	find := func(string, int) (daemon.PortHolder, error) {
+		return daemon.PortHolder{UID: os.Getuid() + 1}, nil
+	}
+	if c := classifySandboxPort("ingress", port, os.Getuid(), find, sandboxIngressOnPort); c.Holder != "sandbox_daemon" ||
+		!strings.Contains(c.Message(), "another account's sandbox daemon") {
+		t.Fatalf("marked listener = %+v", c)
+	}
+	if c := classifySandboxPort("ingress", port, os.Getuid(), find, func(int) bool { return false }); c.Holder != "other_account" ||
+		!strings.Contains(c.Message(), "another account's process") {
+		t.Fatalf("ordinary listener = %+v", c)
+	}
+}
 
 type sandboxIngressFixture struct {
 	api       *APIServer
