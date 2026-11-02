@@ -2659,13 +2659,32 @@ dc_sha256_hex() {
   printf '%s' "${out}"
 }
 
-# dc_run_prereq_checks: the installer's host prerequisite checks (the
-# gateway may execute, no uncleared system immutable flag, loopback ports
-# free, hook transport tools present, the cloud-auth library loads), run
-# before any mutation. Each finding is logged as defenseclaw_prereq with
-# its remedy and never fails the install. No checks are registered yet,
-# so it currently logs nothing.
+# dc_run_prereq_checks GATEWAY_BIN INSTALL_ROOT PORTS: the installer's host
+# prerequisite checks (the gateway may execute, no uncleared system
+# immutable flag, loopback ports free, hook transport tools present, the
+# cloud-auth library loads, installed code matches its integrity
+# manifest). The gateway binary runs the same checks the hook guardian
+# repeats on every tick, so it is called after the binary is installed and
+# the services are quiesced, before bootstrap. Each finding is logged as
+# defenseclaw_prereq (or a code-integrity line) with its remedy and never
+# fails the install. A binary that cannot execute at all is itself the
+# binary_exec_allowed finding.
 dc_run_prereq_checks() {
+  local bin="${1:-}" root="${2:-}" ports="${3:-}"
+  [[ -n "${bin}" ]] || return 0
+  if [[ ! -x "${bin}" ]]; then
+    dc_marker defenseclaw_prereq check=binary_exec_allowed path="${bin}" \
+      remedy="reinstall DefenseClaw; the gateway binary is missing or not executable"
+    return 0
+  fi
+  if ! "${bin}" enterprise prereq-check --install-root "${root}" --ports "${ports}" --exec-probe >/dev/null 2>&1; then
+    # Re-run once to capture the markers in the log; the command itself
+    # always exits 0, so a failure here means the binary did not run.
+    dc_marker defenseclaw_prereq check=binary_exec_allowed path="${bin}" \
+      remedy="allow the DefenseClaw gateway in the endpoint security or app control policy"
+    return 0
+  fi
+  "${bin}" enterprise prereq-check --install-root "${root}" --ports "${ports}" 2>&1 >/dev/null || true
   return 0
 }
 

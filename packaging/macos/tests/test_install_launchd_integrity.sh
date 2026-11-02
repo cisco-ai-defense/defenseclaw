@@ -78,16 +78,39 @@ t_install_writes_integrity_manifest() {
   fixture_cleanup "${b}"
 }
 
-t_prereq_hook_point_is_a_noop() {
+t_prereq_checks_never_fail() {
   . "${PKG_DIR}/lib/installer_lib.sh"
-  local out rc=0
+  local dir out rc=0
+  dir="$(mktemp -d)"
+
   out="$(dc_run_prereq_checks 2>&1)" || rc=$?
-  assert_status "${rc}" 0 "prerequisite hook point never fails"
-  assert_eq "${out}" "" "prerequisite hook point logs nothing yet"
+  assert_status "${rc}" 0 "prerequisite checks without a binary never fail"
+  assert_eq "${out}" "" "prerequisite checks without a binary log nothing"
+
+  rc=0
+  out="$(dc_run_prereq_checks "${dir}/missing" "${dir}" 18970 2>&1)" || rc=$?
+  assert_status "${rc}" 0 "a missing gateway binary never fails the install"
+  assert_contains "${out}" 'defenseclaw_prereq' "a missing gateway binary is a prerequisite line"
+  assert_contains "${out}" 'check="binary_exec_allowed"' "a missing gateway binary names the check"
+
+  printf '#!/bin/bash\nexit 126\n' >"${dir}/blocked"
+  chmod 0755 "${dir}/blocked"
+  rc=0
+  out="$(dc_run_prereq_checks "${dir}/blocked" "${dir}" 18970 2>&1)" || rc=$?
+  assert_status "${rc}" 0 "a binary that cannot run never fails the install"
+  assert_contains "${out}" 'check="binary_exec_allowed"' "a blocked gateway binary names the check"
+
+  printf '#!/bin/bash\necho "defenseclaw_prereq check=\\"hook_transport_tools\\"" >&2\nexit 0\n' >"${dir}/gw"
+  chmod 0755 "${dir}/gw"
+  rc=0
+  out="$(dc_run_prereq_checks "${dir}/gw" "${dir}" 18970 2>&1)" || rc=$?
+  assert_status "${rc}" 0 "prerequisite findings never fail the install"
+  assert_contains "${out}" 'hook_transport_tools' "the gateway's findings reach the install log"
+  rm -rf "${dir}"
 }
 
 run_case "install enables then bootstraps guardian, gateway, enumerator" t_install_enables_then_bootstraps_in_order
 run_case "install reports a guardian that is not loaded"               t_install_reports_guardian_not_loaded
 run_case "install writes canonical plist copies"                       t_install_writes_canonical_plist_copies
 run_case "install writes the integrity manifest"                       t_install_writes_integrity_manifest
-run_case "prerequisite hook point is a no-op"                          t_prereq_hook_point_is_a_noop
+run_case "prerequisite checks never fail the install"               t_prereq_checks_never_fail
