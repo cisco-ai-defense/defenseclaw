@@ -6429,6 +6429,7 @@ var powerShellReadOnlyCommands = map[string]bool{
 	"resolve-path": true, "rvpa": true, "get-filehash": true, "get-acl": true, "get-itemproperty": true, "gp": true,
 	"split-path": true, "join-path": true, "write-host": true, "write-output": true, "echo": true,
 	"select-object": true, "out-null": true, "out-string": true, "measure-object": true,
+	"get-date": true,
 }
 
 var (
@@ -6747,11 +6748,81 @@ func powerShellSegmentReadOnly(segment string) bool {
 	text = powerShellQuotedPath.ReplaceAllStringFunc(text, func(path string) string {
 		return strings.TrimSpace(path[1 : len(path)-1])
 	})
+	var safe bool
+	text, safe = powerShellReadOnlySubexpressions(text)
+	if !safe {
+		return false
+	}
 	if strings.ContainsAny(text, "(){}<>@`") {
 		return false
 	}
 	fields := strings.Fields(text)
 	return len(fields) > 0 && powerShellReadOnlyCommands[strings.ToLower(fields[0])]
+}
+
+// powerShellReadOnlySubexpressions replaces only subexpressions whose command
+// and nested arguments are already proven read-only. Other $() forms remain
+// unresolved, including command invocation and a writer inside output text.
+func powerShellReadOnlySubexpressions(text string) (string, bool) {
+	var out strings.Builder
+	quote := byte(0)
+	for i := 0; i < len(text); i++ {
+		c := text[i]
+		if c == '`' && quote != '\'' && i+1 < len(text) {
+			out.WriteString(text[i : i+2])
+			i++
+			continue
+		}
+		if c == '\'' || c == '"' {
+			switch quote {
+			case 0:
+				quote = c
+			case c:
+				quote = 0
+			}
+		}
+		if quote != '\'' && c == '$' && i+1 < len(text) && text[i+1] == '(' {
+			start := i + 2
+			depth := 1
+			innerQuote := byte(0)
+			j := start
+			for ; j < len(text) && depth > 0; j++ {
+				switch text[j] {
+				case '`':
+					if innerQuote != '\'' && j+1 < len(text) {
+						j++
+					}
+				case '\'', '"':
+					if innerQuote == 0 {
+						innerQuote = text[j]
+					} else if innerQuote == text[j] {
+						innerQuote = 0
+					}
+				case '(':
+					if innerQuote == 0 {
+						depth++
+					}
+				case ')':
+					if innerQuote == 0 {
+						depth--
+					}
+				}
+			}
+			if depth != 0 {
+				return "", false
+			}
+			inner := strings.TrimSpace(text[start : j-1])
+			literal := len(inner) >= 2 && inner[0] == '\'' && inner[len(inner)-1] == '\''
+			if !literal && (strings.Contains(inner, "$(") || !powerShellSegmentReadOnly(inner)) {
+				return "", false
+			}
+			out.WriteString("value")
+			i = j - 1
+			continue
+		}
+		out.WriteByte(c)
+	}
+	return out.String(), true
 }
 
 func powerShellStripLineComment(text string) string {

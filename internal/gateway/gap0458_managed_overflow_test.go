@@ -57,6 +57,9 @@ func TestGAP0458ManagedOverflowHoldAndReadTwin(t *testing.T) {
 	}{
 		{"alias", pad + "\nSet-Alias gc Set-Content -Force; gc -Path ~/.defenseclaw/config.yaml -Value x", true},
 		{"read", pad + "\nGet-Content ~/.defenseclaw/config.yaml", false},
+		{"printed path", pad + "\nWrite-Output $(Get-Date) '~/.defenseclaw/config.yaml'", false},
+		{"printed literal", pad + "\nWrite-Output $('ok') '~/.defenseclaw/config.yaml'", false},
+		{"nested write", pad + "\nWrite-Output $(Set-Content ~/.defenseclaw/config.yaml x)", true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			input := actionfacts.Input{Tool: "PowerShell", Command: tc.command, CWD: cwd, ActiveHome: home,

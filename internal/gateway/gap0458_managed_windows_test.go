@@ -35,6 +35,8 @@ func TestGAP0458WindowsManagedObserveHookHoldsOverflow(t *testing.T) {
 		}{
 			{"alias", pad + "\nSet-Alias gc Set-Content -Force; gc -Path ~/.defenseclaw/config.yaml -Value x", true},
 			{"read", pad + "\nGet-Content ~/.defenseclaw/config.yaml", false},
+			{"printed path", pad + "\nWrite-Output $(Get-Date) '~/.defenseclaw/config.yaml'", false},
+			{"printed literal", pad + "\nWrite-Output $('ok') '~/.defenseclaw/config.yaml'", false},
 		} {
 			t.Run(connector+"/"+row.name, func(t *testing.T) {
 				api := instructionProtectionTestAPI(t, connector, "observe", "HIGH")
