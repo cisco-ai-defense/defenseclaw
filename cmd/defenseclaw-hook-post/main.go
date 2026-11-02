@@ -107,6 +107,7 @@ func runWithPeer(args []string, input io.Reader, output io.Writer, peer *hookexe
 	if err != nil {
 		return err
 	}
+	hookexec.PerUserGatewayRecordObservedAnswer(os.Getenv(hookPostDataDirEnv), peer)
 	if !*curlOutput {
 		return json.NewEncoder(output).Encode(response)
 	}

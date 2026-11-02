@@ -45,12 +45,12 @@ func verifiedFreshGatewayPeer(dataDir string, peer *PerUserPeerRecord) (perUserP
 	if !ok || before.pid <= 0 || before.identity == "" {
 		return perUserPeerProcess{}, false
 	}
-	start, ok := procidentity.StartTime(before.pid)
-	if !ok {
-		return perUserPeerProcess{}, false
-	}
-	age := time.Since(start)
-	if age < 0 || age > perUserFreshGatewayWindow {
+	current, ok := freshGatewayFromRecord(dataDir)
+	return current, ok && current.pid == before.pid && current.identity == before.identity
+}
+
+func freshGatewayFromRecord(dataDir string) (perUserPeerProcess, bool) {
+	if dataDir == "" || !filepath.IsAbs(dataDir) {
 		return perUserPeerProcess{}, false
 	}
 	f, err := os.OpenFile(filepath.Join(dataDir, "gateway.pid"), os.O_RDONLY|syscall.O_NOFOLLOW|syscall.O_NONBLOCK, 0)
@@ -75,8 +75,16 @@ func verifiedFreshGatewayPeer(dataDir string, peer *PerUserPeerRecord) (perUserP
 	decoder := json.NewDecoder(io.LimitReader(f, 16<<10+1))
 	var trailing any
 	if decoder.Decode(&record) != nil || decoder.Decode(&trailing) != io.EOF ||
-		record.PID != before.pid || record.StartIdentity != before.identity ||
-		record.DataDir != dataDir || record.Executable == "" || record.StartTime <= 0 {
+		record.PID <= 0 || record.StartIdentity == "" || record.DataDir != dataDir ||
+		record.Executable == "" || record.StartTime <= 0 {
+		return perUserPeerProcess{}, false
+	}
+	start, ok := procidentity.StartTime(record.PID)
+	if !ok {
+		return perUserPeerProcess{}, false
+	}
+	age := time.Since(start)
+	if age < 0 || age > perUserFreshGatewayWindow {
 		return perUserPeerProcess{}, false
 	}
 	// The daemon captures this lower bound before spawning the child. A stale
@@ -85,12 +93,12 @@ func verifiedFreshGatewayPeer(dataDir string, peer *PerUserPeerRecord) (perUserP
 	if recordedStart.After(start.Add(2*time.Second)) || start.Sub(recordedStart) > 30*time.Second {
 		return perUserPeerProcess{}, false
 	}
-	executable, err := os.Readlink("/proc/" + strconv.Itoa(before.pid) + "/exe")
+	executable, err := os.Readlink("/proc/" + strconv.Itoa(record.PID) + "/exe")
 	if err != nil || strings.TrimSuffix(executable, " (deleted)") != record.Executable {
 		return perUserPeerProcess{}, false
 	}
-	identity, ok := procidentity.Of(before.pid)
-	return before, ok && identity == before.identity
+	identity, ok := procidentity.Of(record.PID)
+	return perUserPeerProcess{pid: record.PID, identity: identity}, ok && identity == record.StartIdentity
 }
 
 func perUserGatewayAnswerPath(dataDir string, peer perUserPeerProcess) string {
@@ -141,6 +149,25 @@ func PerUserGatewayRecordLocalAnswer(dataDir string) error {
 		return errors.New("gateway answer identity unavailable")
 	}
 	current := perUserPeerProcess{pid: os.Getpid(), identity: identity}
+	return recordPerUserGatewayAnswer(dataDir, current)
+}
+
+// PerUserGatewayRecordObservedAnswer preserves a completed response when a
+// short-lived peer socket closes before its asynchronous identity read. The
+// current account-owned start record must still verify against the kernel.
+func PerUserGatewayRecordObservedAnswer(dataDir string, peer *PerUserPeerRecord) {
+	current, ok := freshGatewayFromRecord(dataDir)
+	if !ok {
+		return
+	}
+	if observed, known := peer.wait(0); known &&
+		(observed.pid != current.pid || observed.identity != current.identity) {
+		return
+	}
+	_ = recordPerUserGatewayAnswer(dataDir, current)
+}
+
+func recordPerUserGatewayAnswer(dataDir string, current perUserPeerProcess) error {
 	if answered, valid := perUserGatewayAnswerSeen(dataDir, current); answered && valid {
 		return nil
 	} else if !valid {

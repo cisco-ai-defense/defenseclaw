@@ -81,7 +81,6 @@ func TestGAP0295FreshGatewayNoAnswerUsesOutageExit(t *testing.T) {
 }
 
 const freshAnsweredHelperEnv = "DC_TEST_FRESH_ANSWERED_HELPER"
-const freshAnsweredHelperDirEnv = "DC_TEST_FRESH_ANSWERED_DIR"
 
 func TestGAP0295FreshAnsweredHelper(t *testing.T) {
 	addr := os.Getenv(freshAnsweredHelperEnv)
@@ -97,11 +96,6 @@ func TestGAP0295FreshAnsweredHelper(t *testing.T) {
 	_ = http.Serve(listener, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		_, _ = io.Copy(io.Discard, r.Body)
 		if calls.Add(1) == 1 {
-			if err := hookexec.PerUserGatewayRecordLocalAnswer(os.Getenv(freshAnsweredHelperDirEnv)); err != nil {
-				t.Error(err)
-				w.WriteHeader(http.StatusServiceUnavailable)
-				return
-			}
 			w.Header().Set("Content-Type", "application/json")
 			_, _ = w.Write([]byte(`{"action":"allow"}`))
 			return
@@ -119,7 +113,7 @@ func TestGAP0295FirstAnswerEndsFreshWindow(t *testing.T) {
 	addr := free.Addr().String()
 	_ = free.Close()
 	cmd := exec.Command(os.Args[0], "-test.run=^TestGAP0295FreshAnsweredHelper$")
-	cmd.Env = append(os.Environ(), freshAnsweredHelperEnv+"="+addr, freshAnsweredHelperDirEnv+"="+dir)
+	cmd.Env = append(os.Environ(), freshAnsweredHelperEnv+"="+addr)
 	stdout, err := cmd.StdoutPipe()
 	if err != nil {
 		t.Fatal(err)

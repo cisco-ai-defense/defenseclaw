@@ -10,3 +10,6 @@ func PerUserGatewayFreshStartNoAnswer(string, *PerUserPeerRecord) bool { return 
 
 // PerUserGatewayRecordLocalAnswer has no fresh-start window on other platforms.
 func PerUserGatewayRecordLocalAnswer(string) error { return nil }
+
+// PerUserGatewayRecordObservedAnswer has no fresh-start window on other platforms.
+func PerUserGatewayRecordObservedAnswer(string, *PerUserPeerRecord) {}
