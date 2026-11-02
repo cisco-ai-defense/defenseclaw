@@ -3706,30 +3706,78 @@ func actionWindowsPipedIntoShell(words []string, end int) bool {
 		for last < len(words) && words[last] != ";" && words[last] != "|" && words[last] != "||" && words[last] != "&" && words[last] != "&&" {
 			last++
 		}
-		if strings.TrimSuffix(strings.ToLower(programBase(strings.ReplaceAll(words[stage], `\`, "/"))), ".exe") == "env" {
-			stage++
-			for stage < last {
-				word := words[stage]
-				switch word {
-				case "--":
-					stage++
-				case "-u", "--unset", "-C", "--chdir":
-					stage += 2
-				default:
-					if strings.HasPrefix(word, "-") || strings.Contains(word, "=") {
-						stage++
-						continue
-					}
-				}
-				break
-			}
-		}
-		if stage < last && actionWindowsScriptReader(words[stage]) {
+		if actionWindowsPipelineStageReadsScript(words[stage:last]) {
 			return true
 		}
 		k = last
 	}
 	return false
+}
+
+// A plain shell reads stdin, as does one launched by env. Keep the env
+// argument grammar here so an assignment after -- and a split string do
+// not turn an executable pipeline into display text (GAP-0227).
+func actionWindowsPipelineStageReadsScript(stage []string) bool {
+	if len(stage) == 0 {
+		return false
+	}
+	if strings.TrimSuffix(strings.ToLower(programBase(strings.ReplaceAll(stage[0], `\`, "/"))), ".exe") != "env" {
+		return actionWindowsScriptReader(stage[0])
+	}
+	options := true
+	for i := 1; i < len(stage); i++ {
+		word := stage[i]
+		if word == "--" {
+			options = false
+			continue
+		}
+		if options {
+			switch {
+			case word == "-i" || word == "--ignore-environment" || word == "-0" || word == "--null" || word == "-v" || word == "--debug":
+				continue
+			case word == "-u" || word == "--unset" || word == "-C" || word == "--chdir":
+				i++
+				if i >= len(stage) {
+					return false
+				}
+				continue
+			case strings.HasPrefix(word, "--unset=") || strings.HasPrefix(word, "--chdir="):
+				continue
+			case word == "-S" || word == "--split-string":
+				if i+1 >= len(stage) {
+					return false
+				}
+				return actionWindowsEnvSplitReadsScript(stage[i+1])
+			case strings.HasPrefix(word, "--split-string="):
+				return actionWindowsEnvSplitReadsScript(strings.TrimPrefix(word, "--split-string="))
+			}
+		}
+		if actionWindowsEnvAssignment(word) {
+			continue
+		}
+		return actionWindowsScriptReader(word)
+	}
+	return false
+}
+
+func actionWindowsEnvAssignment(word string) bool {
+	name, _, ok := strings.Cut(word, "=")
+	if !ok || name == "" {
+		return false
+	}
+	for i := 0; i < len(name); i++ {
+		c := name[i]
+		if c == '_' || c >= 'a' && c <= 'z' || c >= 'A' && c <= 'Z' || i > 0 && c >= '0' && c <= '9' {
+			continue
+		}
+		return false
+	}
+	return true
+}
+
+func actionWindowsEnvSplitReadsScript(value string) bool {
+	words := strings.Fields(value)
+	return len(words) > 0 && actionWindowsScriptReader(words[0])
 }
 
 // actionWindowsScriptReader reports a program that runs the text it reads
