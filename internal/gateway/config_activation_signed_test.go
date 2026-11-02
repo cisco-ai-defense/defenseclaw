@@ -810,9 +810,10 @@ func TestManagedStartupNoAnchorReloadOrders(t *testing.T) {
 			}
 			mgr.assetDirs = func() []string { return nil }
 			mgr.setStartupSource(path, edited)
-			if before == "watch_first" {
+			switch before {
+			case "watch_first":
 				_ = mgr.Reload(t.Context(), "watch")
-			} else if before == "asset_watch_first" {
+			case "asset_watch_first":
 				_ = mgr.ReloadAssets(t.Context(), "watch_assets")
 			}
 			ctx, cancel := context.WithCancel(t.Context())

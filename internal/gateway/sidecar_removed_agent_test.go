@@ -304,7 +304,7 @@ func TestSetupConnectorsIsolatedSkipsAnActiveConnectorWhoseAgentExecutableIsGone
 			if err := connector.SaveActiveConnectors(s.cfg.DataDir, []string{"claudecode", "codex"}); err != nil {
 				t.Fatal(err)
 			}
-			var setupErr error = fmt.Errorf("Amp executable admission: inspect selected executable: lstat %s: %w",
+			setupErr := fmt.Errorf("Amp executable admission: inspect selected executable: lstat %s: %w",
 				executable, connector.ErrExecutableAdmission)
 			if tc.stale {
 				setupErr = fmt.Errorf("discovery did not find the agent: %w", ErrHookContractAdmission)
