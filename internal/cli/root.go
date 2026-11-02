@@ -114,7 +114,8 @@ func rootPersistentPreRunE(cmd *cobra.Command, _ []string) error {
 	loadDotEnvIntoOS(filepath.Join(config.DefaultDataPath(), ".env"))
 	var err error
 	cfgPath := config.ConfigPath()
-	cfg, activeObservabilityV8Startup, err = loadGatewayConfigV8(cfgPath)
+	role := managedServiceRoleFor(cmd)
+	cfg, activeObservabilityV8Startup, err = loadGatewayConfigV8ForService(cmd.Context(), cfgPath, role)
 	if err != nil {
 		// Spec 003 B2: in managed_enterprise, tolerate a missing
 		// config.yaml at startup by fsnotify-waiting for UCB to drop
@@ -138,6 +139,9 @@ func rootPersistentPreRunE(cmd *cobra.Command, _ []string) error {
 		}
 	}
 	version.SetBinaryVersion(appVersion)
+	if role == managedServiceGateway {
+		repairGatewayRuntimePlatform(cfg)
+	}
 	// Only the root sidecar command (the gateway service) waits out an audit
 	// store repair; subcommands fail fast.
 	auditStore, err = openGatewayAuditStore(cmd.Context(), cfg.DeploymentMode, cfg.AuditDB, cmd.Parent() == nil)
@@ -208,7 +212,7 @@ func rootPersistentPreRunNoAuditE(cmd *cobra.Command, _ []string) error {
 	if err := daemon.RegisterCurrentProcess(); err != nil {
 		return err
 	}
-	if err := loadGatewayCommandConfigOnly(); err != nil {
+	if err := loadGatewayCommandConfigOnlyFor(cmd); err != nil {
 		return err
 	}
 	return nil
@@ -220,6 +224,13 @@ func rootPersistentPreRunNoAuditE(cmd *cobra.Command, _ []string) error {
 // SQLite owner beside the running daemon, because closing that connection can
 // unlink the daemon's live WAL/SHM files on supported SQLite implementations.
 func loadGatewayCommandConfigOnly() error {
+	return loadGatewayCommandConfigOnlyFor(nil)
+}
+
+// loadGatewayCommandConfigOnlyFor is loadGatewayCommandConfigOnly for cmd; a
+// long-running managed service repairs and retries its config load instead
+// of exiting (see loadGatewayConfigV8ForService).
+func loadGatewayCommandConfigOnlyFor(cmd *cobra.Command) error {
 	// Cobra normally executes this process once, but tests and embedders can
 	// execute the command tree repeatedly. Never retain a previous source.
 	activeObservabilityV8Startup = nil
@@ -231,7 +242,13 @@ func loadGatewayCommandConfigOnly() error {
 	loadDotEnvIntoOS(filepath.Join(config.DefaultDataPath(), ".env"))
 
 	var err error
-	cfg, activeObservabilityV8Startup, err = loadGatewayConfigV8(config.ConfigPath())
+	var ctx context.Context
+	if cmd != nil {
+		ctx = cmd.Context()
+	}
+	cfg, activeObservabilityV8Startup, err = loadGatewayConfigV8ForService(
+		ctx, config.ConfigPath(), managedServiceRoleFor(cmd),
+	)
 	if err != nil {
 		return fmt.Errorf("failed to load config: %w", err)
 	}

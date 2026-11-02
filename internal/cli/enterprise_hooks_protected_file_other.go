@@ -17,9 +17,3 @@ func writeEnterpriseHookProtectedFile(path string, data []byte) error {
 func writeEnterpriseHookAdminOnlyFile(path string, data []byte) error {
 	return safefile.Write(path, data)
 }
-
-// repairEnterpriseHookManifestACL is Windows-only; off-Windows targets.yaml
-// has no AdminFile descriptor to re-stamp.
-func repairEnterpriseHookManifestACL(string) error {
-	return nil
-}
