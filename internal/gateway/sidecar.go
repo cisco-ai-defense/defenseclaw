@@ -75,7 +75,7 @@ import (
 )
 
 var launchConfigRestartHelper = defaultLaunchConfigRestartHelper
-var validateManagedGuardianAuthorization = managed.ValidateTrustedFilePath
+var validateManagedGuardianAuthorization = managed.AcceptTrustedFileDrift
 
 const (
 	modelRouterHealthCheckInterval = 10 * time.Second

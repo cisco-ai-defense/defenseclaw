@@ -18,12 +18,8 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/managed"
 )
 
-// repairEnterpriseHookManagedRuntimePlatform is a no-op off Windows. Managed
-// runtime drift there is an ownership/mode question the POSIX validators already
-// answer, and there is no ACL template for the guardian to reapply.
-func repairEnterpriseHookManagedRuntimePlatform(string, string) error { return nil }
-
 func validateEnterpriseHookScopedTokenLocation(dataDir, connectorName string) error {
+	repairEnterpriseHookScopedTokenPlatform(dataDir, connectorName)
 	tokenPath, err := connector.HookAPITokenFilePath(dataDir, connectorName)
 	if err != nil {
 		return err
@@ -170,7 +166,7 @@ func alignEnterpriseHookTokenPathOwner(dataDir, tokenPath, label string) error {
 	if !ok {
 		return fmt.Errorf("enterprise hooks: cannot inspect managed data_dir owner")
 	}
-	uid, gid := int(st.Uid), int(st.Gid)
+	uid, gid := enterpriseHookTokenOwnerPlatform(st)
 	tokenDir := filepath.Dir(tokenPath)
 	if _, err := validateEnterpriseHookManagedDir(tokenDir, "hook token dir", true); err != nil {
 		return err
@@ -208,6 +204,7 @@ func alignEnterpriseHookTokenPathOwner(dataDir, tokenPath, label string) error {
 var enterpriseHookTokenChmod = os.Chmod
 
 func validateEnterpriseOTLPTokenLocation(dataDir string, scope connector.OTLPPathTokenScope) error {
+	repairEnterpriseOTLPTokenPlatform(dataDir, scope)
 	if _, err := validateEnterpriseHookManagedDir(dataDir, "managed data_dir", true); err != nil {
 		return err
 	}
@@ -241,7 +238,7 @@ func alignEnterpriseOTLPTokenOwner(dataDir string, scope connector.OTLPPathToken
 	if !ok {
 		return fmt.Errorf("enterprise hooks: cannot inspect managed data_dir owner")
 	}
-	uid, gid := int(st.Uid), int(st.Gid)
+	uid, gid := enterpriseHookTokenOwnerPlatform(st)
 	tokenPath, err := connector.OTLPPathTokenFilePath(dataDir, scope)
 	if err != nil {
 		return err
@@ -296,6 +293,3 @@ func validateEnterpriseHookManagedDir(path, label string, requireExisting bool) 
 	}
 	return info, nil
 }
-
-// repairEnterpriseHookGatewayDataPathsPlatform is Windows-only.
-func repairEnterpriseHookGatewayDataPathsPlatform() {}

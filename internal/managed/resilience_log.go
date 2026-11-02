@@ -74,3 +74,13 @@ func FormatResilienceEvent(marker string, fields map[string]string) string {
 	}
 	return b.String()
 }
+
+// EmitResilienceEventOnce logs one resilience event unless the identical
+// line was already logged for path by this process, so a finding that a
+// service re-checks on every pass is reported once per streak.
+func EmitResilienceEventOnce(path, marker string, fields map[string]string) {
+	if !advisoryLogDedupe.shouldEmit(path, marker, FormatResilienceEvent(marker, fields)) {
+		return
+	}
+	EmitResilienceEvent(marker, fields)
+}

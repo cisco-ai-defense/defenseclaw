@@ -11,8 +11,6 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
-	"strconv"
-	"strings"
 	"syscall"
 	"time"
 
@@ -62,33 +60,12 @@ func hookAPIValidateDirectoryACLWithInspector(path string, timeout time.Duration
 		}
 		return fmt.Errorf("inspect macOS ACL for %s: %w", path, err)
 	}
-	for _, line := range strings.Split(string(output), "\n") {
-		normalized := strings.ToLower(strings.TrimSpace(line))
-		colon := strings.IndexByte(normalized, ':')
-		if colon <= 0 {
-			continue
-		}
-		if _, err := strconv.ParseUint(normalized[:colon], 10, 32); err != nil {
-			continue
-		}
-		allowIndex := strings.Index(normalized, " allow ")
-		if allowIndex < 0 {
-			continue
-		}
-		fields := strings.Fields(normalized[allowIndex+len(" allow "):])
-		if len(fields) == 0 {
-			// Unreadable `ls -lde` output is a structural failure, not a
-			// permission judgement, so it must not be eligible for the ancestor
-			// advisory downgrade in managed.RelaxAncestorTrustJudgement.
-			return fmt.Errorf("cannot parse macOS allow ACL on %s", path)
-		}
-		for _, permission := range strings.Split(fields[0], ",") {
-			switch permission {
-			case "write", "add_file", "append", "add_subdirectory", "delete", "delete_child",
-				"writeattr", "writeextattr", "writesecurity", "chown":
-				return managed.NewTrustVerdict("%s has write-capable macOS ACL entry", path)
-			}
-		}
+	// The managed rule judges effective write authority for principals other
+	// than root, wheel and admin, and leaves read, deny and inherit-only
+	// entries alone. A standalone process keeps the strict rule: any allow
+	// entry with a write-class right.
+	if managed.StandaloneTrustScope() {
+		return managed.JudgeDarwinACLOutputStrict(path, output)
 	}
-	return nil
+	return managed.JudgeDarwinACLOutput(path, output)
 }

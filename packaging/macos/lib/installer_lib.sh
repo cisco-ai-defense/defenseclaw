@@ -14,6 +14,10 @@
 # They DO:
 #   - parse strings, render YAML, run pure file I/O against caller-owned
 #     paths (e.g. a tmpdir under /tmp/dctest-XXXX).
+#
+# The one exception is the "resilience markers and repair helpers"
+# section at the end of the file: those helpers re-stamp DefenseClaw-owned
+# paths the caller names (chflags, chmod, chown) and never anything else.
 
 # ---- connector list parsing --------------------------------------------
 
@@ -1401,6 +1405,9 @@ _enumerate_users_warn() {
 # and would otherwise emit spurious warns).
 enumerate_local_users() {
   local names name uid gid home
+  # DC_INSTALLER_USERS_ROOT is a test seam: install.sh sets it only for an
+  # unprivileged fixture run so fixture homes count as local homes.
+  local users_root="${DC_INSTALLER_USERS_ROOT:-/Users}"
   names="$(dscl . -list /Users UniqueID 2>/dev/null)" || {
     _enumerate_users_warn "(all users)" "dscl . -list /Users UniqueID failed — cannot enumerate local users"
     return 0
@@ -1433,7 +1440,7 @@ enumerate_local_users() {
       _enumerate_users_warn "${name}" "NFSHomeDirectory is empty in Open Directory"
       continue
     fi
-    if [[ "${home}" != /Users/* ]]; then
+    if [[ "${home}" != "${users_root}"/* ]]; then
       _enumerate_users_warn "${name}" "home '${home}' is not under /Users/ (network / mobile / MDM account)"
       continue
     fi
@@ -2420,5 +2427,457 @@ move_legacy_aside() {
     return 4
   fi
   printf '[install] moved legacy path aside: %s -> %s\n' "${path}" "${target}"
+  return 0
+}
+
+# ---- resilience markers and repair helpers -----------------------------
+#
+# Unlike the pure helpers above, this section acts on the filesystem.
+# install.sh and uninstall.sh use it to repair DefenseClaw-owned objects
+# instead of aborting, and to log every repair, acceptance, skip,
+# boundary, prerequisite, recovery and degraded state in the same line
+# format the Go services write, so DART triage greps one vocabulary
+# across install.log, uninstall.log and the service logs.
+#
+# Contract for every helper below:
+#   - never exits the shell and never trips `set -e` in the caller: a
+#     failure is logged with a marker and returned as a non-zero status;
+#   - never follows a symlink: a link or wrong-type object at a
+#     DefenseClaw-owned path is moved aside (the link target is never
+#     touched) and logged as defenseclaw_boundary;
+#   - bounded: transient failures are retried DC_RETRY_ATTEMPTS times.
+
+# Component name stamped into every marker (install, uninstall, ...).
+DC_MARKER_COMPONENT="${DC_MARKER_COMPONENT:-}"
+# When set, every marker and dc_warn line is also appended to this file.
+# uninstall.sh uses it because it writes its log directly rather than
+# through a tee.
+DC_MARKER_LOG_FILE="${DC_MARKER_LOG_FILE:-}"
+DC_RETRY_ATTEMPTS="${DC_RETRY_ATTEMPTS:-3}"
+DC_RETRY_SLEEP="${DC_RETRY_SLEEP:-0.5}"
+
+# dc_go_quote VALUE -> stdout: VALUE in Go strconv.Quote form.
+#
+# Backslash and double quote are escaped; \a \b \f \n \r \t \v use their
+# short escapes and every other ASCII control byte (and DEL) becomes
+# \xHH. Bytes >= 0x80 are copied through unchanged, which matches Go for
+# valid UTF-8 (the only input the callers produce: paths, user names and
+# reason tokens).
+dc_go_quote() {
+  local LC_ALL=C
+  local s="${1-}"
+  s="${s//\\/\\\\}"
+  s="${s//\"/\\\"}"
+  case "${s}" in
+    *[[:cntrl:]]*) ;;
+    *)
+      printf '"%s"' "${s}"
+      return 0
+      ;;
+  esac
+  local out="" c code hex i n=${#s}
+  for (( i = 0; i < n; i++ )); do
+    c="${s:i:1}"
+    case "${c}" in
+      $'\a') out="${out}\\a" ;;
+      $'\b') out="${out}\\b" ;;
+      $'\f') out="${out}\\f" ;;
+      $'\n') out="${out}\\n" ;;
+      $'\r') out="${out}\\r" ;;
+      $'\t') out="${out}\\t" ;;
+      $'\v') out="${out}\\v" ;;
+      [[:cntrl:]])
+        printf -v code '%d' "'${c}"
+        printf -v hex '\\x%02x' "${code}"
+        out="${out}${hex}"
+        ;;
+      *) out="${out}${c}" ;;
+    esac
+  done
+  printf '"%s"' "${out}"
+}
+
+# dc_format_marker MARKER [key=value ...] -> stdout: one marker line.
+#
+# Same output as managed.FormatResilienceEvent: the marker, then each
+# key="value" pair in byte order of key, values Go-quoted. A repeated key
+# keeps its last value. Keys outside [A-Za-z0-9_.-] are dropped. When
+# DC_MARKER_COMPONENT is set and the caller passed no component, it is
+# added as component=<name>.
+dc_format_marker() {
+  local marker="${1:-}"
+  [[ -n "${marker}" ]] || return 1
+  shift
+  local -a keys=() vals=()
+  local arg key val i found
+  if [[ -n "${DC_MARKER_COMPONENT}" ]]; then
+    keys=("component")
+    vals=("${DC_MARKER_COMPONENT}")
+  fi
+  for arg in "$@"; do
+    case "${arg}" in
+      *=*) key="${arg%%=*}"; val="${arg#*=}" ;;
+      *)   key="${arg}"; val="" ;;
+    esac
+    [[ "${key}" =~ ^[A-Za-z0-9_.-]+$ ]] || continue
+    found=""
+    if (( ${#keys[@]} > 0 )); then
+      for (( i = 0; i < ${#keys[@]}; i++ )); do
+        if [[ "${keys[i]}" == "${key}" ]]; then
+          vals[i]="${val}"
+          found="1"
+        fi
+      done
+    fi
+    if [[ -z "${found}" ]]; then
+      keys+=("${key}")
+      vals+=("${val}")
+    fi
+  done
+  local line="${marker}" sorted
+  if (( ${#keys[@]} > 0 )); then
+    sorted="$(printf '%s\n' "${keys[@]}" | LC_ALL=C sort)"
+    while IFS= read -r key; do
+      [[ -n "${key}" ]] || continue
+      for (( i = 0; i < ${#keys[@]}; i++ )); do
+        if [[ "${keys[i]}" == "${key}" ]]; then
+          line="${line} ${key}=$(dc_go_quote "${vals[i]}")"
+          break
+        fi
+      done
+    done <<< "${sorted}"
+  fi
+  printf '%s\n' "${line}"
+}
+
+# _dc_emit LINE: write one log line to stderr and, when configured, to
+# DC_MARKER_LOG_FILE. A log sink that cannot be written never fails the
+# caller.
+_dc_emit() {
+  printf '%s\n' "$1" >&2
+  if [[ -n "${DC_MARKER_LOG_FILE}" ]]; then
+    printf '%s\n' "$1" >> "${DC_MARKER_LOG_FILE}" 2>/dev/null || true
+  fi
+  return 0
+}
+
+# dc_marker MARKER [key=value ...]: log one resilience event.
+dc_marker() {
+  local line
+  line="$(dc_format_marker "$@")" || return 0
+  _dc_emit "${line}"
+}
+
+# dc_warn MESSAGE [MARKER key=value ...]: log a human-readable warning
+# and, when a marker is given, the matching marker line. Always returns 0
+# so a caller can write `step || dc_warn ...` and carry on.
+dc_warn() {
+  local message="${1:-}"
+  shift || true
+  _dc_emit "[${DC_MARKER_COMPONENT:-defenseclaw}] WARN: ${message}"
+  if (( $# > 0 )); then
+    dc_marker "$@"
+  fi
+  return 0
+}
+
+# dc_retry CMD [ARGS ...]: run CMD up to DC_RETRY_ATTEMPTS times, pausing
+# DC_RETRY_SLEEP seconds between attempts. Returns CMD's last status.
+dc_retry() {
+  local attempt=1 rc=0
+  while :; do
+    rc=0
+    "$@" || rc=$?
+    if (( rc == 0 )); then
+      return 0
+    fi
+    if (( attempt >= DC_RETRY_ATTEMPTS )); then
+      return "${rc}"
+    fi
+    attempt=$((attempt + 1))
+    sleep "${DC_RETRY_SLEEP}" 2>/dev/null || true
+  done
+}
+
+# dc_move_aside PATH REASON: clear a symlink or wrong-type object off a
+# DefenseClaw-owned PATH and log defenseclaw_boundary. A symlink is
+# unlinked (its target is never touched); anything else is renamed to
+# PATH.defenseclaw-moved-<ts>. Returns 0 when PATH is gone afterwards.
+dc_move_aside() {
+  local path="$1" reason="$2"
+  local dest suffix="" i
+  # A user flag on the entry itself blocks unlink(2) and rename(2) even
+  # for root; -h clears it on a link without touching the target.
+  chflags -h nouchg,nouappnd "${path}" 2>/dev/null || true
+  if [[ -L "${path}" ]]; then
+    local target
+    target="$(readlink -- "${path}" 2>/dev/null || echo '?')"
+    if dc_retry /bin/rm -f -- "${path}" 2>/dev/null; then
+      dc_marker defenseclaw_boundary path="${path}" reason="${reason}" action=unlinked target="${target}"
+      return 0
+    fi
+    dc_marker defenseclaw_boundary path="${path}" reason="${reason}" action=unlink_failed target="${target}"
+    return 1
+  fi
+  dest="${path}.defenseclaw-moved-$(date +%Y%m%d%H%M%S)"
+  for (( i = 0; i < 100; i++ )); do
+    if [[ ! -e "${dest}${suffix}" && ! -L "${dest}${suffix}" ]]; then
+      break
+    fi
+    suffix=".${i}"
+  done
+  dest="${dest}${suffix}"
+  if dc_retry /bin/mv -- "${path}" "${dest}" 2>/dev/null; then
+    dc_marker defenseclaw_boundary path="${path}" reason="${reason}" action=moved_aside moved_to="${dest}"
+    return 0
+  fi
+  dc_marker defenseclaw_boundary path="${path}" reason="${reason}" action=move_aside_failed
+  return 1
+}
+
+# _dc_meta PATH -> "owner:group mode flags acl|-" for change reporting.
+_dc_meta() {
+  local meta acl="-"
+  meta="$(stat -f '%Su:%Sg %Lp %Sf' "$1" 2>/dev/null)" || meta="? ? ?"
+  if [[ -n "$(ls -lde -- "$1" 2>/dev/null | sed -n '2p')" ]]; then
+    acl="acl"
+  fi
+  printf '%s %s' "${meta}" "${acl}"
+}
+
+# _dc_mode_norm MODE -> MODE without leading zeros (0750 -> 750).
+_dc_mode_norm() {
+  local m="$1"
+  while [[ "${m}" == 0?* ]]; do
+    m="${m#0}"
+  done
+  printf '%s' "${m}"
+}
+
+# _dc_restamp_step TAG CMD...: one dc_restamp repair step, with retry. On
+# failure it adds TAG to the caller's `failed` and appends the command's
+# output to the caller's `err` (bash dynamic scope), so a later successful
+# step never erases why an earlier one failed.
+_dc_restamp_step() {
+  local tag="$1" out
+  shift
+  out="$(dc_retry "$@" 2>&1)" && return 0
+  failed="${failed},${tag}"
+  err="${err:+${err} }${out}"
+  return 0
+}
+
+# dc_restamp PATH OWNER:GROUP MODE [-R] [-d|-f] [-q]
+#
+# Re-stamp a DefenseClaw-owned PATH to its canonical form, in order:
+#   1. structure: a symlink, a wrong-type object (-d expects a directory,
+#      -f a regular file) or a file with more than one hard link is moved
+#      aside with dc_move_aside and the helper returns 0 with PATH absent,
+#      so the caller recreates it;
+#   2. clear the uchg/uappnd user flags (and schg/sappnd, which root can
+#      clear at the default securelevel);
+#   3. strip the ACL (chmod -N);
+#   4. chown OWNER:GROUP, then chmod MODE.
+# Every step acts on the entry itself (-h), never through a link. With -R
+# the flag, ACL and owner steps cover the whole tree without following
+# links, group/other write is removed from every entry except sockets,
+# and MODE applies to PATH itself; a symlink inside the tree is logged
+# and left alone.
+#
+# A changed object logs one defenseclaw_repair naming what changed (-q
+# skips that line for an object the caller has just created). A
+# step that still fails after DC_RETRY_ATTEMPTS logs defenseclaw_accept
+# (or defenseclaw_prereq for a system flag that cannot be cleared) and
+# returns 1; the caller continues. A missing PATH is a no-op.
+dc_restamp() {
+  local path="${1:-}" owner_group="${2:-}" mode="${3:-}"
+  if [[ -z "${path}" || -z "${owner_group}" || -z "${mode}" ]]; then
+    return 2
+  fi
+  shift 3
+  local recursive="false" want_type="" quiet_repair="false" opt
+  for opt in "$@"; do
+    case "${opt}" in
+      -R) recursive="true" ;;
+      -d) want_type="d" ;;
+      -f) want_type="f" ;;
+      -q) quiet_repair="true" ;;
+    esac
+  done
+
+  if [[ ! -e "${path}" && ! -L "${path}" ]]; then
+    return 0
+  fi
+  if [[ -L "${path}" ]]; then
+    dc_move_aside "${path}" symlink
+    return $?
+  fi
+  if [[ "${want_type}" == "d" && ! -d "${path}" ]] \
+     || [[ "${want_type}" == "f" && ! -f "${path}" ]]; then
+    dc_move_aside "${path}" wrong_type
+    return $?
+  fi
+  if [[ -f "${path}" ]]; then
+    local nlink
+    nlink="$(stat -f '%l' "${path}" 2>/dev/null || echo 1)"
+    if [[ "${nlink}" =~ ^[0-9]+$ ]] && (( nlink > 1 )); then
+      dc_move_aside "${path}" hard_link
+      return $?
+    fi
+  fi
+
+  local owner="${owner_group%%:*}" group="${owner_group#*:}"
+  local before after failed="" err="" reasons=""
+  before="$(_dc_meta "${path}")"
+
+  if [[ "${recursive}" == "true" ]]; then
+    # Report drift below the top entry before it is repaired; the top
+    # entry is compared through _dc_meta below.
+    if [[ -n "$(/usr/bin/find "${path}" -mindepth 1 \( -flags +uchg -o -flags +uappnd \) 2>/dev/null | head -1)" ]]; then
+      reasons="${reasons},flags"
+    fi
+    if [[ -n "$(/usr/bin/find "${path}" -mindepth 1 \( ! -user "${owner}" -o ! -group "${group}" \) 2>/dev/null | head -1)" ]]; then
+      reasons="${reasons},owner"
+    fi
+    if [[ -n "$(/usr/bin/find "${path}" -mindepth 1 ! -type l ! -type s -perm +022 2>/dev/null | head -1)" ]]; then
+      reasons="${reasons},mode"
+    fi
+    local link
+    while IFS= read -r link; do
+      [[ -n "${link}" ]] || continue
+      dc_marker defenseclaw_boundary path="${link}" reason=symlink action=not_followed
+    done < <(/usr/bin/find "${path}" -mindepth 1 -type l 2>/dev/null | head -20)
+  fi
+
+  # Flags. Root clears user flags at any securelevel and system flags at
+  # securelevel 0; anything left is an OS prerequisite, not drift.
+  local flags
+  flags="$(stat -f '%Sf' "${path}" 2>/dev/null || echo '-')"
+  if [[ "${flags}" == *uchg* || "${flags}" == *uappnd* ]]; then
+    _dc_restamp_step flags chflags -h nouchg,nouappnd "${path}"
+  fi
+  if [[ "${flags}" == *schg* || "${flags}" == *sappnd* ]]; then
+    if ! chflags -h noschg,nosappnd "${path}" 2>/dev/null; then
+      dc_marker defenseclaw_prereq check=system_immutable_flag path="${path}" \
+        remedy="reboot to securelevel 0 or into recovery and run chflags noschg on the path"
+      failed="${failed},system_flags"
+    fi
+  fi
+  if [[ "${recursive}" == "true" ]]; then
+    _dc_restamp_step flags chflags -R -P nouchg,nouappnd "${path}"
+  fi
+
+  # ACL, owner, mode.
+  _dc_restamp_step acl chmod -h -N "${path}"
+  if [[ "${recursive}" == "true" ]]; then
+    _dc_restamp_step acl chmod -R -P -N "${path}"
+    _dc_restamp_step owner chown -R -h "${owner_group}" "${path}"
+    # Sockets keep their mode: the gateway binds its IPC socket with the
+    # mode its peers need and re-applies it on every bind.
+    _dc_restamp_step mode /usr/bin/find "${path}" -mindepth 1 ! -type l ! -type s -perm +022 \
+      -exec chmod -h go-w {} +
+  else
+    _dc_restamp_step owner chown -h "${owner_group}" "${path}"
+  fi
+  _dc_restamp_step mode chmod -h "${mode}" "${path}"
+
+  after="$(_dc_meta "${path}")"
+  if [[ "${before}" != "${after}" ]]; then
+    local b_own b_mode b_flags b_acl a_own a_mode a_flags a_acl
+    read -r b_own b_mode b_flags b_acl <<< "${before}"
+    read -r a_own a_mode a_flags a_acl <<< "${after}"
+    [[ "${b_own}" == "${a_own}" ]] || reasons="${reasons},owner"
+    [[ "$(_dc_mode_norm "${b_mode}")" == "$(_dc_mode_norm "${a_mode}")" ]] || reasons="${reasons},mode"
+    [[ "${b_flags}" == "${a_flags}" ]] || reasons="${reasons},flags"
+    [[ "${b_acl}" == "${a_acl}" ]] || reasons="${reasons},acl"
+  fi
+  if [[ -n "${reasons}" && "${quiet_repair}" != "true" ]]; then
+    # De-duplicate the comma list while keeping first-seen order.
+    local r out_reasons="" seen=","
+    local IFS_SAVE="${IFS}"
+    IFS=','
+    for r in ${reasons#,}; do
+      [[ "${seen}" == *",${r},"* ]] && continue
+      seen="${seen}${r},"
+      out_reasons="${out_reasons:+${out_reasons},}${r}"
+    done
+    IFS="${IFS_SAVE}"
+    dc_marker defenseclaw_repair path="${path}" reason="${out_reasons}"
+  fi
+  if [[ -n "${failed}" ]]; then
+    err="$(printf '%s' "${err}" | tr '\n' ' ')"
+    dc_marker defenseclaw_accept path="${path}" reason=restamp_failed \
+      failed="${failed#,}" detail="${err% }"
+    return 1
+  fi
+  return 0
+}
+
+# dc_remove_path PATH: delete a DefenseClaw-owned file or tree. A symlink
+# is unlinked, never followed or recursed into. Otherwise the user (and,
+# at securelevel 0, system) immutable and append-only flags and the ACLs
+# are cleared across the tree without following links, then rm -rf runs
+# with the bounded retry (an agent writing a hook log mid-delete gives a
+# transient ENOTEMPTY). Returns 1 when PATH still exists; a system flag
+# that cannot be cleared is logged as defenseclaw_prereq. The caller logs
+# the leftover.
+dc_remove_path() {
+  local path="${1:-}"
+  [[ -n "${path}" && "${path}" != "/" ]] || return 2
+  [[ -e "${path}" || -L "${path}" ]] || return 0
+  if [[ -L "${path}" || ! -d "${path}" ]]; then
+    chflags -h nouchg,nouappnd "${path}" 2>/dev/null || true
+    chflags -h noschg,nosappnd "${path}" 2>/dev/null || true
+    dc_retry /bin/rm -f -- "${path}" 2>/dev/null || true
+  else
+    chflags -R -P nouchg,nouappnd "${path}" 2>/dev/null || true
+    chflags -R -P noschg,nosappnd "${path}" 2>/dev/null || true
+    chmod -R -P -N "${path}" 2>/dev/null || true
+    dc_retry /bin/rm -rf -- "${path}" 2>/dev/null || true
+  fi
+  if [[ -e "${path}" || -L "${path}" ]]; then
+    if [[ -n "$(/usr/bin/find "${path}" \( -flags +schg -o -flags +sappnd \) 2>/dev/null | head -1)" ]]; then
+      dc_marker defenseclaw_prereq check=system_immutable_flag path="${path}" \
+        remedy="reboot to securelevel 0 or into recovery and run chflags -R noschg on the path"
+    fi
+    return 1
+  fi
+  return 0
+}
+
+# dc_sha256_hex FILE -> stdout: FILE's SHA-256 as bare lowercase hex.
+dc_sha256_hex() {
+  local out
+  out="$(/usr/bin/shasum -a 256 -- "$1" 2>/dev/null)" || return 1
+  out="${out%% *}"
+  [[ "${out}" =~ ^[0-9a-f]{64}$ ]] || return 1
+  printf '%s' "${out}"
+}
+
+# dc_run_prereq_checks: the installer's host prerequisite checks (the
+# gateway may execute, no uncleared system immutable flag, loopback ports
+# free, hook transport tools present, the cloud-auth library loads), run
+# before any mutation. Each finding is logged as defenseclaw_prereq with
+# its remedy and never fails the install. No checks are registered yet,
+# so it currently logs nothing.
+dc_run_prereq_checks() {
+  return 0
+}
+
+# dc_strip_quarantine PATH ...: remove com.apple.quarantine from each
+# installed regular file, so launchd can exec a binary staged from a
+# browser-downloaded bundle. Logs defenseclaw_repair per stripped file;
+# a failure is logged as defenseclaw_accept and never returned.
+dc_strip_quarantine() {
+  local path
+  for path in "$@"; do
+    [[ -f "${path}" && ! -L "${path}" ]] || continue
+    xattr -p com.apple.quarantine "${path}" >/dev/null 2>&1 || continue
+    if xattr -d com.apple.quarantine "${path}" 2>/dev/null; then
+      dc_marker defenseclaw_repair path="${path}" reason=quarantine_xattr
+    else
+      dc_marker defenseclaw_accept path="${path}" reason=quarantine_xattr_kept
+    fi
+  done
   return 0
 }

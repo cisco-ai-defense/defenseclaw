@@ -51,6 +51,10 @@ func validateTrustedPathACL(path string) error {
 	return checkPOSIXAccessACL(path, buf[:size])
 }
 
+// validateStrictPathACL is validateTrustedPathACL on Linux: the POSIX rule
+// has no administrator principals to treat differently.
+func validateStrictPathACL(path string) error { return validateTrustedPathACL(path) }
+
 func checkPOSIXAccessACL(path string, data []byte) error {
 	if len(data) < 4 || (len(data)-4)%8 != 0 {
 		return fmt.Errorf("%s: malformed POSIX ACL", path)

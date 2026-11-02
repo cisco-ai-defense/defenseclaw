@@ -22,10 +22,12 @@ import (
 
 // A managed gateway that can't open its audit store usually lost its write
 // entry to permission drift; the LocalSystem guardian puts it back within a
-// tick. Waiting here keeps the service up instead of exiting into a restart
-// loop. Only the long-running gateway (the root sidecar command) waits;
-// short-lived subcommands and non-managed deployments return the first
-// failure as before.
+// tick. On macOS the gateway runs as root and owns the store, so it repairs
+// the store itself before each attempt and never gives up. Waiting here keeps
+// the service up instead of exiting into a restart loop. Only the
+// long-running gateway (the root sidecar command) waits; short-lived
+// subcommands and non-managed deployments return the first failure as
+// before.
 var (
 	gatewayAuditOpenBudget       = 3 * time.Minute
 	gatewayAuditOpenInitialDelay = 5 * time.Second
@@ -41,14 +43,15 @@ func openGatewayAuditStore(ctx context.Context, deploymentMode, path string, wai
 	if ctx == nil {
 		ctx = context.Background()
 	}
+	reason, unbounded := gatewayAuditOpenWait()
 	managed.EmitResilienceEvent(managed.MarkerDegraded, map[string]string{
 		"subsystem": "audit store",
 		"path":      path,
-		"reason":    "audit store unavailable at startup; waiting for the guardian to repair it: " + err.Error(),
+		"reason":    reason + err.Error(),
 	})
 	deadline := time.Now().Add(gatewayAuditOpenBudget)
 	delay := gatewayAuditOpenInitialDelay
-	for time.Now().Before(deadline) {
+	for unbounded || time.Now().Before(deadline) {
 		timer := time.NewTimer(delay)
 		select {
 		case <-ctx.Done():
@@ -56,6 +59,7 @@ func openGatewayAuditStore(ctx context.Context, deploymentMode, path string, wai
 			return nil, err
 		case <-timer.C:
 		}
+		repairGatewayAuditStorePlatform(deploymentMode, path)
 		if store, err = gatewayAuditOpenAttempt(deploymentMode, path); err == nil {
 			managed.EmitResilienceEvent(managed.MarkerRepair, map[string]string{
 				"subsystem": "audit store",
@@ -69,6 +73,21 @@ func openGatewayAuditStore(ctx context.Context, deploymentMode, path string, wai
 		}
 	}
 	return nil, err
+}
+
+// gatewayAuditGuardianWaitReason is the degraded line of a gateway that waits
+// for the guardian to repair its audit store.
+const gatewayAuditGuardianWaitReason = "audit store unavailable at startup; waiting for the guardian to repair it: "
+
+// gatewayAuditOpenWait is how this process waits for a managed audit store:
+// the reason it logs and whether it keeps retrying past the budget. Only the
+// macOS Secure Client gateway repairs its own store and never gives up; a
+// standalone process waits for the guardian within the budget, as before.
+func gatewayAuditOpenWait() (reason string, unbounded bool) {
+	if managed.StandaloneTrustScope() {
+		return gatewayAuditGuardianWaitReason, false
+	}
+	return gatewayAuditOpenWaitReason, gatewayAuditOpenUnbounded
 }
 
 func openGatewayAuditStoreOnce(deploymentMode, path string) (*audit.Store, error) {
