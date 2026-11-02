@@ -27,6 +27,7 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/config"
 	"github.com/defenseclaw/defenseclaw/internal/enterprisebundle"
 	"github.com/defenseclaw/defenseclaw/internal/managed"
+	"github.com/defenseclaw/defenseclaw/internal/posixacl"
 )
 
 // maxSecretBytes bounds a protected credential.
@@ -250,7 +251,70 @@ func (e *Env) InstalledSecretConfig(allowAbsent bool) ([]byte, error) {
 		return nil, &enterprisebundle.Error{Code: enterprisebundle.CodeStateInvalid,
 			Detail: fmt.Sprintf("cannot load the installed config %s (%v); nothing was removed: correct the config and run secret remove again", e.Layout.ConfigPath, err)}
 	}
+	if err := e.checkInstalledConfigServiceRead(); err != nil {
+		return nil, &enterprisebundle.Error{Code: enterprisebundle.CodeStateInvalid,
+			Detail: fmt.Sprintf("the gateway service account cannot read the installed config %s (%v); nothing was removed: correct its read access and retry secret remove", e.Layout.ConfigPath, err)}
+	}
 	return raw, nil
+}
+
+var secretConfigACLReader posixacl.Reader = posixacl.System
+
+// checkInstalledConfigServiceRead checks the access that the gateway will
+// use when it starts after a credential change. Root's successful read does
+// not prove access for the service account, including through parent folders.
+func (e *Env) checkInstalledConfigServiceRead() error {
+	account, ok, err := e.Accounts.Lookup(context.Background(), e.Layout.ServiceUser)
+	if err != nil {
+		return fmt.Errorf("look up %s: %w", e.Layout.ServiceUser, err)
+	}
+	if !ok || account.UID < 1 {
+		return fmt.Errorf("the %s service account is unavailable", e.Layout.ServiceUser)
+	}
+	var paths []string
+	rights := map[string][]string{}
+	for canonical := filepath.Clean(e.Layout.ConfigPath); canonical != "/" && canonical != "."; canonical = filepath.Dir(canonical) {
+		rooted := e.P(canonical)
+		info, err := os.Lstat(rooted)
+		if err != nil {
+			return fmt.Errorf("inspect %s: %w", canonical, err)
+		}
+		isFile := canonical == filepath.Clean(e.Layout.ConfigPath)
+		if isFile && !info.Mode().IsRegular() || !isFile && !info.IsDir() {
+			return fmt.Errorf("%s is not a regular %s", canonical, map[bool]string{true: "file", false: "directory"}[isFile])
+		}
+		uid, gid, err := e.OwnerOf(rooted)
+		if err != nil {
+			return fmt.Errorf("inspect the owner of %s: %w", canonical, err)
+		}
+		need := uint16(0o1)
+		if isFile {
+			need = 0o4
+			rights[rooted] = []string{"read"}
+		} else {
+			rights[rooted] = []string{"search"}
+		}
+		allowed := accountMayAccess(uid, gid, info.Mode(), account, os.FileMode(need))
+		if e.GOOS == "linux" {
+			acl, err := secretConfigACLReader.Read(rooted, info.Mode())
+			if err != nil {
+				return fmt.Errorf("inspect the ACL of %s: %w", canonical, err)
+			}
+			allowed = acl.Allows(uid, gid, info.Mode(), account.UID, account.GID, need)
+		}
+		if !allowed {
+			return fmt.Errorf("%s is %04o owned by uid %d gid %d, which does not grant %s access to %s", canonical, info.Mode().Perm(), uid, gid, e.Layout.ServiceUser, map[bool]string{true: "read", false: "search"}[isFile])
+		}
+		paths = append(paths, rooted)
+	}
+	denied, entry, err := e.darwinServiceACLDenial(context.Background(), paths, rights)
+	if err != nil {
+		return fmt.Errorf("inspect the macOS ACLs: %w", err)
+	}
+	if entry != "" {
+		return fmt.Errorf("%s has the macOS ACL entry %q denying %s access", e.canonical(denied), entry, e.Layout.ServiceUser)
+	}
+	return nil
 }
 
 // RemoveRotatedSecret removes credential name although the installed config

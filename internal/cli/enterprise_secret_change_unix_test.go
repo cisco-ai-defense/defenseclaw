@@ -64,6 +64,10 @@ func TestRefusedUnixSecretChangeLeavesTheCredentialStoreAsItWas(t *testing.T) {
 				Lchown: func(string, int, int) error { return nil }, Fchown: func(*os.File, int, int) error { return nil },
 				Trust: func(string, enterpriseunix.TrustKind) error { return nil }}
 			if tc.action == "remove" {
+				// An installed config is removable only after its service
+				// account can read the file and its parent directories.
+				env.Accounts = unixSecretTestAccount{}
+				env.OwnerOf = func(string) (int, int, error) { return 1001, 1001, nil }
 				configPath := env.P(layout.ConfigPath)
 				if err := os.MkdirAll(filepath.Dir(configPath), 0o700); err != nil {
 					t.Fatal(err)

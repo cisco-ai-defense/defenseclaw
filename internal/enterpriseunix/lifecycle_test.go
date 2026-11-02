@@ -28,6 +28,7 @@ import (
 
 	"github.com/defenseclaw/defenseclaw/internal/config"
 	"github.com/defenseclaw/defenseclaw/internal/config/configwrite"
+	"github.com/defenseclaw/defenseclaw/internal/enterprisebundle"
 	"github.com/defenseclaw/defenseclaw/internal/enterprisestatus"
 	"github.com/defenseclaw/defenseclaw/internal/managed"
 	launchdstandalone "github.com/defenseclaw/defenseclaw/packaging/launchd-standalone"
@@ -657,11 +658,11 @@ func TestObservabilityCredentialMustBeStoredBeforeAnyChange(t *testing.T) {
 		t.Fatalf("staging before the install = %+v (stat %v), want a stored root-only credential", staged, err)
 	}
 
-	// While the installed config references it, the credential is not
-	// removed: the gateway could not start without it.
+	// A staged config can name the credential, but removal cannot proceed
+	// before the service account exists to prove it can read that config.
 	referenced := h.env.P(filepath.Join(h.env.Layout.SecretsDir, "galileo-api-key"))
 	unused := h.env.P(filepath.Join(h.env.Layout.SecretsDir, "unused-key"))
-	for path, body := range map[string]string{h.env.P(h.env.Layout.ConfigPath): raw, referenced: "key", unused: "key"} {
+	for path, body := range map[string]string{h.env.P(h.env.Layout.ConfigPath): raw, unused: "key"} {
 		if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
 			t.Fatal(err)
 		}
@@ -672,8 +673,8 @@ func TestObservabilityCredentialMustBeStoredBeforeAnyChange(t *testing.T) {
 	if err := h.env.RemoveSecret("galileo-api-key"); err == nil || !exists(referenced) {
 		t.Fatalf("RemoveSecret of a referenced credential = %v, want a refusal that keeps it", err)
 	}
-	if err := h.env.RemoveSecret("unused-key"); err != nil || exists(unused) {
-		t.Fatalf("RemoveSecret of an unreferenced credential = %v, want it removed", err)
+	if err := h.env.RemoveSecret("unused-key"); enterprisebundle.CodeOf(err) != enterprisebundle.CodeStateInvalid || !exists(unused) {
+		t.Fatalf("RemoveSecret without a service account = %v, want state_invalid and a retained credential", err)
 	}
 }
 

@@ -684,15 +684,18 @@ func (c *unixSecretChange) mutate(ctx context.Context) error {
 		}
 	case "remove":
 		_, statErr := os.Lstat(path)
+		if statErr != nil && !errors.Is(statErr, fs.ErrNotExist) {
+			return &enterprisebundle.Error{Code: enterprisebundle.CodeStateInvalid, Detail: fmt.Sprintf("cannot inspect credential %s before removal (%v); nothing was removed: restore access and retry", opts.name, statErr)}
+		}
 		c.existed = statErr == nil
+		if c.existed && readErr != nil {
+			return &enterprisebundle.Error{Code: enterprisebundle.CodeStateInvalid, Detail: fmt.Sprintf("cannot read credential %s for put-back before removal (%v); nothing was removed: restore access and retry", opts.name, readErr)}
+		}
 		if err := removeUnixSecret(env, opts); err != nil {
 			return err
 		}
 		if c.existed {
 			c.undo = func(ctx context.Context) error {
-				if readErr != nil {
-					return fmt.Errorf("credential %s was removed, and it could not be read before (%v), so it is not put back", opts.name, readErr)
-				}
 				return env.WriteSecret(ctx, opts.name, stored)
 			}
 		}
@@ -700,8 +703,7 @@ func (c *unixSecretChange) mutate(ctx context.Context) error {
 	return nil
 }
 
-// putBack is the change's MutateUndo: it runs only when the run refused
-// the config after the change.
+// putBack restores the prior credential when the ensure fails after mutation.
 func (c *unixSecretChange) putBack(ctx context.Context) error {
 	if c.undo == nil {
 		return nil

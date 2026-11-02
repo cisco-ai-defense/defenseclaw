@@ -9,6 +9,7 @@
 package cli
 
 import (
+	"context"
 	"crypto/sha256"
 	"encoding/hex"
 	"os"
@@ -19,6 +20,18 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/enterpriseunix"
 	"github.com/defenseclaw/defenseclaw/internal/managed"
 )
+
+type unixSecretTestAccount struct{}
+
+func (unixSecretTestAccount) Lookup(_ context.Context, name string) (enterpriseunix.Account, bool, error) {
+	return enterpriseunix.Account{Name: name, UID: 1001, GID: 1001}, true, nil
+}
+
+func (unixSecretTestAccount) Ensure(_ context.Context, name string) (enterpriseunix.Account, error) {
+	return enterpriseunix.Account{Name: name, UID: 1001, GID: 1001}, nil
+}
+
+func (unixSecretTestAccount) Remove(context.Context, string) error { return nil }
 
 // GAP-1173: the installed config references credential ai-key with no value
 // stored, and a failed rotation added the value. The put-back (remove
@@ -61,7 +74,9 @@ func TestUnixPutBackRemovesTheCredentialAFailedRotationAdded(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			root := t.TempDir()
 			env := &enterpriseunix.Env{GOOS: enterpriseunix.CurrentGOOS(), Root: root, Layout: layout,
-				Trust: func(string, enterpriseunix.TrustKind) error { return nil }}
+				Trust:    func(string, enterpriseunix.TrustKind) error { return nil },
+				Accounts: unixSecretTestAccount{},
+				OwnerOf:  func(string) (int, int, error) { return 1001, 1001, nil }}
 			files := map[string][]byte{
 				filepath.Join(env.P(layout.SecretsDir), "ai-key"): []byte(value),
 			}
