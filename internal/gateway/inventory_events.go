@@ -303,21 +303,15 @@ func emitEndpointInventory(
 // exported per-file readers directly with paths constructed under each home in
 // cfg.AIDiscovery.HomeDirs (populated by the installer's eligible-users
 // enumeration).
-func perConnectorMCPEntries(cfg *config.Config, reg *connector.Registry) []endpointInventoryComponent {
-	entries, _ := perConnectorMCPEntriesWithStatus(cfg, reg)
-	return entries
-}
-
-func perConnectorMCPEntriesForOS(cfg *config.Config, reg *connector.Registry, goos string) []endpointInventoryComponent {
-	entries, _ := perConnectorMCPEntriesForOSWithStatus(cfg, reg, goos)
-	return entries
-}
-
 func perConnectorMCPEntriesWithStatus(cfg *config.Config, reg *connector.Registry) ([]endpointInventoryComponent, bool) {
 	return perConnectorMCPEntriesForOSWithStatus(cfg, reg, runtime.GOOS)
 }
 
 func perConnectorMCPEntriesForOSWithStatus(cfg *config.Config, reg *connector.Registry, goos string) ([]endpointInventoryComponent, bool) {
+	return perConnectorMCPEntriesForOSWithHomeGuard(cfg, reg, goos, managed.RequireWindowsGatewayPathOutsideUserProfiles)
+}
+
+func perConnectorMCPEntriesForOSWithHomeGuard(cfg *config.Config, reg *connector.Registry, goos string, homeGuard func(string) error) ([]endpointInventoryComponent, bool) {
 	if cfg == nil {
 		return nil, true
 	}
@@ -456,6 +450,14 @@ func perConnectorMCPEntriesForOSWithStatus(cfg *config.Config, reg *connector.Re
 	for _, home := range homes {
 		home = strings.TrimSpace(home)
 		if home == "" {
+			continue
+		}
+		// The managed Windows LocalSystem gateway must not read a user's
+		// profile. Treat that configured home as missing evidence for the
+		// entire collection instead of probing each connector or publishing
+		// an apparently complete snapshot that would remove its old rows.
+		if homeGuard(home) != nil {
+			partial = true
 			continue
 		}
 		homeScope := endpointInventoryScopeKey(home)
@@ -622,19 +624,8 @@ func hasNativeMCPReader(connectorName string) bool {
 	return false
 }
 
-// readMCPServersUnderHome reads all MCP-server entries for a given connector
-// from the standard filesystem paths under `home`. Returns a slice of
-// per-source results so callers can label each individually if desired.
-// Missing/unparseable files yield nil entries (best-effort).
-func readMCPServersUnderHome(connectorName, home string) [][]config.MCPServerEntry {
-	return readMCPServersUnderHomeForOS(connectorName, home, runtime.GOOS)
-}
-
-func readMCPServersUnderHomeForOS(connectorName, home, goos string) [][]config.MCPServerEntry {
-	entries, _ := readMCPServersUnderHomeForOSWithStatus(connectorName, home, goos)
-	return entries
-}
-
+// readMCPServersUnderHomeForOSWithStatus reads each native config source under
+// home and reports whether an expected source was unreadable or invalid.
 func readMCPServersUnderHomeForOSWithStatus(connectorName, home, goos string) ([][]config.MCPServerEntry, bool) {
 	if home == "" {
 		return nil, false

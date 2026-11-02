@@ -1256,15 +1256,18 @@ func TestReadMCPServersUnderHomeHonorsClaudeConfigDirOverride(t *testing.T) {
 
 	// With CLAUDE_CONFIG_DIR set, both default files must be skipped.
 	t.Setenv("CLAUDE_CONFIG_DIR", filepath.Join(tmp, "custom-claude"))
-	if got := readMCPServersUnderHome("claudecode", tmp); len(got) != 0 {
-		t.Fatalf("with CLAUDE_CONFIG_DIR set, got servers=%+v want none", got)
+	if got, partial := readMCPServersUnderHomeForOSWithStatus("claudecode", tmp, runtime.GOOS); partial || len(got) != 0 {
+		t.Fatalf("with CLAUDE_CONFIG_DIR set, got servers=%+v partial=%t want none", got, partial)
 	}
 
 	// Without the override, both default files should surface.
 	if err := os.Unsetenv("CLAUDE_CONFIG_DIR"); err != nil {
 		t.Fatal(err)
 	}
-	got := readMCPServersUnderHome("claudecode", tmp)
+	got, partial := readMCPServersUnderHomeForOSWithStatus("claudecode", tmp, runtime.GOOS)
+	if partial {
+		t.Fatal("Claude Code native config read was partial")
+	}
 	var names []string
 	for _, group := range got {
 		for _, entry := range group {
@@ -1327,7 +1330,10 @@ func TestReadMCPServersUnderHomeDevinUsesPlatformNativeConfigRoot(t *testing.T) 
 			write(test.canonical, "canonical")
 			write(test.foreign, "foreign")
 
-			groups := readMCPServersUnderHomeForOS("devin", home, test.goos)
+			groups, partial := readMCPServersUnderHomeForOSWithStatus("devin", home, test.goos)
+			if partial {
+				t.Fatal("Devin native config read was partial")
+			}
 			if len(groups) != 1 || len(groups[0]) != 1 || groups[0][0].Name != "canonical" {
 				t.Fatalf("Devin %s per-home inventory = %+v, want only canonical config", test.goos, groups)
 			}
@@ -1362,7 +1368,11 @@ func TestReadMCPServersUnderHomeUsesCanonicalUserConfigs(t *testing.T) {
 		write(t, home, ".copilot/mcp-config.json", `{"mcpServers":{"canonical":{"command":"copilot-mcp"}}}`)
 		write(t, home, ".config/github-copilot/mcp.json", `{"mcpServers":{"stale":{"command":"stale-mcp"}}}`)
 
-		if got, want := serverNames(readMCPServersUnderHomeForOS("copilot", home, "windows")), []string{"canonical"}; !reflect.DeepEqual(got, want) {
+		groups, partial := readMCPServersUnderHomeForOSWithStatus("copilot", home, "windows")
+		if partial {
+			t.Fatal("Copilot native config read was partial")
+		}
+		if got, want := serverNames(groups), []string{"canonical"}; !reflect.DeepEqual(got, want) {
 			t.Fatalf("Copilot per-home inventory = %v, want %v", got, want)
 		}
 	})
@@ -1376,7 +1386,11 @@ func TestReadMCPServersUnderHomeUsesCanonicalUserConfigs(t *testing.T) {
 			},
 		}`)
 
-		if got, want := serverNames(readMCPServersUnderHomeForOS("opencode", home, "windows")), []string{"canonical"}; !reflect.DeepEqual(got, want) {
+		groups, partial := readMCPServersUnderHomeForOSWithStatus("opencode", home, "windows")
+		if partial {
+			t.Fatal("OpenCode native config read was partial")
+		}
+		if got, want := serverNames(groups), []string{"canonical"}; !reflect.DeepEqual(got, want) {
 			t.Fatalf("OpenCode per-home inventory = %v, want %v", got, want)
 		}
 	})
@@ -1391,7 +1405,11 @@ func TestReadMCPServersUnderHomeUsesCanonicalUserConfigs(t *testing.T) {
 			"mcpServers": {"skill": {"command":"skill-mcp"}}
 		}`)
 
-		if got, want := serverNames(readMCPServersUnderHomeForOS("amp", home, "windows")), []string{"settings", "skill"}; !reflect.DeepEqual(got, want) {
+		groups, partial := readMCPServersUnderHomeForOSWithStatus("amp", home, "windows")
+		if partial {
+			t.Fatal("Amp native config read was partial")
+		}
+		if got, want := serverNames(groups), []string{"settings", "skill"}; !reflect.DeepEqual(got, want) {
 			t.Fatalf("Amp per-home inventory = %v, want %v", got, want)
 		}
 	})
@@ -1415,7 +1433,10 @@ func TestPerConnectorMCPEntriesWindowsExcludesUnsupportedAndDeprecated(t *testin
 		}},
 	}
 
-	components := perConnectorMCPEntriesForOS(cfg, nil, "windows")
+	components, partial := perConnectorMCPEntriesForOSWithStatus(cfg, nil, "windows")
+	if partial {
+		t.Fatal("Windows per-connector MCP read was partial")
+	}
 	foundNative := false
 	for _, component := range components {
 		if component.agentConnector != "copilot" {
@@ -1427,6 +1448,33 @@ func TestPerConnectorMCPEntriesWindowsExcludesUnsupportedAndDeprecated(t *testin
 	}
 	if !foundNative {
 		t.Fatalf("Windows MCP fanout did not include canonical Copilot entry: %+v", components)
+	}
+}
+
+func TestPerConnectorMCPEntriesForbiddenProfileIsPartial(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	home := t.TempDir()
+	configPath := filepath.Join(home, ".codex", "config.toml")
+	if err := os.MkdirAll(filepath.Dir(configPath), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(configPath, []byte("[mcp_servers.private]\ncommand = 'node'\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	cfg := &config.Config{
+		AIDiscovery: config.AIDiscoveryConfig{HomeDirs: []string{home}},
+		Guardrail: config.GuardrailConfig{Connectors: map[string]config.PerConnectorGuardrailConfig{
+			"codex": {},
+		}},
+	}
+	components, partial := perConnectorMCPEntriesForOSWithHomeGuard(cfg, nil, "windows", func(path string) error {
+		if path == home {
+			return fmt.Errorf("profile access denied")
+		}
+		return nil
+	})
+	if !partial || len(components) != 0 {
+		t.Fatalf("forbidden profile: components=%+v partial=%t, want empty partial collection", components, partial)
 	}
 }
 
@@ -1463,7 +1511,10 @@ func TestPerConnectorMCPEntriesAttributeEachHomeToItsOwner(t *testing.T) {
 			"claudecode": {},
 		}},
 	}
-	components := perConnectorMCPEntriesForOS(cfg, nil, runtime.GOOS)
+	components, partial := perConnectorMCPEntriesForOSWithStatus(cfg, nil, runtime.GOOS)
+	if partial {
+		t.Fatal("per-connector MCP read was partial")
+	}
 
 	self := useridentity.Current()
 	var attributed int

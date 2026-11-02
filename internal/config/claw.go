@@ -2033,24 +2033,29 @@ func readMCPServersCopilot(workspaceDir string) ([]MCPServerEntry, error) {
 // workspace MCP at <workspace>/.agents/mcp_config.json. The workspace
 // file is consulted only when DefenseClaw has an explicitly pinned
 // connector workspace; the daemon cwd is never inferred. Missing or
-// malformed Antigravity files are soft failures and never fall back to
-// OpenClaw's openclaw.json.
+// malformed Antigravity files report an error and never fall back to
+// OpenClaw's openclaw.json. Missing files are ordinary absence.
 func readMCPServersAntigravity(workspaceDir string) ([]MCPServerEntry, error) {
 	home, _ := os.UserHomeDir()
 	cwd := strings.TrimSpace(workspaceDir)
 
 	var entries []MCPServerEntry
-	if home != "" {
-		if e, err := readMCPFromJSONPath(filepath.Join(home, ".gemini", "config", "mcp_config.json"), []string{"mcpServers"}); err == nil {
+	var firstErr error
+	read := func(path string) {
+		e, err := readMCPFromJSONPath(path, []string{"mcpServers"})
+		if err == nil {
 			entries = append(entries, e...)
+		} else if !errors.Is(err, fs.ErrNotExist) && firstErr == nil {
+			firstErr = err
 		}
+	}
+	if home != "" {
+		read(filepath.Join(home, ".gemini", "config", "mcp_config.json"))
 	}
 	if cwd != "" {
-		if e, err := readMCPFromJSONPath(filepath.Join(cwd, ".agents", "mcp_config.json"), []string{"mcpServers"}); err == nil {
-			entries = append(entries, e...)
-		}
+		read(filepath.Join(cwd, ".agents", "mcp_config.json"))
 	}
-	return dedupMCPEntries(entries), nil
+	return dedupMCPEntries(entries), firstErr
 }
 
 func readMCPFromJSONPath(path string, paths ...[]string) ([]MCPServerEntry, error) {
