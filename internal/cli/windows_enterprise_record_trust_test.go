@@ -166,8 +166,8 @@ func TestPlantedDeploymentRecordDoesNotAffectLifecycleProfile(t *testing.T) {
 			if opts.resolvedProfile != tc.want {
 				t.Fatalf("resolved %q, want %q", opts.resolvedProfile, tc.want)
 			}
-			if len(opts.ignoredDeploymentRecords) != 1 || !strings.Contains(opts.ignoredDeploymentRecords[0], planted) {
-				t.Fatalf("ignored records %q", opts.ignoredDeploymentRecords)
+			if len(opts.ignoredDeploymentRecords) != 1 || opts.ignoredDeploymentRecords[0].path != planted {
+				t.Fatalf("ignored records %+v", opts.ignoredDeploymentRecords)
 			}
 			if tc.want == "standalone" {
 				result := newWindowsEnterpriseStandaloneResult(tc.action, &opts)
@@ -175,16 +175,9 @@ func TestPlantedDeploymentRecordDoesNotAffectLifecycleProfile(t *testing.T) {
 					t.Fatalf("standalone warnings %+v", result.Warnings)
 				}
 				message := result.Warnings[0].Message
-				for _, want := range []string{
-					"inspect the deployment record owner", "restore its expected owner",
-					"/uninstall FORCE=1 PURGE=1 JSON=1", "/ensure CONFIG=<config.yaml> JSON=1",
-				} {
-					if !strings.Contains(message, want) {
-						t.Fatalf("warning %q does not name %q", message, want)
-					}
-				}
-				if count := strings.Count(strings.ToLower(message), strings.ToLower(planted)); count != 1 {
-					t.Fatalf("warning names record %d times, want once: %q", count, message)
+				want := "ignored a deployment record an administrator did not write: " + planted + ": " + validate(planted).Error()
+				if message != want {
+					t.Fatalf("Secure Client record warning = %q, want base text %q", message, want)
 				}
 			}
 		})

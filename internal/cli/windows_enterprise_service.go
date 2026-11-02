@@ -177,10 +177,9 @@ type windowsEnterpriseLifecycleOptions struct {
 	// put the previous config or its enrolled targets back; ensure stops
 	// instead of starting the upgrade transaction.
 	hotConfigRestoreFailed bool
-	// ignoredDeploymentRecords lists deployment records profile resolution
-	// found but ignored because an administrator did not write them. Only
-	// the standalone result reports them.
-	ignoredDeploymentRecords []string
+	// ignoredDeploymentRecords lists records profile resolution could not
+	// trust. Only the standalone result reports them.
+	ignoredDeploymentRecords []windowsEnterpriseIgnoredDeploymentRecord
 	// localEnforcementEntriesIgnored counts the audit.db block/allow entries
 	// a config_version 9 migration in this run left in place (the
 	// actions_rows_ignored of the migration-v9.json it wrote). The standalone

@@ -193,12 +193,12 @@ func resolveWindowsEnterpriseLifecycleProfile(action string, opts *windowsEnterp
 				return err
 			}
 			if deployment.Untrusted != "" {
-				record := deployment.Untrusted
-				if !strings.Contains(strings.ToLower(record), strings.ToLower(deployment.MetadataPath)) {
-					record = deployment.MetadataPath + ": " + record
-				}
 				opts.ignoredDeploymentRecords = append(opts.ignoredDeploymentRecords,
-					record)
+					windowsEnterpriseIgnoredDeploymentRecord{
+						profile: candidate,
+						path:    deployment.MetadataPath,
+						reason:  deployment.Untrusted,
+					})
 			}
 			switch deployment.State {
 			case winpath.EnterpriseDeploymentInstalled, winpath.EnterpriseDeploymentUnknown:
