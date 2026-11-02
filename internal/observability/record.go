@@ -382,6 +382,16 @@ func newSchemaDerivedLogRecord(
 	return newRecord(input, true, contract.schemaDerivedLogMandatory())
 }
 
+// withOccurrence is record with the timestamp and record ID of an occurrence,
+// as newRecordWithFloor stores them. Only a preflight record, built with the
+// largest occurrence, takes it (preflightGeneratedRecord): its checks do not
+// depend on the occurrence, and the real one encodes no longer.
+func (record Record) withOccurrence(timestamp time.Time, recordID string) Record {
+	record.data.timestamp = timestamp.UTC()
+	record.data.recordID = strings.Clone(recordID)
+	return record
+}
+
 func newClassifiedLogRecord(input RecordInput, mandatory, floorOnly bool) (Record, error) {
 	return newRecordWithFloor(input, false, mandatory, floorOnly)
 }
