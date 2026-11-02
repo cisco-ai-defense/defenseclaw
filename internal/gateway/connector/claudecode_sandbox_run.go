@@ -218,8 +218,14 @@ func claudeCodeSandboxRunSettings(run SandboxRunConfig, servers []SandboxMCPServ
 }
 
 // claudeCodeSandboxRunShellPins are the shell variables of HookShellEnvPins
-// that the image drop-in (claudeCodeSandboxPinnedEnv) does not pin: SHELLOPTS,
-// BASHOPTS and FUNCNEST (rel-1-0-6:GAP-0334, the sandbox case of GAP-0322).
+// that the image drop-in (claudeCodeSandboxPinnedEnv) does not pin, less
+// SHELLOPTS and BASHOPTS: FUNCNEST only (rel-1-0-6:GAP-0334, the sandbox case
+// of GAP-0322). A bash that finds SHELLOPTS or BASHOPTS in its environment,
+// even as "", exports it, so every option the Bash tool shell sets (the
+// snapshot's onecmd, expand_aliases, an image rc's nullglob or failglob)
+// reaches every script it starts (rel-1-0-6:GAP-0465). Neither pin is needed:
+// the sandbox hook scripts start with #!/bin/bash -p, which ignores BASHOPTS,
+// and no shopt option stops /bin/sh -c <hook>. FUNCNEST "" means no limit.
 // Claude Code starts each shell-form hook command through /bin/sh with the
 // merged settings env, and a user or project env block with SHELLOPTS=noexec
 // made bash, where /bin/sh is bash, run none of it. The run drop-in pins them
@@ -232,7 +238,7 @@ func claudeCodeSandboxRunSettings(run SandboxRunConfig, servers []SandboxMCPServ
 func claudeCodeSandboxRunShellPins() []string {
 	var out []string
 	for _, key := range HookShellEnvPins() {
-		if _, pinned := claudeCodeSandboxPinnedEnv[key]; !pinned {
+		if _, pinned := claudeCodeSandboxPinnedEnv[key]; !pinned && key != "SHELLOPTS" && key != "BASHOPTS" {
 			out = append(out, key)
 		}
 	}

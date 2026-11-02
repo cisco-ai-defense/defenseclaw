@@ -314,12 +314,11 @@ func TestClaudeDropInPinsHookShellEnvOutsideWindows(t *testing.T) {
 				}
 				return
 			}
-			want := map[string]any{}
-			// Only what can stop the native hook command: managed env is
-			// process-wide (review finding 4).
-			for _, name := range []string{"CLAUDE_CODE_SHELL_PREFIX", "SHELLOPTS"} {
-				want[name] = ""
-			}
+			// Only what can stop the native hook command and is safe for
+			// every process: managed env is process-wide (review finding 4),
+			// and a pinned SHELLOPTS broke every script the Bash tool ran
+			// (rel-1-0-6:GAP-0465).
+			want := map[string]any{"CLAUDE_CODE_SHELL_PREFIX": ""}
 			if !reflect.DeepEqual(env, want) {
 				t.Fatalf("%s drop-in env = %v, want %v", goos, env, want)
 			}
@@ -343,7 +342,7 @@ func TestClaudeInspectNamesHookShellEnvOverrides(t *testing.T) {
 	details := strings.Join(state.Details, "\n")
 	for _, want := range []string{
 		"managed-settings.json sets env CLAUDE_CODE_SHELL_PREFIX; DefenseClaw's drop-in sets it to \"\" later in merge order",
-		"99-late.json sets env SHELLOPTS after DefenseClaw's drop-in, so its value applies to the managed hook commands",
+		"99-late.json sets env SHELLOPTS, which Claude Code passes to the managed hook commands and every Bash tool command",
 	} {
 		if !strings.Contains(details, want) {
 			t.Fatalf("details lack %q:\n%s", want, details)
@@ -366,7 +365,7 @@ func TestClaudeInspectNamesHookShellEnvOverrides(t *testing.T) {
 		t.Fatal(err)
 	}
 	details = strings.Join(state.Details, "\n")
-	if !strings.Contains(details, "macOS managed preferences carries DefenseClaw's hooks but does not set CLAUDE_CODE_SHELL_PREFIX and SHELLOPTS") {
+	if !strings.Contains(details, "macOS managed preferences carries DefenseClaw's hooks but does not set CLAUDE_CODE_SHELL_PREFIX to") {
 		t.Fatalf("details lack the unpinned higher source:\n%s", details)
 	}
 	if strings.Contains(details, "HKLM Settings carries DefenseClaw's hooks but does not set") {

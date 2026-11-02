@@ -94,11 +94,14 @@ func renderClaudeDropIn(opts Options, policy config.ResolvedConnectorPolicy) ([]
 		// /bin/sh with the merged settings env. A user or project env block
 		// with SHELLOPTS=noexec made bash as /bin/sh run none of it, and
 		// CLAUDE_CODE_SHELL_PREFIX replaces it (rel-1-0-6:GAP-0322). Managed
-		// env outranks every user, project and process value, and "" is
-		// unset to both. Only those two are pinned: managed env is
-		// process-wide, and nothing else can stop this command
-		// (connector.ManagedHookShellEnvPins). Windows starts the launcher in
-		// the exec form, with no shell.
+		// env outranks every user, project and process value, and "" turns
+		// the prefix off. Only the prefix is pinned: managed env is
+		// process-wide, and a pinned SHELLOPTS reaches every script the Bash
+		// tool runs, which then stops after its first command
+		// (rel-1-0-6:GAP-0465, connector.ManagedHookShellEnvPins). Nothing
+		// checks SHELLOPTS on a managed host instead: a user or project
+		// SHELLOPTS=noexec stops these commands, as in 1.0.5 and 1.0.6.
+		// Windows starts the launcher in the exec form, with no shell.
 		env := newObject()
 		for _, name := range connector.ManagedHookShellEnvPins() {
 			env.set(name, "")
@@ -221,6 +224,17 @@ func inspectClaudeHookShellEnvPins(opts Options, sources []claudeSource, state *
 				state.detail("%s sets env %s after DefenseClaw's drop-in, so its value applies to the managed hook commands too (rel-1-0-6:GAP-0322)", source.name, name)
 			} else {
 				state.detail("%s sets env %s; DefenseClaw's drop-in sets it to \"\" later in merge order, so that value no longer applies, also to Bash tool commands (rel-1-0-6:GAP-0322)", source.name, name)
+			}
+		}
+		// SHELLOPTS is not pinned (rel-1-0-6:GAP-0465), so a managed source
+		// that sets it applies wherever it sits in merge order.
+		if value, ok := claudeEnvValue(source.doc, "SHELLOPTS"); ok {
+			if text, isText := value.(string); !isText || strings.TrimSpace(text) != "" {
+				state.detail("%s sets env SHELLOPTS, which Claude Code passes to the managed hook commands and every Bash tool command; with noexec no hook runs (rel-1-0-6:GAP-0322)", source.name)
+			} else {
+				// An empty value is exported by bash, so the options of
+				// Claude Code's shell snapshot (onecmd) reach every script.
+				state.detail("%s sets env SHELLOPTS to \"\", which breaks Bash tool scripts: bash exports it, so the onecmd option of Claude Code's shell snapshot reaches every script the Bash tool starts and each runs its first command only; remove SHELLOPTS from that env block (rel-1-0-6:GAP-0465)", source.name)
 			}
 		}
 	}

@@ -125,7 +125,8 @@ func TestClaudeCodeHookShellEnvSourceOrder(t *testing.T) {
 	if !reflect.DeepEqual(names, []string{"SHELLOPTS"}) || len(from) != 1 || from[0].name != "global config" {
 		t.Fatalf("names %v from %v, want SHELLOPTS from the global config (local clears the project's BASH_ENV)", names, from)
 	}
-	// A managed SHELLOPTS "" (the drop-in pin) decides over ~/.claude.json.
+	// A managed SHELLOPTS "" (an administrator's own value; DefenseClaw no
+	// longer pins it, rel-1-0-6:GAP-0465) decides over ~/.claude.json.
 	writeClaudePolicyJSON(t, filepath.Join(managedRoot, "managed-settings.json"), map[string]interface{}{"env": map[string]interface{}{"SHELLOPTS": ""}})
 	if names, _ := claudeCodeSettingsHookShellEnv(claudeCodeHookShellEnvSources(sources)); len(names) != 0 {
 		t.Fatalf("names with a managed pin = %v, want none", names)

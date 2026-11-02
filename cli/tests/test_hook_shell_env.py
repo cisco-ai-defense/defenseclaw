@@ -207,14 +207,31 @@ def test_inherited_bash_env_only_for_agents_that_start_hooks_through_bash(tmp_pa
         assert "BASH_ENV (the agent starts its hook commands through bash" in warnings[0]
 
 
-def test_managed_claude_code_is_pinned_by_machine_policy(tmp_path, monkeypatch):
-    cfg = _cfg(tmp_path, monkeypatch, deployment="managed_enterprise")
-    repo = tmp_path / "repo"
-    _settings(repo / ".claude" / "settings.json", {"SHELLOPTS": "noexec"})
-    assert hook_integrity.agent_hook_env_warnings(
-        cfg, "claudecode", workspace_dir=str(repo), environ={"SHELLOPTS": "noexec"}
-    ) == []
-    assert hook_integrity.agent_hook_switch_problems(cfg, "claudecode", workspace_dir=str(repo)) == []
+def test_managed_claude_code_warns_on_shellopts_noexec_and_never_refuses(tmp_path, monkeypatch):
+    # rel-1-0-6:GAP-0465: the managed drop-in no longer pins SHELLOPTS and the
+    # gateway does not check a managed host, so doctor and status warn.
+    for tier in ("default", "strict"):
+        cfg = _cfg(tmp_path, monkeypatch, tier, deployment="managed_enterprise")
+        repo = tmp_path / "repo"
+        project = _settings(repo / ".claude" / "settings.json", {"SHELLOPTS": "noexec"})
+        warnings = hook_integrity.agent_hook_env_warnings(cfg, "claudecode", workspace_dir=str(repo), environ={})
+        assert len(warnings) == 1 and str(project) in warnings[0], (tier, warnings)
+        assert "does not refuse or alert" in warnings[0] and warnings[0].repair.startswith("remove SHELLOPTS")
+        assert hook_integrity.agent_hook_switch_problems(cfg, "claudecode", workspace_dir=str(repo)) == []
+        project.unlink()
+        inherited = hook_integrity.agent_hook_env_warnings(
+            cfg, "claudecode", workspace_dir=str(repo), environ={"SHELLOPTS": "braceexpand:noexec"}
+        )
+        assert len(inherited) == 1 and "this shell's environment sets SHELLOPTS with noexec" in inherited[0]
+        # Other options, BASH_ENV and a settings value that clears it are not reported.
+        assert hook_integrity.agent_hook_env_warnings(
+            cfg, "claudecode", workspace_dir=str(repo), environ={"SHELLOPTS": "braceexpand:hashall", "BASH_ENV": "/tmp/x"}
+        ) == []
+        _settings(tmp_path / "home" / ".claude" / "settings.json", {"SHELLOPTS": ""})
+        assert hook_integrity.agent_hook_env_warnings(
+            cfg, "claudecode", workspace_dir=str(repo), environ={"SHELLOPTS": "noexec"}
+        ) == []
+        (tmp_path / "home" / ".claude" / "settings.json").unlink()
 
 
 def test_strict_tier_is_read_from_the_real_guardrail_config():

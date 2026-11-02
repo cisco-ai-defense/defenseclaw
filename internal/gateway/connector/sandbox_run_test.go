@@ -419,10 +419,13 @@ func TestCodexSandboxRunFiles(t *testing.T) {
 // rel-1-0-6:GAP-0334: every run drop-in pins the shell variables that stop a
 // shell-form hook command and that the image drop-in leaves open, to "", and
 // the merged managed tier (image drop-in, then run drop-in) holds "" for every
-// name of HookShellEnvPins. The image drop-in itself is unchanged, so images
-// built by an earlier release keep their content hash.
+// name of HookShellEnvPins but SHELLOPTS and BASHOPTS, which neither sets
+// (rel-1-0-6:GAP-0465: bash exports either from the environment, even "", and
+// passes the tool shell's options, onecmd among them, to every script). The image
+// drop-in itself is unchanged, so images built by an earlier release keep
+// their content hash.
 func TestClaudeCodeSandboxRunFilesPinHookShellEnv(t *testing.T) {
-	if got, want := claudeCodeSandboxRunShellPins(), []string{"BASHOPTS", "FUNCNEST", "SHELLOPTS"}; !slices.Equal(got, want) {
+	if got, want := claudeCodeSandboxRunShellPins(), []string{"FUNCNEST"}; !slices.Equal(got, want) {
 		t.Fatalf("run shell pins = %v, want %v", got, want)
 	}
 	for _, key := range claudeCodeSandboxRunShellPins() {
@@ -452,7 +455,15 @@ func TestClaudeCodeSandboxRunFilesPinHookShellEnv(t *testing.T) {
 			t.Fatal(err)
 		}
 		merged, _ := source.settings["env"].(map[string]interface{})
+		for _, key := range []string{"SHELLOPTS", "BASHOPTS"} {
+			if value, ok := merged[key]; ok {
+				t.Fatalf("run %+v: merged managed env sets %s = %#v", run, key, value)
+			}
+		}
 		for _, key := range HookShellEnvPins() {
+			if key == "SHELLOPTS" || key == "BASHOPTS" {
+				continue
+			}
 			if value, ok := merged[key]; !ok || value != "" {
 				t.Fatalf("run %+v: merged managed env %s = %#v (present %v), want \"\"", run, key, value, ok)
 			}

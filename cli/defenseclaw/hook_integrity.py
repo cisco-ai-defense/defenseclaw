@@ -1172,6 +1172,10 @@ def agent_hook_switch_problems(cfg: Any, connector: str, *, workspace_dir: str |
 # sources the gateway checks too: user, ~/.claude.json, managed, and the
 # project of the pinned claw.workspace_dir. Otherwise, and for the folder
 # doctor or status runs in, it is a warning (agent_hook_env_warnings).
+# A managed Claude Code install is not checked by the gateway and never
+# refused: its drop-in pins only CLAUDE_CODE_SHELL_PREFIX (rel-1-0-6:GAP-0465),
+# so a user or project SHELLOPTS=noexec stops the managed hook commands, as in
+# 1.0.5 and 1.0.6. doctor and status warn about it (_managed_claude_shellopts_warnings).
 HOOK_SHELL_ENV_NAMES = ("BASHOPTS", "BASH_ENV", "CLAUDE_CODE_SHELL_PREFIX", "FUNCNEST", "SHELLOPTS")
 _HOOK_SHELL_ENV_FUNCTION_PREFIX = "BASH_FUNC_"
 
@@ -1482,14 +1486,17 @@ def agent_hook_env_warnings(
     agent_hook_switch_problems refuses what the gateway checks, and a project in
     an unpinned folder stays a warning (the gateway does not see it). The
     variables this shell would hand an agent it starts are a warning in every
-    tier. A managed Claude Code install pins the launch-stopping names in its
-    machine policy. Windows runs the native launcher without a POSIX shell.
+    tier. A managed Claude Code install pins only CLAUDE_CODE_SHELL_PREFIX in
+    its machine policy, not SHELLOPTS (rel-1-0-6:GAP-0465), and the gateway
+    does not check it: a SHELLOPTS with noexec there is a warning only
+    (_managed_claude_shellopts_warnings). Windows runs the native launcher
+    without a POSIX shell.
     """
 
     if _is_windows():
         return []
     if connector == "claudecode" and _managed_install(cfg):
-        return []
+        return _managed_claude_shellopts_warnings(cfg, workspace_dir, os.environ if environ is None else environ)
     warnings: list[HookProblem] = []
     settings_names: set[str] = set()
     if connector == "claudecode":
@@ -1523,6 +1530,48 @@ def agent_hook_env_warnings(
             )
         )
     return warnings
+
+
+def _shellopts_noexec(value: Any) -> bool:
+    return "noexec" in [option.strip() for option in str(value or "").split(":")]
+
+
+def _managed_claude_shellopts_warnings(cfg: Any, workspace_dir: str | None, environ: Any) -> list[HookProblem]:
+    """Warnings, never refusals, for a SHELLOPTS with noexec on a managed Claude Code install.
+
+    The managed drop-in does not pin SHELLOPTS (pinning it broke every script
+    the Bash tool runs, rel-1-0-6:GAP-0465) and the gateway does not check
+    settings on a managed host, so a user or project SHELLOPTS=noexec, or one
+    the agent inherits, makes /bin/sh run none of the managed hook command and
+    Claude Code allows the call. Only this warning reports it.
+    """
+
+    folder = workspace_dir if workspace_dir is not None else (pinned_workspace_dir(cfg) or os.getcwd())
+    effect = (
+        "so /bin/sh runs none of the managed DefenseClaw hook command and Claude Code allows every tool call "
+        "unchecked; a managed install does not refuse or alert on this"
+    )
+    for source, env in _claude_env_blocks(cfg, folder):
+        if "SHELLOPTS" not in env or not _claude_keeps_env_value(env["SHELLOPTS"]):
+            continue
+        # The highest source with a kept value decides the name.
+        if not _shellopts_noexec(env["SHELLOPTS"]):
+            return []
+        return [
+            HookProblem(
+                f"Claude Code settings {source} set SHELLOPTS with noexec, {effect}",
+                f"remove SHELLOPTS from the env block of {source}, then restart Claude Code",
+            )
+        ]
+    if _shellopts_noexec(environ.get("SHELLOPTS", "")):
+        return [
+            HookProblem(
+                f"this shell's environment sets SHELLOPTS with noexec, and Claude Code started from it passes it "
+                f"to its hook commands, {effect}",
+                "unset SHELLOPTS in the shell profile that sets it, then start Claude Code from a new shell",
+            )
+        ]
+    return []
 
 
 def copilot_registration_switch_problem(path: Path | str) -> str:
