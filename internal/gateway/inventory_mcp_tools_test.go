@@ -5,6 +5,7 @@ package gateway
 
 import (
 	"context"
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"strings"
@@ -134,6 +135,90 @@ func TestManagedMCPToolInventoryJoinsConfiguredLocalServer(t *testing.T) {
 	}
 	if !recoveredTool {
 		t.Fatal("recovered config did not republish retained tool")
+	}
+}
+
+func TestManagedRemoteMCPToolInventoryUsesConfiguredURLIdentity(t *testing.T) {
+	withManagedEnterprise(t, true)
+	home := t.TempDir()
+	t.Setenv("CODEX_HOME", t.TempDir())
+	if err := os.MkdirAll(filepath.Join(home, ".codex"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	configPath := filepath.Join(home, ".codex", "config.toml")
+	if err := os.WriteFile(configPath, []byte("[mcp_servers.notes]\nurl = 'https://user:password@mcp.example.com/v1?token=secret'\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	cfg := &config.Config{AIDiscovery: config.AIDiscoveryConfig{HomeDirs: []string{home}}, Gateway: config.GatewayConfig{Token: "tool-test-key"}}
+	registry := connector.NewRegistry()
+	if err := registry.RegisterPlugin(&endpointInventoryPluginConnector{name: "codex", description: "test"}); err != nil {
+		t.Fatal(err)
+	}
+	servers, readPartial := perConnectorMCPEntriesWithStatus(cfg, registry)
+	if readPartial || len(servers) != 1 || !servers[0].mcpIsRemote || servers[0].mcpServerURL != "https://mcp.example.com/v1" {
+		t.Fatalf("remote parents=%+v partial=%v", servers, readPartial)
+	}
+	var tools mcpToolInventory
+	tools.refreshParents(servers)
+	listed := time.Date(2026, 11, 2, 0, 0, 0, 0, time.UTC)
+	tools.recordAdvertised("codex", "notes", []string{"search"}, listed)
+	tools.recordObserved("codex", "notes", "read", listed.Add(time.Minute))
+	if local, _ := tools.components(servers, false); len(local) != 0 {
+		t.Fatalf("remote evidence appeared in local collection: %+v", local)
+	}
+	capture := &endpointInventoryCapture{}
+	if err := emitEndpointInventory(t.Context(), cfg, registry, capture, false, nil, nil, &tools); err != nil {
+		t.Fatal(err)
+	}
+	want := map[string]string{"advertised:search": "", "observed:read": ""}
+	for _, record := range capture.snapshot() {
+		if record.EventName() != "ai_component.observed" {
+			continue
+		}
+		body, ok := record.Body()
+		if !ok {
+			continue
+		}
+		fields, err := body.Object()
+		if err != nil {
+			t.Fatal(err)
+		}
+		if fields[observability.TelemetryAttributeDefenseClawAIComponentType] != "mcp_tool" {
+			continue
+		}
+		if fields[observability.TelemetryAttributeDefenseClawAIDiscoverySource] != "endpoint_remote_mcp_tool_inventory" ||
+			fields[observability.TelemetryAttributeDefenseClawInventoryMcpToolParentID] != servers[0].id {
+			t.Fatalf("remote lineage=%v", fields)
+		}
+		key := fields[observability.TelemetryAttributeDefenseClawInventoryMcpToolSource].(string) + ":" + fields[observability.TelemetryAttributeDefenseClawInventoryItemName].(string)
+		if _, ok := want[key]; !ok {
+			t.Fatalf("unexpected tool key %q", key)
+		}
+		want[key], _ = fields[observability.TelemetryAttributeDefenseClawAIComponentID].(string)
+		encoded, err := json.Marshal(fields)
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, secret := range []string{"password", "token=secret", "user:"} {
+			if strings.Contains(string(encoded), secret) {
+				t.Fatalf("remote tool leaked %q: %s", secret, encoded)
+			}
+		}
+	}
+	for key, id := range want {
+		if id == "" {
+			t.Fatalf("missing remote tool %s", key)
+		}
+	}
+	tools.recordAdvertised("codex", "notes", nil, listed.Add(2*time.Minute))
+	rows, partial := tools.components(servers, true)
+	if partial || len(rows) != 1 || rows[0].mcpToolSource != "observed" {
+		t.Fatalf("empty remote listing=%+v partial=%v", rows, partial)
+	}
+	tools.recordListingFailure("codex", "notes")
+	rows, partial = tools.components(servers, true)
+	if !partial || len(rows) != 1 {
+		t.Fatalf("failed remote listing cleared evidence: %+v partial=%v", rows, partial)
 	}
 }
 

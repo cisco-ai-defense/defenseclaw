@@ -298,22 +298,30 @@ func emitEndpointInventory(
 		if !perConnectorPartial && !connectorDiscoveryPartial {
 			toolStates[0].refreshParents(perConnectorMCP)
 		}
-		rows, toolPartial := toolStates[0].components(perConnectorMCP, false)
-		err := emitEndpointInventorySnapshot(ctx, emitter, "endpoint_local_mcp_tool_inventory", rows, perConnectorPartial || toolPartial,
-			config.ObservabilityV8ManagedMCPInventoryAction, publish)
-		if err != nil && firstErr == nil {
-			firstErr = err
+		for _, collection := range []struct {
+			source string
+			remote bool
+		}{
+			{"endpoint_local_mcp_tool_inventory", false},
+			{"endpoint_remote_mcp_tool_inventory", true},
+		} {
+			rows, toolPartial := toolStates[0].components(perConnectorMCP, collection.remote)
+			err := emitEndpointInventorySnapshot(ctx, emitter, collection.source, rows, perConnectorPartial || toolPartial,
+				config.ObservabilityV8ManagedMCPInventoryAction, publish)
+			if err != nil && firstErr == nil {
+				firstErr = err
+			}
+			outcome, reason := "submitted", "none"
+			switch {
+			case err != nil:
+				outcome, reason = "error", "publish_error"
+			case perConnectorPartial || toolPartial:
+				outcome, reason = "partial", "incomplete"
+			case len(rows) == 0:
+				outcome = "empty"
+			}
+			toolStates[0].recordMetric(ctx, "export", outcome, reason)
 		}
-		outcome, reason := "submitted", "none"
-		switch {
-		case err != nil:
-			outcome, reason = "error", "publish_error"
-		case perConnectorPartial || toolPartial:
-			outcome, reason = "partial", "incomplete"
-		case len(rows) == 0:
-			outcome = "empty"
-		}
-		toolStates[0].recordMetric(ctx, "export", outcome, reason)
 	}
 	return firstErr
 }
