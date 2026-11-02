@@ -197,6 +197,7 @@ DefenseClaw 1.0.8 follows 1.0.7. It brings Claude Cowork protection, a faster Cl
 ## [Unreleased] — 1.0.6
 
 ### Changed
+- **Managed remote MCP tool inventory records advertised names and observed calls.** The existing remote scanner `tools/list` result feeds bounded names into the managed `mcp_tool` collection, joined to the sanitized URL-based parent server ID. Empty and partial listings retain the same semantics as local tool inventory; no additional endpoint probe is introduced (AIFW-37479).
 - **Managed local MCP tool inventory records advertised names and observed calls.** Existing scanner `tools/list` results retain bounded names even with no findings, and authenticated hooks add observed names. Managed `mcp_tool` components carry the parent server ID, source, and UTC time without descriptions, schemas, arguments, or results (AIFW-37477).
 - **Local MCP server IDs follow the configured command and ordered arguments.** Managed inventory uses the keyed fingerprints as its identity material; changing only a display alias keeps the ID when no other alias in that connector and user scope has the same command and arguments, while a command or argument change moves it (AIFW-37476).
 - **Managed remote MCP inventory now includes the configured endpoint URL.** The event retains the HTTP(S) scheme, host, port, and path while dropping userinfo, query parameters, and fragments. Remote IDs follow this sanitized URL. It uses the existing managed inventory path and no remote probe (AIFW-37478).
