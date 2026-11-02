@@ -554,6 +554,35 @@ func TestRestoreWindowsManagedUserStateOwnerRightsAfterAnOwnerWriteOfTheTree(t *
 	}
 }
 
+// A user can rename the managed folder and substitute a junction between a
+// path check and enumeration. The restore must never reach the external file.
+func TestRestoreWindowsManagedUserStateOwnerRightsRefusesJunctionSwap(t *testing.T) {
+	target := currentWindowsTestSID(t)
+	dataDir, _ := newOwnerRewrittenTestDataDir(t, target)
+	outside := t.TempDir()
+	foreign := filepath.Join(outside, "foreign.json")
+	writeOwnerRewrittenTestFile(t, foreign, target, ownerRewrittenShapeSDDL)
+	before := ownerRewrittenTestSDDL(t, foreign)
+	previous := windowsOwnerRightsAfterValidation
+	t.Cleanup(func() { windowsOwnerRightsAfterValidation = previous })
+	windowsOwnerRightsAfterValidation = func() {
+		windowsOwnerRightsAfterValidation = func() {}
+		if err := os.Rename(dataDir, dataDir+".held"); err != nil {
+			t.Fatalf("rename managed folder before junction swap: %v", err)
+		}
+		if output, err := exec.Command("cmd", "/c", "mklink", "/J", dataDir, outside).CombinedOutput(); err != nil {
+			t.Fatalf("replace managed folder with junction: %v: %s", err, output)
+		}
+	}
+	count, err := RestoreWindowsManagedUserStateOwnerRights(target.String(), dataDir)
+	if err == nil || count != 0 {
+		t.Fatalf("junction-swapped restore: count=%d err=%v, want no mutation and a refusal", count, err)
+	}
+	if after := ownerRewrittenTestSDDL(t, foreign); after != before {
+		t.Fatalf("external file DACL changed from %s to %s", before, after)
+	}
+}
+
 // The owner-rewritten shape counts only for an object the account owns: owned
 // by Administrators or by another account it is refused by the bundle trust
 // check and left alone by the restore.

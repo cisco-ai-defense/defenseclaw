@@ -85,6 +85,24 @@ def _function_body(text: str, name: str) -> str:
     return text[start : end + 3]
 
 
+def test_upgrade_restores_owner_rewritten_account_state_before_guardian_activation() -> None:
+    # GAP-0513: the signed-out account's old hook lock must be readable before
+    # the new guardian classifies its hooks as awaiting the next sign-in.
+    body = _function_body(_text(MODULE), "Invoke-DefenseClawInstallLikeLifecycle")
+    stopped = body.index("Stop-DefenseClawService -Name $GuardianServiceName")
+    guarded = body.index("if ($Action -eq 'Upgrade' -and $priorDeploymentActive -and", stopped)
+    restored = body.index("Invoke-DefenseClawManagedUserStateOwnerRightsRestore", guarded)
+    classified = body.index("Get-DefenseClawManagedHooksLegacyActivationClassification", restored)
+    activated = body.index("Wait-DefenseClawFreshGuardianReconcile", classified)
+    assert stopped < guarded < restored < classified < activated
+    assert "([string]$metadata.product_version) -match '^1\\.0\\.6(?:$|[+-])'" in body[guarded:restored]
+    assert "Test-DefenseClawUpgradeOwnerRightsRestoreNeeded" in body[guarded:restored]
+    assert "-UpgradeOnly" in body[restored : restored + 220]
+    probe = _function_body(_text(MODULE), "Test-DefenseClawUpgradeOwnerRightsRestoreNeeded")
+    assert "'--probe', '--upgrade-only', '--json'" in probe
+    assert "[int]$report.succeeded_count -gt 0" in probe
+
+
 def test_fresh_install_rebinds_adopted_hook_manifest_before_retiring_its_journal() -> None:
     # rel-1-0-4:GAP-0686: an enumerator may publish targets after the
     # install's activation proof, before journal retirement.

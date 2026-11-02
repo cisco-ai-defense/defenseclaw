@@ -765,7 +765,8 @@ var (
 	// enterpriseHookReconcileTargetEarlierMatrix reports a target whose
 	// agent config still holds an earlier release's hook matrix (GAP-2463).
 	// Tests replace it.
-	enterpriseHookReconcileTargetEarlierMatrix = enterprisehooks.WindowsProtectedTargetRunsEarlierHookMatrix
+	enterpriseHookReconcileTargetEarlierMatrix       = enterprisehooks.WindowsProtectedTargetRunsEarlierHookMatrix
+	enterpriseHookReconcileClosedMachineRegistration = enterprisehooks.WindowsProtectedTargetHasClosedMachineRegistration
 	// enterpriseHookReconcileTargetFailModeChange returns the hook fail mode
 	// a target's lock records and the one the config asks for. Tests
 	// replace it.
@@ -962,12 +963,25 @@ func enterpriseHookRepairAfterVerifyFailure(
 						errEnterpriseHookAwaitingSignIn, enterpriseHookAwaitingSignInEarlierMatrix, written, verifyErr,
 					)
 				}
-				return enterprisehooks.InstallResult{}, false, fmt.Errorf(
-					"%w: DefenseClaw %s protected it, and this release's hooks install only in the account's own "+
-						"Windows session; its exact active Windows session is unavailable, so the guardian repairs "+
-						"it at the account's next sign-in (verification: %v)",
-					errEnterpriseHookAwaitingSignIn, written, verifyErr,
-				)
+				if enterpriseHookReconcileSecureClient() {
+					return enterprisehooks.InstallResult{}, false, fmt.Errorf(
+						"%w: DefenseClaw %s protected it, and this release's hooks install only in the account's own "+
+							"Windows session; its exact active Windows session is unavailable, so the guardian repairs "+
+							"it at the account's next sign-in (verification: %v)",
+						errEnterpriseHookAwaitingSignIn, written, verifyErr,
+					)
+				}
+				// An older lock alone does not establish that an agent will run a
+				// hook. Admit the sign-in wait only when its live machine policy
+				// still registers this SID and the hook will fail closed.
+				closed, proofErr := enterpriseHookReconcileClosedMachineRegistration(opts)
+				if proofErr == nil && closed {
+					return enterprisehooks.InstallResult{}, false, fmt.Errorf(
+						"%w: DefenseClaw %s protected it, and its exact active Windows session is unavailable, "+
+							"so its registered machine hooks fail closed until the account's next sign-in repairs them (verification: %v)",
+						errEnterpriseHookAwaitingSignIn, written, verifyErr,
+					)
+				}
 			}
 			// A signed-out account whose only failure is the owner or
 			// permissions of its own DefenseClaw folder or hooks folder

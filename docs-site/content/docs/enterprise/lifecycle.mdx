@@ -184,6 +184,19 @@ fail closed. On every OS, an agent that was already running keeps the telemetry
 credential it started with, the new gateway refuses it, and that agent's telemetry is
 lost until the agent is restarted.
 
+On a managed Windows upgrade from 1.0.6, an administrator's owner write can remove
+the `OWNER RIGHTS` entry from an enrolled, signed-out account's `.defenseclaw`
+files. Setup restores that entry only for this upgrade case, when the account
+owns the files and their access lists match the exact owner-rewritten form.
+It opens the managed folder and its children without following junctions. The
+upgrade leaves Claude Code or Codex repair pending only when it can read their
+active machine registration and prove that its runtime is closed or has no
+selected generation, which makes the registered hook fail closed.
+`status` and `verify` name the account and the pending repair until sign-in.
+Missing registration, an open runtime, another owner, extra write permission,
+a link, or other untrusted state still refuses the upgrade. Correct the state,
+have the account sign in, and run Setup `/ensure JSON=1` again.
+
 ## Roll back
 
 With bundle trust anchors, DefenseClaw refuses to install a release below the

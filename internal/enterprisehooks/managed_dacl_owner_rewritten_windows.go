@@ -209,6 +209,13 @@ func restoreWindowsUserPathOwnerRights(path string, target *windows.SID, directo
 		return false, fmt.Errorf("enterprise hooks: open %s for the OWNER RIGHTS restore: %w", path, err)
 	}
 	defer windows.CloseHandle(handle)
+	return restoreWindowsUserHandleOwnerRights(handle, path, target, directory)
+}
+
+// restoreWindowsUserHandleOwnerRights inspects and changes the same opened
+// object. The managed-tree caller supplies a handle reached component by
+// component from the volume root without following a reparse point.
+func restoreWindowsUserHandleOwnerRights(handle windows.Handle, path string, target *windows.SID, directory bool) (bool, error) {
 	var info windows.ByHandleFileInformation
 	if err := windows.GetFileInformationByHandle(handle, &info); err != nil {
 		return false, err
@@ -304,6 +311,18 @@ func reportWindowsOwnerRightsRestore(path string, restore func() (bool, error)) 
 // collects or purges that state (rel-1-0-6:GAP-0303), so a host that release
 // left half-uninstalled reaches a clean end.
 func RestoreWindowsManagedUserStateOwnerRights(sid, dataDir string) (int, error) {
+	return visitWindowsManagedUserStateOwnerRights(sid, dataDir, true)
+}
+
+func ProbeWindowsManagedUserStateOwnerRights(sid, dataDir string) (int, error) {
+	return visitWindowsManagedUserStateOwnerRights(sid, dataDir, false)
+}
+
+// Called after path validation, before the no-follow root open. Tests replace
+// the managed directory with a junction at that former race boundary.
+var windowsOwnerRightsAfterValidation = func() {}
+
+func visitWindowsManagedUserStateOwnerRights(sid, dataDir string, apply bool) (int, error) {
 	target, err := validateWindowsEnterpriseTargetSID(sid)
 	if err != nil {
 		return 0, err
@@ -311,47 +330,195 @@ func RestoreWindowsManagedUserStateOwnerRights(sid, dataDir string) (int, error)
 	if err := validateWindowsManagedRuntimeGenerationPath(dataDir, ".defenseclaw"); err != nil {
 		return 0, err
 	}
-	restored := 0
+	if err := winpath.RejectReparseChain(dataDir); err != nil {
+		return 0, err
+	}
+	windowsOwnerRightsAfterValidation()
+	root, parent, rootFinal, err := openWindowsOwnerRightsRoot(dataDir)
+	if errors.Is(err, os.ErrNotExist) {
+		return 0, nil
+	}
+	if err != nil {
+		return 0, err
+	}
+	defer windows.CloseHandle(root)
+	defer windows.CloseHandle(parent)
+	count := 0
 	var failures []error
-	for _, dir := range []string{dataDir, filepath.Join(dataDir, "hooks")} {
-		if _, err := os.Lstat(dir); errors.Is(err, os.ErrNotExist) {
-			continue
-		} else if err != nil {
-			failures = append(failures, err)
-			continue
+	visit := func(handle windows.Handle, path string, directory bool) {
+		var changed bool
+		var err error
+		if apply {
+			changed, err = restoreWindowsUserHandleOwnerRights(handle, path, target, directory)
+		} else {
+			changed, err = windowsUserHandleOwnerRewritten(handle, path, target, directory)
 		}
-		if err := winpath.RejectReparseChain(dir); err != nil {
-			failures = append(failures, err)
-			continue
-		}
-		changed, err := restoreWindowsUserPathOwnerRights(dir, target, true)
 		if changed {
-			restored++
+			count++
 		}
 		if err != nil {
 			failures = append(failures, err)
 		}
-		entries, err := os.ReadDir(dir)
+	}
+	visitDir := func(handle windows.Handle, dir, relative string) {
+		visit(handle, dir, true)
+		names, err := windowsQuarantineDirectoryNames(handle)
 		if err != nil {
 			failures = append(failures, err)
-			continue
+			return
 		}
-		if len(entries) > 4*windowsManagedRuntimeGenerationGCMaxCandidates {
+		if len(names) > 4*windowsManagedRuntimeGenerationGCMaxCandidates {
 			failures = append(failures, fmt.Errorf("enterprise hooks: %s has too many entries for the OWNER RIGHTS restore", dir))
-			continue
+			return
 		}
-		for _, entry := range entries {
-			if !entry.Type().IsRegular() {
+		for _, name := range names {
+			child, err := openWindowsOwnerRightsChild(handle, name, false)
+			if windowsOwnerRightsMissing(err) {
 				continue
 			}
-			changed, err := restoreWindowsUserPathOwnerRights(filepath.Join(dir, entry.Name()), target, false)
-			if changed {
-				restored++
-			}
 			if err != nil {
+				failures = append(failures, err)
+				continue
+			}
+			childRel := name
+			if relative != "" {
+				childRel = filepath.Join(relative, name)
+			}
+			if err := windowsOwnerRightsInsideRoot(child, rootFinal, childRel); err != nil {
+				failures = append(failures, err)
+			} else {
+				visit(child, filepath.Join(dir, name), false)
+			}
+			if err := windows.CloseHandle(child); err != nil {
 				failures = append(failures, err)
 			}
 		}
 	}
-	return restored, errors.Join(failures...)
+	visitDir(root, dataDir, "")
+	hooks, err := openWindowsOwnerRightsChild(root, "hooks", true)
+	if err == nil {
+		if err := windowsOwnerRightsInsideRoot(hooks, rootFinal, "hooks"); err != nil {
+			failures = append(failures, err)
+		} else {
+			visitDir(hooks, filepath.Join(dataDir, "hooks"), "hooks")
+		}
+		if err := windows.CloseHandle(hooks); err != nil {
+			failures = append(failures, err)
+		}
+	} else if !windowsOwnerRightsMissing(err) {
+		failures = append(failures, err)
+	}
+	return count, errors.Join(failures...)
+}
+
+func windowsUserHandleOwnerRewritten(handle windows.Handle, path string, target *windows.SID, directory bool) (bool, error) {
+	var info windows.ByHandleFileInformation
+	if err := windows.GetFileInformationByHandle(handle, &info); err != nil {
+		return false, err
+	}
+	if info.FileAttributes&windows.FILE_ATTRIBUTE_REPARSE_POINT != 0 ||
+		(info.FileAttributes&windows.FILE_ATTRIBUTE_DIRECTORY != 0) != directory ||
+		(!directory && info.NumberOfLinks != 1) {
+		return false, nil
+	}
+	sd, err := windows.GetSecurityInfo(handle, windows.SE_FILE_OBJECT,
+		windows.OWNER_SECURITY_INFORMATION|windows.DACL_SECURITY_INFORMATION)
+	if err != nil {
+		return false, err
+	}
+	return windowsUserPathOwnerRewrittenDescriptor(path, sd, target, directory), nil
+}
+
+func windowsOwnerRightsMissing(err error) bool {
+	return errors.Is(err, windows.ERROR_FILE_NOT_FOUND) || errors.Is(err, windows.ERROR_PATH_NOT_FOUND) ||
+		errors.Is(err, windows.STATUS_OBJECT_NAME_NOT_FOUND) || errors.Is(err, windows.STATUS_OBJECT_PATH_NOT_FOUND)
+}
+
+func openWindowsOwnerRightsRoot(dataDir string) (windows.Handle, windows.Handle, string, error) {
+	home := filepath.Dir(dataDir)
+	if err := winpath.RejectReparseChain(home); err != nil {
+		return 0, 0, "", err
+	}
+	ptr, err := winpath.UTF16Ptr(home)
+	if err != nil {
+		return 0, 0, "", err
+	}
+	const share = windows.FILE_SHARE_READ | windows.FILE_SHARE_WRITE
+	parent, err := windows.CreateFile(ptr, windows.FILE_READ_ATTRIBUTES|windows.FILE_LIST_DIRECTORY|windows.SYNCHRONIZE,
+		share, nil, windows.OPEN_EXISTING, windows.FILE_FLAG_BACKUP_SEMANTICS|windows.FILE_FLAG_OPEN_REPARSE_POINT, 0)
+	if windowsOwnerRightsMissing(err) {
+		return 0, 0, "", os.ErrNotExist
+	}
+	if err != nil {
+		return 0, 0, "", err
+	}
+	var info windows.ByHandleFileInformation
+	if err := windows.GetFileInformationByHandle(parent, &info); err != nil {
+		_ = windows.CloseHandle(parent)
+		return 0, 0, "", err
+	}
+	if info.FileAttributes&windows.FILE_ATTRIBUTE_REPARSE_POINT != 0 || info.FileAttributes&windows.FILE_ATTRIBUTE_DIRECTORY == 0 {
+		_ = windows.CloseHandle(parent)
+		return 0, 0, "", errors.New("enterprise hooks: profile root is a reparse point or non-directory")
+	}
+	parentFinal, err := inventoryDACLFinalPath(parent)
+	if err != nil {
+		_ = windows.CloseHandle(parent)
+		return 0, 0, "", err
+	}
+	expectedHome, err := winpath.Extended(home)
+	if err != nil || !strings.EqualFold(parentFinal, filepath.Clean(expectedHome)) {
+		_ = windows.CloseHandle(parent)
+		return 0, 0, "", errors.New("enterprise hooks: profile root moved during the OWNER RIGHTS open")
+	}
+	root, err := openWindowsOwnerRightsChild(parent, filepath.Base(dataDir), true)
+	if windowsOwnerRightsMissing(err) {
+		_ = windows.CloseHandle(parent)
+		return 0, 0, "", os.ErrNotExist
+	}
+	if err != nil {
+		_ = windows.CloseHandle(parent)
+		return 0, 0, "", err
+	}
+	rootFinal, err := inventoryDACLFinalPath(root)
+	if err != nil || !strings.EqualFold(rootFinal, filepath.Join(parentFinal, filepath.Base(dataDir))) {
+		_ = windows.CloseHandle(root)
+		_ = windows.CloseHandle(parent)
+		return 0, 0, "", errors.New("enterprise hooks: managed folder left the pinned profile")
+	}
+	return root, parent, rootFinal, nil
+}
+
+func openWindowsOwnerRightsChild(parent windows.Handle, name string, directory bool) (windows.Handle, error) {
+	access := uint32(windows.READ_CONTROL | windows.WRITE_DAC | windows.FILE_READ_ATTRIBUTES | windows.SYNCHRONIZE)
+	if directory {
+		access |= windows.FILE_LIST_DIRECTORY
+	}
+	handle, err := openWindowsNamespacePurgeChild(parent, name, access, directory,
+		windows.FILE_SHARE_READ|windows.FILE_SHARE_WRITE)
+	if err != nil {
+		return 0, err
+	}
+	var info windows.ByHandleFileInformation
+	if err := windows.GetFileInformationByHandle(handle, &info); err != nil {
+		_ = windows.CloseHandle(handle)
+		return 0, err
+	}
+	if info.FileAttributes&windows.FILE_ATTRIBUTE_REPARSE_POINT != 0 ||
+		(directory && info.FileAttributes&windows.FILE_ATTRIBUTE_DIRECTORY == 0) {
+		_ = windows.CloseHandle(handle)
+		return 0, errors.New("enterprise hooks: OWNER RIGHTS path contains a reparse point or non-directory")
+	}
+	return handle, nil
+}
+
+func windowsOwnerRightsInsideRoot(child windows.Handle, rootFinal, relative string) error {
+	final, err := inventoryDACLFinalPath(child)
+	if err != nil {
+		return err
+	}
+	if !pathInside(rootFinal, final) || !strings.EqualFold(final, filepath.Join(rootFinal, relative)) {
+		return fmt.Errorf("enterprise hooks: OWNER RIGHTS child left the managed folder: %s", relative)
+	}
+	return nil
 }

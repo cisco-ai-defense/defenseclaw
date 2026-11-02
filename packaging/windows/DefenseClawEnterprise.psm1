@@ -22412,11 +22412,12 @@ function Invoke-DefenseClawManagedUserStateOwnerRightsRestore {
         release refuses the managed folders and generation bundles of an
         enrolled account in that shape, so its uninstall stopped after the
         commit and every later uninstall or reinstall failed the same way.
-        Before the installed helper prepares, verifies, collects or purges
-        that state, the gateway of the running Setup payload puts the entry
-        back on exactly that shape ("teardown-managed-hooks
-        restore-owner-rights"), once per lifecycle run. It never fails the
-        lifecycle: the helper check that follows still decides. Before the
+        Before an upgrade validates an older account's hook lock, or the
+        installed helper prepares, verifies, collects or purges its state,
+        the gateway of the running Setup payload puts the entry back on
+        exactly that shape ("teardown-managed-hooks restore-owner-rights"),
+        once per lifecycle run. It never fails the lifecycle: the subsequent
+        trust and guardian checks still decide. Before the
         read-only GAP-0571 "check" and "verify" it changes no deployment
         state: it only puts back the entry an owner write took out (a
         tightening), so "the uninstall stopped before it removed anything"
@@ -22424,7 +22425,8 @@ function Invoke-DefenseClawManagedUserStateOwnerRightsRestore {
     #>
     param(
         [Parameter(Mandatory)][hashtable]$Layout,
-        [Parameter(Mandatory)][string]$GatewayServiceName
+        [Parameter(Mandatory)][string]$GatewayServiceName,
+        [switch]$UpgradeOnly
     )
     $source = $script:DefenseClawOwnerRightsSource
     if ($null -eq $source -or $script:DefenseClawOwnerRightsRestored -or
@@ -22434,23 +22436,67 @@ function Invoke-DefenseClawManagedUserStateOwnerRightsRestore {
     # Once per lifecycle run: nothing in one run writes an owner again.
     $script:DefenseClawOwnerRightsRestored = $true
     try {
+        $arguments = @(
+            'enterprise',
+            'windows',
+            'teardown-managed-hooks',
+            'restore-owner-rights',
+            '--json'
+        )
+        if ($UpgradeOnly) {
+            $arguments += '--upgrade-only'
+        }
         [void](Invoke-DefenseClawGatewayCommand `
             -Layout $Layout `
             -GatewayServiceName $GatewayServiceName `
             -GatewaySource $source `
-            -Arguments @(
-                'enterprise',
-                'windows',
-                'teardown-managed-hooks',
-                'restore-owner-rights',
-                '--json'
-            ) `
+            -Arguments $arguments `
             -Capture `
             -AllowFailure `
             -TimeoutSeconds 120)
     }
     catch {
         Write-DefenseClawLifecyclePhase -Stage "OWNER RIGHTS restore skipped: $($_.Exception.Message)"
+    }
+}
+
+function Test-DefenseClawUpgradeOwnerRightsRestoreNeeded {
+    param(
+        [Parameter(Mandatory)][hashtable]$Layout,
+        [Parameter(Mandatory)][string]$GatewayServiceName
+    )
+    $source = $script:DefenseClawOwnerRightsSource
+    if ($null -eq $source) {
+        return $false
+    }
+    try {
+        $probe = Invoke-DefenseClawGatewayCommand `
+            -Layout $Layout `
+            -GatewayServiceName $GatewayServiceName `
+            -GatewaySource $source `
+            -Arguments @('enterprise', 'windows', 'teardown-managed-hooks',
+                'restore-owner-rights', '--probe', '--upgrade-only', '--json') `
+            -Capture `
+            -AllowFailure `
+            -TimeoutSeconds 120
+        if ([int]$probe.exit_code -ne 0) {
+            return $false
+        }
+        $reports = @($probe.output | Microsoft.PowerShell.Core\Where-Object {
+            ([string]$_).Trim().StartsWith('{', [StringComparison]::Ordinal)
+        })
+        if ($reports.Count -ne 1) {
+            return $false
+        }
+        $report = [string]$reports[0] | Microsoft.PowerShell.Utility\ConvertFrom-Json
+        return ([int]$report.schema_version -eq 4 -and
+            [string]$report.action -ceq 'restore-owner-rights' -and
+            $report.ok -is [bool] -and [bool]$report.ok -and
+            [int]$report.failed_count -eq 0 -and
+            [int]$report.succeeded_count -gt 0)
+    }
+    catch {
+        return $false
     }
 }
 
@@ -35773,6 +35819,22 @@ function Invoke-DefenseClawInstallLikeLifecycle {
         Stop-DefenseClawService -Name $Layout.SensorHelperServiceName
         if ((Test-DefenseClawLayoutBrokerEnabled -Layout $Layout)) {
             Stop-DefenseClawService -Name $Layout.BrokerServiceName
+        }
+        if ($Action -eq 'Upgrade' -and $priorDeploymentActive -and
+            (Test-DefenseClawStandaloneProfile) -and
+            ([string]$metadata.product_version) -match '^1\.0\.6(?:$|[+-])' -and
+            (Test-DefenseClawUpgradeOwnerRightsRestoreNeeded `
+                -Layout $Layout `
+                -GatewayServiceName $GatewayServiceName)) {
+            # An owner write can remove OWNER RIGHTS from a signed-out
+            # account's hook lock and generation files. Restore only the
+            # exact GAP-0303 shape while the guardian is stopped, before
+            # the replacement guardian verifies that account. Its older
+            # hooks remain registered until its next sign-in (GAP-0513).
+            Invoke-DefenseClawManagedUserStateOwnerRightsRestore `
+                -Layout $Layout `
+                -GatewayServiceName $GatewayServiceName `
+                -UpgradeOnly
         }
         if ($Action -eq 'Repair' -and (Test-DefenseClawStandaloneProfile)) {
             # The snapshot is durable and services are stopped. Heal managed

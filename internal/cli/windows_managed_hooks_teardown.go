@@ -612,9 +612,10 @@ const windowsManagedHooksOwnerRightsRestoreAction = "restore-owner-rights"
 
 // windowsManagedHooksOwnerRightsRestorer is replaceable in tests.
 var windowsManagedHooksOwnerRightsRestorer = enterprisehooks.RestoreWindowsManagedUserStateOwnerRights
+var windowsManagedHooksOwnerRightsProber = enterprisehooks.ProbeWindowsManagedUserStateOwnerRights
 
 func newWindowsManagedHooksOwnerRightsRestoreCommand() *cobra.Command {
-	var jsonOutput bool
+	var jsonOutput, probe, upgradeOnly bool
 	child := &cobra.Command{
 		Use:          windowsManagedHooksOwnerRightsRestoreAction,
 		Short:        "restore the OWNER RIGHTS entry on enrolled accounts managed state after an owner change",
@@ -622,7 +623,7 @@ func newWindowsManagedHooksOwnerRightsRestoreCommand() *cobra.Command {
 		Args:         cobra.NoArgs,
 		SilenceUsage: true,
 		RunE: func(cmd *cobra.Command, _ []string) error {
-			report, err := runWindowsManagedHooksOwnerRightsRestore()
+			report, err := runWindowsManagedHooksOwnerRightsRestoreMode(probe, upgradeOnly)
 			if jsonOutput {
 				if encodeErr := json.NewEncoder(cmd.OutOrStdout()).Encode(report); encodeErr != nil && err == nil {
 					return encodeErr
@@ -638,6 +639,8 @@ func newWindowsManagedHooksOwnerRightsRestoreCommand() *cobra.Command {
 		},
 	}
 	child.Flags().BoolVar(&jsonOutput, "json", false, "emit machine-readable JSON")
+	child.Flags().BoolVar(&probe, "probe", false, "count exact owner-rewritten objects without changing them")
+	child.Flags().BoolVar(&upgradeOnly, "upgrade-only", false, "consider only signed-out accounts with owner-rewritten state")
 	return child
 }
 
@@ -649,6 +652,10 @@ func newWindowsManagedHooksOwnerRightsRestoreCommand() *cobra.Command {
 // an account it could not restore is a failed result, never an error: the
 // trust check that follows still decides.
 func runWindowsManagedHooksOwnerRightsRestore() (windowsManagedHooksTeardownReport, error) {
+	return runWindowsManagedHooksOwnerRightsRestoreMode(false, false)
+}
+
+func runWindowsManagedHooksOwnerRightsRestoreMode(probe, upgradeOnly bool) (windowsManagedHooksTeardownReport, error) {
 	report := windowsManagedHooksTeardownReport{
 		SchemaVersion: windowsManagedHooksTeardownSchema,
 		Action:        windowsManagedHooksOwnerRightsRestoreAction,
@@ -700,7 +707,23 @@ func runWindowsManagedHooksOwnerRightsRestore() (windowsManagedHooksTeardownRepo
 		}
 		seen[key] = true
 		report.TargetCount++
-		restored, err := windowsManagedHooksOwnerRightsRestorer(target.SID, target.DataDir)
+		var restored int
+		var err error
+		if upgradeOnly {
+			var signedOut bool
+			signedOut, err = enterprisehooks.WindowsTargetHasNoSession(target.SID)
+			if err == nil && signedOut {
+				restored, err = windowsManagedHooksOwnerRightsProber(target.SID, target.DataDir)
+			}
+			if err == nil && (!signedOut || restored == 0) {
+				continue
+			}
+		}
+		if err == nil && !probe {
+			restored, err = windowsManagedHooksOwnerRightsRestorer(target.SID, target.DataDir)
+		} else if err == nil && !upgradeOnly {
+			restored, err = windowsManagedHooksOwnerRightsProber(target.SID, target.DataDir)
+		}
 		report.SucceededCount += restored
 		result := windowsManagedHooksTeardownResult{Connector: target.Connector, SID: target.SID, OK: err == nil}
 		if err != nil {

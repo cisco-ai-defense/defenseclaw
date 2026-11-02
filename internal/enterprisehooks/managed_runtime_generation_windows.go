@@ -671,7 +671,7 @@ var windowsMachinePolicyRegisteredSIDs = func(connectorName, hookExecutable stri
 	var registered []string
 	switch connectorName {
 	case "claudecode":
-		targets, active, err := ReadWindowsClaudeManagedPolicyTargets()
+		targets, active, err := readWindowsClaudeManagedPolicyTargetsForHook(hookExecutable)
 		if err != nil || !active {
 			return nil, err
 		}
