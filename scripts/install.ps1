@@ -3581,7 +3581,11 @@ function Install-New {
         elseif (Test-Path -LiteralPath (Join-Path $BinDir "$name.cmd")) { Remove-Aside (Join-Path $BinDir "$name.cmd") }
     }
     $target = Join-Path $Venv "Scripts\defenseclaw.exe"
-    if (Test-Path -LiteralPath $target) { Write-PosixShim $target; Install-File $target (Join-Path $BinDir $CliLauncher) }
+    if (Test-Path -LiteralPath $target) {
+        Write-PosixShim (Join-Path $BinDir $CliLauncher)
+        # The native CLI entry checks the recorded data root before uv starts.
+        Install-File (Join-Path $BinDir "defenseclaw-gateway.exe") (Join-Path $BinDir $CliLauncher)
+    }
     else {
         foreach ($name in @($PosixShim, $CliLauncher)) {
             if (Test-Path -LiteralPath (Join-Path $BinDir $name)) { Remove-Aside (Join-Path $BinDir $name) }

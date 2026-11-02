@@ -629,11 +629,12 @@ def test_a_release_install_removes_the_developer_install_files() -> None:
 def test_powershell_runs_a_native_cli_launcher() -> None:
     # GAP-2237: through defenseclaw.cmd, cmd.exe asked "Terminate batch job
     # (Y/N)?" after Ctrl+C. PATHEXT runs .exe before .cmd, so the installer
-    # puts the venv's own launcher beside the shim, and rollback keeps it.
+    # puts a native launcher beside the shim, and rollback keeps it.
     text = _text()
     assert '$CliLauncher = "defenseclaw.exe"' in text
     assert "@($PosixShim, $CliLauncher, $HookState)" in text
-    assert "Write-PosixShim $target; Install-File $target (Join-Path $BinDir $CliLauncher)" in text
+    assert "Write-PosixShim (Join-Path $BinDir $CliLauncher)" in text
+    assert 'Install-File (Join-Path $BinDir "defenseclaw-gateway.exe") (Join-Path $BinDir $CliLauncher)' in text
     assert "defenseclaw.exe" not in _list("DeveloperFiles")
 
 
