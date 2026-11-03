@@ -2504,7 +2504,7 @@ func failUnreachable(opts Options, sp spec, failMode, reason string) int {
 		}
 	}
 	if blocked {
-		if sp.connector == "antigravity" {
+		if sp.connector == "antigravity" && !managedPlainFailClosed(opts, sp) {
 			fmt.Fprintf(opts.Stderr,
 				"defenseclaw: gateway unreachable, applying Antigravity's event-specific failure response: %s\n", reason)
 		} else if managedPlainFailClosed(opts, sp) {
@@ -3727,6 +3727,12 @@ func failManagedStandaloneClosed(opts Options, sp spec, result failResult, layer
 	case "opencode":
 		fmt.Fprintln(opts.Stdout, openCodeDenyBody(text))
 		return result.exit
+	case "antigravity":
+		if strings.TrimSpace(opts.Event) == "PreToolUse" {
+			fmt.Fprintln(opts.Stdout, `{"decision":"deny","reason":`+mustJSONString(text)+`}`)
+			return 0
+		}
+		return emitHookResult(opts, sp, result)
 	}
 	return emitHookResult(opts, sp, result)
 }
