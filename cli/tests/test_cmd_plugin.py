@@ -1415,6 +1415,17 @@ class TestPluginUnblockMarketplaceKey(PluginCommandTestBase):
         self.assertIsNone(self.app.store.get_action("plugin", "r105fx@r105mkt", "claudecode"))
         self.assertIsNotNone(self.app.store.get_action("plugin", "r105fxx@r105mkt", "claudecode"))
 
+    def test_gap0553_unblock_clears_bare_and_marketplace_state(self):
+        self._auto_block("r108kit@r108market")
+        self._auto_block("r108kit2@r108market")
+        self.assertEqual(self.invoke(["block", "r108kit"]).exit_code, 0)
+
+        result = self.invoke(["unblock", "r108kit"])
+        self.assertEqual(result.exit_code, 0, result.output)
+        self.assertIsNone(self.app.store.get_action("plugin", "r108kit@r108market", "claudecode"))
+        self.assertFalse(PolicyEngine(self.app.store, self.app.cfg).is_blocked("plugin", "r108kit"))
+        self.assertIsNotNone(self.app.store.get_action("plugin", "r108kit2@r108market", "claudecode"))
+
     def test_bare_unblock_without_any_state_still_says_so(self):
         result = self.invoke(["unblock", "r105none"])
         self.assertEqual(result.exit_code, 0, result.output)

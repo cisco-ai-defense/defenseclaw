@@ -4250,6 +4250,7 @@ def unblock(app: AppContext, name: str, connector_flag: str) -> None:
             return
         only_allow = _plugin_only_allow_entry(app, pe, plugin_name, connector)
         pe.remove_action_for_connector("plugin", plugin_name, connector)
+        _unblock_marketplace_copies(app, plugin_name, connector_flag, connector)
         click.secho(_plugin_unblock_line(plugin_name, connector, only_allow), fg="green")
         _plugin_unblock_followup(plugin_name, connector, only_allow)
         if app.logger:
@@ -4286,6 +4287,7 @@ def unblock(app: AppContext, name: str, connector_flag: str) -> None:
             pe.remove_action_for_connector("plugin", plugin_name, target_connector)
         if has_unscoped_state:
             pe.remove_action("plugin", plugin_name)
+        _unblock_marketplace_copies(app, plugin_name, connector_flag, None)
         for scope in scopes:
             click.secho(_plugin_unblock_line(plugin_name, scope, only_allow[scope]), fg="green")
         only_one = len(owners) == 1 and not has_unscoped_state
@@ -4316,6 +4318,7 @@ def unblock(app: AppContext, name: str, connector_flag: str) -> None:
 
     only_allow = _plugin_only_allow_entry(app, pe, plugin_name, "")
     pe.remove_action("plugin", plugin_name)
+    _unblock_marketplace_copies(app, plugin_name, connector_flag, None)
     click.secho(_plugin_unblock_line(plugin_name, "", only_allow), fg="green")
     _plugin_unblock_followup(plugin_name, "", only_allow)
     if app.logger:

@@ -174,8 +174,9 @@ type InstallWatcher struct {
 	debounce         time.Duration
 	onAdmit          OnAdmission
 
-	mu      sync.Mutex
-	pending map[string]time.Time // path → first-seen, for debounce
+	mu               sync.Mutex
+	pending          map[string]time.Time // path → first-seen, for debounce
+	quarantineMoveMu sync.Mutex
 
 	// pluginWaiting holds plugin-root folders that had nothing to admit yet
 	// (empty or category folders, GAP-2449) and skill folders without a
@@ -3081,6 +3082,15 @@ func (w *InstallWatcher) quarantineAssetWith(ctx context.Context, evt InstallEve
 		err := fmt.Errorf("watcher: quarantine provenance store is unavailable")
 		w.emitQuarantineFailure(ctx, evt, err)
 		return err
+	}
+	if evt.Type == InstallPlugin && !w.secureClientActive() {
+		// A rescan and a filesystem event can share one quarantine record and
+		// stage. Keep their filesystem and journal transitions in order.
+		w.quarantineMoveMu.Lock()
+		defer w.quarantineMoveMu.Unlock()
+		if _, err := os.Lstat(evt.Path); errors.Is(err, fs.ErrNotExist) {
+			return nil
+		}
 	}
 	if honorRestore && w.preserveRestoredBlockedAsset(evt) {
 		_ = w.logger.LogAction(string(audit.ActionWatcherBlock), evt.Path,
