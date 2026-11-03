@@ -14,6 +14,7 @@ import (
 	"context"
 	"os"
 	"path/filepath"
+	"runtime"
 	"testing"
 
 	"github.com/defenseclaw/defenseclaw/internal/config"
@@ -191,7 +192,13 @@ func TestGAP0535UnprovenSequentialDirectoryChecksBothTrees(t *testing.T) {
 					HookEventName: "PreToolUse", ToolName: "Bash", CWD: cwd,
 					ToolInput: map[string]interface{}{"command": "cd " + tc.path + separator + "cat skills/folder/SKILL.md"},
 				})
-				want := placement != "ordinary"
+			want := placement != "ordinary"
+			// Mode 0700 and a synthetic UID do not restrict a Windows
+			// directory. The cd reaches other there, so a denied skill
+			// only in cwd cannot be read by the following cat.
+			if runtime.GOOS == "windows" && tc.name == "foreign-0700" && placement == "cwd-denied" {
+				want = false
+			}
 				if matched != want || matched && (decision.Action != "block" || decision.Source != "admin-deny") {
 					t.Errorf("%s separator=%q placement=%s: decision=%+v matched=%t", tc.name, separator, placement, decision, matched)
 				}
