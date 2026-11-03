@@ -214,8 +214,8 @@ func (l *lifecycle) describeLegacySandboxes(ctx context.Context) {
 		seen[a.UID] = true
 		st, err := ops.Status(ctx, a)
 		type unprotected struct{ state, line, why string }
-		legacy := ". Its session runs the supervisor of an OpenShell release older than " + openshell.SupportedMin + ", whose network broker can " +
-			"let its connections bypass sandbox policy and DefenseClaw cannot contain; DefenseClaw stops no sandbox for its user, and runs no new " +
+		legacy := ". Its session runs the supervisor of an OpenShell release older than " + openshell.SupportedMin +
+			", which DefenseClaw cannot verify under the current policy; DefenseClaw stops no sandbox for its user, and runs no new " +
 			"sandbox for " + a.Name + " until it is gone"
 		var lines []unprotected
 		switch {
@@ -633,8 +633,8 @@ func (e *Env) checkSetupMode(ctx context.Context, s openshellSettings) []prereqR
 			Fix: "set enterprise.openshell.version to one of: " + strings.Join(openshell.PinnedTarballReleases(), ", ")})
 	case s.RaisedFrom != "":
 		rows = append(rows, prereqRow{Name: "openshell pin", OK: true, Detail: s.Version + " from NVIDIA's release tarballs, verified against their checksums and the digests this build pins; " +
-			"enterprise.openshell.version pins " + s.RaisedFrom + ", which runs no sandbox (" + openshell.SupportedMin + " closes a network-broker policy bypass, " +
-			"NVIDIA/OpenShell#4494), so each user's OpenShell moves to " + s.Version + " once none of the user's sandboxes runs; set the pin to " + s.Version})
+			"enterprise.openshell.version pins " + s.RaisedFrom + ", which runs no sandbox (OpenShell " + openshell.SupportedMin +
+			" or later is required), so each user's OpenShell moves to " + s.Version + " once none of the user's sandboxes runs; set the pin to " + s.Version})
 	default:
 		rows = append(rows, prereqRow{Name: "openshell pin", OK: true, Detail: s.Version + " from NVIDIA's release tarballs, verified against their checksums and the digests this build pins"})
 	}

@@ -681,8 +681,8 @@ func TestCreateRefusesAFirstBootWithoutDiskRoom(t *testing.T) {
 	e.create(sandboxapi.CreateRequest{Name: "vm-cached", Copy: true, Project: e.otherProject("other")})
 	// After an in-place upgrade the gateway prepares its own disk: the one
 	// the release before prepared counts for neither.
-	e.fake.SetRelease("0.1.6")
-	e.gw.Version = "0.1.6"
+	e.fake.SetRelease("0.1.7")
+	e.gw.Version = "0.1.7"
 	if ex, err := e.m.Explain(t.Context(), sandboxapi.ExplainRequest{Harness: "claudecode", Copy: true, Project: e.project}); err != nil || !ex.VMFirstBoot {
 		t.Fatalf("Explain on the upgraded gateway = %+v, %v", ex, err)
 	}

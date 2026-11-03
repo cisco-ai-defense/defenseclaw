@@ -41,7 +41,7 @@ Install and configure OpenShell sandboxes on Linux with `defenseclaw sandbox set
 | Docker | Rootful Docker Engine 28 or newer with buildx, and your user in the `docker` group. Rootless Docker is not supported. |
 | Disk | 5 GiB free for Docker (10 GiB recommended). The first image build downloads about 3 GB. |
 | Git | Git 2.29 or newer (`sudo dnf install git` or `sudo apt-get install git`). A copy-mode run copies your project with it, and the pre-session snapshot of a git repository uses it. `defenseclaw sandbox doctor` checks it (**Host Git**): the row fails where every run works on a copy (a MicroVM, which mounts no host folders, a managed computer, or `openshell.workdir.mode copy`) and warns otherwise. |
-| OpenShell | 0.1.5 or newer. Setup installs it, or upgrades an older one, after asking. |
+| OpenShell | 0.1.6 or newer. Setup installs it, or upgrades an older one, after asking. |
 
 Turn on linger so the gateway keeps running after you log out: `sudo loginctl enable-linger $USER`.
 
@@ -90,7 +90,7 @@ You can also run setup from the TUI (`defenseclaw tui`, `0`, **Sandboxes (OpenSh
     { type: "prompt", text: "Fix \"Gateway service\" now: start the gateway and enable it at login, then register it (openshell gateway add https://127.0.0.1:17670 --local --name openshell)? [Y/n] ", reply: "", pauseMs: 800 },
     { type: "out", text: "  fixing \"Gateway service\"…" },
     { type: "ok", text: "  ✓ fixed \"Gateway service\"" },
-    { type: "prompt", text: "Upgrade OpenShell 0.1.1 to 0.1.5 in place with NVIDIA's installer? (OpenShell 0.1.1 runs no DefenseClaw sandbox; sudo; sha256 verified; pulls OpenShell's 0.1.5 supervisor images from ghcr.io; restarts the gateway: no sandbox runs on it now) [Y/n] ", reply: "", pauseMs: 800 },
+    { type: "prompt", text: "Upgrade OpenShell 0.1.1 to 0.1.6 in place with NVIDIA's installer? (OpenShell 0.1.1 runs no DefenseClaw sandbox; sudo; sha256 verified; pulls OpenShell's 0.1.6 supervisor images from ghcr.io; restarts the gateway: no sandbox runs on it now) [Y/n] ", reply: "", pauseMs: 800 },
     { type: "out", text: "OpenShell install plan" },
     { type: "out", text: "  Release     v0.1.5 (NVIDIA OpenShell upstream installer)" },
     { type: "out", text: "  Script      https://raw.githubusercontent.com/NVIDIA/OpenShell/v0.1.5/install.sh" },
@@ -196,7 +196,7 @@ Continue with [run an agent](/docs/sandboxes/first-session).
 
 ### Understand what it changed
 
-- **OpenShell 0.1.5**, installed with NVIDIA's installer pinned by SHA-256, using `sudo`. DefenseClaw supports 0.1.5 up to, not including, 0.2.0. An older release only connects so that setup can upgrade it.
+- **OpenShell 0.1.6**, installed with NVIDIA's installer pinned by SHA-256, using `sudo`. DefenseClaw runs sandboxes on 0.1.6 up to, not including, 0.2.0. An older 0.1 release only connects so that setup can upgrade it.
 - **The gateway** listens on `127.0.0.1:17670` with mutual TLS. Setup turns on project-folder mounts for the Docker driver in `~/.config/openshell/gateway.toml`, turns OpenShell's usage telemetry off in `gateway.env`, backs both files up and restarts the gateway once. The compute driver is `docker` unless you choose MicroVMs.
 - **DefenseClaw's config:** `openshell.enabled: true`, and `openshell.harnesses` lists the harnesses setup prepared (`--harness NAME` adds one; the default is Claude Code and Codex).
 - **Harness images**, built and checked that their hooks reach DefenseClaw. `defenseclaw sandbox image list` shows them.

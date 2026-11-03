@@ -871,8 +871,8 @@ func (a *App) installerHow() string {
 // the question's default is no, as the install's, so --yes and
 // --non-interactive keep it; --install-openshell upgrades it. A legacy
 // release (DoctorReport.OpenShellLegacy: older than openshell.SupportedMin,
-// the hosts DefenseClaw 1.0.0 to 1.0.3 left on 0.1.1 to 0.1.4, a 0.1.5
-// prerelease) runs no sandbox, so the default is yes and --yes takes it;
+// the hosts DefenseClaw 1.0.0 to 1.0.3 left on 0.1.1 to 0.1.4, the 0.1.5
+// release, and a 0.1.6 prerelease) runs no sandbox, so the default is yes and --yes takes it;
 // --non-interactive keeps it, and setup then stops on the Gateway check,
 // with the upgrade as its fix. NVIDIA's installer
 // restarts the gateway once it has installed the release, of every owner:

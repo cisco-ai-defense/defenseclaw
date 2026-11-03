@@ -133,7 +133,7 @@ commands change in these ways. Everything else on this page works as written.
   The administrator turns sandboxes on with `openshell.enabled` and decides how
   OpenShell is provided; in `setup` install mode your daemon installs NVIDIA's
   release into `~/.local` at your first sandbox. The first-use progress line is
-  "Installing OpenShell 0.1.5 for your account and starting it (first run only)…".
+  "Installing OpenShell 0.1.6 for your account and starting it (first run only)…".
 - **`sandbox policy allow` and `block`** save one host decision at a time in
   the managed gateway. Start a sandbox first; if you have several, use
   `--sandbox NAME` to select the policy that checks the decision. The gateway
@@ -230,7 +230,7 @@ asking. Doctor exits `1` when a check fails, with `--output json` too, after it
 prints the result (so `ok` is `false` exactly when it exits `1`). The JSON holds `ok`,
 `ready` (`ok`, with sandboxes turned on), `openshell_install` (setup would offer
 to install OpenShell), `openshell_upgrade` (setup would offer to upgrade a
-supported OpenShell older than 0.1.5 in place) and `openshell_install_version`
+  supported OpenShell older than 0.1.6 in place) and `openshell_install_version`
 (the release setup installs), then every check with its id, title, status,
 detail and fix, the OpenShell and Docker versions found, and the compute driver. When a burst of sandbox commands hit the request limit while doctor read the organization policy, that row warns and asks you to run doctor again; it does not report a failed policy;
 the TUI's Setup wizard reads these fields. When sandboxes are on

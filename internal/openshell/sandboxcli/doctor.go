@@ -420,8 +420,8 @@ func (a *App) legacySandboxCheck(ctx context.Context, cached ...*doctorSnapshot)
 	}
 	return &openshell.Check{ID: CheckIDLegacySandbox, Title: "Legacy sandboxes", Status: openshell.StatusFail,
 		Detail: strings.Join(names, ", ") + ": " + sandboxapi.LegacyUnprotected + " (" + itsTheir(names) +
-			" session runs the supervisor of an OpenShell release older than " + openshell.SupportedMin + ", whose network broker can let connections " +
-			"bypass sandbox policy, NVIDIA/OpenShell#4494, and DefenseClaw cannot contain it); DefenseClaw stops " + itThem(names) +
+			" session runs the supervisor of an OpenShell release older than " + openshell.SupportedMin +
+			", which DefenseClaw cannot verify under the current policy); DefenseClaw stops " + itThem(names) +
 			" for nobody, and creates and starts no sandbox until " + gone,
 		Fix: &openshell.Fix{Summary: strings.Join(ways, "; ")}}
 }

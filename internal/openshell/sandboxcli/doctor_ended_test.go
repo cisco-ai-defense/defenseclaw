@@ -169,7 +169,7 @@ func TestStopOfAnEndedMicroVMSaysHowToStopIt(t *testing.T) {
 		{"completed", "completed", "", openshell.SupportedMin,
 			"⚠ box is completed: OpenShell does not stop it, so its MicroVM may still run, and DefenseClaw stops, restarts and upgrades no OpenShell gateway under it, " +
 				"nor moves this account to another OpenShell setup, until OpenShell reports it stopped: save or sync any accessible guest work first; nothing in OpenShell writes this MicroVM's disk back or stops it: " +
-				"on OpenShell 0.1.5 its start (`defenseclaw sandbox start box --end-vm` or `openshell sandbox start box` too) fails with Conflict and leaves it starting, " +
+				"on OpenShell " + openshell.SupportedMin + " its start (`defenseclaw sandbox start box --end-vm` or `openshell sandbox start box` too) fails with Conflict and leaves it starting, " +
 				"so keep it while you need what it holds (it keeps the OpenShell gateway); only then `defenseclaw sandbox delete box` (DefenseClaw sandbox) or `openshell sandbox delete box` (raw OpenShell sandbox), which deletes it and its work"},
 		{"failed", "error", "MainProcessFailed: Canonical main process exited with status 1", openshell.SupportedMin,
 			"⚠ box is in OpenShell's error state (MainProcessFailed: Canonical main process exited with status 1): OpenShell does not stop it, so its MicroVM may still run"},

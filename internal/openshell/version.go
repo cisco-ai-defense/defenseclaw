@@ -31,19 +31,12 @@ const (
 	// SupportedMin is the oldest OpenShell release DefenseClaw supports. It
 	// creates and starts sandboxes only on it and later, and its install
 	// step upgrades an older OpenShell in place (Installer.Install), as
-	// ensure moves a managed account off one (ManagedSetupPin). Before
-	// 0.1.5 the supervisor's network broker fell through to the native
-	// connect, bind, listen or send when it could not inspect a socket
-	// descriptor, so a sandbox's traffic could bypass its policy
-	// (NVIDIA/OpenShell#4494). Its prereleases come before it
-	// (Version.Compare): the fix landed in 0.1.5-pre.4, so 0.1.5-pre.1 to
-	// pre.3 still have the hole. A sandbox keeps the supervisor of the
-	// release its session started on, so one that started earlier must stop
-	// and start again (record.SessionRelease). Every release from it also
-	// stops a sandbox in OpenShell's error state, so that it can be started
-	// again (NVIDIA/OpenShell#4231). Review it with InstallerVersion, never
-	// above it.
-	SupportedMin = "0.1.5"
+	// ensure moves a managed account off one (ManagedSetupPin). OpenShell
+	// 0.1.6 initializes a missing or empty MicroVM hosts file. It preserves
+	// nonempty image-authored files, so retain the current MicroVM image
+	// verdict and admission gate. Its prereleases come before it
+	// (Version.Compare). Review it with InstallerVersion, never above it.
+	SupportedMin = "0.1.6"
 	// LegacyMin is the oldest release DefenseClaw still connects to, only to
 	// move its host to SupportedMin (CheckConnects, Legacy): on a gateway
 	// from it to below SupportedMin, its prereleases included, it runs no
@@ -60,7 +53,7 @@ const (
 	// InstallerVersion is the release the setup flow installs, and the one
 	// it offers an older supported release an in-place upgrade to
 	// (Installer.Upgrade, DoctorReport.OpenShellUpgradeAvailable).
-	InstallerVersion = "0.1.5"
+	InstallerVersion = "0.1.6"
 	// InstallerTag is InstallerVersion's upstream release tag.
 	InstallerTag = "v" + InstallerVersion
 	// InstallerURL is the tag-pinned upstream installer. Fetching it from a
@@ -68,15 +61,13 @@ const (
 	InstallerURL = "https://raw.githubusercontent.com/NVIDIA/OpenShell/" + InstallerTag + "/install.sh"
 	// InstallerSHA256 is the digest of InstallerURL. Setup refuses to run a
 	// script that does not match it.
-	InstallerSHA256 = "7bf6706741b8b59c1b61e0c47030f0a34fefba6cee3c74cd52638cbf7cdc3655"
+	InstallerSHA256 = "04c1a437d4a4fc11930d75a336fc4f52bf0c95251e8469c306e407e203769ae7"
 
 	// installerUpgradeReason says why a host on an older supported release
 	// is offered InstallerVersion (the doctor's CLI check). Review it with
 	// InstallerVersion.
-	installerUpgradeReason = "closes a hole in the network broker that let a sandbox's connections bypass its policy (0.1.5), " +
-		"fixes a supervisor bug that can stall a sandbox's first connection (0.1.2), cuts the CPU an idle sandbox uses (0.1.2), " +
-		"ships the MicroVM driver already signed for Apple's Hypervisor (0.1.3), flushes a MicroVM's disk before it stops (0.1.5) " +
-		"and lets a sandbox in OpenShell's error state be stopped and started again (0.1.5)"
+	installerUpgradeReason = "initializes a missing or empty MicroVM hosts file; " +
+		"the release also includes the 0.1.5 network and lifecycle fixes"
 
 	// DefaultBaseImage is the digest-pinned NVIDIA community sandbox image
 	// the DefenseClaw overlay is built on (multi-arch; ships node, uv, git
@@ -153,16 +144,16 @@ const TarballBaseURL = "https://github.com/NVIDIA/OpenShell/releases/download/"
 // setup mode raises an older pin to InstallerVersion (ManagedSetupPin), so a
 // release older than SupportedMin is never listed.
 var TarballPins = map[string]map[string]string{
-	"0.1.5": {
-		"openshell-x86_64-unknown-linux-musl.tar.gz":           "ca1ad6e6fbb4a6cd407e95763391b8ecff02912e7d9c467e7ca22696fe80af69",
-		"openshell-aarch64-unknown-linux-musl.tar.gz":          "30c949b4ac07a9c8245c1248eb82e4eb241615134fcabf3c9bf30dec7d00addf",
-		"openshell-aarch64-apple-darwin.tar.gz":                "48d6f4b4a222dc0a120ee4d6a677cb931bcc57f9ac54aefb101588f99c9c7642",
-		"openshell-gateway-x86_64-unknown-linux-gnu.tar.gz":    "6ed6a6aff420c65250082cc1db48dc6271a6f5eec0e0068133566ffae4aa788b",
-		"openshell-gateway-aarch64-unknown-linux-gnu.tar.gz":   "125f9f43b8d06da8280c78089904a6da2faa7c4cb03f82db3b31fc980cf6c62d",
-		"openshell-gateway-aarch64-apple-darwin.tar.gz":        "8e6fd1b05999709a9042ec83fcd902e062507af3e817f28bcda181fb93b42e7a",
-		"openshell-driver-vm-x86_64-unknown-linux-gnu.tar.gz":  "6465e39666276215a9fa05d27991e67c9c88267284b59aca95cb7dbb9d69cd41",
-		"openshell-driver-vm-aarch64-unknown-linux-gnu.tar.gz": "fc49a0bebfda3075a996123c0fd252200e2987856da63fbd8e7f021f327e1e68",
-		"openshell-driver-vm-aarch64-apple-darwin.tar.gz":      "125692d5e9b0183ceeadbc78b71de6007a3318dcc7ec9823e784b072ece2c4ac",
+	"0.1.6": {
+		"openshell-x86_64-unknown-linux-musl.tar.gz":           "2951c67366f3e3584ed9cec8d49b9f0b0eefc8cacea8b0582ac164590492f136",
+		"openshell-aarch64-unknown-linux-musl.tar.gz":          "259452a6065c4f76e71884b84e8696cc0fec2f8a832891d333f268ca7bb55a21",
+		"openshell-aarch64-apple-darwin.tar.gz":                "334e9cf24994a5bfd34691e9835920da15f5ef224cc96be0d4751eadfa279897",
+		"openshell-gateway-x86_64-unknown-linux-gnu.tar.gz":    "811265a55993beb333905a5b560764a40aa9177250171f711dce8ba820f7eff8",
+		"openshell-gateway-aarch64-unknown-linux-gnu.tar.gz":   "de7342457746829138cecbc21cc90a2d5d4c0ea22a362b976831ac3bbb0109d6",
+		"openshell-gateway-aarch64-apple-darwin.tar.gz":        "8313480f7d00264fc6c8eaad6e522736b20be97bed6a8f309c08fcb10e3c617b",
+		"openshell-driver-vm-x86_64-unknown-linux-gnu.tar.gz":  "855fdf50b9f1200a6fafd1474b725adff3e7bfe9f787252cdec01c16e90d717c",
+		"openshell-driver-vm-aarch64-unknown-linux-gnu.tar.gz": "f12c877d290638f67c3e54b1faed94a50b27f6404200b44c195e6dded6b9a994",
+		"openshell-driver-vm-aarch64-apple-darwin.tar.gz":      "4193697d892f1050e282b079259c1581256039a3c276ac798cf4b73b71247e2c",
 	},
 }
 
@@ -176,7 +167,7 @@ type SandboxPolicy = v1.SandboxPolicy
 // "dev.108" of a dev build (0.1.6-dev.108+g152d05940). A prerelease comes
 // before its release, as in semantic versioning (Compare): NVIDIA cuts the
 // prereleases of a release before all of its fixes are in, so 0.1.5-pre.3
-// is not 0.1.5 (SupportedMin). A package revision (the "-1" of 0.1.1-1) and
+// is not the supported 0.1.6 release. A package revision (the "-1" of 0.1.1-1) and
 // build metadata (the "+g152d05940") take no part in it.
 type Version struct {
 	Major, Minor, Patch int
@@ -362,15 +353,8 @@ type ErrSandboxRelease struct {
 }
 
 func (e *ErrSandboxRelease) Error() string {
-	if e.Found.Pre != "" && e.Found.Release().Compare(mustParse(SupportedMin)) >= 0 {
-		// A prerelease of SupportedMin or a later release: the broker fix
-		// may not be in it.
-		return fmt.Sprintf("OpenShell %s is a prerelease, which runs no DefenseClaw sandbox: a prerelease of %s may lack its fix for the network broker "+
-			"that let a sandbox's connections bypass the sandbox policy when it could not inspect them (NVIDIA/OpenShell#4494); upgrade OpenShell to %s in place",
-			e.Found, SupportedMin, InstallerVersion)
-	}
-	return fmt.Sprintf("OpenShell %s runs no DefenseClaw sandbox: before %s its network broker let a sandbox's connections bypass the sandbox policy "+
-		"when it could not inspect them (NVIDIA/OpenShell#4494); upgrade OpenShell to %s in place", e.Found, SupportedMin, InstallerVersion)
+	return fmt.Sprintf("OpenShell %s runs no DefenseClaw sandbox: OpenShell %s or later is required; upgrade OpenShell to %s in place",
+		e.Found, SupportedMin, InstallerVersion)
 }
 
 // CheckSandboxRelease returns an *ErrSandboxRelease when a gateway of

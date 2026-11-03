@@ -581,7 +581,7 @@ func TestSetupNeedsTheUpgradeOnAReleaseThatRunsNoSandbox(t *testing.T) {
 			wantErr(t, err, "the OpenShell gateway is not usable yet (Gateway version)")
 			// The upgrade was offered (and kept) before setup stopped.
 			has(t, ta.output(), "OpenShell 0.1.1 at /usr/bin/openshell; OpenShell "+openshell.InstallerVersion+" fixes a supervisor bug",
-				"✗ Gateway version: OpenShell 0.1.1 runs no DefenseClaw sandbox: before "+openshell.SupportedMin,
+				"✗ Gateway version: OpenShell 0.1.1 runs no DefenseClaw sandbox: OpenShell "+openshell.SupportedMin+" or later is required",
 				"→ upgrade OpenShell to "+openshell.InstallerVersion+" in place: defenseclaw sandbox setup --install-openshell")
 		})
 	}

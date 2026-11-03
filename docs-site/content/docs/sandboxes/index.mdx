@@ -76,13 +76,13 @@ The driver decides these rows, not the operating system. A Linux host with KVM c
 OpenShell's supervisor needs Landlock. Docker Desktop's Linux VM kernel does not run it, so a sandbox on OpenShell's Docker driver fails to start there. DefenseClaw refuses that combination and sets the Mac's gateway to the MicroVM driver instead. Docker Desktop still builds the harness images.
 </Callout>
 
-Linux (amd64 or arm64) with Docker Engine 28 and a Landlock kernel, or an Apple-silicon Mac with Docker Desktop and Homebrew, as your own user. Not on Windows, WSL2, Intel Macs or as root. Setup installs OpenShell 0.1.5 or later. On Linux with Docker your folder is mounted live; on a Mac, or with any MicroVM, the agent works on a copy.
+Linux (amd64 or arm64) with Docker Engine 28 and a Landlock kernel, or an Apple-silicon Mac with Docker Desktop and Homebrew, as your own user. Not on Windows, WSL2, Intel Macs or as root. Setup installs OpenShell 0.1.6. On Linux with Docker your folder is mounted live; on a Mac, or with any MicroVM, the agent works on a copy.
 
 Claude Code, Codex, GitHub Copilot CLI, OpenCode, Kiro CLI, Hermes Agent and Antigravity run. Amp, Cursor Agent and Devin CLI cannot run yet.
 
 ### Requirements
 
-DefenseClaw drives OpenShell 0.1.1 and later 0.1 releases, not 0.2, and runs sandboxes only on 0.1.5 or later: before 0.1.5 OpenShell's network broker could let a sandbox's connections bypass its policy (NVIDIA/OpenShell#4494). Setup installs OpenShell 0.1.5 with NVIDIA's installer, and on 0.1.1 to 0.1.4 it offers the upgrade to 0.1.5 in place. On those releases DefenseClaw still lists, stops, deletes and pulls from sandboxes, but creates and starts none. Setup is the only place that installs it.
+DefenseClaw drives OpenShell 0.1.1 and later 0.1 releases, not 0.2, and runs sandboxes only on 0.1.6 or later. OpenShell 0.1.6 initializes missing or empty MicroVM hosts files and includes the earlier network and lifecycle fixes. It preserves nonempty image-authored hosts files, so DefenseClaw retains its current MicroVM image verification and admission gate. Setup installs OpenShell 0.1.6 with NVIDIA's installer, and on 0.1.1 to 0.1.5 it offers the upgrade to 0.1.6 in place. On those older releases DefenseClaw still lists, stops, deletes and pulls from sandboxes, but creates and starts none. Setup is the only place that installs it.
 
 The full lists are on [Set up on Linux](/docs/sandboxes/linux#before-you-start) and [Set up on macOS](/docs/sandboxes/macos#before-you-start). In short: run DefenseClaw as your own user (not root), with its daemon running, plus rootful Docker Engine 28 or newer and a Landlock kernel on Linux, or Docker Desktop and Homebrew on an Apple-silicon Mac. Allow at least 5 GiB of free disk for the images.
 
