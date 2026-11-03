@@ -201,6 +201,41 @@ These hold on every platform in the standalone profile.
     variable cannot change what the host enforces (B15 to B19); the Secure
     Client profile is unchanged.
 
+## Cowork VM sensor host delivery
+
+The optional `enterprise.cowork_vm_sensor` block adds a host-to-Cowork boundary
+on standalone macOS and Windows only. Config controls whether delivery is on,
+which vendor and identifiers to use, and the SHA-256 pins of an
+administrator-staged release archive and detached signature. Delivery takes part
+in the host lifecycle transaction; it does not add a privileged host service or
+change agent-hook decisions.
+
+Ordinary users must be able to read the delivered package and signature without
+being able to replace either file or any ancestor. The macOS arguments are
+root-owned; Windows uses the guide's fixed Program Files arguments path and
+administrator-only writers. Arguments contain identifiers, never credentials,
+and are not covered by the package signature. Windows uses only HKLM REG_SZ
+settings and preserves the existing Claude Desktop merge/create protections
+against masking HKCU or local third-party configuration. macOS settings remain
+owned by MDM, including withdrawal of the profile.
+
+The lifecycle's host-file and settings observations do not attest to execution
+inside Cowork. Anthropic owns vendor-key allowlisting and signature validation
+at VM boot. The exported Claude diagnostic report, last-run result and collector
+receipt are distinct acceptance evidence. Removing a host setting prevents
+future boot installs but does not remove an already installed VM sensor. A
+missing key, signature, profile or approval must not be reported as runtime
+coverage. The release archive is supplied alongside the host installer; the MDM
+wrapper makes bounded private copies and the lifecycle caches pinned bytes in
+the same transaction. It never introduces a network fetch or a second cache
+writer. A failed transaction restores the earlier cache and host delivery.
+
+Implementation: `internal/config/cowork_vm_sensor.go`,
+`internal/enterpriseunix/cowork.go`, the standalone Windows lifecycle under
+`packaging/windows`, and `packaging/mdm/macos/cowork-vm-sensor.mobileconfig.tmpl`.
+The operator procedure is in
+[configuration.mdx](../docs-site/content/docs/enterprise/configuration.mdx#cowork-vm-sensor-host-delivery).
+
 ## Residual risks
 
 | # | Residual | Where | Why it remains | Mitigation outside DefenseClaw |

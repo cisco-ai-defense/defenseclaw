@@ -260,6 +260,9 @@ func parseV8YAML(source string, data []byte) (*V8YAMLDocument, error) {
 	if err := validateV8YAMLVersion(source, root); err != nil {
 		return nil, err
 	}
+	if err := validateCoworkVMSensorSource(source, root); err != nil {
+		return nil, err
+	}
 	if v9SecureClientDocument(root) {
 		// Secure Client stays on v8 and rejects v9-only provider routing.
 		if node := v8YAMLMapValue(root, "llm_providers"); node != nil {

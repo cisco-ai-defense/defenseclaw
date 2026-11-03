@@ -123,10 +123,23 @@
     "openshell": { "$ref": "#/$defs/openshellCapability", "description": "status and verify, standalone profile, from 1.0.3: whether users on this host can run DefenseClaw sandboxes and on which driver. Windows always reports platform_unsupported. Optional." },
     "identity": { "$ref": "#/$defs/identityHealth", "description": "status and verify, standalone profile, from 1.0.3: the gateway's directory lookups, from its /health. Source tokens, counts and ages only. Optional." },
     "account_join": { "$ref": "#/$defs/accountJoin", "description": "status and verify run as root or an administrator, standalone profile, from 1.0.7, only while enterprise.account_join is on: how many account join keys each generation has for the enrolled accounts the guardian saw in the last 30 days (at most 64), and reason codes. Never a key, an account name, an identifier or a secret: the keys are only in the output of enterprise account-keys. Optional." },
+    "cowork_vm_sensor": { "$ref": "#/$defs/coworkVMSensor", "description": "Optional standalone host-delivery observation. host_ready checks the architecture package, detached signature, install arguments and their trust; settings_ready checks the two managed Claude Desktop settings. Neither field proves Claude accepted or ran the package inside its VM. Absent under Secure Client." },
     "log_path": { "type": "string" },
     "exit_code": { "type": "integer" }
   },
   "allOf": [
+    {
+      "if": { "required": ["profile"], "properties": { "profile": { "const": "secure_client" } } },
+      "then": { "properties": { "cowork_vm_sensor": false } }
+    },
+    {
+      "if": { "required": ["platform"], "properties": { "platform": { "const": "linux" } } },
+      "then": {
+        "properties": {
+          "cowork_vm_sensor": { "properties": { "host_ready": { "const": false }, "settings_ready": { "const": false } } }
+        }
+      }
+    },
     {
       "if": { "properties": { "ok": { "const": true } } },
       "then": { "properties": { "errors": { "maxItems": 0 } } },
@@ -187,7 +200,7 @@
         "properties": {
           "installed": false, "installed_version": false, "transaction_pending": false, "services": false,
           "readiness": false, "inspection": false, "machine_policy": false, "enrollment": false, "destinations": false, "audit_store": false,
-          "connectors": false, "openshell": false, "identity": false
+          "connectors": false, "openshell": false, "identity": false, "cowork_vm_sensor": false
         }
       },
       "else": {
@@ -197,6 +210,24 @@
   ],
 
   "$defs": {
+    "coworkVMSensor": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["enabled", "host_ready", "settings_ready"],
+      "properties": {
+        "enabled": { "type": "boolean", "description": "enterprise.cowork_vm_sensor.mode is on in the installed standalone config." },
+        "host_ready": { "type": "boolean", "description": "The configured architecture package, signature and arguments are present with their expected content and administrator-only write access." },
+        "settings_ready": { "type": "boolean", "description": "The two observed machine settings match the configured package path and vendor. Claude diagnostic acceptance is checked separately." },
+        "package_path": { "type": "string" },
+        "reason_codes": { "type": "array", "items": { "type": "string", "pattern": "^[a-z][a-z0-9_]*$" } }
+      },
+      "allOf": [
+        {
+          "if": { "properties": { "enabled": { "const": false } } },
+          "then": { "properties": { "host_ready": { "const": false }, "settings_ready": { "const": false } } }
+        }
+      ]
+    },
     "service": {
       "type": "object",
       "additionalProperties": false,

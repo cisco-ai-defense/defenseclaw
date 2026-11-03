@@ -235,9 +235,10 @@ type Result struct {
 	// macOS) or an administrator (Windows) on the standalone profile with
 	// enterprise.account_join on; nil (omitted) otherwise. The keys are
 	// only in the output of `enterprise account-keys` (internal/accountjoin).
-	AccountJoin *accountjoin.Summary `json:"account_join,omitempty"`
-	LogPath     string               `json:"log_path,omitempty"`
-	ExitCode    int                  `json:"exit_code"`
+	AccountJoin    *accountjoin.Summary `json:"account_join,omitempty"`
+	CoworkVMSensor *CoworkVMSensorState `json:"cowork_vm_sensor,omitempty"`
+	LogPath        string               `json:"log_path,omitempty"`
+	ExitCode       int                  `json:"exit_code"`
 	// ConfigRefused marks a run that refused the submitted config before it
 	// changed anything: the policy, services and advisories it reports are
 	// the running deployment's. Text output only (GAP-0564).

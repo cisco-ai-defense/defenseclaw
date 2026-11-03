@@ -159,6 +159,24 @@ not-found answers.
 
 | M-34 | — | A standard user changes only the agent process's read view of machine policy | **Open (GAP-0716-MAC).** On managed 1.0.2 macOS 15.8 host dc-fc-r104-cap-emac1, a standard user's native Claude Code Bash tool call wrote a marker under a `sandbox-exec` profile that denied reads beneath `/Library/Application Support/ClaudeCode`; the gateway had no matching audit row, while administrator `status` and `verify` still reported `security_complete=true`. The same native Codex command retained its matching audit row when `/etc/codex` was hidden, which does not close the Claude bypass or the process-view class. A hook cannot detect a policy view that prevents the agent from loading the hook. Require an independent agent-launch and policy-registration control; file ownership checks and hook-time checks alone do not provide it ([R35](ENTERPRISE-THREAT-MODEL.md#residual-risks)) | Native standard-user Claude and Codex marker turns and matching gateway audit queries; GAP-0716-MAC remains open |
 
+## Cowork VM delivery boundary
+
+For the optional standalone Cowork sensor, the lifecycle owns only its recorded
+archive, signature and arguments under
+`/Library/Application Support/Cisco/DefenseClaw/Cowork`. It checks root ownership,
+ordinary-user write resistance and plain files/directories throughout the path;
+source archive and signature content are pinned by the administrator's config.
+A pre-existing unowned destination is refused. Disable and uninstall preserve
+files replaced after DefenseClaw wrote them. No signing key or credential belongs
+in the arguments file.
+
+MDM owns `coworkEDRIntegration` and `coworkEDRIntegrationVendor` in
+`com.anthropic.claudefordesktop`. The host lifecycle reads managed preferences
+and reports conflicts, including per-user overrides, but never edits or removes
+that profile. `host_ready` and `settings_ready` are delivery observations, not
+proof of VM execution or a successful collector connection. See the
+[cross-platform boundary](ENTERPRISE-THREAT-MODEL.md#cowork-vm-sensor-host-delivery).
+
 ## Residual risks
 
 1. Per-user registrations are user-owned and repaired within one reconcile

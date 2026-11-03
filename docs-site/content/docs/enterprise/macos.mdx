@@ -523,3 +523,17 @@ Bash tool call, while the gateway recorded no matching call and administrator
 an agent that never loads it. Until agent launch and policy registration are
 enforced outside that process-local view, a healthy result does not prove that
 all Claude tool calls are inspected ([M-34](/docs/enterprise/threat-model)).
+
+
+## Cowork VM sensor
+
+The optional standalone `enterprise.cowork_vm_sensor` block delivers the matching
+Cowork VM package under `/Library/Application Support/Cisco/DefenseClaw/Cowork`.
+Claude Desktop reads its package path and vendor ID from an MDM profile for
+`com.anthropic.claudefordesktop`, separate from Claude Code's
+`com.anthropic.claudecode` policy. Deploy the supplied profile template through
+MDM and remove that profile through MDM when withdrawing delivery. Host files
+remain inside the lifecycle transaction; a healthy host-delivery result does not
+prove the sensor ran inside Cowork. See
+[Cowork VM sensor host delivery](/docs/enterprise/configuration#cowork-vm-sensor-host-delivery)
+for the required signature, config pins, prerequisites and diagnostic checks.

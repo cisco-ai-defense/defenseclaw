@@ -1131,3 +1131,19 @@ state. It refuses an older version (`downgrade_refused`). See
 [Upgrade](/docs/enterprise/lifecycle),
 [Roll back](/docs/enterprise/lifecycle) and
 [Lifecycle error codes](/docs/enterprise/troubleshooting).
+
+
+## Cowork VM sensor
+
+The optional standalone `enterprise.cowork_vm_sensor` block delivers the x64
+package and `.sig` to the OS-drive Program Files folder's
+`Claude\edr-integration` directory. The guide's fixed `install.args` file lives
+there too, as ASCII without a byte-order mark. The lifecycle sets the two Cowork
+`REG_SZ` values directly under `HKLM\SOFTWARE\Policies\Claude`, following the
+existing Claude Desktop merge/create safeguards; HKCU is never used for Cowork.
+Claude Desktop must be the supported MSIX build, with hardware virtualization
+and Virtual Machine Platform available. The existing standalone lifecycle does
+not support Windows on Arm. See
+[Cowork VM sensor host delivery](/docs/enterprise/configuration#cowork-vm-sensor-host-delivery)
+for signature pins, policy precedence, disable/uninstall behavior and the
+separate Claude diagnostic acceptance check.

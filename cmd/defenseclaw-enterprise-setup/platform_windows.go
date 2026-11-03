@@ -197,6 +197,8 @@ func executeEnterpriseSetup(
 	}{
 		{label: "config", value: &opts.Config},
 		{label: "manifest", value: &opts.Manifest},
+		{label: "Cowork package", value: &opts.CoworkPackage},
+		{label: "Cowork signature", value: &opts.CoworkSignature},
 		{label: "trust anchors", value: &opts.TrustAnchors},
 	} {
 		if strings.TrimSpace(*input.value) == "" {
@@ -1035,6 +1037,10 @@ func enterpriseLifecycleArguments(stageRoot string, opts enterpriseSetupOptions)
 		appendValue("--cli-binary", filepath.Join(stageRoot, "defenseclaw.exe"))
 		appendValue("--config", opts.Config)
 		appendValue("--manifest", opts.Manifest)
+		if opts.Standalone {
+			appendValue("--cowork-package", opts.CoworkPackage)
+			appendValue("--cowork-signature", opts.CoworkSignature)
+		}
 		// QA shorthand pair. Forwarded only when both are non-empty
 		// so the CLI's own opts.Mode / opts.Connector validation
 		// (parseEnterpriseSetupOptions in main.go) has already

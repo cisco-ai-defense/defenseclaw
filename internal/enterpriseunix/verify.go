@@ -236,7 +236,7 @@ func (l *lifecycle) readOnly(ctx context.Context) int {
 		// status reports them as warnings with security_complete false.
 		for _, warning := range r.Warnings {
 			if warning.Code == codeMachinePolicyIncomplete || warning.Code == codeGuardianTargetFailed || warning.Code == codeConfigRejected ||
-				warning.Code == codeNoConnectorsEnabled || warning.Code == codeSandboxPackDir || warning.Code == codeLegacySandbox {
+				warning.Code == codeNoConnectorsEnabled || warning.Code == codeSandboxPackDir || warning.Code == codeLegacySandbox || warning.Code == codeCoworkIncomplete {
 				problems = append(problems, warning.Message)
 			}
 		}
@@ -665,6 +665,7 @@ func (l *lifecycle) verifyDeployment(ctx context.Context, record *Deployment, st
 		}
 	}
 	problems = append(problems, l.verifyOpenShell(record)...)
+	problems = append(problems, l.verifyCoworkFiles(record)...)
 	return problems
 }
 
@@ -1223,6 +1224,7 @@ func (l *lifecycle) describe(ctx context.Context, record *Deployment, _ bool) {
 	l.describeIdentityRecords()
 	l.describeDestinations()
 	l.describeOpenShell(ctx)
+	l.describeCoworkVM(ctx, record)
 	l.describeSandboxPolicy(ctx)
 	if record != nil {
 		l.describePerUserGateways(ctx)

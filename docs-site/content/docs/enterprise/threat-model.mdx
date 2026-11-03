@@ -282,6 +282,23 @@ Not covered:
   profile does not proxy the agent's network or model traffic.
 - Administrators and root, who are trusted.
 
+## Cowork VM sensor delivery
+
+The optional standalone Cowork sensor crosses a separate host-to-VM boundary.
+The lifecycle controls its recorded package, detached signature and identifiers
+in protected host folders; Windows also derives the two HKLM settings from the
+config. On macOS, MDM owns those settings and must withdraw its profile when
+delivery is disabled. The identifiers file contains no credentials and is not
+covered by the package signature.
+
+`cowork_vm_sensor.host_ready` and `settings_ready` report the host files and
+observed settings. They do not establish that Anthropic allowlisted the key,
+that Claude accepted the signature at VM boot, or that the collector received
+sensor events. The Claude diagnostic's `go` decision checks the form of the
+settings; read the last run and confirm reporting separately. Removing a setting
+stops future boot installs and does not remove a sensor already inside the VM.
+See [Cowork host delivery](/docs/enterprise/configuration#cowork-vm-sensor-host-delivery).
+
 ## Residual risks
 
 These risks remain by design or because of how an agent vendor works.

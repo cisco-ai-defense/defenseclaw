@@ -704,6 +704,29 @@ to the scan; runtime hook rules still apply to its tool calls.
   transaction-bound flag and cannot be combined with Codex enrollment or
   production attestations.
 
+## Cowork VM delivery boundary
+
+The optional standalone delivery writes the native x64 release package and
+adjacent detached signature beneath the trusted OS-drive Program Files folder's
+`Claude\edr-integration`, alongside the guide's fixed `install.args`. Standard
+users need read access and must have no write access to any file or ancestor.
+Symlinks and junctions are refused; config SHA-256 pins bind the staged source
+content. The existing standalone lifecycle still excludes Windows on Arm.
+
+Only the two `REG_SZ` Cowork values directly under
+`HKLM\SOFTWARE\Policies\Claude` apply. HKCU never supplies Cowork settings.
+Creating the first visible HKLM setting suppresses all HKCU Claude policy, so the
+existing Claude Desktop merge/create safeguards also govern this delivery.
+Administrator conflicts and later replacements are preserved, and only unchanged
+recorded DefenseClaw files and values are removed on disable or uninstall. The
+package path, fixed arguments path, ownership state and registry changes must
+participate in the lifecycle transaction and recovery.
+
+Host status cannot attest that Claude's VM accepted a key or ran the sensor.
+Use the diagnostic report's last-run evidence and collector confirmation as
+separate acceptance checks. See the
+[cross-platform boundary](ENTERPRISE-THREAT-MODEL.md#cowork-vm-sensor-host-delivery).
+
 ## Residual risks and deployment dependencies
 
 1. A user can continuously race repairs to files that the user necessarily

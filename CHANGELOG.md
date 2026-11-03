@@ -10,6 +10,9 @@ for current behavior.
 
 ## [Unreleased] — 1.0.8
 
+### Added
+- **Standalone enterprise installs can stage Cowork VM sensor host delivery.** The optional `enterprise.cowork_vm_sensor` block selects the native architecture package, writes the tenant/device/collector arguments, integrates Windows HKLM policy, and reports host-file and managed-settings readiness in status and verify. macOS uses the included MDM profile template. The block is off by default; signatures, Anthropic approval and key allowlisting are required for production execution. MDM and standalone Setup accept the separate release archive and signature alongside the installer and cache the pinned inputs within the lifecycle transaction.
+
 ### Changed
 - **The unused `openshell.middleware.enabled` setting is retired.** Existing 1.0.x config files still load; the setting is ignored and new `config set` writes are refused. Remove the entry before 1.1.0.
 

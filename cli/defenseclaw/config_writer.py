@@ -121,6 +121,7 @@ RESTART_KEYS = (
     "enterprise.profile",
     "enterprise.network",
     "enterprise.openshell",
+    "enterprise.cowork_vm_sensor",
     "environment",
     "tenant_id",
     "workspace_id",

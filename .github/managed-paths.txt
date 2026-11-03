@@ -46,6 +46,8 @@ internal/*managed*
 internal/*standalone*
 internal/*secure_client*
 internal/*secure-client*
+# Cowork host delivery uses a shared configuration package.
+internal/config/cowork_vm_sensor*.go
 cmd/*enterprise*
 cmd/*managed*
 cmd/*standalone*
@@ -83,6 +85,7 @@ cli/tests/*enterprise*
 cli/tests/*managed*
 cli/tests/*secure_client*
 cli/tests/test_mdm_*
+cli/tests/test_cowork_vm_sensor*
 cli/tests/test_p0_mdm_docs.py
 
 [managed_impacting]

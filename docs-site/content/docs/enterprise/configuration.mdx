@@ -510,6 +510,148 @@ enterprise:
 
 On Windows, keep the file as your input to ensure, not as a hand-edited copy under `C:\ProgramData`. Deliver it as shown in [Deliver the config](/docs/enterprise/mdm#deliver-the-config).
 
+## Cowork VM sensor host delivery
+
+`enterprise.cowork_vm_sensor` is an optional standalone feature for macOS and
+Windows. Its default is `mode: off`. It places the sensor package and host
+identifiers where Claude Desktop expects them. It does not add a host service,
+run inside the VM itself, or enable delivery on Linux or the Secure Client
+profile.
+
+The Cowork sensor archive is a separate release asset. Supply the archive and
+optional signature alongside the host installer in the same MDM ensure run.
+The wrapper makes private input copies, and the lifecycle persists them in its
+protected source cache inside the install transaction. A later repair can use
+that cache. Use the asset from the same DefenseClaw release as the host and its
+digest from authenticated release checksums. The host installer does not embed
+or fetch the archive automatically.
+The production Cowork signing key and Anthropic's assigned vendor ID and explicit
+integration approval are required before a production rollout. A staged unsigned
+package remains incomplete and cannot run in Cowork.
+
+| Requirement | Tier | Details |
+| --- | --- | --- |
+| Claude Desktop with Cowork | Required when enabled | macOS 2.26454.0 or later; Windows 2.37337.1 or later, installed as MSIX. Anthropic may require a later build for the production key. The lifecycle does not install the app. |
+| Windows virtualization | Required on Windows | The standalone Windows lifecycle currently supports x64 only. Hardware virtualization and Virtual Machine Platform; nested virtualization when the Windows host is itself a VM. |
+| Release package and detached signature | Required for ready delivery | `defenseclaw-cowork-amd64.tar.gz` on x64/Intel, or `defenseclaw-cowork-arm64.tar.gz` on Arm Macs. The binary OpenPGP `.sig` sits next to the archive. |
+| Protected source cache | Required when enabled | With explicit release inputs, `source_dir` is `/opt/cisco/defenseclaw/share/cowork` on macOS or the native ProgramData folder’s `Cisco\DefenseClaw\install\cowork-cache` on Windows. The lifecycle creates the cache; every ancestor resists ordinary-user writes and contains no links. |
+| MDM profile | Required on macOS | Deploy the two settings in `com.anthropic.claudefordesktop`; the lifecycle places files and reads settings, while MDM owns the profile. |
+| Collector access | Required for reporting | Permit the configured `collector` host and port through the customer's network controls. The VM sensor's traffic leaves the host as ordinary traffic; Cowork's sandbox egress allowlist does not cover it in guide v1.7. |
+
+Add this block to your existing standalone config. Replace every example value,
+including both example SHA-256 digests, before applying it:
+
+```yaml
+enterprise:
+  profile: standalone
+  cowork_vm_sensor:
+    mode: "on"
+    tenant: customer-123
+    device: endpoint-456
+    collector: collector.example.com:443
+    vendor: vendor-id-from-anthropic
+    source_dir: /opt/cisco/defenseclaw/share/cowork
+    package_sha256: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+    signature_sha256: "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+```
+
+On Windows with explicit release inputs, set `source_dir` to the native
+ProgramData path, normally `'C:\ProgramData\Cisco\DefenseClaw\install\cowork-cache'`.
+Deliver the config through
+the existing [ensure or MDM workflow](/docs/enterprise/mdm). The package digest
+is required when on. The signature digest can be omitted while waiting for the
+key; status and verify then report incomplete delivery. Supply the signature and
+its authenticated digest together when it becomes available.
+
+`tenant` and `device` are nonempty ASCII identifiers. `collector` is a host and
+port, such as `collector.example.com:443`, without a scheme, path, credential or
+space. The derived file contains exactly
+`tenant=customer-123,device=endpoint-456,collector=collector.example.com:443`, as
+ASCII with no byte-order mark, space or trailing newline. The complete value may
+be at most 256 characters. These values are identifiers, never install tokens
+or secrets. `vendor` is the lowercase ID Anthropic assigns, not a display name.
+A change to this block is applied through the lifecycle rather than a hot reload.
+
+### Supply the release inputs in the install run
+
+For the generic macOS MDM wrapper, add `--cowork-package` and
+`--cowork-signature` to the same ensure that delivers the installer and config:
+
+```sh
+sudo sh packaging/mdm/macos/defenseclaw-enterprise.sh \
+  --source /path/defenseclaw-enterprise-VERSION-darwin-arm64.pkg \
+  --sha256 INSTALLER_SHA256 \
+  --config-file /path/config.yaml \
+  --cowork-package /path/defenseclaw-cowork-arm64.tar.gz \
+  --cowork-signature /path/defenseclaw-cowork-arm64.tar.gz.sig
+```
+
+For the generic Windows PowerShell 7 wrapper, use `-CoworkPackagePath` and
+`-CoworkSignaturePath` beside `-SetupPath`, its trust pin and `-ConfigPath`.
+Standalone Setup also accepts `COWORKPACKAGE=` and `COWORKSIGNATURE=`; the native
+lifecycle accepts `--cowork-package` and `--cowork-signature`. These are artifact
+inputs; the approved config still owns the mode, paths, identifiers and digests.
+The input filename must identify `defenseclaw-cowork-amd64.tar.gz` or
+`defenseclaw-cowork-arm64.tar.gz`; the lifecycle checks the native architecture.
+
+Omit the signature input while the signing key is pending. Later, supply a
+signature-only input with an updated approved config containing its digest; the
+archive can come from the persisted cache. Explicit Cowork inputs are accepted
+only on install/upgrade/repair/ensure, and the generic MDM wrappers expose them
+only with ensure. They cannot be combined with a signed policy bundle in the
+same invocation. No archive is downloaded and no source cache is written by the
+wrapper. A deployment that already stages a protected `source_dir` can continue
+to use that path without explicit artifact inputs.
+
+### Files and Claude Desktop settings
+
+| Platform | Delivered files and settings |
+| --- | --- |
+| macOS | `/Library/Application Support/Cisco/DefenseClaw/Cowork/defenseclaw-cowork-<arch>.tar.gz`, adjacent `.sig`, and `<package filename>.args`. Files and ancestors are root-owned and not writable by group or others. The MDM profile sets `coworkEDRIntegration` to the full archive path and `coworkEDRIntegrationVendor` to the assigned vendor ID. |
+| Windows | The native OS-drive Program Files folder's `Claude\edr-integration` directory holds `defenseclaw-cowork-<arch>.tar.gz`, adjacent `.sig`, and the fixed `install.args`. Ordinary users can read these files but cannot write them or their ancestors. The two settings are `REG_SZ` values directly under `HKLM\SOFTWARE\Policies\Claude`. |
+
+For macOS, render `packaging/mdm/macos/cowork-vm-sensor.mobileconfig.tmpl` for the
+host architecture (`amd64` or `arm64`) and the assigned vendor ID, then deploy it
+with MDM. It contains only the Cowork settings. Preserve the organization's other
+Claude Desktop settings in its existing profiles. Per-user managed preferences
+can override the machine profile; status and verify report a conflicting Cowork
+key. See [Anthropic's MDM precedence rules](https://claude.com/docs/third-party/claude-desktop/mdm).
+
+On Windows, delivery follows the existing
+`enterprise.machine_policy.windows_wsl.claude_desktop_key` merge/create rules.
+Creating the first visible HKLM value makes Claude Desktop ignore all HKCU Claude
+policy. Move the organization's policy to HKLM first, and resolve local
+third-party configuration conflicts before choosing `create`; `merge` does not
+silently create a new machine-policy authority. Existing administrator values
+are preserved and conflicting values are reported.
+
+### Check coverage and withdraw delivery
+
+The enterprise status and verify result includes `cowork_vm_sensor` on the
+standalone profile. `enabled` reflects the applied config. `host_ready` reports
+whether the architecture package, pinned signature and exact arguments have
+trusted content and permissions. `settings_ready` reports whether the two
+managed settings match the package path and vendor. Missing or conflicting
+inputs produce `reason_codes` and incomplete coverage. An enabled incomplete
+sensor fails verify; an absent block performs no Cowork file or settings work.
+
+After the host is ready, quit Claude Desktop fully, reopen it, and start a Cowork
+task. Export Help → Troubleshooting → Generate Diagnostic Report and inspect
+`cowork-edr-integration.txt`. `Decision if the VM started now: go` confirms the
+form of the settings only. Read the last run too: the vendor, package, signature,
+Windows drive and arguments are checked during a run. `kind=installed` means
+`install.sh` exited successfully, not that the sensor is sending events. Confirm
+sensor reporting at the collector separately. Execution still requires the key
+to be allowlisted in the installed Claude Desktop release.
+
+Set `mode: off` and apply the config to withdraw delivery. Disable and uninstall
+remove only unchanged files and Windows values DefenseClaw recorded writing;
+administrator replacements are kept. On macOS, remove the Cowork keys or this
+profile through MDM as part of the same rollout. The lifecycle does not delete
+MDM profiles or unrelated Claude settings. Removing the integration setting
+stops later VM-boot installs; it does not remove a sensor already running inside
+the VM.
+
 ## Next steps
 
 <Cards>

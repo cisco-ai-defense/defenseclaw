@@ -158,3 +158,48 @@ against this release. The recipes are templates that follow each vendor's
 documentation and are checked by simulating the MDM's execution context (root
 under `env -i` with no TTY; SYSTEM from 32- and 64-bit Windows PowerShell). Run
 a pilot group first.
+
+
+## Cowork VM sensor profile template
+
+`macos/cowork-vm-sensor.mobileconfig.tmpl` supplies the two Claude Desktop settings
+for the optional standalone host delivery. Replace `__ARCH__` with `amd64` for an
+Intel Mac or `arm64` for Apple silicon, and `__VENDOR_ID__` with the lowercase ID
+assigned by Anthropic. Both values use only the validated identifier characters;
+if another rendering system supplies XML values, escape them as XML text rather
+than interpolating markup. Keep the profile identifiers stable for MDM updates.
+Deploy the rendered profile through MDM, which owns its update and removal.
+
+The template points at the architecture archive in
+`/Library/Application Support/Cisco/DefenseClaw/Cowork`. The lifecycle installs
+the package, detached `.sig` and adjacent `.args`; it never writes the Managed
+Preferences plist itself. The template contains no tenant/device IDs, collector
+address, credentials or signing material. Those non-secret identifiers come from
+`enterprise.cowork_vm_sensor` in the protected config.
+
+Supply the release archive in the same ensure invocation with
+`--cowork-package` on macOS or `-CoworkPackagePath` in the generic Windows
+wrapper; add `--cowork-signature` / `-CoworkSignaturePath` when available.
+Standalone Setup forwards `COWORKPACKAGE=` and `COWORKSIGNATURE=` to the same
+lifecycle. The approved config supplies `package_sha256` from authenticated
+release checksums and, once available, `signature_sha256`. Input copies are
+private: macOS uses `/private/var/root` by default for these inputs; Windows uses
+a protected ProgramData child. Cleanup removes the temporary copies only after
+the lifecycle finishes. The lifecycle owns the persistent source cache and its
+rollback; wrappers never write `source_dir` themselves.
+
+With explicit inputs, set `source_dir` to
+`/opt/cisco/defenseclaw/share/cowork` on macOS or the native ProgramData folder's
+`Cisco\DefenseClaw\install\cowork-cache` on Windows. Signature-only updates can
+reuse the archive from that cache. Explicit inputs require ensure in the MDM
+wrappers and cannot accompany `--bundle-file` / `-BundlePath`; use an approved
+administrator config. The Linux wrapper refuses them. The host installers do
+not embed or fetch the separate Cowork archive. Missing signing material
+remains incomplete, and production execution waits for Anthropic's approval and
+key allowlisting. See the operator instructions in
+[configuration.mdx](../../docs-site/content/docs/enterprise/configuration.mdx#cowork-vm-sensor-host-delivery).
+
+An MDM removal must remove only this profile or these two keys. It must preserve
+other Claude Desktop policy. Disabling or uninstalling DefenseClaw does not
+remove an MDM-owned profile. On Windows the lifecycle owns the two HKLM values
+it creates and preserves administrator replacements; no macOS profile applies.

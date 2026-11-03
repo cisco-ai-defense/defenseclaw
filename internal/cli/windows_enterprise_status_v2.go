@@ -129,6 +129,7 @@ func readWindowsEnterpriseStatusV2Manifest(path string) ([]enterprisestatus.Conn
 func applyWindowsEnterpriseStatusV2(result *enterprisestatus.Result) {
 	publish := result.Action == "status" || result.Action == "verify"
 	in := windowsEnterpriseStatusV2Read()
+	applyWindowsEnterpriseCoworkStatus(result, in.cfg)
 	block := windowsEnterpriseConnectorsBlock(result, in, publish)
 	result.AddHookProcessFailureWarnings(block)
 	if !publish {

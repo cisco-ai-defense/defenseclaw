@@ -59,6 +59,10 @@ type Options struct {
 	Action string
 	// PayloadDir holds the binaries to install (payload channel).
 	PayloadDir string
+	// CoworkPackage and CoworkSignature are optional release-artifact inputs.
+	// The transaction admits their configured hashes and retains its own copy.
+	CoworkPackage   string
+	CoworkSignature string
 	// FromPackage installs the binaries the deb/rpm/pkg already placed in
 	// the layout's bin directory (package channel).
 	FromPackage bool
@@ -1109,6 +1113,19 @@ func (l *lifecycle) validateOptions() int {
 	if o.PayloadDir != "" && o.FromPackage {
 		return bad("--payload and --from-package are mutually exclusive")
 	}
+	if o.CoworkPackage != "" || o.CoworkSignature != "" {
+		if l.env.GOOS != "darwin" || !contains([]string{ActionInstall, ActionUpgrade, ActionRepair, ActionEnsure}, o.Action) {
+			return bad("--cowork-package and --cowork-signature apply only to macOS install, upgrade, repair or ensure")
+		}
+		if o.Bundle != "" || o.BundleInbox {
+			return bad("Cowork artifact inputs cannot accompany a policy bundle")
+		}
+		for _, path := range []string{o.CoworkPackage, o.CoworkSignature} {
+			if path != "" && (!filepath.IsAbs(path) || filepath.Clean(path) != path) {
+				return bad("Cowork artifact input paths must be canonical absolute paths")
+			}
+		}
+	}
 	if (o.PayloadDir != "" || o.FromPackage || o.ConfigFile != "" || o.AdoptExisting || o.NoStart) &&
 		!contains([]string{ActionInstall, ActionUpgrade, ActionRepair, ActionEnsure}, o.Action) {
 		return bad(fmt.Sprintf("--payload, --from-package, --config, --adopt-existing and --no-start do not apply to %s", o.Action))
@@ -1696,6 +1713,9 @@ func (l *lifecycle) buildPlan(ctx context.Context, record *Deployment, account A
 	if err := l.planOpenShell(p); err != nil {
 		return nil, &codedError{code: codeOpenShell, err: err}
 	}
+	if err := l.planCoworkVM(p, record); err != nil {
+		return nil, &codedError{code: codePayload, err: err}
+	}
 
 	// The override a package-kept uninstall wrote over the package's
 	// tmpfiles.d entries goes with the next install.
@@ -1712,6 +1732,9 @@ func (l *lifecycle) buildPlan(ctx context.Context, record *Deployment, account A
 	if record != nil {
 		for path := range record.Files {
 			if !want[path] {
+				if !l.removeCoworkFileAllowed(record, path) {
+					continue
+				}
 				if p.channel == ChannelPackage && env.packageOwns(path) {
 					continue // the package owns the binaries, units and OpenCode plugin now
 				}
@@ -2639,6 +2662,11 @@ func (l *lifecycle) applyDirs(p *plan) ([]string, error) {
 	created := []string{}
 	for _, dir := range p.dirs {
 		path := env.P(dir.Path)
+		// Cowork's owned leaf lies outside the install tree. Track its
+		// creation for rollback/uninstall while still repairing its modes.
+		if dir.Path == macCoworkDir && !dir.External && !exists(path) {
+			created = append(created, dir.Path)
+		}
 		if dir.External {
 			if exists(path) {
 				if info, err := os.Lstat(path); err == nil && (info.Mode()&os.ModeSymlink != 0 || !info.IsDir()) {
@@ -4002,6 +4030,9 @@ func (l *lifecycle) uninstall(ctx context.Context, record *Deployment) int {
 	for _, path := range paths {
 		if path == env.Layout.ConfigPath {
 			continue // machine state: removed with its directory below
+		}
+		if !l.removeCoworkFileAllowed(record, path) {
+			continue
 		}
 		if err := removeFile(env.P(path)); err != nil {
 			errs = append(errs, err)

@@ -3060,6 +3060,7 @@ func writeWindowsEnterpriseStandaloneSummary(output io.Writer, result *enterpris
 		if line := enterprisestatus.ConnectorsLine(result.Connectors); line != "" {
 			fmt.Fprintf(output, "  %s\n", line)
 		}
+		enterprisestatus.WriteCoworkVMSensor(output, result.CoworkVMSensor)
 	}
 	writeWindowsEnterpriseScanners(output, result.Scanners)
 	if result.Policy != nil {
@@ -3927,6 +3928,9 @@ func runWindowsEnterpriseStandaloneEnsureOnce(
 		result.Errors = []enterprisestatus.Message{}
 		result.AddError(windowsEnterpriseMessageCode(planErr.Error(), "ensure_refused"), planErr.Error())
 		return false, finishEnsure(windowsEnterpriseFailureCodeFor(result))
+	}
+	if plan.Action == "" && (opts.coworkPackagePath != "" || opts.coworkSignaturePath != "") {
+		plan = windowsEnterpriseEnsurePlan{Action: "repair", Reason: "cowork_artifact_delivery"}
 	}
 	if plan.Action == "" {
 		// A compliant deployment can still owe the one-time Cursor fail-mode

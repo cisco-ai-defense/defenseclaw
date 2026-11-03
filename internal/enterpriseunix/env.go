@@ -81,6 +81,8 @@ var commandCandidates = map[string][]string{
 	"pkgutil":          {"/usr/sbin/pkgutil"},
 	"lsof":             {"/usr/sbin/lsof", "/usr/bin/lsof"},
 	"ps":               {"/bin/ps", "/usr/bin/ps"},
+	"plutil":           {"/usr/bin/plutil"},
+	"sysctl":           {"/usr/sbin/sysctl"},
 	"ls":               {"/bin/ls"},
 	"chmod":            {"/bin/chmod"},
 	// The sandbox lifecycle acts as the user (runuser on Linux, sudo on macOS)
@@ -188,6 +190,8 @@ const (
 // production defaults in NewEnv.
 type Env struct {
 	GOOS string
+	// GOARCH is the host CPU architecture (empty uses runtime.GOARCH).
+	GOARCH string
 	// Root prefixes every layout path. Production uses "" (the real
 	// filesystem); tests use a temporary directory.
 	Root   string

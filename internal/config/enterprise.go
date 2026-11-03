@@ -53,6 +53,23 @@ type EnterpriseConfig struct {
 	// AccountJoin turns the account join key on (account_join.go).
 	// Standalone only; off when absent.
 	AccountJoin EnterpriseAccountJoinConfig `mapstructure:"account_join" yaml:"account_join,omitempty"`
+	// CoworkVMSensor delivers a release-matched VM sensor from the standalone
+	// host. It is off when absent and never applies to Secure Client.
+	CoworkVMSensor EnterpriseCoworkVMSensorConfig `mapstructure:"cowork_vm_sensor" yaml:"cowork_vm_sensor,omitempty"`
+}
+
+// EnterpriseCoworkVMSensorConfig is the administrator's host delivery request.
+// SourceDir is a protected directory staged by the enterprise release kit.
+// The lifecycle selects the package matching the host architecture.
+type EnterpriseCoworkVMSensorConfig struct {
+	Mode            string `mapstructure:"mode" yaml:"mode,omitempty"`
+	Tenant          string `mapstructure:"tenant" yaml:"tenant,omitempty"`
+	Device          string `mapstructure:"device" yaml:"device,omitempty"`
+	Collector       string `mapstructure:"collector" yaml:"collector,omitempty"`
+	Vendor          string `mapstructure:"vendor" yaml:"vendor,omitempty"`
+	SourceDir       string `mapstructure:"source_dir" yaml:"source_dir,omitempty"`
+	PackageSHA256   string `mapstructure:"package_sha256" yaml:"package_sha256,omitempty"`
+	SignatureSHA256 string `mapstructure:"signature_sha256" yaml:"signature_sha256,omitempty"`
 }
 
 // enterprise.openshell values.
@@ -1383,7 +1400,8 @@ func enterpriseBlockEmpty(e EnterpriseConfig) bool {
 		tetragonEmpty(e.Tetragon) &&
 		e.OpenShell == (EnterpriseOpenShellConfig{}) &&
 		len(e.Identity.TrustedConnectors) == 0 &&
-		accountJoinEmpty(e.AccountJoin)
+		accountJoinEmpty(e.AccountJoin) &&
+		e.CoworkVMSensor == (EnterpriseCoworkVMSensorConfig{})
 }
 
 // standaloneInlineSecrets lists the inline secret keys cfg sets.
@@ -1525,6 +1543,9 @@ func validateEnterpriseConfig(cfg *Config) error {
 		return nil
 	}
 	if err := validateAccountJoin(e.AccountJoin); err != nil {
+		return err
+	}
+	if err := validateCoworkVMSensor(e.CoworkVMSensor); err != nil {
 		return err
 	}
 	// Judge trace logs raw prompts and model responses; a managed device
