@@ -10,6 +10,7 @@ import (
 	"io/fs"
 	"os"
 	"os/exec"
+	pathpkg "path"
 	"path/filepath"
 	"runtime"
 	"strings"
@@ -205,20 +206,75 @@ func staleAmpNPMLauncherAt(path, appData string) bool {
 		before.Size() != after.Size() || !before.ModTime().Equal(after.ModTime()) {
 		return false
 	}
-	text := strings.ToLower(strings.ReplaceAll(string(body), "\\", "/"))
+	target := ampNPMLauncherTarget(string(body))
+	if target == "" || pathpkg.Clean(target) != target {
+		return false
+	}
 	for _, relative := range [][]string{
 		{"node_modules", "@sourcegraph", "amp", "node_modules", "@ampcode", "cli"},
 		{"node_modules", "@sourcegraph", "amp"},
 		{"node_modules", "@ampcode", "cli"},
 	} {
 		marker := strings.Join(relative, "/")
-		if !strings.Contains(text, marker) {
+		if !strings.HasPrefix(target, marker+"/") {
 			continue
 		}
 		_, err := os.Lstat(filepath.Join(append([]string{npmDir}, relative...)...))
 		return errors.Is(err, fs.ErrNotExist)
 	}
 	return false
+}
+
+// ampNPMLauncherTarget accepts only a direct npm target or the command line
+// emitted by npm's cmd shim. Other active lines could select another image.
+func ampNPMLauncherTarget(body string) string {
+	var target string
+	for _, raw := range strings.Split(body, "\n") {
+		line := strings.ToLower(strings.ReplaceAll(strings.TrimSpace(raw), "\\", "/"))
+		comment := (strings.HasPrefix(line, "rem ") || strings.HasPrefix(line, "::")) &&
+			!strings.ContainsAny(line, "&|<>")
+		if line == "" || comment ||
+			ampNPMLauncherScaffold(line) {
+			continue
+		}
+		invoked := ampNPMInvokedTarget(line)
+		if invoked == "" || target != "" {
+			return ""
+		}
+		target = invoked
+	}
+	return target
+}
+
+func ampNPMLauncherScaffold(line string) bool {
+	switch line {
+	case "@echo off", "goto start", ":find_dp0", "set dp0=%~dp0", "exit /b", ":start",
+		"setlocal", "call :find_dp0", "if exist \"%dp0%/node.exe\" (",
+		"set \"_prog=%dp0%/node.exe\"", ") else (", "set \"_prog=node\"",
+		"set pathext=%pathext:;.js;=;%", ")":
+		return true
+	}
+	return false
+}
+
+func ampNPMInvokedTarget(line string) string {
+	if !strings.HasSuffix(line, "%*") {
+		return ""
+	}
+	command := strings.TrimSpace(strings.TrimSuffix(line, "%*"))
+	if strings.HasPrefix(command, "endlocal & goto #_undefined_# 2>nul || title %comspec% & ") {
+		command = strings.TrimPrefix(command, "endlocal & goto #_undefined_# 2>nul || title %comspec% & ")
+	}
+	if strings.HasPrefix(command, "\"%_prog%\" ") {
+		command = strings.TrimSpace(strings.TrimPrefix(command, "\"%_prog%\" "))
+	}
+	command = strings.Trim(command, "\"")
+	for _, prefix := range []string{"%~dp0/", "%dp0%/"} {
+		if strings.HasPrefix(command, prefix) && !strings.ContainsAny(command, " \t\"&|<>") {
+			return strings.TrimPrefix(command, prefix)
+		}
+	}
+	return ""
 }
 
 // agentNotInstalledRefusal is the health reason of a connector skipped because
