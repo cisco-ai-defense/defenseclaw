@@ -13,6 +13,7 @@ package protectedfiles
 import (
 	"fmt"
 	"math/rand"
+	"path/filepath"
 	"sort"
 	"testing"
 	"time"
@@ -158,15 +159,25 @@ func attributeSorted(a *sortedActivity, home string, from, to time.Time) (Sessio
 	return Session{}, false
 }
 
+// capacityHome is the home the capacity test and benchmark begin calls for.
+// The gateway passes the hook caller's native, already clean home
+// (trustedActiveHome). A POSIX literal is not clean on Windows: Clean
+// rewrites its separators and allocates twice per Begin there, which the
+// allocation count would measure instead of the open-call bookkeeping.
+var capacityHome = filepath.Clean(filepath.FromSlash("/home/u"))
+
 // TestBeginAtCapacityDoesNotWalkTheOpenCalls: with maxOpen calls that got no
 // result, a Begin drops the oldest without copying or sorting the open calls
 // (the sort allocated a key slice and a swapper on every call).
 func TestBeginAtCapacityDoesNotWalkTheOpenCalls(t *testing.T) {
+	if cleanHome(capacityHome) != capacityHome {
+		t.Fatalf("capacity home %q is not clean on this OS", capacityHome)
+	}
 	c := &clock{t: time.Unix(1_800_000_000, 0)}
 	a := NewActivity(c.now)
 	for i := 0; i < maxOpen; i++ {
 		c.tick(time.Millisecond)
-		a.Begin("/home/u", Session{Connector: "claudecode", SessionID: "s", ToolInvocationID: fmt.Sprintf("warm%d", i)})
+		a.Begin(capacityHome, Session{Connector: "claudecode", SessionID: "s", ToolInvocationID: fmt.Sprintf("warm%d", i)})
 	}
 	tools := make([]string, 400)
 	for i := range tools {
@@ -175,7 +186,7 @@ func TestBeginAtCapacityDoesNotWalkTheOpenCalls(t *testing.T) {
 	next := 0
 	allocs := testing.AllocsPerRun(300, func() {
 		c.tick(time.Millisecond)
-		a.Begin("/home/u", Session{Connector: "claudecode", SessionID: "s", ToolInvocationID: tools[next%len(tools)]})
+		a.Begin(capacityHome, Session{Connector: "claudecode", SessionID: "s", ToolInvocationID: tools[next%len(tools)]})
 		next++
 	})
 	if allocs > 1 {
@@ -185,7 +196,7 @@ func TestBeginAtCapacityDoesNotWalkTheOpenCalls(t *testing.T) {
 		t.Fatalf("%d open calls, want %d", len(a.open), maxOpen)
 	}
 	first := Session{Connector: "claudecode", SessionID: "s", ToolInvocationID: "warm0"}
-	if _, ok := a.open[callKey{"/home/u", first.Connector, first.SessionID, first.ToolInvocationID}]; ok {
+	if _, ok := a.open[callKey{capacityHome, first.Connector, first.SessionID, first.ToolInvocationID}]; ok {
 		t.Fatal("the oldest open call was not dropped")
 	}
 }
@@ -200,6 +211,6 @@ func BenchmarkActivityBeginAtCapacity(b *testing.B) {
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
 		c.tick(time.Millisecond)
-		a.Begin("/home/u", Session{Connector: "claudecode", SessionID: "s", ToolInvocationID: tools[i%len(tools)]})
+		a.Begin(capacityHome, Session{Connector: "claudecode", SessionID: "s", ToolInvocationID: tools[i%len(tools)]})
 	}
 }
