@@ -811,6 +811,9 @@ function Get-GoTestFailureSummary(
     $failedTestKeys = [Collections.Generic.HashSet[string]]::new(
         [StringComparer]::Ordinal
     )
+    $passedTestKeys = [Collections.Generic.HashSet[string]]::new(
+        [StringComparer]::Ordinal
+    )
     $failedPackages = [Collections.Generic.List[object]]::new()
     $failedPackageNames = [Collections.Generic.HashSet[string]]::new(
         [StringComparer]::Ordinal
@@ -826,7 +829,8 @@ function Get-GoTestFailureSummary(
             } catch {
                 continue
             }
-            if ((Get-WindowsNativeJsonString $testEvent 'Action') -ne 'fail') { continue }
+            $action = Get-WindowsNativeJsonString $testEvent 'Action'
+            if ($action -ne 'fail' -and $action -ne 'pass') { continue }
             $package = Limit-WindowsNativeText (
                 Get-WindowsNativeJsonString $testEvent 'Package'
             ) 1024
@@ -834,6 +838,12 @@ function Get-GoTestFailureSummary(
             $test = Limit-WindowsNativeText (
                 Get-WindowsNativeJsonString $testEvent 'Test'
             ) 1024
+            if ($action -eq 'pass') {
+                if ($test) {
+                    [void]$passedTestKeys.Add("$($package.Length):$package$test")
+                }
+                continue
+            }
             if ($test) {
                 $key = "$($package.Length):$package$test"
                 if ($failedTestKeys.Contains($key)) { continue }
@@ -904,11 +914,14 @@ function Get-GoTestFailureSummary(
             $test = Limit-WindowsNativeText (
                 Get-WindowsNativeJsonString $testEvent 'Test'
             ) 1024
+            $key = "$($package.Length):$package$test"
+            if ($test -and $passedTestKeys.Contains($key) -and
+                -not $failedTestKeys.Contains($key)) { continue }
             $output = Get-WindowsNativeJsonString $testEvent 'Output'
             if ($packageOutput.ContainsKey($package)) {
                 Add-WindowsNativeDiagnosticTail -Queue $packageOutput[$package] `
                     -Text $output -MaxLines 160 -MaxBytes $tailBytesPerFailure
-                if ($output -match '(?im)^(panic:|fatal error:|runtime: out of memory|.*test timed out after|exit status )') {
+                if (-not $test -and $output -match '(?im)^(panic:|fatal error:|runtime: out of memory|.*test timed out after|exit status )') {
                     if (-not $packageCriticalHeader.ContainsKey($package)) {
                         $packageCriticalHeader[$package] = Limit-WindowsNativeText $output 512
                     }
@@ -921,7 +934,6 @@ function Get-GoTestFailureSummary(
                 }
             }
             if ($test) {
-                $key = "$($package.Length):$package$test"
                 if ($testOutput.ContainsKey($key)) {
                     Add-WindowsNativeDiagnosticTail -Queue $testOutput[$key] `
                         -Text $output -MaxLines 120 -MaxBytes $tailBytesPerFailure
@@ -8674,6 +8686,12 @@ function Invoke-SelfTest {
                 Output = "passing output stays out of a package summary`n"
             },
             [pscustomobject]@{
+                Action = 'output'
+                Package = 'example.invalid/runtime'
+                Test = 'TestPassing'
+                Output = "panic: handled in a passing test`n"
+            },
+            [pscustomobject]@{
                 Action = 'pass'
                 Package = 'example.invalid/runtime'
                 Test = 'TestPassing'
@@ -8700,8 +8718,30 @@ function Invoke-SelfTest {
         ) 4096
         if (-not $runtimeSummary.Contains('fatal error: fixture runtime stopped') -or
             $runtimeSummary.Contains('passing output stays out of a package summary') -or
+            $runtimeSummary.Contains('panic: handled in a passing test') -or
             [Text.Encoding]::UTF8.GetByteCount($runtimeSummary) -gt 4096) {
             throw 'structured Go test summary lost the runtime header or retained a passing test'
+        }
+
+        $passingPackageJson = @(
+            [pscustomobject]@{
+                Action = 'output'
+                Package = 'example.invalid/passing'
+                Test = 'TestPassing'
+                Output = "panic: handled in a passing test`n"
+            },
+            [pscustomobject]@{
+                Action = 'pass'
+                Package = 'example.invalid/passing'
+                Test = 'TestPassing'
+            },
+            [pscustomobject]@{
+                Action = 'pass'
+                Package = 'example.invalid/passing'
+            }
+        ) | ForEach-Object { $_ | ConvertTo-Json -Compress }
+        if (Get-GoTestFailureSummary ($passingPackageJson -join [Environment]::NewLine) 4096) {
+            throw 'structured Go test summary retained a passing package'
         }
 
         $largeGoTestJson = @(
