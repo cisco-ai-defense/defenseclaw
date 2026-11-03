@@ -103,3 +103,55 @@ func TestGAP0540RelocatedConsoleScriptRemainsProtected(t *testing.T) {
 		t.Error("relocated console-script session omitted from account-home evidence")
 	}
 }
+
+func TestGAP0540UnfinishedVersionProbeRemainsReportable(t *testing.T) {
+	h, home, uid := versionProbeTestHost(t)
+	scratch, err := os.MkdirTemp(t.TempDir(), "dc-agent-probe-")
+	if err != nil {
+		t.Fatal(err)
+	}
+	retryScratch, err := os.MkdirTemp(t.TempDir(), "dc-agent-probe-")
+	if err != nil {
+		t.Fatal(err)
+	}
+	const gateway = "/opt/defenseclaw/bin/defenseclaw-gateway"
+	writeVersionProbeProcess(t, h, 8501, 1, 0, 100, gateway,
+		[]string{gateway, "enterprise", "hooks", "enumerate", "--manifest", "/etc/defenseclaw/hook-guardian/targets.yaml", "--interval", "5m"}, nil)
+	writeVersionProbeProcess(t, h, 8502, 8501, uid, 200, gateway,
+		[]string{gateway, "enterprise", "hooks", "apply-target"}, nil)
+	argv := []string{"/usr/bin/python3", filepath.Join(home, ".local", "bin", "hermes"), "--version"}
+	env := []string{"HOME=" + home, "PATH=/usr/bin:/bin", "LANG=C", "NO_COLOR=1", "TERM=dumb", "CI=1",
+		"HERMES_HOME=" + scratch, "TMPDIR=" + scratch, "DC_AGENT_VERSION_PROBE=hermes"}
+	writeVersionProbeProcess(t, h, 8503, 8502, uid, 300, "/usr/bin/python3", argv, env)
+	previous := waitManagedHermesVersion
+	var retrySeen bool
+	waitManagedHermesVersion = func(_ string, pid int, _ string, _ time.Duration) bool {
+		switch pid {
+		case 8503:
+			retryEnv := []string{"HOME=" + home, "PATH=/usr/bin:/bin", "LANG=C", "NO_COLOR=1", "TERM=dumb", "CI=1",
+				"HERMES_HOME=" + retryScratch, "TMPDIR=" + retryScratch, "DC_AGENT_VERSION_PROBE=hermes"}
+			writeVersionProbeProcess(t, h, 8504, 8502, uid, 400, "/usr/bin/python3", argv, retryEnv)
+			return false
+		case 8504:
+			retrySeen = true
+			if err := os.RemoveAll(h.env.P("/proc/8503")); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.RemoveAll(h.env.P("/proc/8504")); err != nil {
+				t.Fatal(err)
+			}
+			return true
+		default:
+			t.Fatalf("unexpected version process %d", pid)
+			return false
+		}
+	}
+	t.Cleanup(func() { waitManagedHermesVersion = previous })
+	result := h.run(Options{Action: ActionVerify})
+	if retrySeen {
+		t.Fatal("a second process was waited for while the first remained live")
+	}
+	if got := messagesOf(result.Errors, codeManagedLaunchUninspected); got == "" {
+		t.Fatal("the unfinished process was omitted from verification")
+	}
+}

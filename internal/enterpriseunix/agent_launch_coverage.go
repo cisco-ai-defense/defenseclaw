@@ -93,21 +93,35 @@ func (l *lifecycle) describePluginLaunchCoverage(ctx context.Context, record *De
 		return
 	}
 	if env.GOOS == "linux" {
-		deadline := time.Now().Add(agentprobe.VersionProbeWait)
+		// An enumerator can start another version command while the previous
+		// one finishes. Give each observed command its own bounded wait, with
+		// a fixed cap for the complete verification pass.
+		deadline := time.Now().Add(2 * agentprobe.VersionProbeWait)
 		seen := map[int]bool{}
+	probeLoop:
 		for {
 			checked := false
+			unfinished := map[int]bool{}
 			for _, session := range sessions {
+				remaining := time.Until(deadline)
 				if session.Agent != "hermes" || !session.EnvKnown || seen[session.PID] ||
 					!strings.HasPrefix(filepath.Base(session.Env["HERMES_HOME"]), "dc-agent-probe-") ||
-					time.Until(deadline) <= 0 {
+					remaining <= 0 {
 					continue
 				}
 				seen[session.PID] = true
 				checked = true
 				_, home := env.pluginLaunchAccount(ctx, session.UID)
 				if home != "" {
-					waitManagedHermesVersion(env.P("/proc"), session.PID, home, time.Until(deadline))
+					remaining = time.Until(deadline)
+					if remaining > agentprobe.VersionProbeWait {
+						remaining = agentprobe.VersionProbeWait
+					}
+					if remaining > 0 {
+						if !waitManagedHermesVersion(env.P("/proc"), session.PID, home, remaining) {
+							unfinished[session.PID] = true
+						}
+					}
 				}
 			}
 			if !checked {
@@ -120,6 +134,13 @@ func (l *lifecycle) describePluginLaunchCoverage(ctx context.Context, record *De
 				result.AddError("managed_launch_scan_unknown", "could not rescan running agent launches: "+err.Error())
 				result.MarkCoverageIncomplete("managed_launch_scan_unknown")
 				return
+			}
+			for _, session := range sessions {
+				if unfinished[session.PID] {
+					// Keep a process that remained live after its own wait
+					// reportable, even if another probe also appeared.
+					break probeLoop
+				}
 			}
 		}
 	}
