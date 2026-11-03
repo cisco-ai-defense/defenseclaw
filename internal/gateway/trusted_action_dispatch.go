@@ -340,6 +340,9 @@ func dispatchTrustedAction(
 			// only there (withOverBudgetStateMutation).
 			return withOverBudgetStateMutation(parent, request, facts, trustedActionLimitFindings(request.EnforcementCapable))
 		}
+		defer func() {
+			findings = withStaticFunctionStateMutation(parent, request, findings)
+		}()
 	}
 	// A ~<active user> tilde-prefix names the active home from the password
 	// database (GAP-2378), and under a Windows home an MSYS drive mount
@@ -8818,7 +8821,120 @@ func withOverBudgetStateMutation(parent context.Context, request trustedActionRe
 			findings = append(findings, found...)
 		}
 	}
-	return withReducedStateReading(parent, request, facts, findings)
+	findings = withReducedStateReading(parent, request, facts, findings)
+	return withStaticFunctionStateMutation(parent, request, findings)
+}
+
+func withStaticFunctionStateMutation(parent context.Context, request trustedActionRequest, findings []RuleFinding) []RuleFinding {
+	// The normal reduction can decline a dynamic function body such as
+	// run() { "$@"; }. Check bounded static function readings for a
+	// proven state mutation. A budget finding alone
+	// remains advisory in observe mode.
+	if slices.ContainsFunc(findings, func(f RuleFinding) bool {
+		return f.RuleID == "tamper.detector_state_write" && f.contributesToEnforcement()
+	}) {
+		return findings
+	}
+	if request.Input.DialectHint == actionfacts.DialectPOSIX || request.Input.DialectHint == "" {
+		if command, known := trustedBashCommandInput(request.Input); known && len(command) <= 64<<10 &&
+			(strings.Contains(command, ")") || strings.Contains(command, "function ")) && hookpaths.MayNameState(command) {
+			generation := request.generation
+			if generation == nil {
+				generation = snapshotRulePackGenerationFor(parent, request.Connector)
+			}
+			for _, reading := range hookpaths.StaticFunctionCallReadings(command, request.Input.ActiveHome) {
+				twin := bashReadingRequest(request, command, reading)
+				facts := actionfacts.Analyze(twin.Input)
+				// A static shell command string is an exact executed reading.
+				// Check its state role directly before taking the full rule
+				// path, which would repeat the whole action evaluation.
+				readings := []trustedActionRequest{twin}
+				for _, commandFact := range facts.Commands {
+					if !commandFact.ArgvComplete {
+						continue
+					}
+					if index, ok := actionfacts.ShellCommandStringIndex(commandFact.Argv); ok {
+						child := twin
+						child.Input.Command = commandFact.Argv[index]
+						child.LegacyText = child.Input.Command
+						readings = append(readings, child)
+					}
+				}
+				proved := false
+				add := func(member *compiledRulePackCategories, profile string) {
+					// Prefer the exact child reading; one proven state finding
+					// completes this rule for the current profile.
+					for i := len(readings) - 1; i >= 0; i-- {
+						candidate := readings[i]
+						candidateFacts := facts
+						if candidate.Input.Command != twin.Input.Command {
+							candidateFacts = actionfacts.Analyze(candidate.Input)
+						}
+						var candidateFindings []RuleFinding
+						if candidate.ProtectedHomeHook && staticFunctionLiteralStateMutation(candidateFacts) {
+							candidateFindings = withProvenActiveStateMutation(member, candidate, nil)
+						}
+						if len(candidateFindings) == 0 {
+							candidateFindings = withActiveStateTargetMention(member, candidate, candidateFacts, nil)
+						}
+						for _, finding := range candidateFindings {
+							if finding.RuleID != "tamper.detector_state_write" {
+								continue
+							}
+							finding.profile = profile
+							findings = withTwinProvenBlocks(findings, []RuleFinding{finding})
+							proved = proved || finding.contributesToEnforcement()
+							if finding.contributesToEnforcement() {
+								return
+							}
+						}
+					}
+				}
+				if generation == nil || len(generation.members) == 0 {
+					add(generation, "")
+				} else {
+					for i, member := range generation.members {
+						profile := ""
+						if i < len(generation.memberNames) {
+							profile = generation.memberNames[i]
+						}
+						add(member, profile)
+					}
+				}
+				if !proved {
+					for _, finding := range dispatchTrustedAction(parent, twin) {
+						if finding.RuleID == "tamper.detector_state_write" {
+							findings = withTwinProvenBlocks(findings, []RuleFinding{finding})
+						}
+					}
+				}
+			}
+		}
+	}
+	return findings
+}
+
+// A projected function reading may reach an exact active-state spelling
+// whose shell redirect is complete even when the gateway cannot inspect
+// the managed home. This proof accepts only that lexical spelling and an
+// authoritative mutating command; other aliases keep the client map path.
+func staticFunctionLiteralStateMutation(facts actionfacts.Facts) bool {
+	projected := facts.EnforcementProjection()
+	if projected.ActiveHome == "" || !projected.Authoritative() || !projected.EnforcementEligible() {
+		return false
+	}
+	homeState := path.Join(path.Clean(projected.ActiveHome), ".defenseclaw") + "/"
+	for _, candidate := range projected.Paths {
+		if !strings.HasPrefix(candidate.Value, "~/.defenseclaw/") &&
+			!strings.HasPrefix(candidate.Value, homeState) {
+			continue
+		}
+		command, ok := integrityCommandByID(projected, candidate.CommandID)
+		if ok && stateCommandMutatesPath(command, candidate) && matchesActiveDefenseClawState(projected, candidate) {
+			return true
+		}
+	}
+	return false
 }
 
 // withReducedStateReading adds the state-write finding of the reduced
