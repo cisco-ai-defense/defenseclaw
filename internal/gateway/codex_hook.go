@@ -319,6 +319,7 @@ func (a *APIServer) evaluateCodexHookForProfile(
 			LegacyText:                    string(toolArgs),
 			Connector:                     "codex",
 			EnforcementCapable:            true,
+			ManagedHookOverflowHold:       managedWindowsHookOverflowHold(ctx, a.scannerCfg, "codex", runtime.GOOS),
 			ResolvedWriteTargets:          commandHookResolvedWrites(ctx, cfg, actionInput),
 			SkipLocalFilesystemResolution: isSandboxHookRequest(ctx),
 			DowngradeReadOnlyDataArgs:     mode != "action",

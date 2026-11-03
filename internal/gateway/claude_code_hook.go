@@ -22,6 +22,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"time"
 
@@ -223,6 +224,7 @@ func (a *APIServer) evaluateClaudeCodeHook(ctx context.Context, req claudeCodeHo
 			LegacyText:                    string(toolArgs),
 			Connector:                     "claudecode",
 			EnforcementCapable:            true,
+			ManagedHookOverflowHold:       managedWindowsHookOverflowHold(ctx, a.scannerCfg, "claudecode", runtime.GOOS),
 			SkipLocalFilesystemResolution: isSandboxHookRequest(ctx),
 			ResolvedWriteTargets:          commandHookResolvedWrites(ctx, cfg, actionfacts.Input{Tool: actionTool, Args: toolArgs}),
 			ActiveAgentFileIdentities:     activeAgentContext.identities,
