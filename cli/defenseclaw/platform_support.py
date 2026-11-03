@@ -106,8 +106,8 @@ WINDOWS_CONNECTOR_SUPPORT: dict[str, ConnectorPlatformSupport] = {
         "The Antigravity integration is supported on native Windows x64.",
     ),
     "opencode": ConnectorPlatformSupport(
-        PREVIEW,
-        "OpenCode V2 is available as a native Windows preview using the reviewed @opencode/cli contract.",
+        SUPPORTED,
+        "OpenCode V2 and the DefenseClaw plugin are supported on native Windows x64 using the reviewed @opencode/cli contract.",
     ),
     "amp": ConnectorPlatformSupport(
         SUPPORTED,
@@ -192,9 +192,14 @@ def connector_platform_support(
             ),
         )
     if name == "opencode":
+        if resolved_os in {"linux", "darwin"}:
+            return ConnectorPlatformSupport(
+                SUPPORTED,
+                "OpenCode V2 and the DefenseClaw plugin are supported on Linux and macOS using the reviewed @opencode/cli contract.",
+            )
         return ConnectorPlatformSupport(
             PREVIEW,
-            "The OpenCode V2 integration is a preview; live vendor-CLI certification is not claimed.",
+            "OpenCode V2 has not completed certification on this operating system.",
         )
     return ConnectorPlatformSupport(
         SUPPORTED,

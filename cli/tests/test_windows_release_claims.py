@@ -439,7 +439,10 @@ def test_opencode_docs_exclude_unqualified_enforcement_media() -> None:
         "min_inclusive": "2.0.0",
         "max_exclusive": "2.3.0",
     }
-    assert "V2 support is currently a preview" in connector_page
+    assert (
+        "OpenCode V2 2.2.5 was checked live in per-user and managed installs on Linux, macOS and native Windows."
+        in connector_page
+    )
     assert validated["live"] is False
     assert validated["os"]["windows"] == {
         "last_validated_version": "",
