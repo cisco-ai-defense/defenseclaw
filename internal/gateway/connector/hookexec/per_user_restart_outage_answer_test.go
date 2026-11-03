@@ -205,8 +205,7 @@ func TestPerUserPostNoAnswerExitIsOnlyANoStatusDeadline(t *testing.T) {
 	}
 }
 
-// A no-answer without a prior refusal uses the no-answer warning, rather
-// than claiming a restart that did not happen.
+// A no-answer without a verified contact or a prior refusal stays closed.
 func TestPerUserOutageSeenNeedsARefusedFirstTry(t *testing.T) {
 	previousLogWait := answerWatchdogLogWait
 	answerWatchdogLogWait = time.Minute
@@ -215,6 +214,7 @@ func TestPerUserOutageSeenNeedsARefusedFirstTry(t *testing.T) {
 	for _, err := range []error{
 		fmt.Errorf("post: %w", context.DeadlineExceeded),
 		fmt.Errorf("%w: x", errGatewayTookCallNoAnswer),
+		fmt.Errorf("%w: %w", errPerUserPeerUnverified, syscall.ECONNREFUSED),
 	} {
 		t.Run(err.Error(), func(t *testing.T) {
 			home := t.TempDir()
@@ -224,8 +224,8 @@ func TestPerUserOutageSeenNeedsARefusedFirstTry(t *testing.T) {
 			w := prepareAnswerWatchdog(&opts, sp, "open", time.Time{})
 			w.perUserOutageSeen(opts, sp, "open", err)
 			code, shown := fireAnswerDeadline(t, w, exited, stdout, stderr)
-			if nativeAnswerBlocks(code, stdout.String()) || !strings.Contains(shown, "did not answer in time") || strings.Contains(shown, "restarting or not running") {
-				t.Fatalf("exit %d answer %q, want the open did-not-answer warning", code, shown)
+			if !nativeAnswerBlocks(code, stdout.String()) || !strings.Contains(shown, "did not answer in time") {
+				t.Fatalf("exit %d answer %q, want the closed did-not-answer refusal", code, shown)
 			}
 		})
 	}

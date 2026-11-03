@@ -1144,11 +1144,6 @@ func doRequest(ctx context.Context, opts Options, sp spec, failMode string, payl
 	// not answered closes this call.
 	failMode = closeDuringInstall(&opts, failMode)
 	if err != nil {
-		if errors.Is(err, errGatewayTookCallNoAnswer) {
-			// The transport marks a timeout this way only after a verified
-			// connection. Test transports use the same marker.
-			opts.markVerifiedNoStatus(sp)
-		}
 		if managedNativeDecision(opts) && opts.answeredErrorStatus != 0 {
 			return failAfterErrorStatus(opts, sp, "closed", opts.answeredErrorStatus)
 		}
