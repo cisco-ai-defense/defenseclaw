@@ -107,10 +107,18 @@ func effectiveRulePackKey(cfg *config.Config, connector string) string {
 
 // loadGlobalRulePack loads and composes the global scope's pack.
 func loadGlobalRulePack(cache *guardrail.RulePackCache, cfg *config.Config, scope string) (*guardrail.RulePack, error) {
-	if cfg != nil && !cfg.Guardrail.Enabled && !cfg.SecureClientIntegration() {
-		return loadValidatedRulePack(cache, "", scope)
+	s := globalRulePackScope(cfg)
+	if !cfg.Guardrail.Enabled && !cfg.SecureClientIntegration() && s.ref.Name == "default" && s.dir != "" {
+		if _, custom := cfg.Guardrail.CustomPacks[s.ref.Name]; !custom {
+			if _, err := os.Lstat(s.dir); errors.Is(err, os.ErrNotExist) {
+				// An absent bundled default is optional while guardrail is off.
+				// Keep configured rules layers on the embedded pack.
+				s.ref = config.RulePackRef{}
+				s.dir = ""
+			}
+		}
 	}
-	return loadScopedRulePack(cache, cfg, globalRulePackScope(cfg), scope)
+	return loadScopedRulePack(cache, cfg, s, scope)
 }
 
 // loadConnectorRulePack loads and composes connector's pack.

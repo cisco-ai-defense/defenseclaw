@@ -80,6 +80,36 @@ func TestDisabledGuardrailStartsWithoutDefaultRulePackDirectory(t *testing.T) {
 	}
 }
 
+func TestDisabledGuardrailKeepsConfiguredGlobalPack(t *testing.T) {
+	dir := meetRulePackDir(t, t.TempDir(), "COWORK108")
+	digest, err := guardrail.RulePackDigest(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg := config.DefaultConfig()
+	cfg.Guardrail.Enabled = false
+	cfg.Guardrail.RulePack = "operator"
+	cfg.Guardrail.CustomPacks = map[string]config.CustomRulePack{
+		"operator": {Path: dir, Digest: "sha256:" + digest},
+	}
+	pack, err := loadGlobalRulePack(guardrail.NewRulePackCache(), cfg, "global")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := pack.FilesDigest(); got != digest {
+		t.Fatalf("configured pack digest = %s, want %s", got, digest)
+	}
+
+	// A missing configured pack still reports its load error.
+	cfg.Guardrail.CustomPacks["operator"] = config.CustomRulePack{
+		Path: filepath.Join(t.TempDir(), "missing"), Digest: "sha256:" + digest,
+	}
+	if _, err := loadGlobalRulePack(guardrail.NewRulePackCache(), cfg, "global"); err == nil ||
+		!strings.Contains(err.Error(), "directory_not_found") {
+		t.Fatalf("missing configured pack: error=%v", err)
+	}
+}
+
 func TestNewSidecarRejectsInvalidEffectiveSingleConnectorRulePack(t *testing.T) {
 	cfg := config.DefaultConfig()
 	cfg.ConfigVersion = config.ObservabilityV8ConfigVersion
