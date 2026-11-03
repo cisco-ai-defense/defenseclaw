@@ -627,6 +627,105 @@ def test_local_stdio_scan_ends_short_helper_descendant(tmp_path: Path) -> None:
                 os.kill(child_pid, signal.SIGKILL)
 
 
+_DEEP_CHAIN = """import os, signal, sys, time
+from pathlib import Path
+level, root = int(sys.argv[1]), Path(sys.argv[2])
+signal.signal(signal.SIGTERM, signal.SIG_IGN)
+birth = Path(f'/proc/{os.getpid()}/stat').read_text().rsplit(') ', 1)[1].split()[19]
+(root / f'level-{level}.pid').write_text(f'{os.getpid()} {birth}')
+if level:
+    child = os.fork()
+    if child == 0:
+        os.execl(sys.executable, sys.executable, sys.argv[0], str(level - 1), str(root))
+while True:
+    time.sleep(300)
+"""
+
+_DEEP_CHAIN_SERVER = """import json, os, subprocess, sys, time
+root, chain = sys.argv[1:]
+subprocess.Popen([sys.executable, chain, '6', root],
+                 stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+                 stderr=subprocess.DEVNULL, start_new_session=True)
+deadline = time.monotonic() + 5
+while not os.path.exists(os.path.join(root, 'level-0.pid')) and time.monotonic() < deadline:
+    time.sleep(0.01)
+if not os.path.exists(os.path.join(root, 'level-0.pid')):
+    raise RuntimeError('descendant chain did not start')
+for line in sys.stdin:
+    message = json.loads(line)
+    if 'id' not in message:
+        continue
+    method = message.get('method')
+    if method == 'initialize':
+        result = {'protocolVersion': '2024-11-05', 'capabilities': {'tools': {}},
+                  'serverInfo': {'name': 'fixture', 'version': '1.0'}}
+    elif method == 'server/discover':
+        print(json.dumps({'jsonrpc': '2.0', 'id': message['id'],
+                          'error': {'code': -32601, 'message': 'Method not found'}}), flush=True)
+        continue
+    elif method == 'tools/list':
+        result = {'tools': [{'name': 'echo', 'description': 'Echo text',
+                            'inputSchema': {'type': 'object', 'properties': {}}}]}
+    else:
+        result = {}
+    print(json.dumps({'jsonrpc': '2.0', 'id': message['id'], 'result': result}), flush=True)
+"""
+
+
+@pytest.mark.skipif(sys.platform != "linux", reason="Linux child subreaper scope")
+@pytest.mark.parametrize("worker_mode", ["preferred", "fallback"])
+def test_local_stdio_scan_ends_deep_descendants(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, worker_mode: str,
+) -> None:
+    """A completed scan drains each newly adopted descendant before returning."""
+    mcpscanner = pytest.importorskip("mcpscanner")
+    from defenseclaw.scanner import mcp
+    from mcpscanner.core.models import AnalyzerEnum
+
+    if worker_mode == "fallback":
+        original_access = os.access
+        monkeypatch.setattr(
+            mcp.os, "access",
+            lambda path, mode: False if path == "/usr/bin/perl" else original_access(path, mode),
+        )
+    chain = tmp_path / "chain.py"
+    server = tmp_path / "server.py"
+    chain.write_text(_DEEP_CHAIN, encoding="utf-8")
+    server.write_text(_DEEP_CHAIN_SERVER, encoding="utf-8")
+    launcher = tmp_path / "uvx"
+    launcher.write_text(f"#!/bin/sh\nexec '{sys.executable}' '{server}' \"$@\"\n", encoding="utf-8")
+    launcher.chmod(0o700)
+    monkeypatch.setenv("PATH", f"{tmp_path}{os.pathsep}{os.environ['PATH']}")
+    entry = MCPServerEntry(
+        name="deep-descendants", command="uvx", args=[str(tmp_path), str(chain)], env={},
+    )
+
+    def identities() -> list[tuple[int, str]]:
+        return [tuple((int(parts[0]), parts[1])) for path in sorted(tmp_path.glob("level-*.pid"))
+                if (parts := path.read_text(encoding="ascii").split())]
+
+    def running(identity: tuple[int, str]) -> bool:
+        pid, birth = identity
+        try:
+            fields = Path(f"/proc/{pid}/stat").read_text(encoding="ascii").rsplit(") ", 1)[1].split()
+        except FileNotFoundError:
+            return False
+        return fields[0] != "Z" and fields[19] == birth
+
+    try:
+        wrapper = MCPScannerWrapper(MCPScannerConfig(analyzers="yara"))
+        assert wrapper._scan_local(
+            mcpscanner.Scanner(mcpscanner.Config()), entry, [AnalyzerEnum.YARA],
+        ) == []
+        pids = identities()
+        assert len(pids) == 7
+        assert not any(running(identity) for identity in pids)
+    finally:
+        for identity in identities():
+            if running(identity):
+                os.kill(identity[0], signal.SIGKILL)
+
+
 @pytest.mark.skipif(sys.platform != "linux", reason="Linux child subreaper scope")
 @pytest.mark.parametrize("mode", ["direct", "reparented"])
 @pytest.mark.parametrize("worker_mode", ["preferred", "fallback", "fallback-stuck", "relative-path"])

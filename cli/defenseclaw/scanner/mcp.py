@@ -618,20 +618,22 @@ sub children {
 }
 sub signal_child { kill $_[0], $_[1] }
 my $failed = 0;
-for my $round (1 .. 4) {
+my $deadline = time() + 3;
+my $round = 0;
+while (1) {
+    while (waitpid(-1, 1) > 0) {}
     my @children = children();
     last unless @children;
-    my $sig = $round == 1 ? 'TERM' : 'KILL';
+    if (time() >= $deadline) { $failed = 1; last; }
+    my $sig = $round++ == 0 ? 'TERM' : 'KILL';
     for my $pid (@children) {
         if (!signal_child($sig, $pid) && !$!{ESRCH}) {
             $failed = 1;
             CORE::kill 'KILL', $pid;
         }
     }
-    select undef, undef, undef, 0.25 if $round < 4;
-    while (waitpid(-1, 1) > 0) {}
+    select undef, undef, undef, 0.02;
 }
-$failed = 1 if children();
 exit($failed ? 70 : (($status & 127) ? 128 + ($status & 127) : ($status >> 8)));
 '''
 _MCP_LINUX_WORKER_SCRIPT = r'''
@@ -654,20 +656,28 @@ exec 0<&-
 wait "$server"
 status=$?
 failed=0
-for round in 1 2 3 4; do
+SECONDS=0
+round=0
+while :; do
     children=
     IFS= read -r children < "/proc/$$/task/$$/children" || :
     [ -n "$children" ] || break
+    if (( SECONDS >= 3 )); then
+        failed=1
+        break
+    fi
     sig=KILL
-    [ "$round" = 1 ] && sig=TERM
+    [ "$round" = 0 ] && sig=TERM
+    round=$((round + 1))
     for pid in $children; do
         if ! kill -"$sig" "$pid" 2>/dev/null; then
             failed=1
             builtin kill -KILL "$pid" 2>/dev/null || :
         fi
     done
-    [ "$round" = 4 ] || sleep 0.25
+    sleep 0.02
 done
+[ -z "$children" ] || failed=1
 [ "$failed" = 0 ] || exit 70
 exit "$status"
 '''
@@ -961,6 +971,10 @@ def _contained_mcp_linux_process_factory(server_name: str) -> Iterator[None]:
             except TimeoutError:
                 process.kill()
                 await process.wait()
+                _LOGGER.warning(
+                    "MCP stdio cleanup for server %r may be incomplete; "
+                    "a child may still be running (worker exceeded cleanup deadline)", server_name,
+                )
 
     with _MCP_POSIX_PROCESS_FACTORY_LOCK:
         mcp_stdio._create_platform_compatible_process = create
