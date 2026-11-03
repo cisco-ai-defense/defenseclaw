@@ -1325,6 +1325,25 @@ def test_equal_sandbox_names_on_two_hosts_stay_apart() -> None:
                 assert 'host_name=~"$host"' in target["expr"], panel["title"]
 
 
+def test_sandbox_fleet_counts_only_named_live_sandboxes() -> None:
+    # rel-1-0-3:GAP-0168: registration-time policy records have a digest but
+    # no sandbox name. They must not add a group to the fleet count.
+    board = _dashboard("defenseclaw-sandboxes.json")
+    events = 'defenseclaw_event_name=~"sandbox[.](lifecycle|policy[.]resolved|policy[.]rematched)"'
+    counted = set()
+    panels = [*board["panels"], *(child for row in board["panels"] for child in row.get("panels", []))]
+    for panel in panels:
+        for target in panel.get("targets", []):
+            expr = target.get("expr", "")
+            if events in expr and "sum by (host_name, defenseclaw_sandbox_name" in expr:
+                counted.add(panel["title"])
+                assert events + ' | defenseclaw_sandbox_name!=""' in expr, panel["title"]
+    assert counted >= {
+        "Governed sandboxes", "Sandboxes by profile", "Profile, match and group",
+        "Sandboxes by OS", "Sandboxes by driver",
+    }
+
+
 def test_sandboxes_board_scopes_to_one_computer() -> None:
     # GAP-0195: every panel follows Environment and Host; a metric panel,
     # which cannot follow the Sandbox box, says so in its title; the active

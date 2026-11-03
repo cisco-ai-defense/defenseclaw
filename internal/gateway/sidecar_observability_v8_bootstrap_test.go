@@ -124,6 +124,7 @@ func newSidecarV8BootstrapFixtureIn(
 	t *testing.T, configVersion int, storePath, dataDir string,
 ) sidecarV8BootstrapFixture {
 	t.Helper()
+	restoreGatewayProcessPosture(t)
 	// Some self-hosted Linux runners create testing.TempDir children under a
 	// permissive process umask. The production audit store correctly rejects an
 	// immediately group-writable database directory, so make the shared success
@@ -1055,6 +1056,7 @@ func TestSidecarBootstrapObservabilityV8RejectsV7WithoutMutation(t *testing.T) {
 }
 
 func TestNewSidecarRejectsV7BeforeInitialization(t *testing.T) {
+	restoreGatewayProcessPosture(t)
 	if sidecar, err := NewSidecar(&config.Config{ConfigVersion: 7}, nil, nil); err == nil || sidecar != nil {
 		t.Fatalf("v7 constructor = sidecar:%v error:%v", sidecar, err)
 	}
@@ -1085,6 +1087,7 @@ func TestNewSidecarFailureDoesNotPublishManagedRedactionPosture(t *testing.T) {
 			candidate.DeploymentMode = test.failedNewMode
 			candidate.Gateway.DeviceKeyFile = badKey
 
+			restoreGatewayProcessPosture(t)
 			sidecar, err := NewSidecar(candidate, nil, nil)
 			if err == nil || sidecar != nil {
 				t.Fatalf("failed constructor = sidecar:%v error:%v", sidecar, err)

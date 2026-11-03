@@ -6,7 +6,10 @@
 
 package unixidentity
 
-import "testing"
+import (
+	"strings"
+	"testing"
+)
 
 func TestParseNSSwitchDirectoryConfigured(t *testing.T) {
 	for content, want := range map[string]bool{
@@ -62,15 +65,40 @@ func TestParseLocalPasswdAndDSCL(t *testing.T) {
 // GAP-0669: the gateway's macOS account stamp lists each local account's
 // uid, GeneratedUID, home and primary group, so an account deleted and
 // created again under the same name and uid is seen as another account.
-func TestParseDSCLAccountRecords(t *testing.T) {
-	records := mergeDSCLAccountRecords(
-		parseDSCLAttribute("_www 70\nalice   501\nnobody -2\nbad 5 6\n\n"),
-		parseDSCLAttribute("alice  8C1F-AAAA\n_www FFFFEEEE-0046\nnobody\n"),
-		parseDSCLAttribute("alice  /Users/alice smith\n_www\t/Library/WebServer\n"),
-		parseDSCLAttribute("alice 20\n_www 70\nnobody -2\n"),
-	)
+// rel-1-0-6 GAP-0326: one `dscl -plist . -readall` answers them, as the four
+// `dscl . -list` runs it replaces did.
+func TestParseDSCLAccountRecordsPlist(t *testing.T) {
+	record := func(attributes ...string) string {
+		out := "\t<dict>\n"
+		for i := 0; i+1 < len(attributes); i += 2 {
+			out += "\t\t<key>dsAttrTypeStandard:" + attributes[i] + "</key>\n\t\t<array>\n"
+			for _, value := range strings.Split(attributes[i+1], "|") {
+				out += "\t\t\t<string>" + value + "</string>\n"
+			}
+			out += "\t\t</array>\n"
+		}
+		return out + "\t</dict>\n"
+	}
+	output := `<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<array>
+` + record("GeneratedUID", "FFFFEEEE-0046", "NFSHomeDirectory", "/Library/WebServer", "PrimaryGroupID", "70",
+		"RecordName", "_www|www", "UniqueID", "70") +
+		record("GeneratedUID", "8C1F-AAAA", "NFSHomeDirectory", "/Users/alice smith &amp; co", "PrimaryGroupID", "20",
+			"RecordName", "alice", "UniqueID", "501") +
+		record("PrimaryGroupID", "-2", "RecordName", "nobody", "UniqueID", "-2") +
+		record("RecordName", "bad", "UniqueID", "5|6") +
+		record("RecordName", "nouid", "GeneratedUID", "AAAA") +
+		record("UniqueID", "502") +
+		record("RecordName", "bad name", "UniqueID", "503") +
+		"</array>\n</plist>\n"
+	records, err := parseDSCLAccountRecordsPlist([]byte(output))
+	if err != nil {
+		t.Fatal(err)
+	}
 	want := map[string]LocalAccountRecord{
-		"alice":  {UID: 501, RecordID: "8C1F-AAAA", Home: "/Users/alice smith", PrimaryGID: "20"},
+		"alice":  {UID: 501, RecordID: "8C1F-AAAA", Home: "/Users/alice smith & co", PrimaryGID: "20"},
 		"_www":   {UID: 70, RecordID: "FFFFEEEE-0046", Home: "/Library/WebServer", PrimaryGID: "70"},
 		"nobody": {UID: -2, PrimaryGID: "-2"},
 	}
@@ -80,6 +108,11 @@ func TestParseDSCLAccountRecords(t *testing.T) {
 	for name, record := range want {
 		if records[name] != record {
 			t.Fatalf("records[%q] = %+v, want %+v", name, records[name], record)
+		}
+	}
+	for _, broken := range []string{"<plist><array><dict><key>x</key>", "not a plist"} {
+		if _, err := parseDSCLAccountRecordsPlist([]byte(broken)); err == nil {
+			t.Fatalf("parseDSCLAccountRecordsPlist(%q) did not fail", broken)
 		}
 	}
 }

@@ -431,19 +431,46 @@ func windowsEnterpriseTimeoutPhases(stderr []byte) string {
 	return strings.Join(phases, " | ")
 }
 
+// windowsEnterpriseNoticePhase starts the stage of a phase line the lifecycle
+// log keeps wherever it falls in the run: the log keeps only the last 12
+// ordinary phase lines, so a notice an administrator must see (a Setup that
+// fell back to the File.Replace swap, rel-1-0-6:GAP-0369) was dropped when
+// it came early. At most windowsEnterpriseNoticePhaseLimit notices of at
+// most windowsEnterpriseNoticePhaseMaxLen bytes are kept, before the others.
+const (
+	windowsEnterpriseNoticePhase       = "notice: "
+	windowsEnterpriseNoticePhaseLimit  = 16
+	windowsEnterpriseNoticePhaseMaxLen = 512
+)
+
 func windowsEnterprisePhaseLines(stderr []byte) []string {
 	const prefix = "DC_LIFECYCLE_PHASE: "
-	var phases []string
+	var phases, notices []string
 	for _, line := range strings.Split(string(stderr), "\n") {
 		line = strings.TrimSuffix(line, "\r")
-		if strings.HasPrefix(line, prefix) && len(line) <= 160 {
+		if !strings.HasPrefix(line, prefix) {
+			continue
+		}
+		if windowsEnterpriseNoticePhaseLine(strings.TrimPrefix(line, prefix)) {
+			if len(line) <= windowsEnterpriseNoticePhaseMaxLen && len(notices) < windowsEnterpriseNoticePhaseLimit {
+				notices = append(notices, line)
+			}
+			continue
+		}
+		if len(line) <= 160 {
 			phases = append(phases, line)
 		}
 	}
 	if len(phases) > 12 {
 		phases = phases[len(phases)-12:]
 	}
-	return phases
+	return append(notices, phases...)
+}
+
+// windowsEnterpriseNoticePhaseLine reports a phase "<timestamp> notice: ...".
+func windowsEnterpriseNoticePhaseLine(phase string) bool {
+	_, stage, found := strings.Cut(phase, " ")
+	return found && strings.HasPrefix(stage, windowsEnterpriseNoticePhase)
 }
 
 // windowsEnterpriseForcedUninstallVariable carries --force (Setup /uninstall
@@ -1516,7 +1543,7 @@ func newWindowsEnterpriseStandaloneResult(action string, opts *windowsEnterprise
 	result := enterprisestatus.New(action, managed.ProfileStandalone, "windows", version)
 	result.Inspection = enterprisestatus.Inspection{Local: "active", AIDefense: "disabled"}
 	for _, record := range opts.ignoredDeploymentRecords {
-		result.AddWarning("untrusted_deployment_record", "ignored a deployment record an administrator did not write: "+record)
+		result.AddWarning("untrusted_deployment_record", windowsEnterpriseUntrustedDeploymentRecordMessage(record))
 	}
 	return result
 }
@@ -1913,10 +1940,10 @@ func windowsEnterprisePurgeRerunFindsAccounts(report *windowsEnterpriseInstaller
 }
 
 // addWindowsEnterpriseMachineStateWarning names the machine folders outside
-// StateRoot that the uninstall could not remove. Every standalone uninstall
-// removes them, not only --purge, so the MDM default uninstall reports them
-// too (GAP-1734). A retained selector shared with another deployment is
-// intentional, and two cleanup steps can report the same path (GAP-0571).
+// StateRoot that the uninstall could not remove. The default standalone
+// uninstall also reports intentional machine file retention, including a
+// Cursor tombstone for a pending Cursor registration. Two cleanup steps can
+// report the same path (GAP-0571).
 func addWindowsEnterpriseMachineStateWarning(result *enterprisestatus.Result, report *windowsEnterpriseInstallerReport) {
 	var failed, kept []string
 	seen := map[string]bool{}
@@ -3020,6 +3047,10 @@ func writeWindowsEnterpriseStandaloneSummary(output io.Writer, result *enterpris
 	}
 	if result.Action == "status" || result.Action == "verify" {
 		writeWindowsEnterpriseEnrollmentAccounts(output, result.Enrollment.Accounts)
+		writeWindowsEnterpriseEnrollmentExclusions(output, result.Enrollment)
+		if line := enterprisestatus.ConnectorsLine(result.Connectors); line != "" {
+			fmt.Fprintf(output, "  %s\n", line)
+		}
 	}
 	writeWindowsEnterpriseScanners(output, result.Scanners)
 	if result.Policy != nil {
@@ -3240,7 +3271,7 @@ const windowsEnterpriseHealthNotChecked = "health_not_checked"
 
 // windowsEnterpriseServiceState is a service's state as the installer
 // names it (running, stopped, absent, ...); tests replace it.
-var windowsEnterpriseServiceState = windowsEnterpriseSCMServiceState
+var windowsEnterpriseServiceState = winpath.EnterpriseServiceState
 
 // applyWindowsEnterpriseRecordedDeployment gives a refused request's result
 // the deployment this computer records and its services' states. An unknown
@@ -3265,15 +3296,15 @@ func applyWindowsEnterpriseRecordedDeployment(result *enterprisestatus.Result) {
 			continue
 		}
 		result.Profile, result.Installed, result.InstalledVersion = profile, true, deployment.ProductVersion
-		for _, service := range windowsEnterpriseStandaloneServiceRoster {
-			state := windowsEnterpriseServiceState(service.name)
+		for _, service := range winpath.EnterpriseStandaloneServices {
+			state := windowsEnterpriseServiceState(service.Name)
 			if state == "absent" {
 				continue
 			}
 			result.Services = append(result.Services, enterprisestatus.Service{
-				Name: service.name, Kind: service.kind, State: state, Required: true,
+				Name: service.Name, Kind: service.Kind, State: state, Required: true,
 			})
-			switch service.kind {
+			switch service.Kind {
 			case "enumerator":
 				result.Readiness.Enumerator = state == "running"
 			case "sensor_helper":
@@ -3291,53 +3322,14 @@ func applyWindowsEnterpriseRecordedDeployment(result *enterprisestatus.Result) {
 // have restarted them after its report was taken.
 func windowsEnterpriseLiveStandaloneServices() []enterprisestatus.Service {
 	var services []enterprisestatus.Service
-	for _, service := range windowsEnterpriseStandaloneServiceRoster {
-		if state := windowsEnterpriseServiceState(service.name); state != "absent" {
+	for _, service := range winpath.EnterpriseStandaloneServices {
+		if state := windowsEnterpriseServiceState(service.Name); state != "absent" {
 			services = append(services, enterprisestatus.Service{
-				Name: service.name, Kind: service.kind, State: state, Required: true,
+				Name: service.Name, Kind: service.Kind, State: state, Required: true,
 			})
 		}
 	}
 	return services
-}
-
-// windowsEnterpriseSCMServiceState reads a service's state from the service
-// manager, which any account may query.
-func windowsEnterpriseSCMServiceState(name string) string {
-	manager, err := windows.OpenSCManager(nil, nil, windows.SC_MANAGER_CONNECT)
-	if err != nil {
-		return "unknown"
-	}
-	defer windows.CloseServiceHandle(manager)
-	namePointer, err := windows.UTF16PtrFromString(name)
-	if err != nil {
-		return "unknown"
-	}
-	service, err := windows.OpenService(manager, namePointer, windows.SERVICE_QUERY_STATUS)
-	if errors.Is(err, windows.ERROR_SERVICE_DOES_NOT_EXIST) {
-		return "absent"
-	}
-	if err != nil {
-		return "unknown"
-	}
-	defer windows.CloseServiceHandle(service)
-	var status windows.SERVICE_STATUS
-	if err := windows.QueryServiceStatus(service, &status); err != nil {
-		return "unknown"
-	}
-	switch status.CurrentState {
-	case windows.SERVICE_RUNNING:
-		return "running"
-	case windows.SERVICE_STOPPED:
-		return "stopped"
-	case windows.SERVICE_START_PENDING:
-		return "startpending"
-	case windows.SERVICE_STOP_PENDING:
-		return "stoppending"
-	case windows.SERVICE_PAUSED:
-		return "paused"
-	}
-	return "unknown"
 }
 
 // windowsEnterpriseStandaloneFootprintPresent reports any standalone
@@ -3364,8 +3356,8 @@ func windowsEnterpriseStandaloneFootprintPresent() (bool, error) {
 		return true, nil
 	}
 	defer windows.CloseServiceHandle(manager)
-	for _, name := range []string{"DefenseClawGateway", "DefenseClawHookGuardian", "DefenseClawHookEnumerator", "DefenseClawSensorHelper"} {
-		namePointer, err := windows.UTF16PtrFromString(name)
+	for _, service := range winpath.EnterpriseStandaloneServices {
+		namePointer, err := windows.UTF16PtrFromString(service.Name)
 		if err != nil {
 			return true, nil
 		}
@@ -3442,7 +3434,18 @@ func readWindowsEnterpriseStandaloneEnrollment() (enterprisestatus.Enrollment, e
 	if err != nil {
 		return enterprisestatus.Enrollment{}, err
 	}
-	return readWindowsEnterpriseStandaloneEnrollmentAt(layout.ManifestPath, layout.DataDir)
+	enrollment, err := readWindowsEnterpriseStandaloneEnrollmentAt(layout.ManifestPath, layout.DataDir)
+	if err != nil {
+		return enrollment, err
+	}
+	// The accounts the config holds out get no manifest rows: name them
+	// (GAP-1243). An unreadable config leaves the lists out.
+	if standaloneLayout, layoutErr := managed.StandaloneWindowsLayout(); layoutErr == nil {
+		if body, readErr := readWindowsEnterpriseBoundedFile(standaloneLayout.ConfigPath, windowsEnterpriseConfigProfileLimit); readErr == nil {
+			enrollment.ExcludedUsers, enrollment.ExcludedGroups, _ = windowsEnterpriseEnrollmentExclusions(body)
+		}
+	}
+	return enrollment, nil
 }
 
 // readWindowsEnterpriseStandaloneEnrollmentAt counts the manifest's targets
@@ -4380,6 +4383,7 @@ func windowsEnterpriseEnsureProbeFailure(status *windowsEnterpriseInstallerRepor
 	if strings.Contains(message, windowsEnterpriseUnreadableMetadataMarker) {
 		return fmt.Errorf("ensure_refused: %s", message)
 	}
+	message += windowsEnterpriseRecordOwnerMismatchNextStep(message)
 	return fmt.Errorf("status_failed: ensure could not read the deployment state: %s", message)
 }
 

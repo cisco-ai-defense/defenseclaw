@@ -63,6 +63,10 @@ type DecisionStore interface {
 	Add(uid int, d Decision) error
 	// List returns uid's decisions; registration "" lists all of them.
 	List(uid int, registration string) ([]Decision, error)
+	// SettleAccount stamps uid's decisions saved without a subject key and
+	// drops those of another account than subjectKey's; it returns how many
+	// it dropped (rel-1-0-6:GAP-0262).
+	SettleAccount(uid int, subjectKey string, keyOf func(Decision) (string, bool)) (int, error)
 	// Purge removes the whole store.
 	Purge() error
 }

@@ -11,6 +11,7 @@ import (
 	"encoding/json"
 	"errors"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"reflect"
 	"runtime"
@@ -20,6 +21,7 @@ import (
 
 	"golang.org/x/sys/windows"
 
+	"github.com/defenseclaw/defenseclaw/internal/enterprisestatus"
 	"github.com/defenseclaw/defenseclaw/internal/winpath"
 )
 
@@ -563,5 +565,106 @@ func TestRecoveringSetupTakesTheStoppedRunsYoungStage(t *testing.T) {
 	removeStaleEnterpriseSetupStages(programData, time.Now(), 0, &progress, &diagnostics)
 	if _, err := os.Stat(live); !errors.Is(err, os.ErrNotExist) {
 		t.Fatalf("a released stage stayed: %v", err)
+	}
+}
+
+// rel-1-0-6:GAP-0321: the recorded deployment and the live service states,
+// read the way Setup reads them, and nothing for a retired record.
+func TestEnterpriseSetupRecordedDeploymentReadsTheRecordAndTheServices(t *testing.T) {
+	previousDeployment, previousState := standaloneSetupDeployment, enterpriseSetupServiceState
+	t.Cleanup(func() { standaloneSetupDeployment, enterpriseSetupServiceState = previousDeployment, previousState })
+	states := map[string]string{
+		"DefenseClawGateway":        "running",
+		"DefenseClawHookGuardian":   "running",
+		"DefenseClawHookEnumerator": "stopped",
+		"DefenseClawSensorHelper":   "absent",
+	}
+	enterpriseSetupServiceState = func(name string) string { return states[name] }
+	standaloneSetupDeployment = func() (winpath.EnterpriseDeployment, error) {
+		return winpath.EnterpriseDeployment{State: winpath.EnterpriseDeploymentInstalled, ProductVersion: "1.0.7"}, nil
+	}
+	result := enterprisestatus.New("ensure", "standalone", "windows", "1.0.7")
+	if !enterpriseSetupRecordedDeployment(result) || !result.Installed || result.InstalledVersion != "1.0.7" ||
+		len(result.Services) != 3 || result.Readiness.Enumerator || result.Readiness.SensorHelper {
+		t.Fatalf("installed record: %+v", result)
+	}
+	for _, retired := range []winpath.EnterpriseDeploymentState{winpath.EnterpriseDeploymentAbsent, winpath.EnterpriseDeploymentTombstone, winpath.EnterpriseDeploymentUnknown} {
+		standaloneSetupDeployment = func() (winpath.EnterpriseDeployment, error) {
+			return winpath.EnterpriseDeployment{State: retired, ProductVersion: "1.0.7"}, nil
+		}
+		result := enterprisestatus.New("ensure", "standalone", "windows", "1.0.7")
+		if enterpriseSetupRecordedDeployment(result) || result.Installed || len(result.Services) != 0 {
+			t.Fatalf("%s record: %+v", retired, result)
+		}
+	}
+}
+
+// rel-1-0-6:GAP-0342: the ensure staging folder a killed Setup left is
+// removed only when its name, trust and content prove it is one.
+func TestRemoveStaleEnterpriseEnsureStagesTakesOnlyDefenseClawFolders(t *testing.T) {
+	previous := validateEnterpriseEnsureStage
+	t.Cleanup(func() { validateEnterpriseEnsureStage = previous })
+	untrusted := map[string]bool{}
+	validateEnterpriseEnsureStage = func(path string) error {
+		if untrusted[filepath.Base(path)] {
+			return errors.New("untrusted")
+		}
+		return nil
+	}
+	programData := t.TempDir()
+	hex32 := func(c string) string { return enterpriseSetupEnsureStagePrefix + strings.Repeat(c, 32) }
+	mk := func(name string, files map[string]string, dirs ...string) string {
+		path := filepath.Join(programData, name)
+		if err := os.MkdirAll(path, 0o700); err != nil {
+			t.Fatal(err)
+		}
+		for file, body := range files {
+			if err := os.WriteFile(filepath.Join(path, file), []byte(body), 0o600); err != nil {
+				t.Fatal(err)
+			}
+		}
+		for _, dir := range dirs {
+			if err := os.MkdirAll(filepath.Join(path, dir), 0o700); err != nil {
+				t.Fatal(err)
+			}
+		}
+		return path
+	}
+	removed := []string{
+		mk(hex32("a"), map[string]string{"targets.yaml": "targets: []\n"}),
+		mk(hex32("b"), nil),
+	}
+	kept := []string{
+		mk(hex32("c"), map[string]string{"targets.yaml": "x", "other.txt": "y"}),
+		mk(hex32("d"), map[string]string{"notes.txt": "y"}),
+		mk(hex32("e"), nil, "sub"),
+		mk(hex32("f"), map[string]string{"targets.yaml": "x"}),
+		mk(enterpriseSetupEnsureStagePrefix+strings.Repeat("a", 31), map[string]string{"targets.yaml": "x"}),
+		mk(enterpriseSetupEnsureStagePrefix+strings.Repeat("Ab", 16), map[string]string{"targets.yaml": "x"}),
+		mk("DefenseClaw-Other-"+strings.Repeat("a", 32), map[string]string{"targets.yaml": "x"}),
+	}
+	untrusted[hex32("f")] = true
+	// A link named like a staging folder, to a folder holding a manifest.
+	target := mk("link-target", map[string]string{"targets.yaml": "x"})
+	link := filepath.Join(programData, hex32("1"))
+	if out, err := exec.Command("cmd", "/c", "mklink", "/J", link, target).CombinedOutput(); err != nil {
+		t.Fatalf("mklink /J: %v: %s", err, out)
+	}
+	kept = append(kept, link, filepath.Join(target, "targets.yaml"))
+	var progress, diagnostics bytes.Buffer
+	removeStaleEnterpriseEnsureStages(programData, &progress, &diagnostics)
+	for _, path := range removed {
+		if _, err := os.Lstat(path); !errors.Is(err, os.ErrNotExist) {
+			t.Errorf("stale ensure folder %s kept: %v", path, err)
+		}
+	}
+	for _, path := range kept {
+		if _, err := os.Lstat(path); err != nil {
+			t.Errorf("%s removed: %v", path, err)
+		}
+	}
+	if strings.Count(progress.String(), "removed the ensure staging folder") != 2 ||
+		strings.Count(diagnostics.String(), "kept the ensure staging folder") != 5 {
+		t.Fatalf("progress=%q diagnostics=%q", progress.String(), diagnostics.String())
 	}
 }

@@ -184,7 +184,7 @@ func purgeUserFiles(home, dataDir string, uid int, summary *PurgeSummary) error 
 // DefenseClaw changed get their content back before the backups go; if any
 // teardown fails, the state stays for a rerun. Only the
 // Claude Code blocker the enrollment wrote over the install's hook script
-// goes in both cases (RemovePersonalClaudeHookBlocker). Otherwise
+// goes in both cases (UnblockPersonalClaudeHook). Otherwise
 // all of ~/.defenseclaw goes, including the hook scripts and the account's own
 // hooks the foreign-hook policy moved aside (see connector.PurgeUserState),
 // and so do the binaries and launcher links the per-user install put in
@@ -250,7 +250,7 @@ func PurgeUserState(ctx context.Context, opts InstallOptions) (PurgeSummary, err
 			// connectors keep their backups and registrations: tearing them
 			// down reverted its agent configs to their content from before
 			// that install and deleted its backups (rel-1-0-6 GAP-0178).
-			own, err := holdsPerUserInstall(dataDir)
+			own, err := HoldsPerUserInstall(dataDir)
 			if err != nil {
 				return fmt.Errorf("enterprise hooks: kept the per-user state, because it could not be read: %w", err)
 			}
@@ -322,13 +322,6 @@ const PersonalClaudeHookCopyName = "claude-code-hook.sh.before-managed"
 
 // personalClaudeHookMaxBytes bounds the personal hook script and its copy.
 const personalClaudeHookMaxBytes = 1 << 20
-
-// RemovePersonalClaudeHookBlocker is UnblockPersonalClaudeHook without the
-// report of a put-back script.
-func RemovePersonalClaudeHookBlocker(dataDir string) (bool, error) {
-	removed, _, err := UnblockPersonalClaudeHook(dataDir)
-	return removed, err
-}
 
 // UnblockPersonalClaudeHook removes the enrollment's Claude Code blocker
 // (removePersonalClaudeHookBlocker) and then puts the account's own hook
@@ -418,23 +411,20 @@ func removePersonalClaudeHookBlocker(dataDir string) (bool, error) {
 }
 
 // perUserInstallMarkers are entries that only a per-user DefenseClaw
-// install keeps in ~/.defenseclaw: its config, secrets, audit history and
-// the copy of its data an upgrade keeps for a rollback. The managed
-// enrollment never writes them there (its config and state live in the
+// install keeps in ~/.defenseclaw: its config, secrets, audit history, the
+// copy of its data an upgrade keeps for a rollback, and the program the
+// installer (scripts/install.sh) puts there before any `defenseclaw init`:
+// its Python environment and its installer state. The managed enrollment
+// never writes them there (its config, state and binaries live in the
 // machine directories), so one of them means the folder holds the account's
-// own install from before the managed deployment enrolled it.
-var perUserInstallMarkers = []string{"config.yaml", ".env", "audit.db", "previous"}
+// own install, initialised or not (rel-1-0-6 GAP-0484: an install that never
+// ran init lost its binaries and environment to the purge).
+var perUserInstallMarkers = []string{"config.yaml", ".env", "audit.db", "previous", ".venv", "installer"}
 
 // HoldsPerUserInstall reports whether dataDir holds one of
 // perUserInstallMarkers: the account's own per-user install, which a purge
 // keeps as it is.
 func HoldsPerUserInstall(dataDir string) (bool, error) {
-	return holdsPerUserInstall(dataDir)
-}
-
-// holdsPerUserInstall reports whether dataDir holds one of
-// perUserInstallMarkers.
-func holdsPerUserInstall(dataDir string) (bool, error) {
 	entries, err := os.ReadDir(dataDir)
 	if err != nil {
 		if errors.Is(err, os.ErrNotExist) {

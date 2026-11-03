@@ -415,7 +415,7 @@ func openShellExecBridgeFor(configPath, home string) string {
 		// answered "not found" (rel-1-0-3:GAP-0164).
 		fmt.Fprintf(openShellExecWarn, "defenseclaw: the 1.0.1 upgrade bridge is off for this account: it keeps sandboxes in both OpenShell docker namespaces, %q "+
 			"(the sandboxes kept under 1.0.1) and %q, and one gateway serves one; the gateway starts in %q, so the sandboxes kept under 1.0.1 "+
-			"report not found until no sandbox is left in %q (bring back the work of each with `defenseclaw sandbox pull NAME`, then "+
+			"report not found until no sandbox is left in %q (bring back the work of each with `defenseclaw sandbox pull NAME --apply` (or --branch or --patch-out FILE), confirm it was saved, then "+
 			"`defenseclaw sandbox delete NAME`; their folders are under %s), and the gateway's next start then uses the bridge\n",
 			openshell.DefaultDockerNamespace, openshell.ManagedDockerNamespace, openshell.ManagedDockerNamespace, openshell.ManagedDockerNamespace,
 			filepath.Join(stateHome, "openshell", "docker-sandbox-tokens", openshell.ManagedDockerNamespace))

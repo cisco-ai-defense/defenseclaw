@@ -26,6 +26,7 @@ import tempfile
 import unittest
 import uuid
 from datetime import datetime, timedelta, timezone
+from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
@@ -46,7 +47,6 @@ from defenseclaw.commands.cmd_skill import (
 from defenseclaw.config import SeverityAction
 from defenseclaw.enforce import asset_lists
 from defenseclaw.enforce.policy import PolicyEngine
-from defenseclaw.hermes_skills import directory_md5
 from defenseclaw.models import ActionState, Finding, ScanResult
 
 from tests.environment import requires_symlink_privilege
@@ -141,32 +141,18 @@ class TestSkillBlock(SkillCommandTestBase):
     def test_hermes_unchanged_bundled_skill_cannot_be_blocked_or_quarantined(self):
         hermes_home = os.path.join(self.tmp_dir, "hermes")
         skill_root = os.path.join(hermes_home, "skills")
-        skill_dir = os.path.join(skill_root, "productivity", "vendor-docs")
+        skill_dir = os.path.join(skill_root, "media", "songsee")
         os.makedirs(skill_dir)
-        with open(os.path.join(skill_dir, "SKILL.md"), "w", encoding="utf-8") as handle:
-            handle.write("---\nname: vendor-docs\n---\n")
-        source_dir = os.path.join(
-            hermes_home,
-            "hermes-agent",
-            "skills",
-            "productivity",
-            "vendor-docs",
-        )
-        os.makedirs(source_dir)
-        with open(os.path.join(source_dir, "SKILL.md"), "w", encoding="utf-8") as handle:
-            handle.write("---\nname: vendor-docs\n---\n")
-        origin_hash = directory_md5(skill_dir)
-        self.assertTrue(origin_hash)
-        with open(os.path.join(skill_root, ".bundled_manifest"), "w", encoding="utf-8") as handle:
-            handle.write(f"vendor-docs:{origin_hash}\n")
+        marker = Path(__file__).resolve().parents[2] / "internal/hermesskills/testdata/vendor/media/songsee/SKILL.md"
+        shutil.copyfile(marker, os.path.join(skill_dir, "SKILL.md"))
 
         self.app.cfg.active_connector = lambda: "hermes"  # type: ignore[method-assign]
         self.app.cfg.active_connectors = lambda: ["hermes"]  # type: ignore[method-assign]
         self.app.cfg.skill_dirs = lambda _connector=None: [skill_root]  # type: ignore[method-assign]
         with patch.dict(os.environ, {"HERMES_HOME": hermes_home}):
-            blocked = self.invoke(["block", "vendor-docs", "--connector", "hermes"])
+            blocked = self.invoke(["block", "songsee", "--connector", "hermes"])
             quarantined = self.invoke(
-                ["quarantine", "vendor-docs", "--connector", "hermes"]
+                ["quarantine", "songsee", "--connector", "hermes"]
             )
 
         self.assertEqual(blocked.exit_code, 2, blocked.output)
@@ -175,7 +161,7 @@ class TestSkillBlock(SkillCommandTestBase):
         self.assertFalse(
             self.app.store.has_action(
                 "skill",
-                "vendor-docs",
+                "songsee",
                 "install",
                 "block",
                 "hermes",
@@ -184,7 +170,7 @@ class TestSkillBlock(SkillCommandTestBase):
         self.assertEqual(
             self.app.store.list_quarantine_records(
                 "skill",
-                "vendor-docs",
+                "songsee",
                 "hermes",
             ),
             [],

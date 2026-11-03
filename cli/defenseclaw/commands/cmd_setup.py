@@ -55,6 +55,7 @@ import click
 # ``ux.section("Hook fail mode")`` and the source of the color
 # convention is obvious to anybody auditing this file.
 from defenseclaw import (
+    agent_config_notice,
     codex_toml,
     connector_paths,
     envvars,
@@ -90,6 +91,7 @@ from defenseclaw.config import (
     config_path_for_data_dir,
     enable_all_runtime_planes,
     enable_user_runtime_planes,
+    gateway_pid_path,
     locked_config_yaml,
     locked_file_update,
     outage_block_hint,
@@ -516,7 +518,7 @@ def _echo_saved_without_restart(*, plural: bool = False) -> None:
     ctx = click.get_current_context(silent=True)
     app = ctx.find_object(AppContext) if ctx is not None else None
     known = ctx is not None and app is not None and app.cfg is not None
-    running = known and _is_pid_alive(os.path.join(app.cfg.data_dir, "gateway.pid"))
+    running = known and _is_pid_alive(gateway_pid_path(app.cfg.data_dir))
     noun = "connectors" if plural else "connector"
     if running and _only_hot_config_changes(ctx, _config_yaml_path_from_ctx(ctx)):
         ux.echo("  ℹ Saved. The running gateway applies it on its own, without a restart.")
@@ -1445,6 +1447,14 @@ def setup_llm(
     help="escalate (default): the judge still checks a confident block. decide: the block stands without the judge.",
 )
 @click.option(
+    "--connectors",
+    default=None,
+    help=(
+        "Connectors the decision model answers on its own where the LLM judge does not run: "
+        "comma-separated names, or * for all. An empty string clears it."
+    ),
+)
+@click.option(
     "--ping/--no-ping", "run_ping", default=False, help="After saving, send one benign request to check the endpoint."
 )
 @click.option("--non-interactive", "--accept-defaults", is_flag=True, help="Use flags instead of prompts.")
@@ -1460,16 +1470,23 @@ def setup_decision_model(
     allow_threshold: float | None,
     block_threshold: float | None,
     on_confident_block: str | None,
+    connectors: str | None,
     run_ping: bool,
     non_interactive: bool,
 ) -> None:
     """Configure the unified decision model (``decision_model:``).
 
-    A small, fast model that speaks the System One protocol. The guardrail
-    runs it in front of the LLM judge on tool calls: it allows the clear
-    benign calls itself and sends the rest to the judge. ``skill scan``
-    records its advisory score. Off by default; when it is down, the judge
-    decides as before. The token, if any, goes in ~/.defenseclaw/.env with
+    A small, fast model that speaks the System One protocol. Per connector
+    the guardrail runs tool calls through one of three cascades: rules only,
+    rules -> decision model, or rules -> decision model -> LLM judge. Where
+    the judge runs, the model sits in front of it: it allows the clear
+    benign calls and sends the rest to the judge. Where it does not, list the
+    connector with ``--connectors`` and the model answers alone: a confident
+    allow is allowed, a confident block is denied, anything else asks (Claude
+    Code, Copilot, Amp, Antigravity) or raises a HIGH alert (strict: blocks).
+    ``skill scan`` records its advisory score. Off by default; when it is
+    down, the rules verdict (and the judge, where it runs) stands. The token,
+    if any, goes in ~/.defenseclaw/.env with
     ``defenseclaw keys set DEFENSECLAW_DECISION_MODEL_KEY``.
     """
     from defenseclaw import decision_model as dmod
@@ -1483,6 +1500,8 @@ def setup_decision_model(
         ux.section("Decision model")
         for label, value in dmod.summary_rows(cfg):
             click.echo(f"    {ux.dim(label + ':')} {value}")
+        for line in dmod.cascade_lines(cfg):
+            click.echo(f"    {ux.dim('cascade ' + line.split(': ', 1)[0] + ':')} {line.split(': ', 1)[1]}")
         note = dmod.judge_note(cfg)
         if note:
             ux.subhead(note)
@@ -1494,14 +1513,15 @@ def setup_decision_model(
             api_key_env, "'--api-key-env'", dmod.DECISION_MODEL_KEY_ENV
         )
     flags_given = any(v is not None for v in (enabled, model, base_url, api_key_env, timeout,
-                                              allow_threshold, block_threshold, on_confident_block))
+                                              allow_threshold, block_threshold, on_confident_block, connectors))
     if not non_interactive and not flags_given:
         dm = cfg.decision_model
         click.echo()
         terminal_checkbox.restore_line_prompt_mode()
         ux.section("Decision model")
-        ux.subhead("A fast model in front of the LLM judge: it allows the clear benign tool calls")
-        ux.subhead("itself and sends the rest to the judge. Benchmarks: " + dmod.BENCHMARK_URL)
+        ux.subhead("A fast model for tool calls: in front of the LLM judge it allows the clear benign")
+        ux.subhead("calls and sends the rest on; where the judge is off it can answer alone.")
+        ux.subhead("Benchmarks: " + dmod.BENCHMARK_URL)
         click.echo()
         enabled = click.confirm(f"  {dmod.INIT_QUESTION}", default=dm.enabled)
         if enabled:
@@ -1511,6 +1531,7 @@ def setup_decision_model(
                 "  Token env var (leave the default for a local server)",
                 default=dm.effective_api_key_env(),
             ).strip()
+            connectors = _prompt_decision_model_connectors(cfg)
     elif enabled is None and (base_url or model):
         # Naming an endpoint or model on the command line turns it on.
         enabled = True
@@ -1526,6 +1547,7 @@ def setup_decision_model(
             allow_threshold=allow_threshold,
             block_threshold=block_threshold,
             on_confident_block=on_confident_block,
+            hook_connectors=None if connectors is None else dmod.parse_connectors(connectors),
         )
     except dmod.DecisionModelError as exc:
         raise click.ClickException(str(exc)) from exc
@@ -1545,6 +1567,8 @@ def setup_decision_model(
     ux.ok(f"Saved to {config_path_for_data_dir(cfg.data_dir)}")
     for label, value in dmod.summary_rows(cfg):
         ux.kv(label, value)
+    for line in dmod.cascade_lines(cfg) if updated.active() else ():
+        ux.kv("cascade " + line.split(": ", 1)[0], line.split(": ", 1)[1])
     note = dmod.judge_note(cfg)
     if note:
         ux.subhead(note)
@@ -1555,7 +1579,30 @@ def setup_decision_model(
         if result.ok:
             ux.ok(f"Decision model reachable: {result.detail}")
         else:
-            ux.warn(f"Decision model not reachable: {result.detail}; the LLM judge decides alone until it is reachable")
+            ux.warn(
+                f"Decision model not reachable: {result.detail}; "
+                "tool calls are decided without it until it is reachable"
+            )
+
+
+def _prompt_decision_model_connectors(cfg) -> str:
+    """Ask which connectors the decision model answers for on its own where
+    the LLM judge does not run. Enter keeps the saved list, or offers the
+    active connectors that have no judge."""
+    from defenseclaw import decision_model as dmod
+
+    active = cfg.active_connectors()
+    without_judge = [c for c in active if not dmod.judge_runs_for(cfg, c)]
+    default = ",".join(cfg.decision_model.hook_connectors or without_judge)
+    click.echo()
+    if active:
+        ux.subhead("Active connectors: " + ", ".join(f"{c} ({dmod.cascade_for(cfg, c)})" for c in active))
+    answer = click.prompt(
+        "  Connectors the decision model answers alone where the LLM judge is off (names, * for all, - for none)",
+        default=default,
+        show_default=bool(default),
+    )
+    return answer.strip() if answer.strip() != "-" else ""
 
 
 @setup.command("skill-scanner")
@@ -1677,7 +1724,7 @@ def setup_skill_scanner(
         _clear_legacy_llm_fields(app.cfg)
 
     app.cfg.save()
-    _print_summary(sc, llm, aid)
+    _print_summary(sc, llm, aid, app.cfg.data_dir)
     issue = scanner_settings.recommended_settings_issue(app.cfg)
     if issue:
         click.echo(f"  {ux.dim('Recommended:')} {issue}")
@@ -3081,7 +3128,7 @@ def _emit_untrusted_prefix_setup_hints(resolved_binary: str, parent: str) -> Non
     """Actionable remediation when action-mode setup cannot probe a connector binary."""
     ux.subhead(f"  Binary resolves to: {resolved_binary}")
     ux.subhead(f"  Trust it with: defenseclaw setup trusted-paths add {parent}")
-    ux.subhead("  `trusted-paths add` writes ~/.defenseclaw/config.yaml (ai_discovery.trusted_binary_prefixes).")
+    ux.subhead(f"  `trusted-paths add` writes {config_path_for_data_dir()} (ai_discovery.trusted_binary_prefixes).")
 
 
 def _echo_summary_rows(rows: list[tuple[str, str, str]]) -> None:
@@ -3097,9 +3144,9 @@ def _echo_summary_rows(rows: list[tuple[str, str, str]]) -> None:
     click.echo()
 
 
-def _print_summary(sc, llm, aid) -> None:
+def _print_summary(sc, llm, aid, data_dir: str | None = None) -> None:
     click.echo()
-    click.echo("  Saved to ~/.defenseclaw/config.yaml")
+    click.echo(f"  Saved to {config_path_for_data_dir(data_dir)}")
     click.echo()
 
     rows: list[tuple[str, str, str]] = [
@@ -3264,7 +3311,7 @@ def setup_mcp_scanner(
         _clear_legacy_llm_fields(app.cfg)
 
     app.cfg.save()
-    _print_mcp_summary(mc, llm, aid)
+    _print_mcp_summary(mc, llm, aid, app.cfg.data_dir)
 
     if verify:
         from defenseclaw.commands.cmd_doctor import _check_scanners, _DoctorResult
@@ -3382,9 +3429,9 @@ def _interactive_mcp_setup(mc, cfg) -> None:
     mc.scan_instructions = click.confirm("  Scan server instructions?", default=mc.scan_instructions)
 
 
-def _print_mcp_summary(mc, llm, aid) -> None:
+def _print_mcp_summary(mc, llm, aid, data_dir: str | None = None) -> None:
     click.echo()
-    click.echo("  Saved to ~/.defenseclaw/config.yaml")
+    click.echo(f"  Saved to {config_path_for_data_dir(data_dir)}")
     click.echo()
 
     rows: list[tuple[str, str, str]] = [
@@ -4839,7 +4886,7 @@ def _rotate_token_transaction(
         snapshot = _rotate_token_snapshot_locked(dotenv_path)
         hook_snapshots = [_rotate_token_hook_snapshot_locked(data_dir, connector) for connector in tracked_scopes]
         old_token = _rotate_token_previous_value(app, snapshot)
-        pid_file = os.path.join(data_dir, "gateway.pid")
+        pid_file = gateway_pid_path(data_dir)
         was_running = _is_pid_alive(pid_file)
         if was_running and any(
             hook_snapshot.connector in requested_scopes and not hook_snapshot.existed
@@ -5285,7 +5332,7 @@ def setup_gateway(
             ux.echo("  ⚠ --remote specified but no auth token configured", err=True)
             click.echo("    Provide --token or --ssm-param, or set OPENCLAW_GATEWAY_TOKEN", err=True)
         elif not gw.resolved_token():
-            detected = _detect_openclaw_gateway_token(app.cfg.claw.config_file)
+            detected = _detect_openclaw_gateway_token(app.cfg.claw.config_file, cfg=app.cfg)
             if detected:
                 _save_secret_to_dotenv("OPENCLAW_GATEWAY_TOKEN", detected, data_dir)
                 gw.token = ""
@@ -5307,13 +5354,13 @@ def setup_gateway(
     # verify yet and cannot record the audit event; the change applies when
     # it starts (GAP-2009). That holds for a new API port too, so a stopped
     # gateway gets the same single note (GAP-2153).
-    gateway_stopped = not _is_pid_alive(os.path.join(data_dir, "gateway.pid"))
+    gateway_stopped = not _is_pid_alive(gateway_pid_path(data_dir))
     keep_running_gateway_token(app.logger, data_dir, previous_token, gw.resolved_token())
     # The running gateway keeps its old OpenClaw host and port until the
     # restart that follows this command, so checking it now reports a
     # "reconnecting" FAIL row that the restart fixes (GAP-2478).
     target_changed = (gw.host, gw.port) != previous_target
-    _print_gateway_summary(gw, openclaw=uses_openclaw)
+    _print_gateway_summary(gw, openclaw=uses_openclaw, data_dir=app.cfg.data_dir)
 
     # The sidecar can only be checked while it runs on its current API port.
     check_sidecar = verify and not api_port_changed and not gateway_stopped
@@ -5477,19 +5524,25 @@ def _interactive_gateway_remote(gw, data_dir: str) -> None:
         ux.echo("  warning: no token set — sidecar will fail to connect to a remote gateway", err=True)
 
 
-def _detect_openclaw_gateway_token(openclaw_config_file: str) -> str:
-    """Read the gateway auth token from openclaw.json (gateway.auth.token)."""
-    from pathlib import Path
+_OPENCLAW_TOKEN_NOTICES_SHOWN: set[str] = set()
 
-    path = openclaw_config_file
-    if path.startswith("~/"):
-        path = str(Path.home() / path[2:])
-    try:
-        with open(path) as f:
-            cfg = _json.load(f)
-        return cfg.get("gateway", {}).get("auth", {}).get("token", "")
-    except (OSError, ValueError, KeyError):
-        return ""
+
+def _detect_openclaw_gateway_token(openclaw_config_file: str, cfg=None) -> str:
+    """Read the gateway auth token from openclaw.json (gateway.auth.token).
+
+    A SecretRef token is resolved from the environment when its source is
+    ``env``; any other one is never returned as a token, and one notice per
+    process asks for the token in an environment variable (issue #1404).
+    """
+    from defenseclaw.connector_paths import _read_openclaw_json, defenseclaw_credential_names, openclaw_gateway_token
+
+    token = openclaw_gateway_token(
+        _read_openclaw_json(openclaw_config_file), credential_names=defenseclaw_credential_names(cfg)
+    )
+    if token.notice and token.notice not in _OPENCLAW_TOKEN_NOTICES_SHOWN:
+        _OPENCLAW_TOKEN_NOTICES_SHOWN.add(token.notice)
+        ux.warn(token.notice)
+    return token.value
 
 
 def _fetch_ssm_token(param: str, region: str, profile: str | None) -> str | None:
@@ -6048,6 +6101,30 @@ def _connector_not_detected_message(label: str) -> str:
     )
 
 
+def _untrusted_install_found(label: str, signal: Any, probe_error: str) -> tuple[str, str, str]:
+    """The agent discovery found in a folder it does not trust (GAP-2479).
+
+    Returns the sentence that names the folder and the cause, the resolved
+    binary and its folder; empty strings when the agent was not found that
+    way. Discovery lists such an agent with the error "binary path is not in
+    a trusted install prefix" and does not run it, so setup must not call it
+    "not installed" or tell the person to install it.
+    """
+    binary = getattr(signal, "binary_path", "") if signal is not None else ""
+    # Discovery records the cause with the binary in front of it
+    # ("/path/codex: binary path is not in a trusted install prefix").
+    if agent_discovery.UNTRUSTED_PREFIX_ERROR not in probe_error or not binary:
+        return "", "", ""
+    resolved = os.path.realpath(binary)
+    parent = os.path.dirname(resolved)
+    return (
+        f"{label}: the agent was found at {resolved}, in a folder that is not a built-in or operator-approved "
+        "trusted install prefix, so setup did not run it to read its version",
+        resolved,
+        parent,
+    )
+
+
 def _connector_contract_upgrade_guidance(
     connector: str,
     label: str,
@@ -6332,6 +6409,14 @@ def _check_connector_version_supported_for_setup(
     contract = compatibility.contract.contract_id if compatibility.contract else "none"
 
     if not installed:
+        from defenseclaw.agent_selection import agent_did_not_run_message, probe_error_means_agent_did_not_run
+
+        # Discovery found the agent but it failed its version probe: name that
+        # and its step, not "not installed" (GAP-2479).
+        did_not_run = ""
+        if probe_error_means_agent_did_not_run(probe_error):
+            did_not_run = agent_did_not_run_message(label, probe_error)
+        untrusted, untrusted_binary, untrusted_parent = _untrusted_install_found(label, signal, probe_error)
         # Kiro is not version-gated, but nothing proves a protected Kiro form
         # on this host, so action mode refuses it like a gated connector.
         if action_mode and (compatibility.status != STATUS_NOT_GATED or connector == "kiro") and not allow_drift:
@@ -6352,11 +6437,26 @@ def _check_connector_version_supported_for_setup(
                     )
                 return True
             if emit:
+                if did_not_run:
+                    ux.err(f"{did_not_run}; refusing action-mode hook setup.")
+                    return False
+                if untrusted:
+                    ux.err(f"{untrusted}; refusing action-mode hook setup.")
+                    _emit_untrusted_prefix_setup_hints(untrusted_binary, untrusted_parent)
+                    ux.subhead("  Or install the agent where only administrators or this account can write.")
+                    return False
                 ux.err(f"{label}: connector was not detected locally; refusing action-mode hook setup.")
                 ux.subhead("Install the connector locally, or use observe mode until it is available.")
             return False
         if emit:
-            ux.warn(_connector_not_detected_message(label))
+            if untrusted:
+                ux.warn(
+                    f"{untrusted}; setup will write DefenseClaw config, but the agent is not protected until "
+                    "its folder is trusted or it is installed in a trusted one."
+                )
+                _emit_untrusted_prefix_setup_hints(untrusted_binary, untrusted_parent)
+            else:
+                ux.warn(did_not_run or _connector_not_detected_message(label))
         return True
 
     if compatibility.status == STATUS_KNOWN:
@@ -6444,7 +6544,7 @@ def _check_connector_version_supported_for_setup(
                 _add_trusted_bin_prefix(parent, data_dir or os.path.expanduser("~/.defenseclaw"))
                 if _trusted_prompt_cache is not None:
                     _trusted_prompt_cache[parent] = True
-                ux.subhead(f"  Trusted '{parent}' (saved in ~/.defenseclaw/config.yaml); re-checking…")
+                ux.subhead(f"  Trusted '{parent}' (saved in {config_path_for_data_dir(data_dir)}); re-checking…")
                 ux.subhead(
                     "  Note: if this path is version-specific it may need re-trusting "
                     "after an upgrade — `defenseclaw setup trusted-paths add <dir>`."
@@ -11555,7 +11655,7 @@ def _apply_hook_connector_setup(
     try:
         cfg.save()
         if _batch_summary is None:
-            ux.echo("  ✓ Config saved to ~/.defenseclaw/config.yaml")
+            ux.echo(f"  ✓ Config saved to {config_path_for_data_dir(cfg.data_dir)}")
     except OSError as exc:
         try:
             _restore_setup_config_snapshot(app, setup_snapshot)
@@ -11658,11 +11758,13 @@ def _apply_hook_connector_setup(
     return True
 
 
-def _echo_batch_setup_summary(applied: list[str], summary: dict[str, Any], *, restart: bool) -> None:
+def _echo_batch_setup_summary(
+    applied: list[str], summary: dict[str, Any], *, restart: bool, data_dir: str | None = None,
+) -> None:
     """One summary for a multi-connector setup run (GAP-1781)."""
     modes: dict[str, str] = summary.get("modes", {})
     click.echo()
-    ux.echo("  ✓ Config saved to ~/.defenseclaw/config.yaml")
+    ux.echo(f"  ✓ Config saved to {config_path_for_data_dir(data_dir)}")
     ux.echo(f"  ✓ {len(applied)} connector(s) set up:")
     for name in applied:
         click.echo(f"      - {name}: {modes.get(name, 'observe')}")
@@ -12357,7 +12459,7 @@ def _setup_observability_alias(
             _prompt_judge_model_config(app, app.cfg.guardrail)
             try:
                 app.cfg.save()
-                ux.echo("  ✓ Judge LLM config saved to ~/.defenseclaw/config.yaml")
+                ux.echo(f"  ✓ Judge LLM config saved to {config_path_for_data_dir(app.cfg.data_dir)}")
             except OSError as exc:
                 raise click.ClickException(f"failed to save judge LLM config: {exc}") from exc
 
@@ -12804,7 +12906,8 @@ def _prompt_batch_trusted_prefixes(
         if click.confirm(f"  Add '{parent}' to trusted binary prefixes?", default=False):
             _add_trusted_bin_prefix(parent, getattr(app.cfg, "data_dir", None) or os.path.expanduser("~/.defenseclaw"))
             cache[parent] = True
-            ux.subhead(f"  Trusted '{parent}' (saved in ~/.defenseclaw/config.yaml).")
+            saved_in = config_path_for_data_dir(getattr(app.cfg, "data_dir", None))
+            ux.subhead(f"  Trusted '{parent}' (saved in {saved_in}).")
         else:
             cache[parent] = False
     return cache
@@ -13058,7 +13161,7 @@ def _apply_setup_batch(
     if not applied:
         raise click.ClickException("no connectors were configured — see errors above")
 
-    _echo_batch_setup_summary(applied, batch_summary, restart=restart)
+    _echo_batch_setup_summary(applied, batch_summary, restart=restart, data_dir=app.cfg.data_dir)
 
     # Restart handling: the bare batch owns one narrow result-callback marker.
     # Its default restart must start or restart the gateway and verify every
@@ -13800,7 +13903,7 @@ def _warn_codex_home_not_applied_without_restart(cfg) -> None:
         os.path.normcase(os.path.normpath(recorded)) == os.path.normcase(os.path.normpath(selected))
     ):
         return
-    if recorded is None and not _is_pid_alive(os.path.join(data_dir, "gateway.pid")):
+    if recorded is None and not _is_pid_alive(gateway_pid_path(data_dir)):
         return
     kept = f" ({recorded})" if recorded else ""
     ux.warn(
@@ -14842,7 +14945,7 @@ def _adopt_openclaw_gateway_token(app: AppContext, *, restart: bool = False) -> 
     new token to the old gateway's shutdown API, which logged an
     api-auth-failure security event (GAP-2259).
     """
-    detected = (_detect_openclaw_gateway_token(app.cfg.claw.config_file) or "").strip()
+    detected = (_detect_openclaw_gateway_token(app.cfg.claw.config_file, cfg=app.cfg) or "").strip()
     gw = app.cfg.gateway
     previous = gw.resolved_token()
     if not detected or detected == previous:
@@ -14869,7 +14972,7 @@ def _adopt_openclaw_gateway_token(app: AppContext, *, restart: bool = False) -> 
 
 def _stop_gateway_before_token_swap(data_dir: str) -> bool:
     """Stop a running gateway with the token it loaded; True when it is now down."""
-    pid_file = os.path.join(data_dir, "gateway.pid")
+    pid_file = gateway_pid_path(data_dir)
     if not _is_pid_alive(pid_file) or not _gateway_pid_file_identifies_gateway(pid_file):
         return False
     if os.name == "nt":
@@ -15441,7 +15544,7 @@ def execute_guardrail_setup(
     if save_config:
         try:
             app.cfg.save()
-            ux.ok("Config saved to ~/.defenseclaw/config.yaml")
+            ux.ok(f"Config saved to {config_path_for_data_dir(app.cfg.data_dir)}")
         except OSError as exc:
             ux.err(f"Failed to save config: {exc}")
             warnings.append("Config not saved — settings will be lost on next run")
@@ -16135,7 +16238,7 @@ def _gateway_pid_generation_marker(data_dir: str) -> bytes | None:
 
     try:
         return read_regular_file_no_follow(
-            os.path.join(data_dir, "gateway.pid"),
+            gateway_pid_path(data_dir),
             max_bytes=_GATEWAY_PID_GENERATION_MAX_BYTES,
         )
     except OSError:
@@ -16259,7 +16362,6 @@ def _restart_services(
     ``teardown`` marks a ``guardrail disable`` restart: the closing line says
     the hooks were removed instead of announcing enforcement (GAP-1985)."""
     ux.section(title)
-    restart_started = time.time()
     ctx = click.get_current_context(silent=True)
     if ctx is not None:
         ctx.meta.pop(_CONFIG_WRITE_REMEDY_KEY, None)
@@ -16393,10 +16495,12 @@ def _restart_services(
                 _note_gateway_launcher_missing()
                 click.echo(f"  {_LAUNCHER_MISSING_RESTART_TEXT}: {LAUNCHER_REINSTALL_STEP}.")
             failed.append(f"{readiness_label} readiness")
-        # A settings file the restarted setup put back or recreated (GAP-0581).
-        from defenseclaw.agent_config_notice import put_back_notes
-
-        for note in put_back_notes(data_dir, wait_targets, restart_started):
+    # A settings file this setup put back or recreated (GAP-0581). Said every
+    # time, also when the step did not wait for the connector runtime (a
+    # `setup hermes` run said nothing then, GAP-0333).
+    if hook_targets and not teardown:
+        agent_config_notice.wait_for_put_back(data_dir, hook_targets)
+        for note in agent_config_notice.put_back_notes(data_dir, hook_targets):
             ux.warn(note)
 
     # Multi-connector global change: every active hook connector is affected
@@ -17847,7 +17951,7 @@ def _restart_defense_gateway(
                 previous_generation=previous_generation,
             )
 
-    pid_file = os.path.join(data_dir, "gateway.pid")
+    pid_file = gateway_pid_path(data_dir)
     pid_alive = _is_pid_alive(pid_file)
     # F-0721: only trust a live PID when it actually belongs to the gateway
     # binary. If a PID file points at some live but unverified process, fail
@@ -18020,7 +18124,7 @@ def _wait_for_defense_gateway_api(
             if (
                 current_pid_marker is None
                 or current_pid_marker == previous_generation.pid_marker
-                or not _gateway_pid_file_identifies_gateway(os.path.join(data_dir, "gateway.pid"))
+                or not _gateway_pid_file_identifies_gateway(gateway_pid_path(data_dir))
             ):
                 ready = False
 
@@ -18096,7 +18200,7 @@ def _restart_defense_gateway_native(
         click.echo("  defenseclaw-gateway: native executable not found.")
         return False
 
-    pid_file = os.path.join(data_dir, "gateway.pid")
+    pid_file = gateway_pid_path(data_dir)
     pid_alive = _is_pid_alive(pid_file)
     if pid_alive and not _gateway_pid_file_identifies_gateway(pid_file):
         click.echo("  defenseclaw-gateway: live gateway.pid did not verify as DefenseClaw gateway.")
@@ -18194,7 +18298,7 @@ def _stop_defense_gateway_native(data_dir: str) -> bool:
         return False
     if not _native_gateway_lifecycle_stop(CommandRunner(), executable):
         return False
-    return not _is_pid_alive(os.path.join(data_dir, "gateway.pid"))
+    return not _is_pid_alive(gateway_pid_path(data_dir))
 
 
 def _gateway_lifecycle_status(
@@ -18368,7 +18472,7 @@ def _auto_restart_sidecar_after_setup(ctx: click.Context, *_args, **_kwargs) -> 
         )
         return
 
-    pid_file = os.path.join(data_dir, "gateway.pid")
+    pid_file = gateway_pid_path(data_dir)
     if not _is_pid_alive(pid_file):
         if ctx.meta.get(_SETUP_OFFLINE_NOTED_KEY):
             return
@@ -18503,9 +18607,9 @@ def _looks_like_secret(value: str) -> bool:
     return False
 
 
-def _print_gateway_summary(gw, *, openclaw: bool = True) -> None:
+def _print_gateway_summary(gw, *, openclaw: bool = True, data_dir: str | None = None) -> None:
     click.echo()
-    ux.ok("Saved to ~/.defenseclaw/config.yaml")
+    ux.ok(f"Saved to {config_path_for_data_dir(data_dir)}")
     click.echo()
 
     resolved = gw.resolved_token()
@@ -18972,7 +19076,7 @@ def setup_splunk(
     # round-trip now (Config.save deep-merges over the existing file
     # and preserves unmodelled keys), but it's still
     # wasteful so we skip it to keep this path single-writer.
-    click.echo("  Config saved to ~/.defenseclaw/config.yaml")
+    click.echo(f"  Config saved to {config_path_for_data_dir(app.cfg.data_dir)}")
     click.echo()
     _print_splunk_status(app)
     print_redaction_status_hint(app.cfg)
@@ -19128,7 +19232,7 @@ def _interactive_splunk_setup(
     # The canonical v8 destination writer already persisted config.yaml;
     # avoid a second whole-document Config.save() after the surgical write.
     click.echo()
-    click.echo("  Config saved to ~/.defenseclaw/config.yaml")
+    click.echo(f"  Config saved to {config_path_for_data_dir(app.cfg.data_dir)}")
     click.echo()
     _print_splunk_status(app)
     print_redaction_status_hint(app.cfg)
@@ -19898,7 +20002,7 @@ def _apply_native_windows_logs_config(
         dotenv_snapshot = _snapshot_dotenv(dotenv_path)
     prior_token_present = LOCAL_TOKEN_ENV in os.environ
     prior_token = os.environ.get(LOCAL_TOKEN_ENV)
-    pid_file = os.path.join(app.cfg.data_dir, "gateway.pid")
+    pid_file = gateway_pid_path(app.cfg.data_dir)
     gateway_was_running = _is_pid_alive(pid_file) and _gateway_pid_file_identifies_gateway(pid_file)
     transaction: NativeSplunkSetupTransaction | None = None
     contract = None
@@ -20964,6 +21068,63 @@ def _stop_bridge(data_dir: str, *, gateway_token_env: str = "") -> None:
 # ---------------------------------------------------------------------------
 # Secret storage
 # ---------------------------------------------------------------------------
+
+
+_SECRET_REF_TOKEN_DROPPED = (
+    "Removed a gateway token line from ~/.defenseclaw/.env that an earlier DefenseClaw saved from "
+    "an OpenClaw secret reference; it was not a token."
+)
+
+
+def _drop_secret_ref_gateway_tokens(data_dir: str) -> str:
+    """Remove gateway token lines whose value is SecretRef text (issue #1404).
+
+    DefenseClaw 1.0.5 and 1.0.6 wrote ``OPENCLAW_GATEWAY_TOKEN={'source': ...}``
+    before init failed. Drop those lines (and the copies the CLI loaded into
+    ``os.environ``) so the text never becomes the gateway token. Returns a
+    one-line notice when a line was removed, else "". Never shows the value.
+    """
+    from defenseclaw.connector_paths import _GATEWAY_TOKEN_ENV_NAMES, is_secret_ref_text
+
+    for name in _GATEWAY_TOKEN_ENV_NAMES:
+        if is_secret_ref_text(os.environ.get(name, "")):
+            os.environ.pop(name, None)
+    if not data_dir:
+        return ""
+    dotenv_path = os.path.join(data_dir, ".env")
+    if not os.path.isfile(dotenv_path):
+        return ""
+    try:
+        return _drop_secret_ref_gateway_tokens_at(dotenv_path)
+    except (OSError, click.ClickException):
+        # Best effort: an unreadable or unsafe .env keeps its own diagnosis.
+        return ""
+
+
+def _drop_secret_ref_gateway_tokens_at(dotenv_path: str) -> str:
+    from defenseclaw.connector_paths import _GATEWAY_TOKEN_ENV_NAMES, is_secret_ref_text
+
+    with locked_file_update(dotenv_path):
+        snapshot = _rotate_token_snapshot_locked(dotenv_path)
+        if not snapshot.existed:
+            return ""
+        kept: list[bytes] = []
+        removed = False
+        for line in snapshot.body.splitlines(keepends=True):
+            key, sep, value = line.strip().partition(b"=")
+            name = key.strip().decode("utf-8", "replace")
+            if os.name == "nt":
+                name = name.upper()
+            text = value.strip().decode("utf-8", "replace")
+            if len(text) >= 2 and text[0] == text[-1] and text[0] in "\"'":
+                text = text[1:-1]
+            if sep and name in _GATEWAY_TOKEN_ENV_NAMES and is_secret_ref_text(text):
+                removed = True
+                continue
+            kept.append(line)
+        if removed:
+            atomic_write_private_bytes(dotenv_path, b"".join(kept))
+    return _SECRET_REF_TOKEN_DROPPED if removed else ""
 
 
 def _save_secret_to_dotenv(key: str, value: str, data_dir: str) -> None:

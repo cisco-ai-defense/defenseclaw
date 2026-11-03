@@ -149,6 +149,9 @@ func (e *Env) renderDropins(in renderInputs) []renderedDropin {
 		var b strings.Builder
 		b.WriteString("# Written by the DefenseClaw enterprise lifecycle. Do not edit.\n[Service]\n")
 		for _, name := range in.Secrets {
+			if !managed.GatewayReadsCredential(name) {
+				continue // root reads it from the secrets folder
+			}
 			fmt.Fprintf(&b, "LoadCredential=%s:%s\n", name, filepath.Join(e.Layout.SecretsDir, name))
 		}
 		fmt.Fprintf(&b, "InaccessiblePaths=-%s\n", e.Layout.SecretsDir)

@@ -111,6 +111,9 @@ type LLMJudge struct {
 	// decision is the decision model in front of the tool-call judge; nil
 	// when decision_model is off.
 	decision *decisionModel
+	// decisionOnly marks the hook-lane judge of cascade 2: it has no LLM and
+	// answers tool calls with the decision model alone (newDecisionOnlyJudge).
+	decisionOnly bool
 	// decisionStates holds each prepared call's decision-model state until
 	// it is judged (keepDecisionState / takeDecisionState).
 	decisionStatesMu sync.Mutex

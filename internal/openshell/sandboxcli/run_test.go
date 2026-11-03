@@ -315,6 +315,12 @@ func TestRunDetachedStartsInBackground(t *testing.T) {
 		t.Fatalf("detached codex argv = %q", last)
 	}
 	lacks(t, ta.output(), "may leave no saved conversation")
+	ta = newTestApp(t, "")
+	ta.IO.TTY = false
+	ta.ok(t, ta.Run(bg, RunOptions{Harness: "claude", Copy: true, Detach: true, Prompt: "x"}))
+	// Each displayed results line is a runnable pull command.
+	has(t, ta.output(), "results: defenseclaw sandbox pull ", "or:      defenseclaw sandbox pull ", " --apply", " --branch", " --patch-out FILE")
+	lacks(t, ta.output(), "--apply|--branch|--patch-out FILE")
 }
 
 // GAP-0595: a managed run during a directory outage says so once, at its
@@ -925,7 +931,7 @@ func TestRunFallsBackToCopyMode(t *testing.T) {
 		t.Fatalf("copy steps = %v, want %v first", ta.copy.steps, want)
 	}
 	has(t, ta.output(), "⚠ ~/proj can't be mounted live (its git directory lives at ~/main/.git/worktrees/proj, outside the folder "+
-		"(a git worktree or submodule checkout)), so it runs on a copy: `defenseclaw sandbox pull wt` brings the changes back")
+		"(a git worktree or submodule checkout)), so it runs on a copy: `defenseclaw sandbox pull wt --apply` brings the changes back")
 	lacks(t, ta.output(), "with --copy")
 
 	// The daemon's needs-copy answer on a driver without host mounts, to a
@@ -942,7 +948,7 @@ func TestRunFallsBackToCopyMode(t *testing.T) {
 	}
 	ta.ok(t, ta.Run(bg, RunOptions{Harness: "opencode", Name: "vmbox"}))
 	has(t, ta.output(), "⚠ ~/proj can't be mounted live (the OpenShell MicroVM (vm) driver mounts no host folders), so it runs on a copy: "+
-		"`defenseclaw sandbox pull vmbox` brings the changes back")
+		"`defenseclaw sandbox pull vmbox --apply` brings the changes back")
 }
 
 func TestSummaryLine(t *testing.T) {
@@ -1277,7 +1283,7 @@ func TestRunOnTheMicroVMDriver(t *testing.T) {
 	// through `sandbox pull`, while the session's end offers to bring them
 	// back itself.
 	const note = "copy mode: the OpenShell MicroVM (vm) driver mounts no host folders; the agent works on a copy, " +
-		"and your folder changes only when you bring its work back: at the end of the session, or later with `defenseclaw sandbox pull`"
+		"and your folder changes only when you bring its work back: at the end of the session, or later with `defenseclaw sandbox pull NAME --apply`"
 	driver := func(name string, more ...func(*testApp)) func(*testApp) {
 		return func(ta *testApp) {
 			ta.daemon.status.Gateway.Driver = name
@@ -1361,16 +1367,16 @@ func TestRunOnTheMicroVMDriver(t *testing.T) {
 		// recommended space it is warned about (OC-F1).
 		{name: "a first boot on a full disk", setup: driver("vm", firstBoot, func(ta *testApp) {
 			ta.diskFree, ta.images.sizes = 2<<30, map[string]uint64{"claudecode": 7 << 30}
-		}), do: refused(run, "not enough free disk space for this sandbox's first start: the MicroVM driver's first start uses about 11.0 GiB while preparing a disk from its image in "+
-			"~/.local/state/openshell/vm-driver/images, where 2.0 GiB is free and at least 12.0 GiB is needed; free space on that volume first "+
+		}), do: refused(run, "not enough free disk space for this sandbox's first start: the MicroVM driver's first start uses about 12.0 GiB while preparing a disk from its image in "+
+			"~/.local/state/openshell/vm-driver/images, where 2.0 GiB is free and at least 13.0 GiB is needed; free space on that volume first "+
 			"(`defenseclaw sandbox image prune` removes superseded harness images and the MicroVM disks prepared from them)")},
 		{name: "a first boot of an image to build on a full disk", setup: driver("vm", firstBoot, missing, func(ta *testApp) { ta.diskFree = 5 << 30 }),
-			do: refused(run, "uses about 11.0 GiB while preparing a disk from its image in ~/.local/state/openshell/vm-driver/images, where 5.0 GiB is free and at least 12.0 GiB is needed")},
+			do: refused(run, "uses about 12.0 GiB while preparing a disk from its image in ~/.local/state/openshell/vm-driver/images, where 5.0 GiB is free and at least 13.0 GiB is needed")},
 		{name: "a first boot with measured peak shortfall", setup: driver("vm", firstBoot, func(ta *testApp) { ta.diskFree = 10 << 30 }),
-			do: refused(run, "uses about 11.0 GiB while preparing a disk from its image in ~/.local/state/openshell/vm-driver/images, where 10.0 GiB is free and at least 12.0 GiB is needed")},
+			do: refused(run, "uses about 12.0 GiB while preparing a disk from its image in ~/.local/state/openshell/vm-driver/images, where 10.0 GiB is free and at least 13.0 GiB is needed")},
 		{name: "a first boot with little room", input: "a\n", setup: driver("vm", firstBoot, func(ta *testApp) { ta.diskFree = 15 << 30 }), opts: run,
-			want: []string{"only 15.0 GiB is free in ~/.local/state/openshell/vm-driver/images, and this sandbox's first start uses about 11.0 GiB while preparing a MicroVM disk there " +
-				"(22.0 GiB or more is recommended; `defenseclaw sandbox image prune` removes superseded harness images and the MicroVM disks prepared from them)"},
+			want: []string{"only 15.0 GiB is free in ~/.local/state/openshell/vm-driver/images, and this sandbox's first start uses about 12.0 GiB while preparing a MicroVM disk there " +
+				"(24.0 GiB or more is recommended; `defenseclaw sandbox image prune` removes superseded harness images and the MicroVM disks prepared from them)"},
 			check: func(t *testing.T, ta *testApp) {
 				if ta.creates() != 1 || !strings.HasPrefix(ta.diskProbed, ta.home) {
 					t.Fatalf("creates %d, disk probed at %q", ta.creates(), ta.diskProbed)

@@ -75,6 +75,23 @@ func HookGuardianAuthorizationDir(dataDir string) string {
 	return filepath.Clean(strings.TrimSpace(dataDir)) + "-hook-guardian"
 }
 
+// ForeignHookCleanDirSuffix names the folder next to the data directory in
+// which the Linux and macOS standalone gateway publishes, read-only, the
+// agent processes its last foreign-hook session exchange answered allow for
+// (enterprisepolicy.WriteForeignHookCleanMirrors). The lifecycle creates it
+// 0711 for the service account.
+const ForeignHookCleanDirSuffix = "-foreign-hook-clean"
+
+// ForeignHookCleanDir is that folder for dataDir, or "" when dataDir is not
+// an absolute path.
+func ForeignHookCleanDir(dataDir string) string {
+	dataDir = strings.TrimSpace(dataDir)
+	if !filepath.IsAbs(dataDir) {
+		return ""
+	}
+	return filepath.Clean(dataDir) + ForeignHookCleanDirSuffix
+}
+
 func HookGuardianAuthorizationPath(dataDir string) string {
 	return filepath.Join(HookGuardianAuthorizationDir(dataDir), HookGuardianAuthorizationFile)
 }

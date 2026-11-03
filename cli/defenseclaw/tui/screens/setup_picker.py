@@ -26,10 +26,10 @@ from textual import events
 from textual.app import ComposeResult
 from textual.binding import Binding
 from textual.containers import Vertical
-from textual.screen import ModalScreen
 from textual.widgets import Input, Static
 
 from defenseclaw.tui.markup_safe import escape as rich_escape
+from defenseclaw.tui.modal import GuardedModalScreen
 from defenseclaw.tui.panels.setup_catalog import PickerRow
 from defenseclaw.tui.theme import DEFAULT_TOKENS
 
@@ -70,7 +70,7 @@ def visible_window(total: int, selected: int | None, height: int) -> tuple[int, 
     return (start, start + height)
 
 
-class SetupPickerScreen(ModalScreen[str | None]):
+class SetupPickerScreen(GuardedModalScreen[str | None]):
     """Pick one row; with ``filterable`` a text box narrows the rows."""
 
     CSS = f"""
@@ -141,10 +141,6 @@ class SetupPickerScreen(ModalScreen[str | None]):
             first_selectable(self.rows),
         )
         self._window: tuple[int, int] = (0, 0)
-        # Set by the first dismiss. Enter pressed again before the screen is
-        # gone dismissed it a second time and popped the screen below it:
-        # ScreenStackError "Cannot pop the last screen".
-        self._dismissed = False
 
     def compose(self) -> ComposeResult:
         with Vertical(id="setup-picker-dialog"):
@@ -197,9 +193,7 @@ class SetupPickerScreen(ModalScreen[str | None]):
         self._refresh_list()
 
     def _close(self, result: str | None) -> None:
-        if self._dismissed:
-            return
-        self._dismissed = True
+        # GuardedModalScreen ignores a second dismiss (GAP-0021, GAP-0479).
         self.dismiss(result)
 
     def action_choose(self) -> None:

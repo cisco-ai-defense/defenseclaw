@@ -2161,8 +2161,8 @@ class SandboxesPanelModel:
         if kind == "review" and row.copy_mode:
             return SandboxPanelAction(
                 "hint",
-                hint=f"{row.name} works on a copy; P brings its work back after showing it "
-                f"(defenseclaw sandbox pull {row.name}).",
+                hint=f"{row.name} works on a copy; choose Apply or Branch in P to bring its work back "
+                f"(defenseclaw sandbox pull {row.name} --apply or --branch).",
             )
         if kind == "pull" and not row.copy_mode:
             # sandboxcli.Pull refuses a mounted project the same way.

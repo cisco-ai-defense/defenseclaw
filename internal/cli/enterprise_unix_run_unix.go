@@ -24,6 +24,7 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"syscall"
 	"time"
@@ -317,6 +318,9 @@ func printLifecycleResult(w io.Writer, result *enterprisestatus.Result, asJSON b
 		if result.Inspection.Local != "" || result.Inspection.AIDefense != "" {
 			fmt.Fprintf(w, "  inspection: local=%s ai_defense=%s\n", result.Inspection.Local, result.Inspection.AIDefense)
 		}
+		if line := enterprisestatus.ConnectorsLine(result.Connectors); line != "" {
+			fmt.Fprintf(w, "  %s\n", line)
+		}
 		for _, service := range result.Services {
 			fmt.Fprintf(w, "  %-46s %s\n", service.Name, service.State)
 		}
@@ -351,15 +355,45 @@ func repairCannotFixProblems(result *enterprisestatus.Result) bool {
 			configProblems[warning.Message] = true
 		}
 	}
+	// A file the administrator owns (ownership: verify_only) is fixed by
+	// deploying the export the problem names; repair never writes it
+	// (GAP-0918). The connector's policy-view pin differs from its trusted
+	// digest for the same reason, and only the deployed export followed by
+	// ensure clears it, so that problem is not a repair problem either
+	// (rel-1-0-6 GAP-0918: managed RHEL printed the repair advice for the
+	// pin line next to the verify_only line; managed deb had no pin line).
+	verifyOnly := map[string]bool{}
 	for _, e := range result.Errors {
-		// A file the administrator owns (ownership: verify_only) is fixed by
-		// deploying the export the problem names; repair never writes it
-		// (GAP-0918).
-		if !configProblems[e.Message] && !strings.Contains(e.Message, "missing_defenseclaw_hooks:") {
-			return false
+		if strings.Contains(e.Message, "missing_defenseclaw_hooks:") {
+			if match := verifyOnlyConnectorPattern.FindStringSubmatch(e.Message); match != nil {
+				verifyOnly[match[1]] = true
+			}
 		}
 	}
+	for _, e := range result.Errors {
+		if configProblems[e.Message] || strings.Contains(e.Message, "missing_defenseclaw_hooks:") || policyViewPinOfConnector(e.Message, verifyOnly) {
+			continue
+		}
+		return false
+	}
 	return len(result.Errors) > 0
+}
+
+// verifyOnlyConnectorPattern names the connector in the machine-policy
+// problem of a verify_only file.
+var verifyOnlyConnectorPattern = regexp.MustCompile(`machine policy for ([a-z0-9_-]+)`)
+
+// policyViewPinOfConnector reports whether message is the policy-view pin
+// problem (differs from the trusted digest, no digest, unreadable view) of a
+// connector in connectors.
+func policyViewPinOfConnector(message string, connectors map[string]bool) bool {
+	name, rest, ok := strings.Cut(message, " ")
+	if !ok || !connectors[name] {
+		return false
+	}
+	return strings.HasPrefix(rest, "policy view differs from its trusted digest") ||
+		strings.HasPrefix(rest, "has no trusted policy-view digest") ||
+		strings.HasPrefix(rest, "policy view cannot be read")
 }
 
 // lifecycleResultHasError reports whether result carries an error with code.
@@ -576,6 +610,10 @@ func changeUnixSecret(cmd *cobra.Command, action string, opts *enterpriseSecretO
 		} else if value, err = readUnixSecretStdin(cmd.InOrStdin(), caller); err != nil {
 			return nil, false, nil, err
 		}
+		if err := accountJoinSecretFormatError(opts.name, value); err != nil {
+			clear(value)
+			return nil, false, nil, secretFailed("secret_malformed", enterprisestatus.UnixExitInvalidArgs, err)
+		}
 	}
 	change := &unixSecretChange{env: env, action: action, opts: opts, value: value, caller: caller}
 	// A change this device could not audit is not made: the spool must hold
@@ -646,15 +684,18 @@ func (c *unixSecretChange) mutate(ctx context.Context) error {
 		}
 	case "remove":
 		_, statErr := os.Lstat(path)
+		if statErr != nil && !errors.Is(statErr, fs.ErrNotExist) {
+			return &enterprisebundle.Error{Code: enterprisebundle.CodeStateInvalid, Detail: fmt.Sprintf("cannot inspect credential %s before removal (%v); nothing was removed: restore access and retry", opts.name, statErr)}
+		}
 		c.existed = statErr == nil
+		if c.existed && readErr != nil {
+			return &enterprisebundle.Error{Code: enterprisebundle.CodeStateInvalid, Detail: fmt.Sprintf("cannot read credential %s for put-back before removal (%v); nothing was removed: restore access and retry", opts.name, readErr)}
+		}
 		if err := removeUnixSecret(env, opts); err != nil {
 			return err
 		}
 		if c.existed {
 			c.undo = func(ctx context.Context) error {
-				if readErr != nil {
-					return fmt.Errorf("credential %s was removed, and it could not be read before (%v), so it is not put back", opts.name, readErr)
-				}
 				return env.WriteSecret(ctx, opts.name, stored)
 			}
 		}
@@ -662,8 +703,7 @@ func (c *unixSecretChange) mutate(ctx context.Context) error {
 	return nil
 }
 
-// putBack is the change's MutateUndo: it runs only when the run refused
-// the config after the change.
+// putBack restores the prior credential when the ensure fails after mutation.
 func (c *unixSecretChange) putBack(ctx context.Context) error {
 	if c.undo == nil {
 		return nil
@@ -687,15 +727,17 @@ func removeUnixSecret(env *enterpriseunix.Env, opts *enterpriseSecretOptions) er
 		}
 	}
 	if opts.undoRotation != "" {
-		if installed, err := os.ReadFile(env.P(env.Layout.ConfigPath)); err == nil {
-			if at := config.InstalledCredentialReference(env.Layout.ConfigPath, installed, env.Layout.DataDir, opts.name); at != "" {
-				if !undoRotationOnConfig(opts, installed) {
-					return &enterprisebundle.Error{Code: "credential_in_use", Detail: fmt.Sprintf(
-						"the installed config references credential %s at %s and is not the config installed before the rotation (--undo-config), so it may use the value stored now; credential %s was not removed", opts.name, at, opts.name)}
-				}
-				return env.RemoveRotatedSecret(opts.name)
+		installed, err := env.InstalledSecretConfig(opts.undoConfig == "none")
+		if err != nil {
+			return err
+		}
+		if at := config.InstalledCredentialReference(env.Layout.ConfigPath, installed, env.Layout.DataDir, opts.name); at != "" {
+			if !undoRotationOnConfig(opts, installed) {
+				return &enterprisebundle.Error{Code: "credential_in_use", Detail: fmt.Sprintf(
+					"the installed config references credential %s at %s and is not the config installed before the rotation (--undo-config), so it may use the value stored now; credential %s was not removed", opts.name, at, opts.name)}
 			}
 		}
+		return env.RemoveRotatedSecret(opts.name)
 	}
 	return env.RemoveSecret(opts.name)
 }

@@ -106,14 +106,7 @@ func newSidecarRuntimeFixtureExportingTo(
 	t.Cleanup(func() { gatewaylog.SetSidecarInstanceID(previousInstanceID) })
 	directory := t.TempDir()
 	path := filepath.Join(directory, "audit.db")
-	store, err := audit.NewStore(path)
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() { _ = store.Close() })
-	if err := store.Init(); err != nil {
-		t.Fatal(err)
-	}
+	store := newMigratedTestAuditStore(t, path)
 	retentionDays := 0
 	source := &config.ObservabilityV8Source{Local: config.ObservabilityV8LocalSource{
 		Path: path, JudgeBodiesPath: filepath.Join(directory, "judge-bodies.db"),

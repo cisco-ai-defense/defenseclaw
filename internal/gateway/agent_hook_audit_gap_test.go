@@ -203,6 +203,20 @@ func TestHookVerdictIsRecordedAfterTheClientDisconnects(t *testing.T) {
 	if audited != 2 {
 		t.Fatalf("connector-hook rows after the grace expired = %d, want 2", audited)
 	}
+	db, err := sql.Open("sqlite", fixture.path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	for _, event := range []string{"tool_start", "tool.invocation.requested"} {
+		var count int
+		if err := db.QueryRow(`SELECT COUNT(*) FROM audit_events WHERE event_name = ?`, event).Scan(&count); err != nil {
+			t.Fatal(err)
+		}
+		if count != 2 {
+			t.Errorf("%s rows after two audited PreToolUse calls = %d, want 2", event, count)
+		}
+	}
 }
 
 // GAP-0832: a hook call from an exempt_users account is visible in the audit

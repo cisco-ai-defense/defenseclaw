@@ -6,10 +6,13 @@
 package connector
 
 import (
+	"bufio"
 	"bytes"
 	"encoding/json"
 	"errors"
+	"io"
 	"net"
+	"net/http"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -69,6 +72,7 @@ if [ "$1" = hook-post ]; then
   [ -z "$ts" ] || echo "$ts" >> "$DC_COLD_CAP/tries"
   cat > "$DC_COLD_CAP/body.$n"
   cp "$DC_COLD_CAP/body.$n" "$DC_COLD_CAP/config.$n"
+  printf '%s' "${_DC_HOOK_POST_DATA_DIR:-}" > "$DC_COLD_CAP/datadir.$n"
   if [ "$n" -le "${DC_COLD_FAILS:-1}" ]; then
     if [ "${DC_COLD_DROP_LISTENER:-0}" = 1 ]; then
       : > "$DC_COLD_CAP/drop.$n"
@@ -80,8 +84,12 @@ if [ "$1" = hook-post ]; then
     fi
     # The installer lets go of its lock while the request waits (GAP-2443).
     [ "${DC_COLD_RELEASE_INSTALL_LOCK:-0}" != 1 ] || rmdir "$DEFENSECLAW_HOME/.install.lock"
+    [ -z "${DC_COLD_FIRST_DELAY:-}" ] || sleep "$DC_COLD_FIRST_DELAY"
     exit "${DC_COLD_FIRST_RC:-7}"
   fi
+  # Every later try fails with DC_COLD_THEN_RC when it is set (a gateway that
+  # comes up and does not answer: hook-post's no-answer status 9).
+  [ -z "${DC_COLD_THEN_RC:-}" ] || exit "$DC_COLD_THEN_RC"
   printf '%s\n%s\n' '{"action":"allow","codex_output":{"decision":"allow"}}' '200'
   exit 0
 fi
@@ -114,14 +122,15 @@ func runHookForColdStartWithManaged(t *testing.T, c Connector, script string, ar
 	if err := os.MkdirAll(hooksDir, 0o700); err != nil {
 		t.Fatal(err)
 	}
-	apiAddr := freeAPIAddr(t)
-	// Bind the endpoint as this account to let these retry tests reach the
-	// native transport stub; free and foreign listeners have separate tests.
-	listener, err := net.Listen("tcp", apiAddr)
+	// Hold the endpoint as this account for the whole test to let these
+	// retry tests reach the native transport stub; free and foreign
+	// listeners have separate tests.
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = listener.Close() })
+	apiAddr := listener.Addr().String()
 	if managed {
 		// An explicit managed binary selects standalone, not Secure Client.
 		opts := SetupOpts{
@@ -163,11 +172,36 @@ func runHookForColdStartWithManaged(t *testing.T, c Connector, script string, ar
 		prepare(dataDir)
 	}
 	capDir := t.TempDir()
-	dropListener := false
+	dropListener, acceptDrop := false, false
 	for _, entry := range extraEnv {
 		if entry == "DC_COLD_DROP_LISTENER=1" {
 			dropListener = true
+		} else if entry == "DC_COLD_ACCEPT_DROP=1" {
+			acceptDrop = true
 		}
+	}
+	if acceptDrop {
+		// A restarting gateway can take the connection and close before it
+		// sends any status. Keep the listener bound while the hook decides.
+		done := make(chan struct{})
+		go func() {
+			defer close(done)
+			for {
+				conn, acceptErr := listener.Accept()
+				if acceptErr != nil {
+					return
+				}
+				_ = conn.SetReadDeadline(time.Now().Add(5 * time.Second))
+				request, readErr := http.ReadRequest(bufio.NewReader(conn))
+				if readErr == nil {
+					_, _ = io.Copy(io.Discard, request.Body)
+					_ = request.Body.Close()
+					time.Sleep(300 * time.Millisecond)
+				}
+				_ = conn.Close()
+			}
+		}()
+		t.Cleanup(func() { _ = listener.Close(); <-done })
 	}
 	if dropListener {
 		stop, done := make(chan struct{}), make(chan struct{})

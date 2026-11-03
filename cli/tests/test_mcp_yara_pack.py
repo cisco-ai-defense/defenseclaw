@@ -15,9 +15,9 @@ sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")
 
 import pytest  # noqa: E402
 import yara  # noqa: E402
-from defenseclaw.config import AssetFileRef, MCPScannerYARAConfig  # noqa: E402
+from defenseclaw.config import AssetFileRef, MCPScannerConfig, MCPScannerYARAConfig  # noqa: E402
 from defenseclaw.paths import bundled_mcp_yara_rules_dir  # noqa: E402
-from defenseclaw.scanner.mcp import _supplemental_yara_analyzers  # noqa: E402
+from defenseclaw.scanner.mcp import MCPScannerWrapper, _supplemental_yara_analyzers  # noqa: E402
 
 
 def test_bundled_mcp_yara_pack_is_narrow_and_compiles() -> None:
@@ -406,3 +406,23 @@ def test_supplemental_pack_applies_the_pinned_extra_rules(tmp_path) -> None:
     stale = MCPScannerYARAConfig(extra_rules=[AssetFileRef(path=str(rule), digest="sha256:" + "0" * 64)])
     with pytest.raises(ValueError, match="digest mismatch"):
         _supplemental_yara_analyzers(RecordingAnalyzer, stale)
+
+
+def test_meta_free_extra_yara_rule_produces_valid_finding(tmp_path) -> None:
+    from mcpscanner.core.analyzers.yara_analyzer import YaraAnalyzer
+
+    rule = tmp_path / "plain.yar"
+    rule.write_text('rule no_meta_marker { strings: $a = "PLAINMARKER" condition: $a }')
+    digest = "sha256:" + hashlib.sha256(rule.read_bytes()).hexdigest()
+    pinned = MCPScannerYARAConfig(include_bundled=False, extra_rules=[AssetFileRef(path=str(rule), digest=digest)])
+    analyzer = _supplemental_yara_analyzers(YaraAnalyzer, pinned)[0]
+    sdk_findings = asyncio.run(analyzer.analyze("PLAINMARKER", {"tool_name": "probe", "content_type": "description"}))
+
+    result = MCPScannerWrapper(MCPScannerConfig(analyzers="yara"))._convert(sdk_findings, "probe", 0.1)
+
+    assert len(result.findings) == 1
+    finding = result.findings[0]
+    assert finding.severity == "HIGH"
+    assert finding.title == "Detected 1 threat: no meta marker"
+    assert "no_meta_marker" in finding.description
+    assert finding.scanner == "mcp-scanner/YARA"

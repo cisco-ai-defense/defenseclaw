@@ -1529,13 +1529,11 @@ func windowsCursorManagedTombstone() []byte {
 	return []byte("# defenseclaw-managed-cursor-tombstone v1\r\n[Console]::Out.Write('{\"continue\":true}')\r\nexit 0\r\n")
 }
 
-// PurgeWindowsCursorManagedTombstone removes, for the standalone uninstall
-// with purge, the allow-only Cursor adapter tombstone the teardown left for
-// Cursor processes that were still running, and then the Cursor transaction
-// lock, so the delete-everything option leaves no DefenseClaw file in
-// ProgramData\Cursor (GAP-1567). Only the exact tombstone goes; ownership
-// state, a receipt or an active adapter fail. A missing folder is not an
-// error and is not created.
+// PurgeWindowsCursorManagedTombstone removes the allow-only Cursor adapter
+// tombstone and transaction lock after a standalone teardown. The caller
+// uses it for purge or when no Cursor registration remains pending. Only
+// the exact tombstone goes; ownership state, a receipt or an active adapter
+// fail. A missing folder is not an error and is not created.
 func PurgeWindowsCursorManagedTombstone() error {
 	paths, err := windowsCursorManagedPaths()
 	if err != nil {
@@ -1553,6 +1551,24 @@ func PurgeWindowsCursorManagedTombstone() error {
 		return nil
 	}
 	return withWindowsCursorManagedTransaction(purgeWindowsCursorManagedTombstoneUnlocked)
+}
+
+// WindowsCursorManagedTombstoneFilePaths returns the existing adapter and
+// transaction lock using the same resolved paths as the Cursor writer.
+func WindowsCursorManagedTombstoneFilePaths() ([]string, error) {
+	paths, err := windowsCursorManagedPaths()
+	if err != nil {
+		return nil, err
+	}
+	var present []string
+	for _, path := range []string{paths.Adapter, paths.Lock} {
+		if _, err := os.Lstat(path); err == nil {
+			present = append(present, path)
+		} else if !errors.Is(err, os.ErrNotExist) {
+			return nil, fmt.Errorf("inspect Cursor hook tombstone file %s: %w", path, err)
+		}
+	}
+	return present, nil
 }
 
 func purgeWindowsCursorManagedTombstoneUnlocked() error {

@@ -17,6 +17,7 @@ import (
 	"bytes"
 	"encoding/json"
 	"fmt"
+	"github.com/defenseclaw/defenseclaw/internal/accountjoin"
 	"slices"
 	"sort"
 	"strings"
@@ -111,6 +112,12 @@ type Enrollment struct {
 	// Accounts names each enrolled account and its connectors' states, where
 	// the platform reports them (Windows standalone).
 	Accounts []EnrollmentAccount `json:"accounts,omitempty"`
+	// ExcludedUsers and ExcludedGroups are the installed config's
+	// enterprise.enrollment.exclude_users and exclude_groups entries (Windows
+	// standalone), so an administrator can tell an account held out by policy
+	// from one that is not enrolled yet (GAP-1243).
+	ExcludedUsers  []string `json:"excluded_users,omitempty"`
+	ExcludedGroups []string `json:"excluded_groups,omitempty"`
 }
 
 // EnrollmentAccount is one enrolled account and the state of each of its
@@ -223,8 +230,14 @@ type Result struct {
 	Connectors map[string]ConnectorState `json:"connectors,omitempty"`
 	OpenShell  *OpenShellCapability      `json:"openshell,omitempty"`
 	Identity   *IdentityHealth           `json:"identity,omitempty"`
-	LogPath    string                    `json:"log_path,omitempty"`
-	ExitCode   int                       `json:"exit_code"`
+	// AccountJoin summarizes the account join keys (counts and reason
+	// codes, never a key) for a status or verify run as root (Linux,
+	// macOS) or an administrator (Windows) on the standalone profile with
+	// enterprise.account_join on; nil (omitted) otherwise. The keys are
+	// only in the output of `enterprise account-keys` (internal/accountjoin).
+	AccountJoin *accountjoin.Summary `json:"account_join,omitempty"`
+	LogPath     string               `json:"log_path,omitempty"`
+	ExitCode    int                  `json:"exit_code"`
 	// ConfigRefused marks a run that refused the submitted config before it
 	// changed anything: the policy, services and advisories it reports are
 	// the running deployment's. Text output only (GAP-0564).

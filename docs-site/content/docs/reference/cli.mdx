@@ -522,7 +522,7 @@ defenseclaw guardrail block-message --clear                # clear global + acti
 defenseclaw guardrail disable --connector codex           # then `enable --connector codex` to restore
 defenseclaw guardrail use-pack strict                     # every connector, clears overrides
 defenseclaw guardrail use-pack ~/packs/my-org --connector codex
-defenseclaw guardrail profile explain --user alice --connector codex
+defenseclaw guardrail profile explain --user alice --connector codex   # as alice: a per-user install explains only your own account
 defenseclaw guardrail use-pack --clear --connector codex  # back to the global pack
 defenseclaw guardrail mode action                         # every connector without its own mode
 defenseclaw guardrail mode observe --connector codex      # codex only logs
@@ -833,7 +833,7 @@ Two kinds of verb look alike and differ in where they keep state:
 | Verbs | State | Gateway call |
 | --- | --- | --- |
 | `block`, `allow`, `unblock` on `skill`, `mcp`, `plugin` and `tool` | `asset_policy.<type>.denied` and `asset_policy.<type>.allowed` in `config.yaml`, written through the config writer. The explicit lists apply in every `asset_policy.mode`. The running gateway applies the change on its next reload, so the effect needs no restart. | None. With the gateway stopped, the change is still saved and the command warns that the audit event was not recorded. |
-| `disable`, `enable`, `quarantine`, `restore` on `skill` and `plugin` | Runtime state: the enforcement journal in `audit.db`, plus the files a quarantine moves. These are not block or allow lists and are not in `config.yaml`. | `disable` and `enable` call the running gateway and fail when it cannot be reached. |
+| `disable`, `enable`, `quarantine`, `restore` on `skill` and `plugin` | Runtime state: the enforcement journal in `audit.db`, plus the files a quarantine moves. These are not block or allow lists and are not in `config.yaml`. A Claude Code plugin quarantine also turns the plugin's `enabledPlugins` entries in `~/.claude/settings.json` off, so `claude plugin list` shows it disabled; `restore` turns those entries back on and leaves the others as they are. | `disable` and `enable` call the running gateway and fail when it cannot be reached. |
 
 Nothing reads the `actions` table of `audit.db` as a block or allow list any
 more. A `config_version` 8 install that has operator block or allow entries
@@ -1236,16 +1236,19 @@ The moved keys, sample output and the way back are in [Migrate to config version
 | `defenseclaw uninstall --all --binaries` | Removes everything: all of the above, plus `defenseclaw-gateway`, `defenseclaw-acp`, the launcher links, the `uv` the installer added (when unchanged) and its bookkeeping from `~/.local/bin` (`%USERPROFILE%\.local\bin` on Windows, where the emptied folder and its user `Path` entry go too). On a native Windows Setup install, Setup runs first and the script-install leftovers go after it. On macOS, `DefenseClawMac.app` stays; the plan says how to remove it. Run `--dry-run` first to see the plan. |
 | `defenseclaw uninstall --keep-openclaw` | Leave the OpenClaw config and plugin in place; the other connectors' teardown still runs. |
 | `defenseclaw uninstall --skip-sandbox-teardown` | Uninstall without the OpenShell sandbox teardown it runs first (when Docker or OpenShell are gone or broken); `defenseclaw sandbox teardown` removes the sandboxes later. `reset` takes it too. |
-| `defenseclaw uninstall --stop-sandboxes` | Stop and delete running OpenShell sandboxes during teardown, including copy-mode work not pulled back. Without it, a running sandbox stops uninstall before any change. First use `defenseclaw sandbox pull NAME --branch` for copy mode or `defenseclaw sandbox review NAME` for mount mode, then `defenseclaw sandbox stop NAME`. `reset` takes this option too. |
+| `defenseclaw uninstall --stop-sandboxes` | Stop and delete running OpenShell sandboxes during teardown, including copy-mode work not pulled back. Without it, a running sandbox stops uninstall before any change. For copy mode, use `defenseclaw sandbox pull NAME --apply` (or `--branch` or `--patch-out FILE`) and confirm the project, branch or patch file contains the work before `defenseclaw sandbox stop NAME`. For mount mode, use `defenseclaw sandbox review NAME` before stopping it. `reset` takes this option too. |
 | `defenseclaw reset --yes` | Wipe `~/.defenseclaw/` so `defenseclaw quickstart` starts clean — keeps binaries and the OpenClaw plugin in place. |
 
 When the sandbox teardown would run, `uninstall` and `reset` also stop before
 any change if DefenseClaw cannot read the sandbox list: the gateway or its
 sandbox daemon may be stopped, the list may time out, or its output may not
 be readable. The message says why. Run `defenseclaw sandbox list` to check;
-start the gateway first if it says to. Pull back work or stop the sandboxes
-you want to keep, then retry, or use `--stop-sandboxes` to let teardown stop
-and delete any that still run. With sandboxes off, `defenseclaw sandbox list` fails whatever runs, so the message names `defenseclaw-gateway sandbox teardown --dry-run` instead, which lists them once OpenShell's gateway answers, and `--skip-sandbox-teardown` to uninstall without the teardown. The `error`, `stopping`, `creating` and
+start the gateway first if it says to. For each copy-mode sandbox whose work
+you need, run `defenseclaw sandbox pull NAME --apply` (or `--branch` or
+`--patch-out FILE`) and confirm the project, branch or patch file contains it.
+Then stop the running sandboxes and retry, or use `--stop-sandboxes` to let
+teardown stop and delete any that still run. To leave sandboxes in place during uninstall, use
+`--skip-sandbox-teardown`. With sandboxes off, `defenseclaw sandbox list` fails whatever runs, so the message names `defenseclaw-gateway sandbox teardown --dry-run` instead, which lists them once OpenShell's gateway answers, and `--skip-sandbox-teardown` to uninstall without the teardown. The `error`, `stopping`, `creating` and
 `deleting` phases count as running. Only `stopped`, `completed`, `deleted`
 and `missing` do not.
 
@@ -1266,7 +1269,8 @@ see also [Sandbox](/docs/sandboxes/first-session).
 | `defenseclaw sandbox run <harness> [--copy] [--safe] [--profile open\|balanced\|strict] [-- args]` | Run a harness, such as `claude` or `codex`, in a new sandbox on the current folder. |
 | `defenseclaw sandbox list\|status\|connect\|exec\|logs\|stop\|start\|delete` | Manage sandboxes and their sessions. |
 | `defenseclaw sandbox activity [-f]\|approvals\|approve\|reject\|unblock` | Follow the live activity feed, answer the rare asks, and lift egress blocks. |
-| `defenseclaw sandbox review\|undo\|pull <name>` | Review a mounted project's changes, restore its pre-session snapshot, or bring a copy-mode sandbox's work back. |
+| `defenseclaw sandbox review\|undo <name>` | Review a mounted project's changes or restore its pre-session snapshot. |
+| `defenseclaw sandbox pull <name> --apply` | Bring a copy-mode sandbox's work into the project. `--branch` or `--patch-out FILE` preserves it elsewhere. A pull without a mode shows the review only. |
 | `defenseclaw sandbox policy show\|explain\|suggest\|test\|allow\|block` | Show where each setting of the sandbox policy comes from, suggest a pack from what sandboxes reached, test a destination, and edit the egress lists. |
 | `defenseclaw sandbox pack list\|show\|validate` | Inspect sandbox policy packs and their digests. |
 | `defenseclaw sandbox image build\|list\|prune\|rm` | Build, list, prune, and remove the harness images. |
@@ -1292,6 +1296,13 @@ elevated prompt on Windows.
 deployment. Run `linux` on Linux and `macos` on macOS; the other one exits `2`.
 Every mutating action is a transaction that rolls back on failure. See
 [Upgrade, repair and remove](/docs/enterprise/lifecycle).
+
+On Linux tarball hosts with fapolicyd, trust the staged payload before
+`ensure --no-start`. After staging, add `/opt/defenseclaw/` to the trust file
+for a fresh install or update its existing entry for an upgrade or rerun.
+Check the installed gateway as the service user before the final `ensure`.
+The [tarball steps](/docs/enterprise/linux#3b-or-install-from-the-tarball)
+give the commands.
 
 | Action | Use it for |
 | --- | --- |

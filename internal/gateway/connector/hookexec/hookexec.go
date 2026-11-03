@@ -283,6 +283,9 @@ type Options struct {
 	// answeredErrorStatus records an HTTP refusal seen before a retry. A
 	// failed retry cannot turn that answered error into an outage allow.
 	answeredErrorStatus int
+	// managedNoAnswerCode is managedNoAnswerReason read once for a call the
+	// watchdog answers, so its answer and its failure row agree.
+	managedNoAnswerCode string
 	// installWindowSeen is set once a look at this account's .install.lock
 	// for this call found it held. The answer rendered from it with no home
 	// (the watchdog's prepared answer) still names the install (GAP-2440).
@@ -313,6 +316,9 @@ type Options struct {
 	// (startAnswerWatchdog); doRequest stands it down once the gateway's
 	// decision is in.
 	answerWatch *answerWatchdog
+	// failureLog is the hook-failure log the answer watchdog opens ahead of
+	// its deadline (preparedFailureLog); the first failure line takes it.
+	failureLog *preparedFailureLog
 	// AnswerWatchdog is the answer watchdog the hook command armed for this
 	// call before Run (ArmAnswerWatchdog). Run adopts it: it holds all of
 	// Run's output and gives the call's fail-closed answer at the answer
@@ -426,6 +432,12 @@ type Options struct {
 
 	// MaxBody overrides the stdin cap in bytes (default defaultMaxBody).
 	MaxBody int64
+	// MaxBodyLowered marks a MaxBody the agent's environment lowered
+	// (DEFENSECLAW_HOOK_MAX_BODY). Under the per-user transport's 900 KiB, a
+	// call over it is refused, never sent as a bounded prefix review that
+	// judges too short a prefix: a lowered cap only tightens
+	// (rel-1-0-6:GAP-0337).
+	MaxBodyLowered bool
 
 	// TraceParent / TraceState are W3C trace-context candidates forwarded to
 	// the gateway after validation (invalid values are dropped, never sent).
@@ -908,15 +920,22 @@ func doRequest(ctx context.Context, opts Options, sp spec, failMode string, payl
 		return failUnreachable(opts, sp, failMode, foreignListenerReason(opts.APIAddr, pid))
 	}
 	restartDeadline := gatewayRestartDeadline(opts, opts.StartedAt)
-	// One deadline bounds every wait of a tool call: the restart tries, the
-	// dials, a gateway that accepted the call but does not answer, and the
-	// resends below (hookAnswerBudget).
-	opts.answerBy = answerDeadline(opts, opts.StartedAt)
+	// Compute the first try's local facts before starting its answer window.
+	// On a loaded managed host the account, session, and write-path reads can
+	// take time after Run, leaving a healthy gateway only a fraction of the
+	// configured answer budget. The early watchdog still caps the whole call.
+	opts.requestFacts = &hookRequestFacts{}
+	if opts.ManagedEnterprise && !opts.SecureClient {
+		opts.requestFacts.set(make(http.Header), opts, payload)
+	}
+	// The managed gateway gets its answer window after local preparation,
+	// within the hook's process cap. Per-user calls keep their existing
+	// invocation-based deadline.
+	opts.answerBy = gatewayAnswerDeadline(opts, opts.StartedAt, time.Now())
 	ctx, stopAnswer, stopResponseDeadline, releaseAnswer := awaitAnswerBy(ctx, opts.answerBy, progressCeiling(opts, opts.StartedAt), opts.answerWatch)
 	ctx, stopWatch, releaseWatch := watchManagedGatewayStarts(ctx, opts, restartDeadline)
-	// The account, its session, the asset facts and the resolved write
-	// paths are computed once, for every try of this call.
-	opts.requestFacts = &hookRequestFacts{}
+	// Reuse the account, session, asset facts and resolved write paths on
+	// every retry of this call.
 	// A try that must have its connection within the restart budget
 	// (connectBy); the response is read under its context.
 	var releases []func()
@@ -961,6 +980,11 @@ func doRequest(ctx context.Context, opts Options, sp spec, failMode string, payl
 	}
 	resp, err := send()
 	if !opts.ManagedEnterprise {
+		// A first try the gateway refused or dropped met an outage: from now
+		// on the answer at the deadline is the outage's, the one this call
+		// gives below when the restart outlasts its budget (rel-1-0-6
+		// GAP-0295). perUserOutageSeen ignores every other error.
+		opts.answerWatch.perUserOutageSeen(opts, sp, failMode, err)
 		// This account's own gateway is restarting or starting: send the
 		// call again until the restart budget ends, starting the gateway
 		// beside the tries after a refused connection.
@@ -974,7 +998,7 @@ func doRequest(ctx context.Context, opts Options, sp spec, failMode string, payl
 			// Keep the cause: hook-failures.jsonl is the only record of
 			// why a hook could not start the gateway (GAP-0480).
 			return failUnreachable(withPerUserOutage(opts), sp, failMode, coldStartFailureReason(wait.recoveryErr))
-		case wait.outlasted && outage:
+		case wait.outlasted && outage, perUserRestartUnanswered(ctx, opts, wait):
 			return failUnreachable(withPerUserOutage(opts), sp, failMode, perUserGatewayRestartingReason)
 		}
 	}
@@ -1279,11 +1303,18 @@ func doRequest(ctx context.Context, opts Options, sp spec, failMode string, payl
 	if delivery != nil && resp.StatusCode == http.StatusOK && readErr == nil {
 		opts.answerWatch.setDeliveryReceipt(func(answered, localBlock bool) {
 			// finish calls this only after it writes the answer to the agent.
-			// Keep the request alive for the receipt, using its request/HTTP
-			// deadline rather than the already-met answer deadline.
+			// The receipt shares the managed process deadline with the answer.
+			// A late healthy verdict still reaches the agent before this wait.
 			stopAnswer()
 			if answered {
-				receiptTimer := time.AfterFunc(hookDeliveryReceiptTimeout, requestCancel)
+				receiptWait := hookDeliveryReceiptTimeout
+				if cap := answerDeadline(opts, opts.StartedAt); !cap.IsZero() && time.Until(cap) < receiptWait {
+					receiptWait = time.Until(cap)
+				}
+				if receiptWait < 0 {
+					receiptWait = 0
+				}
+				receiptTimer := time.AfterFunc(receiptWait, requestCancel)
 				defer receiptTimer.Stop()
 				if delivery.acknowledge(localBlock) == nil {
 					// Keep the request alive until HTTP has carried the receipt
@@ -1870,6 +1901,9 @@ func (sp spec) decide(opts Options, body []byte) int {
 		} else {
 			return emitHookResult(opts, sp, sp.openAllow)
 		}
+		if sp.connector == "cursor" && action == "block" {
+			return cursorClosedExit(opts, 0)
+		}
 		return 0
 
 	case styleHookEchoDecision:
@@ -2319,6 +2353,7 @@ func handleOversized(ctx context.Context, opts Options, sp spec, failMode string
 	// Only a gateway allow permits the call; a transport outage follows the
 	// existing per-user outage rule in sendToGateway.
 	if !opts.ManagedEnterprise && !opts.SecureClient && !opts.StrictAvailability &&
+		(!opts.MaxBodyLowered || opts.MaxBody >= perUserHookMaxBody) &&
 		opts.OutageFailModeNow != nil && normalizeFailMode(opts.OutageFailModeNow()) == "open" && !perUserInstallWindow(opts) {
 		// A prefix the reducer cannot turn into one request (a duplicated
 		// key) keeps the closed oversize answer below. Every review is marked
@@ -2463,7 +2498,7 @@ func failUnreachable(opts Options, sp spec, failMode, reason string) int {
 		return allowFailClosedStop(opts, sp, reason, "transport")
 	}
 	blocked := !sp.failOpenOnly && (opts.StrictAvailability || failMode == "closed")
-	logHookFailure(opts, sp, reason, "transport", failMode, blocked)
+	logUnreachableFailure(opts, sp, reason, failMode, blocked)
 	if !managedCopilotOpen(opts, sp, failMode) {
 		if code, handled := copilotFailClosed(opts, sp, "transport", reason); handled {
 			return code
@@ -3708,7 +3743,7 @@ func failManagedStandaloneClosed(opts Options, sp spec, result failResult, layer
 		return emitCodexBlock(opts, text)
 	case "cursor":
 		fmt.Fprintln(opts.Stdout, cursorClosedOutput(opts, text))
-		return result.exit
+		return cursorClosedExit(opts, result.exit)
 	case "devin":
 		fmt.Fprintln(opts.Stdout, devinBlockText(text))
 		return result.exit
@@ -4060,6 +4095,9 @@ func emitHookResult(opts Options, sp spec, result failResult) int {
 			fmt.Fprintln(opts.Stdout, cursorClosedOutput(opts, result.body))
 		} else {
 			fmt.Fprintln(opts.Stdout, cursorFallbackOutput(opts.Event, false, result.body))
+		}
+		if result.closed || result.exit != 0 {
+			return cursorClosedExit(opts, result.exit)
 		}
 		return result.exit
 	}

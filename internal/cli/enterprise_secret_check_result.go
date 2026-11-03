@@ -15,7 +15,6 @@ import (
 	"github.com/spf13/cobra"
 
 	"github.com/defenseclaw/defenseclaw/internal/enterprisestatus"
-	"github.com/defenseclaw/defenseclaw/internal/gateway"
 )
 
 // secretCheckTimeout bounds the one request of `secret check`.
@@ -25,7 +24,7 @@ const secretCheckTimeout = 20 * time.Second
 // builds); tests replace it. On Windows the lifecycle status reports
 // inspection.ai_defense ok from gateway readiness alone, so this is the one
 // way to prove the key there (rel-1-0-6:GAP-0036).
-var checkAIDefense = gateway.CheckStandaloneAIDefense
+var checkAIDefense = checkAIDefenseForPlatform
 
 // secretCheckResult is the `enterprise secret check --json` document
 // (packaging/mdm/contract/secret-result.schema.json, check result branch).
@@ -45,15 +44,21 @@ type secretCheckResult struct {
 // document, as every other Windows secret failure does; Linux and macOS
 // keep it (their MDM wrapper quotes it).
 func printSecretCheck(cmd *cobra.Command, opts *enterpriseSecretOptions, posture string, failureExit int, quietJSON bool) error {
+	if posture == "unavailable:auth_failed" {
+		posture = "rejected"
+	}
 	res := secretCheckResult{SchemaVersion: 1, OK: posture == "ok", Action: "check", Name: opts.name, AIDefense: posture, Errors: []enterprisestatus.Message{}}
 	var failure error
 	switch {
 	case posture == "disabled":
 		res.Errors = append(res.Errors, enterprisestatus.Message{Code: "ai_defense_disabled",
 			Message: "enterprise.inspection.ai_defense is off, so nothing uses this credential"})
+	case posture == "rejected":
+		res.Errors = append(res.Errors, enterprisestatus.Message{Code: "ai_defense_rejected",
+			Message: "Cisco AI Defense rejected the stored key; the local policy engine keeps deciding"})
 	case posture != "ok":
 		res.Errors = append(res.Errors, enterprisestatus.Message{Code: "ai_defense_unavailable",
-			Message: "Cisco AI Defense did not accept the stored key (" + posture + "); the local policy engine keeps deciding"})
+			Message: "Cisco AI Defense could not check the stored key (" + posture + "); the local policy engine keeps deciding"})
 	}
 	if !res.OK {
 		res.ExitCode = failureExit

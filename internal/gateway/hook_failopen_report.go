@@ -18,10 +18,12 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/defenseclaw/defenseclaw/internal/audit"
 	"github.com/defenseclaw/defenseclaw/internal/config"
+	"github.com/defenseclaw/defenseclaw/internal/gateway/connector/hookexec"
 )
 
 // The hooks append one line to <home>/logs/hook-failures.jsonl for every
@@ -32,12 +34,28 @@ import (
 // (GAP-0414). On start, and about once a minute while it runs, the gateway
 // reads the lines it has not reported yet and records one guardrail-degraded
 // alert per connector.
+//
+// A call the hook blocked itself (outcome fail_closed) gets its own audit
+// row too. Under load a per-user hook gives up at its answer budget and
+// blocks the call, while its gateway still decides it, records allow and
+// answers a hook that has left: in an 18000-call flood, 16 calls the agent
+// saw denied were recorded as 17999 allow and 1 block (GAP-0271). The
+// guardrail-block row names the call's session, call and tool id and the
+// hook event, so the audit holds the block the agent received beside the
+// gateway's decision. Only a block of a pre-execution event (PreToolUse,
+// PermissionRequest, the connectors' before-* events: hookexec.ToolGateEvent)
+// is the call's own block; a post-execution event's tool had already run
+// (GAP-0271 review). A report run writes at most hookFailureRowsPerReport
+// rows, so a long outage's backlog does not hold the audit writer the
+// resuming hooks need, and leaves the rest to the next run, which a running
+// gateway starts after hookFailureBacklogInterval. It used to write one
+// summary row for the rest and never their own rows: after an 18000-call
+// flood at 96 or 128 calls in parallel on per-user Windows, 691 and 1231
+// calls the agent saw denied kept only their connector-hook allow row
+// (rel-1-0-6:GAP-0370).
 const (
 	hookFailuresFile         = "hook-failures.jsonl"
 	hookFailuresReportedFile = "hook-failures.reported"
-	// hookFailOpenReportMaxBytes bounds what one start reads. With more
-	// unread, the report reads the newest lines (readHookFailOpenCalls).
-	hookFailOpenReportMaxBytes = 16 << 20
 	// hookFailuresHeadBytes bounds the first line the report fingerprints.
 	hookFailuresHeadBytes = 4096
 	// hookFailOpenReportMaxAge leaves out calls older than the default
@@ -49,6 +67,24 @@ const (
 	// item 3).
 	hookFailOpenReportMaxAge = 7 * 24 * time.Hour
 )
+
+// hookFailOpenReportMaxBytes bounds what one run reads. With more unread
+// and no backlog pending, the report reads the newest lines
+// (readHookFailureCalls). A variable for tests.
+var hookFailOpenReportMaxBytes int64 = 16 << 20
+
+// hookFailureRowsPerReport bounds the per-call audit rows one report run
+// writes; the next run goes on from the first call it did not record. A
+// variable for tests.
+var hookFailureRowsPerReport = 1000
+
+// hookFailureBacklogInterval is how soon a running gateway reports again
+// while a run left calls without their rows (hookFailuresReported
+// AuditPending): with hookFailureRowsPerReport rows a run, at most 200 rows
+// a second. A run itself takes 5-10 s on a loaded Windows disk, so the
+// 15-17k hook-blocked calls of a par-128 flood took 3-5 minutes to record
+// (rel-1-0-6:GAP-0370). A variable for tests.
+var hookFailureBacklogInterval = 5 * time.Second
 
 // hookFailOpenReportInterval is how often a running per-user gateway looks
 // for new hook-failure lines. A call that ran fail-open while the gateway
@@ -62,6 +98,10 @@ var hookFailOpenReportInterval = time.Minute
 // sets it to "", so no test reads or writes the host account's logs.
 var hookFailuresHooksHome = config.DefaultDataPath
 
+// hookFailureWatchWakes counts the running gateway's hook-failure checks,
+// so a test can tell that the backlog timer stopped.
+var hookFailureWatchWakes atomic.Int64
+
 // hookFailOpenReportMu keeps the start-up report and a write-recovery report
 // from reading the same lines.
 var hookFailOpenReportMu sync.Mutex
@@ -71,9 +111,16 @@ type hookFailureLine struct {
 	Connector string `json:"connector"`
 	SessionID string `json:"session_id"`
 	CallID    string `json:"call_id"`
-	Reason    string `json:"reason"`
-	Category  string `json:"category"`
-	FailMode  string `json:"fail_mode"`
+	// ToolID is CallID when the hook took it from the agent's tool call id
+	// (tool_use_id, tool_call_id, callID). Empty in lines of hooks before
+	// 1.0.7.
+	ToolID string `json:"tool_id"`
+	// Event is the hook event (PreToolUse, PostToolUse, ...). Empty in the
+	// shell hooks' lines before 1.0.7.
+	Event    string `json:"event"`
+	Reason   string `json:"reason"`
+	Category string `json:"category"`
+	FailMode string `json:"fail_mode"`
 	// Outcome is what the call got: fail_open (it ran unchecked),
 	// fail_closed (it was blocked) or diagnostic (a record that is no
 	// delivery decision, such as a rejected traceparent: the call still went
@@ -98,6 +145,13 @@ func (l hookFailureLine) ranUnchecked() bool {
 		return false
 	}
 	return strings.TrimSpace(l.FailMode) == "open"
+}
+
+// blockedByHook reports whether the hook blocked the logged call itself:
+// the agent got a block that no gateway decision row records (GAP-0271).
+// Only the outcome the hook wrote counts; a line without one is no proof.
+func (l hookFailureLine) blockedByHook() bool {
+	return strings.TrimSpace(l.Outcome) == "fail_closed"
 }
 
 // hookFailOpenSummary is the fail-open calls of one connector. One call can
@@ -143,6 +197,11 @@ type hookFailuresReported struct {
 	// The summary alert and the per-call audit progress independently. A
 	// failed summary write must not duplicate already recorded call rows.
 	AuditOffset int64 `json:"audit_offset,omitempty"`
+	// AuditPending is true when a run reached hookFailureRowsPerReport: the
+	// calls after AuditOffset still need their rows, so the next run reads
+	// from AuditOffset (Done keeps their fail-open alert from being counted
+	// again).
+	AuditPending bool `json:"audit_pending,omitempty"`
 	// Head fingerprints the file's first line at Offset: a file replaced by
 	// another one, even a longer one, is read again from its start instead
 	// of from the middle of a line (rel-1-0-2 GAP-0446). Empty in a state
@@ -154,12 +213,14 @@ type hookFailuresReported struct {
 	Done map[string]int64 `json:"done,omitempty"`
 }
 
-// reportHookFailOpenCalls records the fail-open hook calls written to
-// hook-failures.jsonl since the last report (hookFailOpenLogDirs). Per-user
-// gateways only: a managed hook's failures are not in the gateway's data
-// directory, and managed hooks fail closed (the block is visible in the
+// reportHookFailureCalls records the hook calls written to
+// hook-failures.jsonl since the last report (hookFailOpenLogDirs): one audit
+// row per call that ran unchecked (fail-open) or that the hook blocked
+// itself (fail-closed), and one alert per connector for the fail-open ones.
+// Per-user gateways only: a managed hook's failures are not in the gateway's
+// data directory, and managed hooks fail closed (the block is visible in the
 // agent).
-func (s *Sidecar) reportHookFailOpenCalls() {
+func (s *Sidecar) reportHookFailureCalls() {
 	if s == nil || s.logger == nil || ManagedEnterpriseActive() {
 		return
 	}
@@ -168,8 +229,8 @@ func (s *Sidecar) reportHookFailOpenCalls() {
 		return
 	}
 	for _, logDir := range hookFailOpenLogDirs(cfg.DataDir) {
-		if err := reportHookFailOpenCallsIn(logDir, s.logger, time.Now().UTC()); err != nil {
-			fmt.Fprintf(os.Stderr, "[gateway] fail-open hook call report: %v\n", err)
+		if err := reportHookFailureCallsIn(logDir, s.logger, time.Now().UTC()); err != nil {
+			fmt.Fprintf(os.Stderr, "[gateway] hook failure report: %v\n", err)
 		}
 	}
 }
@@ -206,11 +267,11 @@ func hookFailOpenLogDirs(dataDir string) []string {
 	return dirs
 }
 
-// watchHookFailOpenCalls reports new hook-failure lines while the gateway
+// watchHookFailureCalls reports new hook-failure lines while the gateway
 // runs (hookFailOpenReportInterval), so a call that ran fail-open while the
 // gateway was up is not left for the next start. It reads a folder only when
 // its file's size or time changed. A managed gateway starts no timer.
-func (s *Sidecar) watchHookFailOpenCalls(ctx context.Context) {
+func (s *Sidecar) watchHookFailureCalls(ctx context.Context) {
 	if s == nil || s.logger == nil || ManagedEnterpriseActive() {
 		return
 	}
@@ -221,18 +282,29 @@ func (s *Sidecar) watchHookFailOpenCalls(ctx context.Context) {
 		mod  time.Time
 	}
 	seen := map[string]stamp{}
+	backlog := time.NewTimer(hookFailureBacklogInterval)
+	backlog.Stop()
+	defer backlog.Stop()
+	// A gateway that restarts while a run left calls pending goes on at the
+	// backlog cadence, not at the first tick of the ticker.
+	if cfg := s.currentConfig(); hookFailOpenReportApplies(cfg) && hookFailureRowsPending(hookFailOpenLogDirs(cfg.DataDir)) {
+		backlog.Reset(hookFailureBacklogInterval)
+	}
 	for {
 		select {
 		case <-ctx.Done():
 			return
 		case <-ticker.C:
+		case <-backlog.C:
 		}
+		hookFailureWatchWakes.Add(1)
 		cfg := s.currentConfig()
 		if !hookFailOpenReportApplies(cfg) {
 			continue
 		}
+		dirs := hookFailOpenLogDirs(cfg.DataDir)
 		changed := false
-		for _, dir := range hookFailOpenLogDirs(cfg.DataDir) {
+		for _, dir := range dirs {
 			var now stamp
 			if info, err := os.Stat(filepath.Join(dir, hookFailuresFile)); err == nil {
 				now = stamp{size: info.Size(), mod: info.ModTime()}
@@ -241,16 +313,34 @@ func (s *Sidecar) watchHookFailOpenCalls(ctx context.Context) {
 				seen[dir], changed = now, true
 			}
 		}
-		if changed {
-			s.reportHookFailOpenCalls()
+		if changed || hookFailureRowsPending(dirs) {
+			s.reportHookFailureCalls()
+		}
+		if hookFailureRowsPending(dirs) {
+			backlog.Reset(hookFailureBacklogInterval)
 		}
 	}
 }
 
-func reportHookFailOpenCallsIn(logDir string, logger *audit.Logger, now time.Time) error {
+// hookFailureRowsPending reports whether a report run in one of dirs left
+// calls without their audit rows (AuditPending). It reads the state under
+// hookFailOpenReportMu: on Windows a report's rename of the state file fails
+// while another open of it is in progress.
+func hookFailureRowsPending(dirs []string) bool {
 	hookFailOpenReportMu.Lock()
 	defer hookFailOpenReportMu.Unlock()
-	summaries, read, err := readHookFailOpenCalls(logDir, now)
+	for _, dir := range dirs {
+		if readHookFailuresReported(dir).AuditPending {
+			return true
+		}
+	}
+	return false
+}
+
+func reportHookFailureCallsIn(logDir string, logger *audit.Logger, now time.Time) error {
+	hookFailOpenReportMu.Lock()
+	defer hookFailOpenReportMu.Unlock()
+	summaries, read, err := readHookFailureCalls(logDir, now)
 	if err != nil {
 		return err
 	}
@@ -263,30 +353,56 @@ func reportHookFailOpenCallsIn(logDir string, logger *audit.Logger, now time.Tim
 		}
 		return nil
 	}
+	written, pending := 0, false
 	for _, call := range read.calls {
 		if call.end <= read.start.AuditOffset {
+			// Recorded by a run whose later write failed (it kept Offset), or
+			// by the run that left the rest pending.
 			continue
+		}
+		if written >= hookFailureRowsPerReport {
+			// The next run goes on from here (AuditPending).
+			pending = true
+			break
 		}
 		env := audit.CorrelationEnvelope{Connector: call.entry.Connector,
 			SessionID: call.entry.SessionID, RequestID: call.entry.CallID}
-		ctx := audit.ContextWithEnvelope(context.Background(), env)
-		reason := strings.TrimSpace(call.entry.Reason)
-		if len(reason) > 300 {
-			reason = reason[:300]
+		if call.blocked {
+			env.ToolID = strings.TrimSpace(call.entry.ToolID)
 		}
-		details := fmt.Sprintf("unchecked hook call during gateway outage: %s; see logs/%s", strconv.Quote(reason), hookFailuresFile)
-		if err := logger.LogActionCtxSeverity(ctx, string(audit.ActionGuardrailWarn), call.entry.Connector, details, "HIGH"); err != nil {
+		ctx := audit.ContextWithEnvelope(context.Background(), env)
+		action, target, details, severity := hookFailureRow(call)
+		if err := logger.LogActionCtxSeverity(ctx, action, target, details, severity); err != nil {
+			// The calls after AuditOffset still need their rows: keep the
+			// running gateway's backlog cadence going. AuditOffset never
+			// stays below Offset: a state from before 1.0.5 has none (0), and
+			// a run that jumped to the last window starts with the old one,
+			// so the next run would read every line before Offset again
+			// (duplicate fail-open alerts and rows).
+			read.start.AuditPending = true
+			if read.start.AuditOffset < read.start.Offset {
+				read.start.AuditOffset = read.start.Offset
+			}
 			_ = writeHookFailuresReported(logDir, read.start)
-			return fmt.Errorf("record %s unchecked hook call: %w", call.entry.Connector, err)
+			return fmt.Errorf("record %s hook call %s: %w", call.entry.Connector, action, err)
 		}
 		read.start.AuditOffset = call.end
+		written++
 	}
-	read.start.AuditOffset = read.next
+	if !pending {
+		read.start.AuditOffset = read.next
+	}
+	if read.more {
+		// A pending backlog longer than one read window: the next run reads
+		// on from here instead of jumping to the file's last window.
+		pending = true
+	}
 	for _, sum := range summaries {
 		if err := logger.LogActionSeverityConnector(string(audit.ActionGuardrailDegraded), sum.Connector,
 			describeHookFailOpenCalls(sum), "HIGH", sum.Connector); err != nil {
 			// Keep the offset, so the next report reads these lines again,
 			// but not the connectors recorded before this one.
+			read.start.AuditPending = true
 			_ = writeHookFailuresReported(logDir, read.start)
 			return fmt.Errorf("record %s fail-open calls: %w", sum.Connector, err)
 		}
@@ -295,38 +411,99 @@ func reportHookFailOpenCallsIn(logDir string, logger *audit.Logger, now time.Tim
 		}
 		read.start.Done[sum.Connector] = read.next
 	}
-	return writeHookFailuresReported(logDir, hookFailuresReported{Offset: read.next, Head: read.start.Head,
-		AuditOffset: read.start.AuditOffset})
+	done := hookFailuresReported{Offset: read.next, Head: read.start.Head, AuditOffset: read.start.AuditOffset}
+	if pending {
+		// The next run reads from AuditOffset again: keep which connectors'
+		// fail-open lines up to here are already in an alert.
+		done.AuditPending, done.Done = true, read.start.Done
+	}
+	return writeHookFailuresReported(logDir, done)
 }
 
-// hookFailOpenRead is where one report read: the state it started from
+// hookFailureRow is the audit row of one hook-failure line: a fail-open
+// call ran unchecked (guardrail-warn, HIGH); a fail-closed one was blocked by
+// the hook (guardrail-block, MEDIUM, target connector:event). Only the
+// block of a pre-execution event is the call's own block, the answer the
+// agent got for it; a post-execution event's tool had already run, and a
+// line that names no event (a shell hook before 1.0.7) is not claimed as
+// either.
+func hookFailureRow(call hookFailureCall) (action, target, details, severity string) {
+	reason := strings.TrimSpace(call.entry.Reason)
+	if len(reason) > 300 {
+		reason = reason[:300]
+	}
+	connectorName := call.entry.Connector
+	if !call.blocked {
+		return string(audit.ActionGuardrailWarn), connectorName,
+			fmt.Sprintf("unchecked hook call during gateway outage: %s; see logs/%s", strconv.Quote(reason), hookFailuresFile), "HIGH"
+	}
+	event := strings.Join(strings.Fields(call.entry.Event), "")
+	if len(event) > 64 {
+		event = event[:64]
+	}
+	target = connectorName
+	if event != "" {
+		target = connectorName + ":" + event
+	}
+	var what string
+	switch {
+	case event == "":
+		what = "hook blocked a hook event itself (fail-closed; the line names no event, so this is not claimed as the call's verdict)"
+	case hookexec.ToolGateEvent(connectorName, event):
+		what = fmt.Sprintf("hook blocked the call itself (fail-closed, %s): the agent got this block, "+
+			"not a gateway decision recorded for the call", event)
+	case postExecutionHookEvent(event):
+		what = fmt.Sprintf("the tool had already run; the hook blocked its result (fail-closed, %s), "+
+			"not the call", event)
+	default:
+		what = fmt.Sprintf("hook blocked its %s event itself (fail-closed), not a tool call", event)
+	}
+	return string(audit.ActionGuardrailBlock), target,
+		fmt.Sprintf("%s: %s; see logs/%s", what, strconv.Quote(reason), hookFailuresFile), "MEDIUM"
+}
+
+// postExecutionHookEvent reports a hook event that runs after its tool
+// call ran: PostToolUse, postToolUse, post_tool_call, tool.execute.after,
+// afterShellExecution, tool.result and the like.
+func postExecutionHookEvent(event string) bool {
+	lower := strings.ToLower(event)
+	return strings.HasPrefix(lower, "post") || strings.HasPrefix(lower, "after") ||
+		strings.HasSuffix(lower, ".after") || lower == "tool.result"
+}
+
+// hookFailureRead is where one report read: the state it started from
 // (the offset it read at, the file's head and the connectors already
 // recorded) and the offset after its last complete line.
-type hookFailOpenRead struct {
+type hookFailureRead struct {
 	start hookFailuresReported
 	next  int64
-	calls []hookFailOpenCall
+	calls []hookFailureCall
 	// found is false when there is no hook-failures.jsonl.
 	found bool
+	// more: a pending backlog goes on past this run's read window.
+	more bool
 }
 
-type hookFailOpenCall struct {
+type hookFailureCall struct {
 	entry hookFailureLine
 	end   int64
+	// blocked: the hook blocked the call itself (blockedByHook); it gets a
+	// guardrail-block row and no place in the fail-open alert.
+	blocked bool
 }
 
-// readHookFailOpenCalls returns the fail-open calls after the reported
+// readHookFailureCalls returns the fail-open calls after the reported
 // offset, grouped by connector, and where it read. A file shorter than the
 // offset, or whose first line changed, was replaced and is read again from
 // the start. With more than hookFailOpenReportMaxBytes unread (a first start
 // after an upgrade with a large file), it reads the newest lines, from the
 // first line that starts in the last hookFailOpenReportMaxBytes.
-func readHookFailOpenCalls(logDir string, now time.Time) ([]hookFailOpenSummary, hookFailOpenRead, error) {
+func readHookFailureCalls(logDir string, now time.Time) ([]hookFailOpenSummary, hookFailureRead, error) {
 	state := readHookFailuresReported(logDir)
-	read := hookFailOpenRead{start: state, next: state.Offset, found: true}
+	read := hookFailureRead{start: state, next: state.Offset, found: true}
 	f, err := os.Open(filepath.Join(logDir, hookFailuresFile))
 	if errors.Is(err, os.ErrNotExist) {
-		return nil, hookFailOpenRead{}, nil
+		return nil, hookFailureRead{}, nil
 	}
 	if err != nil {
 		return nil, read, err
@@ -346,10 +523,20 @@ func readHookFailOpenCalls(logDir string, now time.Time) ([]hookFailOpenSummary,
 		state.AuditOffset = 0
 		positioned = false
 	}
+	if state.AuditPending && positioned && state.AuditOffset >= 0 && state.AuditOffset < offset {
+		// A run left calls without their rows: read them again from the
+		// first one; Done keeps their fail-open alert from counting twice.
+		offset = state.AuditOffset
+	}
 	skipPartial := false
-	if info.Size()-offset > hookFailOpenReportMaxBytes {
+	// A run that left calls pending goes on from them: jumping to the
+	// file's last window would skip them unrecorded. The LimitReader
+	// bounds the run.
+	keepWindow := state.AuditPending && positioned
+	if !keepWindow && info.Size()-offset > hookFailOpenReportMaxBytes {
 		offset, skipPartial = info.Size()-hookFailOpenReportMaxBytes, true
 	}
+	read.more = keepWindow && info.Size()-offset > hookFailOpenReportMaxBytes
 	if _, err := f.Seek(offset, io.SeekStart); err != nil {
 		return nil, read, err
 	}
@@ -373,7 +560,11 @@ func readHookFailOpenCalls(logDir string, now time.Time) ([]hookFailOpenSummary,
 		}
 		next += int64(len(line))
 		var entry hookFailureLine
-		if json.Unmarshal(line, &entry) != nil || !entry.ranUnchecked() {
+		if json.Unmarshal(line, &entry) != nil {
+			continue
+		}
+		blocked := entry.blockedByHook()
+		if !blocked && !entry.ranUnchecked() {
 			continue
 		}
 		at, perr := time.Parse(time.RFC3339, strings.TrimSpace(entry.TS))
@@ -382,8 +573,8 @@ func readHookFailOpenCalls(logDir string, now time.Time) ([]hookFailOpenSummary,
 			continue
 		}
 		entry.Connector = connectorName
-		read.calls = append(read.calls, hookFailOpenCall{entry: entry, end: next})
-		if next <= state.Done[connectorName] {
+		read.calls = append(read.calls, hookFailureCall{entry: entry, end: next, blocked: blocked})
+		if blocked || next <= state.Done[connectorName] {
 			continue
 		}
 		sum := byConnector[connectorName]

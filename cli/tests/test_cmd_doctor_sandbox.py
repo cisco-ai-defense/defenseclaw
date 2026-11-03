@@ -15,6 +15,7 @@ from __future__ import annotations
 import json
 import os
 import stat
+import threading
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -93,6 +94,103 @@ def test_disabled_sandboxes_are_one_skip_row_without_running_the_gateway(monkeyp
     _check_sandbox(_cfg(False), result)
     assert _rows(result) == [("skip", "Sandboxes", "doctor.sandbox.enabled")]
     assert "defenseclaw sandbox setup" in result.checks[0]["detail"]
+
+
+def test_prefetched_sandbox_probe_overlaps_earlier_checks_but_keeps_row_order(monkeypatch) -> None:
+    started, release = threading.Event(), threading.Event()
+    calls = []
+
+    def probe(binary):
+        calls.append(binary)
+        started.set()
+        assert release.wait(2)
+        return REPORT, ""
+
+    monkeypatch.setattr("defenseclaw.gateway.resolve_gateway_binary", lambda: "/fake/gateway")
+    monkeypatch.setattr(cmd_doctor, "sandbox_doctor_report", probe)
+    monkeypatch.setattr(cmd_doctor, "_json_mode", True)
+    pool, prefetched = cmd_doctor._prefetch_sandbox_report(_cfg(True))
+    assert pool is not None and prefetched is not None
+    try:
+        assert started.wait(2)
+        result = _DoctorResult()
+        result.set_section("scanners")
+        cmd_doctor._emit("pass", "Scanner", "ready", r=result)
+        assert [row["section"] for row in result.checks] == ["scanners"]
+        release.set()
+        result.set_section("sandbox")
+        _check_sandbox(_cfg(True), result, prefetched=prefetched)
+    finally:
+        release.set()
+        pool.shutdown(wait=True)
+
+    assert calls == ["/fake/gateway"]
+    assert [row["label"] for row in result.checks] == [
+        "Scanner",
+        "Platform",
+        "OpenShell CLI",
+        "Harness images",
+        "Shell wrappers",
+        "Odd",
+    ]
+
+
+def test_prefetched_sandbox_probe_rechecks_state_changed_before_sandbox_section(monkeypatch) -> None:
+    state = {"reachable": True}
+    sampled = threading.Event()
+    calls = []
+    state_reads = []
+
+    class FakeClient:
+        def __init__(self, **_kwargs):
+            self._session = SimpleNamespace(close=lambda: None)
+
+        def sandbox_status(self):
+            state_reads.append(state["reachable"])
+            return {"available": state["reachable"]}
+
+        def list_sandboxes(self):
+            return [{"hooks_reachable": state["reachable"]}]
+
+    def probe(binary):
+        calls.append(binary)
+        reachable = state["reachable"]
+        sampled.set()
+        return ({"ok": reachable, "checks": [{
+            "id": "sandbox-hooks", "title": "Sandbox hooks",
+            "status": "pass" if reachable else "fail",
+            "detail": "hooks reachable" if reachable else "hooks unreachable",
+        }]}, "")
+
+    monkeypatch.setattr("defenseclaw.gateway.resolve_gateway_binary", lambda: "/fake/gateway")
+    monkeypatch.setattr("defenseclaw.gateway.OrchestratorClient", FakeClient)
+    monkeypatch.setattr(cmd_doctor, "sandbox_doctor_report", probe)
+    monkeypatch.setattr(cmd_doctor, "_gateway_api_host", lambda _cfg: "127.0.0.1")
+    monkeypatch.setattr(cmd_doctor, "_json_mode", True)
+    cfg = _cfg(True)
+    cfg.gateway = SimpleNamespace(api_port=18970, resolved_token=lambda: "token")
+    pool, prefetched = cmd_doctor._prefetch_sandbox_report(cfg)
+    assert pool is not None and prefetched is not None
+    try:
+        assert sampled.wait(2)
+        state["reachable"] = False  # An earlier configuration check sees the change.
+        result = _DoctorResult()
+        result.set_section("sandbox")
+        _check_sandbox(cfg, result, prefetched=prefetched)
+    finally:
+        pool.shutdown(wait=True)
+
+    assert calls == ["/fake/gateway", "/fake/gateway"]
+    assert state_reads == [True, False]
+    assert _rows(result) == [("fail", "Sandbox hooks", "doctor.sandbox.sandbox-hooks")]
+
+
+def test_prefetch_has_no_off_path_work(monkeypatch) -> None:
+    monkeypatch.setattr(
+        "defenseclaw.gateway.resolve_gateway_binary",
+        lambda: pytest.fail("gateway resolved"),
+    )
+    assert cmd_doctor._prefetch_sandbox_report(_cfg(False)) == (None, None)
 
 
 def test_a_stand_in_config_never_reads_as_enabled(monkeypatch) -> None:

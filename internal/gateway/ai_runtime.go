@@ -188,6 +188,10 @@ func (s *Sidecar) runAIRuntime(ctx context.Context) error {
 			if !shouldEmitAIRuntimeSnapshot(snapshot.ScannedAt, lastEmitted) {
 				continue
 			}
+			// Take the snapshot to emit: its kernel events are handed over
+			// once, and a poll that lands before this read keeps them
+			// (rel-1-0-6:GAP-0148).
+			snapshot = service.TakeSnapshot()
 			lastEmitted = snapshot.ScannedAt
 			notifyKernelBlocks(s.OSNotifier(), snapshot)
 			// Emission is best-effort and never blocks the planes. A

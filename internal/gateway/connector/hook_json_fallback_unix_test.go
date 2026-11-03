@@ -257,7 +257,7 @@ func TestShellFallbackUpgradeReplacesV9Helper(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if parseHookSchemaVersion(got) != 10 || !strings.Contains(string(got), "function obj(level") {
+	if parseHookSchemaVersion(got) < 10 || !strings.Contains(string(got), "function obj(level") {
 		t.Fatal("upgrade retained the old shell decision parser")
 	}
 }

@@ -50,29 +50,74 @@ func ActionCommandDecisionWithGlobFacts(command, cwd, home string, facts map[str
 //
 // dialect is an explicit hint, set by the tool that runs the command.
 func ActionCommandDecisionWithDialectAndGlobFacts(command, cwd, home string, dialect actionfacts.Dialect, facts map[string]string) string {
-	return actionTargetDecision(command, cwd, home, dialect, dialect == actionfacts.DialectPOSIX, facts)
+	return (*TargetMemo)(nil).ActionCommandDecisionWithDialectAndGlobFacts(command, cwd, home, dialect, facts)
+}
+
+// ActionCommandDecisionWithDialectAndGlobFacts is the package function of
+// that name, with the file system answers of the evaluation m (nil: none).
+func (m *TargetMemo) ActionCommandDecisionWithDialectAndGlobFacts(command, cwd, home string, dialect actionfacts.Dialect, facts map[string]string) string {
+	return actionTargetDecision(command, cwd, home, dialect, dialect == actionfacts.DialectPOSIX, facts, m)
 }
 
 // ActionCommandDecisionInShell is ActionCommandDecisionWithGlobFacts for a
 // call with no dialect hint that the gateway's parse reads as POSIX
 // (posixShell). That guess adds the POSIX reading and drops none.
 func ActionCommandDecisionInShell(command, cwd, home string, facts map[string]string, posixShell bool) string {
-	return actionTargetDecision(command, cwd, home, "", posixShell, facts)
+	return (*TargetMemo)(nil).ActionCommandDecisionInShell(command, cwd, home, facts, posixShell)
 }
 
-func actionTargetDecision(command, cwd, home string, dialect actionfacts.Dialect, posixShell bool, facts map[string]string) string {
+// ActionCommandDecisionInShell is the package function of that name, with
+// the file system answers of the evaluation m (nil: none).
+func (m *TargetMemo) ActionCommandDecisionInShell(command, cwd, home string, facts map[string]string, posixShell bool) string {
+	return actionTargetDecision(command, cwd, home, "", posixShell, facts, m)
+}
+
+func actionTargetDecision(command, cwd, home string, dialect actionfacts.Dialect, posixShell bool, facts map[string]string, memo *TargetMemo) string {
+	// A single quoted print piped to the named env/cat display has no
+	// writable operand. Prove its full shape before the target scans: an
+	// extra stage, redirect or explicit executable must take the normal
+	// readings (GAP-0227).
+	if actionWindowsHome(home) && actionSimpleEnvTextDisplay(command) {
+		return ""
+	}
+	// A Git Bash home glob in an entirely read-only compound names no
+	// protected write in either Windows or POSIX syntax. Keep the proof
+	// syntactic so a later redirect or copy still reaches all target scans.
+	if dialect == actionfacts.DialectPOSIX && actionWindowsHome(home) && strings.Contains(command, "*/*") {
+		if file, parsed := parseShell(command); parsed &&
+			(actionKnownReadOnlyShell(file, home) ||
+				strings.Contains(command, "pwd") && actionReadOnlyListingCompound(file, cwd, home)) {
+			return ""
+		}
+	}
+	if strings.HasPrefix(strings.TrimSpace(command), "bash -c ") {
+		if file, parsed := parseShell(command); parsed && len(file.Stmts) == 1 &&
+			len(file.Stmts[0].Redirs) == 0 && !file.Stmts[0].Background && !file.Stmts[0].Coprocess &&
+			!file.Stmts[0].Negated {
+			if call, ok := file.Stmts[0].Cmd.(*syntax.CallExpr); ok && len(call.Args) > 0 {
+				if program, known := StaticWord(call.Args[0], home); known && programBase(program) == "bash" &&
+					actionReadOnlyBashCLaunch(call, home, 0) {
+					return ""
+				}
+			}
+		}
+	}
+	if memo == nil {
+		// Every reading of this decision shares one memo.
+		memo = NewTargetMemo()
+	}
 	var globs *actionGlobs
 	if facts != nil {
 		globs = &actionGlobs{facts: facts}
 	}
 	if !actionGitBashReadsAlone(command, home, dialect) &&
-		actionProtectedTargetMentionIn(command, cwd, home, 0, false, globs, dialect) {
+		actionProtectedTargetMentionIn(command, cwd, home, 0, false, globs, dialect, memo) {
 		return "protected-target"
 	}
 	if posixShell && actionWindowsHome(home) && command != "" && len(command) <= MaxPayloadBytes {
-		if actionWindowsLiteralHereDocumentTarget(command, home) ||
-			actionPosixTargetMention(command, cwd, home, 0, false, globs.forCommand(command)) ||
-			runtime.GOOS == "windows" && actionConcreteProtectedWriteOn(command, cwd, home, true) {
+		if actionWindowsLiteralHereDocumentTarget(command, home, memo) ||
+			actionPosixTargetMention(command, cwd, home, 0, false, globs.forCommandWith(command, memo)) ||
+			runtime.GOOS == "windows" && actionConcreteProtectedWriteOnWith(command, cwd, home, true, memo) {
 			return "protected-target"
 		}
 	}
@@ -85,10 +130,25 @@ func actionTargetDecision(command, cwd, home string, dialect actionfacts.Dialect
 	if actionMakeProtectedRecipe(command, cwd, home) {
 		return "protected-target"
 	}
-	if actionConcreteProtectedWrite(command, cwd, home) {
+	if actionConcreteProtectedWriteOnWith(command, cwd, home, false, memo) {
 		return "protected-target"
 	}
 	return ""
+}
+
+func actionSimpleEnvTextDisplay(command string) bool {
+	program, rest, ok := strings.Cut(command, " ")
+	if !ok || program != "echo" && program != "printf" {
+		return false
+	}
+	const suffix = "' | env -S 'cat -n'"
+	if !strings.HasPrefix(rest, "'") || !strings.HasSuffix(rest, suffix) {
+		return false
+	}
+	literal := strings.TrimSuffix(strings.TrimPrefix(rest, "'"), suffix)
+	// cmd.exe does not treat single quotes as quoting. Its control and
+	// expansion characters must not hide a second command in the text.
+	return !strings.ContainsAny(literal, "'\"\r\n&|<>()^%!")
 }
 
 func actionConcreteProtectedWrite(command, cwd, home string) bool {
@@ -98,25 +158,96 @@ func actionConcreteProtectedWrite(command, cwd, home string) bool {
 // actionConcreteProtectedWriteOn reads POSIX write operands; windowsHome
 // allows a Windows home (a POSIX shell on a native Windows host).
 func actionConcreteProtectedWriteOn(command, cwd, home string, windowsHome bool) bool {
+	return actionConcreteProtectedWriteOnWith(command, cwd, home, windowsHome, nil)
+}
+
+// actionConcreteProtectedWriteOnWith is actionConcreteProtectedWriteOn with
+// the evaluation's file system answers (TargetMemo; nil: none).
+func actionConcreteProtectedWriteOnWith(command, cwd, home string, windowsHome bool, memo *TargetMemo) bool {
+	return actionConcreteProtectedWriteOnWithOperands(command, cwd, home, windowsHome, memo, nil)
+}
+
+// actionConcreteOperands holds writer operands already found during one
+// client decision, so its subsequent action description reuses that reading.
+type actionConcreteOperands struct {
+	literal, loop, sourceGlob, globLoop []string
+	shellParsed, ready                  bool
+}
+
+func actionConcreteProtectedWriteOnWithOperands(command, cwd, home string, windowsHome bool, memo *TargetMemo, cache *actionConcreteOperands) bool {
 	if command == "" || home == "" || actionWindowsHome(home) && !windowsHome || !filepath.IsAbs(cwd) {
 		return false
 	}
-	if !windowsHome && actionMoveProtectedEntry(command, cwd, home) {
+	protected := memo.protectedFiles(home)
+	ssh := filepath.Join(home, ".ssh")
+	var file *syntax.File
+	var parsed, parsedOnce bool
+	clientCandidate := !windowsHome && len(command) <= MaxPayloadBytes && actionClientWriteCandidate(command)
+	if !windowsHome {
+		file, parsed = parseShell(command)
+		parsedOnce = true
+	}
+	if clientCandidate && parsed && len(file.Stmts) == 1 {
+		stmt := file.Stmts[0]
+		if call, ok := stmt.Cmd.(*syntax.CallExpr); ok && !stmt.Background && !stmt.Negated &&
+			len(stmt.Redirs) == 0 && len(actionSSHDirectorySetupWords(call, actionValues{"HOME": home}, cwd, home)) > 0 {
+			return false
+		}
+	}
+	if clientCandidate && parsed && actionClientResolvedProtectedWrite(file, command, cwd, home, protected, ssh) {
 		return true
 	}
-	protected := newProtectedFiles(home)
-	ssh := filepath.Join(home, ".ssh")
-	writes, _, _ := ShellWriteOperands(command, cwd, home)
-	writes = append(writes, LiteralWriteOperands(command, cwd, home)...)
-	writes = append(writes, AdjacentAssignedWriteOperands(command, cwd, home)...)
-	bounded, _ := BoundedShellWriteOperands(command, cwd, home)
-	writes = append(writes, bounded...)
-	directoryWrites, _ := ShellDirectoryWriteOperands(command, cwd, home, nil, false, false)
+	if !windowsHome && parsed && actionMoveProtectedEntryWithFile(command, cwd, home, file) {
+		return true
+	}
+	if !windowsHome && actionClientBoundedLoopCopyPotentialProtected(command, cwd, home) {
+		return true
+	}
+	// These readers only return output redirects. A command with no '>'
+	// still needs its copy, mutation and directory-write readings below.
+	hasOutputRedirect := strings.Contains(command, ">")
+	var writes []string
+	if hasOutputRedirect {
+		writes, _, _ = ShellWriteOperands(command, cwd, home)
+	}
+	var literalWrites []string
+	if parsed {
+		literalWrites, _ = literalWriteOperandsWithParsed(command, cwd, home, 0, file)
+	} else {
+		literalWrites = LiteralWriteOperands(command, cwd, home)
+	}
+	writes = append(writes, literalWrites...)
+	if hasOutputRedirect {
+		writes = append(writes, AdjacentAssignedWriteOperands(command, cwd, home)...)
+	}
+	loopWrites := BoundedLoopCopyDestinations(command, cwd, home)
+	writes = append(writes, loopWrites...)
+	sourceGlobWrites := CopySourceGlobDestinations(command, cwd, home, nil)
+	writes = append(writes, sourceGlobWrites...)
+	globLoopWrites := boundedGlobLoopCopyDestinationsWithFile(command, cwd, home, nil, file)
+	writes = append(writes, globLoopWrites...)
+	if cache != nil {
+		*cache = actionConcreteOperands{literal: literalWrites, loop: loopWrites, sourceGlob: sourceGlobWrites, globLoop: globLoopWrites, ready: true}
+	}
+	if hasOutputRedirect {
+		bounded, _ := BoundedShellWriteOperands(command, cwd, home)
+		writes = append(writes, bounded...)
+	}
+	var directoryParsed bool
+	directoryWrites, _ := shellDirectoryWriteOperandsWithFile(command, cwd, home, nil, false, false, &directoryParsed, file)
+	if cache != nil && cache.ready {
+		cache.shellParsed = directoryParsed
+	}
 	for _, occurrence := range directoryWrites {
 		writes = append(writes, occurrence.Path)
 	}
-	patches, _ := ApplyPatchWriteTargets("Bash", nil, command, cwd, home)
-	writes = append(writes, patches...)
+	// A patch envelope and each supported patch program spell "patch".
+	// Other commands cannot contribute patch targets to this writer list.
+	if strings.Contains(strings.ToLower(command), "patch") {
+		patches, _ := ApplyPatchWriteTargets("Bash", nil, command, cwd, home)
+		writes = append(writes, patches...)
+	}
+	writes = append(writes, touchBraceWriteOperands(command, home)...)
 	msys := func(value string) string {
 		if windowsHome && runtime.GOOS == "windows" {
 			return actionMSYSDrivePath(value) // Git Bash /c/... (GAP-0781 RV8-1)
@@ -142,7 +273,7 @@ func actionConcreteProtectedWriteOn(command, cwd, home string, windowsHome bool)
 		}
 	}
 	for _, target := range writes {
-		if protectedReachPath(OperandPath(msys(target), cwd), protected, ssh) {
+		if protectedReachPathWith(OperandPath(msys(target), cwd), protected, ssh, memo) {
 			return true
 		}
 	}
@@ -151,17 +282,77 @@ func actionConcreteProtectedWriteOn(command, cwd, home string, windowsHome bool)
 	if !windowsHome && (len(writes) > 0 || strings.Contains(command, ">")) && diskLinkDotDotReachesState(command, cwd, home) {
 		return true
 	}
-	if file, ok := parseShell(command); ok {
-		values := actionValues{"HOME": home, "PWD": cwd}
-		for _, stmt := range file.Stmts {
-			actionUpdateValues(stmt, values, cwd, home)
-			for _, redirect := range stmt.Redirs {
-				if redirect.Word == nil || redirect.Op == syntax.RdrIn {
+	// All remaining checks in this reader examine output redirects. Every
+	// output redirect spelling contains '>'; copy and other writer operands
+	// have already been checked above.
+	if !strings.Contains(command, ">") {
+		return false
+	}
+	if !parsedOnce {
+		file, parsed = parseShell(command)
+	}
+	if parsed {
+		// The value tracker is needed only for a redirect whose target
+		// expands a shell parameter. Fixed redirects were already checked
+		// among the write operands above. Skipping candidate expansion for
+		// unrelated conditionals keeps this reader bounded.
+		valueRedirect := false
+		if strings.Contains(command, "$") {
+			syntax.Walk(file, func(node syntax.Node) bool {
+				redirect, ok := node.(*syntax.Redirect)
+				if ok && redirect.Word != nil && redirect.Op != syntax.RdrIn && wordExpandsParameter(redirect.Word) {
+					valueRedirect = true
+				}
+				return !valueRedirect
+			})
+		}
+		if valueRedirect {
+			values := actionValues{"HOME": home, "PWD": cwd}
+			trackKept := len(command) < 1024 || !actionfacts.ShellStatementsOverBudget(command)
+			var kept []actionValues
+			if trackKept {
+				kept = []actionValues{{"HOME": home, "PWD": cwd}}
+			}
+			steps := 0
+			for _, stmt := range file.Stmts {
+				actionUpdateValues(stmt, values, cwd, home)
+				if trackKept {
+					kept = actionUpdateValuesKept(stmt, kept, cwd, home, &steps)
+				}
+				if actionKeptSaturated(kept) {
+					uncertainWrite := false
+					syntax.Walk(stmt, func(node syntax.Node) bool {
+						redirect, ok := node.(*syntax.Redirect)
+						if !ok || redirect.Word == nil || redirect.Op == syntax.RdrIn {
+							return true
+						}
+						if values, known := actionSaturatedWordValues(redirect.Word, kept[0], cwd, home); known {
+							for _, value := range values {
+								if protectedReachPath(OperandPath(msys(value), cwd), protected, ssh) {
+									uncertainWrite = true
+									break
+								}
+							}
+						} else if wordExpandsParameter(redirect.Word) {
+							uncertainWrite = true
+						}
+						return !uncertainWrite
+					})
+					if uncertainWrite {
+						return true
+					}
 					continue
 				}
-				if value, known := actionWordValue(redirect.Word, values, cwd, home); known &&
-					protectedReachPath(OperandPath(msys(value), cwd), protected, ssh) {
-					return true
+				for _, redirect := range stmt.Redirs {
+					if redirect.Word == nil || redirect.Op == syntax.RdrIn {
+						continue
+					}
+					for _, candidate := range append([]actionValues{values}, kept...) {
+						if value, known := actionWordValue(redirect.Word, candidate, cwd, home); known &&
+							protectedReachPathWith(OperandPath(msys(value), cwd), protected, ssh, memo) {
+							return true
+						}
+					}
 				}
 			}
 		}
@@ -393,13 +584,15 @@ func actionSoleParameter(word *syntax.Word) string {
 	return param.Param.Value
 }
 
-// keyReadMode is how a reader's words are read: on a Windows home, and
-// with the shell's dotglob option set.
+// keyReadMode is how a reader's words are read: on a Windows home, with
+// the shell's dotglob option set, or by a native Windows program whose
+// runtime expands wildcards without selecting leading dot names.
 type keyReadMode uint8
 
 const (
 	keyReadWindows keyReadMode = 1 << iota
 	keyReadDotglob
+	keyReadNativeGlob
 )
 
 // Wrapper arguments are not file reads. Resolve a bounded, literal child
@@ -410,6 +603,12 @@ func actionPrivateKeyReadWords(words []string, cwd, home string, mode keyReadMod
 		return false
 	}
 	program := programBase(words[0])
+	// PowerShell passes a native head command's wildcard operand through to
+	// the executable. The MSYS runtime expands it without matching .ssh for
+	// */*, unlike Get-Content's PowerShell wildcard binding.
+	if windows && program == "head" {
+		mode |= keyReadNativeGlob
+	}
 	switch program {
 	case "cmd":
 		if windows && len(words) > 2 && strings.EqualFold(words[1], "/c") {
@@ -511,7 +710,9 @@ func actionPrivateKeyReadWords(words []string, cwd, home string, mode keyReadMod
 	}
 	if posixShellProgram(program) {
 		if body, known := shellCommandBodyIndex(words); known && body < len(words) {
-			return ActionPrivateKeyRead(words[body], cwd, home)
+			// The -c body runs in the child shell. On Windows, losing the
+			// POSIX dialect here would read a Git Bash glob as PowerShell.
+			return ActionPrivateKeyReadWithDialect(words[body], cwd, home, actionfacts.DialectPOSIX)
 		}
 		return false
 	}
@@ -908,14 +1109,16 @@ var actionPrivateKeyNames = []string{"id_rsa", "id_ed25519", "id_ecdsa", "id_dsa
 // key paths component by component, and expanded on this host with each
 // match resolved through links (GAP-1780: dirlink/id_*, keyl*). A POSIX
 // shell's * and ? do not select a leading dot without dotglob (R2-2: head
-// -n 5 */* from the home is not a key read); PowerShell's wildcards do. MSYS
-// drive spellings (/c/..., /cygdrive/c/...) map to the Windows home, and
-// darwin matches case-insensitively.
+// -n 5 */* from the home is not a key read); PowerShell cmdlet wildcards do.
+// Native head on Windows uses the leading-dot rule of its MSYS runtime.
+// MSYS drive spellings (/c/..., /cygdrive/c/...) map to the Windows home,
+// and darwin matches case-insensitively.
 func actionPrivateKeyGlob(value, cwd, home string, mode keyReadMode) bool {
 	if !strings.ContainsAny(value, "*?[") {
 		return false
 	}
 	if mode&keyReadWindows != 0 {
+		dotglob := mode&keyReadNativeGlob == 0
 		pattern := strings.ReplaceAll(value, `\`, "/")
 		lower := strings.ToLower(pattern)
 		for _, prefix := range []string{"%userprofile%", "%homedrive%%homepath%", "$env:userprofile", "${env:userprofile}", "$home", "${home}", "~"} {
@@ -932,14 +1135,14 @@ func actionPrivateKeyGlob(value, cwd, home string, mode keyReadMode) bool {
 		pattern = strings.ToLower(native)
 		root := strings.ToLower(path.Clean(strings.ReplaceAll(home, `\`, "/")))
 		for _, name := range actionPrivateKeyNames {
-			if actionKeyPatternMatch(pattern, root+"/.ssh/"+name, true) {
+			if actionKeyPatternMatch(pattern, root+"/.ssh/"+name, dotglob) {
 				return true
 			}
 		}
 		// On the Windows host itself the pattern is expanded and each match
 		// resolved through junctions and symlinks, as on POSIX (GAP-1780).
 		if runtime.GOOS == "windows" {
-			for _, match := range actionBoundedGlob(filepath.FromSlash(native), true) {
+			for _, match := range actionBoundedGlob(filepath.FromSlash(native), dotglob) {
 				if actionPrivateReadPath(match, cwd, home) {
 					return true
 				}

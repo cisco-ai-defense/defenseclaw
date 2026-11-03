@@ -382,6 +382,31 @@ function Get-ConfigGeneration([string]$Result) {
     return [int64]$document.policy.config_generation
 }
 
+# The file version MDM detection rules and the management sidecar read
+# (rel-1-0-6:GAP-0296: 1.0.5 and 1.0.6 shipped with none). Checked on the
+# Setup under test only: the previous release of an upgrade has none.
+function Assert-SetupVersionInfo([string]$Path, [string]$Expected) {
+    $info = (Get-Item -LiteralPath $Path).VersionInfo
+    $numeric = [regex]::Match($Expected, '^v?(\d+)\.(\d+)\.(\d+)')
+    if (-not $numeric.Success) { Fail "-Version $Expected is not a release version" }
+    $fixed = '{0}.{1}.{2}.0' -f $numeric.Groups[1].Value, $numeric.Groups[2].Value, $numeric.Groups[3].Value
+    $actualFixed = '{0}.{1}.{2}.{3}' -f $info.FileMajorPart, $info.FileMinorPart, $info.FileBuildPart, $info.FilePrivatePart
+    $actualProductFixed = '{0}.{1}.{2}.{3}' -f $info.ProductMajorPart, $info.ProductMinorPart, $info.ProductBuildPart, $info.ProductPrivatePart
+    $want = [ordered]@{
+        ProductVersion   = $Expected.TrimStart('v')
+        FileVersion      = $Expected.TrimStart('v')
+        ProductName      = 'Cisco DefenseClaw'
+        CompanyName      = 'Cisco Systems, Inc.'
+        OriginalFilename = 'DefenseClawSetup-Enterprise-Standalone-x64.exe'
+    }
+    foreach ($key in $want.Keys) {
+        if ($info.$key -ne $want[$key]) { Fail "Setup VERSIONINFO $key is '$($info.$key)', want '$($want[$key])'" }
+    }
+    if ($actualFixed -ne $fixed) { Fail "Setup fixed file version is $actualFixed, want $fixed" }
+    if ($actualProductFixed -ne $fixed) { Fail "Setup fixed product version is $actualProductFixed, want $fixed" }
+    Write-Host "Setup VERSIONINFO: $($info.ProductName) $($info.ProductVersion) ($actualFixed), $($info.OriginalFilename)"
+}
+
 function Write-Diagnostics {
     Write-Host '-- diagnostics (bounded)'
     foreach ($name in $serviceNames) {
@@ -431,6 +456,7 @@ if (-not [IO.Path]::IsPathRooted($Setup) -or -not (Test-Path -LiteralPath $Setup
     throw "-Setup must be the absolute path of an existing Setup: $Setup"
 }
 $Setup = (Resolve-Path -LiteralPath $Setup).Path
+Assert-SetupVersionInfo -Path $Setup -Expected $Version
 if ($UpgradeFrom) {
     if (-not [IO.Path]::IsPathRooted($UpgradeFrom) -or -not (Test-Path -LiteralPath $UpgradeFrom -PathType Leaf)) {
         throw "-UpgradeFrom must be the absolute path of an existing Setup: $UpgradeFrom"

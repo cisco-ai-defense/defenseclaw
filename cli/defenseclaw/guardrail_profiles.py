@@ -46,6 +46,7 @@ STOCK_PROFILE_DIGESTS: dict[str, frozenset[str]] = {
             "0678175caa680c77ffd723c5ffd7d581e5d6747c884e71b61aa3bfedba92e1b6",
             "19f3cf6086023cfc419756c4b30fe395820b008ba831653949b0c33f2daf76a4",
             "20a9adcda34d02c061e6f1c0073546fcc540f97ee604b55401ba0f9946ef4a70",
+            "30833ca25490a295a65c778827394fa64a8d3f4aedc589648355aa55509b72d6",
             "37d8dc92222a208b8a769155b44040a2ebcd7bffebd7691461f28c079594407a",
             "3b60ff13444113a2d41cf9f4002794685267b61ec82ccf309fa6d6419fb3bdfd",
             "3eec0102c3fd29f3cb9205b0cb3750cbc2b88de821ed5d943081e5605d5fefad",
@@ -56,6 +57,7 @@ STOCK_PROFILE_DIGESTS: dict[str, frozenset[str]] = {
             "681d8e7f28cb4030cdd68aae6cc494517f034e355aa4b964fccd391d8b1dd0a4",
             "8c28e4d946d9c9fe01d3fb4a7254db347e6183c1b659fbfb37a1aeaebc08f63c",
             "9dc9a1aa028a8b2232babe38e8519f864a1f6d3a6b3990150c2ec3f907d71b8a",
+            "9fba3bb1b2c4eec5b675643b6a08f823dc6f61502a4bbacf0f2b60157df737bf",
             "a3481c6ce6bf367a0282b4ba97329d78ee40ab32371b3b0bbab6980d31f5fa56",
             "ac605bb145db8df3803a27cfcbe9958ef3a22c7038a626e6f8c1503887813905",
             "aee0a2044e72b0ae9b028b7d40105bb275e60387e2f561e52d729074b7bf1198",
@@ -69,6 +71,7 @@ STOCK_PROFILE_DIGESTS: dict[str, frozenset[str]] = {
             "ea81d7cea6c23a7de47e62379572f29704df1a24e0e5efe22e9b02a6f159af95",
             "eb35cfd63246ee6343faf4114ea9a6b62155f8faf6825f05a2bb9180444bb61d",
             "ef527c66677705936f1ee319b24a76f3401286a1362265251ae2a69dc4f6dd22",
+            "f24c07c3beea7d1b590347461d9d263db597aad5bd73f1a43b4a546f60df4ad0",
         }
     ),
     "permissive": frozenset(
@@ -85,9 +88,11 @@ STOCK_PROFILE_DIGESTS: dict[str, frozenset[str]] = {
             "6dd147550abcb729f5bc59f4f7be5ff04ff4d40b57a45a7848a8139b8c35ffe9",
             "6ded828057977035dc763c35fc117ab2caf63ebc42bf79c70b2eb78d3c44a228",
             "7be65bc5f810de910c07ed0cc955606d0c49fecc9644b438f043ec0eddba3883",
+            "8487451e43767a1f0136da3a8b346e143ad9e33ec864f74c49381eff64155aec",
             "9006dc19c958f8b2fa5fe7aba6d54e2fb8454f634b3fc6b6abf777c15a9e6604",
             "a1291dd16dbd6350daa6b94425bcfa19e734d99e1962e38e64915573d64f27c2",
             "a8c864dc71a7201897b4bfe5770187dedaae939ed51d8923ca6b2367b3501d79",
+            "b0ade92e8990e321af88bc657a198b2ab49c06c420d66c0908cb5e8aa2e9b3f1",
             "b890f74b17262c155256632e92d5b7545c39c5a02ddbbde88f9421ee5a15e91b",
             "ba3c328ac60c00cd249228cc36cb0cc2bec6ae5141b302b5ca9fc89c6ac0914e",
             "daa1b33a274a3c9f286ed5e9dc94a7081058c9a88832892afc7bec90e296f052",
@@ -102,6 +107,7 @@ STOCK_PROFILE_DIGESTS: dict[str, frozenset[str]] = {
     "strict": frozenset(
         {
             "1031aaa480cd71c5544f54acd59b25086f63c545867e2dc33b94bb692c09b209",
+            "2720dce36378e7ef8cf3e196af5ef6e0c40777be43cc168e6e8d3b6b57728ca4",
             "3bff549d5860011cd63f0654455b6cc0d49e9493bd607284c12be6c764e10893",
             "4f9b68412f1cb102b54dad54a08c6e45d254e79984dccd84451cfdca62470e7f",
             "5b9b0f79c491c27b3feed63b90765091d37345621a95792ebcd34195abb097fd",

@@ -279,9 +279,9 @@ def test_help_says_how_a_mac_differs(exec_capture) -> None:
 
     run = help_text("run")
     assert "on macOS (the MicroVM driver) every run works on a copy" in run
-    assert "(mount: keep the changes; copy: leave them in the sandbox for pull)" in run
+    assert "(mount: keep the changes; copy: leave them in the sandbox for later pull --apply, --branch or --patch-out FILE)" in run
     assert "(repeatable; mount mode only)" in run
-    assert "copy: leave them in the sandbox for pull" in help_text("connect")
+    assert "copy: leave them in the sandbox for later pull --apply" in help_text("connect")
     assert 'previews what "sandbox pull" would bring back and applies nothing' in help_text("review")
     assert "on a Mac it switches the gateway to OpenShell's MicroVM driver" in help_text("setup")
     assert exec_capture == []

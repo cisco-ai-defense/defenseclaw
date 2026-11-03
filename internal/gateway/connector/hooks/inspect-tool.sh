@@ -4,7 +4,13 @@
 # Used by Claude Code (PreToolUse) and OpenCode (hook command).
 # The agent sets CLAUDE_TOOL_NAME (Claude Code) or TOOL_NAME and pipes input to stdin.
 set -euo pipefail
-{{if and (not .Managed) (not .Sandbox)}}# _DC_HOOK_DATA_DIR is the data directory this hook was installed in, the
+{{if not .SecureClient}}# The agent's environment cannot change how this script runs: a function
+# nesting limit, a read timeout, ignored commands and POSIX mode would end a
+# check early and let a blocked call run (review 2 of
+# sandbox-visibility:GAP-0028). Before the first function call.
+unset -v FUNCNEST TMOUT EXECIGNORE POSIXLY_CORRECT 2>/dev/null || true
+set +o posix
+{{end}}{{if and (not .Managed) (not .Sandbox)}}# _DC_HOOK_DATA_DIR is the data directory this hook was installed in, the
 # folder above its hooks folder (defenseclaw_install_held). Until the hook
 # path is resolved below it is the folder above the path the agent ran.
 _DC_HOOK_DATA_DIR="${BASH_SOURCE[0]:-$0}"
@@ -222,7 +228,9 @@ trap '_dc_boot_rc=$?; if [ "$_dc_boot_rc" -ne 0 ] && defenseclaw_boot_fails_clos
 HOME="${HOME:-${USERPROFILE:-$(cd ~ 2>/dev/null && pwd)}}"
 export HOME
 
-HOOK_SOURCE="${BASH_SOURCE[0]:-$0}"
+{{if .Sandbox}}# The image's hook folder, baked: the workload's environment cannot move it.
+HOOK_DIR={{.SandboxHookDirSH}}
+{{else}}HOOK_SOURCE="${BASH_SOURCE[0]:-$0}"
 HOOK_LINK_DEPTH=0
 while [ -L "$HOOK_SOURCE" ]; do
   HOOK_LINK_DEPTH=$((HOOK_LINK_DEPTH + 1))
@@ -246,7 +254,7 @@ HOOK_PARENT="${HOOK_SOURCE%/*}"
 [ "$HOOK_PARENT" != "$HOOK_SOURCE" ] || HOOK_PARENT="."
 HOOK_DIR="$(cd -P -- "$HOOK_PARENT" 2>/dev/null && pwd)" || exit 2
 unset HOOK_SOURCE HOOK_LINK_DEPTH HOOK_PARENT HOOK_BASE HOOK_TARGET
-{{if .Managed}}
+{{end}}{{if .Managed}}
 DEFENSECLAW_MANAGED_HOOK=1
 export DEFENSECLAW_MANAGED_HOOK
 {{if not .Sandbox}}_DC_SECURE_CLIENT_HOOK={{if .SecureClient}}1{{else}}0{{end}}
@@ -277,8 +285,18 @@ _DC_HOOK_DATA_DIR="${HOOK_DIR}/.."
 # touching any agent-supplied data so resource caps + env sanitization
 # apply to every subprocess this hook spawns.
 # command: bash 3.2 (macOS /bin/bash) exits 0 when a sourced helper is missing or unreadable.
-command . "${HOOK_DIR}/_hardening.sh" || exit "$?"
-{{if .Sandbox}}# OpenShell sandbox: _sandbox.sh drops every inherited variable the hook
+{{if .SecureClient}}command . "${HOOK_DIR}/_hardening.sh" || exit "$?"
+{{else}}# A helper that does not load (a path the agent's BASH_SOURCE moved, a
+# missing or broken file) is a local failure: block, whatever the fail
+# mode (review 2 of sandbox-visibility:GAP-0028).
+# bash 3.2 can return 0 from a "." of a file that is not there: the helper
+# counts as loaded only when its functions are defined.
+if [ ! -r "${HOOK_DIR}/_hardening.sh" ] || ! command . "${HOOK_DIR}/_hardening.sh" ||
+  ! declare -F defenseclaw_harden_env >/dev/null; then
+  echo "defenseclaw: hook hardening helper unavailable; blocking (fail mode closed)" >&2
+  exit 2
+fi
+{{end}}{{if .Sandbox}}# OpenShell sandbox: _sandbox.sh drops every inherited variable the hook
 # does not read and pins the baked PATH before the first child process
 # (mktemp in defenseclaw_harden_env) or helper call.
 command . "${HOOK_DIR}/_sandbox.sh" || exit 2
@@ -335,8 +353,9 @@ API_TOKEN="${DEFENSECLAW_GATEWAY_TOKEN:-}"
 unset DEFENSECLAW_GATEWAY_TOKEN{{end}}
 
 TOOL_NAME="${CLAUDE_TOOL_NAME:-${TOOL_NAME:-unknown}}"
-TOOL_INPUT="$(defenseclaw_read_stdin_capped fail_closed)" || {
-  _DC_STDIN_RC=$?
+{{if .SecureClient}}TOOL_INPUT="$(defenseclaw_read_stdin_capped fail_closed)" || {
+{{else}}defenseclaw_read_stdin_into TOOL_INPUT fail_closed || {
+{{end}}  _DC_STDIN_RC=$?
 {{if and (not .Managed) (not .Sandbox)}}  defenseclaw_close_during_install
   if [ "$_DC_STDIN_RC" = 3 ] && defenseclaw_per_user_oversize_open; then
     _DC_OVERSIZED_INSPECT=1
@@ -444,9 +463,10 @@ RESPONSE=$(defenseclaw_gateway_post "http://${API_ADDR}/api/v1/inspect/tool" 5 "
 {{end}}  fail_unreachable "$(defenseclaw_gateway_unreachable_reason 2>/dev/null || printf 'gateway unreachable')"
 }{{end}}
 
-HTTP_CODE=$(echo "$RESPONSE" | tail -1)
+{{if .SecureClient}}HTTP_CODE=$(echo "$RESPONSE" | tail -1)
 RESULT=$(echo "$RESPONSE" | sed '$d')
-
+{{else}}defenseclaw_split_response
+{{end}}
 {{if and .Managed (not .SecureClient) (not .Sandbox)}}defenseclaw_managed_http_result "$HTTP_CODE"
 {{else}}if [ -z "$HTTP_CODE" ]; then
   fail_unreachable "gateway returned no HTTP status"
@@ -462,24 +482,28 @@ fi{{end}}
 {{end}}
 {{if .Sandbox}}# Every DefenseClaw inspect verdict names its action: an empty or
 # action-less reply from the sandbox ingress is not a verdict.
-ACTION=$(echo "$RESULT" | _dc_jq -r '.action // empty' 2>/dev/null) || {
-  fail_response "failed to parse action from response"
+{{if .SecureClient}}ACTION=$(echo "$RESULT" | _dc_jq -r '.action // empty' 2>/dev/null) || {
+{{else}}_dc_jq_into ACTION line "$RESULT" -r '.action // empty' 2>/dev/null || {
+{{end}}  fail_response "failed to parse action from response"
 }
 [ -n "$ACTION" ] || fail_response "missing action in ingress response"
-{{else}}{{if .SecureClient}}ACTION=$(echo "$RESULT" | _dc_jq -r '.action // "allow"' 2>/dev/null) || {
-  fail_response "failed to parse action from response"
+{{else}}{{if .SecureClient}}{{if .SecureClient}}ACTION=$(echo "$RESULT" | _dc_jq -r '.action // "allow"' 2>/dev/null) || {
+{{else}}_dc_jq_into ACTION line "$RESULT" -r '.action // "allow"' 2>/dev/null || {
+{{end}}  fail_response "failed to parse action from response"
 }
 {{else}}# Only a recognized string action is a usable gateway verdict.
-ACTION=$(echo "$RESULT" | _dc_jq -r '.action // empty' 2>/dev/null) || {
-  fail_response "failed to parse action from response"
+{{if .SecureClient}}ACTION=$(echo "$RESULT" | _dc_jq -r '.action // empty' 2>/dev/null) || {
+{{else}}_dc_jq_into ACTION line "$RESULT" -r '.action // empty' 2>/dev/null || {
+{{end}}  fail_response "failed to parse action from response"
 }
 case "$ACTION" in
   allow|alert|block|confirm) ;;
   *) fail_response "invalid or missing action in gateway response" ;;
 esac
 {{end}}{{end}}if [ "$ACTION" = "block" ]; then
-  REASON=$(echo "$RESULT" | _dc_jq -r '.reason // "blocked by DefenseClaw"' 2>/dev/null)
-  echo "DefenseClaw: $REASON" >&2
+{{if .SecureClient}}  REASON=$(echo "$RESULT" | _dc_jq -r '.reason // "blocked by DefenseClaw"' 2>/dev/null)
+{{else}}  _dc_jq_into REASON line "$RESULT" -r '.reason // "blocked by DefenseClaw"' 2>/dev/null
+{{end}}  echo "DefenseClaw: $REASON" >&2
   exit 2
 fi
 exit 0

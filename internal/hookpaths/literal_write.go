@@ -4,7 +4,6 @@
 package hookpaths
 
 import (
-	"maps"
 	"path/filepath"
 	"slices"
 	"strings"
@@ -12,6 +11,7 @@ import (
 	"mvdan.cc/sh/v3/expand"
 	"mvdan.cc/sh/v3/syntax"
 
+	"github.com/defenseclaw/defenseclaw/internal/actionfacts"
 	"github.com/defenseclaw/defenseclaw/internal/lazyregexp"
 )
 
@@ -55,12 +55,21 @@ func literalWriteOperandsDepth(command, cwd, home string, depth int) []string {
 }
 
 func literalWriteOperandsWithCopies(command, cwd, home string, depth int) (operands, copies []string) {
+	return literalWriteOperandsWithParsed(command, cwd, home, depth, nil)
+}
+
+// literalWriteOperandsWithParsed reuses a shell tree already parsed for this
+// command. Nested interpreter bodies still get their own parse.
+func literalWriteOperandsWithParsed(command, cwd, home string, depth int, file *syntax.File) (operands, copies []string) {
 	if depth > 4 {
 		return nil, nil
 	}
-	file, ok := parseShell(command)
-	if !ok {
-		return nil, nil
+	if file == nil {
+		var ok bool
+		file, ok = parseShell(command)
+		if !ok {
+			return nil, nil
+		}
 	}
 	add := func(name string) bool {
 		if name == "" || strings.ContainsAny(name, "\x00\r\n") {
@@ -73,120 +82,219 @@ func literalWriteOperandsWithCopies(command, cwd, home string, depth int) (opera
 		return true
 	}
 	boundName, boundValue := boundedProgramAssignment(file, home)
-	// The values the command assigns before each top-level statement, so an
-	// awk word built from them is read as the shell expands it (GAP-2197,
-	// GAP-0509): out=alias; awk "BEGIN {print 1 >> \"$out\"}".
-	before := make([]actionValues, len(file.Stmts))
+	// Read each top-level statement with the values that precede it. The
+	// candidates are immutable until this statement has been walked, so
+	// there is no per-statement snapshot of cloned candidate maps.
 	values := actionValues{"HOME": home, "PWD": cwd}
-	for i, stmt := range file.Stmts {
-		before[i] = maps.Clone(values)
-		actionUpdateValues(stmt, values, cwd, home)
+	// The gateway blocks a command past this statement limit regardless of
+	// its concrete target. Keep the forgetting reading, but do not expand
+	// candidates for a command already over the limit. Short calls take the
+	// normal path without another parse.
+	trackKept := len(command) < 1024 || !actionfacts.ShellStatementsOverBudget(command)
+	var kept []actionValues
+	if trackKept {
+		kept = []actionValues{{"HOME": home, "PWD": cwd}}
 	}
-	valuesAt := func(node syntax.Node) actionValues {
-		for i, stmt := range file.Stmts {
-			if node.Pos().Offset() >= stmt.Pos().Offset() && node.End().Offset() <= stmt.End().Offset() {
-				return before[i]
-			}
-		}
-		return nil
-	}
+	steps := 0
+	protected := newProtectedFiles(home)
+	ssh := filepath.Join(home, ".ssh")
 	// A definition runs nothing. A body is read once, where it is defined,
 	// when the command may call it, so an uncalled body stays inert.
 	called := calledFunctions(file, home)
-	syntax.Walk(file, func(node syntax.Node) bool {
-		if declaration, isFunction := node.(*syntax.FuncDecl); isFunction {
-			return declaration.Name != nil && called[declaration.Name.Value]
+	var knownValues map[*syntax.Word]string
+	knownValuesRead := false
+	for _, root := range file.Stmts {
+		candidates := append([]actionValues{values}, kept...)
+		saturated := actionKeptSaturated(kept)
+		if saturated {
+			candidates = candidates[:1]
 		}
-		stmt, ok := node.(*syntax.Stmt)
-		if !ok {
-			return true
-		}
-		call, ok := stmt.Cmd.(*syntax.CallExpr)
-		if !ok || len(call.Args) == 0 {
-			return true
-		}
-		words := make([]string, len(call.Args))
-		// The brace words of a plain cp call, or of another writer, are
-		// the fixed words bash makes of them, so its real targets are
-		// listed (rel-1-0-6 GAP-0202, GAP-0228): the hook client resolves
-		// them like any operand. tee ~/.ssh/authorized_key{s,x} writes the
-		// keys file; a managed gateway that cannot search the home only
-		// sees the targets the client lists.
-		var braces map[int][]string
-		var argStatic []bool
-		if first, ok := StaticWord(call.Args[0], home); ok && slices.Contains(braceOperandPrograms, programBase(first)) {
-			argStatic = make([]bool, len(call.Args))
-			for i, arg := range call.Args {
-				_, argStatic[i] = StaticWord(arg, home)
-			}
-			braces = copyBraceWordFields(call.Args, argStatic, expand.ListEnviron("HOME="+strings.TrimRight(home, "/")))
-		}
-		for i, arg := range call.Args {
-			var static bool
-			words[i], static = StaticWord(arg, home)
-			if braces[i] != nil {
+		for _, redirect := range root.Redirs {
+			if redirect.Word == nil || !actionOutputRedirect(redirect.Op) {
 				continue
 			}
-			if i == 0 && !static && simpleShellParameter(arg) == boundName {
-				words[i], static = boundValue, true
-			}
-			if !static && i > 0 && (awkProgramName(words[0]) || programBase(words[0]) == "tee" && wordExpandsParameter(arg)) {
-				// An awk word the command assigned (GAP-2197), or a tee
-				// operand named by an assigned variable or a ${f:-default}
-				// the shell expands to its default (GAP-2514). A generated
-				// basename has no fixed spelling and stays dynamic.
-				if known := valuesAt(stmt); known != nil {
-					if value, fixed := actionWordValue(shellUnescapedWord(arg), known, cwd, home); fixed &&
-						!strings.Contains(value, actionGeneratedMarker) {
-						words[i], static = value, true
-					}
+			for _, candidate := range candidates {
+				if value, possible := actionOptionalEmptyPrefix(redirect.Word, candidate, cwd, home); possible &&
+					protectedReachPath(OperandPath(value, cwd), protected, ssh) {
+					add(value)
+					break
 				}
 			}
-			if !static {
-				// Interpreter arguments after fixed code do not change that
-				// code. Keep its write operands even though argv is dynamic.
-				if i > 0 && fixedInterpreterCodePrefix(words[:i]) {
-					for _, name := range literalProgramOperands(words[:i], stmt, cwd, home, depth, len(file.Stmts) == 1) {
-						add(name)
+		}
+		syntax.Walk(root, func(node syntax.Node) bool {
+			if declaration, isFunction := node.(*syntax.FuncDecl); isFunction {
+				return declaration.Name != nil && called[declaration.Name.Value]
+			}
+			stmt, ok := node.(*syntax.Stmt)
+			if !ok {
+				return true
+			}
+			call, ok := stmt.Cmd.(*syntax.CallExpr)
+			if !ok || len(call.Args) == 0 {
+				return true
+			}
+			// A copy operand with one known parameter value can also be a
+			// brace word. Keep that reading alongside the candidate values.
+			var copyValues map[*syntax.Word]string
+			if first, ok := StaticWord(call.Args[0], home); ok && slices.Contains(copyPrograms, programBase(first)) {
+				if !knownValuesRead {
+					knownValues, knownValuesRead = knownWordParameterValues(command, file, home), true
+				}
+				copyValues = knownValues
+			}
+			callCandidates := candidates
+			if len(callCandidates) > 1 {
+				dynamic := false
+				for _, arg := range call.Args[1:] {
+					if wordExpandsParameter(arg) {
+						dynamic = true
+						break
 					}
-				} else if i > 0 && awkProgramName(words[0]) {
-					// A double-quoted awk program with an expansion: its
-					// literal print targets stay targets (GAP-2197).
-					if text, rendered := awkRenderedProgram(arg); rendered {
-						prefix := append(append([]string(nil), words[:i]...), text)
-						for _, name := range literalProgramOperands(prefix, stmt, cwd, home, depth, len(file.Stmts) == 1) {
-							add(name)
+				}
+				if !dynamic {
+					callCandidates = callCandidates[:1]
+				}
+			}
+			added := make(map[string]bool)
+			positiveOnly := false
+			addCall := func(name string) bool {
+				path := OperandPath(name, cwd)
+				if positiveOnly && !protectedReachPath(path, protected, ssh) {
+					return false
+				}
+				if added[path] || !add(name) {
+					return false
+				}
+				added[path] = true
+				return true
+			}
+			if saturated {
+				// A name lost at the cap may be a protected writer target.
+				// Keep names that still have one certain value, including a
+				// straight-line assignment made after saturation.
+				probe := filepath.Join(ssh, "authorized_keys")
+				words := make([]string, len(call.Args))
+				unknown := false
+				for i, arg := range call.Args {
+					words[i], _ = StaticWord(arg, home)
+					if i > 0 && wordExpandsParameter(arg) {
+						if value, fixed := actionWordValue(shellUnescapedWord(arg), kept[0], cwd, home); fixed {
+							words[i] = value
+						} else {
+							words[i], unknown = probe, true
 						}
 					}
 				}
-				return true
+				if unknown {
+					for _, name := range literalProgramOperands(words, stmt, cwd, home, depth, len(file.Stmts) == 1) {
+						if samePathName(OperandPath(name, cwd), probe) {
+							addCall(probe)
+							break
+						}
+					}
+				}
 			}
-		}
-		_, words, _ = spliceCopyBraceWords(call.Args, words, argStatic, braces)
-		names := literalProgramOperands(words, stmt, cwd, home, depth, len(file.Stmts) == 1)
-		// A plain cp call lists only its own destination; a literal shell
-		// body (sh -c BODY) lists the own destinations of its cp calls.
-		var own []string
-		switch program := programBase(words[0]); program {
-		case "cp", "gcp":
-			own = names
-		case "sh", "bash", "dash", "ash", "zsh", "ksh":
-			if body, ok := shellCommandBodyIndex(words); ok {
-				_, own = literalWriteOperandsWithCopies(words[body], cwd, home, depth+1)
+		candidate:
+			for index, known := range callCandidates {
+				positiveOnly = index > 0
+				words := make([]string, len(call.Args))
+				// The brace words of a plain cp call, or of another writer, are
+				// the fixed words bash makes of them, so its real targets are
+				// listed (rel-1-0-6 GAP-0202, GAP-0228): the hook client resolves
+				// them like any operand. tee ~/.ssh/authorized_key{s,x} writes the
+				// keys file; a managed gateway that cannot search the home only
+				// sees the targets the client lists.
+				var braces map[int][]string
+				var argStatic []bool
+				if first, ok := StaticWord(call.Args[0], home); ok && slices.Contains(braceOperandPrograms, programBase(first)) {
+					argStatic = make([]bool, len(call.Args))
+					for i, arg := range call.Args {
+						_, argStatic[i] = StaticWord(arg, home)
+						if _, known := copyValues[arg]; known && i > 0 {
+							argStatic[i] = true
+						}
+					}
+					braces = copyBraceWordFields(call.Args, argStatic, expand.ListEnviron("HOME="+strings.TrimRight(home, "/")))
+				}
+				for i, arg := range call.Args {
+					var static bool
+					words[i], static = StaticWord(arg, home)
+					if value, known := copyValues[arg]; known && !static && i > 0 {
+						words[i], static = value, true
+					}
+					if braces[i] != nil {
+						continue
+					}
+					if i == 0 && !static && simpleShellParameter(arg) == boundName {
+						words[i], static = boundValue, true
+					}
+					if !static && i > 0 && wordExpandsParameter(arg) {
+						// A newly resolved parameter operand is positive evidence
+						// only when it reaches a protected target.
+						if value, fixed := actionWordValue(shellUnescapedWord(arg), known, cwd, home); fixed &&
+							!strings.Contains(value, actionGeneratedMarker) {
+							words[i], static = value, true
+							if index == 0 {
+								positiveOnly = true
+							}
+						} else if value, possible := actionOptionalEmptyPrefix(arg, known, cwd, home); possible &&
+							protectedReachPath(OperandPath(value, cwd), protected, ssh) {
+							// Only the protected empty-prefix possibility contributes
+							// a write. An unknown parameter proves no safe target.
+							words[i], static, positiveOnly = value, true, true
+						}
+					}
+					if !static {
+						// Interpreter arguments after fixed code do not change that
+						// code. Keep its write operands even though argv is dynamic.
+						if i > 0 && fixedInterpreterCodePrefix(words[:i]) {
+							for _, name := range literalProgramOperands(words[:i], stmt, cwd, home, depth, len(file.Stmts) == 1) {
+								addCall(name)
+							}
+						} else if i > 0 && awkProgramName(words[0]) {
+							// A double-quoted awk program with an expansion: its
+							// literal print targets stay targets (GAP-2197).
+							if text, rendered := awkRenderedProgram(arg); rendered {
+								prefix := append(append([]string(nil), words[:i]...), text)
+								for _, name := range literalProgramOperands(prefix, stmt, cwd, home, depth, len(file.Stmts) == 1) {
+									addCall(name)
+								}
+							}
+						}
+						continue candidate
+					}
+				}
+				_, words, _ = spliceCopyBraceWords(call.Args, words, argStatic, braces)
+				names := literalProgramOperands(words, stmt, cwd, home, depth, len(file.Stmts) == 1)
+				// A plain cp call lists only its own destination; a literal shell
+				// body (sh -c BODY) lists the own destinations of its cp calls.
+				var own []string
+				switch program := programBase(words[0]); program {
+				case "cp", "gcp":
+					own = names
+				case "sh", "bash", "dash", "ash", "zsh", "ksh":
+					if body, ok := shellCommandBodyIndex(words); ok {
+						_, own = literalWriteOperandsWithCopies(words[body], cwd, home, depth+1)
+					}
+				}
+				credit := make(map[string]int, len(own))
+				for _, name := range own {
+					credit[OperandPath(name, cwd)]++
+				}
+				for _, name := range names {
+					if addCall(name) && credit[operands[len(operands)-1]] > 0 {
+						credit[operands[len(operands)-1]]--
+						copies = append(copies, operands[len(operands)-1])
+					}
+				}
 			}
+			return true
+		})
+		actionUpdateValues(root, values, cwd, home)
+		if trackKept {
+			kept = actionUpdateValuesKept(root, kept, cwd, home, &steps)
 		}
-		credit := make(map[string]int, len(own))
-		for _, name := range own {
-			credit[OperandPath(name, cwd)]++
-		}
-		for _, name := range names {
-			if add(name) && credit[operands[len(operands)-1]] > 0 {
-				credit[operands[len(operands)-1]]--
-				copies = append(copies, operands[len(operands)-1])
-			}
-		}
-		return true
-	})
+	}
 	operands = append(operands, literalPipelineOperands(file, called, cwd, home, depth)...)
 	operands = append(operands, literalGeneratedScriptOperands(file, cwd, home, depth)...)
 	return operands, copies

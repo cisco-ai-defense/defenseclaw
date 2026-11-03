@@ -100,6 +100,10 @@ type ScanVerdict struct {
 	// finding of a verdict merged from several judges (mergeJudgeVerdicts),
 	// whose own severity is the strictest one. In-process only.
 	findingSeverity map[string]string
+	// decisionConfirm marks a decision-model confirm made without the LLM
+	// judge (cascade 2): the hook lane maps it with the ask armed
+	// (decisionModelConfirmAction). In-process only.
+	decisionConfirm bool
 }
 
 func allowVerdict(scanner string) *ScanVerdict {

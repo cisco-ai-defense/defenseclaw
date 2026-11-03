@@ -128,18 +128,34 @@ const (
 type RetentionRunResult struct {
 	Disabled bool
 	// SizeCapped is set when the store was over observability.local.max_store_mb
-	// and the run moved its cutoff forward to bring it under the cap.
-	SizeCapped  bool
-	Cutoff      time.Time
-	CompletedAt time.Time
-	Duration    time.Duration
-	BatchCount  int64
+	// and the run moved its cutoff forward toward the cap.
+	SizeCapped bool
+	// CapNotReached reports a completed non-Secure Client cap pass whose
+	// audit.db used pages still exceed the cap. These fields contain only
+	// bounded size and reason data, never stored record content.
+	CapNotReached  bool
+	StoreSizeBytes int64
+	StoreCapBytes  int64
+	CapReason      RetentionCapReason
+	Cutoff         time.Time
+	CompletedAt    time.Time
+	Duration       time.Duration
+	BatchCount     int64
 	// Backlog is set when a stage stopped at its time budget with work left;
 	// the scheduler then runs again after RetentionFollowUpInterval.
 	Backlog       bool
 	RowsDeleted   map[RetentionTableClass]int64
 	ProtectedRows map[RetentionProtectedClass]int64
 }
+
+// RetentionCapReason describes why a successful pass can leave used pages
+// above the configured target without claiming a database write failure.
+type RetentionCapReason string
+
+const (
+	RetentionCapActiveCorrelation RetentionCapReason = "active_correlation_state"
+	RetentionCapRetainedHistory   RetentionCapReason = "retained_history_or_pending_work"
+)
 
 type RetentionProtectedClass string
 
@@ -544,6 +560,20 @@ func retentionRunFailure(class RetentionFailureClass, cause error) error {
 	return &retentionRunError{class: class, cause: cause}
 }
 
+// RetentionFailureDetail is the failure class of a failed Run and the text of
+// its cause, for the gateway log only: Error() and every status keep only
+// the class (rel-1-0-6:GAP-0263, a run that failed with no cause logged).
+func RetentionFailureDetail(err error) (RetentionFailureClass, string) {
+	if err == nil {
+		return "", ""
+	}
+	cause := err
+	if inner := errors.Unwrap(err); inner != nil {
+		cause = inner
+	}
+	return retentionFailureClass(err), cause.Error()
+}
+
 func retentionFailureClass(err error) RetentionFailureClass {
 	if err == nil {
 		return ""
@@ -671,6 +701,27 @@ func (reaper *RetentionReaper) Run(ctx context.Context) (RetentionRunResult, err
 			runErr = retentionRunFailure(RetentionFailureCheckpoint, err)
 		}
 	}
+	if runErr == nil && !reaper.secureClient && capBytes > 0 {
+		used, err := reaper.storeUsedBytes(ctx)
+		if err != nil {
+			runErr = retentionRunFailure(RetentionFailureAuditStore, err)
+		} else if used > capBytes {
+			var activeCursor bool
+			err = reaper.store.db.QueryRowContext(ctx,
+				`SELECT EXISTS(SELECT 1 FROM correlation_cursors WHERE active=1)`).Scan(&activeCursor)
+			if err != nil {
+				runErr = retentionRunFailure(RetentionFailureAuditStore, fmt.Errorf("audit: read active correlation state: %w", err))
+			} else {
+				result.CapNotReached = true
+				result.StoreSizeBytes = used
+				result.StoreCapBytes = capBytes
+				result.CapReason = RetentionCapRetainedHistory
+				if activeCursor {
+					result.CapReason = RetentionCapActiveCorrelation
+				}
+			}
+		}
+	}
 	if runErr == nil {
 		result.CompletedAt = reaper.hooks.now().UTC()
 	}
@@ -687,14 +738,10 @@ func (reaper *RetentionReaper) Run(ctx context.Context) (RetentionRunResult, err
 // correlation graph, as day retention does. It never reaches into the last
 // RetentionSizeCapKeep.
 func (reaper *RetentionReaper) storeSizeCutoff(ctx context.Context, now time.Time, capBytes int64) (time.Time, bool, error) {
-	var pageCount, freePages, pageSize int64
-	if err := reaper.store.db.QueryRowContext(ctx, `SELECT
-		(SELECT page_count FROM pragma_page_count()),
-		(SELECT freelist_count FROM pragma_freelist_count()),
-		(SELECT page_size FROM pragma_page_size())`).Scan(&pageCount, &freePages, &pageSize); err != nil {
-		return time.Time{}, false, fmt.Errorf("audit: read store size: %w", err)
+	used, err := reaper.storeUsedBytes(ctx)
+	if err != nil {
+		return time.Time{}, false, err
 	}
-	used := (pageCount - freePages) * pageSize
 	if used <= capBytes {
 		return time.Time{}, false, nil
 	}
@@ -710,7 +757,7 @@ func (reaper *RetentionReaper) storeSizeCutoff(ctx context.Context, now time.Tim
 	fraction := float64(used-target) / float64(used)
 	at := first.Int64 + int64(fraction*float64(last.Int64-first.Int64))
 	var stamp sql.NullInt64
-	err := reaper.store.db.QueryRowContext(ctx, `SELECT retention_timestamp_unix_nano FROM audit_events
+	err = reaper.store.db.QueryRowContext(ctx, `SELECT retention_timestamp_unix_nano FROM audit_events
 		WHERE rowid >= ? AND retention_timestamp_unix_nano IS NOT NULL ORDER BY rowid LIMIT 1`, at).Scan(&stamp)
 	if err != nil && !errors.Is(err, sql.ErrNoRows) {
 		return time.Time{}, false, fmt.Errorf("audit: read size cutoff: %w", err)
@@ -723,6 +770,17 @@ func (reaper *RetentionReaper) storeSizeCutoff(ctx context.Context, now time.Tim
 		cutoff = keepFrom
 	}
 	return cutoff, true, nil
+}
+
+func (reaper *RetentionReaper) storeUsedBytes(ctx context.Context) (int64, error) {
+	var pageCount, freePages, pageSize int64
+	if err := reaper.store.db.QueryRowContext(ctx, `SELECT
+		(SELECT page_count FROM pragma_page_count()),
+		(SELECT freelist_count FROM pragma_freelist_count()),
+		(SELECT page_size FROM pragma_page_size())`).Scan(&pageCount, &freePages, &pageSize); err != nil {
+		return 0, fmt.Errorf("audit: read store size: %w", err)
+	}
+	return (pageCount - freePages) * pageSize, nil
 }
 
 func sumRetentionRows(rows map[RetentionTableClass]int64) int64 {
@@ -1444,6 +1502,14 @@ func materializeRetentionACKBaselines(
 }
 
 func migrateRetentionTimestampUnixNano(ex dbExecer) error {
+	// The store's form (storeMigrationTx): bound outside Secure Client,
+	// main's on a Secure Client store, which therefore never carries the
+	// bound trigger, not even until Init. An executor that does not say
+	// gets main's form; Init then installs the store's.
+	bound := false
+	if form, ok := ex.(interface{ secureClientMigration() bool }); ok {
+		bound = !form.secureClientMigration()
+	}
 	for _, spec := range retentionTimestampRegistry {
 		present, err := tableExists(ex, spec.table)
 		if err != nil {
@@ -1469,15 +1535,39 @@ func migrateRetentionTimestampUnixNano(ex dbExecer) error {
 		)); err != nil {
 			return fmt.Errorf("create exact retention timestamp index: %w", err)
 		}
-		if err := installRetentionTimestampTriggers(ex, spec); err != nil {
+		// Installing the store's form here means Init finds it in place and
+		// writes no schema, so the purge's VACUUM leaves no free page behind.
+		if err := installRetentionTimestampTriggers(ex, spec, bound); err != nil {
 			return err
 		}
 	}
 	return nil
 }
 
-func installRetentionTimestampTriggers(ex dbExecer, spec retentionTimestampSpec) error {
-	insertTrigger, updateTrigger, insertSQL, updateSQL := retentionTimestampTriggerDDL(spec)
+func installRetentionTimestampTriggers(ex dbExecer, spec retentionTimestampSpec, bound bool) error {
+	insertTrigger, updateTrigger, insertSQL, updateSQL := retentionTimestampTriggerDDL(spec, bound)
+	// Both already as required: rewriting them would only churn the schema
+	// (and free a page of the longer bound form's text on every open).
+	installed := true
+	for _, trigger := range []struct {
+		name string
+		sql  string
+	}{{insertTrigger, insertSQL}, {updateTrigger, updateSQL}} {
+		var actual string
+		err := ex.QueryRow(`SELECT sql FROM sqlite_master WHERE type='trigger' AND name=?`, trigger.name).Scan(&actual)
+		// Exact text: the store wrote it, so anything else (also a change
+		// of whitespace inside a literal) is replaced.
+		if errors.Is(err, sql.ErrNoRows) || (err == nil && actual != trigger.sql) {
+			installed = false
+			break
+		}
+		if err != nil {
+			return fmt.Errorf("read exact retention timestamp trigger: %w", err)
+		}
+	}
+	if installed {
+		return nil
+	}
 	if _, err := ex.Exec(fmt.Sprintf(`DROP TRIGGER IF EXISTS %s; DROP TRIGGER IF EXISTS %s`,
 		insertTrigger, updateTrigger)); err != nil {
 		return fmt.Errorf("replace exact retention timestamp triggers: %w", err)
@@ -1503,7 +1593,11 @@ func installRetentionTimestampTriggers(ex dbExecer, spec retentionTimestampSpec)
 	return nil
 }
 
-func retentionTimestampTriggerDDL(spec retentionTimestampSpec) (string, string, string, string) {
+// retentionTimestampTriggerDDL is the pair of retention triggers of spec's
+// table. bound is the form of a store outside Secure Client, whose insert
+// trigger skips a row that already carries the exact instant; a Secure
+// Client store keeps main's form, which rewrites every new row.
+func retentionTimestampTriggerDDL(spec retentionTimestampSpec, bound bool) (string, string, string, string) {
 	expression := `CASE
 		WHEN timestamp GLOB '????-??-??T??:??:??*' THEN
 			CAST(strftime('%s', substr(timestamp, 1, 19) ||
@@ -1549,12 +1643,40 @@ func retentionTimestampTriggerDDL(spec retentionTimestampSpec) (string, string, 
 		BEGIN
 			UPDATE %s SET retention_timestamp_unix_nano = %s WHERE id = NEW.id;
 		END`, insertTrigger, spec.table, spec.table, expression)
+	if bound {
+		// The bound form rewrites a new row only when its insert did not
+		// carry the exact instant. The hook path's writers bind it
+		// (retentionInstantOf), so each of their audit_events and
+		// scan_results rows is written once instead of inserted and then
+		// updated with a second retention index entry: about 3% of the WAL
+		// a hook call writes (rel-1-0-6:GAP-0267). Any other writer (the
+		// Python CLI, an older binary), or a wrong value, still gets the
+		// computed instant.
+		insertSQL = fmt.Sprintf(`CREATE TRIGGER %s
+		AFTER INSERT ON %s
+		WHEN NEW.retention_timestamp_unix_nano IS NOT (%s)
+		BEGIN
+			UPDATE %s SET retention_timestamp_unix_nano = %s WHERE id = NEW.id;
+		END`, insertTrigger, spec.table, strings.ReplaceAll(expression, "timestamp", "NEW.timestamp"),
+			spec.table, expression)
+	}
 	updateSQL := fmt.Sprintf(`CREATE TRIGGER %s
 		AFTER UPDATE OF timestamp ON %s
 		BEGIN
 			UPDATE %s SET retention_timestamp_unix_nano = %s WHERE id = NEW.id;
 		END`, updateTrigger, spec.table, spec.table, expression)
 	return insertTrigger, updateTrigger, insertSQL, updateSQL
+}
+
+// retentionInstantOf is the retention_timestamp_unix_nano the insert
+// trigger computes for timestamp, an RFC 3339 text the writer binds, or nil
+// when it is not one (the trigger then computes it).
+func retentionInstantOf(timestamp string) any {
+	instant, err := time.Parse(time.RFC3339Nano, timestamp)
+	if err != nil {
+		return nil
+	}
+	return instant.UnixNano()
 }
 
 type retentionScanIntegrityTrigger struct {
@@ -1629,13 +1751,13 @@ func installRetentionScanIntegrityTriggers(ex dbExecer) error {
 	return nil
 }
 
-func ensureRetentionTimestampInfrastructure(db *sql.DB) error {
+func ensureRetentionTimestampInfrastructure(db *sql.DB, bound bool) error {
 	return retryBusy(context.Background(), "ensure-retention-timestamp-infrastructure", func() error {
-		return ensureRetentionTimestampInfrastructureOnce(db)
+		return ensureRetentionTimestampInfrastructureOnce(db, bound)
 	})
 }
 
-func ensureRetentionTimestampInfrastructureOnce(db *sql.DB) error {
+func ensureRetentionTimestampInfrastructureOnce(db *sql.DB, bound bool) error {
 	tx, err := db.Begin()
 	if err != nil {
 		return fmt.Errorf("begin retention timestamp infrastructure verification: %w", err)
@@ -1652,7 +1774,7 @@ func ensureRetentionTimestampInfrastructureOnce(db *sql.DB) error {
 			// than synthesizing unrelated historical tables.
 			continue
 		}
-		if err := installRetentionTimestampTriggers(tx, spec); err != nil {
+		if err := installRetentionTimestampTriggers(tx, spec, bound); err != nil {
 			return err
 		}
 		if err := verifyRetentionTimestampIndex(tx, spec); err != nil {

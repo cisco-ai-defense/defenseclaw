@@ -331,7 +331,10 @@ class GatePromptContractGateTests(unittest.TestCase):
         joined = " ".join(hints)
         self.assertIn("trusted-paths add", joined)
         self.assertIn(os.path.dirname(os.path.realpath(binpath)), joined)
-        self.assertIn("writes ~/.defenseclaw/config.yaml", joined)
+        # rel-1-0-6:GAP-0445: the hint names the active config file.
+        from defenseclaw.config import config_path_for_data_dir
+
+        self.assertIn(f"writes {config_path_for_data_dir()}", joined)
 
     def test_prompt_cache_avoids_reasking_same_directory(self):
         tmp = tempfile.mkdtemp()

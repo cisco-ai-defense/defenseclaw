@@ -271,6 +271,72 @@ func TestEvaluateClaudeCodeHook_BlockedPluginRefusesItsToolsSkillsAndCommands(t 
 	}
 }
 
+// GAP-0270: `plugin quarantine` moves only the cache copy of a plugin
+// installed from a local marketplace folder; Claude Code still ran its
+// /plugin:command (and its skills and MCP tools) from that folder, and the
+// hook allowed it. A quarantine journal entry, by name or plugin@marketplace,
+// for the connector or every connector, refuses them as a disable does, and
+// `plugin restore` (clearing the file action) lets them run again, each round.
+func TestEvaluateClaudeCodeHook_QuarantinedPluginRefusesItsCommandsUntilRestored(t *testing.T) {
+	calls := []claudeCodeHookRequest{
+		{HookEventName: "UserPromptExpansion", ExpansionType: "slash_command", CommandSource: "plugin",
+			CommandName: "usm-kit:hello", Prompt: "/usm-kit:hello"},
+		{HookEventName: "PreToolUse", ToolName: "Skill", ToolInput: map[string]interface{}{"skill": "usm-kit:usm-kit-notes"}},
+		{HookEventName: "PreToolUse", ToolName: "mcp__plugin_usm-kit_kit-time__get_current_time", ToolInput: map[string]interface{}{}},
+	}
+	neighbour := claudeCodeHookRequest{HookEventName: "UserPromptExpansion", ExpansionType: "slash_command",
+		CommandSource: "plugin", CommandName: "usm-kit-ok:hello", Prompt: "/usm-kit-ok:hello"}
+	for _, tc := range []struct{ name, target, connector string }{
+		{name: "plugin id, connector scope", target: "usm-kit", connector: "claudecode"},
+		{name: "plugin@marketplace, connector scope", target: "usm-kit@vs7mp", connector: "claudecode"},
+		{name: "plugin id, every connector", target: "usm-kit"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			cfg := &config.Config{AssetPolicy: config.DefaultAssetPolicy()}
+			cfg.Guardrail.Mode = "action"
+			cfg.Guardrail.Connector = "claudecode"
+			store, err := audit.NewStore(":memory:")
+			if err != nil {
+				t.Fatal(err)
+			}
+			t.Cleanup(func() { store.Close() })
+			if err := store.Init(); err != nil {
+				t.Fatal(err)
+			}
+			api := &APIServer{scannerCfg: cfg, store: store}
+			for round := 1; round <= 2; round++ {
+				if err := store.SetActionFieldForConnector("plugin", tc.target, tc.connector, "file", "quarantine",
+					"manual quarantine via CLI"); err != nil {
+					t.Fatal(err)
+				}
+				for _, req := range calls {
+					resp := api.evaluateClaudeCodeHook(context.Background(), req)
+					if resp.Action != "block" {
+						t.Fatalf("round %d %s %s%s: action=%q, want the quarantined plugin refused",
+							round, req.HookEventName, req.ToolName, req.CommandName, resp.Action)
+					}
+				}
+				resp := api.evaluateClaudeCodeHook(context.Background(), calls[0])
+				if !strings.Contains(resp.Reason+resp.SourceReason, "usm-kit") {
+					t.Fatalf("round %d: reason %q / %q does not name the plugin", round, resp.Reason, resp.SourceReason)
+				}
+				if resp := api.evaluateClaudeCodeHook(context.Background(), neighbour); resp.Action == "block" {
+					t.Fatalf("round %d another plugin: action=%q, want it allowed", round, resp.Action)
+				}
+				if err := store.ClearActionFieldForConnector("plugin", tc.target, tc.connector, "file"); err != nil {
+					t.Fatal(err)
+				}
+				for _, req := range calls {
+					if resp := api.evaluateClaudeCodeHook(context.Background(), req); resp.Action == "block" {
+						t.Fatalf("round %d restored %s %s%s: action=%q, want it allowed again",
+							round, req.HookEventName, req.ToolName, req.CommandName, resp.Action)
+					}
+				}
+			}
+		})
+	}
+}
+
 func TestEvaluateClaudeCodeHook_BlocksUnregisteredMCPPermissionRequest(t *testing.T) {
 	cfg := &config.Config{AssetPolicy: config.DefaultAssetPolicy()}
 	cfg.Guardrail.Mode = "action"

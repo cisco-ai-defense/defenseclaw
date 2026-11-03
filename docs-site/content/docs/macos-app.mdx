@@ -91,8 +91,8 @@ Actions for the selected sandbox:
 | **Review changes** | `defenseclaw sandbox review <name>` (sandboxes that mount their folder). |
 | **Undo…** | `defenseclaw sandbox undo <name> --yes` after asking. On a mounting sandbox it restores the pre-session snapshot. On a copy-mode sandbox it reverts the last `pull --apply`; later edits stay, and if one touched the same files nothing is reverted and Activity says why. |
 | **Copy connect command** | Copies the resume command. |
-| **Copy pull command** | Copies `defenseclaw sandbox pull <name>` (copy-mode sandboxes). |
-| **Pull to branch** | `defenseclaw sandbox pull <name> --branch`: the work lands on branch `dc/<name>`. A change that can run code on your Mac is not brought back this way; pull it in Terminal, where it asks. |
+| **Copy pull command** | Copies `defenseclaw sandbox pull <name>` for a review only. Add `--apply` to bring the work into your project, or `--branch` or `--patch-out FILE` to save it elsewhere. |
+| **Pull to branch** | `defenseclaw sandbox pull <name> --branch`: the work lands on branch `dc/<name>`. A change that can run code on your Mac is not brought back this way; run `defenseclaw sandbox pull <name> --apply` in Terminal, where it asks. |
 
 The alerts are the same as in the TUI (see [Alerts and notifications](/docs/tui#alerts-and-notifications)). The actions are unavailable while the installation is read-only. The app never starts a harness session; it copies the command for Terminal.
 

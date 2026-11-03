@@ -350,8 +350,8 @@ describe('recovery and repair advice', () => {
     for (const [name, claim] of [
       ['sandboxes/guide.mdx', 'save or sync its work first, then `defenseclaw sandbox stop NAME`'],
       ['macos-app.mdx', 'save or sync each guest’s work first, then stop it with `defenseclaw sandbox stop NAME`'],
-      ['reference/sandbox-cli.mdx', 'Save or sync accessible work first. In copy mode, pull work you need on the host; then stop the guest'],
-      ['enterprise/sandboxes.mdx', 'Users save or pull accessible work first, then stop a running sandbox with `defenseclaw sandbox stop`'],
+      ['reference/sandbox-cli.mdx', 'Save or sync accessible work first. In copy mode, run `defenseclaw sandbox pull NAME --apply` (or `--branch` or `--patch-out FILE`) for work you need on the host; confirm the project, branch or patch file contains it, then stop the guest'],
+      ['enterprise/sandboxes.mdx', 'Users save accessible work first (`defenseclaw sandbox pull NAME --apply` for a copy, or `--branch` or `--patch-out FILE`) and confirm the project, branch or patch file contains it before stopping a running sandbox with `defenseclaw sandbox stop`'],
       ['sandboxes/guide.mdx', 'Before following a stop step below, save or sync accessible guest work'],
     ] as const) {
       assert.ok(page(name).includes(claim), `${name} must give save-first advice`);
@@ -947,6 +947,14 @@ describe('1.0.4 operator routes and limits', () => {
     assert.doesNotMatch(row, /hook socket is not owned by root or the gateway account/);
   });
 
+  it('counts a managed sandbox hook receipt apart from the hook budget (GAP-0490)', () => {
+    const api = page('reference/gateway-api.mdx');
+    assert.match(api, /\| Hook, notify and inspect \| 25\/s \| 100 \| 32 \|\s*\| Delivery receipts \| 25\/s \| 100 \| 32 \|/);
+    assert.match(api, /Receipts have the budget of their own above, so a tool\s+call counts once against the hook budget/);
+    const managed = page('enterprise/sandboxes.mdx');
+    assert.match(managed, /per-user budget \(100 per second, burst 200\)\. Each sandbox also has its own budget at the user's daemon \(25 per second, burst 100\)\. The receipt that confirms an allowed call counts apart/);
+  });
+
   it('does not advertise local files as MCP scan targets', () => {
     const api = page('reference/gateway-api.mdx');
     assert.match(api, /`POST`\s*\|\s*`\/v1\/mcp\/scan`[^\n]*Path or JSON-file targets[^\n]*HTTP 400[^\n]*bare identifier without path or file syntax[^\n]*configured server name/i);
@@ -1322,6 +1330,7 @@ const knownLimitEntries = [
   },
   { gaps: 'GAP-1110', section: 'Local Splunk', phrases: ['works only with an x86_64 Docker engine', 'published for x86_64 (amd64) only', 'This is a Splunk image limit.', '/docs/observability/splunk#before-you-start'], from: [] },
   { gaps: 'GAP-1565', section: 'Upgrade and policy limits', phrases: ['**Restored hook records on managed macOS:**', '`hook_contract_lock.json`', 'the guardian rewrites, within seconds, the records that no longer match the live registration', 'compare the hook commands, not the file bytes'], from: [] },
+  { gaps: 'GAP-0248', section: 'Upgrade and policy limits', phrases: ['**Restored generated state on managed macOS:**', '`runtime/hook_guardian_state.json`', '`etc/bundles/inbox`', 'The guardian rewrites its two last-pass records on every pass', 'Compare the policy-bearing files'], from: [] },
   { gaps: 'GAP-0999', section: 'Sandboxes', phrases: ['**Raw OpenShell during a gateway restart:**', 'OpenShell has no admission barrier that raw clients honor', 'one started after the last check is ended by the restart', 'This is an OpenShell limit.', '/docs/sandboxes/guide#a-raw-openshell-sandbox-stops-a-restart-or-rollback'], from: [] },
   { gaps: 'GAP-1177', section: 'Sandboxes', phrases: ['**No network cutoff for a contained MicroVM:**', 'the VM stays reported as unprotected and new DefenseClaw runs are refused', 'OpenShell has no VM pause or network-off operation', 'This is an OpenShell and platform limit.', '/docs/sandboxes/guide#a-contained-vm-has-no-confirmed-network-withdrawal'], from: [] },
 ] as const;
@@ -1474,6 +1483,10 @@ const r105Rows: DocRow[] = [
   { gap: "GAP-2500", page: "enterprise/configuration.mdx", has: ["On Windows, `enterprise windows ensure` refuses it as `invalid_arguments` (exit `1639`) at `$.guardrail.block_message` with `configuration violates the maxLength constraint; expected a string of at most 4096 characters (it has 4097)`."], lacks: ["A longer one is refused with `guardrail.block_message must be"] },
   // GAP-2502 (docs pod, 2026-10-29, live OSS RHEL rc.9 action mode): a local credential read alerts; only an SSH private key read is denied.
   { gap: "GAP-2502", page: "segmentation.mdx", section: "Credential files", has: ["| Hook rules in action mode: an SSH private key read is denied, other credential reads alert (see below) |", "A plain local read of another credential file, for example `cat ~/.aws/credentials` (`PATH-AWS-CREDS`), is a `MEDIUM` alert and the command goes ahead"], lacks: ["`PATH-AWS-CREDS`) | Hook rules in action mode |"] },
+  // rel-1-0-3:GAP-0275 (docs pod w2, 2026-10-31): the published 1.0.2 managed hook is slow while the Linux package downgrade swaps the gateway; a documented limit.
+  { gap: "GAP-0275", page: "enterprise/lifecycle.mdx", section: "Roll back", has: ["**Rollback to the published 1.0.2 (Linux packages):**", "can take longer than 5 seconds to answer a call", "no call policy refuses was allowed", "Roll back while agents are idle."] },
+  // identity-round:GAP-0998 (docs pod w2, 2026-10-31): the 15 s sentence is when the sign-in cycle starts, not when the user is enrolled (live managed Windows: 70 to 95 s).
+  { gap: "GAP-0998", page: "enterprise/enrollment.mdx", section: "New, changed and removed users", has: ["On Windows a sign-in also starts an extra cycle about 15 seconds later; the cycle itself can take up to a minute", "enrolled about one to two minutes after it (70 to 95 seconds in one test)", "the agents stay pending until then"] },
   // GAP-2491 (docs pod, 2026-10-29, live managed RHEL rc.9 -> 1.0.3 dnf downgrade, 1.4 GB audit.db): hooks deny for minutes after the rollback.
   { gap: "GAP-2491", page: "enterprise/lifecycle.mdx", section: "Roll back", has: ["**Rollback to 1.0.3 or 1.0.4 with a large audit store (Linux):**", "On RHEL with a 1.4 GB store this lasted 3.5 to 7.5 minutes after `dnf downgrade` finished.", "Roll back while agents are idle"] },
   // GAP-2592 (docs-t11 pod, 2026-10-30, live managed RHEL T11 -> published 1.0.4 dnf downgrade, 1.5 GB audit.db): 1.0.4 denies hooks for minutes too.
@@ -1523,7 +1536,7 @@ const r105Rows: DocRow[] = [
   { gap: "GAP-2357", page: "guardrail/user-and-group-policies.mdx", section: "Steps", has: ["With no `--user`, `guardrail profile explain` explains the account that runs the command. The managed `enterprise linux|macos|windows profile-explain` commands need `--user` when an administrator runs them; on Linux and macOS a standard user leaves it out and gets their own profile only."], lacks: ["3. Ask which profile a person gets. With no `--user`, it explains the account that runs the command."] },
   { gap: "GAP-2332", page: "scanning/index.mdx", has: ["The defaults quarantine CRITICAL and HIGH skills, warn on MEDIUM and queue it for review, and allow LOW and INFO.", "`defenseclaw config get admission.skill` shows the actions in force"], lacks: ["A skill whose worst finding is MEDIUM, LOW or INFO is installed with the `warning` verdict"] },
   { gap: "GAP-2353", page: "guardrail/unified-llm-key.mdx", has: ["While the guardrail is on, the `DEFENSECLAW_LLM_KEY` row still reads `OPTIONAL`", "A local judge's `JUDGE_API_KEY` row reads `NOT_USED`."], lacks: ["correctly classifies them as `NOT_USED` even when the feature is on"] },
-  { gap: "GAP-0515", page: "connectors/hermes.mdx", has: ["On Windows, where Hermes has no guard, an administrator's `open` lets the call run during an outage: the user's `hook-failures.jsonl` gets a line with `fail_mode` `open` and `outcome` `fail_open`.", "through the [foreign-hook guard](/docs/enterprise/foreign-hook-guard) while `foreign_hooks` is `remove`"], lacks: ["(service not running, unusable answer, call too large to inspect)", "The administrator-owned hook is stricter"] },
+  { gap: "GAP-0515", page: "connectors/hermes.mdx", has: ["On Windows, where Hermes has no guard, an administrator's `open` lets the call run during an outage: the user's `hook-failures.jsonl` gets a line with `fail_mode` `open` and `outcome` `fail_open`.", "through the [foreign-hook guard](/docs/enterprise/foreign-hook-guard) while `foreign_hooks` is `remove` (the default), unless the fail mode is `open` and the agent process has a current clean-session note."], lacks: ["whatever the fail mode", "(service not running, unusable answer, call too large to inspect)", "The administrator-owned hook is stricter"] },
   { gap: "GAP-2350", page: "enterprise/troubleshooting.mdx", has: ["| `security_incomplete` | Linux, macOS, Windows |", "security_complete is false because of:"], lacks: ["| `security_incomplete` | Windows |"] },
   { gap: "GAP-1696", page: "enterprise/troubleshooting.mdx", section: "`security_complete` is `false` on Windows", has: ["`security_incomplete` lists the reasons and names the actionable causes even next to `hook_process_fail_open`"], lacks: ["on 1.0.3 or a host without Claude Code or Codex"] },
   { gap: "GAP-2351", page: "reference/configuration.mdx", section: "Per-connector files", has: ["warns `a generated script is not the one setup rendered`", "fails the `Hook runtime files` row (`changed since setup`)"], lacks: ["warns `stale generated script` when one no longer matches"] },
@@ -1550,7 +1563,7 @@ const r105Rows: DocRow[] = [
   { gap: "GAP-2192", page: "enterprise/identity-okta.mdx", has: ['<Callout type="warn" title="Not part of the release certification">', "Active Directory is the certified identity stack. The Okta lab is retired"], lacks: ["1.0.4 certification", "certified identity stack in 1.0.4"] },
   { gap: "GAP-2192", page: "enterprise/identity-sources.mdx", has: ["Active Directory is the certified identity stack; the Okta and Entra parts were last verified live in October 2026."], lacks: ["certified in 1.0.4"] },
   { gap: "GAP-2158", page: "guardrail/unified-llm-key.mdx", has: ["## The `keys` subcommands"], lacks: ["All four `keys` subcommands"] },
-  { gap: "GAP-2309", page: "connectors/opencode.mdx", has: ["a managed standalone OpenCode plugin stays closed and blocks the outage even when the administrator selects open", "Under Secure Client an administrator can choose outage-only open; on a managed standalone host OpenCode blocks the outage under either mode."], lacks: ["On managed hosts, an administrator may select open for a classified outage only", "A managed administrator can choose outage-only open."] },
+  { gap: "GAP-2309", page: "connectors/opencode.mdx", has: ["Under Secure Client an administrator can choose outage-only open. On a managed standalone host the route decides what an outage does, the machine-policy plugin (the default route) or the per-user plugin (used when machine policy is off or does not apply): both rows and the foreign-hook guard rule are in the [gateway outage table](/docs/connectors/capability-matrix#gateway-outage)."], lacks: ["follows the administrator's fail mode, with the foreign-hook guard rule", "stays closed and blocks the outage even when the administrator selects open", "blocks the outage under either mode", "a managed standalone OpenCode plugin stays closed", "On managed hosts, an administrator may select open for a classified outage only", "A managed administrator can choose outage-only open."] },
   { gap: "GAP-2314", page: "connectors/devin.mdx", has: ["in a project `.devin/hooks.v1.json` setup and teardown edit only DefenseClaw's entries, so your comments, formatting and a UTF-8 BOM stay.", "If setup cannot edit the project file in place, for example when it has a duplicate top-level key, it writes it back as JSON too, so its comments, formatting and BOM are removed."], lacks: ["Modified hook files are written as JSON, so comments and formatting are removed", "but writes a changed file back as JSON, so comments and formatting are removed"] },
   { gap: "GAP-0826", page: "reference/fail-modes.mdx", section: "Refusals that ignore the fail mode", has: ["so they block in every fail mode on a managed standalone computer:", "Secure Client hooks are different for a refused credential: an HTTP 401 or 403 follows the effective fail mode"], lacks: ["so they block in every fail mode on a managed computer:"] },
   { gap: "GAP-0826", page: "connectors/capability-matrix.mdx", has: ["a refused credential (outside Secure Client, where an HTTP 401 or 403 follows the effective fail mode)"], lacks: ["an invalid managed runtime, a refused credential, and,"] },
@@ -1761,13 +1774,15 @@ const r105Rows: DocRow[] = [
   { gap: "GAP-0013", page: "connectors/codex.mdx", has: ["On a per-user install with no saved mode, a gateway that is not running follows the policy tier: the default and permissive policies let the call run with one warning, and the strict policy blocks it"] },
   { gap: "GAP-0040", page: "connectors/codex.mdx", has: ["A saved mode decides instead: with `guardrail fail-mode open` saved, the call runs with one warning under every policy, strict included."], lacks: ["yes, except on a per-user install with no saved mode"] },
   { gap: "GAP-0013", page: "policies/defaults.mdx", has: ["A per-user install with no saved mode follows its rule pack when the gateway is down"] },
-  { gap: "GAP-0464", page: "enterprise/troubleshooting.mdx", has: ["The foreign-hook guard is the exception: with `foreign_hooks: remove` (the default) the connectors it checks need the gateway's session record, so `open` does not apply to them", "It is never an allow, also with the administrator's `hook_fail_mode: open`: `open` covers only a gateway service the hook proves stopped."], lacks: ["It is never an allow unless the administrator set `hook_fail_mode: open`."] },
-  { gap: "GAP-0827", page: "enterprise/machine-policy.mdx", section: "Managed OpenCode plugin", has: ["a stopped gateway service depends on `foreign_hooks`: with `remove` (the default) the foreign-plugin guard needs the gateway's session record, so `open` does not apply; with `report` or `allow` it does.", "/docs/connectors/capability-matrix#gateway-outage"], lacks: ["It fails closed: a tool call is blocked when the hook binary cannot run, answers with an error, or the gateway is unreachable."] },
+  { gap: "GAP-0464", page: "enterprise/troubleshooting.mdx", has: ["The foreign-hook guard narrows this: with `foreign_hooks: remove` (the default), `open` applies to the connectors it checks only on Linux and macOS, for an agent process with a current clean-session note", "It is never an allow, also with the administrator's `hook_fail_mode: open`: `open` covers only a gateway service the hook proves stopped."], lacks: ["It is never an allow unless the administrator set `hook_fail_mode: open`.", "so `open` does not apply to them"] },
+  { gap: "GAP-0363", page: "enterprise/lifecycle.mdx", has: ["For connectors whose foreign-hook guard checks the session with the gateway (`foreign_hooks: remove`, the default), `open` runs a call only on Linux and macOS, for an agent process with a current clean-session note."], lacks: ["Connectors whose foreign-hook guard checks the session with the gateway (`foreign_hooks: remove`, the default) block outages too."] },
+  { gap: "GAP-0363", page: "enterprise/threat-model.mdx", has: ["For connectors whose foreign-hook guard checks the session with the gateway (`foreign_hooks: remove`), it covers only a Linux or macOS session with a clean-session note."], lacks: ["except for connectors whose foreign-hook guard checks the session with the gateway (`foreign_hooks: remove`)."] },
+  { gap: "GAP-0827", page: "enterprise/machine-policy.mdx", section: "Managed OpenCode plugin", has: ["a stopped gateway service depends on `foreign_hooks`. With `remove` (the default), `open` applies only on Linux and macOS, to an agent process with a current clean-session note, and every other call blocks. With `report` or `allow` it always applies.", "/docs/connectors/capability-matrix#gateway-outage"], lacks: ["the foreign-plugin guard needs the gateway's session record, so `open` does not apply", "It fails closed: a tool call is blocked when the hook binary cannot run, answers with an error, or the gateway is unreachable."] },
   { gap: "GAP-1997", page: "reference/fail-modes.mdx", has: ["Their PATH shims for `curl`, `wget`, `ssh`, `nc`, `pip` and `npm` are not requests", "Open runs the real tool with one warning and a `hook-failures.jsonl` record. Closed refuses it."] },
   { gap: "GAP-1997", page: "support-matrix.mdx", lacks: ["refuse to run the real tool in every policy, so `npm` and `pip` builds stop", "running <tool> without inspection"] },
   { gap: "GAP-1997", page: "connectors/zeptoclaw.mdx", section: "Subprocess policy", has: ["While the gateway is not running, the shims follow the policy", "running <tool> without inspection", "refusing to exec <tool>`, exit 1"] },
   { gap: "GAP-1997", page: "connectors/openclaw.mdx", section: "Subprocess policy", has: ["While the gateway is not running, the shims follow the policy", "running <tool> without inspection", "refusing to exec <tool>`, exit 1"] },
-  { gap: "GAP-0506", page: "segmentation.mdx", section: "Fail-open and fail-closed, per layer", has: ["| A hook cannot reach the gateway | The [gateway outage table](/docs/connectors/capability-matrix#gateway-outage) gives the result per connector and install.", "covers a gateway outage only, and not for a connector whose foreign-hook guard checks the session with the gateway ([gateway outage table](/docs/connectors/capability-matrix#gateway-outage))"] },
+  { gap: "GAP-0506", page: "segmentation.mdx", section: "Fail-open and fail-closed, per layer", has: ["| A hook cannot reach the gateway | The [gateway outage table](/docs/connectors/capability-matrix#gateway-outage) gives the result per connector and install.", "The administrator's `open` covers a gateway outage only. For a connector whose foreign-hook guard checks the session with the gateway, it covers only a Linux or macOS session with a clean-session note ([gateway outage table](/docs/connectors/capability-matrix#gateway-outage))"], lacks: ["and not for a connector whose foreign-hook guard checks the session"] },
   { gap: "GAP-0465", page: "connectors/capability-matrix.mdx", has: ["report as `effective_hook_fail_mode` the mode a managed connector's hook works in", "(on Windows the Amp and OpenCode plugins) read `closed`"], lacks: ["also for a hook that blocks the outage anyway"] },
   { gap: "GAP-0034", page: "connectors/claudecode.mdx", has: ["Works on Linux and macOS. On a per-user install setup writes the hooks through a link", "On Windows setup refuses a `settings.json` that is a symbolic link or junction, wherever it points, and changes nothing", "On Windows replace the link with the file it points to, then run setup again."], lacks: ["| `settings.json` is a symlink | Works. On a per-user install"] },
   { gap: "GAP-0034", page: "get-started/windows/paths-troubleshooting.mdx", has: ["Setup changes the Claude Code `settings.json` only as a regular file. If it is a symbolic link or junction, setup refuses, names the link and its target, and changes nothing."] },
@@ -1941,13 +1956,13 @@ describe('identity-entra-id callouts appear once (GAP-2193)', () => {
 });
 
 // GAP-2347 class: only a per-user gateway turns hook-failures.jsonl lines
-// into a guardrail-degraded alert (reportHookFailOpenCalls returns on a
+// into a guardrail-degraded alert (reportHookFailureCalls returns on a
 // managed host), so every sentence that promises that alert from the file
 // says per-user.
 describe('fail-open alert promises are scoped to per-user installs (GAP-2347)', () => {
   it('scopes every hook-failures.jsonl guardrail-degraded sentence and matches the gateway', () => {
     const report = source('internal/gateway/hook_failopen_report.go');
-    assert.match(report, /func \(s \*Sidecar\) reportHookFailOpenCalls\(\) \{\s*if s == nil \|\| s\.logger == nil \|\| ManagedEnterpriseActive\(\) \{\s*return/, 'the managed early return moved: re-check the docs scope');
+    assert.match(report, /func \(s \*Sidecar\) reportHookFailureCalls\(\) \{\s*if s == nil \|\| s\.logger == nil \|\| ManagedEnterpriseActive\(\) \{\s*return/, 'the managed early return moved: re-check the docs scope');
     const walk = (dir: string): string[] => readdirSync(dir, { withFileTypes: true }).flatMap((e) => (e.isDirectory() ? walk(join(dir, e.name)) : e.name.endsWith('.mdx') ? [join(dir, e.name)] : []));
     const root = join(site, 'content/docs');
     const unscoped: string[] = [];
@@ -2664,5 +2679,84 @@ describe('retained-state file names match the Remove pages (sidecar-aispg-retest
   it('retained.go still writes retained-state.json and .defenseclaw-retained', () => {
     const go = source('internal/enterpriseunix/retained.go');
     assert.ok(go.includes('retainedStateFileName      = "retained-state.json"') && go.includes('retainedMarkerName         = ".defenseclaw-retained"'), 'retained-state names changed: re-check enterprise/lifecycle.mdx What uninstall keeps, linux.mdx and macos.mdx Remove');
+  });
+});
+
+describe('A disabled connector on a managed host (rel-1-0-6:GAP-0325)', () => {
+  it('says root and exempt_users get the same unrecorded allow and keep only their own refusals', () => {
+    const text = page('enterprise/troubleshooting.mdx');
+    assert.ok(text.includes('Root and `exempt_users` accounts get the same allow without a record. Root is still refused by `enrollment.root: deny`. Each account keeps only the refusals that already apply to it (root skips the surface check, `exempt_users` skips the require-sandbox refusal).'),
+      'troubleshooting.mdx no longer says how root and exempt_users are answered on a disabled connector');
+    assert.ok(!text.includes('This applies to every account, root and `exempt_users` included'),
+      'troubleshooting.mdx again claims every refusal applies to root and exempt_users (root skips the surface check, exempt_users skips require-sandbox)');
+  });
+});
+
+describe('hook_process_fail_open next to fail-closed managed hooks (rel-1-0-6:GAP-0411)', () => {
+  it('the warning and the troubleshooting row say it is the agent limit, not the hook fail mode', () => {
+    const go = source('internal/enterprisestatus/hook_process_failure.go');
+    assert.ok(go.includes("This is the agent's own behavior, not DefenseClaw's fail mode: the managed hook still fails closed (effective_hook_fail_mode closed) when the gateway does not answer. "),
+      'the hook_process_fail_open warning no longer explains the fail mode');
+    const text = page('enterprise/troubleshooting.mdx');
+    assert.ok(text.includes("It is an agent limit, not DefenseClaw's hook fail mode (which covers a gateway that does not answer; with fail mode `closed`, the managed default, the hook still fails closed then). The message names the connector's fail mode when the config can be read."),
+      'troubleshooting.mdx hook_process_fail_open row no longer separates the agent limit from the fail mode');
+    assert.ok(!text.includes('a managed hook still fails closed when the gateway does not answer'),
+      'troubleshooting.mdx again says every managed hook fails closed (an administrator can set fail mode open)');
+    assert.ok(go.includes("This is the agent's own behavior, not DefenseClaw's fail mode: the managed hook also fails open (effective_hook_fail_mode open) when the gateway does not answer. "),
+      'the open-mode hook_process_fail_open warning no longer says it is the agent limit');
+  });
+});
+
+describe('account-keys refusal on a per-user install (rel-1-0-6:GAP-0417)', () => {
+  it('names the managed-only refusal in the guide and the CLI', () => {
+    const text = page('enterprise/account-join-key.mdx');
+    assert.ok(text.includes('On a computer with only a per-user install there are no account join keys, and the command says so (`not_installed`)'),
+      'account-join-key.mdx no longer says what account-keys does on a per-user install');
+    const go = source('internal/cli/enterprise_account_keys_unix.go');
+    assert.ok(go.includes('secretFailed("not_installed", ') && go.includes('account join keys exist only on a managed (enterprise) install of DefenseClaw'),
+      'enterprise_account_keys_unix.go no longer refuses a per-user install with not_installed');
+  });
+});
+
+describe('1.0.7 ruled limits are visible on their affected pages (GAP-0539)', () => {
+  it('lists the remaining reader, platform, and audit limits while omitting the repaired hook cleanup', () => {
+    const matrix = page('support-matrix.mdx').split('### 1.0.7 deterministic reader limits')[1]?.split('## Claude Code shell')[0] ?? '';
+    for (const id of ['0339', '0347', '0350', '0354', '0355', '0367', '0372', '0379', '0390', '0391', '0425', '0429', '0327', '0482', '0495', '0519', '0524']) {
+      assert.ok(matrix.includes(`GAP-${id}`), `GAP-${id} missing from the 1.0.7 known limits`);
+    }
+    assert.ok(!matrix.includes('GAP-0510'), 'repaired connector cleanup is still listed as a limit');
+    for (const [name, id] of [
+      ['reference/fail-modes.mdx', '0524'],
+      ['observability/index.mdx', '0327'],
+      ['connectors/hermes.mdx', '0486'],
+      ['scanning/mcp-scanner.mdx', '0499'],
+      ['get-started/windows/paths-troubleshooting.mdx', '0495'],
+      ['enterprise/troubleshooting.mdx', '0409'],
+    ] as const) {
+      assert.ok(page(name).includes(`GAP-${id}`), `${name} lacks GAP-${id}`);
+    }
+    assert.match(page('enterprise/windows.mdx'), /### 1\.0\.7 purge limit/);
+  });
+});
+
+describe('macOS account join key while the domain is away (rel-1-0-6:GAP-0447)', () => {
+  it('says the guardian keeps the last SID while the domain does not answer', () => {
+    const text = page('enterprise/account-join-key.mdx');
+    assert.ok(text.includes('While the domain does not answer (off the network, or the domain controller unreachable), it keeps the SID it last read, so the key does not change. An account the domain reports as gone loses its SID and its key.'),
+      'account-join-key.mdx no longer says the macOS SID is kept while the domain is away');
+    assert.ok(!text.includes('a macOS Active Directory account while its domain does not answer'),
+      'account-join-key.mdx again says a macOS AD account gets no key while its domain is away');
+    const go = source('internal/enterprisehooks/identity_spool_macos.go');
+    assert.ok(go.includes('func macOSNodeUnanswered(result macOSToolResult) bool') && go.includes('dsclExitRecordNotFound = 56') &&
+      go.includes('dsclExitNodeNotValid   = 69'),
+      'identity_spool_macos.go no longer separates an unreachable domain node (exit 69) from a definitive record-not-found (exit 56)');
+  });
+});
+
+describe('GAP-0372 documented reader limit', () => {
+  it('names the dynamic destination limit and a fixed destination option', () => {
+    const matrix = page('support-matrix.mdx');
+    assert.match(matrix, /GAP-0372[^\n]*dynamic destination can still be refused/);
+    assert.match(matrix, /Run them yourself or name a fixed destination/);
   });
 });

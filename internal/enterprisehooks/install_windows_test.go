@@ -2731,6 +2731,22 @@ func TestWindowsStandaloneClaudeEmptyEnrollmentKeepsMachinePolicy(t *testing.T) 
 	}
 }
 
+func TestWindowsClaudeClosedRegistrationRequiresActiveHookExecutable(t *testing.T) {
+	fixture := newWindowsManagedInstallFixture(t, map[string]interface{}{"allowManagedHooksOnly": true})
+	if _, err := Install(context.Background(), windowsManagedInstallOptions(fixture)); err != nil {
+		t.Fatal(err)
+	}
+	registered, err := windowsMachinePolicyRegisteredSIDs("claudecode", fixture.hookExe)
+	if err != nil || !registered[strings.ToUpper(fixture.targetSID.String())] {
+		t.Fatalf("matching policy registration: registered=%v err=%v", registered, err)
+	}
+	missingHook := filepath.Join(t.TempDir(), "missing-hook.exe")
+	registered, err = windowsMachinePolicyRegisteredSIDs("claudecode", missingHook)
+	if err == nil || len(registered) != 0 {
+		t.Fatalf("mismatched policy registration: registered=%v err=%v", registered, err)
+	}
+}
+
 func TestRemoveWindowsClaudeManagedPolicyRefusesTamperedPolicy(t *testing.T) {
 	fixture := newWindowsManagedInstallFixture(t, map[string]interface{}{"allowManagedHooksOnly": true})
 	opts := windowsManagedInstallOptions(fixture)

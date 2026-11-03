@@ -1061,7 +1061,7 @@ func errRunConfigStricter(rec record, why string) error {
 		e.Message = "the sandbox policy now runs the harness under stricter settings (safe mode or MCP servers) than sandbox " + name +
 			" was created with, and " + why + ", so it cannot start; its work stays in it, and deleting it discards what was never pulled"
 		e.Detail = "to bring the work back first, start it under the settings it was made with (undo the change that made the policy stricter, " +
-			"or ask your administrator), `defenseclaw sandbox pull " + name + "`, then `defenseclaw sandbox delete " + name +
+			"or ask your administrator), `defenseclaw sandbox pull " + name + " --apply` (or --branch or --patch-out FILE), confirm the project, branch or patch file contains the work, then `defenseclaw sandbox delete " + name +
 			"` and `defenseclaw sandbox run` with the same project"
 	}
 	return e

@@ -1653,6 +1653,10 @@ type managedState struct {
 	// decisions are the saved decisions per registration, as the last
 	// refresh (or a decision since) left them.
 	decisions map[string][]sandboxrelay.Decision
+	// unanswered are the registrations whose decisions load got no answer
+	// (prefetchDecisions), and when: for decisionsRetryAfter no policy
+	// build or refresh waits for them again (missedRecently).
+	unanswered map[string]time.Time
 	// foreignRules counts each sandbox's removals of rules DefenseClaw
 	// neither rendered nor approved: a repeat stops the sandbox.
 	foreignRules map[string]int
@@ -1720,9 +1724,10 @@ func (m *Manager) savedDecisions(registration string, f config.OpenShellAdminCon
 	st := m.managedSide()
 	st.mu.Lock()
 	list, loaded := st.decisions[registration]
+	unanswered := st.missedRecently(registration, m.now())
 	list = slices.Clone(list)
 	st.mu.Unlock()
-	if !loaded {
+	if !loaded && !unanswered {
 		list = m.loadDecisions(registration)
 	}
 	return slices.DeleteFunc(list, func(d sandboxrelay.Decision) bool {
@@ -1764,6 +1769,74 @@ func (m *Manager) loadDecisions(registration string) []sandboxrelay.Decision {
 	}
 	st.decisions[registration] = list
 	return slices.Clone(list)
+}
+
+// decisionsRetryAfter is how long a registration whose decisions load got
+// no answer is not waited for again. A daemon start refreshes the policies
+// back to back (the manager, its egress proxy, the confirmed floor) before
+// it serves: on a managed gateway that stopped answering, each refresh
+// waited out loadDecisionsTimeout again (GAP-0608). Until a load answers,
+// the sandbox runs without the saved "always" decisions: stricter, never
+// looser.
+const decisionsRetryAfter = 3 * loadDecisionsTimeout
+
+// missedRecently reports a registration whose decisions load got no answer
+// less than decisionsRetryAfter before now. Callers hold st.mu.
+func (st *managedState) missedRecently(registration string, now time.Time) bool {
+	at, ok := st.unanswered[registration]
+	if !ok {
+		return false
+	}
+	since := now.Sub(at)
+	return since >= 0 && since < decisionsRetryAfter
+}
+
+// prefetchDecisions loads, side by side, the saved decisions of the boxes'
+// registrations not loaded yet (loadDecisions, each bounded by
+// loadDecisionsTimeout), so a refresh of the policies waits for one load,
+// not one per sandbox: the daemon's start-up refresh runs before it serves
+// (GAP-0608). A registration that got no answer is not asked again, by
+// this refresh or the next, for decisionsRetryAfter (missedRecently).
+func (m *Manager) prefetchDecisions(boxes []*box) {
+	if m.authority() == nil {
+		return
+	}
+	var regs []string
+	for _, b := range boxes {
+		if r := m.registrationOf(b); r != "" && !slices.Contains(regs, r) {
+			regs = append(regs, r)
+		}
+	}
+	st := m.managedSide()
+	st.mu.Lock()
+	now := m.now()
+	regs = slices.DeleteFunc(regs, func(r string) bool {
+		_, ok := st.decisions[r]
+		return ok || st.missedRecently(r, now)
+	})
+	st.mu.Unlock()
+	var wg sync.WaitGroup
+	for _, r := range regs {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			m.loadDecisions(r)
+		}()
+	}
+	wg.Wait()
+	st.mu.Lock()
+	defer st.mu.Unlock()
+	at := m.now()
+	for _, r := range regs {
+		if _, ok := st.decisions[r]; ok {
+			delete(st.unanswered, r)
+			continue
+		}
+		if st.unanswered == nil {
+			st.unanswered = map[string]time.Time{}
+		}
+		st.unanswered[r] = at
+	}
 }
 
 // refreshDecisions reloads the saved decisions of every registered

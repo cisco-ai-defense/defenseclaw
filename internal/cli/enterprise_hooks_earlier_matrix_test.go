@@ -14,6 +14,15 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/enterprisestatus"
 )
 
+func stubEarlierReleaseClosedMachineRegistration(t *testing.T) {
+	t.Helper()
+	previous := enterpriseHookReconcileClosedMachineRegistration
+	t.Cleanup(func() { enterpriseHookReconcileClosedMachineRegistration = previous })
+	enterpriseHookReconcileClosedMachineRegistration = func(opts enterprisehooks.InstallOptions) (bool, error) {
+		return opts.ConnectorName == "claudecode" || opts.ConnectorName == "codex", nil
+	}
+}
+
 // GAP-2463: after a managed Windows upgrade, a disconnected account whose
 // Hermes still runs the hooks the earlier release registered (that matrix
 // lacks only the fail_closed setting this release adds) is reported as
@@ -65,18 +74,95 @@ func TestEnterpriseHookEarlierHookMatrixIsReportedEnrolledNotPending(t *testing.
 		t.Fatalf("warnings = %+v, want one guarded-but-not-fail-closed guardian_repair_pending warning", result.Warnings)
 	}
 
-	// Any other drift of an earlier release's target still waits as pending.
+	// A lock without a proved registered closed hook cannot wait as pending.
 	earlier = false
 	_, _, err = enterpriseHookVerifyOrRepairTarget(context.Background(), target, opts, true)
-	if !errors.Is(err, errEnterpriseHookAwaitingSignIn) {
-		t.Fatalf("other drift: err=%v, want the sign-in wait", err)
+	if err == nil || errors.Is(err, errEnterpriseHookAwaitingSignIn) {
+		t.Fatalf("other drift: err=%v, want the signed-out refusal", err)
 	}
-	row.Error = err.Error()
-	if enterpriseHookEarlierMatrixRow(row) {
-		t.Fatalf("other drift reported as the earlier matrix: %q", row.Error)
+}
+
+// GAP-0513: Setup restores the exact owner-rewritten ACL of an older
+// account's hook lock before the guardian checks it. Model a signed-out
+// account: before that restore the release cannot be read, so the failure
+// must stay a failure; afterwards the guardian can carry its older hooks
+// forward and name the pending sign-in repair without installing as SYSTEM.
+func TestSignedOutOwnerRewrittenAccountUpgradeNeedsReadableOlderLock(t *testing.T) {
+	stubSecureClientSignInReconcile(t)
+	previousEarlier := enterpriseHookReconcileTargetEarlierMatrix
+	previousClosed := enterpriseHookReconcileClosedMachineRegistration
+	t.Cleanup(func() {
+		enterpriseHookReconcileTargetEarlierMatrix = previousEarlier
+		enterpriseHookReconcileClosedMachineRegistration = previousClosed
+	})
+	enterpriseHookReconcileSecureClient = func() bool { return false }
+	ownerRightsRestored := false
+	signedIn := false
+	installs := 0
+	enterpriseHookReconcileSessionAvailable = func(enterprisehooks.ManifestTarget) (bool, error) { return signedIn, nil }
+	enterpriseHookReconcileVerifier = func(context.Context, enterprisehooks.InstallOptions) (enterprisehooks.InstallResult, error) {
+		return enterprisehooks.InstallResult{}, errors.New("protected hook lock belongs to an earlier release")
 	}
-	accounts = windowsEnterpriseEnrollmentAccounts([]enterpriseHookReconcileRow{row, codex})
-	if accounts[0].Connectors["hermes"] != "pending" || !strings.Contains(accounts[0].Reason, windowsEnterpriseEnrollmentPending) {
-		t.Fatalf("other drift enrollment = %+v, want hermes pending", accounts)
+	enterpriseHookReconcileTargetRelease = func(enterprisehooks.InstallOptions) (string, bool, error) {
+		if !ownerRightsRestored {
+			return "", false, errors.New("owner-rewritten hook lock is unreadable")
+		}
+		return "1.0.6", true, nil
+	}
+	enterpriseHookReconcileTargetEarlierMatrix = func(enterprisehooks.InstallOptions) (bool, error) { return false, nil }
+	registered, closed := true, true
+	enterpriseHookReconcileClosedMachineRegistration = func(enterprisehooks.InstallOptions) (bool, error) {
+		return registered && closed, nil
+	}
+	enterpriseHookReconcileInstaller = func(context.Context, enterprisehooks.InstallOptions) (enterprisehooks.InstallResult, error) {
+		installs++
+		return enterprisehooks.InstallResult{}, nil
+	}
+	target := enterprisehooks.ManifestTarget{
+		User: "EXAMPLE\\signedout", UserHome: `C:\Users\signedout`, SID: "S-1-5-21-1-2-3-1120",
+		Connector: "codex", Deferred: true,
+	}
+	opts := enterprisehooks.InstallOptions{ConnectorName: target.Connector}
+	_, repaired, err := enterpriseHookVerifyOrRepairTarget(context.Background(), target, opts, true)
+	if err == nil || errors.Is(err, errEnterpriseHookAwaitingSignIn) || repaired || installs != 0 {
+		t.Fatalf("unreadable older lock: err=%v repaired=%t installs=%d, want a refusal", err, repaired, installs)
+	}
+	ownerRightsRestored = true
+	_, repaired, err = enterpriseHookVerifyOrRepairTarget(context.Background(), target, opts, true)
+	if !errors.Is(err, errEnterpriseHookAwaitingSignIn) || repaired || installs != 0 {
+		t.Fatalf("restored lock, signed out: err=%v repaired=%t installs=%d, want pending repair", err, repaired, installs)
+	}
+	pendingErr := err
+	registered = false
+	_, _, err = enterpriseHookVerifyOrRepairTarget(context.Background(), target, opts, true)
+	if err == nil || errors.Is(err, errEnterpriseHookAwaitingSignIn) {
+		t.Fatalf("missing machine registration: err=%v, want refusal", err)
+	}
+	registered, closed = true, false
+	_, _, err = enterpriseHookVerifyOrRepairTarget(context.Background(), target, opts, true)
+	if err == nil || errors.Is(err, errEnterpriseHookAwaitingSignIn) {
+		t.Fatalf("open machine runtime: err=%v, want refusal", err)
+	}
+	closed = true
+	row := enterpriseHookReconcileRow{User: target.User, UserHome: target.UserHome, SID: target.SID, Connector: target.Connector, Error: pendingErr.Error()}
+	accounts := windowsEnterpriseEnrollmentAccounts([]enterpriseHookReconcileRow{row})
+	if len(accounts) != 1 || accounts[0].Account != target.User || accounts[0].Connectors["codex"] != "pending" ||
+		!strings.Contains(accounts[0].Reason, windowsEnterpriseEnrollmentPending) {
+		t.Fatalf("signed-out account status = %+v, want the account and pending repair", accounts)
+	}
+	for _, action := range []string{"status", "verify"} {
+		status := &enterprisestatus.Result{Action: action, SecurityComplete: true}
+		applyWindowsEnterpriseGuardianTargetGaps(status, enterpriseHookGuardianState{Results: []enterpriseHookReconcileRow{row}}, nil)
+		if status.SecurityComplete || len(status.Warnings) != 1 ||
+			status.Warnings[0].Code != windowsEnterpriseGuardianRepairPendingCode ||
+			!strings.Contains(status.Warnings[0].Message, "codex for "+target.User) ||
+			!strings.Contains(status.Warnings[0].Message, "until the account signs in") {
+			t.Fatalf("%s = %+v, want incomplete coverage and the named pending repair", action, status)
+		}
+	}
+	signedIn = true
+	_, repaired, err = enterpriseHookVerifyOrRepairTarget(context.Background(), target, opts, true)
+	if err != nil || !repaired || installs != 1 {
+		t.Fatalf("next sign-in: err=%v repaired=%t installs=%d, want one in-session repair", err, repaired, installs)
 	}
 }

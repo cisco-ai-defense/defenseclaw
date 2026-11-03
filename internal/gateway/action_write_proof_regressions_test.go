@@ -5,12 +5,16 @@ package gateway
 
 import (
 	"encoding/json"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"runtime"
+	"strings"
 	"testing"
 
 	"github.com/defenseclaw/defenseclaw/internal/actionfacts"
+	"github.com/defenseclaw/defenseclaw/internal/config"
 	"github.com/defenseclaw/defenseclaw/internal/hookpaths"
 )
 
@@ -64,6 +68,101 @@ func r104ReviewHome(t *testing.T) (home, cwd string) {
 	}
 	t.Setenv("HOME", home)
 	return home, cwd
+}
+
+func TestGAP0529CopyFieldSplitBothConnectors(t *testing.T) {
+	home := t.TempDir()
+	cwd := filepath.Join(home, "project")
+	for _, dir := range []string{cwd, filepath.Join(home, ".ssh"), filepath.Join(home, "build")} {
+		if err := os.MkdirAll(dir, 0o700); err != nil {
+			t.Fatal(err)
+		}
+	}
+	t.Setenv("HOME", home)
+	for _, row := range []struct {
+		name, command string
+		blocked       bool
+	}{
+		{"protected ordinary destination", `t=" $HOME/.ssh"; cp a.txt $t`, true},
+		{"protected single parameter destination", `t="a.txt $HOME/.ssh"; cp $t`, true},
+		{"protected single parameter option", `t="-t $HOME/.ssh a.txt"; cp $t`, true},
+		{"ordinary option word", `t="-t $HOME/build"; cp $t a.txt`, false},
+		{"ordinary single parameter destination", `t="a.txt $HOME/build"; cp $t`, false},
+		{"ordinary single parameter option", `t="-t $HOME/build a.txt"; cp $t`, false},
+	} {
+		t.Run(row.name, func(t *testing.T) {
+			for i, got := range r104ReviewProtectedWrite(t, row.command, cwd, home) {
+				if got != row.blocked {
+					t.Errorf("cell %d (per-user, managed Claude Code, managed Codex) blocked=%t, want %t", i, got, row.blocked)
+				}
+			}
+		})
+	}
+}
+
+func TestGAP0548OptionWordBothConnectorTools(t *testing.T) {
+	home := t.TempDir()
+	cwd := filepath.Join(home, "project")
+	for _, dir := range []string{cwd, filepath.Join(home, "build")} {
+		if err := os.MkdirAll(dir, 0o700); err != nil {
+			t.Fatal(err)
+		}
+	}
+	t.Setenv("HOME", home)
+	command := `t="-t $HOME/build"; cp $t a.txt`
+	for _, row := range []struct{ connector, tool, argument string }{
+		{"claudecode", "Bash", "command"},
+		{"codex", "exec_command", "cmd"},
+	} {
+		t.Run(row.connector, func(t *testing.T) {
+			input := actionfacts.Input{Tool: row.tool, Command: command, CWD: cwd,
+				ActiveHome: home, DialectHint: actionfacts.DialectPOSIX}
+			toolInput := map[string]string{row.argument: command}
+			if row.connector == "codex" {
+				toolInput["workdir"] = cwd
+			}
+			payload, err := json.Marshal(map[string]any{"session_id": "gap0548", "hook_event_name": "PreToolUse",
+				"tool_use_id": "gap0548-tool", "tool_name": row.tool, "cwd": cwd,
+				"tool_input": toolInput})
+			if err != nil {
+				t.Fatal(err)
+			}
+			header := hookpaths.Resolve(payload)
+			targets, ok := hookpaths.Decode(header)
+			if !ok {
+				t.Fatal("client proof did not decode")
+			}
+			if runtime.GOOS == "windows" {
+				targets = nil
+			}
+			for _, managed := range []bool{false, true} {
+				request := trustedActionRequest{Input: input, Connector: row.connector,
+					ProtectedHomeHook: managed, ResolvedWriteTargets: targets}
+				if trustedExistingAuthorizedKeysSymlinkWrite(request, actionfacts.Analyze(input)) {
+					t.Errorf("managed=%t: ordinary option target was blocked", managed)
+				}
+				cfg := &config.Config{}
+				cfg.Guardrail.Mode = "action"
+				cfg.Guardrail.Connector = row.connector
+				api := &APIServer{scannerCfg: cfg, health: NewSidecarHealth()}
+				req := httptest.NewRequest(http.MethodPost, "/api/v1/hook", strings.NewReader(string(payload)))
+				if managed {
+					if runtime.GOOS != "windows" {
+						req.Header.Set(hookpaths.Header, header)
+					}
+					req = req.WithContext(withManagedHookPeer(req.Context(), managedHookPeer{Home: home}))
+				}
+				if row.connector == "codex" {
+					setTestCodexHookBinding(req, "PreToolUse", defaultTestCodexHookContract)
+				}
+				recorder := httptest.NewRecorder()
+				api.handleAgentHook(row.connector).ServeHTTP(recorder, req)
+				if body := recorder.Body.String(); !strings.HasPrefix(body, `{"action":"allow"`) {
+					t.Errorf("managed=%t: gateway status %d body %.300s, want allow", managed, recorder.Code, body)
+				}
+			}
+		})
+	}
 }
 
 func TestR104ReviewFixDecisions(t *testing.T) {

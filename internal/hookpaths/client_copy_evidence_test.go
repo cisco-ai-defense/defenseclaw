@@ -17,10 +17,14 @@ func TestR103B36ReviewRealClientCopyFact(t *testing.T) {
 	if err := os.Symlink("source-target", filepath.Join(project, "source")); err != nil {
 		t.Fatal(err)
 	}
+	if err := os.WriteFile(filepath.Join(project, "ordinary"), []byte("x\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
 	destination := filepath.Join(project, "copied")
 	for _, row := range []struct {
 		name, command, want string
 	}{
+		{"plain copy without an opaque scope", "cp -a ordinary copied", "c"},
 		{"one copy", "cp -P source copied; echo hi > copied", "c"},
 		{"two copies", "cp -P source copied; cp -P source copied; echo hi > copied", ""},
 	} {

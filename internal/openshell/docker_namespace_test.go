@@ -72,7 +72,7 @@ func TestDoctorNamesAGatewayOnTheSharedDockerNamespace(t *testing.T) {
 		f.writeTOML(shared, f.started.Add(-time.Minute))
 		defaultNamespaceSandbox(t, f.home)
 		c := expectCheck(t, f.run(), openshell.CheckIDDockerNamespace, openshell.StatusWarn, "removes the supervisors of your running sandboxes")
-		if c.Fix == nil || c.Fix.Automatic || c.Fix.Apply != nil || !strings.Contains(c.Fix.Summary, "defenseclaw sandbox pull NAME") {
+		if c.Fix == nil || c.Fix.Automatic || c.Fix.Apply != nil || !strings.Contains(c.Fix.Summary, "defenseclaw sandbox pull NAME --apply") {
 			t.Fatalf("fix = %+v, want the account's own steps first", c.Fix)
 		}
 	})

@@ -61,13 +61,20 @@ func (c *ampExecutableDriftAfterSetupConnector) Teardown(ctx context.Context, op
 }
 
 func prepareAmpGatewayAuthorityFixture(t *testing.T, dataDir string) ampGatewayAuthorityFixture {
+	return prepareAmpGatewayAuthorityFixtureAtPath(t, dataDir, "")
+}
+
+func prepareAmpGatewayAuthorityFixtureAtPath(t *testing.T, dataDir, executablePath string) ampGatewayAuthorityFixture {
 	t.Helper()
 	if err := safefile.ProtectDirectory(dataDir); err != nil {
 		t.Fatalf("protect Amp fixture data directory: %v", err)
 	}
 
-	executableRoot := testenv.PrivateTempDir(t)
-	executablePath := filepath.Join(executableRoot, "amp.exe")
+	if executablePath == "" {
+		executablePath = filepath.Join(testenv.PrivateTempDir(t), "amp.exe")
+	} else if err := os.MkdirAll(filepath.Dir(executablePath), 0o700); err != nil {
+		t.Fatalf("create Amp fixture executable directory: %v", err)
+	}
 	executableBody := []byte("MZ native Amp gateway fixture")
 	if err := os.WriteFile(executablePath, executableBody, 0o700); err != nil {
 		t.Fatalf("write Amp fixture executable: %v", err)

@@ -62,12 +62,15 @@ func TestWindowsProfileUnlistableFolderAtHome(t *testing.T) {
 		command, want string
 		owner         bool
 	}{
-		{"head -n 1 */*; echo done", "", true},
+		// printf done keeps the command out of the read-only list, so the
+		// pattern is judged; a fixed-text echo is verdict-neutral
+		// (rel-1-0-6:GAP-0225) and head -n 1 */*; echo done is read-only.
+		{"head -n 1 */*; printf done", "", true},
 		{"echo */*; echo done", "", true},
 		// No account lists a folder that denies listing to Everyone, so a
 		// gateway service of another account judges it as the user does
 		// (managed parity).
-		{"head -n 1 */*; echo done", "", false},
+		{"head -n 1 */*; printf done", "", false},
 		{"cp a.txt .ssh/authorized_keys", "protected-target", true},
 		{"cp a.txt .*/authorized_keys", "protected-target", true},
 	} {
@@ -119,6 +122,9 @@ func TestWindowsProfileFolderDeniedToOneAccountAtHome(t *testing.T) {
 	}
 	saved := actionProcessProfileDirectory
 	t.Cleanup(func() { actionProcessProfileDirectory = saved })
+	// printf done keeps the command out of the read-only list, so the
+	// pattern is judged (a fixed-text echo is verdict-neutral,
+	// rel-1-0-6:GAP-0225).
 	for _, row := range []struct {
 		owner bool
 		want  string
@@ -129,7 +135,7 @@ func TestWindowsProfileFolderDeniedToOneAccountAtHome(t *testing.T) {
 			}
 			return filepath.Join(filepath.Dir(home), "other"), nil
 		}
-		if got := ActionCommandDecisionWithDialectAndGlobFacts("head -n 1 */*; echo done", home, home, actionfacts.DialectPOSIX, nil); got != row.want {
+		if got := ActionCommandDecisionWithDialectAndGlobFacts("head -n 1 */*; printf done", home, home, actionfacts.DialectPOSIX, nil); got != row.want {
 			t.Errorf("owner=%v: decision %q, want %q", row.owner, got, row.want)
 		}
 	}

@@ -96,6 +96,7 @@ func TestManagedGatewayStartsFromV8ObservabilityConfig(t *testing.T) {
 	if mgr.assetDirs == nil && mgr.assetFiles == nil {
 		t.Fatal("rule-pack asset watches are not attached; the startup reconcile would not take the asset path")
 	}
+	recordStandaloneStartupGeneration(t, fixture.configPath)
 	mgr.setStartupSource(fixture.configPath, raw)
 	ctx, cancel := context.WithCancel(t.Context())
 	ready := make(chan error, 1)

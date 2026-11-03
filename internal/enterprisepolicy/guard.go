@@ -25,6 +25,7 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/config"
 	"github.com/defenseclaw/defenseclaw/internal/gateway/connector"
 	"github.com/defenseclaw/defenseclaw/internal/jsonc"
+	"github.com/defenseclaw/defenseclaw/internal/pathidentity"
 )
 
 // The foreign-hook guard exists because several agents run every
@@ -233,6 +234,10 @@ type GuardDecision struct {
 	// source the agent loaded may not have been checked. At a session start
 	// it blocks the session (ApplyForeignHookSession).
 	Incomplete bool `json:"incomplete,omitempty"`
+	// Outage is set only by the hook, never sent or decoded: the gateway
+	// is proven stopped and its clean-session entry vouches for this agent
+	// process, so the call is left to the managed outage fail mode.
+	Outage bool `json:"-"`
 }
 
 func (r GuardRequest) getenv(key string) string {
@@ -737,7 +742,7 @@ func truncate(value string, limit int) string {
 }
 
 func readGuardFileLimit(path string, limit int64) ([]byte, bool, error) {
-	info, err := os.Lstat(path)
+	info, err := pathidentity.LstatPinned(path)
 	if errors.Is(err, fs.ErrNotExist) {
 		return nil, false, nil
 	}

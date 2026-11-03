@@ -34,16 +34,19 @@ func claudeResponseTestCommand(t *testing.T, response string) (*exec.Cmd, string
 		t.Fatal(err)
 	}
 	countPath := filepath.Join(home, "parser-calls")
-	helper, err := os.OpenFile(filepath.Join(hookDir, "_hardening.sh"), os.O_APPEND|os.O_WRONLY, 0o600)
-	if err != nil {
-		t.Fatal(err)
-	}
+	// A jq program first on the hook's baked PATH records each run: the
+	// hook execs jq in its command substitutions (issue #1130), so a shell
+	// function named jq would see none of them.
 	quote := func(s string) string { return "'" + strings.ReplaceAll(s, "'", "'\\''") + "'" }
-	_, err = helper.WriteString("\njq() { printf '%s\\0' \"$*\" >> " + quote(countPath) + "; command " + quote(jq) + " \"$@\"; }\n")
-	_ = helper.Close()
-	if err != nil {
+	wrapDir := filepath.Join(home, "jq-wrapper")
+	if err := os.MkdirAll(wrapDir, 0o700); err != nil {
 		t.Fatal(err)
 	}
+	wrapper := "#!/bin/sh\nprintf '%s\\0' \"$*\" >> " + quote(countPath) + "\nexec " + quote(jq) + " \"$@\"\n"
+	if err := os.WriteFile(filepath.Join(wrapDir, "jq"), []byte(wrapper), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	bakeHookPathForTest(t, filepath.Join(hookDir, "claude-code-hook.sh"), wrapDir+":/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin")
 	cmd := exec.Command("bash", filepath.Join(hookDir, "claude-code-hook.sh"))
 	cmd.Env = []string{"HOME=" + home, "DEFENSECLAW_HOME=" + home, "PATH=" + os.Getenv("PATH")}
 	cmd.Stdin = strings.NewReader(`{"hook_event_name":"PreToolUse","tool_name":"Bash","tool_input":{"command":"echo ok"}}`)

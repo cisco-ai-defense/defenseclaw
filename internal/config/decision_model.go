@@ -74,11 +74,37 @@ type DecisionModelConfig struct {
 	// decision model's finding is a floor) or decide (the finding stands
 	// without the judge).
 	OnConfidentBlock string `mapstructure:"on_confident_block" yaml:"on_confident_block,omitempty"`
+	// HookConnectors lists the connectors whose hook tool calls the
+	// decision model answers on its own where the LLM judge does not judge
+	// them (cascade 2: rules, then the decision model). "*" matches every
+	// connector. Where the judge runs, the decision model stays in front of
+	// it (cascade 3) whether or not the connector is listed. Empty, the
+	// default, keeps the decision model in front of the judge only.
+	HookConnectors []string `mapstructure:"hook_connectors" yaml:"hook_connectors,omitempty"`
 }
 
 // Active reports whether the decision model should be called.
 func (d DecisionModelConfig) Active() bool {
 	return d.Enabled && strings.TrimSpace(d.BaseURL) != "" && strings.TrimSpace(d.Model) != ""
+}
+
+// AnswersAlone reports whether the decision model answers the connector's
+// hook tool calls on its own where the LLM judge does not run (cascade 2).
+// Names are matched in canonical form (NormalizeConnectorName: case and the
+// claude-code alias folded, as the CLI's connector_paths.normalize does);
+// "*" matches every connector and a blank entry matches none.
+func (d DecisionModelConfig) AnswersAlone(connector string) bool {
+	connector = NormalizeConnectorName(connector)
+	if !d.Active() || connector == "" {
+		return false
+	}
+	for _, entry := range d.HookConnectors {
+		entry = strings.TrimSpace(entry)
+		if entry == "*" || (entry != "" && NormalizeConnectorName(entry) == connector) {
+			return true
+		}
+	}
+	return false
 }
 
 // EffectiveTimeoutSeconds returns Timeout or the default.

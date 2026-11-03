@@ -103,7 +103,7 @@ func TestStopKeepsAFullDiskMicroVMWithUnpulledWork(t *testing.T) {
 			wantExit(t, err, ExitStopKept)
 			ta.wantCalls(t, 0, "POST", "vmbox/stop")
 			has(t, ta.output(), "Sandbox vmbox keeps running: a MicroVM stopped with its disk full cannot start again, and its work that was not pulled would be lost",
-				"`defenseclaw sandbox exec vmbox -- df -h /`", "`defenseclaw sandbox pull vmbox`", "to give that work up, delete it: `defenseclaw sandbox delete vmbox`")
+				"`defenseclaw sandbox exec vmbox -- df -h /`", "`defenseclaw sandbox pull vmbox --apply`", "to give that work up, delete it: `defenseclaw sandbox delete vmbox`")
 			if !ranDF(ta) {
 				t.Fatalf("the stop did not look at the disk: %q", ta.stream.commands())
 			}
@@ -172,7 +172,7 @@ func TestStatusSaysAMicroVMsDiskIsFilling(t *testing.T) {
 	diskAnswers(ta, "run=none\n", dfFilling, 0)
 	ta.ok(t, ta.Status(bg, "vmbox", OutputText))
 	has(t, ta.output(), "vmbox's own disk is 93% full (143.4 MiB of 2.0 GiB free): a MicroVM stopped with its disk full cannot start again",
-		"`defenseclaw sandbox exec vmbox -- df -h /` shows it", "`defenseclaw sandbox pull vmbox` brings its work back before it fills")
+		"`defenseclaw sandbox exec vmbox -- df -h /` shows it", "`defenseclaw sandbox pull vmbox --apply` brings its work back before it fills")
 	ta.out.Reset()
 	diskAnswers(ta, "run=none\n", dfHalf, 0)
 	ta.ok(t, ta.Status(bg, "vmbox", OutputText))
@@ -216,7 +216,7 @@ func TestSessionWarnsOnceThatItsMicroVMDiskIsFilling(t *testing.T) {
 	if got := strings.Count(ta.err.String(), "own disk is 93% full"); got != 1 {
 		t.Fatalf("warned %d times:\n%s", got, ta.err.String())
 	}
-	if len(s.notices) != 1 || !strings.Contains(s.notices[0].summary, "`defenseclaw sandbox pull vmbox`") {
+	if len(s.notices) != 1 || !strings.Contains(s.notices[0].summary, "`defenseclaw sandbox pull vmbox --apply`") {
 		t.Fatalf("summary notices = %+v", s.notices)
 	}
 }

@@ -77,7 +77,9 @@ def test_running_sandboxes_refuse_the_uninstall_before_any_change(gateway: str) 
     out = _one_line(result.output)
     assert "2 OpenShell sandboxes run for this account (cdx-enforce, myapp-claude)" in out
     assert "nothing was changed" in out
-    assert "`defenseclaw sandbox pull cdx-enforce --branch` keeps its work on branch dc/cdx-enforce" in out
+    assert "`defenseclaw sandbox pull cdx-enforce --apply` to save its work in the project" in out
+    assert "`--branch` for a Git branch or `--patch-out FILE` for a patch" in out
+    assert "confirm the project, branch or patch file contains it, then `defenseclaw sandbox stop cdx-enforce`" in out
     assert "`defenseclaw sandbox stop cdx-enforce`" in out
     assert "`defenseclaw sandbox review myapp-claude`" in out
     assert "`defenseclaw sandbox stop myapp-claude`" in out
@@ -172,6 +174,8 @@ def test_an_unanswered_sandbox_list_refuses_before_any_change(gateway: str, case
     assert "a running sandbox may hold work never pulled back" in out
     assert "nothing was changed" in out
     assert "Run `defenseclaw sandbox list` to check" in out
+    assert "`defenseclaw sandbox pull NAME --apply`, `--branch`, or `--patch-out FILE`" in out
+    assert "confirm the project, branch or patch file contains it" in out
     assert "then run this command again, or add --stop-sandboxes" in out
 
     # --stop-sandboxes still lets the teardown run.
