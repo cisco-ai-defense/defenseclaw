@@ -25,6 +25,10 @@ function Grant-DefenseClawStateAncestorTraverse { }
 function Invoke-DefenseClawBundleAclContract { }
 function Test-DefenseClawLayoutBrokerEnabled { $false }
 function Test-DefenseClawStandaloneProfile { $script:Standalone }
+# Every layout folder here is the same absent path; the repair's log-folder
+# recreation is not what this smoke checks.
+function New-DefenseClawDirectory { param([string]$Path) }
+function Write-DefenseClawResilienceEvent { param($Marker, $Fields) }
 
 $root = [IO.Path]::Combine([IO.Path]::GetTempPath(), 'dc-env-acl-' + [guid]::NewGuid().ToString('N'))
 [void][IO.Directory]::CreateDirectory($root)
