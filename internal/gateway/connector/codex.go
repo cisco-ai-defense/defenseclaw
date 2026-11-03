@@ -2648,9 +2648,10 @@ func codexOriginalNotifyValue(cfg map[string]interface{}, opts SetupOpts) (inter
 
 // stripCodexSelfNotify removes DefenseClaw's own notifier from argv so the
 // chained original never calls back into us. Codex computer-use wraps the
-// current notifier as `--previous-notify <json argv>`; when that is ours, it is
-// replaced by previous (the notifier ours was chaining) or dropped. An argv
-// that is ours outright becomes previous.
+// current notifier as `--previous-notify <json argv>`, and wrappers can stack;
+// at any depth, a reference to ours is replaced by previous (the notifier ours
+// was chaining) or dropped. An argv that is ours outright becomes previous.
+// JSON escaping doubles with each level, so depth is logarithmic in input size.
 func stripCodexSelfNotify(argv, previous []string, opts SetupOpts) []string {
 	if codexNotifyLooksManaged(argv, opts) {
 		return previous
@@ -2659,12 +2660,15 @@ func stripCodexSelfNotify(argv, previous []string, opts SetupOpts) []string {
 	for i := 0; i < len(argv); i++ {
 		if argv[i] == "--previous-notify" && i+1 < len(argv) {
 			var nested []string
-			if json.Unmarshal([]byte(argv[i+1]), &nested) == nil && codexNotifyLooksManaged(nested, opts) {
-				i++
-				if raw, err := json.Marshal(previous); err == nil && len(previous) > 0 {
-					out = append(out, "--previous-notify", string(raw))
+			if json.Unmarshal([]byte(argv[i+1]), &nested) == nil {
+				stripped := stripCodexSelfNotify(nested, previous, opts)
+				if !slices.Equal(stripped, nested) {
+					i++
+					if raw, err := json.Marshal(stripped); err == nil && len(stripped) > 0 {
+						out = append(out, "--previous-notify", string(raw))
+					}
+					continue
 				}
-				continue
 			}
 		}
 		out = append(out, argv[i])
