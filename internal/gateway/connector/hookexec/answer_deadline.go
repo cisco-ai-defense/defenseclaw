@@ -328,8 +328,10 @@ func noAnswerFailMode(opts Options, failMode string) string {
 	if opts.SecureClient {
 		return failMode
 	}
-	if opts.ManagedUnixSocket != "" || opts.StrictAvailability || perUserInstallWindow(opts) || opts.OutageFailModeNow == nil ||
-		opts.peerStatus == nil || opts.peerStatus.Load() != 1 {
+	// Peer contact checks precede the install-lock read: watchdog arming
+	// must not wait on a filesystem path before it can start its timer.
+	if opts.ManagedUnixSocket != "" || opts.StrictAvailability || opts.OutageFailModeNow == nil ||
+		opts.peerStatus == nil || opts.peerStatus.Load() != 1 || perUserInstallWindow(opts) {
 		return "closed"
 	}
 	return normalizeFailMode(opts.OutageFailModeNow())
