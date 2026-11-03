@@ -94,3 +94,19 @@ func TestGAP0227WindowsWrappedShellReaderStandalone(t *testing.T) {
 		}
 	}
 }
+
+func TestGAP0227SimpleDisplayRejectsWindowsControlCharacters(t *testing.T) {
+	for _, literal := range []string{
+		`note & copy a.txt .ssh\authorized_keys & rem `,
+		`note | copy a.txt .ssh\authorized_keys | rem `,
+		`note > .ssh\authorized_keys`,
+		`note %WRITE_COMMAND%`,
+		`note !WRITE_COMMAND!`,
+		`note " & copy a.txt .ssh\authorized_keys`,
+	} {
+		command := "echo '" + literal + "' | env -S 'cat -n'"
+		if actionSimpleEnvTextDisplay(command) {
+			t.Errorf("Windows control syntax bypassed the full readings: %q", command)
+		}
+	}
+}
