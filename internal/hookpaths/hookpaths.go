@@ -1108,7 +1108,6 @@ func ResolveConnector(connector, surface, event string, payload []byte) string {
 	var globFacts, walkFacts map[string]string
 	var unprovenReason string
 	var protectedDecision bool
-	var copyTargetMemo *TargetMemo
 	// identities is the file-identity evidence for InstructionIdentityKey:
 	// every existing instruction file a write target names.
 	// fileIdentities are the write targets' own identities (FileIdentitiesKey).
@@ -1196,10 +1195,7 @@ func ResolveConnector(connector, surface, event string, payload []byte) string {
 					unprovenReason = ActionCommandAuditReasonWithDialect(command, cwd, home, hookShellDialect(connector, tool))
 				}
 				if !isApplyPatchToolName(tool) && !protectedDecision {
-					if copyTargetMemo == nil && strings.Contains(command, "cp") {
-						copyTargetMemo = NewTargetMemo()
-					}
-					protectedDecision = actionConcreteProtectedWriteOnWithOperands(command, cwd, home, false, copyTargetMemo, &concreteOperands, sourceFacts)
+					protectedDecision = actionConcreteProtectedWriteOnWithOperands(command, cwd, home, false, nil, &concreteOperands)
 					if !protectedDecision && actionClientVariableWriteCandidate(command, home) {
 						// A per-user gateway can resolve a variable write through
 						// the user's links. Carry that positive decision to managed
@@ -1311,7 +1307,7 @@ func ResolveConnector(connector, surface, event string, payload []byte) string {
 				// to a protected file (GAP-1505). The command of an
 				// apply_patch tool is a patch envelope, not shell.
 				if !isApplyPatchToolName(tool) {
-					links = commandLinksWithCopySourceFact(command, cwd, home, sourceFacts)
+					links = commandLinksWithFacts(command, cwd, home, sourceFacts, true)
 					// The gateway also judges each simple command in the
 					// directory actionfacts places it in, which follows a
 					// pushd of a bare name as it follows cd. The copy source
@@ -1356,15 +1352,7 @@ func ResolveConnector(connector, surface, event string, payload []byte) string {
 	targets := map[string]string{CWDKey: cwd}
 	// The fixed part counts the truncation marker, so setting it never
 	// exceeds the budget.
-	protected := copyTargetMemo.protectedFiles(home)
-	for key := range sourceFacts {
-		if copyTargetMemo == nil && strings.HasPrefix(key, CopySourceGlobFactPrefix) {
-			// The source reader adds several children of the same directory.
-			// Reuse their common disk-path prefixes within this hook call.
-			copyTargetMemo = NewTargetMemo()
-			break
-		}
-	}
+	protected := newProtectedFiles(home)
 	size := 2 + len(jsonString(CWDKey)) + 1 + len(jsonString(cwd)) + 1 + len(jsonString(TruncatedKey)) + 1 + 3 +
 		len(jsonString(BudgetKey)) + 1 + 3 + 1
 	// overBudget is set when an operand or fact is left out only because the
@@ -1407,7 +1395,7 @@ func ResolveConnector(connector, surface, event string, payload []byte) string {
 			resolutionPath, aliasKnown = ResolveProcSelfCWDTarget(path, cwd)
 		}
 		if aliasKnown && links.known {
-			resolved, ok = links.resolveWithMemo(resolutionPath, protected, copyTargetMemo)
+			resolved, ok = links.resolve(resolutionPath, protected)
 		} else if aliasKnown && !links.opaque {
 			// The command may name an unknown program, but it has no
 			// proved link operation. Resolve this operand in the caller's
@@ -2760,26 +2748,16 @@ func commandLinksWithFacts(command, cwd, home string, facts map[string]string, r
 	return commandLinks(command, cwd, home, facts, record, false)
 }
 
-// commandLinksWithCopySourceFact reuses the bounded source reading recorded
-// earlier in this hook request for the same sole copy call.
-func commandLinksWithCopySourceFact(command, cwd, home string, facts map[string]string) shellLinks {
-	return commandLinksWithReuse(command, cwd, home, facts, true, false, true)
-}
-
 // commandLinks reads the links of command. A nested literal shell body
 // returns its facts without the end checks: its caller runs them once
 // over its own links and the body links together.
 func commandLinks(command, cwd, home string, facts map[string]string, record, nested bool) shellLinks {
-	return commandLinksWithReuse(command, cwd, home, facts, record, nested, false)
-}
-
-func commandLinksWithReuse(command, cwd, home string, facts map[string]string, record, nested, reuseCopySource bool) shellLinks {
-	links, fallback := commandLinksRead(command, cwd, home, facts, record, nested, true, reuseCopySource)
+	links, fallback := commandLinksRead(command, cwd, home, facts, record, nested, true)
 	if fallback {
 		// A copy of links on disk that the end of the command does not let
 		// us read is read as before, an opaque copy scope at the copy call
 		// (rel-1-0-6:GAP-0274).
-		links, _ = commandLinksRead(command, cwd, home, facts, record, nested, false, reuseCopySource)
+		links, _ = commandLinksRead(command, cwd, home, facts, record, nested, false)
 	}
 	return links
 }
@@ -2787,7 +2765,7 @@ func commandLinksWithReuse(command, cwd, home string, facts map[string]string, r
 // commandLinksRead is commandLinks; readDisk reads the link-keeping copies
 // of links on disk as those links (copyDiskLinks). fallback reports such a
 // copy that could not be read so.
-func commandLinksRead(command, cwd, home string, facts map[string]string, record, nested, readDisk, reuseCopySource bool) (shellLinks, bool) {
+func commandLinksRead(command, cwd, home string, facts map[string]string, record, nested, readDisk bool) (shellLinks, bool) {
 	links := shellLinks{known: true, callAt: -1}
 	file, parsed := parseShell(command)
 	if !parsed {
@@ -3028,15 +3006,8 @@ func commandLinksRead(command, cwd, home string, facts map[string]string, record
 			globSafe := len(file.Stmts) == 1 && file.Stmts[0].Cmd == call &&
 				len(file.Stmts[0].Redirs) == 0 && len(callDirs) > 0
 			for _, dir := range callDirs {
-				// An unproved reading keeps the general copy reading below;
-				// the client's protected-target decision covers an unscannable
-				// destination.
-				copyRecord := record
-				if reuseCopySource && record && globSafe && facts[copySourceGlobFactKey(call, dir)] != "" {
-					copyRecord = false
-				}
-				paths, proved, safe, _ := copySourceGlobDestinations(call, dir, home, facts, copyRecord)
-				if !safe || !proved {
+				paths, safe := copySourceGlobDestinations(call, dir, home, facts, record)
+				if !safe {
 					globSafe = false
 					break
 				}
@@ -5966,10 +5937,6 @@ func (l shellLinks) resolve(path string, protected protectedFiles) (string, bool
 	return l.resolveUntil(path, protected, protected.has)
 }
 
-func (l shellLinks) resolveWithMemo(path string, protected protectedFiles, memo *TargetMemo) (string, bool) {
-	return l.resolveUntilWithMemo(path, protected, protected.has, memo)
-}
-
 // stateTarget is the name in home's DefenseClaw state tree that the
 // directory path reaches through the command's links and the disk links
 // below their targets (ln -s /dev/shm/x e; echo z > e/y/config.yaml with
@@ -6021,18 +5988,8 @@ func (l shellLinks) stateEntry(path, home string, protected protectedFiles) (str
 // resolveUntil is resolve with the stop test: the walk returns the first
 // name through the links that stop accepts.
 func (l shellLinks) resolveUntil(path string, protected protectedFiles, stop func(string) bool) (string, bool) {
-	return l.resolveUntilWithMemo(path, protected, stop, nil)
-}
-
-func (l shellLinks) resolveUntilWithMemo(path string, protected protectedFiles, stop func(string) bool, memo *TargetMemo) (string, bool) {
 	target := func(path string) (string, bool) {
-		var resolved string
-		var ok bool
-		if memo != nil {
-			resolved, ok = memo.ResolveWriteTarget(path)
-		} else {
-			resolved, ok = resolveWritePath(path, 0)
-		}
+		resolved, ok := resolveWritePath(path, 0)
 		if ok {
 			resolved, ok = protected.target(resolved)
 		}

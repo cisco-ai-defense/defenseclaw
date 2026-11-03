@@ -142,7 +142,7 @@ func actionConcreteProtectedWriteOn(command, cwd, home string, windowsHome bool)
 // actionConcreteProtectedWriteOnWith is actionConcreteProtectedWriteOn with
 // the evaluation's file system answers (TargetMemo; nil: none).
 func actionConcreteProtectedWriteOnWith(command, cwd, home string, windowsHome bool, memo *TargetMemo) bool {
-	return actionConcreteProtectedWriteOnWithOperands(command, cwd, home, windowsHome, memo, nil, nil)
+	return actionConcreteProtectedWriteOnWithOperands(command, cwd, home, windowsHome, memo, nil)
 }
 
 // actionConcreteOperands holds writer operands already found during one
@@ -152,7 +152,7 @@ type actionConcreteOperands struct {
 	shellParsed, ready                  bool
 }
 
-func actionConcreteProtectedWriteOnWithOperands(command, cwd, home string, windowsHome bool, memo *TargetMemo, cache *actionConcreteOperands, sourceFacts map[string]string) bool {
+func actionConcreteProtectedWriteOnWithOperands(command, cwd, home string, windowsHome bool, memo *TargetMemo, cache *actionConcreteOperands) bool {
 	if command == "" || home == "" || actionWindowsHome(home) && !windowsHome || !filepath.IsAbs(cwd) {
 		return false
 	}
@@ -200,16 +200,7 @@ func actionConcreteProtectedWriteOnWithOperands(command, cwd, home string, windo
 	}
 	loopWrites := BoundedLoopCopyDestinations(command, cwd, home)
 	writes = append(writes, loopWrites...)
-	var sourceGlobWrites []string
-	var sourceGlobUnknown bool
-	if parsed && sourceFacts != nil {
-		sourceGlobWrites, sourceGlobUnknown = copySourceGlobDestinationsWithParsed(command, cwd, home, file, sourceFacts, true)
-	} else {
-		sourceGlobWrites, sourceGlobUnknown = CopySourceGlobDestinationsAndUnknown(command, cwd, home, nil)
-	}
-	if sourceGlobUnknown {
-		return true
-	}
+	sourceGlobWrites := CopySourceGlobDestinations(command, cwd, home, nil)
 	writes = append(writes, sourceGlobWrites...)
 	globLoopWrites := boundedGlobLoopCopyDestinationsWithFile(command, cwd, home, nil, file)
 	writes = append(writes, globLoopWrites...)
