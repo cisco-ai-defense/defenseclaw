@@ -366,10 +366,10 @@ func connectBy(ctx context.Context, deadline time.Time, onConnect func()) (tryCt
 	var once sync.Once
 	trace := &httptrace.ClientTrace{GotConn: func(httptrace.GotConnInfo) {
 		once.Do(func() {
-			close(connected)
 			if onConnect != nil {
 				onConnect()
 			}
+			close(connected)
 		})
 	}}
 	ctx, peerCheck := withPerUserPeerCheck(ctx)
