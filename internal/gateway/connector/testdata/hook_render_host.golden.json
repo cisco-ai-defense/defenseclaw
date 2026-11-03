@@ -1,10 +1,5 @@
 {
   "antigravity/managed=0/scoped=1/fail=closed": {
-    ".config-record": {
-      "mode": "-rw-------",
-      "size": 40,
-      "sha256": "6dfc1b089a0b12bc4a83c1c2f35c4ddf558ef3af2b641cd7abcf1d40e238ac39"
-    },
     ".gateway-helper": {
       "mode": "-rw-------",
       "size": 44,
@@ -104,11 +99,6 @@
     }
   },
   "claudecode/managed=0/scoped=0/fail=closed": {
-    ".config-record": {
-      "mode": "-rw-------",
-      "size": 40,
-      "sha256": "6dfc1b089a0b12bc4a83c1c2f35c4ddf558ef3af2b641cd7abcf1d40e238ac39"
-    },
     ".gateway-helper": {
       "mode": "-rw-------",
       "size": 44,
@@ -161,11 +151,6 @@
     }
   },
   "claudecode/managed=0/scoped=0/fail=open": {
-    ".config-record": {
-      "mode": "-rw-------",
-      "size": 40,
-      "sha256": "6dfc1b089a0b12bc4a83c1c2f35c4ddf558ef3af2b641cd7abcf1d40e238ac39"
-    },
     ".gateway-helper": {
       "mode": "-rw-------",
       "size": 44,
@@ -218,11 +203,6 @@
     }
   },
   "claudecode/managed=0/scoped=1/fail=closed": {
-    ".config-record": {
-      "mode": "-rw-------",
-      "size": 40,
-      "sha256": "6dfc1b089a0b12bc4a83c1c2f35c4ddf558ef3af2b641cd7abcf1d40e238ac39"
-    },
     ".gateway-helper": {
       "mode": "-rw-------",
       "size": 44,
@@ -275,11 +255,6 @@
     }
   },
   "claudecode/managed=0/scoped=1/fail=open": {
-    ".config-record": {
-      "mode": "-rw-------",
-      "size": 40,
-      "sha256": "6dfc1b089a0b12bc4a83c1c2f35c4ddf558ef3af2b641cd7abcf1d40e238ac39"
-    },
     ".gateway-helper": {
       "mode": "-rw-------",
       "size": 44,
@@ -520,11 +495,6 @@
     }
   },
   "codex/managed=0/scoped=0/fail=closed": {
-    ".config-record": {
-      "mode": "-rw-------",
-      "size": 40,
-      "sha256": "6dfc1b089a0b12bc4a83c1c2f35c4ddf558ef3af2b641cd7abcf1d40e238ac39"
-    },
     ".gateway-helper": {
       "mode": "-rw-------",
       "size": 44,
@@ -577,11 +547,6 @@
     }
   },
   "codex/managed=0/scoped=0/fail=open": {
-    ".config-record": {
-      "mode": "-rw-------",
-      "size": 40,
-      "sha256": "6dfc1b089a0b12bc4a83c1c2f35c4ddf558ef3af2b641cd7abcf1d40e238ac39"
-    },
     ".gateway-helper": {
       "mode": "-rw-------",
       "size": 44,
@@ -634,11 +599,6 @@
     }
   },
   "codex/managed=0/scoped=1/fail=closed": {
-    ".config-record": {
-      "mode": "-rw-------",
-      "size": 40,
-      "sha256": "6dfc1b089a0b12bc4a83c1c2f35c4ddf558ef3af2b641cd7abcf1d40e238ac39"
-    },
     ".gateway-helper": {
       "mode": "-rw-------",
       "size": 44,
@@ -691,11 +651,6 @@
     }
   },
   "codex/managed=0/scoped=1/fail=open": {
-    ".config-record": {
-      "mode": "-rw-------",
-      "size": 40,
-      "sha256": "6dfc1b089a0b12bc4a83c1c2f35c4ddf558ef3af2b641cd7abcf1d40e238ac39"
-    },
     ".gateway-helper": {
       "mode": "-rw-------",
       "size": 44,
@@ -936,11 +891,6 @@
     }
   },
   "copilot/managed=0/scoped=1/fail=closed": {
-    ".config-record": {
-      "mode": "-rw-------",
-      "size": 40,
-      "sha256": "6dfc1b089a0b12bc4a83c1c2f35c4ddf558ef3af2b641cd7abcf1d40e238ac39"
-    },
     ".gateway-helper": {
       "mode": "-rw-------",
       "size": 44,
@@ -1040,11 +990,6 @@
     }
   },
   "cursor/managed=0/scoped=1/fail=closed": {
-    ".config-record": {
-      "mode": "-rw-------",
-      "size": 40,
-      "sha256": "6dfc1b089a0b12bc4a83c1c2f35c4ddf558ef3af2b641cd7abcf1d40e238ac39"
-    },
     ".gateway-helper": {
       "mode": "-rw-------",
       "size": 44,
@@ -1144,11 +1089,6 @@
     }
   },
   "devin/managed=0/scoped=1/fail=closed": {
-    ".config-record": {
-      "mode": "-rw-------",
-      "size": 40,
-      "sha256": "6dfc1b089a0b12bc4a83c1c2f35c4ddf558ef3af2b641cd7abcf1d40e238ac39"
-    },
     ".gateway-helper": {
       "mode": "-rw-------",
       "size": 44,
@@ -1248,11 +1188,6 @@
     }
   },
   "generic/common": {
-    ".config-record": {
-      "mode": "-rw-------",
-      "size": 40,
-      "sha256": "6dfc1b089a0b12bc4a83c1c2f35c4ddf558ef3af2b641cd7abcf1d40e238ac39"
-    },
     ".gateway-helper": {
       "mode": "-rw-------",
       "size": 44,
@@ -1307,11 +1242,6 @@
     }
   },
   "helpers/unmanaged": {
-    ".config-record": {
-      "mode": "-rw-------",
-      "size": 40,
-      "sha256": "6dfc1b089a0b12bc4a83c1c2f35c4ddf558ef3af2b641cd7abcf1d40e238ac39"
-    },
     ".gateway-helper": {
       "mode": "-rw-------",
       "size": 44,
@@ -1324,11 +1254,6 @@
     }
   },
   "hermes/managed=0/scoped=1/fail=closed": {
-    ".config-record": {
-      "mode": "-rw-------",
-      "size": 40,
-      "sha256": "6dfc1b089a0b12bc4a83c1c2f35c4ddf558ef3af2b641cd7abcf1d40e238ac39"
-    },
     ".gateway-helper": {
       "mode": "-rw-------",
       "size": 44,
@@ -1428,11 +1353,6 @@
     }
   },
   "kiro/managed=0/scoped=1/fail=closed": {
-    ".config-record": {
-      "mode": "-rw-------",
-      "size": 40,
-      "sha256": "6dfc1b089a0b12bc4a83c1c2f35c4ddf558ef3af2b641cd7abcf1d40e238ac39"
-    },
     ".gateway-helper": {
       "mode": "-rw-------",
       "size": 44,
@@ -1532,11 +1452,6 @@
     }
   },
   "legacy/all-scripts": {
-    ".config-record": {
-      "mode": "-rw-------",
-      "size": 40,
-      "sha256": "6dfc1b089a0b12bc4a83c1c2f35c4ddf558ef3af2b641cd7abcf1d40e238ac39"
-    },
     ".gateway-helper": {
       "mode": "-rw-------",
       "size": 44,
@@ -1624,11 +1539,6 @@
     }
   },
   "legacy/all-scripts-no-token": {
-    ".config-record": {
-      "mode": "-rw-------",
-      "size": 40,
-      "sha256": "6dfc1b089a0b12bc4a83c1c2f35c4ddf558ef3af2b641cd7abcf1d40e238ac39"
-    },
     ".gateway-helper": {
       "mode": "-rw-------",
       "size": 44,
