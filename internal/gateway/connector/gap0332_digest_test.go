@@ -30,13 +30,16 @@ func TestGAP0332HookScriptDigestStreamsLargeArtifact(t *testing.T) {
 	if err := file.Close(); err != nil {
 		t.Fatal(err)
 	}
-	data, err := os.ReadFile(path)
-	if err != nil {
-		t.Fatal(err)
-	}
-	sum := sha256.Sum256(data)
-	want := "sha256:" + hex.EncodeToString(sum[:])
-	data = nil
+	// Read the expected digest in its own scope so the file bytes are
+	// unreachable before the memory measurement below.
+	want := func() string {
+		data, err := os.ReadFile(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		sum := sha256.Sum256(data)
+		return "sha256:" + hex.EncodeToString(sum[:])
+	}()
 	conn := &memoArtifactConnector{
 		stubConnector: stubConnector{name: "testartifact"},
 		artifacts:     []string{path},
