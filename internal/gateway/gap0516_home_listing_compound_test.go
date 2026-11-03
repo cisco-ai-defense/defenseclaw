@@ -106,11 +106,21 @@ func TestGAP0516HomeListingCompoundFourCell(t *testing.T) {
 					recorder := httptest.NewRecorder()
 					api.handleAgentHook(connector).ServeHTTP(recorder, req)
 					body := recorder.Body.String()
-					if !strings.HasPrefix(body, `{"action":"`+row.want+`"`) {
-						t.Errorf("%q: status %d body %.400s, want %s", row.command, recorder.Code, body, row.want)
+					want := row.want
+					if runtime.GOOS == "windows" && connector == "codex" && row.want == "allow" &&
+						strings.HasPrefix(row.command, "head -n 1 */*") {
+						// Codex's Windows Bash tool runs PowerShell, whose glob can
+						// include .ssh. Git Bash on Claude Code excludes dot names.
+						want = "block"
+					}
+					if !strings.HasPrefix(body, `{"action":"`+want+`"`) {
+						t.Errorf("%q: status %d body %.400s, want %s", row.command, recorder.Code, body, want)
 					}
 					if row.want == "block" && !strings.Contains(body, "persistence.ssh_authorized_keys_command") {
 						t.Errorf("%q: wrong block rule: %.400s", row.command, body)
+					}
+					if want == "block" && row.want == "allow" && !strings.Contains(body, "PATH-SSH-KEY") {
+						t.Errorf("%q: wrong Windows private-key block rule: %.400s", row.command, body)
 					}
 				})
 			}
