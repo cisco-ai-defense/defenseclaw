@@ -611,6 +611,7 @@ func runWindowsEnterpriseLifecycle(
 		InstallRoot:     opts.installRoot,
 		StateRoot:       opts.stateRoot,
 		UnsignedPayload: opts.allowUnsigned,
+		Standalone:      windowsEnterpriseStandalone(opts),
 	}); err != nil {
 		return failPreflight(err)
 	}

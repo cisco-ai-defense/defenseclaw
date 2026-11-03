@@ -69,6 +69,9 @@ type windowsEnterprisePrereqInput struct {
 	InstallRoot     string
 	StateRoot       string
 	UnsignedPayload bool
+	// Standalone selects the standalone layout's default roots
+	// (Cisco\DefenseClaw) when InstallRoot or StateRoot is empty.
+	Standalone bool
 }
 
 // windowsEnterpriseExecutionPolicyScope is one Group Policy execution-policy

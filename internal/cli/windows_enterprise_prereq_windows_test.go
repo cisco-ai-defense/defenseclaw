@@ -121,3 +121,46 @@ func TestWindowsEnterpriseBindAndConnectDetectsBusyPort(t *testing.T) {
 		t.Fatalf("free port: excluded=%t inUse=%t bindErr=%v connectErr=%v", excluded, inUse, bindErr, connectErr)
 	}
 }
+
+// The port preflight admits only the installed gateway as the listener. A
+// standalone gateway runs from Cisco\DefenseClaw, so the image and config it
+// reads must follow the profile, or ensure, upgrade and repair of a running
+// standalone deployment fail with its own gateway named as a foreign owner.
+func TestWindowsEnterprisePrereqRootsFollowTheProfile(t *testing.T) {
+	programFiles, programData := t.TempDir(), t.TempDir()
+	previousFiles, previousData := windowsEnterpriseProgramFilesResolver, windowsEnterpriseProgramDataResolver
+	t.Cleanup(func() {
+		windowsEnterpriseProgramFilesResolver, windowsEnterpriseProgramDataResolver = previousFiles, previousData
+	})
+	windowsEnterpriseProgramFilesResolver = func() (string, error) { return programFiles, nil }
+	windowsEnterpriseProgramDataResolver = func() (string, error) { return programData, nil }
+
+	for _, tc := range []struct {
+		name  string
+		input windowsEnterprisePrereqInput
+		image string
+	}{
+		{"secure client", windowsEnterprisePrereqInput{}, filepath.Join(programFiles, "Cisco", "Cisco Secure Client", "DefenseClaw", "bin", "defenseclaw-gateway.exe")},
+		{"standalone", windowsEnterprisePrereqInput{Standalone: true}, filepath.Join(programFiles, "Cisco", "DefenseClaw", "bin", "defenseclaw-gateway.exe")},
+		{"explicit root", windowsEnterprisePrereqInput{Standalone: true, InstallRoot: `C:\Scope`}, `C:\Scope\bin\defenseclaw-gateway.exe`},
+	} {
+		got, err := windowsEnterpriseGatewayImage(tc.input)
+		if err != nil || !strings.EqualFold(got, tc.image) {
+			t.Errorf("%s: gateway image = %q, %v; want %q", tc.name, got, err, tc.image)
+		}
+	}
+
+	config := filepath.Join(programData, "Cisco", "DefenseClaw", "etc", "config.yaml")
+	if err := os.MkdirAll(filepath.Dir(config), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(config, []byte("gateway:\n  api_port: 19443\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if got := windowsEnterpriseGatewayPort(windowsEnterprisePrereqInput{Standalone: true}); got != 19443 {
+		t.Errorf("standalone gateway port = %d, want 19443 from the standalone config", got)
+	}
+	if got := windowsEnterpriseGatewayPort(windowsEnterprisePrereqInput{}); got != windowsEnterpriseGatewayPortFromConfig(nil) {
+		t.Errorf("secure client gateway port = %d, read the standalone config", got)
+	}
+}

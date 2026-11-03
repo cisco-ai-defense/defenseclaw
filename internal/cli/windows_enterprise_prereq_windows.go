@@ -170,7 +170,7 @@ func windowsEnterpriseGatewayPort(input windowsEnterprisePrereqInput) int {
 	stateRoot := strings.TrimSpace(input.StateRoot)
 	if stateRoot == "" {
 		if programData, err := windowsEnterpriseProgramDataResolver(); err == nil {
-			stateRoot = filepath.Join(programData, "Cisco", "Cisco Secure Client", "DefenseClaw")
+			stateRoot = windowsEnterprisePrereqProductRoot(programData, input)
 		}
 	}
 	if stateRoot != "" {
@@ -195,9 +195,20 @@ func windowsEnterpriseGatewayImage(input windowsEnterprisePrereqInput) (string, 
 		if err != nil {
 			return "", err
 		}
-		root = filepath.Join(programFiles, "Cisco", "Cisco Secure Client", "DefenseClaw")
+		root = windowsEnterprisePrereqProductRoot(programFiles, input)
 	}
 	return filepath.Join(filepath.Clean(root), "bin", "defenseclaw-gateway.exe"), nil
+}
+
+// windowsEnterprisePrereqProductRoot is the profile's folder below Program
+// Files or ProgramData. A standalone gateway runs from Cisco\DefenseClaw,
+// so reading the Secure Client folder there refused the installed gateway's
+// own listener on every ensure, upgrade and repair.
+func windowsEnterprisePrereqProductRoot(base string, input windowsEnterprisePrereqInput) string {
+	if input.Standalone {
+		return filepath.Join(base, "Cisco", "DefenseClaw")
+	}
+	return filepath.Join(base, "Cisco", "Cisco Secure Client", "DefenseClaw")
 }
 
 func windowsEnterpriseProcessImage(pid int) (string, error) {
