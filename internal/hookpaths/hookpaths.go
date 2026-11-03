@@ -1108,6 +1108,7 @@ func ResolveConnector(connector, surface, event string, payload []byte) string {
 	var globFacts, walkFacts map[string]string
 	var unprovenReason string
 	var protectedDecision bool
+	var copyTargetMemo *TargetMemo
 	// identities is the file-identity evidence for InstructionIdentityKey:
 	// every existing instruction file a write target names.
 	// fileIdentities are the write targets' own identities (FileIdentitiesKey).
@@ -1195,7 +1196,10 @@ func ResolveConnector(connector, surface, event string, payload []byte) string {
 					unprovenReason = ActionCommandAuditReasonWithDialect(command, cwd, home, hookShellDialect(connector, tool))
 				}
 				if !isApplyPatchToolName(tool) && !protectedDecision {
-					protectedDecision = actionConcreteProtectedWriteOnWithOperands(command, cwd, home, false, nil, &concreteOperands, sourceFacts)
+					if copyTargetMemo == nil && strings.Contains(command, "cp") {
+						copyTargetMemo = NewTargetMemo()
+					}
+					protectedDecision = actionConcreteProtectedWriteOnWithOperands(command, cwd, home, false, copyTargetMemo, &concreteOperands, sourceFacts)
 					if !protectedDecision && actionClientVariableWriteCandidate(command, home) {
 						// A per-user gateway can resolve a variable write through
 						// the user's links. Carry that positive decision to managed
@@ -1352,7 +1356,15 @@ func ResolveConnector(connector, surface, event string, payload []byte) string {
 	targets := map[string]string{CWDKey: cwd}
 	// The fixed part counts the truncation marker, so setting it never
 	// exceeds the budget.
-	protected := newProtectedFiles(home)
+	protected := copyTargetMemo.protectedFiles(home)
+	for key := range sourceFacts {
+		if copyTargetMemo == nil && strings.HasPrefix(key, CopySourceGlobFactPrefix) {
+			// The source reader adds several children of the same directory.
+			// Reuse their common disk-path prefixes within this hook call.
+			copyTargetMemo = NewTargetMemo()
+			break
+		}
+	}
 	size := 2 + len(jsonString(CWDKey)) + 1 + len(jsonString(cwd)) + 1 + len(jsonString(TruncatedKey)) + 1 + 3 +
 		len(jsonString(BudgetKey)) + 1 + 3 + 1
 	// overBudget is set when an operand or fact is left out only because the
@@ -1395,7 +1407,7 @@ func ResolveConnector(connector, surface, event string, payload []byte) string {
 			resolutionPath, aliasKnown = ResolveProcSelfCWDTarget(path, cwd)
 		}
 		if aliasKnown && links.known {
-			resolved, ok = links.resolve(resolutionPath, protected)
+			resolved, ok = links.resolveWithMemo(resolutionPath, protected, copyTargetMemo)
 		} else if aliasKnown && !links.opaque {
 			// The command may name an unknown program, but it has no
 			// proved link operation. Resolve this operand in the caller's
@@ -5954,6 +5966,10 @@ func (l shellLinks) resolve(path string, protected protectedFiles) (string, bool
 	return l.resolveUntil(path, protected, protected.has)
 }
 
+func (l shellLinks) resolveWithMemo(path string, protected protectedFiles, memo *TargetMemo) (string, bool) {
+	return l.resolveUntilWithMemo(path, protected, protected.has, memo)
+}
+
 // stateTarget is the name in home's DefenseClaw state tree that the
 // directory path reaches through the command's links and the disk links
 // below their targets (ln -s /dev/shm/x e; echo z > e/y/config.yaml with
@@ -6005,8 +6021,18 @@ func (l shellLinks) stateEntry(path, home string, protected protectedFiles) (str
 // resolveUntil is resolve with the stop test: the walk returns the first
 // name through the links that stop accepts.
 func (l shellLinks) resolveUntil(path string, protected protectedFiles, stop func(string) bool) (string, bool) {
+	return l.resolveUntilWithMemo(path, protected, stop, nil)
+}
+
+func (l shellLinks) resolveUntilWithMemo(path string, protected protectedFiles, stop func(string) bool, memo *TargetMemo) (string, bool) {
 	target := func(path string) (string, bool) {
-		resolved, ok := resolveWritePath(path, 0)
+		var resolved string
+		var ok bool
+		if memo != nil {
+			resolved, ok = memo.ResolveWriteTarget(path)
+		} else {
+			resolved, ok = resolveWritePath(path, 0)
+		}
 		if ok {
 			resolved, ok = protected.target(resolved)
 		}
