@@ -33,6 +33,7 @@ type PerUserPeerRecord struct {
 	once      sync.Once
 	connected chan struct{}
 	done      chan struct{}
+	server    *net.TCPAddr
 	peer      perUserPeerProcess
 	ok        bool
 }
@@ -69,9 +70,12 @@ func (r *PerUserPeerRecord) capture(local, remote net.Addr) {
 		return
 	}
 	r.once.Do(func() {
-		close(r.connected)
 		client, okc := local.(*net.TCPAddr)
 		server, oks := remote.(*net.TCPAddr)
+		if oks {
+			r.server = server
+		}
+		close(r.connected)
 		go func() {
 			defer close(r.done)
 			if !okc || !oks {
@@ -88,6 +92,18 @@ func (r *PerUserPeerRecord) capture(local, remote net.Addr) {
 			r.peer, r.ok = perUserPeerProcess{pid: pid, identity: identity, server: server}, true
 		}()
 	})
+}
+
+func (r *PerUserPeerRecord) connectedServer() (*net.TCPAddr, bool) {
+	if r == nil {
+		return nil, false
+	}
+	select {
+	case <-r.connected:
+		return r.server, r.server != nil
+	default:
+		return nil, false
+	}
 }
 
 // wait returns the peer once its read is done, false when it is unknown or

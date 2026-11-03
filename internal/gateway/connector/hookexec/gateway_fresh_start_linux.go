@@ -6,6 +6,7 @@
 package hookexec
 
 import (
+	"context"
 	"crypto/sha256"
 	"encoding/json"
 	"errors"
@@ -152,19 +153,33 @@ func PerUserGatewayRecordLocalAnswer(dataDir string) error {
 	return recordPerUserGatewayAnswer(dataDir, current)
 }
 
-// PerUserGatewayRecordObservedAnswer preserves a completed response when a
-// short-lived peer socket closes before its asynchronous identity read. The
-// current account-owned start record must still verify against the kernel.
+// PerUserGatewayRecordObservedAnswer preserves a completed response even if
+// the start record has not yet been published. A known connected peer is
+// identified by the kernel; a completed reply may also use the sole owner
+// of the verified listener when the accepted socket has already closed.
 func PerUserGatewayRecordObservedAnswer(dataDir string, peer *PerUserPeerRecord) {
+	if dataDir == "" || !filepath.IsAbs(dataDir) {
+		return
+	}
+	if observed, known := peer.wait(0); known {
+		_ = recordPerUserGatewayAnswer(dataDir, observed)
+		return
+	}
 	current, ok := freshGatewayFromRecord(dataDir)
-	if !ok {
+	if ok {
+		_ = recordPerUserGatewayAnswer(dataDir, current)
 		return
 	}
-	if observed, known := peer.wait(0); known &&
-		(observed.pid != current.pid || observed.identity != current.identity) {
+	server, connected := peer.connectedServer()
+	if !connected {
 		return
 	}
-	_ = recordPerUserGatewayAnswer(dataDir, current)
+	ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
+	defer cancel()
+	owners, found := perUserListenerOwners(ctx, server)
+	if found && ctx.Err() == nil && len(owners) == 1 && owners[0].identity != "" {
+		_ = recordPerUserGatewayAnswer(dataDir, owners[0])
+	}
 }
 
 func recordPerUserGatewayAnswer(dataDir string, current perUserPeerProcess) error {

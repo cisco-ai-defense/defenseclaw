@@ -105,6 +105,15 @@ func TestGAP0295FreshAnsweredHelper(t *testing.T) {
 }
 
 func TestGAP0295FirstAnswerEndsFreshWindow(t *testing.T) {
+	checkGAP0295FirstAnswerEndsFreshWindow(t, true)
+}
+
+func TestGAP0295ObservedAnswerBeforePIDPublication(t *testing.T) {
+	checkGAP0295FirstAnswerEndsFreshWindow(t, false)
+}
+
+func checkGAP0295FirstAnswerEndsFreshWindow(t *testing.T, publishBeforeAnswer bool) {
+	t.Helper()
 	dir := t.TempDir()
 	free, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
@@ -140,8 +149,14 @@ func TestGAP0295FirstAnswerEndsFreshWindow(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(filepath.Join(dir, "gateway.pid"), record, 0o600); err != nil {
-		t.Fatal(err)
+	writeRecord := func() {
+		t.Helper()
+		if err := os.WriteFile(filepath.Join(dir, "gateway.pid"), record, 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if publishBeforeAnswer {
+		writeRecord()
 	}
 	t.Setenv(hookPostDataDirEnv, dir)
 	t.Setenv(hookPostDeadlineEnv, "800")
@@ -150,6 +165,9 @@ func TestGAP0295FirstAnswerEndsFreshWindow(t *testing.T) {
 	var errOutput bytes.Buffer
 	if got := runMain(args, bytes.NewReader(first), io.Discard, &errOutput); got != 0 {
 		t.Fatalf("first answer status = %d: %s", got, errOutput.String())
+	}
+	if !publishBeforeAnswer {
+		writeRecord()
 	}
 	second := []byte("DCPOST1\x00/api/v1/claude-code/hook\x00{\"hook_event_name\":\"PreToolUse\",\"tool_name\":\"Bash\",\"tool_input\":{\"command\":\"rm -rf ~/.defenseclaw\"}}\x00Content-Type\x00application/json\x00")
 	if got := runMain(args, bytes.NewReader(second), io.Discard, io.Discard); got != hookexec.PerUserPostNoAnswerExit {

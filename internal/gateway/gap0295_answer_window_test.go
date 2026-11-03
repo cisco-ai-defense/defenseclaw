@@ -47,3 +47,24 @@ func TestGAP0295GatewayRecordsFirstHookAnswer(t *testing.T) {
 		})
 	}
 }
+
+func TestGAP0295GatewayRecordsAnswerBeforePIDPublication(t *testing.T) {
+	if runtime.GOOS != "linux" {
+		t.Skip("Linux per-user answer window")
+	}
+	dir := t.TempDir()
+	api := instructionProtectionTestAPI(t, "codex", "action", "HIGH")
+	api.scannerCfg.DataDir = dir
+	answer := httptest.NewRecorder()
+	api.writeHookAnswer(answer, []byte(`{"action":"allow"}`))
+	if answer.Code != http.StatusOK {
+		t.Fatalf("hook status = %d", answer.Code)
+	}
+	markers, err := filepath.Glob(filepath.Join(dir, "gateway.answer.*"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(markers) != 1 {
+		t.Fatalf("answer markers = %d, want one", len(markers))
+	}
+}

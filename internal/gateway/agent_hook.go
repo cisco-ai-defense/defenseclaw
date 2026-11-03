@@ -1366,12 +1366,10 @@ func (a *APIServer) writeHookAnswer(w http.ResponseWriter, body []byte) {
 		if !a.firstHookAnswerRecorded.Load() {
 			dataDir := a.configDataDir()
 			if dataDir != "" {
-				if info, err := os.Lstat(filepath.Join(dataDir, "gateway.pid")); err == nil && info.Mode().IsRegular() {
-					if err := hookexec.PerUserGatewayRecordLocalAnswer(dataDir); err != nil {
-						a.firstHookAnswerMu.Unlock()
-						http.Error(w, "gateway answer unavailable", http.StatusServiceUnavailable)
-						return
-					}
+				if err := hookexec.PerUserGatewayRecordLocalAnswer(dataDir); err != nil {
+					a.firstHookAnswerMu.Unlock()
+					http.Error(w, "gateway answer unavailable", http.StatusServiceUnavailable)
+					return
 				}
 			}
 			a.firstHookAnswerRecorded.Store(true)
