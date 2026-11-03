@@ -20,11 +20,13 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/audit"
 	"github.com/defenseclaw/defenseclaw/internal/config"
 	"github.com/defenseclaw/defenseclaw/internal/guardrail"
+	"github.com/defenseclaw/defenseclaw/internal/testenv"
 )
 
 func TestNewSidecarRejectsInvalidGlobalRulePackBeforeClientConstruction(t *testing.T) {
 	cfg := config.DefaultConfig()
 	cfg.ConfigVersion = config.ObservabilityV8ConfigVersion
+	cfg.Guardrail.Enabled = true
 	cfg.Guardrail.RulePackDir = invalidRulePackDir(t)
 	// If rule-pack preflight regresses behind client construction, this
 	// deliberately nonexistent key path will obscure the policy error.
@@ -37,6 +39,44 @@ func TestNewSidecarRejectsInvalidGlobalRulePackBeforeClientConstruction(t *testi
 	}
 	if !strings.Contains(err.Error(), "global rule pack") {
 		t.Fatalf("NewSidecar error = %v, want global rule-pack context", err)
+	}
+}
+
+func TestDisabledGuardrailStartsWithoutDefaultRulePackDirectory(t *testing.T) {
+	cfg := config.DefaultConfig()
+	cfg.ConfigVersion = config.ObservabilityV8ConfigVersion
+	cfg.DataDir = testenv.PrivateTempDir(t)
+	cfg.PolicyDir = filepath.Join(cfg.DataDir, "policies")
+	cfg.Guardrail.Enabled = false
+	cfg.Guardrail.RulePack = "default"
+	cfg.Gateway.DeviceKeyFile = filepath.Join(cfg.DataDir, "device.key")
+	restoreGatewayProcessPosture(t)
+
+	sidecar, err := NewSidecar(cfg, nil, nil)
+	if err != nil || sidecar == nil {
+		t.Fatalf("disabled guardrail with no default rule pack: sidecar=%p error=%v", sidecar, err)
+	}
+	t.Cleanup(func() {
+		if svc := sidecar.aiDiscoverySnapshot(); svc != nil {
+			_, _ = svc.CloseIfNeverStarted()
+		}
+		_ = shutdownJudgeStore(sidecar.judgeStore)
+		if sidecar.judgeBodyStore != nil {
+			_ = sidecar.judgeBodyStore.Close()
+		}
+		if sidecar.webhooks != nil {
+			sidecar.webhooks.Close()
+		}
+		sidecar.alertCancel()
+	})
+	if sidecar.activeRulePack() == nil {
+		t.Fatal("disabled guardrail has no embedded fallback")
+	}
+
+	cfg.Guardrail.Enabled = true
+	if _, _, _, err := loadInitialSidecarRulePack(cfg); err == nil ||
+		!strings.Contains(err.Error(), "directory_not_found") {
+		t.Fatalf("enabled guardrail with no default rule pack: error=%v", err)
 	}
 }
 

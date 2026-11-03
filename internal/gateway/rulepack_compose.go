@@ -107,6 +107,9 @@ func effectiveRulePackKey(cfg *config.Config, connector string) string {
 
 // loadGlobalRulePack loads and composes the global scope's pack.
 func loadGlobalRulePack(cache *guardrail.RulePackCache, cfg *config.Config, scope string) (*guardrail.RulePack, error) {
+	if cfg != nil && !cfg.Guardrail.Enabled && !cfg.SecureClientIntegration() {
+		return loadValidatedRulePack(cache, "", scope)
+	}
 	return loadScopedRulePack(cache, cfg, globalRulePackScope(cfg), scope)
 }
 
