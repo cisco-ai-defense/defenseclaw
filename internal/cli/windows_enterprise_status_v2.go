@@ -15,6 +15,7 @@ package cli
 import (
 	"errors"
 	"fmt"
+	"github.com/defenseclaw/defenseclaw/internal/accountjoin"
 	"os"
 	"sort"
 
@@ -47,6 +48,9 @@ type windowsEnterpriseStatusV2Inputs struct {
 	machinePolicy  func(connector string) bool
 	gatewayHealth  func() ([]byte, error)
 	knownConnector func(connector string) bool
+	// accountJoin computes the account join keys (nil: omitted); the
+	// result carries only their summary.
+	accountJoin func() *accountjoin.Report
 }
 
 // windowsEnterpriseStatusV2Read reads the inputs of an installed deployment;
@@ -75,6 +79,7 @@ func readWindowsEnterpriseStatusV2Inputs() windowsEnterpriseStatusV2Inputs {
 		in.manifestErr = err
 		return in
 	}
+	in.accountJoin = func() *accountjoin.Report { return windowsAccountJoinReport(in.cfg, layout) }
 	in.manifest, in.manifestErr = readWindowsEnterpriseStatusV2Manifest(layout.ManifestPath)
 	// An unreadable record is already reported by
 	// applyWindowsEnterpriseUnprotectedAgents.
@@ -138,6 +143,12 @@ func applyWindowsEnterpriseStatusV2(result *enterprisestatus.Result) {
 		body, _ := in.gatewayHealth()
 		result.Identity = enterprisestatus.ParseIdentityHealth(body)
 	}
+	if in.accountJoin != nil {
+		if report := in.accountJoin(); report != nil {
+			summary := report.Summary()
+			result.AccountJoin = &summary
+		}
+	}
 }
 
 // windowsEnterpriseConnectorsBlock is the connectors block. The fail mode is
@@ -152,6 +163,7 @@ func windowsEnterpriseConnectorsBlock(result *enterprisestatus.Result, in window
 	case in.configErr == nil && cfg != nil:
 		inputs.ConfigLoaded = true
 		inputs.Enabled = enterprisehooks.EffectiveWindowsStandaloneHookConnectors(cfg)
+		inputs.Disabled = cfg.Guardrail.DisabledConnectors()
 		inputs.Mode = cfg.EffectiveGuardrailModeForConnector
 	case publish && !errors.Is(in.configErr, os.ErrNotExist):
 		result.AddWarning(enterprisestatus.CodeStatusDetailUnavailable, "connectors: the installed config could not be loaded, "+

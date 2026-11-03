@@ -593,3 +593,119 @@ func WindowsMovedOntoLinkEntries(command, cwd, home string) map[string]bool {
 func WindowsMovedOntoLinkKey(path string) string {
 	return strings.ToLower(filepath.Clean(filepath.FromSlash(PlainMovePath(path))))
 }
+
+// actionDirectStatements marks the statements of a command list that run on
+// their own: top-level statements and the operands of && and ||, not a side
+// of a pipeline, a subshell or a substitution, whose output could feed
+// another command (GAP-2590).
+func actionDirectStatements(file *syntax.File) map[*syntax.Stmt]bool {
+	direct := map[*syntax.Stmt]bool{}
+	var mark func(stmt *syntax.Stmt)
+	mark = func(stmt *syntax.Stmt) {
+		if stmt == nil {
+			return
+		}
+		if binary, ok := stmt.Cmd.(*syntax.BinaryCmd); ok {
+			if binary.Op == syntax.AndStmt || binary.Op == syntax.OrStmt {
+				mark(binary.X)
+				mark(binary.Y)
+			}
+			return
+		}
+		direct[stmt] = true
+	}
+	if file != nil {
+		for _, stmt := range file.Stmts {
+			mark(stmt)
+		}
+	}
+	return direct
+}
+
+// actionWindowsPlainRemovedLinks reads one statement of the Windows target
+// scan as a plain removal of link entries (rel-1-0-4:GAP-2590): in the
+// PowerShell reading Remove-Item (and its aliases rm, del, erase, ri) with
+// only -Force and positional, -Path or -LiteralPath operands, no -Recurse;
+// in the plain (Git Bash) reading rm or unlink with options only among
+// -f -i -I -v. Each operand that is an existing symbolic link to a file (or
+// a dangling one), with no pattern or trailing slash, maps by its word index
+// to the entry it removes; a directory link or a junction is not read
+// (Windows PowerShell 5.1 Remove-Item can reach into a directory link).
+func actionWindowsPlainRemovedLinks(statement []string, dir, home string, powerShell bool) map[int]string {
+	if runtime.GOOS != "windows" || len(statement) < 2 || len(statement) > 16 {
+		return nil
+	}
+	for _, word := range statement {
+		if word == "" || strings.ContainsAny(word, actionWindowsMoveUnsafe) ||
+			strings.HasSuffix(word, "/") || strings.HasSuffix(word, "\\") {
+			return nil
+		}
+	}
+	program := strings.TrimSuffix(strings.ToLower(statement[0]), ".exe")
+	var operands []int
+	switch {
+	case program == "remove-item" || powerShell && (program == "rm" || program == "del" || program == "erase" || program == "ri"):
+		for i := 1; i < len(statement); i++ {
+			word := strings.ToLower(statement[i])
+			switch {
+			case word == "-force":
+			case word == "-path" || word == "-literalpath":
+				if i+1 >= len(statement) || strings.HasPrefix(statement[i+1], "-") {
+					return nil
+				}
+				i++
+				operands = append(operands, i)
+			case strings.HasPrefix(word, "-"):
+				return nil
+			default:
+				operands = append(operands, i)
+			}
+		}
+	case !powerShell && (program == "rm" || program == "unlink"):
+		options := true
+		for i := 1; i < len(statement); i++ {
+			word := statement[i]
+			switch {
+			case options && word == "--":
+				options = false
+			case options && strings.HasPrefix(word, "--"):
+				if !plainRemoveLongOptions[word] {
+					return nil
+				}
+			case options && len(word) > 1 && strings.HasPrefix(word, "-"):
+				if strings.Trim(word[1:], "fiIv") != "" {
+					return nil
+				}
+			default:
+				operands = append(operands, i)
+			}
+		}
+	default:
+		return nil
+	}
+	var removed map[int]string
+	for _, index := range operands {
+		resolved, known := actionWindowsPath(statement[index], dir, home)
+		if !known {
+			continue
+		}
+		path := filepath.FromSlash(resolved)
+		info, err := pathLstat(path)
+		if err != nil || info.Mode()&os.ModeSymlink == 0 {
+			continue
+		}
+		if target, err := pathStat(path); err == nil && target.IsDir() {
+			continue
+		}
+		name := filepath.Base(path)
+		parent, resolvedParent := ResolveWriteTarget(filepath.Dir(path))
+		if !resolvedParent || name == "." || name == ".." {
+			continue
+		}
+		if removed == nil {
+			removed = make(map[int]string)
+		}
+		removed[index] = filepath.Join(parent, name)
+	}
+	return removed
+}

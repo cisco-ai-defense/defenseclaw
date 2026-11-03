@@ -5,7 +5,9 @@ package audit
 
 import (
 	"context"
+	"fmt"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -16,6 +18,64 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/observability"
 	observabilityredaction "github.com/defenseclaw/defenseclaw/internal/observability/redaction"
 )
+
+// GAP-0503: a stalled SQLite connection cannot retain hook-call flushes after
+// their persistence deadlines. Every queued row must settle as a reported
+// loss, and no timed-out row may be written when the connection returns.
+func TestCallWriteBatchStalledConnectionFloodHonorsDeadlines(t *testing.T) {
+	store, writer := newGroupCommitWriter(t)
+	conn := holdWriterConn(t, store)
+	const calls = 300
+	const interval = time.Second / 25
+	var active, peak, dropped atomic.Int64
+	var wg sync.WaitGroup
+	for index := range calls {
+		record := newV8HistoryRecord(t, fmt.Sprintf("call-stall-%03d", index), "private")
+		projection := projectV8HistoryRecord(t, record, observabilityredaction.ProfileNone)
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			inFlight := active.Add(1)
+			defer active.Add(-1)
+			for observed := peak.Load(); inFlight > observed; observed = peak.Load() {
+				if peak.CompareAndSwap(observed, inFlight) {
+					break
+				}
+			}
+			deadline, cancel := context.WithTimeout(t.Context(), 300*time.Millisecond)
+			defer cancel()
+			call := WithCallWriteBatch(deadline, store)
+			writeCtx, report := WithCallWriteReport(call, store, func(err error) {
+				if err != nil {
+					dropped.Add(1)
+				}
+			})
+			if err := writer.AppendContext(writeCtx, record, projection); err == nil && report.Deferred() {
+				CloseCallWrites(call)
+			}
+		}()
+		time.Sleep(interval)
+	}
+	finished := make(chan struct{})
+	go func() { wg.Wait(); close(finished) }()
+	select {
+	case <-finished:
+	case <-time.After(2 * time.Second):
+	}
+	remaining, maximum, losses := active.Load(), peak.Load(), dropped.Load()
+	_ = conn.Close()
+	select {
+	case <-finished:
+	case <-time.After(10 * time.Second):
+		t.Fatal("flushes did not finish after the held connection was released")
+	}
+	if remaining != 0 || maximum > 40 || losses != calls {
+		t.Errorf("held-connection flood: active=%d peak=%d reported_dropped=%d, want 0, <=40, %d", remaining, maximum, losses, calls)
+	}
+	if got := countAuditEvents(t, store, "call-stall-000"); got != 0 {
+		t.Errorf("a deadline-expired row committed after the connection returned: %d", got)
+	}
+}
 
 // observeTransactions records the op of every grouped transaction.
 func observeTransactions(t *testing.T) func() []string {

@@ -252,6 +252,12 @@ func ResolveWindowsClaudeManagedHookRuntime(hookExecutable string) (dataDir stri
 // enrollment set. It never consults a target-owned runtime and treats a clean
 // absence of both machine policy artifacts as inactive.
 func ReadWindowsClaudeManagedPolicyTargets() ([]string, bool, error) {
+	return readWindowsClaudeManagedPolicyTargetsForHook("")
+}
+
+// readWindowsClaudeManagedPolicyTargetsForHook checks the active executable
+// with the authenticated target set in one policy transaction.
+func readWindowsClaudeManagedPolicyTargetsForHook(expectedHook string) ([]string, bool, error) {
 	path, err := windowsClaudeManagedPolicyPath()
 	if err != nil {
 		return nil, false, err
@@ -303,6 +309,9 @@ func ReadWindowsClaudeManagedPolicyTargets() ([]string, bool, error) {
 		}
 		if !policy.existed {
 			return nil
+		}
+		if expectedHook != "" && !sameWindowsEnterprisePath(parsed.HookExecutable, expectedHook) {
+			return errors.New("enterprise hooks: active Claude Code policy executable does not match the installed hook")
 		}
 		active = true
 		targets = append([]string(nil), parsed.TargetSIDs...)

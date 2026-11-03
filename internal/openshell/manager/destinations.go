@@ -31,6 +31,7 @@ import (
 
 	"github.com/defenseclaw/defenseclaw/internal/audit"
 	"github.com/defenseclaw/defenseclaw/internal/config"
+	"github.com/defenseclaw/defenseclaw/internal/gateway/connector"
 	"github.com/defenseclaw/defenseclaw/internal/openshell"
 	"github.com/defenseclaw/defenseclaw/internal/openshell/egress"
 	"github.com/defenseclaw/defenseclaw/internal/openshell/harness"
@@ -134,6 +135,25 @@ func destinationLineage(refs []ProcessRef) []sandboxapi.DestinationProcess {
 	return out
 }
 
+// commLen is the most of a program's name the kernel keeps as its comm
+// (TASK_COMM_LEN less the NUL): claude-code-hook.sh reads claude-code-hoo.
+const commLen = 15
+
+// ownHookLineage reports a lineage that runs through one of DefenseClaw's
+// own hook scripts (connector.HookScriptFileNames), named by its path or by
+// its comm, which the kernel cuts at commLen (GAP-0404).
+func ownHookLineage(lineage []sandboxapi.DestinationProcess) bool {
+	scripts := connector.HookScriptFileNames()
+	for _, p := range lineage {
+		for _, name := range scripts {
+			if filepath.Base(p.Exe) == name || p.Comm == name || len(p.Comm) == commLen && strings.HasPrefix(name, p.Comm) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
 func (m *Manager) actorLineage(sandbox, binary string, pid int, at time.Time) []sandboxapi.DestinationProcess {
 	if binary == "" || m.procs == nil {
 		return nil
@@ -141,7 +161,12 @@ func (m *Manager) actorLineage(sandbox, binary string, pid int, at time.Time) []
 	if pid > 0 {
 		return m.lineage(sandbox, pid, binary)
 	}
-	return destinationLineage(m.procs.LineageAt(sandbox, binary, at))
+	// A program image running then is a guess: one under DefenseClaw's own
+	// hook is not the agent's connection (GAP-0404).
+	if lineage := destinationLineage(m.procs.LineageAt(sandbox, binary, at)); !ownHookLineage(lineage) {
+		return lineage
+	}
+	return nil
 }
 
 // destTable is one sandbox's destinations. Manager.destMu guards it.
@@ -534,6 +559,12 @@ func (r *destRow) attributeProxied(opens []proxyOpen, now time.Time) bool {
 			continue
 		}
 		if bin, pid, lineage, ok := proxyActor(opens, q.at); ok {
+			if ownHookLineage(lineage) {
+				// The one open around a request too short for the process
+				// tree can be DefenseClaw's own hook's: the request keeps
+				// only the binary (GAP-0404).
+				lineage = nil
+			}
 			if r.addActor(bin, pid, q.denied) {
 				r.Lineage = lineage
 			}

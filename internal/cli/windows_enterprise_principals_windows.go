@@ -19,6 +19,8 @@ import (
 	"strings"
 
 	"golang.org/x/sys/windows"
+
+	"github.com/defenseclaw/defenseclaw/internal/managed"
 )
 
 // windowsPrincipalName is the account or group a SID names on this
@@ -159,6 +161,15 @@ func windowsEnterpriseNamePrincipals(message string) string {
 }
 
 func init() {
+	// The relaxed-ancestor advisory that status, verify and policy show
+	// print names the account and the fix too, not a raw SID and mask
+	// (GAP-0925).
+	managed.DescribeTrustAdvisoryReason = func(reason string) string {
+		if _, standalone := managedHostWindowsStandalone(); !standalone {
+			return reason
+		}
+		return windowsEnterpriseNamePrincipals(reason)
+	}
 	describeManagedConfigLoadError = func(err error) error {
 		if err == nil {
 			return nil

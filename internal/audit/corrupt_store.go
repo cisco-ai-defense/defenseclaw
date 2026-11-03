@@ -88,13 +88,15 @@ func openDaemonStore(dbPath string, warn, progress io.Writer, opts ...StoreOptio
 	// A failed writable SQLite open can checkpoint or delete a damaged store's
 	// WAL as its last connection closes. Check an existing store read-only first,
 	// before any connection with journal_mode(WAL) is allowed to open it.
-	sidecars, err := probeExistingAuditStore(dbPath, warn)
+	probe, err := probeExistingAuditStore(dbPath, warn)
 	if err != nil && !isSQLiteCorrupt(err) {
 		return nil, err
 	}
+	sidecars := probe.sidecars
 	var store *Store
 	if err == nil {
-		store, err = openCheckedStore(dbPath, warn, progress, opts...)
+		afterAuditStoreProbe(dbPath)
+		store, err = openCheckedStore(dbPath, warn, progress, probe.checked, opts...)
 	}
 	if err == nil || !isSQLiteCorrupt(err) {
 		return store, err
@@ -104,7 +106,7 @@ func openDaemonStore(dbPath string, warn, progress io.Writer, opts ...StoreOptio
 	if preCutover {
 		if rebuildErr := rebuildAuditDB(dbPath, progress, opts...); rebuildErr != nil {
 			err = fmt.Errorf("%w; rebuilding it failed: %v", err, rebuildErr)
-		} else if rebuilt, retryErr := openCheckedStore(dbPath, warn, progress, opts...); retryErr == nil {
+		} else if rebuilt, retryErr := openCheckedStore(dbPath, warn, progress, nil, opts...); retryErr == nil {
 			fmt.Fprintf(warn, "[audit] the audit store DefenseClaw 0.x wrote failed SQLite's integrity check (%v); "+
 				"it was rebuilt in place and passes the check now.\n", err)
 			return rebuilt, nil
@@ -169,56 +171,153 @@ type auditSidecarAtStart struct {
 	size   int64
 }
 
+// auditStoreProbe is what the read-only probe found: the SQLite sidecars
+// beside the store at start, and checked, the files its quick_check read and
+// found intact. A skipped or inconclusive check checked nothing (nil).
+type auditStoreProbe struct {
+	sidecars []auditSidecarAtStart
+	checked  *auditCheckedFiles
+}
+
+// auditCheckedFiles names the store files a quick_check read: the database
+// leaf the check's path guard held open, and the -wal as it was when the
+// check ended (absent is a state too). openCheckedStore skips its own check
+// only for these files unchanged (sameAs).
+type auditCheckedFiles struct {
+	db  os.FileInfo
+	wal auditFileState
+}
+
+type auditFileState struct {
+	present bool
+	size    int64
+	modTime time.Time
+}
+
+func auditFileStateOf(path string) (auditFileState, error) {
+	info, err := os.Lstat(path)
+	if errors.Is(err, os.ErrNotExist) {
+		return auditFileState{}, nil
+	}
+	if err != nil {
+		return auditFileState{}, err
+	}
+	return auditFileState{present: true, size: info.Size(), modTime: info.ModTime()}, nil
+}
+
+// sameAs reports whether the store the writable open holds (its path guard's
+// pinned leaf, and the -wal beside it now) is the file set the probe checked:
+// the same file (os.SameFile), with the same size and modification time,
+// and a -wal of the same size and modification time. A store renamed into
+// place after the probe, or a -wal another process wrote since, is not.
+func (checked *auditCheckedFiles) sameAs(store *Store) bool {
+	if checked == nil || store == nil || store.dbPathGuard == nil || store.dbPathGuard.pinned == nil {
+		return false
+	}
+	db, err := store.dbPathGuard.pinned.Stat()
+	if err != nil || !os.SameFile(checked.db, db) || db.Size() != checked.db.Size() || !db.ModTime().Equal(checked.db.ModTime()) {
+		return false
+	}
+	wal, err := auditFileStateOf(store.dbPathGuard.path + "-wal")
+	return err == nil && wal.present == checked.wal.present && wal.size == checked.wal.size && wal.modTime.Equal(checked.wal.modTime)
+}
+
+// afterAuditStoreProbe runs between the probe and the writable open, and
+// duringAuditStoreProbeCheck right after the probe's quick_check; tests change
+// the store files there.
+var (
+	afterAuditStoreProbe       = func(string) {}
+	duringAuditStoreProbeCheck = func(string) {}
+)
+
+// unchangedSince reports whether db and wal, read after the probe's
+// connection closed, are the files as they were before it opened (checked
+// holds that earlier state): the same leaf with the same size and mtime, and
+// the same -wal. A -wal that was absent before and is absent or empty after
+// is unchanged: the read-only open may create an empty one, which holds no
+// frames. Anything else was written while the check ran, possibly after its
+// read snapshot, so the check did not read it.
+func (checked *auditCheckedFiles) unchangedSince(db os.FileInfo, wal auditFileState) bool {
+	if !os.SameFile(checked.db, db) || db.Size() != checked.db.Size() || !db.ModTime().Equal(checked.db.ModTime()) {
+		return false
+	}
+	if !checked.wal.present {
+		return !wal.present || wal.size == 0
+	}
+	return wal.present && wal.size == checked.wal.size && wal.modTime.Equal(checked.wal.modTime)
+}
+
 // readOnlyAuditStoreProbe identifies corruption before a writable connection
 // can consume a damaged WAL. A hot rollback journal yields SQLITE_READONLY;
 // the probe leaves it unchanged and lets SQLite's writable open roll it back.
 // If corruption remains, the start warning says the journal was not archived.
 // Any other read failure with a populated WAL refuses the start, so a failing
 // writable open cannot consume that WAL.
-func readOnlyAuditStoreProbe(dbPath string, warn io.Writer) ([]auditSidecarAtStart, error) {
+func readOnlyAuditStoreProbe(dbPath string, warn io.Writer) (auditStoreProbe, error) {
 	if dbPath == ":memory:" || strings.TrimSpace(dbPath) == "" {
-		return nil, nil
+		return auditStoreProbe{}, nil
 	}
 	absolute, err := filepath.Abs(filepath.Clean(dbPath))
 	if err != nil {
-		return nil, err
+		return auditStoreProbe{}, err
 	}
 	info, err := os.Lstat(absolute)
 	if errors.Is(err, os.ErrNotExist) || (err == nil && !info.Mode().IsRegular()) {
-		return nil, nil // NewStore retains its existing missing/unsafe-path handling.
+		return auditStoreProbe{}, nil // NewStore retains its existing missing/unsafe-path handling.
 	}
 	if err != nil {
-		return nil, err
+		return auditStoreProbe{}, err
 	}
 	var sidecars []auditSidecarAtStart
 	for _, suffix := range auditDBSQLiteSidecarSuffixes {
 		if sidecar, err := os.Lstat(absolute + suffix); err == nil {
 			sidecars = append(sidecars, auditSidecarAtStart{suffix: suffix, size: sidecar.Size()})
 		} else if !errors.Is(err, os.ErrNotExist) {
-			return nil, fmt.Errorf("audit: inspect SQLite sidecar %s: %w", suffix, err)
+			return auditStoreProbe{}, fmt.Errorf("audit: inspect SQLite sidecar %s: %w", suffix, err)
 		}
 	}
 	prepared, err := prepareAuditDatabasePath(absolute, auditDBPathHooks{})
 	if err != nil {
-		return nil, err
+		return auditStoreProbe{}, err
 	}
 	defer prepared.close()
+	// The files as they are before the check reads them: a writer that appends
+	// while the check runs adds frames it may not read (review round 2).
+	var before *auditCheckedFiles
+	if prepared.pinned != nil {
+		leaf, leafErr := prepared.pinned.Stat()
+		wal, walErr := auditFileStateOf(absolute + "-wal")
+		if leafErr == nil && walErr == nil {
+			before = &auditCheckedFiles{db: leaf, wal: wal}
+		}
+	}
 	db, err := openAuditReadOnlyPreservingSHM(prepared.path, "")
 	if err != nil {
-		return nil, err
+		return auditStoreProbe{}, err
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), startupIntegrityCheckTimeout)
 	defer cancel()
 	checkErr := quickCheckAuditDB(ctx, db)
+	duringAuditStoreProbeCheck(absolute)
 	validationErr := prepared.validateAfterOpen()
 	closeErr := db.Close()
+	var checked *auditCheckedFiles
+	if checkErr == nil && validationErr == nil && closeErr == nil && prepared.pinned != nil {
+		// The -wal is read once the check's connection is closed: its last
+		// close can still change it.
+		leaf, leafErr := prepared.pinned.Stat()
+		wal, walErr := auditFileStateOf(absolute + "-wal")
+		if leafErr == nil && walErr == nil && before != nil && before.unchangedSince(leaf, wal) {
+			checked = &auditCheckedFiles{db: leaf, wal: wal}
+		}
+	}
 	if validationErr != nil || closeErr != nil {
-		return nil, errors.Join(validationErr, closeErr)
+		return auditStoreProbe{}, errors.Join(validationErr, closeErr)
 	}
 	if checkErr != nil && !isSQLiteCorrupt(checkErr) {
 		if errors.Is(ctx.Err(), context.DeadlineExceeded) || isTransientSQLiteProbeError(checkErr) {
 			fmt.Fprintf(warn, "[audit] startup integrity check skipped: %v\n", checkErr)
-			return sidecars, nil
+			return auditStoreProbe{sidecars: sidecars}, nil
 		}
 		cause := ""
 		var coded sqliteCoded
@@ -229,14 +328,14 @@ func readOnlyAuditStoreProbe(dbPath string, warn io.Writer) ([]auditSidecarAtSta
 			// The writable open would most likely fail the same way, and its
 			// last connection would checkpoint or delete the WAL as it closed
 			// (rel-1-0-2:GAP-0609). Refuse before any writable connection.
-			return nil, fmt.Errorf("audit: the audit store %s could not be read (%w); the gateway did not open it for writing, "+
+			return auditStoreProbe{}, fmt.Errorf("audit: the audit store %s could not be read (%w); the gateway did not open it for writing, "+
 				"so its -wal file keeps its records. Copy the store with its -wal and -shm files before you inspect it, "+
 				"and run defenseclaw doctor", absolute, checkErr)
 		}
 		fmt.Fprintf(warn, "[audit] read-only probe could not read the store%s: %v; the normal open and its integrity check follow.\n", cause, checkErr)
-		return sidecars, nil
+		return auditStoreProbe{sidecars: sidecars}, nil
 	}
-	return sidecars, checkErr
+	return auditStoreProbe{sidecars: sidecars, checked: checked}, checkErr
 }
 
 // isTransientSQLiteProbeError reports contention a later open does not
@@ -386,15 +485,26 @@ func readCarryOverNote(moved string) (carryOverNote, bool) {
 	return note, true
 }
 
-func openCheckedStore(dbPath string, warn, progress io.Writer, opts ...StoreOption) (*Store, error) {
+// openCheckedStore opens the store and runs its startup quick_check, unless
+// the read-only probe has just read the same files and found them intact
+// (checked.sameAs). quick_check reads every page, so each run makes the
+// start slower by the size of the store: the probe and this second check took
+// 1.3 s of a 300 MB store's open on Linux (the probe 0.26 s of it), and a
+// Windows per-user restart took 6.6 s at 11 MB and 9.2 s at 272 MB (rel-1-0-6
+// GAP-0332). A store replaced or a -wal written between the probe and this
+// open is checked again, as every store was before. Secure Client keeps the
+// second check of main (#1092).
+func openCheckedStore(dbPath string, warn, progress io.Writer, checked *auditCheckedFiles, opts ...StoreOption) (*Store, error) {
 	store, err := NewStore(dbPath, opts...)
 	if err != nil {
 		return nil, err
 	}
 	store.progress = progress
-	if err := store.startupQuickCheck(warn); err != nil {
-		_ = store.Close()
-		return nil, err
+	if store.secureClientSchema || !checked.sameAs(store) {
+		if err := store.startupQuickCheck(warn); err != nil {
+			_ = store.Close()
+			return nil, err
+		}
 	}
 	if err := store.Init(); err != nil {
 		_ = store.Close()
@@ -409,7 +519,7 @@ func (s *Store) startupQuickCheck(warn io.Writer) error {
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), startupIntegrityCheckTimeout)
 	defer cancel()
-	err := quickCheckAuditDB(ctx, s.db)
+	err := writableStartupQuickCheck(ctx, s.db)
 	if isSQLiteCorrupt(err) {
 		return err
 	}
@@ -418,6 +528,10 @@ func (s *Store) startupQuickCheck(warn io.Writer) error {
 	}
 	return nil
 }
+
+// writableStartupQuickCheck is the check of the writable open
+// (startupQuickCheck); tests count its runs.
+var writableStartupQuickCheck = quickCheckAuditDB
 
 func quickCheckAuditDB(ctx context.Context, db *sql.DB) error {
 	var result string

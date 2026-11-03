@@ -239,6 +239,27 @@ func cursorClosedOutput(opts Options, reason string) string {
 	return `{"continue":false,"permission":"deny","user_message":` + message + `,"agent_message":` + message + `}`
 }
 
+// cursorEventUnread matches the events registered by Cursor's hook contract.
+// An event outside this roster has no event-specific block response.
+func cursorEventUnread(event string) bool {
+	switch strings.TrimSpace(event) {
+	case "sessionStart", "sessionEnd", "preToolUse", "postToolUse", "postToolUseFailure",
+		"subagentStart", "subagentStop", "beforeShellExecution", "beforeMCPExecution",
+		"afterShellExecution", "afterMCPExecution", "beforeReadFile", "beforeTabFileRead",
+		"afterFileEdit", "afterTabFileEdit", "beforeSubmitPrompt", "afterAgentResponse",
+		"afterAgentThought", "stop", "preCompact", "workspaceOpen":
+		return false
+	}
+	return true
+}
+
+func cursorClosedExit(opts Options, exit int) int {
+	if !opts.SecureClient && !secureClientHook(opts) && cursorEventUnread(opts.Event) {
+		return blockExit
+	}
+	return exit
+}
+
 func cursorActionOutput(event, action, reason string) string {
 	event = strings.ToLower(strings.TrimSpace(event))
 	if action != "block" {

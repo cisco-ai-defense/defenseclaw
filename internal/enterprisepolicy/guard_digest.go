@@ -22,6 +22,8 @@ import (
 	"sort"
 	"strings"
 	"unicode"
+
+	"github.com/defenseclaw/defenseclaw/internal/pathidentity"
 )
 
 // An approval in allowed_hooks is a digest the block message shows. It
@@ -450,7 +452,7 @@ func unboundState(state string) string {
 // they do not own (macOS), a root-owned file named from a folder a user
 // controls is bound by content (systemBoundFile).
 func (s *guardScan) fileState(path string) string {
-	info, err := os.Stat(path)
+	info, err := pathidentity.StatPinned(path)
 	switch {
 	case err != nil && (errors.Is(err, fs.ErrNotExist) || guardPathCannotExist(err)):
 		return "absent"
@@ -567,7 +569,7 @@ func (s *guardScan) treeDigest(root string) (string, error) {
 			}
 			name := rel + "/" + entry.Name()
 			path := filepath.Join(dir, entry.Name())
-			info, err := os.Lstat(path)
+			info, err := pathidentity.LstatPinned(path)
 			if err != nil {
 				return err
 			}

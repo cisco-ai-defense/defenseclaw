@@ -20,6 +20,7 @@ import (
 
 	"github.com/defenseclaw/defenseclaw/internal/gateway/connector"
 	"github.com/defenseclaw/defenseclaw/internal/managed"
+	"github.com/defenseclaw/defenseclaw/internal/pathidentity"
 	"github.com/defenseclaw/defenseclaw/internal/safefile"
 	"github.com/defenseclaw/defenseclaw/internal/version"
 	"github.com/defenseclaw/defenseclaw/internal/winpath"
@@ -1609,6 +1610,13 @@ func platformWatchDirs(opts InstallOptions) ([]string, bool, error) {
 				out = append(out, dir)
 			}
 		}
+		if !secureClientHookDelivery() && windowsStandaloneRuntimeOnlyInstall(name) {
+			policyPath, err := windowsRuntimeOnlyPolicyPath(name)
+			if err != nil {
+				return nil, true, err
+			}
+			out = append(out, filepath.Dir(policyPath))
+		}
 		return sortedUnique(out), true, nil
 	}
 	home, sid, err := validateWindowsEnterpriseHome(opts.UserHome, opts.OwnerSID)
@@ -1630,8 +1638,41 @@ func platformWatchDirs(opts InstallOptions) ([]string, bool, error) {
 }
 
 func platformWatchOwnedFiles(opts InstallOptions) (WatchOwnership, bool, error) {
-	if !strings.EqualFold(strings.TrimSpace(opts.ConnectorName), "cursor") {
+	name := strings.ToLower(strings.TrimSpace(opts.ConnectorName))
+	if secureClientHookDelivery() && name != "cursor" {
 		return WatchOwnership{}, false, nil
+	}
+	if name == "claudecode" {
+		home, sid, err := validateWindowsEnterpriseHome(opts.UserHome, opts.OwnerSID)
+		if err != nil {
+			return WatchOwnership{}, true, err
+		}
+		dataDir, err := resolveWindowsEnterpriseDataDir(home, opts.DataDir)
+		if err != nil {
+			return WatchOwnership{}, true, err
+		}
+		if err := validateWindowsUserPathPrefix(home, dataDir, sid, true); err != nil {
+			return WatchOwnership{}, true, err
+		}
+		policyPath, err := windowsClaudeManagedPolicyPath()
+		if err != nil {
+			return WatchOwnership{}, true, err
+		}
+		hookDir := filepath.Join(dataDir, "hooks")
+		files := []string{
+			policyPath,
+			filepath.Join(filepath.Dir(policyPath), windowsClaudeManagedStateFile),
+			filepath.Join(hookDir, ".hookcfg.claudecode"),
+			filepath.Join(hookDir, ".hook-claudecode.token"),
+			filepath.Join(hookDir, "_hardening.sh"),
+			filepath.Join(dataDir, "hook_contract_lock.json"),
+			filepath.Join(dataDir, "hook_contract_lock.json.lock"),
+		}
+		files = append(files, connector.NewClaudeCodeConnector().HookScripts(connector.SetupOpts{DataDir: dataDir})...)
+		return WatchOwnership{ExclusiveWriter: sortedUnique(files)}, true, nil
+	}
+	if name != "cursor" {
+		return windowsGenericWatchOwnedFiles(opts)
 	}
 	target, err := resolveWindowsGenericManagedTarget(opts)
 	if err != nil {
@@ -1654,6 +1695,113 @@ func platformWatchOwnedFiles(opts InstallOptions) (WatchOwnership, bool, error) 
 			filepath.Join(target.dataDir, "hook_contract_lock.json.lock"),
 		}),
 	}, true, nil
+}
+
+func windowsGenericWatchOwnedFiles(opts InstallOptions) (WatchOwnership, bool, error) {
+	target, err := resolveWindowsGenericManagedTarget(opts)
+	if err != nil {
+		return WatchOwnership{}, true, err
+	}
+	exclusive := map[string]struct{}{}
+	shared := map[string]struct{}{}
+	addExclusive := func(path string) {
+		if path = strings.TrimSpace(path); path != "" {
+			path = filepath.Clean(path)
+			exclusive[path] = struct{}{}
+			delete(shared, path)
+		}
+	}
+	addShared := func(path string) {
+		if path = strings.TrimSpace(path); path != "" {
+			path = filepath.Clean(path)
+			if _, owned := exclusive[path]; !owned {
+				shared[path] = struct{}{}
+			}
+		}
+	}
+	if target.conn.Name() == "codex" {
+		for _, path := range windowsCodexRuntimePaths(target.dataDir) {
+			switch filepath.Base(path) {
+			case ".token", ".hookcfg", ".hookcfg.lock":
+				continue
+			}
+			addExclusive(path)
+		}
+		machineOpts, err := windowsCodexRequirementsOptionsResolver(target.hookExecutable, target.setup.APIAddr)
+		if err != nil {
+			return WatchOwnership{}, true, err
+		}
+		addExclusive(machineOpts.RequirementsPath)
+		addExclusive(machineOpts.OwnershipPath)
+		addExclusive(machineOpts.ManagedStatePath)
+		return WatchOwnership{ExclusiveWriter: sortedMapKeys(exclusive)}, true, nil
+	}
+	if windowsStandaloneRuntimeOnlyInstall(target.conn.Name()) {
+		for _, path := range windowsRuntimeOnlyPaths(target.dataDir, target.conn.Name()) {
+			switch filepath.Base(path) {
+			case ".token", ".hookcfg", ".hookcfg.lock":
+				continue
+			}
+			addExclusive(path)
+		}
+		policyPath, err := windowsRuntimeOnlyPolicyPath(target.conn.Name())
+		if err != nil {
+			return WatchOwnership{}, true, err
+		}
+		addExclusive(policyPath)
+		return WatchOwnership{ExclusiveWriter: sortedMapKeys(exclusive)}, true, nil
+	}
+	err = connector.WithUserHomeDir(target.home, func() error {
+		plugins := map[string]struct{}{}
+		for _, path := range connector.ManagedPluginArtifacts(target.conn, target.setup) {
+			plugins[filepath.Clean(path)] = struct{}{}
+		}
+		addConfig := func(path string) {
+			if _, plugin := plugins[filepath.Clean(path)]; plugin {
+				addExclusive(path)
+			} else {
+				addShared(path)
+			}
+		}
+		for _, path := range connector.HookConfigPathsForConnector(target.conn, target.setup) {
+			addConfig(path)
+		}
+		if provider, ok := target.conn.(connector.AgentPathProvider); ok {
+			footprint := provider.AgentPaths(target.setup)
+			for _, path := range footprint.PatchedFiles {
+				addConfig(path)
+			}
+			for _, paths := range [][]string{footprint.BackupFiles, footprint.HookScripts, footprint.GeneratedFiles, footprint.GeneratedExecutables} {
+				for _, path := range paths {
+					addExclusive(path)
+				}
+			}
+		}
+		sidecars, sidecarErr := hookSidecarFiles(target.dataDir, target.conn.Name())
+		if sidecarErr != nil {
+			return sidecarErr
+		}
+		for _, path := range sidecars {
+			switch filepath.Base(path) {
+			case ".token", ".hookcfg":
+				continue
+			}
+			addExclusive(path)
+		}
+		for path := range plugins {
+			addExclusive(path)
+		}
+		return nil
+	})
+	if err != nil {
+		return WatchOwnership{}, true, err
+	}
+	hookDir := filepath.Join(target.dataDir, "hooks")
+	addExclusive(filepath.Join(hookDir, ".hookcfg."+target.conn.Name()))
+	contractPath := filepath.Join(target.dataDir, "hook_contract_lock.json")
+	addExclusive(contractPath)
+	addExclusive(contractPath + ".lock")
+	return WatchOwnership{ExclusiveWriter: sortedMapKeys(exclusive), SharedWriter: sortedMapKeys(shared)}, true, nil
 }
 
 func resolveWindowsEnterpriseDataDir(home, raw string) (string, error) {
@@ -2985,7 +3133,7 @@ func snapshotWindowsRuntimeFiles(paths []string) ([]windowsRuntimeFileSnapshot, 
 		} else if parentErr == nil {
 			snapshot.parentExisted = true
 		}
-		info, err := os.Lstat(path)
+		info, err := pathidentity.LstatPinned(path)
 		if errors.Is(err, os.ErrNotExist) {
 			snapshots = append(snapshots, snapshot)
 			continue

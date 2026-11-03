@@ -19,6 +19,10 @@ func WindowsProtectedTargetRunsEarlierHookMatrix(InstallOptions) (bool, error) {
 	return false, nil
 }
 
+func WindowsProtectedTargetHasClosedMachineRegistration(InstallOptions) (bool, error) {
+	return false, nil
+}
+
 // WindowsProtectedTargetHookFailModeChange is the native Windows check.
 func WindowsProtectedTargetHookFailModeChange(InstallOptions) (string, string, error) {
 	return "", "", nil

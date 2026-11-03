@@ -56,6 +56,13 @@ func TestBraceWriterOperandsOntoKeysBlockManagedLikePerUser(t *testing.T) {
 		"install {../.ssh/id.pub,../.ssh/authorized_keys}",
 		"mv {../.ssh/id.pub,../.ssh/authorized_keys}",
 		"ln -sf {../ordinary/a,../.ssh/authorized_keys}",
+		// rel-1-0-6:GAP-0233/GAP-0255 (r107-bd-hookparse3): a brace word
+		// is now read as the words bash makes of it, so this rsync gets the
+		// verdict of its spelled-out form (next row), which already
+		// blocked: the target scan does not tell a source from a
+		// destination in a writing command.
+		"rsync ../.ssh/id.pub ../.ssh/authorized_key{s,}",
+		"rsync ../.ssh/id.pub ../.ssh/authorized_keys ../.ssh/authorized_key",
 	}
 	allowed := []string{
 		"tee ordinary/{a,b}.txt < README.md",
@@ -70,7 +77,6 @@ func TestBraceWriterOperandsOntoKeysBlockManagedLikePerUser(t *testing.T) {
 		"touch $HOME/project/ordinary/{a,b}",
 		`dd if=README.md of="ordinary/a"{,.bak}`,
 		"echo k >> ../.ssh/authorized_key{s,x}",
-		"rsync ../.ssh/id.pub ../.ssh/authorized_key{s,}",
 	}
 	check := func(command, want string) {
 		payload := f.payload(t, command)

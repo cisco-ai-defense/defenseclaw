@@ -162,6 +162,40 @@ def install() -> bool:
     return True
 
 
+def use_libyaml_for_rule_packs() -> bool:
+    """Read the scanner's rule packs with libyaml instead of PyYAML's Python loader.
+
+    Every scan starts by parsing about ninety rule-pack files with the
+    pure-Python ``yaml.SafeLoader``, a third of the time of a scan without a
+    judge (rel-1-0-6 GAP-0113). The scanner's loader differs from ``SafeLoader``
+    only in rejecting a duplicate mapping key, so the same constructor is put on
+    a ``CSafeLoader`` subclass: the same documents, the same duplicate-key
+    refusal, parsed by libyaml. Idempotent. Returns False, and changes nothing,
+    when libyaml is not built into PyYAML or the scanner is not shaped the way
+    this relies on (another version), so the scan runs as shipped.
+    """
+    try:
+        import yaml
+        from skill_scanner.core import rule_registry
+    except ImportError:
+        return False
+    base = getattr(yaml, "CSafeLoader", None)
+    current = getattr(rule_registry, "_DuplicateKeySafeLoader", None)
+    construct = getattr(rule_registry, "_construct_unique_mapping", None)
+    if base is None or current is None or construct is None:
+        _log.debug("skill-scanner has no rule-pack YAML loader to speed up; rule packs are read as shipped")
+        return False
+    if issubclass(current, base):
+        return True
+
+    class _DuplicateKeyCSafeLoader(base):  # type: ignore[misc, valid-type]
+        """libyaml safe loader that rejects duplicate mapping keys."""
+
+    _DuplicateKeyCSafeLoader.add_constructor(yaml.resolver.BaseResolver.DEFAULT_MAPPING_TAG, construct)
+    rule_registry._DuplicateKeySafeLoader = _DuplicateKeyCSafeLoader
+    return True
+
+
 def main() -> Any:
     """Run the skill-scanner command line with the judge-answer fix installed.
 
@@ -169,6 +203,7 @@ def main() -> Any:
     script: ``sys.argv`` is the skill-scanner command line.
     """
     install()
+    use_libyaml_for_rule_packs()
     matches = [e for e in importlib.metadata.entry_points(group="console_scripts") if e.name == "skill-scanner"]
     if len(matches) != 1:
         print("defenseclaw: the skill-scanner command is not installed", file=sys.stderr)

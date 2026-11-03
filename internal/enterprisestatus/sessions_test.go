@@ -221,3 +221,29 @@ func TestSessionLeadersEndsAParentCycle(t *testing.T) {
 		t.Fatal("a parent cycle did not end")
 	}
 }
+
+// rel-1-0-6 GAP-0183: a background helper of an agent (the Codex background
+// server and its supervisor) is not a session. It is never counted, and a
+// process it started is not a session of its own.
+func TestCountedSessionsLeaveOutBackgroundProcesses(t *testing.T) {
+	started := time.Now().Add(-time.Hour)
+	changed := map[string]time.Time{"codex": time.Now()}
+	rows := []SessionProcess{
+		{PID: 100, PPID: 1, User: "u", Agent: "codex", StartedAt: started},
+		{PID: 101, PPID: 100, User: "u", Agent: "codex", StartedAt: started},
+		{PID: 200, PPID: 1, User: "u", Agent: "codex", StartedAt: started, Background: true},
+		{PID: 201, PPID: 200, User: "u", Agent: "codex", StartedAt: started},
+		{PID: 300, PPID: 100, User: "u", Agent: "codex", StartedAt: started, Background: true},
+	}
+	counted := CountedSessions(rows)
+	if len(counted) != 1 || counted[0].PID != 100 {
+		t.Fatalf("counted = %+v, want only the session leader 100", counted)
+	}
+	got := UnprotectedSessions(rows, changed)
+	if got.Count != 1 || len(got.Entries) != 1 || got.Entries[0].PID != 100 {
+		t.Fatalf("bundle scan = %+v, want one session (pid 100)", got)
+	}
+	if pending := PendingFromScan(got); pending == nil || pending.Count != 1 {
+		t.Fatalf("enforcement_pending = %+v, want 1", pending)
+	}
+}

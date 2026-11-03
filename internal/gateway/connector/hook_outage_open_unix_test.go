@@ -6,6 +6,7 @@
 package connector
 
 import (
+	"errors"
 	"fmt"
 	"io"
 	"math/rand/v2"
@@ -15,8 +16,11 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
+	"strconv"
 	"strings"
 	"sync"
+	"syscall"
 	"testing"
 	"time"
 )
@@ -51,7 +55,7 @@ func TestPerUserShellHookOutageOpenOnlyForAnOutage(t *testing.T) {
 			_, _ = io.Copy(io.Discard, r.Body)
 			select {
 			case <-r.Context().Done():
-			case <-time.After(30 * time.Second):
+			case <-time.After(6 * time.Second):
 			}
 		}},
 		{name: "malformed answer", handler: func(w http.ResponseWriter, _ *http.Request) {
@@ -90,7 +94,10 @@ func TestPerUserShellHookOutageOpenOnlyForAnOutage(t *testing.T) {
 					var addr string
 					if sc.handler != nil {
 						server := httptest.NewServer(sc.handler)
-						defer server.Close()
+						defer func() {
+							server.CloseClientConnections()
+							server.Close()
+						}()
 						addr = strings.TrimPrefix(server.URL, "http://")
 					} else {
 						addr = freeLoopbackAddrForOutageTest(t)
@@ -266,31 +273,91 @@ func outageOpenWarningForTest(connector string) string {
 	return "fail mode open for an outage"
 }
 
-// freeLoopbackAddrForOutageTest is a loopback address no process listens on.
-// It comes from below the ephemeral range (Linux 32768-60999, macOS
-// 49152-65535), where no parallel subtest's httptest server (port 0) can take
-// it after this probe, and no two callers get the same port.
+// freeLoopbackAddrForOutageTest is a loopback address for a stopped gateway.
+// Linux holds a bound, non-listening socket for the whole case, so no other
+// listener can take it. On macOS that socket can blackhole a connect rather
+// than refuse it; close it after proving the port is free. The process-wide
+// allocation and the range below the ephemeral ports keep the macOS cases
+// disjoint from each other and from port-0 fake gateways (GAP-0454/0455).
 func freeLoopbackAddrForOutageTest(t *testing.T) string {
 	t.Helper()
 	outagePortsMu.Lock()
 	defer outagePortsMu.Unlock()
-	for port := 21000 + rand.IntN(8000); ; port++ {
-		if port >= 29000 {
-			port = 21000
-		}
+	start := rand.IntN(8000)
+	for i := 0; i < 8000; i++ {
+		port := 21000 + (start+i)%8000
 		if outagePortsUsed[port] {
 			continue
 		}
-		addr := fmt.Sprintf("127.0.0.1:%d", port)
-		listener, err := net.Listen("tcp", addr)
+		fd, err := refusingLoopbackSocket(port)
 		if err != nil {
 			continue
 		}
-		if err := listener.Close(); err != nil {
+		outagePortsUsed[port] = true
+		if runtime.GOOS == "darwin" {
+			_ = closeReservedSocket(fd)
+		} else {
+			t.Cleanup(func() { _ = closeReservedSocket(fd) })
+		}
+		return fmt.Sprintf("127.0.0.1:%d", port)
+	}
+	t.Fatal("no loopback port below the ephemeral range could be held")
+	return ""
+}
+
+// refusingLoopbackSocket binds a close-on-exec TCP socket
+// (reservedLoopbackSocket) to 127.0.0.1:port and never listens on it.
+func refusingLoopbackSocket(port int) (int, error) {
+	fd, err := reservedLoopbackSocket()
+	if err != nil {
+		return -1, err
+	}
+	if err := syscall.Bind(fd, &syscall.SockaddrInet4{Port: port, Addr: [4]byte{127, 0, 0, 1}}); err != nil {
+		_ = closeReservedSocket(fd)
+		return -1, err
+	}
+	return fd, nil
+}
+
+// TestOutageAddrHoldsItsPortAndRefuses pins rel-1-0-6 GAP-0454 and GAP-0455:
+// while the test runs no other listener can take the outage address, and a
+// hook that connects to it is refused at once.
+func TestOutageAddrHoldsItsPortAndRefuses(t *testing.T) {
+	addr := freeLoopbackAddrForOutageTest(t)
+	if runtime.GOOS == "darwin" {
+		_, text, err := net.SplitHostPort(addr)
+		if err != nil {
 			t.Fatal(err)
 		}
-		outagePortsUsed[port] = true
-		return addr
+		port, err := strconv.Atoi(text)
+		if err != nil {
+			t.Fatal(err)
+		}
+		fd, err := refusingLoopbackSocket(port)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if listener, err := net.Listen("tcp", addr); err == nil {
+			_ = listener.Close()
+			_ = closeReservedSocket(fd)
+			t.Fatalf("another listener took %s while the test held it", addr)
+		}
+		if err := closeReservedSocket(fd); err != nil {
+			t.Fatal(err)
+		}
+	} else {
+		if listener, err := net.Listen("tcp", addr); err == nil {
+			_ = listener.Close()
+			t.Fatalf("another listener took %s while the test held it", addr)
+		}
+	}
+	conn, err := net.DialTimeout("tcp", addr, 5*time.Second)
+	if err == nil {
+		_ = conn.Close()
+		t.Fatalf("a connection to %s was accepted", addr)
+	}
+	if !errors.Is(err, syscall.ECONNREFUSED) {
+		t.Fatalf("connect to %s: %v, want a refusal", addr, err)
 	}
 }
 

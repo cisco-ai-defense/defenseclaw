@@ -558,7 +558,8 @@ func windowsLex(source string, dialect windowsDialect, out *parseOutput) ([]wind
 				quotedTokenBoundary := dialect == windowsPowerShell &&
 					wordQuotedOnly && i+1 < len(runes) &&
 					!unicode.IsSpace(runes[i+1]) &&
-					!strings.ContainsRune(";|&<>", runes[i+1])
+					(!strings.ContainsRune(";|&<>", runes[i+1]) ||
+						runes[i+1] == '<' && i+2 < len(runes) && runes[i+2] == '#')
 				quote = 0
 				if quotedTokenBoundary && !flush() {
 					return lexemes, false
@@ -605,9 +606,8 @@ func windowsLex(source string, dialect windowsDialect, out *parseOutput) ([]wind
 		if dialect == windowsPowerShell && r == '-' && !wordActive &&
 			i+2 < len(runes) && runes[i+1] == '-' && runes[i+2] == '%' &&
 			(i+3 == len(runes) || unicode.IsSpace(runes[i+3])) {
-			// PowerShell's stop-parsing token makes the rest of the native
-			// invocation opaque. Do not interpret later metacharacters as new
-			// commands or destinations.
+			// PowerShell's stop-parsing token makes the native arguments
+			// opaque up to an unquoted pipe, &&, or the physical line end.
 			out.markPartial(IssueUnsupportedConstruct)
 			wordExpands = true
 			for _, literal := range "--%" {
@@ -615,8 +615,8 @@ func windowsLex(source string, dialect windowsDialect, out *parseOutput) ([]wind
 					return lexemes, false
 				}
 			}
-			i = len(runes)
-			break
+			i = windowsPowerShellStopParsingEnd(runes, i+3) - 1
+			continue
 		}
 		if dialect == windowsPowerShell &&
 			(r == '@' && i+1 < len(runes) &&
@@ -624,8 +624,8 @@ func windowsLex(source string, dialect windowsDialect, out *parseOutput) ([]wind
 				(r == '$' || r == '@') && i+1 < len(runes) &&
 					(runes[i+1] == '(' || runes[i+1] == '{')) {
 			// Here-strings, subexpressions, arrays, and hashtables require a
-			// full PowerShell AST. Preserve the surrounding positive command
-			// only, and keep the remainder opaque.
+			// full PowerShell AST. Preserve this value as opaque, then read
+			// the next statement after its balanced end.
 			out.markPartial(IssueUnsupportedConstruct)
 			wordExpands = true
 			if !writeRune(r) {
@@ -634,11 +634,36 @@ func windowsLex(source string, dialect windowsDialect, out *parseOutput) ([]wind
 			if !writeRune(runes[i+1]) {
 				return lexemes, false
 			}
-			i = len(runes)
-			break
+			end, ok := windowsPowerShellOpaqueEnd(runes, i)
+			if !ok {
+				break
+			}
+			i = end
+			continue
 		}
 
-		if dialect == windowsPowerShell && r == '#' && !wordActive {
+		if dialect == windowsPowerShell && r == '<' && i+1 < len(runes) && runes[i+1] == '#' &&
+			windowsPowerShellCommentStarts(runes, i, windowsPowerShellTypeExpressionBeforeComment(runes, i)) {
+			// A PowerShell block comment, <# ... #>, separates tokens like
+			// a blank. It was read as the input redirection PowerShell
+			// rejects, so a script with one read as invalid and its
+			// statements, a destructive one included, were not judged
+			// (rel-1-0-6:GAP-0331 review r3 item 5c). An unterminated one is
+			// a PowerShell parse error.
+			if !flush() {
+				return lexemes, false
+			}
+			end, ok := windowsPowerShellBlockCommentEnd(runes, i)
+			if !ok {
+				out.markInvalid(IssueInvalidSyntax)
+				return lexemes, false
+			}
+			i = end
+			continue
+		}
+
+		if dialect == windowsPowerShell && r == '#' &&
+			windowsPowerShellCommentStarts(runes, i, windowsPowerShellTypeExpressionBeforeComment(runes, i)) {
 			if !flush() {
 				return lexemes, false
 			}
@@ -646,6 +671,17 @@ func windowsLex(source string, dialect windowsDialect, out *parseOutput) ([]wind
 				i++
 			}
 			i--
+			continue
+		}
+		if dialect == windowsPowerShell && wordActive &&
+			(r == '<' && i+1 < len(runes) && runes[i+1] == '#' ||
+				r == '>' && i > 0 && runes[i-1] == '#') {
+			// A glued <#...#> is argument text, not a block comment or
+			// input/output redirection. PowerShell keeps both markers in
+			// the word and executes a later statement separator.
+			if !writeRune(r) {
+				return lexemes, false
+			}
 			continue
 		}
 
@@ -804,10 +840,9 @@ func windowsLex(source string, dialect windowsDialect, out *parseOutput) ([]wind
 				if r == '&' && (i+1 >= len(runes) || runes[i+1] != '&') &&
 					!wordActive && windowsPowerShellCallPosition(lexemes) {
 					if !windowsPowerShellQuotedCallTarget(runes, i+1) {
-						// Dynamic expressions and script blocks can contain
-						// arbitrary nested syntax. Retain only an opaque,
-						// non-authoritative invocation rather than interpreting
-						// their contents as commands or operands.
+						// A dynamic call target is not an authoritative command
+						// word. Keep its invocation opaque, then continue to a
+						// following statement separator and command.
 						out.markPartial(IssueUnsupportedConstruct)
 						if !appendLexeme(windowsLexeme{
 							kind: windowsWordLexeme,
@@ -818,7 +853,7 @@ func windowsLex(source string, dialect windowsDialect, out *parseOutput) ([]wind
 						}) {
 							return lexemes, false
 						}
-						i = len(runes)
+						i = windowsPowerShellDynamicCallEnd(runes, i+1) - 1
 						continue
 					}
 					if !appendOperator(windowsCallLexeme, "&", i+1) {

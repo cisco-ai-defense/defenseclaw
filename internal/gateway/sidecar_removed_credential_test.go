@@ -49,7 +49,7 @@ func TestRemovedConnectorWithAFailedCredentialRevocationStaysPending(t *testing.
 				}
 			}
 			opts := connector.SetupOpts{DataDir: dataDir, ManagedEnterprise: tc.managed}
-			for _, path := range []string{"multi-connector removal", "connector switch"} {
+			for _, path := range []string{"multi-connector removal", "final connector reconciliation"} {
 				conn := &recordingConnector{stubConnector: stubConnector{name: "codex"}, teardownErr: tc.teardownErr}
 				other := &recordingConnector{stubConnector: stubConnector{name: "cursor"}}
 				reg := newRecordingRegistry(conn, other)
@@ -63,17 +63,27 @@ func TestRemovedConnectorWithAFailedCredentialRevocationStaysPending(t *testing.
 					if err := connector.SaveActiveConnector(dataDir, "codex"); err != nil {
 						t.Fatal(err)
 					}
-					err := teardownPreviousConnector(reg, "cursor", opts, context.Background())
+					mode := ""
+					if tc.managed {
+						mode = string(config.DeploymentModeManagedEnterprise)
+					}
+					s := &Sidecar{cfg: &config.Config{DataDir: dataDir, DeploymentMode: mode}}
+					err := s.reconcileUnconfiguredConnectors(context.Background(), reg)
 					pending = err != nil
 					if err != nil {
 						detail = err.Error()
+					}
+					if pending && len(connector.LoadActiveConnectors(dataDir)) != 1 {
+						t.Fatal("connector awaiting cleanup was not retained")
 					}
 				}
 				if pending != tc.wantPending {
 					t.Fatalf("%s: removal pending = %t (%s), want %t", path, pending, detail, tc.wantPending)
 				}
-				if tc.wantPending && path == "connector switch" && !strings.Contains(detail, "hook credential") {
-					t.Fatalf("%s: the error does not name the credential: %s", path, detail)
+				if tc.wantPending {
+					if verifyErr := verifyConnectorRemoved(conn, opts, tc.teardownErr); verifyErr == nil || !strings.Contains(verifyErr.Error(), "hook credential") {
+						t.Fatalf("%s: failed credential was not named: %v", path, verifyErr)
+					}
 				}
 			}
 		})

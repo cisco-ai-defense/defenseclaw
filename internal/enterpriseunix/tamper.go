@@ -215,7 +215,7 @@ func (e *Env) restoreHookBinary(record *Deployment, damage *hookBinaryDamage) (b
 	if n, err := io.Copy(out, io.LimitReader(in, maxSealedBinaryBytes+1)); err != nil || n > maxSealedBinaryBytes {
 		return false, fmt.Errorf("copy the lifecycle's copy of it: %v", err)
 	}
-	if err := out.Sync(); err != nil {
+	if err := syncFile(out); err != nil {
 		return false, err
 	}
 	hash := sha256.New()

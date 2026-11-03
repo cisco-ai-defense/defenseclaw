@@ -14,9 +14,24 @@ function Test-PathWithinOrEqual([string]$Path, [string]$Root) {
         (Test-PathWithin $candidate $parent)
 }
 
+# Get-WindowsNativeRunnerDriveBase is the CI state base on the hosted
+# runner test volume (T:, a VHDX on the runner work drive that
+# initialize-windows-native-ci-paths.ps1 -StateOnRunnerDrive attaches),
+# T\dc-ci; empty outside CI (rel-1-0-6:GAP-0443).
+function Get-WindowsNativeRunnerDriveBase {
+    $runnerTemp = [Environment]::GetEnvironmentVariable('RUNNER_TEMP')
+    if ([string]::IsNullOrWhiteSpace($runnerTemp)) { return '' }
+    return 'T:\dc-ci'
+}
+
 function Resolve-SafeWindowsNativeBase([AllowNull()][string]$Path) {
     if ([string]::IsNullOrWhiteSpace($Path)) { return '' }
     $full = [IO.Path]::GetFullPath($Path).TrimEnd('\')
+    # The one base allowed outside the profile: the runner drive base.
+    $runnerDriveBase = Get-WindowsNativeRunnerDriveBase
+    if ($runnerDriveBase -and $full.Equals($runnerDriveBase, [StringComparison]::OrdinalIgnoreCase)) {
+        return $full
+    }
     $userProfile = [Environment]::GetFolderPath(
         [Environment+SpecialFolder]::UserProfile
     ).TrimEnd('\')

@@ -521,7 +521,7 @@ func TestSandboxDaemonServesWhyItCannotRun(t *testing.T) {
 	done := make(chan error, 1)
 	cause := &sandboxrelay.Error{Status: http.StatusForbidden, Reason: sandboxrelay.ReasonNotAllowed, Message: "Sandboxes are turned off for you."}
 	go func() {
-		done <- serveSandboxDaemonUnavailable(context.Background(), ln, cause, 200*time.Millisecond, 10*time.Second)
+		done <- serveSandboxDaemonUnavailable(context.Background(), ln, cause, nil, 200*time.Millisecond, 10*time.Second, time.Second)
 	}()
 	client := sandboxapi.NewUnixClient(socket)
 	if _, err := client.Status(context.Background()); err == nil || !strings.Contains(err.Error(), "turned off for you") {

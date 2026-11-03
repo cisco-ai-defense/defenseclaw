@@ -121,8 +121,13 @@ type agentConfigNotice struct {
 	// could not put them back. It stays set across another loss of the file
 	// until the account has settings in it again: the file recreated without
 	// them is then the copy, which holds DefenseClaw's hooks only.
-	SettingsLost bool   `json:"settings_lost,omitempty"`
-	At           string `json:"at"`
+	SettingsLost bool `json:"settings_lost,omitempty"`
+	// HooksOnly is set when the copy that was put back held DefenseClaw's
+	// hooks only (a file setup created, say): `defenseclaw setup` then says
+	// the hooks were restored, not that the account's settings were
+	// (rel-1-0-6 GAP-0333).
+	HooksOnly bool   `json:"hooks_only,omitempty"`
+	At        string `json:"at"`
 }
 
 // The copy and the notice sit beside the managed backup record. Their names
@@ -137,6 +142,13 @@ func (s agentConfigSpec) noticePath(dataDir string) string {
 	return strings.TrimSuffix(record, ".json") + ".restore-notice"
 }
 
+// seenPath is the marker `defenseclaw setup` writes beside the notice with the
+// notice time it has reported (cli agent_config_notice.py), so each put-back
+// is said once (rel-1-0-6 GAP-0333).
+func (s agentConfigSpec) seenPath(dataDir string) string {
+	return s.noticePath(dataDir) + "-seen"
+}
+
 // AgentConfigBackupLeaves names the files the agent config of connectorName
 // keeps in connector_backups/<connector> beside its managed backup record
 // (the last known good copy and the restore notice); none for a connector
@@ -146,7 +158,7 @@ func AgentConfigBackupLeaves(connectorName string) []string {
 	if !ok {
 		return nil
 	}
-	return []string{filepath.Base(spec.copyPath("")), filepath.Base(spec.noticePath(""))}
+	return []string{filepath.Base(spec.copyPath("")), filepath.Base(spec.noticePath("")), filepath.Base(spec.seenPath(""))}
 }
 
 // agentConfigMaxBytes bounds the files read and kept.
@@ -333,6 +345,8 @@ func (s agentConfigSpec) seedMissing(dataDir, configPath string) (string, error)
 		notice.SettingsLost = notice.SettingsLost || pristine || copyErr == nil
 	} else if err := atomicWriteFile(configPath, seed, mode); err != nil {
 		return "", fmt.Errorf("put back %s %s: %w", s.label, configPath, err)
+	} else {
+		notice.HooksOnly = !s.hasSettings(seed)
 	}
 	if err := s.writeNotice(dataDir, notice); err != nil {
 		return notice.Source, err
@@ -369,7 +383,7 @@ func (s agentConfigSpec) readNotice(dataDir string) (agentConfigNotice, bool) {
 // manages).
 func (s agentConfigSpec) removeCopies(dataDir string) error {
 	var errs []error
-	for _, path := range []string{s.copyPath(dataDir), s.noticePath(dataDir)} {
+	for _, path := range []string{s.copyPath(dataDir), s.noticePath(dataDir), s.seenPath(dataDir)} {
 		if err := os.Remove(path); err != nil && !os.IsNotExist(err) {
 			errs = append(errs, err)
 		}

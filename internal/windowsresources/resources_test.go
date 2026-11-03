@@ -27,6 +27,7 @@ func TestCompleteWindowsExecutableInventory(t *testing.T) {
 	want := []Component{
 		"gateway", "acp-guard", "cmid-broker", "sensor-helper", "hook",
 		"hook-guard", "launcher", "startup", "setup", "enterprise-setup",
+		"enterprise-setup-standalone",
 	}
 	if len(AllComponents) != len(want) {
 		t.Fatalf("component inventory = %v, want %v", AllComponents, want)
@@ -48,7 +49,7 @@ func TestManifestContractForEveryComponent(t *testing.T) {
 	for _, component := range AllComponents {
 		component := component
 		t.Run(string(component), func(t *testing.T) {
-			manifest, err := Manifest(component, "12.34.56-rc.7")
+			manifest, err := ManifestForTarget(TargetWindowsAMD64, component, "12.34.56-rc.7")
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -80,7 +81,7 @@ func TestManifestContractForEveryComponent(t *testing.T) {
 				}
 			}
 			hasCommonControls := strings.Contains(text, "Microsoft.Windows.Common-Controls")
-			wantCommonControls := component == ComponentSetup || component == ComponentEnterpriseSetup
+			wantCommonControls := isSetup(component)
 			if hasCommonControls != wantCommonControls {
 				t.Errorf("common-controls v6 present = %v, want %v", hasCommonControls, wantCommonControls)
 			}
@@ -151,8 +152,8 @@ func TestManifestArchitectureMatchesTarget(t *testing.T) {
 }
 
 func TestSetupResourcesRemainAMD64Only(t *testing.T) {
-	for _, component := range []Component{ComponentSetup, ComponentEnterpriseSetup} {
-		manifest, err := Manifest(component, "1.2.3")
+	for _, component := range []Component{ComponentSetup, ComponentEnterpriseSetup, ComponentEnterpriseStandaloneSetup} {
+		manifest, err := ManifestForTarget(TargetWindowsAMD64, component, "1.2.3")
 		if err != nil {
 			t.Fatal(err)
 		}

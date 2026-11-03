@@ -570,7 +570,7 @@ func (a *App) Setup(ctx context.Context, o SetupOptions) (retErr error) {
 	noMounts := !microVM && copyOnly && !state.BindMounts.Enabled() && !changes.EnableBindMounts
 	switch {
 	case onMicroVMs:
-		a.note("every run works on a copy (the MicroVM driver mounts no host folders); `" + CommandName + " pull` brings the changes back")
+		a.note("every run works on a copy (the MicroVM driver mounts no host folders); `" + CommandName + " pull NAME --apply` brings the changes back")
 	case stuck:
 		kernel := "the Linux VM Docker runs in"
 		if a.GOOS == "linux" {
@@ -725,7 +725,7 @@ func (a *App) Setup(ctx context.Context, o SetupOptions) (retErr error) {
 		skipped = append(skipped, "harness images (--skip-images; the first run builds them, or `"+CommandName+" image build`)")
 	}
 	if onMicroVMs {
-		a.note("the first run of each image uses about 11 GiB while preparing its MicroVM disk (about a minute; OpenShell keeps the prepared disk)")
+		a.note("the first run of each image uses about 12 GiB while preparing its MicroVM disk (about a minute; OpenShell keeps the prepared disk)")
 	}
 	a.importIngressProfile(ctx)
 
@@ -1166,7 +1166,7 @@ func (a *App) consentGatewayRestart(ctx context.Context, o SetupOptions, assume,
 	case switching && known:
 		a.warn("applying this restarts the OpenShell gateway on the MicroVM driver: the " + plural(int64(len(sandboxes)), "sandbox", "sandboxes") +
 			" on it (" + shortList(sandboxes) + ") were made on the docker driver, stop if running, and cannot start again: OpenShell drops them a few minutes after the switch, " +
-			"with any work in them that was not brought back (`" + CommandName + " pull`), so bring it back first")
+			"with any copy-mode work in them that was not brought back (`" + CommandName + " pull NAME --apply`, or --branch or --patch-out FILE), so bring it back and confirm the project, branch or patch file contains it before switching")
 	case switching:
 		a.warn("applying this restarts the OpenShell gateway on the MicroVM driver, and " + what + "; sandboxes made on the docker driver cannot start again after it, and OpenShell drops them a few minutes later with any work not brought back")
 	case microVM:
@@ -1361,8 +1361,8 @@ func (a *App) listDockerSandboxes(ctx context.Context, rep *openshell.DoctorRepo
 			"); after the switch they can only be deleted (`" + CommandName + " delete NAME`)")
 		return
 	}
-	a.warn(plural(int64(len(names)), "sandbox runs", "sandboxes run") + " on the docker driver (" + shortList(names) + "): pull their work now (`" +
-		CommandName + " pull NAME`); after the switch it is reachable only by switching back")
+	a.warn(plural(int64(len(names)), "sandbox runs", "sandboxes run") + " on the docker driver (" + shortList(names) + "): bring back any copy-mode work now (`" +
+		CommandName + " pull NAME --apply`, or --branch or --patch-out FILE), then confirm the project, branch or patch file contains the work before switching; afterward it is reachable only by switching back")
 }
 
 // microVMChanges are the gateway changes that run sandboxes in MicroVMs:

@@ -579,12 +579,15 @@ func migrateWindowsClaudeUserHooks(stderr, removals io.Writer, target enterprise
 	present, left, err := windowsManagedClaudeRegistrationProbe(target.UserHome, target.SID)
 	removed := 0
 	if err == nil && present {
-		removed, left, err = windowsManagedClaudeSettingsRemover(target.UserHome, target.SID, "")
+		removed, left, err = windowsManagedClaudeSettingsRemover(target.UserHome, target.SID)
 	}
 	if err != nil {
 		fmt.Fprintf(stderr, "defenseclaw: enterprise foreign-hook guard: older DefenseClaw hooks in %s: %v\n", settings, err)
 		return
 	}
+	// The cleanup's own transaction folder goes once it holds only its lock
+	// (sidecar-r107:GAP-0007); one that stays is retried next pass.
+	_ = windowsManagedClaudeGuardianLeftoverRemover()
 	if removed > 0 {
 		fmt.Fprintf(removals, "defenseclaw: enterprise foreign-hook guard: removed %d older DefenseClaw hook command(s) from %s\n", removed, settings)
 	}

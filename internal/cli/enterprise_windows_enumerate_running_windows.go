@@ -69,36 +69,18 @@ var enterpriseWindowsEnumerateLastRunning = struct {
 // reason.
 var enterpriseWindowsRunningAgentEntryReason = lazyregexp.New(`^[a-z0-9][a-z0-9._-]{0,63} \(pid [0-9]{1,10}\) runs\b`)
 
-// enterpriseWindowsEnumerateKnownSIDs keeps, for the life of the enumerator
-// process (the interval loop), the SID each account resolved to. A lookup that
-// fails or times out in a later cycle (an unreachable domain controller) uses
-// it, so that account's running agent is still judged against its rows instead
+// enterpriseWindowsEnumerateKnownSIDs keeps the SID each account resolved to.
+// A lookup that fails or times out in a later cycle (an unreachable domain
+// controller) uses it, for at most enterpriseWindowsEnumerateKnownSIDMaxAge,
+// so that account's running agent is still judged against its rows instead
 // of dropping out of the unprotected record for the cycle.
-var enterpriseWindowsEnumerateKnownSIDs = struct {
-	sync.Mutex
-	byAccount map[string]string
-}{byAccount: map[string]string{}}
-
-// enterpriseWindowsEnumerateKnownSIDsMax bounds that cache; past it the cache
-// starts over.
-const enterpriseWindowsEnumerateKnownSIDsMax = 4096
+var enterpriseWindowsEnumerateKnownSIDs = enterpriseWindowsKnownSIDs{byAccount: map[string]enterpriseWindowsKnownSID{}}
 
 // enterpriseWindowsEnumerateResolveSID resolves account (key is its lowercase
 // spelling) within remaining, or returns the SID an earlier cycle resolved,
 // or "" when neither is known.
 func enterpriseWindowsEnumerateResolveSID(account, key string, remaining time.Duration) string {
-	sid := enterpriseWindowsEnumerateLookupWithin(account, remaining)
-	known := &enterpriseWindowsEnumerateKnownSIDs
-	known.Lock()
-	defer known.Unlock()
-	if sid == "" {
-		return known.byAccount[key]
-	}
-	if len(known.byAccount) >= enterpriseWindowsEnumerateKnownSIDsMax {
-		known.byAccount = map[string]string{}
-	}
-	known.byAccount[key] = sid
-	return sid
+	return enterpriseWindowsEnumerateKnownSIDs.remember(key, enterpriseWindowsEnumerateLookupWithin(account, remaining))
 }
 
 // enterpriseWindowsEnumerateRunningAgents returns, by account SID and
@@ -145,7 +127,7 @@ func enterpriseWindowsEnumerateRunningAgents(stderr io.Writer, connectors []stri
 			continue
 		}
 		key := strings.ToLower(user)
-		sid := process.OwnerSID
+		sid := enterpriseWindowsRunningAgentSnapshotSID(process)
 		if sid == "" && user != "" {
 			var resolved bool
 			sid, resolved = sids[key]

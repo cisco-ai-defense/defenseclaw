@@ -51,8 +51,22 @@ func (a *APIServer) correlateHookOccurrence(
 	// call's store wait and passed their answer budget (GAP-1790).
 	resume := waitWithoutHookRunSlot(ctx)
 	defer resume()
+	runCtx := ctx
+	if end, ok := a.observeHookCorrelationEnd(ctx, req.ConnectorName); ok {
+		var cancel context.CancelFunc
+		runCtx, cancel = context.WithDeadline(ctx, end)
+		defer cancel()
+	}
 	for attempt := 1; ; attempt++ {
-		outCtx, out, err := a.correlateHookOccurrenceOnce(ctx, profile, cloneHookCorrelationState(req), rawBody)
+		outCtx, out, err := a.correlateHookOccurrenceOnce(runCtx, profile, cloneHookCorrelationState(req), rawBody)
+		if runCtx != ctx {
+			// The ledger's deadline bounds the ledger only: the call goes on
+			// with the request's own context and the values the ledger added.
+			outCtx = hookCallContextWithValuesOf(ctx, outCtx)
+		}
+		if err != nil && ctx.Err() == nil && runCtx.Err() != nil {
+			return ctx, req, fmt.Errorf("%w: %w", errHookCorrelationLate, err)
+		}
 		if err == nil || attempt >= hookCorrelationAttempts || ctx.Err() != nil {
 			return outCtx, out, err
 		}
@@ -79,6 +93,62 @@ func (a *APIServer) correlateHookOccurrence(
 
 // hookCorrelationAttempts bounds the attempts of one hook's correlation.
 const hookCorrelationAttempts = 8
+
+// errHookCorrelationLate is the correlation error of an observe-mode call
+// whose ledger work did not finish inside its share of the hook's answer
+// window (observeHookCorrelationEnd).
+var errHookCorrelationLate = errors.New("correlation ledger late for the hook's answer window (observe mode)")
+
+// hookCorrelationAnswerReserve is kept from a bounded call's answer window
+// for the rest of its decision, its audit commit and the answer's way back
+// once the correlation ledger has had its share.
+var hookCorrelationAnswerReserve = 1400 * time.Millisecond
+
+// observeHookCorrelationEnd is the latest time the correlation ledger may
+// hold an observe-mode call whose hook bounds its wait for the answer
+// (hookJudgeAnswerEnd, or for a per-user shell tool gate the end
+// hookCorrelationBoundContext put on ctx), and false for every other call. The ledger reads and
+// writes audit.db on the store's one connection; in a burst of concurrent
+// hooks (32 on a 2-vCPU host) the calls queued there past the hook's 4 s and
+// the hook denied benign calls as "the gateway is running but did not
+// answer", in observe mode too (rel-1-0-6 GAP-0152). Observe never enforces
+// a policy verdict, and a call whose ledger work fails already goes on
+// without its cross-call join IDs (CorrelationUnavailable), so a late ledger
+// takes that path instead of costing the answer. Action mode, sandboxed
+// calls in action and unbounded callers (Secure Client, session events,
+// in-process callers) keep waiting for the ledger as before.
+func (a *APIServer) observeHookCorrelationEnd(ctx context.Context, connectorName string) (time.Time, bool) {
+	end, bounded := hookJudgeAnswerEnd(ctx)
+	if !bounded {
+		end, bounded = ctx.Value(hookCorrelationAnswerEndKey{}).(time.Time)
+		bounded = bounded && !end.IsZero()
+	}
+	if !bounded || a == nil {
+		return time.Time{}, false
+	}
+	if sandboxHookMode(ctx, connectorName, a.agentHookMode(ctx, connectorName)) == "action" {
+		return time.Time{}, false
+	}
+	return end.Add(-hookCorrelationAnswerReserve), true
+}
+
+// hookCallValues is ctx for its deadline, cancellation and error, with the
+// values of values (a context derived from ctx).
+type hookCallValues struct {
+	context.Context
+	values context.Context
+}
+
+func (c hookCallValues) Value(key any) any { return c.values.Value(key) }
+
+// hookCallContextWithValuesOf is the call's context ctx carrying the values
+// the correlation ledger added on its bounded child context (values).
+func hookCallContextWithValuesOf(ctx, values context.Context) context.Context {
+	if values == nil || values == ctx {
+		return ctx
+	}
+	return hookCallValues{Context: ctx, values: values}
+}
 
 // hookCorrelationBusyWait runs when attempt failed on a competing SQLite
 // writer, before the wait for it. Tests replace it to let the writer commit

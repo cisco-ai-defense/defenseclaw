@@ -82,6 +82,87 @@ func TestEnterpriseHookWatchOwnedFileChangedSeesInPlaceRewrites(t *testing.T) {
 	}
 }
 
+func TestEnterpriseHookWatchWindowsCaseVariantOwnedPathRouting(t *testing.T) {
+	dir := t.TempDir()
+	config := filepath.Join(dir, "hooks.json")
+	token := filepath.Join(dir, ".hook-devin.token")
+	exclusive := map[string]struct{}{token: {}}
+	shared := map[string]struct{}{config: {}}
+	ownedPaths := enterpriseHookWatchCaseFoldedOwnedPaths(exclusive, shared)
+	left := map[string]string{config: "config-original", token: "token-original"}
+	current := map[string]string{config: "config-updated", token: "token-updated"}
+	fingerprint := func(path string) string { return current[path] }
+	now := time.Now()
+	for _, tc := range []struct {
+		name  string
+		owned string
+		event fsnotify.Event
+	}{
+		{name: "shared config", owned: config, event: fsnotify.Event{Name: filepath.Join(dir, "HOOKS.JSON"), Op: fsnotify.Write}},
+		{name: "scoped token", owned: token, event: fsnotify.Event{Name: filepath.Join(dir, ".HOOK-DEVIN.TOKEN"), Op: fsnotify.Write}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			event := tc.event
+			event.Name = enterpriseHookWatchOwnedPath(event.Name, ownedPaths)
+			if event.Name != tc.owned {
+				t.Fatalf("event path = %q, want owned path %q", event.Name, tc.owned)
+			}
+			if drop, _ := enterpriseHookWatchEventDropped(now, now.Add(time.Second), event, false,
+				exclusive, shared, left, left, fingerprint, true); drop {
+				t.Fatal("changed owned file did not schedule a reconcile")
+			}
+			if securePath := enterpriseHookWatchOwnedPath(tc.event.Name, nil); securePath != tc.event.Name {
+				t.Fatal("the legacy watch path changed")
+			}
+		})
+	}
+	other := fsnotify.Event{Name: filepath.Join(dir, "session.log"), Op: fsnotify.Write}
+	other.Name = enterpriseHookWatchOwnedPath(other.Name, ownedPaths)
+	if drop, _ := enterpriseHookWatchEventDropped(now, now.Add(time.Second), other, false,
+		exclusive, shared, left, left, fingerprint, true); !drop {
+		t.Fatal("an unrelated file scheduled a reconcile")
+	}
+	current[config] = left[config]
+	unchanged := fsnotify.Event{Name: filepath.Join(dir, "HOOKS.JSON"), Op: fsnotify.Write}
+	unchanged.Name = enterpriseHookWatchOwnedPath(unchanged.Name, ownedPaths)
+	if drop, _ := enterpriseHookWatchEventDropped(now, now.Add(time.Second), unchanged, false,
+		exclusive, shared, left, left, fingerprint, true); !drop {
+		t.Fatal("an unchanged shared config scheduled a reconcile")
+	}
+}
+
+// A token can be overwritten after its target was checked but before a
+// retry pass for another target takes its final owned-file snapshot. The
+// queued Write must start another pass even inside the widened settle
+// window; otherwise the damaged snapshot hides the overwrite until retry.
+func TestEnterpriseHookWatchReplaysOverwriteQueuedDuringAnotherTargetsRetry(t *testing.T) {
+	dir := t.TempDir()
+	token := filepath.Join(dir, ".hook-hermes.token")
+	if err := os.WriteFile(token, []byte("issued\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	exclusive := map[string]struct{}{token: {}}
+	found, left := map[string]string{}, map[string]string{}
+	takeEnterpriseHookOwnedSnapshot(found, exclusive, nil, enterprisehooks.OwnedFileFingerprint)
+	if err := os.WriteFile(token, []byte("overwritten\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	takeEnterpriseHookOwnedSnapshot(left, exclusive, nil, enterprisehooks.OwnedFileFingerprint)
+	now := time.Now()
+	drop, _ := enterpriseHookWatchEventDropped(now, now.Add(6*time.Second),
+		fsnotify.Event{Name: token, Op: fsnotify.Write}, false, exclusive, nil,
+		found, left, enterprisehooks.OwnedFileFingerprint, true)
+	if drop {
+		t.Fatal("a healthy target's queued token overwrite was dropped during another target's retry")
+	}
+	legacyDrop, _ := enterpriseHookWatchEventDropped(now, now.Add(6*time.Second),
+		fsnotify.Event{Name: token, Op: fsnotify.Write}, false, exclusive, nil,
+		found, left, enterprisehooks.OwnedFileFingerprint, false)
+	if !legacyDrop {
+		t.Fatal("the Secure Client event classifier changed")
+	}
+}
+
 // GAP-0030: while a Hermes repair kept failing, each pass wrote the
 // allowlist backup receipt and its rollback removed it again; the receipt's
 // Create|Remove armed the next pass a second later, so the repair backoff
@@ -180,7 +261,7 @@ func TestEnterpriseHookWatchDeleteRightAfterARepairArmsThePass(t *testing.T) {
 	settleUntil := now.Add(2 * time.Second)
 	dropped := func(path string, op fsnotify.Op, lastPassFailed bool) (bool, bool) {
 		return enterpriseHookWatchEventDropped(now, settleUntil, fsnotify.Event{Name: path, Op: op}, lastPassFailed,
-			exclusive, shared, found, left, enterprisehooks.OwnedFileFingerprint)
+			exclusive, shared, found, left, enterprisehooks.OwnedFileFingerprint, true)
 	}
 	for _, op := range []fsnotify.Op{fsnotify.Remove, fsnotify.Create | fsnotify.Remove} {
 		if drop, _ := dropped(hook, op, false); drop {

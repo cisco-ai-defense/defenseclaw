@@ -29,6 +29,7 @@ var unprovenReasonTitles = map[string]string{
 	"interpreter-path":     "Interpreter file effects cannot be proved safe for the protected path",
 	"interpreter-argument": "An interpreter has a dynamic argument after writable code",
 	"shell-parse":          "A shell parse error leaves a protected write unproved",
+	"shell-parse-bound":    "A shell parse exceeded the protected write proof bound",
 	"copy-directory":       "A copy into a directory can select a protected file",
 	"cdpath":               "CDPATH can select a directory containing a protected file link",
 	"nested-shell":         "A nested shell or shell script can write a protected file",
@@ -78,13 +79,27 @@ var (
 // such a form and a path in its bounded text can reach a protected file. A
 // dynamic interpreter write operand can name the protected file directly.
 func UnprovenProtectedWrite(command, cwd, home string) string {
-	return unprovenProtectedWriteDepth(command, cwd, home, 0)
+	budget := unprovenParseBudget{bytes: 8 * MaxPayloadBytes, calls: 512}
+	return unprovenProtectedWriteDepth(command, cwd, home, 0, &budget)
 }
 
-func unprovenProtectedWriteDepth(command, cwd, home string, depth int) string {
-	if command == "" || home == "" || !filepath.IsAbs(cwd) || len(command) > MaxPayloadBytes {
+// The budget is shared by every nested and recovered parse of one hook call.
+// It caps total input and rendered-call text, even if each individual parse
+// stays below MaxPayloadBytes.
+type unprovenParseBudget struct {
+	bytes   int
+	calls   int
+	bounded bool
+}
+
+func unprovenProtectedWriteDepth(command, cwd, home string, depth int, budget *unprovenParseBudget) string {
+	if command == "" || home == "" || !filepath.IsAbs(cwd) {
 		return ""
 	}
+	if len(command) > MaxPayloadBytes || len(command) > budget.bytes {
+		return "shell-parse-bound" // The proof budget cannot certify the write.
+	}
+	budget.bytes -= len(command)
 	if depth >= 4 {
 		if protectedReachFromText(command, cwd, home) {
 			return "dynamic-command"
@@ -105,7 +120,10 @@ func unprovenProtectedWriteDepth(command, cwd, home string, depth int) string {
 	}
 	file, ok := parseShell(command)
 	if !ok {
-		if unprovenShellParseWrite(command, cwd, home) {
+		if unprovenShellParseWrite(command, cwd, home, depth, budget) {
+			if budget.bounded {
+				return "shell-parse-bound"
+			}
 			return "shell-parse"
 		}
 		return ""
@@ -267,7 +285,7 @@ func unprovenProtectedWriteDepth(command, cwd, home string, depth int) string {
 				words = append(words, word)
 			}
 			if body, ok := shellCommandBodyIndex(words); ok {
-				if nested := unprovenProtectedWriteDepth(words[body], cwd, home, depth+1); nested != "" {
+				if nested := unprovenProtectedWriteDepth(words[body], cwd, home, depth+1, budget); nested != "" {
 					set(nested, true)
 				} else if shellArgvIncomplete(program) && shellBodyProtectedWrite(words[body], cwd, home) {
 					// Zsh runs its startup files before the -c body, so argv
@@ -284,7 +302,7 @@ func unprovenProtectedWriteDepth(command, cwd, home string, depth int) string {
 			// path, because the contents it will run are not bounded here.
 			if script, ok := shellScriptOperand(words); ok {
 				if content, read := readIndirectSource(script, cwd); read {
-					if nested := unprovenProtectedWriteDepth(content, cwd, home, depth+1); nested != "" {
+					if nested := unprovenProtectedWriteDepth(content, cwd, home, depth+1, budget); nested != "" {
 						set(nested, true)
 					} else if shellBodyProtectedWrite(content, cwd, home) {
 						set("nested-shell", true)
@@ -385,8 +403,9 @@ func unprovenProtectedWriteDepth(command, cwd, home string, depth int) string {
 
 // Recoverable syntax errors may leave executable calls and redirects in the
 // syntax tree. Check those effects before discarding the failed parse.
-func unprovenShellParseWrite(command, cwd, home string) bool {
+func unprovenShellParseWrite(command, cwd, home string, depth int, budget *unprovenParseBudget) bool {
 	if len(command) > MaxPayloadBytes || shellparse.TooDeep(command) {
+		budget.bounded = true
 		return true // Beyond the command proof bound, effects are unknown.
 	}
 	file, _ := syntax.NewParser(syntax.Variant(syntax.LangBash), syntax.RecoverErrors(8)).Parse(shellparse.Reader(command), "")
@@ -397,7 +416,6 @@ func unprovenShellParseWrite(command, cwd, home string) bool {
 	protected := newProtectedFiles(home)
 	ssh := filepath.Join(home, ".ssh")
 	unknown := false
-	calls := 0
 	called := calledFunctions(file, home)
 	syntax.Walk(file, func(node syntax.Node) bool {
 		if unknown {
@@ -407,18 +425,27 @@ func unprovenShellParseWrite(command, cwd, home string) bool {
 			return declaration.Name != nil && called[declaration.Name.Value]
 		}
 		if call, ok := node.(*syntax.CallExpr); ok {
-			calls++
-			if calls > 256 {
+			budget.calls--
+			if budget.calls < 0 {
+				budget.bounded = true
 				unknown = true
 				return false
 			}
-			var rendered strings.Builder
+			// The printer can expand text while rendering recovered syntax.
+			// Bound the rendered text before recursing into another parse.
+			rendered := unprovenBoundedWriter{limit: min(MaxPayloadBytes, budget.bytes)}
 			if syntax.NewPrinter().Print(&rendered, call) != nil {
+				budget.bounded = true
 				unknown = true
 				return false
 			}
 			prefix := rendered.String()
-			if unprovenProtectedWriteDepth(prefix, cwd, home, 0) != "" {
+			if prefix == command || depth+1 >= 4 {
+				budget.bounded = true
+				unknown = true // A fixed point or the recursion bound is unproved.
+				return false
+			}
+			if unprovenProtectedWriteDepth(prefix, cwd, home, depth+1, budget) != "" {
 				unknown = true
 				return false
 			}
@@ -462,6 +489,18 @@ func unprovenShellParseWrite(command, cwd, home string) bool {
 		return !unknown
 	})
 	return unknown
+}
+
+type unprovenBoundedWriter struct {
+	strings.Builder
+	limit int
+}
+
+func (w *unprovenBoundedWriter) Write(p []byte) (int, error) {
+	if len(p) > w.limit-w.Len() {
+		return 0, io.ErrShortWrite
+	}
+	return w.Builder.Write(p)
 }
 
 // awkCallUnproven reports an awk call whose program text has an output this
@@ -1753,7 +1792,13 @@ func boundedProtectedGlobReach(pattern, cwd string, protected protectedFiles, ss
 }
 
 func protectedReachPath(path string, protected protectedFiles, ssh string) bool {
-	resolved, ok := ResolveWriteTarget(path)
+	return protectedReachPathWith(path, protected, ssh, nil)
+}
+
+// protectedReachPathWith is protectedReachPath with the evaluation's file
+// system answers (TargetMemo; nil: none).
+func protectedReachPathWith(path string, protected protectedFiles, ssh string, memo *TargetMemo) bool {
+	resolved, ok := memo.resolveWriteTarget(path)
 	if !ok {
 		return false
 	}

@@ -137,6 +137,13 @@ class _GatewayConfigRecorder:
         return
 
 
+
+def _gateway_pid_path(data_dir: str) -> str:
+    # Imported lazily, like this module's other config reads.
+    from defenseclaw.config import gateway_pid_path
+
+    return gateway_pid_path(data_dir)
+
 def _is_authentication_rejection(exc: requests.HTTPError) -> bool:
     response = getattr(exc, "response", None)
     return response is not None and response.status_code == 401
@@ -218,7 +225,7 @@ def keep_running_gateway_token(logger: Any, data_dir: str, running: str, saved: 
         return
     from defenseclaw.process_liveness import pid_alive, read_pid_file
 
-    pid = read_pid_file(os.path.join(data_dir, "gateway.pid"))
+    pid = read_pid_file(_gateway_pid_path(data_dir))
     if pid is None or not pid_alive(pid):
         return
     # A second rotation must still authenticate with the value the gateway
@@ -232,7 +239,7 @@ def keep_running_gateway_token(logger: Any, data_dir: str, running: str, saved: 
 
     record = json.dumps({"pid": pid, "token": running}, separators=(",", ":")).encode()
     atomic_write_private_bytes(os.path.join(data_dir, "gateway_running_token.json"), record)
-    if read_pid_file(os.path.join(data_dir, "gateway.pid")) != pid:
+    if read_pid_file(_gateway_pid_path(data_dir)) != pid:
         # A concurrent restart made this handoff stale. Its PID check keeps
         # it from authorizing another process; let the caller re-evaluate.
         return
@@ -273,7 +280,7 @@ def _running_gateway_record(data_dir: str, name: str) -> dict | None:
     )
     from defenseclaw.process_liveness import pid_alive, read_pid_file
 
-    pid = read_pid_file(os.path.join(data_dir, "gateway.pid"))
+    pid = read_pid_file(_gateway_pid_path(data_dir))
     if pid is None or not pid_alive(pid):
         return None
     path = os.path.join(data_dir, name)

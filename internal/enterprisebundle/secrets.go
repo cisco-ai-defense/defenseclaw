@@ -220,7 +220,8 @@ type SecretRefState struct {
 }
 
 // CheckSecretRefs refuses a bundle whose config.yaml names a credential that
-// secret_refs does not list (manifest_invalid) and a secret_refs entry that
+// secret_refs does not list (manifest_invalid), also a tenant secret of
+// enterprise.account_join (AccountJoinCredentials), and a secret_refs entry that
 // binds no value (secret_ref_unbound). The device-side checks that every
 // required credential is stored (secret_ref_missing) with its signed value
 // (secret_ref_mismatch) are the verifier's.
@@ -240,6 +241,15 @@ func CheckSecretRefs(m *Manifest, b *Bundle) error {
 	for _, name := range needed {
 		if !listed[name] {
 			return refuse(CodeManifestInvalid, "secret_refs", "config.yaml references the credential %s, which secret_refs does not list", safePath(name))
+		}
+	}
+	join, err := AccountJoinCredentials(raw)
+	if err != nil {
+		return err
+	}
+	for _, name := range join {
+		if !listed[name] {
+			return refuse(CodeManifestInvalid, "secret_refs", "enterprise.account_join uses the tenant secret %s, which secret_refs does not bind", safePath(name))
 		}
 	}
 	for _, ref := range m.SecretRefs {

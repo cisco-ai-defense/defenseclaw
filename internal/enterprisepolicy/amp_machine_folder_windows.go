@@ -30,6 +30,9 @@ func windowsAmpMachineDir(opts Options) string {
 	return strings.TrimRight(opts.WindowsProgramData, `\`) + `\ampcode`
 }
 
+const windowsAmpMachineFolderOwnerFile = ".defenseclaw-folder-owner"
+const windowsAmpMachineFolderOwnerContents = "defenseclaw-created-amp-folder-v1\n"
+
 // reserveWindowsAmpMachineDir creates the Amp machine folder when it is
 // missing, takes back one an unprivileged user created and moves aside
 // what such a user put in it. The guardian runs it on every pass.
@@ -47,9 +50,68 @@ func reserveWindowsAmpMachineDir(opts Options) (State, error) {
 	if err != nil {
 		return state, err
 	}
+	// Record ownership only when this writer created the vendor folder.
+	// An empty folder that predates Setup may belong to Amp or an administrator.
+	for _, path := range append(created, made...) {
+		if path == dir {
+			if err := atomicWriteSDDL(filepath.Join(dir, windowsAmpMachineFolderOwnerFile),
+				[]byte(windowsAmpMachineFolderOwnerContents), privateFileSDDL); err != nil {
+				return state, fmt.Errorf("record ownership of Amp machine folder: %w", err)
+			}
+			break
+		}
+	}
 	displaceUntrustedEntries(opts, dir, &state)
 	state.Changed = len(created) > 0 || len(made) > 0 || len(state.Details) > 0
 	return state, nil
+}
+
+// RemoveWindowsAmpMachineFolderIfCreated removes the folder this writer made
+// only when its protected ownership marker is the sole entry. A vendor or
+// administrator folder, or one containing any other entry, stays intact.
+func RemoveWindowsAmpMachineFolderIfCreated(opts Options) error {
+	if opts.goos() != "windows" || opts.WindowsProgramData == "" {
+		return nil
+	}
+	dir := windowsAmpMachineDir(opts)
+	marker := filepath.Join(dir, windowsAmpMachineFolderOwnerFile)
+	info, err := os.Lstat(marker)
+	if errors.Is(err, os.ErrNotExist) {
+		return nil
+	}
+	if err != nil {
+		return fmt.Errorf("inspect Amp folder ownership marker: %w", err)
+	}
+	if !info.Mode().IsRegular() || info.Size() != int64(len(windowsAmpMachineFolderOwnerContents)) {
+		return fmt.Errorf("Amp folder ownership marker is not the Setup marker: %s", marker)
+	}
+	if err := validateTrustedLeafDir(dir); err != nil {
+		return fmt.Errorf("Amp folder is not protected: %w", err)
+	}
+	if err := validateTrustedPolicyFile(opts, marker); err != nil {
+		return fmt.Errorf("Amp folder ownership marker is not protected: %w", err)
+	}
+	data, err := os.ReadFile(marker)
+	if err != nil || string(data) != windowsAmpMachineFolderOwnerContents {
+		return fmt.Errorf("Amp folder ownership marker is not the Setup marker: %s", marker)
+	}
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return fmt.Errorf("inspect Amp machine folder: %w", err)
+	}
+	removeFolder := len(entries) == 1 && entries[0].Name() == windowsAmpMachineFolderOwnerFile
+	if err := os.Remove(marker); err != nil {
+		return fmt.Errorf("remove Amp folder ownership marker: %w", err)
+	}
+	if !removeFolder {
+		return nil
+	}
+	if err := os.Remove(dir); err != nil {
+		// Preserve the proof for a later purge if another writer added an entry.
+		_ = atomicWriteSDDL(marker, []byte(windowsAmpMachineFolderOwnerContents), privateFileSDDL)
+		return fmt.Errorf("remove empty Setup-created Amp machine folder: %w", err)
+	}
+	return nil
 }
 
 // InspectWindowsAmpMachineFolder reports, read-only, why the Amp machine

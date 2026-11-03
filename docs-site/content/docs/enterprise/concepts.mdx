@@ -71,6 +71,10 @@ When everything matches, it changes nothing and exits `0`. Windows `ensure`
 refuses to replace a newer version with an older one. See
 [What `ensure` does with the config](/docs/enterprise/lifecycle#what-ensure-does-with-the-config).
 
+On a Linux tarball host with fapolicyd, follow the
+[staged-payload trust and two-stage flow](/docs/enterprise/linux#3b-or-install-from-the-tarball)
+before activating an install, upgrade or rollback.
+
 ### Transaction and rollback
 
 Every action that changes the computer runs as one locked transaction with a

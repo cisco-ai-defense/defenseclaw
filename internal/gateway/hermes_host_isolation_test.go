@@ -27,6 +27,7 @@ func TestMain(m *testing.M) {
 		os.Exit(1)
 	}
 	code := m.Run()
+	removeMigratedAuditTemplate()
 	cleanup()
 	os.Exit(code)
 }

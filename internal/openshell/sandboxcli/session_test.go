@@ -340,7 +340,7 @@ func TestCopySessionOnAFullMicroVMDiskKeepsItRunning(t *testing.T) {
 	full := errors.New("capture the sandbox copy (exit 128): error: unable to create temporary file: No space left on device")
 	running := "Sandbox " + name + " keeps running: a MicroVM stopped with its disk full cannot start again, and its work that was not pulled would be lost → " +
 		"free some space in it (`defenseclaw sandbox exec " + name + " -- df -h /` shows it; `defenseclaw sandbox connect " + name +
-		" --shell` to remove what it does not need), then `defenseclaw sandbox pull " + name + "`; stop it after that: `defenseclaw sandbox stop " + name + "`"
+		" --shell` to remove what it does not need), then `defenseclaw sandbox pull " + name + " --apply` (or --branch or --patch-out FILE); confirm the project, branch or patch file contains the work before stopping it: `defenseclaw sandbox stop " + name + "`"
 	for _, driver := range []string{"vm", "docker"} {
 		t.Run(driver, func(t *testing.T) {
 			ta := newTestApp(t, "")
@@ -360,7 +360,7 @@ func TestCopySessionOnAFullMicroVMDiskKeepsItRunning(t *testing.T) {
 			if stops != 1 {
 				t.Fatalf("docker: %d stop calls, want 1:\n%s", stops, ta.output())
 			}
-			has(t, ta.output(), "retry with `defenseclaw sandbox pull "+name+"`; the sandbox is kept")
+			has(t, ta.output(), "retry with `defenseclaw sandbox pull "+name+" --apply` (or --branch or --patch-out FILE); the sandbox is kept")
 			lacks(t, ta.output(), "keeps running")
 		})
 	}
@@ -1687,7 +1687,7 @@ func TestRefreshNamesAWayOn(t *testing.T) {
 	ta.copy.refreshErr = fmt.Errorf("%w, and a refresh would discard them (sandbox copybox)", workspace.ErrUnpulledChanges)
 	err = ta.Connect(bg, ConnectOptions{Name: "copybox", Refresh: true})
 	if want := "copybox has work that was not pulled: bring it back with `defenseclaw sandbox pull copybox --apply` (or --branch, " +
-		"or --patch-out FILE), or connect without --refresh to go on with the copy as it is"; err == nil || err.Error() != want {
+		"or --patch-out FILE) and confirm the project, branch or patch file contains it before refreshing, or connect without --refresh to go on with the copy as it is"; err == nil || err.Error() != want {
 		t.Fatalf("Connect = %v, want %q", err, want)
 	}
 }

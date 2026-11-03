@@ -888,8 +888,10 @@ func writeEnterpriseSetupFailureAs(stdout, stderr io.Writer, name string, opts e
 // writeEnterpriseSetupFailureFor reports a failure of Setup itself. With
 // JSON=1 the standalone Setup prints the lifecycle's schema-2 result, so an
 // MDM reads one shape whether Setup or the lifecycle refused (GAP-0562). It
-// reports no deployment state unless Setup's bounded timeout recovery
-// proved one: its replay left no lifecycle record, and its status is shown.
+// reports the deployment state Setup's bounded timeout recovery proved, or
+// else the deployment this computer records with its service states
+// (enterpriseSetupRecordedDeployment, rel-1-0-6:GAP-0321); readiness and
+// coverage are never evaluated here.
 func writeEnterpriseSetupFailureFor(stdout, stderr io.Writer, standalone bool, name string, opts enterpriseSetupOptions, err error, exitCode int) {
 	if !standalone || !opts.JSON || err == nil {
 		writeEnterpriseSetupFailureAs(stdout, stderr, name, opts, err)
@@ -925,8 +927,16 @@ func writeEnterpriseSetupFailureFor(stdout, stderr io.Writer, standalone bool, n
 		return
 	}
 	result.AddError(code, err.Error())
-	result.AddWarning("health_not_checked", "Setup stopped before the lifecycle reported on this computer, so installed, services and readiness are not evaluated; "+
-		name+" /status JSON=1 reports them")
+	if enterpriseSetupRecordedDeployment(result) {
+		// A refusal of Setup itself on an installed computer (too little
+		// disk space, saturated processors, a bad property) reported
+		// installed=false, no version and no services (rel-1-0-6:GAP-0321).
+		result.AddWarning("health_not_checked", "Setup stopped before the lifecycle reported on this computer: installed and installed_version are the deployment this computer records and services are their states now; readiness.gateway, readiness.guardian, coverage_complete, security_complete and enrollment were not checked; "+
+			name+" /status JSON=1 reports them")
+	} else {
+		result.AddWarning("health_not_checked", "Setup stopped before the lifecycle reported on this computer, so installed, services and readiness are not evaluated; "+
+			name+" /status JSON=1 reports them")
+	}
 	result.Finish("windows", exitCode)
 	_ = json.NewEncoder(stdout).Encode(result)
 }

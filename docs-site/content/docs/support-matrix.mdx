@@ -109,6 +109,30 @@ Their pages are listed under [Connectors](/docs/connectors).
 
 These are the agent, operating system, local Splunk bridge, sandbox, upgrade and policy limits that DefenseClaw cannot remove.
 
+### 1.0.7 deterministic reader limits
+
+The deterministic hook reader covers common command forms. The optional [LLM judge](/docs/policies/deterministic-detection#optional-llm-judge) is the second layer for the remaining forms below. These limits apply to the rule layer in 1.0.7; a managed host's operating-system controls still apply independently.
+
+| Ruling | Limit |
+| --- | --- |
+| GAP-0347, GAP-0354 | On Windows, statements after a subexpression prefix and junction references inside a Bash wrapper are outside the reader's proof. |
+| GAP-0350 | A long script can exceed the self-protection reader's bounded analysis. |
+| GAP-0339, GAP-0391 | Some archive entries and later file moves cannot be tied together by the deterministic archive proof. |
+| GAP-0355, GAP-0390 | A path held in a shell variable populated by `read` is not fully resolved through a later write or copy, including on managed macOS. |
+| GAP-0367, GAP-0425 | A PowerShell scriptblock or leading unquoted call, and a shell function defined in an `&&` list after a directory change, can hide later statements from the reader. |
+| GAP-0429 | Case modification or pattern substitution used as a redirect target is outside the reader's proof. |
+| GAP-0372 | Two ordinary copy commands with options and a dynamic destination can still be refused because the destination cannot be proved. Run them yourself or name a fixed destination. |
+
+Long PowerShell pipelines now receive the same bounded treatment as POSIX pipelines and can be refused when the reader cannot prove the full command. The GAP-0379 MCP refusal wording can still be less specific than the underlying reason; a refusal remains a refusal. See [Fail modes](/docs/reference/fail-modes) for what the agent receives.
+
+### Other 1.0.7 limits
+
+- **GAP-0327:** On macOS per-user installs, idle gateway memory can grow gradually with the audit store. Retention bounds the store, but does not immediately return all memory; see [Local history](/docs/observability#local-history).
+- **GAP-0482:** On per-user Windows, a redirect to a network share that responds slowly can receive a conservative reader decision. Check the destination and retry from a terminal when appropriate.
+- **GAP-0495:** On per-user Windows, replacing the DefenseClaw home with a junction can leave the copied launcher unable to start doctor, setup or status. Restore a regular home folder before rerunning the command; the gateway refuses to start in this state. See [Windows paths](/docs/get-started/windows/paths-troubleshooting).
+- **GAP-0519:** Per-user Linux performance budgets were measured on x86 hosts with four vCPUs. A two-vCPU arm64 host can exceed hook latency and command-time budgets while remaining inside memory and restart bounds.
+- **GAP-0524:** During a sustained per-user Windows hook flood, some calls can lack a completed audit row even when the agent received a decision. See [Audit completeness](/docs/reference/fail-modes#audit-completeness-under-windows-floods).
+
 ## Claude Code shell
 
 Claude Code does not run its hook for a command you type with `!` in shell mode. DefenseClaw's hook cannot inspect or block that command, so there is no hook decision and no hook audit row for it. This applies on every OS, to per-user and managed installs, in observe and action mode. On managed Linux the Tetragon runtime layer can still record it (`hook_seen=false`), see [Coverage by layer](/docs/segmentation). It is a Claude Code limit: shell mode runs no `PreToolUse` hook. Use a normal Claude Code tool action when you need DefenseClaw to check a command. See [Claude Code](/docs/connectors/claudecode#limits).
@@ -165,11 +189,11 @@ After a long flood the gateway on Windows keeps much of the memory the flood use
 
 ## Many agents on one Linux host
 
-On a per-user install on Linux, the gateway answered every tool-call hook within 2 seconds with up to 3 interactive agents per vCPU working at once. In 1.0.5 tests on RHEL 9.8 with 4 vCPUs, 6 and then 12 interactive agents (Claude Code, Codex, GitHub Copilot CLI, Hermes and OpenCode) ran at the same time, with extra CPU load added until the 1-minute load average reached 8 to 14. All 613 tool calls sent through the registered Claude Code and Codex hooks were answered and allowed: median about 1.5 seconds, maximum 1.9 seconds (an idle host answers in 0.1 to 1.1 seconds). Answers get slower as the load grows, so a host with more agents per vCPU waits longer. On a managed host a call that waits out the 3.5-second hook wait is blocked ([Hook capacity on managed hosts](#hook-capacity-on-managed-hosts)).
+On a per-user install on Linux, the gateway answered every tool-call hook within 2 seconds with up to 3 interactive agents per vCPU working at once. In 1.0.5 tests on RHEL 9.8 with 4 vCPUs, 6 and then 12 interactive agents (Claude Code, Codex, GitHub Copilot CLI, Hermes and OpenCode) ran at the same time, with extra CPU load added until the 1-minute load average reached 8 to 14. All 613 tool calls sent through the registered Claude Code and Codex hooks were answered and allowed: median about 1.5 seconds, maximum 1.9 seconds (an idle host answers in 0.1 to 1.1 seconds). Answers get slower as the load grows, so a host with more agents per vCPU waits longer. On a managed host a call that waits out its answer window is blocked ([Hook capacity on managed hosts](#hook-capacity-on-managed-hosts)).
 
 ## Hook capacity on managed hosts
 
-A managed host fails closed. When the gateway does not answer a tool-call hook within the hook wait of about 3.5 seconds, the hook blocks the call (`enterprise_managed_gateway_no_answer`), and only after that full wait. Under a heavy burst of calls, or with a very large audit store, the gateway can be slow enough that some calls wait out the 3.5 seconds and are denied. Measured in 1.0.5:
+A managed host fails closed. In 1.0.7, a native tool-call hook gives the gateway up to 3.5 seconds from contact, within a 4-second cap from hook launch, before it blocks with `enterprise_managed_gateway_no_answer`. The 1.0.5 measurements below used a 3.5-second wait from hook launch: when the gateway did not answer, the hook blocked only after that full wait. Under a heavy burst of calls, or with a very large audit store, the gateway could be slow enough that some calls waited out the 3.5 seconds and were denied. Measured in 1.0.5:
 
 - **Parallel burst.** On a managed macOS host with a 710 MB audit store, the gateway answered about 14 calls a second when 32 tool calls ran in parallel. A call that was not answered in time was denied after the full wait.
 - **First start after an upgrade.** With a 2 GB audit store, the first cold start of the gateway after an upgrade denied 27 to 37 calls at the full wait before it answered normally.
@@ -206,6 +230,18 @@ Shell can express the same write in many ways, and some unusual forms are not re
 - **A socket opened from an interpreter command line.** The deterministic socket rule recognises the minimal one-liner form only. Other spellings are left to the LLM judge.
 - **PowerShell text sent to the Claude Code Bash tool on Windows.** The Bash tool runs Git Bash, so DefenseClaw reads the call as Git Bash and PowerShell cmdlet text with a comment that names a protected path is blocked. Run PowerShell commands through PowerShell.
 
+A few harmless commands are blocked because their text matches a protected write and the hook cannot see what they do when they run:
+
+- a link to the SSH folder or to DefenseClaw's state made in a project, and a move in the same command as such a link;
+- a move inside a linked folder whose entries are links to the SSH folder or to DefenseClaw's state;
+- `find -exec mv` into a link that the same command makes;
+- a project script run by a relative path after `cd`, in a command that also makes a link;
+- `cp -s` with a source built by command substitution;
+- `rsync` of the whole SSH folder (`cp -a` and `tar` of it block too);
+- a `~` path after the command sets `HOME`.
+
+Run such a step yourself, or give the agent a command of its own that names the real path.
+
 The LLM judge (the LLM guardrail) is the second layer for protected-file access. If you need more than the command reader gives, turn it on; see [Optional LLM judge](/docs/policies/deterministic-detection#optional-llm-judge).
 
 On a managed install DefenseClaw's own state is owned by root or SYSTEM, so these commands cannot change it. A user's own files, such as `authorized_keys`, are as exposed as on a per-user install. The managed gateway cannot read the user's home, so it judges links there from what the hook reports: a few link forms of a write to `authorized_keys` (an existing link moved and then written through, a relative link made from the home) and some PowerShell writes to it that a per-user gateway blocks can run on a managed install. The LLM judge is the second layer for them. Check for links in repositories you pull. For what DefenseClaw repairs afterwards and what to protect yourself, see **Protected files in action mode** under [Security](#security).
@@ -219,6 +255,7 @@ On a managed install DefenseClaw's own state is owned by root or SYSTEM, so thes
   - If the VM process has exited, run `defenseclaw sandbox stop NAME` and `defenseclaw sandbox start NAME` instead. For other states or errors, follow the recovery advice from `status`.
 - **Managed policy before launch:** on managed Linux, macOS and Windows a managed agent loads its DefenseClaw hook from the machine policy when it starts. A standard user can start the agent in a private view of the files (a user and mount namespace or a process tracer such as PRoot on Linux, a sandbox profile on macOS, a process device map on Windows). On Linux and macOS that view can hide the machine policy: the agent then runs without its hook, so DefenseClaw does not see or audit its tool calls, and `status` and `verify` cannot see inside that one process. macOS has no setting that stops a user's sandbox profile, and its `status` and `verify` stay healthy while such an agent runs. On Windows the tested device map did not change what the agent read. This is an operating system limit: the system lets users change what their own processes see. On Linux, `status` and `verify` warn `unprivileged_user_namespaces` while the kernel allows these namespaces and `unprivileged_ptrace` while standard users can trace their own processes, and report `security_complete: false`; an administrator can set `user.max_user_namespaces=0` and `kernel.yama.ptrace_scope=2` after testing the host's workloads ([Linux user namespaces](/docs/enterprise/linux#user-namespaces), [macOS machine policy](/docs/enterprise/macos#machine-policy), [Windows machine policy](/docs/enterprise/windows#inspect-machine-policy)). Keep Unix policy files owned by root and Windows machine policy protected by the installer. Use the agent's doctor check where available. Before use, ask an administrator to run the [policy verification for that OS](/docs/enterprise/machine-policy) and repair any missing hook.
 - **Restored hook records on managed macOS:** after you restore saved per-user hook records (Hermes `hook_contract_lock.json`, hook token files, `.hookcfg` files), the guardian rewrites, within seconds, the records that no longer match the live registration (an older token, another fail mode or contract state). Records that still match stay byte for byte as restored. Protection is unchanged; compare the hook commands, not the file bytes.
+- **Restored generated state on managed macOS:** after you restore saved copies of the generated files of a managed Mac (for example `runtime/hook_guardian_state.json`, `runtime/hook_guardian_owned_files.json` and `etc/bundles/inbox`), the files and folders the running services own change again within a few minutes. The guardian rewrites its two last-pass records on every pass (`updated_at` is the heartbeat that `status` and `verify` require to be less than five minutes old), and every `ensure` creates the empty `etc/bundles/inbox` folder that the apply job watches. Protection is unchanged. Compare the policy-bearing files (the admin config, machine profiles and effective policy digest) and the `status` and `verify` results, not the bytes of these records.
 - **Restored hook contract lock:** on every install the gateway writes `hook_contract_lock.json` again when it starts and on every upgrade or rollback, so a restored copy keeps its bytes only until then. Only `updated_at` and `defenseclaw_version` change; see [Fields the gateway rewrites](/docs/connectors/compatibility#fields-the-gateway-rewrites).
 - **Hermes config changed and put back quickly:** on a managed computer Hermes reads its config from a file the user owns. If that file is emptied and put back within about 3 seconds, before the guardian's next check, one Hermes session can start without the DefenseClaw hook. The guardian repairs the file at its next check and records the change in the audit log. This is a limit of an agent config the user owns.
 - **Windows upgrade and rollback return before the installer finishes:** On Windows, `defenseclaw upgrade` and `defenseclaw rollback` hand over to the installer in a new window and return at once: exit code 0 means the installer started, not that it finished, because the installer must replace the Python environment the CLI runs from. The result is shown in that window and saved in `%USERPROFILE%\.defenseclaw\logs\install-<time>.log`. A script that needs the result runs the installer itself in its own terminal, for example `powershell -NoProfile -ExecutionPolicy Bypass -File <install.ps1> -Rollback -Yes`, which waits and sets the exit code.

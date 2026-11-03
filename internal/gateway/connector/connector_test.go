@@ -7509,11 +7509,12 @@ func TestWriteHookScriptsWithToken_InjectsBearerHeader(t *testing.T) {
 	// header the request is 401'd and the hook blocks. Run the generated
 	// script so we exercise the real runtime auth wiring.
 	dir := t.TempDir()
-	if err := WriteHookScriptsWithToken(dir, freeAPIAddr(t), "tok-abcdef123"); err != nil {
+	listener, addr := heldAPIListener(t)
+	if err := WriteHookScriptsWithToken(dir, addr, "tok-abcdef123"); err != nil {
 		t.Fatalf("WriteHookScriptsWithToken: %v", err)
 	}
 
-	capture := runHookAndCaptureNativeTransport(t, filepath.Join(dir, "claude-code-hook.sh"), nil)
+	capture := runHookAndCaptureNativeTransport(t, listener, filepath.Join(dir, "claude-code-hook.sh"), nil)
 	if capture.err != nil || capture.requests != 1 {
 		t.Fatalf("native hook post = %v, requests=%d: %s", capture.err, capture.requests, capture.output)
 	}
@@ -7529,11 +7530,12 @@ func TestWriteHookScriptsWithToken_EmptyTokenOmitsHeader(t *testing.T) {
 	// A hook without a token may use the same-account listener's loopback
 	// fallback, but it must not manufacture an Authorization header.
 	dir := t.TempDir()
-	if err := WriteHookScriptsWithToken(dir, freeAPIAddr(t), ""); err != nil {
+	listener, addr := heldAPIListener(t)
+	if err := WriteHookScriptsWithToken(dir, addr, ""); err != nil {
 		t.Fatalf("WriteHookScriptsWithToken: %v", err)
 	}
 
-	capture := runHookAndCaptureNativeTransport(t, filepath.Join(dir, "claude-code-hook.sh"), nil)
+	capture := runHookAndCaptureNativeTransport(t, listener, filepath.Join(dir, "claude-code-hook.sh"), nil)
 	if capture.err != nil || capture.requests != 1 || hasBearerHeader(capture.headers, "") {
 		t.Errorf("tokenless native post had unexpected transport: err=%v requests=%d headers=%s", capture.err, capture.requests, capture.headers)
 	}
@@ -7545,11 +7547,12 @@ func TestWriteHookScriptsWithToken_EnvVarOverridesBakedToken(t *testing.T) {
 	// working across rotations. ${DEFENSECLAW_GATEWAY_TOKEN:-<baked>} in
 	// the script expresses that.
 	dir := t.TempDir()
-	if err := WriteHookScriptsWithToken(dir, freeAPIAddr(t), "baked-stale"); err != nil {
+	listener, addr := heldAPIListener(t)
+	if err := WriteHookScriptsWithToken(dir, addr, "baked-stale"); err != nil {
 		t.Fatalf("WriteHookScriptsWithToken: %v", err)
 	}
 
-	capture := runHookAndCaptureNativeTransport(t, filepath.Join(dir, "claude-code-hook.sh"),
+	capture := runHookAndCaptureNativeTransport(t, listener, filepath.Join(dir, "claude-code-hook.sh"),
 		map[string]string{"DEFENSECLAW_GATEWAY_TOKEN": "from-env"})
 	if capture.err != nil || capture.requests != 1 {
 		t.Fatalf("native hook post = %v, requests=%d: %s", capture.err, capture.requests, capture.output)
@@ -7564,11 +7567,12 @@ func TestWriteHookScriptsWithToken_EnvVarOverridesBakedToken(t *testing.T) {
 
 func TestConnectorScopedHookTokenOverridesGenericEnv(t *testing.T) {
 	dir := t.TempDir()
-	if err := WriteHookScriptsForConnectorObject(dir, freeAPIAddr(t), "scoped-token", NewCodexConnector()); err != nil {
+	listener, addr := heldAPIListener(t)
+	if err := WriteHookScriptsForConnectorObject(dir, addr, "scoped-token", NewCodexConnector()); err != nil {
 		t.Fatalf("WriteHookScriptsForConnectorObject: %v", err)
 	}
 
-	capture := runHookAndCaptureNativeTransport(t, filepath.Join(dir, "codex-hook.sh"),
+	capture := runHookAndCaptureNativeTransport(t, listener, filepath.Join(dir, "codex-hook.sh"),
 		map[string]string{"DEFENSECLAW_GATEWAY_TOKEN": "generic-env"})
 	if capture.err != nil || capture.requests != 1 {
 		t.Fatalf("native hook post = %v, requests=%d: %s", capture.err, capture.requests, capture.output)
@@ -7597,14 +7601,15 @@ func TestConnectorScopedHookReadFailureClearsGenericEnv(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			dir := t.TempDir()
-			if err := WriteHookScriptsForConnectorObject(dir, freeAPIAddr(t), "scoped-token", NewCodexConnector()); err != nil {
+			listener, addr := heldAPIListener(t)
+			if err := WriteHookScriptsForConnectorObject(dir, addr, "scoped-token", NewCodexConnector()); err != nil {
 				t.Fatalf("WriteHookScriptsForConnectorObject: %v", err)
 			}
 			if err := tc.mutate(filepath.Join(dir, ".hook-codex.token")); err != nil {
 				t.Fatalf("mutate scoped token: %v", err)
 			}
 
-			capture := runHookAndCaptureNativeTransport(t, filepath.Join(dir, "codex-hook.sh"),
+			capture := runHookAndCaptureNativeTransport(t, listener, filepath.Join(dir, "codex-hook.sh"),
 				map[string]string{"DEFENSECLAW_GATEWAY_TOKEN": "generic-env"})
 			if capture.err != nil || capture.requests != 1 || hasBearerHeader(capture.headers, "") || strings.Contains(capture.argv, "generic-env") {
 				t.Errorf("hook retained an inherited generic token after scoped read failure: err=%v requests=%d headers=%s argv=%s", capture.err, capture.requests, capture.headers, capture.argv)
@@ -7623,7 +7628,22 @@ type hookNativeTransportCapture struct {
 	output   string
 }
 
-func runHookAndCaptureNativeTransport(t *testing.T, scriptPath string, extraEnv map[string]string) hookNativeTransportCapture {
+// heldAPIListener is a loopback listener the test holds from before it
+// renders a hook with its address until it ends, so no other test can take
+// the port between the render and the hook's post (rel-1-0-6 GAP-0317).
+func heldAPIListener(t *testing.T) (net.Listener, string) {
+	t.Helper()
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = listener.Close() })
+	return listener, listener.Addr().String()
+}
+
+// runHookAndCaptureNativeTransport runs the hook at scriptPath, rendered with
+// the address of listener (heldAPIListener), and answers its post there.
+func runHookAndCaptureNativeTransport(t *testing.T, listener net.Listener, scriptPath string, extraEnv map[string]string) hookNativeTransportCapture {
 	t.Helper()
 	if runtime.GOOS == "windows" {
 		t.Skip("POSIX shell-hook runtime is covered by native defenseclaw-hook.exe tests on Windows")
@@ -7642,12 +7662,8 @@ func runHookAndCaptureNativeTransport(t *testing.T, scriptPath string, extraEnv 
 			break
 		}
 	}
-	if apiAddr == "" {
-		t.Fatal("rendered hook has no API_ADDR")
-	}
-	listener, err := net.Listen("tcp", apiAddr)
-	if err != nil {
-		t.Fatal(err)
+	if apiAddr != listener.Addr().String() {
+		t.Fatalf("rendered hook posts to %q, want the held listener %s", apiAddr, listener.Addr())
 	}
 	seen := make(chan http.Header, 10)
 	server := &http.Server{Handler: http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -11953,6 +11969,93 @@ func TestHardening_SweepStaleHookDirs(t *testing.T) {
 	}
 	if _, err := os.Stat(unrelated); err != nil {
 		t.Errorf("unrelated dir %s was swept; the sweep must only touch hook-tmp.*: %v", unrelated, err)
+	}
+}
+
+// TestHardening_SweepRunsOnlyOnAFallbackCall pins rel-1-0-6 GAP-0266: the
+// stale-folder sweep (a find) used to run on a random one call in 32, so a
+// warm hook sometimes ran one program more. Only a call that had to use the
+// fallback folder (mktemp unavailable or failed) sweeps now. RANDOM is seeded
+// so that the old one-in-32 draw would sweep on this very call.
+func TestHardening_SweepRunsOnlyOnAFallbackCall(t *testing.T) {
+	bash, err := exec.LookPath("bash")
+	if err != nil {
+		t.Skip("bash not available")
+	}
+	for _, tool := range []string{"find", "mktemp", "mkdir"} {
+		if _, err := exec.LookPath(tool); err != nil {
+			t.Skipf("%s not available", tool)
+		}
+	}
+	helperBytes, err := hookFS.ReadFile("hooks/_hardening.sh")
+	if err != nil {
+		t.Fatalf("read embed: %v", err)
+	}
+	tmp := t.TempDir()
+	helperPath := filepath.Join(tmp, "_hardening.sh")
+	if err := os.WriteFile(helperPath, helperBytes, 0o600); err != nil {
+		t.Fatalf("write helper: %v", err)
+	}
+	// The fallback call needs a failing mktemp. On Windows a non-directory
+	// TMPDIR makes it fail even when Git Bash finds its own copy outside the
+	// PATH passed to the child process. macOS mktemp ignores a bad TMPDIR and
+	// uses the account's temp folder, so on Unix the call starts from a
+	// folder whose only program is mkdir and has no mktemp at all.
+	noMktemp := filepath.Join(tmp, "bin-without-mktemp")
+	if runtime.GOOS != "windows" {
+		if err := os.MkdirAll(noMktemp, 0o700); err != nil {
+			t.Fatal(err)
+		}
+		mkdir, _ := exec.LookPath("mkdir")
+		if err := os.Symlink(mkdir, filepath.Join(noMktemp, "mkdir")); err != nil {
+			t.Fatal(err)
+		}
+	}
+	const script = `source "$0"
+seed=0
+while :; do RANDOM=$seed; [ $((RANDOM % 32)) -eq 0 ] && break; seed=$((seed + 1)); done
+RANDOM=$seed
+defenseclaw_harden_env
+printf '%s\n' "$HOME"`
+	run := func(home, tmpdir string) string {
+		t.Helper()
+		orphan := filepath.Join(home, "hook-tmp.11111")
+		if err := os.MkdirAll(orphan, 0o700); err != nil {
+			t.Fatal(err)
+		}
+		old := time.Now().Add(-2 * time.Hour)
+		if err := os.Chtimes(orphan, old, old); err != nil {
+			t.Fatal(err)
+		}
+		cmd := exec.Command(bash, "-c", script, helperPath)
+		// Git Bash and Go can spell the same Windows path with different separators.
+		path := "/usr/local/bin:/usr/bin:/bin"
+		if tmpdir != "" && runtime.GOOS != "windows" {
+			path = noMktemp
+		}
+		cmd.Env = []string{"PATH=" + path, "HOME=" + filepath.ToSlash(tmp), "DEFENSECLAW_HOME=" + filepath.ToSlash(home)}
+		if tmpdir != "" && runtime.GOOS == "windows" {
+			cmd.Env = append(cmd.Env, "TMPDIR="+tmpdir)
+		}
+		out, err := cmd.CombinedOutput()
+		if err != nil {
+			t.Fatalf("harden_env: %v\n%s", err, out)
+		}
+		return filepath.Clean(strings.TrimSpace(string(out)))
+	}
+	withMktemp := filepath.Join(tmp, "home-mktemp")
+	if got := run(withMktemp, ""); strings.HasPrefix(got, withMktemp) {
+		t.Fatalf("a call with mktemp used the fallback folder %s", got)
+	}
+	if _, err := os.Stat(filepath.Join(withMktemp, "hook-tmp.11111")); err != nil {
+		t.Fatalf("a call that got its folder from mktemp swept the stale folder: %v", err)
+	}
+	fallback := filepath.Join(tmp, "home-fallback")
+	if got := run(fallback, "/dev/null"); !strings.HasPrefix(got, filepath.Join(fallback, "hook-tmp.")) {
+		t.Fatalf("a call whose mktemp failed used %q, want a hook-tmp folder in %s", got, fallback)
+	}
+	if _, err := os.Stat(filepath.Join(fallback, "hook-tmp.11111")); !os.IsNotExist(err) {
+		t.Fatalf("a fallback call on its sweep draw left the stale folder (err=%v)", err)
 	}
 }
 

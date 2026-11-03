@@ -96,8 +96,8 @@ func TestConfigManagerHotBundleAuditWaitsForWriterAndEmitsOnce(t *testing.T) {
 	go func() { reloaded <- mgr.ReloadAssets(context.Background(), "api:policy_reload") }()
 	select {
 	case err := <-reloaded:
-		if err == nil || !strings.Contains(err.Error(), "signed policy bundle") {
-			t.Fatalf("reload before the bundle generation receipt = %v; want signed-bundle refusal", err)
+		if err == nil || !strings.Contains(err.Error(), "activation_not_signed (signature)") {
+			t.Fatalf("reload before the bundle generation receipt = %v; want missing-trust refusal", err)
 		}
 	case <-time.After(10 * time.Second):
 		t.Fatal("reload while the bundle writer is paused did not refuse")
@@ -124,7 +124,12 @@ func TestConfigManagerHotBundleAuditWaitsForWriterAndEmitsOnce(t *testing.T) {
 	}
 	check := func(want int, id string, restart bool, changedPath string) {
 		t.Helper()
-		records := capture.snapshot()
+		var records []observability.Record
+		for _, record := range capture.snapshot() {
+			if record.EventName() == observability.EventName(observability.TelemetryEventConfigChangeApplied) {
+				records = append(records, record)
+			}
+		}
 		if len(records) != want {
 			t.Fatalf("audit records = %d, want %d", len(records), want)
 		}
@@ -211,8 +216,14 @@ func TestConfigManagerHotBundleAuditWaitsForWriterAndEmitsOnce(t *testing.T) {
 		t.Fatal(err)
 	}
 	records := capture.snapshot()
-	if len(records) != 4 || records[3].EventName() != observability.EventName(observability.TelemetryEventConfigBundleReceipt) {
-		t.Fatalf("receipt produced %d records, want one separate config.bundle.receipt", len(records))
+	receipts := 0
+	for _, record := range records {
+		if record.EventName() == observability.EventName(observability.TelemetryEventConfigBundleReceipt) {
+			receipts++
+		}
+	}
+	if receipts != 1 {
+		t.Fatalf("receipt produced %d config.bundle.receipt records, want one", receipts)
 	}
 }
 
@@ -244,6 +255,15 @@ func TestConfigManagerHotPolicyOnlyBundleGenerationEventAudited(t *testing.T) {
 	}
 	initial.DeploymentMode = "managed_enterprise"
 	initial.Enterprise.Profile = "standalone"
+	// The gateway boots a managed standalone computer from a file that is
+	// already managed, so its omitted paths take the standalone defaults (on
+	// Windows an omitted policy_dir is cleared: standalonePolicyDirDefault).
+	// Re-base the patched snapshot as the reload candidate is re-based, or
+	// the startup reconcile sees a policy_dir change the boot never made and
+	// refuses it as an unrecorded edit.
+	if err := config.ApplyRuntimeV8DataDirDefaultsFromBytes(initial, path, raw, initial.DataDir); err != nil {
+		t.Fatal(err)
+	}
 	_, logger := newNativeSkillRuntimeTestStore(t)
 	capture := &captureJudgeRuntimeV8Emitter{}
 	logger.SetRuntimeV8Emitter(capture)

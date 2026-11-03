@@ -231,7 +231,7 @@ func TestBuildHookOptionsPackagedWindowsTakesItsInstalledModeAndTighteningKnobs(
 	// The installed config supplies the outage mode; every other per-user
 	// failure stays closed.
 	if opts.Home != trustedHome || opts.FailMode != "closed" || opts.OutageFailModeNow == nil ||
-		!opts.StrictAvailability || opts.MaxBody != 4096 {
+		!opts.StrictAvailability || opts.MaxBody != 4096 || !opts.MaxBodyLowered {
 		t.Fatalf("the installed mode or a tightening knob was not honored: %+v", opts)
 	}
 }

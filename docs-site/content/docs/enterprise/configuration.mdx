@@ -84,6 +84,8 @@ guardrail:
 
 <Callout type="warn" title="Removing a connector removes its protection">
 `guardrail.connectors.<name>.enabled: false` disables the connector and removes its machine policy and hooks. An empty entry (`{}`) enables it. Removing a connector from both `guardrail.connectors` and `enterprise.machine_policy.connectors` also removes its protection, so stop agent use before making either change. On Linux and macOS, `ownership: "off"` leaves machine-policy agents without DefenseClaw hooks. On Windows, `ownership: "off"` does not disable configured Claude Code, Codex and Cursor machine hooks; `enterprise policy verify` checks them even with zero enrolled users. After a configuration change, run `defenseclaw-gateway enterprise policy show --json` and the OS-specific coverage check: `enterprise linux verify --json`, `enterprise macos verify --json` or `enterprise windows verify --json`, using the installed gateway as administrator.
+
+On managed Linux and macOS, a connector enabled, disabled, added or removed by a config push applies to the running gateway when the primary connector stays the same, no other restart-required setting or deployment file changes, and the gateway confirms the new policy generation. The lifecycle still refreshes machine policy and the hook guardian. The config-apply trigger waits for six seconds of quiet config writes before it plans a change, so pushes five seconds apart are applied together; a later queued ensure sees the committed config and does nothing. If the gateway cannot confirm the hot reload, `ensure` restarts it.
 </Callout>
 
 ## Apply and check
@@ -150,7 +152,7 @@ Under `enterprise.enrollment`. See [Enrollment](/docs/enterprise/enrollment).
 | Key | Values and default | What it does |
 | --- | --- | --- |
 | `mode` | `auto`, `manifest`. Default: `auto` | `manifest` stops the enumerator; you write the target manifest yourself. On Windows the first install then needs `--manifest` (Setup: `MANIFEST=`). |
-| `include_users` | List of user names. Default: empty | Linux and macOS: also enroll these accounts. Windows: accepted, but every profile is already a candidate, so it changes nothing. |
+| `include_users` | List of user names. Default: empty | Linux and macOS: also enroll these accounts. An account still gets a row only for an agent installed in it. Windows: accepted, but every profile is already a candidate, so it changes nothing. |
 | `exclude_users` | List of user names (Linux and macOS: or numeric uids). Default: empty | Never enroll these accounts. Wins over every include. |
 | `include_groups` | Linux and macOS: group names or numeric IDs. Windows: group names or SIDs. Default: empty | When not empty, enroll only members of these groups. Windows covers local and Active Directory groups, and the Microsoft Entra ID groups a built-in local group lists; see [Enrollment](/docs/enterprise/enrollment#group-filters-on-windows). |
 | `exclude_groups` | As `include_groups`. Default: empty | Never enroll members. Wins over `include_groups`. |

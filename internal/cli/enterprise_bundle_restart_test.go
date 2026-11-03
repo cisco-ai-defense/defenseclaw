@@ -45,12 +45,14 @@ func TestPredictBundleRestart(t *testing.T) {
 		{"hot mode change", "linux", base, strings.Replace(base, "mode: observe", "mode: action", 1), bundleRestartNotRequired, []string{}, nil},
 		{"formatting only", "darwin", base, "# managed\n" + base, bundleRestartNotRequired, []string{}, nil},
 		{"restart-required key", "linux", base, base + "  hook_self_heal: false\n", bundleRestartRequired, []string{restartReasonSettings}, []string{"guardrail.hook_self_heal"}},
-		{"connector added on Linux", "linux", base, withConnector("amp"), bundleRestartRequired, []string{restartReasonSettings}, []string{"guardrail.connectors.*.enabled"}},
-		{"connector added on macOS", "darwin", base, withConnector("amp"), bundleRestartRequired, []string{restartReasonSettings}, []string{"guardrail.connectors.*.enabled"}},
+		{"connector added on Linux", "linux", base, withConnector("opencode"), bundleRestartNotRequired, []string{}, nil},
+		{"connector added on macOS", "darwin", base, withConnector("opencode"), bundleRestartNotRequired, []string{}, nil},
+		{"primary connector moved on Linux", "linux", base, withConnector("amp"), bundleRestartRequired, []string{restartReasonSettings}, []string{"guardrail.connector"}},
+		{"primary connector moved on macOS", "darwin", base, withConnector("amp"), bundleRestartRequired, []string{restartReasonSettings}, []string{"guardrail.connector"}},
 		{"connector added on Windows", "windows", base, withConnector("opencode"), bundleRestartNotRequired, []string{}, nil},
 		// The gateway reads its primary connector (the explicit one, else the
 		// first connectors key) only at start: a connector-set change that
-		// moves it restarts the gateway on Windows too (GAP-1498).
+		// moves it restarts the gateway on every platform (GAP-1498).
 		{"connector added before the primary on Windows", "windows", base, withConnector("amp"), bundleRestartRequired, []string{restartReasonSettings}, []string{"guardrail.connector"}},
 		{"primary connector entry removed on Windows", "windows", withConnector("opencode"), primaryOnly("", "opencode"), bundleRestartRequired, []string{restartReasonSettings}, []string{"guardrail.connector"}},
 		{"explicit primary kept on Windows", "windows", primaryOnly("opencode", "claudecode", "opencode"), primaryOnly("opencode", "opencode"), bundleRestartNotRequired, []string{}, nil},
@@ -58,7 +60,7 @@ func TestPredictBundleRestart(t *testing.T) {
 		{"enrollment list on Windows", "windows", enrollment("alice"), enrollment("bob"), bundleRestartNotRequired, []string{}, nil},
 		{"gateway key on Windows", "windows", base, base + "gateway:\n  port: 18971\n", bundleRestartRequired, []string{restartReasonSettings}, []string{"gateway"}},
 		{"Codex on Windows", "windows", base, withConnector("codex"), bundleRestartRequired, []string{restartReasonCodexMachinePolicy}, []string{"guardrail.connectors.*.enabled"}},
-		{"Codex on Linux", "linux", base, withConnector("codex"), bundleRestartRequired, []string{restartReasonSettings}, []string{"guardrail.connectors.*.enabled"}},
+		{"Codex on Linux", "linux", base, withConnector("codex"), bundleRestartNotRequired, []string{}, nil},
 		{"Fleet on Windows", "windows", base, base + "fleet:\n  enabled: true\n", bundleRestartUnknown, []string{restartReasonFleetSetup}, nil},
 		// The apply replaces a config it cannot parse wholesale: every key
 		// changes, so a restart-required one restarts the gateway.

@@ -14,6 +14,12 @@ import (
 // seedSizedAuditRows writes count audit rows of about 1 KiB, one a minute,
 // the newest at newest.
 func seedSizedAuditRows(t *testing.T, store *Store, prefix string, count int, newest time.Time) {
+	seedSizedAuditRowsWithSpacing(t, store, prefix, count, newest, time.Minute)
+}
+
+func seedSizedAuditRowsWithSpacing(
+	t *testing.T, store *Store, prefix string, count int, newest time.Time, spacing time.Duration,
+) {
 	t.Helper()
 	tx, err := store.db.Begin()
 	if err != nil {
@@ -26,7 +32,7 @@ func seedSizedAuditRows(t *testing.T, store *Store, prefix string, count int, ne
 	}
 	padding := strings.Repeat("x", 1024)
 	for index := 0; index < count; index++ {
-		at := newest.Add(-time.Duration(count-1-index) * time.Minute)
+		at := newest.Add(-time.Duration(count-1-index) * spacing)
 		if _, err := statement.Exec(fmt.Sprintf("%s-%05d", prefix, index), at.Format(time.RFC3339Nano),
 			"scan", "operator", padding, "LOW"); err != nil {
 			t.Fatal(err)
@@ -132,6 +138,80 @@ func TestRetentionSizeCapDeletesOldestHistoryUntilUnderTheCap(t *testing.T) {
 	}
 	if result.SizeCapped || result.RowsDeleted[RetentionAuditEvents] != 0 || result.Backlog {
 		t.Fatalf("run under the cap: capped %t, deleted %d, backlog %t", result.SizeCapped, result.RowsDeleted[RetentionAuditEvents], result.Backlog)
+	}
+	if result.CapNotReached || result.StoreSizeBytes != 0 || result.StoreCapBytes != 0 || result.CapReason != "" {
+		t.Fatalf("run under the cap reported a shortfall: %+v", result)
+	}
+}
+
+// A completed cap pass may preserve more than the cap when all remaining
+// history is within the protected newest hour. The result must report the
+// measured used pages rather than treating a successful SQL run as success
+// against the size target.
+func TestRetentionSizeCapReportsWhenThePassStopsAboveTheCap(t *testing.T) {
+	store, judge := newRetentionStores(t)
+	now := time.Date(2026, 10, 30, 12, 0, 0, 0, time.UTC)
+	seedSizedAuditRowsWithSpacing(t, store, "recent", 2000, now, time.Millisecond)
+	reaper := newRetentionReaperAt(t, store, judge, 7, now, RetentionOptions{}, retentionHooks{yield: noRetentionYield})
+	if err := reaper.UpdateMaxStoreMB(1); err != nil {
+		t.Fatal(err)
+	}
+	result, err := reaper.Run(t.Context())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !result.CapNotReached || result.StoreSizeBytes != usedStoreBytes(t, store) ||
+		result.StoreCapBytes != 1<<20 || result.CapReason != RetentionCapRetainedHistory {
+		t.Fatalf("cap shortfall = %+v; used=%d", result, usedStoreBytes(t, store))
+	}
+	if result.RowsDeleted[RetentionAuditEvents] != 0 {
+		t.Fatalf("protected recent audit rows deleted: %d", result.RowsDeleted[RetentionAuditEvents])
+	}
+}
+
+func TestRetentionSizeCapNamesActiveCorrelationState(t *testing.T) {
+	store, repo := newCorrelationTestStore(t)
+	instance := mustCorrelationInstance(t, repo, "codex", ConnectorCustodyDefenseClaw)
+	now := time.Date(2026, 10, 30, 12, 0, 0, 0, time.UTC)
+	old := now.Add(-8 * 24 * time.Hour)
+	link := func(tx *CorrelationTx, event CorrelationEvent) {
+		if _, err := tx.PutRelationship(t.Context(), CorrelationRelationshipInput{
+			FromKind: CorrelationNodeSemanticEvent, FromID: string(event.SemanticEventID),
+			ToKind: CorrelationNodeSession, ToID: "active-session", Type: CorrelationBelongsTo,
+			Method: CorrelationMethodReported, RuleID: "membership", RuleVersion: "v1",
+			Status: CorrelationRelationshipActive, ObservedAt: old,
+		}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	seedCorrelationEvent(t, repo, instance, correlationSeedOptions{receivedAt: old, mutate: func(tx *CorrelationTx, event CorrelationEvent) {
+		if err := tx.PutCursor(t.Context(), CorrelationCursor{
+			ConnectorInstanceID: instance.ConnectorInstanceID, SessionID: "active-session", AgentID: "active-agent",
+			Phase: "active", Sequence: 1, LastSemanticEventID: event.SemanticEventID,
+			ProfileVersion: instance.ProfileVersion, Active: true, UpdatedAt: old,
+		}); err != nil {
+			t.Fatal(err)
+		}
+		link(tx, event)
+	}})
+	for range 400 {
+		seedCorrelationEvent(t, repo, instance, correlationSeedOptions{receivedAt: old, mutate: link})
+	}
+	reaper := newRetentionReaperAt(t, store, nil, 7, now, RetentionOptions{}, retentionHooks{yield: noRetentionYield})
+	if err := reaper.UpdateMaxStoreMB(1); err != nil {
+		t.Fatal(err)
+	}
+	result, err := reaper.Run(t.Context())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !result.CapNotReached || result.CapReason != RetentionCapActiveCorrelation ||
+		result.StoreSizeBytes <= result.StoreCapBytes || result.StoreSizeBytes != usedStoreBytes(t, store) {
+		t.Fatalf("active-state shortfall = %+v", result)
+	}
+	if result.RowsDeleted[RetentionCorrelationRelationships] != 0 ||
+		countRetentionRows(t, store.db, "correlation_relationships") != 401 {
+		t.Fatalf("active relationships were removed or not seeded: %+v", result.RowsDeleted)
 	}
 }
 

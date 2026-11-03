@@ -36,6 +36,7 @@ import (
 	"unicode/utf8"
 
 	"github.com/defenseclaw/defenseclaw/internal/managed"
+	"github.com/defenseclaw/defenseclaw/internal/pathidentity"
 )
 
 const activeConnectorFile = "active_connector.json"
@@ -1468,7 +1469,7 @@ func setupSelectedAgentExecutableEvidence(path string) (string, string, bool) {
 		return "", "", false
 	}
 	path = filepath.Clean(path)
-	before, err := os.Lstat(path)
+	before, err := pathidentity.LstatPinned(path)
 	if err != nil || before.Mode()&os.ModeSymlink != 0 || !before.Mode().IsRegular() {
 		return "", "", false
 	}
@@ -2086,7 +2087,7 @@ func stableManagedArtifactDigestWithAge(
 		lock.Lock()
 		defer lock.Unlock()
 	}
-	expected, err := os.Lstat(path)
+	expected, err := pathidentity.LstatPinned(path)
 	if errors.Is(err, os.ErrNotExist) {
 		return "", false, nil
 	}
@@ -2646,7 +2647,7 @@ func readStablePrivateStateFile(dataDir, name string, limit int64) ([]byte, bool
 		return nil, false
 	}
 	path := filepath.Join(dataDir, name)
-	before, err := os.Lstat(path)
+	before, err := pathidentity.LstatPinned(path)
 	if err != nil || before.Mode()&os.ModeSymlink != 0 || !before.Mode().IsRegular() || before.Size() > limit {
 		return nil, false
 	}

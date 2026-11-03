@@ -44,6 +44,7 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/gateway/notifier"
 	"github.com/defenseclaw/defenseclaw/internal/lazyregexp"
 	"github.com/defenseclaw/defenseclaw/internal/managed"
+	"github.com/defenseclaw/defenseclaw/internal/pathidentity"
 	"github.com/defenseclaw/defenseclaw/internal/redaction"
 	"github.com/defenseclaw/defenseclaw/internal/sandboxauth"
 	"github.com/defenseclaw/defenseclaw/internal/scanner"
@@ -256,7 +257,7 @@ func (a *APIServer) evaluateCodexHookForProfile(
 		}
 	case "UserPromptSubmit":
 		if !a.managedAIDOnly() && (cfg == nil || !cfg.SecureClientIntegration()) {
-			if judge := a.judgeFor(ctx); judge != nil {
+			for _, judge := range a.hookSessionJudges(ctx) {
 				judge.ObserveSessionPrompt(ctx, req.Prompt)
 			}
 			a.observeUserDownloadRequest(ctx, req.Prompt)
@@ -318,6 +319,7 @@ func (a *APIServer) evaluateCodexHookForProfile(
 			LegacyText:                    string(toolArgs),
 			Connector:                     "codex",
 			EnforcementCapable:            true,
+			ManagedHookOverflowHold:       managedWindowsHookOverflowHold(ctx, a.scannerCfg, "codex", runtime.GOOS),
 			ResolvedWriteTargets:          commandHookResolvedWrites(ctx, cfg, actionInput),
 			SkipLocalFilesystemResolution: isSandboxHookRequest(ctx),
 			DowngradeReadOnlyDataArgs:     mode != "action",
@@ -545,7 +547,7 @@ func (a *APIServer) codexEnabled() bool {
 	// still calls in. EffectiveEnabled defaults to true, so this is a
 	// no-op for single-connector installs and any connector never
 	// explicitly disabled.
-	if cfg.ManualConnectorConfigured("codex") && !cfg.Guardrail.EffectiveEnabled("codex") {
+	if cfg.ConnectorDisabled("codex") {
 		return false
 	}
 	if cfg.ConnectorHookConfig("codex").Enabled {
@@ -1086,6 +1088,7 @@ func mergeCodexToolResultVerdicts(
 	}
 	merged.WouldBlock = source.WouldBlock || untrusted.WouldBlock
 	merged.laneVerdict = source.laneVerdict || untrusted.laneVerdict
+	merged.decisionConfirm = mergedDecisionConfirm(merged.Action, source, untrusted)
 	if source.RedactionEnabled != nil || untrusted.RedactionEnabled != nil {
 		enabled := source.RedactionEnabled != nil && *source.RedactionEnabled ||
 			untrusted.RedactionEnabled != nil && *untrusted.RedactionEnabled
@@ -1532,7 +1535,7 @@ func codexReadVerifiedGitDiffCurrentLines(
 		return nil, false
 	}
 	target := filepath.Join(realCWD, physicalRelative)
-	listed, err := os.Lstat(target)
+	listed, err := pathidentity.LstatPinned(target)
 	if err != nil || !listed.Mode().IsRegular() || listed.Size() < 0 ||
 		listed.Size() > codexTrustedSourceTreeMaxBytes ||
 		!codexSingleLinkRegularFile(target, listed) {

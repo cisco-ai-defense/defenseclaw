@@ -753,9 +753,15 @@ def test_hermes_forkless_probe_reaches_the_installed_hook_template(tmp_path, mon
     hook = tmp_path / "hermes-hook.sh"
     helper = tmp_path / "_hardening.sh"
     template = (source / hook.name).read_text(encoding="utf-8")
-    # The Go renderer removes this host-only guard. The probe exits before
-    # the later template branches are parsed by bash.
-    template = template.replace("{{if not .Sandbox}}", "", 1).replace("{{end}}# Windows", "# Windows", 1)
+    # The Go renderer removes these template guards for a per-user host
+    # hook (not Secure Client, not a sandbox). The probe exits before the
+    # later template branches are parsed by bash.
+    template = (
+        template.replace("{{if not .SecureClient}}", "", 1)
+        .replace("{{end}}{{if not .Sandbox}}", "", 1)
+        .replace("{{end}}# Windows", "# Windows", 1)
+    )
+    assert "{{" not in template.split("_DC_FORKLESS_PROBE=1", 1)[0], "a template guard is left before the probe"
     hook.write_text(template, encoding="utf-8")
     shutil.copyfile(source / helper.name, helper)
     hook.chmod(0o700)

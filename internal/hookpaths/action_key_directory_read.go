@@ -22,7 +22,7 @@ func actionRecursiveKeyDirectoryRead(words []string, cwd, home string, windows b
 	if len(words) == 0 {
 		return false
 	}
-	program := strings.TrimSuffix(strings.ToLower(programBase(words[0])), ".exe")
+	program := programBase(words[0])
 	var valueLetters string
 	recursive := false
 	switch program {
@@ -176,7 +176,7 @@ func actionWindowsPipedKeyDirectoryRead(head, reader []string, cwd, home string,
 		return false
 	}
 	base := func(word string) string {
-		return strings.TrimSuffix(strings.ToLower(programBase(strings.ReplaceAll(word, `\`, "/"))), ".exe")
+		return programBase(strings.ReplaceAll(word, `\`, "/"))
 	}
 	switch base(reader[0]) {
 	case "select-string", "sls", "format-hex", "fhx":
@@ -391,7 +391,7 @@ func actionWindowsCertainLocation(statement []string, next string, earlier []str
 	if operand := strings.TrimSpace(statement[1]); operand == "-" || operand == "+" || strings.HasPrefix(operand, "-") {
 		return false
 	}
-	switch strings.TrimSuffix(strings.ToLower(programBase(strings.ReplaceAll(statement[0], `\`, "/"))), ".exe") {
+	switch programBase(strings.ReplaceAll(statement[0], `\`, "/")) {
 	case "sl", "set-location", "pushd", "push-location":
 		return true
 	case "cd", "chdir":

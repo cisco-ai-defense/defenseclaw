@@ -1074,7 +1074,7 @@ def test_no_asks_text_holds_for_every_pack() -> None:
         # (it needs no snapshot).
         (0, "P", "pull", ""),
         (0, "U", "undo", ""),
-        (0, "R", "hint", "P brings its work back after showing it (defenseclaw sandbox pull fix-tests)"),
+        (0, "R", "hint", "choose Apply or Branch in P to bring its work back (defenseclaw sandbox pull fix-tests --apply or --branch)"),
         (2, "U", "hint", "no snapshot to undo"),
         (2, "s", "hint", "is not running"),
         (2, "c", "connect", ""),

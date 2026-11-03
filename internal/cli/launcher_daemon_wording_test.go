@@ -73,3 +73,27 @@ func TestLauncherEnsureDaemonLeavesTheTransportErrorOutOfItsSentence(t *testing.
 		})
 	}
 }
+
+// GAP-0608: a daemon that answered its status with why it cannot serve (the
+// managed gateway did not answer its settings read) runs. The launcher
+// started it again and polled 15 s, which only kept it serving that answer,
+// and printed that the service does not answer. It now leaves the answer
+// to the command that follows, at once.
+func TestLauncherEnsureDaemonLeavesADaemonThatAnsweredAlone(t *testing.T) {
+	fastLauncherWaits(t)
+	calls := recordRuns(t, nil)
+	answered := &sandboxapi.Error{Code: sandboxapi.CodeUnavailable, Status: 503, Message: "the managed DefenseClaw gateway is not reachable"}
+	client := &transportStatus{err: answered}
+	var stderr bytes.Buffer
+	status, err := launcherEnsureDaemon(context.Background(), client, "linux", 501, &stderr)
+	if err != nil || status != nil {
+		t.Fatalf("launcherEnsureDaemon = %v, %v; want nothing to report (the command shows the answer)", status, err)
+	}
+	if client.calls != 1 || len(*calls) != 0 {
+		t.Fatalf("asked %d times and ran %q, want one status and no service-manager call", client.calls, *calls)
+	}
+	// A transport failure is still a daemon that does not answer.
+	if launcherDaemonAnswered(&sandboxapi.Error{Code: sandboxapi.CodeUnavailable, Message: "the DefenseClaw daemon is not reachable"}) {
+		t.Fatal("a transport failure was taken for an answer")
+	}
+}

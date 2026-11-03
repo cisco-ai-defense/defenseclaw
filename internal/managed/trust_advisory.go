@@ -62,6 +62,13 @@ const TrustDriftAdvisoryMarker = "managed_trust_drift_advisory"
 // managed trust check runs. When nil the advisory goes to the standard logger.
 var ReportTrustDrift func(path, label, reason string)
 
+// DescribeTrustAdvisoryReason, when set, rewrites an advisory's reason the way
+// an administrator reads it before it is reported: on a standalone Windows
+// install, the account next to its SID, the access mask in words and the
+// icacls command that clears it, as the trust refusals print them
+// (GAP-0925). Set once during process startup, like ReportTrustAdvisory.
+var DescribeTrustAdvisoryReason func(reason string) string
+
 // PlatformInstallerOwnedRoots returns the directories whose permissions belong
 // to the Cisco Secure Client installer (AVC) rather than to DefenseClaw. AVC
 // creates them, shares them with other Cisco software, and re-ACLs them on its
@@ -212,6 +219,9 @@ func relaxAncestorTrustVerdict(advisory bool, path, label string, verdict error)
 }
 
 func reportTrustAdvisory(path, label, reason string) {
+	if describe := DescribeTrustAdvisoryReason; describe != nil {
+		reason = describe(reason)
+	}
 	if hook := ReportTrustAdvisory; hook != nil {
 		// Embedders (structured log, telemetry) get every occurrence and
 		// dedupe themselves with their richer context. The default-log

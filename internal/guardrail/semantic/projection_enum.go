@@ -61,6 +61,14 @@ func projectDialect(value actionfacts.Dialect) (semanticpb.Dialect, bool) {
 	}
 }
 
+// ProjectableIssue reports whether a parse issue has a projection. A caller
+// that judges a reduced view of a partial action leaves out the issues that
+// have none (opaque_artifact).
+func ProjectableIssue(issue actionfacts.IssueCode) bool {
+	_, ok := projectIssue(issue)
+	return ok
+}
+
 func projectIssue(value actionfacts.IssueCode) (semanticpb.IssueCode, bool) {
 	switch value {
 	case actionfacts.IssueInvalidJSON:

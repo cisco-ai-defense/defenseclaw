@@ -4,6 +4,7 @@
 package gateway
 
 import (
+	"encoding/json"
 	"net/http"
 	"net/http/httptest"
 	"runtime"
@@ -13,6 +14,75 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/config"
 	"github.com/defenseclaw/defenseclaw/internal/managed"
 )
+
+// The Unix lifecycle can report each of these process reasons. A root
+// status or verify must be able to record all of them through the gateway.
+func TestManagedLaunchCoverageAuditAcceptsBashHookProcessReasons(t *testing.T) {
+	fixture, api, _ := newCLIObservabilityV8Fixture(t)
+	handler := api.managedHookPeerAuth(newManagedHookAuthorizer(config.EnterpriseEnrollmentConfig{}, nil, nil), api.managedHookSocketMux())
+	tests := []struct {
+		connector string
+		reasons   []string
+	}{
+		{"devin", []string{"bash_hook_startup", "bash_hook_noexec"}},
+		{"codex", []string{"bash_hook_startup", "bash_hook_noexec", "launch_environment_unverified", "launch_arguments_unverified"}},
+		{"copilot", []string{"bash_hook_startup", "bash_hook_noexec", "launch_environment_unverified", "launch_arguments_unverified"}},
+	}
+	want := make(map[string]bool)
+	for _, test := range tests {
+		for _, reason := range test.reasons {
+			name := test.connector + "/" + reason
+			t.Run(name, func(t *testing.T) {
+				report := managed.LaunchCoverageReport{Connector: test.connector, Reason: reason,
+					PID: 4242, UID: 1001, StartedAt: "2026-10-22T23:30:00Z"}
+				body, err := json.Marshal(report)
+				if err != nil {
+					t.Fatal(err)
+				}
+				request := httptest.NewRequest(http.MethodPost, managed.LaunchCoverageReportPath, strings.NewReader(string(body)))
+				request.Header.Set("Content-Type", "application/json")
+				request.Header.Set("X-DefenseClaw-Client", "enterprise-lifecycle")
+				request = request.WithContext(withManagedHookPeer(request.Context(), managedHookPeer{UID: 0}))
+				response := httptest.NewRecorder()
+				handler.ServeHTTP(response, request)
+				if response.Code != http.StatusNoContent {
+					t.Fatalf("root launch audit returned HTTP %d: %s", response.Code, response.Body.String())
+				}
+			})
+			want[name] = true
+		}
+	}
+	events, err := fixture.store.ListEvents(100)
+	if err != nil {
+		t.Fatal(err)
+	}
+	seen := make(map[string]bool)
+	for _, event := range events {
+		if event.Action != "alert" || event.Structured["defenseclaw.schema.error_code"] != "managed_launch_uninspected" {
+			continue
+		}
+		if !strings.Contains(event.Details, `"process_pid":4242`) || event.Severity != "HIGH" ||
+			event.Structured["defenseclaw.health.subsystem"] != "managed-launch-coverage" {
+			t.Fatalf("unexpected launch audit row: %+v", event)
+		}
+		matched := false
+		for name := range want {
+			connector, reason, _ := strings.Cut(name, "/")
+			if strings.Contains(event.Details, `"connector":"`+connector+`"`) &&
+				strings.Contains(event.Details, `"coverage_reason":"`+reason+`"`) {
+				seen[name] = true
+				matched = true
+				break
+			}
+		}
+		if !matched {
+			t.Fatalf("unexpected connector or reason in launch audit row: %+v", event)
+		}
+	}
+	if len(seen) != len(want) {
+		t.Fatalf("recorded %d of %d process reasons: %+v", len(seen), len(want), seen)
+	}
+}
 
 func TestManagedLaunchCoverageAuditRequiresRootAndRecordsTheUninspectedProcess(t *testing.T) {
 	fixture, api, _ := newCLIObservabilityV8Fixture(t)

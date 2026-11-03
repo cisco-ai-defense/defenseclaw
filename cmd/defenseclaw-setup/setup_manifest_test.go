@@ -25,7 +25,7 @@ type setupManifestDocument struct {
 }
 
 func TestSetupManifestRequiresAsInvoker(t *testing.T) {
-	contents, err := windowsresources.Manifest(windowsresources.ComponentSetup, "1.2.3")
+	contents, err := windowsresources.ManifestForTarget(windowsresources.TargetWindowsAMD64, windowsresources.ComponentSetup, "1.2.3")
 	if err != nil {
 		t.Fatal(err)
 	}

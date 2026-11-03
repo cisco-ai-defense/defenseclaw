@@ -90,6 +90,10 @@ type APIServer struct {
 	// install-window warning of strictInstallWindowGate; it clears when a
 	// call finds no install lock.
 	installWindowWarned atomic.Bool
+	// firstHookAnswerRecorded avoids a filesystem check after this process
+	// has sent its first per-user hook verdict.
+	firstHookAnswerRecorded atomic.Bool
+	firstHookAnswerMu       sync.Mutex
 
 	// projectSkills are the project skill folders the install watcher
 	// watches; nil when no watcher shares them (GAP-1063).
@@ -398,6 +402,9 @@ type APIServer struct {
 	// boot via SetHookJudge. Per-connector gating happens in
 	// hookJudgeInspect via guardrail.judge.hook_connectors.
 	hookJudge atomic.Pointer[LLMJudge]
+	// hookDecisionJudge is the decision-model-only judge of cascade 2 for an
+	// API server outside a gateway (a gateway reads its generation's).
+	hookDecisionJudge atomic.Pointer[LLMJudge]
 
 	// userDownloads remembers the hosts recent user prompts ask to download
 	// from and run (#1390), per session, judge or not.
@@ -459,6 +466,36 @@ func (a *APIServer) judgeFor(ctx context.Context) *LLMJudge {
 		return nil
 	}
 	return judgeOf(pinnedGeneration(ctx), a.hookJudge.Load())
+}
+
+// decisionJudgeFor is the cascade-2 judge (decision model, no LLM) of the
+// generation ctx pinned, else the server's own.
+func (a *APIServer) decisionJudgeFor(ctx context.Context) *LLMJudge {
+	if a == nil {
+		return nil
+	}
+	if g := pinnedGeneration(ctx); g.published() {
+		return g.decisionJudge
+	}
+	return a.hookDecisionJudge.Load()
+}
+
+// SetHookDecisionJudge wires the cascade-2 judge (newDecisionOnlyJudge);
+// nil turns cascade 2 off.
+func (a *APIServer) SetHookDecisionJudge(j *LLMJudge) {
+	a.hookDecisionJudge.Store(j)
+}
+
+// hookSessionJudges are the hook-lane judges that keep a session's user
+// intent and recent tool calls: the LLM judge and the cascade-2 judge.
+func (a *APIServer) hookSessionJudges(ctx context.Context) []*LLMJudge {
+	var out []*LLMJudge
+	for _, j := range []*LLMJudge{a.judgeFor(ctx), a.decisionJudgeFor(ctx)} {
+		if j != nil {
+			out = append(out, j)
+		}
+	}
+	return out
 }
 
 // SetHookJudge wires the LLM judge onto the API server so the hook
@@ -3380,7 +3417,7 @@ func (a *APIServer) handleSkillScan(w http.ResponseWriter, r *http.Request) {
 	admission := a.scanAdmissionPreview(r.Context(), cfg, config.AdmissionTypeSkill, req.Target, req.Name, result)
 	if a.logger != nil {
 		_ = a.logger.LogActionCtx(r.Context(), string(audit.ActionAPISkillScan), req.Target, fmt.Sprintf("findings=%d max=%s", len(result.Findings), result.MaxSeverity()))
-		_ = a.logger.LogScanWithCorrelation(r.Context(), result, scanAdmissionVerdict(admission), scanCorrelationWithJudge(r.Context(), result))
+		_ = a.logger.LogScanWithCorrelation(r.Context(), result, scanAdmissionVerdict(admission), scanCorrelationForTarget(r.Context(), result, req.Target))
 	}
 
 	a.writeJSON(w, http.StatusOK, withScanAdmission(withScannerSettings(cfg, "skill", result, scanAPIResponseEnvelope(result)), admission))
@@ -3591,7 +3628,7 @@ func (a *APIServer) handlePluginScan(w http.ResponseWriter, r *http.Request) {
 	admission := a.scanAdmissionPreview(r.Context(), cfg, config.AdmissionTypePlugin, req.Target, req.Name, result)
 	if a.logger != nil {
 		_ = a.logger.LogActionCtx(r.Context(), string(audit.ActionAPIPluginScan), req.Target, fmt.Sprintf("findings=%d max=%s", len(result.Findings), result.MaxSeverity()))
-		_ = a.logger.LogScanWithCorrelation(r.Context(), result, scanAdmissionVerdict(admission), scanCorrelationWithJudge(r.Context(), result))
+		_ = a.logger.LogScanWithCorrelation(r.Context(), result, scanAdmissionVerdict(admission), scanCorrelationForTarget(r.Context(), result, req.Target))
 	}
 
 	a.writeJSON(w, http.StatusOK, withScanAdmission(scanAPIResponseEnvelope(result), admission))
@@ -5239,6 +5276,24 @@ func connectorProxyBindsByName(name string) bool {
 // scanCorrelationWithJudge is ScanCorrelationFromContext plus the LLM judge
 // model the skill or plugin scan ran with, so its audit rows say the judge
 // ran, as the install watcher rows do (GAP-0575, GAP-2435).
+// scanCorrelationForTarget is scanCorrelationWithJudge plus, when the request
+// names no verified caller (an administrator's scan on a managed host), the
+// enrolled user whose home holds target: the scan, scan-finding rows then
+// name the user whose asset it was, as the watcher's rows do (GAP-0575).
+// Secure Client rows keep their shape.
+func scanCorrelationForTarget(ctx context.Context, result *scanner.ScanResult, target string) audit.ScanCorrelation {
+	correlation := scanCorrelationWithJudge(ctx, result)
+	if correlation.UserID != "" || ManagedEnterpriseActive() {
+		return correlation
+	}
+	if owners := scanAssetOwners.Load(); owners != nil {
+		if owner, ok := watcher.AssetOwnerOf(*owners, target); ok {
+			correlation.UserID, correlation.UserIDKind, correlation.UserName = owner.ID, owner.IDKind, owner.Name
+		}
+	}
+	return correlation
+}
+
 func scanCorrelationWithJudge(ctx context.Context, result *scanner.ScanResult) audit.ScanCorrelation {
 	correlation := ScanCorrelationFromContext(ctx)
 	if result != nil {

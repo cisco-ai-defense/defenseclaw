@@ -3536,3 +3536,48 @@ class TestConnectorSkippedAtStart(unittest.TestCase):
         self.assertEqual((row["status"], row["label"]), ("warn", "Connector setup"))
         self.assertIn("Cursor was skipped", row["detail"])
         self.assertEqual(row["remediation"], "defenseclaw setup cursor")
+
+    def test_removed_agent_names_the_gateway_reason_not_setup(self):
+        # GAP-0492: setup cannot start a connector whose agent was removed.
+        from defenseclaw.commands.cmd_doctor import _check_connector_skipped_at_start
+
+        reason = (
+            "the agent is not installed for this account (its executable C:\\amp\\amp.exe is gone); "
+            "reinstall it and run: defenseclaw-gateway restart, or remove the connector: defenseclaw setup remove amp"
+        )
+        health = {
+            "guardrail": {
+                "state": "running",
+                "details": {
+                    "connectors_not_started": ["amp"],
+                    "connectors_refused_by_agent_settings": {"amp": reason},
+                },
+            }
+        }
+        r = _DoctorResult()
+        _check_connector_skipped_at_start("amp", health, r)
+        self.assertEqual(len(r.checks), 1)
+        row = r.checks[0]
+        self.assertEqual((row["status"], row["label"]), ("warn", "Connector setup"))
+        self.assertIn("is not installed for this account", row["detail"])
+        self.assertIn("defenseclaw setup remove amp", row["detail"])
+        self.assertNotIn("gateway.log has the reason", row["detail"])
+        self.assertNotEqual(row.get("remediation"), "defenseclaw setup amp")
+
+    def test_agent_settings_refusal_keeps_older_setup_row(self):
+        from defenseclaw.commands.cmd_doctor import _check_connector_skipped_at_start
+
+        health = {
+            "guardrail": {
+                "state": "running",
+                "details": {
+                    "connectors_not_started": ["codex"],
+                    "connectors_refused_by_agent_settings": {"codex": "Codex hooks are disabled"},
+                },
+            }
+        }
+        r = _DoctorResult()
+        _check_connector_skipped_at_start("codex", health, r)
+        row = r.checks[0]
+        self.assertIn("gateway.log has the reason", row["detail"])
+        self.assertEqual(row["remediation"], "defenseclaw setup codex")

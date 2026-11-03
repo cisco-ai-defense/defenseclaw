@@ -81,6 +81,36 @@ func ownerOf(path string) string {
 	return ownerName(int(stat.Uid), time.Now())
 }
 
+// ownerFills are the uids CachedOwnerName is looking up in the background.
+var ownerFills sync.Map // int -> struct{}
+
+// OwnerNameOfUID is the name of the account that holds uid, "" when there
+// is none or the account database does not answer. It may wait up to
+// ownerLookupTimeout for the account database, so it is for the poll, not
+// for an event read loop (p0-round GAP-1389).
+func OwnerNameOfUID(uid int) string { return ownerName(uid, time.Now()) }
+
+// CachedOwnerName is the name of uid's account when a lookup has answered,
+// and otherwise "" at once while a lookup runs in the background for the
+// next event. An event source calls it from its read loop, where a lookup
+// that waits on a directory service (SSSD, Open Directory) would stall the
+// reader and let the kernel drop events.
+func CachedOwnerName(uid int) string {
+	if cached, ok := userCache.Load(strconv.Itoa(uid)); ok {
+		entry := cached.(cachedOwner)
+		if entry.retryAt.IsZero() || time.Now().Before(entry.retryAt) {
+			return entry.name
+		}
+	}
+	if _, busy := ownerFills.LoadOrStore(uid, struct{}{}); !busy {
+		go func() {
+			defer ownerFills.Delete(uid)
+			_ = ownerName(uid, time.Now())
+		}()
+	}
+	return ""
+}
+
 // ownerName is the name of the account that holds uid, "" when there is
 // none or the account database does not answer.
 func ownerName(uid int, now time.Time) string {

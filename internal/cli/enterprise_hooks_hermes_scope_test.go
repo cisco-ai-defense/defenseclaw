@@ -250,6 +250,7 @@ func TestVerifyLeavesASignedOutHermesTargetToTheNextSignIn(t *testing.T) {
 	previousPublic, previousRegistration := enterpriseHookLivePublicVerifier, enterpriseHookLiveRegistrationVerifier
 	previousSession, previousDeferredSession := enterpriseHookReconcileSessionAvailable, enterpriseHookReconcileDeferredSessionAvailable
 	previousRelease, previousChange := enterpriseHookReconcileTargetRelease, enterpriseHookReconcileTargetFailModeChange
+	previousEarlierMatrix := enterpriseHookReconcileTargetEarlierMatrix
 	previousSecureClient, previousApplies := enterpriseHookReconcileSecureClient, enterpriseHookHermesSignedOutApplies
 	previousCleanup := enterpriseForeignHookCleanup
 	previousStateTrust, previousManifestTrust := enterpriseHookGuardianStateFileTrustCheck, enterpriseHookManifestFileTrustCheck
@@ -260,6 +261,7 @@ func TestVerifyLeavesASignedOutHermesTargetToTheNextSignIn(t *testing.T) {
 		enterpriseHookLivePublicVerifier, enterpriseHookLiveRegistrationVerifier = previousPublic, previousRegistration
 		enterpriseHookReconcileSessionAvailable, enterpriseHookReconcileDeferredSessionAvailable = previousSession, previousDeferredSession
 		enterpriseHookReconcileTargetRelease, enterpriseHookReconcileTargetFailModeChange = previousRelease, previousChange
+		enterpriseHookReconcileTargetEarlierMatrix = previousEarlierMatrix
 		enterpriseHookReconcileSecureClient, enterpriseHookHermesSignedOutApplies = previousSecureClient, previousApplies
 		enterpriseForeignHookCleanup = previousCleanup
 		enterpriseHookGuardianStateFileTrustCheck, enterpriseHookManifestFileTrustCheck = previousStateTrust, previousManifestTrust
@@ -405,8 +407,8 @@ func TestVerifyLeavesASignedOutHermesTargetToTheNextSignIn(t *testing.T) {
 	check("hive loaded while signed out, hook restored", true, true)
 
 	// GAP-1433 as observed: an upgrade from 1.0.2 while Bob is signed out
-	// leaves his Hermes target waiting for his sign-in (an earlier release
-	// protected it), and an elevated administrator's verify cannot query
+	// leaves his Hermes target waiting for his sign-in (the earlier hook
+	// matrix is still registered), and an elevated administrator's verify cannot query
 	// his session. The LocalSystem guardian's record of the wait stands.
 	previousNotLocalSystem := enterpriseHookSessionCheckNotLocalSystem
 	t.Cleanup(func() { enterpriseHookSessionCheckNotLocalSystem = previousNotLocalSystem })
@@ -419,6 +421,9 @@ func TestVerifyLeavesASignedOutHermesTargetToTheNextSignIn(t *testing.T) {
 	live[bob+"/hermes"] = errors.New("enterprise hooks: connector hermes hook verification failed: canonical hook matrix is absent: owned hook command not present")
 	enterpriseHookReconcileTargetRelease = func(opts enterprisehooks.InstallOptions) (string, bool, error) {
 		return "1.0.2", opts.OwnerSID == bob && opts.ConnectorName == "hermes", nil
+	}
+	enterpriseHookReconcileTargetEarlierMatrix = func(opts enterprisehooks.InstallOptions) (bool, error) {
+		return opts.OwnerSID == bob && opts.ConnectorName == "hermes", nil
 	}
 	reconcile(1)
 	enterpriseHookReconcileTargetRelease = func(enterprisehooks.InstallOptions) (string, bool, error) { return "", false, nil }
@@ -482,7 +487,7 @@ func TestVerifyLeavesASignedOutHermesTargetToTheNextSignIn(t *testing.T) {
 			}
 		}
 	}
-	checkNote("earlier release, administrator verify", "an earlier DefenseClaw release protected it")
+	checkNote("earlier matrix, administrator verify", enterpriseHookEarlierMatrixState)
 	// Bob signs in: until the guardian repairs his target, it fails.
 	enterpriseHookReconcileSessionAvailable = func(enterprisehooks.ManifestTarget) (bool, error) { return true, nil }
 	if run, err := runEnterpriseHookVerifyAttemptWithScope(context.Background(), true); err != nil ||

@@ -8,13 +8,13 @@ package enterprisehooks
 import (
 	"errors"
 	"fmt"
-	"runtime"
 	"strings"
 	"sync"
 	"time"
 	"unsafe"
 
 	"github.com/defenseclaw/defenseclaw/internal/managed"
+	"github.com/defenseclaw/defenseclaw/internal/winmutex"
 	"golang.org/x/sys/windows"
 )
 
@@ -84,15 +84,6 @@ var windowsUserRuntimeMachineMutexTimeout = 90 * time.Second
 const windowsUserRuntimeMachineMutexSDDL = "D:P(A;;GA;;;SY)(A;;GA;;;BA)"
 
 func acquireWindowsUserRuntimeMachineMutex(canonicalSID string) (func() error, error) {
-	name, err := windows.UTF16PtrFromString(
-		`Global\Cisco.DefenseClaw.EnterpriseHooks.` + strings.ToUpper(canonicalSID),
-	)
-	if err != nil {
-		return nil, fmt.Errorf(
-			"enterprise hooks: encode machine-wide runtime transaction lock name: %w",
-			err,
-		)
-	}
 	descriptor, err := windows.SecurityDescriptorFromString(windowsUserRuntimeMachineMutexSDDL)
 	if err != nil {
 		return nil, fmt.Errorf("enterprise hooks: build runtime transaction lock descriptor: %w", err)
@@ -101,50 +92,33 @@ func acquireWindowsUserRuntimeMachineMutex(canonicalSID string) (func() error, e
 		Length:             uint32(unsafe.Sizeof(windows.SecurityAttributes{})),
 		SecurityDescriptor: descriptor,
 	}
-	// A mutex belongs to the thread that acquired it, so keep this goroutine
-	// on its thread until the release below.
-	runtime.LockOSThread()
-	handle, err := windows.CreateMutex(attributes, false, name)
-	if err != nil && !errors.Is(err, windows.ERROR_ALREADY_EXISTS) {
-		if handle != 0 {
-			_ = windows.CloseHandle(handle)
-		}
-		runtime.UnlockOSThread()
+	// winmutex holds the mutex on one goroutine locked to its OS thread:
+	// only the owning thread can release a Windows mutex, and callers unlock
+	// from whatever thread their goroutine has moved to.
+	release, abandoned, err := winmutex.Acquire(
+		`Global\Cisco.DefenseClaw.EnterpriseHooks.`+strings.ToUpper(canonicalSID),
+		attributes,
+		windowsUserRuntimeMachineMutexTimeout,
+	)
+	if errors.Is(err, winmutex.ErrTimeout) {
+		return nil, fmt.Errorf(
+			"enterprise hooks: another DefenseClaw enterprise hook transaction for this target did not finish within %s",
+			windowsUserRuntimeMachineMutexTimeout,
+		)
+	}
+	if err != nil {
 		return nil, fmt.Errorf(
 			"enterprise hooks: acquire machine-wide runtime transaction lock: %w",
 			err,
 		)
 	}
-	timeout := uint32(windowsUserRuntimeMachineMutexTimeout / time.Millisecond)
-	event, err := windows.WaitForSingleObject(handle, timeout)
-	switch {
-	case err != nil:
-		_ = windows.CloseHandle(handle)
-		runtime.UnlockOSThread()
-		return nil, fmt.Errorf("enterprise hooks: wait for machine-wide runtime transaction lock: %w", err)
-	case event == windows.WAIT_OBJECT_0:
-	case event == windows.WAIT_ABANDONED:
+	if abandoned {
 		// The previous holder exited without releasing. Each transaction
 		// re-validates everything it touches, so taking over is safe.
 		managed.EmitResilienceEvent(managed.MarkerAccept, map[string]string{
 			"sid":    canonicalSID,
 			"reason": "runtime transaction lock was abandoned by a process that exited; taking it over",
 		})
-	default:
-		_ = windows.CloseHandle(handle)
-		runtime.UnlockOSThread()
-		return nil, fmt.Errorf(
-			"enterprise hooks: another DefenseClaw enterprise hook transaction for this target did not finish within %s",
-			windowsUserRuntimeMachineMutexTimeout,
-		)
 	}
-	return func() error {
-		releaseErr := windows.ReleaseMutex(handle)
-		closeErr := windows.CloseHandle(handle)
-		runtime.UnlockOSThread()
-		if releaseErr != nil {
-			return releaseErr
-		}
-		return closeErr
-	}, nil
+	return release, nil
 }

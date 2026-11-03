@@ -23,6 +23,91 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/enterprisestatus"
 )
 
+func TestWindowsEnterpriseDeploymentRecordOwnerMessages(t *testing.T) {
+	record := `C:\ProgramData\Cisco\DefenseClaw\install\deployment.json`
+	mismatch := "managed path owner/group do not match the exact canonical descriptor after ACL replacement: " + record
+	next := windowsEnterpriseDeploymentRecordOwnerNextStep()
+	for _, message := range []string{
+		windowsEnterpriseUntrustedDeploymentRecordMessage(windowsEnterpriseIgnoredDeploymentRecord{
+			profile: "standalone", path: record, reason: record + ": owner S-1-5-21-1001 is not trusted",
+		}),
+		mismatch + windowsEnterpriseRecordOwnerMismatchNextStep(mismatch),
+	} {
+		if !strings.Contains(message, record) || !strings.HasSuffix(message, next) {
+			t.Fatalf("message does not name the record and shared next step: %q", message)
+		}
+	}
+	for _, want := range []string{
+		"inspect the deployment record owner", "restore its expected owner",
+		"/uninstall FORCE=1 PURGE=1 JSON=1", "/ensure CONFIG=<config.yaml> JSON=1",
+	} {
+		if !strings.Contains(next, want) {
+			t.Fatalf("next step %q does not name %q", next, want)
+		}
+	}
+	if got := windowsEnterpriseRecordOwnerMismatchNextStep("managed path owner/group do not match the exact canonical descriptor after ACL replacement: C:\\ProgramData\\Cisco\\DefenseClaw\\etc\\config.yaml"); got != "" {
+		t.Fatalf("unrelated path gained record remedy: %q", got)
+	}
+}
+
+func TestWindowsEnterpriseUntrustedDeploymentRecordCases(t *testing.T) {
+	standalone := `C:\ProgramData\Cisco\DefenseClaw\install\deployment.json`
+	secureClient := `C:\ProgramData\Cisco\Cisco Secure Client\DefenseClaw\install\deployment.json`
+	for _, tc := range []struct {
+		name, profile, path, reason string
+		want                        []string
+		absent                      []string
+		exact                       string
+	}{
+		{
+			name:    "secure client record",
+			profile: "secure_client", path: secureClient,
+			reason: secureClient + `: owner S-1-5-21-1001 is not trusted`,
+			exact:  "ignored a deployment record an administrator did not write: " + secureClient + `: ` + secureClient + `: owner S-1-5-21-1001 is not trusted`,
+			absent: []string{"Standalone", "/uninstall", "/ensure", "Next step:"},
+		},
+		{
+			name:    "standalone owner",
+			profile: "standalone", path: standalone,
+			reason: standalone + `: owner S-1-5-21-1001 is not trusted`,
+			want:   []string{"inspect the deployment record owner", "restore its expected owner and group", "/uninstall FORCE=1 PURGE=1 JSON=1", "/ensure CONFIG=<config.yaml> JSON=1"},
+		},
+		{
+			name:    "standalone unsafe ACL",
+			profile: "standalone", path: standalone,
+			reason: standalone + `: untrusted Windows principal S-1-5-21-1001 has write-like access mask 0x2`,
+			want:   []string{"unsafe permissions", "StateRoot", "remove the untrusted deployment record", "/ensure CONFIG=<config.yaml> JSON=1"},
+			absent: []string{"restore its expected owner", "If /ensure still refuses"},
+		},
+		{
+			name:    "standalone reparse point",
+			profile: "standalone", path: standalone,
+			reason: standalone + `: reparse points are not allowed in enterprise deployment record path`,
+			want:   []string{"reparse point", "StateRoot", "remove the untrusted deployment record", "/ensure CONFIG=<config.yaml> JSON=1"},
+			absent: []string{"restore its expected owner", "If /ensure still refuses"},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			got := windowsEnterpriseUntrustedDeploymentRecordMessage(windowsEnterpriseIgnoredDeploymentRecord{
+				profile: tc.profile, path: tc.path, reason: tc.reason,
+			})
+			if tc.exact != "" && got != tc.exact {
+				t.Fatalf("message = %q, want exact %q", got, tc.exact)
+			}
+			for _, want := range tc.want {
+				if !strings.Contains(got, want) {
+					t.Fatalf("message %q lacks %q", got, want)
+				}
+			}
+			for _, absent := range tc.absent {
+				if strings.Contains(got, absent) {
+					t.Fatalf("message %q contains %q", got, absent)
+				}
+			}
+		})
+	}
+}
+
 // Verify with the guardian stopped names the repair that starts it again
 // (GAP-1072); with every service running it adds nothing.
 func TestWindowsEnterpriseStoppedServiceNextStep(t *testing.T) {

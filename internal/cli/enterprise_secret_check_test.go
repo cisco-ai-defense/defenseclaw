@@ -53,7 +53,7 @@ func errorCode(doc map[string]any) string {
 
 // #1320: `enterprise secret check` reports what inspection.ai_defense reports
 // once a request was answered: ok for an accepted key, exit 1 with
-// ai_defense_unavailable for a rejected one, and refusals before the request
+// ai_defense_rejected for a rejected one, and refusals before the request
 // as the failure document of the other secret verbs.
 func TestEnterpriseSecretCheckReportsTheKeyOutcome(t *testing.T) {
 	_, _, euid := anchorsInstallDevice(t)
@@ -74,7 +74,7 @@ func TestEnterpriseSecretCheckReportsTheKeyOutcome(t *testing.T) {
 
 	posture = "unavailable:auth_failed"
 	doc, _, code = runSecretCheck(t, "--name", "ai-defense-api-key", "--json")
-	if code != 1 || doc["ok"] != false || doc["ai_defense"] != "unavailable:auth_failed" || errorCode(doc) != "ai_defense_unavailable" || doc["exit_code"] != float64(1) {
+	if code != 1 || doc["ok"] != false || doc["ai_defense"] != "rejected" || errorCode(doc) != "ai_defense_rejected" || doc["exit_code"] != float64(1) {
 		t.Fatalf("rejected key: exit %d %v", code, doc)
 	}
 
