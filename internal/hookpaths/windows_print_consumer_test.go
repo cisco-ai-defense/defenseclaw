@@ -67,3 +67,28 @@ func TestWindowsPrintFeedingAConsumerKeepsItsPatterns(t *testing.T) {
 		}
 	}
 }
+
+func TestGAP0227WindowsWrappedShellReaderStandalone(t *testing.T) {
+	const home = `C:\Users\b00`
+	for _, row := range []struct {
+		command string
+		want    string
+	}{
+		{"echo 'cp a.txt .ssh/authorized_k*' | env bash", "protected-target"},
+		{"printf 'cp a.txt .ssh/authorized_k*' | env -C ~ sh", "protected-target"},
+		{"echo 'cp a.txt .ssh/authorized_k*' | env -u X pwsh -Command -", "protected-target"},
+		{"echo 'cp a.txt .ssh/authorized_k*' | env X=1 -- bash", "protected-target"},
+		{"echo 'cp a.txt .ssh/authorized_k*' | env -- X=1 bash", "protected-target"},
+		{"echo 'cp a.txt .ssh/authorized_k*' | env -S 'bash -s'", "protected-target"},
+		{"echo 'cp a.txt .ssh/authorized_k*' | env --split-string='bash -s'", "protected-target"},
+		{"echo 'cp a.txt .ssh/authorized_k*' | env --chdir=. bash", "protected-target"},
+		{"echo 'git status' | env bash", ""},
+		{"echo 'cp a.txt .ssh/authorized_k*' | env -S 'cat -n'", ""},
+	} {
+		for _, dialect := range []actionfacts.Dialect{"", actionfacts.DialectPowerShell} {
+			if got := ActionCommandDecisionWithDialectAndGlobFacts(row.command, home, home, dialect, nil); got != row.want {
+				t.Errorf("dialect %q command %q = %q, want %q", dialect, row.command, got, row.want)
+			}
+		}
+	}
+}

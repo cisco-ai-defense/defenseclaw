@@ -3599,7 +3599,13 @@ func actionWindowsPrintOnlyDisplays(scan actionWindowsScanResult, start, end int
 		if k >= len(words) {
 			return false
 		}
-		if !actionWindowsDisplaySinks[programBase(words[k])] {
+		// env -S can launch a named text display program. Keep this
+		// spelling narrow: an explicitly named executable or a different
+		// command may interpret its input as a script (GAP-0227).
+		if words[k] == "env" && k+2 < len(words) && words[k+1] == "-S" && words[k+2] == "cat -n" &&
+			(k+3 == len(words) || words[k+3] == "|" || words[k+3] == ";" || words[k+3] == "&" || words[k+3] == "&&" || words[k+3] == "||") {
+			k += 2
+		} else if !actionWindowsDisplaySinks[programBase(words[k])] {
 			return false
 		}
 		// A sink stage that keeps or forwards what it shows (-OutVariable,
