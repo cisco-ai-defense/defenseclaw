@@ -1333,11 +1333,10 @@ func validateWindowsManagedHooksGuardianActivation(
 	expected := make([]enterpriseHookReconcileRow, 0, len(ctx.targets))
 	active := make([]enterpriseHookReconcileRow, 0, len(ctx.targets))
 	pendingTargets := make([]windowsManagedHooksTeardownTarget, 0, len(ctx.targets))
-	// awaitingSignIn counts the failed rows of deferred targets an earlier
-	// release protected that wait for their signed-out account's next
-	// sign-in (enterpriseHookAwaitingSignInPrefix, GAP-0644), and of those
-	// whose signed-out account's DefenseClaw folder is untrusted (GAP-0211).
-	awaitingSignIn := 0
+	// excusedFailures counts failed rows whose prior protected target is
+	// still enrolled and whose account-specific condition leaves the other
+	// targets' teardown coverage intact.
+	excusedFailures := 0
 	for _, target := range ctx.targets {
 		key := strings.ToLower(target.Connector) + "\x00" + strings.ToUpper(target.SID)
 		if _, exists := targetsByKey[key]; exists {
@@ -1369,7 +1368,8 @@ func validateWindowsManagedHooksGuardianActivation(
 		// at that account's next sign-in, and a 1.0.2 guardian records it
 		// that way (#1105, GAP-0211). Any other failed row is still refused.
 		_, untrustedFolder := enterpriseHookSignedOutUntrustedFolder(row, target.DataDir)
-		waiting := target.Deferred && (enterpriseHookAwaitingSignInError(row) || untrustedFolder)
+		waiting := (target.Deferred && (enterpriseHookAwaitingSignInError(row) || untrustedFolder)) ||
+			(enterprisehooks.WindowsStandaloneProcess() && enterpriseHookAccountLinkRowStandalone(row))
 		if row.OK == row.Pending && !waiting {
 			// Name the row and the guardian's own error so the refusal says
 			// what to repair (GAP-0571).
@@ -1415,9 +1415,9 @@ func validateWindowsManagedHooksGuardianActivation(
 		}
 		if waiting {
 			if row.Result != nil {
-				return nil, errors.New("protected Guardian target waiting for a sign-in contains contradictory runtime evidence")
+				return nil, errors.New("protected Guardian target with an excused account condition contains contradictory runtime evidence")
 			}
-			awaitingSignIn++
+			excusedFailures++
 		}
 		active = append(active, enterpriseHookReconcileRow{
 			SID:       target.SID,
@@ -1453,18 +1453,18 @@ func validateWindowsManagedHooksGuardianActivation(
 	if activation.Version != enterpriseHookGuardianActivationVersion ||
 		!validEnterpriseHookHex(activation.ReconcileID, 16) ||
 		authorization.Version != 1 || state.Version != 1 || activationTimeErr != nil ||
-		activation.OK != (awaitingSignIn == 0) || activation.FailureCount != awaitingSignIn ||
-		activation.SuccessCount != len(active)-awaitingSignIn ||
+		activation.OK != (excusedFailures == 0) || activation.FailureCount != excusedFailures ||
+		activation.SuccessCount != len(active)-excusedFailures ||
 		activation.PendingCount != len(pendingTargets) ||
 		activation.TargetCount != len(ctx.targets) ||
 		len(activation.ProtectedTargets) != len(active) ||
-		authorization.OK != (awaitingSignIn == 0) || authorization.FailureCount != awaitingSignIn ||
-		authorization.SuccessCount != len(active)-awaitingSignIn ||
+		authorization.OK != (excusedFailures == 0) || authorization.FailureCount != excusedFailures ||
+		authorization.SuccessCount != len(active)-excusedFailures ||
 		authorization.PendingCount != len(pendingTargets) ||
 		authorization.TargetCount != len(ctx.targets) ||
 		len(authorization.ProtectedTargets) != len(active) ||
-		state.OK != (awaitingSignIn == 0) || state.FailureCount != awaitingSignIn ||
-		state.SuccessCount != len(active)-awaitingSignIn || state.PendingCount != len(pendingTargets) ||
+		state.OK != (excusedFailures == 0) || state.FailureCount != excusedFailures ||
+		state.SuccessCount != len(active)-excusedFailures || state.PendingCount != len(pendingTargets) ||
 		state.TargetCount != len(ctx.targets) ||
 		len(state.Results) != len(ctx.targets) ||
 		activation.UpdatedAt == "" || activation.UpdatedAt != authorization.UpdatedAt ||

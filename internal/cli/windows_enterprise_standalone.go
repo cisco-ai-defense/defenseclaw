@@ -1862,7 +1862,7 @@ func addWindowsEnterpriseUserStateWarning(result *enterprisestatus.Result, repor
 	for _, entry := range windowsEnterpriseReportStrings(report.UserStatePurged) {
 		result.Changes = append(result.Changes, windowsEnterprisePurgedUserStateChange(entry))
 	}
-	var notLocalSystem, pathEntryKept, keptForRegistrations, remaining []string
+	var notLocalSystem, pathEntryKept, keptForRegistrations, accountLinksKept, remaining []string
 	for _, entry := range windowsEnterpriseReportStrings(report.UserStateRemaining) {
 		if account, found := strings.CutSuffix(entry, ": "+windowsManagedHooksNotLocalSystemReason); found {
 			notLocalSystem = append(notLocalSystem, account)
@@ -1870,6 +1870,10 @@ func addWindowsEnterpriseUserStateWarning(result *enterprisestatus.Result, repor
 		}
 		if account, found := strings.CutSuffix(entry, ": "+windowsManagedHooksKeptForRegistrationsReason); found {
 			keptForRegistrations = append(keptForRegistrations, account)
+			continue
+		}
+		if account, found := strings.CutSuffix(entry, ": "+windowsManagedHooksAccountLinkKeptReason); found {
+			accountLinksKept = append(accountLinksKept, account)
 			continue
 		}
 		if account, found := strings.CutSuffix(entry, ": "+windowsManagedHooksSignedOutPathEntryReason); found {
@@ -1913,6 +1917,11 @@ func addWindowsEnterpriseUserStateWarning(result *enterprisestatus.Result, repor
 			windowsEnterpriseLocalSystemRemedy("/uninstall PURGE=1"),
 			windowsEnterpriseBoundedLabels(keptForRegistrations),
 		))
+	}
+	if len(accountLinksKept) > 0 {
+		result.AddWarning("per_user_state_remaining", fmt.Sprintf(
+			"--purge left the account-owned link at the DefenseClaw folder of %d account(s) as found. Accounts: %s",
+			len(accountLinksKept), windowsEnterpriseBoundedLabels(accountLinksKept)))
 	}
 	if len(remaining) > 0 {
 		result.AddError("per_user_state_remaining", windowsEnterpriseUserStateRemainingMessage(

@@ -145,7 +145,7 @@ try {
                     $utf8
                 )
             }
-            function Set-TestGuardian([bool]$Ok, [string]$ManifestSHA256, [int64]$TargetCount, [int64]$Failures = 0, [string]$StateStamp = '', [switch]$NoAuthorization, [switch]$Stale, [object[]]$Results = @(), [int64]$RemovedAccountFailures = 0, [int64]$AwaitingSignInFailures = 0) {
+            function Set-TestGuardian([bool]$Ok, [string]$ManifestSHA256, [int64]$TargetCount, [int64]$Failures = 0, [string]$StateStamp = '', [switch]$NoAuthorization, [switch]$Stale, [object[]]$Results = @(), [int64]$RemovedAccountFailures = 0, [int64]$AwaitingSignInFailures = 0, [int64]$AccountLinkFailures = 0) {
                 $stamp = '2026-09-27T15:55:44Z'
                 if ([string]::IsNullOrEmpty($StateStamp)) {
                     $StateStamp = $stamp
@@ -186,6 +186,9 @@ try {
                 }
                 if ($AwaitingSignInFailures -gt 0) {
                     $report['awaiting_sign_in_failures'] = $AwaitingSignInFailures
+                }
+                if ($AccountLinkFailures -gt 0) {
+                    $report['account_link_failures'] = $AccountLinkFailures
                 }
                 $script:TestGuardianReport = [pscustomobject]$report
             }
@@ -274,6 +277,25 @@ try {
             Assert-TestSyncRefuses 'guardian still on the old manifest' 'guardian'
             Set-TestGuardian $false $republishedSHA256 2 1
             Assert-TestSyncRefuses 'guardian reconcile failed' 'marker'
+            $linkHealthy = [pscustomobject]@{ user = 'bob'; sid = 'S-1-5-21-1-2-3-1017'; connector = 'codex'; ok = $true }
+            $accountLink = [pscustomobject]@{
+                user = 'alice'; sid = 'S-1-5-21-1-2-3-1018'; connector = 'claudecode'; ok = $false
+                error = 'enterprise hooks: the account''s own DefenseClaw folder link is pending repair'
+            }
+            Set-TestGuardian $false $republishedSHA256 2 1 -Results @($linkHealthy, $accountLink) -AccountLinkFailures 1
+            $adoption = Get-DefenseClawStandaloneManifestAdoption `
+                -Layout $layout -GatewayServiceName 'DefenseClawGateway' `
+                -Activation $activation -InstalledManifestSHA256 $republishedSHA256
+            if (-not [bool]$adoption.ok -or [int64]$adoption.target_count -ne 2) {
+                $failures.Add("one account's folder link refused adoption: $($adoption.reason)")
+            }
+            Set-TestGuardian $false $republishedSHA256 2 1 -Results @($linkHealthy, $accountLink)
+            Assert-TestSyncRefuses 'account link without trusted count' 'failure-free reconcile'
+            Set-TestGuardian $false $republishedSHA256 2 1 -Results @($linkHealthy, [pscustomobject]@{
+                    user = 'alice'; sid = 'S-1-5-21-1-2-3-1018'; connector = 'claudecode'; ok = $false
+                    error = 'another account failure'
+                }) -AccountLinkFailures 1
+            Assert-TestSyncRefuses 'account link count for another failure' 'account-link count does not match'
             # A failure that lasts until a signed-out account signs in names
             # that account instead of asking for a retry.
             $signedOut = [pscustomobject]@{

@@ -260,6 +260,8 @@ const windowsManagedHooksSignedOutPathEntryReason = "only its user Path entry fo
 // restore them, so the purge keeps it on purpose.
 const windowsManagedHooksKeptForRegistrationsReason = "kept: the account's agent registrations were not all removed, and its connector_backups restore them"
 
+const windowsManagedHooksAccountLinkKeptReason = "kept: the account owns a link at its DefenseClaw folder; the link and its contents were left as found"
+
 // windowsManagedHooksUserBinariesReason is the user_state_remaining reason of
 // a failed per-user binaries purge.
 func windowsManagedHooksUserBinariesReason(err error) string {
@@ -367,6 +369,15 @@ func windowsManagedHooksStandaloneUserState(
 			reason = windowsManagedHooksKeptForRegistrationsReason
 		default:
 			err := windowsManagedHooksStandaloneUserStatePurger(home, sid, target.DataDir)
+			if errors.Is(err, enterprisehooks.ErrWindowsUserStateOnlyLink) &&
+				sameWindowsEnterprisePathCLI(dataDir, filepath.Join(home, ".defenseclaw")) &&
+				windowsEnterpriseAccountOwnedDataDirLink(home, sid) {
+				if _, binaryErr := windowsManagedHooksStandaloneUserBinariesPurger(home, sid); binaryErr != nil {
+					remaining = append(remaining, label+": "+windowsManagedHooksUserBinariesReason(binaryErr))
+				}
+				remaining = append(remaining, label+": "+windowsManagedHooksAccountLinkKeptReason)
+				continue
+			}
 			var binaries []string
 			if err == nil {
 				binaries, err = windowsManagedHooksStandaloneUserBinariesPurger(home, sid)

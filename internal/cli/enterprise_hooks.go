@@ -797,7 +797,34 @@ var (
 	enterpriseHookReconcileDeferredSessionAvailable = enterpriseHookDeferredTargetSessionAvailable
 	enterpriseHookReconcileStageDeferredPolicies    = stageEnterpriseHookDeferredManagedPolicies
 	enterpriseHookReconcileSyncEnrollments          = syncEnterpriseHookManagedEnrollments
+	enterpriseHookAccountOwnedDataDirLink           = enterpriseHookAccountOwnedDataDirLinkPlatform
 )
+
+const enterpriseHookAccountLinkFailure = "enterprise hooks: the account's own DefenseClaw folder link is pending repair"
+
+func enterpriseHookTargetAccountLink(target enterprisehooks.ManifestTarget, home, sid string) bool {
+	if cfg == nil || !cfg.StandaloneEnterprise() || cfg.SecureClientIntegration() ||
+		strings.TrimSpace(home) == "" || strings.TrimSpace(sid) == "" {
+		return false
+	}
+	dataDir := strings.TrimSpace(target.DataDir)
+	if dataDir == "" || !sameEnterpriseHookPath(dataDir, filepath.Join(home, ".defenseclaw")) {
+		return false
+	}
+	return enterpriseHookAccountOwnedDataDirLink(home, sid)
+}
+
+func enterpriseHookAccountLinkRow(row enterpriseHookReconcileRow) bool {
+	return cfg != nil && cfg.StandaloneEnterprise() && !cfg.SecureClientIntegration() &&
+		enterpriseHookAccountLinkRowStandalone(row)
+}
+
+func enterpriseHookAccountLinkRowStandalone(row enterpriseHookReconcileRow) bool {
+	return !row.OK && !row.Pending && row.Result == nil &&
+		row.Error == enterpriseHookAccountLinkFailure &&
+		strings.TrimSpace(row.UserHome) != "" && strings.TrimSpace(row.SID) != "" &&
+		enterpriseHookAccountOwnedDataDirLink(row.UserHome, row.SID)
+}
 
 // enterpriseHookAwaitingSignInPrefix starts the guardian error of a target
 // an earlier DefenseClaw release protected that fails this release's
@@ -1159,14 +1186,15 @@ type enterpriseHookStatusReport struct {
 	Enrollment []enterpriseHookEnrollment `json:"enrollment,omitempty"`
 	Errors     []string                   `json:"errors,omitempty"`
 	// Warnings name rows that do not fail the host: those of a deleted
-	// account and those waiting for their account's next sign-in
+	// account, an account-owned folder link, and those waiting for sign-in
 	// (enterpriseHookExcusedFailures).
 	Warnings []string `json:"warnings,omitempty"`
-	// RemovedAccountFailures and AwaitingSignInFailures count those rows, so
+	// The three failure counts identify those rows, so
 	// the Windows lifecycle's manifest adoption accepts exactly them, as
 	// verify does.
 	RemovedAccountFailures int `json:"removed_account_failures,omitempty"`
 	AwaitingSignInFailures int `json:"awaiting_sign_in_failures,omitempty"`
+	AccountLinkFailures    int `json:"account_link_failures,omitempty"`
 }
 
 // enterpriseHookEnrollment is one account's connectors in the last
@@ -1336,8 +1364,8 @@ func runEnterpriseHooksStatus(cmd *cobra.Command, _ []string) error {
 		report.Errors = append(report.Errors, "hook guardian has not completed a reconcile")
 	} else {
 		report.State = &state
-		report.RemovedAccountFailures, report.AwaitingSignInFailures = enterpriseHookExcusedFailures(state)
-		excusedFailures = report.RemovedAccountFailures + report.AwaitingSignInFailures
+		report.RemovedAccountFailures, report.AwaitingSignInFailures, report.AccountLinkFailures = enterpriseHookExcusedFailures(state)
+		excusedFailures = report.RemovedAccountFailures + report.AwaitingSignInFailures + report.AccountLinkFailures
 		for _, row := range state.Results {
 			if row.OK || row.Pending {
 				continue
@@ -1347,6 +1375,8 @@ func runEnterpriseHooksStatus(cmd *cobra.Command, _ []string) error {
 			case excusedFailures == 0:
 				report.Errors = append(report.Errors, issue)
 			case enterpriseHookAwaitingSignInRow(row):
+				report.Warnings = append(report.Warnings, issue)
+			case enterpriseHookAccountLinkRow(row):
 				report.Warnings = append(report.Warnings, issue)
 			default:
 				report.Warnings = append(report.Warnings, issue+enterpriseHookRemovedAccountNote)
@@ -1415,7 +1445,7 @@ func runEnterpriseHooksStatus(cmd *cobra.Command, _ []string) error {
 	}
 	if report.OK {
 		fmt.Fprintf(cmd.OutOrStdout(), "  %s enterprise hook guardian healthy (%d verified, %d pending, %d total)\n",
-			Style("✓", "fg=green", "bold"), state.SuccessCount, state.PendingCount+report.AwaitingSignInFailures, state.TargetCount)
+			Style("✓", "fg=green", "bold"), state.SuccessCount, state.PendingCount+report.AwaitingSignInFailures+report.AccountLinkFailures, state.TargetCount)
 		for _, warning := range report.Warnings {
 			fmt.Fprintf(cmd.OutOrStdout(), "  %s %s\n", Style("•", "fg=yellow", "bold"), warning)
 		}
@@ -1496,12 +1526,11 @@ func enterpriseHookManifestActivationIssue(
 
 // enterpriseHookExcusedFailures counts the failed rows of the last reconcile
 // that do not fail the host: those of an account confirmed removed by the
-// platform (enterpriseHookRemovedAccountRow), which the enumerator
-// eventually drops, and those waiting for their signed-out account's next
-// sign-in (enterpriseHookAwaitingSignInRow). Both counts are 0 unless every
-// failed row is one of them; status and verify then report them as
+// platform, those waiting for their signed-out account's next sign-in, and
+// an account-owned folder link the guardian left untouched. All counts are
+// 0 unless every failed row is one of them; status and verify report them as
 // warnings instead of failing the whole host.
-func enterpriseHookExcusedFailures(state enterpriseHookGuardianState) (removed, awaiting int) {
+func enterpriseHookExcusedFailures(state enterpriseHookGuardianState) (removed, awaiting, linked int) {
 	for _, row := range state.Results {
 		if row.OK || row.Pending {
 			continue
@@ -1511,14 +1540,16 @@ func enterpriseHookExcusedFailures(state enterpriseHookGuardianState) (removed, 
 			removed++
 		case enterpriseHookAwaitingSignInRow(row):
 			awaiting++
+		case enterpriseHookAccountLinkRow(row):
+			linked++
 		default:
-			return 0, 0
+			return 0, 0, 0
 		}
 	}
-	if removed+awaiting != state.FailureCount {
-		return 0, 0
+	if removed+awaiting+linked != state.FailureCount {
+		return 0, 0, 0
 	}
-	return removed, awaiting
+	return removed, awaiting, linked
 }
 
 // enterpriseHookAwaitingSignInRow reports, on a standalone or Secure Client
@@ -2368,8 +2399,8 @@ func runEnterpriseHookVerifyAttemptWithScope(ctx context.Context, registrationOn
 				recorded[key] = row
 			}
 		}
-		removed, awaiting := enterpriseHookExcusedFailures(guardianState)
-		excused = removed + awaiting
+		removed, awaiting, linked := enterpriseHookExcusedFailures(guardianState)
+		excused = removed + awaiting + linked
 		for _, row := range guardianState.Results {
 			if awaiting > 0 && enterpriseHookAwaitingSignInRow(row) {
 				awaitingSignIn[enterpriseHookProtectedTargetKey(row)] = row.Error
@@ -2488,6 +2519,11 @@ func runEnterpriseHookVerifyAttemptWithScope(ctx context.Context, registrationOn
 				continue
 			}
 		}
+		if targetErr == nil && previousProtection.PreviouslyProtected &&
+			recorded[enterpriseHookProtectedTargetKey(row)].Error == enterpriseHookAccountLinkFailure &&
+			enterpriseHookTargetAccountLink(target, resolved.home, resolved.sid) {
+			targetErr = errors.New(enterpriseHookAccountLinkFailure)
+		}
 		token := ""
 		otlpToken := ""
 		if targetErr == nil {
@@ -2591,7 +2627,11 @@ func runEnterpriseHookVerifyAttemptWithScope(ctx context.Context, registrationOn
 				}
 				run.RecordedProtected[enterpriseHookProtectedTargetKey(row)] = true
 			}
-			if excused > 0 && enterpriseHookRemovedAccountRow(row) {
+			if excused > 0 && row.Error == enterpriseHookAccountLinkFailure &&
+				enterpriseHookAccountLinkRow(recorded[enterpriseHookProtectedTargetKey(row)]) &&
+				enterpriseHookTargetAccountLink(target, row.UserHome, row.SID) {
+				run.Excused = append(run.Excused, row)
+			} else if excused > 0 && enterpriseHookRemovedAccountRow(row) {
 				run.Excused = append(run.Excused, row)
 			} else if excused > 0 && enterpriseHookVerifyAwaitingSignIn(awaitingSignIn, target, row) {
 				run.Excused = append(run.Excused, row)
@@ -2941,6 +2981,7 @@ func runEnterpriseHookReconcileOnce(ctx context.Context) (enterpriseHookReconcil
 	// awaitingSignIn counts the failures that wait for their signed-out
 	// account's next sign-in (errEnterpriseHookAwaitingSignIn).
 	awaitingSignIn := 0
+	accountLinks := 0
 	pending := 0
 	repairs := 0
 	var restored []enterpriseHookGuardianRestore
@@ -3008,6 +3049,13 @@ func runEnterpriseHookReconcileOnce(ctx context.Context) (enterpriseHookReconcil
 				rows = append(rows, row)
 				continue
 			}
+		}
+		if err == nil && previousProtection.PreviouslyProtected &&
+			enterpriseHookTargetAccountLink(target, resolved.home, resolved.sid) {
+			// The link itself belongs to this account. Leave its contents
+			// untouched and record the account as unprotected; the other
+			// targets can still establish their own protected coverage.
+			err = errors.New(enterpriseHookAccountLinkFailure)
 		}
 		if err == nil {
 			token, otlpToken, err = enterpriseHookTargetTokens(cfg.DataDir, target.Connector, resolved.sid, true)
@@ -3131,6 +3179,9 @@ func runEnterpriseHookReconcileOnce(ctx context.Context) (enterpriseHookReconcil
 			if errors.Is(err, errEnterpriseHookAwaitingSignIn) {
 				awaitingSignIn++
 			}
+			if err.Error() == enterpriseHookAccountLinkFailure {
+				accountLinks++
+			}
 			row.OK = false
 			row.Error = err.Error()
 		}
@@ -3198,14 +3249,11 @@ func runEnterpriseHookReconcileOnce(ctx context.Context) (enterpriseHookReconcil
 		writeEnterpriseHookGuardianNotices(os.Stderr, cfg.DataDir, notices)
 	}
 
-	// A target an earlier release protected that waits for its signed-out
-	// account (GAP-0644) keeps the SID enrollment that release published, and
-	// the exact set covers every enabled target, so such failures alone do
-	// not hold back staging new pending targets or publishing the exact set.
-	// Without that, one account that never signs in again keeps every new
-	// target unenrolled and verify failing. Any other failure blocks both.
+	// A target waiting for its account's sign-in, or an account-owned folder
+	// link left for that account, does not hold back exact machine enrollment
+	// for the other targets. Every other failure blocks publication.
 	var enrollmentErr error
-	if failures == awaitingSignIn {
+	if failures == awaitingSignIn+accountLinks {
 		enrollmentErr = enterpriseHookReconcileStageDeferredPolicies(
 			manifest,
 			pendingTargets,

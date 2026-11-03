@@ -214,7 +214,7 @@ func TestEnterpriseHookReconcilePublishesExactEnrollmentWhileAccountsAwaitSignIn
 			Enterprise:     config.EnterpriseConfig{Profile: managed.ProfileStandalone},
 		}
 		defer func() { cfg = reconcileCfg }()
-		removed, awaiting = enterpriseHookExcusedFailures(state)
+		removed, awaiting, _ = enterpriseHookExcusedFailures(state)
 		return removed, awaiting, state
 	}
 

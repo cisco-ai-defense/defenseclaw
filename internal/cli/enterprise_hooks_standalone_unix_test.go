@@ -2061,7 +2061,7 @@ func TestStandaloneUnixRemovedAccountRowIsExcused(t *testing.T) {
 		{User: "carol", Connector: "claudecode", Error: `enterprise hooks: target account "carol" does not exist: no such account`},
 	}}
 	removedAccountFailures := func(state enterpriseHookGuardianState) int {
-		removed, _ := enterpriseHookExcusedFailures(state)
+		removed, _, _ := enterpriseHookExcusedFailures(state)
 		return removed
 	}
 	if got := removedAccountFailures(state); got != 1 {

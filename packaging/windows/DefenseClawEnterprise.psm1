@@ -25610,9 +25610,10 @@ function Get-DefenseClawStandaloneManifestAdoption {
     if ($awaitingSignIn -gt 0) {
         $excused += $awaitingSignIn
     }
-    # A reconcile that fails only because each failed target's account is
-    # signed out stays failed until that account signs in, so a retry cannot
-    # help: name the accounts, and say what to do first.
+    $accountLinks = [Math]::Max([int64](& $count $report 'account_link_failures'), [int64]0)
+    $excused += $accountLinks
+    # A signed-out account remains pending until it signs in; name those
+    # accounts and the next step in the adoption result.
     $signedOut = [Collections.Generic.List[string]]::new()
     $otherFailure = $false
     # A signed-out account whose only failure is its DefenseClaw folder's
@@ -25629,6 +25630,7 @@ function Get-DefenseClawStandaloneManifestAdoption {
     # signed-out one: repair said to remove its profile and run again, which
     # could never pass because the profile was already gone (GAP-1657).
     $removedRows = [int64]0
+    $accountLinkRows = [int64]0
     foreach ($row in @(& $field $records.state 'results')) {
         if ($null -eq $row -or
             [bool](& $field $row 'ok') -or
@@ -25637,6 +25639,12 @@ function Get-DefenseClawStandaloneManifestAdoption {
         }
         if ([string](& $field $row 'error') -match 'no longer exists: the account was deleted or its profile folder removed') {
             $removedRows++
+            continue
+        }
+        if ([string](& $field $row 'error') -ceq
+            'enterprise hooks: the account''s own DefenseClaw folder link is pending repair' -and
+            $accountLinks -gt 0) {
+            $accountLinkRows++
             continue
         }
         if (([string](& $field $row 'error')).Trim().StartsWith(
@@ -25681,6 +25689,9 @@ function Get-DefenseClawStandaloneManifestAdoption {
             $signedOut.Add($account)
         }
     }
+    if ($accountLinkRows -ne $accountLinks) {
+        return & $result $false 'the guardian account-link count does not match its failed rows' -1
+    }
     if ($removedRows -gt 0) {
         # The gateway may already count them in removed_account_failures.
         $gatewayRemoved = [Math]::Max([int64](& $count $report 'removed_account_failures'), [int64]0)
@@ -25698,7 +25709,7 @@ function Get-DefenseClawStandaloneManifestAdoption {
     if ($folderRows -gt 0) {
         # Every failed row must be one of these, a waiting row or a removed
         # account's row; any other failure keeps the adoption refused.
-        $excused = $folderRows + $waitingRows + $removedRows
+        $excused = $folderRows + $waitingRows + $removedRows + $accountLinkRows
     }
     $nextStep = ''
     if ($signedOut.Count -gt 0 -and -not $otherFailure) {

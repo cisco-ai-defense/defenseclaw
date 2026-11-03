@@ -39,7 +39,8 @@ func PurgeWindowsUserState(rawHome, rawSID, rawDataDir string) error {
 	if err != nil {
 		return err
 	}
-	failures := []error{purgeWindowsUserStateFolder(home, sid, dataDir)}
+	rootErr := purgeWindowsUserStateFolder(home, sid, dataDir)
+	failures := []error{rootErr}
 	// A rolled-back enrollment can keep a copy of the folder aside as
 	// .defenseclaw.rollback-<random> beside it; that is DefenseClaw per-user
 	// data too (GAP-1567).
@@ -48,8 +49,25 @@ func PurgeWindowsUserState(rawHome, rawSID, rawDataDir string) error {
 	for _, folder := range kept {
 		failures = append(failures, purgeWindowsUserStateFolder(home, sid, folder))
 	}
+	if errors.Is(rootErr, errWindowsUserStateLinkedFolder) {
+		_, joined := rootErr.(interface{ Unwrap() []error })
+		sole := !joined
+		for _, failure := range failures[1:] {
+			sole = sole && failure == nil
+		}
+		if sole {
+			return fmt.Errorf("%w: %v", ErrWindowsUserStateOnlyLink, rootErr)
+		}
+	}
 	return errors.Join(failures...)
 }
+
+// ErrWindowsUserStateOnlyLink means the canonical per-user folder was a
+// link and all other purge work succeeded. The caller checks that the link
+// itself belongs to the account before reporting the folder as left.
+var ErrWindowsUserStateOnlyLink = errors.New("enterprise hooks: per-user folder link left as found")
+
+var errWindowsUserStateLinkedFolder = errors.New("enterprise hooks: linked per-user folder")
 
 // windowsUserStateRollbackFolders lists the .defenseclaw.rollback-<random>
 // folders a rolled-back enrollment kept in home.
@@ -86,7 +104,7 @@ func purgeWindowsUserStateFolder(home string, sid *windows.SID, dataDir string) 
 	if err != nil || rel == "." || rel == ".." || strings.HasPrefix(rel, `..\`) {
 		return fmt.Errorf("enterprise hooks: refusing to purge %s, which is not below the profile %s", dataDir, home)
 	}
-	linked := fmt.Errorf("enterprise hooks: refusing to purge %s, which is reached through a link or junction; left as found", dataDir)
+	linked := fmt.Errorf("%w: refusing to purge %s, which is reached through a link or junction; left as found", errWindowsUserStateLinkedFolder, dataDir)
 	if err := inventoryDACLRejectLinkBelow(home, rel); errors.Is(err, errInventoryDACLLink) {
 		return linked
 	} else if err != nil {
