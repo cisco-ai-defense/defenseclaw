@@ -62,7 +62,7 @@ func copyBraceWordFields(args []*syntax.Word, static []bool, env expand.Environ)
 			return nil
 		}
 		var expanded []string
-		if actionHasPaddedBraceRange(braced.Parts) {
+		if actionHasExactBraceRange(braced.Parts) {
 			var ok bool
 			expanded, ok = actionPaddedBraceFields(&braced, env)
 			if !ok {
@@ -206,18 +206,30 @@ func actionPaddedNumber(value string) bool {
 	return len(value) > 1 && value[0] == '0'
 }
 
-func actionHasPaddedBraceRange(parts []syntax.WordPart) bool {
+func actionHasExactBraceRange(parts []syntax.WordPart) bool {
 	for _, part := range parts {
 		brace, ok := part.(*syntax.BraceExp)
 		if !ok {
 			continue
 		}
-		if brace.Sequence && len(brace.Elems) >= 2 &&
-			(actionPaddedNumber(brace.Elems[0].Lit()) || actionPaddedNumber(brace.Elems[1].Lit())) {
-			return true
+		if brace.Sequence && len(brace.Elems) >= 2 {
+			if actionPaddedNumber(brace.Elems[0].Lit()) || actionPaddedNumber(brace.Elems[1].Lit()) {
+				return true
+			}
+			// expand.Fields treats a step whose sign opposes the range
+			// direction as a unit step. Bash uses its magnitude. Read all
+			// stepped numeric ranges here so skipped names stay skipped.
+			if len(brace.Elems) > 2 {
+				_, fromErr := strconv.Atoi(brace.Elems[0].Lit())
+				_, toErr := strconv.Atoi(brace.Elems[1].Lit())
+				_, stepErr := strconv.Atoi(brace.Elems[2].Lit())
+				if fromErr == nil && toErr == nil && stepErr == nil {
+					return true
+				}
+			}
 		}
 		for _, elem := range brace.Elems {
-			if actionHasPaddedBraceRange(elem.Parts) {
+			if actionHasExactBraceRange(elem.Parts) {
 				return true
 			}
 		}

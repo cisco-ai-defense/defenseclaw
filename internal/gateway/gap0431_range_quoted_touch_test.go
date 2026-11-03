@@ -38,6 +38,31 @@ func TestGAP0431PaddedRangeStepAndWidthFourCell(t *testing.T) {
 	}
 }
 
+func TestGAP0431SignedStepRangeFourCell(t *testing.T) {
+	rows := []struct{ name, link, command, want string }{
+		{"ascending-skipped-name", "1", `touch {-0..+005..-2}`, "allow"},
+		{"ascending-member", "2", `touch {-0..+005..-2}`, "block"},
+		{"descending-skipped-name", "2", `touch {+005..-0..2}`, "allow"},
+		{"descending-member", "3", `touch {+005..-0..2}`, "block"},
+	}
+	for _, row := range rows {
+		t.Run(row.name, func(t *testing.T) {
+			f := newB36ManagedHookFixture(t)
+			if err := os.Symlink(f.keys, filepath.Join(f.project, row.link)); err != nil {
+				t.Fatal(err)
+			}
+			payload := f.payload(t, row.command)
+			calls := everyMode(row.name, payload, f.clientHeader(t, payload))
+			f.answerAll(t, calls)
+			for _, call := range calls {
+				if call.verdict != row.want {
+					t.Errorf("%s: got %s, want %s", call.name, call.verdict, row.want)
+				}
+			}
+		})
+	}
+}
+
 func TestGAP0431QuotedTouchIdentityFourCell(t *testing.T) {
 	f := newB36ManagedHookFixture(t)
 	if err := os.Link(f.keys, filepath.Join(f.project, "alias[1]")); err != nil {

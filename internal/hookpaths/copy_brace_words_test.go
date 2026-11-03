@@ -167,3 +167,24 @@ func TestGAP0431PaddedBraceStepAndSignedWidth(t *testing.T) {
 		}
 	}
 }
+
+func TestGAP0431SignedStepBraceFields(t *testing.T) {
+	for _, row := range []struct {
+		command string
+		want    []string
+	}{
+		{`touch {-0..+005..-2}`, []string{"0", "2", "4"}},
+		{`touch {+005..-0..2}`, []string{"5", "3", "1"}},
+		{`touch {1..5..-2}`, []string{"1", "3", "5"}},
+		{`touch {5..1..2}`, []string{"5", "3", "1"}},
+	} {
+		file, ok := parseShell(row.command)
+		if !ok {
+			t.Fatalf("parse %q", row.command)
+		}
+		word := file.Stmts[0].Cmd.(*syntax.CallExpr).Args[1]
+		if got := actionMentionBraceFields(word, "/tmp/home"); !slices.Equal(got, row.want) {
+			t.Errorf("%q: got %v, want %v", row.command, got, row.want)
+		}
+	}
+}
