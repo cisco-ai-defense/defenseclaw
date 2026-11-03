@@ -51,6 +51,14 @@ func TestGAP0523FailedFilePassPreemptsHealthyEvent(t *testing.T) {
 }
 
 func TestGAP0523MixedBurstReplaysRecoveredTargetEvent(t *testing.T) {
+	testGAP0523MixedBurstReplaysRecoveredTargetEvent(t, false)
+}
+
+func TestR108CIBatch3MixedBurstRetainsFailedPathWithoutItsEvent(t *testing.T) {
+	testGAP0523MixedBurstReplaysRecoveredTargetEvent(t, true)
+}
+
+func testGAP0523MixedBurstReplaysRecoveredTargetEvent(t *testing.T, missedFailedEvent bool) {
 	restoreEnterpriseHooksLifecycleTestState(t)
 	previousReconcile := enterpriseHookWatchReconcileOnce
 	previousPlatformWatch := enterpriseHookWatchPlatformWatch
@@ -67,8 +75,17 @@ func TestGAP0523MixedBurstReplaysRecoveredTargetEvent(t *testing.T) {
 		enterpriseHookWatchRepairRetryMin, enterpriseHookWatchRepairRetryMax = previousRetryMin, previousRetryMax
 	})
 	dir := t.TempDir()
-	failedToken := filepath.Join(dir, ".hook-failed.token")
-	healthyToken := filepath.Join(dir, ".hook-healthy.token")
+	failedDir, healthyDir := dir, dir
+	if missedFailedEvent {
+		failedDir, healthyDir = filepath.Join(dir, "failed"), filepath.Join(dir, "healthy")
+		for _, path := range []string{failedDir, healthyDir} {
+			if err := os.Mkdir(path, 0o700); err != nil {
+				t.Fatal(err)
+			}
+		}
+	}
+	failedToken := filepath.Join(failedDir, ".hook-failed.token")
+	healthyToken := filepath.Join(healthyDir, ".hook-healthy.token")
 	const issued = "issued\n"
 	for _, path := range []string{failedToken, healthyToken} {
 		if err := os.WriteFile(path, []byte(issued), 0o600); err != nil {
@@ -91,6 +108,12 @@ func TestGAP0523MixedBurstReplaysRecoveredTargetEvent(t *testing.T) {
 		failedToken:  {enterpriseHookProtectedTargetKey(failed)},
 		healthyToken: {enterpriseHookProtectedTargetKey(healthy)},
 	}
+	watchDirs := []string{dir}
+	if missedFailedEvent {
+		// The failed target's file changes without a directory event;
+		// the healthy target still supplies the wakeup for both.
+		watchDirs = []string{healthyDir}
+	}
 	healthyRepaired := make(chan time.Time, 1)
 	failedRepaired := make(chan time.Time, 1)
 	calls := 0
@@ -98,7 +121,7 @@ func TestGAP0523MixedBurstReplaysRecoveredTargetEvent(t *testing.T) {
 		calls++
 		run := enterpriseHookReconcileRun{
 			Rows: []enterpriseHookReconcileRow{failed, healthy}, Failures: 1,
-			ManifestSHA256: "same", WatchDirs: []string{dir},
+			ManifestSHA256: "same", WatchDirs: watchDirs,
 			WatchExclusiveFiles: []string{failedToken, healthyToken}, WatchPathOwners: owners,
 		}
 		if calls >= 2 {

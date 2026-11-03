@@ -3817,6 +3817,17 @@ func runEnterpriseHooksWatch(cmd *cobra.Command, _ []string) error {
 		case <-debounce.C:
 			if debouncePending {
 				debouncePending = false
+				// If only a healthy path's event reached this loop, retain any
+				// failed owned path whose current state differs from the last
+				// reconcile. Save the old fingerprints now; check the files
+				// after the healthy pass so those reads cannot delay its repair.
+				var priorFailedSnapshot map[string]string
+				if !legacyWatch && debounceHasHealthyPath {
+					priorFailedSnapshot = make(map[string]string, len(failedOwnedPaths))
+					for path := range failedOwnedPaths {
+						priorFailedSnapshot[path] = ownedSnapshot[path]
+					}
+				}
 				reason := debounceReason
 				debounceReason = ""
 				if reason == "" {
@@ -3830,6 +3841,11 @@ func runEnterpriseHooksWatch(cmd *cobra.Command, _ []string) error {
 				interrupted, err := reconcileWatchPass(reason)
 				enterpriseHookReconcileRecheckWindow = 0
 				enterpriseHookReconcileRecheckPaths, enterpriseHookReconcileRecheckAll = nil, false
+				for path, before := range priorFailedSnapshot {
+					if failedOwnedPaths[path] && enterpriseHookOwnedFileFingerprint(path) != before {
+						deferredFailedPaths, deferredFailedAll = enterpriseHookWatchAddTriggerPath(deferredFailedPaths, deferredFailedAll, path)
+					}
+				}
 				if err != nil && !errors.Is(err, context.Canceled) {
 					fmt.Fprintf(cmd.ErrOrStderr(), "[hook-guardian] reconcile after %s failed: %s\n", reason, err)
 				}
