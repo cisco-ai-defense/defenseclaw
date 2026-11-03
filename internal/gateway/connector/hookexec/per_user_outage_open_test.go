@@ -130,7 +130,7 @@ func nativeOutageBlocked(r runResult) bool {
 // and only in the outage-open tier the current config selects.
 // The strict tier, strict availability, the install window, an answer the gateway gave (malformed, cut off, an error
 // status, an authentication refusal) and a gateway that took the call and did
-// not answer is allowed only in the open tier; an answered error stays closed.
+// not answer block in every tier.
 func TestPerUserNativeHookOutageOpenOnlyForAnOutage(t *testing.T) {
 	fastRestartRetries(t)
 	type scenario struct {
@@ -153,7 +153,7 @@ func TestPerUserNativeHookOutageOpenOnlyForAnOutage(t *testing.T) {
 					panic(err)
 				}
 			}},
-		{name: "gateway took the call and did not answer", opens: true, rt: func() *stubRT {
+		{name: "gateway took the call and did not answer", rt: func() *stubRT {
 			return &stubRT{err: fmt.Errorf("%w: %w", errGatewayTookCallNoAnswer, context.DeadlineExceeded)}
 		}},
 		{name: "malformed answer", rt: func() *stubRT { return ok(`{"action":"allow" garbage`) }},
@@ -197,11 +197,7 @@ func TestPerUserNativeHookOutageOpenOnlyForAnOutage(t *testing.T) {
 					if !wantRun || sc.name == "gateway up" {
 						return
 					}
-					repair := "defenseclaw-gateway start"
-					if sc.name == "gateway took the call and did not answer" {
-						repair = "defenseclaw-gateway restart"
-					}
-					for _, want := range []string{repair, "defenseclaw doctor", "fail mode open for an outage"} {
+					for _, want := range []string{"defenseclaw-gateway start", "defenseclaw doctor", "fail mode open for an outage"} {
 						if !strings.Contains(result.stdout+result.stderr, want) {
 							t.Fatalf("the outage warning does not name %q: stdout=%q stderr=%q", want, result.stdout, result.stderr)
 						}
