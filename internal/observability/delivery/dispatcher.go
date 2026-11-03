@@ -865,6 +865,33 @@ func (dispatcher *Dispatcher) deliver(payloads []Payload, encodedSize int, halfO
 				if dispatcher.config.LegacyCircuit {
 					dispatcher.counters.rejected.Add(uint64(len(payloads)))
 					dispatcher.release(payloads)
+				} else if dispatcher.config.RetryUntilClosed {
+					// Keep the same immutable batch charged while the destination
+					// is unavailable. The queue limits bound new intake.
+					dispatcher.counters.retried.Add(uint64(len(payloads)))
+					if !dispatcher.waitBackoff(attempt) {
+						dispatcher.releaseDropped(payloads)
+						return false
+					}
+					for {
+						if !dispatcher.waitCircuitCooldown() {
+							dispatcher.releaseDropped(payloads)
+							return false
+						}
+						mode, entered := dispatcher.circuitMode(dispatcher.nowUTC())
+						if mode == circuitDeliveryBlocked {
+							continue
+						}
+						if mode == circuitDeliveryProbe && entered {
+							dispatcher.setOperationalHealth(HealthDegraded, HealthReasonCircuitHalfOpen)
+						}
+						if mode == circuitDeliveryProbe {
+							maxAttempts = 1
+						}
+						break
+					}
+					attempt = 0
+					continue
 				} else {
 					dispatcher.releaseDropped(payloads)
 				}

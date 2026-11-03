@@ -213,8 +213,9 @@ func CompiledDispatcherConfigForProfile(
 		}
 	}
 	return delivery.Config{
-		LegacyCircuit: secureClient,
-		Destination:   destination.Name, Generation: generation, Signal: string(signal), Enabled: true,
+		LegacyCircuit:    secureClient,
+		RetryUntilClosed: destination.Kind == config.ObservabilityV8DestinationOTLP && !secureClient,
+		Destination:      destination.Name, Generation: generation, Signal: string(signal), Enabled: true,
 		MaxQueueItems: batch.MaxQueueSize, MaxQueueBytes: batch.MaxQueueBytes,
 		MaxBatchItems: maxBatchItems, MaxBatchBytes: maxBatchBytes,
 		ScheduledDelay: scheduledDelay, AttemptTimeout: attemptTimeout,
