@@ -135,7 +135,11 @@ func agentBinaryMayExistNow(name string) bool {
 		if binary == "" || binary != filepath.Base(binary) {
 			return true
 		}
-		if _, err := exec.LookPath(binary); err == nil || !errors.Is(err, exec.ErrNotFound) {
+		if found, err := exec.LookPath(binary); err == nil {
+			if !staleAmpNPMLauncher(name, found) {
+				return true
+			}
+		} else if !errors.Is(err, exec.ErrNotFound) {
 			return true
 		}
 		variants := []string{binary}
@@ -144,7 +148,8 @@ func agentBinaryMayExistNow(name string) bool {
 		}
 		for _, dir := range dirs {
 			for _, variant := range variants {
-				if _, err := os.Lstat(filepath.Join(dir, variant)); !errors.Is(err, fs.ErrNotExist) {
+				path := filepath.Join(dir, variant)
+				if _, err := os.Lstat(path); !errors.Is(err, fs.ErrNotExist) && !staleAmpNPMLauncher(name, path) {
 					return true
 				}
 			}
@@ -168,6 +173,50 @@ func agentBinaryMayExistNow(name string) bool {
 				}
 			}
 		}
+	}
+	return false
+}
+
+// staleAmpNPMLauncher recognizes an npm launcher left in the account's bin
+// folder after its package directory was removed. It is not a native Amp
+// image. Any unknown or changed launcher remains evidence of a possible
+// installation, so setup keeps its existing refusal in that case.
+func staleAmpNPMLauncher(name, path string) bool {
+	if name != "amp" || runtime.GOOS != "windows" {
+		return false
+	}
+	return staleAmpNPMLauncherAt(path, os.Getenv("APPDATA"))
+}
+
+func staleAmpNPMLauncherAt(path, appData string) bool {
+	roaming := strings.TrimSpace(appData)
+	npmDir := filepath.Join(roaming, "npm")
+	if !filepath.IsAbs(roaming) || !strings.EqualFold(filepath.Clean(filepath.Dir(path)), npmDir) ||
+		!strings.EqualFold(filepath.Base(path), "amp.cmd") {
+		return false
+	}
+	before, err := os.Lstat(path)
+	if err != nil || !before.Mode().IsRegular() || before.Size() <= 0 || before.Size() > 16*1024 {
+		return false
+	}
+	body, err := os.ReadFile(path)
+	after, statErr := os.Lstat(path)
+	if err != nil || statErr != nil || !os.SameFile(before, after) ||
+		before.Size() != after.Size() || !before.ModTime().Equal(after.ModTime()) {
+		return false
+	}
+	text := strings.ToLower(strings.ReplaceAll(string(body), "\\", "/"))
+	for _, relative := range [][]string{
+		{"node_modules", "@sourcegraph", "amp", "node_modules", "@ampcode", "cli"},
+		{"node_modules", "@sourcegraph", "amp"},
+		{"node_modules", "@ampcode", "cli"},
+	} {
+		marker := strings.Join(relative, "/")
+		if !strings.Contains(text, marker) {
+			continue
+		}
+		_, err := os.Lstat(filepath.Join(append([]string{npmDir}, relative...)...))
+		return errors.Is(err, fs.ErrNotExist)
 	}
 	return false
 }

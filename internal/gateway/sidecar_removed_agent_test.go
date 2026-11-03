@@ -225,6 +225,7 @@ func TestSetupConnectorsIsolatedSkipsAnActiveConnectorWhoseAgentExecutableIsGone
 		{name: "moved executable in known install directory", knownDir: true},
 		{name: "stale discovery miss with executable on PATH", stale: true, onPath: true},
 		{name: "stale discovery after custom move", stale: true, offPath: true, recordedPath: true},
+		{name: "stale discovery but setup changed state before failure", stale: true, changed: true},
 		{name: "discovery confirms no selected executable", stale: true, skipped: true},
 		{name: "setup changed state before failure", changed: true},
 		{name: "Lstat error other than missing", lstatError: true},

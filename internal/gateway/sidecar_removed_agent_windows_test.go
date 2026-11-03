@@ -59,6 +59,15 @@ func TestWindowsAmpRemovedAgentKeepsClaudeCodeGuarded(t *testing.T) {
 	}
 	t.Setenv("APPDATA", roaming)
 	t.Setenv("LOCALAPPDATA", local)
+	npmDir := filepath.Join(roaming, "npm")
+	if err := os.MkdirAll(npmDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(npmDir, "amp.cmd"),
+		[]byte("@echo off\r\n%~dp0\\node_modules\\@ampcode\\cli\\bin\\amp.exe %*\r\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", npmDir+string(os.PathListSeparator)+os.Getenv("PATH"))
 	packageDir := filepath.Join(roaming, "npm", "node_modules", "@ampcode", "cli")
 	fixture := prepareAmpGatewayAuthorityFixtureAtPath(t, f.dataDir, filepath.Join(packageDir, "bin", "amp.exe"))
 	s, err := f.boot(t)
