@@ -47,12 +47,14 @@ func perUserLauncherTarget(executable string, stateData []byte, selectedRoot str
 			continue
 		}
 		root = filepath.Clean(root)
+		// The messages quote the path as the user typed it: %q would double
+		// every backslash of a Windows path, so it would not match the folder.
 		linked, err := isReparse(root)
 		if err != nil && !os.IsNotExist(err) {
-			return "", true, fmt.Errorf("inspect data folder %q: %w", root, err)
+			return "", true, fmt.Errorf("inspect data folder \"%s\": %w", root, err)
 		}
 		if linked {
-			return "", true, fmt.Errorf("data folder %q is a reparse point; restore the original non-link folder at that path and retry", root)
+			return "", true, fmt.Errorf("data folder \"%s\" is a reparse point; restore the original non-link folder at that path and retry", root)
 		}
 	}
 	return filepath.Join(state.DataRoot, ".venv", "Scripts", "defenseclaw.exe"), true, nil
