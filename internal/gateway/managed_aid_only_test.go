@@ -2638,6 +2638,93 @@ func TestHookManagedAIDOnly_SecureClientPreToolUseWire(t *testing.T) {
 	}
 }
 
+// A Claude Code or Codex PermissionRequest that names no tool, or carries no
+// tool input or a null one, goes to AID as the text form alone: the adapter's
+// placeholder name and empty arguments are not the agent's, so they are not
+// sent as a tool call. The text message is the one the managed lane has always
+// sent. (A PreToolUse like that never reaches AID: the hook route answers it as
+// an unread tool call.)
+func TestHookManagedAIDOnly_SecureClientPermissionRequestWithoutArgsStaysText(t *testing.T) {
+	codexHeaders := map[string]string{
+		"X-DefenseClaw-Hook-Event":    "PermissionRequest",
+		"X-DefenseClaw-Hook-Contract": defaultTestCodexHookContract,
+	}
+	for _, test := range []struct {
+		name      string
+		connector string
+		headers   map[string]string
+		edit      func(map[string]interface{})
+		wantText  string
+	}{
+		{"claudecode absent input", "claudecode", nil, func(p map[string]interface{}) { delete(p, "tool_input") }, "Tool call: Bash\n{}"},
+		{"claudecode null input", "claudecode", nil, func(p map[string]interface{}) { p["tool_input"] = nil }, "Tool call: Bash\n{}"},
+		{"claudecode blank name", "claudecode", nil, func(p map[string]interface{}) { p["tool_name"] = " " }, "Tool call: ClaudeCodeTool\n"},
+		{"codex absent input", "codex", codexHeaders, func(p map[string]interface{}) { delete(p, "tool_input") }, "Tool call: shell\n{}"},
+		{"codex null input", "codex", codexHeaders, func(p map[string]interface{}) { p["tool_input"] = nil }, "Tool call: shell\n{}"},
+		{"codex blank name", "codex", codexHeaders, func(p map[string]interface{}) { p["tool_name"] = "" }, "Tool call: Bash\n"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			installCorrelationHMACForTest()
+			var gotBody []byte
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				gotBody, _ = io.ReadAll(r.Body)
+				w.Header().Set("Content-Type", "application/json")
+				_, _ = io.WriteString(w, `{"is_safe":true,"action":"Allow","rules":[]}`)
+			}))
+			t.Cleanup(srv.Close)
+			client := NewCiscoDefenseClawInspectClient(&config.CiscoAIDefenseConfig{
+				Endpoint:  srv.URL,
+				TimeoutMs: 3000,
+			}, newFakeCloudProvider("cmid-token-1"))
+			if client == nil {
+				t.Fatal("expected managed client")
+			}
+			a := managedHookServer(client)
+			a.scannerCfg.Guardrail.Connector = test.connector
+			a.scannerCfg.Guardrail.Mode = "action"
+
+			payload := loadGoldenHookPayload(t, test.connector, "pre_tool_block")
+			payload["hook_event_name"] = "PermissionRequest"
+			test.edit(payload)
+			raw, err := json.Marshal(payload)
+			if err != nil {
+				t.Fatal(err)
+			}
+			request := httptest.NewRequest(http.MethodPost, "/api/v1/"+test.connector+"/hook", bytes.NewReader(raw))
+			for key, value := range test.headers {
+				request.Header.Set(key, value)
+			}
+			response := httptest.NewRecorder()
+			a.handleAgentHook(test.connector).ServeHTTP(response, request)
+			if response.Code != http.StatusOK {
+				t.Fatalf("hook status=%d body=%s", response.Code, response.Body.String())
+			}
+
+			var wire struct {
+				Messages []json.RawMessage `json:"messages"`
+			}
+			if err := json.Unmarshal(gotBody, &wire); err != nil {
+				t.Fatalf("unmarshal: %v (body=%s)", err, gotBody)
+			}
+			if len(wire.Messages) != 1 {
+				t.Fatalf("messages = %d, want the text form alone (body=%s)", len(wire.Messages), gotBody)
+			}
+			var text struct {
+				Role    string `json:"role"`
+				Content struct {
+					Text string `json:"text"`
+				} `json:"content"`
+			}
+			if err := json.Unmarshal(wire.Messages[0], &text); err != nil {
+				t.Fatal(err)
+			}
+			if text.Role != "user" || !strings.HasPrefix(text.Content.Text, test.wantText) {
+				t.Errorf("message = %s, want a user text message starting %q", wire.Messages[0], test.wantText)
+			}
+		})
+	}
+}
+
 // The tool-call form follows the hook contract the dispatcher resolved, not the
 // payload: the same golden PreToolUse goes out as the tool call and the text
 // form under a contract that declares it, and as the text form alone under a
@@ -2733,6 +2820,7 @@ func TestToolCallNotCarriedReason(t *testing.T) {
 		{"envelope", declared(ToolInspectRequest{Tool: "Bash", Args: json.RawMessage(`{}`), Direction: "tool_call", toolArgsAreHookEnvelope: true}), "hook_envelope_args"},
 		{"placeholder", declared(ToolInspectRequest{Tool: "tool", Args: json.RawMessage(`{}`), Direction: "tool_call", toolNameIsLabel: true}), "placeholder_tool_name"},
 		{"blank", declared(ToolInspectRequest{Tool: " ", Args: json.RawMessage(`{}`), Direction: "tool_call"}), "blank_tool_name"},
+		{"absent args", declared(ToolInspectRequest{Tool: "Bash", Args: json.RawMessage(`{}`), Direction: "tool_call", toolArgsAbsent: true}), "args_absent"},
 		{"null args", declared(ToolInspectRequest{Tool: "Bash", Args: json.RawMessage(`null`), Direction: "tool_call"}), "args_not_object"},
 		{"string args", declared(ToolInspectRequest{Tool: "Bash", Args: json.RawMessage(`"ls"`), Direction: "tool_call"}), "args_not_object"},
 		{"carried", declared(ToolInspectRequest{Tool: "Bash", Args: json.RawMessage(`{"command":"ls"}`), Direction: "tool_call"}), ""},

@@ -207,6 +207,8 @@ func (a *APIServer) evaluateClaudeCodeHook(ctx context.Context, req claudeCodeHo
 			toolUseID:     req.ToolUseID,
 
 			aidToolCallDeclared: req.aidToolCallDeclared,
+			toolNameIsLabel:     strings.TrimSpace(req.ToolName) == "",
+			toolArgsAbsent:      req.ToolInput == nil,
 			hookEvent:           req.HookEventName,
 		}
 		command, commandTool := sandboxShellCommand(ctx, "claudecode", req.HookEventName, toolName, actionTool, toolArgs)

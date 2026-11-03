@@ -101,6 +101,10 @@ type ToolInspectRequest struct {
 	// toolNameIsLabel marks Tool as a placeholder the adapter filled in because
 	// the payload named no tool; it is not sent as a tool call's name.
 	toolNameIsLabel bool
+	// toolArgsAbsent marks Args as the empty object an adapter fills in when the
+	// payload carried no tool input, or a null one; it is not sent as a tool
+	// call's arguments.
+	toolArgsAbsent bool
 	// hookEvent is the agent hook event that produced the request, set by a
 	// connector adapter for the AID wire log only.
 	hookEvent string
@@ -470,6 +474,8 @@ func toolCallNotCarriedReason(req *ToolInspectRequest) string {
 		return "placeholder_tool_name"
 	case strings.TrimSpace(req.Tool) == "":
 		return "blank_tool_name"
+	case req.toolArgsAbsent:
+		return "args_absent"
 	}
 	var object map[string]json.RawMessage
 	if json.Unmarshal(req.Args, &object) != nil || object == nil {

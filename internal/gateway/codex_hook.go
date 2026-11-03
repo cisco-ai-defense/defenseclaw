@@ -301,6 +301,8 @@ func (a *APIServer) evaluateCodexHookForProfile(
 			toolUseID:     req.ToolUseID,
 
 			aidToolCallDeclared: req.aidToolCallDeclared,
+			toolNameIsLabel:     strings.TrimSpace(req.ToolName) == "",
+			toolArgsAbsent:      req.ToolInput == nil,
 			hookEvent:           req.HookEventName,
 		}
 		command, commandTool := sandboxShellCommand(ctx, "codex", req.HookEventName, toolName, actionTool, toolArgs)
