@@ -623,9 +623,14 @@ func (r GuardRequest) ownedHandler(handler any) bool {
 				return false
 			}
 		case key == "args":
-			// Claude's Windows exec form: the admin binary in command with
-			// its arguments listed separately.
-			if !ownedExecArgs(value) || !strings.EqualFold(strings.TrimSpace(stringField(handler, "command")), strings.TrimSpace(r.HookBinary)) {
+			// Exec form carries the admin binary and its arguments separately.
+			command := stringField(handler, "command")
+			matchesBinary := command == r.HookBinary
+			if r.goos() == "windows" {
+				matchesBinary = strings.EqualFold(command, r.HookBinary)
+			}
+			if !ownedExecArgs(value) || !matchesBinary ||
+				(r.Connector == ConnectorClaudeCode && !claudeHandlerIsOwned(Options{GOOS: r.goos(), HookBinary: r.HookBinary}, handler)) {
 				return false
 			}
 		case key == "fail_closed":
@@ -636,6 +641,11 @@ func (r GuardRequest) ownedHandler(handler any) bool {
 				return false
 			}
 		case !ownedHandlerKeys[key]:
+			return false
+		}
+	}
+	if r.Connector == ConnectorClaudeCode && stringField(handler, "command") == r.HookBinary {
+		if _, hasArgs := fields["args"]; !hasArgs {
 			return false
 		}
 	}
@@ -672,7 +682,7 @@ func ownedCommand(command, hookBinary string) bool {
 	if command == "" || hookBinary == "" {
 		return false
 	}
-	// Windows exec-form handlers carry the binary alone in command.
+	// Exec-form handlers carry the binary alone in command.
 	if strings.EqualFold(command, hookBinary) {
 		return true
 	}

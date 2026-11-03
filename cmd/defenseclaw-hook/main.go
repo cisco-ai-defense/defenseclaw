@@ -25,10 +25,12 @@
 package main
 
 import (
+	"bytes"
 	"encoding/json"
 	"fmt"
 	"io"
 	"os"
+	"runtime"
 
 	// Its init raises a Windows hook process to above-normal priority
 	// before the CLI packages initialize (GAP-0155).
@@ -37,6 +39,7 @@ import (
 	"github.com/defenseclaw/defenseclaw/cmd/internal/initgc"
 	"github.com/defenseclaw/defenseclaw/internal/cli"
 	"github.com/defenseclaw/defenseclaw/internal/gateway/connector"
+	"github.com/defenseclaw/defenseclaw/internal/gateway/connector/hookexec"
 )
 
 var (
@@ -85,11 +88,75 @@ func main() {
 		os.Exit(0)
 	}
 	if !isHookEntrypoint(os.Args[1:]) {
-		os.Exit(nonHookInvocationExit(os.Args[1:], os.Stdin, os.Stderr))
+		// Claude Code builds before exec-form args invoke the Unix managed
+		// command without its configured arguments. Route their event through
+		// the same managed hook command used by newer builds.
+		if runtime.GOOS != "windows" && len(os.Args) == 1 && connector.StdinIsPiped(os.Stdin) {
+			payload, err := io.ReadAll(io.LimitReader(os.Stdin, hookexec.DefaultMaxBody+1))
+			if err == nil {
+				if int64(len(payload)) > hookexec.DefaultMaxBody {
+					// Cursor imports can carry larger tool inputs. Check the full
+					// event as a stream without enlarging the managed hook body.
+					if connector.IsCursorHookEvent(io.MultiReader(bytes.NewReader(payload), os.Stdin)) {
+						os.Exit(0)
+					}
+				} else {
+					switch classifyNoArgHook(payload) {
+					case noArgCursor:
+						os.Exit(0)
+					case noArgClaude:
+						if replay, replayErr := replayHookInput(payload); replayErr == nil {
+							os.Stdin = replay
+							os.Args = append(os.Args, "hook", "--connector", "claudecode", "--enterprise-managed")
+						}
+					}
+				}
+			}
+			if !isHookEntrypoint(os.Args[1:]) {
+				os.Exit(nonHookInvocationExit(os.Args[1:], nil, os.Stderr))
+			}
+		} else {
+			os.Exit(nonHookInvocationExit(os.Args[1:], os.Stdin, os.Stderr))
+		}
 	}
 	cli.SetVersion(version)
 	cli.SetBuildInfo(commit, date)
 	os.Exit(cli.Execute())
+}
+
+type noArgHookKind uint8
+
+const (
+	noArgOther noArgHookKind = iota
+	noArgCursor
+	noArgClaude
+)
+
+func classifyNoArgHook(payload []byte) noArgHookKind {
+	if connector.IsCursorHookEvent(bytes.NewReader(payload)) {
+		return noArgCursor
+	}
+	var event struct {
+		Name          string          `json:"hook_event_name"`
+		CursorVersion json.RawMessage `json:"cursor_version"`
+	}
+	if json.Unmarshal(payload, &event) != nil || len(event.CursorVersion) != 0 || event.Name == "" ||
+		event.Name[0] < 'A' || event.Name[0] > 'Z' {
+		return noArgOther
+	}
+	return noArgClaude
+}
+
+func replayHookInput(payload []byte) (*os.File, error) {
+	reader, writer, err := os.Pipe()
+	if err != nil {
+		return nil, err
+	}
+	go func() {
+		_, _ = writer.Write(payload)
+		_ = writer.Close()
+	}()
+	return reader, nil
 }
 
 // nonHookInvocationExit answers a start without a hook subcommand. Cursor
@@ -101,7 +168,8 @@ func main() {
 // tool call, also with no Cursor hooks set up (GAP-1011). That call is no
 // Claude Code event, so it gets no answer (exit 0, no output); Cursor's own
 // DefenseClaw hooks, when set up, decide its events. Any other start without
-// a subcommand is still refused with exit 2.
+// a subcommand is refused with exit 2 unless it is a Unix Claude Code event,
+// which main routes through the managed hook command before this function.
 func nonHookInvocationExit(args []string, stdin *os.File, stderr io.Writer) int {
 	if len(args) == 0 && connector.StdinIsPiped(stdin) && connector.IsCursorHookEvent(stdin) {
 		return 0

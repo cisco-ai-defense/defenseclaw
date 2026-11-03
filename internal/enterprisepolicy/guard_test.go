@@ -80,6 +80,31 @@ func TestGuardDeniesForeignUserAndProjectHooks(t *testing.T) {
 // hooks run url: a handler is DefenseClaw's only when every field the agent
 // may execute is an owned command and it carries nothing DefenseClaw does
 // not write.
+func TestGuardClaudeManagedExecFormAndLegacyOwnership(t *testing.T) {
+	req := guardRequest(t, "claudecode", config.ForeignHooksRemove)
+	path := filepath.Join(req.Home, ".claude", "settings.json")
+	for name, handler := range map[string]string{
+		"exec form":        `{"type":"command","command":"` + testHookBinary + `","args":["hook","--connector","claudecode","--enterprise-managed"]}`,
+		"prior shell form": `{"type":"command","command":"'` + testHookBinary + `' hook --connector claudecode --enterprise-managed"}`,
+	} {
+		writeFile(t, path, `{"hooks":{"PreToolUse":[{"hooks":[`+handler+`] }]}}`)
+		if decision := EvaluateForeignHooks(req); decision.Deny || len(decision.Findings) != 0 {
+			t.Fatalf("%s classified as foreign: %+v", name, decision)
+		}
+	}
+	for name, handler := range map[string]string{
+		"wrong connector": `{"type":"command","command":"` + testHookBinary + `","args":["hook","--connector","codex","--enterprise-managed"]}`,
+		"missing args":    `{"type":"command","command":"` + testHookBinary + `"}`,
+		"extra args":      `{"type":"command","command":"` + testHookBinary + `","args":["hook","--connector","claudecode","--enterprise-managed","--extra"]}`,
+		"changed path":    `{"type":"command","command":"` + testHookBinary + `.old","args":["hook","--connector","claudecode","--enterprise-managed"]}`,
+	} {
+		writeFile(t, path, `{"hooks":{"PreToolUse":[{"hooks":[`+handler+`] }]}}`)
+		if decision := EvaluateForeignHooks(req); !decision.Deny || len(decision.Findings) != 1 {
+			t.Fatalf("%s not classified as foreign: %+v", name, decision)
+		}
+	}
+}
+
 func TestGuardOwnershipCoversEveryExecutableField(t *testing.T) {
 	owned := `'` + testHookBinary + `' hook --connector copilot --enterprise-managed --event 'preToolUse'`
 	req := guardRequest(t, "copilot", config.ForeignHooksRemove)

@@ -5,6 +5,7 @@ package main
 
 import (
 	"bytes"
+	"io"
 	"os"
 	"os/exec"
 	"runtime"
@@ -71,6 +72,36 @@ func TestNonHookInvocationAnswersNothingForACursorImportedClaudeHook(t *testing.
 	}
 }
 
+func TestR108PreExecClaudeInputAndCursorTwin(t *testing.T) {
+	for _, tc := range []struct {
+		name, payload string
+		want          noArgHookKind
+	}{
+		{"Claude prompt", `{"session_id":"s","hook_event_name":"UserPromptSubmit","prompt":"hello"}`, noArgClaude},
+		{"Claude tool", `{"session_id":"s","hook_event_name":"PreToolUse","tool_name":"Bash"}`, noArgClaude},
+		{"Cursor import", cursorPreToolUse, noArgCursor},
+		{"empty Cursor marker", `{"cursor_version":"","hook_event_name":"preToolUse"}`, noArgOther},
+		{"unrelated event", `{"hook_event_name":"preToolUse"}`, noArgOther},
+		{"invalid input", `{"hook_event_name":`, noArgOther},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := classifyNoArgHook([]byte(tc.payload)); got != tc.want {
+				t.Fatalf("route = %d, want %d", got, tc.want)
+			}
+		})
+	}
+	payload := []byte(`{"hook_event_name":"UserPromptSubmit","prompt":"hello"}`)
+	replay, err := replayHookInput(payload)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer replay.Close()
+	got, err := io.ReadAll(replay)
+	if err != nil || !bytes.Equal(got, payload) {
+		t.Fatalf("replayed input = %q, error %v", got, err)
+	}
+}
+
 // The built launcher, started the way Cursor starts an imported Claude Code
 // handler (no arguments, the event on stdin), exits 0 with no output; before,
 // it exited 2 and Cursor blocked the tool call (GAP-1011).
@@ -104,7 +135,12 @@ func TestLauncherStartedWithoutArgumentsByCursorGivesNoAnswer(t *testing.T) {
 	if code, stdout, stderr := run(cursorPreToolUse); code != 0 || stdout != "" {
 		t.Fatalf("Cursor import: exit %d, stdout %q, stderr %q; want exit 0 and no output", code, stdout, stderr)
 	}
-	if code, _, stderr := run(`{"hook_event_name":"PreToolUse"}`); code != 2 || !strings.Contains(stderr, "expected hook") {
-		t.Fatalf("non-Cursor start without a subcommand: exit %d, stderr %q; want the exit-2 refusal", code, stderr)
+	if code, stdout, stderr := run(`{"hook_event_name":"PreToolUse"}`); strings.Contains(stderr, "expected hook") ||
+		!strings.Contains(stdout+stderr, "refusal") {
+		t.Fatalf("managed Claude Code tool: exit %d, stdout %q, stderr %q; want the managed refusal", code, stdout, stderr)
+	}
+	if code, stdout, stderr := run(`{"session_id":"s","hook_event_name":"UserPromptSubmit","prompt":"hello"}`); code != 0 ||
+		strings.Contains(stderr, "expected hook") || !strings.Contains(stdout, "enterprise_managed_runtime_descriptor_missing") {
+		t.Fatalf("Claude Code prompt without a runtime: exit %d, stdout %q, stderr %q; want the managed response", code, stdout, stderr)
 	}
 }
