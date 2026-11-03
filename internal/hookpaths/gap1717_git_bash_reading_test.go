@@ -80,8 +80,10 @@ func TestGAP1717GitBashCallIsReadWithThePOSIXGrammar(t *testing.T) {
 		{`head -n 5 */*`, false},
 		{`cat */id_*`, false},
 		{`head -n 1 */* | wc -l`, false},
+		{`bash -c "head -n 1 */*; echo done"`, false},
 		{`cat ~/.ssh/id_ed25519`, true},
 		{`cat .ssh/id_*`, true},
+		{`bash -c "cat ~/.ssh/id_ed25519"`, true},
 	} {
 		if got := ActionPrivateKeyReadWithDialect(tc.command, home, home, actionfacts.DialectPOSIX); got != tc.read {
 			t.Errorf("key read(%q) = %t, want %t", tc.command, got, tc.read)

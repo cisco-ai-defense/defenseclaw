@@ -1027,6 +1027,54 @@ func (s *FileStore) Restart(uid int, id string) (Registration, error) {
 	return fresh, nil
 }
 
+// ForgetOtherAccounts removes every registration of uid that another
+// account made: one whose subject key is not subjectKey. The account
+// database gives a deleted account's uid to the next new account, and a
+// renamed account keeps its uid; the account that holds the uid now never
+// inherits the earlier account's sandboxes, never sees them and never has
+// them counted against its MaxEntriesPerUID and MaxLivePerUID limits
+// (rel-1-0-6:GAP-0262). The sandbox ids of a removed bound registration
+// are retired, so that sandbox never registers again, and its run record
+// goes with it. It returns the removed registrations; with none, nothing
+// is written.
+func (s *FileStore) ForgetOtherAccounts(uid int, subjectKey string) ([]Registration, error) {
+	if subjectKey == "" {
+		return nil, fmt.Errorf("%w: subject key is required", ErrInvalid)
+	}
+	var gone []Registration
+	defer func() { s.notifyGone(gone) }()
+	defer s.lockForWrite()()
+	u, err := s.loadLocked(uid)
+	if err != nil {
+		return nil, err
+	}
+	other := func(r Registration) bool { return r.SubjectKey != subjectKey }
+	if !slices.ContainsFunc(u.regs, other) {
+		return nil, nil
+	}
+	next := u.clone()
+	var removed []Registration
+	withdrawLiveAuthority := false
+	now := s.now()
+	next.regs = slices.DeleteFunc(next.regs, func(r Registration) bool {
+		if !other(r) {
+			return false
+		}
+		if r.BindingID != "" || r.SandboxID != "" {
+			next.retired = append(next.retired, Retired{BindingID: r.BindingID, SandboxID: r.SandboxID, At: now})
+		}
+		withdrawLiveAuthority = withdrawLiveAuthority || r.State == StateLive
+		delete(next.runs, r.ID)
+		removed = append(removed, r)
+		return true
+	})
+	if err := s.saveLocked(uid, next, withdrawLiveAuthority); err != nil {
+		return nil, err
+	}
+	gone = removed
+	return removed, nil
+}
+
 // RevokeSandbox revokes uid's bound registrations of one sandbox, the one
 // with id sandboxID (a registration bound without an id: named
 // sandboxName), with reason, and returns them as revoked. The sandbox ids

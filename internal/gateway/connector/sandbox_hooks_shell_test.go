@@ -133,6 +133,9 @@ func newSandboxHookHarnessFiles(t *testing.T, files []SandboxFile, systemPATH st
 		case codexSandboxNotifyScript:
 			data = bytes.Replace(data, []byte("PATH="+SandboxHookPATH+"\n"), []byte("PATH="+stubPath+"\n"), 1)
 		}
+		// The hooks bake the image's hook folder: point it at this copy.
+		data = bytes.ReplaceAll(data, []byte("HOOK_DIR="+shellSingleQuote(SandboxHookDir)+"\n"),
+			[]byte("HOOK_DIR="+shellSingleQuote(h.path(SandboxHookDir))+"\n"))
 		dest := filepath.Join(h.root, filepath.FromSlash(file.Path))
 		if err := os.MkdirAll(filepath.Dir(dest), 0o755); err != nil {
 			t.Fatal(err)
@@ -274,6 +277,8 @@ func TestSandboxClaudeAndCodexAcknowledgeTheirRelayedToolAnswer(t *testing.T) {
 			}
 			if run.calls[0].body != tc.stdin || run.calls[1].url() != run.calls[0].url() ||
 				run.calls[1].headers["authorization"] != "Bearer sandbox-token" ||
+				run.calls[0].headers["x-defenseclaw-hook-receipt"] != "" ||
+				run.calls[1].headers["x-defenseclaw-hook-receipt"] != "1" ||
 				run.calls[0].headers["x-defenseclaw-client"] == "" ||
 				run.calls[1].headers["x-defenseclaw-client"] == "" {
 				t.Fatalf("receipt crossed the wrong binding or route: %+v", run.calls)

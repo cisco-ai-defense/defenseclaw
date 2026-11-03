@@ -17,6 +17,7 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/gateway/connector/hookexec"
 	"github.com/defenseclaw/defenseclaw/internal/observability"
 	"github.com/defenseclaw/defenseclaw/internal/sandboxauth"
+	"github.com/defenseclaw/defenseclaw/internal/sandboxrelay"
 	"github.com/google/uuid"
 )
 
@@ -36,17 +37,53 @@ func (a *APIServer) wantsSandboxHookReceipt(ctx context.Context, connectorName, 
 	return ok
 }
 
-func sandboxHookReceiptID(raw []byte) (string, bool) {
+// classifySandboxHookReceiptBody also identifies malformed receipt-shaped
+// bodies, so an unmarked one never spends the ordinary hook rate budget.
+func classifySandboxHookReceiptBody(raw []byte) (string, bool, bool) {
 	var body map[string]json.RawMessage
-	if json.Unmarshal(raw, &body) != nil || len(body) != 2 {
-		return "", false
+	if json.Unmarshal(raw, &body) != nil {
+		return "", false, false
+	}
+	_, receiptLike := body["delivery_receipt"]
+	if !receiptLike || len(body) != 2 {
+		return "", false, receiptLike
 	}
 	var id, result string
 	if json.Unmarshal(body["delivery_receipt"], &id) != nil ||
-		json.Unmarshal(body["result"], &result) != nil || result != "ack" {
-		return "", false
+		id == "" || json.Unmarshal(body["result"], &result) != nil || result != "ack" {
+		return "", false, true
 	}
-	return id, true
+	return id, true, true
+}
+
+type sandboxHookBudgetChargeKey struct{}
+type sandboxHookBudgetCharge func(receipt bool) error
+
+func withSandboxHookBudgetCharge(ctx context.Context, charge sandboxHookBudgetCharge) context.Context {
+	if previous, ok := ctx.Value(sandboxHookBudgetChargeKey{}).(sandboxHookBudgetCharge); ok {
+		current := charge
+		charge = func(receipt bool) error {
+			if err := previous(receipt); err != nil {
+				return err
+			}
+			return current(receipt)
+		}
+	}
+	return context.WithValue(ctx, sandboxHookBudgetChargeKey{}, charge)
+}
+
+func chargeSandboxHookBudget(ctx context.Context, receipt bool) error {
+	if charge, ok := ctx.Value(sandboxHookBudgetChargeKey{}).(sandboxHookBudgetCharge); ok {
+		return charge(receipt)
+	}
+	return nil
+}
+
+// claimsSandboxHookReceipt selects the receipt budget without touching the
+// body. A malformed claim still spends that budget and is rejected after
+// the handler reads the body. Only hook routes use this marker for admission.
+func claimsSandboxHookReceipt(r *http.Request) bool {
+	return r.Method == http.MethodPost && len(r.Header.Values(sandboxrelay.HookReceiptHeader)) != 0
 }
 
 // Striped locks serialize receipt retries with journal recovery. Their fixed

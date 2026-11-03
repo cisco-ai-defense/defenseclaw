@@ -17,14 +17,17 @@
 package gateway
 
 import (
+	"bytes"
 	"context"
 	"crypto/tls"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"math"
 	"net/url"
 	"os"
 	"path/filepath"
+	"regexp"
 	"runtime"
 	"strings"
 	"sync"
@@ -679,7 +682,11 @@ func (c *Client) tryAuthRepair(connectErr error) {
 		fmt.Fprintf(os.Stderr, "[gateway] repair pairing failed: %v\n", err)
 	}
 
-	if newToken, ok := readOpenClawGatewayToken(home); ok && newToken != c.cfg.Token {
+	newToken, ok, tokenErr := readOpenClawGatewayToken(home)
+	if tokenErr != nil {
+		fmt.Fprintf(os.Stderr, "[gateway] %v\n", tokenErr)
+	}
+	if ok && newToken != c.cfg.Token {
 		fmt.Fprintf(os.Stderr, "[gateway] gateway token refreshed from openclaw.json\n")
 		c.cfg.Token = newToken
 		c.refreshedToken.Store(&newToken)
@@ -854,29 +861,53 @@ func isAuthError(err error) bool {
 	return false
 }
 
+// errOpenClawTokenUnreadable reports a gateway.auth.token that is a SecretRef
+// DefenseClaw cannot resolve (issue #1404). It never carries the token.
+var errOpenClawTokenUnreadable = errors.New("openclaw.json gateway.auth.token is a secret reference DefenseClaw cannot read; " +
+	"give DefenseClaw the token in OPENCLAW_GATEWAY_TOKEN or DEFENSECLAW_GATEWAY_TOKEN")
+
 // readOpenClawGatewayToken reads gateway.auth.token from the OpenClaw
-// config file inside the sandbox home directory.
-func readOpenClawGatewayToken(sandboxHome string) (string, bool) {
+// config file inside the sandbox home directory. The token is a string or
+// a SecretRef object; a {"source":"env","id":NAME} reference is resolved
+// from the environment, and any other reference returns
+// errOpenClawTokenUnreadable instead of a token (issue #1404).
+func readOpenClawGatewayToken(sandboxHome string) (string, bool, error) {
 	path := filepath.Join(sandboxHome, ".openclaw", "openclaw.json")
 	data, err := os.ReadFile(path)
 	if err != nil {
-		return "", false
+		return "", false, nil
 	}
 	var cfg struct {
 		Gateway struct {
 			Auth struct {
-				Token string `json:"token"`
+				Token json.RawMessage `json:"token"`
 			} `json:"auth"`
 		} `json:"gateway"`
 	}
 	if err := json.Unmarshal(data, &cfg); err != nil {
-		return "", false
+		return "", false, nil
 	}
-	if cfg.Gateway.Auth.Token == "" {
-		return "", false
+	raw := bytes.TrimSpace(cfg.Gateway.Auth.Token)
+	if len(raw) == 0 || bytes.Equal(raw, []byte("null")) {
+		return "", false, nil
 	}
-	return cfg.Gateway.Auth.Token, true
+	var token string
+	if json.Unmarshal(raw, &token) == nil {
+		return token, token != "", nil
+	}
+	var ref struct {
+		Source string `json:"source"`
+		ID     string `json:"id"`
+	}
+	if json.Unmarshal(raw, &ref) == nil && ref.Source == "env" && openClawEnvNameRE.MatchString(ref.ID) {
+		if value := os.Getenv(ref.ID); value != "" {
+			return value, true, nil
+		}
+	}
+	return "", false, errOpenClawTokenUnreadable
 }
+
+var openClawEnvNameRE = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_]*$`)
 
 func truncateBytes(b []byte, maxLen int) string {
 	s := string(b)

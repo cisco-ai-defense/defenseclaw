@@ -13,6 +13,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"os/exec"
+	"os/user"
 	"path/filepath"
 	"strconv"
 	"strings"
@@ -117,11 +118,36 @@ const nodeHarnessStarted = "defenseclaw-node-harness-started"
 // killed, 41 s, then 3.6 s in gw1 at e5c04823b6, no output at all), and that
 // wait is the operating system's. The harness's own work, from the start line
 // to node's exit, keeps nodeHarnessTimeout.
+// nodeHarnessEnv is the test's environment for a plugin harness, with HOME
+// moved to a folder of the test when the test left it at the build account's
+// own home. The plugins look for an installer's lock in ~/.defenseclaw (from
+// HOME), and other tests and builds on a shared computer write the build
+// account's real one: an install lock there turned an outage denial into
+// "being installed" at random (rel-1-0-6:GAP-0345, as the gateway binary's
+// account home). A test that set HOME keeps it.
+func nodeHarnessEnv(t *testing.T) []string {
+	t.Helper()
+	env := os.Environ()
+	account, err := user.Current()
+	if err != nil || account.HomeDir == "" || filepath.Clean(os.Getenv("HOME")) != filepath.Clean(account.HomeDir) {
+		return env
+	}
+	home := t.TempDir()
+	out := env[:0:0]
+	for _, kv := range env {
+		if !strings.HasPrefix(kv, "HOME=") {
+			out = append(out, kv)
+		}
+	}
+	return append(out, "HOME="+home)
+}
+
 func runNodeHarness(t *testing.T, harness string, args ...string) []string {
 	t.Helper()
 	harness = "process.stdout.write(" + strconv.Quote(nodeHarnessStarted+"\n") + ");\n" + withOpenCodeV2Fixture(t, harness)
 	node := nodeForTest(t)
 	cmd := exec.Command(node, append([]string{"--input-type=module", "-e", harness}, args...)...)
+	cmd.Env = nodeHarnessEnv(t)
 	var stderr strings.Builder
 	cmd.Stderr = &stderr
 	pipe, err := cmd.StdoutPipe()

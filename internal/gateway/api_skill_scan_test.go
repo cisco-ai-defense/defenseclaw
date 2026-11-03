@@ -104,33 +104,25 @@ func TestBundledSkillScanPathDoesNotTrustArbitrarySystemDirectory(t *testing.T) 
 	}
 }
 
-func TestHandleSkillScanRejectsOnlySourceBoundHermesBundle(t *testing.T) {
+func TestHandleSkillScanRejectsOnlyPinnedHermesBundle(t *testing.T) {
 	home, err := filepath.EvalSymlinks(t.TempDir())
 	if err != nil {
 		t.Fatal(err)
 	}
 	t.Setenv("HERMES_HOME", home)
 	root := filepath.Join(home, "skills")
-	target := filepath.Join(root, "productivity", "vendor-docs")
-	source := filepath.Join(home, "hermes-agent", "skills", "productivity", "vendor-docs")
-	marker := []byte("---\nname: vendor-docs\n---\n")
-	for _, path := range []string{target, source} {
-		if err := os.MkdirAll(path, 0o700); err != nil {
-			t.Fatal(err)
-		}
-		if err := os.WriteFile(filepath.Join(path, "SKILL.md"), marker, 0o600); err != nil {
-			t.Fatal(err)
-		}
-	}
-	origin := md5.Sum(append([]byte("SKILL.md"), marker...)) // #nosec G401 -- Hermes fixture.
-	if err := os.WriteFile(
-		filepath.Join(root, ".bundled_manifest"),
-		[]byte(fmt.Sprintf("vendor-docs:%x\n", origin)),
-		0o600,
-	); err != nil {
+	target := filepath.Join(root, "media", "songsee")
+	if err := os.MkdirAll(target, 0o700); err != nil {
 		t.Fatal(err)
 	}
-	body, err := json.Marshal(skillScanRequest{Target: target, Name: "vendor-docs"})
+	marker, err := os.ReadFile(filepath.Join("..", "hermesskills", "testdata", "vendor", "media", "songsee", "SKILL.md"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(target, "SKILL.md"), marker, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	body, err := json.Marshal(skillScanRequest{Target: target, Name: "songsee"})
 	if err != nil {
 		t.Fatal(err)
 	}

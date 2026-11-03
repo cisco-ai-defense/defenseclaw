@@ -91,25 +91,34 @@ func TestWarmRegisteredClaudeHookRunsAtMostEightPrograms(t *testing.T) {
 	for i := 0; i < 3; i++ {
 		run(i, "")
 	}
-	trace := filepath.Join(t.TempDir(), "execve")
-	if out := run(3, trace); strings.Contains(out, "deny") || strings.Contains(out, "block") {
-		t.Fatalf("the allowed call was blocked:\n%s", out)
-	}
-	raw, err := os.ReadFile(trace)
-	if err != nil {
-		t.Fatal(err)
-	}
-	var programs []string
-	for _, line := range strings.Split(string(raw), "\n") {
-		if strings.Contains(line, "execve(") && strings.HasSuffix(strings.TrimSpace(line), "= 0") {
-			fields := strings.SplitN(line, "\"", 3)
-			if len(fields) > 1 {
-				programs = append(programs, filepath.Base(fields[1]))
+	// The count must hold on every call, not on most: one call in 32 used to
+	// start the stale-folder sweep's find, so a single traced call ran 9 or 10
+	// programs about once in 32 runs (rel-1-0-6 GAP-0266). Tracing 40 calls
+	// makes such a random extra program fail about 72 runs in 100.
+	traces := t.TempDir()
+	for call := 3; call < 43; call++ {
+		trace := filepath.Join(traces, fmt.Sprintf("execve-%d", call))
+		if out := run(call, trace); strings.Contains(out, "deny") || strings.Contains(out, "block") {
+			t.Fatalf("the allowed call %d was blocked:\n%s", call, out)
+		}
+		raw, err := os.ReadFile(trace)
+		if err != nil {
+			t.Fatal(err)
+		}
+		var programs []string
+		for _, line := range strings.Split(string(raw), "\n") {
+			if strings.Contains(line, "execve(") && strings.HasSuffix(strings.TrimSpace(line), "= 0") {
+				fields := strings.SplitN(line, "\"", 3)
+				if len(fields) > 1 {
+					programs = append(programs, filepath.Base(fields[1]))
+				}
 			}
 		}
-	}
-	t.Logf("programs of the warm call: %d %v", len(programs), programs)
-	if len(programs) > 8 {
-		t.Fatalf("a warm allowed call ran %d programs, want at most 8: %v", len(programs), programs)
+		if call == 3 {
+			t.Logf("programs of the warm call: %d %v", len(programs), programs)
+		}
+		if len(programs) > 8 {
+			t.Fatalf("warm allowed call %d ran %d programs, want at most 8 on every call: %v", call, len(programs), programs)
+		}
 	}
 }

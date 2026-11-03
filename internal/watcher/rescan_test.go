@@ -447,14 +447,15 @@ func TestEnumerateTargetsExpandsHermesSkillsAndSkipsOnlyProvenBundles(t *testing
 	t.Setenv("HERMES_HOME", home)
 	cfg.Guardrail.Connector = "hermes"
 	root := filepath.Join(home, "skills")
-	bundled := filepath.Join(root, "productivity", "vendor-docs")
-	source := filepath.Join(home, "hermes-agent", "skills", "productivity", "vendor-docs")
-	forged := filepath.Join(root, "productivity", "manifest-only")
+	bundled := filepath.Join(root, "media", "songsee")
+	forged := filepath.Join(root, "media", "manifest-only")
 	user := filepath.Join(root, "operator-skill")
-	bundledMarker := []byte("---\nname: vendor-docs\n---\n")
+	bundledMarker, err := os.ReadFile(filepath.Join("..", "hermesskills", "testdata", "vendor", "media", "songsee", "SKILL.md"))
+	if err != nil {
+		t.Fatal(err)
+	}
 	for path, marker := range map[string][]byte{
 		bundled: bundledMarker,
-		source:  bundledMarker,
 		forged:  []byte("---\nname: manifest-only\n---\n"),
 		user:    []byte("---\nname: operator-skill\n---\n"),
 	} {
@@ -465,13 +466,12 @@ func TestEnumerateTargetsExpandsHermesSkillsAndSkipsOnlyProvenBundles(t *testing
 			t.Fatal(err)
 		}
 	}
-	bundledHash := md5.Sum(append([]byte("SKILL.md"), bundledMarker...)) // #nosec G401 -- Hermes fixture.
 	forgedMarker, err := os.ReadFile(filepath.Join(forged, "SKILL.md"))
 	if err != nil {
 		t.Fatal(err)
 	}
 	forgedHash := md5.Sum(append([]byte("SKILL.md"), forgedMarker...)) // #nosec G401 -- Hermes fixture.
-	manifest := fmt.Sprintf("vendor-docs:%x\nmanifest-only:%x\n", bundledHash, forgedHash)
+	manifest := fmt.Sprintf("manifest-only:%x\n", forgedHash)
 	if err := os.WriteFile(filepath.Join(root, ".bundled_manifest"), []byte(manifest), 0o600); err != nil {
 		t.Fatal(err)
 	}
@@ -484,10 +484,10 @@ func TestEnumerateTargetsExpandsHermesSkillsAndSkipsOnlyProvenBundles(t *testing
 			got[target.Name] = target
 		}
 	}
-	if _, ok := got["vendor-docs"]; ok {
+	if _, ok := got["songsee"]; ok {
 		t.Fatalf("proven Hermes bundle entered periodic rescan: %+v", targets)
 	}
-	if _, ok := got["productivity"]; ok {
+	if _, ok := got["media"]; ok {
 		t.Fatalf("Hermes category entered periodic rescan: %+v", targets)
 	}
 	for name, path := range map[string]string{"manifest-only": forged, "operator-skill": user} {
@@ -497,15 +497,15 @@ func TestEnumerateTargetsExpandsHermesSkillsAndSkipsOnlyProvenBundles(t *testing
 		}
 	}
 
-	events := w.pendingInstallEvents(filepath.Join(root, "productivity"))
+	events := w.pendingInstallEvents(filepath.Join(root, "media"))
 	byName := make(map[string]InstallEvent, len(events))
 	for _, event := range events {
 		byName[event.Name] = event
 	}
-	if _, ok := byName["productivity"]; ok {
+	if _, ok := byName["media"]; ok {
 		t.Fatalf("category notification was not expanded: %+v", events)
 	}
-	if _, ok := byName["vendor-docs"]; !ok {
+	if _, ok := byName["songsee"]; !ok {
 		t.Fatalf("bundled identity missing from live expansion: %+v", events)
 	}
 	if _, ok := byName["manifest-only"]; !ok {
@@ -521,6 +521,8 @@ func TestEnumerateTargetsExpandsHermesSkillsAndSkipsOnlyProvenBundles(t *testing
 		t.Fatal(err)
 	}
 	profileRoot := filepath.Join(profileHome, ".hermes", "skills")
+	profileMarker := []byte("---\nname: vendor-docs\n---\n")
+	profileHash := md5.Sum(append([]byte("SKILL.md"), profileMarker...)) // #nosec G401 -- Hermes fixture.
 	k8s := filepath.Join(profileRoot, "devops", "k8s")
 	if err := os.MkdirAll(k8s, 0o700); err != nil {
 		t.Fatal(err)
@@ -535,11 +537,11 @@ func TestEnumerateTargetsExpandsHermesSkillsAndSkipsOnlyProvenBundles(t *testing
 		if err := os.MkdirAll(dir, 0o700); err != nil {
 			t.Fatal(err)
 		}
-		if err := os.WriteFile(filepath.Join(dir, "SKILL.md"), bundledMarker, 0o600); err != nil {
+		if err := os.WriteFile(filepath.Join(dir, "SKILL.md"), profileMarker, 0o600); err != nil {
 			t.Fatal(err)
 		}
 	}
-	if err := os.WriteFile(filepath.Join(profileRoot, ".bundled_manifest"), []byte(fmt.Sprintf("vendor-docs:%x\n", bundledHash)), 0o600); err != nil {
+	if err := os.WriteFile(filepath.Join(profileRoot, ".bundled_manifest"), []byte(fmt.Sprintf("vendor-docs:%x\n", profileHash)), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	names := map[string]bool{}

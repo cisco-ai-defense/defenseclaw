@@ -5,10 +5,12 @@ package hookpaths
 
 import (
 	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
 	"runtime"
 	"slices"
+	"strings"
 	"testing"
 )
 
@@ -57,19 +59,73 @@ func TestResolveNamesEveryInstructionNameOfTheFile(t *testing.T) {
 	}
 }
 
-// GAP-1432: a call that moves a directory sights it before it goes, as a
-// plain directory with its identity.
+// GAP-1432, GAP-0474: a call that moves a directory sights it before it goes,
+// as a plain directory with its identity, even when cwd is outside the home.
 func TestReachedEvidenceSightsTheDirectoryAMoveMoves(t *testing.T) {
-	base, err := filepath.EvalSymlinks(t.TempDir())
+	check := func(t *testing.T, base string) {
+		t.Helper()
+		moved := filepath.Join(base, "new")
+		if err := os.Mkdir(moved, 0o700); err != nil {
+			t.Fatal(err)
+		}
+		for _, connector := range []string{"claudecode", "codex"} {
+			targets := resolvedEvidence(t, connector, base, "Bash", map[string]interface{}{"command": "mv new renamed"})
+			if plain := ReachedPlainDirectories(targets); plain[moved] == "" || plain[moved] != DirectoryIdentity(moved) {
+				t.Errorf("%s: the moved directory was not sighted: %v", connector, plain)
+			}
+		}
+	}
+	check(t, moveSightingTestDir(t, t.TempDir()))
+	if runtime.GOOS == "windows" {
+		var outside string
+		parents := []string{`C:\Users\Public`}
+		if winDir := os.Getenv("SystemRoot"); filepath.IsAbs(winDir) {
+			parents = append([]string{filepath.Join(winDir, "Temp")}, parents...)
+		}
+		for _, parent := range parents {
+			if parent == "" {
+				continue
+			}
+			if base, err := os.MkdirTemp(parent, "dc-hp474-"); err == nil {
+				outside = base
+				t.Cleanup(func() { _ = os.RemoveAll(base) })
+				break
+			}
+		}
+		if outside == "" {
+			t.Fatal("could not create an outside-profile test directory")
+		}
+		if home, err := os.UserHomeDir(); err == nil {
+			if relative, err := filepath.Rel(home, outside); err == nil &&
+				(relative == "." || relative != ".." && !strings.HasPrefix(relative, ".."+string(os.PathSeparator))) {
+				t.Fatalf("outside-profile test directory %q is inside home %q", outside, home)
+			}
+		}
+		t.Run("outside-profile", func(t *testing.T) { check(t, outside) })
+		for drive := 'C'; drive <= 'Z'; drive++ {
+			volume := fmt.Sprintf("%c:\\", drive)
+			if filepath.VolumeName(volume) == filepath.VolumeName(outside) {
+				continue
+			}
+			if other, err := os.MkdirTemp(volume, "dc-hp474-"); err == nil {
+				t.Cleanup(func() { _ = os.RemoveAll(other) })
+				t.Run("other-volume", func(t *testing.T) { check(t, other) })
+				break
+			}
+		}
+	}
+}
+
+func moveSightingTestDir(t *testing.T, parent string) string {
+	t.Helper()
+	base, err := os.MkdirTemp(parent, "dc-hp474-")
 	if err != nil {
 		t.Fatal(err)
 	}
-	moved := filepath.Join(base, "new")
-	if err := os.Mkdir(moved, 0o700); err != nil {
+	t.Cleanup(func() { _ = os.RemoveAll(base) })
+	base, err = filepath.EvalSymlinks(base)
+	if err != nil {
 		t.Fatal(err)
 	}
-	targets := resolvedEvidence(t, "codex", base, "Bash", map[string]interface{}{"command": "mv new renamed"})
-	if plain := ReachedPlainDirectories(targets); plain[moved] == "" || plain[moved] != DirectoryIdentity(moved) {
-		t.Fatalf("the moved directory was not sighted: %v", plain)
-	}
+	return base
 }

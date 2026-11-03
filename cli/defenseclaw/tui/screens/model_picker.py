@@ -32,10 +32,10 @@ from textual.app import ComposeResult
 from textual.binding import Binding
 from textual.containers import Vertical
 from textual.reactive import reactive
-from textual.screen import ModalScreen
 from textual.widgets import Input, Static
 
 from defenseclaw.tui.markup_safe import escape as rich_escape
+from defenseclaw.tui.modal import GuardedModalScreen
 from defenseclaw.tui.theme import DEFAULT_TOKENS
 from defenseclaw.tui.widgets.list_window import rows_that_fit, window_lines
 
@@ -103,7 +103,7 @@ def opening_rows(current: str, models: tuple[str, ...]) -> tuple[list[str], int]
     return rows, rows.index(current)
 
 
-class ModelPickerScreen(ModalScreen[str | None]):
+class ModelPickerScreen(GuardedModalScreen[str | None]):
     """Searchable picker over the catalog models for one provider."""
 
     CSS = f"""

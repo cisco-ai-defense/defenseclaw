@@ -1319,7 +1319,7 @@ func TestSetupOnMacOSPlansMicroVMsNotBindMounts(t *testing.T) {
 			"sandbox_uid and sandbox_gid are gateway-wide: every MicroVM sandbox on this gateway, including ones made outside DefenseClaw "+
 				"with `openshell sandbox create`, then runs as 501:20",
 			"✓ gateway configured and restarted: it runs sandboxes in OpenShell MicroVMs",
-			"every run works on a copy (the MicroVM driver mounts no host folders); `defenseclaw sandbox pull` brings the changes back")
+			"every run works on a copy (the MicroVM driver mounts no host folders); `defenseclaw sandbox pull NAME --apply` brings the changes back")
 		lacks(t, ta.output(), "Allow sandboxes to mount", "does not read gateway.env", "Download the OpenShell base image", "telemetry stays on")
 		if asked := strings.Contains(ta.output(), question); asked == upstream {
 			t.Fatalf("upstream %t: telemetry question asked = %t:\n%s", upstream, asked, ta.output())
@@ -1450,7 +1450,7 @@ func TestSetupOnAMacAlreadyOnMicroVMs(t *testing.T) {
 	ta.ok(t, ta.Setup(bg, SetupOptions{SkipImages: true, NoWrappers: true}))
 	has(t, ta.output(), "✓ darwin/arm64  ✓ Landlock (MicroVM)  ✓ Docker 29.1.5  ✓ MicroVM driver  ✓ OpenShell 0.1.1\n",
 		"every run works on a copy (the MicroVM driver mounts no host folders)",
-		"the first run of each image uses about 11 GiB while preparing its MicroVM disk")
+		"the first run of each image uses about 12 GiB while preparing its MicroVM disk")
 	lacks(t, ta.output(), "Run sandboxes in OpenShell MicroVMs?", "Allow sandboxes to mount", "Restart the OpenShell gateway")
 	if len(ta.gateway.planned) != 1 || ta.gateway.applied != 0 || ta.gateway.restarts != 0 {
 		t.Fatalf("plans %+v, applied %d, restarts %d", ta.gateway.planned, ta.gateway.applied, ta.gateway.restarts)
@@ -1646,7 +1646,7 @@ func TestSetupListsTheSandboxesASwitchStrands(t *testing.T) {
 		{noLandlockInTheVM, "2 sandboxes were made on the docker driver and never ran here (dc-a, dc-b); after the switch they can only be deleted " +
 			"(`defenseclaw sandbox delete NAME`)"},
 		{openshell.Check{ID: openshell.CheckIDLandlock, Title: "Landlock", Status: openshell.StatusPass, Detail: "ABI 6 in the Linux VM Docker runs in"},
-			"2 sandboxes run on the docker driver (dc-a, dc-b): pull their work now (`defenseclaw sandbox pull NAME`); after the switch it is reachable only by switching back"},
+			"2 sandboxes run on the docker driver (dc-a, dc-b): bring back any copy-mode work now (`defenseclaw sandbox pull NAME --apply`, or --branch or --patch-out FILE), then confirm the project, branch or patch file contains the work before switching; afterward it is reachable only by switching back"},
 	} {
 		// The MicroVM and telemetry questions take their default (yes), the
 		// restart its default (no).

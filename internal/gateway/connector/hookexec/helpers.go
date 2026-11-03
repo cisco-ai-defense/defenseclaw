@@ -33,7 +33,12 @@ import (
 	"github.com/google/uuid"
 )
 
-func hookFailureCorrelation(payload []byte) (sessionID, callID string) {
+// hookFailureCorrelation is the session and call a hook-failure line names.
+// toolID is the call id when it came from the payload's tool call field
+// (Claude Code and Codex tool_use_id, tool_call_id, OpenCode callID): the
+// gateway records a call the hook blocked itself under that tool id, beside
+// the gateway's own decision row for the call (GAP-0271).
+func hookFailureCorrelation(payload []byte) (sessionID, callID, toolID string) {
 	var fields struct {
 		SessionID     string `json:"session_id"`
 		SessionCamel  string `json:"sessionID"`
@@ -41,6 +46,7 @@ func hookFailureCorrelation(payload []byte) (sessionID, callID string) {
 		ThreadID      string `json:"thread_id"`
 		SourceEventID string `json:"source_event_id"`
 		ToolCallID    string `json:"tool_call_id"`
+		ToolUseID     string `json:"tool_use_id"`
 		CallCamel     string `json:"callID"`
 		CallID        string `json:"call_id"`
 	}
@@ -50,10 +56,16 @@ func hookFailureCorrelation(payload []byte) (sessionID, callID string) {
 				break
 			}
 		}
-		for _, value := range []string{fields.SourceEventID, fields.ToolCallID, fields.CallCamel, fields.CallID} {
-			if callID = strings.TrimSpace(value); callID != "" {
-				break
+		if callID = strings.TrimSpace(fields.SourceEventID); callID == "" {
+			for _, value := range []string{fields.ToolCallID, fields.ToolUseID, fields.CallCamel} {
+				if callID = strings.TrimSpace(value); callID != "" {
+					toolID = callID
+					break
+				}
 			}
+		}
+		if callID == "" {
+			callID = strings.TrimSpace(fields.CallID)
 		}
 	}
 	if len(sessionID) > 256 {
@@ -62,20 +74,23 @@ func hookFailureCorrelation(payload []byte) (sessionID, callID string) {
 	if len(callID) > 256 {
 		callID = callID[:256]
 	}
+	if toolID != "" {
+		toolID = callID
+	}
 	if callID == "" {
 		var id [16]byte
 		if _, err := rand.Read(id[:]); err == nil {
 			callID = hex.EncodeToString(id[:])
 		}
 	}
-	return sessionID, callID
+	return sessionID, callID, toolID
 }
 
 // firstOutageWarning reserves one user-visible warning per agent session.
 // The marker is advisory only: failure to create it leaves the warning on,
 // and neither its presence nor its contents can affect the hook verdict.
 func firstOutageWarning(opts Options) bool {
-	sessionID, _ := hookFailureCorrelation(opts.failurePayload)
+	sessionID, _, _ := hookFailureCorrelation(opts.failurePayload)
 	if sessionID == "" || opts.HookDir == "" {
 		return true
 	}
@@ -241,13 +256,24 @@ func managedOpenCodeBackgroundEvent(opts Options, sp spec) bool {
 // hook may have no Home at all, so it also leaves a durable platform record
 // of the decision (recordManagedHookDecision).
 func logHookFailure(opts Options, sp spec, reason, category, failMode string, blocked bool) {
+	logHookFailureOf(opts, sp, reason, category, failMode, blocked, false)
+}
+
+// logUnreachableFailure is logHookFailure for failUnreachable, whose answer
+// for reason the watchdog can render: a managed call's answer then names the
+// reason its row names (claimFailureLog, rel-1-0-6 GAP-0294).
+func logUnreachableFailure(opts Options, sp spec, reason, failMode string, blocked bool) {
+	logHookFailureOf(opts, sp, reason, "transport", failMode, blocked, true)
+}
+
+func logHookFailureOf(opts Options, sp spec, reason, category, failMode string, blocked, unreachableAnswer bool) {
 	if sp.failOpenOnly {
 		blocked = loggedFailMode(opts, sp, failMode) == "closed"
 	}
 	if w := opts.answerWatch; w != nil {
 		// Before anything below can block: a closed failure keeps the
 		// watchdog's answer closed (claimFailureLog).
-		done, claimed := w.claimFailureLog(opts, sp, blocked)
+		done, claimed := w.claimFailureLog(opts, sp, blocked, reason, failMode, unreachableAnswer)
 		if !claimed {
 			return
 		}
@@ -282,60 +308,46 @@ func logHookFailure(opts Options, sp spec, reason, category, failMode string, bl
 	if home == "" {
 		return
 	}
-	// Never create the DefenseClaw folder for a log line: a managed hook whose
-	// protected folder was missing recreated it here, user-owned with the
-	// profile's inherited access control, and the next event's hook found a
-	// folder and no longer said it was missing (GAP-0154, rel-1-0-4
-	// GAP-0593). A managed account with no such folder writes no row.
-	// Mkdir creates only logs, so a purge that removes the folder while the
-	// call runs is not undone either (GAP-0654).
-	if info, err := os.Stat(home); err != nil || !info.IsDir() {
-		return
+	eventID := managedLocalDenyEventID(opts, outcome)
+	logDir := filepath.Join(home, "logs")
+	// The log the watchdog opened ahead of its deadline: the folder and the
+	// file exist, so the line is one append (rel-1-0-6 GAP-0407).
+	f := opts.failureLog.take(home)
+	if f == nil {
+		if !hookFailureLogFolderReady(opts, home, logDir, eventID) {
+			return
+		}
 	}
 	failMode = loggedFailMode(opts, sp, failMode)
-	sessionID, callID := hookFailureCorrelation(opts.failurePayload)
-	logDir := filepath.Join(home, "logs")
-	if err := os.Mkdir(logDir, 0o700); err != nil && !errors.Is(err, os.ErrExist) {
-		return
-	}
-	entry := struct {
-		TS        string `json:"ts"`
-		Connector string `json:"connector"`
-		Hook      string `json:"hook"`
-		// Event names the hook event, so a neutral stop event's allow
-		// reads apart from a tool call's fail-open (GAP-0527).
-		Event     string `json:"event,omitempty"`
-		SessionID string `json:"session_id,omitempty"`
-		CallID    string `json:"call_id,omitempty"`
-		Reason    string `json:"reason"`
-		Category  string `json:"category"`
-		FailMode  string `json:"fail_mode"`
-		Outcome   string `json:"outcome"`
-		// EventID names a managed call the hook blocked itself (the
-		// gateway, which writes the audit log, did not decide it); the
-		// hook's answer names the same id (managedLocalDenyEventID).
-		EventID string `json:"event_id,omitempty"`
-	}{
+	sessionID, callID, toolID := hookFailureCorrelation(opts.failurePayload)
+	entry := hookFailureEntry{
 		TS:        opts.Now().UTC().Format("2006-01-02T15:04:05Z"),
 		Connector: sp.connector,
 		Hook:      sp.hookName,
 		Event:     strings.TrimSpace(opts.Event),
 		SessionID: sessionID,
 		CallID:    callID,
+		ToolID:    toolID,
 		Reason:    reason,
 		Category:  category,
 		FailMode:  failMode,
 		Outcome:   outcome,
-		EventID:   managedLocalDenyEventID(opts, outcome),
+		EventID:   eventID,
 	}
 	line, err := json.Marshal(entry)
 	if err != nil {
+		if f != nil {
+			_ = f.Close()
+		}
 		return
 	}
-	f, err := os.OpenFile(filepath.Join(logDir, "hook-failures.jsonl"),
-		os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o600)
-	if err != nil {
-		return
+	if f == nil {
+		f, err = openHookFailureLog(filepath.Join(logDir, "hook-failures.jsonl"),
+			os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o600)
+		if err != nil {
+			noteUnrecordedLocalDeny(opts, eventID, "the account's hook-failure log cannot be opened")
+			return
+		}
 	}
 	defer f.Close()
 	if _, err := f.Write(append(line, '\n')); err == nil && entry.EventID != "" && opts.Stderr != nil &&
@@ -347,6 +359,66 @@ func logHookFailure(opts Options, sp spec, reason, category, failMode string, bl
 		fmt.Fprintf(opts.Stderr, "defenseclaw: event_id=%s: this refusal is recorded in %s\n",
 			entry.EventID, filepath.Join(logDir, "hook-failures.jsonl"))
 	}
+}
+
+// hookFailureLogFolderReady makes the logs folder of home for a failure line
+// written without the prepared log, and reports false (with the note of a
+// managed refusal) when there is no place for the line.
+func hookFailureLogFolderReady(opts Options, home, logDir, eventID string) bool {
+	// Never create the DefenseClaw folder for a log line: a managed hook whose
+	// protected folder was missing recreated it here, user-owned with the
+	// profile's inherited access control, and the next event's hook found a
+	// folder and no longer said it was missing (GAP-0154, rel-1-0-4
+	// GAP-0593). A managed account with no such folder writes no row; its
+	// refusal still gets an event id, which the answer names with the reason
+	// no row holds it (noteUnrecordedLocalDeny). Mkdir creates only logs, so
+	// a purge that removes the folder while the call runs is not undone
+	// either (GAP-0654).
+	if info, err := os.Stat(home); err != nil || !info.IsDir() {
+		noteUnrecordedLocalDeny(opts, eventID, "this account has no DefenseClaw folder")
+		return false
+	}
+	if err := os.Mkdir(logDir, 0o700); err != nil && !errors.Is(err, os.ErrExist) {
+		noteUnrecordedLocalDeny(opts, eventID, "the account's log folder cannot be created")
+		return false
+	}
+	return true
+}
+
+// hookFailureEntry is one line of hook-failures.jsonl.
+type hookFailureEntry struct {
+	TS        string `json:"ts"`
+	Connector string `json:"connector"`
+	Hook      string `json:"hook"`
+	// Event names the hook event, so a neutral stop event's allow
+	// reads apart from a tool call's fail-open (GAP-0527).
+	Event     string `json:"event,omitempty"`
+	SessionID string `json:"session_id,omitempty"`
+	CallID    string `json:"call_id,omitempty"`
+	// ToolID is CallID when it is the agent's tool call id.
+	ToolID   string `json:"tool_id,omitempty"`
+	Reason   string `json:"reason"`
+	Category string `json:"category"`
+	FailMode string `json:"fail_mode"`
+	Outcome  string `json:"outcome"`
+	// EventID names a managed call the hook blocked itself (the
+	// gateway, which writes the audit log, did not decide it); the
+	// hook's answer names the same id (managedLocalDenyEventID).
+	EventID string `json:"event_id,omitempty"`
+}
+
+// noteUnrecordedLocalDeny names the event id of a managed refusal that no
+// hook-failures row holds: the account has no DefenseClaw folder (the hook
+// never creates one, and as the invoking user it has no machine-owned place
+// to write), so the id is the one thing the user can quote and the answer
+// says plainly that no local record exists (rel-1-0-6 GAP-0297, mgmt-p1
+// GAP-0134). The line keeps the "defenseclaw: event_id=" prefix of the
+// recorded form.
+func noteUnrecordedLocalDeny(opts Options, eventID, why string) {
+	if eventID == "" || opts.Stderr == nil {
+		return
+	}
+	fmt.Fprintf(opts.Stderr, "defenseclaw: event_id=%s: this refusal is not recorded on this computer (%s); quote the id to your administrator\n", eventID, why)
 }
 
 // managedLocalDenyEventID is a new event id for a managed call the hook

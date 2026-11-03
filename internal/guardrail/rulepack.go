@@ -72,6 +72,40 @@ type RulePack struct {
 	// without one. Its posture sets the pack's default levels, so it is
 	// part of the pin and of Summary (GAP-0431).
 	manifestDigest string
+	compilation    *rulePackCompilation
+}
+
+// rulePackCompilation is shared by a loaded pack and its in-memory variants.
+// Keys are the complete source strings, so editing a rule never reuses a
+// result compiled for its previous value.
+type rulePackCompilation struct {
+	mu           sync.Mutex
+	patterns     map[string]*regexp.Regexp
+	semanticOnce sync.Once
+	semantic     *semantic.Compiler
+	semanticErr  error
+}
+
+// SemanticCompiler returns the candidate's expression compiler. A pack built
+// directly in memory keeps the independent compiler behavior.
+func (rp *RulePack) SemanticCompiler() (*semantic.Compiler, error) {
+	if rp == nil || rp.compilation == nil {
+		return semantic.NewCompiler()
+	}
+	c := rp.compilation
+	c.semanticOnce.Do(func() { c.semantic, c.semanticErr = semantic.NewCompiler() })
+	return c.semantic, c.semanticErr
+}
+
+// ValidatedPattern returns a pattern compiled during rule-pack validation.
+// A missing entry must be compiled and checked by the caller.
+func (rp *RulePack) ValidatedPattern(pattern string) *regexp.Regexp {
+	if rp == nil || rp.compilation == nil {
+		return nil
+	}
+	rp.compilation.mu.Lock()
+	defer rp.compilation.mu.Unlock()
+	return rp.compilation.patterns[pattern]
 }
 
 // RulePackError is the safe, machine-readable error returned by the strict
@@ -464,7 +498,10 @@ func (rp *RulePack) FilesDigest() string {
 }
 
 func loadEmbeddedRulePack() (*RulePack, error) {
-	rp := &RulePack{JudgeConfigs: make(map[string]*JudgeYAML, len(knownJudgeNames))}
+	rp := &RulePack{
+		JudgeConfigs: make(map[string]*JudgeYAML, len(knownJudgeNames)),
+		compilation:  &rulePackCompilation{patterns: make(map[string]*regexp.Regexp)},
+	}
 
 	suppressions, err := decodeEmbeddedYAML[SuppressionsConfig]("suppressions.yaml")
 	if err != nil {
@@ -1093,7 +1130,7 @@ func (rp *RulePack) validateRuleFiles(allowEmptyCategories bool) error {
 				return rulePackErr(rel, "duplicate_rule_id", fmt.Sprintf("rule %d id duplicates another rule", ruleIndex))
 			}
 			seenIDs[ruleID] = struct{}{}
-			if err := validateRequiredRegex(rel, ruleFieldLabel(ruleIndex, ruleID)+" pattern", rule.Pattern); err != nil {
+			if err := rp.validateRulePattern(rel, ruleFieldLabel(ruleIndex, ruleID)+" pattern", rule.Pattern); err != nil {
 				return err
 			}
 			hasExpression := rule.Expression != "" || (rule.decoded && rule.expressionSet)
@@ -1116,7 +1153,7 @@ func (rp *RulePack) validateRuleFiles(allowEmptyCategories bool) error {
 				}
 				if compiler == nil {
 					var err error
-					compiler, err = semantic.NewCompiler()
+					compiler, err = rp.SemanticCompiler()
 					if err != nil {
 						return rulePackErr(rel, "semantic_unavailable", "semantic expression validation is unavailable")
 					}
@@ -1477,16 +1514,38 @@ func (rp *RulePack) validateSensitiveTools() error {
 }
 
 func validateRequiredRegex(rel, field, pattern string) error {
-	if strings.TrimSpace(pattern) == "" {
-		return rulePackErr(rel, "validation", field+" must not be blank")
+	_, err := compileRequiredRegex(rel, field, pattern)
+	return err
+}
+
+func (rp *RulePack) validateRulePattern(rel, field, pattern string) error {
+	if rp.ValidatedPattern(pattern) != nil {
+		return nil
 	}
-	if len(pattern) > maxRegexBytes {
-		return rulePackErr(rel, "pattern_size_limit", field+" exceeds 2048 bytes")
+	re, err := compileRequiredRegex(rel, field, pattern)
+	if err != nil {
+		return err
 	}
-	if _, err := regexp.Compile(pattern); err != nil {
-		return rulePackErr(rel, "regex", field+" is not a valid Go regular expression"+regexErrorReason(err))
+	if rp.compilation != nil {
+		rp.compilation.mu.Lock()
+		rp.compilation.patterns[pattern] = re
+		rp.compilation.mu.Unlock()
 	}
 	return nil
+}
+
+func compileRequiredRegex(rel, field, pattern string) (*regexp.Regexp, error) {
+	if strings.TrimSpace(pattern) == "" {
+		return nil, rulePackErr(rel, "validation", field+" must not be blank")
+	}
+	if len(pattern) > maxRegexBytes {
+		return nil, rulePackErr(rel, "pattern_size_limit", field+" exceeds 2048 bytes")
+	}
+	re, err := regexp.Compile(pattern)
+	if err != nil {
+		return nil, rulePackErr(rel, "regex", field+" is not a valid Go regular expression"+regexErrorReason(err))
+	}
+	return re, nil
 }
 
 // safeRuleIDPattern bounds the rule ids echoed in validation errors.

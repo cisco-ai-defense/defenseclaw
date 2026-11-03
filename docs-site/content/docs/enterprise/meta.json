@@ -25,6 +25,7 @@
     "trusted-connectors",
     "foreign-hook-guard",
     "ai-defense-key",
+    "account-join-key",
     "---Operate---",
     "operations",
     "lifecycle",

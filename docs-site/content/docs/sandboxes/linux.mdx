@@ -206,7 +206,7 @@ Continue with [run an agent](/docs/sandboxes/first-session).
 
 ## Run sandboxes in MicroVMs with KVM
 
-On a host with KVM, the `vm` driver runs each sandbox as a small virtual machine with its own kernel. It is the way on when the host kernel has no Landlock. Setup offers it when `/dev/kvm` exists and stops with the way on if something is missing: access to `/dev/kvm`, `e2fsprogs` 1.43 or newer, and the `openshell-driver-vm` download. Every MicroVM run works on a copy, so [pull](/docs/sandboxes/guide#pull-on-macos) brings the work back.
+On a host with KVM, the `vm` driver runs each sandbox as a small virtual machine with its own kernel. It is the way on when the host kernel has no Landlock. Setup offers it when `/dev/kvm` exists and stops with the way on if something is missing: access to `/dev/kvm`, `e2fsprogs` 1.43 or newer, and the `openshell-driver-vm` download. Every MicroVM run works on a copy, so [`sandbox pull NAME --apply`](/docs/sandboxes/guide#pull-on-macos) brings the work into your project (`--branch` or `--patch-out FILE` saves it elsewhere).
 
 ## One OpenShell gateway per machine
 

@@ -200,6 +200,7 @@ func runSecureClientEvaluation(t *testing.T, src string) []byte {
 		t.Fatal(err)
 	}
 	defer store.Close()
+	restoreGatewayProcessPosture(t)
 	sc, err := NewSidecar(cfg, store, audit.NewLogger(store))
 	if err != nil || sc == nil {
 		t.Fatalf("NewSidecar: %v", err)

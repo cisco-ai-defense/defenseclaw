@@ -61,6 +61,12 @@ schemas/telemetry/v8/upstream/** -text
 # rewriting before the strict normalization gate reads them.
 benchmarks/fixtures/** -text
 
+# The Hermes vendor skill fixture is a byte copy of an upstream Hermes skill
+# tree that internal/hermesskills/vendor_digests.go (and the Python twin
+# hermes_vendor_digests.py) pin by SHA-256 over exact bytes. A Windows CRLF
+# checkout changed the digest, so the pinned bundle read as a user skill.
+internal/hermesskills/testdata/vendor/** -text
+
 # The Secure Client evaluation goldens are compared byte for byte, also on a
 # Windows checkout.
 internal/gateway/testdata/secure_client_evaluation/** text eol=lf
@@ -116,3 +122,5 @@ edge-connector/third_party/** -whitespace
 docs-site/content/**/*.mdx text eol=lf
 cli/defenseclaw/enforce/_asset_name_fold.py text eol=lf
 internal/enterprisepolicy/testdata/copilot-vscode-guarded/** text eol=lf
+# dscl output fixtures: a value dscl prints with its own trailing spaces is part of the case.
+internal/unixidentity/testdata/dscl-listing/* text eol=lf -whitespace

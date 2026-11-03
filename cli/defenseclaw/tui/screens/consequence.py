@@ -18,9 +18,9 @@ from textual import events, on
 from textual.app import ComposeResult
 from textual.binding import Binding
 from textual.containers import Vertical
-from textual.screen import ModalScreen
 from textual.widgets import Button, Static
 
+from defenseclaw.tui.modal import GuardedModalScreen
 from defenseclaw.tui.theme import DEFAULT_TOKENS
 
 # Footer hint text. The armed variant is shown once a ``danger`` action has
@@ -148,7 +148,7 @@ class ConsequenceModalModel:
         return None
 
 
-class ConsequenceModalScreen(ModalScreen[ConsequenceAction | None]):
+class ConsequenceModalScreen(GuardedModalScreen[ConsequenceAction | None]):
     """Rounded modal that returns the selected consequence action."""
 
     # Don't auto-focus an action button. With a button focused, Textual's

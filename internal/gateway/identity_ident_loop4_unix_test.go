@@ -65,6 +65,7 @@ func TestLegacyContinuityNeedsTheUIDOfTheSIDsOwnSlice(t *testing.T) {
 // fallback takes an account only when NSS shows it is the local account
 // that holds its uid, alone.
 func TestProfileExplainRefusesAnAccountItsLookupRefused(t *testing.T) {
+	managedExplainView(t) // the managed administrator view of made-up accounts
 	prevAccount, prevCached, prevLocal := profileExplainAccount, profileExplainCachedSubject, profileExplainLocalAccount
 	prevBlocking := identityLookupBlocking.Load()
 	t.Cleanup(func() {

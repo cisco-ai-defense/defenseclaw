@@ -21,6 +21,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"os/exec"
 	"slices"
 	"sort"
 	"strconv"
@@ -270,6 +271,8 @@ func (a *App) printStatus(st *sandboxapi.Status) {
 	if st.Enabled {
 		if st.Available {
 			row("OpenShell", "connected")
+		} else if st.Managed != nil && st.PortConflict != nil {
+			row("OpenShell", "unavailable: "+st.PortConflict.Message())
 		} else if st.Managed != nil && st.GatewayElsewhere != "" {
 			row("OpenShell", managedAccountBusyText)
 		} else if st.Managed != nil && st.Managed.Unavailable == "" {
@@ -769,10 +772,10 @@ func (a *App) refreshCopy(ctx context.Context, s *session) error {
 		case errors.Is(err, workspace.ErrUnpulledChanges):
 			// One sentence: connect and run take no flag that discards it.
 			return &wsError{msg: s.sb.Name + " has work that was not pulled: bring it back with `" + CommandName + " pull " + s.sb.Name +
-				" --apply` (or --branch, or --patch-out FILE), or connect without --refresh to go on with the copy as it is", err: err}
+				" --apply` (or --branch, or --patch-out FILE) and confirm the project, branch or patch file contains it before refreshing, or connect without --refresh to go on with the copy as it is", err: err}
 		case errors.Is(err, workspace.ErrUnappliedPull):
 			hint = "bring the work back first (`" + CommandName + " pull " + s.sb.Name + " --apply`, --branch or --patch-out FILE), " +
-				"or connect without --refresh to go on with the copy as it is"
+				"confirm the project, branch or patch file contains it before refreshing, or connect without --refresh to go on with the copy as it is"
 		}
 		return workspaceFailure("refresh the copy", err, hint)
 	}
@@ -839,11 +842,14 @@ func (a *App) Exec(ctx context.Context, o ExecOptions) error {
 	// to end stops what the command left running before it exits.
 	runCtx, stop := untilTerminated(ctx, tty)
 	var code int
+	var gatewayFilter *gatewayLostFilter
 	if tty {
 		code, err = a.Terminal.Run(runCtx, inv)
 	} else {
-		code, err = a.Streamer.Stream(runCtx, inv, a.IO.Out, a.IO.Err)
+		gatewayFilter = newGatewayLostFilter(a.IO.Err)
+		code, err = a.Streamer.Stream(runCtx, inv, a.IO.Out, gatewayFilter)
 	}
+	gatewayLost := gatewayFilter != nil && gatewayFilter.finish(code)
 	ended := runCtx.Err() != nil
 	sig := stop()
 	if ended {
@@ -854,7 +860,13 @@ func (a *App) Exec(ctx context.Context, o ExecOptions) error {
 		return ctx.Err()
 	}
 	if err != nil {
-		return err
+		return a.clientMissingOr(ctx, sb.Name, err)
+	}
+	if code != 0 && gatewayLost {
+		// The OpenShell command could not connect to its gateway (it was
+		// killed or is restarting): said in DefenseClaw's words (GAP-0340).
+		a.warn(a.gatewayLostExecText(ctx, sb.Name))
+		return &ExitError{Code: code}
 	}
 	if code != 0 {
 		// OpenShell's own line ("exec relay closed before the command
@@ -1230,7 +1242,7 @@ func overlayDiskFillingText(name string, d overlayDisk, copyMode bool) string {
 	text := fmt.Sprintf("%s's own disk is %d%% full (%s of %s free): a MicroVM stopped with its disk full cannot start again → `%s exec %s -- df -h /` shows it",
 		name, d.percent(), humanBytes(d.avail), humanBytes(d.size), CommandName, name)
 	if copyMode {
-		text += "; `" + CommandName + " pull " + name + "` brings its work back before it fills"
+		text += "; `" + CommandName + " pull " + name + " --apply` brings its work back before it fills"
 	}
 	return text
 }
@@ -1517,7 +1529,9 @@ func (a *App) unhandedWork(ctx context.Context, sb *sandboxapi.Sandbox) string {
 		// run since.
 		return ""
 	}
-	pull := "`" + CommandName + " pull " + sb.Name + " --apply|--branch|--patch-out FILE`"
+	pull := "`" + CommandName + " pull " + sb.Name + " --apply`, `" + CommandName + " pull " + sb.Name +
+		" --branch`, or `" + CommandName + " pull " + sb.Name + " --patch-out FILE`"
+	check := "; inspect the project, branch or patch file before deleting the sandbox"
 	last := ""
 	if h := a.lastHandover(sb); h != nil {
 		last = "its work was last " + a.handoverText(h)
@@ -1536,13 +1550,13 @@ func (a *App) unhandedWork(ctx context.Context, sb *sandboxapi.Sandbox) string {
 	}
 	switch {
 	case err != nil:
-		return "may hold work that was never pulled back" + why("it could not be checked: "+truncate(gatewayTransportText(err.Error()), 120)) + "; " + pull + " brings it back"
+		return "may hold work that was never pulled back" + why("it could not be checked: "+truncate(gatewayTransportText(err.Error()), 120)) + "; use " + pull + " to save it if needed" + check
 	case work == workspace.CopyWorkUnpulled:
-		return "holds work that was never pulled back" + why() + "; " + pull + " brings it back"
+		return "holds work that was never pulled back" + why() + "; use " + pull + " to save it if needed" + check
 	case work == workspace.CopyWorkUnapplied:
-		return "holds a pull that was never applied" + why() + "; " + pull + " applies it"
+		return "holds a pull that was never applied" + why() + "; use " + pull + " to save it" + check
 	case work == workspace.CopyWorkUnknown:
-		return "may hold work that was never pulled back" + why("it is not running, so it was not checked") + "; " + pull + " looks"
+		return "may hold work that was never pulled back" + why("it is not running, so it was not checked") + "; use " + pull + " to save it if needed" + check
 	}
 	return ""
 }
@@ -1614,7 +1628,7 @@ func (a *App) Logs(ctx context.Context, o LogsOptions) error {
 		}
 	}
 	if err != nil {
-		return err
+		return a.clientMissingOr(ctx, sb.Name, err)
 	}
 	switch code {
 	case 0:
@@ -1713,7 +1727,18 @@ func (a *App) stoppedUnderFollower(ctx context.Context, api API, sb *sandboxapi.
 	a.keptRunState(kept)
 }
 
-// openShellClientMissingText is the refusal of a connect that could not run
+// clientMissingOr is err, except that a command which could not run the
+// OpenShell command at all (exec's "executable file not found") says in plain
+// words what is missing and what to do, as connect does, instead of Go's text
+// (GAP-0196: sandbox exec and logs printed the raw error).
+func (a *App) clientMissingOr(ctx context.Context, sandbox string, err error) error {
+	if errors.Is(err, exec.ErrNotFound) {
+		return a.openShellClientMissingText(ctx, &openShellClientMissingError{sandbox: sandbox, err: err}, false)
+	}
+	return err
+}
+
+// openShellClientMissingText is the refusal of a command that could not run
 // the OpenShell command (openShellClientMissingError), with the next step: on
 // a managed computer the account's sandbox service puts its copy back, so
 // the command is run again, and the organization's contact if it lasts.
@@ -1725,9 +1750,9 @@ func (a *App) openShellClientMissingText(ctx context.Context, e *openShellClient
 	facts := a.managedFacts(ctx)
 	if a.ManagedHost() || onManagedHost() || a.managedSeen != nil {
 		return fmt.Errorf("%s; %s. This happens for a short while after your organization changed the sandbox setup on this computer, "+
-			"until your sandbox service installs the command again: run `%s sandbox connect %s` again in a minute, and `%s sandbox doctor` shows what is missing. %s",
-			e.Error(), state, CommandName, e.sandbox, CommandName, accountOutageContact(facts.RequestAccess))
+			"until your sandbox service installs the command again: run the command again in a minute, and `%s doctor` shows what is missing. %s",
+			e.Error(), state, CommandName, accountOutageContact(facts.RequestAccess))
 	}
-	return fmt.Errorf("%s; %s. Install OpenShell again with `%s sandbox setup`, and `%s sandbox doctor` shows what is missing",
+	return fmt.Errorf("%s; %s. Install OpenShell again with `%s setup`, and `%s doctor` shows what is missing",
 		e.Error(), state, CommandName, CommandName)
 }

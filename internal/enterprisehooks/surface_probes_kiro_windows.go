@@ -32,7 +32,8 @@ import (
 // Its version is never assumed (a 2.24.1 install would then be enrolled as
 // a supported one although its headless runs load no hooks, rel-1-0-4
 // GAP-0829): it is reported as not protected, with no row of its own, until
-// its first run names the version.
+// a matching run copy names the version. Other receipt formats alone do not
+// establish the hook contract.
 //
 // The Kiro IDE reads the global %USERPROFILE%\.kiro\hooks file from
 // KiroIDEGlobalHooksFloor. Its version is the resources\app\product.json of
@@ -84,7 +85,8 @@ func windowsKiroCLIVersionUnknown(profileHome string) string {
 // reports the deployment's coverage as incomplete.
 func windowsKiroCLIVersionUnknownReason(launcher string) string {
 	return fmt.Sprintf("%s has no run copy that matches it, so its version is unknown and not verified against a known hook contract; "+
-		"kiro-cli records its build in %s when the user starts it, and the next enumeration enrolls or reports that version",
+		"this release needs a matching version copy in %s to select a hook contract. Other receipt formats do not establish one; "+
+		"the installation is not counted as protected. Check status and verify after installing a Kiro CLI build whose hook contract this release can verify",
 		launcher, filepath.Join(filepath.Dir(launcher), "run"))
 }
 

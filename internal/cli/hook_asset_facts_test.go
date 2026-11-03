@@ -11,6 +11,7 @@
 package cli
 
 import (
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"testing"
@@ -50,6 +51,30 @@ func TestHookAssetFactsReportWhatTheGatewayCannotRead(t *testing.T) {
 	facts, ok = assetfacts.Decode(hookAssetFacts("claudecode", []byte(`{"tool_name":"mcp__notes__count_words","cwd":"`+filepath.ToSlash(home)+`"}`)))
 	if !ok || facts.MCP == nil || facts.MCP.Name != "notes" || facts.MCP.URL != "http://127.0.0.1:28561/mcp" {
 		t.Fatalf("mcp facts = %+v (ok=%v)", facts, ok)
+	}
+}
+
+func TestGAP0535HookReportsDeclaredNameAfterDirectoryChange(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("USERPROFILE", home)
+	dir := filepath.Join(home, ".claude", "skills", "folder")
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "SKILL.md"), []byte("---\nname: listed-name\n---\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	input, err := json.Marshal(map[string]any{
+		"tool_name": "Bash", "cwd": t.TempDir(),
+		"tool_input": map[string]any{"command": "cd " + filepath.Join(home, ".claude") + " && cat skills/folder/SKILL.md"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	facts, ok := assetfacts.Decode(hookAssetFacts("claudecode", input))
+	if !ok || len(facts.DeclaredFor("folder")) != 1 || facts.DeclaredFor("folder")[0] != "listed-name" {
+		t.Fatalf("declared skill facts = %+v (ok=%v)", facts, ok)
 	}
 }
 

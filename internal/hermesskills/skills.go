@@ -18,10 +18,7 @@
 package hermesskills
 
 import (
-	"bufio"
-	"bytes"
-	"crypto/md5" // #nosec G501 -- required by Hermes's manifest contract.
-	"encoding/hex"
+	"crypto/sha256"
 	"errors"
 	"fmt"
 	"io"
@@ -33,16 +30,20 @@ import (
 	"strings"
 
 	"github.com/defenseclaw/defenseclaw/internal/hermespath"
+	"github.com/defenseclaw/defenseclaw/internal/pathidentity"
 	"github.com/defenseclaw/defenseclaw/internal/safefile"
 )
 
 const (
-	ManifestName          = ".bundled_manifest"
 	DefaultDirectoryLimit = 32768
-	manifestMaxBytes      = 2 * 1024 * 1024
-	markerMaxBytes        = 64 * 1024
-	maxSkillFileBytes     = 64 * 1024 * 1024
-	maxSkillTreeBytes     = 256 * 1024 * 1024
+	// FullScanDirectoryLimit is used after a bounded walk reaches its directory,
+	// entry, or depth budget. It keeps the same provenance checks while allowing
+	// the off-reader worker to finish the tree.
+	FullScanDirectoryLimit = int(^uint(0)>>1) / 8
+	DefaultDepthLimit      = 128
+	markerMaxBytes         = 64 * 1024
+	maxSkillFileBytes      = 64 * 1024 * 1024
+	maxSkillTreeBytes      = 256 * 1024 * 1024
 )
 
 var ErrDirectoryLimit = errors.New("Hermes skill discovery directory limit exceeded")
@@ -106,8 +107,8 @@ func IsProfileRoot(path string) bool {
 }
 
 // Discover recursively returns actual Hermes skills and their provenance.
-// Copies are bundled only when the manifest, user copy, and matching source in
-// the exact Hermes checkout all agree; every other copy remains scanable.
+// Copies are bundled only when their complete tree matches a pinned vendor
+// digest; every other copy remains scanable.
 func Discover(root string, directoryLimit int) ([]Entry, error) {
 	if !IsRoot(root) {
 		return nil, fmt.Errorf("not the resolved Hermes skills root: %s", root)
@@ -115,14 +116,13 @@ func Discover(root string, directoryLimit int) ([]Entry, error) {
 	if !canonicalPath(root) {
 		return nil, fmt.Errorf("Hermes skills root is linked or unavailable: %s", root)
 	}
-	return discover(root, directoryLimit)
+	return discover(root, root, directoryLimit)
 }
 
 // DiscoverProfileRoot is Discover for the Hermes skills root of a profile
 // the caller resolved itself: a service-context scan (managed Windows)
 // reads every user's profile, while IsRoot resolves only this process's
-// own Hermes home. Provenance is decided the same way, against that
-// profile's own manifest and Hermes checkout.
+// own Hermes home. Provenance uses the same pinned vendor digests.
 func DiscoverProfileRoot(root string, directoryLimit int) ([]Entry, error) {
 	if filepath.Base(filepath.Clean(root)) != "skills" {
 		return nil, fmt.Errorf("not a Hermes skills root: %s", root)
@@ -130,15 +130,39 @@ func DiscoverProfileRoot(root string, directoryLimit int) ([]Entry, error) {
 	if !profileRootUnlinked(root) {
 		return nil, fmt.Errorf("Hermes skills root is linked or unavailable: %s", root)
 	}
-	return discover(root, directoryLimit)
+	return discover(root, root, directoryLimit)
+}
+
+// DiscoverUnder lists only the subtree named by a watcher directory event.
+// The vendor digest is checked for each skill in the selected subtree. This
+// keeps a move into an existing category from walking every installed skill.
+func DiscoverUnder(root, subtree string, directoryLimit int) ([]Entry, error) {
+	if !IsRoot(root) && !IsProfileRoot(root) {
+		return nil, fmt.Errorf("not a Hermes skills root: %s", root)
+	}
+	if !profileRootUnlinked(root) || !pathAtOrBelow(subtree, root) || samePath(subtree, root) {
+		return nil, fmt.Errorf("invalid Hermes skill subtree: %s", subtree)
+	}
+	for dir := filepath.Clean(subtree); !samePath(dir, root); dir = filepath.Dir(dir) {
+		if !plainDirectory(dir) {
+			return nil, fmt.Errorf("linked or unavailable Hermes skill subtree: %s", subtree)
+		}
+	}
+	return discover(root, subtree, directoryLimit)
+}
+
+// DiscoverUnderFull completes a moved-in subtree after the bounded walk hits
+// its budget. Callers run it off the event reader.
+func DiscoverUnderFull(root, subtree string) ([]Entry, error) {
+	return DiscoverUnder(root, subtree, FullScanDirectoryLimit)
 }
 
 // profileRootUnlinked is canonicalPath for a profile's skills root. The
 // managed Windows gateway runs as a virtual service account that is
 // granted read on the skills folder only, not list on the profile folders
 // above it, so resolving the path is denied and every user's Hermes skills
-// went unlisted (GAP-2263). On that denial the root itself must still be a
-// plain directory; the walk below it skips links.
+// went unlisted (GAP-2263). On that denial every existing ancestor must be
+// a plain directory too, or a linked profile parent could redirect the walk.
 func profileRootUnlinked(root string) bool {
 	absolute, err := filepath.Abs(filepath.Clean(root))
 	if err != nil {
@@ -151,7 +175,22 @@ func profileRootUnlinked(root string) bool {
 	if !errors.Is(err, fs.ErrPermission) {
 		return false
 	}
-	return plainDirectory(absolute)
+	return UnlinkedAncestors(absolute)
+}
+
+// UnlinkedAncestors checks every existing directory up to the volume root.
+// It is the no-link proof used when resolving a readable skills folder is
+// denied by permissions on one of its parents.
+func UnlinkedAncestors(path string) bool {
+	for dir := filepath.Clean(path); ; dir = filepath.Dir(dir) {
+		if !plainDirectory(dir) {
+			return false
+		}
+		parent := filepath.Dir(dir)
+		if parent == dir {
+			return true
+		}
+	}
 }
 
 func plainDirectory(path string) bool {
@@ -159,16 +198,25 @@ func plainDirectory(path string) bool {
 	return err == nil && info.IsDir() && info.Mode()&(os.ModeSymlink|os.ModeIrregular) == 0
 }
 
-func discover(root string, directoryLimit int) ([]Entry, error) {
+func discover(root, subtree string, directoryLimit int) ([]Entry, error) {
 	if directoryLimit <= 0 {
 		directoryLimit = DefaultDirectoryLimit
 	}
-	manifest := readManifest(root)
 	entries := make([]Entry, 0)
 	visited := 0
-	err := filepath.WalkDir(root, func(path string, entry os.DirEntry, walkErr error) error {
+	visitedEntries := 0
+	err := filepath.WalkDir(subtree, func(path string, entry os.DirEntry, walkErr error) error {
 		if walkErr != nil {
+			if !samePath(path, subtree) && errors.Is(walkErr, fs.ErrPermission) {
+				return filepath.SkipDir
+			}
 			return walkErr
+		}
+		if !samePath(subtree, root) {
+			visitedEntries++
+			if visitedEntries > 8*directoryLimit {
+				return ErrDirectoryLimit
+			}
 		}
 		if entry.Type()&os.ModeSymlink != 0 {
 			if entry.IsDir() {
@@ -178,6 +226,10 @@ func discover(root string, directoryLimit int) ([]Entry, error) {
 		}
 		if !entry.IsDir() {
 			return nil
+		}
+		if !samePath(subtree, root) && directoryLimit != FullScanDirectoryLimit &&
+			strings.Count(path[len(subtree):], string(filepath.Separator)) > DefaultDepthLimit {
+			return ErrDirectoryLimit
 		}
 		visited++
 		if visited > directoryLimit {
@@ -193,7 +245,7 @@ func discover(root string, directoryLimit int) ([]Entry, error) {
 		entries = append(entries, Entry{
 			Name:    name,
 			Path:    path,
-			Bundled: matchesInstalledSource(root, path, name, manifest[name]),
+			Bundled: matchesVendorDigest(root, path, name),
 		})
 		return nil
 	})
@@ -203,7 +255,7 @@ func discover(root string, directoryLimit int) ([]Entry, error) {
 	return entries, nil
 }
 
-// IsBundledPath reports whether path is a source-bound Hermes bundle or a
+// IsBundledPath reports whether path is a digest-pinned Hermes bundle or a
 // descendant of one.
 func IsBundledPath(path string) bool {
 	trimmed := strings.TrimSpace(path)
@@ -215,11 +267,10 @@ func IsBundledPath(path string) bool {
 	if info, err := os.Stat(current); err == nil && !info.IsDir() {
 		current = filepath.Dir(current)
 	}
-	manifest := readManifest(root)
 	for pathAtOrBelow(current, root) && !samePath(current, root) {
 		name, ok := readSkillName(current)
 		if ok {
-			return matchesInstalledSource(root, current, name, manifest[name])
+			return matchesVendorDigest(root, current, name)
 		}
 		parent := filepath.Dir(current)
 		if parent == current {
@@ -230,59 +281,23 @@ func IsBundledPath(path string) bool {
 	return false
 }
 
-// matchesInstalledSource binds the writable manifest and user copy to the
-// matching source in the exact Hermes installation checkout. If any of the
-// three inputs is missing, linked, oversized, modified, or mismatched, the
-// skill deliberately remains scanable.
-func matchesInstalledSource(root, skillDir, name, manifestHash string) bool {
-	origin := strings.ToLower(strings.TrimSpace(manifestHash))
-	if origin == "" {
-		return false
-	}
-	current, err := treeMD5(skillDir)
-	if err != nil || current != origin {
-		return false
-	}
+// matchesVendorDigest uses the digest shipped with DefenseClaw, independent
+// of the installed manifest, launcher, and local Hermes checkout.
+func matchesVendorDigest(root, skillDir, name string) bool {
 	relative, err := filepath.Rel(root, skillDir)
 	if err != nil || relative == "." || relative == ".." ||
 		strings.HasPrefix(relative, ".."+string(filepath.Separator)) {
 		return false
 	}
-	sourceRoot := filepath.Join(filepath.Dir(root), "hermes-agent", "skills")
-	source := filepath.Join(sourceRoot, relative)
-	if !pathAtOrBelow(source, sourceRoot) {
+	if name != filepath.Base(relative) {
 		return false
 	}
-	sourceName, ok := readSkillName(source)
-	if !ok || sourceName != name {
+	want := vendorDigests[filepath.ToSlash(relative)]
+	if want == "" {
 		return false
 	}
-	sourceHash, err := treeMD5(source)
-	return err == nil && sourceHash == origin
-}
-
-func readManifest(root string) map[string]string {
-	payload, err := safefile.ReadRegularFileBounded(
-		filepath.Join(root, ManifestName),
-		manifestMaxBytes,
-	)
-	if err != nil {
-		return nil
-	}
-	result := make(map[string]string)
-	scanner := bufio.NewScanner(bytes.NewReader(payload))
-	for scanner.Scan() {
-		line := strings.TrimSpace(scanner.Text())
-		name, digest, ok := strings.Cut(line, ":")
-		name = strings.TrimSpace(name)
-		digest = strings.ToLower(strings.TrimSpace(digest))
-		decoded, decodeErr := hex.DecodeString(digest)
-		if !ok || name == "" || decodeErr != nil || len(decoded) != md5.Size {
-			continue
-		}
-		result[name] = digest
-	}
-	return result
+	current, err := treeSHA256(skillDir)
+	return err == nil && current == want
 }
 
 func readSkillName(skillDir string) (string, bool) {
@@ -320,7 +335,7 @@ func readSkillFile(path string) ([]byte, error) {
 	if err == nil || !errors.Is(err, fs.ErrPermission) {
 		return payload, err
 	}
-	info, err := os.Lstat(path)
+	info, err := pathidentity.LstatPinned(path)
 	if err != nil {
 		return nil, err
 	}
@@ -349,7 +364,7 @@ func readSkillFile(path string) ([]byte, error) {
 	return payload, nil
 }
 
-func treeMD5(root string) (string, error) {
+func treeSHA256(root string) (string, error) {
 	if !canonicalPath(root) {
 		return "", fmt.Errorf("skill root is linked or unavailable: %s", root)
 	}
@@ -367,7 +382,7 @@ func treeMD5(root string) (string, error) {
 		if entry.Type()&os.ModeSymlink != 0 {
 			return fmt.Errorf("linked Hermes skill content: %s", path)
 		}
-		info, err := entry.Info()
+		info, err := pathidentity.LstatPinned(path)
 		if err != nil {
 			return err
 		}
@@ -394,13 +409,9 @@ func treeMD5(root string) (string, error) {
 	sort.Slice(files, func(i, j int) bool {
 		left, _ := filepath.Rel(root, files[i].path)
 		right, _ := filepath.Rel(root, files[j].path)
-		if runtime.GOOS == "windows" {
-			left = strings.ToLower(left)
-			right = strings.ToLower(right)
-		}
-		return left < right
+		return vendorDigestRelativePath(left) < vendorDigestRelativePath(right)
 	})
-	digest := md5.New() // #nosec G401 -- required by Hermes's manifest contract.
+	digest := sha256.New()
 	for _, file := range files {
 		relative, err := filepath.Rel(root, file.path)
 		if err != nil {
@@ -410,7 +421,7 @@ func treeMD5(root string) (string, error) {
 		if err != nil {
 			return "", err
 		}
-		_, _ = digest.Write([]byte(relative))
+		_, _ = digest.Write([]byte(vendorDigestRelativePath(relative)))
 		_, _ = digest.Write(payload)
 	}
 	for _, item := range append(dirs, files...) {
@@ -421,6 +432,10 @@ func treeMD5(root string) (string, error) {
 		}
 	}
 	return fmt.Sprintf("%x", digest.Sum(nil)), nil
+}
+
+func vendorDigestRelativePath(relative string) string {
+	return strings.ReplaceAll(relative, `\`, "/")
 }
 
 func canonicalPath(path string) bool {

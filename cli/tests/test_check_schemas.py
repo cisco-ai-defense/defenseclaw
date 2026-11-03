@@ -373,6 +373,21 @@ class TestManagementForwardSchemas(unittest.TestCase):
         self.assertNotEqual(result.returncode, 0)
         self.assertIn("'accounts'", result.stderr)
 
+    def test_each_account_or_group_member_is_banned(self) -> None:
+        # sidecar-r107 GAP-0006 review: these name accounts, groups or hold
+        # free text, so no forward schema may list them, even with a pattern.
+        members = ("user_name", "user_id", "excluded_users", "excluded_groups", "device_groups",
+                   "windows_token_groups_pending", "error_message")
+        for member in members:
+            with self.subTest(member=member):
+                def add(document: dict, member: str = member) -> None:
+                    document["properties"][member] = {"type": "string", "pattern": "^[a-z]{1,8}$"}
+
+                result = self._tampered(
+                    lambda forward, add=add: self._edit(forward, "identity-refresh-forward.schema.json", add))
+                self.assertNotEqual(result.returncode, 0, result.stdout + result.stderr)
+                self.assertIn(f"lists the member {member!r}", result.stderr)
+
     def test_a_loose_string_that_lets_a_name_through_is_caught(self) -> None:
         def loosen(document: dict) -> None:
             document["$defs"]["message"]["properties"]["code"] = {"type": "string", "pattern": ".*"}

@@ -7,6 +7,7 @@ package refusalpipe
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"strings"
@@ -219,6 +220,138 @@ func TestRefusalPipeKeepsEveryReportOfAClientThatExitsAtOnce(t *testing.T) {
 	mu.Lock()
 	defer mu.Unlock()
 	t.Fatalf("received %d of %d reports", received, sent)
+}
+
+// GAP-0547: the next pipe instance may briefly be unavailable between two
+// reports. The client waits for it within its connection budget.
+func TestRefusalPipeSendWaitsForNextInstance(t *testing.T) {
+	user, err := windows.GetCurrentProcessToken().GetTokenUser()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !AccountSID(user.User.Sid.String()) {
+		t.Skipf("test account %s is not a user account SID", user.User.Sid)
+	}
+	name := fmt.Sprintf(`\\.\pipe\defenseclaw-refusal-gap-%d-%d`, os.Getpid(), time.Now().UnixNano())
+	restoreName, restorePID := clientPipeName, gatewayServerPID
+	t.Cleanup(func() { clientPipeName, gatewayServerPID = restoreName, restorePID })
+	clientPipeName = name
+	gatewayServerPID = func() (uint32, error) { return uint32(os.Getpid()), nil }
+
+	security, err := pipeSecurity()
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	firstReady := make(chan struct{})
+	gap := make(chan struct{})
+	resume := make(chan struct{})
+	var release sync.Once
+	received := make(chan Report, 2)
+	served := make(chan error, 1)
+	go func() {
+		for i := 0; i < 2; i++ {
+			if i == 1 {
+				close(gap)
+				select {
+				case <-ctx.Done():
+					served <- ctx.Err()
+					return
+				case <-resume:
+				}
+			}
+			pipe, err := createPipe(name, security, true)
+			if err != nil {
+				served <- err
+				return
+			}
+			if i == 0 {
+				close(firstReady)
+			}
+			_, err = overlapped(ctx, 0, pipe, func(_ *uint32, o *windows.Overlapped) error {
+				err := windows.ConnectNamedPipe(pipe, o)
+				if errors.Is(err, windows.ERROR_PIPE_CONNECTED) {
+					return nil
+				}
+				return err
+			})
+			if err == nil {
+				var sid string
+				var report Report
+				var ok bool
+				sid, report, ok = receive(ctx, pipe)
+				if !ok || sid != user.User.Sid.String() {
+					err = fmt.Errorf("report %d was not attributed to the client", i)
+				} else {
+					received <- report
+				}
+			}
+			_ = windows.DisconnectNamedPipe(pipe)
+			_ = windows.CloseHandle(pipe)
+			if err != nil {
+				served <- err
+				return
+			}
+		}
+		served <- nil
+	}()
+	t.Cleanup(func() {
+		cancel()
+		release.Do(func() { close(resume) })
+		<-served
+	})
+	select {
+	case <-firstReady:
+	case <-ctx.Done():
+		t.Fatal(ctx.Err())
+	}
+	report := Report{Command: "enterprise windows repair", Reason: ReasonElevationRequired}
+	if !t.Run("available instance", func(t *testing.T) {
+		if err := Send(ctx, report); err != nil {
+			t.Fatal(err)
+		}
+		select {
+		case got := <-received:
+			if got != report {
+				t.Fatalf("received %+v, want %+v", got, report)
+			}
+		case <-ctx.Done():
+			t.Fatal(ctx.Err())
+		}
+	}) {
+		return
+	}
+	select {
+	case <-gap:
+	case <-ctx.Done():
+		t.Fatal(ctx.Err())
+	}
+	t.Run("next instance", func(t *testing.T) {
+		result := make(chan error, 1)
+		go func() { result <- Send(ctx, report) }()
+		select {
+		case err := <-result:
+			t.Fatalf("send returned before the next instance was ready: %v", err)
+		case <-time.After(100 * time.Millisecond):
+		}
+		release.Do(func() { close(resume) })
+		select {
+		case err := <-result:
+			if err != nil {
+				t.Fatal(err)
+			}
+		case <-ctx.Done():
+			t.Fatal(ctx.Err())
+		}
+		select {
+		case got := <-received:
+			if got != report {
+				t.Fatalf("received %+v, want %+v", got, report)
+			}
+		case <-ctx.Done():
+			t.Fatal(ctx.Err())
+		}
+	})
 }
 
 // GAP-2639: the gateway service's write-restricted token creates the pipe's

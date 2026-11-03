@@ -136,7 +136,20 @@
         },
         "ai_defense": {
           "type": "string",
-          "pattern": "^[a-z][a-z0-9_]{0,63}$"
+          "enum": [
+            "",
+            "disabled",
+            "ok",
+            "unknown",
+            "unavailable:auth_failed",
+            "unavailable:credential_unavailable",
+            "unavailable:unreachable",
+            "unavailable:proxy_auth_required",
+            "unavailable:proxy_config",
+            "unavailable:not_initialized",
+            "unavailable:error",
+            "unavailable:gateway_not_ready"
+          ]
         }
       }
     },
@@ -167,6 +180,24 @@
     "bundle": {
       "$ref": "#/$defs/bundleState"
     },
+    "enforcement_pending": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "count": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "connectors": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "pattern": "^[a-z][a-z0-9_-]{0,31}$"
+          },
+          "maxItems": 64
+        }
+      }
+    },
     "last_refusal": {
       "$ref": "#/$defs/bundleRefusal"
     },
@@ -185,6 +216,14 @@
           "detected": {
             "type": "boolean"
           },
+          "versions": {
+            "type": "array",
+            "items": {
+              "type": "string",
+              "pattern": "^[0-9A-Za-z][0-9A-Za-z.+_-]{0,63}$"
+            },
+            "maxItems": 8
+          },
           "hooks_installed": {
             "type": "string",
             "enum": [
@@ -193,6 +232,28 @@
               "none",
               "unknown"
             ]
+          },
+          "targets": {
+            "type": "object",
+            "additionalProperties": false,
+            "properties": {
+              "total": {
+                "type": "integer",
+                "minimum": 0
+              },
+              "protected": {
+                "type": "integer",
+                "minimum": 0
+              },
+              "pending": {
+                "type": "integer",
+                "minimum": 0
+              },
+              "failed": {
+                "type": "integer",
+                "minimum": 0
+              }
+            }
           },
           "effective_mode": {
             "type": "string",
@@ -226,6 +287,35 @@
             "idle",
             "unknown"
           ]
+        },
+        "sources": {
+          "type": "array",
+          "maxItems": 8,
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "properties": {
+              "source": {
+                "type": "string",
+                "pattern": "^[a-z][a-z0-9_]{0,31}$"
+              },
+              "directory": {
+                "type": "string",
+                "enum": [
+                  "local",
+                  "ldap",
+                  "active_directory",
+                  "entra_id",
+                  "okta",
+                  "other"
+                ]
+              },
+              "last_ok_age_seconds": {
+                "type": "integer",
+                "minimum": 0
+              }
+            }
+          }
         },
         "failing_accounts": {
           "type": "integer",
@@ -263,6 +353,10 @@
         },
         "installed": {
           "type": "boolean"
+        },
+        "version": {
+          "type": "string",
+          "pattern": "^[0-9A-Za-z][0-9A-Za-z.+_-]{0,63}$"
         },
         "driver": {
           "type": "string",

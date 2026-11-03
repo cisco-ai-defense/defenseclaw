@@ -6,12 +6,15 @@ package gateway
 
 import (
 	"database/sql"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/defenseclaw/defenseclaw/internal/audit"
 	"github.com/defenseclaw/defenseclaw/internal/scanner"
+	"github.com/defenseclaw/defenseclaw/internal/useridentity"
+	"github.com/defenseclaw/defenseclaw/internal/watcher"
 )
 
 // GAP-2435 (p0 GAP-0575): a judged skill scan's persisted scan and
@@ -76,5 +79,27 @@ func TestGAP2435APIScanCorrelationCarriesTheJudgeModel(t *testing.T) {
 	}
 	if corr := scanCorrelationWithJudge(t.Context(), nil); corr.JudgeModel != "" {
 		t.Fatalf("nil result judge = %q", corr.JudgeModel)
+	}
+}
+
+// p0 GAP-0575: an administrator's API scan of an asset in an enrolled user's
+// folder names that user on its scan rows, as the watcher's rows do; an
+// asset outside every enrolled home names nobody.
+func TestAPIScanOfAnEnrolledUsersAssetNamesThatUser(t *testing.T) {
+	previous := scanAssetOwners.Load()
+	t.Cleanup(func() { scanAssetOwners.Store(previous) })
+	base := t.TempDir()
+	home := filepath.Join(base, "Users", "dcw-epw1")
+	publishScanAssetOwners([]watcher.AssetOwner{
+		{Home: filepath.Join(base, "Users"), ID: "S-1-5-21-1-1000", IDKind: useridentity.KindWindowsSID, Name: "outer"},
+		{Home: home, ID: "S-1-5-21-1-1001", IDKind: useridentity.KindWindowsSID, Name: "dcw-epw1"},
+	})
+	result := &scanner.ScanResult{Target: "epa-crit", JudgeModel: "bedrock/haiku"}
+	corr := scanCorrelationForTarget(t.Context(), result, filepath.Join(home, ".claude", "skills", "epa-crit"))
+	if corr.UserID != "S-1-5-21-1-1001" || corr.UserName != "dcw-epw1" || corr.UserIDKind != useridentity.KindWindowsSID || corr.JudgeModel != "bedrock/haiku" {
+		t.Fatalf("correlation = %+v, want the enrolled owner of the folder and the judge", corr)
+	}
+	if other := scanCorrelationForTarget(t.Context(), result, filepath.Join(t.TempDir(), "skills", "x")); other.UserID != "" || other.UserName != "" {
+		t.Fatalf("an asset outside every enrolled home got an owner: %+v", other)
 	}
 }

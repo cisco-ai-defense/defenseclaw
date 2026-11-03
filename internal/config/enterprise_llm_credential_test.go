@@ -63,6 +63,37 @@ func TestStandaloneLLMKeyComesFromProtectedCredential(t *testing.T) {
 	}
 }
 
+// rel-1-0-6:GAP-0301: a credential the gateway reads cannot name an
+// account join tenant secret, which the gateway is not given.
+func TestGatewayCredentialsCannotNameTheAccountJoinSecrets(t *testing.T) {
+	for _, name := range []string{"account-join-key", "account-join-key-next"} {
+		for _, inspection := range []EnterpriseInspectionConfig{
+			{LLM: EnterpriseLLMConfig{Credential: name}},
+			{AIDefense: EnterpriseAIDefenseConfig{Enabled: true, Credential: name}},
+		} {
+			cfg := Config{DeploymentMode: "managed_enterprise", Enterprise: EnterpriseConfig{Profile: "standalone", Inspection: inspection}}
+			if err := validateEnterpriseConfig(&cfg); err == nil || !strings.Contains(err.Error(), "account join tenant secret") {
+				t.Errorf("%s in %+v: %v, want a refusal", name, inspection, err)
+			}
+		}
+		cfg := Config{DeploymentMode: "managed_enterprise", Enterprise: EnterpriseConfig{Profile: "standalone"}, DecisionModel: DecisionModelConfig{Credential: name}}
+		if err := validateEnterpriseConfig(&cfg); err == nil || !strings.Contains(err.Error(), "decision_model.credential") {
+			t.Errorf("decision_model.credential %s: %v, want a refusal", name, err)
+		}
+		headers := map[string]ObservabilityV8HeaderValue{"X-Api-Key": {Secret: &ObservabilityV8SecretRef{Credential: name}}}
+		if err := validateObservabilityV8Headers(headers, ObservabilityV8DestinationOTLP, "http/protobuf", "observability.destinations.x.headers"); err == nil || !strings.Contains(err.Error(), "account join tenant secret") {
+			t.Errorf("observability header credential %s: %v, want a refusal", name, err)
+		}
+		source := ObservabilityV8DestinationSource{Kind: ObservabilityV8DestinationSplunkHEC, Endpoint: "https://splunk.example.com:8088/services/collector", TokenCredential: name}
+		if _, err := compileObservabilityV8Transport(source, nil, "observability.destinations.x"); err == nil || !strings.Contains(err.Error(), "account join tenant secret") {
+			t.Errorf("observability token_credential %s: %v, want a refusal", name, err)
+		}
+	}
+	if refusal := gatewayCredentialRefusal("enterprise.inspection.llm.credential", "llm-judge"); refusal != "" {
+		t.Fatalf("an ordinary credential is refused: %s", refusal)
+	}
+}
+
 // GAP-0674: the installed config still names the judge key, so `enterprise
 // secret remove` of that credential is refused with the key that names it;
 // AI Defense only counts while it is enabled.

@@ -274,7 +274,7 @@ const (
 )
 
 func compileRulePackCategories(rp *guardrail.RulePack) (*compiledRulePackCategories, error) {
-	compiler, err := semantic.NewCompiler()
+	compiler, err := rp.SemanticCompiler()
 	if err != nil {
 		return nil, errors.New("semantic rule compiler is unavailable")
 	}
@@ -614,14 +614,18 @@ func mergeRulePackCategories(
 					)
 				}
 			}
-			re, err := compileRegexSafe(r.Pattern)
-			if err != nil {
-				return nil, 0, 0, fmt.Errorf(
-					"rule-pack category entry %d rule %d contains an invalid regular expression: %w",
-					fileIndex,
-					ruleIndex,
-					err,
-				)
+			re := rp.ValidatedPattern(r.Pattern)
+			if re == nil {
+				var err error
+				re, err = compileRegexSafe(r.Pattern)
+				if err != nil {
+					return nil, 0, 0, fmt.Errorf(
+						"rule-pack category entry %d rule %d contains an invalid regular expression: %w",
+						fileIndex,
+						ruleIndex,
+						err,
+					)
+				}
 			}
 			if r.Enabled != nil && !*r.Enabled {
 				continue

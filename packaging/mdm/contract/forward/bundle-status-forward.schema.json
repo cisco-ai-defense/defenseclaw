@@ -47,6 +47,9 @@
       "type": "object",
       "additionalProperties": false,
       "properties": {
+        "schema_version": {
+          "const": 1
+        },
         "receipt_id": {
           "type": "string",
           "pattern": "^[br]-[0-7][0-9A-HJKMNP-TV-Z]{25}$"
@@ -63,6 +66,10 @@
           "type": "integer",
           "minimum": 0
         },
+        "manifest_sha256": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$"
+        },
         "state": {
           "type": "string",
           "enum": [
@@ -74,9 +81,41 @@
             "failed"
           ]
         },
+        "transitions": {
+          "type": "array",
+          "maxItems": 16,
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "properties": {
+              "state": {
+                "type": "string",
+                "enum": [
+                  "received",
+                  "verified",
+                  "staged",
+                  "applied",
+                  "confirmed",
+                  "failed"
+                ]
+              },
+              "at": {
+                "type": "string",
+                "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}(\\.[0-9]{1,9})?(Z|[+-][0-9]{2}:[0-9]{2})$"
+              }
+            }
+          }
+        },
         "error_code": {
           "type": "string",
           "pattern": "^[a-z][a-z0-9_]{0,63}$"
+        },
+        "expected_digest": {
+          "type": "string",
+          "pattern": "^sha256:[0-9a-f]{64}$"
+        },
+        "digest_comparable": {
+          "type": "boolean"
         },
         "warning_codes": {
           "type": "array",
@@ -135,9 +174,28 @@
           "type": "string",
           "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}(\\.[0-9]{1,9})?(Z|[+-][0-9]{2}:[0-9]{2})$"
         },
+        "sessions_restart_required": {
+          "type": "integer",
+          "minimum": 0
+        },
         "finished_at": {
           "type": "string",
           "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}(\\.[0-9]{1,9})?(Z|[+-][0-9]{2}:[0-9]{2})$"
+        },
+        "config_sha256": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$"
+        },
+        "base_config_sha256": {
+          "type": "string",
+          "pattern": "^([0-9a-f]{64}|none)$"
+        },
+        "base_config_generation": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "base_config_generation_known": {
+          "type": "boolean"
         }
       }
     },
@@ -149,6 +207,24 @@
     },
     "sessions_restart_required": {
       "$ref": "#/$defs/sessions"
+    },
+    "enforcement_pending": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "count": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "connectors": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "pattern": "^[a-z][a-z0-9_-]{0,31}$"
+          },
+          "maxItems": 64
+        }
+      }
     },
     "alert_only_rule_count": {
       "type": "integer",
@@ -185,6 +261,14 @@
         "code": {
           "type": "string",
           "pattern": "^[a-z][a-z0-9_]{0,63}$"
+        },
+        "platform": {
+          "type": "string",
+          "enum": [
+            "linux",
+            "darwin",
+            "windows"
+          ]
         }
       }
     },

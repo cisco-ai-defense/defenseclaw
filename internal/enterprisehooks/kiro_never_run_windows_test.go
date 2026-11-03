@@ -39,6 +39,45 @@ func writeKiroIDEProduct(t *testing.T, home, version string) {
 	}
 }
 
+func TestWindowsKiroReceiptOnlyInstallReportsUnverifiedContract(t *testing.T) {
+	setStandaloneProfileForTest(t, true)
+	home := kiroNeverRunProfile(t)
+	root := filepath.Join(home, "AppData", "Local", "Kiro-Cli")
+	receipt := filepath.Join(root, "run-receipts", "receipt.json")
+	if err := os.MkdirAll(filepath.Dir(receipt), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(receipt, []byte(`{"version":"2.37.1"}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	var reports []UnprotectedAgent
+	row := ManifestTarget{SID: testLocalUserSID, Connector: "kiro", UserHome: home}
+	context := windowsStandaloneRowContext{sessionActive: true, user: "alice", report: func(a UnprotectedAgent) { reports = append(reports, a) }}
+	if applyStandaloneRowStateFor(&row, nil, nil, context) || row.AgentVersion != "" || len(reports) != 1 {
+		t.Fatalf("receipt-only Kiro row = %+v, reports = %+v; want one unprotected install", row, reports)
+	}
+	if reports[0].Code != UnprotectedCodeHookContractUnverified ||
+		!strings.Contains(reports[0].Reason, "Other receipt formats do not establish one") ||
+		!strings.Contains(reports[0].Message(), "runs without DefenseClaw hooks") ||
+		strings.Contains(reports[0].Reason, "next enumeration enrolls") {
+		t.Fatalf("receipt-only Kiro reason = %+v", reports[0])
+	}
+
+	// A matching copy of the previously verified floor still enrolls.
+	runCopy := filepath.Join(root, "run", "chat-cli-2.27.1.exe")
+	if err := os.MkdirAll(filepath.Dir(runCopy), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(runCopy, []byte("MZ-current"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	reports = nil
+	row = ManifestTarget{SID: testLocalUserSID, Connector: "kiro", UserHome: home}
+	if !applyStandaloneRowStateFor(&row, nil, nil, context) || row.AgentVersion != "2.27.1" || len(reports) != 0 {
+		t.Fatalf("matching run copy = %+v, reports = %+v; want the known contract", row, reports)
+	}
+}
+
 // rel-1-0-4 GAP-0829: a never-run kiro-cli was enrolled at the standalone
 // floor, so a 2.24.1 install whose headless runs load no hooks counted as a
 // supported one. Its version is never assumed: a new row is not written and

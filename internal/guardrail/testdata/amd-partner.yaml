@@ -1,0 +1,167 @@
+# Copyright © Advanced Micro Devices, Inc., or its affiliates.
+#
+# SPDX-License-Identifier: MIT
+
+# The AMD deskside rules as a DefenseClaw rule file, for GAS_POLICY_AUTHORITY=defenseclaw.
+# start_defenseclaw.sh copies DefenseClaw's default pack, adds this file as
+# the `amd` pack, and pins it by digest; the rules mirror admission-rules.yaml.
+#
+# DefenseClaw 1.x blocks a tool call only on a CEL `expression` over a complete
+# parse (`argv_complete`); a `pattern` match on a tool call is detection-only,
+# whatever its severity. So each rule here carries an expression, and the
+# pattern is only its recorded fallback. Severity CRITICAL is the default
+# pack's blocking level; MEDIUM alerts.
+
+version: 1
+category: amd-deskside
+rules:
+  - id: AMD-EXEC-PIPE
+    tool_call_only: true
+    expression: >-
+      f.data_flows.exists(x,
+        x.from == defenseclaw.guardrail.semantic.v1.DataKind.DATA_KIND_STDOUT &&
+        x.to == defenseclaw.guardrail.semantic.v1.DataKind.DATA_KIND_STDIN &&
+        f.commands.exists(c, c.id == x.from_command_id && c.argv_complete && c.program in ['curl', 'wget']) &&
+        f.commands.exists(d, d.id == x.to_command_id && d.argv_complete &&
+          d.program in ['sh', 'bash', 'zsh', 'dash', 'ksh', 'fish', 'python', 'python3', 'perl', 'ruby', 'node']))
+    pattern: '\b(?:curl|wget)\b[^|;&\n]*\|\s*(?:sudo\s+(?:-\S+\s+)*)?(?:(?:ba|z|da|k|fi|c|tc)?sh|python[0-9.]*|perl|ruby|node)\b'
+    title: "A download piped into a shell or interpreter"
+    severity: CRITICAL
+    confidence: 0.95
+    tags: [amd, execution]
+
+  - id: AMD-NET-DEVTCP
+    tool_call_only: true
+    expression: >-
+      f.paths.exists(p, p.normalized.startsWith('/dev/tcp/') || p.normalized.startsWith('/dev/udp/'))
+    pattern: '/dev/(?:tcp|udp)/'
+    title: "A raw socket through /dev/tcp or /dev/udp"
+    severity: CRITICAL
+    confidence: 0.95
+    tags: [amd, network]
+
+  - id: AMD-NET-NC-EXEC
+    tool_call_only: true
+    expression: >-
+      f.commands.exists(c, c.argv_complete && c.program in ['nc', 'ncat', 'netcat'] &&
+        ('-e' in c.argv || '-c' in c.argv))
+    pattern: '\b(?:nc|ncat|netcat)\b[^\n;&|]*\s-[ec]\s'
+    title: "netcat executing a program"
+    severity: CRITICAL
+    confidence: 0.95
+    tags: [amd, network]
+
+  # Detection-only: matching inside an argument needs a nested `contains`, which
+  # DefenseClaw's static cost limit rejects. AXIS blocks the network regardless.
+  - id: AMD-NET-INTERP-SOCKET
+    tool_call_only: true
+    pattern: '\b(?:python[0-9.]*|perl|ruby|node|php)\s+(?:-\S+\s+)*-[cer]\b.*(?:\bsocket\b|require\(\s*[''"](?:net|dgram)[''"]\s*\))'
+    title: "Inline interpreter code opening a socket"
+    severity: CRITICAL
+    confidence: 0.9
+    tags: [amd, network]
+
+  - id: AMD-CRED-PATH
+    tool_call_only: true
+    expression: >-
+      f.paths.exists(p,
+        p.normalized.contains('/.ssh/') || p.normalized.contains('/.aws/') ||
+        p.normalized.contains('/.gnupg/') || p.normalized.contains('/.kube/') ||
+        p.normalized.endsWith('/.git-credentials') || p.normalized.endsWith('/.netrc') ||
+        p.normalized.endsWith('/.docker/config.json'))
+    pattern: '(?:~|\$\{?HOME\}?|/home/[^/\s]+|/root)/(?:\.ssh/|\.aws/|\.gnupg/|\.kube/|\.git-credentials|\.netrc|\.docker/config\.json)'
+    title: "A credential store the sandbox policy denies"
+    severity: CRITICAL
+    confidence: 0.9
+    tags: [amd, credential]
+
+  - id: AMD-AUDIT-TAMPER
+    tool_call_only: true
+    expression: >-
+      f.paths.exists(p,
+        p.normalized.endsWith('audit.db') ||
+        p.normalized.endsWith('audit.jsonl') || p.normalized.endsWith('.fallback.jsonl') ||
+        p.normalized.contains('deskside-tokens') ||
+        p.normalized.endsWith('.claude/settings.json') || p.normalized.endsWith('.claude/settings.local.json') ||
+        p.normalized.endsWith('.mcp.json')) ||
+      f.commands.exists(c, c.argv_complete &&
+        c.argv.exists(a, a.endsWith('audit.db') || a.endsWith('audit.jsonl')))
+    pattern: '(?:\baudit\.(?:db|jsonl)\b|\.fallback\.jsonl\b|\bhec_[a-z_]*\.token\b|deskside-tokens|\.claude/settings(?:\.local)?\.json|(?:^|[\s/''"=>])\.mcp\.json\b)'
+    title: "The audit record, its credentials, or the harness configuration"
+    severity: CRITICAL
+    confidence: 0.95
+    tags: [amd, tampering]
+
+  # An expression cannot locate git's subcommand: argv has no positions, and
+  # DefenseClaw skips a rule that negates or reads parse facts whenever the
+  # parse is partial, as it always is for filter-branch and filter-repo. So a
+  # rewrite also needs an option only that subcommand takes, which a read
+  # such as `git log --grep filter-branch` does not carry.
+  - id: AMD-GIT-HISTORY-REWRITE
+    tool_call_only: true
+    expression: >-
+      f.commands.exists(c, c.argv_complete && c.program == 'git' &&
+        (('push' in c.argv && ('--force' in c.argv || '-f' in c.argv || '--force-with-lease' in c.argv)) ||
+         ('filter-branch' in c.argv && c.argv.exists(a, a in ['--env-filter', '--tree-filter', '--index-filter',
+           '--parent-filter', '--msg-filter', '--commit-filter', '--tag-name-filter', '--subdirectory-filter',
+           '--prune-empty', '--force', '-f'])) ||
+         ('filter-repo' in c.argv && c.argv.exists(a, a.startsWith('--path') || a.startsWith('--invert-paths') ||
+           a.startsWith('--replace-') || a.startsWith('--strip-blobs') || a.startsWith('--subdirectory-filter') ||
+           a.startsWith('--to-subdirectory-filter') || a.startsWith('--mailmap') || a.startsWith('--use-mailmap') ||
+           a.startsWith('--tag-rename') || a.startsWith('--prune-') ||
+           a in ['--force', '--blob-callback', '--commit-callback', '--message-callback', '--name-callback',
+             '--email-callback', '--refname-callback', '--filename-callback']))))
+    pattern: '\bgit\s+(?:push\b[^\n;&|]*\s(?:--force(?:-with-lease)?|-f)(?:\s|$)|filter-branch\b|filter-repo\b)'
+    title: "Rewriting shared git history"
+    severity: HIGH
+    confidence: 0.9
+    tags: [amd, source-control]
+
+  # The other ways to force a push: --force-with-lease=<ref>, a +refspec, and
+  # -f inside a short-option cluster such as -uf. A rule of its own because
+  # inside AMD-GIT-HISTORY-REWRITE it takes that rule past DefenseClaw's
+  # per-rule cost limit; admission-rules.yaml keeps them in one regex. No
+  # negation, so a partial parse does not skip it.
+  - id: AMD-GIT-FORCE-PUSH
+    tool_call_only: true
+    expression: >-
+      f.commands.exists(c, c.argv_complete && c.program == 'git' && 'push' in c.argv &&
+        c.argv.exists(a, a.startsWith('--force-with-lease=') || a.startsWith('+') ||
+          a.startsWith('-f') || (a.startsWith('-') && a.endsWith('f'))))
+    pattern: '\bgit\s+push\b[^\n;&|]*\s(?:--force-with-lease=\S*|-[A-Za-z]*f[A-Za-z]*|\+\S+)(?:\s|$)'
+    title: "Rewriting shared git history"
+    severity: HIGH
+    confidence: 0.9
+    tags: [amd, source-control]
+
+  # Prompt rules: no expression and no tool_call_only, so DefenseClaw applies
+  # the pattern to prompt text (the per-turn admit consult asks with tool
+  # "message"); on a tool call it is detection-only. The consult vetoes a turn
+  # on HIGH or CRITICAL severity, whatever action DefenseClaw reports.
+
+  # A private key or credential file named next to a way off the box. A public
+  # key (id_rsa.pub) does not count, nor does the ~/.ssh directory alone.
+  - id: AMD-PROMPT-EXFIL
+    pattern: '(?is)(?:\bid_(?:rsa|ed25519|ecdsa|dsa)(?:[^.\w]|$)|\.aws/credentials\b|\.git-credentials\b|\.kube/config\b|\.netrc\b|\.docker/config\.json\b)[\s\S]{0,200}?(?:\b(?:curl|wget|scp|rsync|nc|ncat|netcat)\b|https?://)|(?:\b(?:curl|wget|scp|rsync|nc|ncat|netcat)\b|https?://)[\s\S]{0,200}?(?:\bid_(?:rsa|ed25519|ecdsa|dsa)(?:[^.\w]|$)|\.aws/credentials\b|\.git-credentials\b|\.kube/config\b|\.netrc\b|\.docker/config\.json\b)'
+    title: "A prompt asking to send a credential off the box"
+    severity: CRITICAL
+    confidence: 0.9
+    tags: [amd, prompt-injection, exfiltration]
+
+  # Instructions the user does not see: inside an HTML comment, or in Unicode
+  # tag characters.
+  - id: AMD-PROMPT-HIDDEN-INSTRUCTION
+    pattern: '(?is)<!--[\s\S]{0,500}?(?:\byou\s+are\s+now\b|\balways\s+(?:answer|respond|reply|say|output|classify)\b|\bignore\s+(?:the\s+)?(?:user|above|previous|prior|preceding)\b|\b(?:system|assistant|developer)\s*:|\bnew\s+instructions?\b)[\s\S]{0,500}?-->|[\x{E0020}-\x{E007E}]{4,}'
+    title: "Instructions hidden in the prompt"
+    severity: HIGH
+    confidence: 0.85
+    tags: [amd, prompt-injection]
+
+  # A private key pasted into a prompt. On 1.0.2 the default pack's
+  # SEC-PRIVKEY catches it in a tool call but not in a prompt.
+  - id: AMD-PROMPT-PRIVATE-KEY
+    pattern: '-----BEGIN [A-Z0-9 ]{0,40}PRIVATE KEY-----'
+    title: "A private key in the prompt"
+    severity: CRITICAL
+    confidence: 0.95
+    tags: [amd, credential]

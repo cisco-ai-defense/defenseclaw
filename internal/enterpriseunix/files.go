@@ -341,7 +341,7 @@ func (e *Env) installAtomic(path string, mode os.FileMode, owner fileOwner, fill
 	if err := fill(file); err != nil {
 		return fmt.Errorf("write %s: %w", path, err)
 	}
-	if err := file.Sync(); err != nil {
+	if err := syncFile(file); err != nil {
 		return fmt.Errorf("sync %s: %w", path, err)
 	}
 	if err := file.Close(); err != nil {
@@ -363,9 +363,16 @@ func (e *Env) installAtomic(path string, mode os.FileMode, owner fileOwner, fill
 	return nil
 }
 
+// syncFile flushes file to stable storage. Every fsync of this package goes
+// through it, so the package tests can leave it out: each one costs about
+// 5 ms on an EBS root disk, and the tests ran tens of thousands of them
+// (GAP-0281).
+var syncFile = (*os.File).Sync
+
+// syncDir flushes the directory entry of a file just renamed into dir.
 func syncDir(dir string) {
 	if handle, err := os.Open(dir); err == nil {
-		_ = handle.Sync()
+		_ = syncFile(handle)
 		_ = handle.Close()
 	}
 }
@@ -488,7 +495,7 @@ func copyPreserved(src, dst string) error {
 		_ = out.Close()
 		return err
 	}
-	if err := out.Sync(); err != nil {
+	if err := syncFile(out); err != nil {
 		_ = out.Close()
 		return err
 	}

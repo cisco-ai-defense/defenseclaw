@@ -50,6 +50,9 @@ type EnterpriseConfig struct {
 	// Identity names trusted connectors (trusted_connectors.go). Lifecycle
 	// (restart-required); honoured only from a signed bundle.
 	Identity EnterpriseIdentityConfig `mapstructure:"identity" yaml:"identity,omitempty"`
+	// AccountJoin turns the account join key on (account_join.go).
+	// Standalone only; off when absent.
+	AccountJoin EnterpriseAccountJoinConfig `mapstructure:"account_join" yaml:"account_join,omitempty"`
 }
 
 // enterprise.openshell values.
@@ -866,6 +869,17 @@ func ValidEnterpriseCredentialName(name string) bool {
 	return managed.ValidCredentialName(name)
 }
 
+// gatewayCredentialRefusal refuses a credential the gateway is to read
+// (field names the setting) when the gateway is not given it: the account
+// join tenant secrets (managed.GatewayReadsCredential, rel-1-0-6:GAP-0301).
+// "" for any other name.
+func gatewayCredentialRefusal(field, name string) string {
+	if name = strings.TrimSpace(name); name == "" || managed.GatewayReadsCredential(name) {
+		return ""
+	}
+	return fmt.Sprintf("%s %q names an account join tenant secret, which the gateway is not given; store the key under another credential name", field, name)
+}
+
 // resolveEnterpriseConfig resolves the profile against the service pin and
 // validates the enterprise block. goos is injected for tests.
 func resolveEnterpriseConfig(cfg *Config, goos, pinnedProfile string) error {
@@ -1368,7 +1382,8 @@ func enterpriseBlockEmpty(e EnterpriseConfig) bool {
 		strings.TrimSpace(e.Network.HTTPSProxy) == "" && strings.TrimSpace(e.Network.NoProxy) == "" &&
 		tetragonEmpty(e.Tetragon) &&
 		e.OpenShell == (EnterpriseOpenShellConfig{}) &&
-		len(e.Identity.TrustedConnectors) == 0
+		len(e.Identity.TrustedConnectors) == 0 &&
+		accountJoinEmpty(e.AccountJoin)
 }
 
 // standaloneInlineSecrets lists the inline secret keys cfg sets.
@@ -1509,6 +1524,9 @@ func validateEnterpriseConfig(cfg *Config) error {
 		}
 		return nil
 	}
+	if err := validateAccountJoin(e.AccountJoin); err != nil {
+		return err
+	}
 	// Judge trace logs raw prompts and model responses; a managed device
 	// never writes them.
 	if cfg.Guardrail.Judge.Trace {
@@ -1524,6 +1542,15 @@ func validateEnterpriseConfig(cfg *Config) error {
 	}
 	if name := strings.TrimSpace(e.Inspection.LLM.Credential); name != "" && !ValidEnterpriseCredentialName(name) {
 		return fmt.Errorf("config: enterprise.inspection.llm.credential %q must be a protected credential name (lowercase letters, digits and dashes)", name)
+	}
+	for _, ref := range [][2]string{
+		{"enterprise.inspection.ai_defense.credential", ai.Credential},
+		{"enterprise.inspection.llm.credential", e.Inspection.LLM.Credential},
+		{"decision_model.credential", cfg.DecisionModel.Credential},
+	} {
+		if refusal := gatewayCredentialRefusal(ref[0], ref[1]); refusal != "" {
+			return fmt.Errorf("config: %s", refusal)
+		}
 	}
 	// Secrets never live in config: the gateway reads the keys from the
 	// named protected credentials (it ignores cisco_ai_defense.api_key_env)

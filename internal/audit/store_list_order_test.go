@@ -194,3 +194,52 @@ func TestRecentSessionFindingsUseExactTimeAndInsertTies(t *testing.T) {
 		t.Fatalf("recent findings: %s want %s", got, want)
 	}
 }
+
+// The network egress readers list newest first by the exact instant, with
+// insert order on a tie, not by the timestamp text (GAP-0251): one instant
+// written in two zones, or with a shorter fraction, sorted by its text.
+func TestNetworkEgressReadersUseExactTimeAndInsertTies(t *testing.T) {
+	store, cleanup := newTestStore(t)
+	defer cleanup()
+	base := time.Date(2026, 10, 13, 12, 0, 0, 0, time.UTC)
+	stamps := []struct {
+		id string
+		ts time.Time
+	}{
+		{"short", base.Add(120 * time.Millisecond)},
+		{"long", base.Add(123 * time.Millisecond)},
+		{"tie-utc", base.Add(time.Second)},
+		{"tie-offset", base.Add(time.Second).In(time.FixedZone("minus4", -4*60*60))},
+		{"offset", base.Add(2 * time.Second).In(time.FixedZone("plus2", 7200))},
+	}
+	for _, item := range stamps {
+		if err := store.InsertNetworkEgressEvent(NetworkEgressRow{ID: item.id, Timestamp: item.ts,
+			Hostname: "egress.example", PolicyOutcome: "allowed"}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	want := "offset,tie-offset,tie-utc,long,short"
+	ids := func(rows []NetworkEgressRow) string {
+		out := make([]string, 0, len(rows))
+		for _, row := range rows {
+			out = append(out, row.ID)
+		}
+		return strings.Join(out, ",")
+	}
+	for _, hostname := range []string{"", "egress.example"} {
+		rows, err := store.ListNetworkEgressEvents(10, hostname)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got := ids(rows); got != want {
+			t.Fatalf("list (host %q): %s want %s", hostname, got, want)
+		}
+	}
+	rows, err := store.QueryNetworkEgressEvents(NetworkEgressFilter{Limit: 10})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := ids(rows); got != want {
+		t.Fatalf("query: %s want %s", got, want)
+	}
+}

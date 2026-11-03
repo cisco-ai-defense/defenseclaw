@@ -39,6 +39,7 @@ import (
 	"github.com/spf13/viper"
 	"gopkg.in/yaml.v3"
 
+	"github.com/defenseclaw/defenseclaw/internal/envvars"
 	"github.com/defenseclaw/defenseclaw/internal/managed"
 	"github.com/defenseclaw/defenseclaw/internal/netguard"
 	"github.com/defenseclaw/defenseclaw/internal/useridentity"
@@ -2486,20 +2487,21 @@ type JudgeConfig struct {
 
 // HookConnectorEnabled reports whether the hook-lane judge is enabled
 // for the named connector. Requires the judge itself to be enabled;
-// matching against HookConnectors is case-insensitive and the "*"
+// matching against HookConnectors is in canonical form (case and the
+// claude-code alias folded, as the CLI does) and the "*"
 // entry matches every connector. Empty list (the default) keeps the
 // hook lane off so existing deployments see no behavior change.
 func (c *JudgeConfig) HookConnectorEnabled(name string) bool {
 	if c == nil || !c.Enabled {
 		return false
 	}
-	name = strings.TrimSpace(name)
+	name = normalizeConnectorKey(name)
 	if name == "" {
 		return false
 	}
 	for _, entry := range c.HookConnectors {
 		entry = strings.TrimSpace(entry)
-		if entry == "*" || strings.EqualFold(entry, name) {
+		if entry == "*" || (entry != "" && normalizeConnectorKey(entry) == name) {
 			return true
 		}
 	}
@@ -2627,17 +2629,19 @@ const legacyGatewayTokenEnv = "OPENCLAW_GATEWAY_TOKEN"
 // caller (judge LLM init, etc.). The sidecar boot path masked
 // the bug via EnsureGatewayToken's own fallback, so it only
 // surfaced in obscure code paths until investigation.
+//
+// SecretRef text an earlier build saved as a token is skipped (issue #1404).
 func (g *GatewayConfig) ResolvedToken() string {
-	if g.TokenEnv != "" {
-		if v := os.Getenv(g.TokenEnv); v != "" {
+	for _, name := range []string{g.TokenEnv, defaultGatewayTokenEnv, legacyGatewayTokenEnv} {
+		if name == "" {
+			continue
+		}
+		if v := os.Getenv(name); v != "" && !envvars.IsSecretRefText(v) {
 			return v
 		}
 	}
-	if v := os.Getenv(defaultGatewayTokenEnv); v != "" {
-		return v
-	}
-	if v := os.Getenv(legacyGatewayTokenEnv); v != "" {
-		return v
+	if envvars.IsSecretRefText(g.Token) {
+		return ""
 	}
 	return g.Token
 }

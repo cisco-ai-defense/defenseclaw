@@ -19,7 +19,20 @@ func actionWindowsHome(home string) bool {
 }
 
 func actionWindowsPath(value, cwd, home string) (string, bool) {
-	value = strings.TrimSpace(strings.ReplaceAll(value, `\`, "/"))
+	return actionWindowsPathWithTrim(value, cwd, home, true)
+}
+
+// POSIX word expansion preserves whitespace inside a quoted or unsplit path.
+func actionWindowsPathFromPOSIX(value, cwd, home string) (string, bool) {
+	value = strings.Trim(value, " \t\n")
+	return actionWindowsPathWithTrim(value, cwd, home, false)
+}
+
+func actionWindowsPathWithTrim(value, cwd, home string, trim bool) (string, bool) {
+	value = strings.ReplaceAll(value, `\`, "/")
+	if trim {
+		value = strings.TrimSpace(value)
+	}
 	if value == "" || strings.ContainsAny(value, "\x00\r\n`") {
 		return "", false
 	}
@@ -123,6 +136,14 @@ const (
 	// whose shell is known to be one of them (GAP-1982). A call of unknown
 	// dialect or a cmd call keeps every word.
 	actionWindowsPlainComments
+	// actionWindowsBackslashEscapes gives the plain reading Git Bash's
+	// backslash: outside quotes an escaped quote, blank, separator or
+	// backslash is part of the word and \<line end> joins the lines; inside
+	// double quotes \" and \\ are escapes. Other escaped characters keep
+	// their backslash, which the path rules already read as literal. A POSIX-hinted call, or one of unknown dialect, is also
+	// read this way, so an escaped quote no longer opens a string that hides
+	// the next lines (rel-1-0-6:GAP-0237 item 3). It only adds a reading.
+	actionWindowsBackslashEscapes
 )
 
 // actionWindowsScanResult is one reading of a command. quoted[i] reports a
@@ -131,7 +152,12 @@ type actionWindowsScanResult struct {
 	words   []string
 	literal []bool
 	quoted  []bool
-	ok      bool
+	// paren[i] reports a word with an unquoted, unescaped ( anywhere in
+	// it (rel-1-0-6:GAP-0237 item 2: echo ,(...), echo x(...)).
+	paren []bool
+	// powerShell reports the PowerShell reading (not the plain one).
+	powerShell bool
+	ok         bool
 }
 
 // actionWindowsPlainComment reports a # at i that starts a comment in Git
@@ -187,6 +213,8 @@ func actionWindowsScan(command string, grammar actionWindowsGrammar) (result act
 	plain := grammar&actionWindowsPlainGrammar != 0
 	literalDollar := grammar&actionWindowsLiteralDollar != 0
 	plainComments := plain && grammar&actionWindowsPlainComments != 0
+	backslash := plain && grammar&actionWindowsBackslashEscapes != 0
+	result.powerShell = !plain
 	var word strings.Builder
 	var quote byte
 	hereLen := -1
@@ -196,22 +224,37 @@ func actionWindowsScan(command string, grammar actionWindowsGrammar) (result act
 	// in it, before the line that is its delimiter, ends no statement
 	// (GAP-0234). delimiterNext marks the word after <<, pendingDoc that
 	// delimiter until its line ends and hereDoc the body being read.
-	delimiterNext := false
+	// dashDoc marks a <<- (the - attached to <<): bash strips that - and
+	// leading tabs, never the - of a word after a blank (<< -EOF ends at
+	// a -EOF line). The delimiter is the word with its quotes and
+	// backslashes removed, as bash compares it (rel-1-0-6:GAP-0237 item 1).
+	delimiterNext, dashDoc := false, false
 	pendingDoc, hereDoc := "", ""
+	parenWord := false
 	emit := func(value string, isLiteral, isQuoted bool) {
 		result.words = append(result.words, value)
 		result.literal = append(result.literal, isLiteral)
 		result.quoted = append(result.quoted, isQuoted)
+		result.paren = append(result.paren, false)
 	}
 	flush := func() {
 		if word.Len() > 0 {
 			if delimiterNext {
-				pendingDoc = strings.TrimPrefix(word.String(), "-")
-				delimiterNext = false
+				delimiter := word.String()
+				if dashDoc {
+					delimiter = strings.TrimPrefix(delimiter, "-")
+				}
+				if delimiter != "" {
+					pendingDoc = actionWindowsHereDocDelimiterWord(delimiter)
+					delimiterNext = false
+				}
+				dashDoc = false
 			}
 			emit(word.String(), word.Len() == hereLen, startQuoted)
+			result.paren[len(result.paren)-1] = parenWord
 			word.Reset()
 		}
+		parenWord = false
 		hereLen = -1
 		quoted = false
 		startQuoted = false
@@ -240,6 +283,13 @@ func actionWindowsScan(command string, grammar actionWindowsGrammar) (result act
 		c := command[i]
 		kind, size := quoteAt(i)
 		if quote != 0 {
+			if backslash && quote == '"' && c == '\\' && i+1 < len(command) && strings.IndexByte("\"\\\n", command[i+1]) >= 0 {
+				if command[i+1] != '\n' {
+					word.WriteByte(command[i+1])
+				}
+				i++
+				continue
+			}
 			switch {
 			case kind == quote:
 				quote = 0
@@ -252,6 +302,24 @@ func actionWindowsScan(command string, grammar actionWindowsGrammar) (result act
 				if word.Len() == 0 {
 					startQuoted = true
 				}
+				word.WriteByte(c)
+			}
+			continue
+		}
+		if backslash && c == '\\' && i+1 < len(command) {
+			switch next := command[i+1]; {
+			case next == '\n':
+				i++
+			case next == '\r' && i+2 < len(command) && command[i+2] == '\n':
+				i += 2
+			case strings.IndexByte("'\" \t;|&<>()\\", next) >= 0:
+				// An escaped quote, blank or separator is part of the word.
+				word.WriteByte(next)
+				i++
+			default:
+				// \~, \$, \* ... keep the backslash: the path rules
+				// already read that spelling as literal, as the plain
+				// reading does (\~/.ssh is a directory named ~).
 				word.WriteByte(c)
 			}
 			continue
@@ -362,8 +430,11 @@ func actionWindowsScan(command string, grammar actionWindowsGrammar) (result act
 			}
 			flush()
 			if i+1 < len(command) && command[i+1] == c && (c == '>' || c == '<' || c == '&' || c == '|') {
+				// An escaped \<< is a literal < and an input redirect,
+				// no here-document.
+				delimiterNext = c == '<' && (i == 0 || command[i-1] != '\\')
+				dashDoc = delimiterNext && i+2 < len(command) && command[i+2] == '-'
 				emit(command[i:i+2], false, false)
-				delimiterNext = c == '<'
 				i++
 			} else {
 				// <<< is a here-string, with no delimiter line.
@@ -371,12 +442,32 @@ func actionWindowsScan(command string, grammar actionWindowsGrammar) (result act
 				emit(command[i:i+1], false, false)
 			}
 		default:
+			if c == '(' {
+				parenWord = true
+			}
 			word.WriteByte(c)
 		}
 	}
 	flush()
 	result.ok = quote == 0
 	return result
+}
+
+// actionWindowsHereDocDelimiterWord removes the backslashes of a
+// here-document delimiter word (\EOF is EOF, a\\b is a\b); the scan has
+// already removed its quotes.
+func actionWindowsHereDocDelimiterWord(word string) string {
+	if !strings.Contains(word, `\`) {
+		return word
+	}
+	var out strings.Builder
+	for i := 0; i < len(word); i++ {
+		if word[i] == '\\' && i+1 < len(word) {
+			i++
+		}
+		out.WriteByte(word[i])
+	}
+	return out.String()
 }
 
 // actionWindowsLineEndsStatement reports an unquoted line end at

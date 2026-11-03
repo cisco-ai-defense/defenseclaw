@@ -69,7 +69,7 @@ func TestWindowsForeignCleanupCoversEligibleUsersWithoutRows(t *testing.T) {
 		probed = append(probed, sid+"|"+home)
 		return sid == alice, nil, nil
 	}
-	windowsManagedClaudeSettingsRemover = func(home, sid, _ string) (int, []string, error) {
+	windowsManagedClaudeSettingsRemover = func(home, sid string) (int, []string, error) {
 		migrated = append(migrated, sid+"|"+home)
 		return 2, []string{"Stop: a hook command naming defenseclaw-hook (arguments not shown)"}, nil
 	}
@@ -133,7 +133,7 @@ func TestWindowsClaudeMigrationRunsForUsersWithClaudeCodeRows(t *testing.T) {
 		probed = append(probed, sid)
 		return true, nil, nil
 	}
-	windowsManagedClaudeSettingsRemover = func(home, sid, _ string) (int, []string, error) {
+	windowsManagedClaudeSettingsRemover = func(home, sid string) (int, []string, error) {
 		migrated = append(migrated, sid)
 		return 29, nil, nil
 	}
@@ -180,7 +180,7 @@ func TestWindowsClaudeMigrationReportsLeftoversWhenNothingIsRemovable(t *testing
 		}
 		return raw, nil
 	}
-	windowsManagedClaudeSettingsRemover = func(string, string, string) (int, []string, error) {
+	windowsManagedClaudeSettingsRemover = func(string, string) (int, []string, error) {
 		t.Fatal("settings without a removable hook were rewritten")
 		return 0, nil, nil
 	}
@@ -467,7 +467,7 @@ func TestWindowsClaudeMigrationRunsBeforeTheMachinePolicyIsPublished(t *testing.
 		}
 		return true, nil, nil
 	}
-	windowsManagedClaudeSettingsRemover = func(home, sid, _ string) (int, []string, error) {
+	windowsManagedClaudeSettingsRemover = func(home, sid string) (int, []string, error) {
 		order = append(order, "migrate "+sid)
 		return 29, nil, nil
 	}

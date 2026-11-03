@@ -38,6 +38,9 @@ type foreignGuardFixture struct {
 	loadErr error
 	// process is the agent process identity the guard sees ("" unknown).
 	process string
+	// cleanMirror is whether the gateway's clean-session entry of the agent
+	// process is present and trusted (hookForeignGuardCleanMirror).
+	cleanMirror bool
 }
 
 func newForeignGuardFixture(t *testing.T, mode string) *foreignGuardFixture {
@@ -68,6 +71,14 @@ func newPortableForeignGuardFixture(t *testing.T, mode string) *foreignGuardFixt
 	previousAccountHome, previousEnvHomes := hookForeignGuardAccountHome, hookForeignGuardEnvHomes
 	previousProcess := hookForeignGuardAgentProcess
 	previousExchange := hookForeignGuardExchange
+	previousMirror, previousFailsOpen := hookForeignGuardCleanMirror, hookForeignGuardOutageFailsOpen
+	hookForeignGuardCleanMirror = func(enterprisepolicy.SessionKey) error {
+		if fixture.cleanMirror {
+			return nil
+		}
+		return os.ErrNotExist
+	}
+	hookForeignGuardOutageFailsOpen = func(string, string) bool { return false }
 	gatewayState := t.TempDir()
 	hookForeignGuardSummaryPath = func() (string, bool) { return "/etc/defenseclaw/machine-policy.json", true }
 	hookForeignGuardLoad = func(string) (*enterprisepolicy.PublicPolicy, error) {
@@ -96,6 +107,7 @@ func newPortableForeignGuardFixture(t *testing.T, mode string) *foreignGuardFixt
 		hookForeignGuardAccountHome, hookForeignGuardEnvHomes = previousAccountHome, previousEnvHomes
 		hookForeignGuardAgentProcess = previousProcess
 		hookForeignGuardExchange = previousExchange
+		hookForeignGuardCleanMirror, hookForeignGuardOutageFailsOpen = previousMirror, previousFailsOpen
 	})
 	return fixture
 }

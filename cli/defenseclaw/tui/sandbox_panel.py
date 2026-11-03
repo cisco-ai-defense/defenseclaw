@@ -134,14 +134,14 @@ def sandbox_stop_kept_text(name: str) -> str:
     return (
         f"{name} keeps running: its MicroVM disk is full, and a MicroVM stopped like that cannot start again, "
         f"so its work that was not pulled would be lost. Free some space in it (defenseclaw sandbox exec {name} "
-        f"-- df -h /), pull its work (P), then stop it; delete it (d) to give that work up."
+        f"-- df -h /), press P and choose Apply or Branch to save its work, confirm the result, then stop it; delete it (d) to give that work up."
     )
 
 def sandbox_stop_unsynced_text(name: str) -> str:
     """Why ``sandbox stop`` kept ``name`` running: its MicroVM disk could not be synced first."""
     return (
         f"{name} keeps running: its MicroVM's disk could not be synced first, so a stop now would lose what it "
-        f"wrote since its last sync. Save the work you need (pull it with P), then stop it again; "
+        f"wrote since its last sync. Save the work you need (press P and choose Apply or Branch), confirm the result, then stop it again; "
         f"defenseclaw sandbox stop {name} --discard-unsynced stops it anyway, losing that."
     )
 
@@ -1306,7 +1306,7 @@ class SandboxPanelMixin:
                     MenuAction(
                         "copy",
                         "Run this one on a copy (--copy)",
-                        "defenseclaw sandbox pull brings its changes back to the folder.",
+                        "defenseclaw sandbox pull NAME --apply brings its changes back to the folder.",
                     ),
                     MenuAction(
                         "connect",

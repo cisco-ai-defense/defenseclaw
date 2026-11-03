@@ -40,6 +40,7 @@ from defenseclaw.config import (
     AIRuntimeConfig,
     enable_all_runtime_planes,
     enable_user_runtime_planes,
+    gateway_pid_path,
 )
 from defenseclaw.connector_contracts import normalize_connector
 from defenseclaw.context import AppContext, pass_ctx
@@ -3654,7 +3655,7 @@ def _gateway_running(app: AppContext) -> bool:
     from defenseclaw.process_liveness import pid_file_alive
 
     try:
-        return pid_file_alive(os.path.join(app.cfg.data_dir, "gateway.pid"))
+        return pid_file_alive(gateway_pid_path(app.cfg.data_dir))
     except Exception:  # noqa: BLE001 - an unreadable PID file means "not running".
         return False
 
@@ -4221,10 +4222,12 @@ def _resolve_gateway_target(
     # `defenseclaw agent usage` to succeed if the Go gateway has
     # written its token to the environment. Mirrors the auto-detect
     # ladder in GatewayConfig.resolved_token so the two stay in sync.
-    if not token:
-        token = os.environ.get("DEFENSECLAW_GATEWAY_TOKEN", "")
-    if not token:
-        token = os.environ.get("OPENCLAW_GATEWAY_TOKEN", "")
+    # SecretRef text an earlier build saved as a token is never one (#1404).
+    from defenseclaw.connector_paths import is_secret_ref_text
+
+    for name in ("DEFENSECLAW_GATEWAY_TOKEN", "OPENCLAW_GATEWAY_TOKEN"):
+        if not token and not is_secret_ref_text(os.environ.get(name, "")):
+            token = os.environ.get(name, "")
 
     # The gateway bearer token authenticates to the *local* sidecar. Only
     # ever attach it to a loopback target: a non-loopback ``gw.host`` (a

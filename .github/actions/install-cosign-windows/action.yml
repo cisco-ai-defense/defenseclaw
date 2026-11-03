@@ -1,0 +1,33 @@
+# Copyright 2026 Cisco Systems, Inc. and its affiliates
+# SPDX-License-Identifier: Apache-2.0
+
+name: Install cosign on Windows
+description: >-
+  Puts cosign v2.6.3 (cosign-windows-amd64.exe, pinned by SHA-256) on PATH
+  for the Windows enterprise upgrade lanes, which verify the previous
+  release with it. sigstore/cosign-installer deletes its bootstrap
+  cosign.exe right after that program verified the download, and Windows
+  can still hold the file then ("rm: cannot remove 'cosign': Device or
+  resource busy" failed the CI lane, rel-1-0-6:GAP-0378). This step runs
+  nothing it has to delete. The pin was taken through the cosign-installer
+  chain (bootstrap v2.4.1 by its pinned digest, release-cosign.pub by its
+  pinned digest, verify-blob of the v2.6.3 signature) and matches the
+  cosign_checksums.txt of the v2.6.3 release.
+runs:
+  using: composite
+  steps:
+    - shell: pwsh
+      env:
+        COSIGN_VERSION: v2.6.3
+        COSIGN_SHA256: 2264ea5867077b9e070161648e8c18544decac351f5f3a7edaea43c233ce2e36
+      run: |
+        $ErrorActionPreference = "Stop"
+        $dir = Join-Path $env:RUNNER_TEMP "cosign-bin"
+        New-Item -ItemType Directory -Force -Path $dir | Out-Null
+        $exe = Join-Path $dir "cosign.exe"
+        Invoke-WebRequest -Uri "https://github.com/sigstore/cosign/releases/download/$env:COSIGN_VERSION/cosign-windows-amd64.exe" -OutFile $exe
+        $sha = (Get-FileHash -LiteralPath $exe -Algorithm SHA256).Hash.ToLowerInvariant()
+        if ($sha -ne $env:COSIGN_SHA256) {
+          throw "cosign $env:COSIGN_VERSION download has SHA-256 $sha, want $env:COSIGN_SHA256"
+        }
+        $dir | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append

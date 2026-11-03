@@ -54,11 +54,24 @@ func outageTableManagedRows(t *testing.T) []outageTableManagedRow {
 
 // outageCellBlocks is whether a managed open cell says an outage call blocks
 // on goos, on the default route (machine policy where the connector has it),
-// under a policy with managed_hooks_only preserve or not.
-func outageCellBlocks(t *testing.T, id, value, goos string, hooksOnlyPreserve bool) bool {
+// under a policy with managed_hooks_only preserve or not, for a call of an
+// agent process the gateway allowed before it stopped (clean) or not. A
+// cell that defers to the hook for a known process reads noGuard, the
+// foreign_hooks report or allow cell.
+func outageCellBlocks(t *testing.T, id, value, goos string, hooksOnlyPreserve, clean bool, noGuard string) bool {
 	t.Helper()
 	switch value {
 	case "blocks":
+		return true
+	case "blocks-new-process":
+		if clean && goos != "windows" {
+			return outageCellBlocks(t, id, noGuard, goos, false, false, "")
+		}
+		return true
+	case "blocks-new-process-linux-macos":
+		if clean || goos == "windows" {
+			return outageCellBlocks(t, id, noGuard, goos, false, false, "")
+		}
 		return true
 	case "runs", "per-user-route-blocks-linux-macos", "per-user-route-blocks":
 		// The machine-policy route (the default) follows the mode.
@@ -136,9 +149,13 @@ func TestOutageTableManagedOpenMatchesAFullManagedCall(t *testing.T) {
 		foreignHooks      string
 		hooksOnlyPreserve bool
 		noGuard           bool
+		clean             bool
 	}{
 		{name: "default policy"},
 		{name: "managed_hooks_only preserve", hooksOnlyPreserve: true},
+		// A later call of an agent process the gateway allowed before it
+		// stopped: its clean-session entry is present (rel-1-0-3:GAP-0352).
+		{name: "default policy, allowed process", clean: true},
 		{name: "foreign_hooks report", foreignHooks: config.ForeignHooksReport, noGuard: true},
 		{name: "foreign_hooks allow", foreignHooks: config.ForeignHooksAllow, noGuard: true},
 	}
@@ -165,6 +182,12 @@ func TestOutageTableManagedOpenMatchesAFullManagedCall(t *testing.T) {
 					fixture := newPortableForeignGuardFixture(t, config.ForeignHooksRemove)
 					fixture.summary = &summary
 					fixture.process = "agent-process"
+					if variant.clean {
+						// The gateway's entry is there and the administrator's
+						// open lets a proven outage run.
+						fixture.cleanMirror = true
+						hookForeignGuardOutageFailsOpen = func(string, string) bool { return true }
+					}
 					previousGOOS := hookForeignGuardGOOS
 					hookForeignGuardGOOS = goos
 					t.Cleanup(func() { hookForeignGuardGOOS = previousGOOS })
@@ -172,8 +195,12 @@ func TestOutageTableManagedOpenMatchesAFullManagedCall(t *testing.T) {
 						return enterprisepolicy.GuardDecision{}, notRunning
 					}
 					blocked := managedOutageGuardBlocks(t, fixture, row.ID, outageGuardCallFor(row.ID))
-					if want := enterprisepolicy.GuardBlocksOutage(row.ID, goos, policies[row.ID]); blocked != want {
-						t.Fatalf("the guard blocked the outage call: %v, GuardBlocksOutage says %v", blocked, want)
+					want := enterprisepolicy.GuardBlocksOutage(row.ID, goos, policies[row.ID])
+					if variant.clean && enterprisepolicy.ForeignHookCleanMirrorOS(goos) {
+						want = false
+					}
+					if blocked != want {
+						t.Fatalf("the guard blocked the outage call: %v, want %v (GuardBlocksOutage, clean entry %v)", blocked, want, variant.clean)
 					}
 					if variant.noGuard && blocked {
 						t.Fatalf("with %s the guard must leave the outage to the hook", variant.name)
@@ -183,8 +210,8 @@ func TestOutageTableManagedOpenMatchesAFullManagedCall(t *testing.T) {
 					if variant.noGuard {
 						column = row.Outage.ManagedOpenNoGuard
 					}
-					hookBlocks := outageCellBlocks(t, row.ID, row.Outage.ManagedOpenNoGuard, goos, false)
-					if got, want := outageCellBlocks(t, row.ID, column, goos, variant.hooksOnlyPreserve), blocked || hookBlocks; got != want {
+					hookBlocks := outageCellBlocks(t, row.ID, row.Outage.ManagedOpenNoGuard, goos, false, false, "")
+					if got, want := outageCellBlocks(t, row.ID, column, goos, variant.hooksOnlyPreserve, variant.clean, row.Outage.ManagedOpenNoGuard), blocked || hookBlocks; got != want {
 						t.Fatalf("the gateway outage table says the call blocks: %v (%q); the managed call: guard blocked %v, the hook blocks %v (%q)",
 							got, column, blocked, hookBlocks, row.Outage.ManagedOpenNoGuard)
 					}
@@ -196,6 +223,19 @@ func TestOutageTableManagedOpenMatchesAFullManagedCall(t *testing.T) {
 	for _, key := range []string{"linux/default policy/copilot", "darwin/default policy/opencode", "windows/default policy/opencode", "windows/default policy/copilot"} {
 		if !guardBlocked[key] {
 			t.Errorf("%s: the default foreign-hook guard must block a managed open outage call", key)
+		}
+	}
+	// A process the gateway allowed before it stopped follows the mode on
+	// Linux and macOS only (rel-1-0-6:GAP-0280).
+	for key, want := range map[string]bool{
+		"linux/default policy, allowed process/copilot":    false,
+		"darwin/default policy, allowed process/opencode":  false,
+		"linux/default policy, allowed process/hermes":     false,
+		"windows/default policy, allowed process/copilot":  true,
+		"windows/default policy, allowed process/opencode": true,
+	} {
+		if got, ok := guardBlocked[key]; !ok || got != want {
+			t.Errorf("%s: the guard blocked %v (ran %v), want %v", key, got, ok, want)
 		}
 	}
 }

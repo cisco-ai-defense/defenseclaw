@@ -22,6 +22,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"time"
 
@@ -179,7 +180,7 @@ func (a *APIServer) evaluateClaudeCodeHook(ctx context.Context, req claudeCodeHo
 		// carries command text the user did not type, so it must not
 		// replace the task. Secure Client keeps the judge input of main.
 		if isToolJudgeIntentEvent(req.HookEventName) && !a.managedAIDOnly() && (cfg == nil || !cfg.SecureClientIntegration()) {
-			if judge := a.judgeFor(ctx); judge != nil {
+			for _, judge := range a.hookSessionJudges(ctx) {
 				judge.ObserveSessionPrompt(ctx, req.Prompt)
 			}
 			a.observeUserDownloadRequest(ctx, req.Prompt)
@@ -232,6 +233,7 @@ func (a *APIServer) evaluateClaudeCodeHook(ctx context.Context, req claudeCodeHo
 			LegacyText:                    string(toolArgs),
 			Connector:                     "claudecode",
 			EnforcementCapable:            true,
+			ManagedHookOverflowHold:       managedWindowsHookOverflowHold(ctx, a.scannerCfg, "claudecode", runtime.GOOS),
 			SkipLocalFilesystemResolution: isSandboxHookRequest(ctx),
 			ResolvedWriteTargets:          commandHookResolvedWrites(ctx, cfg, actionfacts.Input{Tool: actionTool, Args: toolArgs}),
 			ActiveAgentFileIdentities:     activeAgentContext.identities,
@@ -345,7 +347,7 @@ func (a *APIServer) evaluateClaudeCodeHook(ctx context.Context, req claudeCodeHo
 	// reason, so the confirmation blocks with the next step (GAP-0371). The
 	// reason was resolved as a confirmation, so no block message replaces it.
 	if action == "confirm" && req.HookEventName == "PreToolUse" && !gatewayconnector.ClaudeCodeModeCanAsk(req.PermissionMode) {
-		action = "block"
+		action = decisionConfirmWithoutAsk(verdict, "block")
 	}
 	resp := claudeCodeResponseFor(req, action, rawAction, verdict.Severity, reason, verdict.Findings, mode, wouldBlock, policy)
 	// The alert-only SQL rule says so in the chat, as on the Codex and generic
@@ -501,7 +503,7 @@ func (a *APIServer) claudeCodeEnabled() bool {
 	// for re-enable). Defense-in-depth alongside the boot-loop teardown.
 	// EffectiveEnabled defaults to true ⇒ no-op for single-connector
 	// installs and any connector never explicitly disabled.
-	if cfg.ManualConnectorConfigured("claudecode") && !cfg.Guardrail.EffectiveEnabled("claudecode") {
+	if cfg.ConnectorDisabled("claudecode") {
 		return false
 	}
 	hookCfg := cfg.ConnectorHookConfig("claudecode")

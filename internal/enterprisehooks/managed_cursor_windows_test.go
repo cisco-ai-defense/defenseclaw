@@ -104,6 +104,36 @@ func TestWindowsCursorTransactionLockRetiresOnlyWithoutManagedArtifacts(t *testi
 	}
 }
 
+func TestWindowsCursorTombstoneFileListUsesWriterPaths(t *testing.T) {
+	root := filepath.Join(t.TempDir(), "Cursor")
+	if err := os.Mkdir(root, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	previous := windowsCursorManagedRootResolver
+	windowsCursorManagedRootResolver = func() (string, error) { return root, nil }
+	t.Cleanup(func() { windowsCursorManagedRootResolver = previous })
+	paths, err := windowsCursorManagedPaths()
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, path := range []string{paths.Adapter, paths.Lock} {
+		if err := os.WriteFile(path, []byte("test"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	got, err := WindowsCursorManagedTombstoneFilePaths()
+	if err != nil || !slices.Equal(got, []string{paths.Adapter, paths.Lock}) {
+		t.Fatalf("writer file list = %v, %v", got, err)
+	}
+	if err := os.Remove(paths.Lock); err != nil {
+		t.Fatal(err)
+	}
+	got, err = WindowsCursorManagedTombstoneFilePaths()
+	if err != nil || !slices.Equal(got, []string{paths.Adapter}) {
+		t.Fatalf("remaining writer file list = %v, %v", got, err)
+	}
+}
+
 const (
 	windowsCursorTestTrustedSDDL = "O:BAG:BAD:P(A;;FA;;;SY)(A;;FA;;;BA)(A;;GR;;;BU)"
 	windowsCursorTestPrivateSDDL = "O:BAG:BAD:P(A;;FA;;;SY)(A;;FA;;;BA)"

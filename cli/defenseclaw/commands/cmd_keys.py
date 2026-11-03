@@ -33,6 +33,7 @@ import click
 
 from defenseclaw import ux
 from defenseclaw.audit_actions import ACTION_CONFIG_UPDATE
+from defenseclaw.config import gateway_pid_path
 from defenseclaw.config_writer import ACTOR_PREFIX_CLI, current_actor
 from defenseclaw.context import AppContext, pass_ctx
 from defenseclaw.credentials import (
@@ -102,11 +103,10 @@ def _emit_gateway_restart_hint(cfg, env_name: str) -> None:
     The gateway reads ``.env`` once, at start, so a rotated judge, LLM or
     destination key keeps its old value until the gateway restarts.
     """
-    import os
 
     from defenseclaw.process_liveness import pid_file_alive
 
-    if pid_file_alive(os.path.join(cfg.data_dir, "gateway.pid")):
+    if pid_file_alive(gateway_pid_path(cfg.data_dir)):
         ux.subhead(
             f"The running gateway keeps the {env_name} it loaded at start; "
             "apply the change with: defenseclaw-gateway restart",

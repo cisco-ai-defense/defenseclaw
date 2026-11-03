@@ -62,19 +62,24 @@ func TestSandboxRelayNeverAdoptsSandboxTraceParent(t *testing.T) {
 	const path = sandboxrelay.PathHookPrefix + "claudecode"
 	var seen string
 	var forwardedTrace bool
+	var receiptMarker string
 	routes := map[string]sandboxRelayRoute{path: {
 		class: sandboxauth.RouteHook, connector: "claudecode", native: "/api/v1/claudecode/hook",
 		handler: func(w http.ResponseWriter, r *http.Request) {
 			seen = trace.SpanFromContext(r.Context()).SpanContext().TraceID().String()
 			forwardedTrace = r.Header.Get("Traceparent") != "" || r.Header.Get("Tracestate") != ""
+			receiptMarker = r.Header.Get(sandboxrelay.HookReceiptHeader)
 			w.WriteHeader(http.StatusOK)
 		},
 	}}
 	f := newRelayFixtureWith(t, routes)
 	reg := f.register(t, "trace", "claudecode", relayTestBindingID(401))
-	resp, _ := f.post(t, path, reg.ID, `{}`, "Traceparent", wellFormedTraceparent)
-	if resp.StatusCode != http.StatusOK || seen == "0af7651916cd43dd8448eb211c80319c" || forwardedTrace {
-		t.Fatalf("sandbox trace adopted or forwarded: status %d trace %q headers %t", resp.StatusCode, seen, forwardedTrace)
+	resp, _ := f.post(t, path, reg.ID, `{}`, "Traceparent", wellFormedTraceparent,
+		sandboxrelay.HookReceiptHeader, sandboxrelay.HookReceiptHeaderValue)
+	if resp.StatusCode != http.StatusOK || seen == "0af7651916cd43dd8448eb211c80319c" || forwardedTrace ||
+		receiptMarker != sandboxrelay.HookReceiptHeaderValue {
+		t.Fatalf("sandbox trace or receipt marker: status %d trace %q trace headers %t receipt %q",
+			resp.StatusCode, seen, forwardedTrace, receiptMarker)
 	}
 	seen = ""
 	resp, _ = f.post(t, path, "unknown", `{}`, "Traceparent", wellFormedTraceparent)
@@ -235,6 +240,10 @@ func newRelayFixtureWith(t *testing.T, routes map[string]sandboxRelayRoute, muta
 		sandboxAuthorityKey = prevKey
 		sandboxBudgetLimits[sandboxBudgetHook] = prevHook
 	})
+	// NewAPIServer publishes the config's profile set process-wide; the next
+	// test must not resolve against it (rel-1-0-6 GAP-0335).
+	previousProfiles := liveGuardrailProfiles.Load()
+	t.Cleanup(func() { liveGuardrailProfiles.Store(previousProfiles) })
 	api := NewAPIServer("127.0.0.1:18970", NewSidecarHealth(), nil, nil, nil, cfg)
 	auth, err := api.sandboxAuth()
 	if err != nil {
@@ -1060,8 +1069,13 @@ func TestSandboxRelayThroughTheHookSocketServer(t *testing.T) {
 	cfg := &config.Config{DeploymentMode: "managed_enterprise", DataDir: dataDir}
 	cfg.Enterprise.Profile = managed.ProfileStandalone
 	cfg.Guardrail.Mode = "observe"
+	cfg.Guardrail.Enabled = true
+	cfg.Guardrail.Connectors = map[string]config.PerConnectorGuardrailConfig{"claudecode": {}}
 	cfg.OpenShell.Enabled = true
 	api := NewAPIServer("127.0.0.1:0", NewSidecarHealth(), nil, nil, nil, cfg)
+	api.SetGenerationSource(func() *Generation {
+		return &Generation{N: 1, ConfigGen: 1, ConfigGenRecorded: true, Config: cfg}
+	})
 	api.SetConnectorRegistry(connector.NewDefaultRegistry())
 	api.bindOTLPObservabilityRuntime(newSidecarRuntimeFixture(t, true).runtime)
 	auth, err := api.sandboxAuth()

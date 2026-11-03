@@ -16,6 +16,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"regexp"
 	"sort"
 	"strings"
 
@@ -26,12 +27,16 @@ import (
 // Claude Code merges managed-settings.json first, then every non-hidden
 // *.json in managed-settings.d alphabetically; lists union, objects merge
 // key by key and later scalars win. DefenseClaw owns exactly one drop-in.
-// Higher-ranked admin sources (server-managed, MDM plist / HKLM) are used
-// instead of the files unless the highest source sets
-// managedSourcesBehavior: "merge" (Claude Code 2.1.242 and later).
+// Claude Code selects the highest-ranked admin source (server-managed, MDM
+// plist / HKLM, then the files as one source) that carries a policy key, a
+// key other than managedSourcesBehavior and wslInheritsWindowsSettings, and
+// ignores the rest unless managedSourcesBehavior is "merge" (Claude Code
+// 2.1.242 and later). Env variables merge across admin sources from Claude
+// Code 2.1.223; before that only the selected source's env applies.
 const (
-	claudeConnector           = ConnectorClaudeCode
-	claudeMergeMinimumVersion = "2.1.242"
+	claudeConnector              = ConnectorClaudeCode
+	claudeMergeMinimumVersion    = "2.1.242"
+	claudeEnvMergeMinimumVersion = "2.1.223"
 )
 
 type claudeTarget struct{}
@@ -62,15 +67,10 @@ func (claudeTarget) Paths(opts Options) ([]string, error) {
 func claudeHandler(opts Options, group connector.ManagedHookGroup) *object {
 	handler := newObject()
 	handler.set("type", "command")
-	if opts.goos() == "windows" {
-		// Claude's exec form starts the native launcher directly, with no
-		// shell parsing of a path that may contain spaces (the Secure Client
-		// profile certifies the same form).
-		handler.set("command", opts.HookBinary)
-		handler.set("args", []any{"hook", "--connector", "claudecode", "--enterprise-managed"})
-	} else {
-		handler.set("command", shellQuote(opts.HookBinary)+" hook --connector claudecode --enterprise-managed")
-	}
+	// Claude starts the native binary directly on every platform. The
+	// registered command does not inherit shell options from the agent.
+	handler.set("command", opts.HookBinary)
+	handler.set("args", []any{"hook", "--connector", "claudecode", "--enterprise-managed"})
 	handler.set("timeout", json.Number(fmt.Sprint(group.Timeout)))
 	if group.Async {
 		handler.set("async", true)
@@ -87,6 +87,13 @@ func renderClaudeDropIn(opts Options, policy config.ResolvedConnectorPolicy) ([]
 	doc := newObject()
 	if policy.ManagedHooksOnly == config.ManagedHooksOnlyEnforce {
 		doc.set("allowManagedHooksOnly", true)
+	}
+	if opts.goos() != "windows" {
+		// This env value also governs Bash tool commands. Keep their shell
+		// prefix at the managed default while the hook itself uses exec form.
+		env := newObject()
+		env.set("CLAUDE_CODE_SHELL_PREFIX", "")
+		doc.set("env", env)
 	}
 	hooks := newObject()
 	for _, group := range groups {
@@ -127,37 +134,42 @@ func renderClaudeHigherPrecedence(opts Options, policy config.ResolvedConnectorP
 	return encodeOrdered(doc)
 }
 
-// claudeHandlerIsOwned reports whether a decoded handler is DefenseClaw's.
+// claudeHandlerIsOwned reports whether a decoded handler uses the current
+// managed form. Earlier forms need a policy refresh before they count.
 func claudeHandlerIsOwned(opts Options, raw any) bool {
 	command := stringField(raw, "command")
 	if opts.goos() == "windows" {
 		if !strings.EqualFold(command, opts.HookBinary) {
 			return false
 		}
-		var args []any
-		switch v := raw.(type) {
-		case *object:
-			args, _ = v.values["args"].([]any)
-		case map[string]any:
-			args, _ = v["args"].([]any)
-		}
-		want := []string{"hook", "--connector", "claudecode", "--enterprise-managed"}
-		if len(args) != len(want) {
+	} else if command != opts.HookBinary {
+		return false
+	}
+	var args []any
+	switch v := raw.(type) {
+	case *object:
+		args, _ = v.values["args"].([]any)
+	case map[string]any:
+		args, _ = v["args"].([]any)
+	}
+	want := []string{"hook", "--connector", "claudecode", "--enterprise-managed"}
+	if len(args) != len(want) {
+		return false
+	}
+	for i := range want {
+		if s, _ := args[i].(string); s != want[i] {
 			return false
 		}
-		for i := range want {
-			if s, _ := args[i].(string); s != want[i] {
-				return false
-			}
-		}
-		return true
 	}
-	return command == shellQuote(opts.HookBinary)+" hook --connector claudecode --enterprise-managed"
+	return true
 }
 
-// countClaudeHooks counts DefenseClaw and foreign handlers in a settings
-// "hooks" value and reports which contracted events lack DefenseClaw.
-func countClaudeHooks(opts Options, hooks any, events []string) (owned, foreign int, missing []string) {
+// claudeHandlerIsLegacyOwned keeps earlier drop-ins recognizable for cleanup.
+func claudeHandlerIsLegacyOwned(opts Options, raw any) bool {
+	return opts.goos() != "windows" && stringField(raw, "command") == shellQuote(opts.HookBinary)+" hook --connector claudecode --enterprise-managed"
+}
+
+func claudeEventLists(hooks any) map[string][]any {
 	eventLists := map[string][]any{}
 	switch v := hooks.(type) {
 	case *object:
@@ -171,31 +183,253 @@ func countClaudeHooks(opts Options, hooks any, events []string) (owned, foreign 
 			eventLists[key] = list
 		}
 	}
+	return eventLists
+}
+
+// claudeEnvValue returns doc's env value for name.
+func claudeEnvValue(doc *object, name string) (any, bool) {
+	if doc == nil {
+		return nil, false
+	}
+	raw, _ := doc.get("env")
+	switch env := raw.(type) {
+	case *object:
+		return env.get(name)
+	case map[string]any:
+		value, ok := env[name]
+		return value, ok
+	}
+	return nil, false
+}
+
+// inspectClaudeShellEnvironment reports managed env values that affect Bash
+// tool scripts and returns the effective file-based prefix. The native
+// DefenseClaw hook uses exec form.
+func inspectClaudeShellEnvironment(opts Options, sources []claudeSource, state *State) (any, bool) {
+	dropIn, _ := claudeDropInPath(opts)
+	var prefix any
+	var prefixSet bool
+	for _, source := range sources {
+		if value, ok := claudeEnvValue(source.doc, "CLAUDE_CODE_SHELL_PREFIX"); ok {
+			prefix, prefixSet = value, true
+			if text, isText := value.(string); isText {
+				if source.name != dropIn && text != "" {
+					state.detail("%s sets env CLAUDE_CODE_SHELL_PREFIX; verify the effective managed value is empty for Bash tool commands (rel-1-0-6:GAP-0322)", source.name)
+				}
+			}
+		}
+		if value, ok := claudeEnvValue(source.doc, "SHELLOPTS"); ok {
+			if text, isText := value.(string); !isText || strings.TrimSpace(text) != "" {
+				state.detail("%s sets env SHELLOPTS, which Claude Code passes to Bash tool commands; review shell startup options if scripts stop early (rel-1-0-6:GAP-0465)", source.name)
+			} else {
+				// An empty value is exported by bash, so the options of
+				// Claude Code's shell snapshot (onecmd) reach every script.
+				state.detail("%s sets env SHELLOPTS to \"\", which breaks Bash tool scripts: bash exports it, so the onecmd option of Claude Code's shell snapshot reaches every script the Bash tool starts and each runs its first command only; remove SHELLOPTS from that env block (rel-1-0-6:GAP-0465)", source.name)
+			}
+		}
+	}
+	return prefix, prefixSet
+}
+
+// countClaudeHooks counts DefenseClaw and foreign handlers in a settings
+// "hooks" value and reports which contracted events lack DefenseClaw.
+// A contracted event counts only when Claude Code runs a DefenseClaw handler
+// for it: the entry matcher covers the contract and the handler is a
+// blocking command (claudeEntryCovers, claudeHandlerRuns).
+func countClaudeHooks(opts Options, hooks any, groups []connector.ManagedHookGroup) (owned, foreign int, missing []string) {
+	eventLists := claudeEventLists(hooks)
 	for _, list := range eventLists {
 		for _, entry := range list {
 			for _, handler := range handlersOf(entry) {
 				if claudeHandlerIsOwned(opts, handler) {
 					owned++
-				} else {
+				} else if !claudeHandlerIsLegacyOwned(opts, handler) {
 					foreign++
 				}
 			}
 		}
 	}
-	for _, event := range events {
+	for _, group := range groups {
 		found := false
-		for _, entry := range eventLists[event] {
+		for _, entry := range eventLists[group.Event] {
+			if !claudeEntryCovers(entry, group) {
+				continue
+			}
 			for _, handler := range handlersOf(entry) {
-				if claudeHandlerIsOwned(opts, handler) {
+				if claudeHandlerIsOwned(opts, handler) && claudeHandlerRuns(handler, group) {
 					found = true
 				}
 			}
 		}
 		if !found {
-			missing = append(missing, event)
+			missing = append(missing, group.Event)
 		}
 	}
 	return owned, foreign, missing
+}
+
+// claudeEventsWithoutMatcher fire on every occurrence; Claude Code ignores
+// a matcher on them.
+var claudeEventsWithoutMatcher = map[string]bool{
+	"UserPromptSubmit": true, "PostToolBatch": true, "Stop": true, "TeammateIdle": true,
+	"TaskCreated": true, "TaskCompleted": true, "WorktreeCreate": true, "WorktreeRemove": true,
+	"MessageDisplay": true, "CwdChanged": true,
+}
+
+// claudeEntryCovers reports whether an entry's matcher selects every
+// occurrence the contract's matcher does: an omitted, "" or "*" matcher
+// matches all. A restricted unanchored regex that matches the empty string
+// also matches every tool name. Other expressions must equal the contract's
+// matcher.
+func claudeEntryCovers(entry any, group connector.ManagedHookGroup) bool {
+	if claudeEventsWithoutMatcher[group.Event] {
+		return true
+	}
+	var raw any
+	var present bool
+	switch v := entry.(type) {
+	case *object:
+		raw, present = v.get("matcher")
+	case map[string]any:
+		raw, present = v["matcher"]
+	default:
+		return false
+	}
+	if !present {
+		return true
+	}
+	matcher, ok := raw.(string)
+	return ok && (matcher == "" || matcher == "*" || matcher == group.Matcher || claudeMatcherMatchesAll(matcher))
+}
+
+// Keep this proof within regex syntax shared by Go and JavaScript. Claude
+// Code treats names and separators alone as an exact-name list, not a regex.
+// Without anchors or lookarounds, an empty regex match is available at every
+// input start.
+func claudeMatcherMatchesAll(matcher string) bool {
+	if matcher == "^" || matcher == "$" {
+		return true
+	}
+	regexPath := false
+	for _, char := range matcher {
+		if !strings.ContainsRune("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_- ,|", char) {
+			regexPath = true
+			break
+		}
+	}
+	if !regexPath {
+		return false
+	}
+	if strings.Contains(strings.ReplaceAll(matcher, "(?:", ""), "(?") {
+		return false
+	}
+	for i := 0; i < len(matcher); i++ {
+		if matcher[i] == '[' {
+			start := i
+			i++
+			if i < len(matcher) && matcher[i] == '^' {
+				i++
+			}
+			for ; i < len(matcher) && matcher[i] != ']'; i++ {
+				if matcher[i] == '\\' {
+					i++
+					if i == len(matcher) || !strings.ContainsRune("sSdDwW", rune(matcher[i])) {
+						return false
+					}
+				} else if !strings.ContainsRune("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_- .", rune(matcher[i])) {
+					return false
+				}
+			}
+			if i == len(matcher) || i == start+1 || (i == start+2 && matcher[start+1] == '^') {
+				return false
+			}
+			continue
+		}
+		if !strings.ContainsRune("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_- ,._*+?|():", rune(matcher[i])) {
+			return false
+		}
+	}
+	compiled, err := regexp.Compile(matcher)
+	return err == nil && compiled.MatchString("")
+}
+
+// claudeHandlerRuns reports whether Claude Code runs a handler as a command
+// that can decide the call: type "command", no "if" filter, and no
+// background run unless the contract runs the group in the background.
+func claudeHandlerRuns(raw any, group connector.ManagedHookGroup) bool {
+	var fields map[string]any
+	switch v := raw.(type) {
+	case *object:
+		fields = v.values
+	case map[string]any:
+		fields = v
+	default:
+		return false
+	}
+	if fields["type"] != "command" {
+		return false
+	}
+	if _, filtered := fields["if"]; filtered {
+		return false
+	}
+	if !group.Async {
+		for _, key := range []string{"async", "asyncRewake"} {
+			if value, set := fields[key]; set && value != false {
+				return false
+			}
+		}
+	}
+	return true
+}
+
+// claudeHasPolicyKey reports whether doc carries a non-null policy value.
+// Claude Code skips a source with only control keys or null policy values.
+func claudeHasPolicyKey(doc *object) bool {
+	for _, key := range doc.keys {
+		if key != "managedSourcesBehavior" && key != "wslInheritsWindowsSettings" {
+			if value, present := doc.get(key); present && value != nil {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// claudeShellPrefixConflict returns a conflict unless the
+// CLAUDE_CODE_SHELL_PREFIX value Claude Code applies to Bash tool commands
+// is "". From Claude Code 2.1.223 each env variable comes from the
+// highest-ranked admin source that sets it; before that, only from the
+// selected source (the highest-ranked one with a policy key). The file
+// sources count as one source whose last value wins. An unknown client
+// version must pass under both rules.
+func claudeShellPrefixConflict(opts Options, higher []higherClaudeSource, filePrefix any, filePrefixSet bool) string {
+	rules := []bool{true, false}
+	if version := opts.agentVersion(claudeConnector); version != "" {
+		rules = []bool{compareVersions(version, claudeEnvMergeMinimumVersion) >= 0}
+	}
+	for _, perVariable := range rules {
+		value, set, from := filePrefix, filePrefixSet, ""
+		for _, source := range higher {
+			if perVariable {
+				if v, ok := claudeEnvValue(source.doc, "CLAUDE_CODE_SHELL_PREFIX"); ok {
+					value, set, from = v, true, source.name
+					break
+				}
+			} else if claudeHasPolicyKey(source.doc) {
+				value, set = claudeEnvValue(source.doc, "CLAUDE_CODE_SHELL_PREFIX")
+				from = source.name
+				break
+			}
+		}
+		if text, isText := value.(string); set && isText && text == "" {
+			continue
+		}
+		if from == "" {
+			return "managed Claude Code settings do not keep CLAUDE_CODE_SHELL_PREFIX empty for Bash tool commands (rel-1-0-6:GAP-0322)"
+		}
+		return fmt.Sprintf("effective managed policy from %s does not keep CLAUDE_CODE_SHELL_PREFIX empty for Bash tool commands (rel-1-0-6:GAP-0322)", from)
+	}
+	return ""
 }
 
 func handlersOf(entry any) []any {
@@ -310,7 +544,7 @@ func inspectClaude(opts Options, policy config.ResolvedConnectorPolicy, state *S
 	}
 	for _, source := range sources {
 		hooks, _ := source.doc.get("hooks")
-		owned, foreign, missing := countClaudeHooks(opts, hooks, events)
+		owned, foreign, missing := countClaudeHooks(opts, hooks, groups)
 		state.OwnedEntries += owned
 		state.ForeignEntries += foreign
 		missingSet := map[string]bool{}
@@ -325,7 +559,7 @@ func inspectClaude(opts Options, policy config.ResolvedConnectorPolicy, state *S
 	}
 	for _, event := range events {
 		if missingAll[event] {
-			state.entryConflict("Claude Code event %s has no DefenseClaw managed hook", event)
+			state.entryConflict("Claude Code event %s has no DefenseClaw managed hook that runs for it (a command handler with DefenseClaw's command and args, a matcher covering the contract, no if filter, not async)", event)
 		}
 	}
 	if value, from := claudeEffectiveScalar(sources, "disableAllHooks"); value == true {
@@ -347,6 +581,11 @@ func inspectClaude(opts Options, policy config.ResolvedConnectorPolicy, state *S
 	if policy.ManagedHooksOnly == config.ManagedHooksOnlyPreserve && lockValue != true {
 		state.detail("managed_hooks_only: preserve — user and project Claude Code hooks still run and can rewrite tool input (updatedInput) after DefenseClaw approves it")
 	}
+	var filePrefix any
+	var filePrefixSet bool
+	if opts.goos() != "windows" {
+		filePrefix, filePrefixSet = inspectClaudeShellEnvironment(opts, sources, state)
+	}
 	if value, from := claudeEffectiveScalar(sources, "policyHelper"); value != nil {
 		state.conflict("%s configures policyHelper, which lets an external helper decide managed policy; DefenseClaw cannot verify the effective hooks", from)
 	}
@@ -355,10 +594,19 @@ func inspectClaude(opts Options, policy config.ResolvedConnectorPolicy, state *S
 	if err != nil {
 		state.conflict("inspect higher-precedence Claude Code policy: %v", err)
 	}
+	if opts.goos() != "windows" {
+		// Checked whichever source is selected: env merges across sources.
+		if message := claudeShellPrefixConflict(opts, higher, filePrefix, filePrefixSet); message != "" {
+			state.conflict("%s", message)
+		}
+	}
 	for _, source := range higher {
 		hooks, _ := source.doc.get("hooks")
-		_, _, missing := countClaudeHooks(opts, hooks, events)
+		_, _, missing := countClaudeHooks(opts, hooks, groups)
 		behavior, _ := source.doc.get("managedSourcesBehavior")
+		if value, _ := source.doc.get("policyHelper"); value != nil {
+			state.conflict("%s configures policyHelper, which lets an external helper decide managed policy; DefenseClaw cannot verify the effective hooks", source.name)
+		}
 		switch {
 		case len(missing) == 0:
 			state.detail("%s embeds DefenseClaw's hook matrix", source.name)
@@ -367,6 +615,9 @@ func inspectClaude(opts Options, policy config.ResolvedConnectorPolicy, state *S
 			if version := opts.agentVersion(claudeConnector); version != "" && compareVersions(version, claudeMergeMinimumVersion) < 0 {
 				state.Pending = append(state.Pending, fmt.Sprintf("Claude Code %s is older than %s and ignores managedSourcesBehavior: merge", version, claudeMergeMinimumVersion))
 			}
+		case !claudeHasPolicyKey(source.doc):
+			// Claude Code skips it and selects the next source.
+			state.detail("%s carries only managed-source control keys, so Claude Code applies the next managed source", source.name)
 		default:
 			state.HigherPrecedence = append(state.HigherPrecedence, source.name)
 			// A macOS managed-preferences profile takes the plist export.
@@ -374,7 +625,7 @@ func inspectClaude(opts Options, policy config.ResolvedConnectorPolicy, state *S
 			if opts.goos() == "darwin" {
 				format = "plist"
 			}
-			message := fmt.Sprintf("%s has higher precedence than file-based managed settings and does not include DefenseClaw's hooks; add \"managedSourcesBehavior\": \"merge\" to it (Claude Code %s+) or deploy `defenseclaw-gateway enterprise policy export --connector claudecode --format %s` through it (the export also sets requiredMinimumVersion under version_floor: enforce)", source.name, claudeMergeMinimumVersion, format)
+			message := fmt.Sprintf("%s has higher precedence than file-based managed settings and does not include DefenseClaw's hooks for %s; add \"managedSourcesBehavior\": \"merge\" to it (Claude Code %s+) or deploy `defenseclaw-gateway enterprise policy export --connector claudecode --format %s` through it (the export also sets requiredMinimumVersion under version_floor: enforce)", source.name, strings.Join(missing, ", "), claudeMergeMinimumVersion, format)
 			if policy.HigherPrecedenceSources == config.HigherPrecedenceWarn {
 				state.detail("%s", message)
 				state.HigherPrecedence = state.HigherPrecedence[:len(state.HigherPrecedence)-1]
@@ -515,7 +766,19 @@ func claudeStrip(opts Options) stripFunc {
 		}
 		hooks, _ := doc.get("hooks")
 		owned, _, _ := countClaudeHooks(opts, hooks, nil)
-		return owned > 0
+		if owned > 0 {
+			return true
+		}
+		for _, list := range claudeEventLists(hooks) {
+			for _, entry := range list {
+				for _, handler := range handlersOf(entry) {
+					if claudeHandlerIsLegacyOwned(opts, handler) {
+						return true
+					}
+				}
+			}
+		}
+		return false
 	})
 }
 

@@ -167,6 +167,9 @@ class BuildPlanTests(unittest.TestCase):
     def test_windows_git_bash_launcher_is_bound_to_the_data_dir(self):
         data_dir = Path(self._tmp.name) / "data"
         launcher = Path(self._tmp.name) / "defenseclaw"
+        native = Path(self._tmp.name) / "defenseclaw.exe"
+        launcher.write_text(f'#!/bin/sh\nexec "{str(native).replace(os.sep, "/")}" "$@"\n', encoding="utf-8")
+        self.assertTrue(cmd_uninstall._is_data_bound_launcher(str(launcher), str(data_dir), "win32"))
         exe = os.path.join(os.path.normcase(os.path.abspath(data_dir)), ".venv", "Scripts", "defenseclaw.exe")
         launcher.write_text(f'#!/bin/sh\nexec "{exe.replace(os.sep, "/")}" "$@"\n', encoding="utf-8")
         self.assertTrue(cmd_uninstall._is_data_bound_launcher(str(launcher), str(data_dir), "win32"))
@@ -792,6 +795,29 @@ class WindowsOwnedCleanupTests(unittest.TestCase):
             launcher.write_bytes(b"MZ\0trampoline" + python.upper().encode("utf-8") + b"PK\0script")
             self.assertTrue(cmd_uninstall._is_data_bound_launcher(str(launcher), data_dir, "win32"))
             launcher.write_bytes(b"MZ\0trampoline C:\\Other\\.venv\\Scripts\\python.exe")
+            self.assertFalse(cmd_uninstall._is_data_bound_launcher(str(launcher), data_dir, "win32"))
+
+    def test_installer_native_cli_launcher_is_bound_to_recorded_data_root(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            data_dir = os.path.join(tmp, ".defenseclaw")
+            launcher = Path(tmp) / "defenseclaw.exe"
+            gateway = Path(tmp) / "defenseclaw-gateway.exe"
+            state = Path(tmp) / "defenseclaw-hook-state.json"
+            launcher.write_bytes(b"MZ\0native launcher")
+            gateway.write_bytes(launcher.read_bytes())
+            valid_state = json.dumps({
+                "schema_version": 1,
+                "install_kind": "powershell-windows",
+                "install_scope": "user",
+                "data_root": data_dir,
+            })
+            state.write_text(valid_state, encoding="utf-8")
+            self.assertTrue(cmd_uninstall._is_data_bound_launcher(str(launcher), data_dir, "win32"))
+            self.assertFalse(cmd_uninstall._is_data_bound_launcher(str(launcher), os.path.join(tmp, "other"), "win32"))
+            state.write_text("[]", encoding="utf-8")
+            self.assertFalse(cmd_uninstall._is_data_bound_launcher(str(launcher), data_dir, "win32"))
+            state.write_text(valid_state, encoding="utf-8")
+            gateway.write_bytes(b"MZ\0different image")
             self.assertFalse(cmd_uninstall._is_data_bound_launcher(str(launcher), data_dir, "win32"))
 
     def test_deferred_scheduling_failure_is_nonzero_and_stops_cleanup(self):
@@ -2689,7 +2715,7 @@ class RetiredSourceInstallCopyTests(unittest.TestCase):
             managed_venv = home / ".defenseclaw" / ".venv"
             managed_venv.mkdir(parents=True)
             (bin_dir / "defenseclaw.cmd").write_text(
-                f'@echo off\r\n"{managed_venv / "Scripts" / "defenseclaw.exe"}" %*\r\n', encoding="utf-8"
+                f'@echo off\r\n"{managed_venv / "Scripts" / "defenseclaw.exe"}" %*\r\n', encoding="utf-8", newline=""
             )
             plan = {
                 "install_root": install_root,
@@ -2725,7 +2751,7 @@ class RetiredSourceInstallCopyTests(unittest.TestCase):
             managed_venv = home / ".defenseclaw" / ".venv"
             managed_venv.mkdir(parents=True)
             (bin_dir / "defenseclaw.cmd").write_text(
-                f'@echo off\r\n"{managed_venv / "Scripts" / "defenseclaw.exe"}" %*\r\n', encoding="utf-8"
+                f'@echo off\r\n"{managed_venv / "Scripts" / "defenseclaw.exe"}" %*\r\n', encoding="utf-8", newline=""
             )
             plan = {
                 "install_root": install_root,

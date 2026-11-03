@@ -226,9 +226,10 @@ not the driver's name or `runtime.GOOS`.
   daemon counts as a first boot), and credential names, never their values.
   The CLI turns the answer into its "about a minute" note and a disk check
   before it stages the copy
-  (`openshell.VMDiskShortage`: refused below the image's size plus 1 GiB,
-  never below the doctor's 6 GiB `VMDiskFailBytes`, warned below twice that,
-  never below 12 GiB; `image build` warns the same after a build). The
+  (`openshell.VMDiskShortage`: refused below the first-start use (the
+  measured 12 GiB `VMDiskFirstStartBytes`, or the image's size plus 1 GiB if
+  larger) plus 1 GiB, never below the doctor's 13 GiB `VMDiskFailBytes`,
+  warned below twice the first-start use, never below 24 GiB; `image build` warns the same after a build). The
   daemon's create refuses the same shortage (`unavailable`) once it knows the
   image ID the sandbox boots and finds no disk prepared from it
   (`Options.VMDiskFree`). `delete` keeps a sandbox's run image even when

@@ -16,6 +16,7 @@ import (
 	"syscall"
 
 	"github.com/defenseclaw/defenseclaw/internal/managed"
+	"github.com/defenseclaw/defenseclaw/internal/pathidentity"
 )
 
 // scannerRuntimePath is the installed scanner runtime, or "" when this host
@@ -69,7 +70,7 @@ func installedScannerRuntime() (string, error) {
 		return "", fmt.Errorf("scanner runtime folder %s is unavailable: %w", root, err)
 	}
 	path := filepath.Join(root, managed.StandaloneWindowsScannerRuntimeName)
-	info, err := os.Lstat(path)
+	info, err := pathidentity.LstatPinned(path)
 	if err != nil {
 		return "", fmt.Errorf("%s is missing", path)
 	}

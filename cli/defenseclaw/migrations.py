@@ -3699,6 +3699,11 @@ def _migrate_config_v9(ctx: MigrationContext) -> None:
         for merge in record.get("rule_file_merges") or []:
             if isinstance(merge, str) and merge.isprintable():
                 ctx.changes.append(f"rule pack {merge}")
+        # GAP-0268: 1.0 refuses a rule without tags, which 0.8.x took; the
+        # 1.0 copy of the pack gave each the tag custom.
+        for tagged in record.get("tagged_rules") or []:
+            if isinstance(tagged, str) and tagged.isprintable():
+                ctx.changes.append(f"rule pack {tagged}")
         # MCP servers already configured keep running after the upgrade; the
         # gateway records their baselines at its first start (GAP-1227). Name
         # the ones a block entry keeps blocked.

@@ -111,9 +111,11 @@ func NewJudgeBodyStore(dbPath string) (*JudgeBodyStore, error) {
 
 // NewJudgeBodyStoreForCutover opens the authoritative database with reads and
 // writes disabled until CutoverLegacyJudgeBodies completes successfully. The
-// gateway MUST use this constructor whenever audit.db is present.
-func NewJudgeBodyStoreForCutover(dbPath string) (*JudgeBodyStore, error) {
-	return newJudgeBodyStore(dbPath, true)
+// gateway MUST use this constructor whenever audit.db is present. opts are
+// those of the audit store (Store.StoreOptions): a Secure Client host opens
+// the judge-body store with main's pragmas too.
+func NewJudgeBodyStoreForCutover(dbPath string, opts ...StoreOption) (*JudgeBodyStore, error) {
+	return newJudgeBodyStoreWithPathHooks(dbPath, true, judgeBodyPathHooks{secureClient: secureClientStoreOptions(opts)})
 }
 
 func newJudgeBodyStore(dbPath string, requireCutover bool) (*JudgeBodyStore, error) {
@@ -140,12 +142,12 @@ func newJudgeBodyStoreWithPathHooks(
 			return nil, fmt.Errorf("judge_body: pre-open path check: %w", err)
 		}
 	}
-	db, err := openSQLite(dbPath)
+	db, err := openSQLiteWithPragmas(dbPath, auditPragmasFor(hooks.secureClient))
 	if err != nil {
 		prepared.close()
-		// Strip the leading "audit:" tier that openSQLite stamps so
+		// Strip the leading "audit:" tier that openSQLiteWithPragmas stamps so
 		// the operator sees the correct subsystem in the wrapped
-		// error chain. openSQLite is shared across both DBs, so the
+		// error chain. openSQLiteWithPragmas is shared across both DBs, so the
 		// tier disambiguation happens at the caller boundary.
 		return nil, fmt.Errorf("judge_body: open db %s: %w", dbPath, unwrapOpenSQLiteErr(err))
 	}
@@ -163,7 +165,7 @@ func newJudgeBodyStoreWithPathHooks(
 }
 
 // unwrapOpenSQLiteErr strips the shared "audit:" prefix from the
-// openSQLite helper so the caller-side wrap shows the right tier.
+// openSQLiteWithPragmas helper so the caller-side wrap shows the right tier.
 // Falls back to the original error when the prefix isn't present.
 func unwrapOpenSQLiteErr(err error) error {
 	if err == nil {

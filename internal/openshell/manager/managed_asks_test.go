@@ -75,6 +75,11 @@ type fakeAuthority struct {
 	down   bool
 	gone   map[string]bool
 	byName map[string]string
+	// hang is a gateway that never answers a decisions load (it waits for
+	// the caller's deadline).
+	hang atomic.Bool
+	// hungLoads counts the decisions loads hang held.
+	hungLoads atomic.Int64
 }
 
 // floor is the floor of the person's profile.
@@ -134,7 +139,12 @@ func (a *fakeAuthority) Decide(_ context.Context, req sandboxrelay.DecisionReque
 	return sandboxrelay.DecisionResult{V: 1, Stored: stored, Decision: d}, nil
 }
 
-func (a *fakeAuthority) Decisions(_ context.Context, registration string) ([]sandboxrelay.Decision, error) {
+func (a *fakeAuthority) Decisions(ctx context.Context, registration string) ([]sandboxrelay.Decision, error) {
+	if a.hang.Load() {
+		a.hungLoads.Add(1)
+		<-ctx.Done()
+		return nil, ctx.Err()
+	}
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	switch {

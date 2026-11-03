@@ -102,6 +102,15 @@ func launcherEnsureDaemon(ctx context.Context, client launcherStatusClient, goos
 		ctx = context.Background()
 	}
 	status, err := launcherProbe(ctx, client, launcherProbeTimeout)
+	if launcherDaemonAnswered(err) {
+		// The daemon runs and answered why it cannot serve now (the managed
+		// gateway did not answer its settings read, say). Starting it again
+		// and polling for launcherStartWait kept it serving that answer, and
+		// the command waited 15 s more for the same refusal, under a line
+		// that said the service does not answer (GAP-0608). The command
+		// that follows shows the daemon's answer.
+		return nil, nil
+	}
 	if err != nil {
 		if startErr := launcherStartDaemon(ctx, goos, uid); startErr != nil {
 			return nil, fmt.Errorf("your sandbox service is not running and could not be started: %v", startErr)
@@ -147,6 +156,14 @@ type launcherDaemonError struct {
 
 func (e *launcherDaemonError) Error() string { return e.msg }
 func (e *launcherDaemonError) Unwrap() error { return e.err }
+
+// launcherDaemonAnswered reports a status request the daemon answered with
+// an error status: it runs. A transport failure (no daemon, no answer in
+// time) carries no status.
+func launcherDaemonAnswered(err error) bool {
+	var refused *sandboxapi.Error
+	return errors.As(err, &refused) && refused.Status >= 400
+}
 
 // launcherProbe asks the daemon for its status within timeout.
 func launcherProbe(ctx context.Context, client launcherStatusClient, timeout time.Duration) (*sandboxapi.Status, error) {
