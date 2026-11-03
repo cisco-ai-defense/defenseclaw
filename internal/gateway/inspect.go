@@ -1675,15 +1675,19 @@ func (a *APIServer) runHookJudgeSingle(ctx context.Context, strategyDirection, j
 	fallback := func(reason string) {
 		fallbackOnce.Do(func() { a.recordHookJudgeFallback(context.WithoutCancel(ctx), connector, reason) })
 	}
+	// A rule finding is a floor: the decision model cannot skip the judge on
+	// a call the rules flagged (escalate-on-confirm). Read it here, before
+	// the judge can run apart from the answer: the caller folds this run's
+	// verdict (an escalated fail-closed refusal included) into current while
+	// a late judge is still running.
+	ruleFloor := rulesFlagged(current)
 	call := func(callCtx context.Context) *ScanVerdict {
 		jctx, cancel := context.WithTimeout(callCtx, timeout)
 		defer cancel()
 		jctx = withJudgeSuppressionPack(jctx, pack)
 		var v *ScanVerdict
 		if strings.EqualFold(strategyDirection, "tool_call") {
-			// A rule finding is a floor: the decision model cannot skip the
-			// judge on a call the rules flagged (escalate-on-confirm).
-			jctx = withDecisionRuleFloor(jctx, rulesFlagged(current))
+			jctx = withDecisionRuleFloor(jctx, ruleFloor)
 			v = judge.RunToolJudge(jctx, toolName, content)
 		} else {
 			v = judge.RunJudges(jctx, judgeDirection, content, toolName)
