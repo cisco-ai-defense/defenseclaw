@@ -217,6 +217,12 @@ class ScanLocalGracefulDegradeTests(unittest.TestCase):
         # These fakes exercise the legacy scanner config-file/log-degrade path,
         # which remains the macOS/Linux implementation. Native Windows uses
         # DefenseClaw's same-task stdio adapter and never calls this fake API.
+        # The patch replaces os.name for the whole process, and _scan_local
+        # imports the MCP SDK lazily: import it first, or a first import under
+        # the patch builds POSIX paths on Windows.
+        import anyio._core._eventloop  # noqa: F401
+        import mcp.client.stdio  # noqa: F401
+
         platform = patch("defenseclaw.scanner.mcp.os.name", "posix")
         platform.start()
         self.addCleanup(platform.stop)
