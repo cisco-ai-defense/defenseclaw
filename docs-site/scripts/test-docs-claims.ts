@@ -628,10 +628,11 @@ describe('Amp rejected command display', () => {
 });
 
 describe('setup and rollback recovery guides', () => {
-  it('shows the release floor and the supported rollback sequence (GAP-0086)', () => {
+  it('shows the release floor before rollback (GAP-0086)', () => {
     const lifecycle = page('enterprise/lifecycle.mdx');
     assert.match(lifecycle, /`bundle status` shows the floor as `current\.min_product_version`/);
-    assert.match(lifecycle, /deliver a bundle signed with a lower `--min-product-version` before installing the older release/);
+    assert.match(lifecycle, /If the floor is higher, contact your administrator before the rollback/);
+    assert.doesNotMatch(lifecycle, /deliver a bundle signed with a lower `--min-product-version` before installing the older release/);
     assert.match(lifecycle, /confirmed floor must be unset or 1\.0\.4 or lower/);
     assert.match(lifecycle, /check that the release you install meets the floor first/);
   });
