@@ -4,6 +4,7 @@
 package gateway
 
 import (
+	"encoding/json"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -12,16 +13,16 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/defenseclaw/defenseclaw/internal/actionfacts"
 	"github.com/defenseclaw/defenseclaw/internal/config"
 	"github.com/defenseclaw/defenseclaw/internal/hookpaths"
 )
 
-// A POSIX shell's */* does not select .ssh at the home directory. Adding a
-// second statement must not turn that listing into a protected write. Codex
-// runs PowerShell on Windows, where the private-key glob read blocks. The
-// matching explicit writes still block in every hook route. The native
-// absolute path row uses Windows paths on Windows and Unix paths on Unix;
-// the slash path row also covers Git Bash spelling.
+// A user shell's native head */* does not select .ssh at the home directory.
+// Adding a second statement must not turn that listing into a protected
+// write. The matching explicit writes still block in every hook route. The
+// native absolute path row uses Windows paths on Windows and Unix paths on
+// Unix; the slash path row also covers Git Bash spelling.
 func TestGAP0516HomeListingCompoundFourCell(t *testing.T) {
 	root := t.TempDir()
 	home := filepath.Join(root, "user")
@@ -107,24 +108,50 @@ func TestGAP0516HomeListingCompoundFourCell(t *testing.T) {
 					recorder := httptest.NewRecorder()
 					api.handleAgentHook(connector).ServeHTTP(recorder, req)
 					body := recorder.Body.String()
-					want := row.want
-					if runtime.GOOS == "windows" && connector == "codex" && row.want == "allow" &&
-						strings.HasPrefix(row.command, "head -n 1 */*") {
-						// Codex's Windows Bash tool runs PowerShell, whose glob can
-						// include .ssh. Git Bash on Claude Code excludes dot names.
-						want = "block"
-					}
-					if !strings.HasPrefix(body, `{"action":"`+want+`"`) {
-						t.Errorf("%q: status %d body %.400s, want %s", row.command, recorder.Code, body, want)
+					if !strings.HasPrefix(body, `{"action":"`+row.want+`"`) {
+						t.Errorf("%q: status %d body %.400s, want %s", row.command, recorder.Code, body, row.want)
 					}
 					if row.want == "block" && !strings.Contains(body, "persistence.ssh_authorized_keys_command") {
 						t.Errorf("%q: wrong block rule: %.400s", row.command, body)
 					}
-					if want == "block" && row.want == "allow" && !strings.Contains(body, "PATH-SSH-KEY") {
-						t.Errorf("%q: wrong Windows private-key block rule: %.400s", row.command, body)
-					}
 				})
 			}
 		}
+	}
+}
+
+// The synthetic Windows home exercises Codex's PowerShell dispatch on every
+// build host. The native head glob skips leading dot names, while the
+// explicit key path and PowerShell cmdlet glob retain their key-read proof.
+func TestGAP0516CodexWindowsNativeHeadRead(t *testing.T) {
+	installDefaultProfileConnector(t, "codex")
+	const home = `C:\Users\Alice`
+	for _, row := range []struct {
+		name, command string
+		blocked       bool
+	}{
+		{"direct", `head -n 1 */*`, false},
+		{"compound", `head -n 1 */*; echo done`, false},
+		{"native exe", `head.exe -n 1 */*`, false},
+		{"explicit key", `head -n 1 .ssh/id_ed25519`, true},
+		{"explicit key glob", `head -n 1 .ssh/id_*`, true},
+		{"PowerShell cmdlet glob", `Get-Content */*`, true},
+	} {
+		t.Run(row.name, func(t *testing.T) {
+			args, err := json.Marshal(map[string]string{"command": row.command})
+			if err != nil {
+				t.Fatal(err)
+			}
+			input := actionfacts.Input{Tool: "Bash", Args: args, CWD: home, ActiveHome: home}
+			input.DialectHint = selectWindowsShellDialect(input.Tool, row.command, input)
+			findings := dispatchTrustedAction(t.Context(), trustedActionRequest{
+				Input: input, LegacyText: string(args), Connector: "codex",
+				EnforcementCapable: true, windowsShellDialect: true,
+			})
+			blocked := buildVerdict(findings, "tool_call").Action == guardrailActionBlock
+			if blocked != row.blocked || row.blocked && findingWithID(findings, "PATH-SSH-KEY") == nil {
+				t.Errorf("%q: blocked=%t, want %t; findings=%v", row.command, blocked, row.blocked, findingIDs(findings))
+			}
+		})
 	}
 }

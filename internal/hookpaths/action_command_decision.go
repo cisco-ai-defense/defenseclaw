@@ -562,13 +562,15 @@ func actionSoleParameter(word *syntax.Word) string {
 	return param.Param.Value
 }
 
-// keyReadMode is how a reader's words are read: on a Windows home, and
-// with the shell's dotglob option set.
+// keyReadMode is how a reader's words are read: on a Windows home, with
+// the shell's dotglob option set, or by a native Windows program whose
+// runtime expands wildcards without selecting leading dot names.
 type keyReadMode uint8
 
 const (
 	keyReadWindows keyReadMode = 1 << iota
 	keyReadDotglob
+	keyReadNativeGlob
 )
 
 // Wrapper arguments are not file reads. Resolve a bounded, literal child
@@ -579,6 +581,12 @@ func actionPrivateKeyReadWords(words []string, cwd, home string, mode keyReadMod
 		return false
 	}
 	program := programBase(words[0])
+	// PowerShell passes a native head command's wildcard operand through to
+	// the executable. The MSYS runtime expands it without matching .ssh for
+	// */*, unlike Get-Content's PowerShell wildcard binding.
+	if windows && program == "head" {
+		mode |= keyReadNativeGlob
+	}
 	switch program {
 	case "cmd":
 		if windows && len(words) > 2 && strings.EqualFold(words[1], "/c") {
@@ -1079,14 +1087,16 @@ var actionPrivateKeyNames = []string{"id_rsa", "id_ed25519", "id_ecdsa", "id_dsa
 // key paths component by component, and expanded on this host with each
 // match resolved through links (GAP-1780: dirlink/id_*, keyl*). A POSIX
 // shell's * and ? do not select a leading dot without dotglob (R2-2: head
-// -n 5 */* from the home is not a key read); PowerShell's wildcards do. MSYS
-// drive spellings (/c/..., /cygdrive/c/...) map to the Windows home, and
-// darwin matches case-insensitively.
+// -n 5 */* from the home is not a key read); PowerShell cmdlet wildcards do.
+// Native head on Windows uses the leading-dot rule of its MSYS runtime.
+// MSYS drive spellings (/c/..., /cygdrive/c/...) map to the Windows home,
+// and darwin matches case-insensitively.
 func actionPrivateKeyGlob(value, cwd, home string, mode keyReadMode) bool {
 	if !strings.ContainsAny(value, "*?[") {
 		return false
 	}
 	if mode&keyReadWindows != 0 {
+		dotglob := mode&keyReadNativeGlob == 0
 		pattern := strings.ReplaceAll(value, `\`, "/")
 		lower := strings.ToLower(pattern)
 		for _, prefix := range []string{"%userprofile%", "%homedrive%%homepath%", "$env:userprofile", "${env:userprofile}", "$home", "${home}", "~"} {
@@ -1103,14 +1113,14 @@ func actionPrivateKeyGlob(value, cwd, home string, mode keyReadMode) bool {
 		pattern = strings.ToLower(native)
 		root := strings.ToLower(path.Clean(strings.ReplaceAll(home, `\`, "/")))
 		for _, name := range actionPrivateKeyNames {
-			if actionKeyPatternMatch(pattern, root+"/.ssh/"+name, true) {
+			if actionKeyPatternMatch(pattern, root+"/.ssh/"+name, dotglob) {
 				return true
 			}
 		}
 		// On the Windows host itself the pattern is expanded and each match
 		// resolved through junctions and symlinks, as on POSIX (GAP-1780).
 		if runtime.GOOS == "windows" {
-			for _, match := range actionBoundedGlob(filepath.FromSlash(native), true) {
+			for _, match := range actionBoundedGlob(filepath.FromSlash(native), dotglob) {
 				if actionPrivateReadPath(match, cwd, home) {
 					return true
 				}
