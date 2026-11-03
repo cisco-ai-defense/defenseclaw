@@ -82,7 +82,8 @@ func TestGAP0431LoopCopyProofGuards(t *testing.T) {
 		{"path-qualified-prefix", `./echo; for f in authorized_keys; do cp a.txt "$HOME/.ssh/$f"; done`, false},
 		{"no-clobber", `for f in authorized_keys; do cp -n a.txt "$HOME/.ssh/$f"; done`, false},
 		{"L5-no-loop-name", `for f in authorized_keys; do cp a.txt ~/.ssh/authorized_keys; done`, false},
-		{"L6-dynamic-source", `for f in authorized_keys; do cp "$src" "$HOME/.ssh/$f"; done`, false},
+		{"L6-quoted-copy-source", `for f in authorized_keys; do cp "$src" "$HOME/.ssh/$f"; done`, true},
+		{"L6-dynamic-move-source", `for f in authorized_keys; do mv "$src" "$HOME/.ssh/$f"; done`, false},
 	}
 	for _, row := range rows {
 		t.Run(row.name, func(t *testing.T) {

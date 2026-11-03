@@ -15,6 +15,17 @@ import (
 // follow through ProtectHome. Earlier statements and other body calls must
 // leave the current directory, iterator and link unchanged.
 func actionClientLoopCopyDestinationProtected(command, cwd, home string) bool {
+	return loopCopyDestinationProtected(command, cwd, home, false)
+}
+
+// LoopCopyDestinationProtected checks fixed loop destinations of copy calls
+// in the gateway's own filesystem view. Move and install calls have different
+// destination-link behavior and are left to their existing readers.
+func LoopCopyDestinationProtected(command, cwd, home string) bool {
+	return loopCopyDestinationProtected(command, cwd, home, true)
+}
+
+func loopCopyDestinationProtected(command, cwd, home string, copyOnly bool) bool {
 	if !filepath.IsAbs(cwd) || home == "" {
 		return false
 	}
@@ -42,7 +53,7 @@ func actionClientLoopCopyDestinationProtected(command, cwd, home string) bool {
 			if !ok || stmt.Background || stmt.Negated || len(stmt.Redirs) != 0 || len(call.Assigns) != 0 || len(call.Args) == 0 {
 				return false
 			}
-			if candidate, ok := actionClientLoopCopyDestination(call, home); ok {
+			if candidate, ok := actionClientLoopCopyDestination(call, home, copyOnly); ok {
 				if destination != nil {
 					return false
 				}
@@ -126,7 +137,7 @@ func actionClientLoopCopyNoop(stmt *syntax.Stmt, cwd, home string) bool {
 	return false
 }
 
-func actionClientLoopCopyDestination(call *syntax.CallExpr, home string) (*syntax.Word, bool) {
+func actionClientLoopCopyDestination(call *syntax.CallExpr, home string, copyOnly bool) (*syntax.Word, bool) {
 	if len(call.Args) < 3 {
 		return nil, false
 	}
@@ -136,6 +147,9 @@ func actionClientLoopCopyDestination(call *syntax.CallExpr, home string) (*synta
 	}
 	base := programBase(program)
 	if base != "cp" && base != "gcp" && base != "mv" && base != "install" {
+		return nil, false
+	}
+	if copyOnly && base != "cp" && base != "gcp" {
 		return nil, false
 	}
 	for i := 1; i < len(call.Args)-2; i++ {
@@ -164,8 +178,18 @@ func actionClientLoopCopyDestination(call *syntax.CallExpr, home string) (*synta
 			return nil, false
 		}
 	}
-	source, fixed := StaticWord(call.Args[len(call.Args)-2], home)
-	if !fixed || source == "" || strings.HasPrefix(source, "-") || strings.ContainsAny(source, "*?[]\x00\x1f") {
+	sourceWord := call.Args[len(call.Args)-2]
+	source, fixed := StaticWord(sourceWord, home)
+	if !fixed {
+		// A quoted source remains one operand. Its value does not change
+		// the copy destination named by the final word.
+		if base != "cp" && base != "gcp" || len(sourceWord.Parts) != 1 {
+			return nil, false
+		}
+		if _, quoted := sourceWord.Parts[0].(*syntax.DblQuoted); !quoted {
+			return nil, false
+		}
+	} else if source == "" || strings.HasPrefix(source, "-") || strings.ContainsAny(source, "*?[]\x00\x1f") {
 		return nil, false
 	}
 	return call.Args[len(call.Args)-1], true

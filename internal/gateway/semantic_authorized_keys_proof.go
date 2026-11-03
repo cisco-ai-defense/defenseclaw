@@ -1333,6 +1333,13 @@ func trustedExistingAuthorizedKeysSymlinkWrite(request trustedActionRequest, fac
 	if decision != "" {
 		return true
 	}
+	if !cannotResolveLocally && trustedPOSIXShellCall(input, facts) &&
+		strings.Contains(input.Command, "for") && strings.Contains(input.Command, "cp") &&
+		hookpaths.LoopCopyDestinationProtected(input.Command, input.CWD, facts.ActiveHome) {
+		// The per-user gateway can check the same fixed loop destination
+		// that a managed hook checks before ProtectHome hides the home.
+		return true
+	}
 	if request.ProtectedHomeHook && clientTargets[hookpaths.ActionDecisionKey] == hookpaths.ProtectedTargetDecision {
 		// Behind ProtectHome the walk above cannot follow the user's links;
 		// the user's hook ran the same decision on the same command and
