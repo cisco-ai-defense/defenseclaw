@@ -18,6 +18,17 @@ func TestGAP0426NestedPlacedCopyScope(t *testing.T) {
 	if err := os.MkdirAll(filepath.Join(project, "src"), 0o700); err != nil {
 		t.Fatal(err)
 	}
+	// The copy is also placed where the shell starts. Its source there,
+	// project/project/src, holds a link, so the copy keeps an archive scope
+	// on every host; a missing source is a possible link only on Linux,
+	// where ProtectHome may hide it.
+	nested := filepath.Join(project, "project", "src")
+	if err := os.MkdirAll(nested, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(filepath.Join("..", "elsewhere"), filepath.Join(nested, "link")); err != nil {
+		t.Fatal(err)
+	}
 	command := `cd ~ && f=project/backup; echo $(cp -a project/src $f)`
 	links := commandLinks(command, project, home, nil, false, false)
 	if !links.cdScopes || links.globalOpaque || len(links.placedCopyDestinations) == 0 {
