@@ -331,6 +331,9 @@ type Options struct {
 	// itself (newPerUserHookHTTPClient), so the listener table describes the
 	// endpoint the call dials (perUserInstallWindowWithoutListener).
 	perUserLoopbackDial bool
+	// peerStatus is 1 after verified contact with no HTTP status and 2 after
+	// any HTTP status. Only state 1 may use the outage mode.
+	peerStatus *atomic.Int32
 	// HookContractID is the finite Setup-selected connector contract bound into
 	// the protected native Windows command. Codex uses it to prevent local
 	// failure paths from backfilling newer lifecycle controls into legacy tiers.
@@ -670,6 +673,9 @@ func runHook(ctx context.Context, opts Options) int {
 	// missing answer is not the gateway's outage, and fail mode open does not
 	// apply to it (final review, P2).
 	opts.answerSpentLocally = gatewayAnswerWindowShort(opts, deadline)
+	if !opts.ManagedEnterprise && opts.ManagedUnixSocket == "" && !opts.SecureClient {
+		opts.peerStatus = &atomic.Int32{}
+	}
 	switch {
 	case opts.answerWatch != nil && deadline.IsZero():
 		// The hook command armed the watchdog for an event that is not a
@@ -931,7 +937,8 @@ func doRequest(ctx context.Context, opts Options, sp spec, failMode string, payl
 	// within the hook's process cap. Per-user calls keep their existing
 	// invocation-based deadline.
 	opts.answerBy = gatewayAnswerDeadline(opts, opts.StartedAt, time.Now())
-	ctx, stopAnswer, stopResponseDeadline, releaseAnswer := awaitAnswerBy(ctx, opts.answerBy, progressCeiling(opts, opts.StartedAt), opts.answerWatch)
+	ctx, stopAnswer, stopResponseDeadline, releaseAnswer := awaitAnswerBy(ctx, opts.answerBy, progressCeiling(opts, opts.StartedAt), opts.answerWatch,
+		func() { opts.markHTTPStatus(sp) })
 	ctx, stopWatch, releaseWatch := watchManagedGatewayStarts(ctx, opts, restartDeadline)
 	// Reuse the account, session, asset facts and resolved write paths on
 	// every retry of this call.
@@ -1137,6 +1144,11 @@ func doRequest(ctx context.Context, opts Options, sp spec, failMode string, payl
 	// not answered closes this call.
 	failMode = closeDuringInstall(&opts, failMode)
 	if err != nil {
+		if errors.Is(err, errGatewayTookCallNoAnswer) {
+			// The transport marks a timeout this way only after a verified
+			// connection. Test transports use the same marker.
+			opts.markVerifiedNoStatus(sp)
+		}
 		if managedNativeDecision(opts) && opts.answeredErrorStatus != 0 {
 			return failAfterErrorStatus(opts, sp, "closed", opts.answeredErrorStatus)
 		}
@@ -1164,6 +1176,11 @@ func doRequest(ctx context.Context, opts Options, sp spec, failMode string, payl
 			// is a gateway service that is not running (see
 			// managedPeerFailMode).
 			return failUnreachable(withManagedOutage(opts, err), sp, managedPeerFailMode(opts, failMode, err), managedPeerFailureReason(opts, err))
+		}
+		if errors.Is(err, errPerUserPeerUnverified) {
+			// A deadline on the peer check is a local verification failure,
+			// not a verified gateway that gave no HTTP status.
+			return failUnreachable(opts, sp, "closed", perUserPeerUnverifiedReason(opts))
 		}
 		if !opts.SecureClient && (errors.Is(err, context.DeadlineExceeded) ||
 			errors.Is(err, errGatewayTookCallNoAnswer) || errors.Is(ctx.Err(), context.DeadlineExceeded)) {
@@ -1569,7 +1586,10 @@ func sendHookRequest(
 
 	var connected atomic.Bool
 	req = req.WithContext(httptrace.WithClientTrace(req.Context(), &httptrace.ClientTrace{
-		GotConn: func(httptrace.GotConnInfo) { connected.Store(true) },
+		GotConn: func(httptrace.GotConnInfo) {
+			connected.Store(true)
+			opts.markVerifiedNoStatus(sp)
+		},
 	}))
 	resp, err := opts.HTTPClient.Do(req)
 	if err != nil {
@@ -1581,6 +1601,8 @@ func sendHookRequest(
 		}
 		return nil, markConnectedTimeout(err, connected.Load())
 	}
+	// Headers are a gateway response even if its body has not arrived yet.
+	opts.markHTTPStatus(sp)
 	if delivery != nil {
 		// A 103 after the capability wait still asks for a receipt; the
 		// gateway reads the released marker instead and takes none.
@@ -2438,6 +2460,27 @@ func withPerUserOutage(opts Options) Options {
 	return opts
 }
 
+// markVerifiedNoStatus makes the current per-user outage mode available to
+// the watchdog only after the request reached its verified gateway socket.
+func (opts Options) markVerifiedNoStatus(sp spec) {
+	if opts.peerStatus == nil || !opts.peerStatus.CompareAndSwap(0, 1) {
+		return
+	}
+	if opts.answerWatch != nil {
+		opts.answerWatch.peerVerifiedNoAnswer(opts, sp)
+	}
+}
+
+func (opts Options) markHTTPStatus(sp spec) {
+	if opts.peerStatus == nil {
+		return
+	}
+	opts.peerStatus.Store(2)
+	if opts.answerWatch != nil {
+		opts.answerWatch.closeForAnsweredError(opts, sp)
+	}
+}
+
 // perUserOutageError reports a per-user transport error that is a gateway
 // outage: a connection this account's gateway refused, reset or closed
 // before any status (it exited or is restarting), or none within the
@@ -2634,9 +2677,8 @@ func coldStartFailureReason(err error) string {
 // Code or Codex hook prints when the gateway of this account is down. Those
 // agents do not show stderr after exit 0, so an agent in outage-open mode ran
 // unguarded with no message (GAP-0377). The Unix hooks print the same notice
-// (defenseclaw_unreachable_notice_json) on the same events. A missing answer
-// never fails open outside Secure Client (noAnswerFailMode), so only the
-// outage reasons have a notice.
+// (defenseclaw_unreachable_notice_json) on the same events. A verified
+// no-status deadline uses the same notice under the per-user open mode.
 // outageWarningNoticeOnly reports a connector whose agent shows a per-user
 // outage warning only in its hook result (perUserGatewayDownNotice): Claude
 // Code and Codex as a systemMessage, Copilot CLI as postToolUse
@@ -2688,11 +2730,17 @@ const perUserOutageDoctorHint = " If it does not start, run `defenseclaw doctor`
 // open): the cause and the fix. "" for a reason that is no outage.
 func perUserOutageOpenText(opts Options, reason string) string {
 	cause := ""
+	startCommand := "start"
+	lastHint := perUserOutageDoctorHint
 	switch {
 	case reason == "gateway unreachable":
 		cause = "this account's gateway is not running"
 	case reason == perUserGatewayRestartingReason:
 		cause = "this account's gateway is restarting or not running (no answer within 3 seconds)"
+	case reason == perUserGatewayNoAnswerReason:
+		cause = "this account's gateway is running but did not answer in time"
+		startCommand = "restart"
+		lastHint = " If it stays unresponsive, run `defenseclaw doctor`."
 	case strings.HasPrefix(reason, coldStartFailedReason) && fileExists(filepath.Join(opts.Home, gatewayStoppedMarker)):
 		cause = "this account's gateway was stopped with `defenseclaw-gateway stop`"
 	case strings.HasPrefix(reason, coldStartFailedReason):
@@ -2702,8 +2750,8 @@ func perUserOutageOpenText(opts Options, reason string) string {
 		return ""
 	}
 	return "DefenseClaw is not checking this session: " + cause + ", so calls run unchecked (fail mode open " +
-		"for an outage). Run `defenseclaw-gateway start` to resume protection." + perUserGatewayStatusHint +
-		perUserOutageDoctorHint
+		"for an outage). Run `defenseclaw-gateway " + startCommand + "` to resume protection." + perUserGatewayStatusHint +
+		lastHint
 }
 
 // perUserGatewayStatusHint ends a per-user gateway-down notice: the command
@@ -2721,24 +2769,15 @@ func unreachableLead(opts Options, sp spec, reason, verdict string) string {
 	return "gateway unreachable, " + verdict + " " + sp.subject
 }
 
-// perUserNotOutageNote is the reason a blocked per-user call gives when its
-// own gateway took the call and did not answer: that is not an outage, so the
-// call is blocked in every fail mode (LEAD RULING 02:09). The shell hooks say
-// the same (defenseclaw_unreachable_mode_note).
+// perUserNotOutageNote names a listener DefenseClaw could not verify.
 const perUserNotOutageNote = "not a gateway outage, so it is blocked in every fail mode"
 
 // unreachableModeNote names, in the blocked unreachable line and text, why
-// the call was blocked. A per-user call its gateway took and did not answer
-// is blocked in every fail mode, so beside a saved open mode "fail mode
-// closed" read as the mode being ignored (GAP-2475; GAP-2279 fixed the shell
-// hooks). An outage the mode closed, strict availability, this account's
-// install window and managed, socket and Secure Client hooks keep "fail mode
-// closed".
-// A listener DefenseClaw cannot verify is no outage either and says so too
-// (GAP-1735); a refused connection keeps "fail mode closed" even when the
-// outage was not classified (cold start skipped).
+// the call was blocked. A verified no-status deadline follows the per-user
+// outage mode, so a block says "fail mode closed". A listener DefenseClaw
+// cannot verify is not an outage and says so (GAP-1735).
 func unreachableModeNote(opts Options, reason string) string {
-	notOutage := reason == perUserGatewayNoAnswerReason || strings.HasPrefix(reason, foreignListenerReasonPrefix)
+	notOutage := strings.HasPrefix(reason, foreignListenerReasonPrefix)
 	if notOutage && !opts.perUserOutage && !opts.ManagedEnterprise && opts.ManagedUnixSocket == "" &&
 		!opts.SecureClient && !opts.StrictAvailability && !perUserInstallWindow(opts) {
 		return perUserNotOutageNote

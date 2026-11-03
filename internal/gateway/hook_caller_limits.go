@@ -47,12 +47,14 @@ import (
 // requests inside the bound finish in time.
 //
 // Within its in-flight cap a caller also runs at most half as many requests
-// at a time as the gateway has processors (at least one); the rest wait for
+// at a time as the gateway has processors (at least two); the rest wait for
 // one of the caller's own run slots. A flood inside its rate budget can still
 // need more CPU than a small host gives the gateway, and the CPU is shared
 // among all running requests, so another caller's hook shared it with up to
 // 32 of the flood's and could take many times longer. With the cap, the
-// other callers keep at least half of the processors. A request
+// other callers keep at least half of the processors on hosts with four or
+// more processors. On two-processor hosts the Go scheduler shares the CPUs
+// between the two short running hook requests and other callers. A request
 // gives its slot up while it waits on a remote scanner (yieldHookRunSlot),
 // which uses no gateway CPU, so a caller's parallel tool calls do not queue
 // behind Cisco AI Defense or LLM judge round trips.
@@ -147,7 +149,10 @@ func (l *hookCallerLimiter) globalLimit() int {
 // classes (sandbox_authority_limits.go) have their own; host hooks and
 // OTLP exports take the caller defaults (or a test's overrides).
 func (l *hookCallerLimiter) limits(key string) (rps, burst, inFlight, running int) {
-	running = max(1, runtime.GOMAXPROCS(0)/2)
+	// On a two-processor host one run slot serializes the whole account,
+	// including short store and session waits. Two slots keep a 32-way hook
+	// burst moving while Go still schedules other callers independently.
+	running = max(2, runtime.GOMAXPROCS(0)/2)
 	if class, ok := sandboxBudgetForKey(key); ok {
 		return class.Rate, class.Burst, class.InFlight, min(running, class.InFlight)
 	}
@@ -399,9 +404,20 @@ func (a *APIServer) admitHookCaller(w http.ResponseWriter, r *http.Request, iden
 					return nil
 				})
 			}
+			var once sync.Once
+			finish := func() { once.Do(func() { slot.end(); release() }) }
+			// A canceled hook no longer occupies an answer slot while its
+			// bounded audit completion continues (GAP-0518).
+			var stop func() bool
+			if r.Method == http.MethodPost && strings.HasSuffix(r.URL.Path, "/hook") {
+				stop = context.AfterFunc(r.Context(), finish)
+			}
 			return r.WithContext(ctx), func() {
-				slot.end()
-				release()
+				if stop != nil {
+					stop()
+				}
+				finish()
+
 			}
 		case <-r.Context().Done():
 			release()
@@ -439,7 +455,12 @@ type hookRunSlot struct {
 	done bool // the request has ended
 	// park takes the request out of its caller's in-flight bounds for a
 	// wait without gateway CPU (hookCallerLimiter.park); nil in tests.
-	park func() (unpark func())
+	park   func() (unpark func())
+	parked *hookCallerPark
+}
+
+type hookCallerPark struct {
+	unpark func()
 }
 
 type hookRunSlotContextKey struct{}
@@ -525,12 +546,30 @@ func giveUpHookRunSlot(ctx context.Context) *hookRunSlot {
 func parkHookCaller(ctx context.Context) (resume func()) {
 	resumeSlot := waitWithoutHookRunSlot(ctx)
 	unpark := func() {}
-	if slot, _ := ctx.Value(hookRunSlotContextKey{}).(*hookRunSlot); slot != nil && slot.park != nil {
-		unpark = slot.park()
+	if slot, _ := ctx.Value(hookRunSlotContextKey{}).(*hookRunSlot); slot != nil {
+		unpark = slot.parkCaller()
 	}
 	return func() {
 		unpark()
 		resumeSlot()
+	}
+}
+
+func (s *hookRunSlot) parkCaller() func() {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.done || s.park == nil || s.parked != nil {
+		return func() {}
+	}
+	parked := &hookCallerPark{unpark: s.park()}
+	s.parked = parked
+	return func() {
+		s.mu.Lock()
+		defer s.mu.Unlock()
+		if s.parked == parked {
+			s.parked = nil
+			parked.unpark()
+		}
 	}
 }
 
@@ -539,6 +578,10 @@ func (s *hookRunSlot) end() {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.done = true
+	if s.parked != nil {
+		s.parked.unpark()
+		s.parked = nil
+	}
 	if s.held {
 		s.held = false
 		<-s.run

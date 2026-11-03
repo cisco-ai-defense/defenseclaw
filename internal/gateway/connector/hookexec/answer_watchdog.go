@@ -31,7 +31,7 @@ var installLockCheckWait = 100 * time.Millisecond
 // simply no CPU. The deny of such a call came a second or more after the
 // budget.
 //
-// The watchdog renders the call's fail-closed answer (failNoAnswer) when the
+// The watchdog renders the call's closed pre-contact answer when the
 // call starts, and at the answer deadline writes it and ends the process
 // (Options.Exit), unless the call's own result is out or the gateway's
 // decision is in. A 102 report that the gateway waits on a remote scanner
@@ -39,9 +39,9 @@ var installLockCheckWait = 100 * time.Millisecond
 // further. Until then the call's output is held in memory, so exactly one
 // answer reaches the agent. On Windows the watchdog waits on its own thread
 // at the highest priority of the process (answerDeadlineWaiter), so
-// ordinary-priority work that fills the CPU does not delay it. It never
-// allows a call: its answer is the one the call gives when its gateway does
-// not answer in time, and once the call logged a closed failure (an
+// ordinary-priority work that fills the CPU does not delay it. Its result
+// follows the effective no-answer mode after verified gateway contact;
+// before contact it is closed. Once the call logged a closed failure (an
 // unverified gateway peer, an invalid runtime) it is that call's closed
 // answer in every fail mode (claimFailureLog). While this account's
 // installer holds its data directory (.install.lock) the answer is closed
@@ -79,6 +79,7 @@ type answerWatchdog struct {
 	fallbackOut, fallbackErr []byte
 	fallbackCode             int
 	logFailure               func()
+	visibleOutage            func() ([]byte, []byte, int)
 	exit                     func(int)
 	deliveryReceipt          func(bool, bool)
 
@@ -199,6 +200,12 @@ func renderNoAnswer(opts Options, sp spec, failMode string) (stdout, stderr []by
 	rendered.Home = ""
 	rendered.FailureLogHome = nil
 	rendered.answerWatch = nil
+	// Preparing a fallback must not consume this session's warning marker:
+	// the request may still receive a gateway answer before the deadline.
+	rendered.HookDir = ""
+	if !rendered.ManagedEnterprise && !rendered.SecureClient && rendered.ManagedUnixSocket == "" {
+		rendered.OutageFailModeNow = func() string { return failMode }
+	}
 	code = failNoAnswer(rendered, sp, failMode)
 	logged := opts
 	logged.answerWatch = nil
@@ -219,6 +226,18 @@ func renderNoAnswer(opts Options, sp spec, failMode string) (stdout, stderr []by
 			!sp.failOpenOnly && (logged.StrictAvailability || failMode == "closed"))
 	}
 	return out.Bytes(), errb.Bytes(), code, logFailure
+}
+
+// renderVisibleOutage reserves the session warning only when the watchdog
+// actually answers. Its failure row is written separately by logFailure.
+func renderVisibleOutage(opts Options, sp spec, mode, reason string) (stdout, stderr []byte, code int) {
+	var out, errb bytes.Buffer
+	rendered := opts
+	rendered.Stdout, rendered.Stderr = &out, &errb
+	rendered.Home, rendered.FailureLogHome, rendered.answerWatch = "", nil, nil
+	rendered.OutageFailModeNow = func() string { return mode }
+	code = failUnreachable(rendered, sp, mode, reason)
+	return out.Bytes(), errb.Bytes(), code
 }
 
 // renderInstallAnswer renders the closed answer a call whose fallback is
@@ -270,6 +289,33 @@ func (w *answerWatchdog) adopt(opts *Options, sp spec, failMode string) {
 		return
 	}
 	w.fallbackOut, w.fallbackErr, w.fallbackCode, w.logFailure = stdout, stderr, code, logFailure
+	w.visibleOutage = nil
+	w.installCheck, w.installOut, w.installErr, w.installCode, w.installLogFailure =
+		installCheck, installOut, installErr, installCode, installLogFailure
+}
+
+// peerVerifiedNoAnswer replaces the prepared closed no-answer result after
+// the transport has proved the socket and before any HTTP status arrives.
+func (w *answerWatchdog) peerVerifiedNoAnswer(opts Options, sp spec) {
+	mode := noAnswerFailMode(opts, "closed")
+	// Keep the rendered answer and the deadline's install check on the same
+	// outage choice. An installer may take the lock after peer verification.
+	opts.OutageFailModeNow = func() string { return mode }
+	stdout, stderr, code, logFailure := renderNoAnswer(opts, sp, mode)
+	installCheck, installOut, installErr, installCode, installLogFailure := renderInstallAnswer(opts, sp, mode)
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	if w.fired || w.claimedAnswer || w.closedKnown {
+		return
+	}
+	w.fallbackOut, w.fallbackErr, w.fallbackCode, w.logFailure = stdout, stderr, code, logFailure
+	w.visibleOutage = nil
+	if mode == "open" {
+		outage := withPerUserOutage(opts)
+		w.visibleOutage = func() ([]byte, []byte, int) {
+			return renderVisibleOutage(outage, sp, mode, perUserGatewayNoAnswerReason)
+		}
+	}
 	w.installCheck, w.installOut, w.installErr, w.installCode, w.installLogFailure =
 		installCheck, installOut, installErr, installCode, installLogFailure
 }
@@ -292,6 +338,7 @@ func (w *answerWatchdog) closeForAnsweredError(opts Options, sp spec) {
 		return
 	}
 	w.fallbackOut, w.fallbackErr, w.fallbackCode, w.logFailure = stdout, stderr, code, logFailure
+	w.visibleOutage = nil
 }
 
 // claimFailureLog runs first in logHookFailure, before anything there can
@@ -329,6 +376,7 @@ func (w *answerWatchdog) claimFailureLog(opts Options, sp spec, closed bool, rea
 	if w.fired {
 		return nil, false
 	}
+	w.visibleOutage = nil
 	if closed {
 		w.closedKnown = true
 		w.failureClosed = true
@@ -427,6 +475,12 @@ func (w *answerWatchdog) perUserOutageSeen(opts Options, sp spec, failMode strin
 		return
 	}
 	w.fallbackOut, w.fallbackErr, w.fallbackCode, w.logFailure = out.Bytes(), errb.Bytes(), code, logFailure
+	w.visibleOutage = nil
+	if mode == "open" {
+		w.visibleOutage = func() ([]byte, []byte, int) {
+			return renderVisibleOutage(outage, sp, mode, perUserGatewayRestartingReason)
+		}
+	}
 	w.installCheck, w.installOut, w.installErr, w.installCode, w.installLogFailure =
 		installCheck, installOut, installErr, installCode, installLogFailure
 }
@@ -515,6 +569,8 @@ func (w *answerWatchdog) watch(deadline time.Time) {
 	if installing && !w.closedKnown && !w.claimedAnswer && w.installCheck != nil {
 		w.fallbackOut, w.fallbackErr, w.fallbackCode, w.logFailure =
 			w.installOut, w.installErr, w.installCode, w.installLogFailure
+	} else if !w.closedKnown && !w.claimedAnswer && !w.failureLogged && w.visibleOutage != nil {
+		w.fallbackOut, w.fallbackErr, w.fallbackCode = w.visibleOutage()
 	}
 	w.fired = true
 	_, _ = w.stderr.Write(w.fallbackErr)
@@ -586,6 +642,7 @@ func (w *answerWatchdog) gatewayAnsweredError(opts Options, sp spec, status int)
 	}
 	w.closedKnown = true
 	w.fallbackOut, w.fallbackErr, w.fallbackCode, w.logFailure = out, errb, code, logFailure
+	w.visibleOutage = nil
 }
 
 // installLockHeldWithin is installLockHeld bounded by wait: a look that

@@ -25,14 +25,11 @@ import (
 	"time"
 )
 
-// oss-outage-open (owner decision 2026-10-23): a per-user shell hook in the
-// default or permissive policy tier (outage mode open) lets a call run with
-// one warning and a hook-failures.jsonl row only while this account's gateway
-// is not running. The strict tier (outage mode closed) blocks it. In every
-// tier an answer the gateway gave (malformed, cut off, an error status), a
-// gateway that took the call and did not answer, strict availability and the
-// install window block. The real native helper (hook-post) carries every
-// call, as on an installed host.
+// The default or permissive per-user tier lets a call run with a warning
+// when its gateway is absent or gives no status before the hook deadline.
+// Strict and managed hooks close. An answered error, malformed or partial
+// answer, strict availability and an install window remain closed. The real
+// native helper carries every call, as on an installed host.
 func TestPerUserShellHookOutageOpenOnlyForAnOutage(t *testing.T) {
 	type scenario struct {
 		name    string
@@ -50,12 +47,12 @@ func TestPerUserShellHookOutageOpenOnlyForAnOutage(t *testing.T) {
 		{name: "gateway down", opens: true},
 		{name: "gateway down, strict availability", env: []string{"DEFENSECLAW_STRICT_AVAILABILITY=1"}},
 		{name: "gateway down, install in progress", lock: true},
-		{name: "gateway took the call and did not answer", handler: func(_ http.ResponseWriter, r *http.Request) {
+		{name: "gateway took the call and did not answer", opens: true, handler: func(_ http.ResponseWriter, r *http.Request) {
 			// Read the body so the server notices the hook hang up.
 			_, _ = io.Copy(io.Discard, r.Body)
 			select {
 			case <-r.Context().Done():
-			case <-time.After(6 * time.Second):
+			case <-time.After(35 * time.Second):
 			}
 		}},
 		{name: "malformed answer", handler: func(w http.ResponseWriter, _ *http.Request) {
@@ -88,8 +85,12 @@ func TestPerUserShellHookOutageOpenOnlyForAnOutage(t *testing.T) {
 				t.Run(conn.Name()+"/"+tier.name+"/"+sc.name, func(t *testing.T) {
 					t.Parallel()
 					invoke := hookArgvConnectorCase(t, conn.Name())
+					if conn.Name() == "claudecode" && sc.name == "gateway took the call and did not answer" {
+						invoke.stdin = `{"hook_event_name":"PreToolUse","session_id":"s1","tool_name":"Read","tool_input":{"file_path":"/tmp/hello"}}`
+					}
 					home := t.TempDir()
 					installNativeGatewayForHookTest(t, home)
+					installNativeHookPostForHookTest(t, home)
 					writeOutageTierConfig(t, home, tier.config)
 					var addr string
 					if sc.handler != nil {
@@ -99,6 +100,9 @@ func TestPerUserShellHookOutageOpenOnlyForAnOutage(t *testing.T) {
 							server.Close()
 						}()
 						addr = strings.TrimPrefix(server.URL, "http://")
+						if err := os.WriteFile(filepath.Join(home, "gateway.pid"), []byte(strconv.Itoa(os.Getpid())+"\n"), 0o600); err != nil {
+							t.Fatal(err)
+						}
 					} else {
 						addr = freeLoopbackAddrForOutageTest(t)
 					}

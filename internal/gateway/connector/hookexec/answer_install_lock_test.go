@@ -271,6 +271,28 @@ func TestPerUserInstallLockThatCannotBeReadIsHeld(t *testing.T) {
 	}
 }
 
+func TestVerifiedNoAnswerWatchdogChecksInstallStartedAfterContact(t *testing.T) {
+	home := t.TempDir()
+	watchdog := &answerWatchdog{}
+	opts := Options{
+		Connector:         "claudecode",
+		Event:             "PreToolUse",
+		FailMode:          "open",
+		Home:              home,
+		OutageFailModeNow: func() string { return "open" },
+		peerStatus:        &atomic.Int32{},
+		answerWatch:       watchdog,
+	}
+	opts.markVerifiedNoStatus(specs["claudecode"])
+	if watchdog.installCheck == nil || watchdog.installCheck() {
+		t.Fatal("verified no-answer did not prepare a future install check")
+	}
+	mkdirInstallLock(t, home)
+	if !watchdog.installCheck() || !nativeAnswerBlocks(watchdog.installCode, string(watchdog.installOut)) {
+		t.Fatal("an install started after verified contact did not close the deadline answer")
+	}
+}
+
 func mkdirInstallLock(t *testing.T, home string) {
 	t.Helper()
 	if err := os.Mkdir(filepath.Join(home, ".install.lock"), 0o700); err != nil {

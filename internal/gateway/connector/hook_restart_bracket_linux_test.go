@@ -136,8 +136,8 @@ func TestLinuxShellHookCallBracketingRestartFollowsOutageMode(t *testing.T) {
 	}{
 		{"default tier, restart", outageDefaultTierConfig, "open", true, true, true},
 		{"strict tier, restart", outageStrictTierConfig, "closed", false, true, true},
-		{"default tier, same slow gateway", outageDefaultTierConfig, "open", false, false, true},
-		{"default tier, replacement without a start lock", outageDefaultTierConfig, "open", false, true, false},
+		{"default tier, same slow gateway", outageDefaultTierConfig, "open", true, false, true},
+		{"default tier, replacement without a start lock", outageDefaultTierConfig, "open", true, true, false},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			home := t.TempDir()

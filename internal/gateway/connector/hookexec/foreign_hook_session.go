@@ -136,7 +136,7 @@ func exchangeForeignHookSessionOnce(ctx context.Context, opts Options, connector
 		}
 		return fmt.Errorf("%w: %v", cause, err)
 	}
-	ctx, stopAnswer, _, releaseAnswer := awaitAnswerBy(ctx, answerBy, progressCeiling(opts, started), nil)
+	ctx, stopAnswer, _, releaseAnswer := awaitAnswerBy(ctx, answerBy, progressCeiling(opts, started), nil, nil)
 	defer releaseAnswer()
 	// A call queued in the socket systemd holds across a restart is ended
 	// at the restart budget, like the hook request (Linux).

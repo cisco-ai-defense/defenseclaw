@@ -166,6 +166,40 @@ func TestAdmitHookCallerBoundsAllCallersTogether(t *testing.T) {
 	}
 }
 
+// A timed-out hook can keep auditing for its bounded completion grace. Its
+// admission must be returned when the client leaves, so later hooks are not
+// refused for the entire grace period.
+func TestTimedOutHookReleasesAdmissionBeforeAuditCompletes(t *testing.T) {
+	const path = "/api/v1/claude-code/hook"
+	api := &APIServer{}
+	api.hookCallerLimits = hookCallerLimiter{rate: 1000, burst: 1000, globalInFlight: 1}
+	ctx, cancel := context.WithCancel(t.Context())
+	_, first := api.admitHookCaller(httptest.NewRecorder(), httptest.NewRequest(http.MethodPost, path, nil).WithContext(ctx), "1001", path)
+	if first == nil {
+		t.Fatal("first hook refused")
+	}
+	defer first()
+	cancel()
+	deadline := time.Now().Add(time.Second)
+	for {
+		api.hookCallerLimits.mu.Lock()
+		total := api.hookCallerLimits.total
+		api.hookCallerLimits.mu.Unlock()
+		if total == 0 {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("timed-out hook kept its admission while its handler remained active")
+		}
+		time.Sleep(time.Millisecond)
+	}
+	_, next := api.admitHookCaller(httptest.NewRecorder(), httptest.NewRequest(http.MethodPost, path, nil), "1001", path)
+	if next == nil {
+		t.Fatal("next hook refused after the previous client's deadline")
+	}
+	next()
+}
+
 // OTLP exporters share the host bound, with half of it reserved for hooks.
 func TestOTLPBatchesShareHostAdmissionBound(t *testing.T) {
 	limiter := &hookCallerLimiter{rate: 1000, burst: 1000, globalInFlight: 4}

@@ -33,7 +33,7 @@ func TestShellHookRestartWindowNoAnswerFollowsTheOutageMode(t *testing.T) {
 	}{
 		{"refused then no answer, open tier", "open", []string{"DC_COLD_FAILS=1", "DC_COLD_FIRST_RC=7", "DC_COLD_DROP_LISTENER=1", "DC_COLD_THEN_RC=9"}, true, "restarting or not running"},
 		{"refused then no answer, strict tier", "closed", []string{"DC_COLD_FAILS=1", "DC_COLD_FIRST_RC=7", "DC_COLD_DROP_LISTENER=1", "DC_COLD_THEN_RC=9"}, false, "restarting or not running"},
-		{"no answer with no refusal, open tier", "open", []string{"DC_COLD_FAILS=1000", "DC_COLD_FIRST_RC=9"}, false, "the gateway is running but did not answer"},
+		{"no answer with no refusal, open tier", "open", []string{"DC_COLD_FAILS=1000", "DC_COLD_FIRST_RC=9"}, true, "the gateway is running but did not answer"},
 		// hook-post 10: no answer while a start or restart of this account's
 		// gateway holds its start lock (the old gateway is stopping, or the
 		// new one is not ready): the restart outage, with no refusal first.

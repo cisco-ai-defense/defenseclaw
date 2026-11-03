@@ -146,10 +146,10 @@ const PerUserPostPeerUnverifiedExit = 8
 
 // PerUserPostNoAnswerExit is the exit status of `hook-post` for a call that
 // got no answer before its deadline and no HTTP status at all
-// (PerUserPostNoAnswer). The shell hooks read it as curl's timeout (28): a
-// call whose gateway refused it a moment before is the restart wait running
-// out of the call's budget, an outage (rel-1-0-6 GAP-0295); any other is the
-// hung-gateway refusal. An older shell hook reads it as any other failure.
+// (PerUserPostNoAnswer). The command emits it only after a verified
+// connection. A shell hook treats that no-status deadline as a per-user
+// outage-mode choice; a prior refusal is a restart outage (GAP-0295).
+// An older shell hook reads it as any other failure.
 const PerUserPostNoAnswerExit = 9
 
 // PerUserPostRestartNoAnswerExit is the exit status of `hook-post` for such a
@@ -159,7 +159,8 @@ const PerUserPostNoAnswerExit = 9
 // call is gone or no longer owns the port. The shell hooks read it as the
 // restart outage (7, restart waited), whatever the call's first try was
 // (rel-1-0-6 GAP-0295). A held lock alone, with the same gateway up, is
-// PerUserPostNoAnswerExit: a gateway that is up and slow stays closed.
+// PerUserPostNoAnswerExit: a gateway that is up and slow follows the
+// per-user outage mode.
 const PerUserPostRestartNoAnswerExit = 10
 
 // PerUserPostRestartOutageExit is the exit status for a connection that was
