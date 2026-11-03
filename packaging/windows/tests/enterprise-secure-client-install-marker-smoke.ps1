@@ -9,8 +9,10 @@
 # deployment), so a marker gate that required the key never wrote it, and
 # every Secure Client install ran its hooks as if it were not one. Only a
 # standalone layout, which sets BrokerEnabled to false, gets no marker. The
-# marker's ACL write is stubbed: it needs real service SIDs and is covered by
-# the exact ACL smoke.
+# uninstall allowlist reads the key the same way, so a Secure Client retired
+# tree accepts its own marker and a standalone one does not. The marker's ACL
+# write is stubbed: it needs real service SIDs and is covered by the exact ACL
+# smoke.
 
 [CmdletBinding()]
 param(
@@ -57,7 +59,18 @@ try {
             [void](Microsoft.PowerShell.Management\New-Item -ItemType Directory -Path $layout.InstallRoot)
             Set-DefenseClawSecureClientInstallMarker -Layout $layout -GatewayServiceSID 'S-1-5-80-0'
         }
+        $retiredMarker = @{}
+        foreach ($name in @('secure-client', 'standalone')) {
+            $layout = if ($name -ceq 'standalone') { $standalone } else { $secureClient }
+            $retired = [IO.Path]::Combine($Scratch, "$name.retired")
+            $allowlist = Get-DefenseClawRetiredInstallTreeAllowlist -Layout $layout -RetiredRoot $retired
+            $retiredMarker[$name] = [IO.Path]::GetFullPath(
+                [IO.Path]::Combine($retired, 'secure-client.install')
+            ) -in $allowlist.directories
+        }
         [pscustomobject]@{
+            RetiredSecureClient = $retiredMarker['secure-client']
+            RetiredStandalone = $retiredMarker['standalone']
             SecureClient = Microsoft.PowerShell.Management\Test-Path `
                 -LiteralPath ([IO.Path]::Combine($secureClient.InstallRoot, 'secure-client.install')) `
                 -PathType Container
@@ -71,6 +84,12 @@ try {
     }
     if ($result.Standalone) {
         throw 'a standalone layout got the Secure Client install marker'
+    }
+    if (-not $result.RetiredSecureClient) {
+        throw 'a Secure Client retired tree does not accept its own install marker'
+    }
+    if ($result.RetiredStandalone) {
+        throw 'a standalone retired tree accepts the Secure Client install marker'
     }
     if ($result.AclWrites -ne 1) {
         throw "marker ACL writes = $($result.AclWrites), want 1"

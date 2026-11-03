@@ -993,7 +993,8 @@ func loadPreviousManifestForEnumeration(path string, logf EnumerationLogger) map
 //   - Newly-discovered (SID, Connector): consult
 //     `windowsSecureClientAgentVersionExplain` to see whether this
 //     user's profile contains a supported install of the connector's
-//     CLI.
+//     CLI, or, for Claude Code and Codex, whether a machine-scope
+//     WinGet package or one in this user's hive records a version.
 //   - If a version is discoverable: emit the row with
 //     `Enabled: true`, `Deferred: false`, `AgentVersion: <found>`.
 //     This is the auto-authorize path — parity with macOS
