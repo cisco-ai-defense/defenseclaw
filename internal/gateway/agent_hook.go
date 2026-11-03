@@ -1853,6 +1853,11 @@ func (a *APIServer) hookDecisionMeta(
 	meta.AgentType = firstNonEmpty(meta.AgentType, identity.AgentType)
 
 	correlation := audit.EnvelopeFromContext(ctx)
+	if strings.EqualFold(source, "hermes") && req.HookEventName == "transform_terminal_output" &&
+		req.SessionID == "" && identity.IdentityVerified && correlation.SessionID != "" {
+		meta.SessionID = correlation.SessionID
+		meta.AgentID = correlation.AgentID
+	}
 	meta.RunID = firstNonEmpty(meta.RunID, correlation.RunID)
 	meta.RequestID = firstNonEmpty(meta.RequestID, correlation.RequestID)
 	meta.PolicyID = firstNonEmpty(meta.PolicyID, correlation.PolicyID)
@@ -2701,16 +2706,15 @@ func enrichAgentHookContext(ctx context.Context, req agentHookRequest) context.C
 	identity := agentIdentityForGenericHook(ctx, req)
 	ctx = ContextWithAgentIdentity(ctx, identity)
 	var auditSessionID string
-	var auditIdentity AgentIdentity
 	if strings.EqualFold(req.ConnectorName, "hermes") && req.SessionID == "" &&
 		audit.EnvelopeFromContext(ctx).SessionID == "" &&
 		req.HookEventName == "transform_terminal_output" && identity.IdentityVerified {
 		if reg := SharedAgentRegistry(); reg != nil {
 			if session, agent, instance := reg.hermesRecentSession(ctx, identity.IdentityID, time.Now()); session != "" {
 				auditSessionID = session
-				auditIdentity = identity
-				auditIdentity.AgentID = agent
-				auditIdentity.AgentInstanceID = instance
+				identity.AgentID = firstNonEmpty(identity.AgentID, agent)
+				identity.AgentInstanceID = instance
+				ctx = ContextWithAgentIdentity(ctx, identity)
 			}
 		}
 	}
@@ -2730,7 +2734,7 @@ func enrichAgentHookContext(ctx context.Context, req agentHookRequest) context.C
 	// a different session than the inbound header takes precedence.
 	ctx = refreshAuditEnvelopeFromHook(ctx, req, identity)
 	if auditSessionID != "" {
-		ctx = refreshAuditEnvelopeFromIdentity(ctx, auditSessionID, auditIdentity)
+		ctx = refreshAuditEnvelopeFromIdentity(ctx, auditSessionID, identity)
 	}
 	// Stamp the connector identity onto the audit envelope so every
 	// downstream surface (audit rows, canonical records, and routed exports) can filter by
