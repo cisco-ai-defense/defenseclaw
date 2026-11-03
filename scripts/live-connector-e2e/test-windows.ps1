@@ -2948,12 +2948,14 @@ threading.Event().wait()
     Assert-True ($nativeWorkflowText -match '''test'', ''-vet=off'', ''-v'', ''-count=1'', ''-run'', \$daclTestPattern, ''\./internal/safefile'', ''\./internal/managed'', ''\./internal/gateway/connector''') 'Go DACL regressions execute in every owning package without cache reuse'
     $gatewayMatrixIndexes = @([regex]::Matches($nativeWorkflowText,
         '- \{ shard: gw(\d+), kind: gateway, index: \1 \}') | ForEach-Object { [int]$_.Groups[1].Value } | Sort-Object)
+    $hookexecMatrixIndexes = @([regex]::Matches($nativeWorkflowText,
+        '- \{ shard: hx(\d+), kind: hookexec, index: \1 \}') | ForEach-Object { [int]$_.Groups[1].Value } | Sort-Object)
     Assert-True ($nativeWorkflowText -match
         '@\{ Dir = ''internal/gateway''; Skip = \$windowsInapplicable; Extra = @\(''-parallel=1''\) \}' -and
         $nativeWorkflowText -match '@\{ Dir = ''internal/gateway/connector''; Skip = \$connectorSkip; Extra = @\(\) \}' -and
         $nativeWorkflowText -match '''--package-dir'', \$part\.Dir,' -and
         $nativeWorkflowText -match '''--shard-count'', \[string\]\$nativeTestShardCount,' -and
-        [regex]::Matches($nativeWorkflowText, '''--shard-index'', \[string\]\$matrixShard').Count -eq 2 -and
+        [regex]::Matches($nativeWorkflowText, '''--shard-index'', \[string\]\$matrixShard').Count -eq 3 -and
         $nativeWorkflowText -match 'foreach \(\$part in @\(' -and
         $nativeWorkflowText -match 'throw "go_test_shards\.py selected no \$\(\$part\.Dir\) tests for shard \$matrixShard"' -and
         $nativeWorkflowText -match '\$suiteKind -eq ''gateway'' -and \(\$matrixShard -lt 0 -or \$matrixShard -ge \$nativeTestShardCount\)' -and
@@ -2969,9 +2971,20 @@ threading.Event().wait()
         $nativeWorkflowText -match '''-run'', \(''\^'' \+ \[regex\]::Escape\(\$isolatedTest\) \+ ''\$''\), ''\./internal/gateway/connector''' -and
         $nativeWorkflowText -match '''--exclude'', ''github\.com/defenseclaw/defenseclaw/internal/gateway'',' -and
         $nativeWorkflowText -match '''--exclude'', ''github\.com/defenseclaw/defenseclaw/internal/gateway/connector'',' -and
-        [regex]::Matches($nativeWorkflowText, '''--timings'', ''scripts/test-timings/go-windows\.json''').Count -eq 2 -and
+        $nativeWorkflowText -match '''--exclude'', ''github\.com/defenseclaw/defenseclaw/internal/gateway/connector/hookexec'',' -and
+        [regex]::Matches($nativeWorkflowText, '''--timings'', ''scripts/test-timings/go-windows\.json''').Count -eq 3 -and
         $nativeWorkflowText -match '\$remainingArguments = @\(') `
-        'full native Go suite runs one timing-balanced gateway and connector shard per runner across all sixteen matrix shards, isolates native lifecycle regressions, serializes gateway tests with process-global capture state, and separately selects every remaining package'
+        'full native Go suite runs gateway, connector, hookexec, and remaining-package shards with the declared coverage and time limits'
+    Assert-True (($hookexecMatrixIndexes -join ',') -eq ((0..2) -join ',') -and
+        $nativeWorkflowText -match '\$hookexecTestShardCount = 3' -and
+        $nativeWorkflowText -match '\$suiteKind -eq ''hookexec''' -and
+        $nativeWorkflowText -match '''--package-dir'', ''internal/gateway/connector/hookexec''' -and
+        $nativeWorkflowText -match '''--split-tests''' -and
+        $nativeWorkflowText -match '''--shard-count'', \[string\]\$hookexecTestShardCount,' -and
+        $nativeWorkflowText -match '''--shard-index'', \[string\]\$matrixShard' -and
+        $nativeWorkflowText -match '''-timeout=11m'', ''-p=1''' -and
+        $nativeWorkflowText -match '\) -TimeoutSeconds 840') `
+        'native hookexec suite runs all three test-level shards within the declared time limits'
     Assert-True ($nativeWorkflowText -match '(?s)''-p=1''.*?''-skip''.*?\$windowsInapplicable') 'native Go suite serializes packages and excludes only declared Windows-inapplicable tests'
     Assert-True ([regex]::Matches($nativeWorkflowText, '''test'', ''-vet=off''').Count -eq
         [regex]::Matches($nativeWorkflowText, '''test''').Count -and
