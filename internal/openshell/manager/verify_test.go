@@ -262,6 +262,9 @@ func TestMicroVMResolverResult(t *testing.T) {
 		want string
 	}{
 		{"good", nil, ""},
+		{"long canonical alias", func(a *workloadAnswer) {
+			a.localhost = []string{"127.0.0.1 STREAM " + strings.Repeat(strings.Repeat("a", 60)+".", 3) + strings.Repeat("a", 60)}
+		}, ""},
 		{"no answer", func(a *workloadAnswer) { a.localhost = nil }, "could not resolve localhost"},
 		{"command failed", func(a *workloadAnswer) { a.localhost, a.localhostFailed = nil, true }, "could not resolve localhost"},
 		{"status missing", func(a *workloadAnswer) { a.localhostUnreported = true }, "could not resolve localhost"},
@@ -288,7 +291,7 @@ func TestMicroVMResolverResult(t *testing.T) {
 			}
 		})
 	}
-	for _, answer := range []string{"localhost " + strings.Repeat("a", 257) + "\nlocalhost-ok\n", "localhost 127.0.0.1 STREAM localhost\nlocalhost-ok\nlocalhost-ok\n", "localhost-ok\nlocalhost 127.0.0.1 STREAM localhost\n"} {
+	for _, answer := range []string{"localhost " + strings.Repeat("a", 513) + "\nlocalhost-ok\n", "localhost 127.0.0.1 STREAM localhost\nlocalhost-ok\nlocalhost-ok\n", "localhost-ok\nlocalhost 127.0.0.1 STREAM localhost\n"} {
 		if _, err := parseWorkloadFacts([]byte(answer)); err == nil {
 			t.Fatalf("accepted malformed resolver result %q", answer)
 		}
@@ -304,15 +307,29 @@ func TestMicroVMGuestResolverUsesLibcWithProjectPythonModule(t *testing.T) {
 			t.Skipf("local Docker and the pinned base are needed: %v", err)
 		}
 	}
+	imageDir := t.TempDir()
+	imageFile := "FROM " + openshell.DefaultBaseImage + "\nUSER root\n" +
+		"COPY --from=" + openshell.DefaultBaseImage + " --chown=0:0 --chmod=0755 /usr/bin/getent /usr/local/lib/defenseclaw/localhost-getent\nUSER sandbox\n"
+	if err := os.WriteFile(filepath.Join(imageDir, "Dockerfile"), []byte(imageFile), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	sum := sha256.Sum256([]byte(imageDir))
+	imageTag := fmt.Sprintf("dc-osmin23-guest:%x", sum[:6])
+	if out, err := exec.CommandContext(t.Context(), "docker", "build", "--pull=false", "-t", imageTag, imageDir).CombinedOutput(); err != nil {
+		t.Fatalf("build guest fixture: %v\n%s", err, out)
+	}
+	t.Cleanup(func() { exec.Command("docker", "image", "rm", "-f", imageTag).Run() })
 	for _, tc := range []struct {
-		name, hosts, module string
-		want                string
+		name, hosts, module, customAddress string
+		want                               string
 	}{
-		{"ordinary project module", "127.0.0.1 localhost\n", "# project module\n", ""},
+		{"ordinary project module", "127.0.0.1 localhost\n", "# project module\n", "", ""},
 		{"alternate project module", "203.0.113.10 localhost\n", `AF_INET = 2
 def getaddrinfo(host, port, family=0, type=0, proto=0, flags=0):
     return [(2, 1, 6, "", ("127.0.0.1", 0))]
-`, "did not return only 127.0.0.1"},
+`, "", "did not return only 127.0.0.1"},
+		{"custom caller benign", "127.0.0.1 localhost\n", "# project module\n", "203.0.113.10", ""},
+		{"custom caller protected", "203.0.113.10 localhost\n", "# project module\n", "127.0.0.1", "did not return only 127.0.0.1"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			dir := t.TempDir()
@@ -323,11 +340,24 @@ def getaddrinfo(host, port, family=0, type=0, proto=0, flags=0):
 			if err := os.WriteFile(filepath.Join(dir, "socket.py"), []byte(tc.module), 0o644); err != nil {
 				t.Fatal(err)
 			}
+			if tc.customAddress != "" {
+				custom := "#!/bin/sh\ncase \"$1\" in\n" +
+					"  hosts) printf '%s\\n' '" + tc.customAddress + " localhost';;\n" +
+					"  ahostsv4) printf '%s\\n' '" + tc.customAddress + " STREAM localhost' '" +
+					tc.customAddress + " DGRAM' '" + tc.customAddress + " RAW';;\n" +
+					"  *) exit 2;;\nesac\n"
+				if err := os.WriteFile(filepath.Join(dir, "custom-getent"), []byte(custom), 0o755); err != nil {
+					t.Fatal(err)
+				}
+			}
 			argv := verifyArgv(verifyRecord{}, true)
 			args := []string{"run", "--rm", "--network=bridge", "--user", "1000:1000", "--workdir", "/sandbox",
 				"--mount", "type=bind,src=" + dir + ",dst=/sandbox,readonly",
-				"--mount", "type=bind,src=" + hosts + ",dst=/etc/hosts,readonly",
-				"--entrypoint", argv[0], openshell.DefaultBaseImage}
+				"--mount", "type=bind,src=" + hosts + ",dst=/etc/hosts,readonly"}
+			if tc.customAddress != "" {
+				args = append(args, "--mount", "type=bind,src="+filepath.Join(dir, "custom-getent")+",dst=/usr/bin/getent,readonly")
+			}
+			args = append(args, "--entrypoint", argv[0], imageTag)
 			args = append(args, argv[1:]...)
 			out, err := exec.CommandContext(t.Context(), "docker", args...).Output()
 			if err != nil {
@@ -367,7 +397,7 @@ func TestWorkloadCheckRunsNothingFromThePath(t *testing.T) {
 	if runtime.GOOS != "linux" {
 		t.Skip("the script reads /proc, and GNU sha256sum and stat")
 	}
-	for _, tool := range []string{"/usr/bin/env", "/usr/bin/id", "/usr/bin/sha256sum", "/usr/bin/stat", "/usr/bin/getent"} {
+	for _, tool := range []string{"/usr/bin/env", "/usr/bin/id", "/usr/bin/sha256sum", "/usr/bin/stat"} {
 		if _, err := os.Stat(tool); err != nil {
 			t.Skipf("no %s", tool)
 		}
@@ -406,8 +436,12 @@ func TestWorkloadCheckRunsNothingFromThePath(t *testing.T) {
 	if !vmFacts.LocalhostReported {
 		t.Fatal("VM workload check omitted the resolver result")
 	}
-	if problem := microVMResolverProblem(vmFacts); problem != "" {
-		t.Fatalf("VM workload check: %s", problem)
+	if _, err := os.Stat("/usr/local/lib/defenseclaw/localhost-getent"); err == nil {
+		if problem := microVMResolverProblem(vmFacts); problem != "" {
+			t.Fatalf("VM workload check: %s", problem)
+		}
+	} else if problem := microVMResolverProblem(vmFacts); problem == "" {
+		t.Fatal("VM workload check accepted a missing resolver caller")
 	}
 	if !facts.End || facts.UID != os.Getuid() || facts.GID != os.Getgid() || facts.Hostname == "" || facts.CapEff == "" || facts.CPUs < 1 || facts.MemTotalKB < 1 {
 		t.Fatalf("facts = %+v (%s)", facts, out)

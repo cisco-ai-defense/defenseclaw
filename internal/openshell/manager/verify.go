@@ -92,7 +92,7 @@ while read -r key value rest; do
   [ "$key" = MemTotal: ] && printf 'memtotal %s\n' "$value"
 done < /proc/meminfo
 if [ "$0" = defenseclaw-verify-vm ]; then
-  if localhost=$(/usr/bin/timeout 5 /usr/bin/getent ahostsv4 localhost 2>/dev/null); then
+  if localhost=$(/usr/bin/timeout 5 /usr/local/lib/defenseclaw/localhost-getent ahostsv4 localhost 2>/dev/null); then
     printf '%s\n' "$localhost" | while IFS= read -r answer; do printf 'localhost %s\n' "$answer"; done
     echo localhost-ok
   else
@@ -250,7 +250,7 @@ func parseWorkloadFacts(out []byte) (workloadFacts, error) {
 			f := file(path)
 			f.MountPoint, f.MountOptions = true, opts
 		case "localhost":
-			if facts.LocalhostReported || len(rest) > 256 || strings.ContainsAny(rest, "\x00\r") || len(facts.LocalhostAnswers) >= 64 {
+			if facts.LocalhostReported || len(rest) > 512 || strings.ContainsAny(rest, "\x00\r") || len(facts.LocalhostAnswers) >= 64 {
 				err = fmt.Errorf("a malformed localhost answer")
 				break
 			}

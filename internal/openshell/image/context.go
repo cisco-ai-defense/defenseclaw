@@ -51,7 +51,12 @@ const DefaultRepository = "defenseclaw/sandbox"
 
 // contextSchema versions image admission and the Dockerfile layout; bump it
 // when either changes so older records stop matching.
-const contextSchema = 4
+const contextSchema = 5
+
+// The VM resolver check runs this caller from the pinned base against the
+// completed image's libc and NSS configuration. Custom bases may replace
+// their own getent, so that path is not used for image admission.
+const microVMResolverPath = "/usr/local/lib/defenseclaw/localhost-getent"
 
 // Image labels. The content hash is attached with `docker build --label`
 // because it is computed over the context itself.
@@ -433,8 +438,16 @@ func renderDockerfile(c *Context, steps []harness.InstallStep) []byte {
 		"install -d -o root -g root -m 0755 %s; chown -R %d:%d %s\n",
 		dirs, harness.WorkRoot, spec.UID, spec.GID, connector.SandboxHomeDir)
 	b.WriteString("RUN " + runAsUserStep(spec.UID, spec.GID, "/etc/passwd", "/etc/group") + "\n")
+	if spec.MicroVM {
+		b.WriteString(microVMResolverCopyStep())
+	}
 	b.WriteString("USER sandbox\n")
 	return b.Bytes()
+}
+
+func microVMResolverCopyStep() string {
+	return fmt.Sprintf("COPY --from=%s --chown=0:0 --chmod=0755 /usr/bin/getent %s\n",
+		openshell.DefaultBaseImage, microVMResolverPath)
 }
 
 // microVMResolverStep checks a completed image's own name service with the
@@ -453,7 +466,7 @@ RUN --network=none --mount=type=bind,from=dc-complete,source=/,target=/tmp/dc-ro
     if [ -f "$hosts" ] && [ ! -L "$hosts" ] && [ ! -s "$hosts" ]; then exit 0; fi; \
     fail() { echo 'MicroVM image localhost check failed for BASE_IMAGE: leave its hosts file empty or make its resolver return a loopback address for localhost' >&2; exit 1; }; \
     /usr/sbin/chroot "$root" /bin/sh -c 'test -f /etc/hosts' || fail; \
-    answer=$(/usr/bin/timeout 5 /usr/sbin/chroot "$root" /usr/bin/getent hosts localhost) || fail; \
+    answer=$(/usr/bin/timeout 5 /usr/sbin/chroot "$root" /usr/local/lib/defenseclaw/localhost-getent hosts localhost) || fail; \
     [ ${#answer} -le 4096 ] && [ -n "$answer" ] || fail; \
     printf '%s\n' "$answer" | /usr/bin/awk 'NF < 2 || ($1 != "127.0.0.1" && index($1, ":") == 0) { bad=1 } END { exit bad || NR == 0 }' || fail
 USER sandbox

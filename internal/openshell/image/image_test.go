@@ -373,8 +373,13 @@ func TestR108OSMINNoHostsWorkaround(t *testing.T) {
 		if vm.ContentHash == docker.ContentHash || vm.Tag == docker.Tag {
 			t.Fatalf("%s: driver images share a content hash", name)
 		}
-		if string(vm.Dockerfile) != string(docker.Dockerfile) {
-			t.Fatalf("%s: vm image has a driver-specific Dockerfile step", name)
+		base := string(docker.Dockerfile)
+		if !strings.HasSuffix(base, "USER sandbox\n") {
+			t.Fatalf("%s: docker image has no final sandbox user", name)
+		}
+		want := strings.TrimSuffix(base, "USER sandbox\n") + microVMResolverCopyStep() + "USER sandbox\n"
+		if string(vm.Dockerfile) != want {
+			t.Fatalf("%s: vm image has an unexpected driver-specific Dockerfile step", name)
 		}
 		for _, df := range [][]byte{docker.Dockerfile, vm.Dockerfile} {
 			if bytes.Contains(df, []byte("libnss-myhostname")) || bytes.Contains(df, []byte("nsswitch.conf")) {
