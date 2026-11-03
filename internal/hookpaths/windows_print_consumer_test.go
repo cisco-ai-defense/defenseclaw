@@ -84,6 +84,8 @@ func TestGAP0227WindowsWrappedShellReaderStandalone(t *testing.T) {
 		{"echo 'cp a.txt .ssh/authorized_k*' | env --chdir=. bash", "protected-target"},
 		{"echo 'git status' | env bash", ""},
 		{"echo 'cp a.txt .ssh/authorized_k*' | env -S 'cat -n'", ""},
+		{"echo 'cp a.txt .ssh/authorized_k*' | ./env -S 'cat -n'", "protected-target"},
+		{"echo 'cp a.txt .ssh/authorized_k*' | env -S 'cat -n' | sh", "protected-target"},
 	} {
 		for _, dialect := range []actionfacts.Dialect{"", actionfacts.DialectPowerShell} {
 			if got := ActionCommandDecisionWithDialectAndGlobFacts(row.command, home, home, dialect, nil); got != row.want {

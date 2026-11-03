@@ -73,6 +73,13 @@ func (m *TargetMemo) ActionCommandDecisionInShell(command, cwd, home string, fac
 }
 
 func actionTargetDecision(command, cwd, home string, dialect actionfacts.Dialect, posixShell bool, facts map[string]string, memo *TargetMemo) string {
+	// A single quoted print piped to the named env/cat display has no
+	// writable operand. Prove its full shape before the target scans: an
+	// extra stage, redirect or explicit executable must take the normal
+	// readings (GAP-0227).
+	if actionWindowsHome(home) && actionSimpleEnvTextDisplay(command) {
+		return ""
+	}
 	// A Git Bash home glob in an entirely read-only compound names no
 	// protected write in either Windows or POSIX syntax. Keep the proof
 	// syntactic so a later redirect or copy still reaches all target scans.
@@ -127,6 +134,19 @@ func actionTargetDecision(command, cwd, home string, dialect actionfacts.Dialect
 		return "protected-target"
 	}
 	return ""
+}
+
+func actionSimpleEnvTextDisplay(command string) bool {
+	program, rest, ok := strings.Cut(command, " ")
+	if !ok || program != "echo" && program != "printf" {
+		return false
+	}
+	const suffix = "' | env -S 'cat -n'"
+	if !strings.HasPrefix(rest, "'") || !strings.HasSuffix(rest, suffix) {
+		return false
+	}
+	literal := strings.TrimSuffix(strings.TrimPrefix(rest, "'"), suffix)
+	return !strings.ContainsAny(literal, "'\r\n")
 }
 
 func actionConcreteProtectedWrite(command, cwd, home string) bool {
