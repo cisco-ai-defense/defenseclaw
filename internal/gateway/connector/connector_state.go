@@ -1871,8 +1871,10 @@ func RepublishManagedSharedHookScripts(dataDir, apiAddr string) error {
 }
 
 // managedSharedHookScriptsMatchingPins renders the shared inspect-* scripts
-// as renderHookScripts does for each managed profile and returns the render
-// whose digests equal pins.
+// through renderHookScriptSet, as renderHookScripts does, for each managed
+// profile and returns the render whose digests equal pins. The shared render
+// is what the installer pinned (a standalone render carries the privileged
+// host shebang), so a raw template render would match no profile.
 func managedSharedHookScriptsMatchingPins(apiAddr string, pins map[string]string) ([]renderedHookFile, error) {
 	profiles := []templateData{
 		{APIAddr: apiAddr, Managed: true},
@@ -1880,18 +1882,18 @@ func managedSharedHookScriptsMatchingPins(apiAddr string, pins map[string]string
 		{APIAddr: apiAddr, Managed: true, SecureClient: true, SecureClientDelivery: true},
 	}
 	for _, data := range profiles {
+		set, err := renderHookScriptSet(data, data, nil)
+		if err != nil {
+			return nil, err
+		}
 		out := make([]renderedHookFile, 0, len(genericHookScripts))
-		for _, name := range genericHookScripts {
-			body, err := renderHookTemplate(name, data)
-			if err != nil {
-				return nil, err
-			}
-			sum := sha256.Sum256(body)
-			if pins[name] != "sha256:"+hex.EncodeToString(sum[:]) {
+		for _, file := range set[:len(genericHookScripts)] {
+			sum := sha256.Sum256(file.Data)
+			if pins[file.Name] != "sha256:"+hex.EncodeToString(sum[:]) {
 				out = nil
 				break
 			}
-			out = append(out, renderedHookFile{Name: name, Data: body})
+			out = append(out, file)
 		}
 		if out != nil {
 			return out, nil
