@@ -1337,6 +1337,12 @@ func claudeCodeHandlerTargetsCurrentRuntime(handler map[string]interface{}, opts
 		return codexValueMatches(args, expectedArgs)
 	}
 	command, _ := handler["command"].(string)
+	if opts.DataDir == SandboxLibDir {
+		sandboxCommand, sandboxArgs := claudeCodeSandboxHookInvocation()
+		if command == sandboxCommand && codexValueMatches(handler["args"], sandboxArgs) {
+			return true
+		}
+	}
 	expected := posixHookCommandWord(hookInvocationCommand(
 		"claudecode",
 		filepath.ToSlash(filepath.Join(opts.DataDir, "hooks", "claude-code-hook.sh")),
