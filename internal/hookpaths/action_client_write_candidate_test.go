@@ -3,7 +3,10 @@
 
 package hookpaths
 
-import "testing"
+import (
+	"path/filepath"
+	"testing"
+)
 
 func TestActionClientWriteCandidate(t *testing.T) {
 	for _, row := range []struct {
@@ -25,6 +28,10 @@ func TestActionClientWriteCandidate(t *testing.T) {
 }
 
 func TestActionClientDeadValueProofDeclinesChangedShellExpansion(t *testing.T) {
+	// The proof needs an absolute working directory, as every hook reports;
+	// /tmp/project is not one on Windows.
+	root := t.TempDir()
+	cwd, home := filepath.Join(root, "project"), filepath.Join(root, "home")
 	for _, row := range []struct {
 		name, command string
 		want          bool
@@ -38,7 +45,7 @@ func TestActionClientDeadValueProofDeclinesChangedShellExpansion(t *testing.T) {
 		{"unquoted-rsync", `f=keylink; f=a.txt; rsync b.txt $f`, false},
 	} {
 		t.Run(row.name, func(t *testing.T) {
-			if got := actionClientProvedSafeVariableTargets(row.command, "/tmp/project", "/tmp/home"); got != row.want {
+			if got := actionClientProvedSafeVariableTargets(row.command, cwd, home); got != row.want {
 				t.Errorf("proof %v, want %v for %q", got, row.want, row.command)
 			}
 		})

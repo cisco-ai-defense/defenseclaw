@@ -15,6 +15,10 @@ import (
 // guards are masked by other readers in four-cell decisions, so the proof
 // boundary is checked here as well as in the gateway rows.
 func TestGAP0431ClientProofGuards(t *testing.T) {
+	// The proof needs an absolute working directory, as every hook reports;
+	// /tmp/project is not one on Windows.
+	root := t.TempDir()
+	cwd, home := filepath.Join(root, "project"), filepath.Join(root, "home")
 	var saturated strings.Builder
 	saturated.WriteString("f=a.txt; ")
 	for i := 0; i < 10; i++ {
@@ -46,7 +50,7 @@ func TestGAP0431ClientProofGuards(t *testing.T) {
 	}
 	for _, row := range rows {
 		t.Run(row.name, func(t *testing.T) {
-			got := actionClientProvedSafeVariableTargets(row.command, "/tmp/project", "/tmp/home")
+			got := actionClientProvedSafeVariableTargets(row.command, cwd, home)
 			t.Logf("HP7GUARDROW %s | %t | want %t", row.name, got, row.want)
 			if got != row.want {
 				t.Errorf("proof %t, want %t for %q", got, row.want, row.command)
