@@ -1488,9 +1488,9 @@ defenseclaw_log_hook_delivery_failure() {
 # defenseclaw_per_user_outage_open returns 0 (true) when a per-user hook lets
 # the call through because this account's gateway is down (owner decision
 # 2026-10-23, config.HookOutageFailMode): the call's last transport status
-# (_DC_TRANSPORT_STATUS, defenseclaw_await_gateway) is 7, no gateway took the
-# connection after the cold-start retries, and the connector's current config
-# selects an open tier. Strict availability, this account's install
+# (_DC_TRANSPORT_STATUS, defenseclaw_await_gateway) is 7 (no connection),
+# and the connector's current config selects an open tier. A verified peer
+# that gives no HTTP status stays closed. Strict availability, this account's install
 # window, an answer the gateway gave (any HTTP status, a cut-off or
 # malformed body), another program on the port, a missing token and a
 # config that is missing, malformed or strict keep the call closed. Managed,
@@ -2201,9 +2201,8 @@ _dc_hook_elapsed_ms() {
 defenseclaw_await_gateway() {
   local status="${1:-1}" post="${2:-}" launched="" tries=0
   local data="${DEFENSECLAW_HOME:-${DEFENSECLAW_AGENT_HOME:-${HOME}}/.defenseclaw}"
-  # The final transport status of the call: 7 (no gateway took the
-  # connection) is the one outage a per-user hook may let through
-  # (defenseclaw_per_user_outage_open).
+  # The final transport status: 7 is no connection; 9 is a verified
+  # gateway that gave no HTTP status. Only a call that was not sent may open.
   if [ "$status" = 75 ]; then
     defenseclaw_refused_while_coming_up && return 7
     status=1
@@ -2244,20 +2243,6 @@ defenseclaw_await_gateway() {
       defenseclaw_refused_while_coming_up && return 7
       status=1
     fi
-    if [ "$status" = 28 ]; then
-      # This call's gateway refused it a moment ago (7), and the try sent to
-      # the gateway that comes up got no answer before the call's budget
-      # ended: the restart outlasted the budget, as a last refused try does,
-      # so the outage mode decides (rel-1-0-6 GAP-0295). It said "the gateway
-      # is running but did not answer" and blocked in every fail mode, so a
-      # default-tier account's benign calls were denied in its own gateway's
-      # restart window. A first try that timed out is still the hung-gateway
-      # refusal, and a listener the hook could not prove its own still fails
-      # closed (defenseclaw_gateway_post returns 1 for it).
-      _DC_TRANSPORT_STATUS=7
-      _DC_GATEWAY_RESTART_WAITED=1
-      return 7
-    fi
   done
 }
 
@@ -2268,8 +2253,7 @@ defenseclaw_await_gateway() {
 # (defenseclaw_gateway_post 75): the gateway is coming up in a restart. The
 # call is not sent again, so a possibly changed peer gets no credentials; the
 # outage mode decides it, as it decides the tries refused a moment before
-# (rel-1-0-6 GAP-0295). It said "the gateway is running but did not answer" and
-# blocked in every fail mode. Without a live gateway process (a stop, an
+# (rel-1-0-6 GAP-0295). Without a live gateway process (a stop, an
 # install, no configuration) the call keeps the closed refusal.
 defenseclaw_refused_while_coming_up() {
   case "${DEFENSECLAW_MANAGED_HOOK:-0}" in
@@ -2902,9 +2886,8 @@ defenseclaw_emit_unreachable_stderr() {
 # GAP-1735): "fail mode closed" for a gateway outage the mode closed (no
 # gateway took the connection, curl 7), strict availability, the install
 # window, and managed, socket and Secure Client hooks; for a per-user call the
-# gateway took and did not answer (a timeout, a dropped or cut-off answer),
-# that it is not an outage and is blocked in every fail mode, so a saved open
-# mode does not read as ignored (GAP-2279).
+# gateway answered but gave an unusable response (a cut-off or malformed
+# body), that it is blocked in every fail mode (GAP-2279).
 defenseclaw_unreachable_mode_note() {
   local closed='fail mode closed'
   case "${DEFENSECLAW_MANAGED_HOOK:-0}" in
@@ -2913,10 +2896,8 @@ defenseclaw_unreachable_mode_note() {
   case "${DEFENSECLAW_STRICT_AVAILABILITY:-0}" in
     1|true|TRUE|yes|YES) printf '%s' "$closed"; return 0 ;;
   esac
-  # A refused connection (7) is an outage. Any other failure while this
-  # account's own gateway process is alive (a timeout, a dropped answer) is
-  # a call the gateway took and did not answer; with no live gateway it
-  # stays an outage the mode closed.
+  # A refused connection (7) follows the configured mode. A verified
+  # no-status deadline (9) stays closed in every mode.
   if [ "${_DC_TRANSPORT_STATUS:-}" = 7 ] || [ -n "${DEFENSECLAW_HOOK_SOCKET:-}" ] ||
     [ "${_DC_SECURE_CLIENT_HOOK:-0}" = 1 ] || defenseclaw_install_held ||
     ! defenseclaw_own_gateway_alive; then
@@ -3839,7 +3820,7 @@ defenseclaw_gateway_post() {
   local _dc_post_status=0 _dc_listener_status=0 _dc_post_peer_final=0 _dc_post_refused=0 _dc_post_sent_noanswer=0
   _dc_gateway_post_once "$@" || _dc_post_status=$?
   case "$_dc_post_status" in
-    1|28) ;;
+    1|28|9) ;;
     *) return "$_dc_post_status" ;;
   esac
   case "${DEFENSECLAW_MANAGED_HOOK:-0}" in
@@ -3855,10 +3836,10 @@ defenseclaw_gateway_post() {
   [ "$_dc_post_peer_final" = 0 ] || return 1
   # The helper sent the call to its verified own listener and got no status
   # (9): the gateway took it. That is final, read no socket table: a gateway
-  # that took the call and then died must not turn it into an outage
-  # (review of rel-1-0-6 GAP-0295). The restart wait decides a 28 that comes
+  # that took the call and then died must retain its no-status classification
+  # (review of rel-1-0-6 GAP-0295). The restart wait decides a 9 that comes
   # after a refusal of this call.
-  [ "$_dc_post_sent_noanswer" = 0 ] || return 28
+  [ "$_dc_post_sent_noanswer" = 0 ] || return 9
   # A per-user call that never reached a peer (refused, or not sent) reads
   # the socket tables once, so the outcome is the one the old send-time
   # preflight gave: no listener is a cold start (7), a foreign or unknown one
@@ -4113,11 +4094,9 @@ _dc_gateway_post_once() {
       # 7 is the helper's outage status (hookexec.PerUserPostOutageExit: no
       # gateway took the connection) and 126 or 127 a helper that did not
       # run; neither reached a peer. 9 (hookexec.PerUserPostNoAnswerExit) is
-      # a call that got no status before its deadline, curl's timeout (28):
-      # after a refusal of this call it is the restart wait running out of
-      # the budget (defenseclaw_await_gateway, rel-1-0-6 GAP-0295). Every
-      # other failure came after the helper's connected-peer check decided,
-      # and stays closed (defenseclaw_gateway_post).
+      # a verified call that got no status before its deadline and stays
+      # closed, including after an earlier refusal. A proven restart has
+      # status 10. Other failures stay closed (defenseclaw_gateway_post).
       case "$?" in
         7) _dc_post_refused=1 ;;
         # 11: the connection was refused or closed before a status while
@@ -4126,7 +4105,7 @@ _dc_gateway_post_once() {
         # must not change the outage decision (rel-1-0-6 GAP-0497).
         11) return 7 ;;
         126|127) ;;
-        9) _dc_post_sent_noanswer=1; return 28 ;;
+        9) _dc_post_sent_noanswer=1; return 9 ;;
         # 10 (hookexec.PerUserPostRestartNoAnswerExit): no status while a
         # start or restart of this account's gateway holds its start lock and
         # the process behind the call's connection exited or gave up the port

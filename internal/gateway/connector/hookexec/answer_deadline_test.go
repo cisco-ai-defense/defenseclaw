@@ -238,9 +238,8 @@ func TestToolCallKeepsItsBudgetWhileTheGatewayWaitsOnARemoteScanner(t *testing.T
 	}
 }
 
-// A per-user hook applies its fail mode at the end of the answer budget:
-// closed blocks and names the cause; open is the account's own choice.
-func TestPerUserToolCallAppliesItsFailModeWhenTheGatewayDoesNotAnswer(t *testing.T) {
+// A gateway that gives no decision leaves a tool call closed in either mode.
+func TestPerUserToolCallWithoutGatewayDecisionStaysClosed(t *testing.T) {
 	shortAnswerBudget(t, 300*time.Millisecond)
 	closed, elapsed := runAgainstGateway(t, "codex", hungGateway(t), func(opts *Options) { opts.FailMode = "closed" })
 	if elapsed > time.Second || !blocked(closed) || !strings.Contains(closed.stderr, "did not answer in time") {
@@ -248,24 +247,20 @@ func TestPerUserToolCallAppliesItsFailModeWhenTheGatewayDoesNotAnswer(t *testing
 			elapsed, closed.code, closed.stdout, closed.stderr)
 	}
 	open, elapsed := runAgainstGateway(t, "claudecode", hungGateway(t), func(opts *Options) { opts.FailMode = "open" })
-	if elapsed > time.Second || open.code != 0 || !strings.Contains(open.stdout, "did not answer in time") {
-		t.Fatalf("open: after %s code=%d stdout=%q stderr=%q, want the notice", elapsed, open.code, open.stdout, open.stderr)
+	if elapsed > time.Second || !blocked(open) || !strings.Contains(open.stderr, "did not answer in time") {
+		t.Fatalf("open: after %s code=%d stdout=%q stderr=%q, want a bounded closed answer", elapsed, open.code, open.stdout, open.stderr)
 	}
 }
 
-// A per-user call its own gateway took and did not answer is blocked in
-// every fail mode. Its stderr line and its block say that, not "fail mode
-// closed", which beside a saved open mode read as the mode being ignored
-// (GAP-2475, OSS Windows native hook). A refused connection in fail mode
-// closed is an outage the mode closed and keeps "fail mode closed".
-func TestPerUserNoAnswerBlockNamesWhyNotFailModeClosed(t *testing.T) {
+// A native hook without an installed outage-mode resolver closes a no-status
+// deadline even when its general fail mode is open.
+func TestPerUserNoAnswerWithoutModeResolverFailsClosed(t *testing.T) {
 	shortAnswerBudget(t, 300*time.Millisecond)
 	for _, mode := range []string{"open", "closed"} {
 		result, _ := runAgainstGateway(t, "claudecode", hungGateway(t), func(opts *Options) { opts.FailMode = mode })
-		if !blocked(result) || strings.Contains(result.stderr+result.stdout, "fail mode closed") ||
-			!strings.Contains(result.stderr, "("+perUserNotOutageNote+"): this account's gateway did not answer in time") ||
-			!strings.Contains(result.stdout, perUserNotOutageNote) {
-			t.Fatalf("fail mode %s: code=%d stdout=%q stderr=%q, want a block that says it is not an outage and is blocked in every fail mode",
+		if !blocked(result) || !strings.Contains(result.stderr, "(fail mode closed): this account's gateway did not answer in time") ||
+			!strings.Contains(result.stdout, "fail mode closed") {
+			t.Fatalf("fail mode %s: code=%d stdout=%q stderr=%q, want a block using the closed mode",
 				mode, result.code, result.stdout, result.stderr)
 		}
 	}

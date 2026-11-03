@@ -25,14 +25,12 @@ import (
 	"time"
 )
 
-// oss-outage-open (owner decision 2026-10-23): a per-user shell hook in the
-// default or permissive policy tier (outage mode open) lets a call run with
-// one warning and a hook-failures.jsonl row only while this account's gateway
-// is not running. The strict tier (outage mode closed) blocks it. In every
-// tier an answer the gateway gave (malformed, cut off, an error status), a
-// gateway that took the call and did not answer, strict availability and the
-// install window block. The real native helper (hook-post) carries every
-// call, as on an installed host.
+// The default or permissive per-user tier lets a call run with a warning
+// when its gateway is absent. A call that reached its gateway but has no
+// final decision stays closed. Strict and managed hooks close. An answered
+// error, malformed or partial answer, strict availability and an install
+// window remain closed. The real native helper carries every call, as on an
+// installed host.
 func TestPerUserShellHookOutageOpenOnlyForAnOutage(t *testing.T) {
 	type scenario struct {
 		name    string
@@ -90,6 +88,7 @@ func TestPerUserShellHookOutageOpenOnlyForAnOutage(t *testing.T) {
 					invoke := hookArgvConnectorCase(t, conn.Name())
 					home := t.TempDir()
 					installNativeGatewayForHookTest(t, home)
+					installNativeHookPostForHookTest(t, home)
 					writeOutageTierConfig(t, home, tier.config)
 					var addr string
 					if sc.handler != nil {
@@ -99,6 +98,9 @@ func TestPerUserShellHookOutageOpenOnlyForAnOutage(t *testing.T) {
 							server.Close()
 						}()
 						addr = strings.TrimPrefix(server.URL, "http://")
+						if err := os.WriteFile(filepath.Join(home, "gateway.pid"), []byte(strconv.Itoa(os.Getpid())+"\n"), 0o600); err != nil {
+							t.Fatal(err)
+						}
 					} else {
 						addr = freeLoopbackAddrForOutageTest(t)
 					}

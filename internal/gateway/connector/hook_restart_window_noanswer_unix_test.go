@@ -18,12 +18,10 @@ import (
 // TestShellHookRestartWindowNoAnswerFollowsTheOutageMode pins rel-1-0-6
 // GAP-0295 on the per-user shell hook: the call's first try is refused (this
 // account's gateway is restarting, curl/hook-post 7) and the try sent to the
-// gateway that comes up gets no answer before the call's budget ends
-// (hook-post 9). That is the restart outlasting the budget: the default and
-// permissive tiers let the call run with the outage warning and a fail_open
-// row, the strict tier blocks it with the restarting text and a fail_closed
-// row. A first try that gets no answer with no refusal is still the
-// hung-gateway refusal in every mode.
+// gateway that comes up gives no answer before the call's budget ends
+// (hook-post 9). A reached gateway without a decision stays closed in every
+// tier, including after a prior refusal. A proven restart (hook-post 10)
+// follows the outage mode.
 func TestShellHookRestartWindowNoAnswerFollowsTheOutageMode(t *testing.T) {
 	for _, tc := range []struct {
 		name, outageMode string
@@ -31,8 +29,8 @@ func TestShellHookRestartWindowNoAnswerFollowsTheOutageMode(t *testing.T) {
 		allow            bool
 		wantText         string
 	}{
-		{"refused then no answer, open tier", "open", []string{"DC_COLD_FAILS=1", "DC_COLD_FIRST_RC=7", "DC_COLD_DROP_LISTENER=1", "DC_COLD_THEN_RC=9"}, true, "restarting or not running"},
-		{"refused then no answer, strict tier", "closed", []string{"DC_COLD_FAILS=1", "DC_COLD_FIRST_RC=7", "DC_COLD_DROP_LISTENER=1", "DC_COLD_THEN_RC=9"}, false, "restarting or not running"},
+		{"refused then no answer, open tier", "open", []string{"DC_COLD_FAILS=1", "DC_COLD_FIRST_RC=7", "DC_COLD_DROP_LISTENER=1", "DC_COLD_THEN_RC=9"}, false, "the gateway is running but did not answer"},
+		{"refused then no answer, strict tier", "closed", []string{"DC_COLD_FAILS=1", "DC_COLD_FIRST_RC=7", "DC_COLD_DROP_LISTENER=1", "DC_COLD_THEN_RC=9"}, false, "the gateway is running but did not answer"},
 		{"no answer with no refusal, open tier", "open", []string{"DC_COLD_FAILS=1000", "DC_COLD_FIRST_RC=9"}, false, "the gateway is running but did not answer"},
 		// hook-post 10: no answer while a start or restart of this account's
 		// gateway holds its start lock (the old gateway is stopping, or the
