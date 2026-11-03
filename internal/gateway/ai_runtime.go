@@ -23,11 +23,14 @@ package gateway
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"log"
 	"os"
 	"runtime"
+	"sort"
 	"time"
 
 	"github.com/defenseclaw/defenseclaw/internal/config"
@@ -165,6 +168,7 @@ func (s *Sidecar) runAIRuntime(ctx context.Context) error {
 	defer ticker.Stop()
 	// The scan time of the last snapshot whose findings were emitted.
 	var lastEmitted time.Time
+	var emittedFindings map[string][sha256.Size]byte
 	for {
 		select {
 		case err := <-errCh:
@@ -196,6 +200,10 @@ func (s *Sidecar) runAIRuntime(ctx context.Context) error {
 			snapshot = service.TakeSnapshot()
 			lastEmitted = snapshot.ScannedAt
 			notifyKernelBlocks(s.OSNotifier(), snapshot)
+			var nextFindings map[string][sha256.Size]byte
+			snapshot.Findings, nextFindings = newAIRuntimeFindings(
+				snapshot.Findings, emittedFindings, activeConfig.SecureClientIntegration(),
+			)
 			// Emission is best-effort and never blocks the planes. A
 			// destination being unreachable must not stop the sensor from
 			// observing; the snapshot the API serves is unaffected either way.
@@ -213,6 +221,8 @@ func (s *Sidecar) runAIRuntime(ctx context.Context) error {
 						"[ai-runtime] canonical snapshot emission failed (error_code=%s); dashboard data may be incomplete",
 						errorCode,
 					)
+				} else {
+					emittedFindings = nextFindings
 				}
 			}
 		case <-ctx.Done():
@@ -253,6 +263,76 @@ func aiRuntimeHomeDirs(cfg *config.Config, directRootLinux bool) []string {
 		return append(homes, "/home/*", "/sessions/*")
 	}
 	return homes
+}
+
+// newAIRuntimeFindings keeps one emission per observed finding state. The
+// cursor contains digests only and is replaced each poll, so an absent finding
+// can be reported again if it returns. A failed emission leaves the prior
+// cursor in place and the next poll can retry it.
+func newAIRuntimeFindings(
+	findings []sensor.Finding, previous map[string][sha256.Size]byte, secureClient bool,
+) ([]sensor.Finding, map[string][sha256.Size]byte) {
+	if secureClient {
+		return findings, previous
+	}
+	next := make(map[string][sha256.Size]byte, len(findings))
+	changed := make([]sensor.Finding, 0, len(findings))
+	for _, finding := range findings {
+		if finding.FindingID == "" {
+			changed = append(changed, finding)
+			continue
+		}
+		digest, ok := aiRuntimeFindingDigest(finding)
+		if !ok {
+			changed = append(changed, finding)
+			continue
+		}
+		if prior, ok := previous[finding.FindingID]; !ok || prior != digest {
+			changed = append(changed, finding)
+		}
+		next[finding.FindingID] = digest
+	}
+	return changed, next
+}
+
+func aiRuntimeFindingDigest(finding sensor.Finding) ([sha256.Size]byte, bool) {
+	activities := make([]string, 0, len(finding.Activities))
+	for _, activity := range finding.Activities {
+		encoded, err := json.Marshal(activity)
+		if err != nil {
+			return [sha256.Size]byte{}, false
+		}
+		activities = append(activities, string(encoded))
+	}
+	sort.Strings(activities)
+	state := struct {
+		PID, Score               int
+		Process, Cmdline, User   string
+		UserSID, Attribution     string
+		AttributionReason, Agent string
+		Severity, Exe, Connector string
+		NotEnforcedReason        string
+		UID, AUID                *int
+		Signals, Providers       []string
+		CorrelationVerdict       string
+		CorrelationReason        string
+		Activities               []string
+	}{
+		PID: finding.PID, Score: finding.Score,
+		Process: finding.Process, Cmdline: finding.Cmdline, User: finding.User,
+		UserSID: finding.UserSID, Attribution: finding.Attribution,
+		AttributionReason: finding.AttributionReason, Agent: finding.AgentName,
+		Severity: string(finding.Severity), Exe: finding.Exe, Connector: finding.Connector,
+		NotEnforcedReason: finding.NotEnforcedReason, UID: finding.UID, AUID: finding.AUID,
+		Signals: renderRuntimeSignals(finding), Providers: renderRuntimeProviders(finding),
+		CorrelationVerdict: string(finding.Correlation.Verdict),
+		CorrelationReason:  finding.Correlation.Reason, Activities: activities,
+	}
+	encoded, err := json.Marshal(state)
+	if err != nil {
+		return [sha256.Size]byte{}, false
+	}
+	return sha256.Sum256(encoded), true
 }
 
 // shouldEmitAIRuntimeSnapshot reports whether this snapshot's findings have
