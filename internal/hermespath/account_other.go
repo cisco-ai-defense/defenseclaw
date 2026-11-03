@@ -24,6 +24,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/defenseclaw/defenseclaw/internal/agentprobe"
 	"github.com/defenseclaw/defenseclaw/internal/lazyregexp"
 )
 
@@ -39,6 +40,7 @@ var (
 	accountSystemRoot        = "/"
 	accountLaunchdHermesHome = launchdHermesHome
 	accountProcessEvidence   = runningProcessEvidence
+	waitManagedHermesVersion = agentprobe.WaitManagedHermesVersion
 )
 
 // OverrideAccountEnvironmentForTest reads the host-wide environment files and
@@ -145,7 +147,7 @@ func accountEnvironmentEvidence(userHome string) ([]homeEvidence, error) {
 			out = append(out, homeEvidence{source: "the launchd environment of uid " + strconv.Itoa(uid), home: absoluteHome(value)})
 		}
 	}
-	if err := add(accountProcessEvidence(uid)); err != nil {
+	if err := add(accountProcessEvidence(uid, userHome)); err != nil {
 		return nil, err
 	}
 	return out, nil
@@ -267,21 +269,41 @@ func startupFileEvidence(path string) ([]homeEvidence, error) {
 // running process of uid (Linux /proc). A process that exits or cannot be
 // read is skipped; a caller that is neither root nor uid can read none,
 // which fails.
-func procProcessEvidence(uid int) ([]homeEvidence, error) {
+func procProcessEvidence(uid int, userHome string) ([]homeEvidence, error) {
 	if err := canReadProcessesOf(uid); err != nil {
 		return nil, err
 	}
 	proc := filepath.Join(accountSystemRoot, "proc")
+	out, probes, err := scanProcProcessEvidence(uid, proc)
+	if err != nil || len(probes) == 0 {
+		return out, err
+	}
+	deadline := time.Now().Add(agentprobe.VersionProbeWait)
+	rescan := false
+	for _, pid := range probes {
+		if waitManagedHermesVersion(proc, pid, userHome, time.Until(deadline)) {
+			rescan = true
+		}
+	}
+	if rescan {
+		out, _, err = scanProcProcessEvidence(uid, proc)
+	}
+	return out, err
+}
+
+func scanProcProcessEvidence(uid int, proc string) ([]homeEvidence, []int, error) {
 	entries, err := os.ReadDir(proc)
 	if errors.Is(err, os.ErrNotExist) {
-		return nil, nil
+		return nil, nil, nil
 	}
 	if err != nil {
-		return nil, fmt.Errorf("list %s: %w", proc, err)
+		return nil, nil, fmt.Errorf("list %s: %w", proc, err)
 	}
 	var out []homeEvidence
+	var probes []int
 	for _, entry := range entries {
-		if _, err := strconv.Atoi(entry.Name()); err != nil {
+		pid, err := strconv.Atoi(entry.Name())
+		if err != nil {
 			continue
 		}
 		dir := filepath.Join(proc, entry.Name())
@@ -305,9 +327,12 @@ func procProcessEvidence(uid int) ([]homeEvidence, error) {
 		if err != nil {
 			continue
 		}
+		if bytes.Contains(environ, []byte(agentprobe.EnvName+"="+agentprobe.Hermes+"\x00")) {
+			probes = append(probes, pid)
+		}
 		out = append(out, environEvidence(bytes.Split(environ, []byte{0}), source)...)
 	}
-	return out, nil
+	return out, probes, nil
 }
 
 // canReadProcessesOf fails unless the caller is root or uid: another

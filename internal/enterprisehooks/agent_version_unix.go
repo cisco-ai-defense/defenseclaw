@@ -30,6 +30,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/defenseclaw/defenseclaw/internal/agentprobe"
 	"github.com/defenseclaw/defenseclaw/internal/lazyregexp"
 	"github.com/defenseclaw/defenseclaw/internal/unixidentity"
 )
@@ -280,6 +281,19 @@ func nodeModulesPackage(prefix, pkg string) []string {
 // allowExec enables the `--version` fallback; callers set it only when
 // already running with the target user's credentials.
 func DiscoverUnixAgentVersion(ctx context.Context, home, connector string, allowExec bool) (string, string) {
+	return discoverUnixAgentVersion(ctx, home, connector, allowExec, true)
+}
+
+// DiscoverUnixAgentVersionInAccountHome runs a version command with the
+// account's normal state location. Managed discovery uses this for Hermes so
+// a running version command has the same home as an ordinary session. If its
+// state is busy or read-only, retry with isolated state before trusting an
+// install stamp that may describe an older CLI.
+func DiscoverUnixAgentVersionInAccountHome(ctx context.Context, home, connector string) (string, string) {
+	return discoverUnixAgentVersion(ctx, home, connector, true, false)
+}
+
+func discoverUnixAgentVersion(ctx context.Context, home, connector string, allowExec, isolateState bool) (string, string) {
 	connector = strings.ToLower(strings.TrimSpace(connector))
 	probe, ok := unixAgentProbes[connector]
 	if !ok {
@@ -327,6 +341,10 @@ func DiscoverUnixAgentVersion(ctx context.Context, home, connector string, allow
 		return "", fmt.Sprintf("no %s package metadata under this home", connector)
 	}
 	installedAt, installedNote := "", ""
+	stateEnv := probe.stateEnv
+	if !isolateState {
+		stateEnv = ""
+	}
 	for index, binary := range probe.binaries {
 		for _, candidate := range unixAgentBinaryCandidates(home, binary) {
 			// A CLI outside the home that another account can change is
@@ -334,8 +352,13 @@ func DiscoverUnixAgentVersion(ctx context.Context, home, connector string, allow
 			// every enrolled user on every enumeration cycle.
 			trusted := unixDiscoveryCandidateTrusted(home, candidate)
 			if trusted {
-				if version := execUnixAgentVersion(ctx, candidate, home, probe.stateEnv); version != "" {
+				if version := execUnixAgentVersion(ctx, candidate, home, stateEnv); version != "" {
 					return version, ""
+				}
+				if !isolateState && probe.stateEnv != "" && ctx.Err() == nil {
+					if version := execUnixAgentVersion(ctx, candidate, home, probe.stateEnv); version != "" {
+						return version, ""
+					}
 				}
 			}
 			// Only the connector's own CLI name counts as evidence of an
@@ -348,10 +371,11 @@ func DiscoverUnixAgentVersion(ctx context.Context, home, connector string, allow
 			}
 		}
 	}
-	// The install stamp names the release only when the CLI does not answer
-	// itself: only the installer rewrites the stamp, so a CLI upgraded
-	// another way leaves it naming the older release (GAP-1274).
-	if stampVersion != "" {
+	// A managed Hermes CLI whose live version could not be read cannot use
+	// the stamp as contract evidence: the installed CLI may have changed
+	// since the installer last wrote it (GAP-1274). Metadata remains useful
+	// when there is no CLI to query and for the existing isolated callers.
+	if stampVersion != "" && (installedAt == "" || isolateState) {
 		return stampVersion, ""
 	}
 	if installedAt != "" {
@@ -944,6 +968,9 @@ func runUnixAgentVersion(parent context.Context, candidate, home, stateEnv strin
 		}
 		defer os.RemoveAll(scratch)
 		cmd.Env = append(cmd.Env, stateEnv+"="+scratch, "TMPDIR="+scratch)
+		if stateEnv == "HERMES_HOME" {
+			cmd.Env = append(cmd.Env, agentprobe.EnvName+"="+agentprobe.Hermes)
+		}
 	}
 	out := &cappedBuffer{limit: unixAgentVersionOutput}
 	errOut := &cappedBuffer{limit: unixAgentVersionOutput}

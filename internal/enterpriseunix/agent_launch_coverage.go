@@ -16,7 +16,9 @@ import (
 	"strconv"
 	"strings"
 	"syscall"
+	"time"
 
+	"github.com/defenseclaw/defenseclaw/internal/agentprobe"
 	"github.com/defenseclaw/defenseclaw/internal/enterprisehooks"
 	"github.com/defenseclaw/defenseclaw/internal/enterprisestatus"
 	"github.com/defenseclaw/defenseclaw/internal/gateway/connector"
@@ -25,6 +27,8 @@ import (
 
 const codeManagedLaunchUninspected = "managed_launch_uninspected"
 const codeManagedLaunchAuditUnavailable = "managed_launch_audit_unavailable"
+
+var waitManagedHermesVersion = agentprobe.WaitManagedHermesVersion
 
 func pluginLaunchConnectorName(name string) string {
 	if name == "kiro-cli" {
@@ -87,6 +91,28 @@ func (l *lifecycle) describePluginLaunchCoverage(ctx context.Context, record *De
 			result.AddError("managed_launch_scan_unknown", message)
 		}
 		return
+	}
+	if env.GOOS == "linux" {
+		deadline := time.Now().Add(agentprobe.VersionProbeWait)
+		rescan := false
+		for _, session := range sessions {
+			if session.Agent != "hermes" || !session.EnvKnown ||
+				!strings.HasPrefix(filepath.Base(session.Env["HERMES_HOME"]), "dc-agent-probe-") {
+				continue
+			}
+			_, home := env.pluginLaunchAccount(ctx, session.UID)
+			if home != "" && waitManagedHermesVersion(env.P("/proc"), session.PID, home, time.Until(deadline)) {
+				rescan = true
+			}
+		}
+		if rescan {
+			sessions, err = env.linuxAgentSessionsWithError()
+			if err != nil {
+				result.AddError("managed_launch_scan_unknown", "could not rescan running agent launches: "+err.Error())
+				result.MarkCoverageIncomplete("managed_launch_scan_unknown")
+				return
+			}
+		}
 	}
 	claudeParents := map[int]bool{}
 	for _, session := range sessions {
