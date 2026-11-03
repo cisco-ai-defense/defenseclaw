@@ -689,7 +689,9 @@ func actionPrivateKeyReadWords(words []string, cwd, home string, mode keyReadMod
 	}
 	if posixShellProgram(program) {
 		if body, known := shellCommandBodyIndex(words); known && body < len(words) {
-			return ActionPrivateKeyRead(words[body], cwd, home)
+			// The -c body runs in the child shell. On Windows, losing the
+			// POSIX dialect here would read a Git Bash glob as PowerShell.
+			return ActionPrivateKeyReadWithDialect(words[body], cwd, home, actionfacts.DialectPOSIX)
 		}
 		return false
 	}
