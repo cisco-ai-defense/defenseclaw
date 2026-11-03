@@ -9,6 +9,11 @@ package managed
 // walk, so the *Standalone validators the cross-platform standalone checks
 // call are the ordinary ones.
 
+// ValidateTrustedFilePathStandalone is ValidateTrustedFilePath.
+func ValidateTrustedFilePathStandalone(path, label string) error {
+	return ValidateTrustedFilePath(path, label)
+}
+
 // ValidateTrustedServiceRuntimeDirStandalone is ValidateTrustedServiceRuntimeDir.
 func ValidateTrustedServiceRuntimeDirStandalone(path, label, serviceAccount string) error {
 	return ValidateTrustedServiceRuntimeDir(path, label, serviceAccount)

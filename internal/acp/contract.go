@@ -470,7 +470,10 @@ func (lock RuntimeContractLock) executableDigestsMatch(agentPath, guardPath stri
 		// enterprise upgrade. This exception is valid only while the complete
 		// path still passes the platform root/Admin ownership and no-untrusted-
 		// writer contract. User-owned guards always retain exact digest pinning.
-		if !lock.Guard.ManagedCustody || managed.ValidateTrustedFilePath(guardPath, "managed ACP guard") != nil {
+		// The exact SYSTEM/Administrators rule: the Secure Client drift
+		// acceptances (an administrator account as owner or writer) would let
+		// a guard such an account wrote skip its digest.
+		if !lock.Guard.ManagedCustody || managed.ValidateTrustedFilePathStandalone(guardPath, "managed ACP guard") != nil {
 			return errors.New("ACP guard executable digest does not match the runtime contract")
 		}
 	}
