@@ -13,7 +13,7 @@ import (
 func TestAIRuntimeDynamicHomesOnlyForDirectUnmanagedRoot(t *testing.T) {
 	cfg := config.DefaultConfig()
 	cfg.AIDiscovery.HomeDirs = []string{"/home/known"}
-	if got := aiRuntimeHomeDirs(cfg, true); !reflect.DeepEqual(got, []string{"/home/known", "/home/*"}) {
+	if got := aiRuntimeHomeDirs(cfg, true); !reflect.DeepEqual(got, []string{"/home/known", "/home/*", "/sessions/*"}) {
 		t.Fatalf("direct root homes = %v", got)
 	}
 	if got := aiRuntimeHomeDirs(cfg, false); !reflect.DeepEqual(got, []string{"/home/known"}) {

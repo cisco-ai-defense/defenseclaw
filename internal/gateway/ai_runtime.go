@@ -250,7 +250,7 @@ func aiRuntimeHomeDirs(cfg *config.Config, directRootLinux bool) []string {
 	homes := append([]string(nil), cfg.AIDiscovery.HomeDirs...)
 	if directRootLinux && !managed.IsManagedEnterprise(cfg.DeploymentMode) &&
 		!cfg.StandaloneEnterprise() && !cfg.SecureClientIntegration() {
-		return append(homes, "/home/*")
+		return append(homes, "/home/*", "/sessions/*")
 	}
 	return homes
 }
