@@ -377,7 +377,9 @@ func TestR108OSMINNoHostsWorkaround(t *testing.T) {
 		if !strings.HasSuffix(base, "USER sandbox\n") {
 			t.Fatalf("%s: docker image has no final sandbox user", name)
 		}
-		want := strings.TrimSuffix(base, "USER sandbox\n") + microVMResolverCopyStep() + "USER sandbox\n"
+		want := strings.Replace(base, "FROM "+docker.Spec.BaseImage+"\n",
+			microVMResolverToolStage()+"FROM "+docker.Spec.BaseImage+"\n", 1)
+		want = strings.TrimSuffix(want, "USER sandbox\n") + microVMResolverCopyStep() + "USER sandbox\n"
 		if string(vm.Dockerfile) != want {
 			t.Fatalf("%s: vm image has an unexpected driver-specific Dockerfile step", name)
 		}

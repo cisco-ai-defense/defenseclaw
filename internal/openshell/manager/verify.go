@@ -92,7 +92,18 @@ while read -r key value rest; do
   [ "$key" = MemTotal: ] && printf 'memtotal %s\n' "$value"
 done < /proc/meminfo
 if [ "$0" = defenseclaw-verify-vm ]; then
-  if localhost=$(/usr/bin/timeout 5 /usr/local/lib/defenseclaw/localhost-getent ahostsv4 localhost 2>/dev/null); then
+  trusted_resolver() {
+    for d in / /usr /usr/local /usr/local/lib /usr/local/lib/defenseclaw; do
+      [ ! -L "$d" ] && [ -d "$d" ] && [ "$(/usr/bin/stat -c %u "$d")" = 0 ] || return 1
+      mode=$(/usr/bin/stat -c %a "$d") || return 1
+      [ $((0$mode & 022)) -eq 0 ] || return 1
+    done
+    f=/usr/local/lib/defenseclaw/localhost-resolver
+    [ -f "$f" ] && [ ! -L "$f" ] && [ "$(/usr/bin/stat -c %u "$f")" = 0 ] || return 1
+    mode=$(/usr/bin/stat -c %a "$f") || return 1
+    [ $((0$mode & 022)) -eq 0 ]
+  }
+  if trusted_resolver && localhost=$(/usr/bin/timeout 5 /usr/local/lib/defenseclaw/localhost-resolver 2>/dev/null); then
     printf '%s\n' "$localhost" | while IFS= read -r answer; do printf 'localhost %s\n' "$answer"; done
     echo localhost-ok
   else
@@ -421,7 +432,7 @@ func workloadProblems(want verifyRecord, got workloadFacts, d openshell.Driver, 
 	return out
 }
 
-// microVMResolverProblem judges the guest's own bounded getent result. The
+// microVMResolverProblem judges the guest's own bounded libc result. The
 // build checked the completed image, while this check also sees guest init.
 func microVMResolverProblem(got workloadFacts) string {
 	if !got.LocalhostReported || !got.LocalhostOK || len(got.LocalhostAnswers) == 0 {

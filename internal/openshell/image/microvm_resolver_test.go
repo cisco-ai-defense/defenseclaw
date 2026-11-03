@@ -46,7 +46,7 @@ func TestR108OSMINMicroVMCustomBaseHostsAndBenignTwin(t *testing.T) {
 	for _, part := range []string{
 		"FROM dc-complete AS dc-resolver-check\n",
 		"--network=none --mount=type=bind,from=dc-complete,source=/,target=/tmp/dc-root,ro",
-		"/usr/sbin/chroot \"$root\" " + microVMResolverPath + " hosts localhost",
+		"/usr/sbin/chroot \"$root\" " + microVMResolverPath,
 		"USER sandbox\n",
 	} {
 		if !strings.Contains(file, part) {
@@ -76,6 +76,8 @@ func TestR108OSMINMicroVMCustomBaseHostsAndBenignTwin(t *testing.T) {
 		{"empty regular file", nil, true, true},
 		{"canonical mapping", []byte("127.0.0.1 localhost\n"), true, true},
 		{"dual stack mapping", []byte("::1 localhost\n127.0.0.1 localhost\n"), true, true},
+		{"dual stack with another IPv4 address", []byte("::1 localhost\n198.51.100.10 localhost\n"), true, false},
+		{"IPv6-only mapping", []byte("::1 localhost\n"), true, false},
 		{"IPv6 answer ahead of usable IPv4", []byte("::2 localhost\n127.0.0.1 localhost\n"), true, true},
 		{"alias after another name", []byte("127.0.0.1 localname localhost\n"), true, true},
 		{"upper ASCII alias", []byte("127.0.0.1 LOCALHOST\n"), true, true},
@@ -85,7 +87,7 @@ func TestR108OSMINMicroVMCustomBaseHostsAndBenignTwin(t *testing.T) {
 		{"non ASCII full line comment", []byte("# caf\xc3\xa9\n127.0.0.1 localhost\n"), true, true},
 		{"non ASCII inline comment", []byte("127.0.0.1 localhost # caf\xc3\xa9\n"), true, true},
 		{"unrelated record", []byte("not a record\n127.0.0.1 localhost\n"), true, true},
-		{"NUL after mapping", []byte("127.0.0.1 localhost\n\x00unrelated\n"), true, true},
+		{"NUL after mapping", []byte("127.0.0.1 localhost\n\x00unrelated\n"), true, false},
 		{"long canonical alias", []byte("127.0.0.1 " + strings.Repeat(strings.Repeat("a", 60)+".", 3) + strings.Repeat("a", 60) + " localhost\n"), true, true},
 		{"unmapped name", []byte("127.0.0.1 custom\n"), true, false},
 		{"comment only", []byte("# 127.0.0.1 localhost\n"), true, false},
@@ -99,7 +101,7 @@ func TestR108OSMINMicroVMCustomBaseHostsAndBenignTwin(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			dir := t.TempDir()
-			layout := "FROM " + openshell.DefaultBaseImage + " AS dc-complete\n"
+			layout := microVMResolverFixtureStage(t, dir) + "FROM " + openshell.DefaultBaseImage + " AS dc-complete\n"
 			if tc.copyHosts {
 				if err := os.WriteFile(filepath.Join(dir, "hosts"), tc.hosts, 0o600); err != nil {
 					t.Fatal(err)
@@ -118,6 +120,37 @@ func TestR108OSMINMicroVMCustomBaseHostsAndBenignTwin(t *testing.T) {
 			}
 			if err != nil && !bytes.Contains(out, []byte("MicroVM image localhost check failed")) {
 				t.Fatalf("build did not name the localhost repair: %s", out)
+			}
+		})
+	}
+}
+
+func TestMicroVMResolverCallerLocation(t *testing.T) {
+	localDocker(t)
+	for _, tc := range []struct {
+		name, change string
+		want         bool
+	}{
+		{"ordinary directory", "", true},
+		{"existing caller link", "RUN mkdir -p /usr/local/lib/defenseclaw && ln -s /sandbox/locator " + microVMResolverPath + "\n", false},
+		{"linked parent", "RUN ln -s /sandbox/callers /usr/local/lib/defenseclaw\n", false},
+		{"writable parent", "RUN mkdir -p /usr/local/lib/defenseclaw && chmod 0777 /usr/local/lib/defenseclaw\n", false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			dir := t.TempDir()
+			layout := microVMResolverFixtureStage(t, dir) + "FROM " + openshell.DefaultBaseImage + "\nUSER root\n" +
+				tc.change + microVMResolverCopyStep() + "USER sandbox\n"
+			if err := os.WriteFile(filepath.Join(dir, "Dockerfile"), []byte(layout), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			tag := testImageTag(dir)
+			t.Cleanup(func() { exec.Command("docker", "image", "rm", "-f", tag).Run() })
+			out, err := dockerCommand(t, "build", "--pull=false", "--progress=plain", "-t", tag, dir).CombinedOutput()
+			if (err == nil) != tc.want {
+				t.Fatalf("build success = %t, want %t: %v\n%s", err == nil, tc.want, err, out)
+			}
+			if err != nil && !bytes.Contains(out, []byte("resolver caller location")) {
+				t.Fatalf("build did not identify the caller location: %s", out)
 			}
 		})
 	}
@@ -176,7 +209,7 @@ enum nss_status _nss_localtest_gethostbyname2_r(const char *name, int af, struct
 			if err := os.WriteFile(filepath.Join(dir, "hosts"), []byte("127.0.0.1 custom\n"), 0o600); err != nil {
 				t.Fatal(err)
 			}
-			layout := "FROM " + openshell.DefaultBaseImage + " AS dc-complete\nUSER root\nCOPY hosts /etc/hosts\n"
+			layout := microVMResolverFixtureStage(t, dir) + "FROM " + openshell.DefaultBaseImage + " AS dc-complete\nUSER root\nCOPY hosts /etc/hosts\n"
 			if tc.nss != "" {
 				if err := os.WriteFile(filepath.Join(dir, "localtest.c"), []byte(source), 0o600); err != nil {
 					t.Fatal(err)
@@ -219,7 +252,7 @@ socket.getaddrinfo = resolved
 			if err := os.WriteFile(filepath.Join(dir, "sitecustomize.py"), []byte(site), 0o600); err != nil {
 				t.Fatal(err)
 			}
-			layout := "FROM " + openshell.DefaultBaseImage + " AS dc-complete\nUSER root\n" +
+			layout := microVMResolverFixtureStage(t, dir) + "FROM " + openshell.DefaultBaseImage + " AS dc-complete\nUSER root\n" +
 				"COPY hosts /etc/hosts\nCOPY sitecustomize.py /usr/lib/python3.12/sitecustomize.py\n" +
 				microVMResolverCopyStep() + microVMResolverStep(openshell.DefaultBaseImage)
 			if err := os.WriteFile(filepath.Join(dir, "Dockerfile"), []byte(layout), 0o600); err != nil {
@@ -253,7 +286,7 @@ func TestMicroVMResolverUsesPinnedCallerWithCustomGetent(t *testing.T) {
 			if err := os.WriteFile(filepath.Join(dir, "custom-getent"), []byte(custom), 0o755); err != nil {
 				t.Fatal(err)
 			}
-			layout := "FROM " + openshell.DefaultBaseImage + " AS dc-complete\nUSER root\n" +
+			layout := microVMResolverFixtureStage(t, dir) + "FROM " + openshell.DefaultBaseImage + " AS dc-complete\nUSER root\n" +
 				"COPY hosts /etc/hosts\nCOPY --chmod=0755 custom-getent /usr/bin/getent\n" +
 				microVMResolverCopyStep() + microVMResolverStep(openshell.DefaultBaseImage)
 			if err := os.WriteFile(filepath.Join(dir, "Dockerfile"), []byte(layout), 0o600); err != nil {
@@ -301,7 +334,7 @@ func TestMicroVMResolverSymlinks(t *testing.T) {
 			if err := os.WriteFile(filepath.Join(dir, "hosts.tar"), data.Bytes(), 0o600); err != nil {
 				t.Fatal(err)
 			}
-			layout := "FROM " + openshell.DefaultBaseImage + " AS dc-complete\nADD hosts.tar /\n" +
+			layout := microVMResolverFixtureStage(t, dir) + "FROM " + openshell.DefaultBaseImage + " AS dc-complete\nADD hosts.tar /\n" +
 				microVMResolverCopyStep() + microVMResolverStep(openshell.DefaultBaseImage)
 			if err := os.WriteFile(filepath.Join(dir, "Dockerfile"), []byte(layout), 0o600); err != nil {
 				t.Fatal(err)
@@ -336,7 +369,7 @@ func TestMicroVMResolverUnprobeableImage(t *testing.T) {
 					t.Fatal(err)
 				}
 			}
-			layout := "FROM " + openshell.DefaultBaseImage + " AS dc-complete\nCOPY hosts /etc/hosts\n" +
+			layout := microVMResolverFixtureStage(t, dir) + "FROM " + openshell.DefaultBaseImage + " AS dc-complete\nCOPY hosts /etc/hosts\n" +
 				microVMResolverCopyStep() + tc.change +
 				microVMResolverStep(openshell.DefaultBaseImage)
 			if err := os.WriteFile(filepath.Join(dir, "Dockerfile"), []byte(layout), 0o600); err != nil {
@@ -401,6 +434,14 @@ func localDocker(t *testing.T) {
 			t.Skipf("local Docker/BuildKit and the pinned base are needed: %v", err)
 		}
 	}
+}
+
+func microVMResolverFixtureStage(t *testing.T, dir string) string {
+	t.Helper()
+	if err := os.WriteFile(filepath.Join(dir, "localhost-resolver.c"), microVMResolverSource, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	return microVMResolverToolStage()
 }
 
 func dockerCommand(t *testing.T, args ...string) *exec.Cmd {

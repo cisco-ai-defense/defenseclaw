@@ -308,8 +308,15 @@ func TestMicroVMGuestResolverUsesLibcWithProjectPythonModule(t *testing.T) {
 		}
 	}
 	imageDir := t.TempDir()
-	imageFile := "FROM " + openshell.DefaultBaseImage + "\nUSER root\n" +
-		"COPY --from=" + openshell.DefaultBaseImage + " --chown=0:0 --chmod=0755 /usr/bin/getent /usr/local/lib/defenseclaw/localhost-getent\nUSER sandbox\n"
+	source, err := os.ReadFile(filepath.Join("..", "image", "testdata", "localhost-resolver.c"))
+	must(t, err)
+	must(t, os.WriteFile(filepath.Join(imageDir, "localhost-resolver.c"), source, 0o600))
+	imageFile := "FROM " + openshell.DefaultBaseImage + " AS dc-localhost-tool\n" +
+		"COPY localhost-resolver.c /tmp/localhost-resolver.c\n" +
+		"RUN gcc -O2 -Wall -Wextra -Werror -o /tmp/localhost-resolver /tmp/localhost-resolver.c\n" +
+		"FROM " + openshell.DefaultBaseImage + "\nUSER root\n" +
+		"RUN install -d -o root -g root -m 0755 /usr/local/lib/defenseclaw\n" +
+		"COPY --from=dc-localhost-tool --chown=0:0 --chmod=0755 /tmp/localhost-resolver /usr/local/lib/defenseclaw/localhost-resolver\nUSER sandbox\n"
 	if err := os.WriteFile(filepath.Join(imageDir, "Dockerfile"), []byte(imageFile), 0o600); err != nil {
 		t.Fatal(err)
 	}
@@ -327,9 +334,9 @@ func TestMicroVMGuestResolverUsesLibcWithProjectPythonModule(t *testing.T) {
 		{"alternate project module", "203.0.113.10 localhost\n", `AF_INET = 2
 def getaddrinfo(host, port, family=0, type=0, proto=0, flags=0):
     return [(2, 1, 6, "", ("127.0.0.1", 0))]
-`, "", "did not return only 127.0.0.1"},
+`, "", "could not resolve localhost"},
 		{"custom caller benign", "127.0.0.1 localhost\n", "# project module\n", "203.0.113.10", ""},
-		{"custom caller protected", "203.0.113.10 localhost\n", "# project module\n", "127.0.0.1", "did not return only 127.0.0.1"},
+		{"custom caller protected", "203.0.113.10 localhost\n", "# project module\n", "127.0.0.1", "could not resolve localhost"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			dir := t.TempDir()
@@ -372,6 +379,28 @@ def getaddrinfo(host, port, family=0, type=0, proto=0, flags=0):
 			}
 		})
 	}
+	t.Run("mutable hosts checked again", func(t *testing.T) {
+		hosts := filepath.Join(t.TempDir(), "hosts")
+		argv := verifyArgv(verifyRecord{}, true)
+		check := func(want string) {
+			t.Helper()
+			args := []string{"run", "--rm", "--network=bridge", "--user", "1000:1000",
+				"--mount", "type=bind,src=" + hosts + ",dst=/etc/hosts,readonly",
+				"--entrypoint", argv[0], imageTag}
+			args = append(args, argv[1:]...)
+			out, err := exec.CommandContext(t.Context(), "docker", args...).Output()
+			must(t, err)
+			facts, err := parseWorkloadFacts(out)
+			must(t, err)
+			if problem := microVMResolverProblem(facts); !strings.Contains(problem, want) || (want == "" && problem != "") {
+				t.Fatalf("resolver problem = %q, want %q", problem, want)
+			}
+		}
+		must(t, os.WriteFile(hosts, []byte("127.0.0.1 localhost\n"), 0o644))
+		check("")
+		must(t, os.WriteFile(hosts, []byte("198.51.100.10 localhost\n"), 0o644))
+		check("could not resolve localhost")
+	})
 }
 
 // The check runs in an empty environment with every tool by absolute path:
@@ -436,7 +465,7 @@ func TestWorkloadCheckRunsNothingFromThePath(t *testing.T) {
 	if !vmFacts.LocalhostReported {
 		t.Fatal("VM workload check omitted the resolver result")
 	}
-	if _, err := os.Stat("/usr/local/lib/defenseclaw/localhost-getent"); err == nil {
+	if _, err := os.Stat("/usr/local/lib/defenseclaw/localhost-resolver"); err == nil {
 		if problem := microVMResolverProblem(vmFacts); problem != "" {
 			t.Fatalf("VM workload check: %s", problem)
 		}
