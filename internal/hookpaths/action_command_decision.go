@@ -146,7 +146,9 @@ func actionSimpleEnvTextDisplay(command string) bool {
 		return false
 	}
 	literal := strings.TrimSuffix(strings.TrimPrefix(rest, "'"), suffix)
-	return !strings.ContainsAny(literal, "'\r\n")
+	// cmd.exe does not treat single quotes as quoting. Its control and
+	// expansion characters must not hide a second command in the text.
+	return !strings.ContainsAny(literal, "'\"\r\n&|<>()^%!")
 }
 
 func actionConcreteProtectedWrite(command, cwd, home string) bool {
