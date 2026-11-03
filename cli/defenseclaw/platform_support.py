@@ -107,7 +107,8 @@ WINDOWS_CONNECTOR_SUPPORT: dict[str, ConnectorPlatformSupport] = {
     ),
     "opencode": ConnectorPlatformSupport(
         SUPPORTED,
-        "OpenCode V2 and the DefenseClaw plugin are supported on native Windows x64 using the reviewed @opencode/cli contract.",
+        "OpenCode V2 and the DefenseClaw plugin are supported on native Windows x64 "
+        "using the reviewed @opencode/cli contract.",
     ),
     "amp": ConnectorPlatformSupport(
         SUPPORTED,
@@ -195,7 +196,8 @@ def connector_platform_support(
         if resolved_os in {"linux", "darwin"}:
             return ConnectorPlatformSupport(
                 SUPPORTED,
-                "OpenCode V2 and the DefenseClaw plugin are supported on Linux and macOS using the reviewed @opencode/cli contract.",
+                "OpenCode V2 and the DefenseClaw plugin are supported on Linux and macOS "
+                "using the reviewed @opencode/cli contract.",
             )
         return ConnectorPlatformSupport(
             PREVIEW,
