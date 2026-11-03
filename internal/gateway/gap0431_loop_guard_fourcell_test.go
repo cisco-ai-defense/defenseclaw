@@ -33,6 +33,10 @@ func TestGAP0431LoopDestinationGuardsFourCell(t *testing.T) {
 		{"L6-copy-ordinary", `for f in ordinary; do cp a.txt "$f/../out2.txt"; done`, "allow"},
 		{"L6-quoted-copy", `src=a.txt; for f in keylink; do cp "$src" "$f"; done`, "block"},
 		{"L6-environment-source", `for f in keylink; do cp "$src" "$f"; done`, "block"},
+		{"L6-special-source-index", `OPTIND=; for f in keylink; do cp "$OPTIND" "$f"; done`, "block"},
+		{"L6-special-source-seconds", `SECONDS=; for f in keylink; do cp "$SECONDS" "$f"; done`, "block"},
+		{"L6-option-after-separator", `src=-n; for f in keylink; do cp -- "$src" "$f"; done`, "block"},
+		{"L6-joined-option-separator", `src=-n; for f in keylink; do cp "-"'-' "$src" "$f"; done`, "block"},
 	} {
 		payload := f.payload(t, row.command)
 		header := f.clientHeader(t, payload)
@@ -70,6 +74,13 @@ func TestGAP0431ManagedLoopBenignSources(t *testing.T) {
 	for _, command := range []string{
 		`for f in keylink; do cp "$(printf '')" "$f"; done`,
 		`src=; for f in keylink; do cp "$src" "$f"; done`,
+		`src=-n; for f in keylink; do cp "$src" "$f"; done`,
+		`src=-f; for f in keylink; do cp "$src" "$f"; done`,
+		`src=--help; for f in keylink; do cp "$src" "$f"; done`,
+		`REPLY=; for f in keylink; do cp "$REPLY" "$f"; done`,
+		`OPTARG=; for f in keylink; do cp "$OPTARG" "$f"; done`,
+		`BASH_ENV=; for f in keylink; do cp "$BASH_ENV" "$f"; done`,
+		`IFS=; for f in keylink; do cp "$IFS" "$f"; done`,
 		`src=a.txt; for f in keylink; do mv a.txt "$f"; done`,
 	} {
 		payload := f.payload(t, command)

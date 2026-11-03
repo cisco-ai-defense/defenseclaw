@@ -212,6 +212,11 @@ func actionClientLoopCopyDestination(call *syntax.CallExpr, assignments actionVa
 	}
 	sourceWord := call.Args[len(call.Args)-2]
 	source, fixed := StaticWord(sourceWord, home)
+	endOfOptions := false
+	if len(call.Args) > 3 {
+		option, fixed := StaticWord(call.Args[len(call.Args)-3], home)
+		endOfOptions = fixed && option == "--"
+	}
 	if !fixed {
 		if base != "cp" && base != "gcp" || len(sourceWord.Parts) != 1 {
 			return nil, false
@@ -219,16 +224,37 @@ func actionClientLoopCopyDestination(call *syntax.CallExpr, assignments actionVa
 		if _, quoted := sourceWord.Parts[0].(*syntax.DblQuoted); !quoted {
 			return nil, false
 		}
-		if value, known := actionWordValue(sourceWord, assignments, cwd, home); known && value == "" &&
-			!actionClientLoopCopySourceStartupUnknown() {
-			return nil, false
+		if value, known := actionWordValue(sourceWord, assignments, cwd, home); known &&
+			!actionClientLoopCopySourceVariableMayChange(sourceWord) && !actionClientLoopCopySourceStartupUnknown() {
+			if value == "" || strings.HasPrefix(value, "-") && !endOfOptions {
+				return nil, false
+			}
 		}
 		return call.Args[len(call.Args)-1], true
 	}
-	if source == "" || strings.HasPrefix(source, "-") || strings.ContainsAny(source, "*?[]\x00\x1f") {
+	if source == "" || strings.HasPrefix(source, "-") && !endOfOptions || strings.ContainsAny(source, "*?[]\x00\x1f") {
 		return nil, false
 	}
 	return call.Args[len(call.Args)-1], true
+}
+
+func actionClientLoopCopySourceVariableMayChange(word *syntax.Word) bool {
+	mayChange := false
+	syntax.Walk(word, func(node syntax.Node) bool {
+		if param, ok := node.(*syntax.ParamExp); ok && param.Param != nil {
+			// These values can be refreshed by Bash after a plain assignment.
+			// Other assigned shell variables keep their known empty value
+			// throughout the admitted straight-line loop.
+			switch param.Param.Value {
+			case "_", "BASHPID", "BASH_ARGC", "BASH_COMMAND", "BASH_SUBSHELL", "COLUMNS", "DIRSTACK",
+				"EPOCHREALTIME", "EPOCHSECONDS", "EUID", "GROUPS", "HISTCMD", "LINENO", "LINES",
+				"OPTIND", "PIPESTATUS", "PPID", "RANDOM", "SECONDS", "SHELLOPTS", "SRANDOM", "UID":
+				mayChange = true
+			}
+		}
+		return !mayChange
+	})
+	return mayChange
 }
 
 func actionClientLoopCopySourceStartupUnknown() bool {
