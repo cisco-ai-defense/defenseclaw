@@ -65,15 +65,25 @@ func (e *perIPLimiterEntry) lastSeen() time.Time {
 // scripts (claude-code-hook.sh / codex-hook.sh / inspect-*.sh) all loop
 // through localhost and would otherwise self-throttle and stall the agent.
 //
-// The map of per-IP limiters is swept periodically (every minute) to evict
-// entries idle for >5 minutes, keeping memory bounded under sustained
-// scans of the IPv4/IPv6 address space (the `sync.Map` plus rate.Limiter
-// pair is ~200 bytes per IP).
+// Entries idle for >5 minutes are evicted, keeping memory bounded under
+// sustained scans of the IPv4/IPv6 address space (the `sync.Map` plus
+// rate.Limiter pair is ~200 bytes per IP). The eviction sweep runs at most
+// once a minute and only when a non-loopback request arrives: entries are
+// only added by such requests, so the bound is the same as a timer's, and
+// the middleware owns no goroutine. A sweeper goroutine with its own ticker
+// had no way to stop, so every APIServer route table built (each test
+// server, each managed hook socket) leaked one (rel-1-0-6:GAP-0550).
 //
 // rps and burst are intentionally small for /api/v1/inspect/* — see plan
 // F19/A2: a misbehaving / compromised local agent should never be able to
 // blast the inspect path; legitimate hook callers send <1 req/s per agent.
 func perIPRateLimiter(rps, burst int) func(http.Handler) http.Handler {
+	return newPerIPRateLimiter(rps, burst, time.Now, nil)
+}
+
+// newPerIPRateLimiter is perIPRateLimiter with an injectable clock; swept,
+// when set, is told how many entries each eviction sweep dropped (tests).
+func newPerIPRateLimiter(rps, burst int, now func() time.Time, swept func(evicted int)) func(http.Handler) http.Handler {
 	if rps <= 0 {
 		rps = 1
 	}
@@ -81,23 +91,29 @@ func perIPRateLimiter(rps, burst int) func(http.Handler) http.Handler {
 		burst = rps
 	}
 	limiters := &sync.Map{}
-	now := func() time.Time { return time.Now() }
 	const idleEviction = 5 * time.Minute
 	const sweepInterval = 1 * time.Minute
-
-	go func() {
-		ticker := time.NewTicker(sweepInterval)
-		defer ticker.Stop()
-		for range ticker.C {
-			cutoff := now().Add(-idleEviction)
-			limiters.Range(func(k, v interface{}) bool {
-				if e, ok := v.(*perIPLimiterEntry); ok && e.lastSeen().Before(cutoff) {
-					limiters.Delete(k)
-				}
-				return true
-			})
+	var lastSweep atomic.Int64
+	lastSweep.Store(now().UnixNano())
+	sweep := func(current time.Time) {
+		last := lastSweep.Load()
+		if current.UnixNano()-last < int64(sweepInterval) ||
+			!lastSweep.CompareAndSwap(last, current.UnixNano()) {
+			return
 		}
-	}()
+		cutoff := current.Add(-idleEviction)
+		evicted := 0
+		limiters.Range(func(k, v interface{}) bool {
+			if e, ok := v.(*perIPLimiterEntry); ok && e.lastSeen().Before(cutoff) {
+				limiters.Delete(k)
+				evicted++
+			}
+			return true
+		})
+		if swept != nil {
+			swept(evicted)
+		}
+	}
 
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -105,6 +121,8 @@ func perIPRateLimiter(rps, burst int) func(http.Handler) http.Handler {
 				next.ServeHTTP(w, r)
 				return
 			}
+			current := now()
+			sweep(current)
 			ip := clientIPForLimiter(r)
 			if ip == "" {
 				// Unparseable RemoteAddr — refuse rather than fail open;
@@ -113,10 +131,10 @@ func perIPRateLimiter(rps, burst int) func(http.Handler) http.Handler {
 				return
 			}
 			fresh := &perIPLimiterEntry{limiter: rate.NewLimiter(rate.Limit(rps), burst)}
-			fresh.touch(now())
+			fresh.touch(current)
 			val, _ := limiters.LoadOrStore(ip, fresh)
 			entry := val.(*perIPLimiterEntry)
-			entry.touch(now())
+			entry.touch(current)
 			if !entry.limiter.Allow() {
 				writeJSONRefusal(w, `{"error":"rate limit exceeded"}`, http.StatusTooManyRequests)
 				return
