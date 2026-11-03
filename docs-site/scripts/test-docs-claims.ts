@@ -628,6 +628,14 @@ describe('Amp rejected command display', () => {
 });
 
 describe('setup and rollback recovery guides', () => {
+  it('shows the release floor and the supported rollback sequence (GAP-0086)', () => {
+    const lifecycle = page('enterprise/lifecycle.mdx');
+    assert.match(lifecycle, /`bundle status` shows the floor as `current\.min_product_version`/);
+    assert.match(lifecycle, /deliver a bundle signed with a lower `--min-product-version` before installing the older release/);
+    assert.match(lifecycle, /confirmed floor must be unset or 1\.0\.4 or lower/);
+    assert.match(lifecycle, /check that the release you install meets the floor first/);
+  });
+
   it('says a refused Cursor action setup makes no change and gives an explicit observe command', () => {
     const setup = readFileSync(join(repo, 'cli/defenseclaw/commands/cmd_setup.py'), 'utf8');
     assert.ok(setup.includes('connector was not detected locally; refusing action-mode hook setup.'));
