@@ -3553,6 +3553,7 @@ var actionWindowsDisplaySinks = map[string]bool{
 	"out-host": true, "oh": true, "out-null": true, "out-string": true, "out-default": true,
 	"format-table": true, "ft": true, "format-list": true, "fl": true, "format-wide": true, "fw": true,
 	"format-custom": true, "fc": true, "select-string": true, "sls": true, "findstr": true, "grep": true, "more": true,
+	"cat": true,
 }
 
 // actionWindowsSinkParameters are the parameters a display sink may carry
@@ -3619,7 +3620,11 @@ func actionWindowsPrintOnlyDisplays(scan actionWindowsScanResult, start, end int
 		if words[k] == "env" && k+2 < len(words) && words[k+1] == "-S" && words[k+2] == "cat -n" &&
 			(k+3 == len(words) || words[k+3] == "|" || words[k+3] == ";" || words[k+3] == "&" || words[k+3] == "&&" || words[k+3] == "||") {
 			k += 2
-		} else if !actionWindowsDisplaySinks[programBase(words[k])] {
+		} else if !actionWindowsDisplaySinks[programBase(words[k])] ||
+			programBase(words[k]) == "cat" &&
+				(words[k] != "cat" || !actionWindowsDisplayBindingStable(words[:start])) {
+			// An explicit path or an earlier binding change cannot prove
+			// the named display command's behavior.
 			return false
 		}
 		// A sink stage that keeps or forwards what it shows (-OutVariable,
@@ -3676,6 +3681,24 @@ func actionWindowsPipelineShellReader(words []string, end int) bool {
 		}
 	}
 	return false
+}
+
+// A named display command keeps its usual meaning only when earlier
+// statements in the same call leave command bindings unchanged.
+func actionWindowsDisplayBindingStable(words []string) bool {
+	start := 0
+	for i, word := range words {
+		switch word {
+		case ";", "|", "||", "&", "&&":
+		default:
+			continue
+		}
+		if i > start && !powerShellReadBindingsUnchanged(strings.Join(words[start:i], " ")) {
+			return false
+		}
+		start = i + 1
+	}
+	return start >= len(words) || powerShellReadBindingsUnchanged(strings.Join(words[start:], " "))
 }
 
 // actionWindowsNestedArgument reports a statement words[start:end] with an
