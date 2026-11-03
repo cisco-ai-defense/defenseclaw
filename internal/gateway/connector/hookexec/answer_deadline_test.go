@@ -238,9 +238,8 @@ func TestToolCallKeepsItsBudgetWhileTheGatewayWaitsOnARemoteScanner(t *testing.T
 	}
 }
 
-// A per-user hook applies its fail mode at the end of the answer budget:
-// closed blocks and names the cause; open is the account's own choice.
-func TestPerUserToolCallAppliesItsFailModeWhenTheGatewayDoesNotAnswer(t *testing.T) {
+// A gateway that gives no decision leaves a tool call closed in either mode.
+func TestPerUserToolCallWithoutGatewayDecisionStaysClosed(t *testing.T) {
 	shortAnswerBudget(t, 300*time.Millisecond)
 	closed, elapsed := runAgainstGateway(t, "codex", hungGateway(t), func(opts *Options) { opts.FailMode = "closed" })
 	if elapsed > time.Second || !blocked(closed) || !strings.Contains(closed.stderr, "did not answer in time") {
@@ -248,8 +247,8 @@ func TestPerUserToolCallAppliesItsFailModeWhenTheGatewayDoesNotAnswer(t *testing
 			elapsed, closed.code, closed.stdout, closed.stderr)
 	}
 	open, elapsed := runAgainstGateway(t, "claudecode", hungGateway(t), func(opts *Options) { opts.FailMode = "open" })
-	if elapsed > time.Second || open.code != 0 || !strings.Contains(open.stdout, "did not answer in time") {
-		t.Fatalf("open: after %s code=%d stdout=%q stderr=%q, want the notice", elapsed, open.code, open.stdout, open.stderr)
+	if elapsed > time.Second || !blocked(open) || !strings.Contains(open.stderr, "did not answer in time") {
+		t.Fatalf("open: after %s code=%d stdout=%q stderr=%q, want a bounded closed answer", elapsed, open.code, open.stdout, open.stderr)
 	}
 }
 

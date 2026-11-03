@@ -11,7 +11,6 @@ import (
 	"net/http"
 	"net/http/httptrace"
 	"strings"
-	"sync/atomic"
 	"syscall"
 	"testing"
 	"time"
@@ -100,7 +99,7 @@ func TestPerUserRestartOutlastingTheBudgetFollowsTheOutageMode(t *testing.T) {
 // whose gateway took it and did not answer, with no refusal, is the hung
 // gateway, closed in every fail mode (GAP-2279); and a managed call's answer
 // does not change when the per-user outage is reported.
-func TestPerUserNoAnswerFollowsTheCurrentMode(t *testing.T) {
+func TestPerUserNoAnswerStaysClosed(t *testing.T) {
 	previousLogWait := answerWatchdogLogWait
 	answerWatchdogLogWait = time.Minute
 	t.Cleanup(func() { answerWatchdogLogWait = previousLogWait })
@@ -110,19 +109,17 @@ func TestPerUserNoAnswerFollowsTheCurrentMode(t *testing.T) {
 		stdout, stderr := newClaimedStopWriter(), newClaimedStopWriter()
 		exited := make(chan int, 1)
 		opts := perUserRestartOptions(home, "open", false, stdout, stderr, func(code int) { exited <- code })
-		opts.peerStatus = &atomic.Int32{}
 		w := prepareAnswerWatchdog(&opts, sp, "open", time.Time{})
 		if !nativeAnswerBlocks(w.fallbackCode, string(w.fallbackOut)) {
 			t.Fatal("a deadline before verified gateway contact must stay closed")
 		}
-		opts.markVerifiedNoStatus(sp)
 		code, shown := fireAnswerDeadline(t, w, exited, stdout, stderr)
-		if nativeAnswerBlocks(code, stdout.String()) || !strings.Contains(shown, "did not answer in time") {
-			t.Fatalf("exit %d answer %q, want the open did-not-answer warning", code, shown)
+		if !nativeAnswerBlocks(code, stdout.String()) || !strings.Contains(shown, "did not answer in time") {
+			t.Fatalf("exit %d answer %q, want the closed no-answer result", code, shown)
 		}
 		rows := claimedStopRows(t, home)
-		if len(rows) != 1 || rows[0].Reason != perUserGatewayNoAnswerReason || rows[0].Outcome != "fail_open" {
-			t.Fatalf("rows %+v, want one fail_open %q row", rows, perUserGatewayNoAnswerReason)
+		if len(rows) != 1 || rows[0].Reason != perUserGatewayNoAnswerReason || rows[0].Outcome != "fail_closed" {
+			t.Fatalf("rows %+v, want one fail_closed %q row", rows, perUserGatewayNoAnswerReason)
 		}
 	})
 	t.Run("per-user deadline before contact", func(t *testing.T) {
@@ -130,7 +127,6 @@ func TestPerUserNoAnswerFollowsTheCurrentMode(t *testing.T) {
 		stdout, stderr := newClaimedStopWriter(), newClaimedStopWriter()
 		exited := make(chan int, 1)
 		opts := perUserRestartOptions(home, "open", false, stdout, stderr, func(code int) { exited <- code })
-		opts.peerStatus = &atomic.Int32{}
 		w := prepareAnswerWatchdog(&opts, sp, "open", time.Time{})
 		code, shown := fireAnswerDeadline(t, w, exited, stdout, stderr)
 		if !nativeAnswerBlocks(code, shown) {
@@ -270,7 +266,7 @@ func TestPerUserRunRefusedThenStalledFollowsTheOutageMode(t *testing.T) {
 	}{
 		{"refused then stalled, open tier", []string{"refused", "stall"}, "open", false, "restarting or not running", perUserGatewayRestartingReason, "fail_open"},
 		{"refused then stalled, strict tier", []string{"refused", "stall"}, "closed", true, "restarting or not running", perUserGatewayRestartingReason, "fail_closed"},
-		{"stalled with no refusal, open tier", []string{"stall"}, "open", false, "did not answer", perUserGatewayNoAnswerReason, "fail_open"},
+		{"stalled with no refusal, open tier", []string{"stall"}, "open", true, "did not answer", perUserGatewayNoAnswerReason, "fail_closed"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			// The call's own time ends before its answer deadline, so the

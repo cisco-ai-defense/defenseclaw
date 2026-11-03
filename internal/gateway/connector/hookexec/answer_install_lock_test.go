@@ -11,6 +11,7 @@ import (
 	"strings"
 	"sync"
 	"sync/atomic"
+	"syscall"
 	"testing"
 	"time"
 )
@@ -271,7 +272,7 @@ func TestPerUserInstallLockThatCannotBeReadIsHeld(t *testing.T) {
 	}
 }
 
-func TestVerifiedNoAnswerWatchdogChecksInstallStartedAfterContact(t *testing.T) {
+func TestPerUserOutageWatchdogChecksInstallStartedAfterRefusal(t *testing.T) {
 	home := t.TempDir()
 	watchdog := &answerWatchdog{}
 	opts := Options{
@@ -280,16 +281,15 @@ func TestVerifiedNoAnswerWatchdogChecksInstallStartedAfterContact(t *testing.T) 
 		FailMode:          "open",
 		Home:              home,
 		OutageFailModeNow: func() string { return "open" },
-		peerStatus:        &atomic.Int32{},
 		answerWatch:       watchdog,
 	}
-	opts.markVerifiedNoStatus(specs["claudecode"])
+	watchdog.perUserOutageSeen(opts, specs["claudecode"], "open", syscall.ECONNREFUSED)
 	if watchdog.installCheck == nil || watchdog.installCheck() {
-		t.Fatal("verified no-answer did not prepare a future install check")
+		t.Fatal("outage did not prepare a future install check")
 	}
 	mkdirInstallLock(t, home)
 	if !watchdog.installCheck() || !nativeAnswerBlocks(watchdog.installCode, string(watchdog.installOut)) {
-		t.Fatal("an install started after verified contact did not close the deadline answer")
+		t.Fatal("an install started after a refusal did not close the deadline answer")
 	}
 }
 

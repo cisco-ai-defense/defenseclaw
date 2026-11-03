@@ -22,7 +22,7 @@ import (
 // (gatewayRestartBudget), dial, accepted call without an answer, and resends
 // after a 429 or 401 all share the call's deadline. Managed and strict hooks
 // close at the deadline; a per-user hook follows its configured outage mode
-// only when a verified gateway gave no HTTP status.
+// only for a proven gateway outage. A request with no decision stays closed.
 //
 // The agent may wait at most 5 s for DefenseClaw, and the deadline itself
 // runs late on a loaded host: the answer is written by a process that the
@@ -251,7 +251,7 @@ func toolGateEvent(connector, event string) bool {
 // lets the hook send its receipt after the answer deadline without the
 // deadline canceling the HTTP request. watch, when set, takes the ceiling
 // at the 102. A zero deadline returns ctx unchanged.
-func awaitAnswerBy(ctx context.Context, deadline, ceiling time.Time, watch *answerWatchdog, onInterim func()) (watched context.Context, stop, stopResponse, release func()) {
+func awaitAnswerBy(ctx context.Context, deadline, ceiling time.Time, watch *answerWatchdog) (watched context.Context, stop, stopResponse, release func()) {
 	if deadline.IsZero() {
 		noop := func() {}
 		return ctx, noop, noop, noop
@@ -272,9 +272,6 @@ func awaitAnswerBy(ctx context.Context, deadline, ceiling time.Time, watch *answ
 		watch.answered()
 	}
 	trace := &httptrace.ClientTrace{Got1xxResponse: func(code int, _ textproto.MIMEHeader) error {
-		if onInterim != nil {
-			onInterim()
-		}
 		if code == HookProgressStatus {
 			progressOnce.Do(func() {
 				close(progressed)
@@ -316,25 +313,14 @@ func gatewayNoAnswer(ctx context.Context) bool {
 	return errors.Is(context.Cause(ctx), errGatewayNoAnswer)
 }
 
-// noAnswerFailMode applies the current per-user outage choice only when a
-// verified gateway gave no HTTP status before the answer deadline. Local
-// budget exhaustion, an earlier HTTP error, managed hooks and an install
-// window stay closed. An early watchdog has no current-mode resolver until
-// Run adopts it; the adopted watchdog stays closed until verified contact.
+// noAnswerFailMode keeps a call with no gateway decision closed. A proven
+// outage has its own answer path; socket contact alone does not prove one.
+// Secure Client retains its established fail-mode behavior.
 func noAnswerFailMode(opts Options, failMode string) string {
-	if opts.answerSpentLocally || opts.answeredErrorStatus != 0 || opts.ManagedEnterprise {
-		return "closed"
-	}
 	if opts.SecureClient {
 		return failMode
 	}
-	// Peer contact checks precede the install-lock read: watchdog arming
-	// must not wait on a filesystem path before it can start its timer.
-	if opts.ManagedUnixSocket != "" || opts.StrictAvailability || opts.OutageFailModeNow == nil ||
-		opts.peerStatus == nil || opts.peerStatus.Load() != 1 || perUserInstallWindow(opts) {
-		return "closed"
-	}
-	return normalizeFailMode(opts.OutageFailModeNow())
+	return "closed"
 }
 
 func failNoAnswer(opts Options, sp spec, failMode string) int {

@@ -5,7 +5,7 @@ package hookexec
 
 import (
 	"strings"
-	"sync/atomic"
+	"syscall"
 	"testing"
 	"time"
 )
@@ -18,9 +18,8 @@ func TestRV518NoAnswerWarningOncePerSession(t *testing.T) {
 		exited := make(chan int, 1)
 		opts := perUserRestartOptions(home, "open", false, stdout, stderr, func(code int) { exited <- code })
 		opts.failurePayload = []byte(`{"session_id":"same-session","tool_call_id":"call"}`)
-		opts.peerStatus = &atomic.Int32{}
 		w := prepareAnswerWatchdog(&opts, sp, "open", time.Time{})
-		opts.markVerifiedNoStatus(sp)
+		w.perUserOutageSeen(opts, sp, "open", syscall.ECONNREFUSED)
 		code, shown := fireAnswerDeadline(t, w, exited, stdout, stderr)
 		if code != 0 {
 			t.Fatalf("call %d returned code %d", i, code)

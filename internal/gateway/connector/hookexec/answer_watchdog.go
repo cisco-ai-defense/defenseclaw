@@ -40,8 +40,8 @@ var installLockCheckWait = 100 * time.Millisecond
 // answer reaches the agent. On Windows the watchdog waits on its own thread
 // at the highest priority of the process (answerDeadlineWaiter), so
 // ordinary-priority work that fills the CPU does not delay it. Its result
-// follows the effective no-answer mode after verified gateway contact;
-// before contact it is closed. Once the call logged a closed failure (an
+// stays closed without a gateway decision. A proven outage may use the
+// account's outage mode. Once the call logged a closed failure (an
 // unverified gateway peer, an invalid runtime) it is that call's closed
 // answer in every fail mode (claimFailureLog). While this account's
 // installer holds its data directory (.install.lock) the answer is closed
@@ -290,32 +290,6 @@ func (w *answerWatchdog) adopt(opts *Options, sp spec, failMode string) {
 	}
 	w.fallbackOut, w.fallbackErr, w.fallbackCode, w.logFailure = stdout, stderr, code, logFailure
 	w.visibleOutage = nil
-	w.installCheck, w.installOut, w.installErr, w.installCode, w.installLogFailure =
-		installCheck, installOut, installErr, installCode, installLogFailure
-}
-
-// peerVerifiedNoAnswer replaces the prepared closed no-answer result after
-// the transport has proved the socket and before any HTTP status arrives.
-func (w *answerWatchdog) peerVerifiedNoAnswer(opts Options, sp spec) {
-	mode := noAnswerFailMode(opts, "closed")
-	// Keep the rendered answer and the deadline's install check on the same
-	// outage choice. An installer may take the lock after peer verification.
-	opts.OutageFailModeNow = func() string { return mode }
-	stdout, stderr, code, logFailure := renderNoAnswer(opts, sp, mode)
-	installCheck, installOut, installErr, installCode, installLogFailure := renderInstallAnswer(opts, sp, mode)
-	w.mu.Lock()
-	defer w.mu.Unlock()
-	if w.fired || w.claimedAnswer || w.closedKnown {
-		return
-	}
-	w.fallbackOut, w.fallbackErr, w.fallbackCode, w.logFailure = stdout, stderr, code, logFailure
-	w.visibleOutage = nil
-	if mode == "open" {
-		outage := withPerUserOutage(opts)
-		w.visibleOutage = func() ([]byte, []byte, int) {
-			return renderVisibleOutage(outage, sp, mode, perUserGatewayNoAnswerReason)
-		}
-	}
 	w.installCheck, w.installOut, w.installErr, w.installCode, w.installLogFailure =
 		installCheck, installOut, installErr, installCode, installLogFailure
 }

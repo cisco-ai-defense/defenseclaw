@@ -331,9 +331,6 @@ type Options struct {
 	// itself (newPerUserHookHTTPClient), so the listener table describes the
 	// endpoint the call dials (perUserInstallWindowWithoutListener).
 	perUserLoopbackDial bool
-	// peerStatus is 1 after verified contact with no HTTP status and 2 after
-	// any HTTP status. Only state 1 may use the outage mode.
-	peerStatus *atomic.Int32
 	// HookContractID is the finite Setup-selected connector contract bound into
 	// the protected native Windows command. Codex uses it to prevent local
 	// failure paths from backfilling newer lifecycle controls into legacy tiers.
@@ -673,9 +670,6 @@ func runHook(ctx context.Context, opts Options) int {
 	// missing answer is not the gateway's outage, and fail mode open does not
 	// apply to it (final review, P2).
 	opts.answerSpentLocally = gatewayAnswerWindowShort(opts, deadline)
-	if !opts.ManagedEnterprise && opts.ManagedUnixSocket == "" && !opts.SecureClient {
-		opts.peerStatus = &atomic.Int32{}
-	}
 	switch {
 	case opts.answerWatch != nil && deadline.IsZero():
 		// The hook command armed the watchdog for an event that is not a
@@ -937,8 +931,7 @@ func doRequest(ctx context.Context, opts Options, sp spec, failMode string, payl
 	// within the hook's process cap. Per-user calls keep their existing
 	// invocation-based deadline.
 	opts.answerBy = gatewayAnswerDeadline(opts, opts.StartedAt, time.Now())
-	ctx, stopAnswer, stopResponseDeadline, releaseAnswer := awaitAnswerBy(ctx, opts.answerBy, progressCeiling(opts, opts.StartedAt), opts.answerWatch,
-		func() { opts.markHTTPStatus(sp) })
+	ctx, stopAnswer, stopResponseDeadline, releaseAnswer := awaitAnswerBy(ctx, opts.answerBy, progressCeiling(opts, opts.StartedAt), opts.answerWatch)
 	ctx, stopWatch, releaseWatch := watchManagedGatewayStarts(ctx, opts, restartDeadline)
 	// Reuse the account, session, asset facts and resolved write paths on
 	// every retry of this call.
@@ -1583,7 +1576,6 @@ func sendHookRequest(
 	req = req.WithContext(httptrace.WithClientTrace(req.Context(), &httptrace.ClientTrace{
 		GotConn: func(httptrace.GotConnInfo) {
 			connected.Store(true)
-			opts.markVerifiedNoStatus(sp)
 		},
 	}))
 	resp, err := opts.HTTPClient.Do(req)
@@ -1597,7 +1589,6 @@ func sendHookRequest(
 		return nil, markConnectedTimeout(err, connected.Load())
 	}
 	// Headers are a gateway response even if its body has not arrived yet.
-	opts.markHTTPStatus(sp)
 	if delivery != nil {
 		// A 103 after the capability wait still asks for a receipt; the
 		// gateway reads the released marker instead and takes none.
@@ -2453,27 +2444,6 @@ func emitFailOpenAllow(opts Options, sp spec, reason string) int {
 func withPerUserOutage(opts Options) Options {
 	opts.perUserOutage = !opts.ManagedEnterprise && opts.ManagedUnixSocket == "" && !opts.SecureClient
 	return opts
-}
-
-// markVerifiedNoStatus makes the current per-user outage mode available to
-// the watchdog only after the request reached its verified gateway socket.
-func (opts Options) markVerifiedNoStatus(sp spec) {
-	if opts.peerStatus == nil || !opts.peerStatus.CompareAndSwap(0, 1) {
-		return
-	}
-	if opts.answerWatch != nil {
-		opts.answerWatch.peerVerifiedNoAnswer(opts, sp)
-	}
-}
-
-func (opts Options) markHTTPStatus(sp spec) {
-	if opts.peerStatus == nil {
-		return
-	}
-	opts.peerStatus.Store(2)
-	if opts.answerWatch != nil {
-		opts.answerWatch.closeForAnsweredError(opts, sp)
-	}
 }
 
 // perUserOutageError reports a per-user transport error that is a gateway
