@@ -22,11 +22,6 @@
 
 #define HOSTS_LIMIT (1 << 20)
 
-static int alias_char(unsigned char c) {
-    return (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') ||
-           (c >= '0' && c <= '9') || c == '.' || c == '_' || c == '-';
-}
-
 static int localhost_alias(const char *s) {
     const char *name = "localhost";
     for (; *s && *name; s++, name++) {
@@ -37,8 +32,9 @@ static int localhost_alias(const char *s) {
     return *s == 0 && *name == 0;
 }
 
-// The file check applies to nonempty image hosts files. It keeps a
-// localhost entry with only an IPv6 address from satisfying the IPv4 check.
+// The file check distinguishes an IPv6-only localhost entry from an IPv4
+// entry. libc can otherwise synthesize an IPv4 answer from ::1. Other file
+// syntax is decided by the resolver below.
 static int hosts_file_valid(void) {
     FILE *f = fopen("/etc/hosts", "rb");
     if (f == NULL) return 0;
@@ -48,56 +44,33 @@ static int hosts_file_valid(void) {
     int good = !ferror(f) && n <= HOSTS_LIMIT;
     fclose(f);
     if (!good) { free(data); return 0; }
-
-    for (size_t i = 0; i < n; i++) {
-        unsigned char c = (unsigned char)data[i];
-        if (c == 0 || (c < 32 && c != '\n' && c != '\r' && c != '\t') ||
-            (c == '\r' && (i + 1 == n || data[i + 1] != '\n'))) {
-            free(data);
-            return 0;
-        }
-    }
     data[n] = 0;
-    int named = 0, ipv4 = 0;
+    int named_v6 = 0, named_v4 = 0;
     for (char *line = data; line < data + n;) {
-        char *end = strchr(line, '\n');
+        char *end = memchr(line, '\n', (size_t)(data + n - line));
         if (end == NULL) end = data + n;
         else *end = 0;
         if (end > line && end[-1] == '\r') end[-1] = 0;
 
         char *save = NULL;
-        char *address = strtok_r(line, " \t", &save);
+        char *address = strtok_r(line, " \t\v\f\r", &save);
         if (address != NULL && address[0] != '#') {
             unsigned char parsed[sizeof(struct in6_addr)];
-            int family = inet_pton(AF_INET, address, parsed) == 1 ? AF_INET : AF_INET6;
-            int valid_address = family == AF_INET || inet_pton(AF_INET6, address, parsed) == 1;
-            if (strcmp(address, "include") == 0) good = 0;
-            for (const unsigned char *p = (const unsigned char *)address; *p; p++) {
-                if (*p > 127) good = 0;
-            }
-            int aliases = 0;
-            for (char *alias = strtok_r(NULL, " \t", &save); alias != NULL;
-                 alias = strtok_r(NULL, " \t", &save)) {
+            int is_v4 = inet_pton(AF_INET, address, parsed) == 1;
+            int is_v6 = inet_pton(AF_INET6, address, parsed) == 1;
+            for (char *alias = strtok_r(NULL, " \t\v\f\r", &save); alias != NULL;
+                 alias = strtok_r(NULL, " \t\v\f\r", &save)) {
                 if (alias[0] == '#') break;
-                for (const unsigned char *p = (const unsigned char *)alias; *p; p++) {
-                    if (!alias_char(*p)) good = 0;
-                }
                 if (localhost_alias(alias)) {
-                    named = 1;
-                    if (!valid_address) good = 0;
-                    if (family == AF_INET) {
-                        if (strcmp(address, "127.0.0.1") != 0) good = 0;
-                        else ipv4 = 1;
-                    }
+                    named_v4 |= is_v4;
+                    named_v6 |= is_v6;
                 }
-                aliases++;
             }
-            if (aliases == 0 && valid_address) good = 0;
         }
         line = end == data + n ? data + n : end + 1;
     }
     free(data);
-    return good && (!named || ipv4);
+    return !(named_v6 && !named_v4);
 }
 
 int main(void) {
