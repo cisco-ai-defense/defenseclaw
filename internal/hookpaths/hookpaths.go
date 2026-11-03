@@ -6836,9 +6836,10 @@ func powerShellReadOnlySubexpressions(text string) (string, bool) {
 						j++
 					}
 				case '\'', '"':
-					if innerQuote == 0 {
+					switch innerQuote {
+					case 0:
 						innerQuote = text[j]
-					} else if innerQuote == text[j] {
+					case text[j]:
 						innerQuote = 0
 					}
 				case '(':
