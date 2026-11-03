@@ -247,12 +247,28 @@ func actionConcreteProtectedWriteOnWithOperands(command, cwd, home string, windo
 		patches, _ := ApplyPatchWriteTargets("Bash", nil, command, cwd, home)
 		writes = append(writes, patches...)
 	}
-	writes = append(writes, touchBraceWriteOperands(command, home)...)
+	if parsed {
+		writes = append(writes, touchBraceWriteOperands(command, home, file)...)
+	}
 	msys := func(value string) string {
 		if windowsHome && runtime.GOOS == "windows" {
 			return actionMSYSDrivePath(value) // Git Bash /c/... (GAP-0781 RV8-1)
 		}
 		return value
+	}
+	// One plain touch call with a single fixed brace operand has no other
+	// write or directory step. The batch proof covered every expanded name.
+	if parsed && len(file.Stmts) == 1 {
+		stmt := file.Stmts[0]
+		if call, ok := stmt.Cmd.(*syntax.CallExpr); ok && !stmt.Background && !stmt.Negated &&
+			len(stmt.Redirs) == 0 && len(call.Assigns) == 0 && len(call.Args) == 2 &&
+			actionWordHasBraceText(call.Args[1]) {
+			if program, fixed := StaticWord(call.Args[0], home); fixed &&
+				(programBase(program) == "touch" || programBase(program) == "gtouch") &&
+				actionMissingSimpleTargets(writes, cwd, protected, ssh, memo) {
+				return false
+			}
+		}
 	}
 	// The new name of a disk link to the keys file that the command moves
 	// does not exist on the disk yet (rel-1-0-6:GAP-0045), nor does the

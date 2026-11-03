@@ -91,6 +91,10 @@ func TestGAP0431LoopCopyProofGuards(t *testing.T) {
 		{"L6-quoted-copy-source", `for f in authorized_keys; do cp "$src" "$HOME/.ssh/$f"; done`, true},
 		{"L6-assigned-copy-source", `src=a.txt; for f in authorized_keys; do cp "$src" "$HOME/.ssh/$f"; done`, true},
 		{"L6-empty-copy-source", `src=; for f in authorized_keys; do cp "$src" "$HOME/.ssh/$f"; done`, false},
+		{"L6-empty-unset-default", `src=; for f in authorized_keys; do cp "${src-a.txt}" "$HOME/.ssh/$f"; done`, false},
+		{"L6-empty-null-alternative", `src=; for f in authorized_keys; do cp "${src:+a.txt}" "$HOME/.ssh/$f"; done`, false},
+		{"L6-empty-required", `src=; for f in authorized_keys; do cp "${src?missing}" "$HOME/.ssh/$f"; done`, false},
+		{"L6-empty-substring", `src=; for f in authorized_keys; do cp "${src:0:1}" "$HOME/.ssh/$f"; done`, false},
 		{"L6-loop-source-overwrites-empty", `src=; for src in authorized_keys; do cp "$src" "$HOME/.ssh/$src"; done`, true},
 		{"L6-dynamic-move-source", `for f in authorized_keys; do mv "$src" "$HOME/.ssh/$f"; done`, false},
 		{"L6-option-source", `src=-n; for f in authorized_keys; do cp "$src" "$HOME/.ssh/$f"; done`, false},
@@ -100,6 +104,7 @@ func TestGAP0431LoopCopyProofGuards(t *testing.T) {
 		{"L6-special-source-seconds", `SECONDS=; for f in authorized_keys; do cp "$SECONDS" "$HOME/.ssh/$f"; done`, true},
 		{"L6-empty-reply", `REPLY=; for f in authorized_keys; do cp "$REPLY" "$HOME/.ssh/$f"; done`, false},
 		{"L6-empty-option-argument", `OPTARG=; for f in authorized_keys; do cp "$OPTARG" "$HOME/.ssh/$f"; done`, false},
+		{"L6-two-loops-protected-second", `for f in ordinary; do cp a.txt "$f"; done; for f in authorized_keys; do cp a.txt "$HOME/.ssh/$f"; done`, true},
 	}
 	for _, row := range rows {
 		t.Run(row.name, func(t *testing.T) {

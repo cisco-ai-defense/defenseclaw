@@ -208,12 +208,8 @@ func actionWordHasBraceText(word *syntax.Word) bool {
 // (rel-1-0-6:GAP-0233). They are not listed in the client target map, so a
 // long benign touch cannot overflow it (GAP-0151). The values of -d, -r and
 // -t (and --date, --reference, --time) are not files touch writes.
-func touchBraceWriteOperands(command, home string) []string {
-	if !strings.Contains(command, "touch") || !strings.Contains(command, "{") {
-		return nil
-	}
-	file, ok := parseShell(command)
-	if !ok {
+func touchBraceWriteOperands(command, home string, file *syntax.File) []string {
+	if file == nil || !strings.Contains(command, "touch") || !strings.Contains(command, "{") {
 		return nil
 	}
 	var operands []string

@@ -314,7 +314,13 @@ func actionPosixTargetMention(command, cwd, home string, depth int, stateOnly bo
 				// moved file under that name (rel-1-0-6:GAP-0217).
 				readOnly := !stateOnly && actionKnownReadOnlyShell(&syntax.File{Stmts: []*syntax.Stmt{stmt}}, home)
 				readsReplaced := len(replacedEntries) > 0 && readOnly
-				if strings.Contains(command, "{") && actionOversizedTouchOperands(call, home, effectiveCWD, check) {
+				var quick func([]string) bool
+				if !stateOnly {
+					quick = func(fields []string) bool {
+						return actionMissingSimpleTargets(fields, effectiveCWD, protected, ssh, memo)
+					}
+				}
+				if strings.Contains(command, "{") && actionOversizedTouchOperands(call, home, effectiveCWD, check, quick) {
 					found = true
 					return false
 				}
@@ -1584,6 +1590,11 @@ func (g *actionGlobs) answer(pattern string) string {
 // actionGlobFacts expands, as the user, each pathname pattern the action
 // target scan of command checks, and returns the answers for the gateway.
 func actionGlobFacts(command, cwd, home string) map[string]string {
+	// A pathname pattern needs a glob metacharacter or an expansion that
+	// can produce one. Fixed brace ranges alone cannot add a glob.
+	if !strings.ContainsAny(command, "*?[$`") {
+		return nil
+	}
 	globs := &actionGlobs{record: map[string]string{}}
 	actionProtectedTargetMentionDepth(command, cwd, home, 0, false, globs)
 	return globs.record

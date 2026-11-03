@@ -109,6 +109,7 @@ func TestGAP0431StartupSourceKeepsLinkedDestination(t *testing.T) {
 	for _, command := range []string{
 		`for f in keylink; do cp "$(printf '')" "$f"; done`,
 		`src=; for f in keylink; do cp "$src" "$f"; done`,
+		`src=; for f in keylink; do cp "${src-a.txt}" "$f"; done`,
 	} {
 		payload := f.payload(t, command)
 		header := f.clientHeader(t, payload)
