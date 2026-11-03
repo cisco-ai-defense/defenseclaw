@@ -1536,12 +1536,12 @@ func enterpriseHookExcusedFailures(state enterpriseHookGuardianState) (removed, 
 			continue
 		}
 		switch {
+		case enterpriseHookAccountLinkRow(row):
+			linked++
 		case enterpriseHookRemovedAccountRow(row):
 			removed++
 		case enterpriseHookAwaitingSignInRow(row):
 			awaiting++
-		case enterpriseHookAccountLinkRow(row):
-			linked++
 		default:
 			return 0, 0, 0
 		}
