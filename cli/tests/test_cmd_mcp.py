@@ -40,6 +40,7 @@ from defenseclaw.enforce.policy import PolicyEngine
 from defenseclaw.models import ActionState, Finding, ScanResult
 
 from tests.helpers import cleanup_app, make_app_context, make_separate_stderr_runner
+from tests.os_view import os_view
 
 
 class MCPCommandTestBase(unittest.TestCase):
@@ -1749,7 +1750,7 @@ class TestMCPScan(MCPCommandTestBase):
             (0x001F01FF, 1, 0x03, "S-1-5-32-544"),
         ]
         with (
-            patch.object(fp.os, "name", "nt"),
+            patch.object(fp, "os", os_view("nt")),
             patch.object(fp, "_windows_current_user_sid", return_value=me),
             patch.object(fp, "_windows_acl_snapshot", side_effect=lambda _path: (me, False, entries)),
             patch.object(fp, "_windows_dacl_is_protected", return_value=True),

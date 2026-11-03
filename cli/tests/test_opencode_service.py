@@ -9,6 +9,8 @@ import pytest
 from click.testing import CliRunner
 from defenseclaw import opencode_service
 
+from tests.os_view import os_view
+
 pytestmark = pytest.mark.skipif(sys.platform == "win32", reason="POSIX shell fake; Windows keeps the documented command")
 
 
@@ -56,7 +58,7 @@ def test_account_binary_is_only_an_opencode_v2(monkeypatch, version, found):
 
     monkeypatch.setattr(agent_discovery, "discover_with_probes", discover)
     assert opencode_service.account_binary() == ("/u/.npm-global/bin/opencode" if found else "")
-    monkeypatch.setattr(opencode_service.os, "name", "nt")
+    monkeypatch.setattr(opencode_service, "os", os_view("nt"))
     assert opencode_service.account_binary() == ""
 
 

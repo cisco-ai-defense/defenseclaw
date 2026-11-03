@@ -47,6 +47,8 @@ from defenseclaw.observability.local_stack import (
     read_grafana_access_mode,
 )
 
+from tests.os_view import os_view
+
 
 def _secure_compose_model() -> dict[str, object]:
     return {
@@ -1268,7 +1270,7 @@ def test_command_runner_timeout_preserves_bounded_diagnostics() -> None:
     process.stdout = io.BytesIO(b"")
     process.stderr = io.BytesIO(b"partial-\x90")
     with (
-        patch("defenseclaw.observability.local_stack.os.name", "posix"),
+        patch("defenseclaw.observability.local_stack.os", os_view("posix")),
         patch(
             "defenseclaw.observability.local_stack.subprocess.Popen",
             return_value=process,
@@ -1305,7 +1307,7 @@ def test_command_runner_keyboard_interrupt_cancels_process_group() -> None:
     process.poll.return_value = None
     process.wait.side_effect = [KeyboardInterrupt(), 0]
     with (
-        patch("defenseclaw.observability.local_stack.os.name", "posix"),
+        patch("defenseclaw.observability.local_stack.os", os_view("posix")),
         patch(
             "defenseclaw.observability.local_stack.subprocess.Popen",
             return_value=process,

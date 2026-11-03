@@ -55,6 +55,8 @@ from defenseclaw.doctor_hooks import (
     validate_windows_hook_registration,
 )
 
+from tests.os_view import os_view
+
 
 class WindowsHookDoctorTests(unittest.TestCase):
     def test_codex_bom_config_is_read_by_hook_inspectors(self) -> None:
@@ -2424,7 +2426,7 @@ class WindowsHookDoctorTests(unittest.TestCase):
         )
         with (
             patch.dict(sys.modules, {"winreg": fake_winreg}),
-            patch("defenseclaw.doctor_hooks.os.name", "nt"),
+            patch("defenseclaw.doctor_hooks.os", os_view("nt")),
         ):
             policy = _read_claude_registry_policy("HKEY_LOCAL_MACHINE")
         self.assertEqual(policy, {"allowManagedHooksOnly": True})
@@ -2433,7 +2435,7 @@ class WindowsHookDoctorTests(unittest.TestCase):
         fake_winreg.QueryValueEx.return_value = ("   ", 3)
         with (
             patch.dict(sys.modules, {"winreg": fake_winreg}),
-            patch("defenseclaw.doctor_hooks.os.name", "nt"),
+            patch("defenseclaw.doctor_hooks.os", os_view("nt")),
         ):
             policy = _read_claude_registry_policy("HKEY_LOCAL_MACHINE")
         self.assertIsNone(policy)

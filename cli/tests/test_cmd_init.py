@@ -47,6 +47,7 @@ from defenseclaw.inventory import agent_discovery
 from defenseclaw.inventory.agent_discovery import AgentDiscovery, AgentSignal
 
 from tests.helpers import record_test_setup_agent_selections
+from tests.os_view import os_view
 
 
 def test_init_health_probe_refuses_an_unverified_gateway() -> None:
@@ -4168,14 +4169,14 @@ class TestMultiConnectorInit(unittest.TestCase):
         from defenseclaw.commands import cmd_init
 
         with patch.object(cmd_init.terminal_checkbox, "stdout_is_tty", return_value=True), \
-                patch.object(cmd_init.os, "name", "nt"):
+                patch.object(cmd_init.terminal_checkbox, "os", os_view("nt")):
             self.assertTrue(cmd_init._supports_terminal_redraw())
 
     def test_checkbox_windows_terminal_hint_keeps_redraw_when_stdout_is_wrapped(self):
         from defenseclaw.commands import cmd_init
 
         with patch.object(cmd_init.terminal_checkbox, "stdout_is_tty", return_value=False), \
-                patch.object(cmd_init.os, "name", "nt"), \
+                patch.object(cmd_init.terminal_checkbox, "os", os_view("nt")), \
                 patch.dict(cmd_init.os.environ, {"WT_SESSION": "test-session"}, clear=True):
             self.assertTrue(cmd_init._supports_terminal_redraw())
 

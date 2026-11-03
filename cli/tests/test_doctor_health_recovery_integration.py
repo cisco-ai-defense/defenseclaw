@@ -33,6 +33,7 @@ from defenseclaw.doctor_gateway import ListenerEvidence
 from defenseclaw.doctor_health import ComponentEvidence, HealthStatus
 from defenseclaw.doctor_recovery import DeviceKeyHealthStatus, inspect_device_key
 
+from tests.os_view import os_view
 from tests.permissions import set_known_windows_directory_acl
 
 
@@ -881,9 +882,9 @@ def test_moved_audit_store_report_names_the_archive_not_a_file_with_an_archive_n
 
 def test_archive_header_repair_names_a_command_for_the_platform(monkeypatch) -> None:
     # GAP-0647: the recovery hint repairs a zeroed header on the copy, with a command the host has.
-    monkeypatch.setattr(cmd_doctor.os, "name", "posix")
+    monkeypatch.setattr(cmd_doctor, "os", os_view("posix"))
     assert "dd of=<copy> bs=16 count=1 conv=notrunc" in cmd_doctor._archive_header_repair()
-    monkeypatch.setattr(cmd_doctor.os, "name", "nt")
+    monkeypatch.setattr(cmd_doctor, "os", os_view("nt"))
     windows = cmd_doctor._archive_header_repair()
     assert "PowerShell" in windows and "[IO.File]::OpenWrite('<copy>')" in windows and "dd of=" not in windows
 
