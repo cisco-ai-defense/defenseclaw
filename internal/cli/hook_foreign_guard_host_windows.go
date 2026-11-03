@@ -35,5 +35,5 @@ func platformHookForeignGuardSummaryDirTrusted(dir string) error {
 	if !info.IsDir() {
 		return fmt.Errorf("machine policy summary directory %s is not a directory", dir)
 	}
-	return managed.ValidateTrustedRuntimeDir(dir, "machine policy summary directory")
+	return managed.ValidateTrustedRuntimeDirStandalone(dir, "machine policy summary directory")
 }

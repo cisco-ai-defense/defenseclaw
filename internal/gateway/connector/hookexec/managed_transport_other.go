@@ -18,6 +18,12 @@ import (
 // protected gateway LaunchDaemon on macOS or systemd service on Linux before
 // net/http writes a credential or event. The Unix lifecycle also uses it for
 // an older gateway whose hook socket cannot answer /health.
+// managedEnterpriseHTTPClientFor is managedEnterpriseHTTPClient; the profile
+// only changes the Windows stopped-service port check.
+func managedEnterpriseHTTPClientFor(timeout time.Duration, apiAddr, serviceName string, _ bool) (*http.Client, error) {
+	return managedEnterpriseHTTPClient(timeout, apiAddr, serviceName)
+}
+
 func managedEnterpriseHTTPClient(timeout time.Duration, apiAddr, serviceName string) (*http.Client, error) {
 	host, rawPort, err := net.SplitHostPort(apiAddr)
 	if err != nil || host != "127.0.0.1" {

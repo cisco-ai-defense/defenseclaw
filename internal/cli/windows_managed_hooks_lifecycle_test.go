@@ -100,7 +100,8 @@ func TestWindowsManagedHooksLifecycleCommandIsHiddenAndBounded(t *testing.T) {
 		actions = append(actions, child.Name())
 	}
 	if !slices.Equal(actions, []string{
-		"capture", "classify-activation", "collect", "restore", "retire", "retire-committed",
+		"capture", "classify-activation", "collect", "prune-orphaned-selectors",
+		"restore", "retire", "retire-committed",
 	}) {
 		t.Fatalf("actions = %v", actions)
 	}
@@ -939,8 +940,8 @@ func TestValidateLegacyWindowsManagedHooksGuardianActivationIsExact(t *testing.T
 	}
 
 	for name, mutate := range map[string]func(*enterpriseHookGuardianActivation, *enterpriseHookGuardianAuthorization, *enterpriseHookGuardianState){
-		"manifest digest": func(value *enterpriseHookGuardianActivation, _ *enterpriseHookGuardianAuthorization, _ *enterpriseHookGuardianState) {
-			value.ManifestSHA256 = strings.Repeat("b", 64)
+		"malformed manifest digest": func(value *enterpriseHookGuardianActivation, _ *enterpriseHookGuardianAuthorization, _ *enterpriseHookGuardianState) {
+			value.ManifestSHA256 = "not-a-digest"
 		},
 		"stale target": func(value *enterpriseHookGuardianActivation, _ *enterpriseHookGuardianAuthorization, _ *enterpriseHookGuardianState) {
 			value.ProtectedTargets[0].SID = "S-1-5-21-111-222-333-1099"
@@ -1047,7 +1048,7 @@ func TestValidateWindowsManagedHooksGuardianActivationBindsDeferredPendingSubset
 		PendingCount: 1,
 		Results:      []enterpriseHookReconcileRow{active, pending},
 	}
-	pendingTargets, err := validateWindowsManagedHooksGuardianActivation(
+	pendingTargets, failedTargets, err := validateWindowsManagedHooksGuardianActivation(
 		activation,
 		authorization,
 		state,
@@ -1060,11 +1061,14 @@ func TestValidateWindowsManagedHooksGuardianActivationBindsDeferredPendingSubset
 	if len(pendingTargets) != 1 || pendingTargets[0] != ctx.targets[1] {
 		t.Fatalf("pending targets = %+v", pendingTargets)
 	}
+	if len(failedTargets) != 0 {
+		t.Fatalf("failed targets = %+v, want none for a healthy Guardian", failedTargets)
+	}
 
 	unauthorized := ctx
 	unauthorized.targets = append([]windowsManagedHooksTeardownTarget(nil), ctx.targets...)
 	unauthorized.targets[1].Deferred = false
-	if _, err := validateWindowsManagedHooksGuardianActivation(
+	if _, _, err := validateWindowsManagedHooksGuardianActivation(
 		activation,
 		authorization,
 		state,
@@ -1084,7 +1088,7 @@ func TestValidateWindowsManagedHooksGuardianActivationBindsDeferredPendingSubset
 		SID:       pending.SID,
 		OK:        true,
 	})
-	if _, err := validateWindowsManagedHooksGuardianActivation(
+	if _, _, err := validateWindowsManagedHooksGuardianActivation(
 		tamperedActivation,
 		authorization,
 		state,
@@ -1101,7 +1105,7 @@ func TestValidateWindowsManagedHooksGuardianActivationBindsDeferredPendingSubset
 		UserHome:  `C:\Users\bob`,
 		DataDir:   ctx.targets[1].DataDir,
 	}
-	if _, err := validateWindowsManagedHooksGuardianActivation(
+	if _, _, err := validateWindowsManagedHooksGuardianActivation(
 		activation,
 		authorization,
 		tamperedState,
@@ -1225,23 +1229,86 @@ func TestRestoreWindowsManagedHooksLifecycleSelectorsCompensatesPartialRestore(t
 	originalRestore := windowsManagedHooksLifecycleSelectorRestore
 	t.Cleanup(func() { windowsManagedHooksLifecycleSelectorRestore = originalRestore })
 	var calls []string
+	var expected []enterprisehooks.WindowsManagedRuntimeSelectorCAS
 	injected := errors.New("injected Cursor selector restore failure")
+	// Each successful restore reports a published CAS that differs from its
+	// snapshot, as when an entry with an unloadable bundle was dropped.
+	reducedCAS := func(connectorName string) enterprisehooks.WindowsManagedRuntimeSelectorCAS {
+		return enterprisehooks.WindowsManagedRuntimeSelectorCAS{
+			Exists: true,
+			SHA256: "sha256:reduced-" + connectorName,
+		}
+	}
 	windowsManagedHooksLifecycleSelectorRestore = func(
 		opts enterprisehooks.WindowsManagedRuntimeSelectorFullRestoreOptions,
-	) error {
+	) (enterprisehooks.WindowsManagedRuntimeSelectorCAS, error) {
 		calls = append(calls, opts.Snapshot.Connector)
+		expected = append(expected, opts.ExpectedCurrent)
 		if len(calls) == 3 {
-			return injected
+			return enterprisehooks.WindowsManagedRuntimeSelectorCAS{}, injected
 		}
-		return nil
+		return reducedCAS(opts.Snapshot.Connector), nil
 	}
-	err := restoreWindowsManagedHooksLifecycleSelectors(prior, current)
+	_, err := restoreWindowsManagedHooksLifecycleSelectors(prior, current)
 	if !errors.Is(err, injected) {
 		t.Fatalf("selector restore error = %v, want injected failure", err)
 	}
 	wantCalls := []string{"claudecode", "codex", "cursor", "codex", "claudecode"}
 	if !slices.Equal(calls, wantCalls) {
 		t.Fatalf("selector restore calls = %v, want %v", calls, wantCalls)
+	}
+	// The compensating restores expect what was actually published.
+	if expected[3] != reducedCAS("codex") || expected[4] != reducedCAS("claudecode") {
+		t.Fatalf("compensating restores expected %+v, want the published reduced CAS", expected[3:])
+	}
+}
+
+func TestRestoreWindowsManagedHooksLifecycleSelectorsReturnsPublishedCAS(t *testing.T) {
+	prior := make([]enterprisehooks.WindowsManagedRuntimeSelectorSnapshot, 0, 3)
+	current := make([]enterprisehooks.WindowsManagedRuntimeSelectorSnapshot, 0, 3)
+	for _, connectorName := range windowsManagedHooksLifecycleSelectorConnectors {
+		prior = append(prior, enterprisehooks.WindowsManagedRuntimeSelectorSnapshot{
+			SchemaVersion:  1,
+			Connector:      connectorName,
+			Existed:        true,
+			Selector:       []byte("prior-" + connectorName),
+			SelectorSHA256: "sha256:prior-" + connectorName,
+			CAS: enterprisehooks.WindowsManagedRuntimeSelectorCAS{
+				Exists: true,
+				SHA256: "sha256:prior-" + connectorName,
+			},
+		})
+		current = append(current, enterprisehooks.WindowsManagedRuntimeSelectorSnapshot{
+			SchemaVersion: 1,
+			Connector:     connectorName,
+		})
+	}
+	originalRestore := windowsManagedHooksLifecycleSelectorRestore
+	t.Cleanup(func() { windowsManagedHooksLifecycleSelectorRestore = originalRestore })
+	var expected []enterprisehooks.WindowsManagedRuntimeSelectorCAS
+	windowsManagedHooksLifecycleSelectorRestore = func(
+		opts enterprisehooks.WindowsManagedRuntimeSelectorFullRestoreOptions,
+	) (enterprisehooks.WindowsManagedRuntimeSelectorCAS, error) {
+		expected = append(expected, opts.ExpectedCurrent)
+		return enterprisehooks.WindowsManagedRuntimeSelectorCAS{
+			Exists: true,
+			SHA256: "sha256:reduced-" + opts.Snapshot.Connector,
+		}, nil
+	}
+	published, err := restoreWindowsManagedHooksLifecycleSelectors(prior, current)
+	if err != nil {
+		t.Fatalf("restore selectors: %v", err)
+	}
+	// A compensating restore of current over the published selectors must
+	// expect the published CAS, not the prior snapshot's.
+	expected = nil
+	if _, err := restoreWindowsManagedHooksLifecycleSelectorsExpecting(current, prior, published); err != nil {
+		t.Fatalf("compensating restore: %v", err)
+	}
+	for index, connectorName := range windowsManagedHooksLifecycleSelectorConnectors {
+		if expected[index].SHA256 != "sha256:reduced-"+connectorName {
+			t.Fatalf("compensating restore of %s expected %+v, want the published CAS", connectorName, expected[index])
+		}
 	}
 }
 
@@ -1387,7 +1454,7 @@ func TestReadWindowsManagedHooksLifecycleCursorTargetsRestoresAChangedAdapter(t 
 // selector the guardian could not read) is still refused, and the refusal
 // names the row and the guardian's own error so the operator knows what to
 // repair before the uninstall commits.
-func TestWindowsManagedHooksGuardianRefusalNamesTheFailedRow(t *testing.T) {
+func TestWindowsManagedHooksGuardianFailedRowIsAcceptedAndAnAmbiguousOneNamed(t *testing.T) {
 	manifestSHA256 := strings.Repeat("a", 64)
 	ctx := windowsManagedHooksLifecycleContext{
 		manifestPath: `C:\ProgramData\DefenseClaw\hook-guardian\targets.yaml`,
@@ -1435,14 +1502,26 @@ func TestWindowsManagedHooksGuardianRefusalNamesTheFailedRow(t *testing.T) {
 		FailureCount: 1,
 		Results:      results,
 	}
-	_, err := validateWindowsManagedHooksGuardianActivation(activation, authorization, state, ctx, manifestSHA256)
+	// A failed row with its reconcile error is a valid disposition: teardown
+	// records it as possibly wired instead of refusing.
+	_, failed, err := validateWindowsManagedHooksGuardianActivation(activation, authorization, state, ctx, manifestSHA256)
+	if err != nil {
+		t.Fatalf("a failed guardian row with its error was refused: %v", err)
+	}
+	if len(failed) != 1 || failed[0].Connector != "codex" || failed[0].SID != "S-1-5-21-111-222-333-1001" {
+		t.Fatalf("failed targets = %+v, want the codex row", failed)
+	}
+
+	// A failed row with no error is ambiguous, and the refusal names it.
+	state.Results[1].Error = ""
+	_, _, err = validateWindowsManagedHooksGuardianActivation(activation, authorization, state, ctx, manifestSHA256)
 	if err == nil {
-		t.Fatal("a failed guardian row was accepted for teardown")
+		t.Fatal("a failed guardian row with no error was accepted for teardown")
 	}
 	for _, want := range []string{
 		"ambiguous target disposition",
 		"codex target S-1-5-21-111-222-333-1001",
-		"managed runtime selector targets are not strictly sorted",
+		"no error recorded",
 	} {
 		if !strings.Contains(err.Error(), want) {
 			t.Fatalf("refusal %q does not name %q", err, want)

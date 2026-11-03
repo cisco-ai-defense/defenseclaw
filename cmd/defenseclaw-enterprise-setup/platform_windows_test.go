@@ -8,6 +8,8 @@ package main
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"os"
@@ -16,10 +18,12 @@ import (
 	"runtime"
 	"strings"
 	"testing"
+	"testing/fstest"
 	"time"
 
 	"golang.org/x/sys/windows"
 
+	"github.com/defenseclaw/defenseclaw/internal/managed"
 	"github.com/defenseclaw/defenseclaw/internal/winpath"
 )
 
@@ -322,7 +326,7 @@ func TestStandaloneSetupReportsMalformedInputPathsAsInvalidArguments(t *testing.
 		`%ProgramData%\config.yaml`,
 		filepath.Join(t.TempDir(), "missing", "config.yaml"),
 	} {
-		_, err := validateEnterpriseSetupInput(value, "config")
+		_, err := validateEnterpriseSetupInput(value, "config", true)
 		if err == nil {
 			t.Fatalf("%q accepted", value)
 		}
@@ -334,15 +338,16 @@ func TestStandaloneSetupReportsMalformedInputPathsAsInvalidArguments(t *testing.
 			t.Fatalf("%q: Secure Client error changed: %v", value, secureClient)
 		}
 	}
-	// An existing input that fails the trust check stays a 1603 security
-	// refusal for the Secure Client Setup. The standalone Setup refuses it
-	// as every config the lifecycle will not take (1639) and names the
-	// account and safe staging step, not a bare SID (GAP-0528, GAP-1112).
+	// A trust refusal stays a 1603 security refusal for the Secure Client
+	// Setup. The standalone Setup, which keeps the full trusted-path walk,
+	// refuses an existing input that fails it as every config the lifecycle
+	// will not take (1639) and names the account and safe staging step, not a
+	// bare SID (GAP-0528, GAP-1112).
 	untrusted := filepath.Join(t.TempDir(), "config.yaml")
 	if err := os.WriteFile(untrusted, []byte("x"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	_, err := validateEnterpriseSetupInput(untrusted, "config")
+	_, err := validateEnterpriseSetupInput(untrusted, "config", true)
 	var invalid enterpriseSetupInvalidArguments
 	if err == nil || errors.As(standaloneEnterpriseSetupInputError(false, err), &invalid) {
 		t.Fatalf("untrusted config: %v", err)
@@ -352,6 +357,62 @@ func TestStandaloneSetupReportsMalformedInputPathsAsInvalidArguments(t *testing.
 		!strings.Contains(standalone.Error(), "Copy the config into a dedicated administrator-only staging folder") ||
 		strings.Contains(strings.ToLower(standalone.Error()), "icacls") || strings.Contains(standalone.Error(), "access mask") {
 		t.Fatalf("standalone untrusted config error = %v", standalone)
+	}
+}
+
+// The Secure Client Setup trusts the administrator who ran it as the owner
+// and writer of the CONFIG and MANIFEST it was handed and treats the folders
+// above them as advisory (26.8.4). The standalone Setup keeps the full
+// trusted-path walk, and a link stays refused by both.
+func TestSecureClientSetupInputTrustsTheInvokingAdministrator(t *testing.T) {
+	user, err := windows.GetCurrentProcessToken().GetTokenUser()
+	if err != nil || user == nil || user.User.Sid == nil {
+		t.Fatalf("GetTokenUser: %v", err)
+	}
+	sid := user.User.Sid.String()
+	parent := filepath.Join(t.TempDir(), "handed")
+	if err := os.Mkdir(parent, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	// Standard users can replace children of the folder: an untrusted
+	// ancestor. The file itself is the administrator's own.
+	setEnterpriseSetupTestDACL(t, parent, "D:P(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)(A;OICI;FA;;;"+sid+")(A;;FA;;;BU)")
+	config := filepath.Join(parent, "config.yaml")
+	if err := os.WriteFile(config, []byte("x"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	setEnterpriseSetupTestDACL(t, config, "D:P(A;;FA;;;SY)(A;;FA;;;BA)(A;;FA;;;"+sid+")")
+	if _, err := validateEnterpriseSetupInput(config, "config", false); err != nil {
+		t.Fatalf("Secure Client Setup refused the administrator's own config: %v", err)
+	}
+	if _, err := validateEnterpriseSetupInput(config, "config", true); err == nil {
+		t.Fatal("standalone Setup accepted a config below a folder standard users can change")
+	}
+	link := filepath.Join(parent, "link.yaml")
+	if err := os.Symlink(config, link); err != nil {
+		t.Logf("symbolic links are unavailable here, link case not run: %v", err)
+		return
+	}
+	for _, standalone := range []bool{false, true} {
+		if _, err := validateEnterpriseSetupInput(link, "config", standalone); err == nil {
+			t.Fatalf("standalone=%t accepted a symlinked config", standalone)
+		}
+	}
+}
+
+func setEnterpriseSetupTestDACL(t *testing.T, path, sddl string) {
+	t.Helper()
+	descriptor, err := windows.SecurityDescriptorFromString(sddl)
+	if err != nil {
+		t.Fatalf("parse %s: %v", sddl, err)
+	}
+	dacl, _, err := descriptor.DACL()
+	if err != nil {
+		t.Fatalf("DACL of %s: %v", sddl, err)
+	}
+	if err := windows.SetNamedSecurityInfo(path, windows.SE_FILE_OBJECT,
+		windows.DACL_SECURITY_INFORMATION|windows.PROTECTED_DACL_SECURITY_INFORMATION, nil, nil, dacl, nil); err != nil {
+		t.Fatalf("set the DACL of %s: %v", path, err)
 	}
 }
 
@@ -506,7 +567,7 @@ func TestEnterpriseLifecycleArgumentsHandEnsureTheSetupTimeout(t *testing.T) {
 // GAP-0165: the recovering /ensure after a killed Setup kept the killed run's
 // staging folder (about 700 MB of payload), because it was younger than the
 // 30-minute bar. With a pending transaction the bar is not waited for; a
-// folder a live Setup holds (holdEnterpriseSetupStage, or a lifecycle's
+// folder a live Setup holds (its stage pin, or a lifecycle's
 // working directory) is still kept, and without a pending transaction a young
 // folder is kept as before.
 func TestRecoveringSetupTakesTheStoppedRunsYoungStage(t *testing.T) {
@@ -533,7 +594,7 @@ func TestRecoveringSetupTakesTheStoppedRunsYoungStage(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	hold, err := holdEnterpriseSetupStage(live)
+	hold, err := managed.PinSetupPath(live, managed.SetupPathDirectory)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -557,11 +618,102 @@ func TestRecoveringSetupTakesTheStoppedRunsYoungStage(t *testing.T) {
 		t.Fatalf("progress = %q", progress.String())
 	}
 	// Released, it is an ordinary stopped run's stage.
-	if err := windows.CloseHandle(hold); err != nil {
+	if err := hold.Close(); err != nil {
 		t.Fatal(err)
 	}
 	removeStaleEnterpriseSetupStages(programData, time.Now(), 0, &progress, &diagnostics)
 	if _, err := os.Stat(live); !errors.Is(err, os.ErrNotExist) {
 		t.Fatalf("a released stage stayed: %v", err)
+	}
+}
+
+func TestIsEnterpriseSetupStagingChildAcceptsOnlyCapabilityDirectories(t *testing.T) {
+	programData, err := winpath.TrustedProgramData()
+	if err != nil {
+		t.Skipf("ProgramData unavailable: %v", err)
+	}
+	const capability = "0123456789abcdef0123456789abcdef"
+	cisco := filepath.Join(programData, "Cisco")
+	for name, test := range map[string]struct {
+		root, parent string
+		want         bool
+	}{
+		"ProgramData":         {filepath.Join(programData, enterpriseSetupStagePrefix+capability), programData, true},
+		"ProgramData Cisco":   {filepath.Join(cisco, enterpriseSetupStagePrefix+capability), cisco, true},
+		"wrong parent":        {filepath.Join(programData, "Other", enterpriseSetupStagePrefix+capability), filepath.Join(programData, "Other"), false},
+		"parent mismatch":     {filepath.Join(cisco, enterpriseSetupStagePrefix+capability), programData, false},
+		"short capability":    {filepath.Join(programData, enterpriseSetupStagePrefix+"0123"), programData, false},
+		"ProgramData itself":  {programData, filepath.Dir(programData), false},
+		"other staging names": {filepath.Join(programData, "DefenseClaw-PowerShell-"+capability), programData, false},
+	} {
+		if got := isEnterpriseSetupStagingChild(test.root, test.parent); got != test.want {
+			t.Fatalf("%s: isEnterpriseSetupStagingChild(%q, %q) = %t, want %t", name, test.root, test.parent, got, test.want)
+		}
+	}
+}
+
+func testEnterprisePayload(t *testing.T) enterprisePayload {
+	t.Helper()
+	files := fstest.MapFS{}
+	entries := map[string]enterprisePayloadManifestFile{}
+	for _, name := range requiredPayloadFiles {
+		body := []byte("staged " + name)
+		digest := sha256.Sum256(body)
+		files["payload/"+name] = &fstest.MapFile{Data: body}
+		entries[name] = enterprisePayloadManifestFile{Name: name, SHA256: hex.EncodeToString(digest[:]), Size: int64(len(body))}
+	}
+	return enterprisePayload{Files: entries, PayloadFS: files}
+}
+
+func TestStageEnterprisePayloadPinsFilesAndAlwaysCleansUp(t *testing.T) {
+	if !windows.GetCurrentProcessToken().IsElevated() {
+		t.Skip("protected ProgramData staging requires an elevated token")
+	}
+	programData, err := winpath.TrustedProgramData()
+	if err != nil {
+		t.Fatalf("ProgramData: %v", err)
+	}
+	stage, err := stageEnterprisePayload(testEnterprisePayload(t), programData)
+	if err != nil {
+		t.Fatalf("stageEnterprisePayload: %v", err)
+	}
+	t.Cleanup(stage.cleanupAndAccept)
+	if !strings.HasPrefix(filepath.Base(stage.root), enterpriseSetupStagePrefix) {
+		t.Fatalf("stage root = %q", stage.root)
+	}
+	staged := filepath.Join(stage.root, "defenseclaw.exe")
+	if err := os.WriteFile(staged, []byte("replaced"), 0o600); err == nil {
+		t.Fatal("a staged payload file was rewritten while pinned")
+	}
+	if err := os.Rename(stage.root, stage.root+".moved"); err == nil {
+		t.Fatal("the pinned staging directory was renamed")
+	}
+	for _, name := range requiredPayloadFiles {
+		sd, err := windows.GetNamedSecurityInfo(filepath.Join(stage.root, name), windows.SE_FILE_OBJECT, windows.OWNER_SECURITY_INFORMATION)
+		if err != nil {
+			t.Fatalf("%s: GetNamedSecurityInfo: %v", name, err)
+		}
+		owner, _, _ := sd.Owner()
+		if owner == nil || !owner.IsWellKnown(windows.WinBuiltinAdministratorsSid) {
+			t.Fatalf("%s owner = %v, want Administrators", name, owner)
+		}
+	}
+	// Entries the lifecycle leaves behind are accepted and removed with the
+	// stage rather than failing cleanup.
+	if err := os.WriteFile(filepath.Join(stage.root, "unexpected.log"), []byte("x"), 0o600); err != nil {
+		t.Fatalf("WriteFile: %v", err)
+	}
+	if err := os.MkdirAll(filepath.Join(stage.root, enterpriseSetupScratchDirName, "nested"), 0o700); err != nil {
+		t.Fatalf("MkdirAll: %v", err)
+	}
+	stage.releaseFiles()
+	if err := stage.cleanup(); err != nil {
+		t.Fatalf("cleanup: %v", err)
+	}
+	if _, err := os.Lstat(stage.root); !os.IsNotExist(err) {
+		t.Fatalf("stage survived cleanup: %v", err)
+	}
+	if err := stage.cleanup(); err != nil {
+		t.Fatalf("second cleanup: %v", err)
 	}
 }

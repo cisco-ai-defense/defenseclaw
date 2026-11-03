@@ -391,7 +391,8 @@ foreach ($name in @(
         'Assert-DefenseClawSourceDescriptorCurrent',
         'Install-DefenseClawSourceDescriptor',
         'Assert-DefenseClawRegularSource',
-        'Test-DefenseClawStandalonePayloadTrusted')) {
+        'Test-DefenseClawStandalonePayloadTrusted',
+        'Test-DefenseClawTrustStrictAncestors')) {
     $definition = $ast.Find({
         param($node)
         $node -is [Management.Automation.Language.FunctionDefinitionAst] -and $node.Name -ceq $name
@@ -402,6 +403,8 @@ foreach ($name in @(
         'Microsoft.PowerShell.Security\Get-AuthenticodeSignature', 'Get-TestAuthenticodeSignature')
     . ([ScriptBlock]::Create($text))
 }
+# The real strict-pin switch reads this variable; the harness runs unpinned.
+$script:TrustStrictAncestorsEnv = 'DEFENSECLAW_MANAGED_TRUST_STRICT_ANCESTORS'
 function Get-TestAuthenticodeSignature {
     param([string]$LiteralPath)
     [pscustomobject]@{ Status = [Management.Automation.SignatureStatus]::NotSigned; SignerCertificate = $null }

@@ -52,6 +52,9 @@ func TestValidateTrustedRuntimeImageRefusesReplaceRightsOnEveryFolder(t *testing
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			cisco, root := testenv.CiscoRuntimeTree(t, runtimeDir)
+			// The tree's base stands for the registered ProgramData, so its
+			// Cisco folder is installer-owned as on a real host.
+			t.Cleanup(AddTrustedMachineInstallBaseForTest(filepath.Dir(cisco)))
 			image := filepath.Join(root, "defenseclaw-scanners.exe")
 			nestedImage := filepath.Join(root, "python", "python.exe")
 			testenv.WriteAdminOnlyFile(t, image, []byte("runtime"))

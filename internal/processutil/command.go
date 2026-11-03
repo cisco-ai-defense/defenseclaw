@@ -43,6 +43,13 @@ func CombinedOutputTree(cmd *exec.Cmd, allowManagedBreakaway bool) ([]byte, erro
 	return combinedOutputTree(cmd, allowManagedBreakaway)
 }
 
+// OutputTree is CombinedOutputTree with standard output and standard error
+// captured separately, for a caller that publishes the child's machine-readable
+// stdout on its own stdout and its diagnostics elsewhere.
+func OutputTree(cmd *exec.Cmd, allowManagedBreakaway bool) (stdout, stderr []byte, err error) {
+	return outputTree(cmd, allowManagedBreakaway)
+}
+
 // RunTree runs cmd with the streams the caller set and ties it to this
 // process: on Windows a kill-on-close Job Object ends the whole tree. On
 // Linux and macOS the child runs in a process group of its own, and the

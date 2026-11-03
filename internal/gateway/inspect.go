@@ -285,7 +285,7 @@ func (a *APIServer) inspectManagedAIDOnlyCall(
 		failOpenReason = aidFailOpenNoContent
 	} else if call != nil && len(call.Args) == 0 {
 		failOpenReason = aidFailOpenNoContent
-	} else if a == nil || a.ciscoInspector == nil || cfg == nil ||
+	} else if a == nil || a.currentCiscoInspector() == nil || cfg == nil ||
 		!cfg.CiscoAIDefense.HookSurfaceEnabled() {
 		failOpenReason = aidFailOpenUnwired
 	}
@@ -430,7 +430,8 @@ func (a *APIServer) recordManagedAIDFailOpenForSelectedNativeHookResult(
 }
 
 func (a *APIServer) hookAIDInspect(ctx context.Context, toolName string, content string) *ScanVerdict {
-	if a == nil || a.ciscoInspector == nil {
+	inspector := a.currentCiscoInspector()
+	if inspector == nil {
 		return nil
 	}
 	if cfg := a.decisionConfig(ctx); cfg == nil || !cfg.CiscoAIDefense.HookSurfaceEnabled() {
@@ -445,7 +446,7 @@ func (a *APIServer) hookAIDInspect(ctx context.Context, toolName string, content
 	// content as a free-text user message; the structured tool name
 	// would otherwise be lost on the wire.
 	defer yieldHookRunSlot(ctx)()
-	return a.ciscoInspector.Inspect(ctx, []ChatMessage{
+	return inspector.Inspect(ctx, []ChatMessage{
 		{Role: "user", Content: hookAIDToolText(toolName, content)},
 	})
 }
@@ -487,7 +488,7 @@ func toolCallNotCarriedReason(req *ToolInspectRequest) string {
 // aidHookSurfaceWired reports whether a hook inspection reaches AID at all, so
 // the wire log below is written only for requests that are actually sent.
 func (a *APIServer) aidHookSurfaceWired(ctx context.Context) bool {
-	if a == nil || a.ciscoInspector == nil {
+	if a.currentCiscoInspector() == nil {
 		return false
 	}
 	cfg := a.decisionConfig(ctx)
@@ -589,7 +590,8 @@ func (a *APIServer) hookAIDInspectToolCall(
 	call aidToolCall,
 	content string,
 ) *ScanVerdict {
-	if a == nil || a.ciscoInspector == nil {
+	inspector := a.currentCiscoInspector()
+	if inspector == nil {
 		return nil
 	}
 	if cfg := a.decisionConfig(ctx); cfg == nil || !cfg.CiscoAIDefense.HookSurfaceEnabled() {
@@ -620,7 +622,7 @@ func (a *APIServer) hookAIDInspectToolCall(
 	}
 	logAIDToolCallCarried(call, wireID)
 	defer yieldHookRunSlot(ctx)()
-	return a.ciscoInspector.Inspect(ctx, []ChatMessage{
+	return inspector.Inspect(ctx, []ChatMessage{
 		{Role: "assistant", ToolCalls: toolCalls},
 		{Role: "user", Content: hookAIDToolText(call.Name, content)},
 	})

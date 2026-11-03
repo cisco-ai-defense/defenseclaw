@@ -127,7 +127,7 @@ func standaloneUninstallRecoveryNeeded() (bool, error) {
 	}
 	path := filepath.Join(layout.LifecycleDir, "pending.json")
 	if _, err := os.Lstat(path); err == nil {
-		if err := managed.ValidateTrustedFilePath(path, "standalone pending transaction"); err != nil {
+		if err := managed.ValidateTrustedFilePathStandalone(path, "standalone pending transaction"); err != nil {
 			return false, err
 		}
 		return true, nil

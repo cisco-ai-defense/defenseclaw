@@ -286,6 +286,9 @@ func NewSidecar(cfg *config.Config, store *audit.Store, logger *audit.Logger) (*
 	if cfg.Fleet.Enabled && (store == nil || logger == nil) {
 		return nil, fmt.Errorf("sidecar: fleet.enabled requires a durable audit store and emitter")
 	}
+	// Record managed data-store drift before anything opens it. Read-only:
+	// the gateway never re-stamps descriptors.
+	AssessManagedDataPaths(cfg)
 	// Rule-pack integrity is a construction precondition. Load both the global
 	// pack and the effective pack for an enabled single-connector deployment
 	// before creating a client or returning any runnable sidecar state.
@@ -522,14 +525,27 @@ func NewSidecar(cfg *config.Config, store *audit.Store, logger *audit.Logger) (*
 			bodyDBPath = filepath.Join(cfg.DataDir, config.DefaultJudgeBodiesDBName)
 		}
 		bs, openErr := openAuthoritativeJudgeBodyStore(context.Background(), bodyDBPath, store)
-		if openErr != nil {
+		switch {
+		case openErr == nil:
+			judgeBodyStore = bs
+			judgeBodyStore.BindSQLiteBusyObservabilityV8(logger)
+			judgeBodiesReadyDetails = "path=" + bodyDBPath
+			judgeBodiesReadyPending = deferJudgeBodiesReady(logger)
+		case !legacyJudgeBodies:
+			// Body retention is optional. When its store cannot be opened
+			// (permission drift the guardian has not repaired yet), keep the
+			// gateway and its canonical judge summaries running without raw
+			// bodies instead of refusing to start. A pending legacy cutover
+			// is not skipped this way.
+			managed.EmitResilienceEvent(managed.MarkerDegraded, map[string]string{
+				"subsystem": "judge-bodies",
+				"reason":    openErr.Error(),
+				"path":      bodyDBPath,
+			})
+		default:
 			cleanupFailedConstruction()
 			return nil, openErr
 		}
-		judgeBodyStore = bs
-		judgeBodyStore.BindSQLiteBusyObservabilityV8(logger)
-		judgeBodiesReadyDetails = "path=" + bodyDBPath
-		judgeBodiesReadyPending = deferJudgeBodiesReady(logger)
 	}
 	var bodyInserter JudgeBodyInserter
 	if retainJudge && judgeBodyStore != nil {
@@ -601,6 +617,7 @@ func NewSidecar(cfg *config.Config, store *audit.Store, logger *audit.Logger) (*
 	SetUserEmailCollectionEnabled(cfg.AIDiscovery.IncludeUserEmail)
 	setAgentIdentityConfig(cfg)
 	applyIdentityPosture(cfg)
+	setProviderRegistryManagedEnterprise(managed.IsManagedEnterprise(cfg.DeploymentMode))
 	return sidecar, nil
 }
 
@@ -984,10 +1001,12 @@ func (s *Sidecar) claimAIDiscoveryRun() (*inventory.ContinuousDiscoveryService, 
 // in its own goroutine so that a gateway disconnect does not stop the watcher
 // or API server. Run blocks until ctx is cancelled, then shuts everything down.
 // sidecarWorkerCount is how many goroutines in runRestartable can send into
-// errCh: config manager, gateway loop, watcher, API, guardrail, AI discovery,
-// AI runtime planes, IPC server. Keep it in step when adding one -- the
-// accompanying test fails if the two drift.
-const sidecarWorkerCount = 8
+// errCh: gateway loop, watcher, guardrail (unmanaged deployments; a managed
+// one sends to fatalCh), AI discovery, AI runtime planes. The config manager
+// and the API report to fatalCh, and the IPC server retries in place. Keep
+// it in step when adding one -- the accompanying test fails if the two
+// drift.
+const sidecarWorkerCount = 5
 
 // logSecureClientPolicyEngine prints the policy engine start-up line of
 // main on a Secure Client host (issue #1092).
@@ -1180,6 +1199,18 @@ func (s *Sidecar) Run(ctx context.Context) (runErr error) {
 	// instead of exiting. Sized from the count rather than a literal so
 	// adding a worker cannot quietly overrun it again.
 	errCh := make(chan error, sidecarWorkerCount)
+	// fatalCh carries the death of a subsystem the gateway cannot protect
+	// without: the config manager, the REST API and the guardrail proxy
+	// (managed deployments only, see guardrailFailureIsFatal). The process
+	// stops so the service manager restarts it, instead of staying Running
+	// with protection off. The IPC server retries in place
+	// (runIPCWithRetry) and sends nothing.
+	fatalCh := make(chan error, 4)
+	// A standalone gateway keeps its guardrail retry: a failed run waits for
+	// the next connector change (runGuardrailRestartable) instead of
+	// exiting into a restart loop that also drops its hook socket.
+	runCfg := s.currentConfig()
+	guardrailFatal := guardrailFailureIsFatal(runCfg.DeploymentMode) && !runCfg.StandaloneEnterprise()
 
 	configPath := s.currentConfig().ConfigFilePath
 	if strings.TrimSpace(configPath) == "" {
@@ -1217,7 +1248,7 @@ func (s *Sidecar) Run(ctx context.Context) (runErr error) {
 		err := s.configMgr.runWithStartupReconcile(runCtx, configStartupReady)
 		if err != nil && runCtx.Err() == nil {
 			fmt.Fprintf(os.Stderr, "[sidecar] config manager exited with error: %v\n", err)
-			errCh <- err
+			fatalCh <- subsystemFailure("config", err)
 		}
 	}()
 	if err := <-configStartupReady; err != nil {
@@ -1333,7 +1364,7 @@ func (s *Sidecar) Run(ctx context.Context) (runErr error) {
 		defer wg.Done()
 		if err := s.runRestartable(runCtx, "api", s.apiRestartCh, s.runAPI); err != nil && runCtx.Err() == nil {
 			fmt.Fprintf(os.Stderr, "[sidecar] api server exited with error: %v\n", err)
-			errCh <- err
+			fatalCh <- subsystemFailure("api", err)
 		}
 	}()
 
@@ -1345,8 +1376,13 @@ func (s *Sidecar) Run(ctx context.Context) (runErr error) {
 		reported := false
 		s.runGuardrailRestartable(runCtx, func(err error) {
 			fmt.Fprintf(os.Stderr, "[sidecar] guardrail exited with error: %v\n", err)
-			if !reported {
-				reported = true
+			if reported {
+				return
+			}
+			reported = true
+			if guardrailFatal {
+				fatalCh <- subsystemFailure("guardrail", err)
+			} else {
 				errCh <- err
 			}
 		})
@@ -1382,14 +1418,20 @@ func (s *Sidecar) Run(ctx context.Context) (runErr error) {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			if err := s.ipcRunner.Run(runCtx); err != nil && runCtx.Err() == nil {
-				fmt.Fprintf(os.Stderr, "[sidecar] ipc server exited with error: %v\n", err)
-				errCh <- err
-			}
+			s.runIPCWithRetry(runCtx)
 		}()
 	}
-	// Wait for context cancellation (signal handler in CLI layer)
-	<-runCtx.Done()
+	// Wait for context cancellation (signal handler in CLI layer) or for a
+	// subsystem the gateway cannot run without to die.
+	subsystemErr := waitForStopOrSubsystemFailure(runCtx, fatalCh)
+	if subsystemErr != nil {
+		managed.EmitResilienceEvent(managed.MarkerDegraded, map[string]string{
+			"subsystem": "gateway",
+			"reason":    subsystemErr.Error(),
+			"action":    "exit-for-service-restart",
+		})
+		runCancel()
+	}
 	fmt.Fprintf(os.Stderr, "[sidecar] context cancelled, waiting for subsystems to stop ...\n")
 	wg.Wait()
 
@@ -1480,11 +1522,44 @@ func (s *Sidecar) Run(ctx context.Context) (runErr error) {
 		_ = s.client.Close()
 	}
 	// Return the first non-nil error if any subsystem failed before shutdown
+	if subsystemErr != nil {
+		return subsystemErr
+	}
 	select {
+	case err := <-fatalCh:
+		return err
 	case err := <-errCh:
 		return err
 	default:
 		return stopObservabilityErr
+	}
+}
+
+// subsystemFailure names the subsystem in a fatal error.
+func subsystemFailure(name string, err error) error {
+	return fmt.Errorf("sidecar: %s subsystem stopped: %w", name, err)
+}
+
+// guardrailFailureIsFatal reports whether the guardrail runner's death stops
+// the process. A managed deployment runs under a service manager that restarts
+// it, so exiting beats staying up with protection off. An unmanaged gateway is
+// started by the CLI with no supervisor: its guardrail runner also performs
+// connector setup, whose failures (a transient sharing or access-denied error
+// on an agent config file, an unsupported agent version) the operator fixes by
+// re-running setup. That gateway keeps its API, health reporting and audit
+// running and reports the guardrail error in health, as it did before.
+func guardrailFailureIsFatal(deploymentMode string) bool {
+	return managed.IsManagedEnterprise(deploymentMode)
+}
+
+// waitForStopOrSubsystemFailure blocks until ctx is done, returning nil, or
+// until a fatal subsystem failure arrives, returning it.
+func waitForStopOrSubsystemFailure(ctx context.Context, fatal <-chan error) error {
+	select {
+	case <-ctx.Done():
+		return nil
+	case err := <-fatal:
+		return err
 	}
 }
 
@@ -2256,6 +2331,7 @@ func (s *Sidecar) applyConfigReloadSnapshot(
 	SetUserEmailCollectionEnabled(next.AIDiscovery.IncludeUserEmail)
 	setAgentIdentityConfig(&next)
 	applyIdentityPosture(&next)
+	setProviderRegistryManagedEnterprise(nextManagedEnterprise)
 
 	// The judge is wired before the generation is published: a request
 	// that pins the next generation runs its judge, already bound to the
@@ -2944,6 +3020,10 @@ func (s *Sidecar) ensureActiveHookRegistration(ctx context.Context, connectorNam
 	}
 }
 
+// errEnvConfigRejected is the inspection-availability reason while the AVC
+// env_config.json overlay is present but rejected.
+var errEnvConfigRejected = errors.New("env_config_rejected: managed inspection is off until env_config.json is trusted and readable")
+
 // pickInspector selects the AID inspector implementation based on
 // deployment_mode. Returns a non-nil Inspector interface only when the
 // concrete constructor produced a non-nil value; the returned
@@ -2968,6 +3048,12 @@ func (s *Sidecar) pickInspector(ctx context.Context) Inspector {
 		// state via /health instead of falling into the generic
 		// "provider unavailable" path that ensureCMIDProvider would
 		// otherwise take.
+		if s.configMgr.EnvConfigRejected() {
+			// Fail closed on the endpoint: the region overlay was rejected,
+			// so the config.yaml endpoint must not receive managed traffic.
+			s.setInspectionAvailability(errEnvConfigRejected)
+			return nil
+		}
 		if !cloudreg.Registered() {
 			s.setInspectionAvailability(cloudreg.ErrNoProviderRegistered)
 			EmitCiscoError(ctx, gatewaylog.ErrCodeUpstreamError,
@@ -2983,6 +3069,61 @@ func (s *Sidecar) pickInspector(ctx context.Context) Inspector {
 		return c
 	}
 	return nil
+}
+
+// Managed inspector rebuild backoff after a failed build.
+const (
+	managedInspectorRetryInitial = 5 * time.Second
+	managedInspectorRetryMax     = 2 * time.Minute
+)
+
+func nextManagedInspectorRetry(delay time.Duration) time.Duration {
+	delay *= 2
+	if delay > managedInspectorRetryMax {
+		return managedInspectorRetryMax
+	}
+	return delay
+}
+
+// retryManagedInspector rebuilds the managed inspector with backoff until it
+// succeeds or ctx ends, then binds it to api. While it is missing, the hook
+// lane follows its configured fail mode and /health reports inspection as
+// unavailable (setInspectionAvailability, called by every build attempt).
+func (s *Sidecar) retryManagedInspector(ctx context.Context, api *APIServer) {
+	managed.EmitResilienceEvent(managed.MarkerDegraded, map[string]string{
+		"subsystem": "managed-inspector",
+		"reason":    "managed cloud auth provider unavailable; retrying",
+	})
+	delay := managedInspectorRetryInitial
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-time.After(delay):
+		}
+		if cfg := s.currentConfig(); cfg == nil || !cfg.ManagedAIDOnly() {
+			return
+		}
+		if inspector := s.pickInspector(ctx); inspector != nil {
+			api.SetCiscoInspector(inspector)
+			fmt.Fprintf(os.Stderr, "[managed-cloud] managed inspector rebuilt after an earlier failure\n")
+			return
+		}
+		delay = nextManagedInspectorRetry(delay)
+	}
+}
+
+// cmidLibraryName is the Cloud Management identity library the platform's
+// CMID provider loads, for operator-facing diagnostics.
+func cmidLibraryName() string {
+	switch runtime.GOOS {
+	case "windows":
+		return "cmidapi.dll"
+	case "darwin":
+		return "libcmidapi.dylib"
+	default:
+		return "the Cloud Management identity library"
+	}
 }
 
 // newManagedInspector constructs the managed_enterprise Inspector:
@@ -3025,8 +3166,8 @@ func (s *Sidecar) newManagedInspector(ctx context.Context, siteLabel string) Ins
 		fmt.Fprintf(os.Stderr,
 			"[managed-cloud] CMID provider constructed but not yet ready (%s): %v — "+
 				"inspector will retry per-inspect; enforcement is fail-open until "+
-				"libcmidapi.dylib becomes loadable\n",
-			siteLabel, err)
+				"%s becomes loadable\n",
+			siteLabel, err, cmidLibraryName())
 	}
 	m := NewCiscoDefenseClawInspectClient(&cfg.CiscoAIDefense, prov)
 	if m == nil {
@@ -3208,8 +3349,11 @@ func (s *Sidecar) buildCMIDProvider(ctx context.Context) (cloudreg.Provider, err
 		// inside the gateway's service account, so it faces the same path
 		// trust the deployment demands of every other artifact: an
 		// administrator-owned library, on an administrator-owned path. An
-		// empty value leaves the provider to find its own library.
-		if err := managed.ValidateTrustedFilePath(libPath, "managed cloud auth library"); err != nil {
+		// empty value leaves the provider to find its own library. On
+		// Windows a permission finding on the library is logged (an
+		// untrusted writer as a boundary finding) and the library still
+		// loads, the same as in the CMID broker; structure stays fatal.
+		if err := managed.ValidateExecutableFilePath(libPath, "managed cloud auth library"); err != nil {
 			wrapped := fmt.Errorf("refusing untrusted managed cloud auth library: %w", err)
 			s.logCMIDBuildError("path-trust", wrapped)
 			return nil, wrapped
@@ -8498,6 +8642,14 @@ func (s *Sidecar) runAPI(ctx context.Context) error {
 	// interface and defeats every downstream `!= nil` guard.
 	if inspector := s.pickInspector(ctx); inspector != nil {
 		api.SetCiscoInspector(inspector)
+	} else if cfg := s.currentConfig(); cfg != nil && cfg.ManagedAIDOnly() {
+		// The managed provider could not be built (broker key briefly
+		// locked, broker not up yet, library missing). Keep retrying in the
+		// background instead of leaving inspection off until a restart.
+		// Only the Secure Client profile builds its inspector from the
+		// managed cloud auth provider; a standalone inspector that is off
+		// or misconfigured stays as reported.
+		go s.retryManagedInspector(ctx, api)
 	}
 	// Wire the LLM judge onto the API server so hook connectors listed
 	// in guardrail.judge.hook_connectors get live-content adjudication

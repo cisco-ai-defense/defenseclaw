@@ -22,10 +22,26 @@ func validateManagedSharedHookOpenedFile(file *os.File, expectedOwnerSID string)
 	if err != nil || target == nil {
 		return fmt.Errorf("parse managed shared hook target SID: %w", err)
 	}
-	if err := validateWindowsManagedTargetRuntimeProtection(
-		windows.Handle(file.Fd()),
-		target,
-	); err != nil {
+	// The script bytes are bound by the contract digest, so only the
+	// descriptor can drift here. The installer or the guardian re-stamps it
+	// on the held inode; a standard-user caller accepts and logs it.
+	validate := func(handle windows.Handle) error {
+		if err := validateWindowsManagedTargetRuntimeProtection(handle, target); err != nil {
+			return managedDriftError{err: err}
+		}
+		return nil
+	}
+	if err := ensureWindowsManagedLockProtection(windowsManagedLockRepair{
+		Label:    "managed shared hook script",
+		Path:     file.Name(),
+		Handle:   windows.Handle(file.Fd()),
+		Validate: validate,
+		Canonical: func() (*windows.SECURITY_DESCRIPTOR, error) {
+			return windowsManagedTargetRuntimeSecurityDescriptor(target)
+		},
+		Policy:       windowsManagedTargetRuntimeDriftPolicy(target),
+		PolicyOrCode: true,
+	}); err != nil {
 		return fmt.Errorf("managed shared hook protection is noncanonical: %w", err)
 	}
 	return nil

@@ -23,8 +23,9 @@ func RunWithWindowsAdministratorOwnerRestorePrivilege(fn func() error) error {
 // RunWithWindowsOwnerRestorePrivilege runs fn on a locked OS thread holding
 // SeBackupPrivilege and SeRestorePrivilege from the process token. Assigning an
 // owner other than the caller's SID requires SeRestorePrivilege, which a
-// target-impersonated thread does not hold. Outside the LocalSystem guardian
-// fn runs unchanged.
+// target-impersonated thread does not hold. The LocalSystem guardian and the
+// elevated installer both get the privileged thread; any other caller runs fn
+// unchanged.
 func RunWithWindowsOwnerRestorePrivilege(fn func() error) error {
 	if fn == nil {
 		return fmt.Errorf("enterprise hooks: owner privilege callback is required")
@@ -35,10 +36,15 @@ func RunWithWindowsOwnerRestorePrivilege(fn func() error) error {
 		// failure, opaque GetTokenUser error) means we could not resolve
 		// the identity at all, and hiding it would run mutations without
 		// the required privileges. Propagate those.
-		if errors.Is(err, errWindowsEnterpriseNotLocalSystem) {
+		if !errors.Is(err, errWindowsEnterpriseNotLocalSystem) {
+			return err
+		}
+		// The elevated installer holds both privileges too, disabled by
+		// default; without them it can't hand a drifted policy folder or
+		// machine file back to its canonical owner.
+		if !windows.GetCurrentProcessToken().IsElevated() {
 			return fn()
 		}
-		return err
 	}
 	result := make(chan error, 1)
 	go func() {

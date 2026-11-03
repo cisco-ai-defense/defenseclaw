@@ -471,7 +471,7 @@ func TestFinalizeWindowsManagedHooksTeardownCleansUpUsersWhilePrepared(t *testin
 	windowsManagedHooksTeardownStandaloneMachineFinalizer = func() error { return machineErr }
 	finalize := func() error {
 		var report windowsManagedHooksTeardownReport
-		_, err := finalizeWindowsManagedHooksTeardown(windowsManagedHooksTeardownJournal{Phase: "prepared"},
+		_, _, err := finalizeWindowsManagedHooksTeardown(windowsManagedHooksTeardownJournal{Phase: "prepared"},
 			"journal.json", &report, `C:\ProgramData\DefenseClaw\runtime`, perUserTeardownManifest("devin"))
 		return err
 	}

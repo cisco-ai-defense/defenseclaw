@@ -17,12 +17,14 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"strconv"
 	"strings"
 
 	"github.com/defenseclaw/defenseclaw/internal/enterprisehooks"
 	"github.com/defenseclaw/defenseclaw/internal/gateway/connector"
 	"github.com/defenseclaw/defenseclaw/internal/managed"
 	"github.com/defenseclaw/defenseclaw/internal/safefile"
+	"github.com/defenseclaw/defenseclaw/internal/winpath"
 	"github.com/spf13/cobra"
 	"golang.org/x/sys/windows"
 )
@@ -46,25 +48,32 @@ type windowsManagedHooksTeardownTarget struct {
 }
 
 type windowsManagedHooksTeardownJournal struct {
-	SchemaVersion          int                                                           `json:"schema_version"`
-	Phase                  string                                                        `json:"phase"`
-	ManifestPath           string                                                        `json:"manifest_path"`
-	ManifestSHA256         string                                                        `json:"manifest_sha256"`
-	ManifestFingerprint    string                                                        `json:"manifest_fingerprint"`
-	ActivationState        string                                                        `json:"activation_state"`
-	DeploymentGenerationID string                                                        `json:"deployment_generation_id"`
-	HookBinary             string                                                        `json:"hook_binary"`
-	GatewayAddr            string                                                        `json:"gateway_addr"`
-	GatewayServiceName     string                                                        `json:"gateway_service_name"`
-	Targets                []windowsManagedHooksTeardownTarget                           `json:"targets"`
-	PendingTargets         []windowsManagedHooksTeardownTarget                           `json:"pending_targets,omitempty"`
-	ClaudeTargetSIDs       []string                                                      `json:"claude_target_sids"`
-	Claude                 enterprisehooks.WindowsClaudeManagedPolicyTeardownSnapshot    `json:"claude"`
-	CodexPolicyActive      bool                                                          `json:"codex_policy_active"`
-	CodexTargets           []connector.WindowsCodexManagedRuntimeTarget                  `json:"codex_targets"`
-	CursorTargets          []enterprisehooks.WindowsCursorManagedRuntimeTarget           `json:"cursor_targets"`
-	Cursor                 enterprisehooks.WindowsCursorManagedPolicyTeardownSnapshot    `json:"cursor"`
-	SelectorTargets        []enterprisehooks.WindowsManagedRuntimeSelectorTargetSnapshot `json:"selector_targets"`
+	SchemaVersion          int                                 `json:"schema_version"`
+	Phase                  string                              `json:"phase"`
+	ManifestPath           string                              `json:"manifest_path"`
+	ManifestSHA256         string                              `json:"manifest_sha256"`
+	ManifestFingerprint    string                              `json:"manifest_fingerprint"`
+	ActivationState        string                              `json:"activation_state"`
+	DeploymentGenerationID string                              `json:"deployment_generation_id"`
+	HookBinary             string                              `json:"hook_binary"`
+	GatewayAddr            string                              `json:"gateway_addr"`
+	GatewayServiceName     string                              `json:"gateway_service_name"`
+	Targets                []windowsManagedHooksTeardownTarget `json:"targets"`
+	PendingTargets         []windowsManagedHooksTeardownTarget `json:"pending_targets,omitempty"`
+	// FailedTargets are targets a degraded Guardian reported as failed;
+	// teardown treats them as possibly wired. Omitted when empty, so a
+	// healthy deployment's journal is unchanged. A journal that carries it is
+	// not readable by an older helper or installer (both reject unknown
+	// fields), which is acceptable: before this field existed a degraded
+	// Guardian could not prepare a teardown at all.
+	FailedTargets     []windowsManagedHooksTeardownTarget                           `json:"failed_targets,omitempty"`
+	ClaudeTargetSIDs  []string                                                      `json:"claude_target_sids"`
+	Claude            enterprisehooks.WindowsClaudeManagedPolicyTeardownSnapshot    `json:"claude"`
+	CodexPolicyActive bool                                                          `json:"codex_policy_active"`
+	CodexTargets      []connector.WindowsCodexManagedRuntimeTarget                  `json:"codex_targets"`
+	CursorTargets     []enterprisehooks.WindowsCursorManagedRuntimeTarget           `json:"cursor_targets"`
+	Cursor            enterprisehooks.WindowsCursorManagedPolicyTeardownSnapshot    `json:"cursor"`
+	SelectorTargets   []enterprisehooks.WindowsManagedRuntimeSelectorTargetSnapshot `json:"selector_targets"`
 }
 
 type windowsManagedHooksTeardownMachineCapture struct {
@@ -620,6 +629,7 @@ func runWindowsManagedHooksTeardown(
 		Action:        action,
 		Results:       []windowsManagedHooksTeardownResult{},
 	}
+	var finalizeNotes map[string]string
 	fail := func(err error) (windowsManagedHooksTeardownReport, error) {
 		report.OK = false
 		report.Error = err.Error()
@@ -667,8 +677,11 @@ func runWindowsManagedHooksTeardown(
 		!sameWindowsEnterprisePathCLI(stateRoot, expectedStateRoot) {
 		return fail(errors.New("managed-hook teardown ownership path does not match the protected state root"))
 	}
-	if err := managed.ValidateTrustedRuntimeDir(
+	// Uninstall runs whether or not the guardian is healthy, so state-root
+	// drift is repaired here and residual drift accepted and logged.
+	if err := validateWindowsManagedHooksTrustedDir(
 		stateRoot,
+		managed.ObjectStateDirectory,
 		"Windows enterprise managed-hook teardown state root",
 	); err != nil {
 		return fail(err)
@@ -685,10 +698,9 @@ func runWindowsManagedHooksTeardown(
 	) {
 		return fail(errors.New("managed-hook teardown derived a noncanonical protected layout"))
 	}
-	if err := managed.ValidateTrustedFilePath(
-		report.ManifestPath,
-		"Windows enterprise hook target manifest",
-	); err != nil {
+	// The guardian's manifest check: repair, then accept and log what
+	// survives. The manifest is hash-bound to the deployment below.
+	if err := enterpriseHookManifestFileTrustCheck(report.ManifestPath); err != nil {
 		return fail(err)
 	}
 	manifest, manifestSHA256, err := enterprisehooks.LoadManifestWithSHA256(report.ManifestPath)
@@ -751,7 +763,7 @@ func runWindowsManagedHooksTeardown(
 		Targets:                targets,
 	}
 	if activation.State == windowsManagedHooksActivated {
-		identity.PendingTargets, err = windowsManagedHooksPendingTargetsFromGuardian(
+		identity.PendingTargets, identity.FailedTargets, err = windowsManagedHooksTargetsFromGuardian(
 			runtimeDir,
 			report.ManifestPath,
 			manifestSHA256,
@@ -966,7 +978,7 @@ func runWindowsManagedHooksTeardown(
 			// an uninstall interrupted while they were removed finds the
 			// phase still prepared and runs finalize, and so this cleanup,
 			// again. Once the phase is finalized, a rerun skips finalize.
-			report.CollectedGenerationCount, err = finalizeWindowsManagedHooksTeardown(
+			report.CollectedGenerationCount, finalizeNotes, err = finalizeWindowsManagedHooksTeardown(
 				journal,
 				report.JournalPath,
 				&report,
@@ -986,6 +998,12 @@ func runWindowsManagedHooksTeardown(
 	}
 	for index := range report.Results {
 		report.Results[index].OK = true
+		// A completed target can still carry a note, such as runtime
+		// generations a failed target's drifted data directory kept.
+		key := report.Results[index].Connector + "\x00" + strings.ToUpper(report.Results[index].SID)
+		if note, ok := finalizeNotes[key]; ok {
+			report.Results[index].Error = note
+		}
 	}
 	report.FailedCount = 0
 	// SurvivingOwnedPathReferences is intentionally NOT reset here. The
@@ -1067,6 +1085,7 @@ func checkWindowsManagedHooksTeardownReady(
 	selectorTargets, err := captureWindowsManagedHooksRuntimeSelectors(
 		identity.Targets,
 		identity.PendingTargets,
+		identity.FailedTargets,
 		identity.HookBinary,
 		identity.ActivationState,
 	)
@@ -1141,6 +1160,7 @@ func prepareWindowsManagedHooksTeardown(
 	selectorTargets, err := captureWindowsManagedHooksRuntimeSelectors(
 		identity.Targets,
 		identity.PendingTargets,
+		identity.FailedTargets,
 		identity.HookBinary,
 		identity.ActivationState,
 	)
@@ -1569,6 +1589,7 @@ func windowsManagedHooksRuntimeSelectorOptions(
 func captureWindowsManagedHooksRuntimeSelectors(
 	targets []windowsManagedHooksTeardownTarget,
 	pendingTargets []windowsManagedHooksTeardownTarget,
+	failedTargets []windowsManagedHooksTeardownTarget,
 	hookBinary string,
 	activationState string,
 ) ([]enterprisehooks.WindowsManagedRuntimeSelectorTargetSnapshot, error) {
@@ -1594,6 +1615,11 @@ func captureWindowsManagedHooksRuntimeSelectors(
 			pendingTargets,
 			activationState,
 		)
+		if windowsManagedHooksTeardownTargetIn(target, failedTargets) {
+			// A failed target may or may not have been wired before it failed;
+			// capture whichever state it is in, as long as it is consistent.
+			expectedPresent = snapshot.Existed
+		}
 		if snapshot.Existed != expectedPresent || snapshot.CAS.Exists != expectedPresent {
 			state := "absent"
 			if expectedPresent {
@@ -1709,19 +1735,25 @@ func restoreWindowsManagedHooksRuntimeSelectors(
 	return nil
 }
 
-// finalizeWindowsManagedHooksTeardown retires the machine wiring the
-// prepared journal records, removes the users' registrations and, with
-// purge, their per-user folders, and only then records the phase finalized,
-// so a rerun after an interruption finds the phase prepared and retries
-// that cleanup.
+// finalizeWindowsManagedHooksTeardown runs after the uninstall has committed:
+// the hooks are already removed. It collects unreferenced runtime
+// generations, retires the machine wiring the prepared journal records,
+// removes the users' registrations and, with purge, their per-user folders,
+// and only then records the phase finalized, so a rerun after an
+// interruption finds the phase prepared and retries that cleanup. A target
+// the Guardian reported as failed may have failed because its data directory
+// drifted, which also makes its generation collection refuse; that target's
+// generations are left behind and reported as a note instead of failing a
+// committed uninstall on every retry.
 func finalizeWindowsManagedHooksTeardown(
 	journal windowsManagedHooksTeardownJournal,
 	journalPath string,
 	report *windowsManagedHooksTeardownReport,
 	runtimeDir string,
 	manifest enterprisehooks.Manifest,
-) (int, error) {
+) (int, map[string]string, error) {
 	collected := 0
+	notes := map[string]string{}
 	for _, target := range journal.Targets {
 		removed, err := enterprisehooks.GarbageCollectWindowsManagedRuntimeGenerations(
 			enterprisehooks.WindowsManagedRuntimeGenerationGCOptions{
@@ -1733,7 +1765,13 @@ func finalizeWindowsManagedHooksTeardown(
 			},
 		)
 		if err != nil {
-			return collected, fmt.Errorf(
+			if windowsManagedHooksTeardownTargetIn(target, journal.FailedTargets) {
+				notes[target.Connector+"\x00"+strings.ToUpper(target.SID)] = fmt.Sprintf(
+					"hooks removed; runtime generations left in place: %v", err,
+				)
+				continue
+			}
+			return collected, notes, fmt.Errorf(
 				"finalize %s managed runtime generations for %s: %w",
 				target.Connector,
 				target.SID,
@@ -1743,14 +1781,14 @@ func finalizeWindowsManagedHooksTeardown(
 		collected += removed
 	}
 	if err := windowsManagedHooksTeardownStandaloneMachineFinalizer(); err != nil {
-		return collected, err
+		return collected, notes, err
 	}
 	completeWindowsManagedHooksTeardownUserCleanup(report, runtimeDir, manifest)
 	journal.Phase = "finalized"
 	if err := windowsManagedHooksTeardownJournalWriter(journalPath, journal); err != nil {
-		return collected, err
+		return collected, notes, err
 	}
-	return collected, nil
+	return collected, notes, nil
 }
 
 // The standalone machine steps of finalize and the journal writer are
@@ -1819,6 +1857,52 @@ func windowsManagedHooksTeardownSelectorExpected(
 		}
 	}
 	return true
+}
+
+// windowsManagedHooksTeardownTargetIn reports whether target is in set.
+func windowsManagedHooksTeardownTargetIn(
+	target windowsManagedHooksTeardownTarget,
+	set []windowsManagedHooksTeardownTarget,
+) bool {
+	for _, candidate := range set {
+		if candidate.Connector == target.Connector && strings.EqualFold(candidate.SID, target.SID) {
+			return true
+		}
+	}
+	return false
+}
+
+// validateWindowsManagedHooksFailedTargetSubset binds the failed targets a
+// degraded Guardian reported to the protected manifest: each one must be an
+// exact manifest target, appear once, and not also be pending.
+func validateWindowsManagedHooksFailedTargetSubset(
+	targets []windowsManagedHooksTeardownTarget,
+	pendingTargets []windowsManagedHooksTeardownTarget,
+	failedTargets []windowsManagedHooksTeardownTarget,
+	activationState string,
+) error {
+	if activationState != windowsManagedHooksActivated && len(failedTargets) != 0 {
+		return errors.New("never-activated teardown journal contains failed target evidence")
+	}
+	allowed := make(map[string]windowsManagedHooksTeardownTarget, len(targets))
+	for _, target := range targets {
+		allowed[target.Connector+"\x00"+strings.ToUpper(target.SID)] = target
+	}
+	seen := make(map[string]struct{}, len(failedTargets))
+	for _, failed := range failedTargets {
+		key := failed.Connector + "\x00" + strings.ToUpper(failed.SID)
+		if target, ok := allowed[key]; !ok || target != failed {
+			return errors.New("failed teardown target is outside the protected manifest")
+		}
+		if windowsManagedHooksTeardownTargetIn(failed, pendingTargets) {
+			return errors.New("failed teardown target is also pending")
+		}
+		if _, duplicate := seen[key]; duplicate {
+			return errors.New("failed teardown target set contains a duplicate")
+		}
+		seen[key] = struct{}{}
+	}
+	return nil
 }
 
 func validateWindowsManagedHooksPendingTargetSubset(
@@ -1944,6 +2028,9 @@ func verifyWindowsManagedHooksTeardownInstalled(
 				identity.PendingTargets,
 				identity.ActivationState,
 			)
+			if windowsManagedHooksTeardownTargetIn(target, identity.FailedTargets) {
+				expectedPresent = expected.Existed
+			}
 			if expected.Existed != expectedPresent || expected.CAS.Exists != expectedPresent {
 				return fmt.Errorf(
 					"managed runtime selector snapshot has the wrong activation state for %s target %s",
@@ -2020,6 +2107,29 @@ func validateWindowsManagedHooksTeardownEnrollment(
 	return nil
 }
 
+// acceptWindowsManagedHooksActivationDrift logs, and tolerates, an
+// activation record whose manifest digest or target count no longer matches
+// the live manifest. The enumerator republishes the manifest for agent
+// version bumps and new users after the installer pinned it; the deployment
+// generation and the Guardian's row-level evidence still authenticate
+// teardown.
+func acceptWindowsManagedHooksActivationDrift(
+	activation windowsManagedHooksActivationRecord,
+	manifestSHA256 string,
+	targetCount int,
+) {
+	if activation.ManifestSHA256 == manifestSHA256 && activation.TargetCount == targetCount {
+		return
+	}
+	managed.EmitResilienceEvent(managed.MarkerAccept, map[string]string{
+		"reason":           "managed-hook activation evidence predates the current manifest",
+		"pinned_sha256":    activation.ManifestSHA256,
+		"manifest_sha256":  manifestSHA256,
+		"pinned_targets":   strconv.Itoa(activation.TargetCount),
+		"manifest_targets": strconv.Itoa(targetCount),
+	})
+}
+
 func validateWindowsManagedHooksTeardownActivation(
 	record *windowsManagedHooksActivationRecord,
 	manifestSHA256 string,
@@ -2036,14 +2146,14 @@ func validateWindowsManagedHooksTeardownActivation(
 		(activation.State != windowsManagedHooksNeverActivated &&
 			activation.State != windowsManagedHooksActivated) ||
 		!validEnterpriseHookHex(activation.ManifestSHA256, sha256.Size) ||
-		activation.ManifestSHA256 != manifestSHA256 ||
 		activation.TargetCount < 0 ||
 		activation.TargetCount > windowsManagedHooksTeardownTargetMax ||
-		activation.TargetCount != targetCount {
+		targetCount < 0 || targetCount > windowsManagedHooksTeardownTargetMax {
 		return windowsManagedHooksActivationRecord{}, errors.New(
 			"protected managed-hook activation evidence does not match the current manifest",
 		)
 	}
+	acceptWindowsManagedHooksActivationDrift(activation, manifestSHA256, targetCount)
 	return activation, nil
 }
 
@@ -2267,6 +2377,7 @@ func validateWindowsManagedHooksTeardownJournal(
 			(len(journal.CodexTargets) != 0 || len(identity.CodexTargets) != 0)) ||
 		len(journal.Targets) != len(identity.Targets) ||
 		len(journal.PendingTargets) != len(identity.PendingTargets) ||
+		len(journal.FailedTargets) != len(identity.FailedTargets) ||
 		len(journal.ClaudeTargetSIDs) != len(identity.ClaudeTargetSIDs) ||
 		len(journal.CodexTargets) != len(identity.CodexTargets) ||
 		len(journal.CursorTargets) != len(identity.CursorTargets) {
@@ -2288,9 +2399,22 @@ func validateWindowsManagedHooksTeardownJournal(
 			return errors.New("managed-hook teardown journal pending target set changed")
 		}
 	}
+	for index := range identity.FailedTargets {
+		if journal.FailedTargets[index] != identity.FailedTargets[index] {
+			return errors.New("managed-hook teardown journal failed target set changed")
+		}
+	}
 	if err := validateWindowsManagedHooksPendingTargetSubset(
 		journal.Targets,
 		journal.PendingTargets,
+		journal.ActivationState,
+	); err != nil {
+		return err
+	}
+	if err := validateWindowsManagedHooksFailedTargetSubset(
+		journal.Targets,
+		journal.PendingTargets,
+		journal.FailedTargets,
 		journal.ActivationState,
 	); err != nil {
 		return err
@@ -2325,6 +2449,11 @@ func validateWindowsManagedHooksTeardownJournal(
 			journal.PendingTargets,
 			journal.ActivationState,
 		)
+		if windowsManagedHooksTeardownTargetIn(target, journal.FailedTargets) {
+			// Validate a failed target's snapshot in whichever shape it was
+			// captured: an exact enrollment, or an exact absence.
+			expectedPresent = snapshot.Existed || snapshot.CAS.Exists
+		}
 		if !expectedPresent {
 			if snapshot.Existed || snapshot.CAS.Exists || len(snapshot.Target) != 0 ||
 				snapshot.TargetSHA256 != "" || snapshot.CAS.GenerationID != "" ||
@@ -2463,11 +2592,15 @@ func readWindowsManagedHooksTeardownJournal(
 			"managed-hook teardown journal is not a bounded regular non-link file",
 		)
 	}
-	if err := managed.ValidateTrustedFilePath(path, "managed-hook teardown journal"); err != nil {
+	// Hold a no-follow handle across validation and read from it, then
+	// confirm the path still names that same file: the bytes parsed are the
+	// object whose owner and DACL were just checked, not a swapped-in one.
+	file, before, err := openWindowsManagedHooksTeardownJournalNoFollow(path)
+	if err != nil {
 		return journal, err
 	}
-	file, err := os.Open(path)
-	if err != nil {
+	defer file.Close()
+	if err := validateWindowsManagedHooksTeardownJournalFile(path); err != nil {
 		return journal, err
 	}
 	body, err := io.ReadAll(io.LimitReader(
@@ -2475,17 +2608,74 @@ func readWindowsManagedHooksTeardownJournal(
 		windowsManagedHooksTeardownJournalMax+1,
 	))
 	if err != nil {
-		_ = file.Close()
 		return journal, err
 	}
 	if len(body) > windowsManagedHooksTeardownJournalMax {
-		_ = file.Close()
 		return journal, errors.New("managed-hook teardown journal exceeds its size limit")
 	}
-	if err := file.Close(); err != nil {
+	if err := sameWindowsManagedHooksTeardownJournalObject(path, before); err != nil {
 		return journal, err
 	}
 	return parseWindowsManagedHooksTeardownJournalBody(body)
+}
+
+// openWindowsManagedHooksTeardownJournalNoFollow opens the journal without
+// following a reparse point and returns its identity.
+func openWindowsManagedHooksTeardownJournalNoFollow(
+	path string,
+) (*os.File, windows.ByHandleFileInformation, error) {
+	var info windows.ByHandleFileInformation
+	pathPtr, err := winpath.UTF16Ptr(path)
+	if err != nil {
+		return nil, info, err
+	}
+	handle, err := windows.CreateFile(
+		pathPtr,
+		windows.GENERIC_READ,
+		windows.FILE_SHARE_READ,
+		nil,
+		windows.OPEN_EXISTING,
+		windows.FILE_ATTRIBUTE_NORMAL|windows.FILE_FLAG_OPEN_REPARSE_POINT,
+		0,
+	)
+	if err != nil {
+		return nil, info, err
+	}
+	file := os.NewFile(uintptr(handle), path)
+	if file == nil {
+		_ = windows.CloseHandle(handle)
+		return nil, info, errors.New("wrap managed-hook teardown journal handle")
+	}
+	if err := windows.GetFileInformationByHandle(handle, &info); err != nil {
+		_ = file.Close()
+		return nil, info, err
+	}
+	if info.FileAttributes&(windows.FILE_ATTRIBUTE_DIRECTORY|windows.FILE_ATTRIBUTE_REPARSE_POINT) != 0 ||
+		info.NumberOfLinks != 1 {
+		_ = file.Close()
+		return nil, info, errors.New(
+			"managed-hook teardown journal is not a single-link no-follow regular file",
+		)
+	}
+	return file, info, nil
+}
+
+// sameWindowsManagedHooksTeardownJournalObject fails unless path still names
+// the file whose identity was taken when the journal was opened.
+func sameWindowsManagedHooksTeardownJournalObject(
+	path string,
+	opened windows.ByHandleFileInformation,
+) error {
+	current, info, err := openWindowsManagedHooksTeardownJournalNoFollow(path)
+	if err != nil {
+		return err
+	}
+	_ = current.Close()
+	if windowsManagedHooksLifecycleFileIdentity(info) !=
+		windowsManagedHooksLifecycleFileIdentity(opened) {
+		return errors.New("managed-hook teardown journal was replaced while it was read")
+	}
+	return nil
 }
 
 // parseWindowsManagedHooksTeardownJournalBody is the ACL-independent
@@ -2577,8 +2767,9 @@ func writeWindowsManagedHooksTeardownJournal(
 		)
 	}
 	parent := filepath.Dir(path)
-	if err := managed.ValidateTrustedRuntimeDir(
+	if err := validateWindowsManagedHooksTrustedDir(
 		parent,
+		managed.ObjectAdminDirectory,
 		"managed-hook teardown journal parent",
 	); err != nil {
 		return err
@@ -2587,7 +2778,7 @@ func writeWindowsManagedHooksTeardownJournal(
 		if !info.Mode().IsRegular() {
 			return errors.New("managed-hook teardown journal is not a regular non-link file")
 		}
-		if err := managed.ValidateTrustedFilePath(path, "managed-hook teardown journal"); err != nil {
+		if err := validateWindowsManagedHooksTeardownJournalFile(path); err != nil {
 			return err
 		}
 	} else if !errors.Is(err, os.ErrNotExist) {
@@ -2642,5 +2833,5 @@ func writeWindowsManagedHooksTeardownJournal(
 	if !bytes.Equal(persisted, body) {
 		return errors.New("managed-hook teardown journal changed during publication")
 	}
-	return managed.ValidateTrustedFilePath(path, "managed-hook teardown journal")
+	return validateWindowsManagedHooksTeardownJournalFile(path)
 }
