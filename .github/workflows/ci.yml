@@ -109,9 +109,11 @@ jobs:
     steps:
       - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
         with:
-          # golangci-lint reports issues on the lines changed since the merge
-          # base with the target branch, so the job needs that history (#1228).
-          fetch-depth: 0
+          # A PR checks out its merge commit. Its first parent is the target
+          # branch tip used for this check, so two commits retain the exact
+          # changed-line baseline without fetching every branch and tag.
+          # Push and dispatch jobs keep their original full-history baseline.
+          fetch-depth: ${{ github.event_name == 'pull_request' && 2 || 0 }}
           persist-credentials: false
       - uses: ./.github/actions/setup-go
         id: go
@@ -127,7 +129,7 @@ jobs:
         run: make amp-plugin-typecheck
       - name: Go lint (gofmt, go vet, golangci-lint on changed lines)
         env:
-          GOLANGCI_LINT_BASE: origin/${{ github.base_ref || 'main' }}
+          GOLANGCI_LINT_BASE: ${{ github.event_name == 'pull_request' && 'HEAD^1' || 'origin/main' }}
         run: make go-lint
 
   go-test-gateway:
