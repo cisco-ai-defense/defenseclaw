@@ -23,6 +23,12 @@ func callerCanEnterDirectory(path string, uid, gid int) bool {
 		if err != nil || !info.IsDir() {
 			return false
 		}
+		// Mode bits do not establish the peer's search permission when an
+		// access ACL may select a named user or group instead. An uncertain cd
+		// leaves both the original and candidate trees in the policy check.
+		if !directoryAccessACLAbsent(dir) {
+			return false
+		}
 		stat, ok := info.Sys().(*syscall.Stat_t)
 		if !ok {
 			return false
