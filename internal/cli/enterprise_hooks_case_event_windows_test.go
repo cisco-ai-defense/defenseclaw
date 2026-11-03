@@ -40,6 +40,20 @@ func (log *enterpriseHookCaseEventLog) Write(data []byte) (int, error) {
 	return n, err
 }
 
+// waitFor waits up to timeout for text in the log. The guardian writes the
+// reconcile line after the reconcile returns, so a test sees the repair the
+// fake reconcile signals before the line that names its reason.
+func (log *enterpriseHookCaseEventLog) waitFor(text string, timeout time.Duration) bool {
+	deadline := time.Now().Add(timeout)
+	for !strings.Contains(log.String(), text) {
+		if !time.Now().Before(deadline) {
+			return false
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	return true
+}
+
 func (log *enterpriseHookCaseEventLog) String() string {
 	log.mu.Lock()
 	defer log.mu.Unlock()
@@ -172,7 +186,7 @@ func TestEnterpriseHookWindowsGuardianRepairsCaseVariantOnEvent(t *testing.T) {
 			if err != nil || string(contents) != original {
 				t.Fatalf("file after event repair = %q, %v", contents, err)
 			}
-			if !strings.Contains(log.String(), "reconcile reason=fsnotify") {
+			if !log.waitFor("reconcile reason=fsnotify", 4*time.Second) {
 				t.Fatalf("repair was not attributed to a file event: %s", log.String())
 			}
 		})
