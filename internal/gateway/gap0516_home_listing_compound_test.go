@@ -16,11 +16,12 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/hookpaths"
 )
 
-// A user shell's */* does not select .ssh/authorized_keys at the home
-// directory. Adding a second statement must not turn that listing into a
-// protected write. The matching explicit writes still block in every hook
-// route. The native absolute path row uses Windows paths on Windows and
-// Unix paths on Unix; the slash path row also covers Git Bash spelling.
+// A POSIX shell's */* does not select .ssh at the home directory. Adding a
+// second statement must not turn that listing into a protected write. Codex
+// runs PowerShell on Windows, where the private-key glob read blocks. The
+// matching explicit writes still block in every hook route. The native
+// absolute path row uses Windows paths on Windows and Unix paths on Unix;
+// the slash path row also covers Git Bash spelling.
 func TestGAP0516HomeListingCompoundFourCell(t *testing.T) {
 	root := t.TempDir()
 	home := filepath.Join(root, "user")
