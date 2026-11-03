@@ -71,6 +71,12 @@ func TestGAP0431LoopCopyProofGuards(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(home, ".ssh", "authorized_keys"), []byte("# decoy\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
+	if err := os.WriteFile(filepath.Join(cwd, "a.txt"), []byte("a\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(cwd, "authorized_keys"), []byte("a\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
 	rows := []struct {
 		name, command string
 		want          bool
@@ -83,6 +89,9 @@ func TestGAP0431LoopCopyProofGuards(t *testing.T) {
 		{"no-clobber", `for f in authorized_keys; do cp -n a.txt "$HOME/.ssh/$f"; done`, false},
 		{"L5-no-loop-name", `for f in authorized_keys; do cp a.txt ~/.ssh/authorized_keys; done`, false},
 		{"L6-quoted-copy-source", `for f in authorized_keys; do cp "$src" "$HOME/.ssh/$f"; done`, true},
+		{"L6-assigned-copy-source", `src=a.txt; for f in authorized_keys; do cp "$src" "$HOME/.ssh/$f"; done`, true},
+		{"L6-empty-copy-source", `src=; for f in authorized_keys; do cp "$src" "$HOME/.ssh/$f"; done`, false},
+		{"L6-loop-source-overwrites-empty", `src=; for src in authorized_keys; do cp "$src" "$HOME/.ssh/$src"; done`, true},
 		{"L6-dynamic-move-source", `for f in authorized_keys; do mv "$src" "$HOME/.ssh/$f"; done`, false},
 	}
 	for _, row := range rows {
@@ -94,6 +103,13 @@ func TestGAP0431LoopCopyProofGuards(t *testing.T) {
 			}
 		})
 	}
+	t.Run("startup-env-empty-assignment", func(t *testing.T) {
+		t.Setenv("BASH_ENV", filepath.Join(root, "startup.sh"))
+		command := `src=; for f in authorized_keys; do cp "$src" "$HOME/.ssh/$f"; done`
+		if !actionClientLoopCopyDestinationProtected(command, cwd, home) {
+			t.Fatal("startup source proof missed protected destination")
+		}
+	})
 }
 
 func TestGAP0428PrintfAttachedValueTracking(t *testing.T) {

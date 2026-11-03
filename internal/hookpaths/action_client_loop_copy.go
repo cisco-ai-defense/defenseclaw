@@ -4,6 +4,8 @@
 package hookpaths
 
 import (
+	"maps"
+	"os"
 	"path/filepath"
 	"strings"
 
@@ -35,10 +37,13 @@ func loopCopyDestinationProtected(command, cwd, home string, copyOnly bool) bool
 	}
 	protected := newProtectedFiles(home)
 	ssh := filepath.Join(home, ".ssh")
+	assignments := actionValues{"HOME": home, "PWD": cwd}
 	for _, top := range file.Stmts {
 		loop, ok := actionClientLoopCopyTop(top, cwd, home)
 		if !ok {
-			if !actionClientLoopCopyNoop(top, cwd, home) {
+			if name, value, assigned := actionClientLoopCopyAssignment(top, home); assigned {
+				assignments[name] = value
+			} else if !actionClientLoopCopyNoop(top, cwd, home) {
 				return false
 			}
 			continue
@@ -47,13 +52,15 @@ func loopCopyDestinationProtected(command, cwd, home string, copyOnly bool) bool
 		if !ok || iter.Name == nil || len(iter.Items) == 0 {
 			return false
 		}
+		loopAssignments := maps.Clone(assignments)
+		delete(loopAssignments, iter.Name.Value)
 		var destination *syntax.Word
 		for _, stmt := range loop.Do {
 			call, ok := stmt.Cmd.(*syntax.CallExpr)
 			if !ok || stmt.Background || stmt.Negated || len(stmt.Redirs) != 0 || len(call.Assigns) != 0 || len(call.Args) == 0 {
 				return false
 			}
-			if candidate, ok := actionClientLoopCopyDestination(call, home, copyOnly); ok {
+			if candidate, ok := actionClientLoopCopyDestination(call, loopAssignments, cwd, home, copyOnly); ok {
 				if destination != nil {
 					return false
 				}
@@ -80,8 +87,8 @@ func loopCopyDestinationProtected(command, cwd, home string, copyOnly bool) bool
 			if !fixed || value == "" || strings.ContainsAny(value, "*?[]\x00\x1f") {
 				return false
 			}
-			values := actionValues{"HOME": home, "PWD": cwd, iter.Name.Value: value}
-			if target, known := actionWordValue(destination, values, cwd, home); known &&
+			loopValues := actionValues{"HOME": home, "PWD": cwd, iter.Name.Value: value}
+			if target, known := actionWordValue(destination, loopValues, cwd, home); known &&
 				actionClientProtectedPath(target, cwd, protected, ssh) {
 				return true
 			}
@@ -89,6 +96,26 @@ func loopCopyDestinationProtected(command, cwd, home string, copyOnly bool) bool
 		return false
 	}
 	return false
+}
+
+func actionClientLoopCopyAssignment(stmt *syntax.Stmt, home string) (string, string, bool) {
+	if stmt == nil || stmt.Background || stmt.Negated || len(stmt.Redirs) != 0 {
+		return "", "", false
+	}
+	call, ok := stmt.Cmd.(*syntax.CallExpr)
+	if !ok || len(call.Args) != 0 || len(call.Assigns) != 1 {
+		return "", "", false
+	}
+	assign := call.Assigns[0]
+	if assign.Name == nil || assign.Append || assign.Array != nil || assign.Index != nil ||
+		assign.Name.Value == "HOME" || assign.Name.Value == "PWD" {
+		return "", "", false
+	}
+	if assign.Value == nil {
+		return assign.Name.Value, "", true
+	}
+	value, fixed := StaticWord(assign.Value, home)
+	return assign.Name.Value, value, fixed && !strings.ContainsAny(value, "*?[]\x00\x1f")
 }
 
 func actionClientLoopCopyTop(stmt *syntax.Stmt, cwd, home string) (*syntax.ForClause, bool) {
@@ -137,7 +164,7 @@ func actionClientLoopCopyNoop(stmt *syntax.Stmt, cwd, home string) bool {
 	return false
 }
 
-func actionClientLoopCopyDestination(call *syntax.CallExpr, home string, copyOnly bool) (*syntax.Word, bool) {
+func actionClientLoopCopyDestination(call *syntax.CallExpr, assignments actionValues, cwd, home string, copyOnly bool) (*syntax.Word, bool) {
 	if len(call.Args) < 3 {
 		return nil, false
 	}
@@ -150,6 +177,11 @@ func actionClientLoopCopyDestination(call *syntax.CallExpr, home string, copyOnl
 		return nil, false
 	}
 	if copyOnly && base != "cp" && base != "gcp" {
+		return nil, false
+	}
+	if !copyOnly && len(assignments) > 2 && base != "cp" && base != "gcp" {
+		// Earlier assignments are only tracked for copy sources. Keep move
+		// and install on their existing entry semantics.
 		return nil, false
 	}
 	for i := 1; i < len(call.Args)-2; i++ {
@@ -181,16 +213,32 @@ func actionClientLoopCopyDestination(call *syntax.CallExpr, home string, copyOnl
 	sourceWord := call.Args[len(call.Args)-2]
 	source, fixed := StaticWord(sourceWord, home)
 	if !fixed {
-		// A quoted source remains one operand. Its value does not change
-		// the copy destination named by the final word.
 		if base != "cp" && base != "gcp" || len(sourceWord.Parts) != 1 {
 			return nil, false
 		}
 		if _, quoted := sourceWord.Parts[0].(*syntax.DblQuoted); !quoted {
 			return nil, false
 		}
-	} else if source == "" || strings.HasPrefix(source, "-") || strings.ContainsAny(source, "*?[]\x00\x1f") {
+		if value, known := actionWordValue(sourceWord, assignments, cwd, home); known && value == "" &&
+			!actionClientLoopCopySourceStartupUnknown() {
+			return nil, false
+		}
+		return call.Args[len(call.Args)-1], true
+	}
+	if source == "" || strings.HasPrefix(source, "-") || strings.ContainsAny(source, "*?[]\x00\x1f") {
 		return nil, false
 	}
 	return call.Args[len(call.Args)-1], true
+}
+
+func actionClientLoopCopySourceStartupUnknown() bool {
+	if os.Getenv("BASH_ENV") != "" || os.Getenv("ENV") != "" {
+		return true
+	}
+	for _, entry := range os.Environ() {
+		if strings.HasPrefix(entry, "BASH_FUNC_") {
+			return true
+		}
+	}
+	return false
 }

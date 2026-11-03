@@ -17,6 +17,7 @@ import (
 // retain copy writes through the same link in each hook configuration.
 func TestGAP0431LoopDestinationGuardsFourCell(t *testing.T) {
 	f := newB36ManagedHookFixture(t)
+	t.Setenv("src", "a.txt")
 	for _, name := range []string{"a.txt", "out2.txt"} {
 		if err := os.WriteFile(filepath.Join(f.project, name), []byte("a\n"), 0o600); err != nil {
 			t.Fatal(err)
@@ -30,7 +31,8 @@ func TestGAP0431LoopDestinationGuardsFourCell(t *testing.T) {
 		{"L6-entry-move", `for f in ordinary; do mv "$src" "$f/../keylink"; done`, "allow"},
 		{"L6-copy", `for f in ordinary; do cp a.txt "$f/../keylink"; done`, "block"},
 		{"L6-copy-ordinary", `for f in ordinary; do cp a.txt "$f/../out2.txt"; done`, "allow"},
-		{"L6-quoted-copy", `for f in keylink; do cp "$src" "$f"; done`, "block"},
+		{"L6-quoted-copy", `src=a.txt; for f in keylink; do cp "$src" "$f"; done`, "block"},
+		{"L6-environment-source", `for f in keylink; do cp "$src" "$f"; done`, "block"},
 	} {
 		payload := f.payload(t, row.command)
 		header := f.clientHeader(t, payload)
@@ -58,6 +60,50 @@ func TestGAP0431LoopDestinationGuardsFourCell(t *testing.T) {
 						t.Errorf("%s = %s, want %s", row.name, got, row.want)
 					}
 				})
+			}
+		}
+	}
+}
+
+func TestGAP0431ManagedLoopBenignSources(t *testing.T) {
+	f := newB36ManagedHookFixture(t)
+	for _, command := range []string{
+		`for f in keylink; do cp "$(printf '')" "$f"; done`,
+		`src=; for f in keylink; do cp "$src" "$f"; done`,
+		`src=a.txt; for f in keylink; do mv a.txt "$f"; done`,
+	} {
+		payload := f.payload(t, command)
+		header := f.clientHeader(t, payload)
+		for _, connector := range []string{"claudecode", "codex"} {
+			if got := f.post(t, connector, payload, header); got != "allow" {
+				t.Errorf("%s: %s = %s, want allow", connector, command, got)
+			}
+		}
+	}
+}
+
+func TestGAP0431StartupSourceKeepsLinkedDestination(t *testing.T) {
+	f := newB36ManagedHookFixture(t)
+	if err := os.WriteFile(filepath.Join(f.project, "a.txt"), []byte("a\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(f.project, "0"), []byte("zero\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	startup := filepath.Join(f.project, "startup.sh")
+	if err := os.WriteFile(startup, []byte("printf() { builtin printf a.txt; }\ndeclare -i src=1\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("BASH_ENV", startup)
+	for _, command := range []string{
+		`for f in keylink; do cp "$(printf '')" "$f"; done`,
+		`src=; for f in keylink; do cp "$src" "$f"; done`,
+	} {
+		payload := f.payload(t, command)
+		header := f.clientHeader(t, payload)
+		for _, connector := range []string{"claudecode", "codex"} {
+			if got := f.post(t, connector, payload, header); got != "block" {
+				t.Errorf("%s: %s: %s, want block", connector, command, got)
 			}
 		}
 	}
