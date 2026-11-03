@@ -1976,6 +1976,9 @@ func renderObservabilityV8Health(
 			row["queue"] = renderObservabilityV8Queue(*destination.Queue, destination.Counters)
 		}
 		row["counters"] = renderObservabilityV8Counters(destination.Counters)
+		if destination.MetricRejectsScoped {
+			row["rejected_count_scope"] = "log and trace records; metric export attempts are in signal_health"
+		}
 		queueRows := make([]map[string]interface{}, 0, len(destination.Sources))
 		signalRows := make([]map[string]interface{}, 0, len(destination.Sources))
 		for _, source := range destination.Sources {

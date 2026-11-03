@@ -43,6 +43,7 @@ type DestinationHealth struct {
 	LastSuccess         time.Time
 	LastFailure         time.Time
 	Sources             []delivery.HealthSnapshot
+	MetricRejectsScoped bool
 }
 
 // DestinationHealthSnapshot is pinned to exactly one active graph generation.
@@ -95,6 +96,9 @@ func (runtime *Runtime) DestinationHealthSnapshot(
 			Name: destination.Name, Kind: destination.Kind, Enabled: destination.Enabled,
 			Signals: signals, CircuitState: delivery.CircuitClosed,
 		}
+		row.MetricRejectsScoped = !runtime.secureClient &&
+			destination.Kind == config.ObservabilityV8DestinationOTLP &&
+			containsHealthSignal(signals, observability.SignalMetrics)
 		if !destination.Enabled {
 			row.State = delivery.HealthDisabled
 		} else if destination.Kind == config.ObservabilityV8DestinationLocalSQLite {
@@ -174,7 +178,14 @@ func (runtime *Runtime) DestinationHealthSnapshot(
 			source.Counters.Dropped, runtime.carriedDropped(graph.Generation(), source.Destination, source.Signal),
 		)
 		row.Sources = append(row.Sources, source)
-		row.Counters = addCounters(row.Counters, source.Counters)
+		// Metric exports are cumulative. A rejected attempt can be replaced
+		// by the next export, so it stays in the signal's counters without
+		// appearing as a lost record in the destination total.
+		aggregateCounters := source.Counters
+		if row.MetricRejectsScoped && signal == observability.SignalMetrics {
+			aggregateCounters.Rejected = 0
+		}
+		row.Counters = addCounters(row.Counters, aggregateCounters)
 		if healthStateRank(source.State) > healthStateRank(row.State) {
 			row.State = source.State
 			row.Reason = source.Reason
