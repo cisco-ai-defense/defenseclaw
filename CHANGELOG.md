@@ -13,6 +13,9 @@ for current behavior.
 ### Changed
 - **The unused `openshell.middleware.enabled` setting is retired.** Existing 1.0.x config files still load; the setting is ignored and new `config set` writes are refused. Remove the entry before 1.1.0.
 
+### Fixed
+- **The OpenCode V2 docs show supported status where live certification passed.** The support matrix, connector guide and Windows command generator now agree for per-user and managed Linux, macOS and native Windows; OpenCode 2.2.5 was checked live in all six cells (GAP-0552).
+
 ## [Unreleased] — 1.0.7
 
 ### Changed

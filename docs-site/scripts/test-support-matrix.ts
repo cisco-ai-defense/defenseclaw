@@ -35,19 +35,35 @@ test('Kiro support matrix gives the hook floors and uncovered upgrade state', ()
   assert.match(kiro.versionNote ?? '', /earlier managed CLI enrollments keep their interactive hooks/i);
 });
 
-test('OpenCode V2 does not inherit V1 live certification on any displayed platform', () => {
+test('OpenCode V2 live certification reaches every displayed platform (GAP-0552)', () => {
   const opencode = connectorById('opencode');
   assert.ok(opencode);
   assert.equal(opencode.minVersion, '2.0.0');
   const home = HOME_CONNECTORS.find((connector) => connector.id === 'opencode');
   assert.ok(home);
   for (const os of ['linux', 'macos', 'windows'] as const) {
-    assert.equal(opencode.oss[os].status, 'preview');
-    assert.equal(opencode.oss[os].observability, 'preview');
-    assert.equal(opencode.enterprise[os].status, 'preview');
-    assert.equal(home.os[os], 'preview');
+    assert.equal(opencode.oss[os].status, 'supported');
+    assert.equal(opencode.oss[os].observability, 'supported');
+    assert.equal(opencode.enterprise[os].status, 'supported');
+    assert.equal(home.os[os], 'supported');
   }
-  assert.equal(connectorById('claudecode')?.oss.linux.status, 'supported');
+  assert.match(opencode.versionNote ?? '', /2\.2\.5.*Linux, macOS and native Windows.*per-user and managed/);
+  const connectorPage = readFileSync(new URL('../content/docs/connectors/opencode.mdx', import.meta.url), 'utf8');
+  const compatibilityPage = readFileSync(new URL('../content/docs/connectors/compatibility.mdx', import.meta.url), 'utf8');
+  assert.match(connectorPage, /\| macOS and Linux \| \*\*Supported\*\*/);
+  assert.match(connectorPage, /\| Native Windows x64 \| \*\*Supported\*\*/);
+  const opencodeContract = compatibilityPage.split('| <ConnectorLabel id="opencode" /> |')[1]?.split('\n')[0];
+  assert.ok(opencodeContract, 'OpenCode contract row');
+  assert.doesNotMatch(opencodeContract, /preview/i);
+});
+
+test('certified Claude Code cells remain supported (GAP-0552 benign twin)', () => {
+  const claudecode = connectorById('claudecode');
+  assert.ok(claudecode);
+  for (const os of ['linux', 'macos', 'windows'] as const) {
+    assert.equal(claudecode.oss[os].status, 'supported');
+    assert.equal(claudecode.enterprise[os].status, 'supported');
+  }
 });
 
 test('Kiro IDE floor and unknown Kiro versions read the same on every page', () => {
