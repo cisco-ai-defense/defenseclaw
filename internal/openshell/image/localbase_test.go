@@ -133,6 +133,28 @@ func TestBuildRunsOnALocalBaseImage(t *testing.T) {
 	}
 }
 
+func TestMicroVMLocalBaseUsesFinalStage(t *testing.T) {
+	spec := testSpec(harness.Codex)
+	spec.MicroVM = true
+	c := mustContext(t, spec)
+	_, baseID, ok := strings.Cut(c.Spec.BaseImage, "@")
+	if !ok {
+		t.Fatal("the pinned base has no digest")
+	}
+	b := &Builder{Docker: localBaseDocker(t, c, baseID, "", true)}
+	files, _, local, err := b.localBase(context.Background(), c)
+	if err != nil || !local {
+		t.Fatalf("local base: %v, local %t", err, local)
+	}
+	file := string(files[0].Data)
+	alias := BaseAliasRepository + ":" + strings.TrimPrefix(baseID, "sha256:")
+	if !strings.Contains(file, "FROM "+c.Spec.BaseImage+" AS dc-localhost-tool\n") ||
+		!strings.Contains(file, "FROM "+alias+"\n") ||
+		strings.Contains(file, "FROM "+c.Spec.BaseImage+"\n") {
+		t.Fatalf("MicroVM base stages do not use the selected local base: %s", file[:300])
+	}
+}
+
 // A base named by tag is refused before docker runs, with the digest form
 // to use for an image built on this computer.
 func TestATaggedBaseImageSaysHowToPinIt(t *testing.T) {
