@@ -150,9 +150,10 @@ func splitSimpleShellCommands(command string) ([]string, bool) {
 			continue
 		}
 		if char == '\'' || char == '"' {
-			if quote == 0 {
+			switch quote {
+			case 0:
 				quote = char
-			} else if quote == char {
+			case char:
 				quote = 0
 			}
 		}

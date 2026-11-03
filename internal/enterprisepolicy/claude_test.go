@@ -419,7 +419,6 @@ func TestClaudeManagedSettingsPrefixIsPinned(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	details = strings.Join(state.Details, "\n")
 	if !strings.Contains(strings.Join(state.Conflicts, "\n"), "does not keep CLAUDE_CODE_SHELL_PREFIX empty") {
 		t.Fatalf("higher source without the prefix pin was not reported: %v", state.Conflicts)
 	}

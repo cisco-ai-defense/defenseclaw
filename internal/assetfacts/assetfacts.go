@@ -433,9 +433,10 @@ func leadingSkillDirectoryChange(value, cwd, home, caller string, uid, gid int) 
 		}
 		switch {
 		case ch == '\'' || ch == '"':
-			if quote == 0 {
+			switch quote {
+			case 0:
 				quote = ch
-			} else if quote == ch {
+			case ch:
 				quote = 0
 			}
 		case quote == 0 && (ch == ';' || ch == '\n' ||

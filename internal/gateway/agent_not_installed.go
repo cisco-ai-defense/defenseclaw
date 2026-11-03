@@ -262,9 +262,7 @@ func ampNPMInvokedTarget(line string) string {
 		return ""
 	}
 	command := strings.TrimSpace(strings.TrimSuffix(line, "%*"))
-	if strings.HasPrefix(command, "endlocal & goto #_undefined_# 2>nul || title %comspec% & ") {
-		command = strings.TrimPrefix(command, "endlocal & goto #_undefined_# 2>nul || title %comspec% & ")
-	}
+	command = strings.TrimPrefix(command, "endlocal & goto #_undefined_# 2>nul || title %comspec% & ")
 	if strings.HasPrefix(command, "\"%_prog%\" ") {
 		command = strings.TrimSpace(strings.TrimPrefix(command, "\"%_prog%\" "))
 	}
