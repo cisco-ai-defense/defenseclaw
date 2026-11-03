@@ -316,3 +316,100 @@ func TestApplyTriggerRacingConfigWriteDebouncesOnce(t *testing.T) {
 		})
 	}
 }
+
+// A metadata repair completed before a later config push is still reported
+// after the quiet-window retry applies the final config.
+func TestApplyTriggerLateRetryReportsCompletedMetadataRepair(t *testing.T) {
+	for _, goos := range []string{"linux", "darwin"} {
+		t.Run(goos, func(t *testing.T) {
+			h := newTestHost(t, goos)
+			base := string(DefaultConfig(h.env.Layout)) + "  hook_self_heal_debounce_ms: 500\n"
+			requireOK(t, h.run(Options{Action: ActionInstall, PayloadDir: h.payload("1.0.0"), ConfigFile: writeTempConfig(t, []byte(base))}))
+			configPath := h.env.P(h.env.Layout.ConfigPath)
+			_, serviceGID, err := h.env.OwnerOf(configPath)
+			if err != nil || serviceGID == 0 {
+				t.Fatalf("installed config group = %d, %v", serviceGID, err)
+			}
+			if err := h.env.Lchown(configPath, 0, 0); err != nil {
+				t.Fatal(err)
+			}
+			first := strings.Replace(base, "debounce_ms: 500", "debounce_ms: 600", 1)
+			second := strings.Replace(base, "debounce_ms: 500", "debounce_ms: 700", 1)
+			wroteFirst, waits := false, 0
+			h.env.Services = &applyTriggerMarkerWriter{
+				ServiceManager: h.services,
+				marker:         h.env.P(h.env.Layout.LifecycleMarkerPath),
+				write: func() {
+					if err := os.WriteFile(configPath, []byte(first), 0o640); err != nil {
+						t.Fatal(err)
+					}
+					wroteFirst = true
+				},
+			}
+			h.env.ApplyTriggerDebounce = func(ctx context.Context, _ string) error {
+				requireOpenQuietWindow(t, h, ctx)
+				waits++
+				return os.WriteFile(configPath, []byte(second), 0o640)
+			}
+			result := h.run(Options{Action: ActionEnsure, Reason: ApplyTriggerReason})
+			requireOK(t, result)
+			if !wroteFirst || waits != 1 || !hasWarning(result, codeConfigMetadataRestored) {
+				t.Fatalf("completed metadata repair: first=%t waits=%d warnings=%+v", wroteFirst, waits, result.Warnings)
+			}
+			if _, got, err := h.env.OwnerOf(configPath); err != nil || got != serviceGID {
+				t.Fatalf("config group = %d, want %d (%v)", got, serviceGID, err)
+			}
+			record, err := h.env.loadDeployment()
+			if err != nil || record == nil || record.ConfigSHA256 != sha256Bytes([]byte(second)) {
+				t.Fatalf("final config not applied: record=%+v err=%v", record, err)
+			}
+			// An unchanged path event after the repair remains an ordinary no-op.
+			benign := h.run(Options{Action: ActionEnsure, Reason: ApplyTriggerReason})
+			requireOK(t, benign)
+			if waits != 1 || !benign.Noop || benign.NoopReason != "up_to_date" || hasWarning(benign, codeConfigMetadataRestored) {
+				t.Fatalf("unchanged path event: waits=%d result=%+v", waits, benign)
+			}
+		})
+	}
+}
+
+// A directory flag removed before the later push is a completed repair even
+// though the retry no longer finds that flag on disk.
+func TestApplyTriggerLateRetryReportsCompletedDirFlagRepair(t *testing.T) {
+	h := newTestHost(t, "darwin")
+	base := string(DefaultConfig(h.env.Layout)) + "  hook_self_heal_debounce_ms: 500\n"
+	requireOK(t, h.run(Options{Action: ActionInstall, PayloadDir: h.payload("1.0.0"), ConfigFile: writeTempConfig(t, []byte(base))}))
+	configPath := h.env.P(h.env.Layout.ConfigPath)
+	lifecycleDir := h.env.P(h.env.Layout.LifecycleDir)
+	flagged, clears, waits := true, 0, 0
+	h.env.clearDirFlags = func(path string) (string, error) {
+		if path == lifecycleDir && flagged {
+			flagged = false
+			clears++
+			return "uchg", nil
+		}
+		return "", nil
+	}
+	first := strings.Replace(base, "debounce_ms: 500", "debounce_ms: 600", 1)
+	second := base
+	h.env.Services = &applyTriggerMarkerWriter{
+		ServiceManager: h.services,
+		marker:         h.env.P(h.env.Layout.LifecycleMarkerPath),
+		write: func() {
+			if err := os.WriteFile(configPath, []byte(first), 0o640); err != nil {
+				t.Fatal(err)
+			}
+		},
+	}
+	h.env.ApplyTriggerDebounce = func(ctx context.Context, _ string) error {
+		requireOpenQuietWindow(t, h, ctx)
+		waits++
+		return os.WriteFile(configPath, []byte(second), 0o640)
+	}
+	result := h.run(Options{Action: ActionEnsure, Reason: ApplyTriggerReason})
+	requireOK(t, result)
+	note := "cleared the macOS uchg flag of " + lifecycleDir
+	if clears != 1 || waits != 1 || !strings.Contains(strings.Join(result.Changes, "\n"), note) || result.Noop || result.NoopReason != "" {
+		t.Fatalf("completed directory repair: clears=%d waits=%d noop=%t reason=%q changes=%q", clears, waits, result.Noop, result.NoopReason, result.Changes)
+	}
+}

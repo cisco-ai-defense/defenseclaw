@@ -412,6 +412,7 @@ func Run(ctx context.Context, env *Env, opts Options) *enterprisestatus.Result {
 		}
 	}
 	var failure int
+	carriedChanges := false
 	for {
 		failure = l.run(ctx)
 		if !l.pathTriggerLateWait {
@@ -421,13 +422,29 @@ func Run(ctx context.Context, env *Env, opts Options) *enterprisestatus.Result {
 			break
 		}
 		env.agentDigest = ""
+		// The first attempt may have repaired host state before it noticed
+		// the later config write. Its result is replaced for the new plan,
+		// but completed repairs must remain visible to the caller.
+		next := enterprisestatus.New(opts.Action, managed.ProfileStandalone, env.GOOS, env.ProductVersion)
+		next.Changes = append(next.Changes, l.result.Changes...)
+		carriedChanges = len(next.Changes) != 0
+		for _, warning := range l.result.Warnings {
+			switch warning.Code {
+			case codeConfigMetadataRestored, codeRecovered, "selinux_relabel":
+				next.Warnings = append(next.Warnings, warning)
+			}
+		}
 		l = &lifecycle{
 			env: env, opts: opts,
-			result:               enterprisestatus.New(opts.Action, managed.ProfileStandalone, env.GOOS, env.ProductVersion),
+			result:               next,
 			pathTriggerDebounced: true,
 		}
 	}
 	env.dirFlagsCleared = nil
+	if carriedChanges && l.result.Noop {
+		l.result.Noop = false
+		l.result.NoopReason = ""
+	}
 	// A no-op ensure and a committed change report the same observed host
 	// limits as status and verify. They do not change these kernel settings.
 	if l.result.Installed && opts.Action != ActionStatus && opts.Action != ActionVerify && opts.Action != ActionUninstall {
