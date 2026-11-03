@@ -10,6 +10,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strconv"
 	"strings"
 	"testing"
@@ -51,14 +52,21 @@ func TestGAP0523FailedFilePassPreemptsHealthyEvent(t *testing.T) {
 }
 
 func TestGAP0523MixedBurstReplaysRecoveredTargetEvent(t *testing.T) {
-	testGAP0523MixedBurstReplaysRecoveredTargetEvent(t, false)
+	testGAP0523MixedBurstReplaysRecoveredTargetEvent(t, false, false)
 }
 
 func TestR108CIBatch3MixedBurstRetainsFailedPathWithoutItsEvent(t *testing.T) {
-	testGAP0523MixedBurstReplaysRecoveredTargetEvent(t, true)
+	testGAP0523MixedBurstReplaysRecoveredTargetEvent(t, true, false)
 }
 
-func testGAP0523MixedBurstReplaysRecoveredTargetEvent(t *testing.T, missedFailedEvent bool) {
+func TestR108CIBatch7WindowsFailedPathCaseVariant(t *testing.T) {
+	if runtime.GOOS != "windows" {
+		t.Skip("Windows directory event spelling")
+	}
+	testGAP0523MixedBurstReplaysRecoveredTargetEvent(t, false, true)
+}
+
+func testGAP0523MixedBurstReplaysRecoveredTargetEvent(t *testing.T, missedFailedEvent, failedCaseVariant bool) {
 	restoreEnterpriseHooksLifecycleTestState(t)
 	previousReconcile := enterpriseHookWatchReconcileOnce
 	previousPlatformWatch := enterpriseHookWatchPlatformWatch
@@ -86,8 +94,12 @@ func testGAP0523MixedBurstReplaysRecoveredTargetEvent(t *testing.T, missedFailed
 	}
 	failedToken := filepath.Join(failedDir, ".hook-failed.token")
 	healthyToken := filepath.Join(healthyDir, ".hook-healthy.token")
+	failedStoredToken := failedToken
+	if failedCaseVariant {
+		failedStoredToken = filepath.Join(failedDir, ".HOOK-FAILED.TOKEN")
+	}
 	const issued = "issued\n"
-	for _, path := range []string{failedToken, healthyToken} {
+	for _, path := range []string{failedStoredToken, healthyToken} {
 		if err := os.WriteFile(path, []byte(issued), 0o600); err != nil {
 			t.Fatal(err)
 		}
@@ -178,7 +190,7 @@ func testGAP0523MixedBurstReplaysRecoveredTargetEvent(t *testing.T, missedFailed
 		t.Fatal("watcher did not start")
 	}
 	writtenAt := time.Now()
-	if err := os.WriteFile(failedToken, []byte("changed\n"), 0o600); err != nil {
+	if err := os.WriteFile(failedStoredToken, []byte("changed\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	if err := os.WriteFile(healthyToken, []byte("changed\n"), 0o600); err != nil {

@@ -146,3 +146,28 @@ func enterpriseHookWatchPartitionFailedPaths(paths []string, failed map[string]b
 	}
 	return kept, retry
 }
+
+// enterpriseHookWatchIncludeDeferredFailed keeps a changed failed path in
+// the next pass when the pending healthy event is only a replay of the last
+// snapshot. A newly changed healthy path still gets its own pass first.
+func enterpriseHookWatchIncludeDeferredFailed(
+	pending []string, pendingAll bool,
+	deferred []string, deferredAll bool,
+	failed map[string]bool, changed func(string) bool,
+) ([]string, bool, bool) {
+	if len(deferred) == 0 && !deferredAll {
+		return pending, pendingAll, false
+	}
+	for _, path := range pending {
+		if !failed[filepath.Clean(path)] && changed(path) {
+			return pending, pendingAll, false
+		}
+	}
+	if deferredAll {
+		return pending, true, true
+	}
+	for _, path := range deferred {
+		pending, pendingAll = enterpriseHookWatchAddTriggerPath(pending, pendingAll, path)
+	}
+	return pending, pendingAll, true
+}
