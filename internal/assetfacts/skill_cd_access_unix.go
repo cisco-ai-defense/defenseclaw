@@ -43,6 +43,11 @@ func callerCanEnterDirectory(path string, uid, gid int) bool {
 		case uint32(gid) == stat.Gid:
 			search = 0o010
 		default:
+			// A supplementary group may select the group bits instead of
+			// the other-user bits. Both must permit search to prove entry.
+			if mode&0o010 == 0 {
+				return false
+			}
 			search = 0o001
 		}
 		if mode&search == 0 {
