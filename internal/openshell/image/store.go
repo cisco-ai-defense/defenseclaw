@@ -80,32 +80,29 @@ type Record struct {
 	HookFireVerified bool `json:"hook_fire_verified,omitempty"`
 	// HookFireVerifiedAt is when that probe passed.
 	HookFireVerifiedAt time.Time `json:"hook_fire_verified_at,omitzero"`
-	// MicroVMVerified is set by VerifyHooks with HookFireVerified when the
-	// probe's MicroVM scenario passed as well: the harness started and its
-	// hooks fired with an OpenShell MicroVM's name resolution (no
-	// localhost in /etc/hosts). A driver without a hosts file
-	// (openshell.Driver.HostsFile) boots only an image that has it.
-	MicroVMVerified bool `json:"microvm_verified,omitempty"`
-	// MicroVMProblem says why the harness cannot work in a MicroVM: the
-	// MicroVM scenario found that it resolves names on its own
-	// (HookFireResult.MicroVMProblem). It stays until the image is checked
-	// again (`sandbox image build <harness> --force`).
-	MicroVMProblem string `json:"microvm_problem,omitempty"`
-	// MicroVMInconclusive says why the last MicroVM scenario settled
-	// nothing (HookFireResult.MicroVMInconclusive); the image stays
-	// unchecked for a MicroVM (MicroVMUnchecked).
-	MicroVMInconclusive string `json:"microvm_inconclusive,omitempty"`
 }
 
-// MicroVMUnchecked reports whether r, an image for the MicroVM driver
-// whose hooks verified, has no MicroVM verdict: the probe's MicroVM
-// scenario never passed and never found that the harness cannot resolve
-// localhost (it did not settle, MicroVMInconclusive, or never ran). Build
-// probes such a cached image again, and so does a sandbox on the MicroVM
-// driver before it boots one; a definitive MicroVMProblem is not probed
-// again unless asked (Force).
-func (r Record) MicroVMUnchecked() bool {
-	return r.MicroVM && r.HookFireVerified && !r.MicroVMVerified && r.MicroVMProblem == ""
+// UnmarshalJSON accepts the retired MicroVM verdict fields in older image
+// records. They are discarded on read and are not written to new records.
+// All other unknown fields remain errors.
+func (r *Record) UnmarshalJSON(data []byte) error {
+	type recordFields Record
+	var old struct {
+		recordFields
+		MicroVMVerified     bool   `json:"microvm_verified"`
+		MicroVMProblem      string `json:"microvm_problem"`
+		MicroVMInconclusive string `json:"microvm_inconclusive"`
+	}
+	dec := json.NewDecoder(bytes.NewReader(data))
+	dec.DisallowUnknownFields()
+	if err := dec.Decode(&old); err != nil {
+		return err
+	}
+	if err := dec.Decode(new(json.RawMessage)); !errors.Is(err, io.EOF) {
+		return fmt.Errorf("image record has trailing data")
+	}
+	*r = Record(old.recordFields)
+	return nil
 }
 
 // NetworkRealpaths lists the realpaths for profiles.Input.Binaries.

@@ -198,7 +198,7 @@ func sandboxHarnessHookContractFor(cfg *config.Config, connectorName string, hos
 		if err != nil {
 			return sandboxHarnessContract{}, false, fmt.Errorf("sandbox harness hook contract: %w", err)
 		}
-		if !ok || !rec.HookFireVerified || (rec.MicroVM && !rec.MicroVMVerified) {
+		if !ok || !rec.HookFireVerified {
 			continue
 		}
 		resolution := connector.ResolveSandboxHookContract(rec.Connector, strings.TrimSpace(rec.HarnessVersion))

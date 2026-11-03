@@ -913,6 +913,49 @@ func TestStoreRoundTripAndStrictness(t *testing.T) {
 	}
 }
 
+func TestLegacyMicroVMRecordsRemainReadable(t *testing.T) {
+	for _, tc := range []struct {
+		name, field string
+	}{
+		{"verified", `"microvm_verified":true`},
+		{"problem", `"microvm_problem":"previous result"`},
+		{"inconclusive", `"microvm_inconclusive":"previous result"`},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			store := NewStore(t.TempDir())
+			if err := os.MkdirAll(filepath.Dir(store.Path()), 0o700); err != nil {
+				t.Fatal(err)
+			}
+			prior := `{"version":1,"images":[{"tag":"old-vm","microvm":true,` + tc.field + `}]}`
+			if err := os.WriteFile(store.Path(), []byte(prior), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			got, err := store.List()
+			if err != nil || len(got) != 1 || got[0].Tag != "old-vm" || !got[0].MicroVM {
+				t.Fatalf("legacy record = %+v, %v", got, err)
+			}
+			if err := store.Put(Record{Tag: "new-vm", MicroVM: true}); err != nil {
+				t.Fatal(err)
+			}
+			written, err := os.ReadFile(store.Path())
+			if err != nil || strings.Contains(string(written), "microvm_verified") ||
+				strings.Contains(string(written), "microvm_problem") || strings.Contains(string(written), "microvm_inconclusive") {
+				t.Fatalf("retired fields survived write: %v %s", err, written)
+			}
+			if got, err := store.List(); err != nil || len(got) != 2 {
+				t.Fatalf("rewritten store = %+v, %v", got, err)
+			}
+			unknown := `{"version":1,"images":[{"tag":"old-vm","unexpected_field":true}]}`
+			if err := os.WriteFile(store.Path(), []byte(unknown), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := store.List(); err == nil {
+				t.Fatal("unrelated record field was accepted")
+			}
+		})
+	}
+}
+
 // withHarnessVersion is c for another pin of its harness, as a later
 // DefenseClaw release that pins it would render it: every harness has a
 // single pinned release today, so NewContext refuses any other version.

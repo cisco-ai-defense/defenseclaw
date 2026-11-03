@@ -209,7 +209,8 @@ func (r *doctorRun) macChecks(ctx context.Context) {
 		}
 		checks = []Check{landlock, docker, r.buildKit,
 			{ID: CheckIDDockerHostNetwork, Title: checkTitles[CheckIDDockerHostNetwork], Status: StatusSkip, Detail: "the MicroVM driver does not use Docker's network"},
-			r.vmFileSharingCheck(), r.vmDriverCheck(ctx), r.vmIdentityCheck(ctx), r.vmResourcesCheck(), r.vmDiskCheck()}
+			{ID: CheckIDDockerFileSharing, Title: checkTitles[CheckIDDockerFileSharing], Status: StatusSkip, Detail: "the MicroVM driver does not mount project folders"},
+			r.vmDriverCheck(ctx), r.vmIdentityCheck(ctx), r.vmResourcesCheck(), r.vmDiskCheck()}
 	} else {
 		landlock := r.dockerVMLandlockCheck(ctx)
 		hostNet, sharing, disk := r.dockerDriverChecks(r.dockerRoot)
@@ -252,89 +253,6 @@ func mootWithoutLandlock(c Check, microVMs string) Check {
 	}
 	c.Status, c.Fix = StatusSkip, nil
 	c.Detail = "not needed: without a usable Landlock in the Linux VM Docker runs in, no sandbox starts there whatever this setting is, and " + microVMs
-	return c
-}
-
-// dockerDesktopSharing are the directories Docker Desktop for Mac shares
-// with its VM by default; its settings store names them only once they are
-// changed.
-var dockerDesktopSharing = []string{"/Users", "/Volumes", "/private", "/tmp", "/var/folders"}
-
-// HookFireProbeDir is the private directory under the user cache
-// directory (~/Library/Caches/defenseclaw/hookfire on a Mac) that the
-// hook-fire probe of an image build mounts a MicroVM /etc/hosts and
-// /etc/resolv.conf from (image.Builder, GAP-0037): a container engine that
-// shares the home directory sees it. "" without a cache directory.
-func HookFireProbeDir() string {
-	cache, err := os.UserCacheDir()
-	if err != nil || !filepath.IsAbs(cache) {
-		return ""
-	}
-	return filepath.Join(cache, "defenseclaw", "hookfire")
-}
-
-// vmFileSharingCheck is the Docker file sharing check of a gateway on the
-// MicroVM driver. Its sandboxes mount no host folders, but the hook-fire
-// probe that checks every image built for them runs the harness in a
-// Docker container with a MicroVM /etc/hosts and /etc/resolv.conf, which
-// it mounts from HookFireProbeDir (Doctor.TempDir), under the home
-// directory. Unshared, every image stays unchecked for a MicroVM, which the
-// gateway then refuses to boot. On a Mac every engine runs containers in a
-// Linux VM: Docker Desktop shares what its settings name (/Users among its
-// defaults), Colima and OrbStack the home directory by default (GAP-0402).
-func (r *doctorRun) vmFileSharingCheck() Check {
-	c := Check{ID: CheckIDDockerFileSharing, Title: checkTitles[CheckIDDockerFileSharing]}
-	what := " (the hook-fire probe of an image build mounts a MicroVM's /etc/hosts from there; sandboxes mount nothing)"
-	dir := r.TempDir()
-	switch {
-	case !r.docker:
-		c.Status, c.Detail = StatusSkip, "the Docker daemon is not available"
-		return c
-	case !r.desktop && r.GOOS != "darwin":
-		c.Status, c.Detail = StatusSkip, "bind mounts come straight from the host filesystem"
-		return c
-	case dir == "":
-		c.Status, c.Detail = StatusWarn, "no cache directory for the hook-fire probe of an image build (HOME is not set)"
-		c.Fix = &Fix{Summary: "run DefenseClaw with HOME set to your home directory"}
-		return c
-	}
-	dir = filepath.Clean(dir)
-	resolved, _ := filepath.EvalSymlinks(dir)
-	under := func(shared []string) bool {
-		return sharedDir(shared, dir) || (resolved != "" && sharedDir(shared, resolved))
-	}
-	if !r.desktop {
-		// Colima, OrbStack and other engines on a Mac: their VM sees the
-		// home directory by default; what else it sees is their own
-		// configuration, which DefenseClaw does not read.
-		if home, _ := r.HomeDir(); filepath.IsAbs(home) && under([]string{home}) {
-			c.Status, c.Detail = StatusPass, dir+" is under your home directory, which Colima and OrbStack share with the VM they run containers in by default"+what
-			return c
-		}
-		c.Status, c.Detail = StatusWarn, dir+" is outside your home directory, and the VM this Docker engine runs containers in may not see it"+what
-		c.Fix = &Fix{Summary: "share " + dir + " with the VM of your Docker engine (Colima: add it under mounts in ~/.colima/default/colima.yaml, then `colima restart`)"}
-		return c
-	}
-	dd, err := r.DockerDesktop()
-	shared := dockerDesktopSharing
-	switch {
-	case err != nil || dd == nil:
-		c.Status, c.Detail = StatusWarn, "could not read the Docker Desktop settings"
-		if err != nil {
-			c.Detail += ": " + err.Error()
-		}
-		c.Fix = &Fix{Summary: "make sure " + dir + " is under a shared directory (Docker Desktop → Settings → Resources → File sharing)"}
-		return c
-	case dd.FileSharing != nil:
-		shared = dd.FileSharing
-	}
-	if under(shared) {
-		c.Status, c.Detail = StatusPass, dir+" is shared with Docker Desktop"+what
-		return c
-	}
-	c.Status = StatusFail
-	c.Detail = dir + " is not shared with Docker Desktop, so the hook-fire probe cannot run an image with a MicroVM's name resolution and the gateway refuses every image" + what
-	c.Fix = &Fix{Summary: "add " + dir + " (or your home directory) in Docker Desktop → Settings → Resources → File sharing (/Users is shared by default)"}
 	return c
 }
 

@@ -281,9 +281,6 @@ func (m *Manager) create(ctx context.Context, gw *Gateway, b *box, in createInpu
 	if err != nil {
 		return nil, err
 	}
-	if !gw.Driver.HostsFile && !img.MicroVMVerified {
-		return nil, microVMRefusal(spec, img)
-	}
 	uid, gid := m.runAs()
 	if img.UID != uid || img.GID != gid {
 		return nil, sandboxapi.Errorf(sandboxapi.CodeImageUnavailable,
@@ -983,7 +980,7 @@ func (m *Manager) credentialProvider(ctx context.Context, gw *Gateway, c credent
 
 // image resolves the harness overlay image for this host user and the
 // compute driver d the sandbox runs on: an image for the MicroVM driver
-// answers localhost itself (image.MicroVMTarget).
+// uses the vm driver's image layout (image.MicroVMTarget).
 func (m *Manager) image(ctx context.Context, cfg *config.Config, spec *harness.Spec, d openshell.Driver, build bool) (image.Record, error) {
 	if m.opts.Images == nil {
 		return image.Record{}, sandboxapi.Errorf(sandboxapi.CodeImageUnavailable, "no image builder is configured")
@@ -1011,33 +1008,6 @@ func (m *Manager) image(ctx context.Context, cfg *config.Config, spec *harness.S
 		return image.Record{}, newImageError("the "+spec.DisplayName+" sandbox image is not usable", err, m.opts.ManagedAccount)
 	}
 	return rec, nil
-}
-
-// microVMRefusal refuses a sandbox on a gateway whose driver writes no
-// /etc/hosts (openshell.Driver.HostsFile: a MicroVM) when its image did not
-// pass the hook-fire probe's MicroVM scenario: the harness would exit at
-// once, as Antigravity CLI did when localhost did not resolve. A harness
-// the scenario found to resolve names on its own cannot start; an image
-// whose scenario settled nothing, or never ran, is not checked yet. Each
-// refusal names the command that checks the image again.
-func microVMRefusal(spec *harness.Spec, img image.Record) error {
-	recheck := "`defenseclaw sandbox image build " + spec.Name + " --force`"
-	if img.MicroVMProblem != "" {
-		return &sandboxapi.Error{Code: sandboxapi.CodeImageUnavailable,
-			Message: spec.DisplayName + " cannot start in an OpenShell MicroVM (the vm driver this gateway runs)",
-			Detail: img.MicroVMProblem + ". A gateway on the docker driver (Linux), whose sandboxes get Docker's /etc/hosts, runs " + spec.DisplayName +
-				"; to check the image again: " + recheck}
-	}
-	// The command comes first: the reason can be a long probe message
-	// (GAP-0274).
-	detail := "run " + recheck + " to check it; its image " + img.Tag + " was not checked with a MicroVM's name resolution " +
-		"(OpenShell 0.1.1 gives a MicroVM an empty /etc/hosts)"
-	if img.MicroVMInconclusive != "" {
-		detail = "run " + recheck + " to check it again (a run without --no-build checks it first, too); its image " + img.Tag +
-			" was run with a MicroVM's name resolution, which settled nothing: " + img.MicroVMInconclusive
-	}
-	return &sandboxapi.Error{Code: sandboxapi.CodeImageUnavailable,
-		Message: spec.DisplayName + "'s image is not checked for an OpenShell MicroVM (the vm driver this gateway runs)", Detail: detail}
 }
 
 // imageError is the error of a sandbox image that could not be built or

@@ -260,43 +260,15 @@ not the driver's name or `runtime.GOOS`.
   whenever such a rootfs exists, because once the records are forgotten no
   prune or teardown would find its ID again; a docker gateway has none, so
   there the records alone decide.
-- **Name resolution.** A MicroVM's `/etc/hosts` is empty (OpenShell 0.1.1:
-  the driver makes the root disk from a `docker export`, whose init layer
-  puts an empty file over the image's, and its guest init writes none), and
-  its loopback DNS relay at `127.0.0.53` answers `localhost` with SERVFAIL.
-  Antigravity CLI 1.2.12 exited at start there ("lookup localhost on
-  127.0.0.53:53: server misbehaving"), and any dev server, local MCP server
-  or test that resolves localhost failed the same way. The overlay images
-  built for the vm driver (`BuildSpec.MicroVM`, which the daemon sets from
-  the driver its gateway reports and `sandbox image build` from the
-  daemon's gateway or the gateway configuration) answer localhost with a
-  pinned `nss-myhostname` (see [Build](#build)): glibc programs, Node,
-  Python and Go programs linked with cgo (agy is one) now resolve it. The
-  images for the docker driver, whose sandboxes get Docker's `/etc/hosts`,
-  are built as before, byte for byte. Go's own resolver (a Go binary built without cgo, or with
-  `netgo`) and statically linked musl programs read `/etc/hosts` and DNS
-  themselves and still cannot, until OpenShell writes `/etc/hosts`.
-  `nss-myhostname` answers only the localhost names and the hostname, with
-  loopback addresses. Every other name goes on to the relay, which answers
-  it with a synthetic `198.18.x.x` address, even a name that does not
-  exist: in an OpenShell 0.1.1 MicroVM `getent hosts` gave `198.18.0.3` for
-  `_gateway` and `198.18.0.4` for `_outbound` (with no default route,
-  `nss-myhostname` does not answer those two), and `198.18.0.6` for
-  `nonexistent-zz9.invalid`. A connection to one of these addresses reaches
-  only the egress proxy, which refuses it as an invalid destination
-  (`curl http://_gateway/`), so nothing is exposed. The
-  hook-fire probe runs every image for the vm driver with a MicroVM's name
-  resolution too, and a driver without a hosts file (`HostsFile` in the
-  driver table) boots only an image that passed that run. An image whose
-  run settled nothing (it could not run, or the harness failed without a
-  failed lookup of localhost) is checked again before the next sandbox on
-  that driver boots it (`Record.MicroVMUnchecked`); `create` refuses an
-  image that still did not pass, with the probe's reason, and every refusal
-  names `defenseclaw sandbox image build <harness> --force`, which checks
-  it again. A harness that exits at once in a sandbox where localhost
-  does not resolve is named as such in the end-of-session summary, with
-  what to do (a sandbox made before the images answered localhost is
-  deleted and made again).
+- **Name resolution.** OpenShell 0.1.6 writes localhost entries when a
+  MicroVM's exported `/etc/hosts` is missing or empty. A nonempty file from
+  a custom image is preserved. DefenseClaw checks the completed image's
+  exported file through its own offline resolver before recording a vm image,
+  then checks the actual guest resolver in the workload verification before
+  a session. Both checks require IPv4 answers for `localhost` to be
+  `127.0.0.1`. Docker-driver images keep their normal hook verification.
+  If a custom base supplies a nonempty hosts file, it must provide that
+  mapping or another working local name-service source.
 - **Stops.** A MicroVM stopped without a flush brings back empty what its
   workload wrote since the last one (OpenShell 0.1.1; `StopFlushes` is off
   for vm). The daemon's stop runs `sync` in the sandbox first. Every gateway
@@ -1743,23 +1715,12 @@ modes and owners are set in the tar headers) and streams it to
    provider chains with the host's trust and the distribution's public roots,
    and fails while a provider host is inspected, with or without the CA.
 1. Installs `jq` and `curl` if the base lacks them on the hook PATH
-   (`/usr/bin:/bin:/usr/sbin:/sbin`). An image for the vm driver
-   (`BuildSpec.MicroVM`) also installs `nss-myhostname`, asked right after
-   `files` and before `dns` (`hosts: files myhostname dns`). It answers
-   `localhost`, `localhost.localdomain`, `*.localhost` and the hostname
-   with loopback addresses and does no network I/O, so localhost resolves
-   in a MicroVM, whose `/etc/hosts` is empty (see
-   [compute drivers](#compute-drivers)). The package is pinned next to the
-   base image (`NSSMyhostnameDebs` in `internal/openshell/version.go`):
-   Ubuntu 24.04's `libnss-myhostname` 255.4-1ubuntu8.17 for amd64 and
-   arm64, downloaded from Ubuntu's snapshot archive (Launchpad's librarian
-   as fallback), checked with `sha256sum -c` and installed with `dpkg -i`.
-   It needs only the base's `libc6` and `libcap2`, so no package index is
-   fetched, and two images with one content hash carry the same module.
-   The build fails unless the module answers `localhost` with `127.0.0.1`.
-   An image for the docker driver has no such step: its Dockerfile, content
-   hash and tag are those of the images before it, and its build fetches
-   nothing more than it did. `MicroVM` is part of the content hash only
+   (`/usr/bin:/bin:/usr/sbin:/sbin`). A vm image is checked after its
+   completed filesystem is exported: its libc resolver runs offline against
+   that filesystem's `/etc/hosts`. Missing or empty regular files are
+   initialized by OpenShell 0.1.6 when the guest starts. A nonempty file
+   must resolve `localhost` to `127.0.0.1` without network access.
+   `MicroVM` is part of the content hash only
    when set, and of `images.json` (`microvm`), so the two kinds of image of
    one harness never select each other, and prune keeps the newest of each
    kind. The exception is a gateway known to run the vm driver
@@ -1851,34 +1812,11 @@ container. `TestLiveRunConfig` (tag `openshell_integration`, on branch
 `test/openshell-live`; see [Testing](#testing)) uses it to prove the per-run
 configuration below against the real harnesses.
 
-The probe of an image for the vm driver (`BuildSpec.MicroVM`) ends with the
-allowed run once more, with an OpenShell MicroVM's name resolution: an
-`/etc/hosts` that names neither `localhost` nor the hostname (only the
-stand-in ingress and, in relay mode, `host.docker.internal`), the guest's
-`resolv.conf` pointed at a resolver no server answers at (the container's
-own `127.0.0.53` in relay mode; the stand-in's address on the host network,
-where `127.0.0.53` is systemd-resolved), and the image's own
-`nsswitch.conf`. The two files are written to a new directory under the
-system temp directory (`Builder.TempDir`, `os.TempDir()`: the user's
-`$TMPDIR` under `/var/folders` on a Mac), which Docker Desktop shares by
-default wherever the data dir is (a managed install's
-`/opt/cisco/defenseclaw/runtime` is not shared), and removed with the
-container; the doctor's file sharing check on a vm gateway is of that
-directory. An image for the docker driver never runs this scenario. Its
-verdict is kept apart (`MicroVMVerified`, `MicroVMProblem` and
-`MicroVMInconclusive` in `images.json`) and never fails the probe; only an
-interrupted probe fails. It is definitive only two ways: a pass, or a
-harness that failed and printed a failed lookup of localhost
-(`MicroVMProblem`, named with the line it printed): it resolves names on
-its own, which the image cannot answer. Anything else settles nothing
-(`MicroVMInconclusive`): a MicroVM run that could not run at all (a mount
-Docker refused, a timeout, an address relay mode could not learn), or a
-harness that exited or fired no hook without saying why. Such an image
-stays unchecked for a MicroVM (`Record.MicroVMUnchecked`): `Build` probes
-it again when it is next asked for it, which the daemon's create on the vm
-driver does, and so does `sandbox image build`; a definitive problem stays
-until `sandbox image build <harness> --force`. `sandbox image build` says
-which of the two an image has.
+The normal hook-fire probe checks the image's hook contract for either
+driver. A vm image additionally passes the exported-filesystem resolver
+check during build. The running MicroVM passes the guest resolver check
+before the first harness session. Image records retain the hook verdict;
+they no longer carry a separate synthetic MicroVM probe verdict.
 
 Kiro CLI has no model endpoint a mock can stand in for; its own
 scripted-response mode (`KIRO_MOCK_CHAT_RESPONSE`, with a placeholder
@@ -3233,22 +3171,22 @@ nothing of the vm driver, but the names of its caches carry the release
 | The vm driver prepares one rootfs per image ID (about 56 s and about 5 GB the first time, 6-8 s after that) and keeps it under `~/.local/state/openshell/vm-driver/images`; nothing evicts it. A tag pointing at an image ID the driver has prepared starts from the cache. The directory name carries the driver's release (`…-openshell-0.1.1-…-sha256-<image ID>`): after an in-place upgrade the driver prepares each image again and keeps the old release's disks. | Run images are content-addressed, one per posture, and aliases share their base's image ID. The pre-create explain reports `vm_first_boot` for the CLI's note, counting only a disk of the gateway's release (`image.VMDisk.PreparedBy`), and so does the daemon's disk-room check at create; the doctor names the cache and its size, and `image prune`, `image rm` and teardown remove the rootfs of each image ID they removed that no sandbox boots, and nothing else of the cache. `image prune` also removes every prepared rootfs of another release than the gateway's (`image.StaleVMDisks`), which that gateway never boots. |
 | Inside a MicroVM sandbox `pidfd_open` fails with ENOSYS, as in a Docker-driver sandbox, although the VM's own kernel (6.12.76) has the call: the workload runs under OpenShell's seccomp filter there too (`Seccomp: 2`, five filters in `/proc/self/status`). | Without a fix interactive Copilot CLI would wait out its 30-second hook timeout on every hook on both drivers; its image preloads a `pidfd_open` fallback into the pinned CLI (see GitHub Copilot CLI under [harness facts](#harness-facts)). |
 | With `sandbox_uid`/`sandbox_gid` set to the host's 501:20, a new sandbox of a cached image runs as `uid=501(sandbox) gid=20(dialout)` with `/sandbox` 501:20 and writable; `/etc/passwd`, `/usr/bin/env`, the hook entrypoints and the managed settings stay root-owned (0644, or 0755 for programs and hooks). `upload` lands files owned by the workload, and `exec` runs as it (only while the sandbox is `Ready`). | The host uid and gid are the workload identity, so the images, the hook-fire probe and the policy stay the Docker driver's, and the copy is uploaded as the user the agent runs as. |
-| In a MicroVM `/etc/hosts` is an empty root-owned 0755 file (the init layer of the `docker export` the driver makes the rootfs from), `nsswitch.conf` is the image's (`hosts: files dns` in the base), and `/etc/resolv.conf` is `nameserver 127.0.0.53` with `options timeout:2 attempts:2`, a loopback DNS relay that answers `localhost` with SERVFAIL; only the loopback interface is configured. `getent hosts localhost` fails, and Antigravity CLI 1.2.12 exits at start: `Failed to start: listen tcp: lookup localhost on 127.0.0.53:53: server misbehaving`. The workload cannot write `/etc`. Reproduced without OpenShell by `docker run` of the base image with an empty file mounted over `/etc/hosts` and a SERVFAIL resolver at `127.0.0.53`: getent, Node, Python, a cgo and a pure Go program and agy all fail (curl answers localhost itself). | Every image for the vm driver installs the pinned `nss-myhostname` after `files` (see [Build](#build)); in the same container getent, Node, Python, the cgo Go program and agy then resolve localhost. With only a loopback interface `nss-myhostname` does not answer `_gateway` and `_outbound`, so they go on to DNS; in a real MicroVM the `127.0.0.53` relay answers them, like every name but localhost and even nonexistent ones, with a synthetic `198.18.x.x` address (`_gateway` `198.18.0.3`, `_outbound` `198.18.0.4`, `nonexistent-zz9.invalid` `198.18.0.6`), and the egress proxy refuses a connection to one as an invalid destination. A pure Go program still fails. The hook-fire probe's MicroVM run catches such a harness, and the vm driver boots only images that pass it. Reported upstream as a guest-init fix (write `127.0.0.1 localhost`, `::1 localhost` and the hostname to `/etc/hosts`). |
+| OpenShell 0.1.6 initializes a missing or empty exported hosts file in the MicroVM guest; a nonempty image-authored file remains as supplied by that image. | DefenseClaw checks the completed image with its offline resolver before it records a vm image, and checks the actual guest resolver before a session. Each check requires `localhost` to resolve to `127.0.0.1`; the ordinary hook-contract check continues for both drivers. |
 | The `nvidia/openshell/openshell` Homebrew formula runs the gateway as a `brew services` service. An OpenShell installed another way, such as from NVIDIA's release binaries, runs its gateway outside that service. | On macOS DefenseClaw starts and restarts only the Homebrew service's gateway. It finds an `openshell` installed another way on `PATH` (`DoctorReport.GatewayUnmanaged`; on Linux, one without the `openshell-gateway` user unit) and uses its gateway while it answers: the doctor does not fail it (`vm-driver` passes on the driver the gateway reports, found in `driver_dir`, Homebrew's keg, next to the `openshell-gateway` on `PATH`, or from the running process in `ps`; `gateway-service` warns, saying how it runs, from the launchd label in `launchctl list` or started by hand, and that DefenseClaw cannot restart it), and setup goes on, marking it `⚠` and writing any gateway change it needs with `GatewayConfigurator.Write` (no flush, no restart, no pending-restart mark) for the user to restart the gateway on. As nothing flushes the MicroVM sandboxes before that restart, the `Manual` plan text and setup's last line say that it stops every sandbox on the gateway and, on the vm driver, to stop the running ones first with `defenseclaw sandbox stop NAME` (the daemon's graceful stop runs `sync`), naming them when the gateway lists them; teardown's plan says the same for the files it restores. Whether that gateway loaded them is judged from the start of the user's `openshell-gateway` process, which no service reports (`gatewayStartedAt`: on macOS the process `ps` lists, on Linux the first `pgrep -u <euid> -f '^([^ ]*/)?openshell-gateway( |$)'` finds, whose age `ps -o etime=` gives), against the files' mtimes; with no such process, `bind-mounts`, `telemetry` and `vm-identity` warn that DefenseClaw cannot tell whether the gateway was restarted on them rather than pass. Teardown's `Rollback` restores those files and returns `ErrNoGatewayService` rather than restart. With no gateway answering, `gateway-service` and `gateway` fail and setup stops on their fix: start that gateway yourself, or stop it and remove that OpenShell (the installer would find that CLI and install nothing), then `setup --install-openshell` installs the formula. `vm-driver` then checks the driver it finds (next to the `openshell-gateway` on `PATH`, say) or fails as not installed. The TUI's machine check follows setup. The formula's post-install step signs only the formula's driver, so for an unsigned driver elsewhere the fix names that binary instead. |
 | `docker build` uses BuildKit only through the buildx CLI plugin, which docker looks for in the `cli-plugins` directory of its config (`DOCKER_CONFIG`, else `~/.docker`), where Docker Desktop links it: a `HOME` or `DOCKER_CONFIG` without that directory hides it. Without it, or with `DOCKER_BUILDKIT=0`, docker falls back to the legacy builder with only a deprecation notice; it runs every step before the first `COPY --chmod` and then fails with `the --chmod option requires BuildKit`, and a caller that discards docker's output sees `docker build exited 1` and nothing else. The same holds for Docker Engine on Linux without the `docker-buildx-plugin` package. | Every image build checks `docker buildx version` and `DOCKER_BUILDKIT` first and refuses with the fix, before `docker build` runs; the doctor's `docker-buildkit` check reports the same, and a failed build's error carries the last lines docker printed. The daemon builds in the environment it started with. |
 
 ## Supported platforms and versions
 
-- OpenShell `>=0.1.5 <0.2.0` (`SupportedMin`, `SupportedBelow`), checked
+- OpenShell `>=0.1.6 <0.2.0` (`SupportedMin`, `SupportedBelow`), checked
   against the CLI and the gateway; DefenseClaw still connects to the legacy
-  `>=0.1.1 <0.1.5` (`LegacyMin`, `CheckConnects`, prereleases of 0.1.5
+  `>=0.1.1 <0.1.6` (`LegacyMin`, `CheckConnects`, prereleases of 0.1.6
   included) only to move the host off it. The
   installer code (`openshell.Installer`) runs the upstream installer from the
-  v0.1.5 tag (`InstallerVersion`) only after checking it against a pinned
+  v0.1.6 tag (`InstallerVersion`) only after checking it against a pinned
   SHA-256 for that tag; the release comes from `OPENSHELL_VERSION`.
   Releases before 0.0.37 must be cleaned up
   with the old CLI first; later ones upgrade in place. A supported release
-  older than `SupportedMin` (0.1.5) is still driven (list, stop, delete,
+  older than `SupportedMin` (0.1.6) is still driven (list, stop, delete,
   pull) but runs no sandbox: the doctor's `openshell-cli` check warns, its
   **Gateway** check fails, `Installer.Install` upgrades it in place as
   `Installer.Upgrade` does, and setup takes that upgrade by default (yes to

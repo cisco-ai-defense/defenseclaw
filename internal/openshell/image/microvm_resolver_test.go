@@ -118,6 +118,80 @@ func TestR108OSMINMicroVMCustomBaseHostsAndBenignTwin(t *testing.T) {
 	}
 }
 
+// A custom base may supply localhost through a local NSS module even when
+// its nonempty hosts file names only other hosts. The completed-image check
+// uses that resolver instead of requiring a particular hosts-file layout.
+func TestMicroVMResolverCustomLocalNSSSource(t *testing.T) {
+	localDocker(t)
+	const source = `#include <nss.h>
+#include <netdb.h>
+#include <arpa/inet.h>
+#include <errno.h>
+#include <stdint.h>
+#include <string.h>
+enum nss_status _nss_localtest_gethostbyname2_r(const char *name, int af, struct hostent *result, char *buffer, size_t buflen, int *errnop, int *h_errnop) {
+    if (strcasecmp(name, "localhost") != 0 || af != AF_INET) {
+        *h_errnop = HOST_NOT_FOUND;
+        return NSS_STATUS_NOTFOUND;
+    }
+    uintptr_t p = ((uintptr_t)buffer + sizeof(char *) - 1) & ~(sizeof(char *) - 1);
+    char **aliases = (char **)p;
+    p += sizeof(char *);
+    char **addresses = (char **)p;
+    p += 2 * sizeof(char *);
+    if (p + 4 + 10 > (uintptr_t)buffer + buflen) {
+        *errnop = ERANGE;
+        *h_errnop = NETDB_INTERNAL;
+        return NSS_STATUS_TRYAGAIN;
+    }
+    char *address = (char *)p;
+    address[0] = 127; address[1] = 0; address[2] = 0; address[3] = 1;
+    char *canonical = address + 4;
+    memcpy(canonical, "localhost", 10);
+    aliases[0] = NULL;
+    addresses[0] = address;
+    addresses[1] = NULL;
+    result->h_name = canonical;
+    result->h_aliases = aliases;
+    result->h_addrtype = AF_INET;
+    result->h_length = 4;
+    result->h_addr_list = addresses;
+    return NSS_STATUS_SUCCESS;
+}
+`
+	for _, tc := range []struct {
+		name, nss string
+		want      bool
+	}{
+		{"custom file without local source", "", false},
+		{"custom file with local source", "localtest", true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			dir := t.TempDir()
+			if err := os.WriteFile(filepath.Join(dir, "hosts"), []byte("127.0.0.1 custom\n"), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			layout := "FROM " + openshell.DefaultBaseImage + " AS dc-complete\nUSER root\nCOPY hosts /etc/hosts\n"
+			if tc.nss != "" {
+				if err := os.WriteFile(filepath.Join(dir, "localtest.c"), []byte(source), 0o600); err != nil {
+					t.Fatal(err)
+				}
+				layout += "COPY localtest.c /tmp/localtest.c\nRUN gcc -shared -fPIC -o /usr/lib/$(gcc -dumpmachine)/libnss_localtest.so.2 /tmp/localtest.c && sed -i 's/^hosts:.*/hosts: files localtest/' /etc/nsswitch.conf\n"
+			}
+			layout += microVMResolverStep(openshell.DefaultBaseImage)
+			if err := os.WriteFile(filepath.Join(dir, "Dockerfile"), []byte(layout), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			tag := testImageTag(dir)
+			t.Cleanup(func() { exec.Command("docker", "image", "rm", "-f", tag).Run() })
+			out, err := dockerCommand(t, "build", "--pull=false", "--progress=plain", "-t", tag, dir).CombinedOutput()
+			if (err == nil) != tc.want {
+				t.Fatalf("build success = %t, want %t: %v\n%s", err == nil, tc.want, err, out)
+			}
+		})
+	}
+}
+
 func TestMicroVMResolverUsesLibcWithImagePythonCustomization(t *testing.T) {
 	localDocker(t)
 	for _, tc := range []struct {

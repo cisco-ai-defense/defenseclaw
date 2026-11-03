@@ -930,9 +930,7 @@ func gatewayText(g *sandboxapi.Gateway) string {
 // it warns about when one is not built, and every other harness built for
 // this user and DefenseClaw (`sandbox run kiro` builds one without
 // configuring it). An image Docker no longer has does not count, whatever
-// its record says; a MicroVM image whose MicroVM check refused it, or
-// settled nothing yet, is named apart with the command that checks it
-// again.
+// its record says.
 func (a *App) imagesCheck(ctx context.Context, microVM bool) openshell.Check {
 	c := openshell.Check{ID: CheckIDImages, Title: "Harness images"}
 	specs, err := a.harnesses(nil)
@@ -972,26 +970,13 @@ func (a *App) imagesCheck(ctx context.Context, microVM bool) openshell.Check {
 			}
 		}
 	}
-	var ready, missing, unchecked, refused []string
-	// verdict files the harness name's newest image by its MicroVM check.
-	verdict := func(name string) {
-		r := newest[name]
-		switch {
-		case r.MicroVMProblem != "":
-			// Every run of it on the MicroVM driver is refused.
-			refused = append(refused, name)
-		case r.MicroVMUnchecked():
-			// Its next run checks it again first, which takes a while.
-			unchecked = append(unchecked, name)
-		default:
-			ready = append(ready, name+" "+r.HarnessVersion)
-		}
-	}
+	var ready, missing []string
 	covered := map[string]bool{}
 	for _, spec := range specs {
 		covered[spec.Name] = true
 		if _, ok := newest[spec.Name]; ok {
-			verdict(spec.Name)
+			r := newest[spec.Name]
+			ready = append(ready, spec.Name+" "+r.HarnessVersion)
 		} else {
 			missing = append(missing, spec.Name)
 		}
@@ -1005,7 +990,8 @@ func (a *App) imagesCheck(ctx context.Context, microVM bool) openshell.Check {
 	others, _ = a.allowedHarnesses(others)
 	sort.Slice(others, func(i, j int) bool { return others[i].Name < others[j].Name })
 	for _, spec := range others {
-		verdict(spec.Name)
+		r := newest[spec.Name]
+		ready = append(ready, spec.Name+" "+r.HarnessVersion)
 	}
 	var notes, never, rebuild []string
 	for _, name := range missing {
@@ -1022,14 +1008,6 @@ func (a *App) imagesCheck(ctx context.Context, microVM bool) openshell.Check {
 		notes = append(notes, "built by an earlier DefenseClaw build only: "+strings.Join(rebuild, ", ")+
 			" (the next run builds it for this one, which takes a while; then `"+CommandName+" image prune` frees the old one)")
 	}
-	if len(refused) > 0 {
-		notes = append(notes, "cannot start in an OpenShell MicroVM: "+strings.Join(refused, ", ")+
-			" (the image build's MicroVM check says why; a gateway on the docker driver runs it)")
-	}
-	if len(unchecked) > 0 {
-		notes = append(notes, "not checked for an OpenShell MicroVM yet: "+strings.Join(unchecked, ", ")+
-			" (the next run checks it first, which takes a while)")
-	}
 	if len(notes) > 0 && len(ready) > 0 {
 		notes = append(notes, "hook-verified: "+strings.Join(ready, ", "))
 	}
@@ -1039,10 +1017,6 @@ func (a *App) imagesCheck(ctx context.Context, microVM bool) openshell.Check {
 	case len(missing) > 0:
 		c.Status, c.Detail = openshell.StatusWarn, strings.Join(notes, "; ")
 		c.Fix = &openshell.Fix{Summary: "build the images now", Command: CommandName + " image build " + strings.Join(missing, " ")}
-	default:
-		c.Status, c.Detail = openshell.StatusWarn, strings.Join(notes, "; ")
-		recheck := append(append([]string{}, refused...), unchecked...)
-		c.Fix = &openshell.Fix{Summary: "check them again", Command: CommandName + " image build " + strings.Join(recheck, " ") + " --force"}
 	}
 	if forbidden != "" {
 		c.Detail += "; " + forbidden
