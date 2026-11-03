@@ -643,6 +643,7 @@ $ast = [Management.Automation.Language.Parser]::ParseFile($ModulePath, [ref]$tok
 if ($errors.Count -gt 0) { throw "module parse failed: $($errors[0].Message)" }
 foreach ($name in @(
     'Get-DefenseClawRetiredInstallTreeAllowlist',
+    'Test-DefenseClawLayoutBrokerEnabled',
     'Assert-DefenseClawNoReparsePath',
     'Remove-DefenseClawEmptyRetiredInstallDirectory',
     'Remove-DefenseClawRetiredInstallTree'
@@ -1608,6 +1609,8 @@ def test_standalone_replacement_swaps_the_launcher_in_one_step(tmp_path) -> None
     _run_lifecycle_functions(tmp_path, ["Install-DefenseClawFileAtomic"], r"""
 function Test-DefenseClawStandaloneProfile { return $true }
 function Assert-DefenseClawNoReparsePath {}
+function Clear-DefenseClawRestrictiveFileAttributes { param($Path) return $false }
+function Write-DefenseClawResilienceEvent { param([string]$Marker, [hashtable]$Fields) }
 function New-DefenseClawDirectory { param($Path) [void][IO.Directory]::CreateDirectory($Path) }
 function Remove-DefenseClawStaleReplacementBackups {}
 function Remove-DefenseClawReplacementBackup { param($Path) [IO.File]::Delete($Path); return $true }
