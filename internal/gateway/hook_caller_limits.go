@@ -409,7 +409,8 @@ func (a *APIServer) admitHookCaller(w http.ResponseWriter, r *http.Request, iden
 			// A canceled hook no longer occupies an answer slot while its
 			// bounded audit completion continues (GAP-0518).
 			var stop func() bool
-			if r.Method == http.MethodPost && strings.HasSuffix(r.URL.Path, "/hook") {
+			if r.Method == http.MethodPost && (strings.HasSuffix(r.URL.Path, "/hook") ||
+				strings.HasPrefix(r.URL.Path, sandboxrelay.PathHookPrefix)) {
 				stop = context.AfterFunc(r.Context(), finish)
 			}
 			return r.WithContext(ctx), func() {

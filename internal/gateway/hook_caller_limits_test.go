@@ -862,3 +862,55 @@ func TestSandboxHookFloodAtTheDocumentedUserRate(t *testing.T) {
 		t.Fatalf("%d calls at %d a second: %d hooks and %d receipts refused", calls, budget.Rate, refusedHooks, refusedReceipts)
 	}
 }
+
+// A classified sandbox hook keeps GAP-0490's class charge even when
+// GAP-0518 releases its pending admission at the client deadline.
+func TestCanceledSandboxHookChargesClassAndReleasesSlot(t *testing.T) {
+	const identity = "canceling-sandbox-user"
+	path := sandboxrelay.PathHookPrefix + "claudecode"
+	now := time.Unix(4_500_000, 0)
+	api := &APIServer{}
+	api.hookCallerLimits = hookCallerLimiter{globalInFlight: 1, now: func() time.Time { return now }}
+	ctx, cancel := context.WithCancel(t.Context())
+	defer cancel()
+	r, release := api.admitHookCaller(httptest.NewRecorder(),
+		httptest.NewRequest(http.MethodPost, path, strings.NewReader(`{"hook_event_name":"PreToolUse"}`)).WithContext(ctx), identity, path)
+	if release == nil {
+		t.Fatal("sandbox hook refused before classification")
+	}
+	defer release()
+	if err := chargeSandboxHookBudget(r.Context(), false); err != nil {
+		t.Fatalf("classified hook charge: %v", err)
+	}
+	api.hookCallerLimits.mu.Lock()
+	charged := api.hookCallerLimits.callers[identity+"|"+sandboxBudgetHook] != nil
+	api.hookCallerLimits.mu.Unlock()
+	if !charged {
+		t.Fatal("classified hook did not spend its sandbox hook budget")
+	}
+	cancel()
+	deadline := time.Now().Add(time.Second)
+	for {
+		api.hookCallerLimits.mu.Lock()
+		total := api.hookCallerLimits.total
+		pending := api.hookCallerLimits.callers[identity+"|"+sandboxBudgetPending]
+		running := len(pending.running)
+		api.hookCallerLimits.mu.Unlock()
+		if total == 0 && running == 0 {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("canceled classified hook retained admission: total=%d running=%d", total, running)
+		}
+		time.Sleep(time.Millisecond)
+	}
+	next, nextRelease := api.admitHookCaller(httptest.NewRecorder(),
+		httptest.NewRequest(http.MethodPost, path, nil), identity, path)
+	if nextRelease == nil {
+		t.Fatal("following sandbox hook refused after cancellation")
+	}
+	nextRelease()
+	if err := chargeSandboxHookBudget(next.Context(), false); err != nil {
+		t.Fatalf("following hook lost its class charge: %v", err)
+	}
+}
