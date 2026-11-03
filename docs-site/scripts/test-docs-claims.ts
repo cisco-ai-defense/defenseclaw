@@ -112,6 +112,7 @@ describe('Cursor observe outage mode', () => {
       assert.ok(!/Per-user Cursor (?:in )?observe (?:mode )?(?:still|also) blocks/i.test(page(stale)), stale);
     }
     assert.match(failModes, /On a per-user install, an explicit saved `guardrail\.hook_fail_mode` selects the outage mode.{0,600}A verified gateway that gives no final decision before the hook deadline blocks in every tier and saved mode/i);
+    assert.match(failModes, /On a per-user install, an explicit saved `guardrail\.hook_fail_mode` selects the outage mode.{0,600}Other transport and answer failures block in every tier/i);
     assert.match(perUser, /A verified gateway that accepts the call but gives no final decision before the hook.s fixed deadline blocks in every tier/i);
     const managedRegistration = source('internal/gateway/connector/cursor_enterprise_hooks.go');
     assert.match(managedRegistration, /"failClosed": true,/);
