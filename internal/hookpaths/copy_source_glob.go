@@ -681,17 +681,31 @@ func CopySourceGlobDestinationsAndUnknown(command, cwd, home string, facts map[s
 		return nil, false
 	}
 	file, ok := parseShell(command)
-	if !ok || len(file.Stmts) != 1 || len(file.Stmts[0].Redirs) != 0 {
+	if !ok {
+		return nil, false
+	}
+	return copySourceGlobDestinationsWithParsed(command, cwd, home, file, facts, false)
+}
+
+// copySourceGlobDestinationsWithParsed lets the hook client reuse its first
+// bounded source reading when it later walks links in the same command.
+func copySourceGlobDestinationsWithParsed(command, cwd, home string, file *syntax.File, facts map[string]string, record bool) ([]string, bool) {
+	if !strings.Contains(command, "cp") || strings.HasPrefix(strings.TrimSpace(command), "for ") ||
+		file == nil || len(file.Stmts) != 1 || len(file.Stmts[0].Redirs) != 0 {
 		return nil, false
 	}
 	call, ok := file.Stmts[0].Cmd.(*syntax.CallExpr)
 	if !ok {
 		return nil, false
 	}
-	if paths := copyLiteralDestinations(call, cwd, home, facts); paths != nil {
+	literalFacts := facts
+	if record {
+		literalFacts = nil
+	}
+	if paths := copyLiteralDestinations(call, cwd, home, literalFacts); paths != nil {
 		return paths, false
 	}
-	paths, _, ok, unknown := copySourceGlobDestinations(call, cwd, home, facts, false)
+	paths, _, ok, unknown := copySourceGlobDestinations(call, cwd, home, facts, record)
 	if !ok {
 		return nil, false
 	}

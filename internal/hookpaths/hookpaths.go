@@ -1195,7 +1195,7 @@ func ResolveConnector(connector, surface, event string, payload []byte) string {
 					unprovenReason = ActionCommandAuditReasonWithDialect(command, cwd, home, hookShellDialect(connector, tool))
 				}
 				if !isApplyPatchToolName(tool) && !protectedDecision {
-					protectedDecision = actionConcreteProtectedWriteOnWithOperands(command, cwd, home, false, nil, &concreteOperands)
+					protectedDecision = actionConcreteProtectedWriteOnWithOperands(command, cwd, home, false, nil, &concreteOperands, sourceFacts)
 					if !protectedDecision && actionClientVariableWriteCandidate(command, home) {
 						// A per-user gateway can resolve a variable write through
 						// the user's links. Carry that positive decision to managed
@@ -1307,7 +1307,7 @@ func ResolveConnector(connector, surface, event string, payload []byte) string {
 				// to a protected file (GAP-1505). The command of an
 				// apply_patch tool is a patch envelope, not shell.
 				if !isApplyPatchToolName(tool) {
-					links = commandLinksWithFacts(command, cwd, home, sourceFacts, true)
+					links = commandLinksWithCopySourceFact(command, cwd, home, sourceFacts)
 					// The gateway also judges each simple command in the
 					// directory actionfacts places it in, which follows a
 					// pushd of a bare name as it follows cd. The copy source
@@ -2748,16 +2748,26 @@ func commandLinksWithFacts(command, cwd, home string, facts map[string]string, r
 	return commandLinks(command, cwd, home, facts, record, false)
 }
 
+// commandLinksWithCopySourceFact reuses the bounded source reading recorded
+// earlier in this hook request for the same sole copy call.
+func commandLinksWithCopySourceFact(command, cwd, home string, facts map[string]string) shellLinks {
+	return commandLinksWithReuse(command, cwd, home, facts, true, false, true)
+}
+
 // commandLinks reads the links of command. A nested literal shell body
 // returns its facts without the end checks: its caller runs them once
 // over its own links and the body links together.
 func commandLinks(command, cwd, home string, facts map[string]string, record, nested bool) shellLinks {
-	links, fallback := commandLinksRead(command, cwd, home, facts, record, nested, true)
+	return commandLinksWithReuse(command, cwd, home, facts, record, nested, false)
+}
+
+func commandLinksWithReuse(command, cwd, home string, facts map[string]string, record, nested, reuseCopySource bool) shellLinks {
+	links, fallback := commandLinksRead(command, cwd, home, facts, record, nested, true, reuseCopySource)
 	if fallback {
 		// A copy of links on disk that the end of the command does not let
 		// us read is read as before, an opaque copy scope at the copy call
 		// (rel-1-0-6:GAP-0274).
-		links, _ = commandLinksRead(command, cwd, home, facts, record, nested, false)
+		links, _ = commandLinksRead(command, cwd, home, facts, record, nested, false, reuseCopySource)
 	}
 	return links
 }
@@ -2765,7 +2775,7 @@ func commandLinks(command, cwd, home string, facts map[string]string, record, ne
 // commandLinksRead is commandLinks; readDisk reads the link-keeping copies
 // of links on disk as those links (copyDiskLinks). fallback reports such a
 // copy that could not be read so.
-func commandLinksRead(command, cwd, home string, facts map[string]string, record, nested, readDisk bool) (shellLinks, bool) {
+func commandLinksRead(command, cwd, home string, facts map[string]string, record, nested, readDisk, reuseCopySource bool) (shellLinks, bool) {
 	links := shellLinks{known: true, callAt: -1}
 	file, parsed := parseShell(command)
 	if !parsed {
@@ -3009,7 +3019,11 @@ func commandLinksRead(command, cwd, home string, facts map[string]string, record
 				// An unproved reading keeps the general copy reading below;
 				// the client's protected-target decision covers an unscannable
 				// destination.
-				paths, proved, safe, _ := copySourceGlobDestinations(call, dir, home, facts, record)
+				copyRecord := record
+				if reuseCopySource && record && globSafe && facts[copySourceGlobFactKey(call, dir)] != "" {
+					copyRecord = false
+				}
+				paths, proved, safe, _ := copySourceGlobDestinations(call, dir, home, facts, copyRecord)
 				if !safe || !proved {
 					globSafe = false
 					break
