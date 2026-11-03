@@ -49,9 +49,9 @@ import (
 // DefaultRepository names overlay images when BuildSpec.Repository is empty.
 const DefaultRepository = "defenseclaw/sandbox"
 
-// contextSchema versions the Dockerfile layout; bump it whenever the
-// generated Dockerfile changes shape so older images stop matching.
-const contextSchema = 1
+// contextSchema versions image admission and the Dockerfile layout; bump it
+// when either changes so older records stop matching.
+const contextSchema = 3
 
 // Image labels. The content hash is attached with `docker build --label`
 // because it is computed over the context itself.
@@ -507,6 +507,29 @@ func renderDockerfile(c *Context, steps []harness.InstallStep) []byte {
 	b.WriteString("RUN " + runAsUserStep(spec.UID, spec.GID, "/etc/passwd", "/etc/group") + "\n")
 	b.WriteString("USER sandbox\n")
 	return b.Bytes()
+}
+
+// microVMResolverStep checks a completed image's own name service with the
+// exported /etc/hosts overlaid. Docker may export a different hosts file
+// than its completed image stage carries, so the exported file is the one
+// the VM admission check judges. BuildKit's network=none has no configured
+// IPv4 interface, so getent ahostsv4 returns no answer there. getent hosts
+// may return only an IPv6 entry for a dual-stack name; the guest check
+// requires the IPv4 answer before a session runs.
+func microVMResolverStep(baseImage string) string {
+	return strings.Replace(`FROM dc-complete AS dc-resolver-check
+USER root
+RUN --network=none --mount=type=bind,from=dc-complete,source=/,target=/tmp/dc-root,ro set -eu; \
+    root=/tmp/dc-root; hosts="$root/etc/hosts"; \
+    if [ ! -e "$hosts" ] && [ ! -L "$hosts" ]; then exit 0; fi; \
+    if [ -f "$hosts" ] && [ ! -L "$hosts" ] && [ ! -s "$hosts" ]; then exit 0; fi; \
+    fail() { echo 'MicroVM image localhost check failed for BASE_IMAGE: leave its hosts file empty or make its resolver return a loopback address for localhost' >&2; exit 1; }; \
+    /usr/sbin/chroot "$root" /bin/sh -c 'test -f /etc/hosts' || fail; \
+    answer=$(/usr/bin/timeout 5 /usr/sbin/chroot "$root" /usr/bin/getent hosts localhost) || fail; \
+    [ ${#answer} -le 4096 ] && [ -n "$answer" ] || fail; \
+    printf '%s\n' "$answer" | /usr/bin/awk 'NF < 2 || ($1 != "127.0.0.1" && index($1, ":") == 0) { bad=1 } END { exit bad || NR == 0 }' || fail
+USER sandbox
+`, "BASE_IMAGE", baseImage, 1)
 }
 
 // runAsUserStep names the run-as uid and gid in the image: the workload

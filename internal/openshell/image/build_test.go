@@ -19,6 +19,7 @@
 package image
 
 import (
+	"archive/tar"
 	"bytes"
 	"context"
 	"crypto/sha256"
@@ -41,12 +42,13 @@ import (
 // It has the buildx plugin unless noBuildx is set; the handler never sees
 // `docker buildx version`. It runs in env, not the test's environment.
 type fakeDocker struct {
-	mu       sync.Mutex
-	calls    [][]string
-	stdin    map[int][]byte
-	handler  func(args []string, stdin []byte) (stdout string, exit int)
-	noBuildx bool
-	env      map[string]string
+	mu            sync.Mutex
+	calls         [][]string
+	stdin         map[int][]byte
+	handler       func(args []string, stdin []byte) (stdout string, exit int)
+	noBuildx      bool
+	env           map[string]string
+	exportedHosts exportedHosts
 }
 
 func (f *fakeDocker) Getenv(key string) string { return f.env[key] }
@@ -73,6 +75,27 @@ func (f *fakeDocker) Run(_ context.Context, stdin io.Reader, stdout, stderr io.W
 			return &CommandError{Args: args, ExitCode: 1}
 		}
 		_, _ = io.WriteString(stdout, "github.com/docker/buildx v0.30.1 c6f062d0eef6a18ae703d0433e2c8a4dd34d4513\n")
+		return nil
+	}
+	if len(args) == 2 && args[0] == "create" {
+		_, _ = io.WriteString(stdout, strings.Repeat("c", 64)+"\n")
+		return nil
+	}
+	if len(args) == 2 && args[0] == "export" {
+		tw := tar.NewWriter(stdout)
+		if f.exportedHosts.present {
+			h := &tar.Header{Name: "etc/hosts", Typeflag: f.exportedHosts.typeflag, Linkname: f.exportedHosts.link, Mode: 0o644,
+				Size: int64(len(f.exportedHosts.data))}
+			if err := tw.WriteHeader(h); err != nil {
+				return err
+			}
+			if _, err := tw.Write(f.exportedHosts.data); err != nil {
+				return err
+			}
+		}
+		return tw.Close()
+	}
+	if len(args) == 3 && args[0] == "rm" && args[1] == "-f" {
 		return nil
 	}
 	out, exit := f.handler(args, in)

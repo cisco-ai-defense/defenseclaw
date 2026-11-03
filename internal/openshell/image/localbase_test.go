@@ -95,13 +95,17 @@ func TestBuildRunsOnALocalBaseImage(t *testing.T) {
 	for _, tc := range []struct {
 		name       string
 		repoDigest string
+		microVM    bool
 	}{
-		{"classic store", ""},
-		{"containerd store", `"corp-base@` + baseID + `"`},
+		{"classic store", "", false},
+		{"containerd store", `"corp-base@` + baseID + `"`, false},
+		{"MicroVM classic store", "", true},
+		{"MicroVM containerd store", `"corp-base@` + baseID + `"`, true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			spec := testSpec(harness.Codex)
 			spec.BaseImage = "corp-base@" + baseID
+			spec.MicroVM = tc.microVM
 			c := mustContext(t, spec)
 			docker := localBaseDocker(t, c, baseID, tc.repoDigest, true)
 			b := &Builder{Docker: docker, Store: testStore(t)}

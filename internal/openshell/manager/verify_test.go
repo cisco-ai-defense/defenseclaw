@@ -47,7 +47,8 @@ import (
 
 // isWorkloadCheck reports the exec of the workload check.
 func isWorkloadCheck(call openshelltest.ExecCall) bool {
-	return len(call.Command) >= 8 && call.Command[0] == "/usr/bin/env" && call.Command[7] == "defenseclaw-verify"
+	return len(call.Command) >= 8 && call.Command[0] == "/usr/bin/env" &&
+		(call.Command[7] == "defenseclaw-verify" || call.Command[7] == "defenseclaw-verify-vm")
 }
 
 // workloadAnswer is what a sandbox answers the workload check.
@@ -57,9 +58,12 @@ type workloadAnswer struct {
 	home     string
 	capEff   string
 	// cpus and memKB are the processors and the MemTotal (kB) it sees.
-	cpus  int
-	memKB int64
-	files []answerFile
+	cpus                int
+	memKB               int64
+	files               []answerFile
+	localhost           []string
+	localhostFailed     bool
+	localhostUnreported bool
 	// cut leaves out the end line.
 	cut bool
 }
@@ -91,6 +95,16 @@ func (a workloadAnswer) stdout() []byte {
 			fmt.Fprintf(&b, "mount %s %s\n", f.mount, f.path)
 		}
 	}
+	if !a.localhostUnreported {
+		for _, line := range a.localhost {
+			fmt.Fprintf(&b, "localhost %s\n", line)
+		}
+		if a.localhostFailed {
+			b.WriteString("localhost-failed\n")
+		} else {
+			b.WriteString("localhost-ok\n")
+		}
+	}
 	if !a.cut {
 		b.WriteString("end\n")
 	}
@@ -100,7 +114,8 @@ func (a workloadAnswer) stdout() []byte {
 // answerFor is the answer of a sandbox named hostname (a MicroVM's
 // hostname is its name) that runs as want expects.
 func answerFor(want verifyRecord, hostname string) workloadAnswer {
-	a := workloadAnswer{uid: want.UID, gid: want.GID, hostname: hostname, home: "writable", capEff: "0000000000000000", cpus: 2, memKB: 2000000}
+	a := workloadAnswer{uid: want.UID, gid: want.GID, hostname: hostname, home: "writable", capEff: "0000000000000000", cpus: 2, memKB: 2000000,
+		localhost: []string{"127.0.0.1 STREAM localhost", "127.0.0.1 DGRAM", "127.0.0.1 RAW"}}
 	for _, f := range want.Files {
 		af := answerFile{path: f.Path, sha256: f.SHA256, uid: f.UID, gid: f.GID, mode: f.Mode}
 		if f.ReadOnlyMount {
@@ -131,6 +146,9 @@ func (e *harnessEnv) workloadChecks(edit func(sandbox string, a *workloadAnswer)
 		a := answerFor(want, call.Sandbox)
 		if edit != nil {
 			edit(call.Sandbox, &a)
+		}
+		if call.Command[7] != "defenseclaw-verify-vm" {
+			a.localhostUnreported = true
 		}
 		return openshelltest.ExecResponse{Stdout: a.stdout()}
 	}
@@ -235,10 +253,104 @@ func TestWorkloadProblems(t *testing.T) {
 	}
 }
 
+func TestMicroVMResolverResult(t *testing.T) {
+	vm, _ := openshell.LookupDriver("vm")
+	docker, _ := openshell.LookupDriver("docker")
+	for _, tc := range []struct {
+		name string
+		edit func(*workloadAnswer)
+		want string
+	}{
+		{"good", nil, ""},
+		{"no answer", func(a *workloadAnswer) { a.localhost = nil }, "could not resolve localhost"},
+		{"command failed", func(a *workloadAnswer) { a.localhost, a.localhostFailed = nil, true }, "could not resolve localhost"},
+		{"status missing", func(a *workloadAnswer) { a.localhostUnreported = true }, "could not resolve localhost"},
+		{"wrong address", func(a *workloadAnswer) { a.localhost = []string{"203.0.113.10 STREAM localhost"} }, "did not return only 127.0.0.1"},
+		{"mixed addresses", func(a *workloadAnswer) { a.localhost = append(a.localhost, "203.0.113.10 DGRAM") }, "did not return only 127.0.0.1"},
+		{"malformed output", func(a *workloadAnswer) { a.localhost = []string{"localhost"} }, "did not return only 127.0.0.1"},
+		{"IPv6 output", func(a *workloadAnswer) { a.localhost = []string{"::1 STREAM localhost"} }, "did not return only 127.0.0.1"},
+		{"address without type", func(a *workloadAnswer) { a.localhost = []string{"127.0.0.1"} }, "did not return only 127.0.0.1"},
+		{"unexpected type", func(a *workloadAnswer) { a.localhost = []string{"127.0.0.1 OTHER localhost"} }, "did not return only 127.0.0.1"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			a := answerFor(testVerify(), "vmbox")
+			if tc.edit != nil {
+				tc.edit(&a)
+			}
+			facts, err := parseWorkloadFacts(a.stdout())
+			must(t, err)
+			problems := strings.Join(workloadProblems(testVerify(), facts, vm, workloadLimits{}), "; ")
+			if !strings.Contains(problems, tc.want) || (tc.want == "" && problems != "") {
+				t.Fatalf("VM problems = %q, want %q", problems, tc.want)
+			}
+			if dockerProblems := workloadProblems(testVerify(), facts, docker, workloadLimits{}); len(dockerProblems) != 0 {
+				t.Fatalf("Docker driver changed: %q", dockerProblems)
+			}
+		})
+	}
+	for _, answer := range []string{"localhost " + strings.Repeat("a", 257) + "\nlocalhost-ok\n", "localhost 127.0.0.1 STREAM localhost\nlocalhost-ok\nlocalhost-ok\n", "localhost-ok\nlocalhost 127.0.0.1 STREAM localhost\n"} {
+		if _, err := parseWorkloadFacts([]byte(answer)); err == nil {
+			t.Fatalf("accepted malformed resolver result %q", answer)
+		}
+	}
+}
+
+func TestMicroVMGuestResolverUsesLibcWithProjectPythonModule(t *testing.T) {
+	if runtime.GOOS != "linux" {
+		t.Skip("the guest check uses Linux /proc")
+	}
+	for _, args := range [][]string{{"info", "--format", "{{.ServerVersion}}"}, {"image", "inspect", openshell.DefaultBaseImage}} {
+		if err := exec.CommandContext(t.Context(), "docker", args...).Run(); err != nil {
+			t.Skipf("local Docker and the pinned base are needed: %v", err)
+		}
+	}
+	for _, tc := range []struct {
+		name, hosts, module string
+		want                string
+	}{
+		{"ordinary project module", "127.0.0.1 localhost\n", "# project module\n", ""},
+		{"alternate project module", "203.0.113.10 localhost\n", `AF_INET = 2
+def getaddrinfo(host, port, family=0, type=0, proto=0, flags=0):
+    return [(2, 1, 6, "", ("127.0.0.1", 0))]
+`, "did not return only 127.0.0.1"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			dir := t.TempDir()
+			hosts := filepath.Join(dir, "hosts")
+			if err := os.WriteFile(hosts, []byte(tc.hosts), 0o644); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(filepath.Join(dir, "socket.py"), []byte(tc.module), 0o644); err != nil {
+				t.Fatal(err)
+			}
+			argv := verifyArgv(verifyRecord{}, true)
+			args := []string{"run", "--rm", "--network=bridge", "--user", "1000:1000", "--workdir", "/sandbox",
+				"--mount", "type=bind,src=" + dir + ",dst=/sandbox,readonly",
+				"--mount", "type=bind,src=" + hosts + ",dst=/etc/hosts,readonly",
+				"--entrypoint", argv[0], openshell.DefaultBaseImage}
+			args = append(args, argv[1:]...)
+			out, err := exec.CommandContext(t.Context(), "docker", args...).Output()
+			if err != nil {
+				t.Fatalf("guest check: %v", err)
+			}
+			facts, err := parseWorkloadFacts(out)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if problem := microVMResolverProblem(facts); !strings.Contains(problem, tc.want) || (tc.want == "" && problem != "") {
+				t.Fatalf("resolver problem = %q, want %q", problem, tc.want)
+			}
+		})
+	}
+}
+
 // The check runs in an empty environment with every tool by absolute path:
 // nothing planted on the image PATH (under /sandbox) answers for itself.
 func TestWorkloadCheckRunsNothingFromThePath(t *testing.T) {
-	argv := verifyArgv(testVerify())
+	argv := verifyArgv(testVerify(), false)
+	if vm := verifyArgv(testVerify(), true); vm[7] != "defenseclaw-verify-vm" || argv[7] != "defenseclaw-verify" {
+		t.Fatalf("workload check names: docker=%q vm=%q", argv[7], vm[7])
+	}
 	if !slices.Equal(argv[:8], []string{"/usr/bin/env", "-i", "PATH=/usr/bin:/bin", "HOME=" + connector.SandboxHomeDir,
 		"/bin/sh", "-c", verifyScript, "defenseclaw-verify"}) || len(argv) != 11 || argv[8] != testVerify().Files[0].Path {
 		t.Fatalf("argv = %q", argv)
@@ -255,7 +367,7 @@ func TestWorkloadCheckRunsNothingFromThePath(t *testing.T) {
 	if runtime.GOOS != "linux" {
 		t.Skip("the script reads /proc, and GNU sha256sum and stat")
 	}
-	for _, tool := range []string{"/usr/bin/env", "/usr/bin/id", "/usr/bin/sha256sum", "/usr/bin/stat"} {
+	for _, tool := range []string{"/usr/bin/env", "/usr/bin/id", "/usr/bin/sha256sum", "/usr/bin/stat", "/usr/bin/getent"} {
 		if _, err := os.Stat(tool); err != nil {
 			t.Skipf("no %s", tool)
 		}
@@ -273,7 +385,7 @@ func TestWorkloadCheckRunsNothingFromThePath(t *testing.T) {
 	want := verifyRecord{UID: os.Getuid(), GID: os.Getgid(), Files: []verifyFile{
 		{Path: hook, SHA256: hex.EncodeToString(sum[:]), UID: os.Getuid(), GID: os.Getgid(), Mode: 0o755},
 	}}
-	argv = verifyArgv(want)
+	argv = verifyArgv(want, false)
 	cmd := exec.Command(argv[0], argv[1:]...)
 	cmd.Env = []string{"PATH=" + planted + ":/usr/bin:/bin"}
 	out, err := cmd.Output()
@@ -283,6 +395,20 @@ func TestWorkloadCheckRunsNothingFromThePath(t *testing.T) {
 	}
 	facts, err := parseWorkloadFacts(out)
 	must(t, err)
+	if facts.LocalhostReported {
+		t.Fatal("Docker workload check ran the VM resolver probe")
+	}
+	vmArgv := verifyArgv(want, true)
+	vmOut, err := exec.Command(vmArgv[0], vmArgv[1:]...).Output()
+	must(t, err)
+	vmFacts, err := parseWorkloadFacts(vmOut)
+	must(t, err)
+	if !vmFacts.LocalhostReported {
+		t.Fatal("VM workload check omitted the resolver result")
+	}
+	if problem := microVMResolverProblem(vmFacts); problem != "" {
+		t.Fatalf("VM workload check: %s", problem)
+	}
 	if !facts.End || facts.UID != os.Getuid() || facts.GID != os.Getgid() || facts.Hostname == "" || facts.CapEff == "" || facts.CPUs < 1 || facts.MemTotalKB < 1 {
 		t.Fatalf("facts = %+v (%s)", facts, out)
 	}
@@ -330,7 +456,7 @@ func TestCreateChecksTheWorkload(t *testing.T) {
 	d.create(sandboxapi.CreateRequest{Name: "dkcheck"})
 	dcalls := d.workloadCheckCalls("dkcheck")
 	rec = d.boxOf("dkcheck").rec
-	if len(dcalls) != 1 || rec.Verify == nil || !slices.Equal(dcalls[0].Command, verifyArgv(*rec.Verify)) || rec.Hostname != "dkcheck" {
+	if len(dcalls) != 1 || rec.Verify == nil || !slices.Equal(dcalls[0].Command, verifyArgv(*rec.Verify, false)) || rec.Hostname != "dkcheck" {
 		t.Fatalf("docker workload checks = %+v, record verify = %+v, hostname %q", dcalls, rec.Verify, rec.Hostname)
 	}
 	if !slices.ContainsFunc(rec.Verify.Files, func(f verifyFile) bool { return f.ReadOnlyMount }) {
@@ -482,7 +608,7 @@ func TestStartChecksTheWorkloadAgainstTheRecord(t *testing.T) {
 		t.Fatalf("another ingress port renders the same hooks: %+v", fresh.Files)
 	}
 	e.startBox("restart", sandboxapi.StartRequest{})
-	if calls := e.workloadCheckCalls("restart"); len(calls) != 2 || !slices.Equal(calls[1].Command, verifyArgv(recorded)) {
+	if calls := e.workloadCheckCalls("restart"); len(calls) != 2 || !slices.Equal(calls[1].Command, verifyArgv(recorded, true)) {
 		t.Fatalf("workload checks = %+v", calls)
 	}
 	if after := e.boxOf("restart").rec.Verify; after == nil || !reflect.DeepEqual(*after, recorded) {

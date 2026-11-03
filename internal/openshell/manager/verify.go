@@ -72,7 +72,8 @@ const (
 // (under /sandbox) would otherwise answer for itself. The shell reads the
 // hostname, the capabilities, the processors and the memory (in kB) itself.
 // The arguments are the files to check; a "mount" line names each that is a
-// mount point, with its options.
+// mount point, with its options. Only the vm check name adds the localhost
+// resolver result; the docker check retains its original work and output.
 const verifyScript = `printf 'uid %s\n' "$(/usr/bin/id -u)"
 printf 'gid %s\n' "$(/usr/bin/id -g)"
 host=
@@ -90,6 +91,14 @@ printf 'cpus %s\n' "$cpus"
 while read -r key value rest; do
   [ "$key" = MemTotal: ] && printf 'memtotal %s\n' "$value"
 done < /proc/meminfo
+if [ "$0" = defenseclaw-verify-vm ]; then
+  if localhost=$(/usr/bin/timeout 5 /usr/bin/getent ahostsv4 localhost 2>/dev/null); then
+    printf '%s\n' "$localhost" | while IFS= read -r answer; do printf 'localhost %s\n' "$answer"; done
+    echo localhost-ok
+  else
+    echo localhost-failed
+  fi
+fi
 if [ "$#" -gt 0 ]; then
   /usr/bin/sha256sum -- "$@" | while read -r sum file; do printf 'sha256 %s %s\n' "$sum" "$file"; done
   /usr/bin/stat -c 'stat %u %g %a %n' -- "$@"
@@ -100,9 +109,13 @@ fi
 echo end`
 
 // verifyArgv is the workload check's command for the files of want.
-func verifyArgv(want verifyRecord) []string {
+func verifyArgv(want verifyRecord, microVM bool) []string {
+	checkName := "defenseclaw-verify"
+	if microVM {
+		checkName += "-vm"
+	}
 	argv := []string{"/usr/bin/env", "-i", "PATH=/usr/bin:/bin", "HOME=" + connector.SandboxHomeDir,
-		"/bin/sh", "-c", verifyScript, "defenseclaw-verify"}
+		"/bin/sh", "-c", verifyScript, checkName}
 	for _, f := range want.Files {
 		argv = append(argv, f.Path)
 	}
@@ -138,9 +151,12 @@ type workloadFacts struct {
 	// CPUs are the processors the workload sees, and MemTotalKB the
 	// memory (/proc/meminfo MemTotal, in kB; a little under what the
 	// MicroVM was given, the kernel keeps some).
-	CPUs       int
-	MemTotalKB int64
-	Files      map[string]*fileFacts
+	CPUs              int
+	MemTotalKB        int64
+	Files             map[string]*fileFacts
+	LocalhostAnswers  []string
+	LocalhostOK       bool
+	LocalhostReported bool
 	// seen holds the tags of the single-valued lines read.
 	seen map[string]bool
 	// End is set when the answer was complete.
@@ -233,6 +249,19 @@ func parseWorkloadFacts(out []byte) (workloadFacts, error) {
 			}
 			f := file(path)
 			f.MountPoint, f.MountOptions = true, opts
+		case "localhost":
+			if facts.LocalhostReported || len(rest) > 256 || strings.ContainsAny(rest, "\x00\r") || len(facts.LocalhostAnswers) >= 64 {
+				err = fmt.Errorf("a malformed localhost answer")
+				break
+			}
+			facts.LocalhostAnswers = append(facts.LocalhostAnswers, rest)
+		case "localhost-ok", "localhost-failed":
+			if rest != "" || facts.LocalhostReported {
+				err = fmt.Errorf("a malformed localhost result")
+				break
+			}
+			facts.LocalhostReported = true
+			facts.LocalhostOK = tag == "localhost-ok"
 		case "end":
 			facts.End = true
 		default:
@@ -359,6 +388,11 @@ func workloadProblems(want verifyRecord, got workloadFacts, d openshell.Driver, 
 	if !d.SandboxLimits {
 		out = append(out, sharedLimitProblems(got, d, limits)...)
 	}
+	if d.Name == openshell.DriverVM {
+		if problem := microVMResolverProblem(got); problem != "" {
+			out = append(out, problem)
+		}
+	}
 	for _, w := range want.Files {
 		f := got.Files[w.Path]
 		switch {
@@ -387,6 +421,22 @@ func workloadProblems(want verifyRecord, got workloadFacts, d openshell.Driver, 
 	return out
 }
 
+// microVMResolverProblem judges the guest's own bounded getent result. The
+// build checked the completed image, while this check also sees guest init.
+func microVMResolverProblem(got workloadFacts) string {
+	if !got.LocalhostReported || !got.LocalhostOK || len(got.LocalhostAnswers) == 0 {
+		return "the MicroVM could not resolve localhost to its loopback ingress (127.0.0.1)"
+	}
+	for _, line := range got.LocalhostAnswers {
+		fields := strings.Fields(line)
+		if len(fields) < 2 || len(fields) > 3 || fields[0] != "127.0.0.1" ||
+			(fields[1] != "STREAM" && fields[1] != "DGRAM" && fields[1] != "RAW") {
+			return "the MicroVM resolver did not return only 127.0.0.1 for localhost"
+		}
+	}
+	return ""
+}
+
 // verifyWorkload runs the workload check in sandbox name and returns what
 // it found. A sandbox that does not run as want expects, or that cannot be
 // checked, is refused with CodePolicyRejected: the caller deletes or stops
@@ -395,7 +445,7 @@ func workloadProblems(want verifyRecord, got workloadFacts, d openshell.Driver, 
 // the extra environment the create passed (nil at a start); a check cut
 // short names the shell setting in it that most likely did that.
 func (m *Manager) verifyWorkload(ctx context.Context, gw *Gateway, name string, want verifyRecord, eff *packs.Effective, outcome string, env map[string]string) (workloadFacts, error) {
-	res, err := m.ownExec(ctx, gw, name, verifyArgv(want), openshell.ExecOptions{
+	res, err := m.ownExec(ctx, gw, name, verifyArgv(want, gw.Driver.Name == openshell.DriverVM), openshell.ExecOptions{
 		Timeout: verifyTimeout, Idempotent: true, MaxOutputBytes: verifyMaxOutput,
 	})
 	if err != nil {

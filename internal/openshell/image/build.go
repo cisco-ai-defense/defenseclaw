@@ -94,6 +94,12 @@ func (b *Builder) Build(ctx context.Context, spec BuildSpec, opts BuildOptions) 
 			return Record{}, err
 		}
 	}
+	if c.Spec.MicroVM {
+		if err := b.verifyExportedResolver(ctx, c); err != nil {
+			_, _ = output(ctx, b.Docker, nil, "image", "rm", "-f", c.Tag)
+			return Record{}, err
+		}
+	}
 
 	id, err := b.imageID(ctx, c.Tag)
 	if err != nil {
