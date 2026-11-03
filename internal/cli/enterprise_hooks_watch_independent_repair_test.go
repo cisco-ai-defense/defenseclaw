@@ -29,12 +29,157 @@ func TestEnterpriseHookWatchRepairsHealthyTokenWhileOtherTargetFails(t *testing.
 			name = "shared_hook"
 		}
 		t.Run(name, func(t *testing.T) {
-			testEnterpriseHookWatchRepairBeforeOtherRetry(t, shared)
+			testEnterpriseHookWatchRepairBeforeOtherRetry(t, shared, 0, false)
 		})
 	}
 }
 
-func testEnterpriseHookWatchRepairBeforeOtherRetry(t *testing.T, shared bool) {
+func TestGAP0523QueuedHealthyEventPreemptsSlowRetry(t *testing.T) {
+	for _, shared := range []bool{false, true} {
+		name := "target_token"
+		if shared {
+			name = "shared_hook"
+		}
+		t.Run(name, func(t *testing.T) {
+			testEnterpriseHookWatchRepairBeforeOtherRetry(t, shared, 5200*time.Millisecond, false)
+		})
+	}
+}
+
+func TestGAP0523FailedFilePassPreemptsHealthyEvent(t *testing.T) {
+	testEnterpriseHookWatchRepairBeforeOtherRetry(t, false, 5200*time.Millisecond, true)
+}
+
+func TestGAP0523MixedBurstReplaysRecoveredTargetEvent(t *testing.T) {
+	restoreEnterpriseHooksLifecycleTestState(t)
+	previousReconcile := enterpriseHookWatchReconcileOnce
+	previousPlatformWatch := enterpriseHookWatchPlatformWatch
+	previousTargetScoped := enterpriseHookWatchTargetScoped
+	previousManifest := enterpriseHookManifest
+	previousInterval, previousDebounce, previousSettle := enterpriseHookWatchInterval, enterpriseHookWatchDebounce, enterpriseHookWatchSettle
+	previousRetryMin, previousRetryMax := enterpriseHookWatchRepairRetryMin, enterpriseHookWatchRepairRetryMax
+	t.Cleanup(func() {
+		enterpriseHookWatchReconcileOnce = previousReconcile
+		enterpriseHookWatchPlatformWatch = previousPlatformWatch
+		enterpriseHookWatchTargetScoped = previousTargetScoped
+		enterpriseHookManifest = previousManifest
+		enterpriseHookWatchInterval, enterpriseHookWatchDebounce, enterpriseHookWatchSettle = previousInterval, previousDebounce, previousSettle
+		enterpriseHookWatchRepairRetryMin, enterpriseHookWatchRepairRetryMax = previousRetryMin, previousRetryMax
+	})
+	dir := t.TempDir()
+	failedToken := filepath.Join(dir, ".hook-failed.token")
+	healthyToken := filepath.Join(dir, ".hook-healthy.token")
+	const issued = "issued\n"
+	for _, path := range []string{failedToken, healthyToken} {
+		if err := os.WriteFile(path, []byte(issued), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	cfg = &config.Config{DataDir: dir}
+	enterpriseHookManifest = filepath.Join(dir, "targets.yaml")
+	enterpriseHookWatchInterval = time.Minute
+	enterpriseHookWatchDebounce = 250 * time.Millisecond
+	enterpriseHookWatchSettle = 2 * time.Second
+	enterpriseHookWatchRepairRetryMin = 20 * time.Second
+	enterpriseHookWatchRepairRetryMax = 20 * time.Second
+	ready := make(chan struct{})
+	enterpriseHookWatchPlatformWatch = func(context.Context, io.Writer) { close(ready) }
+	enterpriseHookWatchTargetScoped = func() bool { return true }
+	failed := enterpriseHookReconcileRow{User: "bob", Connector: "hermes", Error: "home unavailable"}
+	healthy := enterpriseHookReconcileRow{User: "alice", Connector: "hermes", OK: true}
+	owners := map[string][]string{
+		failedToken:  {enterpriseHookProtectedTargetKey(failed)},
+		healthyToken: {enterpriseHookProtectedTargetKey(healthy)},
+	}
+	healthyRepaired := make(chan time.Time, 1)
+	failedRepaired := make(chan time.Time, 1)
+	calls := 0
+	enterpriseHookWatchReconcileOnce = func(ctx context.Context) (enterpriseHookReconcileRun, error) {
+		calls++
+		run := enterpriseHookReconcileRun{
+			Rows: []enterpriseHookReconcileRow{failed, healthy}, Failures: 1,
+			ManifestSHA256: "same", WatchDirs: []string{dir},
+			WatchExclusiveFiles: []string{failedToken, healthyToken}, WatchPathOwners: owners,
+		}
+		if calls >= 2 {
+			for _, path := range enterpriseHookReconcileRecheckPaths {
+				switch path {
+				case healthyToken:
+					if err := os.WriteFile(healthyToken, []byte(issued), 0o600); err != nil {
+						return run, err
+					}
+					run.Repairs++
+					select {
+					case healthyRepaired <- time.Now():
+					default:
+					}
+				case failedToken:
+					if err := os.WriteFile(failedToken, []byte(issued), 0o600); err != nil {
+						return run, err
+					}
+					run.Rows[0].Error = ""
+					run.Rows[0].OK = true
+					run.Failures = 0
+					run.Repairs++
+					select {
+					case failedRepaired <- time.Now():
+					default:
+					}
+				}
+			}
+		}
+		return run, nil
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	cmd := &cobra.Command{}
+	cmd.SetContext(ctx)
+	cmd.SetErr(io.Discard)
+	done := make(chan error, 1)
+	go func() { done <- runEnterpriseHooksWatch(cmd, nil) }()
+	t.Cleanup(func() {
+		cancel()
+		select {
+		case err := <-done:
+			if err != nil && !errors.Is(err, context.Canceled) {
+				t.Errorf("guardian exit: %v", err)
+			}
+		case <-time.After(3 * time.Second):
+			t.Error("guardian did not stop")
+		}
+	})
+	select {
+	case <-ready:
+	case err := <-done:
+		t.Fatalf("guardian exited before events: %v", err)
+	case <-time.After(4 * time.Second):
+		t.Fatal("watcher did not start")
+	}
+	writtenAt := time.Now()
+	if err := os.WriteFile(failedToken, []byte("changed\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(healthyToken, []byte("changed\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	for label, repaired := range map[string]<-chan time.Time{"healthy": healthyRepaired, "recovered": failedRepaired} {
+		select {
+		case at := <-repaired:
+			if elapsed := at.Sub(writtenAt); elapsed >= 5*time.Second {
+				t.Errorf("%s token repair took %s", label, elapsed)
+			}
+		case <-time.After(time.Until(writtenAt.Add(5 * time.Second))):
+			t.Errorf("%s token event was not replayed within five seconds", label)
+		}
+	}
+	for _, path := range []string{failedToken, healthyToken} {
+		data, err := os.ReadFile(path)
+		if err != nil || string(data) != issued {
+			t.Errorf("token %s after repair = %q, %v", filepath.Base(path), data, err)
+		}
+	}
+}
+
+func testEnterpriseHookWatchRepairBeforeOtherRetry(t *testing.T, shared bool, retryHold time.Duration, failedFileEvent bool) {
 	restoreEnterpriseHooksLifecycleTestState(t)
 	previousReconcile := enterpriseHookWatchReconcileOnce
 	previousPlatformWatch := enterpriseHookWatchPlatformWatch
@@ -62,6 +207,12 @@ func testEnterpriseHookWatchRepairBeforeOtherRetry(t *testing.T, shared bool) {
 	if err := os.WriteFile(token, []byte(issued), 0o600); err != nil {
 		t.Fatal(err)
 	}
+	failedToken := filepath.Join(dir, ".hook-failed.token")
+	if failedFileEvent {
+		if err := os.WriteFile(failedToken, []byte(issued), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
 	cfg = &config.Config{DataDir: dir}
 	enterpriseHookManifest = filepath.Join(dir, "targets.yaml")
 	enterpriseHookWatchInterval = time.Minute
@@ -69,7 +220,12 @@ func testEnterpriseHookWatchRepairBeforeOtherRetry(t *testing.T, shared bool) {
 	enterpriseHookWatchSettle = 2 * time.Second
 	enterpriseHookWatchRepairRetryMin = 2 * time.Second
 	enterpriseHookWatchRepairRetryMax = 15 * time.Second
-	enterpriseHookWatchPlatformWatch = func(context.Context, io.Writer) {}
+	if failedFileEvent {
+		enterpriseHookWatchRepairRetryMin = time.Minute
+		enterpriseHookWatchRepairRetryMax = time.Minute
+	}
+	ready := make(chan struct{})
+	enterpriseHookWatchPlatformWatch = func(context.Context, io.Writer) { close(ready) }
 	enterpriseHookWatchTargetScoped = func() bool { return true }
 	healthy := enterpriseHookReconcileRow{User: "alice", Connector: "hermes", OK: true}
 	failing := enterpriseHookReconcileRow{User: "bob", Connector: "hermes", Error: "home unavailable"}
@@ -81,14 +237,20 @@ func testEnterpriseHookWatchRepairBeforeOtherRetry(t *testing.T, shared bool) {
 	}
 	retryStarted := make(chan struct{})
 	releaseRetry := make(chan struct{})
-	repaired := make(chan struct{}, 1)
+	repaired := make(chan time.Time, 1)
+	watchFiles := []string{token}
+	pathOwners := map[string][]string{token: owners}
+	if failedFileEvent {
+		watchFiles = append(watchFiles, failedToken)
+		pathOwners[failedToken] = []string{enterpriseHookProtectedTargetKey(failing)}
+	}
 	calls := 0
 	enterpriseHookWatchReconcileOnce = func(ctx context.Context) (enterpriseHookReconcileRun, error) {
 		calls++
 		run := enterpriseHookReconcileRun{
 			Rows: []enterpriseHookReconcileRow{failing, healthy}, Failures: 1,
-			WatchDirs: []string{filepath.Dir(token)}, WatchExclusiveFiles: []string{token},
-			WatchPathOwners: map[string][]string{token: owners},
+			WatchDirs: []string{filepath.Dir(token)}, WatchExclusiveFiles: watchFiles,
+			WatchPathOwners: pathOwners,
 		}
 		if calls == 2 {
 			close(retryStarted)
@@ -109,7 +271,7 @@ func testEnterpriseHookWatchRepairBeforeOtherRetry(t *testing.T, shared bool) {
 				}
 				run.Repairs = 1
 				select {
-				case repaired <- struct{}{}:
+				case repaired <- time.Now():
 				default:
 				}
 			}
@@ -124,6 +286,18 @@ func testEnterpriseHookWatchRepairBeforeOtherRetry(t *testing.T, shared bool) {
 	cmd.SetErr(&log)
 	done := make(chan error, 1)
 	go func() { done <- runEnterpriseHooksWatch(cmd, nil) }()
+	if failedFileEvent {
+		select {
+		case <-ready:
+		case err := <-done:
+			t.Fatalf("guardian exited before file event: %v; log: %s", err, log.String())
+		case <-time.After(4 * time.Second):
+			t.Fatal("guardian did not start watcher")
+		}
+		if err := os.WriteFile(failedToken, []byte("changed\n"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
 	select {
 	case <-retryStarted:
 	case err := <-done:
@@ -133,16 +307,27 @@ func testEnterpriseHookWatchRepairBeforeOtherRetry(t *testing.T, shared bool) {
 	}
 	// The retry already checked Alice. Overwrite while Bob's retry is
 	// finishing, so the pass snapshots the damaged token after the event.
+	writtenAt := time.Now()
 	if err := os.WriteFile(token, []byte("overwritten\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	close(releaseRetry)
+	if retryHold > 0 {
+		release := time.AfterFunc(retryHold, func() { close(releaseRetry) })
+		defer release.Stop()
+	} else {
+		close(releaseRetry)
+	}
+	var repairedAt time.Time
+	repairLimit := 3 * time.Second
+	if failedFileEvent {
+		repairLimit = 5 * time.Second
+	}
 	select {
-	case <-repaired:
-	case <-time.After(3 * time.Second):
+	case repairedAt = <-repaired:
+	case <-time.After(repairLimit):
 		cancel()
 		<-done
-		t.Fatalf("healthy token waited for the failing target's retry; log: %s", log.String())
+		t.Fatalf("healthy token waited for the failing target's pass; log: %s", log.String())
 	}
 	data, err := os.ReadFile(token)
 	if err != nil || string(data) != issued {
@@ -151,6 +336,9 @@ func testEnterpriseHookWatchRepairBeforeOtherRetry(t *testing.T, shared bool) {
 	cancel()
 	if err := <-done; err != nil && !errors.Is(err, context.Canceled) {
 		t.Fatalf("guardian exit: %v", err)
+	}
+	if retryHold > 0 && repairedAt.Sub(writtenAt) >= 5*time.Second {
+		t.Fatalf("healthy token repair took %s; limit five seconds; log: %s", repairedAt.Sub(writtenAt), log.String())
 	}
 	// The guardian logs the trigger path quoted (%q): on Windows its
 	// backslashes are escaped, so match the quoted form on every platform.

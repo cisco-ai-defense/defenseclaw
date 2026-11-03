@@ -9,6 +9,11 @@ import (
 	"time"
 )
 
+// enterpriseHookWatchPriorRunKey carries the last completed pass into a
+// standalone filesystem pass. A failed account remains failed until its own
+// event or retry, so unrelated file changes need not repeat its worker.
+type enterpriseHookWatchPriorRunKey struct{}
+
 type enterpriseHookTargetRetry struct {
 	delay time.Duration
 	due   time.Time
@@ -127,4 +132,17 @@ func enterpriseHookWatchFailedOwnedPaths(run enterpriseHookReconcileRun) map[str
 		}
 	}
 	return failed
+}
+
+func enterpriseHookWatchPartitionFailedPaths(paths []string, failed map[string]bool) ([]string, []string) {
+	kept := paths[:0]
+	var retry []string
+	for _, path := range paths {
+		if failed[filepath.Clean(path)] {
+			retry = append(retry, path)
+		} else {
+			kept = append(kept, path)
+		}
+	}
+	return kept, retry
 }
