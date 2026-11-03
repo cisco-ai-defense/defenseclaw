@@ -10,11 +10,11 @@ import (
 	"mvdan.cc/sh/v3/syntax"
 )
 
-// A plain unquoted scalar is field-split before cp reads its options. Return
-// only a positive target-directory reading; an uncertain value supplies no
-// ordinary-destination proof.
+// A plain unquoted scalar is field-split before cp reads its operands and
+// options. Only cp's parsed destination is a write target; a source operand
+// or an uncertain option supplies no destination proof.
 func actionPosixCopyVariableTarget(call *syntax.CallExpr, values actionValues, cwd, home string) (string, bool) {
-	if call == nil || len(call.Args) < 3 || len(call.Assigns) != 0 {
+	if call == nil || len(call.Args) < 2 || len(call.Assigns) != 0 {
 		return "", false
 	}
 	program, fixed := staticProgramWord(call.Args[0], home)
@@ -53,5 +53,5 @@ func actionPosixCopyVariableTarget(call *syntax.CallExpr, values actionValues, c
 		return "", false
 	}
 	parsed := cpOperands(args, makeStatic(len(args)))
-	return parsed.destination, parsed.ok && parsed.targetDir
+	return parsed.destination, parsed.ok
 }
