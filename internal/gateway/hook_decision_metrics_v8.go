@@ -102,7 +102,8 @@ func (a *APIServer) emitHookDecisionLogV8(
 	}
 	result := hookDecisionResult(env, panicked)
 	effectiveAction := normalizeHookActionLabel(resp.Action)
-	sandboxID, sandboxName := hookV8Sandbox(audit.EnvelopeFromContext(ctx))
+	auditEnvelope := audit.EnvelopeFromContext(ctx)
+	sandboxID, sandboxName := hookV8Sandbox(auditEnvelope)
 	classification := observability.ClassificationContext{
 		Bucket: observability.BucketGuardrailEvaluation, EventName: observability.EventName(observability.TelemetryEventHookDecision),
 		RawSeverity: string(severity.Severity), Enforced: env.Enforced,
@@ -178,6 +179,7 @@ func (a *APIServer) emitHookDecisionLogV8(
 			DefenseClawUserName:                 v8UserName(meta.UserName, hookV8OptionalIdentifier),
 			DefenseClawUserEmail:                v8UserEmail(meta.UserEmail),
 			DefenseClawAgentIdentityID:          agentIdentityV8FromContext(ctx),
+			DefenseClawAgentInstanceID:          hookV8OptionalIdentifier(auditEnvelope.AgentInstanceID),
 			DefenseClawPolicyID:                 hookV8OptionalIdentifier(meta.PolicyID),
 			DefenseClawDestinationApp:           hookV8OptionalIdentifier(meta.DestinationApp),
 			GenAIConversationID:                 hookV8OptionalIdentifier(meta.SessionID),
