@@ -175,6 +175,11 @@ type lifecycle struct {
 	env    *Env
 	opts   Options
 	result *enterprisestatus.Result
+	// A path-triggered ensure waits at most once. A change first seen at the
+	// later apply decision asks Run to release the lock and marker before it
+	// waits, then start a fresh attempt against the settled inputs.
+	pathTriggerDebounced bool
+	pathTriggerLateWait  bool
 	// gatewayAuditFailure is the active mandatory event-history write failure
 	// in the gateway's latest /health answer, used when describe computes
 	// security_complete after reading that answer.
@@ -406,7 +411,22 @@ func Run(ctx context.Context, env *Env, opts Options) *enterprisestatus.Result {
 			l.result.Changes = append(l.result.Changes, fmt.Sprintf("cleared the macOS %s flag of %s, which stopped DefenseClaw from managing the folder", flags, path))
 		}
 	}
-	failure := l.run(ctx)
+	var failure int
+	for {
+		failure = l.run(ctx)
+		if !l.pathTriggerLateWait {
+			break
+		}
+		if !l.waitForApplyTriggerBeforeLock(ctx) {
+			break
+		}
+		env.agentDigest = ""
+		l = &lifecycle{
+			env: env, opts: opts,
+			result:               enterprisestatus.New(opts.Action, managed.ProfileStandalone, env.GOOS, env.ProductVersion),
+			pathTriggerDebounced: true,
+		}
+	}
 	env.dirFlagsCleared = nil
 	// A no-op ensure and a committed change report the same observed host
 	// limits as status and verify. They do not change these kernel settings.
@@ -493,21 +513,9 @@ func (l *lifecycle) run(ctx context.Context) (failure int) {
 	if readOnly {
 		return l.readOnly(ctx)
 	}
-	if l.opts.Action == ActionEnsure && l.opts.Reason == ApplyTriggerReason && l.opts.ConfigFile == "" && env.ApplyTriggerDebounce != nil {
-		waitCtx, stop := l.untilInterrupted(ctx)
-		err := env.ApplyTriggerDebounce(waitCtx, env.P(env.Layout.ConfigPath))
-		stop()
-		if err != nil {
-			if l.interrupted() || errors.Is(err, context.Canceled) {
-				r.AddError(codeInterrupted, "the run stopped while it waited for the config push to settle; nothing was changed")
-			} else {
-				r.AddError(codeState, "wait for config push: "+err.Error())
-			}
-			return 0
-		}
-	}
 	// Before the lock, which another run can hold for the readiness timeout.
 	env.closePrivateDirs(ctx)
+	debounced := l.pathTriggerDebounced
 
 	// The lock stays at one inode while anything is in the lifecycle
 	// directory; only an uninstall that leaves it empty removes it (see
@@ -521,40 +529,54 @@ func (l *lifecycle) run(ctx context.Context) (failure int) {
 	// A stop signal ends the wait for the lock: the run that waited could
 	// otherwise take it later and remove or change the deployment after
 	// the command was told to stop.
-	lockCtx, stopLockWait := l.untilInterrupted(ctx)
-	lock, err := env.acquireLock(lockCtx)
-	stopLockWait()
-	if err != nil && l.interrupted() {
-		r.AddError(codeInterrupted, "the run got a stop signal (SIGTERM or an interrupt) while it waited for the lifecycle lock; nothing was changed")
-		return 0
-	}
-	if err != nil {
-		if errors.Is(err, errLockBusy) {
-			r.AddError(codeBusy, err.Error()+"; "+lockBusyNextStep(env.LockTimeout))
-			return enterprisestatus.BusyExitCode(env.GOOS)
+	var lock *lifecycleLock
+	for {
+		lockCtx, stopLockWait := l.untilInterrupted(ctx)
+		var err error
+		lock, err = env.acquireLock(lockCtx)
+		stopLockWait()
+		if err != nil && l.interrupted() {
+			r.AddError(codeInterrupted, "the run got a stop signal (SIGTERM or an interrupt) while it waited for the lifecycle lock; nothing was changed")
+			return 0
 		}
-		if errors.Is(err, errLockRemoved) {
-			if l.opts.Action == ActionUninstall {
-				// Only an uninstall that left the lifecycle directory empty
-				// removes the lock: the run this one waited for removed the
-				// deployment, so there is nothing left to remove. A busy exit
-				// here aborted the rpm or deb removal whose preremove waited
-				// for a concurrent MDM purge, after the purge had removed
-				// everything (GAP-0112).
-				r.Noop, r.NoopReason = true, "not_installed"
-				message := "DefenseClaw enterprise was uninstalled by the lifecycle run this uninstall waited for; nothing was left to remove"
-				if l.opts.Purge {
-					message += " (each account keeps its per-user DefenseClaw files if that run was not a purge)"
-				}
-				r.AddWarning(codeNotInstalled, message)
-				return 0
+		if err != nil {
+			if errors.Is(err, errLockBusy) {
+				r.AddError(codeBusy, err.Error()+"; "+lockBusyNextStep(env.LockTimeout))
+				return enterprisestatus.BusyExitCode(env.GOOS)
 			}
-			r.AddError(codeBusy, err.Error()+"; rerun the command if it is still needed")
-			return enterprisestatus.BusyExitCode(env.GOOS)
+			if errors.Is(err, errLockRemoved) {
+				if l.opts.Action == ActionUninstall {
+					// Only an uninstall that left the lifecycle directory empty
+					// removes the lock: the run this one waited for removed the
+					// deployment, so there is nothing left to remove. A busy exit
+					// here aborted the rpm or deb removal whose preremove waited
+					// for a concurrent MDM purge, after the purge had removed
+					// everything (GAP-0112).
+					r.Noop, r.NoopReason = true, "not_installed"
+					message := "DefenseClaw enterprise was uninstalled by the lifecycle run this uninstall waited for; nothing was left to remove"
+					if l.opts.Purge {
+						message += " (each account keeps its per-user DefenseClaw files if that run was not a purge)"
+					}
+					r.AddWarning(codeNotInstalled, message)
+					return 0
+				}
+				r.AddError(codeBusy, err.Error()+"; rerun the command if it is still needed")
+				return enterprisestatus.BusyExitCode(env.GOOS)
+			}
+			r.AddError(codeState, err.Error())
+			l.reportNoSpace(err)
+			return 0
 		}
-		r.AddError(codeState, err.Error())
-		l.reportNoSpace(err)
-		return 0
+		// A push can start while the run waits for the lock. Release it
+		// before the quiet window so status and verify can observe the host.
+		if debounced || !l.pathTriggerNeedsQuiet(ctx) {
+			break
+		}
+		lock.release()
+		if !l.waitForApplyTriggerBeforeLock(ctx) {
+			return 0
+		}
+		debounced, l.pathTriggerDebounced = true, true
 	}
 	defer lock.release()
 	if l.interrupted() {
@@ -573,12 +595,16 @@ func (l *lifecycle) run(ctx context.Context) (failure int) {
 	if l.opts.FromPackage && l.opts.Reason != "package" {
 		// Recorded before the lock goes, so a package run that waits for it
 		// writes its own result after this one.
-		defer func() { l.recordPackageResult(failure) }()
+		defer func() {
+			if !l.pathTriggerLateWait {
+				l.recordPackageResult(failure)
+			}
+		}()
 	}
 	if l.opts.Action == ActionInstall || l.opts.Action == ActionUpgrade ||
 		l.opts.Action == ActionEnsure || l.opts.Action == ActionRepair {
 		defer func() {
-			if len(r.Errors) != 0 || !r.Installed || r.InstalledVersion != env.ProductVersion {
+			if l.pathTriggerLateWait || len(r.Errors) != 0 || !r.Installed || r.InstalledVersion != env.ProductVersion {
 				return
 			}
 			current, err := env.loadDeployment()
@@ -622,7 +648,7 @@ func (l *lifecycle) run(ctx context.Context) (failure int) {
 		// receipt the new gateway disproves gets the last good bundle back
 		// in this run.
 		defer func() {
-			if l.opts.Bundle != "" || len(r.Errors) != 0 {
+			if l.pathTriggerLateWait || l.opts.Bundle != "" || len(r.Errors) != 0 {
 				return
 			}
 			latest, err := env.loadDeployment()
@@ -744,7 +770,11 @@ func (l *lifecycle) run(ctx context.Context) (failure int) {
 		if l.opts.Bundle != "" {
 			return l.requireProtectedTargets(l.applyBundle(ctx, record))
 		}
-		return l.requireProtectedTargets(l.ensureInstalled(ctx, record, l.apply))
+		code := l.ensureInstalled(ctx, record, l.apply)
+		if l.pathTriggerLateWait {
+			return 0
+		}
+		return l.requireProtectedTargets(code)
 	case ActionReconcile:
 		if record == nil {
 			r.AddError(codeNotInstalled, "DefenseClaw enterprise is not installed")
@@ -787,6 +817,10 @@ func (l *lifecycle) ensureInstalled(ctx context.Context, record *Deployment, app
 	// while the installed bytes are still the applied config.
 	for retry := 0; !noop && retry < maxMetadataRechecks && l.restoreUnchangedConfigMetadata(ctx, record); retry++ {
 		noop, reason = l.ensureNoop(ctx, record)
+	}
+	if !noop && l.hasApplyTriggerDebounce() && !l.pathTriggerDebounced {
+		l.pathTriggerLateWait = true
+		return 0
 	}
 	if noop {
 		// A run that put a tampered file back changed the host.

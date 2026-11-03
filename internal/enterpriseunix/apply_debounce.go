@@ -10,6 +10,8 @@ import (
 	"errors"
 	"os"
 	"time"
+
+	"github.com/defenseclaw/defenseclaw/internal/enterprisestatus"
 )
 
 // A path-triggered ensure plans once a pair of config pushes five seconds
@@ -17,6 +19,59 @@ import (
 const applyTriggerQuietWindow = 6 * time.Second
 const applyTriggerSampleInterval = 200 * time.Millisecond
 const applyTriggerMaxWait = 15 * time.Second
+
+func (l *lifecycle) hasApplyTriggerDebounce() bool {
+	return l.opts.Action == ActionEnsure && l.opts.Reason == ApplyTriggerReason &&
+		l.opts.ConfigFile == "" && l.env.ApplyTriggerDebounce != nil
+}
+
+// pathTriggerNeedsQuiet distinguishes a path event for the applied inputs
+// from a change that needs the quiet window. The caller holds the lifecycle
+// lock for this check and releases it before waiting, without publishing the
+// lifecycle marker while the gateway remains active.
+func (l *lifecycle) pathTriggerNeedsQuiet(ctx context.Context) bool {
+	if !l.hasApplyTriggerDebounce() {
+		return false
+	}
+	if l.opts.Bundle != "" || l.opts.BundleInbox || l.opts.Mutate != nil {
+		return true
+	}
+	if l.env.bundleMode() {
+		entries, err := os.ReadDir(l.env.bundleInboxDir())
+		if err != nil && !errors.Is(err, os.ErrNotExist) {
+			return true
+		}
+		if len(entries) != 0 {
+			return true
+		}
+	}
+	record, err := l.env.loadDeployment()
+	if err != nil || record == nil {
+		return true
+	}
+	l.restoreUnchangedConfigMetadata(ctx, record)
+	probe := &lifecycle{
+		env: l.env, opts: l.opts,
+		result: enterprisestatus.New(l.opts.Action, l.result.Profile, l.env.GOOS, l.env.ProductVersion),
+	}
+	noop, _ := probe.ensureNoop(ctx, record)
+	return !noop
+}
+
+func (l *lifecycle) waitForApplyTriggerBeforeLock(ctx context.Context) bool {
+	waitCtx, stop := l.untilInterrupted(ctx)
+	err := l.env.ApplyTriggerDebounce(waitCtx, l.env.P(l.env.Layout.ConfigPath))
+	stop()
+	if err == nil {
+		return true
+	}
+	if l.interrupted() || errors.Is(err, context.Canceled) {
+		l.result.AddError(codeInterrupted, "the run stopped while it waited for the config push to settle; nothing was changed")
+	} else {
+		l.result.AddError(codeState, "wait for config push: "+err.Error())
+	}
+	return false
+}
 
 func debounceApplyTrigger(ctx context.Context, configPath string) error {
 	return waitForApplyTriggerQuiet(ctx, configPath, time.Now, waitApplyTriggerSample, os.Lstat)
