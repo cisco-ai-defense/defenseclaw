@@ -873,6 +873,7 @@ function Get-GoTestFailureSummary(
     }
     $packageOutput = @{}
     $packageCriticalOutput = @{}
+    $packageCriticalHeader = @{}
     $packageCriticalRemaining = @{}
     foreach ($failure in $failedPackages) {
         $packageOutput[$failure.Package] = [Collections.Generic.Queue[string]]::new()
@@ -908,6 +909,9 @@ function Get-GoTestFailureSummary(
                 Add-WindowsNativeDiagnosticTail -Queue $packageOutput[$package] `
                     -Text $output -MaxLines 160 -MaxBytes $tailBytesPerFailure
                 if ($output -match '(?im)^(panic:|fatal error:|runtime: out of memory|.*test timed out after|exit status )') {
+                    if (-not $packageCriticalHeader.ContainsKey($package)) {
+                        $packageCriticalHeader[$package] = Limit-WindowsNativeText $output 512
+                    }
                     $packageCriticalRemaining[$package] = 48
                 }
                 if ([int]$packageCriticalRemaining[$package] -gt 0) {
@@ -940,6 +944,9 @@ function Get-GoTestFailureSummary(
     foreach ($failure in $failedPackages) {
         $elapsed = if ($failure.Elapsed) { " [$($failure.Elapsed)s]" } else { '' }
         [void]$summary.AppendLine("FAIL package $($failure.Package)$elapsed")
+        if ($packageCriticalHeader.ContainsKey($failure.Package)) {
+            [void]$summary.AppendLine($packageCriticalHeader[$failure.Package])
+        }
         foreach ($line in $packageCriticalOutput[$failure.Package]) {
             [void]$summary.AppendLine($line)
         }
@@ -8657,6 +8664,44 @@ function Invoke-SelfTest {
             -not $goTestSummary.Contains('Authorization: ***REDACTED***') -or
             [Text.Encoding]::UTF8.GetByteCount($goTestSummary) -gt 1024) {
             throw 'structured Go test summary lost failure identity, focus, redaction, or bounds'
+        }
+
+        $runtimeJson = @(
+            [pscustomobject]@{
+                Action = 'output'
+                Package = 'example.invalid/runtime'
+                Test = 'TestPassing'
+                Output = "passing output stays out of a package summary`n"
+            },
+            [pscustomobject]@{
+                Action = 'pass'
+                Package = 'example.invalid/runtime'
+                Test = 'TestPassing'
+            },
+            [pscustomobject]@{
+                Action = 'output'
+                Package = 'example.invalid/runtime'
+                Output = "fatal error: fixture runtime stopped`n"
+            }
+        )
+        $runtimeJson += @(1..96 | ForEach-Object {
+            [pscustomobject]@{
+                Action = 'output'
+                Package = 'example.invalid/runtime'
+                Output = "stack frame $_ $('x' * 128)`n"
+            }
+        })
+        $runtimeJson += [pscustomobject]@{
+            Action = 'fail'
+            Package = 'example.invalid/runtime'
+        }
+        $runtimeSummary = Get-GoTestFailureSummary (
+            ($runtimeJson | ForEach-Object { $_ | ConvertTo-Json -Compress }) -join [Environment]::NewLine
+        ) 4096
+        if (-not $runtimeSummary.Contains('fatal error: fixture runtime stopped') -or
+            $runtimeSummary.Contains('passing output stays out of a package summary') -or
+            [Text.Encoding]::UTF8.GetByteCount($runtimeSummary) -gt 4096) {
+            throw 'structured Go test summary lost the runtime header or retained a passing test'
         }
 
         $largeGoTestJson = @(
