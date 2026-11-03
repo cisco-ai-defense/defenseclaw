@@ -222,7 +222,11 @@ class DeferredHelperResultFileTests(unittest.TestCase):
         (managed_venv / "Scripts").mkdir(parents=True)
         install_root.mkdir()
         shim = install_root / "defenseclaw.cmd"
-        shim.write_text(f'@echo off\r\n"{managed_venv / "Scripts" / "defenseclaw.exe"}" %*\r\n', encoding="utf-8")
+        # newline="": the exact CRLF bytes install.ps1 writes. Text mode on
+        # Windows would turn each \r\n into \r\r\n, which is not the shim.
+        shim.write_text(
+            f'@echo off\r\n"{managed_venv / "Scripts" / "defenseclaw.exe"}" %*\r\n', encoding="utf-8", newline=""
+        )
         (data_dir / ".env").write_text("KEY=x", encoding="utf-8")
         (data_dir / "config.yaml").write_text("{}", encoding="utf-8")
         temp = tmp / "temp"
@@ -460,6 +464,7 @@ class WindowsManagedVenvResetTests(unittest.TestCase):
             (install_root / "defenseclaw.cmd").write_text(
                 f'@echo off\r\n"{managed_venv / "Scripts" / "defenseclaw.exe"}" %*\r\n',
                 encoding="utf-8",
+                newline="",
             )
             plan = {
                 "install_root": str(install_root),

@@ -2674,7 +2674,7 @@ class RetiredSourceInstallCopyTests(unittest.TestCase):
             managed_venv = home / ".defenseclaw" / ".venv"
             managed_venv.mkdir(parents=True)
             (bin_dir / "defenseclaw.cmd").write_text(
-                f'@echo off\r\n"{managed_venv / "Scripts" / "defenseclaw.exe"}" %*\r\n', encoding="utf-8"
+                f'@echo off\r\n"{managed_venv / "Scripts" / "defenseclaw.exe"}" %*\r\n', encoding="utf-8", newline=""
             )
             plan = {
                 "install_root": install_root,
@@ -2710,7 +2710,7 @@ class RetiredSourceInstallCopyTests(unittest.TestCase):
             managed_venv = home / ".defenseclaw" / ".venv"
             managed_venv.mkdir(parents=True)
             (bin_dir / "defenseclaw.cmd").write_text(
-                f'@echo off\r\n"{managed_venv / "Scripts" / "defenseclaw.exe"}" %*\r\n', encoding="utf-8"
+                f'@echo off\r\n"{managed_venv / "Scripts" / "defenseclaw.exe"}" %*\r\n', encoding="utf-8", newline=""
             )
             plan = {
                 "install_root": install_root,
