@@ -114,10 +114,10 @@ func TestCreateMountMode(t *testing.T) {
 		t.Fatalf("template = %+v", tmpl)
 	}
 	mounts := tmpl.DriverConfig["docker"].(map[string]any)["mounts"].([]any)
-	if len(mounts) != 4 || mounts[0].(map[string]any)["target"] != "/work/myapp" {
+	if len(mounts) != 5 || mounts[0].(map[string]any)["target"] != "/work/myapp" {
 		t.Fatalf("mounts = %v", mounts)
 	}
-	for i, want := range []string{connector.ClaudeCodeSandboxRunDropInPath, connector.ClaudeCodeSandboxManagedMCPPath} {
+	for i, want := range []string{connector.ClaudeCodeSandboxDropInPath, connector.ClaudeCodeSandboxRunDropInPath, connector.ClaudeCodeSandboxManagedMCPPath} {
 		if mt := mounts[2+i].(map[string]any); mt["target"] != want || mt["read_only"] != true || mt["type"] != "bind" {
 			t.Fatalf("run config mount %d = %v", i, mt)
 		}
@@ -217,7 +217,7 @@ func TestCreateCopyModeAndStrict(t *testing.T) {
 	}
 	_, egressRule := pol.NetworkPolicies[policy.EgressRuleName]
 	_, proxy := got.Spec.Environment["HTTPS_PROXY"]
-	if len(mounts) != 2 || proxy || egressRule {
+	if len(mounts) != 3 || proxy || egressRule {
 		t.Fatalf("strict copy: %d mounts, proxy %v, egress rule %v", len(mounts), proxy, egressRule)
 	}
 	if w := e.binding("copybox").Workdir; w.Mode != sandboxauth.WorkdirCopy || len(w.Mounts) != 0 {
