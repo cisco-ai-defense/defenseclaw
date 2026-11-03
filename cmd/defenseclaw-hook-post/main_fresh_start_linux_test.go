@@ -33,10 +33,7 @@ func TestGAP0295FreshGatewayNoAnswerUsesOutageExit(t *testing.T) {
 	}
 	addr := listener.Addr().String()
 	_ = listener.Close()
-	cmd := startListenHelper(t, addr)
-	if cmd == nil {
-		t.Fatal("listener did not start")
-	}
+	cmd := startGAP0295FreshServer(t, addr, freshUnansweredHelperEnv)
 	identity, ok := procidentity.Of(cmd.Process.Pid)
 	if !ok {
 		t.Fatal("fresh listener identity unavailable")
@@ -81,9 +78,15 @@ func TestGAP0295FreshGatewayNoAnswerUsesOutageExit(t *testing.T) {
 }
 
 const freshAnsweredHelperEnv = "DC_TEST_FRESH_ANSWERED_HELPER"
+const freshUnansweredHelperEnv = "DC_TEST_FRESH_UNANSWERED_HELPER"
 
 func TestGAP0295FreshAnsweredHelper(t *testing.T) {
 	addr := os.Getenv(freshAnsweredHelperEnv)
+	unanswered := false
+	if addr == "" {
+		addr = os.Getenv(freshUnansweredHelperEnv)
+		unanswered = addr != ""
+	}
 	if addr == "" {
 		t.Skip("helper only")
 	}
@@ -95,13 +98,31 @@ func TestGAP0295FreshAnsweredHelper(t *testing.T) {
 	_, _ = os.Stdout.WriteString("ready\n")
 	_ = http.Serve(listener, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		_, _ = io.Copy(io.Discard, r.Body)
-		if calls.Add(1) == 1 {
+		if !unanswered && calls.Add(1) == 1 {
 			w.Header().Set("Content-Type", "application/json")
 			_, _ = w.Write([]byte(`{"action":"allow"}`))
 			return
 		}
 		select {}
 	}))
+}
+
+func startGAP0295FreshServer(t *testing.T, addr, envName string) *exec.Cmd {
+	t.Helper()
+	cmd := exec.Command(os.Args[0], "-test.run=^TestGAP0295FreshAnsweredHelper$")
+	cmd.Env = append(os.Environ(), envName+"="+addr)
+	stdout, err := cmd.StdoutPipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := cmd.Start(); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = cmd.Process.Kill(); _ = cmd.Wait() })
+	if line, err := bufio.NewReader(stdout).ReadString('\n'); err != nil || strings.TrimSpace(line) != "ready" {
+		t.Fatalf("helper ready: %q %v", line, err)
+	}
+	return cmd
 }
 
 func TestGAP0295FirstAnswerEndsFreshWindow(t *testing.T) {
@@ -121,19 +142,7 @@ func checkGAP0295FirstAnswerEndsFreshWindow(t *testing.T, publishBeforeAnswer bo
 	}
 	addr := free.Addr().String()
 	_ = free.Close()
-	cmd := exec.Command(os.Args[0], "-test.run=^TestGAP0295FreshAnsweredHelper$")
-	cmd.Env = append(os.Environ(), freshAnsweredHelperEnv+"="+addr)
-	stdout, err := cmd.StdoutPipe()
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := cmd.Start(); err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() { _ = cmd.Process.Kill(); _ = cmd.Wait() })
-	if line, err := bufio.NewReader(stdout).ReadString('\n'); err != nil || strings.TrimSpace(line) != "ready" {
-		t.Fatalf("helper ready: %q %v", line, err)
-	}
+	cmd := startGAP0295FreshServer(t, addr, freshAnsweredHelperEnv)
 	identity, ok := procidentity.Of(cmd.Process.Pid)
 	if !ok {
 		t.Fatal("identity unavailable")
