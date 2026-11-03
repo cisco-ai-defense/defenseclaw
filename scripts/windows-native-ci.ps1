@@ -923,9 +923,11 @@ function Get-GoTestFailureSummary(
             if ($packageOutput.ContainsKey($package)) {
                 Add-WindowsNativeDiagnosticTail -Queue $packageOutput[$package] `
                     -Text $output -MaxLines 160 -MaxBytes $tailBytesPerFailure
+                # "[signal ..." follows a runtime fault header and names the
+                # exception and faulting address (rel-1-0-6:GAP-0550).
                 $criticalLines = [regex]::Matches(
                     $output,
-                    '(?im)^(panic:|fatal error:|runtime: out of memory|.*test timed out after|exit status )[^\r\n]*'
+                    '(?im)^(panic:|fatal error:|\[signal |runtime: out of memory|.*test timed out after|exit status )[^\r\n]*'
                 )
                 foreach ($criticalLine in $criticalLines) {
                     $header = Limit-WindowsNativeText $criticalLine.Value 512
@@ -8767,6 +8769,42 @@ function Invoke-SelfTest {
                 -not $activeTestSummary.Contains('FAIL package example.invalid/active') -or
                 [Text.Encoding]::UTF8.GetByteCount($activeTestSummary) -gt $limit) {
                 throw 'structured Go test summary lost an active test runtime header'
+            }
+        }
+
+        $signalJson = @(
+            [pscustomobject]@{
+                Action = 'output'
+                Package = 'example.invalid/signal'
+                Output = "fatal error: unexpected signal during runtime execution`n"
+            },
+            [pscustomobject]@{
+                Action = 'output'
+                Package = 'example.invalid/signal'
+                Output = "[signal 0xc0000005 code=0x0 addr=0x6 pc=0x7ff623ad40ec]`n"
+            }
+        )
+        $signalJson += @(1..96 | ForEach-Object {
+            [pscustomobject]@{
+                Action = 'output'
+                Package = 'example.invalid/signal'
+                Output = "runtime frame $_ $('x' * 128)`n"
+            }
+        })
+        $signalJson += [pscustomobject]@{
+            Action = 'fail'
+            Package = 'example.invalid/signal'
+        }
+        $signalEvents = ($signalJson | ForEach-Object {
+            $_ | ConvertTo-Json -Compress
+        }) -join [Environment]::NewLine
+        foreach ($limit in @(4096, 262144)) {
+            $signalSummary = Get-GoTestFailureSummary $signalEvents $limit
+            if (-not $signalSummary.Contains('fatal error: unexpected signal during runtime execution') -or
+                -not $signalSummary.Contains('[signal 0xc0000005 code=0x0 addr=0x6') -or
+                -not $signalSummary.Contains('FAIL package example.invalid/signal') -or
+                [Text.Encoding]::UTF8.GetByteCount($signalSummary) -gt $limit) {
+                throw 'structured Go test summary lost a runtime fault signal line'
             }
         }
 
