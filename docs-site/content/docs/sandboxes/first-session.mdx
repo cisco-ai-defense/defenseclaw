@@ -51,7 +51,7 @@ Sandbox myapp-7f3a · Claude Code · skip-permissions ON · network: open + bloc
   Asks      watch for them in another terminal: defenseclaw sandbox approvals --watch --sandbox myapp-7f3a
 ```
 
-On a Mac the `Project` line ends in `(copy)` and says `changes come back with defenseclaw sandbox pull myapp-7f3a`: the agent works on a copy. `(live)` means it edits your folder. Every banner line is explained in the [sandbox CLI reference](/docs/reference/sandbox-cli).
+On a Mac the `Project` line ends in `(copy)` and says `changes come back with defenseclaw sandbox pull myapp-7f3a --apply`: the agent works on a copy. `(live)` means it edits your folder. Every banner line is explained in the [sandbox CLI reference](/docs/reference/sandbox-cli).
 
 ![The banner of defenseclaw sandbox run claude --host-port 8765 on Linux: the sandbox and its permission mode, the live project with its undo point, the hidden secret files, the protected git internals, the model credential bound to its endpoint and the line saying OpenShell opens that endpoint to the harness's own program around the egress proxy, the host port that opens on approval, the repository policy that tightened one setting, and where asks appear](/images/sandboxes/screens/terminal-run-banner-linux.png)
 

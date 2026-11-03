@@ -378,7 +378,7 @@ func (l *lifecycle) reconcileMacOSAgents(ctx context.Context, state *openshellSt
 					failed = err
 					break
 				}
-				l.openshellChange("replaced %s of %s with %s, the label of this DefenseClaw's LaunchAgent", job.domain+"/"+job.label, a.Name, job.current)
+				l.openshellChange(a.Name, "replaced %s of %s with %s, the label of this DefenseClaw's LaunchAgent", job.domain+"/"+job.label, accountSlot, job.current)
 				continue
 			}
 			if job.state.CodeSigningKilled() && !refreshed {
@@ -387,13 +387,13 @@ func (l *lifecycle) reconcileMacOSAgents(ctx context.Context, state *openshellSt
 					break
 				}
 				refreshed = true
-				l.openshellChange("gave the LaunchAgent gateway a new file after macOS killed %s of %s for code signing", job.label, a.Name)
+				l.openshellChange(a.Name, "gave the LaunchAgent gateway a new file after macOS killed %s of %s for code signing", job.label, accountSlot)
 			}
 			if err := e.reloadMacOSAgent(ctx, job, job.state.Failure(job.base == labelOpenShellGateway && status.Running > 0) != ""); err != nil {
 				failed = err
 				break
 			}
-			l.openshellChange("reloaded %s for %s after its program or job failed", job.label, a.Name)
+			l.openshellChange(a.Name, "reloaded %s for %s after its program or job failed", job.label, accountSlot)
 		}
 		release()
 		if failed != nil {
@@ -446,7 +446,7 @@ func (l *lifecycle) replaceIdleEarlierSandboxAgent(ctx context.Context, a Sandbo
 			continue
 		}
 		replaced = true
-		l.openshellChange("replaced %s of %s, which does not run, with %s, the label of this DefenseClaw's sandbox LaunchAgent", job.domain+"/"+job.label, a.Name, job.current)
+		l.openshellChange(a.Name, "replaced %s of %s, which does not run, with %s, the label of this DefenseClaw's sandbox LaunchAgent", job.domain+"/"+job.label, accountSlot, job.current)
 	}
 	if !replaced {
 		return jobs, false

@@ -1,5 +1,5 @@
 #!/bin/bash
-# defenseclaw-managed-hook v10
+# defenseclaw-managed-hook v11
 # Shell-side hook hardening helpers.
 DEFENSECLAW_BAKED_HOOK_PATH=""
 #
@@ -67,6 +67,15 @@ DEFENSECLAW_BAKED_HOOK_PATH=""
 #        by newer hook scripts.)
 #   v10 — validates the entire JSON answer, including nested fields and
 #         duplicate keys, before the awk fallback can extract an action.
+#   v11 — adds the in-shell readers the hooks rendered by this build call
+#         (sandbox-visibility:GAP-0028, issue #1130): defenseclaw_read_hook_stdin
+#         and defenseclaw_read_stdin_into (stdin into a variable),
+#         defenseclaw_trace_header_args and defenseclaw_user_identity_header_args
+#         (the header arrays), _dc_jq_into (a jq answer into a variable) and
+#         _dc_herestring_in_memory. They do what the command substitutions and
+#         process substitutions they replace did, with fewer processes. Every
+#         v10 helper stays, with its behaviour, for hooks an older build
+#         rendered; an older writer keeps this newer helper.
 #   v5 — adds defenseclaw_read_stdin_capped, a bounded replacement for
 #        the historical PAYLOAD=$(cat) idiom. The unbounded read pulled
 #        the entire agent payload into a shell variable BEFORE the
@@ -131,6 +140,36 @@ DEFENSECLAW_BAKED_HOOK_PATH=""
 # beyond setting env / ulimit. They MUST NOT call out to the agent or
 # the gateway.
 
+# The agent's environment cannot change how the hook runs: a function
+# nesting limit, a read timeout and ignored commands would end a check early
+# (review 2 of sandbox-visibility:GAP-0028). The hooks of this build drop them
+# before their first function call; this covers hooks an older build
+# rendered. Secure Client hooks keep their contract (owner rule): none of
+# the review-2 changes apply to them.
+#
+# _DC_SC_RENDER is 1 only in a hook a Secure Client render ran: the render
+# assigns _DC_SECURE_CLIENT_HOOK without exporting it, so an exported one came
+# from the agent's environment. A per-user hook rendered by 1.0.3 or earlier
+# did not clear the markers, and with an inherited pair it skipped these
+# checks (review of 0f2e3b002c, item 3). Only the review-2 checks read it:
+# this unset, the 1 MiB cap clamp and the refusal of an unreadable stdin.
+_DC_SC_RENDER=0
+case "${DEFENSECLAW_MANAGED_HOOK:-0}:${_DC_SECURE_CLIENT_HOOK:-0}" in
+  1:1 | true:1 | TRUE:1 | yes:1 | YES:1)
+    if [ "${BASH_VERSINFO[0]:-0}" -gt 4 ] || { [ "${BASH_VERSINFO[0]:-0}" -eq 4 ] && [ "${BASH_VERSINFO[1]:-0}" -ge 4 ]; }; then
+      _DC_SC_ATTRS="${_DC_SECURE_CLIENT_HOOK@a}"
+    else
+      # bash 3.2 (macOS) has no attribute expansion.
+      _DC_SC_ATTRS="$(declare -p _DC_SECURE_CLIENT_HOOK 2>/dev/null)"
+      _DC_SC_ATTRS="${_DC_SC_ATTRS#declare -}"
+      _DC_SC_ATTRS="${_DC_SC_ATTRS%% *}"
+    fi
+    case "$_DC_SC_ATTRS" in *x*) ;; *) _DC_SC_RENDER=1 ;; esac
+    unset -v _DC_SC_ATTRS
+    ;;
+esac
+[ "$_DC_SC_RENDER" = 1 ] || unset -v FUNCNEST TMOUT EXECIGNORE 2>/dev/null || true
+
 # Windows compatibility: some agent runtimes (e.g. Codex on Windows) do
 # not set HOME when spawning hook subprocesses. Without this, `set -u`
 # causes an immediate "unbound variable" exit 1. Fall back to USERPROFILE
@@ -169,7 +208,8 @@ _DC_OUTAGE_WARNING_THIS_CALL=""
 # macOS, so one call there ran twice the programs Linux runs (GAP-1755). The
 # first try follows OSTYPE and the spelling that answered is kept for this
 # process (GNU coreutils on macOS keeps working, at one extra launch once).
-# A failed try leaves no output behind. The install check each hook carries
+# A failed try leaves no output behind. exec makes the substitution's
+# shell the stat itself (issue #1130). The install check each hook carries
 # before it sources this file keeps its own spelling (it runs only while a
 # lock exists, and it must stay the same text in every hook).
 defenseclaw_stat_into() {
@@ -182,15 +222,53 @@ defenseclaw_stat_into() {
       *) _DC_STAT_DIALECT=gnu ;;
     esac
   fi
+  if defenseclaw_secure_client_hook; then
+    # A Secure Client hook keeps the pre-1.0.7 spelling, which runs a stat
+    # function the agent exported (owner rule: its behaviour does not change).
+    if [ "$_DC_STAT_DIALECT" = bsd ]; then
+      _DC_STAT_OUT="$(stat -f "$bsd" "$@" 2>/dev/null)" && return 0
+      _DC_STAT_OUT="$(stat -c "$gnu" "$@" 2>/dev/null)" || { _DC_STAT_OUT=""; return 1; }
+      _DC_STAT_DIALECT=gnu
+    else
+      _DC_STAT_OUT="$(stat -c "$gnu" "$@" 2>/dev/null)" && return 0
+      _DC_STAT_OUT="$(stat -f "$bsd" "$@" 2>/dev/null)" || { _DC_STAT_OUT=""; return 1; }
+      _DC_STAT_DIALECT=bsd
+    fi
+    return 0
+  fi
   if [ "$_DC_STAT_DIALECT" = bsd ]; then
-    _DC_STAT_OUT="$(stat -f "$bsd" "$@" 2>/dev/null)" && return 0
-    _DC_STAT_OUT="$(stat -c "$gnu" "$@" 2>/dev/null)" || { _DC_STAT_OUT=""; return 1; }
+    _DC_STAT_OUT="$(exec stat -f "$bsd" "$@" 2>/dev/null)" && return 0
+    _DC_STAT_OUT="$(exec stat -c "$gnu" "$@" 2>/dev/null)" || { _DC_STAT_OUT=""; return 1; }
     _DC_STAT_DIALECT=gnu
   else
-    _DC_STAT_OUT="$(stat -c "$gnu" "$@" 2>/dev/null)" && return 0
-    _DC_STAT_OUT="$(stat -f "$bsd" "$@" 2>/dev/null)" || { _DC_STAT_OUT=""; return 1; }
+    _DC_STAT_OUT="$(exec stat -c "$gnu" "$@" 2>/dev/null)" && return 0
+    _DC_STAT_OUT="$(exec stat -f "$bsd" "$@" 2>/dev/null)" || { _DC_STAT_OUT=""; return 1; }
     _DC_STAT_DIALECT=bsd
   fi
+}
+
+# _dc_vmem_soft_limit sets _DC_HOOK_NATIVE_VMEM_LIMIT to this shell's soft
+# address-space limit as `ulimit -S -v` prints it (KiB, or unlimited), read
+# from /proc/self/limits with no child process (issue #1130). It returns 1
+# where that file does not say (macOS), and the caller asks ulimit.
+_dc_vmem_soft_limit() {
+  local line="" soft=""
+  [ -r /proc/self/limits ] || return 1
+  while IFS= read -r line; do
+    case "$line" in
+      "Max address space "*)
+        soft="${line#Max address space}"
+        soft="${soft#"${soft%%[! ]*}"}"
+        soft="${soft%% *}"
+        break
+        ;;
+    esac
+  done < /proc/self/limits
+  case "$soft" in
+    unlimited) _DC_HOOK_NATIVE_VMEM_LIMIT=unlimited ;;
+    '' | *[!0-9]* | ???????????????????*) return 1 ;;
+    *) _DC_HOOK_NATIVE_VMEM_LIMIT=$((soft / 1024)) ;;
+  esac
 }
 
 # Resource limits — bound the hook so a stuck regex / hostile input
@@ -206,7 +284,7 @@ defenseclaw_harden_resources() {
   # The forkless Hermes execution probe (no process may start) makes no
   # native POST, so it skips the command substitution.
   if [ "${_DC_FORKLESS_PROBE:-}" != "1" ]; then
-    _DC_HOOK_NATIVE_VMEM_LIMIT="$(ulimit -S -v 2>/dev/null)"
+    _dc_vmem_soft_limit || _DC_HOOK_NATIVE_VMEM_LIMIT="$(ulimit -S -v 2>/dev/null)"
   fi
   ulimit -S -v 524288 2>/dev/null || true
   ulimit -S -n 32    2>/dev/null || true
@@ -221,6 +299,15 @@ defenseclaw_harden_env() {
   # same name, which would copy the value into the environment of every child
   # process (curl, jq, the cold-started gateway), so drop inherited ones first.
   unset -v API_TOKEN PAYLOAD CONTENT TOOL_INPUT TOOL_OUTPUT INSPECT_BODY RESPONSE RESULT OUTPUT
+  [ "${_DC_SC_RENDER:-0}" = 1 ] || unset -v FUNCNEST TMOUT EXECIGNORE 2>/dev/null || true
+  # The values the in-shell readers keep (issue #1130), which lived in
+  # subshells before: an inherited exported name would hand them to every
+  # child process.
+  unset -v _DC_SESSION_FACTS _DC_SESSION_FACTS_FULL _DC_CCACHE_CHANGED _DC_CODEX_FIELDS _DC_CODEX_FIELDS_READ _DC_CODEX_ACTION
+  # echo prints the gateway's answer as it is: an inherited BASHOPTS with
+  # xpg_echo would turn the escapes in its JSON strings into bytes. A Secure
+  # Client hook keeps the shell options it inherits (owner rule).
+  defenseclaw_secure_client_hook || shopt -u xpg_echo 2>/dev/null || true
   # The stat spelling is learned per process, never taken from the caller.
   unset -v _DC_STAT_OUT _DC_STAT_DIALECT
 
@@ -240,7 +327,14 @@ defenseclaw_harden_env() {
   unset DEFENSECLAW_AGENT_HOME
   DEFENSECLAW_AGENT_HOME="${HOME:-}"
   if command -v mktemp >/dev/null 2>&1; then
-    DEFENSECLAW_HOOK_HOME="$(mktemp -d -t defenseclaw-hook.XXXXXXXX 2>/dev/null || true)"
+    # exec: the substitution's shell becomes mktemp (bash forks a shell
+    # first while this hook has an EXIT trap, issue #1130). Its status stays
+    # off errexit, and a failed run leaves its output, empty.
+    if defenseclaw_secure_client_hook; then
+      DEFENSECLAW_HOOK_HOME="$(mktemp -d -t defenseclaw-hook.XXXXXXXX 2>/dev/null || true)"
+    else
+      DEFENSECLAW_HOOK_HOME="$(exec mktemp -d -t defenseclaw-hook.XXXXXXXX 2>/dev/null)" || :
+    fi
     if [ -n "$DEFENSECLAW_HOOK_HOME" ]; then
       _DEFENSECLAW_HOOK_HOME_OWNED=1
     fi
@@ -297,9 +391,14 @@ defenseclaw_harden_env() {
   # and on systems without mktemp every hook invocation creates
   # hook-tmp.<PID>. Without this sweep those orphans accumulate
   # forever. Runs AFTER PATH lockdown so we don't pick up an attacker-
-  # planted `find`. Orphans come only from a killed hook, so one call in 32
-  # keeps them bounded without a find on every call (issue #1130).
-  [ $((RANDOM % 32)) -ne 0 ] || _defenseclaw_sweep_stale_hook_dirs
+  # planted `find`. Orphans come only from a killed hook that used the
+  # fallback folder, so only a call that used it too (no mktemp, or mktemp
+  # failed) sweeps, on one call in 32 (issue #1130). A call that got its
+  # folder from mktemp never starts find, so a warm hook runs the same
+  # programs on every call (rel-1-0-6 GAP-0266).
+  if [ -z "$_DEFENSECLAW_HOOK_HOME_OWNED" ] && [ $((${RANDOM:-1} % 32)) -eq 0 ]; then
+    _defenseclaw_sweep_stale_hook_dirs
+  fi
 }
 
 # Resolve optional connector identity for the shared inspect-* scripts.  The
@@ -890,8 +989,12 @@ defenseclaw_json_string_field() {
   if ! command -v awk >/dev/null 2>&1; then
     return 2
   fi
-  if extracted="$(printf '%s' "$json" | awk -v wanted="$field" '
-    { text = text $0 "\n" }
+  # awk reads the answer from a here-string when bash keeps it in a pipe
+  # (_dc_herestring_in_memory): no process writes it (issue #1130). The
+  # newline the here-string adds is the one awk gives the last line anyway.
+  # The program is a local: a global would carry the agent's value, or be
+  # unset by the sandbox scrub after this file is sourced.
+  local program='    { text = text $0 "\n" }
     function ws() {
       while (p <= n && substr(text,p,1) ~ /[[:space:]]/) p++
     }
@@ -997,17 +1100,23 @@ defenseclaw_json_string_field() {
       if (found) { print result; exit 0 }
       exit 1
     }
-  ')"; then
+'
+  status=0
+  if ! defenseclaw_secure_client_hook && _dc_herestring_in_memory "$json"; then
+    extracted="$(exec awk -v wanted="$field" "$program" <<<"$json")" || status=$?
+  else
+    extracted="$(printf '%s' "$json" | awk -v wanted="$field" "$program")" || status=$?
+  fi
+  if [ "$status" -eq 0 ]; then
     # A caller that only validates the answer reads no value: no sed for it
     # (defenseclaw_json_answer_valid, issue #1130 / GAP-0267).
     [ "${3:-}" = --check ] && return 0
     printf '%s' "$extracted" | sed 's/\\"/"/g; s/\\\\/\\/g; s/\\n/ /g; s/\\r/ /g; s/\\t/ /g'
     return 0
-  else
-    status=$?
-    return "$status"
   fi
+  return "$status"
 }
+
 
 # defenseclaw_json_answer_valid JSON FIELD returns 0 when JSON is one valid
 # object with exactly one top-level string FIELD: the check of
@@ -1053,6 +1162,58 @@ _dc_python3_usable() {
       ;;
   esac
   return 0
+}
+
+# _dc_herestring_in_memory VALUE returns 0 when `<<<"$VALUE"` reaches the
+# command through a pipe: bash 5.1 and later write a here-string shorter
+# than the pipe buffer into a pipe (at the default compatibility level), so
+# a program reads a short value with no file written and no process started
+# to write it (issue #1130). Older bash (macOS 3.2), a compatibility level
+# under 5.1 and a longer value keep the printf pipelines.
+_dc_herestring_in_memory() {
+  [ -z "${BASH_COMPAT:-}" ] || return 1
+  case ":${BASHOPTS:-}:" in
+    *:compat3[0-9]:* | *:compat4[0-9]:*) return 1 ;;
+  esac
+  case "${BASH_VERSINFO[0]:-0}" in
+    '' | *[!0-9]* | [0-4]) return 1 ;;
+    5)
+      case "${BASH_VERSINFO[1]:-0}" in
+        '' | *[!0-9]* | 0) return 1 ;;
+      esac
+      ;;
+  esac
+  local LC_ALL=C
+  [ "${#1}" -lt 4095 ]
+}
+
+# _dc_jq_into VAR line|text VALUE ARGS... sets VAR as
+#   VAR="$(echo "$VALUE" | _dc_jq ARGS...)"          (line)
+#   VAR="$(printf '%s' "$VALUE" | _dc_jq ARGS...)"   (text)
+# do, and returns the same status. With jq installed and a value the
+# here-string keeps in memory, jq reads it from the here-string and is the
+# substitution's only process (exec, issue #1130): VALUE and the newline echo
+# writes, or VALUE and a newline jq reads as the whitespace it is. Only for
+# JSON input (no -R). A line VALUE that echo would take for options keeps
+# echo (defenseclaw_harden_env turns xpg_echo off).
+_dc_jq_into() {
+  local _dc_jqi_var="${1:-}" _dc_jqi_mode="${2:-}" _dc_jqi_value="${3-}" _dc_jqi_out="" _dc_jqi_status=0 _dc_jqi_fast=1
+  case "$_dc_jqi_var" in
+    '' | [!A-Za-z_]* | *[!A-Za-z0-9_]*) return 1 ;;
+  esac
+  shift 3 || return 1
+  if [ "$_dc_jqi_mode" = line ]; then
+    case "$_dc_jqi_value" in -*) _dc_jqi_fast=0 ;; esac
+  fi
+  if [ "$_dc_jqi_fast" = 1 ] && command -v jq >/dev/null 2>&1 && _dc_herestring_in_memory "$_dc_jqi_value"; then
+    _dc_jqi_out="$(exec jq "$@" <<<"$_dc_jqi_value")" || _dc_jqi_status=$?
+  elif [ "$_dc_jqi_mode" = line ]; then
+    _dc_jqi_out="$(echo "$_dc_jqi_value" | _dc_jq "$@")" || _dc_jqi_status=$?
+  else
+    _dc_jqi_out="$(printf '%s' "$_dc_jqi_value" | _dc_jq "$@")" || _dc_jqi_status=$?
+  fi
+  printf -v "$_dc_jqi_var" '%s' "$_dc_jqi_out"
+  return "$_dc_jqi_status"
 }
 
 # _dc_jq is a drop-in shim for jq covering the small subset of filters
@@ -1266,19 +1427,33 @@ defenseclaw_log_hook_failure() {
   local ts
   ts="$(date -u +"%Y-%m-%dT%H:%M:%SZ" 2>/dev/null || date 2>/dev/null || printf unknown)"
   local safe_ts safe_connector safe_hook_name safe_reason safe_category safe_fail_mode
-	local correlation_payload="${PAYLOAD:-${CONTENT:-}}" session_id="" call_id=""
+	local correlation_payload="${PAYLOAD:-${CONTENT:-}}" session_id="" call_id="" tool_id="" hook_event=""
 	if [ -n "$correlation_payload" ]; then
+	  # The hook event, as the native hook's line names it: the gateway tells a
+	  # block of a tool call from a block of a later event of a call that ran.
+	  hook_event="$(_dc_hook_event_field "$correlation_payload" hook_event_name 2>/dev/null)" || hook_event=""
 	  session_id="$(_dc_hook_event_field "$correlation_payload" session_id 2>/dev/null)" || session_id=""
 	  [ -n "$session_id" ] || session_id="$(_dc_hook_event_field "$correlation_payload" sessionID 2>/dev/null)" || session_id=""
 	  [ -n "$session_id" ] || session_id="$(_dc_hook_event_field "$correlation_payload" sessionId 2>/dev/null)" || session_id=""
 	  [ -n "$session_id" ] || session_id="$(_dc_hook_event_field "$correlation_payload" thread_id 2>/dev/null)" || session_id=""
 	  call_id="$(_dc_hook_event_field "$correlation_payload" source_event_id 2>/dev/null)" || call_id=""
-	  [ -n "$call_id" ] || call_id="$(_dc_hook_event_field "$correlation_payload" tool_call_id 2>/dev/null)" || call_id=""
-	  [ -n "$call_id" ] || call_id="$(_dc_hook_event_field "$correlation_payload" callID 2>/dev/null)" || call_id=""
+	  # The agent's tool call id (Claude Code and Codex tool_use_id) is also
+	  # the line's tool_id: the gateway records a call this hook blocked
+	  # itself under it, beside its own decision row (GAP-0271).
+	  if [ -z "$call_id" ]; then
+	    tool_id="$(_dc_hook_event_field "$correlation_payload" tool_call_id 2>/dev/null)" || tool_id=""
+	    [ -n "$tool_id" ] || tool_id="$(_dc_hook_event_field "$correlation_payload" tool_use_id 2>/dev/null)" || tool_id=""
+	    [ -n "$tool_id" ] || tool_id="$(_dc_hook_event_field "$correlation_payload" callID 2>/dev/null)" || tool_id=""
+	    call_id="$tool_id"
+	  fi
 	fi
+	# Copilot and Antigravity bind the event on the command line, not in the payload.
+	[ -n "$hook_event" ] || hook_event="${_DC_COPILOT_EVENT:-${HOOK_EVENT:-}}"
 	session_id="${session_id:0:256}"
 	call_id="${call_id:0:256}"
-	[ -n "$call_id" ] || call_id="$$-${RANDOM}${RANDOM}"
+	tool_id="${tool_id:0:256}"
+	hook_event="${hook_event:0:64}"
+	[ -n "$call_id" ] || call_id="$$-${RANDOM:-0}${RANDOM:-0}"
   safe_ts="$(defenseclaw_json_escape "$ts")"
   safe_connector="$(defenseclaw_json_escape "$connector")"
   safe_hook_name="$(defenseclaw_json_escape "$hook_name")"
@@ -1288,9 +1463,9 @@ defenseclaw_log_hook_failure() {
   # stderr is redirected before the append so a failed open of the log
   # (full disk, read-only home) cannot print a shell diagnostic naming this
   # script into the agent-visible block reason (GAP-1974).
-  printf '{"ts":"%s","connector":"%s","hook":"%s","reason":"%s","category":"%s","fail_mode":"%s","outcome":"%s","session_id":"%s","call_id":"%s"}\n' \
-    "$safe_ts" "$safe_connector" "$safe_hook_name" "$safe_reason" "$safe_category" "$safe_fail_mode" "$outcome" \
-    "$(defenseclaw_json_escape "$session_id")" "$(defenseclaw_json_escape "$call_id")" \
+  printf '{"ts":"%s","connector":"%s","hook":"%s","event":"%s","reason":"%s","category":"%s","fail_mode":"%s","outcome":"%s","session_id":"%s","call_id":"%s","tool_id":"%s"}\n' \
+    "$safe_ts" "$safe_connector" "$safe_hook_name" "$(defenseclaw_json_escape "$hook_event")" "$safe_reason" "$safe_category" "$safe_fail_mode" "$outcome" \
+    "$(defenseclaw_json_escape "$session_id")" "$(defenseclaw_json_escape "$call_id")" "$(defenseclaw_json_escape "$tool_id")" \
     2>/dev/null >> "$log_file" || true
   chmod 600 "$log_file" 2>/dev/null || true
   return 0
@@ -1371,6 +1546,12 @@ defenseclaw_per_user_oversize_open() {
   [ -z "${DEFENSECLAW_HOOK_SOCKET:-}" ] || return 1
   [ "${_DC_SECURE_CLIENT_HOOK:-0}" != 1 ] || return 1
   case "${DEFENSECLAW_STRICT_AVAILABILITY:-0}" in 1|true|TRUE|yes|YES) return 1 ;; esac
+  # The review judges the call from the prefix the read kept. A cap lowered
+  # under the per-user transport's 900 KiB (DEFENSECLAW_HOOK_MAX_BODY) keeps
+  # too little to judge, so that call is refused, as in the closed tiers: a
+  # lowered cap only tightens (rel-1-0-6:GAP-0337).
+  _dc_stdin_cap
+  [ "$_DC_STDIN_CAP" -ge 921600 ] || return 1
   ! defenseclaw_install_held || return 1
   local connector="${DEFENSECLAW_HOOK_CONNECTOR:-}" record="" recorded="" mode="" source=""
   [ "$connector" != inspect ] || connector="${RUNTIME_CONNECTOR:-}"
@@ -1910,7 +2091,7 @@ defenseclaw_gateway_cold_start() {
   ! defenseclaw_install_lock_held "$data" || return 1
   [ ! -e "${data}/.disabled" ] || return 1
   lock="${data}/.cold-start.lock"
-  token="$$.${RANDOM}${RANDOM}"
+  token="$$.${RANDOM:-0}${RANDOM:-0}"
   _dc_cold_start_lock "$lock" "$token" || return 0
   # In its own session where setsid exists, so the agent ending the hook's
   # process group does not end a start that is still running.
@@ -2023,6 +2204,10 @@ defenseclaw_await_gateway() {
   # The final transport status of the call: 7 (no gateway took the
   # connection) is the one outage a per-user hook may let through
   # (defenseclaw_per_user_outage_open).
+  if [ "$status" = 75 ]; then
+    defenseclaw_refused_while_coming_up && return 7
+    status=1
+  fi
   _DC_TRANSPORT_STATUS="$status"
   [ -n "$post" ] || return "$status"
   case "${DEFENSECLAW_MANAGED_HOOK:-0}" in
@@ -2055,7 +2240,46 @@ defenseclaw_await_gateway() {
     sleep 0.2 2>/dev/null || return "$status"
     status=0
     "$post" || status=$?
+    if [ "$status" = 75 ]; then
+      defenseclaw_refused_while_coming_up && return 7
+      status=1
+    fi
+    if [ "$status" = 28 ]; then
+      # This call's gateway refused it a moment ago (7), and the try sent to
+      # the gateway that comes up got no answer before the call's budget
+      # ended: the restart outlasted the budget, as a last refused try does,
+      # so the outage mode decides (rel-1-0-6 GAP-0295). It said "the gateway
+      # is running but did not answer" and blocked in every fail mode, so a
+      # default-tier account's benign calls were denied in its own gateway's
+      # restart window. A first try that timed out is still the hung-gateway
+      # refusal, and a listener the hook could not prove its own still fails
+      # closed (defenseclaw_gateway_post returns 1 for it).
+      _DC_TRANSPORT_STATUS=7
+      _DC_GATEWAY_RESTART_WAITED=1
+      return 7
+    fi
   done
+}
+
+# defenseclaw_refused_while_coming_up returns 0, and makes the call the restart
+# outage (status 7, restart waited), for a per-user try the helper could not
+# connect (refused, nothing sent) while this account's own gateway process is
+# alive and its listener is there by the time the tables are read
+# (defenseclaw_gateway_post 75): the gateway is coming up in a restart. The
+# call is not sent again, so a possibly changed peer gets no credentials; the
+# outage mode decides it, as it decides the tries refused a moment before
+# (rel-1-0-6 GAP-0295). It said "the gateway is running but did not answer" and
+# blocked in every fail mode. Without a live gateway process (a stop, an
+# install, no configuration) the call keeps the closed refusal.
+defenseclaw_refused_while_coming_up() {
+  case "${DEFENSECLAW_MANAGED_HOOK:-0}" in
+    1|true|TRUE|yes|YES) return 1 ;;
+  esac
+  [ -z "${DEFENSECLAW_HOOK_SOCKET:-}" ] || return 1
+  defenseclaw_own_gateway_alive || return 1
+  _DC_TRANSPORT_STATUS=7
+  _DC_GATEWAY_RESTART_WAITED=1
+  return 0
 }
 
 # defenseclaw_own_gateway_stopped returns 0 when this account's per-user
@@ -2548,15 +2772,20 @@ defenseclaw_failed_stop_event() {
 # (it decodes both event fields as strings): jq's `// empty` would turn a
 # false value into an absent field.
 _dc_hook_event_field() {
-  local payload="${1:-}" field="${2:-}"
+  # The jq program is a local (see defenseclaw_json_string_field).
+  local payload="${1:-}" field="${2:-}" program='
+      if length != 1 or (.[0] | type) != "object" then error("not one JSON object") else .[0][$f] end
+      | if . == null then empty elif type == "string" then . else error("not a string") end'
   case "$field" in
-    hook_event_name|event|session_id|sessionID|sessionId|thread_id|source_event_id|tool_call_id|callID) ;;
+    hook_event_name|event|session_id|sessionID|sessionId|thread_id|source_event_id|tool_call_id|tool_use_id|callID) ;;
     *) return 1 ;;
   esac
   if command -v jq >/dev/null 2>&1; then
-    printf '%s' "$payload" | jq -rs --arg f "$field" '
-      if length != 1 or (.[0] | type) != "object" then error("not one JSON object") else .[0][$f] end
-      | if . == null then empty elif type == "string" then . else error("not a string") end' 2>/dev/null
+    if _dc_herestring_in_memory "$payload"; then
+      jq -rs --arg f "$field" "$program" <<<"$payload" 2>/dev/null
+    else
+      printf '%s' "$payload" | jq -rs --arg f "$field" "$program" 2>/dev/null
+    fi
     return
   fi
   if _dc_python3_usable; then
@@ -2935,31 +3164,118 @@ defenseclaw_missing_token_next_step() {
 #
 # Returns 0 with the body on stdout. Returns 3 (overflow, with the first cap
 # bytes on stdout) or 4 (NUL, empty stdout).
+# _dc_stdin_cap sets _DC_STDIN_CAP to the body cap in bytes:
+# DEFENSECLAW_HOOK_MAX_BODY when it is a decimal number up to 1 MiB, which it
+# can only lower, else 1 MiB. A longer number overflowed the read's bound, so
+# the hook sent an empty body (review 2 of sandbox-visibility:GAP-0028).
+_dc_stdin_cap() {
+  _DC_STDIN_CAP="${DEFENSECLAW_HOOK_MAX_BODY:-1048576}"
+  # A Secure Client hook keeps its earlier cap rule (owner rule).
+  if [ "${_DC_SC_RENDER:-0}" = 1 ]; then
+    case "$_DC_STDIN_CAP" in '' | *[!0-9]*) _DC_STDIN_CAP=1048576 ;; esac
+    return 0
+  fi
+  case "$_DC_STDIN_CAP" in
+    '' | *[!0-9]* | ????????*) _DC_STDIN_CAP=1048576 ;;
+  esac
+  _DC_STDIN_CAP=$((10#$_DC_STDIN_CAP))
+  [ "$_DC_STDIN_CAP" -le 1048576 ] || _DC_STDIN_CAP=1048576
+}
+
 defenseclaw_read_stdin_capped() {
   # The caller passes the outcome its oversized-payload branch applies
   # (fail_open or fail_closed); an older caller without one logs unknown.
-  local overflow_outcome="${1:-unknown}"
-  local cap="${DEFENSECLAW_HOOK_MAX_BODY:-1048576}"
-  case "$cap" in
-    ''|*[!0-9]*) cap=1048576 ;;
-  esac
+  local overflow_outcome="${1:-unknown}" cap
+  _dc_stdin_cap
+  cap="$_DC_STDIN_CAP"
   # bash reads at most cap+1 bytes itself: no head(1) or python3 process on
   # any host (issue #1130 / GAP-0267), and the read stays bounded when
   # neither is installed.
   _dc_read_stdin_exact "$cap" "$overflow_outcome"
 }
 
+# defenseclaw_read_hook_stdin VAR KIND MODE sets VAR as
+#   VAR="$(defenseclaw_read_stdin_capped "$(defenseclaw_hook_delivery_outcome KIND MODE)")"
+# did, and returns its status, with neither command substitution (issue
+# #1130). The outcome is looked up before the read, as there; what that
+# lookup notes for this call (the install window) is dropped again, as the
+# substitution dropped it.
+defenseclaw_read_hook_stdin() {
+  local _dc_rhs_seen="${_DC_INSTALL_WINDOW_SEEN-}" _dc_rhs_had_seen="${_DC_INSTALL_WINDOW_SEEN+1}"
+  local _dc_rhs_outcome_before="${_DC_HOOK_DELIVERY_OUTCOME-}" _dc_rhs_had_outcome="${_DC_HOOK_DELIVERY_OUTCOME+1}"
+  local _dc_rhs_outcome=""
+  defenseclaw_resolve_hook_delivery_outcome "${2:-}" "${3:-}" || :
+  _dc_rhs_outcome="${_DC_HOOK_DELIVERY_OUTCOME-}"
+  if [ -n "$_dc_rhs_had_seen" ]; then _DC_INSTALL_WINDOW_SEEN="$_dc_rhs_seen"; else unset _DC_INSTALL_WINDOW_SEEN; fi
+  if [ -n "$_dc_rhs_had_outcome" ]; then _DC_HOOK_DELIVERY_OUTCOME="$_dc_rhs_outcome_before"; else unset _DC_HOOK_DELIVERY_OUTCOME; fi
+  defenseclaw_read_stdin_into "${1:-}" "$_dc_rhs_outcome"
+}
+
+# defenseclaw_read_stdin_into VAR OUTCOME sets VAR as
+# VAR="$(defenseclaw_read_stdin_capped OUTCOME)" did, and returns its status.
+# A body that is read whole is stored with its trailing newlines removed, as
+# the substitution removed them, and no process starts; a refused, cut or
+# transport-sized body takes the old path in a subshell, its log included.
+defenseclaw_read_stdin_into() {
+  local _dc_rsi_var="${1:-}" _dc_rsi_outcome="${2:-unknown}" _dc_rsi_cap=""
+  local _dc_rsi_body="" _dc_rsi_status=0 _dc_rsi_read=0 LC_ALL=C
+  case "$_dc_rsi_var" in
+    '' | [!A-Za-z_]* | *[!A-Za-z0-9_]*) return 1 ;;
+  esac
+  _dc_stdin_cap
+  _dc_rsi_cap="$_DC_STDIN_CAP"
+  IFS= read -r -d '' -n "$((_dc_rsi_cap + 1))" _dc_rsi_body || _dc_rsi_read=$?
+  if [ "$_dc_rsi_read" -eq 0 ] && [ "${#_dc_rsi_body}" -le "$_dc_rsi_cap" ]; then
+    printf -v "$_dc_rsi_var" '%s' "$(_dc_stdin_refused "$_dc_rsi_cap" nul "$_dc_rsi_outcome")"
+    return 4
+  fi
+  if [ "$_dc_rsi_read" -gt 1 ] && [ "${_DC_SC_RENDER:-0}" != 1 ]; then
+    # read could not read (_dc_read_stdin_exact): refused, never sent empty.
+    printf -v "$_dc_rsi_var" '%s' "$(_dc_stdin_refused "$_dc_rsi_cap" unreadable "$_dc_rsi_outcome")"
+    return 5
+  fi
+  if [ "${#_dc_rsi_body}" -gt "$_dc_rsi_cap" ]; then
+    printf -v "$_dc_rsi_var" '%s' "$(_dc_stdin_refused "$_dc_rsi_cap" overflow "$_dc_rsi_outcome"; printf '%s' "${_dc_rsi_body:0:_dc_rsi_cap}")"
+    return 3
+  fi
+  if [ "${#_dc_rsi_body}" -gt 921600 ]; then
+    # Over the per-user transport's cap (_dc_stdin_over_transport, which
+    # returns at once for a smaller body).
+    local _dc_rsi_out=""
+    _dc_rsi_out="$(_dc_stdin_over_transport "$_dc_rsi_body" "$_dc_rsi_outcome" && exit 3; printf '%s' "$_dc_rsi_body")" ||
+      _dc_rsi_status=$?
+    printf -v "$_dc_rsi_var" '%s' "$_dc_rsi_out"
+    return "$_dc_rsi_status"
+  fi
+  case "$_dc_rsi_body" in
+    *$'\n')
+      _dc_rsi_body="${_dc_rsi_body%$'\n'}"
+      # More than one: the substitution removes them all at once.
+      case "$_dc_rsi_body" in
+        *$'\n') _dc_rsi_body="$(printf '%s' "$_dc_rsi_body")" ;;
+      esac
+      ;;
+  esac
+  printf -v "$_dc_rsi_var" '%s' "$_dc_rsi_body"
+}
+
 # _dc_read_stdin_exact prints stdin unchanged, or refuses it (returns 4 for
 # NUL, 3 for overflow, and prints nothing). LC_ALL=C makes
 # ${#body} a byte count. See defenseclaw_read_stdin_capped.
 _dc_read_stdin_exact() {
-  local cap="$1" outcome="$2" body="" LC_ALL=C
+  local cap="$1" outcome="$2" body="" status=0 LC_ALL=C
   # -n cap+1 bounds the read (a producer streaming 1GB is cut off after
   # cap+1 bytes). read returns 0 when it stopped at a NUL or took all cap+1
-  # bytes, and non-zero at the end of input.
-  if IFS= read -r -d '' -n "$((cap + 1))" body && [ "${#body}" -le "$cap" ]; then
+  # bytes, 1 at the end of input, and more when it could not read: that body
+  # is refused (5), never sent empty.
+  IFS= read -r -d '' -n "$((cap + 1))" body || status=$?
+  if [ "$status" -eq 0 ] && [ "${#body}" -le "$cap" ]; then
     _dc_stdin_refused "$cap" nul "$outcome"
     return 4
+  fi
+  if [ "$status" -gt 1 ] && [ "${_DC_SC_RENDER:-0}" != 1 ]; then
+    _dc_stdin_refused "$cap" unreadable "$outcome"
+    return 5
   fi
   if [ "${#body}" -gt "$cap" ]; then
     _dc_stdin_refused "$cap" overflow "$outcome"
@@ -3002,6 +3318,12 @@ _dc_stdin_refused() {
     defenseclaw_log_hook_failure "$connector" "$hook_name" \
       "stdin body has a NUL byte" transport "${FAIL_MODE:-closed}" "$3"
     echo "defenseclaw: hook payload has a NUL byte; refusing to alter it" >&2
+    return 0
+  fi
+  if [ "$2" = unreadable ]; then
+    defenseclaw_log_hook_failure "$connector" "$hook_name" \
+      "stdin body could not be read" transport "${FAIL_MODE:-closed}" "$3"
+    echo "defenseclaw: hook payload could not be read; refusing it" >&2
     return 0
   fi
   local outcome="$3" log_mode="${FAIL_MODE:-closed}"
@@ -3130,6 +3452,19 @@ defenseclaw_extract_trace_context() {
   fi
 }
 
+# defenseclaw_trace_header_args appends to TRACE_HEADER_ARGS the arguments
+# defenseclaw_extract_trace_context prints. Without a trace variable it
+# prints nothing and logs nothing, so the process substitution that reads it
+# is skipped (issue #1130); with one, it runs as before.
+defenseclaw_trace_header_args() {
+  local trace_header_arg=""
+  [ -n "${DEFENSECLAW_TRACEPARENT:-${TRACEPARENT:-${OTEL_TRACEPARENT:-}}}${DEFENSECLAW_TRACESTATE:-${TRACESTATE:-${OTEL_TRACESTATE:-}}}" ] || return 0
+  # A read loop, not mapfile: macOS ships bash 3.2, which has no mapfile.
+  while IFS= read -r trace_header_arg; do
+    TRACE_HEADER_ARGS+=("$trace_header_arg")
+  done < <(defenseclaw_extract_trace_context)
+}
+
 # defenseclaw_user_identity_args
 #
 # Emits curl arguments carrying the OS identity of the user this hook is
@@ -3160,15 +3495,26 @@ defenseclaw_extract_trace_context() {
 # guardrail hook under errexit, where a nonzero return would convert a missing
 # telemetry field into a blocked or allowed tool call.
 defenseclaw_user_identity_args() {
+  local -a IDENTITY_HEADER_ARGS=()
+  defenseclaw_user_identity_header_args
+  [ "${#IDENTITY_HEADER_ARGS[@]}" -eq 0 ] || printf '%s\n' "${IDENTITY_HEADER_ARGS[@]}"
+  return 0
+}
+
+# defenseclaw_user_identity_header_args appends to IDENTITY_HEADER_ARGS the
+# arguments defenseclaw_user_identity_args prints, in its order, with no
+# process substitution to read them from (issue #1130). Same rules, same
+# silent failures.
+defenseclaw_user_identity_header_args() {
   local facts secure_client=0
   # A Secure Client hook keeps its earlier headers: no session facts and the
   # account name as id reports it (issue #1092).
   defenseclaw_secure_client_hook && secure_client=1
   if [ "$secure_client" = 0 ]; then
-    facts="$(defenseclaw_session_facts_value)"
+    _dc_session_facts_into
+    facts="$_DC_SESSION_FACTS"
     if [ -n "$facts" ]; then
-      printf '%s\n' "-H"
-      printf '%s\n' "X-DefenseClaw-Session-Facts: $facts"
+      IDENTITY_HEADER_ARGS+=("-H" "X-DefenseClaw-Session-Facts: $facts")
     fi
   fi
 
@@ -3181,8 +3527,7 @@ defenseclaw_user_identity_args() {
   case "$uid" in
     '' | *[!0-9]*) ;;
     *)
-      printf '%s\n' "-H"
-      printf '%s\n' "X-DefenseClaw-User-Id: $uid"
+      IDENTITY_HEADER_ARGS+=("-H" "X-DefenseClaw-User-Id: $uid")
       ;;
   esac
 
@@ -3204,8 +3549,7 @@ defenseclaw_user_identity_args() {
   case "$name" in
     '' | *[!A-Za-z0-9._-]*) return 0 ;;
   esac
-  printf '%s\n' "-H"
-  printf '%s\n' "X-DefenseClaw-User-Name: $name"
+  IDENTITY_HEADER_ARGS+=("-H" "X-DefenseClaw-User-Name: $name")
   return 0
 }
 
@@ -3228,10 +3572,21 @@ defenseclaw_secure_client_hook() {
 # attribution and is dropped unless it matches the header's allowlisted
 # charset.
 defenseclaw_session_facts_value() {
+  _dc_session_facts_into
+  printf '%s' "$_DC_SESSION_FACTS"
+  return 0
+}
+
+# _dc_session_facts_into sets _DC_SESSION_FACTS to what
+# defenseclaw_session_facts_value prints, with no command substitution
+# between them (issue #1130).
+_dc_session_facts_into() {
   local value kind tty ls ca pair v full
-  full="$(defenseclaw_session_facts_full 2>/dev/null)" || full=""
+  _DC_SESSION_FACTS=""
+  _dc_session_facts_full_into 2>/dev/null || _DC_SESSION_FACTS_FULL=""
+  full="$_DC_SESSION_FACTS_FULL"
   if [ -n "$full" ]; then
-    printf '%s' "$full"
+    _DC_SESSION_FACTS="$full"
     return 0
   fi
   value="v1"
@@ -3254,7 +3609,7 @@ defenseclaw_session_facts_value() {
     [ "${#v}" -le 256 ] || continue
     value="$value;$pair"
   done
-  [ "$value" = "v1" ] || printf '%s' "$value"
+  [ "$value" = "v1" ] || _DC_SESSION_FACTS="$value"
   return 0
 }
 
@@ -3277,7 +3632,16 @@ defenseclaw_session_facts_value() {
 # per-user gateway binary; a managed hook that names none (Secure Client)
 # sends the SSH and logind variables alone.
 defenseclaw_session_facts_full() {
+  _dc_session_facts_full_into
+  printf '%s' "$_DC_SESSION_FACTS_FULL"
+  return 0
+}
+
+# _dc_session_facts_full_into sets _DC_SESSION_FACTS_FULL to what
+# defenseclaw_session_facts_full prints (issue #1130).
+_dc_session_facts_full_into() {
   local home="${DEFENSECLAW_AGENT_HOME:-${HOME:-}}" env_key cache record="" re out="" bin="${DEFENSECLAW_SESSION_FACTS_BIN:-}" ccache=""
+  _DC_SESSION_FACTS_FULL=""
   _DC_CCACHE_CHANGED=same
   case "${DEFENSECLAW_MANAGED_HOOK:-0}" in
     1|true|TRUE|yes|YES) [ -n "$bin" ] || return 0 ;;
@@ -3310,7 +3674,7 @@ defenseclaw_session_facts_full() {
       # Bash 5's epoch clock is a builtin. Unproven, expired and implausibly
       # future records refresh through the native identity collector.
       re='"expires_at":([0-9]{1,11})[,}]'
-      now="$EPOCHSECONDS"
+      now="${EPOCHSECONDS:-0}"
       if [[ "$record" =~ $re ]]; then
         expires="${BASH_REMATCH[1]}"
         if [ "$expires" -gt "$now" ] && [ "$expires" -le "$((now + 300))" ]; then fresh=1; fi
@@ -3338,7 +3702,7 @@ defenseclaw_session_facts_full() {
       if [[ "$record" =~ $re ]]; then
         out="${BASH_REMATCH[1]}"
       fi
-      defenseclaw_session_facts_checked "$out"
+      ! _dc_session_facts_fit "$out" || _DC_SESSION_FACTS_FULL="$out"
       return 0
     fi
   fi
@@ -3352,7 +3716,7 @@ defenseclaw_session_facts_full() {
     ulimit -S -v "$(ulimit -H -v)" 2>/dev/null || true
     HOME="$home" exec "$bin" hook session-facts </dev/null 2>/dev/null
   )" || return 0
-  defenseclaw_session_facts_checked "$out"
+  ! _dc_session_facts_fit "$out" || _DC_SESSION_FACTS_FULL="$out"
   return 0
 }
 
@@ -3381,15 +3745,21 @@ _dc_ccache_changed() {
 # defenseclaw_session_facts_checked prints a v1 session facts value that
 # fits the header (its charset, at most 1024 bytes) and nothing otherwise.
 defenseclaw_session_facts_checked() {
+  ! _dc_session_facts_fit "${1:-}" || printf '%s' "$1"
+  return 0
+}
+
+# _dc_session_facts_fit VALUE returns 0 when VALUE is a v1 session facts
+# value that fits the header (defenseclaw_session_facts_checked prints it).
+_dc_session_facts_fit() {
   case "$1" in
     v1\;*) ;;
-    *) return 0 ;;
+    *) return 1 ;;
   esac
   case "$1" in
-    *[!A-Za-z0-9._@/:\;=-]*) return 0 ;;
+    *[!A-Za-z0-9._@/:\;=-]*) return 1 ;;
   esac
-  [ "${#1}" -le 1024 ] || return 0
-  printf '%s' "$1"
+  [ "${#1}" -le 1024 ]
 }
 
 # defenseclaw_tool_gate_max_time EVENT DEFAULT sets HOOK_MAX_TIME, the
@@ -3412,8 +3782,18 @@ defenseclaw_tool_gate_max_time() {
 # hook_event_name key do not change the bound. A payload whose event cannot
 # be read keeps DEFAULT.
 defenseclaw_payload_tool_gate_max_time() {
-  local event=""
-  event="$(_dc_hook_event_field "$1" hook_event_name 2>/dev/null)" || event=""
+  # _dc_hook_event_field's jq program, a local for the same reason.
+  local event="" program='
+      if length != 1 or (.[0] | type) != "object" then error("not one JSON object") else .[0][$f] end
+      | if . == null then empty elif type == "string" then . else error("not a string") end'
+  if ! defenseclaw_secure_client_hook && command -v jq >/dev/null 2>&1; then
+    # _dc_hook_event_field's jq branch, read into the variable by one
+    # process (_dc_jq_into, issue #1130). A Secure Client hook keeps the
+    # pre-1.0.7 read below (owner rule).
+    _dc_jq_into event text "${1:-}" -rs --arg f hook_event_name "$program" 2>/dev/null || event=""
+  else
+    event="$(_dc_hook_event_field "$1" hook_event_name 2>/dev/null)" || event=""
+  fi
   defenseclaw_tool_gate_max_time "$event" "$2"
 }
 
@@ -3456,7 +3836,7 @@ defenseclaw_keep_nul_visible() {
 # .curlrc there could trace the bearer and body to a file or turn an HTTP 401
 # into a transport failure. Bash 3.2 compatible.
 defenseclaw_gateway_post() {
-  local _dc_post_status=0 _dc_listener_status=0 _dc_post_peer_final=0
+  local _dc_post_status=0 _dc_listener_status=0 _dc_post_peer_final=0 _dc_post_refused=0 _dc_post_sent_noanswer=0
   _dc_gateway_post_once "$@" || _dc_post_status=$?
   case "$_dc_post_status" in
     1|28) ;;
@@ -3473,6 +3853,12 @@ defenseclaw_gateway_post() {
   # refusal, and must not turn the refusal into a cold start, the one status
   # a per-user outage rule may let through.
   [ "$_dc_post_peer_final" = 0 ] || return 1
+  # The helper sent the call to its verified own listener and got no status
+  # (9): the gateway took it. That is final, read no socket table: a gateway
+  # that took the call and then died must not turn it into an outage
+  # (review of rel-1-0-6 GAP-0295). The restart wait decides a 28 that comes
+  # after a refusal of this call.
+  [ "$_dc_post_sent_noanswer" = 0 ] || return 28
   # A per-user call that never reached a peer (refused, or not sent) reads
   # the socket tables once, so the outcome is the one the old send-time
   # preflight gave: no listener is a cold start (7), a foreign or unknown one
@@ -3482,6 +3868,11 @@ defenseclaw_gateway_post() {
     2) return 7 ;;
     0) return 1 ;;
   esac
+  # The helper's connection was refused and this account's listener is there
+  # now: 75, a call that stays unsent (a possibly changed peer gets no
+  # credentials). The restart wait decides it (defenseclaw_await_gateway,
+  # rel-1-0-6 GAP-0295); every other caller reads it as a closed failure.
+  [ "$_dc_post_refused" != 1 ] || return 75
   return "$_dc_post_status"
 }
 
@@ -3524,7 +3915,7 @@ _dc_gateway_post_once() {
   local _dc_post_url="$1" _dc_post_max_time="$2" _dc_post_body="$3"
   local _dc_post_auth="" _dc_post_arg
   local _dc_native_post=0 _dc_post_bin _dc_post_prefix _dc_post_path _dc_legacy_post=1
-  local _dc_header_name _dc_header_value _dc_post_output _dc_post_headers _dc_post_sep _dc_field_index
+  local _dc_header_name _dc_header_value _dc_post_output _dc_post_headers _dc_post_sep _dc_field_index _dc_post_data=""
   local -a _dc_post_args _dc_post_auth_args _dc_post_fields
   # A per-user post reads no socket table before it sends (GAP-1453): the
   # native helper proves the owner of the very connection it sends on, with
@@ -3567,27 +3958,24 @@ _dc_gateway_post_once() {
   esac
   if [ "$_dc_native_post" -eq 1 ]; then
     # The agent's deadline includes shell preparation and starting the native
-    # helper. Give the helper only the time still left, reserving one second
-    # for process startup on short tool-call budgets. Its own timeout starts
-    # after startup, so passing the original four seconds could hold a tool
-    # call beyond the agent's answer window on a busy host.
+    # helper. Give the helper only the time still left. The millisecond
+    # deadline reserves 250 ms for its startup on short tool-call budgets;
+    # whole-second --max-time rounds down for older helpers. The original
+    # four seconds is still the outer bound of the shell request.
     case "$_dc_post_max_time" in ""|*[!0-9]*) return 1 ;; esac
     _dc_hook_elapsed_ms
     [ "$_DC_ELAPSED_MS" -ge 0 ] || _DC_ELAPSED_MS=0
     local _dc_post_remaining=$(( _dc_post_max_time - (_DC_ELAPSED_MS + 999) / 1000 ))
     [ "$_dc_post_remaining" -gt 0 ] || return 28
-    if [ "$_dc_post_max_time" -le 4 ] && [ "$_dc_post_remaining" -gt 2 ]; then
-      _dc_post_remaining=$((_dc_post_remaining - 1))
-    fi
     # The same bound in milliseconds, for the helper (GAP-2279): the whole
     # seconds above round the shell's own time up, so a call that spent
-    # 0.4 s reading a large body gave the helper 2 s of the 2.6 s left after
-    # the startup reserve, and was closed at 2.4 s. The helper gets the time
-    # left after that reserve, never less than the whole seconds above and
-    # never a whole second more; an older helper reads only --max-time.
+    # 0.4 s reading a large body gave the helper only 2 s of its available
+    # time and could close a healthy gateway under host load. The helper gets
+    # the time left after the startup reserve, never less than the rounded
+    # whole seconds above; an older helper reads only --max-time.
     local _dc_post_remaining_ms=$(( _dc_post_max_time * 1000 - _DC_ELAPSED_MS ))
     if [ "$_dc_post_max_time" -le 4 ]; then
-      _dc_post_remaining_ms=$(( _dc_post_remaining_ms - 1000 ))
+      _dc_post_remaining_ms=$(( _dc_post_remaining_ms - 250 ))
     fi
     if [ "$_dc_post_remaining_ms" -lt $(( _dc_post_remaining * 1000 )) ]; then
       _dc_post_remaining_ms=$(( _dc_post_remaining * 1000 ))
@@ -3686,6 +4074,11 @@ _dc_gateway_post_once() {
       _dc_header_value="${_dc_header_value# }"
       _dc_post_fields+=("Authorization" "$_dc_header_value")
     fi
+    # The helper's data folder is the one above the hooks folder. It is read
+    # here, not inside the command substitution below: bash 3.2 (macOS
+    # /bin/bash) ends a $( ) at the ")" of a case pattern, so a case there
+    # made the whole file a syntax error and every hook call failed.
+    case "${HOOK_DIR:-}" in /*/hooks) _dc_post_data="${HOOK_DIR%/hooks}" ;; esac
     _dc_post_output="$(
       if [ "$_dc_legacy_post" -eq 1 ]; then
         # A hook can run during an upgrade before the small helper exists.
@@ -3712,18 +4105,34 @@ _dc_gateway_post_once() {
             # 126, as for a helper that cannot run: nothing was sent.
             ulimit -S -v "$_DC_HOOK_NATIVE_VMEM_LIMIT" 2>/dev/null || exit 126
           fi
-          _DC_HOOK_POST_DEADLINE_MS="$_dc_post_remaining_ms" exec "$_dc_post_bin" hook-post --api-addr "$API_ADDR" --max-time "$_dc_post_remaining" --curl-output
+          _DC_HOOK_POST_DATA_DIR="$_dc_post_data" _DC_HOOK_POST_DEADLINE_MS="$_dc_post_remaining_ms" exec "$_dc_post_bin" hook-post --api-addr "$API_ADDR" --max-time "$_dc_post_remaining" --curl-output
         ) 2>/dev/null |
         defenseclaw_keep_nul_visible
       exit "${PIPESTATUS[1]}"
     )" || {
       # 7 is the helper's outage status (hookexec.PerUserPostOutageExit: no
       # gateway took the connection) and 126 or 127 a helper that did not
-      # run; neither reached a peer. Every other failure came after the
-      # helper's connected-peer check decided, and stays closed
-      # (defenseclaw_gateway_post).
+      # run; neither reached a peer. 9 (hookexec.PerUserPostNoAnswerExit) is
+      # a call that got no status before its deadline, curl's timeout (28):
+      # after a refusal of this call it is the restart wait running out of
+      # the budget (defenseclaw_await_gateway, rel-1-0-6 GAP-0295). Every
+      # other failure came after the helper's connected-peer check decided,
+      # and stays closed (defenseclaw_gateway_post).
       case "$?" in
-        7|126|127) ;;
+        7) _dc_post_refused=1 ;;
+        # 11: the connection was refused or closed before a status while
+        # this account's gateway start lock was held. The new listener may
+        # appear before gateway.pid, so a later socket-table or PID read
+        # must not change the outage decision (rel-1-0-6 GAP-0497).
+        11) return 7 ;;
+        126|127) ;;
+        9) _dc_post_sent_noanswer=1; return 28 ;;
+        # 10 (hookexec.PerUserPostRestartNoAnswerExit): no status while a
+        # start or restart of this account's gateway holds its start lock and
+        # the process behind the call's connection exited or gave up the port
+        # during the call, the restart outage (rel-1-0-6 GAP-0295). The
+        # restart wait names it.
+        10) return 7 ;;
         *) _dc_post_peer_final=1 ;;
       esac
       return 1

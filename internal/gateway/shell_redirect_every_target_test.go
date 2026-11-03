@@ -271,14 +271,24 @@ func TestR105CodeBeforeAHomeRedirectTargetStillJudgesIt(t *testing.T) {
 					connectorName, command, blocked, block, FindingStrings(findings))
 			}
 		}
+		// The calls are independent and run concurrently, as a gateway
+		// answers them: one after another they took 220 s of a CI race
+		// shard (rel-1-0-6:GAP-0252).
+		type call struct {
+			command string
+			block   bool
+		}
+		var calls []call
 		for _, prefix := range prefixes {
 			for _, program := range programs {
 				for _, spelling := range []string{"~/", "$HOME/", home + "/"} {
-					judge(prefix+program+" > "+spelling+".defenseclaw/config.yaml", true)
-					judge(prefix+program+" > "+spelling+"build.log", false)
+					calls = append(calls,
+						call{prefix + program + " > " + spelling + ".defenseclaw/config.yaml", true},
+						call{prefix + program + " > " + spelling + "build.log", false})
 				}
 			}
 		}
+		eachConcurrently(len(calls), func(i int) { judge(calls[i].command, calls[i].block) })
 		// Benign work after code that may change HOME stays allowed.
 		for _, command := range []string{
 			"source .venv/bin/activate && pytest > ~/test.log",

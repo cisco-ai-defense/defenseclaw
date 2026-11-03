@@ -18,6 +18,8 @@ import (
 	"sort"
 	"strings"
 	"time"
+
+	"github.com/defenseclaw/defenseclaw/internal/pathidentity"
 )
 
 // A native OTLP exporter sends to whatever process holds the port named in its
@@ -327,7 +329,7 @@ func userNativeOTLPTooLarge(name string) error {
 // the read costs more than the limit. A missing file keeps its os.ErrNotExist.
 func readUserNativeOTLPFile(path string) ([]byte, error) {
 	name := filepath.Base(path)
-	before, err := os.Stat(path)
+	before, err := pathidentity.StatPinned(path)
 	if err != nil {
 		return nil, err
 	}

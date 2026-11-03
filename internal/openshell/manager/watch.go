@@ -32,6 +32,7 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/audit"
 	"github.com/defenseclaw/defenseclaw/internal/gatewaylog"
 	"github.com/defenseclaw/defenseclaw/internal/lazyregexp"
+	"github.com/defenseclaw/defenseclaw/internal/openshell"
 	"github.com/defenseclaw/defenseclaw/internal/openshell/harness"
 	"github.com/defenseclaw/defenseclaw/internal/openshell/ocsf"
 	"github.com/defenseclaw/defenseclaw/internal/openshell/sandboxapi"
@@ -265,6 +266,9 @@ func (m *Manager) statusEvent(ctx context.Context, b *box, st *stream.Status) {
 	}
 	if b.rec.ID == "" && st.ID != "" {
 		b.rec.ID = st.ID
+	}
+	if st.Phase != openshell.PhaseError {
+		m.forgetPending(b.rec.Name)
 	}
 	creating := b.creating
 	m.mu.Unlock()

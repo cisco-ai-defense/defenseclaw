@@ -22,6 +22,8 @@ import (
 	"sort"
 	"strings"
 
+	"gopkg.in/yaml.v3"
+
 	"github.com/defenseclaw/defenseclaw/internal/enterprisehooks"
 	"github.com/defenseclaw/defenseclaw/internal/enterprisestatus"
 )
@@ -143,4 +145,44 @@ func windowsEnterpriseEnrollmentReason(pending bool, failure string) string {
 		reasons = append(reasons, "failed: "+failure)
 	}
 	return strings.Join(reasons, "; ")
+}
+
+// windowsEnterpriseEnrollmentExclusions reads enterprise.enrollment's
+// exclude_users and exclude_groups from the installed config, so status and
+// verify name the accounts held out by policy; the enumerator gives them no
+// rows, and without the list an excluded account looked like one not
+// enrolled yet (GAP-1243).
+func windowsEnterpriseEnrollmentExclusions(configBody []byte) (users, groups []string, err error) {
+	var document struct {
+		Enterprise struct {
+			Enrollment struct {
+				ExcludeUsers  []string `yaml:"exclude_users"`
+				ExcludeGroups []string `yaml:"exclude_groups"`
+			} `yaml:"enrollment"`
+		} `yaml:"enterprise"`
+	}
+	if err := yaml.Unmarshal(configBody, &document); err != nil {
+		return nil, nil, err
+	}
+	clean := func(entries []string) []string {
+		var out []string
+		for _, entry := range entries {
+			if entry = strings.TrimSpace(entry); entry != "" {
+				out = append(out, entry)
+			}
+		}
+		return out
+	}
+	return clean(document.Enterprise.Enrollment.ExcludeUsers), clean(document.Enterprise.Enrollment.ExcludeGroups), nil
+}
+
+// writeWindowsEnterpriseEnrollmentExclusions prints the exclusion lists
+// after the enrolled accounts.
+func writeWindowsEnterpriseEnrollmentExclusions(output io.Writer, enrollment enterprisestatus.Enrollment) {
+	if len(enrollment.ExcludedUsers) > 0 {
+		fmt.Fprintf(output, "  Excluded by enterprise.enrollment.exclude_users (not enrolled; their agents are refused at start): %s\n", strings.Join(enrollment.ExcludedUsers, ", "))
+	}
+	if len(enrollment.ExcludedGroups) > 0 {
+		fmt.Fprintf(output, "  Excluded by enterprise.enrollment.exclude_groups (members are not enrolled): %s\n", strings.Join(enrollment.ExcludedGroups, ", "))
+	}
 }

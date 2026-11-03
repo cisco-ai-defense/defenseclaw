@@ -13,6 +13,8 @@ import (
 	"io"
 	"slices"
 	"time"
+
+	"github.com/defenseclaw/defenseclaw/internal/accountjoin"
 )
 
 // ComposeInput is what bundle sign writes into a new manifest.
@@ -70,6 +72,13 @@ func Compose(ctx context.Context, in ComposeInput) (*Manifest, []byte, error) {
 	if err := CheckKeyProductFloor(cfg, in.MinProductVersion); err != nil {
 		return nil, nil, err
 	}
+	if join := cfg.Enterprise.AccountJoin; join.On() && join.NextGeneration != 0 {
+		// The device bounds next_not_after by this signing time
+		// (ConfirmedAccountJoinSignedAt): sign refuses what it would.
+		if signed := in.CreatedAt.UTC().Truncate(time.Second); join.NextNotAfterTime().After(signed.Add(accountjoin.MaxNextOverlap)) {
+			return nil, nil, refuse(CodeConfigInvalid, ConfigName, "enterprise.account_join.next_not_after is more than 30 days after the signing time %s", signed.Format(time.RFC3339))
+		}
+	}
 	names, err := ConfigCredentials(b.Files[ConfigName])
 	if err != nil {
 		return nil, nil, err
@@ -82,10 +91,29 @@ func Compose(ctx context.Context, in ComposeInput) (*Manifest, []byte, error) {
 		}
 		refs = append(refs, SecretRef{Ref: SecretRefScheme + name, Required: true, ValueSHA256: CredentialValueSHA256(in.TenantID, name, value)})
 	}
+	joinNames, err := AccountJoinCredentials(b.Files[ConfigName])
+	if err != nil {
+		return nil, nil, err
+	}
+	for _, name := range joinNames {
+		value, ok := in.SecretValues[name]
+		if !ok {
+			return nil, nil, refuse(CodeSecretRefUnbound, "secret_refs", "enterprise.account_join uses the tenant secret %s; give its value with --secret-file %s=<file> so the bundle binds it", safePath(name), safePath(name))
+		}
+		refs = append(refs, SecretRef{Ref: SecretRefScheme + name, ValueSHA256: CredentialValueSHA256(in.TenantID, name, value)})
+	}
 	for name := range in.SecretValues {
-		if !slices.Contains(names, name) {
+		if !slices.Contains(names, name) && !slices.Contains(joinNames, name) {
 			return nil, nil, refuse(CodeManifestInvalid, "secret_refs", "a value is given for the credential %s, which config.yaml does not reference", safePath(name))
 		}
+	}
+	if join := cfg.Enterprise.AccountJoin; join.On() && join.NextGeneration != 0 && !slices.Contains(joinNames, accountjoin.NextSecretName) {
+		// The loaded config and AccountJoinCredentials must agree on the
+		// rotation, or the next secret would go unbound.
+		return nil, nil, refuse(CodeConfigInvalid, ConfigName, "enterprise.account_join.next_generation is not a plain decimal number")
+	}
+	if err := checkAccountJoinSecretValues(cfg.Enterprise.AccountJoin, in.SecretValues); err != nil {
+		return nil, nil, err
 	}
 	ruleWarnings, _, err := RuleNotBlockingWarnings(cfg)
 	if err != nil {

@@ -213,7 +213,8 @@ func (e *Env) bundleLinuxProcesses(ctx context.Context, aliases map[string]strin
 		}
 		ppid, _ := strconv.Atoi(fields[1])
 		out = append(out, enterprisestatus.SessionProcess{PID: pid, PPID: ppid, User: who, Agent: connector,
-			StartedAt: time.Unix(boot, 0).Add(time.Duration(ticks) * time.Second / 100)})
+			StartedAt:  time.Unix(boot, 0).Add(time.Duration(ticks) * time.Second / 100),
+			Background: codexBackgroundProcess(argv)})
 	}
 	return out, nil
 }
@@ -257,7 +258,8 @@ func (e *Env) bundleDarwinProcesses(ctx context.Context, aliases map[string]stri
 			}
 			names[session.UID] = who
 		}
-		out = append(out, enterprisestatus.SessionProcess{PID: session.PID, PPID: session.PPID, User: who, Agent: connector, StartedAt: session.Started})
+		out = append(out, enterprisestatus.SessionProcess{PID: session.PID, PPID: session.PPID, User: who, Agent: connector, StartedAt: session.Started,
+			Background: session.background()})
 	}
 	return out, nil
 }

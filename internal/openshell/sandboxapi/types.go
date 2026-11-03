@@ -18,6 +18,7 @@ package sandboxapi
 
 import (
 	"encoding/json"
+	"fmt"
 	"slices"
 	"strconv"
 	"strings"
@@ -93,6 +94,13 @@ type Status struct {
 	// port while sandboxes are off for this account and another account's
 	// process holds it: one gateway runs on a machine (GAP-0307).
 	GatewayElsewhere string `json:"gateway_elsewhere,omitempty"`
+	// Configured sandbox ports are this account's settings. Listener addresses
+	// below name only sockets the daemon actually holds.
+	IngressPort int `json:"ingress_port,omitempty"`
+	EgressPort  int `json:"egress_port,omitempty"`
+	// PortConflict describes the first occupied sandbox port this daemon does
+	// not hold. Holder is a privacy-safe class, never another user's identity.
+	PortConflict *PortConflict `json:"port_conflict,omitempty"`
 	// Gateway describes the OpenShell gateway the daemon drives.
 	Gateway *Gateway `json:"gateway,omitempty"`
 	// IngressAddr and EgressAddr are the DefenseClaw listeners sandboxes
@@ -150,6 +158,32 @@ type Status struct {
 	// it. Unset by a daemon before DefenseClaw 1.0.4, whose running
 	// sandboxes all are.
 	Unprotected []UnprotectedSandbox `json:"unprotected,omitempty"`
+}
+
+// PortConflict describes a configured sandbox port held outside this daemon.
+// Holder is "sandbox_daemon", "other_account", "own_process" or "process".
+type PortConflict struct {
+	Name   string `json:"name"`
+	Port   int    `json:"port"`
+	Holder string `json:"holder"`
+}
+
+// Message is shared by status, doctor and a managed run's port refusal.
+func (c *PortConflict) Message() string {
+	if c == nil {
+		return ""
+	}
+	where := fmt.Sprintf("sandbox %s port 127.0.0.1:%d", c.Name, c.Port)
+	switch c.Holder {
+	case "sandbox_daemon":
+		return where + " is held by another account's sandbox daemon (one account at a time). Try again when that account has no sandbox running."
+	case "other_account":
+		return where + " is held by another account's process. Free the port, or ask your administrator to set a different openshell." + c.Name + "_port."
+	case "own_process":
+		return where + " is held by another process of your account. Free the port, or ask your administrator to set a different openshell." + c.Name + "_port."
+	default:
+		return where + " is held by another process. Free the port, or ask your administrator to set a different openshell." + c.Name + "_port."
+	}
 }
 
 // LegacyUnprotected opens every account of a live legacy guest

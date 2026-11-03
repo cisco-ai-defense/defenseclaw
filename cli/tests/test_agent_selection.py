@@ -1158,3 +1158,41 @@ def test_windows_opencode_v2_npm_image_needs_scoped_package_identity(tmp_path: P
     for name, allowed in [("opencode-ai", False), ("@opencode/lookalike", False), ("@opencode/cli", True)]:
         manifest.write_text(json.dumps({"name": name}))
         assert agent_selection._opencode_npm_package_identity_verified(str(image)) is allowed
+
+
+def test_agent_that_ran_and_failed_its_probe_gets_the_runtime_on_path_step(tmp_path: Path, monkeypatch) -> None:
+    # GAP-2479: a found codex.exe whose version probe exited 2 was called
+    # "not installed" by setup, and selection stopped at the bare exit code.
+    executable = tmp_path / "codex.exe"
+    executable.write_text("", encoding="utf-8")
+    monkeypatch.setattr(agent_selection, "_setup_agent_candidates", lambda *_args: (str(executable),))
+    monkeypatch.setattr(agent_selection, "is_setup_trusted_binary", lambda *_args, **_kwargs: True)
+    monkeypatch.setattr(
+        agent_selection.agent_discovery, "_version_for_agent_binary", lambda *_args, **_kwargs: ("", "version probe exited 2")
+    )
+    with pytest.raises(OSError, match=r"version probe exited 2; the agent did not run: .*putting its runtime on PATH"):
+        agent_selection._select_agent_executable(str(tmp_path / "state"), "codex")
+
+    warnings: list[str] = []
+    errors: list[str] = []
+    monkeypatch.setattr(cmd_setup.ux, "warn", warnings.append)
+    monkeypatch.setattr(cmd_setup.ux, "err", errors.append)
+    signal = SimpleNamespace(version="", installed=False, error=f"{executable}: version probe exited 2", binary_path="")
+    discovery = SimpleNamespace(agents={"codex": signal})
+    assert cmd_setup._check_connector_version_supported_for_setup(
+        "codex", mode="observe", emit=True, data_dir=str(tmp_path), _discovery=discovery
+    )
+    assert any("did not run when setup read its version" in w and "runtime on PATH" in w for w in warnings), warnings
+    assert not any("not installed" in w for w in warnings), warnings
+    cmd_setup._check_connector_version_supported_for_setup(
+        "codex", mode="action", emit=True, data_dir=str(tmp_path), _discovery=discovery
+    )
+    assert not any("not detected locally" in e for e in errors), errors
+
+    # An agent discovery did not find at all keeps the not-installed line.
+    warnings.clear()
+    missing = SimpleNamespace(agents={"codex": SimpleNamespace(version="", installed=False, error="", binary_path="")})
+    assert cmd_setup._check_connector_version_supported_for_setup(
+        "codex", mode="observe", emit=True, data_dir=str(tmp_path), _discovery=missing
+    )
+    assert any("agent is not installed" in w for w in warnings), warnings

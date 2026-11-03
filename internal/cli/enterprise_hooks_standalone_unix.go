@@ -718,6 +718,7 @@ func runEnterpriseHookReconcileOnceStandaloneUnix(ctx context.Context) (enterpri
 	watchDirs := map[string]struct{}{}
 	exclusiveFiles := map[string]struct{}{}
 	sharedFiles := map[string]struct{}{}
+	watchPathOwners := map[string][]string{}
 	// ownedByRow is each dispatched target's exclusive-writer files, which
 	// the pass records the fingerprints of for status (GAP-0044).
 	ownedByRow := map[int][]string{}
@@ -920,9 +921,11 @@ func runEnterpriseHookReconcileOnceStandaloneUnix(ctx context.Context) (enterpri
 			ownedExclusive = own.ExclusiveWriter
 			for _, f := range own.ExclusiveWriter {
 				exclusiveFiles[f] = struct{}{}
+				enterpriseHookWatchAddPathOwner(watchPathOwners, f, key)
 			}
 			for _, f := range own.SharedWriter {
 				sharedFiles[f] = struct{}{}
+				enterpriseHookWatchAddPathOwner(watchPathOwners, f, key)
 			}
 		}
 		index := len(rows)
@@ -1107,6 +1110,7 @@ func runEnterpriseHookReconcileOnceStandaloneUnix(ctx context.Context) (enterpri
 	run.WatchDirs = sortedEnterpriseHookWatchDirs(watchDirs)
 	run.WatchExclusiveFiles = sortedEnterpriseHookWatchDirs(exclusiveFiles)
 	run.WatchSharedFiles = sortedEnterpriseHookWatchDirs(sharedFiles)
+	run.WatchPathOwners = watchPathOwners
 	runEnterpriseHookStandaloneForeignCleanup(ctx, os.Stderr, time.Now(), manifest, enterpriseHookPerUserEnrolled(manifest, machinePolicy), hookSocket)
 	return run, nil
 }

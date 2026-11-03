@@ -1146,7 +1146,7 @@ CONNECTOR_MATRIX_RUN := Connector|Hook|CodeGuard|Telemetry|OTLP|AgentHook|Mode|S
 # CONNECTOR_MATRIX_CONNECTOR_PARTS, balanced on go-linux.json). The default,
 # all, runs everything in one go test.
 CONNECTOR_MATRIX_PART ?= all
-CONNECTOR_MATRIX_CONNECTOR_PARTS ?= 2
+CONNECTOR_MATRIX_CONNECTOR_PARTS ?= 4
 
 connector-matrix-test: go-connector-matrix-test $(if $(filter all packages,$(CONNECTOR_MATRIX_PART)),py-connector-matrix-test)
 

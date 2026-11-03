@@ -89,6 +89,11 @@ const shellToolGateAnswerMargin = 300 * time.Millisecond
 // the benign call closed whenever a slow or queued judge took longer than
 // the hook waited (#1395).
 func withShellToolGateBound(ctx context.Context, r *http.Request) context.Context {
+	return context.WithValue(ctx, shellToolGateKey{}, shellToolGateEnd(ctx, r))
+}
+
+// shellToolGateEnd is the answer end withShellToolGateBound puts on ctx.
+func shellToolGateEnd(ctx context.Context, r *http.Request) time.Time {
 	start, ok := ctx.Value(hookRequestStartKey{}).(time.Time)
 	if !ok || start.IsZero() {
 		start = time.Now()
@@ -98,7 +103,30 @@ func withShellToolGateBound(ctx context.Context, r *http.Request) context.Contex
 		window = time.Duration(ms)*time.Millisecond - shellToolGateAnswerMargin
 	}
 	window = min(max(window, 0), hookJudgeAnswerWindow)
-	return context.WithValue(ctx, shellToolGateKey{}, start.Add(window))
+	return start.Add(window)
+}
+
+// hookCorrelationAnswerEndKey carries the answer end of a per-user shell
+// tool-gate call to its correlation ledger step, which runs before the call
+// gets its shell tool-gate bound (withShellToolGateBound); only
+// observeHookCorrelationEnd reads it.
+type hookCorrelationAnswerEndKey struct{}
+
+// hookCorrelationBoundContext is ctx for the correlation ledger step of the
+// call on r: with the answer end of a per-user shell tool-gate call
+// (shellHookBoundsToolGate, outside Secure Client), as the judge lane gets
+// it later; a call with progress reports already has its end on ctx.
+func (a *APIServer) hookCorrelationBoundContext(ctx context.Context, connectorName, event string, r *http.Request) context.Context {
+	if _, bounded := hookJudgeAnswerEnd(ctx); bounded || a == nil || r == nil {
+		return ctx
+	}
+	if !shellHookBoundsToolGate(connectorName, event, r) {
+		return ctx
+	}
+	if cfg := a.decisionConfig(ctx); cfg != nil && cfg.SecureClientIntegration() {
+		return ctx
+	}
+	return context.WithValue(ctx, hookCorrelationAnswerEndKey{}, shellToolGateEnd(ctx, r))
 }
 
 // reportHookProgress sends the request's 102 report, if it asked for one.

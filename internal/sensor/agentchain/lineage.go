@@ -353,7 +353,8 @@ func (t *Tracker) ObserveProcessTable(rows []ProcessRow) {
 			}
 			continue
 		}
-		e := ExecObservation{PID: row.PID, PPID: row.PPID, Name: row.Name, Cmdline: row.Cmdline}
+		e := ExecObservation{PID: row.PID, PPID: row.PPID, Name: row.Name, Cmdline: row.Cmdline,
+			Created: Creation{SID: row.UserSID}}
 		if record := t.recordLocked(e, row.Start, true); record != nil {
 			learnt = append(learnt, record)
 		}
@@ -384,6 +385,11 @@ type ProcessRow struct {
 	Cmdline string
 	// Start is when the kernel created the process, zero when unknown.
 	Start time.Time
+	// UserSID is the Windows account the poll read for the process, empty
+	// when it read none. A record a poll found first then knows its owner,
+	// so a creation event naming another account on its pid is a new
+	// process even when the earlier holder's exit was not seen (GAP-1534).
+	UserSID string
 }
 
 // recordLocked records one observation and returns the record when it learnt

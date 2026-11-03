@@ -26,6 +26,8 @@ import (
 	"runtime"
 	"sort"
 	"strings"
+
+	"github.com/defenseclaw/defenseclaw/internal/pathidentity"
 )
 
 // AMPPluginPathOverride is a test seam for the user-wide plugin artifact.
@@ -281,7 +283,7 @@ func readAMPSettingsDocument(path string) (map[string]interface{}, bool) {
 const ampSettingsReadLimit int64 = 2 << 20
 
 func readStableAMPSettingsFile(path string) ([]byte, bool) {
-	before, err := os.Lstat(path)
+	before, err := pathidentity.LstatPinned(path)
 	if err != nil || before.Mode()&os.ModeSymlink != 0 ||
 		!before.Mode().IsRegular() || before.Size() > ampSettingsReadLimit {
 		return nil, false

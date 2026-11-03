@@ -139,6 +139,14 @@ from defenseclaw import ux
     show_default=True,
     help="Env var holding the decision model token (a local server needs none).",
 )
+@click.option(
+    "--decision-model-connectors",
+    default="",
+    help=(
+        "Connectors the decision model answers for on its own where the LLM judge does not run: "
+        "comma-separated names, or *. Default: the connector, when quickstart puts it in action mode."
+    ),
+)
 @click.option("--json-summary", "--json", "json_summary", is_flag=True, help="Emit the first-run summary as JSON.")
 def quickstart_cmd(
     mode: str | None,
@@ -153,6 +161,7 @@ def quickstart_cmd(
     decision_model_url: str,
     decision_model_name: str,
     decision_model_key_env: str,
+    decision_model_connectors: str,
     json_summary: bool,
 ) -> None:
     """Zero-prompt end-to-end setup with safe defaults.
@@ -180,6 +189,7 @@ def quickstart_cmd(
         _validated_api_key_env_name(
             decision_model_key_env, "'--decision-model-key-env'", "DEFENSECLAW_DECISION_MODEL_KEY"
         ),
+        decision_model_connectors,
     )
     if agent_name:
         connector = agent_name
@@ -303,7 +313,12 @@ def quickstart_cmd(
         from defenseclaw.bootstrap import _rollup_status
         from defenseclaw.commands.cmd_init import _apply_first_run_decision_model
 
-        _apply_first_run_decision_model(report, decision_model_request, str(cfg_mod.default_data_path()))
+        _apply_first_run_decision_model(
+            report,
+            decision_model_request,
+            str(cfg_mod.default_data_path()),
+            [connector] if profile == "action" else [],
+        )
         report.status = _rollup_status(report.setup, report.readiness)
     if skip_gateway:
         # GAP-2052: bootstrap words a skipped start with init's flag; name

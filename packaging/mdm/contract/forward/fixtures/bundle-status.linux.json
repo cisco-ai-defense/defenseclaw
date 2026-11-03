@@ -104,6 +104,13 @@
       }
     ]
   },
+  "enforcement_pending": {
+    "count": 2,
+    "connectors": [
+      "claudecode",
+      "codex"
+    ]
+  },
   "alert_only_rule_count": 2,
   "gateway_checked": true,
   "gateway_digest": "sha256:4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f",

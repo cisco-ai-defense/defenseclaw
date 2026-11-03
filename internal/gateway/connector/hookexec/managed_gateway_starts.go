@@ -261,6 +261,9 @@ type perUserGatewayWait struct {
 	// outlasted reports a call still refused or dropped at the end of the
 	// restart budget.
 	outlasted bool
+	// sawOutage reports a call this account's gateway refused or dropped
+	// (gatewayRestartShaped) before it was sent again: it met an outage.
+	sawOutage bool
 }
 
 // awaitPerUserGateway sends a per-user hook call again, every
@@ -284,6 +287,7 @@ func awaitPerUserGateway(
 	send func() (*http.Response, error),
 ) perUserGatewayWait {
 	var recovered chan error
+	sawOutage := err != nil && !deadline.IsZero() && gatewayRestartShaped(err)
 	recoveryStarted := false
 	for err != nil && !deadline.IsZero() && gatewayRestartShaped(err) {
 		if !recoveryStarted && opts.GatewayRecovery != nil && connectionRefused(err) {
@@ -304,25 +308,42 @@ func awaitPerUserGateway(
 		}
 		delay := gatewayRestartRetryDelay
 		if !time.Now().Add(delay).Before(deadline) {
-			return perUserGatewayWait{resp: resp, err: err, outlasted: true}
+			return perUserGatewayWait{resp: resp, err: err, outlasted: true, sawOutage: sawOutage}
 		}
 		timer := time.NewTimer(delay)
 		select {
 		case <-ctx.Done():
 			timer.Stop()
-			return perUserGatewayWait{resp: resp, err: err}
+			return perUserGatewayWait{resp: resp, err: err, sawOutage: sawOutage}
 		case recoveryErr := <-recovered:
 			timer.Stop()
 			// A nil channel never fires again: one start per call.
 			recovered = nil
 			if recoveryErr != nil {
-				return perUserGatewayWait{resp: resp, err: err, recoveryErr: recoveryErr}
+				return perUserGatewayWait{resp: resp, err: err, recoveryErr: recoveryErr, sawOutage: sawOutage}
 			}
 		case <-timer.C:
 		}
 		resp, err = send()
 	}
-	return perUserGatewayWait{resp: resp, err: err}
+	return perUserGatewayWait{resp: resp, err: err, sawOutage: sawOutage}
+}
+
+// perUserRestartUnanswered reports a per-user call whose restart wait met an
+// outage (wait.sawOutage) and then ended with no answer and no status: the
+// call's budget ran out while it was sent again to the gateway that comes up,
+// or between two tries. That is the restart outlasting the budget, as a last
+// try the gateway refused is, so the outage mode decides it (rel-1-0-6
+// GAP-0295). A listener whose owner was not proven, an invalid request and
+// an answer of any kind are not.
+func perUserRestartUnanswered(ctx context.Context, opts Options, wait perUserGatewayWait) bool {
+	err := wait.err
+	if !wait.sawOutage || err == nil || opts.answeredErrorStatus != 0 || errors.Is(err, errPerUserPeerUnverified) ||
+		errors.Is(err, errInvalidHookRequest) || errors.Is(err, errPerUserAnswerIncomplete) {
+		return false
+	}
+	return gatewayNoAnswer(ctx) || errors.Is(err, context.DeadlineExceeded) || errors.Is(err, errGatewayNotConnected) ||
+		errors.Is(err, errGatewayTookCallNoAnswer)
 }
 
 // errGatewayNotConnected ends a per-user hook try that has no connection to

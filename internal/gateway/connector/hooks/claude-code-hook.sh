@@ -9,7 +9,13 @@
 # the hook span links back to the agent's parent span. See
 # codex-hook.sh for the validation contract.
 set -euo pipefail
-{{if and (not .Managed) (not .Sandbox)}}# _DC_HOOK_DATA_DIR is the data directory this hook was installed in, the
+{{if not .SecureClient}}# The agent's environment cannot change how this script runs: a function
+# nesting limit, a read timeout, ignored commands and POSIX mode would end a
+# check early and let a blocked call run (review 2 of
+# sandbox-visibility:GAP-0028). Before the first function call.
+unset -v FUNCNEST TMOUT EXECIGNORE POSIXLY_CORRECT 2>/dev/null || true
+set +o posix
+{{end}}{{if and (not .Managed) (not .Sandbox)}}# _DC_HOOK_DATA_DIR is the data directory this hook was installed in, the
 # folder above its hooks folder (defenseclaw_install_held). Until the hook
 # path is resolved below it is the folder above the path the agent ran.
 _DC_HOOK_DATA_DIR="${BASH_SOURCE[0]:-$0}"
@@ -227,7 +233,9 @@ trap '_dc_boot_rc=$?; if [ "$_dc_boot_rc" -ne 0 ] && defenseclaw_boot_fails_clos
 HOME="${HOME:-${USERPROFILE:-$(cd ~ 2>/dev/null && pwd)}}"
 export HOME
 
-HOOK_SOURCE="${BASH_SOURCE[0]:-$0}"
+{{if .Sandbox}}# The image's hook folder, baked: the workload's environment cannot move it.
+HOOK_DIR={{.SandboxHookDirSH}}
+{{else}}HOOK_SOURCE="${BASH_SOURCE[0]:-$0}"
 HOOK_LINK_DEPTH=0
 while [ -L "$HOOK_SOURCE" ]; do
   HOOK_LINK_DEPTH=$((HOOK_LINK_DEPTH + 1))
@@ -251,7 +259,7 @@ HOOK_PARENT="${HOOK_SOURCE%/*}"
 [ "$HOOK_PARENT" != "$HOOK_SOURCE" ] || HOOK_PARENT="."
 HOOK_DIR="$(cd -P -- "$HOOK_PARENT" 2>/dev/null && pwd)" || exit 2
 unset HOOK_SOURCE HOOK_LINK_DEPTH HOOK_PARENT HOOK_BASE HOOK_TARGET
-{{if .Managed}}
+{{end}}{{if .Managed}}
 DEFENSECLAW_MANAGED_HOOK=1
 export DEFENSECLAW_MANAGED_HOOK
 {{if not .Sandbox}}_DC_SECURE_CLIENT_HOOK={{if .SecureClient}}1{{else}}0{{end}}
@@ -309,8 +317,18 @@ fi
 # subsequent token-resolution logic depends on the operator's
 # original PATH or HOME.
 # command: bash 3.2 (macOS /bin/bash) exits 0 when a sourced helper is missing or unreadable.
-command . "${HOOK_DIR}/_hardening.sh" || exit "$?"
-{{if .Sandbox}}# OpenShell sandbox: _sandbox.sh drops every inherited variable the hook
+{{if .SecureClient}}command . "${HOOK_DIR}/_hardening.sh" || exit "$?"
+{{else}}# A helper that does not load (a path the agent's BASH_SOURCE moved, a
+# missing or broken file) is a local failure: block, whatever the fail
+# mode (review 2 of sandbox-visibility:GAP-0028).
+# bash 3.2 can return 0 from a "." of a file that is not there: the helper
+# counts as loaded only when its functions are defined.
+if [ ! -r "${HOOK_DIR}/_hardening.sh" ] || ! command . "${HOOK_DIR}/_hardening.sh" ||
+  ! declare -F defenseclaw_harden_env >/dev/null; then
+  echo "defenseclaw: hook hardening helper unavailable; blocking (fail mode closed)" >&2
+  exit 2
+fi
+{{end}}{{if .Sandbox}}# OpenShell sandbox: _sandbox.sh drops every inherited variable the hook
 # does not read and pins the baked PATH before the first child process
 # (mktemp in defenseclaw_harden_env) or helper call.
 command . "${HOOK_DIR}/_sandbox.sh" || exit 2
@@ -342,8 +360,9 @@ export DEFENSECLAW_HOOK_CONNECTOR DEFENSECLAW_HOOK_NAME
 
 {{if and .Managed (not .SecureClient) (not .Sandbox)}}# A standalone managed hook blocks input too large to inspect in every
 # fail mode: the agent chooses the size.
-{{end}}PAYLOAD="$(defenseclaw_read_stdin_capped "$(defenseclaw_hook_delivery_outcome response "{{if and .Managed (not .SecureClient) (not .Sandbox)}}closed{{else}}$FAIL_MODE{{end}}")")" || {
-  _DC_STDIN_RC=$?
+{{end}}{{if .SecureClient}}PAYLOAD="$(defenseclaw_read_stdin_capped "$(defenseclaw_hook_delivery_outcome response "{{if and .Managed (not .SecureClient) (not .Sandbox)}}closed{{else}}$FAIL_MODE{{end}}")")" || {
+{{else}}defenseclaw_read_hook_stdin PAYLOAD response "{{if and .Managed (not .SecureClient) (not .Sandbox)}}closed{{else}}$FAIL_MODE{{end}}" || {
+{{end}}  _DC_STDIN_RC=$?
 {{if and (not .Managed) (not .Sandbox)}}  defenseclaw_close_during_install
   if defenseclaw_prepare_oversized_stdin "$_DC_STDIN_RC"; then
     : # the normal gateway path judges the bounded review payload
@@ -382,8 +401,9 @@ export DEFENSECLAW_HOOK_CONNECTOR DEFENSECLAW_HOOK_NAME
 CURSOR_ORIGIN_VERSION=""
 case "$PAYLOAD" in
   *cursor_version*)
-    CURSOR_ORIGIN_VERSION="$(printf '%s' "$PAYLOAD" | _dc_jq -r '.cursor_version // empty' 2>/dev/null || true)" ;;
-esac
+{{if .SecureClient}}    CURSOR_ORIGIN_VERSION="$(printf '%s' "$PAYLOAD" | _dc_jq -r '.cursor_version // empty' 2>/dev/null || true)" ;;
+{{else}}    _dc_jq_into CURSOR_ORIGIN_VERSION text "$PAYLOAD" -r '.cursor_version // empty' 2>/dev/null || true ;;
+{{end}}esac
 if [ -n "$CURSOR_ORIGIN_VERSION" ] && [ -f "${HOOK_DIR}/.hook-cursor.token" ]; then
   CURSOR_HOOK_MARKER=""
   if [ -r "${HOOK_DIR}/cursor-hook.sh" ]; then
@@ -450,8 +470,9 @@ claude_fail_closed_decision() {
   else
     reason="DefenseClaw blocked this because it could not reach its gateway (${1}). Run defenseclaw-gateway status to check it."
   fi
-  event="$(printf '%s' "$PAYLOAD" | _dc_jq -r '.hook_event_name // empty' 2>/dev/null)" || return 1
-  local out=""
+{{if .SecureClient}}  event="$(printf '%s' "$PAYLOAD" | _dc_jq -r '.hook_event_name // empty' 2>/dev/null)" || return 1
+{{else}}  _dc_jq_into event text "$PAYLOAD" -r '.hook_event_name // empty' 2>/dev/null || return 1
+{{end}}  local out=""
   case "$event" in
     PreToolUse)
       out="$(_dc_jq -cn --arg r "$reason" \
@@ -548,23 +569,25 @@ fi
 
 # W3C trace propagation: forward validated traceparent / tracestate.
 TRACE_HEADER_ARGS=()
-# A read loop, not mapfile: macOS ships bash 3.2, which has no mapfile.
+{{if .SecureClient}}# A read loop, not mapfile: macOS ships bash 3.2, which has no mapfile.
 while IFS= read -r trace_header_arg; do
   TRACE_HEADER_ARGS+=("$trace_header_arg")
 done < <(defenseclaw_extract_trace_context)
-
+{{else}}defenseclaw_trace_header_args
+{{end}}
 # Per-user attribution: the gateway cannot read the real user's identity from
 # its own service-account process, so the hook reports it.
-# Read with a read loop rather than mapfile: macOS ships bash 3.2, which has
+{{if .SecureClient}}# Read with a read loop rather than mapfile: macOS ships bash 3.2, which has
 # no mapfile, and there the array would stay empty and the endpoint would send
 # no identity at all.
-IDENTITY_HEADER_ARGS=()
-if declare -F defenseclaw_user_identity_args >/dev/null 2>&1; then
+{{end}}IDENTITY_HEADER_ARGS=()
+{{if .SecureClient}}if declare -F defenseclaw_user_identity_args >/dev/null 2>&1; then
   while IFS= read -r identity_header_arg; do
     IDENTITY_HEADER_ARGS+=("$identity_header_arg")
   done < <(defenseclaw_user_identity_args)
 fi
-
+{{else}}defenseclaw_user_identity_header_args
+{{end}}
 {{if .Sandbox}}# One short attempt plus one retry carrying the same idempotency key: the
 # OpenShell relay occasionally drops a request, and the ingress dedupes by key.
 RESPONSE="$(defenseclaw_sandbox_post "/api/v1/claude-code/hook" "$PAYLOAD" \
@@ -649,24 +672,28 @@ fi{{end}}
 # their delivery contract.
 if command -v jq >/dev/null 2>&1; then
   unset RESPONSE_FIELDS
-  RESPONSE_FIELDS=$(printf '%s' "$RESULT" | jq -ers '
-    if length != 1 or (.[0] | type) != "object" then error("invalid response") else .[0] end
+{{if .SecureClient}}  RESPONSE_FIELDS=$(printf '%s' "$RESULT" | jq -ers '
+{{else}}  _dc_jq_into RESPONSE_FIELDS text "$RESULT" -ers '
+{{end}}    if length != 1 or (.[0] | type) != "object" then error("invalid response") else .[0] end
     | if (.action == "allow" or .action == "alert" or .action == "block" or .action == "confirm")
          and (.claude_code_output == null or (.claude_code_output | type) == "object")
       then .action, (.claude_code_output // empty | tojson)
-      else error("invalid response fields") end' 2>/dev/null) || fail_response "invalid JSON response"
-  ACTION="${RESPONSE_FIELDS%%$'\n'*}"
+{{if .SecureClient}}      else error("invalid response fields") end' 2>/dev/null) || fail_response "invalid JSON response"
+{{else}}      else error("invalid response fields") end' 2>/dev/null || fail_response "invalid JSON response"
+{{end}}  ACTION="${RESPONSE_FIELDS%%$'\n'*}"
   OUTPUT=""
   if [ "$ACTION" != "$RESPONSE_FIELDS" ]; then
     OUTPUT="${RESPONSE_FIELDS#*$'\n'}"
   fi
   unset RESPONSE_FIELDS
 else
-{{end}}OUTPUT=$(echo "$RESULT" | _dc_jq -c '.claude_code_output // empty' 2>/dev/null) || {
-  fail_response "invalid JSON response"
+{{end}}{{if .SecureClient}}OUTPUT=$(echo "$RESULT" | _dc_jq -c '.claude_code_output // empty' 2>/dev/null) || {
+{{else}}_dc_jq_into OUTPUT line "$RESULT" -c '.claude_code_output // empty' 2>/dev/null || {
+{{end}}  fail_response "invalid JSON response"
 }
-ACTION=$(echo "$RESULT" | _dc_jq -r '.action // empty' 2>/dev/null) || {
-  fail_response "failed to parse action from response"
+{{if .SecureClient}}ACTION=$(echo "$RESULT" | _dc_jq -r '.action // empty' 2>/dev/null) || {
+{{else}}_dc_jq_into ACTION line "$RESULT" -r '.action // empty' 2>/dev/null || {
+{{end}}  fail_response "failed to parse action from response"
 }
 {{if and (not .Managed) (not .Sandbox)}}fi
 {{end}}# alert is advisory (would_block=false): the notice printed above is all
@@ -681,14 +708,19 @@ esac
 # stopReason, or absent with decision block. A block
 # without a directive is a policy denial and gets the exit-2 feedback below.
 if [ "$ACTION" = "block" ] && [ -n "$OUTPUT" ] && [ "$OUTPUT" != "null" ]; then
-  CLAUDE_EVENT=$(printf '%s' "$PAYLOAD" | _dc_jq -r '.hook_event_name // empty' 2>/dev/null) || CLAUDE_EVENT=""
-  case "$CLAUDE_EVENT" in
+{{if .SecureClient}}  CLAUDE_EVENT=$(printf '%s' "$PAYLOAD" | _dc_jq -r '.hook_event_name // empty' 2>/dev/null) || CLAUDE_EVENT=""
+{{else}}  _dc_jq_into CLAUDE_EVENT text "$PAYLOAD" -r '.hook_event_name // empty' 2>/dev/null || CLAUDE_EVENT=""
+{{end}}  case "$CLAUDE_EVENT" in
     Stop|SubagentStop|TeammateIdle)
-      NATIVE_CONTINUE=$(printf '%s' "$OUTPUT" | _dc_jq -c '.continue' 2>/dev/null) || NATIVE_CONTINUE=""
+{{if .SecureClient}}      NATIVE_CONTINUE=$(printf '%s' "$OUTPUT" | _dc_jq -c '.continue' 2>/dev/null) || NATIVE_CONTINUE=""
       NATIVE_STOP_REASON=$(printf '%s' "$OUTPUT" | _dc_jq -r '.stopReason // empty' 2>/dev/null) || NATIVE_STOP_REASON=""
       NATIVE_DECISION=$(printf '%s' "$OUTPUT" | _dc_jq -r '.decision // empty' 2>/dev/null) || NATIVE_DECISION=""
       NATIVE_REASON=$(printf '%s' "$OUTPUT" | _dc_jq -r '.reason // empty' 2>/dev/null) || NATIVE_REASON=""
-      NATIVE_AGREES=no
+{{else}}      _dc_jq_into NATIVE_CONTINUE text "$OUTPUT" -c '.continue' 2>/dev/null || NATIVE_CONTINUE=""
+      _dc_jq_into NATIVE_STOP_REASON text "$OUTPUT" -r '.stopReason // empty' 2>/dev/null || NATIVE_STOP_REASON=""
+      _dc_jq_into NATIVE_DECISION text "$OUTPUT" -r '.decision // empty' 2>/dev/null || NATIVE_DECISION=""
+      _dc_jq_into NATIVE_REASON text "$OUTPUT" -r '.reason // empty' 2>/dev/null || NATIVE_REASON=""
+{{end}}      NATIVE_AGREES=no
       if [ "$NATIVE_CONTINUE" = "false" ] && [ -n "$NATIVE_STOP_REASON" ]; then
         NATIVE_AGREES=yes
       elif { [ -z "$NATIVE_CONTINUE" ] || [ "$NATIVE_CONTINUE" = "null" ]; } &&
@@ -696,8 +728,9 @@ if [ "$ACTION" = "block" ] && [ -n "$OUTPUT" ] && [ "$OUTPUT" != "null" ]; then
         NATIVE_AGREES=yes
       fi
       if [ "$NATIVE_AGREES" != "yes" ]; then
-        REASON=$(printf '%s' "$RESULT" | _dc_jq -r '.reason // empty' 2>/dev/null) || REASON=""
-        [ -n "$REASON" ] || REASON="DefenseClaw hook failed closed."
+{{if .SecureClient}}        REASON=$(printf '%s' "$RESULT" | _dc_jq -r '.reason // empty' 2>/dev/null) || REASON=""
+{{else}}        _dc_jq_into REASON text "$RESULT" -r '.reason // empty' 2>/dev/null || REASON=""
+{{end}}        [ -n "$REASON" ] || REASON="DefenseClaw hook failed closed."
         OUTPUT=$(printf '{"continue":false,"stopReason":"%s"}' "$(defenseclaw_json_escape "$REASON")")
       fi
       ;;
@@ -713,8 +746,9 @@ fi
 if [ -n "$OUTPUT" ] && [ "$OUTPUT" != "null" ]; then
   case "$ACTION" in
     block|confirm)
-      _DC_PAYLOAD_EVENT="$(printf '%s' "$PAYLOAD" | _dc_jq -r '.hook_event_name // empty' 2>/dev/null)" || _DC_PAYLOAD_EVENT=""
-      case "$_DC_PAYLOAD_EVENT" in
+{{if .SecureClient}}      _DC_PAYLOAD_EVENT="$(printf '%s' "$PAYLOAD" | _dc_jq -r '.hook_event_name // empty' 2>/dev/null)" || _DC_PAYLOAD_EVENT=""
+{{else}}      _dc_jq_into _DC_PAYLOAD_EVENT text "$PAYLOAD" -r '.hook_event_name // empty' 2>/dev/null || _DC_PAYLOAD_EVENT=""
+{{end}}      case "$_DC_PAYLOAD_EVENT" in
         Stop|SubagentStop|TeammateIdle) ;;
         *)
           if ! defenseclaw_native_output_agrees claudecode "$_DC_PAYLOAD_EVENT" "$ACTION" "$OUTPUT"; then
@@ -763,8 +797,9 @@ if [ "$ACTION" = "block" ]; then
     # decision=block. Exit 0 so Claude Code honors it.
     exit 0
   fi
-  REASON=$(echo "$RESULT" | _dc_jq -r '.reason // empty' 2>/dev/null)
-  if [ -z "$REASON" ]; then
+{{if .SecureClient}}  REASON=$(echo "$RESULT" | _dc_jq -r '.reason // empty' 2>/dev/null)
+{{else}}  _dc_jq_into REASON line "$RESULT" -r '.reason // empty' 2>/dev/null
+{{end}}  if [ -z "$REASON" ]; then
     REASON="Blocked by DefenseClaw Claude Code policy."
   fi
   printf '%s\n' "$REASON" >&2

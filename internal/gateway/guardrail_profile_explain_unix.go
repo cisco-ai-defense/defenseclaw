@@ -9,6 +9,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"os"
 	"strconv"
 	"strings"
 	"time"
@@ -27,7 +28,7 @@ const profileExplainLookupTimeout = 10 * time.Second
 var profileExplainAccount = func(name string) (id, userName string, err error) {
 	ctx, cancel := context.WithTimeout(context.Background(), profileExplainLookupTimeout)
 	defer cancel()
-	resolver := unixidentity.Default(ctx)
+	resolver := profileExplainResolver(ctx)
 	// name@domain and DOMAIN\name resolve as getent resolves them, when the
 	// answer is the same account (GAP-0711).
 	account, err := unixidentity.LookupAccountSpelling(resolver, name, func(uid int) (useridentity.DirectoryFacts, bool) {
@@ -46,12 +47,35 @@ var profileExplainAccount = func(name string) (id, userName string, err error) {
 		// A bare name a local and a directory account share names both:
 		// explaining the one NSS answers first hid the other (GAP-1087).
 		return "", "", ambiguousAccount(name, append([]unixidentity.Account{account}, twins...))
-	} else if err != nil {
+	} else if err != nil && !perUserGatewayOwnAccount(account, err) {
 		// Whether a directory account shares the name is unknown: the bare
 		// name is refused, not taken for the local account (GAP-1131).
 		return "", "", err
 	}
 	return strconv.Itoa(account.UID), sanitizeLLMEventUser(account.Name), nil
+}
+
+// profileExplainResolver is the platform resolver explain names accounts
+// with; profileExplainGatewayUID the uid the gateway runs as.
+var (
+	profileExplainResolver   = unixidentity.Default
+	profileExplainGatewayUID = os.Getuid
+)
+
+// perUserGatewayOwnAccount reports whether a bare name whose directory twins
+// cannot be looked up (NamesakesUnknownError) still names one account for
+// explain: the account a per-user gateway runs as. That gateway's hooks and
+// token are the account's own, and a directory account of the same name has
+// its own gateway, so the name can only be the caller's. Refusing it made
+// `profile explain --user <own name>` exit 1 on an AD-joined Linux host whose
+// sssd.conf only root can read, while the uid and no --user resolved
+// (GAP-0269). A root gateway, which serves every account, and any other
+// account keep the refusal (GAP-1131); a known twin is still ambiguous
+// (GAP-1087).
+func perUserGatewayOwnAccount(account unixidentity.Account, err error) bool {
+	var unknown *useridentity.NamesakesUnknownError
+	uid := profileExplainGatewayUID()
+	return errors.As(err, &unknown) && uid > 0 && account.UID == uid
 }
 
 // sameNameProfileAccounts lists the other accounts a bare name typed for an

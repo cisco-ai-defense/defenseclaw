@@ -165,7 +165,7 @@ with --output json it prints the pull's result.`
 			}
 		}
 		if cmd.Name() == "run" || cmd.Name() == "connect" {
-			cmd.Flags().Lookup("yes").Usage = "take the defaults at the end of the session (leave the changes in the sandbox for pull)"
+			cmd.Flags().Lookup("yes").Usage = "take the defaults at the end of the session (leave the changes in the sandbox for later pull --apply, --branch or --patch-out FILE)"
 		}
 	}
 }
@@ -500,7 +500,7 @@ Skip-permissions mode is on by default;
 --safe keeps the harness's own prompts. The harness gets your terminal; when it exits
 you get a summary, a review of changed files that can run code on your machine, and
 the choice to keep or undo the changes (from a copy: to bring them back, or leave them
-in the sandbox for pull). Arguments after -- go to the harness.
+in the sandbox for later pull --apply, --branch or --patch-out FILE). Arguments after -- go to the harness.
 
 A headless run in the foreground (--prompt, or the harness's own print flag after --)
 deletes its sandbox when it ends and nothing is left in it to bring back or undo, as
@@ -534,7 +534,7 @@ deletes its sandbox when it ends and nothing is left in it to bring back or undo
 	}
 	f := cmd.Flags()
 	f.StringVar(&o.Name, "name", "", "sandbox name, at most 19 lowercase letters, digits and '-' (default <folder>-<random>)")
-	f.BoolVar(&o.Copy, "copy", false, "work on a copy of the folder with secrets held back; bring changes back with pull")
+	f.BoolVar(&o.Copy, "copy", false, "work on a copy of the folder with secrets held back; bring changes back with pull --apply (or --branch or --patch-out FILE)")
 	f.BoolVar(&o.Safe, "safe", false, "keep the harness's own permission prompts (skip-permissions off)")
 	f.StringVar(&o.Pack, "pack", "", "sandbox policy pack (open, balanced, strict, or a custom pack)")
 	f.StringVar(&o.Profile, "profile", "", "network profile: open, balanced or strict")
@@ -564,7 +564,7 @@ deletes its sandbox when it ends and nothing is left in it to bring back or undo
 
 // sessionYesUsage is the --yes of run and connect: a mount's changes are
 // kept, a copy's stay in the sandbox (nothing comes back unreviewed).
-const sessionYesUsage = "take the defaults at the end of the session (mount: keep the changes; copy: leave them in the sandbox for pull)"
+const sessionYesUsage = "take the defaults at the end of the session (mount: keep the changes; copy: leave them in the sandbox for later pull --apply, --branch or --patch-out FILE)"
 
 func nameArg(what string) cobra.PositionalArgs {
 	return func(_ *cobra.Command, args []string) error {

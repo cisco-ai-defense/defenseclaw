@@ -67,6 +67,10 @@ and optionally the Cisco AI Defense API key.
 
 `<arch>` is `amd64` or `arm64`. On Windows use the `-Standalone-` Setup:
 `DefenseClawSetup-Enterprise-x64.exe` is the Cisco Secure Client build.
+On an enforcing fapolicyd host, use the deb or rpm with the Linux MDM wrapper.
+Its tarball path runs one `ensure`; a tarball requires the
+[staged-payload trust and two-stage flow](/docs/enterprise/linux#3b-or-install-from-the-tarball)
+outside that wrapper.
 
 **Hash-pinned trust** is the default. The pin is the artifact's SHA-256 from the
 release's cosign-signed `checksums.txt`. Verify it once on an administrator
@@ -244,6 +248,10 @@ exit $LASTEXITCODE
 | `--log FILE` | — | Wrapper log path. |
 | `--staging-dir DIR` | — | The root-only folder the wrapper stages the artifact and the config in. Default `/var/lib/defenseclaw-mdm` on Linux (created `root`, `0700`) and `/var/tmp` on macOS. A payload source runs its `defenseclaw-gateway` from there, so the folder must allow execution; CIS hosts mount `/tmp` and `/var/tmp` `noexec`. It must be owned by root and not writable by others (`mdm_staging_untrusted`). |
 
+On an enforcing fapolicyd host, the Linux wrapper's payload source does not
+perform the staged and installed-tree trust updates. Use the deb or rpm with
+the wrapper, or follow the [manual two-stage tarball steps](/docs/enterprise/linux#3b-or-install-from-the-tarball).
+
 Script-only MDMs that cannot pass arguments set the same values in the settings
 block at the top of `defenseclaw-enterprise.sh`: `DC_ACTION`, `DC_SOURCE`,
 `DC_SOURCE_URL`, `DC_SOURCE_SHA256`, `DC_TRUST_MODE`, `DC_ALLOWED_TEAM_IDS`,
@@ -302,7 +310,10 @@ gpg --dearmor < defenseclaw-enterprise-release-key.asc > defenseclaw-enterprise-
   `unmanaged_layout_present`. Take them over once by running
   `enterprise linux ensure` or `enterprise macos ensure` as root with
   `--adopt-existing` and `--from-package` (or `--payload <dir>`). It backs the old
-  files up first. The wrapper does not pass `--adopt-existing`. See
+  files up first. On a Linux tarball host with fapolicyd, trust the staged
+  payload and use the [two-stage install flow](/docs/enterprise/linux#3b-or-install-from-the-tarball),
+  passing `--adopt-existing` to the staged `ensure` and adding installed-tree
+  trust before activation. The wrapper does not pass `--adopt-existing`. See
   [Troubleshooting](/docs/enterprise/troubleshooting).
 
 ### Setup properties
@@ -594,6 +605,10 @@ refuses a payload-archive upgrade (`package_owned_binaries`). The first `ensure`
 of a new release migrates a `config_version: 8` config to 9 and, on Linux and
 macOS, reports the applied policy in the result's `policy` object
 ([Effective policy digest](/docs/enterprise/operations)).
+
+On a Linux tarball host with fapolicyd, use the
+[two-stage payload upgrade](/docs/enterprise/lifecycle#linux-payload-upgrade)
+instead of the wrapper's single `ensure`.
 
 **Roll back.** Every lifecycle refuses an older release than the installed one
 unless you ask for the rollback (`downgrade_refused`; exit `1603` on Windows). The

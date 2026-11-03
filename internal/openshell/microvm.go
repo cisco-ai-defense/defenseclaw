@@ -33,11 +33,13 @@ import (
 )
 
 // Free space the MicroVM driver's state directory needs. A first start
-// temporarily uses 9-11 GiB on the host, including disk preparation.
+// temporarily uses up to about 12 GiB on the host, including the image
+// build, its cache and disk preparation (12.02 GiB measured, GAP-0261), so
+// the floor keeps 1 GiB above that.
 const (
-	VMDiskFirstStartBytes = 11 << 30
-	VMDiskFailBytes       = 12 << 30
-	VMDiskWarnBytes       = 22 << 30
+	VMDiskFirstStartBytes = 12 << 30
+	VMDiskFailBytes       = 13 << 30
+	VMDiskWarnBytes       = 24 << 30
 )
 
 // EnterprisePlatformName is the enterprise subcommand for a Go OS name.
@@ -554,9 +556,17 @@ func ManagedMicroVMFix(m *MicroVMHost, unsigned bool) string {
 // Homebrew formula that is not signed for Apple's Hypervisor: the
 // formula's post-install step signs only its own.
 func VMDriverSigningFix(driver string) string {
-	return "sign " + driver + " with the " + hypervisorEntitlement + " entitlement (codesign), or install OpenShell from its " +
-		GatewayFormula + " Homebrew formula, which signs its own driver"
+	return "sign " + driver + " with the " + hypervisorEntitlement + " entitlement (codesign; with the hardened runtime, --options runtime, also " +
+		HardenedRuntimeExceptions + "), or install OpenShell from its " + GatewayFormula + " Homebrew formula, which signs its own driver"
 }
+
+// HardenedRuntimeExceptions are the two entitlements a re-signing of the
+// MicroVM driver with the hardened runtime needs beside the Hypervisor's:
+// library validation refuses the ad-hoc signed libkrun and libkrunfw the
+// driver embeds, and dyld ignores the DYLD_ variables it points libkrun at
+// libkrunfw with. NVIDIA's driver has no way to avoid either yet
+// (NVIDIA/OpenShell#4772), so the re-signing carries the exceptions.
+const HardenedRuntimeExceptions = "com.apple.security.cs.disable-library-validation and com.apple.security.cs.allow-dyld-environment-variables"
 
 // inFormulaKeg reports whether p lies in the nvidia/openshell/openshell
 // formula's keg under the Homebrew prefix (opt/openshell, or the Cellar
@@ -871,7 +881,7 @@ func (r *doctorRun) vmDiskCheck() Check {
 		c.Detail += fmt.Sprintf("; %s take %s (a start under way, or one that failed: `%s` removes those unchanged for 15 minutes)",
 			plural(n, "half-prepared MicroVM disk", "half-prepared MicroVM disks"), humanBytes(size), pruneCommand)
 	}
-	fix := &Fix{Summary: "free space on this volume: the first start of each harness image uses about 11 GiB while preparing a MicroVM disk in " + dir +
+	fix := &Fix{Summary: "free space on this volume: the first start of each harness image uses about 12 GiB while preparing a MicroVM disk in " + dir +
 		"; prune removes DefenseClaw's superseded harness images and the MicroVM disks prepared from them " +
 		"(a backup or indexing app that holds a removed file open keeps its space until it lets go: `lsof +L1` lists them)",
 		Command: pruneCommand}

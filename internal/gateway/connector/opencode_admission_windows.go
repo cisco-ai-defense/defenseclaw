@@ -14,6 +14,7 @@ import (
 	"path/filepath"
 	"strings"
 
+	"github.com/defenseclaw/defenseclaw/internal/pathidentity"
 	"github.com/defenseclaw/defenseclaw/internal/winpath"
 	"golang.org/x/sys/windows"
 )
@@ -160,7 +161,7 @@ func validateOpenCodeExecutableEvidence(selected string, authority openCodeExecu
 		return errors.New("selected executable package identity is not verified")
 	}
 
-	before, err := os.Lstat(selected)
+	before, err := pathidentity.LstatPinned(selected)
 	if err != nil {
 		return fmt.Errorf("inspect selected executable: %w", err)
 	}

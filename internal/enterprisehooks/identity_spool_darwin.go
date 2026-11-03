@@ -13,23 +13,17 @@
 package enterprisehooks
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
 	"os/exec"
-	"strconv"
 	"strings"
 	"time"
-
-	"github.com/defenseclaw/defenseclaw/internal/useridentity"
 )
 
-// On macOS the root enumerator reads the account's Open Directory record
-// (with the Platform SSO login UPN of AltSecurityIdentities), the AD binding
-// and the device Platform SSO configuration
-// (useridentity.ParseMacOSDirectoryFacts).
-
-const macOSIdentityToolTimeout = 10 * time.Second
+// The macOS identity facts are collected by collectMacOSIdentityRecord
+// (identity_spool_macos.go) with the root-owned tools below.
 
 // bindIdentitySpoolUPN binds nothing on macOS: the guardian keeps no
 // InfoPipe UPN there (KeepVerifiedInfoPipeUPN needs an SSSD domain).
@@ -38,30 +32,7 @@ func bindIdentitySpoolUPN(context.Context, int, string, string, bool) UPNBinding
 }
 
 func collectIdentitySpoolRecord(ctx context.Context, account IdentitySpoolAccount, now time.Time) (IdentitySpoolRecord, error) {
-	name := strings.TrimSpace(account.User)
-	if name == "" || strings.ContainsAny(name, "/\x00\n") || strings.HasPrefix(name, "-") {
-		return IdentitySpoolRecord{}, errors.New("account has no usable name")
-	}
-	in := useridentity.MacOSDirectoryInputs{
-		DSCL: runMacOSIdentityTool(ctx, "/usr/bin/dscl", "/Search", "-read", "/Users/"+name, "UniqueID", "AuthenticationAuthority",
-			"OriginalNodeName", "AltSecurityIdentities", "dsAttrTypeNative:userPrincipalName"),
-		DSConfigAD: runMacOSIdentityTool(ctx, "/usr/sbin/dsconfigad", "-show"),
-		AppSSO:     runMacOSIdentityTool(ctx, "/usr/bin/app-sso", "platform", "-s"),
-	}
-	if in.DSCL == "" {
-		return IdentitySpoolRecord{}, errors.New("dscl returned no record")
-	}
-	if err := checkMacOSRecordUID(in.DSCL, account.UID); err != nil {
-		return IdentitySpoolRecord{}, err
-	}
-	facts := useridentity.ParseMacOSDirectoryFacts(in, now)
-	return IdentitySpoolRecord{
-		Key:           strconv.Itoa(account.UID),
-		User:          name,
-		UpdatedAt:     now,
-		AccountDomain: facts.AccountDomain,
-		Facts:         facts,
-	}, nil
+	return collectMacOSIdentityRecord(ctx, runMacOSIdentityTool, account, now)
 }
 
 // DirectoryCachesHoldOutageAnswers: Open Directory keeps serving the answers
@@ -113,17 +84,28 @@ func FlushDirectoryCaches(ctx context.Context) error {
 	return errors.Join(errs...)
 }
 
-func runMacOSIdentityTool(ctx context.Context, tool string, args ...string) string {
+// runMacOSIdentityTool runs a root-owned identity tool and returns its
+// bounded stdout and stderr and its exit code: the domain node read tells
+// an account gone from the domain (eDSRecordNotFound, on stderr) from a
+// domain that does not answer (macOSNodeUnanswered).
+func runMacOSIdentityTool(ctx context.Context, timeout time.Duration, tool string, args ...string) macOSToolResult {
 	if trustedIdentityTool(tool) == "" {
-		return ""
+		return macOSToolResult{Code: -1}
 	}
-	runCtx, cancel := context.WithTimeout(ctx, macOSIdentityToolTimeout)
+	runCtx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
 	cmd := exec.CommandContext(runCtx, tool, args...)
 	cmd.Env = []string{"PATH=/usr/bin:/bin:/usr/sbin:/sbin", "LC_ALL=C"}
+	var stderr bytes.Buffer
+	cmd.Stderr = &stderr
 	out, err := cmd.Output()
-	if err != nil && len(out) == 0 {
-		return ""
+	result := macOSToolResult{Stdout: boundedOutput(out), Stderr: boundedOutput(stderr.Bytes())}
+	if err != nil {
+		result.Code = -1
+		var exit *exec.ExitError
+		if errors.As(err, &exit) && runCtx.Err() == nil {
+			result.Code = exit.ExitCode()
+		}
 	}
-	return boundedOutput(out)
+	return result
 }

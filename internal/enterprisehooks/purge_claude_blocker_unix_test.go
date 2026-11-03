@@ -67,7 +67,7 @@ func TestPurgeUserStateKeptRemovesTheEnrollmentClaudeBlocker(t *testing.T) {
 
 // Only the exact blocker goes: the account's own script, a changed copy and
 // a link to the blocker stay.
-func TestRemovePersonalClaudeHookBlockerRemovesOnlyTheExactBlocker(t *testing.T) {
+func TestUnblockPersonalClaudeHookRemovesOnlyTheExactBlocker(t *testing.T) {
 	skipIfRoot(t)
 	for _, tc := range []struct {
 		name, body string
@@ -94,9 +94,9 @@ func TestRemovePersonalClaudeHookBlockerRemovesOnlyTheExactBlocker(t *testing.T)
 					t.Fatal(err)
 				}
 			}
-			removed, err := RemovePersonalClaudeHookBlocker(dataDir)
+			removed, _, err := UnblockPersonalClaudeHook(dataDir)
 			if err != nil || removed != tc.want {
-				t.Fatalf("RemovePersonalClaudeHookBlocker = %t, %v; want %t", removed, err, tc.want)
+				t.Fatalf("UnblockPersonalClaudeHook = %t, %v; want %t", removed, err, tc.want)
 			}
 			_, statErr := os.Lstat(script)
 			if gone := errors.Is(statErr, os.ErrNotExist); gone != tc.want {
@@ -104,7 +104,7 @@ func TestRemovePersonalClaudeHookBlockerRemovesOnlyTheExactBlocker(t *testing.T)
 			}
 		})
 	}
-	if removed, err := RemovePersonalClaudeHookBlocker(filepath.Join(newTestHome(t), ".defenseclaw")); removed || err != nil {
+	if removed, _, err := UnblockPersonalClaudeHook(filepath.Join(newTestHome(t), ".defenseclaw")); removed || err != nil {
 		t.Fatalf("missing script: %t, %v", removed, err)
 	}
 }
@@ -113,7 +113,7 @@ func TestRemovePersonalClaudeHookBlockerRemovesOnlyTheExactBlocker(t *testing.T)
 // cannot read, for example made by root with sudo, holds no blocker the
 // account wrote: the unblock is not a failure, so a managed uninstall
 // completes and the guardian's cleanup pass stays clean. The folder stays.
-func TestRemovePersonalClaudeHookBlockerSkipsWhatTheAccountCannotRead(t *testing.T) {
+func TestUnblockPersonalClaudeHookSkipsWhatTheAccountCannotRead(t *testing.T) {
 	skipIfRoot(t)
 	for _, tc := range []struct {
 		name  string
@@ -132,9 +132,9 @@ func TestRemovePersonalClaudeHookBlockerSkipsWhatTheAccountCannotRead(t *testing
 				t.Fatal(err)
 			}
 			t.Cleanup(func() { _ = os.Chmod(locked, 0o700) })
-			removed, err := RemovePersonalClaudeHookBlocker(dataDir)
+			removed, _, err := UnblockPersonalClaudeHook(dataDir)
 			if err != nil || removed {
-				t.Fatalf("RemovePersonalClaudeHookBlocker = %t, %v; want false, nil", removed, err)
+				t.Fatalf("UnblockPersonalClaudeHook = %t, %v; want false, nil", removed, err)
 			}
 			if err := os.Chmod(locked, 0o700); err != nil {
 				t.Fatal(err)

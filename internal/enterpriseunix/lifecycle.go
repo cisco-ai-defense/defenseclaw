@@ -94,10 +94,9 @@ type Options struct {
 	// that the change wakes cannot interleave with it. A Mutate error fails
 	// the run before anything is applied.
 	Mutate func(ctx context.Context) error
-	// MutateUndo puts back what Mutate changed when the run then refuses
-	// the config before it changes anything (Result.ConfigRefused): a
-	// refused secret set left the new credential on disk while the result
-	// said the refused config changed nothing (GAP-1734).
+	// MutateUndo puts back what Mutate changed when the run refuses the
+	// config or fails to apply it. A failed transaction must not leave a
+	// removed credential absent after the previous deployment is restored.
 	MutateUndo func(ctx context.Context) error
 	// Bundle is a signed policy bundle (.dcbundle file or directory, an
 	// absolute path) that an ensure stages, verifies, applies, confirms and
@@ -204,6 +203,8 @@ type lifecycle struct {
 	// needs it, or its home was not available). Their session-facts cache
 	// stays with that state (GAP-0582).
 	perUserStateKept map[string]bool
+	// ownInstallRestored names accounts whose own files the purge put back.
+	ownInstallRestored map[string]bool
 	// perUserRemoved counts the per-user hook registrations an uninstall
 	// removed, for its summary.
 	perUserRemoved int
@@ -263,6 +264,9 @@ type lifecycle struct {
 	sandboxesKept       []string
 	sandboxStoreKept    bool
 	openshellRecordKept bool
+	// accountChanges are the sandbox changes of this run's settle, per
+	// line (openshellChange, flushAccountChanges).
+	accountChanges []accountChange
 	// configWrittenDuringRun holds a config.yaml another writer put in place
 	// while a transaction of this run planned its own (applyFiles kept it).
 	// A rollback restores the earlier file, so the newer one is put back
@@ -489,6 +493,19 @@ func (l *lifecycle) run(ctx context.Context) (failure int) {
 	if readOnly {
 		return l.readOnly(ctx)
 	}
+	if l.opts.Action == ActionEnsure && l.opts.Reason == ApplyTriggerReason && l.opts.ConfigFile == "" && env.ApplyTriggerDebounce != nil {
+		waitCtx, stop := l.untilInterrupted(ctx)
+		err := env.ApplyTriggerDebounce(waitCtx, env.P(env.Layout.ConfigPath))
+		stop()
+		if err != nil {
+			if l.interrupted() || errors.Is(err, context.Canceled) {
+				r.AddError(codeInterrupted, "the run stopped while it waited for the config push to settle; nothing was changed")
+			} else {
+				r.AddError(codeState, "wait for config push: "+err.Error())
+			}
+			return 0
+		}
+	}
 	// Before the lock, which another run can hold for the readiness timeout.
 	env.closePrivateDirs(ctx)
 
@@ -665,13 +682,16 @@ func (l *lifecycle) run(ctx context.Context) (failure int) {
 		}
 		if undo := l.opts.MutateUndo; undo != nil {
 			defer func() {
-				if !r.ConfigRefused {
+				applyFailed := hasMessageCode(r.Errors, codeApply)
+				if !r.ConfigRefused && !applyFailed {
 					return
 				}
 				resume := l.pauseApplyTrigger(ctx)
 				defer resume()
 				if err := undo(ctx); err != nil {
-					r.AddError(codeChange, "the config was refused, and the change made before the check could not be put back: "+err.Error())
+					r.AddError(codeChange, "the protected-state change could not be put back after the failed apply: "+err.Error())
+				} else if applyFailed {
+					r.AddWarning(codeChange, "the protected-state change was put back after apply failed")
 				}
 			}()
 		}
@@ -1257,7 +1277,7 @@ func (e *Env) archivePaths(archive string, paths []string) error {
 		}
 		return nil
 	}()
-	closeErr := errors.Join(tw.Close(), gz.Close(), file.Sync(), file.Close())
+	closeErr := errors.Join(tw.Close(), gz.Close(), syncFile(file), file.Close())
 	if walkErr != nil {
 		_ = os.Remove(archive)
 		return walkErr
@@ -4047,6 +4067,11 @@ func (l *lifecycle) uninstall(ctx context.Context, record *Deployment) int {
 	// the deployment record, the config and the state for a rerun, or for
 	// an ensure that restores the deployment.
 	removeState := l.opts.Purge || (!l.opts.KeepState && len(errs) == 0)
+	// The gateway's clean-session entries are never kept, also not with
+	// --keep-state: the next gateway writes them again after an allow.
+	if err := os.RemoveAll(env.P(managed.ForeignHookCleanDir(env.Layout.DataDir))); err != nil {
+		errs = append(errs, err)
+	}
 	if removeState {
 		// The MDM wrapper's rotation journal goes with the credentials it
 		// can put back: --keep-state and a failed uninstall keep both, so
@@ -4543,6 +4568,10 @@ func (l *lifecycle) removePerUserRegistrations(ctx context.Context) bool {
 	// with a blocker; the uninstall removed it, and the account's own hook
 	// does not guard Claude Code until its owner sets it up again.
 	for _, user := range report.OwnInstallRestored {
+		if l.ownInstallRestored == nil {
+			l.ownInstallRestored = map[string]bool{}
+		}
+		l.ownInstallRestored[user] = true
 		r.Changes = append(r.Changes, fmt.Sprintf("put back the own per-user DefenseClaw files of user %s that the enrollment had changed (hook scripts and hook settings in ~/.defenseclaw/hooks, connector backups, hook contract lock, and the agent configs those backups name), byte for byte as they were before the managed deployment", user))
 	}
 	for _, entry := range report.OwnInstallKeptChanged {
@@ -4584,7 +4613,7 @@ func purgedUserChange(user string, detail purgedUserDetail) string {
 	if detail.Kept {
 		// A machine uninstall never deletes or moves an account's own
 		// data (GAP-0727, owner 2026-10-23).
-		return fmt.Sprintf("kept the DefenseClaw per-user data of user %s (~/.defenseclaw) as it is: it holds the account's own DefenseClaw install from before the managed deployment (config, secrets, audit history, policies), which a machine uninstall never deletes or moves; its owner can remove it", user)
+		return fmt.Sprintf("kept the DefenseClaw per-user data of user %s (~/.defenseclaw) and its per-user binaries in ~/.local/bin as they are: they hold the account's own DefenseClaw install (its program, and any config, secrets, audit history or policies), which a machine uninstall never deletes or moves; its owner can remove it", user)
 	}
 	switch {
 	case detail.Data && detail.Binaries:

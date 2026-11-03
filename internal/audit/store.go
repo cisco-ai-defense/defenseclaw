@@ -284,6 +284,13 @@ type Store struct {
 	// observationGroup groups concurrent correlation observation writes
 	// into one transaction (CorrelationRepository.RecordObservations).
 	observationGroup writeGroup
+	// connectorInstances holds the connector instances this store resolved
+	// (connectorInstanceKey -> ConnectorInstance), so a hook call whose
+	// instance needs no change does not take the store's one connection to
+	// read it again (rel-1-0-6 GAP-0381). Only this store writes the table
+	// (resolveConnectorInstance, UpsertConnectorInstance); an upsert and a
+	// failed occurrence forget every entry.
+	connectorInstances sync.Map
 	// callGroup groups the flushes of concurrent hook calls' write batches
 	// into one transaction (CallWriteBatch).
 	callGroup writeGroup
@@ -404,9 +411,9 @@ func (s *Store) groupedTxBusyObservabilityV8() SQLiteBusyObservabilityV8 {
 //   - temp_store=MEMORY         spill temp tables to RAM instead of
 //     disk; eliminates a common contention
 //     source on writes that allocate temp.
-//   - mmap_size                 map up to 256 MB of the DB into the
-//     process address space for read-heavy queries (audit views, exports),
-//     except on Windows (auditMmapSizeBytes).
+//   - mmap_size=0               never map audit.db into the process; pages
+//     are read into the page cache above (auditMmapSizeBytes). Secure
+//     Client keeps main's 256 MiB map (secureClientMmapSizeBytes).
 //   - foreign_keys=ON           defenseclaw relies on the FK between
 //     findings and scan_results; turning
 //     this off at the DSN level would be a
@@ -427,36 +434,66 @@ var auditMandatoryIntegerPragmas = [...]auditIntegerPragma{
 	{name: "foreign_keys", dsnValue: "ON", want: 1},
 }
 
-var auditPragmas = buildAuditPragmas()
+var (
+	auditPragmas = buildAuditPragmas(auditMmapSizeBytes)
+	// secureClientAuditPragmas keep main's memory map on a Secure Client host
+	// (#1092): 256 MiB, 0 on Windows (secureClientMmapSizeBytes).
+	secureClientAuditPragmas = buildAuditPragmas(secureClientMmapSizeBytes())
+)
 
-func buildAuditPragmas() string {
+// auditPragmasFor is the pragma set of a store's connections.
+func auditPragmasFor(secureClient bool) string {
+	if secureClient {
+		return secureClientAuditPragmas
+	}
+	return auditPragmas
+}
+
+func buildAuditPragmas(mmapSize int64) string {
 	var result strings.Builder
 	result.WriteString("?_pragma=journal_mode(WAL)")
 	for _, pragma := range auditMandatoryIntegerPragmas {
 		fmt.Fprintf(&result, "&_pragma=%s(%s)", pragma.name, pragma.dsnValue)
 	}
-	fmt.Fprintf(&result, "&_pragma=mmap_size(%d)", auditMmapSizeBytes())
+	fmt.Fprintf(&result, "&_pragma=mmap_size(%d)", mmapSize)
 	return result.String()
 }
 
-// auditMmapSizeBytes is the mmap_size of every audit connection: 256 MiB,
-// and 0 on Windows. On Windows a FlushFileBuffers of the memory-mapped
-// audit.db cost about as much with a few dirty pages as with many and grew
-// with the database: 120 ms at about 100 MB and 500 ms at 1.2 GB under a
-// 10 calls/s hook flood, while the same sync of the WAL file, which SQLite
-// does not map, took about 10 ms at 30 GB. The checkpoint that lets SQLite
-// restart the log ends with that database sync, so it never fit in the WAL
-// guard's hold of the writer, the log was never restarted and the WAL file
-// grew past 12 GB (rel-1-0-3 GAP-0247, GAP-0136). Windows reads the pages
-// through the file cache instead.
-func auditMmapSizeBytes() int64 {
+// auditMmapSizeBytes is the mmap_size of every audit connection outside
+// Secure Client: 0, so audit.db is never mapped into the gateway.
+//
+// Windows: a FlushFileBuffers of the memory-mapped audit.db cost about as much
+// with a few dirty pages as with many and grew with the database: 120 ms at
+// about 100 MB and 500 ms at 1.2 GB under a 10 calls/s hook flood, while the
+// same sync of the WAL file, which SQLite does not map, took about 10 ms at
+// 30 GB. The checkpoint that lets SQLite restart the log ends with that
+// database sync, so it never fit in the WAL guard's hold of the writer, the
+// log was never restarted and the WAL file grew past 12 GB (rel-1-0-3
+// GAP-0247, GAP-0136).
+//
+// Linux and macOS: the 256 MiB map they had kept every page a connection read
+// through it resident in the gateway. The startup quick_check read the whole
+// store that way, and on Linux the kernel maps whole page-cache folios on a
+// fault, so the gateway's RSS grew with the store about 1 MiB per MiB up to
+// the map size: 215, 243 and 264 MiB on a 30, 57 and 85 MB store on macOS,
+// 198, 224 and 251 MiB on a 27, 53 and 79 MB store on Linux (rel-1-0-6
+// GAP-0327). Without the map, the same 80 MB store on Linux idled at 195
+// instead of 272 MiB, with hook latency the same or lower (idle p50 55 against
+// 56-57 ms, p95 61-63 against 66-76 ms, burst-32 p95 671-701 against
+// 676-707 ms). The page cache the pragmas set (cache_size) bounds what a
+// connection keeps.
+const auditMmapSizeBytes = 0
+
+// secureClientMmapSizeBytes is main's mmap_size, which a Secure Client host
+// keeps (#1092): 256 MiB, and 0 on Windows (rel-1-0-3 GAP-0247, above).
+func secureClientMmapSizeBytes() int64 {
 	if runtime.GOOS == "windows" {
 		return 0
 	}
 	return 256 << 20
 }
 
-// openSQLite opens a SQLite connection with the audit-tier hardening
+// openSQLiteWithPragmas opens a SQLite connection with the audit-tier hardening
 // applied (DSN pragmas + a single-connection pool). Sharing this
 // helper between NewStore and the upcoming judge_body_store keeps
 // the contention guarantees in lockstep.
@@ -470,10 +507,6 @@ func auditMmapSizeBytes() int64 {
 // audit write completes in microseconds; if read latency ever
 // becomes a problem, we can introduce a separate read-only pool
 // without touching this hot path.
-func openSQLite(dbPath string) (*sql.DB, error) {
-	return openSQLiteWithPragmas(dbPath, auditPragmas)
-}
-
 func openSQLiteWithPragmas(dbPath, pragmas string) (*sql.DB, error) {
 	db, err := sql.Open("sqlite", dbPath+pragmas)
 	if err != nil {
@@ -490,6 +523,7 @@ func NewStore(dbPath string, opts ...StoreOption) (*Store, error) {
 }
 
 func newStoreWithHooks(dbPath string, hooks auditDBPathHooks, opts ...StoreOption) (*Store, error) {
+	hooks.secureClient = secureClientStoreOptions(opts)
 	db, identity, pathGuard, err := openHardenedAuditSQLiteWithIdentity(dbPath, hooks)
 	if err != nil {
 		return nil, err
@@ -503,6 +537,15 @@ func newStoreWithHooks(dbPath string, hooks auditDBPathHooks, opts ...StoreOptio
 
 // StoreOption configures a Store when it is opened.
 type StoreOption func(*Store)
+
+// StoreOptions are the options a store of the same deployment opens with
+// (WithSecureClientSchema), for a store opened beside this one.
+func (s *Store) StoreOptions() []StoreOption {
+	if s != nil && s.secureClientSchema {
+		return []StoreOption{WithSecureClientSchema()}
+	}
+	return nil
+}
 
 // WithSecureClientSchema keeps audit.db identical to main's on a Secure
 // Client host: the indexes no query reads stay (#1092, GAP-0253). Every
@@ -2210,7 +2253,7 @@ func (s *Store) Init() error {
 			return fmt.Errorf("audit: mandatory event-history column %s is missing", column)
 		}
 	}
-	if err := ensureRetentionTimestampInfrastructure(s.db); err != nil {
+	if err := ensureRetentionTimestampInfrastructure(s.db, !s.secureClientSchema); err != nil {
 		return fmt.Errorf("audit: verify event timestamp retention infrastructure: %w", err)
 	}
 	for _, table := range []string{
@@ -2442,6 +2485,16 @@ func (s *Store) proveDurableWrite(ctx context.Context) error {
 	return nil
 }
 
+// storeMigrationTx is the transaction a store's migration runs in; it tells a
+// migration that installs a schema object whose form depends on the store
+// (the retention insert trigger) which form this store keeps.
+type storeMigrationTx struct {
+	*sql.Tx
+	secureClient bool
+}
+
+func (tx storeMigrationTx) secureClientMigration() bool { return tx.secureClient }
+
 // applyMigration runs a single migration inside a transaction so that both the
 // DDL and the schema_version bump are atomic. On failure the transaction is
 // rolled back and the version remains unchanged, making retries safe.
@@ -2452,7 +2505,7 @@ func (s *Store) applyMigration(ver int, m migration) error {
 	}
 	defer tx.Rollback() //nolint:errcheck
 
-	if err := m.apply(tx); err != nil {
+	if err := m.apply(storeMigrationTx{Tx: tx, secureClient: s.secureClientSchema}); err != nil {
 		return fmt.Errorf("audit: migration %d (%s): %w", ver, m.description, err)
 	}
 	if _, err := txExecContextObserved(context.Background(), tx, "migration_version_insert", s.sqliteBusyObservabilityV8(), `INSERT INTO schema_version (version, applied_at) VALUES (?, ?)`,
@@ -2658,8 +2711,8 @@ func (s *Store) LogEvent(e Event) error {
 			run_id, trace_id, request_id,
 			session_id, turn_id, agent_name, agent_instance_id, policy_id, destination_app, tool_name, tool_id,
 			schema_version, content_hash, generation, binary_version, agent_id, sidecar_instance_id,
-			connector, step_idx, enforced, rule_pack_dir)
-		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+			connector, step_idx, enforced, rule_pack_dir, retention_timestamp_unix_nano)
+		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		e.ID, ts, e.Action, e.Target, e.Actor, e.Details, structuredJSON, e.Severity,
 		nullStr(e.RunID), nullStr(e.TraceID), nullStr(e.RequestID),
 		nullStr(e.SessionID), nullStr(e.TurnID), nullStr(e.AgentName), nullStr(e.AgentInstanceID),
@@ -2667,7 +2720,7 @@ func (s *Store) LogEvent(e Event) error {
 		nullInt(e.SchemaVersion), nullStr(e.ContentHash), nullUint64(e.Generation),
 		nullStr(e.BinaryVersion), nullStr(e.AgentID), nullStr(e.SidecarInstanceID),
 		nullStr(e.Connector), nullInt(e.StepIdx), nullBool(e.Enforced),
-		nullStr(e.RulePackDir),
+		nullStr(e.RulePackDir), retentionInstantOf(ts),
 	)
 	if err != nil {
 		return fmt.Errorf("audit: log event: %w", err)
@@ -4448,7 +4501,8 @@ func (s *Store) QueryNetworkEgressEvents(f NetworkEgressFilter) ([]NetworkEgress
 		query += " AND blocked = ?"
 		args = append(args, blocked)
 	}
-	query += " ORDER BY julianday(timestamp) DESC, timestamp DESC LIMIT ?"
+	// Newest first by the exact instant, insert order on a tie (GAP-0251).
+	query += " ORDER BY " + s.timeOrderForTable("network_egress_events", "", true) + " LIMIT ?"
 	args = append(args, limit)
 
 	rows, err := s.queryDB(context.Background(), "audit", query, args...)
@@ -4679,13 +4733,15 @@ func (s *Store) ListNetworkEgressEvents(limit int, hostname string) ([]NetworkEg
 		rows *sql.Rows
 		err  error
 	)
+	// Newest first by the exact instant, insert order on a tie (GAP-0251).
+	order := s.timeOrderForTable("network_egress_events", "", true)
 	if hostname == "" {
 		rows, err = s.queryDB(context.Background(), "audit",
 			`SELECT id, timestamp, session_id, connector, agent_id, root_agent_id, parent_agent_id, root_session_id, agent_lifecycle_id,
 			        agent_execution_id, user_id, tool_id, hostname, url, http_method, protocol,
 			        policy_outcome, decision_code, blocked, severity, details
 			 FROM network_egress_events
-			 ORDER BY julianday(timestamp) DESC, timestamp DESC LIMIT ?`, limit,
+			 ORDER BY `+order+` LIMIT ?`, limit,
 		)
 	} else {
 		rows, err = s.queryDB(context.Background(), "audit",
@@ -4693,7 +4749,7 @@ func (s *Store) ListNetworkEgressEvents(limit int, hostname string) ([]NetworkEg
 			        agent_execution_id, user_id, tool_id, hostname, url, http_method, protocol,
 			        policy_outcome, decision_code, blocked, severity, details
 			 FROM network_egress_events WHERE hostname = ?
-			 ORDER BY julianday(timestamp) DESC, timestamp DESC LIMIT ?`, hostname, limit,
+			 ORDER BY `+order+` LIMIT ?`, hostname, limit,
 		)
 	}
 	if err != nil {

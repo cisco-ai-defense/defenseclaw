@@ -23,13 +23,20 @@ const slowStartHelperArg = "hookexec-slow-start-hook"
 
 // GAP-0155, GAP-0167, GAP-0171: the deadline of a tool call runs late on a
 // loaded host (managed Windows blocks came 1.1-1.75 s after a 4 s budget,
-// 5.1-5.75 s in all). The budgets leave that much of the agent's 5 s.
+// 5.1-5.75 s in all). The answer budget and process cap leave margin inside
+// the agent's 5 s limit.
 func TestTheAnswerBudgetsLeaveMarginForALateDeadline(t *testing.T) {
 	if margin := agentHookWait - hookAnswerBudget; margin < 1500*time.Millisecond {
 		t.Fatalf("answer budget %s leaves %s of the agent's %s, want at least 1.5 s for a late deadline", hookAnswerBudget, margin, agentHookWait)
 	}
 	if margin := agentHookWait - hookProgressCeiling; margin < time.Second {
 		t.Fatalf("progress ceiling %s leaves %s of the agent's %s, want at least 1 s", hookProgressCeiling, margin, agentHookWait)
+	}
+	if margin := agentHookWait - managedAnswerDeadlineCap; margin < time.Second {
+		t.Fatalf("managed process cap %s leaves %s of the agent's %s, want at least 1 s", managedAnswerDeadlineCap, margin, agentHookWait)
+	}
+	if managedAnswerDeadlineCap < hookAnswerBudget || managedAnswerDeadlineCap > hookProgressCeiling {
+		t.Fatalf("managed process cap %s must cover answer budget %s and meet progress ceiling %s", managedAnswerDeadlineCap, hookAnswerBudget, hookProgressCeiling)
 	}
 	if hookProgressCeiling < hookAnswerBudget {
 		t.Fatalf("progress ceiling %s is shorter than the answer budget %s", hookProgressCeiling, hookAnswerBudget)
@@ -90,7 +97,7 @@ func TestASlowStartingHookAnswersWithinItsBudgetFromTheProcessStart(t *testing.T
 	if took < slowStart {
 		t.Fatalf("the hook answered after %s, before its slow start of %s ended", took, slowStart)
 	}
-	if limit := hookAnswerBudget + 700*time.Millisecond; took > limit {
+	if limit := managedAnswerDeadlineCap + 700*time.Millisecond; took > limit {
 		t.Fatalf("the slow-start hook blocked %s after its launch, want by %s: the deadline must count from the process start", took, limit)
 	}
 }
@@ -104,7 +111,7 @@ func TestAHookArmedAfterItsDeadlineBlocksAtOnce(t *testing.T) {
 	watchdog := ArmAnswerWatchdog(Options{
 		Connector:         "claudecode",
 		ManagedEnterprise: true,
-		StartedAt:         armed.Add(-hookAnswerBudget - 300*time.Millisecond),
+		StartedAt:         armed.Add(-managedAnswerDeadlineCap - 300*time.Millisecond),
 		Stdout:            answer,
 		Stderr:            answer,
 		Exit:              func(code int) { exited <- code },

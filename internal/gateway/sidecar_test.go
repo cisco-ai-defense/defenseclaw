@@ -83,7 +83,7 @@ func TestResolveActiveConnector_EmptyReturnsError(t *testing.T) {
 	}
 }
 
-func TestTeardownPreviousConnector_CleansCodexTrustedHookState(t *testing.T) {
+func TestRemovedConnectorCleansCodexTrustedHookState(t *testing.T) {
 	dir := testenv.PrivateTempDir(t)
 	configPath := filepath.Join(dir, "codex", "config.toml")
 	if err := os.MkdirAll(filepath.Dir(configPath), 0o755); err != nil {
@@ -116,8 +116,8 @@ func TestTeardownPreviousConnector_CleansCodexTrustedHookState(t *testing.T) {
 	}
 
 	registry := connector.NewDefaultRegistry()
-	if err := teardownPreviousConnector(registry, "claudecode", opts, context.Background()); err != nil {
-		t.Fatalf("teardown previous connector: %v", err)
+	if failed, _ := teardownRemovedConnectorsReport(registry, []string{"codex"}, []string{"claudecode"}, opts, "", context.Background()); len(failed) != 0 {
+		t.Fatalf("teardown removed connector: %v", failed)
 	}
 
 	data, err := os.ReadFile(configPath)

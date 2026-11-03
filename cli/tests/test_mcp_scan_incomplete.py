@@ -113,7 +113,10 @@ def test_local_scan_with_a_failed_analyzer_fails_instead_of_clean() -> None:
         return [_tool_result("ping", ["yara"])]
 
     scanner = SimpleNamespace(scan_mcp_config_file=scan_file)
-    with patch.object(mcp.os, "name", "posix"), pytest.raises(mcp.MCPScanIncompleteError):
+    # Keep the platform override local to the scanner: pathlib and the SDK
+    # must still see the real OS while this POSIX scan branch runs on Windows.
+    posix_os = SimpleNamespace(**{**vars(mcp.os), "name": "posix"})
+    with patch.object(mcp, "os", posix_os), pytest.raises(mcp.MCPScanIncompleteError):
         wrapper._scan_local(scanner, MCPServerEntry(name="decoy", command="npx", args=["pkg"]), [])
 
 
@@ -226,6 +229,4 @@ def test_legacy_http_version_rejection_falls_back_to_initialize() -> None:
         _rpc_error(-32600, "Bad Request: Unsupported protocol version: x", data={"why": 1}), legacy_http=True
     )
     # The upstream shapes keep working.
-    assert Probe._should_fallback_to_initialize(
-        _rpc_error(-32600, "Bad Request: Missing session ID"), legacy_http=True
-    )
+    assert Probe._should_fallback_to_initialize(_rpc_error(-32600, "Bad Request: Missing session ID"), legacy_http=True)

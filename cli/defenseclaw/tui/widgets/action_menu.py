@@ -25,9 +25,9 @@ from textual.app import ComposeResult
 from textual.binding import Binding
 from textual.containers import Vertical
 from textual.message import Message
-from textual.screen import ModalScreen
 from textual.widgets import Button, Static
 
+from defenseclaw.tui.modal import GuardedModalScreen
 from defenseclaw.tui.theme import DEFAULT_TOKENS
 
 
@@ -177,7 +177,7 @@ class ActionMenu(Vertical):
         return self._first_enabled_index()
 
 
-class ActionMenuScreen(ModalScreen[str | None]):
+class ActionMenuScreen(GuardedModalScreen[str | None]):
     """Rounded action menu modal returning the chosen action id."""
 
     CSS = f"""

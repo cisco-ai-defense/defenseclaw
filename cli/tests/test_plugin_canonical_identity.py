@@ -411,3 +411,36 @@ def test_canonical_id_allows_symlinked_system_ancestor(tmp_path):
     source = _plugin(str(alias / "plugin"), "canonical-id")
 
     assert canonical_plugin_id(source) == ("canonical-id", "plugin.json")
+
+
+def test_openclaw_scoped_package_uses_plugin_manifest_id(tmp_path):
+    source = tmp_path / "amazon-bedrock"
+    source.mkdir()
+    (source / "package.json").write_text(json.dumps({"name": "@openclaw/amazon-bedrock-provider"}))
+    (source / "openclaw.plugin.json").write_text(json.dumps({"id": "amazon-bedrock", "name": "Amazon Bedrock"}))
+
+    assert canonical_plugin_id(str(source)) == ("amazon-bedrock", "openclaw.plugin.json")
+
+
+def test_bad_neighbor_does_not_break_openclaw_list_or_allow(app_context):
+    app, _tmp, root = app_context
+    valid = os.path.join(root, "amazon-bedrock")
+    os.makedirs(valid)
+    with open(os.path.join(valid, "package.json"), "w", encoding="utf-8") as handle:
+        json.dump({"name": "@openclaw/amazon-bedrock-provider"}, handle)
+    with open(os.path.join(valid, "openclaw.plugin.json"), "w", encoding="utf-8") as handle:
+        json.dump({"id": "amazon-bedrock", "name": "Amazon Bedrock"}, handle)
+    _plugin(os.path.join(root, "bad-neighbor"), "../unsafe")
+    if os.name != "nt":
+        os.symlink(valid, os.path.join(root, "linked-neighbor"))
+
+    assert resolve_plugin_identity(root, "amazon-bedrock").path == valid
+    with patch("defenseclaw.commands.cmd_plugin._list_openclaw_plugins", return_value=[
+        {"id": "amazon-bedrock", "name": "@openclaw/amazon-bedrock-provider", "enabled": True},
+    ]):
+        for args in (["list"], ["list", "--connector", "openclaw"],
+                     ["allow", "amazon-bedrock", "--connector", "openclaw", "--reason", "reviewed"]):
+            result = CliRunner().invoke(plugin, args, obj=app)
+            assert result.exit_code == 0, (args, result.output)
+            if args[0] == "list":
+                assert "amazon-bedrock" in result.output

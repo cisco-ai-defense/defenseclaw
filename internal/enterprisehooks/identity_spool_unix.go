@@ -19,6 +19,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strconv"
 	"strings"
 	"sync"
@@ -200,6 +201,7 @@ func WriteIdentitySpool(ctx context.Context, dir string, accounts []IdentitySpoo
 			if previous, readErr := ReadIdentitySpoolRecord(dir, strconv.Itoa(account.UID), nil); readErr == nil {
 				previousRecorded = true
 				previousMapless = previous.AccountIncarnation == "" && previous.LegacyOwnerToken == ""
+				record = carryMacOSAccountSID(record, previous)
 				binding := UPNBindingUnknown
 				bind := func(upn string) UPNBinding {
 					// Without a SID on the record it would be checked against,
@@ -562,6 +564,14 @@ func identitySpoolDirectoryDeparture(ctx context.Context, dir, name string) iden
 	return identitySpoolSameIdentity(record, fresh, err == nil)
 }
 
+// identitySpoolMissingSIDIsAnotherIdentity: on Linux SSSD keeps an
+// account's SID through an outage, so a record without one predates the
+// SID (1.0.3 and older) and cannot be bound to the account the lookup now
+// resolves. On macOS a record of 1.0.6 or older has none either, and one
+// written while the domain was away before any pass reached it: there the
+// SID is compared only when both have one (rel-1-0-6:GAP-0275 review).
+var identitySpoolMissingSIDIsAnotherIdentity = runtime.GOOS != "darwin"
+
 // identitySpoolSameIdentity compares a record's directory identity with
 // fresh, what the directory answers for its uid now; complete says every
 // lookup of fresh succeeded. Each fact both name must agree, the account's
@@ -580,7 +590,7 @@ func identitySpoolSameIdentity(record, fresh IdentitySpoolRecord, complete bool)
 		}
 		return identitySpoolDepartureUnknown
 	}
-	if fresh.AccountSID != "" && record.AccountSID == "" {
+	if fresh.AccountSID != "" && record.AccountSID == "" && identitySpoolMissingSIDIsAnotherIdentity {
 		// Older spool records may lack the account's immutable SID. A
 		// matching uid, name and domain cannot bind their UPN to the
 		// account whose SID the current lookup resolved.

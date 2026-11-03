@@ -68,6 +68,12 @@ type UnprotectedAgentLine struct {
 	// Record is the administrator-only unprotected-agents record that names
 	// the accounts the line counts.
 	Record string
+	// Unversioned counts the members whose own run of the copy's launcher
+	// (Launcher, <prefix>/bin/opencode) printed no version: the same copy,
+	// reported by the enumerator as hook_contract_unverified for each of
+	// them (rel-1-0-6 GAP-0380).
+	Unversioned int
+	Launcher    string
 }
 
 func unprotectedAccount(agent UnprotectedAgent) string {
@@ -101,20 +107,76 @@ func (l UnprotectedAgentLine) Message() string {
 	if record := strings.TrimSpace(l.Record); record != "" {
 		where = "the root-only " + record + " names them"
 	}
-	return fmt.Sprintf("%s is a machine-wide copy and is not protected for %d users (%s): %s",
+	message := fmt.Sprintf("%s is a machine-wide copy and is not protected for %d users (%s): %s",
 		name, len(l.Members), where, strings.TrimSpace(first.Reason))
+	if l.Unversioned > 0 {
+		message += fmt.Sprintf(". For %d of these users the version check of %s, the launcher of this same copy, could not read its version (hook_contract_unverified); the same fix covers them",
+			l.Unversioned, l.Launcher)
+	}
+	return message
+}
+
+// openCodeV1Launcher is the launcher npm installs for a V1 package under a
+// global prefix: <prefix>/lib/node_modules/opencode-ai runs as
+// <prefix>/bin/opencode. "" for any other layout.
+func openCodeV1Launcher(install string) string {
+	install = strings.TrimRight(strings.ReplaceAll(strings.TrimSpace(install), `\`, "/"), "/")
+	prefix, ok := strings.CutSuffix(install, "/lib/node_modules/"+openCodeV1Package)
+	if !ok || prefix == "" || !path.IsAbs(prefix) {
+		return ""
+	}
+	return prefix + "/bin/opencode"
+}
+
+// unversionedOpenCodeLauncher is the path of an OpenCode entry the Linux or
+// macOS enumerator reports as hook_contract_unverified only because the
+// account's run of that path printed no version, with nothing else wrong:
+// no version, no install path, no surface, and a reason that is exactly
+// UnixAgentUnversionedReasonPrefix + path + UnixAgentUnversionedContractSuffix.
+// A reason with anything more (a path other accounts can change, a truncated
+// reason) is a different problem and returns "".
+func unversionedOpenCodeLauncher(agent UnprotectedAgent) string {
+	if agent.Code != UnprotectedCodeHookContractUnverified || !strings.EqualFold(strings.TrimSpace(agent.Connector), "opencode") ||
+		strings.TrimSpace(agent.Version) != "" || strings.TrimSpace(agent.InstallPath) != "" || strings.TrimSpace(agent.Surface) != "" {
+		return ""
+	}
+	rest, ok := strings.CutPrefix(agent.Reason, UnixAgentUnversionedReasonPrefix)
+	if !ok {
+		return ""
+	}
+	launcher, ok := strings.CutSuffix(rest, UnixAgentUnversionedContractSuffix)
+	if !ok || !path.IsAbs(launcher) || path.Clean(launcher) != launcher {
+		return ""
+	}
+	return launcher
 }
 
 // CollapseSharedOpenCodeV1 returns one line for each OpenCode V1 copy
 // (same path and version) that two or more accounts can run, and a test for
 // the entries those lines stand for. A copy only one account has, such as one
 // under that account's home, keeps its own per-account entry.
+//
+// Some enumerator paths know an account's OpenCode only by its version and
+// not by a path: the machine's selected version for an account whose home is
+// not inspected, or the version an account's own PATH resolves. Such a
+// pathless V1 entry cannot be a private copy (a private install is found with
+// its path), so it joins the one shared copy of the same version when there
+// is exactly one; with none or several it stays a per-account line, since no
+// copy can be named (rel-1-0-6 GAP-0071, managed RHEL 9.8 rc21).
+//
+// An account whose run of the shared copy's own launcher printed no version
+// (hook_contract_unverified, "installed, but its version could not be read:
+// <prefix>/bin/opencode", nothing else) has the same copy and the same cause:
+// it joins that copy's line, which counts it, instead of printing one line per
+// account (rel-1-0-6 GAP-0380: 9 to 11 such lines on a 14-account RHEL host).
+// Any other hook_contract_unverified entry keeps its own line.
 func CollapseSharedOpenCodeV1(agents []UnprotectedAgent, record string) (lines []UnprotectedAgentLine, collapsed func(UnprotectedAgent) bool) {
 	groups := map[string][]UnprotectedAgent{}
 	var order []string
+	var pathless []UnprotectedAgent
 	seen := map[string]bool{}
 	for _, agent := range agents {
-		if agent.Code != UnprotectedCodeOpenCodeV1 || strings.TrimSpace(agent.InstallPath) == "" || unprotectedAccount(agent) == "" {
+		if agent.Code != UnprotectedCodeOpenCodeV1 || unprotectedAccount(agent) == "" {
 			continue
 		}
 		id := unprotectedAgentIdentity(agent)
@@ -122,6 +184,10 @@ func CollapseSharedOpenCodeV1(agents []UnprotectedAgent, record string) (lines [
 			continue
 		}
 		seen[id] = true
+		if strings.TrimSpace(agent.InstallPath) == "" {
+			pathless = append(pathless, agent)
+			continue
+		}
 		key := sharedOpenCodeV1Key(agent)
 		if _, ok := groups[key]; !ok {
 			order = append(order, key)
@@ -129,13 +195,83 @@ func CollapseSharedOpenCodeV1(agents []UnprotectedAgent, record string) (lines [
 		groups[key] = append(groups[key], agent)
 	}
 	shared := map[string]bool{}
+	sharedByVersion := map[string][]string{}
 	for _, key := range order {
 		if members := groups[key]; len(members) >= 2 {
-			lines = append(lines, UnprotectedAgentLine{Code: UnprotectedCodeOpenCodeV1, Members: members, Record: record})
 			shared[key] = true
+			version := strings.TrimSpace(members[0].Version)
+			sharedByVersion[version] = append(sharedByVersion[version], key)
+		}
+	}
+	foldedVersion := map[string]bool{}
+	for _, agent := range pathless {
+		version := strings.TrimSpace(agent.Version)
+		keys := sharedByVersion[version]
+		if version == "" || len(keys) != 1 {
+			continue
+		}
+		foldedVersion[version] = true
+		account := unprotectedAccount(agent)
+		joined := false
+		for _, member := range groups[keys[0]] {
+			if unprotectedAccount(member) == account {
+				joined = true
+				break
+			}
+		}
+		if !joined {
+			groups[keys[0]] = append(groups[keys[0]], agent)
+		}
+	}
+	sharedByLauncher := map[string][]string{}
+	for _, key := range order {
+		if shared[key] {
+			if launcher := openCodeV1Launcher(groups[key][0].InstallPath); launcher != "" {
+				sharedByLauncher[launcher] = append(sharedByLauncher[launcher], key)
+			}
+		}
+	}
+	unversioned := map[string]int{}
+	foldedUnversioned := map[string]bool{}
+	for _, agent := range agents {
+		launcher := unversionedOpenCodeLauncher(agent)
+		keys := sharedByLauncher[launcher]
+		account := unprotectedAccount(agent)
+		if launcher == "" || len(keys) != 1 || account == "" || foldedUnversioned[account+"\x00"+launcher] {
+			continue
+		}
+		foldedUnversioned[account+"\x00"+launcher] = true
+		unversioned[keys[0]]++
+		joined := false
+		for _, member := range groups[keys[0]] {
+			if unprotectedAccount(member) == account {
+				joined = true
+				break
+			}
+		}
+		if !joined {
+			groups[keys[0]] = append(groups[keys[0]], agent)
+		}
+	}
+	for _, key := range order {
+		if shared[key] {
+			line := UnprotectedAgentLine{Code: UnprotectedCodeOpenCodeV1, Members: groups[key], Record: record}
+			if unversioned[key] > 0 {
+				line.Unversioned, line.Launcher = unversioned[key], openCodeV1Launcher(groups[key][0].InstallPath)
+			}
+			lines = append(lines, line)
 		}
 	}
 	return lines, func(agent UnprotectedAgent) bool {
-		return agent.Code == UnprotectedCodeOpenCodeV1 && shared[sharedOpenCodeV1Key(agent)]
+		if launcher := unversionedOpenCodeLauncher(agent); launcher != "" {
+			return foldedUnversioned[unprotectedAccount(agent)+"\x00"+launcher]
+		}
+		if agent.Code != UnprotectedCodeOpenCodeV1 {
+			return false
+		}
+		if strings.TrimSpace(agent.InstallPath) == "" {
+			return foldedVersion[strings.TrimSpace(agent.Version)]
+		}
+		return shared[sharedOpenCodeV1Key(agent)]
 	}
 }

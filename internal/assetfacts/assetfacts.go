@@ -28,9 +28,12 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"runtime"
 	"sort"
 	"strings"
 	"unicode/utf8"
+
+	"github.com/defenseclaw/defenseclaw/internal/actionfacts"
 )
 
 // Header carries the encoded Facts on a standalone hook request.
@@ -323,22 +326,41 @@ type FolderRef struct {
 	Name string
 	// Manifest is set when the call names the folder's SKILL.md itself.
 	Manifest bool
+	// ExplicitDirectory means a leading static cd fixed the directory for
+	// this reference, so a missing folder must not be resolved in other roots.
+	ExplicitDirectory bool
 }
 
 // SkillFolderRefs lists the skill folders the strings of a tool input reach
 // into: every distinct path with a "skills/<name>" pair of components, in a command
 // line, a file path or a working folder. "~" and $HOME expand to home and
 // a relative path resolves against cwd.
-func SkillFolderRefs(input any, home, cwd string) []FolderRef {
+func SkillFolderRefs(input any, home, cwd string, caller ...string) []FolderRef {
+	account := ""
+	if len(caller) > 0 {
+		account = caller[0]
+	}
+	return skillFolderRefsForCaller(input, home, cwd, account, os.Geteuid(), os.Getegid())
+}
+
+// SkillFolderRefsForPeer resolves a managed hook request using the kernel
+// credentials of the caller, rather than the gateway service account.
+func SkillFolderRefsForPeer(input any, home, cwd, caller string, uid, gid int) []FolderRef {
+	return skillFolderRefsForCaller(input, home, cwd, caller, uid, gid)
+}
+
+func skillFolderRefsForCaller(input any, home, cwd, account string, uid, gid int) []FolderRef {
 	var values []string
 	collectStrings(input, 0, &values)
 	seen := map[string]int{}
 	var refs []FolderRef
-	for _, value := range values {
+	add := func(value, dir string, explicit bool) {
 		for _, token := range commandPathTokens(value) {
-			for _, ref := range skillFolderRefs(token, home, cwd) {
+			for _, ref := range skillFolderRefs(token, home, dir, account) {
+				ref.ExplicitDirectory = explicit
 				if index, ok := seen[ref.Dir]; ok {
 					refs[index].Manifest = refs[index].Manifest || ref.Manifest
+					refs[index].ExplicitDirectory = refs[index].ExplicitDirectory && explicit
 					continue
 				}
 				seen[ref.Dir] = len(refs)
@@ -346,7 +368,117 @@ func SkillFolderRefs(input any, home, cwd string) []FolderRef {
 			}
 		}
 	}
+	for _, value := range values {
+		type position struct {
+			value    string
+			dir      string
+			explicit bool
+		}
+		positions := []position{{value: value, dir: cwd}}
+		for i := 0; i < 8; i++ {
+			var nextPositions []position
+			changed := false
+			for _, current := range positions {
+				prefix, rest, next, sequential, certain, ok := leadingSkillDirectoryChange(current.value, current.dir, home, account, uid, gid)
+				if !ok {
+					nextPositions = append(nextPositions, current)
+					continue
+				}
+				changed = true
+				add(prefix, current.dir, current.explicit)
+				nextPositions = append(nextPositions, position{rest, next, true})
+				if sequential && !certain {
+					// A sequential successor runs in cwd when cd fails. A
+					// gateway unable to prove entry must check both paths.
+					nextPositions = append(nextPositions, position{rest, current.dir, current.explicit})
+				}
+			}
+			if !changed {
+				positions = nextPositions
+				break
+			}
+			unique := make(map[position]bool, len(nextPositions))
+			positions = positions[:0]
+			for _, next := range nextPositions {
+				if !unique[next] {
+					unique[next] = true
+					positions = append(positions, next)
+				}
+			}
+		}
+		for _, current := range positions {
+			add(current.value, current.dir, current.explicit)
+		}
+	}
 	return refs
+}
+
+// leadingSkillDirectoryChange follows a literal cd before another command.
+// A command after a failed cd in a sequential list runs in the original dir.
+func leadingSkillDirectoryChange(value, cwd, home, caller string, uid, gid int) (prefix, rest, dir string, sequential, certain, ok bool) {
+	value = strings.TrimSpace(value)
+	if !strings.HasPrefix(value, "cd ") && !strings.HasPrefix(value, "cd\t") {
+		return "", "", "", false, false, false
+	}
+	var quote rune
+	escaped := false
+	for i, ch := range value {
+		if escaped {
+			escaped = false
+			continue
+		}
+		if ch == '\\' && quote != '\'' {
+			escaped = true
+			continue
+		}
+		switch {
+		case ch == '\'' || ch == '"':
+			switch quote {
+			case 0:
+				quote = ch
+			case ch:
+				quote = 0
+			}
+		case quote == 0 && (ch == ';' || ch == '\n' ||
+			ch == '&' && i+1 < len(value) && value[i+1] == '&'):
+			prefix = value[:i]
+			words := commandPathTokens(prefix)
+			if len(words) != 2 || words[0] != "cd" || words[1] == "-" ||
+				strings.ContainsAny(words[1], "*?[]{}$`") {
+				return "", "", "", false, false, false
+			}
+			dir = words[1]
+			if dir == "~" {
+				dir = home
+			} else if strings.HasPrefix(dir, "~/") {
+				dir = filepath.Join(home, dir[2:])
+			} else if caller != "" && strings.HasPrefix(dir, "~"+caller+"/") {
+				dir = filepath.Join(home, strings.TrimPrefix(dir, "~"+caller+"/"))
+			}
+			if dir == "" || strings.HasPrefix(dir, "~") {
+				return "", "", "", false, false, false
+			}
+			if !filepath.IsAbs(dir) {
+				dir = filepath.Join(cwd, dir)
+			}
+			separatorWidth := 1
+			if ch == '&' {
+				separatorWidth = 2
+			}
+			original := dir
+			resolved, err := filepath.EvalSymlinks(dir)
+			if err == nil {
+				dir = resolved
+			}
+			if err == nil {
+				if info, statErr := os.Stat(dir); statErr == nil && info.IsDir() {
+					certain = callerCanEnterDirectory(original, uid, gid) && callerCanEnterDirectory(dir, uid, gid)
+				}
+			}
+			return prefix, value[i+separatorWidth:], filepath.Clean(dir), ch != '&', certain, true
+		}
+	}
+	return "", "", "", false, false, false
 }
 
 func collectStrings(value any, depth int, out *[]string) {
@@ -450,17 +582,37 @@ func commandPathTokens(value string) []string {
 	return tokens
 }
 
-func skillFolderRefs(token, home, cwd string) []FolderRef {
+// msysDriveSpelling spells a Git Bash drive mount (/c/x, /cygdrive/c/x,
+// and //c/x) as the drive path C:/x on Windows, where Git Bash, the shell
+// Claude Code and other agents run, maps it to that drive: the deny list
+// then sees one name for the folder whatever spelling a call uses
+// (rel-1-0-6:GAP-0299). //c/x is read as the drive too, the cautious
+// reading for a deny list. Elsewhere the path is returned unchanged.
+func msysDriveSpelling(path string) string {
+	if runtime.GOOS != "windows" || !strings.HasPrefix(path, "/") {
+		return path
+	}
+	if len(path) > 3 && path[1] == '/' && path[3] == '/' {
+		path = path[1:]
+	}
+	return actionfacts.MSYSDrivePath(path)
+}
+
+func skillFolderRefs(token, home, cwd, caller string) []FolderRef {
 	if !strings.ContainsAny(token, "/\\") {
 		return nil
 	}
 	path := strings.ReplaceAll(token, "\\", "/")
+	if caller != "" && !strings.ContainsAny(caller, "/\\") && strings.HasPrefix(path, "~"+caller+"/") && home != "" {
+		path = filepath.ToSlash(home) + "/" + strings.TrimPrefix(path, "~"+caller+"/")
+	}
 	for _, prefix := range []string{"~/", "$HOME/", "${HOME}/"} {
 		if strings.HasPrefix(path, prefix) && home != "" {
 			path = filepath.ToSlash(home) + "/" + strings.TrimPrefix(path, prefix)
 			break
 		}
 	}
+	path = msysDriveSpelling(path)
 	// Resolve the entire path before selecting skills/<name> pairs. A
 	// parent segment can otherwise change which skill folders are reached.
 	dir := filepath.FromSlash(path)

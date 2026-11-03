@@ -186,7 +186,7 @@ The harness is claude, codex, copilot, opencode, kiro, hermes
 or antigravity, as far as your organization allows it for you ("defenseclaw sandbox
 policy explain" lists them). The harness gets your terminal; when it exits you get a
 summary, a review of the changed files, and the choice to bring the changes back or
-leave them in the sandbox for pull. Arguments after -- go to the harness.
+leave them in the sandbox for later pull --apply, --branch or --patch-out FILE. Arguments after -- go to the harness.
 
 A headless run in the foreground (--prompt, or the harness's own print flag after --)
 deletes its sandbox when it ends and nothing is left in it to bring back, as --rm

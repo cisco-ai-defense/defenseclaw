@@ -184,6 +184,24 @@ func TestRunWhileAnotherAccountUsesSandboxes(t *testing.T) {
 	}
 }
 
+func TestManagedPortConflictNamesAnOrdinaryProcessInRunAndStatus(t *testing.T) {
+	ta := newTestApp(t, "")
+	ta.daemon.status.Available, ta.daemon.status.Gateway = false, nil
+	ta.daemon.status.Managed = managedStatusFixture()
+	ta.daemon.status.PortConflict = &sandboxapi.PortConflict{Name: "ingress", Port: 18971, Holder: "process"}
+	err := ta.Run(bg, RunOptions{Harness: "claude"})
+	if err == nil || !strings.Contains(err.Error(), "another process") || !strings.Contains(err.Error(), "openshell.ingress_port") ||
+		strings.Contains(err.Error(), "another account is using them") {
+		t.Fatalf("run with ordinary port holder = %v", err)
+	}
+	ta.fresh()
+	ta.printStatus(&ta.daemon.status)
+	if out := ta.output(); !strings.Contains(out, "another process") || !strings.Contains(out, "openshell.ingress_port") ||
+		strings.Contains(out, "another account is using") {
+		t.Fatalf("status with ordinary port holder = %s", out)
+	}
+}
+
 // GAP-0613: an engine the shell names only with DOCKER_HOST answers the
 // doctor but not the sandbox daemon, which uses the account's current
 // Docker context. The doctor warns and the launch refusal says what to do.

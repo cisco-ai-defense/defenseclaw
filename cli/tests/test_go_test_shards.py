@@ -1,6 +1,7 @@
 # Copyright 2026 Cisco Systems, Inc. and its affiliates
 # SPDX-License-Identifier: Apache-2.0
 
+import json
 import sys
 from pathlib import Path
 
@@ -128,6 +129,31 @@ def test_package_mode_splits_a_slow_package_and_covers_every_package_once(tmp_pa
         "TestLightB",
         "TestUnrecorded",
     ]
+
+
+def test_linux_connector_parts_separate_the_ci_timeout_cluster() -> None:
+    root = Path(__file__).resolve().parents[2]
+    timings = json.loads((root / "scripts/test-timings/go-linux.json").read_text(encoding="utf-8"))
+    connector = "github.com/defenseclaw/defenseclaw/internal/gateway/connector"
+    packages = sorted(
+        set(timings["packages"])
+        - {"github.com/defenseclaw/defenseclaw/internal/audit", "github.com/defenseclaw/defenseclaw/internal/gateway"}
+    )
+    shards = partition_packages(packages, 12, timings, root=root)
+    parts = [regex_names(regex) for shard in shards for package, regex in shard if package == connector]
+    assert parts
+
+    # CI run 41444114280 timed out when these measured tests shared one
+    # connector part. Their elapsed time alone exceeded most of its 11 minutes.
+    observed_seconds = {
+        "TestConnectorScopedHookReadFailureClearsGenericEnv": 149.5,
+        "TestShellHookFailureRecordsNameTheOutcomeTheHookApplied": 103.3,
+        "TestShellHookBlockSurvivesHostileEnvironments": 100.1,
+        "TestShellHookLoweredBodyCapOnlyTightens": 73.8,
+        "TestPerUserShellHookOutageOpenOnlyForAnOutage": 63.8,
+        "TestPerUserShellHookOutageFollowsTheConfigNow": 44.2,
+    }
+    assert all(sum(observed_seconds.get(name, 0) for name in part) < 300 for part in parts)
 
 
 OPERATOR_COLLECTOR_PARTS = tuple(

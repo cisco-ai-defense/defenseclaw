@@ -21,6 +21,7 @@ import (
 	"os/exec"
 	"strings"
 	"sync/atomic"
+	"unicode"
 
 	"github.com/defenseclaw/defenseclaw/internal/processutil"
 )
@@ -47,6 +48,28 @@ var keepFullFailureText atomic.Bool
 // unchanged, as main did. The Secure Client profile keeps its scan errors
 // that way (issue #1092).
 func KeepFullFailureText(keep bool) { keepFullFailureText.Store(keep) }
+
+// ScanErrorForAudit keeps scanner diagnostics on one printable line in
+// per-user audit text fields. Secure Client retains its full failure text.
+func ScanErrorForAudit(value string) string {
+	if keepFullFailureText.Load() {
+		return value
+	}
+	return printableScanErrorLine(value)
+}
+
+func printableScanErrorLine(value string) string {
+	value = strings.Map(func(r rune) rune {
+		switch {
+		case unicode.IsSpace(r):
+			return ' '
+		case unicode.IsControl(r) || unicode.Is(unicode.Cf, r):
+			return -1
+		}
+		return r
+	}, value)
+	return strings.Join(strings.Fields(value), " ")
+}
 
 // scannerFailureText is a scanner subprocess's stderr as it is reported to the
 // caller: a Python traceback is cut to its exception line, so interpreter and

@@ -330,13 +330,13 @@ func runSandboxDaemon(ctx context.Context, logw io.Writer) error {
 	logf := func(format string, args ...any) {
 		fmt.Fprintf(logw, "[sandbox-daemon] "+format+"\n", args...)
 	}
-	unavailable := func(cause error) error {
+	unavailable := func(cause error, recovered func(context.Context) bool) error {
 		if ctx.Err() != nil {
 			_ = ln.Close()
 			return nil
 		}
 		logf("sandboxes cannot run now: %v", cause)
-		return gateway.ServeSandboxDaemonUnavailable(ctx, ln, cause)
+		return gateway.ServeSandboxDaemonUnavailable(ctx, ln, cause, recovered)
 	}
 	hookSocket := descriptor.HookSocket
 	if hookSocket == "" {
@@ -348,12 +348,19 @@ func runSandboxDaemon(ctx context.Context, logw io.Writer) error {
 	}
 	relay, err := sandboxrelay.NewClient(sandboxrelay.ClientOptions{SocketPath: hookSocket, TrustedOwners: trusted})
 	if err != nil {
-		return unavailable(fmt.Errorf("the managed gateway's hook socket: %w", err))
+		return unavailable(fmt.Errorf("the managed gateway's hook socket: %w", err), nil)
 	}
 	defer relay.Close()
-	settings, err := sandboxDaemonSettings(ctx, relay)
+	settings, err := sandboxDaemonSettings(ctx, relay, sandboxDaemonSettingsCallTimeout)
 	if err != nil {
-		return unavailable(err)
+		// Once the managed gateway answers the settings again, this daemon
+		// exits and the next command starts one that serves.
+		return unavailable(err, func(ctx context.Context) bool {
+			cctx, cancel := context.WithTimeout(ctx, sandboxDaemonSettingsCallTimeout)
+			defer cancel()
+			_, err := relay.Settings(cctx)
+			return err == nil
+		})
 	}
 	d, err := gateway.NewSandboxDaemon(gateway.SandboxDaemonOptions{
 		RuntimeOptions: gateway.RuntimeOptions{Managed: true, Relay: relay, Settings: &settings},
@@ -373,14 +380,31 @@ func runSandboxDaemon(ctx context.Context, logw io.Writer) error {
 	return err
 }
 
+// sandboxDaemonSettingsCallTimeout bounds one read of the managed settings
+// at start. The relay client allows two minutes for a relayed hook; a
+// managed gateway that took the read and never answered (stopped, hung)
+// held the daemon that long, and every command on its socket waited until
+// the watchdog replaced the gateway: 25 to 51 s (GAP-0608).
+const sandboxDaemonSettingsCallTimeout = 5 * time.Second
+
 // sandboxDaemonSettings reads the managed settings, waiting briefly for a
-// gateway that is still starting.
-func sandboxDaemonSettings(ctx context.Context, relay sandboxrelay.Client) (sandboxrelay.DaemonSettings, error) {
+// gateway that is still starting (its socket refuses or is not there yet).
+// Each read has its own deadline, callTimeout. A gateway that took a read
+// and did not answer within it is not asked again: the daemon answers that
+// sandboxes cannot run now (fail closed) and exits, and the next command
+// starts it again.
+func sandboxDaemonSettings(ctx context.Context, relay sandboxrelay.Client, callTimeout time.Duration) (sandboxrelay.DaemonSettings, error) {
 	deadline := time.Now().Add(30 * time.Second)
 	for {
-		s, err := relay.Settings(ctx)
+		cctx, cancel := context.WithTimeout(ctx, callTimeout)
+		s, err := relay.Settings(cctx)
+		silent := err != nil && ctx.Err() == nil && errors.Is(cctx.Err(), context.DeadlineExceeded)
+		cancel()
 		if err == nil {
 			return s, nil
+		}
+		if silent {
+			return sandboxrelay.DaemonSettings{}, fmt.Errorf("read the managed sandbox settings: the managed gateway did not answer within %s: %w", callTimeout, err)
 		}
 		var refused *sandboxrelay.Error
 		if errors.As(err, &refused) || errors.Is(err, sandboxrelay.ErrSocketUntrusted) || time.Now().After(deadline) {

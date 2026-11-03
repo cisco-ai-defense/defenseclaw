@@ -104,6 +104,16 @@ proves the Cisco AI Defense key before the first prompt.`,
 	}
 )
 
+const linuxFapolicydTarballHelp = `On a tarball host with fapolicyd, trust the staged payload before running
+ensure --no-start: add its entry on first extraction, or update it when its
+files change. After staging, refresh the installed-tree trust:
+
+Fresh install: fapolicyd-cli --file add /opt/defenseclaw/ --trust-file defenseclaw
+Upgrade/rerun: fapolicyd-cli --file update /opt/defenseclaw/ --trust-file defenseclaw
+
+Run fapolicyd-cli --update, check the installed gateway as the service user,
+then run ensure again to start and verify.`
+
 func newUnixLifecycleGroup(name, platform string) *cobra.Command {
 	group := &cobra.Command{
 		Use:   name,
@@ -132,6 +142,9 @@ arguments, 75 another lifecycle run holds the lock.`,
 		},
 	}
 	group.SetFlagErrorFunc(lifecycleFlagError)
+	if name == "linux" {
+		group.Long += "\n\n" + linuxFapolicydTarballHelp
+	}
 	summaries := map[string]string{
 		"install":            "Install the deployment (refuses when one is already installed)",
 		"upgrade":            "Upgrade an installed deployment from a new payload or package",
@@ -270,6 +283,9 @@ func newUnixLifecycleCommand(platform, action, summary string) *cobra.Command {
 	}
 	if action == "status" || action == "verify" {
 		cmd.Long += sandboxRowsHelp
+	}
+	if platform == "linux" && (action == "install" || action == "upgrade" || action == "repair" || action == "ensure") {
+		cmd.Long = summary + ".\n\n" + linuxFapolicydTarballHelp
 	}
 	// An unknown flag or a malformed value fails before RunE; the documented
 	// exit code for it is invalid arguments, not cobra's generic 1.

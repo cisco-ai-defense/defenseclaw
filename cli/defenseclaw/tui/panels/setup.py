@@ -2026,7 +2026,7 @@ def build_setup_sections(
         ConfigSection(
             "Decision Model",
             (
-                _field(cfg, "Enabled", "decision_model.enabled", "bool", hint="Off by default. Runs in front of the LLM judge."),
+                _field(cfg, "Enabled", "decision_model.enabled", "bool", hint="Off by default. Runs in front of the LLM judge, or alone for the connectors below."),
                 _field(cfg, "Model", "decision_model.model", hint="Model name the System One endpoint serves."),
                 _field(cfg, "Endpoint URL", "decision_model.base_url", hint="https, or http to loopback only."),
                 _field(cfg, "Token Env", "decision_model.api_key_env", hint="Env var NAME; default DEFENSECLAW_DECISION_MODEL_KEY."),
@@ -2037,8 +2037,12 @@ def build_setup_sections(
                     cfg, "Confident Block", "decision_model.on_confident_block", "choice", ("escalate", "decide"),
                     "escalate: the judge still checks it (default). decide: it stands.",
                 ),
+                _field(
+                    cfg, "Answers Alone For", "decision_model.hook_connectors",
+                    hint="Connectors (comma list, or *) answered alone where the judge is off.",
+                ),
             ),
-            "Fast first pass in front of the LLM judge; skill scans record its advisory score.",
+            "Fast first pass on tool calls, in front of the LLM judge or alone; skill scans record its advisory score.",
             "Token value: defenseclaw keys set DEFENSECLAW_DECISION_MODEL_KEY. Check: setup decision-model --ping.",
         ),
         ConfigSection(
@@ -5613,7 +5617,7 @@ def sandbox_wizard_fields(
                 hint="Docker Desktop's Linux kernel has no Landlock, so setup switches the OpenShell gateway to "
                 'its MicroVM driver (compute_driver = "vm"; Apple silicon; experimental upstream)'
                 + microvm_restart
-                + ". MicroVMs mount no host folders: the agent works on a copy, and defenseclaw sandbox pull "
+                + ". MicroVMs mount no host folders: the agent works on a copy, and defenseclaw sandbox pull NAME --apply "
                 "brings the changes back. The first run of each image prepares its MicroVM disk (about a minute "
                 "and 5 GB).",
                 visible_when=is_setup,

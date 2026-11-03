@@ -205,7 +205,7 @@ func (a *APIServer) sandboxRelayUnblock(ctx context.Context, reg sandboxreg.Regi
 		host = strings.TrimSuffix(strings.ToLower(strings.TrimSpace(host)), ".")
 		scope := ""
 		for _, d := range saved {
-			if d.Registration != reg.ID && d.Scope != sandboxrelay.DecisionScopeAlways {
+			if !d.AppliesTo(reg) || (d.Registration != reg.ID && d.Scope != sandboxrelay.DecisionScopeAlways) {
 				continue
 			}
 			if !strings.EqualFold(strings.TrimSuffix(strings.TrimSpace(d.Host), "."), host) {

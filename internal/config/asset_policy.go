@@ -605,13 +605,13 @@ func (p AssetTypePolicy) withDefaults(runtime bool) AssetTypePolicy {
 	if strings.TrimSpace(p.Default) == "" {
 		p.Default = "allow"
 	}
-	if runtime {
-		if p.RuntimeDetection.UnknownTerminalMCP == "" {
-			p.RuntimeDetection.UnknownTerminalMCP = AssetPolicyModeObserve
-		}
-		// Keep zero-value compatibility: when the operator did not specify
-		// runtime_detection, the intended v1 default is enabled.
-		if !p.RuntimeDetection.Enabled && !p.RuntimeDetection.TerminalCommands && p.RuntimeDetection.UnknownTerminalMCP == AssetPolicyModeObserve {
+	if runtime && p.RuntimeDetection.UnknownTerminalMCP == "" {
+		// A zero-value struct that never went through config load (the
+		// loader always fills unknown_terminal_mcp): the default is on. A
+		// loaded config that sets enabled and terminal_commands to false is
+		// the operator's off switch and is kept (GAP-0947).
+		p.RuntimeDetection.UnknownTerminalMCP = AssetPolicyModeObserve
+		if !p.RuntimeDetection.Enabled && !p.RuntimeDetection.TerminalCommands {
 			p.RuntimeDetection.Enabled = true
 			p.RuntimeDetection.TerminalCommands = true
 		}

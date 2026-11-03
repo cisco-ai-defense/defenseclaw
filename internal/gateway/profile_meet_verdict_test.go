@@ -9,6 +9,7 @@ import (
 	"regexp"
 	"slices"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -54,7 +55,12 @@ func meetVerdictFixtureSelected(t *testing.T, a, b config.GuardrailProfile, aRul
 	}
 	set.missing = nil
 	api := &APIServer{scannerCfg: cfg, health: NewSidecarHealth()}
-	api.guardrailProfiles.set.Store(set)
+	// Publish the fixture's set as a gateway does and put the process-wide
+	// set back after: a set another test's API server had left there was
+	// resolved instead on later -count runs (rel-1-0-6 GAP-0335).
+	previous := liveGuardrailProfiles.Load()
+	t.Cleanup(func() { liveGuardrailProfiles.Store(previous) })
+	api.setGuardrailProfiles(set)
 	subject := context.WithValue(t.Context(), testVerifiedSubjectKey{}, identityTestSubject(p, p.providers[0], stateProven, true))
 	ctx := api.withGuardrailProfileDecision(withProfilePath(subject, profilePathHook), "codex")
 	if got := resolvedGuardrailProfileFrom(ctx).decision; got.Name != wantSelection || got.Refused != "" {
@@ -350,5 +356,52 @@ func TestProfileMeetSensitiveToolUsesOneMembersPackAtATime(t *testing.T) {
 	packB.SensitiveTools.Tools[0].MinEntitiesAlert = 2
 	if reason, alert := api.sensitiveToolResultAlert(ctx, "codex", "read_db", "HIGH", piiFindings, "some output"); !alert {
 		t.Fatalf("matching member did not alert: %s", reason)
+	}
+}
+
+// Under identity profiles a cascade-2 confirm keeps its HIGH alert mapping on
+// an agent that cannot ask: the meet of the members keeps decisionConfirm.
+func TestProfileMeetKeepsTheDecisionModelConfirm(t *testing.T) {
+	var calls atomic.Int32
+	srv := countingDecisionModel(t, "confirm", 0.30, &calls)
+	a := config.GuardrailProfile{Mode: "action", BlockAt: "CRITICAL", AlertAt: "LOW"}
+	b := config.GuardrailProfile{Mode: "action", BlockAt: "CRITICAL", AlertAt: "MEDIUM"}
+	api, ctx := meetVerdictFixture(t, a, b, nil, nil)
+	dm := config.DecisionModelConfig{Enabled: true, Model: "fake", BaseURL: srv.URL, Timeout: 1, HookConnectors: []string{"codex"}}
+	api.scannerCfg.DecisionModel = dm
+	api.scannerCfg.DataDir = t.TempDir()
+	resolved := resolvedGuardrailProfileFrom(ctx)
+	resolved.derived.DecisionModel = dm
+	for _, member := range []string{"a", "b"} {
+		resolved.set.profileConfig(member).DecisionModel = dm
+	}
+	api.SetHookDecisionJudge(newDecisionOnlyJudge(api.scannerCfg))
+	verdict := api.runHookJudge(ctx, "tool_call", "prompt", "codex", `{"command":"ls -la ./fixtures/reports"}`, "Bash", nil)
+	if verdict == nil || calls.Load() == 0 || verdict.Action != guardrailActionConfirm || !verdict.decisionConfirm {
+		t.Fatalf("meet verdict = %+v (decision model calls %d), want the decision model's confirm", verdict, calls.Load())
+	}
+}
+
+// When another member confirms the same call for another reason, the meet's
+// confirm is not the decision model's alone: the flag is cleared.
+func TestProfileMeetClearsTheDecisionModelConfirmBesideAnotherConfirm(t *testing.T) {
+	dm := &ScanVerdict{Action: guardrailActionConfirm, Severity: "HIGH", decisionConfirm: true}
+	other := &ScanVerdict{Action: guardrailActionConfirm, Severity: "HIGH"}
+	alert := &ScanVerdict{Action: guardrailActionAlert, Severity: "HIGH"}
+	flag := meetDecisionConfirm(false, guardrailActionAllow, dm, true)
+	if !flag {
+		t.Fatal("a member that raises the meet to the decision model's confirm must set the flag")
+	}
+	if !meetDecisionConfirm(flag, guardrailActionConfirm, alert, false) {
+		t.Fatal("a weaker member must leave the flag")
+	}
+	if !meetDecisionConfirm(flag, guardrailActionConfirm, dm, false) {
+		t.Fatal("a second decision-model confirm must leave the flag")
+	}
+	if meetDecisionConfirm(flag, guardrailActionConfirm, other, false) {
+		t.Fatal("another member's confirm at the same action must clear the flag")
+	}
+	if meetDecisionConfirm(false, guardrailActionAlert, other, true) {
+		t.Fatal("a non-model confirm that raises the meet must not set the flag")
 	}
 }

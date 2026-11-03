@@ -228,6 +228,9 @@ func TestWindowsCursorEnterpriseHookCommandPreservesUTF8Stdin(t *testing.T) {
 	}
 
 	t.Run("PowerShell", func(t *testing.T) {
+		// The engine's one-time first start is outside each case's 30 s
+		// budget (rel-1-0-6:GAP-0250).
+		warmPowerShell(t, "powershell.exe")
 		for _, tc := range testCases {
 			t.Run(tc.name, func(t *testing.T) {
 				run(t, func(ctx context.Context) *exec.Cmd {

@@ -1,0 +1,15 @@
+version: 1
+category: partner-config
+rules:
+  - id: PARTNER-CONFIG-EXACT-WRITE
+    tool_call_only: true
+    expression: >-
+      f.paths.exists(p, p.resolved.matches('^/opt/partner/config$') &&
+      p.access in [defenseclaw.guardrail.semantic.v1.PathAccess.PATH_ACCESS_WRITE,
+      defenseclaw.guardrail.semantic.v1.PathAccess.PATH_ACCESS_APPEND,
+      defenseclaw.guardrail.semantic.v1.PathAccess.PATH_ACCESS_DELETE])
+    pattern: 'a^'
+    title: Partner config mutation
+    severity: HIGH
+    confidence: 0.85
+    tags: [partner, config]

@@ -44,7 +44,7 @@ func exactPythonExternalSocketCommand(command CommandFact) bool {
 		return false
 	}
 	parts := strings.Split(command.Argv[2], ";")
-	if len(parts) != 3 || strings.TrimSpace(parts[0]) != "import socket" {
+	if len(parts) != 3 || !pythonImportsSocket(parts[0]) {
 		return false
 	}
 	name, ok := parsePythonSocketAssignment(parts[1])
@@ -98,6 +98,32 @@ func (cursor *pythonCodeCursor) identifier() string {
 func (cursor *pythonCodeCursor) done() bool {
 	cursor.space()
 	return cursor.remaining == ""
+}
+
+// pythonImportsSocket reports a plain import statement whose module list
+// names socket: "import socket", and also "import socket,subprocess,os" or
+// "import os, socket", which let the same connect run (AMD admission corpus,
+// #1393). Each module must be a bare name; an alias or a dotted name leaves
+// the program unresolved.
+func pythonImportsSocket(code string) bool {
+	cursor := pythonCodeCursor{remaining: code}
+	if cursor.identifier() != "import" {
+		return false
+	}
+	imported := false
+	for {
+		name := cursor.identifier()
+		if name == "" {
+			return false
+		}
+		imported = imported || name == "socket"
+		if cursor.done() {
+			return imported
+		}
+		if !cursor.literal(",") {
+			return false
+		}
+	}
 }
 
 func parsePythonSocketAssignment(code string) (string, bool) {

@@ -27,10 +27,10 @@ from textual import events
 from textual.app import ComposeResult
 from textual.binding import Binding
 from textual.containers import Vertical
-from textual.screen import ModalScreen
 from textual.widgets import Static
 
 from defenseclaw.tui.markup_safe import escape as rich_escape
+from defenseclaw.tui.modal import GuardedModalScreen
 from defenseclaw.tui.services.policy_state import (
     ALERT_LEVELS,
     BLOCK_LEVELS,
@@ -131,7 +131,7 @@ def level_lines(choices: tuple[LevelChoice, ...], selected: int) -> list[str]:
     return lines
 
 
-class LevelPickerScreen(ModalScreen[str | None]):
+class LevelPickerScreen(GuardedModalScreen[str | None]):
     """Numbered level list with a per-choice preview."""
 
     CSS = f"""

@@ -712,7 +712,7 @@ discovery is off, `enabled` is `false` and the lists are empty.
 | Method | Path | Purpose |
 | --- | --- | --- |
 | `GET` | `/v1/acp/catalog` | The pinned built-in catalog of ACP clients and agents. |
-| `GET` | `/v1/acp/profiles` | The ACP posture from the running config: `enabled`, `mode`, `default_profile`, and `profiles`. |
+| `GET` | `/v1/acp/profiles` | The ACP posture from the running config: `enabled`, `mode`, `default_profile`, `profiles`, and `pair_profiles` (the profile each configured pair resolves to). |
 | `POST` | `/api/v1/acp/challenge` | Issue a server nonce for the signed ACP request scheme. Loopback only, signed with the ACP key; see [Auth](#auth). |
 | `POST` | `/api/v1/acp/evaluate` | Evaluate one ACP frame, or one completed turn, for a bound agent and return the verdict. Same signed scheme; the gateway token alone gets `401`. |
 
@@ -726,6 +726,11 @@ not an anchor. `span_id` narrows a `trace_id` anchor, and
 `connector_instance_id` narrows any anchor to one connector instance. Results
 page with `limit` (at most 500), `after_time` and `after_id`. Unknown query
 keys are rejected, and each key may appear only once.
+
+In observe mode a hook tool call does not wait past its answer window for the
+ledger. When many hooks run at once and the audit database is busy, the call
+is still evaluated and audited, without its links to other calls, instead of
+reaching the hook too late. Action mode waits for the ledger.
 
 | Method | Path | Purpose |
 | --- | --- | --- |
@@ -1241,7 +1246,15 @@ the sandbox and revokes it when the sandbox is deleted.
 | Traffic | Rate | Burst | Concurrent requests |
 | --- | --- | --- | --- |
 | Hook, notify and inspect | 25/s | 100 | 32 |
+| Delivery receipts | 25/s | 100 | 32 |
 | OTLP | 10/s | 50 | 4 per sandbox, 16 across all sandboxes |
+
+On a managed computer the hook confirms each allowed call with a second post,
+its delivery receipt. Receipts have the budget of their own above, so a tool
+call counts once against the hook budget. Current hooks mark that post with
+`X-DefenseClaw-Hook-Receipt: 1`. An older unmarked receipt-shaped post also
+uses the receipt budget. The gateway checks the receipt body, binding,
+registration and receipt window before acknowledging it.
 
 Hook and inspect bodies are capped at 1 MiB, like the main API. OTLP bodies
 are capped at 4 MiB, far below the main receiver's 64 MiB.

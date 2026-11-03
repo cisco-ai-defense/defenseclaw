@@ -308,6 +308,43 @@ func TestManagedConfigRestartRequiredClassifiesBundleChanges(t *testing.T) {
 	}
 }
 
+func TestManagedConnectorSetRestartClassificationByPlatform(t *testing.T) {
+	before := []byte("guardrail:\n  connectors:\n    claudecode: {}\n    opencode: {}\n")
+	for _, tc := range []struct {
+		name, after string
+	}{
+		{"disable", "guardrail:\n  connectors:\n    claudecode: {}\n    opencode: {enabled: false}\n"},
+		{"remove", "guardrail:\n  connectors:\n    claudecode: {}\n"},
+		{"add", "guardrail:\n  connectors:\n    claudecode: {}\n    opencode: {}\n    hermes: {}\n"},
+	} {
+		for _, goos := range []string{"linux", "darwin", "windows"} {
+			t.Run(tc.name+"/"+goos, func(t *testing.T) {
+				restart, err := ManagedConfigRestartRequired(before, []byte(tc.after), ManagedDefaults{GOOS: goos})
+				if err != nil {
+					t.Fatal(err)
+				}
+				if got, want := len(restart) > 0, goos == "windows"; got != want {
+					t.Fatalf("restart paths = %v, want restart=%t", restart, want)
+				}
+			})
+		}
+	}
+}
+
+func TestManagedConnectorSetRestartWhenPrimaryMoves(t *testing.T) {
+	before := []byte("guardrail:\n  connectors:\n    claudecode: {}\n")
+	after := []byte("guardrail:\n  connectors:\n    claudecode: {}\n    amp: {}\n")
+	for _, goos := range []string{"linux", "darwin"} {
+		restart, err := ManagedConfigRestartRequired(before, after, ManagedDefaults{GOOS: goos})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got := strings.Join(restart, ","); got != "guardrail.connector" {
+			t.Fatalf("%s primary move restart paths = %q", goos, got)
+		}
+	}
+}
+
 // enterprise.openshell is lifecycle and restart-required on every host;
 // openshell.* (the sandbox floor included) stays hot.
 func TestEnterpriseOpenShellRestartsAndSandboxFloorStaysHot(t *testing.T) {

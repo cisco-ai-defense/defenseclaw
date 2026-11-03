@@ -33,6 +33,7 @@ import (
 // coverage gate passes. The Windows guardian's reconcile is this loop; the
 // platform calls it makes are stubbed here.
 func TestEnterpriseHookReconcileLeavesEarlierReleaseTargetsToTheNextSignIn(t *testing.T) {
+	stubEarlierReleaseClosedMachineRegistration(t)
 	restoreEnterpriseHooksLifecycleTestState(t)
 	stubEnterpriseHookAuthorizationTrustForTempDir(t)
 	stubEnterpriseHookTokenSources(t)
@@ -250,6 +251,7 @@ func TestEnterpriseHookReconcileLeavesEarlierReleaseTargetsToTheNextSignIn(t *te
 // release check is not asked for another target, and a failed check keeps
 // the signed-out failure.
 func TestEnterpriseHookVerifyOrRepairTargetWaitsForSignInOnlyForDeferredEarlierRelease(t *testing.T) {
+	stubEarlierReleaseClosedMachineRegistration(t)
 	previousVerifier, previousSession, previousRelease := enterpriseHookReconcileVerifier, enterpriseHookReconcileSessionAvailable, enterpriseHookReconcileTargetRelease
 	previousSecureClient := enterpriseHookReconcileSecureClient
 	t.Cleanup(func() {

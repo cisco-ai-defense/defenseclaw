@@ -106,8 +106,18 @@ func TestParsePOSIXQuotedHeredocLiteralStdin(t *testing.T) {
 		t.Fatalf("quoted heredoc redirects = %#v", quoted.commands[0].Redirects)
 	}
 
+	// An unquoted body that expands only parameters keeps the parse
+	// complete, but its text is never literal stdin (rel-1-0-6:GAP-0399).
+	expanding := parsePOSIX("cat > /etc/sudoers.d/service << EOF\n$USER ALL=(ALL) NOPASSWD: ALL\nEOF", 1, 0)
+	if expanding.status != StatusComplete || len(expanding.commands) != 1 {
+		t.Fatalf("parameter-only heredoc output = %#v", expanding)
+	}
+	if content, ok := StaticPOSIXCatLiteralStdinOutput(expanding.commands[0]); ok || content != "" {
+		t.Fatalf("an expanding heredoc exposed literal stdin: %q, %t", content, ok)
+	}
+
 	for _, source := range []string{
-		"cat > /etc/sudoers.d/service << EOF\n$USER ALL=(ALL) NOPASSWD: ALL\nEOF",
+		"cat > /etc/sudoers.d/service << EOF\n$(id -un) ALL=(ALL) NOPASSWD: ALL\nEOF",
 		"cat > /etc/sudoers.d/service <<- 'EOF'\n\trestricted-service ALL=(ALL) NOPASSWD: ALL\nEOF",
 		"cat < /tmp/input > /etc/sudoers.d/service << 'EOF'\nrestricted-service ALL=(ALL) NOPASSWD: ALL\nEOF",
 		"cat << 'ONE' << 'TWO' > /etc/sudoers.d/service\nfirst\nONE\nsecond\nTWO",

@@ -38,17 +38,20 @@ func purgeTargetsOf(job *enterpriseHookWorkerJob) []string {
 // the ~/.defenseclaw of an eligible account the manifest does not name when
 // that folder holds only what DefenseClaw wrote there (an earlier failed
 // install's hook script, token, hook config and backups). An account whose
-// folder holds its own per-user install, or that has no folder, gets no
-// purge, and an account the manifest names gets exactly one.
+// folder holds its own per-user install, initialised or not (rel-1-0-6
+// GAP-0484: the one-liner's .venv and installer folder, no config yet), or
+// that has no folder, gets no purge, and an account the manifest names gets
+// exactly one.
 func TestRemoveAllPurgesTheLegacyStateOnlyOfAccountsWithoutAnOwnInstall(t *testing.T) {
 	gid := os.Getgid()
-	namedUID, legacyUID, ownUID, emptyUID := os.Getuid()+1, os.Getuid()+2, os.Getuid()+3, os.Getuid()+4
+	namedUID, legacyUID, ownUID, emptyUID, freshUID := os.Getuid()+1, os.Getuid()+2, os.Getuid()+3, os.Getuid()+4, os.Getuid()+5
 	f := newStandaloneFixture(t, standaloneTestResolver{accounts: map[string]unixidentity.Account{}})
 	named := f.home(t, "sample-named", 0o700)
 	legacy := f.home(t, "sample-legacy", 0o700)
 	own := f.home(t, "sample-own", 0o700)
 	empty := f.home(t, "sample-empty", 0o700)
-	homes := map[string]int{named: namedUID, legacy: legacyUID, own: ownUID, empty: emptyUID}
+	fresh := f.home(t, "sample-fresh", 0o700)
+	homes := map[string]int{named: namedUID, legacy: legacyUID, own: ownUID, empty: emptyUID, fresh: freshUID}
 	enterpriseHookCheckHome = func(home string, uid int) enterprisehooks.HomeCheck {
 		if homes[home] == uid {
 			return enterprisehooks.HomeCheck{State: enterprisehooks.HomeAvailable}
@@ -72,6 +75,11 @@ func TestRemoveAllPurgesTheLegacyStateOnlyOfAccountsWithoutAnOwnInstall(t *testi
 	}
 	write(filepath.Join(own, ".defenseclaw", "config.yaml"), "data_dir: ~/.defenseclaw\n")
 	write(filepath.Join(own, ".defenseclaw", "session-facts.json"), "{}\n")
+	// The one-liner install as it is before `defenseclaw init`.
+	write(filepath.Join(fresh, ".defenseclaw", ".venv", "bin", "defenseclaw"), "#!/bin/sh\n")
+	write(filepath.Join(fresh, ".defenseclaw", "installer", "binaries.sha256"), "sample\n")
+	write(filepath.Join(fresh, ".defenseclaw", "receipts", "installer.sha256"), "sample\n")
+	write(filepath.Join(fresh, ".defenseclaw", "logs", "install.log"), "sample\n")
 	f.writeManifest(t, enterprisehooks.ManifestTarget{Connector: "hermes", User: "sample-named", UID: &namedUID, GID: &gid, UserHome: named})
 	manifest, err := enterprisehooks.LoadManifest(f.manifest)
 	if err != nil {
@@ -82,6 +90,7 @@ func TestRemoveAllPurgesTheLegacyStateOnlyOfAccountsWithoutAnOwnInstall(t *testi
 		{User: "sample-legacy", UID: legacyUID, GID: gid, Home: legacy},
 		{User: "sample-own", UID: ownUID, GID: gid, Home: own},
 		{User: "sample-empty", UID: emptyUID, GID: gid, Home: empty},
+		{User: "sample-fresh", UID: freshUID, GID: gid, Home: fresh},
 	}
 	plan := func(skip map[int]string) map[int]*enterpriseHookWorkerJob {
 		rows := resolveEnterpriseHookRemoveRows(manifest)
@@ -97,6 +106,9 @@ func TestRemoveAllPurgesTheLegacyStateOnlyOfAccountsWithoutAnOwnInstall(t *testi
 	}
 	if got := purgeTargetsOf(jobs[ownUID]); len(got) != 0 {
 		t.Fatalf("an account's own per-user install was given a purge: %v", got)
+	}
+	if got := purgeTargetsOf(jobs[freshUID]); len(got) != 0 {
+		t.Fatalf("an own per-user install that never ran init was given a purge: %v", got)
 	}
 	if got := purgeTargetsOf(jobs[emptyUID]); len(got) != 0 {
 		t.Fatalf("an account without ~/.defenseclaw was given a purge: %v", got)

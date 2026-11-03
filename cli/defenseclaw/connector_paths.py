@@ -4543,8 +4543,182 @@ def _read_openclaw_json(config_file: str) -> dict[str, Any] | None:
     try:
         with open(_expand(config_file), encoding="utf-8") as f:
             return json.load(f)
-    except (OSError, json.JSONDecodeError):
+    except (OSError, ValueError):
         return None
+
+
+_ENV_NAME_RE = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
+_GATEWAY_TOKEN_ENV_NAMES = frozenset({"OPENCLAW_GATEWAY_TOKEN", "DEFENSECLAW_GATEWAY_TOKEN"})
+_CREDENTIAL_NAME_PARTS = ("API_KEY", "SECRET", "PASSWORD", "ACCESS_KEY", "PRIVATE_KEY", "SESSION_TOKEN")
+
+
+def is_secret_ref_text(value: object) -> bool:
+    """True for the text of a SecretRef object saved as if it were a token.
+
+    DefenseClaw 1.0.5 and 1.0.6 wrote ``OPENCLAW_GATEWAY_TOKEN={'source': ...}``
+    to ``~/.defenseclaw/.env`` before init failed on a SecretRef (issue #1404).
+    That text is never a token; every gateway token reader ignores it.
+    """
+    if not isinstance(value, str):
+        return False
+    return _SECRET_REF_TEXT_RE.fullmatch(value.strip()) is not None
+
+
+# A quoted "source" key followed by a colon inside braces: the Python repr and
+# the JSON form, any key order. Same pattern as envvars.IsSecretRefText in Go.
+_SECRET_REF_TEXT_RE = re.compile(r"\{.*[\"\x27]source[\"\x27]\s*:.*\}")
+
+
+def _dotenv_key_names(data_dir: str) -> set[str]:
+    names: set[str] = set()
+    try:
+        with open(os.path.join(data_dir, ".env"), encoding="utf-8", errors="replace") as fh:
+            for line in fh:
+                key, sep, _value = line.strip().partition("=")
+                key = key.strip()
+                if key.startswith("export "):
+                    key = key[len("export ") :].strip()
+                if sep and key and not key.startswith("#"):
+                    names.add(key.upper())
+    except OSError:
+        pass
+    return names
+
+
+def _configured_api_key_env_names(value: Any, depth: int = 0) -> set[str]:
+    """Every ``*api_key_env`` value set anywhere in the loaded config."""
+    import dataclasses
+
+    names: set[str] = set()
+    if depth > 8 or value is None:
+        return names
+    if dataclasses.is_dataclass(value) and not isinstance(value, type):
+        items = ((f.name, getattr(value, f.name, None)) for f in dataclasses.fields(value))
+    elif isinstance(value, dict):
+        items = ((str(k), v) for k, v in value.items())
+    elif isinstance(value, (list, tuple)):
+        items = (("", v) for v in value)
+    else:
+        return names
+    for key, child in items:
+        if key.endswith("api_key_env") and isinstance(child, str) and child.strip():
+            names.add(child.strip().upper())
+        elif not isinstance(child, (str, bytes, int, float, bool)):
+            names |= _configured_api_key_env_names(child, depth + 1)
+    return names
+
+
+def defenseclaw_credential_names(cfg: Any = None) -> frozenset[str]:
+    """Env names that hold DefenseClaw's own credentials (issue #1404).
+
+    Every key in ``~/.defenseclaw/.env`` (the CLI loads that file into the
+    environment), every configured ``*api_key_env``, the provider key names
+    of ``llm_keys`` and the credential registry, minus the two gateway token
+    names. An OpenClaw env SecretRef naming one of them is refused.
+    """
+    from defenseclaw.credentials import CREDENTIALS
+    from defenseclaw.llm_keys import PROVIDER_KEY_ENV_NAMES
+
+    data_dir = str(getattr(cfg, "data_dir", "") or "")
+    if not data_dir:
+        from defenseclaw.config import default_data_path
+
+        data_dir = str(default_data_path())
+    names = _dotenv_key_names(data_dir) | _configured_api_key_env_names(cfg)
+    names |= {name.upper() for name in PROVIDER_KEY_ENV_NAMES}
+    names |= {spec.env_name.upper() for spec in CREDENTIALS}
+    return frozenset(names - _GATEWAY_TOKEN_ENV_NAMES)
+
+
+def _names_defenseclaw_credential(name: str, credential_names: frozenset[str] | None) -> bool:
+    """True when an env SecretRef id names a credential DefenseClaw keeps."""
+    upper = name.upper()
+    if upper in _GATEWAY_TOKEN_ENV_NAMES:
+        return False
+    names = defenseclaw_credential_names() if credential_names is None else credential_names
+    if upper in names:
+        return True
+    # Backstop for names DefenseClaw has not stored yet.
+    return upper.startswith("DEFENSECLAW_") or any(part in upper for part in _CREDENTIAL_NAME_PARTS)
+
+
+@dataclass(frozen=True)
+class OpenClawGatewayToken:
+    """The OpenClaw gateway token read from ``gateway.auth.token``.
+
+    ``value`` is the token, or "" when there is none DefenseClaw can use.
+    ``notice`` is set when the setting holds a token DefenseClaw cannot read
+    (a SecretRef object, issue #1404); it never contains the token.
+    """
+
+    value: str = ""
+    notice: str = ""
+
+
+_OPENCLAW_TOKEN_UNREADABLE = (
+    "The OpenClaw gateway token (gateway.auth.token) is not a plain string, and DefenseClaw cannot read it."
+)
+
+
+def _openclaw_token_notice(reason: str) -> str:
+    return (
+        f"{reason} "
+        "Give DefenseClaw that token in OPENCLAW_GATEWAY_TOKEN or DEFENSECLAW_GATEWAY_TOKEN, "
+        "for example: defenseclaw keys set DEFENSECLAW_GATEWAY_TOKEN"
+    )
+
+
+def openclaw_gateway_token(
+    openclaw_config: Any,
+    environ: Any = None,
+    credential_names: frozenset[str] | None = None,
+) -> OpenClawGatewayToken:
+    """Read ``gateway.auth.token`` from a parsed ``openclaw.json``.
+
+    OpenClaw stores the token as a string or as a SecretRef object such as
+    ``{"source": "env", "provider": "default", "id": "NAME"}``. A ``source:
+    env`` reference is resolved from the named environment variable. Every
+    other reference (``store``, ``file``, ``exec``, a malformed object) is
+    never used as a token: the result carries a notice instead (issue #1404).
+    """
+    gateway = openclaw_config.get("gateway") if isinstance(openclaw_config, dict) else None
+    auth = gateway.get("auth") if isinstance(gateway, dict) else None
+    raw = auth.get("token") if isinstance(auth, dict) else None
+    if raw is None:
+        return OpenClawGatewayToken()
+    if isinstance(raw, str):
+        if is_secret_ref_text(raw):
+            return OpenClawGatewayToken(notice=_openclaw_token_notice(_OPENCLAW_TOKEN_UNREADABLE))
+        return OpenClawGatewayToken(raw)
+    if not isinstance(raw, dict):
+        return OpenClawGatewayToken(notice=_openclaw_token_notice(_OPENCLAW_TOKEN_UNREADABLE))
+    source = raw.get("source")
+    name = raw.get("id")
+    if source == "env" and isinstance(name, str) and _ENV_NAME_RE.fullmatch(name):
+        if _names_defenseclaw_credential(name, credential_names):
+            return OpenClawGatewayToken(
+                notice=_openclaw_token_notice(
+                    f"OpenClaw names {name} for its gateway token (gateway.auth.token). "
+                    "That variable holds one of DefenseClaw's own credentials, so DefenseClaw does not use it."
+                )
+            )
+        value = (os.environ if environ is None else environ).get(name, "")
+        if isinstance(value, str) and value and not is_secret_ref_text(value):
+            return OpenClawGatewayToken(value)
+        return OpenClawGatewayToken(
+            notice=_openclaw_token_notice(
+                f"OpenClaw reads its gateway token (gateway.auth.token) from the environment variable {name}, "
+                "which is not set here."
+            )
+        )
+    if isinstance(source, str) and source and source != "env" and _ENV_NAME_RE.fullmatch(source):
+        return OpenClawGatewayToken(
+            notice=_openclaw_token_notice(
+                f'OpenClaw keeps its gateway token (gateway.auth.token) in its "{source}" secret source, '
+                "which DefenseClaw cannot read."
+            )
+        )
+    return OpenClawGatewayToken(notice=_openclaw_token_notice(_OPENCLAW_TOKEN_UNREADABLE))
 
 
 def _load_mcp_json_document(

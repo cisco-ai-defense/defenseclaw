@@ -34,11 +34,15 @@ import logging
 import ntpath
 import os
 import re
+import select
 import shutil
+import signal
+import stat
 import subprocess
 import sys
 import tempfile
 import threading
+import time
 from collections import Counter
 from collections.abc import Awaitable, Callable, Iterator
 from contextlib import contextmanager
@@ -569,6 +573,564 @@ def _contained_mcp_windows_process_factory(started: list[object] | None = None) 
             mcp_stdio._create_platform_compatible_process = original_create
             mcp_stdio._terminate_process_tree = original_terminate
             mcp_stdio.close_process_job = original_close_job
+
+
+_MCP_POSIX_PROCESS_FACTORY_LOCK = threading.Lock()
+_MCP_POSIX_GROUP_GRACE_SECONDS = 0.25
+_MCP_POSIX_SESSION_CLEANUP_SECONDS = 3.0
+_MCP_POSIX_SCANNER_PGID = os.getpgrp() if os.name != "nt" else -1
+_MCP_LINUX_PRCTL_SYSCALL = (
+    {"x86_64": 157, "aarch64": 167}.get(os.uname().machine)
+    if sys.platform == "linux" else None
+)
+_MCP_LINUX_PERL_WORKER = r'''
+my $prctl_syscall = shift @ARGV;
+$prctl_syscall =~ /\A(157|167)\z/ or die "child tracking unavailable\n";
+$prctl_syscall = 0 + $1;
+syscall($prctl_syscall, 36, 1, 0, 0, 0) == 0 or die "child tracking unavailable: $!\n";
+my $path = $ENV{PATH} // '/usr/bin:/bin';
+$path =~ /\A([^\0]*)\z/s or die "server path unavailable\n";
+$ENV{PATH} = $1;
+my $server = fork();
+defined $server or die "server fork failed: $!\n";
+if ($server == 0) {
+    my $command = shift @ARGV;
+    $command =~ /\A([^\0]*)\z/s or die "server command unavailable\n";
+    $command = $1;
+    @ARGV = map { /\A([^\0]*)\z/s ? $1 : die "server argument unavailable\n" } @ARGV;
+    exec { $command } $command, @ARGV;
+    die "server launch failed: $!\n";
+}
+close STDIN;
+$SIG{TERM} = sub {
+    CORE::kill 'KILL', $server if grep { $_ == $server } children();
+};
+my $status;
+while (1) {
+    my $done = waitpid($server, 0);
+    if ($done == $server) { $status = $?; last; }
+    if ($done == -1 && !$!{EINTR}) { $status = 1 << 8; last; }
+}
+sub children {
+    open my $stream, '<', "/proc/$$/task/$$/children" or return ();
+    my $line = <$stream> // '';
+    close $stream;
+    return map { /\A(\d+)\z/ && $1 > 1 ? $1 : () } split /\s+/, $line;
+}
+sub signal_child { kill $_[0], $_[1] }
+my $failed = 0;
+my $deadline = time() + 3;
+my $round = 0;
+while (1) {
+    while (waitpid(-1, 1) > 0) {}
+    my @children = children();
+    last unless @children;
+    if (time() >= $deadline) { $failed = 1; last; }
+    my $sig = $round++ == 0 ? 'TERM' : 'KILL';
+    for my $pid (@children) {
+        if (!signal_child($sig, $pid) && !$!{ESRCH}) {
+            $failed = 1;
+            CORE::kill 'KILL', $pid;
+        }
+    }
+    select undef, undef, undef, 0.02;
+}
+exit($failed ? 70 : (($status & 127) ? 128 + ($status & 127) : ($status >> 8)));
+'''
+_MCP_LINUX_WORKER_SCRIPT = r'''
+server=
+signal_server() {
+    [ -n "$server" ] || return
+    children=
+    IFS= read -r children < "/proc/$$/task/$$/children" || return
+    for pid in $children; do
+        if [ "$pid" = "$server" ]; then
+            builtin kill -KILL "$server" 2>/dev/null || :
+            return
+        fi
+    done
+}
+trap signal_server TERM
+"$@" <&0 >&1 2>&2 &
+server=$!
+exec 0<&-
+wait "$server"
+status=$?
+failed=0
+SECONDS=0
+round=0
+while :; do
+    children=
+    IFS= read -r children < "/proc/$$/task/$$/children" || :
+    [ -n "$children" ] || break
+    if (( SECONDS >= 3 )); then
+        failed=1
+        break
+    fi
+    sig=KILL
+    [ "$round" = 0 ] && sig=TERM
+    round=$((round + 1))
+    for pid in $children; do
+        if ! kill -"$sig" "$pid" 2>/dev/null; then
+            failed=1
+            builtin kill -KILL "$pid" 2>/dev/null || :
+        fi
+    done
+    sleep 0.02
+done
+[ -z "$children" ] || failed=1
+[ "$failed" = 0 ] || exit 70
+exit "$status"
+'''
+_MCP_POSIX_GUARDIAN_SCRIPT = r'''
+trap '' TERM
+printf R
+IFS= read -r -n 1 -u "$1" _ || :
+group_owned() {
+    [ "$$" -gt 1 ] && [ "$$" != "$2" ] || return 1
+    pgid=$(/bin/ps -o pgid= -p "$$") || return 1
+    pgid=${pgid//[[:space:]]/}
+    [ "$pgid" = "$$" ]
+}
+if ! group_owned; then printf 'group ownership lost before SIGTERM\n'; exit 1; fi
+if ! kill -TERM -- "-$$" 2>&1; then printf 'SIGTERM failed\n'; fi
+sleep "$3"
+if ! group_owned; then printf 'group ownership lost before SIGKILL\n'; exit 1; fi
+if ! kill -KILL -- "-$$" 2>&1; then printf 'SIGKILL failed\n'; fi
+'''
+
+
+def _mcp_posix_processes() -> dict[int, tuple[int, int, str]]:
+    """Return PID to (parent, group, birth marker) on macOS."""
+    found: dict[int, tuple[int, int, str]] = {}
+    output = subprocess.check_output(
+        ["/bin/ps", "-A", "-o", "pid=", "-o", "ppid=", "-o", "pgid=", "-o", "lstart="],
+        text=True, timeout=1,
+    )
+    for line in output.splitlines():
+        fields = line.split(maxsplit=3)
+        if len(fields) != 4:
+            continue
+        try:
+            found[int(fields[0])] = (int(fields[1]), int(fields[2]), fields[3])
+        except ValueError:
+            continue
+    return found
+
+
+class _MCPPosixDescendants:
+    """Remember server descendants across process-group and parent changes."""
+
+    def __init__(self, root_pid: int, group_pid: int) -> None:
+        self.root_pid = root_pid
+        self.group_pid = group_pid
+        self._known: dict[int, str] = {}
+        self._lock = threading.Lock()
+        self._stop = threading.Event()
+        self._thread = threading.Thread(target=self._watch, name="mcp-stdio-descendants", daemon=True)
+        self._thread.start()
+
+    def capture(self) -> None:
+        try:
+            processes = _mcp_posix_processes()
+        except (OSError, subprocess.SubprocessError) as exc:
+            _LOGGER.warning("MCP stdio descendant inspection failed: %s", exc)
+            return
+        with self._lock:
+            parents = {self.root_pid}
+            parents.update(
+                pid for pid, birth in self._known.items()
+                if pid in processes and processes[pid][2] == birth
+            )
+            pending = set(parents)
+            while pending:
+                children = {
+                    pid for pid, (parent, _group, _birth) in processes.items()
+                    if parent in pending and pid not in parents
+                }
+                for pid in children:
+                    self._known[pid] = processes[pid][2]
+                parents.update(children)
+                pending = children
+
+    def _watch(self) -> None:
+        while not self._stop.wait(0.25):
+            self.capture()
+
+    def signal(self, sig: signal.Signals) -> None:
+        self.capture()
+        with self._lock:
+            known = dict(self._known)
+        try:
+            processes = _mcp_posix_processes()
+        except (OSError, subprocess.SubprocessError) as exc:
+            _LOGGER.warning("MCP stdio descendant inspection failed: %s", exc)
+            return
+        for pid, birth in known.items():
+            current = processes.get(pid)
+            if (current is None or current[2] != birth or current[1] == self.group_pid
+                    or pid <= 1 or pid == os.getpid()):
+                continue
+            try:
+                os.kill(pid, sig)
+            except ProcessLookupError:
+                pass
+            except OSError as exc:
+                _LOGGER.warning("MCP stdio descendant cleanup for pid %d failed: %s", pid, exc)
+
+    def close(self) -> None:
+        self._stop.set()
+        self._thread.join(timeout=1)
+
+
+class _MCPPosixInput:
+    """Capture the server tree before the SDK closes its input stream."""
+
+    def __init__(self, stream: Any, descendants: _MCPPosixDescendants) -> None:
+        self._stream = stream
+        self._descendants = descendants
+        self._closed = False
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(self._stream, name)
+
+    async def send(self, item: bytes) -> None:
+        await self._stream.send(item)
+
+    async def aclose(self) -> None:
+        if not self._closed:
+            self._closed = True
+            self._descendants.capture()
+        await self._stream.aclose()
+
+
+def _signal_owned_mcp_posix_group(
+    guardian_pid: int, sig: signal.Signals, report_error: Callable[[str], None],
+) -> bool:
+    """Signal only the still-reserved guardian group."""
+    if guardian_pid <= 1 or guardian_pid == _MCP_POSIX_SCANNER_PGID:
+        return False
+    try:
+        if os.getpgid(guardian_pid) != guardian_pid:
+            report_error(f"group ownership lost before {sig.name}")
+            return False
+    except OSError as exc:
+        report_error(f"identity before {sig.name}: {exc}")
+        return False
+    try:
+        os.killpg(guardian_pid, sig)
+    except OSError as exc:
+        report_error(f"{sig.name}: {exc}")
+        return not isinstance(exc, ProcessLookupError)
+    return True
+
+
+def _reap_mcp_posix_guardian(
+    guardian: subprocess.Popen[bytes], server_name: str,
+    session_closed: threading.Event,
+    emergency: threading.Event | None = None,
+    completed: threading.Event | None = None,
+    cleanup_seconds: float = _MCP_POSIX_SESSION_CLEANUP_SECONDS,
+    descendants: list[_MCPPosixDescendants] | None = None,
+) -> None:
+    """Reap after scan closure, with a bounded fallback for cleanup faults."""
+    def reap() -> None:
+        problems: list[str] = []
+
+        try:
+            deadline: float | None = None
+            while True:
+                if emergency is not None and emergency.is_set():
+                    # The control descriptor may still be open after both a
+                    # failed write and close. Signal the reserved group here.
+                    if _signal_owned_mcp_posix_group(guardian.pid, signal.SIGTERM, problems.append):
+                        time.sleep(_MCP_POSIX_GROUP_GRACE_SECONDS)
+                        _signal_owned_mcp_posix_group(guardian.pid, signal.SIGKILL, problems.append)
+                    break
+                if session_closed.is_set():
+                    if deadline is None:
+                        deadline = time.monotonic() + cleanup_seconds
+                    remaining = deadline - time.monotonic()
+                    if remaining <= 0:
+                        problems.append("guardian exceeded cleanup deadline")
+                        _signal_owned_mcp_posix_group(guardian.pid, signal.SIGKILL, problems.append)
+                        break
+                else:
+                    remaining = 0.05
+                try:
+                    guardian.wait(timeout=min(0.05, remaining))
+                    break
+                except subprocess.TimeoutExpired:
+                    pass
+            try:
+                guardian.wait(timeout=1)
+            except (OSError, subprocess.TimeoutExpired) as exc:
+                problems.append(f"guardian reaping: {exc}")
+        except OSError as exc:
+            problems.append(f"guardian reaping: {exc}")
+        finally:
+            if descendants:
+                descendants[0].signal(signal.SIGKILL)
+                descendants[0].close()
+            if guardian.stdout is not None:
+                try:
+                    if select.select([guardian.stdout], [], [], 0)[0]:
+                        report = os.read(guardian.stdout.fileno(), 4096).decode(
+                            "utf-8", errors="replace",
+                        ).strip()
+                        if report:
+                            problems.append(report.replace("\n", "; "))
+                except (OSError, ValueError) as exc:
+                    problems.append(f"cleanup report: {exc}")
+                guardian.stdout.close()
+            if not problems and guardian.returncode != -signal.SIGKILL:
+                problems.append(f"guardian exited with status {guardian.returncode}")
+            if problems:
+                _LOGGER.warning(
+                    "MCP stdio cleanup for server %r may be incomplete; "
+                    "a child may still be running (%s)", server_name, "; ".join(problems),
+                )
+            if completed is not None:
+                completed.set()
+
+    try:
+        threading.Thread(target=reap, name="mcp-stdio-guardian-reaper", daemon=True).start()
+    except (OSError, RuntimeError) as exc:
+        _LOGGER.warning(
+            "MCP stdio cleanup for server %r may be incomplete; "
+            "a child may still be running (guardian reaper unavailable: %s)", server_name, exc,
+        )
+
+
+def _close_mcp_posix_control(fd: int) -> bool:
+    try:
+        os.close(fd)
+        return True
+    except OSError as exc:
+        _LOGGER.debug("MCP stdio group control pipe release failed: %s", exc)
+        return False
+
+
+def _enable_mcp_linux_subreaper() -> None:
+    # This runs only in the just-forked child, before exec. Resolve prctl in
+    # the parent so the child makes no dynamic-library lookups here.
+    if _MCP_LINUX_PRCTL(36, 1, 0, 0, 0) != 0:
+        os._exit(127)
+
+
+def _mcp_linux_perl_path_usable(path: str) -> bool:
+    """Use Perl's taint-mode worker only with directories it accepts on PATH."""
+    for directory in path.split(os.pathsep):
+        if not os.path.isabs(directory):
+            return False
+        try:
+            mode = os.stat(directory).st_mode
+        except OSError:
+            return False
+        if not stat.S_ISDIR(mode) or mode & 0o022:
+            return False
+    return True
+
+
+if sys.platform == "linux":
+    import ctypes
+
+    _MCP_LINUX_PRCTL = ctypes.CDLL(None, use_errno=True).prctl
+
+
+@contextmanager
+def _contained_mcp_linux_process_factory(server_name: str) -> Iterator[None]:
+    """Run each Linux server under its own child subreaper."""
+    import mcp.client.stdio as mcp_stdio
+    from anyio._core._eventloop import get_async_backend
+
+    started: dict[int, Any] = {}
+    original_create = mcp_stdio._create_platform_compatible_process
+    original_terminate = mcp_stdio._terminate_process_tree
+
+    async def create(
+        command: str, args: list[str], env: dict[str, str] | None = None,
+        errlog: Any = sys.stderr, cwd: Any = None,
+    ) -> Any:
+        if os.path.isabs(command) and not os.path.exists(command):
+            raise FileNotFoundError(2, os.strerror(2), command)
+        worker_env = os.environ if env is None else env
+        path = worker_env.get("PATH", os.defpath)
+        perl_path_usable = _mcp_linux_perl_path_usable(path)
+        if (_MCP_LINUX_PRCTL_SYSCALL is not None
+                and os.access("/usr/bin/perl", os.X_OK) and perl_path_usable):
+            argv = ["/usr/bin/perl", "-T", "-e", _MCP_LINUX_PERL_WORKER, "--",
+                    str(_MCP_LINUX_PRCTL_SYSCALL), command, *args]
+            setup: dict[str, Any] = {}
+        else:
+            argv = ["/bin/bash", "-p", "-c", _MCP_LINUX_WORKER_SCRIPT,
+                    "mcp-stdio-worker", command, *args]
+            setup = {"preexec_fn": _enable_mcp_linux_subreaper}
+        process = await get_async_backend().open_process(
+            argv,
+            stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=errlog,
+            env=env, cwd=cwd, start_new_session=True,
+            **setup,
+        )
+        started[process.pid] = process
+        return process
+
+    async def terminate(process: Any) -> None:
+        if process.pid not in started:
+            await original_terminate(process)
+        elif process.returncode is None:
+            process.terminate()
+            try:
+                with asyncio.timeout(_MCP_POSIX_SESSION_CLEANUP_SECONDS):
+                    await process.wait()
+            except TimeoutError:
+                process.kill()
+                await process.wait()
+                _LOGGER.warning(
+                    "MCP stdio cleanup for server %r may be incomplete; "
+                    "a child may still be running (worker exceeded cleanup deadline)", server_name,
+                )
+
+    with _MCP_POSIX_PROCESS_FACTORY_LOCK:
+        mcp_stdio._create_platform_compatible_process = create
+        mcp_stdio._terminate_process_tree = terminate
+        try:
+            yield
+        finally:
+            mcp_stdio._create_platform_compatible_process = original_create
+            mcp_stdio._terminate_process_tree = original_terminate
+            for process in started.values():
+                if process.returncode is None:
+                    process.terminate()
+                if process.returncode == 70:
+                    _LOGGER.warning(
+                        "MCP stdio cleanup for server %r may be incomplete; "
+                        "a child may still be running (cleanup signal failed)", server_name,
+                    )
+
+
+@contextmanager
+def _contained_mcp_posix_process_factory(server_name: str = "stdio server") -> Iterator[None]:
+    """Track SDK stdio launches and end their groups on every scan exit."""
+    if sys.platform == "linux":
+        with _contained_mcp_linux_process_factory(server_name):
+            yield
+        return
+    import mcp.client.stdio as mcp_stdio
+    from anyio._core._eventloop import get_async_backend
+
+    started_groups: dict[int, tuple[subprocess.Popen[bytes], int, threading.Event, _MCPPosixDescendants]] = {}
+    notified_groups: set[int] = set()
+    session_closed = threading.Event()
+
+    def notify(pid: int) -> bool:
+        group = started_groups.get(pid)
+        if group is None:
+            return False
+        if pid not in notified_groups:
+            notified_groups.add(pid)
+            group[3].signal(signal.SIGTERM)
+            written = False
+            try:
+                os.write(group[1], b"x")
+                written = True
+            except OSError as exc:
+                _LOGGER.debug("MCP stdio group notification failed: %s", exc)
+            closed = _close_mcp_posix_control(group[1])
+            if not written and not closed:
+                group[2].set()
+        return True
+
+    async def create(
+        command: str, args: list[str], env: dict[str, str] | None = None,
+        errlog: Any = sys.stderr, cwd: Any = None,
+    ) -> Any:
+        # The SDK reaps the server before this scope exits. A separate group
+        # leader stays alive until it sends TERM and KILL, so its ID cannot
+        # be recycled while either signal is pending.
+        control_read, control_write = os.pipe()
+        try:
+            guardian = subprocess.Popen(
+                [
+                    "/bin/bash", "-p", "-c", _MCP_POSIX_GUARDIAN_SCRIPT,
+                    "mcp-group-guardian", str(control_read), str(os.getpgrp()),
+                    str(_MCP_POSIX_GROUP_GRACE_SECONDS),
+                ],
+                stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
+                stderr=subprocess.DEVNULL, pass_fds=(control_read,), process_group=0,
+            )
+            if (guardian.stdout is None
+                    or not select.select([guardian.stdout], [], [], 1.0)[0]
+                    or os.read(guardian.stdout.fileno(), 1) != b"R"):
+                guardian.kill()
+                guardian.wait(timeout=1)
+                raise RuntimeError("MCP stdio group owner did not start")
+        except BaseException:
+            _close_mcp_posix_control(control_read)
+            _close_mcp_posix_control(control_write)
+            raise
+        _close_mcp_posix_control(control_read)
+        emergency = threading.Event()
+        completed = threading.Event()
+        tracked_descendants: list[_MCPPosixDescendants] = []
+        _reap_mcp_posix_guardian(
+            guardian, server_name, session_closed, emergency, completed,
+            descendants=tracked_descendants,
+        )
+        try:
+            # AnyIO's public open_process omits Python's process_group option;
+            # its active backend forwards it to the same asyncio subprocess.
+            process = await get_async_backend().open_process(
+                [command, *args], stdin=subprocess.PIPE, stdout=subprocess.PIPE,
+                env=env, stderr=errlog, cwd=cwd, process_group=guardian.pid,
+            )
+        except BaseException:
+            _close_mcp_posix_control(control_write)
+            emergency.set()
+            if not completed.wait(_MCP_POSIX_SESSION_CLEANUP_SECONDS + 2):
+                _LOGGER.warning("MCP stdio guardian for server %r did not finish failed-launch cleanup", server_name)
+            raise
+        try:
+            descendants = _MCPPosixDescendants(process.pid, guardian.pid)
+            tracked_descendants.append(descendants)
+            if process.stdin is not None:
+                if not hasattr(process, "_stdin"):
+                    raise RuntimeError("MCP stdio process has no tracked input stream")
+                process._stdin = _MCPPosixInput(process.stdin, descendants)
+        except BaseException:
+            _close_mcp_posix_control(control_write)
+            emergency.set()
+            try:
+                process.kill()
+            except ProcessLookupError:
+                pass
+            except OSError as exc:
+                _LOGGER.warning("MCP stdio process cleanup failed: %s", exc)
+            await process.wait()
+            completed.wait(_MCP_POSIX_SESSION_CLEANUP_SECONDS + 2)
+            raise
+        started_groups[process.pid] = (guardian, control_write, emergency, descendants)
+        return process
+
+    async def terminate(process: Any) -> None:
+        # The SDK assumes the server PID is its group ID. Here the guardian
+        # owns the group, so let it perform both signals before SDK reaping.
+        if not notify(process.pid):
+            await original_terminate(process)
+
+    with _MCP_POSIX_PROCESS_FACTORY_LOCK:
+        original_create = mcp_stdio._create_platform_compatible_process
+        original_terminate = mcp_stdio._terminate_process_tree
+        mcp_stdio._create_platform_compatible_process = create
+        mcp_stdio._terminate_process_tree = terminate
+        try:
+            yield
+        finally:
+            mcp_stdio._create_platform_compatible_process = original_create
+            mcp_stdio._terminate_process_tree = original_terminate
+            for pid in started_groups:
+                notify(pid)
+            session_closed.set()
 
 
 def _trusted_codex_runtime_roots() -> tuple[str, ...]:
@@ -1795,7 +2357,7 @@ class MCPScannerWrapper:
                 scan_kwargs["analyzers"] = analyzers
 
             errors: list[tuple[str, str]] = []
-            with _capture_sdk_error_logs(errors):
+            with _contained_mcp_posix_process_factory(entry.name), _capture_sdk_error_logs(errors):
                 results = asyncio.run(scanner.scan_mcp_config_file(**scan_kwargs))
 
             # Partition captured ERROR logs. An unreachable *LLM backend*
@@ -1979,6 +2541,10 @@ class MCPScannerWrapper:
             analyzer = getattr(sf, "analyzer", "")
             if analyzer in _DEFENSECLAW_YARA_ANALYZER_NAMES:
                 analyzer = "YARA"
+            # The SDK reports UNKNOWN for a missing or unrecognized threat_type.
+            # Give that YARA finding a valid severity.
+            if analyzer == "YARA" and severity == "UNKNOWN":
+                severity = "HIGH"
             scanner_name = f"mcp-scanner/{analyzer}" if analyzer else "mcp-scanner"
 
             findings.append(Finding(

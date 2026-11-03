@@ -157,6 +157,11 @@ type ToolInspectVerdict struct {
 	// sandbox unblock lift (liftUnblockedDestinations) must keep such a
 	// verdict. Never serialized.
 	laneVerdict bool
+	// decisionConfirm reports that the confirm action came from the
+	// decision model answering without the LLM judge (cascade 2). Where the
+	// agent cannot ask, such a confirm is the HIGH alert the judge mapping
+	// gives, not a block (decisionConfirmWithoutAsk). Never serialized.
+	decisionConfirm bool
 }
 
 // applyMode stamps the active guardrail mode onto the verdict and,
@@ -477,6 +482,11 @@ func mergeWithLaneVerdict(local *ToolInspectVerdict, aid *ScanVerdict, findingTa
 	// findings + reason so the audit trail shows both lanes.
 	if rank(aid.Action) > rank(local.Action) {
 		local.Action = aid.Action
+		local.decisionConfirm = aid.decisionConfirm && strings.EqualFold(aid.Action, guardrailActionConfirm)
+	} else if rank(aid.Action) == rank(local.Action) && !aid.decisionConfirm {
+		// Another lane confirms too: the confirm is not the decision
+		// model's alone.
+		local.decisionConfirm = false
 	}
 	if sevRank(aid.Severity) > sevRank(local.Severity) {
 		local.Severity = aid.Severity
@@ -1516,7 +1526,9 @@ func (a *APIServer) runHookJudge(ctx context.Context, strategyDirection, judgeDi
 				if combined == nil {
 					combined = &ScanVerdict{Action: guardrailActionAllow, Severity: "NONE"}
 				}
-				if strongerGuardrailAction(combined.Action, verdict.Action) != combined.Action {
+				raises := strongerGuardrailAction(combined.Action, verdict.Action) != combined.Action
+				combined.decisionConfirm = meetDecisionConfirm(combined.decisionConfirm, combined.Action, verdict, raises)
+				if raises {
 					combined.Action, combined.Reason = verdict.Action, verdict.Reason
 				}
 				if guardrailSeverityRank(verdict.Severity) > guardrailSeverityRank(combined.Severity) {
@@ -1562,12 +1574,14 @@ func meetMemberJudgeCurrent(ctx context.Context, connector string, current *Tool
 	return &ToolInspectVerdict{
 		Action:   profileMeetActionForFindings(ctx, memberConfig, connector, own, true, true),
 		Severity: HighestSeverity(own),
+		// The member's own findings decide whether its verdict is decisive
+		// (regexJudgeLocalVerdictDecisive), as for a single profile.
+		DetailedFindings: own,
 	}
 }
 
-func (a *APIServer) runHookJudgeSingle(ctx context.Context, strategyDirection, judgeDirection, connector, content, toolName string, current *ToolInspectVerdict) *ScanVerdict {
-	judge := a.judgeFor(ctx)
-	if judge == nil || content == "" {
+func (a *APIServer) runHookJudgeSingle(ctx context.Context, strategyDirection, judgeDirection, connector, content, toolName string, current *ToolInspectVerdict) (out *ScanVerdict) {
+	if content == "" {
 		return nil
 	}
 	// Gate on the configuration of the generation the judge came from: the
@@ -1580,22 +1594,16 @@ func (a *APIServer) runHookJudgeSingle(ctx context.Context, strategyDirection, j
 	if cfg == nil {
 		return nil
 	}
-	jcfg := &cfg.Guardrail.Judge
-	if !jcfg.HookConnectorEnabled(connector) {
+	judge, strategy := a.hookLaneJudge(ctx, cfg, strategyDirection, connector)
+	if judge == nil {
 		return nil
 	}
 
-	switch cfg.Guardrail.EffectiveStrategy(strategyDirection) {
+	switch strategy {
 	case "judge_first":
 		// Judge always runs.
 	case "regex_judge":
-		// A regex/AID verdict that already blocks, or is CRITICAL, is
-		// decisive: the judge cannot raise it. A HIGH verdict that only
-		// alerts (block-at CRITICAL) is not, so the judge still runs and
-		// the stronger verdict wins; skipping it let a prompt with more
-		// sensitive data through where the judge blocked less (GAP-1677).
-		if current != nil && (strings.EqualFold(current.Action, "block") ||
-			severityRank[strings.ToUpper(current.Severity)] >= severityRank["CRITICAL"]) {
+		if regexJudgeLocalVerdictDecisive(cfg, current) {
 			return nil
 		}
 	default: // regex_only / unset
@@ -1612,6 +1620,26 @@ func (a *APIServer) runHookJudgeSingle(ctx context.Context, strategyDirection, j
 		fmt.Fprintf(os.Stderr, "[inspect] hook judge skipped (deadline too short) connector=%s direction=%s; keeping regex/AID verdict\n",
 			connector, strategyDirection)
 		return nil
+	}
+
+	if strategy == "regex_judge" && regexJudgeEscalatedCritical(cfg, current) &&
+		sandboxHookMode(ctx, connector, cfg.HookModeForConnector(connector)) == "action" &&
+		cfg.EffectiveHookOutageFailModeForConnector(connector) == "closed" {
+		// The call is here only because its CRITICAL finding cannot block on
+		// its own: the judge is what decides it. When the judge gives no
+		// verdict (an error, a timeout, a late answer, no capacity or hook
+		// budget left), the call follows the connector's hook fail mode, as
+		// for a gateway outage: closed (strict tier, managed hosts, or an
+		// explicit closed) refuses it; open (the default and permissive
+		// tiers of a per-user install) keeps the rule verdict with the
+		// fallback warning and metric below. Secure Client never escalates.
+		defer func() {
+			if out == nil {
+				fmt.Fprintf(os.Stderr, "[inspect] hook judge gave no verdict on an escalated CRITICAL finding connector=%s direction=%s; hook_fail_mode closed: refusing\n",
+					connector, strategyDirection)
+				out = escalatedJudgeFailClosedVerdict()
+			}
+		}()
 	}
 
 	timeout := hookJudgeTimeout(cfg)
@@ -1647,15 +1675,19 @@ func (a *APIServer) runHookJudgeSingle(ctx context.Context, strategyDirection, j
 	fallback := func(reason string) {
 		fallbackOnce.Do(func() { a.recordHookJudgeFallback(context.WithoutCancel(ctx), connector, reason) })
 	}
+	// A rule finding is a floor: the decision model cannot skip the judge on
+	// a call the rules flagged (escalate-on-confirm). Read it here, before
+	// the judge can run apart from the answer: the caller folds this run's
+	// verdict (an escalated fail-closed refusal included) into current while
+	// a late judge is still running.
+	ruleFloor := rulesFlagged(current)
 	call := func(callCtx context.Context) *ScanVerdict {
 		jctx, cancel := context.WithTimeout(callCtx, timeout)
 		defer cancel()
 		jctx = withJudgeSuppressionPack(jctx, pack)
 		var v *ScanVerdict
 		if strings.EqualFold(strategyDirection, "tool_call") {
-			// A rule finding is a floor: the decision model cannot skip the
-			// judge on a call the rules flagged (escalate-on-confirm).
-			jctx = withDecisionRuleFloor(jctx, rulesFlagged(current))
+			jctx = withDecisionRuleFloor(jctx, ruleFloor)
 			v = judge.RunToolJudge(jctx, toolName, content)
 		} else {
 			v = judge.RunJudges(jctx, judgeDirection, content, toolName)
@@ -1715,6 +1747,102 @@ func (a *APIServer) runHookJudgeSingle(ctx context.Context, strategyDirection, j
 	return nil
 }
 
+// regexJudgeLocalVerdictDecisive reports whether the rule/AID verdict settles
+// the call under regex_judge, so the judge is not asked: the verdict already
+// blocks, or a finding that can enforce is CRITICAL. A HIGH verdict that only
+// alerts (block_at CRITICAL) is not decisive, so the judge runs and the
+// stronger verdict wins (GAP-1677). Neither is a CRITICAL finding that cannot
+// block: a detection-only or alert-only tool-call finding (a pattern match
+// whose effect the parser did not prove) left the judge out of exactly the
+// calls the rules flag but cannot decide, and they ran. Secure Client keeps
+// the verdict severity (issue #1092).
+func regexJudgeLocalVerdictDecisive(cfg *config.Config, current *ToolInspectVerdict) bool {
+	if current == nil {
+		return false
+	}
+	if strings.EqualFold(current.Action, guardrailActionBlock) {
+		return true
+	}
+	severity := current.Severity
+	if len(current.DetailedFindings) > 0 && (cfg == nil || !cfg.SecureClientIntegration()) {
+		severity = HighestSeverity(enforceableRuleFindings(current.DetailedFindings))
+	}
+	return severityRank[strings.ToUpper(severity)] >= severityRank["CRITICAL"]
+}
+
+// regexJudgeEscalatedCritical reports a call that reaches the judge under
+// regex_judge only because its CRITICAL findings cannot enforce
+// (regexJudgeLocalVerdictDecisive): before that rule the call was decisive
+// and skipped the judge.
+func regexJudgeEscalatedCritical(cfg *config.Config, current *ToolInspectVerdict) bool {
+	if current == nil || (cfg != nil && cfg.SecureClientIntegration()) || regexJudgeLocalVerdictDecisive(cfg, current) {
+		return false
+	}
+	return severityRank[strings.ToUpper(current.Severity)] >= severityRank["CRITICAL"]
+}
+
+// escalatedJudgeUnavailableFinding names the refusal of an escalated call
+// whose judge gave no verdict under hook_fail_mode closed.
+const escalatedJudgeUnavailableFinding = "JUDGE-UNAVAILABLE-ESCALATED"
+
+func escalatedJudgeFailClosedVerdict() *ScanVerdict {
+	return &ScanVerdict{
+		Action:   guardrailActionBlock,
+		Severity: "CRITICAL",
+		Reason: "judge-unavailable: a CRITICAL finding the rules cannot prove needs the LLM judge, " +
+			"which gave no verdict; hook_fail_mode is closed",
+		Findings:       []string{escalatedJudgeUnavailableFinding},
+		Scanner:        "llm-judge",
+		ScannerSources: []string{"llm-judge"},
+	}
+}
+
+// meetDecisionConfirm is the decisionConfirm of a profile meet after member
+// verdict v: v's own when v raises the action to a confirm, cleared when v
+// confirms at the same action for another reason, else unchanged. Only the
+// decision model's cascade-2 lane confirms on the hook lane today, so the
+// clear is a guard for any other confirming lane.
+func meetDecisionConfirm(current bool, action string, v *ScanVerdict, raises bool) bool {
+	if raises {
+		return v.decisionConfirm && v.Action == guardrailActionConfirm
+	}
+	if v.Action == action && !v.decisionConfirm {
+		return false
+	}
+	return current
+}
+
+// hookLaneJudge picks the judge of one hook-lane call and the detection
+// strategy it runs under, or nil when no model judges the call:
+//   - the LLM judge (with the decision model in front when one is on, cascade
+//     3) for a connector in guardrail.judge.hook_connectors under a judge
+//     strategy;
+//   - else, for a tool call of a connector in decision_model.hook_connectors,
+//     the decision model alone (cascade 2). It runs like regex_judge: a rule
+//     verdict that already blocks, or has a CRITICAL finding that can
+//     enforce, is decisive (regexJudgeLocalVerdictDecisive); judge_first
+//     runs it on every call;
+//   - else nothing (rules only).
+func (a *APIServer) hookLaneJudge(ctx context.Context, cfg *config.Config, strategyDirection, connector string) (*LLMJudge, string) {
+	strategy := cfg.Guardrail.EffectiveStrategy(strategyDirection)
+	if judge := a.judgeFor(ctx); judge != nil && cfg.Guardrail.Judge.HookConnectorEnabled(connector) &&
+		(strategy == "judge_first" || strategy == "regex_judge") {
+		return judge, strategy
+	}
+	if !strings.EqualFold(strategyDirection, "tool_call") || cfg.SecureClientIntegration() ||
+		!cfg.DecisionModel.AnswersAlone(connector) {
+		return nil, ""
+	}
+	judge := a.decisionJudgeFor(ctx)
+	if judge == nil {
+		return nil, ""
+	}
+	if strategy != "judge_first" {
+		strategy = "regex_judge"
+	}
+	return judge, strategy
+}
+
 // hookJudgeLaneVerdict is the hook-lane verdict of judge result v: nil when
 // the judge gave none (the caller keeps the regex/AID verdict), else v with
 // its action set by the connector block_at / alert_at.
@@ -1740,6 +1868,9 @@ func hookJudgeLaneVerdict(cfg *config.Config, connector, strategyDirection strin
 		// (GAP-0235). Secure Client keeps the judge action (issue #1092).
 		out := *v
 		out.Action = guardrailContentAction(cfg, connector, v.Severity, false)
+		if v.decisionConfirm {
+			out.Action = decisionModelConfirmAction(cfg, connector, v.Severity)
+		}
 		return &out
 	}
 	return v

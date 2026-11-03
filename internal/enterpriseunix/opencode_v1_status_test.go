@@ -154,3 +154,45 @@ func TestMachineWideOpenCodeV1IsOneWarningWithTheUserCount(t *testing.T) {
 		t.Fatalf("every account must still be audited: %d of 7", audited)
 	}
 }
+
+// GAP-0071 (rc21, managed RHEL): accounts whose OpenCode V1 is known by its
+// version alone (no install path) print no per-account line next to the one
+// machine-wide line; they count in it.
+func TestMachineWideOpenCodeV1CountsAccountsWithoutAnInstallPath(t *testing.T) {
+	h := newTestHost(t, "linux")
+	requireOK(t, h.run(Options{Action: ActionInstall, PayloadDir: h.payload("1.0.0")}))
+	machine := "/opt/dc-agents/lib/node_modules/opencode-ai"
+	var agents []enterprisehooks.UnprotectedAgent
+	for i, user := range []string{"alice", "bob", "carol", "dave", "erin", "frank"} {
+		uid := 1001 + i
+		path := machine
+		if i >= 3 {
+			path = "" // the account's row carries the version only
+		}
+		agents = append(agents, enterprisehooks.UnprotectedAgent{User: user, UID: &uid, Connector: "opencode", Version: "1.18.34", InstallPath: path,
+			Code: enterprisehooks.UnprotectedCodeHookContractUnverified, Reason: "version 1.18.34 is not verified against a known hook contract"})
+	}
+	data, err := enterprisehooks.MarshalUnprotectedAgents(agents)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(h.env.P(enterprisehooks.UnprotectedAgentsPath(h.env.Layout.ManifestPath)), data, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	writeFreshLedger(t, h)
+	for _, action := range []string{ActionStatus, ActionVerify} {
+		result := h.run(Options{Action: action})
+		var lines []string
+		for _, m := range result.Warnings {
+			if m.Code == enterprisehooks.UnprotectedCodeOpenCodeV1 {
+				lines = append(lines, m.Message)
+			}
+		}
+		if len(lines) != 1 || !strings.Contains(lines[0], "machine-wide copy and is not protected for 6 users") || !strings.Contains(lines[0], machine) {
+			t.Fatalf("%s: want one machine-wide line for 6 users, got %d: %q", action, len(lines), lines)
+		}
+		if result.CoverageComplete || result.SecurityComplete {
+			t.Fatalf("%s: coverage=%v security=%v with OpenCode V1 installed", action, result.CoverageComplete, result.SecurityComplete)
+		}
+	}
+}

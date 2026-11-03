@@ -66,13 +66,19 @@ import (
 //	trace, request ID (always minted), correlation (identity from the
 //	              binding's host user)
 //	authorize     route allowlist and connector match (404/403),
-//	              per-binding limiter with separate hook and OTLP
-//	              slots (429), in-flight tracking
+//	              per-binding limiter with separate hook, delivery
+//	              receipt and OTLP slots (429), in-flight tracking
 //	metrics, CSRF, body limit (OTLP far below the host receiver's cap)
 //	idempotency   replay of a retried hook post by key
 //	mux           hook / notify / inspect / OTLP handlers
 
 const (
+	// This fixed, unauthenticated response identifies a sandbox ingress
+	// listener to the local managed daemon when a port bind fails. It carries
+	// no account, sandbox or process state.
+	sandboxIngressIdentityPath   = "/.well-known/defenseclaw-sandbox-ingress"
+	sandboxIngressIdentityHeader = "X-DefenseClaw-Sandbox-Ingress"
+	sandboxIngressIdentityValue  = "1"
 	// SandboxHookIdempotencyHeader carries a retry-stable key on sandbox hook
 	// posts. OpenShell's relay occasionally drops a response after the
 	// gateway processed the request; the hook retries once with the same key
@@ -602,7 +608,15 @@ func (a *APIServer) newSandboxIngressHandler(st *sandboxIngressState) http.Handl
 	h = CorrelationMiddleware(reg)(h)
 	h = sandboxRequestIDMiddleware(h)
 	h = inboundTraceContextMiddleware(h)
-	return a.sandboxIngressAuthenticate(st, h)
+	authenticated := a.sandboxIngressAuthenticate(st, h)
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodHead && r.URL.Path == sandboxIngressIdentityPath {
+			w.Header().Set(sandboxIngressIdentityHeader, sandboxIngressIdentityValue)
+			w.WriteHeader(http.StatusNoContent)
+			return
+		}
+		authenticated.ServeHTTP(w, r)
+	})
 }
 
 // sandboxIngressMux registers the only handlers the ingress serves and
@@ -796,7 +810,19 @@ func (a *APIServer) sandboxIngressAuthorize(
 			}
 			return
 		}
-		release, err := st.limiter.Acquire(binding, route.class)
+		// A delivery receipt confirms an answer the hook budget already
+		// admitted: it takes the receipt bucket (GAP-0490).
+		var release func()
+		var err error
+		pendingHook := route.class == sandboxauth.RouteHook && !claimsSandboxHookReceipt(r)
+		switch {
+		case route.class == sandboxauth.RouteHook && claimsSandboxHookReceipt(r):
+			release, err = st.limiter.AcquireReceipt(binding)
+		case pendingHook:
+			release, err = st.limiter.AcquirePendingHook(binding)
+		default:
+			release, err = st.limiter.Acquire(binding, route.class)
+		}
 		if err != nil {
 			w.Header().Set("Retry-After", "1")
 			writeSandboxIngressError(w, http.StatusTooManyRequests, err.Error())
@@ -816,6 +842,11 @@ func (a *APIServer) sandboxIngressAuthorize(
 			r.Header.Del(header)
 		}
 		ctx := withSandboxIngressRoute(r.Context(), route.class)
+		if pendingHook {
+			ctx = withSandboxHookBudgetCharge(ctx, func(receipt bool) error {
+				return st.limiter.ChargeHookBody(binding, receipt)
+			})
+		}
 		ctx, outcome := withSandboxHookOutcome(ctx)
 		switch route.class {
 		case sandboxauth.RouteHook, sandboxauth.RouteNotify:

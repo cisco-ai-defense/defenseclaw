@@ -144,6 +144,9 @@ const agentRegistryMaxSessions = 4096
 type sessionEntry struct {
 	AgentInstanceID string
 	LastSeen        time.Time
+	// Hermes reports its logical agent id on some events in a session and
+	// omits it on others. Keep the first reported id with the bounded session.
+	HermesAgentID string
 }
 
 // NewAgentRegistry constructs a registry with a fresh sidecar
@@ -268,6 +271,28 @@ func (r *AgentRegistry) agentInstanceFor(agentIdentityID, sessionID string) (str
 		}
 	}
 	return instance, true
+}
+
+// hermesAgentIDForSession keeps the first reported logical id for Hermes
+// events that omit it later. The caller has already resolved the session,
+// and the key includes the host-derived agent identity and sandbox scope.
+func (r *AgentRegistry) hermesAgentIDForSession(ctx context.Context, agentIdentityID, sessionID, reportedID string) string {
+	if r == nil || ManagedEnterpriseActive() || agentIdentityID == "" || sessionID == "" {
+		return ""
+	}
+	sessionID = sandboxSessionStateKey(ctx, sessionID)
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	key := r.keyLocked(agentIdentityID, sessionID)
+	entry, ok := r.sessions[key]
+	if !ok {
+		return ""
+	}
+	if entry.HermesAgentID == "" && reportedID != "" {
+		entry.HermesAgentID = reportedID
+		r.sessions[key] = entry
+	}
+	return entry.HermesAgentID
 }
 
 // keyLocked returns the cache key of a lookup. Traffic without an agent

@@ -54,6 +54,7 @@ func (l *lifecycle) describeStatusV2(record *Deployment) {
 	if r.Identity == nil {
 		r.Identity = enterprisestatus.IdentityGatewayNotReady()
 	}
+	l.describeAccountJoin()
 }
 
 // describeConnectors builds the connectors block from the installed config,
@@ -84,6 +85,7 @@ func (l *lifecycle) describeConnectors(record *Deployment) {
 	if cfg != nil {
 		in.ConfigLoaded = true
 		in.Enabled = enterprisehooks.EffectiveUnixHookConnectors(cfg, registry)
+		in.Disabled = cfg.Guardrail.DisabledConnectors()
 		in.Mode = cfg.EffectiveGuardrailModeForConnector
 	}
 	switch manifest, err := enterprisehooks.LoadStandaloneManifest(env.P(env.Layout.ManifestPath)); {

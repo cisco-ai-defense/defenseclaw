@@ -28,7 +28,7 @@ case "${1:-}" in
 esac
 if [ "${1:-}" = purge ]; then
     rm -rf /etc/defenseclaw /var/lib/defenseclaw /var/lib/defenseclaw-hook-guardian \
-        /var/log/defenseclaw
+        /var/lib/defenseclaw-foreign-hook-clean /var/log/defenseclaw
     # The lock goes below, under its own flock.
     find "$lifecycle" -mindepth 1 -maxdepth 1 ! -name lifecycle.lock -exec rm -rf -- {} + 2>/dev/null || true
 fi

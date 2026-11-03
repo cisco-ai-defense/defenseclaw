@@ -8,6 +8,19 @@ for released versions and assets, and the
 [documentation website](https://cisco-ai-defense.github.io/defenseclaw/docs/)
 for current behavior.
 
+## [Unreleased] — 1.0.7
+
+### Changed
+- **Audit retention now warns when its size cap remains unmet after a completed pass.** A long active session can keep correlation state above `observability.local.max_store_mb` even after old audit rows are deleted. Status and doctor report the used size, cap and retention reason with advice; the warning clears after a pass meets the cap and never blocks tool calls (GAP-0408).
+- **A sandbox create refused because of a shell setting in `--env` says which one.** `--env SHELLOPTS=noexec` (or `BASHOPTS`) stops the shell of the workload check from running its script, so the create was refused (and the sandbox deleted) with only "the check's answer was cut short". The refusal now names the setting and says to run the sandbox again without it. The refusal itself and which values it covers are unchanged (GAP-0352).
+
+### Fixed
+- **Managed sandbox port conflicts name the actual cause.** Doctor checks the ingress and egress ports while the daemon is idle; status and run distinguish another account's sandbox daemon from an ordinary process and say which port to free or change (GAP-0521).
+- **The managed hook guardian repairs another account's changed token while one account needs retries.** A failing target no longer makes the guardian treat a healthy target's queued file event as the failed repair's own write, or move that target's retry deadline. The affected token is checked from its fsnotify event instead of waiting for the next retry pass (rel-1-0-6:GAP-0523).
+- **Inline Python that imports other modules beside `socket` and connects to a literal address is refused like the plain form (#1393).** `CMD-PYTHON-SOCKET-CONNECT` matched only `import socket`; an import list such as `import socket,subprocess,os` left the connect unproven, so the call ran. Loopback, link-local and calls without a connect still pass.
+- **Under `regex_judge`, a CRITICAL tool-call finding the rules cannot enforce goes to the LLM judge.** A detection-only finding (a pattern match whose effect the parser did not prove) counted as decisive because of its CRITICAL severity, so the judge never saw the call and it ran. The judge now reviews it and the stricter verdict wins; a result that already blocks, or a CRITICAL finding the rules can enforce, still skips the judge. When the judge gives no verdict on such a call (an error, a timeout, a late answer), it follows `hook_fail_mode` as during a gateway outage: refused where that is closed (strict tier, managed hosts, explicit `closed`), run with a warning in the default and permissive tiers. Secure Client is unchanged.
+- **Codex no longer spawns notifiers without end when computer-use wraps DefenseClaw's notifier.** Re-running `setup codex` after the Codex computer-use plugin wrapped `notify` saved the wrapped command as the original, so each turn end started computer-use and `defenseclaw-hook notify` in turn until Codex quit. Setup and the notifier now drop DefenseClaw's own notifier from the original, so a backup saved by an earlier release stops looping without re-running setup. Setup also takes DefenseClaw's notifier out of a wrapper still in `config.toml`, also when one wrapper wraps another or uses `--previous-notify=`, and keeps the notifier of yours it ran; a notifier that calls DefenseClaw's back with the same turn ends the chain after one pass (`DEFENSECLAW_CODEX_NOTIFY_CHAINED`, the SHA-256 of that turn's payload; a constant or inherited value suppresses nothing).
+
 ## [Unreleased] — 1.0.6
 
 ### Changed

@@ -96,6 +96,10 @@ var credentialPrefixes = []credentialPrefix{
 	{prefix: "xoxa-", minLen: 24, label: "slack-app"},
 	{prefix: "xoxr-", minLen: 24, label: "slack-refresh"},
 	{prefix: "eyJ", minLen: 32, requireRune: '.', label: "jwt"},
+	// The account join key (internal/accountjoin) is pseudonymised
+	// personal data reported only in the root-only status: never in a
+	// telemetry field.
+	{prefix: "ak1:", minLen: 34, label: "account-join-key"},
 }
 
 // AssertNoCredentials returns an error wrapping ErrCredentialDetected

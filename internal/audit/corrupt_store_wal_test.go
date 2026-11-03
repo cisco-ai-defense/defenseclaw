@@ -316,7 +316,7 @@ func TestOpenDaemonStoreProbeFailureKeepsWALSet(t *testing.T) {
 	before := auditSetBytes(t, path)
 	injected := errors.New("injected read-only probe failure")
 	original := probeExistingAuditStore
-	probeExistingAuditStore = func(string, io.Writer) ([]auditSidecarAtStart, error) { return nil, injected }
+	probeExistingAuditStore = func(string, io.Writer) (auditStoreProbe, error) { return auditStoreProbe{}, injected }
 	t.Cleanup(func() { probeExistingAuditStore = original })
 	store, err := OpenDaemonStore(path, &bytes.Buffer{})
 	if store != nil || !errors.Is(err, injected) {
@@ -494,8 +494,8 @@ func TestOpenDaemonStoreWarnsWhenALateOpenConsumesWAL(t *testing.T) {
 		t.Fatal(err)
 	}
 	original := probeExistingAuditStore
-	probeExistingAuditStore = func(string, io.Writer) ([]auditSidecarAtStart, error) {
-		return []auditSidecarAtStart{{suffix: "-wal", size: wal.Size()}}, nil
+	probeExistingAuditStore = func(string, io.Writer) (auditStoreProbe, error) {
+		return auditStoreProbe{sidecars: []auditSidecarAtStart{{suffix: "-wal", size: wal.Size()}}}, nil
 	}
 	t.Cleanup(func() { probeExistingAuditStore = original })
 	var warning bytes.Buffer

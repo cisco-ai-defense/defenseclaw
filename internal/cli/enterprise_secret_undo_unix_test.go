@@ -9,6 +9,7 @@
 package cli
 
 import (
+	"context"
 	"crypto/sha256"
 	"encoding/hex"
 	"os"
@@ -19,6 +20,18 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/enterpriseunix"
 	"github.com/defenseclaw/defenseclaw/internal/managed"
 )
+
+type unixSecretTestAccount struct{}
+
+func (unixSecretTestAccount) Lookup(_ context.Context, name string) (enterpriseunix.Account, bool, error) {
+	return enterpriseunix.Account{Name: name, UID: 1001, GID: 1001}, true, nil
+}
+
+func (unixSecretTestAccount) Ensure(_ context.Context, name string) (enterpriseunix.Account, error) {
+	return enterpriseunix.Account{Name: name, UID: 1001, GID: 1001}, nil
+}
+
+func (unixSecretTestAccount) Remove(context.Context, string) error { return nil }
 
 // GAP-1173: the installed config references credential ai-key with no value
 // stored, and a failed rotation added the value. The put-back (remove
@@ -50,14 +63,27 @@ func TestUnixPutBackRemovesTheCredentialAFailedRotationAdded(t *testing.T) {
 		{"put-back on a config installed since", append(append([]byte{}, before...), "# since\n"...),
 			enterpriseSecretOptions{undoRotation: "none", undoConfig: sum(before), ifStored: sum([]byte(value))}, false, "credential_in_use"},
 		{"plain remove of a referenced credential", before, enterpriseSecretOptions{}, false, ""},
+		{"plain remove without config", nil, enterpriseSecretOptions{}, false, "state_invalid"},
+		{"put-back without config from a prior config", nil,
+			enterpriseSecretOptions{undoRotation: "none", undoConfig: sum(before), ifStored: sum([]byte(value))}, false, "state_invalid"},
+		{"put-back without config when none was installed before", nil,
+			enterpriseSecretOptions{undoRotation: "none", undoConfig: "none", ifStored: sum([]byte(value))}, true, ""},
+		{"put-back on malformed config", []byte("guardrail: [\n"),
+			enterpriseSecretOptions{undoRotation: "none", undoConfig: "none", ifStored: sum([]byte(value))}, false, "state_invalid"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			root := t.TempDir()
-			env := &enterpriseunix.Env{GOOS: enterpriseunix.CurrentGOOS(), Root: root, Layout: layout}
-			for path, data := range map[string][]byte{
-				env.P(layout.ConfigPath):                          tc.installed,
+			env := &enterpriseunix.Env{GOOS: enterpriseunix.CurrentGOOS(), Root: root, Layout: layout,
+				Trust:    func(string, enterpriseunix.TrustKind) error { return nil },
+				Accounts: unixSecretTestAccount{},
+				OwnerOf:  func(string) (int, int, error) { return 1001, 1001, nil }}
+			files := map[string][]byte{
 				filepath.Join(env.P(layout.SecretsDir), "ai-key"): []byte(value),
-			} {
+			}
+			if tc.installed != nil {
+				files[env.P(layout.ConfigPath)] = tc.installed
+			}
+			for path, data := range files {
 				if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
 					t.Fatal(err)
 				}
