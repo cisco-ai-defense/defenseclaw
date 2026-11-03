@@ -3043,7 +3043,7 @@
                 },
                 {
                   "id": "PATH-ETC-SUDOERS",
-                  "expression": "f.paths.exists(p, (p.resolved.matches('(?i)^(?:/private)?/etc/sudoers$') || p.normalized.matches('(?i)^(?:/private)?/etc/sudoers$')) && p.access in [defenseclaw.guardrail.semantic.v1.PathAccess.PATH_ACCESS_WRITE, defenseclaw.guardrail.semantic.v1.PathAccess.PATH_ACCESS_APPEND, defenseclaw.guardrail.semantic.v1.PathAccess.PATH_ACCESS_DELETE])",
+                  "expression": "f.paths.exists(p, p.resolved.matches('(?i)^(?:/private)?/etc/sudoers$') && p.access in [defenseclaw.guardrail.semantic.v1.PathAccess.PATH_ACCESS_WRITE, defenseclaw.guardrail.semantic.v1.PathAccess.PATH_ACCESS_APPEND, defenseclaw.guardrail.semantic.v1.PathAccess.PATH_ACCESS_DELETE])",
                   "pattern": "a^",
                   "title": "/etc/sudoers access",
                   "severity": "HIGH",
@@ -3165,7 +3165,7 @@
                 {
                   "id": "persistence.shell_profile_write",
                   "tool_call_only": true,
-                  "expression": "f.commands.exists(c, f.paths.exists(p, p.command_id == c.id && p.access in [defenseclaw.guardrail.semantic.v1.PathAccess.PATH_ACCESS_WRITE, defenseclaw.guardrail.semantic.v1.PathAccess.PATH_ACCESS_APPEND, defenseclaw.guardrail.semantic.v1.PathAccess.PATH_ACCESS_DELETE]))",
+                  "expression": "f.paths.exists(p, p.access in [defenseclaw.guardrail.semantic.v1.PathAccess.PATH_ACCESS_WRITE, defenseclaw.guardrail.semantic.v1.PathAccess.PATH_ACCESS_APPEND, defenseclaw.guardrail.semantic.v1.PathAccess.PATH_ACCESS_DELETE])",
                   "pattern": "a^",
                   "title": "Shell startup profile mutation",
                   "severity": "MEDIUM",
