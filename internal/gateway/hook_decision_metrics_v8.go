@@ -163,6 +163,10 @@ func (a *APIServer) emitHookDecisionLogV8(
 		// when a later gateway process writes its record.
 		policy := req.pendingProvenance.decisionPolicyOr(ctx)
 		managed := policy.sandbox
+		var agentInstanceID observability.Optional[string]
+		if cfg := a.decisionConfig(ctx); cfg == nil || !cfg.SecureClientIntegration() {
+			agentInstanceID = hookV8OptionalIdentifier(auditEnvelope.AgentInstanceID)
+		}
 		identityInput := observability.LogCompatHookDecisionInput{
 			DefenseClawGuardrailProfileName: policy.profile.Name, DefenseClawGuardrailProfileDigest: policy.profile.Digest,
 			DefenseClawPolicyEffectiveDigest: policy.digest, DefenseClawPolicyGeneration: policy.generation,
@@ -179,7 +183,7 @@ func (a *APIServer) emitHookDecisionLogV8(
 			DefenseClawUserName:                 v8UserName(meta.UserName, hookV8OptionalIdentifier),
 			DefenseClawUserEmail:                v8UserEmail(meta.UserEmail),
 			DefenseClawAgentIdentityID:          agentIdentityV8FromContext(ctx),
-			DefenseClawAgentInstanceID:          hookV8OptionalIdentifier(auditEnvelope.AgentInstanceID),
+			DefenseClawAgentInstanceID:          agentInstanceID,
 			DefenseClawPolicyID:                 hookV8OptionalIdentifier(meta.PolicyID),
 			DefenseClawDestinationApp:           hookV8OptionalIdentifier(meta.DestinationApp),
 			GenAIConversationID:                 hookV8OptionalIdentifier(meta.SessionID),
