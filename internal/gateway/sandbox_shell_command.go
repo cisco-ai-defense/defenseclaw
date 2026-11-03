@@ -140,6 +140,7 @@ func (a *APIServer) inspectSandboxShellToolPolicyCtx(
 		LegacyText:                    string(command),
 		Connector:                     action.Connector,
 		EnforcementCapable:            action.EnforcementCapable,
+		ManagedHookOverflowHold:       action.ManagedHookOverflowHold,
 		DowngradeReadOnlyDataArgs:     action.DowngradeReadOnlyDataArgs,
 		SkipLocalFilesystemResolution: action.SkipLocalFilesystemResolution,
 		ResolvedWriteTargets:          action.ResolvedWriteTargets,
