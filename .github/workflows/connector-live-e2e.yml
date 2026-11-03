@@ -176,12 +176,11 @@ jobs:
       - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
         with:
           persist-credentials: false
-          # Need history back to the PR base so the path diff below is accurate.
-          fetch-depth: 0
+          # The PR merge commit and its base parent cover the path diff below.
+          fetch-depth: 2
       - id: decide
         env:
           EVENT: ${{ github.event_name }}
-          BASE_SHA: ${{ github.event.pull_request.base.sha }}
         run: |
           set -euo pipefail
           # The Unix harness covers connectors with executable shell-hook
@@ -207,7 +206,7 @@ jobs:
             exit 0
           fi
 
-          changed="$(git diff --name-only "${BASE_SHA}"...HEAD)"
+          changed="$(git diff --name-only HEAD^1 HEAD)"
           echo "Changed files in PR:"
           printf '%s\n' "${changed}"
 

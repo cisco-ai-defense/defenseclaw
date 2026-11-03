@@ -103,12 +103,11 @@ def test_exhaustive_registry_workflow_always_reports_and_runs_selectively() -> N
     assert changes["outputs"] == {"telemetry": "${{ steps.detect.outputs.telemetry }}"}
     checkout = changes["steps"][0]
     assert checkout["if"] == "${{ github.event_name == 'pull_request' }}"
-    assert checkout["with"] == {"fetch-depth": "0", "persist-credentials": "false"}
+    assert checkout["with"] == {"fetch-depth": "2", "persist-credentials": "false"}
     detect = changes["steps"][1]
-    assert detect["env"]["BASE_SHA"] == "${{ github.event.pull_request.base.sha }}"
-    assert detect["env"]["HEAD_SHA"] == "${{ github.event.pull_request.head.sha }}"
+    assert detect["env"] == {"EVENT_NAME": "${{ github.event_name }}"}
     rendered_changes = _render(changes)
-    assert 'git diff --quiet "$BASE_SHA" "$HEAD_SHA" -- "${telemetry_paths[@]}"' in rendered_changes
+    assert 'git diff --quiet HEAD^1 HEAD^2 -- "${telemetry_paths[@]}"' in rendered_changes
     assert 'echo "telemetry=true" >> "$GITHUB_OUTPUT"' in rendered_changes
     assert 'echo "telemetry=false" >> "$GITHUB_OUTPUT"' in rendered_changes
 
