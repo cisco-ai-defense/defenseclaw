@@ -2700,6 +2700,20 @@ func enrichAgentHookContext(ctx context.Context, req agentHookRequest) context.C
 	ctx = ContextWithSessionID(ctx, req.SessionID)
 	identity := agentIdentityForGenericHook(ctx, req)
 	ctx = ContextWithAgentIdentity(ctx, identity)
+	var auditSessionID string
+	var auditIdentity AgentIdentity
+	if strings.EqualFold(req.ConnectorName, "hermes") && req.SessionID == "" &&
+		audit.EnvelopeFromContext(ctx).SessionID == "" &&
+		req.HookEventName == "transform_terminal_output" && identity.IdentityVerified {
+		if reg := SharedAgentRegistry(); reg != nil {
+			if session, agent, instance := reg.hermesRecentSession(ctx, identity.IdentityID, time.Now()); session != "" {
+				auditSessionID = session
+				auditIdentity = identity
+				auditIdentity.AgentID = agent
+				auditIdentity.AgentInstanceID = instance
+			}
+		}
+	}
 	// Refresh the audit correlation envelope with payload-derived
 	// correlation. CorrelationMiddleware snapshots the envelope
 	// from the HTTP headers BEFORE this handler runs; for hook
@@ -2715,6 +2729,9 @@ func enrichAgentHookContext(ctx context.Context, req agentHookRequest) context.C
 	// payload provides a more specific value, so a hook posted on
 	// a different session than the inbound header takes precedence.
 	ctx = refreshAuditEnvelopeFromHook(ctx, req, identity)
+	if auditSessionID != "" {
+		ctx = refreshAuditEnvelopeFromIdentity(ctx, auditSessionID, auditIdentity)
+	}
 	// Stamp the connector identity onto the audit envelope so every
 	// downstream surface (audit rows, canonical records, and routed exports) can filter by
 	// connector with the same identity. The hook payload's connector is

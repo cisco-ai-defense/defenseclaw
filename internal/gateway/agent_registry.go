@@ -149,6 +149,11 @@ type sessionEntry struct {
 	HermesAgentID string
 }
 
+// A sessionless Hermes transform follows a sessionful event in the same
+// tool exchange. Older sessions and concurrent sessions are not evidence of
+// which exchange produced it.
+const hermesSessionlessAuditWindow = 2 * time.Second
+
 // NewAgentRegistry constructs a registry with a fresh sidecar
 // instance id and the configured agent identity (may be empty).
 // Call exactly once at sidecar boot; pass the result to every
@@ -293,6 +298,30 @@ func (r *AgentRegistry) hermesAgentIDForSession(ctx context.Context, agentIdenti
 		r.sessions[key] = entry
 	}
 	return entry.HermesAgentID
+}
+
+// hermesRecentSession supplies audit correlation for an event that carries no
+// session fields only when one recent host session of the verified agent
+// matches. Scoped sessions cannot be identified from a sessionless event.
+// This never creates a session or changes a verdict.
+func (r *AgentRegistry) hermesRecentSession(ctx context.Context, agentIdentityID string, now time.Time) (sessionID, agentID, instanceID string) {
+	if r == nil || ManagedEnterpriseActive() || agentIdentityID == "" {
+		return "", "", ""
+	}
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	for key, entry := range r.sessions {
+		if key.agent != agentIdentityID || entry.HermesAgentID == "" || key.session == "" ||
+			now.Before(entry.LastSeen) || now.Sub(entry.LastSeen) > hermesSessionlessAuditWindow ||
+			sandboxSessionStateKey(ctx, key.session) != key.session {
+			continue
+		}
+		if sessionID != "" && sessionID != key.session {
+			return "", "", ""
+		}
+		sessionID, agentID, instanceID = key.session, entry.HermesAgentID, entry.AgentInstanceID
+	}
+	return sessionID, agentID, instanceID
 }
 
 // keyLocked returns the cache key of a lookup. Traffic without an agent
