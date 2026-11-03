@@ -108,6 +108,32 @@ def _running(pid: int) -> bool:
     return True
 
 
+@pytest.mark.skipif(sys.platform != "linux", reason="Perl taint-mode PATH check is Linux-only")
+def test_linux_worker_uses_fallback_for_writable_path(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    mcpscanner = pytest.importorskip("mcpscanner")
+    from mcpscanner.core.models import AnalyzerEnum
+
+    entry, child_pid_file = _fixture_entry(tmp_path, monkeypatch)
+    writable = tmp_path / "writable-bin"
+    writable.mkdir(mode=0o777)
+    writable.chmod(0o777)
+    monkeypatch.setenv("PATH", f"{os.environ['PATH']}{os.pathsep}{writable}")
+    wrapper = MCPScannerWrapper(MCPScannerConfig(analyzers="yara"))
+    try:
+        assert wrapper._scan_local(
+            mcpscanner.Scanner(mcpscanner.Config()), entry, [AnalyzerEnum.YARA],
+        ) == []
+        child_pid = int(child_pid_file.read_text(encoding="ascii"))
+        assert not _running(child_pid)
+    finally:
+        if child_pid_file.exists():
+            child_pid = int(child_pid_file.read_text(encoding="ascii"))
+            if _running(child_pid):
+                os.kill(child_pid, signal.SIGKILL)
+
+
 @pytest.mark.skipif(os.name == "nt", reason="Windows uses a Job Object")
 @pytest.mark.parametrize("pgid", [0, 1])
 def test_cleanup_rejects_reserved_process_groups(
@@ -149,7 +175,10 @@ def test_cleanup_skips_reused_group_before_kill(monkeypatch: pytest.MonkeyPatch)
 
 @pytest.mark.skipif(os.name == "nt", reason="Windows uses a Job Object")
 @pytest.mark.parametrize("error_type", [PermissionError, ProcessLookupError, OSError])
-@pytest.mark.parametrize("failed_signal", [signal.SIGTERM, signal.SIGKILL])
+@pytest.mark.parametrize(
+    "failed_signal",
+    [signal.SIGTERM, *([signal.SIGKILL] if hasattr(signal, "SIGKILL") else [])],
+)
 def test_cleanup_signal_error_does_not_escape(
     monkeypatch: pytest.MonkeyPatch, failed_signal: int, error_type: type[OSError],
 ) -> None:

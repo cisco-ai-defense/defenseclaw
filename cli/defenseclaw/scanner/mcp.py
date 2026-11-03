@@ -37,6 +37,7 @@ import re
 import select
 import shutil
 import signal
+import stat
 import subprocess
 import sys
 import tempfile
@@ -917,6 +918,20 @@ def _enable_mcp_linux_subreaper() -> None:
         os._exit(127)
 
 
+def _mcp_linux_perl_path_usable(path: str) -> bool:
+    """Use Perl's taint-mode worker only with directories it accepts on PATH."""
+    for directory in path.split(os.pathsep):
+        if not os.path.isabs(directory):
+            return False
+        try:
+            mode = os.stat(directory).st_mode
+        except OSError:
+            return False
+        if not stat.S_ISDIR(mode) or mode & 0o022:
+            return False
+    return True
+
+
 if sys.platform == "linux":
     import ctypes
 
@@ -941,7 +956,7 @@ def _contained_mcp_linux_process_factory(server_name: str) -> Iterator[None]:
             raise FileNotFoundError(2, os.strerror(2), command)
         worker_env = os.environ if env is None else env
         path = worker_env.get("PATH", os.defpath)
-        perl_path_usable = all(os.path.isabs(part) for part in path.split(os.pathsep))
+        perl_path_usable = _mcp_linux_perl_path_usable(path)
         if (_MCP_LINUX_PRCTL_SYSCALL is not None
                 and os.access("/usr/bin/perl", os.X_OK) and perl_path_usable):
             argv = ["/usr/bin/perl", "-T", "-e", _MCP_LINUX_PERL_WORKER, "--",
