@@ -19,6 +19,7 @@ package gateway
 import (
 	"encoding/base64"
 	"path"
+	"path/filepath"
 	"runtime"
 	"slices"
 	"strconv"
@@ -1512,6 +1513,18 @@ func appendTrustedHomeResolvedSSHKeyWriteFinding(
 			input.Command = command
 		}
 	}
+	if trustedNoDereferenceTouchSafe(input.Command, input.CWD, facts.ActiveHome,
+		request.ResolvedWriteTargets, request.ProtectedHomeHook) {
+		// A pattern in a complete entry-only touch can leave an earlier
+		// path finding that followed a link. Keep unrelated findings.
+		kept := findings[:0]
+		for _, finding := range findings {
+			if finding.RuleID != "persistence.ssh_authorized_keys_command" && finding.RuleID != "PATH-SSH-DIR" {
+				kept = append(kept, finding)
+			}
+		}
+		return kept
+	}
 	commandText := strings.ToLower(input.Command)
 	overBudget, unresolved := false, false
 	evidence := request
@@ -1707,6 +1720,9 @@ func trustedAuthorizedKeysWriteProof(input actionfacts.Input, facts actionfacts.
 // trustedAuthorizedKeysWriteProofWith is trustedAuthorizedKeysWriteProof
 // with the evaluation's file system answers (trustedActionRequest.targetMemo).
 func trustedAuthorizedKeysWriteProofWith(input actionfacts.Input, facts actionfacts.Facts, symlinkWrite bool, globFacts map[string]string, memo *hookpaths.TargetMemo) bool {
+	if trustedNoDereferenceTouchSafe(input.Command, input.CWD, facts.ActiveHome, globFacts, globFacts != nil) {
+		return false
+	}
 	if input.Command != "" &&
 		memo.ActionCommandDecisionWithDialectAndGlobFacts(input.Command, input.CWD, facts.ActiveHome, input.DialectHint, globFacts) == "protected-target" {
 		return true
@@ -1740,6 +1756,19 @@ func trustedAuthorizedKeysWriteProofWith(input actionfacts.Input, facts actionfa
 		trustedNamedOutFileAuthorizedKeysWrite(input) ||
 		trustedGitBashAuthorizedKeysWrite(input) ||
 		trustedNestedAuthorizedKeysWrite(input, facts)
+}
+
+func trustedNoDereferenceTouchSafe(command, cwd, home string, evidence map[string]string, managed bool) bool {
+	if managed && !filepath.IsAbs(cwd) {
+		cwd = evidence[hookpaths.CWDKey]
+	}
+	if !hookpaths.NoDereferenceTouchShape(command, cwd, home) {
+		return false
+	}
+	if managed {
+		return evidence[hookpaths.NoDereferenceTouchSafeKey] == "1"
+	}
+	return hookpaths.NoDereferenceTouchSafe(command, cwd, home)
 }
 
 // An unmodeled program's output option cannot prove a safe read. When that

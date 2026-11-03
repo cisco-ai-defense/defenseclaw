@@ -110,3 +110,27 @@ func TestCopyBraceWordFieldsRangeAtTheCap(t *testing.T) {
 		}
 	}
 }
+
+func TestActionExactOversizedTouchFieldsPaddedRange(t *testing.T) {
+	for _, row := range []struct {
+		command, middle, last string
+	}{
+		{`touch {0001..0300}`, "0150", "0300"},
+		{`touch file{0001..0300}.txt`, "file0150.txt", "file0300.txt"},
+		{`touch {0300..0001}`, "0151", "0001"},
+	} {
+		file, ok := parseShell(row.command)
+		if !ok {
+			t.Fatalf("parse %q", row.command)
+		}
+		word := file.Stmts[0].Cmd.(*syntax.CallExpr).Args[1]
+		fields := actionExactOversizedTouchFields(word, "/tmp/home")
+		if len(fields) != 300 {
+			t.Errorf("%q: got %d fields, want 300", row.command, len(fields))
+			continue
+		}
+		if fields[149] != row.middle || fields[299] != row.last {
+			t.Errorf("%q: middle and last = %q, %q; want %q, %q", row.command, fields[149], fields[299], row.middle, row.last)
+		}
+	}
+}

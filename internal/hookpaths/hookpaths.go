@@ -56,6 +56,10 @@ const PatchCompleteKey = "\x00patch-complete"
 // positive evidence only: no value can make a call less restricted.
 const ActionDecisionKey = "\x00action-decision"
 
+// NoDereferenceTouchSafeKey is the hook's complete entry-only touch proof.
+// It applies only to the touch shape checked again by the gateway.
+const NoDereferenceTouchSafeKey = "\x00touch-no-dereference-safe"
+
 // ProtectedTargetDecision is the only ActionDecisionKey value.
 const ProtectedTargetDecision = "protected-target"
 
@@ -1108,6 +1112,7 @@ func ResolveConnector(connector, surface, event string, payload []byte) string {
 	var globFacts, walkFacts map[string]string
 	var unprovenReason string
 	var protectedDecision bool
+	var noDereferenceTouchSafe bool
 	// identities is the file-identity evidence for InstructionIdentityKey:
 	// every existing instruction file a write target names.
 	// fileIdentities are the write targets' own identities (FileIdentitiesKey).
@@ -1207,6 +1212,9 @@ func ResolveConnector(connector, surface, event string, payload []byte) string {
 					if !protectedDecision {
 						protectedDecision = actionClientLoopCopyDestinationProtected(command, cwd, home)
 					}
+				}
+				if !protectedDecision && NoDereferenceTouchShape(command, cwd, home) {
+					noDereferenceTouchSafe = NoDereferenceTouchSafe(command, cwd, home)
 				}
 				fallback := input
 				fallback.Tool, fallback.Args, fallback.Command = "Bash", nil, command
@@ -1364,6 +1372,10 @@ func ResolveConnector(connector, surface, event string, payload []byte) string {
 		// operand the map omits must never read as no protected target.
 		targets[ActionDecisionKey] = ProtectedTargetDecision
 		size += len(jsonString(ActionDecisionKey)) + 1 + len(jsonString(ProtectedTargetDecision)) + 1
+	}
+	if noDereferenceTouchSafe {
+		targets[NoDereferenceTouchSafeKey] = "1"
+		size += len(jsonString(NoDereferenceTouchSafeKey)) + 1 + len(jsonString("1")) + 1
 	}
 	// A shell operand is already the literal path the shell opens; only a
 	// path fact can still carry unexpanded syntax.
@@ -2009,6 +2021,7 @@ func Decode(value string) (map[string]string, bool) {
 		(targets[BudgetKey] != "" && (targets[BudgetKey] != "1" || targets[TruncatedKey] != "1")) ||
 		(targets[PatchCompleteKey] != "" && targets[PatchCompleteKey] != "1") ||
 		(targets[ActionDecisionKey] != "" && targets[ActionDecisionKey] != ProtectedTargetDecision) ||
+		(targets[NoDereferenceTouchSafeKey] != "" && targets[NoDereferenceTouchSafeKey] != "1") ||
 		(targets[LinksStableKey] != "" && targets[LinksStableKey] != "1") ||
 		(targets[UnprovenReasonKey] != "" && UnprovenWriteTitle(targets[UnprovenReasonKey]) == "") {
 		return nil, false

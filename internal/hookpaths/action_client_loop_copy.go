@@ -7,6 +7,7 @@ import (
 	"maps"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 
 	"mvdan.cc/sh/v3/syntax"
@@ -268,10 +269,10 @@ func actionClientLoopCopyKnownEmptySource(word *syntax.Word, assignments actionV
 		if param.Exp != nil {
 			return false
 		}
-		var offset, length strings.Builder
-		return param.Slice.Offset != nil && param.Slice.Length != nil &&
-			syntax.NewPrinter().Print(&offset, param.Slice.Offset) == nil && offset.String() == "0" &&
-			syntax.NewPrinter().Print(&length, param.Slice.Length) == nil && length.String() == "1"
+		if !actionClientPlainSliceIndex(param.Slice.Offset) {
+			return false
+		}
+		return param.Slice.Length == nil || actionClientPlainSliceIndex(param.Slice.Length)
 	}
 	if param.Exp == nil {
 		return true
@@ -279,9 +280,74 @@ func actionClientLoopCopyKnownEmptySource(word *syntax.Word, assignments actionV
 	switch param.Exp.Op {
 	case syntax.AlternateUnsetOrNull, syntax.ErrorUnset, syntax.DefaultUnset:
 		return true
+	case syntax.AlternateUnset:
+		return actionClientPlainEmptyWord(param.Exp.Word)
+	case syntax.RemSmallPrefix, syntax.RemLargePrefix, syntax.RemSmallSuffix, syntax.RemLargeSuffix:
+		return actionClientPlainPatternWord(param.Exp.Word)
 	default:
 		return false
 	}
+}
+
+func actionClientPlainSliceIndex(expr syntax.ArithmExpr) bool {
+	if expr == nil {
+		return false
+	}
+	var printed strings.Builder
+	if syntax.NewPrinter().Print(&printed, expr) != nil {
+		return false
+	}
+	value := printed.String()
+	if value == "" || strings.Trim(value, "0123456789") != "" {
+		return false
+	}
+	_, err := strconv.ParseUint(value, 10, 32)
+	return err == nil
+}
+
+func actionClientPlainEmptyWord(word *syntax.Word) bool {
+	if word == nil || len(word.Parts) == 0 {
+		return true
+	}
+	if len(word.Parts) != 1 {
+		return false
+	}
+	switch part := word.Parts[0].(type) {
+	case *syntax.Lit:
+		return part.Value == ""
+	case *syntax.SglQuoted:
+		return part.Value == ""
+	case *syntax.DblQuoted:
+		for _, inner := range part.Parts {
+			literal, ok := inner.(*syntax.Lit)
+			if !ok || literal.Value != "" {
+				return false
+			}
+		}
+		return true
+	default:
+		return false
+	}
+}
+
+func actionClientPlainPatternWord(word *syntax.Word) bool {
+	if word == nil {
+		return true
+	}
+	for _, part := range word.Parts {
+		switch part := part.(type) {
+		case *syntax.Lit, *syntax.SglQuoted:
+		case *syntax.DblQuoted:
+			for _, inner := range part.Parts {
+				if _, ok := inner.(*syntax.Lit); !ok {
+					return false
+				}
+			}
+		default:
+			return false
+		}
+	}
+	return true
 }
 
 // A plain copy in a fixed loop with one assigned empty source cannot open a

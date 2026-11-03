@@ -73,6 +73,12 @@ func (m *TargetMemo) ActionCommandDecisionInShell(command, cwd, home string, fac
 }
 
 func actionTargetDecision(command, cwd, home string, dialect actionfacts.Dialect, posixShell bool, facts map[string]string, memo *TargetMemo) string {
+	if NoDereferenceTouchSafe(command, cwd, home) {
+		return ""
+	}
+	if actionStartupConditionalAliasRedirect(command) {
+		return "protected-target"
+	}
 	// A single quoted print piped to the named env/cat display has no
 	// writable operand. Prove its full shape before the target scans: an
 	// extra stage, redirect or explicit executable must take the normal
@@ -176,6 +182,9 @@ type actionConcreteOperands struct {
 
 func actionConcreteProtectedWriteOnWithOperands(command, cwd, home string, windowsHome bool, memo *TargetMemo, cache *actionConcreteOperands) bool {
 	if command == "" || home == "" || actionWindowsHome(home) && !windowsHome || !filepath.IsAbs(cwd) {
+		return false
+	}
+	if NoDereferenceTouchSafe(command, cwd, home) {
 		return false
 	}
 	protected := memo.protectedFiles(home)
