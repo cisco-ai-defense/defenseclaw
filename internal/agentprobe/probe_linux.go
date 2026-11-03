@@ -141,6 +141,11 @@ func versionCommand(p process) bool {
 		filepath.Base(p.exe) == Hermes {
 		return true
 	}
+	if len(p.argv) == 3 && strings.HasPrefix(filepath.Base(p.argv[0]), "python") &&
+		strings.HasPrefix(filepath.Base(p.exe), "python") && filepath.IsAbs(p.argv[1]) &&
+		filepath.Base(p.argv[1]) == Hermes && p.argv[2] == "--version" {
+		return true
+	}
 	if len(p.argv) != 5 || !strings.HasPrefix(filepath.Base(p.argv[0]), "python") ||
 		!strings.HasPrefix(filepath.Base(p.exe), "python") || p.argv[1] != "-I" ||
 		p.argv[2] != "-c" || p.argv[4] != "--version" {

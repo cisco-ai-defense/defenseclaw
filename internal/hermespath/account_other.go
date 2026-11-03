@@ -279,15 +279,12 @@ func procProcessEvidence(uid int, userHome string) ([]homeEvidence, error) {
 		return out, err
 	}
 	deadline := time.Now().Add(agentprobe.VersionProbeWait)
-	rescan := false
 	for _, pid := range probes {
-		if waitManagedHermesVersion(proc, pid, userHome, time.Until(deadline)) {
-			rescan = true
-		}
+		waitManagedHermesVersion(proc, pid, userHome, time.Until(deadline))
 	}
-	if rescan {
-		out, _, err = scanProcProcessEvidence(uid, proc)
-	}
+	// A candidate can exit between the first scan and the provenance check.
+	// Use a fresh snapshot even when its process was already gone.
+	out, _, err = scanProcProcessEvidence(uid, proc)
 	return out, err
 }
 

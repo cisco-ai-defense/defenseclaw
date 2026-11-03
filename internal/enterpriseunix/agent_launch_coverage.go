@@ -100,9 +100,12 @@ func (l *lifecycle) describePluginLaunchCoverage(ctx context.Context, record *De
 				!strings.HasPrefix(filepath.Base(session.Env["HERMES_HOME"]), "dc-agent-probe-") {
 				continue
 			}
+			// The captured process may exit before its provenance can be read.
+			// Rescan after checking it so the final decision uses live evidence.
+			rescan = true
 			_, home := env.pluginLaunchAccount(ctx, session.UID)
-			if home != "" && waitManagedHermesVersion(env.P("/proc"), session.PID, home, time.Until(deadline)) {
-				rescan = true
+			if home != "" {
+				waitManagedHermesVersion(env.P("/proc"), session.PID, home, time.Until(deadline))
 			}
 		}
 		if rescan {
