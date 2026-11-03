@@ -279,12 +279,27 @@ func procProcessEvidence(uid int, userHome string) ([]homeEvidence, error) {
 		return out, err
 	}
 	deadline := time.Now().Add(agentprobe.VersionProbeWait)
-	for _, pid := range probes {
-		waitManagedHermesVersion(proc, pid, userHome, time.Until(deadline))
+	seen := map[int]bool{}
+	for {
+		checked := false
+		for _, pid := range probes {
+			if seen[pid] || time.Until(deadline) <= 0 {
+				continue
+			}
+			seen[pid] = true
+			checked = true
+			waitManagedHermesVersion(proc, pid, userHome, time.Until(deadline))
+		}
+		if !checked {
+			break
+		}
+		// A later version command can start before the first one finishes.
+		// Keep checking new candidates within the same bounded window.
+		out, probes, err = scanProcProcessEvidence(uid, proc)
+		if err != nil {
+			return nil, err
+		}
 	}
-	// A candidate can exit between the first scan and the provenance check.
-	// Use a fresh snapshot even when its process was already gone.
-	out, _, err = scanProcProcessEvidence(uid, proc)
 	return out, err
 }
 

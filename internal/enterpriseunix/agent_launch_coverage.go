@@ -94,21 +94,27 @@ func (l *lifecycle) describePluginLaunchCoverage(ctx context.Context, record *De
 	}
 	if env.GOOS == "linux" {
 		deadline := time.Now().Add(agentprobe.VersionProbeWait)
-		rescan := false
-		for _, session := range sessions {
-			if session.Agent != "hermes" || !session.EnvKnown ||
-				!strings.HasPrefix(filepath.Base(session.Env["HERMES_HOME"]), "dc-agent-probe-") {
-				continue
+		seen := map[int]bool{}
+		for {
+			checked := false
+			for _, session := range sessions {
+				if session.Agent != "hermes" || !session.EnvKnown || seen[session.PID] ||
+					!strings.HasPrefix(filepath.Base(session.Env["HERMES_HOME"]), "dc-agent-probe-") ||
+					time.Until(deadline) <= 0 {
+					continue
+				}
+				seen[session.PID] = true
+				checked = true
+				_, home := env.pluginLaunchAccount(ctx, session.UID)
+				if home != "" {
+					waitManagedHermesVersion(env.P("/proc"), session.PID, home, time.Until(deadline))
+				}
 			}
-			// The captured process may exit before its provenance can be read.
-			// Rescan after checking it so the final decision uses live evidence.
-			rescan = true
-			_, home := env.pluginLaunchAccount(ctx, session.UID)
-			if home != "" {
-				waitManagedHermesVersion(env.P("/proc"), session.PID, home, time.Until(deadline))
+			if !checked {
+				break
 			}
-		}
-		if rescan {
+			// A version command can finish as the next one starts. Classify
+			// only the snapshot after all newly seen candidates are checked.
 			sessions, err = env.linuxAgentSessionsWithError()
 			if err != nil {
 				result.AddError("managed_launch_scan_unknown", "could not rescan running agent launches: "+err.Error())
