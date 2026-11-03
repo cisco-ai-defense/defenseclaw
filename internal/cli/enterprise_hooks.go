@@ -1979,13 +1979,16 @@ type enterpriseHookUserFileFault struct{ err error }
 func (f enterpriseHookUserFileFault) Error() string { return f.err.Error() }
 func (f enterpriseHookUserFileFault) Unwrap() error { return f.err }
 
-// enterpriseHookVerifyExcusedNote is the note of one of run.Excused: for a
-// row that waits for its signed-out account's next sign-in, why, from the
-// guardian row that records the wait.
+// enterpriseHookVerifyExcusedNote describes why an excused row remains
+// pending. A live account's folder link must not receive the removed-account
+// guidance.
 func enterpriseHookVerifyExcusedNote(run enterpriseHookVerifyRun, row enterpriseHookReconcileRow) string {
 	key := enterpriseHookProtectedTargetKey(row)
 	if guardianErr, ok := run.AwaitingSignIn[key]; ok && key != "" {
 		return " (pending until the account signs in: " + enterpriseHookAwaitingSignInCause(guardianErr) + ")"
+	}
+	if row.Error == enterpriseHookAccountLinkFailure {
+		return " (the account remains pending until its DefenseClaw folder link is repaired)"
 	}
 	return enterpriseHookRemovedAccountNote
 }
