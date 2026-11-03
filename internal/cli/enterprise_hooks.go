@@ -47,6 +47,7 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/gateway/connector"
 	"github.com/defenseclaw/defenseclaw/internal/hermespath"
 	"github.com/defenseclaw/defenseclaw/internal/managed"
+	"github.com/defenseclaw/defenseclaw/internal/pathidentity"
 	"github.com/defenseclaw/defenseclaw/internal/winsession"
 )
 
@@ -298,8 +299,13 @@ const (
 	enterpriseHookGuardianStateMaxBytes         int64 = 1 << 20
 	enterpriseHookGuardianAuthorizationMaxBytes int64 = 4 << 20
 	enterpriseHookGuardianActivationVersion           = 1
-	enterpriseHookWatchRepairRetryMin                 = time.Second
-	enterpriseHookWatchRepairRetryMax                 = 15 * time.Second
+)
+
+// Tests widen the gap between the failed target's retry and a healthy
+// target's event repair. Production retains the one-to-fifteen-second cap.
+var (
+	enterpriseHookWatchRepairRetryMin = time.Second
+	enterpriseHookWatchRepairRetryMax = 15 * time.Second
 )
 
 var enterpriseCmd = &cobra.Command{
@@ -765,6 +771,9 @@ type enterpriseHookReconcileRun struct {
 	WatchDirs           []string
 	WatchExclusiveFiles []string // DC-only writers: react to any event
 	WatchSharedFiles    []string // agent + DC writers: react only to Create/Remove/Rename
+	// WatchPathOwners ties owned-file events to their manifest targets. A
+	// failed target must not change how another target's events are handled.
+	WatchPathOwners map[string][]string
 }
 
 var (
@@ -778,7 +787,8 @@ var (
 	// enterpriseHookReconcileTargetEarlierMatrix reports a target whose
 	// agent config still holds an earlier release's hook matrix (GAP-2463).
 	// Tests replace it.
-	enterpriseHookReconcileTargetEarlierMatrix = enterprisehooks.WindowsProtectedTargetRunsEarlierHookMatrix
+	enterpriseHookReconcileTargetEarlierMatrix       = enterprisehooks.WindowsProtectedTargetRunsEarlierHookMatrix
+	enterpriseHookReconcileClosedMachineRegistration = enterprisehooks.WindowsProtectedTargetHasClosedMachineRegistration
 	// enterpriseHookReconcileTargetFailModeChange returns the hook fail mode
 	// a target's lock records and the one the config asks for. Tests
 	// replace it.
@@ -975,12 +985,25 @@ func enterpriseHookRepairAfterVerifyFailure(
 						errEnterpriseHookAwaitingSignIn, enterpriseHookAwaitingSignInEarlierMatrix, written, verifyErr,
 					)
 				}
-				return enterprisehooks.InstallResult{}, false, fmt.Errorf(
-					"%w: DefenseClaw %s protected it, and this release's hooks install only in the account's own "+
-						"Windows session; its exact active Windows session is unavailable, so the guardian repairs "+
-						"it at the account's next sign-in (verification: %v)",
-					errEnterpriseHookAwaitingSignIn, written, verifyErr,
-				)
+				if enterpriseHookReconcileSecureClient() {
+					return enterprisehooks.InstallResult{}, false, fmt.Errorf(
+						"%w: DefenseClaw %s protected it, and this release's hooks install only in the account's own "+
+							"Windows session; its exact active Windows session is unavailable, so the guardian repairs "+
+							"it at the account's next sign-in (verification: %v)",
+						errEnterpriseHookAwaitingSignIn, written, verifyErr,
+					)
+				}
+				// An older lock alone does not establish that an agent will run a
+				// hook. Admit the sign-in wait only when its live machine policy
+				// still registers this SID and the hook will fail closed.
+				closed, proofErr := enterpriseHookReconcileClosedMachineRegistration(opts)
+				if proofErr == nil && closed {
+					return enterprisehooks.InstallResult{}, false, fmt.Errorf(
+						"%w: DefenseClaw %s protected it, and its exact active Windows session is unavailable, "+
+							"so its registered machine hooks fail closed until the account's next sign-in repairs them (verification: %v)",
+						errEnterpriseHookAwaitingSignIn, written, verifyErr,
+					)
+				}
 			}
 			// A signed-out account whose only failure is the owner or
 			// permissions of its own DefenseClaw folder or hooks folder
@@ -1572,7 +1595,7 @@ func enterpriseHookGuardianFailureIssue(row enterpriseHookReconcileRow) string {
 
 func loadEnterpriseHookGuardianState(dataDir string) (enterpriseHookGuardianState, bool, error) {
 	path := filepath.Join(strings.TrimSpace(dataDir), hookGuardianStateFile)
-	info, err := os.Lstat(path)
+	info, err := pathidentity.LstatPinned(path)
 	if errors.Is(err, os.ErrNotExist) {
 		return enterpriseHookGuardianState{}, false, nil
 	}
@@ -2938,6 +2961,10 @@ func runEnterpriseHookReconcileOnce(ctx context.Context) (enterpriseHookReconcil
 	watchDirs := map[string]struct{}{}
 	exclusiveFiles := map[string]struct{}{}
 	sharedFiles := map[string]struct{}{}
+	var watchPathOwners map[string][]string
+	if cfg.StandaloneEnterprise() {
+		watchPathOwners = map[string][]string{}
+	}
 	claudeMachineContract := enterpriseHookMachinePolicyContract(manifest)
 	// The targets that verified in a pass a filesystem event armed, checked
 	// again over one shared window after the loop (GAP-1825).
@@ -2951,6 +2978,7 @@ func runEnterpriseHookReconcileOnce(ctx context.Context) (enterpriseHookReconcil
 		}
 		recheck := false
 		var recheckOpts enterprisehooks.InstallOptions
+		var watchPathErr error
 		row := enterpriseHookReconcileRow{
 			User:      strings.TrimSpace(target.User),
 			UserHome:  strings.TrimSpace(target.UserHome),
@@ -3036,23 +3064,32 @@ func runEnterpriseHookReconcileOnce(ctx context.Context) (enterpriseHookReconcil
 					for _, dir := range dirs {
 						watchDirs[dir] = struct{}{}
 					}
+				} else if runtime.GOOS == "windows" && cfg.StandaloneEnterprise() {
+					watchPathErr = fmt.Errorf("list watch directories: %w", watchErr)
 				}
 			}
 			if own, filesErr := enterprisehooks.WatchOwnedFiles(opts); filesErr == nil {
+				owner := enterpriseHookProtectedTargetKey(row)
 				for _, f := range own.ExclusiveWriter {
 					exclusiveFiles[f] = struct{}{}
+					if watchPathOwners != nil {
+						enterpriseHookWatchAddPathOwner(watchPathOwners, f, owner)
+					}
 				}
 				for _, f := range own.SharedWriter {
 					sharedFiles[f] = struct{}{}
+					if watchPathOwners != nil {
+						enterpriseHookWatchAddPathOwner(watchPathOwners, f, owner)
+					}
 				}
+			} else if runtime.GOOS == "windows" && cfg.StandaloneEnterprise() {
+				watchPathErr = errors.Join(watchPathErr, fmt.Errorf("list owned watch files: %w", filesErr))
 			}
 			platformDirs, platformFiles := enterpriseHookPlatformWatchFiles(target.Connector, resolved.home)
 			for _, dir := range platformDirs {
 				watchDirs[dir] = struct{}{}
 			}
-			for _, f := range platformFiles {
-				exclusiveFiles[f] = struct{}{}
-			}
+			enterpriseHookWatchAddExclusiveOwnedFiles(exclusiveFiles, watchPathOwners, platformFiles, enterpriseHookProtectedTargetKey(row))
 			if err == nil {
 				var result enterprisehooks.InstallResult
 				var repaired bool
@@ -3106,6 +3143,10 @@ func runEnterpriseHookReconcileOnce(ctx context.Context) (enterpriseHookReconcil
 			enterpriseHookTargetHealth.clear(row)
 			rows = append(rows, row)
 			continue
+		}
+		if watchPathErr != nil {
+			err = errors.Join(err, fmt.Errorf("watch target paths: %w", watchPathErr))
+			recheck = false
 		}
 		if err != nil {
 			protected := previousProtection.PreviouslyProtected
@@ -3244,6 +3285,7 @@ func runEnterpriseHookReconcileOnce(ctx context.Context) (enterpriseHookReconcil
 	run.WatchDirs = sortedEnterpriseHookWatchDirs(watchDirs)
 	run.WatchExclusiveFiles = sortedEnterpriseHookWatchDirs(exclusiveFiles)
 	run.WatchSharedFiles = sortedEnterpriseHookWatchDirs(sharedFiles)
+	run.WatchPathOwners = watchPathOwners
 	return run, nil
 }
 
@@ -3259,6 +3301,16 @@ var enterpriseHookAfterWatchReconcile = func(context.Context, io.Writer, enterpr
 // successful reconcile never ran (GAP-0935).
 var enterpriseHookBeforeWatchReconcile = func(io.Writer) {}
 
+// Replaceable only by watch-loop tests that control when a target changes.
+var enterpriseHookWatchReconcileOnce = runEnterpriseHookReconcileOnce
+
+// Replaceable by watch-loop tests so platform background checks do not
+// outlive a test's temporary guardian configuration.
+var enterpriseHookWatchPlatformWatch = enterpriseHookStandalonePlatformWatch
+
+// Tests can select the standalone scheduling path without privileged setup.
+var enterpriseHookWatchTargetScoped = func() bool { return cfg != nil && cfg.StandaloneEnterprise() }
+
 func runEnterpriseHooksWatch(cmd *cobra.Command, _ []string) error {
 	if cfg == nil {
 		return fmt.Errorf("enterprise hooks watch: config is not loaded")
@@ -3272,6 +3324,9 @@ func runEnterpriseHooksWatch(cmd *cobra.Command, _ []string) error {
 	if enterpriseHookWatchDebounce <= 0 {
 		return fmt.Errorf("enterprise hooks watch: --debounce must be positive")
 	}
+	// The standalone guardian uses target-scoped retry and event state.
+	// Secure Client and OSS watch commands retain their existing behavior.
+	legacyWatch := !enterpriseHookWatchTargetScoped()
 	enterpriseHookGuardianWatching.Store(true)
 	defer enterpriseHookGuardianWatching.Store(false)
 	standaloneConfigFingerprint := enterpriseHookStandaloneConfigFingerprint()
@@ -3295,6 +3350,7 @@ func runEnterpriseHooksWatch(cmd *cobra.Command, _ []string) error {
 	// / WatchSharedFiles after each reconcile.
 	exclusiveOwned := map[string]struct{}{} // DC-only writers — any event triggers
 	sharedOwned := map[string]struct{}{}    // agent + DC writers — Create/Remove/Rename trigger
+	var windowsOwnedPaths map[string]string
 	// ownedSnapshot is each owned file's fingerprint as the last reconcile
 	// left it. A Write or Chmod that the writer policy or the settle window
 	// drops still counts when the file no longer matches it.
@@ -3338,8 +3394,17 @@ func runEnterpriseHooksWatch(cmd *cobra.Command, _ []string) error {
 	// Cleared on every reconcile (fsnotify OR interval).
 	var lastTriggerPath string
 	var lastTriggerOp fsnotify.Op
-	repairRetryNeeded := false
-	repairRetryDelay := time.Duration(0)
+	var repairRetries enterpriseHookWatchRetries
+	var failedOwnedPaths map[string]bool
+	legacyRepairRetryNeeded := false
+	legacyRepairRetryDelay := time.Duration(0)
+	repairRetryNeeded := func() bool {
+		if legacyWatch {
+			return legacyRepairRetryNeeded
+		}
+		_, needed := repairRetries.nextDue()
+		return needed
+	}
 	// degraded is set when the startup reconcile failed in managed mode. The
 	// service keeps running and retrying instead of exiting into an SCM
 	// restart loop; the first successful reconcile clears it.
@@ -3353,9 +3418,13 @@ func runEnterpriseHooksWatch(cmd *cobra.Command, _ []string) error {
 		// Then the install tree, StateRoot records, policy folders and
 		// service descriptors, so later drift heals without Setup Repair.
 		repairEnterpriseHookManagedInstallPlatform()
-		run, err := runEnterpriseHookReconcileOnce(cmd.Context())
+		run, err := enterpriseHookWatchReconcileOnce(cmd.Context())
 		if err != nil {
-			repairRetryNeeded = true
+			if legacyWatch {
+				legacyRepairRetryNeeded = true
+			} else {
+				repairRetries.observe(reason, run, err, time.Now())
+			}
 			return false, err
 		}
 		if degraded {
@@ -3370,7 +3439,11 @@ func runEnterpriseHooksWatch(cmd *cobra.Command, _ []string) error {
 			// Match the runEnterpriseHookReconcileOnce error path: mark
 			// retry so the caller schedules a backoff attempt rather than
 			// waiting for the periodic interval to recover.
-			repairRetryNeeded = true
+			if legacyWatch {
+				legacyRepairRetryNeeded = true
+			} else {
+				repairRetries.observe(reason, run, err, time.Now())
+			}
 			return false, fmt.Errorf("enterprise hooks watch: synchronize watch directories: %w", err)
 		}
 		// Rebuild the owned-file allowlists from this run. The
@@ -3390,6 +3463,10 @@ func runEnterpriseHooksWatch(cmd *cobra.Command, _ []string) error {
 		for _, f := range run.WatchSharedFiles {
 			sharedOwned[filepath.Clean(f)] = struct{}{}
 		}
+		windowsOwnedPaths = nil
+		if runtime.GOOS == "windows" && cfg != nil && cfg.StandaloneEnterprise() {
+			windowsOwnedPaths = enterpriseHookWatchCaseFoldedOwnedPaths(exclusiveOwned, sharedOwned)
+		}
 		for k := range foundSnapshot {
 			delete(foundSnapshot, k)
 		}
@@ -3397,6 +3474,9 @@ func runEnterpriseHooksWatch(cmd *cobra.Command, _ []string) error {
 			foundSnapshot[k] = v
 		}
 		takeEnterpriseHookOwnedSnapshot(ownedSnapshot, exclusiveOwned, sharedOwned, enterpriseHookOwnedFileFingerprint)
+		if !legacyWatch {
+			failedOwnedPaths = enterpriseHookWatchFailedOwnedPaths(run)
+		}
 		status := "ok"
 		if run.Failures > 0 || run.StateErr != nil {
 			status = "attention"
@@ -3426,9 +3506,13 @@ func runEnterpriseHooksWatch(cmd *cobra.Command, _ []string) error {
 		if run.StateErr != nil {
 			fmt.Fprintf(cmd.ErrOrStderr(), "[hook-guardian] state write failed: %s\n", run.StateErr)
 		}
-		repairRetryNeeded = run.Failures > 0 || run.StateErr != nil
-		if !repairRetryNeeded {
-			repairRetryDelay = 0
+		if legacyWatch {
+			legacyRepairRetryNeeded = run.Failures > 0 || run.StateErr != nil
+			if !legacyRepairRetryNeeded {
+				legacyRepairRetryDelay = 0
+			}
+		} else {
+			repairRetries.observe(reason, run, nil, time.Now())
 		}
 		// When the row set is byte-identical to the previous run,
 		// any Write/Chmod events still leaking past the normal
@@ -3490,7 +3574,11 @@ func runEnterpriseHooksWatch(cmd *cobra.Command, _ []string) error {
 			// It starts degraded, keeps the manifest folder watched, and
 			// retries on the repair backoff until a reconcile succeeds.
 			degraded = true
-			repairRetryNeeded = true
+			if legacyWatch {
+				legacyRepairRetryNeeded = true
+			} else {
+				repairRetries.observe("startup", enterpriseHookReconcileRun{}, startupErr, time.Now())
+			}
 			managed.EmitResilienceEvent(managed.MarkerDegraded, map[string]string{
 				"component": "hook-guardian",
 				"path":      filepath.Clean(enterpriseHookManifest),
@@ -3532,17 +3620,33 @@ func runEnterpriseHooksWatch(cmd *cobra.Command, _ []string) error {
 	}
 	defer repairRetry.Stop()
 	repairRetryPending := false
+	var repairRetryDue time.Time
 	// Keep failed-repair backoff independent from filesystem debounce. A
 	// target that can generate owned-file events must not be able to postpone
 	// the retry that replaces a released locked or oversized artifact.
 	scheduleRepairRetry := func() {
-		if !repairRetryNeeded || repairRetryPending {
+		if legacyWatch {
+			if !legacyRepairRetryNeeded || repairRetryPending {
+				return
+			}
+			legacyRepairRetryDelay = enterpriseHookWatchNextRepairRetryDelay(legacyRepairRetryDelay)
+			resetEnterpriseHookWatchTimer(repairRetry, legacyRepairRetryDelay)
+			repairRetryPending = true
+			fmt.Fprintf(cmd.ErrOrStderr(), "[hook-guardian] repair incomplete; retrying in %s\n", legacyRepairRetryDelay)
 			return
 		}
-		repairRetryDelay = enterpriseHookWatchNextRepairRetryDelay(repairRetryDelay)
-		resetEnterpriseHookWatchTimer(repairRetry, repairRetryDelay)
+		due, needed := repairRetries.nextDue()
+		if !needed || (repairRetryPending && due.Equal(repairRetryDue)) {
+			return
+		}
+		delay := time.Until(due)
+		if delay < 0 {
+			delay = 0
+		}
+		resetEnterpriseHookWatchTimer(repairRetry, delay)
 		repairRetryPending = true
-		fmt.Fprintf(cmd.ErrOrStderr(), "[hook-guardian] repair incomplete; retrying in %s\n", repairRetryDelay)
+		repairRetryDue = due
+		fmt.Fprintf(cmd.ErrOrStderr(), "[hook-guardian] repair incomplete; retrying in %s\n", delay.Round(time.Millisecond))
 	}
 	cancelRepairRetry := func() {
 		if !repairRetryPending {
@@ -3555,6 +3659,7 @@ func runEnterpriseHooksWatch(cmd *cobra.Command, _ []string) error {
 			}
 		}
 		repairRetryPending = false
+		repairRetryDue = time.Time{}
 	}
 	cancelPendingDebounce := func() {
 		if !debouncePending {
@@ -3573,7 +3678,7 @@ func runEnterpriseHooksWatch(cmd *cobra.Command, _ []string) error {
 	scheduleRepairRetry()
 	// Windows standalone: restore the managed OpenCode plugin as soon as its
 	// attributes change, without waiting for the interval pass.
-	enterpriseHookStandalonePlatformWatch(cmd.Context(), cmd.ErrOrStderr())
+	enterpriseHookWatchPlatformWatch(cmd.Context(), cmd.ErrOrStderr())
 	// A local account created or changed (useradd, usermod) gets its
 	// identity record within seconds, before its first hook (GAP-2108).
 	accountChanges := enterpriseHookAccountDatabaseChanges(cmd.Context())
@@ -3589,6 +3694,7 @@ func runEnterpriseHooksWatch(cmd *cobra.Command, _ []string) error {
 				}
 				return errors.New("enterprise hooks watch: fsnotify event channel closed unexpectedly")
 			}
+			event.Name = enterpriseHookWatchOwnedPath(event.Name, windowsOwnedPaths)
 			if !enterpriseHookWatchEventRelevant(event) {
 				continue
 			}
@@ -3623,8 +3729,12 @@ func runEnterpriseHooksWatch(cmd *cobra.Command, _ []string) error {
 			// protected path inside the settle window, leaving the
 			// destination present just like the guardian's own atomic
 			// rename tail.
-			drop, settling := enterpriseHookWatchEventDropped(time.Now(), settleUntil, event, repairRetryNeeded,
-				exclusiveOwned, sharedOwned, foundSnapshot, ownedSnapshot, enterpriseHookOwnedFileFingerprint)
+			lastTargetFailed := failedOwnedPaths[filepath.Clean(event.Name)]
+			if legacyWatch {
+				lastTargetFailed = legacyRepairRetryNeeded
+			}
+			drop, settling := enterpriseHookWatchEventDropped(time.Now(), settleUntil, event, lastTargetFailed,
+				exclusiveOwned, sharedOwned, foundSnapshot, ownedSnapshot, enterpriseHookOwnedFileFingerprint, !legacyWatch)
 			if drop {
 				if settling {
 					droppedInSettle++
@@ -3686,7 +3796,7 @@ func runEnterpriseHooksWatch(cmd *cobra.Command, _ []string) error {
 				if err != nil {
 					fmt.Fprintf(cmd.ErrOrStderr(), "[hook-guardian] reconcile after %s failed: %s\n", reason, err)
 				}
-				if repairRetryNeeded {
+				if repairRetryNeeded() {
 					scheduleRepairRetry()
 				} else {
 					cancelRepairRetry()
@@ -3694,10 +3804,11 @@ func runEnterpriseHooksWatch(cmd *cobra.Command, _ []string) error {
 			}
 		case <-repairRetry.C:
 			repairRetryPending = false
+			repairRetryDue = time.Time{}
 			if _, err := reconcile("retry"); err != nil {
 				fmt.Fprintf(cmd.ErrOrStderr(), "[hook-guardian] reconcile after retry failed: %s\n", err)
 			}
-			if repairRetryNeeded {
+			if repairRetryNeeded() {
 				scheduleRepairRetry()
 			} else {
 				cancelRepairRetry()
@@ -3739,7 +3850,7 @@ func runEnterpriseHooksWatch(cmd *cobra.Command, _ []string) error {
 				fmt.Fprintf(cmd.ErrOrStderr(), "[hook-guardian] interval reconcile failed: %s\n", err)
 			}
 			hostChecks.Run()
-			if repairRetryNeeded {
+			if repairRetryNeeded() {
 				scheduleRepairRetry()
 			} else {
 				cancelRepairRetry()
@@ -3979,8 +4090,8 @@ func enterpriseHookWatchExclusiveTailUnchanged(now, settleUntil time.Time, event
 
 // enterpriseHookWatchEventDropped reports whether the watch loop drops a
 // filesystem event instead of arming a pass (drop), and whether it counts as
-// a settle-window tail of the last pass (settling). lastPassFailed says the
-// last pass ended with a failed repair (it schedules the repair backoff).
+// a settle-window tail of the last pass (settling). lastPassFailed describes
+// the target that owns this path, not an unrelated target in the same pass.
 //
 // A Write or Chmod in the settle window is the tail of the pass's own writes,
 // and an event on an unowned path is noise, unless the owned file no longer
@@ -4004,6 +4115,7 @@ func enterpriseHookWatchEventDropped(
 	exclusiveOwned, sharedOwned map[string]struct{},
 	found, left map[string]string,
 	fingerprint func(string) string,
+	replayDuringPass bool,
 ) (drop, settling bool) {
 	actionable := enterpriseHookWatchOwnedEventActionable(event, exclusiveOwned, sharedOwned)
 	settling = actionable && enterpriseHookWatchEventInSettleWindow(now, settleUntil, event.Op)
@@ -4011,10 +4123,26 @@ func enterpriseHookWatchEventDropped(
 		enterpriseHookWatchExclusiveTailUnchanged(now, settleUntil, event, exclusiveOwned, found, left, fingerprint) {
 		settling = true
 	}
-	if (!actionable || settling) && !enterpriseHookWatchOwnedFileChanged(event.Name, exclusiveOwned, sharedOwned, left, fingerprint) {
+	// An event queued while a reconcile was running can arrive after its
+	// final snapshot. If another target was in retry, the healthy target
+	// may have been checked before its token was overwritten; the snapshot
+	// then contains the damaged bytes. Replay that event once even though
+	// the current file still matches the final snapshot. A later pass with
+	// equal found/left snapshots drops any remaining self-write tail.
+	changedDuringPass := replayDuringPass && !lastPassFailed && event.Op&(fsnotify.Write|fsnotify.Chmod) != 0 &&
+		enterpriseHookWatchOwnedFileChangedBetweenSnapshots(event.Name, found, left)
+	if (!actionable || settling) && !changedDuringPass &&
+		!enterpriseHookWatchOwnedFileChanged(event.Name, exclusiveOwned, sharedOwned, left, fingerprint) {
 		return true, settling
 	}
 	return false, settling
+}
+
+func enterpriseHookWatchOwnedFileChangedBetweenSnapshots(path string, found, left map[string]string) bool {
+	path = filepath.Clean(path)
+	before, foundOK := found[path]
+	after, leftOK := left[path]
+	return foundOK && leftOK && before != after
 }
 
 // enterpriseHookReconcileRowsHash is a content fingerprint over the
@@ -4170,6 +4298,29 @@ func enterpriseHookWatchEventRelevant(event fsnotify.Event) bool {
 		return false
 	}
 	return !strings.HasSuffix(filepath.Base(event.Name), ".lock")
+}
+
+// Windows directory events use the stored filename spelling. Keep the watch
+// loop's path keys aligned with its owned-file lists for standalone installs.
+func enterpriseHookWatchCaseFoldedOwnedPaths(exclusiveOwned, sharedOwned map[string]struct{}) map[string]string {
+	paths := make(map[string]string, len(exclusiveOwned)+len(sharedOwned))
+	for path := range sharedOwned {
+		paths[strings.ToLower(filepath.Clean(path))] = path
+	}
+	for path := range exclusiveOwned {
+		paths[strings.ToLower(filepath.Clean(path))] = path
+	}
+	return paths
+}
+
+func enterpriseHookWatchOwnedPath(path string, caseFolded map[string]string) string {
+	if len(caseFolded) == 0 {
+		return path
+	}
+	if owned, ok := caseFolded[strings.ToLower(filepath.Clean(path))]; ok {
+		return owned
+	}
+	return path
 }
 
 // enterpriseHookWatchOwnedEventActionable applies the expected-writer
@@ -4741,7 +4892,7 @@ func previousEnterpriseHookSuccess(
 
 func loadEnterpriseHookGuardianAuthorization(dataDir string) (enterpriseHookGuardianAuthorization, bool, error) {
 	path := managed.HookGuardianAuthorizationPath(dataDir)
-	info, err := os.Lstat(path)
+	info, err := pathidentity.LstatPinned(path)
 	if errors.Is(err, os.ErrNotExist) {
 		return enterpriseHookGuardianAuthorization{}, false, nil
 	}
@@ -4802,7 +4953,7 @@ func loadEnterpriseHookGuardianAuthorization(dataDir string) (enterpriseHookGuar
 
 func loadEnterpriseHookGuardianActivation(dataDir string) (enterpriseHookGuardianActivation, bool, error) {
 	path := filepath.Join(managed.HookGuardianAuthorizationDir(dataDir), hookGuardianActivationFile)
-	info, err := os.Lstat(path)
+	info, err := pathidentity.LstatPinned(path)
 	if errors.Is(err, os.ErrNotExist) {
 		return enterpriseHookGuardianActivation{}, false, nil
 	}

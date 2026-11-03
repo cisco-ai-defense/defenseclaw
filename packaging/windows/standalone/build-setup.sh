@@ -140,6 +140,8 @@ if [ -n "$(find "${SCANNERS_EMBED_DIR}" -mindepth 1 -maxdepth 1 ! -name .gitkeep
     die "${SCANNERS_EMBED_DIR} already holds a runtime; remove it before building"
 fi
 
+ICON_PATH="${REPO_ROOT}/macos/DefenseClawMac/DefenseClawMac/Assets.xcassets/AppIcon.appiconset/icon_256.png"
+
 if [ -n "${SIGNED_PAYLOAD_DIR}" ]; then
     FLAVOR="standalone"
     UNSIGNED_FLAG=()
@@ -159,7 +161,6 @@ if [ -n "${SIGNED_PAYLOAD_DIR}" ]; then
 else
     FLAVOR="standalone-unsigned"
     UNSIGNED_FLAG=(--unsigned)
-    ICON_PATH="${REPO_ROOT}/macos/DefenseClawMac/DefenseClawMac/Assets.xcassets/AppIcon.appiconset/icon_256.png"
     build() {
         local output="$1" package="$2" component="$3" gui="$4"
         # main.date: the commit's UTC time, reproducible (#1249).
@@ -232,6 +233,14 @@ echo "==> building ${SETUP##*/} (outer EXE, no trailer yet)"
     go build -trimpath -buildvcs=false \
     -ldflags "-s -w -buildid=defenseclaw-enterprise-setup-standalone-${SOURCE_COMMIT} -X main.standalonePayloadBinding=${PAYLOAD_BINDING}" \
     -o "${SETUP_UNSIGNED}" ./cmd/defenseclaw-enterprise-setup )
+# VERSIONINFO (FileVersion/ProductVersion X.Y.Z.0, ProductName, CompanyName,
+# OriginalFilename), the manifest and the icon, before
+# the trailer and any signature: MDM file-version detection and the
+# management sidecar read the release from it (rel-1-0-6:GAP-0296).
+echo "==> stamping ${SETUP##*/} VERSIONINFO / manifest / icon"
+( cd "${REPO_ROOT}" && go run ./internal/tools/windowsresources \
+    -target windows_amd64 -executable "${SETUP_UNSIGNED}" \
+    -component enterprise-setup-standalone -version "${VERSION}" -icon "${ICON_PATH}" )
 
 # The payload is no longer carried via //go:embed. Append the
 # [archive][manifest][footer] trailer to the just-built outer EXE so
@@ -267,6 +276,12 @@ if [ -n "${SIGN_COMMAND}" ]; then
     echo "==> signing ${SETUP##*/}"
     "${SIGN_COMMAND}" "${SETUP}" || die "signing ${SETUP##*/} failed"
 fi
+
+# Read the shipped Setup back (trailer appended, signed when signing is on):
+# its resources must still be the exact standalone set for this version.
+( cd "${REPO_ROOT}" && go run ./internal/tools/windowsresources -verify-only \
+    -target windows_amd64 -executable "${SETUP}" \
+    -component enterprise-setup-standalone -version "${VERSION}" -icon "${ICON_PATH}" )
 
 "${REPO_ROOT}/scripts/test-managed-package-no-fleet-compiler.sh" "${SETUP}"
 

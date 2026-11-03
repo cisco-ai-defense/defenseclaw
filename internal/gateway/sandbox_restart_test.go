@@ -77,11 +77,11 @@ func TestSandboxStateReportsOnlyMoveTowardStopped(t *testing.T) {
 		if err != nil || !ok {
 			t.Fatalf("registration %s: %v %v", reg, ok, err)
 		}
-		return sandboxreg.EffectiveState(got, g.now)
+		return sandboxreg.EffectiveState(got, g.now())
 	}
 
 	// A lost connection: the lease lapses, the next running report keeps it.
-	g.now = g.now.Add(sandboxreg.LiveLease + time.Minute)
+	g.advance(sandboxreg.LiveLease + time.Minute)
 	if code, body := report(sbxAlice, id, true); code != http.StatusOK || state(id) != sandboxreg.StateLive {
 		t.Fatalf("running report after a lapsed lease: %d %s state=%s", code, body, state(id))
 	}
@@ -90,7 +90,7 @@ func TestSandboxStateReportsOnlyMoveTowardStopped(t *testing.T) {
 		t.Fatalf("stopped report: %d %s", code, body)
 	}
 	for range 2 {
-		g.now = g.now.Add(time.Minute)
+		g.advance(time.Minute)
 		code, body := report(sbxAlice, id, true)
 		if code != http.StatusForbidden || !strings.Contains(body, sandboxrelay.ReasonRegistrationStopped) {
 			t.Fatalf("running report after a stop: %d %s", code, body)

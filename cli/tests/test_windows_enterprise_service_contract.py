@@ -4017,6 +4017,9 @@ def test_atomic_managed_file_replacement_is_idempotent_on_every_engine(
     ):
         start = module.index(f"\nfunction {helper} ") + 1
         helpers += module[start : module.index("\nfunction ", start) + 1]
+    # Standalone swaps the file with the native SwapLaunchableFile (GAP-0240),
+    # so the probe compiles the module's own native helper.
+    native_security = _module_function(module, "Initialize-DefenseClawNativeSecurity")
     probe = tmp_path / f"atomic-file-replacement-{Path(engine).stem}.ps1"
     probe.write_text(
         "Set-StrictMode -Version Latest\n"
@@ -4041,6 +4044,10 @@ def test_atomic_managed_file_replacement_is_idempotent_on_every_engine(
         "function Write-DefenseClawResilienceEvent {\n"
         "    param([string]$Marker, [hashtable]$Fields)\n"
         "}\n"
+        "$script:DefenseClawNativeSecurityType = $null\n"
+        "$script:WindowsDirectory = [Environment]::GetFolderPath('Windows')\n"
+        + native_security
+        + "\n"
         + profile_check
         + helpers
         + atomic_install

@@ -514,7 +514,7 @@ const codeGuardianCleanupPending = "guardian_cleanup_pending"
 
 // describeGuardianCleanups reports the entries of the guardian's per-user
 // cleanup ledger next to its authorization ledger.
-func (l *lifecycle) describeGuardianCleanups() {
+func (l *lifecycle) describeGuardianCleanups(ctx context.Context) {
 	env, r := l.env, l.result
 	data, err := readBounded(env.P(filepath.Join(env.Layout.GuardianAuthDir, managed.HookGuardianUserCleanupFile)), 4<<20)
 	if err != nil {
@@ -523,6 +523,7 @@ func (l *lifecycle) describeGuardianCleanups() {
 	var ledger struct {
 		Pending []struct {
 			Connector string `json:"connector"`
+			UID       int    `json:"uid"`
 			User      string `json:"user"`
 			UserHome  string `json:"user_home"`
 			LastError string `json:"last_error"`
@@ -545,6 +546,13 @@ func (l *lifecycle) describeGuardianCleanups() {
 				// proof that the account was deleted (GAP-0254).
 				message := fmt.Sprintf("%s for user %s: the recorded home %s no longer exists; no hook registration is left there; the hook guardian checks the account's current home before retiring this cleanup",
 					entry.Connector, account, home)
+				if live, ok := env.lookupAccountUID(ctx, entry.UID); entry.UID > 0 && ok && filepath.Clean(live.Home) != filepath.Clean(home) {
+					// A live account that was given another home (rel-1-0-2
+					// GAP-0602): say so, and what ends the cleanup.
+					message = fmt.Sprintf("%s for user %s: the account is still present with home %s; its recorded home %s no longer exists, so no hook registration can be reached there; "+
+						"the hook guardian removes DefenseClaw's hook registration from %s as that user and then retires this cleanup, which also ends when the account is removed",
+						entry.Connector, account, live.Home, home, live.Home)
+				}
 				if reason := strings.TrimSpace(entry.LastError); reason != "" {
 					message += "; the last cleanup attempt failed and is retried: " + boundedGuardianReason(strings.TrimPrefix(reason, "enterprise hooks: "))
 				}

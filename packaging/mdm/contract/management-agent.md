@@ -107,12 +107,23 @@ or an exit code bumps it.
 
 ### What to forward
 
-Some members name accounts or hold free text: warning and error messages,
-`enrollment.accounts`, `services[]`, `changes`,
-`sessions_restart_required.entries`, a receipt's `actor` and `principal`,
-and the bundle `created_by` and `change_summary`. Keep them on the device.
-`forward/` holds one closed schema per document with only the members that
-are safe to send off the device:
+Some members name accounts, hold credential names or free text, or describe
+local detail and the administrator's tenant and key choices. Keep them on
+the device: warning and error messages (with their `subject`, `detail`,
+`reason` and `path`, and a receipt's `error_message`), `enrollment.accounts`,
+`excluded_users` and `excluded_groups`, `services`, `machine_policy`,
+`destinations`, `audit_store`, `scanners`, `api_port_holders`, `log_path`,
+`last_reload_error`, `changes`, `sessions_restart_required.entries`, a
+receipt's `actor` and `principal`, the bundle `created_by` and
+`change_summary`, the credential names (`secret_refs[].name`,
+`secret_refs_missing`, `secret_refs_mismatch`), the identity refresh
+`user_id`, `user_name` and `windows_token_groups_pending`, a bundle's `dir`,
+and the tenant, device group and signing key (`anchors`, `keys`,
+`tenant_id`, `device_group`, `device_groups`, `signer_key_id`). For agent
+sessions that need a restart, forward the `count` and `state` of
+`sessions_restart_required` and the connector names in
+`enforcement_pending` (4.3). `forward/` holds one closed schema per document
+with only the members that are safe to send off the device:
 
 | Forward schema (`forward/`) | Projects |
 |---|---|
@@ -132,7 +143,9 @@ enum. Do not reject the document. A member that a newer DefenseClaw adds is
 then dropped, not an error. `forward/project.py` is a reference projection
 (Python standard library only). The contract tests project a full document
 from Linux, macOS and Windows through each forward schema and check that no
-name remains.
+name remains. They also project every document the contract tests make the
+commands print, and fail when a projection drops a member this section does
+not name, so the guide, the forward schemas and the documents agree.
 
 ## 1. Binaries and paths
 
@@ -751,11 +764,13 @@ Exit 0.
     itself in a maintenance window, then read `bundle status` (4.5) again
     until `count` is 0 with `state` `known`.
 
-  Forward only `count` and the distinct `entries[].agent` values (connector
-  names). `entries[].user` is the account name (a numeric id when the name
-  cannot be resolved), which is personal data; `pid` and `started_at` are for
-  local use. Do not forward them. `entries` lists at most 20 sessions, so the
-  connector names can be incomplete when `count` is above 20. The integer
+  Forward `count` and `state`, and the connector names from
+  `enforcement_pending.connectors` (below). Keep `entries` on the device:
+  `entries[].user` is the account name (a numeric id when the name cannot be
+  resolved), which is personal data, and `pid` and `started_at` are for local
+  use; the forward schemas drop them. `entries` lists at most 20 sessions,
+  so the connector names can be incomplete when `count` is above 20. The
+  integer
   `sessions_restart_required` of a receipt file (4.9) is the count at
   confirmation, not a live value.
 
@@ -882,8 +897,10 @@ exit code; a block whose input could not be read leaves out the members that
 input feeds and adds the warning `status_detail_unavailable`.
 
 - `connectors`: one entry per connector id (`codex`, `claudecode`, ...) the
-  installed config enables, or that still has guardian targets or
-  unprotected installs. `enabled`; `detected` (the enumerator found the
+  installed config enables or turns off with `enabled: false`, or that still
+  has guardian targets or unprotected installs. `enabled` (`false` for a
+  connector the config turns off: DefenseClaw removed its hooks and does not
+  inspect it); `detected` (the enumerator found the
   agent for at least one eligible account; absent when not enabled or the
   enumerator has not run); `versions` (distinct agent versions, at most 8;
   a string that is not a plain version is not shown);
@@ -1244,18 +1261,18 @@ off the device. The agent does not read `/health` itself (section 7); the
   no lock) builds the client the gateway builds, from the stored credential and
   the administrator's egress proxy, and makes one authenticated request whose
   only content is a single full stop. It prints `secret-result.schema.json`
-  (the check branch): `ai_defense` is `ok`, `disabled` or `unavailable:<code>`
-  with the codes of the table above (never `unknown`, `not_initialized` or
-  `gateway_not_ready`), `ok` is true only for `ok`, and a key AI Defense
-  rejects is `unavailable:auth_failed` with `errors[0].code`
-  `ai_defense_unavailable`, exit 1. `--name` must be the credential
+  (the check branch): `ai_defense` is `ok`, `rejected`, `disabled` or
+  `unavailable:<code>` (never `unknown`, `not_initialized` or
+  `gateway_not_ready`). `ok` is true only for `ok`. HTTP 401 or 403 is
+  `rejected` with `errors[0].code` `ai_defense_rejected`, exit 1 (Windows
+  1603). Other probe failures use `unavailable:<code>`. `--name` must be the credential
   `enterprise.inspection.ai_defense.credential` names (else `invalid_arguments`,
   exit 2); failures before the request are the failure document of the other
   verbs (`not_root`, `not_installed`, `state_invalid`). It does not change what
   `inspection.ai_defense` reports; the next prompt does that. Builds before
   1.0.6 have no `check` verb (an unknown command, exit 2): read `unknown`
-  until the first prompt, as above. Windows has no `check`: read
-  `inspection.ai_defense` from `enterprise windows status`.
+  until the first prompt, as above. On Windows, run the command from an
+  elevated PowerShell prompt.
 
 The agent holds the value in its own memory and writes it to the child's
 stdin; the examples stand that in with a variable of the agent process

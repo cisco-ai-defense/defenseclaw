@@ -935,7 +935,9 @@ func (s *session) detach(ctx context.Context, opts harness.LaunchOptions) error 
 	a.line("follow:  " + CommandName + " logs " + s.sb.Name + " -f")
 	a.line("watch:   " + CommandName + " activity -f --sandbox " + s.sb.Name)
 	if s.sb.WorkdirMode == config.OpenShellWorkdirCopy {
-		a.line("results: " + CommandName + " pull " + s.sb.Name + " --apply|--branch|--patch-out FILE")
+		a.line("results: " + CommandName + " pull " + s.sb.Name + " --apply")
+		a.line("or:      " + CommandName + " pull " + s.sb.Name + " --branch")
+		a.line("or:      " + CommandName + " pull " + s.sb.Name + " --patch-out FILE")
 	} else {
 		a.line("review:  " + CommandName + " review " + s.sb.Name + "   undo: " + CommandName + " undo " + s.sb.Name)
 	}
@@ -1034,7 +1036,7 @@ func (s *session) end(ctx context.Context) error {
 		later := "`" + CommandName + " review " + s.sb.Name + "` shows its changes and `" + CommandName + " undo " + s.sb.Name +
 			"` reverts them; " + s.sb.Name + " and its undo point are kept"
 		if s.sb.WorkdirMode == config.OpenShellWorkdirCopy {
-			later = "`" + CommandName + " pull " + s.sb.Name + "` brings its work back; " + s.sb.Name + " keeps it"
+			later = "`" + CommandName + " pull " + s.sb.Name + " --apply` brings its work back; " + s.sb.Name + " keeps it"
 		}
 		a.warn("the DefenseClaw daemon is not running, so this session's review and its question about the changes did not run: start it with " +
 			"`defenseclaw-gateway start`, then " + later)
@@ -2048,7 +2050,7 @@ func (s *session) printAsks(sb *sandboxapi.Sandbox) {
 func fullDiskKeepText(name string) string {
 	return "Sandbox " + name + " keeps running: a MicroVM stopped with its disk full cannot start again, and its work that was not pulled would be lost → " +
 		"free some space in it (`" + CommandName + " exec " + name + " -- df -h /` shows it; `" + CommandName + " connect " + name +
-		" --shell` to remove what it does not need), then `" + CommandName + " pull " + name + "`; stop it after that: `" + CommandName + " stop " + name + "`"
+		" --shell` to remove what it does not need), then `" + CommandName + " pull " + name + " --apply` (or --branch or --patch-out FILE); confirm the project, branch or patch file contains the work before stopping it: `" + CommandName + " stop " + name + "`"
 }
 
 // overlayDiskEvery paces the session's look at its MicroVM's own disk
@@ -2158,7 +2160,7 @@ func (s *session) endCopy(ctx context.Context, after *sandboxapi.Sandbox, endedE
 			s.diskFull = a.ownDiskFull(ctx, s.api, err) != ""
 		}
 		if !s.diskFull {
-			a.note("retry with `" + CommandName + " pull " + after.Name + "`; the sandbox is kept")
+			a.note("retry with `" + CommandName + " pull " + after.Name + " --apply` (or --branch or --patch-out FILE); the sandbox is kept")
 		}
 		s.keepUnpulled()
 		return s.finish(ctx, false)

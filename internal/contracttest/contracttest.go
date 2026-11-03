@@ -38,6 +38,7 @@ type Schemas struct {
 	ids      map[string]string
 	mu       *sync.Mutex
 	compiled map[string]*jsonschema.Schema
+	forward  map[string]map[string]any
 }
 
 // Compile compiles every schema of the contract folder under its $id, so the
@@ -51,8 +52,13 @@ func Compile(t testing.TB) Schemas {
 	compiler := jsonschema.NewCompiler()
 	compiler.Draft = jsonschema.Draft2020
 	compiler.AssertFormat = true
-	s := Schemas{compiler: compiler, ids: map[string]string{}, mu: &sync.Mutex{}, compiled: map[string]*jsonschema.Schema{}}
-	for _, path := range paths {
+	s := Schemas{compiler: compiler, ids: map[string]string{}, mu: &sync.Mutex{}, compiled: map[string]*jsonschema.Schema{},
+		forward: map[string]map[string]any{}}
+	forwardPaths, err := filepath.Glob(filepath.Join(filepath.FromSlash(ForwardDir), "*.schema.json"))
+	if err != nil || len(forwardPaths) != len(forwardOf) {
+		t.Fatalf("forward schemas: %v (%d found, %d expected)", err, len(forwardPaths), len(forwardOf))
+	}
+	for _, path := range append(paths, forwardPaths...) {
 		data, err := os.ReadFile(path)
 		if err != nil {
 			t.Fatal(err)
@@ -66,7 +72,11 @@ func Compile(t testing.TB) Schemas {
 		if err := compiler.AddResource(head.ID, bytes.NewReader(data)); err != nil {
 			t.Fatalf("%s: %v", path, err)
 		}
-		s.ids[filepath.Base(path)] = head.ID
+		name := filepath.Base(path)
+		if filepath.Base(filepath.Dir(path)) == "forward" {
+			name = "forward/" + name
+		}
+		s.ids[name] = head.ID
 	}
 	for name := range s.ids {
 		s.schema(t, name)
@@ -99,7 +109,9 @@ func (s Schemas) schema(t testing.TB, name string) *jsonschema.Schema {
 }
 
 // Validate requires document to be exactly one JSON value that schema name
-// accepts, and returns it decoded (nil when it is not an object).
+// accepts, and returns it decoded (nil when it is not an object). A whole
+// document of a schema with a forward schema is also projected through it
+// (CheckForward).
 func (s Schemas) Validate(t testing.TB, name string, document []byte) map[string]any {
 	t.Helper()
 	schema := s.schema(t, name)
@@ -119,6 +131,9 @@ func (s Schemas) Validate(t testing.TB, name string, document []byte) map[string
 	}
 	if err := schema.Validate(value); err != nil {
 		t.Fatalf("%s rejects a real document: %v\n%s", name, err, document)
+	}
+	if _, ok := forwardOf[name]; ok {
+		s.CheckForward(t, name, value)
 	}
 	object, _ := value.(map[string]any)
 	return object

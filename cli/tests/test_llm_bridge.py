@@ -62,28 +62,47 @@ class LLMBridgeTests(unittest.TestCase):
 
 class LLMHelperExitsWithParentTests(unittest.TestCase):
     # p0 GAP-1156: the helper a scanner starts dies with the scanner.
+    # rel-1-0-6:GAP-0243: the Linux branch is reached through the platform and
+    # libc-loader parameters. Nothing patches sys.platform, ctypes.CDLL or the
+    # signal module for the whole process, so the result is the same on every
+    # host OS and after any earlier test.
     def test_linux_helper_asks_for_the_parent_death_signal(self):
-        import signal
-
         from defenseclaw import llm
 
         libc = MagicMock()
-        # SIGKILL is 9 on Linux; Windows' signal module has no SIGKILL, so the
-        # simulated Linux helper gets the Linux value on every test host.
-        with (
-            patch.object(sys, "platform", "linux"),
-            patch("ctypes.CDLL", return_value=libc),
-            patch.object(signal, "SIGKILL", getattr(signal, "SIGKILL", 9), create=True),
-        ):
-            llm._exit_with_parent()
+        loader = MagicMock(return_value=libc)
+        llm._exit_with_parent(platform="linux", load_libc=loader)
+        loader.assert_called_once_with()
+        # PR_SET_PDEATHSIG (1) with SIGKILL, which is 9 on every Linux
+        # architecture, whatever the signal module of the test host says.
         libc.prctl.assert_called_once_with(1, 9, 0, 0, 0)
+
+    def test_a_libc_without_prctl_leaves_the_helper_running(self):
+        from defenseclaw import llm
+
+        loader = MagicMock(side_effect=OSError("no libc"))
+        llm._exit_with_parent(platform="linux", load_libc=loader)
+        loader.assert_called_once_with()
 
     def test_other_platforms_leave_the_helper_as_is(self):
         from defenseclaw import llm
 
-        with patch.object(sys, "platform", "darwin"), patch("ctypes.CDLL") as cdll:
+        for platform in ("darwin", "win32", "cygwin"):
+            with self.subTest(platform=platform):
+                loader = MagicMock()
+                llm._exit_with_parent(platform=platform, load_libc=loader)
+                loader.assert_not_called()
+
+    def test_the_helper_entry_point_uses_the_running_platform(self):
+        from defenseclaw import llm
+
+        loader = MagicMock()
+        with patch.object(llm, "_load_libc", loader):
             llm._exit_with_parent()
-        cdll.assert_not_called()
+        if sys.platform.startswith("linux"):
+            loader.assert_called_once_with()
+        else:
+            loader.assert_not_called()
 
 
 if __name__ == "__main__":

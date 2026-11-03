@@ -15,6 +15,8 @@ import (
 	"strings"
 
 	"gopkg.in/yaml.v3"
+
+	"github.com/defenseclaw/defenseclaw/internal/pathidentity"
 )
 
 type Manifest struct {
@@ -72,7 +74,7 @@ func loadManifestWithSHA256(path string, validateTarget func(int, ManifestTarget
 	if strings.TrimSpace(path) == "" {
 		return Manifest{}, "", fmt.Errorf("enterprise hooks: manifest path is required")
 	}
-	expected, err := os.Lstat(path)
+	expected, err := pathidentity.LstatPinned(path)
 	if err != nil {
 		return Manifest{}, "", fmt.Errorf("enterprise hooks: inspect manifest %s: %w", path, err)
 	}

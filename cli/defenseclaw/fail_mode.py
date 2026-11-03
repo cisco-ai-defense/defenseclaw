@@ -474,7 +474,12 @@ def resolve_connector_fail_mode(
 
     lock_mode, lock_drift = _registration_lock_state(cfg, name)
     sources.append(("registration-lock", lock_mode))
-    if lock_mode != desired:
+    # A hook that reads its outage mode from config on every call does not run
+    # the lock's recorded mode: a lock that lags a pack switched while the
+    # gateway is stopped is no drift (GAP-0272). A missing or malformed lock
+    # still is.
+    lock_mode_unread = lock_mode is not None and _outage_mode_read_at_call_time(cfg, name, runtime_source)
+    if lock_mode != desired and not lock_mode_unread:
         drift.append("registration-stale")
     if lock_drift:
         drift.append(lock_drift)
@@ -508,6 +513,8 @@ def resolve_connector_fail_mode(
         if source == "config":
             continue
         if source == "claude-env" and not env_read:
+            continue
+        if source == "registration-lock" and lock_mode_unread:
             continue
         if mode is None:
             # A per-user setup writes no fail mode into Claude Code's settings
@@ -815,11 +822,38 @@ def _platform_runtime_source(cfg: Any, connector: str) -> tuple[str, str | None]
     ):
         # A current per-user script decides its outage mode from config at
         # call time; older scripts still read their runtime record.
-        helper = _read_small_file(hook_dir / "_hardening.sh")
-        if helper and "defenseclaw-call-time-outage-v1" in helper:
+        if _call_time_outage_helper(hook_dir):
             return "hook-script", normalize_fail_mode(cfg.guardrail.effective_hook_outage_fail_mode(connector))
         return "hook-script", _read_flat_hook_record_mode(hook_dir, connector)
     return ("hook-script-env" if reads_env else "hook-script"), mode
+
+
+def _call_time_outage_helper(hook_dir: Path) -> bool:
+    """Whether the installed shell helper decides a per-user outage mode from config at call time."""
+
+    helper = _read_small_file(hook_dir / "_hardening.sh")
+    return bool(helper and "defenseclaw-call-time-outage-v1" in helper)
+
+
+def _outage_mode_read_at_call_time(cfg: Any, connector: str, runtime_source: tuple[str, str | None]) -> bool:
+    """Whether a per-user Linux or macOS hook takes its outage mode from config.yaml on every call.
+
+    Such a hook (a closed render with the call-time helper) runs the mode the
+    config chooses now, whatever hook_contract_lock.json recorded when the
+    gateway last rendered it. A pack switched with the gateway stopped
+    rewrites the config and the runtime records, and the lock keeps the old
+    mode until the gateway renders the hooks again when it starts: that lag
+    changes nothing the hook runs, so it is no runtime drift (GAP-0272).
+    """
+
+    if runtime_source[0] != "hook-script" or _is_windows() or connector in {"amp", "opencode"}:
+        return False
+    if str(getattr(cfg, "deployment_mode", "") or "").strip().lower() == "managed_enterprise":
+        return False
+    hook_dir = Path(cfg.data_dir) / "hooks"
+    script_name = "claude-code-hook.sh" if connector == "claudecode" else f"{connector}-hook.sh"
+    mode, reads_env = _read_baked_hook_state(hook_dir / script_name)
+    return mode == "closed" and not reads_env and _call_time_outage_helper(hook_dir)
 
 
 def _read_flat_hook_record_mode(hook_dir: Path, connector: str) -> str | None:

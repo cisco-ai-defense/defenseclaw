@@ -252,7 +252,7 @@ When you omit `--connector`, DefenseClaw resolves it in this order:
 
 ## Tabs by mode (non-interactive recipes)
 
-<Tabs items={['Observe', 'Action', 'HITL', 'Judge', 'Bedrock judge']}>
+<Tabs items={['Observe', 'Action', 'HITL', 'Judge', 'Decision model', 'Bedrock judge']}>
 
 <Tab value="Observe">
 
@@ -297,6 +297,17 @@ defenseclaw setup guardrail --non-interactive --connector claudecode --mode acti
 ```
 
 Regex runs first and the judge adjudicates what regex flags. `--detection-strategy judge_first` flips the order. To cut judge calls on tool calls, put a [decision model](/docs/guardrail/decision-model) in front of the judge. Hook connectors are judged only in action mode; `--judge-hook-connectors` chooses which. A judge verdict goes through `block_at` and `alert_at` like a rule finding.
+
+</Tab>
+
+<Tab value="Decision model">
+
+```bash
+defenseclaw setup guardrail --non-interactive --connector codex --mode action --scanner-mode local --restart
+defenseclaw setup decision-model --base-url http://127.0.0.1:8791/v1/systemone --model my-model --connectors codex --ping
+```
+
+Tool calls go through one of three cascades per connector: rules only (the default); rules, then the [decision model](/docs/guardrail/decision-model) with no judge (the connectors in `--connectors`); or rules, the decision model, then the LLM judge (the connectors the judge covers). Without a judge, a confident allow allows, a confident block blocks, and anything else asks the user where the agent can ask and is a HIGH alert where it cannot. A decision model that is down leaves the rule verdict, as a judge outage does.
 
 </Tab>
 

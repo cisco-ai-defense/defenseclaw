@@ -1020,6 +1020,16 @@ func TestHookConfigGuard_DoesNotReportRepairWhenClaudePolicyStillDisablesHooks(t
 	defer cancel()
 	guard := NewHookConfigGuard(nil, nil, guardTestDebounce)
 	notified := make(chan struct{}, 1)
+	diagnostics := make(chan string, 1)
+	guard.diagnosticObserver = func(failure string) {
+		if !strings.Contains(failure, "disableAllHooks=true") || !strings.Contains(failure, settingsPath) {
+			return
+		}
+		select {
+		case diagnostics <- failure:
+		default:
+		}
+	}
 	guard.SetHealNotifier(func(string, []string) { notified <- struct{}{} })
 	guard.Start(ctx, conn, opts)
 	t.Cleanup(guard.Stop)
@@ -1041,20 +1051,12 @@ func TestHookConfigGuard_DoesNotReportRepairWhenClaudePolicyStillDisablesHooks(t
 		t.Fatalf("restore disabled Claude settings: %v", err)
 	}
 
-	deadline := time.Now().Add(hookGuardSetupTimeout + 5*time.Second)
-	for {
-		guard.mu.Lock()
-		// An inactive effective policy can fail before Setup or during its
-		// post-Setup verification. Both paths must retain the exact source.
-		failure := guard.lastPolicyFailure + "\n" + guard.lastHealFailure
-		guard.mu.Unlock()
-		if strings.Contains(failure, "disableAllHooks=true") && strings.Contains(failure, settingsPath) {
-			break
-		}
-		if time.Now().After(deadline) {
-			t.Fatalf("guard did not report the exact policy-blocked source (last failure=%q)", failure)
-		}
-		time.Sleep(20 * time.Millisecond)
+	// An inactive effective policy can fail before Setup or during its
+	// post-Setup verification. In either case the diagnostic callback is the
+	// guard's completed evaluation, independent of runner scheduling.
+	failure := <-diagnostics
+	if !strings.Contains(failure, "disableAllHooks=true") || !strings.Contains(failure, settingsPath) {
+		t.Fatalf("guard did not report the exact policy-blocked source (failure=%q)", failure)
 	}
 	data, err = os.ReadFile(settingsPath)
 	if err != nil {

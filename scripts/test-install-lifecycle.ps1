@@ -199,9 +199,12 @@ with open(path, 'w', encoding='utf-8') as stream:
 
 function Assert-Versions([string]$Want) {
     $cli = Get-VersionOf (Get-ExeOutput (Join-Path $Bin "defenseclaw.cmd") @("--version"))
+    $nativeCli = Get-VersionOf (Get-ExeOutput (Join-Path $Bin "defenseclaw.exe") @("--version"))
     $gateway = Get-VersionOf (Get-ExeOutput (Join-Path $Bin "defenseclaw-gateway.exe") @("--version"))
-    Check ($cli -eq $Want -and $gateway -eq $Want) "expected $Want, got cli=$cli gateway=$gateway"
+    Check ($cli -eq $Want -and $nativeCli -eq $Want -and $gateway -eq $Want) "expected $Want, got cli=$cli native=$nativeCli gateway=$gateway"
     if ($Want -eq $Target) {
+        $shim = [IO.File]::ReadAllText((Join-Path $Bin "defenseclaw.cmd"))
+        Check ($shim -ceq "@echo off`r`n`"$Bin\defenseclaw.exe`" %*`r`n") "unexpected defenseclaw.cmd: $shim"
         $compiler = Join-Path $DcHome "installer\policy_compiler.py"
         if (Test-FleetEnabled) {
             Check (Test-Path -LiteralPath $compiler -PathType Leaf) "Fleet-on upgrade did not install its compiler"
@@ -367,11 +370,11 @@ function Test-Fresh {
     Check (-not (Test-Path -LiteralPath (Join-Path $DcHome "previous"))) "a fresh install must not leave a rollback slot"
     Check (Test-Path -LiteralPath (Join-Path $DcHome "installer\install.ps1")) "installer copy was not saved"
     $shim = [IO.File]::ReadAllText((Join-Path $Bin "defenseclaw.cmd"))
-    Check ($shim -ceq "@echo off`r`n`"$DcHome\.venv\Scripts\defenseclaw.exe`" %*`r`n") "unexpected defenseclaw.cmd: $shim"
+    Check ($shim -ceq "@echo off`r`n`"$Bin\defenseclaw.exe`" %*`r`n") "unexpected defenseclaw.cmd: $shim"
     $posix = [IO.File]::ReadAllText((Join-Path $Bin "defenseclaw"))
-    Check ($posix.Contains("exec `"$(($DcHome -replace '\\', '/'))/.venv/Scripts/defenseclaw.exe`" `"`$@`"")) "unexpected Git Bash launcher: $posix"
+    Check ($posix.Contains("exec `"$(($Bin -replace '\\', '/'))/defenseclaw.exe`" `"`$@`"")) "unexpected Git Bash launcher: $posix"
     # PowerShell runs this native launcher before defenseclaw.cmd (GAP-2237).
-    Check ((Get-FileHash (Join-Path $Bin "defenseclaw.exe")).Hash -eq (Get-FileHash "$DcHome\.venv\Scripts\defenseclaw.exe").Hash) "defenseclaw.exe is not the venv launcher"
+    Check ((Get-FileHash (Join-Path $Bin "defenseclaw.exe")).Hash -eq (Get-FileHash (Join-Path $Bin "defenseclaw-gateway.exe")).Hash) "defenseclaw.exe is not the native launcher"
     foreach ($name in "defenseclaw-gateway.exe", "defenseclaw-hook.exe", "defenseclaw-acp.exe", "skill-scanner.cmd", "mcp-scanner.cmd") {
         Check (Test-Path -LiteralPath (Join-Path $Bin $name)) "$name is missing"
     }

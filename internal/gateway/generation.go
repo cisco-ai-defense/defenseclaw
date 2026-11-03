@@ -80,6 +80,10 @@ type Generation struct {
 	activePatterns *localPatternsActivation
 	connectorRules map[string]*compiledRulePackCategories
 	judge          *LLMJudge
+	// decisionJudge answers the hook tool calls of the connectors in
+	// decision_model.hook_connectors where the LLM judge does not run
+	// (cascade 2); nil otherwise (newDecisionOnlyJudge).
+	decisionJudge *LLMJudge
 	// registeredRules are the compiled rules registered for connectors
 	// outside the configuration (connector setup, a sandbox harness) while
 	// g is live: the process-wide set when g was published plus the

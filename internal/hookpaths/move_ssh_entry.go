@@ -23,12 +23,19 @@ import (
 // entry itself (rename replaces the link), so the GAP-2559 benign move onto
 // a link keeps its allow.
 func actionMoveProtectedEntry(command, cwd, home string) bool {
+	return actionMoveProtectedEntryWithFile(command, cwd, home, nil)
+}
+
+func actionMoveProtectedEntryWithFile(command, cwd, home string, file *syntax.File) bool {
 	if command == "" || home == "" || !filepath.IsAbs(cwd) {
 		return false
 	}
-	file, ok := parseShell(command)
-	if !ok {
-		return false
+	if file == nil {
+		var ok bool
+		file, ok = parseShell(command)
+		if !ok {
+			return false
+		}
 	}
 	protected := newProtectedFiles(home)
 	ssh := filepath.Join(home, ".ssh")

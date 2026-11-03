@@ -796,6 +796,91 @@ func TestPublishWindowsGoOwnedHoldsTheAmpMachineFolder(t *testing.T) {
 	}
 }
 
+func TestWindowsAmpMachineFolderRemovalUsesWriterOwnership(t *testing.T) {
+	t.Run("Setup-created empty folder", func(t *testing.T) {
+		opts := windowsTestOptions(t)
+		dir := windowsAmpMachineDir(opts)
+		if _, err := reserveWindowsAmpMachineDir(opts); err != nil {
+			t.Fatal(err)
+		}
+		entries, err := os.ReadDir(dir)
+		if err != nil || len(entries) != 1 || entries[0].Name() != windowsAmpMachineFolderOwnerFile {
+			t.Fatalf("Amp writer files = %v, %v", entries, err)
+		}
+		if err := RemoveWindowsAmpMachineFolderIfCreated(opts); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := os.Lstat(dir); !errors.Is(err, os.ErrNotExist) {
+			t.Fatalf("Setup-created Amp folder remained: %v", err)
+		}
+	})
+	t.Run("preexisting vendor folder", func(t *testing.T) {
+		opts := windowsTestOptions(t)
+		dir := windowsAmpMachineDir(opts)
+		if err := createProtectedDir(dir); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := reserveWindowsAmpMachineDir(opts); err != nil {
+			t.Fatal(err)
+		}
+		if err := RemoveWindowsAmpMachineFolderIfCreated(opts); err != nil {
+			t.Fatal(err)
+		}
+		if info, err := os.Lstat(dir); err != nil || !info.IsDir() {
+			t.Fatalf("preexisting Amp folder was removed: %v", err)
+		}
+	})
+	t.Run("writer replaces a junction", func(t *testing.T) {
+		opts := windowsTestOptions(t)
+		dir := windowsAmpMachineDir(opts)
+		target := plantAsUser(t, dir, "junction")
+		if _, err := reserveWindowsAmpMachineDir(opts); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := os.Lstat(filepath.Join(dir, windowsAmpMachineFolderOwnerFile)); err != nil {
+			t.Fatalf("writer ownership marker is missing: %v", err)
+		}
+		if err := RemoveWindowsAmpMachineFolderIfCreated(opts); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := os.Lstat(dir); !errors.Is(err, os.ErrNotExist) {
+			t.Fatalf("writer-created Amp folder remained: %v", err)
+		}
+		if _, err := os.Lstat(filepath.Join(target, "user.json")); err != nil {
+			t.Fatalf("junction target changed: %v", err)
+		}
+	})
+	t.Run("folder with another product file", func(t *testing.T) {
+		opts := windowsTestOptions(t)
+		dir := windowsAmpMachineDir(opts)
+		if _, err := reserveWindowsAmpMachineDir(opts); err != nil {
+			t.Fatal(err)
+		}
+		foreign := filepath.Join(dir, "AGENTS.md")
+		if err := os.WriteFile(foreign, []byte("vendor content"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		if err := RemoveWindowsAmpMachineFolderIfCreated(opts); err != nil {
+			t.Fatal(err)
+		}
+		if data, err := os.ReadFile(foreign); err != nil || string(data) != "vendor content" {
+			t.Fatalf("another product file changed: %q, %v", data, err)
+		}
+		if _, err := os.Lstat(filepath.Join(dir, windowsAmpMachineFolderOwnerFile)); !errors.Is(err, os.ErrNotExist) {
+			t.Fatalf("Setup ownership marker remained: %v", err)
+		}
+		if err := os.Remove(foreign); err != nil {
+			t.Fatal(err)
+		}
+		if err := RemoveWindowsAmpMachineFolderIfCreated(opts); err != nil {
+			t.Fatal(err)
+		}
+		if info, err := os.Lstat(dir); err != nil || !info.IsDir() {
+			t.Fatalf("a folder with another product's content was removed: %v", err)
+		}
+	})
+}
+
 // A standard user who created the Codex vendor folder first, with a
 // requirements file in it, no longer stops the first delivery: the folder
 // and its OpenAI parent are taken back and her file is moved aside to a

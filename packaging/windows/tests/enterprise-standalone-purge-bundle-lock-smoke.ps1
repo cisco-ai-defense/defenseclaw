@@ -125,6 +125,37 @@ try {
             $failures.Add('the forced uninstall kept bundle.lock after it moved StateRoot aside')
         }
         Exit-DefenseClawPurgeBundleLock
+
+        # GAP-1474: another program holds a file under StateRoot open without
+        # delete sharing. The refusal says a file inside StateRoot is in use
+        # and to run FORCE=1 again, not the raw .NET Move exception, and
+        # StateRoot stays where it was.
+        $heldRoot = Microsoft.PowerShell.Management\Join-Path $root 'held-state'
+        [void](Microsoft.PowerShell.Management\New-Item -ItemType Directory -Path $heldRoot)
+        $heldFile = Microsoft.PowerShell.Management\Join-Path $heldRoot 'held.txt'
+        [IO.File]::WriteAllText($heldFile, 'held')
+        $heldLayout = $forcedLayout.Clone()
+        $heldLayout.StateRoot = $heldRoot
+        $heldLayout.InstallStateDirectory = Microsoft.PowerShell.Management\Join-Path $heldRoot 'install'
+        $reader = [IO.File]::Open($heldFile, [IO.FileMode]::Open, [IO.FileAccess]::Read, [IO.FileShare]::Read)
+        $message = ''
+        try {
+            [void](Invoke-DefenseClawForcedUninstallPreparation `
+                -Layout $heldLayout `
+                -GatewayServiceName 'DefenseClawPodTestGateway' `
+                -GuardianServiceName 'DefenseClawPodTestGuardian')
+            $failures.Add('the forced uninstall moved StateRoot aside while a file in it was held open')
+        }
+        catch { $message = $_.Exception.Message }
+        finally { $reader.Dispose() }
+        if ($message -and ($message -notmatch 'is in use by another program' -or
+                $message.IndexOf($heldRoot, [StringComparison]::OrdinalIgnoreCase) -lt 0 -or
+                $message -notmatch 'run Setup /uninstall FORCE=1 again' -or $message -match 'Exception calling')) {
+            $failures.Add("held StateRoot refusal does not say a file in it is in use: $message")
+        }
+        if (-not [IO.Directory]::Exists($heldRoot)) {
+            $failures.Add('StateRoot was not left in place after the refused move')
+        }
         return , $failures
     } $root
 }

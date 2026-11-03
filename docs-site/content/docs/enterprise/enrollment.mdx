@@ -142,7 +142,7 @@ Every key lives under `enterprise.enrollment`. Defaults and value rules are in [
 | Setting | Linux and macOS | Windows |
 | --- | --- | --- |
 | `mode` | `auto` or `manifest` | `auto` or `manifest` |
-| `include_users` | Adds these accounts even when discovery does not list them, and skips the uid and login-shell checks for them | Accepted. Every profile on the computer is already a candidate, so it adds and removes no one. |
+| `include_users` | Adds these accounts even when discovery does not list them, and skips the uid and login-shell checks for them. An account still gets a row only for an agent installed in it; the enumerator log names an included account that has none | Accepted. Every profile on the computer is already a candidate, so it adds and removes no one. |
 | `exclude_users` | Never enrolled. Wins over every other setting. | Same |
 | `include_groups`, `exclude_groups` | Group filters | Group filters for local and Active Directory groups, and for the Entra ID groups that a built-in local group lists; see [Group filters on Windows](#group-filters-on-windows) |
 | `exempt_users` | Not enrolled, and never refused for enrollment or by a sandbox `required_for`; their calls are still inspected under their guardrail profile and logged | Keeps the rows of the machine-policy agents, so the user is inspected and logged there. Per-user agents get no new rows; rows already enrolled are kept. |
@@ -166,6 +166,8 @@ The enumerator applies these checks to each account, in this order:
 6. The home directory must be under a home root, owned by the user, not a link, and not writable by group or others. No parent directory may be writable by everyone.
 
 `enterprise policy show --user <name>` prints an `enrollment:` line when `exclude_users`, `exempt_users` or uid 0 keeps that account out of enrollment.
+
+On Windows, `enterprise windows status` and `enterprise windows verify` list the `exclude_users` and `exclude_groups` entries (`enrollment.excluded_users` and `enrollment.excluded_groups` in `--json`), so an account held out by policy is not mistaken for one that is not enrolled yet.
 
 ```yaml title="config.yaml (Linux example)"
 enterprise:
@@ -277,7 +279,7 @@ A group name that resolved before but does not resolve now (the directory is unr
 
 ## New, changed and removed users
 
-- **New user.** Enrolled on the next enumerator cycle, within five minutes once the account is signed in and the agent is installed. On Windows a sign-in also starts an extra cycle about 15 seconds later. On Windows, Claude Code must also start once so its build can be verified; if that happens later, the five-minute wait starts then. Its first tool call must be refused until enrollment. Machine-policy agents must run their hooks from the first call: on Linux and macOS the user is inspected (`unenrolled_users: inspect`), or refused with `deny`; on Windows the unregistered SID must be refused. Claude Code, Codex and Cursor must refuse a new user even with zero enrolled users for that agent. Per-user agents are covered once the guardian has written the registration.
+- **New user.** Enrolled on the next enumerator cycle, within five minutes once the account is signed in and the agent is installed. On Windows a sign-in also starts an extra cycle about 15 seconds later; the cycle itself can take up to a minute, so a first sign-in is enrolled about one to two minutes after it (70 to 95 seconds in one test), and the agents stay pending until then. On Windows, Claude Code must also start once so its build can be verified; if that happens later, the five-minute wait starts then. Its first tool call must be refused until enrollment. Machine-policy agents must run their hooks from the first call: on Linux and macOS the user is inspected (`unenrolled_users: inspect`), or refused with `deny`; on Windows the unregistered SID must be refused. Claude Code, Codex and Cursor must refuse a new user even with zero enrolled users for that agent. Per-user agents are covered once the guardian has written the registration.
 - **Changed user (Linux and macOS).** A user name that now resolves to a different uid or home path, or a home recreated with a different inode, is a new identity and is enrolled from scratch. A reused uid does not inherit a deleted user's rows.
 - **Excluded user.** Removed on the next cycle.
 - **Agent removed from the config.** Its per-user rows are removed on the next cycle.

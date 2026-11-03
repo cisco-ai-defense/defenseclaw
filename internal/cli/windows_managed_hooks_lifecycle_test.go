@@ -19,6 +19,40 @@ import (
 	"golang.org/x/sys/windows"
 )
 
+func TestWindowsManagedHooksActivationBindingNamesInvalidField(t *testing.T) {
+	valid := windowsManagedHooksActivationRecord{
+		SchemaVersion: 1, DeploymentGenerationID: strings.Repeat("a", 32),
+		State: "activated", ManifestSHA256: strings.Repeat("b", 64), TargetCount: 2,
+	}
+	if err := validateWindowsManagedHooksLifecycleActivationBinding(&valid, 2); err != nil {
+		t.Fatalf("valid activation binding: %v", err)
+	}
+	valid.State = "never_activated"
+	if err := validateWindowsManagedHooksLifecycleActivationBinding(&valid, 2); err != nil {
+		t.Fatalf("valid inactive binding: %v", err)
+	}
+	valid.State = "activated"
+	for _, tc := range []struct {
+		name, field, step string
+		change            func(*windowsManagedHooksActivationRecord)
+	}{
+		{"schema", "schema_version", "Setup /repair", func(a *windowsManagedHooksActivationRecord) { a.SchemaVersion = 0 }},
+		{"generation", "deployment_generation_id", "Setup /repair", func(a *windowsManagedHooksActivationRecord) { a.DeploymentGenerationID = "" }},
+		{"state", "state", "Setup /repair", func(a *windowsManagedHooksActivationRecord) { a.State = "unknown" }},
+		{"manifest hash", "manifest_sha256", "Setup /repair", func(a *windowsManagedHooksActivationRecord) { a.ManifestSHA256 = "" }},
+		{"target count", "target_count", "Setup /ensure", func(a *windowsManagedHooksActivationRecord) { a.TargetCount = 1 }},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			changed := valid
+			tc.change(&changed)
+			err := validateWindowsManagedHooksLifecycleActivationBinding(&changed, 2)
+			if err == nil || !strings.Contains(err.Error(), tc.field) || !strings.Contains(err.Error(), tc.step) {
+				t.Fatalf("invalid %s: %v", tc.field, err)
+			}
+		})
+	}
+}
+
 func TestRestoreWindowsManagedHooksLifecycleCompositeCompensatesClaude(t *testing.T) {
 	claudeErr := errors.New("Claude restore failed")
 	cursorErr := errors.New("Cursor restore failed")
@@ -1522,6 +1556,75 @@ func TestWindowsManagedHooksGuardianFailedRowIsAcceptedAndAnAmbiguousOneNamed(t 
 		"ambiguous target disposition",
 		"codex target S-1-5-21-111-222-333-1001",
 		"no error recorded",
+	} {
+		if !strings.Contains(err.Error(), want) {
+			t.Fatalf("refusal %q does not name %q", err, want)
+		}
+	}
+}
+
+// rel-1-0-6:GAP-0319: an enrolled local account deleted after the last
+// enumerator pass is not something to repair: the refusal says the next
+// pass revokes its rows, and the lifecycle module can recognize it.
+func TestWindowsManagedHooksGuardianRefusalNamesADeletedLocalAccount(t *testing.T) {
+	original := windowsManagedHooksLifecycleDeletedLocalAccount
+	t.Cleanup(func() { windowsManagedHooksLifecycleDeletedLocalAccount = original })
+	windowsManagedHooksLifecycleDeletedLocalAccount = func(sid string) bool { return sid == "S-1-5-21-111-222-333-1001" }
+	manifestSHA256 := strings.Repeat("a", 64)
+	ctx := windowsManagedHooksLifecycleContext{
+		manifestPath: `C:\ProgramData\DefenseClaw\hook-guardian\targets.yaml`,
+		targets: []windowsManagedHooksTeardownTarget{
+			{Connector: "claudecode", SID: "S-1-5-21-111-222-333-1001"},
+			{Connector: "codex", SID: "S-1-5-21-111-222-333-1001"},
+		},
+	}
+	protected := []enterpriseHookReconcileRow{
+		{Connector: "claudecode", SID: "S-1-5-21-111-222-333-1001", OK: true},
+	}
+	results := []enterpriseHookReconcileRow{
+		protected[0],
+		{
+			Connector: "codex",
+			SID:       "S-1-5-21-111-222-333-1001",
+			Error:     "codex runtime selector: enterprise hooks: managed runtime selector targets are not strictly sorted",
+		},
+	}
+	activation := enterpriseHookGuardianActivation{
+		Version:          enterpriseHookGuardianActivationVersion,
+		UpdatedAt:        "2026-08-24T00:00:00Z",
+		ReconcileID:      strings.Repeat("f", 32),
+		Manifest:         ctx.manifestPath,
+		ManifestSHA256:   manifestSHA256,
+		TargetCount:      2,
+		SuccessCount:     1,
+		FailureCount:     1,
+		ProtectedTargets: protected,
+	}
+	authorization := enterpriseHookGuardianAuthorization{
+		Version:          1,
+		UpdatedAt:        activation.UpdatedAt,
+		TargetCount:      2,
+		SuccessCount:     1,
+		FailureCount:     1,
+		ProtectedTargets: protected,
+	}
+	state := enterpriseHookGuardianState{
+		Version:      1,
+		UpdatedAt:    activation.UpdatedAt,
+		Manifest:     ctx.manifestPath,
+		TargetCount:  2,
+		SuccessCount: 1,
+		FailureCount: 1,
+		Results:      results,
+	}
+	_, _, err := validateWindowsManagedHooksGuardianActivation(activation, authorization, state, ctx, manifestSHA256)
+	if !errors.Is(err, errWindowsManagedHooksDeletedLocalAccount) || strings.Contains(err.Error(), "ambiguous") {
+		t.Fatalf("deleted account refusal = %v", err)
+	}
+	for _, want := range []string{
+		"no longer exists",
+		"next pass",
+		"codex target S-1-5-21-111-222-333-1001",
 	} {
 		if !strings.Contains(err.Error(), want) {
 			t.Fatalf("refusal %q does not name %q", err, want)

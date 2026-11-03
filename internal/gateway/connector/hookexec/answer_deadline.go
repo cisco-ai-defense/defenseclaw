@@ -16,28 +16,44 @@ import (
 	"time"
 )
 
-// hookAnswerBudget is how long, from the start of the hook process, a tool
-// call's hook waits for its gateway's decision. Every wait of the call
-// counts against it: a restart (gatewayRestartBudget), a dial, a gateway that
-// accepted the call but does not answer (it is stopping, it is starting, or
-// it is so busy that the call waits for its turn), and the resends after a
-// 429 or a 401. When the budget ends, every hook outside Secure Client fails
-// closed. A slow gateway cannot allow a call without a decision (GAP-0155,
-// GAP-0167, GAP-0139, GAP-0160).
+// hookAnswerBudget is how long a bounded hook waits for its gateway's
+// decision. Per-user hooks count it from process start; managed native hooks
+// count it from gateway contact, within managedAnswerDeadlineCap. A restart
+// (gatewayRestartBudget), dial, accepted call without an answer, and resends
+// after a 429 or 401 all share the call's deadline. When it ends, a hook
+// outside Secure Client fails closed unless a proven outage and the installed
+// policy permit an administrator's open mode. A slow gateway cannot allow a
+// call without a decision (GAP-0155, GAP-0167, GAP-0139, GAP-0160).
 //
 // The agent may wait at most 5 s for DefenseClaw, and the deadline itself
 // runs late on a loaded host: the answer is written by a process that the
 // system schedules, after the deadline, beside the work that holds the CPU.
 // With a 4 s budget, managed Windows calls during Setup ensures, a repair
 // and a gateway service start gave their block 1.1 to 1.75 s after it
-// (5.1-5.75 s; GAP-0155, GAP-0167, GAP-0171). The budget keeps 1.5 s of the
-// 5 s for that slip; the hook also runs above normal priority there
+// (5.1-5.75 s; GAP-0155, GAP-0167, GAP-0171). The 3.5 s contact budget
+// keeps 1.5 s when it starts promptly; the managed process cap below keeps
+// 1 s. The hook also runs above normal priority on Windows
 // (cmd/internal/hookpriority).
 //
 // A gateway that waits on a remote scanner for the call (Cisco AI Defense,
 // the LLM judge) says so with an informational 102 response
 // (HookProgressHeader); the call then waits up to hookProgressCeiling.
 var hookAnswerBudget = 3500 * time.Millisecond
+
+// Codex registers per-user PreToolUse command hooks with a 30-second host
+// timeout. Give an otherwise healthy local gateway another half-second under
+// host load; the managed hook and the other connectors keep the
+// shorter answer budget. This meets the four-second progress ceiling.
+var perUserCodexAnswerBudget = 4 * time.Second
+
+// A managed native hook may resolve its protected runtime, scan foreign
+// hooks, and exchange their session record before its policy POST. The
+// gateway still gets hookAnswerBudget from that contact when it fits; the
+// process deadline below limits the whole call to four seconds from launch,
+// leaving one second inside the agent's five-second hook cap for a late wake.
+// The early watchdog uses this deadline so local work cannot extend the
+// process indefinitely. Secure Client keeps its existing deadlines.
+var managedAnswerDeadlineCap = 4 * time.Second
 
 // hookProgressCeiling is how long, from the start of the hook process, a
 // tool call whose gateway reported (102) that it waits on a remote scanner
@@ -54,11 +70,10 @@ var hookProgressCeiling = 4 * time.Second
 // gateway contact (the foreign-hook session exchange, or the hook request)
 // must have before the call's answer deadline for a missing answer to count
 // as the gateway's: an outage that the administrator's open fail mode lets
-// through. The deadline counts from the invocation, so a slow local step
-// before the contact (a foreign-hook scan that runs close to its own budget)
-// could otherwise leave a healthy gateway a few milliseconds and turn the
-// expired budget into an allowance (final review, P2). Less than this left
-// fails closed (errAnswerBudgetSpentLocally).
+// through. The process cap still counts from invocation, so a slow local
+// step before contact can leave a healthy gateway a few milliseconds and
+// turn the expired budget into an allowance (final review, P2). Less than
+// this left fails closed (errAnswerBudgetSpentLocally).
 var hookGatewayAnswerFloor = time.Second
 
 // errAnswerBudgetSpentLocally marks a missing answer of a gateway contact
@@ -157,7 +172,30 @@ func answerDeadline(opts Options, startedAt time.Time) time.Time {
 	if opts.SecureClient || startedAt.IsZero() || !bounded {
 		return time.Time{}
 	}
-	return startedAt.Add(hookAnswerBudget)
+	if opts.ManagedEnterprise {
+		return startedAt.Add(managedAnswerDeadlineCap)
+	}
+	budget := hookAnswerBudget
+	if !opts.ManagedEnterprise && strings.EqualFold(strings.TrimSpace(opts.Connector), "codex") &&
+		perUserCodexAnswerBudget > budget {
+		budget = perUserCodexAnswerBudget
+	}
+	return startedAt.Add(budget)
+}
+
+// gatewayAnswerDeadline is the managed gateway contact's answer window,
+// bounded by the process deadline armed before runtime and foreign-hook work.
+// A per-user call keeps its invocation-based deadline.
+func gatewayAnswerDeadline(opts Options, startedAt, contactAt time.Time) time.Time {
+	cap := answerDeadline(opts, startedAt)
+	if cap.IsZero() || !opts.ManagedEnterprise {
+		return cap
+	}
+	contactDeadline := contactAt.Add(hookAnswerBudget)
+	if contactDeadline.Before(cap) {
+		return contactDeadline
+	}
+	return cap
 }
 
 // progressCeiling is the latest answer deadline of a tool call that started
@@ -168,6 +206,15 @@ func progressCeiling(opts Options, startedAt time.Time) time.Time {
 		return time.Time{}
 	}
 	return startedAt.Add(max(hookProgressCeiling, hookAnswerBudget))
+}
+
+// ToolGateEvent reports a hook event that runs before a tool call (or asks
+// for its permission) and blocks it until the hook answers: a block of it is
+// the call's verdict. The gateway's hook-failure report uses it to tell the
+// hook's own block of a call from a block of a later event of a call that
+// already ran (GAP-0271 review).
+func ToolGateEvent(connector, event string) bool {
+	return toolGateEvent(connector, event)
 }
 
 // toolGateEvent reports a hook event that runs before a tool call (or asks
@@ -287,9 +334,30 @@ func failNoAnswer(opts Options, sp spec, failMode string) int {
 	}
 	failMode = noAnswerFailMode(opts, failMode)
 	if opts.ManagedEnterprise {
-		return failUnreachable(opts, sp, failMode, managedGatewayNoAnswerReason)
+		return failUnreachable(opts, sp, failMode, managedNoAnswerReason(opts))
 	}
 	return failUnreachable(opts, sp, failMode, noAnswerReason(opts))
+}
+
+// managedGatewayServiceStopped reports whether the managed gateway service
+// is proven stopped now; tests replace it.
+var managedGatewayServiceStopped = platformManagedGatewayServiceStopped
+
+// managedNoAnswerReason is the reason of a managed call the gateway gave no
+// decision in time. On a stopped Windows gateway service a stall on the host
+// can end the answer budget before the transport reads the service state;
+// the call then says the service is not running, as every other call of
+// the outage does, not that the gateway did not answer (rel-1-0-3 GAP-0319).
+// The fail mode stays the no-answer one. Secure Client keeps its reason.
+func managedNoAnswerReason(opts Options) string {
+	if opts.managedNoAnswerCode != "" {
+		return opts.managedNoAnswerCode
+	}
+	name := strings.TrimSpace(opts.ManagedGatewayServiceName)
+	if !opts.SecureClient && name != "" && managedGatewayServiceStopped(name) {
+		return managedGatewayNotRunningReason
+	}
+	return managedGatewayNoAnswerReason
 }
 
 // noAnswerReason is the hook-failure reason of a call whose gateway gave no

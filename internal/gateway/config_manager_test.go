@@ -45,6 +45,17 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/version"
 )
 
+// recordStandaloneStartupGeneration models the lifecycle's installed boot
+// bytes without changing the config document used by the test.
+func recordStandaloneStartupGeneration(t *testing.T, path string) {
+	t.Helper()
+	if _, err := configwrite.Locked(t.Context(), path,
+		configwrite.Options{Actor: configwrite.ActorLifecycle, Reason: "fixture startup"},
+		func() (bool, error) { return true, nil }); err != nil {
+		t.Fatal(err)
+	}
+}
+
 func TestConfigManagerReloadAppliesAndPublishesSnapshot(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, config.DefaultConfigName)
@@ -667,6 +678,7 @@ func TestStandaloneConfigManagerRejectsUnbundledConfigAndAssetReload(t *testing.
 		t.Fatal(err)
 	}
 	mgr.bindInitialObservabilityV8Plan(compiled.Plan)
+	recordStandaloneStartupGeneration(t, path)
 	mgr.setStartupSource(path, raw)
 	if err := mgr.Reload(context.Background(), "startup_reconcile"); err != nil {
 		t.Fatalf("startup reconcile of boot bytes: %v", err)
@@ -676,7 +688,7 @@ func TestStandaloneConfigManagerRejectsUnbundledConfigAndAssetReload(t *testing.
 	if err := os.WriteFile(path, unbundled, 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if err := mgr.Reload(context.Background(), "watch"); err == nil || !strings.Contains(err.Error(), "signed policy bundle") {
+	if err := mgr.Reload(context.Background(), "watch"); err == nil || !strings.Contains(err.Error(), "lifecycle-recorded generation") {
 		t.Fatalf("unbundled config reload = %v, want named refusal", err)
 	}
 	if pending, _ := livePendingRestart.Load().([]string); len(pending) != 0 {
@@ -735,6 +747,7 @@ func TestStandaloneConfigManagerAppliesOnlyRecordedNoAnchorLifecycleGenerations(
 		}
 		return candidate, err
 	}
+	recordStandaloneStartupGeneration(t, path)
 	mgr.setStartupSource(path, initialRaw)
 	if err := mgr.Reload(t.Context(), "startup_reconcile"); err != nil {
 		t.Fatal(err)
@@ -885,8 +898,10 @@ func TestStandaloneStartupReconcilesLifecycleGenerationCommittedAfterBootRead(t 
 				if err := os.WriteFile(path, append([]byte("# unrecorded edit\n"), nextRaw...), 0o600); err != nil {
 					t.Fatal(err)
 				}
-				if err := mgr.Reload(t.Context(), "fsnotify"); err == nil || !strings.Contains(err.Error(), "lifecycle-recorded generation") {
-					t.Fatalf("unrecorded edit after startup = %v, want lifecycle cause", err)
+				if err := mgr.Reload(t.Context(), "fsnotify"); err == nil ||
+					(signed && !strings.Contains(err.Error(), "activation_not_signed (config)")) ||
+					(!signed && !strings.Contains(err.Error(), "lifecycle-recorded generation")) {
+					t.Fatalf("unrecorded edit after startup = %v, want signed activation or lifecycle cause", err)
 				}
 				if applied != 1 || mgr.appliedGeneration != nextGeneration {
 					t.Fatalf("unrecorded edit applied: applies=%d generation=%d", applied, mgr.appliedGeneration)
@@ -950,6 +965,7 @@ func TestStandaloneConfigManagerNoOpGenerationCannotAuthorizeLaterAssetEdit(t *t
 				}
 				return candidate, err
 			}
+			recordStandaloneStartupGeneration(t, path)
 			mgr.setStartupSource(path, initialRaw)
 			if err := mgr.Reload(t.Context(), "startup_reconcile"); err != nil {
 				t.Fatal(err)
@@ -1034,13 +1050,15 @@ func TestStandaloneConfigManagerAPIReloadLoadsOnlyTheRecordedGeneration(t *testi
 		}
 		return candidate, err
 	}
+	recordStandaloneStartupGeneration(t, path)
 	mgr.setStartupSource(path, initialRaw)
 	if err := mgr.Reload(t.Context(), "startup_reconcile"); err != nil {
 		t.Fatal(err)
 	}
-	if err := mgr.ReloadRecordedGeneration(t.Context(), "api:policy_reload"); !errors.Is(err, errNoRecordedGeneration) || applied != 0 {
-		t.Fatalf("reload with nothing recorded = %v (applies %d), want errNoRecordedGeneration", err, applied)
+	if err := mgr.ReloadRecordedGeneration(t.Context(), "api:policy_reload"); err != nil || applied != 0 || proofs != 1 {
+		t.Fatalf("reload of the applied startup generation = %v (applies %d, proofs %d)", err, applied, proofs)
 	}
+	proofs = 0
 	write := func(raw []byte, opt configwrite.Options) uint64 {
 		t.Helper()
 		result, err := configwrite.ReplaceDocument(t.Context(), path, raw, opt)
@@ -1159,6 +1177,7 @@ func TestStandaloneConfigManagerAPIReloadRefusesAnUnrecordedAssetEdit(t *testing
 		}
 		return candidate, err
 	}
+	recordStandaloneStartupGeneration(t, path)
 	mgr.setStartupSource(path, initialRaw)
 	if err := mgr.ReloadAssets(t.Context(), "startup_reconcile"); err != nil {
 		t.Fatal(err)
@@ -1242,6 +1261,7 @@ func TestStandaloneConfigManagerProvesStartupAssetReload(t *testing.T) {
 		}
 		return candidate, loadErr
 	}
+	recordStandaloneStartupGeneration(t, path)
 	mgr.setStartupSource(path, raw)
 	if err := mgr.ReloadAssets(context.Background(), "startup_reconcile"); err != nil {
 		t.Fatalf("unchanged startup asset reload = %v", err)

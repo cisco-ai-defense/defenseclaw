@@ -11,6 +11,8 @@ import (
 	"os"
 	"strings"
 	"time"
+
+	"github.com/defenseclaw/defenseclaw/internal/pathidentity"
 )
 
 // GuardianRestoresFile records, in the standalone guardian's data
@@ -68,7 +70,7 @@ func (entry GuardianRestore) RestoredAtTime() time.Time {
 // without following a link at its name. A missing record returns an
 // os.ErrNotExist error.
 func ReadGuardianRestoreRecord(path string) (GuardianRestoreRecord, error) {
-	info, err := os.Lstat(path)
+	info, err := pathidentity.LstatPinned(path)
 	if err != nil {
 		return GuardianRestoreRecord{}, err
 	}

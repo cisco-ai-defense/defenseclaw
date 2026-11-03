@@ -255,6 +255,27 @@ func TestLifecycleFailureOfAnInstalledVerifyNamesRepair(t *testing.T) {
 	if err := lifecycleFailure(verifyOnly, false, repair); strings.Contains(err.Error(), "repair") {
 		t.Fatalf("verify_only: %q, want no repair advice", err)
 	}
+	// The pin of the same connector differs from its trusted digest because
+	// the file is the company's: repair cannot fix that either (managed RHEL
+	// printed the repair advice next to it; managed deb had no pin line).
+	pinned := enterprisestatus.New(enterpriseunix.ActionVerify, "standalone", "linux", "1.0.0")
+	pinned.Installed = true
+	pinned.AddError("verify_failed", "vendor machine policy for codex (/etc/codex/requirements.toml) no longer carries the DefenseClaw hooks, so codex runs without them; missing_defenseclaw_hooks: DefenseClaw does not write this file (ownership: verify_only), so repair does not restore it")
+	pinned.AddError("verify_failed", "codex policy view differs from its trusted digest; its managed hook keeps enforcing the managed policy while the gateway raises a policy-view alert; run `enterprise linux reconcile` or `enterprise linux ensure` to pin the verified policy view")
+	pinned.Finish("linux", 0)
+	if err := lifecycleFailure(pinned, false, repair); strings.Contains(err.Error(), "repair") {
+		t.Fatalf("verify_only with a pin problem: %q, want no repair advice", err)
+	}
+	// A pin problem of a connector that is not verify_only, or next to a
+	// problem repair does fix, keeps the repair advice.
+	other := enterprisestatus.New(enterpriseunix.ActionVerify, "standalone", "linux", "1.0.0")
+	other.Installed = true
+	other.AddError("verify_failed", "vendor machine policy for codex (/etc/codex/requirements.toml) no longer carries the DefenseClaw hooks; missing_defenseclaw_hooks: DefenseClaw does not write this file (ownership: verify_only)")
+	other.AddError("verify_failed", "claude policy view differs from its trusted digest; its managed hook keeps enforcing the managed policy")
+	other.Finish("linux", 0)
+	if err := lifecycleFailure(other, false, repair); !strings.Contains(err.Error(), "repair") {
+		t.Fatalf("pin problem of another connector: %q, want the repair advice", err)
+	}
 }
 
 // A verify that found another lifecycle run holding the lock printed an

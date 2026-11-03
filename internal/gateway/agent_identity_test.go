@@ -26,10 +26,26 @@ import (
 
 func agentIdentityTestSetup(t *testing.T) {
 	t.Helper()
+	freshAgentIdentityLedger(t)
 	t.Setenv("CLAUDE_CONFIG_DIR", "")
 	setAgentIdentityConfig(nil)
 	t.Cleanup(func() { setAgentIdentityConfig(nil) })
 	InstallSharedAgentRegistry("", "")
+}
+
+// freshAgentIdentityLedger gives the test an empty process-wide agent
+// identity ledger (sharedAgentIdentities) and puts the previous one back
+// after it. The ledger keeps every sighting for the life of the process, so
+// a test that counts sessions or filters rows saw the rows of an earlier test
+// in the binary or of its own earlier -count run (rel-1-0-6 GAP-0304).
+func freshAgentIdentityLedger(t *testing.T) {
+	t.Helper()
+	previous := sharedAgentIdentities
+	sharedAgentIdentities = &agentIdentityRecorder{
+		pending: make(map[string]*inventory.AgentIdentityRecord),
+		hints:   make(map[string]string),
+	}
+	t.Cleanup(func() { sharedAgentIdentities = previous })
 }
 
 // A hook after a restart can have no cached directory UPN. Its API row and

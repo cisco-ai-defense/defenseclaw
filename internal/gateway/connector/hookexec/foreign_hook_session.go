@@ -38,12 +38,7 @@ var (
 // only its final answer (GAP-1711, GAP-1812). The hook sends the exchange
 // once.
 func ExchangeForeignHookSession(ctx context.Context, opts Options, connector string, payload []byte) ([]byte, error) {
-	started := opts.StartedAt
-	if started.IsZero() {
-		started = time.Now()
-	}
-	return exchangeForeignHookSessionOnce(ctx, opts, connector,
-		withForeignHookSessionRetryUntil(payload, foreignHookSessionRetryUntil(ctx, answerDeadline(opts, started))))
+	return exchangeForeignHookSessionOnce(ctx, opts, connector, payload)
 }
 
 // foreignHookSessionRetryUntil is the exchange's retry_until: the earlier of
@@ -125,12 +120,12 @@ func exchangeForeignHookSessionOnce(ctx context.Context, opts Options, connector
 	if opts.ManagedStandalone && addr == "" {
 		addr = "127.0.0.1:1" // the Unix transport dials the socket
 	}
-	// The exchange of a tool call is held to the hook's answer budget,
-	// counted from the invocation like the hook request after it: a gateway
-	// that accepted the exchange but gives no answer (it is stopping, starting
-	// or too busy) ends it in time, and the guard denies the call.
-	answerBy := answerDeadline(opts, started)
-	// A scan that ran close to its own budget may have left the exchange
+	// The exchange gets the managed gateway contact window, within the
+	// process cap armed before the foreign-hook scan. A gateway that accepts
+	// it but gives no answer still ends at that deadline and the guard denies.
+	answerBy := gatewayAnswerDeadline(opts, started, time.Now())
+	payload = withForeignHookSessionRetryUntil(payload, foreignHookSessionRetryUntil(ctx, answerBy))
+	// A scan that ran close to the process cap may have left the exchange
 	// almost none of the answer budget: a missing answer then is the hook's
 	// own delay, not a gateway outage, and stays closed in fail mode open
 	// (final review, P2).

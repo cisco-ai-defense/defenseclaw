@@ -34,10 +34,12 @@ func TestFleetAuditEmitterRequiredOnlyWhenEnabled(t *testing.T) {
 	cfg.DataDir = testenv.PrivateTempDir(t)
 	cfg.Gateway.DeviceKeyFile = filepath.Join(cfg.DataDir, "device.key")
 	cfg.Fleet.Enabled = true
+	restoreGatewayProcessPosture(t)
 	if sidecar, err := NewSidecar(cfg, nil, nil); sidecar != nil || err == nil ||
 		!strings.Contains(err.Error(), "fleet.enabled requires a durable audit store and emitter") {
 		t.Fatalf("Fleet enabled without audit emitter = sidecar:%p error:%v", sidecar, err)
 	}
+	restoreGatewayProcessPosture(t)
 	if sidecar, err := NewSidecar(cfg, nil, audit.NewLogger(nil)); sidecar != nil || err == nil ||
 		!strings.Contains(err.Error(), "fleet.enabled requires a durable audit store and emitter") {
 		t.Fatalf("Fleet enabled without durable audit store = sidecar:%p error:%v", sidecar, err)
@@ -47,6 +49,7 @@ func TestFleetAuditEmitterRequiredOnlyWhenEnabled(t *testing.T) {
 	// normal hook gateway. The live Fleet-disabled probe also verifies /health,
 	// /status and the absent Fleet route with no broker/compiler/keys.
 	cfg.Fleet.Enabled = false
+	restoreGatewayProcessPosture(t)
 	sidecar, err := NewSidecar(cfg, nil, nil)
 	if err != nil || sidecar == nil {
 		t.Fatalf("Fleet disabled without audit emitter = sidecar:%p error:%v", sidecar, err)

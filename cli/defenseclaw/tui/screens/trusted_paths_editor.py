@@ -30,10 +30,10 @@ from textual import events, on
 from textual.app import ComposeResult
 from textual.binding import Binding
 from textual.containers import Horizontal, Vertical
-from textual.screen import ModalScreen
 from textual.widgets import Button, DataTable, Input, Static
 
 from defenseclaw import envvars
+from defenseclaw.tui.modal import GuardedModalScreen
 from defenseclaw.tui.screens.setup_resource_editor import SetupResourceResult
 from defenseclaw.tui.theme import DEFAULT_TOKENS
 from defenseclaw.tui.widgets.data_table import MeasuredDataTable
@@ -57,7 +57,7 @@ class TrustedPathRow:
     error: bool = False
 
 
-class TrustedPathsEditorScreen(ModalScreen[SetupResourceResult | None]):
+class TrustedPathsEditorScreen(GuardedModalScreen[SetupResourceResult | None]):
     """Rounded native editor for the trusted binary-prefix allow-list."""
 
     CSS = f"""

@@ -29,7 +29,25 @@ type guestSignalFixture struct {
 	f     *sandboxFixture
 	store *audit.Store
 	auth  *sandboxAuthority
-	now   time.Time
+
+	// mu guards at: the guest-signal recorder goroutine reads the clock
+	// (auth.clock) while the test advances it.
+	mu sync.Mutex
+	at time.Time
+}
+
+// now is the fixture clock the sandbox authority reads.
+func (g *guestSignalFixture) now() time.Time {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	return g.at
+}
+
+// advance moves the fixture clock forward by d.
+func (g *guestSignalFixture) advance(d time.Duration) {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	g.at = g.at.Add(d)
 }
 
 func newGuestSignalFixture(t *testing.T) *guestSignalFixture {
@@ -39,8 +57,8 @@ func newGuestSignalFixture(t *testing.T) *guestSignalFixture {
 	if err != nil {
 		t.Fatal(err)
 	}
-	g := &guestSignalFixture{f: f, store: store, auth: auth, now: time.Now().UTC().Truncate(time.Second)}
-	auth.now = func() time.Time { return g.now }
+	g := &guestSignalFixture{f: f, store: store, auth: auth, at: time.Now().UTC().Truncate(time.Second)}
+	auth.now = g.now
 	auth.store.(*sandboxreg.FileStore).Now = auth.clock
 	t.Cleanup(auth.guestSignals.wg.Wait)
 	return g
@@ -92,7 +110,7 @@ func TestSandboxGuestBlockedRecorderDoesNotHoldResponses(t *testing.T) {
 	g := newGuestSignalFixture(t)
 	alice := boundRegistration(t, g.f, sbxAlice, 1)
 	bob := boundRegistration(t, g.f, sbxBob, 2)
-	g.now = g.now.Add(sandboxGuestGrace)
+	g.advance(sandboxGuestGrace)
 	started := make(chan audit.SandboxRegistrationWithoutGuestEvent, 8)
 	release := make(chan struct{})
 	var once sync.Once
@@ -159,7 +177,7 @@ func TestSandboxGuestBlockedRecorderDoesNotHoldResponses(t *testing.T) {
 func TestSandboxGuestFailedRecorderRetriesAfterDelay(t *testing.T) {
 	g := newGuestSignalFixture(t)
 	id := boundRegistration(t, g.f, sbxAlice, 1)
-	g.now = g.now.Add(sandboxGuestGrace)
+	g.advance(sandboxGuestGrace)
 	attempts := 0
 	g.auth.guestSignals.record = func(context.Context, audit.SandboxRegistrationWithoutGuestEvent) error {
 		attempts++
@@ -176,12 +194,12 @@ func TestSandboxGuestFailedRecorderRetriesAfterDelay(t *testing.T) {
 	if attempts != 1 {
 		t.Fatalf("immediate retry attempts = %d", attempts)
 	}
-	g.now = g.now.Add(sandboxGuestSignalRetry - time.Nanosecond)
+	g.advance(sandboxGuestSignalRetry - time.Nanosecond)
 	call()
 	if attempts != 1 {
 		t.Fatalf("early retry attempts = %d", attempts)
 	}
-	g.now = g.now.Add(time.Nanosecond)
+	g.advance(time.Nanosecond)
 	call()
 	if attempts != 2 {
 		t.Fatalf("retry attempts = %d", attempts)
@@ -191,7 +209,7 @@ func TestSandboxGuestFailedRecorderRetriesAfterDelay(t *testing.T) {
 func TestSandboxGuestRecorderUsesIndependentDeadline(t *testing.T) {
 	g := newGuestSignalFixture(t)
 	id := boundRegistration(t, g.f, sbxAlice, 1)
-	g.now = g.now.Add(sandboxGuestGrace)
+	g.advance(sandboxGuestGrace)
 	type deadlineObservation struct {
 		deadline time.Time
 		at       time.Time
@@ -229,7 +247,7 @@ func TestSandboxGuestRecorderInFlightCap(t *testing.T) {
 	for i := range ids {
 		ids[i] = boundRegistration(t, g.f, sbxAlice, i+1)
 	}
-	g.now = g.now.Add(sandboxGuestGrace)
+	g.advance(sandboxGuestGrace)
 	release := make(chan struct{})
 	var once sync.Once
 	t.Cleanup(func() { once.Do(func() { close(release) }) })
@@ -254,7 +272,7 @@ func TestSandboxGuestRecorderInFlightCap(t *testing.T) {
 	inFlight := g.auth.guestSignals.inFlight
 	last := g.auth.guestSignals.last[sandboxGuestSignalKey{uid: sbxAlice.UID, id: ids[len(ids)-1], reason: audit.SandboxGuestRelayWithoutGuest}]
 	g.auth.guestSignals.mu.Unlock()
-	if inFlight != sandboxGuestRecordMax || last.pending || !last.next.Equal(g.now.Add(sandboxGuestSignalRetry)) {
+	if inFlight != sandboxGuestRecordMax || last.pending || !last.next.Equal(g.now().Add(sandboxGuestSignalRetry)) {
 		t.Fatalf("capacity state: in-flight=%d last=%+v", inFlight, last)
 	}
 	once.Do(func() { close(release) })
@@ -262,7 +280,7 @@ func TestSandboxGuestRecorderInFlightCap(t *testing.T) {
 	if len(started) != sandboxGuestRecordMax {
 		t.Fatalf("started %d recorders", len(started))
 	}
-	g.now = g.now.Add(sandboxGuestSignalRetry)
+	g.advance(sandboxGuestSignalRetry)
 	reg, _, err := g.auth.store.Get(sbxAlice.UID, ids[len(ids)-1])
 	if err != nil {
 		t.Fatal(err)
@@ -292,7 +310,7 @@ func TestSandboxGuestSignalAdmittedPathsKeepResponses(t *testing.T) {
 	if got := bind.Body.String(); got != string(wantBind)+"\n" || bind.Header().Get("Content-Type") != "application/json" {
 		t.Fatalf("bind response changed: %d %q %v", bind.Code, got, bind.Header())
 	}
-	g.now = g.now.Add(sandboxGuestGrace - time.Nanosecond)
+	g.advance(sandboxGuestGrace - time.Nanosecond)
 	stateBefore := guestSnapshot(g.f.do(sbxAlice, http.MethodPost,
 		sandboxrelay.PathRegistrations+id+sandboxrelay.RegistrationStateSub,
 		sandboxrelay.StateReport{V: 1, Running: true}, nil))
@@ -300,7 +318,7 @@ func TestSandboxGuestSignalAdmittedPathsKeepResponses(t *testing.T) {
 	if stateBefore.status != http.StatusOK || hookBefore.status != http.StatusOK || len(g.rows(t)) != 0 {
 		t.Fatalf("before grace: state=%+v hook=%+v rows=%d", stateBefore, hookBefore, len(g.rows(t)))
 	}
-	g.now = g.now.Add(time.Nanosecond) // The boundary is inclusive.
+	g.advance(time.Nanosecond) // The boundary is inclusive.
 	stateAfter := guestSnapshot(g.f.do(sbxAlice, http.MethodPost,
 		sandboxrelay.PathRegistrations+id+sandboxrelay.RegistrationStateSub,
 		sandboxrelay.StateReport{V: 1, Running: true}, nil))
@@ -333,7 +351,7 @@ func TestSandboxGuestSignalAdmittedPathsKeepResponses(t *testing.T) {
 	}
 	// An unavailable recorder is logged by the signal path; the caller still
 	// receives the same policy and relay bytes on later attempts.
-	g.now = g.now.Add(sandboxGuestSignalEvery)
+	g.advance(sandboxGuestSignalEvery)
 	g.f.api.logger.SetRuntimeV8Emitter(nil)
 	if got := guestSnapshot(g.f.do(sbxAlice, http.MethodPost,
 		sandboxrelay.PathRegistrations+id+sandboxrelay.RegistrationStateSub,
@@ -354,9 +372,9 @@ func TestSandboxGuestSightingSurvivesQuietRestart(t *testing.T) {
 			g := newGuestSignalFixture(t)
 			// Creation queues the first lifecycle records before bind; the
 			// events route accepts them only after the registration is bound.
-			created := g.now
+			created := g.now()
 			id := g.f.resolve(sbxAlice, claudeResolve()).Registration.ID
-			g.now = g.now.Add(time.Minute)
+			g.advance(time.Minute)
 			if rec := g.f.bind(sbxAlice, id, 1); rec.Code != http.StatusOK {
 				t.Fatalf("bind: %d %s", rec.Code, rec.Body.String())
 			}
@@ -366,7 +384,7 @@ func TestSandboxGuestSightingSurvivesQuietRestart(t *testing.T) {
 			} else {
 				claim["source"], claim["host"], claim["port"] = "dc-egress-proxy", "example.com", 443
 			}
-			stamp := g.now
+			stamp := g.now()
 			if kind == sandboxrelay.EventSandboxLifecycle {
 				stamp = created
 			}
@@ -380,10 +398,10 @@ func TestSandboxGuestSightingSurvivesQuietRestart(t *testing.T) {
 			}
 			file := sandboxreg.NewFileStore(sandboxreg.RegistrationsDir(g.f.cfg.DataDir))
 			reg, ok, err := file.Get(sbxAlice.UID, id)
-			if err != nil || !ok || !reg.GuestSeenAt.Equal(g.now) {
+			if err != nil || !ok || !reg.GuestSeenAt.Equal(g.now()) {
 				t.Fatalf("persisted sighting: %+v %v %v", reg, ok, err)
 			}
-			g.now = g.now.Add(sandboxGuestGrace)
+			g.advance(sandboxGuestGrace)
 			if code, _ := g.f.report(sbxAlice, id, true); code != http.StatusOK {
 				t.Fatalf("running state: %d", code)
 			}
@@ -400,7 +418,7 @@ func TestSandboxGuestSightingSurvivesQuietRestart(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			restartedAuth.now = func() time.Time { return g.now }
+			restartedAuth.now = g.now
 			restartedAuth.store.(*sandboxreg.FileStore).Now = restartedAuth.clock
 			t.Cleanup(restartedAuth.guestSignals.wg.Wait)
 			if code, _ := restarted.report(sbxAlice, id, true); code != http.StatusOK {
@@ -419,18 +437,18 @@ func TestSandboxGuestSightingSurvivesQuietRestart(t *testing.T) {
 func TestSandboxGuestSightingRequiresAcceptedMatchingBoundRecord(t *testing.T) {
 	g := newGuestSignalFixture(t)
 	id := g.f.resolve(sbxAlice, claudeResolve()).Registration.ID
-	pendingEvent := telemetryEvent(t, sandboxrelay.EventSandboxLifecycle, g.now,
+	pendingEvent := telemetryEvent(t, sandboxrelay.EventSandboxLifecycle, g.now(),
 		map[string]any{"sandbox": "dc-claude-1", "phase": "ready"})
 	if rec := postEvents(g.f, sbxAlice, id, pendingEvent); rec.Code != http.StatusForbidden {
 		t.Fatalf("pending event: %d %s", rec.Code, rec.Body.String())
 	}
-	g.now = g.now.Add(time.Minute)
+	g.advance(time.Minute)
 	if rec := g.f.bind(sbxAlice, id, 1); rec.Code != http.StatusOK {
 		t.Fatalf("bind: %d %s", rec.Code, rec.Body.String())
 	}
 	for _, ev := range []sandboxrelay.Event{
-		telemetryEvent(t, sandboxrelay.EventSandboxLifecycle, g.now, map[string]any{"sandbox": "another-box", "phase": "ready"}),
-		telemetryEvent(t, sandboxrelay.EventSandboxLifecycle, g.now, map[string]any{"sandbox": "dc-claude-1", "sandbox_id": "another-id", "phase": "ready"}),
+		telemetryEvent(t, sandboxrelay.EventSandboxLifecycle, g.now(), map[string]any{"sandbox": "another-box", "phase": "ready"}),
+		telemetryEvent(t, sandboxrelay.EventSandboxLifecycle, g.now(), map[string]any{"sandbox": "dc-claude-1", "sandbox_id": "another-id", "phase": "ready"}),
 	} {
 		if rec := postEvents(g.f, sbxAlice, id, ev); rec.Code != http.StatusAccepted {
 			t.Fatalf("post accepted but not sighted: %d %s", rec.Code, rec.Body.String())
@@ -440,7 +458,7 @@ func TestSandboxGuestSightingRequiresAcceptedMatchingBoundRecord(t *testing.T) {
 	if err != nil || !reg.GuestSeenAt.IsZero() {
 		t.Fatalf("unmatched record counted: %+v %v", reg, err)
 	}
-	g.now = g.now.Add(sandboxGuestGrace)
+	g.advance(sandboxGuestGrace)
 	if code, _ := g.f.report(sbxAlice, id, true); code != http.StatusOK {
 		t.Fatalf("state report: %d", code)
 	}
@@ -450,7 +468,7 @@ func TestSandboxGuestSightingRequiresAcceptedMatchingBoundRecord(t *testing.T) {
 	if err := g.auth.store.Revoke(sbxAlice.UID, id, sandboxreg.ReasonPolicyChanged); err != nil {
 		t.Fatal(err)
 	}
-	if rec := postEvents(g.f, sbxAlice, id, telemetryEvent(t, sandboxrelay.EventSandboxLifecycle, g.now,
+	if rec := postEvents(g.f, sbxAlice, id, telemetryEvent(t, sandboxrelay.EventSandboxLifecycle, g.now(),
 		map[string]any{"sandbox": "dc-claude-1", "phase": "stopped"})); rec.Code != http.StatusAccepted {
 		t.Fatalf("tombstone event: %d %s", rec.Code, rec.Body.String())
 	}
@@ -464,7 +482,7 @@ func TestSandboxGuestFailedRecordIsNotASighting(t *testing.T) {
 	g := newGuestSignalFixture(t)
 	id := boundRegistration(t, g.f, sbxAlice, 1)
 	g.f.api.logger.SetRuntimeV8Emitter(nil)
-	if rec := postEvents(g.f, sbxAlice, id, telemetryEvent(t, sandboxrelay.EventSandboxLifecycle, g.now,
+	if rec := postEvents(g.f, sbxAlice, id, telemetryEvent(t, sandboxrelay.EventSandboxLifecycle, g.now(),
 		map[string]any{"sandbox": "dc-claude-1", "sandbox_id": "sbx-1", "phase": "ready"})); rec.Code != http.StatusAccepted {
 		t.Fatalf("event route: %d %s", rec.Code, rec.Body.String())
 	}
@@ -477,12 +495,12 @@ func TestSandboxGuestFailedRecordIsNotASighting(t *testing.T) {
 func TestSandboxGuestFirstSightingEndsWatch(t *testing.T) {
 	g := newGuestSignalFixture(t)
 	id := boundRegistration(t, g.f, sbxAlice, 1)
-	if rec := postEvents(g.f, sbxAlice, id, telemetryEvent(t, sandboxrelay.EventSandboxLifecycle, g.now,
+	if rec := postEvents(g.f, sbxAlice, id, telemetryEvent(t, sandboxrelay.EventSandboxLifecycle, g.now(),
 		map[string]any{"sandbox": "dc-claude-1", "sandbox_id": "sbx-1", "phase": "ready"})); rec.Code != http.StatusAccepted {
 		t.Fatalf("event route: %d %s", rec.Code, rec.Body.String())
 	}
 	for range 2 {
-		g.now = g.now.Add(sandboxGuestGrace + sandboxGuestSignalEvery)
+		g.advance(sandboxGuestGrace + sandboxGuestSignalEvery)
 		g.f.report(sbxAlice, id, true)
 		g.f.hook(sbxAlice, id, "claudecode", nil)
 	}
@@ -494,7 +512,7 @@ func TestSandboxGuestFirstSightingEndsWatch(t *testing.T) {
 func TestSandboxGuestSignalRatePruningAndOlderRegistration(t *testing.T) {
 	g := newGuestSignalFixture(t)
 	id := boundRegistration(t, g.f, sbxAlice, 1)
-	g.now = g.now.Add(sandboxGuestGrace)
+	g.advance(sandboxGuestGrace)
 	if rec := g.f.hook(sbxAlice, id, "claudecode", nil); rec.Code != http.StatusForbidden {
 		// The live lease also expires at the grace boundary. Renew first.
 		if rec.Code != http.StatusOK {
@@ -515,7 +533,7 @@ func TestSandboxGuestSignalRatePruningAndOlderRegistration(t *testing.T) {
 	if got := len(g.rows(t)); got != before {
 		t.Fatalf("second hit made %d rows, want %d", got, before)
 	}
-	g.now = g.now.Add(sandboxGuestSignalEvery)
+	g.advance(sandboxGuestSignalEvery)
 	g.f.report(sbxAlice, id, true)
 	g.f.hook(sbxAlice, id, "claudecode", nil)
 	if got := len(g.rows(t)); got != before+2 {
@@ -554,7 +572,7 @@ func TestSandboxGuestSignalRatePruningAndOlderRegistration(t *testing.T) {
 	oldStore := sandboxreg.NewFileStore(sandboxreg.RegistrationsDir(g.f.cfg.DataDir))
 	oldStore.Now = g.auth.clock
 	g.auth.store = oldStore
-	g.now = g.now.Add(sandboxGuestGrace)
+	g.advance(sandboxGuestGrace)
 	g.f.report(sbxAlice, oldID, true)
 	g.f.hook(sbxAlice, oldID, "claudecode", nil)
 	if got := len(g.rows(t)); got != before+2 {
@@ -563,7 +581,7 @@ func TestSandboxGuestSignalRatePruningAndOlderRegistration(t *testing.T) {
 	// The rate map remains bounded even when it was filled by many accounts.
 	g.auth.guestSignals.mu.Lock()
 	for i := range sandboxGuestSignalMax {
-		g.auth.guestSignals.last[sandboxGuestSignalKey{uid: i + 1, id: fmt.Sprint(i), reason: audit.SandboxGuestRelayWithoutGuest}] = sandboxGuestRate{next: g.now.Add(sandboxGuestSignalEvery)}
+		g.auth.guestSignals.last[sandboxGuestSignalKey{uid: i + 1, id: fmt.Sprint(i), reason: audit.SandboxGuestRelayWithoutGuest}] = sandboxGuestRate{next: g.now().Add(sandboxGuestSignalEvery)}
 	}
 	g.auth.guestSignals.mu.Unlock()
 	newID := boundRegistration(t, g.f, sbxAlice, 3)
@@ -571,7 +589,7 @@ func TestSandboxGuestSignalRatePruningAndOlderRegistration(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	g.now = g.now.Add(sandboxGuestGrace)
+	g.advance(sandboxGuestGrace)
 	g.f.api.sandboxGuestSignal(context.Background(), g.auth, newReg, audit.SandboxGuestRelayWithoutGuest)
 	g.auth.guestSignals.wg.Wait()
 	g.auth.guestSignals.mu.Lock()
@@ -591,7 +609,7 @@ func TestSandboxGuestSignalRejectsOtherRegistrationsUnchanged(t *testing.T) {
 	live := boundRegistration(t, g.f, sbxAlice, 1)
 	pending := g.f.resolve(sbxAlice, claudeResolve()).Registration.ID
 	unknown, _ := sandboxreg.NewID()
-	g.now = g.now.Add(sandboxGuestGrace)
+	g.advance(sandboxGuestGrace)
 	for _, id := range []string{live, unknown, pending} {
 		rec := g.f.hook(sbxBob, id, "claudecode", nil)
 		if rec.Code != http.StatusNotFound || errorReason(t, rec) != sandboxrelay.ReasonRegistrationUnknown {

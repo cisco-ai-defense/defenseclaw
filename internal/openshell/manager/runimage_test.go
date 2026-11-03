@@ -586,7 +586,7 @@ func TestStartOnVMComparesTheBakedRunConfig(t *testing.T) {
 	// refusal does not send the user to delete before it is pulled.
 	if apiErr := wantCode(t, err, sandboxapi.CodePolicyViolation); !strings.Contains(apiErr.Message, "baked into its image") ||
 		!strings.Contains(apiErr.Message, "deleting it discards what was never pulled") || strings.Contains(apiErr.Message, "delete it and run it again") ||
-		!strings.Contains(apiErr.Detail, "start it under the settings it was made with") || !strings.Contains(apiErr.Detail, "`defenseclaw sandbox pull vm-yolo`, then") {
+		!strings.Contains(apiErr.Detail, "start it under the settings it was made with") || !strings.Contains(apiErr.Detail, "`defenseclaw sandbox pull vm-yolo --apply` (or --branch or --patch-out FILE), confirm the project, branch or patch file contains the work, then") {
 		t.Fatalf("stricter start = %+v", apiErr)
 	}
 }
@@ -662,7 +662,7 @@ func TestCreateRefusesAFirstBootWithoutDiskRoom(t *testing.T) {
 	disk(e)
 	_, err := e.tryCreate(sandboxapi.CreateRequest{Name: "vm-full", Copy: true})
 	if !sandboxapi.IsCode(err, sandboxapi.CodeUnavailable) || !strings.Contains(err.Error(), "not enough free disk space for this sandbox's first start: "+
-		"the MicroVM driver's first start uses about 11.0 GiB while preparing a disk from its image in "+cache+", where 2.0 GiB is free and at least 12.0 GiB is needed") {
+		"the MicroVM driver's first start uses about 12.0 GiB while preparing a disk from its image in "+cache+", where 2.0 GiB is free and at least 13.0 GiB is needed") {
 		t.Fatalf("create on a full disk = %v", err)
 	}
 	if _, err := e.m.Get(t.Context(), "vm-full"); !sandboxapi.IsCode(err, sandboxapi.CodeNotFound) {

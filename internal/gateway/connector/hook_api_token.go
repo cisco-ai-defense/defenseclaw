@@ -24,6 +24,7 @@ import (
 	"sync"
 
 	"github.com/defenseclaw/defenseclaw/internal/lazyregexp"
+	"github.com/defenseclaw/defenseclaw/internal/pathidentity"
 )
 
 const (
@@ -299,7 +300,7 @@ func captureHookAPITokenPublishSnapshot(dataDir, tokenPath string) (hookAPIToken
 	if err := validateHookAPITokenLocation(dataDir, tokenPath); err != nil {
 		return snapshot, err
 	}
-	pathInfo, err := os.Lstat(tokenPath)
+	pathInfo, err := pathidentity.LstatPinned(tokenPath)
 	if errors.Is(err, os.ErrNotExist) {
 		return snapshot, nil
 	}

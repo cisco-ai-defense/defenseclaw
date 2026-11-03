@@ -54,7 +54,7 @@ func TestPerUserInstallLockClosesEveryShellHook(t *testing.T) {
 		}
 	}
 	for _, endpoint := range []struct{ name, addr string }{
-		{"stopped", freeAPIAddr(t)},
+		{"stopped", refusingAPIAddr(t)},
 		{"unauthorized", strings.TrimPrefix(server.URL, "http://")},
 	} {
 		for _, tc := range cases {

@@ -41,9 +41,11 @@ func guardOutageConnectors() map[string]string {
 	return connectors
 }
 
-// An online allow is only the answer to that call. When the next guarded
-// call cannot reach the gateway, the 1.0.3 outage limit blocks it, even
-// under administrator open and even with a clean earlier session (GAP-0352).
+// An online allow the hook sees is only the answer to that call. When the
+// next guarded call cannot reach the gateway and the gateway's own
+// clean-session entry is absent, the call blocks, even under administrator
+// open and even after a clean earlier session (GAP-0352; the entry is
+// covered in hook_foreign_guard_clean_mirror_test.go).
 func TestForeignHookGuardOnlineAllowDoesNotApproveAnOpenOutage(t *testing.T) {
 	for connector, event := range guardOutageConnectors() {
 		t.Run(connector, func(t *testing.T) {

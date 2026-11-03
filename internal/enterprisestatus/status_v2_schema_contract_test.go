@@ -15,6 +15,7 @@ import (
 	"reflect"
 	"testing"
 
+	"github.com/defenseclaw/defenseclaw/internal/accountjoin"
 	"github.com/defenseclaw/defenseclaw/internal/contracttest"
 )
 
@@ -24,11 +25,13 @@ const lifecycleSchema = "lifecycle-result.schema.json"
 // members, required exactly where Go always renders them.
 func TestStatusV2SchemaDescribesEveryMember(t *testing.T) {
 	for pointer, typ := range map[string]reflect.Type{
-		"#/$defs/connectorState":      reflect.TypeOf(ConnectorState{}),
-		"#/$defs/connectorTargets":    reflect.TypeOf(ConnectorTargets{}),
-		"#/$defs/openshellCapability": reflect.TypeOf(OpenShellCapability{}),
-		"#/$defs/identityHealth":      reflect.TypeOf(IdentityHealth{}),
-		"#/$defs/identitySource":      reflect.TypeOf(IdentitySource{}),
+		"#/$defs/connectorState":        reflect.TypeOf(ConnectorState{}),
+		"#/$defs/connectorTargets":      reflect.TypeOf(ConnectorTargets{}),
+		"#/$defs/openshellCapability":   reflect.TypeOf(OpenShellCapability{}),
+		"#/$defs/identityHealth":        reflect.TypeOf(IdentityHealth{}),
+		"#/$defs/identitySource":        reflect.TypeOf(IdentitySource{}),
+		"#/$defs/accountJoin":           reflect.TypeOf(accountjoin.Summary{}),
+		"#/$defs/accountJoinGeneration": reflect.TypeOf(accountjoin.GenerationCount{}),
 	} {
 		contracttest.RequireMembers(t, lifecycleSchema+pointer, typ)
 	}

@@ -967,15 +967,79 @@ func projectPOSIXLiteralHeredoc(
 		return
 	}
 	delimiter := projectPOSIXWord(redirection.Word)
-	body := projectPOSIXWord(redirection.Hdoc)
+	if !delimiter.Expands && delimiter.Value != "" && delimiter.Quote != QuoteSingle &&
+		posixHeredocBodyRunsNothing(redirection.Hdoc) {
+		// An expanding body whose only expansions are parameters runs no
+		// command: the command and its redirect targets are as certain as
+		// with a quoted body, only the stdin text is unknown. The parse
+		// stays complete, so a proven write target (cat > /etc/sudoers
+		// <<X) is judged by the integrity owners (rel-1-0-6:GAP-0399).
+		command.LiteralStdin = ""
+		command.LiteralStdinComplete = false
+		command.LiteralStdinAmbiguous = true
+		return
+	}
+	body, exact := literalPOSIXHeredocBody(redirection.Hdoc)
+	limit := maxScalarBytes
+	if command.Program == "apply_patch" {
+		// Patch envelopes can contain ordinary file content beyond the
+		// scalar operand bound; the shell command itself remains bounded.
+		limit = maxCommandBytes
+	}
 	if delimiter.Expands || delimiter.Quote != QuoteSingle ||
-		delimiter.Value == "" || body.Expands || len(body.Value) > maxScalarBytes ||
-		strings.ContainsRune(body.Value, '\x00') {
+		delimiter.Value == "" || !exact || len(body) > limit ||
+		strings.ContainsRune(body, '\x00') {
 		out.markPartial(IssueUnsupportedConstruct)
 		return
 	}
-	command.LiteralStdin = body.Value
+	command.LiteralStdin = body
 	command.LiteralStdinComplete = true
+}
+
+// A quoted delimiter leaves the here-document body byte-for-byte literal.
+// The generic word projection treats '*' as a pathname pattern, which is
+// correct for command operands but not for a patch's *** directive lines.
+func literalPOSIXHeredocBody(word *syntax.Word) (string, bool) {
+	if word == nil {
+		return "", false
+	}
+	var text strings.Builder
+	for _, part := range word.Parts {
+		literal, ok := part.(*syntax.Lit)
+		if !ok {
+			return "", false
+		}
+		text.WriteString(literal.Value)
+	}
+	return text.String(), true
+}
+
+// posixHeredocBodyRunsNothing reports an unquoted heredoc body that expands
+// only parameters: no command, arithmetic or process substitution anywhere
+// in it, so reading it runs nothing.
+func posixHeredocBodyRunsNothing(body *syntax.Word) bool {
+	if body == nil {
+		return true
+	}
+	runs := false
+	// The POSIX grammar keeps the legacy $[expr] arithmetic as text (split
+	// into adjacent literals), but bash evaluates it, and a subscript in a
+	// variable value it names can run a command (rel-1-0-6:GAP-0419).
+	var text strings.Builder
+	syntax.Walk(body, func(node syntax.Node) bool {
+		switch typed := node.(type) {
+		case *syntax.CmdSubst, *syntax.ArithmExp, *syntax.ProcSubst:
+			runs = true
+		case *syntax.Lit:
+			text.WriteString(typed.Value)
+		case *syntax.Word:
+		case nil:
+		default:
+			text.WriteByte(0)
+		}
+		return !runs
+	})
+	return !runs && !strings.Contains(text.String(), "$[")
 }
 
 func posixDescriptorIsRedirected(command *CommandFact, fd int64) bool {

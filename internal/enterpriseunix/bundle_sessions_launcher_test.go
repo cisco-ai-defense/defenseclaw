@@ -182,3 +182,72 @@ func TestDarwinEnforcementPendingCountsAnNpmCodexSessionOnce(t *testing.T) {
 		t.Fatalf("sessions named by lifecycle pids %v and bundle scan pids %v, want both the launchers [58467 71042]", lifecyclePIDs, scanPIDs)
 	}
 }
+
+// rel-1-0-6 GAP-0183 (managed macOS rc22): two Codex TUIs and the Codex
+// background server the first TUI started gave enforcement_pending 3 in the
+// lifecycle result and 2 in bundle status. The server is named by its own
+// warning, with how to restart it, and is not a session: both surfaces count
+// the same two sessions through enterprisestatus.CountedSessions.
+func TestDarwinEnforcementPendingLeavesOutTheCodexBackgroundServer(t *testing.T) {
+	h := newTestHost(t, "darwin")
+	const vendor = "/opt/homebrew/lib/node_modules/@openai/codex/vendor/aarch64-apple-darwin/codex/codex"
+	const daemon = "/Users/lane1/.codex/packages/app-server-daemon/releases/0.159.3-aarch64-apple-darwin/bin/codex"
+	type process struct {
+		pid, ppid int
+		argv      []string
+	}
+	processes := []process{
+		{22957, 1, []string{"node", "/opt/homebrew/bin/codex"}},
+		{22970, 22957, []string{vendor}},
+		{22966, 1, []string{"node", "/opt/homebrew/bin/codex"}},
+		{22971, 22966, []string{vendor}},
+		// The server runs in a session's process tree in one shape and is
+		// reparented to launchd in the other; both must stay out of the count.
+		{23415, 22970, []string{daemon, "app-server", "--listen", "unix://", "--managed"}},
+		{23429, 23415, []string{daemon, "app-server", "daemon", "pid-update-loop"}},
+	}
+	argv, parents := map[int][]string{}, map[int]int{}
+	byArgs := ""
+	for _, p := range processes {
+		argv[p.pid], parents[p.pid] = p.argv, p.ppid
+		byArgs += fmt.Sprintf("%d 502 2-00:00:00 %s\n", p.pid, strings.Join(p.argv, " "))
+	}
+	h.runner.replies = map[string]fakeReply{"ps -axww -o pid=,uid=,etime=,args=": {result: CommandResult{Stdout: []byte(byArgs)}}}
+	setDarwinProcessArgv(t, func(pid int) ([]string, error) {
+		if a, ok := argv[pid]; ok {
+			return a, nil
+		}
+		return nil, fmt.Errorf("no process %d", pid)
+	})
+	setDarwinProcessParent(t, func(pid int) (int, error) {
+		if ppid, ok := parents[pid]; ok {
+			return ppid, nil
+		}
+		return 0, fmt.Errorf("no process %d", pid)
+	})
+	enabled := time.Now()
+	lifecycle := h.env.agentSessionsStartedBefore(context.Background(), enabled, -1)
+	listed, err := h.env.bundleDarwinProcesses(context.Background(), map[string]string{"codex": "codex"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	scan := enterprisestatus.UnprotectedSessions(listed, map[string]time.Time{"codex": enabled})
+
+	result := enterprisestatus.New("ensure", "standalone", "darwin", "1.0.6")
+	noteCountedPending(result, lifecycle)
+	result.Bundle = &enterprisestatus.BundleState{}
+	result.SetBundleSessions(scan)
+	result.Finish("darwin", 0)
+	bundleStatus := enterprisestatus.PendingFromScan(scan)
+
+	if result.EnforcementPending == nil || bundleStatus == nil || result.EnforcementPending.Count != 2 || bundleStatus.Count != 2 {
+		t.Fatalf("enforcement_pending: lifecycle result %+v, bundle status %+v; want 2 sessions in both", result.EnforcementPending, bundleStatus)
+	}
+	named := false
+	for _, session := range lifecycle {
+		named = named || session.PID == 23415 && session.CodexServer
+	}
+	if !named {
+		t.Fatalf("the lifecycle scan must still name the Codex background server for its own restart warning: %+v", lifecycle)
+	}
+}

@@ -104,7 +104,7 @@ func (s *Store) checkpointConn() (*sql.DB, error) {
 	s.checkpointMu.Lock()
 	defer s.checkpointMu.Unlock()
 	if s.checkpointDB == nil {
-		db, err := openSQLite(s.dbPath)
+		db, err := openSQLiteWithPragmas(s.dbPath, auditPragmasFor(s.secureClientSchema))
 		if err != nil {
 			return nil, fmt.Errorf("audit: open SQLite checkpoint connection: %w", err)
 		}

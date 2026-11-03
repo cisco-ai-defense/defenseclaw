@@ -335,7 +335,7 @@ func TestPerUserHookAnswersFromAGatewayThatComesBackOnItsPort(t *testing.T) {
 // call is blocked within about the budget (a connect to a closed port takes
 // about 2 s on Windows, and a try still connecting at the end is ended).
 func TestPerUserHookBlocksWithinTheBudgetWhenNothingListens(t *testing.T) {
-	addr := reservedLoopbackAddr(t)
+	addr := refusingLoopbackAddr(t)
 	started := time.Now()
 	result := run(t, "codex", &stubRT{}, func(opts *Options) {
 		opts.APIAddr = addr

@@ -26,9 +26,13 @@ import (
 )
 
 // uninstall --purge kept the per-user install's binaries and the launcher
-// links into ~/.defenseclaw, which the purge left dangling. The purge
-// removes all of ~/.defenseclaw and every DefenseClaw entry in
-// ~/.local/bin, and leaves no dangling link; the account's own tools stay.
+// links into ~/.defenseclaw, which the purge left dangling. For a folder
+// that holds only what DefenseClaw wrote there (no own install: its .venv
+// and installer state are gone), the purge removes all of ~/.defenseclaw
+// and every DefenseClaw entry in ~/.local/bin, and leaves no dangling link;
+// the account's own tools stay. A folder with the install's .venv is the
+// account's own install and is kept (rel-1-0-6 GAP-0484,
+// purge_fresh_own_install_unix_test.go).
 func TestPurgeUserStateRemovesPerUserBinariesAndLinks(t *testing.T) {
 	skipIfRoot(t)
 	home := newTestHome(t)
@@ -54,12 +58,10 @@ func TestPurgeUserStateRemovesPerUserBinariesAndLinks(t *testing.T) {
 		return hex.EncodeToString(sum[:])
 	}
 
-	// ~/.defenseclaw as the per-user install leaves it.
-	for _, name := range []string{"defenseclaw", "skill-scanner", "mcp-scanner"} {
-		write(filepath.Join(dataDir, ".venv", "bin", name), "#!/bin/sh\n", 0o700)
-	}
-	// No config.yaml, .env, audit.db or previous/: an install the account
-	// made of its own is kept as it is (GAP-0727, purge_backup_unix_test.go).
+	// ~/.defenseclaw as the enrollment leaves it, after the per-user install
+	// that put the binaries below went: no config.yaml, .env, audit.db,
+	// previous/, .venv or installer/, which mean an install the account made
+	// of its own and keep the folder as it is (GAP-0727, GAP-0484).
 	write(filepath.Join(dataDir, "hooks", "claude-code-hook.sh"), "#!/bin/bash\n# defenseclaw-managed-hook v5\n", 0o700)
 	write(filepath.Join(dataDir, "foreign-hooks-backup", "cursor", "hooks.json"), "{}", 0o600)
 

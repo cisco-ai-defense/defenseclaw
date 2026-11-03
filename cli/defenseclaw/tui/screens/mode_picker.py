@@ -18,7 +18,6 @@ from textual import events, on
 from textual.app import ComposeResult
 from textual.binding import Binding
 from textual.containers import Vertical
-from textual.screen import ModalScreen
 from textual.widgets import Static
 
 from defenseclaw.platform_support import (
@@ -26,6 +25,7 @@ from defenseclaw.platform_support import (
     connector_preview_on_os,
     supported_connectors,
 )
+from defenseclaw.tui.modal import GuardedModalScreen
 from defenseclaw.tui.theme import DEFAULT_TOKENS
 from defenseclaw.tui.widgets.action_menu import ActionMenu, MenuAction
 
@@ -95,7 +95,7 @@ def visible_mode_picker_choices(os_name: str | None = None) -> tuple[ModeChoice,
     return tuple(visible)
 
 
-class ModePickerScreen(ModalScreen[str | None]):
+class ModePickerScreen(GuardedModalScreen[str | None]):
     """Rounded connector switcher with keyboard hotkeys and mouse rows."""
 
     CSS = f"""

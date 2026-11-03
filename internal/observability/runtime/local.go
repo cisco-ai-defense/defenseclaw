@@ -164,6 +164,22 @@ type localWriteCounters struct {
 	dropped   atomic.Uint64
 }
 
+type deadlineLossReportKey struct{}
+
+// WithDeadlineLossReporting marks hook persistence attempts whose deadline
+// must count as a lost local row even when it expires before the append.
+func WithDeadlineLossReporting(ctx context.Context) context.Context {
+	return context.WithValue(ctx, deadlineLossReportKey{}, true)
+}
+
+func deadlineLossReport(ctx context.Context, err error) bool {
+	if ctx == nil || ctx.Value(deadlineLossReportKey{}) != true {
+		return false
+	}
+	var pipelineErr *pipeline.Error
+	return errors.As(err, &pipelineErr) && pipelineErr.Code() == pipeline.ErrorContextDone
+}
+
 func (counters *localWriteCounters) snapshot() delivery.Counters {
 	return delivery.Counters{
 		Accepted: counters.accepted.Load(), Delivered: counters.delivered.Load(), Dropped: counters.dropped.Load(),
@@ -307,6 +323,12 @@ func (component *localLogComponent) Process(
 	outcome, err := component.pipeline.Process(ctx, metadata, builder)
 	if report.Deferred() {
 		pending.processed(outcome)
+		return outcome, err
+	}
+	if deadlineLossReport(ctx, err) {
+		component.writes.accepted.Add(1)
+		component.writes.dropped.Add(1)
+		component.lostWrites.add(audit.EventHistorySQLiteDeadline)
 		return outcome, err
 	}
 	component.countWrite(outcome, err)

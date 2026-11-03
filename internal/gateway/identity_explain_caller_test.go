@@ -22,6 +22,7 @@ import (
 // caller, root, through NSS, and the gateway explains those facts; its own
 // lookup is the fallback.
 func TestProfileExplainUsesTheCallersNSSFacts(t *testing.T) {
+	managedExplainView(t) // the managed administrator view of made-up accounts
 	facts := useridentity.DirectoryFacts{Source: useridentity.SourceNSSFiles, Directory: useridentity.DirectoryLocal,
 		Groups: []string{"49202", "t6-numeric"}, Assurance: useridentity.AssuranceVerified, ResolvedAt: time.Now()}
 	raw, err := EncodeProfileExplainCallerFacts(ProfileExplainCallerFacts{UID: 49201, Name: "t6b4r2num", Facts: facts})

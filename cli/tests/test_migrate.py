@@ -251,6 +251,9 @@ def test_v8_config_runs_the_go_v9_step(
             "expressed_rules": ["CUSTOM-CMD-RM-RF", "ACME-LIT"],
             "renamed_rules": ["CMD-RM-RF -> CUSTOM-CMD-RM-RF", "CMD-SUDO -> CUSTOM-CMD-SUDO"],
             "rule_file_merges": ["/p/acme-1.0: rules/b.yaml (category \"acme\") merged into rules/a.yaml; 2 rule(s) kept"],
+            # GAP-0268: rules without tags got the tag custom in the 1.0 copy.
+            "tagged_rules": ["/p/acme-1.0: 1 rule(s) had no tags, or blank or repeated ones, which 1.0 refuses; "
+                             "their 1.0 copy has distinct tags, custom where they had none: TEAM-LANE-RULE"],
         }
         (data_dir / "migration-v9.json").write_text(json.dumps(record), encoding="utf-8")
         return {"migrated": True, "record": record}
@@ -304,6 +307,7 @@ def test_v8_config_runs_the_go_v9_step(
     assert "CUSTOM-CMD-SUDO (your edited CMD-SUDO; CMD-SUDO is the shipped 1.0 rule): detection-only" in out
     # GAP-1339: the summary says which rule files of one category were merged.
     assert 'rule pack /p/acme-1.0: rules/b.yaml (category "acme") merged into rules/a.yaml; 2 rule(s) kept' in out
+    assert "rule pack /p/acme-1.0: 1 rule(s) had no tags" in out and "TEAM-LANE-RULE" in out
     # GAP-1227: the summary names the MCP servers the upgrade keeps blocked.
     assert "MCP servers that stay blocked (asset_policy.mcp.denied): bad-mcp" in out
     expected = [

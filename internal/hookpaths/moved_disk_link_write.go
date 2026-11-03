@@ -34,7 +34,7 @@ func actionMovedDiskLinkWrite(command, cwd, home string, writes []string) bool {
 	}
 	protected := newProtectedFiles(home)
 	keysDir := filepath.Join(home, ".ssh")
-	placed, placedKnown := topLevelLinkDirectories(file, cwd, home)
+	placed, _, placedKnown := topLevelLinkDirectories(file, cwd, home)
 	// moved maps a new name to the protected path its link names.
 	moved := map[string]string{}
 	var backups []movedBackup

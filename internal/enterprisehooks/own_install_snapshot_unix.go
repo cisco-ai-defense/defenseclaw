@@ -81,7 +81,7 @@ type ownInstallSnapshot struct {
 // Claude Code hook script that already is the enrollment's blocker is not
 // kept: the restore must never put the blocker back.
 func PreserveOwnInstall(home, dataDir string) error {
-	own, err := holdsPerUserInstall(dataDir)
+	own, err := HoldsPerUserInstall(dataDir)
 	if err != nil || !own {
 		return err
 	}

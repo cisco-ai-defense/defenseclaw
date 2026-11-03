@@ -26,6 +26,7 @@ const clientPipeAccess = windows.FILE_READ_DATA | windows.FILE_WRITE_DATA | wind
 const clientReceiptTimeout = 2 * time.Second
 
 const clientRetryInterval = 25 * time.Millisecond
+const clientConnectTimeout = 2 * time.Second
 
 // Test seams: the pipe the client opens and the process that must serve it.
 var (
@@ -46,8 +47,13 @@ func Send(ctx context.Context, report Report) error {
 	if err != nil {
 		return err
 	}
+	connectCtx, cancel := context.WithTimeout(ctx, clientConnectTimeout)
+	defer cancel()
 	var handle windows.Handle
 	for {
+		if err := connectCtx.Err(); err != nil {
+			return err
+		}
 		handle, err = windows.CreateFile(
 			name,
 			clientPipeAccess,
@@ -60,12 +66,12 @@ func Send(ctx context.Context, report Report) error {
 		if err == nil {
 			break
 		}
-		if !errors.Is(err, windows.ERROR_PIPE_BUSY) {
+		if !errors.Is(err, windows.ERROR_PIPE_BUSY) && !errors.Is(err, windows.ERROR_FILE_NOT_FOUND) {
 			return err
 		}
 		select {
-		case <-ctx.Done():
-			return ctx.Err()
+		case <-connectCtx.Done():
+			return connectCtx.Err()
 		case <-time.After(clientRetryInterval):
 		}
 	}

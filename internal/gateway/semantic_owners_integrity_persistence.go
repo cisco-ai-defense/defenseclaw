@@ -1529,7 +1529,7 @@ func appendTrustedHomeResolvedSSHKeyWriteFinding(
 	if commandText != "" && !strings.Contains(commandText, "authorized_k") &&
 		!strings.Contains(commandText, "administrators_authorized") &&
 		!strings.Contains(commandText, "base64") && !symlinkWrite &&
-		!trustedWindowsLocationAuthorizedKeysWrite(input) {
+		!trustedWindowsLocationAuthorizedKeysWriteWith(input, request.targetMemo) {
 		return appendTrustedCMDPrivateKeyReadFinding(
 			appendTrustedSSHPrivateKeyWriteFinding(findings, generation, request, facts),
 			generation, request, input,
@@ -1542,7 +1542,7 @@ func appendTrustedHomeResolvedSSHKeyWriteFinding(
 		}
 	}
 	if request.EnforcementCapable &&
-		(trustedAuthorizedKeysWriteProof(input, facts, symlinkWrite, clientGlobFacts(request)) ||
+		(trustedAuthorizedKeysWriteProofWith(input, facts, symlinkWrite, clientGlobFacts(request), request.targetMemo) ||
 			trustedSandboxGuestAuthorizedKeysWrite(request)) {
 		_, rule, ok := trustedActionCatalogRule(generation, "persistence.ssh_authorized_keys_command")
 		if ok {
@@ -1568,7 +1568,7 @@ func appendTrustedHomeResolvedSSHKeyWriteFinding(
 			if hookpaths.ArchiveBeforeWrite(input.Command, input.ActiveHome) {
 				title = archiveBeforeWriteTitle
 			} else if symlinkWrite && unresolved && named.ID == rule.ID &&
-				!trustedAuthorizedKeysWriteProof(input, facts, false, clientGlobFacts(request)) &&
+				!trustedAuthorizedKeysWriteProofWith(input, facts, false, clientGlobFacts(request), request.targetMemo) &&
 				!trustedSandboxGuestAuthorizedKeysWrite(request) {
 				// The only write found is one the hook client and this
 				// gateway could not resolve: it still fails closed, named as
@@ -1587,6 +1587,95 @@ func appendTrustedHomeResolvedSSHKeyWriteFinding(
 		appendTrustedSSHPrivateKeyWriteFinding(findings, generation, request, facts),
 		generation, request, input,
 	)
+}
+
+// sshControlFileTitlePrefix opens the title of a block whose only SSH target
+// is a control file of ~/.ssh (config, environment, rc). The rule is the same,
+// persistence.ssh_authorized_keys_command, because a ProxyCommand or
+// LocalCommand line in those files runs code at ssh time and other code keys on
+// the rule id; only the words name the file that was hit (rel-1-0-6 GAP-0305).
+const sshControlFileTitlePrefix = "SSH control file mutation ("
+
+// sshControlFileTitle is the title for the control files in names.
+func sshControlFileTitle(names []string) string {
+	paths := make([]string, len(names))
+	for i, name := range names {
+		paths[i] = "~/.ssh/" + name
+	}
+	return sshControlFileTitlePrefix + strings.Join(paths, ", ") + ")"
+}
+
+// isSSHControlFileTitle reports a title sshControlFileTitle wrote: nothing
+// else is ship-authored text under that prefix.
+func isSSHControlFileTitle(title string) bool {
+	inner, ok := strings.CutPrefix(title, sshControlFileTitlePrefix)
+	if !ok {
+		return false
+	}
+	inner, ok = strings.CutSuffix(inner, ")")
+	if !ok || inner == "" {
+		return false
+	}
+	for _, path := range strings.Split(inner, ", ") {
+		name, found := strings.CutPrefix(path, "~/.ssh/")
+		if !found || !slices.Contains(hookpaths.SSHControlFiles[:], name) {
+			return false
+		}
+	}
+	return true
+}
+
+// sshControlFilesWritten names the ~/.ssh control files the call writes,
+// appends to or deletes, in the order of hookpaths.SSHControlFiles. It is nil
+// when the call also touches another file under .ssh (an authorized-keys file
+// keeps its own title) or touches none.
+func sshControlFilesWritten(facts actionfacts.Facts) []string {
+	hit := map[string]bool{}
+	for _, candidate := range facts.Paths {
+		switch candidate.Access {
+		case actionfacts.PathAccessWrite, actionfacts.PathAccessAppend, actionfacts.PathAccessDelete:
+		default:
+			continue
+		}
+		value := semanticPathValue(candidate)
+		_, after, found := strings.Cut(value, "/.ssh/")
+		if !found {
+			continue
+		}
+		if !slices.Contains(hookpaths.SSHControlFiles[:], after) {
+			return nil
+		}
+		hit[after] = true
+	}
+	var names []string
+	for _, name := range hookpaths.SSHControlFiles {
+		if hit[name] {
+			names = append(names, name)
+		}
+	}
+	return names
+}
+
+// withSSHControlFileTitle renames the authorized-keys finding of a call whose
+// only SSH target is a control file. The rule id, severity and the block stay.
+func withSSHControlFileTitle(facts actionfacts.Facts, findings []RuleFinding) []RuleFinding {
+	var title string
+	for i := range findings {
+		finding := &findings[i]
+		if finding.RuleID != "persistence.ssh_authorized_keys_command" ||
+			!strings.Contains(strings.ToLower(finding.Title), "authorized keys") {
+			continue
+		}
+		if title == "" {
+			names := sshControlFilesWritten(facts)
+			if len(names) == 0 {
+				return findings
+			}
+			title = sshControlFileTitle(names)
+		}
+		finding.Title = title
+	}
+	return findings
 }
 
 // trustedSudoersOnlyWrite reports a call that writes, appends or deletes at
@@ -1612,8 +1701,14 @@ func trustedSudoersOnlyWrite(facts actionfacts.Facts) bool {
 // the command text of a shell tool filled in; globFacts is the managed hook
 // client's evidence (clientGlobFacts), nil for any other caller.
 func trustedAuthorizedKeysWriteProof(input actionfacts.Input, facts actionfacts.Facts, symlinkWrite bool, globFacts map[string]string) bool {
+	return trustedAuthorizedKeysWriteProofWith(input, facts, symlinkWrite, globFacts, nil)
+}
+
+// trustedAuthorizedKeysWriteProofWith is trustedAuthorizedKeysWriteProof
+// with the evaluation's file system answers (trustedActionRequest.targetMemo).
+func trustedAuthorizedKeysWriteProofWith(input actionfacts.Input, facts actionfacts.Facts, symlinkWrite bool, globFacts map[string]string, memo *hookpaths.TargetMemo) bool {
 	if input.Command != "" &&
-		hookpaths.ActionCommandDecisionWithDialectAndGlobFacts(input.Command, input.CWD, facts.ActiveHome, input.DialectHint, globFacts) == "protected-target" {
+		memo.ActionCommandDecisionWithDialectAndGlobFacts(input.Command, input.CWD, facts.ActiveHome, input.DialectHint, globFacts) == "protected-target" {
 		return true
 	}
 	enforcementFacts := facts.EnforcementProjection()
@@ -1636,7 +1731,7 @@ func trustedAuthorizedKeysWriteProof(input actionfacts.Input, facts actionfacts.
 		symlinkWrite ||
 		trustedFindExecAuthorizedKeysWrite(input) ||
 		trustedHomeDirectoryAuthorizedKeysWrite(input) ||
-		trustedWindowsLocationAuthorizedKeysWrite(input) ||
+		trustedWindowsLocationAuthorizedKeysWriteWith(input, memo) ||
 		trustedShellWrapperAuthorizedKeysWrite(input, facts) ||
 		trustedBase64ShellAuthorizedKeysWrite(input, facts) ||
 		trustedInlineAuthorizedKeysWrite(input, facts) ||
@@ -2027,7 +2122,7 @@ func matchesActiveShellHistory(
 }
 
 func matchesSudoersCandidate(value string) bool {
-	value = canonicalSemanticPath(value)
+	value = strings.TrimPrefix(canonicalSemanticPath(value), "/private")
 	return value == "/etc/sudoers" ||
 		strings.Contains(value, "/etc/sudoers.d/")
 }
@@ -2101,7 +2196,8 @@ func matchesActiveSudoers(
 	_ actionfacts.Facts,
 	candidate actionfacts.PathFact,
 ) bool {
-	value := canonicalSemanticPath(semanticPathValue(candidate))
+	// /private/etc is the real path of /etc on macOS (rel-1-0-6:GAP-0398).
+	value := strings.TrimPrefix(canonicalSemanticPath(semanticPathValue(candidate)), "/private")
 	return value == "/etc/sudoers" ||
 		integritySingleChild(value, "/etc/sudoers.d")
 }

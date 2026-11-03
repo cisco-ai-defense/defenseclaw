@@ -31,8 +31,8 @@ func TestSandboxManagedHelpIsCopyOnly(t *testing.T) {
 		want    string
 	}{
 		{"", "ask your administrator"},
-		{"run", "leave them in the sandbox for pull"},
-		{"connect", "leave the changes in the sandbox for pull"},
+		{"run", "leave them in the sandbox for later pull --apply"},
+		{"connect", "leave the changes in the sandbox for later pull --apply"},
 		{"start", "copy"},
 		{"review", "sandbox pull"},
 		{"undo", "pull --apply"},

@@ -1,0 +1,409 @@
+{
+ "schema": 1,
+ "tolerance": 0.2,
+ "notes": [
+  "Budgets for scripts/perf/dcperf.py. A gated metric fails the check when it is over budget * (1 + tolerance) or was not measured.",
+  "linux-per-user is seeded from the RHEL 9.8 per-user column of the 1.0.6 performance baseline (~/dc-eh/plans/r107/data/PERF-BASELINE.md, dc-rhel, 4 vCPU). Each entry names its source row.",
+  "linux-per-user-arm64-2cpu inherits the released-build seeds and scales five CPU-sensitive latency gates by the measured CPU score ratio against the seed host. The 20% tolerance and all other gates remain unchanged.",
+  "gate false: reported next to its budget but not gated, with the reason in why (max is a single-sample tail; burst latency depends on the runner CPU).",
+  "TODO: no baseline measurement for this cell yet; fill it from a dcperf run on that OS and mode.",
+  "burst seeds re-measured on the dcperf harness from published 1.0.6 by owner decision 2026-11-02; the earlier 863 ms seed came from the TST-7591 Pre+Post-pair harness. linux-per-user hook.claudecode.burst.p95_ms and hook.codex.burst.p95_ms are the worst of 9 runs plus 20% (the windows-per-user and macos-per-user seed rule), so the 20% tolerance comes on top.",
+  "windows-per-user and macos-per-user hold the seeds of their PERF-BASELINE.md sections: the worst of three runs plus 20% (the Windows restart seed is a single fresh-store sample), so the gate's tolerance comes on top. windows-per-user is report-only (every entry gate false): it was measured with a Windows port of this harness that is not in the repo.",
+  "windows-per-user host: dc-win2 (Windows Server 2025, 16 vCPU, shared), cpu_score_ms 251.8 / 259.1 against dev 102 and dc-mac 110, so single-thread CPU there is about 2.4x slower than dev; the seeds are kept as measured on it, not scaled. Compare a result's host.cpu_score_ms before reading a Windows regression."
+ ],
+ "columns": {
+  "linux-per-user": {
+   "hook.claudecode.idle.p50_ms": {
+    "budget": 79.8,
+    "source": "Claude Code PreToolUse e2e, 1.0.4, n=40 (TST-0006, perf/live/hookbench2.out)"
+   },
+   "hook.claudecode.idle.p95_ms": {
+    "budget": 94.4,
+    "source": "same"
+   },
+   "hook.claudecode.idle.max_ms": {
+    "budget": 97.7,
+    "gate": false,
+    "source": "same"
+   },
+   "hook.claudecode.idle.not_allowed": {
+    "budget": 0,
+    "source": "benign calls must all be allowed"
+   },
+   "hook.claudecode.burst.p50_ms": {
+    "budget": 619,
+    "source": "32-way burst, rc23 dc-rhel, p50 605-619 ms (TST-7591)",
+    "gate": false,
+    "why": "not gated: burst latency is CPU-bound (32 hook shells on 4 vCPUs) and GitHub runners vary in CPU. CI run 41255145781 on ubuntu-latest: claudecode burst p50 774 / p95 1074 ms. Same harness on the build box pinned to 4 CPUs (taskset): rc23 710e2cc0d8 p50 477-502 / p95 680-746 ms, 1.0.7 tip 94d60a0462 p50 457-465 / p95 652-685 ms, so no regression. Gate it once dcperf has run on dc-rhel (rel-1-0-6:GAP-0239 sweep recipe); not_allowed stays gated."
+   },
+   "hook.claudecode.burst.p95_ms": {
+    "budget": 1388,
+    "source": "published DefenseClaw 1.0.6 (tag 1.0.6, commit 7dca866aba, release assets with checksums verified), dcperf run --only hook,execs, dc-rhel (RHEL 9.8, 4 vCPU Xeon 8375C, cpu_score_ms 162.7, shared host, load1 < 1.0 before each run), fresh install per trial, 3 trials x 3 runs on 2026-11-02 (TST-16087..16089): p95 1039.2-1156.9 ms, worst 1156.9 ms + 20%",
+    "gate": false,
+    "why": "see hook.claudecode.burst.p50_ms"
+   },
+   "hook.claudecode.burst.not_allowed": {
+    "budget": 0,
+    "source": "0 denies (TST-7591)"
+   },
+   "hook.codex.idle.p50_ms": {
+    "budget": 93.1,
+    "source": "Codex PreToolUse e2e, 1.0.4, n=40 (TST-0006, hookbench2.out)"
+   },
+   "hook.codex.idle.p95_ms": {
+    "budget": 109.1,
+    "source": "same"
+   },
+   "hook.codex.idle.max_ms": {
+    "budget": 112.8,
+    "gate": false,
+    "source": "same"
+   },
+   "hook.codex.idle.not_allowed": {
+    "budget": 0,
+    "source": "benign calls must all be allowed"
+   },
+   "hook.codex.burst.p50_ms": {
+    "budget": "TODO",
+    "source": "no Codex burst baseline"
+   },
+   "hook.codex.burst.p95_ms": {
+    "budget": 1737,
+    "source": "published DefenseClaw 1.0.6 (tag 1.0.6, commit 7dca866aba, release assets with checksums verified), dcperf run --only hook,execs, dc-rhel (RHEL 9.8, 4 vCPU Xeon 8375C, cpu_score_ms 162.7, shared host, load1 < 1.0 before each run), fresh install per trial, 3 trials x 3 runs on 2026-11-02 (TST-16087..16089): p95 1306.1-1447.5 ms, worst 1447.5 ms + 20%",
+    "gate": false,
+    "why": "see hook.claudecode.burst.p50_ms"
+   },
+   "hook.codex.burst.not_allowed": {
+    "budget": 0,
+    "source": "benign calls must all be allowed"
+   },
+   "hook_execs.claudecode.per_call_p50": {
+    "budget": 9,
+    "source": "9 execs per hook invocation counting the agent's /bin/sh, r107-perf-hookproc (sandbox-visibility:GAP-0028): installed per-user hook of fix/r107-perf-hookproc, strace -f, 10 calls x 3 runs on dc-build-2, constant"
+   },
+   "hook_execs.claudecode.processes_per_call_p50": {
+    "budget": 14,
+    "source": "14 processes per invocation (was 29 on 94d60a0462), r107-perf-hookproc (sandbox-visibility:GAP-0028): installed per-user hook of fix/r107-perf-hookproc, strace -f, 10 calls x 3 runs on dc-build-2, constant"
+   },
+   "hook_execs.codex.per_call_p50": {
+    "budget": 9,
+    "source": "9 execs per hook invocation (was 13 on 94d60a0462), r107-perf-hookproc (sandbox-visibility:GAP-0028): installed per-user hook of fix/r107-perf-hookproc, strace -f, 10 calls x 3 runs on dc-build-2, constant"
+   },
+   "hook_execs.codex.processes_per_call_p50": {
+    "budget": 14,
+    "source": "14 processes per invocation (was 45 on 94d60a0462), r107-perf-hookproc (sandbox-visibility:GAP-0028): installed per-user hook of fix/r107-perf-hookproc, strace -f, 10 calls x 3 runs on dc-build-2, constant"
+   },
+   "gateway_restart.to_api_ready.p50_ms": {
+    "budget": 7854,
+    "source": "defenseclaw-gateway restart to first /health 200, 1.0.4 dc-rhel (perf/live/cold.out)"
+   },
+   "cli.status.p50_ms": {
+    "budget": 1446.4,
+    "source": "defenseclaw status, 1.0.4, n=10 (TST-0010, perf/live/cli.out)"
+   },
+   "cli.doctor.p50_ms": {
+    "budget": 3502,
+    "source": "defenseclaw doctor, 1.0.4, n=3 (perf/live/cli.out)"
+   },
+   "cli.setup_claudecode.p50_ms": {
+    "budget": 2000,
+    "source": "setup claude-code --yes --no-restart, rc1 (TST-1327)"
+   },
+   "cli.skill_scan.p50_ms": {
+    "budget": 7060,
+    "source": "skill scan fixture --no-use-llm, 1.0.4 (perf/live/scan.out)",
+    "gate": false,
+    "why": "not gated: single-thread CPU-bound and CI runner CPUs differ: 4953, 7514 and 8446 ms on three ubuntu-latest runs of this branch (CI 41255145781, 41257204077, 41258641067; within 1% across the 3 scans of each run; AMD EPYC 7763 on the slowest), 5874-6074 ms on the build box. Gate it once results are normalized by host.cpu_score_ms against the dc-rhel score (rel-1-0-6:GAP-0239 sweep recipe)."
+   },
+   "gateway_rss_kb.after_idle": {
+    "budget": 209920,
+    "source": "gateway RSS before the flood, 205 MB, rc10 fix branch dc-rhel (TST-3312)",
+    "why": "total RSS of the gateway. Until rel-1-0-6 GAP-0327 the file-backed part grew with audit.db up to the 256 MiB mmap_size (build box 170 MiB on a 1 MiB store, 274 MiB on a 103 MiB store); audit.db is no longer mapped, so the RSS no longer depends on the store size (195 MiB on an 80 MB store, fix/r107-perf-mac)."
+   },
+   "gateway_rss_kb.anon_kb": {
+    "budget": "TODO",
+    "source": "no baseline split anon/file before dcperf (1.0.7 build box: anon 90 MiB)"
+   },
+  "gateway_rss_kb.file_kb": {
+    "budget": "TODO",
+    "source": "no baseline split anon/file before dcperf (1.0.7 build box: anon 90 MiB)"
+   }
+  },
+  "linux-per-user-arm64-2cpu": {
+   "extends": "linux-per-user",
+   "cpu_normalization": {
+    "seed_host_score_ms": 162.2,
+    "source": "same dc-rhel seed host; rel-1-0-6/vsweep9/oss-rhel/rel-1-0-6_GAP-0239/dcperf-rhel-1..3.json, median CPU score",
+    "metrics": [
+     "hook.claudecode.idle.p50_ms",
+     "hook.claudecode.idle.p95_ms",
+     "hook.codex.idle.p50_ms",
+     "hook.codex.idle.p95_ms",
+     "cli.status.p50_ms"
+    ]
+   }
+  },
+  "macos-per-user": {
+   "hook.claudecode.idle.p50_ms": {
+    "budget": 85,
+    "source": "macOS per-user, dc-mac (macOS 15.8, M1, 8 CPUs), PERF-BASELINE.md section 'macOS per-user, 1.0.7 e3c263a14b' (lane r107-perf-mac, quiet host, 3 runs): worst p50 71.2 ms + 20%. Interleaved A/B base vs fix on one store: fix the same or lower"
+   },
+   "hook.claudecode.idle.p95_ms": {
+    "budget": 97,
+    "source": "macOS per-user, dc-mac (macOS 15.8, M1, 8 CPUs), PERF-BASELINE.md section 'macOS per-user, 1.0.7 e3c263a14b' (lane r107-perf-mac, quiet host, 3 runs): worst p95 80.8 ms + 20%"
+   },
+   "hook.claudecode.idle.max_ms": {
+    "budget": 198,
+    "source": "macOS per-user, dc-mac (macOS 15.8, M1, 8 CPUs), PERF-BASELINE.md section 'macOS per-user, 1.0.7 e3c263a14b' (lane r107-perf-mac, quiet host, 3 runs): worst max 164.7 ms + 20%",
+    "gate": false
+   },
+   "hook.claudecode.idle.not_allowed": {
+    "budget": 0,
+    "source": "benign calls must all be allowed"
+   },
+   "hook.claudecode.burst.p50_ms": {
+    "budget": 700,
+    "source": "macOS per-user, dc-mac (macOS 15.8, M1, 8 CPUs), PERF-BASELINE.md section 'macOS per-user, 1.0.7 e3c263a14b' (lane r107-perf-mac, quiet host, 3 runs): worst p50 583.0 ms + 20%",
+    "gate": false,
+    "why": "not gated: burst latency is CPU-bound and dc-mac is shared; under other tenants' load 32-way p95 reached 2.1-3.9 s on base and fix alike (interleaved A/B, rel-1-0-6/r107-perf-mac/fix/ab-*.json). Gate it with host.cpu_score_ms normalization (rel-1-0-6:GAP-0239)."
+   },
+   "hook.claudecode.burst.p95_ms": {
+    "budget": 1102,
+    "source": "macOS per-user, dc-mac (macOS 15.8, M1, 8 CPUs), PERF-BASELINE.md section 'macOS per-user, 1.0.7 e3c263a14b' (lane r107-perf-mac, quiet host, 3 runs): worst p95 918.2 ms + 20%",
+    "gate": false,
+    "why": "not gated: burst latency is CPU-bound and dc-mac is shared; under other tenants' load 32-way p95 reached 2.1-3.9 s on base and fix alike (interleaved A/B, rel-1-0-6/r107-perf-mac/fix/ab-*.json). Gate it with host.cpu_score_ms normalization (rel-1-0-6:GAP-0239)."
+   },
+   "hook.claudecode.burst.not_allowed": {
+    "budget": 0,
+    "source": "macOS per-user, dc-mac (macOS 15.8, M1, 8 CPUs), PERF-BASELINE.md section 'macOS per-user, 1.0.7 e3c263a14b' (lane r107-perf-mac, quiet host, 3 runs): 0 denies on a quiet host"
+   },
+   "hook.codex.idle.p50_ms": {
+    "budget": 102,
+    "source": "macOS per-user, dc-mac (macOS 15.8, M1, 8 CPUs), PERF-BASELINE.md section 'macOS per-user, 1.0.7 e3c263a14b' (lane r107-perf-mac, quiet host, 3 runs): worst p50 84.9 ms + 20%"
+   },
+   "hook.codex.idle.p95_ms": {
+    "budget": 209,
+    "source": "macOS per-user, dc-mac (macOS 15.8, M1, 8 CPUs), PERF-BASELINE.md section 'macOS per-user, 1.0.7 e3c263a14b' (lane r107-perf-mac, quiet host, 3 runs): worst p95 173.8 ms + 20% (the 2 s account-listing tail of rel-1-0-6:GAP-0326; the fix lowered codex idle p95 by 15-25% in the interleaved A/B)"
+   },
+   "hook.codex.idle.max_ms": {
+    "budget": 625,
+    "source": "macOS per-user, dc-mac (macOS 15.8, M1, 8 CPUs), PERF-BASELINE.md section 'macOS per-user, 1.0.7 e3c263a14b' (lane r107-perf-mac, quiet host, 3 runs): worst max 520.6 ms + 20%",
+    "gate": false
+   },
+   "hook.codex.idle.not_allowed": {
+    "budget": 0,
+    "source": "benign calls must all be allowed"
+   },
+   "hook.codex.burst.p50_ms": {
+    "budget": 833,
+    "source": "macOS per-user, dc-mac (macOS 15.8, M1, 8 CPUs), PERF-BASELINE.md section 'macOS per-user, 1.0.7 e3c263a14b' (lane r107-perf-mac, quiet host, 3 runs): worst p50 694.1 ms + 20%",
+    "gate": false,
+    "why": "not gated: burst latency is CPU-bound and dc-mac is shared; under other tenants' load 32-way p95 reached 2.1-3.9 s on base and fix alike (interleaved A/B, rel-1-0-6/r107-perf-mac/fix/ab-*.json). Gate it with host.cpu_score_ms normalization (rel-1-0-6:GAP-0239)."
+   },
+   "hook.codex.burst.p95_ms": {
+    "budget": 1199,
+    "source": "macOS per-user, dc-mac (macOS 15.8, M1, 8 CPUs), PERF-BASELINE.md section 'macOS per-user, 1.0.7 e3c263a14b' (lane r107-perf-mac, quiet host, 3 runs): worst p95 999.5 ms + 20%",
+    "gate": false,
+    "why": "not gated: burst latency is CPU-bound and dc-mac is shared; under other tenants' load 32-way p95 reached 2.1-3.9 s on base and fix alike (interleaved A/B, rel-1-0-6/r107-perf-mac/fix/ab-*.json). Gate it with host.cpu_score_ms normalization (rel-1-0-6:GAP-0239)."
+   },
+   "hook.codex.burst.not_allowed": {
+    "budget": 0,
+    "source": "macOS per-user, dc-mac (macOS 15.8, M1, 8 CPUs), PERF-BASELINE.md section 'macOS per-user, 1.0.7 e3c263a14b' (lane r107-perf-mac, quiet host, 3 runs): 0 denies on a quiet host"
+   },
+   "hook_execs.claudecode.per_call_p50": {
+    "budget": 16,
+    "source": "dc-mac, fix/r107-perf-mac 27b025717e, 3 dcperf runs on one install from a fresh store (evidence rel-1-0-6/r107-perf-mac/fix/fix2-1..3.json): 13 execs per call (eslogger, 10 calls x 3, 0 dropped) + 20%; the lane measured 13 too"
+   },
+   "hook_execs.claudecode.processes_per_call_p50": {
+    "budget": 43,
+    "source": "dc-mac, fix/r107-perf-mac 27b025717e, 3 dcperf runs on one install from a fresh store (evidence rel-1-0-6/r107-perf-mac/fix/fix2-1..3.json): 36 processes per call + 20%"
+   },
+   "hook_execs.claudecode.gateway_execs_per_call": {
+    "budget": 4.0,
+    "source": "dc-mac, fix/r107-perf-mac 27b025717e, 3 dcperf runs on one install from a fresh store (evidence rel-1-0-6/r107-perf-mac/fix/fix2-1..3.json): worst 3.3 gateway execs per traced call + 20% (one dscl -readall and its watchdog shell every 2 s, ls -lde ACL checks); 6.8-7.1 before rel-1-0-6:GAP-0326"
+   },
+   "gateway_restart.to_api_ready.p50_ms": {
+    "budget": 2312,
+    "source": "dc-mac, fix/r107-perf-mac 27b025717e, 3 dcperf runs on one install from a fresh store (evidence rel-1-0-6/r107-perf-mac/fix/fix2-1..3.json): worst p50 1926.9 ms (51 MB store) + 20%; 2030 ms at 55 MB before rel-1-0-6:GAP-0332, 1738-1859 against 1990-2076 ms on one 85 MB store"
+   },
+   "cli.status.p50_ms": {
+    "budget": 985,
+    "source": "macOS per-user, dc-mac (macOS 15.8, M1, 8 CPUs), PERF-BASELINE.md section 'macOS per-user, 1.0.7 e3c263a14b' (lane r107-perf-mac, quiet host, 3 runs): worst p50 821.1 ms + 20%"
+   },
+   "cli.doctor.p50_ms": {
+    "budget": 2446,
+    "source": "macOS per-user, dc-mac (macOS 15.8, M1, 8 CPUs), PERF-BASELINE.md section 'macOS per-user, 1.0.7 e3c263a14b' (lane r107-perf-mac, quiet host, 3 runs): worst p50 2038.4 ms + 20% (exit 0 or 1)"
+   },
+   "cli.setup_claudecode.p50_ms": {
+    "budget": 908,
+    "source": "macOS per-user, dc-mac (macOS 15.8, M1, 8 CPUs), PERF-BASELINE.md section 'macOS per-user, 1.0.7 e3c263a14b' (lane r107-perf-mac, quiet host, 3 runs): worst p50 756.7 ms + 20%"
+   },
+   "cli.skill_scan.p50_ms": {
+    "budget": 6026,
+    "source": "macOS per-user, dc-mac (macOS 15.8, M1, 8 CPUs), PERF-BASELINE.md section 'macOS per-user, 1.0.7 e3c263a14b' (lane r107-perf-mac, quiet host, 3 runs): worst p50 5022 ms + 20%",
+    "gate": false,
+    "why": "not gated: single-thread CPU-bound, as in linux-per-user"
+   },
+   "gateway_rss_kb.after_idle": {
+    "budget": 235565,
+    "source": "dc-mac, fix/r107-perf-mac 27b025717e, 3 dcperf runs on one install from a fresh store (evidence rel-1-0-6/r107-perf-mac/fix/fix2-1..3.json): worst 196304 KiB (191.7 MiB) after 300 s idle + 20%, flat at 182-192 MiB on a 26, 51 and 76 MB store (215/243/264 MiB on 30/57/85 MB before rel-1-0-6:GAP-0327)"
+   },
+   "gateway_rss_kb.anon_kb": {
+    "budget": 150650,
+    "source": "dc-mac, fix/r107-perf-mac 27b025717e, 3 dcperf runs on one install from a fresh store (evidence rel-1-0-6/r107-perf-mac/fix/fix2-1..3.json): worst physical footprint 125542 KiB + 20% (vmmap)",
+    "gate": false,
+    "why": "reported: the total after_idle is the gated memory figure; the split says which part moved"
+   },
+   "gateway_rss_kb.file_kb": {
+    "budget": 1075,
+    "source": "dc-mac, fix/r107-perf-mac 27b025717e, 3 dcperf runs on one install from a fresh store (evidence rel-1-0-6/r107-perf-mac/fix/fix2-1..3.json): worst resident mapped files 896 KiB + 20% (vmmap); 29-80 MiB before rel-1-0-6:GAP-0327",
+    "gate": false,
+    "why": "reported: the total after_idle is the gated memory figure; the split says which part moved"
+   }
+  },
+  "windows-per-user": {
+   "hook.claudecode.idle.p50_ms": {
+    "budget": 176,
+    "source": "Windows per-user seed (worst of 3 runs + 20%), dc-win2, 1.0.7 e3c263a14b, PERF-BASELINE.md section 'Windows per-user, 1.0.7 e3c263a14b' (lane r107-perf-win, perf-run1..3.json); worst run 146.4 ms (registered guard launcher + hook.exe)",
+    "gate": false,
+    "why": "report-only: dcperf.py does not run on Windows yet. These seeds were measured with a Windows port of the harness (perf.ps1, ETW for processes, working set for RSS) that is not in the repo, so no producer here writes these metrics; gate the column once a Windows producer is committed with a metric-name test (review of 19f71f9be5, finding 5)."
+   },
+   "hook.claudecode.idle.p95_ms": {
+    "budget": 193,
+    "source": "Windows per-user seed (worst of 3 runs + 20%), dc-win2, 1.0.7 e3c263a14b, PERF-BASELINE.md section 'Windows per-user, 1.0.7 e3c263a14b' (lane r107-perf-win, perf-run1..3.json); worst run 161.0 ms",
+    "gate": false,
+    "why": "report-only: dcperf.py does not run on Windows yet. These seeds were measured with a Windows port of the harness (perf.ps1, ETW for processes, working set for RSS) that is not in the repo, so no producer here writes these metrics; gate the column once a Windows producer is committed with a metric-name test (review of 19f71f9be5, finding 5)."
+   },
+   "hook.claudecode.idle.max_ms": {
+    "budget": 634,
+    "source": "Windows per-user seed (worst of 3 runs + 20%), dc-win2, 1.0.7 e3c263a14b, PERF-BASELINE.md section 'Windows per-user, 1.0.7 e3c263a14b' (lane r107-perf-win, perf-run1..3.json); worst run 528.4 ms",
+    "gate": false,
+    "why": "report-only: dcperf.py does not run on Windows yet. These seeds were measured with a Windows port of the harness (perf.ps1, ETW for processes, working set for RSS) that is not in the repo, so no producer here writes these metrics; gate the column once a Windows producer is committed with a metric-name test (review of 19f71f9be5, finding 5)."
+   },
+   "hook.claudecode.idle.not_allowed": {
+    "budget": 0,
+    "source": "Windows per-user seed (worst of 3 runs + 20%), dc-win2, 1.0.7 e3c263a14b, PERF-BASELINE.md section 'Windows per-user, 1.0.7 e3c263a14b' (lane r107-perf-win, perf-run1..3.json); worst run 0",
+    "gate": false,
+    "why": "report-only: dcperf.py does not run on Windows yet. These seeds were measured with a Windows port of the harness (perf.ps1, ETW for processes, working set for RSS) that is not in the repo, so no producer here writes these metrics; gate the column once a Windows producer is committed with a metric-name test (review of 19f71f9be5, finding 5)."
+   },
+   "hook.claudecode.burst.p50_ms": {
+    "budget": 860,
+    "source": "Windows per-user seed (worst of 3 runs + 20%), dc-win2, 1.0.7 e3c263a14b, PERF-BASELINE.md section 'Windows per-user, 1.0.7 e3c263a14b' (lane r107-perf-win, perf-run1..3.json); worst run 716.9 ms",
+    "gate": false,
+    "why": "report-only: dcperf.py does not run on Windows yet. These seeds were measured with a Windows port of the harness (perf.ps1, ETW for processes, working set for RSS) that is not in the repo, so no producer here writes these metrics; gate the column once a Windows producer is committed with a metric-name test (review of 19f71f9be5, finding 5)."
+   },
+   "hook.claudecode.burst.p95_ms": {
+    "budget": 1355,
+    "source": "Windows per-user seed (worst of 3 runs + 20%), dc-win2, 1.0.7 e3c263a14b, PERF-BASELINE.md section 'Windows per-user, 1.0.7 e3c263a14b' (lane r107-perf-win, perf-run1..3.json); worst run 1129.3 ms",
+    "gate": false,
+    "why": "report-only: dcperf.py does not run on Windows yet. These seeds were measured with a Windows port of the harness (perf.ps1, ETW for processes, working set for RSS) that is not in the repo, so no producer here writes these metrics; gate the column once a Windows producer is committed with a metric-name test (review of 19f71f9be5, finding 5)."
+   },
+   "hook.claudecode.burst.not_allowed": {
+    "budget": 0,
+    "source": "Windows per-user seed (worst of 3 runs + 20%), dc-win2, 1.0.7 e3c263a14b, PERF-BASELINE.md section 'Windows per-user, 1.0.7 e3c263a14b' (lane r107-perf-win, perf-run1..3.json); worst run 0",
+    "gate": false,
+    "why": "report-only: dcperf.py does not run on Windows yet. These seeds were measured with a Windows port of the harness (perf.ps1, ETW for processes, working set for RSS) that is not in the repo, so no producer here writes these metrics; gate the column once a Windows producer is committed with a metric-name test (review of 19f71f9be5, finding 5)."
+   },
+   "hook.codex.idle.p50_ms": {
+    "budget": 202,
+    "source": "Windows per-user seed (worst of 3 runs + 20%), dc-win2, 1.0.7 e3c263a14b, PERF-BASELINE.md section 'Windows per-user, 1.0.7 e3c263a14b' (lane r107-perf-win, perf-run1..3.json); worst run 167.9 ms (registered cmd.exe + hook.exe)",
+    "gate": false,
+    "why": "report-only: dcperf.py does not run on Windows yet. These seeds were measured with a Windows port of the harness (perf.ps1, ETW for processes, working set for RSS) that is not in the repo, so no producer here writes these metrics; gate the column once a Windows producer is committed with a metric-name test (review of 19f71f9be5, finding 5)."
+   },
+   "hook.codex.idle.p95_ms": {
+    "budget": 280,
+    "source": "Windows per-user seed (worst of 3 runs + 20%), dc-win2, 1.0.7 e3c263a14b, PERF-BASELINE.md section 'Windows per-user, 1.0.7 e3c263a14b' (lane r107-perf-win, perf-run1..3.json); worst run 232.8 ms (median of the runs 195.5)",
+    "gate": false,
+    "why": "report-only: dcperf.py does not run on Windows yet. These seeds were measured with a Windows port of the harness (perf.ps1, ETW for processes, working set for RSS) that is not in the repo, so no producer here writes these metrics; gate the column once a Windows producer is committed with a metric-name test (review of 19f71f9be5, finding 5)."
+   },
+   "hook.codex.idle.max_ms": {
+    "budget": 866,
+    "source": "Windows per-user seed (worst of 3 runs + 20%), dc-win2, 1.0.7 e3c263a14b, PERF-BASELINE.md section 'Windows per-user, 1.0.7 e3c263a14b' (lane r107-perf-win, perf-run1..3.json); worst run 721.4 ms",
+    "gate": false,
+    "why": "report-only: dcperf.py does not run on Windows yet. These seeds were measured with a Windows port of the harness (perf.ps1, ETW for processes, working set for RSS) that is not in the repo, so no producer here writes these metrics; gate the column once a Windows producer is committed with a metric-name test (review of 19f71f9be5, finding 5)."
+   },
+   "hook.codex.idle.not_allowed": {
+    "budget": 0,
+    "source": "Windows per-user seed (worst of 3 runs + 20%), dc-win2, 1.0.7 e3c263a14b, PERF-BASELINE.md section 'Windows per-user, 1.0.7 e3c263a14b' (lane r107-perf-win, perf-run1..3.json); worst run 0",
+    "gate": false,
+    "why": "report-only: dcperf.py does not run on Windows yet. These seeds were measured with a Windows port of the harness (perf.ps1, ETW for processes, working set for RSS) that is not in the repo, so no producer here writes these metrics; gate the column once a Windows producer is committed with a metric-name test (review of 19f71f9be5, finding 5)."
+   },
+   "hook.codex.burst.p50_ms": {
+    "budget": 907,
+    "source": "Windows per-user seed (worst of 3 runs + 20%), dc-win2, 1.0.7 e3c263a14b, PERF-BASELINE.md section 'Windows per-user, 1.0.7 e3c263a14b' (lane r107-perf-win, perf-run1..3.json); worst run 756.0 ms",
+    "gate": false,
+    "why": "report-only: dcperf.py does not run on Windows yet. These seeds were measured with a Windows port of the harness (perf.ps1, ETW for processes, working set for RSS) that is not in the repo, so no producer here writes these metrics; gate the column once a Windows producer is committed with a metric-name test (review of 19f71f9be5, finding 5)."
+   },
+   "hook.codex.burst.p95_ms": {
+    "budget": 1332,
+    "source": "Windows per-user seed (worst of 3 runs + 20%), dc-win2, 1.0.7 e3c263a14b, PERF-BASELINE.md section 'Windows per-user, 1.0.7 e3c263a14b' (lane r107-perf-win, perf-run1..3.json); worst run 1110.3 ms",
+    "gate": false,
+    "why": "report-only: dcperf.py does not run on Windows yet. These seeds were measured with a Windows port of the harness (perf.ps1, ETW for processes, working set for RSS) that is not in the repo, so no producer here writes these metrics; gate the column once a Windows producer is committed with a metric-name test (review of 19f71f9be5, finding 5)."
+   },
+   "hook.codex.burst.not_allowed": {
+    "budget": 0,
+    "source": "Windows per-user seed (worst of 3 runs + 20%), dc-win2, 1.0.7 e3c263a14b, PERF-BASELINE.md section 'Windows per-user, 1.0.7 e3c263a14b' (lane r107-perf-win, perf-run1..3.json); worst run 0",
+    "gate": false,
+    "why": "report-only: dcperf.py does not run on Windows yet. These seeds were measured with a Windows port of the harness (perf.ps1, ETW for processes, working set for RSS) that is not in the repo, so no producer here writes these metrics; gate the column once a Windows producer is committed with a metric-name test (review of 19f71f9be5, finding 5)."
+   },
+   "hook_execs.claudecode.per_call_p50": {
+    "budget": 2,
+    "source": "Windows per-user seed (worst of 3 runs + 20%), dc-win2, 1.0.7 e3c263a14b, PERF-BASELINE.md section 'Windows per-user, 1.0.7 e3c263a14b' (lane r107-perf-win, perf-run1..3.json); worst run 2 processes started per call (ETW, 30 calls, no variance; Windows has no exec/fork split)",
+    "gate": false,
+    "why": "report-only: dcperf.py does not run on Windows yet. These seeds were measured with a Windows port of the harness (perf.ps1, ETW for processes, working set for RSS) that is not in the repo, so no producer here writes these metrics; gate the column once a Windows producer is committed with a metric-name test (review of 19f71f9be5, finding 5)."
+   },
+   "hook_execs.codex.per_call_p50": {
+    "budget": 3,
+    "source": "Windows per-user seed (worst of 3 runs + 20%), dc-win2, 1.0.7 e3c263a14b, PERF-BASELINE.md section 'Windows per-user, 1.0.7 e3c263a14b' (lane r107-perf-win, perf-run1..3.json); worst run 3 processes per call (cmd.exe, conhost.exe, hook.exe; ETW, 30 calls)",
+    "gate": false,
+    "why": "report-only: dcperf.py does not run on Windows yet. These seeds were measured with a Windows port of the harness (perf.ps1, ETW for processes, working set for RSS) that is not in the repo, so no producer here writes these metrics; gate the column once a Windows producer is committed with a metric-name test (review of 19f71f9be5, finding 5)."
+   },
+   "gateway_restart.to_api_ready.p50_ms": {
+    "budget": 7900,
+    "source": "Windows per-user, dc-win2, 1.0.7 e3c263a14b (lane r107-perf-win): a single fresh-store sample, 6.6 s at an 11 MB store (first run), seeded at 7900; not the worst of three runs like the other seeds. The three reused-store runs read 8072 / 8563 / 9235 ms at 169 / 221 / 272 MB, before rel-1-0-6:GAP-0332",
+    "gate": false,
+    "why": "report-only: dcperf.py does not run on Windows yet. These seeds were measured with a Windows port of the harness (perf.ps1, ETW for processes, working set for RSS) that is not in the repo, so no producer here writes these metrics; gate the column once a Windows producer is committed with a metric-name test (review of 19f71f9be5, finding 5)."
+   },
+   "cli.status.p50_ms": {
+    "budget": 3735,
+    "source": "Windows per-user seed (worst of 3 runs + 20%), dc-win2, 1.0.7 e3c263a14b, PERF-BASELINE.md section 'Windows per-user, 1.0.7 e3c263a14b' (lane r107-perf-win, perf-run1..3.json); worst run 3112.3 ms",
+    "gate": false,
+    "why": "report-only: dcperf.py does not run on Windows yet. These seeds were measured with a Windows port of the harness (perf.ps1, ETW for processes, working set for RSS) that is not in the repo, so no producer here writes these metrics; gate the column once a Windows producer is committed with a metric-name test (review of 19f71f9be5, finding 5)."
+   },
+   "cli.doctor.p50_ms": {
+    "budget": 10381,
+    "source": "Windows per-user seed (worst of 3 runs + 20%), dc-win2, 1.0.7 e3c263a14b, PERF-BASELINE.md section 'Windows per-user, 1.0.7 e3c263a14b' (lane r107-perf-win, perf-run1..3.json); worst run 8651.0 ms",
+    "gate": false,
+    "why": "report-only: dcperf.py does not run on Windows yet. These seeds were measured with a Windows port of the harness (perf.ps1, ETW for processes, working set for RSS) that is not in the repo, so no producer here writes these metrics; gate the column once a Windows producer is committed with a metric-name test (review of 19f71f9be5, finding 5)."
+   },
+   "cli.setup_claudecode.p50_ms": {
+    "budget": 5349,
+    "source": "Windows per-user seed (worst of 3 runs + 20%), dc-win2, 1.0.7 e3c263a14b, PERF-BASELINE.md section 'Windows per-user, 1.0.7 e3c263a14b' (lane r107-perf-win, perf-run1..3.json); worst run 4457.1 ms",
+    "gate": false,
+    "why": "report-only: dcperf.py does not run on Windows yet. These seeds were measured with a Windows port of the harness (perf.ps1, ETW for processes, working set for RSS) that is not in the repo, so no producer here writes these metrics; gate the column once a Windows producer is committed with a metric-name test (review of 19f71f9be5, finding 5)."
+   },
+   "gateway_rss_kb.after_idle": {
+    "budget": 216634,
+    "source": "Windows per-user seed (worst of 3 runs + 20%), dc-win2, 1.0.7 e3c263a14b, PERF-BASELINE.md section 'Windows per-user, 1.0.7 e3c263a14b' (lane r107-perf-win, perf-run1..3.json); worst run 180528 KiB working set after 300 s idle (peak 647-684 MiB right after a restart, trimmed by Windows)",
+    "gate": false,
+    "why": "report-only: dcperf.py does not run on Windows yet. These seeds were measured with a Windows port of the harness (perf.ps1, ETW for processes, working set for RSS) that is not in the repo, so no producer here writes these metrics; gate the column once a Windows producer is committed with a metric-name test (review of 19f71f9be5, finding 5)."
+   }
+  },
+  "linux-managed": {
+   "hook.claudecode.idle.p50_ms": {
+    "budget": "TODO",
+    "source": "dcperf measures per-user installs only"
+   }
+  },
+  "macos-managed": {
+   "hook.claudecode.idle.p50_ms": {
+    "budget": "TODO"
+   }
+  },
+  "windows-managed": {
+   "hook.claudecode.idle.p50_ms": {
+    "budget": "TODO"
+   }
+  }
+ }
+}

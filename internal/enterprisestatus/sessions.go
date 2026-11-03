@@ -24,6 +24,12 @@ type SessionProcess struct {
 	User      string
 	Agent     string
 	StartedAt time.Time
+	// Background marks a long-lived helper of an agent that is not a session
+	// itself, such as the Codex background server and its supervisor. A
+	// restart brings it under enforcement the way it does a session, but it
+	// is named by its own warning and never counted as a session
+	// (rel-1-0-6 GAP-0183).
+	Background bool
 }
 
 // SessionEntry is one running agent that predates its managed hook settings.
@@ -82,13 +88,9 @@ func WriteSessionEntries(w io.Writer, status SessionRestartStatus) {
 func UnprotectedSessions(processes []SessionProcess, changed map[string]time.Time) SessionRestartStatus {
 	status := SessionRestartStatus{State: "known", Entries: []SessionEntry{}}
 	sort.Slice(processes, func(i, j int) bool { return processes[i].PID < processes[j].PID })
-	leaders := SessionLeaders(processes)
-	for _, process := range processes {
-		if process.PID > 0 && leaders[process.PID] != process.PID {
-			continue
-		}
+	for _, process := range CountedSessions(processes) {
 		at := changed[process.Agent]
-		if process.PID <= 0 || at.IsZero() || process.StartedAt.IsZero() || !process.StartedAt.Before(at) {
+		if at.IsZero() || process.StartedAt.IsZero() || !process.StartedAt.Before(at) {
 			continue
 		}
 		status.Count++
@@ -98,6 +100,25 @@ func UnprotectedSessions(processes []SessionProcess, changed map[string]time.Tim
 		}
 	}
 	return status
+}
+
+// CountedSessions keeps one process for each running agent session: the
+// topmost process of a launcher and the agent it starts (SessionLeaders),
+// and no background helper. The lifecycle result (enforcement_pending of an
+// ensure, a bundle apply, status) and bundle status both count sessions
+// through it, so the two surfaces give one number for the same sessions
+// (rel-1-0-6 GAP-0183). A helper still takes part in the parent walk, so a
+// process it started is not a session of its own.
+func CountedSessions(processes []SessionProcess) []SessionProcess {
+	leaders := SessionLeaders(processes)
+	out := make([]SessionProcess, 0, len(processes))
+	for _, process := range processes {
+		if process.PID <= 0 || process.Background || leaders[process.PID] != process.PID {
+			continue
+		}
+		out = append(out, process)
+	}
+	return out
 }
 
 // SessionLeaders maps the pid of each listed process to the pid of the

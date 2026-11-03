@@ -544,7 +544,7 @@ presented. The CLI writes a pin when you allow an installed skill or plugin,
 and never writes one on a block, so a block follows the name wherever the
 asset is installed.
 
-Claude Code's `Skill` hook call names the skill. DefenseClaw looks in the
+Claude Code's `Skill` hook call names the skill and carries no path. DefenseClaw looks in the
 connector's skill folders for folders that provide that name and judges each
 copy at its own path. An `asset_policy.skill.denied` rule pinned with
 `source_path_contains` to one copy blocks the call when that copy exists. If
@@ -588,6 +588,11 @@ and no explicit watcher folder admits that type.
 Windows `status` and `verify` do not emit `asset_policy_not_enforced`; the
 gateway log is the only warning on Windows for skills and plugins when
 runtime detection is off and no watched folder admits them.
+
+MCP runtime detection is on by default. Set
+`asset_policy.mcp.runtime_detection.enabled: false` to turn it off, with
+`terminal_commands` set to either value; the hook then refuses only the `denied`
+list for MCP too.
 
 For MCP servers, an install admission scan can also record a runtime disable.
 That scan verdict still refuses MCP calls when

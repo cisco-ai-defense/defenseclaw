@@ -27,6 +27,8 @@ import (
 	"runtime"
 	"sort"
 	"strings"
+
+	"github.com/defenseclaw/defenseclaw/internal/pathidentity"
 )
 
 // Keep this identical to Doctor's managed-settings read boundary so the
@@ -173,6 +175,9 @@ func claudeCodeEffectiveHookContract(opts SetupOpts) (bool, error) {
 		return false, err
 	} else if disabled {
 		return false, fmt.Errorf("Claude Code %s sets disableAllHooks=true, so the user-scoped DefenseClaw hooks are inactive", source.label()) //nolint:staticcheck // Preserve the product or platform name in this operator diagnostic.
+	}
+	if err := claudeCodeHookShellEnvRefusal(opts, sources); err != nil {
+		return false, err
 	}
 	user := sources.user
 	if user == nil {
@@ -738,7 +743,7 @@ func decodeClaudeCodeSettings(data []byte, source string) (map[string]interface{
 }
 
 func readStableClaudeCodeSettingsFile(path string) ([]byte, bool, error) {
-	before, err := os.Lstat(path)
+	before, err := pathidentity.LstatPinned(path)
 	if errors.Is(err, os.ErrNotExist) {
 		return nil, false, nil
 	}

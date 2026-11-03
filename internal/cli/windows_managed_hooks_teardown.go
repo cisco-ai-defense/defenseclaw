@@ -21,6 +21,7 @@ import (
 	"strings"
 
 	"github.com/defenseclaw/defenseclaw/internal/enterprisehooks"
+	"github.com/defenseclaw/defenseclaw/internal/enterprisepolicy"
 	"github.com/defenseclaw/defenseclaw/internal/gateway/connector"
 	"github.com/defenseclaw/defenseclaw/internal/managed"
 	"github.com/defenseclaw/defenseclaw/internal/safefile"
@@ -119,6 +120,7 @@ type windowsManagedHooksTeardownReport struct {
 	UserStatePurged              []string                            `json:"user_state_purged,omitempty"`
 	UserSettingsEdited           []string                            `json:"user_settings_edited,omitempty"`
 	UserSettingsHooksLeft        []string                            `json:"user_settings_hooks_left,omitempty"`
+	MachineStateRemaining        []string                            `json:"machine_state_remaining,omitempty"`
 	Results                      []windowsManagedHooksTeardownResult `json:"results"`
 	Error                        string                              `json:"error,omitempty"`
 }
@@ -148,6 +150,13 @@ func completeWindowsManagedHooksTeardownUserCleanup(
 	// check refuses a DACL that still carries them (GAP-1765).
 	revokeErr := windowsManagedHooksStandaloneInventoryACERevoker(manifest)
 	cleanup := windowsManagedHooksStandaloneUserRegistrationRemover(context.Background(), runtimeDir, manifest)
+	// The settings cleanups are done, so their transaction folder in this
+	// token's cache goes too, also without purge. One that stays is named in
+	// machine_state_remaining ("path: kept: reason"), which the lifecycle
+	// reports as machine_state_kept (sidecar-r107:GAP-0007).
+	if err := windowsManagedClaudeTransactionLeftoverRemover(); err != nil {
+		report.MachineStateRemaining = append(report.MachineStateRemaining, boundedEnterpriseHookUserCleanupText(err.Error()))
+	}
 	report.UserRegistrationsRemoved = len(cleanup.Removed)
 	report.UserRegistrationsPending = cleanup.Pending
 	report.UserRegistrationsFailed = cleanup.Failed
@@ -167,12 +176,40 @@ func completeWindowsManagedHooksTeardownUserCleanup(
 			report.UserRegistrationsFailed = append(report.UserRegistrationsFailed,
 				"claudecode/machine policy: the Claude Code version floor: "+boundedEnterpriseHookUserCleanupText(err.Error()))
 		}
-		// The default uninstall keeps an allow-only Cursor hook tombstone for
-		// Cursor processes still running; the purge removes it (GAP-1567).
-		if err := windowsManagedHooksStandaloneCursorTombstonePurger(); err != nil {
-			report.UserRegistrationsFailed = append(report.UserRegistrationsFailed,
-				"cursor/machine policy: the Cursor hook tombstone in ProgramData\\Cursor: "+boundedEnterpriseHookUserCleanupText(err.Error()))
+	}
+	if report.Action == "finalize" || report.Action == windowsManagedHooksUserStatePurgeAction {
+		finishWindowsCursorTombstoneCleanup(report, cleanup.Pending, cleanup.Failed, purge)
+	}
+}
+
+var windowsManagedHooksCursorTombstoneFiles = enterprisehooks.WindowsCursorManagedTombstoneFilePaths
+
+// A pending Cursor registration can still invoke a cached hook command.
+// Keep its allow-only adapter until that registration is cleared or purge
+// is requested. Other connectors' pending registrations do not need a
+// Cursor adapter and must not leave that machine file behind.
+func finishWindowsCursorTombstoneCleanup(report *windowsManagedHooksTeardownReport, pending, failed []string, purge bool) {
+	cursorPending := false
+	for _, entry := range append(append([]string(nil), pending...), failed...) {
+		if strings.HasPrefix(strings.ToLower(entry), "cursor/") {
+			cursorPending = true
+			break
 		}
+	}
+	if cursorPending && !purge {
+		paths, err := windowsManagedHooksCursorTombstoneFiles()
+		if err != nil {
+			report.MachineStateRemaining = append(report.MachineStateRemaining,
+				"Cursor hook tombstone: "+boundedEnterpriseHookUserCleanupText(err.Error()))
+		} else {
+			for _, path := range paths {
+				report.MachineStateRemaining = append(report.MachineStateRemaining,
+					path+": kept: pending Cursor registration; clear it with Setup /ensure and /uninstall in an active session, or use Setup /uninstall PURGE=1")
+			}
+		}
+	} else if err := windowsManagedHooksStandaloneCursorTombstonePurger(); err != nil {
+		report.UserRegistrationsFailed = append(report.UserRegistrationsFailed,
+			"cursor/machine policy: the Cursor hook tombstone in ProgramData\\Cursor: "+boundedEnterpriseHookUserCleanupText(err.Error()))
 	}
 }
 
@@ -446,6 +483,7 @@ func newWindowsManagedHooksTeardownCommand() *cobra.Command {
 	}
 	command.AddCommand(newWindowsManagedHooksTeardownCapabilitiesCommand())
 	command.AddCommand(newWindowsManagedHooksUserStatePurgeCommand())
+	command.AddCommand(newWindowsManagedHooksOwnerRightsRestoreCommand())
 	return command
 }
 
@@ -568,6 +606,142 @@ func runWindowsManagedHooksUserStatePurge() (windowsManagedHooksTeardownReport, 
 	completeWindowsManagedHooksTeardownUserCleanup(&report, runtimeDir, manifest)
 	report.OK = true
 	report.FinalizationCompleted = true
+	return report, nil
+}
+
+// windowsManagedHooksOwnerRightsRestoreAction is the teardown-managed-hooks
+// action a standalone Setup runs with its own authenticated gateway before
+// the installed helper prepares, collects or purges the per-user state of
+// the enrolled accounts: it puts back the OWNER RIGHTS entry an owner write
+// (icacls /setowner, takeown, a profile backup and restore) took out of their
+// managed folders and files. The helper of an older release refuses that
+// shape, and a host that release left half-uninstalled could not finish an
+// uninstall or a reinstall (rel-1-0-6:GAP-0303).
+const windowsManagedHooksOwnerRightsRestoreAction = "restore-owner-rights"
+
+// windowsManagedHooksOwnerRightsRestorer is replaceable in tests.
+var windowsManagedHooksOwnerRightsRestorer = enterprisehooks.RestoreWindowsManagedUserStateOwnerRights
+var windowsManagedHooksOwnerRightsProber = enterprisehooks.ProbeWindowsManagedUserStateOwnerRights
+
+func newWindowsManagedHooksOwnerRightsRestoreCommand() *cobra.Command {
+	var jsonOutput, probe, upgradeOnly bool
+	child := &cobra.Command{
+		Use:          windowsManagedHooksOwnerRightsRestoreAction,
+		Short:        "restore the OWNER RIGHTS entry on enrolled accounts managed state after an owner change",
+		Hidden:       true,
+		Args:         cobra.NoArgs,
+		SilenceUsage: true,
+		RunE: func(cmd *cobra.Command, _ []string) error {
+			report, err := runWindowsManagedHooksOwnerRightsRestoreMode(probe, upgradeOnly)
+			if jsonOutput {
+				if encodeErr := json.NewEncoder(cmd.OutOrStdout()).Encode(report); encodeErr != nil && err == nil {
+					return encodeErr
+				}
+			} else if err == nil {
+				fmt.Fprintf(cmd.OutOrStdout(), "OWNER RIGHTS restored on %d object(s) of %d account(s)\n",
+					report.SucceededCount, report.TargetCount)
+			}
+			if err != nil {
+				return fmt.Errorf("managed-hook teardown %s failed: %w", windowsManagedHooksOwnerRightsRestoreAction, err)
+			}
+			return nil
+		},
+	}
+	child.Flags().BoolVar(&jsonOutput, "json", false, "emit machine-readable JSON")
+	child.Flags().BoolVar(&probe, "probe", false, "count exact owner-rewritten objects without changing them")
+	child.Flags().BoolVar(&upgradeOnly, "upgrade-only", false, "consider only signed-out accounts with owner-rewritten state")
+	return child
+}
+
+// runWindowsManagedHooksOwnerRightsRestore restores the managed state of
+// every enrolled account the protected target manifest names. It changes
+// only objects in the exact owner-rewritten shape
+// (enterprisehooks.RestoreWindowsManagedUserStateOwnerRights). SucceededCount
+// is the number of objects restored and TargetCount the number of accounts;
+// an account it could not restore is a failed result, never an error: the
+// trust check that follows still decides.
+func runWindowsManagedHooksOwnerRightsRestore() (windowsManagedHooksTeardownReport, error) {
+	return runWindowsManagedHooksOwnerRightsRestoreMode(false, false)
+}
+
+func runWindowsManagedHooksOwnerRightsRestoreMode(probe, upgradeOnly bool) (windowsManagedHooksTeardownReport, error) {
+	report := windowsManagedHooksTeardownReport{
+		SchemaVersion: windowsManagedHooksTeardownSchema,
+		Action:        windowsManagedHooksOwnerRightsRestoreAction,
+		Results:       []windowsManagedHooksTeardownResult{},
+	}
+	fail := func(err error) (windowsManagedHooksTeardownReport, error) {
+		report.OK = false
+		report.Error = err.Error()
+		return report, err
+	}
+	if !enterprisehooks.WindowsStandaloneProcess() {
+		return fail(errors.New("the OWNER RIGHTS restore requires the standalone profile"))
+	}
+	if err := enterpriseHooksNativePlatformPreflight(); err != nil {
+		return fail(err)
+	}
+	runtimeDir, err := exactWindowsCodexLayoutEnv("DEFENSECLAW_HOME")
+	if err != nil {
+		return fail(err)
+	}
+	stateRoot := filepath.Dir(runtimeDir)
+	if !strings.EqualFold(filepath.Base(runtimeDir), "runtime") || stateRoot == filepath.Dir(stateRoot) {
+		return fail(errors.New("the OWNER RIGHTS restore received a noncanonical protected runtime directory"))
+	}
+	if err := managed.ValidateTrustedRuntimeDir(stateRoot, "Windows enterprise managed-hook teardown state root"); err != nil {
+		return fail(err)
+	}
+	report.ManifestPath = filepath.Join(stateRoot, "hook-guardian", "targets.yaml")
+	if _, err := os.Lstat(report.ManifestPath); errors.Is(err, os.ErrNotExist) {
+		report.OK = true
+		return report, nil
+	}
+	if err := managed.ValidateTrustedFilePath(report.ManifestPath, "Windows enterprise hook target manifest"); err != nil {
+		return fail(err)
+	}
+	manifest, _, err := enterprisehooks.LoadManifestWithSHA256(report.ManifestPath)
+	if err != nil {
+		return fail(err)
+	}
+	targets, _, _, _, err := windowsManagedHooksTeardownTargets(manifest)
+	if err != nil {
+		return fail(err)
+	}
+	seen := map[string]bool{}
+	for _, target := range targets {
+		key := strings.ToUpper(target.SID) + "\x00" + strings.ToLower(filepath.Clean(target.DataDir))
+		if seen[key] {
+			continue
+		}
+		seen[key] = true
+		report.TargetCount++
+		var restored int
+		var err error
+		if upgradeOnly {
+			var signedOut bool
+			signedOut, err = enterprisehooks.WindowsTargetHasNoSession(target.SID)
+			if err == nil && signedOut {
+				restored, err = windowsManagedHooksOwnerRightsProber(target.SID, target.DataDir)
+			}
+			if err == nil && (!signedOut || restored == 0) {
+				continue
+			}
+		}
+		if err == nil && !probe {
+			restored, err = windowsManagedHooksOwnerRightsRestorer(target.SID, target.DataDir)
+		} else if err == nil && !upgradeOnly {
+			restored, err = windowsManagedHooksOwnerRightsProber(target.SID, target.DataDir)
+		}
+		report.SucceededCount += restored
+		result := windowsManagedHooksTeardownResult{Connector: target.Connector, SID: target.SID, OK: err == nil}
+		if err != nil {
+			result.Error = err.Error()
+			report.FailedCount++
+		}
+		report.Results = append(report.Results, result)
+	}
+	report.OK = true
 	return report, nil
 }
 
@@ -1822,7 +1996,26 @@ func finalizeWindowsManagedHooksTeardownStandaloneMachineState() error {
 	if _, err := enterprisehooks.RemoveWindowsSecureClientPerUserRuntimeDirectories(); err != nil {
 		return fmt.Errorf("finalize the GitHub Copilot runtime folder: %w", err)
 	}
+	if err := finalizeWindowsManagedHooksTeardownAmpFolder(); err != nil {
+		return fmt.Errorf("finalize the Setup-created Amp machine folder: %w", err)
+	}
 	return nil
+}
+
+var windowsManagedHooksTeardownAmpFolderCleaner = func() error {
+	layout, programFiles, programData, err := standaloneEnterprisePolicyLayout()
+	if err != nil {
+		return fmt.Errorf("resolve standalone machine policy for Amp cleanup: %w", err)
+	}
+	return enterprisepolicy.RemoveWindowsAmpMachineFolderIfCreated(
+		enterprisepolicy.LayoutOptions(layout, programFiles, programData))
+}
+
+func finalizeWindowsManagedHooksTeardownAmpFolder() error {
+	if !enterprisehooks.WindowsStandaloneProcess() {
+		return nil
+	}
+	return windowsManagedHooksTeardownAmpFolderCleaner()
 }
 
 func windowsManagedHooksTeardownTargetForSelector(

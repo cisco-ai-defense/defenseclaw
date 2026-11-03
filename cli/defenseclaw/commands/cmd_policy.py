@@ -30,6 +30,7 @@ import click
 import yaml
 
 from defenseclaw import policy_catalog, ux
+from defenseclaw.config import gateway_pid_path
 from defenseclaw.context import AppContext, pass_ctx
 from defenseclaw.enforce import asset_lists
 from defenseclaw.paths import bundled_policies_dir, bundled_rego_dir
@@ -780,7 +781,7 @@ def _gateway_pid_alive(app: AppContext) -> bool:
     from defenseclaw.process_liveness import pid_file_alive
 
     try:
-        return pid_file_alive(os.path.join(app.cfg.data_dir, "gateway.pid"))
+        return pid_file_alive(gateway_pid_path(app.cfg.data_dir))
     except Exception:  # noqa: BLE001 - an unreadable PID file means "not running".
         return False
 

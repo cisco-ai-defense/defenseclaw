@@ -210,7 +210,7 @@ If you set up an editor with `defenseclaw acp setup` or `defenseclaw setup acp`,
    defenseclaw uninstall --all --binaries --yes
    ```
 
-   If you already ran `defenseclaw sandbox teardown`, add `--stop-sandboxes` to this command. Review or pull any remaining sandbox work first: `--stop-sandboxes` stops and deletes running sandboxes.
+   If you already ran `defenseclaw sandbox teardown`, add `--stop-sandboxes` to this command. For copy-mode work, use `defenseclaw sandbox pull NAME --apply` (or `--branch` or `--patch-out FILE`) and confirm the project, branch or patch file contains it. Review mounted work with `defenseclaw sandbox review NAME`. Then use `--stop-sandboxes`, which stops and deletes running sandboxes.
 
 An agent config file you have not changed since setup is restored from its checked backup. If you edited it, only DefenseClaw's entries are removed.
 
@@ -220,7 +220,7 @@ An agent config file you have not changed since setup is restored from its check
 
 ### Sandboxes
 
-If you set up sandboxes, uninstall also removes DefenseClaw's OpenShell sandboxes and images. A running sandbox stops the uninstall before any change: pull or review its work (`defenseclaw sandbox review NAME`, `defenseclaw sandbox undo NAME`), stop it, then retry. `--stop-sandboxes` stops and deletes running sandboxes; copy-mode work not yet pulled back is lost. If teardown fails, rerun without `--all` and `--binaries` and add `--skip-sandbox-teardown`, then run `defenseclaw-gateway sandbox teardown` once Docker and OpenShell work.
+If you set up sandboxes, uninstall also removes DefenseClaw's OpenShell sandboxes and images. A running sandbox stops the uninstall before any change. For copy mode, use `defenseclaw sandbox pull NAME --apply` (or `--branch` or `--patch-out FILE`) and confirm the project, branch or patch file contains the work. For mount mode, use `defenseclaw sandbox review NAME`. Then stop the sandbox and retry. `--stop-sandboxes` stops and deletes running sandboxes; copy-mode work not yet pulled back is lost. If teardown fails, rerun without `--all` and `--binaries` and add `--skip-sandbox-teardown`, then run `defenseclaw-gateway sandbox teardown` once Docker and OpenShell work.
 
 ### Windows
 

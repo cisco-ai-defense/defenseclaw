@@ -233,6 +233,9 @@ func (c *ClaudeCodeConnector) checkAgentSettings(opts SetupOpts) error {
 			source.label(),
 		))
 	}
+	if err := claudeCodeHookShellEnvRefusal(opts, sources); err != nil {
+		return refuseForAgentConfig(err)
+	}
 	return nil
 }
 

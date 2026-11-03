@@ -348,38 +348,60 @@ func dsclRecordNotFound(result commandResult, err error) bool {
 	return err == nil && result.exitCode == dsclRecordNotFoundExit && len(strings.TrimSpace(string(result.stdout))) == 0
 }
 
-// parseDSCLAttribute parses `dscl . -list /Users <attribute>` rows ("name
-// value"; a home may hold spaces, and a record without the attribute is
-// listed with no value) into name -> value.
-func parseDSCLAttribute(output string) map[string]string {
-	out := map[string]string{}
-	for _, line := range strings.Split(output, "\n") {
-		line = strings.TrimSpace(line)
-		name, value := line, ""
-		if cut := strings.IndexAny(line, " \t"); cut > 0 {
-			name, value = line[:cut], strings.TrimSpace(line[cut:])
+// parseDSCLAccountRecordsPlist parses the local node's account records as
+// `dscl -plist . -readall /Users UniqueID GeneratedUID NFSHomeDirectory
+// PrimaryGroupID` prints them (an array of one dict per record, each
+// attribute an array of strings) into the accounts by name. A record is
+// named by its first RecordName, the name `dscl . -list` gives it, and the
+// values of an attribute that holds several are joined with a space, as
+// `dscl . -list` prints them: an account with several uids is not kept. An
+// account is kept when its one uid parses. Output that does not parse is an
+// error, so a broken answer never stamps the account database as empty.
+func parseDSCLAccountRecordsPlist(output []byte) (map[string]LocalAccountRecord, error) {
+	var doc struct {
+		Records []struct {
+			Nodes []struct {
+				XMLName xml.Name
+				Text    string   `xml:",chardata"`
+				Values  []string `xml:"string"`
+			} `xml:",any"`
+		} `xml:"array>dict"`
+	}
+	if err := xml.Unmarshal(output, &doc); err != nil {
+		return nil, fmt.Errorf("unixidentity: parse the dscl account records: %w", err)
+	}
+	out := make(map[string]LocalAccountRecord, len(doc.Records))
+	for _, record := range doc.Records {
+		attributes := map[string][]string{}
+		key := ""
+		for _, node := range record.Nodes {
+			switch node.XMLName.Local {
+			case "key":
+				key = strings.TrimPrefix(strings.TrimSpace(node.Text), "dsAttrTypeStandard:")
+			case "array":
+				values := make([]string, 0, len(node.Values))
+				for _, value := range node.Values {
+					if value = strings.TrimSpace(value); value != "" {
+						values = append(values, value)
+					}
+				}
+				attributes[key] = values
+				key = ""
+			}
 		}
-		if validName(name) != nil {
+		names := attributes["RecordName"]
+		if len(names) == 0 || validName(names[0]) != nil {
 			continue
 		}
-		out[name] = value
-	}
-	return out
-}
-
-// mergeDSCLAccountRecords joins the UniqueID listing with the GeneratedUID,
-// NFSHomeDirectory and PrimaryGroupID listings. An account is kept when its
-// one uid parses.
-func mergeDSCLAccountRecords(uids, recordIDs, homes, gids map[string]string) map[string]LocalAccountRecord {
-	out := make(map[string]LocalAccountRecord, len(uids))
-	for name, raw := range uids {
-		uid, err := parseSignedDSCLID(raw)
+		joined := func(attribute string) string { return strings.Join(attributes[attribute], " ") }
+		uid, err := parseSignedDSCLID(joined("UniqueID"))
 		if err != nil {
 			continue
 		}
-		out[name] = LocalAccountRecord{UID: uid, RecordID: recordIDs[name], Home: homes[name], PrimaryGID: gids[name]}
+		out[names[0]] = LocalAccountRecord{UID: uid, RecordID: joined("GeneratedUID"), Home: joined("NFSHomeDirectory"),
+			PrimaryGID: joined("PrimaryGroupID")}
 	}
-	return out
+	return out, nil
 }
 
 // DirectoryConfigured reports whether account lookups on this host may be

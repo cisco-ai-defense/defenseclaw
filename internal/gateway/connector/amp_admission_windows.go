@@ -24,6 +24,8 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+
+	"github.com/defenseclaw/defenseclaw/internal/pathidentity"
 )
 
 type ampExecutableAuthority = protectedSetupExecutableAuthority
@@ -112,7 +114,7 @@ func validateAmpExecutableEvidence(selected string, authority ampExecutableAutho
 		return errors.New("protected Amp version or hook contract evidence is invalid")
 	}
 
-	before, err := os.Lstat(selected)
+	before, err := pathidentity.LstatPinned(selected)
 	if err != nil {
 		return fmt.Errorf("inspect selected executable: %w", err)
 	}

@@ -45,6 +45,7 @@ import base64
 import codecs
 import contextlib
 import errno
+import filecmp
 import glob
 import json
 import ntpath
@@ -1338,8 +1339,8 @@ def _launcher_link_target(path: str) -> str:
     return os.path.normpath(os.path.join(os.path.dirname(path), target))
 
 
-# The installer's defenseclaw.exe is a copy of uv's console-script launcher
-# (about 50 KB); anything far larger is not that file.
+# Recognition limit for an older uv console-script launcher. The current
+# native entry is checked against the installed gateway image instead.
 _WINDOWS_CLI_LAUNCHER_MAX_BYTES = 4 * 1024 * 1024
 # The Windows CLI launchers: defenseclaw.exe (what PowerShell and cmd.exe run)
 # and the defenseclaw.cmd shim. Either may be the one running this CLI.
@@ -1368,13 +1369,51 @@ def _is_data_bound_launcher(path: str, data_dir: str, platform_name: str) -> boo
         except (OSError, ValueError):
             return False
     if name.lower() == "defenseclaw":
-        # The Git Bash launcher: exec "C:/.../.venv/Scripts/defenseclaw.exe" "$@"
-        expected = f'exec "{os.path.join(venv, "Scripts", "defenseclaw.exe")}" "$@"'.replace("\\", "/").lower()
+        # The current Git Bash launcher uses the native entry. Older copies
+        # named the virtual environment directly and remain removable.
+        native = os.path.join(os.path.dirname(path), "defenseclaw.exe")
+        candidates = (native, os.path.join(venv, "Scripts", "defenseclaw.exe"))
+        try:
+            with open(path, "rb") as stream:
+                data = stream.read(4097)
+            if len(data) > 4096:
+                return False
+            text = data.decode("utf-8").lower()
+        except (OSError, UnicodeError):
+            return False
+        return any(f'exec "{candidate}" "$@"'.replace("\\", "/").lower() in text for candidate in candidates)
     elif name.lower() == "defenseclaw.exe":
-        # The installer's copy of the venv's uv launcher names the venv's
-        # python.exe, which it starts (GAP-2237).
-        # The launcher stores that path in UTF-8; decode before lower-casing
-        # so a non-ASCII profile name compares case-insensitively too.
+        # The current entry is a copy of the installed native gateway image;
+        # its adjacent state binds it to this data root. Retain recognition
+        # of the older uv console launcher for upgrade and rollback.
+        directory = os.path.dirname(path)
+        gateway = os.path.join(directory, "defenseclaw-gateway.exe")
+        state_path = os.path.join(directory, "defenseclaw-hook-state.json")
+        try:
+            if (
+                os.path.isfile(gateway)
+                and not _is_reparse_path(gateway)
+                and os.path.isfile(state_path)
+                and not _is_reparse_path(state_path)
+                and filecmp.cmp(path, gateway, shallow=False)
+            ):
+                with open(state_path, encoding="utf-8") as stream:
+                    text = stream.read((128 << 10) + 1)
+                if len(text) > 128 << 10:
+                    raise ValueError("oversized native launcher state")
+                state = json.loads(text)
+                if (
+                    isinstance(state, dict)
+                    and state.get("schema_version") == 1
+                    and state.get("install_kind") == "powershell-windows"
+                    and state.get("install_scope") == "user"
+                    and _normalized(state.get("data_root", "")) == _normalized(data_dir)
+                ):
+                    return True
+        except (OSError, ValueError, TypeError):
+            pass
+        # The old launcher stores the interpreter path in UTF-8. Decode
+        # before comparing so non-ASCII profile names still match.
         expected = os.path.join(venv, "Scripts", "python.exe").lower()
         try:
             with open(path, "rb") as stream:
@@ -3951,7 +3990,8 @@ def _running_sandboxes_refusal(plan: UninstallPlan) -> str:
             f"the sandbox list could not be read ({plan.sandbox_list_error}), so this run cannot tell whether "
             "OpenShell sandboxes still run for this account; a running sandbox may hold work never pulled back, "
             "and the sandbox teardown would stop and delete it; nothing was changed. Run `defenseclaw sandbox list` "
-            "to check (`defenseclaw sandbox pull NAME --branch` keeps a copy-mode sandbox's work, "
+            "to check (for copy-mode work, use `defenseclaw sandbox pull NAME --apply`, `--branch`, or "
+            "`--patch-out FILE` and confirm the project, branch or patch file contains it; "
             "`defenseclaw sandbox stop NAME` stops one), then run this command again, or add --stop-sandboxes to "
             "stop and delete any running sandbox with the teardown."
         )
@@ -3965,7 +4005,9 @@ def _running_sandboxes_refusal(plan: UninstallPlan) -> str:
         stop = f"`defenseclaw sandbox stop {quoted}`"
         if mode == "copy":
             steps.append(
-                f"`defenseclaw sandbox pull {quoted} --branch` keeps its work on branch dc/{name}, then {stop}"
+                f"use `defenseclaw sandbox pull {quoted} --apply` to save its work in the project "
+                f"(or `--branch` for a Git branch or `--patch-out FILE` for a patch); "
+                f"confirm the project, branch or patch file contains it, then {stop}"
             )
         elif mode == "mount":
             steps.append(f"`defenseclaw sandbox review {quoted}` shows what it changed in your folder, then {stop}")

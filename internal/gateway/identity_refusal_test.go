@@ -29,6 +29,7 @@ import (
 // the refusal. With the groups proven, strict applies
 // and nothing is refused.
 func TestUnprovenIdentityFactIsRefusedOnEverySurface(t *testing.T) {
+	managedExplainView(t) // the managed administrator view of made-up accounts
 	resetConnectorRuleCategories(t)
 	withLocalPatternsRestored(t)
 	priorManaged := ManagedEnterpriseActive()

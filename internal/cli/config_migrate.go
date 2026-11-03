@@ -34,6 +34,7 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/config"
 	"github.com/defenseclaw/defenseclaw/internal/config/configwrite"
 	"github.com/defenseclaw/defenseclaw/internal/guardrail"
+	"github.com/defenseclaw/defenseclaw/internal/pathidentity"
 )
 
 // The Windows bundle lifecycle supplies generation metadata for a staged
@@ -199,7 +200,7 @@ func rebaseRulePackForMigration(dir string) (*config.RulePackRebasePlan, error) 
 	return &config.RulePackRebasePlan{
 		Files: plan.Files, Digest: plan.Digest, Updated: plan.Updated,
 		Carried: plan.Carried, Expressed: plan.Expressed, AlertOnly: plan.AlertOnly, Disabled: plan.Disabled,
-		Merged: plan.Merged, Linked: plan.Linked, Renamed: plan.Renamed,
+		Merged: plan.Merged, Linked: plan.Linked, Renamed: plan.Renamed, Tagged: plan.Tagged,
 	}, nil
 }
 
@@ -411,7 +412,7 @@ const managedMigrationRecordMaxBytes = 4 << 20
 // link for a missing record, and ensure reported compliance while the Cursor
 // correction the record may prove stayed unapplied (G-small).
 func readManagedMigrationRecord(path string, limit int64) ([]byte, error) {
-	info, err := os.Lstat(path)
+	info, err := pathidentity.LstatPinned(path)
 	if errors.Is(err, fs.ErrNotExist) {
 		return nil, nil
 	}

@@ -332,7 +332,10 @@ func TestManagedStatusKeepsBindFailureUntilListenersRecover(t *testing.T) {
 		f.d.statusListenerAddresses(st)
 		return st
 	}
-	if st := status(); st.Available || !strings.Contains(st.Reason, "address already in use") ||
+	// The reason names the conflict: the raw bind error, or since GAP-0521
+	// the process class that holds the port.
+	if st := status(); st.Available || (!strings.Contains(st.Reason, "address already in use") &&
+		!strings.Contains(st.Reason, "is held by another process")) ||
 		!strings.Contains(st.Reason, "openshell.ingress_port") || st.IngressAddr != "" {
 		t.Fatalf("bind failure hidden by idle status: %+v", st)
 	}

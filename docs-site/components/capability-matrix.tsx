@@ -192,6 +192,12 @@ export function SandboxHarnessTable() {
 // TestOutageTableManagedOpenMatchesAFullManagedCall (internal/cli).
 type ManagedOpen = 'blocks' | 'runs' | 'blocks-linux-macos' | 'per-user-route-blocks-linux-macos' | 'per-user-route-blocks';
 
+// The default foreign-hook guard on Linux and macOS lets a call of an agent
+// process the gateway allowed before it stopped follow the next column
+// (the gateway's clean-session entry); a new process, a session start and
+// Windows block.
+type ManagedOpenGuard = ManagedOpen | 'runs-blocks-with-hooks-only-preserve' | 'blocks-new-process' | 'blocks-new-process-linux-macos';
+
 interface OutageRow {
   // The per-user strict policy tier (outage mode closed) and the default or
   // permissive tier (outage mode open), Go config.HookOutageFailMode.
@@ -200,7 +206,7 @@ interface OutageRow {
   // The administrator's open with the default machine policy
   // (foreign_hooks: remove: the foreign-hook guard runs where it covers the
   // connector), and with foreign_hooks report or allow.
-  managedOpen: ManagedOpen | 'runs-blocks-with-hooks-only-preserve';
+  managedOpen: ManagedOpenGuard;
   managedOpenNoGuard: ManagedOpen;
   secureClientClosed: 'blocks' | 'runs';
   strictAvailability: 'yes' | 'no' | 'n/a';
@@ -215,6 +221,10 @@ const outageText: Record<string, string> = {
     'Runs through machine policy (the default); blocks on Linux and macOS on the per-user route',
   'runs-blocks-with-hooks-only-preserve':
     'Runs; blocks with managed_hooks_only: preserve, which turns the foreign-hook guard on',
+  'blocks-new-process':
+    'Blocks a new agent process, a session start and every call on Windows; on Linux and macOS, while the gateway service is stopped, a later call of a process the gateway allowed in the last 12 hours does what the next column says',
+  'blocks-new-process-linux-macos':
+    'Blocks a new agent process or a session start on Linux and macOS; while the gateway service is stopped, a later call of a process the gateway allowed in the last 12 hours, and every call on Windows, does what the next column says',
 };
 
 const strictText: Record<OutageRow['strictAvailability'], string> = {
