@@ -5008,7 +5008,9 @@ function Assert-DefenseClawDescendant {
 # does any tag that cannot be read or is not on this list.
 function Test-DefenseClawBenignFileReparseTag {
     param([Parameter(Mandatory)]$Item)
-    if ($Item.PSIsContainer -or (Test-DefenseClawTrustStrictAncestors)) {
+    # Standalone keeps main's rule: every reparse point is refused.
+    if ($Item.PSIsContainer -or (Test-DefenseClawTrustStrictAncestors) -or
+        (Test-DefenseClawStandaloneProfile)) {
         return $false
     }
     try {
@@ -5018,12 +5020,15 @@ function Test-DefenseClawBenignFileReparseTag {
     catch {
         return $false
     }
+    # The L suffix keeps these literals positive: PowerShell reads a plain
+    # hex literal at or above 0x80000000 as a negative Int32, which [uint32]
+    # refuses, so every tagged file threw instead of being classified.
     $benign = $tag -in @(
-            [uint32]0x80000017,
-            [uint32]0x80000013,
-            [uint32]0x80000023
+            [uint32]0x80000017L,
+            [uint32]0x80000013L,
+            [uint32]0x80000023L
         ) -or
-        (($tag -band [uint32]0xFFFF0FFF) -eq [uint32]0x9000001A)
+        (($tag -band [uint32]0xFFFF0FFFL) -eq [uint32]0x9000001AL)
     if ($benign) {
         Write-DefenseClawResilienceEvent -Marker defenseclaw_accept -Fields @{
             path   = [string]$Item.FullName
@@ -5522,7 +5527,9 @@ function Assert-DefenseClawSourceDescriptorCurrent {
         -Label ([string]$Source.label) `
         -Authenticode:([bool]$Source.authenticode) `
         -AllowUnsigned:([bool]$Source.allow_unsigned)
-    $strict = Test-DefenseClawTrustStrictAncestors
+    # Standalone keeps main's rule: a source that changed after
+    # authorization is refused.
+    $strict = (Test-DefenseClawTrustStrictAncestors) -or (Test-DefenseClawStandaloneProfile)
     foreach ($field in @('path', 'label', 'sha256')) {
         if (-not [string]::Equals(
                 [string]$current[$field],

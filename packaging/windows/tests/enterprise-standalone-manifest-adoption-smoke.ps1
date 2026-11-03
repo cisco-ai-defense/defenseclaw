@@ -56,6 +56,11 @@ try {
             param($Path, $Kind, $GatewayServiceSID)
             $script:TestAclWrites.Add("$Kind|$GatewayServiceSID")
         }
+        # The elevated metadata read repairs its ACL first; that repair has
+        # its own smoke (enterprise-uninstall-acl-recovery-smoke.ps1).
+        function Repair-DefenseClawUninstallAdminFileAcl {
+            param($Layout, $Kind)
+        }
         $script:TestGuardianReport = $null
         $script:TestGuardianProbes = 0
         $script:TestGuardianCatchUp = $null
