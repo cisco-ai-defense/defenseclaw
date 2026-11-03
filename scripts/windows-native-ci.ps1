@@ -884,10 +884,12 @@ function Get-GoTestFailureSummary(
     $packageOutput = @{}
     $packageCriticalOutput = @{}
     $packageCriticalHeader = @{}
+    $packageCriticalRecentHeaders = @{}
     $packageCriticalRemaining = @{}
     foreach ($failure in $failedPackages) {
         $packageOutput[$failure.Package] = [Collections.Generic.Queue[string]]::new()
         $packageCriticalOutput[$failure.Package] = [Collections.Generic.Queue[string]]::new()
+        $packageCriticalRecentHeaders[$failure.Package] = [Collections.Generic.Queue[string]]::new()
         $packageCriticalRemaining[$failure.Package] = 0
     }
     # At most 128 failed tests and 128 package-only failures are retained.
@@ -921,10 +923,21 @@ function Get-GoTestFailureSummary(
             if ($packageOutput.ContainsKey($package)) {
                 Add-WindowsNativeDiagnosticTail -Queue $packageOutput[$package] `
                     -Text $output -MaxLines 160 -MaxBytes $tailBytesPerFailure
-                if ($output -match '(?im)^(panic:|fatal error:|runtime: out of memory|.*test timed out after|exit status )') {
+                $criticalLines = [regex]::Matches(
+                    $output,
+                    '(?im)^(panic:|fatal error:|runtime: out of memory|.*test timed out after|exit status )[^\r\n]*'
+                )
+                foreach ($criticalLine in $criticalLines) {
+                    $header = Limit-WindowsNativeText $criticalLine.Value 512
                     if (-not $packageCriticalHeader.ContainsKey($package)) {
-                        $packageCriticalHeader[$package] = Limit-WindowsNativeText $output 512
+                        $packageCriticalHeader[$package] = $header
+                    } elseif ($header -cne $packageCriticalHeader[$package] -and
+                        -not $packageCriticalRecentHeaders[$package].Contains($header)) {
+                        Add-WindowsNativeDiagnosticTail -Queue $packageCriticalRecentHeaders[$package] `
+                            -Text $header -MaxLines 8 -MaxBytes 1024
                     }
+                }
+                if ($criticalLines.Count -gt 0) {
                     $packageCriticalRemaining[$package] = 48
                 }
                 if ([int]$packageCriticalRemaining[$package] -gt 0) {
@@ -958,6 +971,9 @@ function Get-GoTestFailureSummary(
         [void]$summary.AppendLine("FAIL package $($failure.Package)$elapsed")
         if ($packageCriticalHeader.ContainsKey($failure.Package)) {
             [void]$summary.AppendLine($packageCriticalHeader[$failure.Package])
+            foreach ($header in $packageCriticalRecentHeaders[$failure.Package]) {
+                [void]$summary.AppendLine($header)
+            }
         }
         foreach ($line in $packageCriticalOutput[$failure.Package]) {
             [void]$summary.AppendLine($line)
@@ -8751,6 +8767,60 @@ function Invoke-SelfTest {
                 -not $activeTestSummary.Contains('FAIL package example.invalid/active') -or
                 [Text.Encoding]::UTF8.GetByteCount($activeTestSummary) -gt $limit) {
                 throw 'structured Go test summary lost an active test runtime header'
+            }
+        }
+
+        $laterHeaderJson = @(
+            [pscustomobject]@{
+                Action = 'output'
+                Package = 'example.invalid/later'
+                Test = 'TestActiveAtTermination'
+                Output = "panic: earlier diagnostic line`n"
+            }
+        )
+        $laterHeaderJson += @(1..96 | ForEach-Object {
+            [pscustomobject]@{
+                Action = 'output'
+                Package = 'example.invalid/later'
+                Test = 'TestActiveAtTermination'
+                Output = "earlier frame $_ $('x' * 128)`n"
+            }
+        })
+        $laterHeaderJson += [pscustomobject]@{
+            Action = 'output'
+            Package = 'example.invalid/later'
+            Test = 'TestActiveAtTermination'
+            Output = "fatal error: later package runtime failure`n"
+        }
+        $laterHeaderJson += [pscustomobject]@{
+            Action = 'output'
+            Package = 'example.invalid/later'
+            Test = 'TestActiveAtTermination'
+            Output = "panic: later diagnostic line`n"
+        }
+        $laterHeaderJson += @(1..96 | ForEach-Object {
+            [pscustomobject]@{
+                Action = 'output'
+                Package = 'example.invalid/later'
+                Test = 'TestActiveAtTermination'
+                Output = "later frame $_ $('x' * 128)`n"
+            }
+        })
+        $laterHeaderJson += [pscustomobject]@{
+            Action = 'fail'
+            Package = 'example.invalid/later'
+        }
+        $laterHeaderEvents = ($laterHeaderJson | ForEach-Object {
+            $_ | ConvertTo-Json -Compress
+        }) -join [Environment]::NewLine
+        foreach ($limit in @(4096, 262144)) {
+            $laterHeaderSummary = Get-GoTestFailureSummary $laterHeaderEvents $limit
+            if (-not $laterHeaderSummary.Contains('panic: earlier diagnostic line') -or
+                -not $laterHeaderSummary.Contains('fatal error: later package runtime failure') -or
+                -not $laterHeaderSummary.Contains('panic: later diagnostic line') -or
+                -not $laterHeaderSummary.Contains('FAIL package example.invalid/later') -or
+                [Text.Encoding]::UTF8.GetByteCount($laterHeaderSummary) -gt $limit) {
+                throw 'structured Go test summary lost a later package runtime header'
             }
         }
 
