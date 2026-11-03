@@ -921,7 +921,7 @@ function Get-GoTestFailureSummary(
             if ($packageOutput.ContainsKey($package)) {
                 Add-WindowsNativeDiagnosticTail -Queue $packageOutput[$package] `
                     -Text $output -MaxLines 160 -MaxBytes $tailBytesPerFailure
-                if (-not $test -and $output -match '(?im)^(panic:|fatal error:|runtime: out of memory|.*test timed out after|exit status )') {
+                if ($output -match '(?im)^(panic:|fatal error:|runtime: out of memory|.*test timed out after|exit status )') {
                     if (-not $packageCriticalHeader.ContainsKey($package)) {
                         $packageCriticalHeader[$package] = Limit-WindowsNativeText $output 512
                     }
@@ -8721,6 +8721,37 @@ function Invoke-SelfTest {
             $runtimeSummary.Contains('panic: handled in a passing test') -or
             [Text.Encoding]::UTF8.GetByteCount($runtimeSummary) -gt 4096) {
             throw 'structured Go test summary lost the runtime header or retained a passing test'
+        }
+
+        $activeTestJson = @(
+            [pscustomobject]@{
+                Action = 'output'
+                Package = 'example.invalid/active'
+                Test = 'TestActiveAtTermination'
+                Output = "panic: fixture process stopped during an active test`n"
+            }
+        )
+        $activeTestJson += @(1..96 | ForEach-Object {
+            [pscustomobject]@{
+                Action = 'output'
+                Package = 'example.invalid/active'
+                Output = "stack frame $_ $('x' * 128)`n"
+            }
+        })
+        $activeTestJson += [pscustomobject]@{
+            Action = 'fail'
+            Package = 'example.invalid/active'
+        }
+        $activeTestEvents = ($activeTestJson | ForEach-Object {
+            $_ | ConvertTo-Json -Compress
+        }) -join [Environment]::NewLine
+        foreach ($limit in @(4096, 262144)) {
+            $activeTestSummary = Get-GoTestFailureSummary $activeTestEvents $limit
+            if (-not $activeTestSummary.Contains('panic: fixture process stopped during an active test') -or
+                -not $activeTestSummary.Contains('FAIL package example.invalid/active') -or
+                [Text.Encoding]::UTF8.GetByteCount($activeTestSummary) -gt $limit) {
+                throw 'structured Go test summary lost an active test runtime header'
+            }
         }
 
         $passingPackageJson = @(
