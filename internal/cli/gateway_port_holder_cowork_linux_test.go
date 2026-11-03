@@ -4,6 +4,7 @@
 package cli
 
 import (
+	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -42,8 +43,11 @@ func TestTransientGatewayStatusUsesSameHomeAndAccount(t *testing.T) {
 		_ = child.Wait()
 	})
 
-	previousHolder, previousState := gatewayPortHolder, gatewayManagedState
-	t.Cleanup(func() { gatewayPortHolder, gatewayManagedState = previousHolder, previousState })
+	previousHolder, previousState, previousExecutable := gatewayPortHolder, gatewayManagedState, gatewayExecutable
+	t.Cleanup(func() {
+		gatewayPortHolder, gatewayManagedState, gatewayExecutable = previousHolder, previousState, previousExecutable
+	})
+	gatewayExecutable = func() (string, error) { return childPath, nil }
 	gatewayPortHolder = func(string, int) (daemon.PortHolder, error) {
 		return daemon.PortHolder{PID: child.Process.Pid, UID: os.Getuid()}, nil
 	}
@@ -51,6 +55,43 @@ func TestTransientGatewayStatusUsesSameHomeAndAccount(t *testing.T) {
 	cfg := config.DefaultConfig()
 	if problem := foreignGatewayListener(cfg); problem != "" {
 		t.Fatalf("same-home transient gateway reported foreign: %s", problem)
+	}
+
+	otherPath := filepath.Join(t.TempDir(), "defenseclaw-gateway")
+	source, err := os.Open(executable)
+	if err != nil {
+		t.Fatal(err)
+	}
+	destination, err := os.OpenFile(otherPath, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0700)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := io.Copy(destination, source); err != nil {
+		t.Fatal(err)
+	}
+	if err := source.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if err := destination.Close(); err != nil {
+		t.Fatal(err)
+	}
+	other := exec.Command(otherPath, "-test.run=^TestCoworkTransientGatewayHelperProcess$")
+	other.Env = child.Env
+	if err := other.Start(); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		_ = other.Process.Kill()
+		_ = other.Wait()
+	})
+	gatewayPortHolder = func(string, int) (daemon.PortHolder, error) {
+		return daemon.PortHolder{PID: other.Process.Pid, UID: os.Getuid()}, nil
+	}
+	if problem := foreignGatewayListener(cfg); !strings.Contains(problem, "not by this account's gateway") {
+		t.Fatalf("different executable accepted: %q", problem)
+	}
+	gatewayPortHolder = func(string, int) (daemon.PortHolder, error) {
+		return daemon.PortHolder{PID: child.Process.Pid, UID: os.Getuid()}, nil
 	}
 
 	t.Setenv("DEFENSECLAW_HOME", t.TempDir())

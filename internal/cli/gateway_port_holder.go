@@ -25,6 +25,7 @@ var (
 	gatewayPortAnswers        = gatewayPortAcceptsConnections
 	gatewayManagedState       = func() (bool, int) { return daemon.New(config.DefaultDataPath()).IsRunning() }
 	gatewayRunsReplacedBinary = func() bool { return daemon.New(config.DefaultDataPath()).RunsReplacedExecutable() }
+	gatewayExecutable         = os.Executable
 )
 
 // foreignGatewayListener explains a listener on the configured API port that
@@ -93,8 +94,16 @@ func sameHomeGatewayProcess(pid int, home string) bool {
 	if runtime.GOOS != "linux" || pid <= 0 || !filepath.IsAbs(home) {
 		return false
 	}
-	executable, err := os.Readlink("/proc/" + strconv.Itoa(pid) + "/exe")
-	if err != nil || filepath.Base(strings.TrimSuffix(executable, " (deleted)")) != "defenseclaw-gateway" {
+	executable, err := gatewayExecutable()
+	if err != nil || filepath.Base(executable) != "defenseclaw-gateway" {
+		return false
+	}
+	expected, err := os.Stat(executable)
+	if err != nil {
+		return false
+	}
+	actual, err := os.Stat("/proc/" + strconv.Itoa(pid) + "/exe")
+	if err != nil || !os.SameFile(expected, actual) {
 		return false
 	}
 	environment, err := os.ReadFile("/proc/" + strconv.Itoa(pid) + "/environ")
