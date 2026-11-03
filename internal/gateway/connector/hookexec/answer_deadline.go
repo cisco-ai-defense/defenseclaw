@@ -315,8 +315,12 @@ func gatewayNoAnswer(ctx context.Context) bool {
 
 // noAnswerFailMode keeps a call with no gateway decision closed. A proven
 // outage has its own answer path; socket contact alone does not prove one.
-// Secure Client retains its established fail-mode behavior.
+// Secure Client retains its established fail-mode behavior unless the local
+// answer budget was spent or the gateway already returned an error status.
 func noAnswerFailMode(opts Options, failMode string) string {
+	if opts.answerSpentLocally || opts.answeredErrorStatus != 0 || opts.ManagedEnterprise {
+		return "closed"
+	}
 	if opts.SecureClient {
 		return failMode
 	}
