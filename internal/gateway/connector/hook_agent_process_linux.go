@@ -49,12 +49,35 @@ func accountAgentProcessMayRun(dataDir, agent string) bool {
 			}
 			return true
 		}
-		// Any argument that names the agent counts (its launcher, a
-		// python -m module, a path in its install): a wider match only
-		// keeps a tombstone longer.
-		if bytes.Contains(bytes.ToLower(cmdline), []byte(agent)) {
+		// The setup-remove command also names the agent. It is not an
+		// agent process; all other uncertain matches keep the tombstone.
+		if bytes.Contains(bytes.ToLower(cmdline), []byte(agent)) &&
+			!isConnectorRemovalProcess(cmdline, agent) {
 			return true
 		}
 	}
 	return false
+}
+
+func isConnectorRemovalProcess(cmdline []byte, agent string) bool {
+	args := bytes.Split(bytes.TrimRight(cmdline, "\x00"), []byte{0})
+	if len(args) < 4 {
+		return false
+	}
+	program := 0
+	image := strings.ToLower(filepath.Base(string(args[0])))
+	if image == "python" || strings.HasPrefix(image, "python3") ||
+		image == "sh" || image == "bash" {
+		if len(args) > 4 && string(args[1]) == "-m" && string(args[2]) == "defenseclaw" {
+			program = 2
+		} else if len(args) > 4 && filepath.Base(string(args[1])) == "defenseclaw" {
+			program = 1
+		} else {
+			return false
+		}
+	} else if image != "defenseclaw" {
+		return false
+	}
+	return len(args) > program+3 && string(args[program+1]) == "setup" &&
+		string(args[program+2]) == "remove" && strings.EqualFold(string(args[program+3]), agent)
 }
