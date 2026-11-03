@@ -5,7 +5,6 @@ package hookexec
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"net/http"
@@ -161,7 +160,7 @@ func TestPerUserRestartUnansweredNeedsAnOutageAndNoAnswer(t *testing.T) {
 	}{
 		{"refused, then the budget ended at the next try", opts, perUserGatewayWait{sawOutage: true, err: fmt.Errorf("post: %w", context.DeadlineExceeded)}, true},
 		{"refused, then no connection in the budget", opts, perUserGatewayWait{sawOutage: true, err: errGatewayNotConnected}, true},
-		{"refused, then the new gateway took it and stalled", opts, perUserGatewayWait{sawOutage: true, err: fmt.Errorf("%w: x", errGatewayTookCallNoAnswer)}, true},
+		{"refused, then the new gateway took it and stalled", opts, perUserGatewayWait{sawOutage: true, err: fmt.Errorf("%w: x", errGatewayTookCallNoAnswer)}, false},
 		{"no refusal first (hung gateway)", opts, perUserGatewayWait{err: context.DeadlineExceeded}, false},
 		{"refused, then a listener not proven ours", opts, perUserGatewayWait{sawOutage: true, err: errPerUserPeerCheckUnfinished}, false},
 		{"refused, then a listener not proven ours at the deadline", opts, perUserGatewayWait{sawOutage: true, err: fmt.Errorf("%w: %w", errPerUserPeerUnverified, context.DeadlineExceeded)}, false},
@@ -249,11 +248,9 @@ func stalledAfterConnect(answers ...string) *stubRT {
 
 // TestPerUserRunRefusedThenStalledFollowsTheOutageMode drives the native
 // per-user hook (Run, doRequest) with a fake transport (review M21, M26): the
-// first try is refused (the gateway is restarting), the next is taken and
-// never answered until the call's own time ends. That is the restart
-// outlasting the budget: the open tier runs the call with the restart notice
-// and a fail_open row, strict blocks it. A stalled first try with no refusal
-// is the hung gateway and blocks in the open tier.
+// first try is refused, then the next is taken and never answered until the
+// call's own time ends. Both tiers block a pending gateway decision; a
+// stalled first try without a refusal blocks too.
 func TestPerUserRunRefusedThenStalledFollowsTheOutageMode(t *testing.T) {
 	fastRestartRetries(t)
 	for _, tc := range []struct {
@@ -264,8 +261,8 @@ func TestPerUserRunRefusedThenStalledFollowsTheOutageMode(t *testing.T) {
 		want, row  string
 		outcome    string
 	}{
-		{"refused then stalled, open tier", []string{"refused", "stall"}, "open", false, "restarting or not running", perUserGatewayRestartingReason, "fail_open"},
-		{"refused then stalled, strict tier", []string{"refused", "stall"}, "closed", true, "restarting or not running", perUserGatewayRestartingReason, "fail_closed"},
+		{"refused then stalled, open tier", []string{"refused", "stall"}, "open", true, "did not answer", perUserGatewayNoAnswerReason, "fail_closed"},
+		{"refused then stalled, strict tier", []string{"refused", "stall"}, "closed", true, "did not answer", perUserGatewayNoAnswerReason, "fail_closed"},
 		{"stalled with no refusal, open tier", []string{"stall"}, "open", true, "did not answer", perUserGatewayNoAnswerReason, "fail_closed"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -288,12 +285,6 @@ func TestPerUserRunRefusedThenStalledFollowsTheOutageMode(t *testing.T) {
 			}
 			if !strings.Contains(result.stdout+result.stderr, tc.want) {
 				t.Fatalf("stdout=%q stderr=%q, want %q named", result.stdout, result.stderr, tc.want)
-			}
-			if !tc.blocks {
-				var notice map[string]string
-				if json.Unmarshal([]byte(strings.TrimSpace(result.stdout)), &notice) != nil || !strings.Contains(notice["systemMessage"], "is not checking this session") {
-					t.Fatalf("stdout=%q, want the outage notice", result.stdout)
-				}
 			}
 			rows := claimedStopRows(t, home)
 			if len(rows) != 1 || rows[0].Reason != tc.row || rows[0].Outcome != tc.outcome {

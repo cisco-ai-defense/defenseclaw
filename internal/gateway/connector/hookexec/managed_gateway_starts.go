@@ -330,16 +330,17 @@ func awaitPerUserGateway(
 }
 
 // perUserRestartUnanswered reports a per-user call whose restart wait met an
-// outage (wait.sawOutage) and then ended with no answer and no status: the
-// call's budget ran out while it was sent again to the gateway that comes up,
-// or between two tries. That is the restart outlasting the budget, as a last
-// try the gateway refused is, so the outage mode decides it (rel-1-0-6
-// GAP-0295). A listener whose owner was not proven, an invalid request and
-// an answer of any kind are not.
+// outage and then ended before another connection took the call. A retry
+// accepted by the gateway without a final decision is pending, not an
+// outage. A listener whose owner was not proven and an invalid request are
+// not outages either.
 func perUserRestartUnanswered(ctx context.Context, opts Options, wait perUserGatewayWait) bool {
 	err := wait.err
-	if !wait.sawOutage || err == nil || opts.answeredErrorStatus != 0 || errors.Is(err, errPerUserPeerUnverified) ||
+	if !wait.sawOutage || err == nil || opts.answerWatch.hasPendingDecision() || opts.answeredErrorStatus != 0 || errors.Is(err, errPerUserPeerUnverified) ||
 		errors.Is(err, errInvalidHookRequest) || errors.Is(err, errPerUserAnswerIncomplete) {
+		return false
+	}
+	if !opts.SecureClient && errors.Is(err, errGatewayTookCallNoAnswer) {
 		return false
 	}
 	return gatewayNoAnswer(ctx) || errors.Is(err, context.DeadlineExceeded) || errors.Is(err, errGatewayNotConnected) ||
@@ -357,13 +358,20 @@ var errGatewayNotConnected = errors.New("no connection to the gateway within the
 // then. A try that is connected keeps ctx until release (call it once the
 // response is read): a gateway that accepted the call evaluates it within
 // the hook's whole budget.
-func connectBy(ctx context.Context, deadline time.Time) (tryCtx context.Context, release func()) {
+func connectBy(ctx context.Context, deadline time.Time, onConnect func()) (tryCtx context.Context, release func()) {
 	if deadline.IsZero() {
 		return ctx, func() {}
 	}
 	connected := make(chan struct{})
 	var once sync.Once
-	trace := &httptrace.ClientTrace{GotConn: func(httptrace.GotConnInfo) { once.Do(func() { close(connected) }) }}
+	trace := &httptrace.ClientTrace{GotConn: func(httptrace.GotConnInfo) {
+		once.Do(func() {
+			close(connected)
+			if onConnect != nil {
+				onConnect()
+			}
+		})
+	}}
 	ctx, peerCheck := withPerUserPeerCheck(ctx)
 	tryCtx, cancel := context.WithCancelCause(httptrace.WithClientTrace(ctx, trace))
 	go func() {

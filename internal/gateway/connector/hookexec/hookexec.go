@@ -954,13 +954,20 @@ func doRequest(ctx context.Context, opts Options, sp spec, failMode string, payl
 	// A per-user hook's first try always gets a moment to connect
 	// (firstTryConnectDeadline); the managed first try is send below.
 	firstTry := !opts.ManagedEnterprise
+	retryingAfterOutage := false
 	sendConnectedBy := func() (*http.Response, error) {
 		connectDeadline := restartDeadline
 		if firstTry {
 			firstTry = false
 			connectDeadline = firstTryConnectDeadline(restartDeadline, time.Now())
 		}
-		tryCtx, release := connectBy(ctx, connectDeadline)
+		retry := retryingAfterOutage
+		onConnect := func() {
+			if retry {
+				opts.answerWatch.noDecisionPending()
+			}
+		}
+		tryCtx, release := connectBy(ctx, connectDeadline, onConnect)
 		releases = append(releases, release)
 		resp, err := sendHookRequest(tryCtx, opts, sp, payload, token)
 		return resp, notConnectedError(tryCtx, err)
@@ -979,6 +986,7 @@ func doRequest(ctx context.Context, opts Options, sp spec, failMode string, payl
 	}
 	resp, err := send()
 	if !opts.ManagedEnterprise {
+		retryingAfterOutage = perUserOutageError(opts, err)
 		// A first try the gateway refused or dropped met an outage: from now
 		// on the answer at the deadline is the outage's, the one this call
 		// gives below when the restart outlasts its budget (rel-1-0-6

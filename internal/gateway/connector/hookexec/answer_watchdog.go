@@ -76,12 +76,16 @@ type answerWatchdog struct {
 	stdout, stderr io.Writer
 	out, err       bytes.Buffer
 
-	fallbackOut, fallbackErr []byte
-	fallbackCode             int
-	logFailure               func()
-	visibleOutage            func() ([]byte, []byte, int)
-	exit                     func(int)
-	deliveryReceipt          func(bool, bool)
+	fallbackOut, fallbackErr     []byte
+	fallbackCode                 int
+	logFailure                   func()
+	noDecisionOut, noDecisionErr []byte
+	noDecisionCode               int
+	noDecisionLog                func()
+	secureClient                 bool
+	visibleOutage                func() ([]byte, []byte, int)
+	exit                         func(int)
+	deliveryReceipt              func(bool, bool)
 
 	// installCheck is the install look of a call whose fallback is not
 	// closed: the .install.lock of a per-user call's data directory
@@ -94,8 +98,9 @@ type answerWatchdog struct {
 	installCode            int
 	installLogFailure      func()
 
-	ceiling time.Time
-	waiter  *answerDeadlineWaiter
+	ceiling         time.Time
+	waiter          *answerDeadlineWaiter
+	decisionPending bool
 	// failureLog is the call's hook-failure log, opened
 	// answerWatchdogLogPrepareLead before the deadline (watch).
 	failureLog     *preparedFailureLog
@@ -173,12 +178,14 @@ func startAnswerWatchdog(opts *Options, sp spec, failMode string, deadline, ceil
 // deadline: it renders the watchdog's answer and points opts at the held
 // output.
 func prepareAnswerWatchdog(opts *Options, sp spec, failMode string, ceiling time.Time) *answerWatchdog {
-	w := &answerWatchdog{stdout: opts.Stdout, stderr: opts.Stderr, exit: opts.Exit, ceiling: ceiling, waiter: newAnswerDeadlineWaiter(),
+	w := &answerWatchdog{stdout: opts.Stdout, stderr: opts.Stderr, exit: opts.Exit, ceiling: ceiling, waiter: newAnswerDeadlineWaiter(), secureClient: opts.SecureClient,
 		failureLog: newPreparedFailureLog(), prepareLead: answerWatchdogLogPrepareLead}
 	w.cacheFailureLogHome(opts)
 	opts.failureLog = w.failureLog
 	w.failureLogHome = failureLogHomeOf(*opts)
 	w.fallbackOut, w.fallbackErr, w.fallbackCode, w.logFailure = renderNoAnswer(*opts, sp, failMode)
+	w.noDecisionOut, w.noDecisionErr, w.noDecisionCode, w.noDecisionLog =
+		w.fallbackOut, w.fallbackErr, w.fallbackCode, w.logFailure
 	w.installCheck, w.installOut, w.installErr, w.installCode, w.installLogFailure = renderInstallAnswer(*opts, sp, failMode)
 	opts.Stdout, opts.Stderr = &w.out, &w.err
 	opts.answerWatch = w
@@ -289,6 +296,7 @@ func (w *answerWatchdog) adopt(opts *Options, sp spec, failMode string) {
 		return
 	}
 	w.fallbackOut, w.fallbackErr, w.fallbackCode, w.logFailure = stdout, stderr, code, logFailure
+	w.noDecisionOut, w.noDecisionErr, w.noDecisionCode, w.noDecisionLog = stdout, stderr, code, logFailure
 	w.visibleOutage = nil
 	w.installCheck, w.installOut, w.installErr, w.installCode, w.installLogFailure =
 		installCheck, installOut, installErr, installCode, installLogFailure
@@ -651,13 +659,44 @@ func (w *answerWatchdog) answered() {
 	}
 }
 
-// progressed moves the watchdog's deadline to the progress ceiling: the
-// gateway reported that the decision waits on a remote scanner. Safe on a
-// nil watchdog.
+// noDecisionPending restores the closed answer when a retry has connected
+// or the gateway reported progress but has made no decision. A prior
+// refusal does not turn that pending decision into an outage. Secure Client
+// keeps its established answer mode.
+func (w *answerWatchdog) noDecisionPending() {
+	if w == nil {
+		return
+	}
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	if w.secureClient {
+		return
+	}
+	w.decisionPending = true
+	if !w.fired && !w.claimedAnswer && !w.failureClosed {
+		w.closedKnown = true
+		w.fallbackOut, w.fallbackErr, w.fallbackCode, w.logFailure =
+			w.noDecisionOut, w.noDecisionErr, w.noDecisionCode, w.noDecisionLog
+		w.visibleOutage = nil
+	}
+}
+
+// progressed moves the watchdog's deadline to the progress ceiling. Safe on
+// a nil watchdog.
 func (w *answerWatchdog) progressed() {
 	if w != nil {
+		w.noDecisionPending()
 		w.waiter.extendTo(w.ceiling)
 	}
+}
+
+func (w *answerWatchdog) hasPendingDecision() bool {
+	if w == nil {
+		return false
+	}
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	return w.decisionPending
 }
 
 // Finish ends a call that the hook command answers itself (or with nothing)

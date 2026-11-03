@@ -274,8 +274,8 @@ func awaitAnswerBy(ctx context.Context, deadline, ceiling time.Time, watch *answ
 	trace := &httptrace.ClientTrace{Got1xxResponse: func(code int, _ textproto.MIMEHeader) error {
 		if code == HookProgressStatus {
 			progressOnce.Do(func() {
-				close(progressed)
 				watch.progressed()
+				close(progressed)
 			})
 		}
 		return nil

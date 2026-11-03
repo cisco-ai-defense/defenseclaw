@@ -4,12 +4,68 @@
 package hookexec
 
 import (
+	"context"
+	"io"
 	"net/http"
+	"net/http/httptrace"
+	"net/textproto"
 	"strings"
 	"sync/atomic"
+	"syscall"
 	"testing"
 	"time"
 )
+
+func TestGAP0518RefusedThenProgressNeedsFinalDecision(t *testing.T) {
+	fastRestartRetries(t)
+	shortAnswerBudget(t, 200*time.Millisecond)
+	shortProgressCeiling(t, 700*time.Millisecond)
+	for _, row := range []struct {
+		name, command string
+		progress      bool
+		final         bool
+		blocked       bool
+	}{
+		{"pending decision", "cp a.txt .ssh/authorized_keys", true, false, true},
+		{"pending append", "echo marker >> .ssh/authorized_keys", true, false, true},
+		{"pending without interim status", "cp a.txt .ssh/authorized_keys", false, false, true},
+		{"completed benign call", "echo marker > project/notes.txt", true, true, false},
+	} {
+		t.Run(row.name, func(t *testing.T) {
+			ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+			defer cancel()
+			var sawProgress bool
+			rt := &stubRT{onRequest: func(rt *stubRT, req *http.Request) (*http.Response, error) {
+				if rt.requests == 1 {
+					return nil, syscall.ECONNREFUSED
+				}
+				if trace := httptrace.ContextClientTrace(req.Context()); trace != nil {
+					if trace.GotConn != nil {
+						trace.GotConn(httptrace.GotConnInfo{})
+					}
+					if row.progress && trace.Got1xxResponse != nil {
+						_ = trace.Got1xxResponse(HookProgressStatus, textproto.MIMEHeader{})
+						sawProgress = true
+					}
+				}
+				if row.final {
+					return &http.Response{StatusCode: http.StatusOK, Body: io.NopCloser(strings.NewReader(`{"action":"allow"}`)), Header: make(http.Header)}, nil
+				}
+				<-req.Context().Done()
+				return nil, req.Context().Err()
+			}}
+			result := runWithContext(t, ctx, "claudecode", rt, func(opts *Options) {
+				opts.Stdin = strings.NewReader(`{"hook_event_name":"PreToolUse","tool_name":"Bash","tool_input":{"command":` + mustJSONString(row.command) + `}}`)
+				opts.FailMode = "open"
+				opts.OutageFailModeNow = func() string { return "open" }
+				opts.StartedAt = time.Now()
+			})
+			if sawProgress != row.progress || rt.requests != 2 || claudeBlocked(result) != row.blocked {
+				t.Fatalf("progress=%v requests=%d blocked=%v code=%d stdout=%q stderr=%q", sawProgress, rt.requests, claudeBlocked(result), result.code, result.stdout, result.stderr)
+			}
+		})
+	}
+}
 
 func TestRV518ProgressStatusDoesNotFailOpen(t *testing.T) {
 	shortAnswerBudget(t, 200*time.Millisecond)
