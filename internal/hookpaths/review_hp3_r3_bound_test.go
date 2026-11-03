@@ -96,6 +96,14 @@ func TestHP3R3Gen200AllocationCeiling(t *testing.T) {
 	}
 }
 
+// hp3r3ConcreteWrite is the concrete-write proof the decision runs for this
+// home: a POSIX shell with a native Windows home (Git Bash) on a Windows
+// host, the POSIX home elsewhere. Both read the redirect with the bounded
+// kept tracker; the POSIX-home entry declines a Windows home by design.
+func hp3r3ConcreteWrite(command, cwd, home string) bool {
+	return actionConcreteProtectedWriteOn(command, cwd, home, actionWindowsHome(home))
+}
+
 // TestHP3R3BoundKeepsProtectedCandidate: a candidate that reaches the keys
 // file must not be cut by the bound (fail closed at the bound).
 func TestHP3R3BoundKeepsProtectedCandidate(t *testing.T) {
@@ -107,7 +115,7 @@ func TestHP3R3BoundKeepsProtectedCandidate(t *testing.T) {
 		{"cap-else", `f=a.txt; if [ -n "$X" ]; then f=b.txt; else f=keylink; fi; ` + hp3r3Conds(9) + `echo m >> "$f"`},
 		{"cap-after", `f=a.txt; ` + hp3r3Conds(9) + `if [ -n "$X" ]; then f=keylink; fi; echo m >> "$f"`},
 	} {
-		got := actionConcreteProtectedWrite(row.command, project, home)
+		got := hp3r3ConcreteWrite(row.command, project, home)
 		t.Logf("HP3R3BOUND %s concrete=%v", row.name, got)
 		if !got {
 			t.Errorf("%s: the concrete-write proof lost the keys candidate", row.name)
@@ -133,7 +141,7 @@ func TestHP3R4StepCapKeepsProtectedCandidate(t *testing.T) {
 	if steps <= actionMaxValueSteps || !actionKeptSaturated(kept) {
 		t.Fatalf("step cap not reached: steps=%d saturated=%v", steps, actionKeptSaturated(kept))
 	}
-	if !actionConcreteProtectedWrite(command, project, home) {
+	if !hp3r3ConcreteWrite(command, project, home) {
 		t.Fatal("step-cap assignment lost the protected candidate")
 	}
 }
