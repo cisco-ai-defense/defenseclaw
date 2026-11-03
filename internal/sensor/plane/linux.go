@@ -83,15 +83,16 @@ type linuxSource struct {
 	closed   bool
 	wg       sync.WaitGroup
 
-	// credentialRoots are the directories fanotify marks. Marking a whole
-	// mount would deliver every open on the system, which on a build host is
-	// millions of events a minute for no gain.
-	credentialRoots []credentialRoot
+	// Only these narrow directories are marked; wildcard homes are expanded
+	// again while the source runs so a newly created session can be watched.
+	homeDirs    []string
+	markedRoots map[string]struct{}
+	markRoot    func(int, credentialRoot) bool
 }
 
 // NewSource returns the Linux Plane C source.
 func NewSource(homeDirs []string) Source {
-	return &linuxSource{buffer: NewBuffer(), credentialRoots: credentialRoots(homeDirs)}
+	return &linuxSource{buffer: NewBuffer(), homeDirs: append([]string(nil), homeDirs...)}
 }
 
 // credentialRoot is one location fanotify marks. A root below a user's home
@@ -114,8 +115,42 @@ var homeCredentialSuffixes = []string{
 // filter, so every additional root is delivered events the classifier then has
 // to discard.
 func credentialRoots(homeDirs []string) []credentialRoot {
-	roots := make([]credentialRoot, 0, len(homeDirs)*len(homeCredentialSuffixes)+2)
-	for _, home := range homeDirs {
+	homes := make([]string, 0, len(homeDirs))
+	seen := make(map[string]struct{}, len(homeDirs))
+	for _, entry := range homeDirs {
+		entry = strings.TrimSpace(entry)
+		if entry == "" {
+			continue
+		}
+		if strings.ContainsAny(entry, "*?[]") {
+			if !dynamicHomePattern(entry) {
+				continue
+			}
+			matches, err := filepath.Glob(entry)
+			if err != nil {
+				continue
+			}
+			for _, match := range matches {
+				if len(homes) >= 4096 {
+					break
+				}
+				if info, err := os.Lstat(match); err == nil && info.IsDir() {
+					if _, exists := seen[match]; !exists {
+						homes = append(homes, match)
+						seen[match] = struct{}{}
+					}
+				}
+			}
+			continue
+		}
+		entry = filepath.Clean(entry)
+		if _, exists := seen[entry]; !exists {
+			homes = append(homes, entry)
+			seen[entry] = struct{}{}
+		}
+	}
+	roots := make([]credentialRoot, 0, len(homes)*len(homeCredentialSuffixes)+2)
+	for _, home := range homes {
 		home = strings.TrimSpace(home)
 		if home == "" {
 			continue
@@ -126,6 +161,12 @@ func credentialRoots(homeDirs []string) []credentialRoot {
 		}
 	}
 	return append(roots, credentialRoot{path: "/etc/shadow"}, credentialRoot{path: "/etc/sudoers.d"})
+}
+
+func dynamicHomePattern(home string) bool {
+	return strings.HasSuffix(home, "/*") && filepath.IsAbs(home) &&
+		filepath.Clean(strings.TrimSuffix(home, "/*")) != "/" &&
+		!strings.ContainsAny(strings.TrimSuffix(home, "/*"), "*?[]")
 }
 
 // openHomeCredentialRoot opens a credential directory below a user's home so
@@ -217,6 +258,13 @@ func (s *linuxSource) Start(ctx context.Context) error {
 	if fanErr == nil {
 		s.wg.Add(1)
 		go func() { defer s.wg.Done(); s.readFanotify(ctx) }()
+		for _, home := range s.homeDirs {
+			if dynamicHomePattern(home) {
+				s.wg.Add(1)
+				go func() { defer s.wg.Done(); s.refreshHomeRoots(ctx) }()
+				break
+			}
+		}
 	}
 	go func() {
 		<-ctx.Done()
@@ -441,40 +489,76 @@ func (s *linuxSource) startFanotify() error {
 	if err != nil {
 		return fmt.Errorf("fanotify_init: %w", err)
 	}
-	// FAN_OPEN and the modify/close-write pair cover the read and write
-	// halves. FAN_EVENT_ON_CHILD extends a directory mark to its entries,
-	// which is what makes marking ~/.aws catch ~/.aws/credentials.
-	const mask = unix.FAN_OPEN | unix.FAN_MODIFY | unix.FAN_CLOSE_WRITE | unix.FAN_EVENT_ON_CHILD
-	marked := 0
-	for _, root := range s.credentialRoots {
-		if root.home != "" {
-			// A root in a user's home is marked through a descriptor that
-			// was opened without following links.
-			rootFD, openErr := openHomeCredentialRoot(root.home, root.path)
-			if openErr != nil {
-				continue
-			}
-			markErr := unix.FanotifyMark(fd, unix.FAN_MARK_ADD|unix.FAN_MARK_ONLYDIR, mask, rootFD, "")
-			_ = unix.Close(rootFD)
-			if markErr == nil {
-				marked++
-			}
-			continue
-		}
-		if _, statErr := os.Stat(root.path); statErr != nil {
-			continue
-		}
-		if err := unix.FanotifyMark(fd, unix.FAN_MARK_ADD, mask, unix.AT_FDCWD, root.path); err != nil {
-			continue
-		}
-		marked++
-	}
+	marked := s.markCredentialRoots(fd)
 	if marked == 0 {
 		_ = unix.Close(fd)
 		return fmt.Errorf("no credential root could be marked")
 	}
 	s.fanotifyFD = fd
 	return nil
+}
+
+func (s *linuxSource) markCredentialRoots(fd int) int {
+	if s.markedRoots == nil {
+		s.markedRoots = make(map[string]struct{})
+	}
+	mark := s.markRoot
+	if mark == nil {
+		mark = markLinuxCredentialRoot
+	}
+	marked := 0
+	for _, root := range credentialRoots(s.homeDirs) {
+		if _, exists := s.markedRoots[root.path]; exists {
+			continue
+		}
+		if mark(fd, root) {
+			s.markedRoots[root.path] = struct{}{}
+			marked++
+		}
+	}
+	return marked
+}
+
+func markLinuxCredentialRoot(fd int, root credentialRoot) bool {
+	// FAN_EVENT_ON_CHILD makes a directory mark cover its credential files.
+	const mask = unix.FAN_OPEN | unix.FAN_MODIFY | unix.FAN_CLOSE_WRITE | unix.FAN_EVENT_ON_CHILD
+	if root.home != "" {
+		// A root in a user's home is marked through a descriptor that
+		// was opened without following links.
+		rootFD, openErr := openHomeCredentialRoot(root.home, root.path)
+		if openErr != nil {
+			return false
+		}
+		markErr := unix.FanotifyMark(fd, unix.FAN_MARK_ADD|unix.FAN_MARK_ONLYDIR, mask, rootFD, "")
+		_ = unix.Close(rootFD)
+		return markErr == nil
+	}
+	if _, statErr := os.Stat(root.path); statErr != nil {
+		return false
+	}
+	if err := unix.FanotifyMark(fd, unix.FAN_MARK_ADD, mask, unix.AT_FDCWD, root.path); err != nil {
+		return false
+	}
+	return true
+}
+
+func (s *linuxSource) refreshHomeRoots(ctx context.Context) {
+	ticker := time.NewTicker(time.Second)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			s.mu.Lock()
+			fd, closed := s.fanotifyFD, s.closed
+			s.mu.Unlock()
+			if closed || fd <= 0 {
+				return
+			}
+			s.markCredentialRoots(fd)
+		}
+	}
 }
 
 func (s *linuxSource) readFanotify(ctx context.Context) {

@@ -26,6 +26,8 @@ import (
 	"errors"
 	"fmt"
 	"log"
+	"os"
+	"runtime"
 	"time"
 
 	"github.com/defenseclaw/defenseclaw/internal/config"
@@ -126,7 +128,7 @@ func (s *Sidecar) runAIRuntime(ctx context.Context) error {
 		// host plane would watch the wrong paths without this; in
 		// managed_enterprise the hook-enumerator already populates it from the
 		// eligible-users enumeration that renders targets.yaml.
-		HomeDirs: activeConfig.AIDiscovery.HomeDirs,
+		HomeDirs: aiRuntimeHomeDirs(activeConfig, runtime.GOOS == "linux" && os.Geteuid() == 0 && !acquirer.Brokered()),
 		Owners:   s.aiRuntimeOwnerLookups(activeConfig),
 	})
 	if err != nil {
@@ -237,6 +239,20 @@ func (s *Sidecar) runAIRuntime(ctx context.Context) error {
 			return ctx.Err()
 		}
 	}
+}
+
+// aiRuntimeHomeDirs follows session accounts on a direct, unmanaged root
+// gateway. Managed helpers retain their independently enrolled home scope.
+func aiRuntimeHomeDirs(cfg *config.Config, directRootLinux bool) []string {
+	if cfg == nil {
+		return nil
+	}
+	homes := append([]string(nil), cfg.AIDiscovery.HomeDirs...)
+	if directRootLinux && !managed.IsManagedEnterprise(cfg.DeploymentMode) &&
+		!cfg.StandaloneEnterprise() && !cfg.SecureClientIntegration() {
+		return append(homes, "/home/*")
+	}
+	return homes
 }
 
 // shouldEmitAIRuntimeSnapshot reports whether this snapshot's findings have

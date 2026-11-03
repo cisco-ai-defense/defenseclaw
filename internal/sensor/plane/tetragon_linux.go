@@ -115,7 +115,7 @@ var (
 	}
 	startFileHalf = func(ctx context.Context, homes []string) (nativeHalf, error) {
 		ctx, cancel := context.WithCancel(ctx)
-		half := &linuxSource{buffer: NewBuffer(), credentialRoots: credentialRoots(homes)}
+		half := &linuxSource{buffer: NewBuffer(), homeDirs: homes}
 		if err := half.startFanotify(); err != nil {
 			cancel()
 			return nil, err
