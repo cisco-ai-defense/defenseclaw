@@ -38,14 +38,18 @@ func TestManagedSandboxToolAllowWaitsForItsRelayedReceipt(t *testing.T) {
 				t.Helper()
 				ctx := sandboxauth.WithRequest(t.Context(), from, nil)
 				ctx = withSandboxIngressRoute(ctx, sandboxauth.RouteHook)
-				if _, receipt := sandboxHookReceiptID([]byte(body)); receipt {
+				_, receipt, _ := classifySandboxHookReceiptBody([]byte(body))
+				if receipt {
 					decisionSink = &sandboxRelayDecisionSink{}
 					ctx = context.WithValue(ctx, sandboxRelayStateKey{}, &sandboxRelayState{sink: decisionSink})
 				}
 				request := httptest.NewRequest(http.MethodPost, "/api/v1/"+connectorName+"/hook", strings.NewReader(body)).WithContext(ctx)
 				request.Header.Set("Content-Type", "application/json")
+				if receipt {
+					request.Header.Set(sandboxrelay.HookReceiptHeader, sandboxrelay.HookReceiptHeaderValue)
+				}
 				if connectorName == "codex" {
-					if _, receipt := sandboxHookReceiptID([]byte(body)); !receipt {
+					if _, receipt, _ := classifySandboxHookReceiptBody([]byte(body)); !receipt {
 						request.Header.Set("X-DefenseClaw-Hook-Event", "PreToolUse")
 						request.Header.Set("X-DefenseClaw-Hook-Contract", binding.HookContractID)
 					}
@@ -249,6 +253,37 @@ func TestManagedSandboxToolAllowWaitsForItsRelayedReceipt(t *testing.T) {
 			}
 			if !found {
 				t.Fatal("failed acknowledgement has no recovered audit row")
+			}
+		})
+	}
+}
+
+func TestClaimedSandboxHookReceiptRequiresMatchingBody(t *testing.T) {
+	f := newManagedHookAuditFixtureFor(t, "claudecode", nil)
+	binding := sandboxauth.Binding{ID: "receipt-claim-test", Connector: "claudecode",
+		Routes: []sandboxauth.Route{sandboxauth.RouteHook}}
+	validBody := `{"delivery_receipt":"3f2b8c1e-5d4a-4e6f-9a7b-1c2d3e4f5a6b","result":"ack"}`
+	for _, tc := range []struct {
+		name   string
+		body   string
+		values []string
+	}{
+		{"hook body", `{"hook_event_name":"PreToolUse"}`, []string{"1"}},
+		{"invalid marker", validBody, []string{"invalid"}},
+		{"duplicate marker", validBody, []string{"1", "1"}},
+		{"unmarked malformed", `{"delivery_receipt":null,"result":"ack"}`, nil},
+		{"unmarked mixed hook", `{"delivery_receipt":"3f2b8c1e-5d4a-4e6f-9a7b-1c2d3e4f5a6b","result":"ack","hook_event_name":"PreToolUse"}`, nil},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			ctx := sandboxauth.WithRequest(t.Context(), binding, nil)
+			r := httptest.NewRequest(http.MethodPost, "/api/v1/claudecode/hook", strings.NewReader(tc.body)).WithContext(ctx)
+			for _, value := range tc.values {
+				r.Header.Add(sandboxrelay.HookReceiptHeader, value)
+			}
+			w := httptest.NewRecorder()
+			f.api.handleAgentHook("claudecode").ServeHTTP(w, r)
+			if w.Code != http.StatusBadRequest {
+				t.Fatalf("claimed receipt status %d, want 400: %s", w.Code, w.Body.String())
 			}
 		})
 	}

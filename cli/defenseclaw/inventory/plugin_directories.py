@@ -1446,11 +1446,12 @@ def discover_plugin_directories(
         try:
             plugin_id, manifest = canonical_plugin_id(path)
         except PluginIdentityError as exc:
-            if not str(exc).startswith(
-                ("invalid plugin manifest", "could not read plugin manifest")
-            ):
-                raise
-            plugin_id, manifest = entry, ""
+            if str(exc).startswith(("invalid plugin manifest", "could not read plugin manifest")):
+                plugin_id, manifest = entry, ""
+            else:
+                # An invalid declared ID is not a safe identity. Other
+                # entries in this root can still be listed and resolved.
+                continue
         if not claimed.add(plugin_id, path, root):
             continue
         plugins.append(

@@ -7,6 +7,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
@@ -19,6 +20,7 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/config"
 	"github.com/defenseclaw/defenseclaw/internal/enterprisepolicy"
 	"github.com/defenseclaw/defenseclaw/internal/managed"
+	"github.com/defenseclaw/defenseclaw/internal/sandboxrelay"
 )
 
 func TestHookCallerLimiterBoundsEachCallerSeparately(t *testing.T) {
@@ -570,5 +572,259 @@ func TestCallsWaitingForTheirSessionStartsDoNotHoldBackTheTurnsOtherCalls(t *tes
 	defer limits.mu.Unlock()
 	if budget := limits.callers["1001"]; budget.inFlight != 0 || len(budget.running) != 0 || limits.total != 0 {
 		t.Fatalf("after the turn in-flight = %d, running = %d, total = %d, want 0", budget.inFlight, len(budget.running), limits.total)
+	}
+}
+
+// A relayed hook's delivery receipt confirms an answer the sandbox-hook class
+// already admitted, so it is counted in a class of its own: an account's
+// tool calls spend the hook budget once each, and a run of calls never
+// refuses (or queues behind evaluations) the receipt of an answer already
+// given (rel-1-0-6 GAP-0490). The handler reads the body as sent.
+func TestSandboxHookReceiptsHaveTheirOwnBudget(t *testing.T) {
+	prev := sandboxBudgetLimits[sandboxBudgetHook]
+	sandboxBudgetLimits[sandboxBudgetHook] = sandboxBudgetLimit{Rate: 1, Burst: 2, InFlight: 8}
+	t.Cleanup(func() { sandboxBudgetLimits[sandboxBudgetHook] = prev })
+	api := &APIServer{}
+	path := sandboxrelay.PathHookPrefix + "claudecode"
+	post := func(body string, receipt ...bool) (*httptest.ResponseRecorder, *http.Request, func()) {
+		w := httptest.NewRecorder()
+		r := httptest.NewRequest(http.MethodPost, path, strings.NewReader(body))
+		if len(receipt) != 0 && receipt[0] {
+			r.Header.Set(sandboxrelay.HookReceiptHeader, sandboxrelay.HookReceiptHeaderValue)
+		}
+		r, release := api.admitHookCaller(w, r, "1001", path)
+		return w, r, release
+	}
+	event := `{"hook_event_name":"PreToolUse","tool_name":"Bash"}`
+	receipt := `{"delivery_receipt":"3f2b8c1e-5d4a-4e6f-9a7b-1c2d3e4f5a6b","result":"ack"}`
+	for i := 0; i < 2; i++ {
+		if w, r, release := post(event); release == nil {
+			t.Fatalf("hook %d refused early: %d", i, w.Code)
+		} else {
+			if err := chargeSandboxHookBudget(r.Context(), false); err != nil {
+				t.Fatalf("hook %d refused after classification: %v", i, err)
+			}
+			release()
+		}
+	}
+	w, r, release := post(receipt, true)
+	if release == nil {
+		t.Fatalf("the receipt of an admitted call was refused: %d %s", w.Code, w.Body.String())
+	}
+	got, err := io.ReadAll(r.Body)
+	release()
+	if err != nil || string(got) != receipt {
+		t.Fatalf("the handler read %q (%v), want the receipt as sent", got, err)
+	}
+	if _, r, release := post(event); release != nil {
+		if err := chargeSandboxHookBudget(r.Context(), false); err == nil {
+			t.Fatal("the receipt refilled the hook budget")
+		}
+		release()
+	}
+	// The unmarked form used by older images is also receipt-bounded.
+	api = &APIServer{}
+	w, r, release = post(receipt)
+	if release == nil || chargeSandboxHookBudget(r.Context(), true) != nil {
+		t.Fatalf("unmarked receipt refused before its own budget: %d", w.Code)
+	}
+	release()
+	w, r, release = post(event)
+	if release == nil || chargeSandboxHookBudget(r.Context(), false) != nil {
+		t.Fatalf("ordinary hook after unmarked receipt was refused: %d", w.Code)
+	}
+	release()
+}
+
+// The hook socket's rate and in-flight limits apply before a caller can stall
+// the body of either an ordinary hook or a claimed receipt.
+func TestSandboxHookCallerStalledBodiesAreAdmittedBeforeRead(t *testing.T) {
+	for _, claim := range []bool{false, true} {
+		name := "hook"
+		if claim {
+			name = "receipt"
+		}
+		t.Run(name, func(t *testing.T) {
+			class := sandboxBudgetHook
+			if claim {
+				class = sandboxBudgetReceipt
+			}
+			old := sandboxBudgetLimits[class]
+			sandboxBudgetLimits[class] = sandboxBudgetLimit{Rate: 1, Burst: 1, InFlight: 1}
+			t.Cleanup(func() { sandboxBudgetLimits[class] = old })
+			api := &APIServer{}
+			path := sandboxrelay.PathHookPrefix + "claudecode"
+			request := func(body *stalledHookCallerBody) *http.Request {
+				r := httptest.NewRequest(http.MethodPost, path, nil)
+				r.Body = body
+				r.ContentLength = 73
+				if claim {
+					r.Header.Set("X-DefenseClaw-Hook-Receipt", "1")
+				}
+				return r
+			}
+			first := &stalledHookCallerBody{readCalled: make(chan struct{}), release: make(chan struct{})}
+			second := &stalledHookCallerBody{readCalled: make(chan struct{}), release: make(chan struct{})}
+			firstDone, secondDone := make(chan struct{}), make(chan struct{})
+			secondReply := httptest.NewRecorder()
+			go func() {
+				r, release := api.admitHookCaller(httptest.NewRecorder(), request(first), "1001", path)
+				if release != nil {
+					_, _ = io.ReadAll(r.Body)
+					release()
+				}
+				close(firstDone)
+			}()
+			select {
+			case <-first.readCalled:
+			case <-time.After(2 * time.Second):
+				close(first.release)
+				t.Fatal("first request did not reach its body")
+			}
+			go func() {
+				_, release := api.admitHookCaller(secondReply, request(second), "1001", path)
+				if release != nil {
+					release()
+				}
+				close(secondDone)
+			}()
+			select {
+			case <-secondDone:
+				close(first.release)
+				close(second.release)
+				<-firstDone
+				if secondReply.Code != http.StatusTooManyRequests {
+					t.Fatalf("second request status %d, want immediate 429", secondReply.Code)
+				}
+			case <-time.After(2 * time.Second):
+				close(first.release)
+				close(second.release)
+				<-firstDone
+				<-secondDone
+				t.Fatal("second request waited for its body before admission")
+			}
+		})
+	}
+}
+
+type stalledHookCallerBody struct {
+	readCalled chan struct{}
+	release    chan struct{}
+	once       sync.Once
+}
+
+func (b *stalledHookCallerBody) Read([]byte) (int, error) {
+	b.once.Do(func() { close(b.readCalled) })
+	<-b.release
+	return 0, io.EOF
+}
+
+func (*stalledHookCallerBody) Close() error { return nil }
+
+func TestSandboxHookReceiptAdmissionKeys(t *testing.T) {
+	receipt := `{"delivery_receipt":"3f2b8c1e-5d4a-4e6f-9a7b-1c2d3e4f5a6b","result":"ack"}`
+	for _, c := range []struct {
+		method, path, body, marker, want string
+	}{
+		{http.MethodPost, sandboxrelay.PathHookPrefix + "codex", receipt, "1", "1001|" + sandboxBudgetReceipt},
+		{http.MethodPost, sandboxrelay.PathHookPrefix + "codex", receipt, "", "1001|" + sandboxBudgetPending},
+		{http.MethodPost, sandboxrelay.PathHookPrefix + "codex", `{"hook_event_name":"PreToolUse"}`, "", "1001|" + sandboxBudgetPending},
+		{http.MethodPost, sandboxrelay.PathHookPrefix + "codex", `{"hook_event_name":"PreToolUse"}`, "1", "1001|" + sandboxBudgetReceipt},
+		{http.MethodPost, sandboxrelay.PathHookPrefix + "codex", `{"delivery_receipt":"x","result":"ack"}`, "bogus", "1001|" + sandboxBudgetReceipt},
+		{http.MethodPost, sandboxrelay.PathNotifyPrefix + "codex", receipt, "1", "1001|" + sandboxBudgetHook},
+		{http.MethodPost, sandboxrelay.PathInspectPrefix + "tool", receipt, "1", "1001|" + sandboxBudgetHook},
+		{http.MethodPost, "/api/v1/claudecode/hook", receipt, "1", "1001"},
+		{http.MethodGet, sandboxrelay.PathPolicyCurrent, "", "", "1001" + hookCallerSandboxRead},
+		{http.MethodPost, sandboxrelay.PathPolicyExplain, "{}", "", "1001" + hookCallerSandboxRead},
+		{http.MethodPost, sandboxrelay.PathDecisions, "{}", "", "1001|" + sandboxBudgetPolicy},
+	} {
+		r := httptest.NewRequest(c.method, c.path, strings.NewReader(c.body))
+		if c.marker != "" {
+			r.Header.Set(sandboxrelay.HookReceiptHeader, c.marker)
+		}
+		if got := hookCallerAdmissionKey("1001", r); got != c.want {
+			t.Errorf("%s %s %.30s: key %q, want %q", c.method, c.path, c.body, got, c.want)
+		}
+		if body, _ := io.ReadAll(r.Body); string(body) != c.body {
+			t.Errorf("%s %s: body %q after the key, want %q", c.method, c.path, body, c.body)
+		}
+	}
+	var l hookCallerLimiter
+	if rps, burst, inFlight, _ := l.limits("1001|" + sandboxBudgetReceipt); rps != 100 || burst != 200 || inFlight != 32 {
+		t.Fatalf("receipt limits %d/%d/%d", rps, burst, inFlight)
+	}
+}
+
+// Class selection does not read or replace the request body.
+func TestClaimsSandboxHookReceiptLeavesBodyUnread(t *testing.T) {
+	for _, marked := range []bool{false, true} {
+		body := &oneShotHookCallerBody{}
+		r := httptest.NewRequest(http.MethodPost, "/x", nil)
+		r.Body = body
+		if marked {
+			r.Header.Set(sandboxrelay.HookReceiptHeader, sandboxrelay.HookReceiptHeaderValue)
+		}
+		if got := claimsSandboxHookReceipt(r); got != marked || body.read {
+			t.Fatalf("marked=%t: claim=%t body read=%t", marked, got, body.read)
+		}
+	}
+	r := httptest.NewRequest(http.MethodGet, "/x", nil)
+	r.Header.Set(sandboxrelay.HookReceiptHeader, sandboxrelay.HookReceiptHeaderValue)
+	if claimsSandboxHookReceipt(r) {
+		t.Fatal("a GET counted as a receipt")
+	}
+}
+
+func TestSandboxHookAdmissionClaimHasNoAllocations(t *testing.T) {
+	r := httptest.NewRequest(http.MethodPost, sandboxrelay.PathHookPrefix+"claudecode", nil)
+	if got := testing.AllocsPerRun(1000, func() { _ = claimsSandboxHookReceipt(r) }); got != 0 {
+		t.Fatalf("ordinary hook receipt-class check allocates %.1f times per call", got)
+	}
+}
+
+type oneShotHookCallerBody struct{ read bool }
+
+func (b *oneShotHookCallerBody) Read([]byte) (int, error) {
+	b.read = true
+	return 0, io.ErrUnexpectedEOF
+}
+
+func (*oneShotHookCallerBody) Close() error { return nil }
+
+// TestSandboxHookFloodAtTheDocumentedUserRate is the per-user side of
+// rel-1-0-6 GAP-0490: the documented relayed-hook budget of one account (100
+// calls a second, burst 200), 10 s of allowed calls at that rate, each a
+// relayed hook post and its delivery receipt, on a clock the test moves. No
+// call and no receipt may be refused.
+func TestSandboxHookFloodAtTheDocumentedUserRate(t *testing.T) {
+	now := time.Unix(4_000_000, 0)
+	api := &APIServer{}
+	api.hookCallerLimits.now = func() time.Time { return now }
+	path := sandboxrelay.PathHookPrefix + "claudecode"
+	receipt := `{"delivery_receipt":"3f2b8c1e-5d4a-4e6f-9a7b-1c2d3e4f5a6b","result":"ack"}`
+	post := func(body string, receipt ...bool) bool {
+		r := httptest.NewRequest(http.MethodPost, path, strings.NewReader(body))
+		if len(receipt) != 0 && receipt[0] {
+			r.Header.Set(sandboxrelay.HookReceiptHeader, sandboxrelay.HookReceiptHeaderValue)
+		}
+		_, release := api.admitHookCaller(httptest.NewRecorder(), r, "1001", path)
+		if release != nil {
+			release()
+		}
+		return release != nil
+	}
+	budget := sandboxBudgetLimits[sandboxBudgetHook]
+	refusedHooks, refusedReceipts := 0, 0
+	calls := budget.Rate * 10
+	for i := 0; i < calls; i++ {
+		if !post(`{"hook_event_name":"PreToolUse"}`) {
+			refusedHooks++
+		} else if !post(receipt, true) {
+			refusedReceipts++
+		}
+		now = now.Add(time.Second / time.Duration(budget.Rate))
+	}
+	if refusedHooks != 0 || refusedReceipts != 0 {
+		t.Fatalf("%d calls at %d a second: %d hooks and %d receipts refused", calls, budget.Rate, refusedHooks, refusedReceipts)
 	}
 }

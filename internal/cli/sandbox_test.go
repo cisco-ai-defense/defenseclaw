@@ -279,7 +279,7 @@ func TestSandboxStubHelpIsTheGoHelp(t *testing.T) {
 	}
 	for _, path := range []string{"run", "connect"} {
 		cmd, _, _ := sandboxCmd.Find([]string{path})
-		if usage := cmd.Flags().Lookup("yes").Usage; !strings.Contains(usage, "copy: leave them in the sandbox for pull") {
+		if usage := cmd.Flags().Lookup("yes").Usage; !strings.Contains(usage, "copy: leave them in the sandbox for later pull --apply") {
 			t.Errorf("sandbox %s --yes: %q does not say what a copy's end does", path, usage)
 		}
 	}

@@ -166,13 +166,18 @@ func TestPlantedDeploymentRecordDoesNotAffectLifecycleProfile(t *testing.T) {
 			if opts.resolvedProfile != tc.want {
 				t.Fatalf("resolved %q, want %q", opts.resolvedProfile, tc.want)
 			}
-			if len(opts.ignoredDeploymentRecords) != 1 || !strings.Contains(opts.ignoredDeploymentRecords[0], planted) {
-				t.Fatalf("ignored records %q", opts.ignoredDeploymentRecords)
+			if len(opts.ignoredDeploymentRecords) != 1 || opts.ignoredDeploymentRecords[0].path != planted {
+				t.Fatalf("ignored records %+v", opts.ignoredDeploymentRecords)
 			}
 			if tc.want == "standalone" {
 				result := newWindowsEnterpriseStandaloneResult(tc.action, &opts)
 				if len(result.Warnings) != 1 || result.Warnings[0].Code != "untrusted_deployment_record" {
 					t.Fatalf("standalone warnings %+v", result.Warnings)
+				}
+				message := result.Warnings[0].Message
+				want := "ignored a deployment record an administrator did not write: " + planted + ": " + validate(planted).Error()
+				if message != want {
+					t.Fatalf("Secure Client record warning = %q, want base text %q", message, want)
 				}
 			}
 		})

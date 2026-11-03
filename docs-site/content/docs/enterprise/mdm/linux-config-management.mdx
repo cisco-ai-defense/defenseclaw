@@ -657,8 +657,11 @@ a version, see [Roll back](/docs/enterprise/lifecycle).
 
 Hosts without
 dpkg or rpm can use the `.tar.gz` payload, extracted as root into a root-only folder on
-a filesystem that allows execution; run `ensure` with `--payload` and drop
-`--from-package` ([tarball install](/docs/enterprise/linux#3b-or-install-from-the-tarball)).
+a filesystem that allows execution. Without fapolicyd, run `ensure` with
+`--payload` and drop `--from-package`. With fapolicyd, follow the staged-payload
+trust and two-stage [tarball install](/docs/enterprise/linux#3b-or-install-from-the-tarball),
+adding installed-tree trust on a fresh install and updating its existing entry
+on an upgrade or rerun.
 A host installed from the package refuses a payload upgrade (`package_owned_binaries`):
 keep each host on one channel.
 

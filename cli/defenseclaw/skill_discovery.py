@@ -518,14 +518,13 @@ def _discover_hermes_skill_directories(skill_root: str) -> list[SkillDirectory]:
     """Discover actual nested Hermes skills and retain vendor provenance.
 
     Hermes's installer places bundled skills below category directories in the
-    same root used by hub and operator skills.  The category folders are not
-    skills.  A manifest-tracked leaf is bundled only while its content still
-    matches the origin hash recorded by Hermes.
+    same root used by hub and operator skills. The category folders are not
+    skills. A leaf is bundled only while its complete tree matches a pinned
+    vendor digest.
     """
 
     from defenseclaw.hermes_skills import (
         is_bundled_skill_dir,
-        manifest_for_root,
         skill_name,
     )
 
@@ -534,7 +533,6 @@ def _discover_hermes_skill_directories(skill_root: str) -> list[SkillDirectory]:
     except OSError:
         return []
 
-    manifest = manifest_for_root(skill_root)
     rows: list[SkillDirectory] = []
     pending = [skill_root]
     visited = 0
@@ -563,7 +561,6 @@ def _discover_hermes_skill_directories(skill_root: str) -> list[SkillDirectory]:
                         current,
                         name=name,
                         skill_root=skill_root,
-                        manifest=manifest,
                     ),
                 )
             )

@@ -60,6 +60,7 @@ func (store awaitingSignInEnrollmentStore) verify(desired awaitingSignInEnrollme
 // target is enrolled and verify's exact-set check passes. A real failure
 // still blocks both.
 func TestEnterpriseHookReconcilePublishesExactEnrollmentWhileAccountsAwaitSignIn(t *testing.T) {
+	stubEarlierReleaseClosedMachineRegistration(t)
 	restoreEnterpriseHooksLifecycleTestState(t)
 	stubEnterpriseHookAuthorizationTrustForTempDir(t)
 	stubEnterpriseHookTokenSources(t)

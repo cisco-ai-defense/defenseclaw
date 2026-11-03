@@ -86,6 +86,7 @@ func (m *Manager) Status(ctx context.Context) (*sandboxapi.Status, error) {
 	cfg := m.config()
 	st := &sandboxapi.Status{
 		Enabled: cfg.OpenShell.Enabled, IngressAddr: m.opts.IngressAddr, EgressAddr: m.opts.EgressAddr,
+		IngressPort: m.opts.IngressPort, EgressPort: m.opts.EgressPort,
 	}
 	gw, err := m.gateway(ctx)
 	if err == nil && m.now().Sub(time.Unix(0, m.gwCheckedAt.Load())) >= driverRecheck {
@@ -177,7 +178,7 @@ func (m *Manager) List(ctx context.Context) ([]sandboxapi.Sandbox, error) {
 			m.mu.Lock()
 			for _, sb := range sbs {
 				if b := m.boxes[sb.Name]; b != nil && !b.creating && !b.retained && m.sameSandboxLocked(b, sb) {
-					foundOnLocked(b, gw, sb)
+					m.foundOnLocked(b, gw, sb)
 				}
 			}
 			m.mu.Unlock()
@@ -238,12 +239,12 @@ func (m *Manager) Get(ctx context.Context, name string) (*sandboxapi.Sandbox, er
 	m.mu.Unlock()
 	live := retained
 	if gw, err := m.gateway(ctx); err == nil && !retained {
-		sb, err := gw.Client.GetSandbox(ctx, name)
+		sb, err := m.getSandbox(ctx, gw, name)
 		m.mu.Lock()
 		report := func(context.Context) {}
 		switch {
 		case err == nil && !b.creating && m.sameSandboxLocked(b, sb):
-			foundOnLocked(b, gw, sb)
+			m.foundOnLocked(b, gw, sb)
 		case (err == nil || openshell.IsNotFound(err)) && !b.creating:
 			// Gone from gw, or another sandbox took the name there.
 			report = m.missingFromLocked(gw, b)
@@ -434,7 +435,7 @@ func (m *Manager) stop(ctx context.Context, b *box) error {
 		// one instead of ending the session with gRPC's words (GAP-0601).
 		if cur, ok := m.reconnect(ctx, gw, err); ok {
 			gw = cur
-			if now, gerr := gw.Client.GetSandbox(ctx, name); gerr == nil && auditPhase(now.Status.Phase) == audit.SandboxPhaseStopped {
+			if now, gerr := m.getSandbox(ctx, gw, name); gerr == nil && auditPhase(now.Status.Phase) == audit.SandboxPhaseStopped {
 				err = nil
 			} else {
 				_, err = gw.Client.StopSandbox(ctx, name)
@@ -457,6 +458,7 @@ func (m *Manager) stop(ctx context.Context, b *box) error {
 		}
 		return upstream("stop sandbox "+name, err)
 	}
+	m.forgetPending(name)
 	if ph := stoppedAsIs(stopped); ph != "" {
 		// OpenShell returns a sandbox whose workload completed, or whose
 		// main process failed, as it is: it stops nothing, and flushes
@@ -533,6 +535,12 @@ func flushFailureText(err error) string {
 		if strings.Contains(lower, raw) {
 			return "the connection to the OpenShell gateway closed; `defenseclaw sandbox doctor` checks it, then retry the stop"
 		}
+	}
+	if strings.Contains(lower, notReadyConflict) {
+		// OpenShell's own refusal, "Conflict: sandbox is not ready", when its
+		// gateway restarted and was still bringing the sandbox back (rel-1-0-6
+		// GAP-0340).
+		return "OpenShell was still bringing the sandbox back up; wait until `defenseclaw sandbox list` shows it Ready, then retry the stop"
 	}
 	return truncate(sandboxapi.DisplayText(err.Error()), 200)
 }
@@ -683,7 +691,7 @@ func (m *Manager) restorePhase(ctx context.Context, gw *Gateway, b *box, trigger
 	m.mu.Lock()
 	name := b.rec.Name
 	m.mu.Unlock()
-	sb, err := gw.Client.GetSandbox(ctx, name)
+	sb, err := m.getSandbox(ctx, gw, name)
 	if err == nil && !m.sameSandbox(b, sb) {
 		return
 	}
@@ -727,7 +735,7 @@ func (m *Manager) checkSandbox(ctx context.Context, gw *Gateway, b *box) error {
 	m.mu.Lock()
 	name := b.rec.Name
 	m.mu.Unlock()
-	sb, err := gw.Client.GetSandbox(ctx, name)
+	sb, err := m.getSandbox(ctx, gw, name)
 	if err != nil {
 		m.dropGateway(gw, err)
 		return upstream("look up sandbox "+name, err)
@@ -739,7 +747,7 @@ func (m *Manager) checkSandbox(ctx context.Context, gw *Gateway, b *box) error {
 		report(ctx)
 		return errReplaced(name)
 	}
-	foundOnLocked(b, gw, sb)
+	m.foundOnLocked(b, gw, sb)
 	m.mu.Unlock()
 	return nil
 }
@@ -1150,6 +1158,7 @@ func (m *Manager) start(ctx context.Context, b *box, req sandboxapi.StartRequest
 		}
 		return upstream("start sandbox "+rec.Name, err)
 	}
+	m.forgetPending(rec.Name)
 	sb, err = gw.Client.WaitReady(ctx, rec.Name)
 	if err != nil {
 		m.restorePhase(ctx, gw, b, audit.SandboxTriggerStart, audit.SandboxPhaseStarting)
@@ -1349,7 +1358,7 @@ func (m *Manager) deleteLocked(ctx context.Context, b *box, req sandboxapi.Delet
 	created := recordDriver(b.rec)
 	m.mu.Unlock()
 	otherDriver := created != gw.Driver.Name
-	sb, err := gw.Client.GetSandbox(ctx, name)
+	sb, err := m.getSandbox(ctx, gw, name)
 	gone := openshell.IsNotFound(err)
 	switch {
 	case err != nil && !gone && !otherDriver:
@@ -1402,8 +1411,19 @@ func (m *Manager) deleteLocked(ctx context.Context, b *box, req sandboxapi.Delet
 		if err != nil && !openshell.IsNotFound(err) {
 			m.dropGateway(gw, err)
 			m.deleteFailed(ctx, gw, b)
+			if pendingDriverOp(err) {
+				// Retry first; offer the last resort only after repeated
+				// error-phase refusals in one observed episode
+				// (rel-1-0-6:GAP-0446).
+				var phase openshell.SandboxPhase
+				if sb != nil {
+					phase = sb.Status.Phase
+				}
+				return nil, m.pendingRefusal(name, phase, m.managedMode())
+			}
 			return nil, upstream("delete sandbox "+name, err)
 		}
+		m.forgetPending(name)
 		err = gw.Client.WaitDeleted(ctx, name)
 		if err != nil && transientGatewayError(err) {
 			if cur, ok := m.reconnect(ctx, gw, err); ok {
@@ -1416,6 +1436,7 @@ func (m *Manager) deleteLocked(ctx context.Context, b *box, req sandboxapi.Delet
 			return nil, upstream("wait for sandbox "+name+" deletion", err)
 		}
 	}
+	m.forgetPending(name)
 	// The workload is gone: what it left in the project stays on this
 	// machine, so the guard makes its final pass before it is released.
 	m.finishGuard(ctx, b)
@@ -1707,6 +1728,9 @@ func (m *Manager) removeSandboxDir(name string) {
 // (unrecorded) is written too.
 func (m *Manager) retire(b *box) {
 	m.mu.Lock()
+	if m.boxes[b.rec.Name] == b {
+		m.forgetPending(b.rec.Name)
+	}
 	b.retained, b.missing, b.unrecorded = true, false, false
 	b.sb, b.eff, b.decider, b.cred = nil, nil, nil, egress.Credential{}
 	b.rec.Retained = true
@@ -1725,6 +1749,7 @@ func (m *Manager) forget(b *box) {
 	b.deleted = true
 	name, gone := b.rec.Name, m.boxes[b.rec.Name] == b
 	if gone {
+		m.forgetPending(name)
 		delete(m.boxes, name)
 	}
 	m.mu.Unlock()
@@ -1778,7 +1803,7 @@ func (m *Manager) Undo(ctx context.Context, name string, req sandboxapi.UndoRequ
 		gw, err := m.gateway(ctx)
 		switch {
 		case err == nil:
-			sb, err := gw.Client.GetSandbox(ctx, name)
+			sb, err := m.getSandbox(ctx, gw, name)
 			switch {
 			case err == nil && m.sameSandbox(b, sb):
 				m.mu.Lock()
@@ -1938,7 +1963,7 @@ func (m *Manager) ReportDisk(_ context.Context, name string, r sandboxapi.DiskRe
 		msg += " and filling fast"
 	}
 	msg += ": a MicroVM stopped with its disk full cannot start again; `defenseclaw sandbox exec " + name +
-		" -- df -h /` shows it, `defenseclaw sandbox pull " + name + "` brings its work back before it fills"
+		" -- df -h /` shows it, `defenseclaw sandbox pull " + name + " --apply` brings its work back before it fills"
 	m.feed.Publish(sandboxapi.ActivityEvent{Kind: sandboxapi.ActivityLifecycle, Sandbox: name, Reason: sandboxapi.ReasonDiskFilling, Message: msg})
 	return nil
 }

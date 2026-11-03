@@ -873,6 +873,9 @@ func compileObservabilityV8Transport(
 		if !ValidEnterpriseCredentialName(credential.name) {
 			return ObservabilityV8TransportPlan{}, fmt.Errorf("%s.%s: invalid protected credential name (lowercase letters, digits and dashes)", path, credential.field)
 		}
+		if refusal := gatewayCredentialRefusal(path+"."+credential.field, credential.name); refusal != "" {
+			return ObservabilityV8TransportPlan{}, fmt.Errorf("%s", refusal)
+		}
 		if credential.env != "" {
 			return ObservabilityV8TransportPlan{}, fmt.Errorf("%s.%s: set either %s or %s, not both", path, credential.field, credential.envField, credential.field)
 		}
@@ -1450,6 +1453,9 @@ func validateObservabilityV8Headers(
 			}
 			if !ValidEnterpriseCredentialName(value.Secret.Credential) {
 				return fmt.Errorf("%s.%s.credential: invalid protected credential name (lowercase letters, digits and dashes)", path, name)
+			}
+			if refusal := gatewayCredentialRefusal(path+"."+name+".credential", value.Secret.Credential); refusal != "" {
+				return fmt.Errorf("%s", refusal)
 			}
 		} else if value.Secret != nil && strings.TrimSpace(value.Secret.Env) == "" {
 			return fmt.Errorf("%s.%s.env: must not be empty", path, name)

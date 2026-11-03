@@ -83,13 +83,9 @@ func claudePresent(opts Options) (bool, error) {
 	if err != nil {
 		return false, err
 	}
-	events := make([]string, 0, len(groups))
-	for _, group := range groups {
-		events = append(events, group.Event)
-	}
 	for _, source := range sources {
 		hooks, _ := source.doc.get("hooks")
-		if owned, _, _ := countClaudeHooks(opts, hooks, events); owned > 0 {
+		if owned, _, _ := countClaudeHooks(opts, hooks, groups); owned > 0 {
 			return true, nil
 		}
 	}

@@ -413,6 +413,72 @@ func runCursorAdapterTest(
 	return out.String(), errOut.String(), exitErr.ExitCode()
 }
 
+// runCursorAdapterTimedTest runs the adapter as runCursorAdapterTest does and
+// also reports when powershell.exe exited and when its output pipes closed.
+// A pipe closes only once every process holding its write end has exited,
+// also a launcher that inherited it, so the two times tell an adapter that
+// ended late from a killed launcher whose teardown kept the output open
+// (rel-1-0-6:GAP-0248: answers 31.9-36.6 s after the launcher started on a
+// loaded runner, 25.07 s on the others).
+func runCursorAdapterTimedTest(
+	t *testing.T,
+	adapterPath string,
+	payload string,
+) (stdout, stderr string, exitCode int, exitedAt, closedAt time.Time) {
+	t.Helper()
+	quoted := strings.ReplaceAll(adapterPath, "'", "''")
+	cmd := exec.Command(
+		"powershell.exe", "-NoProfile", "-NonInteractive", "-Command", "$input | & '"+quoted+"'",
+	)
+	cmd.Stdin = strings.NewReader(payload)
+	type drained struct {
+		data []byte
+		at   time.Time
+	}
+	drain := func(r *os.File) <-chan drained {
+		done := make(chan drained, 1)
+		go func() {
+			data, _ := io.ReadAll(r)
+			done <- drained{data: data, at: time.Now()}
+		}()
+		return done
+	}
+	outRead, outWrite, err := os.Pipe()
+	if err != nil {
+		t.Fatalf("Cursor adapter stdout pipe: %v", err)
+	}
+	errRead, errWrite, err := os.Pipe()
+	if err != nil {
+		t.Fatalf("Cursor adapter stderr pipe: %v", err)
+	}
+	defer outRead.Close()
+	defer errRead.Close()
+	cmd.Stdout, cmd.Stderr = outWrite, errWrite
+	outDone, errDone := drain(outRead), drain(errRead)
+	startErr := cmd.Start()
+	// Only the child's copies of the write ends may keep the pipes open.
+	_ = outWrite.Close()
+	_ = errWrite.Close()
+	if startErr != nil {
+		t.Fatalf("run Cursor adapter: %v", startErr)
+	}
+	waitErr := cmd.Wait()
+	exitedAt = time.Now()
+	out, errOut := <-outDone, <-errDone
+	closedAt = out.at
+	if errOut.at.After(closedAt) {
+		closedAt = errOut.at
+	}
+	if waitErr != nil {
+		var exitErr *exec.ExitError
+		if !errors.As(waitErr, &exitErr) {
+			t.Fatalf("run Cursor adapter: %v", waitErr)
+		}
+		exitCode = exitErr.ExitCode()
+	}
+	return string(out.data), string(errOut.data), exitCode, exitedAt, closedAt
+}
+
 func assertCursorAllowJSON(t *testing.T, stdout string) {
 	t.Helper()
 	if strings.TrimSpace(stdout) == "" {
@@ -484,19 +550,26 @@ func TestCursorAdapterTimeoutKillsChildThatDoesNotReadStdinAndFailsClosed(t *tes
 	// Exceed the typical anonymous-pipe buffer so a synchronous stdin write
 	// would remain stuck until the helper's sleep completed.
 	payload := `{"source":"cursor-adapter-probe","padding":"` + strings.Repeat("x", 2<<20) + `"}`
-	stdout, stderr, code := runCursorAdapterTest(
+	stdout, stderr, code, exitedAt, closedAt := runCursorAdapterTimedTest(
 		t, adapter, payload,
 	)
-	finishedAt := time.Now()
+	finishedAt := exitedAt
+	if closedAt.After(finishedAt) {
+		finishedAt = closedAt
+	}
 	pid, launchedAt := readAdapterLauncherRecord(t, pidFile, stderr)
 	// As for Copilot, the timeout plus the cleanup reserve must fit Cursor's
 	// contract from the moment the launcher exists; PowerShell startup is
-	// host-dependent and outside the adapter's budget.
+	// host-dependent and outside the adapter's budget. The answer is complete
+	// when powershell.exe has exited and its output has closed, whichever is
+	// later.
 	elapsed := finishedAt.Sub(launchedAt)
 	if elapsed > time.Duration(cursorWindowsHookContractTimeoutMS)*time.Millisecond {
-		t.Fatalf("adapter exceeded the Cursor command-hook deadline: %s after the launcher started", elapsed)
+		t.Fatalf("adapter exceeded the Cursor command-hook deadline: %s after the launcher started (powershell.exe exited after %s, its output closed after %s)",
+			elapsed, exitedAt.Sub(launchedAt), closedAt.Sub(launchedAt))
 	}
-	t.Logf("adapter finished %s after the launcher started", elapsed)
+	t.Logf("adapter finished %s after the launcher started (powershell.exe exited after %s, its output closed after %s)",
+		elapsed, exitedAt.Sub(launchedAt), closedAt.Sub(launchedAt))
 	if code != 2 {
 		t.Fatalf("exit code = %d, want fail-closed 2; stderr=%q", code, stderr)
 	}

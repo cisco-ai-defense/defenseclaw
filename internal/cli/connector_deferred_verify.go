@@ -16,6 +16,7 @@ import (
 	"strconv"
 	"strings"
 
+	"github.com/defenseclaw/defenseclaw/internal/pathidentity"
 	"github.com/defenseclaw/defenseclaw/internal/safefile"
 	"github.com/spf13/cobra"
 )
@@ -298,7 +299,7 @@ func readDeferredVerifyJSON(path string, target any) error {
 }
 
 func readDeferredVerifyFile(path string, limit int64) ([]byte, error) {
-	before, err := os.Lstat(path)
+	before, err := pathidentity.LstatPinned(path)
 	if err != nil {
 		return nil, err
 	}
@@ -327,7 +328,7 @@ func readDeferredVerifyFile(path string, limit int64) ([]byte, error) {
 
 func hashDeferredVerifyFile(path string) (string, error) {
 	const limit = int64(512 << 20)
-	before, err := os.Lstat(path)
+	before, err := pathidentity.LstatPinned(path)
 	if err != nil {
 		return "", err
 	}

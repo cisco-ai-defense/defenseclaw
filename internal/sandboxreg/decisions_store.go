@@ -187,6 +187,50 @@ func (s *FileDecisionStore) List(uid int, registration string) ([]Decision, erro
 	return out, nil
 }
 
+// SettleAccount keeps uid's decisions to the account subjectKey names, the
+// account that holds the uid now (rel-1-0-6:GAP-0262). A decision saved
+// before decisions carried a subject key gets the key keyOf gives it, or is
+// dropped when keyOf proves no account for it. Then every decision of
+// another account is dropped. It returns how many it dropped; with nothing
+// to stamp or drop, nothing is written. The caller confirms subjectKey with
+// the account database first.
+func (s *FileDecisionStore) SettleAccount(uid int, subjectKey string, keyOf func(Decision) (string, bool)) (int, error) {
+	if subjectKey == "" || keyOf == nil {
+		return 0, fmt.Errorf("%w: subject key and key source are required", ErrInvalid)
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	ds, err := s.loadLocked(uid)
+	if err != nil {
+		return 0, err
+	}
+	next := make([]Decision, 0, len(ds))
+	stamped := 0
+	for _, d := range ds {
+		if d.SubjectKey == "" {
+			key, ok := keyOf(d)
+			if !ok || key == "" {
+				continue
+			}
+			d.SubjectKey = key
+			stamped++
+		}
+		if d.SubjectKey != subjectKey {
+			continue
+		}
+		next = append(next, d)
+	}
+	dropped := len(ds) - len(next)
+	if dropped == 0 && stamped == 0 {
+		return 0, nil
+	}
+	if err := writeStoreFile(s.dir, s.path(uid), decisionFile{V: storeFileVersion, Decisions: next}); err != nil {
+		return 0, err
+	}
+	s.uids[uid] = next
+	return dropped, nil
+}
+
 // Purge removes the whole store.
 func (s *FileDecisionStore) Purge() error {
 	s.mu.Lock()

@@ -25,14 +25,14 @@ from textual import events, on
 from textual.app import ComposeResult
 from textual.binding import Binding
 from textual.containers import Vertical, VerticalScroll
-from textual.screen import ModalScreen
 from textual.widgets import Button, Static
 
+from defenseclaw.tui.modal import GuardedModalScreen
 from defenseclaw.tui.screens.detail import DetailModalModel
 from defenseclaw.tui.theme import DEFAULT_TOKENS
 
 
-class SandboxDetailScreen(ModalScreen[str | None]):
+class SandboxDetailScreen(GuardedModalScreen[str | None]):
     """Scrollable detail modal; dismisses with the action key pressed, or None."""
 
     CSS = f"""

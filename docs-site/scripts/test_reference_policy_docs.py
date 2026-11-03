@@ -44,14 +44,32 @@ class ReferencePolicyDocsTest(unittest.TestCase):
     def test_foreign_hook_outage_scope_names_the_shared_remove_setting(self):
         text = (DOCS / "fail-modes.mdx").read_text()
         guard = next(line for line in text.splitlines()
-                     if "foreign-hook guard" in line and "requires a current gateway answer" in line)
+                     if "foreign-hook guard" in line and "asks the gateway for its session" in line)
         self.assertIn("On a managed standalone host with `foreign_hooks: remove`", guard)
         self.assertIn("GitHub Copilot CLI, Cursor, Devin, OpenCode and Amp", guard)
         self.assertIn("Hermes on Linux and macOS", guard)
-        self.assertIn("Each gateway-backed guarded call requires a current gateway answer", guard)
+        # GAP-0352: on Linux and macOS a clean-session note lets a later call follow the
+        # administrator's fail mode; without a current note, and on Windows, the call blocks.
+        self.assertIn("Each gateway-backed guarded call asks the gateway for its session's record", guard)
+        self.assertIn("leaves a read-only note that this agent process's session was clean", guard)
+        self.assertIn("when there is no current note for its agent process", guard)
+        self.assertIn("`open` lets it run with the outage warning, and `closed`, strict availability and the default block it", guard)
+        self.assertIn("and when the gateway is restarting or gives no answer", guard)
+        self.assertIn("On Windows a guarded call blocks during an outage in every mode", guard)
+        # The summary near the top says the same as the detailed paragraph.
+        summary = next(line for line in text.splitlines() if line.startswith("On a per-user install, an explicit saved"))
+        self.assertIn("a Linux or macOS session that has a clean-session note follows the administrator's mode", summary)
+        self.assertIn("every other guarded call blocks", summary)
+        self.assertNotIn("A guarded connector (foreign-hook guard) blocks during an outage too", text)
         self.assertIn("Windows Amp checks its session record locally", guard)
         effective = text.split("## Effective behavior", 1)[1].split("These outcomes apply", 1)[0]
-        self.assertIn("A gateway-backed guarded tool call", effective)
+        self.assertIn("A gateway-backed guarded tool call runs during an outage under `open` only on Linux or macOS and only when its agent process has a current clean-session note", effective)
+        self.assertIn("A restart or a gateway that gives no answer blocks it in every mode, and so does every guarded call on Windows", effective)
+        self.assertNotIn("stays blocked if the foreign-hook session check cannot get a gateway answer", text)
+        # The per-user summary above the table and the managed-mode paragraph say the same.
+        self.assertNotIn("including an outage under an administrator's `open` choice", text)
+        self.assertIn("With the foreign-hook guard, `open` covers an outage only for a Linux or macOS session that has a clean-session note; every other guarded call blocks.", text)
+        self.assertNotIn("so an outage blocks those calls too", text)
 
     def test_managed_open_never_allows_an_accepted_call_without_an_answer(self):
         # oss-outage-open review (round g, loop round 2): managed open applies

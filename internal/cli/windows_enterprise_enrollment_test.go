@@ -18,8 +18,11 @@ package cli
 
 import (
 	"bytes"
+	"encoding/json"
 	"strings"
 	"testing"
+
+	"github.com/defenseclaw/defenseclaw/internal/enterprisestatus"
 )
 
 // Status lists each enrolled account and each connector's state (GAP-1073).
@@ -62,5 +65,38 @@ func TestWindowsEnterpriseEnrollmentDoesNotClaimHermesSessionHomeCoverage(t *tes
 			!strings.Contains(account.Reason, "session-only HERMES_HOME") {
 			t.Fatalf("Hermes registration was presented as coverage for %s: %+v", account.Account, account)
 		}
+	}
+}
+
+// GAP-1243: status and verify name the accounts and groups the config's
+// exclude lists hold out, in text and JSON, so an excluded account is not
+// mistaken for one that is not enrolled yet.
+func TestWindowsEnterpriseStatusNamesTheAccountsExcludeUsersHoldsOut(t *testing.T) {
+	body := []byte(`enterprise:
+  enrollment:
+    exclude_users: ['DCLAB\dcad-w5w3', ' ', alice@corp.example]
+    exclude_groups: ['DCLAB\contractors']
+`)
+	users, groups, err := windowsEnterpriseEnrollmentExclusions(body)
+	if err != nil {
+		t.Fatal(err)
+	}
+	enrollment := enterprisestatus.Enrollment{ExcludedUsers: users, ExcludedGroups: groups}
+	var text bytes.Buffer
+	writeWindowsEnterpriseEnrollmentExclusions(&text, enrollment)
+	for _, want := range []string{`exclude_users (not enrolled; their agents are refused at start): DCLAB\dcad-w5w3, alice@corp.example`, `exclude_groups (members are not enrolled): DCLAB\contractors`} {
+		if !strings.Contains(text.String(), want) {
+			t.Errorf("text %q lacks %q", text.String(), want)
+		}
+	}
+	encoded, err := json.Marshal(enrollment)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(encoded), `"excluded_users":["DCLAB\\dcad-w5w3","alice@corp.example"]`) || !strings.Contains(string(encoded), `"excluded_groups":["DCLAB\\contractors"]`) {
+		t.Errorf("json %s does not list the exclusions", encoded)
+	}
+	if users, groups, err := windowsEnterpriseEnrollmentExclusions([]byte("enterprise: {}\n")); err != nil || users != nil || groups != nil {
+		t.Errorf("no exclusions: got %v %v %v", users, groups, err)
 	}
 }

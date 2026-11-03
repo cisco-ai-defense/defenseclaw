@@ -1380,6 +1380,31 @@ def test_status_names_the_agent_settings_fix_for_a_connector_the_gateway_refused
     assert "1 active, 1 not running" in out
 
 
+def test_status_uses_gateway_removed_agent_reason_in_text_and_json():
+    # A stale local missing-agent cache cannot hide the gateway's named fix.
+    cfg = _cfg(["amp", "codex"], modes={"amp": "action", "codex": "action"})
+    reason = (
+        "the agent is not installed for this account (its executable C:\\amp\\amp.exe is gone); "
+        "reinstall it and run: defenseclaw-gateway restart, or remove the connector: defenseclaw setup remove amp"
+    )
+    health = {
+        "connectors": [{"name": "codex", "state": "running"}],
+        "guardrail": {"state": "running", "details": {
+            "connectors_not_started": ["amp"],
+            "connectors_refused_by_agent_settings": {"amp": reason},
+        }},
+    }
+    with patch.object(cmd_status, "_agent_missing", side_effect=lambda cfg, name, live: name == "amp"):
+        text = " ".join(_render_live(cfg, health).split())
+        rows = {row["name"]: row for row in cmd_status._connector_roster(cfg, health)}
+    amp_text = text[text.index("Amp (amp)"):text.index("Codex (codex)")]
+    assert "NOT RUNNING" in amp_text and "defenseclaw-gateway restart" in amp_text
+    assert "defenseclaw setup amp" not in amp_text
+    assert rows["amp"]["state"] == "not running"
+    assert rows["amp"]["runtime_detail"] == reason
+    assert rows["codex"]["state"] == "running"
+
+
 def test_policy_row_names_the_config_generation_that_survives_a_restart(capsys) -> None:
     # GAP-0642: the row named policy.generation, which counts the rebuilds of
     # the running gateway and starts again at 1 after a restart, while

@@ -664,6 +664,10 @@ For clones that already run it, on each clone:
    fills at the next boot); on EC2, systemd derives the ID from the instance UUID, so
    each instance already has its own. Each Mac has its own hardware UUID.
 2. Reinstall: uninstall with `--purge`, then install the same package or payload again.
+   On a Linux tarball host with fapolicyd, trust the staged payload and use the
+   [two-stage tarball install](/docs/enterprise/linux#3b-or-install-from-the-tarball),
+   adding installed-tree trust if no entry exists or updating an existing entry
+   after staging.
    That gives the clone a new device key, a new per-machine key and a new
    `redaction-correlation.key`. To keep the deployment instead, run
    `enterprise linux rotate-credentials --json` (macOS: `enterprise macos rotate-credentials --json`;

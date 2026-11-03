@@ -217,9 +217,8 @@ func TestSelfProtLinkNameBesideReaders(t *testing.T) {
 }
 
 // A move onto a real directory goes inside it, so the link moved into the
-// directory it points into is followed. A gateway that cannot read the user's
-// home cannot tell a directory from a link to one and keeps the unread
-// reading (GAP-0091).
+// directory it points into is followed (GAP-0091). The managed legs are in
+// TestSelfProtLinkMoveIntoTargetFolderManagedMatchesPerUser.
 func TestSelfProtMoveIntoRealDirectory(t *testing.T) {
 	for _, r := range []selfProtRow{
 		{"M01", `ln -s build/out bin; mv bin build/`, "allow"},

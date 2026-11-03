@@ -604,7 +604,37 @@ func sudoDiscoveryOrElevationDisposition(
 	if !oneOfFold(command.Program, "sudo") {
 		return false, false
 	}
-	argv := command.Argv
+	return sudoArgvDisposition(command.Argv, false)
+}
+
+// sudoOrElevatedShellDisposition is the CMD-SUDO owner's grammar: the sudo
+// grammar above plus clustered short options (sudo -iu root, sudo -Eu root
+// sh) and a shell behind env or command (sudo env sh), and the elevated
+// shells of doas and pkexec (doas -s, pkexec bash). Other doas and pkexec
+// forms stay indeterminate, as before. The tool-chain roles
+// (sudoChainRoles) keep the narrower sudo grammar (rel-1-0-6:GAP-0419).
+func sudoOrElevatedShellDisposition(
+	_ actionfacts.Facts,
+	command actionfacts.CommandFact,
+) (bool, bool) {
+	switch {
+	case oneOfFold(command.Program, "sudo"):
+		return sudoArgvDisposition(command.Argv, true)
+	case oneOfFold(command.Program, "doas"):
+		if doasElevatedShell(command.Argv) {
+			return true, true
+		}
+	case oneOfFold(command.Program, "pkexec"):
+		if pkexecElevatedShell(command.Argv) {
+			return true, true
+		}
+	}
+	return false, false
+}
+
+// sudoArgvDisposition parses a sudo argv. wide also reads clustered short
+// options and looks through env and command for the shell sudo starts.
+func sudoArgvDisposition(argv []string, wide bool) (bool, bool) {
 	if len(argv) < 2 {
 		return false, false
 	}
@@ -633,7 +663,7 @@ func sudoDiscoveryOrElevationDisposition(
 			if index >= len(argv) {
 				return false, false
 			}
-			return discovery || shellMode || shellProgram(argv[index]), true
+			return discovery || shellMode || privilegeTargetShell(argv[index:], wide), true
 		}
 		switch argument {
 		case "-l", "-ll", "--list":
@@ -680,15 +710,117 @@ func sudoDiscoveryOrElevationDisposition(
 		if _, flag := flagOptions[argument]; flag {
 			continue
 		}
+		if wide && len(argument) > 2 && argument[0] == '-' && argument[1] != '-' {
+			consumesNext, ok := sudoShortOptionCluster(argument[1:], &discovery, &shellMode)
+			if !ok {
+				return false, false
+			}
+			if consumesNext {
+				if index+1 >= len(argv) || argv[index+1] == "" {
+					return false, false
+				}
+				index++
+			}
+			continue
+		}
 		if strings.HasPrefix(argument, "-") {
 			return false, false
 		}
-		return discovery || shellMode || shellProgram(argument), true
+		return discovery || shellMode || privilegeTargetShell(argv[index:], wide), true
 	}
 	if discovery || shellMode {
 		return true, true
 	}
 	return false, true
+}
+
+// sudoShortOptionCluster reads one cluster of sudo short options (the
+// letters after the dash). A value option ends the cluster: its value is the
+// rest of the word, or the next word when it is the last letter.
+func sudoShortOptionCluster(letters string, discovery, shellMode *bool) (consumesNext, ok bool) {
+	for index := 0; index < len(letters); index++ {
+		switch letter := letters[index]; {
+		case letter == 'l':
+			*discovery = true
+		case letter == 's' || letter == 'i':
+			*shellMode = true
+		case strings.IndexByte("AbEHKknPSv", letter) >= 0:
+		case strings.IndexByte("CDgpRrTtUu", letter) >= 0:
+			return index == len(letters)-1, true
+		default:
+			return false, false
+		}
+	}
+	return false, true
+}
+
+// privilegeTargetShell reports whether the command a privilege wrapper
+// starts is a shell; wide looks through a leading env or command.
+func privilegeTargetShell(argv []string, wide bool) bool {
+	if wide {
+		argv = actionfacts.POSIXExecWrapperTarget(argv)
+	}
+	return len(argv) > 0 && shellProgram(argv[0])
+}
+
+// doasElevatedShell reports doas -s or doas starting a shell, after -n,
+// -u USER and -a STYLE (also clustered).
+func doasElevatedShell(argv []string) bool {
+	shell := false
+	for index := 1; index < len(argv); index++ {
+		argument := argv[index]
+		if argument == "--" {
+			if index+1 == len(argv) {
+				return shell
+			}
+			return privilegeTargetShell(argv[index+1:], true)
+		}
+		if len(argument) < 2 || argument[0] != '-' {
+			return privilegeTargetShell(argv[index:], true)
+		}
+		for letter := 1; letter < len(argument); letter++ {
+			switch argument[letter] {
+			case 's':
+				shell = true
+			case 'n':
+			case 'u', 'a':
+				if letter == len(argument)-1 {
+					index++
+					if index >= len(argv) {
+						return false
+					}
+				}
+				letter = len(argument)
+			default:
+				return false
+			}
+		}
+	}
+	return shell
+}
+
+// pkexecElevatedShell reports pkexec starting a shell, or no program (it
+// then runs the target user's shell), after --user USER,
+// --disable-internal-agent and --keep-cwd.
+func pkexecElevatedShell(argv []string) bool {
+	for index := 1; index < len(argv); index++ {
+		switch argument := argv[index]; {
+		case argument == "--user" || argument == "-u":
+			index++
+			if index >= len(argv) {
+				return false
+			}
+		case strings.HasPrefix(argument, "--user="),
+			argument == "--disable-internal-agent", argument == "--keep-cwd":
+		case argument == "--":
+			return index+1 == len(argv) || privilegeTargetShell(argv[index+1:], true)
+		case strings.HasPrefix(argument, "-"):
+			return false
+		default:
+			return privilegeTargetShell(argv[index:], true)
+		}
+	}
+	return true
 }
 
 func sudoOrRootPrivilegeDiscoveryPrerequisite(facts actionfacts.Facts) bool {
@@ -697,7 +829,7 @@ func sudoOrRootPrivilegeDiscoveryPrerequisite(facts actionfacts.Facts) bool {
 	}
 	return reconImpactOwnerPrerequisite(
 		actionfacts.OperationPrivilege,
-		sudoDiscoveryOrElevationDisposition,
+		sudoOrElevatedShellDisposition,
 	)(facts)
 }
 
@@ -707,7 +839,7 @@ func sudoOrRootPrivilegeDiscoverySafeNegative(facts actionfacts.Facts) bool {
 	}
 	return reconImpactOwnerSafeNegative(
 		actionfacts.OperationPrivilege,
-		sudoDiscoveryOrElevationDisposition,
+		sudoOrElevatedShellDisposition,
 	)(facts) || facts.Authoritative()
 }
 

@@ -20,10 +20,10 @@ from textual import events, on
 from textual.app import ComposeResult
 from textual.binding import Binding
 from textual.containers import Horizontal, Vertical
-from textual.screen import ModalScreen
 from textual.widgets import Button, DataTable, Static
 
 from defenseclaw.observability.v8_status import V8OperatorStatus
+from defenseclaw.tui.modal import GuardedModalScreen
 from defenseclaw.tui.theme import DEFAULT_TOKENS
 from defenseclaw.tui.widgets.data_table import MeasuredDataTable
 
@@ -57,7 +57,7 @@ class SetupResourceResult:
     hint: str = ""
 
 
-class SetupResourceEditorScreen(ModalScreen[SetupResourceResult | None]):
+class SetupResourceEditorScreen(GuardedModalScreen[SetupResourceResult | None]):
     """Rounded native editor for resource-list Setup sections."""
 
     CSS = f"""

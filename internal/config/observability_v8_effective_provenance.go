@@ -49,9 +49,13 @@ func completeObservabilityV8EffectiveProvenance(
 	delete(document, "provenance")
 	leaves := make([]observabilityV8EffectiveLeaf, 0, 512)
 	collectObservabilityV8EffectiveLeaves(document, "observability", nil, &leaves)
+	byPath := make(map[string]ObservabilityV8Provenance, len(base))
+	for _, provenance := range base {
+		byPath[provenance.Path] = provenance
+	}
 	result := append([]ObservabilityV8Provenance(nil), base...)
 	for _, leaf := range leaves {
-		basis, ok := observabilityV8EffectiveLeafBasis(leaf.parts, effective, base)
+		basis, ok := observabilityV8EffectiveLeafBasis(leaf.parts, effective, base, byPath)
 		if !ok {
 			basis = ObservabilityV8Provenance{
 				Path: leaf.path, Origin: "compiled-effective", Detail: "derived effective value",
@@ -122,12 +126,9 @@ func observabilityV8EffectiveLeafBasis(
 	parts []any,
 	effective ObservabilityV8EffectivePlan,
 	base []ObservabilityV8Provenance,
+	byPath map[string]ObservabilityV8Provenance,
 ) (ObservabilityV8Provenance, bool) {
 	candidates := observabilityV8EffectiveLeafCandidatePaths(parts, effective)
-	byPath := make(map[string]ObservabilityV8Provenance, len(base))
-	for _, provenance := range base {
-		byPath[provenance.Path] = provenance
-	}
 	for _, candidate := range candidates {
 		if provenance, ok := byPath[candidate]; ok {
 			return provenance, true

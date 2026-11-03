@@ -28,6 +28,7 @@ from defenseclaw.observability.v8_status import (
     destination_health_from_gateway,
     inspect_v8_operator_status,
     operator_status_from_effective,
+    retention_cap_warning_from_gateway,
     retention_health_from_gateway,
     source_is_v8,
 )
@@ -415,6 +416,61 @@ def test_destination_health_current_transition_and_retention_are_not_inferred() 
     assert retention_health_from_gateway(payload) == ("degraded", "run_failed")
 
     assert destination_health_from_gateway({"telemetry": {"state": "running", "details": {}}}) == {}
+
+
+def test_unmet_retention_cap_warns_in_status_and_doctor_then_clears() -> None:
+    from defenseclaw.commands import cmd_status
+    from defenseclaw.commands.cmd_doctor import _check_observability_v8_status, _DoctorResult
+
+    health = {"telemetry": {"state": "running", "details": {
+        "retention_state": "warning",
+        "retention_cap_used_bytes": 2 << 20,
+        "retention_cap_bytes": 1 << 20,
+        "retention_cap_reason": "active_correlation_state",
+    }}}
+    assert retention_health_from_gateway(health) == ("warning", "")
+    message = retention_cap_warning_from_gateway(health)
+    assert "cap not reached: 2.0 MiB used, cap 1.0 MiB" in message
+    assert "end unused sessions" in message
+    with patch.object(cmd_status, "_status_row") as row:
+        cmd_status._print_retention_cap_warning(health)
+    assert row.call_args.args[0] == "Audit retention"
+    assert "cap not reached" in row.call_args.args[1]
+
+    status = V8OperatorStatus(
+        source="/tmp/config.yaml", data_dir="/tmp", plan_digest="a" * 64,
+        bucket_catalog_version=1, retention_days=7, max_store_mb=1,
+        local_path="/tmp/audit.db", judge_bodies_path="", destinations=(), buckets=(), warnings=(),
+    )
+    result = _DoctorResult()
+    _check_observability_v8_status(status, result, live_health=health)
+    check = next(item for item in result.checks if item["label"] == "Retention controller")
+    assert check["status"] == "warn"
+    assert "cap not reached" in check["detail"]
+    assert result.failed == 0
+
+    health["telemetry"]["details"] = {"retention_state": "healthy"}
+    assert retention_cap_warning_from_gateway(health) == ""
+    with patch.object(cmd_status, "_status_row") as row:
+        cmd_status._print_retention_cap_warning(health)
+    row.assert_not_called()
+    result = _DoctorResult()
+    _check_observability_v8_status(status, result, live_health=health)
+    check = next(item for item in result.checks if item["label"] == "Retention controller")
+    assert check["status"] == "pass"
+
+
+def test_unmet_retention_cap_rejects_untrusted_health_fields() -> None:
+    details = {
+        "retention_state": "warning", "retention_cap_used_bytes": 2 << 20,
+        "retention_cap_bytes": 1 << 20, "retention_cap_reason": "active_correlation_state",
+    }
+    for replacement in ("file:///private/data", "unknown_reason", ""):
+        warning = retention_cap_warning_from_gateway({"telemetry": {"details": {**details, "retention_cap_reason": replacement}}})
+        assert warning == "audit store cap not reached; inspect the gateway retention health"
+    for replacement in (True, -1, "2097152"):
+        warning = retention_cap_warning_from_gateway({"telemetry": {"details": {**details, "retention_cap_used_bytes": replacement}}})
+        assert warning == "audit store cap not reached; inspect the gateway retention health"
 
 
 def test_destination_health_redacts_legacy_delivery_error_but_preserves_times() -> None:

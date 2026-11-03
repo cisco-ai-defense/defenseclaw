@@ -47,9 +47,22 @@ func (a *APIServer) handleACPProfiles(w http.ResponseWriter, r *http.Request) {
 		a.writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": "configuration unavailable"})
 		return
 	}
+	// pair_profiles is the profile each configured pair resolves to in the
+	// policy this gateway has loaded, so `acp setup` can wait until a pair
+	// moved back to a profile that already exists is the one the guard will be
+	// held to (rel-1-0-6 GAP-0302: the profile table alone looks loaded).
+	pairs := make(map[string]string, len(cfg.ACP.Bindings))
+	for key := range cfg.ACP.Bindings {
+		if client, agent, ok := strings.Cut(key, "/"); ok {
+			if profile := cfg.ACP.ACPProfileForPair(client, agent); profile != "" {
+				pairs[key] = profile
+			}
+		}
+	}
 	a.writeJSON(w, http.StatusOK, map[string]any{
 		"enabled": cfg.ACP.Enabled, "mode": effectiveACPMode(cfg.ACP, ""),
 		"default_profile": cfg.ACP.DefaultProfile, "profiles": cfg.ACP.Profiles,
+		"pair_profiles": pairs,
 	})
 }
 

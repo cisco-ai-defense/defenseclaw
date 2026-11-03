@@ -189,10 +189,9 @@ func newDoctorFixture(t *testing.T) *doctorFixture {
 	return f
 }
 
-// TestDoctorOnAManagedComputerChecksOnlyThisAccount: on a managed computer
-// no host check reads the gateway's files, asks Homebrew, systemd or
-// Docker, or probes OpenShell's default port: those are the
-// administrator's, and the daemon reports them (GAP-0173, GAP-0215).
+// On a managed computer only the caller's account and configured sandbox
+// ports are probed locally. Gateway files, Homebrew, systemd and Docker are
+// reported by the managed daemon (GAP-0173, GAP-0215).
 func TestDoctorOnAManagedComputerChecksOnlyThisAccount(t *testing.T) {
 	f := newDoctorFixture(t)
 	f.doctor.Managed = true
@@ -203,10 +202,11 @@ func TestDoctorOnAManagedComputerChecksOnlyThisAccount(t *testing.T) {
 	for _, c := range rep.Checks {
 		ids = append(ids, c.ID)
 	}
-	if want := []string{openshell.CheckIDPlatform, openshell.CheckIDUser}; !slices.Equal(ids, want) {
+	if want := []string{openshell.CheckIDPlatform, openshell.CheckIDUser,
+		openshell.CheckIDPortPrefix + "ingress", openshell.CheckIDPortPrefix + "egress"}; !slices.Equal(ids, want) {
 		t.Fatalf("checks = %v, want %v", ids, want)
 	}
-	if calls := f.runner.Calls(); len(calls) > 0 || listened {
+	if calls := f.runner.Calls(); len(calls) > 0 || !listened {
 		t.Errorf("probed the host: %v (listen %v)", calls, listened)
 	}
 	if rep.Driver != "" || rep.OpenShellInstallNeeded() || rep.OpenShellUpgradeAvailable() {

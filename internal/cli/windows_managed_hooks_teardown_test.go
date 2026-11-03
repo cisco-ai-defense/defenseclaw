@@ -57,7 +57,7 @@ func TestWindowsManagedHooksTeardownCommandIsHiddenAndBounded(t *testing.T) {
 		}
 		actions = append(actions, child.Name())
 	}
-	if !slices.Equal(actions, []string{"capabilities", "check", "finalize", "prepare", "purge-user-state", "rollback", "verify"}) {
+	if !slices.Equal(actions, []string{"capabilities", "check", "finalize", "prepare", "purge-user-state", "restore-owner-rights", "rollback", "verify"}) {
 		t.Fatalf("actions = %v", actions)
 	}
 }
@@ -1446,5 +1446,18 @@ func TestWindowsManagedHooksTeardownReportsCommittedStandalonePrepare(t *testing
 		metadata, "prepare", true, filepath.Join(t.TempDir(), "pending.json"))
 	if err != nil || action != "finalize" || !committed {
 		t.Fatalf("committed standalone prepare = %q, %v, %v", action, committed, err)
+	}
+}
+
+// rel-1-0-6:GAP-0303: the OWNER RIGHTS restore Setup runs with its own
+// gateway acts only for a standalone deployment and reports per account.
+func TestWindowsManagedHooksOwnerRightsRestoreRefusesOutsideStandalone(t *testing.T) {
+	if enterprisehooks.WindowsStandaloneProcess() {
+		t.Skip("the test process runs as a standalone deployment")
+	}
+	report, err := runWindowsManagedHooksOwnerRightsRestore()
+	if err == nil || report.OK || report.Action != "restore-owner-rights" ||
+		!strings.Contains(err.Error(), "standalone profile") {
+		t.Fatalf("restore outside standalone: report=%+v err=%v", report, err)
 	}
 }

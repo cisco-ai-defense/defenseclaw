@@ -10,6 +10,7 @@ import (
 	"errors"
 	"fmt"
 	"runtime"
+	"sync"
 	"time"
 	"unsafe"
 
@@ -55,53 +56,73 @@ func serve(ctx context.Context, pipeName string, handle func(sid string, report 
 	if err != nil {
 		return err
 	}
-	slots := make(chan struct{}, serverInstances)
-	// Return only once every accepted client has been handled, so a stop
-	// that drains the audit afterwards sees its report (GAP-1253). A
-	// handler holds its slot for at most serverReadTimeout plus handle.
-	defer func() {
-		for range serverInstances {
-			slots <- struct{}{}
-		}
-	}()
-	first := true
-	for {
-		select {
-		case <-ctx.Done():
-			return nil
-		case slots <- struct{}{}:
-		}
-		pipe, err := createPipe(pipeName, security, first)
+	if ctx.Err() != nil {
+		return nil
+	}
+	// Give every available instance its own accept loop. A client may open
+	// any idle instance before ConnectNamedPipe runs on that instance.
+	pipes := make([]windows.Handle, 0, serverInstances)
+	for i := range serverInstances {
+		pipe, err := createPipe(pipeName, security, i == 0)
 		if err != nil {
-			<-slots
-			// The first instance fails when another process created the
-			// name first; never serve under a name someone else owns.
+			for _, open := range pipes {
+				_ = windows.CloseHandle(open)
+			}
 			return fmt.Errorf("create refusal pipe %s: %w", pipeName, err)
 		}
-		first = false
-		if _, err := overlapped(ctx, 0, pipe, func(_ *uint32, o *windows.Overlapped) error {
-			err := windows.ConnectNamedPipe(pipe, o)
-			if errors.Is(err, windows.ERROR_PIPE_CONNECTED) {
-				return nil
-			}
-			return err
-		}); err != nil {
-			_ = windows.CloseHandle(pipe)
-			<-slots
-			if ctx.Err() != nil {
-				return nil
-			}
-			continue
-		}
-		go func() {
-			defer func() { <-slots }()
+		pipes = append(pipes, pipe)
+	}
+	serveCtx, cancel := context.WithCancel(ctx)
+	defer cancel()
+	serveErr := make(chan error, 1)
+	var workers sync.WaitGroup
+	for _, initial := range pipes {
+		workers.Add(1)
+		go func(pipe windows.Handle) {
+			defer workers.Done()
 			defer windows.CloseHandle(pipe)
-			defer windows.DisconnectNamedPipe(pipe)
-			sid, report, ok := receive(ctx, pipe)
-			if ok {
-				handle(sid, report)
+			for {
+				if serveCtx.Err() != nil {
+					return
+				}
+				_, err := overlapped(serveCtx, 0, pipe, func(_ *uint32, o *windows.Overlapped) error {
+					err := windows.ConnectNamedPipe(pipe, o)
+					if errors.Is(err, windows.ERROR_PIPE_CONNECTED) {
+						return nil
+					}
+					return err
+				})
+				if err != nil {
+					if serveCtx.Err() == nil {
+						if errors.Is(err, windows.ERROR_NO_DATA) {
+							_ = windows.DisconnectNamedPipe(pipe)
+							continue
+						}
+						select {
+						case serveErr <- fmt.Errorf("connect refusal pipe %s: %w", pipeName, err):
+						default:
+						}
+						cancel()
+					}
+					return
+				}
+				sid, report, ok := receive(serveCtx, pipe)
+				if ok {
+					handle(sid, report)
+				}
+				_ = windows.DisconnectNamedPipe(pipe)
 			}
-		}()
+		}(initial)
+	}
+	<-serveCtx.Done()
+	// A stop that drains the audit after Serve returns must see every
+	// report already accepted by a worker (GAP-1253).
+	workers.Wait()
+	select {
+	case err := <-serveErr:
+		return err
+	default:
+		return nil
 	}
 }
 

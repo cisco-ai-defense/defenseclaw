@@ -14,6 +14,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -22,6 +23,7 @@ import (
 
 	"github.com/defenseclaw/defenseclaw/internal/audit"
 	"github.com/defenseclaw/defenseclaw/internal/config"
+	"github.com/defenseclaw/defenseclaw/internal/gatewaylog"
 	"github.com/defenseclaw/defenseclaw/internal/managed"
 	"github.com/defenseclaw/defenseclaw/internal/testenv"
 )
@@ -39,6 +41,47 @@ func withRestoredManagedPosture(t *testing.T) {
 		setManagedEnterpriseRedactionPosture(priorAIDOnly)
 		setManagedServiceHosted(priorHosted)
 		managedPolicyTreeTrust = priorTreeTrust
+	})
+}
+
+// restoreGatewayProcessPosture puts back, after the test, the process-wide
+// state a gateway publishes when it boots or reloads (NewSidecar,
+// applyConfigReloadSnapshot): the managed, standalone and hosted posture, the
+// user email setting, the agent identity config, judge body retention and
+// queue, the live generation and profile set, and the run and instance ids.
+// Without it the next test (and every later -count iteration) ran under the
+// last booted gateway: the organization wording of a standalone gateway, the
+// run id of TestStandaloneHookLaneBlocksOnTheLocalEngine (rel-1-0-6
+// GAP-0365). Every test fixture that boots or reloads a sidecar calls it
+// first.
+func restoreGatewayProcessPosture(t *testing.T) {
+	t.Helper()
+	aidOnly, standalone, hosted := ManagedEnterpriseActive(), standaloneEnterpriseActive.Load(), managedServiceHosted.Load()
+	email, identityConfig, retain := UserEmailCollectionEnabled(), agentIdentityConfig.Load(), retainJudgeBodies.Load()
+	generation, profiles := liveGeneration.Load(), liveGuardrailProfiles.Load()
+	instance, sidecarInstance, watch := audit.ProcessAgentInstanceID(), gatewaylog.SidecarInstanceID(), gatewaylog.CurrentAgentWatchContext()
+	runEnv, runEnvSet := os.LookupEnv("DEFENSECLAW_RUN_ID")
+	t.Cleanup(func() {
+		setManagedEnterpriseRedactionPosture(aidOnly)
+		setStandaloneEnterpriseActive(standalone)
+		setManagedServiceHosted(hosted)
+		SetUserEmailCollectionEnabled(email)
+		setAgentIdentityConfig(identityConfig)
+		retainJudgeBodies.Store(retain)
+		SetJudgeResponseStore(nil)
+		liveGeneration.Store(generation)
+		liveGuardrailProfiles.Store(profiles)
+		audit.SetProcessAgentInstanceID(instance)
+		gatewaylog.SetSidecarInstanceID(sidecarInstance)
+		gatewaylog.SetAgentWatchContext(watch)
+		// NewSidecar installs the run id and mirrors a minted one into the
+		// environment; a test process starts with neither.
+		gatewaylog.SetProcessRunID("")
+		if runEnvSet {
+			_ = os.Setenv("DEFENSECLAW_RUN_ID", runEnv)
+		} else {
+			_ = os.Unsetenv("DEFENSECLAW_RUN_ID")
+		}
 	})
 }
 
@@ -85,6 +128,7 @@ func assertProfilePosture(t *testing.T, want profilePosture) {
 // the wiring could not pass by accident.
 func bootProfileSidecar(t *testing.T, posture profilePosture) *config.Config {
 	t.Helper()
+	restoreGatewayProcessPosture(t)
 	dataDir := testenv.PrivateTempDir(t)
 	store, err := audit.NewStore(filepath.Join(dataDir, "audit.db"))
 	if err != nil {

@@ -316,6 +316,7 @@ func (s *Sidecar) prepareObservabilityV8Runtime(
 	}
 	retentionOptions := observabilityruntime.RetentionControllerOptions{
 		Reporter: sidecarV8RetentionObserver{s: s}, SecureClient: s.currentConfig().SecureClientIntegration(),
+		Log: os.Stderr,
 	}
 	if !retentionOptions.SecureClient {
 		retentionOptions.StartupDelay = observabilityruntime.RetentionStartupDelay
@@ -1203,10 +1204,7 @@ func (observer sidecarV8RetentionObserver) ReportRetentionController(
 	if observer.s == nil || observer.s.health == nil {
 		return
 	}
-	observer.s.health.setObservabilityV8RetentionCap(status.MaxStoreMB)
-	observer.s.health.setObservabilityV8Retention(
-		string(status.State), status.RetentionDays, string(status.Failure),
-	)
+	observer.s.health.setObservabilityV8Retention(status)
 }
 
 type sidecarV8EventHistoryObserver struct{ s *Sidecar }

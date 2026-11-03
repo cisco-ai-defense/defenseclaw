@@ -115,6 +115,11 @@ func newSandboxFixture(t testing.TB, enrollment config.EnterpriseEnrollmentConfi
 		if !ok {
 			return
 		}
+		if err := chargeSandboxHookBudget(ctx, false); err != nil {
+			w.Header().Set("Retry-After", "1")
+			f.api.writeJSON(w, http.StatusTooManyRequests, map[string]string{"error": err.Error()})
+			return
+		}
 		binding := sandboxauth.Binding{ID: reg.BindingID, SandboxName: reg.SandboxName, Connector: reg.Connector}
 		subject, source := profileRequestSubject(sandboxauth.WithRequest(ctx, binding, sandboxauth.NewFSView(binding, nil)))
 		uid := ""

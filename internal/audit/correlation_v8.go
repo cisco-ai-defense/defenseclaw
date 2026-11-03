@@ -541,6 +541,16 @@ func (repo *CorrelationRepository) resolveConnectorInstance(
 	if !validCustody(custody) {
 		return ConnectorInstance{}, errors.New("audit: invalid connector export custody")
 	}
+	key := connectorInstanceKey{scoped: scoped, connector: connector}
+	if cached, ok := repo.store.connectorInstances.Load(key); ok && repo.store.Ready() {
+		// The instance this store resolved or wrote: returned as is when the
+		// call would change nothing (no custody promotion, same profile).
+		instance := cached.(ConnectorInstance)
+		if (custody != ConnectorCustodyDefenseClaw || instance.ExportCustody == ConnectorCustodyDefenseClaw) &&
+			profileVersion == instance.ProfileVersion {
+			return instance, nil
+		}
+	}
 	release, err := repo.store.acquireReady()
 	if err != nil {
 		return ConnectorInstance{}, err
@@ -629,7 +639,24 @@ func (repo *CorrelationRepository) resolveConnectorInstance(
 	if err := tx.Commit(); err != nil {
 		return ConnectorInstance{}, fmt.Errorf("audit: commit connector instance resolution: %w", err)
 	}
+	repo.store.connectorInstances.Store(key, instance)
 	return instance, nil
+}
+
+// connectorInstanceKey names a resolved connector instance
+// (Store.connectorInstances): the default instance of connector when scoped
+// is empty, the scoped instance otherwise.
+type connectorInstanceKey struct {
+	scoped    ConnectorInstanceID
+	connector string
+}
+
+// forgetConnectorInstances drops every resolved connector instance, so the
+// next resolution reads the table again.
+func (s *Store) forgetConnectorInstances() {
+	if s != nil {
+		s.connectorInstances.Clear()
+	}
 }
 
 func (repo *CorrelationRepository) UpsertConnectorInstance(
@@ -666,6 +693,8 @@ func (repo *CorrelationRepository) UpsertConnectorInstance(
 		return ConnectorInstance{}, err
 	}
 	defer release()
+	// Whatever the outcome, the next resolution reads the table.
+	defer repo.store.forgetConnectorInstances()
 	result, err := repo.store.execDB(ctx, "correlation_connector_upsert", `
 		INSERT INTO correlation_connector_instances (
 			connector_instance_id, connector, export_custody, profile_version,

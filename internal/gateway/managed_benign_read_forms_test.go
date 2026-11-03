@@ -28,6 +28,13 @@ type r106Reader2Row struct {
 // and Codex.
 func r106Reader2Check(t *testing.T, rows []r106Reader2Row) {
 	t.Helper()
+	r106Reader2CheckWith(t, rows, nil)
+}
+
+// r106Reader2CheckWith is r106Reader2Check with setup run on each fresh
+// fixture after the project files are written.
+func r106Reader2CheckWith(t *testing.T, rows []r106Reader2Row, setup func(*testing.T, b36ManagedHookFixture)) {
+	t.Helper()
 	for _, connector := range []string{"claudecode", "codex"} {
 		for _, row := range rows {
 			f := newB36ManagedHookFixture(t)
@@ -35,6 +42,9 @@ func r106Reader2Check(t *testing.T, rows []r106Reader2Row) {
 				if err := os.WriteFile(filepath.Join(f.project, name), []byte("x\n"), 0o600); err != nil {
 					t.Fatal(err)
 				}
+			}
+			if setup != nil {
+				setup(t, f)
 			}
 			cwd := f.project
 			if row.where == "home" {
@@ -64,7 +74,14 @@ func r106Reader2Check(t *testing.T, rows []r106Reader2Row) {
 			if err := os.Chmod(f.homes, 0o700); err != nil {
 				t.Fatal(err)
 			}
-			if perUser != row.want || managed != row.want {
+			// want is one verdict for both cells, or per-user/managed
+			// ("allow/block") where the managed gateway keeps a reading it
+			// cannot verify behind ProtectHome.
+			wantPerUser, wantManaged, split := strings.Cut(row.want, "/")
+			if !split {
+				wantManaged = wantPerUser
+			}
+			if perUser != wantPerUser || managed != wantManaged {
 				t.Errorf("%s %s: per-user %s, managed %s, want %s", connector, row.name, perUser, managed, row.want)
 			}
 		}

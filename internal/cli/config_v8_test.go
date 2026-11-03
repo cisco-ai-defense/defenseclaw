@@ -452,6 +452,12 @@ func TestConfigV8MachineCommandsBypassRuntimeInitialization(t *testing.T) {
 	if configV8Cmd.PersistentPreRunE == nil || configV8Cmd.PersistentPostRun == nil {
 		t.Fatal("config-v8 helper must override root runtime hooks")
 	}
+	// Other tests of the package leave the runtime state set; start from
+	// none, so the check below sees only what the helper's hook set
+	// (rel-1-0-6 GAP-0306), and put it back after.
+	previousCfg, previousStore, previousLog := cfg, auditStore, auditLog
+	cfg, auditStore, auditLog = nil, nil, nil
+	t.Cleanup(func() { cfg, auditStore, auditLog = previousCfg, previousStore, previousLog })
 	if err := configV8Cmd.PersistentPreRunE(configV8Cmd, nil); err != nil {
 		t.Fatal(err)
 	}

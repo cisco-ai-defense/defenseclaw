@@ -102,11 +102,7 @@ func TestHandleChatCompletion_HydratedTargetURL_HitsSSRFGuards(t *testing.T) {
 	prov := &mockProvider{}
 	insp := newMockInspector()
 	proxy := newTestProxy(t, prov, insp, "action")
-	// newTestProxy enables passthroughAllowPrivateForTest so legacy
-	// httptest fixtures keep working. Disable it so the production
-	// SSRF guard runs against our hydrated upstream.
-	passthroughAllowPrivateForTest = false
-	t.Cleanup(func() { passthroughAllowPrivateForTest = true })
+	requirePrivateTargetGuard(t)
 
 	body := mustJSON(t, map[string]interface{}{
 		"model":    "openai/gpt-4",
@@ -167,8 +163,7 @@ func TestHandleChatCompletion_HydratedTargetURL_RejectsUserinfo(t *testing.T) {
 	prov := &mockProvider{}
 	insp := newMockInspector()
 	proxy := newTestProxy(t, prov, insp, "action")
-	passthroughAllowPrivateForTest = false
-	t.Cleanup(func() { passthroughAllowPrivateForTest = true })
+	requirePrivateTargetGuard(t)
 
 	proxy.connector = &hydratingTestConnector{
 		upstream: "https://attacker:password@api.openai.com",
@@ -201,8 +196,7 @@ func TestHandleChatCompletion_HydratedTargetURL_RejectsNonHTTPScheme(t *testing.
 	prov := &mockProvider{}
 	insp := newMockInspector()
 	proxy := newTestProxy(t, prov, insp, "action")
-	passthroughAllowPrivateForTest = false
-	t.Cleanup(func() { passthroughAllowPrivateForTest = true })
+	requirePrivateTargetGuard(t)
 
 	proxy.connector = &hydratingTestConnector{
 		upstream: "file:///etc/passwd",
@@ -224,4 +218,17 @@ func TestHandleChatCompletion_HydratedTargetURL_RejectsNonHTTPScheme(t *testing.
 		t.Fatalf("expected 400 for non-http scheme in hydrated upstream, got %d: %s",
 			rec.Code, rec.Body.String())
 	}
+}
+
+// requirePrivateTargetGuard runs the test with the production private-target
+// guard (passthroughAllowPrivateForTest off) and puts the previous value back.
+// The cleanup used to switch the seam on for good, so every later test in the
+// process (TestSemanticRouterRejectedTargetIsBlockedWithoutModelRequestTelemetry
+// on the next -count iteration) reached the dial guard instead of the 403
+// (rel-1-0-6 GAP-0341).
+func requirePrivateTargetGuard(t *testing.T) {
+	t.Helper()
+	previous := passthroughAllowPrivateForTest
+	passthroughAllowPrivateForTest = false
+	t.Cleanup(func() { passthroughAllowPrivateForTest = previous })
 }

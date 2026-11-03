@@ -33,7 +33,7 @@ from pathlib import Path
 import click
 
 from defenseclaw import ux
-from defenseclaw.config import config_path
+from defenseclaw.config import config_path, gateway_pid_path
 from defenseclaw.context import AppContext, pass_ctx
 from defenseclaw.openclaw_presence import openclaw_implied_but_not_installed
 from defenseclaw.scanner_binary import MCP_SCANNER_BINARY, SKILL_SCANNER_BINARY, resolve_scanner_binary
@@ -521,12 +521,14 @@ def status(app: AppContext, as_json: bool) -> None:
             )
         _print_policy(health)
         _print_audit_log_health(cfg, health)
+        _print_retention_cap_warning(health)
         _print_agent_identity_ledger(health)
         _print_agents(cfg, health=health)
         _print_guardrail_profile(cfg)
         _print_application_protection(cfg, health=health)
         _print_semantic_routing(cfg, health=health)
         _print_llm_judge(health, cfg)
+        _print_decision_model(cfg)
         _print_hook_guardian(cfg)
         _print_fleet_health(cfg, client)
         hint(
@@ -749,7 +751,7 @@ def _live_gateway_pid(cfg) -> int:
     try:
         from defenseclaw.commands.cmd_doctor import _read_pid_from_file
 
-        return _read_pid_from_file(os.path.join(data_dir, "gateway.pid"))
+        return _read_pid_from_file(gateway_pid_path(data_dir))
     except Exception:  # noqa: BLE001 - status stays best effort
         return 0
 
@@ -884,6 +886,11 @@ def _print_agents(
     health_map = _fetch_health_connectors(health=health)
     not_started = _connectors_not_started(health)
     refused_by_agent_settings = _connectors_refused_by_agent_settings(health)
+    removed_agent_reasons = {
+        name: reason
+        for name, reason in refused_by_agent_settings.items()
+        if name in not_started and reason.startswith("the agent is not installed for this account")
+    }
     state = _application_protection_status(cfg, health=health)
 
     roster: dict[str, dict] = {}
@@ -940,7 +947,7 @@ def _print_agents(
     not_running_count = sum(
         1 for c in actives if _is_enabled(c) and (
             c in agent_missing
-            or c not in health_map and c in not_started
+            or c in not_started
         )
     )
     header = f"{enabled_count - not_running_count} active"
@@ -1008,7 +1015,9 @@ def _print_agents(
         if hc:
             runtime_detail = ""
             runtime_state = str(hc.get("state") or "")
-            if conn in agent_missing:
+            if conn in removed_agent_reasons:
+                runtime_state, runtime_detail = "not running", removed_agent_reasons[conn]
+            elif conn in agent_missing:
                 # The gateway registers a staged connector, but no agent
                 # runs its hooks (GAP-0513).
                 runtime_state, runtime_detail = "off", _agent_missing_detail(conn)
@@ -1039,7 +1048,12 @@ def _print_agents(
             dim_text = ux.dim(
                 f"{friendly} ({conn}) — mode={mode or '?'}{fail_mode_suffix}{source_suffix}{disclosure_suffix}"
             )
-            if conn in agent_missing:
+            if conn in removed_agent_reasons:
+                suffix = _connector_state_verb("not running") + ux.dim(
+                    f" (not enforced: {removed_agent_reasons[conn]})"
+                )
+                _echo_wrapped(f"                {dim_text}{suffix}", 18)
+            elif conn in agent_missing:
                 suffix = _connector_state_verb("off") + ux.dim(f" ({_agent_missing_detail(conn)})")
                 _echo_wrapped(f"                {dim_text}{suffix}", 18)
             elif conn == "opencode" and not sidecar_down:
@@ -1333,6 +1347,7 @@ def _hook_runtime_degraded_suffix(cfg, connector: str, *, credential_refused: bo
             agent_hook_switch_problems,
             hook_registration_problems,
             hook_runtime_problems,
+            pinned_workspace_dir,
             repair_command,
         )
 
@@ -1348,16 +1363,31 @@ def _hook_runtime_degraded_suffix(cfg, connector: str, *, credential_refused: bo
             # DEGRADED here as in the alert and doctor (GAP-1634).
             else hook_runtime_problems(cfg, connector)
             or hook_registration_problems(cfg, connector)
-            or agent_hook_switch_problems(cfg, connector)
+            # The same workspace as doctor and the gateway: the pinned
+            # claw.workspace_dir, else (disableAllHooks only) this folder.
+            or agent_hook_switch_problems(cfg, connector, workspace_dir=pinned_workspace_dir(cfg) or None)
         )
     except Exception:  # noqa: BLE001 - status must survive incomplete runtime state.
         return ""
     if not problems:
-        return ""
+        return _hook_env_warning_suffix(cfg, connector)
     step = repair_command(connector, problems[0])
     if not (step.startswith("run ") or getattr(problems[0], "repair", "")):
         step = f"run `{step}`"
     return " — " + ux._style("DEGRADED", fg="red", bold=True) + ux.dim(f" ({problems[0]}; {step})")
+
+
+def _hook_env_warning_suffix(cfg, connector: str) -> str:
+    """`` — WARNING (...)`` when agent settings or this shell's environment can stop the hooks (rel-1-0-6:GAP-0322)."""
+    try:
+        from defenseclaw.hook_integrity import agent_hook_env_warnings
+
+        warnings = agent_hook_env_warnings(cfg, connector)
+    except Exception:  # noqa: BLE001 - status must survive incomplete runtime state.
+        return ""
+    if not warnings:
+        return ""
+    return " — " + ux._style("WARNING", fg="yellow", bold=True) + ux.dim(f" ({warnings[0]}; {warnings[0].repair})")
 
 
 def _connectors_not_started(health: dict | None) -> set[str]:
@@ -1372,8 +1402,9 @@ def _connectors_not_started(health: dict | None) -> set[str]:
 
 def _connectors_refused_by_agent_settings(health: dict | None) -> dict[str, str]:
     """Connectors the gateway left unguarded because their agent's own settings
-    turn its hooks off or do not parse, each with the gateway's reason, which
-    names the fix (GAP-0578)."""
+    turn its hooks off or do not parse (GAP-0578), or because the agent is no
+    longer installed (GAP-0492), each with the gateway's reason, which names
+    the fix."""
     guardrail = health.get("guardrail") if isinstance(health, dict) else None
     details = guardrail.get("details") if isinstance(guardrail, dict) else None
     refused = details.get("connectors_refused_by_agent_settings") if isinstance(details, dict) else None
@@ -1681,6 +1712,13 @@ def _print_audit_log_health(cfg, health: dict | None) -> None:
         _status_row("Audit log", ux._style(value[0].upper() + value[1:], fg="yellow"))
 
 
+def _print_retention_cap_warning(health: dict | None) -> None:
+    from defenseclaw.observability.v8_status import retention_cap_warning_from_gateway
+
+    if value := retention_cap_warning_from_gateway(health):
+        _status_row("Audit retention", ux._style("Warning: " + value, fg="yellow"))
+
+
 def _print_agent_identity_ledger(health: dict | None) -> None:
     """Warn when the gateway cannot save agent identities (GAP-0393)."""
     from defenseclaw.commands.cmd_doctor import agent_identity_ledger_failure
@@ -1763,6 +1801,19 @@ def _print_judge_fallbacks(details: dict, cfg=None) -> None:
     if summary:
         hint = judge_max_parallel_hint(cfg)
         _status_row("Judge fallbacks", ux._style(summary + ("; " + hint if hint else ""), fg="yellow"))
+
+
+def _print_decision_model(cfg) -> None:
+    """One row naming the tool-call cascade per active connector, while the
+    decision model is on (rules only / rules -> decision model / ... -> LLM judge)."""
+    from defenseclaw import decision_model as dmod
+
+    dm = getattr(cfg, "decision_model", None)
+    if dm is None or not dm.active():
+        return
+    lines = dmod.cascade_lines(cfg)
+    if lines:
+        _status_row("Decision model", "; ".join(lines))
 
 
 def _print_llm_judge(health: dict | None, cfg=None) -> None:
@@ -2124,6 +2175,11 @@ def _connector_roster(cfg, health: dict | None = None) -> list[dict]:
         )
     health_map = _fetch_health_connectors(health=health)
     not_started = _connectors_not_started(health)
+    removed_agent_reasons = {
+        name: reason
+        for name, reason in _connectors_refused_by_agent_settings(health).items()
+        if name in not_started and reason.startswith("the agent is not installed for this account")
+    }
     refused_credentials = _refused_scoped_hook_credentials(cfg, health)
     for name, row in rows.items():
         # The text roster already uses this authenticated runtime state. Keep
@@ -2140,7 +2196,7 @@ def _connector_roster(cfg, health: dict | None = None) -> list[dict]:
             row["runtime_detail"] = _agent_missing_detail(name)
         if row.get("enabled") and name in not_started:
             row["state"] = "not running"
-            row["runtime_detail"] = (
+            row["runtime_detail"] = removed_agent_reasons.get(name) or (
                 "setup failed when the gateway started, so it is not enforced; "
                 f"run defenseclaw setup {'claude-code' if name == 'claudecode' else name}"
             )
@@ -2287,6 +2343,10 @@ def _status_payload(app) -> dict:
         )
         if failure := _gateway_audit_write_failure(health):
             payload["audit_write_failure"] = failure
+        from defenseclaw.observability.v8_status import retention_cap_warning_from_gateway
+
+        if warning := retention_cap_warning_from_gateway(health):
+            payload["audit_store_cap_warning"] = warning
     if (policy := _policy_status(health)) is not None:
         payload["policy"] = policy
     payload["connectors"] = _connector_roster(cfg, health=health)

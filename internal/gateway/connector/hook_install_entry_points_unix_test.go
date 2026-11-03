@@ -40,7 +40,7 @@ func shellHookBlocksNatively(script string, code int, stdout string) bool {
 // failMode and returns the hook directory.
 func renderPerUserShellHooks(t *testing.T, tc installInFlightShellCase, data, failMode string) string {
 	t.Helper()
-	return renderPerUserShellHooksAt(t, tc, data, failMode, freeAPIAddr(t))
+	return renderPerUserShellHooksAt(t, tc, data, failMode, refusingAPIAddr(t))
 }
 
 // runPerUserShellHookAt runs the rendered hook at path with data as the

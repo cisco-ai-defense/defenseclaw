@@ -27,6 +27,7 @@ import (
 	"sync"
 
 	"github.com/defenseclaw/defenseclaw/internal/lazyregexp"
+	"github.com/defenseclaw/defenseclaw/internal/pathidentity"
 )
 
 // OTLPPathTokenScope identifies a connector-bound OTLP token used in
@@ -357,7 +358,7 @@ func removeOTLPPathTokenUniqueTemps(tokenPath string) error {
 // as removal without mutating the path. Retired connector cleanup uses it to
 // reject a bad token path before writing its deny stub.
 func checkOwnedOTLPPathTokenFile(path string) error {
-	info, err := os.Lstat(path)
+	info, err := pathidentity.LstatPinned(path)
 	if err != nil {
 		if os.IsNotExist(err) {
 			return nil
@@ -502,7 +503,7 @@ func validateSecureOTLPPathTokenFile(dataDir, path string) (os.FileInfo, error) 
 	if err := validateOTLPPathTokenLocation(dataDir, path); err != nil {
 		return nil, err
 	}
-	info, err := os.Lstat(path)
+	info, err := pathidentity.LstatPinned(path)
 	if err != nil {
 		return nil, err
 	}

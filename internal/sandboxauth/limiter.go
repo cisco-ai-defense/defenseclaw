@@ -38,6 +38,13 @@ var (
 // Hook-class requests and OTLP uploads have separate buckets and separate
 // concurrency slots: telemetry gates nothing, so slow or bulky uploads must
 // never hold the capacity that PreToolUse and friends need to answer.
+//
+// A managed sandbox hook confirms each allowed tool answer with a second post,
+// its delivery receipt (AcquireReceipt). Receipts have a bucket and slots of
+// their own, the size of the hook bucket's, so a tool call spends the hook
+// rate once: with one shared bucket a run of parallel calls refused the
+// receipt of an answer already given, and the hook denied it closed, at half
+// the documented rate (rel-1-0-6 GAP-0490).
 type LimiterConfig struct {
 	// HookRPS and HookBurst bound hook, notify and inspect calls. A busy
 	// agent fires a few hooks per tool call, so the defaults leave room for
@@ -90,10 +97,11 @@ type Limiter struct {
 }
 
 type limiterEntry struct {
-	hook  *rate.Limiter
-	otlp  *rate.Limiter
-	slots *limiterSlots
-	maxIn int
+	hook    *rate.Limiter
+	otlp    *rate.Limiter
+	receipt *rate.Limiter
+	slots   *limiterSlots
+	maxIn   int
 	// override is the RateLimit the buckets were built from; a changed
 	// binding override rebuilds them.
 	override RateLimit
@@ -103,8 +111,10 @@ type limiterEntry struct {
 // limiterSlots is shared by every generation of a binding's entry so a
 // release always returns its slot to the counter it was taken from.
 type limiterSlots struct {
-	hook int
-	otlp int
+	hook    int
+	otlp    int
+	receipt int
+	pending int
 }
 
 // NewLimiter builds a limiter; zero fields in cfg take the defaults.
@@ -144,45 +154,94 @@ func NewLimiter(cfg LimiterConfig) *Limiter {
 // invoke release exactly once when the request completes; release is
 // idempotent.
 func (l *Limiter) Acquire(b Binding, route Route) (release func(), err error) {
+	if route == RouteOTLP {
+		return l.acquire(b, limiterOTLP)
+	}
+	return l.acquire(b, limiterHook)
+}
+
+// AcquireReceipt admits one delivery receipt acknowledgement for b, from
+// the receipt bucket and slots (see LimiterConfig). A forged acknowledgement
+// spends only that bucket and still meets the binding's concurrency cap; the
+// gateway checks the receipt itself.
+func (l *Limiter) AcquireReceipt(b Binding) (release func(), err error) {
+	return l.acquire(b, limiterReceipt)
+}
+
+// AcquirePendingHook holds a bounded slot while an unmarked hook body is
+// read. Its hook or receipt rate budget is charged after classification.
+func (l *Limiter) AcquirePendingHook(b Binding) (release func(), err error) {
+	return l.acquire(b, limiterPendingHook)
+}
+
+// ChargeHookBody spends only the classified rate token. The pending request
+// already owns the in-flight slot until its handler finishes.
+func (l *Limiter) ChargeHookBody(b Binding, receipt bool) error {
 	now := l.cfg.Now()
 	l.mu.Lock()
 	defer l.mu.Unlock()
 	l.sweepLocked(now)
 	entry := l.entryLocked(b, now)
 	entry.lastSeen = now
-	otlp := route == RouteOTLP
 	bucket := entry.hook
-	if otlp {
-		if entry.slots.otlp >= l.cfg.OTLPMaxInFlight || l.otlpTotal >= l.cfg.OTLPMaxInFlightTotal {
-			return nil, ErrTooManyInFlight
-		}
-		bucket = entry.otlp
-	} else if entry.slots.hook >= entry.maxIn {
-		return nil, ErrTooManyInFlight
+	if receipt {
+		bucket = entry.receipt
 	}
 	if !bucket.AllowN(now, 1) {
+		return ErrRateLimited
+	}
+	return nil
+}
+
+// limiterClass is the bucket and the slots one request takes.
+type limiterClass int
+
+const (
+	limiterHook limiterClass = iota
+	limiterOTLP
+	limiterReceipt
+	limiterPendingHook
+)
+
+func (l *Limiter) acquire(b Binding, class limiterClass) (release func(), err error) {
+	now := l.cfg.Now()
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	l.sweepLocked(now)
+	entry := l.entryLocked(b, now)
+	entry.lastSeen = now
+	slots := entry.slots
+	bucket, held := entry.hook, &slots.hook
+	switch class {
+	case limiterOTLP:
+		if slots.otlp >= l.cfg.OTLPMaxInFlight || l.otlpTotal >= l.cfg.OTLPMaxInFlightTotal {
+			return nil, ErrTooManyInFlight
+		}
+		bucket, held = entry.otlp, &slots.otlp
+	case limiterReceipt:
+		bucket, held = entry.receipt, &slots.receipt
+	case limiterPendingHook:
+		held = &slots.pending
+	}
+	if class != limiterOTLP && *held >= entry.maxIn {
+		return nil, ErrTooManyInFlight
+	}
+	if class != limiterPendingHook && !bucket.AllowN(now, 1) {
 		return nil, ErrRateLimited
 	}
-	slots := entry.slots
-	if otlp {
-		slots.otlp++
+	*held++
+	if class == limiterOTLP {
 		l.otlpTotal++
-	} else {
-		slots.hook++
 	}
 	var once sync.Once
 	return func() {
 		once.Do(func() {
 			l.mu.Lock()
-			if otlp {
-				if slots.otlp > 0 {
-					slots.otlp--
-				}
-				if l.otlpTotal > 0 {
-					l.otlpTotal--
-				}
-			} else if slots.hook > 0 {
-				slots.hook--
+			if *held > 0 {
+				*held--
+			}
+			if class == limiterOTLP && l.otlpTotal > 0 {
+				l.otlpTotal--
 			}
 			if current, ok := l.bindings[b.ID]; ok && current.slots == slots {
 				current.lastSeen = l.cfg.Now()
@@ -217,6 +276,7 @@ func (l *Limiter) entryLocked(b Binding, now time.Time) *limiterEntry {
 	next := &limiterEntry{
 		hook:     rate.NewLimiter(rate.Limit(hookRPS), hookBurst),
 		otlp:     rate.NewLimiter(rate.Limit(l.cfg.OTLPRPS), l.cfg.OTLPBurst),
+		receipt:  rate.NewLimiter(rate.Limit(hookRPS), hookBurst),
 		slots:    &limiterSlots{},
 		maxIn:    maxIn,
 		override: b.RateLimit,
@@ -237,7 +297,7 @@ func (l *Limiter) sweepLocked(now time.Time) {
 	}
 	l.lastSweep = now
 	for id, entry := range l.bindings {
-		if entry.slots.hook == 0 && entry.slots.otlp == 0 && now.Sub(entry.lastSeen) >= l.cfg.IdleTTL {
+		if entry.slots.hook == 0 && entry.slots.otlp == 0 && entry.slots.receipt == 0 && entry.slots.pending == 0 && now.Sub(entry.lastSeen) >= l.cfg.IdleTTL {
 			delete(l.bindings, id)
 		}
 	}

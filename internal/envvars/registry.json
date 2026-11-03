@@ -2479,6 +2479,25 @@
       "security_note": "Hook PATH lockdown \u2014 stripped so an agent-supplied 'trusted' flag cannot re-enable an attacker-controlled PATH."
     },
     {
+      "name": "DEFENSECLAW_CODEX_NOTIFY_CHAINED",
+      "category": "hook_internal",
+      "purpose": "Set by defenseclaw-hook notify (the per-user native Codex notifier and the Secure Client Windows notifier) on the notifier it chains, the one setup displaced. The value is the hex SHA-256 of the turn payload handed to that notifier. A defenseclaw-hook notify whose own payload has that digest forwards nothing and chains nothing, so a wrapper such as Codex computer-use that runs DefenseClaw's notifier again ends the chain instead of looping. Any other value, such as a constant or one inherited by a nested Codex for another turn, suppresses nothing. Every defenseclaw-hook notify reads it wherever it chains, managed hosts included: the notify process does not apply the managed-mode ignore, so the managed policy is allow.",
+      "default": "(unset; set only on the chained notifier's process)",
+      "accepted_values": [
+        "hex SHA-256 of the notify payload"
+      ],
+      "security_impact": "low",
+      "surface_in_doctor": false,
+      "managed": "allow",
+      "since": "1.0.7",
+      "consumers": [
+        {
+          "location": "internal/cli/notify.go",
+          "description": "Native Codex notifier chain guard"
+        }
+      ]
+    },
+    {
       "name": "DEFENSECLAW_HOOK_SOCKET",
       "category": "hook_internal",
       "purpose": "Path of the standalone gateway's peer-authorized unix hook socket, assigned inside a rendered standalone Unix hook (connector shell hooks and the Codex notify bridge) before the socket and its directory owners are checked and the request is sent with curl --unix-socket. The script sets it itself, so an inherited value is overwritten.",

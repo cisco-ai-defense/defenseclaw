@@ -86,6 +86,7 @@ func classifyOutputAt(out *parseOutput, wrapperDepth int) {
 			return
 		}
 	}
+	markPOSIXStdinCodeBehindWrapper(out)
 	classifyEmbeddedPrograms(out, wrapperDepth)
 
 	allowPreview := out.status == StatusComplete
@@ -330,6 +331,8 @@ func classifyCommand(out *parseOutput, command *CommandFact) {
 	case "cat":
 		addOperation(command, OperationRead)
 		addPathOperands(out, command, PathAccessRead, optionValues())
+	case "apply_patch":
+		classifyPOSIXApplyPatchStdin(out, command)
 	case "head", "tail":
 		addOperation(command, OperationRead)
 		addPathOperands(out, command, PathAccessRead, optionValues(
@@ -13176,4 +13179,228 @@ func deduplicate[T any](values []T, key func(T) string) []T {
 		out = append(out, value)
 	}
 	return out
+}
+
+// markPOSIXStdinCodeBehindWrapper keeps the parse partial when a command
+// that runs its standard input as code is given one: a heredoc, a stdin
+// redirect or the output of an earlier pipeline stage. A shell started by
+// sudo, doas or pkexec (sudo sh, sudo -s, sudo -u root bash), su without -c,
+// at or batch without -f, and crontab reading - or no file run that input,
+// which ActionFacts does not read; direct shells already stay partial
+// (rel-1-0-6:GAP-0419).
+func markPOSIXStdinCodeBehindWrapper(out *parseOutput) {
+	// A pipeline counts when an earlier stage reads a heredoc (cat <<X |
+	// sudo sh); a download piped into a shell keeps its own modeled flow.
+	heredocPipeline := make(map[int64]bool, len(out.commands))
+	for index := range out.commands {
+		command := &out.commands[index]
+		piped := command.PipelineID != 0 && heredocPipeline[command.PipelineID]
+		if command.PipelineID != 0 && (command.LiteralStdinComplete || command.LiteralStdinAmbiguous) {
+			heredocPipeline[command.PipelineID] = true
+		}
+		if command.Dialect != DialectPOSIX {
+			continue
+		}
+		fed := piped || command.LiteralStdinComplete || command.LiteralStdinAmbiguous
+		for _, redirect := range command.Redirects {
+			if redirect.FD == 0 {
+				fed = true
+			}
+		}
+		if fed && posixWrapperRunsStdinAsCode(command.Argv) {
+			out.markPartial(IssueUnsupportedConstruct)
+		}
+	}
+}
+
+// posixWrapperRunsStdinAsCode reports an argv that reads its standard input
+// as commands through a privilege wrapper or a scheduler. A direct shell is
+// not one: its stdin mode is modeled where it is classified.
+func posixWrapperRunsStdinAsCode(argv []string) bool {
+	argv = posixStdinCodeUnwrap(argv)
+	if len(argv) == 0 {
+		return false
+	}
+	switch commandProgram(argv[0]) {
+	case "sudo", "doas", "pkexec":
+		rest := argv[1:]
+		shell := false
+		for len(rest) > 0 && strings.HasPrefix(rest[0], "-") && rest[0] != "-" {
+			option := rest[0]
+			rest = rest[1:]
+			if option == "--" {
+				break
+			}
+			switch option {
+			case "-s", "--shell", "-i", "--login":
+				shell = true
+			case "-u", "-g", "-C", "-D", "-h", "-p", "-r", "-t", "-U", "-T", "-R",
+				"--user", "--group", "--host", "--prompt", "--role", "--type",
+				"--other-user", "--close-from", "--command-timeout", "--chdir", "--chroot":
+				if len(rest) > 0 {
+					rest = rest[1:]
+				}
+			default:
+				// A cluster of short options (-iu root, -Eu root sh): a
+				// value option takes the rest of the word, or the next
+				// word when it ends the cluster.
+				if strings.HasPrefix(option, "--") {
+					continue
+				}
+				for index := 1; index < len(option); index++ {
+					letter := option[index]
+					if letter == 's' || letter == 'i' {
+						shell = true
+						continue
+					}
+					if strings.IndexByte(privilegeWrapperValueOptions, letter) >= 0 {
+						if index == len(option)-1 && len(rest) > 0 {
+							rest = rest[1:]
+						}
+						break
+					}
+				}
+			}
+		}
+		if len(rest) == 0 {
+			return shell
+		}
+		return posixStdinCodeTarget(rest)
+	case "su":
+		for _, argument := range argv[1:] {
+			if argument == "-c" || argument == "--command" || strings.HasPrefix(argument, "--command=") {
+				return false
+			}
+		}
+		return true
+	case "at", "batch":
+		for _, argument := range argv[1:] {
+			switch argument {
+			case "-f", "-l", "-r", "-d", "-c", "-V":
+				return false
+			}
+		}
+		return true
+	case "crontab":
+		// crontab [-u USER] with no file, or with -, installs its stdin.
+		operands := 0
+		for index := 1; index < len(argv); index++ {
+			switch argument := argv[index]; {
+			case argument == "-u":
+				index++
+			case strings.HasPrefix(argument, "-u"):
+				// -uUSER: the user is attached to the option.
+			case argument == "-":
+				return true
+			case strings.HasPrefix(argument, "-"):
+				return false
+			default:
+				operands++
+			}
+		}
+		return operands == 0
+	default:
+		return false
+	}
+}
+
+// privilegeWrapperValueOptions are the short options of sudo, doas and
+// pkexec that take a value.
+const privilegeWrapperValueOptions = "aCDghpRrTtUu"
+
+// posixStdinCodeUnwrap drops a leading env (its options, --, and its
+// NAME=VALUE assignments) or command (-p, --), which start the next word
+// with the same stdin.
+func posixStdinCodeUnwrap(argv []string) []string {
+	for len(argv) > 0 {
+		switch commandProgram(argv[0]) {
+		case "env":
+			argv = posixEnvCommand(argv[1:])
+		case "command":
+			argv = argv[1:]
+			for len(argv) > 0 && (argv[0] == "-p" || argv[0] == "--") {
+				argv = argv[1:]
+			}
+		default:
+			return argv
+		}
+	}
+	return argv
+}
+
+// posixEnvCommand is the command env runs, given env's arguments: it skips
+// the flags (-i, -, -0, -v and their long forms), the options that take a
+// value (-u NAME, -C DIR, -P PATH, attached or as the next word, and
+// --name=value), the end-of-options marker and the assignments. -S splits
+// its value into the words of the command. An unknown option is returned
+// as it is, so nothing past it counts as the command.
+func posixEnvCommand(argv []string) []string {
+	for len(argv) > 0 {
+		option := argv[0]
+		switch {
+		case option == "--":
+			argv = argv[1:]
+			for len(argv) > 0 && posixEnvAssignment(argv[0]) {
+				argv = argv[1:]
+			}
+			return argv
+		case option == "-" || option == "-i" || option == "-0" || option == "-v",
+			option == "--ignore-environment" || option == "--null" || option == "--debug",
+			option == "--block-signal" || option == "--default-signal" || option == "--ignore-signal",
+			strings.HasPrefix(option, "--") && strings.Contains(option, "=") &&
+				!strings.HasPrefix(option, "--split-string="):
+			argv = argv[1:]
+		case option == "-u" || option == "-C" || option == "-P" ||
+			option == "--unset" || option == "--chdir":
+			if len(argv) < 2 {
+				return nil
+			}
+			argv = argv[2:]
+		case option == "-S" || option == "--split-string":
+			if len(argv) < 2 {
+				return nil
+			}
+			return append(strings.Fields(argv[1]), argv[2:]...)
+		case strings.HasPrefix(option, "--split-string="):
+			return append(strings.Fields(strings.TrimPrefix(option, "--split-string=")), argv[1:]...)
+		case len(option) > 2 && option[0] == '-' && option[1] == 'S':
+			return append(strings.Fields(option[2:]), argv[1:]...)
+		case len(option) > 2 && option[0] == '-' && strings.IndexByte("uCP", option[1]) >= 0:
+			argv = argv[1:]
+		case posixEnvAssignment(option):
+			argv = argv[1:]
+		default:
+			return argv
+		}
+	}
+	return argv
+}
+
+func posixEnvAssignment(word string) bool {
+	return strings.Contains(word, "=") && !strings.HasPrefix(word, "-")
+}
+
+// posixStdinCodeTarget reports the program a privilege wrapper starts when
+// it runs its standard input as code: a shell without -c (also behind env
+// or command), or another wrapper or scheduler that does.
+func posixStdinCodeTarget(argv []string) bool {
+	argv = posixStdinCodeUnwrap(argv)
+	if len(argv) == 0 {
+		return false
+	}
+	if posixShellProgram(commandProgram(argv[0])) {
+		for _, argument := range argv[1:] {
+			if argument == "-c" {
+				return false
+			}
+		}
+		return true
+	}
+	return posixWrapperRunsStdinAsCode(argv)
+}
+
+// POSIXExecWrapperTarget is argv without a leading env or command wrapper
+// (their options and assignments): the command they start.
+func POSIXExecWrapperTarget(argv []string) []string {
+	return posixStdinCodeUnwrap(argv)
 }

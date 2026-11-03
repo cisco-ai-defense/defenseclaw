@@ -67,6 +67,22 @@ func withDerivedHeader(script []byte, data templateData) []byte {
 	return append(out, script[at:]...)
 }
 
+// hostHookPrivilegedShebang starts a host hook with `bash -p`, as the
+// sandbox renders are (sandboxHookShebang): with the real and effective ids
+// equal, privileged mode only stops bash from reading BASH_ENV and ENV,
+// importing exported functions and taking SHELLOPTS, BASHOPTS, CDPATH and
+// GLOBIGNORE from the agent's environment, any of which could turn the hook
+// off (review 2 of sandbox-visibility:GAP-0028). Every connector runs the
+// hook by its path, so the kernel passes -p. Secure Client renders keep
+// their contract.
+func hostHookPrivilegedShebang(script []byte) []byte {
+	const plain = "#!/bin/bash\n"
+	if !bytes.HasPrefix(script, []byte(plain)) {
+		return script
+	}
+	return append([]byte("#!/bin/bash -p\n"), script[len(plain):]...)
+}
+
 // renderedHookFile is one generated hook-directory file, rendered in memory.
 type renderedHookFile struct {
 	Name string
@@ -120,6 +136,9 @@ func renderHookScriptSet(connectorData, sharedData templateData, extras []string
 		}
 		if i >= len(genericHookScripts) && !data.Managed && strings.HasSuffix(name, ".sh") && !strings.HasPrefix(name, "_") {
 			rendered = withDerivedHeader(rendered, data)
+		}
+		if !data.Sandbox && !data.SecureClient && strings.HasSuffix(name, ".sh") && !strings.HasPrefix(name, "_") {
+			rendered = hostHookPrivilegedShebang(rendered)
 		}
 		out = append(out, renderedHookFile{Name: name, Data: rendered})
 	}

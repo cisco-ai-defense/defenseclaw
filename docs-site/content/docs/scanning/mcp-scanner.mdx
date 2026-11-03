@@ -449,6 +449,10 @@ be willing to run.
 
 Scanner processes run under the gateway's process-tree supervisor. How it ends them and its known limits: [Scanner processes are supervised](/docs/scanning/skill-scanner#scanner-processes-are-supervised).
 
+### 1.0.7 local scan limit
+
+GAP-0499: on macOS and Linux, a stdio server started for `defenseclaw mcp scan` can leave a long-lived child after the scan ends. The scan result does not prove that child stopped. Check and stop a remaining child process by its PID before starting another scan.
+
 ## Availability and recovery
 
 `cisco-ai-mcp-scanner` is declared for Python 3.11 and newer. DefenseClaw

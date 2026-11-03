@@ -28,7 +28,8 @@ var managedLaunchReasons = map[string]map[string]bool{
 		"kiro_cloud_session": true, "kiro_resume_placement_unverified": true, "launch_arguments_unverified": true,
 		"launch_environment_unverified": true},
 	"devin": {"devin_config_override": true, "user_config_relocated": true,
-		"launch_arguments_unverified": true, "launch_environment_unverified": true},
+		"launch_arguments_unverified": true, "launch_environment_unverified": true,
+		"bash_hook_startup": true, "bash_hook_noexec": true},
 	"hermes": {"hermes_safe_mode": true, "hermes_config_relocated": true,
 		"user_config_relocated": true, "launch_arguments_unverified": true,
 		"launch_environment_unverified": true, "session_only_hermes_home_unobservable": true,
@@ -39,8 +40,12 @@ var managedLaunchReasons = map[string]map[string]bool{
 	"claudecode": {"unsupported_installed_version": true, "installed_version_unverified": true,
 		"claude_npm_launch_unverified": true, "claude_version_unverified": true,
 		"launch_arguments_unverified": true},
-	"codex":   {"unsupported_installed_version": true, "installed_version_unverified": true},
-	"copilot": {"unsupported_installed_version": true, "installed_version_unverified": true},
+	"codex": {"unsupported_installed_version": true, "installed_version_unverified": true,
+		"launch_arguments_unverified": true, "launch_environment_unverified": true,
+		"bash_hook_startup": true, "bash_hook_noexec": true},
+	"copilot": {"unsupported_installed_version": true, "installed_version_unverified": true,
+		"launch_arguments_unverified": true, "launch_environment_unverified": true,
+		"bash_hook_startup": true, "bash_hook_noexec": true},
 }
 
 // The root lifecycle reports what it saw in the OS process table. The

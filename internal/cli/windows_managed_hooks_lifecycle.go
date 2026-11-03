@@ -24,6 +24,7 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/enterprisepolicy"
 	"github.com/defenseclaw/defenseclaw/internal/gateway/connector"
 	"github.com/defenseclaw/defenseclaw/internal/managed"
+	"github.com/defenseclaw/defenseclaw/internal/pathidentity"
 	"github.com/defenseclaw/defenseclaw/internal/safefile"
 	"github.com/defenseclaw/defenseclaw/internal/winpath"
 	"github.com/spf13/cobra"
@@ -769,7 +770,7 @@ func readWindowsManagedHooksLifecycleJSON(
 	disallowUnknown bool,
 	destination any,
 ) (bool, error) {
-	info, err := os.Lstat(path)
+	info, err := pathidentity.LstatPinned(path)
 	if errors.Is(err, os.ErrNotExist) {
 		return false, nil
 	}
@@ -853,12 +854,11 @@ func windowsManagedHooksLifecycleCommittedTransactionID(
 		)
 	}
 	activation := metadata.ManagedHooksActivation
-	if activation.SchemaVersion != 1 ||
-		!validWindowsManagedHooksLifecycleTransactionID(activation.DeploymentGenerationID) ||
-		(activation.State != "never_activated" && activation.State != "activated") ||
-		!validWindowsManagedHooksLifecycleHex(activation.ManifestSHA256, sha256.Size) ||
-		activation.TargetCount != len(ctx.targets) {
-		return "", errors.New("deployment managed-hook activation binding is invalid")
+	if err := validateWindowsManagedHooksLifecycleActivationBinding(activation, len(ctx.targets)); err != nil {
+		if !enterprisehooks.WindowsStandaloneProcess() {
+			return "", errors.New("deployment managed-hook activation binding is invalid")
+		}
+		return "", err
 	}
 	manifestSHA256, err := hashWindowsManagedHooksLifecycleTrustedFile(
 		ctx.manifestPath,
@@ -869,11 +869,33 @@ func windowsManagedHooksLifecycleCommittedTransactionID(
 		return "", err
 	}
 	if activation.ManifestSHA256 != manifestSHA256 {
+		if !enterprisehooks.WindowsStandaloneProcess() {
+			return "", errors.New("deployment managed-hook activation binding does not match the protected manifest")
+		}
 		return "", errors.New(
-			"deployment managed-hook activation binding does not match the protected manifest",
+			"deployment managed-hook activation manifest_sha256 does not match the current protected manifest; run Setup /ensure again to reconcile the target roster",
 		)
 	}
 	return activation.DeploymentGenerationID, nil
+}
+
+func validateWindowsManagedHooksLifecycleActivationBinding(activation *windowsManagedHooksActivationRecord, targetCount int) error {
+	if activation.SchemaVersion != 1 {
+		return fmt.Errorf("deployment managed-hook activation schema_version is %d, expected 1; run Setup /repair", activation.SchemaVersion)
+	}
+	if !validWindowsManagedHooksLifecycleTransactionID(activation.DeploymentGenerationID) {
+		return errors.New("deployment managed-hook activation deployment_generation_id is invalid; run Setup /repair")
+	}
+	if activation.State != "never_activated" && activation.State != "activated" {
+		return fmt.Errorf("deployment managed-hook activation state %q is invalid; run Setup /repair", activation.State)
+	}
+	if !validWindowsManagedHooksLifecycleHex(activation.ManifestSHA256, sha256.Size) {
+		return errors.New("deployment managed-hook activation manifest_sha256 is invalid; run Setup /repair")
+	}
+	if activation.TargetCount != targetCount {
+		return fmt.Errorf("deployment managed-hook activation target_count is %d, current protected manifest has %d; run Setup /ensure again to reconcile the target roster", activation.TargetCount, targetCount)
+	}
+	return nil
 }
 
 func retireCommittedWindowsManagedHooksLifecycle(
@@ -1270,6 +1292,18 @@ func validateWindowsManagedHooksLifecycleSelectorAbsent(path, connectorName stri
 	}
 }
 
+// errWindowsManagedHooksDeletedLocalAccount is the teardown refusal of a
+// target whose local account was deleted after the last enumerator pass.
+// The lifecycle module recognizes its text: it has the enumerator run a pass
+// and checks again, and otherwise says to wait for that pass.
+var errWindowsManagedHooksDeletedLocalAccount = errors.New(
+	"protected Guardian state still lists an enrolled local account that no longer exists; " +
+		"the hook enumerator revokes its rows on its next pass",
+)
+
+// windowsManagedHooksLifecycleDeletedLocalAccount is replaceable in tests.
+var windowsManagedHooksLifecycleDeletedLocalAccount = enterprisehooks.WindowsDeletedLocalAccount
+
 func validateLegacyWindowsManagedHooksGuardianActivation(
 	activation enterpriseHookGuardianActivation,
 	authorization enterpriseHookGuardianAuthorization,
@@ -1345,6 +1379,18 @@ func validateWindowsManagedHooksGuardianActivation(
 			}
 			if detail == "" {
 				detail = "no error recorded"
+			}
+			if windowsManagedHooksLifecycleDeletedLocalAccount(target.SID) {
+				// The account was deleted after the last enumerator pass:
+				// no repair applies, and the next pass revokes its rows
+				// (rel-1-0-6:GAP-0319).
+				return nil, fmt.Errorf(
+					"%w: %s target %s (%s)",
+					errWindowsManagedHooksDeletedLocalAccount,
+					target.Connector,
+					target.SID,
+					detail,
+				)
 			}
 			return nil, fmt.Errorf(
 				"protected Guardian state contains an ambiguous target disposition: %s target %s is neither protected nor pending (%s)",
@@ -1838,7 +1884,7 @@ func hashWindowsManagedHooksLifecycleTrustedFile(
 	limit int64,
 	label string,
 ) (string, error) {
-	info, err := os.Lstat(path)
+	info, err := pathidentity.LstatPinned(path)
 	if err != nil {
 		return "", err
 	}

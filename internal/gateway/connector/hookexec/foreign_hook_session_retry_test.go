@@ -24,6 +24,7 @@ func TestForeignHookSessionExchangeIsSentOnceWithRetryUntil(t *testing.T) {
 	const busy = `{"deny":true,"reason":"enterprise_foreign_hook_blocked: DefenseClaw cannot verify this agent session's hook record. Remove any unapproved hook and restart the agent."}`
 	var calls atomic.Int32
 	var sent map[string]json.RawMessage
+	var requestAt time.Time
 	started := time.Now()
 	opts := Options{
 		ManagedEnterprise: true, ManagedStandalone: true, APIAddr: "127.0.0.1:18970",
@@ -31,6 +32,7 @@ func TestForeignHookSessionExchangeIsSentOnceWithRetryUntil(t *testing.T) {
 	}
 	opts.HTTPClient = &http.Client{Transport: foreignSessionRoundTrip(func(req *http.Request) (*http.Response, error) {
 		calls.Add(1)
+		requestAt = time.Now()
 		body, _ := io.ReadAll(req.Body)
 		_ = json.Unmarshal(body, &sent)
 		return &http.Response{StatusCode: http.StatusOK, Body: io.NopCloser(strings.NewReader(busy))}, nil
@@ -49,9 +51,9 @@ func TestForeignHookSessionExchangeIsSentOnceWithRetryUntil(t *testing.T) {
 	if err := json.Unmarshal(sent["retry_until"], &until); err != nil {
 		t.Fatalf("the exchange carries no retry_until: %v (%s)", err, sent["retry_until"])
 	}
-	want := started.Add(hookAnswerBudget - foreignHookSessionRetryReserve)
-	if !until.Equal(want) {
-		t.Fatalf("retry_until = %v, want the answer deadline less the hook request's reserve (%v)", until, want)
+	window := hookAnswerBudget - foreignHookSessionRetryReserve
+	if until.Before(started.Add(window)) || until.After(requestAt.Add(window)) {
+		t.Fatalf("retry_until = %v, want the gateway contact window less the hook request's reserve, between %v and %v", until, started.Add(window), requestAt.Add(window))
 	}
 	for _, key := range []string{"key", "session_start", "decision"} {
 		if _, ok := sent[key]; !ok {

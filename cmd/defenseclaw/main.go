@@ -53,6 +53,9 @@ func main() {
 	if code, handled := connector.ClaudeCodeGatewayPreToolGuard(runtime.GOOS, os.Args[1:], os.Stdin, os.Stdout, os.Stderr); handled {
 		os.Exit(code)
 	}
+	if handled, code := runWindowsPerUserCLI(); handled {
+		os.Exit(code)
+	}
 	if commandName := releaseCommandNameForExecutable(); commandName != "" {
 		cli.SetCommandName(commandName)
 	}

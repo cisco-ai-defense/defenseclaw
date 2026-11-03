@@ -2485,6 +2485,33 @@ def test_opencode_version_probe_allows_bounded_packaged_binary_startup(monkeypat
     assert calls[0][1]["timeout"] == 10.0
 
 
+def test_windows_opencode_path_launcher_counts_before_first_run(monkeypatch, tmp_path):
+    wrapper = tmp_path / "opencode.cmd"
+    wrapper.write_text("@echo off\r\n", encoding="utf-8")
+    monkeypatch.setattr(ad, "_is_windows_host", lambda: True)
+    monkeypatch.setattr(ad, "_agent_config_path", lambda *_args, **_kwargs: "")
+    monkeypatch.setattr(ad, "_binary_candidates_for_agent", lambda *_args: (str(wrapper),))
+    monkeypatch.setattr(ad, "_missing_probe_state", lambda _name: ([], []))
+    monkeypatch.setattr(ad, "_version_for_agent_binary", lambda *_args, **_kwargs: ("", "version unavailable"))
+    monkeypatch.setattr(ad, "_which", lambda _name: str(wrapper))
+
+    signal = ad._scan_agent("opencode", data_dir=tmp_path)
+    assert signal.installed is True
+    assert signal.binary_path == str(wrapper)
+    assert signal.version == ""
+
+    # A file outside PATH is still not installation evidence from this rule.
+    monkeypatch.setattr(ad, "_which", lambda _name: "")
+    assert ad._scan_agent("opencode", data_dir=tmp_path).installed is False
+
+    # A managed scan that rejects this path keeps that decision.
+    monkeypatch.setattr(ad, "_which", lambda _name: str(wrapper))
+    monkeypatch.setattr(ad, "_is_trusted_binary_path", lambda *_args, **_kwargs: False)
+    assert ad._scan_agent(
+        "opencode", data_dir=tmp_path, require_trusted_binary_paths=True
+    ).installed is False
+
+
 @pytest.mark.skipif(os.name != "nt", reason="Windows PATHEXT regression")
 def test_which_discovers_cmd_wrapper(monkeypatch, tmp_path):
     wrapper = tmp_path / "cursor.CMD"
@@ -3145,6 +3172,167 @@ def test_a_scan_restricted_to_one_connector_still_probes_every_enrolled_one(monk
     # Not enrolled (or disabled): still not started (GAP-0901).
     assert disc.agents["copilot"].error == ad.VERSION_NOT_PROBED
     assert disc.agents["amp"].error == ad.VERSION_NOT_PROBED
+
+
+def _enrolled_pair(monkeypatch, tmp_path, candidates=None):
+    """claudecode and codex enrolled, both binaries real files; returns (data_dir, versions, probed)."""
+    data_dir = tmp_path / ".defenseclaw"
+    data_dir.mkdir()
+    (data_dir / "config.yaml").write_text(
+        "guardrail:\n  connectors:\n    claudecode: {mode: action}\n    codex: {mode: action}\n",
+        encoding="utf-8",
+    )
+    bins = tmp_path / "bin"
+    bins.mkdir()
+    for name in ("claude", "codex"):
+        (bins / name).write_text("#!/bin/sh\n", encoding="utf-8")
+    versions = {"claudecode": "2.1.304 (Claude Code)", "codex": "codex-cli 0.160.0"}
+    probed: list[str] = []
+
+    def probe(name, _path, _args, **_kwargs):
+        probed.append(name)
+        return versions.get(name, f"{name} 1.0"), ""
+
+    paths = {"claudecode": str(bins / "claude"), "codex": str(bins / "codex")}
+    monkeypatch.setattr(ad, "_is_windows_host", lambda: False)
+    monkeypatch.setattr(
+        ad, "_binary_candidates_for_agent",
+        lambda name, _spec: (candidates or {}).get(name) or ((paths[name],) if name in paths else (f"/opt/bin/{name}",)),
+    )
+    monkeypatch.setattr(ad, "_version_for_agent_binary", probe)
+    return data_dir, versions, probed, bins
+
+
+@pytest.mark.skipif(os.name == "nt", reason="Windows always probes enrolled peers")
+def test_a_setup_scan_keeps_an_unchanged_enrolled_peer_version_without_running_it(monkeypatch, tmp_path):
+    """rel-1-0-6:GAP-0491: `setup claude-code` re-ran the CLI of every enrolled
+    peer; with six connectors on macOS that was 1.1 s instead of 0.76 s. A
+    peer whose binary has not changed since the last scan keeps its version."""
+    data_dir, versions, probed, _bins = _enrolled_pair(monkeypatch, tmp_path)
+    later = datetime.now(timezone.utc) + timedelta(seconds=30)
+    monkeypatch.setattr(ad, "_now_utc", lambda: later)
+    ad.discover_agents(use_cache=False, refresh=True, data_dir=data_dir)
+    assert sorted(probed) == ["claudecode", "codex"]
+
+    probed.clear()
+    monkeypatch.setattr(ad, "_now_utc", lambda: later + timedelta(minutes=5))
+    disc = ad.discover_with_probes(["claudecode"], use_cache=False, refresh=True, data_dir=data_dir)
+
+    assert probed == ["claudecode"]
+    assert disc.agents["codex"].version == "codex-cli 0.160.0"
+    assert disc.agents["codex"].error == ""
+    assert ad._read_cache(data_dir=data_dir).agents["codex"].version == "codex-cli 0.160.0"
+    # An unrestricted scan still probes every enrolled agent.
+    probed.clear()
+    ad.discover_agents(use_cache=False, refresh=True, data_dir=data_dir)
+    assert sorted(probed) == ["claudecode", "codex"]
+
+
+@pytest.mark.skipif(os.name == "nt", reason="Windows always probes enrolled peers")
+@pytest.mark.parametrize(
+    ("mode", "target_version", "admitted"),
+    [
+        ("action", "2.1.304 (Claude Code)", True),
+        ("observe", "2.1.100 (Claude Code)", False),
+    ],
+)
+def test_a_setup_preflight_probes_peer_when_binary_disappears_during_metadata_check(
+    monkeypatch, tmp_path, mode, target_version, admitted
+):
+    """A vanishing peer triggers a full scan; setup still checks the target."""
+    from defenseclaw.commands import cmd_setup
+
+    data_dir, versions, probed, bins = _enrolled_pair(monkeypatch, tmp_path)
+    later = datetime.now(timezone.utc) + timedelta(seconds=30)
+    monkeypatch.setattr(ad, "_now_utc", lambda: later)
+    ad.discover_agents(use_cache=False, refresh=True, data_dir=data_dir)
+
+    versions["claudecode"] = target_version
+    versions["codex"] = "codex-cli 0.161.0"
+    probed.clear()
+    monkeypatch.setattr(ad, "_now_utc", lambda: later + timedelta(minutes=5))
+    monkeypatch.delenv("DEFENSECLAW_ALLOW_HOOK_CONTRACT_DRIFT", raising=False)
+    original_lstat = os.lstat
+    peer_reads = 0
+
+    def lstat_with_peer_race(path, *args, **kwargs):
+        nonlocal peer_reads
+        if os.fspath(path) == str(bins / "codex"):
+            peer_reads += 1
+            if peer_reads == 3:
+                raise FileNotFoundError("peer replaced during metadata check")
+        return original_lstat(path, *args, **kwargs)
+
+    monkeypatch.setattr(ad.os, "lstat", lstat_with_peer_race)
+    result = cmd_setup._check_connector_version_supported_for_setup(
+        "claudecode", mode=mode, emit=False, data_dir=data_dir, _allow_prompt=False
+    )
+
+    assert peer_reads >= 3
+    assert sorted(probed) == ["claudecode", "codex"]
+    assert result is admitted
+    assert ad._read_cache(data_dir=data_dir).agents["codex"].version == "codex-cli 0.161.0"
+
+
+@pytest.mark.skipif(os.name == "nt", reason="symlinks and ctime")
+def test_a_setup_scan_probes_a_peer_whose_link_now_names_another_version(monkeypatch, tmp_path):
+    """A retargeted link (a `current` folder link or a bin link) is a change even
+    when the file it names now is older than the last scan (GAP-0491, GAP-0547)."""
+    data_dir, versions, probed, bins = _enrolled_pair(monkeypatch, tmp_path)
+    for version in ("v1", "v2"):
+        (tmp_path / "pkg" / version / "bin").mkdir(parents=True)
+        (tmp_path / "pkg" / version / "bin" / "codex").write_text("#!/bin/sh\n", encoding="utf-8")
+    (tmp_path / "pkg" / "current").symlink_to("v1")
+    (bins / "codex").unlink()
+    (bins / "codex").symlink_to(tmp_path / "pkg" / "current" / "bin" / "codex")
+    later = datetime.now(timezone.utc) + timedelta(seconds=30)
+    assert ad._resolves_unchanged_since(str(bins / "codex"), later.timestamp())
+    assert not ad._resolves_unchanged_since(str(bins / "missing"), later.timestamp())
+
+    time.sleep(1.1)  # both version files must predate the rounded scan time
+    ad.discover_agents(use_cache=False, refresh=True, data_dir=data_dir)
+    scanned_at = ad._parse_rfc3339(ad._read_cache(data_dir=data_dir).scanned_at).timestamp()
+    assert os.stat(tmp_path / "pkg" / "v2" / "bin" / "codex").st_mtime < scanned_at
+    assert ad._resolves_unchanged_since(str(bins / "codex"), scanned_at)
+    time.sleep(1.1)  # the scan time has whole seconds
+    (tmp_path / "pkg" / "current").unlink()
+    (tmp_path / "pkg" / "current").symlink_to("v2")
+    assert not ad._resolves_unchanged_since(str(bins / "codex"), scanned_at)
+    versions["codex"] = "codex-cli 0.161.0"
+    probed.clear()
+    disc = ad.discover_with_probes(["claudecode"], use_cache=False, refresh=True, data_dir=data_dir)
+
+    assert sorted(probed) == ["claudecode", "codex"]
+    assert disc.agents["codex"].version == "codex-cli 0.161.0"
+
+
+@pytest.mark.skipif(os.name == "nt", reason="Windows always probes enrolled peers")
+def test_a_setup_scan_probes_a_skipped_peer_whose_version_cannot_be_kept(monkeypatch, tmp_path):
+    """The binary the last scan versioned is unchanged, but another one is
+    first on PATH now: the kept-version rules refuse it, so the peer is probed
+    rather than left unversioned for the gateway (GAP-0491, GAP-0547)."""
+    data_dir, versions, probed, bins = _enrolled_pair(monkeypatch, tmp_path)
+    later = datetime.now(timezone.utc) + timedelta(seconds=30)
+    monkeypatch.setattr(ad, "_now_utc", lambda: later)
+    ad.discover_agents(use_cache=False, refresh=True, data_dir=data_dir)
+
+    ahead = tmp_path / "other" / "codex"
+    ahead.parent.mkdir()
+    ahead.write_text("#!/bin/sh\n", encoding="utf-8")
+    monkeypatch.setattr(
+        ad, "_binary_candidates_for_agent",
+        lambda name, _spec: {"claudecode": (str(bins / "claude"),), "codex": (str(ahead), str(bins / "codex"))}.get(
+            name, (f"/opt/bin/{name}",)
+        ),
+    )
+    versions["codex"] = "codex-cli 0.161.0"
+    probed.clear()
+    monkeypatch.setattr(ad, "_now_utc", lambda: later + timedelta(minutes=5))
+    disc = ad.discover_with_probes(["claudecode"], use_cache=False, refresh=True, data_dir=data_dir)
+
+    assert sorted(probed) == ["claudecode", "codex"]
+    assert disc.agents["codex"].version == "codex-cli 0.161.0"
+    assert disc.agents["codex"].binary_path == str(ahead)
 
 
 def test_cached_discovery_rechecks_config_files(monkeypatch, tmp_path):

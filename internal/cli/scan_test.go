@@ -109,7 +109,10 @@ func TestGatewayScanUsesTheConnectedPeerVerifier(t *testing.T) {
 }
 
 func TestMarshalScanResultV7Shape(t *testing.T) {
-	t.Parallel()
+	// Not parallel, and the build version is put back after: the test sets the
+	// process-wide version, which the kernel-feed install compares with its
+	// helper on the next -count iteration (rel-1-0-6 GAP-0365, as GAP-0306).
+	t.Cleanup(version.ResetForTesting)
 	version.ResetForTesting()
 	version.SetBinaryVersion("0.0.0-test")
 	version.SetContentHash([]byte("hello"))

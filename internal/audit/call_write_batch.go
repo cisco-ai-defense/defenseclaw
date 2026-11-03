@@ -34,8 +34,9 @@ import (
 // the queue in one transaction, each write in its own savepoint, then runs
 // the queued work: commit before export holds. Concurrent calls' flushes
 // share one transaction (write group). A write the shared transaction did
-// not commit is written again on its own through its ordinary path, which
-// reports its failure exactly as before. A caller that needs the outcome of
+// not commit is retried on its own while persistence is still allowed. An
+// expired context reports that row as lost through its ordinary outcome path.
+// A caller that needs the outcome of
 // its own write (the audit row of the verdict) reads it with
 // WithCallWriteOutcome after the flush.
 type CallWriteBatch struct {
@@ -148,6 +149,15 @@ func (outcome *CallWriteOutcome) record(err error) {
 }
 
 type callWriteBatchKey struct{}
+
+type callWriteAfterCancelKey struct{}
+
+// WithCallWriteAfterCancel preserves Secure Client's existing batch-write
+// lifetime when its request ends during a temporary store hold. Other hook
+// batches continue to use their persistence deadline.
+func WithCallWriteAfterCancel(ctx context.Context) context.Context {
+	return context.WithValue(ctx, callWriteAfterCancelKey{}, true)
+}
 
 type callWriteOutcomeKey struct{}
 
@@ -280,10 +290,14 @@ func runCallWriteFollowUp(fn func()) {
 }
 
 // writeCallBatch commits one call's queued writes in one transaction shared
-// with the flushes of concurrent calls, then writes again on its own every
-// write that transaction did not commit.
+// with the flushes of concurrent calls, then retries uncommitted writes on
+// their own only while the persistence context is live.
 func (s *Store) writeCallBatch(ctx context.Context, writes []*deferredCallWrite) {
-	call := &groupedWrite{ctx: context.WithoutCancel(ctx), run: func(ctx context.Context, tx *sql.Tx) error {
+	writeCtx := ctx
+	if afterCancel, _ := ctx.Value(callWriteAfterCancelKey{}).(bool); afterCancel {
+		writeCtx = context.WithoutCancel(ctx)
+	}
+	call := &groupedWrite{ctx: writeCtx, run: func(ctx context.Context, tx *sql.Tx) error {
 		for _, write := range writes {
 			write.ran = false
 			if _, err := tx.ExecContext(ctx, `SAVEPOINT call_write`); err != nil {
@@ -340,7 +354,10 @@ func (s *Store) writeCallBatch(ctx context.Context, writes []*deferredCallWrite)
 			write.report.done(nil)
 			continue
 		}
-		err := write.alone(groupedWriteCtx{Context: context.WithoutCancel(ctx), values: write.ctx})
+		err := writeCtx.Err()
+		if err == nil {
+			err = write.alone(groupedWriteCtx{Context: writeCtx, values: write.ctx})
+		}
 		write.outcome.record(err)
 		write.report.done(err)
 	}
@@ -357,6 +374,11 @@ func (writer *EventHistoryWriter) deferAppend(
 		return false
 	}
 	outcomes := make([]eventHistoryAppendOutcome, len(records))
+	// Before the batch waits for the store's connection (rel-1-0-6 GAP-0381).
+	prepared := make([]*preparedEventHistoryAppend, len(records))
+	for index := range records {
+		prepared[index] = writer.prepareAppend(ctx, records[index], projections[index])
+	}
 	outcome, _ := ctx.Value(callWriteOutcomeKey{}).(*CallWriteOutcome)
 	report, _ := ctx.Value(callWriteReportKey{}).(*CallWriteReport)
 	if !report.claim() {
@@ -366,7 +388,7 @@ func (writer *EventHistoryWriter) deferAppend(
 		ctx: ctx, outcome: outcome, report: report,
 		run: func(ctx context.Context, tx *sql.Tx) error {
 			for index := range records {
-				appended, err := writer.appendContextTx(ctx, tx, records[index], projections[index])
+				appended, err := writer.appendPreparedTx(ctx, tx, records[index], projections[index], prepared[index])
 				if err != nil {
 					return err
 				}

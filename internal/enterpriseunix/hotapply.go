@@ -42,27 +42,41 @@ const hotApplyTimeout = 20 * time.Second
 // defenseclaw.policy.generation on decisions orders the two configs. A
 // restart starts the in-process counter over at 1 every time.
 //
-// The change is hot when the version, channel, binaries, unit files,
-// drop-ins, descriptor, secrets and machine policy all stay as they are, no
-// changed key is restart-required, and the gateway is up and publishes its
-// effective policy digest. Anything else, and every repair, upgrade and
-// install, stops and starts the services. A rule pack switch (rule_pack, a
-// custom_packs entry added, replaced or removed) is hot: the gateway builds
+// The change is hot when the version, channel, binaries, gateway unit files
+// and secrets stay as they are, no changed key is restart-required, and the
+// gateway is up and publishes its effective policy digest. Any other
+// change, repair, upgrade or install stops and starts the services. A rule
+// pack switch (rule_pack, a custom_packs entry added, replaced or removed)
+// is hot: the gateway builds
 // the packs into each generation (GAP-0550).
 func (l *lifecycle) hotConfigApply(ctx context.Context, record *Deployment, p *plan, adopting *adoption) bool {
 	env := l.env
-	if record == nil || adopting != nil || l.opts.Action != ActionEnsure || l.opts.NoStart || len(p.stale) > 0 ||
+	if record == nil || adopting != nil || l.opts.Action != ActionEnsure || l.opts.NoStart ||
 		p.config.Migration != nil || p.config.SHA == record.ConfigSHA256 ||
-		p.version != record.ProductVersion || p.channel != record.Channel || p.secretsSHA != record.SecretsSHA256 ||
-		!slices.Equal(p.machinePolicy, record.MachinePolicyConnectors) {
+		p.version != record.ProductVersion || p.channel != record.Channel || p.secretsSHA != record.SecretsSHA256 {
 		return false
+	}
+	policySetChanged := !slices.Equal(p.machinePolicy, record.MachinePolicyConnectors)
+	for _, path := range p.stale {
+		if !policySetChanged || !hotConnectorSetFile(env, path) || path == env.Layout.DescriptorPath {
+			return false
+		}
+		current, _ := sha256File(env.P(path))
+		if current == "" || current != record.Files[path] {
+			return false
+		}
 	}
 	for _, file := range append(append([]desiredFile{}, p.files...), p.binaries...) {
 		if file.Path == env.Layout.ConfigPath {
 			continue
 		}
 		if current, _ := sha256File(env.P(file.Path)); current != file.SHA {
-			return false
+			// A connector set change updates the runtime descriptor after the
+			// vendor hooks are published. The gateway's descriptor watcher
+			// updates its hook-socket authorizer without replacing the process.
+			if !policySetChanged || current != record.Files[file.Path] || !hotConnectorSetFile(env, file.Path) {
+				return false
+			}
 		}
 	}
 	if p.channel == ChannelPackage {
@@ -105,6 +119,24 @@ func (l *lifecycle) hotConfigApply(ctx context.Context, record *Deployment, p *p
 	}
 	body, err := l.gatewayHealth(ctx, gateway, l.serviceUID)
 	return err == nil && gatewayPolicyDigest(body) != ""
+}
+
+// A connector set change may rewrite the trusted descriptor and the Linux
+// guardian's writable vendor-policy paths. The guardian is restarted in the
+// transaction; the gateway and its hook socket stay up.
+func hotConnectorSetFile(env *Env, path string) bool {
+	if path == env.Layout.DescriptorPath {
+		return true
+	}
+	if env.GOOS != "linux" {
+		return false
+	}
+	for _, unit := range []string{unitGuardian, unitGuardianOneshot} {
+		if path == filepath.Join("/etc/systemd/system", unit+".d", dropinPaths) {
+			return true
+		}
+	}
+	return false
 }
 
 // installedConfigReplaced reports an in-place config.yaml that changed after

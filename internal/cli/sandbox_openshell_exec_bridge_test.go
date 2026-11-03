@@ -132,7 +132,7 @@ func TestPlanSandboxOpenShellExecDefaultNamespaceBridge(t *testing.T) {
 		t.Fatalf("an account with a sandbox in the managed namespace: %s, want the managed render", got)
 	}
 	for _, want := range []string{"the 1.0.1 upgrade bridge is off for this account", `"default"`, `"defenseclaw-managed"`,
-		"report not found", "defenseclaw sandbox pull NAME", "defenseclaw sandbox delete NAME", tokens(openshell.ManagedDockerNamespace),
+		"report not found", "defenseclaw sandbox pull NAME --apply", "confirm it was saved", "defenseclaw sandbox delete NAME", tokens(openshell.ManagedDockerNamespace),
 		"the gateway's next start then uses the bridge"} {
 		if !strings.Contains(warned.String(), want) {
 			t.Fatalf("both namespaces: the notice %q lacks %q", warned.String(), want)

@@ -38,6 +38,7 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/jsonc"
 	"github.com/defenseclaw/defenseclaw/internal/legacyconnector"
 	"github.com/defenseclaw/defenseclaw/internal/managed"
+	"github.com/defenseclaw/defenseclaw/internal/pathidentity"
 	toml "github.com/pelletier/go-toml/v2"
 	yaml "gopkg.in/yaml.v3"
 )
@@ -2401,7 +2402,7 @@ func readStableAMPSettingsFile(path string) ([]byte, error) {
 	if err := managed.RequireWindowsGatewayPathOutsideUserProfiles(path); err != nil {
 		return nil, err
 	}
-	before, err := os.Lstat(path)
+	before, err := pathidentity.LstatPinned(path)
 	if err != nil {
 		return nil, err
 	}

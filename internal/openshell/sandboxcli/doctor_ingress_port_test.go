@@ -7,6 +7,9 @@ package sandboxcli
 
 import (
 	"context"
+	"net"
+	"strconv"
+	"strings"
 	"testing"
 
 	"github.com/defenseclaw/defenseclaw/internal/openshell"
@@ -35,6 +38,41 @@ func TestDoctorDoesNotCallAnAdvertisedButUnboundIngressPortServed(t *testing.T) 
 		if check.ID == CheckIDDaemon && check.Status == openshell.StatusPass {
 			t.Fatalf("daemon reported ready with unproven listeners: %+v", check)
 		}
+	}
+}
+
+func TestManagedDoctorChecksOccupiedSandboxPorts(t *testing.T) {
+	withManagedHost(t)
+	for _, part := range []string{"ingress", "egress"} {
+		t.Run(part, func(t *testing.T) {
+			ln, err := net.Listen("tcp", "127.0.0.1:0")
+			if err != nil {
+				t.Fatal(err)
+			}
+			t.Cleanup(func() { _ = ln.Close() })
+			port := ln.Addr().(*net.TCPAddr).Port
+			ta := newTestApp(t, "")
+			ta.daemon.status.Managed = managedStatusFixture()
+			ta.daemon.status.IngressPort = ta.Cfg.OpenShellIngressPort()
+			ta.daemon.status.EgressPort = ta.Cfg.OpenShellEgressPort()
+			if part == "ingress" {
+				ta.daemon.status.IngressPort = port
+			} else {
+				ta.daemon.status.EgressPort = port
+			}
+			ta.daemon.status.Available = false
+			ta.daemon.status.IngressAddr = ""
+			ta.daemon.status.EgressAddr = ""
+			ta.HostDoctor = func(ctx context.Context, d *openshell.Doctor) *openshell.DoctorReport {
+				return d.Run(ctx)
+			}
+			rep := ta.runDoctor(bg)
+			c := rep.Get(openshell.CheckIDPortPrefix + part)
+			if c == nil || c.Status != openshell.StatusFail || !strings.Contains(c.Detail, "127.0.0.1:"+strconv.Itoa(port)) ||
+				!strings.Contains(c.Detail, "another process") || c.Fix == nil || !strings.Contains(c.Fix.Summary, "administrator") {
+				t.Fatalf("managed doctor port check = %+v", c)
+			}
+		})
 	}
 }
 

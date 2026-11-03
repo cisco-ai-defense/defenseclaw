@@ -45,6 +45,7 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/guardrail"
 	"github.com/defenseclaw/defenseclaw/internal/hermesskills"
 	"github.com/defenseclaw/defenseclaw/internal/observability"
+	"github.com/defenseclaw/defenseclaw/internal/pathidentity"
 	"github.com/defenseclaw/defenseclaw/internal/policy"
 	"github.com/defenseclaw/defenseclaw/internal/scanner"
 )
@@ -184,6 +185,9 @@ type InstallWatcher struct {
 	addWatch      func(dir string)
 	// addContentWatch watches a skill folder's files (GAP-1087); Run sets it.
 	addContentWatch func(dir string)
+	// Reader and watch-progress hooks let focused tests measure a large move-in.
+	onReadEvent           func(fsnotify.Event)
+	onNestedWatchProgress func(string)
 
 	observabilityV8Mu sync.RWMutex
 	observabilityV8   ObservabilityV8Runtime
@@ -337,12 +341,25 @@ func (w *InstallWatcher) ownerOf(path string) (AssetOwner, bool) {
 	if w == nil || w.secureClientActive() {
 		return AssetOwner{}, false
 	}
-	for _, owner := range w.assetOwners {
-		if watcherPathAtOrBelow(path, owner.Home) {
-			return owner, true
+	return AssetOwnerOf(w.assetOwners, path)
+}
+
+// AssetOwnerOf is the account among owners whose home holds path; the
+// deepest home wins. The gateway's scan API uses it too, so a scan an
+// administrator runs on an enrolled user's asset names that user, as the
+// watcher's rows do (GAP-0575).
+func AssetOwnerOf(owners []AssetOwner, path string) (AssetOwner, bool) {
+	if strings.TrimSpace(path) == "" {
+		return AssetOwner{}, false
+	}
+	var found AssetOwner
+	ok := false
+	for _, owner := range owners {
+		if home := strings.TrimSpace(owner.Home); home != "" && watcherPathAtOrBelow(path, home) && (!ok || len(home) > len(found.Home)) {
+			found, ok = owner, true
 		}
 	}
-	return AssetOwner{}, false
+	return found, ok
 }
 
 // ownedScanCorrelation adds the asset's owner and the judge model of the
@@ -540,10 +557,19 @@ func (w *InstallWatcher) readmitChangedMCPServer(ctx context.Context, evt Instal
 		return
 	}
 	snap, err := w.snapshotForEvent(evt)
-	if err != nil || snap.ContentHash == baseline.ContentHash {
+	if err != nil || (snap.ContentHash == baseline.ContentHash && !w.mcpScanRetryDue(evt.Path, baseline)) {
 		return
 	}
 	w.readmitChanged(ctx, evt, baseline, snap, compareSnapshots(baseline, snap), w.cachedFingerprint(evt, nil), "watch")
+}
+
+// mcpScanRetryDue reports an unchanged MCP server whose last admission scan
+// failed (mcpScanFailedMark) and whose retry is due: 2 minutes after the
+// first failure, doubling to 30 (admissionState). A launcher refusal is never
+// due: it is final for its definition (rel-1-0-6:GAP-0258).
+func (w *InstallWatcher) mcpScanRetryDue(path string, baseline *audit.SnapshotRow) bool {
+	return baseline != nil && !w.secureClientActive() && strings.HasSuffix(baseline.ScannerFingerprint, mcpScanFailedMark) &&
+		w.state.mcpRetryDue(path)
 }
 
 // queueAddedMCP queues name for the next admission pass without waking it.
@@ -678,6 +704,10 @@ func (w *InstallWatcher) discoverAddedMCPServers() {
 		}
 		if !w.secureClientActive() && !mcpBaselineMatches(baseline, server) {
 			// Admitted again at once (readmitChangedMCPServer).
+			added = append(added, server.Name)
+		} else if w.mcpScanRetryDue(path, baseline) {
+			// Its scan failed: tried again with backoff, not every poll
+			// (rel-1-0-6:GAP-0258).
 			added = append(added, server.Name)
 		}
 	}
@@ -917,8 +947,42 @@ func (w *InstallWatcher) Run(ctx context.Context) error {
 
 	watched := 0
 	watchedDirs := make(map[string]struct{})
+	// Moved-in recursive trees are registered by one worker. Its watch keys
+	// are separate from Run's keys so the event reader never shares a map with
+	// the walk. The small lock also coordinates a directory removal with Add.
+	nestedWatches := make(map[string]struct{})
+	watchTasks := make(map[string]struct{})
+	watchWake := make(chan struct{}, 1)
+	var nestedMu sync.Mutex
+	watchAsync := false
 	w.addWatch = func(dir string) { addDirWatches(fsw, dir, 0, watchedDirs) }
-	w.addContentWatch = func(dir string) { addSkillContentWatches(fsw, dir, watchedDirs) }
+	w.addContentWatch = func(dir string) {
+		if !w.secureClientActive() {
+			for _, root := range w.skillDirs {
+				if watcherPathAtOrBelow(dir, root) {
+					if err := unlinkedSkillTreePath(root, dir); err != nil {
+						fmt.Fprintf(os.Stderr, "[watch] skill content directory %s: %v\n", dir, err)
+						return
+					}
+				}
+			}
+		}
+		if root, _, recursive := w.recursiveSkillRoot(dir); recursive {
+			if watchAsync {
+				nestedMu.Lock()
+				watchTasks[filepath.Clean(dir)] = struct{}{}
+				nestedMu.Unlock()
+				select {
+				case watchWake <- struct{}{}:
+				default:
+				}
+				return
+			}
+			addNestedSkillWatches(ctx, fsw, root, dir, watchedDirs, nil, nil)
+			return
+		}
+		addSkillContentWatches(fsw, dir, watchedDirs)
+	}
 	var deferredDirs [][2]string // {dir, kind} not created because an agent installer owns them
 	// missingDirs are configured roots the watcher could not create (an
 	// admin-only parent made later, GAP-2628). Each tick checks them again;
@@ -941,10 +1005,7 @@ func (w *InstallWatcher) Run(ctx context.Context) error {
 		if w.secureClientActive() {
 			return
 		}
-		if info, statErr := os.Stat(dir); statErr == nil {
-			// On Windows this reads the file id now, while dir names
-			// the watched folder; it is read lazily from the path otherwise.
-			os.SameFile(info, info)
+		if info, statErr := pathidentity.StatPinned(dir); statErr == nil {
 			roots[key] = watchedRoot{dir: dir, absolute: absolute, kind: kind, info: info}
 		}
 	}
@@ -959,7 +1020,18 @@ func (w *InstallWatcher) Run(ctx context.Context) error {
 		if os.SameFile(info, root.info) && (watching || root.failed) {
 			return
 		}
+		nestedMu.Lock()
 		forgetDirWatches(fsw, root.absolute, watchedDirs)
+		forgetNestedWatchKeys(root.absolute, nestedWatches)
+		nestedMu.Unlock()
+		if root.kind == "skill" {
+			if err := unlinkedSkillTreePath(root.dir, root.dir); err != nil {
+				root.info, root.failed = info, true
+				roots[key] = root
+				fmt.Fprintf(os.Stderr, "[watch] replaced skill root %s: %v (skipping)\n", root.dir, err)
+				return
+			}
+		}
 		root.info, root.failed = info, false
 		if addErr := fsw.Add(root.dir); addErr != nil {
 			root.failed = true
@@ -990,7 +1062,11 @@ func (w *InstallWatcher) Run(ctx context.Context) error {
 			fmt.Printf("[watch] %s dir %s does not exist; watching it once an administrator creates it\n", kind, dir)
 			return false
 		}
-		created, err := ensureAndWatch(fsw, dir)
+		watchRoot := ensureAndWatchLegacy
+		if kind == "skill" && !w.secureClientActive() {
+			watchRoot = ensureAndWatch
+		}
+		created, err := watchRoot(fsw, dir)
 		if len(created) > 0 {
 			// Uninstall removes these again while they are empty (and the
 			// OpenCode teardown removes its own).
@@ -1002,6 +1078,11 @@ func (w *InstallWatcher) Run(ctx context.Context) error {
 			if errors.Is(err, errWatchDirNotCreated) {
 				missingDirs = append(missingDirs, [2]string{dir, kind})
 				fmt.Fprintf(os.Stderr, "[watch] %s dir %s: %v (watching it once it exists)\n", kind, dir, err)
+				return false
+			}
+			if kind == "skill" && !w.secureClientActive() {
+				missingDirs = append(missingDirs, [2]string{dir, kind})
+				fmt.Fprintf(os.Stderr, "[watch] skill dir %s: %v (retrying when safe)\n", dir, err)
 				return false
 			}
 			fmt.Fprintf(os.Stderr, "[watch] %s dir %s: %v (skipping)\n", kind, dir, err)
@@ -1059,6 +1140,40 @@ func (w *InstallWatcher) Run(ctx context.Context) error {
 			loop(loopCtx)
 		}()
 	}
+	watchAsync = !w.secureClientActive()
+	if watchAsync {
+		startLoop(func(ctx context.Context) {
+			for {
+				select {
+				case <-ctx.Done():
+					return
+				case <-watchWake:
+				}
+				for {
+					nestedMu.Lock()
+					var subtree string
+					for path := range watchTasks {
+						subtree = path
+						delete(watchTasks, path)
+						break
+					}
+					nestedMu.Unlock()
+					if subtree == "" {
+						break
+					}
+					root, _, recursive := w.recursiveSkillRoot(subtree)
+					if !recursive {
+						continue
+					}
+					addNestedSkillWatches(ctx, fsw, root, subtree, nestedWatches, &nestedMu, func() {
+						if w.onNestedWatchProgress != nil {
+							w.onNestedWatchProgress(subtree)
+						}
+					})
+				}
+			}
+		})
+	}
 	if w.cfg.Watch.RescanEnabled {
 		startLoop(w.rescanLoop)
 	}
@@ -1092,12 +1207,37 @@ func (w *InstallWatcher) Run(ctx context.Context) error {
 			if !ok {
 				return nil
 			}
+			if w.onReadEvent != nil {
+				w.onReadEvent(event)
+			}
 			if event.Op&(fsnotify.Rename|fsnotify.Remove) != 0 {
+				nestedMu.Lock()
+				key := strings.ToLower(filepath.Clean(event.Name))
+				_, rootWatched := watchedDirs[key]
 				forgetDirWatches(fsw, event.Name, watchedDirs)
+				if _, watched := nestedWatches[key]; watched {
+					forgetDirWatches(fsw, event.Name, nestedWatches)
+				} else if rootWatched {
+					forgetNestedWatchKeys(event.Name, nestedWatches)
+				}
+				nestedMu.Unlock()
 			}
 			if event.Op&(fsnotify.Create|fsnotify.Rename) != 0 && len(roots) > 0 {
 				if key, _ := watchKey(event.Name); roots[key].dir != "" {
 					rewatchRoot(key, roots[key])
+				}
+			}
+			if event.Op&fsnotify.Create != 0 {
+				if root, _, recursive := w.recursiveSkillRoot(event.Name); recursive &&
+					!sameWatcherPath(event.Name, root) {
+					if info, err := os.Lstat(event.Name); err == nil && info.IsDir() {
+						w.addContentWatch(event.Name)
+						if !w.inSkillInstallStaging(root, event.Name, 0) && !isBundledSkillWatchPath(event.Name) {
+							w.recordWatcherEvent(ctx, "create", string(InstallSkill), "")
+							w.queuePending(event.Name)
+						}
+						continue
+					}
 				}
 			}
 			if skill, inside := w.changedSkillFolder(event.Name); inside {
@@ -1131,6 +1271,26 @@ func (w *InstallWatcher) Run(ctx context.Context) error {
 				}
 			}
 			if depth, inside := w.claudeSyncedDepth(event.Name); inside {
+				if !w.secureClientActive() {
+					valid := true
+					for _, root := range w.skillDirs {
+						if !watcherPathAtOrBelow(event.Name, root) {
+							continue
+						}
+						check := event.Name
+						if depth == 2 {
+							check = filepath.Dir(check)
+						}
+						if err := unlinkedSkillTreePath(root, check); err != nil {
+							fmt.Fprintf(os.Stderr, "[watch] synced skill directory %s: %v\n", event.Name, err)
+							valid = false
+							break
+						}
+					}
+					if !valid {
+						continue
+					}
+				}
 				if info, statErr := os.Stat(event.Name); statErr != nil || !info.IsDir() {
 					continue
 				}
@@ -1204,14 +1364,31 @@ func (w *InstallWatcher) Run(ctx context.Context) error {
 						missingDirs = append(missingDirs, entry)
 						continue
 					}
+					if entry[1] == "skill" && !w.secureClientActive() {
+						if err := unlinkedSkillTreePath(entry[0], entry[0]); err != nil {
+							missingDirs = append(missingDirs, entry)
+							continue
+						}
+					}
 					if watchOnce(entry[0], entry[1]) {
 						fmt.Printf("[watch] %s dir %s exists now; admitting what it holds\n", entry[1], entry[0])
 						w.admitReplacedRoot(ctx, fsw, entry[0], entry[1], watchedDirs)
 					}
 				}
 			}
-			w.queueDueIssues(time.Now())
+			w.queueDueIssues()
 			w.processPending(ctx)
+		}
+	}
+}
+
+// forgetNestedWatchKeys clears the worker's records after Run removed all
+// watches under a replaced root from fsnotify itself.
+func forgetNestedWatchKeys(path string, watched map[string]struct{}) {
+	key := strings.ToLower(filepath.Clean(path))
+	for dir := range watched {
+		if dir == key || strings.HasPrefix(dir, key+string(filepath.Separator)) {
+			delete(watched, dir)
 		}
 	}
 }
@@ -1224,8 +1401,8 @@ func (w *InstallWatcher) Run(ctx context.Context) error {
 // HIGH alert on every retry (GAP-0574). Its install block and runtime
 // disable stay in the journal; a watcher that watches the folder again
 // retries it.
-func (w *InstallWatcher) queueDueIssues(now time.Time) {
-	for _, issue := range w.state.dueIssues(now, AdmissionUnscanned, AdmissionNotQuarantined) {
+func (w *InstallWatcher) queueDueIssues() {
+	for _, issue := range w.state.dueIssues(AdmissionUnscanned, AdmissionNotQuarantined) {
 		roots := w.sourceRootsFor(InstallType(issue.Type))
 		if !slices.ContainsFunc(roots, func(root string) bool { return watcherPathAtOrBelow(issue.Path, root) }) {
 			continue
@@ -1307,13 +1484,62 @@ func (w *InstallWatcher) processPending(ctx context.Context) {
 			ready = append(ready, path)
 		}
 	}
-	for _, p := range ready {
-		delete(w.pending, p)
-		w.inFlight[p] = true
+	admit := ready
+	var discarded []string
+	if slices.ContainsFunc(ready, func(path string) bool {
+		_, _, recursive := w.recursiveSkillRoot(path)
+		return recursive
+	}) {
+		// A move or mkdir sequence can queue both a category and a skill
+		// below it. The category expansion sees the current subtree, so
+		// admit it once instead of scanning the same skill concurrently.
+		sort.Slice(ready, func(i, j int) bool { return len(ready[i]) < len(ready[j]) })
+		selected := make(map[string]struct{}, len(ready))
+		hasQueuedAncestor := func(path string) bool {
+			root, _, recursive := w.recursiveSkillRoot(path)
+			if !recursive {
+				return false
+			}
+			for parent := filepath.Dir(path); watcherPathAtOrBelow(parent, root); parent = filepath.Dir(parent) {
+				if _, exists := selected[strings.ToLower(filepath.Clean(parent))]; exists {
+					return true
+				}
+				if sameWatcherPath(parent, root) {
+					break
+				}
+			}
+			return false
+		}
+		admit = ready[:0]
+		for _, p := range ready {
+			delete(w.pending, p)
+			if hasQueuedAncestor(p) {
+				discarded = append(discarded, p)
+				continue
+			}
+			w.inFlight[p] = true
+			selected[strings.ToLower(filepath.Clean(p))] = struct{}{}
+			admit = append(admit, p)
+		}
+		for p := range w.pending {
+			if hasQueuedAncestor(p) {
+				delete(w.pending, p)
+				discarded = append(discarded, p)
+			}
+		}
+	} else {
+		// Keep the flat-root and Secure Client ordering unchanged.
+		for _, p := range ready {
+			delete(w.pending, p)
+			w.inFlight[p] = true
+		}
 	}
 	w.mu.Unlock()
+	for _, p := range discarded {
+		w.state.clear(p)
+	}
 
-	for _, path := range ready {
+	for _, path := range admit {
 		if _, err := os.Stat(w.addressableAssetPath(path)); err != nil && !w.admitsLinkedAsset(path) {
 			w.endAdmission(path)
 			continue
@@ -1325,17 +1551,39 @@ func (w *InstallWatcher) processPending(ctx context.Context) {
 			w.queuePending(root)
 			continue
 		}
-		events := w.pendingInstallEvents(path) // Run goroutine state
+		root, connector, recursive := w.recursiveSkillRoot(path)
+		recursive = recursive && !sameWatcherPath(root, path)
+		var events []InstallEvent
+		if !recursive {
+			events = w.pendingInstallEvents(path) // mutable plugin state stays on Run
+		}
 		w.admissions.Add(1)
 		go func() {
 			defer w.admissions.Done()
-			defer w.endAdmission(path)
+			retry := false
+			defer func() {
+				w.endAdmission(path)
+				if retry && ctx.Err() == nil {
+					w.queuePending(path)
+				}
+			}()
 			select {
 			case w.liveSlots <- struct{}{}:
 			case <-ctx.Done():
 				return // no baseline: the next start admits it
 			}
 			defer func() { <-w.liveSlots }()
+			if recursive {
+				var err error
+				events, err = w.nestedSkillEvents(root, path, connector)
+				if err != nil {
+					fmt.Fprintf(os.Stderr, "[watch] enumerate moved skill subtree %s: %v\n", path, err)
+					if _, statErr := os.Lstat(path); statErr == nil {
+						retry = true
+					}
+					return
+				}
+			}
 			for _, evt := range events {
 				if ctx.Err() != nil {
 					return
@@ -1376,9 +1624,25 @@ func (w *InstallWatcher) notifyAdmission(res AdmissionResult) {
 }
 
 // pendingInstallEvents expands a top-level Hermes category notification into
-// the actual nested SKILL.md identities. A provenance/discovery failure keeps
-// the original category event so it fails open to scanning.
+// the actual nested SKILL.md identities. A failed recursive discovery never
+// treats the category as a skill; the live worker retries the subtree.
 func (w *InstallWatcher) pendingInstallEvents(path string) []InstallEvent {
+	if !w.secureClientActive() {
+		for _, root := range w.skillDirs {
+			if watcherPathAtOrBelow(path, root) {
+				// A direct linked skill is a scan target, but an event below
+				// a linked folder must not discover its outside descendants.
+				parent := filepath.Dir(path)
+				if !watcherPathAtOrBelow(parent, root) {
+					parent = root
+				}
+				if err := unlinkedSkillTreePath(root, parent); err != nil {
+					fmt.Fprintf(os.Stderr, "[watch] skill discovery %s: %v\n", path, err)
+					return nil
+				}
+			}
+		}
+	}
 	fallback := w.classifyEvent(path)
 	if depth, ok := w.claudeSyncedDepth(path); ok && depth == 2 {
 		fallback.Type = InstallSkill
@@ -1397,6 +1661,13 @@ func (w *InstallWatcher) pendingInstallEvents(path string) []InstallEvent {
 		if events, ok := w.pluginFolderEvents(path); ok {
 			return events
 		}
+	}
+	if root, connector, recursive := w.recursiveSkillRoot(path); recursive && !sameWatcherPath(root, path) {
+		events, err := w.nestedSkillEvents(root, path, connector)
+		if err == nil {
+			return events
+		}
+		return nil
 	}
 	for _, root := range w.skillDirs {
 		discover, _ := hermesSkillsDiscover(root)
@@ -1494,6 +1765,9 @@ func blankFile(path string) bool {
 // pendingInstallEvents). Hermes roots hold category folders and keep their own
 // discovery.
 func (w *InstallWatcher) watchIncompleteSkillFolders(root string) {
+	if _, _, recursive := w.recursiveSkillRoot(root); recursive {
+		return
+	}
 	if discover, _ := hermesSkillsDiscover(root); discover != nil {
 		return
 	}
@@ -1531,16 +1805,21 @@ func (w *InstallWatcher) changedSkillFolder(path string) (string, bool) {
 	if editorScratchFile(filepath.Base(path)) {
 		return "", false
 	}
-	if _, synced := w.claudeSyncedDepth(path); synced {
+	if _, synced := w.claudeSyncedDepth(path); synced &&
+		(w.secureClientActive() || w.connectorForPath(path) != "cursor") {
 		return "", false
 	}
 	pathAbs, err := filepath.Abs(path)
 	if err != nil {
 		return "", false
 	}
+	recursiveRoot, _, recursive := w.recursiveSkillRoot(pathAbs)
 	for _, root := range w.skillDirs {
 		rootAbs, err := filepath.Abs(root)
 		if err != nil {
+			continue
+		}
+		if recursive && !sameWatcherPath(rootAbs, recursiveRoot) {
 			continue
 		}
 		rel, err := filepath.Rel(rootAbs, pathAbs)
@@ -1548,16 +1827,23 @@ func (w *InstallWatcher) changedSkillFolder(path string) (string, bool) {
 			continue
 		}
 		parts := strings.Split(rel, string(filepath.Separator))
-		if len(parts) < 2 || strings.HasPrefix(parts[0], ".") {
+		if len(parts) < 2 || (strings.HasPrefix(parts[0], ".") && !recursive) {
 			return "", false
 		}
 		skill := filepath.Join(rootAbs, parts[0])
-		if discover, _ := hermesSkillsDiscover(root); discover != nil {
-			// Hermes holds skills in category folders: the skill is the
-			// nearest folder with a SKILL.md.
+		discover, _ := hermesSkillsDiscover(root)
+		if (recursive && sameWatcherPath(root, recursiveRoot)) ||
+			discover != nil {
+			// Recursive roots resolve the nearest marked skill, not the
+			// category containing it.
 			skill = ""
 			for dir := filepath.Dir(pathAbs); dir != rootAbs && watcherPathAtOrBelow(dir, rootAbs); dir = filepath.Dir(dir) {
-				if info, statErr := os.Stat(filepath.Join(dir, "SKILL.md")); statErr == nil && info.Mode().IsRegular() {
+				marked := hasSkillMarker(dir)
+				if !recursive {
+					info, statErr := os.Stat(filepath.Join(dir, "SKILL.md"))
+					marked = statErr == nil && info.Mode().IsRegular()
+				}
+				if marked {
 					skill = dir
 					break
 				}
@@ -1586,6 +1872,10 @@ func editorScratchFile(name string) bool {
 // root, so a change to one reaches admission.
 func (w *InstallWatcher) watchSkillContents(root string) {
 	if w.addContentWatch == nil {
+		return
+	}
+	if _, _, recursive := w.recursiveSkillRoot(root); recursive {
+		w.addContentWatch(root)
 		return
 	}
 	entries, err := os.ReadDir(root)
@@ -3931,12 +4221,39 @@ func underVendorSystemRoot(absolute string) bool {
 // missing root (for example under a parent only an administrator may write).
 var errWatchDirNotCreated = errors.New("create dir")
 
-// ensureAndWatch creates dir when it is missing and watches it. It returns
-// the absolute paths of the folders it created: dir and any missing parents.
+// ensureAndWatch creates and watches a skill root only when its existing
+// ancestors and the final root have no links. It returns folders it created.
 func ensureAndWatch(fsw *fsnotify.Watcher, dir string) ([]string, error) {
+	return ensureAndWatchWithCheck(fsw, dir, true)
+}
+
+// ensureAndWatchLegacy retains the existing watch behavior for plugins and
+// Secure Client. Skill roots outside Secure Client use ensureAndWatch.
+func ensureAndWatchLegacy(fsw *fsnotify.Watcher, dir string) ([]string, error) {
+	return ensureAndWatchWithCheck(fsw, dir, false)
+}
+
+func ensureAndWatchWithCheck(fsw *fsnotify.Watcher, dir string, checkLinks bool) ([]string, error) {
 	var created []string
 	if isAbsentVendorSystemDir(dir) {
 		return nil, errAbsentVendorSystemDir
+	}
+	if checkLinks {
+		for current := filepath.Clean(dir); ; current = filepath.Dir(current) {
+			if _, err := os.Lstat(current); err == nil {
+				resolved, resolveErr := filepath.EvalSymlinks(current)
+				if resolveErr != nil || !sameWatcherPath(canonicalSkillSystemPath(current), resolved) {
+					return nil, fmt.Errorf("linked or unavailable skill root: %s", dir)
+				}
+				break
+			} else if !errors.Is(err, fs.ErrNotExist) {
+				return nil, fmt.Errorf("%w: inspect skill root %s: %v", errWatchDirNotCreated, dir, err)
+			}
+			parent := filepath.Dir(current)
+			if parent == current {
+				return nil, fmt.Errorf("unavailable skill root: %s", dir)
+			}
+		}
 	}
 	if current, err := filepath.Abs(dir); err == nil {
 		for {
@@ -3953,6 +4270,11 @@ func ensureAndWatch(fsw *fsnotify.Watcher, dir string) ([]string, error) {
 	}
 	if err := os.MkdirAll(dir, 0o700); err != nil {
 		return nil, fmt.Errorf("%w: %w", errWatchDirNotCreated, err)
+	}
+	if checkLinks {
+		if err := unlinkedSkillTreePath(dir, dir); err != nil {
+			return created, err
+		}
 	}
 
 	if err := fsw.Add(dir); err != nil {

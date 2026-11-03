@@ -31,6 +31,7 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/config/configwrite"
 	"github.com/defenseclaw/defenseclaw/internal/enterprisebundle"
 	"github.com/defenseclaw/defenseclaw/internal/enterprisehooks"
+	"github.com/defenseclaw/defenseclaw/internal/enterprisepolicy"
 	"github.com/defenseclaw/defenseclaw/internal/enterprisestatus"
 	"github.com/defenseclaw/defenseclaw/internal/managed"
 )
@@ -225,6 +226,22 @@ func (e *Env) stateTrees(account Account) []stateTree {
 				return stateMode{mode: 0o640, owner: rootService, need: 0o040}
 			}
 			return stateMode{mode: 0o640, owner: rootService, mask: true}
+		}},
+		// The gateway's clean-session entries (enterprisepolicy.
+		// WriteForeignHookCleanMirrors): a 0711 folder per account uid and
+		// 0644 entries, all the service account's. An account opens its own
+		// entry by name; a looser folder lets it list or change them, and an
+		// entry it cannot read keeps its calls blocked in an outage.
+		{dir: managed.ForeignHookCleanDir(e.Layout.DataDir), rule: func(rel string, dir bool) stateMode {
+			switch {
+			case dir:
+				return stateMode{mode: 0o711, owner: service}
+			case strings.HasPrefix(filepath.Base(rel), enterprisepolicy.ForeignHookCleanMirrorTempPrefix):
+				// An entry the gateway is still writing: created 0600, then
+				// given 0644 before the rename. No bit is added to it.
+				return stateMode{mode: 0o644, owner: service, mask: true}
+			}
+			return stateMode{mode: 0o644, owner: service}
 		}},
 	}
 }
@@ -478,6 +495,9 @@ func (e *Env) closePrivateDirs(ctx context.Context) {
 	private := map[string]bool{
 		e.Layout.DataDir: true, e.Layout.SecretsDir: true, filepath.Dir(e.Layout.ManifestPath): true,
 		e.Layout.GuardianAuthDir: true, e.Layout.LifecycleDir: true,
+		// 0711: listable after chmod -R a+rX, which names every account
+		// with a clean session.
+		managed.ForeignHookCleanDir(e.Layout.DataDir): true,
 	}
 	for _, dir := range e.managedDirs(Account{}, loadCredential) {
 		if private[dir.Path] {

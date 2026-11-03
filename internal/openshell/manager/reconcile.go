@@ -221,7 +221,7 @@ func (m *Manager) reconcile(ctx context.Context, startup bool) (err error) {
 			if held {
 				continue
 			}
-			if _, err := gw.Client.GetSandbox(ctx, p.Labels[LabelSandbox]); !openshell.IsNotFound(err) {
+			if _, err := m.getSandbox(ctx, gw, p.Labels[LabelSandbox]); !openshell.IsNotFound(err) {
 				continue
 			}
 			if _, err := gw.Client.DeleteProvider(ctx, p.Name); err != nil && !openshell.IsNotFound(err) {
@@ -469,6 +469,7 @@ const foreignRemoveTries = 3
 func (m *Manager) stopForeign(ctx context.Context, gw *Gateway, sb *openshell.Sandbox) (foreignOutcome, error) {
 	_, err := gw.Client.StopSandbox(ctx, sb.Name)
 	if err == nil || openshell.IsNotFound(err) {
+		m.forgetPending(sb.Name)
 		return foreignStopped, nil
 	}
 	if auditPhase(sb.Status.Phase) == audit.SandboxPhaseReady {
@@ -479,7 +480,8 @@ func (m *Manager) stopForeign(ctx context.Context, gw *Gateway, sb *openshell.Sa
 	if _, derr := gw.Client.DeleteSandbox(ctx, sb.Name); derr != nil && !openshell.IsNotFound(derr) {
 		return foreignStopped, fmt.Errorf("%w; delete: %w", err, derr)
 	}
-	now, gerr := gw.Client.GetSandbox(ctx, sb.Name)
+	m.forgetPending(sb.Name)
+	now, gerr := m.getSandbox(ctx, gw, sb.Name)
 	switch {
 	case openshell.IsNotFound(gerr):
 		return foreignRemoved, nil
@@ -609,7 +611,7 @@ func (m *Manager) goneNow(ctx context.Context, gw *Gateway, b *box) bool {
 	m.mu.Lock()
 	name, id := b.rec.Name, b.rec.ID
 	m.mu.Unlock()
-	sb, err := gw.Client.GetSandbox(ctx, name)
+	sb, err := m.getSandbox(ctx, gw, name)
 	switch {
 	case openshell.IsNotFound(err):
 		return true
@@ -625,6 +627,9 @@ func (m *Manager) goneNow(ctx context.Context, gw *Gateway, b *box) bool {
 // orphaned when no binding exists either. A sandbox adopted without a
 // record is taken to run on the gateway's driver: it is live there.
 func (m *Manager) adopt(sb *openshell.Sandbox, driver openshell.Driver) *box {
+	if sb.Status.Phase != openshell.PhaseError {
+		m.forgetPending(sb.Name)
+	}
 	binding, berr := m.opts.Bindings.Lookup(sb.Name)
 	m.mu.Lock()
 	b := m.boxes[sb.Name]
@@ -808,7 +813,10 @@ func (m *Manager) missingFromLocked(gw *Gateway, b *box) func(context.Context) {
 // only a compute driver gw no longer runs is still reported (elsewhere,
 // otherDriver). A lookup of the place b's record names is that place's
 // newest read of it (provenPhase). The caller holds m.mu.
-func foundOnLocked(b *box, gw *Gateway, sb *openshell.Sandbox) {
+func (m *Manager) foundOnLocked(b *box, gw *Gateway, sb *openshell.Sandbox) {
+	if sb != nil && sb.Status.Phase != openshell.PhaseError {
+		m.forgetPending(b.rec.Name)
+	}
 	b.sb, b.missing, b.gone = sb, false, false
 	b.elsewhere = gatewayMismatch(record{Driver: b.rec.Driver}, gw)
 	b.otherDriver = b.elsewhere != ""
@@ -863,7 +871,7 @@ func (m *Manager) noteGateway(b *box, gw *Gateway) bool {
 	ws := gw.Client.Workspace()
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	foundOnLocked(b, gw, b.sb)
+	m.foundOnLocked(b, gw, b.sb)
 	if b.rec.Gateway == gw.Name && b.rec.GatewayEndpoint == gw.Endpoint && b.rec.GatewayWorkspace == ws {
 		return false
 	}

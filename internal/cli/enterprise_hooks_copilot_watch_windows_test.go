@@ -9,6 +9,10 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+	"time"
+
+	"github.com/defenseclaw/defenseclaw/internal/enterprisehooks"
+	"github.com/fsnotify/fsnotify"
 )
 
 // A Copilot row's VS Code Local hook file was in no watch list, so its
@@ -31,5 +35,36 @@ func TestEnterpriseHookPlatformWatchFilesNamesTheCopilotVSCodeHookFile(t *testin
 		if dirs, files := enterpriseHookPlatformWatchFiles(other, home); len(dirs)+len(files) != 0 {
 			t.Fatalf("%s: dirs %q files %q, want none", other, dirs, files)
 		}
+	}
+}
+
+func TestEnterpriseHookPlatformWatchFileHasFailedTargetOwner(t *testing.T) {
+	home := t.TempDir()
+	_, files := enterpriseHookPlatformWatchFiles("copilot", home)
+	if len(files) != 1 {
+		t.Fatalf("Copilot platform files: %v", files)
+	}
+	row := enterpriseHookReconcileRow{User: "alice", Connector: "copilot", Error: "repair pending"}
+	exclusive := map[string]struct{}{}
+	owners := map[string][]string{}
+	enterpriseHookWatchAddExclusiveOwnedFiles(exclusive, owners, files, enterpriseHookProtectedTargetKey(row))
+	failed := enterpriseHookWatchFailedOwnedPaths(enterpriseHookReconcileRun{
+		Rows: []enterpriseHookReconcileRow{row}, WatchPathOwners: owners,
+	})
+	path := files[0]
+	if _, watched := exclusive[path]; !watched || !failed[path] {
+		t.Fatalf("platform path %q has no failed owner: watched=%v failed=%v", path, watched, failed[path])
+	}
+	// The watch loop judges an event against the snapshots its last pass took
+	// of every owned path (takeEnterpriseHookOwnedSnapshot); an owned path
+	// with no snapshot entry counts as changed, never as the pass's tail.
+	found, left := map[string]string{}, map[string]string{}
+	takeEnterpriseHookOwnedSnapshot(found, exclusive, nil, enterprisehooks.OwnedFileFingerprint)
+	takeEnterpriseHookOwnedSnapshot(left, exclusive, nil, enterprisehooks.OwnedFileFingerprint)
+	now := time.Now()
+	if drop, settling := enterpriseHookWatchEventDropped(now, now.Add(time.Second),
+		fsnotify.Event{Name: path, Op: fsnotify.Create | fsnotify.Remove}, failed[path], exclusive, nil,
+		found, left, enterprisehooks.OwnedFileFingerprint, true); !drop || !settling {
+		t.Fatalf("failed repair tail: drop=%v settling=%v", drop, settling)
 	}
 }

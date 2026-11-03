@@ -93,7 +93,7 @@ type Result struct {
 // legacyGuestStep is what Summary adds for a kept sandbox: after a roll
 // forward a retained guest can still run the older release's supervisor, and
 // a healthy gateway alone does not let it connect (GAP-1161).
-const legacyGuestStep = "; if `defenseclaw sandbox connect NAME` then says legacy sandbox running, save or pull its work, then run `defenseclaw sandbox stop NAME` and `defenseclaw sandbox start NAME`"
+const legacyGuestStep = "; if `defenseclaw sandbox connect NAME` then says legacy sandbox running, save its work (`defenseclaw sandbox pull NAME --apply` for a copy, or --branch or --patch-out FILE) and confirm the project, branch or patch file contains it, then run `defenseclaw sandbox stop NAME` and `defenseclaw sandbox start NAME`"
 
 // Summary is the installer's line for a carried setup.
 func (r Result) Summary() string {

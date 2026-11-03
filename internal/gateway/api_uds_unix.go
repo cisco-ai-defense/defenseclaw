@@ -55,12 +55,8 @@ func (a *APIServer) newManagedHookSocketServer(ctx context.Context, base func(ht
 		fmt.Fprintf(os.Stderr, "[sidecar-api] standalone runtime descriptor rejected: %v\n", descriptorErr)
 		descriptor = nil
 	}
-	var machinePolicy []string
-	if descriptor != nil {
-		machinePolicy = descriptor.MachinePolicyConnectors
-	}
 	ledger := newManagedHookLedgerLoader(managed.HookGuardianAuthorizationPath(a.configDataDir()))
-	authorizer := newManagedHookAuthorizer(a.scannerCfg.Enterprise.Enrollment, machinePolicy, ledger.Load)
+	authorizer := newManagedHookAuthorizer(a.scannerCfg.Enterprise.Enrollment, nil, ledger.Load)
 	authorizer.loadRefused = newManagedHookRefusedLoader(filepath.Join(
 		managed.HookGuardianAuthorizationDir(a.configDataDir()), managed.HookGuardianRefusedSurfacesFile)).Load
 
@@ -91,7 +87,7 @@ func (a *APIServer) newManagedHookSocketServer(ctx context.Context, base func(ht
 
 	// Prove the published vendor policy before the first call, then again
 	// only when it or the descriptor changes; no hook call computes it.
-	a.startManagedPolicyView(ctx, runtime.GOOS)
+	a.startManagedPolicyView(ctx, runtime.GOOS, authorizer)
 	server := &http.Server{
 		Handler:     a.managedHookSocketHandler(authorizer, base),
 		BaseContext: apiRequestBaseContext(ctx),

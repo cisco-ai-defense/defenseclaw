@@ -49,7 +49,9 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/managed"
 	"github.com/defenseclaw/defenseclaw/internal/managed/mcpasuser"
 	"github.com/defenseclaw/defenseclaw/internal/observability"
+	observabilityruntime "github.com/defenseclaw/defenseclaw/internal/observability/runtime"
 	"github.com/defenseclaw/defenseclaw/internal/redaction"
+	"github.com/defenseclaw/defenseclaw/internal/sandboxrelay"
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/codes"
 	"go.opentelemetry.io/otel/trace"
@@ -247,8 +249,8 @@ type hookClientContextKey struct{}
 // records whether the agent took the answer.
 type hookDeliveryReceiptContextKey struct{}
 
-// agentHookPersistGrace bounds the terminal audit, hook_decision and receipt
-// writes once the hook's own work has been cancelled.
+// agentHookPersistGrace is the maximum lifetime of a persistence attempt.
+// A live request must not hold a stalled SQLite writer without a deadline.
 const agentHookPersistGrace = 10 * time.Second
 
 // agentHookCompletionContext keeps the request's values, but not its
@@ -264,11 +266,20 @@ func agentHookCompletionContext(parent context.Context) (context.Context, contex
 	return context.WithValue(ctx, hookClientContextKey{}, parent), cancel
 }
 
-// agentHookPersistenceContext carries the terminal persistence of a verdict.
-// It outlives the completion context by agentHookPersistGrace, so a hook whose
-// work the disconnect grace cut off still records the verdict it returned.
+// agentHookPersistenceContext keeps the existing cancellation grace for
+// Secure Client finalization and sandbox receipts.
 func agentHookPersistenceContext(ctx context.Context) (context.Context, context.CancelFunc) {
 	return contextWithCancelGrace(ctx, agentHookPersistGrace)
+}
+
+// hookPersistenceContext gives ordinary hooks one deadline across telemetry,
+// finalization and batch close. Secure Client retains its existing grace.
+func (a *APIServer) hookPersistenceContext(ctx context.Context) (context.Context, context.CancelFunc) {
+	if cfg := a.decisionConfig(ctx); cfg != nil && cfg.SecureClientIntegration() {
+		persistCtx, cancel := agentHookPersistenceContext(ctx)
+		return audit.WithCallWriteAfterCancel(persistCtx), cancel
+	}
+	return context.WithTimeout(context.WithoutCancel(ctx), agentHookPersistGrace)
 }
 
 // contextWithCancelGrace keeps parent's values and is cancelled grace after
@@ -292,7 +303,18 @@ func contextWithCancelGrace(parent context.Context, grace time.Duration) (contex
 
 func (a *APIServer) handleAgentHook(connectorName string) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
+		chargeBudget := func(receipt bool) bool {
+			if err := chargeSandboxHookBudget(r.Context(), receipt); err != nil {
+				w.Header().Set("Retry-After", "1")
+				a.writeJSON(w, http.StatusTooManyRequests, map[string]string{"error": err.Error()})
+				return false
+			}
+			return true
+		}
 		if r.Method != http.MethodPost {
+			if !chargeBudget(false) {
+				return
+			}
 			a.recordConnectorHookRejection(r.Context(), connectorName, "unknown", "method", 0)
 			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 			return
@@ -329,6 +351,9 @@ func (a *APIServer) handleAgentHook(connectorName string) http.HandlerFunc {
 			rawBody, err = io.ReadAll(r.Body)
 		}
 		if err != nil {
+			if !chargeBudget(false) {
+				return
+			}
 			var maxBytesError *http.MaxBytesError
 			if errors.As(err, &maxBytesError) {
 				a.recordConnectorHookRejection(
@@ -344,7 +369,23 @@ func (a *APIServer) handleAgentHook(connectorName string) http.HandlerFunc {
 			a.writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid JSON body", "reason": hookexec.MalformedHookPayloadReason})
 			return
 		}
-		if receiptID, ok := sandboxHookReceiptID(rawBody); ok {
+		receiptID, receiptBody, receiptLike := classifySandboxHookReceiptBody(rawBody)
+		if !chargeBudget(receiptLike) {
+			return
+		}
+		invalidReceipt := receiptLike && !receiptBody
+		if claimsSandboxHookReceipt(r) {
+			values := r.Header.Values(sandboxrelay.HookReceiptHeader)
+			invalidReceipt = invalidReceipt || len(values) != 1 || values[0] != sandboxrelay.HookReceiptHeaderValue || !receiptBody
+		}
+		if invalidReceipt {
+			a.recordConnectorHookRejection(r.Context(), connectorName, "unknown", "invalid_receipt", int64(len(rawBody)))
+			a.writeJSON(w, http.StatusBadRequest, map[string]string{
+				"error": "invalid sandbox hook receipt", "reason": hookexec.MalformedHookPayloadReason,
+			})
+			return
+		}
+		if receiptBody {
 			a.handleSandboxHookReceipt(w, r, connectorName, receiptID)
 			return
 		}
@@ -502,6 +543,41 @@ func (a *APIServer) handleAgentHook(connectorName string) http.HandlerFunc {
 			})
 			return
 		}
+		// A retained registration follows its configured outage mode while
+		// setup is unfinished. An absent agent remains denied until restart.
+		setupWarning := ""
+		if reason, state := a.health.connectorHookAdmission(connectorName); reason != "" {
+			cfg := a.runtimeConfigSnapshot()
+			if state != connectorHookSkipped && cfg != nil && !cfg.SecureClientIntegration() &&
+				!managed.IsManagedEnterprise(cfg.DeploymentMode) &&
+				cfg.EffectiveHookOutageFailModeForConnector(connectorName) == "open" {
+				// Continue through the ordinary policy path so a protected
+				// call can still receive its block during setup.
+				setupWarning = reason
+			} else {
+				// Health may include the executable path; this hook reason does not.
+				resp := agentHookResponseForProfile(profile, req, "block", "block", "HIGH", reason,
+					nil, "action", false, profile.Capabilities)
+				// The reason is gateway-authored and contains no user text or path.
+				// Preserve it in the native answer; generic scan-reason redaction
+				// would otherwise hide the restart instruction.
+				resp.Reason = reason
+				if profile.Respond != nil {
+					resp.HookOutput = profile.Respond(connector.HookRespondInput{
+						Req: hookProfileRequestFromAgentHook(req), Action: "block", RawAction: "block",
+						Reason: reason, Caps: profile.Capabilities,
+					}).Output
+				}
+				resp.RuleIDs = []string{"CONNECTOR-NOT-STARTED"}
+				a.writeHookAnswer(w, a.hookAnswerBody(r.Context(), profile, connectorName, req, resp, ""))
+				return
+			}
+		}
+		// A connector the administrator's config turns off is answered allow
+		// here, before anything about the call is recorded (rel-1-0-6:GAP-0325).
+		if a.answerDisabledConnectorHook(r.Context(), w, r.Header, profile, connectorName, req) {
+			return
+		}
 		a.noteProtectedFileActivity(r.Context(), connectorName, req, identityFacts.ID)
 		toolRoute := profile.ToolCallLifecycle.RouteForEvent(req.HookEventName)
 		if (connectorName == "claudecode" || connectorName == "codex") &&
@@ -608,7 +684,7 @@ func (a *APIServer) handleAgentHook(connectorName string) http.HandlerFunc {
 		if deduped && a.copilotDedupeReplayable(r.Context(), connectorName, req, requireSandboxSurface(r.Context(), r.Header), earlier) {
 			dedupedResp := copilotDedupedResponse(profile, req, earlier)
 			startVerdictBlocked, startVerdictReason = sessionStartVerdictBlocks(dedupedResp), dedupedResp.Reason
-			writeHookAnswer(w, a.hookAnswerBody(r.Context(), profile, connectorName, req, dedupedResp, ""))
+			a.writeHookAnswer(w, a.hookAnswerBody(r.Context(), profile, connectorName, req, dedupedResp, ""))
 			return
 		}
 		// From here on the hook is accepted. A managed native hook confirms
@@ -621,12 +697,30 @@ func (a *APIServer) handleAgentHook(connectorName string) http.HandlerFunc {
 		// instead of one per row (GAP-1303, GAP-1791, GAP-0614). What the call
 		// writes after its verdict commits when the handler returns.
 		ctx = audit.WithCallWriteBatch(ctx, a.store)
+		var cancelTelemetry context.CancelFunc
+		var telemetryPersistenceCtx context.Context
+		var finalPersistenceCtx context.Context
+		var cancelFinalPersistence context.CancelFunc
 		defer func() {
-			closeCtx, cancelClose := agentHookPersistenceContext(ctx)
-			defer cancelClose()
+			if cancelTelemetry != nil {
+				defer cancelTelemetry()
+			}
+			if cancelFinalPersistence != nil {
+				defer cancelFinalPersistence()
+			}
+			closeCtx := finalPersistenceCtx
+			if closeCtx == nil {
+				closeCtx = telemetryPersistenceCtx
+			}
+			if closeCtx == nil {
+				var cancelClose context.CancelFunc
+				closeCtx, cancelClose = a.hookPersistenceContext(ctx)
+				defer cancelClose()
+			}
 			audit.CloseCallWrites(closeCtx)
 		}()
-		ctx, correlatedReq, correlationErr := a.correlateHookOccurrence(ctx, profile, req, b)
+		ctx, correlatedReq, correlationErr := a.correlateHookOccurrence(
+			a.hookCorrelationBoundContext(ctx, connectorName, req.HookEventName, r), profile, req, b)
 		if correlationErr != nil {
 			// Correlation persistence is fail-closed for the cross-call join IDs,
 			// not for policy enforcement or export. The hook must still be
@@ -657,7 +751,7 @@ func (a *APIServer) handleAgentHook(connectorName string) http.HandlerFunc {
 		ctx = withHookPanicCapture(ctx)
 		if shouldResetToolJudgeSession(req) {
 			sessionKey := sandboxSessionStateKey(ctx, req.SessionID)
-			if judge := a.judgeFor(ctx); judge != nil {
+			for _, judge := range a.hookSessionJudges(ctx) {
 				judge.ResetToolJudgeSession(sessionKey)
 			}
 			a.resetUserDownloadRequests(sessionKey)
@@ -714,8 +808,19 @@ func (a *APIServer) handleAgentHook(connectorName string) http.HandlerFunc {
 				// span keeps their result, and the late panic is on
 				// defenseclaw.panics.total and the gateway log (GAP-1014).
 				if !finalized {
-					persistCtx, cancelPersist := agentHookPersistenceContext(ctx)
-					defer cancelPersist()
+					persistCtx := telemetryPersistenceCtx
+					var cancelPersist context.CancelFunc
+					if persistCtx == nil {
+						persistCtx, cancelPersist = a.hookPersistenceContext(ctx)
+					}
+					if cfg := a.decisionConfig(ctx); cfg == nil || !cfg.SecureClientIntegration() {
+						finalPersistenceCtx = persistCtx
+						if cancelPersist != nil {
+							cancelFinalPersistence = cancelPersist
+						}
+					} else {
+						defer cancelPersist()
+					}
 					// The panic is on the row either way (the hook's panic
 					// capture); only a fail-mode verdict is a panic verdict.
 					finalization := a.finalizeAgentHookAnswer(a.pendingHookDecidedContext(persistCtx, pending, resp),
@@ -742,7 +847,7 @@ func (a *APIServer) handleAgentHook(connectorName string) http.HandlerFunc {
 						defer func() { _ = recover() }()
 						body := a.hookAnswerBody(ctx, profile, connectorName, req, resp, "")
 						attemptedWrite = true
-						writeHookAnswer(w, body)
+						a.writeHookAnswer(w, body)
 					}()
 				}
 			}
@@ -786,11 +891,20 @@ func (a *APIServer) handleAgentHook(connectorName string) http.HandlerFunc {
 		// managed_enterprise we defer the emit until after safeEvaluateHook
 		// stamps the directive onto ctx (see below), so the event's own
 		// directive governs its content fields. Outside managed_enterprise
-		// the emit stays BEFORE the evaluator (audit-honest ordering) and
-		// behavior is byte-for-byte unchanged.
+		// the emit stays BEFORE the evaluator (audit-honest ordering).
 		deferManagedHookEmit := managedEnterpriseActive.Load()
 		if !deferManagedHookEmit && hookLLMEventExportable(req) && !hookSideRefusal(ctx) {
-			runtime.EmitLLMEvent(a, ctx, req, b, payload, rawEventIDs)
+			// An expired client must not erase the attempted tool call while
+			// the verdict can still persist. Give emission the verdict's
+			// persistence grace and defer cancellation until the batch flush.
+			// Secure Client retains its existing telemetry lifetime.
+			telemetryCtx := ctx
+			if cfg := a.decisionConfig(ctx); cfg == nil || !cfg.SecureClientIntegration() {
+				telemetryCtx, cancelTelemetry = a.hookPersistenceContext(ctx)
+				telemetryCtx = observabilityruntime.WithDeadlineLossReporting(telemetryCtx)
+				telemetryPersistenceCtx = telemetryCtx
+			}
+			runtime.EmitLLMEvent(a, telemetryCtx, req, b, payload, rawEventIDs)
 		}
 
 		// Dispatch evaluation through the profile runtime. Connector-
@@ -932,6 +1046,18 @@ func (a *APIServer) handleAgentHook(connectorName string) http.HandlerFunc {
 			// decision, but make its audit and telemetry severity conspicuous.
 			resp.Severity = "HIGH"
 		}
+		if setupWarning != "" && (resp.Action == "allow" || resp.Action == "alert") {
+			resp.Reason = strings.TrimSpace(resp.Reason + " " + setupWarning)
+			resp.AdditionalContext = strings.TrimSpace(resp.AdditionalContext + " " + setupWarning)
+			if profile.Respond != nil {
+				resp.HookOutput = profile.Respond(connector.HookRespondInput{
+					Req: hookProfileRequestFromAgentHook(req), Action: resp.Action, RawAction: resp.RawAction,
+					Reason: resp.Reason, AdditionalContext: resp.AdditionalContext, Caps: profile.Capabilities,
+				}).Output
+			} else {
+				resp.HookOutput = hookOutputFor(req, resp.Action, resp.RawAction, resp.Reason, resp.AdditionalContext, profile.Capabilities)
+			}
+		}
 		// Re-inject the cloud-controlled per-inspection redaction
 		// directive the evaluator resolved (evaluate*'s ctx-injection is
 		// local to that call) so finalizeAgentHookAnswer emits the
@@ -945,7 +1071,13 @@ func (a *APIServer) handleAgentHook(connectorName string) http.HandlerFunc {
 		// ordering. Fails closed to redact when the AID lane returned no
 		// directive (resp.RedactionEnabled == nil).
 		if deferManagedHookEmit && hookLLMEventExportable(req) && !hookSideRefusal(ctx) {
-			runtime.EmitLLMEvent(a, ctx, req, b, payload, rawEventIDs)
+			telemetryCtx := ctx
+			if cfg := a.decisionConfig(ctx); cfg == nil || !cfg.SecureClientIntegration() {
+				telemetryCtx, cancelTelemetry = a.hookPersistenceContext(ctx)
+				telemetryCtx = observabilityruntime.WithDeadlineLossReporting(telemetryCtx)
+				telemetryPersistenceCtx = telemetryCtx
+			}
+			runtime.EmitLLMEvent(a, telemetryCtx, req, b, payload, rawEventIDs)
 		}
 
 		// A managed answer is only an evaluated proposal until the hook
@@ -975,11 +1107,23 @@ func (a *APIServer) handleAgentHook(connectorName string) http.HandlerFunc {
 				// No answer leaves this process unjournaled. The 503
 				// closes the managed hook before the proposal is offered.
 				resp = pendingFailureHookDecision(resp)
-				persistCtx, cancelPersist := agentHookPersistenceContext(ctx)
+				persistCtx := telemetryPersistenceCtx
+				var cancelPersist context.CancelFunc
+				if persistCtx == nil {
+					persistCtx, cancelPersist = a.hookPersistenceContext(ctx)
+				}
+				if cfg := a.decisionConfig(ctx); cfg == nil || !cfg.SecureClientIntegration() {
+					finalPersistenceCtx = persistCtx
+					if cancelPersist != nil {
+						cancelFinalPersistence = cancelPersist
+					}
+				}
 				finalization := a.finalizeAgentHookAnswer(a.pendingHookDecidedContext(persistCtx, pending, resp),
 					connectorName, req, resp, rawEventIDs, b, time.Since(t0), panicked, auditExtra, false)
 				a.settlePendingHook(persistCtx, pending, finalization)
-				cancelPersist()
+				if cancelPersist != nil && finalPersistenceCtx == nil {
+					cancelPersist()
+				}
 				finalized = true
 				attemptedWrite = true
 				a.writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": "hook audit is unavailable"})
@@ -1002,7 +1146,7 @@ func (a *APIServer) handleAgentHook(connectorName string) http.HandlerFunc {
 			pendingHooksInFlight.Delete(pending.ID)
 			finalized = true
 			attemptedWrite = true
-			writeHookAnswer(w, body)
+			a.writeHookAnswer(w, body)
 			return
 		}
 		// Reading or closing the answer can cancel the HTTP request before
@@ -1020,7 +1164,7 @@ func (a *APIServer) handleAgentHook(connectorName string) http.HandlerFunc {
 				resume := pauseHookRunSlot(ctx)
 				defer resume()
 				return delivery.offer(w, func() {
-					writeHookAnswer(w, body)
+					a.writeHookAnswer(w, body)
 				})
 			}()
 			if receipt == hookexec.HookDeliveryReleased {
@@ -1036,8 +1180,19 @@ func (a *APIServer) handleAgentHook(connectorName string) http.HandlerFunc {
 		}
 		elapsed := time.Since(t0)
 		enrichAgentHookSpan(ctx, req, resp, elapsed)
-		persistCtx, cancelPersist := agentHookPersistenceContext(ctx)
-		defer cancelPersist()
+		persistCtx := telemetryPersistenceCtx
+		var cancelPersist context.CancelFunc
+		if persistCtx == nil {
+			persistCtx, cancelPersist = a.hookPersistenceContext(ctx)
+		}
+		if cfg := a.decisionConfig(ctx); cfg == nil || !cfg.SecureClientIntegration() {
+			finalPersistenceCtx = persistCtx
+			if cancelPersist != nil {
+				cancelFinalPersistence = cancelPersist
+			}
+		} else {
+			defer cancelPersist()
+		}
 		if delivery != nil {
 			// The receipt decided what the agent got (delivered or
 			// unconfirmed); a hang-up after it is not a missed answer.
@@ -1108,7 +1263,7 @@ func (a *APIServer) handleAgentHook(connectorName string) http.HandlerFunc {
 			// response stream may already be partially written, and a
 			// second attempt against the same writer would just re-panic.
 			attemptedWrite = true
-			writeHookAnswer(w, body)
+			a.writeHookAnswer(w, body)
 		}
 	}
 }
@@ -1204,7 +1359,23 @@ func encodeHookAnswer(profile connector.HookProfile, resp agentHookResponse, rec
 }
 
 // writeHookAnswer writes an encoded hook answer.
-func writeHookAnswer(w http.ResponseWriter, body []byte) {
+func (a *APIServer) writeHookAnswer(w http.ResponseWriter, body []byte) {
+	if runtime.GOOS == "linux" && a.scannerCfg != nil && a.scannerCfg.DeploymentMode != "managed_enterprise" &&
+		!a.firstHookAnswerRecorded.Load() {
+		a.firstHookAnswerMu.Lock()
+		if !a.firstHookAnswerRecorded.Load() {
+			dataDir := a.configDataDir()
+			if dataDir != "" {
+				if err := hookexec.PerUserGatewayRecordLocalAnswer(dataDir); err != nil {
+					a.firstHookAnswerMu.Unlock()
+					http.Error(w, "gateway answer unavailable", http.StatusServiceUnavailable)
+					return
+				}
+			}
+			a.firstHookAnswerRecorded.Store(true)
+		}
+		a.firstHookAnswerMu.Unlock()
+	}
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusOK)
 	_, _ = w.Write(body)
@@ -2663,6 +2834,13 @@ func agentIdentityForGenericHook(ctx context.Context, req agentHookRequest) Agen
 	newSession, subagentInstance := false, ""
 	if reg := SharedAgentRegistry(); reg != nil {
 		resolved, minted := reg.ResolveForAgentIdentity(ctx, facts.ID, req.SessionID, identity.AgentID)
+		if strings.EqualFold(req.ConnectorName, "hermes") {
+			// Hermes reports its logical id on a session's first events but
+			// often omits it on later events of that same session.
+			if id := reg.hermesAgentIDForSession(ctx, facts.ID, req.SessionID, identity.AgentID); identity.AgentID == "" && id != "" {
+				resolved.AgentID = id
+			}
+		}
 		if identity.AgentID == "" {
 			identity.AgentID = resolved.AgentID
 		}
@@ -3226,7 +3404,7 @@ func (a *APIServer) evaluateAgentHook(ctx context.Context, req agentHookRequest)
 		// letting them replace the user's task would make the judge trust the
 		// very content it is meant to evaluate.
 		if isToolJudgeIntentEvent(req.HookEventName) {
-			if judge := a.judgeFor(ctx); judge != nil {
+			for _, judge := range a.hookSessionJudges(ctx) {
 				judge.ObserveSessionPrompt(ctx, req.Content)
 			}
 			a.observeUserDownloadRequest(ctx, req.Content)
@@ -3335,16 +3513,17 @@ func (a *APIServer) evaluateAgentHook(ctx context.Context, req agentHookRequest)
 			conflictSource = agentHookConflictSource(ctx, req, actionInput, dialectHint)
 		}
 		verdict = a.inspectHermesWriteToolPolicyCtx(ctx, toolRequest, trustedActionRequest{
-			Input:                actionInput,
-			LegacyText:           string(req.ToolArgs),
-			conflictSource:       conflictSource,
-			Connector:            req.ConnectorName,
-			EnforcementCapable:   enforcementCapable,
-			ResolvedWriteTargets: resolvedWritesFromContext(ctx),
-			patchTarget:          hermesV4APatch,
-			SandboxGuestCWD:      sandboxHookGuestCWD(ctx, req.ReportedCWD, toolCWD),
-			windowsShellDialect:  dialectHint,
-			record:               toolChainRecorder(ctx, req.ConnectorName, req.toolChain),
+			Input:                   actionInput,
+			LegacyText:              string(req.ToolArgs),
+			conflictSource:          conflictSource,
+			Connector:               req.ConnectorName,
+			EnforcementCapable:      enforcementCapable,
+			ManagedHookOverflowHold: managedWindowsHookOverflowHold(ctx, a.scannerCfg, req.ConnectorName, runtime.GOOS),
+			ResolvedWriteTargets:    resolvedWritesFromContext(ctx),
+			patchTarget:             hermesV4APatch,
+			SandboxGuestCWD:         sandboxHookGuestCWD(ctx, req.ReportedCWD, toolCWD),
+			windowsShellDialect:     dialectHint,
+			record:                  toolChainRecorder(ctx, req.ConnectorName, req.toolChain),
 		}, command, commandTool, hermesWriteViews)
 		assetDecisions = a.collectAgentHookAssetDecisions(ctx, req)
 	}
@@ -3362,6 +3541,9 @@ func (a *APIServer) evaluateAgentHook(ctx context.Context, req agentHookRequest)
 		effectiveMode = "action"
 	}
 	action, wouldBlock := mapHookActionForProfile(rawAction, effectiveMode, req.HookEventName, caps, profile, req.Payload)
+	if rawAction == "confirm" {
+		action = decisionConfirmWithoutAsk(verdict, action)
+	}
 	aiDefenseEnforced := verdict.aiDefenseBlock && action == "block"
 	severity := verdict.Severity
 	reason := verdict.Reason
@@ -3688,6 +3870,12 @@ func (a *APIServer) agentHookWindowsDialectHint(ctx context.Context) bool {
 	return cfg == nil || !cfg.SecureClientIntegration()
 }
 
+func managedWindowsHookOverflowHold(ctx context.Context, cfg *config.Config, connector, goos string) bool {
+	return goos == "windows" && cfg != nil && cfg.StandaloneEnterprise() &&
+		!cfg.SecureClientIntegration() && !isSandboxHookRequest(ctx) &&
+		authenticatedHookConnector(ctx) == canonicalConnectorRulePackKey(connector)
+}
+
 // agentHookConflictSource is a structured tool call's arguments as the call
 // carried them (req.ToolArgs), and how a candidate of them is projected as
 // base was: agentHookTrustedActionArgs, its working directory, and the
@@ -3999,7 +4187,7 @@ func (a *APIServer) agentHookEnabled(ctx context.Context, name string) bool {
 	// for re-enable). Defense-in-depth alongside the boot-loop teardown.
 	// EffectiveEnabled defaults to true ⇒ no-op for single-connector
 	// installs and any connector never explicitly disabled.
-	if cfg.ManualConnectorConfigured(name) && !cfg.Guardrail.EffectiveEnabled(name) {
+	if cfg.ConnectorDisabled(name) {
 		return false
 	}
 	if cfg.ConnectorHookConfig(name).Enabled {

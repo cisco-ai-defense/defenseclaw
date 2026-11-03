@@ -87,6 +87,7 @@ func TestUnannouncedSubagentHooksAreChildrenOfTheMainAgent(t *testing.T) {
 // root. The thread is not a session of the agent identity: agent identities
 // counts chats (GAP-0226).
 func TestCodexThreadSpawnLinksTheChildSessionToItsParent(t *testing.T) {
+	freshAgentIdentityLedger(t)
 	api := &APIServer{}
 	const parentSession = "01a112f0-847b-7161-9d89-41cd7dbafd82"
 	const childSession = "01a112f1-8bff-77b2-b8f8-a675ceccfdd2"
@@ -160,6 +161,7 @@ func TestCodexThreadSpawnLinksTheChildSessionToItsParent(t *testing.T) {
 // hooks are a sub-agent of the parent at depth one, and agent identities
 // counts the parent chat only.
 func TestCopilotSubagentSessionLinksToItsParent(t *testing.T) {
+	freshAgentIdentityLedger(t)
 	api := &APIServer{}
 	const parentSession = "6b5c0000-0000-4000-8000-000000000371"
 	const childSession = "e5aa4dff-407b-41c3-9ea8-2250e0de8e02"

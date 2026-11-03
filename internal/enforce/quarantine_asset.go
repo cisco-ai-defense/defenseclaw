@@ -19,6 +19,8 @@ import (
 	"runtime"
 	"sort"
 	"strings"
+
+	"github.com/defenseclaw/defenseclaw/internal/pathidentity"
 )
 
 // AssetQuarantinePlan binds one source tree to its connector-owned quarantine
@@ -644,7 +646,7 @@ func RemoveLinkedAsset(sourceRoots []string, targetType, path string) (string, e
 }
 
 func safeAssetInfo(path string) (fs.FileInfo, error) {
-	info, err := os.Lstat(path)
+	info, err := pathidentity.LstatPinned(path)
 	if err != nil {
 		return nil, fmt.Errorf("enforce: inspect asset %s: %w", path, err)
 	}

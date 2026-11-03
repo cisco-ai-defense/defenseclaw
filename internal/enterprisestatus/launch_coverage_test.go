@@ -78,11 +78,38 @@ func TestPluginLaunchCoverage(t *testing.T) {
 		{"Kiro moved home", "kiro", []string{"kiro-cli"}, map[string]string{"KIRO_HOME": "/tmp/other"}, true, "kiro_hook_config_relocated"},
 		{"Kiro moved agents", "kiro", []string{"kiro-cli"}, map[string]string{"KIRO_AGENT_CONFIG_DIR": "/tmp/agents"}, true, "kiro_hook_config_relocated"},
 		{"Kiro moved test agents", "kiro", []string{"kiro-cli"}, map[string]string{"KIRO_TEST_AGENTS_DIR": "/tmp/agents"}, true, "kiro_hook_config_relocated"},
-		{"Other connector", "codex", []string{"codex", "--pure"}, nil, false, ""},
+		{"Other connector", "claudecode", []string{"claude", "--pure"}, nil, false, ""},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			if got := PluginLaunchCoverage(tc.connector, tc.argv, tc.env, tc.envKnown, home); got != tc.want {
 				t.Fatalf("coverage = %q, want %q", got, tc.want)
+			}
+		})
+	}
+}
+
+func TestBashHookLaunchCoverage(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("Windows does not start these hooks through Bash")
+	}
+	for _, name := range []string{"codex", "copilot", "devin"} {
+		t.Run(name, func(t *testing.T) {
+			for _, tc := range []struct {
+				name  string
+				env   map[string]string
+				known bool
+				want  string
+			}{
+				{"normal", map[string]string{"HOME": "/home/alice"}, true, ""},
+				{"startup file", map[string]string{"HOME": "/home/alice", "BASH_ENV": "set"}, true, "bash_hook_startup"},
+				{"noexec", map[string]string{"HOME": "/home/alice", "SHELLOPTS": "noexec"}, true, "bash_hook_noexec"},
+				{"unreadable", nil, false, "launch_environment_unverified"},
+			} {
+				t.Run(tc.name, func(t *testing.T) {
+					if got := PluginLaunchCoverage(name, []string{name}, tc.env, tc.known, "/home/alice"); got != tc.want {
+						t.Fatalf("coverage = %q, want %q", got, tc.want)
+					}
+				})
 			}
 		})
 	}

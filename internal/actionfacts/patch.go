@@ -67,15 +67,24 @@ func isPatchEnvelopeField(field string, value any) bool {
 	return ok && field == "input" && strings.HasPrefix(text, "*** Begin Patch")
 }
 
-func isRelativePatchPath(value string) bool {
-	if value == "" || strings.HasPrefix(value, "/") ||
-		strings.HasPrefix(value, `\`) || value == "~" ||
-		strings.HasPrefix(value, "~/") || strings.HasPrefix(value, `~\`) {
+// isAcceptedPatchPath reports a patch target with one stable meaning: a path
+// relative to the working directory, an absolute POSIX or drive path, or a
+// root-relative path (/x or \x), which a Windows working directory roots on
+// its own drive as it does any other root-relative path. Codex and the
+// Copilot CLI apply such a target as given, so it is a write fact like a
+// relative one and every path rule judges it (rel-1-0-6:GAP-0361,
+// GAP-0398). Home forms (~) stay unread because the tool does not expand
+// them, and so do UNC shares (\\host) and drive-relative paths (C:x), which
+// name another host or the current directory of another drive.
+func isAcceptedPatchPath(value string) bool {
+	if value == "" || value == "~" || strings.HasPrefix(value, "~/") ||
+		strings.HasPrefix(value, `~\`) || strings.HasPrefix(value, `\\`) {
 		return false
 	}
-	// Drive-qualified paths include both absolute C:\x and drive-relative C:x
-	// forms. Neither has stable working-directory semantics across platforms.
-	return len(value) < 2 || !isASCIILetter(value[0]) || value[1] != ':'
+	if len(value) >= 2 && isASCIILetter(value[0]) && value[1] == ':' {
+		return len(value) >= 3 && (value[2] == '/' || value[2] == '\\')
+	}
+	return true
 }
 
 func appendExtractedPatch(out *extractedInput, text string) {
@@ -186,7 +195,7 @@ func parsePatchEnvelope(text string) patchEnvelopeResult {
 			strings.TrimSpace(pathValue) != pathValue ||
 			len(pathValue) > maxScalarBytes ||
 			strings.IndexByte(pathValue, 0) >= 0 ||
-			!isRelativePatchPath(pathValue) {
+			!isAcceptedPatchPath(pathValue) {
 			status := StatusInvalid
 			issue := IssueInvalidSyntax
 			if len(pathValue) > maxScalarBytes {
@@ -202,7 +211,7 @@ func parsePatchEnvelope(text string) patchEnvelopeResult {
 		if directives > maxPatchDirectives {
 			return fail(StatusLimitExceeded, IssueFactLimit)
 		}
-		// The envelope can spell the same effective relative target through dot
+		// The envelope can spell the same effective target through dot
 		// segments or either separator style. Key duplicate detection by that
 		// conservative lexical identity so conflicting access facts cannot regain
 		// authority after path normalization.
@@ -263,5 +272,38 @@ func parsePatchEnvelope(text string) patchEnvelopeResult {
 		changes: changes,
 		hasMove: hasMove,
 		status:  StatusComplete,
+	}
+}
+
+// classifyPOSIXApplyPatchStdin gives a shell-fed, literal patch the same
+// path operations as the native apply_patch tool. A quoted heredoc preserves
+// the envelope bytes; other stdin forms have no authoritative patch text.
+func classifyPOSIXApplyPatchStdin(out *parseOutput, command *CommandFact) {
+	if command.Dialect != DialectPOSIX || command.Executable != "apply_patch" ||
+		!command.ArgvComplete || len(command.Argv) != 1 ||
+		!command.LiteralStdinComplete || command.LiteralStdinAmbiguous {
+		out.markPartial(IssueUnknownOperandGrammar)
+		return
+	}
+	patch := parsePatchEnvelope(command.LiteralStdin)
+	if patch.status != StatusComplete {
+		if patch.status == StatusLimitExceeded {
+			out.markLimit(patch.issue)
+		} else {
+			out.markPartial(patch.issue)
+		}
+		return
+	}
+	for _, change := range patch.changes {
+		switch change.access {
+		case PathAccessWrite:
+			addOperation(command, OperationWrite)
+		case PathAccessDelete:
+			addOperation(command, OperationDelete)
+		}
+		appendCommandPath(out, command, change.access, change.path)
+	}
+	if patch.hasMove {
+		addOperation(command, OperationMove)
 	}
 }

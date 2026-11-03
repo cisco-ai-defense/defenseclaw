@@ -684,6 +684,7 @@ func buildHookOptionsForRuntime(connector, event, apiAddr, _ string, enterpriseM
 			if !trustedNativeState || n <= 1<<20 {
 				// Packaged hooks allow projects to lower the cap, never raise it.
 				opts.MaxBody = n
+				opts.MaxBodyLowered = n < hookexec.DefaultMaxBody
 			}
 		}
 	}

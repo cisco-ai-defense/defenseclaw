@@ -559,12 +559,97 @@ def config_path() -> Path:
 
 
 def config_path_for_data_dir(data_dir: str | os.PathLike[str] | None = None) -> Path:
-    """Return the active config path for a caller-scoped data directory."""
+    """Return the active config path for a caller-scoped data directory.
+
+    ``defenseclaw config set data_dir`` leaves config.yaml in the install home
+    (``~/.defenseclaw``), so a data_dir without its own config.yaml is run by
+    the account config that names it (:func:`gateway_home_for_data_dir`).
+    """
     if os.environ.get(CONFIG_PATH_ENV):
         return config_path()
     if data_dir:
-        return Path(data_dir) / CONFIG_FILE_NAME
+        return Path(os.path.join(gateway_home_for_data_dir(data_dir), CONFIG_FILE_NAME))
     return config_path()
+
+
+GATEWAY_PID_FILE_NAME = "gateway.pid"
+
+# (path, st_dev, st_ino, st_size, st_mtime_ns) -> the data_dir that config names.
+_home_data_dir_cache: dict[tuple[str, int, int, int, int], str | None] = {}
+
+
+def gateway_home_for_data_dir(data_dir: str | os.PathLike[str]) -> str:
+    """The folder that holds the account config.yaml and gateway.pid for ``data_dir``.
+
+    The gateway reads config.yaml and keeps its PID records in the install
+    home (``DEFENSECLAW_HOME``, else ``~/.defenseclaw``), and keeps its stores,
+    hooks and connector state under the data_dir that config names. While the
+    two are one folder this is ``data_dir``. After ``defenseclaw config set
+    data_dir`` they differ: joining config.yaml to the data folder made every
+    config write create a second config.yaml there, without the account ports
+    (rel-1-0-6 GAP-0232), and setup read the default API port and found no
+    gateway.pid, so it rolled the connector back while the gateway served
+    (GAP-0230). The Go hook runtime had the same gap (GAP-0224). A data_dir
+    holding any config.yaml entry stays its own home, so the default layout
+    and a managed install are unchanged.
+    """
+    own = os.fspath(data_dir)
+    try:
+        os.lstat(os.path.join(own, CONFIG_FILE_NAME))
+        return own
+    except FileNotFoundError:
+        pass
+    except OSError:
+        return own
+    if os.environ.get(CONFIG_PATH_ENV):
+        return own
+    try:
+        home = os.fspath(default_data_path())
+    except (OSError, KeyError, NotImplementedError):
+        return own
+    configured = _home_config_data_dir(os.path.join(home, CONFIG_FILE_NAME))
+    if configured and _same_folder(configured, own):
+        return home
+    return own
+
+
+def gateway_pid_path(data_dir: str | os.PathLike[str]) -> str:
+    """Path of the gateway's PID record for the install that uses ``data_dir``."""
+    return os.path.join(gateway_home_for_data_dir(data_dir), GATEWAY_PID_FILE_NAME)
+
+
+def _home_config_data_dir(path: str) -> str | None:
+    """The data_dir the account config.yaml names, resolved; None when it names none."""
+    try:
+        st = os.stat(path)
+    except OSError:
+        return None
+    key = (path, st.st_dev, st.st_ino, st.st_size, st.st_mtime_ns)
+    if key in _home_data_dir_cache:
+        return _home_data_dir_cache[key]
+    resolved: str | None = None
+    try:
+        raw = parse_config_yaml(read_config_text(path))
+    except (OSError, UnicodeError, yaml.YAMLError):
+        raw = None
+    if isinstance(raw, dict):
+        configured = raw.get("data_dir")
+        if isinstance(configured, str) and configured.strip():
+            resolved = _configured_data_dir(raw, os.path.dirname(path))
+    if len(_home_data_dir_cache) > 32:
+        _home_data_dir_cache.clear()
+    _home_data_dir_cache[key] = resolved
+    return resolved
+
+
+def _same_folder(a: str, b: str) -> bool:
+    def norm(value: str) -> str:
+        return os.path.normcase(os.path.realpath(_expand_store_home(value.strip())))
+
+    try:
+        return norm(a) == norm(b)
+    except (OSError, ValueError):
+        return False
 
 
 def _expand(p: str) -> str:
@@ -1503,6 +1588,10 @@ class DecisionModelConfig:
     allow_threshold: float = 0.0
     block_threshold: float = 0.0
     on_confident_block: str = ""
+    # Connectors whose hook-lane tool calls the model answers on its own
+    # where the LLM judge does not run ("*" = all). Empty = only in front
+    # of the judge. Omitted from YAML when empty.
+    hook_connectors: list[str] = field(default_factory=list)
 
     def active(self) -> bool:
         return bool(self.enabled and self.base_url.strip() and self.model.strip())
@@ -1605,7 +1694,17 @@ def _merge_decision_model(raw: Any) -> DecisionModelConfig:
         allow_threshold=_num("allow_threshold"),
         block_threshold=_num("block_threshold"),
         on_confident_block=str(raw.get("on_confident_block", "") or ""),
+        hook_connectors=_decision_model_connector_list(raw.get("hook_connectors")),
     )
+
+
+def _decision_model_connector_list(raw: Any) -> list[str]:
+    """``decision_model.hook_connectors`` as a list of non-blank names."""
+    if isinstance(raw, str):
+        raw = [raw]
+    if not isinstance(raw, list | tuple):
+        return []
+    return [str(item).strip() for item in raw if str(item).strip()]
 
 
 @dataclass
@@ -2056,17 +2155,14 @@ class GatewayConfig:
         Returns the empty string when no token is reachable; callers
         gate on the truthiness, so empty == "unauthenticated".
         """
-        if self.token_env:
-            val = os.environ.get(self.token_env, "")
-            if val:
+        # SecretRef text an earlier build saved as a token is never one (#1404).
+        from defenseclaw.connector_paths import is_secret_ref_text
+
+        for name in (self.token_env, "DEFENSECLAW_GATEWAY_TOKEN", "OPENCLAW_GATEWAY_TOKEN"):
+            val = os.environ.get(name, "") if name else ""
+            if val and not is_secret_ref_text(val):
                 return val
-        val = os.environ.get("DEFENSECLAW_GATEWAY_TOKEN", "")
-        if val:
-            return val
-        val = os.environ.get("OPENCLAW_GATEWAY_TOKEN", "")
-        if val:
-            return val
-        return self.token
+        return "" if is_secret_ref_text(self.token) else self.token
 
 
 @dataclass
@@ -5510,6 +5606,8 @@ _OWNED_NESTED_KEYS: frozenset[str] = frozenset(
     {
         # Hook-lane judge gate: empty list = lane off, stripped on save.
         "guardrail.judge.hook_connectors",
+        # Decision-model-alone gate: empty list = only in front of the judge.
+        "decision_model.hook_connectors",
         # Hook-lane judge timeout: 0 = gateway default, stripped on save.
         "guardrail.judge.hook_timeout",
         # Judge call bound: 0 = no limit, stripped on save.

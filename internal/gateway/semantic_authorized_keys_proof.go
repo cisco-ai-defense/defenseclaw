@@ -7,6 +7,7 @@ import (
 	"bytes"
 	"encoding/base64"
 	"encoding/json"
+	"maps"
 	"os"
 	"path"
 	"path/filepath"
@@ -1026,7 +1027,7 @@ func trustedExistingAuthorizedKeysSymlinkWrite(request trustedActionRequest, fac
 	}
 	// One list for the path, hard-link and missing-final-file checks, the
 	// same files the direct-write rule protects (GAP-1370).
-	protectedPaths := hookpaths.ProtectedAuthorizedKeysPaths(facts.ActiveHome)
+	protectedPaths := request.targetMemo.ProtectedAuthorizedKeysPaths(facts.ActiveHome)
 	protected := make(map[string]struct{}, len(protectedPaths))
 	for _, path := range protectedPaths {
 		protected[canonicalSemanticPath(path)] = struct{}{}
@@ -1097,7 +1098,12 @@ func trustedExistingAuthorizedKeysSymlinkWrite(request trustedActionRequest, fac
 				}
 			}
 			if strings.HasPrefix(operand, "/proc/self/cwd/") ||
+				strings.HasPrefix(operand, hookpaths.CopySourceGlobFactPrefix) ||
+				strings.HasPrefix(operand, hookpaths.GlobLoopCopyFactPrefix) ||
 				strings.HasPrefix(operand, hookpaths.SourceLinkFactPrefix) ||
+				strings.HasPrefix(operand, hookpaths.SourceLinksFactPrefix) ||
+				strings.HasPrefix(operand, hookpaths.CdEnterableFactPrefix) ||
+				strings.HasPrefix(operand, hookpaths.TarPlainFactPrefix) ||
 				directoryFact && (changedDirectory ||
 					canonicalSemanticPath(resolved) == canonicalSemanticPath(filepath.Join(facts.ActiveHome, ".ssh"))) ||
 				operand == hookpaths.CWDKey && (changedDirectory || truncated) ||
@@ -1320,9 +1326,9 @@ func trustedExistingAuthorizedKeysSymlinkWrite(request trustedActionRequest, fac
 			input.Command = args.Cmd
 		}
 	}
-	decision := hookpaths.ActionCommandDecisionInShell(input.Command, input.CWD, facts.ActiveHome, globFacts, trustedPOSIXShellCall(input, facts))
+	decision := request.targetMemo.ActionCommandDecisionInShell(input.Command, input.CWD, facts.ActiveHome, globFacts, trustedPOSIXShellCall(input, facts))
 	if input.DialectHint != "" {
-		decision = hookpaths.ActionCommandDecisionWithDialectAndGlobFacts(input.Command, input.CWD, facts.ActiveHome, input.DialectHint, globFacts)
+		decision = request.targetMemo.ActionCommandDecisionWithDialectAndGlobFacts(input.Command, input.CWD, facts.ActiveHome, input.DialectHint, globFacts)
 	}
 	if decision != "" {
 		return true
@@ -1340,6 +1346,27 @@ func trustedExistingAuthorizedKeysSymlinkWrite(request trustedActionRequest, fac
 	links = hookpaths.CommandLinksWithFacts(request.Input.Tool, input.Command, input.CWD, facts.ActiveHome, request.ResolvedWriteTargets)
 	safeRedirects = hookpaths.SafeShellRedirectOccurrencesWithFacts(input.Command, input.CWD, facts.ActiveHome, request.ResolvedWriteTargets)
 	replacedBySed := hookpaths.SedReplacedOperands(input.Command, input.CWD, facts.ActiveHome)
+	// The claudecode scoping above drops the client's reading of the
+	// starting directory unless the command changes directory. The
+	// directory walk still needs it: without it, behind ProtectHome, the
+	// walk cannot place the starting directory, and an eval or a function
+	// call that stays there (the walk marks either a possible change) made
+	// every dynamic redirect after it unknown, where Codex and a per-user
+	// gateway read the same directory (rel-1-0-6:GAP-0229). A starting
+	// directory that is or reaches ~/.ssh stays unknown in the walk.
+	directoryFacts := request.ResolvedWriteTargets
+	var startDirectoryFacts map[string]string
+	if start, present := clientTargets[hookpaths.DirectoryFactPrefix+input.CWD]; present &&
+		request.Connector == "claudecode" && request.ProtectedHomeHook && !truncated {
+		startDirectoryFacts = map[string]string{hookpaths.DirectoryFactPrefix + input.CWD: start}
+		if _, scoped := directoryFacts[hookpaths.DirectoryFactPrefix+input.CWD]; !scoped {
+			directoryFacts = maps.Clone(directoryFacts)
+			if directoryFacts == nil {
+				directoryFacts = make(map[string]string, 1)
+			}
+			directoryFacts[hookpaths.DirectoryFactPrefix+input.CWD] = start
+		}
+	}
 	var operands []string
 	if input.Command != "" {
 		var dynamic bool
@@ -1349,8 +1376,11 @@ func trustedExistingAuthorizedKeysSymlinkWrite(request trustedActionRequest, fac
 			// A physical-directory fact can resolve a static write after cd,
 			// but it cannot prove a dynamic redirect target is ordinary.
 			// Preserve the conservative decision from the header-free walk.
+			// Only the starting directory is read from the client, as it is
+			// for Codex: an eval or a function that never leaves it does not
+			// make a dynamic redirect unknown (rel-1-0-6:GAP-0229).
 			_, unknown := hookpaths.ShellDirectoryWriteOperands(
-				input.Command, input.CWD, input.ActiveHome, nil, false, cannotResolveLocally,
+				input.Command, input.CWD, input.ActiveHome, startDirectoryFacts, false, cannotResolveLocally,
 			)
 			if unknown {
 				return true
@@ -1410,8 +1440,23 @@ func trustedExistingAuthorizedKeysSymlinkWrite(request trustedActionRequest, fac
 				return true
 			}
 		}
+		for _, operand := range hookpaths.BoundedLoopCopyDestinations(input.Command, input.CWD, input.ActiveHome) {
+			if writeTarget(operand, false, true) {
+				return true
+			}
+		}
+		for _, operand := range hookpaths.CopySourceGlobDestinations(input.Command, input.CWD, input.ActiveHome, request.ResolvedWriteTargets) {
+			if writeTarget(operand, false, true) {
+				return true
+			}
+		}
+		for _, operand := range hookpaths.BoundedGlobLoopCopyDestinations(input.Command, input.CWD, input.ActiveHome, request.ResolvedWriteTargets) {
+			if writeTarget(operand, false, true) {
+				return true
+			}
+		}
 		directoryOperands, directoryUnknown := hookpaths.ShellDirectoryWriteOperands(
-			input.Command, input.CWD, input.ActiveHome, request.ResolvedWriteTargets, false, cannotResolveLocally,
+			input.Command, input.CWD, input.ActiveHome, directoryFacts, false, cannotResolveLocally,
 		)
 		if directoryUnknown {
 			return true

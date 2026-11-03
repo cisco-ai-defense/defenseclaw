@@ -231,7 +231,7 @@ func (m *Manager) Create(ctx context.Context, req sandboxapi.CreateRequest) (*sa
 	// The sandbox a rolled-back create of this name left behind is removed
 	// first, so a run again right after a Ctrl-C just works (GAP-0557).
 	m.reclaimUndone(ctx, gw, name)
-	if _, err := gw.Client.GetSandbox(ctx, name); err == nil {
+	if _, err := m.getSandbox(ctx, gw, name); err == nil {
 		return nil, sandboxapi.Errorf(sandboxapi.CodeConflict, "an OpenShell sandbox named %s already exists", name)
 	} else if !openshell.IsNotFound(err) {
 		m.dropGateway(gw, err)
@@ -632,7 +632,7 @@ func (m *Manager) create(ctx context.Context, gw *Gateway, b *box, in createInpu
 	}
 	// Before the sandbox is saved and watched: one that does not run as
 	// prepared is rolled back like one OpenShell rejected.
-	facts, err := m.verifyWorkload(ctx, gw, name, *rec.Verify, eff, "DefenseClaw deleted it")
+	facts, err := m.verifyWorkload(ctx, gw, name, *rec.Verify, eff, "DefenseClaw deleted it", in.req.Env)
 	if err != nil {
 		return nil, err
 	}
@@ -810,7 +810,7 @@ func limitsNote(d openshell.Driver, eff *packs.Effective) string {
 // and leaves a sandbox someone else created under the name alone.
 func (m *Manager) deleteCreated(ctx context.Context, gw *Gateway, name string) error {
 	gw = m.liveGateway(ctx, gw)
-	sb, err := gw.Client.GetSandbox(ctx, name)
+	sb, err := m.getSandbox(ctx, gw, name)
 	switch {
 	case openshell.IsNotFound(err):
 		return nil
@@ -822,6 +822,7 @@ func (m *Manager) deleteCreated(ctx context.Context, gw *Gateway, name string) e
 	if _, err := gw.Client.DeleteSandbox(ctx, name); err != nil && !openshell.IsNotFound(err) {
 		return err
 	}
+	m.forgetPending(name)
 	return gw.Client.WaitDeleted(ctx, name)
 }
 
@@ -1221,6 +1222,7 @@ func stoppedAuditPhase(b *box) bool {
 func (m *Manager) release(name string, b *box) {
 	m.mu.Lock()
 	if m.boxes[name] == b {
+		m.forgetPending(name)
 		delete(m.boxes, name)
 	}
 	m.mu.Unlock()
@@ -1290,7 +1292,7 @@ func provisioningFailure(d openshell.Driver, err error) error {
 	if d.ImageCache == "" || !errors.As(err, &e) || !strings.Contains(e.Detail, "ProvisioningTimedOut") {
 		return err
 	}
-	e.Detail += ". The first start of an image uses about 11 GiB while preparing a MicroVM disk, and a full volume stops it: check Disk space in " +
+	e.Detail += ". The first start of an image uses about 12 GiB while preparing a MicroVM disk, and a full volume stops it: check Disk space in " +
 		"`defenseclaw sandbox doctor`, and free space with `defenseclaw sandbox image prune` (it also removes the half-prepared disks of failed starts)"
 	return e
 }
@@ -1308,7 +1310,7 @@ func vmExitFailure(goos string, managed bool, d openshell.Driver, err error) err
 	}
 	cause := "the MicroVM driver could not open /dev/kvm for reading and writing, or the gateway runs with a umask that hides the disk it builds from the guest"
 	if goos == "darwin" {
-		cause = "openshell-driver-vm is not signed with Apple's Hypervisor entitlement (com.apple.security.hypervisor), which a re-signing without it drops, so macOS refuses it the hypervisor"
+		cause = "openshell-driver-vm is not signed with Apple's Hypervisor entitlement (com.apple.security.hypervisor), which a re-signing without it drops, so macOS refuses it the hypervisor; a re-signing with the hardened runtime (codesign --options runtime) also needs " + openshell.HardenedRuntimeExceptions + ", or the driver cannot load its bundled libkrun (NVIDIA/OpenShell#4772)"
 	}
 	way := "`defenseclaw sandbox doctor` checks it (MicroVM driver), and the OpenShell gateway's log has the driver's own error"
 	if managed {
@@ -1318,7 +1320,182 @@ func vmExitFailure(goos string, managed bool, d openshell.Driver, err error) err
 	return e
 }
 
+// OpenShell's refusals of a call on a sandbox it is still bringing up (after
+// its gateway restarted, say), in the words gRPC carries them. They reached
+// the person as "Conflict: ..." (rel-1-0-6 GAP-0340, the GAP-0186 class).
+const (
+	notReadyConflict  = "conflict: sandbox is not ready"
+	stopPhaseConflict = "sandbox must be ready, error, or in an automatic restart to stop"
+	// OpenShell keeps a durable claim on a create or start it handed its
+	// compute driver until the driver answers. A gateway killed in between
+	// never settles it (NVIDIA/OpenShell keeps the claim on purpose: neither
+	// a restart nor the container being gone clears it), so every later
+	// start, stop or delete of the sandbox is refused for good
+	// (rel-1-0-6:GAP-0446). A healthy create or start shows the same claim
+	// until its driver answers.
+	pendingOpConflict    = "previous driver operation is still pending"
+	pendingOpMayComplete = "previous driver operation may still complete"
+)
+
+// pendingStuckAfter is the minimum span of one observed episode of delete
+// refusals in the error phase, and the longest gap allowed between them.
+// OpenShell also holds the claim during a healthy create, start or recovery,
+// so the stuck verdict is a retry heuristic, not proof of a lost operation.
+const pendingStuckAfter = 3 * time.Minute
+
+// pendingDriverOp reports whether err is OpenShell's refusal of a sandbox
+// whose create or start has not settled with its driver.
+func pendingDriverOp(err error) bool {
+	lower := strings.ToLower(err.Error())
+	return strings.Contains(lower, pendingOpConflict) || strings.Contains(lower, pendingOpMayComplete)
+}
+
+// pendingRetryWording is the refusal while OpenShell may still be finishing
+// a create or start: retry first, nothing destructive.
+func pendingRetryWording(name string) (message, detail string) {
+	return "sandbox " + name + " is busy: OpenShell is still finishing a create or start of it",
+		"wait a minute and run the command again (`defenseclaw sandbox list` shows its state). If repeated " +
+			"`defenseclaw sandbox delete " + name + "` attempts are refused while it remains in its error state, " +
+			"the delete may later explain a last resort"
+}
+
+// pendingStuck is the refusal of a delete after one observed error-phase
+// episode has lasted at least pendingStuckAfter. It states what was seen;
+// the database move is the last resort, with what it loses. A
+// managed account gets its administrator only: its OpenShell gateway is
+// DefenseClaw's own unit, not the commands below.
+func pendingStuck(name string, seen time.Duration, managed bool) *sandboxapi.Error {
+	minutes := int(seen / time.Minute)
+	message := "sandbox " + name + " is stuck: OpenShell refused deletion in its error state on repeated attempts " +
+		"over " + strconv.Itoa(minutes) + " minutes; usually a create or start never finished (for example, its gateway " +
+		"was stopped or killed during it). When that operation never finishes, OpenShell does not clear the claim on " +
+		"its own, and restarting the gateway does not either"
+	if managed {
+		return &sandboxapi.Error{Code: sandboxapi.CodeConflict, Message: message,
+			Detail: "DefenseClaw cannot run anything in it. The OpenShell gateway on this computer is your organization's: " +
+				sandboxapi.RequestAccessFallback + " with this message and the sandbox name " + name}
+	}
+	return &sandboxapi.Error{Code: sandboxapi.CodeConflict, Message: message,
+		Detail: "DefenseClaw cannot run anything in it. Last resort, only if you can lose everything this OpenShell " +
+			"gateway knows: list other sandboxes (`defenseclaw sandbox list`); save each one's work with " +
+			"`defenseclaw sandbox pull NAME --apply` (or `--branch` or `--patch-out FILE`); check that the " +
+			"work you need is saved in your project before you delete a sandbox or move the gateway database; " +
+			"delete any sandbox you no longer need with `defenseclaw sandbox delete NAME`; then stop the " +
+			"gateway (on Linux `systemctl --user stop openshell-gateway`), move " +
+			"~/.local/state/openshell/gateway/openshell.db with the openshell.db-wal and openshell.db-shm files " +
+			"beside it to another folder, and start it again (`systemctl --user start openshell-gateway`). This " +
+			"loses OpenShell's record of every sandbox on this gateway, with their policies, providers and " +
+			"sessions, and any providers, profiles or settings you added to this gateway yourself: OpenShell no longer " +
+			"lists, starts, stops or deletes any of those sandboxes, their containers are left " +
+			"for you to remove with docker, and work in them that was not pulled is reachable only through docker. " +
+			"Then remove this sandbox's container (`docker ps -a --filter name=--" + name + "-` names it, " +
+			"`docker rm -f` removes it) and run `defenseclaw sandbox delete " + name + "`, which releases what " +
+			"DefenseClaw held for it"}
+}
+
+type pendingEpisode struct {
+	first time.Time
+	last  time.Time
+}
+
+// pendingRefusal is the delete's refusal for an unsettled driver operation
+// of sandbox name, whose OpenShell phase is phase. A non-error phase, or a
+// gap longer than pendingStuckAfter since the last refusal, starts a new
+// episode. The stuck wording needs refusals spanning pendingStuckAfter.
+func (m *Manager) pendingRefusal(name string, phase openshell.SandboxPhase, managed bool) error {
+	now := m.now()
+	m.pendingMu.Lock()
+	if m.pendingSeen == nil {
+		m.pendingSeen = map[string]pendingEpisode{}
+	}
+	episode, seen := m.pendingSeen[name]
+	if phase != openshell.PhaseError {
+		delete(m.pendingSeen, name)
+	} else {
+		if !seen || now.Before(episode.last) || now.Sub(episode.last) > pendingStuckAfter {
+			episode.first = now
+		}
+		episode.last = now
+		m.pendingSeen[name] = episode
+	}
+	m.pendingMu.Unlock()
+	if phase == openshell.PhaseError && now.Sub(episode.first) >= pendingStuckAfter {
+		return pendingStuck(name, now.Sub(episode.first), managed)
+	}
+	message, detail := pendingRetryWording(name)
+	return &sandboxapi.Error{Code: sandboxapi.CodeConflict, Message: message, Detail: detail}
+}
+
+// forgetPending drops the episode of a sandbox that recovered, accepted an
+// operation, or was released.
+func (m *Manager) forgetPending(name string) {
+	m.pendingMu.Lock()
+	delete(m.pendingSeen, name)
+	m.pendingMu.Unlock()
+}
+
+// getSandbox observes a recovered phase on every successful OpenShell
+// lookup, including lookups made outside the sandbox list and watcher.
+func (m *Manager) getSandbox(ctx context.Context, gw *Gateway, name string) (*openshell.Sandbox, error) {
+	sb, err := gw.Client.GetSandbox(ctx, name)
+	if err == nil && sb != nil && sb.Status.Phase != openshell.PhaseError {
+		m.forgetPending(name)
+	}
+	return sb, err
+}
+
+// forgetAllPending starts a new observation period when the gateway
+// connection is dropped or established.
+func (m *Manager) forgetAllPending() {
+	m.pendingMu.Lock()
+	m.pendingSeen = nil
+	m.pendingMu.Unlock()
+}
+
+// opSandboxName is the sandbox an upstream op names ("delete sandbox X",
+// "wait for sandbox X deletion"): the word after "sandbox", else the last.
+func opSandboxName(op string) string {
+	if _, after, ok := strings.Cut(op, "sandbox "); ok {
+		if fields := strings.Fields(after); len(fields) > 0 {
+			return strings.Trim(fields[0], `"`)
+		}
+	}
+	return strings.TrimSpace(op[strings.LastIndex(op, " ")+1:])
+}
+
+// conflictWording is the plain DefenseClaw message for an OpenShell conflict
+// about a sandbox that is not up yet (ok false: any other error keeps its
+// words). It says what happened and what to do, and keeps none of
+// OpenShell's own text.
+func conflictWording(op string, err error) (message, detail string, ok bool) {
+	lower := strings.ToLower(err.Error())
+	name := opSandboxName(op)
+	switch {
+	case pendingDriverOp(err):
+		message, detail := pendingRetryWording(name)
+		return message, detail, true
+	case strings.Contains(lower, stopPhaseConflict):
+		phase := ""
+		if _, after, found := strings.Cut(lower, "current phase: "); found {
+			phase = strings.TrimSpace(strings.TrimSuffix(strings.TrimSpace(after), ")"))
+		}
+		state := "OpenShell is still bringing it up"
+		if phase != "" {
+			state += " (phase: " + phase + ")"
+		}
+		return "sandbox " + name + " was not stopped: " + state,
+			"wait until `defenseclaw sandbox list` shows it Ready (or Error), then stop it again; if it stays like this, `defenseclaw sandbox doctor` checks the OpenShell gateway", true
+	case strings.Contains(lower, notReadyConflict):
+		return "sandbox " + name + " is not ready yet: OpenShell is still bringing it up (its gateway restarted, for one)",
+			"wait until `defenseclaw sandbox list` shows it Ready, then run the command again; if it stays like this, `defenseclaw sandbox doctor` checks the OpenShell gateway", true
+	}
+	return "", "", false
+}
+
 func upstream(op string, err error) error {
+	if message, detail, ok := conflictWording(op, err); ok {
+		return &sandboxapi.Error{Code: sandboxapi.CodeConflict, Message: message, Detail: detail}
+	}
 	code := sandboxapi.CodeUpstream
 	switch {
 	case openshell.IsUnavailable(err):

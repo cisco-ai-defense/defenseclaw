@@ -38,9 +38,9 @@ from textual.app import ComposeResult
 from textual.binding import Binding
 from textual.containers import Vertical
 from textual.reactive import reactive
-from textual.screen import ModalScreen
 from textual.widgets import Static
 
+from defenseclaw.tui.modal import GuardedModalScreen
 from defenseclaw.tui.theme import DEFAULT_TOKENS
 from defenseclaw.tui.widgets.list_window import rows_that_fit, window_lines
 
@@ -91,7 +91,7 @@ THEME_CHOICES: tuple[ThemeChoice, ...] = (
 )
 
 
-class ThemePickerScreen(ModalScreen[str | None]):
+class ThemePickerScreen(GuardedModalScreen[str | None]):
     """Modal that lists themes and dismisses with the chosen id.
 
     Returns ``None`` if the operator cancels (Escape/clicks outside),

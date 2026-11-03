@@ -7,12 +7,80 @@
 package enterprisehooks
 
 import (
+	"bytes"
 	"errors"
 	"strings"
 
 	"github.com/defenseclaw/defenseclaw/internal/gateway/connector"
 	"github.com/defenseclaw/defenseclaw/internal/version"
 )
+
+// WindowsProtectedTargetHasClosedMachineRegistration proves that a signed-out
+// target still has an active machine hook and that its selected runtime is
+// closed. A protected lock by itself cannot establish either fact.
+func WindowsProtectedTargetHasClosedMachineRegistration(opts InstallOptions) (bool, error) {
+	name := strings.ToLower(strings.TrimSpace(opts.ConnectorName))
+	if name != "claudecode" && name != "codex" {
+		return false, nil
+	}
+	if canonicalHookFailModeFor(opts.HookFailMode, false) != "closed" {
+		return false, nil
+	}
+	lock, err := windowsProtectedTargetLock(opts)
+	if err != nil || lock.Connector != name || canonicalHookFailModeFor(lock.HookFailMode, false) != "closed" {
+		return false, err
+	}
+	home, sid, err := validateWindowsEnterpriseHome(opts.UserHome, opts.OwnerSID)
+	if err != nil {
+		return false, err
+	}
+	dataDir, err := resolveWindowsEnterpriseDataDir(home, opts.DataDir)
+	if err != nil {
+		return false, err
+	}
+	hook, err := windowsEnterpriseHookExecutable()
+	if err != nil {
+		return false, err
+	}
+	if err := windowsEnterpriseHookTrustCheck(hook); err != nil {
+		return false, err
+	}
+	registered, err := windowsMachinePolicyRegisteredSIDs(name, hook)
+	if err != nil || !registered[strings.ToUpper(sid.String())] {
+		return false, err
+	}
+	// An absent administrator-owned selector makes the registered hook fail
+	// closed. If it selects this SID, prove the selected, digest-bound bundle
+	// is closed; an unreadable or changing selection is not an admission.
+	selector, first, exists, err := readWindowsManagedRuntimeSelector(name, true)
+	if err != nil {
+		return false, err
+	}
+	if !exists {
+		return true, nil
+	}
+	entry, selected := windowsManagedRuntimeSelectorTargetForSID(selector, sid.String())
+	if !selected {
+		return true, nil
+	}
+	if err := validateWindowsManagedRuntimeSelectorTargetAgainstResolve(entry, WindowsManagedRuntimeGenerationResolveOptions{
+		Connector: name, TargetSID: sid.String(), DataDir: dataDir, HookExecutable: hook, MachinePolicyRegistered: true,
+	}); err != nil {
+		return false, err
+	}
+	bundle, _, _, err := loadWindowsManagedRuntimeBundle(entry, sid)
+	if err != nil {
+		return false, err
+	}
+	if err := validateWindowsManagedRuntimeBundleAgainstSelector(bundle, entry); err != nil {
+		return false, err
+	}
+	_, second, stillExists, err := readWindowsManagedRuntimeSelector(name, false)
+	if err != nil || !stillExists || !bytes.Equal(first, second) {
+		return false, err
+	}
+	return bundle.FailMode == "closed", nil
+}
 
 // WindowsProtectedTargetFromOtherRelease reads, without writing, the
 // protected hook-contract lock entry of one managed target and reports the
