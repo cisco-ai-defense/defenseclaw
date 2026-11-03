@@ -704,6 +704,37 @@ func copyUnicodeGlobLocale() bool {
 // Bash's punctuation class includes non-ASCII punctuation and symbols in
 // UTF-8 locales. filepath.Match has only literal rune ranges, so use a
 // Unicode class matcher for patterns containing that class.
+//
+// Unicode's full mark category is too broad: Bash's C.UTF-8 punctuation
+// class excludes alphabetic combining marks. These are the mark ranges that
+// Bash matches in that locale; the other Unicode categories remain below.
+const bashUnicodePunctMarks = `\x{300}-\x{344}\x{346}-\x{36F}\x{483}-\x{489}\x{591}-\x{5AF}\x{658}\x{6DF}-\x{6E0}` +
+	`\x{6EA}-\x{6EC}\x{740}-\x{74A}\x{7EB}-\x{7F3}\x{7FD}\x{818}-\x{819}\x{82D}\x{859}-\x{85B}` +
+	`\x{898}-\x{89F}\x{8CA}-\x{8D3}\x{8E0}-\x{8E1}\x{8EA}-\x{8EF}\x{93C}\x{94D}\x{951}-\x{954}\x{9BC}` +
+	`\x{9CD}\x{9FE}\x{A3C}\x{A4D}\x{ABC}\x{ACD}\x{AFD}-\x{AFF}\x{B3C}\x{B4D}\x{B55}\x{BCD}\x{C3C}` +
+	`\x{C4D}\x{CBC}\x{CCD}\x{D3B}-\x{D3C}\x{D4D}\x{DCA}\x{E47}-\x{E4C}\x{E4E}\x{EBA}\x{EC8}-\x{ECC}` +
+	`\x{ECE}\x{F18}-\x{F19}\x{F35}\x{F37}\x{F39}\x{F3E}-\x{F3F}\x{F84}\x{F86}-\x{F87}\x{FC6}\x{1037}` +
+	`\x{1039}-\x{103A}\x{135D}-\x{135F}\x{1714}-\x{1715}\x{1734}\x{17B4}-\x{17B5}\x{17C9}-\x{17D3}` +
+	`\x{17DD}\x{180B}-\x{180D}\x{180F}\x{1939}-\x{193B}\x{1A60}\x{1A75}-\x{1A7C}\x{1A7F}` +
+	`\x{1AB0}-\x{1ABE}\x{1AC1}-\x{1ACB}\x{1B34}\x{1B44}\x{1B6B}-\x{1B73}\x{1BAA}-\x{1BAB}\x{1BE6}` +
+	`\x{1BF2}-\x{1BF3}\x{1C37}\x{1CD0}-\x{1CD2}\x{1CD4}-\x{1CE8}\x{1CED}\x{1CF4}\x{1CF7}-\x{1CF9}` +
+	`\x{1DC0}-\x{1DE6}\x{1DF5}-\x{1DFF}\x{20D0}-\x{20F0}\x{2CEF}-\x{2CF1}\x{2D7F}\x{302A}-\x{302F}` +
+	`\x{3099}-\x{309A}\x{A66F}-\x{A672}\x{A67C}-\x{A67D}\x{A6F0}-\x{A6F1}\x{A806}\x{A82C}\x{A8C4}` +
+	`\x{A8E0}-\x{A8F1}\x{A92B}-\x{A92D}\x{A953}\x{A9B3}\x{A9C0}\x{AABF}\x{AAC1}\x{AAF6}` +
+	`\x{ABEC}-\x{ABED}\x{FE00}-\x{FE0F}\x{FE20}-\x{FE2F}\x{101FD}\x{102E0}\x{10A38}-\x{10A3A}` +
+	`\x{10A3F}\x{10AE5}-\x{10AE6}\x{10EFD}-\x{10EFF}\x{10F46}-\x{10F50}\x{10F82}-\x{10F85}\x{11046}` +
+	`\x{11070}\x{1107F}\x{110B9}-\x{110BA}\x{11133}-\x{11134}\x{11173}\x{111C0}\x{111C9}-\x{111CC}` +
+	`\x{11235}-\x{11236}\x{112E9}-\x{112EA}\x{1133B}-\x{1133C}\x{1134D}\x{11366}-\x{1136C}` +
+	`\x{11370}-\x{11374}\x{11442}\x{11446}\x{1145E}\x{114C2}-\x{114C3}\x{115BF}-\x{115C0}\x{1163F}` +
+	`\x{116B6}-\x{116B7}\x{1172B}\x{11839}-\x{1183A}\x{1193D}-\x{1193E}\x{11943}\x{119E0}` +
+	`\x{11A33}-\x{11A34}\x{11A47}\x{11A98}-\x{11A99}\x{11C3F}\x{11D42}\x{11D44}-\x{11D45}\x{11D97}` +
+	`\x{11F41}-\x{11F42}\x{13440}\x{13447}-\x{13455}\x{16AF0}-\x{16AF4}\x{16B30}-\x{16B36}\x{16FE4}` +
+	`\x{1BC9D}\x{1CF00}-\x{1CF2D}\x{1CF30}-\x{1CF46}\x{1D165}-\x{1D169}\x{1D16D}-\x{1D172}` +
+	`\x{1D17B}-\x{1D182}\x{1D185}-\x{1D18B}\x{1D1AA}-\x{1D1AD}\x{1D242}-\x{1D244}\x{1DA00}-\x{1DA36}` +
+	`\x{1DA3B}-\x{1DA6C}\x{1DA75}\x{1DA84}\x{1DA9B}-\x{1DA9F}\x{1DAA1}-\x{1DAAF}\x{1E130}-\x{1E136}` +
+	`\x{1E2AE}\x{1E2EC}-\x{1E2EF}\x{1E4EC}-\x{1E4EF}\x{1E8D0}-\x{1E8D6}\x{1E944}-\x{1E946}` +
+	`\x{1E948}-\x{1E94A}\x{E0100}-\x{E01EF}`
+
 func bashGlobRegexp(component string) (string, bool) {
 	var b strings.Builder
 	b.WriteString("(?s)^")
@@ -811,7 +842,7 @@ func bashBracketBody(body string, unicodePunct bool) (string, bool) {
 				return "", false
 			}
 			if unicodePunct && body[2:end] == "punct" {
-				class = `\p{P}\p{S}\p{M}\p{Cf}\p{Co}\p{No}\x{00A0}\x{2007}\x{202F}\x{2FFC}\x{2FFD}\x{2FFE}\x{2FFF}\x{31EF}`
+				class = `\p{P}\p{S}` + bashUnicodePunctMarks + `\p{Cf}\p{Co}\p{No}\x{00A0}\x{2007}\x{202F}\x{2FFC}\x{2FFD}\x{2FFE}\x{2FFF}\x{31EF}`
 			}
 			b.WriteString(class)
 			body = body[end+2:]
