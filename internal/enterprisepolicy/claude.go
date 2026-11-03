@@ -302,20 +302,50 @@ func claudeEntryCovers(entry any, group connector.ManagedHookGroup) bool {
 	return ok && (matcher == "" || matcher == "*" || matcher == group.Matcher || claudeMatcherMatchesAll(matcher))
 }
 
-// Keep this proof within regex syntax shared by Go and JavaScript. Without
-// anchors or lookarounds, an empty match is available at every input start.
+// Keep this proof within regex syntax shared by Go and JavaScript. Claude
+// Code treats names and separators alone as an exact-name list, not a regex.
+// Without anchors or lookarounds, an empty regex match is available at every
+// input start.
 func claudeMatcherMatchesAll(matcher string) bool {
 	if matcher == "^" || matcher == "$" {
 		return true
 	}
-	if strings.ContainsAny(matcher, `^$\[]{}\/`) {
+	regexPath := false
+	for _, char := range matcher {
+		if !strings.ContainsRune("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_- ,|", char) {
+			regexPath = true
+			break
+		}
+	}
+	if !regexPath {
 		return false
 	}
 	if strings.Contains(strings.ReplaceAll(matcher, "(?:", ""), "(?") {
 		return false
 	}
-	for _, char := range matcher {
-		if !strings.ContainsRune("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789._*+?|():", char) {
+	for i := 0; i < len(matcher); i++ {
+		if matcher[i] == '[' {
+			start := i
+			i++
+			if i < len(matcher) && matcher[i] == '^' {
+				i++
+			}
+			for ; i < len(matcher) && matcher[i] != ']'; i++ {
+				if matcher[i] == '\\' {
+					i++
+					if i == len(matcher) || !strings.ContainsRune("sSdDwW", rune(matcher[i])) {
+						return false
+					}
+				} else if !strings.ContainsRune("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_- .", rune(matcher[i])) {
+					return false
+				}
+			}
+			if i == len(matcher) || i == start+1 || (i == start+2 && matcher[start+1] == '^') {
+				return false
+			}
+			continue
+		}
+		if !strings.ContainsRune("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_- ,._*+?|():", rune(matcher[i])) {
 			return false
 		}
 	}

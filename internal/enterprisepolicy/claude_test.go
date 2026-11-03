@@ -604,6 +604,10 @@ var claudeHookRunCases = []struct {
 	{"match-all regex group", true, func(entry map[string]any, _ map[string]any) { entry["matcher"] = "(?:.*)" }},
 	{"match-all regex alternative", true, func(entry map[string]any, _ map[string]any) { entry["matcher"] = "Bash|.*" }},
 	{"match-all optional regex", true, func(entry map[string]any, _ map[string]any) { entry["matcher"] = "a*" }},
+	{"match-all character class", true, func(entry map[string]any, _ map[string]any) { entry["matcher"] = `[\s\S]*` }},
+	{"exact-name list trailing separator", false, func(entry map[string]any, _ map[string]any) { entry["matcher"] = "Bash|" }},
+	{"exact-name list leading separator", false, func(entry map[string]any, _ map[string]any) { entry["matcher"] = "|Read" }},
+	{"exact-name list empty middle", false, func(entry map[string]any, _ map[string]any) { entry["matcher"] = "Bash||Edit" }},
 	{"omitted matcher", true, func(entry map[string]any, _ map[string]any) { delete(entry, "matcher") }},
 	{"explicit async false", true, func(_ map[string]any, handler map[string]any) { handler["async"] = false }},
 	{"prompt handler type", false, func(_ map[string]any, handler map[string]any) {
