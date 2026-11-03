@@ -134,3 +134,36 @@ func TestActionExactOversizedTouchFieldsPaddedRange(t *testing.T) {
 		}
 	}
 }
+
+func TestGAP0431PaddedBraceStepAndSignedWidth(t *testing.T) {
+	for _, row := range []struct {
+		command string
+		wantLen int
+		at      int
+		want    string
+	}{
+		{`touch {0300..0001..2}`, 150, 74, "0152"},
+		{`touch {0001..0300..-2}`, 150, 74, "0149"},
+		{`touch {0300..0001..-2}`, 150, 75, "0150"},
+		{`touch {-0150..0150}`, 301, 298, "00148"},
+		{`touch {-01..1}`, 3, 1, "000"},
+	} {
+		file, ok := parseShell(row.command)
+		if !ok {
+			t.Fatalf("parse %q", row.command)
+		}
+		word := file.Stmts[0].Cmd.(*syntax.CallExpr).Args[1]
+		fields := actionMentionBraceFields(word, "/tmp/home")
+		if len(fields) == 0 {
+			fields = actionExactOversizedTouchFields(word, "/tmp/home")
+		}
+		got := ""
+		if len(fields) > row.at {
+			got = fields[row.at]
+		}
+		if len(fields) != row.wantLen || got != row.want {
+			t.Errorf("%q: length %d, field %d = %q; want length %d, %q", row.command,
+				len(fields), row.at, got, row.wantLen, row.want)
+		}
+	}
+}

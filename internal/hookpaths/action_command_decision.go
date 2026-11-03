@@ -73,7 +73,9 @@ func (m *TargetMemo) ActionCommandDecisionInShell(command, cwd, home string, fac
 }
 
 func actionTargetDecision(command, cwd, home string, dialect actionfacts.Dialect, posixShell bool, facts map[string]string, memo *TargetMemo) string {
-	if NoDereferenceTouchSafe(command, cwd, home) {
+	if safe, protected := noDereferenceTouchStatus(command, cwd, home); protected {
+		return "protected-target"
+	} else if safe {
 		return ""
 	}
 	if actionStartupConditionalAliasRedirect(command) {

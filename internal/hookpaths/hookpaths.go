@@ -1214,7 +1214,7 @@ func ResolveConnector(connector, surface, event string, payload []byte) string {
 					}
 				}
 				if !protectedDecision && NoDereferenceTouchShape(command, cwd, home) {
-					noDereferenceTouchSafe = NoDereferenceTouchSafe(command, cwd, home)
+					noDereferenceTouchSafe, protectedDecision = noDereferenceTouchStatus(command, cwd, home)
 				}
 				fallback := input
 				fallback.Tool, fallback.Args, fallback.Command = "Bash", nil, command

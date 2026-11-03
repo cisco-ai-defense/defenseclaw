@@ -146,11 +146,20 @@ func actionPaddedBraceFields(word *syntax.Word, env expand.Environ) ([]string, b
 				step = -1
 			}
 			if len(brace.Elems) > 2 {
-				if value, err := strconv.Atoi(brace.Elems[2].Lit()); err == nil && value != 0 && (value > 0) == upward {
+				if value, err := strconv.Atoi(brace.Elems[2].Lit()); err == nil && value != 0 {
+					if value < 0 {
+						value = -value
+						if value < 0 { // The magnitude does not fit in an int.
+							return false
+						}
+					}
 					step = value
+					if !upward {
+						step = -step
+					}
 				}
 			}
-			width := max(len(strings.TrimPrefix(fromText, "-")), len(strings.TrimPrefix(toText, "-")))
+			width := max(len(fromText), len(toText))
 			pad := actionPaddedNumber(fromText) || actionPaddedNumber(toText)
 			for n := from; ; {
 				if upward && n > to || !upward && n < to {
@@ -164,7 +173,7 @@ func actionPaddedBraceFields(word *syntax.Word, env expand.Environ) ([]string, b
 					if strings.HasPrefix(value, "-") {
 						sign, value = "-", value[1:]
 					}
-					value = sign + strings.Repeat("0", max(0, width-len(value))) + value
+					value = sign + strings.Repeat("0", max(0, width-len(sign)-len(value))) + value
 				}
 				if !add([]syntax.WordPart{&syntax.Lit{Value: value}}) {
 					return false

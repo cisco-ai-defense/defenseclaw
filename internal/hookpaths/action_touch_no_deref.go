@@ -8,8 +8,10 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 
+	"mvdan.cc/sh/v3/expand"
 	"mvdan.cc/sh/v3/syntax"
 )
 
@@ -25,43 +27,54 @@ func NoDereferenceTouchShape(command, cwd, home string) bool {
 // ordinary in the hook's filesystem view. Links are checked at their own
 // entry, while regular files are checked by identity as usual.
 func NoDereferenceTouchSafe(command, cwd, home string) bool {
+	safe, _ := noDereferenceTouchStatus(command, cwd, home)
+	return safe
+}
+
+// noDereferenceTouchStatus reads the entries touch changes. A regular file
+// is checked by identity; -h changes a symbolic link's entry instead.
+func noDereferenceTouchStatus(command, cwd, home string) (safe, protectedTarget bool) {
 	if !strings.Contains(command, "touch") ||
 		!strings.Contains(command, "-h") && !strings.Contains(command, "--no-dereference") {
-		return false
+		return false, false
 	}
 	if actionClientLoopCopySourceStartupUnknown() {
-		return false
+		return false, false
 	}
 	operands, ok := noDereferenceTouchOperands(command, cwd, home, true)
 	if !ok {
-		return false
+		return false, false
 	}
 	protected := newProtectedFiles(home)
 	ssh := filepath.Join(home, ".ssh")
 	memo := NewTargetMemo()
+	unknown := false
 	for _, operand := range operands {
 		path := OperandPath(operand, cwd)
 		parent, known := memo.resolveWriteTarget(filepath.Dir(path))
 		if !known {
-			return false
+			unknown = true
+			continue
 		}
 		entry := filepath.Join(parent, filepath.Base(path))
 		if protected.has(entry) || samePathName(entry, ssh) ||
 			samePathName(parent, ssh) || strings.HasPrefix(parent, ssh+string(filepath.Separator)) {
-			return false
+			protectedTarget = true
+			continue
 		}
 		info, err := pathLstat(entry)
 		if err == nil && info.Mode()&os.ModeSymlink != 0 {
 			continue
 		}
 		if err != nil && !errors.Is(err, fs.ErrNotExist) {
-			return false
+			unknown = true
+			continue
 		}
 		if protectedReachPathWith(entry, protected, ssh, memo) {
-			return false
+			protectedTarget = true
 		}
 	}
-	return true
+	return !unknown && !protectedTarget, protectedTarget
 }
 
 func noDereferenceTouchOperands(command, cwd, home string, expandPatterns bool) ([]string, bool) {
@@ -91,6 +104,16 @@ func noDereferenceTouchOperands(command, cwd, home string, expandPatterns bool) 
 			return nil, false
 		}
 		value, fixed := actionWordValueWithGlob(assign.Value, values, cwd, home, true)
+		if strings.Contains(value, "\\") {
+			if actionWordHasBraceText(assign.Value) {
+				return nil, false
+			}
+			fields, err := expand.Fields(&expand.Config{Env: expand.ListEnviron("HOME=" + home)}, assign.Value)
+			if err != nil || len(fields) != 1 {
+				return nil, false
+			}
+			value = fields[0]
+		}
 		if !fixed || value == "" || strings.ContainsAny(value, " \t\r\n\x00\x1f") {
 			return nil, false
 		}
@@ -132,23 +155,40 @@ func noDereferenceTouchOperands(command, cwd, home string, expandPatterns bool) 
 				if len(word.Parts) != 1 || actionSoleParameter(word) == "" {
 					return nil, false
 				}
-				if _, direct := word.Parts[0].(*syntax.ParamExp); !direct {
-					return nil, false
-				}
 			}
 			value, known := actionWordValueWithGlob(word, values, cwd, home, true)
+			if noDereferenceTouchLiteralWord(word) && !actionWordHasUnquotedGlob(word, command) && strings.Contains(value, "\\") {
+				expanded, err := expand.Fields(&expand.Config{Env: expand.ListEnviron("HOME=" + home)}, word)
+				if err != nil || len(expanded) != 1 {
+					return nil, false
+				}
+				value = expanded[0]
+			}
 			if !known || value == "" || strings.ContainsAny(value, " \t\r\n\x00\x1f") {
 				return nil, false
 			}
 			fields = []string{value}
 		}
+		activePattern := actionWordHasUnquotedGlob(word, command)
+		if len(word.Parts) == 1 {
+			_, unquotedParameter := word.Parts[0].(*syntax.ParamExp)
+			activePattern = activePattern || unquotedParameter
+		}
 		for _, field := range fields {
-			if strings.ContainsAny(field, "*?[") {
+			if activePattern && strings.ContainsAny(field, "*?[") {
 				if !expandPatterns {
 					operands = append(operands, field)
 					continue
 				}
-				pattern := OperandPath(field, cwd)
+				patternField := field
+				if len(fields) == 1 && noDereferenceTouchLiteralWord(word) && !actionWordHasBraceText(word) {
+					var known bool
+					patternField, known = noDereferenceTouchPattern(word, home)
+					if !known {
+						return nil, false
+					}
+				}
+				pattern := OperandPath(patternField, cwd)
 				matches, complete, unseen := actionExpandGlob(pattern, cwd, false, true,
 					func() bool { return actionShellProfileMayDotglob(home) })
 				if !complete || unseen {
@@ -184,4 +224,45 @@ func noDereferenceTouchLiteralWord(word *syntax.Word) bool {
 		}
 	}
 	return true
+}
+
+// noDereferenceTouchPattern keeps quoted pattern characters literal while
+// retaining the active glob characters in an unquoted part of the same word.
+func noDereferenceTouchPattern(word *syntax.Word, home string) (string, bool) {
+	var out strings.Builder
+	quoted := func(value string) bool {
+		if runtime.GOOS == "windows" && strings.ContainsAny(value, "*?[]") {
+			return false
+		}
+		for _, r := range value {
+			if strings.ContainsRune("\\*?[]", r) {
+				out.WriteByte('\\')
+			}
+			out.WriteRune(r)
+		}
+		return true
+	}
+	for _, item := range word.Parts {
+		switch part := item.(type) {
+		case *syntax.Lit:
+			out.WriteString(part.Value)
+		case *syntax.SglQuoted:
+			if !quoted(part.Value) {
+				return "", false
+			}
+		case *syntax.DblQuoted:
+			fields, err := expand.Fields(&expand.Config{Env: expand.ListEnviron("HOME=" + home)},
+				&syntax.Word{Parts: []syntax.WordPart{part}})
+			if err != nil || len(fields) != 1 || !quoted(fields[0]) {
+				return "", false
+			}
+		default:
+			return "", false
+		}
+	}
+	pattern := out.String()
+	if actionWordTildePrefix(word) {
+		pattern = strings.TrimRight(home, "/") + pattern[1:]
+	}
+	return pattern, true
 }
