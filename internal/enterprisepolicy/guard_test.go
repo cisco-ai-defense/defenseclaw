@@ -105,6 +105,65 @@ func TestGuardClaudeManagedExecFormAndLegacyOwnership(t *testing.T) {
 	}
 }
 
+func TestR108ExecFormClaudeGuardOwnership(t *testing.T) {
+	for _, goos := range []string{"linux", "darwin", "windows"} {
+		t.Run(goos, func(t *testing.T) {
+			req := GuardRequest{Connector: ConnectorClaudeCode, GOOS: goos, HookBinary: testHookBinary}
+			exec := map[string]any{"type": "command", "command": testHookBinary, "args": []any{"hook", "--connector", "claudecode", "--enterprise-managed"}}
+			legacy := map[string]any{"type": "command", "command": shellQuote(testHookBinary) + " hook --connector claudecode --enterprise-managed"}
+			for _, tc := range []struct {
+				name    string
+				handler map[string]any
+				owned   bool
+			}{
+				{"current exec form", exec, true},
+				{"prior Unix shell form", legacy, goos != "windows"},
+				{"case changed bare command", map[string]any{"type": "command", "command": strings.ToUpper(testHookBinary)}, false},
+				{"other connector shell form", map[string]any{"type": "command", "command": shellQuote(testHookBinary) + " hook --connector codex --enterprise-managed"}, false},
+				{"bare command", map[string]any{"type": "command", "command": testHookBinary}, false},
+				{"other connector exec form", map[string]any{"type": "command", "command": testHookBinary, "args": []any{"hook", "--connector", "codex", "--enterprise-managed"}}, false},
+			} {
+				t.Run(tc.name, func(t *testing.T) {
+					if got := req.ownedHandler(tc.handler); got != tc.owned {
+						t.Fatalf("ownedHandler = %t, want %t", got, tc.owned)
+					}
+				})
+			}
+			if goos == "windows" {
+				caseChangedExec := map[string]any{"type": "command", "command": strings.ToUpper(testHookBinary), "args": exec["args"]}
+				if !req.ownedHandler(caseChangedExec) {
+					t.Fatal("Windows path case changed for the current exec form")
+				}
+			}
+		})
+	}
+}
+
+func TestR108ExecFormClaudeGuardDecision(t *testing.T) {
+	req := guardRequest(t, ConnectorClaudeCode, config.ForeignHooksRemove)
+	path := filepath.Join(req.Home, ".claude", "settings.json")
+	for _, tc := range []struct {
+		name, command string
+		deny          bool
+	}{
+		{"prior shell form", shellQuote(req.HookBinary) + " hook --connector claudecode --enterprise-managed", false},
+		{"case changed bare command", strings.ToUpper(req.HookBinary), true},
+		{"other connector shell form", shellQuote(req.HookBinary) + " hook --connector codex --enterprise-managed", true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			writeFile(t, path, `{"hooks":{"PreToolUse":[{"hooks":[{"type":"command","command":`+jsonString(tc.command)+`}] }]}}`)
+			decision := EvaluateForeignHooks(req)
+			wantFindings := 0
+			if tc.deny {
+				wantFindings = 1
+			}
+			if decision.Deny != tc.deny || len(decision.Findings) != wantFindings {
+				t.Fatalf("decision = %+v, want deny=%t", decision, tc.deny)
+			}
+		})
+	}
+}
+
 func TestGuardOwnershipCoversEveryExecutableField(t *testing.T) {
 	owned := `'` + testHookBinary + `' hook --connector copilot --enterprise-managed --event 'preToolUse'`
 	req := guardRequest(t, "copilot", config.ForeignHooksRemove)

@@ -629,8 +629,7 @@ func (r GuardRequest) ownedHandler(handler any) bool {
 			if r.goos() == "windows" {
 				matchesBinary = strings.EqualFold(command, r.HookBinary)
 			}
-			if !ownedExecArgs(value) || !matchesBinary ||
-				(r.Connector == ConnectorClaudeCode && !claudeHandlerIsOwned(Options{GOOS: r.goos(), HookBinary: r.HookBinary}, handler)) {
+			if !ownedExecArgs(value) || !matchesBinary {
 				return false
 			}
 		case key == "fail_closed":
@@ -644,10 +643,11 @@ func (r GuardRequest) ownedHandler(handler any) bool {
 			return false
 		}
 	}
-	if r.Connector == ConnectorClaudeCode && stringField(handler, "command") == r.HookBinary {
-		if _, hasArgs := fields["args"]; !hasArgs {
-			return false
-		}
+	if r.Connector == ConnectorClaudeCode {
+		// Claude renders one command. Recognize its current exec form and
+		// the exact earlier shell form when reading user settings.
+		opts := Options{GOOS: r.goos(), HookBinary: r.HookBinary}
+		return commands == 1 && (claudeHandlerIsOwned(opts, handler) || claudeHandlerIsLegacyOwned(opts, handler))
 	}
 	return commands > 0
 }
