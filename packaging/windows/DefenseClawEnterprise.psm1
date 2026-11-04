@@ -5601,6 +5601,108 @@ function Assert-DefenseClawTrustedSource {
     return $full
 }
 
+# cowork-1-0-8 GAP-0044: a standalone lifecycle source staged by Setup is
+# held open for reading, without write or delete sharing, from before its
+# digest and signature are read until this process exits. No process can
+# open it for writing, rename it or delete it while the pin is held, so its
+# bytes are the ones admitted. A later check of the same source (the
+# lifecycle checks every source before and after it takes lifecycle.lock, and
+# again before each copy) then reuses the admitted digest and signature
+# instead of hashing and verifying about 530 MB again, after the path,
+# ancestry and ACL checks and a file-identity match. Without a pin (another
+# path, a source not under a Setup staging folder, a pin refused because a
+# writer holds the file, a changed trust policy) every check reads the file
+# again, as before.
+$script:DefenseClawSourcePins = @{}
+
+function Get-DefenseClawSourcePinTrustPolicy {
+    return '{0}|{1}|{2}' -f [string]$script:DefenseClawTrustMode,
+        ((@($script:DefenseClawAllowedSignerSHA256) | Microsoft.PowerShell.Utility\Sort-Object) -join ','),
+        ((@($script:DefenseClawPinnedPayloadSHA256.GetEnumerator() |
+                Microsoft.PowerShell.Utility\Sort-Object -Property Key |
+                Microsoft.PowerShell.Core\ForEach-Object { '{0}={1}' -f $_.Key, $_.Value })) -join ',')
+}
+
+function Test-DefenseClawSourcePinEligible {
+    <#
+        A source the standalone Setup staged: a file directly in a
+        DefenseClaw-Enterprise-Setup-* folder under ProgramData or
+        ProgramData\Cisco. Installed artifacts are never pinned: the
+        lifecycle replaces or removes them.
+    #>
+    param([Parameter(Mandatory)][string]$Path)
+    if (-not (Test-DefenseClawStandaloneProfile)) {
+        return $false
+    }
+    $stage = [IO.Path]::GetDirectoryName($Path)
+    if ([string]::IsNullOrEmpty($stage) -or
+        -not ([IO.Path]::GetFileName($stage)).StartsWith(
+            'DefenseClaw-Enterprise-Setup-',
+            [StringComparison]::OrdinalIgnoreCase)) {
+        return $false
+    }
+    $parent = ([IO.Path]::GetDirectoryName($stage)).TrimEnd('\')
+    $programData = ([IO.Path]::GetFullPath([string]$script:ProgramData)).TrimEnd('\')
+    return [string]::Equals($parent, $programData, [StringComparison]::OrdinalIgnoreCase) -or
+        [string]::Equals($parent, $programData + '\Cisco', [StringComparison]::OrdinalIgnoreCase)
+}
+
+function Open-DefenseClawSourcePin {
+    <# Returns the read handle and the file identity it pins, or $null. #>
+    param([Parameter(Mandatory)][string]$Path)
+    if (-not (Test-DefenseClawSourcePinEligible -Path $Path)) {
+        return $null
+    }
+    $stream = $null
+    try {
+        $stream = [IO.FileStream]::new(
+            $Path,
+            [IO.FileMode]::Open,
+            [IO.FileAccess]::Read,
+            [IO.FileShare]::Read
+        )
+        return @{
+            stream = $stream
+            identity = (Get-DefenseClawFileIdentity -Path $Path)
+        }
+    }
+    catch {
+        if ($null -ne $stream) {
+            $stream.Dispose()
+        }
+        return $null
+    }
+}
+
+function Get-DefenseClawPinnedSourceDescriptor {
+    <#
+        The descriptor this process admitted for a pinned source, after the
+        same path, ancestry and ACL checks; $null when the source must be read
+        again.
+    #>
+    param([Parameter(Mandatory)][hashtable]$Source)
+    $key = ([string]$Source.path).ToLowerInvariant()
+    if (-not $script:DefenseClawSourcePins.ContainsKey($key)) {
+        return $null
+    }
+    $pin = $script:DefenseClawSourcePins[$key]
+    $cached = [hashtable]$pin.descriptor
+    if (-not $pin.stream.CanRead -or
+        [string]$pin.policy -cne (Get-DefenseClawSourcePinTrustPolicy) -or
+        [bool]$cached.authenticode -ne [bool]$Source.authenticode -or
+        [bool]$cached.allow_unsigned -ne [bool]$Source.allow_unsigned -or
+        [string]$cached.label -cne [string]$Source.label) {
+        return $null
+    }
+    $full = Resolve-DefenseClawFullPath -Path ([string]$Source.path) -MustExist -Leaf
+    [void](Assert-DefenseClawTrustedSource -Path $full -Label ([string]$Source.label))
+    if (-not [string]::Equals($full, [string]$cached.path, [StringComparison]::OrdinalIgnoreCase) -or
+        (Get-DefenseClawFileIdentity -Path $full) -cne [string]$pin.identity) {
+        return $null
+    }
+    return $cached.Clone()
+}
+
 function Get-DefenseClawSourceDescriptor {
     param(
         [Parameter(Mandatory)][string]$Path,
@@ -5610,39 +5712,61 @@ function Get-DefenseClawSourceDescriptor {
     )
     $full = Resolve-DefenseClawFullPath -Path $Path -MustExist -Leaf
     [void](Assert-DefenseClawTrustedSource -Path $full -Label $Label)
-    $full = Assert-DefenseClawRegularSource `
-        -Path $Path `
-        -Label $Label `
-        -Authenticode:$Authenticode `
-        -AllowUnsigned:$AllowUnsigned
-    $descriptor = @{
-        path = $full
-        label = $Label
-        authenticode = [bool]$Authenticode
-        allow_unsigned = [bool]$AllowUnsigned
-        sha256 = (Microsoft.PowerShell.Utility\Get-FileHash -LiteralPath $full -Algorithm SHA256).Hash
+    $key = $full.ToLowerInvariant()
+    $pin = $null
+    if (-not $script:DefenseClawSourcePins.ContainsKey($key)) {
+        # Pinned before the digest and the signature are read.
+        $pin = Open-DefenseClawSourcePin -Path $full
     }
-    if ($Authenticode) {
-        $signature = Microsoft.PowerShell.Security\Get-AuthenticodeSignature `
-            -LiteralPath $full
-        $descriptor['signature_status'] = [string]$signature.Status
-        $descriptor['signer_thumbprint'] = if ($null -eq $signature.SignerCertificate) {
-            ''
+    try {
+        $full = Assert-DefenseClawRegularSource `
+            -Path $Path `
+            -Label $Label `
+            -Authenticode:$Authenticode `
+            -AllowUnsigned:$AllowUnsigned
+        $descriptor = @{
+            path = $full
+            label = $Label
+            authenticode = [bool]$Authenticode
+            allow_unsigned = [bool]$AllowUnsigned
+            sha256 = (Microsoft.PowerShell.Utility\Get-FileHash -LiteralPath $full -Algorithm SHA256).Hash
         }
-        else {
-            ([string]$signature.SignerCertificate.Thumbprint).ToLowerInvariant()
+        if ($Authenticode) {
+            $signature = Microsoft.PowerShell.Security\Get-AuthenticodeSignature `
+                -LiteralPath $full
+            $descriptor['signature_status'] = [string]$signature.Status
+            $descriptor['signer_thumbprint'] = if ($null -eq $signature.SignerCertificate) {
+                ''
+            }
+            else {
+                ([string]$signature.SignerCertificate.Thumbprint).ToLowerInvariant()
+            }
+            $descriptor['signer_subject'] = if ($null -eq $signature.SignerCertificate) {
+                ''
+            }
+            else {
+                [string]$signature.SignerCertificate.Subject
+            }
+            $descriptor['file_version'] = [string](
+                Microsoft.PowerShell.Management\Get-Item `
+                    -LiteralPath $full `
+                    -Force
+            ).VersionInfo.FileVersion
         }
-        $descriptor['signer_subject'] = if ($null -eq $signature.SignerCertificate) {
-            ''
+        if ($null -ne $pin) {
+            $script:DefenseClawSourcePins[([string]$descriptor.path).ToLowerInvariant()] = @{
+                stream = $pin.stream
+                identity = $pin.identity
+                policy = (Get-DefenseClawSourcePinTrustPolicy)
+                descriptor = $descriptor.Clone()
+            }
         }
-        else {
-            [string]$signature.SignerCertificate.Subject
+    }
+    catch {
+        if ($null -ne $pin) {
+            $pin.stream.Dispose()
         }
-        $descriptor['file_version'] = [string](
-            Microsoft.PowerShell.Management\Get-Item `
-                -LiteralPath $full `
-                -Force
-        ).VersionInfo.FileVersion
+        throw
     }
     return $descriptor
 }
@@ -5660,11 +5784,14 @@ function Assert-DefenseClawSourceDescriptorCurrent {
             throw "lifecycle source descriptor is missing $required"
         }
     }
-    $current = Get-DefenseClawSourceDescriptor `
-        -Path ([string]$Source.path) `
-        -Label ([string]$Source.label) `
-        -Authenticode:([bool]$Source.authenticode) `
-        -AllowUnsigned:([bool]$Source.allow_unsigned)
+    $current = Get-DefenseClawPinnedSourceDescriptor -Source $Source
+    if ($null -eq $current) {
+        $current = Get-DefenseClawSourceDescriptor `
+            -Path ([string]$Source.path) `
+            -Label ([string]$Source.label) `
+            -Authenticode:([bool]$Source.authenticode) `
+            -AllowUnsigned:([bool]$Source.allow_unsigned)
+    }
     # Standalone keeps main's rule: a source that changed after
     # authorization is refused.
     $strict = (Test-DefenseClawTrustStrictAncestors) -or (Test-DefenseClawStandaloneProfile)

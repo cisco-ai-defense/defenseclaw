@@ -6759,3 +6759,54 @@ def test_install_like_run_keeps_a_byte_identical_release_binary() -> None:
     # The transaction snapshot is taken before, as before: a rollback still
     # restores any binary the run replaced.
     assert lifecycle.index("$snapshot = New-DefenseClawTransaction") < release
+
+
+def test_a_pinned_staged_source_is_admitted_once_per_lifecycle_run() -> None:
+    """cowork-1-0-8 GAP-0044: every lifecycle source was hashed and its
+    signature verified again before and after lifecycle.lock and before each
+    copy, about 530 MB each time. A source Setup staged is now pinned (read
+    handle, no write or delete sharing) before its digest and signature are
+    read; a later check of the same source reuses them only while that pin
+    holds the same file under the same trust policy, after the path,
+    ancestry and ACL checks. Anything else reads the file again."""
+    module = read(MODULE)
+    eligible = _module_function(module, "Test-DefenseClawSourcePinEligible")
+    assert "if (-not (Test-DefenseClawStandaloneProfile)) {\n        return $false" in eligible
+    assert "'DefenseClaw-Enterprise-Setup-'" in eligible
+    assert "$programData + '\\Cisco'" in eligible
+
+    pin = _module_function(module, "Open-DefenseClawSourcePin")
+    assert "[IO.FileAccess]::Read,\n            [IO.FileShare]::Read\n" in pin
+    assert "FileShare]::ReadWrite" not in pin and "FileShare]::Delete" not in pin
+    assert "identity = (Get-DefenseClawFileIdentity -Path $Path)" in pin
+
+    describe = _module_function(module, "Get-DefenseClawSourceDescriptor")
+    opened = describe.index("$pin = Open-DefenseClawSourcePin -Path $full")
+    assert opened < describe.index("Assert-DefenseClawRegularSource `")
+    assert opened < describe.index("Get-FileHash -LiteralPath $full")
+    assert opened < describe.index("Get-AuthenticodeSignature `")
+    # Recorded only after a successful admission; a refused one lets go.
+    assert describe.index("policy = (Get-DefenseClawSourcePinTrustPolicy)") > describe.index(
+        "VersionInfo.FileVersion"
+    )
+    assert "catch {\n        if ($null -ne $pin) {\n            $pin.stream.Dispose()\n        }\n        throw" in describe
+
+    reuse = _module_function(module, "Get-DefenseClawPinnedSourceDescriptor")
+    for condition in (
+        "-not $pin.stream.CanRead",
+        "[string]$pin.policy -cne (Get-DefenseClawSourcePinTrustPolicy)",
+        "[bool]$cached.authenticode -ne [bool]$Source.authenticode",
+        "[bool]$cached.allow_unsigned -ne [bool]$Source.allow_unsigned",
+    ):
+        assert condition in reuse
+    assert reuse.index("Assert-DefenseClawTrustedSource") < reuse.index("return $cached.Clone()")
+    assert "(Get-DefenseClawFileIdentity -Path $full) -cne [string]$pin.identity" in reuse
+
+    policy = _module_function(module, "Get-DefenseClawSourcePinTrustPolicy")
+    for part in ("DefenseClawTrustMode", "DefenseClawAllowedSignerSHA256", "DefenseClawPinnedPayloadSHA256"):
+        assert part in policy
+
+    current = _module_function(module, "Assert-DefenseClawSourceDescriptorCurrent")
+    cached = current.index("$current = Get-DefenseClawPinnedSourceDescriptor -Source $Source")
+    fallback = current.index("$current = Get-DefenseClawSourceDescriptor `")
+    assert cached < fallback < current.index("foreach ($field in @('path', 'label', 'sha256'))")
