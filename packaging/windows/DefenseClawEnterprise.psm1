@@ -6046,9 +6046,21 @@ function Assert-DefenseClawServicesNotPendingDelete {
         if ([string]::IsNullOrWhiteSpace([string]$name)) {
             continue
         }
+        $pendingSince = $null
         while ((Test-DefenseClawServiceMarkedForDelete -Name ([string]$name)) -and
             [DateTime]::UtcNow -lt $deadline) {
+            if ($null -eq $pendingSince) {
+                $pendingSince = [DateTime]::UtcNow
+            }
             Microsoft.PowerShell.Utility\Start-Sleep -Seconds 2
+        }
+        if ($null -ne $pendingSince -and
+            -not (Test-DefenseClawServiceMarkedForDelete -Name ([string]$name))) {
+            Write-DefenseClawResilienceEvent -Marker defenseclaw_accept -Fields @{
+                check   = 'service_pending_delete'
+                service = [string]$name
+                reason  = ('service was marked for deletion; SCM finished deleting it after {0} s' -f [int][Math]::Round(([DateTime]::UtcNow - $pendingSince).TotalSeconds))
+            }
         }
         if (Test-DefenseClawServiceMarkedForDelete -Name ([string]$name)) {
             Write-DefenseClawResilienceEvent -Marker defenseclaw_prereq -Fields @{
@@ -32087,6 +32099,15 @@ function Wait-DefenseClawFreshGuardianReconcile {
         if ([bool]$coverage.ok) {
             if ($AllowFailedTargets) {
                 Write-DefenseClawGuardianDegradedTargets -Report $report
+            }
+            if ($extended) {
+                Write-DefenseClawResilienceEvent -Marker defenseclaw_accept -Fields @{
+                    subsystem = 'guardian'
+                    reason    = (
+                        'first reconcile finished after {0} s, past the usual {1} s wait; ' +
+                        'Setup kept waiting while it progressed'
+                    ) -f [int][Math]::Round(([DateTime]::UtcNow - $begin).TotalSeconds), $TimeoutSeconds
+                }
             }
             return [string]$coverage.generation
         }
