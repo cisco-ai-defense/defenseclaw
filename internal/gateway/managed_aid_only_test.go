@@ -2897,6 +2897,48 @@ func TestHookManagedAIDOnly_LogsToolCallWire(t *testing.T) {
 		}
 	}
 
+	// Agent-supplied names, ids and keys are bounded in the line.
+	longName := strings.Repeat("n", 4096)
+	manyKeys := map[string]string{}
+	for i := 0; i < aidLogMaxArgKeys+8; i++ {
+		manyKeys[fmt.Sprintf("%s%03d", strings.Repeat("k", 1024), i)] = "v"
+	}
+	manyArgs, err := json.Marshal(manyKeys)
+	if err != nil {
+		t.Fatal(err)
+	}
+	bounded := captureStderr(t, func() {
+		_ = a.inspectToolPolicy(&ToolInspectRequest{
+			Tool: longName, Args: manyArgs, Direction: "tool_call", Connector: "claudecode",
+			toolUseID: strings.Repeat("i", 4096), aidToolCallDeclared: true, hookEvent: "PreToolUse",
+		})
+	})
+	line := ""
+	for _, l := range strings.Split(bounded, "\n") {
+		if strings.HasPrefix(l, "[aid] PreToolUse sent as a tool call:") {
+			line = l
+		}
+	}
+	if line == "" {
+		t.Fatalf("no tool-call line in %q", bounded)
+	}
+	if max := 3*aidLogFieldMaxBytes + aidLogMaxArgKeys*(aidLogFieldMaxBytes+8) + 512; len(line) > max {
+		t.Errorf("tool-call line is %d bytes, want at most %d", len(line), max)
+	}
+	if !strings.Contains(line, `tool="`+strings.Repeat("n", aidLogFieldMaxBytes)+`..."`) ||
+		!strings.Contains(line, `id="`+strings.Repeat("i", aidLogFieldMaxBytes)+`..."`) ||
+		!strings.Contains(line, " (+8 more) wire=") {
+		t.Errorf("tool-call line not cut as expected: %.400q", line)
+	}
+	textBounded := captureStderr(t, func() {
+		_ = a.inspectToolPolicy(&ToolInspectRequest{
+			Tool: longName, Args: args, Direction: "tool_call", Connector: "claudecode",
+		})
+	})
+	if !strings.Contains(textBounded, `tool="`+strings.Repeat("n", aidLogFieldMaxBytes)+`..." reason=contract_undeclared`) {
+		t.Errorf("text-only line not cut as expected: %.400q", textBounded)
+	}
+
 	// No AID lane, no wire line.
 	a.scannerCfg.CiscoAIDefense.ScanHookSurface = boolPtrForAIDLogTest(false)
 	off := captureStderr(t, func() {

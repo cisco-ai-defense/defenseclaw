@@ -512,7 +512,7 @@ func (a *APIServer) logAIDToolCallTextOnly(
 	if reason == "" || reason == "not_a_tool_call" || !a.aidHookSurfaceWired(ctx) {
 		return
 	}
-	tool := strconv.Quote(toolName)
+	tool := strconv.Quote(aidLogField(toolName))
 	if nameIsLabel || strings.TrimSpace(toolName) == "" {
 		tool = "<none>"
 	}
@@ -525,6 +525,23 @@ func aidLogEvent(event string) string {
 		return "<unknown>"
 	}
 	return event
+}
+
+// The tool name, id and argument keys of an [aid] line come from the agent and
+// are bounded only by the request body cap; these limits keep one call's line
+// short.
+const (
+	aidLogFieldMaxBytes = 128
+	aidLogMaxArgKeys    = 32
+)
+
+// aidLogField is s cut to aidLogFieldMaxBytes on a rune boundary, marked with
+// "..." when it was cut.
+func aidLogField(s string) string {
+	if len(s) <= aidLogFieldMaxBytes {
+		return s
+	}
+	return truncateToRuneBoundary(s, aidLogFieldMaxBytes) + "..."
 }
 
 // logAIDToolCallCarried records the shape of a tool call sent to AID: the
@@ -542,10 +559,19 @@ func logAIDToolCallCarried(call aidToolCall, wireID string) {
 		keys = append(keys, key)
 	}
 	sort.Strings(keys)
+	moreKeys := ""
+	if len(keys) > aidLogMaxArgKeys {
+		moreKeys = fmt.Sprintf(" (+%d more)", len(keys)-aidLogMaxArgKeys)
+		keys = keys[:aidLogMaxArgKeys]
+	}
+	for i := range keys {
+		keys[i] = aidLogField(keys[i])
+	}
 	// The id and the argument keys come from the agent: quote them so a
-	// crafted value cannot forge a log line.
-	fmt.Fprintf(os.Stderr, "[aid] PreToolUse sent as a tool call: connector=%s event=%s tool=%q id=%q (%s) arg_keys=%q wire=%s messages=[assistant:tool_calls, user:text]\n",
-		call.Connector, aidLogEvent(call.Event), call.Name, wireID, idSource, keys, connector.AIDWireVersionChatToolCalls)
+	// crafted value cannot forge a log line, and bound them.
+	fmt.Fprintf(os.Stderr, "[aid] PreToolUse sent as a tool call: connector=%s event=%s tool=%q id=%q (%s) arg_keys=%q%s wire=%s messages=[assistant:tool_calls, user:text]\n",
+		call.Connector, aidLogEvent(call.Event), aidLogField(call.Name), aidLogField(wireID), idSource, keys, moreKeys,
+		connector.AIDWireVersionChatToolCalls)
 }
 
 // hookAIDInspectTool sends the invocation as a tool call ahead of the text form,
@@ -555,6 +581,11 @@ func (a *APIServer) hookAIDInspectTool(
 	req *ToolInspectRequest,
 	toolName, argsStr string,
 ) *ScanVerdict {
+	// hookAIDInspect and hookAIDInspectToolCall return nil without a wired
+	// hook surface too; checking first skips parsing the arguments.
+	if !a.aidHookSurfaceWired(ctx) {
+		return nil
+	}
 	if reason := toolCallNotCarriedReason(req); reason != "" {
 		a.logAIDToolCallTextOnly(ctx, req.Connector, req.hookEvent, toolName, req.toolNameIsLabel, reason)
 		return a.hookAIDInspect(ctx, toolName, argsStr)
