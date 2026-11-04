@@ -186,6 +186,13 @@ func TestOTLPPathTokenWindowsSecureCreationAndRepairsBroadDACL(t *testing.T) {
 				t.Fatalf("install broad DACL: %v", err)
 			}
 			if test.readDrift {
+				// The fixture's extra reader is Everyone, which only a
+				// verified Secure Client deployment accepts (GAP-0566);
+				// TestOTLPPathTokenWindowsRefusesBroadReaderOutsideSecureClient
+				// covers standalone and per-user installs.
+				originalSecureClient := SecureClientDeploymentVerified
+				t.Cleanup(func() { SecureClientDeploymentVerified = originalSecureClient })
+				SecureClientDeploymentVerified = func() bool { return true }
 				if token, err := LoadOTLPPathToken(dataDir, OTLPScopeCodex); err != nil || token != first {
 					t.Fatalf("LoadOTLPPathToken with an extra reader matched=%v err=%v, want the token", token == first, err)
 				}
@@ -230,6 +237,83 @@ func TestOTLPPathTokenWindowsSecureCreationAndRepairsBroadDACL(t *testing.T) {
 			}
 		})
 	}
+}
+
+// GAP-0566: outside a verified Secure Client deployment a credential every
+// local account can read is refused, and Ensure rotates it even without
+// privilege; a narrow extra reader stays accepted.
+func TestOTLPPathTokenWindowsRefusesBroadReaderOutsideSecureClient(t *testing.T) {
+	t.Setenv(managed.TrustStrictAncestorsEnv, "")
+	captureManagedResilienceEvents(t)
+	originalSecureClient := SecureClientDeploymentVerified
+	t.Cleanup(func() { SecureClientDeploymentVerified = originalSecureClient })
+	SecureClientDeploymentVerified = func() bool { return false }
+	originalCanRepair := windowsManagedCanRepair
+	t.Cleanup(func() { windowsManagedCanRepair = originalCanRepair })
+	windowsManagedCanRepair = func() bool { return false }
+
+	dataDir := testenv.PrivateTempDir(t)
+	first, err := EnsureOTLPPathToken(dataDir, OTLPScopeCodex)
+	if err != nil {
+		t.Fatalf("initial EnsureOTLPPathToken: %v", err)
+	}
+	path, err := OTLPPathTokenFilePath(dataDir, OTLPScopeCodex)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := setOTLPWindowsBroadDACL(path, windows.GENERIC_READ); err != nil {
+		t.Fatalf("install broad DACL: %v", err)
+	}
+	if token, err := LoadOTLPPathToken(dataDir, OTLPScopeCodex); err == nil || token != "" ||
+		!strings.Contains(err.Error(), "every local account can read") {
+		t.Fatalf("LoadOTLPPathToken with an Everyone reader token=%v err=%v, want the broad-reader refusal", token != "", err)
+	}
+	rotated, err := EnsureOTLPPathToken(dataDir, OTLPScopeCodex)
+	if err != nil || rotated == "" || rotated == first {
+		t.Fatalf("EnsureOTLPPathToken with an Everyone reader rotated=%v err=%v, want a new token", rotated != first, err)
+	}
+	if loaded, err := LoadOTLPPathToken(dataDir, OTLPScopeCodex); err != nil || loaded != rotated {
+		t.Fatalf("load rotated token: matched=%v err=%v", loaded == rotated, err)
+	}
+
+	// A narrow extra reader (one named account) is still drift that is
+	// accepted and logged.
+	narrow, err := windows.StringToSid("S-1-5-21-1-2-3-1001")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := addOTLPWindowsReaderForTest(path, narrow); err != nil {
+		t.Fatalf("add narrow reader: %v", err)
+	}
+	if loaded, err := LoadOTLPPathToken(dataDir, OTLPScopeCodex); err != nil || loaded != rotated {
+		t.Fatalf("LoadOTLPPathToken with a narrow extra reader matched=%v err=%v, want the token", loaded == rotated, err)
+	}
+}
+
+// addOTLPWindowsReaderForTest adds a read entry for sid to path's DACL.
+func addOTLPWindowsReaderForTest(path string, sid *windows.SID) error {
+	sd, err := windows.GetNamedSecurityInfo(path, windows.SE_FILE_OBJECT, windows.DACL_SECURITY_INFORMATION)
+	if err != nil {
+		return err
+	}
+	current, _, err := sd.DACL()
+	if err != nil {
+		return err
+	}
+	acl, err := windows.ACLFromEntries([]windows.EXPLICIT_ACCESS{{
+		AccessPermissions: windows.GENERIC_READ,
+		AccessMode:        windows.GRANT_ACCESS,
+		Trustee: windows.TRUSTEE{
+			TrusteeForm:  windows.TRUSTEE_IS_SID,
+			TrusteeType:  windows.TRUSTEE_IS_USER,
+			TrusteeValue: windows.TrusteeValueFromSID(sid),
+		},
+	}}, current)
+	if err != nil {
+		return err
+	}
+	return windows.SetNamedSecurityInfo(path, windows.SE_FILE_OBJECT,
+		windows.DACL_SECURITY_INFORMATION|windows.PROTECTED_DACL_SECURITY_INFORMATION, nil, nil, acl, nil)
 }
 
 // A data-free lock with an extra reader is drift, not a reason to stop the

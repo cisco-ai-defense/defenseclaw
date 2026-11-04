@@ -1303,11 +1303,17 @@ func AcceptInheritedCreateChild(path, label string, flags uint8, mask windows.AC
 // acceptInheritedCreateChild accepts, and logs once per path, an inherited
 // create-child-only entry for Users or Authenticated Users on a directory:
 // the shape a folder takes after its protection is reset to inherit from
-// C:\ProgramData. Strict mode keeps it fatal.
+// C:\ProgramData. Strict mode keeps it fatal, and so does the standalone
+// profile (windowsStandaloneTrustScope): a standard user who can add a file
+// to a policy or rule-pack folder whose every file is loaded, or plant a
+// journal beside the audit database, changes what DefenseClaw enforces or
+// records. A standalone install stamps its folders protected, so only drift
+// meets this rule there (GAP-0566).
 func acceptInheritedCreateChild(path, label string, flags uint8, mask windows.ACCESS_MASK, sid *windows.SID) bool {
 	// An object-inheritable entry would pass these bits to new files, where
 	// add-file and add-subfolder mean write data and append data.
-	if trustStrictAncestors() || flags&windows.INHERITED_ACE == 0 || flags&windows.OBJECT_INHERIT_ACE != 0 ||
+	if trustStrictAncestors() || windowsStandaloneTrustScope() ||
+		flags&windows.INHERITED_ACE == 0 || flags&windows.OBJECT_INHERIT_ACE != 0 ||
 		mask&^windowsCreateChildOnlyMask != 0 {
 		return false
 	}
