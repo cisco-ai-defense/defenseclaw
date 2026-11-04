@@ -77,6 +77,29 @@ func TestUnmanagedGatewayWaitsBoundedForTheHelperSocket(t *testing.T) {
 		checkHelperSocket, probeHelperSocket, awaitHelperSocket, sleepHelperSocket, helperSocketNow =
 			previousCheck, previousProbe, previousAwait, previousSleep, previousNow
 	})
+	if runtime.GOOS == "windows" {
+		// Windows has no unmanaged helper broker by design: the Cowork VM
+		// sensor and its root helper are Linux-only, and
+		// acquire/root_socket_windows.go refuses every socket (CheckRootSocket)
+		// and never waits (RootSocketAwaitable is false). So the expected
+		// Windows result is no wait and no broker, through the real checks,
+		// for any absolute path the environment names. The bounded wait below
+		// is the Linux and macOS path.
+		var slept time.Duration
+		sleepHelperSocket = func(_ context.Context, d time.Duration) bool { slept += d; return true }
+		checks := 0
+		checkHelperSocket = func(socket string) error { checks++; return previousCheck(socket) }
+		for _, socket := range []string{filepath.Join(t.TempDir(), "sensor-helper.sock"), `C:\ProgramData\DefenseClaw\sensor-helper.sock`} {
+			t.Setenv(acquire.SocketEnvVar, socket)
+			if got := unmanagedHelperSocket(context.Background()); got != "" || slept != 0 {
+				t.Fatalf("unmanaged Windows gateway with %s=%q: brokered via %q, slept %v; want no broker and no wait", acquire.SocketEnvVar, socket, got, slept)
+			}
+		}
+		if checks != 2 {
+			t.Fatalf("the Windows socket check ran %d times, want 2 (once per absolute path, no retries)", checks)
+		}
+		return
+	}
 	t.Setenv(acquire.SocketEnvVar, "/run/defenseclaw-cowork-sensor/sensor-helper.sock")
 	clock := time.Unix(1_800_000_000, 0)
 	helperSocketNow = func() time.Time { return clock }
