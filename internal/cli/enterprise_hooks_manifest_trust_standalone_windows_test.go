@@ -108,6 +108,9 @@ func TestEnterpriseHookManifestTrustCheckStandaloneDrift(t *testing.T) {
 		if err := check(manifest); err == nil {
 			t.Fatal("standalone accepted a guardian manifest whose bytes changed during the repair")
 		}
+		if err := check(manifest); err == nil {
+			t.Fatal("standalone accepted the bytes that changed during the repair on the next read")
+		}
 	})
 }
 

@@ -186,6 +186,20 @@ func TestStandaloneTrustRefusesConfigEditedDuringRepair(t *testing.T) {
 	if err := ValidateTrustedConfigPath(path); err == nil {
 		t.Fatal("standalone accepted config.yaml whose bytes changed during the repair")
 	}
+	// The descriptor is canonical now; the strict check alone would pass.
+	if err := ValidateTrustedFilePath(path, "managed config"); err != nil {
+		t.Fatalf("repaired config.yaml is not trusted by descriptor: %v", err)
+	}
+	if err := ValidateTrustedConfigPath(path); err == nil {
+		t.Fatal("standalone accepted the bytes that changed during the repair on the next read")
+	}
+	// Setup /repair rewrites the file: new bytes from a trusted writer pass.
+	if err := os.WriteFile(path, []byte("rewritten"), 0o600); err != nil {
+		t.Fatalf("rewrite config.yaml: %v", err)
+	}
+	if err := ValidateTrustedConfigPath(path); err != nil {
+		t.Fatalf("standalone refused config.yaml rewritten by a trusted writer: %v", err)
+	}
 }
 
 // A process that never read config.yaml while it was trusted has no

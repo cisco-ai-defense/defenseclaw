@@ -277,18 +277,26 @@ var (
 	enterpriseHookManifestFileTrustCheck = func(path string) error {
 		const label = "hook guardian manifest"
 		needsProof := managed.StandaloneRepairNeedsProvenance()
-		if err := managed.ValidateTrustedFilePath(path, label); err == nil {
+		strictErr := managed.ValidateTrustedFilePath(path, label)
+		if strictErr == nil {
 			if needsProof {
-				managed.RecordTrustedContent(path)
+				return managed.AcceptTrustedContent(path)
 			}
 			return nil
 		}
 		if (enterpriseHooksRuntimeGOOS() == "windows" || enterpriseHooksRuntimeGOOS() == "darwin") &&
 			(!needsProof || managed.TrustedContentUnchanged(path)) &&
 			enterpriseHookManifestACLRepair(path) == nil &&
-			managed.ValidateTrustedFilePath(path, label) == nil &&
-			(!needsProof || managed.TrustedContentUnchanged(path)) {
-			return nil
+			managed.ValidateTrustedFilePath(path, label) == nil {
+			if !needsProof || managed.TrustedContentUnchanged(path) {
+				return nil
+			}
+			// The bytes changed while the repair ran.
+			managed.MarkContentUntrusted(path)
+			return strictErr
+		}
+		if needsProof {
+			return strictErr
 		}
 		return managed.ValidateTrustedPolicyFilePath(path, label)
 	}
