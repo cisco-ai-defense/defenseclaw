@@ -2809,10 +2809,12 @@ def _execute_plan(plan: UninstallPlan) -> ExecutionResult:
         # A stack Docker cannot reach stays, with the command that removes it.
         _local_observability_teardown(plan.data_dir)
     deferred = _requires_deferred_cleanup(plan)
+    held: list[str] = []
     if deferred:
         status: list[str] = []
 
         def schedule() -> None:
+            held.extend(_deferred_cleanup_held_folders(plan))
             status.append(_schedule_deferred_cleanup(plan))
 
         run_phase("deferred cleanup", schedule)
@@ -2820,9 +2822,13 @@ def _execute_plan(plan: UninstallPlan) -> ExecutionResult:
             "deferred cleanup",
             "scheduled",
             # The result file stays for the operator to read; the next
-            # uninstall's helper removes it.
-            f"result: {status[0]}, kept for you to read. If another DefenseClaw window still holds a "
-            "file, the removal fails and DefenseClaw stays; the next defenseclaw command then says why",
+            # uninstall's helper removes it. It said nothing about the data
+            # folder still being there, so a failed cleanup looked like a
+            # finished uninstall (cowork-1-0-8 GAP-0058).
+            f"not finished yet: {plan.data_dir} is removed within about a minute after this command "
+            f"exits; the result is written to {status[0]}, kept for you to read. If a program still "
+            "holds a file or folder in it, the removal fails and DefenseClaw stays; the next "
+            "defenseclaw command then says why",
         )
     elif plan.remove_data_dir:
         run_phase(
@@ -2856,6 +2862,12 @@ def _execute_plan(plan: UninstallPlan) -> ExecutionResult:
 
     result = ExecutionResult(tuple(phases))
     _render_execution_result(result)
+    for folder in held:
+        ux.warn(
+            f"{folder} is open in another program (a terminal or File Explorer window whose current folder "
+            "is inside it, or an agent session still running): close it now, or the cleanup cannot remove "
+            f"{plan.data_dir}"
+        )
     if plan.uv_kept:
         ux.warn(f"kept {_uv_kept_note(plan.uv_kept)}")
     return result
@@ -3493,6 +3505,34 @@ def _helper_failure_detail(*result_paths: str) -> str:
         if isinstance(result, dict) and result.get("status") == "failed" and result.get("detail"):
             return f": {result['detail']} (details: {path})"
     return ""
+
+
+# How often and how long the CLI re-checks a held folder before it warns:
+# a scanner's or indexer's brief hold lets go within it.
+_HELD_FOLDER_CHECKS = 5
+_HELD_FOLDER_CHECK_INTERVAL = 0.5
+
+
+def _deferred_cleanup_held_folders(plan: UninstallPlan) -> list[str]:
+    """The data folders another program holds, which the deferred cleanup cannot remove (GAP-0058).
+
+    The cleanup runs after this CLI exits, with no console, so a folder held
+    open (hooks\\.outage-warnings, by a window whose current folder it was)
+    left the whole data folder behind while the console said nothing. The
+    check changes nothing; the runtime this CLI runs from and the Python the
+    helper runs on are not checked (they go after it exits). A brief hold is
+    re-checked before it is reported.
+    """
+    skip = {plan.managed_venv, os.path.join(plan.data_dir, ".uv")}
+    skip.update(os.path.join(plan.data_dir, name) for name in plan.preserve_data_entries)
+    held = windows_uninstall_helper.held_folders(plan.data_dir, skip)
+    for _ in range(_HELD_FOLDER_CHECKS - 1):
+        if not held:
+            break
+        time.sleep(_HELD_FOLDER_CHECK_INTERVAL)
+        still = set(windows_uninstall_helper.held_folders(plan.data_dir, skip))
+        held = [folder for folder in held if folder in still]
+    return held
 
 
 def _schedule_deferred_cleanup(plan: UninstallPlan) -> str:
