@@ -93,3 +93,36 @@ func TestStandaloneDeferredClaudeStagingRendersTheDeploymentContract(t *testing.
 		t.Fatal("staging rendered the pending row's own newer contract instead of the deployment contract")
 	}
 }
+
+// Under Secure Client the active policy is rendered from the enrolled row's
+// own contract, which for Claude Code 2.1.219+ adds DirectoryAdded. The
+// identity proof the Guardian runs before it stages a signed-out user's
+// deferred row must still recognize that policy as this deployment's; it
+// failed the whole install before.
+func TestSecureClientClaudePolicyIdentityAcceptsTheRowContract(t *testing.T) {
+	fixture := newWindowsManagedInstallFixture(t, map[string]interface{}{"allowManagedHooksOnly": true})
+	previousStandalone := windowsEnterpriseStandaloneProcess
+	windowsEnterpriseStandaloneProcess = func() bool { return false }
+	t.Cleanup(func() { windowsEnterpriseStandaloneProcess = previousStandalone })
+	t.Setenv(connector.WindowsGatewayServiceNameEnv, "DefenseClawGateway")
+
+	opts := windowsManagedInstallOptions(fixture)
+	opts.AgentVersion = "2.1.230 (Claude Code)"
+	if _, err := Install(context.Background(), opts); err != nil {
+		t.Fatalf("Install: %v", err)
+	}
+	body, err := os.ReadFile(fixture.policyPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(body), "DirectoryAdded") {
+		t.Fatal("fixture must render the row's newer contract under Secure Client")
+	}
+	if err := VerifyWindowsClaudeManagedPolicyIdentity(fixture.hookExe, opts.APIAddr, "DefenseClawGateway"); err != nil {
+		t.Fatalf("identity of the row-contract policy: %v", err)
+	}
+	other := filepath.Join(filepath.Dir(fixture.hookExe), "other-hook.exe")
+	if err := VerifyWindowsClaudeManagedPolicyIdentity(other, opts.APIAddr, "DefenseClawGateway"); err == nil {
+		t.Fatal("the policy was accepted for another hook executable")
+	}
+}

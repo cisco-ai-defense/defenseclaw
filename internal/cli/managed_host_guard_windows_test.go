@@ -86,7 +86,12 @@ func TestSecureClientHostRequiresProtectedLayoutAndRegisteredService(t *testing.
 	}{
 		{"installed", winpath.EnterpriseDeploymentInstalled, "", serviceImage, true},
 		{"protected metadata unreadable", winpath.EnterpriseDeploymentUnknown, "", serviceImage, true},
-		{"metadata absent", winpath.EnterpriseDeploymentAbsent, "", serviceImage, false},
+		{"metadata absent", winpath.EnterpriseDeploymentAbsent, "transaction", serviceImage, false},
+		// A first install writes the deployment record when its transaction
+		// commits; its protected transaction record stands in until then.
+		{"first install in progress", winpath.EnterpriseDeploymentAbsent, "", serviceImage, true},
+		{"first install in progress, install marker missing", winpath.EnterpriseDeploymentAbsent, "marker", serviceImage, false},
+		{"first install in progress, no registered service", winpath.EnterpriseDeploymentAbsent, "", "", false},
 		{"deployment removed", winpath.EnterpriseDeploymentTombstone, "", serviceImage, false},
 		{"machine roots unavailable", winpath.EnterpriseDeploymentInstalled, "roots", serviceImage, false},
 		{"metadata inspection fails", winpath.EnterpriseDeploymentInstalled, "deployment", serviceImage, false},
@@ -141,6 +146,18 @@ func TestSecureClientHostRequiresProtectedLayoutAndRegisteredService(t *testing.
 						t.Fatalf("validated file %q", path)
 					}
 					if tc.failAt == "file" {
+						return failure
+					}
+					return nil
+				},
+				trustedTransaction: func(path, _ string) error {
+					if path != filepath.Join(filepath.Dir(roots.MetadataPath), "pending.json") {
+						t.Fatalf("validated transaction record %q", path)
+					}
+					if tc.state != winpath.EnterpriseDeploymentAbsent {
+						t.Fatalf("transaction record consulted for a %s deployment", tc.state)
+					}
+					if tc.failAt == "transaction" {
 						return failure
 					}
 					return nil

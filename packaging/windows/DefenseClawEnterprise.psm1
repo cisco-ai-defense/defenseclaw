@@ -10129,7 +10129,9 @@ function Set-DefenseClawSecureClientInstallMarker {
         [Parameter(Mandatory)][hashtable]$Layout,
         [Parameter(Mandatory)][string]$GatewayServiceSID
     )
-    if (-not ($Layout.Contains('BrokerEnabled') -and [bool]$Layout['BrokerEnabled'])) {
+    # A Secure Client layout carries no BrokerEnabled key (an absent key is
+    # its broker deployment); only standalone layouts set it, to false.
+    if (-not (Test-DefenseClawLayoutBrokerEnabled -Layout $Layout)) {
         return
     }
     # The install root itself has the canonical Administrators owner. Profile
@@ -28351,7 +28353,7 @@ function Assert-DefenseClawManagedInstallTree {
         $Layout.LibexecDirectory,
         $Layout.ManagedIPCDirectory
     )
-    if ($Layout.Contains('BrokerEnabled') -and [bool]$Layout['BrokerEnabled']) {
+    if (Test-DefenseClawLayoutBrokerEnabled -Layout $Layout) {
         $allowedDirectories += (Microsoft.PowerShell.Management\Join-Path `
             $Layout.InstallRoot 'secure-client.install')
     }
@@ -29320,7 +29322,7 @@ function Get-DefenseClawRetiredInstallTreeAllowlist {
         # the canonical validator was tripping on pre-fix.
         (Microsoft.PowerShell.Management\Join-Path $RetiredRoot 'ipc')
     )
-    if ($Layout.Contains('BrokerEnabled') -and [bool]$Layout['BrokerEnabled']) {
+    if (Test-DefenseClawLayoutBrokerEnabled -Layout $Layout) {
         $directories += (Microsoft.PowerShell.Management\Join-Path `
             $RetiredRoot 'secure-client.install')
     }
@@ -32572,7 +32574,7 @@ function Remove-DefenseClawCommittedEmptyInstallRoot {
         # runs.
         [IO.Path]::GetFullPath($Layout.ManagedIPCDirectory).TrimEnd('\')
     )
-    if ($Layout.Contains('BrokerEnabled') -and [bool]$Layout['BrokerEnabled']) {
+    if (Test-DefenseClawLayoutBrokerEnabled -Layout $Layout) {
         $allowed += [IO.Path]::GetFullPath(
             (Microsoft.PowerShell.Management\Join-Path `
                 $Layout.InstallRoot 'secure-client.install')
