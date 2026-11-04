@@ -9,12 +9,82 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"reflect"
+	"strings"
 	"testing"
 
 	"github.com/maximhq/bifrost/core/schemas"
 
 	"github.com/defenseclaw/defenseclaw/internal/config"
+	"github.com/defenseclaw/defenseclaw/internal/configs"
 )
+
+func TestJudgeCompatibleAliasesRequireEffectiveEndpoint(t *testing.T) {
+	for _, alias := range []string{"openai-compatible", "custom-openai"} {
+		t.Run(alias, func(t *testing.T) {
+			for _, baseURL := range []string{"", " / "} {
+				llm := &config.LLMConfig{Provider: alias, Model: "gemma-4", BaseURL: baseURL, APIKey: "fixture-key"}
+				if _, err := NewProviderForLLMConfig(llm, nil); err == nil || !strings.Contains(err.Error(), "base_url") {
+					t.Errorf("base_url %q: expected a named endpoint error, got %v", baseURL, err)
+				}
+			}
+			if _, err := NewProvider(alias+"/gemma-4", "fixture-key"); err == nil {
+				t.Error("direct provider without base_url was accepted")
+			}
+			if _, err := NewProviderWithBase(alias+"/gemma-4", "fixture-key", " / "); err == nil {
+				t.Error("direct provider with empty effective base_url was accepted")
+			}
+
+			withBase := &config.LLMConfig{Provider: alias, Model: "gemma-4", BaseURL: "http://127.0.0.1:8000/v1", APIKey: "fixture-key"}
+			provider, err := NewProviderForLLMConfig(withBase, nil)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if bp := provider.(*bifrostProvider); bp.providerKey != schemas.OpenAI || bp.baseURL != withBase.BaseURL {
+				t.Fatalf("configured provider = %#v", bp)
+			}
+			provider, err = NewProviderWithBase(alias+"/gemma-4", "fixture-key", withBase.BaseURL)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if bp := provider.(*bifrostProvider); bp.providerKey != schemas.OpenAI || bp.baseURL != withBase.BaseURL || bp.model != "gemma-4" {
+				t.Fatalf("configured direct provider = %#v", bp)
+			}
+		})
+	}
+
+	registry := &configs.ProvidersConfig{Providers: []configs.Provider{{
+		Name: "local-judge", BaseProviderType: "openai-compatible", BaseURL: "http://127.0.0.1:8000/v1",
+	}}}
+	llm := &config.LLMConfig{Provider: "custom", Model: "gemma-4", InstanceName: "local-judge"}
+	provider, err := NewProviderForLLMConfig(llm, registry)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if bp := provider.(*bifrostProvider); bp.baseURL != registry.Providers[0].BaseURL {
+		t.Fatalf("overlay base_url = %q", bp.baseURL)
+	}
+	registry.Providers[0].BaseURL = ""
+	if _, err := NewProviderForLLMConfig(llm, registry); err == nil {
+		t.Fatal("overlay without base_url was accepted")
+	}
+}
+
+func TestJudgeNativeOpenAIDefaultEndpointTwin(t *testing.T) {
+	for _, build := range []func() (LLMProvider, error){
+		func() (LLMProvider, error) { return NewProvider("openai/gpt-4o", "fixture-key") },
+		func() (LLMProvider, error) {
+			return NewProviderForLLMConfig(&config.LLMConfig{Provider: "openai", Model: "gpt-4o"}, nil)
+		},
+	} {
+		provider, err := build()
+		if err != nil {
+			t.Fatal(err)
+		}
+		if bp := provider.(*bifrostProvider); bp.providerKey != schemas.OpenAI || bp.baseURL != "" {
+			t.Fatalf("native provider = %#v", bp)
+		}
+	}
+}
 
 func TestJudgeExtraBodyOpenAICompatibleRequest(t *testing.T) {
 	provider := &bifrostProvider{providerKey: schemas.OpenAI, baseURL: "http://127.0.0.1:8000/v1"}

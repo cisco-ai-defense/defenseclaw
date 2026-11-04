@@ -204,6 +204,9 @@ func NewProvider(model string, apiKey string) (LLMProvider, error) {
 	if provider == "" {
 		provider = inferProvider(modelID, apiKey)
 	}
+	if err := requireCompatibleEndpoint(provider, ""); err != nil {
+		return nil, err
+	}
 
 	providerKey, err := mapProviderKey(provider)
 	if err != nil {
@@ -256,6 +259,9 @@ func NewProviderWithBase(model string, apiKey string, baseURL string) (LLMProvid
 	provider, modelID := splitModel(model)
 	if provider == "" {
 		provider = inferProvider(modelID, apiKey)
+	}
+	if err := requireCompatibleEndpoint(provider, baseURL); err != nil {
+		return nil, err
 	}
 
 	providerKey, err := mapProviderKey(provider)
@@ -439,6 +445,9 @@ func buildProviderFromEffective(llm *config.LLMConfig, inst *configs.Provider) (
 			providerType = inferProvider(model, apiKey)
 		}
 	}
+	if err := requireCompatibleEndpoint(providerType, baseURL); err != nil {
+		return nil, err
+	}
 	providerKey, err := mapProviderKey(providerType)
 	if err != nil {
 		return nil, fmt.Errorf("gateway: unsupported provider type %q: %w", providerType, err)
@@ -470,15 +479,26 @@ func buildProviderFromEffective(llm *config.LLMConfig, inst *configs.Provider) (
 	}, nil
 }
 
+func requireCompatibleEndpoint(provider, baseURL string) error {
+	if provider == "openai-compatible" || provider == "custom-openai" {
+		if strings.TrimRight(strings.TrimSpace(baseURL), "/") == "" {
+			return fmt.Errorf("gateway: provider %q requires base_url", provider)
+		}
+	}
+	return nil
+}
+
 // knownProviders lists provider prefixes recognized in "provider/model" strings.
 var knownProviders = map[string]bool{
-	"openai":        true,
-	"anthropic":     true,
-	"openrouter":    true,
-	"azure":         true,
-	"gemini":        true,
-	"gemini-openai": true,
-	"bedrock":       true,
+	"openai":            true,
+	"openai-compatible": true,
+	"custom-openai":     true,
+	"anthropic":         true,
+	"openrouter":        true,
+	"azure":             true,
+	"gemini":            true,
+	"gemini-openai":     true,
+	"bedrock":           true,
 	// amazon-bedrock is OpenClaw's stock provider name for AWS Bedrock; see
 	// https://docs.openclaw.ai/providers/bedrock. Both prefixes are accepted
 	// and routed to the same Bifrost Bedrock backend via mapProviderKey.
