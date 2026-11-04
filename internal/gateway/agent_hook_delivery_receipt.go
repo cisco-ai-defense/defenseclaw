@@ -148,7 +148,14 @@ func (a *APIServer) deliveredHookDecision(connectorName string, resp agentHookRe
 //   - Every other call keeps its evaluated decision. In-agent plugins, policy
 //     bridges and events without an answer deadline send no receipt.
 func (a *APIServer) unreceiptedHookDecision(shellBridge, hungUpBeforeAnswer bool, connectorName, event string, resp agentHookResponse) agentHookResponse {
-	if a.scannerCfg == nil || !a.scannerCfg.StandaloneEnterprise() || hookexec.NeutralLifecycleEvent(connectorName, event) {
+	if a.scannerCfg == nil || a.scannerCfg.SecureClientIntegration() || hookexec.NeutralLifecycleEvent(connectorName, event) {
+		return resp
+	}
+	if !a.scannerCfg.StandaloneEnterprise() {
+		if a.scannerCfg.DeploymentMode == "per_user" && hungUpBeforeAnswer && !shellBridge &&
+			hookexec.DeliveryReceiptEvent(connectorName, event) {
+			return unconfirmedHookDelivery(resp)
+		}
 		return resp
 	}
 	closed := a.scannerCfg.EffectiveHookFailModeForConnector(connectorName) != "open"
