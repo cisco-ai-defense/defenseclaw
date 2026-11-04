@@ -408,14 +408,20 @@ func (h *hostPlane) handle(event plane.Event) {
 	instance := h.tracker.InstanceOfProcess(event.PID, event.ExecID)
 	h.mu.Lock()
 	defer h.mu.Unlock()
-	// A held wrapper whose child is this exec, held for its release manifest,
-	// waits for that manifest with it (GAP-0055 after a gateway start).
-	cold := h.holdColdClientLocked(event, lineage, match, at, instance, observation)
-	h.settleWrappersLocked(event, verifiedClient, true, cold)
-	if cold != nil || h.holdWrapperLocked(event, lineage, match, at, instance) {
-		return
+	// A held wrapper whose child is this exec waits with this exec's own
+	// hold: for its release manifest (GAP-0055 after a gateway start), or for
+	// its child when it is a wrapper too (a chain such as timeout 300 nice).
+	held := h.holdColdClientLocked(event, lineage, match, at, instance, observation)
+	if held == nil {
+		held = h.wrapperRecordLocked(event, lineage, match, at, instance)
 	}
-	h.recordLocked(event, lineage, match, at, instance)
+	h.settleWrappersLocked(event, verifiedClient, true, held)
+	switch {
+	case held == nil:
+		h.recordLocked(event, lineage, match, at, instance)
+	case held.level() > 0:
+		h.holdWrapperLocked(held)
+	}
 }
 
 // recordLocked adds one attributed observation to its agent's session.

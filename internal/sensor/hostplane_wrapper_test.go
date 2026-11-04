@@ -112,6 +112,44 @@ func TestTransparentWrapperOfTheVerifiedClientIsNotReported(t *testing.T) {
 			{wrapper, agent, "timeout", "timeout 300 " + client, "", ""},
 			{child, wrapper, "claude", client, signed, "2.1.317"},
 		}, 2},
+		// Chains of at most maxWrapperChain wrappers, each parsed on its own.
+		{"timeout forks nice, which execs the verified client", false, []exec{
+			{wrapper, agent, "timeout", "timeout 300 nice -n 5 " + client, "", ""},
+			{child, wrapper, "timeout", "timeout 300 nice -n 5 " + client, "", ""},
+			{child, wrapper, "nice", "nice -n 5 " + client, "", ""},
+			{child, wrapper, "claude", client, signed, "2.1.317"},
+		}, 0},
+		{"nice execs env, which execs the verified client", false, []exec{
+			{wrapper, agent, "nice", "nice -n 5 env A=1 " + client, "", ""},
+			{wrapper, agent, "env", "env A=1 " + client, "", ""},
+			{wrapper, agent, "claude", client, signed, "2.1.317"},
+		}, 0},
+		// timeout, its fork and nice are recorded; env, the innermost, is
+		// dropped with the verified client.
+		{"three wrappers: the outer two are reported", false, []exec{
+			{wrapper, agent, "timeout", "timeout 300 nice env A=1 " + client, "", ""},
+			{child, wrapper, "timeout", "timeout 300 nice env A=1 " + client, "", ""},
+			{child, wrapper, "nice", "nice env A=1 " + client, "", ""},
+			{child, wrapper, "env", "env A=1 " + client, "", ""},
+			{child, wrapper, "claude", client, signed, "2.1.317"},
+		}, 3},
+		{"chain whose client is another image", false, []exec{
+			{wrapper, agent, "timeout", "timeout 300 nice " + client, "", ""},
+			{child, wrapper, "timeout", "timeout 300 nice " + client, "", ""},
+			{child, wrapper, "nice", "nice " + client, "", ""},
+			{child, wrapper, "claude", client, unsigned, "2.1.317"},
+		}, 4},
+		{"chain whose inner wrapper carries a signal in its own arguments", false, []exec{
+			{wrapper, agent, "timeout", "timeout 300 env X=@modelcontextprotocol/server-y " + client, "", ""},
+			{child, wrapper, "timeout", "timeout 300 env X=@modelcontextprotocol/server-y " + client, "", ""},
+			{child, wrapper, "env", "env X=@modelcontextprotocol/server-y " + client, "", ""},
+			{child, wrapper, "claude", client, signed, "2.1.317"},
+		}, 3},
+		{"chain whose inner wrapper is not transparent", false, []exec{
+			{wrapper, agent, "nice", "nice env LD_PRELOAD=/tmp/x.so " + client, "", ""},
+			{wrapper, agent, "env", "env LD_PRELOAD=/tmp/x.so " + client, "", ""},
+			{wrapper, agent, "claude", client, signed, "2.1.317"},
+		}, 2},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			host := newHost(newFake(fullCoverage()))
@@ -137,10 +175,10 @@ func TestTransparentWrapperOfTheVerifiedClientIsNotReported(t *testing.T) {
 			time.Sleep(4 * host.wrapperHold)
 			classified, _, _, _ := host.stats()
 			host.mu.Lock()
-			held := len(host.wrappers)
+			held, linked := len(host.wrappers), host.linkedWrappers
 			host.mu.Unlock()
-			if classified != tc.want || held != 0 {
-				t.Fatalf("classified=%d held=%d, want %d and 0", classified, held, tc.want)
+			if classified != tc.want || held != 0 || linked != 0 {
+				t.Fatalf("classified=%d held=%d linked=%d, want %d and 0, 0", classified, held, linked, tc.want)
 			}
 		})
 	}

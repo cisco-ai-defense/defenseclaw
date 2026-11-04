@@ -22,6 +22,10 @@ const (
 	// maxHeldWrappers bounds the records held at once; past it a wrapper is
 	// recorded at once.
 	maxHeldWrappers = 64
+	// maxWrapperChain is the most wrappers a chain held for one client can
+	// have (timeout 300 nice claude). A deeper chain records its outer
+	// wrappers.
+	maxWrapperChain = 2
 )
 
 // heldWrapper is the record of a transparent wrapper exec waiting for the
@@ -38,6 +42,17 @@ type heldWrapper struct {
 	// linked are the held wrapper records whose child exec this record is:
 	// they are dropped with it, or recorded with it.
 	linked []*heldWrapper
+	// depth is the number of wrappers in this record's chain: its own level
+	// (1 for a wrapper, 0 for a client exec) and its deepest linked record's.
+	depth int
+}
+
+// level is the number of wrappers the record itself adds to a chain.
+func (held *heldWrapper) level() int {
+	if held.tail != "" {
+		return 1
+	}
+	return 0
 }
 
 // transparentWrappers run their argv tail as the command, with no shell in
@@ -169,21 +184,21 @@ func wrapperTail(name, cmdline string) (prefix, tail string, ok bool) {
 	return strings.Join(args[:at], " "), strings.Join(args[at:], " "), true
 }
 
-// holdWrapperLocked keeps the record of a transparent wrapper exec whose
+// wrapperRecordLocked returns the record of a transparent wrapper exec whose
 // match comes from the command it wraps, when that command would not be
-// reported as the verified Claude client, until the wrapped exec shows
-// whether it is that client. It reports false when the record is to be
-// made now.
-func (h *hostPlane) holdWrapperLocked(
+// reported as the verified Claude client, to be held with holdWrapperLocked
+// until the wrapped exec shows whether it is that client. It returns nil
+// when the record is to be made now.
+func (h *hostPlane) wrapperRecordLocked(
 	event plane.Event, lineage agentchain.Lineage, match tactics.Match, at time.Time, instance agentchain.Instance,
-) bool {
+) *heldWrapper {
 	if h.wrapperHold <= 0 || event.Kind != plane.KindExec || event.PID <= 0 ||
 		h.indicators.KeepClientMCP || h.clientChecksums == nil {
-		return false
+		return nil
 	}
 	prefix, tail, ok := wrapperTail(event.Name, event.Cmdline)
 	if !ok {
-		return false
+		return nil
 	}
 	// A signal the wrapper's own arguments carry is never held, whatever the
 	// tail gives: an MCP reference in an env assignment is reported even when
@@ -192,7 +207,7 @@ func (h *hostPlane) holdWrapperLocked(
 		Kind: string(plane.KindExec), PID: event.PID, Name: event.Name, Cmdline: commandWordCmdline(prefix),
 	}
 	if _, ok := tactics.Classify(own, h.indicators); ok {
-		return false
+		return nil
 	}
 	// The wrapper's match must be the tail's own, and the tail run by the
 	// verified client must be no match at all.
@@ -201,25 +216,33 @@ func (h *hostPlane) holdWrapperLocked(
 		Cmdline: commandWordCmdline(tail),
 	}
 	if asOther, ok := tactics.Classify(child, h.indicators); !ok || asOther.SignalID != match.SignalID {
-		return false
+		return nil
 	}
 	child.ClaudeClient = true
 	if _, ok := tactics.Classify(child, h.indicators); ok {
-		return false
+		return nil
 	}
-	if previous := h.wrappers[event.PID]; previous != nil {
-		h.releaseWrapperLocked(event.PID, previous)
+	return &heldWrapper{
+		cmdline: event.Cmdline, tail: tail, event: event, lineage: lineage, match: match, at: at, instance: instance,
+		depth: 1,
+	}
+}
+
+// holdWrapperLocked holds a wrapper record from wrapperRecordLocked until
+// its child exec, or records it, with the records linked to it, when the
+// holds are full.
+func (h *hostPlane) holdWrapperLocked(held *heldWrapper) {
+	pid := held.event.PID
+	if previous := h.wrappers[pid]; previous != nil {
+		h.releaseWrapperLocked(pid, previous)
 	}
 	if len(h.wrappers)+h.linkedWrappers >= maxHeldWrappers {
-		return false
+		h.finishHeldLocked(held, true)
+		return
 	}
 	if h.wrappers == nil {
 		h.wrappers = make(map[int]*heldWrapper)
 	}
-	held := &heldWrapper{
-		cmdline: event.Cmdline, tail: tail, event: event, lineage: lineage, match: match, at: at, instance: instance,
-	}
-	pid := event.PID
 	held.timer = time.AfterFunc(h.wrapperHold, func() {
 		h.mu.Lock()
 		defer h.mu.Unlock()
@@ -228,7 +251,6 @@ func (h *hostPlane) holdWrapperLocked(
 		}
 	})
 	h.wrappers[pid] = held
-	return true
 }
 
 // settleWrappersLocked decides the held wrappers an exec event can be the
@@ -236,8 +258,10 @@ func (h *hostPlane) holdWrapperLocked(
 // its parent (timeout). The wrapper's record is dropped only when the child
 // is the verified client image with the wrapper's argv tail and is not
 // reported itself. A child with that tail whose own record is held (holder:
-// its release manifest is not cached yet) takes the wrapper with it, to be
-// dropped or recorded when that hold ends. Any other child records it now.
+// its release manifest is not cached yet, or it is a transparent wrapper
+// itself, at most maxWrapperChain wrappers in all) takes the wrapper with it,
+// to be dropped or recorded when that hold ends. Any other child records it
+// now.
 // A fork that still runs the wrapper decides nothing.
 func (h *hostPlane) settleWrappersLocked(event plane.Event, verifiedClient, reported bool, holder *heldWrapper) {
 	if event.Kind != plane.KindExec || len(h.wrappers) == 0 {
@@ -254,9 +278,10 @@ func (h *hostPlane) settleWrappersLocked(event plane.Event, verifiedClient, repo
 			h.finishHeldLocked(held, true)
 		case verifiedClient && !reported:
 			h.finishHeldLocked(held, false)
-		case holder != nil:
+		case holder != nil && holder.level()+held.depth <= maxWrapperChain:
 			held.timer.Stop()
 			holder.linked = append(holder.linked, held)
+			holder.depth = max(holder.depth, holder.level()+held.depth)
 			h.linkedWrappers++
 		default:
 			h.finishHeldLocked(held, true)

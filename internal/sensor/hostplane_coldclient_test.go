@@ -148,6 +148,18 @@ func TestWrapperOfAColdClientWaitsForItsManifest(t *testing.T) {
 			{wrapper, agent, "timeout", "timeout 300 " + client, ""},
 			{child, wrapper, "claude", client, signed},
 		}, true, false, false, true, false, 2},
+		{"timeout 300 nice chain, manifest lists the image", []exec{
+			{wrapper, agent, "timeout", "timeout 300 nice " + client, ""},
+			{child, wrapper, "timeout", "timeout 300 nice " + client, ""},
+			{child, wrapper, "nice", "nice " + client, ""},
+			{child, wrapper, "claude", client, signed},
+		}, true, false, false, false, true, 0},
+		{"timeout 300 nice chain, fetch fails", []exec{
+			{wrapper, agent, "timeout", "timeout 300 nice " + client, ""},
+			{child, wrapper, "timeout", "timeout 300 nice " + client, ""},
+			{child, wrapper, "nice", "nice " + client, ""},
+			{child, wrapper, "claude", client, signed},
+		}, false, false, false, false, true, 4},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			host := newHost(newFake(fullCoverage()))
