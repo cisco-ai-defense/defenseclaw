@@ -885,11 +885,13 @@ function Get-GoTestFailureSummary(
     $packageCriticalOutput = @{}
     $packageCriticalHeader = @{}
     $packageCriticalRecentHeaders = @{}
+    $packageRuntimeFault = @{}
     $packageCriticalRemaining = @{}
     foreach ($failure in $failedPackages) {
         $packageOutput[$failure.Package] = [Collections.Generic.Queue[string]]::new()
         $packageCriticalOutput[$failure.Package] = [Collections.Generic.Queue[string]]::new()
         $packageCriticalRecentHeaders[$failure.Package] = [Collections.Generic.Queue[string]]::new()
+        $packageRuntimeFault[$failure.Package] = [Collections.Generic.List[string]]::new()
         $packageCriticalRemaining[$failure.Package] = 0
     }
     # At most 128 failed tests and 128 package-only failures are retained.
@@ -931,6 +933,20 @@ function Get-GoTestFailureSummary(
                 )
                 foreach ($criticalLine in $criticalLines) {
                     $header = Limit-WindowsNativeText $criticalLine.Value 512
+                    # Only the Go runtime prints these when the process dies.
+                    # The first of them are reserved (first come, at most 4
+                    # lines and 1 KiB) and printed at the top of the summary,
+                    # so test diagnostics and later goroutine panics can never
+                    # push the fatal line and its signal out (rel-1-0-6:GAP-0550).
+                    if ($header -match '^(fatal error:|\[signal |unexpected fault address|runtime: out of memory)') {
+                        $fault = $packageRuntimeFault[$package]
+                        $faultBytes = [Text.Encoding]::UTF8.GetByteCount($header)
+                        foreach ($kept in $fault) { $faultBytes += [Text.Encoding]::UTF8.GetByteCount($kept) }
+                        if ($fault.Count -lt 4 -and $faultBytes -le 1024 -and -not $fault.Contains($header)) {
+                            $fault.Add($header)
+                        }
+                        continue
+                    }
                     if (-not $packageCriticalHeader.ContainsKey($package)) {
                         $packageCriticalHeader[$package] = $header
                     } elseif ($header -cne $packageCriticalHeader[$package] -and
@@ -961,6 +977,13 @@ function Get-GoTestFailureSummary(
 
     $summary = [Text.StringBuilder]::new()
     [void]$summary.AppendLine('go test failure summary (bounded and redacted)')
+    foreach ($failure in $failedPackages) {
+        if ($packageRuntimeFault[$failure.Package].Count -eq 0) { continue }
+        [void]$summary.AppendLine("runtime fault in package $($failure.Package):")
+        foreach ($line in $packageRuntimeFault[$failure.Package]) {
+            [void]$summary.AppendLine($line)
+        }
+    }
     foreach ($failure in $failedTests) {
         $elapsed = if ($failure.Elapsed) { " [$($failure.Elapsed)s]" } else { '' }
         [void]$summary.AppendLine("--- FAIL: $($failure.Test) ($($failure.Package))$elapsed")
@@ -8805,6 +8828,50 @@ function Invoke-SelfTest {
                 -not $signalSummary.Contains('FAIL package example.invalid/signal') -or
                 [Text.Encoding]::UTF8.GetByteCount($signalSummary) -gt $limit) {
                 throw 'structured Go test summary lost a runtime fault signal line'
+            }
+        }
+
+        foreach ($variant in @(
+            @{ Name = 'many'; Count = 12; Pad = 0 },
+            @{ Name = 'long'; Count = 2; Pad = 480 }
+        )) {
+            $fullQueueJson = [Collections.Generic.List[object]]::new()
+            $fullQueueJson.Add([pscustomobject]@{
+                Action = 'output'; Package = 'example.invalid/fullqueue'; Test = 'TestActive'
+                Output = "panic: benign diagnostic in active test`n"
+            })
+            $fullQueueJson.Add([pscustomobject]@{
+                Action = 'output'; Package = 'example.invalid/fullqueue'; Test = 'TestActive'
+                Output = "fatal error: unexpected signal during runtime execution`n"
+            })
+            $fullQueueJson.Add([pscustomobject]@{
+                Action = 'output'; Package = 'example.invalid/fullqueue'; Test = 'TestActive'
+                Output = "[signal 0xc0000005 code=0x0 addr=0x6]`n"
+            })
+            for ($i = 0; $i -lt $variant.Count; $i++) {
+                $fullQueueJson.Add([pscustomobject]@{
+                    Action = 'output'; Package = 'example.invalid/fullqueue'; Test = 'TestActive'
+                    Output = "panic: later goroutine $i $('x' * $variant.Pad)`n"
+                })
+            }
+            for ($i = 0; $i -lt 96; $i++) {
+                $fullQueueJson.Add([pscustomobject]@{
+                    Action = 'output'; Package = 'example.invalid/fullqueue'; Test = 'TestActive'
+                    Output = "stack frame $i $('x' * 128)`n"
+                })
+            }
+            $fullQueueJson.Add([pscustomobject]@{ Action = 'fail'; Package = 'example.invalid/fullqueue' })
+            $fullQueueEvents = ($fullQueueJson | ForEach-Object {
+                $_ | ConvertTo-Json -Compress
+            }) -join [Environment]::NewLine
+            foreach ($limit in @(4096, 262144)) {
+                $fullQueueSummary = Get-GoTestFailureSummary $fullQueueEvents $limit
+                if (-not $fullQueueSummary.Contains('fatal error: unexpected signal during runtime execution') -or
+                    -not $fullQueueSummary.Contains('[signal 0xc0000005 code=0x0 addr=0x6]') -or
+                    -not $fullQueueSummary.Contains('FAIL package example.invalid/fullqueue') -or
+                    [Text.Encoding]::UTF8.GetByteCount($fullQueueSummary) -gt $limit) {
+                    throw "structured Go test summary let later headers ($($variant.Name)) push out the runtime fault"
+                }
             }
         }
 
