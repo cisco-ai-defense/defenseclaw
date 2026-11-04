@@ -601,7 +601,7 @@ func getBifrostClient(
 // misconfigurations surface early instead of at first API call.
 func mapProviderKey(provider string) (schemas.ModelProvider, error) {
 	switch strings.ToLower(provider) {
-	case "openai":
+	case "openai", "openai-compatible", "custom-openai":
 		return schemas.OpenAI, nil
 	// OpenAI-compatible providers the setup wizard offers. They are
 	// reached through their own base_url with the standard chat

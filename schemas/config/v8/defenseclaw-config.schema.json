@@ -1550,6 +1550,22 @@
         }
       }
     },
+    "judgeExtraValue": {
+      "anyOf": [
+        { "type": "null" },
+        { "type": "boolean" },
+        { "type": "number" },
+        { "type": "string" },
+        {
+          "type": "array",
+          "items": { "$ref": "#/$defs/judgeExtraValue" }
+        },
+        {
+          "type": "object",
+          "additionalProperties": { "$ref": "#/$defs/judgeExtraValue" }
+        }
+      ]
+    },
     "judge": {
       "type": "object",
       "additionalProperties": false,
@@ -1606,6 +1622,12 @@
           "maximum": 256,
           "default": 0,
           "description": "Most LLM judge calls sent to the judge model at once; 0 = no limit. With a limit, tool-call judging goes first and keeps one slot, so a slow local model does not queue it behind prompt checks. Releases before 1.0.6 refuse this key."
+        },
+        "extra_body": {
+          "type": "object",
+          "maxProperties": 32,
+          "additionalProperties": { "$ref": "#/$defs/judgeExtraValue" },
+          "description": "Additional top-level fields for OpenAI-compatible judge chat requests. Judge-owned and authentication keys are refused at load."
         },
         "llm": {
           "$ref": "#/$defs/llm"

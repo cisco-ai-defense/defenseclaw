@@ -2281,6 +2281,9 @@ func (g *GuardrailConfig) Validate() error {
 	if g == nil {
 		return nil
 	}
+	if err := g.Judge.ValidateExtraBody(); err != nil {
+		return err
+	}
 	if err := validateGuardrailLevel("guardrail.block_at", g.BlockAt); err != nil {
 		return err
 	}
@@ -2468,6 +2471,9 @@ type JudgeConfig struct {
 	// slots when there are two or more, so a slow local model does not
 	// queue a pending tool call behind a turn's prompt checks (#1395).
 	MaxParallel int `mapstructure:"max_parallel" yaml:"max_parallel,omitempty"`
+	// ExtraBody adds top-level fields to OpenAI-compatible judge chat requests.
+	// Judge-owned request fields and authentication settings are refused at load.
+	ExtraBody map[string]any `mapstructure:"extra_body" yaml:"extra_body,omitempty"`
 
 	// LLM overrides the top-level llm: block for the LLM judge. Prefer
 	// Config.ResolveLLM("guardrail.judge") over reading LLM / legacy
@@ -2483,6 +2489,47 @@ type JudgeConfig struct {
 
 	Fallbacks           []string `mapstructure:"fallbacks"            yaml:"fallbacks,omitempty"`
 	AdjudicationTimeout float64  `mapstructure:"adjudication_timeout" yaml:"adjudication_timeout,omitempty"`
+}
+
+// ValidateExtraBody keeps operator-supplied fields from replacing judge-owned
+// request parameters or provider credentials. Nested values remain available
+// for server-specific fields such as chat_template_kwargs.
+func (c *JudgeConfig) ValidateExtraBody() error {
+	if c == nil || len(c.ExtraBody) == 0 {
+		return nil
+	}
+	keys := make([]string, 0, len(c.ExtraBody))
+	for key := range c.ExtraBody {
+		keys = append(keys, key)
+	}
+	sort.Strings(keys)
+	for _, key := range keys {
+		if key == "" {
+			return fmt.Errorf("guardrail.judge.extra_body: invalid key %q (use ASCII letters, digits, _, - or .)", key)
+		}
+		for _, ch := range key {
+			if !((ch >= 'a' && ch <= 'z') || (ch >= 'A' && ch <= 'Z') ||
+				(ch >= '0' && ch <= '9') || ch == '_' || ch == '-' || ch == '.') {
+				return fmt.Errorf("guardrail.judge.extra_body: invalid key %q (use ASCII letters, digits, _, - or .)", key)
+			}
+		}
+		normalized := strings.NewReplacer("_", "", "-", "", ".", "").Replace(strings.ToLower(key))
+		switch normalized {
+		case "model", "messages", "tools", "toolchoice", "stream", "streamoptions",
+			"maxtokens", "maxcompletiontokens", "maxoutputtokens", "responseformat",
+			"temperature", "topp", "frequencypenalty", "presencepenalty", "stop",
+			"fallbacks", "provider", "baseurl", "url", "endpoint":
+			return fmt.Errorf("guardrail.judge.extra_body: key %q is reserved", key)
+		}
+		if strings.Contains(normalized, "auth") || strings.Contains(normalized, "credential") ||
+			strings.Contains(normalized, "token") || strings.Contains(normalized, "secret") ||
+			strings.Contains(normalized, "password") || strings.Contains(normalized, "header") ||
+			strings.Contains(normalized, "key") || strings.Contains(normalized, "url") ||
+			strings.Contains(normalized, "endpoint") || strings.Contains(normalized, "certificate") {
+			return fmt.Errorf("guardrail.judge.extra_body: key %q is reserved", key)
+		}
+	}
+	return nil
 }
 
 // HookConnectorEnabled reports whether the hook-lane judge is enabled
@@ -3093,6 +3140,21 @@ func loadConfigSourceCheckedWithLayout(
 				ReportConfigLoadError(context.Background(), "unmarshal")
 			}
 			return nil, fmt.Errorf("config: unmarshal: %w", err)
+		}
+	}
+	// Viper lowercases keys in open maps. Preserve the source spelling of
+	// server-specific request fields, which can be case sensitive.
+	if viper.InConfig("guardrail.judge.extra_body") {
+		parsed, err := ParseV8YAML(configFile, sourceBytes)
+		if err != nil {
+			return nil, err
+		}
+		if guardrail, ok := parsed.Plain["guardrail"].(map[string]any); ok {
+			if judge, ok := guardrail["judge"].(map[string]any); ok {
+				if extra, ok := judge["extra_body"].(map[string]any); ok {
+					cfg.Guardrail.Judge.ExtraBody = extra
+				}
+			}
 		}
 	}
 	foldV8ScannerKeys(&cfg)

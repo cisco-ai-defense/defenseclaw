@@ -339,6 +339,34 @@ Use `--judge-provider vertex_ai` with the `--judge-vertex-*` flags, or `--judge-
 
 ## A judge on a local model
 
+### Lemonade and Gemma 4
+
+For Gemma 4 served by Lemonade's OpenAI-compatible endpoint, the judge can
+disable the model's thinking mode so its bounded response contains the
+classification. Point `base_url` at your Lemonade server:
+
+```yaml
+guardrail:
+  judge:
+    enabled: true
+    llm:
+      provider: openai-compatible
+      model: gemma-4
+      base_url: http://127.0.0.1:8000/v1
+      api_key_env: LEMONADE_API_KEY
+    extra_body:
+      chat_template_kwargs:
+        enable_thinking: false
+```
+
+Set `LEMONADE_API_KEY` in the environment before starting the gateway;
+the OpenAI-compatible client needs a key value even if the local server
+does not use it. The option is also available through `defenseclaw config set
+guardrail.judge.extra_body --json '{"chat_template_kwargs":{"enable_thinking":false}}'`.
+Use `defenseclaw config get guardrail.judge.extra_body` to inspect it and
+`defenseclaw config validate` to check the saved configuration. It affects
+only the judge's OpenAI-compatible chat requests.
+
 A judge on a local model (Ollama, vLLM or LM Studio on your own machine)
 answers one call at a time, so judge calls queue behind each other. With the
 judge on, a prompt can start up to three judge calls (prompt injection,

@@ -2521,6 +2521,8 @@ class JudgeConfig:
     # ``JudgeConfig.MaxParallel``); 0 = no limit. With a limit, tool-call
     # judging goes ahead of prompt judging (#1395).
     max_parallel: int = 0
+    # Additional fields for an OpenAI-compatible judge request.
+    extra_body: dict[str, Any] = field(default_factory=dict)
     # Log judge prompts and responses (was DEFENSECLAW_JUDGE_TRACE).
     trace: bool = False
     # LLM overrides the top-level ``llm:`` block for the LLM judge.
@@ -3105,6 +3107,9 @@ class GuardrailConfig:
         lives in the gateway boot loop. Raises :class:`ValueError` with a
         named message on the first violation.
         """
+        from defenseclaw.observability.v8_config import validate_judge_extra_body
+
+        validate_judge_extra_body(self.judge.extra_body, "config.yaml")
         _validate_guardrail_level("guardrail.block_at", self.block_at)
         _validate_guardrail_level("guardrail.alert_at", self.alert_at)
         seen: dict[str, str] = {}
@@ -5172,6 +5177,8 @@ def _config_to_dict(cfg: Config) -> dict[str, Any]:
             judge.pop("hook_timeout", None)
         if not judge.get("max_parallel"):
             judge.pop("max_parallel", None)
+        if not judge.get("extra_body"):
+            judge.pop("extra_body", None)
     # Mirror Go's ``yaml:"connectors,omitempty"`` — drop the empty
     # per-connector overrides map so existing single-connector configs
     # stay byte-identical after a load/save round-trip. The block
@@ -6549,6 +6556,7 @@ def _merge_judge(raw: dict[str, Any] | None) -> JudgeConfig:
         hook_connectors=raw.get("hook_connectors", []),
         hook_timeout=raw.get("hook_timeout", 0.0),
         max_parallel=_judge_max_parallel(raw.get("max_parallel", 0)),
+        extra_body=raw.get("extra_body", {}),
         trace=raw.get("trace", False) is True,
         llm=_merge_llm(raw.get("llm")),
         model=raw.get("model", ""),
