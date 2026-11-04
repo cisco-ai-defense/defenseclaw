@@ -86,6 +86,11 @@ func TestValidateFixedNTFSMountedPathRejectsRawPerLogonDriveAlias(t *testing.T) 
 	if _, err := ValidateFixedNTFSMountedPath(filepath.Join(aliasRoot, "probe")); err == nil {
 		t.Fatal("raw per-logon DOS alias passed mount-manager validation")
 	}
+	// GAP-0052: the deny-only fallback resolves the real folder alias by
+	// handle, and a folder is never taken for a volume root.
+	if target, err := effectiveDriveTargetByHandle(aliasRoot); err == nil {
+		t.Fatalf("by-handle lookup of folder alias %s = %q, want a refusal", aliasRoot, target)
+	}
 }
 
 func TestValidateFixedNTFSMountedPathRejectsWholeVolumePerLogonAlias(t *testing.T) {
@@ -140,6 +145,17 @@ func TestValidateFixedNTFSMountedPathRejectsWholeVolumePerLogonAlias(t *testing.
 	); err == nil {
 		t.Fatal("whole-volume per-logon DOS alias passed mount-manager validation")
 	}
+	// GAP-0052: the by-handle open resolves the real per-logon alias the way
+	// QueryDosDevice does, and with every query denied (the deny-only
+	// token's path) the alias is still refused.
+	if got, err := effectiveDriveTargetByHandle(aliasRoot); err != nil || !strings.EqualFold(got, rootTarget) {
+		t.Fatalf("by-handle lookup of per-logon alias %s = %q (%v), want %q", aliasRoot, got, err, rootTarget)
+	}
+	resolved := denyDOSDeviceQueries(t)
+	if _, err := ValidateFixedNTFSMountedPath(filepath.Join(aliasRoot, "Windows")); err == nil {
+		t.Fatal("whole-volume per-logon DOS alias passed validation with every DOS-device query denied")
+	}
+	t.Logf("denied path resolved by handle: %q", *resolved)
 }
 
 func TestValidateFixedNTFSMountedPathRejectsDriveRelativeAndDeviceSyntax(t *testing.T) {
