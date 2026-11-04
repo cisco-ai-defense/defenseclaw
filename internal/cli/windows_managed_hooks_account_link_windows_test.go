@@ -75,4 +75,16 @@ func TestWindowsManagedHooksTeardownKeepsAccountLinkScoped(t *testing.T) {
 	if err := check(); err == nil {
 		t.Fatal("Secure Client accepted the standalone account-link case")
 	}
+	t.Setenv(managed.EnterpriseProfileEnv, managed.ProfileStandalone)
+	failing[0].Error = "enterprise hooks: target needs repair"
+	if err := writeEnterpriseHookGuardianState(runtimeDir, manifestPath, digest, failing, 1, true); err != nil {
+		t.Fatal(err)
+	}
+	pending, failed, err := windowsManagedHooksTargetsFromGuardian(runtimeDir, manifestPath, digest, targets)
+	if err != nil {
+		t.Fatalf("unrelated failed target blocked teardown: %v", err)
+	}
+	if len(pending) != 0 || len(failed) != 1 || failed[0].Connector != targets[0].Connector || failed[0].SID != targets[0].SID {
+		t.Fatalf("unexpected target disposition: pending=%v failed=%v", pending, failed)
+	}
 }
