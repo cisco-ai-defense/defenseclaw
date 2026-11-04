@@ -15,6 +15,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 )
@@ -77,6 +78,62 @@ func TestPerUserNativeGatewayAllowAndBlock(t *testing.T) {
 			code := run(home, strings.TrimPrefix(server.URL, "http://"), strings.NewReader(payload), &out, &errOut, time.Now())
 			if code != tc.wantCode || strings.Contains(errOut.String(), "policy") != tc.wantBlock {
 				t.Fatalf("code=%d output=%q stderr=%q", code, out.String(), errOut.String())
+			}
+		})
+	}
+}
+
+func TestGAP0322NativeGatewayUnderShellOptions(t *testing.T) {
+	home := filepath.Join(t.TempDir(), ".defenseclaw")
+	hooks := filepath.Join(home, "hooks")
+	if err := os.MkdirAll(hooks, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(hooks, ".hook-claudecode.token"), []byte("fixture\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	startup := filepath.Join(t.TempDir(), "startup.sh")
+	if err := os.WriteFile(startup, []byte("exit 0\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	for _, tc := range []struct {
+		name string
+		env  map[string]string
+	}{
+		{"noexec", map[string]string{"SHELLOPTS": "noexec"}},
+		{"errexit", map[string]string{"SHELLOPTS": "noexec:errexit"}},
+		{"posix", map[string]string{"SHELLOPTS": "noexec:posix"}},
+		{"startup", map[string]string{"SHELLOPTS": "noexec", "BASH_ENV": startup}},
+		{"combined", map[string]string{"SHELLOPTS": "noexec", "BASH_ENV": startup, "FUNCNEST": "1", "BASHOPTS": "failglob:nullglob"}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			for key, value := range tc.env {
+				t.Setenv(key, value)
+			}
+			var reply atomic.Value
+			reply.Store(`{"action":"block","reason":"policy"}`)
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				w.Header().Set("Content-Type", "application/json")
+				_, _ = fmt.Fprint(w, reply.Load().(string))
+			}))
+			addr := strings.TrimPrefix(server.URL, "http://")
+			payload := `{"hook_event_name":"PreToolUse","session_id":"session","tool_name":"Bash","tool_input":{"command":"echo ok"}}`
+			var out, errOut bytes.Buffer
+			if code := run(home, addr, strings.NewReader(payload), &out, &errOut, time.Now()); code != 2 {
+				t.Fatalf("protected exit %d, stdout %q, stderr %q", code, out.String(), errOut.String())
+			}
+			reply.Store(`{"action":"allow"}`)
+			out.Reset()
+			errOut.Reset()
+			if code := run(home, addr, strings.NewReader(payload), &out, &errOut, time.Now()); code != 0 {
+				t.Fatalf("ordinary exit %d, stdout %q, stderr %q", code, out.String(), errOut.String())
+			}
+			server.Close()
+			out.Reset()
+			errOut.Reset()
+			if code := run(home, addr, strings.NewReader(payload), &out, &errOut, time.Now()); code != 0 ||
+				!strings.Contains(out.String(), `"permissionDecision":"deny"`) {
+				t.Fatalf("unavailable exit %d, stdout %q, stderr %q", code, out.String(), errOut.String())
 			}
 		})
 	}

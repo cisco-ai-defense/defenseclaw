@@ -70,4 +70,23 @@ func TestClaudeCodeNativeUnixRollbackKeepsEarlierHookShape(t *testing.T) {
 	if claudeCodeHandlerInEarlierReleaseForm(foreign, runtime.GOOS, script, owned) {
 		t.Fatalf("foreign command changed: %#v", foreign)
 	}
+	guard := filepath.Join(filepath.Dir(native), "defenseclaw-hook-post")
+	for _, addr := range []string{"", "[::1]:18970"} {
+		args := []string{"guard-user-hook", native, "hook", "--connector", "claudecode", "--hook-home", home}
+		if addr != "" {
+			args = append(args, "--api-addr", addr)
+		}
+		guarded := map[string]interface{}{"command": guard, "args": args}
+		if !claudeCodeHandlerInEarlierReleaseForm(guarded, runtime.GOOS, script, owned) ||
+			guarded["command"] != script || guarded["args"] != nil {
+			t.Fatalf("guard rollback form for %q = %#v", addr, guarded)
+		}
+	}
+	foreignGuard := map[string]interface{}{
+		"command": filepath.Join(root, "profile", ".local", "bin", "defenseclaw-hook-post"),
+		"args":    []string{"guard-user-hook", native, "hook", "--connector", "claudecode", "--hook-home", home},
+	}
+	if claudeCodeHandlerInEarlierReleaseForm(foreignGuard, runtime.GOOS, script, owned) {
+		t.Fatalf("foreign guard changed: %#v", foreignGuard)
+	}
 }

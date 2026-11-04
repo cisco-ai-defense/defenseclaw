@@ -26,6 +26,10 @@ func TestClaudeCodePerUserUnixSelectsNativeHook(t *testing.T) {
 	if err := os.WriteFile(native, []byte("fixture\n"), 0o700); err != nil {
 		t.Fatal(err)
 	}
+	guard := filepath.Join(filepath.Dir(native), "defenseclaw-hook-post")
+	if err := os.WriteFile(guard, []byte("fixture\n"), 0o700); err != nil {
+		t.Fatal(err)
+	}
 	hooks := filepath.Join(dataDir, "hooks")
 	if err := os.MkdirAll(hooks, 0o700); err != nil {
 		t.Fatal(err)
@@ -45,23 +49,22 @@ func TestClaudeCodePerUserUnixSelectsNativeHook(t *testing.T) {
 		}
 		return
 	}
-	want := claudeCodeMissingHookGuard(posixHookCommandWord(native) +
-		" hook --connector claudecode --hook-home " + posixHookCommandWord(dataDir))
-	if command != want || args != nil {
-		t.Fatalf("native command = %q, %q; want %q", command, args, want)
+	wantArgs := []string{"guard-user-hook", native, "hook", "--connector", "claudecode", "--hook-home", dataDir}
+	if command != guard || !codexValueMatches(args, wantArgs) {
+		t.Fatalf("native command = %q, %q; want %q, %q", command, args, guard, wantArgs)
 	}
 	if !claudeCodeHandlerTargetsCurrentRuntime(map[string]interface{}{
-		"type": "command", "command": command,
+		"type": "command", "command": command, "args": args,
 	}, opts) {
 		t.Fatal("native registration is not recognized")
 	}
 	opts.APIAddr = "127.0.0.1:18971"
-	command, _ = claudeCodeHookInvocation(opts, script)
-	if !strings.Contains(command, " --api-addr 127.0.0.1:18971") ||
+	command, args = claudeCodeHookInvocation(opts, script)
+	if command != guard || !codexValueMatches(args, append(wantArgs, "--api-addr", opts.APIAddr)) ||
 		!claudeCodeHandlerTargetsCurrentRuntime(map[string]interface{}{
-			"type": "command", "command": command,
+			"type": "command", "command": command, "args": args,
 		}, opts) {
-		t.Fatalf("configured address is not retained in %q", command)
+		t.Fatalf("configured address is not retained in %q, %q", command, args)
 	}
 }
 

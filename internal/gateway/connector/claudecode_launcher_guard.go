@@ -491,6 +491,14 @@ func claudeCodeHandlerInEarlierReleaseForm(
 		return true
 	}
 	// 1.0.0 matched its handlers by the unquoted script path prefix.
+	if claudeCodePerUserGuardTarget(handler, filepath.Dir(script)) {
+		native := filepath.Join(filepath.Dir(filepath.Dir(filepath.Dir(script))), ".local", "bin", "defenseclaw-hook-user")
+		if owned(native) {
+			handler["command"] = script
+			delete(handler, "args")
+			return true
+		}
+	}
 	command, _ := handler["command"].(string)
 	if word, rest, ok := posixHookCommandSplit(claudeCodeUnguardedHookCommand(command)); ok &&
 		filepath.IsAbs(word) && filepath.Base(word) == "defenseclaw-hook-user" && owned(word) {

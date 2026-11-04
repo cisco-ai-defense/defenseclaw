@@ -1348,8 +1348,8 @@ func claudeCodeHandlerTargetsCurrentRuntime(handler map[string]interface{}, opts
 		filepath.ToSlash(filepath.Join(opts.DataDir, "hooks", "claude-code-hook.sh")),
 	))
 	if native := claudeCodePerUserNativeHook(opts); native != "" {
-		registered, _ := claudeCodeHookInvocation(opts, filepath.Join(opts.DataDir, "hooks", "claude-code-hook.sh"))
-		return command == registered
+		registered, args := claudeCodeHookInvocation(opts, filepath.Join(opts.DataDir, "hooks", "claude-code-hook.sh"))
+		return command == registered && codexValueMatches(handler["args"], args)
 	}
 	return claudeCodeUnguardedHookCommand(command) == expected
 }
@@ -1368,6 +1368,13 @@ func claudeCodeHookInvocation(opts SetupOpts, hookScript string) (string, []stri
 		return claudeCodeWindowsHookInvocation(opts, executable)
 	}
 	if native := claudeCodePerUserNativeHook(opts); native != "" {
+		if guard := claudeCodePerUserNativeGuard(native); guard != "" {
+			args := []string{"guard-user-hook", native, "hook", "--connector", "claudecode", "--hook-home", opts.DataDir}
+			if opts.APIAddr != "" {
+				args = append(args, "--api-addr", opts.APIAddr)
+			}
+			return guard, args
+		}
 		command := posixHookCommandWord(native) + " hook --connector claudecode --hook-home " + posixHookCommandWord(opts.DataDir)
 		if opts.APIAddr != "" {
 			command += " --api-addr " + posixHookCommandWord(opts.APIAddr)
@@ -1382,6 +1389,41 @@ func claudeCodeHookInvocation(opts SetupOpts, hookScript string) (string, []stri
 		return claudeCodeMissingHookGuardWith(command, claudeCodeManagedMissingHookGuardMessage), nil
 	}
 	return claudeCodeMissingHookGuard(command), nil
+}
+
+func claudeCodePerUserNativeGuard(native string) string {
+	guard := filepath.Join(filepath.Dir(native), "defenseclaw-hook-post")
+	info, err := os.Lstat(guard)
+	if err != nil || !info.Mode().IsRegular() || info.Mode()&0o111 == 0 || info.Mode().Perm()&0o022 != 0 {
+		return ""
+	}
+	return guard
+}
+
+func claudeCodePerUserGuardTarget(hook map[string]interface{}, hooksDir string) bool {
+	if runtime.GOOS == "windows" || filepath.Base(hooksDir) != "hooks" {
+		return false
+	}
+	home := filepath.Dir(hooksDir)
+	if filepath.Base(home) != ".defenseclaw" {
+		return false
+	}
+	account := filepath.Dir(home)
+	guard := filepath.Join(account, ".local", "bin", "defenseclaw-hook-post")
+	native := filepath.Join(account, ".local", "bin", "defenseclaw-hook-user")
+	command, _ := hook["command"].(string)
+	args, ok := claudeCodeNativeExecArguments(hook)
+	if !ok || command != guard || (len(args) != 7 && len(args) != 9) {
+		return false
+	}
+	want := []string{"guard-user-hook", native, "hook", "--connector", "claudecode", "--hook-home", home}
+	for i, value := range want {
+		if args[i] != value {
+			return false
+		}
+	}
+	return len(args) == 7 || (args[7] == "--api-addr" &&
+		claudeCodeLoopbackGatewayEndpoint("http://"+args[8]))
 }
 
 // claudeCodePerUserNativeHook selects the installed native launcher only for
@@ -1638,7 +1680,8 @@ func appendClaudeCodeHookGroups(
 }
 
 func (c *ClaudeCodeConnector) patchClaudeCodeHooks(opts SetupOpts, hookScript string) error {
-	// On Unix the agent runs the bundled .sh hook (ToSlash is a no-op there).
+	// On Unix a packaged per-user install uses the native guard; the script
+	// remains the fallback for other installation layouts.
 	// On Windows Claude Code's exec form invokes the native launcher directly,
 	// without Git Bash or PowerShell parsing an absolute path that may contain
 	// spaces. Older shell-form commands are still recognized during migration.
@@ -2876,6 +2919,9 @@ func isOwnedHookHandler(rawHook interface{}, hooksDir string) bool {
 		return false
 	}
 	command = posixHookCommandUnquoted(claudeCodeUnguardedHookCommand(command))
+	if claudeCodePerUserGuardTarget(hook, hooksDir) {
+		return true
+	}
 	if hooksDir != "" && strings.HasPrefix(command, hooksDir+"/") {
 		return true
 	}
