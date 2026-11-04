@@ -35,6 +35,9 @@ type heldWrapper struct {
 	at       time.Time
 	instance agentchain.Instance
 	timer    *time.Timer
+	// linked are the held wrapper records whose child exec this record is:
+	// they are dropped with it, or recorded with it.
+	linked []*heldWrapper
 }
 
 // transparentWrappers run their argv tail as the command, with no shell in
@@ -207,7 +210,7 @@ func (h *hostPlane) holdWrapperLocked(
 	if previous := h.wrappers[event.PID]; previous != nil {
 		h.releaseWrapperLocked(event.PID, previous)
 	}
-	if len(h.wrappers) >= maxHeldWrappers {
+	if len(h.wrappers)+h.linkedWrappers >= maxHeldWrappers {
 		return false
 	}
 	if h.wrappers == nil {
@@ -232,25 +235,52 @@ func (h *hostPlane) holdWrapperLocked(
 // child of: the same pid (an exec in place, or timeout's fork execing) or
 // its parent (timeout). The wrapper's record is dropped only when the child
 // is the verified client image with the wrapper's argv tail and is not
-// reported itself; any other child records it now. A fork that still runs
-// the wrapper decides nothing.
-func (h *hostPlane) settleWrappersLocked(event plane.Event, verifiedClient, reported bool) {
+// reported itself. A child with that tail whose own record is held (holder:
+// its release manifest is not cached yet) takes the wrapper with it, to be
+// dropped or recorded when that hold ends. Any other child records it now.
+// A fork that still runs the wrapper decides nothing.
+func (h *hostPlane) settleWrappersLocked(event plane.Event, verifiedClient, reported bool, holder *heldWrapper) {
+	if event.Kind != plane.KindExec || len(h.wrappers) == 0 {
+		return
+	}
 	for _, pid := range [2]int{event.PID, event.PPID} {
 		held := h.wrappers[pid]
 		if pid <= 0 || held == nil || event.Cmdline == held.cmdline {
 			continue
 		}
-		if verifiedClient && !reported && event.Cmdline == held.tail {
+		delete(h.wrappers, pid)
+		switch {
+		case event.Cmdline != held.tail:
+			h.finishHeldLocked(held, true)
+		case verifiedClient && !reported:
+			h.finishHeldLocked(held, false)
+		case holder != nil:
 			held.timer.Stop()
-			delete(h.wrappers, pid)
-			continue
+			holder.linked = append(holder.linked, held)
+			h.linkedWrappers++
+		default:
+			h.finishHeldLocked(held, true)
 		}
-		h.releaseWrapperLocked(pid, held)
 	}
 }
 
 func (h *hostPlane) releaseWrapperLocked(pid int, held *heldWrapper) {
-	held.timer.Stop()
 	delete(h.wrappers, pid)
-	h.recordLocked(held.event, held.lineage, held.match, held.at, held.instance)
+	h.finishHeldLocked(held, true)
+}
+
+// finishHeldLocked ends a held record and the wrapper records linked to it:
+// all are recorded, or all are dropped.
+func (h *hostPlane) finishHeldLocked(held *heldWrapper, record bool) {
+	if held.timer != nil {
+		held.timer.Stop()
+	}
+	if record {
+		h.recordLocked(held.event, held.lineage, held.match, held.at, held.instance)
+	}
+	for _, linked := range held.linked {
+		h.linkedWrappers--
+		h.finishHeldLocked(linked, record)
+	}
+	held.linked = nil
 }

@@ -102,6 +102,9 @@ type hostPlane struct {
 	// coldClients are the client exec records waiting for the release
 	// manifest of their version, by pid (GAP-0065).
 	coldClients map[int]*heldWrapper
+	// linkedWrappers counts the wrapper records that wait with a held child
+	// record instead of in wrappers; they count against maxHeldWrappers.
+	linkedWrappers int
 	// sessions are keyed by the root process instance, not its pid: an agent
 	// that reuses an exited agent's pid starts its own session (GAP-1372).
 	sessions map[hostSessionKey]*agentchain.Session
@@ -383,14 +386,10 @@ func (h *hostPlane) handle(event plane.Event) {
 		Detail:       event.Detail,
 	}
 	match, ok := tactics.Classify(observation, h.indicators)
-	if event.Kind == plane.KindExec {
-		h.mu.Lock()
-		if len(h.wrappers) > 0 {
-			h.settleWrappersLocked(event, verifiedClient, ok)
-		}
-		h.mu.Unlock()
-	}
 	if !ok {
+		h.mu.Lock()
+		h.settleWrappersLocked(event, verifiedClient, false, nil)
+		h.mu.Unlock()
 		return
 	}
 
@@ -400,6 +399,7 @@ func (h *hostPlane) handle(event plane.Event) {
 	if !attributed {
 		// The lineage gate. A developer running sudo produces nothing here.
 		h.mu.Lock()
+		h.settleWrappersLocked(event, verifiedClient, true, nil)
 		h.gated++
 		h.mu.Unlock()
 		return
@@ -408,8 +408,11 @@ func (h *hostPlane) handle(event plane.Event) {
 	instance := h.tracker.InstanceOfProcess(event.PID, event.ExecID)
 	h.mu.Lock()
 	defer h.mu.Unlock()
-	if h.holdWrapperLocked(event, lineage, match, at, instance) ||
-		h.holdColdClientLocked(event, lineage, match, at, instance, observation) {
+	// A held wrapper whose child is this exec, held for its release manifest,
+	// waits for that manifest with it (GAP-0055 after a gateway start).
+	cold := h.holdColdClientLocked(event, lineage, match, at, instance, observation)
+	h.settleWrappersLocked(event, verifiedClient, true, cold)
+	if cold != nil || h.holdWrapperLocked(event, lineage, match, at, instance) {
 		return
 	}
 	h.recordLocked(event, lineage, match, at, instance)

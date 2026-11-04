@@ -31,22 +31,23 @@ const (
 // manifest before the hold ends records it. The gateway cannot prefetch the
 // manifest at start: in the Cowork VM it runs unprivileged and cannot list
 // the session homes, and the image prewarm runs in the root helper. It
-// reports false when the record is to be made now.
+// returns the held record, which held wrapper records of this exec can be
+// linked to, or nil when the record is to be made now.
 func (h *hostPlane) holdColdClientLocked(
 	event plane.Event, lineage agentchain.Lineage, match tactics.Match, at time.Time, instance agentchain.Instance,
 	observation tactics.Observation,
-) bool {
+) *heldWrapper {
 	if h.coldHold <= 0 || event.Kind != plane.KindExec || event.PID <= 0 || h.indicators.KeepClientMCP ||
 		h.clientChecksums == nil || event.ImageSHA256 == "" || !plane.IsClaudeReleaseVersion(event.ImageVersion) ||
 		len(h.coldClients) >= maxHeldWrappers {
-		return false
+		return nil
 	}
 	if _, cached := h.clientChecksums(event.ImageVersion); cached {
-		return false
+		return nil
 	}
 	observation.ClaudeClient = true
 	if _, ok := tactics.Classify(observation, h.indicators); ok {
-		return false
+		return nil
 	}
 	pid, version, digest := event.PID, event.ImageVersion, event.ImageSHA256
 	if previous := h.coldClients[pid]; previous != nil {
@@ -68,6 +69,7 @@ func (h *hostPlane) holdColdClientLocked(
 		switch {
 		case cached && signedClaudeRelease(digest, checksums):
 			delete(h.coldClients, pid)
+			h.finishHeldLocked(held, false)
 		case cached || !time.Now().Before(deadline):
 			h.releaseColdClientLocked(pid, held)
 		default:
@@ -76,11 +78,10 @@ func (h *hostPlane) holdColdClientLocked(
 	}
 	held.timer = time.AfterFunc(h.coldPoll, check)
 	h.coldClients[pid] = held
-	return true
+	return held
 }
 
 func (h *hostPlane) releaseColdClientLocked(pid int, held *heldWrapper) {
-	held.timer.Stop()
 	delete(h.coldClients, pid)
-	h.recordLocked(held.event, held.lineage, held.match, held.at, held.instance)
+	h.finishHeldLocked(held, true)
 }
