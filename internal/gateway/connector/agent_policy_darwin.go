@@ -9,6 +9,7 @@ package connector
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
 	"encoding/base64"
 	"encoding/json"
 	"errors"
@@ -116,7 +117,7 @@ func readManagedPreferences(connectorName, domain string) []managedPreferenceVal
 			clearAgentPolicyReadFailure(connectorName, layer.source, layer.path)
 			continue
 		}
-		converted, err := managedPreferencesConverter(data)
+		converted, err := convertManagedPreferences(layer.path, data)
 		if err != nil {
 			reportAgentPolicyReadFailure(connectorName, layer.source, layer.path, err)
 			continue
@@ -130,6 +131,39 @@ func readManagedPreferences(connectorName, domain string) []managedPreferenceVal
 		values = append(values, managedPreferenceValues{layer: layer, settings: settings})
 	}
 	return values
+}
+
+// A successful conversion of unchanged file content needs no new plutil
+// process. Read errors and conversion failures never enter this cache.
+type managedPreferenceConversion struct {
+	digest [sha256.Size]byte
+	json   []byte
+}
+
+var managedPreferenceConversions = struct {
+	sync.Mutex
+	byPath map[string]managedPreferenceConversion
+}{byPath: make(map[string]managedPreferenceConversion)}
+
+func convertManagedPreferences(path string, data []byte) ([]byte, error) {
+	digest := sha256.Sum256(data)
+	managedPreferenceConversions.Lock()
+	entry, ok := managedPreferenceConversions.byPath[path]
+	managedPreferenceConversions.Unlock()
+	if ok && entry.digest == digest {
+		return entry.json, nil
+	}
+	converted, err := managedPreferencesConverter(data)
+	if err != nil {
+		return nil, err
+	}
+	managedPreferenceConversions.Lock()
+	if len(managedPreferenceConversions.byPath) >= 16 && !ok {
+		clear(managedPreferenceConversions.byPath)
+	}
+	managedPreferenceConversions.byPath[path] = managedPreferenceConversion{digest: digest, json: bytes.Clone(converted)}
+	managedPreferenceConversions.Unlock()
+	return converted, nil
 }
 
 type managedPreferenceValues struct {
