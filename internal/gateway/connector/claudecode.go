@@ -1604,6 +1604,7 @@ func (c *ClaudeCodeConnector) patchClaudeCodeHooks(opts SetupOpts, hookScript st
 		var backupToSave claudeCodeBackup
 		var transformed []byte
 		exactBackupSafe := true
+		userDisabledHooks := false
 		if err := atomicTransformFileWithStateDir(settingsPath, opts.DataDir, 0o600, func(data []byte, exists bool) (atomicTransformResult, error) {
 			if !managedFileBackupMatchesSnapshot(managedBackup, data, exists) {
 				// Claude Code writes its own keys to settings.json (onboarding,
@@ -1626,6 +1627,15 @@ func (c *ClaudeCodeConnector) patchClaudeCodeHooks(opts SetupOpts, hookScript st
 			}
 			if settings == nil {
 				return atomicTransformResult{}, fmt.Errorf("settings file %s for Claude Code must contain a JSON object", settingsPath)
+			}
+			// A managed install turns the user's own "all hooks off" back on;
+			// no other user setting is touched.
+			userDisabledHooks = false
+			if userDisabledHooksRepairEnabled(opts) {
+				if disabled, ok := settings["disableAllHooks"].(bool); ok && disabled {
+					delete(settings, "disableAllHooks")
+					userDisabledHooks = true
+				}
 			}
 
 			backup := baseBackup
@@ -1736,6 +1746,9 @@ func (c *ClaudeCodeConnector) patchClaudeCodeHooks(opts SetupOpts, hookScript st
 		}
 		if err := c.saveBackup(opts.DataDir, backupToSave); err != nil {
 			return fmt.Errorf("save claudecode backup: %w", err)
+		}
+		if userDisabledHooks {
+			reportUserDisabledHooksRepair(c.Name(), settingsPath)
 		}
 		persisted, err := os.ReadFile(settingsPath)
 		if err != nil {

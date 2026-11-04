@@ -32,7 +32,7 @@ func PrepareServiceRuntimeDir(deploymentMode, path, label string) error {
 	// Validate the parent chain first. If the leaf already exists we
 	// then run the full validation directly; otherwise we create the
 	// leaf and validate again (which now covers both parent + leaf).
-	if err := ValidateTrustedServiceRuntimeDir(
+	if err := validateServiceRuntimeParent(
 		filepath.Dir(path), label+" parent", serviceAccount,
 	); err != nil {
 		return err
@@ -79,7 +79,7 @@ func WriteServiceRuntimeFile(deploymentMode, path, label string, data []byte) er
 	// A replacement keeps the destination's own descriptor, so an existing file
 	// must still be trusted before it is written through.
 	if _, err := os.Lstat(path); err == nil {
-		if err := ValidateTrustedServiceRuntimeFilePath(path, label, serviceAccount); err != nil {
+		if err := validateExistingServiceRuntimeFile(path, label, serviceAccount); err != nil {
 			return err
 		}
 	} else if !os.IsNotExist(err) {

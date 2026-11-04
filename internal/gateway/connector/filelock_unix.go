@@ -39,8 +39,10 @@ func withFileLockMode(path string, _ bool, fn func() error) error {
 	lockPath := path + ".lock"
 	const staleLockAge = 60 * time.Second
 
-	// Clean up stale lock files from crashed processes.
-	if info, err := os.Stat(lockPath); err == nil {
+	// Clean up stale lock files from crashed processes. Where locks are
+	// bounded, a lock file is never unlinked before it is acquired: an old
+	// file may still be held, and flock locks die with their process anyway.
+	if info, err := os.Stat(lockPath); err == nil && !boundedUserLocks {
 		if time.Since(info.ModTime()) > staleLockAge {
 			_ = os.Remove(lockPath)
 		}
@@ -52,6 +54,14 @@ func withFileLockMode(path string, _ bool, fn func() error) error {
 	}
 	defer lockFile.Close()
 	defer func() {
+		if boundedUserLocks {
+			// Unlink while still holding the lock: a waiter that then wins
+			// the flock finds the path gone or replaced and retries, so two
+			// writers never hold "the" lock on different inodes.
+			_ = os.Remove(lockPath)
+			_ = syscall.Flock(int(lockFile.Fd()), syscall.LOCK_UN)
+			return
+		}
 		_ = syscall.Flock(int(lockFile.Fd()), syscall.LOCK_UN)
 		_ = os.Remove(lockPath)
 	}()
@@ -65,15 +75,20 @@ func withFileLockMode(path string, _ bool, fn func() error) error {
 // inode the pathname no longer names, while another writer locks the new
 // file (GAP-0344). After each acquisition the held file must still be the
 // one lockPath names; otherwise it is released and the pathname opened
-// again.
+// again. Where locks are bounded (boundedUserLocks) every attempt shares one
+// deadline, so the whole acquisition waits at most the bounded lock wait.
 func openHeldLockFile(lockPath string) (*os.File, error) {
+	var deadline time.Time
 	for {
 		lockFile, err := os.OpenFile(lockPath, os.O_CREATE|os.O_RDWR, 0o600)
 		if err != nil {
 			return nil, fmt.Errorf("open lock file %s: %w", lockPath, err)
 		}
-		if err := lockFileExclusive(lockFile, lockPath); err != nil {
+		if err := lockFileExclusive(lockFile, lockPath, &deadline); err != nil {
 			_ = lockFile.Close()
+			if errors.Is(err, errLockReplaced) {
+				continue
+			}
 			return nil, fmt.Errorf("acquire lock %s: %w", lockPath, err)
 		}
 		held, err := lockFile.Stat()
@@ -96,9 +111,11 @@ func openHeldLockFile(lockPath string) (*os.File, error) {
 // windowsLockContendedHookForTest is on Windows).
 var fileLockContendedHookForTest atomic.Pointer[func(lockPath string)]
 
-// lockFileExclusive takes the exclusive flock on f, blocking until it is
-// free. A contended attempt is reported to the test hook before the wait.
-func lockFileExclusive(f *os.File, lockPath string) error {
+// lockFileExclusive takes the exclusive flock on f, waiting until it is
+// free: without a bound on Linux, and up to the bounded per-user lock wait on
+// macOS (acquireFlock). A contended attempt is reported to the test hook
+// before the wait.
+func lockFileExclusive(f *os.File, lockPath string, deadline *time.Time) error {
 	err := syscall.Flock(int(f.Fd()), syscall.LOCK_EX|syscall.LOCK_NB)
 	if !errors.Is(err, syscall.EWOULDBLOCK) {
 		return err
@@ -106,7 +123,7 @@ func lockFileExclusive(f *os.File, lockPath string) error {
 	if hook := fileLockContendedHookForTest.Load(); hook != nil {
 		(*hook)(lockPath)
 	}
-	return syscall.Flock(int(f.Fd()), syscall.LOCK_EX)
+	return acquireFlock(f, lockPath, deadline)
 }
 
 // RemoveIdleFileLockSentinels does nothing here: withFileLockMode removes

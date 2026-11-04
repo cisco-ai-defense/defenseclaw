@@ -94,6 +94,7 @@ func antigravityProfileDecode(payload map[string]interface{}) HookProfileRequest
 	req.CWD = antigravityFirstWorkspacePath(payload)
 	if req.ToolName == "" {
 		req.ToolName = "tool"
+		req.ToolNameIsLabel = true
 	}
 	return req
 }

@@ -87,9 +87,3 @@ func writeEnterpriseHookAdminOnlyFile(path string, data []byte) error {
 // enterpriseHookGuardianRecordBusy is Windows-only: an atomic rename never
 // leaves a guardian record unopenable here.
 func enterpriseHookGuardianRecordBusy(error) bool { return false }
-
-// repairEnterpriseHookManifestACL is Windows-only; off-Windows targets.yaml
-// has no AdminFile descriptor to re-stamp.
-func repairEnterpriseHookManifestACL(string) error {
-	return nil
-}

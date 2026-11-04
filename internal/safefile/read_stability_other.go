@@ -20,3 +20,6 @@ func readStabilitySnapshot(file *os.File) (readStability, error) {
 		modified: info.ModTime().UnixNano(),
 	}, nil
 }
+
+// A metadata difference during a read keeps failing the read here.
+const readStabilityRetriesMetadataChange = false

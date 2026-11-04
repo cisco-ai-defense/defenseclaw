@@ -63,3 +63,7 @@ func grantUntrustedWriterForTest(t *testing.T, path string) {
 		t.Fatalf("grant Everyone write on %s: %v", path, err)
 	}
 }
+
+// configTrustAccepted reports whether a managed load passed the config trust
+// check.
+func configTrustAccepted(err error) bool { return err == nil }

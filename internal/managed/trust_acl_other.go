@@ -7,3 +7,5 @@
 package managed
 
 func validateTrustedPathACL(string) error { return nil }
+
+func validateStrictPathACL(string) error { return nil }

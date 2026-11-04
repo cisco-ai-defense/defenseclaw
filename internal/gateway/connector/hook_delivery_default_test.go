@@ -108,11 +108,22 @@ func TestManagedHookDeliveryDefaultAndExplicitClosed(t *testing.T) {
 					if closed {
 						want = "fail_closed"
 					}
-					if record["connector"] != agent.conn.Name() || record["outcome"] != want || strings.Contains(string(out), "WARNING hook fail-open") == closed {
-						t.Fatalf("incorrect diagnostic: record=%+v output=%s", record, out)
+					// Managed macOS hooks keep the fail-open warning off the
+					// agent's stderr; it goes to the per-user diagnostics log.
+					diag, _ := os.ReadFile(filepath.Join(home, "logs", "hook-diagnostics.log"))
+					warningSink := string(out)
+					if managedShellGuardEnabled(true) {
+						if strings.Contains(string(out), "WARNING hook fail-open") {
+							t.Fatalf("managed hook wrote the fail-open warning to the agent: %s", out)
+						}
+						warningSink = string(diag)
+					}
+					if record["connector"] != agent.conn.Name() || record["outcome"] != want ||
+						strings.Contains(warningSink, "WARNING hook fail-open") == closed {
+						t.Fatalf("incorrect diagnostic: record=%+v output=%s diag=%s", record, out, diag)
 					}
 					for _, secret := range []string{"private-payload-marker", "scoped-test-token"} {
-						if strings.Contains(string(failure)+string(out), secret) {
+						if strings.Contains(string(failure)+string(out)+string(diag), secret) {
 							t.Fatalf("diagnostic leaked %q", secret)
 						}
 					}
