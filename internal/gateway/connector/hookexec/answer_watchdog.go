@@ -6,7 +6,9 @@ package hookexec
 import (
 	"bytes"
 	"context"
+	"fmt"
 	"io"
+	"os"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -82,9 +84,11 @@ type answerWatchdog struct {
 
 	fallbackOut, fallbackErr     []byte
 	fallbackCode                 int
+	fallbackBlocked              bool
 	logFailure                   func()
 	noDecisionOut, noDecisionErr []byte
 	noDecisionCode               int
+	noDecisionBlocked            bool
 	noDecisionLog                func()
 	secureClient                 bool
 	visibleOutage                func() ([]byte, []byte, int)
@@ -241,16 +245,23 @@ func prepareAnswerWatchdog(opts *Options, sp spec, failMode string, ceiling time
 		// computer (GAP-0648 review F4).
 		w.waiter.countSleep(platformSuspendClock)
 	}
+	w.failureLog.markerEnabled = !opts.ManagedEnterprise && !opts.SecureClient
 	w.cacheFailureLogHome(opts)
 	opts.failureLog = w.failureLog
 	w.failureLogHome = failureLogHomeOf(*opts)
 	w.fallbackOut, w.fallbackErr, w.fallbackCode, w.logFailure = renderNoAnswer(*opts, sp, failMode)
 	w.noDecisionOut, w.noDecisionErr, w.noDecisionCode, w.noDecisionLog =
 		w.fallbackOut, w.fallbackErr, w.fallbackCode, w.logFailure
+	w.fallbackBlocked = watchdogNoAnswerBlocks(*opts, sp, failMode)
+	w.noDecisionBlocked = w.fallbackBlocked
 	w.installCheck, w.installOut, w.installErr, w.installCode, w.installLogFailure = renderInstallAnswer(*opts, sp, failMode)
 	opts.Stdout, opts.Stderr = &w.out, &w.err
 	opts.answerWatch = w
 	return w
+}
+
+func watchdogNoAnswerBlocks(opts Options, sp spec, failMode string) bool {
+	return !sp.failOpenOnly && noAnswerFailMode(opts, failMode) == "closed" && !failClosedStopEvent(opts, sp)
 }
 
 // renderNoAnswer renders the answer of a call whose gateway did not answer
@@ -358,7 +369,9 @@ func (w *answerWatchdog) adopt(opts *Options, sp spec, failMode string) {
 	}
 	w.fallbackOut, w.fallbackErr, w.fallbackCode, w.logFailure = stdout, stderr, code, logFailure
 	w.noDecisionOut, w.noDecisionErr, w.noDecisionCode, w.noDecisionLog = stdout, stderr, code, logFailure
+	w.noDecisionBlocked = watchdogNoAnswerBlocks(*opts, sp, failMode)
 	w.visibleOutage = nil
+	w.fallbackBlocked = w.noDecisionBlocked
 	w.installCheck, w.installOut, w.installErr, w.installCode, w.installLogFailure =
 		installCheck, installOut, installErr, installCode, installLogFailure
 }
@@ -383,6 +396,7 @@ func (w *answerWatchdog) closeForAnsweredError(opts Options, sp spec) {
 	}
 	w.fallbackOut, w.fallbackErr, w.fallbackCode, w.logFailure = stdout, stderr, code, logFailure
 	w.visibleOutage = nil
+	w.fallbackBlocked = true
 }
 
 // claimFailureLog runs first in logHookFailure, before anything there can
@@ -431,6 +445,7 @@ func (w *answerWatchdog) claimFailureLog(opts Options, sp spec, closed bool, rea
 		// turns closed.
 		if closed && !w.claimedAnswer {
 			w.fallbackOut, w.fallbackErr, w.fallbackCode, w.logFailure = out, errb, code, logFailure
+			w.fallbackBlocked = true
 		}
 		return nil, false
 	}
@@ -441,8 +456,10 @@ func (w *answerWatchdog) claimFailureLog(opts Options, sp spec, closed bool, rea
 		w.claimedAnswer = true
 		// This claim writes the row; the watchdog writes none of its own.
 		w.fallbackOut, w.fallbackErr, w.fallbackCode, w.logFailure = ownOut, ownErr, ownCode, func() {}
+		w.fallbackBlocked = closed
 	case closed:
 		w.fallbackOut, w.fallbackErr, w.fallbackCode, w.logFailure = out, errb, code, logFailure
+		w.fallbackBlocked = true
 	}
 	return w.failureLogDone, true
 }
@@ -529,6 +546,7 @@ type perUserRestartAnswer struct {
 	reason                 string
 	out, err               []byte
 	code                   int
+	blocked                bool
 	logFailure             func()
 	visible                func() ([]byte, []byte, int)
 	installCheck           func() bool
@@ -557,6 +575,7 @@ func renderPerUserRestartAnswer(opts Options, sp spec, failMode, reason string) 
 			return renderVisibleOutage(outage, sp, mode, reason)
 		}
 	}
+	answer.blocked = !sp.failOpenOnly && mode == "closed" && !failClosedStopEvent(outage, sp)
 	answer.installCheck, answer.installOut, answer.installErr, answer.installCode, answer.installLogFailure =
 		renderInstallAnswer(outage, sp, mode)
 	return answer
@@ -566,6 +585,7 @@ func renderPerUserRestartAnswer(opts Options, sp spec, failMode, reason string) 
 func (w *answerWatchdog) useRestartAnswerLocked(answer *perUserRestartAnswer) {
 	w.fallbackOut, w.fallbackErr, w.fallbackCode, w.logFailure = answer.out, answer.err, answer.code, answer.logFailure
 	w.visibleOutage = answer.visible
+	w.fallbackBlocked = answer.blocked
 	w.installCheck, w.installOut, w.installErr, w.installCode, w.installLogFailure =
 		answer.installCheck, answer.installOut, answer.installErr, answer.installCode, answer.installLogFailure
 }
@@ -832,6 +852,7 @@ func (w *answerWatchdog) watch(deadline time.Time) {
 	if installing && !w.closedKnown && !w.claimedAnswer && w.installCheck != nil {
 		w.fallbackOut, w.fallbackErr, w.fallbackCode, w.logFailure =
 			w.installOut, w.installErr, w.installCode, w.installLogFailure
+		w.fallbackBlocked = true
 	} else if !w.closedKnown && !w.claimedAnswer && !w.failureLogged && w.visibleOutage != nil {
 		w.fallbackOut, w.fallbackErr, w.fallbackCode = w.visibleOutage()
 	}
@@ -850,6 +871,18 @@ func (w *answerWatchdog) watch(deadline time.Time) {
 			select {
 			case <-w.failureLogDone:
 			case <-timer.C:
+				select {
+				case <-w.failureLogDone:
+				default:
+					if w.failureLog.markerEnabled {
+						if w.fallbackBlocked {
+							w.failureLog.promoteFallbackClosed()
+						}
+						if !w.failureLog.appendFallback() {
+							fmt.Fprintln(os.Stderr, "defenseclaw: local failure record could not be appended before exit")
+						}
+					}
+				}
 			}
 			timer.Stop()
 		}
@@ -866,6 +899,19 @@ func (w *answerWatchdog) watch(deadline time.Time) {
 	select {
 	case <-logged:
 	case <-timer.C:
+		select {
+		case <-logged:
+		default:
+			if w.failureLog.markerEnabled {
+				if w.fallbackBlocked {
+					w.failureLog.promoteFallbackClosed()
+				}
+				if !w.failureLog.appendFallback() {
+					w.failureLog.forceFallback()
+					logFailure()
+				}
+			}
+		}
 	}
 	timer.Stop()
 	// Production exits here; the lock is never released, so the call's own
@@ -907,6 +953,7 @@ func (w *answerWatchdog) gatewayAnsweredError(opts Options, sp spec, status int)
 	w.closedKnown = true
 	w.fallbackOut, w.fallbackErr, w.fallbackCode, w.logFailure = out, errb, code, logFailure
 	w.visibleOutage = nil
+	w.fallbackBlocked = true
 }
 
 // installLockHeldWithin is installLockHeld bounded by wait: a look that
@@ -967,6 +1014,7 @@ func (w *answerWatchdog) noDecisionPending() {
 		w.closedKnown = true
 		w.fallbackOut, w.fallbackErr, w.fallbackCode, w.logFailure =
 			w.noDecisionOut, w.noDecisionErr, w.noDecisionCode, w.noDecisionLog
+		w.fallbackBlocked = w.noDecisionBlocked
 		w.visibleOutage = nil
 	}
 }
