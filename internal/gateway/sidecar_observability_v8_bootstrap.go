@@ -576,18 +576,7 @@ func (owner *sidecarOwnedObservabilityV8Runtime) EmitRuntimeV8LogBatch(
 		len(operations) > observabilityruntime.MaxLogBatchItems {
 		return nil, newSidecarObservabilityV8BootstrapError(sidecarObservabilityV8BootstrapInvalid, nil)
 	}
-	items := make([]observabilityruntime.LogBatchItem, len(operations))
-	for index := range operations {
-		operation := operations[index]
-		items[index] = observabilityruntime.LogBatchItem{
-			Context: operation.Context(), Metadata: operation.Metadata(),
-			Builder: func(snapshot observabilityruntime.EmitContext, admission router.Admission) (observability.Record, error) {
-				return operation.Build(audit.RuntimeV8BuildContext{
-					ConfigGeneration: snapshot.Generation(), ConfigDigest: snapshot.Digest(),
-				}, admission)
-			},
-		}
-	}
+	items := runtimeV8LogItems(operations)
 	owner.lifecycleMu.RLock()
 	defer owner.lifecycleMu.RUnlock()
 	if owner.closed {
@@ -601,6 +590,45 @@ func (owner *sidecarOwnedObservabilityV8Runtime) EmitRuntimeV8LogBatch(
 		}
 	}
 	return converted, err
+}
+
+func (owner *sidecarOwnedObservabilityV8Runtime) EmitRuntimeV8AtomicLogBatch(
+	ctx context.Context,
+	operations []audit.RuntimeV8LogOperation,
+) ([]audit.RuntimeV8EmitOutcome, error) {
+	if owner == nil || owner.runtime == nil || ctx == nil || len(operations) == 0 ||
+		len(operations) > observabilityruntime.MaxLogBatchItems {
+		return nil, newSidecarObservabilityV8BootstrapError(sidecarObservabilityV8BootstrapInvalid, nil)
+	}
+	owner.lifecycleMu.RLock()
+	defer owner.lifecycleMu.RUnlock()
+	if owner.closed {
+		return nil, newSidecarObservabilityV8BootstrapError(sidecarObservabilityV8BootstrapClose, nil)
+	}
+	outcomes, err := owner.runtime.EmitAtomicBatch(ctx, runtimeV8LogItems(operations))
+	converted := make([]audit.RuntimeV8EmitOutcome, len(outcomes))
+	for index := range outcomes {
+		converted[index] = audit.RuntimeV8EmitOutcome{
+			Admission: outcomes[index].Admission(), LocalPersisted: outcomes[index].LocalPersisted(),
+		}
+	}
+	return converted, err
+}
+
+func runtimeV8LogItems(operations []audit.RuntimeV8LogOperation) []observabilityruntime.LogBatchItem {
+	items := make([]observabilityruntime.LogBatchItem, len(operations))
+	for index := range operations {
+		operation := operations[index]
+		items[index] = observabilityruntime.LogBatchItem{
+			Context: operation.Context(), Metadata: operation.Metadata(),
+			Builder: func(snapshot observabilityruntime.EmitContext, admission router.Admission) (observability.Record, error) {
+				return operation.Build(audit.RuntimeV8BuildContext{
+					ConfigGeneration: snapshot.Generation(), ConfigDigest: snapshot.Digest(),
+				}, admission)
+			},
+		}
+	}
+	return items
 }
 
 func (owner *sidecarOwnedObservabilityV8Runtime) EmitTraceCanary(
