@@ -115,3 +115,35 @@ func TestGAP0370ReporterWakesOnAppend(t *testing.T) {
 		time.Sleep(20 * time.Millisecond)
 	}
 }
+
+func TestGAP0370ReporterRecoversPreparedLocalRecord(t *testing.T) {
+	store, logger := testStoreAndLogger(t)
+	dataDir := t.TempDir()
+	logDir := filepath.Join(dataDir, "logs")
+	if err := os.Mkdir(logDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	now := time.Now().UTC().Format(time.RFC3339)
+	blocked := `{"ts":"` + now + `","connector":"claudecode","event":"PreToolUse","outcome":"fail_closed","session_id":"s","call_id":"g370-recorded","tool_id":"g370-recorded"}`
+	benign := `{"ts":"` + now + `","connector":"claudecode","event":"PreToolUse","outcome":"diagnostic","session_id":"s","call_id":"g370-benign","tool_id":"g370-benign"}`
+	if err := os.WriteFile(filepath.Join(logDir, "hook-failures.dropped"), []byte("DCID"+blocked+"\nDCID"+benign+"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	s := &Sidecar{logger: logger, cfg: &config.Config{DataDir: dataDir}}
+	for range 2 {
+		s.reportHookFailureCalls()
+	}
+	events, err := store.ListEvents(100)
+	if err != nil {
+		t.Fatal(err)
+	}
+	blocks := map[string]int{}
+	for _, event := range events {
+		if event.Action == string(audit.ActionGuardrailBlock) {
+			blocks[event.ToolID]++
+		}
+	}
+	if blocks["g370-recorded"] != 1 || blocks["g370-benign"] != 0 {
+		t.Fatalf("prepared local records = %v", blocks)
+	}
+}
