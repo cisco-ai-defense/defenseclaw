@@ -40,8 +40,9 @@ import (
 
 // imageKey identifies the contents of one image file: the file (device and
 // inode, or volume and file index), its size, and its change and write times
-// (on Windows the file's USN in place of times its owner can set). Writing a
-// file changes the key, so a cached digest is never reused for new bytes.
+// (on Windows the file's USN, which only the file system sets, in place of the
+// change time). Writing a file changes the key, so a cached digest is never
+// reused for new bytes.
 type imageKey struct {
 	device, file           uint64
 	size, changed, written int64

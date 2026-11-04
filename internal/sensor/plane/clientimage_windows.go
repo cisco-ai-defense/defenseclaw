@@ -104,7 +104,8 @@ func openImageUnchangedSince(path string, at time.Time) (*os.File, imageKey, boo
 const fsctlReadFileUSNData = 0x000900eb
 
 // statImageKey is the identity of an open image file: volume, file index,
-// size and the file's last USN. ok is false without a USN.
+// size, the file's last USN and its last write time. ok is false without a
+// USN.
 func statImageKey(file *os.File) (imageKey, bool) {
 	handle := windows.Handle(file.Fd())
 	var info windows.ByHandleFileInformation
@@ -126,6 +127,7 @@ func statImageKey(file *os.File) (imageKey, bool) {
 	return imageKey{
 		device: uint64(info.VolumeSerialNumber), file: uint64(info.FileIndexHigh)<<32 | uint64(info.FileIndexLow),
 		size: int64(info.FileSizeHigh)<<32 | int64(info.FileSizeLow), changed: usn,
+		written: info.LastWriteTime.Nanoseconds(),
 	}, true
 }
 
