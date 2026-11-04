@@ -236,6 +236,9 @@ func (s *Sidecar) reportHookFailureCalls() {
 		if err := reportHookFailureCallsIn(logDir, s.logger, time.Now().UTC()); err != nil {
 			fmt.Fprintf(os.Stderr, "[gateway] hook failure report: %v\n", err)
 		}
+		if err := reportDroppedHookFailuresIn(logDir, s.logger); err != nil {
+			fmt.Fprintf(os.Stderr, "[gateway] hook failure marker report: %v\n", err)
+		}
 	}
 }
 
@@ -330,7 +333,7 @@ func (s *Sidecar) watchHookFailureCalls(ctx context.Context) {
 				events = nil
 				continue
 			}
-			if filepath.Base(event.Name) != hookFailuresFile &&
+			if filepath.Base(event.Name) != hookFailuresFile && filepath.Base(event.Name) != hookFailuresDroppedFile &&
 				!(event.Op&fsnotify.Create != 0 && filepath.Base(event.Name) == "logs") {
 				continue
 			}
@@ -349,12 +352,15 @@ func (s *Sidecar) watchHookFailureCalls(ctx context.Context) {
 		watchDirs(dirs)
 		changed := false
 		for _, dir := range dirs {
-			var now stamp
-			if info, err := os.Stat(filepath.Join(dir, hookFailuresFile)); err == nil {
-				now = stamp{size: info.Size(), mod: info.ModTime()}
-			}
-			if seen[dir] != now {
-				seen[dir], changed = now, true
+			for _, name := range []string{hookFailuresFile, hookFailuresDroppedFile} {
+				var now stamp
+				if info, err := os.Stat(filepath.Join(dir, name)); err == nil {
+					now = stamp{size: info.Size(), mod: info.ModTime()}
+				}
+				key := filepath.Join(dir, name)
+				if seen[key] != now {
+					seen[key], changed = now, true
+				}
 			}
 		}
 		if changed || hookFailureRowsPending(dirs) {
@@ -375,6 +381,10 @@ func hookFailureRowsPending(dirs []string) bool {
 	defer hookFailOpenReportMu.Unlock()
 	for _, dir := range dirs {
 		if readHookFailuresReported(dir).AuditPending {
+			return true
+		}
+		if info, err := os.Stat(filepath.Join(dir, hookFailuresDroppedFile)); err == nil &&
+			info.Size() > readDroppedFailurePosition(dir).Offset {
 			return true
 		}
 	}
