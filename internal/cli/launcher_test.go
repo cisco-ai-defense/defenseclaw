@@ -202,8 +202,10 @@ func TestLauncherHelpShowsOnlySandbox(t *testing.T) {
 			}
 		}
 		// `status` is the user's own protection state (cowork-1-0-8
-		// GAP-0053), not the administrator's status.
-		if !strings.Contains(out, "  defenseclaw status ") || !strings.Contains(out, "Show whether DefenseClaw protects your Claude Code and Cowork sessions") {
+		// GAP-0053), not the administrator's status. Windows has no
+		// launcher, so it has no launcher status command
+		// (own_status_windows.go).
+		if runtime.GOOS != "windows" && (!strings.Contains(out, "  defenseclaw status ") || !strings.Contains(out, "Show whether DefenseClaw protects your Claude Code and Cowork sessions")) {
 			t.Errorf("%v: help does not offer the user's own status:\n%s", args, out)
 		}
 		if len(ran) != 0 {
@@ -224,8 +226,13 @@ func TestPrepareLauncherRootKeepsOnlyTheSandboxTree(t *testing.T) {
 			names = append(names, command.Name())
 		}
 	}
-	if !reflect.DeepEqual(names, []string{"sandbox", "status"}) {
-		t.Fatalf("commands = %v, want [sandbox status]", names)
+	want := []string{"sandbox", "status"}
+	if runtime.GOOS == "windows" {
+		// Windows has no launcher and no launcher status command.
+		want = []string{"sandbox"}
+	}
+	if !reflect.DeepEqual(names, want) {
+		t.Fatalf("commands = %v, want %v", names, want)
 	}
 	if root.Use != "defenseclaw" {
 		t.Fatalf("Use = %q", root.Use)
