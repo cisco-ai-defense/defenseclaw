@@ -2821,6 +2821,16 @@ func (c *hookOnlyConnector) patchConfig(opts SetupOpts, hookScript string) error
 	var err error
 	switch c.name {
 	case "cursor":
+		if cursorHooksLockedWriter && opts.ManagedEnterprise {
+			err = patchCursorHooksLocked(
+				path,
+				opts.DataDir,
+				hookScript,
+				filepath.Join(opts.DataDir, "hooks", c.scriptName),
+				c.effectiveFailClosed(opts),
+			)
+			break
+		}
 		err = patchCursorHooks(
 			path,
 			hookScript,
@@ -5230,6 +5240,37 @@ func patchCursorHooks(path, hookScript, legacyShellScript string, failClosed boo
 	if err != nil {
 		return err
 	}
+	renderCursorHooks(cfg, hookScript, legacyShellScript, failClosed)
+	return writeJSONObject(path, cfg)
+}
+
+// patchCursorHooksLocked is patchCursorHooks under the config lock with a
+// compare-and-swap replace, as the Claude and Codex writers do, so a
+// concurrent Cursor or user edit is never silently overwritten.
+func patchCursorHooksLocked(path, stateDir, hookScript, legacyShellScript string, failClosed bool) error {
+	// A named pipe or another special file in place of hooks.json is named
+	// here (readHookConfigFile never blocks on it); the transform below
+	// would wait on the pipe.
+	if _, err := readHookConfigFile(path); err != nil && !os.IsNotExist(err) {
+		return err
+	}
+	return withFileLock(path, func() error {
+		return atomicTransformFileWithStateDir(path, stateDir, 0o600, func(data []byte, _ bool) (atomicTransformResult, error) {
+			cfg, err := decodeJSONObject(path, data)
+			if err != nil {
+				return atomicTransformResult{}, err
+			}
+			renderCursorHooks(cfg, hookScript, legacyShellScript, failClosed)
+			out, err := json.MarshalIndent(cfg, "", "  ")
+			if err != nil {
+				return atomicTransformResult{}, err
+			}
+			return atomicTransformResult{Data: append(out, '\n')}, nil
+		})
+	})
+}
+
+func renderCursorHooks(cfg map[string]interface{}, hookScript, legacyShellScript string, failClosed bool) {
 	hooks := ensureJSONObject(cfg, "hooks")
 	ownedCommands := newCursorHookCommandMatcher(cursorManagedHookCommands(hookScript, legacyShellScript))
 	cfg["version"] = 1
@@ -5250,7 +5291,6 @@ func patchCursorHooks(path, hookScript, legacyShellScript string, failClosed boo
 		// Entries not owned by DefenseClaw are preserved in their original order.
 		hooks[event] = replaceManagedCursorHooks(hooks[event], ownedCommands, filepath.Base(hookScript), entry)
 	}
-	return writeJSONObject(path, cfg)
 }
 
 // ownedCursorHookContractPresent validates the exact registration Setup writes
@@ -6106,6 +6146,10 @@ func readJSONObject(path string) (map[string]interface{}, error) {
 		}
 		return nil, err
 	}
+	return decodeJSONObject(path, data)
+}
+
+func decodeJSONObject(path string, data []byte) (map[string]interface{}, error) {
 	if len(bytes.TrimSpace(data)) == 0 {
 		return map[string]interface{}{}, nil
 	}

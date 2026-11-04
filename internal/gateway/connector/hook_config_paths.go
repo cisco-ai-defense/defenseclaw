@@ -198,7 +198,11 @@ func ownedHookRegistrationPresent(ctx context.Context, conn Connector, opts Setu
 		return inspector.ownedHookContractPresentContext(ctx, opts)
 	}
 	if cursor, ok := conn.(*hookOnlyConnector); ok && cursor.name == "cursor" {
-		return cursor.ownedCursorHookContractPresent(opts)
+		present, err := cursor.ownedCursorHookContractPresent(opts)
+		if err == nil && !present {
+			cursor.reportCursorUserHooksPartial(opts)
+		}
+		return present, err
 	}
 	if conn != nil && conn.Name() == "devin" {
 		devin, ok := conn.(*hookOnlyConnector)

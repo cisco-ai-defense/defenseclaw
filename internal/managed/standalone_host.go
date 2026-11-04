@@ -35,3 +35,15 @@ func IsStandaloneManagedHost() bool {
 	_, statErr := os.Stat(layout.DescriptorPath)
 	return statErr == nil
 }
+
+// StandaloneTrustScope reports whether this process judges managed trust
+// by the standalone profile's rules: its service environment pins the
+// standalone profile, or this computer carries the standalone runtime
+// descriptor. The macOS drift handling of the Secure Client profile
+// (permission drift accepted and logged, root services repairing their own
+// objects in place, `/` and `/opt` as advisory ancestors, ACL entries for
+// root, wheel and admin) stays outside that scope, so a standalone install
+// keeps its strict verdicts.
+func StandaloneTrustScope() bool {
+	return IsStandaloneProfile(os.Getenv(EnterpriseProfileEnv)) || IsStandaloneManagedHost()
+}

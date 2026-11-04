@@ -24,8 +24,14 @@ const secureClientShellRendersGoldenPath = "testdata/secure_client_shell_renders
 // Client behaviour does not change in 1.0.7 (owner rule; review of
 // 0f2e3b002c): its renders keep the pre-perf statements, and the helper takes
 // its pre-perf path for them. The golden holds one sha256 per file; it is not
-// regenerated from this tree.
+// regenerated from this tree. The one Secure Client change since then is the
+// macOS managed shell guard (#1407), which has its own tests
+// (managed_hook_failmode_unix_test.go); the pin covers every other byte, so it
+// renders with the guard off on every host.
 func TestSecureClientShellRendersKeepPrePerfBytes(t *testing.T) {
+	previousGuardGOOS := managedShellGuardGOOS
+	managedShellGuardGOOS = "linux"
+	t.Cleanup(func() { managedShellGuardGOOS = previousGuardGOOS })
 	raw, err := os.ReadFile(secureClientShellRendersGoldenPath)
 	if err != nil {
 		t.Fatal(err)
