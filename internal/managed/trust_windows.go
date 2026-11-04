@@ -46,9 +46,8 @@ func (e *UntrustedPrincipalError) Error() string { return e.text }
 // ValidateTrustedConfigPath validates config.yaml. Drift on its owner or DACL
 // is repaired first when the caller can (a LocalSystem service or an elevated
 // administrator; never the gateway, whose token cannot re-ACL it), and the
-// strict check runs again. On standalone a repair is attempted only when the
-// bytes are the ones this process last read while the file was trusted, and
-// they must still be after it (trust_content.go): a repair restores the
+// strict check runs again. On standalone the repair runs only through
+// RepairWithContentProof (trust_content.go): a repair restores the
 // descriptor, not the content an untrusted writer may have changed. What
 // survives is handled by ValidateTrustedPolicyFilePath: accepted and logged on
 // Secure Client, refused with the strict verdict on standalone (GAP-0561).
@@ -59,7 +58,7 @@ func ValidateTrustedConfigPath(path string) error {
 	err := ValidateTrustedFilePath(path, label)
 	if err == nil {
 		if needsProof {
-			return AcceptTrustedContent(path)
+			RecordTrustedContent(path)
 		}
 		return nil
 	}
@@ -69,19 +68,25 @@ func ValidateTrustedConfigPath(path string) error {
 	// Only the service-pinned managed config is ever re-stamped, never an
 	// arbitrary path a caller passed in.
 	if pinned := strings.TrimSpace(os.Getenv(ConfigPathEnv)); pinned != "" &&
-		strings.EqualFold(filepath.Clean(pinned), filepath.Clean(path)) &&
-		(!needsProof || TrustedContentUnchanged(path)) {
-		result, ensureErr := windowsConfigEnsureCanonical(path, ObjectConfigFile, CanonicalOptions{})
+		strings.EqualFold(filepath.Clean(pinned), filepath.Clean(path)) {
+		repaired := false
+		var ensureErr error
+		repair := func() {
+			var result CanonicalResult
+			result, ensureErr = windowsConfigEnsureCanonical(path, ObjectConfigFile, CanonicalOptions{})
+			repaired = ensureErr == nil && result.Outcome == CanonicalRepaired
+		}
+		proven := true
+		if needsProof {
+			proven = RepairWithContentProof(path, repair)
+		} else {
+			repair()
+		}
 		if ensureErr != nil {
 			return errors.Join(err, ensureErr)
 		}
-		if result.Outcome == CanonicalRepaired && ValidateTrustedFilePath(path, label) == nil {
-			if !needsProof || TrustedContentUnchanged(path) {
-				return nil
-			}
-			// The bytes changed while the repair ran.
-			MarkContentUntrusted(path)
-			return err
+		if proven && repaired && ValidateTrustedFilePath(path, label) == nil {
+			return nil
 		}
 	}
 	if needsProof {

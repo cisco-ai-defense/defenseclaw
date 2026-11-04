@@ -270,30 +270,32 @@ var (
 	// untrusted writer as a boundary finding) on Secure Client only; a
 	// standalone process refuses it (GAP-0561). Structure stays fatal.
 	//
-	// On standalone the repair runs only when the bytes are the ones this
-	// process last read while the manifest was trusted, and they must still
-	// be after it: a repair restores the descriptor, not a roster an
-	// untrusted writer edited (GAP-0561 review 1).
+	// On standalone the repair runs only through managed.RepairWithContentProof:
+	// a repair restores the descriptor, not a roster an untrusted writer
+	// edited, and an unproven manifest keeps the descriptor every process
+	// refuses (GAP-0561 reviews 1 and 2).
 	enterpriseHookManifestFileTrustCheck = func(path string) error {
 		const label = "hook guardian manifest"
 		needsProof := managed.StandaloneRepairNeedsProvenance()
 		strictErr := managed.ValidateTrustedFilePath(path, label)
 		if strictErr == nil {
 			if needsProof {
-				return managed.AcceptTrustedContent(path)
+				managed.RecordTrustedContent(path)
 			}
 			return nil
 		}
-		if (enterpriseHooksRuntimeGOOS() == "windows" || enterpriseHooksRuntimeGOOS() == "darwin") &&
-			(!needsProof || managed.TrustedContentUnchanged(path)) &&
-			enterpriseHookManifestACLRepair(path) == nil &&
-			managed.ValidateTrustedFilePath(path, label) == nil {
-			if !needsProof || managed.TrustedContentUnchanged(path) {
+		if enterpriseHooksRuntimeGOOS() == "windows" || enterpriseHooksRuntimeGOOS() == "darwin" {
+			var repairErr error
+			repair := func() { repairErr = enterpriseHookManifestACLRepair(path) }
+			proven := true
+			if needsProof {
+				proven = managed.RepairWithContentProof(path, repair)
+			} else {
+				repair()
+			}
+			if proven && repairErr == nil && managed.ValidateTrustedFilePath(path, label) == nil {
 				return nil
 			}
-			// The bytes changed while the repair ran.
-			managed.MarkContentUntrusted(path)
-			return strictErr
 		}
 		if needsProof {
 			return strictErr
