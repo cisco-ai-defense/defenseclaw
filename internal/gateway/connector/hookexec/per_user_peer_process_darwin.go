@@ -8,80 +8,34 @@ package hookexec
 import (
 	"context"
 	"net"
-	"os"
-	"os/exec"
-	"strconv"
-	"strings"
 	"time"
 
 	"github.com/defenseclaw/defenseclaw/internal/procidentity"
 )
 
-// perUserLsofPairs lists this account's sockets on server in state as
-// (pid, name) pairs, every p/n pair lsof -F pn prints.
-func perUserLsofPairs(ctx context.Context, server *net.TCPAddr, state string) [][2]string {
-	ctx, cancel := context.WithTimeout(ctx, 2*time.Second)
-	defer cancel()
-	filter := "-iTCP@" + net.JoinHostPort(server.IP.String(), strconv.Itoa(server.Port))
-	out, err := exec.CommandContext(ctx, "/usr/sbin/lsof", "-nP", "-a", "-u", strconv.Itoa(os.Geteuid()),
-		filter, "-sTCP:"+state, "-Fpn").Output()
-	if err != nil {
-		return nil
-	}
-	var pairs [][2]string
-	pid := ""
-	for _, line := range strings.Split(string(out), "\n") {
-		if len(line) < 2 {
-			continue
-		}
-		switch line[0] {
-		case 'p':
-			pid = line[1:]
-		case 'n':
-			if pid != "" {
-				pairs = append(pairs, [2]string{pid, line[1:]})
-			}
-		}
-	}
-	return pairs
-}
-
-// perUserConnectedPeerPID is the one process of this account that holds the
-// server end of the connection client->server; more than one is unknown.
+// perUserConnectedPeerPID is the one process of this account holding the
+// accepted end of the connected tuple.
 func perUserConnectedPeerPID(client, server *net.TCPAddr) (int, bool) {
-	want := net.JoinHostPort(server.IP.String(), strconv.Itoa(server.Port)) + "->" +
-		net.JoinHostPort(client.IP.String(), strconv.Itoa(client.Port))
-	found := map[int]bool{}
-	for _, pair := range perUserLsofPairs(context.Background(), server, "ESTABLISHED") {
-		pid, err := strconv.Atoi(pair[0])
-		if err == nil && pid > 0 && connectedSocketNameMatches(pair[1], want) {
-			found[pid] = true
-		}
-	}
-	if len(found) != 1 {
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	owners, err := darwinSocketOwnerPIDs(ctx, server, client, darwinTCPEstablished)
+	if err != nil || len(owners) != 1 {
 		return 0, false
 	}
-	for pid := range found {
-		return pid, true
-	}
-	return 0, false
+	return owners[0], true
 }
 
-// perUserListenerOwners is every process of this account that listens on
-// exactly server's host:port now (review r3 finding 1: a wildcard listener
-// lsof may list beside it is not the gateway address), with its identity.
+// perUserListenerOwners finds processes of this account listening on the
+// exact gateway address and records their process identities.
 func perUserListenerOwners(ctx context.Context, server *net.TCPAddr) ([]perUserPeerProcess, bool) {
-	want := net.JoinHostPort(server.IP.String(), strconv.Itoa(server.Port))
-	seen := map[int]bool{}
-	var owners []perUserPeerProcess
-	for _, pair := range perUserLsofPairs(ctx, server, "LISTEN") {
-		pid, err := strconv.Atoi(pair[0])
-		if err != nil || pid <= 0 || seen[pid] || pair[1] != want {
-			continue
-		}
-		seen[pid] = true
-		identity, _ := procidentity.Of(pid)
-		owners = append(owners, perUserPeerProcess{pid: pid, identity: identity, server: server})
+	owners, err := darwinSocketOwnerPIDs(ctx, server, nil, darwinTCPListen)
+	if err != nil || len(owners) == 0 {
+		return nil, false
 	}
-	return owners, len(owners) > 0 && ctx.Err() == nil
+	result := make([]perUserPeerProcess, 0, len(owners))
+	for _, pid := range owners {
+		identity, _ := procidentity.Of(pid)
+		result = append(result, perUserPeerProcess{pid: pid, identity: identity, server: server})
+	}
+	return result, ctx.Err() == nil
 }

@@ -7,11 +7,9 @@ package useridentity
 
 import (
 	"bufio"
-	"context"
 	"io"
 	"net"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"runtime"
 	"strconv"
@@ -30,14 +28,8 @@ const (
 	kcmCallTimeout = 750 * time.Millisecond
 	krb5ConfPath   = "/etc/krb5.conf"
 	maxKrb5Conf    = 256 << 10
-	// macOS's own Heimdal klist reads the API: cache; it answers in about
-	// 15 ms and gets the same bound as a KCM call.
-	macOSKlistPath = "/usr/bin/klist"
-	klistTimeout   = kcmCallTimeout
-	maxKlistOutput = 64 << 10
-	klistWaitDelay = 100 * time.Millisecond
 	// sessionFactsDeadline bounds the whole read, krb5.conf included; the
-	// KCM dial and call, and klist, finish inside it. Managed OpenCode spends
+	// KCM dial and call finish inside it. Managed OpenCode spends
 	// about 1.8 s of the 3.5 s hook answer budget itself (GAP-0582).
 	sessionFactsDeadline = kcmDialTimeout + kcmCallTimeout
 	// fileCCacheDeadline bounds the read of a FILE or DIR cache, a local
@@ -137,8 +129,8 @@ func readSessionFactsHeader(now time.Time, cachePath, stalledKey, envKey string)
 	if cachePath != "" {
 		written := now
 		if !settled {
-			// A KCM read that failed in transit, or a klist that timed out,
-			// is not the session's answer: it is reused for
+			// A credential-cache read that failed in transit is not the
+			// session's answer: it is reused for
 			// sessionFactsRetryAfter, not the TTL.
 			written = now.Add(sessionFactsRetryAfter - SessionFactsCacheTTL)
 		}
@@ -265,7 +257,7 @@ func ccacheModTime(kind, residual string) string {
 
 // readDefaultPrincipal reads the default principal of the named cache. It
 // returns the cache type even when the principal cannot be read; settled is
-// false when a KCM read failed in transit or klist timed out, and may answer
+// false when a KCM read failed in transit, and may answer
 // on a retry.
 func readDefaultPrincipal(kind, residual string) (principal, ccType string, settled bool) {
 	switch kind {
@@ -283,55 +275,6 @@ func readDefaultPrincipal(kind, residual string) (principal, ccType string, sett
 		return principal, CCacheAPI, settled
 	}
 	return "", "", true
-}
-
-// readAPIPrincipal asks macOS's klist for the default principal of the API:
-// cache, or of the named one. It runs as the hook's user with a bare
-// environment, so it reads only that user's caches; a missing cache, no
-// ticket or an older klist without --json settles on no principal, and only
-// a timeout does not. Other systems have no API: cache.
-func readAPIPrincipal(cacheName string) (principal string, settled bool) {
-	if runtime.GOOS != "darwin" {
-		return "", true
-	}
-	args := []string{"--json"}
-	if cacheName != "" {
-		args = append(args, "--cache="+CCacheAPI+":"+cacheName)
-	}
-	ctx, cancel := context.WithTimeout(context.Background(), klistTimeout)
-	defer cancel()
-	cmd := exec.CommandContext(ctx, macOSKlistPath, args...)
-	env := []string{"PATH=/usr/bin:/bin", "LC_ALL=C"}
-	if home, err := os.UserHomeDir(); err == nil {
-		env = append(env, "HOME="+home)
-	}
-	cmd.Env = env
-	out := &cappedBuffer{limit: maxKlistOutput}
-	cmd.Stdout = out
-	cmd.WaitDelay = klistWaitDelay
-	err := cmd.Run()
-	if ctx.Err() != nil {
-		return "", false
-	}
-	if err != nil {
-		return "", true
-	}
-	return parseKlistJSONPrincipal(out.data), true
-}
-
-// cappedBuffer keeps the first limit bytes written to it and drops the rest,
-// so a cache with many tickets cannot make the hook buffer without bound.
-// It has no ReadFrom, so io.Copy goes through Write.
-type cappedBuffer struct {
-	data  []byte
-	limit int
-}
-
-func (c *cappedBuffer) Write(p []byte) (int, error) {
-	if room := c.limit - len(c.data); room > 0 {
-		c.data = append(c.data, p[:min(len(p), room)]...)
-	}
-	return len(p), nil
 }
 
 // openRegularFile opens path for reading only if it is a regular file
