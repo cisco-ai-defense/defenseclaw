@@ -51,8 +51,8 @@ func TestEnterpriseHookManifestTrustCheckStandaloneDrift(t *testing.T) {
 		if calls != 1 {
 			t.Fatalf("repair calls = %d, want 1", calls)
 		}
-		if !strings.Contains(err.Error(), "hook guardian manifest") {
-			t.Fatalf("manifest trust error = %v, want the strict hook guardian manifest verdict", err)
+		if !strings.Contains(err.Error(), "untrusted Windows principal") {
+			t.Fatalf("manifest trust error = %v, want the strict untrusted-writer verdict", err)
 		}
 	})
 
@@ -68,11 +68,12 @@ func TestEnterpriseHookManifestTrustCheckStandaloneDrift(t *testing.T) {
 	})
 }
 
-// ownerOnlyDACLForTest stamps a protected DACL that grants only the process
-// user, SYSTEM and Administrators, the shape the manifest repair leaves.
+// ownerOnlyDACLForTest stamps a protected DACL that grants only SYSTEM and
+// Administrators, the shape the manifest repair leaves; the owner keeps its
+// implicit WRITE_DAC. An OWNER RIGHTS entry would be an untrusted writer.
 func ownerOnlyDACLForTest(t *testing.T, path string) {
 	t.Helper()
-	descriptor, err := windows.SecurityDescriptorFromString("D:P(A;;FA;;;SY)(A;;FA;;;BA)(A;;FA;;;OW)")
+	descriptor, err := windows.SecurityDescriptorFromString("D:P(A;;FA;;;SY)(A;;FA;;;BA)")
 	if err != nil {
 		t.Fatalf("SecurityDescriptorFromString: %v", err)
 	}

@@ -12,10 +12,12 @@ import (
 )
 
 // usersWriteDACL grants BUILTIN\Users write: drift no standard user may hold.
-const usersWriteDACL = "D:P(A;;FA;;;SY)(A;;FA;;;BA)(A;;FA;;;OW)(A;;FW;;;BU)"
+const usersWriteDACL = "D:P(A;;FA;;;SY)(A;;FA;;;BA)(A;;FW;;;BU)"
 
-// canonicalTestDACL is the repaired form: SYSTEM, Administrators, the owner.
-const canonicalTestDACL = "D:P(A;;FA;;;SY)(A;;FA;;;BA)(A;;FA;;;OW)"
+// canonicalTestDACL is the repaired form: SYSTEM and Administrators only. An
+// OWNER RIGHTS entry would itself be an untrusted writer to the strict walk;
+// the owner keeps its implicit WRITE_DAC.
+const canonicalTestDACL = "D:P(A;;FA;;;SY)(A;;FA;;;BA)"
 
 // driftedPolicyFileForTest writes a file with a BUILTIN\Users write grant and
 // confirms the strict walk refuses only that grant, so a later acceptance can
