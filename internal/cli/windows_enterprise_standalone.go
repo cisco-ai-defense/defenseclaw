@@ -4250,7 +4250,7 @@ func runWindowsEnterpriseStandaloneEnsureOnce(
 	if strings.TrimSpace(installedVersion) == "" {
 		installedVersion = statusReport.InstalledVersion
 	}
-	result.AddWarning(windowsEnterpriseEnsureActionWarning(plan, installedVersion, startOnlyKeys, opts.codexTargetTransaction))
+	result.AddWarning(windowsEnterpriseEnsureActionWarning(plan, installedVersion, startOnlyKeys, opts.codexTargetTransaction, len(result.Errors) == 0))
 	return false, finishEnsure(windowsEnterpriseFailureCodeFor(result))
 }
 

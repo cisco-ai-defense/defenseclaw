@@ -719,7 +719,9 @@ every service, puts the same release back in place, starts the services and veri
 deployment. The services are down for one to three minutes and the `ensure` takes two to six
 minutes (about 200 seconds on a typical host, against about a minute for a change applied in the
 running gateway). Nothing is upgraded: the result carries the warning `ensure_config_restart`,
-which names the keys that made it restart. Only a newer release reports `ensure_upgrade`.
+which names the keys that made it restart. Only a newer release reports `ensure_upgrade`. When
+the transaction fails or rolls back, the warning is `ensure_config_failed` instead: the change is
+not confirmed applied, and the errors say what failed.
 
 ## Uninstall
 

@@ -85,6 +85,20 @@ def _fix_script() -> str:
         ({"ok": False, "noop": False, "errors": [
             {"code": "lifecycle_error", "message": "verify failed"},
         ]}, "0|still failing (lifecycle_error): verify failed"),
+        # GAP-0044 review: a failed run's repair warning (an older CLI's
+        # ensure_config_restart, or config_reverted) never names the problem.
+        ({"ok": False, "noop": False, "errors": [
+            {"code": "lifecycle_error", "message": "verify failed"},
+        ], "warnings": [
+            {"code": "ensure_config_restart", "message": "ensure applied a configuration change and upgraded nothing"},
+        ], "changes": ["applied the administrator config"]},
+         "0|still failing (lifecycle_error): verify failed; attempted repair: applied the administrator config"),
+        ({"ok": False, "noop": False, "errors": [
+            {"code": "lifecycle_error", "message": "verify failed"},
+        ], "warnings": [
+            {"code": "ensure_config_failed", "message": "the transaction did not succeed"},
+            {"code": "config_reverted", "message": "put the managed config back"},
+        ]}, "0|still failing (lifecycle_error): verify failed"),
     ],
 )
 def test_remediation_summary_under_strict_mode(

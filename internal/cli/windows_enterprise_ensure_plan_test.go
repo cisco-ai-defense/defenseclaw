@@ -67,6 +67,7 @@ func TestWindowsEnterpriseEnsureActionWarningNamesAConfigChange(t *testing.T) {
 		version  string
 		keys     []string
 		codex    bool
+		failed   bool
 		code     string
 		contains []string
 		absent   []string
@@ -88,6 +89,17 @@ func TestWindowsEnterpriseEnsureActionWarningNamesAConfigChange(t *testing.T) {
 			code: "ensure_config_restart", contains: []string{"to the installed release and upgraded nothing"}},
 		{name: "manifest", plan: windowsEnterpriseEnsurePlan{Action: "upgrade", Reason: "drift:manifest"}, version: "1.0.8",
 			code: "ensure_config_restart", contains: []string{"guardian manifest"}},
+		// GAP-0044 review: a failed or rolled-back transaction applied
+		// nothing it can confirm, and its warning is not a repair.
+		{name: "failed config transaction", plan: windowsEnterpriseEnsurePlan{Action: "upgrade", Reason: "drift:config"}, version: "1.0.8",
+			keys: []string{"enterprise.machine_policy.default.managed_hooks_only"}, failed: true, code: "ensure_config_failed",
+			contains: []string{"ensure ran the lifecycle transaction for a configuration change (drift:config) on the installed release 1.0.8 and upgraded nothing",
+				"did not succeed", "not confirmed applied"},
+			absent: []string{"ensure applied", "verifies the deployment", "ensure ran upgrade"}},
+		{name: "failed manifest transaction", plan: windowsEnterpriseEnsurePlan{Action: "upgrade", Reason: "drift:manifest"}, failed: true,
+			code: "ensure_config_failed", contains: []string{"(drift:manifest) on the installed release and upgraded nothing"}, absent: []string{"ensure applied"}},
+		{name: "failed real upgrade keeps its action", plan: windowsEnterpriseEnsurePlan{Action: "upgrade", Reason: "older_version:1.0.7"}, version: "1.0.7", failed: true,
+			code: "ensure_upgrade", contains: []string{"ensure ran upgrade: older_version:1.0.7"}},
 		{name: "real upgrade", plan: windowsEnterpriseEnsurePlan{Action: "upgrade", Reason: "older_version:1.0.7"}, version: "1.0.7",
 			code: "ensure_upgrade", contains: []string{"ensure ran upgrade: older_version:1.0.7"}, absent: []string{"configuration change"}},
 		{name: "payload reinstall", plan: windowsEnterpriseEnsurePlan{Action: "upgrade", Reason: "drift:gateway"}, version: "1.0.8",
@@ -100,7 +112,7 @@ func TestWindowsEnterpriseEnsureActionWarningNamesAConfigChange(t *testing.T) {
 			code: "ensure_install", contains: []string{"ensure ran install: not_installed"}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			code, message := windowsEnterpriseEnsureActionWarning(tc.plan, tc.version, tc.keys, tc.codex)
+			code, message := windowsEnterpriseEnsureActionWarning(tc.plan, tc.version, tc.keys, tc.codex, !tc.failed)
 			if code != tc.code {
 				t.Fatalf("code %q, want %q (message %q)", code, tc.code, message)
 			}

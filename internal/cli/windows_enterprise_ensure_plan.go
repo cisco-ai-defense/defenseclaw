@@ -51,6 +51,11 @@ const windowsEnterpriseCodexTargetTransactionReason = "the config turns Codex pr
 // as a package upgrade in MDM results (GAP-0044).
 const windowsEnterpriseConfigRestartCode = "ensure_config_restart"
 
+// windowsEnterpriseConfigFailedCode replaces it when that transaction did
+// not succeed: the change is then not known to be applied, and MDM
+// remediation (Remediate-Fix.ps1) must not name a repair as the problem.
+const windowsEnterpriseConfigFailedCode = "ensure_config_failed"
+
 // windowsEnterpriseConfigDriftReason reports a plan reason that is a changed
 // administrator input on the installed release (config.yaml, a policy
 // bundle, the Codex target or a guardian manifest), not a changed payload
@@ -66,8 +71,10 @@ func windowsEnterpriseConfigDriftReason(reason string) bool {
 // windowsEnterpriseEnsureActionWarning is the warning that names the action
 // ensure ran and why. startOnlyKeys are the changed keys the services read
 // only at start (GAP-0719); codexTransaction is a change of Codex protection,
-// which only the transaction applies (GAP-0033).
-func windowsEnterpriseEnsureActionWarning(plan windowsEnterpriseEnsurePlan, installedVersion string, startOnlyKeys []string, codexTransaction bool) (code, message string) {
+// which only the transaction applies (GAP-0033). succeeded is false when the
+// run ends with errors (a failed or rolled-back transaction): a configuration
+// change is then not reported as applied.
+func windowsEnterpriseEnsureActionWarning(plan windowsEnterpriseEnsurePlan, installedVersion string, startOnlyKeys []string, codexTransaction, succeeded bool) (code, message string) {
 	why := ""
 	switch {
 	case len(startOnlyKeys) > 0:
@@ -85,6 +92,10 @@ func windowsEnterpriseEnsureActionWarning(plan windowsEnterpriseEnsurePlan, inst
 		release := "the installed release"
 		if version := strings.TrimSpace(installedVersion); version != "" {
 			release += " " + version
+		}
+		if !succeeded {
+			return windowsEnterpriseConfigFailedCode, "ensure ran the lifecycle transaction for a configuration change (" + plan.Reason + ") on " + release +
+				" and upgraded nothing, but the transaction did not succeed, so the change is not confirmed applied: see the errors"
 		}
 		return windowsEnterpriseConfigRestartCode, "ensure applied a configuration change (" + plan.Reason + ") to " + release +
 			" and upgraded nothing: " + why + ", so ensure ran the lifecycle transaction on the same release, which stops and starts every service and verifies the deployment (two to six minutes)"
