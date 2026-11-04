@@ -88,8 +88,14 @@ type hostPlane struct {
 	// hooks holds the managed hook decisions tool-call processes are joined
 	// against; nil where decisions are not joined (not a managed host).
 	hooks *hookRing
+	// wrapperHold is how long a transparent wrapper's record waits for its
+	// child's exec; zero records it at once.
+	wrapperHold time.Duration
 
 	mu sync.Mutex
+	// wrappers are the transparent wrapper records waiting for their
+	// child's exec, by the wrapper's pid (GAP-0055).
+	wrappers map[int]*heldWrapper
 	// sessions are keyed by the root process instance, not its pid: an agent
 	// that reuses an exited agent's pid starts its own session (GAP-1372).
 	sessions map[hostSessionKey]*agentchain.Session
@@ -179,6 +185,7 @@ func newHostPlane(
 	return &hostPlane{
 		source: source, tracker: tracker, indicators: indicators,
 		clientChecksums: claudeReleases.checksums,
+		wrapperHold:     wrapperHold,
 		window:          window, minStages: minStages,
 		sessions: make(map[hostSessionKey]*agentchain.Session),
 		meta:     make(map[hostSessionKey]*sessionMeta),
@@ -344,7 +351,7 @@ func (h *hostPlane) handle(event plane.Event) {
 	// allow. The lineage gate runs first, and the manifest lookup never
 	// waits: an attributed client exec of a version not yet cached starts
 	// its fetch, and is classified as before until the manifest is in.
-	claudeClient := false
+	claudeClient, verifiedClient := false, false
 	if event.Kind == plane.KindExec && !h.indicators.KeepClientMCP && event.ImageVersion != "" && h.clientChecksums != nil {
 		if !looked {
 			lineage, attributed = h.tracker.Lineage(event.PID, event.ExecID)
@@ -353,9 +360,9 @@ func (h *hostPlane) handle(event plane.Event) {
 		if attributed {
 			checksums, _ := h.clientChecksums(event.ImageVersion)
 			lower := strings.ToLower(cmdline)
-			claudeClient = event.ImageSHA256 != "" &&
-				(strings.Contains(lower, "mcp") || strings.Contains(lower, "@modelcontextprotocol/")) &&
-				signedClaudeRelease(event.ImageSHA256, checksums)
+			verifiedClient = event.ImageSHA256 != "" && signedClaudeRelease(event.ImageSHA256, checksums)
+			claudeClient = verifiedClient &&
+				(strings.Contains(lower, "mcp") || strings.Contains(lower, "@modelcontextprotocol/"))
 		}
 	}
 	match, ok := tactics.Classify(tactics.Observation{
@@ -367,6 +374,13 @@ func (h *hostPlane) handle(event plane.Event) {
 		Path:         event.Path,
 		Detail:       event.Detail,
 	}, h.indicators)
+	if event.Kind == plane.KindExec {
+		h.mu.Lock()
+		if len(h.wrappers) > 0 {
+			h.settleWrappersLocked(event, verifiedClient, ok)
+		}
+		h.mu.Unlock()
+	}
 	if !ok {
 		return
 	}
@@ -383,12 +397,22 @@ func (h *hostPlane) handle(event plane.Event) {
 	}
 
 	instance := h.tracker.InstanceOfProcess(event.PID, event.ExecID)
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	if h.holdWrapperLocked(event, lineage, match, at, instance) {
+		return
+	}
+	h.recordLocked(event, lineage, match, at, instance)
+}
+
+// recordLocked adds one attributed observation to its agent's session.
+func (h *hostPlane) recordLocked(
+	event plane.Event, lineage agentchain.Lineage, match tactics.Match, at time.Time, instance agentchain.Instance,
+) {
 	user := ""
 	if event.UserSID != "" {
 		user = event.User
 	}
-	h.mu.Lock()
-	defer h.mu.Unlock()
 	h.classified++
 	root := hostSessionKey{
 		process:  procprobe.KeyOf(lineage.RootPID, lineage.RootKeyStart),
