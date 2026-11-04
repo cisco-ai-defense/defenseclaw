@@ -886,12 +886,14 @@ function Get-GoTestFailureSummary(
     $packageCriticalHeader = @{}
     $packageCriticalRecentHeaders = @{}
     $packageRuntimeFault = @{}
+    $packageRuntimeFaultOpen = @{}
     $packageCriticalRemaining = @{}
     foreach ($failure in $failedPackages) {
         $packageOutput[$failure.Package] = [Collections.Generic.Queue[string]]::new()
         $packageCriticalOutput[$failure.Package] = [Collections.Generic.Queue[string]]::new()
         $packageCriticalRecentHeaders[$failure.Package] = [Collections.Generic.Queue[string]]::new()
-        $packageRuntimeFault[$failure.Package] = [Collections.Generic.List[string]]::new()
+        $packageRuntimeFault[$failure.Package] = [Collections.Generic.Queue[string]]::new()
+        $packageRuntimeFaultOpen[$failure.Package] = $false
         $packageCriticalRemaining[$failure.Package] = 0
     }
     # At most 128 failed tests and 128 package-only failures are retained.
@@ -931,22 +933,29 @@ function Get-GoTestFailureSummary(
                     $output,
                     '(?im)^(panic:|fatal error:|\[signal |runtime: out of memory|.*test timed out after|exit status )[^\r\n]*'
                 )
+                $sawRuntimeFault = $false
                 foreach ($criticalLine in $criticalLines) {
                     $header = Limit-WindowsNativeText $criticalLine.Value 512
-                    # Only the Go runtime prints these when the process dies.
-                    # The first of them are reserved (first come, at most 4
-                    # lines and 1 KiB) and printed at the top of the summary,
-                    # so test diagnostics and later goroutine panics can never
-                    # push the fatal line and its signal out (rel-1-0-6:GAP-0550).
+                    # The Go runtime prints these when the process dies. Only
+                    # the final crash dump may fill the reserved block (at most
+                    # 4 lines, 1 KiB, printed right after the summary title):
+                    # a run of fault lines with no other output between them
+                    # replaces any earlier run, and the latest lines win inside
+                    # a run. Nothing follows the real dump but its stacks, so
+                    # earlier fixture diagnostics cannot stand in for the fatal
+                    # line and its signal, and later goroutine panics cannot
+                    # push them out (rel-1-0-6:GAP-0550).
                     if ($header -match '^(fatal error:|\[signal |unexpected fault address|runtime: out of memory)') {
-                        $fault = $packageRuntimeFault[$package]
-                        $faultBytes = [Text.Encoding]::UTF8.GetByteCount($header)
-                        foreach ($kept in $fault) { $faultBytes += [Text.Encoding]::UTF8.GetByteCount($kept) }
-                        if ($fault.Count -lt 4 -and $faultBytes -le 1024 -and -not $fault.Contains($header)) {
-                            $fault.Add($header)
+                        if (-not $packageRuntimeFaultOpen[$package]) {
+                            $packageRuntimeFault[$package].Clear()
                         }
+                        Add-WindowsNativeDiagnosticTail -Queue $packageRuntimeFault[$package] `
+                            -Text $header -MaxLines 4 -MaxBytes 1024
+                        $packageRuntimeFaultOpen[$package] = $true
+                        $sawRuntimeFault = $true
                         continue
                     }
+                    $packageRuntimeFaultOpen[$package] = $false
                     if (-not $packageCriticalHeader.ContainsKey($package)) {
                         $packageCriticalHeader[$package] = $header
                     } elseif ($header -cne $packageCriticalHeader[$package] -and
@@ -954,6 +963,9 @@ function Get-GoTestFailureSummary(
                         Add-WindowsNativeDiagnosticTail -Queue $packageCriticalRecentHeaders[$package] `
                             -Text $header -MaxLines 8 -MaxBytes 1024
                     }
+                }
+                if (-not $sawRuntimeFault) {
+                    $packageRuntimeFaultOpen[$package] = $false
                 }
                 if ($criticalLines.Count -gt 0) {
                     $packageCriticalRemaining[$package] = 48
@@ -8872,6 +8884,59 @@ function Invoke-SelfTest {
                     [Text.Encoding]::UTF8.GetByteCount($fullQueueSummary) -gt $limit) {
                     throw "structured Go test summary let later headers ($($variant.Name)) push out the runtime fault"
                 }
+            }
+        }
+
+        # Earlier fixture text that looks like a runtime fault must not stand
+        # in for the final crash dump.
+        $decoyJson = [Collections.Generic.List[object]]::new()
+        for ($i = 0; $i -lt 4; $i++) {
+            $decoyJson.Add([pscustomobject]@{
+                Action = 'output'; Package = 'example.invalid/decoy'; Test = 'TestActive'
+                Output = "fatal error: child fixture diagnostic $i`n"
+            })
+            $decoyJson.Add([pscustomobject]@{
+                Action = 'output'; Package = 'example.invalid/decoy'; Test = 'TestActive'
+                Output = "[signal 0xc0000094 fixture $i]`n"
+            })
+        }
+        for ($i = 0; $i -lt 8; $i++) {
+            $decoyJson.Add([pscustomobject]@{
+                Action = 'output'; Package = 'example.invalid/decoy'; Test = 'TestActive'
+                Output = "fixture output $i`n"
+            })
+        }
+        for ($i = 0; $i -lt 4; $i++) {
+            $decoyJson.Add([pscustomobject]@{
+                Action = 'output'; Package = 'example.invalid/decoy'; Test = 'TestActive'
+                Output = "fatal error: child fixture diagnostic again $i`n"
+            })
+        }
+        $decoyJson.Add([pscustomobject]@{
+            Action = 'output'; Package = 'example.invalid/decoy'; Test = 'TestActive'
+            Output = "fatal error: unexpected signal during runtime execution`n"
+        })
+        $decoyJson.Add([pscustomobject]@{
+            Action = 'output'; Package = 'example.invalid/decoy'; Test = 'TestActive'
+            Output = "[signal 0xc0000005 code=0x0 addr=0x6]`n"
+        })
+        for ($i = 0; $i -lt 96; $i++) {
+            $decoyJson.Add([pscustomobject]@{
+                Action = 'output'; Package = 'example.invalid/decoy'; Test = 'TestActive'
+                Output = "stack frame $i $('x' * 128)`n"
+            })
+        }
+        $decoyJson.Add([pscustomobject]@{ Action = 'fail'; Package = 'example.invalid/decoy' })
+        $decoyEvents = ($decoyJson | ForEach-Object { $_ | ConvertTo-Json -Compress }) -join [Environment]::NewLine
+        foreach ($limit in @(4096, 262144)) {
+            $decoySummary = Get-GoTestFailureSummary $decoyEvents $limit
+            $reserved = ($decoySummary -split "`r?`n" | Select-Object -Skip 1 -First 6) -join "`n"
+            if (-not $reserved.Contains('runtime fault in package example.invalid/decoy:') -or
+                -not $reserved.Contains('fatal error: unexpected signal during runtime execution') -or
+                -not $reserved.Contains('[signal 0xc0000005 code=0x0 addr=0x6]') -or
+                $reserved.Contains('fixture 0]') -or $reserved.Contains('child fixture diagnostic 0') -or
+                [Text.Encoding]::UTF8.GetByteCount($decoySummary) -gt $limit) {
+                throw 'structured Go test summary let fixture diagnostics stand in for the final crash dump'
             }
         }
 
