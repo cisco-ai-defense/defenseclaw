@@ -28,6 +28,18 @@ const desktopEnginePlist = `<?xml version="1.0" encoding="UTF-8"?>
 
 // desktopEngineFixture lays out Claude Desktop's macOS engine build of
 // version under home and returns its executable.
+// resolvedDesktopTempDir is t.TempDir() with symbolic links resolved: the
+// engine paths come back resolved, and macOS temp folders sit under the
+// /var -> /private/var link.
+func resolvedDesktopTempDir(t *testing.T) string {
+	t.Helper()
+	dir, err := filepath.EvalSymlinks(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	return dir
+}
+
 func desktopEngineFixture(t *testing.T, home, version, plistVersion string) string {
 	t.Helper()
 	bundle := filepath.Join(home, "Library", "Application Support", "Claude", "claude-code", version, "5af865b9901c", "claude.app")
@@ -69,7 +81,7 @@ func stubDesktopVerify(t *testing.T, result codesig.Result) *fakeDesktopVerify {
 }
 
 func TestClaudeDesktopEngineBuildRecognizesOnlyTheEngineFolderOfTheAccount(t *testing.T) {
-	home := t.TempDir()
+	home := resolvedDesktopTempDir(t)
 	exe := desktopEngineFixture(t, home, "2.1.309", "2.1.309")
 	engine, ok := claudeDesktopEngineBuild("darwin", home, exe)
 	if !ok || engine.version != "2.1.309" || engine.executable != exe ||
@@ -228,7 +240,7 @@ func TestClaudeDesktopEngineCoverageNeedsTheSessionAccount(t *testing.T) {
 func TestClaudeDesktopEngineBuildRecognizesEveryDataRoot(t *testing.T) {
 	for _, goos := range []string{"darwin", "linux"} {
 		for _, root := range claudedesktop.Roots(goos) {
-			home := t.TempDir()
+			home := resolvedDesktopTempDir(t)
 			data := root.Pattern(claudedesktop.FoldersForHome(goos, home))
 			exe := filepath.Join(data, "claude-code", "2.1.317", "claude")
 			if goos == "darwin" {
