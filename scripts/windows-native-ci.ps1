@@ -938,14 +938,24 @@ function Get-GoTestFailureSummary(
                     $header = Limit-WindowsNativeText $criticalLine.Value 512
                     # The Go runtime prints these when the process dies. Only
                     # the final crash dump may fill the reserved block (at most
-                    # 4 lines, 1 KiB, printed right after the summary title):
-                    # a run of fault lines with no other output between them
-                    # replaces any earlier run, and the latest lines win inside
-                    # a run. Nothing follows the real dump but its stacks, so
-                    # earlier fixture diagnostics cannot stand in for the fatal
-                    # line and its signal, and later goroutine panics cannot
-                    # push them out (rel-1-0-6:GAP-0550).
-                    if ($header -match '^(fatal error:|\[signal |unexpected fault address|runtime: out of memory)') {
+                    # 4 lines, 1 KiB, printed right after the summary title).
+                    # A fault header (fatal error:, unexpected fault address,
+                    # runtime: out of memory) that follows other output starts
+                    # a new crash and replaces earlier fixture fault lines;
+                    # headers with nothing between them form one crash
+                    # ("unexpected fault address" then "fatal error: fault").
+                    # A "[signal ..." line joins the current crash whatever
+                    # output came between, so a still-running child's output
+                    # cannot split the fatal line from its signal. The latest
+                    # lines win inside a crash; nothing follows the real dump
+                    # but its stacks (rel-1-0-6:GAP-0550).
+                    if ($header -match '^\[signal ') {
+                        Add-WindowsNativeDiagnosticTail -Queue $packageRuntimeFault[$package] `
+                            -Text $header -MaxLines 4 -MaxBytes 1024
+                        $sawRuntimeFault = $true
+                        continue
+                    }
+                    if ($header -match '^(fatal error:|unexpected fault address|runtime: out of memory)') {
                         if (-not $packageRuntimeFaultOpen[$package]) {
                             $packageRuntimeFault[$package].Clear()
                         }
@@ -8937,6 +8947,42 @@ function Invoke-SelfTest {
                 $reserved.Contains('fixture 0]') -or $reserved.Contains('child fixture diagnostic 0') -or
                 [Text.Encoding]::UTF8.GetByteCount($decoySummary) -gt $limit) {
                 throw 'structured Go test summary let fixture diagnostics stand in for the final crash dump'
+            }
+        }
+
+        # Output from a still-running child between the fatal line and its
+        # signal must not split them, and an earlier fixture fault before the
+        # crash must still be replaced.
+        foreach ($tagged in @('TestActive', '')) {
+            $splitJson = [Collections.Generic.List[object]]::new()
+            foreach ($text in @(
+                "fatal error: child fixture diagnostic`n",
+                "ordinary fixture output`n",
+                "fatal error: unexpected signal during runtime execution`n",
+                "ordinary output from a still-running child`n",
+                "[signal 0xc0000005 code=0x0 addr=0x6]`n"
+            )) {
+                $splitJson.Add([pscustomobject]@{
+                    Action = 'output'; Package = 'example.invalid/split'; Test = $tagged; Output = $text
+                })
+            }
+            for ($i = 0; $i -lt 96; $i++) {
+                $splitJson.Add([pscustomobject]@{
+                    Action = 'output'; Package = 'example.invalid/split'; Test = $tagged
+                    Output = "stack frame $i $('x' * 128)`n"
+                })
+            }
+            $splitJson.Add([pscustomobject]@{ Action = 'fail'; Package = 'example.invalid/split' })
+            $splitEvents = ($splitJson | ForEach-Object { $_ | ConvertTo-Json -Compress }) -join [Environment]::NewLine
+            foreach ($limit in @(4096, 262144)) {
+                $splitSummary = Get-GoTestFailureSummary $splitEvents $limit
+                $reserved = ($splitSummary -split "`r?`n" | Select-Object -Skip 1 -First 5) -join "`n"
+                if (-not $reserved.Contains('fatal error: unexpected signal during runtime execution') -or
+                    -not $reserved.Contains('[signal 0xc0000005 code=0x0 addr=0x6]') -or
+                    $reserved.Contains('child fixture diagnostic') -or
+                    [Text.Encoding]::UTF8.GetByteCount($splitSummary) -gt $limit) {
+                    throw "structured Go test summary split the fatal line from its signal (test='$tagged')"
+                }
             }
         }
 
