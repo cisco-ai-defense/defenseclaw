@@ -110,7 +110,9 @@ var lookupNamedGroupGID = func(ctx context.Context, name string) (gid int, ok bo
 
 // uidVerifiedGroupIDs checks candidates, then the extra gids of named groups,
 // through the Open Directory membership API, once each. The account's
-// primary gid is held by its uid record.
+// primary gid is held by its uid record. The gateway and the CLI answer each
+// check in process (accountGroupsRunner, membership_darwin.go); the check and
+// the answer that lists a group are the same as with the tool.
 func uidVerifiedGroupIDs(ctx context.Context, runner commandRunner, account *user.User, candidates []string, extra []int) ([]string, error) {
 	uid, err := parseID(account.Uid, "uid")
 	if err != nil {
@@ -234,5 +236,5 @@ func accountInGroup(ctx context.Context, runner commandRunner, account *user.Use
 
 func platformAccountInGroup(ctx context.Context, account *user.User, gid int) (bool, error) {
 	ids, err := account.GroupIds()
-	return accountInGroup(ctx, runTrustedCommand, account, ids, err, gid)
+	return accountInGroup(ctx, accountGroupsRunner, account, ids, err, gid)
 }
