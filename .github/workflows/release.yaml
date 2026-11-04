@@ -950,7 +950,9 @@ jobs:
     needs: validate
     runs-on: ubuntu-latest
     timeout-minutes: 15
-    environment: release
+    # The job's own condition already skips dry runs; the guarded forms keep
+    # the release-secrets rule of every other job.
+    environment: ${{ !inputs.dry_run && 'release' || '' }}
     permissions:
       contents: write
     env:
@@ -979,11 +981,13 @@ jobs:
           done
       - name: Sign, verify and attach
         env:
-          COWORK_GPG_PRIVATE_KEY: ${{ secrets.COWORK_GPG_PRIVATE_KEY }}
-          COWORK_GPG_PASSPHRASE: ${{ secrets.COWORK_GPG_PASSPHRASE }}
+          COWORK_GPG_PRIVATE_KEY: ${{ !inputs.dry_run && secrets.COWORK_GPG_PRIVATE_KEY || '' }}
+          COWORK_GPG_PASSPHRASE: ${{ !inputs.dry_run && secrets.COWORK_GPG_PASSPHRASE || '' }}
           COWORK_GPG_FINGERPRINT: ${{ vars.COWORK_GPG_FINGERPRINT }}
         run: |
           set -euo pipefail
+          # The job's condition skips dry runs; this is the second guard.
+          [[ "$DRY_RUN" != true ]] || { echo "::error::cowork-sign never runs in a dry run"; exit 1; }
           [[ -n "${COWORK_GPG_PRIVATE_KEY:-}" ]] || { echo "::error::COWORK_GPG_PRIVATE_KEY is not set in the release environment"; exit 1; }
           [[ -n "${COWORK_GPG_FINGERPRINT:-}" ]] || { echo "::error::the release variable COWORK_GPG_FINGERPRINT (the Cowork key's pinned fingerprint) is not set"; exit 1; }
           cd cowork
