@@ -1385,12 +1385,13 @@ func claudeCodeHookInvocation(opts SetupOpts, hookScript string) (string, []stri
 }
 
 // claudeCodePerUserNativeHook selects the installed native launcher only for
-// per-user Unix hooks in the account's default data directory. A separate
+// per-user Linux hooks in the account's default data directory. macOS keeps
+// the shell hook until its startup path is measured (GAP-0559). A separate
 // data root keeps the shell's two-home install-lock checks. Managed and
 // Secure Client registrations keep their existing transport. Source installs
 // without this binary keep the script.
 func claudeCodePerUserNativeHook(opts SetupOpts) string {
-	if runtime.GOOS == "windows" || opts.ManagedEnterprise || opts.SecureClientHookDelivery ||
+	if runtime.GOOS != "linux" || opts.ManagedEnterprise || opts.SecureClientHookDelivery ||
 		!filepath.IsAbs(opts.DataDir) || filepath.Clean(opts.DataDir) != opts.DataDir ||
 		opts.DataDir != filepath.Join(userHomeDir(), ".defenseclaw") ||
 		strings.ContainsAny(opts.DataDir, "\x00\r\n") ||
