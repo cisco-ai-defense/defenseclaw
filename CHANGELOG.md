@@ -19,6 +19,7 @@ for current behavior.
 
 ### Changed
 - **The unused `openshell.middleware.enabled` setting is retired.** Existing 1.0.x config files still load; the setting is ignored and new `config set` writes are refused. Remove the entry before 1.1.0.
+- **`defenseclaw init --non-interactive --yes` starts the gateway, as guided `init` does.** `--yes` accepts every prompt's default and "Start gateway after setup?" defaults to yes, but a scripted run left the gateway stopped, so `doctor` failed "Sidecar API" and the agent hooks until the user found `defenseclaw-gateway start`. `--no-start-gateway` still skips it. `--non-interactive` without `--yes` leaves a stopped gateway stopped and its Sidecar step now says to run `defenseclaw-gateway start` and why `doctor` fails until then. (cowork-1-0-8 GAP-0061)
 
 ### Fixed
 - **Windows: `setup cowork` from an elevated session builds the plugin, or says why not.** The elevated CLI created `<data_dir>\cowork` owned by Administrators and the private-file writer refused it with a Python traceback. With the elevated CLI now making the user the owner, a new folder belongs to the user; a folder an earlier elevated run left behind ends in one sentence with the `icacls ... /setowner` fix. (cowork-1-0-8 GAP-0054)

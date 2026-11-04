@@ -788,11 +788,16 @@ def _run_first_run_cmd(  # noqa: PLR0913 - mirrors click options.
 
         _refuse_hook_set_over_configured_proxy(setting["connector"] for setting in connector_settings)
     if start_gateway is None:
-        # GAP-1539: a running gateway loads its connector set only at start,
-        # so a scripted re-init reconciles (restarts) it instead of leaving
-        # it on the old roster with the new connector unhooked. A stopped
-        # gateway still starts only with --start-gateway.
-        start_gateway = _gateway_already_running(str(data_dir))
+        # --yes accepts every prompt's default, and the wizard's "Start
+        # gateway after setup?" defaults to yes, so a scripted init with
+        # --yes ends where guided init does: gateway running, hooks
+        # written. Without it doctor reported two FAIL rows (Sidecar API,
+        # agent hooks) until the user found `defenseclaw-gateway start`
+        # (cowork-1-0-8 GAP-0061). GAP-1539: a running gateway loads its
+        # connector set only at start, so a scripted re-init reconciles
+        # (restarts) it. --non-interactive without --yes starts a stopped
+        # gateway only with --start-gateway.
+        start_gateway = bool(yes) or _gateway_already_running(str(data_dir))
     if verify is None:
         verify = True
 
@@ -3026,7 +3031,12 @@ def _word_sidecar_skip(report, *, prompted: bool, flag: bool | None) -> None:
     elif flag is False:
         detail = _SIDECAR_SKIPPED_DETAIL
     else:
-        detail = "not started (init starts it only with --start-gateway)"
+        # GAP-0061: say what the user must do next and why doctor fails
+        # until then, not only which flag would have done it.
+        detail = (
+            "not started: run defenseclaw-gateway start to write the agent hooks and turn protection on "
+            "(doctor reports the gateway and the hooks missing until then; --yes or --start-gateway starts it)"
+        )
     for step in report.setup:
         if step.name == "Sidecar" and step.status == "skip" and step.detail == _SIDECAR_SKIPPED_DETAIL:
             step.detail = detail

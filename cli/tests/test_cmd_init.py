@@ -530,18 +530,50 @@ class TestInitFirstRunBackend(unittest.TestCase):
             )
 
         for flags, want in (
-            (["--no-start-gateway"], "not started (--no-start-gateway)"),
-            ([], "not started (init starts it only with --start-gateway)"),
+            (["--yes", "--no-start-gateway"], "not started (--no-start-gateway)"),
+            ([], "not started: run defenseclaw-gateway start to write the agent hooks and turn protection on "
+             "(doctor reports the gateway and the hooks missing until then; --yes or --start-gateway starts it)"),
         ):
             self.tmp_dir = os.path.realpath(tempfile.mkdtemp(prefix="dclaw-init-sidecar-word-"))
             self.addCleanup(shutil.rmtree, self.tmp_dir, True)
             result = self._invoke([
-                "--non-interactive", "--yes", "--connector", "codex", "--scanner-mode", "local",
+                "--non-interactive", "--connector", "codex", "--scanner-mode", "local",
                 "--skip-install", "--no-verify", "--json-summary", *flags,
             ])
             summary = json.loads(result.output)
             sidecar = [s for s in summary["setup"] if s["name"] == "Sidecar"]
             self.assertEqual([s["detail"] for s in sidecar], [want], summary["setup"])
+            self.assertIn("defenseclaw-gateway start", [s["next_command"] for s in sidecar], summary["setup"])
+
+    def test_scripted_init_with_yes_starts_the_gateway_like_the_wizard(self):
+        # cowork-1-0-8 GAP-0061: `init --non-interactive --yes` accepts the
+        # wizard's default "Start gateway after setup? yes", so it ends with
+        # the gateway running and the hooks written, not with doctor FAIL
+        # rows. An explicit --no-start-gateway still wins.
+        from defenseclaw.bootstrap import StepResult
+
+        self.addCleanup(shutil.rmtree, self.tmp_dir, True)
+        for flags, started in ((["--yes"], True), (["--yes", "--no-start-gateway"], False), ([], False)):
+            self.tmp_dir = os.path.realpath(tempfile.mkdtemp(prefix="dclaw-init-yes-gw-"))
+            self.addCleanup(shutil.rmtree, self.tmp_dir, True)
+            with (
+                patch("defenseclaw.bootstrap._pid_file_running", return_value=False),
+                patch(
+                    "defenseclaw.bootstrap._start_gateway_structured",
+                    return_value=StepResult("Sidecar", "pass", "started"),
+                ) as start,
+            ):
+                result = self._invoke([
+                    "--non-interactive", "--connector", "codex", "--scanner-mode", "local",
+                    "--skip-install", "--no-verify", "--json-summary", *flags,
+                ])
+            summary = json.loads(result.output)
+            sidecar = [s["detail"] for s in summary["setup"] if s["name"] == "Sidecar"]
+            self.assertEqual(start.called, started, (flags, summary["setup"]))
+            if started:
+                self.assertEqual(sidecar, ["started"], summary["setup"])
+            else:
+                self.assertTrue(all(detail.startswith("not started") for detail in sidecar), summary["setup"])
 
     def test_scripted_reinit_reconciles_a_running_gateway(self):
         # GAP-1539: with the gateway already running, a scripted init that
