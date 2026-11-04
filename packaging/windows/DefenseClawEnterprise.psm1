@@ -5976,12 +5976,26 @@ function Invoke-DefenseClawProcess {
 # prerequisite precisely instead of a generic sc.exe failure.
 $script:ServiceMarkedForDeleteExitCode = 1072
 
+function Get-DefenseClawServicePendingDeleteRemedy {
+    # An open MMC console (Services, Event Viewer, Computer Management) is the
+    # usual holder of the last handle, and closing it lets SCM finish the
+    # delete without a restart.
+    $remedy = 'restart Windows to finish deleting the service, then run Setup again'
+    try {
+        if (@(Microsoft.PowerShell.Management\Get-Process -Name mmc -ErrorAction SilentlyContinue).Count -gt 0) {
+            $remedy = 'close Services, Event Viewer and other MMC consoles that are open, then run Setup again; if it still fails, restart Windows'
+        }
+    }
+    catch { }
+    return $remedy
+}
+
 function Get-DefenseClawServicePendingDeleteMessage {
     param([Parameter(Mandatory)][string]$Name)
     return Format-DefenseClawResilienceEvent -Marker defenseclaw_prereq -Fields @{
         check   = 'service_pending_delete'
         service = $Name
-        remedy  = 'restart Windows to finish deleting the service, then run Setup again'
+        remedy  = (Get-DefenseClawServicePendingDeleteRemedy)
     }
 }
 
@@ -6040,7 +6054,7 @@ function Assert-DefenseClawServicesNotPendingDelete {
             Write-DefenseClawResilienceEvent -Marker defenseclaw_prereq -Fields @{
                 check   = 'service_pending_delete'
                 service = [string]$name
-                remedy  = 'restart Windows to finish deleting the service, then run Setup again'
+                remedy  = (Get-DefenseClawServicePendingDeleteRemedy)
             }
             throw (Get-DefenseClawServicePendingDeleteMessage -Name ([string]$name))
         }
@@ -15769,10 +15783,19 @@ function New-DefenseClawTransaction {
         throw 'refusing to open a lifecycle transaction while protected recovery state already exists'
     }
     if (-not $SkipRedactionKeySnapshot) {
-        # Install and Upgrade, not the uninstall/purge transaction.
+        # Install and Upgrade, not the uninstall/purge transaction. Secure
+        # Client waits longer: an EDR or monitoring agent can hold the last
+        # service handle for minutes after an uninstall, and the lifecycle
+        # budget (1800 s) has room for it.
+        $pendingDeleteWaitSeconds = 120
+        if (-not (Test-DefenseClawStandaloneProfile) -and
+            -not (Test-DefenseClawTrustStrictAncestors)) {
+            $pendingDeleteWaitSeconds = 300
+        }
         Assert-DefenseClawServicesNotPendingDelete `
             -GatewayServiceName $GatewayServiceName `
-            -GuardianServiceName $GuardianServiceName
+            -GuardianServiceName $GuardianServiceName `
+            -WaitSeconds $pendingDeleteWaitSeconds
     }
     if ($PriorDeploymentActive -and
         ($InstallRootCreatedForTransaction -or
