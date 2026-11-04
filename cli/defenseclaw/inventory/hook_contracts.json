@@ -1,5 +1,5 @@
 {
-  "schema_version": 2,
+  "schema_version": 3,
   "defenseclaw_version": "0.5.0",
   "runtime_lock_file": "hook_contract_lock.json",
   "description": "DefenseClaw hook connector compatibility contracts. Each hook connector maps agent CLI version ranges to the hook script contract DefenseClaw knows how to install, decode, evaluate, and respond to. A version newer than every tested range uses the newest contract (untested newer version) unless known_broken_versions lists it; each entry has exact or min_inclusive/max_exclusive, reason and issue.",
@@ -85,6 +85,19 @@
             "tool_call",
             "tool_result"
           ],
+          "aid_surface_events": {
+            "tool_call": [
+              "PreToolUse",
+              "PermissionRequest"
+            ],
+            "prompt": [
+              "UserPromptSubmit"
+            ],
+            "tool_result": [
+              "PostToolUse"
+            ]
+          },
+          "aid_wire_version": "chat-tool-calls-v1",
           "supports_traceparent": true,
           "native_otlp": true,
           "tool_call_lifecycle": {
@@ -186,6 +199,19 @@
             "tool_call",
             "tool_result"
           ],
+          "aid_surface_events": {
+            "tool_call": [
+              "PreToolUse",
+              "PermissionRequest"
+            ],
+            "prompt": [
+              "UserPromptSubmit"
+            ],
+            "tool_result": [
+              "PostToolUse"
+            ]
+          },
+          "aid_wire_version": "chat-tool-calls-v1",
           "supports_traceparent": true,
           "native_otlp": true,
           "tool_call_lifecycle": {
@@ -289,6 +315,20 @@
             "tool_call",
             "tool_result"
           ],
+          "aid_surface_events": {
+            "tool_call": [
+              "PreToolUse",
+              "PermissionRequest"
+            ],
+            "prompt": [
+              "UserPromptSubmit",
+              "SubagentStart"
+            ],
+            "tool_result": [
+              "PostToolUse"
+            ]
+          },
+          "aid_wire_version": "chat-tool-calls-v1",
           "supports_traceparent": true,
           "native_otlp": true,
           "native_otlp_auth": "header-token",
@@ -407,6 +447,20 @@
             "tool_call",
             "tool_result"
           ],
+          "aid_surface_events": {
+            "tool_call": [
+              "PreToolUse",
+              "PermissionRequest"
+            ],
+            "prompt": [
+              "UserPromptSubmit",
+              "SubagentStart"
+            ],
+            "tool_result": [
+              "PostToolUse"
+            ]
+          },
+          "aid_wire_version": "chat-tool-calls-v1",
           "supports_traceparent": true,
           "native_otlp": true,
           "native_otlp_auth": "header-token",
@@ -526,6 +580,32 @@
             "prompt",
             "tool_call",
             "tool_result"
+          ],
+          "aid_surface_events": {
+            "tool_call": [
+              "PreToolUse",
+              "PermissionRequest"
+            ],
+            "prompt": [
+              "UserPromptSubmit",
+              "SubagentStart"
+            ],
+            "tool_result": [
+              "PostToolUse"
+            ]
+          },
+          "aid_wire_version": "chat-tool-calls-v1",
+          "aid_tool_call_shapes": [
+            {
+              "tool": "shell",
+              "surface": "shell",
+              "command_arg": "command"
+            },
+            {
+              "tool": "Bash",
+              "surface": "shell",
+              "command_arg": "command"
+            }
           ],
           "supports_traceparent": true,
           "native_otlp": true,
@@ -676,6 +756,29 @@
             "tool_result",
             "event_content"
           ],
+          "aid_surface_events": {
+            "tool_call": [
+              "PreToolUse",
+              "PermissionRequest"
+            ],
+            "prompt": [
+              "UserPromptSubmit",
+              "SubagentStart"
+            ],
+            "tool_result": [
+              "PermissionDenied",
+              "PostToolUse",
+              "PostToolUseFailure"
+            ]
+          },
+          "aid_wire_version": "chat-tool-calls-v1",
+          "aid_tool_call_shapes": [
+            {
+              "tool": "Bash",
+              "surface": "shell",
+              "command_arg": "command"
+            }
+          ],
           "supports_traceparent": true,
           "native_otlp": true,
           "tool_call_lifecycle": {
@@ -823,6 +926,29 @@
             "tool_call",
             "tool_result",
             "event_content"
+          ],
+          "aid_surface_events": {
+            "tool_call": [
+              "PreToolUse",
+              "PermissionRequest"
+            ],
+            "prompt": [
+              "UserPromptSubmit",
+              "SubagentStart"
+            ],
+            "tool_result": [
+              "PermissionDenied",
+              "PostToolUse",
+              "PostToolUseFailure"
+            ]
+          },
+          "aid_wire_version": "chat-tool-calls-v1",
+          "aid_tool_call_shapes": [
+            {
+              "tool": "Bash",
+              "surface": "shell",
+              "command_arg": "command"
+            }
           ],
           "supports_traceparent": true,
           "native_otlp": true,
@@ -1005,6 +1131,27 @@
             "tool_result",
             "event_content"
           ],
+          "aid_surface_events": {
+            "tool_call": [
+              "pre_tool_call"
+            ],
+            "prompt": [
+              "pre_llm_call",
+              "subagent_start"
+            ],
+            "tool_result": [
+              "post_tool_call",
+              "post_llm_call"
+            ]
+          },
+          "aid_wire_version": "chat-tool-calls-v1",
+          "aid_tool_call_shapes": [
+            {
+              "tool": "execute_command",
+              "surface": "shell",
+              "command_arg": "command"
+            }
+          ],
           "supports_traceparent": true,
           "native_otlp": false,
           "tool_call_lifecycle": {
@@ -1146,6 +1293,27 @@
             "tool_result",
             "event_content"
           ],
+          "aid_surface_events": {
+            "tool_call": [
+              "pre_tool_call"
+            ],
+            "prompt": [
+              "pre_llm_call",
+              "subagent_start"
+            ],
+            "tool_result": [
+              "post_tool_call",
+              "post_llm_call"
+            ]
+          },
+          "aid_wire_version": "chat-tool-calls-v1",
+          "aid_tool_call_shapes": [
+            {
+              "tool": "execute_command",
+              "surface": "shell",
+              "command_arg": "command"
+            }
+          ],
           "supports_traceparent": true,
           "native_otlp": false,
           "tool_call_lifecycle": {
@@ -1285,6 +1453,50 @@
             "tool_call",
             "tool_result"
           ],
+          "aid_surface_events": {
+            "tool_call": [
+              "preToolUse",
+              "beforeShellExecution",
+              "beforeMCPExecution",
+              "beforeReadFile",
+              "beforeTabFileRead"
+            ],
+            "prompt": [
+              "subagentStart",
+              "beforeSubmitPrompt"
+            ],
+            "tool_result": [
+              "postToolUse",
+              "postToolUseFailure",
+              "afterShellExecution",
+              "afterMCPExecution",
+              "afterFileEdit",
+              "afterTabFileEdit",
+              "afterAgentResponse",
+              "afterAgentThought"
+            ]
+          },
+          "aid_wire_version": "chat-tool-calls-v1",
+          "aid_tool_call_shapes": [
+            {
+              "tool": "run_terminal_cmd",
+              "surface": "shell",
+              "command_arg": "command"
+            },
+            {
+              "tool": "Shell",
+              "surface": "shell",
+              "command_arg": "command"
+            },
+            {
+              "tool": "Grep",
+              "surface": "file-read"
+            },
+            {
+              "tool": "Read",
+              "surface": "file-read"
+            }
+          ],
           "supports_traceparent": true,
           "native_otlp": false,
           "tool_call_lifecycle": {
@@ -1416,6 +1628,26 @@
             "prompt",
             "tool_call",
             "tool_result"
+          ],
+          "aid_surface_events": {
+            "tool_call": [
+              "PreToolUse",
+              "PermissionRequest"
+            ],
+            "prompt": [
+              "UserPromptSubmit"
+            ],
+            "tool_result": [
+              "PostToolUse"
+            ]
+          },
+          "aid_wire_version": "chat-tool-calls-v1",
+          "aid_tool_call_shapes": [
+            {
+              "tool": "exec",
+              "surface": "shell",
+              "command_arg": "command"
+            }
           ],
           "supports_traceparent": true,
           "native_otlp": false,
@@ -1552,6 +1784,28 @@
             "tool_call",
             "tool_result"
           ],
+          "aid_surface_events": {
+            "tool_call": [
+              "preToolUse",
+              "permissionRequest"
+            ],
+            "prompt": [
+              "userPromptSubmitted",
+              "subagentStart"
+            ],
+            "tool_result": [
+              "postToolUse",
+              "postToolUseFailure"
+            ]
+          },
+          "aid_wire_version": "chat-tool-calls-v1",
+          "aid_tool_call_shapes": [
+            {
+              "tool": "shell",
+              "surface": "shell",
+              "command_arg": "command"
+            }
+          ],
           "supports_traceparent": true,
           "native_otlp": false,
           "tool_call_lifecycle": {
@@ -1666,6 +1920,29 @@
             "tool_call",
             "tool_result"
           ],
+          "aid_surface_events": {
+            "tool_call": [
+              "preToolUse",
+              "permissionRequest"
+            ],
+            "prompt": [
+              "userPromptSubmitted",
+              "userPromptTransformed",
+              "subagentStart"
+            ],
+            "tool_result": [
+              "postToolUse",
+              "postToolUseFailure"
+            ]
+          },
+          "aid_wire_version": "chat-tool-calls-v1",
+          "aid_tool_call_shapes": [
+            {
+              "tool": "shell",
+              "surface": "shell",
+              "command_arg": "command"
+            }
+          ],
           "supports_traceparent": true,
           "native_otlp": false,
           "tool_call_lifecycle": {
@@ -1779,6 +2056,19 @@
             "tool_call",
             "event_content"
           ],
+          "aid_surface_events": {
+            "tool_call": [
+              "PreToolUse"
+            ]
+          },
+          "aid_wire_version": "chat-tool-calls-v1",
+          "aid_tool_call_shapes": [
+            {
+              "tool": "run_command",
+              "surface": "shell",
+              "command_arg": "CommandLine"
+            }
+          ],
           "supports_traceparent": true,
           "native_otlp": false,
           "tool_call_lifecycle": {
@@ -1883,6 +2173,22 @@
           "aid_surfaces": [
             "tool_call",
             "tool_result"
+          ],
+          "aid_surface_events": {
+            "tool_call": [
+              "tool.execute.before"
+            ],
+            "tool_result": [
+              "tool.execute.after"
+            ]
+          },
+          "aid_wire_version": "chat-tool-calls-v1",
+          "aid_tool_call_shapes": [
+            {
+              "tool": "bash",
+              "surface": "shell",
+              "command_arg": "command"
+            }
           ],
           "supports_traceparent": false,
           "native_otlp": false,
@@ -1995,6 +2301,26 @@
             "tool_call",
             "tool_result",
             "event_content"
+          ],
+          "aid_surface_events": {
+            "tool_call": [
+              "tool.call"
+            ],
+            "prompt": [
+              "agent.start"
+            ],
+            "tool_result": [
+              "tool.result",
+              "agent.end"
+            ]
+          },
+          "aid_wire_version": "chat-tool-calls-v1",
+          "aid_tool_call_shapes": [
+            {
+              "tool": "shell",
+              "surface": "shell",
+              "command_arg": "command"
+            }
           ],
           "supports_traceparent": false,
           "native_otlp": false,

@@ -871,7 +871,7 @@ func (g *GuardrailInspector) inspectManagedAIDOnly(ctx context.Context, directio
 	}
 	t0 := time.Now()
 	ciscoCtx, endCisco := g.startPhaseSpan(ctx, "cisco_ai_defense")
-	v := ciscoClient.Inspect(ciscoCtx, messages)
+	v := inspectCisco(ciscoCtx, ciscoClient, messages)
 	duration := time.Since(t0)
 	elapsed := float64(duration) / float64(time.Millisecond)
 	endCisco(phaseAction(v), phaseSeverity(v), duration)
@@ -890,10 +890,32 @@ func (g *GuardrailInspector) inspectManagedAIDOnly(ctx context.Context, directio
 	return v
 }
 
+// inspectCisco sends the proxy lane's messages to AID without their tool
+// fields. A provider's tool_calls are forwarded raw (null, [], object
+// arguments, no id), and AID rejects the whole request over one malformed
+// entry, so this lane keeps sending role and content only. The hook lane is
+// what sends tool calls, in a shape it builds itself. client is the caller's
+// currentCiscoInspector snapshot.
+func inspectCisco(ctx context.Context, client Inspector, messages []ChatMessage) *ScanVerdict {
+	return client.Inspect(ctx, withoutAIDToolCalls(messages))
+}
+
+// withoutAIDToolCalls copies messages with ToolCalls cleared, leaving the
+// caller's slice untouched.
+func withoutAIDToolCalls(messages []ChatMessage) []ChatMessage {
+	out := make([]ChatMessage, len(messages))
+	copy(out, messages)
+	for i := range out {
+		out[i].ToolCalls = nil
+	}
+	return out
+}
+
 // managedAIDContentIsInspectable mirrors the text AID actually receives.
-// Both Cisco clients serialize ChatMessage.Content and ignore RawContent,
-// tool calls, and other local-only fields, so whitespace-only Content cannot
-// produce a meaningful remote decision.
+// Both Cisco clients serialize ChatMessage.Content and ignore RawContent and
+// other local-only fields, and the proxy lane drops tool calls before sending
+// (see inspectCisco), so whitespace-only Content cannot produce a meaningful
+// remote decision.
 func managedAIDContentIsInspectable(content string) bool {
 	return strings.TrimSpace(content) != ""
 }
@@ -909,8 +931,8 @@ func managedAIDMessagesHaveInspectableContent(messages []ChatMessage) bool {
 
 // managedAIDMessagesForInspection closes the gap between provider-native
 // prompt formats and the canonical message payload sent to Cisco AI Defense.
-// Passthrough routes expose top-level prompt text through content, while both
-// Cisco clients serialize only ChatMessage.Content. When no existing message
+// Passthrough routes expose top-level prompt text through content, while the
+// proxy lane sends AID only ChatMessage.Content. When no existing message
 // has serializable text, preserve the original history and append one user
 // turn carrying that prompt. Existing chat history is already authoritative
 // and must not receive a duplicate; blank prompts keep the benign no_content
@@ -1103,7 +1125,7 @@ func (g *GuardrailInspector) inspectRegexOnly(ctx context.Context, direction, co
 	if (sm == "remote" || sm == "both") && ciscoClient != nil && len(messages) > 0 {
 		t0 := time.Now()
 		ciscoCtx, endCisco := g.startPhaseSpan(ctx, "cisco_ai_defense")
-		ciscoResult = ciscoClient.Inspect(ciscoCtx, messages)
+		ciscoResult = inspectCisco(ciscoCtx, ciscoClient, messages)
 		ciscoElapsed := time.Since(t0)
 		ciscoElapsedMs = float64(ciscoElapsed) / float64(time.Millisecond)
 		endCisco(phaseAction(ciscoResult), phaseSeverity(ciscoResult), ciscoElapsed)
@@ -1166,7 +1188,7 @@ func (g *GuardrailInspector) inspectRegexJudge(ctx context.Context, direction, c
 	runCisco := func() {
 		t0 := time.Now()
 		ciscoCtx, endCisco := g.startPhaseSpan(ctx, "cisco_ai_defense")
-		ciscoResult = ciscoClient.Inspect(ciscoCtx, messages)
+		ciscoResult = inspectCisco(ciscoCtx, ciscoClient, messages)
 		ciscoElapsed := time.Since(t0)
 		ciscoElapsedMs = float64(ciscoElapsed) / float64(time.Millisecond)
 		endCisco(phaseAction(ciscoResult), phaseSeverity(ciscoResult), ciscoElapsed)
@@ -1343,7 +1365,7 @@ func (g *GuardrailInspector) inspectJudgeFirst(ctx context.Context, direction, c
 		if (g.scannerMode == "remote" || g.scannerMode == "both") && ciscoClient != nil && len(messages) > 0 {
 			t0 := time.Now()
 			ciscoCtx, endCisco := g.startPhaseSpan(ctx, "cisco_ai_defense")
-			ciscoResult = ciscoClient.Inspect(ciscoCtx, messages)
+			ciscoResult = inspectCisco(ciscoCtx, ciscoClient, messages)
 			ciscoElapsed := time.Since(t0)
 			ciscoElapsedMs = float64(ciscoElapsed) / float64(time.Millisecond)
 			endCisco(phaseAction(ciscoResult), phaseSeverity(ciscoResult), ciscoElapsed)
@@ -1397,7 +1419,7 @@ func (g *GuardrailInspector) inspectJudgeFirst(ctx context.Context, direction, c
 	if (g.scannerMode == "remote" || g.scannerMode == "both") && ciscoClient != nil && len(messages) > 0 {
 		t0 := time.Now()
 		ciscoCtx, endCisco := g.startPhaseSpan(ctx, "cisco_ai_defense")
-		ciscoResult = ciscoClient.Inspect(ciscoCtx, messages)
+		ciscoResult = inspectCisco(ciscoCtx, ciscoClient, messages)
 		ciscoElapsed := time.Since(t0)
 		ciscoElapsedMs = float64(ciscoElapsed) / float64(time.Millisecond)
 		endCisco(phaseAction(ciscoResult), phaseSeverity(ciscoResult), ciscoElapsed)
