@@ -135,6 +135,24 @@ class PluginEnforcer:
             return None
         return dest
 
+    def legacy_quarantine_path(self, plugin_name: str, connector: str, path: str) -> str | None:
+        """Validate a recorded version-named copy from an earlier watcher."""
+        if not connector or self._quarantine_path(plugin_name, connector) is None:
+            return None
+        parent = os.path.abspath(os.path.join(self.quarantine_dir, connector))
+        source = os.path.abspath(path)
+        if (os.path.dirname(source) != parent or
+                is_link_or_reparse(parent) or is_link_or_reparse(source) or
+                not os.path.exists(source) or
+                not os.path.realpath(parent).startswith(os.path.realpath(self.quarantine_dir) + os.sep)):
+            return None
+        try:
+            actual = canonical_plugin_id(source)[0]
+            expected = validate_plugin_id(plugin_name)
+        except PluginIdentityError:
+            return None
+        return source if filesystem_identity_key(actual, parent) == filesystem_identity_key(expected, parent) else None
+
     def quarantine(
         self,
         plugin_name: str,
@@ -198,9 +216,13 @@ class PluginEnforcer:
         restore_path: str,
         allowed_roots: list[str] | None = None,
         connector: str = "",
+        quarantine_path: str = "",
     ) -> bool:
         """Restore a quarantined plugin to its original location."""
-        src = self._quarantine_path(plugin_name, connector)
+        src = (
+            self.legacy_quarantine_path(plugin_name, connector, quarantine_path)
+            if quarantine_path else self._quarantine_path(plugin_name, connector)
+        )
         if src is None:
             return False
         if is_link_or_reparse(src) or not os.path.exists(src):

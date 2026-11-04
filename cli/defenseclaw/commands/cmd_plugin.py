@@ -3979,6 +3979,27 @@ def _quarantined_plugin_alias(pe: Any, name: str, connector: str) -> str:
     return next(iter(hits)) if len(hits) == 1 else ""
 
 
+def _plugin_quarantine_copy(app: AppContext, plugin_name: str, connector: str) -> str:
+    """Find the current slot or one recorded version-named plugin copy."""
+    from defenseclaw.enforce.plugin_enforcer import PluginEnforcer
+
+    enforcer = PluginEnforcer(app.cfg.quarantine_dir)
+    current = enforcer.quarantine_path(plugin_name, connector)
+    if current and os.path.exists(current):
+        return current
+    if not connector or app.store is None or asset_lists.is_secure_client(app.cfg):
+        return ""
+    candidates = set()
+    for record in app.store.list_quarantine_records("plugin", plugin_name, connector):
+        if (record.state not in {"pending", "active", "restoring"} or
+                os.path.basename(record.original_path) != os.path.basename(record.quarantine_path)):
+            continue
+        path = enforcer.legacy_quarantine_path(plugin_name, connector, record.quarantine_path)
+        if path:
+            candidates.add(path)
+    return next(iter(candidates)) if len(candidates) == 1 else ""
+
+
 def _hermes_listed_id(path: str, connector: str) -> str:
     """The id 'plugin list' shows for a Hermes plugin folder, or "" (GAP-2308)."""
     if not path or not connector or connector_paths.normalize(connector) != "hermes":
@@ -4202,17 +4223,23 @@ def _plugin_unblock_line(plugin_name: str, connector: str, only_allow: bool) -> 
     return f"[plugin] Unblocked {plugin_name!r}{scope}."
 
 
-def _plugin_unblock_followup(plugin_name: str, connector: str, all_only_allow: bool) -> None:
+def _plugin_unblock_followup(app: AppContext, plugin_name: str, connector: str, all_only_allow: bool) -> None:
     import shlex
 
     if not all_only_allow:
         click.echo(_PLUGIN_UNBLOCK_NOTE)
-        return
-    cmd = f"defenseclaw plugin scan {shlex.quote(plugin_name)}"
-    if connector:
-        cmd += f" --connector {connector}"
-    click.echo("  Its scan verdict applies again.")
-    click.echo(f"  To scan it now, run: {cmd}")
+    else:
+        cmd = f"defenseclaw plugin scan {shlex.quote(plugin_name)}"
+        if connector:
+            cmd += f" --connector {connector}"
+        click.echo("  Its scan verdict applies again.")
+        click.echo(f"  To scan it now, run: {cmd}")
+    scopes = [connector] if connector else _active_plugin_connectors(app)
+    if any(_plugin_quarantine_copy(app, plugin_name, scope) for scope in scopes):
+        cmd = f"defenseclaw plugin restore {shlex.quote(plugin_name)}"
+        if connector:
+            cmd += f" --connector {connector}"
+        click.echo(f"  A quarantined copy remains. To restore it, run: {cmd}")
 
 
 @plugin.command()
@@ -4247,12 +4274,14 @@ def unblock(app: AppContext, name: str, connector_flag: str) -> None:
             if _unblock_marketplace_copies(app, plugin_name, connector_flag, connector):
                 return
             click.echo(f"[plugin] {plugin_name!r} has no enforcement state to clear for {connector}")
+            if _plugin_quarantine_copy(app, plugin_name, connector):
+                _plugin_unblock_followup(app, plugin_name, connector, False)
             return
         only_allow = _plugin_only_allow_entry(app, pe, plugin_name, connector)
         pe.remove_action_for_connector("plugin", plugin_name, connector)
         _unblock_marketplace_copies(app, plugin_name, connector_flag, connector)
         click.secho(_plugin_unblock_line(plugin_name, connector, only_allow), fg="green")
-        _plugin_unblock_followup(plugin_name, connector, only_allow)
+        _plugin_unblock_followup(app, plugin_name, connector, only_allow)
         if app.logger:
             saved_change_audit(app.logger).log_action(
                 "plugin-unblock",
@@ -4292,7 +4321,7 @@ def unblock(app: AppContext, name: str, connector_flag: str) -> None:
             click.secho(_plugin_unblock_line(plugin_name, scope, only_allow[scope]), fg="green")
         only_one = len(owners) == 1 and not has_unscoped_state
         _plugin_unblock_followup(
-            plugin_name,
+            app, plugin_name,
             owners[0] if only_one else "",
             bool(scopes) and all(only_allow.values()),
         )
@@ -4314,13 +4343,15 @@ def unblock(app: AppContext, name: str, connector_flag: str) -> None:
         if _unblock_marketplace_copies(app, plugin_name, connector_flag, None):
             return
         click.echo(f"[plugin] {plugin_name!r} has no enforcement state to clear")
+        if any(_plugin_quarantine_copy(app, plugin_name, scope) for scope in _active_plugin_connectors(app)):
+            _plugin_unblock_followup(app, plugin_name, "", False)
         return
 
     only_allow = _plugin_only_allow_entry(app, pe, plugin_name, "")
     pe.remove_action("plugin", plugin_name)
     _unblock_marketplace_copies(app, plugin_name, connector_flag, None)
     click.secho(_plugin_unblock_line(plugin_name, "", only_allow), fg="green")
-    _plugin_unblock_followup(plugin_name, "", only_allow)
+    _plugin_unblock_followup(app, plugin_name, "", only_allow)
     if app.logger:
         saved_change_audit(app.logger).log_action("plugin-unblock", plugin_name, "manual unblock via CLI")
 
@@ -4358,9 +4389,6 @@ def allow(app: AppContext, name: str, reason: str, connector_flag: str) -> None:
 
     # A quarantined copy is absent from installed directories. Allowing it now
     # would create a name-only rule and clear the journal needed by restore.
-    from defenseclaw.enforce.plugin_enforcer import PluginEnforcer
-
-    quarantines = PluginEnforcer(app.cfg.quarantine_dir)
     scopes = [connector_scope] if connector_scope else _active_plugin_connectors(app)
     scopes = [*scopes, ""]  # Legacy/global quarantine slot.
     journal_quarantine = any(
@@ -4370,7 +4398,7 @@ def allow(app: AppContext, name: str, reason: str, connector_flag: str) -> None:
         for entry in pe.list_by_type("plugin")
     )
     if not asset_lists.is_secure_client(app.cfg) and (
-        journal_quarantine or any(quarantines.is_quarantined(plugin_name, scope) for scope in scopes)
+        journal_quarantine or any(_plugin_quarantine_copy(app, plugin_name, scope) for scope in scopes)
     ):
         raise click.ClickException(
             f"{plugin_name!r} is quarantined; restore it before allowing the installed copy"
@@ -4899,20 +4927,29 @@ def restore(app: AppContext, name: str, restore_path: str, connector_flag: str) 
 
     pe_enforcer = PluginEnforcer(app.cfg.quarantine_dir)
 
-    def quarantined_targets() -> list[tuple[str, Any, str]]:
-        """(action scope, entry, connector folder holding the copy)."""
+    def quarantined_targets() -> list[tuple[str, Any, str, str]]:
+        """(action scope, entry, connector folder, copy path)."""
         scoped = {target_connector for target_connector, _ in targets}
         found = []
         for target_connector, entry in targets:
-            slot = target_connector if pe_enforcer.is_quarantined(plugin_name, target_connector) else None
+            path = _plugin_quarantine_copy(app, plugin_name, target_connector)
+            slot = target_connector if path else None
             if slot is None and not target_connector and entry is not None and entry.source_path:
                 # GAP-2464: the gateway watcher records a global action but
                 # keeps the copy under the connector it watches for.
                 owner = _connector_for_plugin_path(app, entry.source_path)
-                if owner and owner not in scoped and pe_enforcer.is_quarantined(plugin_name, owner):
+                if owner and owner not in scoped and (path := _plugin_quarantine_copy(app, plugin_name, owner)):
                     slot = owner
+            if slot is None and not target_connector and entry is None:
+                candidates = [
+                    (owner, copy)
+                    for owner in _active_plugin_connectors(app)
+                    if (copy := _plugin_quarantine_copy(app, plugin_name, owner))
+                ]
+                if len(candidates) == 1:
+                    slot, path = candidates[0]
             if slot is not None:
-                found.append((target_connector, entry, slot))
+                found.append((target_connector or (slot if entry is None else ""), entry, slot, path))
         return found
 
     existing_targets = quarantined_targets()
@@ -4926,10 +4963,19 @@ def restore(app: AppContext, name: str, restore_path: str, connector_flag: str) 
         click.echo(f"error: {plugin_name!r} is not quarantined", err=True)
         raise SystemExit(1)
 
-    for resolved_connector, entry, slot_connector in existing_targets:
+    for resolved_connector, entry, slot_connector, slot_path in existing_targets:
         target_restore_path = restore_path
         if not target_restore_path:
-            if entry is None or not entry.source_path:
+            target_restore_path = entry.source_path if entry is not None else ""
+            if not target_restore_path and app.store is not None:
+                records = [
+                    record for record in app.store.list_quarantine_records(
+                        "plugin", plugin_name, slot_connector,
+                    ) if record.quarantine_path == slot_path
+                ]
+                if len(records) == 1:
+                    target_restore_path = records[0].original_path
+            if not target_restore_path:
                 ux.echo(
                     f"error: no stored path for {plugin_name!r}"
                     + (f" on connector={resolved_connector}" if resolved_connector else "")
@@ -4937,7 +4983,6 @@ def restore(app: AppContext, name: str, restore_path: str, connector_flag: str) 
                     err=True,
                 )
                 raise SystemExit(1)
-            target_restore_path = entry.source_path
 
         allowed_roots = (
             _plugin_roots_for_connector(app, resolved_connector) if resolved_connector else _all_active_plugin_dirs(app)
@@ -4983,6 +5028,9 @@ def restore(app: AppContext, name: str, restore_path: str, connector_flag: str) 
             target_restore_path,
             allowed_roots=allowed_roots,
             connector=slot_connector,
+            quarantine_path=(
+                slot_path if slot_path != pe_enforcer.quarantine_path(plugin_name, slot_connector) else ""
+            ),
         ):
             click.echo(
                 f"error: restore failed for {plugin_name!r}"
@@ -5166,19 +5214,18 @@ def _plugin_info_card(
         except Exception:
             scoped_action = None
 
-    from defenseclaw.enforce.plugin_enforcer import PluginEnforcer
-
-    pe_enforcer = PluginEnforcer(app.cfg.quarantine_dir)
-    quarantined = pe_enforcer.is_quarantined(plugin_name, connector)
+    quarantined_path = _plugin_quarantine_copy(app, plugin_name, connector)
+    quarantined = bool(quarantined_path)
     action_name = plugin_name
     display_name = plugin_name
     if info_map is None and not quarantined and connector and app.store is not None:
         from defenseclaw.enforce import PolicyEngine
 
         alias = _quarantined_plugin_alias(PolicyEngine(app.store, app.cfg), plugin_name, connector)
-        if alias and alias != plugin_name and pe_enforcer.is_quarantined(alias, connector):
+        if alias and alias != plugin_name and (alias_path := _plugin_quarantine_copy(app, alias, connector)):
             action_name = alias
             quarantined = True
+            quarantined_path = alias_path
             if scan_entry is None:
                 scan_entry = _latest_plugin_scan_for_connector(app, alias, connector)
     if quarantined and connector:
@@ -5227,9 +5274,7 @@ def _plugin_info_card(
     if action_name != info_map["name"]:
         info_map["quarantine_id"] = action_name
     if quarantined:
-        qpath = pe_enforcer._quarantine_path(action_name, connector)
-        if qpath:
-            info_map["quarantine_path"] = qpath
+        info_map["quarantine_path"] = quarantined_path
     info_map["quarantined"] = quarantined
     info_map.setdefault("installed", False)
     return info_map

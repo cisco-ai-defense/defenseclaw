@@ -3120,6 +3120,14 @@ func (w *InstallWatcher) quarantineAssetWith(ctx context.Context, evt InstallEve
 		w.emitQuarantineFailure(ctx, evt, err)
 		return err
 	}
+	if evt.Type == InstallPlugin && !w.secureClientActive() &&
+		!strings.Contains(evt.Name, "/") && evt.Name != physicalName {
+		plan, err = plan.WithPluginQuarantineName(evt.Name)
+		if err != nil {
+			w.emitQuarantineFailure(ctx, evt, err)
+			return err
+		}
+	}
 	if category, _, nested := strings.Cut(evt.Name, "/"); nested && evt.Type == InstallPlugin {
 		// A plugin in a category folder keeps its category in quarantine, so
 		// "plugin restore <category>/<name>" finds it and web/x and memx/x

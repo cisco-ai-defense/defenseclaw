@@ -66,3 +66,33 @@ func TestGAP0553RepeatedPluginQuarantineKeepsOneCompleteStage(t *testing.T) {
 		}
 	}
 }
+
+func TestGAP0556WatcherQuarantineUsesPluginIdentity(t *testing.T) {
+	cfg, store, logger, skillDir := setupQuarantineProvenanceTestEnv(t)
+	pluginDir := filepath.Join(cfg.DataDir, "plugins")
+	cfg.PluginDir = pluginDir
+	cfg.Guardrail.Connector = "claudecode"
+	pluginPath := filepath.Join(pluginDir, "kit", "1.0.0")
+	if err := os.MkdirAll(pluginPath, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(pluginPath, "plugin.txt"), []byte("ordinary\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	w := New(cfg, []string{skillDir}, []string{pluginDir}, store, logger, nil, nil)
+	evt := InstallEvent{Type: InstallPlugin, Name: "kit", Path: pluginPath, Connector: "claudecode"}
+	if err := w.quarantineAssetWith(context.Background(), evt, false, "manual block via CLI"); err != nil {
+		t.Fatal(err)
+	}
+	want := filepath.Join(cfg.QuarantineDir, "plugins", "claudecode", "kit")
+	if _, err := os.Stat(filepath.Join(want, "plugin.txt")); err != nil {
+		t.Fatalf("plugin copy: %v", err)
+	}
+	if _, err := os.Lstat(filepath.Join(cfg.QuarantineDir, "plugins", "claudecode", "1.0.0")); !os.IsNotExist(err) {
+		t.Fatalf("unexpected version slot: %v", err)
+	}
+	records, err := store.ListQuarantineRecordsForConnector(context.Background(), "plugin", "kit", "claudecode")
+	if err != nil || len(records) != 1 || records[0].QuarantinePath != want {
+		t.Fatalf("quarantine records=%v err=%v", records, err)
+	}
+}
