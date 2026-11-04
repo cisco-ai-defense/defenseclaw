@@ -110,14 +110,13 @@ func TestWindowsVirtualServiceSIDRejectsBroadOrMalformedAccounts(t *testing.T) {
 }
 
 func TestWindowsVirtualServiceSIDForDeletedService(t *testing.T) {
-	// This name has no SCM row, but sc.exe showsid computes a stable service
-	// SID. The exact expected value was independently recorded from Windows.
+	// This name has no SCM row, so LSA cannot resolve it (and on a
+	// domain-joined host off the network it fails with a domain-trust error
+	// instead of ERROR_NONE_MAPPED). The SID is still computed from the name.
+	// The exact expected value was independently recorded from sc.exe showsid.
 	const name = "DefenseClawRecoveryNoSuchServiceProbe_48A6"
 	const expected = "S-1-5-80-557343067-3914267301-595778489-1841644181-1709292513"
 	account := `NT SERVICE\` + name
-	if _, _, _, err := windows.LookupSID("", account); !errors.Is(err, windows.ERROR_NONE_MAPPED) {
-		t.Fatalf("absent service LookupSID error = %v, want ERROR_NONE_MAPPED", err)
-	}
 	sid, err := windowsVirtualServiceSID(account)
 	if err != nil {
 		t.Fatalf("resolve absent service SID: %v", err)
@@ -141,36 +140,19 @@ func TestWindowsVirtualServiceSIDForDeletedService(t *testing.T) {
 	}
 }
 
-func TestWindowsDeterministicServiceSIDMatchesInstalledService(t *testing.T) {
-	const name = "TrustedInstaller"
-	resolved, _, _, err := windows.LookupSID("", `NT SERVICE\`+name)
-	if err != nil {
-		t.Fatalf("LookupSID installed service: %v", err)
-	}
-	computed, err := windowsDeterministicServiceSID(name)
-	if err != nil {
-		t.Fatalf("compute installed service SID: %v", err)
-	}
-	if !resolved.Equals(computed) {
-		t.Fatalf("resolved SID %s differs from deterministic SID %s", resolved, computed)
-	}
-}
-
-func TestParseWindowsServiceSIDOutputRejectsAmbiguousOrPartial(t *testing.T) {
-	const sid = "S-1-5-80-557343067-3914267301-595778489-1841644181-1709292513"
-	for _, output := range []string{
-		"no service SID",
-		sid + "\n" + sid,
-		"SERVICE SID: " + sid + "-1",
-		"SERVICE SID: " + sid + "1",
-	} {
-		if _, err := parseWindowsServiceSIDOutput(output); err == nil {
-			t.Fatalf("accepted ambiguous or partial SID output %q", output)
+func TestWindowsVirtualServiceSIDMatchesInstalledService(t *testing.T) {
+	for _, name := range []string{"TrustedInstaller", "EventLog"} {
+		resolved, _, _, err := windows.LookupSID("", `NT SERVICE\`+name)
+		if err != nil {
+			t.Fatalf("LookupSID installed service %s: %v", name, err)
 		}
-	}
-	parsed, err := parseWindowsServiceSIDOutput("SERVICE SID: " + sid + "\r\nSTATUS: Inactive")
-	if err != nil || parsed.String() != sid {
-		t.Fatalf("valid service SID output = %v, %v", parsed, err)
+		computed, err := windowsVirtualServiceSID(`NT SERVICE\` + name)
+		if err != nil {
+			t.Fatalf("compute installed service SID %s: %v", name, err)
+		}
+		if !resolved.Equals(computed) {
+			t.Fatalf("resolved SID %s differs from computed SID %s for %s", resolved, computed, name)
+		}
 	}
 }
 

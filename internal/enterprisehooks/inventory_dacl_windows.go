@@ -14,6 +14,7 @@ import (
 	"strings"
 	"unsafe"
 
+	"github.com/defenseclaw/defenseclaw/internal/managed"
 	"github.com/defenseclaw/defenseclaw/internal/winpath"
 	"golang.org/x/sys/windows"
 	"golang.org/x/sys/windows/svc/mgr"
@@ -81,7 +82,7 @@ func GrantGatewayInventoryReadForManifest(manifest Manifest, gatewayServiceName 
 		return fmt.Errorf("enterprise hooks: refusing untrusted gateway service name %q", name)
 	}
 	account := `NT SERVICE\` + name
-	sid, _, _, err := windows.LookupSID("", account)
+	sid, err := managed.WindowsServiceAccountSID(account)
 	if err != nil {
 		return fmt.Errorf("enterprise hooks: resolve gateway service SID %q: %w", account, err)
 	}

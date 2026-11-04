@@ -27335,12 +27335,22 @@ function Invoke-DefenseClawInstallLikeLifecycle {
         if ($Action -eq 'Install' -and -not $priorDeploymentActive) {
             # Before any target runtime is prepared or the Guardian can
             # start, clear runtime selectors an earlier purge or interrupted
-            # uninstall left with nothing that could authorize them.
-            [void](Invoke-DefenseClawOrphanedSelectorPrune `
-                -Layout $Layout `
-                -GatewayServiceName $GatewayServiceName `
-                -TransactionID $lifecycleTransactionID `
-                -SnapshotPath $snapshot)
+            # uninstall left with nothing that could authorize them. This is
+            # cleanup: a host with no orphaned selector loses nothing when it
+            # fails, so the Install logs it and continues.
+            try {
+                [void](Invoke-DefenseClawOrphanedSelectorPrune `
+                    -Layout $Layout `
+                    -GatewayServiceName $GatewayServiceName `
+                    -TransactionID $lifecycleTransactionID `
+                    -SnapshotPath $snapshot)
+            }
+            catch {
+                Write-DefenseClawResilienceEvent -Marker defenseclaw_degraded -Fields @{
+                    subsystem = 'selector-prune'
+                    reason    = "orphaned selector prune failed; continuing the Install: $(ConvertTo-DefenseClawBoundedDiagnostic -Value $_.Exception.Message)"
+                }
+            }
         }
         $targetRuntimeManifestPresent = [bool](
             Microsoft.PowerShell.Management\Test-Path `

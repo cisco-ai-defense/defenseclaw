@@ -13,16 +13,12 @@
 package managed
 
 import (
-	"context"
 	"errors"
 	"fmt"
 	"os"
-	"os/exec"
 	"path/filepath"
-	"regexp"
 	"strings"
 	"sync"
-	"time"
 	"unsafe"
 
 	"github.com/defenseclaw/defenseclaw/internal/winpath"
@@ -829,79 +825,16 @@ func windowsVirtualServiceSID(account string) (*windows.SID, error) {
 	if len(name) > 128 {
 		return nil, fmt.Errorf("%s service name is too long", WindowsServiceAccountEnv)
 	}
-	sid, _, _, err := windows.LookupSID("", account)
-	if errors.Is(err, windows.ERROR_NONE_MAPPED) {
-		// SCM removes the virtual account mapping when an uninstall deletes
-		// the service. Committed managed-hook teardown still has to validate
-		// the retained runtime before it can retire its authenticated journal.
-		// Match the installer's recovery path: sc.exe showsid computes the
-		// service SID from the exact validated name without an SCM row.
-		sid, err = windowsDeterministicServiceSID(name)
-	}
+	// Compute the SID from the validated name instead of asking LSA. Before
+	// the service exists LSA does not know the name and forwards it to a
+	// domain controller; a domain-joined host off the corporate network then
+	// fails the lookup (ERROR_TRUSTED_RELATIONSHIP_FAILURE) even though the
+	// SID depends only on the name.
+	sid, err := windows.StringToSid(virtualServiceSIDString(name))
 	if err != nil {
 		return nil, fmt.Errorf("resolve Windows virtual service account %q: %w", account, err)
 	}
-	// LookupSID resolved the `NT SERVICE\<name>` string, but a compromised
-	// registrar could point the lookup at any SID. Bind trust to the NT
-	// SERVICE authority (S-1-5-80-...) before returning: reject any SID
-	// that is not under NT AUTHORITY (Value 5) with SubAuthority(0) == 80.
-	if !sidIsNTService(sid) {
-		return nil, fmt.Errorf(
-			"resolved Windows virtual service account %q is not under NT SERVICE (S-1-5-80): %s",
-			account, sidString(sid),
-		)
-	}
 	return sid, nil
-}
-
-var windowsServiceSIDOutput = regexp.MustCompile(
-	`S-1-5-80-(?:[0-9]{1,10}-){4}[0-9]{1,10}`,
-)
-
-func windowsDeterministicServiceSID(name string) (*windows.SID, error) {
-	systemDir, err := windows.GetSystemDirectory()
-	if err != nil {
-		return nil, fmt.Errorf("resolve Windows system directory: %w", err)
-	}
-	scExe := filepath.Join(systemDir, "sc.exe")
-	// Code integrity is advisory: TrustedInstaller owns sc.exe, and host
-	// hardening that re-ACLs System32 must not stop service SID resolution.
-	if err := ValidateExecutableFilePath(scExe, "Windows service SID calculator"); err != nil {
-		return nil, fmt.Errorf("validate Windows service SID calculator: %w", err)
-	}
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer cancel()
-	command := exec.CommandContext(ctx, scExe, "showsid", name)
-	command.Dir = systemDir
-	output, err := command.CombinedOutput()
-	if err != nil {
-		return nil, fmt.Errorf("compute Windows virtual service SID: %w", err)
-	}
-	if len(output) > 4096 {
-		return nil, errors.New("Windows service SID calculator output exceeds 4096 bytes")
-	}
-	return parseWindowsServiceSIDOutput(string(output))
-}
-
-func parseWindowsServiceSIDOutput(output string) (*windows.SID, error) {
-	matches := windowsServiceSIDOutput.FindAllStringIndex(output, -1)
-	if len(matches) != 1 {
-		return nil, errors.New("Windows service SID calculator did not return exactly one service SID")
-	}
-	start, end := matches[0][0], matches[0][1]
-	if start > 0 && isWindowsSIDChar(output[start-1]) ||
-		end < len(output) && isWindowsSIDChar(output[end]) {
-		return nil, errors.New("Windows service SID calculator returned a partial service SID")
-	}
-	sid, err := windows.StringToSid(output[start:end])
-	if err != nil || !sidIsNTService(sid) || sid.SubAuthorityCount() != 6 {
-		return nil, errors.New("Windows service SID calculator returned an invalid service SID")
-	}
-	return sid, nil
-}
-
-func isWindowsSIDChar(char byte) bool {
-	return char == '-' || char >= '0' && char <= '9'
 }
 
 func sidIsNTService(sid *windows.SID) bool {
