@@ -3371,6 +3371,14 @@ func (w *InstallWatcher) linkedAssetScanTarget(evt InstallEvent) (string, error)
 		if watcherPathAtOrBelow(target, root) {
 			return target, nil
 		}
+		// OpenClaw installs npm plugins in a managed project beside its
+		// extensions folder and links the extension entry to that package.
+		// Read only that project's package tree for an extension entry.
+		if evt.Type == InstallPlugin && w.eventConnector(evt) == "openclaw" &&
+			filepath.Base(root) == "extensions" && sameWatcherPath(filepath.Dir(evt.Path), root) &&
+			watcherPathAtOrBelow(target, filepath.Join(filepath.Dir(root), "npm", "projects")) {
+			return target, nil
+		}
 	}
 	return "", errLinkedAssetOutsideRoots
 }

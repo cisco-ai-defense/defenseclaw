@@ -37,7 +37,7 @@ var managedHookDecisionRecorder = writeManagedHookDecisionRecord
 // never payloads, response bodies, tokens or transport error text.
 func recordManagedHookDecision(opts Options, sp spec, reason, category, failMode string, blocked bool) {
 	marker := managed.MarkerDegraded
-	if managedHookBoundaryReason(reason) {
+	if managedHookBoundaryReason(reason) || (blocked && managedHookAvailabilityReason(reason)) {
 		marker = managed.MarkerBoundary
 	}
 	decision := "allow"
@@ -109,20 +109,28 @@ func managedHookBoundaryReason(reason string) bool {
 	case managedRuntimeStateInvalidReason,
 		managedRuntimeHomeMissingReason,
 		managedRuntimeDisableSentinelReason,
-		managedRuntimeTokenEmptyReason,
-		managedHookTokenUnreadableReason,
-		managedHookTokenEmptyReason,
-		managedHookOversizedReason,
 		managedHookInternalErrorReason,
 		managedGatewayPortHeldReason,
 		managedGatewayPeerUnverifiedReason:
 		return true
 	}
-	if strings.HasPrefix(reason, missingGatewayTokenReason) {
-		return true
-	}
 	return strings.HasPrefix(reason, "gateway returned HTTP 401") ||
 		strings.HasPrefix(reason, "gateway returned HTTP 403")
+}
+
+// managedHookAvailabilityReason reports the managed failures the fail mode
+// decides under Secure Client: a missing, empty or unreadable token and a
+// payload over the cap. They are recorded as a boundary when they block and
+// as degraded when the fail mode lets the event through.
+func managedHookAvailabilityReason(reason string) bool {
+	switch reason {
+	case managedRuntimeTokenEmptyReason,
+		managedHookTokenUnreadableReason,
+		managedHookTokenEmptyReason,
+		managedHookOversizedReason:
+		return true
+	}
+	return strings.HasPrefix(reason, missingGatewayTokenReason)
 }
 
 func boundedManagedRecordField(value string, maximum int) string {

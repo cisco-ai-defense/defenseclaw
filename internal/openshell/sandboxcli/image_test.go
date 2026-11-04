@@ -195,42 +195,20 @@ func TestImageBuildTargetsTheGatewayDriver(t *testing.T) {
 	}
 }
 
-// AG-MAC-F2: an image whose hooks verify but whose harness cannot start
-// with a MicroVM's name resolution is built (docker sandboxes run it), and
-// the build says a MicroVM gateway refuses it, with the probe's reason.
-// A MicroVM run that settled nothing is said as such: the image is not
-// checked for a MicroVM yet, and the next run on the vm driver, or a
-// forced build, checks it again. Both warnings name the forced build.
-func TestImageBuildSaysWhatCannotStartInAMicroVM(t *testing.T) {
-	const why = `Antigravity cannot resolve localhost in an OpenShell MicroVM: it printed "lookup localhost on 127.0.0.53:53: server misbehaving"`
-	const unsettled = "the hook-fire probe could not run Codex with an OpenShell MicroVM's name resolution: the run timed out"
+// TestR108OSMINImageBuildHasNoHostsVerdict checks that a vm image with
+// verified hooks is reported ready without a separate name-resolution gate.
+func TestR108OSMINImageBuildHasNoHostsVerdict(t *testing.T) {
 	ta := newTestApp(t, "")
 	ta.daemon.status.Gateway.Driver = "vm"
-	ta.images.microVMProblem = map[string]string{"antigravity": why}
-	ta.images.microVMInconclusive = map[string]string{"codex": unsettled}
 	ta.ok(t, ta.ImageBuild(bg, ImageBuildOptions{Harnesses: []string{"antigravity", "claude", "codex"}}))
 	out := ta.output()
-	for _, want := range []string{
-		"Antigravity 1.2.12: defenseclaw/sandbox:antigravity, hooks verified",
-		"Antigravity cannot start in an OpenShell MicroVM, so a gateway on the vm driver (a Mac's) refuses to run it: " + why +
-			"; `defenseclaw sandbox image build antigravity --force` checks it again",
-		"Codex's image is not checked for an OpenShell MicroVM yet: " + unsettled +
-			"; the next `defenseclaw sandbox run codex` on the vm driver checks it again, as does `defenseclaw sandbox image build codex --force`",
-		"Claude Code ",
-	} {
-		if !strings.Contains(out, want) {
-			t.Fatalf("output lacks %q:\n%s", want, out)
+	for _, name := range []string{"Antigravity", "Claude Code", "Codex"} {
+		if !strings.Contains(out, name+" ") || !strings.Contains(out, "hooks verified") {
+			t.Fatalf("%s image not reported ready:\n%s", name, out)
 		}
 	}
-	if strings.Count(out, "cannot start in an OpenShell MicroVM") != 1 || strings.Count(out, "not checked for an OpenShell MicroVM") != 1 {
-		t.Fatalf("only Antigravity cannot start in a MicroVM, and only Codex is not checked:\n%s", out)
-	}
-	// A docker gateway's images say nothing about MicroVMs.
-	ta = newTestApp(t, "")
-	ta.images.microVMProblem = map[string]string{"antigravity": why}
-	ta.ok(t, ta.ImageBuild(bg, ImageBuildOptions{Harnesses: []string{"antigravity"}}))
-	if strings.Contains(ta.output(), "MicroVM") {
-		t.Fatalf("a docker image build mentions MicroVMs:\n%s", ta.output())
+	if strings.Contains(out, "not checked for an OpenShell MicroVM") || strings.Contains(out, "cannot start in an OpenShell MicroVM") {
+		t.Fatalf("obsolete MicroVM verdict in image build:\n%s", out)
 	}
 }
 
@@ -524,34 +502,29 @@ func TestImageBuildWarnsOfTheMicroVMDisk(t *testing.T) {
 	}
 }
 
-// On a MicroVM gateway the doctor's image check covers every built
-// harness too, counting only its images for the MicroVM driver, and names
-// one whose MicroVM check settled nothing with the command that checks it
-// again.
+// TestDoctorImagesCoverEveryMicroVMHarness checks the vm image list with
+// one configured harness missing and one additional verified harness.
 func TestDoctorImagesCoverEveryMicroVMHarness(t *testing.T) {
 	ta := newTestApp(t, "")
 	ta.HostDoctor = hostReport(func(r *openshell.DoctorReport) { r.Driver = openshell.DriverVM })
-	built := func(connector, version string, microVM, verified bool) image.Record {
+	built := func(connector, version string, microVM bool) image.Record {
 		r := readyImages(ta)[0]
 		r.Tag, r.Connector, r.HarnessVersion = "defenseclaw/sandbox:"+connector, connector, version
-		r.MicroVM, r.MicroVMVerified = microVM, microVM && verified
+		r.MicroVM = microVM
 		if microVM {
 			r.Tag += "-microvm"
 		}
 		return r
 	}
-	// Codex has only a docker image; Kiro, not configured, is unchecked.
-	ta.images.recs = []image.Record{built("claudecode", "2.1.156", true, true), built("codex", "0.146.0", false, false), built("kiro", "2.24.1", true, false)}
+	ta.images.recs = []image.Record{built("claudecode", "2.1.156", true), built("codex", "0.146.0", false), built("kiro", "2.24.1", true)}
 	c := ta.runDoctor(bg).Get(CheckIDImages)
 	if c == nil || c.Status != "warn" || c.Fix == nil || c.Fix.Command != CommandName+" image build codex" ||
-		c.Detail != "not built yet: codex (the first run builds it, which takes a while); not checked for an OpenShell MicroVM yet: kiro "+
-			"(the next run checks it first, which takes a while); hook-verified: claudecode 2.1.156" {
+		!strings.Contains(c.Detail, "hook-verified: claudecode 2.1.156, kiro 2.24.1") {
 		t.Fatalf("images check = %+v", c)
 	}
-	ta.images.recs = append(ta.images.recs, built("codex", "0.146.0", true, true))
+	ta.images.recs = append(ta.images.recs, built("codex", "0.146.0", true))
 	c = ta.runDoctor(bg).Get(CheckIDImages)
-	if c.Status != "warn" || c.Fix == nil || c.Fix.Command != CommandName+" image build kiro --force" ||
-		c.Detail != "not checked for an OpenShell MicroVM yet: kiro (the next run checks it first, which takes a while); hook-verified: claudecode 2.1.156, codex 0.146.0" {
+	if c == nil || c.Status != "pass" || c.Fix != nil || !strings.Contains(c.Detail, "codex 0.146.0") {
 		t.Fatalf("images check = %+v", c)
 	}
 }

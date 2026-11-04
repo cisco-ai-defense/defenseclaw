@@ -1497,6 +1497,13 @@ func validateWindowsManagedHooksGuardianActivation(
 		// ambiguous. The refusal names the row so it says what to repair
 		// (GAP-0571).
 		failedRow := !row.OK && !row.Pending
+		if row.Error == enterpriseHookAccountLinkFailure && !waiting {
+			return nil, nil, fmt.Errorf(
+				"protected Guardian account link for %s target %s cannot be verified for teardown",
+				target.Connector,
+				target.SID,
+			)
+		}
 		if row.OK && row.Pending {
 			return nil, nil, fmt.Errorf(
 				"protected Guardian state contains an ambiguous target disposition: %s target %s is both protected and pending",
