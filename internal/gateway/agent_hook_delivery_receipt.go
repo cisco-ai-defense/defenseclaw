@@ -139,7 +139,8 @@ func (a *APIServer) deliveredHookDecision(connectorName string, resp agentHookRe
 //   - A native hook's tool call without a receipt comes from an earlier hook
 //     binary (a package upgrade in flight) or a connection without full
 //     duplex. Its answer watchdog may have blocked after the gateway decided,
-//     so only a block is known.
+//     including after an on-time connection check, so only a block in closed
+//     mode is known.
 //   - A 1.0.4 hook that released its request before the gateway's late 103
 //     took the answer without a receipt, the same as an earlier binary.
 //   - A managed shell hook post (shellBridge, HookShellBridgeHeader) has no
@@ -152,8 +153,11 @@ func (a *APIServer) unreceiptedHookDecision(shellBridge, hungUpBeforeAnswer bool
 		return resp
 	}
 	if !a.scannerCfg.StandaloneEnterprise() {
-		if a.scannerCfg.DeploymentMode == "per_user" && hungUpBeforeAnswer && !shellBridge &&
+		if a.scannerCfg.DeploymentMode == "per_user" && !shellBridge &&
 			hookexec.DeliveryReceiptEvent(connectorName, event) {
+			if a.scannerCfg.EffectiveHookFailModeForConnector(connectorName) != "open" && resp.Action == "block" {
+				return resp
+			}
 			return unconfirmedHookDelivery(resp)
 		}
 		return resp
