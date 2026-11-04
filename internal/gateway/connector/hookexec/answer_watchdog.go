@@ -90,6 +90,7 @@ type answerWatchdog struct {
 	noDecisionCode               int
 	noDecisionBlocked            bool
 	noDecisionLog                func()
+	noDecisionFrame              []byte
 	secureClient                 bool
 	visibleOutage                func() ([]byte, []byte, int)
 	exit                         func(int)
@@ -109,6 +110,7 @@ type answerWatchdog struct {
 	installOut, installErr []byte
 	installCode            int
 	installLogFailure      func()
+	installFrame           []byte
 
 	ceiling         time.Time
 	waiter          *answerDeadlineWaiter
@@ -256,10 +258,14 @@ func prepareAnswerWatchdog(opts *Options, sp spec, failMode string, ceiling time
 	w.fallbackBlocked = watchdogNoAnswerBlocks(*opts, sp, failMode)
 	w.noDecisionBlocked = w.fallbackBlocked
 	if w.failureLog.markerEnabled {
-		w.failureLog.setFallbackFrame(localFailureFallbackFrame(*opts, sp, perUserGatewayNoAnswerReason,
-			"transport", noAnswerFailMode(*opts, failMode), w.fallbackBlocked))
+		w.noDecisionFrame = localFailureFallbackFrame(*opts, sp, perUserGatewayNoAnswerReason,
+			"transport", noAnswerFailMode(*opts, failMode), w.fallbackBlocked)
+		w.failureLog.setFallbackFrame(w.noDecisionFrame)
 	}
 	w.installCheck, w.installOut, w.installErr, w.installCode, w.installLogFailure = renderInstallAnswer(*opts, sp, failMode)
+	if w.installCheck != nil && w.failureLog.markerEnabled {
+		w.installFrame = localFailureFallbackFrame(*opts, sp, perUserGatewayNoAnswerReason, "transport", "closed", true)
+	}
 	opts.Stdout, opts.Stderr = &w.out, &w.err
 	opts.answerWatch = w
 	return w
@@ -367,6 +373,10 @@ func (w *answerWatchdog) adopt(opts *Options, sp spec, failMode string) {
 	opts.failureLog = w.failureLog
 	stdout, stderr, code, logFailure := renderNoAnswer(*opts, sp, failMode)
 	installCheck, installOut, installErr, installCode, installLogFailure := renderInstallAnswer(*opts, sp, failMode)
+	var installFrame []byte
+	if installCheck != nil && w.failureLog.markerEnabled {
+		installFrame = localFailureFallbackFrame(*opts, sp, perUserGatewayNoAnswerReason, "transport", "closed", true)
+	}
 	w.mu.Lock()
 	defer w.mu.Unlock()
 	if w.fired || w.claimedAnswer || (w.closedKnown && !closed) {
@@ -375,10 +385,16 @@ func (w *answerWatchdog) adopt(opts *Options, sp spec, failMode string) {
 	w.fallbackOut, w.fallbackErr, w.fallbackCode, w.logFailure = stdout, stderr, code, logFailure
 	w.noDecisionOut, w.noDecisionErr, w.noDecisionCode, w.noDecisionLog = stdout, stderr, code, logFailure
 	w.noDecisionBlocked = watchdogNoAnswerBlocks(*opts, sp, failMode)
+	if w.failureLog.markerEnabled {
+		w.noDecisionFrame = localFailureFallbackFrame(*opts, sp, perUserGatewayNoAnswerReason,
+			"transport", noAnswerFailMode(*opts, failMode), w.noDecisionBlocked)
+		w.failureLog.replaceFallbackFrame(w.noDecisionFrame)
+	}
 	w.visibleOutage = nil
 	w.fallbackBlocked = w.noDecisionBlocked
 	w.installCheck, w.installOut, w.installErr, w.installCode, w.installLogFailure =
 		installCheck, installOut, installErr, installCode, installLogFailure
+	w.installFrame = installFrame
 }
 
 // closeForAnsweredError makes the watchdog's answer the closed response of a
@@ -559,6 +575,7 @@ type perUserRestartAnswer struct {
 	out, err               []byte
 	code                   int
 	blocked                bool
+	frame, installFrame    []byte
 	logFailure             func()
 	visible                func() ([]byte, []byte, int)
 	installCheck           func() bool
@@ -590,6 +607,12 @@ func renderPerUserRestartAnswer(opts Options, sp spec, failMode, reason string) 
 	answer.blocked = !sp.failOpenOnly && mode == "closed" && !failClosedStopEvent(outage, sp)
 	answer.installCheck, answer.installOut, answer.installErr, answer.installCode, answer.installLogFailure =
 		renderInstallAnswer(outage, sp, mode)
+	if !outage.ManagedEnterprise && !outage.SecureClient {
+		answer.frame = localFailureFallbackFrame(outage, sp, perUserGatewayRestartingReason, "transport", mode, answer.blocked)
+		if answer.installCheck != nil {
+			answer.installFrame = localFailureFallbackFrame(outage, sp, perUserGatewayNoAnswerReason, "transport", "closed", true)
+		}
+	}
 	return answer
 }
 
@@ -600,6 +623,10 @@ func (w *answerWatchdog) useRestartAnswerLocked(answer *perUserRestartAnswer) {
 	w.fallbackBlocked = answer.blocked
 	w.installCheck, w.installOut, w.installErr, w.installCode, w.installLogFailure =
 		answer.installCheck, answer.installOut, answer.installErr, answer.installCode, answer.installLogFailure
+	w.installFrame = answer.installFrame
+	if len(answer.frame) != 0 {
+		w.failureLog.replaceFallbackFrame(answer.frame)
+	}
 }
 
 // restartWindowContact notes the proven connection of a per-user try. When
@@ -872,6 +899,9 @@ func (w *answerWatchdog) watch(deadline time.Time) {
 		w.fallbackOut, w.fallbackErr, w.fallbackCode, w.logFailure =
 			w.installOut, w.installErr, w.installCode, w.installLogFailure
 		w.fallbackBlocked = true
+		if len(w.installFrame) != 0 {
+			w.failureLog.replaceFallbackFrame(w.installFrame)
+		}
 	} else if !w.closedKnown && !w.claimedAnswer && !w.failureLogged && w.visibleOutage != nil {
 		w.fallbackOut, w.fallbackErr, w.fallbackCode = w.visibleOutage()
 	}
@@ -910,7 +940,7 @@ func (w *answerWatchdog) watch(deadline time.Time) {
 	}
 	// If the ordinary log is still opening, the prepared marker can finish
 	// this deadline record without starting another open after exit.
-	if w.failureLog.markerEnabled && !w.failureLog.ordinaryReady() {
+	if remaining > answerWatchdogLogWait && w.failureLog.markerEnabled && !w.failureLog.ordinaryReady() {
 		if w.fallbackBlocked {
 			w.failureLog.promoteFallbackClosed()
 		}
@@ -1060,6 +1090,9 @@ func (w *answerWatchdog) noDecisionPending() {
 			w.noDecisionOut, w.noDecisionErr, w.noDecisionCode, w.noDecisionLog
 		w.fallbackBlocked = w.noDecisionBlocked
 		w.visibleOutage = nil
+		if len(w.noDecisionFrame) != 0 {
+			w.failureLog.replaceFallbackFrame(w.noDecisionFrame)
+		}
 	}
 }
 
