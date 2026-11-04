@@ -313,6 +313,21 @@ func (p *preparedFailureLog) appendFallback() bool {
 	return p.fallbackSaved
 }
 
+// appendFallbackWithin leaves the hook free to answer when the local write
+// does not finish in time. A completed write reports whether it was saved.
+func (p *preparedFailureLog) appendFallbackWithin(wait time.Duration) (saved, finished bool) {
+	result := make(chan bool, 1)
+	go func() { result <- p.appendFallback() }()
+	timer := time.NewTimer(wait)
+	defer timer.Stop()
+	select {
+	case saved := <-result:
+		return saved, true
+	case <-timer.C:
+		return false, false
+	}
+}
+
 // close closes the log unless a failure line took it.
 func (p *preparedFailureLog) close() {
 	if p == nil {
