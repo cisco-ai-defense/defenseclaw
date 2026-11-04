@@ -7,6 +7,7 @@ import (
 	"bytes"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 )
@@ -69,6 +70,41 @@ func TestGAP0322UserGuardDecisionAndBenignTwin(t *testing.T) {
 	var out, errOut bytes.Buffer
 	if code := runUserHookGuardAt(self, args, strings.NewReader("ordinary\n"), &out, &errOut); code != 2 {
 		t.Fatalf("missing hook exit = %d, stderr %q", code, errOut.String())
+	}
+}
+
+func TestGAP0322UserGuardSymlinkHomeAndOrdinaryTwin(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("Unix account paths")
+	}
+	root := t.TempDir()
+	realAccount := filepath.Join(root, "real")
+	alias := filepath.Join(root, "alias")
+	bin := filepath.Join(realAccount, ".local", "bin")
+	if err := os.MkdirAll(bin, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(realAccount, alias); err != nil {
+		t.Fatal(err)
+	}
+	self := filepath.Join(bin, "defenseclaw-hook-post")
+	if err := os.WriteFile(self, []byte("guard fixture\n"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	native := filepath.Join(bin, "defenseclaw-hook-user")
+	if err := os.WriteFile(native, []byte("#!/bin/sh\nread value\n[ \"$value\" = ordinary ] && exit 0\nexit 2\n"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	args := []string{"guard-user-hook", filepath.Join(alias, ".local", "bin", "defenseclaw-hook-user"),
+		"hook", "--connector", "claudecode", "--hook-home", filepath.Join(alias, ".defenseclaw")}
+	for _, call := range []struct {
+		input string
+		want  int
+	}{{"ordinary", 0}, {"protected", 2}} {
+		var out, errOut bytes.Buffer
+		if got := runUserHookGuardAt(self, args, strings.NewReader(call.input+"\n"), &out, &errOut); got != call.want {
+			t.Fatalf("%s exit = %d, want %d; stderr %q", call.input, got, call.want, errOut.String())
+		}
 	}
 }
 

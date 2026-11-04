@@ -286,7 +286,7 @@ func runUserHookGuardAt(self string, args []string, input io.Reader, output, err
 			args[5] == "--hook-home" && filepath.IsAbs(home) &&
 			filepath.Clean(home) == home && filepath.Base(home) == ".defenseclaw" &&
 			native == filepath.Join(account, ".local", "bin", "defenseclaw-hook-user") &&
-			self == filepath.Join(account, ".local", "bin", "defenseclaw-hook-post")
+			userGuardExecutableMatches(self, filepath.Join(account, ".local", "bin", "defenseclaw-hook-post"))
 		if len(args) == 9 {
 			valid = valid && args[7] == "--api-addr"
 		}
@@ -307,4 +307,16 @@ func runUserHookGuardAt(self string, args []string, input io.Reader, output, err
 	}
 	fmt.Fprintln(errOutput, "DefenseClaw hook could not start")
 	return 2
+}
+
+func userGuardExecutableMatches(self, registered string) bool {
+	if self == registered {
+		return true
+	}
+	actual, err := os.Stat(self)
+	if err != nil || !actual.Mode().IsRegular() {
+		return false
+	}
+	expected, err := os.Stat(registered)
+	return err == nil && expected.Mode().IsRegular() && os.SameFile(actual, expected)
 }
