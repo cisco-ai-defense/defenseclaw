@@ -7,6 +7,8 @@ package enterpriseunix
 
 import (
 	"context"
+	"encoding/json"
+	"errors"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -29,6 +31,7 @@ import (
 // block now lists every included account's Claude Desktop data folders, the
 // newest engine build in each and its trust, from disk, as root only.
 func TestDescribeCoworkListsEachIncludedAccountsClaudeDesktop(t *testing.T) {
+	stubCoworkEligibleAccounts(t)
 	old := coworkLastEvents
 	coworkLastEvents = func(context.Context, string) ([]enterprisestatus.CoworkAccountEvent, bool, error) {
 		return nil, false, nil
@@ -137,5 +140,103 @@ func TestDescribeCoworkListsEachIncludedAccountsClaudeDesktop(t *testing.T) {
 			EnginePath: engine, Trust: enterprisestatus.CoworkEngineUnsigned,
 			Reason: "Linux engine builds carry no vendor signature, and the folder is the user's own"}) {
 		t.Fatalf("linux claude_desktop = %+v (checks %d)", got, fake.calls)
+	}
+}
+
+// stubCoworkEligibleAccounts reads the test host's eligible-accounts record
+// without the root-owner checks an unprivileged test cannot meet.
+func stubCoworkEligibleAccounts(t *testing.T) {
+	t.Helper()
+	old := coworkEligibleAccounts
+	coworkEligibleAccounts = func(path string) ([]enterprisehooks.UnixEligibleAccount, error) {
+		data, err := os.ReadFile(path)
+		if errors.Is(err, os.ErrNotExist) {
+			return nil, nil
+		}
+		if err != nil {
+			return nil, err
+		}
+		var record struct {
+			Accounts []enterprisehooks.UnixEligibleAccount `json:"accounts"`
+		}
+		if err := json.Unmarshal(data, &record); err != nil {
+			return nil, err
+		}
+		return record.Accounts, nil
+	}
+	t.Cleanup(func() { coworkEligibleAccounts = old })
+}
+
+// GAP-0031 review: under manifest enrollment (and with unenrolled_users
+// deny) the eligible-accounts record is what the enumerator's last auto pass
+// published, so an account the administrator has since left out of the
+// manifest is not listed and gets no codesign run as it. Auto enrollment
+// still lists every eligible account. The record itself is read through
+// enterprisehooks.LoadUnixEligibleAccounts: a record that is not a
+// root-owned 0600 file is refused and reported as unknown.
+func TestDescribeCoworkDesktopKeepsOnlyManifestAccountsUnderManifestEnrollment(t *testing.T) {
+	old := coworkLastEvents
+	coworkLastEvents = func(context.Context, string) ([]enterprisestatus.CoworkAccountEvent, bool, error) {
+		return nil, false, nil
+	}
+	t.Cleanup(func() { coworkLastEvents = old })
+	h := newTestHost(t, "darwin")
+	writeHostFile(t, h, enterprisehooks.UnixEligibleAccountsPath(h.env.Layout.ManifestPath),
+		`{"version":1,"accounts":[{"user":"ec2-user","uid":501,"gid":20,"home":"/Users/ec2-user"},{"user":"bob","uid":502,"gid":20,"home":"/Users/bob"}]}`)
+	var engines []string
+	for _, home := range []string{"/Users/ec2-user", "/Users/bob"} {
+		bundle := filepath.Join(home, "Library/Application Support/Claude-3p", "claude-code", "2.1.317", "91184d3d9ba3", "claude.app")
+		writeHostFile(t, h, filepath.Join(bundle, "Contents", "MacOS", "claude"), "engine")
+		writeHostFile(t, h, filepath.Join(bundle, "Contents", "Info.plist"), strings.Replace(desktopEnginePlist, "%s", "2.1.317", 1))
+		engines = append(engines, h.env.P(bundle))
+	}
+	uid := 501
+	disabled := false
+	// bob's row is disabled: the administrator left him out.
+	targets := []enterprisehooks.ManifestTarget{
+		{Connector: "codex", User: "ec2-user", UserHome: "/Users/ec2-user", UID: &uid},
+		{Connector: "codex", User: "bob", UserHome: "/Users/bob", Enabled: &disabled},
+	}
+	describe := func(cfg *config.Config) (*enterprisestatus.CoworkDesktopState, *fakeDesktopVerify) {
+		t.Helper()
+		fake := stubDesktopVerify(t, codesig.Result{Verified: true})
+		claudeDesktopAccountGID = func(int) (uint32, bool) { return 20, true } // both accounts exist
+		l := lifecycle{env: h.env, result: enterprisestatus.New(ActionStatus, managed.ProfileStandalone, "darwin", "1.0.8"), opts: Options{Action: ActionStatus}}
+		return l.describeCoworkDesktop(context.Background(), cfg, targets), fake
+	}
+	accountsOf := func(state *enterprisestatus.CoworkDesktopState) []string {
+		var names []string
+		for _, account := range state.Accounts {
+			names = append(names, account.Account)
+		}
+		return names
+	}
+
+	stubCoworkEligibleAccounts(t)
+	for name, enrollment := range map[string]config.EnterpriseEnrollmentConfig{
+		"manifest enrollment":   {Mode: config.EnterpriseEnrollmentManifest},
+		"unenrolled users deny": {UnenrolledUsers: config.EnterpriseUnenrolledDeny},
+	} {
+		cfg := &config.Config{}
+		cfg.Enterprise.Enrollment = enrollment
+		state, fake := describe(cfg)
+		if got := accountsOf(state); !state.AccountsKnown || !reflect.DeepEqual(got, []string{"ec2-user"}) {
+			t.Fatalf("%s: accounts = %q (known %v), want only ec2-user", name, got, state.AccountsKnown)
+		}
+		if fake.calls != 1 || fake.path != engines[0] || fake.opts.UID != 501 {
+			t.Fatalf("%s: codesign ran %d times, last %s as %d; want once, for ec2-user only", name, fake.calls, fake.path, fake.opts.UID)
+		}
+	}
+	// Auto enrollment: every eligible account, as before.
+	if state, fake := describe(&config.Config{}); !reflect.DeepEqual(accountsOf(state), []string{"bob", "ec2-user"}) || fake.calls != 2 {
+		t.Fatalf("auto enrollment: accounts = %q, codesign calls %d", accountsOf(state), fake.calls)
+	}
+
+	// The real loader refuses this 0644 record of an unprivileged test:
+	// nothing from it is listed, and the account list is not known.
+	coworkEligibleAccounts = enterprisehooks.LoadUnixEligibleAccounts
+	state, _ := describe(&config.Config{})
+	if state.AccountsKnown || !reflect.DeepEqual(accountsOf(state), []string{"ec2-user"}) {
+		t.Fatalf("refused record: accounts = %q (known %v), want only the manifest row and unknown", accountsOf(state), state.AccountsKnown)
 	}
 }

@@ -76,6 +76,6 @@ func (l *lifecycle) describeCowork(cfg *config.Config, raw []byte, block map[str
 	r.Cowork = enterprisestatus.BuildCowork(in)
 	if env.Geteuid != nil && env.Geteuid() == 0 {
 		// Root only: it names accounts and runs codesign as each of them.
-		r.Cowork.ClaudeDesktop = l.describeCoworkDesktop(context.Background(), targets)
+		r.Cowork.ClaudeDesktop = l.describeCoworkDesktop(context.Background(), cfg, targets)
 	}
 }

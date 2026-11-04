@@ -7,7 +7,6 @@ package enterpriseunix
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"os"
 	"path/filepath"
@@ -17,6 +16,7 @@ import (
 	"time"
 
 	"github.com/defenseclaw/defenseclaw/internal/claudedesktop"
+	"github.com/defenseclaw/defenseclaw/internal/config"
 	"github.com/defenseclaw/defenseclaw/internal/enterprisehooks"
 	"github.com/defenseclaw/defenseclaw/internal/enterprisestatus"
 )
@@ -50,9 +50,10 @@ type coworkDesktopAccount struct {
 }
 
 // describeCoworkDesktop is the claude_desktop member of the cowork block.
-// targets are the enumerator's manifest rows.
-func (l *lifecycle) describeCoworkDesktop(ctx context.Context, targets []enterprisehooks.ManifestTarget) *enterprisestatus.CoworkDesktopState {
-	accounts, known := l.coworkDesktopAccounts(targets)
+// targets are the enumerator's manifest rows; cfg is the installed config
+// (nil when it could not be read).
+func (l *lifecycle) describeCoworkDesktop(ctx context.Context, cfg *config.Config, targets []enterprisehooks.ManifestTarget) *enterprisestatus.CoworkDesktopState {
+	accounts, known := l.coworkDesktopAccounts(cfg, targets)
 	state := &enterprisestatus.CoworkDesktopState{AccountsKnown: known}
 	if len(accounts) > enterprisestatus.CoworkAccountsMax {
 		accounts, state.AccountsTruncated = accounts[:enterprisestatus.CoworkAccountsMax], true
@@ -69,10 +70,32 @@ func (l *lifecycle) describeCoworkDesktop(ctx context.Context, targets []enterpr
 	return state
 }
 
-// coworkDesktopAccounts are the accounts the enumerator found eligible
-// (eligible-accounts.json) and the enabled manifest rows, by name. known is
-// false when the record exists but cannot be read.
-func (l *lifecycle) coworkDesktopAccounts(targets []enterprisehooks.ManifestTarget) ([]coworkDesktopAccount, bool) {
+// coworkEligibleAccounts is enterprisehooks.LoadUnixEligibleAccounts, which
+// refuses a record that is not a root-owned 0600 single-link file below a
+// root-owned folder chain; tests replace it.
+var coworkEligibleAccounts = enterprisehooks.LoadUnixEligibleAccounts
+
+// coworkManifestEnrollment reports whether only the manifest decides which
+// accounts enrollment includes: manifest enrollment, or unenrolled_users
+// deny (the rule copilotAccountHomes applies).
+func coworkManifestEnrollment(cfg *config.Config) bool {
+	if cfg == nil {
+		return false
+	}
+	enrollment := cfg.Enterprise.Enrollment
+	return strings.EqualFold(strings.TrimSpace(enrollment.Mode), config.EnterpriseEnrollmentManifest) ||
+		strings.EqualFold(strings.TrimSpace(enrollment.UnenrolledUsers), config.EnterpriseUnenrolledDeny)
+}
+
+// coworkDesktopAccounts are the accounts enrollment includes, by name: the
+// accounts the enumerator found eligible (eligible-accounts.json) and the
+// enabled manifest rows. Under manifest enrollment the enumerator is idle,
+// so the record is what its last auto pass published: there only eligible
+// accounts an enabled manifest row names count (ManifestEnrolledAccounts,
+// GAP-0761), or status would list, and run codesign as, an account the
+// administrator has since left out. known is false when the record exists
+// but is refused or cannot be read.
+func (l *lifecycle) coworkDesktopAccounts(cfg *config.Config, targets []enterprisehooks.ManifestTarget) ([]coworkDesktopAccount, bool) {
 	env := l.env
 	byName := map[string]coworkDesktopAccount{}
 	add := func(user, home string, uid int) {
@@ -82,25 +105,26 @@ func (l *lifecycle) coworkDesktopAccounts(targets []enterprisehooks.ManifestTarg
 		}
 		byName[user] = coworkDesktopAccount{user: user, home: filepath.Clean(home), uid: uid}
 	}
-	known := true
-	data, err := readBounded(env.P(enterprisehooks.UnixEligibleAccountsPath(env.Layout.ManifestPath)), maxInputBytes)
-	var record struct {
-		Version  int                                   `json:"version"`
-		Accounts []enterprisehooks.UnixEligibleAccount `json:"accounts"`
-	}
-	switch {
-	case err == nil:
-		if json.Unmarshal(data, &record) != nil || record.Version != 1 {
-			known = false
+	var enabled []enterprisehooks.ManifestTarget
+	for _, target := range targets {
+		if target.IsEnabled() {
+			enabled = append(enabled, target)
 		}
-		for _, account := range record.Accounts {
+	}
+	known := true
+	path := env.P(enterprisehooks.UnixEligibleAccountsPath(env.Layout.ManifestPath))
+	if _, err := os.Lstat(path); !errors.Is(err, os.ErrNotExist) {
+		eligible, err := coworkEligibleAccounts(path)
+		known = err == nil
+		if coworkManifestEnrollment(cfg) {
+			eligible = enterprisehooks.ManifestEnrolledAccounts(eligible, enterprisehooks.Manifest{Targets: enabled})
+		}
+		for _, account := range eligible {
 			add(account.User, account.Home, account.UID)
 		}
-	case !errors.Is(err, os.ErrNotExist):
-		known = false
 	}
-	for _, target := range targets {
-		if target.IsEnabled() && target.UID != nil {
+	for _, target := range enabled {
+		if target.UID != nil {
 			add(target.User, target.UserHome, *target.UID)
 		}
 	}
