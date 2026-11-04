@@ -15,6 +15,7 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/audit"
 	"github.com/defenseclaw/defenseclaw/internal/config"
 	"github.com/defenseclaw/defenseclaw/internal/coworkaudit"
+	"github.com/defenseclaw/defenseclaw/internal/enterprisehooks"
 	"github.com/defenseclaw/defenseclaw/internal/enterprisestatus"
 	"github.com/defenseclaw/defenseclaw/internal/managed"
 )
@@ -28,7 +29,15 @@ func TestWindowsEnterpriseCoworkBlockNamesEachEnrolledAccount(t *testing.T) {
 		return []enterprisestatus.CoworkAccountEvent{{UserID: "S-1-5-21-1-2-3-1001", At: at}}, false, nil
 	}
 	windowsCoworkElevated = func() bool { return true }
-	t.Cleanup(func() { windowsCoworkLastEvents, windowsCoworkElevated = old, oldElevated })
+	oldFolders := windowsCoworkDesktopFolders
+	var desktopChecked []string
+	windowsCoworkDesktopFolders = func(sid string) ([]enterprisehooks.ClaudeDesktopFolder, error) {
+		desktopChecked = append(desktopChecked, sid)
+		return []enterprisehooks.ClaudeDesktopFolder{{Deployment: "3p", Path: `C:\Users\alice\AppData\Local\Claude-3p`, EngineVersion: "2.1.317", EnginePath: `C:\x\claude.exe`}}, nil
+	}
+	t.Cleanup(func() {
+		windowsCoworkLastEvents, windowsCoworkElevated, windowsCoworkDesktopFolders = old, oldElevated, oldFolders
+	})
 	result := &enterprisestatus.Result{Action: "status"}
 	result.Enrollment.Accounts = []enterprisestatus.EnrollmentAccount{
 		{Account: `CORP\alice`, SID: "S-1-5-21-1-2-3-1001"}, {Account: `CORP\bob`, SID: "S-1-5-21-1-2-3-1002"},
@@ -44,10 +53,15 @@ func TestWindowsEnterpriseCoworkBlockNamesEachEnrolledAccount(t *testing.T) {
 		cowork.Accounts[0].LastEventAt != "2026-11-03T13:16:05Z" || cowork.Accounts[1].LastEventAt != "" || queried != store {
 		t.Fatalf("cowork = %+v (queried %q)", cowork, queried)
 	}
+	// GAP-0057: the elevated view names each enrolled account's engine trust.
+	if desktop := cowork.ClaudeDesktop; desktop == nil || len(desktop.Accounts) != 2 || desktop.Trusted != 2 || len(desktopChecked) != 2 {
+		t.Fatalf("claude_desktop = %+v (checked %v)", cowork.ClaudeDesktop, desktopChecked)
+	}
 	windowsCoworkElevated = func() bool { return false }
-	queried = ""
-	if got := windowsEnterpriseCoworkBlock(result, cfg, auditStore, block, nil); got == nil || got.AccountsKnown || queried != "" {
-		t.Fatalf("unelevated cowork = %+v (queried %q)", got, queried)
+	queried, desktopChecked = "", nil
+	if got := windowsEnterpriseCoworkBlock(result, cfg, auditStore, block, nil); got == nil || got.AccountsKnown || queried != "" ||
+		got.ClaudeDesktop != nil || desktopChecked != nil {
+		t.Fatalf("unelevated cowork = %+v (queried %q, desktop checked %v)", got, queried, desktopChecked)
 	}
 	if got := windowsEnterpriseCoworkBlock(&enterprisestatus.Result{Action: "ensure"}, cfg, auditStore, block, nil); got != nil {
 		t.Fatalf("ensure cowork = %+v", got)

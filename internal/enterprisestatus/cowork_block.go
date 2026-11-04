@@ -28,8 +28,9 @@ import (
 // DefenseClaw's side of that is configured, how many hook calls reported
 // themselves as Cowork and when each enrolled account last sent one
 // (caller-reported attribution: any local process can send it, so it is not
-// proof that the hooks ran in Cowork) and whether customers' own Cowork plugin
-// hooks are meant to run next to it (managed_hooks_only). It is on status and verify of the
+// proof that the hooks ran in Cowork), whether customers' own Cowork plugin
+// hooks are meant to run next to it (managed_hooks_only) and the trust of
+// each account's Claude Desktop engine build. It is on status and verify of the
 // standalone profile only. It names accounts, so it is built only for an
 // administrator: root on Linux and macOS, an elevated administrator on
 // Windows.
@@ -74,12 +75,14 @@ type CoworkState struct {
 	// AccountsTruncated: more accounts exist than Accounts lists (the
 	// CoworkAccountsMax bound, or the audit lookup's own row bound).
 	AccountsTruncated bool `json:"accounts_truncated,omitempty"`
-	// ClaudeDesktop is, on Linux and macOS, the Claude Desktop installs of
-	// every account enrollment includes and the trust of their engine
-	// builds, read from disk when status or verify runs (no running engine
-	// needed). Claude Code is a machine-policy connector there, so such an
+	// ClaudeDesktop is the Claude Desktop installs of every account
+	// enrollment includes and the trust of their engine builds, read from
+	// disk when status or verify runs (no running engine needed). On Linux
+	// and macOS Claude Code is a machine-policy connector, so such an
 	// account has no enrollment row and was shown nowhere (cowork-1-0-8
-	// GAP-0031). Absent on Windows and when not run as root.
+	// GAP-0031); on Windows these are the enrolled accounts, and trust is
+	// the Authenticode check enrolment makes (GAP-0057). Absent when not
+	// run as root or as an elevated administrator.
 	ClaudeDesktop *CoworkDesktopState `json:"claude_desktop,omitempty"`
 }
 
@@ -87,7 +90,9 @@ type CoworkState struct {
 const (
 	// CoworkEngineTrusted: the code signature verifies as Anthropic's
 	// Claude Code (macOS: Developer ID team Q6L2SF6YDW, identifier
-	// com.anthropic.claude-code) and its Info.plist names the folder's version.
+	// com.anthropic.claude-code, and its Info.plist names the folder's
+	// version; Windows: an Authenticode signature by Anthropic whose signed
+	// file version is the folder's).
 	CoworkEngineTrusted = "trusted"
 	// CoworkEngineUntrusted: the build has a signature that does not verify
 	// or names another signer, its version does not match its folder, or
@@ -123,6 +128,10 @@ type CoworkDesktopAccount struct {
 	// Installs are the account's Claude Desktop data folders that exist,
 	// one per deployment (internal/claudedesktop); none: no Claude Desktop.
 	Installs []CoworkDesktopInstall `json:"installs,omitempty"`
+	// Reason says why the account's folders were not checked, or not all
+	// of them (Windows: for example no signed-in session for an MDM run);
+	// absent when they were.
+	Reason string `json:"reason,omitempty"`
 }
 
 // CoworkDesktopInstall is one Claude Desktop data folder and the newest
@@ -371,6 +380,10 @@ func coworkDesktopLines(desktop *CoworkDesktopState) []string {
 	}
 	var lines []string
 	for _, account := range desktop.Accounts {
+		if len(account.Installs) == 0 && account.Reason != "" {
+			lines = append(lines, "  cowork "+account.Account+": Claude Desktop not checked ("+account.Reason+")")
+			continue
+		}
 		if len(account.Installs) == 0 {
 			lines = append(lines, "  cowork "+account.Account+": no Claude Desktop data folder")
 			continue
@@ -386,6 +399,9 @@ func coworkDesktopLines(desktop *CoworkDesktopState) []string {
 				line += " (" + install.Reason + ")"
 			}
 			lines = append(lines, line)
+		}
+		if account.Reason != "" {
+			lines = append(lines, "  cowork "+account.Account+": Claude Desktop check incomplete ("+account.Reason+")")
 		}
 	}
 	if desktop.AccountsTruncated {

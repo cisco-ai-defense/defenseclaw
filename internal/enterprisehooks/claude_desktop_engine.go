@@ -27,6 +27,24 @@ type ClaudeDesktopEngineBuild struct {
 	Unverified string `json:"unverified,omitempty"`
 }
 
+// ClaudeDesktopFolder is one Claude Desktop data folder of an account and
+// the newest engine build in it, for the administrator's Cowork status
+// (WindowsClaudeDesktopFolders, cowork-1-0-8 GAP-0057).
+type ClaudeDesktopFolder struct {
+	// Deployment is "1p" (Claude account) or "3p" (third-party inference).
+	Deployment string
+	// Path is the data folder.
+	Path string
+	// EngineVersion is the newest build's version folder; "" when the
+	// folder holds none.
+	EngineVersion string
+	// EnginePath is the claude.exe whose signature verified, or the
+	// version folder that was checked.
+	EnginePath string
+	// Unverified is why the newest build is not trusted; "" when it is.
+	Unverified string
+}
+
 // ClaudeDesktopEngineVersion is ClaudeDesktopEngine's version and engine
 // folder.
 func ClaudeDesktopEngineVersion(ctx context.Context, home string) (version, engineDir string) {

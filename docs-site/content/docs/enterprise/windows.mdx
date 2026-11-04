@@ -1153,7 +1153,7 @@ Claude Cowork runs its agent loop on the computer, with the Claude Code engine t
 | Engine folder | `claude-code\<version>\` in the user's Claude Desktop data folder: `%APPDATA%\Claude`, `%LOCALAPPDATA%\Claude-Data\claude_<id>` for the Microsoft Store (MSIX) app, or `%LOCALAPPDATA%\Claude-3p` for third-party inference. DefenseClaw trusts it by an Authenticode signature by `Anthropic, PBC` (or `Anthropic PBC`) on `claude.exe`, whose file version equals the folder |
 | If the engine is not identified | The Desktop surface is reported `surface_unverified`. That does not block by default |
 | Shell | Runs in the Cowork Linux VM, so the POSIX shell rules apply on Windows |
-| `status` and `verify` | Print a `cowork` line (`configured`, and how many hook calls reported themselves as Cowork since the gateway started) and each enrolled account's last Cowork event. An elevated session is needed for the per-account events |
+| `status` and `verify` | Print a `cowork` line (`configured`, and how many hook calls reported themselves as Cowork since the gateway started), each enrolled account's last Cowork event, and each enrolled account's Claude Desktop data folders with the newest engine build and its Authenticode trust (for example `engine 2.1.317 trusted`; JSON `cowork.claude_desktop`). An elevated session is needed for the per-account lines |
 
 See [Claude Cowork](/docs/connectors/cowork) for the tools, `managed_hooks_only` and the limits.
 

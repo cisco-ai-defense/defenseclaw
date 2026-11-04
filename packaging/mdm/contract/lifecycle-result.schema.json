@@ -480,7 +480,7 @@
         "accounts_known": { "type": "boolean", "description": "The audit store answered the per-account lookup." },
         "accounts": { "type": "array", "maxItems": 64, "items": { "$ref": "#/$defs/coworkAccount" }, "description": "The enrolled accounts and every account with a Cowork event, sorted by name. Absent when accounts_known is false." },
         "accounts_truncated": { "type": "boolean", "description": "More accounts exist than accounts lists: over 64 accounts, or the audit lookup hit its bound of 256 accounts. Absent otherwise." },
-        "claude_desktop": { "$ref": "#/$defs/coworkDesktop", "description": "Linux and macOS, from 1.0.8: the Claude Desktop installs of every account enrollment includes (the enumerator's eligible accounts and enabled manifest rows), with the newest Claude Code engine build in each data folder and its trust, read from disk by status and verify (no running engine needed, the engine is never run). Claude Code is a machine-policy connector there, so such an account has no enrollment row. Absent on Windows and when not run as root. Optional." }
+        "claude_desktop": { "$ref": "#/$defs/coworkDesktop", "description": "From 1.0.8: the Claude Desktop installs of every account enrollment includes (Linux and macOS: the enumerator's eligible accounts and enabled manifest rows, which have no enrollment row because Claude Code is a machine-policy connector there; Windows: the enrolled accounts), with the newest Claude Code engine build in each data folder and its trust, read from disk by status and verify (no running engine needed, the engine is never run). Absent when not run as root or as an elevated administrator. Optional." }
       }
     },
     "coworkAccount": {
@@ -512,7 +512,8 @@
       "required": ["account"],
       "properties": {
         "account": { "type": "string", "minLength": 1, "description": "The account name." },
-        "installs": { "type": "array", "maxItems": 8, "items": { "$ref": "#/$defs/coworkDesktopInstall" }, "description": "The account's Claude Desktop data folders that exist, one per deployment; absent: no Claude Desktop data folder." }
+        "installs": { "type": "array", "maxItems": 8, "items": { "$ref": "#/$defs/coworkDesktopInstall" }, "description": "The account's Claude Desktop data folders that exist, one per deployment; absent: no Claude Desktop data folder, or not checked (reason)." },
+        "reason": { "type": "string", "description": "Why the account's folders were not checked, or not all of them (Windows: for example no signed-in session for a LocalSystem run, or no SID); absent when they were." }
       }
     },
     "coworkDesktopInstall": {
@@ -523,8 +524,8 @@
         "deployment": { "enum": ["1p", "3p"], "description": "1p: signed in with a Claude account (Claude); 3p: third-party inference (Claude-3p)." },
         "path": { "type": "string", "minLength": 1, "description": "The data folder." },
         "engine_version": { "type": "string", "minLength": 1, "description": "The newest engine build's version (its folder name); absent when trust is not_found." },
-        "engine_path": { "type": "string", "minLength": 1, "description": "The engine build checked (macOS: its claude.app; Linux: its version folder); absent when trust is not_found." },
-        "trust": { "enum": ["trusted", "untrusted", "unsigned", "not_found"], "description": "trusted: on macOS the code signature verifies as Anthropic's Claude Code (Developer ID team Q6L2SF6YDW, identifier com.anthropic.claude-code; codesign runs as the account) and its Info.plist names the folder's version; untrusted: a signature that does not verify or names another signer, a version mismatch, or a check that could not run; unsigned: no signature (every Linux build); not_found: no engine build in the folder." },
+        "engine_path": { "type": "string", "minLength": 1, "description": "The engine build checked (macOS: its claude.app; Linux: its version folder; Windows: the claude.exe that verified, or the version folder); absent when trust is not_found." },
+        "trust": { "enum": ["trusted", "untrusted", "unsigned", "not_found"], "description": "trusted: on macOS the code signature verifies as Anthropic's Claude Code (Developer ID team Q6L2SF6YDW, identifier com.anthropic.claude-code; codesign runs as the account) and its Info.plist names the folder's version; on Windows a claude.exe in the build has an Authenticode signature by Anthropic (Anthropic, PBC) whose signed file version is the folder's; untrusted: a signature that does not verify or names another signer, a version mismatch, or a check that could not run; unsigned: no signature (every Linux build); not_found: no engine build in the folder." },
         "reason": { "type": "string", "description": "Why the build is not trusted, or a limit of a trusted one (claude_version_unverified)." }
       }
     },

@@ -13,6 +13,7 @@ import (
 
 	"github.com/defenseclaw/defenseclaw/internal/config"
 	"github.com/defenseclaw/defenseclaw/internal/coworkaudit"
+	"github.com/defenseclaw/defenseclaw/internal/enterprisehooks"
 	"github.com/defenseclaw/defenseclaw/internal/enterprisepolicy"
 	"github.com/defenseclaw/defenseclaw/internal/enterprisestatus"
 	"github.com/defenseclaw/defenseclaw/internal/gateway/connector"
@@ -26,6 +27,10 @@ var windowsCoworkLastEvents = coworkaudit.LastEvents
 // only caller that may name accounts; tests replace it.
 var windowsCoworkElevated = windowsEnterpriseIsElevated
 
+// windowsCoworkDesktopFolders reads an account's Claude Desktop folders and
+// engine trust; tests replace it.
+var windowsCoworkDesktopFolders = enterprisehooks.WindowsClaudeDesktopFolders
+
 // windowsEnterpriseCoworkBlock is the cowork block of a Windows standalone
 // status or verify (enterprisestatus.BuildCowork): Claude Cowork runs the
 // Claude Code machine policy hooks of C:\Program Files\ClaudeCode, so it is
@@ -35,7 +40,9 @@ var windowsCoworkElevated = windowsEnterpriseIsElevated
 // runtime descriptor's covered set decides on Linux and macOS). The elevated
 // lifecycle reads the audit store auditStore resolves
 // (windowsEnterpriseAuditStore) for each enrolled account's last Cowork
-// event; accounts are named only in this administrator view.
+// event, and each enrolled account's Claude Desktop engine trust
+// (windowsCoworkDesktopState, GAP-0057); accounts are named only in this
+// administrator view.
 func windowsEnterpriseCoworkBlock(result *enterprisestatus.Result, cfg *config.Config, auditStore func() (string, error),
 	block map[string]enterprisestatus.ConnectorState, health []byte) *enterprisestatus.CoworkState {
 	if result == nil || (result.Action != "status" && result.Action != "verify") {
@@ -62,8 +69,9 @@ func windowsEnterpriseCoworkBlock(result *enterprisestatus.Result, cfg *config.C
 		in.DesktopSurfaceRefused = connector.SurfaceRefused(enterprisepolicy.ConnectorClaudeCode, connector.HostSurfaceDesktop,
 			cfg.Enterprise.Enrollment.UnverifiedVersionsFor(enterprisepolicy.ConnectorClaudeCode))
 	}
+	elevated := windowsCoworkElevated()
 	switch {
-	case !windowsCoworkElevated():
+	case !elevated:
 		in.EventsErr = errors.New("the per-account Cowork lookup runs only for an elevated administrator")
 	case auditStore == nil:
 		in.EventsErr = errors.New("the installed config names no audit store")
@@ -74,7 +82,11 @@ func windowsEnterpriseCoworkBlock(result *enterprisestatus.Result, cfg *config.C
 			in.Events, in.EventsTruncated, in.EventsErr = windowsCoworkLastEvents(context.Background(), path)
 		}
 	}
-	return enterprisestatus.BuildCowork(in)
+	cowork := enterprisestatus.BuildCowork(in)
+	if elevated {
+		cowork.ClaudeDesktop = windowsCoworkDesktopState(result.Enrollment.Accounts, windowsCoworkDesktopFolders)
+	}
+	return cowork
 }
 
 // windowsEnterpriseAuditStore is the audit store the gateway opens for the
