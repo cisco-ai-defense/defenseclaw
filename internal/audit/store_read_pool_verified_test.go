@@ -4,9 +4,71 @@
 package audit
 
 import (
+	"os"
 	"path/filepath"
 	"testing"
 )
+
+func TestR109PerfWALReadPoolReleasesSidecarsOnStoreClose(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "audit.db")
+	store, err := NewStore(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Init(); err != nil {
+		_ = store.Close()
+		t.Fatal(err)
+	}
+	if store.readDB == nil {
+		_ = store.Close()
+		t.Fatal("read-only WAL pool is unavailable")
+	}
+	if store.readDB.Stats().Idle == 0 {
+		_ = store.Close()
+		t.Fatal("read-only WAL pool has no reusable connection")
+	}
+	if err := store.LogEvent(Event{Action: "allow", Target: "ordinary"}); err != nil {
+		_ = store.Close()
+		t.Fatal(err)
+	}
+	if err := store.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(path + "-wal"); !os.IsNotExist(err) {
+		t.Fatalf("WAL remains after the last store close: %v", err)
+	}
+}
+
+func TestR109PerfWALReadPoolCloseKeepsCommittedAllow(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "audit.db")
+	store, err := NewStore(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Init(); err != nil {
+		_ = store.Close()
+		t.Fatal(err)
+	}
+	if err := store.SetActionForConnector("tool", "ordinary", "codex", "", ActionState{Install: "allow"}, "reviewed"); err != nil {
+		_ = store.Close()
+		t.Fatal(err)
+	}
+	if err := store.Close(); err != nil {
+		t.Fatal(err)
+	}
+	reopened, err := NewStore(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = reopened.Close() })
+	if err := reopened.Init(); err != nil {
+		t.Fatal(err)
+	}
+	entry, err := reopened.GetActionForConnector("tool", "ordinary", "codex")
+	if err != nil || entry == nil || entry.Actions.Install != "allow" {
+		t.Fatalf("committed allow after reopen = %+v, %v", entry, err)
+	}
+}
 
 func TestR109PerfWALReadPoolIsReadOnly(t *testing.T) {
 	store, _ := newCorrelationTestStore(t)
