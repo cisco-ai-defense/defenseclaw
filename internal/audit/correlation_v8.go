@@ -735,7 +735,7 @@ func (repo *CorrelationRepository) GetConnectorInstance(
 	var digest sql.NullString
 	var created, updated int64
 	var isDefault int
-	err := repo.store.db.QueryRowContext(ctx, `SELECT connector_instance_id, connector,
+	err := repo.store.queryPool().QueryRowContext(ctx, `SELECT connector_instance_id, connector,
 		export_custody, profile_version, managed_config_digest, is_default, created_time_unix_nano,
 		updated_time_unix_nano FROM correlation_connector_instances
 		WHERE connector_instance_id=?`, string(id)).Scan(

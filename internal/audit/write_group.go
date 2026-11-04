@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"sync"
 	"sync/atomic"
+	"time"
 
 	"github.com/defenseclaw/defenseclaw/internal/observability"
 	observabilityredaction "github.com/defenseclaw/defenseclaw/internal/observability/redaction"
@@ -43,9 +44,10 @@ type writeGroup struct {
 // groupedWrite is one caller's write. run performs it inside the shared
 // transaction; data is the caller's state for the commit callback.
 type groupedWrite struct {
-	ctx  context.Context
-	run  func(ctx context.Context, tx *sql.Tx) error
-	data any
+	ctx      context.Context
+	queuedAt time.Time
+	run      func(ctx context.Context, tx *sql.Tx) error
+	data     any
 	// result receives exactly one message: the outcome of the write, or lead
 	// when the write heads the queue and runs the next transaction.
 	result  chan groupedWriteResult
@@ -79,6 +81,7 @@ func (group *writeGroup) removeLocked(write *groupedWrite) bool {
 func (group *writeGroup) do(write *groupedWrite, execute func([]*groupedWrite)) error {
 	write.result = make(chan groupedWriteResult, 1)
 	group.mu.Lock()
+	write.queuedAt = time.Now()
 	group.pending = append(group.pending, write)
 	lead := !group.active
 	group.active = true
@@ -119,6 +122,42 @@ func (group *writeGroup) do(write *groupedWrite, execute func([]*groupedWrite)) 
 		item.result <- groupedWriteResult{err: item.err}
 	}
 	return batch[0].err
+}
+
+// WriteQueueSnapshot is the number of writes waiting for the next grouped
+// transaction and the age of the oldest one. A transaction in progress is
+// excluded because its writes have left the queue.
+type WriteQueueSnapshot struct {
+	Depth     int64
+	OldestAge time.Duration
+}
+
+func (group *writeGroup) snapshot(now time.Time) WriteQueueSnapshot {
+	group.mu.Lock()
+	defer group.mu.Unlock()
+	if len(group.pending) == 0 {
+		return WriteQueueSnapshot{}
+	}
+	return WriteQueueSnapshot{
+		Depth:     int64(len(group.pending)),
+		OldestAge: max(now.Sub(group.pending[0].queuedAt), 0),
+	}
+}
+
+// CallWriteQueueSnapshot reports the foreground hook-call write queue.
+func (s *Store) CallWriteQueueSnapshot() WriteQueueSnapshot {
+	if s == nil {
+		return WriteQueueSnapshot{}
+	}
+	return s.callGroup.snapshot(time.Now())
+}
+
+// ObservationWriteQueueSnapshot reports the correlation-observation queue.
+func (s *Store) ObservationWriteQueueSnapshot() WriteQueueSnapshot {
+	if s == nil {
+		return WriteQueueSnapshot{}
+	}
+	return s.observationGroup.snapshot(time.Now())
 }
 
 // groupedTxHooks are the per-kind parts of a grouped transaction.
