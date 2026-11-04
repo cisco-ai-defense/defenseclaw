@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"sync"
 	"testing"
 	"time"
 
@@ -130,9 +131,15 @@ func TestGAP0370ReporterRecoversPreparedLocalRecord(t *testing.T) {
 		t.Fatal(err)
 	}
 	s := &Sidecar{logger: logger, cfg: &config.Config{DataDir: dataDir}}
-	for range 2 {
-		s.reportHookFailureCalls()
+	var reports sync.WaitGroup
+	for range 8 {
+		reports.Add(1)
+		go func() {
+			defer reports.Done()
+			s.reportHookFailureCalls()
+		}()
 	}
+	reports.Wait()
 	events, err := store.ListEvents(100)
 	if err != nil {
 		t.Fatal(err)
