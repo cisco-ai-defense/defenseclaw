@@ -810,7 +810,7 @@ func sendToGateway(ctx context.Context, opts Options, sp spec, failMode string, 
 			return failUnreachable(
 				opts,
 				sp,
-				"closed",
+				secureClientAvailabilityMode(opts, failMode),
 				managedRuntimeTokenEmptyReason,
 			)
 		}
@@ -834,16 +834,20 @@ func sendToGateway(ctx context.Context, opts Options, sp spec, failMode string, 
 			if readErr != nil && opts.ManagedEnterprise {
 				// Managed enterprise mode must not silently omit Authorization when
 				// the token sidecar is present but unreadable, malformed, or fails a
-				// stability/identity check. Fail closed so unauthenticated loopback
-				// requests never sneak past connector-side auth.
-				return failUnreachable(opts, sp, "closed", managedHookTokenUnreadableReason)
+				// stability/identity check. No request is sent, so unauthenticated
+				// loopback requests never sneak past connector-side auth; the
+				// hook fails closed except under Secure Client, where the
+				// configured fail mode decides.
+				return failUnreachable(opts, sp, secureClientAvailabilityMode(opts, failMode), managedHookTokenUnreadableReason)
 			}
 			if opts.ManagedEnterprise && strings.TrimSpace(loaded) == "" {
 				// An empty sidecar parses without error but sendHookRequest would
 				// then omit Authorization entirely and the connector-side loopback
 				// path would accept the credential-less request. Managed mode has
-				// no no-auth path, so fail closed here.
-				return failUnreachable(opts, sp, "closed", managedHookTokenEmptyReason)
+				// no no-auth path, so no request is sent; the hook fails closed
+				// except under Secure Client, where the configured fail mode
+				// decides.
+				return failUnreachable(opts, sp, secureClientAvailabilityMode(opts, failMode), managedHookTokenEmptyReason)
 			}
 			token = loaded
 		}
@@ -2340,13 +2344,15 @@ const missingGatewayTokenReason = "missing gateway token"
 func handleMissingToken(opts Options, sp spec, failMode, tokenFile string) int {
 	reason := missingGatewayTokenReason + ": " + tokenFile + " not found"
 	failMode = closeDuringInstall(&opts, failMode)
-	closes := opts.ManagedEnterprise || (!sp.failOpenOnly && (opts.StrictAvailability || failMode == "closed"))
+	closes := !sp.failOpenOnly && (opts.StrictAvailability || failMode == "closed")
 	if opts.ManagedEnterprise {
 		// A managed hook's token is installer state: a missing one is a
 		// broken or altered install, not an outage, so it is closed in
-		// fail mode open too.
-		failMode = "closed"
-		opts.FailMode = "closed"
+		// fail mode open too, except under Secure Client, where the
+		// configured fail mode decides.
+		failMode = secureClientAvailabilityMode(opts, failMode)
+		opts.FailMode = failMode
+		closes = failMode == "closed"
 	}
 	if perUserInstallWindow(opts) {
 		// The installer sets the hooks folder, and the token in it, aside
@@ -2373,6 +2379,18 @@ func handleMissingToken(opts Options, sp spec, failMode, tokenFile string) int {
 		return emitHookResult(opts, sp, sp.unreachableStrict)
 	}
 	return emitFailOpenAllow(opts, sp, reason)
+}
+
+// secureClientAvailabilityMode is the fail mode of a managed hook's local
+// availability gap: a missing, empty or unreadable token, or a payload over
+// the cap. Under Secure Client the configured mode decides; strict
+// availability (an install window or an invalid runtime) still closes. Every
+// other managed hook stays closed.
+func secureClientAvailabilityMode(opts Options, failMode string) string {
+	if opts.SecureClient && secureClientHook(opts) && !opts.StrictAvailability {
+		return failMode
+	}
+	return "closed"
 }
 
 // handleUnavailableHome refuses an unavailable registered per-user hook in
@@ -2439,10 +2457,19 @@ func handleOversized(ctx context.Context, opts Options, sp spec, failMode string
 			return sendToGateway(ctx, opts, sp, failMode, review, startedAt)
 		}
 	}
-	// All managed and strict hooks keep their closed local-failure behavior.
-	failMode = managedNonOutageMode(&opts, failMode)
-	if opts.ManagedEnterprise || !opts.SecureClient {
-		failMode, opts.FailMode = "closed", "closed"
+	if opts.SecureClient && secureClientHook(opts) {
+		// Agents routinely send large payloads (a big file read or edit):
+		// under Secure Client the configured fail mode decides, and the
+		// uninspected event is logged.
+		failMode = secureClientAvailabilityMode(opts, failMode)
+		opts.FailMode = failMode
+	} else {
+		// All other managed and strict hooks keep their closed local-failure
+		// behavior.
+		failMode = managedNonOutageMode(&opts, failMode)
+		if opts.ManagedEnterprise || !opts.SecureClient {
+			failMode, opts.FailMode = "closed", "closed"
+		}
 	}
 	if !sp.failOpenOnly && failMode == "closed" && failClosedStopEvent(opts, sp) {
 		return allowFailClosedStop(opts, sp, managedHookOversizedReason, "transport")
