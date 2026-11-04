@@ -21,11 +21,13 @@ import (
 // transport closes, so judge records can name a stopped request correctly.
 func TestGAP0564RealProviderCancellationReason(t *testing.T) {
 	entered := make(chan struct{}, 1)
+	disconnected := make(chan struct{}, 1)
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		_, _ = io.Copy(io.Discard, r.Body)
 		_ = r.Body.Close()
 		entered <- struct{}{}
 		<-r.Context().Done()
+		disconnected <- struct{}{}
 	}))
 	defer server.Close()
 	defer server.CloseClientConnections()
@@ -58,19 +60,122 @@ func TestGAP0564RealProviderCancellationReason(t *testing.T) {
 	case <-time.After(5 * time.Second):
 		t.Fatal("model transport did not stop after cancellation")
 	}
+	select {
+	case <-disconnected:
+	case <-time.After(time.Second):
+		t.Fatal("model transport stayed connected after cancellation")
+	}
+}
+
+func TestGAP0564RealProviderDeadlineDisconnect(t *testing.T) {
+	entered := make(chan struct{}, 1)
+	disconnected := make(chan struct{}, 1)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = io.Copy(io.Discard, r.Body)
+		_ = r.Body.Close()
+		entered <- struct{}{}
+		<-r.Context().Done()
+		disconnected <- struct{}{}
+	}))
+	defer server.Close()
+	defer server.CloseClientConnections()
+	provider, err := NewProviderForLLMConfig(&config.LLMConfig{
+		Provider: "openai", Model: "openai/test-model", APIKey: "test-placeholder", BaseURL: server.URL,
+	}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithTimeout(t.Context(), 250*time.Millisecond)
+	defer cancel()
+	done := make(chan error, 1)
+	go func() {
+		_, callErr := provider.ChatCompletion(ctx, &ChatRequest{
+			Model: "openai/test-model", Messages: []ChatMessage{{Role: "user", Content: "summarize these files"}},
+		})
+		done <- callErr
+	}()
+	select {
+	case <-entered:
+	case <-time.After(5 * time.Second):
+		t.Fatal("model transport did not start")
+	}
+	select {
+	case err := <-done:
+		if !errors.Is(err, context.DeadlineExceeded) {
+			t.Fatalf("model deadline cause = %v, want context.DeadlineExceeded", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("model transport did not stop at deadline")
+	}
+	select {
+	case <-disconnected:
+	case <-time.After(time.Second):
+		t.Fatal("model transport stayed connected after deadline")
+	}
+}
+
+func TestGAP0564RealProviderHookWindowDisconnect(t *testing.T) {
+	entered := make(chan struct{}, 1)
+	disconnected := make(chan struct{}, 1)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = io.Copy(io.Discard, r.Body)
+		_ = r.Body.Close()
+		entered <- struct{}{}
+		<-r.Context().Done()
+		disconnected <- struct{}{}
+	}))
+	defer server.Close()
+	defer server.CloseClientConnections()
+	provider, err := NewProviderForLLMConfig(&config.LLMConfig{
+		Provider: "openai", Model: "openai/test-model", APIKey: "test-placeholder", BaseURL: server.URL,
+	}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg := &config.Config{}
+	cfg.Guardrail.Mode = "action"
+	cfg.Guardrail.DetectionStrategy = "judge_first"
+	cfg.Guardrail.Judge = config.JudgeConfig{Enabled: true, Injection: true, HookConnectors: []string{"codex"}, HookTimeout: 4}
+	api := &APIServer{scannerCfg: cfg}
+	api.SetHookJudge(&LLMJudge{cfg: &cfg.Guardrail.Judge, model: "test-model", provider: provider, rp: &guardrail.RulePack{}})
+	done := make(chan *ScanVerdict, 1)
+	go func() {
+		done <- api.runHookJudge(boundedHookContext(time.Now().Add(-3*time.Second)), "prompt", "prompt", "codex",
+			"please list the files in this folder", "", nil)
+	}()
+	select {
+	case <-entered:
+	case <-time.After(2 * time.Second):
+		t.Fatal("judge transport did not start")
+	}
+	select {
+	case verdict := <-done:
+		if verdict != nil {
+			t.Fatalf("expired judge changed hook verdict: %+v", verdict)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("hook did not finish at its answer window")
+	}
+	select {
+	case <-disconnected:
+	case <-time.After(time.Second):
+		t.Fatal("judge transport stayed connected after hook completion")
+	}
 }
 
 // A completed model request still supplies the benign judge answer.
 func TestGAP0564RealProviderBenignAnswer(t *testing.T) {
+	answered := make(chan struct{}, 1)
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		_, _ = io.Copy(io.Discard, r.Body)
 		_ = r.Body.Close()
 		w.Header().Set("Content-Type", "application/json")
 		_, _ = fmt.Fprintf(w, `{"id":"gap0564-answer","object":"chat.completion","created":1,"model":"test-model","choices":[{"index":0,"message":{"role":"assistant","content":%q},"finish_reason":"stop"}]}`, allFalseInjectionJSON)
+		answered <- struct{}{}
 	}))
 	defer server.Close()
 	provider, err := NewProviderForLLMConfig(&config.LLMConfig{
-		Provider: "openai", Model: "openai/test-model", APIKey: "test-placeholder", BaseURL: server.URL,
+		Provider: "openai", Model: "openai/test-model", APIKey: "test-placeholder-benign", BaseURL: server.URL,
 	}, nil)
 	if err != nil {
 		t.Fatal(err)
@@ -82,5 +187,10 @@ func TestGAP0564RealProviderBenignAnswer(t *testing.T) {
 	verdict := judge.runInjectionJudge(t.Context(), "please list the files in this folder")
 	if verdict == nil || verdict.Action != "allow" {
 		t.Fatalf("benign judge answer = %+v, want allow", verdict)
+	}
+	select {
+	case <-answered:
+	case <-time.After(time.Second):
+		t.Fatal("benign model response was not used")
 	}
 }

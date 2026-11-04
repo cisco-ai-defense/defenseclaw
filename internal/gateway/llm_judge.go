@@ -281,6 +281,9 @@ func (j *LLMJudge) chat(ctx context.Context, kind string, req *ChatRequest) (*Ch
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
+	if end, bounded := hookJudgeAnswerEnd(ctx); bounded && !time.Now().Before(end) {
+		return nil, context.Canceled
+	}
 	return j.provider.ChatCompletion(ctx, req)
 }
 
