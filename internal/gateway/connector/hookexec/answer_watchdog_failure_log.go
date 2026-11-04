@@ -4,6 +4,8 @@
 package hookexec
 
 import (
+	"bytes"
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"sync"
@@ -29,8 +31,9 @@ var openHookFailureLog = os.OpenFile
 // of its answer deadline. Every copy of the call's Options shares it
 // (Options.failureLog), and the first failure line of the call takes it.
 type preparedFailureLog struct {
-	once sync.Once
-	done chan struct{}
+	once        sync.Once
+	done        chan struct{}
+	markerReady chan struct{}
 	// open and record are openHookFailureLog and managedHookDecisionRecorder
 	// as the call found them: its lines can be written by a goroutine that
 	// outlives it (the watchdog's log line past answerWatchdogLogWait, the
@@ -39,11 +42,16 @@ type preparedFailureLog struct {
 	open   func(string, int, os.FileMode) (*os.File, error)
 	record func(source, marker, line string)
 
-	mu     sync.Mutex
-	home   string
-	file   *os.File
-	taken  bool
-	closed bool
+	mu            sync.Mutex
+	home          string
+	file          *os.File
+	marker        *os.File
+	markerEnabled bool
+	markerTaken   bool
+	forceMarker   bool
+	fallbackFrame []byte
+	taken         bool
+	closed        bool
 	// restartReason is the bounded proof's result for a per-user no-answer.
 	restartReason string
 }
@@ -67,7 +75,7 @@ func (p *preparedFailureLog) getRestartReason() string {
 }
 
 func newPreparedFailureLog() *preparedFailureLog {
-	return &preparedFailureLog{done: make(chan struct{}), open: openHookFailureLog, record: managedHookDecisionRecorder}
+	return &preparedFailureLog{done: make(chan struct{}), markerReady: make(chan struct{}), open: openHookFailureLog, record: managedHookDecisionRecorder}
 }
 
 // opener is the call's openHookFailureLog.
@@ -86,9 +94,9 @@ func (p *preparedFailureLog) recorder() func(source, marker, line string) {
 	return p.record
 }
 
-// prepare opens home/logs/hook-failures.jsonl for appending, once, in the
-// background. It never creates the folder or the file: a log that does not
-// exist yet is opened the usual way when a line is written (logHookFailure).
+// prepare opens the per-user marker before the ordinary failure log. The
+// marker can be used if opening or writing the ordinary log is delayed.
+// A managed call does not create either folder or file here.
 func (p *preparedFailureLog) prepare(home func() string) {
 	if p == nil || home == nil {
 		return
@@ -98,8 +106,25 @@ func (p *preparedFailureLog) prepare(home func() string) {
 			defer close(p.done)
 			h := home()
 			if h == "" {
+				close(p.markerReady)
 				return
 			}
+			if p.markerEnabled {
+				if info, err := os.Stat(h); err == nil && info.IsDir() {
+					_ = os.Mkdir(filepath.Join(h, "logs"), 0o700)
+				}
+				marker, err := p.opener()(filepath.Join(h, "logs", "hook-failures.dropped"), os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o600)
+				if err == nil {
+					p.mu.Lock()
+					if p.closed {
+						_ = marker.Close()
+					} else {
+						p.home, p.marker = h, marker
+					}
+					p.mu.Unlock()
+				}
+			}
+			close(p.markerReady)
 			f, err := p.opener()(filepath.Join(h, "logs", "hook-failures.jsonl"), os.O_APPEND|os.O_WRONLY, 0)
 			if err != nil {
 				return
@@ -115,16 +140,17 @@ func (p *preparedFailureLog) prepare(home func() string) {
 	})
 }
 
-// take hands the open log of home to the first failure line of the call, and
-// nil when it was not opened, is for another home, was taken or closed. An
-// open still in progress is waited for: it is the open the line would make.
+// take hands the ready ordinary log to the first failure line of the call.
+// An open still in progress leaves the caller free to use the marker.
 func (p *preparedFailureLog) take(home string) *os.File {
 	if p == nil || home == "" {
 		return nil
 	}
-	// Not started yet: nothing to wait for, and no later prepare.
-	p.once.Do(func() { close(p.done) })
-	<-p.done
+	select {
+	case <-p.done:
+	default:
+		return nil
+	}
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	if p.taken || p.closed || p.file == nil || p.home != home {
@@ -132,6 +158,86 @@ func (p *preparedFailureLog) take(home string) *os.File {
 	}
 	p.taken = true
 	return p.file
+}
+
+func (p *preparedFailureLog) forceFallback() {
+	if p == nil {
+		return
+	}
+	p.mu.Lock()
+	p.forceMarker = true
+	p.mu.Unlock()
+}
+
+func (p *preparedFailureLog) wantsFallback() bool {
+	if p == nil {
+		return false
+	}
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return p.forceMarker
+}
+
+func (p *preparedFailureLog) takeMarker(home string) *os.File {
+	if p == nil || home == "" || !p.markerEnabled {
+		return nil
+	}
+	select {
+	case <-p.markerReady:
+	default:
+		return nil
+	}
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if p.closed || p.markerTaken || p.marker == nil || p.home != home {
+		return nil
+	}
+	p.markerTaken = true
+	return p.marker
+}
+
+func (p *preparedFailureLog) setFallbackFrame(frame []byte) {
+	if p == nil {
+		return
+	}
+	p.mu.Lock()
+	if !bytes.Contains(p.fallbackFrame, []byte(`"outcome":"fail_closed"`)) ||
+		bytes.Contains(frame, []byte(`"outcome":"fail_closed"`)) {
+		p.fallbackFrame = append(p.fallbackFrame[:0], frame...)
+	}
+	p.mu.Unlock()
+}
+
+func (p *preparedFailureLog) promoteFallbackClosed() {
+	if p == nil {
+		return
+	}
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if !bytes.HasPrefix(p.fallbackFrame, []byte("DCID")) {
+		return
+	}
+	var entry hookFailureEntry
+	if json.Unmarshal(p.fallbackFrame[4:], &entry) != nil {
+		return
+	}
+	entry.Outcome, entry.FailMode = "fail_closed", "closed"
+	if line, err := json.Marshal(entry); err == nil {
+		p.fallbackFrame = append(append([]byte("DCID"), line...), '\n')
+	}
+}
+
+func (p *preparedFailureLog) appendFallback() bool {
+	if p == nil {
+		return false
+	}
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if p.marker == nil || len(p.fallbackFrame) == 0 {
+		return false
+	}
+	n, err := p.marker.Write(p.fallbackFrame)
+	return err == nil && n == len(p.fallbackFrame)
 }
 
 // close closes the log unless a failure line took it.
@@ -147,6 +253,9 @@ func (p *preparedFailureLog) close() {
 	p.closed = true
 	if !p.taken && p.file != nil {
 		_ = p.file.Close()
+	}
+	if !p.markerTaken && p.marker != nil {
+		_ = p.marker.Close()
 	}
 }
 
