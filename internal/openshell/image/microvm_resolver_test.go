@@ -1018,7 +1018,25 @@ func TestMicroVMExportedNSSClassification(t *testing.T) {
 		{"space before the colon", "hosts : familytest\n", `names the hosts source "familytest"`},
 		{"module glued to an action", "hosts: files [NOTFOUND=return]familytest\n", `names the hosts source "familytest"`},
 		{"unterminated action", "hosts: files [NOTFOUND=return dns\n", "has a hosts action it cannot read"},
-		{"odd action", "hosts: files [NOTFOUND=/x] dns\n", `has the hosts action "[NOTFOUND=/x]", which can let DNS answer after /etc/hosts`},
+		{"odd action", "hosts: files [NOTFOUND=/x] dns\n", "has a hosts action it cannot read"},
+		// Action groups as nss_action_parse reads them (osmin23c review 4).
+		{"spaces around the equals sign", "hosts: files [SUCCESS = return] dns\n", ""},
+		{"spaces inside the brackets", "hosts: files [ NOTFOUND=return ] dns\n", ""},
+		{"tabs around the equals sign", "hosts: files [NOTFOUND\t=\treturn] dns\n", ""},
+		{"two pairs", "hosts: files [NOTFOUND=return UNAVAIL=return] dns\n", ""},
+		{"negated pair in mixed case", "hosts: files [!UNAVAIL=return TRYAGAIN = Return] dns\n", ""},
+		{"glued group with spaces", "hosts: files[ SUCCESS =return]dns\n", ""},
+		{"lower-case spaced pair", "hosts: files [ success = return ] dns\n", ""},
+		{"two groups", "hosts: files [NOTFOUND=return] [UNAVAIL=return] dns\n", ""},
+		{"spaced action after dns", "hosts: files dns [ NOTFOUND = return ]\n", ""},
+		{"spaced continue", "hosts: files [SUCCESS = continue] dns\n", `has the hosts action "[SUCCESS = continue]", which can let DNS answer after /etc/hosts`},
+		{"spaced group with continue", "hosts: files [ SUCCESS=continue ] dns\n", `has the hosts action "[ SUCCESS=continue ]", which can let DNS answer after /etc/hosts`},
+		{"return pair then continue pair", "hosts: files [NOTFOUND=return SUCCESS=continue] dns\n", `has the hosts action "[NOTFOUND=return SUCCESS=continue]", which can let DNS answer after /etc/hosts`},
+		{"spaced merge", "hosts: files [SUCCESS = merge] dns\n", `has the hosts action "[SUCCESS = merge]", which can let DNS answer after /etc/hosts`},
+		{"negation apart from its status", "hosts: files [! UNAVAIL=return] dns\n", "has a hosts action it cannot read"},
+		{"empty group", "hosts: files [] dns\n", "has a hosts action it cannot read"},
+		{"action word too long", "hosts: files [NOTFOUND=returns] dns\n", "has a hosts action it cannot read"},
+		{"non-ASCII status letter", "hosts: files [\u017fUCCESS=return] dns\n", "has a hosts action it cannot read"},
 		{"long line", "hosts: files " + strings.Repeat(" ", 5000) + "dns\n", "has a line too long to check"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -1076,6 +1094,9 @@ func TestMicroVMResolverRefusesDNSBesideFiles(t *testing.T) {
 		{"no nsswitch.conf: glibc's files dns default", "RUN rm /etc/nsswitch.conf\n", true},
 		{"stock files dns", "", true},
 		{"return action", "RUN sed -i 's/^hosts:.*/hosts: files [NOTFOUND=return] dns/' /etc/nsswitch.conf\n", true},
+		{"spaced return action", "RUN sed -i 's/^hosts:.*/hosts: files [SUCCESS = return] dns/' /etc/nsswitch.conf\n", true},
+		{"two return pairs", "RUN sed -i 's/^hosts:.*/hosts: files [NOTFOUND=return UNAVAIL=return] dns/' /etc/nsswitch.conf\n", true},
+		{"spaced continue action", "RUN sed -i 's/^hosts:.*/hosts: files [SUCCESS = continue] dns/' /etc/nsswitch.conf\n", false},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			dir := t.TempDir()

@@ -207,11 +207,11 @@ func hostsSourcesProblem(data []byte) string {
 	state := 0 // 0: files is next; 1: after files; 2: after dns
 	for rest := strings.TrimLeft(list, nssSpace); rest != ""; rest = strings.TrimLeft(rest, nssSpace) {
 		if strings.HasPrefix(rest, "[") {
-			action, after, ok := strings.Cut(rest[1:], "]")
-			if !ok || state == 0 {
+			if state == 0 {
 				return "has a hosts action it cannot read"
 			}
-			if problem := hostsActionProblem(action); problem != "" {
+			after, problem := hostsAction(rest)
+			if problem != "" {
 				return problem
 			}
 			rest = after
@@ -239,25 +239,73 @@ func hostsSourcesProblem(data []byte) string {
 	return ""
 }
 
-// hostsActionProblem judges the text of one [status=action ...] item: only
-// return actions on known statuses, which end a lookup sooner.
-func hostsActionProblem(text string) string {
-	items := strings.Fields(text)
-	if len(items) == 0 {
-		return "has a hosts action it cannot read"
+// hostsAction reads the [status=action ...] group at the start of s exactly
+// as glibc 2.39's nss_action_parse does (and the pinned caller's
+// action_returns): white space after '[', around '=' and between pairs; '!'
+// glued to the status; statuses and actions in any ASCII case; one or more
+// pairs up to ']'. It returns the rest of s after the group and a problem:
+// the group cannot be read, or one of its actions is not return (only return
+// can end a lookup sooner without letting a later source answer).
+func hostsAction(s string) (rest, problem string) {
+	const unreadable = "has a hosts action it cannot read"
+	p := 1
+	space := func() {
+		for p < len(s) && strings.IndexByte(nssSpace, s[p]) >= 0 {
+			p++
+		}
 	}
-	for _, item := range items {
-		status, action, ok := strings.Cut(strings.TrimPrefix(item, "!"), "=")
-		switch strings.ToLower(status) {
-		case "success", "notfound", "unavail", "tryagain":
+	word := func() string {
+		start := p
+		for p < len(s) && strings.IndexByte(nssSpace, s[p]) < 0 && s[p] != '=' && s[p] != ']' {
+			p++
+		}
+		return asciiUpper(s[start:p])
+	}
+	returns := true
+	space()
+	for {
+		if p < len(s) && s[p] == '!' {
+			p++
+		}
+		switch word() {
+		case "SUCCESS", "UNAVAIL", "NOTFOUND", "TRYAGAIN":
 		default:
-			return "has a hosts action it cannot read"
+			return "", unreadable
 		}
-		if !ok || !strings.EqualFold(action, "return") {
-			return fmt.Sprintf("has the hosts action %q, which can let DNS answer after /etc/hosts", "["+text+"]")
+		space()
+		if p >= len(s) || s[p] != '=' {
+			return "", unreadable
+		}
+		p++
+		space()
+		switch word() {
+		case "RETURN":
+		case "CONTINUE", "MERGE":
+			returns = false
+		default:
+			return "", unreadable
+		}
+		space()
+		if p < len(s) && s[p] == ']' {
+			break
 		}
 	}
-	return ""
+	if !returns {
+		return "", fmt.Sprintf("has the hosts action %q, which can let DNS answer after /etc/hosts", s[:p+1])
+	}
+	return s[p+1:], ""
+}
+
+// asciiUpper upper-cases ASCII letters only, as glibc's strncasecmp compares
+// in the C locale; any other byte stays, so no Unicode folding can match.
+func asciiUpper(s string) string {
+	b := []byte(s)
+	for i, c := range b {
+		if 'a' <= c && c <= 'z' {
+			b[i] = c - 'a' + 'A'
+		}
+	}
+	return string(b)
 }
 
 // exportHosts reads the same container export that OpenShell makes for the

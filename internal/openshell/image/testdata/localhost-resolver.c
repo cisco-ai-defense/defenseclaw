@@ -84,23 +84,48 @@ static int preloaded(struct loaded *l) {
     return l->other != 0 || l->libc > 1 || l->loader > 1 || l->vdso > 1;
 }
 
-// action_returns reports whether the [status=action ...] item text (without
-// the brackets) holds only return actions on known statuses: those can only
-// end the lookup sooner, never let a later source answer after /etc/hosts.
-static int action_returns(char *text) {
-    char *save = NULL;
-    int items = 0;
-    for (char *item = strtok_r(text, " \t\r\f\v", &save); item != NULL; item = strtok_r(NULL, " \t\r\f\v", &save)) {
-        items++;
-        if (*item == '!') item++;
-        char *eq = strchr(item, '=');
-        if (eq == NULL) return 0;
-        *eq = 0;
-        if (strcasecmp(item, "success") != 0 && strcasecmp(item, "notfound") != 0 &&
-            strcasecmp(item, "unavail") != 0 && strcasecmp(item, "tryagain") != 0) return 0;
-        if (strcasecmp(eq + 1, "return") != 0) return 0;
-    }
-    return items > 0;
+// action_word reads a status or action word as nss_action_parse does: up to
+// white space, '=', ']' or the end, compared without regard to ASCII case.
+static int action_word(char **pp, const char *a, const char *b) {
+    char *start = *pp, *p = *pp;
+    while (*p != 0 && !isspace((unsigned char)*p) && *p != '=' && *p != ']') p++;
+    *pp = p;
+    size_t len = (size_t)(p - start);
+    if (len == strlen(a) && strncasecmp(start, a, len) == 0) return 1;
+    if (b != NULL && len == strlen(b) && strncasecmp(start, b, len) == 0) return 2;
+    return 0;
+}
+
+// action_returns reads one [status=action ...] group at *pp exactly as glibc
+// 2.39's nss_action_parse does: white space after '[', around '=' and
+// between pairs; '!' glued to the status; statuses and actions in any ASCII
+// case; one or more pairs up to ']'. It returns 1 for a readable group of
+// only return actions (they can only end the lookup sooner, never let a
+// later source answer after /etc/hosts), 0 otherwise, and moves *pp past ']'.
+static int action_returns(char **pp) {
+    char *p = *pp + 1;
+    int returns = 1;
+    while (isspace((unsigned char)*p)) p++;
+    do {
+        if (*p == '!') p++;
+        char *status = p;
+        if (!action_word(&p, "SUCCESS", "UNAVAIL")) {
+            p = status;
+            if (!action_word(&p, "NOTFOUND", "TRYAGAIN")) return 0;
+        }
+        while (isspace((unsigned char)*p)) p++;
+        if (*p != '=') return 0;
+        do p++; while (isspace((unsigned char)*p));
+        char *action = p;
+        if (!action_word(&p, "RETURN", NULL)) {
+            p = action;
+            if (!action_word(&p, "CONTINUE", "MERGE")) return 0;
+            returns = 0;
+        }
+        while (isspace((unsigned char)*p)) p++;
+    } while (*p != ']');
+    *pp = p + 1;
+    return returns;
 }
 
 // hosts_list_files_first judges one hosts service list as glibc 2.39 reads
@@ -113,11 +138,7 @@ static int hosts_list_files_first(char *p) {
         while (isspace((unsigned char)*p)) p++;
         if (*p == 0) break;
         if (*p == '[') {
-            char *end = strchr(p, ']');
-            if (end == NULL || state == 0) return 0;
-            *end = 0;
-            if (!action_returns(p + 1)) return 0;
-            p = end + 1;
+            if (state == 0 || !action_returns(&p)) return 0;
             continue;
         }
         char *word = p;
