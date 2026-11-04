@@ -278,6 +278,28 @@ Disabling stops only what the agent loads by that exact name (Codex `$skill` sel
 
 </Accordion>
 
+<Accordion title="Files owned by the Administrators group after an elevated session">
+
+Claude Desktop can run elevated as the built-in Administrator, and it runs Cowork's hooks that way. Since 1.0.8 the CLI, the hook, the per-user gateway and the ACP guard make your own account the owner of what they create, also when elevated. Files that an earlier elevated run created can still belong to the Administrators group, and your account without elevation cannot change or remove them. You see one of these:
+
+- `defenseclaw doctor` fails **Private files** and says the files belong to the Administrators group because DefenseClaw ran from an elevated administrator session.
+- `defenseclaw setup cowork` stops with "Cannot build the Cowork plugin: ... belongs to the Administrators group because it was created from an elevated administrator session".
+- `defenseclaw uninstall` warns that this account cannot remove a file or folder (for example `hooks\.outage-warnings`), or that a folder is open in another program, and says the cleanup will not finish.
+
+**Fix.** Open a prompt with Run as administrator and run the `icacls ... /setowner` command the message prints. It names your account by its SID. It has this form:
+
+```powershell
+icacls "$env:USERPROFILE\.defenseclaw" /setowner "*<your SID>" /T /C /Q
+```
+
+Then run `defenseclaw doctor` or `defenseclaw setup cowork` again. For the uninstall warning, run `defenseclaw uninstall` again from the elevated prompt, or close the program the warning names and run it from your normal prompt.
+
+After a managed deployment is removed, your first per-user run moves the files that deployment left to `%USERPROFILE%\.defenseclaw-managed-leftovers-<UTC time>` and never reads them. Delete that folder when you no longer need it. See [Per-user installs](/docs/enterprise/windows#per-user-installs).
+
+**Check.** `defenseclaw doctor` shows **Private files** as `[PASS]`, `defenseclaw setup cowork` prints the path of the zip, and `defenseclaw uninstall` ends without the cleanup warning.
+
+</Accordion>
+
 </Accordions>
 
 ## Post-install and post-upgrade checklist
