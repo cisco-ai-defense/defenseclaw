@@ -77,7 +77,8 @@ func TestR108OSMINMicroVMCustomBaseHostsAndBenignTwin(t *testing.T) {
 		{"canonical mapping", []byte("127.0.0.1 localhost\n"), true, true},
 		{"dual stack mapping", []byte("::1 localhost\n127.0.0.1 localhost\n"), true, true},
 		{"dual stack with another IPv4 address", []byte("::1 localhost\n198.51.100.10 localhost\n"), true, false},
-		{"IPv6-only mapping", []byte("::1 localhost\n"), true, false},
+		{"IPv6-only mapping", []byte("::1 localhost\n"), true, true},
+		{"IPv6-only other address", []byte("::2 localhost\n"), true, false},
 		{"IPv6 answer ahead of usable IPv4", []byte("::2 localhost\n127.0.0.1 localhost\n"), true, true},
 		{"alias after another name", []byte("127.0.0.1 localname localhost\n"), true, true},
 		{"upper ASCII alias", []byte("127.0.0.1 LOCALHOST\n"), true, true},
@@ -199,15 +200,17 @@ enum nss_status _nss_localtest_gethostbyname2_r(const char *name, int af, struct
 }
 `
 	for _, tc := range []struct {
-		name, nss string
-		want      bool
+		name, hosts, nss string
+		want             bool
 	}{
-		{"custom file without local source", "", false},
-		{"custom file with local source", "localtest", true},
+		{"custom file without local source", "127.0.0.1 custom\n", "", false},
+		{"custom file with local source", "127.0.0.1 custom\n", "localtest", true},
+		{"IPv6 hosts with local source", "::1 localhost\n", "localtest", true},
+		{"IPv6 hosts and other IPv4 with local source", "::1 localhost\n203.0.113.10 localhost\n", "localtest", false},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			dir := t.TempDir()
-			if err := os.WriteFile(filepath.Join(dir, "hosts"), []byte("127.0.0.1 custom\n"), 0o600); err != nil {
+			if err := os.WriteFile(filepath.Join(dir, "hosts"), []byte(tc.hosts), 0o600); err != nil {
 				t.Fatal(err)
 			}
 			layout := microVMResolverFixtureStage(t, dir) + "FROM " + openshell.DefaultBaseImage + " AS dc-complete\nUSER root\nCOPY hosts /etc/hosts\n"

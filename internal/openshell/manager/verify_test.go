@@ -268,12 +268,13 @@ func TestMicroVMResolverResult(t *testing.T) {
 		{"no answer", func(a *workloadAnswer) { a.localhost = nil }, "could not resolve localhost"},
 		{"command failed", func(a *workloadAnswer) { a.localhost, a.localhostFailed = nil, true }, "could not resolve localhost"},
 		{"status missing", func(a *workloadAnswer) { a.localhostUnreported = true }, "could not resolve localhost"},
-		{"wrong address", func(a *workloadAnswer) { a.localhost = []string{"203.0.113.10 STREAM localhost"} }, "did not return only 127.0.0.1"},
-		{"mixed addresses", func(a *workloadAnswer) { a.localhost = append(a.localhost, "203.0.113.10 DGRAM") }, "did not return only 127.0.0.1"},
-		{"malformed output", func(a *workloadAnswer) { a.localhost = []string{"localhost"} }, "did not return only 127.0.0.1"},
-		{"IPv6 output", func(a *workloadAnswer) { a.localhost = []string{"::1 STREAM localhost"} }, "did not return only 127.0.0.1"},
-		{"address without type", func(a *workloadAnswer) { a.localhost = []string{"127.0.0.1"} }, "did not return only 127.0.0.1"},
-		{"unexpected type", func(a *workloadAnswer) { a.localhost = []string{"127.0.0.1 OTHER localhost"} }, "did not return only 127.0.0.1"},
+		{"wrong address", func(a *workloadAnswer) { a.localhost = []string{"203.0.113.10 STREAM localhost"} }, "did not return only its loopback ingress"},
+		{"mixed addresses", func(a *workloadAnswer) { a.localhost = append(a.localhost, "203.0.113.10 DGRAM") }, "did not return only its loopback ingress"},
+		{"malformed output", func(a *workloadAnswer) { a.localhost = []string{"localhost"} }, "did not return only its loopback ingress"},
+		{"IPv6 output", func(a *workloadAnswer) { a.localhost = []string{"::1 STREAM localhost"} }, ""},
+		{"other IPv6 output", func(a *workloadAnswer) { a.localhost = []string{"::2 STREAM localhost"} }, "did not return only its loopback ingress"},
+		{"address without type", func(a *workloadAnswer) { a.localhost = []string{"127.0.0.1"} }, "did not return only its loopback ingress"},
+		{"unexpected type", func(a *workloadAnswer) { a.localhost = []string{"127.0.0.1 OTHER localhost"} }, "did not return only its loopback ingress"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			a := answerFor(testVerify(), "vmbox")
@@ -331,6 +332,7 @@ func TestMicroVMGuestResolverUsesLibcWithProjectPythonModule(t *testing.T) {
 		want                               string
 	}{
 		{"ordinary project module", "127.0.0.1 localhost\n", "# project module\n", "", ""},
+		{"IPv6-only guest", "::1 localhost\n", "# project module\n", "", ""},
 		{"alternate project module", "203.0.113.10 localhost\n", `AF_INET = 2
 def getaddrinfo(host, port, family=0, type=0, proto=0, flags=0):
     return [(2, 1, 6, "", ("127.0.0.1", 0))]

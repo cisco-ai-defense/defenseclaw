@@ -436,13 +436,13 @@ func workloadProblems(want verifyRecord, got workloadFacts, d openshell.Driver, 
 // build checked the completed image, while this check also sees guest init.
 func microVMResolverProblem(got workloadFacts) string {
 	if !got.LocalhostReported || !got.LocalhostOK || len(got.LocalhostAnswers) == 0 {
-		return "the MicroVM could not resolve localhost to its loopback ingress (127.0.0.1)"
+		return "the MicroVM could not resolve localhost to its loopback ingress"
 	}
 	for _, line := range got.LocalhostAnswers {
 		fields := strings.Fields(line)
-		if len(fields) < 2 || len(fields) > 3 || fields[0] != "127.0.0.1" ||
+		if len(fields) < 2 || len(fields) > 3 || (fields[0] != "127.0.0.1" && fields[0] != "::1") ||
 			(fields[1] != "STREAM" && fields[1] != "DGRAM" && fields[1] != "RAW") {
-			return "the MicroVM resolver did not return only 127.0.0.1 for localhost"
+			return "the MicroVM resolver did not return only its loopback ingress for localhost"
 		}
 	}
 	return ""

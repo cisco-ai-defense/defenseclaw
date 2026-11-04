@@ -485,7 +485,7 @@ RUN gcc -O2 -Wall -Wextra -Werror -o /tmp/localhost-resolver /tmp/localhost-reso
 // the VM admission check judges. BuildKit's network=none has no configured
 // IPv4 interface, so getent ahostsv4 returns no answer there. The pinned
 // helper calls the completed image's libc without AI_ADDRCONFIG and checks
-// each IPv4 answer. Its file check distinguishes IPv6-only hosts entries.
+// each IPv4 answer, or an IPv6 answer when no IPv4 answer exists.
 func microVMResolverStep(baseImage string) string {
 	return strings.Replace(`FROM dc-complete AS dc-resolver-check
 USER root
@@ -497,7 +497,7 @@ RUN --network=none --mount=type=bind,from=dc-complete,source=/,target=/tmp/dc-ro
     /usr/sbin/chroot "$root" /bin/sh -c 'test -f /etc/hosts' || fail; \
     answer=$(/usr/bin/timeout 5 /usr/sbin/chroot "$root" /usr/local/lib/defenseclaw/localhost-resolver) || fail; \
     [ ${#answer} -le 4096 ] && [ -n "$answer" ] || fail; \
-    printf '%s\n' "$answer" | /usr/bin/awk 'NF != 2 || $1 != "127.0.0.1" || $2 != "STREAM" { bad=1 } END { exit bad || NR == 0 }' || fail
+    printf '%s\n' "$answer" | /usr/bin/awk 'NF != 2 || ($1 != "127.0.0.1" && $1 != "::1") || $2 != "STREAM" { bad=1 } END { exit bad || NR == 0 }' || fail
 USER sandbox
 `, "BASE_IMAGE", baseImage, 1)
 }
