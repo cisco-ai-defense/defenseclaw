@@ -55,10 +55,9 @@ func TestManagedCodexFailClosedAnswersWithCodexBlock(t *testing.T) {
 		reason string
 	}{
 		{
-			name: "disabled sentinel, closed mode",
+			name: "disabled sentinel",
 			rt:   func() *stubRT { return ok(`{"action":"allow"}`) },
 			mutate: func(t *testing.T, o *Options) {
-				o.FailMode = "closed"
 				if err := os.WriteFile(filepath.Join(o.Home, ".disabled"), nil, 0o600); err != nil {
 					t.Fatal(err)
 				}

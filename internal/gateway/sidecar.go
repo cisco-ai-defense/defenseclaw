@@ -857,6 +857,7 @@ func (s *Sidecar) Run(ctx context.Context) (runErr error) {
 			"guardrail",
 			managed.IsManagedEnterprise(s.currentConfig().DeploymentMode),
 			managedInspectorRetryInitial,
+			s.guardrailRestartCh,
 			errCh,
 			func(ctx context.Context) error {
 				return s.runRestartable(ctx, "guardrail", s.guardrailRestartCh, s.runActiveGuardrail)
@@ -1002,26 +1003,29 @@ func subsystemFailure(name string, err error) error {
 	return fmt.Errorf("sidecar: %s subsystem stopped: %w", name, err)
 }
 
-// runSubsystemWithRetry runs a subsystem until ctx is done. Its first error is
-// reported on errCh without blocking; with retry it runs again after an
-// exponential backoff starting at delay, otherwise it stops.
-func runSubsystemWithRetry(ctx context.Context, name string, retry bool, delay time.Duration, errCh chan<- error, run func(context.Context) error) {
+// runSubsystemWithRetry runs a subsystem until ctx is done. Every error is
+// logged. With retry it runs again after an exponential backoff starting at
+// delay, or at once when restart is signalled (a config reload); a recovered
+// error is not reported on errCh, so a clean stop still exits cleanly.
+// Without retry the error is reported on errCh and the subsystem stops.
+func runSubsystemWithRetry(ctx context.Context, name string, retry bool, delay time.Duration, restart <-chan struct{}, errCh chan<- error, run func(context.Context) error) {
 	for {
 		err := run(ctx)
 		if err == nil || ctx.Err() != nil {
 			return
 		}
 		fmt.Fprintf(os.Stderr, "[sidecar] %s exited with error: %v\n", name, err)
-		select {
-		case errCh <- err:
-		default:
-		}
 		if !retry {
+			select {
+			case errCh <- err:
+			default:
+			}
 			return
 		}
 		select {
 		case <-ctx.Done():
 			return
+		case <-restart:
 		case <-time.After(delay):
 		}
 		delay = nextManagedInspectorRetry(delay)

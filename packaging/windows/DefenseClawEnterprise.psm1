@@ -29988,9 +29988,19 @@ function Invoke-DefenseClawEnterpriseLifecycle {
             # be: the Install stops here and leaves it in place rather than
             # purging it, as Install did before it recovered by itself.
             # Upgrade and Repair heal it; Uninstall clears it.
+            # The checked probe reports absence only on Win32 1060; a query
+            # SCM refuses counts as present, so a hardened service
+            # descriptor can never lead to a purge.
             $metadataError = $_
             foreach ($liveService in @($GatewayServiceName, $GuardianServiceName)) {
-                if ((Get-DefenseClawServiceState -Name $liveService) -ne 'absent') {
+                $serviceRegistered = $true
+                try {
+                    $serviceRegistered = Test-DefenseClawServiceExists -Name $liveService
+                }
+                catch {
+                    $serviceRegistered = $true
+                }
+                if ($serviceRegistered) {
                     $installLiveDeployment = $true
                     throw $metadataError
                 }

@@ -58,14 +58,14 @@ func TestManagedInspectorRetryBackoff(t *testing.T) {
 }
 
 // A managed guardrail that fails is run again after a backoff and recovers
-// without the process exiting; its first error is still reported. Without
-// retry it stops after the first error, as an unmanaged gateway does.
+// without the process exiting or leaving the recovered error on errCh.
+// Without retry it stops after the first error and reports it.
 func TestRunSubsystemWithRetryRecoversAfterTransientError(t *testing.T) {
 	for _, retry := range []bool{true, false} {
 		ctx, cancel := context.WithCancel(context.Background())
 		errCh := make(chan error, 1)
 		attempts := 0
-		runSubsystemWithRetry(ctx, "guardrail", retry, time.Millisecond, errCh, func(context.Context) error {
+		runSubsystemWithRetry(ctx, "guardrail", retry, time.Millisecond, nil, errCh, func(context.Context) error {
 			attempts++
 			if attempts < 3 {
 				return errors.New("transient")
@@ -83,11 +83,42 @@ func TestRunSubsystemWithRetryRecoversAfterTransientError(t *testing.T) {
 		}
 		select {
 		case err := <-errCh:
-			if err == nil || err.Error() != "transient" {
-				t.Fatalf("reported error = %v", err)
+			if retry {
+				t.Fatalf("recovered error reported: %v", err)
 			}
 		default:
-			t.Fatalf("retry=%v first error not reported", retry)
+			if !retry {
+				t.Fatal("stopped subsystem's error not reported")
+			}
 		}
+	}
+}
+
+// A config reload during the backoff retries at once instead of waiting.
+func TestRunSubsystemWithRetryWakesOnRestart(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	restart := make(chan struct{}, 1)
+	attempts := 0
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		runSubsystemWithRetry(ctx, "guardrail", true, time.Hour, restart, make(chan error, 1), func(context.Context) error {
+			attempts++
+			if attempts == 1 {
+				restart <- struct{}{}
+				return errors.New("transient")
+			}
+			cancel()
+			return nil
+		})
+	}()
+	select {
+	case <-done:
+	case <-time.After(10 * time.Second):
+		t.Fatal("retry did not wake on the restart signal")
+	}
+	if attempts != 2 {
+		t.Fatalf("attempts = %d, want 2", attempts)
 	}
 }

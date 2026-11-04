@@ -1366,7 +1366,7 @@ func TestStrictAvailabilityBlocksDisabledOrMissingHome(t *testing.T) {
 	}
 }
 
-func TestManagedEnterpriseMissingOrDisabledHomeFollowsFailMode(t *testing.T) {
+func TestManagedEnterpriseMissingHomeFollowsFailModeAndSentinelBlocks(t *testing.T) {
 	for _, connectorName := range []string{"claudecode", "codex"} {
 		for _, tc := range []struct {
 			name       string
@@ -1413,8 +1413,9 @@ func TestManagedEnterpriseMissingOrDisabledHomeFollowsFailMode(t *testing.T) {
 				requireManagedStderr(t, errb.String(), true)
 				requireManagedRecordReason(t, *records, tc.diagnostic)
 
-				// An interrupted install or purge must not block the agent
-				// under the default open fail mode.
+				// Under the default open fail mode a missing home (an
+				// availability gap) is allowed; the disable sentinel is
+				// tampering and still blocks.
 				out.Reset()
 				errb.Reset()
 				options.FailMode = "open"
@@ -1425,8 +1426,19 @@ func TestManagedEnterpriseMissingOrDisabledHomeFollowsFailMode(t *testing.T) {
 						t.Fatal(err)
 					}
 				}
-				if code := Run(context.Background(), options); code != 0 || rt.requests != 0 {
-					t.Fatalf("open mode: code = %d requests = %d, want an allow without a request; stderr=%q", code, rt.requests, errb.String())
+				code = Run(context.Background(), options)
+				if rt.requests != 0 {
+					t.Fatalf("open mode: gateway called %d times, want 0", rt.requests)
+				}
+				if tc.name == "disabled" {
+					if code != failClosedExit(connectorName) {
+						t.Fatalf("open mode sentinel: code = %d, want fail-closed %d", code, failClosedExit(connectorName))
+					}
+					requireManagedStderr(t, errb.String(), true)
+					return
+				}
+				if code != 0 {
+					t.Fatalf("open mode: code = %d, want an allow; stderr=%q", code, errb.String())
 				}
 				requireManagedStderr(t, errb.String(), false)
 			})
