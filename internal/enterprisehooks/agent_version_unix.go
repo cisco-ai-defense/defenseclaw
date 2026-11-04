@@ -32,6 +32,7 @@ import (
 
 	"github.com/defenseclaw/defenseclaw/internal/agentprobe"
 	"github.com/defenseclaw/defenseclaw/internal/lazyregexp"
+	"github.com/defenseclaw/defenseclaw/internal/processutil"
 	"github.com/defenseclaw/defenseclaw/internal/unixidentity"
 )
 
@@ -978,9 +979,11 @@ func runUnixAgentVersion(parent context.Context, candidate, home, stateEnv strin
 	// Some agents (Hermes) print their version on stderr when stdout is
 	// not a terminal; read it only when stdout names no version.
 	cmd.Stderr = errOut
-	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 	cmd.WaitDelay = time.Second
-	_ = cmd.Run()
+	// The apply worker can end during an interrupted transaction. Keep the
+	// version command tied to that worker so it cannot survive as an
+	// unaccounted-for launch after its parent process disappears.
+	_ = processutil.RunTree(cmd)
 	first, _, _ := strings.Cut(out.buf.String(), "\n")
 	if version := ExtractUnixAgentVersion(first); version != "" {
 		return version, false
