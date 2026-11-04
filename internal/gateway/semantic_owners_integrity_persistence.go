@@ -2236,11 +2236,26 @@ func matchesActiveSudoers(
 	candidate actionfacts.PathFact,
 ) bool {
 	value := canonicalSemanticPath(semanticPathValue(candidate))
-	if actionfacts.DriveSlashPath(value) &&
-		(candidate.Flavor != actionfacts.PathFlavorWindows ||
-			runtime.GOOS != "windows" &&
-				!actionfacts.DriveSlashPath(strings.ReplaceAll(facts.CWD, `\`, "/"))) {
-		return false
+	if actionfacts.DriveSlashPath(value) {
+		windowsCWD := actionfacts.DriveSlashPath(strings.ReplaceAll(facts.CWD, `\`, "/"))
+		switch candidate.Flavor {
+		case actionfacts.PathFlavorWindows:
+			if runtime.GOOS != "windows" && !windowsCWD {
+				return false
+			}
+		case actionfacts.PathFlavorPOSIX:
+			// Git Bash retains POSIX flavor for an explicit drive path. Match
+			// only the literal Windows target, including after a shell cd.
+			if !windowsCWD || facts.Parse.Dialect != actionfacts.DialectPOSIX {
+				return false
+			}
+			hostPath, ok := windowsHostPathOfPOSIXOperand(candidate.Value, facts.CWD, facts.ActiveHome, true)
+			if !ok || canonicalSemanticPath(hostPath) != value {
+				return false
+			}
+		default:
+			return false
+		}
 	}
 	// /private/etc is the real path of /etc on macOS (rel-1-0-6:GAP-0398).
 	value = sudoersRootPath(value)
