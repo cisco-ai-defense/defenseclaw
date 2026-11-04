@@ -982,6 +982,7 @@ func resolveWindowsCodexManagedRuntimeRegistryLocked(
 				fmt.Fprintf(os.Stderr,
 					"[enterprise-hooks] Codex managed runtime: no active registry on this host, Codex stays unhooked: %s\n",
 					conflict.Error())
+				result.AdminConflict = conflict.Error()
 				return result, nil
 			}
 		}

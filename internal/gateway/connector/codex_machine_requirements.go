@@ -95,6 +95,10 @@ type WindowsCodexManagedRuntimeRegistry struct {
 	GatewayAddr        string
 	GatewayServiceName string
 	Targets            []WindowsCodexManagedRuntimeTarget
+	// AdminConflict names the administrator setting that turned DefenseClaw's
+	// managed Codex hooks off. Only a Secure Client host without the strict
+	// pin sets it; the registry is then inactive and Codex stays unhooked.
+	AdminConflict string
 }
 
 // WindowsCodexMachineRequirementsReport is stable machine-readable output for
