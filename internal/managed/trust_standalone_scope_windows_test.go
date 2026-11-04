@@ -403,6 +403,32 @@ func TestStandaloneTrustRefusesInheritedCreateChild(t *testing.T) {
 			t.Fatalf("Secure Client refused the inherited create-child folder: %v", err)
 		}
 	})
+	// GAP-0566 review 2: inside the Cisco root the exported helper still
+	// needs a verified Secure Client host; an OSS data_dir there is refused.
+	t.Run("inside the installer roots it needs a verified Secure Client host", func(t *testing.T) {
+		base := t.TempDir()
+		t.Cleanup(AddTrustedMachineInstallBaseForTest(base))
+		t.Setenv(TrustStrictAncestorsEnv, "")
+		pinTrustProfileForTest(t, false)
+		dir := filepath.Join(base, "Cisco", "oss-data", "audit")
+		if err := os.MkdirAll(dir, 0o700); err != nil {
+			t.Fatal(err)
+		}
+		if !PlatformInstallerOwnedPath(dir) {
+			t.Fatal("the test folder is not inside the stand-in Cisco root")
+		}
+		previous := SecureClientHostVerified
+		t.Cleanup(func() { SecureClientHostVerified = previous })
+		flags := uint8(windows.INHERITED_ACE | windows.CONTAINER_INHERIT_ACE)
+		SecureClientHostVerified = func() bool { return false }
+		if AcceptInheritedCreateChild(dir, "audit store", flags, 0x1201bf, usersSIDForTest(t)) {
+			t.Fatal("an OSS audit folder under the Cisco root accepted an inherited create-child entry")
+		}
+		SecureClientHostVerified = func() bool { return true }
+		if !AcceptInheritedCreateChild(dir, "audit store", flags, 0x1201bf, usersSIDForTest(t)) {
+			t.Fatal("a verified Secure Client host refused the inherited create-child entry under the Cisco root")
+		}
+	})
 	// GAP-0566 review 1: the audit store, judge-body and hook token walks
 	// accept the entry only inside the platform installer's roots, so a
 	// per-user data_dir elsewhere under ProgramData is refused on every

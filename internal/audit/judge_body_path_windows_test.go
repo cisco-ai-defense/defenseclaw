@@ -79,11 +79,13 @@ func TestJudgeBodyWindowsAcceptsInheritedReadAccessForSQLiteSidecars(t *testing.
 
 // After an ACL reset the store's folder inherits C:\ProgramData's
 // container-only Users create-child entry; it cannot replace a child, so the
-// store opens. The acceptance is for a folder inside the platform installer's
-// roots (GAP-0566); the temp tree stands in for C:\ProgramData\Cisco here.
+// store opens. The acceptance is for a verified Secure Client host and a
+// folder inside the platform installer's roots (GAP-0566); the temp tree
+// stands in for C:\ProgramData\Cisco here.
 func TestJudgeBodyWindowsAcceptsInheritedCreateChildOnFolder(t *testing.T) {
 	base := t.TempDir()
 	t.Cleanup(managed.AddTrustedMachineInstallBaseForTest(base))
+	verifySecureClientHostForAuditTest(t, true)
 	parent := filepath.Join(base, "Cisco", "parent")
 	directory := filepath.Join(parent, "store")
 	if err := os.MkdirAll(parent, 0o700); err != nil {

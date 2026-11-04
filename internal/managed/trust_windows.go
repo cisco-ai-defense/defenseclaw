@@ -1297,16 +1297,31 @@ var acceptedCreateChild sync.Map
 // folder reset to inherit from C:\ProgramData is judged the same way
 // everywhere. It reports whether the entry is accepted, logging it once.
 //
-// The folder must also be inside the platform installer's roots
-// (PlatformInstallerOwnedPath, C:\ProgramData\Cisco and the HKLM Cisco
-// bases), where only the installer creates folders and the ProgramData reset
-// is the one way the entry appears. A per-user (OSS) data_dir placed
-// elsewhere under C:\ProgramData inherits the same entry on creation, and
+// Those walks run on every profile, so the acceptance also needs a verified
+// Secure Client host (SecureClientHostVerified) and a folder inside the
+// platform installer's roots. A per-user (OSS) data_dir under C:\ProgramData,
+// the Cisco folder included, inherits the same entry when it is created, and
 // there another standard user could add a file beside the audit database, a
-// SQLite journal included, so it is refused, as before 26.8.4. The default
-// per-user data_dir in the profile never carries the entry (GAP-0566).
+// SQLite journal included, so outside a verified Secure Client host it is
+// refused, as before 26.8.4. The default per-user data_dir in the profile
+// never carries the entry (GAP-0566 reviews 1 and 2).
 func AcceptInheritedCreateChild(path, label string, flags uint8, mask windows.ACCESS_MASK, sid *windows.SID) bool {
-	return PlatformInstallerOwnedPath(path) && acceptInheritedCreateChild(path, label, flags, mask, sid)
+	return PlatformInstallerOwnedPath(path) && SecureClientHostVerified() &&
+		acceptInheritedCreateChild(path, label, flags, mask, sid)
+}
+
+// SecureClientHostVerified reports whether this computer is an authenticated
+// Secure Client deployment. internal/cli sets it to its strict host
+// classifier (protected deployment record, trusted install tree and
+// registered gateway service), the same one behind
+// connector.SecureClientDeploymentVerified; every binary that runs a
+// per-user (OSS) gateway or hook links internal/cli. A managed helper that
+// does not link it (the sensor helper, enterprise Setup) falls back to its
+// protected service pin: a managed_enterprise deployment outside the
+// standalone profile. A standard user cannot set either for another
+// account's process.
+var SecureClientHostVerified = func() bool {
+	return IsManagedEnterprise(PinnedDeploymentMode()) && !windowsStandaloneTrustScope()
 }
 
 // acceptInheritedCreateChild accepts, and logs once per path, an inherited
