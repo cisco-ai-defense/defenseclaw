@@ -120,6 +120,8 @@ DefenseClaw cannot add a plugin to your Claude account. `defenseclaw setup cowor
 
 5. Setup, still waiting, prints `Cowork is protected` with the time of the first Cowork event, and the Claude Code mode. If you pressed Ctrl+C or used `--no-wait`, check with `defenseclaw status`.
 
+   ![PowerShell on Windows after defenseclaw setup cowork: the plugin was built, the upload steps are listed, and the last line says Cowork is protected because a Cowork session reached DefenseClaw](/images/cowork/setup-cowork-windows.png)
+
 Options:
 
 | Option | Effect |
@@ -134,6 +136,8 @@ What the plugin contains: `.claude-plugin/plugin.json` and `hooks/hooks.json`, n
 ### Check it
 
 `defenseclaw status` and `defenseclaw doctor` show a **Cowork** row. `status --json` has a `cowork` object with `protected`, `detail`, `step`, `reason_code`, `last_event_at`, `plugin_version` and `plugin_zip`. The doctor check id is `doctor.cowork`; it passes when protected and warns otherwise.
+
+![Output of defenseclaw status and defenseclaw doctor on Windows: the Cowork row of each says protected in observe mode, with the plugin version and the time of the last Cowork event](/images/cowork/status-doctor-windows.png)
 
 | Row says | Reason code | What to do |
 | --- | --- | --- |
@@ -185,6 +189,8 @@ On a managed standalone install, DefenseClaw's Claude Code machine policy drop-i
 ### Configured versus covered
 
 `status` and `verify` print a `cowork` line and a `cowork` JSON member. In 1.0.8 the member is `configured`, not `covered`, because DefenseClaw can check its own side but not what Cowork runs.
+
+![The cowork lines of defenseclaw-gateway enterprise windows verify on a managed Windows computer: cowork is configured, managed_hooks_only is preserve, the account's last Cowork call, and the Claude Desktop data folders with their engine builds](/images/cowork/managed-verify-windows.png)
 
 | Field or line | Meaning |
 | --- | --- |
@@ -244,6 +250,14 @@ Claude Desktop keeps the engine in the user's own data folder, under `claude-cod
 | Gateway health | `connectors[name=claudecode].surfaces.cowork` with `requests`, `last_activity_at` and `last_session_start_at`. It appears after the first Cowork call |
 | AI Discovery | Claude Desktop, whether Cowork is set up on the machine, the engine version, the VM bundle and its size, and the Cowork plugin names. See [AI Discovery](/docs/ai-discovery) |
 | Cowork's own window | No DefenseClaw hook warning or notice. Check `defenseclaw status`, `defenseclaw doctor` or the TUI instead. See [Limits](#limits) |
+
+In the example below, an administrator deny rule blocked a shell command in a Cowork task on a managed Windows computer. Cowork's window shows no notice from DefenseClaw. The block shows in the model's reply, which names the rule.
+
+![Claude Desktop in Cowork mode: the task asked for a shell command, the tool call failed, and Claude's reply says the command was blocked by an organization policy, DefenseClaw rule DC-DENY-TEST-1](/images/cowork/block-in-cowork-windows.png)
+
+On a per-user install the TUI Overview shows the same state in its Configuration panel.
+
+![The Overview tab of defenseclaw tui on macOS: the Configuration panel lists the agent claudecode and a Cowork row that says protected, with the time of the last event](/images/cowork/tui-overview-cowork-macos.png)
 
 The user's identity comes from the operating system, never from Cowork's environment.
 
