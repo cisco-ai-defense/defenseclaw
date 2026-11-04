@@ -31623,30 +31623,31 @@ function Test-DefenseClawGuardianCoverageReport {
     }
 }
 
-# GAP-0401: the first reconcile of a standalone guardian reads every signed-in
-# target and can outlast the usual coverage wait on a busy device. Past that
-# wait Setup keeps waiting, in steps and up to the hard limit, only while the
+# GAP-0401: the first reconcile of the guardian reads every signed-in target
+# and can outlast the usual coverage wait on a busy device. Past that wait
+# Setup keeps waiting, in steps and up to the hard limit, only while the
 # guardian process it started is still the service process and its startup
-# record shows that reconcile running and moving.
+# record shows that reconcile running and moving. Both profiles: a slow or
+# antivirus-heavy Secure Client laptop rolled a healthy install back at 90 s.
 $script:GuardianFirstReconcileTimeoutSeconds = 600
 $script:GuardianFirstReconcileStallSeconds = 180
 $script:GuardianFirstReconcileCheckSeconds = 5
 
 function Get-DefenseClawGuardianStartupProgress {
     <#
-        The startup record of the standalone LocalSystem guardian
+        The startup record of the LocalSystem guardian
         (<RuntimeDirectory>\hook_guardian_startup.json): how far the first
         reconcile of guardian process ProcessId, started after StartedAfter,
-        has come. $null when there is no such record (Secure Client, a release
-        that does not write it, another process, or a record that cannot be
-        read): the coverage wait then keeps its usual limit.
+        has come. $null when there is no such record (a release that does not
+        write it, another process, or a record that cannot be read): the
+        coverage wait then keeps its usual limit.
     #>
     param(
         [Parameter(Mandatory)][hashtable]$Layout,
         [Parameter(Mandatory)][uint32]$ProcessId,
         [Parameter(Mandatory)][DateTime]$StartedAfter
     )
-    if ($ProcessId -eq 0 -or -not (Test-DefenseClawStandaloneProfile)) {
+    if ($ProcessId -eq 0) {
         return $null
     }
     try {
@@ -32027,10 +32028,7 @@ function Wait-DefenseClawFreshGuardianReconcile {
             return [uint32]0
         }
     }
-    $guardianProcessId = [uint32]0
-    if (Test-DefenseClawStandaloneProfile) {
-        $guardianProcessId = & $guardianProcess
-    }
+    $guardianProcessId = & $guardianProcess
     $deadline = $begin.AddSeconds($TimeoutSeconds)
     $limit = $begin.AddSeconds([Math]::Max(
             $TimeoutSeconds,

@@ -5,10 +5,9 @@
 
 package cli
 
-import "github.com/defenseclaw/defenseclaw/internal/enterprisehooks"
-
-// Only the standalone Windows guardian writes the startup record that the
-// Setup coverage wait reads (GAP-0401); Secure Client is unchanged.
+// Every Windows guardian writes the startup record that the Setup coverage
+// wait reads (GAP-0401), so a slow first reconcile extends the wait on
+// Secure Client as it does on the standalone profile.
 func init() {
-	enterpriseHookStartup.enabled = enterprisehooks.WindowsStandaloneProcess
+	enterpriseHookStartup.enabled = func() bool { return true }
 }
