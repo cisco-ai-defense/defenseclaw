@@ -1764,10 +1764,16 @@ func hookSessionStateKey(meta llmEventMeta) string {
 }
 
 func hookTraceEventID(ctx context.Context, meta llmEventMeta) string {
+	return hookTraceEventIDAt(ctx, meta, time.Now().UTC())
+}
+
+// A wall-clock tick can cover multiple hook deliveries, so each trace anchor
+// also needs a per-delivery value.
+func hookTraceEventIDAt(ctx context.Context, meta llmEventMeta, at time.Time) string {
 	parts := []string{
 		"trace-event", meta.Source, meta.SessionID, meta.AgentID,
 		meta.LifecycleEvent, meta.TurnID, meta.ToolID,
-		strconv.FormatInt(time.Now().UTC().UnixNano(), 10),
+		strconv.FormatInt(at.UnixNano(), 10), uuid.NewString(),
 	}
 	if spanContext := trace.SpanContextFromContext(ctx); spanContext.IsValid() {
 		parts = append(parts, spanContext.TraceID().String(), spanContext.SpanID().String())
