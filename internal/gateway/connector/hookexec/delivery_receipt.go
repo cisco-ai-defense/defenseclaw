@@ -73,7 +73,7 @@ func DeliveryReceiptEvent(connector, event string) bool {
 }
 
 func wantsHookDeliveryReceipt(opts Options) bool {
-	return opts.ManagedEnterprise && !opts.SecureClient && opts.answerWatch != nil && !opts.answerBy.IsZero()
+	return !opts.SecureClient && opts.answerWatch != nil && !opts.answerBy.IsZero()
 }
 
 func prepareHookDeliveryRequest(req *http.Request, payload []byte, wait time.Duration, starting func(context.Context) bool) (*http.Request, *hookDeliveryRequest) {
