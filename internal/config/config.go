@@ -2508,8 +2508,8 @@ func (c *JudgeConfig) ValidateExtraBody() error {
 			return fmt.Errorf("guardrail.judge.extra_body: invalid key %q (use ASCII letters, digits, _, - or .)", key)
 		}
 		for _, ch := range key {
-			if !((ch >= 'a' && ch <= 'z') || (ch >= 'A' && ch <= 'Z') ||
-				(ch >= '0' && ch <= '9') || ch == '_' || ch == '-' || ch == '.') {
+			if (ch < 'a' || ch > 'z') && (ch < 'A' || ch > 'Z') &&
+				(ch < '0' || ch > '9') && ch != '_' && ch != '-' && ch != '.' {
 				return fmt.Errorf("guardrail.judge.extra_body: invalid key %q (use ASCII letters, digits, _, - or .)", key)
 			}
 		}
