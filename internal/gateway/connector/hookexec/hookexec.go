@@ -262,15 +262,16 @@ func Run(ctx context.Context, opts Options) int {
 	}
 
 	// DEFENSECLAW_HOME guard: an ordinary removed/disabled installation is an
-	// intentional no-op. Administrator-managed hooks carry ManagedEnterprise
-	// (and invalid runtimes also set StrictAvailability), so a missing or
-	// disabled machine-policy home must block instead of bypassing enforcement.
+	// intentional no-op. A missing or disabled machine-policy home under an
+	// administrator-managed hook is an availability gap (an interrupted
+	// install, upgrade or purge), so the configured fail mode decides and is
+	// logged; strict availability still blocks.
 	if info, err := os.Stat(opts.Home); err != nil || !info.IsDir() {
 		if opts.ManagedEnterprise {
 			return failUnreachable(
 				opts,
 				sp,
-				"closed",
+				failMode,
 				managedRuntimeHomeMissingReason,
 			)
 		}
@@ -281,7 +282,7 @@ func Run(ctx context.Context, opts Options) int {
 			return failUnreachable(
 				opts,
 				sp,
-				"closed",
+				failMode,
 				managedRuntimeDisableSentinelReason,
 			)
 		}
@@ -347,7 +348,7 @@ func Run(ctx context.Context, opts Options) int {
 			return failUnreachable(
 				opts,
 				sp,
-				"closed",
+				failMode,
 				managedRuntimeTokenEmptyReason,
 			)
 		}
@@ -371,16 +372,16 @@ func Run(ctx context.Context, opts Options) int {
 			if readErr != nil && opts.ManagedEnterprise {
 				// Managed enterprise mode must not silently omit Authorization when
 				// the token sidecar is present but unreadable, malformed, or fails a
-				// stability/identity check. Fail closed so unauthenticated loopback
-				// requests never sneak past connector-side auth.
-				return failUnreachable(opts, sp, "closed", managedHookTokenUnreadableReason)
+				// stability/identity check. No request is sent; the fail mode
+				// decides, so an unauthenticated request never reaches the gateway.
+				return failUnreachable(opts, sp, failMode, managedHookTokenUnreadableReason)
 			}
 			if opts.ManagedEnterprise && strings.TrimSpace(loaded) == "" {
 				// An empty sidecar parses without error but sendHookRequest would
 				// then omit Authorization entirely and the connector-side loopback
 				// path would accept the credential-less request. Managed mode has
-				// no no-auth path, so fail closed here.
-				return failUnreachable(opts, sp, "closed", managedHookTokenEmptyReason)
+				// no no-auth path, so no request is sent and the fail mode decides.
+				return failUnreachable(opts, sp, failMode, managedHookTokenEmptyReason)
 			}
 			token = loaded
 		}
@@ -642,13 +643,13 @@ func (sp spec) decide(opts Options, body []byte) int {
 }
 
 // handleMissingToken mirrors defenseclaw_handle_missing_token: log the bypass,
-// then allow (exit 0) by default or block (exit 2) under strict availability.
-// Managed enterprise mode has no unauthenticated path, so a missing token is
-// always fatal there regardless of the caller-supplied fail mode.
+// then allow (exit 0) by default or block (exit 2) under strict availability
+// or a closed fail mode. Managed enterprise mode has no unauthenticated path,
+// so no request is sent either way.
 // No connector-specific JSON body is emitted on this path.
 func handleMissingToken(opts Options, sp spec, failMode string) int {
 	const reason = missingGatewayTokenReason + " (connector-scoped and legacy token sidecars absent; DEFENSECLAW_GATEWAY_TOKEN unset)"
-	blocked := opts.ManagedEnterprise || opts.StrictAvailability || failMode == "closed"
+	blocked := opts.StrictAvailability || failMode == "closed"
 	logHookFailure(opts, sp, reason, "transport", failMode, blocked)
 	if blocked {
 		writeFailureDiagnostic(opts, true,
@@ -666,17 +667,16 @@ func handleUnavailableHome(opts Options, sp spec, reason string) int {
 	return emit(opts.Stdout, sp.openAllow)
 }
 
-// handleOversized mirrors the per-connector oversized-payload branch. The
-// agent's payload is caller-controlled, so an open fail mode would make an
-// oversized event a deterministic inspection bypass; a managed hook always
-// blocks it and records the boundary.
+// handleOversized mirrors the per-connector oversized-payload branch. Agents
+// routinely send large payloads (a big file read or edit), so the configured
+// fail mode decides, and the uninspected event is logged.
 func handleOversized(opts Options, sp spec, failMode string) int {
-	if opts.ManagedEnterprise {
-		failMode = "closed"
-	}
-	logHookFailure(opts, sp, managedHookOversizedReason, "transport", failMode, failMode == "closed")
-	writeFailureDiagnostic(opts, failMode == "closed", "defenseclaw: %s hook refusing oversized payload\n", sp.connector)
-	if failMode == "closed" {
+	// A managed runtime that failed validation sets StrictAvailability; an
+	// unmanaged hook keeps following only its fail mode here.
+	blocked := failMode == "closed" || (opts.ManagedEnterprise && opts.StrictAvailability)
+	logHookFailure(opts, sp, managedHookOversizedReason, "transport", failMode, blocked)
+	writeFailureDiagnostic(opts, blocked, "defenseclaw: %s hook refusing oversized payload\n", sp.connector)
+	if blocked {
 		// A managed Codex hook denies with the event's own block when the
 		// event could be read from the payload's prefix: a top-level decision
 		// does not deny a PreToolUse or PermissionRequest.

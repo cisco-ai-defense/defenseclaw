@@ -57,13 +57,37 @@ func TestManagedInspectorRetryBackoff(t *testing.T) {
 	}
 }
 
-// An unmanaged gateway has no service manager to restart it, so a guardrail
-// (connector setup) failure must not stop the process before the API is ready.
-func TestGuardrailFailureIsFatalOnlyWhenManaged(t *testing.T) {
-	if guardrailFailureIsFatal("") || guardrailFailureIsFatal("unmanaged_byod") {
-		t.Fatal("an unmanaged gateway exits on a guardrail failure")
-	}
-	if !guardrailFailureIsFatal("managed_enterprise") {
-		t.Fatal("a managed gateway stays up with the guardrail dead")
+// A managed guardrail that fails is run again after a backoff and recovers
+// without the process exiting; its first error is still reported. Without
+// retry it stops after the first error, as an unmanaged gateway does.
+func TestRunSubsystemWithRetryRecoversAfterTransientError(t *testing.T) {
+	for _, retry := range []bool{true, false} {
+		ctx, cancel := context.WithCancel(context.Background())
+		errCh := make(chan error, 1)
+		attempts := 0
+		runSubsystemWithRetry(ctx, "guardrail", retry, time.Millisecond, errCh, func(context.Context) error {
+			attempts++
+			if attempts < 3 {
+				return errors.New("transient")
+			}
+			cancel()
+			return nil
+		})
+		cancel()
+		want := 3
+		if !retry {
+			want = 1
+		}
+		if attempts != want {
+			t.Fatalf("retry=%v attempts = %d, want %d", retry, attempts, want)
+		}
+		select {
+		case err := <-errCh:
+			if err == nil || err.Error() != "transient" {
+				t.Fatalf("reported error = %v", err)
+			}
+		default:
+			t.Fatalf("retry=%v first error not reported", retry)
+		}
 	}
 }

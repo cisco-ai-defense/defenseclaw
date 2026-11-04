@@ -184,7 +184,7 @@ func TestRunUsesAuthenticatedManagedTokenSnapshotWithoutRereadingSidecars(t *tes
 	}
 }
 
-func TestRunAuthenticatedManagedTokenSnapshotEmptyFailsClosedWithoutFallback(t *testing.T) {
+func TestRunAuthenticatedManagedTokenSnapshotEmptyFollowsFailModeWithoutFallback(t *testing.T) {
 	records := captureManagedHookDecisions(t)
 	result := run(t, "codex", ok(`{"action":"allow"}`), func(opts *Options) {
 		path := filepath.Join(opts.HookDir, ".hook-codex.token")
@@ -192,7 +192,7 @@ func TestRunAuthenticatedManagedTokenSnapshotEmptyFailsClosedWithoutFallback(t *
 			t.Fatalf("write scoped token: %v", err)
 		}
 		opts.ManagedEnterprise = true
-		opts.FailMode = "open"
+		opts.FailMode = "closed"
 		empty := "  "
 		opts.AuthenticatedManagedToken = &empty
 	})
@@ -1366,7 +1366,7 @@ func TestStrictAvailabilityBlocksDisabledOrMissingHome(t *testing.T) {
 	}
 }
 
-func TestManagedEnterpriseMissingOrDisabledHomeFailsClosed(t *testing.T) {
+func TestManagedEnterpriseMissingOrDisabledHomeFollowsFailMode(t *testing.T) {
 	for _, connectorName := range []string{"claudecode", "codex"} {
 		for _, tc := range []struct {
 			name       string
@@ -1389,20 +1389,21 @@ func TestManagedEnterpriseMissingOrDisabledHomeFailsClosed(t *testing.T) {
 				rt := ok(`{"action":"allow"}`)
 				var out, errb bytes.Buffer
 				home := tc.home(t)
-				code := Run(context.Background(), Options{
+				options := Options{
 					Connector:          connectorName,
 					APIAddr:            "127.0.0.1:1",
 					Home:               home,
 					HookDir:            filepath.Join(home, "hooks"),
 					Token:              "target-readable-token",
-					FailMode:           "open",
+					FailMode:           "closed",
 					ManagedEnterprise:  true,
 					StrictAvailability: false,
 					Stdin:              strings.NewReader("{}"),
 					Stdout:             &out,
 					Stderr:             &errb,
 					HTTPClient:         &http.Client{Transport: rt},
-				})
+				}
+				code := Run(context.Background(), options)
 				if code != failClosedExit(connectorName) {
 					t.Fatalf("code = %d, want fail-closed %d; stdout=%q stderr=%q", code, failClosedExit(connectorName), out.String(), errb.String())
 				}
@@ -1411,6 +1412,23 @@ func TestManagedEnterpriseMissingOrDisabledHomeFailsClosed(t *testing.T) {
 				}
 				requireManagedStderr(t, errb.String(), true)
 				requireManagedRecordReason(t, *records, tc.diagnostic)
+
+				// An interrupted install or purge must not block the agent
+				// under the default open fail mode.
+				out.Reset()
+				errb.Reset()
+				options.FailMode = "open"
+				options.Stdin = strings.NewReader("{}")
+				if tc.name == "missing" {
+					// The first run's failure record created the home.
+					if err := os.RemoveAll(home); err != nil {
+						t.Fatal(err)
+					}
+				}
+				if code := Run(context.Background(), options); code != 0 || rt.requests != 0 {
+					t.Fatalf("open mode: code = %d requests = %d, want an allow without a request; stderr=%q", code, rt.requests, errb.String())
+				}
+				requireManagedStderr(t, errb.String(), false)
 			})
 		}
 	}

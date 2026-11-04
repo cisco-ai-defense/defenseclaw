@@ -55,9 +55,10 @@ func TestManagedCodexFailClosedAnswersWithCodexBlock(t *testing.T) {
 		reason string
 	}{
 		{
-			name: "disabled sentinel",
+			name: "disabled sentinel, closed mode",
 			rt:   func() *stubRT { return ok(`{"action":"allow"}`) },
 			mutate: func(t *testing.T, o *Options) {
+				o.FailMode = "closed"
 				if err := os.WriteFile(filepath.Join(o.Home, ".disabled"), nil, 0o600); err != nil {
 					t.Fatal(err)
 				}
@@ -212,7 +213,7 @@ func TestManagedCodexOversizedAnswersWithCodexBlockForEvent(t *testing.T) {
 			r := run(t, "codex", ok(`{"action":"allow"}`), func(o *Options) {
 				o.Event = ""
 				o.ManagedEnterprise = true
-				o.FailMode = "open"
+				o.FailMode = "closed"
 				token := "authenticated-token"
 				o.AuthenticatedManagedToken = &token
 				o.MaxBody = 1 // an inherited tiny cap is raised for a managed hook
@@ -223,6 +224,18 @@ func TestManagedCodexOversizedAnswersWithCodexBlockForEvent(t *testing.T) {
 			}
 			if r.code != 0 || r.stdout != tc.want {
 				t.Fatalf("code = %d stdout = %q, want 0 and %q", r.code, r.stdout, tc.want)
+			}
+			// The default open fail mode lets a large agent payload through.
+			open := run(t, "codex", ok(`{"action":"allow"}`), func(o *Options) {
+				o.Event = ""
+				o.ManagedEnterprise = true
+				o.FailMode = "open"
+				token := "authenticated-token"
+				o.AuthenticatedManagedToken = &token
+				o.Stdin = strings.NewReader(tc.payload)
+			})
+			if open.rt.requests != 0 || open.code != 0 || open.stdout != "" {
+				t.Fatalf("open mode: requests=%d code=%d stdout=%q, want an uninspected allow", open.rt.requests, open.code, open.stdout)
 			}
 		})
 	}

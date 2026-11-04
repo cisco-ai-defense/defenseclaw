@@ -4638,12 +4638,17 @@ function Test-DefenseClawServiceMarkedForDelete {
 
 # Install and Upgrade stop here, before any service is touched, when one of
 # this scope's services is still marked for deletion: no create or configure
-# can succeed until SCM removes it.
+# can succeed until SCM removes it. SCM removes the service as soon as its
+# last handle closes, and the handle is usually a short-lived one (services.msc,
+# an EDR or monitoring agent querying it right after an uninstall), so the
+# check waits for that before it asks for a restart.
 function Assert-DefenseClawServicesNotPendingDelete {
     param(
         [Parameter(Mandatory)][string]$GatewayServiceName,
-        [Parameter(Mandatory)][string]$GuardianServiceName
+        [Parameter(Mandatory)][string]$GuardianServiceName,
+        [ValidateRange(0, 600)][int]$WaitSeconds = 120
     )
+    $deadline = [DateTime]::UtcNow.AddSeconds($WaitSeconds)
     foreach ($name in @(
             $GatewayServiceName,
             $GuardianServiceName,
@@ -4652,6 +4657,10 @@ function Assert-DefenseClawServicesNotPendingDelete {
         )) {
         if ([string]::IsNullOrWhiteSpace([string]$name)) {
             continue
+        }
+        while ((Test-DefenseClawServiceMarkedForDelete -Name ([string]$name)) -and
+            [DateTime]::UtcNow -lt $deadline) {
+            Microsoft.PowerShell.Utility\Start-Sleep -Seconds 2
         }
         if (Test-DefenseClawServiceMarkedForDelete -Name ([string]$name)) {
             Write-DefenseClawResilienceEvent -Marker defenseclaw_prereq -Fields @{
@@ -18987,14 +18996,24 @@ function Invoke-DefenseClawOrphanedSelectorPrune {
     $fallbackUsed = $false
     if (-not [bool]$report.ok) {
         $reason = [string]$report.failure_detail
-        if ($reportTransaction -cne $TransactionID) {
-            throw "orphaned selector prune failed: $reason"
-        }
         $selectorPaths = @()
         if ($null -ne $report.PSObject.Properties['selector_paths']) {
             $selectorPaths = @($report.selector_paths | Microsoft.PowerShell.Core\ForEach-Object { [string]$_ })
         }
-        if ($selectorPaths.Count -eq 0) {
+        # The helper failed before it identified any selector (it could not
+        # load its config, for example). The prune is cleanup and a host with
+        # no orphaned selector loses nothing, so the Install logs it and
+        # continues. A report for another transaction or one that names
+        # selectors still stops the Install.
+        if ($selectorPaths.Count -eq 0 -and
+            ([string]::IsNullOrEmpty($reportTransaction) -or $reportTransaction -ceq $TransactionID)) {
+            Write-DefenseClawResilienceEvent -Marker defenseclaw_degraded -Fields @{
+                subsystem = 'selector-prune'
+                reason    = "orphaned selector prune could not run; continuing the Install: $(ConvertTo-DefenseClawBoundedDiagnostic -Value $reason)"
+            }
+            return $null
+        }
+        if ($reportTransaction -cne $TransactionID) {
             throw "orphaned selector prune failed: $reason"
         }
         Microsoft.PowerShell.Utility\Write-Warning -Message (
@@ -27335,22 +27354,12 @@ function Invoke-DefenseClawInstallLikeLifecycle {
         if ($Action -eq 'Install' -and -not $priorDeploymentActive) {
             # Before any target runtime is prepared or the Guardian can
             # start, clear runtime selectors an earlier purge or interrupted
-            # uninstall left with nothing that could authorize them. This is
-            # cleanup: a host with no orphaned selector loses nothing when it
-            # fails, so the Install logs it and continues.
-            try {
-                [void](Invoke-DefenseClawOrphanedSelectorPrune `
-                    -Layout $Layout `
-                    -GatewayServiceName $GatewayServiceName `
-                    -TransactionID $lifecycleTransactionID `
-                    -SnapshotPath $snapshot)
-            }
-            catch {
-                Write-DefenseClawResilienceEvent -Marker defenseclaw_degraded -Fields @{
-                    subsystem = 'selector-prune'
-                    reason    = "orphaned selector prune failed; continuing the Install: $(ConvertTo-DefenseClawBoundedDiagnostic -Value $_.Exception.Message)"
-                }
-            }
+            # uninstall left with nothing that could authorize them.
+            [void](Invoke-DefenseClawOrphanedSelectorPrune `
+                -Layout $Layout `
+                -GatewayServiceName $GatewayServiceName `
+                -TransactionID $lifecycleTransactionID `
+                -SnapshotPath $snapshot)
         }
         $targetRuntimeManifestPresent = [bool](
             Microsoft.PowerShell.Management\Test-Path `
@@ -28846,6 +28855,10 @@ function Invoke-DefenseClawNuclearUninstall {
             }
         }
     }
+    # A user's .defenseclaw holds only that user's hook state and logs; no
+    # service, ACL or policy depends on it once StateRoot is gone, and the
+    # next Install re-creates it. One that cannot be removed is logged and the
+    # purge still succeeds.
     foreach ($userData in $userDataPaths) {
         $leftover = Remove-DefenseClawNuclearPath `
             -Path ([string]$userData) `
@@ -28853,7 +28866,11 @@ function Invoke-DefenseClawNuclearUninstall {
             -RebootRequired ([ref]$rebootRequired) `
             -AcceptScheduledDelete
         if (-not [string]::IsNullOrEmpty($leftover)) {
-            $incomplete.Add($leftover)
+            Write-DefenseClawResilienceEvent -Marker defenseclaw_degraded -Fields @{
+                subsystem = 'purge'
+                path      = [string]$userData
+                reason    = "user data folder survived the purge; continuing: $(ConvertTo-DefenseClawBoundedDiagnostic -Value $leftover)"
+            }
         }
     }
 
@@ -29966,6 +29983,18 @@ function Invoke-DefenseClawEnterpriseLifecycle {
             if (-not $installAutoRecoveryEligible) {
                 throw
             }
+            # Unreadable metadata cannot say whether the deployment is live.
+            # A registered Gateway or Guardian, running or not, says it may
+            # be: the Install stops here and leaves it in place rather than
+            # purging it, as Install did before it recovered by itself.
+            # Upgrade and Repair heal it; Uninstall clears it.
+            $metadataError = $_
+            foreach ($liveService in @($GatewayServiceName, $GuardianServiceName)) {
+                if ((Get-DefenseClawServiceState -Name $liveService) -ne 'absent') {
+                    $installLiveDeployment = $true
+                    throw $metadataError
+                }
+            }
             $installRecoveryReason = "deployment metadata: $($_.Exception.Message)"
         }
     }
@@ -30403,6 +30432,15 @@ function Invoke-DefenseClawEnterpriseLifecycle {
                     -NoStart:($NoStart -or $DeferredConfig)
             }
             catch {
+                # The retry's own failure is the result, but the failure
+                # that started the recovery is the likelier root cause, so
+                # both are reported.
+                if ($installRecoveryAttempted -and
+                    -not [string]::IsNullOrEmpty($installRecoveryReason)) {
+                    throw ('{0} (retried after clearing leftover state; first failure: {1})' -f
+                        [string]$_.Exception.Message,
+                        (ConvertTo-DefenseClawBoundedDiagnostic -Value $installRecoveryReason))
+                }
                 # A service still marked for deletion needs a restart; a
                 # purge-and-retry cannot clear it and would only discard
                 # state, so the precise prerequisite is the result.
