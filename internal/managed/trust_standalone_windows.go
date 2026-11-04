@@ -95,16 +95,17 @@ var windowsStandaloneTrustScope = func() bool {
 	return StandaloneTrustScope() || WindowsStandaloneInstallExecutable()
 }
 
-// StandaloneRepairNeedsProvenance reports whether a file repaired after an
-// untrusted writer must also prove its content (TrustedContentUnchanged)
-// before it is used: true in the standalone scope (see trust_content.go).
-func StandaloneRepairNeedsProvenance() bool {
-	return windowsStandaloneTrustScope()
-}
-
-// WindowsStandaloneTrustScope is windowsStandaloneTrustScope for drift
-// acceptances outside this package (the Codex machine requirements gate).
-func WindowsStandaloneTrustScope() bool {
+// StandaloneRefusesContentDrift reports whether a drifted policy or data
+// file (config.yaml, the guardian manifest, the managed-hook journals, the
+// Codex machine requirements) must be refused without an in-place ACL
+// repair: true in the standalone scope. A repair restores the descriptor,
+// not the content an untrusted writer may have changed, and a handle opened
+// during the drift (write data or WRITE_DAC) keeps its authority after it.
+// Recovery is a trusted rewrite only: Setup /repair writes a fresh file
+// from the protected source under the admin-only descriptor and replaces
+// the old one, so a retained handle points at the replaced object (GAP-0561
+// reviews 1 to 3).
+func StandaloneRefusesContentDrift() bool {
 	return windowsStandaloneTrustScope()
 }
 

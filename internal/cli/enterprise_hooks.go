@@ -267,38 +267,26 @@ var (
 	// Permission drift on targets.yaml is re-stamped first when the caller is
 	// privileged (the LocalSystem guardian or enumerator, or the installer),
 	// and the check runs again. What survives is accepted and logged (an
-	// untrusted writer as a boundary finding) on Secure Client only; a
-	// standalone process refuses it (GAP-0561). Structure stays fatal.
+	// untrusted writer as a boundary finding) on Secure Client only. Structure
+	// stays fatal.
 	//
-	// On standalone the repair runs only through managed.RepairWithContentProof:
-	// a repair restores the descriptor, not a roster an untrusted writer
-	// edited, and an unproven manifest keeps the descriptor every process
-	// refuses (GAP-0561 reviews 1 and 2).
+	// On standalone a drifted manifest is refused with the strict verdict and
+	// never repaired in place (managed.StandaloneRefusesContentDrift): a
+	// repair restores the descriptor, not a roster an untrusted writer
+	// edited. Setup /repair rewrites it (GAP-0561).
 	enterpriseHookManifestFileTrustCheck = func(path string) error {
 		const label = "hook guardian manifest"
-		needsProof := managed.StandaloneRepairNeedsProvenance()
 		strictErr := managed.ValidateTrustedFilePath(path, label)
 		if strictErr == nil {
-			if needsProof {
-				managed.RecordTrustedContent(path)
-			}
 			return nil
 		}
-		if enterpriseHooksRuntimeGOOS() == "windows" || enterpriseHooksRuntimeGOOS() == "darwin" {
-			var repairErr error
-			repair := func() { repairErr = enterpriseHookManifestACLRepair(path) }
-			proven := true
-			if needsProof {
-				proven = managed.RepairWithContentProof(path, repair)
-			} else {
-				repair()
-			}
-			if proven && repairErr == nil && managed.ValidateTrustedFilePath(path, label) == nil {
-				return nil
-			}
+		if managed.StandaloneRefusesContentDrift() {
+			return managed.RefuseStandaloneContentDrift(strictErr)
 		}
-		if needsProof {
-			return strictErr
+		if (enterpriseHooksRuntimeGOOS() == "windows" || enterpriseHooksRuntimeGOOS() == "darwin") &&
+			enterpriseHookManifestACLRepair(path) == nil &&
+			managed.ValidateTrustedFilePath(path, label) == nil {
+			return nil
 		}
 		return managed.ValidateTrustedPolicyFilePath(path, label)
 	}
