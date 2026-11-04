@@ -403,6 +403,7 @@ func TestCursorMachineHooksConflictIsReported(t *testing.T) {
 }
 
 func TestCursorManagedWriterUsesLockAndCompareAndSwap(t *testing.T) {
+	pinSecureClientTokenTest(t)
 	newManagedPreferencesFixture(t, "")
 	dir := t.TempDir()
 	cfgPath := filepath.Join(dir, "hooks.json")

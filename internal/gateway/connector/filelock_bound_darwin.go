@@ -17,10 +17,8 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/managed"
 )
 
-// boundedUserLocks: the root guardian takes these locks inside folders the
-// target user owns, so a user holding one must never stall the guardian for
-// every other user. A lock is waited for up to userLockWait, then the
-// caller fails for this user only and retries on the next tick.
+// Keep sentinel handling on the existing Darwin path for every profile.
+// The wait limit is selected separately in acquireFlock.
 const boundedUserLocks = true
 
 // ErrLockBusy reports a per-user lock still held after the bounded wait.
@@ -38,13 +36,14 @@ var lockBusyStreaks = struct {
 // the same streak and is not logged again.
 const lockBusyStreakGap = 10 * time.Minute
 
-// acquireFlock takes an exclusive flock on file with LOCK_NB and a bounded
-// retry. It confirms afterwards that lockPath still names the locked inode,
-// so a lock file unlinked and recreated by another writer is never trusted.
-// deadline is shared by the caller's retries after a replaced lock file, so
-// the whole acquisition waits at most userLockWait; a zero deadline is set on
-// the first attempt.
+// acquireFlock blocks for ordinary profiles and uses a bounded retry for
+// Secure Client. The bounded path confirms that lockPath still names the
+// locked inode. Its deadline is shared by retries after a replaced file, so
+// the whole acquisition waits at most userLockWait.
 func acquireFlock(file *os.File, lockPath string, deadline *time.Time) error {
+	if !secureClientManagedRuntime() {
+		return syscall.Flock(int(file.Fd()), syscall.LOCK_EX)
+	}
 	if deadline.IsZero() {
 		*deadline = time.Now().Add(userLockWait)
 	}
