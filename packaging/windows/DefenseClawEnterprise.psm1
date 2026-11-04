@@ -24613,6 +24613,13 @@ function Get-DefenseClawSharedManagedHookOwners {
         if ([string]::IsNullOrWhiteSpace($owner)) {
             throw "$($specification.name) managed-hook ownership has no gateway service"
         }
+        # Secure Client counts the owner even when the bound policy file was
+        # removed or changed after DefenseClaw wrote it (an MDM or an
+        # administrator edit): the writer re-merges and re-authenticates the
+        # file later in this transaction, so a reinstall no longer fails on
+        # it. Standalone and strict keep refusing.
+        $lenientBinding = -not (Test-DefenseClawStandaloneProfile) -and
+            -not (Test-DefenseClawTrustStrictAncestors)
         foreach ($binding in @($specification.bindings)) {
             $boundPath = [string]$binding.path
             $expectedHash = [string]$state.([string]$binding.field)
@@ -24626,6 +24633,13 @@ function Get-DefenseClawSharedManagedHookOwners {
                     $boundPath
                 )
             if ($null -eq $boundSnapshot) {
+                if ($lenientBinding) {
+                    Write-DefenseClawResilienceEvent -Marker defenseclaw_accept -Fields @{
+                        path   = $boundPath
+                        reason = "$($specification.name) managed-hook ownership names a policy file that is gone; the owner still counts and the writer re-creates the file"
+                    }
+                    continue
+                }
                 throw "$($specification.name) managed-hook ownership has an incomplete policy binding"
             }
             Assert-DefenseClawNoReparsePath -Path $boundPath
@@ -24635,6 +24649,15 @@ function Get-DefenseClawSharedManagedHookOwners {
                     -LiteralPath $boundPath -Algorithm SHA256
             ).Hash.ToLowerInvariant()
             if ($actualHash -cne $expectedHash) {
+                if ($lenientBinding) {
+                    Write-DefenseClawResilienceEvent -Marker defenseclaw_accept -Fields @{
+                        path   = $boundPath
+                        pinned = $expectedHash
+                        live   = $actualHash
+                        reason = "$($specification.name) policy file changed since DefenseClaw wrote it; the owner still counts and the writer re-merges it"
+                    }
+                    continue
+                }
                 throw "$($specification.name) managed-hook ownership does not bind the live policy"
             }
         }
