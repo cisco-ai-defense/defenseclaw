@@ -310,7 +310,7 @@ func TestCutEngineDir(t *testing.T) {
 			if !ok || rest != filepath.Join("2.1.317", "a33aa5518497", "claude") {
 				t.Errorf("%s %s: rest %q ok %v", goos, root.Path, rest, ok)
 			}
-			upper := strings.Replace(exe, "Claude", "CLAUDE", -1)
+			upper := strings.ReplaceAll(exe, "Claude", "CLAUDE")
 			if _, ok := CutEngineDir(goos, f, upper); ok != (goos != "linux") {
 				t.Errorf("%s: %s matched %v (case folds only on macOS and Windows)", goos, upper, ok)
 			}

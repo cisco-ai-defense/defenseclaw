@@ -505,10 +505,10 @@ func parseEnterpriseSetupOptionsForFlavor(arguments []string, standalone bool) (
 	}
 	if opts.CoworkPackage != "" || opts.CoworkSignature != "" {
 		if opts.Action != "ensure" && opts.Action != "install" && opts.Action != "upgrade" && opts.Action != "repair" {
-			return opts, false, errors.New("Cowork release inputs are valid only with /ensure, /install, /upgrade or /repair")
+			return opts, false, errors.New("the Cowork release inputs are valid only with /ensure, /install, /upgrade or /repair")
 		}
 		if opts.Bundle != "" {
-			return opts, false, errors.New("Cowork release inputs cannot be combined with BUNDLE=; deliver them with an administrator config")
+			return opts, false, errors.New("the Cowork release inputs cannot be combined with BUNDLE=; deliver them with an administrator config")
 		}
 	}
 	if opts.NoStart && !enterpriseSetupMutation(opts.Action, standalone) {

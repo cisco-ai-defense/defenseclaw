@@ -129,7 +129,9 @@ def check_rules(data: bytes, now: float) -> tuple[list[str], dict]:
     if len(expires) != 1 or expires[0] == 0:
         problems.append("the signature does not expire; it must expire within 730 days")
     elif expires[0] > MAX_EXPIRY_SECONDS:
-        problems.append(f"the signature expires {expires[0] / 86400:.2f} days after it was made; at most 730 are allowed")
+        problems.append(
+            f"the signature expires {expires[0] / 86400:.2f} days after it was made; at most 730 are allowed"
+        )
     elif created and created[0] + expires[0] <= now:
         problems.append("the signature has expired; sign the package again")
     if created and expires:

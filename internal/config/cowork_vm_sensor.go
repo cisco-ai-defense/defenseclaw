@@ -99,7 +99,7 @@ func coworkSourceDirAbsolute(path string) bool {
 	if strings.HasPrefix(path, "/") {
 		return pathpkg.Clean(path) == path
 	}
-	if len(path) < 3 || !((path[0] >= 'A' && path[0] <= 'Z') || (path[0] >= 'a' && path[0] <= 'z')) || path[1:3] != `:\` || strings.ContainsAny(path[3:], `/<>|?*:`) {
+	if len(path) < 3 || ((path[0] < 'A' || path[0] > 'Z') && (path[0] < 'a' || path[0] > 'z')) || path[1:3] != `:\` || strings.ContainsAny(path[3:], `/<>|?*:`) {
 		return false
 	}
 	if len(path) == 3 {

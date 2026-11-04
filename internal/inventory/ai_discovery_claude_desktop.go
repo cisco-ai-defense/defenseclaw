@@ -527,7 +527,6 @@ func claudeDesktopVMBundle(dataDir string, acc *claudeDesktopAcc) (present bool,
 	if !claudeDesktopRealDir(bundle) {
 		// The bundle's name is a live check off macOS: take the first
 		// *.bundle folder instead.
-		bundle = ""
 		entries, overflow, err := claudeDesktopReadDir(root, claudeDesktopMaxEntries)
 		acc.noteErr(err)
 		if overflow {

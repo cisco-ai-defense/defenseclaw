@@ -59,7 +59,7 @@ func (e *Env) coworkPackageName() (string, error) {
 		}
 	}
 	if arch != "amd64" && arch != "arm64" {
-		return "", fmt.Errorf("Cowork VM sensor does not support host architecture %s", arch)
+		return "", fmt.Errorf("the Cowork VM sensor does not support host architecture %s", arch)
 	}
 	return "defenseclaw-cowork-" + arch + ".tar.gz", nil
 }
@@ -407,9 +407,10 @@ func (l *lifecycle) describeCoworkVM(ctx context.Context, record *Deployment) {
 		for _, suffix := range []string{"", ".sig", ".args"} {
 			path := s.PackagePath + suffix
 			code := "package_not_ready"
-			if suffix == ".sig" {
+			switch suffix {
+			case ".sig":
 				code = "signature_not_ready"
-			} else if suffix == ".args" {
+			case ".args":
 				code = "arguments_not_ready"
 			}
 			digest, err := sha256File(l.env.P(path))

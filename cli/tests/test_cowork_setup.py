@@ -460,4 +460,3 @@ def test_plugin_write_refusal_names_the_administrators_owner_and_the_fix(tmp_pat
     message = cowork.plugin_write_refusal(str(tmp_path), OSError("refusing"))
     assert "belongs to the Administrators group because it was created from an elevated administrator session" in message
     assert '/setowner "*S-1-5-21-1-2-3-1001"' in message
-
