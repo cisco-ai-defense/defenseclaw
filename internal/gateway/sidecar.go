@@ -1007,13 +1007,11 @@ func (s *Sidecar) claimAIDiscoveryRun() (*inventory.ContinuousDiscoveryService, 
 // Run starts all subsystems as independent goroutines. Each subsystem runs
 // in its own goroutine so that a gateway disconnect does not stop the watcher
 // or API server. Run blocks until ctx is cancelled, then shuts everything down.
-// sidecarWorkerCount is how many goroutines in runRestartable can send into
-// errCh: gateway loop, watcher, guardrail (unmanaged deployments; a managed
-// one sends to fatalCh), AI discovery, AI runtime planes. The config manager
-// and the API report to fatalCh, and the IPC server retries in place. Keep
-// it in step when adding one -- the accompanying test fails if the two
-// drift.
-const sidecarWorkerCount = 5
+// sidecarWorkerCount is how many goroutines can send into errCh: config
+// manager, gateway loop, watcher, guardrail, AI discovery, AI runtime planes.
+// The API reports to fatalCh, and the IPC server retries in place. Keep it
+// in step when adding one -- the accompanying test fails if the two drift.
+const sidecarWorkerCount = 6
 
 // logSecureClientPolicyEngine prints the policy engine start-up line of
 // main on a Secure Client host (issue #1092).
@@ -1571,10 +1569,17 @@ func subsystemFailure(name string, err error) error {
 // error is not reported on errCh, so a clean stop still exits cleanly.
 // Without retry the error is reported on errCh and the subsystem stops.
 func runSubsystemWithRetry(ctx context.Context, name string, retry bool, delay time.Duration, restart <-chan struct{}, errCh chan<- error, run func(context.Context) error) {
+	initialDelay := delay
 	for {
+		started := time.Now()
 		err := run(ctx)
 		if err == nil || ctx.Err() != nil {
 			return
+		}
+		if time.Since(started) >= managedInspectorRetryMax {
+			// A run that stayed up past the longest backoff was healthy;
+			// a later, unrelated failure starts the backoff over.
+			delay = initialDelay
 		}
 		fmt.Fprintf(os.Stderr, "[sidecar] %s exited with error: %v\n", name, err)
 		if !retry {

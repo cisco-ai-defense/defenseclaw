@@ -56,6 +56,7 @@ func TestSecureClientAvailabilityGapsFollowFailMode(t *testing.T) {
 		for _, tc := range []struct {
 			name         string
 			secureClient bool
+			standalone   bool
 			failMode     string
 			strict       bool
 			allowed      bool
@@ -64,12 +65,16 @@ func TestSecureClientAvailabilityGapsFollowFailMode(t *testing.T) {
 			{name: "secure client closed", secureClient: true, failMode: "closed"},
 			{name: "secure client strict", secureClient: true, failMode: "open", strict: true},
 			{name: "managed open", failMode: "open"},
+			// A standalone hook is not a Secure Client hook (secureClientHook)
+			// even when the host also reports Secure Client.
+			{name: "standalone with secure client open", secureClient: true, standalone: true, failMode: "open"},
 		} {
 			t.Run(gap.name+"/"+tc.name, func(t *testing.T) {
 				records := captureManagedHookDecisions(t)
 				r := run(t, "claudecode", ok(`{"action":"allow"}`), func(opts *Options) {
 					opts.ManagedEnterprise = true
 					opts.SecureClient = tc.secureClient
+					opts.ManagedStandalone = tc.standalone
 					opts.FailMode = tc.failMode
 					opts.StrictAvailability = tc.strict
 					gap.mutate(t, opts)
@@ -86,6 +91,11 @@ func TestSecureClientAvailabilityGapsFollowFailMode(t *testing.T) {
 				}
 				if r.code == 0 && r.stdout == "" {
 					t.Fatalf("code = 0 with no block output, want a block; stderr=%q", r.stderr)
+				}
+				if tc.standalone {
+					// A standalone hook may stop at its own peer check first;
+					// it blocks either way.
+					return
 				}
 				for _, record := range *records {
 					if record.marker == managed.MarkerBoundary &&

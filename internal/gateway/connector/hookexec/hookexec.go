@@ -2371,7 +2371,7 @@ func handleMissingToken(opts Options, sp spec, failMode, tokenFile string) int {
 // availability (an install window or an invalid runtime) still closes. Every
 // other managed hook stays closed.
 func secureClientAvailabilityMode(opts Options, failMode string) string {
-	if opts.ManagedEnterprise && opts.SecureClient && !opts.StrictAvailability {
+	if opts.SecureClient && secureClientHook(opts) && !opts.StrictAvailability {
 		return failMode
 	}
 	return "closed"
@@ -2441,7 +2441,7 @@ func handleOversized(ctx context.Context, opts Options, sp spec, failMode string
 			return sendToGateway(ctx, opts, sp, failMode, review, startedAt)
 		}
 	}
-	if opts.ManagedEnterprise && opts.SecureClient {
+	if opts.SecureClient && secureClientHook(opts) {
 		// Agents routinely send large payloads (a big file read or edit):
 		// under Secure Client the configured fail mode decides, and the
 		// uninspected event is logged.
