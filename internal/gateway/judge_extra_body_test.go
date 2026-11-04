@@ -69,6 +69,40 @@ func TestJudgeCompatibleAliasesRequireEffectiveEndpoint(t *testing.T) {
 	}
 }
 
+func TestJudgeCompatibleModelPrefixCaseRequiresEndpoint(t *testing.T) {
+	for _, prefix := range []string{"OpenAI-Compatible", "CUSTOM-OPENAI", "OpenAi-Compatible"} {
+		model := prefix + "/gemma-4"
+		t.Run(prefix, func(t *testing.T) {
+			for _, build := range []func() (LLMProvider, error){
+				func() (LLMProvider, error) { return NewProvider(model, "fixture-key") },
+				func() (LLMProvider, error) {
+					return NewProviderForLLMConfig(&config.LLMConfig{Model: model, APIKey: "fixture-key"}, nil)
+				},
+			} {
+				if _, err := build(); err == nil || !strings.Contains(err.Error(), "base_url") {
+					t.Errorf("unconfigured model %q: expected base_url error, got %v", model, err)
+				}
+			}
+
+			baseURL := "http://127.0.0.1:8000/v1"
+			for _, build := range []func() (LLMProvider, error){
+				func() (LLMProvider, error) { return NewProviderWithBase(model, "fixture-key", baseURL) },
+				func() (LLMProvider, error) {
+					return NewProviderForLLMConfig(&config.LLMConfig{Model: model, BaseURL: baseURL, APIKey: "fixture-key"}, nil)
+				},
+			} {
+				provider, err := build()
+				if err != nil {
+					t.Fatal(err)
+				}
+				if bp := provider.(*bifrostProvider); bp.providerKey != schemas.OpenAI || bp.baseURL != baseURL || bp.model != "gemma-4" {
+					t.Errorf("configured model %q: provider = %#v", model, bp)
+				}
+			}
+		})
+	}
+}
+
 func TestJudgeNativeOpenAIDefaultEndpointTwin(t *testing.T) {
 	for _, build := range []func() (LLMProvider, error){
 		func() (LLMProvider, error) { return NewProvider("openai/gpt-4o", "fixture-key") },

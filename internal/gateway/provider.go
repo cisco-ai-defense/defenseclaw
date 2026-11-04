@@ -522,7 +522,7 @@ func splitModel(model string) (provider, modelID string) {
 	if i < 0 {
 		return "", model
 	}
-	prefix := model[:i]
+	prefix := strings.ToLower(model[:i])
 	if knownProviders[prefix] {
 		return prefix, model[i+1:]
 	}
