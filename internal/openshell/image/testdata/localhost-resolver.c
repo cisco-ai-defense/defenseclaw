@@ -17,8 +17,10 @@
 #include <arpa/inet.h>
 #include <netdb.h>
 #include <stdio.h>
+#include <unistd.h>
 
 int main(void) {
+    alarm(5);
     struct addrinfo hints = {0}, *answers = NULL;
     hints.ai_family = AF_INET;
     hints.ai_socktype = SOCK_STREAM;

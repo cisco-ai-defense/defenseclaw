@@ -312,12 +312,15 @@ func TestMicroVMGuestResolverUsesLibcWithProjectPythonModule(t *testing.T) {
 	source, err := os.ReadFile(filepath.Join("..", "image", "testdata", "localhost-resolver.c"))
 	must(t, err)
 	must(t, os.WriteFile(filepath.Join(imageDir, "localhost-resolver.c"), source, 0o600))
+	must(t, os.WriteFile(filepath.Join(imageDir, "timeout"), []byte("#!/bin/sh\nprintf '127.0.0.1 STREAM\\n'\n"), 0o755))
 	imageFile := "FROM " + openshell.DefaultBaseImage + " AS dc-localhost-tool\n" +
+		"USER root\n" +
 		"COPY localhost-resolver.c /tmp/localhost-resolver.c\n" +
 		"RUN gcc -O2 -Wall -Wextra -Werror -o /tmp/localhost-resolver /tmp/localhost-resolver.c\n" +
 		"FROM " + openshell.DefaultBaseImage + "\nUSER root\n" +
 		"RUN install -d -o root -g root -m 0755 /usr/local/lib/defenseclaw\n" +
-		"COPY --from=dc-localhost-tool --chown=0:0 --chmod=0755 /tmp/localhost-resolver /usr/local/lib/defenseclaw/localhost-resolver\nUSER sandbox\n"
+		"COPY --from=dc-localhost-tool --chown=0:0 --chmod=0755 /tmp/localhost-resolver /usr/local/lib/defenseclaw/localhost-resolver\n" +
+		"COPY --chmod=0755 timeout /usr/bin/timeout\nUSER sandbox\n"
 	if err := os.WriteFile(filepath.Join(imageDir, "Dockerfile"), []byte(imageFile), 0o600); err != nil {
 		t.Fatal(err)
 	}
@@ -336,9 +339,9 @@ func TestMicroVMGuestResolverUsesLibcWithProjectPythonModule(t *testing.T) {
 		{"alternate project module", "203.0.113.10 localhost\n", `AF_INET = 2
 def getaddrinfo(host, port, family=0, type=0, proto=0, flags=0):
     return [(2, 1, 6, "", ("127.0.0.1", 0))]
-`, "", "could not resolve localhost"},
+`, "", "did not return only its loopback ingress"},
 		{"custom caller benign", "127.0.0.1 localhost\n", "# project module\n", "203.0.113.10", ""},
-		{"custom caller protected", "203.0.113.10 localhost\n", "# project module\n", "127.0.0.1", "could not resolve localhost"},
+		{"custom caller protected", "203.0.113.10 localhost\n", "# project module\n", "127.0.0.1", "did not return only its loopback ingress"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			dir := t.TempDir()
@@ -401,7 +404,7 @@ def getaddrinfo(host, port, family=0, type=0, proto=0, flags=0):
 		must(t, os.WriteFile(hosts, []byte("127.0.0.1 localhost\n"), 0o644))
 		check("")
 		must(t, os.WriteFile(hosts, []byte("198.51.100.10 localhost\n"), 0o644))
-		check("could not resolve localhost")
+		check("did not return only its loopback ingress")
 	})
 }
 

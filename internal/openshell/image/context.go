@@ -474,28 +474,35 @@ RUN set -eu; [ -f %[1]s ] && [ ! -L %[1]s ] && [ "$(stat -c %%u %[1]s)" = 0 ]; \
 
 func microVMResolverToolStage() string {
 	return fmt.Sprintf(`FROM %s AS dc-localhost-tool
+USER root
 COPY localhost-resolver.c /tmp/localhost-resolver.c
 RUN gcc -O2 -Wall -Wextra -Werror -o /tmp/localhost-resolver /tmp/localhost-resolver.c
 `, openshell.DefaultBaseImage)
 }
 
-// microVMResolverStep checks a completed image's own name service with the
-// exported /etc/hosts overlaid. Docker may export a different hosts file
-// than its completed image stage carries, so the exported file is the one
-// the VM admission check judges. BuildKit's network=none has no configured
-// IPv4 interface, so getent ahostsv4 returns no answer there. The pinned
-// helper calls the completed image's libc without AI_ADDRCONFIG and checks
-// each IPv4 answer, or an IPv6 answer when no IPv4 answer exists.
+// microVMResolverStep checks the completed image's name service with the
+// exported /etc/hosts overlaid. The shell tools come from the pinned tool
+// stage; only the resolver's libc and NSS configuration come from the image.
+// BuildKit's network=none has no configured IPv4 interface, so the resolver
+// calls libc without AI_ADDRCONFIG and checks each IPv4 answer, or an IPv6
+// answer when no IPv4 answer exists.
 func microVMResolverStep(baseImage string) string {
-	return strings.Replace(`FROM dc-complete AS dc-resolver-check
+	return strings.Replace(`FROM dc-localhost-tool AS dc-resolver-check
 USER root
 RUN --network=none --mount=type=bind,from=dc-complete,source=/,target=/tmp/dc-root,ro set -eu; \
     root=/tmp/dc-root; hosts="$root/etc/hosts"; \
+    fail() { echo 'MicroVM image localhost check failed for BASE_IMAGE: leave its hosts file empty or make its resolver return a loopback address for localhost' >&2; exit 1; }; \
+    for d in "$root" "$root/usr" "$root/usr/local" "$root/usr/local/lib" "$root/usr/local/lib/defenseclaw"; do \
+      [ ! -L "$d" ] && [ -d "$d" ] && [ "$(/usr/bin/stat -c %u "$d")" = 0 ] || fail; \
+      mode=$(/usr/bin/stat -c %a "$d") || fail; [ $((0$mode & 022)) -eq 0 ] || fail; \
+    done; \
+    caller="$root/usr/local/lib/defenseclaw/localhost-resolver"; \
+    [ -f "$caller" ] && [ ! -L "$caller" ] && [ "$(/usr/bin/stat -c %u "$caller")" = 0 ] || fail; \
+    mode=$(/usr/bin/stat -c %a "$caller") || fail; [ $((0$mode & 022)) -eq 0 ] || fail; \
+    /usr/bin/cmp -s /tmp/localhost-resolver "$caller" || fail; \
     if [ ! -e "$hosts" ] && [ ! -L "$hosts" ]; then exit 0; fi; \
     if [ -f "$hosts" ] && [ ! -L "$hosts" ] && [ ! -s "$hosts" ]; then exit 0; fi; \
-    fail() { echo 'MicroVM image localhost check failed for BASE_IMAGE: leave its hosts file empty or make its resolver return a loopback address for localhost' >&2; exit 1; }; \
-    /usr/sbin/chroot "$root" /bin/sh -c 'test -f /etc/hosts' || fail; \
-    answer=$(/usr/bin/timeout 5 /usr/sbin/chroot "$root" /usr/local/lib/defenseclaw/localhost-resolver) || fail; \
+    answer=$(/usr/sbin/chroot "$root" /usr/local/lib/defenseclaw/localhost-resolver) || fail; \
     [ ${#answer} -le 4096 ] && [ -n "$answer" ] || fail; \
     printf '%s\n' "$answer" | /usr/bin/awk 'NF != 2 || ($1 != "127.0.0.1" && $1 != "::1") || $2 != "STREAM" { bad=1 } END { exit bad || NR == 0 }' || fail
 USER sandbox

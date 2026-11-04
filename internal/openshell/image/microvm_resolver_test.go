@@ -44,7 +44,7 @@ func TestR108OSMINMicroVMCustomBaseHostsAndBenignTwin(t *testing.T) {
 	}
 	file := microVMResolverStep(openshell.DefaultBaseImage)
 	for _, part := range []string{
-		"FROM dc-complete AS dc-resolver-check\n",
+		"FROM dc-localhost-tool AS dc-resolver-check\n",
 		"--network=none --mount=type=bind,from=dc-complete,source=/,target=/tmp/dc-root,ro",
 		"/usr/sbin/chroot \"$root\" " + microVMResolverPath,
 		"USER sandbox\n",
@@ -91,7 +91,7 @@ func TestR108OSMINMicroVMCustomBaseHostsAndBenignTwin(t *testing.T) {
 		{"NUL after mapping", []byte("127.0.0.1 localhost\n\x00unrelated\n"), true, true},
 		{"non ASCII unrelated alias", []byte("127.0.0.2 caf\xc3\xa9\n127.0.0.1 localhost\n"), true, true},
 		{"long canonical alias", []byte("127.0.0.1 " + strings.Repeat(strings.Repeat("a", 60)+".", 3) + strings.Repeat("a", 60) + " localhost\n"), true, true},
-		{"unmapped name", []byte("127.0.0.1 custom\n"), true, false},
+		{"unmapped name", []byte("127.0.0.1 custom\n# reserved name absent\n"), true, false},
 		{"comment only", []byte("# 127.0.0.1 localhost\n"), true, false},
 		{"long s lookalike", []byte("127.0.0.1 localho\xc5\xbft\n"), true, false},
 		{"Cyrillic alias", []byte("127.0.0.1 localh\xd0\xbest\n"), true, false},
@@ -301,6 +301,48 @@ func TestMicroVMResolverUsesPinnedCallerWithCustomGetent(t *testing.T) {
 			out, err := dockerCommand(t, "build", "--pull=false", "--progress=plain", "-t", tag, dir).CombinedOutput()
 			if (err == nil) != tc.want {
 				t.Fatalf("build success = %t, want %t: %v\n%s", err == nil, tc.want, err, out)
+			}
+		})
+	}
+}
+
+func TestMicroVMResolverUsesPinnedCheckTools(t *testing.T) {
+	localDocker(t)
+	for _, tc := range []struct {
+		name, toolPath, toolBody, hosts string
+		want                            bool
+	}{
+		{"timeout with other address", "/usr/bin/timeout", "#!/bin/sh\nprintf '127.0.0.1 STREAM\\n'\n", "203.0.113.10 localhost\n", false},
+		{"timeout with loopback", "/usr/bin/timeout", "#!/bin/sh\nprintf '203.0.113.10 STREAM\\n'\n", "127.0.0.1 localhost\n", true},
+		{"chroot with other address", "/usr/sbin/chroot", "#!/bin/sh\nprintf '127.0.0.1 STREAM\\n'\n", "203.0.113.10 localhost\n", false},
+		{"chroot with loopback", "/usr/sbin/chroot", "#!/bin/sh\nprintf '203.0.113.10 STREAM\\n'\n", "127.0.0.1 localhost\n", true},
+		{"awk with other address", "/usr/bin/awk", "#!/bin/sh\nexit 0\n", "203.0.113.10 localhost\n", false},
+		{"awk with loopback", "/usr/bin/awk", "#!/bin/sh\nexit 1\n", "127.0.0.1 localhost\n", true},
+		{"NUL in alias", "/usr/bin/timeout", "#!/bin/sh\nprintf '127.0.0.1 STREAM\\n'\n", "127.0.0.1 localho\x00st\n", false},
+		{"non ASCII alias", "/usr/bin/timeout", "#!/bin/sh\nprintf '127.0.0.1 STREAM\\n'\n", "127.0.0.1 localh\u043est\n", false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			dir := t.TempDir()
+			if err := os.WriteFile(filepath.Join(dir, "hosts"), []byte(tc.hosts), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(filepath.Join(dir, "custom-tool"), []byte(tc.toolBody), 0o755); err != nil {
+				t.Fatal(err)
+			}
+			layout := microVMResolverFixtureStage(t, dir) + "FROM " + openshell.DefaultBaseImage + " AS dc-complete\nUSER root\n" +
+				"COPY hosts /etc/hosts\n" + microVMResolverCopyStep() +
+				"COPY --chmod=0755 custom-tool " + tc.toolPath + "\n" + microVMResolverStep(openshell.DefaultBaseImage)
+			if err := os.WriteFile(filepath.Join(dir, "Dockerfile"), []byte(layout), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			tag := testImageTag(dir)
+			t.Cleanup(func() { exec.Command("docker", "image", "rm", "-f", tag).Run() })
+			out, err := dockerCommand(t, "build", "--pull=false", "--progress=plain", "-t", tag, dir).CombinedOutput()
+			if (err == nil) != tc.want {
+				t.Fatalf("image check success = %t, want %t: %v\n%s", err == nil, tc.want, err, out)
+			}
+			if err != nil && !bytes.Contains(out, []byte("MicroVM image localhost check failed")) {
+				t.Fatalf("image check did not name the resolver: %s", out)
 			}
 		})
 	}

@@ -103,7 +103,7 @@ if [ "$0" = defenseclaw-verify-vm ]; then
     mode=$(/usr/bin/stat -c %a "$f") || return 1
     [ $((0$mode & 022)) -eq 0 ]
   }
-  if trusted_resolver && localhost=$(/usr/bin/timeout 5 /usr/local/lib/defenseclaw/localhost-resolver 2>/dev/null); then
+  if trusted_resolver && localhost=$(/usr/local/lib/defenseclaw/localhost-resolver 2>/dev/null); then
     printf '%s\n' "$localhost" | while IFS= read -r answer; do printf 'localhost %s\n' "$answer"; done
     echo localhost-ok
   else

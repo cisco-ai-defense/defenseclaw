@@ -165,9 +165,10 @@ func (b *Builder) verifyExportedResolver(ctx context.Context, c *Context) (err e
 			err = fmt.Errorf("remove temporary resolver image: %w", removeErr)
 		}
 	}()
-	file := "FROM " + c.Tag + " AS dc-complete\nADD hosts.tar /\n" + microVMResolverStep(c.Spec.BaseImage)
+	file := microVMResolverToolStage() + "FROM " + c.Tag + " AS dc-complete\nADD hosts.tar /\n" + microVMResolverStep(c.Spec.BaseImage)
 	files := []ContextFile{{Name: "Dockerfile", Mode: 0o644, Data: []byte(file)},
-		{Name: "hosts.tar", Mode: 0o644, Data: layer.Bytes()}}
+		{Name: "hosts.tar", Mode: 0o644, Data: layer.Bytes()},
+		{Name: "localhost-resolver.c", Mode: 0o644, Data: microVMResolverSource}}
 	if err := buildImage(ctx, b.Docker, files, nil, checkTag, b.Log); err != nil {
 		return fmt.Errorf("MicroVM image %s localhost check: %w", c.Tag, err)
 	}
