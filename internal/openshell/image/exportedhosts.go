@@ -29,7 +29,8 @@ import (
 
 const maxExportedHosts = 1 << 20
 
-// maxExportedPreload bounds the /etc/ld.so.preload read from the export.
+// maxExportedPreload bounds the /etc/ld.so.preload and /etc/nsswitch.conf
+// read from the export.
 const maxExportedPreload = 64 << 10
 
 // exportedHosts is the /etc/hosts entry in the container export OpenShell
@@ -47,6 +48,14 @@ type exportedHosts struct {
 	preload string
 	// sawPreload is set once an /etc/ld.so.preload entry was read.
 	sawPreload bool
+	// nss says why the export's /etc/nsswitch.conf lets code other than
+	// libc answer host lookups ("" when its hosts sources are only files
+	// and dns, or the file is absent: glibc's default uses only those two,
+	// both built into libc). An NSS module is image code that can answer
+	// DefenseClaw's resolver caller unlike every other program.
+	nss string
+	// sawNSS is set once an /etc/nsswitch.conf entry was read.
+	sawNSS bool
 }
 
 func (h exportedHosts) initializedByGuest() bool {
@@ -71,6 +80,16 @@ func parseExportedHosts(r io.Reader) (exportedHosts, error) {
 			}
 			result.sawPreload = true
 			if result.preload, err = exportedPreload(h, tr); err != nil {
+				return result, err
+			}
+			continue
+		}
+		if name == "etc/nsswitch.conf" {
+			if result.sawNSS {
+				return result, errors.New("exported image has more than one /etc/nsswitch.conf entry")
+			}
+			result.sawNSS = true
+			if result.nss, err = exportedNSS(h, tr); err != nil {
 				return result, err
 			}
 			continue
@@ -125,6 +144,62 @@ func exportedPreload(h *tar.Header, r io.Reader) (string, error) {
 	return "", nil
 }
 
+// exportedNSS says why the export's /etc/nsswitch.conf entry h lets code
+// besides libc answer host lookups, or "".
+func exportedNSS(h *tar.Header, r io.Reader) (string, error) {
+	if h.Typeflag != tar.TypeReg && h.Typeflag != tar.TypeRegA {
+		return "is not a regular file", nil
+	}
+	if h.Size < 0 || h.Size > maxExportedPreload {
+		return "is too large to check", nil
+	}
+	data, err := io.ReadAll(io.LimitReader(r, maxExportedPreload+1))
+	if err != nil {
+		return "", fmt.Errorf("read exported image /etc/nsswitch.conf: %w", err)
+	}
+	return hostsSourcesProblem(data), nil
+}
+
+// hostsSourcesProblem judges nsswitch.conf data as the pinned caller does
+// (testdata/localhost-resolver.c, hosts_sources_builtin): every line whose
+// database is hosts, in any letter case, may name only the files and dns
+// sources and [status=action] items, and only one such line may exist.
+func hostsSourcesProblem(data []byte) string {
+	hosts := 0
+	for _, line := range strings.Split(string(data), "\n") {
+		if len(line) >= 4095 {
+			return "has a line too long to check"
+		}
+		line, _, _ = strings.Cut(line, "#")
+		key, rest, ok := strings.Cut(strings.TrimLeft(line, " \t\r\f\v"), ":")
+		if !ok || !strings.EqualFold(strings.TrimRight(key, " \t\r\f\v"), "hosts") || strings.ContainsAny(strings.TrimRight(key, " \t\r\f\v"), " \t") {
+			continue
+		}
+		if hosts++; hosts > 1 {
+			return "has more than one hosts line"
+		}
+		for rest = strings.TrimSpace(rest); rest != ""; rest = strings.TrimSpace(rest) {
+			if strings.HasPrefix(rest, "[") {
+				action, after, ok := strings.Cut(rest[1:], "]")
+				if !ok || strings.Trim(action, "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ=! \t\r\f\v") != "" {
+					return "has a hosts action it cannot read"
+				}
+				rest = after
+				continue
+			}
+			end := strings.IndexAny(rest, " \t\r\f\v[")
+			if end < 0 {
+				end = len(rest)
+			}
+			if source := rest[:end]; source != "files" && source != "dns" {
+				return fmt.Sprintf("names the hosts source %q", source)
+			}
+			rest = rest[end:]
+		}
+	}
+	return ""
+}
+
 // exportHosts reads the same container export that OpenShell makes for the
 // local VM root disk. The stream is parsed as it arrives, without retaining
 // the image tar, and the temporary container is removed before return.
@@ -168,7 +243,7 @@ func (b *Builder) exportHosts(ctx context.Context, tag string) (hosts exportedHo
 }
 
 // verifyExportedResolver refuses an export that preloads code into every
-// program, then checks a nonempty exported hosts file against the completed
+// program or answers host lookups with an NSS module, then checks a nonempty exported hosts file against the completed
 // image's libc and NSS configuration with build networking off. Missing and
 // empty regular files use OpenShell guest initialization; the guest check
 // before every session judges those.
@@ -181,6 +256,11 @@ func (b *Builder) verifyExportedResolver(ctx context.Context, c *Context) (err e
 		return fmt.Errorf("MicroVM image %s localhost check failed for %s: its /etc/ld.so.preload %s, so every program in the guest "+
 			"runs that code ahead of libc and no check can show what they resolve localhost to; remove the preload from the base image",
 			c.Tag, c.Spec.BaseImage, hosts.preload)
+	}
+	if hosts.nss != "" {
+		return fmt.Errorf("MicroVM image %s localhost check failed for %s: its /etc/nsswitch.conf %s; a MicroVM image may resolve hosts only "+
+			"with the files and dns sources built into libc, the same code for every program, which DefenseClaw can verify: set the line to "+
+			"`hosts: files dns` and map localhost in /etc/hosts (or leave /etc/hosts empty)", c.Tag, c.Spec.BaseImage, hosts.nss)
 	}
 	if hosts.initializedByGuest() {
 		return nil

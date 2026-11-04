@@ -245,6 +245,7 @@ func TestMicroVMGuestResolverBeforeSession(t *testing.T) {
 		{"truncated", func(a *workloadAnswer) { a.cut = true }, ""},
 		{"mixed family from the direct caller", keep, "unspec 127.0.0.1\nrefused nonloopback\n"},
 		{"preloaded code from the direct caller", keep, "refused preload\n"},
+		{"NSS module from the direct caller", keep, "refused nss\n"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			direct, code := goodResolverOutput, 0

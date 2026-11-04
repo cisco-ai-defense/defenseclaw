@@ -52,7 +52,7 @@ const DefaultRepository = "defenseclaw/sandbox"
 
 // contextSchema versions image admission and the Dockerfile layout; bump it
 // when either changes so older records stop matching.
-const contextSchema = 7
+const contextSchema = 8
 
 // The VM resolver check runs this pinned caller against the completed
 // image's libc and NSS configuration.
@@ -485,7 +485,8 @@ RUN gcc -O2 -Wall -Wextra -Werror -o /tmp/localhost-resolver /tmp/localhost-reso
 // stage; only the resolver's libc and NSS configuration come from the image.
 // The caller asks libc for every family (unspec, inet, inet6) without
 // AI_ADDRCONFIG, which BuildKit's network=none would empty, and passes only
-// when every answer is loopback; awk accepts only that exact report.
+// when every answer is loopback and only libc's files and dns sources gave
+// them; awk accepts only that exact report.
 func microVMResolverStep(baseImage string) string {
 	return strings.Replace(`FROM dc-localhost-tool AS dc-resolver-check
 USER root

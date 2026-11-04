@@ -162,9 +162,11 @@ func TestMicroVMResolverCallerLocation(t *testing.T) {
 	}
 }
 
-// A custom base may supply localhost through a local NSS module even when
-// its nonempty hosts file names only other hosts. The completed-image check
-// uses that resolver instead of requiring a particular hosts-file layout.
+// An NSS module is image code that can answer DefenseClaw's caller unlike
+// every other program (osmin23c review 1), so a MicroVM image may resolve
+// hosts only with libc's files and dns sources: a local NSS source is
+// refused even when it answers loopback, and the IPv4-only loopback mapping
+// with the stock NSS configuration passes.
 func TestMicroVMResolverCustomLocalNSSSource(t *testing.T) {
 	localDocker(t)
 	const source = `#include <nss.h>
@@ -208,8 +210,9 @@ enum nss_status _nss_localtest_gethostbyname2_r(const char *name, int af, struct
 		want             bool
 	}{
 		{"custom file without local source", "127.0.0.1 custom\n", "", false},
-		{"custom file with local source", "127.0.0.1 custom\n", "localtest", true},
-		{"IPv6 hosts with local source", "::1 localhost\n", "localtest", true},
+		{"IPv4-only loopback with the stock NSS configuration", "127.0.0.1 localhost\n", "", true},
+		{"custom file with local source", "127.0.0.1 custom\n", "localtest", false},
+		{"IPv6 hosts with local source", "::1 localhost\n", "localtest", false},
 		{"IPv6 hosts and other IPv4 with local source", "::1 localhost\n203.0.113.10 localhost\n", "localtest", false},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -233,6 +236,9 @@ enum nss_status _nss_localtest_gethostbyname2_r(const char *name, int af, struct
 			out, err := dockerCommand(t, "build", "--pull=false", "--progress=plain", "-t", tag, dir).CombinedOutput()
 			if (err == nil) != tc.want {
 				t.Fatalf("build success = %t, want %t: %v\n%s", err == nil, tc.want, err, out)
+			}
+			if err != nil && !bytes.Contains(out, []byte("MicroVM image localhost check failed")) {
+				t.Fatalf("build failed before the localhost check: %s", out)
 			}
 		})
 	}
@@ -306,8 +312,9 @@ enum nss_status _nss_familytest_gethostbyname2_r(const char *name, int af, struc
 
 // An image resolver that answers the IPv4 query with loopback and the
 // unspec query (what programs ask by default) with another address is
-// refused (round-3 review item 2, family-dependent resolver); the same
-// module answering loopback to both is accepted.
+// refused (round-3 review item 2, family-dependent resolver), and so is the
+// same module answering loopback to both: no NSS module answers a MicroVM's
+// host lookups (osmin23c review 1).
 func TestMicroVMResolverFamilyDependentNSSSource(t *testing.T) {
 	localDocker(t)
 	for _, tc := range []struct {
@@ -315,7 +322,7 @@ func TestMicroVMResolverFamilyDependentNSSSource(t *testing.T) {
 		want         bool
 	}{
 		{"unspec query gets another address", "203.0.113.10", false},
-		{"unspec query gets loopback", "127.0.0.1", true},
+		{"unspec query gets loopback", "127.0.0.1", false},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			dir := t.TempDir()
@@ -339,6 +346,140 @@ func TestMicroVMResolverFamilyDependentNSSSource(t *testing.T) {
 			}
 			if err != nil && !bytes.Contains(out, []byte("MicroVM image localhost check failed")) {
 				t.Fatalf("build failed before the localhost check: %s", out)
+			}
+		})
+	}
+}
+
+// reviewerNSSSource is the osmin23c review-1 reproduction: an NSS module
+// that answers the program named localhost-resolver with 127.0.0.1 and every
+// other program with 203.0.113.10, for both lookup kinds.
+const reviewerNSSSource = `#include <nss.h>
+#include <netdb.h>
+#include <arpa/inet.h>
+#include <errno.h>
+#include <stdint.h>
+#include <string.h>
+extern char *program_invocation_short_name;
+enum nss_status _nss_familytest_gethostbyname4_r(const char *name, struct gaih_addrtuple **pat, char *buffer, size_t buflen, int *errnop, int *herrnop, int32_t *ttlp) {
+    (void)ttlp;
+    if (strcasecmp(name, "localhost") != 0) {
+        *herrnop = HOST_NOT_FOUND;
+        return NSS_STATUS_NOTFOUND;
+    }
+    uintptr_t p = ((uintptr_t)buffer + sizeof(void *) - 1) & ~(sizeof(void *) - 1);
+    if (p + sizeof(struct gaih_addrtuple) + 10 > (uintptr_t)buffer + buflen) {
+        *errnop = ERANGE;
+        *herrnop = NETDB_INTERNAL;
+        return NSS_STATUS_TRYAGAIN;
+    }
+    struct gaih_addrtuple *t = *pat;
+    if (t == NULL) {
+        t = (struct gaih_addrtuple *)p;
+        p += sizeof(struct gaih_addrtuple);
+        *pat = t;
+    }
+    char *canonical = (char *)p;
+    memcpy(canonical, "localhost", 10);
+    memset(t, 0, sizeof *t);
+    t->name = canonical;
+    t->family = AF_INET;
+    inet_pton(AF_INET, program_invocation_short_name && strstr(program_invocation_short_name, "localhost-resolver") ? "127.0.0.1" : "203.0.113.10", t->addr);
+    return NSS_STATUS_SUCCESS;
+}
+enum nss_status _nss_familytest_gethostbyname2_r(const char *name, int af, struct hostent *result, char *buffer, size_t buflen, int *errnop, int *h_errnop) {
+    if (strcasecmp(name, "localhost") != 0 || af != AF_INET) {
+        *h_errnop = HOST_NOT_FOUND;
+        return NSS_STATUS_NOTFOUND;
+    }
+    uintptr_t p = ((uintptr_t)buffer + sizeof(char *) - 1) & ~(sizeof(char *) - 1);
+    char **aliases = (char **)p;
+    p += sizeof(char *);
+    char **addresses = (char **)p;
+    p += 2 * sizeof(char *);
+    if (p + 4 + 10 > (uintptr_t)buffer + buflen) {
+        *errnop = ERANGE;
+        *h_errnop = NETDB_INTERNAL;
+        return NSS_STATUS_TRYAGAIN;
+    }
+    char *address = (char *)p;
+    address[0] = program_invocation_short_name && strstr(program_invocation_short_name, "localhost-resolver") ? 127 : 203; address[1] = 0; address[2] = program_invocation_short_name && strstr(program_invocation_short_name, "localhost-resolver") ? 0 : 113; address[3] = program_invocation_short_name && strstr(program_invocation_short_name, "localhost-resolver") ? 1 : 10;
+    char *canonical = address + 4;
+    memcpy(canonical, "localhost", 10);
+    aliases[0] = NULL;
+    addresses[0] = address;
+    addresses[1] = NULL;
+    result->h_name = canonical;
+    result->h_aliases = aliases;
+    result->h_addrtype = AF_INET;
+    result->h_length = 4;
+    result->h_addr_list = addresses;
+    return NSS_STATUS_SUCCESS;
+}
+`
+
+// The osmin23c review-1 reproduction: an image with an empty hosts file (the
+// guest fills it), no preload, and hosts answered only by a module that
+// gives the caller loopback and applications another address. The export
+// check names the source, and the caller in the completed image refuses it
+// while an application there gets the other address. Its twin with the
+// stock NSS configuration passes both.
+func TestMicroVMResolverReviewerNSSReproduction(t *testing.T) {
+	localDocker(t)
+	for _, tc := range []struct {
+		name   string
+		module bool
+	}{
+		{"module answers the caller alone with loopback", true},
+		{"stock NSS configuration", false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			dir := t.TempDir()
+			if err := os.WriteFile(filepath.Join(dir, "hosts"), nil, 0o644); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(filepath.Join(dir, "familytest.c"), []byte(reviewerNSSSource), 0o644); err != nil {
+				t.Fatal(err)
+			}
+			layout := microVMResolverFixtureStage(t, dir) + "FROM " + openshell.DefaultBaseImage + " AS dc-complete\nUSER root\nCOPY hosts /etc/hosts\n" +
+				"COPY familytest.c /tmp/familytest.c\nRUN gcc -shared -fPIC -o /usr/lib/$(gcc -dumpmachine)/libnss_familytest.so.2 /tmp/familytest.c\n"
+			if tc.module {
+				layout += "RUN sed -i 's/^hosts:.*/hosts: familytest/' /etc/nsswitch.conf\n"
+			}
+			layout += microVMResolverCopyStep() + "USER sandbox\n"
+			if err := os.WriteFile(filepath.Join(dir, "Dockerfile"), []byte(layout), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			tag := testImageTag(dir)
+			t.Cleanup(func() { exec.Command("docker", "image", "rm", "-f", tag).Run() })
+			if out, err := dockerCommand(t, "build", "--pull=false", "--progress=plain", "-t", tag, dir).CombinedOutput(); err != nil {
+				t.Fatalf("build the completed image: %v\n%s", err, out)
+			}
+			exported, err := (&Builder{Docker: CLI{}}).exportHosts(t.Context(), tag)
+			if err != nil || !exported.initializedByGuest() || exported.preload != "" {
+				t.Fatalf("export = %+v, %v", exported, err)
+			}
+			if want := map[bool]string{true: `names the hosts source "familytest"`, false: ""}[tc.module]; exported.nss != want {
+				t.Fatalf("export nss = %q, want %q", exported.nss, want)
+			}
+			caller, err := dockerCommand(t, "run", "--rm", "--network=none", "--entrypoint", microVMResolverPath, tag).Output()
+			app, appErr := dockerCommand(t, "run", "--rm", "--network=none", "--entrypoint", "/usr/bin/python3", tag, "-c",
+				`import socket; print(socket.getaddrinfo("localhost", None, family=socket.AF_INET, type=socket.SOCK_STREAM)[0][4][0])`).Output()
+			if appErr != nil {
+				t.Fatalf("application lookup: %v", appErr)
+			}
+			if tc.module {
+				var exitErr *exec.ExitError
+				if !errors.As(err, &exitErr) || exitErr.ExitCode() != 1 || string(caller) != "refused nss\n" {
+					t.Fatalf("caller = %q, %v; want \"refused nss\"", caller, err)
+				}
+				if strings.TrimSpace(string(app)) != "203.0.113.10" {
+					t.Fatalf("the reproduction's application got %q, not the module's other address", app)
+				}
+				return
+			}
+			if err != nil || !strings.HasSuffix(string(caller), "loopback-only\n") || strings.TrimSpace(string(app)) != "127.0.0.1" {
+				t.Fatalf("stock twin: caller %q (%v), application %q", caller, err, app)
 			}
 		})
 	}
@@ -829,6 +970,81 @@ func TestMicroVMExportedPreloadClassification(t *testing.T) {
 	}
 	if _, err := parseExportedHosts(&twice); err == nil {
 		t.Fatal("an export with two /etc/ld.so.preload entries was read")
+	}
+}
+
+// hostsSourcesProblem reads nsswitch.conf the way the pinned caller does:
+// only files, dns and [status=action] items on the one hosts line.
+func TestMicroVMExportedNSSClassification(t *testing.T) {
+	for _, tc := range []struct {
+		name, data, want string
+	}{
+		{"stock", "passwd: files\nhosts:          files dns\nnetworks: files\n", ""},
+		{"actions", "hosts: files [NOTFOUND=return] dns [!UNAVAIL=return]\n", ""},
+		{"comment and CRLF", "# hosts: evil\r\nhosts: files dns # mdns\r\n", ""},
+		{"other databases may use modules", "passwd: files systemd\nhosts: files dns\n", ""},
+		{"no hosts line", "passwd: files\n", ""},
+		{"local module", "hosts: files localtest\n", `names the hosts source "localtest"`},
+		{"module only", "hosts: familytest\n", `names the hosts source "familytest"`},
+		{"myhostname", "hosts: files myhostname dns\n", `names the hosts source "myhostname"`},
+		{"upper-case database", "HOSTS: files familytest\n", `names the hosts source "familytest"`},
+		{"space before the colon", "hosts : familytest\n", `names the hosts source "familytest"`},
+		{"module glued to an action", "hosts: files [NOTFOUND=continue]familytest\n", `names the hosts source "familytest"`},
+		{"two hosts lines", "hosts: files dns\nhosts: familytest\n", "has more than one hosts line"},
+		{"unterminated action", "hosts: files [NOTFOUND=return dns\n", "has a hosts action it cannot read"},
+		{"odd action", "hosts: files [NOTFOUND=/x] dns\n", "has a hosts action it cannot read"},
+		{"long line", "hosts: files " + strings.Repeat(" ", 5000) + "dns\n", "has a line too long to check"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := hostsSourcesProblem([]byte(tc.data)); got != tc.want {
+				t.Fatalf("hostsSourcesProblem(%q) = %q, want %q", tc.data, got, tc.want)
+			}
+		})
+	}
+	var link bytes.Buffer
+	tw := tar.NewWriter(&link)
+	if err := tw.WriteHeader(&tar.Header{Name: "etc/nsswitch.conf", Typeflag: tar.TypeSymlink, Linkname: "/sandbox/nsswitch.conf", Mode: 0o777}); err != nil {
+		t.Fatal(err)
+	}
+	if err := tw.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if hosts, err := parseExportedHosts(&link); err != nil || hosts.nss != "is not a regular file" {
+		t.Fatalf("linked nsswitch.conf = %q, %v", hosts.nss, err)
+	}
+}
+
+// The osmin23c review-1 image (an empty hosts file, hosts answered only by
+// a module) is refused before any resolver build and before a record, with
+// the repair; its twin with the stock NSS configuration records.
+func TestBuildRejectsCustomNSSMicroVMBeforeRecord(t *testing.T) {
+	for _, tc := range []struct {
+		name, nsswitch string
+		want           bool
+	}{
+		{"module answers hosts", "hosts: familytest\n", false},
+		{"stock NSS configuration", "hosts: files dns\n", true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			spec := testSpec(harness.Codex)
+			spec.MicroVM = true
+			c := mustContext(t, spec)
+			docker := imageDocker(t, c, goodProbeOutput(c))
+			docker.exportedHosts = exportedHosts{present: true, typeflag: tar.TypeReg}
+			docker.exportedFiles = map[string][]byte{"etc/nsswitch.conf": []byte(tc.nsswitch)}
+			store := testStore(t)
+			_, err := (&Builder{Docker: docker, Store: store}).Build(t.Context(), spec, BuildOptions{SkipHookFire: true})
+			if (err == nil) != tc.want {
+				t.Fatalf("build error = %v, want success %t", err, tc.want)
+			}
+			if err != nil && (!strings.Contains(err.Error(), `names the hosts source "familytest"`) || !strings.Contains(err.Error(), "`hosts: files dns`")) {
+				t.Fatalf("refusal does not name the source and the repair: %v", err)
+			}
+			items, listErr := store.List()
+			if listErr != nil || (len(items) == 0) == tc.want {
+				t.Fatalf("records = %+v, %v", items, listErr)
+			}
+		})
 	}
 }
 

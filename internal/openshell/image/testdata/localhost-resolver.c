@@ -15,23 +15,33 @@
 // SPDX-License-Identifier: Apache-2.0
 
 // DefenseClaw's MicroVM localhost check. It resolves localhost with the
-// image's own libc and NSS modules, the way every program in the guest does,
-// and passes only when every answer of every address family is loopback.
+// image's own libc, the way every program in the guest does, and passes only
+// when every answer of every address family is loopback.
+//
+// Only libc's own code may answer: the image's hosts sources must be the
+// files and dns sources built into libc, and no other object may be mapped
+// into this process before or during the lookups. An NSS module or a preload
+// is image code that can tell this program from any other and answer it
+// alone with loopback, so no probe could show what the harness gets.
 //
 // Output, one line each: "<query> <address>" for each distinct answer of the
 // unspec (AF_UNSPEC, what ordinary programs ask), inet and inet6 queries, then
 // "loopback-only" and exit status 0. A refusal prints "refused <reason>" and
 // exits 1: noanswer (the unspec query has no answer), nonloopback (some answer
-// is not 127.0.0.1 or ::1), family (an answer of another family than asked)
-// or preload (code an image injects into every process, for which no probe
-// can show what other programs get).
+// is not 127.0.0.1 or ::1), family (an answer of another family than asked),
+// preload (code an image injects into every process) or nss (a hosts source
+// besides files and dns in /etc/nsswitch.conf, or an object the lookups
+// loaded).
 
 #define _GNU_SOURCE
 #include <arpa/inet.h>
+#include <ctype.h>
+#include <errno.h>
 #include <link.h>
 #include <netdb.h>
 #include <stdio.h>
 #include <string.h>
+#include <strings.h>
 #include <unistd.h>
 
 struct loaded {
@@ -67,10 +77,67 @@ static int count_object(struct dl_phdr_info *info, size_t size, void *data) {
     return 0;
 }
 
-static int preloaded(void) {
-    struct loaded l = {0};
-    dl_iterate_phdr(count_object, &l);
-    return l.other != 0 || l.libc > 1 || l.loader > 1 || l.vdso > 1;
+static int preloaded(struct loaded *l) {
+    dl_iterate_phdr(count_object, l);
+    return l->other != 0 || l->libc > 1 || l->loader > 1 || l->vdso > 1;
+}
+
+// hosts_sources_builtin reports whether every hosts line of nsswitch.conf
+// names only the files and dns sources (with any [status=action] items).
+// A missing file is glibc's default, which uses only those two. Every line
+// whose database is hosts in any letter case counts, and only one may exist.
+static int hosts_sources_builtin(void) {
+    FILE *f = fopen("/etc/nsswitch.conf", "re");
+    if (f == NULL) return errno == ENOENT;
+    char line[4096];
+    int hosts = 0, good = 1;
+    while (good && fgets(line, sizeof line, f) != NULL) {
+        size_t n = strlen(line);
+        if (n == sizeof line - 1 && line[n - 1] != '\n') {
+            good = 0;
+            break;
+        }
+        char *hash = strchr(line, '#');
+        if (hash != NULL) *hash = 0;
+        char *p = line;
+        while (isspace((unsigned char)*p)) p++;
+        char *key = p;
+        while (*p != 0 && *p != ':' && !isspace((unsigned char)*p)) p++;
+        size_t keylen = (size_t)(p - key);
+        while (isspace((unsigned char)*p)) p++;
+        if (*p != ':' || keylen != 5 || strncasecmp(key, "hosts", 5) != 0) continue;
+        if (hosts++) {
+            good = 0;
+            break;
+        }
+        p++;
+        for (;;) {
+            while (isspace((unsigned char)*p)) p++;
+            if (*p == 0) break;
+            if (*p == '[') {
+                char *end = strchr(p, ']');
+                if (end == NULL) {
+                    good = 0;
+                    break;
+                }
+                for (char *c = p + 1; c < end; c++) {
+                    if (!isalpha((unsigned char)*c) && *c != '=' && *c != '!' && !isspace((unsigned char)*c)) good = 0;
+                }
+                p = end + 1;
+                continue;
+            }
+            char *word = p;
+            while (*p != 0 && !isspace((unsigned char)*p) && *p != '[') p++;
+            size_t len = (size_t)(p - word);
+            if (!((len == 5 && strncmp(word, "files", 5) == 0) || (len == 3 && strncmp(word, "dns", 3) == 0))) {
+                good = 0;
+                break;
+            }
+        }
+    }
+    if (ferror(f)) good = 0;
+    fclose(f);
+    return good;
 }
 
 static const char *refusal;
@@ -117,8 +184,13 @@ static int query(int family, const char *tag) {
 
 int main(void) {
     alarm(5);
-    if (preloaded()) {
+    struct loaded before = {0}, after = {0};
+    if (preloaded(&before)) {
         printf("refused preload\n");
+        return 1;
+    }
+    if (!hosts_sources_builtin()) {
+        printf("refused nss\n");
         return 1;
     }
     // A family the image does not map may fail on its own; the unspec query,
@@ -126,6 +198,11 @@ int main(void) {
     if (query(AF_UNSPEC, "unspec") == 0) refuse("noanswer");
     query(AF_INET, "inet");
     query(AF_INET6, "inet6");
+    // Whatever the lookups mapped (an NSS module) answered them, not libc.
+    dl_iterate_phdr(count_object, &after);
+    if (after.objects != before.objects) {
+        refusal = "nss";
+    }
     if (refusal != NULL) {
         printf("refused %s\n", refusal);
         return 1;
