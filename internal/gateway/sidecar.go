@@ -289,6 +289,12 @@ func NewSidecar(cfg *config.Config, store *audit.Store, logger *audit.Logger) (*
 	// Record managed data-store drift before anything opens it. Read-only:
 	// the gateway never re-stamps descriptors.
 	AssessManagedDataPaths(cfg)
+	// The boot generation and the hook judge read the provider overlay
+	// below; a managed gateway must already ignore the env path override
+	// then. Only ever tightened here; the posture is published at the end.
+	if managed.IsManagedEnterprise(cfg.DeploymentMode) {
+		configs.SetIgnoreCustomProvidersPathEnv(true)
+	}
 	// Rule-pack integrity is a construction precondition. Load both the global
 	// pack and the effective pack for an enabled single-connector deployment
 	// before creating a client or returning any runnable sidecar state.

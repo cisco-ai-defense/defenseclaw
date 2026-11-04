@@ -25,7 +25,6 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
-	"time"
 
 	"github.com/spf13/cobra"
 
@@ -259,43 +258,7 @@ func openDaemonAuditStore(ctx context.Context, cfg *config.Config) (*audit.Store
 		}
 		return store, nil
 	}
-	store, err := attempt()
-	if err == nil || !managed.IsManagedEnterprise(cfg.DeploymentMode) {
-		return store, err
-	}
-	if ctx == nil {
-		ctx = context.Background()
-	}
-	reason, unbounded := gatewayAuditOpenWait()
-	managed.EmitResilienceEvent(managed.MarkerDegraded, map[string]string{
-		"subsystem": "audit store",
-		"path":      cfg.AuditDB,
-		"reason":    reason + err.Error(),
-	})
-	deadline := time.Now().Add(gatewayAuditOpenBudget)
-	delay := gatewayAuditOpenInitialDelay
-	for unbounded || time.Now().Before(deadline) {
-		timer := time.NewTimer(delay)
-		select {
-		case <-ctx.Done():
-			timer.Stop()
-			return nil, err
-		case <-timer.C:
-		}
-		repairGatewayAuditStorePlatform(cfg.DeploymentMode, cfg.AuditDB)
-		if store, err = attempt(); err == nil {
-			managed.EmitResilienceEvent(managed.MarkerRepair, map[string]string{
-				"subsystem": "audit store",
-				"path":      cfg.AuditDB,
-				"reason":    "audit store available again",
-			})
-			return store, nil
-		}
-		if delay *= 2; delay > gatewayAuditOpenMaxDelay {
-			delay = gatewayAuditOpenMaxDelay
-		}
-	}
-	return nil, err
+	return openAuditStoreWaitingForRepair(ctx, cfg.DeploymentMode, cfg.AuditDB, attempt)
 }
 
 // auditStoreOptions are the options every opener of cfg's audit.db passes:

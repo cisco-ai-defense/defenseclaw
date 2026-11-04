@@ -511,6 +511,7 @@ func TestWindowsEnterpriseSelfUpgradeRequiresExternalReleaseCLI(t *testing.T) {
 		installRoot string
 		executable  string
 		cliBinary   string
+		standalone  bool
 		conflict    bool
 	}{
 		{
@@ -526,6 +527,14 @@ func TestWindowsEnterpriseSelfUpgradeRequiresExternalReleaseCLI(t *testing.T) {
 			action:     "upgrade",
 			executable: defaultInstalledCLI,
 			cliBinary:  replacement,
+			conflict:   true,
+		},
+		{
+			name:       "standalone default installed root exact path",
+			action:     "upgrade",
+			executable: filepath.Join(defaultProgramFiles, "Cisco", "DefenseClaw", "bin", "defenseclaw.exe"),
+			cliBinary:  replacement,
+			standalone: true,
 			conflict:   true,
 		},
 		{
@@ -570,6 +579,7 @@ func TestWindowsEnterpriseSelfUpgradeRequiresExternalReleaseCLI(t *testing.T) {
 				test.installRoot,
 				test.executable,
 				test.cliBinary,
+				test.standalone,
 			)
 			if err != nil {
 				t.Fatalf("windowsEnterpriseSelfUpgradeConflict: %v", err)
@@ -592,6 +602,7 @@ func TestWindowsEnterpriseSelfUpgradeResolutionErrorsFailClosed(t *testing.T) {
 		`..\..\Program Files\Cisco\Cisco Secure Client\DefenseClaw`,
 		`C:\stage\defenseclaw.exe`,
 		`C:\release\defenseclaw.exe`,
+		false,
 	); err == nil || conflict ||
 		!strings.Contains(err.Error(), "install root must be an absolute path") {
 		t.Fatalf("relative explicit root = (%t, %v), want fail-closed error", conflict, err)
@@ -605,6 +616,7 @@ func TestWindowsEnterpriseSelfUpgradeResolutionErrorsFailClosed(t *testing.T) {
 		"",
 		`C:\stage\defenseclaw.exe`,
 		`C:\release\defenseclaw.exe`,
+		false,
 	); err == nil || conflict ||
 		!strings.Contains(err.Error(), "not an absolute path") {
 		t.Fatalf("relative default root = (%t, %v), want fail-closed error", conflict, err)
@@ -618,6 +630,7 @@ func TestWindowsEnterpriseSelfUpgradeResolutionErrorsFailClosed(t *testing.T) {
 		"",
 		`C:\stage\defenseclaw.exe`,
 		`C:\release\defenseclaw.exe`,
+		false,
 	); err == nil || conflict ||
 		!strings.Contains(err.Error(), "trusted default Windows Program Files") {
 		t.Fatalf("default-root resolution = (%t, %v), want fail-closed error", conflict, err)
@@ -628,6 +641,7 @@ func TestWindowsEnterpriseSelfUpgradeResolutionErrorsFailClosed(t *testing.T) {
 		t.TempDir(),
 		"",
 		`C:\release\defenseclaw.exe`,
+		false,
 	); err == nil || conflict ||
 		!strings.Contains(err.Error(), "executable path is empty") {
 		t.Fatalf("executable resolution = (%t, %v), want fail-closed error", conflict, err)

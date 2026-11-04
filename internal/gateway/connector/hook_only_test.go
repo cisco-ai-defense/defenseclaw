@@ -1377,9 +1377,8 @@ func TestHookOnlyConnector_SetupTeardown_BackupRestore(t *testing.T) {
 				ownedCommands := []string{conn.hookCommand(opts)}
 				if conn.Name() == "antigravity" {
 					// Current Antigravity registration carries one of its five
-					// trusted --event bindings. The owned list also keeps the
-					// generic pre-event command and the 1.0.x renders, for
-					// teardown only.
+					// trusted --event bindings (the teardown-only renders are
+					// covered by TestWindowsAwaitedHookLegacyFallbackRenderStaysOwned).
 					ownedCommands = make([]string, 0, len(antigravityLifecycleEvents))
 					for _, event := range antigravityLifecycleEvents {
 						ownedCommands = append(ownedCommands, antigravityHookInvocationCommandForEvent(

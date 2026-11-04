@@ -218,7 +218,8 @@ func serveBroker(
 	// is frequently absent when this service first starts. Resolve the
 	// library lazily instead of at startup: the broker serves the pipe
 	// either way, answers token requests with a provider error while the
-	// library is missing (managed inspection stays fail-closed), and
+	// library is missing (the gateway then has no AI Defense verdict and
+	// fails open, recording each such decision; see ErrLibraryUnavailable), and
 	// adopts the library on the first request after Cloud Management
 	// lands — no reinstall, repair, or service restart.
 	provider, err := cmidbroker.NewDeferredProvider(cmidbroker.DeferredProviderConfig{

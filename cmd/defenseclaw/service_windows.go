@@ -86,13 +86,13 @@ func runWindowsService(execute windowsServiceExecutor) (bool, int) {
 	// LocalSystem it owns what it writes as its service SID, as the 1.0.0
 	// virtual account did, so its write-restricted token can secure its own
 	// audit database and logs. A no-op for every other service.
-	if err := adoptGatewayFileOwner(); err != nil {
-		fmt.Fprintf(os.Stderr, "defenseclaw: %v\n", err)
-		return true, 1
-	}
+	ownerErr := adoptGatewayFileOwner()
 
-	// A service log that can't be opened does not stop the service: output
-	// goes to the Application event log instead.
+	// Neither failure stops the service (26.8.4). A service log that can't be
+	// opened sends output to the Application event log instead; without the
+	// file owner, files the gateway creates later may fail to harden, and
+	// that is reported where it happens instead of the process exiting
+	// before SCM sees it.
 	closeLog, err := redirectWindowsServiceOutput()
 	if err != nil {
 		closeLog = redirectWindowsServiceOutputToEventLog(name, err)
@@ -100,13 +100,18 @@ func runWindowsService(execute windowsServiceExecutor) (bool, int) {
 	if closeLog != nil {
 		defer closeLog()
 	}
+	if ownerErr != nil {
+		reportWindowsServiceDegraded(name, "default-owner", ownerErr)
+	}
 
 	handler := &defenseClawWindowsService{
 		execute:       execute,
 		sessionEvents: windowsServiceSessionEvents(os.Args[1:], os.Getenv(managed.EnterpriseProfileEnv)),
 	}
 	if err := runSCMService(name, handler); err != nil {
-		fmt.Fprintf(os.Stderr, "defenseclaw: run Windows service %s: %v\n", name, err)
+		// Through the standard logger: the service log, or the event log
+		// when the service log could not be opened.
+		log.Printf("defenseclaw: run Windows service %s: %v", name, err)
 		return true, 1
 	}
 	return true, 0

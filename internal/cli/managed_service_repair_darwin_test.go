@@ -518,20 +518,18 @@ func TestDarwinGatewayAuditOpenRepairsBeforeEachAttempt(t *testing.T) {
 	writeMode(t, path, 0o666)
 	chflags(t, "uchg", path)
 
-	previousAttempt := gatewayAuditOpenAttempt
 	previousInitial, previousMax := gatewayAuditOpenInitialDelay, gatewayAuditOpenMaxDelay
 	t.Cleanup(func() {
-		gatewayAuditOpenAttempt = previousAttempt
 		gatewayAuditOpenInitialDelay, gatewayAuditOpenMaxDelay = previousInitial, previousMax
 	})
 	gatewayAuditOpenInitialDelay, gatewayAuditOpenMaxDelay = time.Millisecond, time.Millisecond
-	gatewayAuditOpenAttempt = func(_ string, p string) (*audit.Store, error) {
-		if modeOf(t, p) != 0o600 {
+	attempt := func() (*audit.Store, error) {
+		if modeOf(t, path) != 0o600 {
 			return nil, errors.New("audit: database file is group- or other-writable")
 		}
 		return &audit.Store{}, nil
 	}
-	store, err := openGatewayAuditStore(context.Background(), managed.DeploymentModeManagedEnterprise, path, true)
+	store, err := openAuditStoreWaitingForRepair(context.Background(), managed.DeploymentModeManagedEnterprise, path, attempt)
 	if err != nil || store == nil {
 		t.Fatalf("open = %v, %v; want the store after the gateway repaired it", store, err)
 	}

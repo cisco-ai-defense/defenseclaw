@@ -479,8 +479,9 @@ function Add-DefenseClawBootstrapResilienceEvent {
 # Names the policy that stopped Add-Type from compiling. Only numeric codes and
 # error IDs are read, never localized text: 1260 is AppLocker or Software
 # Restriction Policies, 4551 is WDAC or Smart App Control, 225 is Defender or
-# an ASR rule, ScriptContainedMaliciousContent is AMSI, and 112 or another
-# IOException means the compiler's temporary directory is unusable.
+# an ASR rule, ScriptContainedMaliciousContent is AMSI, and, for Add-Type only,
+# 112 or another IOException means the compiler's temporary directory is
+# unusable. Any other check keeps its own error for an IOException.
 function Get-DefenseClawBootstrapAddTypeFailure {
     param(
         [Parameter(Mandatory)]$ErrorRecord,
@@ -532,7 +533,7 @@ function Get-DefenseClawBootstrapAddTypeFailure {
             }).Count -gt 0) {
         $policy = 'amsi'
     }
-    if ($policy -eq '' -and $ioFailure) {
+    if ($policy -eq '' -and $ioFailure -and $Check -ceq 'powershell_add_type') {
         $policy = 'compiler_temp_unusable'
     }
     if ($policy -eq '') {
