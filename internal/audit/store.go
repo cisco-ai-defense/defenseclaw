@@ -4909,9 +4909,13 @@ func (s *Store) Close() error {
 	// transactions to release the lifecycle read lock.
 	s.ready.Store(false)
 	s.closed = true
-	err := s.db.Close()
+	var readErr error
 	if s.readDB != nil {
-		err = errors.Join(err, s.readDB.Close())
+		readErr = s.readDB.Close()
+	}
+	err := s.db.Close()
+	if readErr != nil {
+		err = errors.Join(err, readErr)
 	}
 	s.checkpointMu.Lock()
 	if s.checkpointDB != nil {
