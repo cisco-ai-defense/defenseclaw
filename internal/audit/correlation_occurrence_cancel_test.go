@@ -60,10 +60,8 @@ func TestR108CanceledCorrelationOccurrenceReleasesTheStorePin(t *testing.T) {
 		done <- err
 	}()
 	deadline := time.Now().Add(5 * time.Second)
-	for {
-		if !store.lifecycleMu.TryLock() {
-			break // the occurrence holds the pin while it waits for the writer
-		}
+	// The caller holds the pin while it waits for the writer.
+	for store.lifecycleMu.TryLock() {
 		store.lifecycleMu.Unlock()
 		if time.Now().After(deadline) {
 			t.Fatal("the occurrence never started waiting for the writer")
@@ -105,10 +103,8 @@ func TestR108CanceledCallGroupWriteReleasesTheStorePinAndStoresNothing(t *testin
 		})
 	}()
 	deadline := time.Now().Add(5 * time.Second)
-	for {
-		if !store.lifecycleMu.TryLock() {
-			break
-		}
+	// The caller holds the pin while it waits for the writer.
+	for store.lifecycleMu.TryLock() {
 		store.lifecycleMu.Unlock()
 		if time.Now().After(deadline) {
 			t.Fatal("the write never started waiting for the writer")
