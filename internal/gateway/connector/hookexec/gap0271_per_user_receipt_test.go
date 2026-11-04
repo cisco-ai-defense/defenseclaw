@@ -24,3 +24,14 @@ func TestGAP0271NonToolCallStaysWithoutReceipt(t *testing.T) {
 		t.Fatal("event without an answer deadline requested a receipt")
 	}
 }
+
+func TestGAP0271PerUserReceiptWaitPreservesRetryWindow(t *testing.T) {
+	opts := Options{answerBy: time.Now().Add(200 * time.Millisecond)}
+	if got := hookDeliveryWait(opts); got <= 0 || got > 50*time.Millisecond {
+		t.Fatalf("short per-user answer window reserved %v for capability wait", got)
+	}
+	opts.ManagedEnterprise = true
+	if got := hookDeliveryWait(opts); got != hookDeliveryCapabilityWait {
+		t.Fatalf("managed capability wait changed to %v", got)
+	}
+}

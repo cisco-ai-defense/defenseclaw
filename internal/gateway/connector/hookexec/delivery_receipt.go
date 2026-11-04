@@ -179,6 +179,11 @@ func gatewayServiceNotServing(state gatewayServiceState) bool {
 
 func hookDeliveryWait(opts Options) time.Duration {
 	wait := hookDeliveryCapabilityWait
+	if !opts.ManagedEnterprise && !opts.answerBy.IsZero() {
+		// Keep room for a per-user call to retry a refused first connection.
+		// The normal answer window still gets the full capability wait.
+		wait = min(wait, max(time.Until(opts.answerBy)/4, 0))
+	}
 	if deadline := gatewayRestartDeadline(opts, opts.StartedAt); !deadline.IsZero() {
 		remaining := time.Until(deadline) / 4
 		if remaining < wait {
