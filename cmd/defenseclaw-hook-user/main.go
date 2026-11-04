@@ -23,6 +23,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/defenseclaw/defenseclaw/internal/envvars"
 	"github.com/defenseclaw/defenseclaw/internal/gateway/connector/hookexec"
 )
 
@@ -351,7 +352,7 @@ func gatewayRecovery(gateway, home string) func(context.Context, error) error {
 		if ctx.Err() != nil {
 			return ctx.Err()
 		}
-		if env := strings.ToLower(strings.TrimSpace(os.Getenv("DEFENSECLAW_GATEWAY_AUTOSTART"))); env == "0" || env == "false" || env == "no" || env == "off" {
+		if env := strings.ToLower(strings.TrimSpace(envvars.Getenv("DEFENSECLAW_GATEWAY_AUTOSTART"))); env == "0" || env == "false" || env == "no" || env == "off" {
 			return fmt.Errorf("gateway autostart disabled")
 		}
 		if fileExists(filepath.Join(home, "gateway.stopped")) {

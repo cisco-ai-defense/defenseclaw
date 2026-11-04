@@ -223,6 +223,8 @@ def test_release_builds_only_the_four_supported_targets_with_flat_names() -> Non
         "defenseclaw-acp-posix",
         "defenseclaw-acp-windows-amd64",
         "defenseclaw-hook-posix",
+        # The per-user Linux Claude Code hook launcher (GAP-0558).
+        "defenseclaw-hook-user-posix",
         "defenseclaw-sensor-helper-posix",
         # The managed Linux and macOS packages' scanner launcher (GAP-1527);
         # no archive carries it (the payload archive has no scanners).
@@ -236,6 +238,7 @@ def test_release_builds_only_the_four_supported_targets_with_flat_names() -> Non
         "defenseclaw-hook-post",
         "defenseclaw-acp-posix",
         "defenseclaw-hook-posix",
+        "defenseclaw-hook-user-posix",
         "defenseclaw-sensor-helper-posix",
         "defenseclaw-scanners-posix",
     ):
@@ -256,7 +259,7 @@ def test_release_builds_only_the_four_supported_targets_with_flat_names() -> Non
     archives = {archive["id"]: archive for archive in release["archives"]}
     flat_name = "{{ .ProjectName }}-{{ .Version }}-{{ .Os }}-{{ .Arch }}"
     assert set(archives) == {"default", "enterprise-posix", "windows-amd64"}
-    assert archives["default"]["ids"] == ["defenseclaw", "defenseclaw-hook-post", "defenseclaw-acp-posix", "defenseclaw-sensor-helper-posix"]
+    assert archives["default"]["ids"] == ["defenseclaw", "defenseclaw-hook-post", "defenseclaw-hook-user-posix", "defenseclaw-acp-posix", "defenseclaw-sensor-helper-posix"]
     # The standalone managed-enterprise payload is its own flat asset family;
     # per-user installers never fetch it.
     enterprise = archives.pop("enterprise-posix")
