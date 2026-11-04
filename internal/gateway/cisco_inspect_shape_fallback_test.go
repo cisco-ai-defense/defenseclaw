@@ -109,8 +109,8 @@ func TestCiscoInspectAPIKeyToolCallValidationFallback(t *testing.T) {
 				t.Fatalf("benign fallback verdict = %+v, want allow", verdict)
 			}
 			gotRequests = requestSnapshot()
-			if len(gotRequests) != 4 || hasShapeFallbackToolCalls(gotRequests[3]) {
-				t.Fatalf("benign fallback messages = %v", gotRequests)
+			if len(gotRequests) != 5 || !hasShapeFallbackToolCalls(gotRequests[3]) || hasShapeFallbackToolCalls(gotRequests[4]) {
+				t.Fatalf("different request formats = %v", gotRequests)
 			}
 		})
 	}
@@ -128,7 +128,14 @@ func TestCiscoInspectAPIKeyMessageToolValidationFallback(t *testing.T) {
 		messages := shapeFallbackWire(t, r)
 		structured := hasShapeFallbackToolCalls(messages)
 		var content string
-		if !structured {
+		if structured {
+			if len(messages) != 2 || string(messages[0]["role"]) != `"assistant"` ||
+				string(messages[1]["role"]) != `"user"` {
+				t.Errorf("structured messages = %v", messages)
+			} else if err := json.Unmarshal(messages[1]["content"], &content); err != nil {
+				t.Errorf("decode structured content: %v", err)
+			}
+		} else {
 			if len(messages) != 1 || string(messages[0]["role"]) != `"user"` {
 				t.Errorf("text messages = %v", messages)
 			}
@@ -143,10 +150,6 @@ func TestCiscoInspectAPIKeyMessageToolValidationFallback(t *testing.T) {
 		}{structured, content})
 		mu.Unlock()
 		if structured {
-			if len(messages) != 2 || string(messages[0]["role"]) != `"assistant"` ||
-				string(messages[1]["role"]) != `"user"` || string(messages[1]["content"]) != `"{\"topic\":\"policy-review\"}"` {
-				t.Errorf("structured messages = %v", messages)
-			}
 			w.WriteHeader(http.StatusUnprocessableEntity)
 			return
 		}
@@ -178,7 +181,7 @@ func TestCiscoInspectAPIKeyMessageToolValidationFallback(t *testing.T) {
 	want := []struct {
 		structured bool
 		content    string
-	}{{true, ""}, {false, reviewedArgs}, {false, ordinaryArgs}}
+	}{{true, reviewedArgs}, {false, reviewedArgs}, {true, ordinaryArgs}, {false, ordinaryArgs}}
 	if !reflect.DeepEqual(requests, want) {
 		t.Fatalf("request formats = %v, want %v", requests, want)
 	}
@@ -204,6 +207,61 @@ func TestCiscoInspectAPIKeyMessageToolBenignTwin(t *testing.T) {
 	verdict := api.hookAIDInspectToolCall(t.Context(), aidToolCall{Name: "message", Args: json.RawMessage(ordinaryArgs)}, ordinaryArgs)
 	if verdict == nil || verdict.Action != "allow" || calls.Load() != 1 {
 		t.Fatalf("benign verdict = %+v, calls = %d, want allow in one call", verdict, calls.Load())
+	}
+}
+
+func TestCiscoInspectAPIKeyTextRetryPreservesDifferentToolCalls(t *testing.T) {
+	var mu sync.Mutex
+	var formats []string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		messages := shapeFallbackWire(t, r)
+		if !hasShapeFallbackToolCalls(messages) {
+			mu.Lock()
+			formats = append(formats, "text")
+			mu.Unlock()
+			_, _ = io.WriteString(w, `{"is_safe":true,"action":"Allow","rules":[]}`)
+			return
+		}
+		var calls []struct {
+			Function struct {
+				Name string `json:"name"`
+			} `json:"function"`
+		}
+		if len(messages) != 2 || json.Unmarshal(messages[0]["tool_calls"], &calls) != nil || len(calls) != 1 {
+			t.Errorf("structured messages = %v", messages)
+			w.WriteHeader(http.StatusBadRequest)
+			return
+		}
+		mu.Lock()
+		formats = append(formats, "structured:"+calls[0].Function.Name)
+		mu.Unlock()
+		if calls[0].Function.Name == "message" && string(messages[1]["content"]) == `"{\"topic\":\"team-update\"}"` {
+			w.WriteHeader(http.StatusUnprocessableEntity)
+			return
+		}
+		_, _ = io.WriteString(w, `{"is_safe":false,"action":"Block","rules":[]}`)
+	}))
+	t.Cleanup(srv.Close)
+
+	client := &CiscoInspectClient{apiKey: "test-key", endpoint: srv.URL, timeout: time.Second, client: srv.Client()}
+	api := testAPIServerWithConfig(t, "action")
+	api.SetCiscoInspector(client)
+	inspect := func(name, args string) *ScanVerdict {
+		return api.hookAIDInspectToolCall(t.Context(), aidToolCall{Name: name, Args: json.RawMessage(args)}, args)
+	}
+	if verdict := inspect("message", `{"topic":"team-update"}`); verdict == nil || verdict.Action != "allow" {
+		t.Fatalf("message fallback verdict = %+v, want allow", verdict)
+	}
+	if verdict := inspect("Bash", `{"command":"review"}`); verdict == nil || verdict.Action != "block" {
+		t.Fatalf("different tool verdict = %+v, want block", verdict)
+	}
+	if verdict := inspect("message", `{"topic":"review"}`); verdict == nil || verdict.Action != "block" {
+		t.Fatalf("different request verdict = %+v, want block", verdict)
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	if want := []string{"structured:message", "text", "structured:Bash", "structured:message"}; !reflect.DeepEqual(formats, want) {
+		t.Fatalf("request formats = %v, want %v", formats, want)
 	}
 }
 

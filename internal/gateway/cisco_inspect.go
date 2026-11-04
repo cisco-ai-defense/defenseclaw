@@ -19,6 +19,7 @@ package gateway
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -350,9 +351,41 @@ type CiscoInspectClient struct {
 	availabilityObserver func(error)
 }
 
-// API-key format preference is shared by clients reconstructed after a config
-// reload. Secure Client requests never read or update this map.
-var ciscoAPIKeyTextOnlyEndpoints sync.Map
+// A validation response can apply to one request rather than every tool call
+// at an endpoint. Remember only successful text retries for identical API-key
+// requests across client reloads. Secure Client never uses this cache.
+var ciscoAPIKeyTextOnlyRequests = struct {
+	sync.Mutex
+	keys  map[[32]byte]struct{}
+	order [1024][32]byte
+	next  int
+	size  int
+}{keys: make(map[[32]byte]struct{})}
+var ciscoAPIKeyTextOnlyLogOnce sync.Once
+
+func ciscoAPIKeyTextOnlyRequestKnown(key [32]byte) bool {
+	ciscoAPIKeyTextOnlyRequests.Lock()
+	defer ciscoAPIKeyTextOnlyRequests.Unlock()
+	_, known := ciscoAPIKeyTextOnlyRequests.keys[key]
+	return known
+}
+
+func ciscoRememberAPIKeyTextOnlyRequest(key [32]byte) bool {
+	ciscoAPIKeyTextOnlyRequests.Lock()
+	defer ciscoAPIKeyTextOnlyRequests.Unlock()
+	if _, known := ciscoAPIKeyTextOnlyRequests.keys[key]; known {
+		return false
+	}
+	if ciscoAPIKeyTextOnlyRequests.size == len(ciscoAPIKeyTextOnlyRequests.order) {
+		delete(ciscoAPIKeyTextOnlyRequests.keys, ciscoAPIKeyTextOnlyRequests.order[ciscoAPIKeyTextOnlyRequests.next])
+	} else {
+		ciscoAPIKeyTextOnlyRequests.size++
+	}
+	ciscoAPIKeyTextOnlyRequests.order[ciscoAPIKeyTextOnlyRequests.next] = key
+	ciscoAPIKeyTextOnlyRequests.next = (ciscoAPIKeyTextOnlyRequests.next + 1) % len(ciscoAPIKeyTextOnlyRequests.order)
+	ciscoAPIKeyTextOnlyRequests.keys[key] = struct{}{}
+	return true
+}
 
 // bindAvailabilityObserver installs the callback that receives every
 // inspection's outcome: nil after a verdict, the failure otherwise.
@@ -512,17 +545,27 @@ func (c *CiscoInspectClient) Inspect(ctx context.Context, messages []ChatMessage
 	if canUseText {
 		textMsgs = []map[string]interface{}{{"role": "user", "content": messages[1].Content}}
 	}
-	endpointKey := c.endpoint + "/api/v1/inspect/chat"
-	if canUseText {
-		if _, known := ciscoAPIKeyTextOnlyEndpoints.Load(endpointKey); known {
-			chatMsgs = textMsgs
-			canUseText = false
-		}
-	}
-
 	payload := map[string]interface{}{"messages": chatMsgs}
 	if len(c.enabledRules) > 0 {
 		payload["config"] = map[string]interface{}{"enabled_rules": c.enabledRules}
+	}
+	var requestKey [32]byte
+	if canUseText {
+		// Include the endpoint, credential, and full structured payload. Keep
+		// only a digest in the process cache, never the request content.
+		if body, err := json.Marshal(payload); err == nil {
+			hash := sha256.New()
+			_, _ = hash.Write([]byte(c.endpoint))
+			_, _ = hash.Write([]byte{0})
+			_, _ = hash.Write([]byte(c.apiKey))
+			_, _ = hash.Write([]byte{0})
+			_, _ = hash.Write(body)
+			copy(requestKey[:], hash.Sum(nil))
+			if ciscoAPIKeyTextOnlyRequestKnown(requestKey) {
+				payload["messages"] = textMsgs
+				canUseText = false
+			}
+		}
 	}
 
 	// A retry shares the original request's configured time budget. The
@@ -550,9 +593,11 @@ func (c *CiscoInspectClient) Inspect(ctx context.Context, messages []ChatMessage
 		}
 	}
 	verdict := doInspectHTTP(ctx, runtime, call)
-	if retriedAsText && verdict != nil {
-		if _, loaded := ciscoAPIKeyTextOnlyEndpoints.LoadOrStore(endpointKey, struct{}{}); !loaded {
-			fmt.Fprintln(defaultLogWriter, "  [cisco-ai-defense] API-key endpoint accepted \"text-only\" messages; using that format for later tool calls")
+	if retriedAsText && verdict != nil && requestKey != ([32]byte{}) {
+		if ciscoRememberAPIKeyTextOnlyRequest(requestKey) {
+			ciscoAPIKeyTextOnlyLogOnce.Do(func() {
+				fmt.Fprintln(defaultLogWriter, "  [cisco-ai-defense] API-key endpoint accepted \"text-only\" for a request; remembering that format for identical requests")
+			})
 		}
 	}
 	return verdict
