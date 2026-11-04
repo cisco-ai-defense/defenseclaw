@@ -471,16 +471,27 @@ sandbox_files_gone() {
 }
 
 # launcher_offers_only_sandbox: an unprivileged account that runs the launcher
-# is told the computer is managed, and sees the sandbox tree in its help.
+# is told the computer is managed, sees only its own protection state in
+# `defenseclaw status` (cowork-1-0-8 GAP-0053), sees the sandbox tree and that
+# status in its help, and is refused every administrator command.
 launcher_offers_only_sandbox() {
-    local output rc=0 text="This computer is managed; use \`defenseclaw sandbox status\` for your read-only status and \`defenseclaw sandbox policy explain\` for your policy. Other commands require an administrator."
+    local output rc=0 text="This computer is managed; use \`defenseclaw status\` for your protection state, \`defenseclaw sandbox status\` for your sandboxes and \`defenseclaw sandbox policy explain\` for your policy. Other commands require an administrator."
     output=$(as_standard_user "$launcher" status 2>&1) || rc=$?
-    [ "$rc" = 2 ] || die "defenseclaw status exited $rc as a standard user, want 2: $output"
-    [ "$output" = "$text" ] || die "defenseclaw status printed '$output', want '$text'"
+    [ "$rc" = 0 ] || die "defenseclaw status exited $rc as a standard user, want 0 (the user's own status): $output"
+    [ "$(head -n 1 <<<"$output")" = "This computer is managed by your organization." ] ||
+        die "defenseclaw status as a standard user does not say the computer is managed: $output"
+    grep -Eq '^  Account +' <<<"$output" && grep -Eq '^  Claude Code +(protected|not protected)$' <<<"$output" &&
+        grep -Eq '^  Cowork +' <<<"$output" ||
+        die "defenseclaw status as a standard user does not show its own protection state: $output"
+    rc=0
+    output=$(as_standard_user "$launcher" setup 2>&1) || rc=$?
+    [ "$rc" = 2 ] || die "defenseclaw setup exited $rc as a standard user, want 2: $output"
+    [ "$output" = "$text" ] || die "defenseclaw setup printed '$output', want '$text'"
     output=$(as_standard_user "$launcher" --help 2>&1) || die "defenseclaw --help failed as a standard user: $output"
     grep -Fq "defenseclaw sandbox" <<<"$output" || die "the launcher help does not offer the sandbox commands: $output"
-    ! grep -Eq '^[[:space:]]+(enterprise|setup|status)[[:space:]]' <<<"$output" || die "the launcher help lists gateway commands: $output"
-    echo "defenseclaw offers only the sandbox commands to a standard user"
+    grep -Eq '^[[:space:]]+status[[:space:]]' <<<"$output" || die "the launcher help does not offer the user's own status: $output"
+    ! grep -Eq '^[[:space:]]+(enterprise|setup)[[:space:]]' <<<"$output" || die "the launcher help lists gateway commands: $output"
+    echo "defenseclaw offers only the sandbox commands and the user's own status to a standard user"
 }
 
 policy_entries() {
