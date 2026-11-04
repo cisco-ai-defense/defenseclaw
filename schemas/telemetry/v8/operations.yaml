@@ -11260,6 +11260,34 @@ groups:
     legacy_bindings:
     - source: schemas/otel/metrics.schema.json x-emitted-metrics
       disposition: preserved
+- id: metric.defenseclaw.queue.oldest_age
+  type: metric
+  brief: Age of the oldest queued write
+  stability: stable
+  introduced_in: telemetry-registry-v1
+  extends: []
+  attributes:
+  - ref: defenseclaw.metric.queue
+    requirement_level: recommended
+  body_fields: []
+  metric:
+    instrument_name: defenseclaw.queue.oldest_age
+    instrument_type: gauge
+    value_type: int64
+    unit: ms
+    description: Age of the oldest queued write
+    temporality: unspecified
+    label_projections:
+    - profile: local-observability-v1
+      mappings:
+      - ref: defenseclaw.metric.queue
+        label: queue
+  x-defenseclaw:
+    bucket: platform.health
+    family_schema_version: 1
+    route_selector: true
+    compatibility_profiles:
+    - local-observability-v1
 - id: metric.defenseclaw.redaction.applied
   type: metric
   brief: Guardrail/egress redactions applied by detector/field
