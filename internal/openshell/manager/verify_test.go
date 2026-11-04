@@ -131,6 +131,9 @@ func answerFor(want verifyRecord, hostname string) workloadAnswer {
 // (openshelltest.DefaultExec when nil: a stop's flush syncs).
 func (e *harnessEnv) workloadChecks(edit func(sandbox string, a *workloadAnswer), other openshelltest.ExecHandler) openshelltest.ExecHandler {
 	return func(ctx context.Context, call openshelltest.ExecCall) openshelltest.ExecResponse {
+		if slices.Equal(call.Command, []string{"/usr/local/lib/defenseclaw/localhost-resolver"}) {
+			return openshelltest.ExecResponse{Stdout: []byte("127.0.0.1 STREAM\n")}
+		}
 		if !isWorkloadCheck(call) {
 			if other != nil {
 				return other(ctx, call)
@@ -233,6 +236,7 @@ func TestWorkloadProblems(t *testing.T) {
 			}
 			facts, err := parseWorkloadFacts(a.stdout())
 			must(t, err)
+			facts.DirectResolverOK = true
 			problems := strings.Join(workloadProblems(testVerify(), facts, tc.driver, adminLimits(tc.limits)), "; ")
 			if tc.want == "" {
 				if problems != "" || facts.Hostname != "vmbox" {
@@ -283,6 +287,7 @@ func TestMicroVMResolverResult(t *testing.T) {
 			}
 			facts, err := parseWorkloadFacts(a.stdout())
 			must(t, err)
+			facts.DirectResolverOK = true
 			problems := strings.Join(workloadProblems(testVerify(), facts, vm, workloadLimits{}), "; ")
 			if !strings.Contains(problems, tc.want) || (tc.want == "" && problems != "") {
 				t.Fatalf("VM problems = %q, want %q", problems, tc.want)
@@ -296,6 +301,71 @@ func TestMicroVMResolverResult(t *testing.T) {
 		if _, err := parseWorkloadFacts([]byte(answer)); err == nil {
 			t.Fatalf("accepted malformed resolver result %q", answer)
 		}
+	}
+}
+
+func TestMicroVMDirectResolverResult(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		out  string
+		want bool
+	}{
+		{"IPv4 loopback", "127.0.0.1 STREAM\n", true},
+		{"IPv6 loopback", "::1 STREAM\n", true},
+		{"mixed loopback", "127.0.0.1 STREAM\n::1 STREAM\n", true},
+		{"other address", "203.0.113.10 STREAM\n", false},
+		{"mixed addresses", "127.0.0.1 STREAM\n203.0.113.10 STREAM\n", false},
+		{"NUL byte", "127.0.0.1 STREAM\n\x00", false},
+		{"non ASCII alias", "127.0.0.1 STREAM caf\xc3\xa9\n", false},
+		{"missing final newline", "127.0.0.1 STREAM", false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := directResolverOK([]byte(tc.out)); got != tc.want {
+				t.Fatalf("directResolverOK(%q) = %v, want %v", tc.out, got, tc.want)
+			}
+		})
+	}
+}
+
+func TestMicroVMGuestResolverDirectExec(t *testing.T) {
+	const caller = "/usr/local/lib/defenseclaw/localhost-resolver"
+	for _, tc := range []struct {
+		name    string
+		answer  string
+		allowed bool
+	}{
+		{"guest resolver returns another address", "203.0.113.10 STREAM\n", false},
+		{"guest resolver returns loopback", "127.0.0.1 STREAM\n", true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			e := newVMEnv(t, nil)
+			useOpenCode(t, e)
+			defaultCheck := e.workloadChecks(nil, nil)
+			e.fake.HandleExec(func(ctx context.Context, call openshelltest.ExecCall) openshelltest.ExecResponse {
+				if slices.Equal(call.Command, []string{caller}) {
+					return openshelltest.ExecResponse{Stdout: []byte(tc.answer)}
+				}
+				return defaultCheck(ctx, call)
+			})
+			_, err := e.tryCreate(sandboxapi.CreateRequest{Name: "resolver-cell", Harness: "opencode", Copy: true})
+			if tc.allowed {
+				must(t, err)
+			} else {
+				wantCode(t, err, sandboxapi.CodePolicyRejected)
+			}
+			var directCalls int
+			for _, call := range e.fake.ExecCalls() {
+				if slices.Equal(call.Command, []string{caller}) {
+					directCalls++
+					if !slices.Equal(call.Argv, []string{caller}) {
+						t.Fatalf("resolver caller was wrapped: %q", call.Argv)
+					}
+				}
+			}
+			if directCalls != 1 {
+				t.Fatalf("direct resolver calls = %d, want 1", directCalls)
+			}
+		})
 	}
 }
 

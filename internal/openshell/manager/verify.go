@@ -168,6 +168,8 @@ type workloadFacts struct {
 	LocalhostAnswers  []string
 	LocalhostOK       bool
 	LocalhostReported bool
+	// DirectResolverOK is set only by a separate exec of the pinned caller.
+	DirectResolverOK bool
 	// seen holds the tags of the single-valued lines read.
 	seen map[string]bool
 	// End is set when the answer was complete.
@@ -403,6 +405,9 @@ func workloadProblems(want verifyRecord, got workloadFacts, d openshell.Driver, 
 		if problem := microVMResolverProblem(got); problem != "" {
 			out = append(out, problem)
 		}
+		if !got.DirectResolverOK {
+			out = append(out, "the MicroVM could not verify localhost with its resolver caller")
+		}
 	}
 	for _, w := range want.Files {
 		f := got.Files[w.Path]
@@ -448,6 +453,24 @@ func microVMResolverProblem(got workloadFacts) string {
 	return ""
 }
 
+// directResolverOK judges the output of the pinned caller invoked directly
+// as the sandbox workload. The caller prints one numeric address per line.
+func directResolverOK(out []byte) bool {
+	if len(out) == 0 || len(out) > 4096 || out[len(out)-1] != '\n' {
+		return false
+	}
+	lines := strings.Split(strings.TrimSuffix(string(out), "\n"), "\n")
+	if len(lines) > 64 {
+		return false
+	}
+	for _, line := range lines {
+		if line != "127.0.0.1 STREAM" && line != "::1 STREAM" {
+			return false
+		}
+	}
+	return true
+}
+
 // verifyWorkload runs the workload check in sandbox name and returns what
 // it found. A sandbox that does not run as want expects, or that cannot be
 // checked, is refused with CodePolicyRejected: the caller deletes or stops
@@ -473,6 +496,19 @@ func (m *Manager) verifyWorkload(ctx context.Context, gw *Gateway, name string, 
 	case res.ExitCode != 0:
 		problems = []string{fmt.Sprintf("the check exited with status %d", res.ExitCode)}
 	default:
+		if gw.Driver.Name == openshell.DriverVM {
+			// Execute the pinned caller directly. The image's env and shell can
+			// alter their own output, so their localhost lines are insufficient.
+			resolver, resolverErr := m.ownExec(ctx, gw, name,
+				[]string{"/usr/local/lib/defenseclaw/localhost-resolver"}, openshell.ExecOptions{
+					Timeout: verifyTimeout, Attempts: 1, MaxOutputBytes: 4096, NoSandboxTimeout: true,
+				})
+			if resolverErr != nil {
+				m.dropGateway(gw, resolverErr)
+				return workloadFacts{}, upstream("check the resolver of sandbox "+name, resolverErr)
+			}
+			facts.DirectResolverOK = !resolver.Truncated && resolver.ExitCode == 0 && directResolverOK(resolver.Stdout)
+		}
 		problems = workloadProblems(want, facts, gw.Driver, adminLimits(eff.MaxResources()))
 		if len(problems) == 1 && problems[0] == cutShortProblem {
 			problems[0] = cutShortWithEnv(env)
