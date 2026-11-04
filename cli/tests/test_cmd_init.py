@@ -1461,8 +1461,8 @@ class TestInitFirstRunBackend(unittest.TestCase):
         self.assertEqual(result.exit_code, 0, result.output + (result.stderr or ""))
         summary = json.loads(result.output)
         self.assertEqual(summary["connector"], "codex")
-        # The hook-contract gate adds a read-only probe (persist_cache=False).
-        scans = [c.kwargs for c in mock_discover.call_args_list if c.kwargs.get("persist_cache") is not False]
+        # The hook-contract gate and readiness add their own version probes (use_cache=False).
+        scans = [c.kwargs for c in mock_discover.call_args_list if c.kwargs.get("use_cache") is not False]
         self.assertEqual(scans, [{"refresh": False}])
 
         import yaml
@@ -1490,6 +1490,11 @@ class TestInitFirstRunBackend(unittest.TestCase):
         self.assertEqual(result.exit_code, 0, result.output + (result.stderr or ""))
         summary = json.loads(result.output)
         self.assertEqual(summary["connector"], "claudecode")
+        # The default was picked from a scan that ran no agent CLI, so the
+        # hook-contract gate's probe publishes the version it read for the
+        # gateway and the first doctor (cowork-1-0-8 GAP-0033).
+        probes = [c.kwargs for c in mock_discover.call_args_list if c.kwargs.get("use_cache") is False]
+        self.assertTrue(any(p.get("refresh") is True and p.get("persist_cache") is True for p in probes), probes)
 
         import yaml
         with open(os.path.join(self.tmp_dir, "config.yaml"), encoding="utf-8") as fh:
@@ -1540,8 +1545,8 @@ class TestInitFirstRunBackend(unittest.TestCase):
         ])
 
         self.assertEqual(result.exit_code, 0, result.output + (result.stderr or ""))
-        # The hook-contract gate adds a read-only probe (persist_cache=False).
-        scans = [c.kwargs for c in mock_discover.call_args_list if c.kwargs.get("persist_cache") is not False]
+        # The hook-contract gate and readiness add their own version probes (use_cache=False).
+        scans = [c.kwargs for c in mock_discover.call_args_list if c.kwargs.get("use_cache") is not False]
         self.assertEqual(scans, [{"refresh": True}])
 
 class TestInitVersionDisplay(unittest.TestCase):

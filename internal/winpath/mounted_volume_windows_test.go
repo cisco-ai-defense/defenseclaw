@@ -6,6 +6,7 @@
 package winpath
 
 import (
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
@@ -31,7 +32,7 @@ func TestValidateFixedNTFSMountedPathRejectsRawPerLogonDriveAlias(t *testing.T) 
 	if len(volume) != 2 {
 		t.Skipf("test temp path has no drive letter: %s", target)
 	}
-	rootTarget, err := singleDOSDeviceTarget(volume)
+	rootTarget, err := globalDOSDeviceTarget(volume)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -93,7 +94,7 @@ func TestValidateFixedNTFSMountedPathRejectsWholeVolumePerLogonAlias(t *testing.
 	if len(volume) != 2 {
 		t.Skipf("test temp path has no drive letter: %s", target)
 	}
-	rootTarget, err := singleDOSDeviceTarget(volume)
+	rootTarget, err := globalDOSDeviceTarget(volume)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -174,4 +175,50 @@ func unusedDriveLetter(letter byte) (string, bool) {
 		return "", false
 	}
 	return string([]byte{letter, ':'}), true
+}
+
+// TestEffectiveDriveTargetByHandleMatchesTheDOSDevice pins the fallback of a
+// token that cannot query its DOS-device directory (GAP-0052) to what
+// QueryDosDevice answers for a token that can: the system drive resolves to
+// the same kernel device both ways, and to the global one.
+func TestEffectiveDriveTargetByHandleMatchesTheDOSDevice(t *testing.T) {
+	root := strings.ToUpper(os.Getenv("SystemDrive")) + `\`
+	if len(root) != 3 {
+		t.Skip("no SystemDrive")
+	}
+	byHandle, err := effectiveDriveTargetByHandle(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	global, err := globalDOSDeviceTarget(strings.TrimSuffix(root, `\`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	nt, err := globalSymbolicLinkTarget(strings.TrimSuffix(root, `\`))
+	if err != nil || !strings.EqualFold(nt, global) {
+		t.Fatalf("\\GLOBAL?? link %q (%v), global %q", nt, err, global)
+	}
+	if !strings.EqualFold(byHandle, global) {
+		t.Fatalf("by handle %q, global %q", byHandle, global)
+	}
+	effective, err := singleDOSDeviceTarget(strings.TrimSuffix(root, `\`))
+	switch {
+	case errors.Is(err, windows.ERROR_ACCESS_DENIED):
+		t.Logf("this token cannot query %s (deny-only Administrators); by handle %s", root, byHandle)
+	case err != nil:
+		t.Fatal(err)
+	case !strings.EqualFold(effective, byHandle):
+		t.Fatalf("QueryDosDevice %q, by handle %q", effective, byHandle)
+	default:
+		t.Logf("QueryDosDevice and by handle agree: %s", byHandle)
+	}
+	if _, err := ValidateFixedNTFSMountedPath(root + "Windows"); err != nil {
+		t.Fatalf("system drive refused: %v", err)
+	}
+	if _, err := ValidateTrustedMachineRoot(os.Getenv("ProgramFiles"), "Program Files"); err != nil {
+		t.Fatalf("Program Files refused: %v", err)
+	}
+	if _, err := LocalPathIdentity(os.Args[0]); err != nil {
+		t.Fatalf("the test binary is not a local path: %v", err)
+	}
 }

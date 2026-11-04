@@ -29,7 +29,9 @@ nobody reintroduces them.
   when intended, but check the table in `ux-rules.md`.
 - **`t` is pinned as a no-op** at the app level by a test. Don't bind it
   globally (panels such as AI Discovery use `t` locally).
-- **`q` is local close** (drawer or overlay), never quit.
+- **`q` closes first, then quits**: it closes the drawer, help overlay, command
+  strip or an open panel detail (as Esc), and quits only when nothing is open and
+  no command runs (GAP-0048). Panels that type text keep consuming `q`.
 - **The Tools panel is unreachable.** `ToolsPanelModel`, `#tools-controls` and a
   hint branch exist, but `tools` is not in `PANELS`. Don't "fix" hints or tests
   for it as if users could see it, and don't assume a `T` shortcut exists.

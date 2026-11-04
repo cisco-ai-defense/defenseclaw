@@ -89,6 +89,11 @@ def ignore_stray_deployment_pins() -> None:
 
 
 def main() -> None:
+    if os.name == "nt":
+        # Elevated, files would be owned by Administrators (GAP-0050).
+        from defenseclaw.windows_owner import use_current_user_as_default_owner
+
+        use_current_user_as_default_owner(sys.argv[1:])
     exempt_instance_metadata_from_proxy()
     use_bundled_litellm_cost_map()
     ignore_stray_deployment_pins()

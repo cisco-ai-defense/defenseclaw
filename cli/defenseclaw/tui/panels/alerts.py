@@ -83,6 +83,9 @@ class AlertEvent:
     # The sandbox the alert was raised in (its record, or the hook decision
     # of a finding's request), so the Sandboxes panel can count them.
     sandbox: str = ""
+    # The agent surface (defenseclaw.agent.surface): "cowork" for a Claude
+    # Cowork call on the claudecode connector, else "".
+    surface: str = ""
 
 
 @dataclass(frozen=True)
@@ -294,6 +297,47 @@ _DECISION_KEYS = (
 )
 
 
+_SURFACE_KEY = "defenseclaw.agent.surface"
+_SURFACE_LABELS = {"cowork": "Cowork (Claude Code)"}
+
+
+def surface_label(surface: str) -> str:
+    """How the Alerts row and detail name an agent surface ("Cowork (Claude Code)")."""
+
+    surface = (surface or "").strip().lower()
+    return _SURFACE_LABELS.get(surface, surface)
+
+
+def _evaluation_surfaces(rows: Iterable[V8EventHistoryRow]) -> dict[str, str]:
+    """Map a guardrail evaluation id (and "req:" + request id) to the agent surface of that call.
+
+    Only the hook decision record carries defenseclaw.agent.surface; the
+    finding of the same evaluation or request takes it from here (GAP-0047).
+    """
+
+    surfaces: dict[str, str] = {}
+    for row in rows:
+        surface = payload_text(row.payload, _SURFACE_KEY).lower()
+        if not surface:
+            continue
+        if evaluation := payload_text(row.payload, "defenseclaw.evaluation.id"):
+            surfaces.setdefault(evaluation, surface)
+        if row.request_id:
+            surfaces.setdefault(f"req:{row.request_id}", surface)
+    return surfaces
+
+
+def _cowork_target(target: str, surface: str) -> str:
+    """``claudecode:PreToolUse`` reads ``cowork:PreToolUse`` for a Cowork call (GAP-0047)."""
+
+    if surface != "cowork":
+        return target
+    head, sep, rest = target.partition(":")
+    if sep and head.strip().lower() == "claudecode":
+        return f"cowork:{rest}"
+    return f"cowork {target}" if target else "cowork"
+
+
 def _evaluation_decisions(rows: Iterable[V8EventHistoryRow]) -> dict[str, str]:
     """Map a guardrail evaluation id to the action taken for that call.
 
@@ -314,8 +358,18 @@ def _evaluation_decisions(rows: Iterable[V8EventHistoryRow]) -> dict[str, str]:
 _POST_TOOL_DECISION = POST_TOOL_DECISION
 
 
-def _v8_alert_event(row: V8EventHistoryRow, decisions: Mapping[str, str] | None = None) -> AlertEvent:
+def _v8_alert_event(
+    row: V8EventHistoryRow,
+    decisions: Mapping[str, str] | None = None,
+    surfaces: Mapping[str, str] | None = None,
+) -> AlertEvent:
     payload = row.payload
+    surfaces = surfaces or {}
+    surface = (
+        payload_text(payload, _SURFACE_KEY).lower()
+        or surfaces.get(payload_text(payload, "defenseclaw.evaluation.id") or "-", "")
+        or (surfaces.get(f"req:{row.request_id}", "") if row.request_id else "")
+    )
     action = (
         payload_text(
             payload,
@@ -381,6 +435,8 @@ def _v8_alert_event(row: V8EventHistoryRow, decisions: Mapping[str, str] | None 
                 facts.append(("File", file_path))
     if row.connector:
         facts.append(("Connector", row.connector))
+    if surface:
+        facts.append(("Surface", surface_label(surface)))
     rule_id = payload_text(payload, "defenseclaw.finding.rule_id")
     rule = ": ".join(
         value
@@ -428,7 +484,7 @@ def _v8_alert_event(row: V8EventHistoryRow, decisions: Mapping[str, str] | None 
         id=row.id,
         severity=severity,
         action=action,
-        target=copilot_hook_target(target, row.connector),
+        target=_cowork_target(copilot_hook_target(target, row.connector), surface),
         details=" ".join(detail_parts),
         timestamp=row.timestamp or datetime.now(timezone.utc),
         actor=row.actor or row.source,
@@ -439,6 +495,7 @@ def _v8_alert_event(row: V8EventHistoryRow, decisions: Mapping[str, str] | None 
         connector=row.connector,
         facts=tuple(facts),
         sandbox=sandbox,
+        surface=surface,
     )
 
 
@@ -453,7 +510,8 @@ def alerts_from_v8_history(
     """
 
     decisions = _evaluation_decisions((*rows, *context))
-    return tuple(_v8_alert_event(row, decisions) for row in rows if _is_v8_alert_row(row))
+    surfaces = _evaluation_surfaces((*rows, *context))
+    return tuple(_v8_alert_event(row, decisions, surfaces) for row in rows if _is_v8_alert_row(row))
 
 
 def humanize_alert_details(raw: str) -> str:

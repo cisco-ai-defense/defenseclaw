@@ -4925,6 +4925,9 @@ func (s *Sidecar) runGuardrail(ctx context.Context) error {
 	}
 	agentVersion := connector.LoadCachedAgentVersion(s.currentConfig().DataDir, conn.Name())
 	contractResolution := connector.ResolveHookContract(conn.Name(), agentVersion)
+	// GAP-0037: a Desktop-only account's Claude Code is Claude Desktop's
+	// engine, as connectorSetupOptsChecked found for setupOpts.
+	agentVersion, contractResolution = s.applyClaudeDesktopEngineEvidence(conn.Name(), agentVersion, contractResolution)
 	// F9: the same harness-evidence substitution connectorSetupOptsChecked
 	// applied to setupOpts, so the gate below sees the sandbox contract.
 	agentVersion, contractResolution = s.applySandboxHarnessEvidence(conn.Name(), agentVersion, setupOpts.AgentExecutable, contractResolution)
@@ -7157,6 +7160,7 @@ func (s *Sidecar) connectorSetupOptsChecked(conn connector.Connector, apiToken, 
 	// accepted harness version and contract, so every caller of this helper
 	// (the setup paths, application protection) sees one consistent evidence
 	// base, and the hook contract lock records it.
+	agentVersion, contractResolution = s.applyClaudeDesktopEngineEvidence(conn.Name(), agentVersion, contractResolution)
 	agentVersion, contractResolution = s.applySandboxHarnessEvidence(conn.Name(), agentVersion, agentExecutable, contractResolution)
 	setupTokens, err := connectorSetupTokensFor(s.currentConfig().DataDir, conn, apiToken, managed.IsManagedEnterprise(s.currentConfig().DeploymentMode))
 	if err != nil {

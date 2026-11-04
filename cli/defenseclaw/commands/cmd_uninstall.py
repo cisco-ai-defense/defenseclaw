@@ -379,6 +379,9 @@ def uninstall_cmd(
     plan = _with_listed_sandboxes(plan, stop_sandboxes)
     ux.banner("DefenseClaw Uninstall")
     _render_plan(plan, dry_run=dry_run)
+    cowork_plugin = _cowork_plugin_built(plan)
+    if cowork_plugin and dry_run:
+        ux.echo(f"  • the Cowork plugin stays in your Claude account: {_COWORK_REMOVAL_STEP}")
 
     if dry_run:
         refusal = _open_tui_refusal(plan) or _running_sandboxes_refusal(plan)
@@ -407,7 +410,22 @@ def uninstall_cmd(
     if plan.connectors:
         # The plan said so; the end says it again, once it is true (GAP-0255).
         ux.warn("Close any agent session still open: it runs without DefenseClaw's hooks now.")
+    if cowork_plugin:
+        ux.warn(f"DefenseClaw cannot remove its Cowork plugin from your Claude account: {_COWORK_REMOVAL_STEP}")
     _render_kept_and_next_steps(plan)
+
+
+_COWORK_REMOVAL_STEP = (
+    "remove it in Claude Desktop (Customize > Plugins, then the ... menu > Remove). "
+    "Until then Cowork keeps working and shows a reminder on each call."
+)
+
+
+def _cowork_plugin_built(plan: UninstallPlan) -> bool:
+    """Whether setup cowork built an account plugin from this data dir."""
+    from defenseclaw import cowork
+
+    return bool(plan.data_dir) and os.path.exists(cowork.state_path(plan.data_dir))
 
 
 _NATIVE_OTEL_READ_LIMIT = 1024 * 1024

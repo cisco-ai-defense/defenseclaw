@@ -36,6 +36,12 @@ _CONNECTOR_SECTION_REFERENCE_PAGES = {"capability-matrix", "compatibility", "ope
 # Windows statement instead.
 _CONNECTOR_SECTION_ROUTE_PAGES = {"agent-gateway"}
 
+# Agent surfaces a connector covers, each with its connector (cowork-1-0-8).
+# Claude Cowork runs Claude Code hooks from the engine Claude Desktop bundles:
+# it has no setup connector and no platform status of its own, so its page
+# points at its connector's page, which holds the status rows.
+_CONNECTOR_SECTION_SURFACE_PAGES = {"cowork": "claudecode"}
+
 
 def _active_connector_docs() -> dict[str, Path]:
     """The per-connector reference pages, which carry the platform status table."""
@@ -53,6 +59,7 @@ def _active_connector_docs() -> dict[str, Path]:
             and not item.startswith("---")
             and item not in _CONNECTOR_SECTION_REFERENCE_PAGES
             and item not in _CONNECTOR_SECTION_ROUTE_PAGES
+            and item not in _CONNECTOR_SECTION_SURFACE_PAGES
         ):
             connector_ids.append(item)
     return {connector_id: reference_dir / f"{connector_id}.mdx" for connector_id in connector_ids}
@@ -98,6 +105,22 @@ def test_windows_guide_has_unambiguous_platform_claims_and_powershell_examples()
     assert text.count("```powershell") >= 8
     assert "OpenShell sandboxes run on Linux and macOS only" in text
     assert "enterprise hooks status" in enterprise_deployment
+
+
+def test_connector_surface_pages_point_at_their_connector() -> None:
+    connectors_dir = ROOT / "docs-site/content/docs/connectors"
+    navigation = json.loads((connectors_dir / "meta.json").read_text(encoding="utf-8"))["pages"]
+    connector_docs = _active_connector_docs()
+    for surface, connector in sorted(_CONNECTOR_SECTION_SURFACE_PAGES.items()):
+        assert surface in navigation, surface
+        # A surface is not a setup connector: its connector's page holds the
+        # per-OS status rows, kept in parity by the canonical source test.
+        assert surface not in WINDOWS_CONNECTOR_SUPPORT, surface
+        assert connector in connector_docs, (surface, connector)
+        text = " ".join((connectors_dir / f"{surface}.mdx").read_text(encoding="utf-8").split())
+        assert "## Platform support" not in text, surface
+        assert f"](/docs/connectors/{connector})" in text, surface
+        assert "is a surface of that connector, not a connector of its own" in text, surface
 
 
 def test_connector_route_pages_are_listed_and_state_their_windows_limit() -> None:

@@ -6292,6 +6292,22 @@ def _unversioned_probe_next_step(probe_error: str) -> str:
     return ""
 
 
+def _version_scan_persists(connector: str) -> bool:
+    """Whether a setup version probe of *connector* republishes the discovery cache.
+
+    Native Windows OpenCode/Amp setup immediately records a protected,
+    connector-scoped executable selection, so its admission scan does not
+    need to republish the process-wide discovery cache. Leaving that cache
+    untouched prevents an unrelated connector whose CLI is temporarily
+    undiscoverable from losing already-sealed version and contract status
+    when the gateway restarts every active connector.
+    """
+    connector = normalize_connector(connector)
+    return connector != "codex" and not (
+        connector in {"opencode", "amp"} and platform_support.host_os() == "windows"
+    )
+
+
 def _check_connector_version_supported_for_setup(
     connector: str,
     *,
@@ -6331,17 +6347,7 @@ def _check_connector_version_supported_for_setup(
             use_cache=False,
             refresh=True,
             data_dir=data_dir,
-            # Native Windows OpenCode/Amp setup immediately records a protected,
-            # connector-scoped executable selection below.  Its admission scan
-            # therefore does not need to republish the process-wide discovery
-            # cache.  Leaving that cache untouched prevents an unrelated
-            # connector whose CLI is temporarily undiscoverable from losing
-            # already-sealed version and contract status when the gateway
-            # restarts every active connector.
-            persist_cache=connector != "codex" and not (
-                connector in {"opencode", "amp"}
-                and platform_support.host_os() == "windows"
-            ),
+            persist_cache=_version_scan_persists(connector),
         )
         signal = disc.agents.get(connector)
     except Exception as exc:
@@ -6459,6 +6465,10 @@ def _check_connector_version_supported_for_setup(
                 ux.warn(did_not_run or _connector_not_detected_message(label))
         return True
 
+    if emit and getattr(signal, "source", "") == agent_discovery.SOURCE_CLAUDE_DESKTOP:
+        # GAP-0036: a Desktop-only account. Say which Claude Code was read.
+        cli_state = "the claude CLI did not answer" if signal.skipped_binaries else "no claude CLI was found"
+        ux.subhead(f"{label}: using Claude Desktop's Claude Code engine {signal.binary_path} ({cli_state}).")
     if compatibility.status == STATUS_KNOWN:
         if emit and compatibility.untested:
             ux.ok(
@@ -14521,6 +14531,13 @@ for _observability_connector in (
     "kiro",
 ):
     setup.add_command(_make_observability_setup_command(_observability_connector))
+
+
+# Claude Cowork has no connector of its own: its account plugin runs the
+# Claude Code connector's hook (cmd_setup_cowork).
+from defenseclaw.commands.cmd_setup_cowork import setup_cowork as _setup_cowork  # noqa: E402
+
+setup.add_command(_setup_cowork)
 
 
 # Two orthogonal facts about a connector — split deliberately so the

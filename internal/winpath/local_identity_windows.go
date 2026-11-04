@@ -66,7 +66,7 @@ func walkLocalPath(path string) (identity LocalFileIdentity, next string, err er
 		return identity, "", fmt.Errorf("%w: %s", ErrPathNotLocal, path)
 	}
 	drive := strings.ToUpper(abs[:1]) + ":"
-	if target, err := singleDOSDeviceTarget(drive); err != nil || !localDiskDevice(target) {
+	if target, err := effectiveDOSDeviceTarget(drive); err != nil || !localDiskDevice(target) {
 		return identity, "", fmt.Errorf("%w: drive %s is not a local disk volume", ErrPathNotLocal, drive)
 	}
 	handle, err := openLocalDriveRoot(drive + `\`)

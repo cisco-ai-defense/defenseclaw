@@ -10,11 +10,16 @@ import (
 	"fmt"
 	"path/filepath"
 	"strings"
+	"unsafe"
 
 	"golang.org/x/sys/windows"
 )
 
 const maxMountedVolumeUTF16 = 32 * 1024
+
+// finalPathVolumeNameNT is VOLUME_NAME_NT of GetFinalPathNameByHandle: the
+// path starts with the kernel device name (\Device\HarddiskVolumeN).
+const finalPathVolumeNameNT = 0x2
 
 // MountedVolumeIdentity is the mount-manager identity of a trusted local
 // drive. DeviceTarget is the kernel device object backing both the effective
@@ -77,17 +82,19 @@ func ValidateFixedNTFSMountedPath(path string) (MountedVolumeIdentity, error) {
 		return identity, fmt.Errorf("drive %s is not an exact mount-manager path for %s", root, volumeName)
 	}
 
-	driveTarget, err := singleDOSDeviceTarget(strings.TrimSuffix(root, `\`))
+	driveTarget, err := effectiveDOSDeviceTarget(strings.TrimSuffix(root, `\`))
 	if err != nil {
 		return identity, fmt.Errorf("resolve effective DOS device for %s: %w", root, err)
 	}
-	globalTarget, err := singleDOSDeviceTarget(`Global\` + strings.TrimSuffix(root, `\`))
+	globalTarget, err := globalDOSDeviceTarget(strings.TrimSuffix(root, `\`))
 	if err != nil {
 		return identity, fmt.Errorf("resolve global DOS device for %s: %w", root, err)
 	}
-	volumeTarget, err := singleDOSDeviceTarget(
-		strings.TrimSuffix(strings.TrimPrefix(volumeName, `\\?\`), `\`),
-	)
+	volumeDevice := strings.TrimSuffix(strings.TrimPrefix(volumeName, `\\?\`), `\`)
+	volumeTarget, err := singleDOSDeviceTarget(volumeDevice)
+	if errors.Is(err, windows.ERROR_ACCESS_DENIED) {
+		volumeTarget, err = globalDOSDeviceTarget(volumeDevice)
+	}
 	if err != nil {
 		return identity, fmt.Errorf("resolve DOS device for %s: %w", volumeName, err)
 	}
@@ -266,6 +273,113 @@ func parseMultiSZ(buffer []uint16) []string {
 		start = end + 1
 	}
 	return values
+}
+
+// effectiveDOSDeviceTarget returns the kernel device of drive ("C:") as this
+// process resolves it: QueryDosDevice, or, when the token cannot read its
+// logon session DOS-device directory, the device an open of the drive root
+// reaches (effectiveDriveTargetByHandle).
+func effectiveDOSDeviceTarget(drive string) (string, error) {
+	target, err := singleDOSDeviceTarget(drive)
+	if !errors.Is(err, windows.ERROR_ACCESS_DENIED) {
+		return target, err
+	}
+	return effectiveDriveTargetByHandle(drive + `\`)
+}
+
+// effectiveDriveTargetByHandle returns the kernel device that an open of
+// root reaches through this process DOS-device map, for a token that may not
+// query its logon session DOS-device directory. That is the case for a token
+// whose Administrators SID is deny-only in a logon session an administrator
+// token created (runas /trustlevel:0x20000 of the built-in Administrator, a
+// Safer or other filtered token): the directory grants Administrators, so
+// QueryDosDevice of the drive fails with access denied, while an open still
+// resolves the name, with traverse checking bypassed (cowork-1-0-8 GAP-0052).
+// The open resolves a per-logon alias exactly as QueryDosDevice would, so a
+// drive alias still shows as a device other than the global one and is
+// refused by the comparison in ValidateFixedNTFSMountedPath. Only a token
+// that can write that directory can add an alias to it, and that token is
+// an administrator.
+func effectiveDriveTargetByHandle(root string) (string, error) {
+	handle, err := openMountedVolumeRoot(root)
+	if err != nil {
+		return "", err
+	}
+	defer windows.CloseHandle(handle)
+	size := uint32(windows.MAX_PATH + 1)
+	for {
+		if size > maxMountedVolumeUTF16 {
+			return "", fmt.Errorf("final path exceeds %d UTF-16 code units", maxMountedVolumeUTF16)
+		}
+		buffer := make([]uint16, size)
+		n, err := windows.GetFinalPathNameByHandle(handle, &buffer[0], size, finalPathVolumeNameNT)
+		if err != nil {
+			return "", err
+		}
+		if n >= size {
+			size = n + 1
+			continue
+		}
+		// The volume root: \Device\HarddiskVolumeN\ (one trailing separator).
+		target := strings.TrimSuffix(windows.UTF16ToString(buffer[:n]), `\`)
+		if !strings.HasPrefix(strings.ToUpper(target), `\DEVICE\`) || strings.Contains(target[len(`\Device\`):], `\`) {
+			return "", fmt.Errorf("unexpected final path %q for %s", target, root)
+		}
+		return target, nil
+	}
+}
+
+// globalDOSDeviceTarget returns the target of the global DOS device name
+// (\GLOBAL??\<name>). QueryDosDevice reaches it through the Global link of
+// the logon session DOS-device directory, which a token with Administrators
+// deny-only cannot read in a session an administrator token created
+// (GAP-0052); the object manager directory \GLOBAL?? itself is readable by
+// every account, so the link is then opened there directly.
+func globalDOSDeviceTarget(name string) (string, error) {
+	target, err := singleDOSDeviceTarget(`Global\` + name)
+	if !errors.Is(err, windows.ERROR_ACCESS_DENIED) {
+		return target, err
+	}
+	return globalSymbolicLinkTarget(name)
+}
+
+var (
+	procNtOpenSymbolicLinkObject  = windows.NewLazySystemDLL("ntdll.dll").NewProc("NtOpenSymbolicLinkObject")
+	procNtQuerySymbolicLinkObject = windows.NewLazySystemDLL("ntdll.dll").NewProc("NtQuerySymbolicLinkObject")
+)
+
+const symbolicLinkQuery = 0x0001 // SYMBOLIC_LINK_QUERY
+
+func globalSymbolicLinkTarget(name string) (string, error) {
+	if name == "" || strings.ContainsAny(name, `\/`) || strings.IndexByte(name, 0) >= 0 {
+		return "", fmt.Errorf("invalid DOS device name %q", name)
+	}
+	objectName, err := windows.NewNTUnicodeString(`\GLOBAL??\` + name)
+	if err != nil {
+		return "", err
+	}
+	attributes := windows.OBJECT_ATTRIBUTES{ObjectName: objectName, Attributes: windows.OBJ_CASE_INSENSITIVE}
+	attributes.Length = uint32(unsafe.Sizeof(attributes))
+	var link windows.Handle
+	if status, _, _ := procNtOpenSymbolicLinkObject.Call(
+		uintptr(unsafe.Pointer(&link)), symbolicLinkQuery, uintptr(unsafe.Pointer(&attributes)),
+	); windows.NTStatus(status) != windows.STATUS_SUCCESS {
+		return "", fmt.Errorf("open \\GLOBAL??\\%s: %w", name, windows.NTStatus(status))
+	}
+	defer windows.CloseHandle(link)
+	buffer := make([]uint16, windows.MAX_PATH+1)
+	target := windows.NTUnicodeString{MaximumLength: uint16(len(buffer) * 2), Buffer: &buffer[0]}
+	var returned uint32
+	if status, _, _ := procNtQuerySymbolicLinkObject.Call(
+		uintptr(link), uintptr(unsafe.Pointer(&target)), uintptr(unsafe.Pointer(&returned)),
+	); windows.NTStatus(status) != windows.STATUS_SUCCESS {
+		return "", fmt.Errorf("query \\GLOBAL??\\%s: %w", name, windows.NTStatus(status))
+	}
+	value := target.String()
+	if value == "" || !strings.HasPrefix(strings.ToUpper(value), `\DEVICE\`) || strings.IndexByte(value, 0) >= 0 {
+		return "", fmt.Errorf("expected one kernel device target for %s, got %q", name, value)
+	}
+	return value, nil
 }
 
 func openMountedVolumeRoot(root string) (windows.Handle, error) {
