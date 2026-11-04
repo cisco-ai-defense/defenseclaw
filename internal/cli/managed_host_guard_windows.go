@@ -52,6 +52,13 @@ import (
 // (install\pending.json) stands in for it, so the target enumeration and the
 // helpers the install runs apply the Secure Client rules, as they already do
 // for Repair and Upgrade.
+func init() {
+	// The audit store, judge-body and hook token walks accept an inherited
+	// Users create-child entry only on a verified Secure Client host
+	// (managed.AcceptInheritedCreateChild, GAP-0566).
+	managed.SecureClientHostVerified = func() bool { return secureClientHost() }
+}
+
 var secureClientHost = func() bool {
 	return classifySecureClientHost(secureClientClassificationChecks{
 		roots:              winpath.TrustedEnterpriseRoots,
