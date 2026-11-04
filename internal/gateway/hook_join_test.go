@@ -153,6 +153,8 @@ func TestManagedHookDecisionLabelsTheToolCall(t *testing.T) {
 	service, err := sensor.New(sensor.Options{
 		Config:   config.AIRuntimeConfig{Enabled: true, EnableHostPlane: true, MinRiskToReport: 1},
 		Acquirer: acquirer,
+		// A managed host: hook decisions are machine policy.
+		ManagedHooks: true,
 	})
 	if err != nil {
 		t.Fatalf("sensor.New: %v", err)

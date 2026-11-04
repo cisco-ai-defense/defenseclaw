@@ -411,6 +411,11 @@ func (s *tetragonSource) handleBatch(batch KernelBatch) {
 		if event.Kind == KindExec && s.duplicateOfNative(event.PID, now) {
 			continue
 		}
+		if event.Kind == KindExec && event.Exe != "" {
+			// The helper reads the image while the event is fresh, only if
+			// the pid still runs the binary the event names.
+			event.ImageSHA256, event.ImageVersion = tetragonClientImage(event.PID, event.Exe, eventAccount(event))
+		}
 		if event.Kind == KindFileRead || event.Kind == KindFileWrite {
 			s.noteTetragonFile(event, now)
 		}

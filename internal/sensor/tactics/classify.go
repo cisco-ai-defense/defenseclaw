@@ -22,8 +22,10 @@
 package tactics
 
 import (
+	"encoding/json"
 	"regexp"
 	"strings"
+	"unicode"
 
 	"github.com/defenseclaw/defenseclaw/internal/lazyregexp"
 )
@@ -34,12 +36,15 @@ import (
 // free of the acquisition layer and remains a pure function over data. The
 // service does the two-line translation.
 type Observation struct {
-	Kind    string // exec | exit | file_read | file_write | identity | privilege
-	PID     int
-	Name    string
-	Cmdline string
-	Path    string
-	Detail  string
+	Kind string // exec | exit | file_read | file_write | identity | privilege
+	PID  int
+	Name string
+	// ClaudeClient is set only when the exec image's digest, read by the
+	// event's source at exec time, is a signed Claude Code release image.
+	ClaudeClient bool
+	Cmdline      string
+	Path         string
+	Detail       string
 }
 
 // Kind values, mirroring plane.Kind.
@@ -299,7 +304,8 @@ func classifyExec(observation Observation, indicators IndicatorSet) (Match, bool
 			}, true
 		}
 	}
-	if localMCPCommand.MatchString(cmdline) {
+	if localMCPCommand.MatchString(cmdline) &&
+		(indicators.KeepClientMCP || !observation.ClaudeClient || !claudeClientOnlyMCPReference(cmdline)) {
 		return Match{
 			Tactic: LocalInference, SignalID: "agent_local_mcp_server",
 			Title:  "agent started a local MCP tool server",
@@ -317,6 +323,90 @@ func classifyExec(observation Observation, indicators IndicatorSet) (Match, bool
 		}, true
 	}
 	return Match{}, false
+}
+
+// claudeClientOnlyMCPReference checks, for a Claude Code client image, the
+// argument that owns an MCP name. A configuration value or print prompt may
+// name a package; a separate positional package remains a server invocation.
+func claudeClientOnlyMCPReference(cmdline string) bool {
+	args, valid := claudeCommandArgs(cmdline)
+	if !valid || len(args) == 0 || localMCPCommand.MatchString(args[0]) {
+		return false
+	}
+	configValues := false
+	for i := 1; i < len(args); i++ {
+		arg := args[i]
+		if arg == "--" {
+			configValues = false
+			continue
+		}
+		if configValues {
+			if !strings.HasPrefix(arg, "-") {
+				continue
+			}
+			configValues = false
+		}
+		switch {
+		case arg == "--mcp-config":
+			configValues = true // Values continue until the next option.
+		case strings.HasPrefix(arg, "--mcp-config="):
+			// The value is attached to the option.
+		case arg == "-p" || arg == "--print":
+			return true // Remaining positional text is the client's prompt.
+		case localMCPCommand.MatchString(arg):
+			return false
+		}
+	}
+	return true
+}
+
+// claudeCommandArgs keeps a JSON configuration value together after the
+// acquisition layer has joined argv. An incomplete JSON value is ambiguous.
+func claudeCommandArgs(cmdline string) ([]string, bool) {
+	var args []string
+	configValues := false
+	appendArg := func(arg string) {
+		args = append(args, arg)
+		if arg == "--mcp-config" {
+			configValues = true
+		} else if strings.HasPrefix(arg, "-") {
+			configValues = false
+		}
+	}
+	for cmdline != "" {
+		cmdline = strings.TrimLeftFunc(cmdline, unicode.IsSpace)
+		if cmdline == "" {
+			break
+		}
+		prefix := ""
+		value := cmdline
+		if strings.HasPrefix(value, "--mcp-config={") {
+			prefix = "--mcp-config="
+			value = value[len(prefix):]
+		}
+		if strings.HasPrefix(value, "{") && (configValues || prefix != "") {
+			var raw json.RawMessage
+			decoder := json.NewDecoder(strings.NewReader(value))
+			if err := decoder.Decode(&raw); err != nil {
+				return nil, false
+			}
+			end := int(decoder.InputOffset())
+			if end < len(value) && !unicode.IsSpace(rune(value[end])) {
+				return nil, false
+			}
+			appendArg(prefix + value[:end])
+			cmdline = value[end:]
+			continue
+		}
+		end := strings.IndexFunc(cmdline, unicode.IsSpace)
+		if end < 0 {
+			appendArg(cmdline)
+			break
+		}
+		appendArg(cmdline[:end])
+		cmdline = cmdline[end:]
+	}
+	return args, true
 }
 
 // containsAny returns the first fragment present in value.

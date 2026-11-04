@@ -96,11 +96,13 @@ type Resolver interface {
 
 // Options configure a Service.
 type Options struct {
-	Config    config.AIRuntimeConfig
-	Inventory InventoryProvider
-	Resolver  Resolver
-	Providers *catalog.Catalog
-	Platform  platform.Platform
+	Config config.AIRuntimeConfig
+	// SecureClient retains the existing Plane C client classification profile.
+	SecureClient bool
+	Inventory    InventoryProvider
+	Resolver     Resolver
+	Providers    *catalog.Catalog
+	Platform     platform.Platform
 	// HomeDirs are the user homes whose credential and agent-config paths the
 	// host plane watches. Empty means the daemon's own $HOME, which under
 	// launchd or a Windows service is not a real user's -- the caller should
@@ -115,6 +117,11 @@ type Options struct {
 	// Owners are the account lookups that attribute a finding whose process
 	// owner the probe could not read. The zero value skips them.
 	Owners OwnerLookups
+	// ManagedHooks is set on a managed host, where every agent runs machine
+	// policy hooks, so a tool call no hook decision covers is a fact
+	// (hook_seen=false). Elsewhere (the Cowork VM, per-user installs) hooks
+	// are not machine policy and no hook_seen label is given.
+	ManagedHooks bool
 	// Acquirer is where the privileged reads come from: directly from this
 	// process, or brokered by a helper that holds the privilege the gateway
 	// deliberately does not. Defaults to reading directly.
@@ -311,20 +318,27 @@ func New(options Options) (*Service, error) {
 		if selected != "c" {
 			continue
 		}
+		indicators := tactics.Indicators()
+		indicators.KeepClientMCP = options.SecureClient
+		if options.SecureClient {
+			// This profile never uses a client image digest.
+			plane.DisableClientImageDigests()
+		}
 		service.hostPlane = newHostPlane(
 			options.NewPlaneSource(options.HomeDirs),
 			service.tracker,
-			tactics.Indicators(),
+			indicators,
 			options.Config.EffectiveChainWindow(),
 			scoring.KillChainMinStages,
 		)
 	}
 	if service.hostPlane != nil && options.Acquirer.Brokered() {
-		// A brokered plane runs on a managed host, where the hooks that
-		// matter are machine policy every agent runs: a tool call no
-		// decision covers is a fact (hook_seen=false), not a missing
-		// install.
-		service.hostPlane.hooks = newHookRing(hookRingSize, hookRingWindow)
+		if options.ManagedHooks {
+			// On a managed host the hooks that matter are machine policy
+			// every agent runs: a tool call no decision covers is a fact
+			// (hook_seen=false), not a missing install.
+			service.hostPlane.hooks = newHookRing(hookRingSize, hookRingWindow)
+		}
 		if reader, ok := options.Acquirer.(kernelStatusReader); ok {
 			service.kernelReader = reader
 		}

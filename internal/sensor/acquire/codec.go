@@ -157,6 +157,10 @@ type wireEvent struct {
 	PolicyMessage  string   `json:"policy_message,omitempty"`
 	Target         string   `json:"target,omitempty"`
 	Count          int      `json:"count,omitempty"`
+	// The exec-time image identity the helper read (plane.Event); a gateway
+	// that is not root cannot read another account's image itself.
+	ImageSHA256  string `json:"image_sha256,omitempty"`
+	ImageVersion string `json:"image_version,omitempty"`
 }
 
 func encodeEvent(event plane.Event) wireEvent {
@@ -173,6 +177,7 @@ func encodeEvent(event plane.Event) wireEvent {
 		PolicyOwner: event.PolicyOwner, KernelHookType: event.KernelHookType, KernelFunction: event.KernelFunction,
 		KernelAction: event.KernelAction, PolicyMode: event.PolicyMode, PolicyTags: copyStrings(event.PolicyTags),
 		PolicyMessage: event.PolicyMessage, Target: event.Target, Count: event.Count,
+		ImageSHA256: event.ImageSHA256, ImageVersion: event.ImageVersion,
 	}
 	if !event.At.IsZero() {
 		out.AtUnixNano = event.At.UnixNano()
@@ -194,6 +199,7 @@ func decodeEvent(event wireEvent) plane.Event {
 		PolicyOwner: event.PolicyOwner, KernelHookType: event.KernelHookType, KernelFunction: event.KernelFunction,
 		KernelAction: event.KernelAction, PolicyMode: event.PolicyMode, PolicyTags: copyStrings(event.PolicyTags),
 		PolicyMessage: event.PolicyMessage, Target: event.Target, Count: event.Count,
+		ImageSHA256: event.ImageSHA256, ImageVersion: event.ImageVersion,
 	}
 	if event.AtUnixNano != 0 {
 		out.At = time.Unix(0, event.AtUnixNano)

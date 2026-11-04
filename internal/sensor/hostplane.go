@@ -80,8 +80,11 @@ type hostPlane struct {
 	source     plane.Source
 	tracker    *agentchain.Tracker
 	indicators tactics.IndicatorSet
-	window     time.Duration
-	minStages  int
+	// clientChecksums reads the signed release checksums of a Claude Code
+	// version, which an exec's source-read image digest is compared with.
+	clientChecksums func(string) ([][32]byte, bool)
+	window          time.Duration
+	minStages       int
 	// hooks holds the managed hook decisions tool-call processes are joined
 	// against; nil where decisions are not joined (not a managed host).
 	hooks *hookRing
@@ -175,7 +178,8 @@ func newHostPlane(
 ) *hostPlane {
 	return &hostPlane{
 		source: source, tracker: tracker, indicators: indicators,
-		window: window, minStages: minStages,
+		clientChecksums: claudeReleases.checksums,
+		window:          window, minStages: minStages,
 		sessions: make(map[hostSessionKey]*agentchain.Session),
 		meta:     make(map[hostSessionKey]*sessionMeta),
 		joins:    newToolJoins(maxToolJoins),
@@ -332,13 +336,36 @@ func (h *hostPlane) handle(event plane.Event) {
 		h.recordKernelEvent(event, lineage, attributed)
 	}
 
+	cmdline := commandWordCmdline(event.Cmdline)
+	// The client identity comes from the exec event alone: the image digest
+	// its source read at exec time, checked against the signed release
+	// manifest. Nothing here reads the process, its image or its account,
+	// which an unprivileged gateway cannot and an exited process does not
+	// allow. The lineage gate runs first, and the manifest lookup never
+	// waits: an attributed client exec of a version not yet cached starts
+	// its fetch, and is classified as before until the manifest is in.
+	claudeClient := false
+	if event.Kind == plane.KindExec && !h.indicators.KeepClientMCP && event.ImageVersion != "" && h.clientChecksums != nil {
+		if !looked {
+			lineage, attributed = h.tracker.Lineage(event.PID, event.ExecID)
+			looked = true
+		}
+		if attributed {
+			checksums, _ := h.clientChecksums(event.ImageVersion)
+			lower := strings.ToLower(cmdline)
+			claudeClient = event.ImageSHA256 != "" &&
+				(strings.Contains(lower, "mcp") || strings.Contains(lower, "@modelcontextprotocol/")) &&
+				signedClaudeRelease(event.ImageSHA256, checksums)
+		}
+	}
 	match, ok := tactics.Classify(tactics.Observation{
-		Kind:    string(event.Kind),
-		PID:     event.PID,
-		Name:    event.Name,
-		Cmdline: commandWordCmdline(event.Cmdline),
-		Path:    event.Path,
-		Detail:  event.Detail,
+		Kind:         string(event.Kind),
+		PID:          event.PID,
+		Name:         event.Name,
+		ClaudeClient: claudeClient,
+		Cmdline:      cmdline,
+		Path:         event.Path,
+		Detail:       event.Detail,
 	}, h.indicators)
 	if !ok {
 		return

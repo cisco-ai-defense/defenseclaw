@@ -55,7 +55,16 @@ type esAuditToken struct {
 }
 
 type esFile struct {
-	Path string `json:"path"`
+	Path          string `json:"path"`
+	PathTruncated bool   `json:"path_truncated"`
+	// Stat is the exec-time stat of the file; darwinClientImage binds the
+	// image it hashes to it.
+	Stat struct {
+		Dev     int64  `json:"st_dev"`
+		Ino     uint64 `json:"st_ino"`
+		Size    int64  `json:"st_size"`
+		Changed string `json:"st_ctimespec"`
+	} `json:"stat"`
 }
 
 type esEvent struct {
@@ -154,6 +163,9 @@ func translateES(message esMessage, watched []string, owner func(uid int) string
 			base.ResponsiblePID = base.PPID
 		}
 		base.Name = filepath.Base(payload.Exec.Target.Executable.Path)
+		if !payload.Exec.Target.Executable.PathTruncated {
+			base.Exe = payload.Exec.Target.Executable.Path
+		}
 		base.Cmdline = strings.Join(payload.Exec.Args, " ")
 		// The new image's account, which a setuid target changes.
 		base.UID, base.User = esAccount(payload.Exec.Target.AuditToken, owner)

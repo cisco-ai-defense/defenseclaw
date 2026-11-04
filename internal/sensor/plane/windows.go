@@ -119,6 +119,7 @@ func (s *windowsSource) Start(ctx context.Context) error {
 	newest, err := newestSecurityRecordID()
 	if err == nil {
 		reader := newSecurityReader(subscribeSecurity, s.buffer, newest)
+		reader.image = windowsClientImage
 		if err = reader.openAll(); err == nil {
 			s.reader = reader
 		}

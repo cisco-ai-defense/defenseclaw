@@ -25,12 +25,13 @@ func (source *coworkMetricHealthSource) DeliveryHealthSnapshot() delivery.Health
 
 func TestDestinationHealthMetricExportCountsStaySignalScoped(t *testing.T) {
 	for _, tc := range []struct {
-		name       string
-		secure     bool
-		wantReject uint64
+		name   string
+		secure bool
+		want   delivery.Counters
 	}{
-		{"standard profile", false, 0},
-		{"Secure Client twin", true, 210},
+		// The destination total covers logs and traces only, so it balances.
+		{"standard profile", false, delivery.Counters{}},
+		{"Secure Client twin", true, delivery.Counters{Accepted: 397, Delivered: 187, Rejected: 210}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			dependencies := newRuntimeTestDependencies(t)
@@ -79,11 +80,11 @@ func TestDestinationHealthMetricExportCountsStaySignalScoped(t *testing.T) {
 				t.Fatal(err)
 			}
 			row := destinationHealthByName(t, snapshot, "collector")
-			if row.Counters.Rejected != tc.wantReject || len(row.Sources) != 1 ||
+			if row.Counters != tc.want || len(row.Sources) != 1 ||
 				row.Sources[0].Signal != string(observability.SignalMetrics) ||
-				row.Sources[0].Counters.Rejected != 210 {
-				t.Fatalf("destination rejected=%d, metric rejected=%+v, want destination=%d metric=210",
-					row.Counters.Rejected, row.Sources, tc.wantReject)
+				row.Sources[0].Counters != (delivery.Counters{Accepted: 397, Delivered: 187, Rejected: 210}) {
+				t.Fatalf("destination counters=%+v, metric source=%+v, want destination=%+v",
+					row.Counters, row.Sources, tc.want)
 			}
 		})
 	}

@@ -118,14 +118,17 @@ func (s *Sidecar) runAIRuntime(ctx context.Context) error {
 		return ctx.Err()
 	}
 
-	acquirer := ownAccountProcesses(activeConfig, chooseAcquirer(activeConfig))
+	acquirer := ownAccountProcesses(activeConfig, chooseAcquirer(ctx, activeConfig))
 	if acquirer.Brokered() {
 		defer inventory.SetProcessAccountLookup(brokeredProcessAccounts(ctx, acquirer))()
 	}
 	service, err := sensor.New(sensor.Options{
-		Config:    runtimeConfig,
-		Acquirer:  acquirer,
-		Inventory: discoveryCorrelationSource{sidecar: s},
+		Config:       runtimeConfig,
+		SecureClient: activeConfig.SecureClientIntegration(),
+		Acquirer:     acquirer,
+		Inventory:    discoveryCorrelationSource{sidecar: s},
+		// The hook ring labels hook_seen only where hooks are machine policy.
+		ManagedHooks: managed.IsManagedEnterprise(activeConfig.DeploymentMode),
 		// The same home list the inventory scanner walks. Under launchd or a
 		// Windows service the daemon's own $HOME is not a real user's, so the
 		// host plane would watch the wrong paths without this; in
@@ -468,8 +471,13 @@ func brokeredProcessAccounts(ctx context.Context, acquirer acquire.Acquirer) fun
 // to this account's processes: other accounts' argv must not reach this
 // user's findings and telemetry (GAP-1105). Managed and standalone enterprise
 // gateways keep the machine-wide view.
+//
+// A gateway brokering through a root sensor helper keeps the helper's
+// machine-wide view too: root started that helper for this account as the
+// machine's sensor, as the Claude Cowork VM package does (packaging/cowork-vm).
 func ownAccountProcesses(activeConfig *config.Config, acquirer acquire.Acquirer) acquire.Acquirer {
-	if managed.IsManagedEnterprise(activeConfig.DeploymentMode) || activeConfig.StandaloneEnterprise() {
+	if managed.IsManagedEnterprise(activeConfig.DeploymentMode) || activeConfig.StandaloneEnterprise() ||
+		acquirer.Brokered() {
 		return acquirer
 	}
 	name, _ := inventory.CurrentProcessOwner()
@@ -504,8 +512,9 @@ func (a ownerProcessAcquirer) Processes(ctx context.Context) ([]procprobe.Proces
 // what the planes need, so brokering is the only way it sees anything. An
 // unmanaged install is the operator's own process with whatever privilege
 // they granted it, where inserting a broker would add a failure mode and buy
-// nothing. There is no setting: the managed socket path is part of what the
-// installer owns, and an unmanaged gateway has no helper to ask.
+// nothing. There is no config setting: the managed socket path is part of
+// what the installer owns, and an unmanaged gateway normally has no helper to
+// ask.
 //
 // Broker only where this process was de-privileged on purpose and a helper is
 // therefore installed. Both halves matter.
@@ -521,10 +530,23 @@ func (a ownerProcessAcquirer) Processes(ctx context.Context) ([]procprobe.Proces
 // running without sudo also lacks wide coverage, and there is no helper
 // installed for it to ask. It should read what it can and report the
 // shortfall, not dial a socket nobody is serving.
-func chooseAcquirer(activeConfig *config.Config) acquire.Acquirer {
-	managedEnterprise := managed.IsManagedEnterprise(activeConfig.DeploymentMode)
-	if !managedEnterprise || acquire.NewLocal().WideCoverage() {
+//
+// One unmanaged case brokers: a de-privileged gateway whose service
+// environment names a root helper socket (DEFENSECLAW_SENSOR_HELPER_SOCKET),
+// as the Claude Cowork VM package does (packaging/cowork-vm/install.sh). The
+// variable only names the path: the gateway trusts it only when the socket and
+// every folder above it are root-owned and writable by root alone, and the
+// serving process is root on every connect (unmanagedHelperSocket). A per-user
+// install never sets it, and the helper accepts only the peer uids root allowed.
+func chooseAcquirer(ctx context.Context, activeConfig *config.Config) acquire.Acquirer {
+	if acquire.NewLocal().WideCoverage() {
 		return acquire.NewLocal()
 	}
-	return acquire.NewHelper(acquire.DefaultSocketPath(activeConfig.DataDir, managedEnterprise))
+	if managed.IsManagedEnterprise(activeConfig.DeploymentMode) {
+		return acquire.NewHelper(acquire.DefaultSocketPath(activeConfig.DataDir, true))
+	}
+	if socket := unmanagedHelperSocket(ctx); socket != "" {
+		return acquire.NewRootHelper(socket)
+	}
+	return acquire.NewLocal()
 }
