@@ -241,7 +241,11 @@ def test_local_stdio_scan_ends_child_on_success_or_timeout(
                 params = StdioServerParameters(
                     command=entry.command, args=entry.args, env=entry.env,
                 )
-                async with stdio_client(params):
+                # Pass the current stderr, as the product does
+                # (scanner/mcp.py): the default errlog is bound when
+                # mcp.client.stdio is first imported, which may be inside
+                # an earlier test's CliRunner stream that has no fileno.
+                async with stdio_client(params, errlog=sys.stderr):
                     deadline = time.monotonic() + 3
                     while not (child_pid_file.exists() and server_pid_file.exists()) and time.monotonic() < deadline:
                         await asyncio.sleep(0.02)
