@@ -35,11 +35,22 @@ func TestShellHookOutageDenyReasonsNameTheGatewayAndNextStep(t *testing.T) {
 			if connector == "antigravity" || connector == "copilot" {
 				wantCode = 0
 			}
-			checkOutageDenyReason(t, connector, code, wantCode, stdout, stderr,
+			fragments := []string{
 				"the DefenseClaw gateway service is not running on this computer",
 				"Try again in a moment",
-				"ask your administrator to start the DefenseClaw gateway service",
-				"enterprise_managed_gateway_not_running")
+				"enterprise_managed_gateway_not_running",
+			}
+			if connector == "antigravity" && (runtime.GOOS == "linux" || runtime.GOOS == "darwin") {
+				platform := "linux"
+				if runtime.GOOS == "darwin" {
+					platform = "macos"
+				}
+				fragments = append(fragments, "ask your administrator to check DefenseClaw", "enterprise "+platform+" status")
+			} else {
+				fragments = append(fragments, "ask your administrator to start the DefenseClaw gateway service")
+			}
+			checkOutageDenyReason(t, connector, code, wantCode, stdout, stderr,
+				fragments...)
 		})
 		t.Run(connector+"/per-user", func(t *testing.T) {
 			home := t.TempDir()
@@ -85,11 +96,10 @@ func TestGAP0494ManagedMacAntigravityOutageRenderAndBenignTwin(t *testing.T) {
 	render := resolveConnectorHookRender(opts, conn)
 	linux := shellHookSocketTransport(f.socket, os.Getuid(), managedSessionFactsBinary(opts), render.foreignGuard, conn.Name(), "linux")
 	mac := shellHookSocketTransport(f.socket, os.Getuid(), managedSessionFactsBinary(opts), render.foreignGuard, conn.Name(), "darwin")
-	wantLinux := strings.Replace(renderShellHookSocket(shellHookSocketTransportBlock, f.socket, os.Getuid()), "@FACTS@", "", 1)
-	wantLinux = strings.Replace(wantLinux, "@GUARD@", render.foreignGuard, 1)
-	if linux != wantLinux ||
+	if strings.Count(linux, "enterprise linux status") != 1 ||
+		strings.Contains(linux, "enterprise macos status") ||
 		strings.Contains(shellHookSocketTransport(f.socket, os.Getuid(), "", "", "copilot", "darwin"), "enterprise macos status") {
-		t.Fatal("the Linux or other connector stopped-service render changed")
+		t.Fatal("the Linux Antigravity or other connector stopped-service render has the wrong status instruction")
 	}
 	if (runtime.GOOS == "darwin" && render.socketTransport != mac) ||
 		(runtime.GOOS == "linux" && render.socketTransport != linux) {
@@ -134,6 +144,35 @@ func TestGAP0494ManagedMacAntigravityOutageRenderAndBenignTwin(t *testing.T) {
 		strings.Contains(stderr, "event-specific failure") {
 		t.Fatalf("managed macOS outage: code=%d stdout=%q stderr=%q parse=%v", code, stdout, stderr, err)
 	}
+}
+
+func TestGAP0494ManagedLinuxAntigravityInstalledShellAndBenignTwin(t *testing.T) {
+	if runtime.GOOS != "linux" {
+		t.Skip("Linux installed shell check")
+	}
+	requireShellHookToolsForTest(t)
+	f := newHookSocketFixture(t, "dc49l", nil)
+	call := hookArgvConnectorCase(t, "antigravity")
+	run := func() (int, string, string) {
+		return runStandaloneShellHook(t, f, NewAntigravityConnector(), call.script, call.args, call.stdin)
+	}
+	code, stdout, stderr := run()
+	var answer struct {
+		Decision string `json:"decision"`
+		Reason   string `json:"reason"`
+	}
+	if err := json.Unmarshal([]byte(stdout), &answer); err != nil || code != 0 || answer.Decision != "allow" {
+		t.Fatalf("ordinary managed call: code=%d stdout=%q stderr=%q parse=%v", code, stdout, stderr, err)
+	}
+	if err := os.Remove(f.socket); err != nil {
+		t.Fatal(err)
+	}
+	code, stdout, stderr = run()
+	checkOutageDenyReason(t, "antigravity", code, 0, stdout, stderr,
+		"the DefenseClaw gateway service is not running on this computer",
+		"Try again in a moment",
+		"enterprise linux status",
+		"enterprise_managed_gateway_not_running")
 }
 
 func checkOutageDenyReason(t *testing.T, connector string, code, wantCode int, stdout, stderr string, fragments ...string) {

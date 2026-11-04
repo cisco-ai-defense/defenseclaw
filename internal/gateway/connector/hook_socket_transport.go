@@ -91,13 +91,31 @@ API_TOKEN=
 // stopped), in the words the native hook uses for a stopped gateway service.
 // The socket-ownership text is only for a socket that exists with the wrong
 // owner (GAP-0581).
-const shellManagedGatewayStoppedText = "the DefenseClaw gateway service is not running on this computer. " +
-	"Try again in a moment; if this continues, ask your administrator to start the DefenseClaw gateway service. " +
-	"(enterprise_managed_gateway_not_running)"
+const shellManagedGatewayStoppedPrefix = "the DefenseClaw gateway service is not running on this computer. "
+const shellManagedGatewayStoppedCode = "(enterprise_managed_gateway_not_running)"
 
-const shellManagedGatewayStoppedMacAntigravityText = "the DefenseClaw gateway service is not running on this computer. " +
-	"Try again in a moment; if this continues, ask your administrator to check DefenseClaw on this computer: \\`enterprise macos status\\` names what to do. " +
-	"(enterprise_managed_gateway_not_running)"
+const shellManagedGatewayStoppedText = shellManagedGatewayStoppedPrefix +
+	"Try again in a moment; if this continues, ask your administrator to start the DefenseClaw gateway service. " +
+	shellManagedGatewayStoppedCode
+
+func shellManagedGatewayStoppedReason(connectorName, goos string) string {
+	if normalizeConnectorName(connectorName) != "antigravity" {
+		return shellManagedGatewayStoppedText
+	}
+	platform := ""
+	switch goos {
+	case "linux":
+		platform = "linux"
+	case "darwin":
+		platform = "macos"
+	}
+	if platform == "" {
+		return shellManagedGatewayStoppedText
+	}
+	return shellManagedGatewayStoppedPrefix +
+		"Try again in a moment; if this continues, ask your administrator to check DefenseClaw on this computer: \\`enterprise " + platform + " status\\` names what to do. " +
+		shellManagedGatewayStoppedCode
+}
 
 // shellHookSocketTransport renders shellHookSocketTransportBlock for the
 // socket path and the gateway service uid trusted beside root. The path is
@@ -114,9 +132,7 @@ func shellHookSocketTransport(socket string, serviceUID int, factsBinary, guard,
 		facts = "DEFENSECLAW_SESSION_FACTS_BIN=" + shellSingleQuote(factsBinary) + "\nexport DEFENSECLAW_SESSION_FACTS_BIN\n"
 	}
 	block := shellHookSocketTransportBlock
-	if goos == "darwin" && normalizeConnectorName(connectorName) == "antigravity" {
-		block = strings.Replace(block, shellManagedGatewayStoppedText, shellManagedGatewayStoppedMacAntigravityText, 1)
-	}
+	block = strings.Replace(block, shellManagedGatewayStoppedText, shellManagedGatewayStoppedReason(connectorName, goos), 1)
 	block = strings.Replace(renderShellHookSocket(block, socket, serviceUID), "@FACTS@", facts, 1)
 	return strings.Replace(block, "@GUARD@", guard, 1)
 }
