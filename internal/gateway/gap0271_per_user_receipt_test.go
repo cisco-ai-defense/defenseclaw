@@ -50,6 +50,9 @@ func TestGAP0271PerUserOnTimeBenignCallStaysAllowed(t *testing.T) {
 	if reply.Code != http.StatusOK || !strings.Contains(reply.Body.String(), `"action":"allow"`) {
 		t.Fatalf("benign answer status=%d body=%q", reply.Code, reply.Body.String())
 	}
+	if got := f.audited(t, "per-user-benign")["per-user-benign"]; got != "unconfirmed/no_answer" {
+		t.Fatalf("unreceipted benign decision = %q, want unconfirmed/no_answer", got)
+	}
 }
 
 func TestGAP0271PerUserLegacyDisconnectHasUnconfirmedDecision(t *testing.T) {
@@ -60,7 +63,7 @@ func TestGAP0271PerUserLegacyDisconnectHasUnconfirmedDecision(t *testing.T) {
 		if got := api.unreceiptedHookDecision(false, true, connector, event, proposal); got.Action != hookActionUnconfirmed {
 			t.Errorf("%s disconnected call recorded %s", connector, got.Action)
 		}
-		if got := api.unreceiptedHookDecision(false, false, connector, event, proposal); got.Action != "allow" {
+		if got := api.unreceiptedHookDecision(false, false, connector, event, proposal); got.Action != hookActionUnconfirmed {
 			t.Errorf("%s on-time call recorded %s", connector, got.Action)
 		}
 	}
