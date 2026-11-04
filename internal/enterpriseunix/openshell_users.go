@@ -218,8 +218,8 @@ const (
 )
 
 // defenseclawCacheRel is DefenseClaw's folder in the account's cache folder
-// (os.UserCacheDir), which holds the hook-fire probe folder of image builds
-// (openshell.HookFireProbeDir).
+// (os.UserCacheDir), where image builds of DefenseClaw 1.0.7 and earlier
+// kept the hook-fire MicroVM probe folder (hookfire).
 func (e *Env) defenseclawCacheRel() string {
 	if e.GOOS == "darwin" {
 		return "Library/Caches/defenseclaw"
@@ -2033,8 +2033,10 @@ func (l *lifecycle) purgeAccountSandbox(a SandboxAccount) {
 	remove(env.daemonStateRel())
 	remove(installStateRel)
 	// DefenseClaw's own files in the account's OpenShell and cache folders:
-	// the gateway lifecycle lock and the hook-fire probe folder of image
-	// builds. Both stayed after the purge (rel-1-0-2 GAP-0599).
+	// the gateway lifecycle lock, and the hook-fire probe folder that image
+	// builds of 1.0.7 and earlier left (no build writes it since the MicroVM
+	// probe was retired; removed while 1.0.x upgrades from 1.0.7 are
+	// supported). Both stayed after the purge (rel-1-0-2 GAP-0599).
 	remove(openshellLifecycleLockRel)
 	remove(env.defenseclawCacheRel() + "/hookfire")
 	// What the managed `defenseclaw sandbox` keeps below ~/.defenseclaw (the

@@ -36,11 +36,6 @@ type Builder struct {
 	Log io.Writer
 	// Now defaults to time.Now.
 	Now func() time.Time
-	// TempDir overrides the parent of the hook-fire MicroVM probe's mounted
-	// files. By default, the probe uses a private directory under the user's
-	// cache directory, where a container engine that shares the user's home
-	// directory can read them.
-	TempDir string
 }
 
 // BuildOptions tune one build.
@@ -65,8 +60,7 @@ type BuildOptions struct {
 // diagnosis) and Build returns the ErrHooksNotFired error. A new build is
 // recorded with HookFireVerified unset (a rebuild clears an earlier
 // verdict); a cached image keeps its verdict and is probed again only when
-// it is not verified yet, or, built for the MicroVM driver, not checked for
-// it yet (Record.MicroVMUnchecked).
+// it is not verified yet.
 func (b *Builder) Build(ctx context.Context, spec BuildSpec, opts BuildOptions) (Record, error) {
 	c, err := b.Context(spec)
 	if err != nil {
@@ -75,7 +69,7 @@ func (b *Builder) Build(ctx context.Context, spec BuildSpec, opts BuildOptions) 
 	if rec, ok, err := b.cached(ctx, c, opts); err != nil {
 		return Record{}, err
 	} else if ok {
-		if (rec.HookFireVerified && !rec.MicroVMUnchecked()) || opts.SkipHookFire {
+		if rec.HookFireVerified || opts.SkipHookFire {
 			return rec, nil
 		}
 		return b.verifyBuilt(ctx, c, rec, opts)
@@ -90,6 +84,12 @@ func (b *Builder) Build(ctx context.Context, spec BuildSpec, opts BuildOptions) 
 	}
 	if local {
 		if err := b.checkBuiltOn(ctx, c.Tag, base); err != nil {
+			_, _ = output(ctx, b.Docker, nil, "image", "rm", "-f", c.Tag)
+			return Record{}, err
+		}
+	}
+	if c.Spec.MicroVM {
+		if err := b.verifyExportedResolver(ctx, c); err != nil {
 			_, _ = output(ctx, b.Docker, nil, "image", "rm", "-f", c.Tag)
 			return Record{}, err
 		}
