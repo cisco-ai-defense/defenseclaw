@@ -2143,7 +2143,7 @@ func ensureWindowsCodexMachineFileTrust(path, label string, repairable bool) err
 	strictErr := windowsCodexMachineTrustedFileCheck(path, label)
 	if strictErr == nil {
 		if needsProof {
-			managed.RecordTrustedContent(path)
+			return managed.AcceptTrustedContent(path)
 		}
 		return nil
 	}
@@ -2169,6 +2169,8 @@ func ensureWindowsCodexMachineFileTrust(path, label string, repairable bool) err
 			reason += "; repair failed: " + repairErr.Error()
 		} else if recheckErr := windowsCodexMachineTrustedFileCheck(path, label); recheckErr == nil {
 			if needsProof && !managed.TrustedContentUnchanged(path) {
+				// The bytes changed while the repair ran.
+				managed.MarkContentUntrusted(path)
 				return strictErr
 			}
 			emitManagedRepairResilience(drift, true, path,
