@@ -95,6 +95,10 @@ const shellManagedGatewayStoppedText = "the DefenseClaw gateway service is not r
 	"Try again in a moment; if this continues, ask your administrator to start the DefenseClaw gateway service. " +
 	"(enterprise_managed_gateway_not_running)"
 
+const shellManagedGatewayStoppedMacAntigravityText = "the DefenseClaw gateway service is not running on this computer. " +
+	"Try again in a moment; if this continues, ask your administrator to check DefenseClaw on this computer: \\`enterprise macos status\\` names what to do. " +
+	"(enterprise_managed_gateway_not_running)"
+
 // shellHookSocketTransport renders shellHookSocketTransportBlock for the
 // socket path and the gateway service uid trusted beside root. The path is
 // emitted as one single-quoted shell word, so no character in it can end
@@ -104,12 +108,16 @@ const shellManagedGatewayStoppedText = "the DefenseClaw gateway service is not r
 // guard is the rendered foreign-hook guard block, or "" for every hook but
 // the standalone Hermes one; with "" the block renders as it did before the
 // guard moved into it.
-func shellHookSocketTransport(socket string, serviceUID int, factsBinary, guard string) string {
+func shellHookSocketTransport(socket string, serviceUID int, factsBinary, guard, connectorName, goos string) string {
 	facts := ""
 	if factsBinary != "" {
 		facts = "DEFENSECLAW_SESSION_FACTS_BIN=" + shellSingleQuote(factsBinary) + "\nexport DEFENSECLAW_SESSION_FACTS_BIN\n"
 	}
-	block := strings.Replace(renderShellHookSocket(shellHookSocketTransportBlock, socket, serviceUID), "@FACTS@", facts, 1)
+	block := shellHookSocketTransportBlock
+	if goos == "darwin" && normalizeConnectorName(connectorName) == "antigravity" {
+		block = strings.Replace(block, shellManagedGatewayStoppedText, shellManagedGatewayStoppedMacAntigravityText, 1)
+	}
+	block = strings.Replace(renderShellHookSocket(block, socket, serviceUID), "@FACTS@", facts, 1)
 	return strings.Replace(block, "@GUARD@", guard, 1)
 }
 
