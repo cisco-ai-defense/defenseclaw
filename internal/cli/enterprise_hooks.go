@@ -272,7 +272,7 @@ var (
 		if err := managed.ValidateTrustedFilePath(path, label); err == nil {
 			return nil
 		}
-		if enterpriseHooksRuntimeGOOS() == "windows" &&
+		if (enterpriseHooksRuntimeGOOS() == "windows" || enterpriseHooksRuntimeGOOS() == "darwin") &&
 			enterpriseHookManifestACLRepair(path) == nil &&
 			managed.ValidateTrustedFilePath(path, label) == nil {
 			return nil
@@ -2920,6 +2920,7 @@ func runEnterpriseHookReconcileOnce(ctx context.Context) (enterpriseHookReconcil
 	if err != nil {
 		return run, err
 	}
+	reportEnterpriseHookManifestSkippedRowsPlatform(enterpriseHookManifest, manifest.Skipped)
 	run.ManifestSHA256 = manifestSHA256
 	apiAddr := strings.TrimSpace(enterpriseHookAPIAddr)
 	if apiAddr == "" {
@@ -3056,6 +3057,8 @@ func runEnterpriseHookReconcileOnce(ctx context.Context) (enterpriseHookReconcil
 				ManagedHookBinary:       standaloneManagedHookBinary(),
 				MachinePolicyContractID: enterpriseHookMachinePolicyContractFor(target.Connector, claudeMachineContract),
 			}
+			// Repair the user's objects as root before anything validates them.
+			err = repairEnterpriseHookUserTargetPlatform(target, opts)
 			if err == nil {
 				if dirs, watchErr := enterprisehooks.WatchDirs(opts); watchErr == nil {
 					for _, dir := range dirs {
@@ -3104,6 +3107,7 @@ func runEnterpriseHookReconcileOnce(ctx context.Context) (enterpriseHookReconcil
 							Connector:  row.Connector,
 							RestoredAt: time.Now().UTC().Format(time.RFC3339Nano),
 						})
+						reportEnterpriseHookTargetRepairedPlatform(target, result)
 					}
 					row.OK = true
 					row.UserHome = result.UserHome
@@ -3151,11 +3155,12 @@ func runEnterpriseHookReconcileOnce(ctx context.Context) (enterpriseHookReconcil
 				// profile detached, a renamed folder). Look the target up by
 				// its manifest identity so a protected user keeps protection.
 				var ledgerErr error
+				row.SID = enterpriseHookUnresolvedTargetIdentity(cfg.DataDir, target)
 				protected, ledgerErr = previousEnterpriseHookSuccess(
 					cfg.DataDir,
 					target.User,
 					target.UserHome,
-					target.SID,
+					row.SID,
 					target.Connector,
 				)
 				if ledgerErr != nil {
@@ -3429,7 +3434,8 @@ func runEnterpriseHooksWatch(cmd *cobra.Command, _ []string) error {
 		}
 		enterpriseHookAfterWatchReconcile(cmd.Context(), cmd.ErrOrStderr(), run)
 		dirs := append([]string{filepath.Dir(filepath.Clean(enterpriseHookManifest))}, run.WatchDirs...)
-		if err := syncEnterpriseHookWatchDirs(fsw, watched, dirs); err != nil {
+		if err := syncEnterpriseHookWatchDirs(fsw, watched, dirs); err != nil &&
+			!enterpriseHookWatchFailureToleratedPlatform(err) {
 			// Match the runEnterpriseHookReconcileOnce error path: mark
 			// retry so the caller schedules a backoff attempt rather than
 			// waiting for the periodic interval to recover.
@@ -3591,6 +3597,8 @@ func runEnterpriseHooksWatch(cmd *cobra.Command, _ []string) error {
 		// can collapse to overall `ready`.
 		writeGuardianStateOrLog(cmd.ErrOrStderr(), guardianstate.StateReady)
 	}
+	hostChecks := newEnterpriseHookHostChecks(cfg)
+	hostChecks.Run()
 
 	ticker := time.NewTicker(enterpriseHookWatchInterval)
 	defer ticker.Stop()
@@ -3841,6 +3849,7 @@ func runEnterpriseHooksWatch(cmd *cobra.Command, _ []string) error {
 			if _, err := reconcile("interval"); err != nil {
 				fmt.Fprintf(cmd.ErrOrStderr(), "[hook-guardian] interval reconcile failed: %s\n", err)
 			}
+			hostChecks.Run()
 			if repairRetryNeeded() {
 				scheduleRepairRetry()
 			} else {
@@ -5110,6 +5119,19 @@ func mergeProtectedEnterpriseHookTargets(previous, current []enterpriseHookRecon
 		}
 		if prior, ok := previousByKey[key]; ok {
 			merged[key] = prior
+			continue
+		}
+		// A ledger row written before platform identities existed has no SID
+		// and is keyed by user name; carry it forward under the current
+		// identity so the first failed repair after an upgrade keeps it.
+		for _, prior := range previous {
+			if prior.OK && strings.TrimSpace(prior.SID) == "" &&
+				strings.EqualFold(strings.TrimSpace(prior.Connector), strings.TrimSpace(row.Connector)) &&
+				enterpriseHookLegacyLedgerRowMatchesPlatform(prior, row.User, row.UserHome, row.SID) {
+				prior.SID = row.SID
+				merged[key] = prior
+				break
+			}
 		}
 	}
 	out := make([]enterpriseHookReconcileRow, 0, len(merged))
@@ -5156,6 +5178,9 @@ func enterpriseHookRowMatches(row enterpriseHookReconcileRow, userName, userHome
 	}
 	rowSID := strings.TrimSpace(row.SID)
 	sid = strings.TrimSpace(sid)
+	if rowSID == "" && enterpriseHookLegacyLedgerRowMatchesPlatform(row, userName, userHome, sid) {
+		return true
+	}
 	if rowSID != "" || sid != "" {
 		if rowSID == "" || sid == "" || !strings.EqualFold(rowSID, sid) {
 			return false
@@ -5269,6 +5294,15 @@ func resolveEnterpriseHookTargetValuesForPlatform(userName, userHome string, uid
 	}
 	if dataDir := strings.TrimSpace(dataDir); dataDir != "" && !filepath.IsAbs(dataDir) {
 		return target, fmt.Errorf("enterprise hooks: --data-dir must be absolute")
+	}
+	if target.sid == "" {
+		// Where accounts have a stable identity beyond the short name, key
+		// the ledger on it so a reused name never inherits protection.
+		identity, err := enterpriseHookPlatformTargetIdentity(strings.TrimSpace(userName), target.uid)
+		if err != nil {
+			return target, err
+		}
+		target.sid = identity
 	}
 	return target, nil
 }

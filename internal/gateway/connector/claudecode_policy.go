@@ -42,6 +42,50 @@ type claudeCodeSettingsSource struct {
 	// origins names, for the merged file-based tier, the file whose value
 	// of each top-level key Claude Code applies (the last one to set it).
 	origins map[string]string
+	// kind names the policy tier for reports (server, file, mdm-device);
+	// tierOrigins overrides it per key when one source merges several
+	// tiers (the device and per-user MDM plists).
+	kind        string
+	tierOrigins map[string]string
+}
+
+// sourceKind names the tier that delivered key, for reports.
+func (s *claudeCodeSettingsSource) sourceKind(key string) string {
+	if s == nil {
+		return ""
+	}
+	if origin := s.tierOrigins[key]; origin != "" {
+		return origin
+	}
+	if s.kind != "" {
+		return s.kind
+	}
+	return s.name
+}
+
+// reportBlock reports that key in this managed source makes Claude ignore
+// user-scope hooks.
+func (s *claudeCodeSettingsSource) reportBlock(key string) {
+	if s != nil {
+		reportAgentPolicyBlocksUserHooks("claudecode", s.sourceKind(key), key, s.path)
+	}
+}
+
+// readOptionalClaudeCodeManagedSettings reads one machine-policy tier. A
+// file rewritten during the read is read again; where a failed policy read
+// must not fail the reconcile, it is logged and the tier treated as absent.
+func readOptionalClaudeCodeManagedSettings(name, kind, path string) (*claudeCodeSettingsSource, error) {
+	source, err := readOptionalClaudeCodeSettings(name, path)
+	for attempt := 0; attempt < 2 && agentPolicyReadRetryable(err); attempt++ {
+		source, err = readOptionalClaudeCodeSettings(name, path)
+	}
+	if err != nil && agentPolicyReadTolerated("claudecode", kind, path, err) {
+		return nil, nil
+	}
+	if source != nil {
+		source.kind = kind
+	}
+	return source, err
 }
 
 func (s *claudeCodeSettingsSource) active() bool {
@@ -83,6 +127,7 @@ func claudeCodeEffectiveHookContract(opts SetupOpts) (bool, error) {
 		return false, err
 	}
 	if helper := claudeCodePolicyHelperSource(managed); helper != nil {
+		helper.reportBlock("policyHelper")
 		return false, fmt.Errorf( //nolint:staticcheck // Preserve the product or platform name in this operator diagnostic.
 			"Claude Code policyHelper from %s is dynamic and cannot be passively verified; include the DefenseClaw managed hook matrix in the helper output",
 			helper.label(),
@@ -163,7 +208,7 @@ func (s claudeCodeManagedSourceSet) active() *claudeCodeSettingsSource {
 func inspectClaudeCodeManagedSources() (claudeCodeManagedSourceSet, error) {
 	var result claudeCodeManagedSourceSet
 	remotePath := claudeCodeRemoteSettingsPath()
-	remote, err := readOptionalClaudeCodeSettings("remote/server-managed settings", remotePath)
+	remote, err := readOptionalClaudeCodeManagedSettings("remote/server-managed settings", "server", remotePath)
 	if err != nil {
 		return result, err
 	}
@@ -247,6 +292,7 @@ func validateClaudeCodeManagedHookControls(source *claudeCodeSettingsSource, man
 			return fmt.Errorf("Claude Code disableAllHooks from %s has unsupported type %T", source.label(), raw) //nolint:staticcheck // Preserve the product or platform name in this operator diagnostic.
 		}
 		if disabled {
+			source.reportBlock("disableAllHooks")
 			return fmt.Errorf("Claude Code %s sets disableAllHooks=true", source.label()) //nolint:staticcheck // Preserve the product or platform name in this operator diagnostic.
 		}
 	}
@@ -278,9 +324,11 @@ func validateClaudeCodeManagedHookControls(source *claudeCodeSettingsSource, man
 		}
 	}
 	if !managedHook && allowManagedOnly {
+		source.reportBlock("allowManagedHooksOnly")
 		return fmt.Errorf("Claude Code %s sets allowManagedHooksOnly=true, so the user-scoped DefenseClaw hooks are ignored", source.label()) //nolint:staticcheck // Preserve the product or platform name in this operator diagnostic.
 	}
 	if !managedHook && strictHooks {
+		source.reportBlock("strictPluginOnlyCustomization")
 		return fmt.Errorf("Claude Code %s restricts hooks to plugins or managed settings, so the user-scoped DefenseClaw hooks are ignored", source.label()) //nolint:staticcheck // Preserve the product or platform name in this operator diagnostic.
 	}
 	return nil
@@ -484,7 +532,7 @@ func readClaudeCodeManagedFileSettingsAt(root string) (*claudeCodeSettingsSource
 	paths := []string{filepath.Join(root, "managed-settings.json")}
 	dropin := filepath.Join(root, "managed-settings.d")
 	entries, err := os.ReadDir(dropin)
-	if err != nil && !errors.Is(err, os.ErrNotExist) {
+	if err != nil && !errors.Is(err, os.ErrNotExist) && !agentPolicyReadTolerated("claudecode", "file", dropin, err) {
 		return nil, fmt.Errorf("inspect Claude Code managed settings drop-ins %s: %w", dropin, err)
 	}
 	var names []string
@@ -504,7 +552,7 @@ func readClaudeCodeManagedFileSettingsAt(root string) (*claudeCodeSettingsSource
 	origins := map[string]string{}
 	var loaded []string
 	for _, path := range paths {
-		source, err := readOptionalClaudeCodeSettings("file-based managed settings", path)
+		source, err := readOptionalClaudeCodeManagedSettings("file-based managed settings", "file", path)
 		if err != nil {
 			return nil, err
 		}
@@ -525,6 +573,7 @@ func readClaudeCodeManagedFileSettingsAt(root string) (*claudeCodeSettingsSource
 		path:     strings.Join(loaded, ", "),
 		settings: merged,
 		origins:  origins,
+		kind:     "file",
 	}, nil
 }
 

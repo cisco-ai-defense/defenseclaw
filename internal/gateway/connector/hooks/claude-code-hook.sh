@@ -266,7 +266,8 @@ export DEFENSECLAW_MANAGED_HOOK
 _DC_SECURE_CLIENT_DELIVERY={{if .SecureClientDelivery}}1{{else}}0{{end}}
 {{end}}DEFENSECLAW_HOME="$(cd "${HOOK_DIR}/.." && pwd -P)"
 export DEFENSECLAW_HOME
-{{else}}
+{{if .ManagedShellGuard}}{{template "managed-prologue" .}}
+{{end}}{{else}}
 # A per-user render is never a managed or Secure Client hook: those markers
 # come only from a managed render (the branch above), never from the
 # agent's environment, where they would change how the per-user hook answers
@@ -334,7 +335,8 @@ fi
 command . "${HOOK_DIR}/_sandbox.sh" || exit 2
 {{end}}defenseclaw_harden_resources
 defenseclaw_harden_env
-
+{{if .ManagedShellGuard}}trap '_dc_managed_on_exit' EXIT
+{{end}}
 # Fail mode set BEFORE the missing-token check so the helper has a
 # stable FAIL_MODE to log against. See codex-hook.sh for the full
 # response-layer and transport-layer rationale.
@@ -802,7 +804,7 @@ if [ "$ACTION" = "block" ]; then
 {{end}}  if [ -z "$REASON" ]; then
     REASON="Blocked by DefenseClaw Claude Code policy."
   fi
-  printf '%s\n' "$REASON" >&2
+  {{if .ManagedShellGuard}}_dc_managed_block_reason "$REASON"{{else}}printf '%s\n' "$REASON" >&2{{end}}
   exit 2
 fi
 exit 0

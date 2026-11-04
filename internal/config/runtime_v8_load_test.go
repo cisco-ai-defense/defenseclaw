@@ -408,7 +408,7 @@ func TestRuntimeV8LoadersRetainManagedPathTrust(t *testing.T) {
 				}
 				return
 			}
-			if err != nil {
+			if !configTrustAccepted(err) {
 				t.Fatalf("managed runtime loader error = %v, want drifted config accepted", err)
 			}
 			if !boundaryNamesPath(boundaries(), path) {

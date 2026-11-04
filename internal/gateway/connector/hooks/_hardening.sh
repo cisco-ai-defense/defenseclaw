@@ -321,11 +321,15 @@ defenseclaw_harden_env() {
   # Per-hook ephemeral HOME so any tool that stores state under $HOME
   # (gh, gcloud, openssl rand state, etc.) writes to a sandbox the
   # hook tears down on exit. Fall back to the gateway data dir if
-  # mktemp is unavailable.
+  # mktemp is unavailable. A managed hook never takes its scratch folder
+  # from the agent's environment.
   _DEFENSECLAW_HOOK_HOME_OWNED=""
   # The account's real HOME, kept unexported for defenseclaw_gateway_cold_start.
   unset DEFENSECLAW_AGENT_HOME
   DEFENSECLAW_AGENT_HOME="${HOME:-}"
+  if declare -F _dc_managed_on_exit >/dev/null 2>&1; then
+    DEFENSECLAW_HOOK_HOME=""
+  fi
   if command -v mktemp >/dev/null 2>&1; then
     # exec: the substitution's shell becomes mktemp (bash forks a shell
     # first while this hook has an EXIT trap, issue #1130). Its status stays
@@ -345,7 +349,14 @@ defenseclaw_harden_env() {
     mkdir "$DEFENSECLAW_HOOK_HOME" 2>/dev/null || true
   fi
   export HOME="$DEFENSECLAW_HOOK_HOME"
-  trap '_defenseclaw_hook_cleanup' EXIT
+  # A managed hook's exit handler maps unexpected exits to the fail mode and
+  # runs this cleanup itself; replacing it here would let bash's own exit
+  # status decide the outcome.
+  if declare -F _dc_managed_on_exit >/dev/null 2>&1; then
+    trap '_dc_managed_on_exit' EXIT
+  else
+    trap '_defenseclaw_hook_cleanup' EXIT
+  fi
 
   # A managed hook's socket transport names the session-facts binary after
   # this point. An inherited one would let the agent pick a binary for the
@@ -3188,6 +3199,11 @@ defenseclaw_read_stdin_capped() {
   local overflow_outcome="${1:-unknown}" cap
   _dc_stdin_cap
   cap="$_DC_STDIN_CAP"
+  # Managed hooks use the built-in cap; the agent's environment cannot turn
+  # every payload into an oversized one.
+  if declare -F _dc_managed_on_exit >/dev/null 2>&1; then
+    cap=1048576
+  fi
   # bash reads at most cap+1 bytes itself: no head(1) or python3 process on
   # any host (issue #1130 / GAP-0267), and the read stays bounded when
   # neither is installed.

@@ -91,10 +91,12 @@ t_install_bootstraps_guardian_and_enumerator() {
     "install.sh copies the guardian plist"
   assert_contains "${body}" 'install_file_no_replace "${ENUMERATOR_PLIST_SRC}" "${ENUMERATOR_PLIST_DST}"' \
     "install.sh copies the enumerator plist"
-  assert_contains "${body}" 'launchctl bootstrap system "${GUARDIAN_PLIST_DST}"' \
+  assert_contains "${body}" 'bootstrap_launchd_job "${GUARDIAN_LAUNCHD_LABEL}" "${GUARDIAN_PLIST_DST}"' \
     "install.sh bootstraps the guardian daemon"
-  assert_contains "${body}" 'launchctl bootstrap system "${ENUMERATOR_PLIST_DST}"' \
+  assert_contains "${body}" 'bootstrap_launchd_job "${ENUMERATOR_LAUNCHD_LABEL}" "${ENUMERATOR_PLIST_DST}"' \
     "install.sh bootstraps the enumerator daemon"
+  assert_contains "${body}" 'launchctl bootstrap system "${plist}"' \
+    "the bootstrap helper loads the job into the system domain"
   assert_contains "${body}" 'render_targets_manifest' \
     "install.sh renders the initial targets.yaml manifest"
   assert_contains "${body}" 'enumerate_local_users' \
@@ -414,6 +416,13 @@ t_scrub_py_syntax() {
 #
 #   Uses stdout instead of bash 4.3+ namerefs (macOS bash 3.2 has no
 #   `local -n`).
+#
+#   The fixture carries every file the shipped bundle does, plus:
+#     ${bundle}/root  a fixture machine root; tests pass it as
+#                     DC_INSTALLER_TEST_ROOT so no run ever touches /opt,
+#                     /Library or the real launchd;
+#     ${bundle}/shim  stub launchctl (nothing loaded) and dscl (no users)
+#                     to put first on PATH.
 _setup_bundle_fixture() {
   local with_binary="$1"
   local bundle
@@ -423,16 +432,35 @@ _setup_bundle_fixture() {
   # what install.sh's SCRIPT_DIR resolves to.
   bundle="${bundle%/}"
   bundle="$(cd "${bundle}" && pwd -P)"
-  mkdir -p "${bundle}/lib"
+  mkdir -p "${bundle}/lib" "${bundle}/policies/guardrail/default" "${bundle}/root" "${bundle}/shim"
   cp "${PKG_DIR}/install.sh"           "${bundle}/install.sh"
   cp "${PKG_DIR}/lib/installer_lib.sh" "${bundle}/lib/installer_lib.sh"
+  cp "${PKG_DIR}/lib/render-targets.sh" "${bundle}/lib/render-targets.sh"
   printf '<?xml version="1.0"?><plist/>' > "${bundle}/com.cisco.secureclient.defenseclaw.plist"
+  printf '<?xml version="1.0"?><plist/>' > "${bundle}/com.cisco.secureclient.defenseclaw.hook-guardian.plist"
+  printf '<?xml version="1.0"?><plist/>' > "${bundle}/com.cisco.secureclient.defenseclaw.hook-enumerator.plist"
+  printf 'rules: []\n' > "${bundle}/policies/guardrail/default/rules.yaml"
+  chmod 0644 "${bundle}"/*.plist
   chmod 0755 "${bundle}/install.sh"
+  printf '#!/bin/sh\n[ "$1" = print ] && exit 113\nexit 0\n' > "${bundle}/shim/launchctl"
+  printf '#!/bin/sh\nexit 0\n' > "${bundle}/shim/dscl"
+  chmod 0755 "${bundle}/shim/launchctl" "${bundle}/shim/dscl"
   if [[ "${with_binary}" == "true" ]]; then
     printf '#!/bin/sh\nexit 0\n' > "${bundle}/defenseclaw"
-    chmod 0755 "${bundle}/defenseclaw"
+    # The bundle ships the ACP guard next to the gateway; install requires it.
+    printf '#!/bin/sh\nexit 0\n' > "${bundle}/defenseclaw-acp"
+    chmod 0755 "${bundle}/defenseclaw" "${bundle}/defenseclaw-acp"
   fi
   printf '%s\n' "${bundle}"
+}
+
+# _fixture_install BUNDLE [ARGS ...]: run the fixture's install.sh
+# unprivileged against its fixture root and shims.
+_fixture_install() {
+  local bundle="$1"; shift
+  DC_INSTALLER_SKIP_ROOT_CHECK=1 DC_INSTALLER_TEST_ROOT="${bundle}/root" \
+    DC_RETRY_SLEEP=0 PATH="${bundle}/shim:${PATH}" \
+    "${bundle}/install.sh" "$@"
 }
 
 # Regression guard for the "shippable bundle" contract: install.sh must
@@ -444,10 +472,10 @@ t_bundle_layout_resolves_locally() {
 
   local trace
   # DC_INSTALLER_SKIP_ROOT_CHECK is a test-only seam declared in
-  # install.sh's preflight block; it also skips the plist-source
-  # ownership check so the fake stub plist under a tmpdir doesn't need
-  # to be root-owned.
-  trace="$(DC_INSTALLER_SKIP_ROOT_CHECK=1 bash -x "${bundle}/install.sh" \
+  # install.sh's preflight block; DC_INSTALLER_TEST_ROOT keeps every
+  # write inside the fixture.
+  trace="$(DC_INSTALLER_SKIP_ROOT_CHECK=1 DC_INSTALLER_TEST_ROOT="${bundle}/root" \
+    PATH="${bundle}/shim:${PATH}" bash -x "${bundle}/install.sh" \
     --connector codex --skip-launchd --skip-connector 2>&1 | \
     grep -E "PLIST_SRC=|BINARY_SRC=/" || true)"
 
@@ -456,29 +484,42 @@ t_bundle_layout_resolves_locally() {
 }
 
 # Complementary: with NO bundle-local binary AND no repo tree, install.sh
-# must die with a clear message rather than trying to `go build`.
+# must die with a clear message rather than trying to `go build`. A
+# bundle missing its own files is one of the few fatal install paths.
 t_bundle_without_binary_and_no_repo_dies() {
   local bundle
   bundle="$(_setup_bundle_fixture false)"
 
   local out rc=0
-  out="$(DC_INSTALLER_SKIP_ROOT_CHECK=1 "${bundle}/install.sh" \
+  out="$(_fixture_install "${bundle}" \
     --connector codex --skip-launchd --skip-connector 2>&1)" || rc=$?
   assert_status "${rc}" 1 "missing binary + no repo should die"
   assert_contains "${out}" "no repo tree" "explains missing repo tree"
 }
 
+# A bundle missing a file it publishes dies before anything is mutated.
+t_bundle_missing_guardian_plist_dies_before_mutation() {
+  local bundle
+  bundle="$(_setup_bundle_fixture true)"
+  rm -f "${bundle}/com.cisco.secureclient.defenseclaw.hook-guardian.plist"
+  local out rc=0
+  out="$(_fixture_install "${bundle}" \
+    --connector codex --skip-launchd --skip-connector 2>&1)" || rc=$?
+  assert_status "${rc}" 1 "bundle missing its own plist must fail"
+  assert_contains "${out}" "hook-guardian plist source not found" "names the missing file"
+  [[ ! -e "${bundle}/root/opt" ]] || _fail "nothing may be created before the bundle check"
+}
+
 # PLIST validator regression: install.sh's plist-source ownership check
-# must be a TWO-TIER policy:
-#   - override (--plist or DEFENSECLAW_PLIST_SRC): require root-owned
-#   - bundle / repo default: allow the extracting user's uid (a plist
-#     extracted from our shipped tarball is owned by whoever ran `tar -x`,
-#     not root; requiring root there would break the documented
-#     `sudo ./install.sh` bundle flow — see PR #440 review feedback).
-# Group/world-writable bits must always be refused, regardless of origin.
-# We drive install.sh through DC_INSTALLER_SKIP_ROOT_CHECK=1 to bypass
-# the euid check but DO NOT set DC_INSTALLER_SKIP_PLIST_VALIDATION here —
-# we WANT the validator to run.
+# is a TWO-TIER policy:
+#   - override (--plist or DEFENSECLAW_PLIST_SRC): expected root-owned
+#   - bundle / repo default: the extracting user's uid is fine (a plist
+#     extracted from our shipped tarball is owned by whoever ran `tar -x`).
+# Code integrity is advisory: a failed check is logged as
+# defenseclaw_boundary and the install continues, because the installed
+# copy is always published root:wheel 0644. We drive install.sh through
+# DC_INSTALLER_SKIP_ROOT_CHECK=1 but DO NOT set
+# DC_INSTALLER_SKIP_PLIST_VALIDATION — we WANT the validator to run.
 t_plist_validator_accepts_bundle_default_owned_by_user() {
   local bundle
   bundle="$(_setup_bundle_fixture true)"
@@ -490,47 +531,48 @@ t_plist_validator_accepts_bundle_default_owned_by_user() {
   #      repo default or an earlier candidate).
   #   2. PLIST_SRC_ORIGIN is "bundle" so the validator applied the
   #      relaxed policy (skip root-owner requirement).
-  # Without these, a regression that dies BEFORE the ownership branch
-  # or resolves PLIST_SRC to some other path would still pass the
-  # negative-only `assert_not_contains "must be owned by root"` check.
   local out rc=0
-  out="$(DC_INSTALLER_SKIP_ROOT_CHECK=1 bash -x "${bundle}/install.sh" \
+  out="$(DC_INSTALLER_SKIP_ROOT_CHECK=1 DC_INSTALLER_TEST_ROOT="${bundle}/root" \
+    PATH="${bundle}/shim:${PATH}" bash -x "${bundle}/install.sh" \
     --connector codex --skip-launchd --skip-connector 2>&1)" || rc=$?
   local trace
   trace="$(printf '%s' "${out}" | grep -E 'PLIST_SRC=|PLIST_SRC_ORIGIN=' || true)"
   assert_contains "${trace}" "PLIST_SRC=${bundle}/com.cisco.secureclient.defenseclaw.plist" "plist resolved from bundle"
   assert_contains "${trace}" "PLIST_SRC_ORIGIN=bundle"                            "origin is bundle (relaxed policy)"
   # And the ownership branch must not have fired.
-  assert_not_contains "${out}" "must be owned by root" "bundle default plist accepted"
+  assert_not_contains "${out}" "is not owned by root" "bundle default plist accepted"
+  assert_status "${rc}" 0 "fixture install completes"
 }
 
-t_plist_validator_rejects_bundle_default_that_is_world_writable() {
+t_plist_validator_logs_world_writable_bundle_default_and_continues() {
   local bundle
   bundle="$(_setup_bundle_fixture true)"
   chmod 0646 "${bundle}/com.cisco.secureclient.defenseclaw.plist"
   local out rc=0
-  out="$(DC_INSTALLER_SKIP_ROOT_CHECK=1 "${bundle}/install.sh" \
+  out="$(_fixture_install "${bundle}" \
     --connector codex --skip-launchd --skip-connector 2>&1)" || rc=$?
-  assert_status "${rc}" 1 "world-writable plist rejected"
-  assert_contains "${out}" "group/other writable" "explains why"
+  assert_status "${rc}" 0 "world-writable source plist is logged, install continues"
+  assert_contains "${out}" "group/other writable" "explains the finding"
+  assert_contains "${out}" 'defenseclaw_boundary component="install"' "boundary marker logged"
+  assert_contains "${out}" 'reason="source_group_writable"' "boundary names the reason"
+  assert_file_mode "${bundle}/root/Library/LaunchDaemons/com.cisco.secureclient.defenseclaw.plist" 644
 }
 
-t_plist_validator_rejects_override_owned_by_non_root() {
-  # DEFENSECLAW_PLIST_SRC forces override policy; a non-root owner must
-  # be rejected even if the file is otherwise safe.
+t_plist_validator_logs_override_owned_by_non_root_and_continues() {
+  # DEFENSECLAW_PLIST_SRC forces override policy; a non-root owner is a
+  # code-integrity finding: logged, never fatal.
   local bundle
   bundle="$(_setup_bundle_fixture true)"
   local override_plist="${bundle}/override.plist"
   printf '<?xml version="1.0"?><plist/>' > "${override_plist}"
   chmod 0644 "${override_plist}"
   local out rc=0
-  out="$(DC_INSTALLER_SKIP_ROOT_CHECK=1 \
-    DEFENSECLAW_PLIST_SRC="${override_plist}" \
-    "${bundle}/install.sh" \
+  out="$(DEFENSECLAW_PLIST_SRC="${override_plist}" _fixture_install "${bundle}" \
     --connector codex --skip-launchd --skip-connector 2>&1)" || rc=$?
-  assert_status "${rc}" 1 "override plist owned by non-root rejected"
-  assert_contains "${out}" "must be owned by root" "explains why"
+  assert_status "${rc}" 0 "override plist owned by non-root is logged, install continues"
+  assert_contains "${out}" "is not owned by root" "explains the finding"
   assert_contains "${out}" "DEFENSECLAW_PLIST_SRC" "names the override source"
+  assert_contains "${out}" 'reason="source_not_root_owned"' "boundary names the reason"
 }
 
 t_plist_validator_rejects_missing_env_override() {
@@ -539,12 +581,11 @@ t_plist_validator_rejects_missing_env_override() {
   # rather than silently falling through to the bundle default. Silent
   # fallback would substitute a different plist AND downgrade the
   # ownership policy from `override` (strict) to `bundle` (relaxed).
+  # This is a usage error, which stays fatal.
   local bundle
   bundle="$(_setup_bundle_fixture true)"
   local out rc=0
-  out="$(DC_INSTALLER_SKIP_ROOT_CHECK=1 \
-    DEFENSECLAW_PLIST_SRC="${bundle}/does-not-exist.plist" \
-    "${bundle}/install.sh" \
+  out="$(DEFENSECLAW_PLIST_SRC="${bundle}/does-not-exist.plist" _fixture_install "${bundle}" \
     --connector codex --skip-launchd --skip-connector 2>&1)" || rc=$?
   assert_status "${rc}" 1 "missing env-override plist must fail"
   assert_contains "${out}" "DEFENSECLAW_PLIST_SRC" "error names the env var"
@@ -553,21 +594,19 @@ t_plist_validator_rejects_missing_env_override() {
   assert_not_contains "${out}" "com.cisco.secureclient.defenseclaw.plist installed" "no silent fallback"
 }
 
-t_plist_validator_fails_closed_when_stat_output_empty() {
+t_plist_validator_logs_when_stat_output_empty() {
   # Simulate stat failure by shimming a `stat` on PATH that outputs
-  # nothing. install.sh must die rather than silently skipping the check.
+  # nothing. install.sh must log the uninspectable source and finish.
   local bundle
   bundle="$(_setup_bundle_fixture true)"
-  local shimbin="${bundle}/shim"
-  mkdir -p "${shimbin}"
-  printf '#!/bin/sh\nexit 0\n' > "${shimbin}/stat"
-  chmod 0755 "${shimbin}/stat"
+  printf '#!/bin/sh\nexit 0\n' > "${bundle}/shim/stat"
+  chmod 0755 "${bundle}/shim/stat"
   local out rc=0
-  out="$(DC_INSTALLER_SKIP_ROOT_CHECK=1 PATH="${shimbin}:${PATH}" \
-    "${bundle}/install.sh" \
+  out="$(_fixture_install "${bundle}" \
     --connector codex --skip-launchd --skip-connector 2>&1)" || rc=$?
-  assert_status "${rc}" 1 "stat empty must fail closed"
-  assert_contains "${out}" "cannot stat plist source" "explains why"
+  assert_status "${rc}" 0 "uninspectable plist source is logged, install continues"
+  assert_contains "${out}" "cannot stat plist source" "explains the finding"
+  assert_contains "${out}" 'reason="source_uninspectable"' "boundary names the reason"
 }
 
 t_install_log_sink_is_after_preflight() {
@@ -863,13 +902,15 @@ run_case "install.sh passes DEFENSECLAW_HOOK_GUARDIAN_AUTH_DIR on every hooks-in
   t_install_passes_guardian_auth_dir_to_cli
 run_case "bundle layout: plist + binary resolve locally" t_bundle_layout_resolves_locally
 run_case "bundle without binary + no repo dies"          t_bundle_without_binary_and_no_repo_dies
+run_case "bundle missing its own plist dies before mutation" \
+  t_bundle_missing_guardian_plist_dies_before_mutation
 run_case "plist validator accepts bundle default owned by extracting user" \
   t_plist_validator_accepts_bundle_default_owned_by_user
-run_case "plist validator rejects world-writable bundle default" \
-  t_plist_validator_rejects_bundle_default_that_is_world_writable
-run_case "plist validator rejects --override owned by non-root" \
-  t_plist_validator_rejects_override_owned_by_non_root
+run_case "plist validator logs a world-writable bundle default and continues" \
+  t_plist_validator_logs_world_writable_bundle_default_and_continues
+run_case "plist validator logs an --override owned by non-root and continues" \
+  t_plist_validator_logs_override_owned_by_non_root_and_continues
 run_case "plist validator rejects missing env-override (no silent fallback)" \
   t_plist_validator_rejects_missing_env_override
-run_case "plist validator fails closed when stat output empty" \
-  t_plist_validator_fails_closed_when_stat_output_empty
+run_case "plist validator logs an uninspectable source and continues" \
+  t_plist_validator_logs_when_stat_output_empty

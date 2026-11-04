@@ -272,6 +272,9 @@ func Verify(ctx context.Context, opts InstallOptions) (InstallResult, error) {
 
 	var result InstallResult
 	err = connector.WithUserHomeDir(home, func() error {
+		// As root, before the euid drop: no agent policy child starts inside
+		// the drop, where it could regain root.
+		platformPrepareAgentPolicy(ctx, conn.Name(), home, dataDir, uid, gid, &setupOpts)
 		secureClient := secureClientHookDelivery()
 		if secureClient {
 			setupOpts, err = prepareHookContract(opts.GuardrailMode, conn, setupOpts)
@@ -392,6 +395,11 @@ func Verify(ctx context.Context, opts InstallOptions) (InstallResult, error) {
 				if err := verifyOwnedHooks(); err != nil {
 					return err
 				}
+			}
+			// A Secure Client macOS hook is also compared with what the
+			// guardian renders now (connector.VerifyManagedHookRender).
+			if err := connector.VerifyManagedHookRender(setupOpts, conn); err != nil {
+				return fmt.Errorf("enterprise hooks: connector %s: %w", conn.Name(), err)
 			}
 			result = InstallResult{
 				Connector:       conn.Name(),
@@ -530,6 +538,7 @@ func Install(ctx context.Context, opts InstallOptions) (InstallResult, error) {
 
 	var result InstallResult
 	err = connector.WithUserHomeDir(home, func() error {
+		platformPrepareAgentPolicy(ctx, conn.Name(), home, dataDir, uid, gid, &setupOpts)
 		secureClient := secureClientHookDelivery()
 		requestedHookFailMode := canonicalHookFailMode(setupOpts.HookFailMode)
 		if secureClient {
@@ -620,7 +629,7 @@ func Install(ctx context.Context, opts InstallOptions) (InstallResult, error) {
 			return err
 		}
 
-		return withOwnerCredentials(uid, gid, func() error {
+		if err := withOwnerCredentials(uid, gid, func() error {
 			// Held until the hook contract lock names this connector: a
 			// removal of the account's last other connector would take the
 			// shared scripts Setup writes (lockSharedHookRuntime).
@@ -646,6 +655,13 @@ func Install(ctx context.Context, opts InstallOptions) (InstallResult, error) {
 					if lockErr != nil {
 						failures = append(failures, fmt.Errorf("enterprise hooks: restore previous hook contract lock: %w", lockErr))
 					}
+				}
+				// A Secure Client macOS target that was protected keeps its
+				// hooks on a failed repair (keepProtectedHooksOnRepairFailure);
+				// the standalone profile keeps its rollback.
+				if secureClient && keepProtectedHooksOnRepairFailure(previousLockEntry) {
+					reportProtectedHookRepairFailure(dataDir, conn.Name(), cause)
+					return errors.Join(failures...)
 				}
 				teardownErr := conn.Teardown(ctx, setupOpts)
 				if teardownErr != nil {
@@ -748,6 +764,7 @@ func Install(ctx context.Context, opts InstallOptions) (InstallResult, error) {
 					return rollback(fmt.Errorf("enterprise hooks: publish connector-scoped hook token: %w", err))
 				}
 			}
+			clearProtectedHookRepairFailure(dataDir, conn.Name())
 			result = InstallResult{
 				Connector:       conn.Name(),
 				UserHome:        home,
@@ -764,7 +781,11 @@ func Install(ctx context.Context, opts InstallOptions) (InstallResult, error) {
 			// An agent config this setup put back or recreated (GAP-0564).
 			result.AgentConfig = connector.AgentConfigStatus(conn.Name(), setupOpts, setupStarted, false)
 			return nil
-		})
+		}); err != nil {
+			return err
+		}
+		platformRepairAfterOwnerInstall(home, dataDir, uid, gid)
+		return nil
 	})
 	if err != nil {
 		return InstallResult{}, err

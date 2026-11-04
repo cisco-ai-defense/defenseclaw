@@ -29,7 +29,6 @@ import (
 	"runtime"
 	"sort"
 	"strings"
-	"text/template"
 
 	"github.com/defenseclaw/defenseclaw/internal/lazyregexp"
 	"github.com/defenseclaw/defenseclaw/internal/pathidentity"
@@ -103,7 +102,10 @@ type templateData struct {
 	WindowsPowerShellJS string
 	FailMode            string // Rendered non-outage mode; per-user hooks bake "closed" and ask the current config for a classified outage.
 	Managed             bool
-	SecureClient        bool // render-time profile marker for Unix shell identity headers
+	// ManagedShellGuard renders the managed shell prologue (fail-mode exit
+	// guard, stderr hygiene) into a Secure Client macOS connector hook.
+	ManagedShellGuard bool
+	SecureClient      bool // render-time profile marker for Unix shell identity headers
 	// SecureClientDelivery marks a Secure Client render on a verified install.
 	// Every shell hook uses the installed mode, never the agent environment.
 	SecureClientDelivery bool
@@ -813,6 +815,7 @@ func renderHookScripts(apiAddr, failMode, tokenFile string, extras []string, man
 		APIToken:             "",
 		FailMode:             normalizeHookFailMode(failMode),
 		Managed:              managed,
+		ManagedShellGuard:    managedShellGuardEnabled(managed) && secureClient,
 		SecureClient:         secureClient,
 		SecureClientDelivery: secureClient && secureClientDelivery,
 		TokenFile:            tokenFile,
@@ -2938,7 +2941,7 @@ func (d templateData) ManagedOutageClosed() bool {
 }
 
 func renderTemplate(tmpl string, data templateData) (string, error) {
-	t, err := template.New("").Parse(tmpl)
+	t, err := parseHookTemplate(tmpl)
 	if err != nil {
 		return "", err
 	}

@@ -167,9 +167,3 @@ func startEnterpriseHookLookup(key string, fn func() any) *enterpriseHookLookup 
 	}()
 	return lookup
 }
-
-// repairEnterpriseHookGuardianLedgerObjectPlatform is Windows-only. POSIX
-// ledgers are protected by root ownership and modes the writer re-applies.
-func repairEnterpriseHookGuardianLedgerObjectPlatform(string, bool) error {
-	return errors.New("hook guardian ledger repair is not supported on this platform")
-}

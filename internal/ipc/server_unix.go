@@ -21,6 +21,7 @@ import (
 	"runtime"
 
 	"github.com/defenseclaw/defenseclaw/internal/managed"
+	"golang.org/x/sys/unix"
 )
 
 // bindListenerForOS is the linux + darwin bind block. Applies the
@@ -43,6 +44,17 @@ func (s *Server) bindListenerForOS(ctx context.Context) (net.Listener, error) {
 	if managed.IsManagedEnterprise(s.opts.Config.DeploymentMode) {
 		dirMode = 0o750
 	}
+	managedDarwin := runtime.GOOS == "darwin" && managed.IsManagedEnterprise(s.opts.Config.DeploymentMode)
+	if managed.IsManagedEnterprise(s.opts.Config.DeploymentMode) {
+		// The managed socket folder belongs to DefenseClaw. A symlink or a
+		// non-directory in its place is moved aside (never followed, never
+		// written through) and a fresh folder is created below.
+		if info, err := os.Lstat(dir); err == nil && (info.Mode()&os.ModeSymlink != 0 || !info.IsDir()) {
+			if _, moveErr := managed.MoveAsideStructural(dir, "ipc socket folder is a symlink or not a directory"); moveErr != nil {
+				return nil, fmt.Errorf("ipc: %w", moveErr)
+			}
+		}
+	}
 	if err := os.MkdirAll(dir, dirMode); err != nil {
 		return nil, fmt.Errorf("ipc: mkdir %s: %w", dir, err)
 	}
@@ -50,17 +62,30 @@ func (s *Server) bindListenerForOS(ctx context.Context) (net.Listener, error) {
 	// stricter, so a mode-0750 request lands as 0700). Force the
 	// intended mode explicitly so the staff group actually gets its
 	// traverse bit. Also idempotent when the installer pre-created
-	// the dir with a laxer mode.
-	if err := os.Chmod(dir, dirMode); err != nil {
+	// the dir with a laxer mode. Mode and owner are set on a
+	// descriptor; in managed mode it is opened without following
+	// links, so a folder swapped for a symlink after the check above
+	// can never redirect root's chmod or chown. A standalone install
+	// may keep its socket folder behind a symlink, as before.
+	openFlags := unix.O_RDONLY | unix.O_DIRECTORY | unix.O_CLOEXEC
+	if managed.IsManagedEnterprise(s.opts.Config.DeploymentMode) {
+		openFlags |= unix.O_NOFOLLOW
+	}
+	dirFD, err := unix.Open(dir, openFlags, 0)
+	if err != nil {
+		return nil, fmt.Errorf("ipc: open %s: %w", dir, err)
+	}
+	defer func() { _ = unix.Close(dirFD) }()
+	if err := unix.Fchmod(dirFD, uint32(dirMode)); err != nil {
 		return nil, fmt.Errorf("ipc: chmod %s: %w", dir, err)
 	}
 	// Best-effort chown to root:staff on darwin managed_enterprise.
 	// Fails silently on non-root dev runs; a real install runs as
-	// root and the chown succeeds. We rely on os.Chown returning
+	// root and the chown succeeds. We rely on chown returning
 	// EPERM for the unprivileged case and only treat other errors
 	// as fatal.
-	if runtime.GOOS == "darwin" && managed.IsManagedEnterprise(s.opts.Config.DeploymentMode) && s.staffGID > 0 {
-		if err := os.Chown(dir, 0, int(s.staffGID)); err != nil && !os.IsPermission(err) {
+	if managedDarwin && s.staffGID > 0 {
+		if err := unix.Fchown(dirFD, 0, int(s.staffGID)); err != nil && !os.IsPermission(err) {
 			return nil, fmt.Errorf("ipc: chown %s to root:staff: %w", dir, err)
 		}
 	}

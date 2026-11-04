@@ -1,7 +1,7 @@
 // Copyright 2026 Cisco Systems, Inc. and its affiliates
 // SPDX-License-Identifier: Apache-2.0
 
-//go:build !windows
+//go:build !windows && !darwin
 
 package config
 
@@ -16,3 +16,7 @@ const untrustedWriterAcceptedAsBoundary = false
 func grantUntrustedWriterForTest(t *testing.T, _ string) {
 	t.Helper()
 }
+
+// configTrustAccepted reports whether a managed load passed the config trust
+// check.
+func configTrustAccepted(err error) bool { return err == nil }
