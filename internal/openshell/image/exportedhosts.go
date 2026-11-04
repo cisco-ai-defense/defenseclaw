@@ -103,7 +103,7 @@ func parseExportedHosts(r io.Reader) (exportedHosts, error) {
 		result.present = true
 		result.typeflag = h.Typeflag
 		switch h.Typeflag {
-		case tar.TypeReg, tar.TypeRegA:
+		case tar.TypeReg:
 			if h.Size < 0 || h.Size > maxExportedHosts {
 				return result, errors.New("exported image /etc/hosts is too large to check")
 			}
@@ -128,7 +128,7 @@ func parseExportedHosts(r io.Reader) (exportedHosts, error) {
 // (spaces, tabs, newlines and colons) names a library, and any other kind
 // of entry cannot be judged.
 func exportedPreload(h *tar.Header, r io.Reader) (string, error) {
-	if h.Typeflag != tar.TypeReg && h.Typeflag != tar.TypeRegA {
+	if h.Typeflag != tar.TypeReg {
 		return "is not a regular file", nil
 	}
 	if h.Size < 0 || h.Size > maxExportedPreload {
@@ -147,7 +147,7 @@ func exportedPreload(h *tar.Header, r io.Reader) (string, error) {
 // exportedNSS says why the export's /etc/nsswitch.conf entry h lets code
 // besides libc answer host lookups, or "".
 func exportedNSS(h *tar.Header, r io.Reader) (string, error) {
-	if h.Typeflag != tar.TypeReg && h.Typeflag != tar.TypeRegA {
+	if h.Typeflag != tar.TypeReg {
 		return "is not a regular file", nil
 	}
 	if h.Size < 0 || h.Size > maxExportedPreload {
