@@ -13,6 +13,10 @@ import (
 	"strconv"
 )
 
+// accountGroupsRunner runs the group listing tools; macOS answers its uid
+// membership checks in process (membership_darwin.go).
+var accountGroupsRunner commandRunner = runTrustedCommand
+
 // platformAccountGroupIDs binds os/user's group candidates to the uid. Local
 // accounts use local group records; directory accounts use the verified NSS
 // owner of the uid. The original name-based candidate list is not reused.
