@@ -676,7 +676,7 @@ func TestCheckpointWALIfLargeBoundsALogOverTheLimitUnderAFlood(t *testing.T) {
 		t.Fatalf("emergency catch-up held the writer for %v; want the %v copy inside the 500 ms writer bound", pass.WriterHeld, slowCopy)
 	}
 	// The contract: a hook write that arrives during the pass waits for the
-	// writer hold the pass reports (inside the fixed 1s cap, checked above)
+	// writer hold the pass reports (inside the emergency cap, checked above)
 	// plus its own commit and at most one commit queued ahead of it. A commit
 	// is the longest ordinary one measured above, never under 100ms
 	// (GAP-2407: a fixed 500ms total failed on a slow Windows runner whose
@@ -733,6 +733,37 @@ func TestGAP0245EmergencyCopyYieldsWriterWithinBound(t *testing.T) {
 		t.Fatalf("ordinary append after guard yield: %v", err)
 	}
 	requireNoDiskFlushes(t, store)
+}
+
+func TestGAP0245IntermediateEmergencyCopyRestartsWAL(t *testing.T) {
+	store, cleanup := newTestStore(t)
+	defer cleanup()
+	withoutDiskFlushes(t, store)
+	logWALGuardEvents(t, store, 200)
+	frames := (walFileSize(t, store) - 32) / (4096 + 24)
+	if frames <= 0 {
+		t.Fatal("no WAL frames to scale")
+	}
+	originalFrameBytes := walFrameBytes
+	walFrameBytes = (WALEmergencyArmBytes + 8<<20) / frames
+	t.Cleanup(func() { walFrameBytes = originalFrameBytes })
+	writeDuringEveryCopy(t, store)
+	originalPhase := walWriterPhaseHook
+	walWriterPhaseHook = func(context.Context) { time.Sleep(450 * time.Millisecond) }
+	t.Cleanup(func() { walWriterPhaseHook = originalPhase })
+	for attempt := 0; attempt < 2; attempt++ {
+		pass, err := store.CheckpointWALIfLarge(context.Background(), 0, testWALWriterBudget)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if pass.Restarted {
+			if !pass.Bounded || pass.WriterDeferred || pass.WriterHeld >= 500*time.Millisecond {
+				t.Fatalf("intermediate emergency copy exceeded the writer bound: %+v", pass)
+			}
+			return
+		}
+	}
+	t.Fatal("intermediate emergency copy did not restart the WAL")
 }
 
 // The bounded catch-up still gives the writer back at walCatchUpCap: a
