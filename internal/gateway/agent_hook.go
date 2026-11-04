@@ -841,10 +841,7 @@ func (a *APIServer) handleAgentHook(connectorName string) http.HandlerFunc {
 						enrichAgentHookSpanPanic(ctx)
 					}
 					if finalization.AuditPersisted {
-						if err := a.finalizeHookCorrelationReceipt(persistCtx, req.CorrelationReceipt); err != nil {
-							fmt.Fprintf(os.Stderr, "[gateway] hook receipt finalization failed connector=%s event=%s: %v\n",
-								connectorName, req.HookEventName, err)
-						}
+						a.finalizeHookCorrelationReceiptBounded(persistCtx, req.CorrelationReceipt, connectorName, req.HookEventName)
 					}
 					a.settlePendingHook(persistCtx, pending, finalization)
 					finalized = true
@@ -1246,10 +1243,7 @@ func (a *APIServer) handleAgentHook(connectorName string) http.HandlerFunc {
 				connectorName, req.HookEventName, err)
 		}
 		if finalization.AuditPersisted {
-			if err := a.finalizeHookCorrelationReceipt(persistCtx, req.CorrelationReceipt); err != nil {
-				fmt.Fprintf(os.Stderr, "[gateway] hook receipt finalization failed connector=%s event=%s: %v\n",
-					connectorName, req.HookEventName, err)
-			}
+			a.finalizeHookCorrelationReceiptBounded(persistCtx, req.CorrelationReceipt, connectorName, req.HookEventName)
 		}
 		a.settlePendingHook(persistCtx, pending, finalization)
 		// The decision is persisted: a panic in the notifier must not

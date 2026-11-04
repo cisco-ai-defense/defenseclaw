@@ -1328,18 +1328,37 @@ func (repo *CorrelationRepository) markReceiptCanonicalPersisted(
               AND observation.status='export_eligible'
               AND observation.bucket<>'telemetry.ingest'
             )`
-	result, err := repo.store.execDB(ctx, "correlation_receipt_accept", `
+	const statement = `
 		UPDATE correlation_receipts SET accepted_time_unix_nano=COALESCE(
 			accepted_time_unix_nano, MAX(?, first_received_time_unix_nano))
 		WHERE connector_instance_id=? AND source_key_digest=? AND fingerprint_sha256=?
-		  AND semantic_event_id=?`+observationGuard, unixNano(acceptedAt), string(instance), sourceKeyDigest,
-		fingerprintSHA256, string(semantic))
-	if err != nil {
-		return fmt.Errorf("audit: mark correlation receipt accepted: %w", err)
-	}
-	rows, err := result.RowsAffected()
-	if err != nil {
-		return fmt.Errorf("audit: inspect accepted correlation receipt: %w", err)
+		  AND semantic_event_id=?` + observationGuard
+	args := []any{unixNano(acceptedAt), string(instance), sourceKeyDigest, fingerprintSHA256, string(semantic)}
+	var rows int64
+	if repo.store.secureClientSchema {
+		result, err := repo.store.execDB(ctx, "correlation_receipt_accept", statement, args...)
+		if err != nil {
+			return fmt.Errorf("audit: mark correlation receipt accepted: %w", err)
+		}
+		if rows, err = result.RowsAffected(); err != nil {
+			return fmt.Errorf("audit: inspect accepted correlation receipt: %w", err)
+		}
+	} else {
+		// The hook-call write group: concurrent calls' receipts share a commit
+		// instead of each waiting for the writer connection (r108 SWEEP-100).
+		err := repo.store.callGroupWrite(ctx, func(ctx context.Context, tx *sql.Tx) error {
+			result, err := tx.ExecContext(ctx, statement, args...)
+			if err != nil {
+				return fmt.Errorf("audit: mark correlation receipt accepted: %w", err)
+			}
+			if rows, err = result.RowsAffected(); err != nil {
+				return fmt.Errorf("audit: inspect accepted correlation receipt: %w", err)
+			}
+			return nil
+		})
+		if err != nil {
+			return err
+		}
 	}
 	if rows != 1 {
 		return ErrCorrelationNotFound
