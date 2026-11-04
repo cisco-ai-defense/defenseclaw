@@ -187,6 +187,22 @@ func (l *lifecycle) describePluginLaunchSession(ctx context.Context, session age
 		return
 	}
 	message := fmt.Sprintf("user %s runs %s (pid %d): %s; its managed hook or plugin load is not proven, so tool calls in this session may be uninspected. Close this session and restart without the bypass", who, name, session.PID, launchCoverageExplanation(reason))
+	if env.GOOS == "linux" && name == "hermes" {
+		arg0 := ""
+		if len(session.Args) > 0 {
+			arg0 = filepath.Base(session.Args[0])
+			if len(arg0) > 80 {
+				arg0 = arg0[:80]
+			}
+		}
+		image := filepath.Base(session.Executable)
+		if session.Executable == "" {
+			image = "unknown"
+		}
+		versionArgument := len(session.Args) > 0 && session.Args[len(session.Args)-1] == "--version"
+		message += fmt.Sprintf(" Observed process identity: parent pid %d, started %s, image %q, argv0 %q, version argument %t.",
+			session.PPID, session.Started.UTC().Format(time.RFC3339Nano), image, arg0, versionArgument)
+	}
 	result.AddWarning(codeManagedLaunchUninspected, message)
 	result.MarkCoverageIncomplete(codeManagedLaunchUninspected)
 	if l.opts.Action == ActionVerify {
