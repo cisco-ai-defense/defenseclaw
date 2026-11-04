@@ -119,7 +119,8 @@ func windowsEnterpriseLeftoverUserStateFolders() []string {
 // whose machine purge Setup's recovery finished, or an earlier uninstall,
 // kept them, and its result named them once or never. The run that asked for
 // the purge, or the recovery of one, says so instead of a silent success
-// (GAP-2094). A plain uninstall keeps these folders by design and is not
+// (GAP-2094). A plain uninstall keeps the account's own files there by design (it
+// removes only what the managed runtime wrote, GAP-0045) and is not
 // asked.
 func addWindowsEnterpriseLeftoverUserStateWarning(result *enterprisestatus.Result, recovered bool) {
 	folders := windowsEnterpriseLeftoverUserStateFolders()

@@ -78,6 +78,31 @@ func newTestService(t *testing.T, runtime config.AIRuntimeConfig, inventoryProvi
 	return service
 }
 
+func TestSecureClientPlaneClassificationProfile(t *testing.T) {
+	for _, test := range []struct {
+		name         string
+		secureClient bool
+	}{
+		{name: "direct"},
+		{name: "secure client", secureClient: true},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			service, err := New(Options{
+				Config:       config.AIRuntimeConfig{Enabled: true, Planes: []string{"c"}, EnableHostPlane: true},
+				SecureClient: test.secureClient,
+				Platform:     allPlanesAvailable(),
+				Providers:    testCatalog(),
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if service.hostPlane == nil || service.hostPlane.indicators.KeepClientMCP != test.secureClient {
+				t.Fatalf("Plane C client profile: hostPlane=%p secureClient=%v", service.hostPlane, test.secureClient)
+			}
+		})
+	}
+}
+
 // TestPollProducesASnapshotOnTheRealHost is the end-to-end smoke test: the
 // service reads this machine and reports coverage without erroring.
 func TestPollProducesASnapshotOnTheRealHost(t *testing.T) {

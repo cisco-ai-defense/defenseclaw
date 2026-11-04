@@ -753,6 +753,10 @@ func (a *APIServer) handleAgentHook(connectorName string) http.HandlerFunc {
 		ctx = withToolChainHookCapture(ctx, req.toolChain)
 		ctx = withSandboxCoverage(ctx)
 		ctx = withAgentHost(ctx, r.Header)
+		// Secure Client hook audit keeps the shape of main.
+		if coworkInspected(a.decisionConfig(ctx)) {
+			ctx = withCowork(ctx, r.Header, connectorName)
+		}
 		ctx = enrichAgentHookContext(ctx, req)
 		ctx = withHookToolCallCapture(ctx, &hookToolCallCapture{})
 		ctx = withHookPanicCapture(ctx)
@@ -1095,6 +1099,7 @@ func (a *APIServer) handleAgentHook(connectorName string) http.HandlerFunc {
 		wireResp = resp
 		auditExtra := mergeHookEnvelopeExtra(hookRequestAuditExtra(ctx, profile), sandboxGate.auditExtra())
 		auditExtra = mergeHookEnvelopeExtra(auditExtra, hookActionCommandAuditExtra(req, hookActiveHome(ctx)))
+		auditExtra = mergeHookEnvelopeExtra(auditExtra, coworkCallAuditExtra(ctx, req.Payload, req.ToolName))
 		if payload["bounded_prefix_review"] == true {
 			auditExtra = mergeHookEnvelopeExtra(auditExtra, map[string]string{"bounded_prefix_review": "true"})
 		}
@@ -1503,6 +1508,8 @@ func (a *APIServer) finalizeAgentHookAnswer(
 		RawEventIDs:  rawEventIDs,
 		EvaluationID: resp.EvaluationID,
 		RuleIDs:      resp.RuleIDs,
+		// The connected Cowork folders ride in their own path-class field.
+		WorkspaceHostPaths: coworkWorkspaceHostPaths(ctx),
 	}
 	if req.pendingOccurrenceID != "" {
 		env.occurrenceID = req.pendingOccurrenceID
@@ -1644,6 +1651,11 @@ func (a *APIServer) finalizeAgentHookAnswer(
 			return
 		}
 		a.health.RecordConnectorRequestFor(connectorName)
+		if _, cowork := coworkFromContext(ctx); cowork {
+			a.health.RecordConnectorSurfaceRequestFor(connectorName, connector.CoworkSurface, req.HookEventName)
+			// Kept across a gateway restart for status and doctor (GAP-0038).
+			persistCoworkActivity(a.configDataDir(), req.HookEventName, time.Now())
+		}
 		if connName(connectorName) == "opencode" {
 			loadProof, _ := req.Payload["load_heartbeat"].(bool)
 			if canonicalEvent(req.HookEventName) == "defenseclawpluginloaded" || loadProof {

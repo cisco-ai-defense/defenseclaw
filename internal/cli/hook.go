@@ -161,6 +161,7 @@ func newHookCmd() *cobra.Command {
 				opts.Stdin = input
 			}
 			applyHostEnterpriseForeignHookGuard(&opts)
+			applyCoworkContext(&opts)
 			// hookexec returns the connector-native process status after writing
 			// any structured decision. os.Exit is required because cobra
 			// collapses RunE outcomes to 0/1.

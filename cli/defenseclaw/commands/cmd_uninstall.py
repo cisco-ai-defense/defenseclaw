@@ -379,6 +379,9 @@ def uninstall_cmd(
     plan = _with_listed_sandboxes(plan, stop_sandboxes)
     ux.banner("DefenseClaw Uninstall")
     _render_plan(plan, dry_run=dry_run)
+    cowork_plugin = _cowork_plugin_built(plan)
+    if cowork_plugin and dry_run:
+        ux.echo(f"  • the Cowork plugin stays in your Claude account: {_COWORK_REMOVAL_STEP}")
 
     if dry_run:
         refusal = _open_tui_refusal(plan) or _running_sandboxes_refusal(plan)
@@ -407,7 +410,22 @@ def uninstall_cmd(
     if plan.connectors:
         # The plan said so; the end says it again, once it is true (GAP-0255).
         ux.warn("Close any agent session still open: it runs without DefenseClaw's hooks now.")
+    if cowork_plugin:
+        ux.warn(f"DefenseClaw cannot remove its Cowork plugin from your Claude account: {_COWORK_REMOVAL_STEP}")
     _render_kept_and_next_steps(plan)
+
+
+_COWORK_REMOVAL_STEP = (
+    "remove it in Claude Desktop (Customize > Plugins, then the ... menu > Remove). "
+    "Until then Cowork tool calls are blocked."
+)
+
+
+def _cowork_plugin_built(plan: UninstallPlan) -> bool:
+    """Whether setup cowork built an account plugin from this data dir."""
+    from defenseclaw import cowork
+
+    return bool(plan.data_dir) and os.path.exists(cowork.state_path(plan.data_dir))
 
 
 _NATIVE_OTEL_READ_LIMIT = 1024 * 1024
@@ -977,6 +995,8 @@ def reset_cmd(skip_sandbox_teardown: bool, yes: bool, stop_sandboxes: bool = Fal
     plan = _with_listed_sandboxes(plan, stop_sandboxes)
     ux.banner("DefenseClaw Reset")
     _render_plan(plan, dry_run=False)
+    # Read before the wipe: reset deletes the Cowork state this looks for.
+    cowork_plugin = _cowork_plugin_built(plan)
 
     _refuse_running_sandboxes(plan)
     if not yes and not click.confirm(
@@ -987,6 +1007,8 @@ def reset_cmd(skip_sandbox_teardown: bool, yes: bool, stop_sandboxes: bool = Fal
         raise SystemExit(1)
 
     _execute_plan(plan)
+    if cowork_plugin:
+        ux.warn(f"DefenseClaw cannot remove its Cowork plugin from your Claude account: {_COWORK_REMOVAL_STEP}")
     ux.ok("Reset complete. Run 'defenseclaw quickstart' to reinstall.")
 
 
@@ -2791,21 +2813,36 @@ def _execute_plan(plan: UninstallPlan) -> ExecutionResult:
         # A stack Docker cannot reach stays, with the command that removes it.
         _local_observability_teardown(plan.data_dir)
     deferred = _requires_deferred_cleanup(plan)
+    held: list[str] = []
+    denied: list[str] = []
     if deferred:
         status: list[str] = []
 
         def schedule() -> None:
+            held.extend(_deferred_cleanup_held_folders(plan))
+            denied.extend(_deferred_cleanup_denied_entries(plan))
             status.append(_schedule_deferred_cleanup(plan))
 
         run_phase("deferred cleanup", schedule)
-        phases[-1] = ExecutionPhaseResult(
-            "deferred cleanup",
-            "scheduled",
-            # The result file stays for the operator to read; the next
-            # uninstall's helper removes it.
-            f"result: {status[0]}, kept for you to read. If another DefenseClaw window still holds a "
-            "file, the removal fails and DefenseClaw stays; the next defenseclaw command then says why",
-        )
+        # The result file stays for the operator to read; the next
+        # uninstall's helper removes it. It said nothing about the data
+        # folder still being there, so a failed cleanup looked like a
+        # finished uninstall (cowork-1-0-8 GAP-0058).
+        if denied:
+            # Known before the CLI exits: say it will fail, not that it may
+            # (cowork-1-0-8 GAP-0063).
+            detail = (
+                f"will not finish: this account cannot remove {_denied_note(denied)}, so {plan.data_dir} "
+                f"stays; the result is written to {status[0]}, kept for you to read"
+            )
+        else:
+            detail = (
+                f"not finished yet: {plan.data_dir} is removed within about a minute after this command "
+                f"exits; the result is written to {status[0]}, kept for you to read. If a program still "
+                "holds a file or folder in it, the removal fails and DefenseClaw stays; the next "
+                "defenseclaw command then says why"
+            )
+        phases[-1] = ExecutionPhaseResult("deferred cleanup", "scheduled", detail)
     elif plan.remove_data_dir:
         run_phase(
             "data removal",
@@ -2838,9 +2875,29 @@ def _execute_plan(plan: UninstallPlan) -> ExecutionResult:
 
     result = ExecutionResult(tuple(phases))
     _render_execution_result(result)
+    for folder in held:
+        ux.warn(
+            f"{folder} is open in another program (a terminal or File Explorer window whose current folder "
+            "is inside it, or an agent session still running): close it now, or the cleanup cannot remove "
+            f"{plan.data_dir}"
+        )
+    if denied:
+        ux.warn(
+            f"this account cannot remove {_denied_note(denied)}: Windows denies it access (probably created "
+            "by an earlier elevated run, such as a hook an elevated Claude Desktop ran), so the cleanup "
+            f"cannot remove {plan.data_dir}. An elevated "
+            "defenseclaw uninstall removes it: open a prompt with Run as administrator and run "
+            "this uninstall command again"
+        )
     if plan.uv_kept:
         ux.warn(f"kept {_uv_kept_note(plan.uv_kept)}")
     return result
+
+
+def _denied_note(denied: list[str]) -> str:
+    shown = ", ".join(denied[:_DENIED_SHOWN])
+    more = len(denied) - _DENIED_SHOWN
+    return f"{shown} and {more} more" if more > 0 else shown
 
 
 def _uv_kept_note(kept: tuple[str, ...]) -> str:
@@ -3475,6 +3532,67 @@ def _helper_failure_detail(*result_paths: str) -> str:
         if isinstance(result, dict) and result.get("status") == "failed" and result.get("detail"):
             return f": {result['detail']} (details: {path})"
     return ""
+
+
+# How often and how long the CLI re-checks a held folder before it warns:
+# a scanner's or indexer's brief hold lets go within it.
+_HELD_FOLDER_CHECKS = 5
+_HELD_FOLDER_CHECK_INTERVAL = 0.5
+
+
+def _deferred_cleanup_skip(plan: UninstallPlan) -> set[str]:
+    """What the deferred-cleanup checks leave out: the runtimes the helper removes after this CLI, and kept entries."""
+    skip = {plan.managed_venv, os.path.join(plan.data_dir, ".uv")}
+    skip.update(os.path.join(plan.data_dir, name) for name in plan.preserve_data_entries)
+    return skip
+
+
+def _deferred_cleanup_held_folders(plan: UninstallPlan) -> list[str]:
+    """The data folders another program holds, which the deferred cleanup cannot remove (GAP-0058).
+
+    The cleanup runs after this CLI exits, with no console, so a folder it
+    could not remove (on the test computer hooks\\.outage-warnings; which
+    program, if any, held it was not identified) left the whole data folder
+    behind while the console said nothing. The check changes nothing; the
+    runtime this CLI runs from and the Python the helper runs on are not
+    checked (they go after it exits). A brief hold is re-checked before it is
+    reported. The check is advisory: if it fails, it reports nothing and the
+    cleanup is still scheduled.
+    """
+    skip = _deferred_cleanup_skip(plan)
+    try:
+        held = windows_uninstall_helper.held_folders(plan.data_dir, skip)
+        for _ in range(_HELD_FOLDER_CHECKS - 1):
+            if not held:
+                break
+            time.sleep(_HELD_FOLDER_CHECK_INTERVAL)
+            still = set(windows_uninstall_helper.held_folders(plan.data_dir, skip))
+            held = [folder for folder in held if folder in still]
+    except Exception:  # noqa: BLE001 - an advisory check must never stop the cleanup.
+        return []
+    return held
+
+
+# How many of the entries this account cannot remove the console names.
+_DENIED_SHOWN = 3
+
+
+def _deferred_cleanup_denied_entries(plan: UninstallPlan) -> list[str]:
+    """The data entries this account cannot remove, which stop the deferred cleanup (GAP-0063).
+
+    A file or folder an elevated run created as the Administrators group
+    (hooks\\.outage-warnings, written by a hook that an elevated Claude
+    Desktop ran) cannot be removed from a token without elevation; the
+    cleanup, which runs after this CLI exits, failed on it and the data
+    folder stayed. An elevated token removes it, so it reports nothing.
+    Skips what _deferred_cleanup_held_folders skips. Advisory, as that one:
+    an error reports nothing and the cleanup is still scheduled.
+    """
+    skip = _deferred_cleanup_skip(plan)
+    try:
+        return windows_uninstall_helper.denied_entries(plan.data_dir, skip)
+    except Exception:  # noqa: BLE001 - an advisory check must never stop the cleanup.
+        return []
 
 
 def _schedule_deferred_cleanup(plan: UninstallPlan) -> str:

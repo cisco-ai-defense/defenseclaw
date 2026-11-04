@@ -1367,3 +1367,41 @@ def test_windows_write_acl_on_the_data_directory_fails_the_private_files_row(tmp
     assert f"{data_dir} (unsafe Windows ACL: ACL grants write access" in row["detail"]
     assert "remove other accounts' write access" in row["remediation"]
     assert [kwargs for _path, kwargs in seen] == [{"allow_current_user": True, "require_current_user_owner": True}]
+def test_administrators_owned_private_file_names_the_elevated_session_and_the_fix(tmp_path, monkeypatch) -> None:
+    # GAP-0050: a per-user init run from an elevated administrator token left
+    # audit.db owned by BUILTIN\Administrators; doctor said only "review
+    # ownership". It must name the cause and the exact fix.
+    data_dir = _private_data_dir(tmp_path)
+    cfg = _cfg(data_dir)
+    environ = {"USERDOMAIN": "DCLAB", "USERNAME": "dcadmin"}
+    monkeypatch.setattr(cmd_doctor, "os", SimpleNamespace(name="nt", path=os.path, lstat=os.lstat, environ=environ))
+    monkeypatch.setattr(
+        "defenseclaw.file_permissions._windows_current_user_sid", lambda: "S-1-5-21-111-222-333-500"
+    )
+    audit_db = os.path.join(data_dir, "audit.db")
+    with open(audit_db, "wb"):
+        pass
+
+    for owner_problem, elevated in (
+        ("owner SID S-1-5-32-544 is not the current user", True),
+        ("owner SID S-1-5-21-1-2-3-1001 is not the current user", False),
+    ):
+        with (
+            patch(
+                "defenseclaw.file_permissions.windows_acl_confidentiality_error",
+                side_effect=lambda path, problem=owner_problem: problem if path == audit_db else None,
+            ),
+            patch("defenseclaw.file_permissions.windows_acl_custody_write_error", return_value=None),
+        ):
+            rows = _DoctorResult()
+            cmd_doctor._check_private_file_exposure(cfg, rows)
+        row = rows.checks[-1]
+        assert row["status"] == "fail", rows.checks
+        assert f"{audit_db} (unsafe Windows ACL: {owner_problem})" in row["detail"]
+        if elevated:
+            assert "because DefenseClaw ran from an elevated administrator session" in row["remediation"]
+            assert f'icacls "{data_dir}" /setowner "*S-1-5-21-111-222-333-500" /T /C /Q' in row["remediation"]
+            assert "review ownership" not in row["remediation"]
+        else:
+            assert "elevated" not in row["remediation"]
+            assert f"review ownership and remove untrusted permissions on {audit_db}" in row["remediation"]

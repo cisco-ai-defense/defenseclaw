@@ -531,11 +531,23 @@ claude_fail_closed_decision() {
     esac
 {{end}}    exit 2
   fi
-{{if not .Sandbox}}  # Claude Code does not show stderr of a hook that exits 0: say on screen
+{{if and .SecureClient (not .Sandbox)}}  # Claude Code does not show stderr of a hook that exits 0: say on screen
   # that this account's gateway is down and how to start it again.
   if [ "$1" = "gateway unreachable" ]; then
     case "$(printf '%s' "$PAYLOAD" | _dc_jq -r '.hook_event_name // empty' 2>/dev/null)" in
       SessionStart|UserPromptSubmit|PreToolUse) defenseclaw_unreachable_notice_json ;;
+    esac
+  fi
+{{else if not .Sandbox}}  # Claude Code does not show stderr of a hook that exits 0: say on screen
+  # that this account's gateway is down and how to start it again. A prompt
+  # or tool call carries the warning: only the interactive terminal shows a
+  # SessionStart systemMessage, while Claude Cowork, the IDE extensions and
+  # claude -p (the Agent SDK stream) drop it, so a session start would spend
+  # the once-per-session warning unseen (cowork-1-0-8 GAP-0040). Secure
+  # Client renders keep their pinned bytes.
+  if [ "$1" = "gateway unreachable" ]; then
+    case "$(printf '%s' "$PAYLOAD" | _dc_jq -r '.hook_event_name // empty' 2>/dev/null)" in
+      UserPromptSubmit|PreToolUse) defenseclaw_unreachable_notice_json ;;
     esac
   fi
 {{end}}  exit 0
@@ -589,6 +601,54 @@ done < <(defenseclaw_extract_trace_context)
   done < <(defenseclaw_user_identity_args)
 fi
 {{else}}defenseclaw_user_identity_header_args
+{{end}}{{if and (not .SecureClient) (not .Sandbox)}}
+# Claude Cowork runs this hook from the Claude Code engine Claude Desktop
+# bundles, with CLAUDE_CODE_IS_COWORK=1: the call names its Cowork session for
+# the audit (X-DefenseClaw-Cowork, hookexec.CoworkHeader), as the native
+# runner does. It is attribution, never a policy input. The engine is looked
+# for among the nearest ancestors only when the flag is set, by the same
+# paths the native runner knows (rendered from the Claude Desktop data
+# folder table, connector.ClaudeDesktopEngineCaseSH), compared in lower case.
+defenseclaw_cowork_engine() {
+  local pid="${PPID:-}" hops=0 exe parent
+  while [ "$hops" -lt 3 ] && [ -n "$pid" ] && [ "$pid" -gt 1 ] 2>/dev/null; do
+    exe=
+    if [ -e "/proc/$pid/exe" ]; then
+      exe="$(readlink "/proc/$pid/exe" 2>/dev/null)" || exe=
+    elif [ -x /bin/ps ]; then
+      exe="$(LC_ALL=C /bin/ps -o comm= -p "$pid" 2>/dev/null)" || exe=
+    fi
+    if [ -n "$exe" ]; then
+      exe="$(printf '%s' "$exe" | LC_ALL=C tr '[:upper:]' '[:lower:]')" || exe=
+    fi
+    case "$exe" in
+      {{.ClaudeDesktopEngineCaseSH}}) return 0 ;;
+    esac
+    if [ -r "/proc/$pid/stat" ]; then
+      parent="$(sed -e 's/^.*) [A-Za-z] //' -e 's/ .*//' "/proc/$pid/stat" 2>/dev/null)" || parent=
+    elif [ -x /bin/ps ]; then
+      parent="$(LC_ALL=C /bin/ps -o ppid= -p "$pid" 2>/dev/null)" || parent=
+    else
+      parent=
+    fi
+    pid="${parent//[!0-9]/}"
+    hops=$((hops + 1))
+  done
+  return 1
+}
+COWORK_HEADER_ARGS=()
+if [ "${CLAUDE_CODE_IS_COWORK:-}" = "1" ] && defenseclaw_cowork_engine; then
+  _dc_cowork_session="${CLAUDE_CODE_SESSION_ID:-}"
+  case "$_dc_cowork_session" in *[!A-Za-z0-9._:-]*) _dc_cowork_session= ;; esac
+  # The raw folder list, base64 encoded (the gateway parses it): no shell
+  # quoting of an arbitrary value. Over 8 KiB it is left out.
+  _dc_cowork_paths=
+  if [ -n "${CLAUDE_CODE_WORKSPACE_HOST_PATHS:-}" ] && [ "${#CLAUDE_CODE_WORKSPACE_HOST_PATHS}" -le 8192 ]; then
+    _dc_cowork_paths="$(printf '%s' "$CLAUDE_CODE_WORKSPACE_HOST_PATHS" | base64 2>/dev/null | tr -d '\r\n')" || _dc_cowork_paths=
+    case "$_dc_cowork_paths" in *[!A-Za-z0-9+/=]*) _dc_cowork_paths= ;; esac
+  fi
+  COWORK_HEADER_ARGS=(-H "X-DefenseClaw-Cowork: {\"session_id\":\"${_dc_cowork_session}\",\"workspace_host_paths_b64\":\"${_dc_cowork_paths}\"}")
+fi
 {{end}}
 {{if .Sandbox}}# One short attempt plus one retry carrying the same idempotency key: the
 # OpenShell relay occasionally drops a request, and the ingress dedupes by key.
@@ -634,7 +694,8 @@ defenseclaw_hook_post() {
 {{if and .Managed (not .SecureClient)}}    "${RESOLVED_HEADER_ARGS[@]+"${RESOLVED_HEADER_ARGS[@]}"}" \
 {{end}}    "${AUTH_HEADER_ARGS[@]+"${AUTH_HEADER_ARGS[@]}"}" \
     "${TRACE_HEADER_ARGS[@]+"${TRACE_HEADER_ARGS[@]}"}" \
-    "${IDENTITY_HEADER_ARGS[@]+"${IDENTITY_HEADER_ARGS[@]}"}"{{if .HookSocketTransportSH}} \
+    "${IDENTITY_HEADER_ARGS[@]+"${IDENTITY_HEADER_ARGS[@]}"}"{{if not .SecureClient}} \
+    "${COWORK_HEADER_ARGS[@]+"${COWORK_HEADER_ARGS[@]}"}"{{end}}{{if .HookSocketTransportSH}} \
     -H "X-DefenseClaw-Hook-Bridge: shell" \
     --unix-socket "${DEFENSECLAW_HOOK_SOCKET}"{{end}}
 }

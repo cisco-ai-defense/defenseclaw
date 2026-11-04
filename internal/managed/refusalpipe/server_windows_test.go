@@ -260,7 +260,7 @@ func TestRefusalPipeSendWaitsForNextInstance(t *testing.T) {
 				case <-resume:
 				}
 			}
-			pipe, err := createPipe(name, security, true)
+			pipe, err := createPipe(name, security, true, uint32(len(Receipt)))
 			if err != nil {
 				served <- err
 				return

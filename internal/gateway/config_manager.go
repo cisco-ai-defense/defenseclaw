@@ -2078,19 +2078,9 @@ func (m *ConfigManager) buildCandidate(raw []byte) (*config.Config, configReload
 	if !config.CurrentSchemaVersion(next.ConfigVersion) {
 		return nil, configReloadSource{}, fmt.Errorf("config reload: the configuration is from an older DefenseClaw; run 'defenseclaw migrate' first")
 	}
-	if compiled == nil || compiled.Plan == nil {
-		return nil, configReloadSource{}, fmt.Errorf("config reload v8 compiler returned no effective plan")
+	if err := config.UseCompiledLocalStores(next, m.path, raw, compiled); err != nil {
+		return nil, configReloadSource{}, fmt.Errorf("config reload: %w", err)
 	}
-	snapshot := compiled.Plan.Snapshot()
-	if strings.TrimSpace(snapshot.Local.Path) == "" || strings.TrimSpace(snapshot.Local.JudgeBodiesPath) == "" {
-		return nil, configReloadSource{}, fmt.Errorf("config reload v8 local store paths are incomplete")
-	}
-	next.DataDir = compiled.DataDir
-	if err := config.ApplyRuntimeV8DataDirDefaultsFromBytes(next, m.path, raw, compiled.DataDir); err != nil {
-		return nil, configReloadSource{}, err
-	}
-	next.AuditDB = snapshot.Local.Path
-	next.JudgeBodiesDB = snapshot.Local.JudgeBodiesPath
 	// NOTE: the release-owned managed-enterprise destination is NOT
 	// injected here. `next.CiscoAIDefense.Endpoint` at this point is
 	// the raw config.yaml value; the AVC env_config.json overlay

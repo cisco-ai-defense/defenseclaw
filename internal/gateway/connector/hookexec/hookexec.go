@@ -422,6 +422,9 @@ type Options struct {
 	// AgentSurface is the surface the hook classified its caller as
 	// (AgentSurfaceHeader); "" when unclassified.
 	AgentSurface string
+	// Cowork is the Claude Cowork context of a claudecode call (CoworkHeader);
+	// nil outside Cowork.
+	Cowork *CoworkContext
 	// ManagedRuntimeFailure is a stable, non-sensitive resolver diagnostic
 	// selected before target-owned runtime files are consulted.
 	ManagedRuntimeFailure string
@@ -1598,6 +1601,9 @@ func sendHookRequest(
 	}
 	if surface := AgentSurfaceHeaderValue(opts.AgentSurface); surface != "" {
 		req.Header.Set(AgentSurfaceHeader, surface)
+	}
+	if opts.Cowork != nil && sp.connector == "claudecode" {
+		req.Header.Set(CoworkHeader, opts.Cowork.HeaderValue())
 	}
 	if token != "" {
 		req.Header.Set("Authorization", "Bearer "+token)
@@ -2792,7 +2798,11 @@ func perUserGatewayDownNotice(opts Options, sp spec, reason string) string {
 	field := "systemMessage"
 	switch {
 	case sp.connector == "claudecode":
-		events = []string{"SessionStart", "UserPromptSubmit", "PreToolUse"}
+		// Only the interactive terminal shows a SessionStart systemMessage;
+		// Claude Cowork, the IDE extensions and claude -p (the Agent SDK
+		// stream) drop it, so the warning waits for the first prompt or tool
+		// call, which every Claude Code surface shows (cowork-1-0-8 GAP-0040).
+		events = []string{"UserPromptSubmit", "PreToolUse"}
 	case sp.connector == "codex":
 		events = []string{"SessionStart", "PreToolUse"}
 	case copilotCLIOutageNotice(sp):

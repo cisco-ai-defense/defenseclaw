@@ -46,6 +46,7 @@ from defenseclaw.connector_contracts import normalize_connector
 from defenseclaw.context import AppContext, pass_ctx
 from defenseclaw.gateway import OrchestratorClient, SandboxAPIError
 from defenseclaw.inventory import agent_discovery, ai_signatures
+from defenseclaw.inventory.claude_desktop import ClaudeDesktopInfo
 
 
 def _mapping_block(value: Any) -> Mapping[str, Any]:
@@ -4641,6 +4642,12 @@ def _format_runtime(runtime: dict[str, Any], *, live: bool = False) -> str:
     return " ".join(parts)
 
 
+def _format_claude_desktop(block: Any) -> str:
+    """The ``claude_desktop`` block of a signal as one line, or "" without one."""
+    info = ClaudeDesktopInfo.from_mapping(block)
+    return info.summary() if info else ""
+
+
 def _humanize_seconds(seconds: int) -> str:
     """Compact ``[Nd][Nh][Nm][Ns]`` formatting; uses the two largest units."""
     if seconds <= 0:
@@ -4911,6 +4918,7 @@ def _render_ai_usage_table(
             for sig in displayed
         )
         has_runtime = any(sig.get("runtime") for sig in displayed)
+        has_desktop = any(sig.get("claude_desktop") for sig in displayed)
         has_last_active = any(sig.get("last_active_at") for sig in displayed)
         # Identity / Presence columns appear only when the gateway
         # has the two-axis engine wired (v2+). Older sidecars still
@@ -4943,6 +4951,8 @@ def _render_ai_usage_table(
             table.add_column("Presence")
         if has_runtime:
             table.add_column("Runtime")
+        if has_desktop:
+            table.add_column("Claude Desktop")
         if has_last_active:
             table.add_column("Last active")
         table.add_column("Evidence")
@@ -5014,6 +5024,8 @@ def _render_ai_usage_table(
                     prev_conf_key = conf_key
             if has_runtime:
                 row.append(_format_runtime(runtime, live=sig.get("source") == "sandbox"))
+            if has_desktop:
+                row.append(_format_claude_desktop(sig.get("claude_desktop")))
             if has_last_active:
                 row.append(_format_relative_time(sig.get("last_active_at", "")))
             # Prefer the richer evidence records (basename + quality
@@ -5177,6 +5189,7 @@ def _render_ai_usage_plain(
     if detail:
         rows = signals[:limit] if limit > 0 else signals
         has_model = any(_mapping_block(sig.get("model")).get("id") for sig in rows)
+        has_desktop = any(sig.get("claude_desktop") for sig in rows)
         for sig in rows:
             comp = _mapping_block(sig.get("component"))
             model = _mapping_block(sig.get("model"))
@@ -5209,6 +5222,10 @@ def _render_ai_usage_plain(
                 _format_confidence(sig.get("identity_score"), sig.get("identity_band")),
                 _format_confidence(sig.get("presence_score"), sig.get("presence_band")),
                 _format_runtime(runtime, live=sig.get("source") == "sandbox"),
+            ])
+            if has_desktop:
+                fields.append(_format_claude_desktop(sig.get("claude_desktop")))
+            fields.extend([
                 _format_relative_time(sig.get("last_active_at", "")),
                 evidence_cell,
             ])

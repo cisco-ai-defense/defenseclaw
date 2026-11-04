@@ -19,6 +19,12 @@
 // command report carries only the refused command's fixed words and a reason,
 // never its arguments, and becomes the refused-command row the Unix gateway
 // writes for its hook socket's peer (managed_refusal_audit.go).
+//
+// A second pipe, OwnStatusPipeName, answers a standard account's own
+// `defenseclaw status` (cowork-1-0-8 GAP-0060): the account holds no gateway
+// credential, so the gateway names it from the pipe client token as it
+// names a refusal's sender, and answers with that account's own protection
+// state only.
 package refusalpipe
 
 import (
@@ -34,6 +40,17 @@ const PipeName = `\\.\pipe\` + managed.StandaloneWindowsGatewaySvc + `-unenrolle
 
 // MaxMessageBytes bounds one report.
 const MaxMessageBytes = 1024
+
+// OwnStatusPipeName is the gateway service pipe on which a standard account
+// of a managed Windows computer reads its own protection state.
+const OwnStatusPipeName = `\\.\pipe\` + managed.StandaloneWindowsGatewaySvc + `-own-status`
+
+// OwnStatusRequest is the only message the own-status pipe takes. It names
+// no account: the gateway answers for the pipe client token.
+const OwnStatusRequest = `{"request":"own-status"}`
+
+// MaxOwnStatusBytes bounds an own-status answer.
+const MaxOwnStatusBytes = 16 << 10
 
 // The refusal reasons a report may carry: the Windows standalone hook's
 // unenrolled-account refusals (enterprisehooks.WindowsManagedSIDUnregisteredReason

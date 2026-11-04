@@ -899,16 +899,37 @@ step "MDM detection (detect.sh)"
 detected=$(detect_settled --min-version "$version")
 [ "$detected" = "$version" ] || die "detect.sh printed '$detected', want '$version'"
 echo "detect.sh: $detected"
-# --require-healthy requires verify.ok and verify.security_complete
-# (packaging/mdm/contract/detection.md): with the hook-process limit of the
-# enabled Claude Code and Codex, and on a kernel with open policy-view routes,
-# verify is ok with incomplete security, so the device reports unhealthy.
+# --require-healthy requires verify.ok, verify.coverage_complete and, when
+# security_complete is false, only host-hardening reasons in verify's
+# security_incomplete note (packaging/mdm/contract/detection.md): the
+# hook-process limit of the enabled Claude Code and Codex and open kernel
+# policy-view routes, which only --require-security-complete reports
+# unhealthy. The note is parsed here in Python, apart from detect.sh's awk.
 want_healthy=$version
-[ "$(json_field "$results/04-verify.json" ok)" = True ] && [ "$(json_field "$results/04-verify.json" security_complete)" = True ] ||
-    want_healthy=unhealthy
+"$python" - "$results/04-verify.json" <<'PY' || want_healthy=unhealthy
+import json, sys
+r = json.load(open(sys.argv[1], encoding="utf-8-sig"))
+if r.get("ok") is not True or r.get("coverage_complete") is not True:
+    sys.exit(1)
+if r.get("security_complete") is True:
+    sys.exit(0)
+note = next((w.get("message") or "" for w in r.get("warnings") or [] if w.get("code") == "security_incomplete"), "")
+prefix = "security_complete is false because of: "
+suffix = "; coverage_complete is true; each warning above says what to do"
+if not (note.startswith(prefix) and note.endswith(suffix)):
+    sys.exit(1)
+reasons = note[len(prefix):-len(suffix)].split(", ")
+sys.exit(0 if all(reason in {"hook_process_fail_open", "unprivileged_user_namespaces", "unprivileged_ptrace"}
+                  for reason in reasons) else 1)
+PY
 detected=$(detect_settled --require-healthy --min-version "$version")
 [ "$detected" = "$want_healthy" ] || die "detect.sh --require-healthy printed '$detected', want '$want_healthy'"
 echo "detect.sh --require-healthy: $detected"
+want_secure=$want_healthy
+[ "$(json_field "$results/04-verify.json" security_complete)" = True ] || want_secure=unhealthy
+detected=$(detect_value --require-security-complete --min-version "$version" || true)
+[ "$detected" = "$want_secure" ] || die "detect.sh --require-security-complete printed '$detected', want '$want_secure'"
+echo "detect.sh --require-security-complete: $detected"
 
 # ---- uninstall ---------------------------------------------------------------
 step "uninstall (the machine config and state go too)"

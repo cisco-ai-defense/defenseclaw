@@ -20,6 +20,8 @@ type rowsAcquirer struct {
 	rows []procprobe.Process
 }
 
+func (rowsAcquirer) Brokered() bool { return false }
+
 func (a rowsAcquirer) Processes(context.Context) ([]procprobe.Process, int, error) {
 	return append([]procprobe.Process(nil), a.rows...), 2, nil
 }
@@ -43,4 +45,14 @@ func TestOwnAccountProcessesDropsOtherAccounts(t *testing.T) {
 	if _, wrapped := ownAccountProcesses(managedCfg, base).(ownerProcessAcquirer); wrapped {
 		t.Fatal("managed gateway acquirer was wrapped")
 	}
+	// A root helper root started for this gateway is the machine sensor
+	// (Cowork VM): its machine-wide view is kept.
+	brokered := brokeredRowsAcquirer{rowsAcquirer: base}
+	if _, wrapped := ownAccountProcesses(&config.Config{}, brokered).(ownerProcessAcquirer); wrapped {
+		t.Fatal("an unmanaged gateway brokering through a root helper dropped the other accounts")
+	}
 }
+
+type brokeredRowsAcquirer struct{ rowsAcquirer }
+
+func (brokeredRowsAcquirer) Brokered() bool { return true }

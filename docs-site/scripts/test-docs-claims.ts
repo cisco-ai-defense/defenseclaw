@@ -1853,7 +1853,7 @@ const r105Rows: DocRow[] = [
   { gap: "GAP-2264", page: "hitl.mdx", has: ["Outside Manual mode Claude Code cannot ask, so the call is blocked and its row shows `decision=blocked` in the list and `blocked` on the `Decision` line of `--show`."], lacks: ["Outside Manual mode, the decision is `block`."] },
   { gap: "GAP-2264", page: "stories/hitl-approvals.mdx", has: ["Outside Manual mode Claude Code cannot ask, so the call is blocked and its row shows `decision=blocked` in the list and `blocked` on the `Decision` line of `--show`."], lacks: ["Outside Manual mode, the decision is `block`."] },
   { gap: "GAP-2260", page: "guardrail/semantic-routing.mdx", has: ["Native Windows is not supported: there `defenseclaw setup routing` says so and refuses `--enable`, and `--disable` still turns off a routing block copied from another machine."] },
-  { gap: "GAP-2334", page: "enterprise/mdm/linux-config-management.mdx", section: "Check health", has: ["| Kit detection script | `packaging/mdm/linux/detect.sh --require-healthy` (exit `1`, or `unhealthy` with `--format value`, when `verify` reports a problem or `security_complete` is `false`: a host whose `verify` passes with incomplete security still fails it, and the message says which) |"], lacks: ["| Kit detection script | `packaging/mdm/linux/detect.sh --require-healthy` |"] },
+  { gap: "GAP-2334", page: "enterprise/mdm/linux-config-management.mdx", section: "Check health", has: ["| Kit detection script | `packaging/mdm/linux/detect.sh --require-healthy` (exit `1`, or `unhealthy` with `--format value`, when `verify` reports a problem, `coverage_complete` is `false`, or `security_complete` is `false` for any reason other than `hook_process_fail_open`, `unprivileged_user_namespaces` and `unprivileged_ptrace`; a host with only those warnings passes and gets them on standard error). Add `--require-security-complete` to fail on incomplete security too |"], lacks: ["| Kit detection script | `packaging/mdm/linux/detect.sh --require-healthy` |", "a host whose `verify` passes with incomplete security still fails it", "a host whose `verify` passes with only incomplete security passes"] },
   // pod docs r105 loop i1 (2026-10-28)
   { gap: "GAP-2411", page: "enterprise/troubleshooting.mdx", has: ["On Linux and macOS `status` warns `policy_not_applied` with `policy.applied: false` and `security_complete: false`, and `verify` reports it as an error and exits `1`."], lacks: ["`policy.applied: false` and do not warn"] },
   { gap: "GAP-2411", page: "enterprise/operations.mdx", has: ["`verify` reports `policy_not_applied` or `policy_reload_rejected` as an error"] },
@@ -2244,7 +2244,8 @@ describe('Setup properties and the Windows unknown-flag exit match the code (GAP
   it('lists every property standalone Setup /? prints', () => {
     const main = source('cmd/defenseclaw-enterprise-setup/main.go');
     const usage = main.slice(main.indexOf('func writeStandaloneSetupUsage('), main.indexOf('Exit codes: 0 success, 1603 failure'));
-    const props = [...usage.matchAll(/"  ([A-Z]+)=/g)].map((m) => m[1]);
+    // The COWORK* Setup properties stay out of the public docs in 1.0.8.
+    const props = [...usage.matchAll(/"  ([A-Z]+)=/g)].map((m) => m[1]).filter((p) => !p.startsWith('COWORK'));
     assert.ok(props.length >= 12, `Setup usage parse found ${props.length} properties`);
     for (const page of ['enterprise/windows.mdx', 'reference/cli.mdx']) {
       const text = pageSection(page);
@@ -2309,12 +2310,19 @@ describe('Linux MDM wrapper busy retries match intune-linux.mdx (GAP-1537)', () 
   });
 });
 
-// GAP-2334: detect.sh --require-healthy fails on security_complete false as
-// well as on a verify problem; the Linux config-management page says so.
-describe('kit detect.sh health gate matches the Linux Check health row (GAP-2334)', () => {
-  it('fails on a verify problem and on incomplete security', () => {
+// GAP-2334: detect.sh --require-healthy fails on a verify problem and on
+// coverage_complete false; since cowork-1-0-8 GAP-0021 incomplete security from
+// host-hardening reasons alone (DC_HARDENING_REASONS) only warns, any other reason
+// only warns, and --require-security-complete fails on it. The Linux
+// config-management page says so.
+describe('kit detect.sh health gate matches the Linux Check health row (GAP-2334, GAP-0021)', () => {
+  it('fails on a verify problem, incomplete coverage and non-hardening security reasons; hardening only with --require-security-complete', () => {
     const detect = source('packaging/mdm/linux/detect.sh');
-    assert.ok(detect.includes('dc_json_true "$verify" ok || dc_report 0 unhealthy') && detect.includes('dc_json_true "$verify" security_complete || dc_report 0 unhealthy "verify reported incomplete security'), 'detect.sh --require-healthy gate changed: re-check enterprise/mdm/linux-config-management.mdx Check health');
+    assert.ok(detect.includes('dc_json_true "$verify" ok || dc_report 0 unhealthy') && detect.includes('dc_json_true "$verify" coverage_complete ||')
+      && detect.includes('[ "$DC_REQUIRE_SECURITY_COMPLETE" = 0 ] ||\n            dc_report 0 unhealthy "verify reported incomplete security')
+      && detect.includes("DC_HARDENING_REASONS='hook_process_fail_open unprivileged_user_namespaces unprivileged_ptrace'")
+      && detect.includes('dc_hardening_only "$note" ||\n            dc_report 0 unhealthy "verify reported incomplete security beyond host hardening')
+      && !detect.includes('dc_json_true "$verify" security_complete || dc_report'), 'detect.sh --require-healthy gate changed: re-check enterprise/mdm/linux-config-management.mdx Check health');
   });
 });
 

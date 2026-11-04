@@ -53,6 +53,7 @@ jobs:
       checks: ${{ steps.classify.outputs.checks }}
       core: ${{ steps.classify.outputs.core }}
       install: ${{ steps.classify.outputs.install }}
+      cowork_vm: ${{ steps.classify.outputs.cowork_vm }}
       enterprise: ${{ steps.classify.outputs.enterprise }}
       workflows: ${{ steps.classify.outputs.workflows }}
     steps:
@@ -964,6 +965,44 @@ jobs:
           path: ${{ runner.temp }}/assets
       - run: scripts/test-install-lifecycle.sh --assets "$RUNNER_TEMP/assets" --lanes "fresh fleet-opt-in upgrade-0.8.10 handoff drills"
 
+  cowork-vm-package:
+    # The Claude Cowork VM sensor package (packaging/cowork-vm). The contract
+    # test, with stand-in binaries and a throwaway key: a deterministic build
+    # that meets Anthropic's package rules, sign.sh output verify-signature.py
+    # accepts, every signature Claude would refuse refused, and install.sh's
+    # argument refusals (exit 11-14, 18). Then test-install.sh installs a real
+    # package as root on this runner. The release workflow's cowork-vm job
+    # builds and signs the release packages, so a change to it alone runs
+    # this job too (cowork_vm).
+    name: Cowork VM Package
+    needs: changes
+    if: ${{ !cancelled() && needs.changes.outputs.cowork_vm != 'false' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
+        with:
+          persist-credentials: false
+      - name: Lint the scripts
+        run: shellcheck -S warning packaging/cowork-vm/*.sh
+      - name: Build, sign and verify (contract test)
+        run: make cowork-vm-test
+      - uses: ./.github/actions/setup-go
+        id: go
+      # The installer's security fixes, as root on this runner with real
+      # binaries: $DATA/home link refused, planted links not followed,
+      # root-only no-systemd output, spoofed listener and non-brokering
+      # helper give exit 17, startup with and without policies.
+      - name: Install as Claude does (root regression)
+        run: |
+          set -euo pipefail
+          bin="$RUNNER_TEMP/cowork-bin"; mkdir -p "$bin"
+          CGO_ENABLED=0 go build -trimpath -o "$bin/defenseclaw-gateway" ./cmd/defenseclaw
+          CGO_ENABLED=0 go build -trimpath -o "$bin/defenseclaw-sensor-helper" ./cmd/defenseclaw-sensor-helper
+          packaging/cowork-vm/build.sh --arch amd64 --version 0.0.0-ci --gateway "$bin/defenseclaw-gateway" \
+            --helper "$bin/defenseclaw-sensor-helper" --policies policies --out-dir "$RUNNER_TEMP/cowork-vm"
+          sudo packaging/cowork-vm/test-install.sh "$RUNNER_TEMP/cowork-vm/defenseclaw-cowork-amd64.tar.gz"
+
   perf-budget:
     # scripts/perf/dcperf.py on a per-user install of this commit's assets in
     # a throwaway HOME: installed Claude Code and Codex hook latency (100
@@ -1153,6 +1192,7 @@ jobs:
       LIFECYCLE_PACKAGES: >-
         ./internal/unixidentity/... ./internal/peercred/... ./internal/managed/...
         ./internal/enterprisehooks/... ./internal/enterprisepolicy/... ./internal/ipc/...
+        ./internal/codesig/... ./internal/coworkaudit/... ./internal/claudedesktop/...
     strategy:
       fail-fast: false
       matrix:

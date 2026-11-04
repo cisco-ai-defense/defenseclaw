@@ -813,6 +813,14 @@ The message reads `<connector>'s agent changed`.
 
 **Check.** The message no longer appears.
 
+### Cowork says "DefenseClaw blocked this: its Claude Code hook script is missing or cannot be run"
+
+**Cause.** The DefenseClaw plugin that `defenseclaw setup cowork` added to your Claude account is still installed, but the hook script it runs is gone: `defenseclaw uninstall --all`, `defenseclaw reset`, a deleted data folder or a moved home folder. The plugin blocks Cowork tool calls until the script is back or the plugin is removed. On Windows the notice names the hook launcher instead of the script.
+
+**Fix.** Either install DefenseClaw again and run `defenseclaw setup cowork`, then upload the new zip. Or remove the plugin: in Claude Desktop open **Customize > Plugins**, then the **...** menu on DefenseClaw, and choose **Remove**. See [Remove the Cowork plugin](/docs/connectors/cowork#remove).
+
+**Check.** A Cowork tool call runs, or `defenseclaw status` shows the **Cowork** row as protected.
+
 ### Every tool call is blocked while the gateway is down
 
 **Cause.** The connector runs the strict policy (or the install is managed), whose hooks block while the gateway is not running. With the default or permissive policy an outage lets calls run with a warning instead; an install or upgrade in progress blocks in every policy.

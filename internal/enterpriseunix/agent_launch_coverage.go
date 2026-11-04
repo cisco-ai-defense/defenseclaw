@@ -174,9 +174,17 @@ func (l *lifecycle) describePluginLaunchCoverage(ctx context.Context, record *De
 func (l *lifecycle) describePluginLaunchSession(ctx context.Context, session agentSession, name string) {
 	env, result := l.env, l.result
 	who, home := env.pluginLaunchAccount(ctx, session.UID)
-	reason := ""
+	reason, detail := "", ""
 	if name == "claudecode" {
 		reason = claudeManagedLaunchCoverage(session.Args, session.Executable)
+		if reason == "claude_version_unverified" {
+			// Claude Desktop's engine build (Cowork, the Code tab) is in the
+			// user's own folder: it is identified by its code signature.
+			if engine, ok := claudeDesktopEngineBuild(env.GOOS, home, session.Executable); ok {
+				verdict := l.claudeDesktopVerdictFor(ctx, engine, session.UID)
+				reason, detail = verdict.reason, verdict.detail
+			}
+		}
 	} else {
 		reason = enterprisestatus.PluginLaunchCoverage(name, session.Args, session.Env, session.EnvKnown, home)
 	}
@@ -186,7 +194,11 @@ func (l *lifecycle) describePluginLaunchSession(ctx context.Context, session age
 	if reason == "" {
 		return
 	}
-	message := fmt.Sprintf("user %s runs %s (pid %d): %s; its managed hook or plugin load is not proven, so tool calls in this session may be uninspected. Close this session and restart without the bypass", who, name, session.PID, launchCoverageExplanation(reason))
+	explanation := launchCoverageExplanation(reason)
+	if detail != "" {
+		explanation += " (" + detail + ")"
+	}
+	message := fmt.Sprintf("user %s runs %s (pid %d): %s; its managed hook or plugin load is not proven, so tool calls in this session may be uninspected. Close this session and restart without the bypass", who, name, session.PID, explanation)
 	if env.GOOS == "linux" && name == "hermes" {
 		arg0 := ""
 		if len(session.Args) > 0 {
@@ -272,6 +284,12 @@ func launchCoverageExplanation(reason string) string {
 		return "the process arguments could not be verified"
 	case "claude_npm_launch_unverified":
 		return "the running Claude Code npm script has an unsupported or unreadable managed hook contract"
+	case reasonClaudeDesktopUnsigned:
+		return "the running Claude Desktop engine build (Cowork or the Code tab) is in the user's own folder, and its code signature does not verify as Anthropic's (Developer ID team Q6L2SF6YDW, identifier com.anthropic.claude-code), so it is an unidentified, user-writable engine"
+	case reasonClaudeDesktopLinuxUnsigned:
+		return "the running Claude Desktop engine build (Cowork or the Code tab) is in the user's own folder (~/.config/Claude/claude-code, or Claude-3p for third-party inference), and Linux builds carry no vendor code signature, so it is an unidentified, user-writable engine"
+	case reasonClaudeDesktopVersionMismatch:
+		return "the running Claude Desktop engine build's signed Info.plist does not name the version of the folder it runs from"
 	case "claude_version_unverified":
 		return "the running Claude Code build is not identified as a release with a verified managed hook contract (it is older, unrecognized, or was replaced on disk by an update after it started)"
 	default:

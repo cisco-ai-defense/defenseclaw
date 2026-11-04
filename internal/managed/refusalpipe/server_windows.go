@@ -52,6 +52,17 @@ func Serve(ctx context.Context, handle func(sid string, report Report)) error {
 }
 
 func serve(ctx context.Context, pipeName string, handle func(sid string, report Report)) error {
+	return serveInstances(ctx, pipeName, uint32(len(Receipt)), func(ctx context.Context, pipe windows.Handle) {
+		if sid, report, ok := receive(ctx, pipe); ok {
+			handle(sid, report)
+		}
+	})
+}
+
+// serveInstances runs serverInstances instances of pipeName, each with an
+// outBuffer-byte output buffer, until ctx ends; exchange serves one
+// connected client, after which the instance is disconnected and reused.
+func serveInstances(ctx context.Context, pipeName string, outBuffer uint32, exchange func(context.Context, windows.Handle)) error {
 	security, err := pipeSecurity()
 	if err != nil {
 		return err
@@ -63,7 +74,7 @@ func serve(ctx context.Context, pipeName string, handle func(sid string, report 
 	// any idle instance before ConnectNamedPipe runs on that instance.
 	pipes := make([]windows.Handle, 0, serverInstances)
 	for i := range serverInstances {
-		pipe, err := createPipe(pipeName, security, i == 0)
+		pipe, err := createPipe(pipeName, security, i == 0, outBuffer)
 		if err != nil {
 			for _, open := range pipes {
 				_ = windows.CloseHandle(open)
@@ -106,10 +117,7 @@ func serve(ctx context.Context, pipeName string, handle func(sid string, report 
 					}
 					return
 				}
-				sid, report, ok := receive(serveCtx, pipe)
-				if ok {
-					handle(sid, report)
-				}
+				exchange(serveCtx, pipe)
 				_ = windows.DisconnectNamedPipe(pipe)
 			}
 		}(initial)
@@ -231,7 +239,7 @@ func pipeSDDL(owner string) string {
 	return "O:" + owner + "D:P(A;;GA;;;SY)(A;;GA;;;" + owner + ")(A;;GA;;;" + service + ")(A;;" + clientRights + ";;;AU)"
 }
 
-func createPipe(name string, s *security, first bool) (windows.Handle, error) {
+func createPipe(name string, s *security, first bool, outBuffer uint32) (windows.Handle, error) {
 	pointer, err := windows.UTF16PtrFromString(name)
 	if err != nil {
 		return 0, err
@@ -245,7 +253,7 @@ func createPipe(name string, s *security, first bool) (windows.Handle, error) {
 		flags,
 		windows.PIPE_TYPE_MESSAGE|windows.PIPE_READMODE_MESSAGE|windows.PIPE_WAIT|windows.PIPE_REJECT_REMOTE_CLIENTS,
 		serverInstances,
-		uint32(len(Receipt)),
+		outBuffer,
 		MaxMessageBytes,
 		0,
 		&s.attributes,

@@ -143,6 +143,24 @@ type ConnectorHealth struct {
 	ToolInspections     int64                        `json:"tool_inspections"`
 	ToolBlocks          int64                        `json:"tool_blocks"`
 	SubprocessBlocks    int64                        `json:"subprocess_blocks"`
+	// Surfaces are the connector's product surfaces with their own live
+	// counters, keyed by surface ("cowork" on claudecode: Claude Cowork,
+	// which runs Claude Desktop's bundled Claude Code). Absent until one
+	// sends a hook event. The surface is caller-reported (the hook's
+	// X-DefenseClaw-Cowork header): these counters are attribution, never
+	// proof of coverage.
+	Surfaces map[string]ConnectorSurfaceHealth `json:"surfaces,omitempty"`
+}
+
+// ConnectorSurfaceHealth is one product surface of a connector.
+type ConnectorSurfaceHealth struct {
+	Requests       int64      `json:"requests"`
+	LastActivityAt *time.Time `json:"last_activity_at,omitempty"`
+	// LastSessionStartAt is the last SessionStart that reported the
+	// surface. Cowork runs each turn as its own short Claude Code session;
+	// like every surface counter it is caller-reported attribution, not
+	// proof that the hooks load in Cowork.
+	LastSessionStartAt *time.Time `json:"last_session_start_at,omitempty"`
 }
 
 type HealthSnapshot struct {
@@ -360,6 +378,12 @@ type connectorStats struct {
 	toolInspections     atomic.Int64
 	toolBlocks          atomic.Int64
 	subprocessBlocks    atomic.Int64
+
+	// The Cowork surface of claudecode (RecordConnectorSurfaceRequestFor).
+	// One fixed surface keeps the hot path lock-free and the map bounded.
+	coworkRequests           atomic.Int64
+	coworkLastActivityAt     atomic.Int64
+	coworkLastSessionStartAt atomic.Int64
 }
 
 func (s *connectorStats) snapshot() ConnectorHealth {
@@ -391,7 +415,26 @@ func (s *connectorStats) snapshot() ConnectorHealth {
 		ToolInspections:     s.toolInspections.Load(),
 		ToolBlocks:          s.toolBlocks.Load(),
 		SubprocessBlocks:    s.subprocessBlocks.Load(),
+		Surfaces:            s.surfaceSnapshot(),
 	}
+}
+
+func (s *connectorStats) surfaceSnapshot() map[string]ConnectorSurfaceHealth {
+	// Requests before the timestamp, as in snapshot.
+	requests := s.coworkRequests.Load()
+	if requests == 0 {
+		return nil
+	}
+	surface := ConnectorSurfaceHealth{Requests: requests}
+	if unixNanos := s.coworkLastActivityAt.Load(); unixNanos > 0 {
+		at := time.Unix(0, unixNanos).UTC()
+		surface.LastActivityAt = &at
+	}
+	if unixNanos := s.coworkLastSessionStartAt.Load(); unixNanos > 0 {
+		at := time.Unix(0, unixNanos).UTC()
+		surface.LastSessionStartAt = &at
+	}
+	return map[string]ConnectorSurfaceHealth{connector.CoworkSurface: surface}
 }
 
 func (s *connectorStats) recordActivity(at time.Time) {
@@ -1685,6 +1728,22 @@ func (h *SidecarHealth) RecordConnectorRequestFor(name string) {
 	stats.requests.Add(1)
 }
 
+// RecordConnectorSurfaceRequestFor records one accepted hook event (by its
+// native name) of a connector's product surface. Only the Cowork surface is
+// counted; any other value is ignored.
+func (h *SidecarHealth) RecordConnectorSurfaceRequestFor(name, surface, event string) {
+	if surface != connector.CoworkSurface {
+		return
+	}
+	stats := h.statsFor(name)
+	now := time.Now()
+	if event == "SessionStart" {
+		recordLatestTimestamp(&stats.coworkLastSessionStartAt, now)
+	}
+	recordLatestTimestamp(&stats.coworkLastActivityAt, now)
+	stats.coworkRequests.Add(1)
+}
+
 // RecordConnectorLoadHeartbeatFor records proof that a connector's managed
 // bridge actually loaded. File presence alone cannot distinguish a live
 // OpenCode plugin from --pure/external-plugin-disabled operation.
@@ -1976,8 +2035,8 @@ func renderObservabilityV8Health(
 			row["queue"] = renderObservabilityV8Queue(*destination.Queue, destination.Counters)
 		}
 		row["counters"] = renderObservabilityV8Counters(destination.Counters)
-		if destination.MetricRejectsScoped {
-			row["rejected_count_scope"] = "log and trace records; metric export attempts are in signal_health"
+		if destination.MetricExportsScoped {
+			row["counters_scope"] = "log and trace records; metric export attempts are counted only in signal_health"
 		}
 		queueRows := make([]map[string]interface{}, 0, len(destination.Sources))
 		signalRows := make([]map[string]interface{}, 0, len(destination.Sources))

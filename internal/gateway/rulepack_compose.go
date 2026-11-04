@@ -108,17 +108,38 @@ func effectiveRulePackKey(cfg *config.Config, connector string) string {
 // loadGlobalRulePack loads and composes the global scope's pack.
 func loadGlobalRulePack(cache *guardrail.RulePackCache, cfg *config.Config, scope string) (*guardrail.RulePack, error) {
 	s := globalRulePackScope(cfg)
-	if !cfg.Guardrail.Enabled && !cfg.SecureClientIntegration() && s.ref.Name == "default" && s.dir != "" {
-		if _, custom := cfg.Guardrail.CustomPacks[s.ref.Name]; !custom {
-			if _, err := os.Lstat(s.dir); errors.Is(err, os.ErrNotExist) {
-				// An absent bundled default is optional while guardrail is off.
-				// Keep configured rules layers on the embedded pack.
-				s.ref = config.RulePackRef{}
-				s.dir = ""
-			}
+	if !cfg.Guardrail.Enabled && !cfg.SecureClientIntegration() && s.dir != "" && bundledDefaultRulePack(cfg, s.ref) {
+		if _, err := os.Lstat(s.dir); errors.Is(err, os.ErrNotExist) {
+			// An absent bundled default is optional while guardrail is off.
+			// Keep configured rules layers on the embedded pack.
+			s.ref = config.RulePackRef{}
+			s.dir = ""
 		}
 	}
 	return loadScopedRulePack(cache, cfg, s, scope)
+}
+
+// bundledDefaultRulePack reports a global reference to the bundled default
+// pack: rule_pack "default" when no custom pack takes that name, or, with
+// rule_pack unset, a rule_pack_dir at the default pack's own place under
+// policy_dir or data_dir, which is what the config defaults to when the key
+// is absent (cowork-1-0-8 GAP-0014). Any other directory is the operator's
+// pack, whose absence stays a load error.
+func bundledDefaultRulePack(cfg *config.Config, ref config.RulePackRef) bool {
+	if ref.Name != "" {
+		_, custom := cfg.Guardrail.CustomPacks[ref.Name]
+		return ref.Name == "default" && !custom
+	}
+	dir := filepath.Clean(strings.TrimSpace(ref.Dir))
+	for _, root := range []string{
+		strings.TrimSpace(cfg.PolicyDir),
+		filepath.Join(strings.TrimSpace(cfg.DataDir), "policies"),
+	} {
+		if root != "" && root != "policies" && dir == filepath.Join(root, "guardrail", "default") {
+			return true
+		}
+	}
+	return false
 }
 
 // loadConnectorRulePack loads and composes connector's pack.

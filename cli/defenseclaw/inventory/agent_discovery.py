@@ -69,6 +69,7 @@ from defenseclaw.file_permissions import (
     open_regular_file_no_follow,
     reject_reparse_path,
 )
+from defenseclaw.inventory.claude_desktop import EngineBuild, claude_desktop_engines
 
 # Sentinel error returned by ``_version_for_binary`` when a connector
 # binary resolves outside the trusted install prefixes. Callers (e.g.
@@ -77,6 +78,13 @@ from defenseclaw.file_permissions import (
 # constant rather than being duplicated as a string literal on both
 # sides — if the wording ever changes, the consumer can't silently drift.
 UNTRUSTED_PREFIX_ERROR = "binary path is not in a trusted install prefix"
+
+#: ``AgentSignal.source`` of Claude Code: the ``claude`` CLI, or the Claude
+#: Code engine Claude Desktop runs for Cowork and its Code tab (an account
+#: with Claude Desktop and no CLI, cowork-1-0-8 GAP-0036).
+SOURCE_CLI = "cli"
+SOURCE_CLAUDE_DESKTOP = "claude-desktop"
+_SOURCES = frozenset({SOURCE_CLI, SOURCE_CLAUDE_DESKTOP})
 
 # Version 7 keeps Kiro CLI and IDE versions separately; an older cache can
 # incorrectly call the whole connector supported after seeing only one binary.
@@ -830,6 +838,9 @@ class AgentSignal:
     #: ``{"kind": "cli"|"ide", "version": ..., "unread": ..., "path": ...}``.
     #: ``version`` is empty and ``unread`` says why when the probe failed.
     kiro_forms: list[dict[str, str]] = field(default_factory=list)
+    #: Claude Code only: SOURCE_CLI or SOURCE_CLAUDE_DESKTOP for the
+    #: installation ``binary_path`` names; "" when none was found.
+    source: str = ""
 
 
 #: The most Kiro forms one signal records.
@@ -1579,6 +1590,15 @@ def _display_version(version: str) -> str:
     return (version or "").strip().rstrip(".")
 
 
+def _display_detail(signal: AgentSignal) -> str:
+    """The Version / Error column: the version, and where a Claude Code
+    engine came from when it is Claude Desktop's (GAP-0036)."""
+    version = _display_version(signal.version)
+    if not version:
+        return _display_error(signal)
+    return f"{version} (Claude Desktop engine)" if signal.source == SOURCE_CLAUDE_DESKTOP else version
+
+
 def _display_error(signal: AgentSignal) -> str:
     """The probe error without the path the Binary column already shows.
 
@@ -1611,7 +1631,7 @@ def render_discovery_table(disc: AgentDiscovery) -> str:
 
     for name in _ordered_connector_names(disc):
         signal = disc.agents[name]
-        detail = _display_version(signal.version) or _display_error(signal)
+        detail = _display_detail(signal)
         table.add_row(
             signal.name,
             "yes" if signal.installed else "no",
@@ -1718,6 +1738,7 @@ def _scan_agent(
             version="",
             error=VERSION_NOT_PROBED if binary_path else "",
             configured=bool(config_path),
+            source=_agent_source(name, binary_path),
         )
     version = ""
     error = ""
@@ -1868,7 +1889,15 @@ def _scan_agent(
         kiro_cli_version=kiro_versions.get("cli", ("", ""))[1],
         kiro_ide_version=kiro_versions.get("ide", ("", ""))[1],
         kiro_forms=kiro_forms[:_KIRO_FORMS_MAX],
+        source=_agent_source(name, binary_path) if installed or timed_out else "",
     )
+
+
+def _agent_source(name: str, binary_path: str) -> str:
+    """Which Claude Code installation *binary_path* is (``AgentSignal.source``)."""
+    if name != "claudecode" or not binary_path:
+        return ""
+    return SOURCE_CLAUDE_DESKTOP if _claude_desktop_engine(binary_path) is not None else SOURCE_CLI
 
 
 def _kiro_binary_surface(path: str, version: str) -> str:
@@ -2454,10 +2483,6 @@ def _version_for_binary(
         # Hermes runs a synchronous update check (17.5 s on Windows), and a
         # timeout made init drop an enrolled Hermes (GAP-1604).
         timeout = 30.0
-    elif binary_name == "claude" or (
-        os.name == "nt" and binary_name in {"amp", "agent", "copilot", "cursor-agent"}
-    ):
-        timeout = 8.0
     elif binary_name in {"opencode", "opencode2"}:
         # The official WinGet binary is a packaged Bun executable. Windows
         # Defender inspection routinely makes its otherwise trivial
@@ -2519,6 +2544,14 @@ def _version_for_agent_binary(
     """
 
     spec = _SPECS.get(name)
+    if name == "claudecode" and (engine := _claude_desktop_engine(binary_path)) is not None:
+        return _claude_desktop_engine_version(
+            engine,
+            version_args,
+            require_trusted_binary_paths=require_trusted_binary_paths,
+            data_dir=data_dir,
+            timeout_override=timeout_override,
+        )
     bundle_relatives = spec.macos_bundle_binaries if spec is not None else ()
     if bundle_relatives and _macos_app_bundle_for_binary(binary_path, bundle_relatives) is not None:
         return _macos_app_version_for_binary(binary_path, bundle_relatives)
@@ -2563,6 +2596,94 @@ def _version_for_agent_binary(
     if name == "devin" and not error:
         version = _normalize_devin_cli_version_output(version)
     return version, error
+
+
+def _claude_desktop_platform() -> str:
+    """The table key of this host (behind the host helpers tests replace)."""
+    if _is_windows_host():
+        return "windows"
+    return "darwin" if _is_macos_host() else "linux"
+
+
+def _claude_desktop_engine_candidates() -> tuple[str, ...]:
+    """Claude Desktop's engine executables for this account, newest first."""
+    return tuple(build.path for build in claude_desktop_engines(_claude_desktop_platform()))
+
+
+def _claude_desktop_engine(binary_path: str) -> EngineBuild | None:
+    """The engine build *binary_path* is, when it is one of this account's."""
+    if not binary_path:
+        return None
+    key = _path_key(os.path.abspath(binary_path))
+    for build in claude_desktop_engines(_claude_desktop_platform()):
+        if _path_key(build.path) == key:
+            return build
+    return None
+
+
+def _claude_desktop_engine_metadata_problem(engine: EngineBuild) -> str:
+    """Why the engine's own metadata does not name its folder's version, or "".
+
+    The checks the Go side makes before it trusts a build, where Python can
+    make them without running anything: the bundle's Info.plist
+    (CFBundleShortVersionString) on macOS, the executable's file version on
+    Windows. Linux builds carry neither; that the folder holds an executable
+    is the evidence there, as in Go. The code signature Go checks too is not
+    checked here (setup and the gateway do not take authority from this).
+    """
+    if engine.path.endswith(os.path.join("claude.app", "Contents", "MacOS", "claude")):
+        info_path = os.path.join(os.path.dirname(os.path.dirname(engine.path)), "Info.plist")
+        try:
+            with open(info_path, "rb") as stream:
+                info = plistlib.loads(stream.read(1 << 20))
+        except (OSError, plistlib.InvalidFileException, ExpatError, ValueError) as exc:
+            return f"Claude Desktop engine metadata could not be read ({exc})"
+        named = str(info.get("CFBundleShortVersionString") or "").strip() if isinstance(info, dict) else ""
+        if named != engine.version:
+            return f"Claude Desktop engine in the {engine.version} folder: its Info.plist names {named!r}"
+    elif _is_windows_host():
+        from defenseclaw.connector_contracts import normalize_agent_version
+
+        named, error = _windows_file_version_for_binary(engine.path, require_trusted_binary_paths=False)
+        if error:
+            return f"Claude Desktop engine file version could not be read ({error})"
+        if normalize_agent_version(named) != normalize_agent_version(engine.version):
+            return f"Claude Desktop engine in the {engine.version} folder: its file version is {named!r}"
+    return ""
+
+
+def _claude_desktop_engine_version(
+    engine: EngineBuild,
+    version_args: tuple[str, ...],
+    *,
+    require_trusted_binary_paths: bool,
+    data_dir: str | os.PathLike[str] | None,
+    timeout_override: float | None,
+) -> tuple[str, str]:
+    """The version of a Claude Desktop engine build (GAP-0036).
+
+    Its metadata must name its folder's version first; then the engine is
+    asked ``--version`` exactly as a ``claude`` CLI is (same trust check,
+    same timeout), and it must answer with that version too. A build that
+    fails either check is passed over for the next one.
+    """
+    from defenseclaw.connector_contracts import normalize_agent_version
+
+    problem = _claude_desktop_engine_metadata_problem(engine)
+    if problem:
+        return "", problem
+    version, error = _version_for_binary(
+        engine.path,
+        version_args,
+        require_trusted_binary_paths=require_trusted_binary_paths,
+        data_dir=data_dir,
+        timeout_override=timeout_override,
+    )
+    if error:
+        return version, error
+    if normalize_agent_version(version) != normalize_agent_version(engine.version):
+        return "", f"Claude Desktop engine in the {engine.version} folder reports version {version!r}"
+    return version, ""
 
 
 def _normalize_devin_cli_version_output(output: str) -> str:
@@ -2869,6 +2990,9 @@ def _binary_candidates_for_agent(name: str, spec: _AgentSpec) -> tuple[str, ...]
                     if os.path.isfile(candidate) and os.access(candidate, os.X_OK):
                         candidates.append(os.path.abspath(candidate))
     if not _is_windows_host():
+        if name == "claudecode":
+            # After every CLI, so a claude CLI still wins (GAP-0036).
+            candidates.extend(_claude_desktop_engine_candidates())
         return _deduplicate_paths(candidates)
 
     for binary_name in dict.fromkeys(binary_names):
@@ -2895,6 +3019,9 @@ def _binary_candidates_for_agent(name: str, spec: _AgentSpec) -> tuple[str, ...]
             for candidate in sorted(desktop_bin.glob("*/codex.exe")):
                 if candidate.is_file():
                     candidates.append(os.path.abspath(candidate))
+
+    if name == "claudecode":
+        candidates.extend(_claude_desktop_engine_candidates())
 
     return _deduplicate_paths(candidates)
 
@@ -3167,6 +3294,7 @@ def _read_cache(*, data_dir: str | os.PathLike[str] | None = None) -> AgentDisco
                 kiro_cli_version=str(raw.get("kiro_cli_version") or ""),
                 kiro_ide_version=str(raw.get("kiro_ide_version") or ""),
                 kiro_forms=_kiro_forms_from_cache(raw.get("kiro_forms")),
+                source=str(raw.get("source") or "") if raw.get("source") in _SOURCES else "",
             )
     except Exception:
         return None
@@ -3254,7 +3382,7 @@ def _render_plain_table(disc: AgentDiscovery) -> str:
                     signal.mode if signal.active else "no",
                     _display_path(signal.config_path),
                     _display_path(signal.binary_path),
-                    _display_version(signal.version) or _display_error(signal),
+                    _display_detail(signal),
                 ]
             )
         )

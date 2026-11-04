@@ -608,8 +608,16 @@ func (s *ContinuousDiscoveryService) variable(name string) (string, bool) {
 		value, ok := s.sandbox.variables[name]
 		return value, ok
 	}
+	if discoveryVariableOverride != nil {
+		return discoveryVariableOverride(name)
+	}
 	return platformDiscoveryVariable(name, s.opts.HomeDir)
 }
+
+// discoveryVariableOverride replaces the platform lookup of a path variable
+// ($APPDATA, ...) in tests, which on Windows otherwise reads the account's
+// known folders and ignores the environment. nil in production.
+var discoveryVariableOverride func(name string) (string, bool)
 
 // hostOnlyDetector reports a detector of a machine-wide surface, which a
 // sandbox scan does not run.
@@ -618,7 +626,7 @@ func (s *ContinuousDiscoveryService) hostOnlyDetector(name string) bool {
 		return false
 	}
 	switch name {
-	case "application", "editor_extension", "local_endpoint", "local_model_api", "model_file":
+	case "application", claudeDesktopDetector, "editor_extension", "local_endpoint", "local_model_api", "model_file":
 		return true
 	}
 	return false
@@ -783,5 +791,7 @@ func (s *ContinuousDiscoveryService) attributeSandboxSignal(sig AISignal, id, na
 		sig.Runtime = &runtimeInfo
 	}
 	sig.Model = nil
+	// A sandbox scan runs no claude_desktop detector (hostOnlyDetector).
+	sig.ClaudeDesktop = nil
 	return sig
 }

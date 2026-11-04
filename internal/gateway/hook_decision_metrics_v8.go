@@ -172,6 +172,7 @@ func (a *APIServer) emitHookDecisionLogV8(
 			DefenseClawPolicyEffectiveDigest: policy.digest, DefenseClawPolicyGeneration: policy.generation,
 			DefenseClawGuardrailProfileMatch: policy.profile.Match, DefenseClawGuardrailProfileMatchedGroup: policy.profile.MatchedGroup,
 			DefenseClawUserEnrollment: policy.enrollment,
+			DefenseClawAgentSurface:   coworkSurfaceV8(ctx),
 			Envelope:                  envelope, Severity: observability.Present(severity.Severity),
 			LogLevel: logLevel, Outcome: hookDecisionV8Outcome(effectiveAction, result),
 			DefenseClawRequestID:                hookV8OptionalIdentifier(meta.RequestID),

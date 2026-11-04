@@ -571,3 +571,34 @@ func TestConnectorRosterOnlyReloadRetiresRemovedPreviousManualConnector(t *testi
 		t.Fatal("roster-only reload replaced the detached router rule pack")
 	}
 }
+
+// cowork-1-0-8 GAP-0014: with rule_pack unset the config defaults
+// rule_pack_dir to the default pack's place under policy_dir; a disabled
+// guardrail starts on the embedded pack when that folder is absent. A missing
+// operator directory, and the same config with guardrail on, still fail.
+func TestDisabledGuardrailUnsetRulePackStartsWithoutDefaultDirectory(t *testing.T) {
+	cfg := config.DefaultConfig()
+	cfg.ConfigVersion = config.ObservabilityV8ConfigVersion
+	cfg.DataDir = testenv.PrivateTempDir(t)
+	cfg.PolicyDir = filepath.Join(t.TempDir(), "vendor-policies")
+	cfg.Guardrail.Enabled = false
+	cfg.Guardrail.RulePack = ""
+	for _, dir := range []string{
+		filepath.Join(cfg.PolicyDir, "guardrail", "default"),
+		filepath.Join(cfg.DataDir, "policies", "guardrail", "default"),
+	} {
+		cfg.Guardrail.RulePackDir = dir
+		if pack, _, _, err := loadInitialSidecarRulePack(cfg); err != nil || pack == nil {
+			t.Fatalf("rule_pack unset, rule_pack_dir %s absent: pack=%p error=%v", dir, pack, err)
+		}
+	}
+	cfg.Guardrail.RulePackDir = filepath.Join(t.TempDir(), "operator-pack")
+	if _, _, _, err := loadInitialSidecarRulePack(cfg); err == nil || !strings.Contains(err.Error(), "directory_not_found") {
+		t.Fatalf("missing operator rule_pack_dir: error=%v", err)
+	}
+	cfg.Guardrail.RulePackDir = filepath.Join(cfg.PolicyDir, "guardrail", "default")
+	cfg.Guardrail.Enabled = true
+	if _, _, _, err := loadInitialSidecarRulePack(cfg); err == nil || !strings.Contains(err.Error(), "directory_not_found") {
+		t.Fatalf("enabled guardrail with no default rule pack: error=%v", err)
+	}
+}

@@ -120,11 +120,12 @@ Under the Secure Client profile none of this applies. The model is in
 [Configuration: one source of truth](/docs/reference/source-of-truth).
 
 On Linux and macOS the enterprise package installs `defenseclaw` as a launcher
-that runs only `defenseclaw sandbox` commands. Every other command, readers
-included, prints this and exits `2`:
+that runs only `defenseclaw sandbox` commands and `defenseclaw status`, which
+shows the person their own Claude Code and Cowork protection state (never
+another account's). Every other command prints this and exits `2`:
 
 ```text
-This computer is managed; use `defenseclaw sandbox status` for your read-only status and `defenseclaw sandbox policy explain` for your policy. Other commands require an administrator.
+This computer is managed; use `defenseclaw status` for your protection state, `defenseclaw sandbox status` for your sandboxes and `defenseclaw sandbox policy explain` for your policy. Other commands require an administrator.
 ```
 
 Windows has no launcher: `defenseclaw.exe` there is the administrator command. It refuses the per-user writers itself:
@@ -134,6 +135,12 @@ Windows has no launcher: `defenseclaw.exe` there is the administrator command. I
 | `config set`, `config unset` | Exit `3`: `This device is managed: change config.yaml in the admin config (MDM or management plane); config set did not change it` |
 | `skill`, `mcp`, `plugin` or `tool` with `block`, `allow` or `unblock` | Exit `3`, naming the `asset_policy` key in the admin config and saying the command did not change it |
 | `init`, `quickstart`, `guardrail`, `policy activate` | Exit `2`: not a command of the administrator's `defenseclaw.exe` |
+
+A standard account's `defenseclaw.exe status` (and `status --json`) shows that
+account's own Claude Code and Cowork protection state and its own last Cowork
+event, which the gateway service reads for the account that asks, never
+another account's. From an elevated prompt `status` names the administrator's
+`enterprise windows status --profile standalone`.
 
 The table below is for a per-user CLI left from an earlier install on Linux and macOS.
 

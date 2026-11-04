@@ -1022,6 +1022,30 @@
       "since": "0.7.0"
     },
     {
+      "name": "DEFENSECLAW_COWORK_NO_SYSTEMD",
+      "category": "test_fixture",
+      "purpose": "Makes the packaged Linux service installer start its helper and gateway as detached processes under a cgroup budget instead of systemd units, so the installer test covers that start path on a runner that does run systemd. The installer already uses this path on its own when /run/systemd/system is absent.",
+      "default": "unset",
+      "accepted_values": [
+        "1",
+        "unset"
+      ],
+      "security_impact": "none",
+      "surface_in_doctor": false,
+      "managed": "ignore",
+      "consumers": [
+        {
+          "location": "packaging/cowork-vm/install.sh",
+          "description": "Reads it when it chooses between systemd units and detached processes; only the value 1 selects detached processes"
+        },
+        {
+          "location": "packaging/cowork-vm/test-install.sh",
+          "description": "The installer test sets it to cover the no-systemd start"
+        }
+      ],
+      "since": "1.0.8"
+    },
+    {
       "name": "DEFENSECLAW_CURSOR_CONFIG_HOME",
       "category": "upgrade_internal",
       "purpose": "Carries the exact Cursor configuration home already captured and validated by the native Windows Setup transaction into its isolated connector maintenance child. The child converts it to the hidden --config-home binding; Cursor itself never reads this variable.",
@@ -4874,7 +4898,7 @@
     {
       "name": "DEFENSECLAW_SENSOR_HELPER_SOCKET",
       "category": "runtime_path",
-      "purpose": "Override the local UDS path the AI Discovery sensor helper listens on outside managed deployments. The helper holds the privilege the runtime planes need so the gateway does not have to; see internal/sensor/acquire. A gateway brokers through the helper only on a managed host, and managed-enterprise resolution deliberately ignores this variable, because in that mode the path is part of what the installer owns and letting the environment move it would let whoever controls the gateway's environment point it at a socket they serve.",
+      "purpose": "Override the local UDS path the AI Discovery sensor helper listens on outside managed deployments. The helper holds the privilege the runtime planes need so the gateway does not have to; see internal/sensor/acquire. A managed gateway brokers through the helper at the installer-owned path, and managed-enterprise resolution deliberately ignores this variable, because in that mode the path is part of what the installer owns and letting the environment move it would let whoever controls the gateway's environment point it at a socket they serve. Outside managed deployments a de-privileged gateway brokers only when its service environment sets this variable to an absolute path that it can trust as root's: the socket is root-owned and not writable by others, every folder from it to / is a real root-owned folder writable by root alone (no symbolic links), and the serving process is root. The folder checks run when the gateway starts; the serving process is checked as root at start and again on every connect. Otherwise the gateway reads directly and keeps its per-user process filter. Root sets the variable when it starts a helper for that gateway, as the Claude Cowork VM package does (packaging/cowork-vm/install.sh). On Windows an unmanaged gateway never brokers through it.",
       "default": "unset (managed_enterprise: Windows Secure Client uses <TrustedProgramFiles>\\Cisco\\Cisco Secure Client\\DefenseClaw\\ipc\\sensor-helper.sock and Windows standalone uses <TrustedProgramFiles>\\Cisco\\DefenseClaw\\ipc\\sensor-helper.sock; Linux uses /run/defenseclaw-sensor/sensor-helper.sock; macOS standalone uses /var/run/defenseclaw-sensor/sensor-helper.sock; macOS Secure Client keeps /var/run/defenseclaw/sensor-helper.sock. Other modes use <data_dir>/ipc/sensor-helper.sock)",
       "accepted_values": [
         "any-absolute-path",
@@ -4887,6 +4911,10 @@
         {
           "location": "internal/sensor/acquire/paths.go",
           "description": "DefaultSocketPath consults this outside managed deployments before falling back to the deployment-mode default"
+        },
+        {
+          "location": "internal/gateway/ai_runtime_helper_socket.go",
+          "description": "unmanagedHelperSocket: a de-privileged unmanaged gateway brokers its runtime planes through a root helper at this path, after acquire.CheckRootSocket and a uid 0 check of the serving process (acquire.NewRootHelper repeats it on every connect)"
         }
       ],
       "since": "0.8.11",

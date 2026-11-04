@@ -330,6 +330,31 @@ class ResetCommandTests(unittest.TestCase):
             self.assertEqual(plan.preserve_data_entries, (".venv", ".uv"))
             self.assertIn("preserve runtime:", result.output)
 
+    def test_reset_says_the_cowork_plugin_stays_in_the_claude_account(self):
+        # setup cowork recorded a plugin; reset wipes that record, so it says
+        # what only the user can remove, as uninstall does.
+        from defenseclaw import cowork
+
+        state = Path(cowork.state_path(self._tmp.name))
+        state.parent.mkdir(parents=True, exist_ok=True)
+        state.write_text("{}")
+        runner = CliRunner()
+        with patch("defenseclaw.commands.cmd_uninstall._execute_plan"):
+            result = runner.invoke(cmd_uninstall.reset_cmd, ["--yes"])
+        self.assertEqual(result.exit_code, 0, msg=result.output)
+        flat = " ".join(result.output.split())
+        self.assertIn("cannot remove its Cowork plugin from your Claude account", flat)
+        self.assertIn("Customize > Plugins, then the ... menu > Remove", flat)
+        self.assertIn("Until then Cowork tool calls are blocked.", flat)
+        self.assertLess(flat.index("Cowork plugin"), flat.index("Reset complete"))
+
+    def test_reset_without_a_cowork_plugin_prints_no_cowork_line(self):
+        runner = CliRunner()
+        with patch("defenseclaw.commands.cmd_uninstall._execute_plan"):
+            result = runner.invoke(cmd_uninstall.reset_cmd, ["--yes"])
+        self.assertEqual(result.exit_code, 0, msg=result.output)
+        self.assertNotIn("Cowork", result.output)
+
     def test_reset_failure_is_nonzero_and_never_reports_complete(self):
         runner = CliRunner()
         with (

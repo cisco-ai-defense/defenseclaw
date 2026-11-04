@@ -40,6 +40,7 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/cli"
 	"github.com/defenseclaw/defenseclaw/internal/gateway/connector"
 	"github.com/defenseclaw/defenseclaw/internal/gateway/connector/hookexec"
+	"github.com/defenseclaw/defenseclaw/internal/managed"
 )
 
 var (
@@ -70,6 +71,11 @@ func main() {
 		}
 		return
 	}
+	// An elevated hook (an elevated Claude Desktop runs Cowork's hooks)
+	// creates hooks\.outage-warnings, its logs and markers as its user, so
+	// the account without elevation can remove them (GAP-0063). Before the
+	// launcher guard: the hook it starts inherits the owner.
+	managed.UseCurrentUserAsWindowsDefaultOwner(os.Args[1:])
 	// The per-user Windows Claude Code PreToolUse handler. It runs before the
 	// installer-state checks below: the launcher it starts applies them, and
 	// a missing launcher must block whatever that state says.

@@ -16,13 +16,16 @@ import (
 	"encoding/json"
 	"errors"
 	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
 	"github.com/defenseclaw/defenseclaw/internal/config"
 	"github.com/defenseclaw/defenseclaw/internal/contracttest"
 	"github.com/defenseclaw/defenseclaw/internal/enterprisehooks"
+	"github.com/defenseclaw/defenseclaw/internal/enterprisepolicy"
 	"github.com/defenseclaw/defenseclaw/internal/enterprisestatus"
+	"github.com/defenseclaw/defenseclaw/internal/gateway/connector"
 	"github.com/defenseclaw/defenseclaw/internal/managed"
 )
 
@@ -255,4 +258,213 @@ func messagesOfCode(messages []enterprisestatus.Message, code string) []string {
 		}
 	}
 	return out
+}
+
+// cowork-1-0-8 GAP-0028: before any account enrolls, status counts the one
+// machine-wide Claude Code drop-in, laid out as a standalone install leaves
+// it (managed-settings.d\00-defenseclaw-version-floor.json and
+// 90-defenseclaw.json rendered as the guardian renders it, the hook
+// executable in BinDir). machine_policy.claudecode owns every hook in it,
+// connectors.claudecode has its hooks installed from the machine policy and
+// Cowork is configured; the attestation alone still sets effective_lock.
+// With the drop-in gone all three say it is not in place.
+func TestWindowsStatusV2CountsTheClaudeCodeDropInBeforeAnyAccountEnrolls(t *testing.T) {
+	root := t.TempDir()
+	programFiles, programData := filepath.Join(root, "Program Files"), filepath.Join(root, "ProgramData")
+	layout, err := managed.StandaloneWindowsLayoutForRoots(programFiles, programData)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg := &config.Config{DeploymentMode: managed.DeploymentModeManagedEnterprise}
+	cfg.Enterprise.Profile = managed.ProfileStandalone
+	cfg.Guardrail.Mode = "observe"
+	cfg.Guardrail.Connectors = map[string]config.PerConnectorGuardrailConfig{"claudecode": {}}
+	opts, err := enterprisepolicy.StandaloneOptions(layout, programFiles, programData, cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// A temp tree is not administrator-owned; the trust rules have their own tests.
+	opts.SkipTrustChecks = true
+	if err := os.MkdirAll(filepath.Dir(opts.HookBinary), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(opts.HookBinary, []byte("MZ"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	body, err := connector.NewClaudeCodeConnector().ManagedHookPolicy(connector.SetupOpts{
+		APIAddr: "127.0.0.1:18970", HookFailMode: "closed", ManagedEnterprise: true,
+		HookExecutable: opts.HookBinary, ClaudeAllowManagedHooksOnly: true,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var rendered struct {
+		Hooks map[string][]struct {
+			Hooks []json.RawMessage `json:"hooks"`
+		} `json:"hooks"`
+	}
+	if err := json.Unmarshal(body, &rendered); err != nil {
+		t.Fatal(err)
+	}
+	handlers := 0
+	for _, groups := range rendered.Hooks {
+		for _, group := range groups {
+			handlers += len(group.Hooks)
+		}
+	}
+	floor, err := enterprisepolicy.Export(opts, enterprisepolicy.ConnectorClaudeCode, "version-floor")
+	if err != nil {
+		t.Fatal(err)
+	}
+	dir := filepath.Join(programFiles, "ClaudeCode", "managed-settings.d")
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	dropIn := filepath.Join(dir, "90-defenseclaw.json")
+	for path, data := range map[string][]byte{dropIn: body, filepath.Join(dir, "00-defenseclaw-version-floor.json"): floor} {
+		if err := os.WriteFile(path, data, 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	schemas := contracttest.Compile(t)
+	status := func() *enterprisestatus.Result {
+		fakeWindowsStatusV2(t, windowsEnterpriseStatusV2Inputs{
+			cfg: cfg, guardianKnown: true,
+			machinePolicyStates: func(_ *config.Config, names []string) (map[string]enterprisestatus.MachinePolicyState, error) {
+				return windowsEnterpriseMachinePolicyStates(opts, names)
+			},
+		})
+		result := enterprisestatus.New("status", managed.ProfileStandalone, "windows", "1.0.8")
+		result.Installed, result.InstalledVersion = true, "1.0.8"
+		result.MachinePolicy["claudecode"] = windowsEnterpriseMachinePolicy(false)
+		applyWindowsEnterpriseStatusV2(result)
+		// Nobody is enrolled: the guardian has no row, so zero targets,
+		// which the lifecycle schema requires of a Windows entry whose
+		// hooks_installed is known.
+		if targets := result.Connectors["claudecode"].Targets; targets == nil || *targets != (enterprisestatus.ConnectorTargets{}) {
+			t.Fatalf("connectors.claudecode.targets = %+v, want zero", targets)
+		}
+		result.Finish("windows", 0)
+		document, err := json.Marshal(result)
+		if err != nil {
+			t.Fatal(err)
+		}
+		schemas.Validate(t, "lifecycle-result.schema.json", document)
+		return result
+	}
+
+	result := status()
+	policy := result.MachinePolicy["claudecode"]
+	if handlers == 0 || policy.OwnedEntries != handlers || policy.ForeignEntries != 0 || len(policy.Conflicts) != 0 || policy.EffectiveLock != "" {
+		t.Fatalf("machine_policy.claudecode = %+v, want %d owned entries, no conflict and no attested lock", policy, handlers)
+	}
+	if state := result.Connectors["claudecode"]; state.HooksInstalled != enterprisestatus.HooksInstalledAll || state.ManagedHook == nil || !*state.ManagedHook {
+		t.Fatalf("connectors.claudecode = %+v", state)
+	}
+	if result.Cowork == nil || !result.Cowork.Configured || result.Cowork.Reason != "" {
+		t.Fatalf("cowork = %+v", result.Cowork)
+	}
+
+	if err := os.Remove(dropIn); err != nil {
+		t.Fatal(err)
+	}
+	result = status()
+	if policy := result.MachinePolicy["claudecode"]; policy.OwnedEntries != 0 {
+		t.Fatalf("machine_policy.claudecode without the drop-in = %+v", policy)
+	}
+	if state := result.Connectors["claudecode"]; state.HooksInstalled != enterprisestatus.HooksInstalledNone {
+		t.Fatalf("connectors.claudecode without the drop-in = %+v", state)
+	}
+	if result.Cowork == nil || result.Cowork.Configured || result.Cowork.Reason != enterprisestatus.CoworkReasonMachinePolicyUnset {
+		t.Fatalf("cowork without the drop-in = %+v", result.Cowork)
+	}
+}
+
+// A machine policy that cannot be read is reported, not counted as empty
+// coverage: the entry keeps owned_entries 0, status says why, and the
+// connector's hooks_installed is unknown (not none, not all) with no targets,
+// as the lifecycle schema wants of an unknown entry. Cowork stays not
+// configured. A config that cannot be loaded is reported the same way.
+func TestWindowsStatusV2ReportsAnUnreadableMachinePolicy(t *testing.T) {
+	cfg := windowsStatusV2Config()
+	cfg.Guardrail.Connectors["claudecode"] = config.PerConnectorGuardrailConfig{}
+	for _, tc := range []struct {
+		name, cause string
+		cfg         *config.Config
+	}{
+		{"inspection fails", "access is denied", cfg},
+		{"config not loaded", "the installed config could not be loaded", nil},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			fakeWindowsStatusV2(t, windowsEnterpriseStatusV2Inputs{
+				cfg: tc.cfg, guardianKnown: true,
+				machinePolicyStates: func(*config.Config, []string) (map[string]enterprisestatus.MachinePolicyState, error) {
+					return nil, errors.New("access is denied")
+				},
+			})
+			result := enterprisestatus.New("verify", managed.ProfileStandalone, "windows", "1.0.8")
+			result.Installed = true
+			result.MachinePolicy["codex"] = windowsEnterpriseMachinePolicy(true)
+			result.MachinePolicy["claudecode"] = windowsEnterpriseMachinePolicy(true)
+			applyWindowsEnterpriseStatusV2(result)
+			if policy := result.MachinePolicy["codex"]; policy.OwnedEntries != 0 || policy.EffectiveLock != "enforce" {
+				t.Fatalf("machine_policy.codex = %+v", policy)
+			}
+			found := false
+			for _, warning := range result.Warnings {
+				found = found || warning.Code == enterprisestatus.CodeStatusDetailUnavailable &&
+					strings.Contains(warning.Message, "machine policy of claudecode, codex could not be read ("+tc.cause+")")
+			}
+			if !found {
+				t.Fatalf("warnings = %+v", result.Warnings)
+			}
+			if tc.cfg == nil {
+				return
+			}
+			for _, name := range []string{"codex", "claudecode"} {
+				if state, ok := result.Connectors[name]; !ok || state.HooksInstalled != enterprisestatus.HooksInstalledUnknown || state.Targets != nil {
+					t.Fatalf("connectors.%s = %+v (listed %v), want hooks_installed unknown and no targets", name, state, ok)
+				}
+			}
+			if result.Cowork == nil || result.Cowork.Configured {
+				t.Fatalf("cowork = %+v", result.Cowork)
+			}
+			result.Finish("windows", 0)
+			document, err := json.Marshal(result)
+			if err != nil {
+				t.Fatal(err)
+			}
+			contracttest.Compile(t).Validate(t, "lifecycle-result.schema.json", document)
+		})
+	}
+}
+
+// Before the guardian state exists the connectors block does not count the
+// machine policy (a known hooks_installed on Windows carries the guardian's
+// targets): hooks_installed is unknown, without targets.
+func TestWindowsStatusV2MachinePolicyCoverageNeedsTheGuardianState(t *testing.T) {
+	cfg := windowsStatusV2Config()
+	cfg.Guardrail.Connectors["claudecode"] = config.PerConnectorGuardrailConfig{}
+	fakeWindowsStatusV2(t, windowsEnterpriseStatusV2Inputs{
+		cfg: cfg,
+		machinePolicyStates: func(_ *config.Config, names []string) (map[string]enterprisestatus.MachinePolicyState, error) {
+			return map[string]enterprisestatus.MachinePolicyState{"claudecode": {OwnedEntries: 9}}, nil
+		},
+	})
+	result := enterprisestatus.New("status", managed.ProfileStandalone, "windows", "1.0.8")
+	result.Installed = true
+	result.MachinePolicy["claudecode"] = windowsEnterpriseMachinePolicy(true)
+	applyWindowsEnterpriseStatusV2(result)
+	if policy := result.MachinePolicy["claudecode"]; policy.OwnedEntries != 9 {
+		t.Fatalf("machine_policy.claudecode = %+v", policy)
+	}
+	if state := result.Connectors["claudecode"]; state.HooksInstalled != enterprisestatus.HooksInstalledUnknown || state.Targets != nil {
+		t.Fatalf("connectors.claudecode = %+v", state)
+	}
+	result.Finish("windows", 0)
+	document, err := json.Marshal(result)
+	if err != nil {
+		t.Fatal(err)
+	}
+	contracttest.Compile(t).Validate(t, "lifecycle-result.schema.json", document)
 }

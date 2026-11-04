@@ -465,6 +465,7 @@ STANDALONE_SMOKES = (
     "enterprise-profile-deployment-record-smoke.ps1",
     "enterprise-standalone-claude-policy-binding-smoke.ps1",
     "enterprise-standalone-config-acl-repair-smoke.ps1",
+    "enterprise-standalone-cowork-delivery-smoke.ps1",
     "enterprise-standalone-enumerator-environment-smoke.ps1",
     "enterprise-standalone-forced-uninstall-residue-smoke.ps1",
     "enterprise-standalone-guardian-first-reconcile-wait-smoke.ps1",
@@ -2277,3 +2278,13 @@ def test_lifecycle_scope_hash_matches_the_cli(tmp_path: Path) -> None:
     )
     assert completed.returncode == 0, completed.stdout + completed.stderr
     assert completed.stdout.strip() == golden
+
+
+def test_cowork_policy_key_defaults_are_pinned() -> None:
+    """The Cowork delivery writes HKLM SOFTWARE\\Policies\\Claude; only the
+    smoke repoints the two module variables; the module assigns each once."""
+    text = _text(MODULE)
+    hive = re.findall(r"^\s*\$script:CoworkPolicyHive\s*=\s*(.+?)\s*$", text, re.M)
+    key = re.findall(r"^\s*\$script:CoworkPolicyKey\s*=\s*(.+?)\s*$", text, re.M)
+    assert hive == ["[Microsoft.Win32.RegistryHive]::LocalMachine"]
+    assert key == ["'SOFTWARE\\Policies\\Claude'"]

@@ -273,8 +273,9 @@ async def test_tab_moves_to_next_panel(tmp_path) -> None:
         assert app.active_panel == names[(start + 1) % len(names)]
 
 
-@pytest.mark.parametrize("key", ["q", "t"])
-async def test_q_and_t_leave_the_app_where_it_was(tmp_path, key: str) -> None:
+# q quits when nothing is open (GAP-0048, test_r108_cowork_tui.py); t is not a global key.
+@pytest.mark.parametrize("key", ["t"])
+async def test_t_leaves_the_app_where_it_was(tmp_path, key: str) -> None:
     app = fixtures.snapshot_app(tmp_path)
     async with app.run_test(size=SIZE) as pilot:
         await pilot.pause()

@@ -453,6 +453,18 @@ def test_the_deterministic_build_gate_runs_only_for_its_inputs() -> None:
     assert ci_changes.everything("test")["repro"]
 
 
+def test_a_release_workflow_change_runs_the_cowork_vm_install_suite() -> None:
+    release_only = classify(".github/workflows/release.yaml")
+    assert release_only["cowork_vm"] and not release_only["install"]
+    assert classify("packaging/cowork-vm/install.sh")["cowork_vm"]
+    assert classify("internal/gateway/router.go")["cowork_vm"]
+    for path in (".github/workflows/docs-site.yml", "docs-site/content/docs/hitl.mdx"):
+        assert not classify(path)["cowork_vm"], path
+    assert ci_changes.everything("test")["cowork_vm"]
+    job = _workflow("ci.yml")["jobs"]["cowork-vm-package"]
+    assert "needs.changes.outputs.cowork_vm != 'false'" in job["if"]
+
+
 def test_repro_paths_mirror_the_deterministic_build_push_paths() -> None:
     push = _workflow("windows-deterministic-build.yml")[True]["push"]["paths"]
     mirrored = {path[: -len("**")] if path.endswith("/**") else path for path in push}
