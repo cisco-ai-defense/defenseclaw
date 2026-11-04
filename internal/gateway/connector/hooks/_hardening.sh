@@ -2220,6 +2220,13 @@ defenseclaw_await_gateway() {
       7) ;;
       *) return "$status" ;;
     esac
+    # An unsent call and a still-running gateway with no listener identify
+    # its restart window. Keep that outage result before another attempt can
+    # reach a newly listening gateway and run out of answer time.
+    if defenseclaw_own_gateway_alive; then
+      _DC_GATEWAY_RESTART_WAITED=1
+      return 7
+    fi
     # An operator stop is not a restart: the fail mode applies at once. An
     # install or upgrade stops the gateway the same way and starts it again
     # when it is done (.install.lock), so that one is (GAP-0140).
