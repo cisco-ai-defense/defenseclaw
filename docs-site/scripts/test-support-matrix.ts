@@ -3,7 +3,7 @@ import { readFileSync } from 'node:fs';
 import { describe, it, test } from 'node:test';
 import contracts from '../../cli/defenseclaw/inventory/hook_contracts.json' with { type: 'json' };
 import { connectorById, supportMatrix, withUnlistedPreview } from '../data/support-matrix';
-import { HOME_CONNECTORS } from '../components/home/home-data';
+import { HOME_CONNECTORS, HOME_TILES, AGENT_COUNT } from '../components/home/home-data';
 
 describe('support matrix statuses kept outside the generated block', () => {
   it('turns not-offered cells into preview for an unlisted route', () => {
@@ -87,4 +87,18 @@ test('Claude Cowork support matrix labels every route on every OS', () => {
   assert.match(section, /^\| Per user \(open source\)[^|]*\| Preview \| Supported \| Supported \|$/m);
   assert.match(section, /^\| Managed computer \(enterprise standalone\)[^|]*\| Preview \| Supported \| Supported \|$/m);
   assert.match(section, /Cowork on Linux is not certified/);
+});
+
+test('Landing connector grid has a Claude Cowork tile with the support matrix labels', () => {
+  const page = readFileSync(new URL('../content/docs/support-matrix.mdx', import.meta.url), 'utf8');
+  const section = page.split('\n## Claude Cowork\n')[1]?.split('\n## ')[0] ?? '';
+  const cells = (row: RegExp) => section.match(row)?.[1].split('|').map((cell) => cell.trim().toLowerCase());
+  const perUser = cells(/^\| Per user \(open source\)[^|]*\|([^\n]*)\|$/m);
+  assert.deepEqual(perUser, ['preview', 'supported', 'supported']);
+  const cowork = HOME_TILES.find((tile) => tile.id === 'cowork');
+  assert.ok(cowork, 'Claude Cowork tile');
+  assert.equal(cowork.label, 'Claude Cowork');
+  assert.deepEqual([cowork.os.linux, cowork.os.macos, cowork.os.windows], perUser);
+  assert.equal(AGENT_COUNT, HOME_CONNECTORS.length + 1);
+  assert.equal(AGENT_COUNT, 11);
 });

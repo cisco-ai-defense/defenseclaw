@@ -16,7 +16,12 @@ const FALLBACKS: Record<string, { initials: string; color: string }> = {
   zeptoclaw: { initials: 'ZC', color: '#7c5ce7' },
 };
 
+// Claude Cowork is a surface of Claude Code: it has no connector row or brand
+// artwork of its own, so it shows the Claude Code mark.
+const ICON_ALIASES: Record<string, string> = { cowork: 'claudecode' };
+
 const labels = new Map(matrix.connectors.map((connector) => [connector.id, connector.label]));
+labels.set('cowork', 'Claude Cowork');
 const basePath = process.env.NEXT_PUBLIC_BASE_PATH ?? '';
 
 interface ConnectorBrandProps {
@@ -25,7 +30,7 @@ interface ConnectorBrandProps {
 }
 
 export function ConnectorBrand({ id, size = 'md' }: ConnectorBrandProps) {
-  const icon = OFFICIAL_ICONS[id];
+  const icon = OFFICIAL_ICONS[ICON_ALIASES[id] ?? id];
   const fallback = FALLBACKS[id];
   const label = labels.get(id) ?? id;
   const color = icon?.accent ?? fallback?.color ?? '#006f9d';
