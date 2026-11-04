@@ -14,11 +14,15 @@
          untrusted PowerShell engine (not the Microsoft-signed pwsh.exe
          registered under HKLM in the protected Program Files root) and .NET
          loader-injection variables in its own environment;
-      2. copies DefenseClawSetup-Enterprise-Standalone-x64.exe into a new SYSTEM- and
-         Administrators-only staging folder and verifies the copy there:
-         its SHA-256 against -Sha256 (hash-pinned trust, required) and/or its
-         Authenticode signature against -AllowedSigners (SHA-256 thumbprints
-         of the signer certificate; Cisco or your own re-signing certificate);
+      2. verifies DefenseClawSetup-Enterprise-Standalone-x64.exe: its SHA-256
+         against -Sha256 (hash-pinned trust, required) and/or its Authenticode
+         signature against -AllowedSigners (SHA-256 thumbprints of the signer
+         certificate; Cisco or your own re-signing certificate). A Setup in an
+         administrator-only file whose folders no other account can rename,
+         delete or re-permission is verified and run where it is, held open
+         with no write or delete sharing from before the checks until it
+         exits; any other Setup is first copied into a new SYSTEM- and
+         Administrators-only staging folder and the copy is verified and run;
       3. takes the administrator config and the optional credential from an
          administrator-only file or standard input, never from the command
          line, and stages them in the same folder; or, instead of a config,
@@ -601,6 +605,36 @@ function Copy-WrapperInput {
     if ($item.Length -gt $Limit) { Exit-Wrapper $script:ExitInvalid 'mdm_input_too_large' "$Label exceeds $Limit bytes" }
     [System.IO.File]::Copy($Source, $Destination, $false)
     if ((Get-Item -LiteralPath $Destination).Length -gt $Limit) { Exit-Wrapper $script:ExitInvalid 'mdm_input_too_large' "$Label exceeds $Limit bytes" }
+}
+
+function Open-WrapperSetupInPlace {
+    # Returns a read handle on the Setup when it can run where it is, or
+    # $null to copy it into staging. The handle shares only reading: from
+    # before the hash and signature checks until Setup exits no process can
+    # write, replace, rename or delete the file, and the file and every
+    # folder above it are administrator-only (no other account can change
+    # the file or move a folder), so the bytes Setup runs are the bytes
+    # checked. A fresh copy of the 700 MB Setup was scanned again by the
+    # antivirus on its first start, about 20 s, and copied in about 5 s,
+    # on every run (cowork-1-0-8 GAP-0044).
+    param([Parameter(Mandatory = $true)][string]$Source, [long]$Limit)
+    if (-not [System.IO.Path]::IsPathFullyQualified($Source) -or $Source.StartsWith('\\')) { return $null }
+    $stream = $null
+    try {
+        $stream = [System.IO.File]::Open($Source, [System.IO.FileMode]::Open, [System.IO.FileAccess]::Read, [System.IO.FileShare]::Read)
+        $item = Get-Item -LiteralPath $Source -Force -ErrorAction Stop
+        if ($item.PSIsContainer -or ($item.Attributes -band [System.IO.FileAttributes]::ReparsePoint) -or
+            $item.Length -gt $Limit -or $stream.Length -ne $item.Length -or
+            -not (Test-DefenseClawAdminOnlyItem -Path $item.FullName) -or
+            -not (Test-WrapperAdminOnlyAncestors -Path $item.FullName)) {
+            $stream.Dispose()
+            return $null
+        }
+        return $stream
+    } catch {
+        if ($null -ne $stream) { $stream.Dispose() }
+        return $null
+    }
 }
 
 function Read-WrapperStdin {
@@ -1289,10 +1323,17 @@ if ($null -ne $installedDeployment -and (Test-WrapperSecretSetBundle -Cli $insta
 $exitCode = 0
 try {
     if ($SetupPath) {
-        $stagedSetup = Join-Path $staging 'DefenseClawSetup-Enterprise-Standalone-x64.exe'
-        Copy-WrapperInput -Source $SetupPath -Destination $stagedSetup -Limit 1GB -Label 'Setup'
+        $script:SetupPin = Open-WrapperSetupInPlace -Source $SetupPath -Limit 1GB
+        if ($null -ne $script:SetupPin) {
+            $stagedSetup = $script:SetupPin.Name
+            $setupPlace = 'in place'
+        } else {
+            $stagedSetup = Join-Path $staging 'DefenseClawSetup-Enterprise-Standalone-x64.exe'
+            Copy-WrapperInput -Source $SetupPath -Destination $stagedSetup -Limit 1GB -Label 'Setup'
+            $setupPlace = 'staged copy'
+        }
         Assert-WrapperSetup -Staged $stagedSetup
-        Write-WrapperLog -Message "verified Setup (trust=$($script:Mode) sha256=$(if ($script:PinnedSha256) { $script:PinnedSha256 } else { 'unpinned' }))"
+        Write-WrapperLog -Message "verified Setup ($setupPlace, trust=$($script:Mode) sha256=$(if ($script:PinnedSha256) { $script:PinnedSha256 } else { 'unpinned' }))"
         # Parenthesize the switch: the comma operator binds tighter than +, so
         # '/' + $normalizedAction, 'JSON=1' is one string "/ensure JSON=1".
         $arguments = @(('/' + $normalizedAction), 'JSON=1')

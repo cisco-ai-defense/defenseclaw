@@ -4300,3 +4300,37 @@ dc_journal_ready && echo journal
     assert result.returncode == 0, (result.stdout, result.stderr)
     assert result.stdout.split() == ["staged", "journal"], result.stdout
     assert (state / "rotation").is_dir()
+
+
+def test_windows_wrapper_runs_an_administrator_only_setup_in_place_while_it_holds_it() -> None:
+    """cowork-1-0-8 GAP-0044: every wrapper run copied the 700 MB Setup into
+    staging (about 5 s) and the antivirus scanned the fresh copy again when it
+    first ran (about 20 s on vm-dc-cowork-win11). A Setup whose file and
+    folders are administrator-only now runs where it is, held open with read
+    sharing only from before its hash and signature checks until the wrapper
+    exits; any other Setup is copied and checked as before."""
+    text = _text(MDM / "windows" / "Invoke-DefenseClawEnterprise.ps1")
+    start = text.index("function Open-WrapperSetupInPlace {")
+    body = text[start : text.index("\nfunction ", start + 1)]
+    opened = body.index(
+        "[System.IO.File]::Open($Source, [System.IO.FileMode]::Open, [System.IO.FileAccess]::Read, [System.IO.FileShare]::Read)"
+    )
+    # The handle is taken before any check, so the checked file is the run one.
+    assert opened < body.index("Test-DefenseClawAdminOnlyItem -Path $item.FullName")
+    assert opened < body.index("Test-WrapperAdminOnlyAncestors -Path $item.FullName")
+    assert "FileShare]::ReadWrite" not in body and "FileShare]::Delete" not in body
+    assert "$item.Length -gt $Limit" in body
+    assert "[System.IO.FileAttributes]::ReparsePoint" in body
+    assert body.count("$stream.Dispose()") == 2
+
+    main = text[text.index("    if ($SetupPath) {\n        $script:SetupPin") :]
+    main = main[: main.index("$exitCode = Write-LifecycleResult -Run $run -Label 'Setup'")]
+    assert "$script:SetupPin = Open-WrapperSetupInPlace -Source $SetupPath -Limit 1GB" in main
+    assert "$stagedSetup = $script:SetupPin.Name" in main
+    # Anything else keeps the copy into the administrator-only staging folder.
+    assert "Copy-WrapperInput -Source $SetupPath -Destination $stagedSetup -Limit 1GB -Label 'Setup'" in main
+    # Both run only after the same SHA-256 and signer checks.
+    assert main.index("Assert-WrapperSetup -Staged $stagedSetup") < main.index(
+        "Invoke-DefenseClawNative -FilePath $stagedSetup"
+    )
+    assert "$script:SetupPin.Dispose()" not in text
