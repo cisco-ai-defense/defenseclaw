@@ -417,7 +417,7 @@ def uninstall_cmd(
 
 _COWORK_REMOVAL_STEP = (
     "remove it in Claude Desktop (Customize > Plugins, then the ... menu > Remove). "
-    "Until then Cowork keeps working and shows a reminder on each call."
+    "Until then Cowork tool calls are blocked."
 )
 
 

@@ -54,7 +54,7 @@ def _homes(tmp_path, monkeypatch, codex: str, claude_env: dict) -> tuple[str, st
 
 
 def _run_uninstall(monkeypatch) -> str:
-    plan = SimpleNamespace(connectors=(), data_dir="")
+    plan = SimpleNamespace(connectors=())
     monkeypatch.setattr(cmd_uninstall, "_dispatch_native_windows_uninstall", lambda **_: False)
     monkeypatch.setattr(cmd_uninstall, "_build_plan", lambda **_: plan)
     monkeypatch.setattr(cmd_uninstall, "_with_listed_sandboxes", lambda p, _stop: p)

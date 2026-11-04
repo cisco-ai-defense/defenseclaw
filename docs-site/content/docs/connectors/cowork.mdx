@@ -150,17 +150,15 @@ The row appears only when Claude Desktop is present or a plugin was built. It do
 
 ### Update or rebuild
 
-Run `defenseclaw setup cowork` again after you move the data folder or reinstall DefenseClaw. It rebuilds the zip with a newer version and clears the earlier confirmation, so the row reads "not protected yet" until a Cowork event reaches the new build. Upload the new zip. The earlier plugin keeps working until the new one is live. If Claude then lists two DefenseClaw plugins, remove the older one.
+Run `defenseclaw setup cowork` again after you move the data folder or reinstall DefenseClaw. It rebuilds the zip with a newer version and clears the earlier confirmation, so the row reads "not protected yet" until a Cowork event reaches the new build. Upload the new zip. The earlier plugin keeps working until the new one is live. If Claude then lists two DefenseClaw plugins, uninstall the older one.
 
 Do not publish this zip to your whole organization from Claude's organization settings. It holds the absolute paths of one account's DefenseClaw install. Organizations use the managed route.
 
 ### Remove
 
-In Claude Desktop, open **Customize > Plugins**, open the **...** menu of the DefenseClaw plugin and choose **Remove**. DefenseClaw cannot remove an account plugin. `defenseclaw uninstall` and `defenseclaw uninstall --dry-run` print this reminder.
+In Claude Desktop, open **Customize > Plugins**, then the **...** menu on DefenseClaw, and choose **Remove**. DefenseClaw cannot remove an account plugin. `defenseclaw uninstall` and `defenseclaw uninstall --dry-run` print this reminder.
 
-If you uninstall DefenseClaw first, Cowork keeps working: the plugin finds that the DefenseClaw hook is gone, lets each call go ahead without a check, and shows "DefenseClaw is no longer installed on this computer, so its Cowork plugin checks nothing. Remove the plugin in Claude: Customize, Plugins, the ... menu of the DefenseClaw plugin, Remove." On Windows Claude shows the sentence in its hook error notice. Remove the plugin to stop the reminder.
-
-If DefenseClaw is still installed but its hook script cannot run (macOS and Linux), the plugin blocks Cowork tool calls with "DefenseClaw blocked this: its Claude Code hook script is missing or cannot be run". Run the installer, then `defenseclaw setup cowork`, or remove the plugin.
+Remove the plugin before you uninstall DefenseClaw. If the hook script is gone and the plugin is still installed, the plugin's hook blocks Cowork tool calls with "DefenseClaw blocked this: its Claude Code hook script is missing or cannot be run". The message tells you to reinstall DefenseClaw and run `defenseclaw setup cowork`, or to remove the plugin in Claude.
 
 ## Managed computers
 
@@ -248,7 +246,7 @@ The user's identity comes from the operating system, never from Cowork's environ
 | Detection gaps | No built-in rule flags JavaScript that exfiltrates data, such as `fetch(url + document.cookie)` in `javascript_tool`, or a download-and-execute instruction in a scheduled task prompt |
 | Secrets in tool results | A secret in a file Cowork reads, such as a key in a `.env` file, is detected and recorded after the read, not prevented, in action mode too. The model is told the rule, never the value. To prevent the read, block it at `PreToolUse` with a path rule: see [Secrets in tool results](/docs/connectors/claudecode#secrets-in-tool-results) |
 | Gateway outage | The hook follows the Claude Code connector's fail mode. On a managed computer that is closed by default: on managed macOS, with the gateway service stopped, Cowork blocked the prompt with `enterprise_managed_gateway_not_running`. See [Fail modes](/docs/reference/fail-modes) |
-| Notices | Claude Desktop's Cowork (4.16336.0) does not show DefenseClaw hook notices to the user. When the gateway is down or the plugin is left after an uninstall, Cowork keeps working without a visible warning; `defenseclaw status` and `doctor` show the state. What an outage does is in the [capability matrix](/docs/connectors/capability-matrix#gateway-outage) |
+| Notices | Claude Desktop's Cowork (4.16336.0) does not show DefenseClaw hook notices to the user. When the gateway is down, Cowork keeps working without a visible warning; a plugin left after an uninstall blocks Cowork tool calls until you remove it; `defenseclaw status` and `doctor` show the state. What an outage does is in the [capability matrix](/docs/connectors/capability-matrix#gateway-outage) |
 
 ## See also
 

@@ -31,8 +31,7 @@ import (
 // TestCoworkPluginHooksRunClaudeCodeHandler pins the Cowork plugin to the
 // per-user Claude Code handler: the measured Cowork events only, each with
 // the Claude Code matcher and timeout, running the Claude Code hook script
-// behind the missing-script guard (allow with a message once DefenseClaw is
-// uninstalled, block when the script exists and cannot run). Without a Claude Code setup
+// behind the fail-closed missing-script guard. Without a Claude Code setup
 // (no lock entry, or no script) it refuses.
 func TestCoworkPluginHooksRunClaudeCodeHandler(t *testing.T) {
 	dataDir := filepath.Join(t.TempDir(), "data dir")
@@ -93,7 +92,7 @@ func TestCoworkPluginHooksRunClaudeCodeHandler(t *testing.T) {
 	for _, group := range hookGroups {
 		groups[group.eventType] = group
 	}
-	wantCommand := coworkUnixHookCommand(shellSingleQuote(script))
+	wantCommand := claudeCodeMissingHookGuardWith(shellSingleQuote(script), coworkMissingHookGuardMessage)
 	for event, entries := range doc.Hooks {
 		group := groups[event]
 		if len(entries) != 1 || len(entries[0].Hooks) != 1 {

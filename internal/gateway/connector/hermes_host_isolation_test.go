@@ -6,7 +6,6 @@ package connector
 
 import (
 	"fmt"
-	"io"
 	"os"
 	"strings"
 	"testing"
@@ -30,9 +29,6 @@ func TestMain(m *testing.M) {
 		fmt.Print(hermesExecutionProbeResponse)
 		os.Exit(0)
 	}
-	if verdict := os.Getenv(testCoworkLauncherEnv); verdict != "" && len(os.Args) == 4 && os.Args[1] == "hook" {
-		runCoworkLauncherStandIn(verdict)
-	}
 	prepareConnectorTestProcess()
 	cleanup, err := hermespath.IsolateHostForTests()
 	if err != nil {
@@ -55,24 +51,4 @@ func TestConnectorTestsRunWithoutTheHostsHermesEnvironment(t *testing.T) {
 			t.Fatalf("the tests run with the host's %s", variable)
 		}
 	}
-}
-
-// testCoworkLauncherEnv makes a copy of the test binary stand in for the
-// Windows hook launcher in the Cowork plugin simulation: "deny" answers exit
-// 2 with a reason, "allow" exit 0 with an allow decision. It reads the event
-// on stdin first, as the launcher does.
-const testCoworkLauncherEnv = "DC_CONNECTOR_TEST_COWORK_LAUNCHER"
-
-func runCoworkLauncherStandIn(verdict string) {
-	input, _ := io.ReadAll(os.Stdin)
-	if !strings.Contains(string(input), "PreToolUse") {
-		fmt.Fprintln(os.Stderr, "no event on stdin")
-		os.Exit(3)
-	}
-	if verdict == "deny" {
-		fmt.Fprintln(os.Stderr, "DefenseClaw denied this tool call")
-		os.Exit(2)
-	}
-	fmt.Println(`{"hookSpecificOutput":{"hookEventName":"PreToolUse","permissionDecision":"allow"}}`)
-	os.Exit(0)
 }
