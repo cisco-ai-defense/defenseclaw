@@ -146,23 +146,24 @@ func commandAt(args []string, i int) int {
 	return i
 }
 
-// wrapperTail is the argv a transparent wrapper's child execs with: the
-// wrapper's own command line after its options. The command line is argv
-// joined by single spaces, so the tail is a suffix of it.
-func wrapperTail(name, cmdline string) (string, bool) {
+// wrapperTail splits a transparent wrapper's command line into the
+// wrapper's own arguments (the program and its options, env assignments
+// included) and the tail, the argv its child execs with. The command line is
+// argv joined by single spaces, so it is the prefix, one space and the tail.
+func wrapperTail(name, cmdline string) (prefix, tail string, ok bool) {
 	args := strings.Split(cmdline, " ")
 	if len(args) < 2 || tactics.BaseName(args[0]) != name {
-		return "", false
+		return "", "", false
 	}
 	index, ok := transparentWrappers[name]
 	if !ok {
-		return "", false
+		return "", "", false
 	}
 	at := index(args)
 	if at < 0 {
-		return "", false
+		return "", "", false
 	}
-	return strings.Join(args[at:], " "), true
+	return strings.Join(args[:at], " "), strings.Join(args[at:], " "), true
 }
 
 // holdWrapperLocked keeps the record of a transparent wrapper exec whose
@@ -177,13 +178,21 @@ func (h *hostPlane) holdWrapperLocked(
 		h.indicators.KeepClientMCP || h.clientChecksums == nil {
 		return false
 	}
-	tail, ok := wrapperTail(event.Name, event.Cmdline)
+	prefix, tail, ok := wrapperTail(event.Name, event.Cmdline)
 	if !ok {
 		return false
 	}
+	// A signal the wrapper's own arguments carry is never held, whatever the
+	// tail gives: an MCP reference in an env assignment is reported even when
+	// the tail names the same package (IN-g55 review 1).
+	own := tactics.Observation{
+		Kind: string(plane.KindExec), PID: event.PID, Name: event.Name, Cmdline: commandWordCmdline(prefix),
+	}
+	if _, ok := tactics.Classify(own, h.indicators); ok {
+		return false
+	}
 	// The wrapper's match must be the tail's own, and the tail run by the
-	// verified client must be no match at all: a signal the wrapper's own
-	// options carry is never held.
+	// verified client must be no match at all.
 	child := tactics.Observation{
 		Kind: string(plane.KindExec), PID: event.PID, Name: tactics.BaseName(strings.SplitN(tail, " ", 2)[0]),
 		Cmdline: commandWordCmdline(tail),

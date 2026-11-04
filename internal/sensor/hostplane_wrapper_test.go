@@ -94,6 +94,16 @@ func TestTransparentWrapperOfTheVerifiedClientIsNotReported(t *testing.T) {
 			{wrapper, agent, "env", "env MCP_SERVER_CMD=npx /sessions/cwk-v1/.local/bin/claude -p hello", "", ""},
 			{wrapper, agent, "claude", "/sessions/cwk-v1/.local/bin/claude -p hello", signed, "2.1.317"},
 		}, 1},
+		// The tail names the same package as the assignment: the
+		// assignment alone is a signal, so the wrapper is reported.
+		{"MCP reference in an env assignment, same signal as the tail", false, []exec{
+			{wrapper, agent, "env", "env DOCS=@modelcontextprotocol/server-everything " + client, "", ""},
+			{wrapper, agent, "claude", client, signed, "2.1.317"},
+		}, 1},
+		{"MCP reference in a timeout option", false, []exec{
+			{wrapper, agent, "timeout", "timeout --signal=mcp-server 300 " + client, "", ""},
+			{child, wrapper, "claude", client, signed, "2.1.317"},
+		}, 1},
 		{"wrapped client starts a positional server", false, []exec{
 			{wrapper, agent, "timeout", "timeout 300 claude @modelcontextprotocol/server-filesystem /workspace", "", ""},
 			{child, wrapper, "claude", "claude @modelcontextprotocol/server-filesystem /workspace", signed, "2.1.317"},
@@ -136,6 +146,26 @@ func TestTransparentWrapperOfTheVerifiedClientIsNotReported(t *testing.T) {
 	}
 }
 
+// A signal in the wrapper's own arguments records the wrapper on its own
+// exec: it is not held for the child.
+func TestWrapperWithASignalInItsOwnArgumentsIsRecordedAtOnce(t *testing.T) {
+	release := sha256.Sum256([]byte("claude release image"))
+	host := newHost(newFake(fullCoverage()))
+	host.wrapperHold = time.Hour
+	host.clientChecksums = func(string) ([][32]byte, bool) { return [][32]byte{release}, true }
+	uid := os.Getuid() + 1000
+	cmd := "/home/u/.local/bin/claude -p use @modelcontextprotocol/server-filesystem"
+	host.handle(plane.Event{Kind: plane.KindExec, PID: 500, PPID: 1, Name: "claude", Cmdline: "claude", UID: &uid})
+	host.handle(plane.Event{Kind: plane.KindExec, PID: 501, PPID: 500, Name: "env",
+		Cmdline: "env X=@modelcontextprotocol/server-y " + cmd, UID: &uid})
+	host.mu.Lock()
+	held := len(host.wrappers)
+	host.mu.Unlock()
+	if classified, _, _, _ := host.stats(); classified != 1 || held != 0 {
+		t.Fatalf("classified=%d held=%d right after the wrapper exec, want 1 and 0", classified, held)
+	}
+}
+
 // A child that is not the verified client records the held wrapper at once,
 // not when the hold ends.
 func TestWrapperWithAnUnverifiedChildIsRecordedAtOnce(t *testing.T) {
@@ -158,36 +188,37 @@ func TestWrapperWithAnUnverifiedChildIsRecordedAtOnce(t *testing.T) {
 
 func TestWrapperTail(t *testing.T) {
 	for _, tc := range []struct {
-		name, cmdline, tail string
-		ok                  bool
+		name, cmdline, prefix, tail string
+		ok                          bool
 	}{
-		{"timeout", "timeout 300 claude -p x", "claude -p x", true},
-		{"timeout", "/usr/bin/timeout 1.5m claude", "claude", true},
-		{"timeout", "timeout -k5 --signal=KILL -- 10s claude -p", "claude -p", true},
-		{"timeout", "timeout --foreground -v 300 claude", "claude", true},
-		{"timeout", "timeout claude -p x", "", false},
-		{"timeout", "timeout 300", "", false},
-		{"timeout", "timeout --unknown 300 claude", "", false},
-		{"nice", "nice claude", "claude", true},
-		{"nice", "nice -n 5 claude", "claude", true},
-		{"nice", "nice -n5 claude", "claude", true},
-		{"nice", "nice -10 claude", "claude", true},
-		{"nice", "nice --adjustment=3 -- claude", "claude", true},
-		{"nice", "nice -n x claude", "", false},
-		{"nice", "nice", "", false},
-		{"env", "env A=1 B=2 claude -p", "claude -p", true},
-		{"env", "env -i -u HOME -- claude", "claude", true},
-		{"env", "env -S 'claude -p' x", "", false},
-		{"env", "env -C /tmp claude", "", false},
-		{"env", "env DYLD_INSERT_LIBRARIES=x claude", "", false},
-		{"env", "env A=1", "", false},
-		{"env", "env  claude", "", false},
-		{"stdbuf", "stdbuf -o0 claude", "", false},
-		{"timeout", "nice 300 claude", "", false},
+		{"timeout", "timeout 300 claude -p x", "timeout 300", "claude -p x", true},
+		{"timeout", "/usr/bin/timeout 1.5m claude", "/usr/bin/timeout 1.5m", "claude", true},
+		{"timeout", "timeout -k5 --signal=KILL -- 10s claude -p", "timeout -k5 --signal=KILL -- 10s", "claude -p", true},
+		{"timeout", "timeout --foreground -v 300 claude", "timeout --foreground -v 300", "claude", true},
+		{"timeout", "timeout claude -p x", "", "", false},
+		{"timeout", "timeout 300", "", "", false},
+		{"timeout", "timeout --unknown 300 claude", "", "", false},
+		{"nice", "nice claude", "nice", "claude", true},
+		{"nice", "nice -n 5 claude", "nice -n 5", "claude", true},
+		{"nice", "nice -n5 claude", "nice -n5", "claude", true},
+		{"nice", "nice -10 claude", "nice -10", "claude", true},
+		{"nice", "nice --adjustment=3 -- claude", "nice --adjustment=3 --", "claude", true},
+		{"nice", "nice -n x claude", "", "", false},
+		{"nice", "nice", "", "", false},
+		{"env", "env A=1 B=2 claude -p", "env A=1 B=2", "claude -p", true},
+		{"env", "env -i -u HOME -- claude", "env -i -u HOME --", "claude", true},
+		{"env", "env -S 'claude -p' x", "", "", false},
+		{"env", "env -C /tmp claude", "", "", false},
+		{"env", "env DYLD_INSERT_LIBRARIES=x claude", "", "", false},
+		{"env", "env A=1", "", "", false},
+		{"env", "env  claude", "", "", false},
+		{"stdbuf", "stdbuf -o0 claude", "", "", false},
+		{"timeout", "nice 300 claude", "", "", false},
 	} {
-		tail, ok := wrapperTail(tc.name, tc.cmdline)
-		if tail != tc.tail || ok != tc.ok {
-			t.Errorf("wrapperTail(%q, %q) = %q, %t; want %q, %t", tc.name, tc.cmdline, tail, ok, tc.tail, tc.ok)
+		prefix, tail, ok := wrapperTail(tc.name, tc.cmdline)
+		if prefix != tc.prefix || tail != tc.tail || ok != tc.ok {
+			t.Errorf("wrapperTail(%q, %q) = %q, %q, %t; want %q, %q, %t",
+				tc.name, tc.cmdline, prefix, tail, ok, tc.prefix, tc.tail, tc.ok)
 		}
 	}
 }
