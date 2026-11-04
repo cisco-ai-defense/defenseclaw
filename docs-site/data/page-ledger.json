@@ -19,6 +19,7 @@
   "connectors/codex",
   "connectors/compatibility",
   "connectors/copilot",
+  "connectors/cowork",
   "connectors/cursor",
   "connectors/devin",
   "connectors/hermes",

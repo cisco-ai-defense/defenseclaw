@@ -29,7 +29,7 @@ This page is for a DefenseClaw you installed yourself. A managed computer (an
 enterprise package, MDM or Setup) has no TUI and no `defenseclaw init`. On
 Linux and macOS the user's `defenseclaw` offers only `sandbox` commands,
 `help` and `--version`, and answers `tui`, `init` and anything else with
-"This computer is managed; use `defenseclaw sandbox status` for your read-only status and `defenseclaw sandbox policy explain` for your policy. Other commands require an administrator."
+"This computer is managed; use `defenseclaw status` for your protection state, `defenseclaw sandbox status` for your sandboxes and `defenseclaw sandbox policy explain` for your policy. Other commands require an administrator."
 and exit `2`. On Windows the managed `defenseclaw.exe` is the
 administrator CLI. An administrator checks a managed computer as shown in
 [On a managed device](/docs/tui#on-a-managed-device).
@@ -225,7 +225,7 @@ block NAME`, `defenseclaw mcp allow NAME` or `defenseclaw tool block NAME
 4. **Change protection.** On Policies, press `m` to switch a scope between observe and action. `b`, `a`, `h` and `p` set block level, alert level, human approval and rule pack.
 5. **Edit settings.** On Setup, press `c` for the config editor, then `S` to review and save.
 
-`?` opens the help overlay for the panel you are on. `Ctrl+C` quits. `q` only closes a drawer.
+`?` opens the help overlay for the panel you are on. `q` closes an open drawer, overlay or detail, and quits when nothing is open. `Ctrl+C` quits from anywhere.
 
 With two or more connectors, `m` filters most panels by connector.
 
@@ -243,7 +243,7 @@ With two or more connectors, `m` filters most panels by connector.
 | `Y` | Copy the last command's output (works on every panel) |
 | `Ctrl+S` | Save the last run to a log file |
 | `Ctrl+C` | Quit the TUI (it cancels a running command first) |
-| `q` | Close the open drawer or overlay; it does not quit |
+| `q` | Close the open drawer, overlay or detail; quit when nothing is open (it never cancels a running command) |
 | `b` | On Overview and Logs: turn desktop notifications on or off |
 | `e` | On Registries: require (or stop requiring) registry approval for the selected entry's type. Registry actions (sync, approve, reject, require) keep the Registries panel in front and report the result in the status bar; their full output is in Activity |
 

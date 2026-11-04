@@ -95,7 +95,7 @@ The machine-wide drop-in carries one hook contract for every account, not the ve
 
 ### On a managed computer
 
-The per-user commands on this page do not run on a computer with a standalone enterprise install. On Linux and macOS, `defenseclaw` there offers only `sandbox` commands, `help` and `--version`: anything else prints "This computer is managed; use `defenseclaw sandbox status` for your read-only status and `defenseclaw sandbox policy explain` for your policy. Other commands require an administrator." and exits 2. On native Windows, `defenseclaw` is the administrator's command: it refuses `setup claudecode` and `setup remove`, and refuses `guardrail` commands (exit `3`).
+The per-user commands on this page do not run on a computer with a standalone enterprise install. On Linux and macOS, `defenseclaw` there offers only `sandbox` commands, `help` and `--version`: anything else prints "This computer is managed; use `defenseclaw status` for your protection state, `defenseclaw sandbox status` for your sandboxes and `defenseclaw sandbox policy explain` for your policy. Other commands require an administrator." and exits 2. On native Windows, `defenseclaw` is the administrator's command: it refuses `setup claudecode` and `setup remove`, and refuses `guardrail` commands (exit `3`).
 
 The administrator manages Claude Code in the managed `config.yaml`. `guardrail.connectors.claudecode: {}` adds it, the connector's `mode` and `hook_fail_mode` tune it, and `guardrail.connectors.claudecode.enabled: false` removes it. Apply the change as in [Change the config](/docs/enterprise/lifecycle), then check it with `enterprise policy verify` ([Machine policy](/docs/enterprise/machine-policy)).
 
@@ -144,6 +144,39 @@ Claude Code's interactive `!` shell mode is outside this hook contract. In the r
 | `ConfigChange` | Blockable, except when `source=policy_settings`, where Claude Code ignores blocking decisions. |
 
 A standalone `PostToolUse` response may use physically verified local source provenance to lower source-code trust findings to detection-only telemetry. Batch, failure, denial and mixed outputs stay untrusted content.
+
+### Secrets in tool results
+
+A tool's result reaches Claude Code before `PostToolUse` runs, so DefenseClaw cannot keep a result away from the model. Result-side secrets are detected and recorded, not prevented. When a result holds a secret, for example an AWS secret access key in a `.env` file that `Read` returned, DefenseClaw does this in both modes:
+
+- It records the finding (here `SEC-AWS-SECRET`, CRITICAL) with the value redacted.
+- It answers `allow` with `would_block: true`, also in action mode. A block at this point cannot take the result back.
+- It names the rule to the model in `additionalContext`, never the value. Claude usually then declines to repeat the secret. That is the model's choice, not a DefenseClaw control.
+
+DefenseClaw does not return Claude Code's `PostToolUse` `decision: "block"`. It would only add a reason to the conversation, and the result stays in it.
+
+To stop a secret file from being read, block the read at `PreToolUse` with a path rule in a [custom pack](/docs/policies/rules#add-your-own-pack). This rule blocks a `Read` of any `.env` file, and a shell command that DefenseClaw parses as reading one, such as `cat .env`. `.env.example` and other names do not match:
+
+```yaml title="rules/my-org-dotenv.yaml in your custom pack"
+version: 1
+category: my-org-dotenv
+rules:
+  - id: ORG-DOTENV-READ
+    tool_call_only: true
+    expression: >-
+      f.commands.exists(c,
+      defenseclaw.guardrail.semantic.v1.OperationKind.OPERATION_KIND_READ in c.operations &&
+      f.paths.exists(p, p.command_id == c.id &&
+      p.access == defenseclaw.guardrail.semantic.v1.PathAccess.PATH_ACCESS_READ &&
+      (p.resolved.endsWith('/.env') || p.resolved.endsWith('\\.env'))))
+    pattern: '(?:^|[\s/\\])\.env(?:\s|$)'
+    title: "Read of a .env file"
+    severity: CRITICAL
+    confidence: 0.95
+    tags: [credential, file-sensitive]
+```
+
+Validate and pin the pack as in [Start with a complete rule](/docs/policies/cel#start-with-a-complete-rule): `defenseclaw guardrail validate-pack` and `defenseclaw guardrail use-pack` on a per-user install, or `defenseclaw-gateway rulepack validate` and `rule_pack` with `custom_packs` in the admin config on a managed computer ([custom rule packs](/docs/enterprise/configuration)). In action mode the read is denied before the file is opened. In observe mode it is recorded as `would_block` and runs. A command the parser cannot read fully only matches the `pattern`, which records and never blocks. The same holds in Claude Cowork, which runs this engine and hook route.
 
 ### Native ask
 
@@ -201,6 +234,10 @@ On every host install, setup removes the native exporter settings it can prove D
 | Bedrock models | Bedrock Mantle serves Claude only under `anthropic.*` ids. A Bedrock run starts on `anthropic.claude-sonnet-5` and maps Opus to `anthropic.claude-opus-4-8`, Sonnet to `anthropic.claude-sonnet-5`, and Haiku (also background tasks) to `anthropic.claude-haiku-4-5`. Pick another with `-- --model MODEL` or `/model`. |
 | Per-sandbox settings | A read-only `60-defenseclaw-run.json` wins over the image's. It pins the model provider (and Bedrock models), so a repository's `.claude/settings.json` cannot redirect the conversation. A read-only `/etc/claude-code/managed-mcp.json` lists the MCP servers brought from your setup. Repository `.mcp.json` servers do not start unless the pack sets [`mcp.project_servers: allow`](/docs/sandboxes/policy-packs). `--no-mcp` leaves yours behind. |
 | Image | Claude Code 2.1.156 by default. A version without a reviewed Linux hook contract is refused. Verified end to end against a mock model, including hostile settings such as `disableAllHooks`, and in a live run where a blocked command was denied and the egress block list held. |
+
+## Claude Cowork
+
+Claude Desktop's Cowork mode runs Claude Code's engine on your computer, and that engine runs these hooks. A per-user install adds a DefenseClaw plugin to your Claude account with `defenseclaw setup cowork`. A managed computer needs nothing extra, because the machine policy covers it. See [Claude Cowork](/docs/connectors/cowork).
 
 ## Limits
 

@@ -877,6 +877,16 @@ On a computer with the standalone deployment the per-user product refuses to run
 | `defenseclaw upgrade`, `defenseclaw rollback` | Refuse when the marker key exists |
 | Per-user gateway | Refuses to start on a managed computer. `defenseclaw-gateway stop`, `start` and `restart` refuse there too; the message names `status` and the installed release's Setup `/repair` as the way to restart the managed gateway |
 
+After the managed deployment is removed, a user can install the per-user product.
+Its first `defenseclaw init` moves the files a managed install left in
+`%USERPROFILE%\.defenseclaw` (an uninstall before 1.0.8 kept them, with the managed
+access list) to `%USERPROFILE%\.defenseclaw-managed-leftovers-<UTC time>` and says so
+in the **Managed leftovers** row. It never reads or reuses them, it moves only entries
+that LocalSystem or Administrators hold that way, and it moves nothing once the folder
+has a `config.yaml`, `.env` or `audit.db`. Delete that folder when it is no longer
+needed. If an entry cannot be moved, init names it: move it out of the folder, or
+have an administrator delete it, and run `defenseclaw init` again.
+
 Nothing migrates a per-user install. Before you deploy, have each user run
 `defenseclaw uninstall --all --binaries --yes`. Setup needs `--all`: it does not
 adopt a `%USERPROFILE%\.defenseclaw` folder a per-user install left, and a first
@@ -908,9 +918,11 @@ Uninstall removes DefenseClaw's hook registrations and machine-policy entries
 `enabledPlugins["defenseclaw@defenseclaw"]` in
 `%ProgramFiles%\GitHubCopilot\managed-settings.json`), the four services, the
 binaries, and the machine state under `C:\ProgramData\Cisco\DefenseClaw` (config,
-secrets, data and service logs). Each user keeps `%USERPROFILE%\.defenseclaw` and
-the per-user binaries. Add `PURGE=1` to Setup or `--purge` to the CLI to remove
-those too. The marker key, the Add/Remove Programs entry and a `DisableSelfUpdate`
+secrets, data and service logs). From each enrolled account whose registrations it
+removed it also removes the files the managed runtime wrote in
+`%USERPROFILE%\.defenseclaw` (see **Per-user runtime files** below); the account keeps
+its other files there and the per-user binaries. Add `PURGE=1` to Setup or `--purge`
+to the CLI to remove those too. The marker key, the Add/Remove Programs entry and a `DisableSelfUpdate`
 value the lifecycle wrote are removed, and the lifecycle log stays. A standalone
 Setup uninstall removes the administrator-only
 `C:\ProgramData\Cisco\DefenseClaw-Lifecycle\lifecycle.lock` and its directory even
@@ -961,6 +973,21 @@ not remove a lock an earlier uninstall left.
   `user_registrations_pending`; failures report `user_registrations_failed`. An older Claude Code per-user hook in
   `%USERPROFILE%\.claude\settings.json` is removed exactly, and a changed one is
   kept with `claude_settings_hook_left`.
+- **Per-user runtime files.** Run as LocalSystem, an uninstall without `PURGE=1` also
+  removes, from the `%USERPROFILE%\.defenseclaw` of each enrolled account whose
+  registrations it removed, what the managed runtime wrote there: `hooks`, `logs`,
+  `hook_contract_lock.json` and its lock file, `inventory.db`, `foreign-hook-env.json`,
+  `foreign-hook-sessions`, `agent_selection.json` and the connectors' lock files, and
+  the emptied `connector_backups` folders. The folder goes when nothing else is in it.
+  The account's own files, `foreign-hooks-backup`, a backup record that stays and `acp`
+  stay, and get the owner-private access list a per-user install can manage; the
+  result names the folder in `user_state_remaining` with what stays. A link or junction
+  is left as found, and a folder that holds a per-user install (`config.yaml`,
+  `audit.db`, `.venv` or `installer`) is not changed. An account whose registrations
+  stay keeps its folder as it is. Before 1.0.8 the folder stayed whole, with the managed
+  access list, and a later per-user install of that account stopped at
+  `defenseclaw init` ("hook_contract_lock.json rollback source is not protected");
+  see [Per-user installs](#per-user-installs).
 - **`PURGE=1`** also removes each enrolled account's `%USERPROFILE%\.defenseclaw`
   (including `foreign-hooks-backup`; copy it first if the account wants those
   hooks back), its `.defenseclaw.rollback-<random>` copies, the DefenseClaw
@@ -1115,6 +1142,20 @@ Limits:
 
 See [Machine policy](/docs/enterprise/machine-policy) and
 [Foreign-hook guard](/docs/enterprise/foreign-hook-guard).
+
+## Claude Cowork
+
+Claude Cowork runs its agent loop on the computer, with the Claude Code engine that Claude Desktop bundles. The Claude Code drop-in (`C:\Program Files\ClaudeCode\managed-settings.d\90-defenseclaw.json`) is meant to cover it. There is nothing to configure for Cowork itself.
+
+| Item | Windows |
+| --- | --- |
+| Measured | In the 1.0.8 tests with Claude Desktop 4.16336.0 (engine 2.1.317) using third-party inference through Amazon Bedrock, Cowork's hook calls reached the gateway with surface `cowork`, an administrator deny rule blocked `mcp__workspace__bash`, and a read of a `.env` file had its secret withheld. An account that has only Claude Desktop is enrolled. How `managed_hooks_only` treats Cowork plugin hooks on Windows has not been measured yet |
+| Engine folder | `claude-code\<version>\` in the user's Claude Desktop data folder: `%APPDATA%\Claude`, `%LOCALAPPDATA%\Claude-Data\claude_<id>` for the Microsoft Store (MSIX) app, or `%LOCALAPPDATA%\Claude-3p` for third-party inference. DefenseClaw trusts it by an Authenticode signature by `Anthropic, PBC` (or `Anthropic PBC`) on `claude.exe`, whose file version equals the folder |
+| If the engine is not identified | The Desktop surface is reported `surface_unverified`. That does not block by default |
+| Shell | Runs in the Cowork Linux VM, so the POSIX shell rules apply on Windows |
+| `status` and `verify` | Print a `cowork` line (`configured`, and how many hook calls reported themselves as Cowork since the gateway started) and each enrolled account's last Cowork event. An elevated session is needed for the per-account events |
+
+See [Claude Cowork](/docs/connectors/cowork) for the tools, `managed_hooks_only` and the limits.
 
 ## Sandboxes
 

@@ -120,11 +120,12 @@ Under the Secure Client profile none of this applies. The model is in
 [Configuration: one source of truth](/docs/reference/source-of-truth).
 
 On Linux and macOS the enterprise package installs `defenseclaw` as a launcher
-that runs only `defenseclaw sandbox` commands. Every other command, readers
-included, prints this and exits `2`:
+that runs only `defenseclaw sandbox` commands and `defenseclaw status`, which
+shows the person their own Claude Code and Cowork protection state (never
+another account's). Every other command prints this and exits `2`:
 
 ```text
-This computer is managed; use `defenseclaw sandbox status` for your read-only status and `defenseclaw sandbox policy explain` for your policy. Other commands require an administrator.
+This computer is managed; use `defenseclaw status` for your protection state, `defenseclaw sandbox status` for your sandboxes and `defenseclaw sandbox policy explain` for your policy. Other commands require an administrator.
 ```
 
 Windows has no launcher: `defenseclaw.exe` there is the administrator command. It refuses the per-user writers itself:

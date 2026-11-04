@@ -235,6 +235,20 @@ def _consumer_files(entry: EnvVar) -> str:
     return ", ".join(f"`{loc}`" for loc in seen)
 
 
+def _public_entries(category: str, registry: Registry) -> list[EnvVar]:
+    """Entries of one category that belong on the public page.
+
+    Rows whose every consumer is under packaging/cowork-vm/ are left out: the
+    VM sensor is documented in a later release. The coverage test still checks
+    them against the real files.
+    """
+    return [
+        e
+        for e in registry.by_category(category)
+        if not (e.consumers and all(c.location.startswith("packaging/cowork-vm/") for c in e.consumers))
+    ]
+
+
 def _render_table(category: str, *, mdx: bool, registry: Registry) -> str:
     """Render one category's MDX-safe table.
 
@@ -243,7 +257,7 @@ def _render_table(category: str, *, mdx: bool, registry: Registry) -> str:
     policy) and what it does (purpose, security concern, and the files that
     read it).
     """
-    entries = sorted(registry.by_category(category), key=lambda e: e.name)
+    entries = sorted(_public_entries(category, registry), key=lambda e: e.name)
     if not entries:
         return "\n*(no entries in this category)*\n"
 
@@ -291,7 +305,7 @@ def _render_block(*, mdx: bool) -> str:
         if mdx and category == CATEGORY_TEST_FIXTURE:
             # Test-only switches are listed for completeness but collapsed so
             # they don't read as operator settings.
-            count = len(registry.by_category(category))
+            count = len(_public_entries(category, registry))
             chunks.append(
                 "These variables exist for DefenseClaw's own test suites. Do not "
                 "set them on a real install."

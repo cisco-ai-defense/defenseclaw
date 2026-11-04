@@ -183,7 +183,8 @@ Warnings do not fail an action. They appear in `warnings[]`.
 | `guardian_report_pending` | Linux, macOS | After a change the guardian had not reported its targets within 30 seconds. Run `status` or `verify` a moment later |
 | `guardian_reconcile_pending` | Linux, macOS | `targets.yaml` changed in the last three minutes (an apply, `ensure` or an enumerator cycle) and the guardian has not reconciled it yet. It does within about a minute, and until then enforces the targets it last reconciled. No repair is needed; run `verify` again a minute later. A guardian that stays behind an older `targets.yaml` fails `verify` |
 | `package_installed`, `package_upgraded` | Linux, macOS | In the MDM wrapper's result: the wrapper installed or upgraded the package (the message gives the versions) before the `ensure` whose result follows |
-| `ensure_install`, `ensure_upgrade`, `ensure_repair` | Windows | The action that `ensure` chose, and why |
+| `ensure_install`, `ensure_upgrade`, `ensure_repair` | Windows | The action that `ensure` chose, and why. `ensure_upgrade` means a newer release was installed |
+| `ensure_config_restart` | Windows | `ensure` applied a config change to the installed release through the lifecycle transaction and upgraded nothing: a changed key is one the services read only at start (such as `enterprise.machine_policy`), or the running gateway could not take the change. Every service stopped and started again, which takes two to six minutes; the message names the keys. See [Restart or repair the gateway](/docs/enterprise/lifecycle#restart-the-managed-gateway) |
 | `ensure_config_applied` | Windows | `ensure` applied a config-only change in the running gateway and stopped no service; the message lists the changed keys. See [Restart or repair the gateway](/docs/enterprise/lifecycle#restart-the-managed-gateway) |
 | `custom_pack_will_not_load` | Windows | A `guardrail.custom_packs` entry that no setting selects would not load if one did: its folder is missing, the pack is invalid, or its `digest` pin does not match the files (the message gives the files digest). The config was applied; a config that selects the pack is refused until the pin matches. Review the pack, then put the files digest in `guardrail.custom_packs.NAME.digest` and run Setup `/ensure` again, or remove the entry |
 | `policy_reload_rejected` | Windows | The gateway rejected the last policy change (for example a rule pack edited away from the digest `guardrail.custom_packs` pins) and keeps enforcing an earlier policy. The message gives its error; `policy.last_reload_error` and `policy.applied: false` say the same. `verify` fails with this code (exit `1603`). Restore the asset or apply a corrected config |
@@ -619,9 +620,9 @@ The policy commands read the managed config, which only administrators can read.
 
 #### This computer is managed (`defenseclaw` exits 2)
 
-You see: "This computer is managed; use `defenseclaw sandbox status` for your read-only status and `defenseclaw sandbox policy explain` for your policy. Other commands require an administrator." The command exits `2`. On a managed Linux or macOS computer the packaged `defenseclaw` runs only `defenseclaw sandbox` commands; everything else, readers included, belongs to the administrator.
+You see: "This computer is managed; use `defenseclaw status` for your protection state, `defenseclaw sandbox status` for your sandboxes and `defenseclaw sandbox policy explain` for your policy. Other commands require an administrator." The command exits `2`. On a managed Linux or macOS computer the packaged `defenseclaw` runs only `defenseclaw sandbox` commands and `defenseclaw status` (your own protection state); everything else belongs to the administrator.
 
-**Fix.** Use `defenseclaw sandbox ...` as a user. An administrator runs `defenseclaw-gateway enterprise linux status` (`enterprise macos status` on macOS) as root, by its packaged path. Policy changes go in the admin config.
+**Fix.** Use `defenseclaw status` to see whether your Claude Code and Cowork are protected, and `defenseclaw sandbox ...` for sandboxes. An administrator runs `defenseclaw-gateway enterprise linux status` (`enterprise macos status` on macOS) as root, by its packaged path. Policy changes go in the admin config.
 
 **Check.** `defenseclaw sandbox list` runs.
 
@@ -694,7 +695,9 @@ The login shell is `nologin` or `false`. Or the user is in `exclude_users` or an
 
 #### A user named in include_users is not enrolled (Linux and macOS)
 
-No supported agent is installed in the account. `include_users` makes the account a candidate, but a row is added only for an agent the enumerator finds installed for that user. This holds for local and directory (mobile) accounts alike. The enumerator log says `<user>: named in enterprise.enrollment.include_users but not enrolled: no installation of <agents> found for this account`.
+No supported agent is installed in the account. `include_users` makes the account a candidate, but a row is added only for an agent the enumerator finds installed for that user. This holds for local and directory (mobile) accounts alike. The enumerator log says `<user>: named in enterprise.enrollment.include_users but not enrolled: no installation of <agents> found for this account`, where `<agents>` are the per-user connectors.
+
+An account whose only agent is a machine-policy connector (Claude Code, including Claude Desktop and Cowork, on macOS) needs no row: machine policy covers it. The log then says `<user>: named in enterprise.enrollment.include_users: no per-user connector install (no <agents> found); covered by machine policy (claudecode)`, and the `cowork` block of `status` lists the account's Claude Desktop installs and engine trust (see [Claude Cowork](/docs/enterprise/machine-policy#claude-cowork)).
 
 **Fix.** Install the agent in the account (for Hermes, also run its first-run setup), then run `reconcile` or wait for the next cycle.
 
