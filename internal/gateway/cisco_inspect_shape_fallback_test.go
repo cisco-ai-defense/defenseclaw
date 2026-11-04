@@ -116,6 +116,97 @@ func TestCiscoInspectAPIKeyToolCallValidationFallback(t *testing.T) {
 	}
 }
 
+func TestCiscoInspectAPIKeyMessageToolValidationFallback(t *testing.T) {
+	const reviewedArgs = `{"topic":"policy-review"}`
+	const ordinaryArgs = `{"topic":"team-update"}`
+	var mu sync.Mutex
+	var requests []struct {
+		structured bool
+		content    string
+	}
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		messages := shapeFallbackWire(t, r)
+		structured := hasShapeFallbackToolCalls(messages)
+		var content string
+		if !structured {
+			if len(messages) != 1 || string(messages[0]["role"]) != `"user"` {
+				t.Errorf("text messages = %v", messages)
+			}
+			if err := json.Unmarshal(messages[0]["content"], &content); err != nil {
+				t.Errorf("decode content: %v", err)
+			}
+		}
+		mu.Lock()
+		requests = append(requests, struct {
+			structured bool
+			content    string
+		}{structured, content})
+		mu.Unlock()
+		if structured {
+			if len(messages) != 2 || string(messages[0]["role"]) != `"assistant"` ||
+				string(messages[1]["role"]) != `"user"` || string(messages[1]["content"]) != `"{\"topic\":\"policy-review\"}"` {
+				t.Errorf("structured messages = %v", messages)
+			}
+			w.WriteHeader(http.StatusUnprocessableEntity)
+			return
+		}
+		switch content {
+		case reviewedArgs:
+			_, _ = io.WriteString(w, `{"is_safe":false,"action":"Block","rules":[]}`)
+		case ordinaryArgs:
+			_, _ = io.WriteString(w, `{"is_safe":true,"action":"Allow","rules":[]}`)
+		default:
+			t.Errorf("unexpected text content = %q", content)
+		}
+	}))
+	t.Cleanup(srv.Close)
+
+	client := &CiscoInspectClient{apiKey: "test-key", endpoint: srv.URL, timeout: time.Second, client: srv.Client()}
+	api := testAPIServerWithConfig(t, "action")
+	api.SetCiscoInspector(client)
+	inspect := func(args string) *ScanVerdict {
+		return api.hookAIDInspectToolCall(t.Context(), aidToolCall{Name: "message", Args: json.RawMessage(args)}, args)
+	}
+	if verdict := inspect(reviewedArgs); verdict == nil || verdict.Action != "block" {
+		t.Fatalf("reviewed verdict = %+v, want block", verdict)
+	}
+	if verdict := inspect(ordinaryArgs); verdict == nil || verdict.Action != "allow" {
+		t.Fatalf("ordinary verdict = %+v, want allow", verdict)
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	want := []struct {
+		structured bool
+		content    string
+	}{{true, ""}, {false, reviewedArgs}, {false, ordinaryArgs}}
+	if !reflect.DeepEqual(requests, want) {
+		t.Fatalf("request formats = %v, want %v", requests, want)
+	}
+}
+
+func TestCiscoInspectAPIKeyMessageToolBenignTwin(t *testing.T) {
+	const ordinaryArgs = `{"topic":"team-update"}`
+	var calls atomic.Int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		messages := shapeFallbackWire(t, r)
+		calls.Add(1)
+		if len(messages) != 2 || !hasShapeFallbackToolCalls(messages) ||
+			string(messages[1]["content"]) != `"{\"topic\":\"team-update\"}"` {
+			t.Errorf("accepted messages = %v", messages)
+		}
+		_, _ = io.WriteString(w, `{"is_safe":true,"action":"Allow","rules":[]}`)
+	}))
+	t.Cleanup(srv.Close)
+
+	client := &CiscoInspectClient{apiKey: "test-key", endpoint: srv.URL, timeout: time.Second, client: srv.Client()}
+	api := testAPIServerWithConfig(t, "action")
+	api.SetCiscoInspector(client)
+	verdict := api.hookAIDInspectToolCall(t.Context(), aidToolCall{Name: "message", Args: json.RawMessage(ordinaryArgs)}, ordinaryArgs)
+	if verdict == nil || verdict.Action != "allow" || calls.Load() != 1 {
+		t.Fatalf("benign verdict = %+v, calls = %d, want allow in one call", verdict, calls.Load())
+	}
+}
+
 func TestCiscoInspectAPIKeyRulesRetryKeepsToolCall(t *testing.T) {
 	var mu sync.Mutex
 	var shapes []bool
@@ -227,12 +318,16 @@ func TestCiscoInspectAPIKeyToolCallNonValidationStatusesDoNotRetry(t *testing.T)
 
 func TestCiscoInspectAPIKeyUnpairedToolCallKeepsOriginalShape(t *testing.T) {
 	toolCall := shapeFallbackMessages("ordinary edit")[0]
+	messageCall := ChatMessage{Role: "assistant", ToolCalls: json.RawMessage(`[{"type":"function","function":{"name":"message","arguments":"{\"topic\":\"team-update\"}"}}]`)}
 	for name, messages := range map[string][]ChatMessage{
 		"last message is a tool call": {
 			{Role: "user", Content: "ordinary context"}, toolCall,
 		},
 		"user text has no tool companion": {
 			toolCall, {Role: "user", Content: "ordinary context"},
+		},
+		"message text differs from tool arguments": {
+			messageCall, {Role: "user", Content: "ordinary context"},
 		},
 	} {
 		t.Run(name, func(t *testing.T) {

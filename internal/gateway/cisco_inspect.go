@@ -463,6 +463,22 @@ func NewCiscoInspectClient(cfg *config.CiscoAIDefenseConfig, dotenvPath string) 
 	}
 }
 
+// ciscoMessageToolCallHasTextForm recognizes the unlabelled text form used by
+// the message hook. The user message must match the carried arguments so an
+// unrelated message cannot be substituted for the tool call on retry.
+func ciscoMessageToolCallHasTextForm(messages []ChatMessage) bool {
+	var calls []struct {
+		Type     string `json:"type"`
+		Function struct {
+			Name      string `json:"name"`
+			Arguments string `json:"arguments"`
+		} `json:"function"`
+	}
+	return json.Unmarshal(messages[0].ToolCalls, &calls) == nil && len(calls) == 1 &&
+		calls[0].Type == "function" && calls[0].Function.Name == "message" &&
+		calls[0].Function.Arguments == messages[1].Content
+}
+
 // Inspect sends messages to Cisco AI Defense and returns a normalized verdict.
 // The caller's context is mandatory for cancellation and W3C parentage. The
 // generated guardrail ai_defense CLIENT phase owns the span; this client only
@@ -486,12 +502,12 @@ func (c *CiscoInspectClient) Inspect(ctx context.Context, messages []ChatMessage
 		chatMsgs[i] = msg
 	}
 	// PreToolUse supplies its complete text form after an empty assistant
-	// tool-call message. Other message lists have no known equivalent text
-	// request, so they keep their original shape on a validation error.
+	// tool-call message. The message hook omits the usual tool label.
+	// Other message lists keep their original shape on a validation error.
 	canUseText := len(messages) == 2 &&
 		messages[0].Role == "assistant" && messages[0].Content == "" && len(messages[0].ToolCalls) > 0 &&
-		messages[1].Role == "user" && strings.HasPrefix(messages[1].Content, "Tool call: ") &&
-		len(messages[1].ToolCalls) == 0
+		messages[1].Role == "user" && len(messages[1].ToolCalls) == 0 &&
+		(strings.HasPrefix(messages[1].Content, "Tool call: ") || ciscoMessageToolCallHasTextForm(messages))
 	var textMsgs []map[string]interface{}
 	if canUseText {
 		textMsgs = []map[string]interface{}{{"role": "user", "content": messages[1].Content}}
