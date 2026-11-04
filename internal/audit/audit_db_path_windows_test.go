@@ -419,16 +419,21 @@ func TestAuditDBWindowsAcceptsInheritedReadAccessForSQLiteSidecars(t *testing.T)
 
 // After an ACL reset the audit folder inherits C:\ProgramData's
 // container-only Users create-child entry. It cannot replace a child, so the
-// gateway keeps its audit store.
+// gateway keeps its audit store. The acceptance is for a folder inside the
+// platform installer's roots (GAP-0566): the temp tree stands in for
+// C:\ProgramData\Cisco here, and TestAuditDBWindowsRefusesInheritedCreateChildOutsideInstallerRoots
+// covers a per-user folder elsewhere.
 func TestAuditDBWindowsAcceptsInheritedContainerOnlyCreateChild(t *testing.T) {
 	users, err := windows.CreateWellKnownSid(windows.WinBuiltinUsersSid)
 	if err != nil {
 		t.Fatal(err)
 	}
 	const createChild windows.ACCESS_MASK = 0x116
-	parent := filepath.Join(t.TempDir(), "parent")
+	base := t.TempDir()
+	t.Cleanup(managed.AddTrustedMachineInstallBaseForTest(base))
+	parent := filepath.Join(base, "Cisco", "parent")
 	directory := filepath.Join(parent, "audit")
-	if err := os.Mkdir(parent, 0o700); err != nil {
+	if err := os.MkdirAll(parent, 0o700); err != nil {
 		t.Fatal(err)
 	}
 	if err := secureAuditDBPlatformPath(parent, true); err != nil {
@@ -444,6 +449,40 @@ func TestAuditDBWindowsAcceptsInheritedContainerOnlyCreateChild(t *testing.T) {
 	}
 	if err := validateAuditDBWindowsSecurityDescriptor(directory, sd, true, true); err != nil {
 		t.Fatalf("inherited container-only create-child entry refused: %v", err)
+	}
+}
+
+// GAP-0566: a per-user (OSS) audit folder outside the platform installer's
+// roots, say a custom data_dir under C:\ProgramData, inherits the same entry
+// when it is created; another standard user could add a SQLite journal there,
+// so it is refused.
+func TestAuditDBWindowsRefusesInheritedCreateChildOutsideInstallerRoots(t *testing.T) {
+	users, err := windows.CreateWellKnownSid(windows.WinBuiltinUsersSid)
+	if err != nil {
+		t.Fatal(err)
+	}
+	const createChild windows.ACCESS_MASK = 0x116
+	parent := filepath.Join(t.TempDir(), "parent")
+	directory := filepath.Join(parent, "audit")
+	if err := os.Mkdir(parent, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if managed.PlatformInstallerOwnedPath(directory) {
+		t.Skip("the test temp folder is inside the platform installer roots")
+	}
+	if err := secureAuditDBPlatformPath(parent, true); err != nil {
+		t.Fatal(err)
+	}
+	addJudgeBodyWindowsContainerOnlyGrant(t, parent, users, createChild)
+	if err := os.Mkdir(directory, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	sd, err := windows.GetNamedSecurityInfo(directory, windows.SE_FILE_OBJECT, windows.OWNER_SECURITY_INFORMATION|windows.DACL_SECURITY_INFORMATION)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := validateAuditDBWindowsSecurityDescriptor(directory, sd, true, true); err == nil {
+		t.Fatal("inherited create-child entry accepted on an audit folder outside the installer roots")
 	}
 }
 
