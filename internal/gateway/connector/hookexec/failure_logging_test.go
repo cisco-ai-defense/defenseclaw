@@ -63,12 +63,14 @@ func TestDeliveryFailureDiagnostics(t *testing.T) {
 						if err := json.Unmarshal(failure, &record); err != nil {
 							t.Fatalf("expected one failure record: %v: %s", err, failure)
 						}
-						blocked := mode == "closed" || scenario == "managed-missing-token" || (strict && (scenario == "outage" || scenario == "missing-token"))
+						blocked := mode == "closed" || (strict && (scenario == "outage" || strings.HasSuffix(scenario, "missing-token")))
 						want := "fail_open"
 						if blocked {
 							want = "fail_closed"
 						}
-						if record["connector"] != connector || record["fail_mode"] != mode || record["outcome"] != want || strings.Contains(r.stderr, "WARNING hook fail-open") == blocked {
+						// A managed hook prints nothing when it allows.
+						wantWarning := !blocked && scenario != "managed-missing-token"
+						if record["connector"] != connector || record["fail_mode"] != mode || record["outcome"] != want || strings.Contains(r.stderr, "WARNING hook fail-open") != wantWarning {
 							t.Fatalf("wrong diagnostic: record=%+v stderr=%s", record, r.stderr)
 						}
 						for _, secret := range []string{"private-payload-marker", "private-response-marker", "tkn"} {

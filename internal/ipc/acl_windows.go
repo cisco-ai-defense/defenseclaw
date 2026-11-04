@@ -225,7 +225,8 @@ func explicitAllow(sid *windows.SID, mask windows.ACCESS_MASK) windows.EXPLICIT_
 // service registration time) and falls back to
 // defaultGatewayServiceAccount when unset.
 //
-// The lookup goes through LookupSID. The resolved SID is validated
+// The SID is computed from the account name (managed.WindowsServiceAccountSID),
+// so it needs no LSA or domain controller. The SID is validated
 // as an NT SERVICE virtual account (S-1-5-80-...) BEFORE it enters
 // the DACL — under the initial-cut deferred-auth posture, the DACL
 // is the ONLY access boundary, so an unvalidated principal in the
@@ -259,7 +260,7 @@ func resolveGatewayServiceSID() (*windows.SID, error) {
 			ntServicePrefix, account,
 		)
 	}
-	sid, _, _, err := windows.LookupSID("", account)
+	sid, err := managed.WindowsServiceAccountSID(account)
 	if err != nil {
 		return nil, fmt.Errorf("ipc: resolve gateway service SID for %q: %w", account, err)
 	}

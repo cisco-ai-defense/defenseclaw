@@ -164,8 +164,9 @@ func TestManagedRuntimeBoundaryStaysClosedWithBoundaryRecord(t *testing.T) {
 	)
 }
 
-// The disable sentinel and a missing Home stay closed for a managed hook.
-func TestManagedSentinelAndMissingHomeStayClosedWithBoundaryRecord(t *testing.T) {
+// The disable sentinel and a missing Home block a managed hook under a closed
+// fail mode and record the boundary.
+func TestManagedSentinelAndMissingHomeClosedModeBlocksWithBoundaryRecord(t *testing.T) {
 	for _, tc := range []struct {
 		name   string
 		home   func(t *testing.T) string
@@ -188,7 +189,7 @@ func TestManagedSentinelAndMissingHomeStayClosedWithBoundaryRecord(t *testing.T)
 				APIAddr:                   "127.0.0.1:1",
 				Home:                      home,
 				HookDir:                   filepath.Join(home, "hooks"),
-				FailMode:                  "open",
+				FailMode:                  "closed",
 				ManagedEnterprise:         true,
 				AuthenticatedManagedToken: &token,
 				Stdin:                     strings.NewReader("{}"),
@@ -204,15 +205,18 @@ func TestManagedSentinelAndMissingHomeStayClosedWithBoundaryRecord(t *testing.T)
 	}
 }
 
-// An oversized payload is a deterministic bypass under an open fail mode, so
-// a managed hook blocks it and records the boundary; an unmanaged hook keeps
-// following its fail mode and writes no platform record.
-func TestOversizedPayloadManagedForcesClosed(t *testing.T) {
+// An oversized payload follows the fail mode. Under a closed fail mode a
+// managed hook blocks it and records the boundary; an unmanaged hook under an
+// open fail mode allows it and writes no platform record.
+func TestOversizedPayloadFollowsFailMode(t *testing.T) {
 	for _, managedHook := range []bool{true, false} {
 		t.Run(map[bool]string{true: "managed", false: "unmanaged"}[managedHook], func(t *testing.T) {
 			records := captureManagedHookDecisions(t)
 			r := run(t, "codex", ok(`{"action":"allow"}`), func(opts *Options) {
 				opts.FailMode = "open"
+				if managedHook {
+					opts.FailMode = "closed"
+				}
 				opts.MaxBody = 4
 				opts.ManagedEnterprise = managedHook
 				if managedHook {
@@ -241,6 +245,43 @@ func TestOversizedPayloadManagedForcesClosed(t *testing.T) {
 				`reason="`+managedHookOversizedReason+`"`,
 				`fail_mode="closed"`,
 				`decision="block"`,
+			)
+		})
+	}
+}
+
+// Under an open fail mode a managed oversized event is allowed and recorded
+// as degraded, not as an integrity boundary; a managed runtime under strict
+// availability still blocks it.
+func TestOversizedPayloadManagedOpenModeRecordsDegradedAndStrictBlocks(t *testing.T) {
+	big := `{"hook_event_name":"PreToolUse","tool_input":"` + strings.Repeat("x", int(defaultMaxBody)) + `"}`
+	for _, strict := range []bool{false, true} {
+		t.Run(map[bool]string{false: "open", true: "strict"}[strict], func(t *testing.T) {
+			records := captureManagedHookDecisions(t)
+			r := run(t, "claudecode", ok(`{"action":"allow"}`), func(opts *Options) {
+				opts.FailMode = "open"
+				opts.StrictAvailability = strict
+				opts.ManagedEnterprise = true
+				token := "authenticated-token"
+				opts.AuthenticatedManagedToken = &token
+				opts.Stdin = strings.NewReader(big)
+			})
+			if r.rt.requests != 0 {
+				t.Fatal("oversized payload reached the gateway")
+			}
+			if strict {
+				if r.code != blockExit {
+					t.Fatalf("strict oversized code = %d, want %d", r.code, blockExit)
+				}
+				requireOneManagedRecord(t, *records, managed.MarkerBoundary, `decision="block"`)
+				return
+			}
+			if r.code != 0 {
+				t.Fatalf("open oversized code = %d, want 0", r.code)
+			}
+			requireOneManagedRecord(t, *records, managed.MarkerDegraded,
+				`reason="`+managedHookOversizedReason+`"`,
+				`decision="allow"`,
 			)
 		})
 	}
@@ -472,7 +513,8 @@ func TestManagedFailurePathsWriteOnlyTheFixedBlockSentence(t *testing.T) {
 		{name: "auth/open", rt: &stubRT{status: 401}, failMode: "open"},
 		{name: "auth/closed", rt: &stubRT{status: 403}, failMode: "closed", blocked: true},
 		{name: "invalid-json/open", rt: ok("not json"), failMode: "open"},
-		{name: "oversized", rt: ok(`{"action":"allow"}`), failMode: "open", stdin: strings.Repeat("x", int(defaultMaxBody)+1), blocked: true},
+		{name: "oversized/open", rt: ok(`{"action":"allow"}`), failMode: "open", stdin: strings.Repeat("x", int(defaultMaxBody)+1)},
+		{name: "oversized/closed", rt: ok(`{"action":"allow"}`), failMode: "closed", stdin: strings.Repeat("x", int(defaultMaxBody)+1), blocked: true},
 	} {
 		for _, managedHook := range []bool{true, false} {
 			t.Run(tc.name+"/managed="+map[bool]string{true: "1", false: "0"}[managedHook], func(t *testing.T) {
