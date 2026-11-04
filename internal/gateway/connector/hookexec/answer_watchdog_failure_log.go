@@ -51,6 +51,7 @@ type preparedFailureLog struct {
 	markerTaken   bool
 	forceMarker   bool
 	fallbackFrame []byte
+	fallbackSaved bool
 	taken         bool
 	closed        bool
 	// restartReason is the bounded proof's result for a per-user no-answer.
@@ -161,6 +162,29 @@ func (p *preparedFailureLog) take(home string) *os.File {
 	return p.file
 }
 
+func (p *preparedFailureLog) ordinaryReady() bool {
+	if p == nil {
+		return false
+	}
+	select {
+	case <-p.done:
+	default:
+		return false
+	}
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return p.file != nil && !p.taken && !p.closed
+}
+
+func (p *preparedFailureLog) fallbackRecorded() bool {
+	if p == nil {
+		return false
+	}
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return p.fallbackSaved
+}
+
 func (p *preparedFailureLog) forceFallback() {
 	if p == nil {
 		return
@@ -206,6 +230,15 @@ func (p *preparedFailureLog) setFallbackFrame(frame []byte) {
 		bytes.Contains(frame, []byte(`"outcome":"fail_closed"`)) {
 		p.fallbackFrame = append(p.fallbackFrame[:0], frame...)
 	}
+	p.mu.Unlock()
+}
+
+func (p *preparedFailureLog) replaceFallbackFrame(frame []byte) {
+	if p == nil {
+		return
+	}
+	p.mu.Lock()
+	p.fallbackFrame = append(p.fallbackFrame[:0], frame...)
 	p.mu.Unlock()
 }
 
@@ -276,7 +309,8 @@ func (p *preparedFailureLog) appendFallback() bool {
 		return false
 	}
 	n, err := p.marker.Write(p.fallbackFrame)
-	return err == nil && n == len(p.fallbackFrame)
+	p.fallbackSaved = err == nil && n == len(p.fallbackFrame)
+	return p.fallbackSaved
 }
 
 // close closes the log unless a failure line took it.
