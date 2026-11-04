@@ -25,6 +25,7 @@ import (
 )
 
 type legacyEventProjectionContextKey struct{}
+type legacyEventProjectionBatchContextKey struct{}
 
 // contextWithLegacyEventProjection carries source compatibility columns into
 // EventHistoryWriter. The same canonical runtime transaction can populate the
@@ -37,6 +38,17 @@ func contextWithLegacyEventProjection(ctx context.Context, event Event) context.
 	}
 	event.Structured = cloneStructuredPayload(event.Structured)
 	return context.WithValue(ctx, legacyEventProjectionContextKey{}, event)
+}
+
+// An atomic runtime batch has one persistence context for all its records.
+// Keep each compatibility projection keyed by its generated record identity.
+func contextWithLegacyEventProjectionBatch(ctx context.Context, events []Event) context.Context {
+	projections := make(map[string]Event, len(events))
+	for _, event := range events {
+		event.Structured = cloneStructuredPayload(event.Structured)
+		projections[event.ID] = event
+	}
+	return context.WithValue(ctx, legacyEventProjectionBatchContextKey{}, projections)
 }
 
 func legacyEventProjectionFromContext(
@@ -53,6 +65,11 @@ func legacyEventProjectionFromContext(
 		return Event{}, false, nil
 	}
 	event, ok := ctx.Value(legacyEventProjectionContextKey{}).(Event)
+	if !ok {
+		if projections, present := ctx.Value(legacyEventProjectionBatchContextKey{}).(map[string]Event); present {
+			event, ok = projections[record.RecordID()]
+		}
+	}
 	if !ok {
 		return Event{}, false, nil
 	}
