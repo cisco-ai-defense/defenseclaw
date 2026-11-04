@@ -2151,9 +2151,19 @@ func matchesActiveShellHistory(
 }
 
 func matchesSudoersCandidate(value string) bool {
-	value = strings.TrimPrefix(canonicalSemanticPath(value), "/private")
+	value = sudoersRootPath(value)
 	return value == "/etc/sudoers" ||
 		strings.Contains(value, "/etc/sudoers.d/")
+}
+
+// sudoersRootPath keeps a resolved Windows drive root in the same rule scope
+// as a rooted path spelling. Other directories retain their full path.
+func sudoersRootPath(value string) string {
+	value = canonicalSemanticPath(value)
+	if actionfacts.DriveSlashPath(value) {
+		value = value[2:]
+	}
+	return strings.TrimPrefix(value, "/private")
 }
 
 func matchesGlobalLDPreload(
@@ -2222,11 +2232,18 @@ func literalSharedObjectPath(content string) bool {
 }
 
 func matchesActiveSudoers(
-	_ actionfacts.Facts,
+	facts actionfacts.Facts,
 	candidate actionfacts.PathFact,
 ) bool {
+	value := canonicalSemanticPath(semanticPathValue(candidate))
+	if actionfacts.DriveSlashPath(value) &&
+		(candidate.Flavor != actionfacts.PathFlavorWindows ||
+			runtime.GOOS != "windows" &&
+				!actionfacts.DriveSlashPath(strings.ReplaceAll(facts.CWD, `\`, "/"))) {
+		return false
+	}
 	// /private/etc is the real path of /etc on macOS (rel-1-0-6:GAP-0398).
-	value := strings.TrimPrefix(canonicalSemanticPath(semanticPathValue(candidate)), "/private")
+	value = sudoersRootPath(value)
 	return value == "/etc/sudoers" ||
 		integritySingleChild(value, "/etc/sudoers.d")
 }
