@@ -971,6 +971,21 @@ func resolveWindowsCodexManagedRuntimeRegistryLocked(
 		}
 		return result, nil
 	}
+	// Secure Client (not strict): the administrator turned DefenseClaw's
+	// managed Codex hooks off after DefenseClaw installed them. Codex runs
+	// no hooks then, so there is no active managed Codex runtime to
+	// resolve; Codex is left unauthorized and reported, instead of failing
+	// the Guardian's enrollment publication for every agent on the host.
+	if !managed.StandaloneTrustScope() && !managed.TrustStrictAncestors() {
+		if cfg, parseErr := parseWindowsCodexRequirements(requirements.data); parseErr == nil {
+			if conflict := codexRequirementsAdminConflict(cfg); conflict != nil {
+				fmt.Fprintf(os.Stderr,
+					"[enterprise-hooks] Codex managed runtime: no active registry on this host, Codex stays unhooked: %s\n",
+					conflict.Error())
+				return result, nil
+			}
+		}
+	}
 	if err := verifyWindowsCodexRequirementsBytes(requirements.data, identityOpts); err != nil {
 		return result, fmt.Errorf("verify active Codex machine requirements: %w", err)
 	}
