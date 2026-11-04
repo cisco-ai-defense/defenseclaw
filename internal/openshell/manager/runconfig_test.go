@@ -127,8 +127,14 @@ func TestRunConfigClaudeCodePinsProviderAndLocksMCP(t *testing.T) {
 	writeFile(t, filepath.Join(e.project, ".mcp.json"), `{"mcpServers":{"repo-tool":{"command":"./tool"},"zeta":{"url":"https://x"},"\u001b[31mred":{"command":"x"}}}`)
 	sb := e.create(sandboxapi.CreateRequest{Name: "cc-run", LLM: anthropicLLM, Env: map[string]string{"ANTHROPIC_BASE_URL": "http://host.openshell.internal:28921"}})
 	files := e.runFiles("cc-run")
-	if !slices.Equal(inv.calls, []string{"claudecode"}) || len(files) != 2 {
+	if !slices.Equal(inv.calls, []string{"claudecode"}) || len(files) != 3 ||
+		files[connector.ClaudeCodeSandboxDropInPath] == nil ||
+		files[connector.ClaudeCodeSandboxRunDropInPath] == nil ||
+		files[connector.ClaudeCodeSandboxManagedMCPPath] == nil {
 		t.Fatalf("inventory calls = %v, run files = %d", inv.calls, len(files))
+	}
+	if hook := decodeJSON(t, files[connector.ClaudeCodeSandboxDropInPath]); hook["hooks"] == nil {
+		t.Fatalf("managed hook drop-in = %v", hook)
 	}
 	dropIn := decodeJSON(t, files[connector.ClaudeCodeSandboxRunDropInPath])
 	env := dropIn["env"].(map[string]any)

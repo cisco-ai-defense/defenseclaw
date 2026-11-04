@@ -13,8 +13,11 @@ import (
 )
 
 func TestGAP0193AccountFolderLinkExcusesOnlyItsOwnFailedRow(t *testing.T) {
-	previousCfg, previousProbe := cfg, enterpriseHookAccountOwnedDataDirLink
-	t.Cleanup(func() { cfg, enterpriseHookAccountOwnedDataDirLink = previousCfg, previousProbe })
+	previousCfg, previousProbe, previousRemoved := cfg, enterpriseHookAccountOwnedDataDirLink, enterpriseHookRemovedAccountRow
+	t.Cleanup(func() {
+		cfg, enterpriseHookAccountOwnedDataDirLink, enterpriseHookRemovedAccountRow = previousCfg, previousProbe, previousRemoved
+	})
+	enterpriseHookRemovedAccountRow = func(enterpriseHookReconcileRow) bool { return false }
 	cfg = &config.Config{DeploymentMode: managed.DeploymentModeManagedEnterprise,
 		Enterprise: config.EnterpriseConfig{Profile: managed.ProfileStandalone}}
 	home := filepath.Join(t.TempDir(), "alice")
@@ -46,10 +49,22 @@ func TestGAP0193AccountFolderLinkExcusesOnlyItsOwnFailedRow(t *testing.T) {
 	if removed, awaiting, ownLink := enterpriseHookExcusedFailures(state); removed != 0 || awaiting != 0 || ownLink != 1 {
 		t.Fatalf("own link counts = %d removed, %d awaiting, %d linked", removed, awaiting, ownLink)
 	}
+	enterpriseHookRemovedAccountRow = func(row enterpriseHookReconcileRow) bool {
+		return row.SID == sid
+	}
+	if removed, awaiting, ownLink := enterpriseHookExcusedFailures(state); removed != 0 || awaiting != 0 || ownLink != 1 {
+		t.Fatalf("own link before removed-account fallback = %d removed, %d awaiting, %d linked", removed, awaiting, ownLink)
+	}
+	enterpriseHookRemovedAccountRow = func(enterpriseHookReconcileRow) bool { return false }
 	linked = false
 	if removed, awaiting, ownLink := enterpriseHookExcusedFailures(state); removed != 0 || awaiting != 0 || ownLink != 0 {
 		t.Fatalf("link no longer owned by account: %d, %d, %d", removed, awaiting, ownLink)
 	}
+	enterpriseHookRemovedAccountRow = func(row enterpriseHookReconcileRow) bool { return row.SID == sid }
+	if removed, awaiting, ownLink := enterpriseHookExcusedFailures(state); removed != 1 || awaiting != 0 || ownLink != 0 {
+		t.Fatalf("removed account remains excused = %d removed, %d awaiting, %d linked", removed, awaiting, ownLink)
+	}
+	enterpriseHookRemovedAccountRow = func(enterpriseHookReconcileRow) bool { return false }
 	linked = true
 	unrelated := state
 	unrelated.Results = []enterpriseHookReconcileRow{healthy, row, {User: "carol", Connector: "cursor", Error: "another target failed"}}

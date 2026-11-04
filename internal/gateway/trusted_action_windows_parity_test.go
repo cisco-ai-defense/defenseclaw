@@ -733,6 +733,7 @@ func TestWindowsCurlActualConnectorToolLabels(t *testing.T) {
 
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
+			installDefaultProfileConnector(t, test.connector)
 			cfg := &config.Config{}
 			cfg.Guardrail.Mode = "action"
 			cfg.Guardrail.Connector = test.connector

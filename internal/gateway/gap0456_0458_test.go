@@ -74,6 +74,89 @@ func TestGAP0456OverBudgetWrappers(t *testing.T) {
 	}
 }
 
+// A function call that writes the active state has the same self-protection
+// verdict as the direct call, including when the policy reading is over its
+// statement budget. The four hook cells cover both connectors and both home
+// visibility models.
+func TestGAP0456WrappedStateWriteVerdictParity(t *testing.T) {
+	if runtime.GOOS == "windows" || os.Geteuid() == 0 {
+		t.Skip("POSIX home fixture requires an unprivileged Unix user")
+	}
+	homes := filepath.Join(t.TempDir(), "homes")
+	home := filepath.Join(homes, "alice")
+	cwd := filepath.Join(home, "project")
+	if err := os.MkdirAll(cwd, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	gap0568StateFile(t, home)
+	t.Setenv("HOME", home)
+	t.Cleanup(func() { _ = os.Chmod(homes, 0o700) })
+	state := "~/.defenseclaw/config.yaml"
+	pad := gap0568Assignments(200)
+	rows := []struct{ name, command string }{
+		{"direct", pad + "; sh -c 'printf c >> " + state + "'"},
+		{"wrapped boundary", `run() { "$@"; }; ` + gap0568Assignments(129) + `; run sh -c 'printf c >> ` + state + `'`},
+		{"wrapped", `run() { "$@"; }; ` + pad + "; run sh -c 'printf c >> " + state + "'"},
+		{"variable wrapper", `run() { "$@"; }; f=run; ` + pad + `; "$f" sh -c 'printf c >> ` + state + `'`},
+		{"shadowed echo", `echo() { printf c >> "$1"; }; log() { echo "$1"; }; ` + pad + "; log " + state},
+		{"shadowed writer", `printf() { command printf c >> "$1"; }; log() { printf "$1"; }; ` + pad + "; log " + state},
+		{"wrapped short", `run() { "$@"; }; run sh -c 'printf c >> ` + state + `'`},
+		{"wrapped short after read", `run() { "$@"; }; true; run sh -c 'printf c >> ` + state + `'`},
+		{"wrapped two statements", `run() { :; "$@"; }; run sh -c 'printf c >> ` + state + `'`},
+		{"wrapped two statements after read", `run() { :; "$@"; }; true; run sh -c 'printf c >> ` + state + `'`},
+		{"shadowed short", `printf() { command printf c >> "$1"; }; log() { printf "$1"; }; log ` + state},
+		{"shadowed short echo", `echo() { printf c >> "$1"; }; log() { echo "$1"; }; log ` + state},
+		{"conditional wrapper", `run() { if true; then "$@"; fi; }; run sh -c 'printf c >> ` + state + `'`},
+	}
+	benign := []string{
+		`run() { "$@"; }; ` + pad + `; run sh -c 'echo ok'`,
+		`run() { :; "$@"; }; run sh -c 'echo ok'`,
+		`run() { "$@"; }; true; run cat ` + state,
+		`log() { echo "$1"; }; ` + pad + `; log ` + state,
+		`printf() { command printf c >> "$1"; }; ` + pad + `; echo ` + state,
+	}
+	shortBenign := []string{
+		`run() { "$@"; }; run sh -c 'echo ok'`,
+		`run() { :; "$@"; }; true; run sh -c 'echo ok'`,
+		`run() { "$@"; }; run sh -c 'printf c >> out.txt'`,
+		`run() { "$@"; }; run sh -c 'printf c >> ~/.defenseclaw/notes.txt'`,
+		`echo() { printf c >> "$1"; }; log() { echo "$1"; }; log out.txt`,
+		`run() { if true; then "$@"; fi; }; run sh -c 'printf c >> out.txt'`,
+		`run() { if true; then "$@"; fi; }; run cat ` + state,
+		`run() { if false; then "$@"; fi; }; run sh -c 'printf c >> ` + state + `'`,
+		`run() { "$@"; }; run sh -c 'if false; then printf c >> ` + state + `; fi'`,
+	}
+	for _, connector := range []string{"claudecode", "codex"} {
+		for _, managed := range []bool{false, true} {
+			t.Run(fmt.Sprintf("%s/managed=%t", connector, managed), func(t *testing.T) {
+				for _, policy := range []string{"default", "strict"} {
+					for _, mode := range []string{"observe", "action"} {
+						api := instructionProtectionTestAPI(t, connector, mode, "HIGH")
+						api.scannerCfg.Guardrail.RulePackDir = filepath.Join(guardrailPoliciesRoot(t), policy)
+						for _, row := range rows {
+							if got := gap0568HookAction(t, api, connector, home, cwd, row.command, true, managed); got != "block" {
+								t.Errorf("%s/%s/%s: got %s, want block", policy, mode, row.name, got)
+							}
+						}
+						for _, command := range shortBenign {
+							if got := gap0568HookAction(t, api, connector, home, cwd, command, true, managed); got != "allow" {
+								t.Errorf("%s/%s/ordinary %q: got %s, want allow", policy, mode, command, got)
+							}
+						}
+						if mode == "observe" {
+							for _, command := range benign {
+								if got := gap0568HookAction(t, api, connector, home, cwd, command, true, managed); got != "allow" {
+									t.Errorf("%s/%s/benign: got %s, want allow", policy, mode, got)
+								}
+							}
+						}
+					}
+				}
+			})
+		}
+	}
+}
+
 func TestGAP0456ForwardedChildBoundaryCells(t *testing.T) {
 	if runtime.GOOS == "windows" || os.Geteuid() == 0 {
 		t.Skip("POSIX home fixture requires an unprivileged Unix user")
@@ -190,7 +273,7 @@ func TestGAP0448AndGAP0462Round9StateReadings(t *testing.T) {
 					tool = "PowerShell"
 				}
 				got := gap0568ToolHookAction(t, api, connector, tool, home, cwd, row.command, true, managed)
-				wantBlock := managed && row.hold
+				wantBlock := managed && row.hold || row.name == "earlier function"
 				if (got == "block") != wantBlock {
 					t.Errorf("%s managed=%t %s: %s, want block=%t", connector, managed, row.name, got, wantBlock)
 				}
@@ -319,7 +402,8 @@ func TestGAP0459ShadowedPOSIXRead(t *testing.T) {
 			for _, cell := range []struct{ client, managed bool }{{false, false}, {true, false}, {true, true}} {
 				for _, row := range rows {
 					got := gap0568HookAction(t, api, connector, home, cwd, row.command, cell.client, cell.managed)
-					wantBlock := mode == "action" || mode == "observe" && cell.managed && row.hold
+					staticFunctionWrite := row.name == "shadowed echo" || row.name == "shadowed printf" || row.name == "spaced read function"
+					wantBlock := mode == "action" || mode == "observe" && (cell.managed && row.hold || staticFunctionWrite)
 					if (got == "block") != wantBlock {
 						t.Errorf("%s/%s client=%t managed=%t %s: %s, want block=%t", connector, mode, cell.client, cell.managed, row.name, got, wantBlock)
 					}

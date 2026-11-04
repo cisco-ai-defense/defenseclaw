@@ -232,8 +232,16 @@ func runMain(args []string, input io.Reader, output, errOutput io.Writer) int {
 		// Amp plugins send again (GAP-2083).
 		return hookexec.PerUserPostPeerUnverifiedExit
 	case hookexec.PerUserPostNoAnswer(err):
-		// No status before the deadline: the shell hook reads it as a
-		// timeout, or as the restart outage when this account's start lock
+		// A local deadline before the verified connection is not an
+		// unanswered gateway call. Keep it distinct from exit 9, which
+		// records verified contact without a decision.
+		select {
+		case <-peer.Connected():
+		default:
+			return 1
+		}
+		// No status after verified contact: the shell hook reads it as a
+		// no-answer, or as the restart outage when this account's start lock
 		// was held after the call reached its gateway and that gateway gave
 		// up the port during the call (rel-1-0-6 GAP-0498).
 		if startObservation.changed || hookexec.PerUserGatewayRestartProvenDuringCall(dataDir, peer, startObservation.start) ||

@@ -138,3 +138,25 @@ func TestEnterpriseHookWatchFailedTargetDoesNotDelayHealthyTokenRepair(t *testin
 		t.Fatalf("healthy target's event moved failed target retry from %s to %s", retryDue, due)
 	}
 }
+
+func TestR108CIBatch7WatchIncludesDeferredFailedPathAfterUnchangedHealthyTail(t *testing.T) {
+	healthy := filepath.Join(t.TempDir(), "healthy.token")
+	failed := filepath.Join(t.TempDir(), "failed.token")
+	failures := map[string]bool{failed: true}
+	pending := []string{healthy}
+	paths, all, included := enterpriseHookWatchIncludeDeferredFailed(pending, false, []string{failed}, false,
+		failures, func(string) bool { return false })
+	if !included || all || !slices.Equal(paths, []string{healthy, failed}) {
+		t.Fatalf("unchanged healthy tail lost the failed path: %v, all=%t, included=%t", paths, all, included)
+	}
+	paths, all, included = enterpriseHookWatchIncludeDeferredFailed(pending, false, []string{failed}, false,
+		failures, func(path string) bool { return path == healthy })
+	if included || all || !slices.Equal(paths, pending) {
+		t.Fatalf("changed healthy path lost priority: %v, all=%t, included=%t", paths, all, included)
+	}
+	paths, all, included = enterpriseHookWatchIncludeDeferredFailed(pending, false, nil, true,
+		failures, func(string) bool { return false })
+	if !included || !all || !slices.Equal(paths, pending) {
+		t.Fatalf("overflow did not keep the full recheck: %v, all=%t, included=%t", paths, all, included)
+	}
+}

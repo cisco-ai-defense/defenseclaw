@@ -1536,12 +1536,12 @@ func enterpriseHookExcusedFailures(state enterpriseHookGuardianState) (removed, 
 			continue
 		}
 		switch {
+		case enterpriseHookAccountLinkRow(row):
+			linked++
 		case enterpriseHookRemovedAccountRow(row):
 			removed++
 		case enterpriseHookAwaitingSignInRow(row):
 			awaiting++
-		case enterpriseHookAccountLinkRow(row):
-			linked++
 		default:
 			return 0, 0, 0
 		}
@@ -3467,7 +3467,7 @@ func runEnterpriseHooksWatch(cmd *cobra.Command, _ []string) error {
 			sharedOwned[filepath.Clean(f)] = struct{}{}
 		}
 		windowsOwnedPaths = nil
-		if runtime.GOOS == "windows" && cfg != nil && cfg.StandaloneEnterprise() {
+		if runtime.GOOS == "windows" && !legacyWatch {
 			windowsOwnedPaths = enterpriseHookWatchCaseFoldedOwnedPaths(exclusiveOwned, sharedOwned)
 		}
 		for k := range foundSnapshot {
@@ -3583,6 +3583,7 @@ func runEnterpriseHooksWatch(cmd *cobra.Command, _ []string) error {
 	var debouncePaths []string
 	debounceAllPaths := false
 	debounceHasHealthyPath := false
+	debounceKeepFailedPaths := false
 	// Failed owned events yield to healthy events in the same burst, then
 	// run in a follow-up pass while their own retry deadline remains intact.
 	var deferredFailedPaths []string
@@ -3650,6 +3651,7 @@ func runEnterpriseHooksWatch(cmd *cobra.Command, _ []string) error {
 		debounceReason = ""
 		debouncePaths, debounceAllPaths = nil, false
 		debounceHasHealthyPath = false
+		debounceKeepFailedPaths = false
 		deferredFailedPaths, deferredFailedAll = nil, false
 	}
 	scheduleRepairRetry()
@@ -3662,7 +3664,7 @@ func runEnterpriseHooksWatch(cmd *cobra.Command, _ []string) error {
 	// A pass may spend its worker timeout on an unavailable account. Keep
 	// reading owned-file events during that pass so a healthy target can run.
 	queueWatchPath := func(name string) {
-		if !legacyWatch && !debounceAllPaths {
+		if !legacyWatch && !debounceAllPaths && !debounceKeepFailedPaths {
 			// A failed target keeps its retry deadline. When a healthy
 			// target changes in the same burst, inspect it first rather
 			// than waiting for the failed target's worker timeout.
@@ -3689,7 +3691,11 @@ func runEnterpriseHooksWatch(cmd *cobra.Command, _ []string) error {
 		if !debouncePending {
 			debounceArmedAt = time.Now()
 		}
-		resetEnterpriseHookWatchTimer(debounce, enterpriseHookWatchDebounceDelay(time.Now(), debounceArmedAt, enterpriseHookWatchDebounce, enterpriseHookWatchDebounceMaxWait))
+		delay := enterpriseHookWatchDebounceDelay(time.Now(), debounceArmedAt, enterpriseHookWatchDebounce, enterpriseHookWatchDebounceMaxWait)
+		if debounceKeepFailedPaths {
+			delay = 0
+		}
+		resetEnterpriseHookWatchTimer(debounce, delay)
 		debouncePending = true
 		debounceReason = "fsnotify"
 	}
@@ -3838,12 +3844,32 @@ func runEnterpriseHooksWatch(cmd *cobra.Command, _ []string) error {
 				enterpriseHookReconcileRecheckPaths, enterpriseHookReconcileRecheckAll = debouncePaths, debounceAllPaths
 				debouncePaths, debounceAllPaths = nil, false
 				debounceHasHealthyPath = false
+				debounceKeepFailedPaths = false
 				interrupted, err := reconcileWatchPass(reason)
 				enterpriseHookReconcileRecheckWindow = 0
 				enterpriseHookReconcileRecheckPaths, enterpriseHookReconcileRecheckAll = nil, false
 				for path, before := range priorFailedSnapshot {
 					if failedOwnedPaths[path] && enterpriseHookOwnedFileFingerprint(path) != before {
 						deferredFailedPaths, deferredFailedAll = enterpriseHookWatchAddTriggerPath(deferredFailedPaths, deferredFailedAll, path)
+					}
+				}
+				// Windows can report a late Write for the healthy file just
+				// restored by this pass. Its metadata fingerprint changes even
+				// when its bytes are back. Replay that event, but include the
+				// changed failed path already waiting behind it. A healthy
+				// file that differs from this pass's snapshot still goes first.
+				if runtime.GOOS == "windows" && !legacyWatch && debouncePending && (len(deferredFailedPaths) > 0 || deferredFailedAll) {
+					var included bool
+					debouncePaths, debounceAllPaths, included = enterpriseHookWatchIncludeDeferredFailed(
+						debouncePaths, debounceAllPaths, deferredFailedPaths, deferredFailedAll, failedOwnedPaths,
+						func(path string) bool {
+							return enterpriseHookWatchOwnedFileChanged(path, exclusiveOwned, sharedOwned, ownedSnapshot, enterpriseHookOwnedFileFingerprint)
+						},
+					)
+					if included {
+						deferredFailedPaths, deferredFailedAll = nil, false
+						debounceKeepFailedPaths = true
+						resetEnterpriseHookWatchTimer(debounce, 0)
 					}
 				}
 				if err != nil && !errors.Is(err, context.Canceled) {

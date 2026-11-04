@@ -1926,6 +1926,186 @@ class TestPluginRuntimeToggleConnectorGuard(PluginCommandTestBase):
 
 
 class TestPluginQuarantineRestore(PluginCommandTestBase):
+    def test_gap0556_claude_cache_identity_info_unblock_restore(self):
+        claude_root = os.path.join(self.tmp_dir, ".claude", "plugins")
+        original = os.path.join(claude_root, "cache", "market", "kit", "1.0.0")
+        identity = "kit@market"
+        slot = os.path.join(self.app.cfg.quarantine_dir, "plugins", "claudecode", identity)
+        os.makedirs(os.path.join(slot, ".claude-plugin"), exist_ok=True)
+        with open(os.path.join(slot, ".claude-plugin", "plugin.json"), "w") as handle:
+            json.dump({"name": "kit"}, handle)
+        self.app.cfg.active_connector = lambda: "claudecode"  # type: ignore[method-assign]
+        self.app.cfg.active_connectors = lambda: ["claudecode"]  # type: ignore[method-assign]
+        self.app.cfg.plugin_dirs = lambda connector=None: [claude_root]  # type: ignore[method-assign]
+        record = self.app.store.create_quarantine_record(
+            "plugin", identity, original, slot, "a" * 64, "watcher", "claudecode", state="active",
+        )
+        pe = PolicyEngine(self.app.store, self.app.cfg)
+        pe.quarantine_for_connector("plugin", identity, "claudecode", "watcher")
+        pe.set_source_path("plugin", identity, original, "claudecode")
+
+        for name in ("kit", identity):
+            info = self.invoke(["info", name, "--connector", "claudecode"])
+            self.assertEqual(info.exit_code, 0, info.output)
+            self.assertIn("Quarantined: yes", info.output)
+        unblocked = self.invoke(["unblock", "kit", "--connector", "claudecode"])
+        self.assertEqual(unblocked.exit_code, 0, unblocked.output)
+        self.assertIn("A quarantined copy remains", unblocked.output)
+        info = self.invoke(["info", "kit", "--connector", "claudecode"])
+        self.assertIn("Quarantined: yes", info.output)
+        allowed = self.invoke(["allow", "kit", "--connector", "claudecode"])
+        self.assertNotEqual(allowed.exit_code, 0)
+        self.assertIn("restore it before allowing", allowed.output)
+        restored = self.invoke(["restore", "kit", "--connector", "claudecode"])
+        self.assertEqual(restored.exit_code, 0, restored.output)
+        self.assertTrue(os.path.isfile(os.path.join(original, ".claude-plugin", "plugin.json")))
+        self.assertFalse(os.path.exists(slot))
+        self.assertIsNone(self.app.store.get_quarantine_record(record.id))
+
+    def test_gap0556_per_source_copy_info_unblock_restore(self):
+        claude_root = os.path.join(self.tmp_dir, ".claude", "plugins")
+        original = os.path.join(claude_root, "cache", "market", "kit", "2.0.0")
+        fallback = os.path.join(
+            self.app.cfg.quarantine_dir, "per-source", "plugins", "claudecode", "abcdef0123456789", "kit",
+        )
+        os.makedirs(os.path.join(fallback, ".claude-plugin"), exist_ok=True)
+        with open(os.path.join(fallback, ".claude-plugin", "plugin.json"), "w") as handle:
+            json.dump({"name": "kit"}, handle)
+        self.app.cfg.active_connector = lambda: "claudecode"  # type: ignore[method-assign]
+        self.app.cfg.active_connectors = lambda: ["claudecode"]  # type: ignore[method-assign]
+        self.app.cfg.plugin_dirs = lambda connector=None: [claude_root]  # type: ignore[method-assign]
+        self.app.store.create_quarantine_record(
+            "plugin", "kit", original, fallback, "a" * 64, "watcher", "claudecode", state="active",
+        )
+        pe = PolicyEngine(self.app.store, self.app.cfg)
+        pe.quarantine_for_connector("plugin", "kit", "claudecode", "watcher")
+        pe.set_source_path("plugin", "kit", original, "claudecode")
+
+        info = self.invoke(["info", "kit", "--connector", "claudecode"])
+        self.assertEqual(info.exit_code, 0, info.output)
+        self.assertIn("Quarantined: yes", info.output)
+        unblocked = self.invoke(["unblock", "kit", "--connector", "claudecode"])
+        self.assertEqual(unblocked.exit_code, 0, unblocked.output)
+        self.assertIn("A quarantined copy remains", unblocked.output)
+        allowed = self.invoke(["allow", "kit", "--connector", "claudecode"])
+        self.assertNotEqual(allowed.exit_code, 0)
+        self.assertIn("restore it before allowing", allowed.output)
+        restored = self.invoke(["restore", "kit", "--connector", "claudecode"])
+        self.assertEqual(restored.exit_code, 0, restored.output)
+        self.assertTrue(os.path.isfile(os.path.join(original, ".claude-plugin", "plugin.json")))
+        self.assertFalse(os.path.exists(fallback))
+
+    def test_gap0556_cache_versions_restore_from_separate_slots(self):
+        claude_root = os.path.join(self.tmp_dir, ".claude", "plugins")
+        identity = "kit@market"
+        primary = os.path.join(self.app.cfg.quarantine_dir, "plugins", "claudecode", identity)
+        fallback = os.path.join(
+            self.app.cfg.quarantine_dir, "per-source", "plugins", "claudecode", "abcdef0123456789", identity,
+        )
+        self.app.cfg.active_connector = lambda: "claudecode"  # type: ignore[method-assign]
+        self.app.cfg.active_connectors = lambda: ["claudecode"]  # type: ignore[method-assign]
+        self.app.cfg.plugin_dirs = lambda connector=None: [claude_root]  # type: ignore[method-assign]
+        for version, slot in (("1.0.0", primary), ("2.0.0", fallback)):
+            os.makedirs(os.path.join(slot, ".claude-plugin"), exist_ok=True)
+            with open(os.path.join(slot, ".claude-plugin", "plugin.json"), "w") as handle:
+                json.dump({"name": "kit"}, handle)
+            original = os.path.join(claude_root, "cache", "market", "kit", version)
+            self.app.store.create_quarantine_record(
+                "plugin", identity, original, slot, "a" * 64, "watcher", "claudecode", state="active",
+            )
+        pe = PolicyEngine(self.app.store, self.app.cfg)
+        pe.quarantine_for_connector("plugin", identity, "claudecode", "watcher")
+        pe.set_source_path("plugin", identity, os.path.join(claude_root, "cache", "market", "kit", "1.0.0"), "claudecode")
+
+        first = self.invoke(["restore", "kit", "--connector", "claudecode"])
+        self.assertEqual(first.exit_code, 0, first.output)
+        remaining = self.invoke(["info", "kit", "--connector", "claudecode"])
+        self.assertIn("Quarantined: yes", remaining.output)
+        allowed = self.invoke(["allow", "kit", "--connector", "claudecode"])
+        self.assertNotEqual(allowed.exit_code, 0)
+        second = self.invoke(["restore", "kit", "--connector", "claudecode"])
+        self.assertEqual(second.exit_code, 0, second.output)
+        for version in ("1.0.0", "2.0.0"):
+            original = os.path.join(claude_root, "cache", "market", "kit", version)
+            self.assertTrue(os.path.isfile(os.path.join(original, ".claude-plugin", "plugin.json")))
+        self.assertFalse(os.path.exists(fallback))
+
+    def test_gap0556_per_source_record_keeps_other_copy_unclaimed(self):
+        claude_root = os.path.join(self.tmp_dir, ".claude", "plugins")
+        original = os.path.join(claude_root, "cache", "market", "kit", "2.0.0")
+        fallback = os.path.join(
+            self.app.cfg.quarantine_dir, "per-source", "plugins", "claudecode", "abcdef0123456789", "kit",
+        )
+        os.makedirs(os.path.join(fallback, ".claude-plugin"), exist_ok=True)
+        with open(os.path.join(fallback, ".claude-plugin", "plugin.json"), "w") as handle:
+            json.dump({"name": "other"}, handle)
+        self.app.cfg.active_connector = lambda: "claudecode"  # type: ignore[method-assign]
+        self.app.cfg.active_connectors = lambda: ["claudecode"]  # type: ignore[method-assign]
+        self.app.cfg.plugin_dirs = lambda connector=None: [claude_root]  # type: ignore[method-assign]
+        self.app.store.create_quarantine_record(
+            "plugin", "kit", original, fallback, "a" * 64, "watcher", "claudecode", state="active",
+        )
+        restored = self.invoke(["restore", "kit", "--connector", "claudecode"])
+        self.assertNotEqual(restored.exit_code, 0)
+        self.assertIn("is not quarantined", restored.output)
+        self.assertTrue(os.path.isdir(fallback))
+
+    def test_gap0556_legacy_version_slot_info_and_restore(self):
+        claude_root = os.path.join(self.tmp_dir, ".claude", "plugins")
+        original = os.path.join(claude_root, "cache", "market", "kit", "1.0.0")
+        legacy = os.path.join(self.app.cfg.quarantine_dir, "plugins", "claudecode", "1.0.0")
+        os.makedirs(os.path.join(legacy, ".claude-plugin"), exist_ok=True)
+        with open(os.path.join(legacy, ".claude-plugin", "plugin.json"), "w") as handle:
+            json.dump({"name": "kit"}, handle)
+        self.app.cfg.active_connector = lambda: "claudecode"  # type: ignore[method-assign]
+        self.app.cfg.active_connectors = lambda: ["claudecode"]  # type: ignore[method-assign]
+        self.app.cfg.plugin_dirs = lambda connector=None: [claude_root]  # type: ignore[method-assign]
+        self.app.store.create_quarantine_record(
+            "plugin", "kit", original, legacy, "a" * 64, "watcher", "claudecode", state="active",
+        )
+        pe = PolicyEngine(self.app.store, self.app.cfg)
+        pe.quarantine_for_connector("plugin", "kit", "claudecode", "watcher")
+        pe.set_source_path("plugin", "kit", original, "claudecode")
+
+        info = self.invoke(["info", "kit", "--connector", "claudecode"])
+        self.assertEqual(info.exit_code, 0, info.output)
+        self.assertIn("Quarantined: yes", info.output)
+        self.assertIn(legacy, info.output)
+        bare_info = self.invoke(["info", "kit"])
+        self.assertEqual(bare_info.exit_code, 0, bare_info.output)
+        self.assertIn("Quarantined: yes", bare_info.output)
+        unblocked = self.invoke(["unblock", "kit"])
+        self.assertEqual(unblocked.exit_code, 0, unblocked.output)
+        self.assertIn("A quarantined copy remains", unblocked.output)
+        info_after_unblock = self.invoke(["info", "kit", "--connector", "claudecode"])
+        self.assertEqual(info_after_unblock.exit_code, 0, info_after_unblock.output)
+        self.assertIn("Quarantined: yes", info_after_unblock.output)
+        allowed = self.invoke(["allow", "kit", "--connector", "claudecode"])
+        self.assertNotEqual(allowed.exit_code, 0)
+        self.assertIn("restore it before allowing", allowed.output)
+        restored = self.invoke(["restore", "kit"])
+        self.assertEqual(restored.exit_code, 0, restored.output)
+        self.assertTrue(os.path.isfile(os.path.join(original, ".claude-plugin", "plugin.json")))
+        self.assertFalse(os.path.exists(legacy))
+
+    def test_gap0556_record_does_not_claim_another_plugin_copy(self):
+        claude_root = os.path.join(self.tmp_dir, ".claude", "plugins")
+        original = os.path.join(claude_root, "cache", "market", "kit", "1.0.0")
+        legacy = os.path.join(self.app.cfg.quarantine_dir, "plugins", "claudecode", "1.0.0")
+        os.makedirs(os.path.join(legacy, ".claude-plugin"), exist_ok=True)
+        with open(os.path.join(legacy, ".claude-plugin", "plugin.json"), "w") as handle:
+            json.dump({"name": "other"}, handle)
+        self.app.cfg.active_connector = lambda: "claudecode"  # type: ignore[method-assign]
+        self.app.cfg.active_connectors = lambda: ["claudecode"]  # type: ignore[method-assign]
+        self.app.cfg.plugin_dirs = lambda connector=None: [claude_root]  # type: ignore[method-assign]
+        self.app.store.create_quarantine_record(
+            "plugin", "kit", original, legacy, "a" * 64, "watcher", "claudecode", state="active",
+        )
+        restored = self.invoke(["restore", "kit", "--connector", "claudecode"])
+        self.assertNotEqual(restored.exit_code, 0)
+        self.assertIn("is not quarantined", restored.output)
+        self.assertTrue(os.path.isdir(legacy))
+
     def test_quarantine_moves_plugin_and_records_policy(self):
         self._install_plugin("qplug")
         result = self.invoke(["quarantine", "qplug"])

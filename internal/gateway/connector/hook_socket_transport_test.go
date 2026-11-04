@@ -43,7 +43,7 @@ var shellHookSocketConnectorTemplates = []string{
 // socket, without a bearer, when a standalone socket is configured, and
 // contains no trace of it otherwise.
 func TestShellHookTemplatesCarryTheSocketTransportOnlyWhenConfigured(t *testing.T) {
-	transport := shellHookSocketTransport("/opt/cisco/defenseclaw/run/hook's.sock", 497, "/opt/defenseclaw/bin/defenseclaw-hook", "")
+	transport := shellHookSocketTransport("/opt/cisco/defenseclaw/run/hook's.sock", 497, "/opt/defenseclaw/bin/defenseclaw-hook", "", "cursor", runtime.GOOS)
 	for _, name := range shellHookSocketConnectorTemplates {
 		content, err := hookFS.ReadFile("hooks/" + name)
 		if err != nil {
@@ -566,7 +566,7 @@ func TestManagedStandaloneShellHookMarksItsSocketPostAsAShellBridge(t *testing.T
 		if err != nil {
 			t.Fatalf("%s: %v", name, err)
 		}
-		base.HookSocketTransportSH = shellHookSocketTransport("/run/defenseclaw-hook/hook.sock", 988, "/opt/defenseclaw/bin/defenseclaw-hook", "")
+		base.HookSocketTransportSH = shellHookSocketTransport("/run/defenseclaw-hook/hook.sock", 988, "/opt/defenseclaw/bin/defenseclaw-hook", "", "cursor", runtime.GOOS)
 		socket, err := renderTemplate(string(content), base)
 		if err != nil {
 			t.Fatalf("%s: %v", name, err)
