@@ -19,6 +19,7 @@
 from __future__ import annotations
 
 import asyncio
+import builtins
 import errno
 import inspect
 import logging
@@ -106,6 +107,12 @@ def _running(pid: int) -> bool:
     except ProcessLookupError:
         return False
     return True
+
+
+def _has_fixture_timeout(exc: BaseException) -> bool:
+    if isinstance(exc, getattr(builtins, "BaseExceptionGroup", ())):
+        return any(_has_fixture_timeout(child) for child in exc.exceptions)
+    return isinstance(exc, TimeoutError) and str(exc) == "fixture scan timed out"
 
 
 @pytest.mark.skipif(sys.platform != "linux", reason="Perl taint-mode PATH check is Linux-only")
@@ -209,31 +216,44 @@ def test_cleanup_signal_error_does_not_escape(
 
 
 @pytest.mark.skipif(os.name == "nt", reason="Windows uses a Job Object")
-@pytest.mark.parametrize("mode", ["normal-exit", "detached-normal-exit", "scan-timeout", "server-stuck"])
+@pytest.mark.parametrize(
+    "mode",
+    ["normal-exit", "detached-normal-exit", "scan-timeout", "scan-timeout-nested", "server-stuck"],
+)
 def test_local_stdio_scan_ends_child_on_success_or_timeout(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, mode: str,
 ) -> None:
     mcpscanner = pytest.importorskip("mcpscanner")
     from mcpscanner.core.models import AnalyzerEnum
 
+    if mode == "scan-timeout-nested" and sys.version_info < (3, 11):
+        pytest.skip("nested exception groups require Python 3.11")
     entry, child_pid_file = _fixture_entry(
         tmp_path, monkeypatch, stuck=mode == "server-stuck", detached=mode == "detached-normal-exit",
     )
-    if mode == "scan-timeout":
+    server_pid_file = tmp_path / "server.pid"
+    if mode.startswith("scan-timeout"):
         class TimedOutScanner:
             async def scan_mcp_config_file(self, **_kwargs):
                 from mcp import StdioServerParameters
                 from mcp.client.stdio import stdio_client
 
                 params = StdioServerParameters(
-                    command="uvx", args=["fixture-package"],
-                    env={"MCP_FIXTURE_CHILD_PID": str(child_pid_file)},
+                    command=entry.command, args=entry.args, env=entry.env,
                 )
                 async with stdio_client(params):
                     deadline = time.monotonic() + 3
-                    while not child_pid_file.exists() and time.monotonic() < deadline:
+                    while not (child_pid_file.exists() and server_pid_file.exists()) and time.monotonic() < deadline:
                         await asyncio.sleep(0.02)
                     assert child_pid_file.exists()
+                    assert server_pid_file.exists()
+                    assert _running(int(server_pid_file.read_text(encoding="ascii")))
+                    if mode == "scan-timeout-nested":
+                        group = getattr(builtins, "ExceptionGroup")
+                        raise group(
+                            "fixture scan",
+                            [group("async close", [TimeoutError("fixture scan timed out")])],
+                        )
                     raise TimeoutError("fixture scan timed out")
 
         scanner = TimedOutScanner()
@@ -247,13 +267,10 @@ def test_local_stdio_scan_ends_child_on_success_or_timeout(
     )
 
     try:
-        if mode == "scan-timeout":
+        if mode.startswith("scan-timeout"):
             with pytest.raises(BaseException) as caught:
                 wrapper._scan_local(scanner, entry, [AnalyzerEnum.YARA])
-            assert any(
-                isinstance(exc, TimeoutError) and str(exc) == "fixture scan timed out"
-                for exc in getattr(caught.value, "exceptions", (caught.value,))
-            )
+            assert _has_fixture_timeout(caught.value), repr(caught.value)
         else:
             findings = wrapper._scan_local(scanner, entry, [AnalyzerEnum.YARA])
             assert findings == []
