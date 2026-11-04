@@ -45,7 +45,11 @@ func TestManagedWindowsStatusShowsOwnState(t *testing.T) {
 		if err := statusCmd.PersistentPreRunE(cmd, nil); err != nil {
 			return out.String(), err
 		}
-		return out.String(), statusCmd.RunE(cmd, nil)
+		// Run first, then read the buffer: in `return out.String(),
+		// statusCmd.RunE(...)` Go calls String() before RunE writes
+		// (cowork-1-0-8 GAP-0062).
+		err := statusCmd.RunE(cmd, nil)
+		return out.String(), err
 	}
 	stdout, err := run(false)
 	if err != nil || !strings.Contains(stdout, "This computer is managed by your organization.") ||
