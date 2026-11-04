@@ -1992,20 +1992,19 @@ func (a *APIServer) runHookJudgeSingle(ctx context.Context, strategyDirection, j
 		return hookJudgeLaneVerdict(cfg, connector, strategyDirection, v)
 	}
 
-	// A bounded hook fails closed when its answer is late (GAP-2625). The
-	// judge runs apart from the answer and records its verdict (the judge
-	// event) when it arrives. In observe mode the answer does not wait for
-	// it: nothing is enforced, and a benign call must never be denied for a
-	// slow judge. In action mode the answer waits for the judge only up to
-	// hookJudgeAnswerWindow, then keeps the rule/AID verdict: a rule block
-	// stays a block, and a judge that is late cannot make one.
+	// A bounded hook keeps the rule/AID verdict when the judge has not
+	// answered inside its answer window. Cancel the model request when the
+	// hook stops waiting, including a disconnected caller. The completion
+	// path still records a response that arrives before cancellation.
+	callCtx, cancel := context.WithCancel(ctx)
+	defer cancel()
 	done := make(chan *ScanVerdict, 1)
 	go func() {
 		defer func() { <-a.hookJudgeSem }()
-		done <- call(context.WithoutCancel(ctx))
+		done <- call(callCtx)
 	}()
 	if sandboxHookMode(ctx, connector, cfg.HookModeForConnector(connector)) != "action" {
-		fmt.Fprintf(os.Stderr, "[inspect] hook judge runs after the answer (observe) connector=%s direction=%s; its verdict is recorded when it arrives\n",
+		fmt.Fprintf(os.Stderr, "[inspect] hook judge does not hold the answer (observe) connector=%s direction=%s\n",
 			connector, strategyDirection)
 		return nil
 	}
@@ -2026,7 +2025,7 @@ func (a *APIServer) runHookJudgeSingle(ctx context.Context, strategyDirection, j
 	case <-wait.C:
 	case <-ctx.Done():
 	}
-	fmt.Fprintf(os.Stderr, "[inspect] hook judge late (over the %s hook answer window) connector=%s direction=%s; keeping regex/AID verdict, the judge verdict is recorded when it arrives\n",
+	fmt.Fprintf(os.Stderr, "[inspect] hook judge late (over the %s hook answer window) connector=%s direction=%s; keeping regex/AID verdict\n",
 		hookJudgeAnswerWindow, connector, strategyDirection)
 	fallback(judgeFallbackLate)
 	return nil

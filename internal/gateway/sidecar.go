@@ -2074,6 +2074,9 @@ func buildSharedJudge(cfg *config.Config, rp *guardrail.RulePack, providers *gen
 		return nil, unavailable, nil
 	}
 	judge.secureClient = cfg.SecureClientIntegration()
+	if judge.secureClient && !cfg.Guardrail.Judge.MaxParallelExplicit && cfg.Guardrail.Judge.MaxParallel == 0 {
+		judge.calls = nil
+	}
 	if !judge.secureClient {
 		judge.decision = newDecisionModel(cfg, dotenvPath)
 		if judge.decision != nil {

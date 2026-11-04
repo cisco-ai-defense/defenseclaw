@@ -55,29 +55,26 @@ func boundedHookContext(start time.Time) context.Context {
 		&hookProgressWriter{ResponseWriter: httptest.NewRecorder(), start: start})
 }
 
-// GAP-2625: a bounded hook fails closed when its answer is late, so the
-// answer of a prompt must not wait on a slow LLM judge. In observe mode it
-// does not wait at all; the judge still runs and records its verdict.
+// GAP-2625: a bounded hook does not hold an observe answer for a slow judge.
+// GAP-0564: no model request remains after that answer.
 func TestHookJudgeDoesNotHoldAnObserveAnswer(t *testing.T) {
-	a, p := newAnswerWindowJudgeServer("observe", 2*time.Second)
+	a, _ := newAnswerWindowJudgeServer("observe", 2*time.Second)
 	t0 := time.Now()
 	got := a.runHookJudge(boundedHookContext(t0), "prompt", "prompt", "codex", "please list the files in this folder", "", nil)
 	if elapsed := time.Since(t0); got != nil || elapsed > 500*time.Millisecond {
 		t.Fatalf("observe answer waited %s for the judge (verdict %v), want an immediate answer without it", elapsed, got)
 	}
-	select {
-	case err := <-p.finished:
-		if err != nil {
-			t.Fatalf("the judge after the observe answer was cancelled: %v", err)
+	deadline := time.Now().Add(time.Second)
+	for len(a.hookJudgeSem) != 0 {
+		if time.Now().After(deadline) {
+			t.Fatal("observe judge kept a model slot after its answer")
 		}
-	case <-time.After(5 * time.Second):
-		t.Fatal("the judge never ran after the observe answer")
+		time.Sleep(time.Millisecond)
 	}
 }
 
 // GAP-2625: in action mode the answer waits for the judge only inside the
-// hook answer window, then keeps the rule verdict; the judge call is not
-// cancelled, so its verdict is still recorded when it arrives.
+// hook answer window, then keeps the rule verdict and cancels the model call.
 func TestHookJudgeHoldsAnActionAnswerOnlyInsideTheWindow(t *testing.T) {
 	a, p := newAnswerWindowJudgeServer("action", 2*time.Second)
 	t0 := time.Now()
@@ -88,8 +85,8 @@ func TestHookJudgeHoldsAnActionAnswerOnlyInsideTheWindow(t *testing.T) {
 	}
 	select {
 	case err := <-p.finished:
-		if err != nil {
-			t.Fatalf("the late judge was cancelled with the answer: %v", err)
+		if err != context.Canceled {
+			t.Fatalf("late judge finished with %v, want cancellation", err)
 		}
 	case <-time.After(5 * time.Second):
 		t.Fatal("the late judge never finished")

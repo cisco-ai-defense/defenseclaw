@@ -112,6 +112,7 @@ type GuardrailProxy struct {
 	connector connector.Connector
 
 	inspector    ContentInspector
+	secureClient atomic.Bool
 	masterKey    string
 	gatewayToken string // gateway token, accepted in X-DC-Auth
 	notify       *NotificationQueue
@@ -266,19 +267,17 @@ func (p *GuardrailProxy) connectorName() string {
 	return "unknown"
 }
 
-// postCallContext returns a detached context for post-stream completion
-// inspection. The HTTP request context may already be cancelled by the time
-// the final POST-CALL inspection runs, which would kill in-flight LLM judge
-// calls. We use context.WithoutCancel to preserve request-scoped values
-// (tracing, correlation IDs) while disconnecting from the request lifecycle,
-// then layer a timeout on top.
+// postCallContext bounds completion inspection by the caller's lifetime.
+// Secure Client keeps its existing detached completion context.
 func (p *GuardrailProxy) postCallContext(parent context.Context) (context.Context, context.CancelFunc) {
 	timeout := 30 * time.Second
 	if p.cfg != nil && p.cfg.Judge.Timeout > 0 {
 		timeout = time.Duration(p.cfg.Judge.Timeout * float64(time.Second))
 	}
-	detached := context.WithoutCancel(parent)
-	return context.WithTimeout(detached, timeout)
+	if p.secureClient.Load() {
+		parent = context.WithoutCancel(parent)
+	}
+	return context.WithTimeout(parent, timeout)
 }
 
 func (p *GuardrailProxy) resolveConfirm(ctx context.Context, r *http.Request, verdict *ScanVerdict, direction, model, mode string) {
@@ -541,12 +540,16 @@ func (p *GuardrailProxy) SetSecureClientIntegration(enabled bool) {
 	if p == nil {
 		return
 	}
+	p.secureClient.Store(enabled)
 	g, ok := p.inspector.(*GuardrailInspector)
 	if !ok {
 		return
 	}
 	if judge := g.currentJudge(); judge != nil && judge.secureClient != enabled {
 		judge.secureClient = enabled
+		if enabled && judge.cfg != nil && !judge.cfg.MaxParallelExplicit && judge.cfg.MaxParallel == 0 {
+			judge.calls = nil
+		}
 	}
 }
 
