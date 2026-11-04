@@ -15,6 +15,11 @@ TEXT krb5_free_context_trampoline<>(SB),NOSPLIT,$0-0
 GLOBL	·krb5FreeContextAddr(SB), RODATA, $8
 DATA	·krb5FreeContextAddr(SB)/8, $krb5_free_context_trampoline<>(SB)
 
+TEXT krb5_cc_default_trampoline<>(SB),NOSPLIT,$0-0
+	JMP	krb5_cc_default(SB)
+GLOBL	·krb5CCDefaultAddr(SB), RODATA, $8
+DATA	·krb5CCDefaultAddr(SB)/8, $krb5_cc_default_trampoline<>(SB)
+
 TEXT krb5_cc_resolve_trampoline<>(SB),NOSPLIT,$0-0
 	JMP	krb5_cc_resolve(SB)
 GLOBL	·krb5CCResolveAddr(SB), RODATA, $8

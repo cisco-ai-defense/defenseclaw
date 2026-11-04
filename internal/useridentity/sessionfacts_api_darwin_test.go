@@ -6,9 +6,36 @@
 package useridentity
 
 import (
+	"encoding/json"
+	"os/exec"
 	"syscall"
 	"testing"
 )
+
+func TestAPIPrincipalMatchesPopulatedDefaultKlist(t *testing.T) {
+	output, err := exec.Command("/usr/bin/klist", "--json").Output()
+	if err != nil {
+		t.Skip("no populated default cache")
+	}
+	var cache struct {
+		Cache     string `json:"cache"`
+		Principal string `json:"principal"`
+	}
+	if err := json.Unmarshal(output, &cache); err != nil {
+		t.Fatal(err)
+	}
+	kind, residual := SplitCCacheName(cache.Cache)
+	if kind != CCacheAPI || residual == "" || cache.Principal == "" {
+		t.Skip("no populated API default cache")
+	}
+	want := NormalizePrincipal(cache.Principal)
+	if principal, settled := readAPIPrincipal(""); !settled || principal != want {
+		t.Fatal("default API cache principal differs from klist")
+	}
+	if principal, settled := readAPIPrincipal(residual); !settled || principal != want {
+		t.Fatal("named API cache principal differs from klist")
+	}
+}
 
 func TestAPIPrincipalMissingCacheSettles(t *testing.T) {
 	principal, settled := readAPIPrincipal("r108-perf100m-empty-cache")
