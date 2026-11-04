@@ -28,6 +28,8 @@ import (
 
 const maxInput = hookexec.MaxPerUserPluginRequest
 
+const userGuardCapability = "defenseclaw-hook-post guard-user-hook v1\n"
+
 var (
 	version = "dev"
 	commit  = "unknown"
@@ -207,6 +209,12 @@ func main() {
 
 // runMain is main with its streams: the exit status of the request.
 func runMain(args []string, input io.Reader, output, errOutput io.Writer) int {
+	if len(args) == 1 && args[0] == "--guard-user-hook-capability" {
+		if _, err := io.WriteString(output, userGuardCapability); err != nil {
+			return 2
+		}
+		return 0
+	}
 	if len(args) == 0 {
 		// Cursor imports the Claude Code command without its arguments.
 		var event struct {

@@ -86,10 +86,10 @@ func runFallbackGuardAt(self string, args []string, stdin io.Reader, stdout, std
 	if err == nil && info.Mode().IsRegular() && info.Mode()&0o111 != 0 && info.Mode().Perm()&0o022 == 0 {
 		ctx, cancel := context.WithTimeout(context.Background(), 200*time.Millisecond)
 		defer cancel()
-		check := exec.CommandContext(ctx, guard, "--version")
+		check := exec.CommandContext(ctx, guard, "--guard-user-hook-capability")
 		check.Stderr = io.Discard
-		versionLine, checkErr := check.Output()
-		if checkErr == nil && bytes.HasPrefix(versionLine, []byte("defenseclaw-hook-post version ")) {
+		capability, checkErr := check.Output()
+		if checkErr == nil && bytes.Equal(capability, []byte("defenseclaw-hook-post guard-user-hook v1\n")) {
 			return 0
 		}
 	}
