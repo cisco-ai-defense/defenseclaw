@@ -222,3 +222,72 @@ func TestEffectiveDriveTargetByHandleMatchesTheDOSDevice(t *testing.T) {
 		t.Fatalf("the test binary is not a local path: %v", err)
 	}
 }
+
+// denyDOSDeviceQueries makes every QueryDosDevice answer access denied, as
+// it does for a token whose Administrators SID is deny-only in a logon
+// session an administrator token created (GAP-0052), and records the drive
+// roots the fallback resolved by handle.
+func denyDOSDeviceQueries(t *testing.T) *[]string {
+	t.Helper()
+	savedQuery, savedByHandle := queryDOSDeviceTarget, driveTargetByHandle
+	t.Cleanup(func() { queryDOSDeviceTarget, driveTargetByHandle = savedQuery, savedByHandle })
+	queryDOSDeviceTarget = func(string) (string, error) { return "", windows.ERROR_ACCESS_DENIED }
+	var resolved []string
+	driveTargetByHandle = func(root string) (string, error) {
+		resolved = append(resolved, root)
+		return effectiveDriveTargetByHandle(root)
+	}
+	return &resolved
+}
+
+// GAP-0052 review: the alias-rejection tests above skip on the deny-only
+// token (it cannot DefineDosDevice) and an elevated token never takes the
+// access-denied branch, so the fallback was unproven. This test needs no
+// alias and no privilege: every QueryDosDevice is denied, the genuine
+// system drive still validates through the by-handle fallback and the
+// \GLOBAL?? link, and a per-logon alias of that drive letter, faked as
+// the device the open reaches, is refused, whether it points into a folder
+// of the volume or at another volume. The real by-handle lookup itself
+// refuses a folder (what a folder alias resolves to).
+func TestValidateFixedNTFSMountedPathFallbackRefusesAFakeDriveAlias(t *testing.T) {
+	drive := strings.ToUpper(os.Getenv("SystemDrive"))
+	if len(drive) != 2 {
+		t.Fatalf("SystemDrive = %q, want a drive letter", drive)
+	}
+	root := drive + `\`
+	global, err := globalSymbolicLinkTarget(drive)
+	if err != nil {
+		t.Fatal(err)
+	}
+	resolved := denyDOSDeviceQueries(t)
+
+	if _, err := ValidateFixedNTFSMountedPath(root + "Windows"); err != nil {
+		t.Fatalf("system drive refused with every DOS-device query denied: %v", err)
+	}
+	if len(*resolved) == 0 || (*resolved)[0] != root {
+		t.Fatalf("the access-denied fallback did not resolve %s by handle (resolved %q)", root, *resolved)
+	}
+	if byHandle, err := effectiveDOSDeviceTarget(drive); err != nil || !strings.EqualFold(byHandle, global) {
+		t.Fatalf("fallback target %q (%v), global %q", byHandle, err, global)
+	}
+
+	for name, alias := range map[string]string{
+		"folder of the same volume": global + `\Users\Public`,
+		"another volume":            `\Device\HarddiskVolume999`,
+	} {
+		driveTargetByHandle = func(string) (string, error) { return alias, nil }
+		got, err := effectiveDOSDeviceTarget(drive)
+		if err != nil || strings.EqualFold(got, global) {
+			t.Fatalf("%s: effective target %q (%v) must differ from the global %q", name, got, err, global)
+		}
+		if _, err := ValidateFixedNTFSMountedPath(root + "Windows"); err == nil ||
+			!strings.Contains(err.Error(), "does not match its mount-manager volume") {
+			t.Fatalf("%s: alias of %s not refused: %v", name, root, err)
+		}
+	}
+
+	folder := filepath.Join(root, "Windows") + `\`
+	if target, err := effectiveDriveTargetByHandle(folder); err == nil {
+		t.Fatalf("by-handle lookup of the folder %s returned %q, want a refusal", folder, target)
+	}
+}

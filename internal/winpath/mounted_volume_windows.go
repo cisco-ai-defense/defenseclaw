@@ -91,7 +91,7 @@ func ValidateFixedNTFSMountedPath(path string) (MountedVolumeIdentity, error) {
 		return identity, fmt.Errorf("resolve global DOS device for %s: %w", root, err)
 	}
 	volumeDevice := strings.TrimSuffix(strings.TrimPrefix(volumeName, `\\?\`), `\`)
-	volumeTarget, err := singleDOSDeviceTarget(volumeDevice)
+	volumeTarget, err := queryDOSDeviceTarget(volumeDevice)
 	if errors.Is(err, windows.ERROR_ACCESS_DENIED) {
 		volumeTarget, err = globalDOSDeviceTarget(volumeDevice)
 	}
@@ -275,16 +275,25 @@ func parseMultiSZ(buffer []uint16) []string {
 	return values
 }
 
+// queryDOSDeviceTarget is singleDOSDeviceTarget (QueryDosDevice); tests
+// replace it to answer access denied for every name, as it does for a token
+// whose Administrators SID is deny-only (GAP-0052).
+var queryDOSDeviceTarget = singleDOSDeviceTarget
+
+// driveTargetByHandle is effectiveDriveTargetByHandle; tests replace it to
+// stand for a per-logon drive alias such a token cannot define itself.
+var driveTargetByHandle = effectiveDriveTargetByHandle
+
 // effectiveDOSDeviceTarget returns the kernel device of drive ("C:") as this
 // process resolves it: QueryDosDevice, or, when the token cannot read its
 // logon session DOS-device directory, the device an open of the drive root
 // reaches (effectiveDriveTargetByHandle).
 func effectiveDOSDeviceTarget(drive string) (string, error) {
-	target, err := singleDOSDeviceTarget(drive)
+	target, err := queryDOSDeviceTarget(drive)
 	if !errors.Is(err, windows.ERROR_ACCESS_DENIED) {
 		return target, err
 	}
-	return effectiveDriveTargetByHandle(drive + `\`)
+	return driveTargetByHandle(drive + `\`)
 }
 
 // effectiveDriveTargetByHandle returns the kernel device that an open of
@@ -336,7 +345,7 @@ func effectiveDriveTargetByHandle(root string) (string, error) {
 // (GAP-0052); the object manager directory \GLOBAL?? itself is readable by
 // every account, so the link is then opened there directly.
 func globalDOSDeviceTarget(name string) (string, error) {
-	target, err := singleDOSDeviceTarget(`Global\` + name)
+	target, err := queryDOSDeviceTarget(`Global\` + name)
 	if !errors.Is(err, windows.ERROR_ACCESS_DENIED) {
 		return target, err
 	}
