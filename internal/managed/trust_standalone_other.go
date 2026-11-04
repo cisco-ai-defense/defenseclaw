@@ -30,6 +30,6 @@ func ValidateTrustedServiceRuntimeFilePathStandalone(path, label, serviceAccount
 	return ValidateTrustedServiceRuntimeFilePath(path, label, serviceAccount)
 }
 
-// StandaloneRepairNeedsProvenance is false off Windows: the repair-then-use
+// StandaloneRefusesContentDrift is false off Windows: the repair-then-use
 // paths there keep their own rules.
-func StandaloneRepairNeedsProvenance() bool { return false }
+func StandaloneRefusesContentDrift() bool { return false }

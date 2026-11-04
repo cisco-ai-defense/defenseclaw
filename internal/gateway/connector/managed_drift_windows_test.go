@@ -9,6 +9,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/defenseclaw/defenseclaw/internal/managed"
@@ -77,10 +78,11 @@ func TestEnsureWindowsCodexMachineFileTrustStandaloneRefusesDrift(t *testing.T) 
 	stubWindowsCodexMachineFileChecks(t,
 		func(string, string) error { return verdict },
 		func(string, string) error { return nil },
-		false,
+		true,
 	)
-	if err := ensureWindowsCodexMachineFileTrust(path, "Codex machine requirements", true); !errors.Is(err, verdict) {
-		t.Fatalf("standalone drift = %v, want %v", err, verdict)
+	if err := ensureWindowsCodexMachineFileTrust(path, "Codex machine requirements", true); !errors.Is(err, verdict) ||
+		!strings.Contains(err.Error(), "Setup /ensure") {
+		t.Fatalf("standalone drift = %v, want %v and the Setup step", err, verdict)
 	}
 	if len(*markers) != 0 {
 		t.Fatalf("resilience events = %v, want none for a refused file", *markers)
