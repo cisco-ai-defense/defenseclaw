@@ -8837,7 +8837,7 @@ func withStaticFunctionStateMutation(parent context.Context, request trustedActi
 	}
 	if request.Input.DialectHint == actionfacts.DialectPOSIX || request.Input.DialectHint == "" {
 		if command, known := trustedBashCommandInput(request.Input); known && len(command) <= 64<<10 &&
-			(strings.Contains(command, ")") || strings.Contains(command, "function ")) && hookpaths.MayNameState(command) {
+			(strings.Contains(command, ")") || strings.Contains(command, "function")) && hookpaths.MayNameState(command) {
 			generation := request.generation
 			if generation == nil {
 				generation = snapshotRulePackGenerationFor(parent, request.Connector)

@@ -15,7 +15,7 @@ import (
 // that forwards "$@". The projection retains only complete, bounded static
 // readings. A command that may change a later shell binding ends the proof.
 func StaticFunctionCallReadings(command, home string) []string {
-	if len(command) > 64<<10 || !strings.Contains(command, ")") && !strings.Contains(command, "function ") {
+	if len(command) > 64<<10 || !strings.Contains(command, ")") && !strings.Contains(command, "function") {
 		return nil
 	}
 	file, ok := parseShell(command)
@@ -42,7 +42,7 @@ func StaticFunctionCallReadings(command, home string) []string {
 					return readings
 				}
 				name, value, known := boundedSimpleAssignment(stmt, home)
-				if name == "HOME" || name == "PATH" {
+				if name == "HOME" || name == "PATH" || name == "IFS" {
 					return readings
 				}
 				if known {
@@ -316,6 +316,15 @@ func staticFunctionWord(word *syntax.Word, args []string, home string) (string, 
 			return "", false
 		}
 		return args[index-1], true
+	}
+	if word != nil && len(word.Parts) == 1 {
+		if _, plain := word.Parts[0].(*syntax.ParamExp); plain {
+			index, err := strconv.Atoi(simpleShellParameter(word))
+			if err == nil && index >= 1 && index <= len(args) && args[index-1] != "" &&
+				!strings.ContainsAny(args[index-1], " \t\r\n*?[]") {
+				return args[index-1], true
+			}
+		}
 	}
 	return StaticWord(word, home)
 }
