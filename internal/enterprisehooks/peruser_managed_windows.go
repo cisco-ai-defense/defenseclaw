@@ -468,8 +468,8 @@ func resolveWindowsPerUserManagedHookRuntime(
 	target, ok := windowsPerUserManagedEnrollmentTargetForSID(enrollment, currentSID)
 	if !ok {
 		return result, fmt.Errorf(
-			"%s: connector %s current SID %s is absent from the protected target set",
-			WindowsManagedSIDUnregisteredReason,
+			"%w: connector %s current SID %s is absent from the protected target set",
+			ErrWindowsManagedSIDUnregistered,
 			connectorName,
 			currentSID,
 		)
