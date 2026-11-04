@@ -716,9 +716,11 @@ other `enterprise` keys include `enterprise.machine_policy` (for example `manage
 the gateway reads them only at start, so they need a restart.
 The transaction is the one an upgrade runs, with the installed release's own payload: it stops
 every service, puts the same release back in place, starts the services and verifies the
-deployment. The services are down for one to three minutes and the `ensure` takes two to six
-minutes (about 200 seconds on a typical host, against about a minute for a change applied in the
-running gateway). Nothing is upgraded: the result carries the warning `ensure_config_restart`,
+deployment. On the 1.0.8 test VM the `ensure` took about 110 seconds, against about a minute for a
+change applied in the running gateway. Before 1.0.8 the same change took about 183 seconds. It
+skips a fixed wait of about 65 seconds when every service stopped cleanly; a service that did not
+stop cleanly keeps the full wait, and a slower or busier host takes longer, so give the MDM script
+a time limit of several minutes. Nothing is upgraded: the result carries the warning `ensure_config_restart`,
 which names the keys that made it restart. Only a newer release reports `ensure_upgrade`. When
 the transaction fails or rolls back, the warning is `ensure_config_failed` instead: the change is
 not confirmed applied, and the errors say what failed.
