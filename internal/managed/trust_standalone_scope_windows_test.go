@@ -164,3 +164,115 @@ func TestWindowsStandaloneTrustScopeFollowsProfilePin(t *testing.T) {
 		t.Fatal("a Secure Client pin selected the standalone trust scope")
 	}
 }
+
+// driftedRuntimeDirForTest is driftedPolicyFileForTest for a folder.
+func driftedRuntimeDirForTest(t *testing.T) string {
+	t.Helper()
+	t.Setenv(TrustStrictAncestorsEnv, "")
+	dir := filepath.Join(t.TempDir(), "runtime")
+	if err := os.Mkdir(dir, 0o700); err != nil {
+		t.Fatalf("Mkdir: %v", err)
+	}
+	setTestFileDACL(t, dir, testDACL(t, canonicalTestDACL), true)
+	if err := ValidateTrustedRuntimeDir(dir, "fixture"); err != nil {
+		t.Skipf("the process user does not own a trusted temp folder here: %v", err)
+	}
+	setTestFileDACL(t, dir, testDACL(t, usersWriteDACL), true)
+	if err := ValidateTrustedRuntimeDir(dir, "fixture"); err == nil {
+		t.Fatal("ValidateTrustedRuntimeDir accepted a Users writer; the strict API must be unchanged")
+	}
+	return dir
+}
+
+// GAP-0561: every drift-tolerant walk follows the profile, through
+// windowsTrustScope.driftTolerated: the hook executable check and the
+// tolerant folder check refuse drift on standalone and accept and log it on
+// Secure Client. Once the drift is repaired both pass on standalone.
+func TestStandaloneTrustGatesEveryDriftTolerantWalk(t *testing.T) {
+	checks := []struct {
+		name    string
+		fixture func(*testing.T) string
+		check   func(string) error
+		strict  func(string) error
+	}{
+		{
+			name:    "executable",
+			fixture: func(t *testing.T) string { return driftedPolicyFileForTest(t, "defenseclaw-hook.exe") },
+			check:   func(path string) error { return ValidateExecutableFilePath(path, "enterprise hook executable") },
+			strict:  func(path string) error { return ValidateTrustedFilePath(path, "enterprise hook executable") },
+		},
+		{
+			name:    "runtime dir",
+			fixture: driftedRuntimeDirForTest,
+			check:   func(path string) error { return ValidateTrustedRuntimeDirTolerant(path, "managed-hook state root") },
+			strict:  func(path string) error { return ValidateTrustedRuntimeDir(path, "managed-hook state root") },
+		},
+	}
+	for _, tc := range checks {
+		t.Run(tc.name+"/standalone refuses", func(t *testing.T) {
+			path := tc.fixture(t)
+			pinTrustProfileForTest(t, true)
+			_ = captureTrustDrift(t)
+			err := tc.check(path)
+			if err == nil {
+				t.Fatalf("standalone accepted %s drift", tc.name)
+			}
+			if want := tc.strict(path); want == nil || err.Error() != want.Error() {
+				t.Fatalf("standalone error = %q, want the strict verdict %v", err, want)
+			}
+		})
+		t.Run(tc.name+"/secure client accepts and logs", func(t *testing.T) {
+			path := tc.fixture(t)
+			pinTrustProfileForTest(t, false)
+			reports := captureTrustDrift(t)
+			if err := tc.check(path); err != nil {
+				t.Fatalf("Secure Client refused %s drift: %v", tc.name, err)
+			}
+			if !reportsMention(*reports, path, "untrusted Windows principal") {
+				t.Fatalf("drift reports = %v, want an untrusted-principal report for %s", *reports, path)
+			}
+		})
+		t.Run(tc.name+"/standalone accepts after repair", func(t *testing.T) {
+			path := tc.fixture(t)
+			pinTrustProfileForTest(t, true)
+			setTestFileDACL(t, path, testDACL(t, canonicalTestDACL), true)
+			if err := tc.check(path); err != nil {
+				t.Fatalf("standalone refused %s after the drift was repaired: %v", tc.name, err)
+			}
+		})
+	}
+}
+
+// A standalone gateway still reads its own token: the service runtime file
+// gate falls back to the strict service check, which allows the gateway
+// service as a writer, instead of the tolerant walk, which does not.
+func TestStandaloneServiceRuntimeFileKeepsGatewayWriter(t *testing.T) {
+	t.Setenv(TrustStrictAncestorsEnv, "")
+	pinTrustProfileForTest(t, true)
+	const account = `NT SERVICE\DefenseClawGatewayG561`
+	sid, err := windowsVirtualServiceSID(account)
+	if err != nil {
+		t.Fatalf("windowsVirtualServiceSID: %v", err)
+	}
+	dir := filepath.Join(t.TempDir(), "runtime")
+	if err := os.Mkdir(dir, 0o700); err != nil {
+		t.Fatalf("Mkdir: %v", err)
+	}
+	path := filepath.Join(dir, "hook-api-token")
+	if err := os.WriteFile(path, []byte("token"), 0o600); err != nil {
+		t.Fatalf("WriteFile: %v", err)
+	}
+	gatewayWrites := "D:P(A;;FA;;;SY)(A;;FA;;;BA)(A;;FA;;;" + sid.String() + ")"
+	setTestFileDACL(t, dir, testDACL(t, gatewayWrites), true)
+	setTestFileDACL(t, path, testDACL(t, gatewayWrites), true)
+	if err := ValidateTrustedServiceRuntimeFilePath(path, "hook token", account); err != nil {
+		t.Skipf("the process user does not own a trusted temp tree here: %v", err)
+	}
+	if err := AcceptServiceRuntimeFileDrift(path, "hook token", account); err != nil {
+		t.Fatalf("standalone refused a gateway-writable token: %v", err)
+	}
+	setTestFileDACL(t, path, testDACL(t, "D:P(A;;FA;;;SY)(A;;FA;;;BA)(A;;FW;;;BU)"), true)
+	if err := AcceptServiceRuntimeFileDrift(path, "hook token", account); err == nil {
+		t.Fatal("standalone accepted a token with a Users writer")
+	}
+}

@@ -2131,7 +2131,8 @@ func WindowsCodexManagedHookContract(hookBinary string) string {
 // stays fatal. Permission drift is repaired first when repairable is set and
 // the process is the installer or the LocalSystem guardian; whatever cannot
 // be repaired, including drift seen by a standard-user hook, is accepted and
-// logged so it never stops reconcile, verify or the hook.
+// logged on Secure Client so it never stops reconcile, verify or the hook,
+// and refused on standalone (GAP-0561).
 func ensureWindowsCodexMachineFileTrust(path, label string, repairable bool) error {
 	strictErr := windowsCodexMachineTrustedFileCheck(path, label)
 	if strictErr == nil {
@@ -2165,7 +2166,11 @@ func ensureWindowsCodexMachineFileTrust(path, label string, repairable bool) err
 			reason = "re-stamped leaf; remaining: " + recheckErr.Error()
 		}
 	}
-	if managed.TrustStrictAncestors() {
+	// A standalone process keeps the strict verdict once the repair had its
+	// chance: the drift acceptance is for the Secure Client tree, and a
+	// standard user who can write this file could remove the DefenseClaw
+	// hooks from Codex (GAP-0561).
+	if managed.TrustStrictAncestors() || managed.WindowsStandaloneTrustScope() {
 		return strictErr
 	}
 	emitManagedResilience(managedDriftMarker(drift, false, true), path,
