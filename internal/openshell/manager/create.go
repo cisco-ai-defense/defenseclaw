@@ -357,6 +357,7 @@ func (m *Manager) create(ctx context.Context, gw *Gateway, b *box, in createInpu
 		rec.Warnings = append(rec.Warnings, note)
 	}
 	rec.Verify = verifyExpectation(img, spec, arts)
+	rec.Verify.LocalhostResolver = gw.Driver.Name == openshell.DriverVM
 	rec.ProviderEndpoints = providerEndpoints(name, llm, creds)
 	if strings.EqualFold(cfg.OpenShell.TokenDelivery, config.OpenShellTokenDeliveryEnv) {
 		rec.TokenDelivery = config.OpenShellTokenDeliveryEnv

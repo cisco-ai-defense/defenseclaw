@@ -51,6 +51,26 @@ func isWorkloadCheck(call openshelltest.ExecCall) bool {
 		(call.Command[7] == "defenseclaw-verify" || call.Command[7] == "defenseclaw-verify-vm")
 }
 
+// goodResolverOutput is what the pinned resolver caller prints in a guest
+// whose localhost is IPv4 loopback only.
+const goodResolverOutput = "unspec 127.0.0.1\ninet 127.0.0.1\nloopback-only\n"
+
+// isResolverCall reports the direct exec of the pinned resolver caller.
+func isResolverCall(call openshelltest.ExecCall) bool {
+	return slices.Equal(call.Command, []string{localhostResolverPath})
+}
+
+// withResolverAnswer answers the direct resolver exec with out and exit
+// status code, and hands every other command to h.
+func withResolverAnswer(h openshelltest.ExecHandler, out string, code int) openshelltest.ExecHandler {
+	return func(ctx context.Context, call openshelltest.ExecCall) openshelltest.ExecResponse {
+		if isResolverCall(call) {
+			return openshelltest.ExecResponse{Stdout: []byte(out), ExitCode: code}
+		}
+		return h(ctx, call)
+	}
+}
+
 // workloadAnswer is what a sandbox answers the workload check.
 type workloadAnswer struct {
 	uid, gid int
@@ -115,7 +135,7 @@ func (a workloadAnswer) stdout() []byte {
 // hostname is its name) that runs as want expects.
 func answerFor(want verifyRecord, hostname string) workloadAnswer {
 	a := workloadAnswer{uid: want.UID, gid: want.GID, hostname: hostname, home: "writable", capEff: "0000000000000000", cpus: 2, memKB: 2000000,
-		localhost: []string{"127.0.0.1 STREAM localhost", "127.0.0.1 DGRAM", "127.0.0.1 RAW"}}
+		localhost: []string{"unspec 127.0.0.1", "inet 127.0.0.1", "loopback-only"}}
 	for _, f := range want.Files {
 		af := answerFile{path: f.Path, sha256: f.SHA256, uid: f.UID, gid: f.GID, mode: f.Mode}
 		if f.ReadOnlyMount {
@@ -131,8 +151,8 @@ func answerFor(want verifyRecord, hostname string) workloadAnswer {
 // (openshelltest.DefaultExec when nil: a stop's flush syncs).
 func (e *harnessEnv) workloadChecks(edit func(sandbox string, a *workloadAnswer), other openshelltest.ExecHandler) openshelltest.ExecHandler {
 	return func(ctx context.Context, call openshelltest.ExecCall) openshelltest.ExecResponse {
-		if slices.Equal(call.Command, []string{"/usr/local/lib/defenseclaw/localhost-resolver"}) {
-			return openshelltest.ExecResponse{Stdout: []byte("127.0.0.1 STREAM\n")}
+		if isResolverCall(call) {
+			return openshelltest.ExecResponse{Stdout: []byte(goodResolverOutput)}
 		}
 		if !isWorkloadCheck(call) {
 			if other != nil {
@@ -260,25 +280,29 @@ func TestWorkloadProblems(t *testing.T) {
 func TestMicroVMResolverResult(t *testing.T) {
 	vm, _ := openshell.LookupDriver("vm")
 	docker, _ := openshell.LookupDriver("docker")
+	const refused = "did not return only its loopback ingress"
+	lines := func(l ...string) func(*workloadAnswer) { return func(a *workloadAnswer) { a.localhost = l } }
 	for _, tc := range []struct {
 		name string
 		edit func(*workloadAnswer)
 		want string
 	}{
-		{"good", nil, ""},
-		{"long canonical alias", func(a *workloadAnswer) {
-			a.localhost = []string{"127.0.0.1 STREAM " + strings.Repeat(strings.Repeat("a", 60)+".", 3) + strings.Repeat("a", 60)}
-		}, ""},
+		{"IPv4 only", nil, ""},
+		{"IPv6 only", lines("unspec ::1", "inet6 ::1", "loopback-only"), ""},
+		{"both families", lines("unspec ::1", "unspec 127.0.0.1", "inet 127.0.0.1", "inet6 ::1", "loopback-only"), ""},
 		{"no answer", func(a *workloadAnswer) { a.localhost = nil }, "could not resolve localhost"},
 		{"command failed", func(a *workloadAnswer) { a.localhost, a.localhostFailed = nil, true }, "could not resolve localhost"},
 		{"status missing", func(a *workloadAnswer) { a.localhostUnreported = true }, "could not resolve localhost"},
-		{"wrong address", func(a *workloadAnswer) { a.localhost = []string{"203.0.113.10 STREAM localhost"} }, "did not return only its loopback ingress"},
-		{"mixed addresses", func(a *workloadAnswer) { a.localhost = append(a.localhost, "203.0.113.10 DGRAM") }, "did not return only its loopback ingress"},
-		{"malformed output", func(a *workloadAnswer) { a.localhost = []string{"localhost"} }, "did not return only its loopback ingress"},
-		{"IPv6 output", func(a *workloadAnswer) { a.localhost = []string{"::1 STREAM localhost"} }, ""},
-		{"other IPv6 output", func(a *workloadAnswer) { a.localhost = []string{"::2 STREAM localhost"} }, "did not return only its loopback ingress"},
-		{"address without type", func(a *workloadAnswer) { a.localhost = []string{"127.0.0.1"} }, "did not return only its loopback ingress"},
-		{"unexpected type", func(a *workloadAnswer) { a.localhost = []string{"127.0.0.1 OTHER localhost"} }, "did not return only its loopback ingress"},
+		{"wrong address", lines("unspec 203.0.113.10", "loopback-only"), refused},
+		{"mixed family", lines("unspec 127.0.0.1", "unspec 2001:db8::10", "inet 127.0.0.1", "loopback-only"), refused},
+		{"other IPv6 address", lines("unspec ::2", "loopback-only"), refused},
+		{"IPv4 answer to the inet6 query", lines("unspec 127.0.0.1", "inet6 127.0.0.1", "loopback-only"), refused},
+		{"no unspec answer", lines("inet 127.0.0.1", "loopback-only"), refused},
+		{"no final line", lines("unspec 127.0.0.1", "inet 127.0.0.1"), refused},
+		{"line after the final line", lines("unspec 127.0.0.1", "loopback-only", "unspec 127.0.0.1"), refused},
+		{"repeated answer", lines("unspec 127.0.0.1", "unspec 127.0.0.1", "loopback-only"), refused},
+		{"queries out of order", lines("inet 127.0.0.1", "unspec 127.0.0.1", "loopback-only"), refused},
+		{"retired caller output", lines("127.0.0.1 STREAM localhost"), refused},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			a := answerFor(testVerify(), "vmbox")
@@ -297,67 +321,90 @@ func TestMicroVMResolverResult(t *testing.T) {
 			}
 		})
 	}
-	for _, answer := range []string{"localhost " + strings.Repeat("a", 513) + "\nlocalhost-ok\n", "localhost 127.0.0.1 STREAM localhost\nlocalhost-ok\nlocalhost-ok\n", "localhost-ok\nlocalhost 127.0.0.1 STREAM localhost\n"} {
+	for _, answer := range []string{"localhost " + strings.Repeat("a", 513) + "\nlocalhost-ok\n", "localhost unspec 127.0.0.1\nlocalhost-ok\nlocalhost-ok\n", "localhost-ok\nlocalhost unspec 127.0.0.1\n"} {
 		if _, err := parseWorkloadFacts([]byte(answer)); err == nil {
 			t.Fatalf("accepted malformed resolver result %q", answer)
 		}
 	}
 }
 
+// The direct exec's output is judged as exactly the caller's report, and a
+// refusal keeps the caller's reason for the message.
 func TestMicroVMDirectResolverResult(t *testing.T) {
 	for _, tc := range []struct {
-		name string
-		out  string
-		want bool
+		name, out string
+		want      bool
+		refusal   string
 	}{
-		{"IPv4 loopback", "127.0.0.1 STREAM\n", true},
-		{"IPv6 loopback", "::1 STREAM\n", true},
-		{"mixed loopback", "127.0.0.1 STREAM\n::1 STREAM\n", true},
-		{"other address", "203.0.113.10 STREAM\n", false},
-		{"mixed addresses", "127.0.0.1 STREAM\n203.0.113.10 STREAM\n", false},
-		{"NUL byte", "127.0.0.1 STREAM\n\x00", false},
-		{"non ASCII alias", "127.0.0.1 STREAM caf\xc3\xa9\n", false},
-		{"missing final newline", "127.0.0.1 STREAM", false},
+		{"IPv4 only", goodResolverOutput, true, ""},
+		{"IPv6 only", "unspec ::1\ninet6 ::1\nloopback-only\n", true, ""},
+		{"both families", "unspec ::1\nunspec 127.0.0.1\ninet 127.0.0.1\ninet6 ::1\nloopback-only\n", true, ""},
+		{"mixed family refused by the caller", "unspec 127.0.0.1\nrefused nonloopback\n", false, "nonloopback"},
+		{"mixed family as answers", "unspec 127.0.0.1\nunspec 2001:db8::10\nloopback-only\n", false, ""},
+		{"other address", "unspec 203.0.113.10\nloopback-only\n", false, ""},
+		{"preloaded code", "refused preload\n", false, "preload"},
+		{"no answer", "refused noanswer\n", false, "noanswer"},
+		{"answer of another family", "unspec 127.0.0.1\nrefused family\n", false, "family"},
+		{"unknown refusal", "refused other\n", false, ""},
+		{"retired caller output", "127.0.0.1 STREAM\n", false, ""},
+		{"NUL byte", "unspec 127.0.0.1\nloopback-only\n\x00", false, ""},
+		{"non ASCII", "unspec 127.0.0.1 caf\xc3\xa9\nloopback-only\n", false, ""},
+		{"missing final newline", "unspec 127.0.0.1\nloopback-only", false, ""},
+		{"empty", "", false, ""},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			if got := directResolverOK([]byte(tc.out)); got != tc.want {
 				t.Fatalf("directResolverOK(%q) = %v, want %v", tc.out, got, tc.want)
 			}
+			if got := directResolverRefusal([]byte(tc.out)); got != tc.refusal {
+				t.Fatalf("directResolverRefusal(%q) = %q, want %q", tc.out, got, tc.refusal)
+			}
 		})
 	}
 }
 
+// The guest decision is the pinned caller's own report, executed directly:
+// a create rolls back a guest whose caller reports another address, a
+// mixed-family answer or preloaded code, and keeps one whose localhost is
+// loopback of either family or both.
 func TestMicroVMGuestResolverDirectExec(t *testing.T) {
-	const caller = "/usr/local/lib/defenseclaw/localhost-resolver"
 	for _, tc := range []struct {
-		name    string
-		answer  string
-		allowed bool
+		name, answer string
+		code         int
+		want         string // "" allows
 	}{
-		{"guest resolver returns another address", "203.0.113.10 STREAM\n", false},
-		{"guest resolver returns loopback", "127.0.0.1 STREAM\n", true},
+		{"guest resolver returns another address", "unspec 203.0.113.10\nloopback-only\n", 0, "could not verify localhost"},
+		{"guest resolver refuses a mixed-family answer", "unspec 127.0.0.1\nrefused nonloopback\n", 1, "did not return only its loopback ingress"},
+		{"guest image preloads code", "refused preload\n", 1, "/etc/ld.so.preload"},
+		{"guest resolver has no answer", "refused noanswer\n", 1, "could not resolve localhost"},
+		{"retired caller output", "127.0.0.1 STREAM\n", 0, "could not verify localhost"},
+		{"good report with a failed exit", goodResolverOutput, 1, "could not verify localhost"},
+		{"guest resolver returns IPv4 loopback", goodResolverOutput, 0, ""},
+		{"guest resolver returns IPv6 loopback", "unspec ::1\ninet6 ::1\nloopback-only\n", 0, ""},
+		{"guest resolver returns both families", "unspec ::1\nunspec 127.0.0.1\ninet 127.0.0.1\ninet6 ::1\nloopback-only\n", 0, ""},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			e := newVMEnv(t, nil)
 			useOpenCode(t, e)
-			defaultCheck := e.workloadChecks(nil, nil)
-			e.fake.HandleExec(func(ctx context.Context, call openshelltest.ExecCall) openshelltest.ExecResponse {
-				if slices.Equal(call.Command, []string{caller}) {
-					return openshelltest.ExecResponse{Stdout: []byte(tc.answer)}
-				}
-				return defaultCheck(ctx, call)
-			})
+			e.fake.HandleExec(withResolverAnswer(e.workloadChecks(nil, nil), tc.answer, tc.code))
 			_, err := e.tryCreate(sandboxapi.CreateRequest{Name: "resolver-cell", Harness: "opencode", Copy: true})
-			if tc.allowed {
+			if tc.want == "" {
 				must(t, err)
+				if rec := e.boxOf("resolver-cell").rec; rec.Verify == nil || !rec.Verify.LocalhostResolver {
+					t.Fatalf("a MicroVM create did not record the resolver check: %+v", rec.Verify)
+				}
 			} else {
-				wantCode(t, err, sandboxapi.CodePolicyRejected)
+				apiErr := wantCode(t, err, sandboxapi.CodePolicyRejected)
+				if !strings.Contains(apiErr.Detail, tc.want) {
+					t.Fatalf("detail = %q, want %q", apiErr.Detail, tc.want)
+				}
+				assertNothingLeft(t, e)
 			}
 			var directCalls int
 			for _, call := range e.fake.ExecCalls() {
-				if slices.Equal(call.Command, []string{caller}) {
+				if isResolverCall(call) {
 					directCalls++
-					if !slices.Equal(call.Argv, []string{caller}) {
+					if !slices.Equal(call.Argv, []string{localhostResolverPath}) {
 						t.Fatalf("resolver caller was wrapped: %q", call.Argv)
 					}
 				}
@@ -409,9 +456,9 @@ func TestMicroVMGuestResolverUsesLibcWithProjectPythonModule(t *testing.T) {
 		{"alternate project module", "203.0.113.10 localhost\n", `AF_INET = 2
 def getaddrinfo(host, port, family=0, type=0, proto=0, flags=0):
     return [(2, 1, 6, "", ("127.0.0.1", 0))]
-`, "", "did not return only its loopback ingress"},
+`, "", "could not resolve localhost to its loopback ingress"},
 		{"custom caller benign", "127.0.0.1 localhost\n", "# project module\n", "203.0.113.10", ""},
-		{"custom caller protected", "203.0.113.10 localhost\n", "# project module\n", "127.0.0.1", "did not return only its loopback ingress"},
+		{"custom caller protected", "203.0.113.10 localhost\n", "# project module\n", "127.0.0.1", "could not resolve localhost to its loopback ingress"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			dir := t.TempDir()
@@ -474,7 +521,7 @@ def getaddrinfo(host, port, family=0, type=0, proto=0, flags=0):
 		must(t, os.WriteFile(hosts, []byte("127.0.0.1 localhost\n"), 0o644))
 		check("")
 		must(t, os.WriteFile(hosts, []byte("198.51.100.10 localhost\n"), 0o644))
-		check("did not return only its loopback ingress")
+		check("could not resolve localhost to its loopback ingress")
 	})
 }
 
@@ -727,7 +774,12 @@ func TestStartChecksTheWorkloadAgainstTheRecord(t *testing.T) {
 	// The sandbox answers with the files create left in it, whatever the
 	// start expects.
 	created := answerFor(recorded, "restart")
+	resolverCalls := 0
 	e.fake.HandleExec(func(_ context.Context, call openshelltest.ExecCall) openshelltest.ExecResponse {
+		if isResolverCall(call) {
+			resolverCalls++
+			return openshelltest.ExecResponse{Stdout: []byte(goodResolverOutput)}
+		}
 		if isWorkloadCheck(call) {
 			return openshelltest.ExecResponse{Stdout: created.stdout()}
 		}
@@ -746,8 +798,8 @@ func TestStartChecksTheWorkloadAgainstTheRecord(t *testing.T) {
 		t.Fatalf("another ingress port renders the same hooks: %+v", fresh.Files)
 	}
 	e.startBox("restart", sandboxapi.StartRequest{})
-	if calls := e.workloadCheckCalls("restart"); len(calls) != 2 || !slices.Equal(calls[1].Command, verifyArgv(recorded, true)) {
-		t.Fatalf("workload checks = %+v", calls)
+	if calls := e.workloadCheckCalls("restart"); len(calls) != 2 || !slices.Equal(calls[1].Command, verifyArgv(recorded, true)) || resolverCalls != 1 {
+		t.Fatalf("workload checks = %+v, direct resolver calls %d", calls, resolverCalls)
 	}
 	if after := e.boxOf("restart").rec.Verify; after == nil || !reflect.DeepEqual(*after, recorded) {
 		t.Fatalf("the start changed what the check expects: %+v, want %+v", after, recorded)
@@ -767,6 +819,50 @@ func TestStartChecksTheWorkloadAgainstTheRecord(t *testing.T) {
 	}
 	if phases := e.tel.phases("restart"); phases[len(phases)-1] != audit.SandboxPhaseStopped {
 		t.Fatalf("lifecycle = %v", phases)
+	}
+}
+
+// A MicroVM recorded before the guest resolver check (DefenseClaw 1.0.7 and
+// earlier) has no caller in its image: its create passed the hook-fire
+// MicroVM verdict, and its start keeps the check it was created under
+// instead of refusing the upgraded sandbox. A MicroVM created now records
+// the check, and a start keeps that mark.
+func TestStartKeepsTheCheckOfAMicroVMRecordedBeforeTheResolverCheck(t *testing.T) {
+	e := newVMEnv(t, nil)
+	useOpenCode(t, e)
+	e.create(sandboxapi.CreateRequest{Name: "upgraded", Harness: "opencode", Copy: true})
+	e.stopBox("upgraded")
+	b := e.boxOf("upgraded")
+	if b.rec.Verify == nil || !b.rec.Verify.LocalhostResolver {
+		t.Fatalf("a MicroVM create did not record the resolver check: %+v", b.rec.Verify)
+	}
+	legacy := *b.rec.Verify
+	legacy.LocalhostResolver = false
+	e.m.mu.Lock()
+	b.rec.Verify = &legacy
+	e.m.mu.Unlock()
+	resolverCalls := 0
+	checks := e.workloadChecks(nil, nil)
+	e.fake.HandleExec(func(ctx context.Context, call openshelltest.ExecCall) openshelltest.ExecResponse {
+		if isResolverCall(call) {
+			resolverCalls++
+			return openshelltest.ExecResponse{Stderr: []byte("exec: no such file or directory"), ExitCode: 127}
+		}
+		return checks(ctx, call)
+	})
+	e.startBox("upgraded", sandboxapi.StartRequest{})
+	calls := e.workloadCheckCalls("upgraded")
+	if resolverCalls != 0 || len(calls) != 2 || calls[1].Command[7] != "defenseclaw-verify" {
+		t.Fatalf("legacy MicroVM start ran resolver calls %d, workload checks %+v", resolverCalls, calls)
+	}
+	if after := e.boxOf("upgraded").rec.Verify; after == nil || after.LocalhostResolver {
+		t.Fatalf("the start changed the legacy record: %+v", after)
+	}
+
+	d := newEnv(t, nil)
+	d.create(sandboxapi.CreateRequest{Name: "dkmark"})
+	if rec := d.boxOf("dkmark").rec; rec.Verify == nil || rec.Verify.LocalhostResolver {
+		t.Fatalf("a docker create recorded the MicroVM resolver check: %+v", rec.Verify)
 	}
 }
 

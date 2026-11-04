@@ -49,6 +49,8 @@ type fakeDocker struct {
 	noBuildx      bool
 	env           map[string]string
 	exportedHosts exportedHosts
+	// exportedFiles are further regular files of the export, by tar name.
+	exportedFiles map[string][]byte
 }
 
 func (f *fakeDocker) Getenv(key string) string { return f.env[key] }
@@ -90,6 +92,20 @@ func (f *fakeDocker) Run(_ context.Context, stdin io.Reader, stdout, stderr io.W
 				return err
 			}
 			if _, err := tw.Write(f.exportedHosts.data); err != nil {
+				return err
+			}
+		}
+		names := make([]string, 0, len(f.exportedFiles))
+		for name := range f.exportedFiles {
+			names = append(names, name)
+		}
+		sort.Strings(names)
+		for _, name := range names {
+			data := f.exportedFiles[name]
+			if err := tw.WriteHeader(&tar.Header{Name: name, Typeflag: tar.TypeReg, Mode: 0o644, Size: int64(len(data))}); err != nil {
+				return err
+			}
+			if _, err := tw.Write(data); err != nil {
 				return err
 			}
 		}

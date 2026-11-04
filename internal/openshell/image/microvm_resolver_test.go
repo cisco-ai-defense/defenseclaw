@@ -24,10 +24,12 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 
@@ -79,7 +81,9 @@ func TestR108OSMINMicroVMCustomBaseHostsAndBenignTwin(t *testing.T) {
 		{"dual stack with another IPv4 address", []byte("::1 localhost\n198.51.100.10 localhost\n"), true, false},
 		{"IPv6-only mapping", []byte("::1 localhost\n"), true, true},
 		{"IPv6-only other address", []byte("::2 localhost\n"), true, false},
-		{"IPv6 answer ahead of usable IPv4", []byte("::2 localhost\n127.0.0.1 localhost\n"), true, true},
+		// Every family is judged: programs ask for both (round-3 review item 1).
+		{"other IPv6 answer ahead of IPv4 loopback", []byte("::2 localhost\n127.0.0.1 localhost\n"), true, false},
+		{"IPv4 loopback with other IPv6 address", []byte("127.0.0.1 localhost\n2001:db8::10 localhost\n"), true, false},
 		{"alias after another name", []byte("127.0.0.1 localname localhost\n"), true, true},
 		{"upper ASCII alias", []byte("127.0.0.1 LOCALHOST\n"), true, true},
 		{"mixed ASCII alias", []byte("127.0.0.1 LocalHost\n"), true, true},
@@ -231,6 +235,231 @@ enum nss_status _nss_localtest_gethostbyname2_r(const char *name, int af, struct
 				t.Fatalf("build success = %t, want %t: %v\n%s", err == nil, tc.want, err, out)
 			}
 		})
+	}
+}
+
+// nssFamilySource is an NSS module that answers localhost per query kind:
+// gethostbyname4_r (what getaddrinfo uses for AF_UNSPEC) with UNSPEC_ADDR
+// and gethostbyname2_r for AF_INET with 127.0.0.1.
+const nssFamilySource = `#include <nss.h>
+#include <netdb.h>
+#include <arpa/inet.h>
+#include <errno.h>
+#include <stdint.h>
+#include <string.h>
+enum nss_status _nss_familytest_gethostbyname4_r(const char *name, struct gaih_addrtuple **pat, char *buffer, size_t buflen, int *errnop, int *herrnop, int32_t *ttlp) {
+    (void)ttlp;
+    if (strcasecmp(name, "localhost") != 0) {
+        *herrnop = HOST_NOT_FOUND;
+        return NSS_STATUS_NOTFOUND;
+    }
+    uintptr_t p = ((uintptr_t)buffer + sizeof(void *) - 1) & ~(sizeof(void *) - 1);
+    if (p + sizeof(struct gaih_addrtuple) + 10 > (uintptr_t)buffer + buflen) {
+        *errnop = ERANGE;
+        *herrnop = NETDB_INTERNAL;
+        return NSS_STATUS_TRYAGAIN;
+    }
+    struct gaih_addrtuple *t = *pat;
+    if (t == NULL) {
+        t = (struct gaih_addrtuple *)p;
+        p += sizeof(struct gaih_addrtuple);
+        *pat = t;
+    }
+    char *canonical = (char *)p;
+    memcpy(canonical, "localhost", 10);
+    memset(t, 0, sizeof *t);
+    t->name = canonical;
+    t->family = AF_INET;
+    inet_pton(AF_INET, "UNSPEC_ADDR", t->addr);
+    return NSS_STATUS_SUCCESS;
+}
+enum nss_status _nss_familytest_gethostbyname2_r(const char *name, int af, struct hostent *result, char *buffer, size_t buflen, int *errnop, int *h_errnop) {
+    if (strcasecmp(name, "localhost") != 0 || af != AF_INET) {
+        *h_errnop = HOST_NOT_FOUND;
+        return NSS_STATUS_NOTFOUND;
+    }
+    uintptr_t p = ((uintptr_t)buffer + sizeof(char *) - 1) & ~(sizeof(char *) - 1);
+    char **aliases = (char **)p;
+    p += sizeof(char *);
+    char **addresses = (char **)p;
+    p += 2 * sizeof(char *);
+    if (p + 4 + 10 > (uintptr_t)buffer + buflen) {
+        *errnop = ERANGE;
+        *h_errnop = NETDB_INTERNAL;
+        return NSS_STATUS_TRYAGAIN;
+    }
+    char *address = (char *)p;
+    address[0] = 127; address[1] = 0; address[2] = 0; address[3] = 1;
+    char *canonical = address + 4;
+    memcpy(canonical, "localhost", 10);
+    aliases[0] = NULL;
+    addresses[0] = address;
+    addresses[1] = NULL;
+    result->h_name = canonical;
+    result->h_aliases = aliases;
+    result->h_addrtype = AF_INET;
+    result->h_length = 4;
+    result->h_addr_list = addresses;
+    return NSS_STATUS_SUCCESS;
+}
+`
+
+// An image resolver that answers the IPv4 query with loopback and the
+// unspec query (what programs ask by default) with another address is
+// refused (round-3 review item 2, family-dependent resolver); the same
+// module answering loopback to both is accepted.
+func TestMicroVMResolverFamilyDependentNSSSource(t *testing.T) {
+	localDocker(t)
+	for _, tc := range []struct {
+		name, unspec string
+		want         bool
+	}{
+		{"unspec query gets another address", "203.0.113.10", false},
+		{"unspec query gets loopback", "127.0.0.1", true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			dir := t.TempDir()
+			if err := os.WriteFile(filepath.Join(dir, "hosts"), []byte("127.0.0.1 custom\n"), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(filepath.Join(dir, "familytest.c"), []byte(strings.Replace(nssFamilySource, "UNSPEC_ADDR", tc.unspec, 1)), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			layout := microVMResolverFixtureStage(t, dir) + "FROM " + openshell.DefaultBaseImage + " AS dc-complete\nUSER root\nCOPY hosts /etc/hosts\n" +
+				"COPY familytest.c /tmp/familytest.c\nRUN gcc -shared -fPIC -o /usr/lib/$(gcc -dumpmachine)/libnss_familytest.so.2 /tmp/familytest.c && sed -i 's/^hosts:.*/hosts: files familytest/' /etc/nsswitch.conf\n" +
+				microVMResolverCopyStep() + microVMResolverStep(openshell.DefaultBaseImage)
+			if err := os.WriteFile(filepath.Join(dir, "Dockerfile"), []byte(layout), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			tag := testImageTag(dir)
+			t.Cleanup(func() { exec.Command("docker", "image", "rm", "-f", tag).Run() })
+			out, err := dockerCommand(t, "build", "--pull=false", "--progress=plain", "-t", tag, dir).CombinedOutput()
+			if (err == nil) != tc.want {
+				t.Fatalf("build success = %t, want %t: %v\n%s", err == nil, tc.want, err, out)
+			}
+			if err != nil && !bytes.Contains(out, []byte("MicroVM image localhost check failed")) {
+				t.Fatalf("build failed before the localhost check: %s", out)
+			}
+		})
+	}
+}
+
+// preloadSource interposes getaddrinfo for localhost: FAKE_CONDITION picks
+// the queries that get 203.0.113.10, every other one gets loopback.
+const preloadSource = `#define _GNU_SOURCE
+#include <arpa/inet.h>
+#include <dlfcn.h>
+#include <netdb.h>
+#include <stdlib.h>
+#include <string.h>
+#include <unistd.h>
+extern char *program_invocation_short_name;
+int getaddrinfo(const char *node, const char *service, const struct addrinfo *hints, struct addrinfo **res) {
+    if (node && strcmp(node, "localhost") == 0) {
+        struct addrinfo *ai = calloc(1, sizeof *ai);
+        struct sockaddr_in *addr = calloc(1, sizeof *addr);
+        if (!ai || !addr) { free(ai); free(addr); return EAI_MEMORY; }
+        addr->sin_family = AF_INET;
+        inet_pton(AF_INET, (FAKE_CONDITION) ? "203.0.113.10" : "127.0.0.1", &addr->sin_addr);
+        ai->ai_family = AF_INET;
+        ai->ai_socktype = SOCK_STREAM;
+        ai->ai_addrlen = sizeof *addr;
+        ai->ai_addr = (struct sockaddr *)addr;
+        *res = ai;
+        return 0;
+    }
+    int (*real)(const char *, const char *, const struct addrinfo *, struct addrinfo **) = dlsym(RTLD_NEXT, "getaddrinfo");
+    return real(node, service, hints, res);
+}
+`
+
+// Code an image preloads into every program (/etc/ld.so.preload) can answer
+// DefenseClaw's caller unlike every other program: by the caller's name or
+// by the query's family (round-3 review item 2). No probe can show what the
+// harness gets, so such an image is refused, also when its preload answers
+// loopback to everyone; the same image without the preload is accepted.
+func TestMicroVMResolverRefusesPreloadedCode(t *testing.T) {
+	localDocker(t)
+	for _, tc := range []struct {
+		name, condition string
+		preload, want   bool
+	}{
+		{"preload answers only the caller with loopback", `strstr(program_invocation_short_name, "localhost-resolver") == NULL`, true, false},
+		{"preload answers only the IPv4 query with loopback", `!hints || hints->ai_family != AF_INET`, true, false},
+		{"preload answers loopback to everyone", "0", true, false},
+		{"same image without the preload", "0", false, true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			dir := t.TempDir()
+			if err := os.WriteFile(filepath.Join(dir, "hosts"), []byte("127.0.0.1 localhost\n"), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(filepath.Join(dir, "libfake.c"), []byte(strings.Replace(preloadSource, "FAKE_CONDITION", tc.condition, 1)), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			layout := microVMResolverFixtureStage(t, dir) + "FROM " + openshell.DefaultBaseImage + " AS dc-complete\nUSER root\nCOPY hosts /etc/hosts\n" +
+				"COPY libfake.c /tmp/libfake.c\nRUN gcc -shared -fPIC -o /usr/local/lib/libfake.so /tmp/libfake.c -ldl\n"
+			if tc.preload {
+				layout += "RUN printf '/usr/local/lib/libfake.so\\n' > /etc/ld.so.preload\n"
+			}
+			layout += microVMResolverCopyStep() + microVMResolverStep(openshell.DefaultBaseImage)
+			if err := os.WriteFile(filepath.Join(dir, "Dockerfile"), []byte(layout), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			tag := testImageTag(dir)
+			t.Cleanup(func() { exec.Command("docker", "image", "rm", "-f", tag).Run() })
+			out, err := dockerCommand(t, "build", "--pull=false", "--progress=plain", "-t", tag, dir).CombinedOutput()
+			if (err == nil) != tc.want {
+				t.Fatalf("build success = %t, want %t: %v\n%s", err == nil, tc.want, err, out)
+			}
+			if err != nil && !bytes.Contains(out, []byte("MicroVM image localhost check failed")) {
+				t.Fatalf("build failed before the localhost check: %s", out)
+			}
+		})
+	}
+}
+
+// The caller itself refuses to report while anything but the program, the
+// vDSO, libc and the loader is mapped into it: a preload that answers only
+// the caller with loopback cannot make it pass. Runs without Docker where a
+// C compiler is on PATH (Linux).
+func TestLocalhostResolverRefusesPreloadedCode(t *testing.T) {
+	if runtime.GOOS != "linux" {
+		t.Skip("the caller is a Linux program")
+	}
+	cc, err := exec.LookPath("cc")
+	if err != nil {
+		t.Skip("no C compiler")
+	}
+	dir := t.TempDir()
+	caller, lib := filepath.Join(dir, "localhost-resolver"), filepath.Join(dir, "libfake.so")
+	if err := os.WriteFile(filepath.Join(dir, "resolver.c"), microVMResolverSource, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	fake := strings.Replace(preloadSource, "FAKE_CONDITION", `strstr(program_invocation_short_name, "localhost-resolver") == NULL`, 1)
+	if err := os.WriteFile(filepath.Join(dir, "libfake.c"), []byte(fake), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	for _, args := range [][]string{
+		{"-O2", "-Wall", "-Wextra", "-Werror", "-o", caller, filepath.Join(dir, "resolver.c")},
+		{"-shared", "-fPIC", "-o", lib, filepath.Join(dir, "libfake.c"), "-ldl"},
+	} {
+		if out, err := exec.CommandContext(t.Context(), cc, args...).CombinedOutput(); err != nil {
+			t.Fatalf("cc %q: %v\n%s", args, err, out)
+		}
+	}
+	plain := exec.CommandContext(t.Context(), caller)
+	plain.Env = []string{}
+	out, _ := plain.Output()
+	if strings.Contains(string(out), "refused preload") {
+		t.Fatalf("the caller refused a process without preloaded code: %q", out)
+	}
+	preloaded := exec.CommandContext(t.Context(), caller)
+	preloaded.Env = []string{"LD_PRELOAD=" + lib}
+	out, err = preloaded.Output()
+	var exitErr *exec.ExitError
+	if !errors.As(err, &exitErr) || exitErr.ExitCode() != 1 || string(out) != "refused preload\n" {
+		t.Fatalf("preloaded caller = %q, %v; want \"refused preload\" and exit status 1", out, err)
 	}
 }
 
@@ -438,7 +667,8 @@ func TestMicroVMResolverUsesExportedHosts(t *testing.T) {
 	localDocker(t)
 	dir := t.TempDir()
 	const authored = "127.0.0.1 localhost\n# image-authored marker\n"
-	if err := os.WriteFile(filepath.Join(dir, "hosts"), []byte(authored), 0o600); err != nil {
+	// World-readable: the base's sandbox user copies it in the mounted stage.
+	if err := os.WriteFile(filepath.Join(dir, "hosts"), []byte(authored), 0o644); err != nil {
 		t.Fatal(err)
 	}
 	file := "FROM " + openshell.DefaultBaseImage + " AS dc-complete\nCOPY hosts /etc/hosts\n" +
@@ -536,6 +766,102 @@ func TestMicroVMExportedHostsClassification(t *testing.T) {
 			hosts, err := parseExportedHosts(&data)
 			if (err != nil) != tc.wantError || (err == nil && hosts.initializedByGuest() != tc.wantInit) {
 				t.Fatalf("hosts = %+v, error = %v", hosts, err)
+			}
+		})
+	}
+}
+
+// The export's /etc/ld.so.preload is judged by DefenseClaw, not by image
+// tools: one that names a library, or that is not a regular file, refuses
+// the image; an absent one, or one with only separators, does not.
+func TestMicroVMExportedPreloadClassification(t *testing.T) {
+	for _, tc := range []struct {
+		name     string
+		typeflag byte
+		data     string
+		want     string
+	}{
+		{"absent", 0, "", ""},
+		{"empty", tar.TypeReg, "", ""},
+		{"separators only", tar.TypeReg, " \n\t:\r\n", ""},
+		{"a library", tar.TypeReg, "/usr/local/lib/libfake.so\n", "names a library to load"},
+		{"a symlink", tar.TypeSymlink, "", "is not a regular file"},
+		{"a directory", tar.TypeDir, "", "is not a regular file"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var data bytes.Buffer
+			tw := tar.NewWriter(&data)
+			if tc.typeflag != 0 {
+				h := &tar.Header{Name: "etc/ld.so.preload", Typeflag: tc.typeflag, Mode: 0o644, Size: int64(len(tc.data))}
+				if tc.typeflag == tar.TypeSymlink {
+					h.Linkname, h.Size = "/sandbox/preload", 0
+				}
+				if tc.typeflag == tar.TypeDir {
+					h.Size = 0
+				}
+				if err := tw.WriteHeader(h); err != nil {
+					t.Fatal(err)
+				}
+				if h.Size > 0 {
+					if _, err := tw.Write([]byte(tc.data)); err != nil {
+						t.Fatal(err)
+					}
+				}
+			}
+			if err := tw.Close(); err != nil {
+				t.Fatal(err)
+			}
+			hosts, err := parseExportedHosts(&data)
+			if err != nil || hosts.preload != tc.want {
+				t.Fatalf("preload = %q, error %v, want %q", hosts.preload, err, tc.want)
+			}
+		})
+	}
+	var twice bytes.Buffer
+	tw := tar.NewWriter(&twice)
+	for range 2 {
+		if err := tw.WriteHeader(&tar.Header{Name: "etc/ld.so.preload", Typeflag: tar.TypeReg, Mode: 0o644}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := tw.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := parseExportedHosts(&twice); err == nil {
+		t.Fatal("an export with two /etc/ld.so.preload entries was read")
+	}
+}
+
+// A MicroVM image whose export preloads a library is refused before any
+// resolver build and before a record, also when its hosts file is empty
+// (the guest initializes that one); its twin without the preload records.
+func TestBuildRejectsPreloadingMicroVMBeforeRecord(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		preload string
+		want    bool
+	}{
+		{"preloaded library", "/usr/local/lib/libfake.so\n", false},
+		{"empty preload file", "", true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			spec := testSpec(harness.Codex)
+			spec.MicroVM = true
+			c := mustContext(t, spec)
+			docker := imageDocker(t, c, goodProbeOutput(c))
+			docker.exportedHosts = exportedHosts{present: true, typeflag: tar.TypeReg}
+			docker.exportedFiles = map[string][]byte{"etc/ld.so.preload": []byte(tc.preload)}
+			store := testStore(t)
+			_, err := (&Builder{Docker: docker, Store: store}).Build(t.Context(), spec, BuildOptions{SkipHookFire: true})
+			if (err == nil) != tc.want {
+				t.Fatalf("build error = %v, want success %t", err, tc.want)
+			}
+			if err != nil && !strings.Contains(err.Error(), "/etc/ld.so.preload names a library to load") {
+				t.Fatalf("refusal does not name the preload: %v", err)
+			}
+			items, listErr := store.List()
+			if listErr != nil || (len(items) == 0) == tc.want {
+				t.Fatalf("records = %+v, %v", items, listErr)
 			}
 		})
 	}

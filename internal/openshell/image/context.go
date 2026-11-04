@@ -52,7 +52,7 @@ const DefaultRepository = "defenseclaw/sandbox"
 
 // contextSchema versions image admission and the Dockerfile layout; bump it
 // when either changes so older records stop matching.
-const contextSchema = 6
+const contextSchema = 7
 
 // The VM resolver check runs this pinned caller against the completed
 // image's libc and NSS configuration.
@@ -483,9 +483,9 @@ RUN gcc -O2 -Wall -Wextra -Werror -o /tmp/localhost-resolver /tmp/localhost-reso
 // microVMResolverStep checks the completed image's name service with the
 // exported /etc/hosts overlaid. The shell tools come from the pinned tool
 // stage; only the resolver's libc and NSS configuration come from the image.
-// BuildKit's network=none has no configured IPv4 interface, so the resolver
-// calls libc without AI_ADDRCONFIG and checks each IPv4 answer, or an IPv6
-// answer when no IPv4 answer exists.
+// The caller asks libc for every family (unspec, inet, inet6) without
+// AI_ADDRCONFIG, which BuildKit's network=none would empty, and passes only
+// when every answer is loopback; awk accepts only that exact report.
 func microVMResolverStep(baseImage string) string {
 	return strings.Replace(`FROM dc-localhost-tool AS dc-resolver-check
 USER root
@@ -504,7 +504,7 @@ RUN --network=none --mount=type=bind,from=dc-complete,source=/,target=/tmp/dc-ro
     if [ -f "$hosts" ] && [ ! -L "$hosts" ] && [ ! -s "$hosts" ]; then exit 0; fi; \
     answer=$(/usr/sbin/chroot "$root" /usr/local/lib/defenseclaw/localhost-resolver) || fail; \
     [ ${#answer} -le 4096 ] && [ -n "$answer" ] || fail; \
-    printf '%s\n' "$answer" | /usr/bin/awk 'NF != 2 || ($1 != "127.0.0.1" && $1 != "::1") || $2 != "STREAM" { bad=1 } END { exit bad || NR == 0 }' || fail
+    printf '%s\n' "$answer" | /usr/bin/awk 'done { bad = 1 } $0 == "loopback-only" { done = 1; next } $0 == "unspec 127.0.0.1" || $0 == "unspec ::1" { if (rank > 0 || seen[$0]++) bad = 1; unspec = 1; next } $0 == "inet 127.0.0.1" { if (rank > 1 || seen[$0]++) bad = 1; rank = 1; next } $0 == "inet6 ::1" { if (seen[$0]++) bad = 1; rank = 2; next } { bad = 1 } END { exit bad || !done || !unspec }' || fail
 USER sandbox
 `, "BASE_IMAGE", baseImage, 1)
 }
@@ -541,8 +541,8 @@ type hashInput struct {
 	IngressPort        int    `json:"ingress_port"`
 	FailMode           string `json:"fail_mode"`
 	Owner              string `json:"owner"`
-	// MicroVM is left out when unset, which keeps the content hash of an
-	// image for the docker driver what it was before MicroVM images.
+	// MicroVM is left out when unset, so a docker-driver image's hash input
+	// has no MicroVM field (contextSchema still changes every hash).
 	MicroVM bool        `json:"microvm,omitempty"`
 	Files   []hashEntry `json:"files"`
 }

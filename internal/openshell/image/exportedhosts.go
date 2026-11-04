@@ -29,6 +29,9 @@ import (
 
 const maxExportedHosts = 1 << 20
 
+// maxExportedPreload bounds the /etc/ld.so.preload read from the export.
+const maxExportedPreload = 64 << 10
+
 // exportedHosts is the /etc/hosts entry in the container export OpenShell
 // uses to make the VM disk. Docker's build stage can carry different bytes.
 type exportedHosts struct {
@@ -36,6 +39,14 @@ type exportedHosts struct {
 	typeflag byte
 	data     []byte
 	link     string
+	// preload says why the export's /etc/ld.so.preload makes the dynamic
+	// loader map code into every guest program ahead of libc ("" when the
+	// file is absent or names nothing). Such code can answer DefenseClaw's
+	// resolver caller unlike any other program, so no check in the image
+	// or the guest can show what the guest resolves localhost to.
+	preload string
+	// sawPreload is set once an /etc/ld.so.preload entry was read.
+	sawPreload bool
 }
 
 func (h exportedHosts) initializedByGuest() bool {
@@ -54,6 +65,16 @@ func parseExportedHosts(r io.Reader) (exportedHosts, error) {
 			return result, fmt.Errorf("read exported image: %w", err)
 		}
 		name := strings.TrimPrefix(h.Name, "./")
+		if name == "etc/ld.so.preload" {
+			if result.sawPreload {
+				return result, errors.New("exported image has more than one /etc/ld.so.preload entry")
+			}
+			result.sawPreload = true
+			if result.preload, err = exportedPreload(h, tr); err != nil {
+				return result, err
+			}
+			continue
+		}
 		if name != "etc/hosts" {
 			continue
 		}
@@ -81,6 +102,27 @@ func parseExportedHosts(r io.Reader) (exportedHosts, error) {
 			return result, errors.New("exported image /etc/hosts is not a regular file or symbolic link")
 		}
 	}
+}
+
+// exportedPreload says why the export's /etc/ld.so.preload entry h preloads
+// code: a regular file with anything besides the loader's separators
+// (spaces, tabs, newlines and colons) names a library, and any other kind
+// of entry cannot be judged.
+func exportedPreload(h *tar.Header, r io.Reader) (string, error) {
+	if h.Typeflag != tar.TypeReg && h.Typeflag != tar.TypeRegA {
+		return "is not a regular file", nil
+	}
+	if h.Size < 0 || h.Size > maxExportedPreload {
+		return "is too large to check", nil
+	}
+	data, err := io.ReadAll(io.LimitReader(r, maxExportedPreload+1))
+	if err != nil {
+		return "", fmt.Errorf("read exported image /etc/ld.so.preload: %w", err)
+	}
+	if len(strings.Trim(string(data), " \t\r\n:")) != 0 {
+		return "names a library to load", nil
+	}
+	return "", nil
 }
 
 // exportHosts reads the same container export that OpenShell makes for the
@@ -125,13 +167,20 @@ func (b *Builder) exportHosts(ctx context.Context, tag string) (hosts exportedHo
 	return hosts, err
 }
 
-// verifyExportedResolver checks a nonempty exported hosts file against the
-// completed image's libc and NSS configuration with build networking off.
-// Missing and empty regular files use OpenShell guest initialization.
+// verifyExportedResolver refuses an export that preloads code into every
+// program, then checks a nonempty exported hosts file against the completed
+// image's libc and NSS configuration with build networking off. Missing and
+// empty regular files use OpenShell guest initialization; the guest check
+// before every session judges those.
 func (b *Builder) verifyExportedResolver(ctx context.Context, c *Context) (err error) {
 	hosts, err := b.exportHosts(ctx, c.Tag)
 	if err != nil {
 		return fmt.Errorf("MicroVM image %s localhost check: %w", c.Tag, err)
+	}
+	if hosts.preload != "" {
+		return fmt.Errorf("MicroVM image %s localhost check failed for %s: its /etc/ld.so.preload %s, so every program in the guest "+
+			"runs that code ahead of libc and no check can show what they resolve localhost to; remove the preload from the base image",
+			c.Tag, c.Spec.BaseImage, hosts.preload)
 	}
 	if hosts.initializedByGuest() {
 		return nil

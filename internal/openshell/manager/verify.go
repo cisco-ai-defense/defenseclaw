@@ -119,10 +119,15 @@ if [ "$#" -gt 0 ]; then
 fi
 echo end`
 
-// verifyArgv is the workload check's command for the files of want.
-func verifyArgv(want verifyRecord, microVM bool) []string {
+// localhostResolverPath is the pinned caller every DefenseClaw MicroVM image
+// carries (image.microVMResolverPath).
+const localhostResolverPath = "/usr/local/lib/defenseclaw/localhost-resolver"
+
+// verifyArgv is the workload check's command for the files of want;
+// resolver adds the MicroVM localhost result.
+func verifyArgv(want verifyRecord, resolver bool) []string {
 	checkName := "defenseclaw-verify"
-	if microVM {
+	if resolver {
 		checkName += "-vm"
 	}
 	argv := []string{"/usr/bin/env", "-i", "PATH=/usr/bin:/bin", "HOME=" + connector.SandboxHomeDir,
@@ -168,8 +173,14 @@ type workloadFacts struct {
 	LocalhostAnswers  []string
 	LocalhostOK       bool
 	LocalhostReported bool
-	// DirectResolverOK is set only by a separate exec of the pinned caller.
-	DirectResolverOK bool
+	// DirectResolverOK is set only by a separate exec of the pinned caller,
+	// and DirectResolverRefusal to the reason that caller refused with.
+	DirectResolverOK      bool
+	DirectResolverRefusal string
+	// ResolverExempt marks a MicroVM whose record is from before the guest
+	// resolver check (verifyRecord.LocalhostResolver): its create passed
+	// the hook-fire MicroVM verdict of DefenseClaw 1.0.7 and earlier.
+	ResolverExempt bool
 	// seen holds the tags of the single-valued lines read.
 	seen map[string]bool
 	// End is set when the answer was complete.
@@ -401,12 +412,12 @@ func workloadProblems(want verifyRecord, got workloadFacts, d openshell.Driver, 
 	if !d.SandboxLimits {
 		out = append(out, sharedLimitProblems(got, d, limits)...)
 	}
-	if d.Name == openshell.DriverVM {
+	if d.Name == openshell.DriverVM && !got.ResolverExempt {
 		if problem := microVMResolverProblem(got); problem != "" {
 			out = append(out, problem)
 		}
 		if !got.DirectResolverOK {
-			out = append(out, "the MicroVM could not verify localhost with its resolver caller")
+			out = append(out, directResolverProblem(got.DirectResolverRefusal))
 		}
 	}
 	for _, w := range want.Files {
@@ -437,38 +448,76 @@ func workloadProblems(want verifyRecord, got workloadFacts, d openshell.Driver, 
 	return out
 }
 
-// microVMResolverProblem judges the guest's own bounded libc result. The
-// build checked the completed image, while this check also sees guest init.
+// microVMResolverProblem judges what the pinned caller printed when the
+// image's shell ran it. The shell is the image's, so this result alone
+// admits nothing; the direct exec (directResolverOK) must pass too.
 func microVMResolverProblem(got workloadFacts) string {
 	if !got.LocalhostReported || !got.LocalhostOK || len(got.LocalhostAnswers) == 0 {
 		return "the MicroVM could not resolve localhost to its loopback ingress"
 	}
-	for _, line := range got.LocalhostAnswers {
-		fields := strings.Fields(line)
-		if len(fields) < 2 || len(fields) > 3 || (fields[0] != "127.0.0.1" && fields[0] != "::1") ||
-			(fields[1] != "STREAM" && fields[1] != "DGRAM" && fields[1] != "RAW") {
-			return "the MicroVM resolver did not return only its loopback ingress for localhost"
-		}
+	if !resolverAnswerOK(got.LocalhostAnswers) {
+		return "the MicroVM resolver did not return only its loopback ingress for localhost"
 	}
 	return ""
 }
 
+// resolverAnswerOK judges the lines of the pinned caller
+// (image/testdata/localhost-resolver.c): one line per distinct answer of
+// the unspec, inet and inet6 queries in that order, each 127.0.0.1 or ::1,
+// at least one unspec answer, and "loopback-only" last.
+func resolverAnswerOK(lines []string) bool {
+	if len(lines) < 2 || lines[len(lines)-1] != "loopback-only" {
+		return false
+	}
+	rank := map[string]int{"unspec 127.0.0.1": 0, "unspec ::1": 0, "inet 127.0.0.1": 1, "inet6 ::1": 2}
+	seen := map[string]bool{}
+	last, unspec := 0, false
+	for _, line := range lines[:len(lines)-1] {
+		r, ok := rank[line]
+		if !ok || seen[line] || r < last {
+			return false
+		}
+		seen[line], last = true, r
+		unspec = unspec || r == 0
+	}
+	return unspec
+}
+
 // directResolverOK judges the output of the pinned caller invoked directly
-// as the sandbox workload. The caller prints one numeric address per line.
+// as the sandbox workload (resolverAnswerOK, newline-terminated).
 func directResolverOK(out []byte) bool {
 	if len(out) == 0 || len(out) > 4096 || out[len(out)-1] != '\n' {
 		return false
 	}
+	return resolverAnswerOK(strings.Split(strings.TrimSuffix(string(out), "\n"), "\n"))
+}
+
+// directResolverRefusal is the reason the pinned caller refused with
+// ("refused <reason>" last), or "".
+func directResolverRefusal(out []byte) string {
 	lines := strings.Split(strings.TrimSuffix(string(out), "\n"), "\n")
-	if len(lines) > 64 {
-		return false
+	reason, ok := strings.CutPrefix(lines[len(lines)-1], "refused ")
+	if !ok || len(out) > 4096 {
+		return ""
 	}
-	for _, line := range lines {
-		if line != "127.0.0.1 STREAM" && line != "::1 STREAM" {
-			return false
-		}
+	switch reason {
+	case "preload", "nonloopback", "noanswer", "family":
+		return reason
 	}
-	return true
+	return ""
+}
+
+// directResolverProblem says why the direct resolver check failed.
+func directResolverProblem(refusal string) string {
+	switch refusal {
+	case "preload":
+		return "the MicroVM image loads code into every program ahead of libc (/etc/ld.so.preload), so DefenseClaw cannot verify what its programs resolve localhost to"
+	case "nonloopback", "family":
+		return "the MicroVM resolver did not return only its loopback ingress for localhost"
+	case "noanswer":
+		return "the MicroVM could not resolve localhost to its loopback ingress"
+	}
+	return "the MicroVM could not verify localhost with its resolver caller"
 }
 
 // verifyWorkload runs the workload check in sandbox name and returns what
@@ -479,7 +528,10 @@ func directResolverOK(out []byte) bool {
 // the extra environment the create passed (nil at a start); a check cut
 // short names the shell setting in it that most likely did that.
 func (m *Manager) verifyWorkload(ctx context.Context, gw *Gateway, name string, want verifyRecord, eff *packs.Effective, outcome string, env map[string]string) (workloadFacts, error) {
-	res, err := m.ownExec(ctx, gw, name, verifyArgv(want, gw.Driver.Name == openshell.DriverVM), openshell.ExecOptions{
+	// A MicroVM record from before the guest resolver check keeps the check
+	// it was created under (verifyRecord.LocalhostResolver).
+	resolverCheck := gw.Driver.Name == openshell.DriverVM && want.LocalhostResolver
+	res, err := m.ownExec(ctx, gw, name, verifyArgv(want, resolverCheck), openshell.ExecOptions{
 		Timeout: verifyTimeout, Idempotent: true, MaxOutputBytes: verifyMaxOutput,
 	})
 	if err != nil {
@@ -496,11 +548,12 @@ func (m *Manager) verifyWorkload(ctx context.Context, gw *Gateway, name string, 
 	case res.ExitCode != 0:
 		problems = []string{fmt.Sprintf("the check exited with status %d", res.ExitCode)}
 	default:
-		if gw.Driver.Name == openshell.DriverVM {
+		facts.ResolverExempt = gw.Driver.Name == openshell.DriverVM && !resolverCheck
+		if resolverCheck {
 			// Execute the pinned caller directly. The image's env and shell can
 			// alter their own output, so their localhost lines are insufficient.
 			resolver, resolverErr := m.ownExec(ctx, gw, name,
-				[]string{"/usr/local/lib/defenseclaw/localhost-resolver"}, openshell.ExecOptions{
+				[]string{localhostResolverPath}, openshell.ExecOptions{
 					Timeout: verifyTimeout, Attempts: 1, MaxOutputBytes: 4096, NoSandboxTimeout: true,
 				})
 			if resolverErr != nil {
@@ -508,6 +561,9 @@ func (m *Manager) verifyWorkload(ctx context.Context, gw *Gateway, name string, 
 				return workloadFacts{}, upstream("check the resolver of sandbox "+name, resolverErr)
 			}
 			facts.DirectResolverOK = !resolver.Truncated && resolver.ExitCode == 0 && directResolverOK(resolver.Stdout)
+			if !resolver.Truncated {
+				facts.DirectResolverRefusal = directResolverRefusal(resolver.Stdout)
+			}
 		}
 		problems = workloadProblems(want, facts, gw.Driver, adminLimits(eff.MaxResources()))
 		if len(problems) == 1 && problems[0] == cutShortProblem {

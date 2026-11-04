@@ -307,11 +307,11 @@ If your organization re-signs `openshell-driver-vm` with its own Developer ID an
 
 ### `localhost` does not resolve in a MicroVM
 
-**You see:** an image build reports that `localhost` does not resolve to `127.0.0.1`, a sandbox fails its workload check before a session, or a harness reports that it cannot resolve `localhost`.
+**You see:** an image build reports that `localhost` does not resolve only to loopback, a sandbox fails its workload check before a session, or a harness reports that it cannot resolve `localhost`.
 
-**Cause:** OpenShell 0.1.6 fills a missing or empty hosts file at guest startup but preserves a nonempty file supplied by a custom image. That file must let the image and guest resolve `localhost` to `127.0.0.1`.
+**Cause:** OpenShell 0.1.6 fills a missing or empty hosts file at guest startup but preserves a nonempty file supplied by a custom image. That file must let the image and guest resolve `localhost` only to `127.0.0.1`, `::1`, or both. An image whose `/etc/ld.so.preload` names a library is refused too.
 
-**Fix:** update the custom base so its hosts file is empty or supplies a working localhost mapping, then run `defenseclaw sandbox image build <harness> --force`. Delete an existing sandbox before running it again.
+**Fix:** update the custom base so its hosts file is empty or supplies a working localhost mapping, remove any `/etc/ld.so.preload`, then run `defenseclaw sandbox image build <harness> --force`. Delete an existing sandbox before running it again.
 
 **Check:** the new sandbox starts and its hooks reach DefenseClaw.
 
