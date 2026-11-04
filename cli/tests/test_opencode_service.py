@@ -66,7 +66,7 @@ def test_uninstall_restarts_the_running_background_server_and_says_so(monkeypatc
     from defenseclaw.commands import cmd_uninstall
 
     order = []
-    plan = SimpleNamespace(connectors=("opencode",))
+    plan = SimpleNamespace(connectors=("opencode",), data_dir="")
     monkeypatch.setattr(cmd_uninstall, "_dispatch_native_windows_uninstall", lambda **kwargs: False)
     monkeypatch.setattr(cmd_uninstall, "_build_plan", lambda **kwargs: plan)
     monkeypatch.setattr(cmd_uninstall, "_with_listed_sandboxes", lambda plan, stop: plan)
