@@ -15,6 +15,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 )
@@ -221,5 +222,98 @@ func TestGAP0326InProcessMembershipKeepsTheDeadline(t *testing.T) {
 		if _, err := runner(context.Background(), darwinDSMemberUtil, args); err != nil || !ran {
 			t.Fatalf("%q: ran %t, %v", args, ran, err)
 		}
+	}
+}
+
+// A native call cannot be cancelled. In a stalled directory the calls that
+// outlive their bound keep their slots, so repeated refreshes leave at most
+// cap(nativeMembershipSlots) calls outstanding; past that, checks run as the
+// cancellable dsmemberutil process, as on the merge base. Every refresh
+// fails as the merge base's does, and the native path comes back once the
+// directory answers (review 1 of r108-g326c).
+func TestGAP0326StalledDirectoryKeepsNativeCallsBounded(t *testing.T) {
+	if err := validateTrustedTool(darwinDSMemberUtil); err != nil {
+		t.Skip(err)
+	}
+	previousMember, previousSlots := openDirectoryUIDMember, nativeMembershipSlots
+	t.Cleanup(func() { openDirectoryUIDMember, nativeMembershipSlots = previousMember, previousSlots })
+	nativeMembershipSlots = make(chan struct{}, cap(previousSlots))
+	limit := int32(cap(nativeMembershipSlots))
+
+	var inFlight, most atomic.Int32
+	release := make(chan struct{})
+	stalled := true
+	var stallMu sync.Mutex
+	openDirectoryUIDMember = func(uint32, uint32) (bool, error) {
+		n := inFlight.Add(1)
+		defer inFlight.Add(-1)
+		for {
+			m := most.Load()
+			if n <= m || most.CompareAndSwap(m, n) {
+				break
+			}
+		}
+		stallMu.Lock()
+		wait := stalled
+		stallMu.Unlock()
+		if wait {
+			<-release
+		}
+		return true, nil
+	}
+	var commands atomic.Int32
+	// The dsmemberutil process of a stalled directory: it never answers and
+	// ends when its context does, as exec.CommandContext kills it.
+	tool := func(ctx context.Context, path string, args []string, _ ...outputFilter) (commandResult, error) {
+		if path != darwinDSMemberUtil || len(args) != 5 {
+			return commandResult{}, fmt.Errorf("unexpected command %s %q", path, args)
+		}
+		commands.Add(1)
+		<-ctx.Done()
+		return commandResult{}, ctx.Err()
+	}
+	ids := []string{"20"}
+	for gid := 701; gid <= 794; gid++ {
+		ids = append(ids, strconv.Itoa(gid))
+	}
+	account := &user.User{Username: "dcuser", Uid: "511", Gid: "20"}
+	refresh := func(runner commandRunner) ([]string, error) {
+		ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
+		defer cancel()
+		return platformAccountGroupIDs(ctx, runner, account, ids, nil, nil)
+	}
+
+	for i := range 6 {
+		baseGroups, baseErr := refresh(tool)
+		headGroups, headErr := refresh(inProcessMembership(tool))
+		if baseErr == nil || headErr == nil || baseGroups != nil || headGroups != nil {
+			t.Fatalf("refresh %d: base (%v, %v), head (%v, %v); want both to fail", i, baseGroups, baseErr, headGroups, headErr)
+		}
+		if n := inFlight.Load(); n > limit {
+			t.Fatalf("refresh %d left %d native calls outstanding, more than %d", i, n, limit)
+		}
+	}
+	if most.Load() > limit {
+		t.Fatalf("%d native calls were in flight at once, more than %d", most.Load(), limit)
+	}
+	t.Logf("after 6 stalled refreshes: %d native calls outstanding (limit %d), %d dsmemberutil fallbacks", inFlight.Load(), limit, commands.Load())
+
+	// The directory answers again: the stuck calls return, their slots free,
+	// and the next refresh is native again with no process.
+	stallMu.Lock()
+	stalled = false
+	stallMu.Unlock()
+	close(release)
+	deadline := time.Now().Add(5 * time.Second)
+	for (inFlight.Load() != 0 || len(nativeMembershipSlots) != 0) && time.Now().Before(deadline) {
+		time.Sleep(5 * time.Millisecond)
+	}
+	if inFlight.Load() != 0 || len(nativeMembershipSlots) != 0 {
+		t.Fatalf("after the stall: %d calls, %d slots still held", inFlight.Load(), len(nativeMembershipSlots))
+	}
+	commands.Store(0)
+	got, err := platformAccountGroupIDs(context.Background(), inProcessMembership(tool), account, ids, nil, nil)
+	if err != nil || len(got) != len(ids) || commands.Load() != 0 {
+		t.Fatalf("after the stall: %d groups, %v, %d commands; want %d, nil, 0", len(got), err, commands.Load(), len(ids))
 	}
 }

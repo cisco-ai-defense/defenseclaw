@@ -72,11 +72,21 @@ var openDirectoryUIDMember = func(uid, gid uint32) (bool, error) {
 // every other tool (id) as before.
 var accountGroupsRunner = inProcessMembership(runTrustedCommand)
 
+// nativeMembershipSlots bounds the native membership calls in flight in
+// this process. A native call cannot be cancelled: one that outlives its
+// bound keeps its slot until Open Directory answers it, so a stalled
+// directory holds at most this many threads however often the facts are
+// refreshed. 16 is the verifier's own limit (uidVerifiedGroupIDs), so one
+// refresh never waits for a slot.
+var nativeMembershipSlots = make(chan struct{}, 16)
+
 // inProcessMembership answers `dsmemberutil checkmembership -u <uid> -g
 // <gid>` with openDirectoryUIDMember, in dsmemberutil's own words, under the
 // same bound as the tool: the caller's context and defaultCommandTimeout. A
 // failed or late answer is an error, as a failed or late dsmemberutil was.
-// Every other command goes to next.
+// When every native slot is taken (calls stuck in a stalled directory, or
+// other refreshes running), the check runs as the dsmemberutil process,
+// cancellable as before, through next. Every other command goes to next.
 func inProcessMembership(next commandRunner) commandRunner {
 	return func(ctx context.Context, path string, args []string, filters ...outputFilter) (commandResult, error) {
 		uid, gid, ok := checkMembershipArgs(path, args)
@@ -86,11 +96,17 @@ func inProcessMembership(next commandRunner) commandRunner {
 		if ctx == nil {
 			ctx = context.Background()
 		}
-		ctx, cancel := context.WithTimeout(ctx, defaultCommandTimeout)
-		defer cancel()
 		if err := ctx.Err(); err != nil {
 			return commandResult{}, fmt.Errorf("unixidentity: dsmemberutil timed out: %w", err)
 		}
+		slots := nativeMembershipSlots
+		select {
+		case slots <- struct{}{}:
+		default:
+			return next(ctx, path, args, filters...)
+		}
+		ctx, cancel := context.WithTimeout(ctx, defaultCommandTimeout)
+		defer cancel()
 		type answer struct {
 			member bool
 			err    error
@@ -98,6 +114,7 @@ func inProcessMembership(next commandRunner) commandRunner {
 		check := openDirectoryUIDMember
 		done := make(chan answer, 1)
 		go func() {
+			defer func() { <-slots }()
 			member, err := check(uid, gid)
 			done <- answer{member, err}
 		}()
