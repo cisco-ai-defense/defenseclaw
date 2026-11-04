@@ -6665,3 +6665,59 @@ def test_native_privilege_reparse_and_service_dacl_contract() -> None:
 
     tree = _function_text(module, "Assert-DefenseClawManagedTreeNoReparse")
     assert "Test-DefenseClawBenignFileReparseTag -Item $item" in tree
+
+
+def test_config_only_ensure_skips_the_restart_barrier_only_after_clean_stops() -> None:
+    """cowork-1-0-8 GAP-0044: a config-only ensure (drift:config that the
+    services read only at start) runs the upgrade transaction on the installed
+    release, and spent the whole 65-second SCM failure-restart barrier with
+    nothing to drain. The barrier is skipped only when this process proved, at
+    the quiesce, that every service it stopped had run through the window and
+    stopped cleanly (exit codes 0, nothing terminated); the disable and stop
+    after the wait still run, and every other path keeps the full wait."""
+    module = read(MODULE)
+    assert "$script:ServiceFailureRestartQuiescenceSeconds = 65\n" in module
+    assert "$script:DefenseClawCleanQuiescenceBarrier = $null\n" in module
+
+    ran = _module_function(module, "Test-DefenseClawServiceRanThroughBarrier")
+    assert "$null -eq $Identity -or $null -eq $Identity.StartTime" in ran
+    assert "-ge $script:ServiceFailureRestartQuiescenceSeconds" in ran
+
+    exit_state = _module_function(module, "Get-DefenseClawServiceExitState")
+    assert "@('queryex', $Name)" in exit_state
+    assert "WIN32_EXIT_CODE" in exit_state and "SERVICE_EXIT_CODE" in exit_state
+    clean = _module_function(module, "Test-DefenseClawServiceStoppedCleanly")
+    assert "$exit.state -ceq 'STOPPED'" in clean
+    assert "$exit.win32_exit_code -eq 0" in clean
+    assert "$exit.service_exit_code -eq 0" in clean
+
+    transaction = _module_function(module, "New-DefenseClawTransaction")
+    reset = transaction.index("$script:DefenseClawCleanQuiescenceBarrier = $null")
+    identity = transaction.index("Test-DefenseClawServiceRanThroughBarrier -Identity $identity")
+    disable = transaction.index("Write-DefenseClawLifecyclePhase -Stage 'transaction quiesce disable services'")
+    stopped = transaction.index("Write-DefenseClawLifecyclePhase -Stage 'transaction services stopped'")
+    proof = transaction.index("Test-DefenseClawServiceStoppedCleanly -Name $name")
+    bound = transaction.index("$script:DefenseClawCleanQuiescenceBarrier =\n")
+    assert reset < identity < disable < stopped < proof < bound
+    assert "@($script:DefenseClawTerminatedServiceProcesses).Count -eq $terminatedBefore" in transaction
+
+    wait = _module_function(module, "Wait-DefenseClawServiceFailureRestartQuiescence")
+    assert "[switch]$CleanStopProven" in wait
+    skip = wait.index("if ($CleanStopProven) {")
+    sleep = wait.index("Start-Sleep -Milliseconds $milliseconds")
+    redisable = wait.index("Set-DefenseClawServiceStartMode -Name $name -StartMode 4")
+    restop = wait.index("Stop-DefenseClawService -Name $name")
+    assert skip < sleep < redisable < restop
+
+    barrier = _module_function(module, "Test-DefenseClawCleanQuiescenceBarrier")
+    assert "ConvertFrom-DefenseClawServiceQuiescenceTimestamp -Value $ServicesQuiescedAt" in barrier
+    assert ".Ticks -eq" in barrier
+
+    # Only the in-process install-like activation passes the proof; the
+    # rollback and recovery activation keeps the whole barrier.
+    assert module.count("-CleanStopProven:") == 1
+    install_like = _module_function(module, "Invoke-DefenseClawInstallLikeLifecycle")
+    assert (
+        "-CleanStopProven:(Test-DefenseClawCleanQuiescenceBarrier `\n"
+        "                        -ServicesQuiescedAt $activationQuiescedAt)"
+    ) in install_like

@@ -177,6 +177,13 @@ $script:TrustedInstallerSID = 'S-1-5-80-956008885-3418522649-1831038044-18532926
 $script:ServiceSDDL = 'D:P(A;;CCDCLCSWRPWPDTLOCRSDRCWDWO;;;SY)(A;;CCDCLCSWRPWPDTLOCRSDRCWDWO;;;BA)(A;;CCLCSWLORC;;;BU)'
 $script:ServiceDescription = 'Administrator-managed DefenseClaw service; standard users have query-only SCM access.'
 $script:ServiceFailureRestartQuiescenceSeconds = 65
+# GAP-0044 (cowork-1-0-8): the barrier (services_disabled_and_stopped_at, as
+# a UTC DateTime) of the transaction this process quiesced when every managed
+# service it stopped had run for the whole barrier and stopped cleanly
+# (Test-DefenseClawServiceStoppedCleanly), so no SCM failure restart can be
+# queued; $null otherwise. In-process only: a recovery in a new process never
+# has it and waits the whole barrier.
+$script:DefenseClawCleanQuiescenceBarrier = $null
 # Standalone: how long verify gives the hook guardian to activate a
 # targets.yaml the enumerator republished (it does within seconds), and how
 # recent the file must be for that wait (the gateway's catch-up window).
@@ -11910,11 +11917,102 @@ function Test-DefenseClawPathVanishedError {
     return $false
 }
 
+function Get-DefenseClawServiceExitState {
+    <#
+        GAP-0044: the SCM state and exit codes of service Name from
+        `sc.exe queryex` (state, win32_exit_code, service_exit_code), or $null
+        when the query fails or its output cannot be read.
+    #>
+    param([Parameter(Mandatory)][string]$Name)
+    Assert-DefenseClawServiceName -Name $Name
+    try {
+        $text = @(Invoke-DefenseClawNative -File $script:ScExe -Arguments @('queryex', $Name) -TimeoutSeconds 10 -Capture) -join "`n"
+    }
+    catch {
+        return $null
+    }
+    $state = [regex]::Match($text, '(?m)^\s*STATE\s*:\s*[0-9]+\s+([A-Z_]+)')
+    $win32 = [regex]::Match($text, '(?m)^\s*WIN32_EXIT_CODE\s*:\s*([0-9]+)')
+    $service = [regex]::Match($text, '(?m)^\s*SERVICE_EXIT_CODE\s*:\s*([0-9]+)')
+    if (-not ($state.Success -and $win32.Success -and $service.Success)) {
+        return $null
+    }
+    return [pscustomobject]@{
+        state = [string]$state.Groups[1].Value
+        win32_exit_code = [uint32]$win32.Groups[1].Value
+        service_exit_code = [uint32]$service.Groups[1].Value
+    }
+}
+
+function Test-DefenseClawServiceRanThroughBarrier {
+    <#
+        GAP-0044: whether Identity (Get-DefenseClawServiceProcessIdentity,
+        taken before the transaction disabled the service) is a process that
+        has run for at least the failure-restart barrier. SCM queues a failure
+        restart only when the service process ends unexpectedly (or, with the
+        non-crash failure flag, stops with an error), at most 60 seconds ahead;
+        a service that has run longer than that since its last start has no
+        restart queued from before it. No identity or no start time: $false.
+    #>
+    param([AllowNull()]$Identity)
+    if ($null -eq $Identity -or $null -eq $Identity.StartTime) {
+        return $false
+    }
+    $age = [DateTime]::UtcNow - ([DateTime]$Identity.StartTime).ToUniversalTime()
+    return $age.TotalSeconds -ge $script:ServiceFailureRestartQuiescenceSeconds
+}
+
+function Test-DefenseClawServiceStoppedCleanly {
+    <#
+        GAP-0044: whether service Name, which ran through the barrier
+        (Test-DefenseClawServiceRanThroughBarrier), is now stopped with
+        WIN32_EXIT_CODE and SERVICE_EXIT_CODE 0: it answered the stop
+        itself. A process that ended without reporting its stop (a crash, or
+        one Windows or the lifecycle ended) has exit code 1067 or another
+        error, and that is what queues an SCM failure restart.
+    #>
+    param([Parameter(Mandatory)][string]$Name)
+    $exit = Get-DefenseClawServiceExitState -Name $Name
+    return ($null -ne $exit -and
+        $exit.state -ceq 'STOPPED' -and
+        $exit.win32_exit_code -eq 0 -and
+        $exit.service_exit_code -eq 0)
+}
+
+function Test-DefenseClawCleanQuiescenceBarrier {
+    <#
+        GAP-0044: whether ServicesQuiescedAt is the barrier this process
+        proved clean when it quiesced the services (New-DefenseClawTransaction).
+    #>
+    param([Parameter(Mandatory)]$ServicesQuiescedAt)
+    if ($null -eq $script:DefenseClawCleanQuiescenceBarrier) {
+        return $false
+    }
+    try {
+        $barrier = ConvertFrom-DefenseClawServiceQuiescenceTimestamp -Value $ServicesQuiescedAt
+    }
+    catch {
+        return $false
+    }
+    return $barrier.Ticks -eq ([DateTime]$script:DefenseClawCleanQuiescenceBarrier).Ticks
+}
+
 function Wait-DefenseClawServiceFailureRestartQuiescence {
+    <#
+        Holds every managed service disabled for the canonical failure-restart
+        window from ServicesQuiescedAt (an SCM restart queued before the
+        quiesce then fires against a disabled service and drains), then
+        disables and stops them again. CleanStopProven (GAP-0044: every
+        service the quiesce stopped had run through the window and stopped
+        cleanly, so no restart can be queued) skips only the rest of the
+        wait; the disable and stop that follow it still run. A config-only
+        ensure spent the whole 65 seconds here with nothing to drain.
+    #>
     param(
         [Parameter(Mandatory)][string]$ServicesQuiescedAt,
         [Parameter(Mandatory)][string]$GatewayServiceName,
-        [Parameter(Mandatory)][string]$GuardianServiceName
+        [Parameter(Mandatory)][string]$GuardianServiceName,
+        [switch]$CleanStopProven
     )
     $quiescedAt = ConvertFrom-DefenseClawServiceQuiescenceTimestamp `
         -Value $ServicesQuiescedAt
@@ -11922,6 +12020,10 @@ function Wait-DefenseClawServiceFailureRestartQuiescence {
     $deadline = $quiescedAt.AddSeconds(
         $script:ServiceFailureRestartQuiescenceSeconds
     )
+    if ($CleanStopProven) {
+        Write-DefenseClawLifecyclePhase -Stage 'service failure restart quiescence: every service ran through the window and stopped cleanly, no restart can be queued'
+        $deadline = [DateTime]::UtcNow
+    }
     $remainingMilliseconds = [Math]::Min(
         $script:ServiceFailureRestartQuiescenceSeconds * 1000,
         [Math]::Max(
@@ -16018,6 +16120,28 @@ function New-DefenseClawTransaction {
                 -Intent $quiescingIntent `
                 -PriorDeploymentActive:$PriorDeploymentActive
         }
+        # GAP-0044: whether this quiesce can prove that no SCM failure
+        # restart is queued for any service it stops: each must run now,
+        # since before the barrier window, and stop cleanly below.
+        $script:DefenseClawCleanQuiescenceBarrier = $null
+        $cleanStop = $true
+        $terminatedBefore = @($script:DefenseClawTerminatedServiceProcesses).Count
+        $quiescedServices = [Collections.Generic.List[string]]::new()
+        foreach ($entry in $services) {
+            if (-not [bool]$entry.existed) {
+                continue
+            }
+            $quiescedServices.Add([string]$entry.name)
+            try {
+                $identity = Get-DefenseClawServiceProcessIdentity -Name ([string]$entry.name)
+            }
+            catch {
+                $identity = $null
+            }
+            if (-not (Test-DefenseClawServiceRanThroughBarrier -Identity $identity)) {
+                $cleanStop = $false
+            }
+        }
         Write-DefenseClawLifecyclePhase -Stage 'transaction quiesce disable services'
 
         # Disabled start neutralizes boot activation and any failure restart
@@ -16100,6 +16224,19 @@ function New-DefenseClawTransaction {
         }
         Write-DefenseClawLifecyclePhase -Stage 'transaction services stopped'
         $servicesQuiescedAt = [DateTime]::UtcNow.ToString('o')
+        if ($cleanStop -and
+            @($script:DefenseClawTerminatedServiceProcesses).Count -eq $terminatedBefore) {
+            foreach ($name in $quiescedServices) {
+                if (-not (Test-DefenseClawServiceStoppedCleanly -Name $name)) {
+                    $cleanStop = $false
+                    break
+                }
+            }
+            if ($cleanStop) {
+                $script:DefenseClawCleanQuiescenceBarrier =
+                    ConvertFrom-DefenseClawServiceQuiescenceTimestamp -Value $servicesQuiescedAt
+            }
+        }
         $quiescingIntent['services_disabled_and_stopped_at'] =
             $servicesQuiescedAt
         # This second durable intent is the only authority for amortizing the
@@ -41142,7 +41279,9 @@ function Invoke-DefenseClawInstallLikeLifecycle {
                 Wait-DefenseClawServiceFailureRestartQuiescence `
                     -ServicesQuiescedAt $activationQuiescedAt `
                     -GatewayServiceName $GatewayServiceName `
-                    -GuardianServiceName $GuardianServiceName
+                    -GuardianServiceName $GuardianServiceName `
+                    -CleanStopProven:(Test-DefenseClawCleanQuiescenceBarrier `
+                        -ServicesQuiescedAt $activationQuiescedAt)
             }
             # The LocalSystem broker must be live before any restricted
             # gateway path can request a credential.
