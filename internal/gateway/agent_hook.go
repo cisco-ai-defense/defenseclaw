@@ -756,6 +756,7 @@ func (a *APIServer) handleAgentHook(connectorName string) http.HandlerFunc {
 		ctx = enrichAgentHookContext(ctx, req)
 		ctx = withHookToolCallCapture(ctx, &hookToolCallCapture{})
 		ctx = withHookPanicCapture(ctx)
+		ctx = withHookJudgeFallbackNote(ctx)
 		if shouldResetToolJudgeSession(req) {
 			sessionKey := sandboxSessionStateKey(ctx, req.SessionID)
 			for _, judge := range a.hookSessionJudges(ctx) {
@@ -943,8 +944,6 @@ func (a *APIServer) handleAgentHook(connectorName string) http.HandlerFunc {
 		// per-profile evaluators (claudeCode / codex / generic) so
 		// they round-trip back to the HTTP response and onto the
 		// audit envelope without a second pass here.
-		// The judge fallback of this call, for its audit row and record (#1395).
-		ctx = withHookJudgeFallbackNote(ctx)
 		if cfg := a.decisionConfig(ctx); shellHookBoundsToolGate(connectorName, req.HookEventName, r) &&
 			(cfg == nil || !cfg.SecureClientIntegration()) {
 			ctx = withShellToolGateBound(ctx, r)
@@ -1070,6 +1069,9 @@ func (a *APIServer) handleAgentHook(connectorName string) http.HandlerFunc {
 		// local to that call) so finalizeAgentHookAnswer emits the
 		// hook_decision event + audit row under the same decision.
 		ctx = withRedactionDecision(ctx, resp.RedactionEnabled)
+		if telemetryPersistenceCtx != nil {
+			telemetryPersistenceCtx = withRedactionDecision(telemetryPersistenceCtx, resp.RedactionEnabled)
+		}
 
 		// Managed carve-out (see deferManagedHookEmit above): the directive
 		// from this event's evaluation is now on ctx, so emit the deferred
