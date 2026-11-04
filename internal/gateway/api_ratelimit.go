@@ -92,6 +92,9 @@ type perIPLimiterOptions struct {
 	schedule func(d time.Duration, f func())
 	// swept, when set, is told what each sweep evicted and kept.
 	swept func(evicted, remaining int)
+	// afterScan, when set, runs between a sweep's scan and its decision to
+	// re-arm (tests of the arm/sweep boundary).
+	afterScan func()
 }
 
 // perIPLimiterSet is the per-IP limiter map and its self-ending sweep.
@@ -136,9 +139,12 @@ func (s *perIPLimiterSet) arm() {
 	}
 }
 
-// sweep evicts idle entries and re-arms only while entries remain. An entry
-// stored after the count below arms again through arm, which waits for mu.
+// sweep evicts idle entries and re-arms only while entries remain. The scan
+// and the decision run under mu, the lock arm takes: an entry stored during
+// the scan either is counted by it or arms after the sweep has disarmed, so
+// no entry is left without a pending sweep.
 func (s *perIPLimiterSet) sweep() {
+	s.mu.Lock()
 	cutoff := s.opts.now().Add(-s.opts.idleEviction)
 	evicted, remaining := 0, 0
 	s.limiters.Range(func(k, v interface{}) bool {
@@ -150,7 +156,9 @@ func (s *perIPLimiterSet) sweep() {
 		}
 		return true
 	})
-	s.mu.Lock()
+	if s.opts.afterScan != nil {
+		s.opts.afterScan()
+	}
 	if remaining == 0 {
 		s.armed = false
 	} else {

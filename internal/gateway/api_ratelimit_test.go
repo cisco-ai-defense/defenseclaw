@@ -9,6 +9,7 @@ import (
 	"net/http/httptest"
 	"runtime"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 )
@@ -153,5 +154,93 @@ func TestPerIPRateLimiterIdleEntriesExpireWithoutRemoteTraffic(t *testing.T) {
 				t.Fatal("the sweep stays armed on an empty limiter")
 			}
 		})
+	}
+}
+
+// Review-2 race (rel-1-0-6:GAP-0550): a remote caller whose entry is stored
+// after a sweep has scanned an empty map, while that sweep still holds the
+// arm/disarm decision, must still leave a sweep pending for its entry.
+func TestPerIPRateLimiterEntryAddedDuringASweepStaysArmed(t *testing.T) {
+	var clock atomic.Int64
+	clock.Store(time.Unix(1_800_000_000, 0).UnixNano())
+	scheduled := make(chan func(), 4)
+	var afterScan atomic.Value
+	set := newPerIPLimiterSet(20, 40, perIPLimiterOptions{
+		now:      func() time.Time { return time.Unix(0, clock.Load()) },
+		schedule: func(_ time.Duration, f func()) { scheduled <- f },
+		afterScan: func() {
+			if f, ok := afterScan.Load().(func()); ok && f != nil {
+				f()
+			}
+		},
+	})
+	handler := set.middleware(limiterTestHandler())
+	if code := limiterRequest(t, handler, "192.0.2.1:4000"); code != http.StatusNoContent {
+		t.Fatalf("first request = %d", code)
+	}
+	clock.Add(int64(6 * time.Minute))
+	requestDone := make(chan int, 1)
+	afterScan.Store(func() {
+		// The old entry is gone; a new caller arrives now. Its entry is
+		// stored and its arm call waits for the sweep's decision.
+		go func() { requestDone <- limiterRequest(t, handler, "192.0.2.2:4000") }()
+		deadline := time.Now().Add(5 * time.Second)
+		for limiterEntries(set) == 0 && time.Now().Before(deadline) {
+			runtime.Gosched()
+		}
+		if limiterEntries(set) == 0 {
+			t.Error("the new caller's entry was never stored")
+		}
+	})
+	(<-scheduled)()
+	afterScan.Store(func() {})
+	select {
+	case code := <-requestDone:
+		if code != http.StatusNoContent {
+			t.Fatalf("new caller = %d", code)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("the new caller never finished")
+	}
+	set.mu.Lock()
+	armed := set.armed
+	set.mu.Unlock()
+	if entries := limiterEntries(set); !armed || len(scheduled) != 1 || entries != 1 {
+		t.Fatalf("after the sweep: armed=%v scheduled=%d entries=%d, want true/1/1", armed, len(scheduled), entries)
+	}
+}
+
+// Many remote callers racing short real-timer sweeps: once traffic stops,
+// every entry still expires and the sweep stops (run with -race).
+func TestPerIPRateLimiterConcurrentCallersAndSweepsLeaveNothingBehind(t *testing.T) {
+	set := newPerIPLimiterSet(1000, 1000, perIPLimiterOptions{
+		idleEviction:  20 * time.Millisecond,
+		sweepInterval: time.Millisecond,
+	})
+	handler := set.middleware(limiterTestHandler())
+	var wg sync.WaitGroup
+	stop := time.Now().Add(500 * time.Millisecond)
+	for g := 0; g < 8; g++ {
+		wg.Add(1)
+		go func(g int) {
+			defer wg.Done()
+			for i := 0; time.Now().Before(stop); i++ {
+				limiterRequest(t, handler, fmt.Sprintf("198.51.%d.%d:4000", g, i%250))
+				if i%50 == 0 {
+					time.Sleep(time.Millisecond)
+				}
+			}
+		}(g)
+	}
+	wg.Wait()
+	deadline := time.Now().Add(5 * time.Second)
+	for limiterEntries(set) != 0 && time.Now().Before(deadline) {
+		time.Sleep(5 * time.Millisecond)
+	}
+	set.mu.Lock()
+	armed := set.armed
+	set.mu.Unlock()
+	if n := limiterEntries(set); n != 0 || armed {
+		t.Fatalf("after traffic stopped: entries=%d armed=%v, want 0/false", n, armed)
 	}
 }
