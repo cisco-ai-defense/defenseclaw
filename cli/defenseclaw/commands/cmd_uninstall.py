@@ -995,6 +995,8 @@ def reset_cmd(skip_sandbox_teardown: bool, yes: bool, stop_sandboxes: bool = Fal
     plan = _with_listed_sandboxes(plan, stop_sandboxes)
     ux.banner("DefenseClaw Reset")
     _render_plan(plan, dry_run=False)
+    # Read before the wipe: reset deletes the Cowork state this looks for.
+    cowork_plugin = _cowork_plugin_built(plan)
 
     _refuse_running_sandboxes(plan)
     if not yes and not click.confirm(
@@ -1005,6 +1007,8 @@ def reset_cmd(skip_sandbox_teardown: bool, yes: bool, stop_sandboxes: bool = Fal
         raise SystemExit(1)
 
     _execute_plan(plan)
+    if cowork_plugin:
+        ux.warn(f"DefenseClaw cannot remove its Cowork plugin from your Claude account: {_COWORK_REMOVAL_STEP}")
     ux.ok("Reset complete. Run 'defenseclaw quickstart' to reinstall.")
 
 
