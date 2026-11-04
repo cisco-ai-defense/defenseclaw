@@ -1189,6 +1189,10 @@ func doRequest(ctx context.Context, opts Options, sp spec, failMode string, payl
 		if managedNativeDecision(opts) && opts.answeredErrorStatus != 0 {
 			return failAfterErrorStatus(opts, sp, "closed", opts.answeredErrorStatus)
 		}
+		if !opts.SecureClient && opts.answerWatch.hasPendingDecision() {
+			// A connected retry or progress report still needs a final decision.
+			return failNoAnswer(opts, sp, failMode)
+		}
 		reason := "gateway unreachable"
 		switch cause := context.Cause(ctx); {
 		case errors.Is(cause, errGatewayNoAnswer):
