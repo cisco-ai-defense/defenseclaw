@@ -407,7 +407,11 @@ func (w *answerWatchdog) claimFailureLog(opts Options, sp spec, closed bool, rea
 		return nil, false
 	}
 	if len(frame) > 0 && len(frame[0]) > 0 {
-		w.failureLog.setFallbackFrame(frame[0])
+		if own {
+			w.failureLog.replaceFallbackFrame(frame[0])
+		} else {
+			w.failureLog.setFallbackFrame(frame[0])
+		}
 	}
 	w.failureLogged = true
 	w.failureLogDone = make(chan struct{})
@@ -786,6 +790,18 @@ func (w *answerWatchdog) watch(deadline time.Time) {
 		}
 		w.exit(w.fallbackCode)
 		return
+	}
+	// If the ordinary log is still opening, the prepared marker can finish
+	// this deadline record without starting another open after exit.
+	if w.failureLog.markerEnabled && !w.failureLog.ordinaryReady() {
+		if w.fallbackBlocked {
+			w.failureLog.promoteFallbackClosed()
+		}
+		if w.failureLog.appendFallback() {
+			w.failureLog.close()
+			w.exit(w.fallbackCode)
+			return
+		}
 	}
 	logged := make(chan struct{})
 	logFailure := w.logFailure
