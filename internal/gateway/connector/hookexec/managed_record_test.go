@@ -228,15 +228,18 @@ func TestManagedSentinelAndMissingHomeStayClosedWithBoundaryRecord(t *testing.T)
 	}
 }
 
-// An oversized payload is a deterministic bypass under an open fail mode, so
-// a managed hook blocks it and records the boundary; an unmanaged hook keeps
-// following its fail mode and writes no platform record.
-func TestOversizedPayloadManagedForcesClosed(t *testing.T) {
+// A Secure Client hook under a closed fail mode blocks an oversized payload
+// and records the boundary; an unmanaged hook under an open fail mode keeps
+// following it and writes no platform record.
+func TestOversizedPayloadManagedClosedModeBlocks(t *testing.T) {
 	for _, managedHook := range []bool{true, false} {
 		t.Run(map[bool]string{true: "managed", false: "unmanaged"}[managedHook], func(t *testing.T) {
 			records := captureManagedHookDecisions(t)
 			r := run(t, "codex", ok(`{"action":"allow"}`), func(opts *Options) {
 				opts.FailMode = "open"
+				if managedHook {
+					opts.FailMode = "closed"
+				}
 				opts.MaxBody = 4
 				opts.ManagedEnterprise = managedHook
 				opts.SecureClient = managedHook
@@ -512,7 +515,8 @@ func TestManagedFailurePathsWriteOnlyTheFixedBlockSentence(t *testing.T) {
 		{name: "auth/open", rt: &stubRT{status: 401}, failMode: "open"},
 		{name: "auth/closed", rt: &stubRT{status: 403}, failMode: "closed", blocked: true},
 		{name: "invalid-json/open", rt: ok("not json"), failMode: "open"},
-		{name: "oversized", rt: ok(`{"action":"allow"}`), failMode: "open", stdin: strings.Repeat("x", int(defaultMaxBody)+1), blocked: true},
+		{name: "oversized/open", rt: ok(`{"action":"allow"}`), failMode: "open", stdin: strings.Repeat("x", int(defaultMaxBody)+1)},
+		{name: "oversized/closed", rt: ok(`{"action":"allow"}`), failMode: "closed", stdin: strings.Repeat("x", int(defaultMaxBody)+1), blocked: true},
 	} {
 		for _, managedHook := range []bool{true, false} {
 			t.Run(tc.name+"/managed="+map[bool]string{true: "1", false: "0"}[managedHook], func(t *testing.T) {

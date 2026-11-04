@@ -193,9 +193,10 @@ func TestCodexFailClosedReplyLeavesOtherPathsUnchanged(t *testing.T) {
 	})
 }
 
-// An oversized Secure Client Codex payload is denied with its bound event's
-// own block: a top-level decision does not deny a PermissionRequest or
-// PreToolUse.
+// An oversized Secure Client Codex payload under a closed fail mode is denied
+// with its bound event's own block: a top-level decision does not deny a
+// PermissionRequest or PreToolUse. (Under the open fail mode it is allowed;
+// see TestSecureClientAvailabilityGapsFollowFailMode.)
 func TestManagedCodexOversizedAnswersWithCodexBlockForEvent(t *testing.T) {
 	big := strings.Repeat("x", 64)
 	for _, tc := range []struct {
@@ -220,7 +221,7 @@ func TestManagedCodexOversizedAnswersWithCodexBlockForEvent(t *testing.T) {
 				o.Event = tc.event
 				o.ManagedEnterprise = true
 				o.SecureClient = true
-				o.FailMode = "open"
+				o.FailMode = "closed"
 				token := "authenticated-token"
 				o.AuthenticatedManagedToken = &token
 				o.MaxBody = 32

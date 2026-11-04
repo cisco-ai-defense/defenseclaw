@@ -1209,18 +1209,19 @@ func (s *Sidecar) Run(ctx context.Context) (runErr error) {
 	// instead of exiting. Sized from the count rather than a literal so
 	// adding a worker cannot quietly overrun it again.
 	errCh := make(chan error, sidecarWorkerCount)
-	// fatalCh carries the death of a subsystem the gateway cannot protect
-	// without: the config manager, the REST API and the guardrail proxy
-	// (managed deployments only, see guardrailFailureIsFatal). The process
-	// stops so the service manager restarts it, instead of staying Running
-	// with protection off. The IPC server retries in place
-	// (runIPCWithRetry) and sends nothing.
+	// fatalCh carries the death of a subsystem the gateway cannot serve
+	// without: the REST API. The process stops so the service manager
+	// restarts it. A config manager or guardrail error is reported in health
+	// and the gateway keeps its API and hook inspection running with the
+	// last good config: a deterministic error there would otherwise become a
+	// restart loop that drops every hook to its fail mode. The IPC server
+	// retries in place (runIPCWithRetry) and sends nothing.
 	fatalCh := make(chan error, 4)
-	// A standalone gateway keeps its guardrail retry: a failed run waits for
-	// the next connector change (runGuardrailRestartable) instead of
-	// exiting into a restart loop that also drops its hook socket.
+	// A managed gateway retries its guardrail with backoff. A standalone or
+	// unmanaged gateway waits for the next connector change
+	// (runGuardrailRestartable) instead.
 	runCfg := s.currentConfig()
-	guardrailFatal := guardrailFailureIsFatal(runCfg.DeploymentMode) && !runCfg.StandaloneEnterprise()
+	retryGuardrail := managed.IsManagedEnterprise(runCfg.DeploymentMode) && !runCfg.StandaloneEnterprise()
 
 	configPath := s.currentConfig().ConfigFilePath
 	if strings.TrimSpace(configPath) == "" {
@@ -1258,7 +1259,7 @@ func (s *Sidecar) Run(ctx context.Context) (runErr error) {
 		err := s.configMgr.runWithStartupReconcile(runCtx, configStartupReady)
 		if err != nil && runCtx.Err() == nil {
 			fmt.Fprintf(os.Stderr, "[sidecar] config manager exited with error: %v\n", err)
-			fatalCh <- subsystemFailure("config", err)
+			errCh <- err
 		}
 	}()
 	if err := <-configStartupReady; err != nil {
@@ -1383,6 +1384,24 @@ func (s *Sidecar) Run(ctx context.Context) (runErr error) {
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
+		if retryGuardrail {
+			// A managed gateway has no operator to re-run setup, so it
+			// retries the guardrail with backoff: a transient sharing or
+			// access error on a token or rule pack heals once the guardian
+			// repairs it, without restarting the API.
+			runSubsystemWithRetry(
+				runCtx,
+				"guardrail",
+				true,
+				managedInspectorRetryInitial,
+				s.guardrailRestartCh,
+				errCh,
+				func(ctx context.Context) error {
+					return s.runRestartable(ctx, "guardrail", s.guardrailRestartCh, s.runActiveGuardrail)
+				},
+			)
+			return
+		}
 		reported := false
 		s.runGuardrailRestartable(runCtx, func(err error) {
 			fmt.Fprintf(os.Stderr, "[sidecar] guardrail exited with error: %v\n", err)
@@ -1390,11 +1409,7 @@ func (s *Sidecar) Run(ctx context.Context) (runErr error) {
 				return
 			}
 			reported = true
-			if guardrailFatal {
-				fatalCh <- subsystemFailure("guardrail", err)
-			} else {
-				errCh <- err
-			}
+			errCh <- err
 		})
 	}()
 
@@ -1550,16 +1565,33 @@ func subsystemFailure(name string, err error) error {
 	return fmt.Errorf("sidecar: %s subsystem stopped: %w", name, err)
 }
 
-// guardrailFailureIsFatal reports whether the guardrail runner's death stops
-// the process. A managed deployment runs under a service manager that restarts
-// it, so exiting beats staying up with protection off. An unmanaged gateway is
-// started by the CLI with no supervisor: its guardrail runner also performs
-// connector setup, whose failures (a transient sharing or access-denied error
-// on an agent config file, an unsupported agent version) the operator fixes by
-// re-running setup. That gateway keeps its API, health reporting and audit
-// running and reports the guardrail error in health, as it did before.
-func guardrailFailureIsFatal(deploymentMode string) bool {
-	return managed.IsManagedEnterprise(deploymentMode)
+// runSubsystemWithRetry runs a subsystem until ctx is done. Every error is
+// logged. With retry it runs again after an exponential backoff starting at
+// delay, or at once when restart is signalled (a config reload); a recovered
+// error is not reported on errCh, so a clean stop still exits cleanly.
+// Without retry the error is reported on errCh and the subsystem stops.
+func runSubsystemWithRetry(ctx context.Context, name string, retry bool, delay time.Duration, restart <-chan struct{}, errCh chan<- error, run func(context.Context) error) {
+	for {
+		err := run(ctx)
+		if err == nil || ctx.Err() != nil {
+			return
+		}
+		fmt.Fprintf(os.Stderr, "[sidecar] %s exited with error: %v\n", name, err)
+		if !retry {
+			select {
+			case errCh <- err:
+			default:
+			}
+			return
+		}
+		select {
+		case <-ctx.Done():
+			return
+		case <-restart:
+		case <-time.After(delay):
+		}
+		delay = nextManagedInspectorRetry(delay)
+	}
 }
 
 // waitForStopOrSubsystemFailure blocks until ctx is done, returning nil, or
