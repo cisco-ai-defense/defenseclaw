@@ -46,25 +46,37 @@ func (e *UntrustedPrincipalError) Error() string { return e.text }
 // ValidateTrustedConfigPath validates config.yaml. Drift on its owner or DACL
 // is repaired first when the caller can (a LocalSystem service or an elevated
 // administrator; never the gateway, whose token cannot re-ACL it), and the
-// strict check runs again. What survives is handled by
-// ValidateTrustedPolicyFilePath: accepted and logged on Secure Client,
-// refused with the strict verdict on standalone (GAP-0561). Structural
-// failures stay fatal.
+// strict check runs again. On standalone a repair is attempted only when the
+// bytes are the ones this process last read while the file was trusted, and
+// they must still be after it (trust_content.go): a repair restores the
+// descriptor, not the content an untrusted writer may have changed. What
+// survives is handled by ValidateTrustedPolicyFilePath: accepted and logged on
+// Secure Client, refused with the strict verdict on standalone (GAP-0561).
+// Structural failures stay fatal.
 func ValidateTrustedConfigPath(path string) error {
 	const label = "managed config"
+	needsProof := StandaloneRepairNeedsProvenance()
 	err := ValidateTrustedFilePath(path, label)
-	if err == nil || trustStrictAncestors() {
+	if err == nil {
+		if needsProof {
+			RecordTrustedContent(path)
+		}
+		return nil
+	}
+	if trustStrictAncestors() {
 		return err
 	}
 	// Only the service-pinned managed config is ever re-stamped, never an
 	// arbitrary path a caller passed in.
 	if pinned := strings.TrimSpace(os.Getenv(ConfigPathEnv)); pinned != "" &&
-		strings.EqualFold(filepath.Clean(pinned), filepath.Clean(path)) {
+		strings.EqualFold(filepath.Clean(pinned), filepath.Clean(path)) &&
+		(!needsProof || TrustedContentUnchanged(path)) {
 		result, ensureErr := windowsConfigEnsureCanonical(path, ObjectConfigFile, CanonicalOptions{})
 		if ensureErr != nil {
 			return errors.Join(err, ensureErr)
 		}
-		if result.Outcome == CanonicalRepaired && ValidateTrustedFilePath(path, label) == nil {
+		if result.Outcome == CanonicalRepaired && ValidateTrustedFilePath(path, label) == nil &&
+			(!needsProof || TrustedContentUnchanged(path)) {
 			return nil
 		}
 	}
@@ -343,7 +355,9 @@ func ValidateTrustedFilePathTolerant(path, label string) error {
 // MarkerBoundary finding naming the path and principal. The caller keeps
 // running and loading the file; a privileged component re-stamps the ACL and
 // Install, Upgrade and Repair re-copy the binary. Pin TrustStrictAncestorsEnv
-// to make every verdict fatal again.
+// to make every verdict fatal again. A standalone process gets every verdict
+// fatal too (windowsTrustScope.driftTolerated, GAP-0561); no caller repairs
+// an executable before this check, so there is no repaired-content case.
 func ValidateExecutableFilePath(path, label string) error {
 	leaf := windowsTrustLeaf.tolerant()
 	leaf.code = true

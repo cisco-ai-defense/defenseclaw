@@ -97,12 +97,33 @@ func TestStandaloneTrustRefusesDriftedConfigAndManifest(t *testing.T) {
 	}
 }
 
+// trustedThenDriftedConfigForTest pins the standalone profile and the
+// service config path, reads config.yaml once while it is trusted (which
+// records its content), then grants BUILTIN\Users write.
+func trustedThenDriftedConfigForTest(t *testing.T) string {
+	t.Helper()
+	path := driftedPolicyFileForTest(t, "config.yaml")
+	setTestFileDACL(t, path, testDACL(t, canonicalTestDACL), true)
+	pinTrustProfileForTest(t, true)
+	t.Setenv(ConfigPathEnv, path)
+	if err := ValidateTrustedConfigPath(path); err != nil {
+		t.Fatalf("trusted config.yaml refused: %v", err)
+	}
+	setTestFileDACL(t, path, testDACL(t, usersWriteDACL), true)
+	return path
+}
+
+func restampRepairForTest(t *testing.T) func(string) CanonicalOutcome {
+	return func(repaired string) CanonicalOutcome {
+		setTestFileDACL(t, repaired, testDACL(t, canonicalTestDACL), true)
+		return CanonicalRepaired
+	}
+}
+
 // GAP-0561: the service-pinned config.yaml gets its repair attempt first; a
 // repair that leaves the Users writer in place is refused on standalone.
 func TestStandaloneTrustRefusesConfigTheRepairCannotFix(t *testing.T) {
-	path := driftedPolicyFileForTest(t, "config.yaml")
-	pinTrustProfileForTest(t, true)
-	t.Setenv(ConfigPathEnv, path)
+	path := trustedThenDriftedConfigForTest(t)
 	calls := stubConfigRepairForTest(t, func(string) CanonicalOutcome { return CanonicalBoundary })
 	if err := ValidateTrustedConfigPath(path); err == nil {
 		t.Fatal("standalone accepted config.yaml that the repair could not fix")
@@ -112,18 +133,13 @@ func TestStandaloneTrustRefusesConfigTheRepairCannotFix(t *testing.T) {
 	}
 }
 
-// Twin: a repair that does fix the drift ends trusted and accepted on
-// standalone, because the strict check runs again after it.
+// Twin: ACL-only drift (the bytes are the ones last read while trusted) ends
+// trusted and accepted on standalone once the repair fixed the descriptor.
 func TestStandaloneTrustAcceptsConfigTheRepairFixed(t *testing.T) {
-	path := driftedPolicyFileForTest(t, "config.yaml")
-	pinTrustProfileForTest(t, true)
-	t.Setenv(ConfigPathEnv, path)
-	calls := stubConfigRepairForTest(t, func(repaired string) CanonicalOutcome {
-		setTestFileDACL(t, repaired, testDACL(t, canonicalTestDACL), true)
-		return CanonicalRepaired
-	})
+	path := trustedThenDriftedConfigForTest(t)
+	calls := stubConfigRepairForTest(t, restampRepairForTest(t))
 	if err := ValidateTrustedConfigPath(path); err != nil {
-		t.Fatalf("standalone refused config.yaml after a successful repair: %v", err)
+		t.Fatalf("standalone refused config.yaml after an ACL-only repair: %v", err)
 	}
 	if *calls != 1 {
 		t.Fatalf("repair calls = %d, want 1", *calls)
@@ -133,12 +149,71 @@ func TestStandaloneTrustAcceptsConfigTheRepairFixed(t *testing.T) {
 	}
 }
 
+// GAP-0561 review 1: a user who edited config.yaml through the write grant
+// gains nothing from a repair. The edited bytes are refused with the strict
+// verdict, and the file is left unrepaired so every other process refuses
+// it too.
+func TestStandaloneTrustRefusesConfigEditedBeforeRepair(t *testing.T) {
+	path := trustedThenDriftedConfigForTest(t)
+	if err := os.WriteFile(path, []byte("edited"), 0o600); err != nil {
+		t.Fatalf("edit config.yaml: %v", err)
+	}
+	calls := stubConfigRepairForTest(t, restampRepairForTest(t))
+	strict := ValidateTrustedFilePath(path, "managed config")
+	err := ValidateTrustedConfigPath(path)
+	if err == nil {
+		t.Fatal("standalone accepted config.yaml a user edited before the repair")
+	}
+	if strict == nil || err.Error() != strict.Error() {
+		t.Fatalf("standalone error = %v, want the strict verdict %v", err, strict)
+	}
+	if *calls != 0 {
+		t.Fatalf("repair calls = %d, want none for unproven content", *calls)
+	}
+	if ValidateTrustedFilePath(path, "managed config") == nil {
+		t.Fatal("the edited config.yaml was made to look trusted")
+	}
+}
+
+// GAP-0561 review 1: bytes that change during the repair are refused too.
+func TestStandaloneTrustRefusesConfigEditedDuringRepair(t *testing.T) {
+	path := trustedThenDriftedConfigForTest(t)
+	stubConfigRepairForTest(t, func(repaired string) CanonicalOutcome {
+		if err := os.WriteFile(repaired, []byte("edited"), 0o600); err != nil {
+			t.Fatalf("edit config.yaml: %v", err)
+		}
+		setTestFileDACL(t, repaired, testDACL(t, canonicalTestDACL), true)
+		return CanonicalRepaired
+	})
+	if err := ValidateTrustedConfigPath(path); err == nil {
+		t.Fatal("standalone accepted config.yaml whose bytes changed during the repair")
+	}
+}
+
+// A process that never read config.yaml while it was trusted has no
+// provenance for its bytes, so a drifted file is refused without a repair.
+func TestStandaloneTrustRefusesDriftedConfigWithoutProvenance(t *testing.T) {
+	path := driftedPolicyFileForTest(t, "config.yaml")
+	pinTrustProfileForTest(t, true)
+	t.Setenv(ConfigPathEnv, path)
+	calls := stubConfigRepairForTest(t, restampRepairForTest(t))
+	if err := ValidateTrustedConfigPath(path); err == nil {
+		t.Fatal("standalone accepted drifted config.yaml with no trusted read")
+	}
+	if *calls != 0 {
+		t.Fatalf("repair calls = %d, want none", *calls)
+	}
+}
+
 // Twin: Secure Client keeps the 26.8.4 behaviour, accepting the drift the
-// repair could not fix and logging it.
+// repair could not fix and logging it, edited bytes included.
 func TestSecureClientTrustStillAcceptsAndLogsDrift(t *testing.T) {
 	path := driftedPolicyFileForTest(t, "config.yaml")
 	pinTrustProfileForTest(t, false)
 	t.Setenv(ConfigPathEnv, path)
+	if err := os.WriteFile(path, []byte("edited"), 0o600); err != nil {
+		t.Fatalf("edit config.yaml: %v", err)
+	}
 	calls := stubConfigRepairForTest(t, func(string) CanonicalOutcome { return CanonicalBoundary })
 	reports := captureTrustDrift(t)
 	if err := ValidateTrustedConfigPath(path); err != nil {

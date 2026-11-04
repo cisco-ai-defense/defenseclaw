@@ -24,6 +24,9 @@ func TestWindowsManagedHooksTrustStandaloneDrift(t *testing.T) {
 	originalEnsure := windowsManagedHooksEnsureCanonical
 	t.Cleanup(func() { windowsManagedHooksEnsureCanonical = originalEnsure })
 
+	// fixtures returns a lifecycle file read once while trusted (which
+	// records its content) and a state folder, both then granted to
+	// Everyone.
 	fixtures := func(t *testing.T) (file, dir string) {
 		t.Helper()
 		dir = filepath.Join(t.TempDir(), "state")
@@ -35,9 +38,17 @@ func TestWindowsManagedHooksTrustStandaloneDrift(t *testing.T) {
 		if err := os.WriteFile(file, []byte("{}"), 0o600); err != nil {
 			t.Fatal(err)
 		}
+		ownerOnlyDACLForTest(t, file)
+		if err := validateWindowsManagedHooksTrustedFile(file, managed.ObjectAdminFile, "lifecycle journal"); err != nil {
+			t.Fatalf("trusted lifecycle journal refused: %v", err)
+		}
 		grantUntrustedWriterForTest(t, file)
 		grantUntrustedWriterForTest(t, dir)
 		return file, dir
+	}
+	restamp := func(path string, kind managed.ObjectKind, _ managed.CanonicalOptions) (managed.CanonicalResult, error) {
+		ownerOnlyDACLForTest(t, path)
+		return managed.CanonicalResult{Path: path, Kind: kind, Outcome: managed.CanonicalRepaired}, nil
 	}
 
 	t.Run("unrepaired drift is refused", func(t *testing.T) {
@@ -58,17 +69,42 @@ func TestWindowsManagedHooksTrustStandaloneDrift(t *testing.T) {
 		}
 	})
 
-	t.Run("repaired drift is accepted", func(t *testing.T) {
+	t.Run("repaired ACL-only drift is accepted", func(t *testing.T) {
 		file, dir := fixtures(t)
-		windowsManagedHooksEnsureCanonical = func(path string, kind managed.ObjectKind, _ managed.CanonicalOptions) (managed.CanonicalResult, error) {
-			ownerOnlyDACLForTest(t, path)
-			return managed.CanonicalResult{Path: path, Kind: kind, Outcome: managed.CanonicalRepaired}, nil
-		}
+		windowsManagedHooksEnsureCanonical = restamp
 		if err := validateWindowsManagedHooksTrustedFile(file, managed.ObjectAdminFile, "lifecycle journal"); err != nil {
 			t.Fatalf("standalone refused a lifecycle journal the repair made trusted: %v", err)
 		}
 		if err := validateWindowsManagedHooksTrustedDir(dir, managed.ObjectStateDirectory, "state root"); err != nil {
 			t.Fatalf("standalone refused a state folder the repair made trusted: %v", err)
+		}
+	})
+
+	// GAP-0561 review 1: a journal edited through the write grant is refused
+	// and left unrepaired, as is the teardown journal.
+	t.Run("edited before repair is refused", func(t *testing.T) {
+		file, _ := fixtures(t)
+		if err := os.WriteFile(file, []byte(`{"edited":true}`), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		calls := 0
+		windowsManagedHooksEnsureCanonical = func(path string, kind managed.ObjectKind, opts managed.CanonicalOptions) (managed.CanonicalResult, error) {
+			calls++
+			return restamp(path, kind, opts)
+		}
+		if err := validateWindowsManagedHooksTrustedFile(file, managed.ObjectAdminFile, "lifecycle journal"); err == nil {
+			t.Fatal("standalone accepted a lifecycle journal a user edited before the repair")
+		}
+		teardown := filepath.Join(t.TempDir(), windowsManagedHooksTeardownJournalFile)
+		if err := os.WriteFile(teardown, []byte("{}"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		grantUntrustedWriterForTest(t, teardown)
+		if err := validateWindowsManagedHooksTeardownJournalFile(teardown); err == nil {
+			t.Fatal("standalone accepted a drifted teardown journal it never read while trusted")
+		}
+		if calls != 0 {
+			t.Fatalf("repair calls = %d, want none for unproven content", calls)
 		}
 	})
 }

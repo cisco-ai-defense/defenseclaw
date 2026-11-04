@@ -95,6 +95,13 @@ var windowsStandaloneTrustScope = func() bool {
 	return StandaloneTrustScope() || WindowsStandaloneInstallExecutable()
 }
 
+// StandaloneRepairNeedsProvenance reports whether a file repaired after an
+// untrusted writer must also prove its content (TrustedContentUnchanged)
+// before it is used: true in the standalone scope (see trust_content.go).
+func StandaloneRepairNeedsProvenance() bool {
+	return windowsStandaloneTrustScope()
+}
+
 // WindowsStandaloneTrustScope is windowsStandaloneTrustScope for drift
 // acceptances outside this package (the Codex machine requirements gate).
 func WindowsStandaloneTrustScope() bool {
