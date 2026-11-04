@@ -17,6 +17,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/defenseclaw/defenseclaw/internal/agentprobe"
 	"github.com/defenseclaw/defenseclaw/internal/enterprisehooks"
 )
 
@@ -156,5 +157,64 @@ func TestGAP0540VerifierRecordsHermesIdentity(t *testing.T) {
 		if !strings.Contains(message, field) {
 			t.Fatalf("verdict has no %q identity field: %s", field, message)
 		}
+	}
+}
+
+// The version child remains live during Verify while its apply worker is
+// running. A shell launcher adds PWD and SHLVL before executing Python.
+func TestGAP0540LiveWorkerShellVersionSettlesBeforeVerify(t *testing.T) {
+	h, home, uid := versionProbeTestHost(t)
+	scratch, err := os.MkdirTemp(t.TempDir(), "dc-agent-probe-")
+	if err != nil {
+		t.Fatal(err)
+	}
+	const gateway = "/opt/defenseclaw/bin/defenseclaw-gateway"
+	gap0540WriteProcess(t, h, 9301, 1, 0, 100, gateway,
+		[]string{gateway, "enterprise", "hooks", "enumerate", "--manifest", "/etc/defenseclaw/hook-guardian/targets.yaml", "--interval", "5m"}, nil)
+	gap0540WriteProcess(t, h, 9302, 9301, uid, 200, gateway,
+		[]string{gateway, "enterprise", "hooks", "apply-target"}, nil)
+	argv := []string{"/opt/hermes/bin/python3", "-I", "-c", "from hermes_cli.main import main\nmain()", "--version"}
+	env := []string{
+		"HOME=" + home, "PATH=/opt/hermes/bin:/usr/bin:/bin", "LANG=C", "NO_COLOR=1", "TERM=dumb", "CI=1",
+		"HERMES_HOME=" + scratch, "TMPDIR=" + scratch, agentprobe.EnvName + "=" + agentprobe.Hermes,
+		"PWD=" + home, "SHLVL=0",
+	}
+	gap0540WriteProcess(t, h, 9303, 9302, uid, 300, "/opt/hermes/bin/python3", argv, env)
+	previous := waitManagedHermesVersion
+	called := false
+	stop := make(chan struct{})
+	done := make(chan error, 1)
+	waitManagedHermesVersion = func(procRoot string, pid int, accountHome string, maxWait time.Duration) bool {
+		if pid != 9303 {
+			t.Fatalf("unexpected version process pid %d", pid)
+		}
+		called = true
+		go func() {
+			select {
+			case <-time.After(time.Second):
+				done <- os.RemoveAll(h.env.P("/proc/9303"))
+			case <-stop:
+				done <- nil
+			}
+		}()
+		return agentprobe.WaitManagedHermesVersion(procRoot, pid, accountHome, maxWait)
+	}
+	t.Cleanup(func() { waitManagedHermesVersion = previous })
+	result := h.run(Options{Action: ActionVerify})
+	close(stop)
+	if !called {
+		t.Fatal("live version process was not checked")
+	}
+	if err := <-done; err != nil {
+		t.Fatal(err)
+	}
+	waitManagedHermesVersion = previous
+	if got := messagesOf(result.Errors, codeManagedLaunchUninspected); got != "" {
+		t.Fatalf("product version process was reported after it settled: %s", got)
+	}
+	gap0540WriteProcess(t, h, 9304, 1, uid, 400, "/opt/hermes/bin/python3", argv, env)
+	result = h.run(Options{Action: ActionVerify})
+	if got := messagesOf(result.Errors, codeManagedLaunchUninspected); got == "" {
+		t.Fatal("same-command user process was omitted from verification")
 	}
 }

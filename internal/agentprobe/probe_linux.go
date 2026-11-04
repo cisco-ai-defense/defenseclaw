@@ -166,7 +166,7 @@ func probeEnvironment(root string, p process, accountHome string) bool {
 			return false
 		}
 		switch string(key) {
-		case "HOME", "PATH", "LANG", "NO_COLOR", "TERM", "CI", "HERMES_HOME", "TMPDIR", EnvName:
+		case "HOME", "PATH", "LANG", "NO_COLOR", "TERM", "CI", "HERMES_HOME", "TMPDIR", EnvName, "PWD", "SHLVL":
 			if _, duplicate := values[string(key)]; duplicate {
 				return false
 			}
@@ -175,8 +175,19 @@ func probeEnvironment(root string, p process, accountHome string) bool {
 			return false
 		}
 	}
+	for _, key := range []string{"HOME", "PATH", "LANG", "NO_COLOR", "TERM", "CI", "HERMES_HOME", "TMPDIR", EnvName} {
+		if _, present := values[key]; !present {
+			return false
+		}
+	}
+	if pwd, present := values["PWD"]; present && pwd != accountHome {
+		return false
+	}
+	if level, present := values["SHLVL"]; present && level != "0" && level != "1" {
+		return false
+	}
 	home := values["HERMES_HOME"]
-	if len(values) != 9 || values[EnvName] != Hermes || values["HOME"] != accountHome ||
+	if values[EnvName] != Hermes || values["HOME"] != accountHome ||
 		values["LANG"] != "C" || values["NO_COLOR"] != "1" || values["TERM"] != "dumb" || values["CI"] != "1" ||
 		home == "" || home != values["TMPDIR"] || !filepath.IsAbs(home) ||
 		filepath.Clean(home) != home || !strings.HasPrefix(filepath.Base(home), "dc-agent-probe-") {
