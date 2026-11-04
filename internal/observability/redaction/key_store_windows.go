@@ -856,6 +856,12 @@ func hardenExistingWindowsCorrelationKey(path string, pinned windows.Handle, set
 	if err != nil {
 		return keyStoreError(KeyStoreErrorUnavailable)
 	}
+	flags := uint32(windows.FILE_ATTRIBUTE_NORMAL | windows.FILE_FLAG_OPEN_REPARSE_POINT)
+	if setOwner {
+		// The owner repair runs under SeRestorePrivilege, which grants
+		// WRITE_DAC and WRITE_OWNER past the DACL only to a backup-semantics open.
+		flags |= windows.FILE_FLAG_BACKUP_SEMANTICS
+	}
 	hardening, err := openWindowsCorrelationHandle(func() (windows.Handle, error) {
 		return windows.CreateFile(
 			name,
@@ -863,7 +869,7 @@ func hardenExistingWindowsCorrelationKey(path string, pinned windows.Handle, set
 			windows.FILE_SHARE_READ,
 			nil,
 			windows.OPEN_EXISTING,
-			windows.FILE_ATTRIBUTE_NORMAL|windows.FILE_FLAG_OPEN_REPARSE_POINT,
+			flags,
 			0,
 		)
 	}, true)

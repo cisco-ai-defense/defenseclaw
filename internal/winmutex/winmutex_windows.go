@@ -104,7 +104,15 @@ func Acquire(name string, attrs *windows.SecurityAttributes, timeout time.Durati
 			acquired <- acquireResult{err: err}
 			return
 		}
-		event, err := windows.WaitForSingleObject(handle, uint32(timeout/time.Millisecond))
+		// A bounded wait: a non-positive timeout polls once, and a huge one
+		// stops short of INFINITE instead of wrapping.
+		wait := uint32(windows.INFINITE - 1)
+		if timeout <= 0 {
+			wait = 0
+		} else if timeout < time.Duration(wait)*time.Millisecond {
+			wait = uint32(timeout / time.Millisecond)
+		}
+		event, err := windows.WaitForSingleObject(handle, wait)
 		switch {
 		case err != nil:
 			_ = windows.CloseHandle(handle)

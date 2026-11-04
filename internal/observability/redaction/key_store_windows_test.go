@@ -1174,6 +1174,7 @@ func TestWindowsCorrelationKeyAcceptsReadACLButRejectsWriteACL(t *testing.T) {
 // key still loads (privileged retry, or an attribute-only hold on the
 // ancestor).
 func TestWindowsCorrelationKeyToleratesAncestorThatDeniesTraverse(t *testing.T) {
+	t.Setenv(managed.TrustStrictAncestorsEnv, "")
 	root := t.TempDir()
 	ancestor := filepath.Join(root, "ancestor")
 	dataDir := filepath.Join(ancestor, "data")

@@ -21,6 +21,7 @@ const (
 	managedHookTokenEmptyReason             = "managed hook token empty"
 	managedHookOversizedReason              = "stdin body exceeded cap"
 	managedHookRecordEventMaxBytes          = 128
+	managedHookRecordReasonMaxBytes         = 512
 	managedHookDecisionRecordDefaultSource  = "DefenseClawGateway"
 	managedHookDecisionRecordComponentValue = "hook"
 )
@@ -48,7 +49,9 @@ func recordManagedHookDecision(opts Options, sp spec, reason, category, failMode
 		"connector": sp.connector,
 		"hook":      sp.hookName,
 		"event":     boundedManagedRecordField(opts.Event, managedHookRecordEventMaxBytes),
-		"reason":    reason,
+		// Bounded: a Codex binding error quotes the stdin hook_event_name.
+		// The marker above is chosen from the full reason.
+		"reason":    boundedManagedRecordField(reason, managedHookRecordReasonMaxBytes),
 		"category":  category,
 		"fail_mode": failMode,
 		"decision":  decision,
