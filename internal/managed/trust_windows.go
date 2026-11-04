@@ -59,7 +59,7 @@ func ValidateTrustedConfigPath(path string) error {
 	err := ValidateTrustedFilePath(path, label)
 	if err == nil {
 		if needsProof {
-			RecordTrustedContent(path)
+			return AcceptTrustedContent(path)
 		}
 		return nil
 	}
@@ -75,10 +75,17 @@ func ValidateTrustedConfigPath(path string) error {
 		if ensureErr != nil {
 			return errors.Join(err, ensureErr)
 		}
-		if result.Outcome == CanonicalRepaired && ValidateTrustedFilePath(path, label) == nil &&
-			(!needsProof || TrustedContentUnchanged(path)) {
-			return nil
+		if result.Outcome == CanonicalRepaired && ValidateTrustedFilePath(path, label) == nil {
+			if !needsProof || TrustedContentUnchanged(path) {
+				return nil
+			}
+			// The bytes changed while the repair ran.
+			MarkContentUntrusted(path)
+			return err
 		}
+	}
+	if needsProof {
+		return err
 	}
 	return ValidateTrustedPolicyFilePath(path, label)
 }

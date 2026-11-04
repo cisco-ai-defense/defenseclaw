@@ -42,21 +42,25 @@ func validateWindowsManagedHooksTrustedFile(path string, kind managed.ObjectKind
 	err := windowsManagedHooksStrictFileCheck(path, label)
 	if err == nil {
 		if needsProof {
-			managed.RecordTrustedContent(path)
+			return managed.AcceptTrustedContent(path)
 		}
 		return nil
 	}
-	if managed.TrustStrictAncestors() {
+	if managed.TrustStrictAncestors() || (needsProof && !managed.TrustedContentUnchanged(path)) {
 		return err
-	}
-	if needsProof && !managed.TrustedContentUnchanged(path) {
-		return managed.ValidateTrustedPolicyFilePath(path, label)
 	}
 	if repaired, ensureErr := repairWindowsManagedHooksObject(path, kind); ensureErr != nil {
 		return errors.Join(err, ensureErr)
-	} else if repaired && windowsManagedHooksStrictFileCheck(path, label) == nil &&
-		(!needsProof || managed.TrustedContentUnchanged(path)) {
-		return nil
+	} else if repaired && windowsManagedHooksStrictFileCheck(path, label) == nil {
+		if !needsProof || managed.TrustedContentUnchanged(path) {
+			return nil
+		}
+		// The bytes changed while the repair ran.
+		managed.MarkContentUntrusted(path)
+		return err
+	}
+	if needsProof {
+		return err
 	}
 	return managed.ValidateTrustedPolicyFilePath(path, label)
 }
@@ -77,7 +81,7 @@ func validateWindowsManagedHooksTeardownJournalFile(path string) error {
 	err := windowsManagedHooksStrictFileCheck(path, label)
 	if err == nil {
 		if needsProof {
-			managed.RecordTrustedContent(path)
+			return managed.AcceptTrustedContent(path)
 		}
 		return nil
 	}
@@ -91,6 +95,8 @@ func validateWindowsManagedHooksTeardownJournalFile(path string) error {
 		return recheck
 	}
 	if needsProof && !managed.TrustedContentUnchanged(path) {
+		// The bytes changed while the repair ran.
+		managed.MarkContentUntrusted(path)
 		return err
 	}
 	return nil
