@@ -107,7 +107,7 @@ func (l *lifecycle) planCoworkVM(p *plan, record *Deployment) error {
 	c := p.config.Loaded.Enterprise.CoworkVMSensor
 	if c.Mode != "on" {
 		if l.opts.CoworkPackage != "" || l.opts.CoworkSignature != "" {
-			return fmt.Errorf("Cowork artifact inputs require enterprise.cowork_vm_sensor.mode: on")
+			return fmt.Errorf("the Cowork artifact inputs require enterprise.cowork_vm_sensor.mode: on")
 		}
 		p.coworkRetiredDirs = l.env.coworkRecordedDirs(record)
 		return nil
@@ -130,7 +130,7 @@ func (l *lifecycle) planCoworkVM(p *plan, record *Deployment) error {
 		if _, err := os.Lstat(l.env.P(sigPath)); !errors.Is(err, os.ErrNotExist) {
 			digest, digestErr := sha256File(l.env.P(sigPath))
 			if err != nil || digestErr != nil || record == nil || record.Files[sigPath] == "" || record.Files[sigPath] != digest {
-				return fmt.Errorf("Cowork cache signature %s is not an unchanged DefenseClaw file; remove it or configure its signature_sha256 before delivery", sigPath)
+				return fmt.Errorf("the Cowork cache signature %s is not an unchanged DefenseClaw file; remove it or configure its signature_sha256 before delivery", sigPath)
 			}
 		}
 	}
@@ -155,10 +155,10 @@ func (l *lifecycle) planCoworkVM(p *plan, record *Deployment) error {
 			limit = 1 << 20
 		}
 		if !info.Mode().IsRegular() || info.Size() <= 0 || info.Size() > limit {
-			return fmt.Errorf("Cowork VM source %s must be a nonempty regular file of at most %d bytes", source, limit)
+			return fmt.Errorf("the Cowork VM source %s must be a nonempty regular file of at most %d bytes", source, limit)
 		}
 		if err := l.env.checkCoworkPath(source, false); err != nil {
-			return fmt.Errorf("Cowork VM source: %w", err)
+			return fmt.Errorf("the Cowork VM source: %w", err)
 		}
 		digest, err := sha256File(l.env.P(source))
 		if err != nil {
@@ -169,7 +169,7 @@ func (l *lifecycle) planCoworkVM(p *plan, record *Deployment) error {
 			expected = c.SignatureSHA256
 		}
 		if expected == "" || digest != expected {
-			return fmt.Errorf("Cowork VM source %s does not match its configured SHA-256 release pin", source)
+			return fmt.Errorf("the Cowork VM source %s does not match its configured SHA-256 release pin", source)
 		}
 		files = append(files, desiredFile{Path: filepath.Join(macCoworkDir, name+asset.suffix), Src: l.env.P(source), SHA: digest, Mode: 0o644, Owner: rootOwner(), Kind: "cowork_vm_asset"})
 		cachePath := filepath.Join(c.SourceDir, name+asset.suffix)
@@ -187,7 +187,7 @@ func (l *lifecycle) planCoworkVM(p *plan, record *Deployment) error {
 			return err
 		}
 		if err := l.env.checkCoworkPath(path, true); err != nil {
-			return fmt.Errorf("Cowork VM destination: %w", err)
+			return fmt.Errorf("the Cowork VM destination: %w", err)
 		}
 	}
 	for _, file := range files {
@@ -197,7 +197,7 @@ func (l *lifecycle) planCoworkVM(p *plan, record *Deployment) error {
 			return err
 		}
 		if record == nil || record.Files[file.Path] == "" {
-			return fmt.Errorf("Cowork VM destination %s already exists and was not written by DefenseClaw; move it aside before enabling delivery", file.Path)
+			return fmt.Errorf("the Cowork VM destination %s already exists and was not written by DefenseClaw; move it aside before enabling delivery", file.Path)
 		}
 	}
 	for _, path := range []string{"/Library/Application Support/Cisco", "/Library/Application Support/Cisco/DefenseClaw", macCoworkDir} {

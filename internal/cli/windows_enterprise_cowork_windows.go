@@ -67,7 +67,7 @@ func windowsCoworkPaths() (dir, record string, err error) {
 		return "", "", err
 	}
 	if !strings.EqualFold(filepath.VolumeName(roots.ProgramFiles), filepath.VolumeName(windowsDir)) {
-		return "", "", errors.New("Cowork delivery requires Program Files on the Windows OS drive")
+		return "", "", errors.New("the Cowork delivery requires Program Files on the Windows OS drive")
 	}
 	layout, err := managed.StandaloneWindowsLayoutForRoots(roots.ProgramFiles, roots.ProgramData)
 	if err != nil {
@@ -84,7 +84,7 @@ func windowsCoworkArchitecture() (string, error) {
 	// The standalone lifecycle runs only on native Windows x64
 	// (validateWindowsEnterpriseStandaloneHost), so x64 is the only package.
 	if native != windowsImageFileMachineAMD64 {
-		return "", fmt.Errorf("Cowork VM sensor does not support native Windows machine 0x%04x", native)
+		return "", fmt.Errorf("the Cowork VM sensor does not support native Windows machine 0x%04x", native)
 	}
 	return "amd64", nil
 }
@@ -171,7 +171,7 @@ func windowsCoworkDigest(path string, limit int64) (string, error) {
 		return "", err
 	}
 	if !info.Mode().IsRegular() || info.Size() <= 0 || info.Size() > limit {
-		return "", errors.New("Cowork asset must be a nonempty regular file within its size limit")
+		return "", errors.New("the Cowork asset must be a nonempty regular file within its size limit")
 	}
 	file, err := os.Open(path)
 	if err != nil {
@@ -206,7 +206,7 @@ func buildWindowsCoworkPlan(c *config.Config, delivery bool, inputs ...string) (
 func buildWindowsCoworkPlanWith(c *config.Config, delivery bool, ops windowsCoworkPlanOps, inputs ...string) (windowsCoworkPlan, error) {
 	p := windowsCoworkPlan{}
 	if c == nil || !c.StandaloneEnterprise() {
-		return p, errors.New("Cowork delivery applies only to the standalone enterprise profile")
+		return p, errors.New("the Cowork delivery applies only to the standalone enterprise profile")
 	}
 	section := c.Enterprise.CoworkVMSensor
 	packageInput, signatureInput := "", ""
@@ -218,7 +218,7 @@ func buildWindowsCoworkPlanWith(c *config.Config, delivery bool, ops windowsCowo
 	}
 	if section.Mode != "on" {
 		if packageInput != "" || signatureInput != "" {
-			return p, errors.New("Cowork artifact inputs require enterprise.cowork_vm_sensor.mode: on")
+			return p, errors.New("the Cowork artifact inputs require enterprise.cowork_vm_sensor.mode: on")
 		}
 		return p, nil
 	}
@@ -233,17 +233,17 @@ func buildWindowsCoworkPlanWith(c *config.Config, delivery bool, ops windowsCowo
 	}
 	name := "defenseclaw-cowork-" + arch + ".tar.gz"
 	if packageInput != "" && filepath.Base(packageInput) != name {
-		return p, fmt.Errorf("Cowork package input must be named %s for this host", name)
+		return p, fmt.Errorf("the Cowork package input must be named %s for this host", name)
 	}
 	p.PackagePath, p.ArgumentsPath = filepath.Join(dir, name), filepath.Join(dir, "install.args")
 	if !filepath.IsAbs(section.SourceDir) || len(filepath.VolumeName(section.SourceDir)) != 2 || strings.ContainsAny(section.SourceDir, "/%\"") || filepath.Clean(section.SourceDir) != section.SourceDir {
-		return p, errors.New("Cowork source_dir must be a canonical local drive path with backslashes")
+		return p, errors.New("the Cowork source_dir must be a canonical local drive path with backslashes")
 	}
 	p.SourceArchive, p.SourceSignature = filepath.Join(section.SourceDir, name), filepath.Join(section.SourceDir, name+".sig")
 	if packageInput != "" || signatureInput != "" {
 		cache := filepath.Join(filepath.Dir(recordPath), "cowork-cache")
 		if !strings.EqualFold(section.SourceDir, cache) {
-			return p, fmt.Errorf("Cowork artifact inputs require source_dir: %s", cache)
+			return p, fmt.Errorf("the Cowork artifact inputs require source_dir: %s", cache)
 		}
 		p.CacheDirectory = cache
 		if packageInput != "" {
@@ -296,15 +296,15 @@ func buildWindowsCoworkPlanWith(c *config.Config, delivery bool, ops windowsCowo
 			return p, err
 		}
 		if got != p.PackageSHA256 {
-			return p, errors.New("Cowork package does not match enterprise.cowork_vm_sensor.package_sha256")
+			return p, errors.New("the Cowork package does not match enterprise.cowork_vm_sensor.package_sha256")
 		}
 		if p.SourceSignature == "" {
 			if p.SignatureSHA256 != "" {
-				return p, errors.New("Cowork signature is pinned but no signature source was supplied")
+				return p, errors.New("the Cowork signature is pinned but no signature source was supplied")
 			}
 		} else if _, err := ops.stat(p.SourceSignature); errors.Is(err, os.ErrNotExist) {
 			if p.SignatureSHA256 != "" {
-				return p, errors.New("Cowork signature is pinned but missing from source_dir")
+				return p, errors.New("the Cowork signature is pinned but missing from source_dir")
 			}
 			p.SourceSignature = ""
 		} else {
@@ -313,7 +313,7 @@ func buildWindowsCoworkPlanWith(c *config.Config, delivery bool, ops windowsCowo
 				return p, err
 			}
 			if p.SignatureSHA256 == "" || got != p.SignatureSHA256 {
-				return p, errors.New("Cowork signature does not match enterprise.cowork_vm_sensor.signature_sha256")
+				return p, errors.New("the Cowork signature does not match enterprise.cowork_vm_sensor.signature_sha256")
 			}
 		}
 	}

@@ -143,7 +143,7 @@ func validateCoworkVMSensorSource(source string, root *yaml.Node) error {
 		if value.Kind != yaml.ScalarNode || value.ShortTag() != "!!str" {
 			return refuse(path, value, "Cowork VM sensor settings must be strings")
 		}
-		valid := true
+		var valid bool
 		switch key.Value {
 		case "mode":
 			valid = value.Value == "on" || value.Value == "off"

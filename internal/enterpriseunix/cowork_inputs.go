@@ -27,7 +27,7 @@ func (l *lifecycle) coworkInputs(p *plan, name string) ([]coworkAsset, error) {
 	archive := filepath.Join(c.SourceDir, name)
 	if !explicit {
 		if err := l.env.checkCoworkPath(c.SourceDir, true); err != nil {
-			return nil, fmt.Errorf("Cowork VM source: %w", err)
+			return nil, fmt.Errorf("the Cowork VM source: %w", err)
 		}
 		return []coworkAsset{{source: archive}, {source: archive + ".sig", suffix: ".sig"}}, nil
 	}
@@ -44,7 +44,7 @@ func (l *lifecycle) coworkInputs(p *plan, name string) ([]coworkAsset, error) {
 			return nil, err
 		}
 		if err := l.env.checkCoworkPath(path, true); err != nil {
-			return nil, fmt.Errorf("Cowork VM cache: %w", err)
+			return nil, fmt.Errorf("the Cowork VM cache: %w", err)
 		}
 	}
 	p.dirs = append(p.dirs,
@@ -54,7 +54,7 @@ func (l *lifecycle) coworkInputs(p *plan, name string) ([]coworkAsset, error) {
 	packageSource := archive
 	if l.opts.CoworkPackage != "" {
 		if filepath.Base(l.opts.CoworkPackage) != name {
-			return nil, fmt.Errorf("Cowork package input must be named %s for this machine's VM architecture", name)
+			return nil, fmt.Errorf("the Cowork package input must be named %s for this machine's VM architecture", name)
 		}
 		var err error
 		packageSource, err = l.env.coworkInputCanonical(l.opts.CoworkPackage)
@@ -77,11 +77,11 @@ func (l *lifecycle) coworkInputs(p *plan, name string) ([]coworkAsset, error) {
 
 func (e *Env) coworkInputCanonical(path string) (string, error) {
 	if !filepath.IsAbs(path) || filepath.Clean(path) != path {
-		return "", fmt.Errorf("Cowork artifact input must be a canonical absolute path")
+		return "", fmt.Errorf("the Cowork artifact input must be a canonical absolute path")
 	}
 	if e.Root != "" {
 		if !strings.HasPrefix(path, filepath.Clean(e.Root)+string(filepath.Separator)) {
-			return "", fmt.Errorf("Cowork input is outside the test root")
+			return "", fmt.Errorf("the Cowork input is outside the test root")
 		}
 		path = strings.TrimPrefix(path, filepath.Clean(e.Root))
 	}
