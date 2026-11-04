@@ -64,6 +64,7 @@ $script:AuditDb = ''
 # launch; each request is then only a read-only SQLite query and an atomic
 # snapshot write, bounded separately as hang protection.
 $script:CanonicalAuditProjector = $null
+$script:IsolatedProcessRoots = @{}
 $script:CanonicalAuditProjectorScript = ''
 $script:CanonicalAuditProjectorStartTimeoutSeconds = $CommandTimeoutSeconds
 $script:CanonicalAuditProjectionRequestTimeoutSeconds = 15
@@ -3957,6 +3958,18 @@ function Update-RootProcessExitBound([object]$RecordedProcess, [Diagnostics.Proc
     }
 }
 
+function Register-IsolatedProcess([Diagnostics.Process]$Process) {
+    $record = [pscustomobject]@{
+        ProcessId = $Process.Id
+        ParentProcessId = 0
+        CreationDate = $Process.StartTime.ToUniversalTime().ToString('O')
+        ExitDate = ''
+        ExecutablePath = ''
+    }
+    $script:IsolatedProcessRoots["$($record.ProcessId)|$($record.CreationDate)"] = $record
+    return $record
+}
+
 function Add-ProcessTreeSnapshot([hashtable]$Tracked, [object]$RootProcess) {
     $roots = @($RootProcess) + @($Tracked.Values)
     try {
@@ -4119,16 +4132,11 @@ function Invoke-NativeProcess {
         $process.Dispose()
         throw "failed to start $FilePath"
     }
+    $rootProcessIdentity = $null
     try {
         $deadline = [DateTime]::UtcNow.AddSeconds($TimeoutSeconds)
         $trackedDescendants = @{}
-        $rootProcessIdentity = [pscustomobject]@{
-            ProcessId = $process.Id
-            ParentProcessId = 0
-            CreationDate = $process.StartTime.ToUniversalTime().ToString('O')
-            ExitDate = ''
-            ExecutablePath = ''
-        }
+        $rootProcessIdentity = Register-IsolatedProcess $process
         $timeoutIdentitySummary = 'none'
         $inputWriteFailed = $false
         $inputWriteFailure = ''
@@ -4260,6 +4268,9 @@ function Invoke-NativeProcess {
         }
         return $result
     } finally {
+        if ($null -ne $rootProcessIdentity) {
+            Update-RootProcessExitBound $rootProcessIdentity $process
+        }
         $process.Dispose()
     }
 }
@@ -10168,7 +10179,6 @@ function Stop-IsolatedProcessTree {
     if ($PSCmdlet.ShouldProcess('canonical audit projector', 'Stop')) {
         $null = Stop-CanonicalAuditProjector
     }
-    $root = [IO.Path]::GetFullPath($StateRoot)
     $processes = @(Get-CimInstance Win32_Process -ErrorAction SilentlyContinue)
     $ancestorIds = [Collections.Generic.HashSet[int]]::new()
     $ancestorId = [int]$PID
@@ -10237,15 +10247,50 @@ function Stop-IsolatedProcessTree {
         }
     }
 
-    foreach ($process in $processes) {
-        $processId = [int]$process.ProcessId
-        $matchesRoot = $process.CommandLine -and
-            $process.CommandLine.IndexOf($root, [StringComparison]::OrdinalIgnoreCase) -ge 0
-        if (-not $ancestorIds.Contains($processId) -and
-            -not $managedProductProcesses.ContainsKey($processId) -and
-            $matchesRoot -and
-            $PSCmdlet.ShouldProcess("PID $processId", 'Stop isolated process')) {
-            Stop-Process -Id $processId -Force -ErrorAction SilentlyContinue
+    $roots = @($script:IsolatedProcessRoots.Values)
+    $tracked = @($roots)
+    if ($roots.Count -gt 0) {
+        $tracked += @(Get-ProcessTreeSnapshot `
+            -RootProcesses $roots -ProcessSnapshot $processes)
+    }
+    $seen = [Collections.Generic.HashSet[string]]::new([StringComparer]::Ordinal)
+    foreach ($recorded in $tracked) {
+        $processId = [int]$recorded.ProcessId
+        $key = "$processId|$($recorded.CreationDate)"
+        if (-not $seen.Add($key) -or
+            $ancestorIds.Contains($processId) -or
+            $managedProductProcesses.ContainsKey($processId)) { continue }
+        $native = $null
+        try {
+            $native = [Diagnostics.Process]::GetProcessById($processId)
+            $expected = [DateTime]::Parse(
+                [string]$recorded.CreationDate,
+                [Globalization.CultureInfo]::InvariantCulture,
+                [Globalization.DateTimeStyles]::RoundtripKind
+            ).ToUniversalTime()
+            if ([Math]::Abs(($native.StartTime.ToUniversalTime() - $expected).TotalMilliseconds) -ge 1) {
+                continue
+            }
+            if (-not [string]::IsNullOrWhiteSpace([string]$recorded.ExecutablePath) -and
+                -not [string]::Equals(
+                    [string]$native.MainModule.FileName,
+                    [string]$recorded.ExecutablePath,
+                    [StringComparison]::OrdinalIgnoreCase
+                )) { continue }
+            if ($PSCmdlet.ShouldProcess("PID $processId", 'Stop isolated process')) {
+                $native.Kill($true)
+                if (-not $native.WaitForExit(5000)) {
+                    Write-Warning "isolated process PID $processId did not exit within 5 seconds"
+                }
+            }
+        } catch [ArgumentException] {
+            # A recorded process may have exited before cleanup.
+        } catch [InvalidOperationException] {
+            # A recorded process may exit while its identity is checked.
+        } catch {
+            Write-Warning (Protect-LogText "could not stop tracked PID ${processId}: $($_.Exception.Message)")
+        } finally {
+            if ($null -ne $native) { $native.Dispose() }
         }
     }
     foreach ($entry in @($managedProductProcesses.GetEnumerator())) {
