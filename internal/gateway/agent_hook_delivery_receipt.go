@@ -37,7 +37,7 @@ func withHookDeliveryReceipt(r *http.Request, delivery *hookDeliveryReceipt) *ht
 }
 
 func (a *APIServer) beginHookDeliveryReceipt(w http.ResponseWriter, r *http.Request) *hookDeliveryReceipt {
-	if a == nil || a.scannerCfg == nil || !a.scannerCfg.StandaloneEnterprise() ||
+	if a == nil || a.scannerCfg == nil || a.scannerCfg.SecureClientIntegration() ||
 		r.Header.Get(hookexec.HookDeliveryReceiptHeader) != "1" {
 		return nil
 	}
