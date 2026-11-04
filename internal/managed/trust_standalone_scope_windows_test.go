@@ -122,9 +122,10 @@ func openRetainedHandleForTest(t *testing.T, path string, access uint32) windows
 	return handle
 }
 
-// trustedRewriteForTest is what Setup does: a fresh file under the canonical
-// descriptor, moved over the old name, so a handle to the old file points at
-// the replaced object.
+// trustedRewriteForTest is what Setup does with [IO.File]::Replace: a fresh
+// file under the canonical descriptor takes the name, and the old file moves
+// to a backup name, so a handle to the old file points at the replaced
+// object. ReplaceFile renames the open old file aside in the same way.
 func trustedRewriteForTest(t *testing.T, path string, content []byte) {
 	t.Helper()
 	fresh := path + ".setup"
@@ -132,17 +133,22 @@ func trustedRewriteForTest(t *testing.T, path string, content []byte) {
 		t.Fatal(err)
 	}
 	setTestFileDACL(t, fresh, testDACL(t, canonicalTestDACL), true)
-	from, err := windows.UTF16PtrFromString(fresh)
-	if err != nil {
-		t.Fatal(err)
+	move := func(from, to string) {
+		t.Helper()
+		source, err := windows.UTF16PtrFromString(from)
+		if err != nil {
+			t.Fatal(err)
+		}
+		target, err := windows.UTF16PtrFromString(to)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := windows.MoveFileEx(source, target, windows.MOVEFILE_WRITE_THROUGH); err != nil {
+			t.Fatalf("move %s to %s: %v", from, to, err)
+		}
 	}
-	to, err := windows.UTF16PtrFromString(path)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := windows.MoveFileEx(from, to, windows.MOVEFILE_REPLACE_EXISTING|windows.MOVEFILE_WRITE_THROUGH); err != nil {
-		t.Fatalf("replace %s: %v", path, err)
-	}
+	move(path, path+".backup")
+	move(fresh, path)
 }
 
 // GAP-0561 review 3: on standalone a drifted config.yaml is never repaired in
