@@ -183,6 +183,42 @@ def test_linux_connector_parts_separate_the_ci_timeout_cluster() -> None:
     assert all(sum(observed_seconds.get(name, 0) for name in part) < 300 for part in parts)
 
 
+def test_linux_gateway_shards_separate_the_ci_timeout_cluster() -> None:
+    root = Path(__file__).resolve().parents[2]
+    timings = json.loads((root / "scripts/test-timings/go-linux.json").read_text(encoding="utf-8"))
+    seconds = timings["tests"]["internal/gateway"]
+    files = discover_test_files(root / "internal/gateway")
+    shards = partition_test_files(files, 36, seconds)
+
+    # These are top-level elapsed seconds from the red shard 20 CI artifact.
+    # Unrecorded tests used to weigh 0.22 seconds and all landed with an
+    # already slow test, exhausting the existing 11-minute Go test budget.
+    observed = {
+        "TestGAP0503HookToolRowsSurviveExpiredCompletionDuringFlood": 344.1,
+        "TestGAP0503HandlerHeldSQLiteReportsDroppedToolRows": 22.8,
+        "TestGAP0568ObserveOverBudgetStateWriteBlocks": 77.7,
+        "TestOverLimitNativeWritesOfAuthorizedKeysAreBlockedOnTheHost": 80.3,
+    }
+    assert all(name in seconds for name in observed)
+    holders = {name: next(i for i, shard in enumerate(shards) if name in shard) for name in observed}
+    assert len(set(holders.values())) == len(observed)
+    for index in holders.values():
+        projected = sum(observed.get(name, float(seconds.get(name, seconds["*"]))) for name in shards[index])
+        assert projected * 1.3 < 660, (index, projected)
+
+
+def test_linux_gateway_shards_keep_ordinary_tests_covered() -> None:
+    root = Path(__file__).resolve().parents[2]
+    seconds = json.loads((root / "scripts/test-timings/go-linux.json").read_text(encoding="utf-8"))["tests"][
+        "internal/gateway"
+    ]
+    files = discover_test_files(root / "internal/gateway")
+    shards = partition_test_files(files, 36, seconds)
+    names = [name for _, file_names in files for name in file_names]
+    assert check_exact_cover(shards, names) == []
+    assert sum("TestAgentHookDispatch_BlockFiresOnBlock" in shard for shard in shards) == 1
+
+
 OPERATOR_COLLECTOR_PARTS = tuple(
     f"TestClaudeMarkedOperatorCollectorKeepsBytes{goos}" for goos in ("Linux", "Darwin", "Windows")
 )
