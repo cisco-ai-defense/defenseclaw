@@ -96,3 +96,42 @@ func TestGAP0556WatcherQuarantineUsesPluginIdentity(t *testing.T) {
 		t.Fatalf("quarantine records=%v err=%v", records, err)
 	}
 }
+
+func TestGAP0556ClaudeCacheCopiesKeepListedIdentity(t *testing.T) {
+	cfg, store, logger, skillDir := setupQuarantineProvenanceTestEnv(t)
+	pluginDir := filepath.Join(cfg.DataDir, "plugins")
+	cfg.PluginDir = pluginDir
+	cfg.Guardrail.Connector = "claudecode"
+	w := New(cfg, []string{skillDir}, []string{pluginDir}, store, logger, nil, nil)
+	for _, version := range []string{"1.0.0", "2.0.0"} {
+		path := filepath.Join(pluginDir, "cache", "market", "kit", version)
+		if err := os.MkdirAll(path, 0o700); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(path, "plugin.txt"), []byte(version), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		evt := InstallEvent{Type: InstallPlugin, Name: "kit@market", Path: path, Connector: "claudecode"}
+		if err := w.quarantineAssetWith(context.Background(), evt, false, "manual block via CLI"); err != nil {
+			t.Fatal(err)
+		}
+	}
+	records, err := store.ListQuarantineRecordsForConnector(context.Background(), "plugin", "kit@market", "claudecode")
+	if err != nil || len(records) != 2 {
+		t.Fatalf("quarantine records=%v err=%v", records, err)
+	}
+	primary := filepath.Join(cfg.QuarantineDir, "plugins", "claudecode", "kit@market")
+	if records[0].QuarantinePath != primary {
+		t.Fatalf("primary path=%q, want %q", records[0].QuarantinePath, primary)
+	}
+	fallback := records[1].QuarantinePath
+	wantFallbackRoot := filepath.Join(cfg.QuarantineDir, "per-source", "plugins", "claudecode") + string(filepath.Separator)
+	if !strings.HasPrefix(fallback, wantFallbackRoot) || filepath.Base(fallback) != "kit@market" {
+		t.Fatalf("fallback path=%q, want a separate listed-identity slot", fallback)
+	}
+	for _, path := range []string{primary, fallback} {
+		if _, err := os.Stat(filepath.Join(path, "plugin.txt")); err != nil {
+			t.Fatalf("quarantine copy %q: %v", path, err)
+		}
+	}
+}

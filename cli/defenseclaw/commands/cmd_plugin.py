@@ -3958,7 +3958,7 @@ def _resolve_plugin_quarantine_restore_scopes(
     return [("", global_entry)]
 
 
-def _quarantined_plugin_alias(pe: Any, name: str, connector: str) -> str:
+def _quarantined_plugin_alias(app: AppContext, pe: Any, name: str, connector: str) -> str:
     """Map a listed name (folder or nested id) to its quarantine key.
 
     GAP-2163: quarantine is keyed by manifest ID, but Hermes lists the folder
@@ -3968,36 +3968,55 @@ def _quarantined_plugin_alias(pe: Any, name: str, connector: str) -> str:
     wanted = os.path.normpath((name or "").strip().strip("/\\"))
     if not wanted or wanted in (".", ".."):
         return ""
+    from defenseclaw.enforce.plugin_enforcer import claude_cache_plugin_key
+
     hits = {
         entry.target_name
         for entry in pe.list_by_type("plugin")
         if entry.actions.file == "quarantine"
         and entry.source_path
         and (not connector or entry.connector == connector)
-        and (os.sep + os.path.normpath(entry.source_path)).endswith(os.sep + wanted)
+        and (
+            (os.sep + os.path.normpath(entry.source_path)).endswith(os.sep + wanted)
+            or (not asset_lists.is_secure_client(app.cfg) and entry.connector == "claudecode" and
+                claude_cache_plugin_key(entry.source_path) == entry.target_name and
+                os.path.basename(os.path.dirname(entry.source_path)) == wanted)
+        )
     }
+    if connector in {"", "claudecode"} and not asset_lists.is_secure_client(app.cfg):
+        hits.update(
+            key for key in _marketplace_plugin_keys(app, wanted, connector or None)
+            if _plugin_quarantine_copy(app, key, "claudecode")
+        )
     return next(iter(hits)) if len(hits) == 1 else ""
 
 
-def _plugin_quarantine_copy(app: AppContext, plugin_name: str, connector: str) -> str:
-    """Find the current slot or one recorded version-named plugin copy."""
+def _plugin_quarantine_copies(app: AppContext, plugin_name: str, connector: str) -> list[str]:
+    """Find current and recorded copies of one connector plugin."""
     from defenseclaw.enforce.plugin_enforcer import PluginEnforcer
 
     enforcer = PluginEnforcer(app.cfg.quarantine_dir)
     current = enforcer.quarantine_path(plugin_name, connector)
+    copies = []
     if current and os.path.exists(current):
-        return current
+        copies.append(current)
     if not connector or app.store is None or asset_lists.is_secure_client(app.cfg):
-        return ""
-    candidates = set()
+        return copies
     for record in app.store.list_quarantine_records("plugin", plugin_name, connector):
-        if (record.state not in {"pending", "active", "restoring"} or
-                os.path.basename(record.original_path) != os.path.basename(record.quarantine_path)):
+        if record.state not in {"pending", "active", "restoring"}:
             continue
-        path = enforcer.legacy_quarantine_path(plugin_name, connector, record.quarantine_path)
-        if path:
-            candidates.add(path)
-    return next(iter(candidates)) if len(candidates) == 1 else ""
+        path = enforcer.legacy_quarantine_path(
+            plugin_name, connector, record.quarantine_path, record.original_path,
+        )
+        if path and path not in copies:
+            copies.append(path)
+    return copies
+
+
+def _plugin_quarantine_copy(app: AppContext, plugin_name: str, connector: str) -> str:
+    """Find a physical quarantine copy for notices and policy checks."""
+    copies = _plugin_quarantine_copies(app, plugin_name, connector)
+    return copies[0] if copies else ""
 
 
 def _hermes_listed_id(path: str, connector: str) -> str:
@@ -4200,10 +4219,23 @@ def _marketplace_plugin_keys(app: AppContext, plugin_name: str, connector: str |
     if app.store is None or "@" in plugin_name:
         return []
     rows = app.store.list_actions_by_type("plugin", connector)
-    return sorted({
+    keys = {
         row.target_name for row in rows
         if row.target_name.startswith(plugin_name + "@") and not row.actions.is_empty()
-    })
+    }
+    if not asset_lists.is_secure_client(app.cfg) and connector in {None, "", "claudecode"}:
+        from defenseclaw.enforce.plugin_enforcer import claude_cache_plugin_key
+
+        keys.update(
+            record.target_name
+            for record in app.store.list_quarantine_records("plugin")
+            if record.target_name.startswith(plugin_name + "@")
+            and "claudecode" in record.connectors
+            and record.state in {"pending", "active", "restoring"}
+            and claude_cache_plugin_key(record.original_path) == record.target_name
+            and _plugin_quarantine_copy(app, record.target_name, "claudecode")
+        )
+    return sorted(keys)
 
 
 def _unblock_marketplace_copies(app: AppContext, plugin_name: str, connector_flag: str, connector: str | None) -> bool:
@@ -4391,14 +4423,20 @@ def allow(app: AppContext, name: str, reason: str, connector_flag: str) -> None:
     # would create a name-only rule and clear the journal needed by restore.
     scopes = [connector_scope] if connector_scope else _active_plugin_connectors(app)
     scopes = [*scopes, ""]  # Legacy/global quarantine slot.
+    quarantine_names = {plugin_name}
+    if not asset_lists.is_secure_client(app.cfg):
+        quarantine_names.update(_marketplace_plugin_keys(app, plugin_name, connector_scope or None))
     journal_quarantine = any(
-        entry.target_name == plugin_name
+        entry.target_name in quarantine_names
         and entry.actions.file == "quarantine"
         and (not connector_scope or entry.connector in ("", connector_scope))
         for entry in pe.list_by_type("plugin")
     )
     if not asset_lists.is_secure_client(app.cfg) and (
-        journal_quarantine or any(_plugin_quarantine_copy(app, plugin_name, scope) for scope in scopes)
+        journal_quarantine or any(
+            _plugin_quarantine_copy(app, key, scope)
+            for key in quarantine_names for scope in scopes
+        )
     ):
         raise click.ClickException(
             f"{plugin_name!r} is quarantined; restore it before allowing the installed copy"
@@ -4910,7 +4948,7 @@ def restore(app: AppContext, name: str, restore_path: str, connector_flag: str) 
     alias_scope = _resolve_connector_scope(app, connector_flag) if connector_flag else ""
     if "/" in name.strip("/\\"):
         # GAP-2464: "web/x" names the category plugin itself, not a flat "x".
-        plugin_name = _quarantined_plugin_alias(pe, name, alias_scope) or plugin_name
+        plugin_name = _quarantined_plugin_alias(app, pe, name, alias_scope) or plugin_name
     targets = _resolve_plugin_quarantine_restore_scopes(
         app,
         pe,
@@ -4954,7 +4992,7 @@ def restore(app: AppContext, name: str, restore_path: str, connector_flag: str) 
 
     existing_targets = quarantined_targets()
     if not existing_targets:
-        alias = _quarantined_plugin_alias(pe, name, alias_scope)
+        alias = _quarantined_plugin_alias(app, pe, name, alias_scope)
         if alias and alias != plugin_name:
             plugin_name = alias
             targets = _resolve_plugin_quarantine_restore_scopes(app, pe, plugin_name, connector_flag)
@@ -4964,17 +5002,16 @@ def restore(app: AppContext, name: str, restore_path: str, connector_flag: str) 
         raise SystemExit(1)
 
     for resolved_connector, entry, slot_connector, slot_path in existing_targets:
+        records = [
+            record for record in app.store.list_quarantine_records("plugin", plugin_name, slot_connector)
+            if record.quarantine_path == slot_path and record.state in {"pending", "active", "restoring"}
+        ] if app.store is not None else []
+        record = records[0] if len(records) == 1 and not asset_lists.is_secure_client(app.cfg) else None
         target_restore_path = restore_path
         if not target_restore_path:
-            target_restore_path = entry.source_path if entry is not None else ""
-            if not target_restore_path and app.store is not None:
-                records = [
-                    record for record in app.store.list_quarantine_records(
-                        "plugin", plugin_name, slot_connector,
-                    ) if record.quarantine_path == slot_path
-                ]
-                if len(records) == 1:
-                    target_restore_path = records[0].original_path
+            target_restore_path = record.original_path if record is not None else (
+                entry.source_path if entry is not None else ""
+            )
             if not target_restore_path:
                 ux.echo(
                     f"error: no stored path for {plugin_name!r}"
@@ -5031,6 +5068,7 @@ def restore(app: AppContext, name: str, restore_path: str, connector_flag: str) 
             quarantine_path=(
                 slot_path if slot_path != pe_enforcer.quarantine_path(plugin_name, slot_connector) else ""
             ),
+            identity_path=record.original_path if record is not None else "",
         ):
             click.echo(
                 f"error: restore failed for {plugin_name!r}"
@@ -5046,11 +5084,15 @@ def restore(app: AppContext, name: str, restore_path: str, connector_flag: str) 
         )
         click.echo(f"[plugin] {_plugin_label(listed, plugin_name)} restored to {target_restore_path}{suffix}")
 
-        if resolved_connector:
+        if record is not None:
+            app.store.complete_quarantine_restore(record.id, target_restore_path)
+        elif resolved_connector:
             pe.clear_quarantine_for_connector("plugin", plugin_name, resolved_connector)
-            pe.set_source_path("plugin", plugin_name, target_restore_path, resolved_connector)
         else:
             pe.clear_quarantine("plugin", plugin_name)
+        if resolved_connector:
+            pe.set_source_path("plugin", plugin_name, target_restore_path, resolved_connector)
+        else:
             pe.set_source_path("plugin", plugin_name, target_restore_path)
         _claude_show_restored_enabled(plugin_name, app.cfg.quarantine_dir, slot_connector)
 
@@ -5221,7 +5263,7 @@ def _plugin_info_card(
     if info_map is None and not quarantined and connector and app.store is not None:
         from defenseclaw.enforce import PolicyEngine
 
-        alias = _quarantined_plugin_alias(PolicyEngine(app.store, app.cfg), plugin_name, connector)
+        alias = _quarantined_plugin_alias(app, PolicyEngine(app.store, app.cfg), plugin_name, connector)
         if alias and alias != plugin_name and (alias_path := _plugin_quarantine_copy(app, alias, connector)):
             action_name = alias
             quarantined = True

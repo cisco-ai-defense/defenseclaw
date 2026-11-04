@@ -22,6 +22,7 @@ Mirrors internal/enforce/plugin_enforcer.go.
 from __future__ import annotations
 
 import os
+import re
 import shutil
 import uuid
 
@@ -35,6 +36,25 @@ from defenseclaw.inventory.plugin_identity import (
 
 # Quarantine tree of plugins in a Hermes category folder, next to plugins/.
 PLUGIN_CATEGORY_QUARANTINE_DIR = "plugin-categories"
+
+
+def claude_cache_plugin_key(path: str) -> str:
+    """Return the listed identity of a Claude cache version path."""
+    if not path:
+        return ""
+    version_dir = os.path.abspath(path)
+    plugin_dir = os.path.dirname(version_dir)
+    market_dir = os.path.dirname(plugin_dir)
+    cache_dir = os.path.dirname(market_dir)
+    if os.path.basename(cache_dir).casefold() != "cache":
+        return ""
+    try:
+        plugin = validate_plugin_id(os.path.basename(plugin_dir))
+        market = validate_plugin_id(os.path.basename(market_dir))
+        validate_plugin_id(os.path.basename(version_dir))
+        return validate_plugin_id(f"{plugin}@{market}")
+    except PluginIdentityError:
+        return ""
 
 
 def _remove_owned(path: str) -> None:
@@ -135,23 +155,55 @@ class PluginEnforcer:
             return None
         return dest
 
-    def legacy_quarantine_path(self, plugin_name: str, connector: str, path: str) -> str | None:
-        """Validate a recorded version-named copy from an earlier watcher."""
-        if not connector or self._quarantine_path(plugin_name, connector) is None:
-            return None
-        parent = os.path.abspath(os.path.join(self.quarantine_dir, connector))
-        source = os.path.abspath(path)
-        if (os.path.dirname(source) != parent or
-                is_link_or_reparse(parent) or is_link_or_reparse(source) or
-                not os.path.exists(source) or
-                not os.path.realpath(parent).startswith(os.path.realpath(self.quarantine_dir) + os.sep)):
-            return None
+    def _matches_identity(self, source: str, plugin_name: str, connector: str, original_path: str = "") -> bool:
         try:
-            actual = canonical_plugin_id(source)[0]
+            actual = (
+                validate_plugin_id(os.path.basename(source))
+                if os.path.isfile(source)
+                else canonical_plugin_id(source)[0]
+            )
             expected = validate_plugin_id(plugin_name)
         except PluginIdentityError:
+            return False
+        root = os.path.dirname(source)
+        if filesystem_identity_key(actual, root) == filesystem_identity_key(expected, root):
+            return True
+        if connector != "claudecode" or claude_cache_plugin_key(original_path) != expected:
+            return False
+        storage_name = os.path.basename(os.path.dirname(original_path))
+        return filesystem_identity_key(actual, root) == filesystem_identity_key(storage_name, root)
+
+    def legacy_quarantine_path(
+        self, plugin_name: str, connector: str, path: str, original_path: str = "",
+    ) -> str | None:
+        """Validate a recorded copy outside the current identity slot."""
+        if not connector or self._quarantine_path(plugin_name, connector) is None:
             return None
-        return source if filesystem_identity_key(actual, parent) == filesystem_identity_key(expected, parent) else None
+        source = os.path.abspath(path)
+        direct_parent = os.path.abspath(os.path.join(self.quarantine_dir, connector))
+        fallback_parent = os.path.abspath(os.path.join(
+            os.path.dirname(self.quarantine_dir), "per-source", "plugins", connector,
+        ))
+        parent = os.path.dirname(source)
+        direct = parent == direct_parent
+        fallback = (os.path.dirname(parent) == fallback_parent and
+                    re.fullmatch(r"[0-9a-f]{16}", os.path.basename(parent)) is not None)
+        if not (direct or fallback) or not os.path.exists(source):
+            return None
+        if fallback and os.path.basename(source) != plugin_name:
+            return None
+        root = os.path.abspath(os.path.dirname(self.quarantine_dir))
+        current = source
+        while current != root:
+            if is_link_or_reparse(current):
+                return None
+            next_parent = os.path.dirname(current)
+            if next_parent == current:
+                return None
+            current = next_parent
+        if not os.path.realpath(source).startswith(os.path.realpath(root) + os.sep):
+            return None
+        return source if self._matches_identity(source, plugin_name, connector, original_path) else None
 
     def quarantine(
         self,
@@ -217,10 +269,11 @@ class PluginEnforcer:
         allowed_roots: list[str] | None = None,
         connector: str = "",
         quarantine_path: str = "",
+        identity_path: str = "",
     ) -> bool:
         """Restore a quarantined plugin to its original location."""
         src = (
-            self.legacy_quarantine_path(plugin_name, connector, quarantine_path)
+            self.legacy_quarantine_path(plugin_name, connector, quarantine_path, identity_path)
             if quarantine_path else self._quarantine_path(plugin_name, connector)
         )
         if src is None:
@@ -234,16 +287,7 @@ class PluginEnforcer:
                 for part in plugin_name.split("/"):
                     validate_plugin_id(part)
             else:
-                # GAP-2164: a single-file OpenCode/Amp plugin is quarantined as
-                # a file named by its ID; it has no manifest directory to read.
-                source_id = (
-                    validate_plugin_id(os.path.basename(src))
-                    if os.path.isfile(src)
-                    else canonical_plugin_id(src)[0]
-                )
-                if filesystem_identity_key(source_id, os.path.dirname(src)) != filesystem_identity_key(
-                    validate_plugin_id(plugin_name), os.path.dirname(src)
-                ):
+                if not self._matches_identity(src, plugin_name, connector, identity_path):
                     return False
         except PluginIdentityError:
             return False
