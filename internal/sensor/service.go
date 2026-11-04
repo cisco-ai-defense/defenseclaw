@@ -28,6 +28,7 @@ import (
 	"errors"
 	"fmt"
 	"net"
+	"os"
 	"sort"
 	"strconv"
 	"strings"
@@ -160,6 +161,10 @@ type Service struct {
 	// detail.
 	planeAOn bool
 	planeBOn bool
+
+	// selfPID is this process (os.Getpid). Only its own release manifest
+	// fetch is DefenseClaw's egress rather than AI use (GAP-0068).
+	selfPID int
 
 	// episodes carries per-process state between polls: the previous CPU
 	// reading, first-seen time, and how many distinct unnamed public peers the
@@ -305,6 +310,7 @@ func New(options Options) (*Service, error) {
 			options.Config.EffectiveChainWindow()+2*options.Config.EffectivePollInterval()),
 		dnsCache: dnsCache,
 		dnsCap:   dnsCap,
+		selfPID:  os.Getpid(),
 	}
 	for _, selected := range options.Config.EffectivePlanes() {
 		switch selected {
@@ -782,10 +788,14 @@ func (s *Service) Poll(ctx context.Context) Snapshot {
 
 		var result planeBResult
 		if s.planeBOn {
-			result = planeB(byPID[process.PID], process.Name, s.options.Providers,
-				func(connection netprobe.Connection) (string, float64, string) {
-					return s.options.Resolver.Resolve(nameCtx, connection)
-				}, sanctioned)
+			resolve := func(connection netprobe.Connection) (string, float64, string) {
+				return s.options.Resolver.Resolve(nameCtx, connection)
+			}
+			processConnections := byPID[process.PID]
+			if s.hostPlane != nil && s.selfPID > 0 && process.PID == s.selfPID {
+				processConnections = withoutReleaseManifestFetch(processConnections, resolve)
+			}
+			result = planeB(processConnections, process.Name, s.options.Providers, resolve, sanctioned)
 			signals = append(signals, result.signals...)
 
 			// planeB already resolved every public peer and counted the ones

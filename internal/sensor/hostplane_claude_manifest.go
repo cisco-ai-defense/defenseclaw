@@ -20,6 +20,7 @@ import (
 
 	"golang.org/x/crypto/openpgp" //nolint:staticcheck // Release manifests use OpenPGP signatures.
 
+	"github.com/defenseclaw/defenseclaw/internal/sensor/netprobe"
 	"github.com/defenseclaw/defenseclaw/internal/sensor/plane"
 )
 
@@ -154,16 +155,43 @@ func (m *releaseManifests) load(version string, asked time.Time) {
 	}
 }
 
+// claudeReleaseHost serves the signed release manifests. It is the only host
+// fetchClaudeReleaseChecksums reaches, redirects included.
+const claudeReleaseHost = "downloads.claude.ai"
+
+// withoutReleaseManifestFetch drops the connections to the release manifest
+// host from the gateway's own connections: its fetch below is DefenseClaw's
+// egress, not AI use (cowork-1-0-8 GAP-0068). The caller passes only the
+// connections of this process, matched by its pid (os.Getpid), never by
+// name: another process going to that host, a process merely named like the
+// gateway, and the gateway going anywhere else are all still scored.
+func withoutReleaseManifestFetch(
+	connections []netprobe.Connection,
+	resolve func(netprobe.Connection) (hostname string, confidence float64, source string),
+) []netprobe.Connection {
+	kept := make([]netprobe.Connection, 0, len(connections))
+	for _, connection := range connections {
+		if connection.State != netprobe.StateListen && !connection.Loopback() && connection.Public() &&
+			connection.RemotePort == 443 {
+			if hostname, _, _ := resolve(connection); strings.EqualFold(hostname, claudeReleaseHost) {
+				continue
+			}
+		}
+		kept = append(kept, connection)
+	}
+	return kept
+}
+
 func fetchClaudeReleaseChecksums(version string) ([][32]byte, bool) {
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 	defer cancel()
 	client := &http.Client{CheckRedirect: func(req *http.Request, _ []*http.Request) error {
-		if req.URL.Scheme != "https" || req.URL.Host != "downloads.claude.ai" {
+		if req.URL.Scheme != "https" || req.URL.Host != claudeReleaseHost {
 			return http.ErrUseLastResponse
 		}
 		return nil
 	}}
-	base := "https://downloads.claude.ai/claude-code-releases/" + version + "/manifest.json"
+	base := "https://" + claudeReleaseHost + "/claude-code-releases/" + version + "/manifest.json"
 	manifest, ok := readClaudeReleaseFile(ctx, client, base, 1<<20)
 	if !ok {
 		return nil, false
