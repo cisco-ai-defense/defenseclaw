@@ -333,6 +333,8 @@ def _cowork_target(target: str, surface: str) -> str:
     if surface != "cowork":
         return target
     head, sep, rest = target.partition(":")
+    if sep and head.strip().lower() == "cowork":
+        return target
     if sep and head.strip().lower() == "claudecode":
         return f"cowork:{rest}"
     return f"cowork {target}" if target else "cowork"
@@ -1407,10 +1409,16 @@ class AlertsPanelModel:
                 facts=event.facts,
             )
         connector = (hydrated.connector if hydrated is not None else "") or event.connector
+        surface = event.surface
         event = hydrated or event
         # The list shows one Copilot hook target for both harnesses; so do
         # the detail pane and its History (GAP-2619).
         event = replace(event, target=copilot_hook_target(event.target, connector))
+        history_target = event.target
+        if surface and hydrated is not None and event.target and not _is_hook_event(event):
+            # The stored row names the connector; the list row and the Surface
+            # line say Cowork, so the Target line does too (GAP-0056).
+            event = replace(event, target=_cowork_target(event.target, surface), surface=surface)
         if event.action == "scan-finding":
             # A hook-rule finding carries the rule, not the outcome; the
             # connector-hook row of the same request says whether the call was
@@ -1427,7 +1435,7 @@ class AlertsPanelModel:
         return AlertDetailInfo(
             event=event,
             findings=_list_findings_by_run_id(self.store, event.run_id),
-            history=_list_events_by_target(self.store, event.target, 10, connector),
+            history=_list_events_by_target(self.store, history_target, 10, connector),
         )
 
     def detail_pairs(self) -> tuple[tuple[str, str], ...]:

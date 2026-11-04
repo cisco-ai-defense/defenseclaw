@@ -17,7 +17,13 @@ from types import SimpleNamespace
 
 import pytest
 from defenseclaw.tui.app import _fetch_cowork_status, overview_metrics_compact
-from defenseclaw.tui.panels.alerts import _evaluation_surfaces, _v8_alert_event, surface_label
+from defenseclaw.tui.panels.alerts import (
+    AlertEvent,
+    AlertsPanelModel,
+    _evaluation_surfaces,
+    _v8_alert_event,
+    surface_label,
+)
 from defenseclaw.tui.panels.setup import _build_connector_setup_args, connector_setup_wizard_fields
 from defenseclaw.tui.services.overview_state import (
     ConnectorHealth,
@@ -117,6 +123,28 @@ def test_a_cowork_finding_says_cowork_in_row_and_detail() -> None:
     plain = _v8_alert_event(_row("f3", "security.finding", {"defenseclaw.finding.target_ref": "claudecode:PreToolUse"}))
     assert plain.target == "claudecode:PreToolUse" and plain.surface == ""
     assert surface_label("cowork") == "Cowork (Claude Code)"
+
+
+def test_a_cowork_alert_detail_names_the_same_target_as_its_row() -> None:
+    # GAP-0056: the stored audit row says claudecode:PreToolUse; the detail Target must match the list row.
+    row = _row(
+        "f1",
+        "security.finding",
+        {"defenseclaw.finding.target_ref": "claudecode:PreToolUse", "defenseclaw.agent.surface": "cowork"},
+    )
+    projected = _v8_alert_event(row)
+    assert projected.target == "cowork:PreToolUse"
+
+    class Store:
+        @staticmethod
+        def get_event(_event_id: str) -> AlertEvent:
+            return AlertEvent(id="f1", severity="CRITICAL", action="scan-finding", target="claudecode:PreToolUse")
+
+    model = AlertsPanelModel(store=Store())
+    model.set_events([projected])
+    model.detail_open = True
+    assert "Target: cowork:PreToolUse" in model.detail_text()
+    assert ("Target", "cowork:PreToolUse") in model.detail_pairs()
 
 
 def test_setup_offers_setup_cowork() -> None:
