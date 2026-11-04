@@ -810,9 +810,13 @@ func (w *answerWatchdog) watch(deadline time.Time) {
 	}
 	// A call still waiting answerWatchdogLogPrepareLead before its deadline
 	// opens its log now, so the line of the answer below is one append.
-	// Short test and already-running calls keep a chance to finish before
-	// preparing a file they will not use.
-	lead := min(w.prepareLead, max(time.Until(deadline)/2, 0))
+	// Give quick answers a short window to finish without opening a log,
+	// while leaving enough time to prepare the marker before the deadline.
+	remaining := max(time.Until(deadline), 0)
+	lead := min(w.prepareLead, remaining)
+	if remaining > 100*time.Millisecond {
+		lead = min(w.prepareLead, remaining-100*time.Millisecond)
+	}
 	prepare := time.AfterFunc(time.Until(deadline.Add(-lead)), func() {
 		w.failureLog.prepare(w.failureLogHome)
 	})
