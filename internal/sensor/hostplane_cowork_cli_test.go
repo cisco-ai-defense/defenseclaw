@@ -42,6 +42,8 @@ func TestClaudeClientClassifiesFromExecTimeImageDigest(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			host := newHost(newFake(fullCoverage()))
 			host.indicators.KeepClientMCP = tc.keepClientMCP
+			// A version without a manifest is held for it (GAP-0065), then reported.
+			host.coldHold, host.coldPoll = 20*time.Millisecond, 5*time.Millisecond
 			host.clientChecksums = func(version string) ([][32]byte, bool) {
 				if version != "2.1.317" {
 					return nil, false
@@ -55,6 +57,7 @@ func TestClaudeClientClassifiesFromExecTimeImageDigest(t *testing.T) {
 				Cmdline: tc.cmdline, UID: &sessionUID, At: time.Unix(1_760_000_000, 0),
 				ImageSHA256: tc.digest, ImageVersion: tc.version,
 			})
+			time.Sleep(5 * host.coldHold)
 			classified, _, _, _ := host.stats()
 			if classified != tc.classified {
 				t.Fatalf("classified=%d, want %d", classified, tc.classified)
@@ -83,6 +86,9 @@ func TestForgedClientVersionsNeverStallTheHostPlane(t *testing.T) {
 	}()
 	host := newHost(newFake(fullCoverage()))
 	host.clientChecksums = manifests.checksums
+	// At most maxHeldWrappers of them wait for a manifest (GAP-0065), and
+	// are reported when the hold ends.
+	host.coldHold, host.coldPoll = 20*time.Millisecond, 5*time.Millisecond
 	uid := os.Getuid() + 1000
 	started := time.Now()
 	for i := range 200 {
@@ -97,6 +103,11 @@ func TestForgedClientVersionsNeverStallTheHostPlane(t *testing.T) {
 		Cmdline: "cat /home/u/.aws/credentials", UID: &uid})
 	if elapsed := time.Since(started); elapsed > 2*time.Second {
 		t.Fatalf("201 events took %v with the manifest fetch blocked", elapsed)
+	}
+	for deadline := time.Now().Add(2 * time.Second); time.Now().Before(deadline); time.Sleep(5 * time.Millisecond) {
+		if classified, _, _, _ := host.stats(); classified >= 200 {
+			break
+		}
 	}
 	if classified, _, _, _ := host.stats(); classified < 200 || host.handled.Load() != 201 {
 		t.Fatalf("classified=%d handled=%d, want the 200 forged versions reported as servers and 201 handled",

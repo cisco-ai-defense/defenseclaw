@@ -91,11 +91,17 @@ type hostPlane struct {
 	// wrapperHold is how long a transparent wrapper's record waits for its
 	// child's exec; zero records it at once.
 	wrapperHold time.Duration
+	// coldHold is how long a client exec's record waits for its release
+	// manifest, polled every coldPoll; zero records it at once.
+	coldHold, coldPoll time.Duration
 
 	mu sync.Mutex
 	// wrappers are the transparent wrapper records waiting for their
 	// child's exec, by the wrapper's pid (GAP-0055).
 	wrappers map[int]*heldWrapper
+	// coldClients are the client exec records waiting for the release
+	// manifest of their version, by pid (GAP-0065).
+	coldClients map[int]*heldWrapper
 	// sessions are keyed by the root process instance, not its pid: an agent
 	// that reuses an exited agent's pid starts its own session (GAP-1372).
 	sessions map[hostSessionKey]*agentchain.Session
@@ -186,6 +192,8 @@ func newHostPlane(
 		source: source, tracker: tracker, indicators: indicators,
 		clientChecksums: claudeReleases.checksums,
 		wrapperHold:     wrapperHold,
+		coldHold:        coldClientHold,
+		coldPoll:        coldClientPoll,
 		window:          window, minStages: minStages,
 		sessions: make(map[hostSessionKey]*agentchain.Session),
 		meta:     make(map[hostSessionKey]*sessionMeta),
@@ -365,7 +373,7 @@ func (h *hostPlane) handle(event plane.Event) {
 				(strings.Contains(lower, "mcp") || strings.Contains(lower, "@modelcontextprotocol/"))
 		}
 	}
-	match, ok := tactics.Classify(tactics.Observation{
+	observation := tactics.Observation{
 		Kind:         string(event.Kind),
 		PID:          event.PID,
 		Name:         event.Name,
@@ -373,7 +381,8 @@ func (h *hostPlane) handle(event plane.Event) {
 		Cmdline:      cmdline,
 		Path:         event.Path,
 		Detail:       event.Detail,
-	}, h.indicators)
+	}
+	match, ok := tactics.Classify(observation, h.indicators)
 	if event.Kind == plane.KindExec {
 		h.mu.Lock()
 		if len(h.wrappers) > 0 {
@@ -399,7 +408,8 @@ func (h *hostPlane) handle(event plane.Event) {
 	instance := h.tracker.InstanceOfProcess(event.PID, event.ExecID)
 	h.mu.Lock()
 	defer h.mu.Unlock()
-	if h.holdWrapperLocked(event, lineage, match, at, instance) {
+	if h.holdWrapperLocked(event, lineage, match, at, instance) ||
+		h.holdColdClientLocked(event, lineage, match, at, instance, observation) {
 		return
 	}
 	h.recordLocked(event, lineage, match, at, instance)

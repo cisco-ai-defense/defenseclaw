@@ -106,6 +106,7 @@ func TestTransparentWrapperOfTheVerifiedClientIsNotReported(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			host := newHost(newFake(fullCoverage()))
 			host.wrapperHold = 30 * time.Millisecond
+			host.coldHold, host.coldPoll = 30*time.Millisecond, 5*time.Millisecond
 			host.indicators.KeepClientMCP = tc.keepClientMCP
 			host.clientChecksums = func(version string) ([][32]byte, bool) {
 				if version != "2.1.317" {
