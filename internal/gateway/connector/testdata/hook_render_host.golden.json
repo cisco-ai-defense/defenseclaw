@@ -74,8 +74,8 @@
     },
     "antigravity-hook.sh": {
       "mode": "-rwx------",
-      "size": 14025,
-      "sha256": "4f1d4a9ec21848b5fcc6aa4668f6e503f475a0966efe8d4765741773968a1fae"
+      "size": 13963,
+      "sha256": "73148d1e08efec0092178e4b7336d3a41d24d768bb766d7fb50db3e510b33d49"
     },
     "inspect-request.sh": {
       "mode": "-rwx------",

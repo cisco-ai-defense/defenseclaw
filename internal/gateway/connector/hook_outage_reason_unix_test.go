@@ -141,7 +141,7 @@ func TestGAP0494ManagedMacAntigravityOutageRenderAndBenignTwin(t *testing.T) {
 		!strings.Contains(answer.Reason, "ask your administrator") ||
 		!strings.Contains(answer.Reason, "enterprise macos status") ||
 		!strings.Contains(answer.Reason, "enterprise_managed_gateway_not_running") ||
-		strings.Contains(stderr, "event-specific failure") {
+		strings.Contains(stderr, "blocking antigravity tool") {
 		t.Fatalf("managed macOS outage: code=%d stdout=%q stderr=%q parse=%v", code, stdout, stderr, err)
 	}
 }
@@ -173,6 +173,9 @@ func TestGAP0494ManagedLinuxAntigravityInstalledShellAndBenignTwin(t *testing.T)
 		"Try again in a moment",
 		"enterprise linux status",
 		"enterprise_managed_gateway_not_running")
+	if strings.Contains(stderr, "blocking antigravity tool") {
+		t.Fatalf("managed Linux outage reported a tool-specific stderr line: %q", stderr)
+	}
 }
 
 func checkOutageDenyReason(t *testing.T, connector string, code, wantCode int, stdout, stderr string, fragments ...string) {
