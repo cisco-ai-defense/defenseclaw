@@ -1609,6 +1609,10 @@ targets:
                 # branch on it; accepting the parameter keeps the mock
                 # signature-compatible with Invoke-DefenseClawUninstall...
                 [switch]$SkipRedactionKeySnapshot,
+                # The production function's Cowork switch (cowork-1-0-8): an
+                # install that delivers Cowork snapshots its host artifacts.
+                # This harness delivers no Cowork; the stub only accepts it.
+                [switch]$CoworkRequested,
                 # The production function's replacement hook, published
                 # before the services stop (GAP-0993). Production types it
                 # [hashtable]; this harness's sources are plain strings, so
