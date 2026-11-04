@@ -314,6 +314,9 @@ func retryTransientOpen(open func() (windows.Handle, error)) (windows.Handle, er
 		if !IsTransientWindowsError(err) {
 			return windows.InvalidHandle, err
 		}
+		if attempt == canonicalOpenAttempts-1 {
+			break
+		}
 		time.Sleep(delay)
 		delay *= 2
 	}

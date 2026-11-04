@@ -32,10 +32,14 @@ const managedFileRestrictiveAttributes = windows.FILE_ATTRIBUTE_READONLY |
 func clearManagedFileRestrictiveAttributes(path string) {
 	cleared, err := ClearRestrictiveFileAttributesNoFollow(path, managedFileRestrictiveAttributes)
 	if err != nil {
-		EmitResilienceEvent(MarkerAccept, map[string]string{
+		fields := map[string]string{
 			"path":   path,
 			"reason": fmt.Sprintf("restrictive file attributes were not cleared: %v", err),
-		})
+		}
+		// Once per path and reason: the Guardian retries on every pass.
+		if advisoryLogDedupe.shouldEmit(path, MarkerAccept, FormatResilienceEvent(MarkerAccept, fields)) {
+			EmitResilienceEvent(MarkerAccept, fields)
+		}
 		return
 	}
 	if cleared != 0 {

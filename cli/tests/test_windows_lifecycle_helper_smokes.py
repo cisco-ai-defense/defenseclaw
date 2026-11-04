@@ -35,13 +35,17 @@ SMOKES = {
 def _engines() -> list[str]:
     # The smoke loads two string helpers by AST and never imports the module,
     # so it also runs under pwsh off Windows.
+    if os.name == "nt":
+        # The machine-wide engines, not PATH: a runner can omit them from PATH
+        # or resolve a WindowsApps alias that fails before the script starts.
+        from tests.test_windows_enterprise_service_contract import windows_powershell_engines
+
+        return windows_powershell_engines() or ["<no-powershell-engine-found>"]
     found: list[str] = []
     for name in ("powershell.exe", "pwsh.exe", "pwsh"):
         path = shutil.which(name)
         if path and os.path.normcase(path) not in {os.path.normcase(p) for p in found}:
             found.append(path)
-    if not found and os.name == "nt":
-        return ["<no-powershell-engine-found>"]
     return found
 
 
