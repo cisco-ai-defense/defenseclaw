@@ -124,7 +124,7 @@ Options:
 
 | Option | Effect |
 | --- | --- |
-| `--yes`, `-y` | Answers yes to setting up the Claude Code connector. Does not open Claude and does not wait, unless you ask for it |
+| `--yes`, `-y`, `--non-interactive` | Answers yes to setting up the Claude Code connector. Does not open Claude and does not wait, unless you ask for it |
 | `--open-claude` / `--no-open-claude` | Opens Claude Desktop after the build. Without either, setup asks |
 | `--wait` / `--no-wait` | Waits for the first Cowork event. The default is to wait |
 | `--timeout SECONDS` | How long to wait. Default 900, from 10 to 3600 |
@@ -156,9 +156,19 @@ Do not publish this zip to your whole organization from Claude's organization se
 
 ### Remove
 
-In Claude Desktop, open **Customize > Plugins**, then the **...** menu on DefenseClaw, and choose **Remove**. DefenseClaw cannot remove an account plugin. `defenseclaw uninstall` and `defenseclaw uninstall --dry-run` print this reminder.
+In Claude Desktop, open **Customize > Plugins**, then the **...** menu on DefenseClaw, and choose **Remove**. DefenseClaw cannot remove an account plugin.
 
 Remove the plugin before you uninstall DefenseClaw. If the hook script is gone and the plugin is still installed, the plugin's hook blocks Cowork tool calls with "DefenseClaw blocked this: its Claude Code hook script is missing or cannot be run". The message tells you to reinstall DefenseClaw and run `defenseclaw setup cowork`, or to remove the plugin in Claude.
+
+How each command treats the plugin:
+
+| Command | What it does about the plugin |
+| --- | --- |
+| `defenseclaw uninstall`, `defenseclaw uninstall --dry-run` | Prints the removal step when `setup cowork` built a plugin from this data folder. The dry run lists it with the plan |
+| `defenseclaw reset` | Deletes the data folder, the hook script and the Cowork state with it. It reads the state first and prints the same removal step when a plugin was built, because the plugin now blocks Cowork tool calls |
+| `defenseclaw setup remove claudecode` | Turns off the Claude Code hooks. It does not touch the plugin in your Claude account and prints no Cowork step. Remove the plugin in Claude too, because Cowork is no longer protected through it |
+
+All three leave the plugin in your Claude account. Only you can remove it.
 
 ## Managed computers
 

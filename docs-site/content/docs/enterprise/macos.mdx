@@ -358,7 +358,7 @@ the upgrade resolver.
 
 Nothing migrates a per-user install. Before you deploy, have each user run
 `defenseclaw uninstall --binaries --yes` (add `--all` to delete `~/.defenseclaw`;
-[Uninstall](/docs/get-started/download)).
+[Uninstall](/docs/get-started/download)). If a user set up Claude Cowork, they also remove the DefenseClaw plugin in Claude Desktop (**Customize > Plugins**, then the **...** menu on DefenseClaw, **Remove**); until then Cowork tool calls are blocked.
 
 A `config.yaml` a per-user install left in `~/.defenseclaw` is not the policy the
 device enforces. The installed managed `defenseclaw` launcher offers only `sandbox`

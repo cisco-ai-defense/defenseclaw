@@ -888,7 +888,7 @@ needed. If an entry cannot be moved, init names it: move it out of the folder, o
 have an administrator delete it, and run `defenseclaw init` again.
 
 Nothing migrates a per-user install. Before you deploy, have each user run
-`defenseclaw uninstall --all --binaries --yes`. Setup needs `--all`: it does not
+`defenseclaw uninstall --all --binaries --yes`. If a user set up Claude Cowork, they also remove the DefenseClaw plugin in Claude Desktop (**Customize > Plugins**, then the **...** menu on DefenseClaw, **Remove**); until then Cowork tool calls are blocked. Setup needs `--all`: it does not
 adopt a `%USERPROFILE%\.defenseclaw` folder a per-user install left, and a first
 install checks every enrolled profile and stops in seconds, naming the folder and
 this command. A folder the account created itself without a per-user product is

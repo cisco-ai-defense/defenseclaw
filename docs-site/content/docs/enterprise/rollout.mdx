@@ -134,7 +134,7 @@ managed install reaches a computer:
 1. Find them: `~/.defenseclaw` (`%USERPROFILE%\.defenseclaw` on Windows), programs in
    `~/.local/bin`.
 2. As that user, run `defenseclaw uninstall --binaries --yes` (add `--all` to delete
-   the data). On Windows always use `--all --binaries --yes`.
+   the data). On Windows always use `--all --binaries --yes`. If the user set up Claude Cowork, they also remove the DefenseClaw plugin in Claude Desktop (**Customize > Plugins**, then the **...** menu on DefenseClaw, **Remove**); until then Cowork tool calls are blocked.
 3. Deploy the managed install.
 
 A per-user gateway listens on the managed port, `127.0.0.1:18970`. If one still
