@@ -71,10 +71,14 @@ func TestEnterpriseHookManifestTrustCheckStandaloneDrift(t *testing.T) {
 		t.Fatal(err)
 	}
 	ownerOnlyDACLForTest(t, fresh)
-	from, _ := windows.UTF16PtrFromString(fresh)
-	to, _ := windows.UTF16PtrFromString(manifest)
-	if err := windows.MoveFileEx(from, to, windows.MOVEFILE_REPLACE_EXISTING|windows.MOVEFILE_WRITE_THROUGH); err != nil {
-		t.Fatalf("replace manifest: %v", err)
+	// [IO.File]::Replace renames the open old file aside, then moves the
+	// fresh one onto the name.
+	for _, move := range [][2]string{{manifest, manifest + ".backup"}, {fresh, manifest}} {
+		from, _ := windows.UTF16PtrFromString(move[0])
+		to, _ := windows.UTF16PtrFromString(move[1])
+		if err := windows.MoveFileEx(from, to, windows.MOVEFILE_WRITE_THROUGH); err != nil {
+			t.Fatalf("move %s to %s: %v", move[0], move[1], err)
+		}
 	}
 	if err := check(manifest); err != nil {
 		t.Fatalf("standalone refused a manifest Setup rewrote: %v", err)
