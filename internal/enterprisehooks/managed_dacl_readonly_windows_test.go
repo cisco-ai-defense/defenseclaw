@@ -206,10 +206,28 @@ func TestWindowsManagedRuntimeInstallPlanRestampsAReadOnlyGrant(t *testing.T) {
 	if err := os.WriteFile(perUser, []byte("gateway: {}\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
+	// Secure Client skips only this user and leaves the folder as it is;
+	// a strict or standalone plan refuses it.
+	skippedPlan, err := PlanWindowsManagedRuntimeRoots(manifest, manifestPath, digest)
+	if err != nil || len(skippedPlan.Roots) != 0 || len(skippedPlan.SkippedProfiles) != 1 ||
+		!strings.Contains(skippedPlan.SkippedProfiles[0].Reason, dataDir+" holds config.yaml") {
+		t.Fatalf("Secure Client install plan over a per-user install folder = %+v, %v; want that user skipped", skippedPlan, err)
+	}
+	if got := windowsReadOnlyTestACECount(t, dataDir); got != canonicalCount+1 {
+		t.Fatalf("skipping the per-user install folder changed its DACL (%d ACEs)", got)
+	}
+	t.Setenv(managed.TrustStrictAncestorsEnv, "1")
 	if _, err := PlanWindowsManagedRuntimeRoots(manifest, manifestPath, digest); err == nil ||
 		!strings.Contains(err.Error(), dataDir+" holds config.yaml") {
-		t.Fatalf("install plan over a per-user install folder = %v, want the refusal", err)
+		t.Fatalf("strict install plan over a per-user install folder = %v, want the refusal", err)
 	}
+	t.Setenv(managed.TrustStrictAncestorsEnv, "")
+	windowsEnterpriseStandaloneProcess = func() bool { return true }
+	if _, err := PlanWindowsManagedRuntimeRoots(manifest, manifestPath, digest); err == nil ||
+		!strings.Contains(err.Error(), dataDir+" holds config.yaml") {
+		t.Fatalf("standalone install plan over a per-user install folder = %v, want the refusal", err)
+	}
+	windowsEnterpriseStandaloneProcess = func() bool { return false }
 	if err := os.Remove(perUser); err != nil {
 		t.Fatal(err)
 	}
