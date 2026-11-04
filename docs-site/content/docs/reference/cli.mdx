@@ -1175,10 +1175,14 @@ refused with exit `3` like `config set` (`guardrail disable` prints `This device
 It has no `version` command (run `defenseclaw.exe --version`) and no `policy activate`
 or `policy edit`: these return an unknown-command error and exit `2`. Its
 `policy` group has `digest`, `evaluate`, `reload`, `show`, `test` and `validate`.
-Commands that read a per-user gateway, such as `status`, `audit findings` and
+Commands that read a per-user gateway, such as `audit findings` and
 `connector list-backups`, exit `1` with `this computer's DefenseClaw is managed by your organization`, say the command has no per-user deployment to check and
 name the administrator's `enterprise windows status --profile standalone`,
-also from an elevated prompt; `audit export` works there. A standard account's
+also from an elevated prompt; `audit export` works there. `status` run by a
+standard account shows that account's own Claude Code and Cowork protection
+state and its own last Cowork event (`--json` adds `deployment_mode:
+managed_enterprise`), which the gateway service answers for the account that
+asks; from an elevated prompt it gives the answer above. A standard account's
 `enterprise windows status` or `verify` only says that it needs an elevated
 prompt. The administrator runs `defenseclaw.exe enterprise ...` from an
 elevated PowerShell.

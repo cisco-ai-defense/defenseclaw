@@ -623,7 +623,7 @@ The policy commands read the managed config, which only administrators can read.
 
 You see: "This computer is managed; use `defenseclaw status` for your protection state, `defenseclaw sandbox status` for your sandboxes and `defenseclaw sandbox policy explain` for your policy. Other commands require an administrator." The command exits `2`. On a managed Linux or macOS computer the packaged `defenseclaw` runs only `defenseclaw sandbox` commands and `defenseclaw status` (your own protection state); everything else belongs to the administrator.
 
-**Fix.** Use `defenseclaw status` to see whether your Claude Code and Cowork are protected, and `defenseclaw sandbox ...` for sandboxes. An administrator runs `defenseclaw-gateway enterprise linux status` (`enterprise macos status` on macOS) as root, by its packaged path. Policy changes go in the admin config.
+**Fix.** Use `defenseclaw status` to see whether your Claude Code and Cowork are protected, and `defenseclaw sandbox ...` for sandboxes. An administrator runs `defenseclaw-gateway enterprise linux status` (`enterprise macos status` on macOS) as root, by its packaged path. Policy changes go in the admin config. On a managed Windows computer a standard account's `defenseclaw.exe status` shows the same own state.
 
 **Check.** `defenseclaw sandbox list` runs.
 

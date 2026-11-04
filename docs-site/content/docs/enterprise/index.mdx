@@ -136,6 +136,12 @@ Windows has no launcher: `defenseclaw.exe` there is the administrator command. I
 | `skill`, `mcp`, `plugin` or `tool` with `block`, `allow` or `unblock` | Exit `3`, naming the `asset_policy` key in the admin config and saying the command did not change it |
 | `init`, `quickstart`, `guardrail`, `policy activate` | Exit `2`: not a command of the administrator's `defenseclaw.exe` |
 
+A standard account's `defenseclaw.exe status` (and `status --json`) shows that
+account's own Claude Code and Cowork protection state and its own last Cowork
+event, which the gateway service reads for the account that asks, never
+another account's. From an elevated prompt `status` names the administrator's
+`enterprise windows status --profile standalone`.
+
 The table below is for a per-user CLI left from an earlier install on Linux and macOS.
 
 ### Local writers refuse

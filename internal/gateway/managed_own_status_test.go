@@ -88,3 +88,62 @@ func TestOwnStatusAnswersOnlyTheCaller(t *testing.T) {
 		t.Fatalf("own status without the Claude Code connector = %s; want not protected", body)
 	}
 }
+
+// cowork-1-0-8 GAP-0060: on a managed Windows computer the gateway answers a
+// standard account's own status for the SID its own-status pipe read from
+// the client token, with the same rule as the hook socket: that account's
+// own state and last Cowork event only. A SID that is not a user account's
+// gets no answer.
+func TestOwnStatusForWindowsAccountAnswersOnlyThatAccount(t *testing.T) {
+	previousEvents, previousName := ownStatusCoworkEvents, ownStatusWindowsAccountName
+	t.Cleanup(func() { ownStatusCoworkEvents, ownStatusWindowsAccountName = previousEvents, previousName })
+	const alice, bob = "S-1-5-21-1004336348-1177238915-682003330-1001", "S-1-5-21-1004336348-1177238915-682003330-1002"
+	mine := time.Date(2026, 11, 4, 13, 0, 0, 0, time.UTC)
+	ownStatusCoworkEvents = func(context.Context, string) ([]enterprisestatus.CoworkAccountEvent, bool, error) {
+		return []enterprisestatus.CoworkAccountEvent{
+			{UserID: bob, UserName: `WIN11\bob`, At: mine.Add(time.Hour)},
+			// The row's SID in another case is still alice's.
+			{UserID: strings.ToLower(alice), UserName: `WIN11\alice`, At: mine},
+		}, false, nil
+	}
+	ownStatusWindowsAccountName = func(sid string) string {
+		if sid == alice {
+			return `WIN11\alice`
+		}
+		return ""
+	}
+	cfg := &config.Config{AuditDB: `C:\ProgramData\Cisco\DefenseClaw\audit.db`}
+	cfg.Guardrail.Mode = "action"
+	cfg.Guardrail.Connector = "claudecode"
+	cfg.Guardrail.Profiles = map[string]config.GuardrailProfile{"secret-admin-profile": {Mode: "observe"}}
+	api := NewAPIServer("127.0.0.1:0", nil, nil, nil, nil, cfg)
+
+	body := api.ownStatusForWindowsAccount(context.Background(), alice)
+	var out map[string]any
+	if err := json.Unmarshal(body, &out); err != nil {
+		t.Fatalf("answer %q: %v", body, err)
+	}
+	account, _ := out["account"].(map[string]any)
+	cowork, _ := out["cowork"].(map[string]any)
+	if out["own"] != true || account["sid"] != alice || account["name"] != `WIN11\alice` || account["uid"] != nil ||
+		cowork["protected"] != true || cowork["last_event_at"] != mine.Format(time.RFC3339) {
+		t.Fatalf("own status for alice = %s", body)
+	}
+	for _, leak := range []string{"bob", "1002", "secret-admin-profile", "audit.db", "ProgramData", "profiles"} {
+		if strings.Contains(string(body), leak) {
+			t.Fatalf("own status names %q: %s", leak, body)
+		}
+	}
+	// An account with no Cowork event of its own sees none of bob's.
+	const carol = "S-1-12-1-3541625939-1147367106-2371843228-3893412310"
+	if body := api.ownStatusForWindowsAccount(context.Background(), carol); !strings.Contains(string(body), carol) || strings.Contains(string(body), "last_event_at") {
+		t.Fatalf("own status for carol = %s", body)
+	}
+	// SYSTEM, a service SID or a well-known group is not an account the
+	// answer is for.
+	for _, sid := range []string{"S-1-5-18", "S-1-5-80-956008885-3418522649-1831038044-1853292631-2271478464", "S-1-1-0", ""} {
+		if body := api.ownStatusForWindowsAccount(context.Background(), sid); body != nil {
+			t.Fatalf("own status for %q = %s; want no answer", sid, body)
+		}
+	}
+}
