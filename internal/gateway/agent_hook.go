@@ -289,6 +289,23 @@ func (a *APIServer) hookPersistenceContext(ctx context.Context) (context.Context
 	return context.WithTimeout(context.WithoutCancel(ctx), agentHookPersistGrace)
 }
 
+// A receipt-capable per-user call has already offered its answer before its
+// terminal records are written. Its pending occurrence is durable, so give
+// finalization a fresh window after earlier telemetry used the ordinary 10 s
+// window. Writes queued in that window finish after its deadline. This does
+// not extend the hook's answer deadline or Secure Client's path.
+func (a *APIServer) hookDeliveredPersistenceContext(ctx context.Context, receiptBacked bool) (context.Context, context.CancelFunc) {
+	if !receiptBacked {
+		return ctx, nil
+	}
+	cfg := a.decisionConfig(ctx)
+	if cfg == nil || cfg.SecureClientIntegration() || cfg.DeploymentMode != "per_user" {
+		return ctx, nil
+	}
+	durableCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 30*time.Second)
+	return audit.WithCallWriteAfterCancel(durableCtx), cancel
+}
+
 // contextWithCancelGrace keeps parent's values and is cancelled grace after
 // parent is done, or when the returned cancel runs.
 func contextWithCancelGrace(parent context.Context, grace time.Duration) (context.Context, context.CancelFunc) {
@@ -863,6 +880,15 @@ func (a *APIServer) handleAgentHook(connectorName string) http.HandlerFunc {
 						persistCtx, cancelPersist = a.hookPersistenceContext(ctx)
 					}
 					if cfg := a.decisionConfig(ctx); cfg == nil || !cfg.SecureClientIntegration() {
+						if answered != nil {
+							if durableCtx, cancelDurable := a.hookDeliveredPersistenceContext(persistCtx, pending != nil && delivery != nil); cancelDurable != nil {
+								if cancelPersist != nil {
+									defer cancelPersist()
+								}
+								persistCtx = durableCtx
+								cancelPersist = cancelDurable
+							}
+						}
 						finalPersistenceCtx = persistCtx
 						if cancelPersist != nil {
 							cancelFinalPersistence = cancelPersist
@@ -1250,6 +1276,13 @@ func (a *APIServer) handleAgentHook(connectorName string) http.HandlerFunc {
 			persistCtx, cancelPersist = a.hookPersistenceContext(ctx)
 		}
 		if cfg := a.decisionConfig(ctx); cfg == nil || !cfg.SecureClientIntegration() {
+			if durableCtx, cancelDurable := a.hookDeliveredPersistenceContext(persistCtx, pending != nil && delivery != nil); cancelDurable != nil {
+				if cancelPersist != nil {
+					defer cancelPersist()
+				}
+				persistCtx = durableCtx
+				cancelPersist = cancelDurable
+			}
 			finalPersistenceCtx = persistCtx
 			if cancelPersist != nil {
 				cancelFinalPersistence = cancelPersist
@@ -1748,10 +1781,17 @@ func (a *APIServer) finalizeAgentHookAnswer(
 			}
 		}
 		if !result.DecisionSettled {
-			decisionCtx, decisionOutcome := audit.WithCallWriteOutcome(ctx)
+			decisionBaseCtx := ctx
+			if ctx.Err() != nil {
+				if renewed, cancel := a.hookDeliveredPersistenceContext(ctx, req.pendingOccurrenceID != "" && delivered); cancel != nil {
+					decisionBaseCtx = renewed
+					defer cancel()
+				}
+			}
+			decisionCtx, decisionOutcome := audit.WithCallWriteOutcome(decisionBaseCtx)
 			decision := a.emitHookDecisionObservabilityV8(decisionCtx, req, resp, env, panicked)
 			// The hook_decision record is committed before the answer.
-			audit.FlushCallWrites(ctx)
+			audit.FlushCallWrites(decisionBaseCtx)
 			result.DecisionSettled = decision.settled() && decisionOutcome.Err() == nil
 			if decision == hookDecisionLogUnbuildable && req.pendingOccurrenceID != "" {
 				fmt.Fprintf(os.Stderr, "[gateway] hook_decision record cannot be built connector=%s event=%s; the connector audit row keeps the decision\n",

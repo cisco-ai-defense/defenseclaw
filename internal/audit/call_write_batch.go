@@ -153,8 +153,10 @@ type callWriteBatchKey struct{}
 type callWriteAfterCancelKey struct{}
 
 // WithCallWriteAfterCancel preserves Secure Client's existing batch-write
-// lifetime when its request ends during a temporary store hold. Other hook
-// batches continue to use their persistence deadline.
+// lifetime when its request ends during a temporary store hold. A per-user
+// receipt-capable call also uses it after the answer is offered and
+// its pending occurrence is journaled. Other hook batches continue to use
+// their persistence deadline.
 func WithCallWriteAfterCancel(ctx context.Context) context.Context {
 	return context.WithValue(ctx, callWriteAfterCancelKey{}, true)
 }
