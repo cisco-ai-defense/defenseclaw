@@ -14147,6 +14147,7 @@ function Get-DefenseClawLayout {
         ClaudeEffectivePolicyVerified = $false
         ClaudeTargetEnabled = $false
         CodexTargetEnabled = $false
+        CodexRequirementsConflict = ''
         CursorTargetEnabled = $false
         CertificationCodexHome = [string]$CertificationCodexHome
     }
@@ -25185,12 +25186,34 @@ function Invoke-DefenseClawCodexRequirementsCommand {
             [bool]$Layout.ClaudeEffectivePolicyVerified) {
             throw "Codex requirements $Action Claude effective-policy evidence does not match the protected live verification result"
         }
+        # Secure Client only: the administrator's requirements.toml turns
+        # DefenseClaw's managed Codex hooks off (allow_managed_hooks_only=false,
+        # features.hooks=false or hooks.state). The helper wrote nothing and
+        # reports ok but not security-complete; Codex stays unhooked on this
+        # host, every Codex row fails in the Guardian, and the install goes on
+        # for the other agents.
+        $codexConflict = ''
+        $conflictProperty = $report.PSObject.Properties['codex_requirements_conflict']
+        if ($null -ne $conflictProperty -and
+            -not [string]::IsNullOrWhiteSpace([string]$conflictProperty.Value)) {
+            if ((Test-DefenseClawStandaloneProfile) -or (Test-DefenseClawTrustStrictAncestors)) {
+                throw "Codex requirements $Action reported an administrator conflict outside Secure Client: $([string]$conflictProperty.Value)"
+            }
+            $codexConflict = [string]$conflictProperty.Value
+            Write-DefenseClawResilienceEvent -Marker defenseclaw_degraded -Fields @{
+                subsystem = 'codex_requirements'
+                path      = [string]$Layout.CodexMachinePolicyPath
+                reason    = "Codex is not hooked on this host: the administrator's requirements.toml turns DefenseClaw managed hooks off ($(ConvertTo-DefenseClawBoundedDiagnostic -Value $codexConflict)); other agents are unaffected"
+            }
+        }
+        $Layout.CodexRequirementsConflict = $codexConflict
         $expectedSecurityComplete = [bool](
             ([bool]$report.claude_target_enabled -or
                 [bool]$report.codex_target_enabled -or
                 [bool]$report.cursor_target_enabled) -and
             (-not [bool]$report.claude_target_enabled -or
-                [bool]$Layout.ClaudeEffectivePolicyVerified)
+                [bool]$Layout.ClaudeEffectivePolicyVerified) -and
+            [string]::IsNullOrEmpty($codexConflict)
         )
         if ([bool]$report.security_complete -ne $expectedSecurityComplete) {
             throw "Codex requirements $Action aggregate security result disagrees with protected evidence"
@@ -25199,7 +25222,8 @@ function Invoke-DefenseClawCodexRequirementsCommand {
         $Layout.CodexTargetEnabled = [bool]$report.codex_target_enabled
         $Layout.CursorTargetEnabled = [bool]$report.cursor_target_enabled
         if ([bool]$Layout.CodexTargetEnabled) {
-            if ($Action -in @('reconcile', 'verify')) {
+            if ($Action -in @('reconcile', 'verify') -and
+                [string]::IsNullOrEmpty($codexConflict)) {
                 if (@($report.managed_events).Count -ne 10) {
                     throw "Codex requirements $Action did not attest all 10 managed hook groups"
                 }
@@ -40450,8 +40474,12 @@ function Invoke-DefenseClawInstallLikeLifecycle {
             Set-DefenseClawManagedAcls `
                 -Layout $Layout `
                 -GatewayServiceName $GatewayServiceName
-            Assert-DefenseClawCodexMachinePolicyFile -Layout $Layout
-            Assert-DefenseClawCodexManagedHooksStateFile -Layout $Layout
+            # An administrator conflict wrote no DefenseClaw policy or state
+            # (Secure Client; logged by the report check above).
+            if ([string]::IsNullOrEmpty([string]$Layout.CodexRequirementsConflict)) {
+                Assert-DefenseClawCodexMachinePolicyFile -Layout $Layout
+                Assert-DefenseClawCodexManagedHooksStateFile -Layout $Layout
+            }
         }
         elseif ($priorCodexTargetEnabled) {
             $codexRemoval = Invoke-DefenseClawCodexRequirementsCommand `

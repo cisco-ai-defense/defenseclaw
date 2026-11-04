@@ -5,6 +5,7 @@ package connector
 
 import (
 	"bytes"
+	"errors"
 	"strings"
 	"testing"
 
@@ -586,5 +587,52 @@ func TestWindowsCodexAdoptRequirementsPreimageExistence(t *testing.T) {
 	adoption, err = windowsCodexAdoptRequirements(nil, false, nil, opts)
 	if err != nil || adoption.preimageExisted || len(adoption.preimage) != 0 {
 		t.Fatalf("absent requirements: %q, %t, %v", adoption.preimage, adoption.preimageExisted, err)
+	}
+}
+
+// An administrator setting that turns DefenseClaw's managed Codex hooks off
+// is a typed conflict: Secure Client reports it and leaves Codex unhooked
+// instead of failing the lifecycle. Reconcile returns the same error with the
+// message it always had, and the read-only check never changes the file.
+func TestCodexRequirementsAdminConflictIsTypedAndReadOnly(t *testing.T) {
+	cases := []struct {
+		want string
+		cfg  func() map[string]interface{}
+	}{
+		{"allow_managed_hooks_only=false conflicts with required DefenseClaw managed-hook isolation",
+			func() map[string]interface{} { return map[string]interface{}{"allow_managed_hooks_only": false} }},
+		{"features.hooks=false conflicts with required DefenseClaw managed hooks",
+			func() map[string]interface{} {
+				return map[string]interface{}{"features": map[string]interface{}{"hooks": false}}
+			}},
+		{"hooks.state is not valid in DefenseClaw managed requirements",
+			func() map[string]interface{} {
+				return map[string]interface{}{"hooks": map[string]interface{}{"state": map[string]interface{}{}}}
+			}},
+	}
+	layout := windowsCodexMachineLayout(testWindowsCodexMachineOptions())
+	for _, tc := range cases {
+		cfg := tc.cfg()
+		before, _ := toml.Marshal(cfg)
+		err := codexRequirementsAdminConflict(cfg)
+		if !errors.Is(err, ErrCodexRequirementsAdminConflict) || err.Error() != tc.want {
+			t.Fatalf("conflict check = %v, want typed %q", err, tc.want)
+		}
+		if after, _ := toml.Marshal(cfg); !bytes.Equal(before, after) {
+			t.Fatalf("conflict check changed the requirements:\n%s\n%s", before, after)
+		}
+		if err := layout.reconcile(tc.cfg()); !errors.Is(err, ErrCodexRequirementsAdminConflict) || err.Error() != tc.want {
+			t.Fatalf("reconcile = %v, want typed %q", err, tc.want)
+		}
+	}
+	allowed := map[string]interface{}{
+		"allow_managed_hooks_only": true,
+		"features":                 map[string]interface{}{"hooks": true},
+	}
+	if err := codexRequirementsAdminConflict(allowed); err != nil {
+		t.Fatalf("requirements that keep managed hooks on reported a conflict: %v", err)
+	}
+	if err := layout.reconcile(map[string]interface{}{"features": "x"}); errors.Is(err, ErrCodexRequirementsAdminConflict) {
+		t.Fatalf("an unsupported type is not an administrator conflict: %v", err)
 	}
 }

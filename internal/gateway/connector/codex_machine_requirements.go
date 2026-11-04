@@ -140,6 +140,12 @@ type WindowsCodexMachineRequirementsReport struct {
 	// requirements bytes. It is advisory: verification still succeeds and the
 	// next privileged reconcile refreshes the pin.
 	PinMismatch bool `json:"pin_mismatch,omitempty"`
+	// CodexRequirementsConflict names the administrator setting in the
+	// machine requirements that turns DefenseClaw's managed Codex hooks off.
+	// Set only on Secure Client, where reconcile and verify then report ok
+	// and not security-complete instead of failing the lifecycle; DefenseClaw
+	// writes nothing and never overrides the setting.
+	CodexRequirementsConflict string `json:"codex_requirements_conflict,omitempty"`
 }
 
 type windowsCodexMachineOwnership struct {
@@ -578,6 +584,39 @@ func (l codexMachineRequirementsLayout) groupMatches(raw interface{}, expected c
 	return ok && timeout == expected.timeout
 }
 
+// ErrCodexRequirementsAdminConflict matches, with errors.Is, an
+// administrator setting in the Codex machine requirements that turns
+// DefenseClaw's managed hooks off: allow_managed_hooks_only=false,
+// features.hooks=false, or a hooks.state table.
+var ErrCodexRequirementsAdminConflict = errors.New("Codex machine requirements turn DefenseClaw managed hooks off")
+
+type codexRequirementsAdminConflictError struct{ msg string }
+
+func (e codexRequirementsAdminConflictError) Error() string { return e.msg }
+
+func (e codexRequirementsAdminConflictError) Is(target error) bool {
+	return target == ErrCodexRequirementsAdminConflict
+}
+
+// codexRequirementsAdminConflict reports the administrator setting in cfg
+// that turns DefenseClaw managed hooks off, without changing cfg.
+func codexRequirementsAdminConflict(cfg map[string]interface{}) error {
+	if value, ok := cfg["allow_managed_hooks_only"].(bool); ok && !value {
+		return codexRequirementsAdminConflictError{"allow_managed_hooks_only=false conflicts with required DefenseClaw managed-hook isolation"}
+	}
+	if features, ok := cfg["features"].(map[string]interface{}); ok {
+		if value, ok := features["hooks"].(bool); ok && !value {
+			return codexRequirementsAdminConflictError{"features.hooks=false conflicts with required DefenseClaw managed hooks"}
+		}
+	}
+	if hooks, ok := cfg["hooks"].(map[string]interface{}); ok {
+		if _, present := hooks["state"]; present {
+			return codexRequirementsAdminConflictError{"hooks.state is not valid in DefenseClaw managed requirements"}
+		}
+	}
+	return nil
+}
+
 // reconcile merges the DefenseClaw managed hook matrix into cfg in place,
 // preserving unrelated administrator content and refusing contradictory
 // isolation controls.
@@ -588,7 +627,7 @@ func (l codexMachineRequirementsLayout) reconcile(cfg map[string]interface{}) er
 			return fmt.Errorf("allow_managed_hooks_only has unsupported type %T", existing)
 		}
 		if !value {
-			return errors.New("allow_managed_hooks_only=false conflicts with required DefenseClaw managed-hook isolation")
+			return codexRequirementsAdminConflictError{"allow_managed_hooks_only=false conflicts with required DefenseClaw managed-hook isolation"}
 		}
 	}
 	cfg["allow_managed_hooks_only"] = true
@@ -606,7 +645,7 @@ func (l codexMachineRequirementsLayout) reconcile(cfg map[string]interface{}) er
 			return fmt.Errorf("features.hooks has unsupported type %T", existing)
 		}
 		if !value {
-			return errors.New("features.hooks=false conflicts with required DefenseClaw managed hooks")
+			return codexRequirementsAdminConflictError{"features.hooks=false conflicts with required DefenseClaw managed hooks"}
 		}
 	}
 	features["hooks"] = true
@@ -620,7 +659,7 @@ func (l codexMachineRequirementsLayout) reconcile(cfg map[string]interface{}) er
 		hooks = map[string]interface{}{}
 	}
 	if _, present := hooks["state"]; present {
-		return errors.New("hooks.state is not valid in DefenseClaw managed requirements")
+		return codexRequirementsAdminConflictError{"hooks.state is not valid in DefenseClaw managed requirements"}
 	}
 	if existing, present := hooks[l.managedDirKey]; present {
 		value, ok := existing.(string)
