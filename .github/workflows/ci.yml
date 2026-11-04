@@ -1138,7 +1138,7 @@ jobs:
     # check on Linux.
     # On macOS the Go tests run on separate runners so that each stays under
     # 15 minutes: the lifecycle packages, the darwin paths of the small
-    # connector packages (hookexec alone takes ~11 minutes), the unix and
+    # connector packages (hookexec in two parts), the unix and
     # darwin tests of internal/gateway and internal/cli ("darwin gateway and
     # cli"), and the connector package in four time-balanced parts
     # ("darwin connector", scripts/test-timings/go-darwin.json; each part
@@ -1178,6 +1178,11 @@ jobs:
           - os: macos-latest
             label: macos-latest darwin paths
             part: darwin
+            shard: 0
+          - os: macos-latest
+            label: macos-latest darwin paths 2 of 2
+            part: darwin
+            shard: 1
           - os: macos-latest
             label: macos-latest darwin gateway and cli
             part: darwin-unix
@@ -1244,6 +1249,8 @@ jobs:
         # (hookexec and the /etc/codex requirements path included).
         if: runner.os == 'macOS' && matrix.part == 'darwin'
         shell: bash
+        env:
+          GO_TEST_SHARD: ${{ matrix.shard }}
         run: |
           set -euo pipefail
           # The runner's default TMPDIR is under /var, a symbolic link to
@@ -1252,9 +1259,21 @@ jobs:
           mkdir -p "$RUNNER_TEMP/go-tmp"
           TMPDIR="$(cd "$RUNNER_TEMP/go-tmp" && pwd -P)"
           export TMPDIR
-          # The connector package itself runs in the darwin-connector parts.
-          go test -count=1 -timeout 14m ./internal/agentprocess/... ./internal/agentidentity/... \
-            $(go list ./internal/gateway/connector/... | grep -v '/internal/gateway/connector$')
+          if [ "$GO_TEST_SHARD" = 0 ]; then
+            # The connector package itself runs in the darwin-connector parts.
+            go test -count=1 -timeout 14m ./internal/agentprocess/... ./internal/agentidentity/... \
+              $(go list ./internal/gateway/connector/... | grep -v -e '/internal/gateway/connector$' -e '/connector/hookexec$')
+          fi
+          # hookexec took ~11 minutes here, and with the hook answer and
+          # gateway-start tests of 1.0.7 it ran past the 14-minute -timeout,
+          # so its tests run in two time-balanced parts (go_test_shards.py
+          # covers every test exactly once; one test alone takes ~200 s).
+          test_regex="$(python3 scripts/go_test_shards.py \
+            --package-dir internal/gateway/connector/hookexec \
+            --timings scripts/test-timings/go-darwin.json \
+            --shard-count 2 \
+            --shard-index "$GO_TEST_SHARD")"
+          go test -count=1 -timeout 14m -run "$test_regex" ./internal/gateway/connector/hookexec
       - name: Go tests of the darwin paths in the gateway and CLI packages
         # In internal/gateway and internal/cli, the tests of their darwin,
         # unix, linux||darwin and !windows test files plus the foreign-hook

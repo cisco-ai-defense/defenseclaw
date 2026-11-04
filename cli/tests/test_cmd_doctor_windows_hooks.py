@@ -173,10 +173,11 @@ class WindowsHookDoctorTests(unittest.TestCase):
         legacy: bool = False,
         unqualified: bool = False,
         start_process: bool = False,
+        constrained_fail_open: bool = False,
     ) -> str:
         literal = str(runtime).replace("'", "''")
-        if legacy and (unqualified or start_process):
-            raise ValueError("legacy and Start-Process fixtures are mutually exclusive")
+        if legacy + unqualified + start_process + constrained_fail_open > 1:
+            raise ValueError("launcher fixture flags are mutually exclusive")
         arguments = ["hook", "--connector", connector]
         if event:
             arguments += ["--event", event]
@@ -189,13 +190,16 @@ class WindowsHookDoctorTests(unittest.TestCase):
                 f"& '{literal}' hook --connector {connector}; exit $LASTEXITCODE"
             )
         elif not (unqualified or start_process) and connector != "devin":
+            # The gateway's windowsAwaitedHookStatements form; bridges rendered
+            # before the Constrained Language fail-closed exit lack it.
             quoted = " ".join(f"'{argument}'" for argument in arguments)
+            fail_closed = "" if constrained_fail_open else "if ($null -eq $LASTEXITCODE) { exit 1 }; "
             script = (
                 "$ErrorActionPreference='Stop'; "
                 "$env:NoDefaultCurrentDirectoryInExePath='1'; "
                 "if ($ExecutionContext.SessionState.LanguageMode -ne 'FullLanguage') { "
                 f"$ErrorActionPreference='Continue'; & '{literal}' {quoted} "
-                "| Microsoft.PowerShell.Core\\Out-Host; exit $LASTEXITCODE }; "
+                f"| Microsoft.PowerShell.Core\\Out-Host; {fail_closed}exit $LASTEXITCODE }}; "
                 f"$hookStart=[System.Diagnostics.ProcessStartInfo]::new('{literal}','{' '.join(arguments)}'); "
                 "$hookStart.UseShellExecute=$false; "
                 "$hookStart.RedirectStandardError=$true; "
@@ -1983,6 +1987,18 @@ class WindowsHookDoctorTests(unittest.TestCase):
 
         self.assertEqual(check.state, "stale", check.detail)
         self.assertIn("loses the status of a hook that exits at once", check.detail)
+        self.assertIn("repair", check.detail)
+        self.assertTrue(doctor_hooks._managed_hook_command(command, "codex"))
+
+    def test_codex_awaited_bridge_without_constrained_language_fail_closed_requires_repair(self) -> None:
+        runtime = self._runtime()
+        command = self._encoded_hook_command(runtime, constrained_fail_open=True)
+        config = self._config("codex", command, codex_features=False)
+
+        check = self._validate("codex", config)
+
+        self.assertEqual(check.state, "stale", check.detail)
+        self.assertIn("exits 0 in Constrained Language mode", check.detail)
         self.assertIn("repair", check.detail)
         self.assertTrue(doctor_hooks._managed_hook_command(command, "codex"))
 

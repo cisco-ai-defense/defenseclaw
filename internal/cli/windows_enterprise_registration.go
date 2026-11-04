@@ -133,14 +133,6 @@ func observeWindowsEnterpriseStandaloneResult(result *enterprisestatus.Result, o
 	return path
 }
 
-func windowsEnterpriseMutationAction(action string) bool {
-	switch action {
-	case "install", "upgrade", "repair", "ensure":
-		return true
-	}
-	return false
-}
-
 // updateWindowsEnterpriseRegistration publishes the marker and ARP entry
 // after a successful mutation and removes them after a successful
 // uninstall. A failed run, and Setup's transaction recovery, leave the

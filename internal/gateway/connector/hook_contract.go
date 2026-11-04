@@ -68,9 +68,19 @@ type HookContract struct {
 	ResponseFieldName       string
 	Events                  []string
 	AIDSurfaces             []string
-	Capabilities            HookCapability
-	SupportsTraceparent     bool
-	NativeOTLP              bool
+	// AIDSurfaceEvents names, per AID surface, the connector's own hook events
+	// that reach Cisco AI Defense. AIDWireVersion names the encoding they are
+	// sent in, and the send path carries a tool call only for the version it
+	// implements. Both are mirrored in the manifest, so a change to either fails
+	// the parity test until it is declared.
+	AIDSurfaceEvents map[string][]string
+	AIDWireVersion   string
+	// AIDToolCallShapes records the tools the contract's goldens show reaching
+	// AID as a tool call. See AIDToolCallShape.
+	AIDToolCallShapes   []AIDToolCallShape
+	Capabilities        HookCapability
+	SupportsTraceparent bool
+	NativeOTLP          bool
 	// ToolCallLifecycle declares which hook events are safe inputs to the
 	// structured, stateful tool-call path. Its nested version is independent
 	// of this vendor hook contract's version.
@@ -1017,6 +1027,8 @@ func hookContractsForOS(connectorName, goos string) []HookContract {
 		contract.HookConfigPathTemplates = append([]string(nil), contract.HookConfigPathTemplates...)
 		contract.Events = append([]string(nil), contract.Events...)
 		contract.AIDSurfaces = append([]string(nil), contract.AIDSurfaces...)
+		contract.AIDSurfaceEvents = copyAIDSurfaceEvents(contract.AIDSurfaceEvents)
+		contract.AIDToolCallShapes = append([]AIDToolCallShape(nil), contract.AIDToolCallShapes...)
 		contract.Notes = append([]string(nil), contract.Notes...)
 
 		// Windows and macOS stay on the Devin build they were reviewed
@@ -1572,6 +1584,7 @@ func ApplyHookContract(profile HookProfile, opts SetupOpts) HookProfile {
 	profile.HookConfigPathTemplates = append([]string(nil), contract.HookConfigPathTemplates...)
 	profile.SupportedEvents = append([]string(nil), contract.Events...)
 	profile.AIDSurfaces = append([]string(nil), contract.AIDSurfaces...)
+	profile.AIDWireVersion = contract.AIDWireVersion
 	profile.SupportsTraceparent = contract.SupportsTraceparent
 	profile.ResponseFieldName = contract.ResponseFieldName
 	profile.ContentEnvelope = contract.ContentEnvelope.clone()
@@ -1606,6 +1619,14 @@ func HookProfileAIDSurfaceEnabled(profile HookProfile, surface string) bool {
 		}
 	}
 	return false
+}
+
+// HookProfileCarriesAIDToolCall reports whether the resolved contract declares
+// the tool_call surface in the encoding the send path implements. Anything
+// else, including no resolved contract, is sent to AID as text alone.
+func HookProfileCarriesAIDToolCall(profile HookProfile) bool {
+	return profile.AIDWireVersion == AIDWireVersionChatToolCalls &&
+		HookProfileAIDSurfaceEnabled(profile, AIDSurfaceToolCall)
 }
 
 func normalizeConnectorName(name string) string {

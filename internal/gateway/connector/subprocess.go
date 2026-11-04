@@ -29,7 +29,6 @@ import (
 	"runtime"
 	"sort"
 	"strings"
-	"text/template"
 
 	"github.com/defenseclaw/defenseclaw/internal/lazyregexp"
 	"github.com/defenseclaw/defenseclaw/internal/pathidentity"
@@ -103,7 +102,10 @@ type templateData struct {
 	WindowsPowerShellJS string
 	FailMode            string // Rendered non-outage mode; per-user hooks bake "closed" and ask the current config for a classified outage.
 	Managed             bool
-	SecureClient        bool // render-time profile marker for Unix shell identity headers
+	// ManagedShellGuard renders the managed shell prologue (fail-mode exit
+	// guard, stderr hygiene) into a Secure Client macOS connector hook.
+	ManagedShellGuard bool
+	SecureClient      bool // render-time profile marker for Unix shell identity headers
 	// SecureClientDelivery marks a Secure Client render on a verified install.
 	// Every shell hook uses the installed mode, never the agent environment.
 	SecureClientDelivery bool
@@ -813,6 +815,7 @@ func renderHookScripts(apiAddr, failMode, tokenFile string, extras []string, man
 		APIToken:             "",
 		FailMode:             normalizeHookFailMode(failMode),
 		Managed:              managed,
+		ManagedShellGuard:    managedShellGuardEnabled(managed) && secureClient,
 		SecureClient:         secureClient,
 		SecureClientDelivery: secureClient && secureClientDelivery,
 		TokenFile:            tokenFile,
@@ -2392,6 +2395,11 @@ func readStableHookRuntimeSidecar(
 	)
 }
 
+// ErrManagedRuntimeFileTooLarge marks a managed runtime file larger than its
+// caller's read ceiling, so callers can tell an enlarged file from a denied
+// or busy one.
+var ErrManagedRuntimeFileTooLarge = errors.New("managed runtime file is larger than its read limit")
+
 // ReadManagedHookRuntimeFile reads an already-authorized target-owned runtime
 // leaf through an identity-pinned, no-reparse, single-link handle. Callers
 // provide a format-specific allocation ceiling; trust in the owning directory
@@ -2436,9 +2444,10 @@ func readStableManagedRuntimeFileForOwner(
 	}
 	if expected.Size() < 0 || expected.Size() > maxBytes {
 		return nil, false, fmt.Errorf(
-			"%s exceeds %d-byte limit",
+			"%s exceeds %d-byte limit: %w",
 			label,
 			maxBytes,
+			ErrManagedRuntimeFileTooLarge,
 		)
 	}
 	file, err := openConnectorStateFileWithRetry(path)
@@ -2467,9 +2476,10 @@ func readStableManagedRuntimeFileForOwner(
 		}
 		if int64(len(data)) > maxBytes {
 			return nil, fmt.Errorf(
-				"%s exceeds %d-byte limit",
+				"%s exceeds %d-byte limit: %w",
 				label,
 				maxBytes,
+				ErrManagedRuntimeFileTooLarge,
 			)
 		}
 		return data, nil
@@ -2931,7 +2941,7 @@ func (d templateData) ManagedOutageClosed() bool {
 }
 
 func renderTemplate(tmpl string, data templateData) (string, error) {
-	t, err := template.New("").Parse(tmpl)
+	t, err := parseHookTemplate(tmpl)
 	if err != nil {
 		return "", err
 	}

@@ -36,15 +36,6 @@ func otlpOpenNoFollow() int {
 	return syscall.O_NOFOLLOW
 }
 
-// otlpValidatePerm enforces that the token file is not group/other accessible.
-// On Unix the file is created 0600, so anything else is a tampering signal.
-func otlpValidatePerm(path string, info os.FileInfo) error {
-	if mode := info.Mode().Perm(); mode != 0o600 {
-		return fmt.Errorf("OTLP path-token %s has mode %o, want 600", path, mode)
-	}
-	return nil
-}
-
 // otlpValidateOwner checks that the file at the given path is owned by the
 // effective user performing the filesystem operation. Enterprise hook
 // guardians keep a real uid of 0 while temporarily dropping their effective
@@ -53,7 +44,7 @@ func otlpValidatePerm(path string, info os.FileInfo) error {
 func otlpValidateOwner(path string, info os.FileInfo) error {
 	if stat, ok := info.Sys().(*syscall.Stat_t); ok {
 		if int(stat.Uid) != os.Geteuid() && !hookAPITrustedOwner(stat.Uid) {
-			return fmt.Errorf("OTLP path-token %s uid %d is not root, effective uid %d, real uid %d, or the defenseclaw service uid", path, stat.Uid, os.Geteuid(), os.Getuid())
+			return tokenPermissionVerdict(fmt.Errorf("OTLP path-token %s uid %d is not root, effective uid %d, real uid %d, or the defenseclaw service uid", path, stat.Uid, os.Geteuid(), os.Getuid()))
 		}
 	}
 	return nil
@@ -69,6 +60,14 @@ func otlpValidateTokenDirectory(_, _ string) error {
 
 func otlpPathTokenNeedsSecureReplacement(_ string) (bool, error) {
 	return false, nil
+}
+
+func otlpPathTokenDriftNeedsRepublish(_ string) bool {
+	return false
+}
+
+func otlpPathTokenDriftDisclosedValue(_ string) bool {
+	return false
 }
 
 func createSecureOTLPPathTokenTempFile(tokenPath string) (*os.File, string, error) {

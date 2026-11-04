@@ -101,6 +101,16 @@ func prepareConnectorTestProcess() {
 		_, _ = io.Copy(io.Discard, os.Stdin)
 		fmt.Print(`{"continue":false,"permission":"deny"}`)
 		os.Exit(2)
+	case "codex-machine-block":
+		payload, err := io.ReadAll(os.Stdin)
+		if err != nil || !bytes.Contains(payload, []byte("codex-machine-probe")) {
+			os.Exit(3)
+		}
+		if strings.Join(os.Args[1:], "|") != "hook|--connector|codex|--enterprise-managed" {
+			os.Exit(4)
+		}
+		fmt.Print(`{"decision":"block","reason":"codex-machine-block"}`)
+		os.Exit(2)
 	case "timeout":
 		writeAdapterLauncherRecord(os.Getenv(cursorAdapterPIDFileEnv))
 		// Outlive the contract, as the Copilot helper does.

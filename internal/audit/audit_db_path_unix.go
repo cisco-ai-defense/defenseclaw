@@ -74,6 +74,8 @@ func auditDBPlatformSidecarNeedsHardening(*os.File) (bool, error) { return true,
 
 func auditDBPlatformHardeningNeedsCapabilityReopen() bool { return false }
 
+func auditDBPlatformProcessCannotRestamp(*os.File) bool { return false }
+
 // validateAuditDBPlatformTrust judges the ownership + permission posture of an
 // audit-DB path element.
 //
@@ -96,7 +98,13 @@ func validateAuditDBPlatformTrust(path string, info os.FileInfo, directory, stri
 	}
 	owner := int(stat.Uid)
 	if !runtimeowner.Trusted(stat.Uid) {
-		return errors.New("audit: database path has an untrusted owner")
+		verdict := errors.New("audit: database path has an untrusted owner")
+		if !auditDBAncestorOwnerAdvisory(path, directory, strict) {
+			return verdict
+		}
+		if err := managed.RelaxAncestorTrustVerdict(true, path, "audit store database directory", verdict); err != nil {
+			return err
+		}
 	}
 	if info.Mode().Perm()&0o022 != 0 {
 		if directory && owner == 0 && info.Mode()&os.ModeSticky != 0 {
@@ -107,7 +115,7 @@ func validateAuditDBPlatformTrust(path string, info os.FileInfo, directory, stri
 			kind = "directory"
 		}
 		verdict := managed.NewTrustVerdict("audit: database %s is group- or other-writable", kind)
-		advisory := !strict && managed.PlatformInstallerOwnedPath(path)
+		advisory := !strict && managed.AdvisoryAncestorPath(path)
 		label := fmt.Sprintf("audit store database %s", kind)
 		return managed.RelaxAncestorTrustVerdict(advisory, path, label, verdict)
 	}
@@ -181,3 +189,8 @@ func auditDBOpenElsewhere(path string) error {
 	}
 	return nil
 }
+
+// Unix hardening runs with the gateway's own rights; a failure is real.
+func auditDBPlatformHardeningFailureIsDrift(error) bool { return false }
+
+func auditDBPlatformReportAccept(string, string) {}

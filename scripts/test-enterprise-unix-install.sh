@@ -496,6 +496,20 @@ detect_value() {
     sh "$detect" --format value "$@" 2>/dev/null
 }
 
+# detect.sh prints busy while a lifecycle run holds the lock, and an MDM
+# retries it later. The apply job's redundant ensure (see retry_busy) can still
+# hold the lock when the MDM checks start: retry only a busy answer, for at most
+# three minutes.
+detect_settled() {
+    local deadline=$((SECONDS + 180)) value
+    value=$(detect_value "$@" || true)
+    while [ "$value" = busy ] && [ "$SECONDS" -lt "$deadline" ]; do
+        sleep 2
+        value=$(detect_value "$@" || true)
+    done
+    printf '%s\n' "$value"
+}
+
 # install_package FILE: install (or upgrade to) a package; prints nothing and
 # returns the package manager's exit status. The postinstall runs ensure
 # --from-package and leaves its result in last-package-result.json.
@@ -882,7 +896,7 @@ check "$results/05-status.json" status --action status --installed --version "$v
 services_running
 
 step "MDM detection (detect.sh)"
-detected=$(detect_value --min-version "$version" || true)
+detected=$(detect_settled --min-version "$version")
 [ "$detected" = "$version" ] || die "detect.sh printed '$detected', want '$version'"
 echo "detect.sh: $detected"
 # --require-healthy requires verify.ok and verify.security_complete
@@ -892,7 +906,7 @@ echo "detect.sh: $detected"
 want_healthy=$version
 [ "$(json_field "$results/04-verify.json" ok)" = True ] && [ "$(json_field "$results/04-verify.json" security_complete)" = True ] ||
     want_healthy=unhealthy
-detected=$(detect_value --require-healthy --min-version "$version" || true)
+detected=$(detect_settled --require-healthy --min-version "$version")
 [ "$detected" = "$want_healthy" ] || die "detect.sh --require-healthy printed '$detected', want '$want_healthy'"
 echo "detect.sh --require-healthy: $detected"
 

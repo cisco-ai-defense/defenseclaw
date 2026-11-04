@@ -62,6 +62,39 @@ func removeEmptyWindowsCopilotFolders(directory string) {
 	}
 }
 
+// windowsSecureClientAgentVersionExplain is a Secure Client row's version
+// from the sources the installer reads: the npm, bun and yarn packages, then,
+// for Claude Code and Codex, the machine's and the user's WinGet package (the
+// user's while the user's hive is loaded). The enumerator refreshes a known
+// row's version from it on every pass, so a source the installer reads but
+// this probe does not would erase the installer's version. Like every other
+// probe it only reads; nothing the user owns is executed.
+func windowsSecureClientAgentVersionExplain(profileHome, sid, connectorName string) (string, string) {
+	version, reason := windowsAgentVersionExplain(profileHome, connectorName)
+	connectorName = strings.ToLower(strings.TrimSpace(connectorName))
+	if version != "" || (connectorName != "claudecode" && connectorName != "codex") {
+		return version, reason
+	}
+	reasons := []string{reason}
+	for _, packageID := range windowsWinGetPackageIDs[connectorName] {
+		machine, machineReason := windowsMachineWinGetPackageVersion(packageID)
+		if machine != "" {
+			return machine, ""
+		}
+		reasons = append(reasons, machineReason)
+	}
+	if sid = strings.TrimSpace(sid); sid != "" {
+		for _, packageID := range windowsWinGetPackageIDs[connectorName] {
+			user, userReason := windowsUserWinGetPackageVersion(sid, packageID)
+			if user != "" {
+				return user, ""
+			}
+			reasons = append(reasons, userReason)
+		}
+	}
+	return "", strings.Join(nonEmptyStrings(reasons), "; ")
+}
+
 // windowsSecureClientCopilotVersion is a Secure Client GitHub Copilot row's
 // version when no npm package records one: the WinGet GitHub.Copilot package
 // (the machine's, then the user's while the user's hive is loaded), then the

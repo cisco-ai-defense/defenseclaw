@@ -134,7 +134,7 @@ func RemoveWindowsPerUserRuntimeSelectors() error {
 		if !current.Existed {
 			continue
 		}
-		if err := RestoreWindowsManagedRuntimeSelectorCAS(WindowsManagedRuntimeSelectorFullRestoreOptions{
+		if _, err := RestoreWindowsManagedRuntimeSelectorCAS(WindowsManagedRuntimeSelectorFullRestoreOptions{
 			Snapshot:        WindowsManagedRuntimeSelectorSnapshot{SchemaVersion: 1, Connector: name},
 			ExpectedCurrent: current.CAS,
 		}); err != nil {

@@ -19,12 +19,16 @@ package gateway
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"io"
 	"net/http"
 	"os"
 	"path/filepath"
+	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -83,6 +87,27 @@ type ToolInspectRequest struct {
 	// BoundedPrefixReview is set by the per-user shell inspect hooks on the
 	// bounded review of a call over their size cap (markOversizeUninspected).
 	BoundedPrefixReview bool `json:"bounded_prefix_review,omitempty"`
+	// toolUseID is set by a connector adapter, never from the wire (see
+	// contentScope below).
+	toolUseID string
+	// toolArgsAreHookEnvelope marks args the connector did not project from a
+	// tool payload: the whole hook envelope, session and event keys included.
+	toolArgsAreHookEnvelope bool
+	// aidToolCallDeclared is set by a connector adapter, never from the wire,
+	// when the resolved hook contract declares the tool_call surface in the
+	// encoding hookAIDInspectToolCall implements. Without it the invocation is
+	// sent to AID as text alone, so an undeclared contract never changes shape.
+	aidToolCallDeclared bool
+	// toolNameIsLabel marks Tool as a placeholder the adapter filled in because
+	// the payload named no tool; it is not sent as a tool call's name.
+	toolNameIsLabel bool
+	// toolArgsAbsent marks Args as the empty object an adapter fills in when the
+	// payload carried no tool input, or a null one; it is not sent as a tool
+	// call's arguments.
+	toolArgsAbsent bool
+	// hookEvent is the agent hook event that produced the request, set by a
+	// connector adapter for the AID wire log only.
+	hookEvent string
 	// contentScope is set only after a connector adapter derives content
 	// provenance from its typed hook payload. It is deliberately not accepted
 	// from the public inspect wire, where a caller could otherwise promote its
@@ -233,6 +258,15 @@ func (a *APIServer) managedAIDOnly() bool {
 	return a != nil && a.scannerCfg != nil && a.scannerCfg.ManagedAIDOnly()
 }
 
+// aidToolCall is a tool invocation sent to AID as a structured tool call.
+type aidToolCall struct {
+	Connector string
+	Event     string
+	Name      string
+	ID        string
+	Args      json.RawMessage
+}
+
 // inspectManagedAIDOnly is the managed_enterprise hook-lane inspection
 // path: Cisco AI Defense is the only thing that can block. Static
 // block/allow lists, MCP-server blocks, connector regex packs, CodeGuard,
@@ -240,15 +274,32 @@ func (a *APIServer) managedAIDOnly() bool {
 // down / timeout / token failure — hookAIDInspect returns nil), the request
 // fails open with an explicit allow verdict.
 func (a *APIServer) inspectManagedAIDOnly(ctx context.Context, toolName, content string) *ToolInspectVerdict {
+	return a.inspectManagedAIDOnlyCall(ctx, toolName, content, nil)
+}
+
+// inspectManagedAIDOnlyCall is the shared fail-open path: call is nil for
+// content, set for a tool invocation.
+func (a *APIServer) inspectManagedAIDOnlyCall(
+	ctx context.Context,
+	toolName, content string,
+	call *aidToolCall,
+) *ToolInspectVerdict {
 	cfg := a.decisionConfig(ctx)
 	failOpenReason := aidFailOpenUnavailable
-	if !managedAIDHookContentIsInspectable(toolName, content) {
+	if call == nil && !managedAIDHookContentIsInspectable(toolName, content) {
 		failOpenReason = aidFailOpenNoContent
-	} else if a == nil || a.ciscoInspector == nil || cfg == nil ||
+	} else if call != nil && len(call.Args) == 0 {
+		failOpenReason = aidFailOpenNoContent
+	} else if a == nil || a.currentCiscoInspector() == nil || cfg == nil ||
 		!cfg.CiscoAIDefense.HookSurfaceEnabled() {
 		failOpenReason = aidFailOpenUnwired
 	}
-	aid := a.hookAIDInspect(ctx, toolName, content)
+	var aid *ScanVerdict
+	if call != nil {
+		aid = a.hookAIDInspectToolCall(ctx, *call, content)
+	} else {
+		aid = a.hookAIDInspect(ctx, toolName, content)
+	}
 	if aid == nil {
 		// Fail-open surface: managed_enterprise's local detectors are
 		// demoted, so a nil AID verdict means this inspection ends
@@ -384,7 +435,8 @@ func (a *APIServer) recordManagedAIDFailOpenForSelectedNativeHookResult(
 }
 
 func (a *APIServer) hookAIDInspect(ctx context.Context, toolName string, content string) *ScanVerdict {
-	if a == nil || a.ciscoInspector == nil {
+	inspector := a.currentCiscoInspector()
+	if inspector == nil {
 		return nil
 	}
 	if cfg := a.decisionConfig(ctx); cfg == nil || !cfg.CiscoAIDefense.HookSurfaceEnabled() {
@@ -398,12 +450,237 @@ func (a *APIServer) hookAIDInspect(ctx context.Context, toolName string, content
 	// "createJiraIssue") have it visible. AID's /inspect/chat reads
 	// content as a free-text user message; the structured tool name
 	// would otherwise be lost on the wire.
-	body := content
-	if toolName != "" && toolName != "message" {
-		body = fmt.Sprintf("Tool call: %s\n%s", toolName, content)
-	}
 	defer yieldHookRunSlot(ctx)()
-	return a.ciscoInspector.Inspect(ctx, []ChatMessage{{Role: "user", Content: body}})
+	return inspector.Inspect(ctx, []ChatMessage{
+		{Role: "user", Content: hookAIDToolText(toolName, content)},
+	})
+}
+
+// toolCallArgsCarryable reports whether the invocation can stand as tool-call
+// fields: the connector's contract declares the encoding, the connector named
+// the tool, and the arguments are a JSON object it projected from its own tool
+// payload. A blank or placeholder name would put a made-up name in
+// function.name. JSON null decodes into a map without error, but it is not an
+// object, and AID's rule engine fails the tool-call rules on it.
+func toolCallArgsCarryable(req *ToolInspectRequest) bool {
+	return toolCallNotCarriedReason(req) == ""
+}
+
+// toolCallNotCarriedReason names why an invocation goes to AID as text alone,
+// in the order toolCallArgsCarryable checks; "" when it can be carried.
+func toolCallNotCarriedReason(req *ToolInspectRequest) string {
+	switch {
+	case req == nil || req.Direction != "tool_call":
+		return "not_a_tool_call"
+	case !req.aidToolCallDeclared:
+		return "contract_undeclared"
+	case req.toolArgsAreHookEnvelope:
+		return "hook_envelope_args"
+	case req.toolNameIsLabel:
+		return "placeholder_tool_name"
+	case strings.TrimSpace(req.Tool) == "":
+		return "blank_tool_name"
+	case req.toolArgsAbsent:
+		return "args_absent"
+	}
+	var object map[string]json.RawMessage
+	if json.Unmarshal(req.Args, &object) != nil || object == nil {
+		return "args_not_object"
+	}
+	return ""
+}
+
+// aidHookSurfaceWired reports whether a hook inspection reaches AID at all, so
+// the wire log below is written only for requests that are actually sent.
+func (a *APIServer) aidHookSurfaceWired(ctx context.Context) bool {
+	if a.currentCiscoInspector() == nil {
+		return false
+	}
+	cfg := a.decisionConfig(ctx)
+	return cfg != nil && cfg.CiscoAIDefense.HookSurfaceEnabled()
+}
+
+// logAIDToolCallTextOnly records that a tool invocation went to AID as the
+// text form alone, and why. Names only, never argument values. A tool name the
+// adapter filled in as a label, or a blank one, is shown as <none>.
+func (a *APIServer) logAIDToolCallTextOnly(
+	ctx context.Context,
+	connectorName, event, toolName string,
+	nameIsLabel bool,
+	reason string,
+) {
+	if reason == "" || reason == "not_a_tool_call" || !a.aidHookSurfaceWired(ctx) {
+		return
+	}
+	tool := aidLogQuoted(toolName)
+	if nameIsLabel || strings.TrimSpace(toolName) == "" {
+		tool = "<none>"
+	}
+	fmt.Fprintf(os.Stderr, "[aid] PreToolUse sent as text only: connector=%s event=%s tool=%s reason=%s\n",
+		connectorName, aidLogEvent(event), tool, reason)
+}
+
+func aidLogEvent(event string) string {
+	if strings.TrimSpace(event) == "" {
+		return "<unknown>"
+	}
+	return aidLogField(event)
+}
+
+// The event, tool name, id and argument keys of an [aid] line come from the
+// agent and are bounded only by the request body cap; these limits keep one
+// call's line short.
+const (
+	aidLogFieldMaxBytes = 128
+	aidLogMaxArgKeys    = 32
+)
+
+// aidLogField is s cut to aidLogFieldMaxBytes on a rune boundary, marked with
+// "..." when it was cut.
+func aidLogField(s string) string {
+	if len(s) <= aidLogFieldMaxBytes {
+		return s
+	}
+	return truncateToRuneBoundary(s, aidLogFieldMaxBytes) + "..."
+}
+
+// aidLogQuoted is s quoted, so a crafted value cannot forge a line, and then
+// cut to aidLogFieldMaxBytes: escaping can make a value up to four times
+// longer, so the bound applies to the escaped form. A cut ends in `..."`.
+func aidLogQuoted(s string) string {
+	q := strconv.Quote(s)
+	if len(q) <= aidLogFieldMaxBytes {
+		return q
+	}
+	return truncateToRuneBoundary(q, aidLogFieldMaxBytes) + `..."`
+}
+
+// logAIDToolCallCarried records the shape of a tool call sent to AID: the
+// tool name, the id and whether the agent reported it, the argument keys and
+// the message order. Never argument values, which carry commands and content.
+func logAIDToolCallCarried(call aidToolCall, wireID string) {
+	idSource := "agent"
+	if call.ID == "" {
+		idSource = "derived"
+	}
+	var object map[string]json.RawMessage
+	_ = json.Unmarshal(call.Args, &object)
+	keys := make([]string, 0, len(object))
+	for key := range object {
+		keys = append(keys, key)
+	}
+	sort.Strings(keys)
+	moreKeys := ""
+	if len(keys) > aidLogMaxArgKeys {
+		moreKeys = fmt.Sprintf(" (+%d more)", len(keys)-aidLogMaxArgKeys)
+		keys = keys[:aidLogMaxArgKeys]
+	}
+	for i := range keys {
+		keys[i] = aidLogQuoted(keys[i])
+	}
+	// The name, id and argument keys come from the agent: aidLogQuoted quotes
+	// and bounds them.
+	fmt.Fprintf(os.Stderr, "[aid] PreToolUse sent as a tool call: connector=%s event=%s tool=%s id=%s (%s) arg_keys=[%s]%s wire=%s messages=[assistant:tool_calls, user:text]\n",
+		call.Connector, aidLogEvent(call.Event), aidLogQuoted(call.Name), aidLogQuoted(wireID), idSource,
+		strings.Join(keys, " "), moreKeys, connector.AIDWireVersionChatToolCalls)
+}
+
+// hookAIDInspectTool sends the invocation as a tool call ahead of the text form,
+// and as text alone when the arguments cannot be carried as fields.
+func (a *APIServer) hookAIDInspectTool(
+	ctx context.Context,
+	req *ToolInspectRequest,
+	toolName, argsStr string,
+) *ScanVerdict {
+	// hookAIDInspect and hookAIDInspectToolCall return nil without a wired
+	// hook surface too; checking first skips parsing the arguments.
+	if !a.aidHookSurfaceWired(ctx) {
+		return nil
+	}
+	if reason := toolCallNotCarriedReason(req); reason != "" {
+		a.logAIDToolCallTextOnly(ctx, req.Connector, req.hookEvent, toolName, req.toolNameIsLabel, reason)
+		return a.hookAIDInspect(ctx, toolName, argsStr)
+	}
+	return a.hookAIDInspectToolCall(ctx, aidToolCall{
+		Connector: req.Connector,
+		Event:     req.hookEvent,
+		Name:      toolName,
+		ID:        req.toolUseID,
+		Args:      req.Args,
+	}, argsStr)
+}
+
+// aidToolCallMaxBytes bounds the tool call added beside the text form. Both
+// carry the arguments, so a larger one is sent as text alone, as before:
+// doubling the arguments could push the request past AID's 10 MiB body limit,
+// which fails the inspection open.
+const aidToolCallMaxBytes = 2 << 20
+
+// toolCallWireID is the tool call's id. The chat schema requires a non-empty
+// one, so an invocation the agent did not identify is given a "dc-" id derived
+// from its own content, which also marks it as not the agent's.
+func toolCallWireID(call aidToolCall) string {
+	if call.ID != "" {
+		return call.ID
+	}
+	sum := sha256.Sum256(append([]byte(call.Name+"\x00"), call.Args...))
+	return "dc-" + hex.EncodeToString(sum[:8])
+}
+
+// hookAIDInspectToolCall sends the invocation as an assistant tool call, with
+// arguments as a JSON string, followed by the message hookAIDInspect would send
+// for it. That user message is unchanged and stays last: AID takes the
+// direction from the last role, so the request path, its policies and the
+// text rules' input are what they were, and the tool call only adds to them.
+func (a *APIServer) hookAIDInspectToolCall(
+	ctx context.Context,
+	call aidToolCall,
+	content string,
+) *ScanVerdict {
+	inspector := a.currentCiscoInspector()
+	if inspector == nil {
+		return nil
+	}
+	if cfg := a.decisionConfig(ctx); cfg == nil || !cfg.CiscoAIDefense.HookSurfaceEnabled() {
+		return nil
+	}
+	if len(call.Args) == 0 {
+		return nil
+	}
+	if strings.TrimSpace(call.Name) == "" {
+		a.logAIDToolCallTextOnly(ctx, call.Connector, call.Event, call.Name, false, "blank_tool_name")
+		return a.hookAIDInspect(ctx, call.Name, content)
+	}
+	wireID := toolCallWireID(call)
+	toolCalls, err := json.Marshal([]map[string]interface{}{{
+		"id":   wireID,
+		"type": "function",
+		"function": map[string]interface{}{
+			"name":      call.Name,
+			"arguments": string(call.Args),
+		},
+	}})
+	if err != nil {
+		return nil
+	}
+	if len(toolCalls) > aidToolCallMaxBytes {
+		a.logAIDToolCallTextOnly(ctx, call.Connector, call.Event, call.Name, false, "oversized")
+		return a.hookAIDInspect(ctx, call.Name, content)
+	}
+	logAIDToolCallCarried(call, wireID)
+	defer yieldHookRunSlot(ctx)()
+	return inspector.Inspect(ctx, []ChatMessage{
+		{Role: "assistant", ToolCalls: toolCalls},
+		{Role: "user", Content: hookAIDToolText(call.Name, content)},
+	})
+}
+
+// hookAIDToolText is the flattened form AID's text classifiers read.
+func hookAIDToolText(toolName, content string) string {
+	if toolName != "" && toolName != "message" {
+		return fmt.Sprintf("Tool call: %s\n%s", toolName, content)
+	}
+	return content
 }
 
 // managedAIDHookContentIsInspectable applies text trimming only to the
@@ -708,7 +985,17 @@ func (a *APIServer) inspectTrustedToolPolicyCtx(
 	// CodeGuard, and the judge lane; AID inspects the tool call directly
 	// and a nil AID verdict fails open. See inspectManagedAIDOnly.
 	if a.managedAIDOnly() {
-		return a.inspectManagedAIDOnly(ctx, req.Tool, string(req.Args))
+		if reason := toolCallNotCarriedReason(req); reason != "" {
+			a.logAIDToolCallTextOnly(ctx, req.Connector, req.hookEvent, req.Tool, req.toolNameIsLabel, reason)
+			return a.inspectManagedAIDOnly(ctx, req.Tool, string(req.Args))
+		}
+		return a.inspectManagedAIDOnlyCall(ctx, req.Tool, string(req.Args), &aidToolCall{
+			Connector: req.Connector,
+			Event:     req.hookEvent,
+			Name:      req.Tool,
+			ID:        req.toolUseID,
+			Args:      req.Args,
+		})
 	}
 
 	// Static block/allow list takes priority — checked before any rule
@@ -834,7 +1121,7 @@ func (a *APIServer) inspectTrustedToolPolicyCtx(
 		// turn — operators with custom AID policies (e.g. block
 		// `createJiraIssue`, throttle `addComment`) want their rules to
 		// fire even when no DefenseClaw built-in pattern matched.
-		if aid := a.hookAIDInspect(ctx, toolName, argsStr); aid != nil && aid.Action != "allow" && aid.Action != "" {
+		if aid := a.hookAIDInspectTool(ctx, req, toolName, argsStr); aid != nil && aid.Action != "allow" && aid.Action != "" {
 			verdict = mergeWithAIDVerdict(nil, aid)
 		}
 	} else {
@@ -905,11 +1192,9 @@ func (a *APIServer) inspectTrustedToolPolicyCtx(
 
 		// AID lane: also forward to Cisco AI Defense when the operator has
 		// configured a key. Strictest verdict wins via mergeWithAIDVerdict.
-		// We send the rule reasons text rather than just the args because
-		// AID's classifier reads free-text content; the rule names give it
-		// useful context. The lane is silent when no AID client is wired
-		// or when ScanHookSurface=false.
-		if aid := a.hookAIDInspect(ctx, toolName, argsStr); aid != nil {
+		// The lane is silent when no AID client is wired or when
+		// ScanHookSurface=false.
+		if aid := a.hookAIDInspectTool(ctx, req, toolName, argsStr); aid != nil {
 			verdict = mergeWithAIDVerdict(verdict, aid)
 		}
 	}

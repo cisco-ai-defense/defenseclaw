@@ -156,7 +156,8 @@ func rootPersistentPreRunE(cmd *cobra.Command, _ []string) (err error) {
 	activeObservabilityV8Startup = nil
 	loadDotEnvIntoOS(filepath.Join(config.DefaultDataPath(), ".env"))
 	cfgPath := config.ConfigPath()
-	cfg, activeObservabilityV8Startup, err = loadGatewayConfigV8(cfgPath)
+	role := managedServiceRoleFor(cmd)
+	cfg, activeObservabilityV8Startup, err = loadGatewayConfigV8ForService(cmd.Context(), cfgPath, role)
 	if err != nil {
 		// In managed_enterprise, tolerate a missing
 		// config.yaml at startup by fsnotify-waiting for UCB to drop
@@ -186,22 +187,25 @@ func rootPersistentPreRunE(cmd *cobra.Command, _ []string) (err error) {
 		}
 	}
 	version.SetBinaryVersion(appVersion)
+	if role == managedServiceGateway {
+		repairGatewayRuntimePlatform(cfg)
+		startManagedPeerHealPlatform(cmd.Context(), role)
+	}
 	// Every command that resolves directory facts verifies an account of a
 	// child AD domain only when the administrator lists it (GAP-1255).
 	useridentity.SetTrustedADChildDomains(cfg.AIDiscovery.TrustedADChildDomains)
-	if auditDir := filepath.Dir(cfg.AuditDB); auditDir != "." {
-		if err := managed.PrepareServiceRuntimeDir(cfg.DeploymentMode, auditDir, "audit store directory"); err != nil {
-			return fmt.Errorf("failed to prepare audit store directory: %w", err)
-		}
-	}
 	if cmd != nil && !cmd.HasParent() {
 		// The daemon owns the store: it moves a corrupt one aside and starts
-		// on a new one instead of failing.
-		auditStore, err = audit.OpenDaemonStore(cfg.AuditDB, os.Stderr, auditStoreOptions(cfg)...)
+		// on a new one instead of failing. Only the daemon waits out an audit
+		// store repair; subcommands fail fast.
+		auditStore, err = openDaemonAuditStore(cmd.Context(), cfg)
 		if err != nil {
-			return fmt.Errorf("failed to open audit store: %w", err)
+			return err
 		}
 	} else {
+		if err := prepareAuditStoreDir(cfg.DeploymentMode, cfg.AuditDB); err != nil {
+			return err
+		}
 		auditStore, err = openCommandAuditStore(cfg.AuditDB, auditStoreOptions(cfg)...)
 		if err != nil {
 			if cmd == nil || cmd.Annotations[auditOptionalAnnotation] != "true" {
@@ -223,6 +227,38 @@ func rootPersistentPreRunE(cmd *cobra.Command, _ []string) (err error) {
 		loadDotEnvIntoOS(resolved)
 	}
 	return nil
+}
+
+// prepareAuditStoreDir prepares the directory of the audit store at path.
+func prepareAuditStoreDir(deploymentMode, path string) error {
+	if auditDir := filepath.Dir(path); auditDir != "." {
+		if err := managed.PrepareServiceRuntimeDir(deploymentMode, auditDir, "audit store directory"); err != nil {
+			return fmt.Errorf("failed to prepare audit store directory: %w", err)
+		}
+	}
+	return nil
+}
+
+// openDaemonAuditStore prepares the audit store directory and opens the
+// store the way the daemon does (audit.OpenDaemonStore). A managed daemon
+// that can't open it usually lost its write entry to permission drift, which
+// the LocalSystem guardian puts back within a tick, so it retries on the
+// gatewayAuditOpen* backoff instead of exiting into an SCM restart loop, and
+// stops when ctx ends. The macOS Secure Client gateway runs as root and owns
+// the store, so it repairs the store before each retry and never gives up
+// (gatewayAuditOpenWait). Outside managed mode the first failure is returned.
+func openDaemonAuditStore(ctx context.Context, cfg *config.Config) (*audit.Store, error) {
+	attempt := func() (*audit.Store, error) {
+		if err := prepareAuditStoreDir(cfg.DeploymentMode, cfg.AuditDB); err != nil {
+			return nil, err
+		}
+		store, err := audit.OpenDaemonStore(cfg.AuditDB, os.Stderr, auditStoreOptions(cfg)...)
+		if err != nil {
+			return nil, fmt.Errorf("failed to open audit store: %w", err)
+		}
+		return store, nil
+	}
+	return openAuditStoreWaitingForRepair(ctx, cfg.DeploymentMode, cfg.AuditDB, attempt)
 }
 
 // auditStoreOptions are the options every opener of cfg's audit.db passes:
@@ -386,7 +422,9 @@ func loadGatewayCommandConfigOnly() error {
 }
 
 // loadGatewayCommandConfigFor is loadGatewayCommandConfigOnly for cmd, so the
-// managed Windows answer names the command the user ran.
+// managed Windows answer names the command the user ran, and a long-running
+// managed service repairs and retries its config load instead of exiting
+// (see loadGatewayConfigV8ForService).
 func loadGatewayCommandConfigFor(cmd *cobra.Command) error {
 	// Cobra normally executes this process once, but tests and embedders can
 	// execute the command tree repeatedly. Never retain a previous source.
@@ -399,7 +437,13 @@ func loadGatewayCommandConfigFor(cmd *cobra.Command) error {
 	loadDotEnvIntoOS(filepath.Join(config.DefaultDataPath(), ".env"))
 
 	var err error
-	cfg, activeObservabilityV8Startup, err = loadGatewayConfigV8(config.ConfigPath())
+	var ctx context.Context
+	if cmd != nil {
+		ctx = cmd.Context()
+	}
+	cfg, activeObservabilityV8Startup, err = loadGatewayConfigV8ForService(
+		ctx, config.ConfigPath(), managedServiceRoleFor(cmd),
+	)
 	if err != nil {
 		if answer := managedWindowsConfigLoadError(cmd, err); answer != err {
 			return answer
@@ -556,7 +600,13 @@ func ExecuteContext(ctx context.Context) int {
 	keepCommandTreeOfMainOnSecureClient(rootCmd)
 	installUsageArgChecks(rootCmd)
 	pendingUnknownSubcommand = nil
-	return executeResult(rootCmd, rootCmd.ExecuteContext(ctx))
+	executed, err := rootCmd.ExecuteContextC(ctx)
+	// A managed service caught in a restart loop stays up degraded instead.
+	if err != nil && !errors.Is(err, context.Canceled) &&
+		holdManagedServiceAfterFailurePlatform(ctx, managedServiceRoleFor(executed), err) {
+		return 0
+	}
+	return executeResult(rootCmd, err)
 }
 
 // executeResult turns the outcome of running root into the process exit code.

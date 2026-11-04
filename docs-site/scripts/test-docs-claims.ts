@@ -115,8 +115,8 @@ describe('Cursor observe outage mode', () => {
     assert.match(failModes, /On a per-user install, an explicit saved `guardrail\.hook_fail_mode` selects the outage mode.{0,600}Other transport and answer failures block in every tier/i);
     assert.match(perUser, /A verified gateway that accepts the call but gives no final decision before the hook.s fixed deadline blocks in every tier/i);
     const managedRegistration = source('internal/gateway/connector/cursor_enterprise_hooks.go');
-    assert.match(managedRegistration, /"failClosed": true,/);
-    assert.match(page('connectors/cursor.mdx'), /sets `failClosed: true`, so a hook process that never answers blocks the call. The administrator's resolved fail mode decides/i);
+    assert.match(managedRegistration, /"failClosed": normalizeHookFailMode\(failMode\) == "closed",/);
+    assert.match(page('connectors/cursor.mdx'), /sets `failClosed: true`, so a hook process that never answers blocks the call\. Under Secure Client the flag follows the administrator's resolved fail mode instead: `open`, the default there, lets Cursor run the call when the hook process never answers, and `closed` keeps `failClosed: true`\. The administrator's resolved fail mode decides/i);
     assert.ok(!/per-user Cursor in observe mode fails open/i.test(failModes));
 
     const overview = page('connectors/cursor.mdx').split('## What it can block or ask')[1]?.split('## Files it changes')[0] ?? '';
@@ -125,6 +125,24 @@ describe('Cursor observe outage mode', () => {
     const mapping = page('connectors/cursor.mdx').split('## Verdict mapping')[1]?.split('## Native ask')[0] ?? '';
     assert.match(mapping, /\| Observe \| `failClosed: true` \|[^|]*policy findings[^|]*gateway outage/i);
     assert.ok(!/observe cannot become blocking/i.test(mapping));
+  });
+
+  it('scopes the managed Cursor host flag claim to standalone installs', () => {
+    assert.match(page('connectors/cursor.mdx'), /On a managed standalone host, each entry runs the administrator's hook binary[^.]*sets `failClosed: true`, so a hook process that never answers blocks the call\./i);
+  });
+
+  it('keeps the managed standalone host flag closed', () => {
+    const registration = source('internal/gateway/connector/cursor_enterprise_hooks.go');
+    const entry = registration.split('func windowsCursorEnterpriseHookEntry(')[1]?.split('\n}')[0] ?? '';
+    const fixed = /"failClosed":\s*true,/.test(entry);
+    const selected = /"failClosed":\s*normalizeHookFailMode\(failMode\) == "closed",/.test(entry);
+    assert.ok(fixed || selected, 'the managed Cursor entry must close a standalone unanswered hook');
+    if (selected) {
+      const managed = source('internal/enterprisehooks/managed_cursor_windows.go');
+      const mode = managed.split('func cursorMachineHookFlagMode(')[1]?.split('\n}')[0] ?? '';
+      assert.match(mode, /if secureClientHookDelivery\(\) \{\s*return failMode\s*\}\s*return "closed"/);
+      assert.match(managed, /SpliceWindowsCursorEnterpriseHooksInPlace\(base, adapterPath, cursorMachineHookFlagMode\(failMode\)\)/);
+    }
   });
 });
 

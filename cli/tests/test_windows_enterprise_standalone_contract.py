@@ -411,7 +411,10 @@ def test_compliant_ensure_verify_collects_old_runtime_generations() -> None:
     go = (ROOT / "internal" / "cli" / "windows_enterprise_standalone.go").read_text(encoding="utf-8")
     assert f'windowsEnterpriseCollectGenerationsVariable = "{variable}"' in go
     lifecycle_go = (ROOT / "internal" / "cli" / "windows_managed_hooks_lifecycle.go").read_text(encoding="utf-8")
-    assert '"capture", "classify-activation", "collect", "restore", "retire", "retire-committed",' in lifecycle_go
+    assert (
+        '"capture", "classify-activation", "collect", "prune-orphaned-selectors",\n'
+        '\t\t"restore", "retire", "retire-committed",'
+    ) in lifecycle_go
 
 
 def test_standalone_first_enumeration_has_a_longer_named_budget() -> None:
@@ -640,6 +643,7 @@ $ast = [Management.Automation.Language.Parser]::ParseFile($ModulePath, [ref]$tok
 if ($errors.Count -gt 0) { throw "module parse failed: $($errors[0].Message)" }
 foreach ($name in @(
     'Get-DefenseClawRetiredInstallTreeAllowlist',
+    'Test-DefenseClawLayoutBrokerEnabled',
     'Assert-DefenseClawNoReparsePath',
     'Remove-DefenseClawEmptyRetiredInstallDirectory',
     'Remove-DefenseClawRetiredInstallTree'
@@ -1408,7 +1412,11 @@ Initialize-DefenseClawTransactionManagedRoot -Layout @{} -GatewayServiceName Gat
 def test_standalone_replacement_retries_transient_hook_readers(tmp_path) -> None:
     # Holders come and go under registered hook traffic. Retry the atomic
     # operation while keeping the launcher present on every attempt.
-    _run_lifecycle_functions(tmp_path, ["Install-DefenseClawFileAtomic"], r"""
+    _run_lifecycle_functions(tmp_path, [
+        "Install-DefenseClawFileAtomic",
+        "Invoke-DefenseClawTransientFileRetry",
+        "Clear-DefenseClawRestrictiveFileAttributes",
+    ], r"""
 function Test-DefenseClawStandaloneProfile { return $true }
 function Assert-DefenseClawNoReparsePath {}
 function New-DefenseClawDirectory { param($Path) [void][IO.Directory]::CreateDirectory($Path) }
@@ -1601,6 +1609,8 @@ def test_standalone_replacement_swaps_the_launcher_in_one_step(tmp_path) -> None
     _run_lifecycle_functions(tmp_path, ["Install-DefenseClawFileAtomic"], r"""
 function Test-DefenseClawStandaloneProfile { return $true }
 function Assert-DefenseClawNoReparsePath {}
+function Clear-DefenseClawRestrictiveFileAttributes { param($Path) return $false }
+function Write-DefenseClawResilienceEvent { param([string]$Marker, [hashtable]$Fields) }
 function New-DefenseClawDirectory { param($Path) [void][IO.Directory]::CreateDirectory($Path) }
 function Remove-DefenseClawStaleReplacementBackups {}
 function Remove-DefenseClawReplacementBackup { param($Path) [IO.File]::Delete($Path); return $true }
@@ -1714,11 +1724,15 @@ def test_service_start_mode_refusal_names_the_modes(tmp_path) -> None:
     body = _function_body(module, "Assert-DefenseClawServiceConfiguration")
     # Stub registry reads only; run the real configuration checker.
     body = body.replace("Microsoft.PowerShell.Management\\Get-ItemProperty", "Get-TestServiceProperties")
-    helpers = _function_body(module, "ConvertTo-DefenseClawServiceStartModeName")
+    helpers = "\n".join(
+        _function_body(module, name)
+        for name in ("ConvertTo-DefenseClawServiceStartModeName", "Test-DefenseClawTrustStrictAncestors")
+    )
     script = tmp_path / "service-modes.ps1"
     script.write_text(helpers + "\n" + body + r"""
 $ErrorActionPreference = 'Stop'
 $script:ServiceDescription = 'test service'
+$script:TrustStrictAncestorsEnv = 'DEFENSECLAW_MANAGED_TRUST_STRICT_ANCESTORS'
 function Test-DefenseClawServiceExists { return $true }
 function Test-DefenseClawStandaloneProfile { return $true }
 function Get-TestServiceProperties {
@@ -1801,6 +1815,7 @@ def test_repair_rebuilds_deployment_metadata_that_is_not_json(tmp_path: Path) ->
             "Get-DefenseClawDeploymentMetadata",
             "Repair-DefenseClawUnreadableDeploymentMetadata",
             "Write-DefenseClawJsonAtomic",
+            "Clear-DefenseClawRestrictiveFileAttributes",
         )
     )
     harness = tmp_path / "unreadable-metadata.ps1"
@@ -1836,6 +1851,15 @@ function Assert-DefenseClawCanonicalPathAcl {
 function Set-DefenseClawPathAcl { param([string]$Path, [string]$Kind, [string]$GatewayServiceSID) $global:Drifted = $false; $global:Stamps++ }
 function Test-DefenseClawTrustStrictAncestors { return $false }
 function Write-DefenseClawAclSelfHealAdvisory { param($Path, $Reason) }
+# Setup reads the metadata elevated, so the authenticated ACL repair runs
+# first. Like a file another principal could have written, a drifted one is
+# refused there, and the standalone profile keeps the canonical check.
+function Test-DefenseClawAdministrator { $true }
+function Test-DefenseClawStandaloneProfile { $true }
+function Repair-DefenseClawUninstallAdminFileAcl {
+    param($Layout, [string]$Kind)
+    if ($global:Drifted) { throw "refusing to re-stamp the $Kind metadata: another principal could have written it" }
+}
 function Test-DefenseClawMetadataInstalled { param($Metadata) return [bool]$Metadata.installed }
 function Resolve-DefenseClawCertificationCodexHome { param($Path, $GatewayServiceName, $GuardianServiceName) return $Path }
 function Test-DefenseClawLayoutBrokerEnabled { param($Layout) return $false }

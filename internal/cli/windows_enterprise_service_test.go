@@ -457,7 +457,7 @@ func TestWindowsEnterpriseSelfUpgradeRequiresExternalReleaseCLI(t *testing.T) {
 	root := t.TempDir()
 	explicitInstallRoot := filepath.Join(root, "explicit-install")
 	defaultProgramFiles := filepath.Join(root, "default-program-files")
-	defaultInstallRoot := filepath.Join(defaultProgramFiles, "Cisco", "DefenseClaw")
+	defaultInstallRoot := filepath.Join(defaultProgramFiles, "Cisco", "Cisco Secure Client", "DefenseClaw")
 	explicitInstalledCLI := filepath.Join(
 		explicitInstallRoot,
 		"bin",
@@ -511,6 +511,7 @@ func TestWindowsEnterpriseSelfUpgradeRequiresExternalReleaseCLI(t *testing.T) {
 		installRoot string
 		executable  string
 		cliBinary   string
+		standalone  bool
 		conflict    bool
 	}{
 		{
@@ -526,6 +527,14 @@ func TestWindowsEnterpriseSelfUpgradeRequiresExternalReleaseCLI(t *testing.T) {
 			action:     "upgrade",
 			executable: defaultInstalledCLI,
 			cliBinary:  replacement,
+			conflict:   true,
+		},
+		{
+			name:       "standalone default installed root exact path",
+			action:     "upgrade",
+			executable: filepath.Join(defaultProgramFiles, "Cisco", "DefenseClaw", "bin", "defenseclaw.exe"),
+			cliBinary:  replacement,
+			standalone: true,
 			conflict:   true,
 		},
 		{
@@ -570,6 +579,7 @@ func TestWindowsEnterpriseSelfUpgradeRequiresExternalReleaseCLI(t *testing.T) {
 				test.installRoot,
 				test.executable,
 				test.cliBinary,
+				test.standalone,
 			)
 			if err != nil {
 				t.Fatalf("windowsEnterpriseSelfUpgradeConflict: %v", err)
@@ -592,6 +602,7 @@ func TestWindowsEnterpriseSelfUpgradeResolutionErrorsFailClosed(t *testing.T) {
 		`..\..\Program Files\Cisco\Cisco Secure Client\DefenseClaw`,
 		`C:\stage\defenseclaw.exe`,
 		`C:\release\defenseclaw.exe`,
+		false,
 	); err == nil || conflict ||
 		!strings.Contains(err.Error(), "install root must be an absolute path") {
 		t.Fatalf("relative explicit root = (%t, %v), want fail-closed error", conflict, err)
@@ -605,6 +616,7 @@ func TestWindowsEnterpriseSelfUpgradeResolutionErrorsFailClosed(t *testing.T) {
 		"",
 		`C:\stage\defenseclaw.exe`,
 		`C:\release\defenseclaw.exe`,
+		false,
 	); err == nil || conflict ||
 		!strings.Contains(err.Error(), "not an absolute path") {
 		t.Fatalf("relative default root = (%t, %v), want fail-closed error", conflict, err)
@@ -618,6 +630,7 @@ func TestWindowsEnterpriseSelfUpgradeResolutionErrorsFailClosed(t *testing.T) {
 		"",
 		`C:\stage\defenseclaw.exe`,
 		`C:\release\defenseclaw.exe`,
+		false,
 	); err == nil || conflict ||
 		!strings.Contains(err.Error(), "trusted default Windows Program Files") {
 		t.Fatalf("default-root resolution = (%t, %v), want fail-closed error", conflict, err)
@@ -628,6 +641,7 @@ func TestWindowsEnterpriseSelfUpgradeResolutionErrorsFailClosed(t *testing.T) {
 		t.TempDir(),
 		"",
 		`C:\release\defenseclaw.exe`,
+		false,
 	); err == nil || conflict ||
 		!strings.Contains(err.Error(), "executable path is empty") {
 		t.Fatalf("executable resolution = (%t, %v), want fail-closed error", conflict, err)
@@ -653,7 +667,7 @@ func TestRunWindowsEnterpriseLifecycleSelfUpgradeConflictStopsBeforeRunnerAndEmi
 	root := t.TempDir()
 	explicitInstallRoot := filepath.Join(root, "explicit-install")
 	defaultProgramFiles := filepath.Join(root, "default-program-files")
-	defaultInstallRoot := filepath.Join(defaultProgramFiles, "Cisco", "DefenseClaw")
+	defaultInstallRoot := filepath.Join(defaultProgramFiles, "Cisco", "Cisco Secure Client", "DefenseClaw")
 	externalInstaller := filepath.Join(root, "release", "install-enterprise.ps1")
 	replacement := filepath.Join(root, "release", "defenseclaw.exe")
 	windowsEnterpriseScriptFinder = func(string) (string, error) {
@@ -970,6 +984,15 @@ func TestWindowsEnterpriseInstallerFailureDiagnosticPreservesCausalJSON(t *testi
 	); !ok || action != "repair" || detail == "" {
 		t.Fatalf("PowerShell 5.1 BOM diagnostic = (%q, %q, %t)", action, detail, ok)
 	}
+	// PowerShell and the module may print warnings and resilience markers
+	// before the result; the last top-level object is the result.
+	prefixed := []byte("WARNING: defenseclaw_accept path=\"C:\\\\x\" reason=\"r\"\n{\"note\":1}\n" + string(body) + "\n")
+	if action, detail, ok := windowsEnterpriseInstallerFailureDiagnostic(
+		prefixed,
+		false,
+	); !ok || action != "repair" || detail != "guardian activation failed policy incomplete" {
+		t.Fatalf("prefixed diagnostic = (%q, %q, %t)", action, detail, ok)
+	}
 	errorsOnly := []byte(`{"schema_version":1,"ok":false,"action":"repair","errors":["readiness timeout"]}`)
 	if _, detail, ok := windowsEnterpriseInstallerFailureDiagnostic(
 		errorsOnly,
@@ -984,8 +1007,11 @@ func TestWindowsEnterpriseInstallerFailureDiagnosticPreservesCausalJSON(t *testi
 		"success report": {
 			body: []byte(`{"schema_version":1,"ok":true,"action":"repair","error":"unexpected"}`),
 		},
-		"non-json prefix": {
-			body: []byte("warning\n" + string(body)),
+		"no json object": {
+			body: []byte("WARNING: the installer printed only text\n"),
+		},
+		"incomplete trailing object": {
+			body: []byte(`{"schema_version":1,"ok":false,"action":"repair","error":"cut`),
 		},
 		"truncated": {
 			body:      body,
@@ -1083,6 +1109,9 @@ func TestFindWindowsEnterpriseInstallerRejectsUserControlledScriptAndModule(t *t
 		if err := os.WriteFile(path, []byte("# fixture"), 0o600); err != nil {
 			t.Fatalf("WriteFile(%s): %v", path, err)
 		}
+		// The process user can be an administrator principal, which the
+		// trust walk accepts as drift; a standard-user writer must refuse.
+		grantUntrustedWriterForTest(t, path)
 	}
 	if _, err := findWindowsEnterpriseInstaller(installer); err == nil {
 		t.Fatal("user-controlled installer and adjacent module were accepted")
@@ -1305,6 +1334,7 @@ func TestPrepareWindowsEnterprisePowerShellTempOpsCreatesExactProtectedCapabilit
 		createdPath       string
 		createdDescriptor string
 		validatePaths     []string
+		structurePaths    []string
 		removedPath       string
 	)
 	ops := windowsEnterprisePowerShellTempOps{
@@ -1335,6 +1365,10 @@ func TestPrepareWindowsEnterprisePowerShellTempOpsCreatesExactProtectedCapabilit
 		},
 		validate: func(path string) error {
 			validatePaths = append(validatePaths, path)
+			return nil
+		},
+		validateStructure: func(path string) error {
+			structurePaths = append(structurePaths, path)
 			return nil
 		},
 		remove: func(path string) error {
@@ -1378,8 +1412,11 @@ func TestPrepareWindowsEnterprisePowerShellTempOpsCreatesExactProtectedCapabilit
 	if err := cleanup(); err != nil {
 		t.Fatalf("cleanup protected capability: %v", err)
 	}
-	if !reflect.DeepEqual(validatePaths, []string{want, want}) {
-		t.Fatalf("validation paths after cleanup = %#v", validatePaths)
+	if !reflect.DeepEqual(validatePaths, []string{want}) {
+		t.Fatalf("descriptor validation ran during cleanup: %#v", validatePaths)
+	}
+	if !reflect.DeepEqual(structurePaths, []string{want}) {
+		t.Fatalf("structure validation paths after cleanup = %#v", structurePaths)
 	}
 	if removedPath != want {
 		t.Fatalf("RemoveAll path = %q, want %q", removedPath, want)
@@ -1420,15 +1457,10 @@ func TestWindowsEnterpriseExactDescriptorMatchIgnoresOnlyAutoInherited(t *testin
 }
 
 func TestPrepareWindowsEnterprisePowerShellTempOpsCleanupAcceptsARemovedFolder(t *testing.T) {
-	validateCalls := 0
 	removeAllCalled := false
 	ops := deterministicWindowsEnterpriseTempOps(t)
-	ops.validate = func(path string) error {
-		validateCalls++
-		if validateCalls == 1 {
-			return nil
-		}
-		return errors.Join(errors.New("validation"), &os.PathError{Op: "GetFileAttributesEx", Path: path, Err: os.ErrNotExist})
+	ops.validateStructure = func(path string) error {
+		return errors.Join(errors.New("structure"), &os.PathError{Op: "GetFileAttributesEx", Path: path, Err: os.ErrNotExist})
 	}
 	ops.removeAll = func(string) error {
 		removeAllCalled = true
@@ -1462,16 +1494,16 @@ func TestPrepareWindowsEnterprisePowerShellTempOpsCleanupRetriesLockedFile(t *te
 	}
 }
 
-func TestPrepareWindowsEnterprisePowerShellTempOpsCleanupRefusesValidationDrift(t *testing.T) {
+func TestPrepareWindowsEnterprisePowerShellTempOpsCleanupRefusesStructureDrift(t *testing.T) {
 	validateCalls := 0
 	removeAllCalled := false
 	ops := deterministicWindowsEnterpriseTempOps(t)
 	ops.validate = func(string) error {
 		validateCalls++
-		if validateCalls == 1 {
-			return nil
-		}
-		return errors.New("reparse or descriptor drift")
+		return nil
+	}
+	ops.validateStructure = func(string) error {
+		return errors.New("reparse point drift")
 	}
 	ops.removeAll = func(string) error {
 		removeAllCalled = true
@@ -1486,7 +1518,94 @@ func TestPrepareWindowsEnterprisePowerShellTempOpsCleanupRefusesValidationDrift(
 		t.Fatalf("cleanup validation error = %v", err)
 	}
 	if removeAllCalled {
-		t.Fatal("cleanup followed validation drift with RemoveAll")
+		t.Fatal("cleanup followed structure drift with RemoveAll")
+	}
+	if validateCalls != 1 {
+		t.Fatalf("descriptor validation ran %d times, want only at creation", validateCalls)
+	}
+}
+
+func TestPrepareWindowsEnterprisePowerShellTempOpsCleanupIgnoresDescriptorDrift(t *testing.T) {
+	ops := deterministicWindowsEnterpriseTempOps(t)
+	structureChecked := false
+	removed := ""
+	ops.validateStructure = func(string) error {
+		structureChecked = true
+		return nil
+	}
+	ops.removeAll = func(path string) error {
+		removed = path
+		return nil
+	}
+	path, cleanup, err := prepareWindowsEnterprisePowerShellTempWithOps(ops)
+	if err != nil {
+		t.Fatalf("prepare: %v", err)
+	}
+	// A descriptor that drifted while PowerShell ran no longer blocks
+	// cleanup: only the structure check gates removal.
+	ops.validate = func(string) error { return errors.New("descriptor drift") }
+	if err := cleanup(); err != nil {
+		t.Fatalf("cleanup after descriptor drift: %v", err)
+	}
+	if !structureChecked || removed != path {
+		t.Fatalf("cleanup structureChecked=%t removed=%q want %q", structureChecked, removed, path)
+	}
+}
+
+func TestPrepareWindowsEnterprisePowerShellTempOpsFallsBackUnderCisco(t *testing.T) {
+	ops := deterministicWindowsEnterpriseTempOps(t)
+	var attempted []string
+	ops.createDirectory = func(path *uint16, _ *windows.SecurityAttributes) error {
+		value := windows.UTF16PtrToString(path)
+		attempted = append(attempted, value)
+		if !strings.Contains(value, `\Cisco\`) {
+			return windows.ERROR_ACCESS_DENIED
+		}
+		return nil
+	}
+	ops.fallbackParent = func(parent string) (string, bool) {
+		return filepath.Join(parent, "Cisco"), true
+	}
+	swept := ""
+	ops.sweep = func(parent string) { swept = parent }
+	path, _, err := prepareWindowsEnterprisePowerShellTempWithOps(ops)
+	if err != nil {
+		t.Fatalf("prepare with Controlled Folder Access fallback: %v", err)
+	}
+	if !strings.HasPrefix(path, `C:\ProgramData\Cisco\DefenseClaw-PowerShell-`) {
+		t.Fatalf("fallback path = %q", path)
+	}
+	if swept != `C:\ProgramData` {
+		t.Fatalf("sweep parent = %q", swept)
+	}
+
+	blocked := deterministicWindowsEnterpriseTempOps(t)
+	blocked.createDirectory = func(*uint16, *windows.SecurityAttributes) error {
+		return windows.ERROR_ACCESS_DENIED
+	}
+	blocked.fallbackParent = func(parent string) (string, bool) {
+		return filepath.Join(parent, "Cisco"), true
+	}
+	_, _, err = prepareWindowsEnterprisePowerShellTempWithOps(blocked)
+	if err == nil || !errors.Is(err, windows.ERROR_ACCESS_DENIED) {
+		t.Fatalf("blocked error = %v, want access denied cause", err)
+	}
+	for _, want := range []string{
+		`defenseclaw_prereq check="staging_directory"`,
+		"Controlled Folder Access",
+		"ControlledFolderAccessAllowedApplications",
+	} {
+		if !strings.Contains(err.Error(), want) {
+			t.Fatalf("blocked error %q is missing %q", err, want)
+		}
+	}
+
+	noFallback := deterministicWindowsEnterpriseTempOps(t)
+	noFallback.createDirectory = blocked.createDirectory
+	noFallback.fallbackParent = func(string) (string, bool) { return "", false }
+	_, _, err = prepareWindowsEnterprisePowerShellTempWithOps(noFallback)
+	if err == nil || !strings.Contains(err.Error(), `path="C:\\ProgramData"`) {
+		t.Fatalf("no-fallback error = %v", err)
 	}
 }
 
@@ -1594,7 +1713,7 @@ func deterministicWindowsEnterpriseTempOps(t *testing.T) windowsEnterprisePowerS
 	}
 }
 
-func TestPrepareWindowsEnterprisePowerShellTempElevatedDescriptorAndCleanupRefusal(t *testing.T) {
+func TestPrepareWindowsEnterprisePowerShellTempElevatedDescriptorRepairAndCleanup(t *testing.T) {
 	if !windows.GetCurrentProcessToken().IsElevated() {
 		t.Skip("protected ProgramData temp creation requires an elevated process token")
 	}
@@ -1627,64 +1746,49 @@ func TestPrepareWindowsEnterprisePowerShellTempElevatedDescriptorAndCleanupRefus
 		t.Fatalf("validate freshly created protected temp: %v", err)
 	}
 
-	hostileDescriptor, err := windows.SecurityDescriptorFromString(
-		"O:BAG:BAD:P(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)(A;OICI;GR;;;BU)",
-	)
-	if err != nil {
-		t.Fatalf("build hostile descriptor: %v", err)
-	}
-	hostileDACL, _, err := hostileDescriptor.DACL()
-	if err != nil {
-		t.Fatalf("read hostile descriptor DACL: %v", err)
-	}
-	extended, err := winpath.Extended(path)
-	if err != nil {
-		t.Fatalf("encode protected temp path: %v", err)
-	}
-	if err := windows.SetNamedSecurityInfo(
-		extended,
-		windows.SE_FILE_OBJECT,
-		windows.DACL_SECURITY_INFORMATION|windows.PROTECTED_DACL_SECURITY_INFORMATION,
-		nil,
-		nil,
-		hostileDACL,
-		nil,
-	); err != nil {
-		t.Fatalf("tamper protected temp DACL: %v", err)
-	}
-	if err := validateWindowsEnterprisePowerShellTemp(path); err == nil ||
-		!strings.Contains(err.Error(), "descriptor mismatch") {
-		t.Fatalf("descriptor tamper validation error = %v", err)
-	}
-	if err := cleanup(); err == nil ||
-		!strings.Contains(err.Error(), "refusing unsafe temp cleanup") {
-		t.Fatalf("cleanup after descriptor tamper error = %v", err)
-	}
-	if _, err := os.Lstat(path); err != nil {
-		t.Fatalf("cleanup removed rejected protected temp: %v", err)
-	}
-
-	expectedDescriptor, err := windows.SecurityDescriptorFromString(windowsEnterpriseTempSDDL)
-	if err != nil {
-		t.Fatalf("build expected descriptor: %v", err)
-	}
-	expectedDACL, _, err := expectedDescriptor.DACL()
-	if err != nil {
-		t.Fatalf("read expected descriptor DACL: %v", err)
-	}
-	if err := windows.SetNamedSecurityInfo(
-		extended,
-		windows.SE_FILE_OBJECT,
-		windows.DACL_SECURITY_INFORMATION|windows.PROTECTED_DACL_SECURITY_INFORMATION,
-		nil,
-		nil,
-		expectedDACL,
-		nil,
-	); err != nil {
-		t.Fatalf("restore protected temp DACL: %v", err)
+	// Descriptor drift on the temp is repaired once, not fatal: an untrusted
+	// writer and an unprotected (inheriting) DACL are both re-stamped.
+	for name, sddl := range map[string]string{
+		"untrusted writer":   "O:BAG:BAD:P(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)(A;OICI;GW;;;BU)",
+		"unprotected DACL":   "O:BAG:BAD:(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)",
+		"reader is accepted": "O:BAG:BAD:P(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)(A;OICI;GR;;;BU)",
+	} {
+		descriptor, err := windows.SecurityDescriptorFromString(sddl)
+		if err != nil {
+			t.Fatalf("%s: build descriptor: %v", name, err)
+		}
+		dacl, _, err := descriptor.DACL()
+		if err != nil {
+			t.Fatalf("%s: read descriptor DACL: %v", name, err)
+		}
+		protection := windows.SECURITY_INFORMATION(windows.UNPROTECTED_DACL_SECURITY_INFORMATION)
+		if strings.Contains(sddl, "D:P") {
+			protection = windows.PROTECTED_DACL_SECURITY_INFORMATION
+		}
+		extended, err := winpath.Extended(path)
+		if err != nil {
+			t.Fatalf("encode protected temp path: %v", err)
+		}
+		if err := windows.SetNamedSecurityInfo(
+			extended,
+			windows.SE_FILE_OBJECT,
+			windows.DACL_SECURITY_INFORMATION|protection,
+			nil,
+			nil,
+			dacl,
+			nil,
+		); err != nil {
+			t.Fatalf("%s: tamper protected temp DACL: %v", name, err)
+		}
+		if err := validateWindowsEnterprisePowerShellTemp(path); err != nil {
+			t.Fatalf("%s: drifted temp was not repaired: %v", name, err)
+		}
+		if err := windowsEnterprisePowerShellTempVerdict(path, "test"); err != nil {
+			t.Fatalf("%s: temp still drifted after repair: %v", name, err)
+		}
 	}
 	if err := cleanup(); err != nil {
-		t.Fatalf("cleanup restored protected temp: %v", err)
+		t.Fatalf("cleanup repaired protected temp: %v", err)
 	}
 	if _, err := os.Lstat(path); !os.IsNotExist(err) {
 		t.Fatalf("protected temp survived cleanup: %v", err)

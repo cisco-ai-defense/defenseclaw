@@ -836,7 +836,8 @@ targets:
                 [string]$SelfHealKind,
                 [string]$SelfHealGatewayServiceSID,
                 # Accepted and ignored: the config ACL repair gate passes it.
-                [switch]$IgnoreCreatorTemplates
+                [switch]$IgnoreCreatorTemplates,
+                [switch]$HealOnlyUntrusted
             )
             if ($script:HarnessState.ContainsKey('purge_acl_invalid') -and
                 [bool]$script:HarnessState.purge_acl_invalid -and
@@ -2918,7 +2919,8 @@ targets:
                 [Parameter(Mandatory)][string]$GuardianServiceName,
                 [bool]$RequireBroker = $true,
                 [bool]$RequireEnumerator = $true,
-                [int]$TimeoutSeconds = 90
+                [int]$TimeoutSeconds = 90,
+                [switch]$AllowFailedTargets
             )
             $script:HarnessState.events.Add(
                 'readiness-require-broker:{0}' -f (
@@ -2938,7 +2940,8 @@ targets:
                 [Parameter(Mandatory)][string]$GatewayServiceName,
                 [Parameter(Mandatory)][string]$GuardianServiceName,
                 [string]$ExpectedManifestSHA256,
-                [int]$TimeoutSeconds = 90
+                [int]$TimeoutSeconds = 90,
+                [switch]$AllowFailedTargets
             )
             if ($script:HarnessState.service_start_modes[
                     $GatewayServiceName
@@ -3014,7 +3017,8 @@ targets:
                 [switch]$ServicingTransaction,
                 [switch]$AllowTransactionRecordedBrokerAbsence,
                 [switch]$AllowTransactionRecordedEnumeratorAbsence,
-                [string[]]$ExpectedGatewayAccount
+                [string[]]$ExpectedGatewayAccount,
+                [switch]$AcceptDegradedTargets
             )
             if ($null -ne $ExpectedGatewayAccount) {
                 $script:HarnessState.verified_gateway_account = @($ExpectedGatewayAccount)
@@ -3299,7 +3303,8 @@ targets:
                 [Parameter(Mandatory)][string]$Action,
                 [Parameter(Mandatory)][hashtable]$Layout,
                 [Parameter(Mandatory)][string]$GatewayServiceName,
-                [Parameter(Mandatory)][string]$GuardianServiceName
+                [Parameter(Mandatory)][string]$GuardianServiceName,
+                [switch]$AcceptDegradedTargets
             )
             return [ordered]@{
                 ok = $true
@@ -3917,7 +3922,10 @@ targets:
             $outputPath = ''
             switch ($action) {
                 'plan' {
-                    if ($Arguments.Count -ne 8 -or
+                    # A fresh Install also passes --skip-busy-profiles last.
+                    if (($Arguments.Count -ne 8 -and
+                            -not ($Arguments.Count -eq 9 -and
+                                [string]$Arguments[8] -ceq '--skip-busy-profiles')) -or
                         [string]$Arguments[4] -cne '--manifest' -or
                         [string]$Arguments[6] -cne '--output') {
                         throw 'target-runtime plan mock received unexpected arguments'
@@ -7556,7 +7564,8 @@ targets:
                 [Parameter(Mandatory)][string]$Action,
                 [Parameter(Mandatory)][hashtable]$Layout,
                 [Parameter(Mandatory)][string]$GatewayServiceName,
-                [Parameter(Mandatory)][string]$GuardianServiceName
+                [Parameter(Mandatory)][string]$GuardianServiceName,
+                [switch]$AcceptDegradedTargets
             )
             return [pscustomobject]@{
                 schema_version = 1

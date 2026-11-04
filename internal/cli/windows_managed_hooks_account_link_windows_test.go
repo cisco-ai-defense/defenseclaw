@@ -60,7 +60,7 @@ func TestWindowsManagedHooksTeardownKeepsAccountLinkScoped(t *testing.T) {
 		t.Fatal(err)
 	}
 	check := func() error {
-		_, err := windowsManagedHooksPendingTargetsFromGuardian(runtimeDir, manifestPath, digest, targets)
+		_, _, err := windowsManagedHooksTargetsFromGuardian(runtimeDir, manifestPath, digest, targets)
 		return err
 	}
 	if err := check(); err != nil {

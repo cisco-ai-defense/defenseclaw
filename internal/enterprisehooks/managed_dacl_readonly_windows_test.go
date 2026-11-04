@@ -160,8 +160,10 @@ func windowsReadOnlyTestACECount(t *testing.T, path string) uint16 {
 // The field report: a Secure Client reinstall refused a .defenseclaw that
 // Codex's sandbox had granted CodexSandboxUsers read on ("has 8 ACEs,
 // expected 7"). An install plan takes it over and restores the exact DACL;
-// strict mode, a per-user install folder and a write-capable grant keep the
-// refusal; a validation plan accepts it unchanged.
+// strict mode and a per-user install folder keep the refusal; a validation
+// plan accepts it unchanged. A write-capable grant is drift a Secure Client
+// plan re-stamps like any retained root (26.8.4); strict mode and a
+// standalone plan refuse it.
 func TestWindowsManagedRuntimeInstallPlanRestampsAReadOnlyGrant(t *testing.T) {
 	previous := windowsEnterpriseStandaloneProcess
 	t.Cleanup(func() { windowsEnterpriseStandaloneProcess = previous })
@@ -224,12 +226,24 @@ func TestWindowsManagedRuntimeInstallPlanRestampsAReadOnlyGrant(t *testing.T) {
 	}
 	assertWindowsTargetOwnedCanonicalDirectory(t, dataDir, target)
 
-	// A write-capable grant is still refused.
 	grantWindowsReadOnlyTestACE(t, dataDir, codex, windows.ACCESS_MASK(0x001301bf))
+	t.Setenv(managed.TrustStrictAncestorsEnv, "1")
 	if _, err := PlanWindowsManagedRuntimeRoots(manifest, manifestPath, digest); err == nil ||
 		!strings.Contains(err.Error(), "reject noncanonical managed runtime baseline") {
-		t.Fatalf("install plan over a write grant = %v, want the refusal", err)
+		t.Fatalf("strict install plan over a write grant = %v, want the refusal", err)
 	}
+	t.Setenv(managed.TrustStrictAncestorsEnv, "")
+	windowsEnterpriseStandaloneProcess = func() bool { return true }
+	if _, err := PlanWindowsManagedRuntimeRoots(manifest, manifestPath, digest); err == nil ||
+		!strings.Contains(err.Error(), "reject noncanonical managed runtime baseline") {
+		t.Fatalf("standalone install plan over a write grant = %v, want the refusal", err)
+	}
+	windowsEnterpriseStandaloneProcess = func() bool { return false }
+	plan, err = PlanWindowsManagedRuntimeRoots(manifest, manifestPath, digest)
+	if err != nil || len(plan.Roots) != 1 || len(plan.RepairedProfiles) != 1 || len(plan.SkippedProfiles) != 0 {
+		t.Fatalf("Secure Client install plan over a write grant = %+v, %v; want the root repaired", plan, err)
+	}
+	assertWindowsTargetOwnedCanonicalDirectory(t, dataDir, target)
 }
 
 // GAP-1334: a guardian stopped in the middle of a Hermes setup (or a

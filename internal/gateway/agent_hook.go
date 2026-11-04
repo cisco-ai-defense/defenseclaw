@@ -134,8 +134,15 @@ type agentHookRequest struct {
 	CWD                          string
 	ReportedCWD                  string // the cwd as sent, before hookCWDForContext; user text only (requireSandboxHostRun)
 	ToolName                     string
-	ToolArgs                     json.RawMessage
-	ToolArgsProjectionUncertain  bool
+	// ToolNameIsLabel marks ToolName as a placeholder ("tool", "session",
+	// "message", "subagent") filled in for logs and spans because the payload
+	// named no tool. It is never sent to AID as a tool call's name.
+	ToolNameIsLabel             bool
+	ToolArgs                    json.RawMessage
+	ToolArgsProjectionUncertain bool
+	// ToolArgsAreHookEnvelope marks ToolArgs as the whole hook body, used when
+	// the payload carries no tool-argument object.
+	ToolArgsAreHookEnvelope bool
 	// ToolCallUnparsed: the connector's decoder found no tool call it can
 	// read (connector.HookProfileRequest.ToolCallUnparsed).
 	ToolCallUnparsed bool
@@ -3102,6 +3109,7 @@ func normalizeAgentHookRequestWithCorrelationEvent(connectorName string, payload
 			}
 		}
 	}
+	toolNameIsLabel := toolName == ""
 	if toolName == "" {
 		// Label-only mapping for lifecycle events that carry no tool:
 		// session start/end → "session", subagent stop → "subagent",
@@ -3145,6 +3153,7 @@ func normalizeAgentHookRequestWithCorrelationEvent(connectorName string, payload
 	if args == nil {
 		args = firstValue(payload, "tool_info", "toolInfo")
 	}
+	argsAreEnvelope := args == nil
 	if args == nil {
 		args = payload
 	}
@@ -3215,8 +3224,9 @@ func normalizeAgentHookRequestWithCorrelationEvent(connectorName string, payload
 		CorrelationProfileVersion: spec.ProfileVersion, CorrelationCompleteness: spec.Completeness,
 		CorrelationSurface: connector.CorrelationSurfaceHook, CorrelationOrigins: origins,
 		CorrelationValues: values, CorrelationIdentifiers: identifiers,
-		CWD: cwd, ToolName: toolName, ToolArgs: json.RawMessage(argBytes),
-		Content: content, Direction: direction, Payload: payload,
+		CWD: cwd, ToolName: toolName, ToolNameIsLabel: toolNameIsLabel, ToolArgs: json.RawMessage(argBytes),
+		ToolArgsAreHookEnvelope: argsAreEnvelope,
+		Content:                 content, Direction: direction, Payload: payload,
 		AgentIdentityID: agentIdentityID,
 	}
 }
@@ -3257,22 +3267,26 @@ func normalizeAgentHookRequestWithRawProfileEvent(connectorName string, payload 
 	}
 	if decoded.ToolName != "" {
 		req.ToolName = decoded.ToolName
+		req.ToolNameIsLabel = decoded.ToolNameIsLabel
 	}
 	req.ToolCallUnparsed = decoded.ToolCallUnparsed
 	if decoded.ToolArgsAuthoritative {
 		req.ToolArgs = append(json.RawMessage(nil), decoded.ToolArgs...)
 		req.ToolArgsProjectionUncertain = len(req.ToolArgs) == 0
+		req.ToolArgsAreHookEnvelope = false
 		if len(req.ToolArgs) == 0 {
 			req.ToolArgs = json.RawMessage(`{}`)
 		}
 	} else if len(decoded.ToolArgs) != 0 {
 		req.ToolArgs = append(json.RawMessage(nil), decoded.ToolArgs...)
+		req.ToolArgsAreHookEnvelope = false
 	}
 	// The raw-payload decoder is the final authority for native tool arguments.
 	// An empty result stays valid JSON but records parser uncertainty downstream.
 	if profile.DecodeToolArgs != nil && len(rawPayload) != 0 {
 		toolArgs := profile.DecodeToolArgs(rawPayload)
 		req.ToolArgsProjectionUncertain = len(toolArgs) == 0
+		req.ToolArgsAreHookEnvelope = false
 		if len(toolArgs) == 0 {
 			// A body the raw decoder rejects (a duplicate key, an alias
 			// collision) is an unread tool call even when the map decode
@@ -3384,6 +3398,16 @@ func extractAgentIdentityFromHookPayload(payload map[string]interface{}) (agentI
 // avoids).
 var hookEvaluatorPanicHook func()
 
+// reportedToolInvocationID returns the id the agent itself reported, empty when
+// the id was minted here. A minted id changes per evaluation and is not the
+// agent's, so the AID tool call gets toolCallWireID's "dc-" id instead.
+func reportedToolInvocationID(req agentHookRequest) string {
+	if req.CorrelationOrigins[connector.CorrelationTargetTool] != connector.CorrelationOriginReported {
+		return ""
+	}
+	return req.ToolInvocationID
+}
+
 func (a *APIServer) evaluateAgentHook(ctx context.Context, req agentHookRequest) agentHookResponse {
 	if hookEvaluatorPanicHook != nil {
 		hookEvaluatorPanicHook()
@@ -3469,12 +3493,17 @@ func (a *APIServer) evaluateAgentHook(ctx context.Context, req agentHookRequest)
 			ctx, req.ConnectorName, req.ToolName, fallbackTool,
 		)
 		toolRequest := &ToolInspectRequest{
-			Tool:          req.ToolName,
-			Args:          req.ToolArgs,
-			Direction:     "tool_call",
-			Connector:     req.ConnectorName,
-			MCPServerName: payloadString(req.Payload, "mcp_server_name"),
-			callerCWD:     req.CWD,
+			Tool:                    req.ToolName,
+			Args:                    req.ToolArgs,
+			Direction:               "tool_call",
+			Connector:               req.ConnectorName,
+			MCPServerName:           payloadString(req.Payload, "mcp_server_name"),
+			callerCWD:               req.CWD,
+			toolUseID:               reportedToolInvocationID(req),
+			toolArgsAreHookEnvelope: req.ToolArgsAreHookEnvelope,
+			aidToolCallDeclared:     connector.HookProfileCarriesAIDToolCall(profile),
+			toolNameIsLabel:         req.ToolNameIsLabel,
+			hookEvent:               req.HookEventName,
 		}
 		enforcementCapable := profile.Capabilities.CanBlock &&
 			eventIn(req.HookEventName, profile.Capabilities.BlockEvents)

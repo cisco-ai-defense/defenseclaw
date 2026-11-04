@@ -129,6 +129,7 @@ func orphanedCopilotVSCodeLocalDocument(path string) bool {
 			bin, ok := orphanCopilotVSCodeCommandBinary(command)
 			if !ok || (binary != "" && bin != binary) ||
 				(command != CopilotVSCodeLocalManagedHookCommand(runtime.GOOS, bin, event) &&
+					command != CopilotVSCodeLocalGuardedPriorReleaseHookCommand(runtime.GOOS, bin, event) &&
 					command != CopilotVSCodeLocalPriorReleaseHookCommand(runtime.GOOS, bin, event)) {
 				return false
 			}

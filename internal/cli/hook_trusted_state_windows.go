@@ -18,6 +18,7 @@ import (
 
 	"github.com/defenseclaw/defenseclaw/internal/config"
 	"github.com/defenseclaw/defenseclaw/internal/enterprisehooks"
+	"github.com/defenseclaw/defenseclaw/internal/gateway/connector/hookexec"
 	"github.com/defenseclaw/defenseclaw/internal/hookruntime"
 	"github.com/defenseclaw/defenseclaw/internal/pathidentity"
 	"github.com/defenseclaw/defenseclaw/internal/winpath"
@@ -135,6 +136,10 @@ func nativeHookExecutable() string {
 // uninstall removes that policy before retiring the binary and requires
 // already-running clients to reload.
 func NativeHookRuntimeNoop() bool {
+	// defenseclaw-hook.exe calls this first, before any managed check runs.
+	// From here on managed diagnostics go to the durable record only: the
+	// agent shows hook stderr, and Claude Code makes it the block message.
+	hookexec.InstallManagedHookDiagnosticSinks()
 	if len(os.Args) > 1 && os.Args[1] == "hook" &&
 		(hookArgsContainEnterpriseManaged(os.Args[1:]) || implicitEnterpriseManagedHook()) {
 		// A managed hook call resolves its runtime in the hook command, after
@@ -383,8 +388,8 @@ func enterpriseManagedRuntimeAbsenceNoop(
 		nativeEnterpriseHookRuntimeSnapshot.connector == connectorName &&
 		nativeEnterpriseHookRuntimeSnapshot.err == nil {
 		nativeEnterpriseHookRuntimeSnapshot.err = fmt.Errorf(
-			"%s: connector %s is absent from the protected target set",
-			enterprisehooks.WindowsManagedSIDUnregisteredReason,
+			"%w: connector %s is absent from the protected target set",
+			enterprisehooks.ErrWindowsManagedSIDUnregistered,
 			connectorName,
 		)
 	}
@@ -435,17 +440,19 @@ func enterpriseManagedHookRuntimeFailureReason() string {
 	if !prepared || err == nil {
 		return ""
 	}
-	if strings.Contains(err.Error(), enterprisehooks.WindowsManagedSIDUnregisteredReason) {
+	switch enterprisehooks.WindowsManagedRuntimeFailureClassOf(err) {
+	case enterprisehooks.WindowsManagedRuntimeFailureUnregistered:
 		return enterprisehooks.WindowsManagedSIDUnregisteredReason
+	case enterprisehooks.WindowsManagedRuntimeFailureDrift:
+		return enterprisehooks.WindowsManagedRuntimeDriftReason
 	}
 	if errors.Is(err, enterprisehooks.ErrWindowsStandaloneHooksClosed) {
 		return enterprisehooks.ErrWindowsStandaloneHooksClosed.Error()
 	}
 	// A registered account with no runtime has not signed in since it was
-	// enrolled. Only the standalone hook says so; Secure Client keeps its
-	// reason.
-	if errors.Is(err, enterprisehooks.ErrWindowsManagedRuntimeGenerationPending) &&
-		standaloneEnterpriseHookCheck(nativeHookExecutable()) {
+	// enrolled. The machine-side runtime selector says so, not the
+	// account's own files, so every managed profile reports it.
+	if errors.Is(err, enterprisehooks.ErrWindowsManagedRuntimeGenerationPending) {
 		return enterprisehooks.WindowsManagedEnrollmentPendingReason
 	}
 	// The account's DefenseClaw folder (renamed, moved or deleted) is gone:
@@ -458,6 +465,22 @@ func enterpriseManagedHookRuntimeFailureReason() string {
 		return "enterprise_managed_runtime_home_missing"
 	}
 	return "enterprise_managed_runtime_state_invalid"
+}
+
+// enterpriseManagedHookRuntimeDriftFailMode is the fail mode of a drifted
+// managed runtime: the configured mode the resolver recovered from
+// authenticated state, or closed when it could not establish one. Only a
+// Secure Client hook uses it (secureClientRuntimeFailureDelivery).
+func enterpriseManagedHookRuntimeDriftFailMode() string {
+	nativeEnterpriseHookRuntimeSnapshot.Lock()
+	defer nativeEnterpriseHookRuntimeSnapshot.Unlock()
+	if nativeEnterpriseHookRuntimeSnapshot.prepared &&
+		enterprisehooks.WindowsManagedRuntimeFailureClassOf(nativeEnterpriseHookRuntimeSnapshot.err) ==
+			enterprisehooks.WindowsManagedRuntimeFailureDrift &&
+		nativeEnterpriseHookRuntimeSnapshot.failMode == "open" {
+		return "open"
+	}
+	return "closed"
 }
 
 // windowsManagedRuntimeHomeAbsent reports whether the account's DefenseClaw

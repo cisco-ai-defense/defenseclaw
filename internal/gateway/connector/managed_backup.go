@@ -651,7 +651,12 @@ func codexCopiedHomeNativeCommands(dataDir, configPath string) (map[string]struc
 
 func codexNativeCommandsForLauncher(oldLauncher string) map[string]struct{} {
 	commands := map[string]struct{}{}
-	add := func(command string) { commands[command] = struct{}{} }
+	add := func(command string) {
+		commands[command] = struct{}{}
+		if legacy, ok := legacyWindowsAwaitedHookCommand(command); ok {
+			commands[legacy] = struct{}{}
+		}
+	}
 	add(windowsNativePowerShellHookCommandForBinary("codex", oldLauncher))
 	add(legacyStartProcessWindowsNativePowerShellHookCommand("codex", oldLauncher))
 	add(legacyUnqualifiedWindowsNativePowerShellHookCommandForBinary("codex", oldLauncher))

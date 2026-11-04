@@ -114,7 +114,7 @@ func enrollWindowsCursorOpenAliceForTest(t *testing.T, paths windowsCursorPaths)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if hooks, err = connector.SpliceWindowsCursorEnterpriseHooks(hooks, paths.Adapter, "open"); err != nil {
+	if hooks, err = connector.SpliceWindowsCursorEnterpriseHooks(hooks, paths.Adapter, cursorMachineHookFlagMode("open")); err != nil {
 		t.Fatal(err)
 	}
 	for path, content := range map[string][]byte{paths.Adapter: adapter, paths.State: body, paths.Hooks: hooks} {

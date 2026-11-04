@@ -52,6 +52,16 @@ const TrustAdvisoryMarker = "managed_trust_ancestor_advisory"
 // a check in flight. When nil the advisory goes to the standard logger.
 var ReportTrustAdvisory func(path, label, reason string)
 
+// TrustDriftAdvisoryMarker prefixes every drift-tolerant trust advisory: a
+// permission verdict on a path the caller asked about (not just an ancestor)
+// that a *Tolerant validator accepted and continued past.
+const TrustDriftAdvisoryMarker = "managed_trust_drift_advisory"
+
+// ReportTrustDrift is the ReportTrustAdvisory counterpart for drift advisories.
+// Same contract: nil by default, set once during process startup before any
+// managed trust check runs. When nil the advisory goes to the standard logger.
+var ReportTrustDrift func(path, label, reason string)
+
 // DescribeTrustAdvisoryReason, when set, rewrites an advisory's reason the way
 // an administrator reads it before it is reported: on a standalone Windows
 // install, the account next to its SID, the access mask in words and the
@@ -79,10 +89,11 @@ func PlatformInstallerOwnedRoots() []string {
 		// partially redirected environment (%ProgramFiles% set, %ProgramData%
 		// not) must still read `C:\ProgramData\Cisco` as installer-owned, or
 		// the managed state root itself would be judged foreign.
+		// The other bases come from the HKLM machine registration, never the
+		// process environment, which the invoking user controls.
 		roots := make([]string, 0, 4)
 		roots = append(roots, `C:\ProgramData\Cisco`)
-		for _, envName := range []string{"ProgramData", "ProgramFiles", "ProgramFiles(x86)"} {
-			base := os.Getenv(envName)
+		for _, base := range trustedMachineInstallBases() {
 			if base == "" {
 				continue
 			}
@@ -117,6 +128,16 @@ func PlatformInstallerOwnedPath(path string) bool {
 		}
 	}
 	return false
+}
+
+// AdvisoryAncestorPath reports whether an ancestor's permission verdict should
+// be advisory: the ancestor is inside PlatformInstallerOwnedRoots or, on
+// Windows, is one of the fixed operating system roots (system drive root,
+// Windows, System32, ProgramData, Program Files). Every ancestor walk, in this
+// package and outside it, uses this so the scope cannot drift between walks.
+// Like PlatformInstallerOwnedPath it says nothing about the named path itself.
+func AdvisoryAncestorPath(path string) bool {
+	return PlatformInstallerOwnedPath(path) || osRootAncestor(path)
 }
 
 // containsInstallerOwnedRoot keeps PlatformInstallerOwnedRoots free of
@@ -222,6 +243,30 @@ func reportTrustAdvisory(path, label, reason string) {
 	log.Printf(
 		"%s: %s ancestor %s is not provably trusted, continuing (permissions are owned by the platform installer): %s",
 		TrustAdvisoryMarker, label, path, reason,
+	)
+}
+
+// EmitTrustDriftAdvisory reports a permission drift that a caller outside this
+// package found and accepted, through the same hook and default-log dedupe the
+// *Tolerant validators use. The gateway's CMID broker client calls it for
+// auth key owner and DACL drift it accepts without repairing.
+func EmitTrustDriftAdvisory(path, label, reason string) {
+	reportTrustDrift(path, label, reason)
+}
+
+func reportTrustDrift(path, label, reason string) {
+	if hook := ReportTrustDrift; hook != nil {
+		hook(path, label, reason)
+		return
+	}
+	// The dedupe key carries the marker so a drift advisory and an ancestor
+	// advisory about the same tuple are both emitted once.
+	if !advisoryLogDedupe.shouldEmit(path, label, TrustDriftAdvisoryMarker+"\x00"+reason) {
+		return
+	}
+	log.Printf(
+		"%s: %s %s does not match its expected permissions, continuing: %s",
+		TrustDriftAdvisoryMarker, label, path, reason,
 	)
 }
 

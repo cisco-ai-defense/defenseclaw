@@ -290,6 +290,10 @@ func enterpriseManagedHookRuntimeFailMode() string {
 	return standaloneHookRuntime.descriptor.HookFailMode(standaloneHookRuntime.connector)
 }
 
+// enterpriseManagedHookRuntimeDriftFailMode: a Unix runtime failure is never
+// Windows runtime drift, so it stays closed.
+func enterpriseManagedHookRuntimeDriftFailMode() string { return "closed" }
+
 func enterpriseManagedHookRuntimeFailureReason() string {
 	standaloneHookRuntime.Lock()
 	defer standaloneHookRuntime.Unlock()

@@ -33,14 +33,7 @@ import (
 // changing the mode bits; on Linux a named POSIX ACL entry with effective
 // write. Code outside this package that trusts a path's mode bits checks
 // its ACL with this, as the trust checks here do.
-func ValidatePathACL(path string) error { return validateTrustedPathACL(path) }
-
-// ValidateTrustedConfigPath rejects managed_enterprise config paths that a
-// standard user could replace or edit. The managed service may run as a
-// dedicated non-root user, but the authoritative config must stay admin-owned.
-func ValidateTrustedConfigPath(path string) error {
-	return ValidateTrustedFilePath(path, "managed config")
-}
+func ValidatePathACL(path string) error { return validateStrictPathACL(path) }
 
 // ValidateTrustedInstallMarkerDir accepts a Secure Client install marker
 // only when root owns it and every ancestor, with no group, other or ACL
@@ -82,12 +75,15 @@ func ValidateTrustedFilePath(path, label string) error {
 		return err
 	}
 	for dir := filepath.Dir(clean); dir != filepath.Dir(dir); dir = filepath.Dir(dir) {
-		if err := validateTrustedPathElement(dir, true, label, PlatformInstallerOwnedPath(dir)); err != nil {
+		if trustedRootAlias(dir) {
+			continue
+		}
+		if err := validateTrustedPathElement(dir, true, label, AdvisoryAncestorPath(dir)); err != nil {
 			return err
 		}
 	}
 	root := filepath.VolumeName(clean) + string(filepath.Separator)
-	return validateTrustedPathElement(root, true, label, PlatformInstallerOwnedPath(root))
+	return validateTrustedPathElement(root, true, label, AdvisoryAncestorPath(root))
 }
 
 // ValidateTrustedRuntimeDir rejects managed_enterprise runtime directories that
@@ -107,7 +103,10 @@ func ValidateTrustedRuntimeDir(path, label string) error {
 		return fmt.Errorf("resolve %s path: %w", label, err)
 	}
 	for cur := clean; ; cur = filepath.Dir(cur) {
-		advisory := cur != clean && PlatformInstallerOwnedPath(cur)
+		if cur != clean && trustedRootAlias(cur) {
+			continue
+		}
+		advisory := cur != clean && AdvisoryAncestorPath(cur)
 		if err := validateTrustedRuntimeDirElement(cur, label, advisory); err != nil {
 			return err
 		}
@@ -116,20 +115,6 @@ func ValidateTrustedRuntimeDir(path, label string) error {
 		}
 	}
 	return nil
-}
-
-// ValidateTrustedServiceRuntimeDir is the cross-platform service-runtime
-// entry point. On unix the packaged defenseclaw account is resolved by
-// username (via user.Lookup) inside trustedRuntimeOwner; the
-// Windows-format `NT SERVICE\...` account name in the third argument
-// cannot be reused for a unix user lookup, so it is intentionally
-// dropped here. To point unix trust at a non-default username, set the
-// DEFENSECLAW_UNIX_SERVICE_ACCOUNT env — trustedRuntimeOwner reads it
-// on every check. When neither the env is set nor the "defenseclaw"
-// user exists, the ancestor walk fails with a clear "owner uid N is
-// not trusted" error instead of silently allowing any owner.
-func ValidateTrustedServiceRuntimeDir(path, label, _ string) error {
-	return ValidateTrustedRuntimeDir(path, label)
 }
 
 // serviceRuntimeTreeMaxEntries bounds the walk of a managed policy tree.
@@ -270,12 +255,15 @@ func ValidateTrustedServiceRuntimeFilePath(path, label, _ string) error {
 		return err
 	}
 	for dir := filepath.Dir(clean); dir != filepath.Dir(dir); dir = filepath.Dir(dir) {
-		if err := validateTrustedRuntimeDirElement(dir, label, PlatformInstallerOwnedPath(dir)); err != nil {
+		if trustedRootAlias(dir) {
+			continue
+		}
+		if err := validateTrustedRuntimeDirElement(dir, label, AdvisoryAncestorPath(dir)); err != nil {
 			return err
 		}
 	}
 	root := filepath.VolumeName(clean) + string(filepath.Separator)
-	return validateTrustedRuntimeDirElement(root, label, PlatformInstallerOwnedPath(root))
+	return validateTrustedRuntimeDirElement(root, label, AdvisoryAncestorPath(root))
 }
 
 func validateTrustedRuntimeFileElement(path, label string) error {
@@ -314,11 +302,13 @@ func validateTrustedRuntimeFileElement(path, label string) error {
 // see AIFW-34262 and TrustStrictAncestorsEnv. Structural failures stay fatal at
 // every element, and the named leaf (advisory=false) keeps every verdict fatal.
 //
-// Callers pass advisory=true only for an ancestor that PlatformInstallerOwnedPath
-// accepts. An ancestor outside those roots — a temp, home, or third-party
-// prefix — keeps its verdicts fatal, because nobody else has a claim on the
-// permissions there and a writable directory above the artifact means the
-// artifact can be swapped.
+// Callers pass advisory=true only for an ancestor that AdvisoryAncestorPath
+// accepts: the platform installer's roots and, on macOS, `/` and `/opt`. An
+// ancestor outside those — a temp, home, or third-party prefix — keeps its
+// verdicts fatal, because nobody else has a claim on the permissions there and
+// a writable directory above the artifact means the artifact can be swapped.
+// Apple's root aliases (`/etc`, `/tmp`, `/var`) are skipped by the walks
+// before they reach this check.
 //
 // Unlike Windows there is no second, narrower ancestor rule here: unix has no
 // equivalent of the stock known-folder create-child grant, so advisory is the
@@ -446,3 +436,7 @@ func trustedServiceAccounts(goos, custom string) []string {
 	}
 	return []string{StandaloneLinuxServiceUser}
 }
+
+// trustedMachineInstallBases is Windows-only; PlatformInstallerOwnedRoots
+// returns fixed roots on Unix.
+func trustedMachineInstallBases() []string { return nil }
