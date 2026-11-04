@@ -3005,8 +3005,8 @@ threading.Event().wait()
         [regex]::Matches($nativeWorkflowText, '''--timings'', ''scripts/test-timings/go-windows\.json''').Count -eq 3 -and
         $nativeWorkflowText -match '\$remainingArguments = @\(') `
         'full native Go suite runs gateway, connector, hookexec, and remaining-package shards with the declared coverage and time limits'
-    Assert-True (($hookexecMatrixIndexes -join ',') -eq ((0..2) -join ',') -and
-        $nativeWorkflowText -match '\$hookexecTestShardCount = 3' -and
+    Assert-True (($hookexecMatrixIndexes -join ',') -eq ((0..4) -join ',') -and
+        $nativeWorkflowText -match '\$hookexecTestShardCount = 5' -and
         $nativeWorkflowText -match '\$suiteKind -eq ''hookexec''' -and
         $nativeWorkflowText -match '''--package-dir'', ''internal/gateway/connector/hookexec''' -and
         $nativeWorkflowText -match '''--split-tests''' -and
@@ -3014,7 +3014,7 @@ threading.Event().wait()
         $nativeWorkflowText -match '''--shard-index'', \[string\]\$matrixShard' -and
         $nativeWorkflowText -match '''-timeout=11m'', ''-p=1''' -and
         $nativeWorkflowText -match '\) -TimeoutSeconds 840') `
-        'native hookexec suite runs all three test-level shards within the declared time limits'
+        'native hookexec suite runs all five test-level shards within the declared time limits'
     Assert-True ($nativeWorkflowText -match '(?s)''-p=1''.*?''-skip''.*?\$windowsInapplicable') 'native Go suite serializes packages and excludes only declared Windows-inapplicable tests'
     Assert-True ([regex]::Matches($nativeWorkflowText, '''test'', ''-vet=off''').Count -eq
         [regex]::Matches($nativeWorkflowText, '''test''').Count -and
