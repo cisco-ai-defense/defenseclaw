@@ -1317,8 +1317,17 @@ var acceptedCreateChild sync.Map
 // own trust walks (audit store, judge-body store, hook token folders), so a
 // folder reset to inherit from C:\ProgramData is judged the same way
 // everywhere. It reports whether the entry is accepted, logging it once.
+//
+// The folder must also be inside the platform installer's roots
+// (PlatformInstallerOwnedPath, C:\ProgramData\Cisco and the HKLM Cisco
+// bases), where only the installer creates folders and the ProgramData reset
+// is the one way the entry appears. A per-user (OSS) data_dir placed
+// elsewhere under C:\ProgramData inherits the same entry on creation, and
+// there another standard user could add a file beside the audit database, a
+// SQLite journal included, so it is refused, as before 26.8.4. The default
+// per-user data_dir in the profile never carries the entry (GAP-0566).
 func AcceptInheritedCreateChild(path, label string, flags uint8, mask windows.ACCESS_MASK, sid *windows.SID) bool {
-	return acceptInheritedCreateChild(path, label, flags, mask, sid)
+	return PlatformInstallerOwnedPath(path) && acceptInheritedCreateChild(path, label, flags, mask, sid)
 }
 
 // acceptInheritedCreateChild accepts, and logs once per path, an inherited

@@ -436,6 +436,20 @@ func TestStandaloneTrustRefusesInheritedCreateChild(t *testing.T) {
 			t.Fatalf("Secure Client refused the inherited create-child folder: %v", err)
 		}
 	})
+	// GAP-0566 review 1: the audit store, judge-body and hook token walks
+	// accept the entry only inside the platform installer's roots, so a
+	// per-user data_dir elsewhere under ProgramData is refused on every
+	// profile.
+	t.Run("outside the installer roots the exported helper refuses", func(t *testing.T) {
+		dir := inheritedCreateChildDirForTest(t)
+		pinTrustProfileForTest(t, false)
+		if PlatformInstallerOwnedPath(dir) {
+			t.Skip("the test temp folder is inside the platform installer roots")
+		}
+		if AcceptInheritedCreateChild(dir, "audit store", windows.INHERITED_ACE|windows.CONTAINER_INHERIT_ACE, 0x1201bf, usersSIDForTest(t)) {
+			t.Fatal("an inherited create-child entry was accepted for an audit folder outside the installer roots")
+		}
+	})
 	t.Run("standalone refuses", func(t *testing.T) {
 		dir := inheritedCreateChildDirForTest(t)
 		pinTrustProfileForTest(t, true)
