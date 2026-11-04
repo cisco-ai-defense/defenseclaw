@@ -95,13 +95,21 @@ func (f *fakeDocker) Run(_ context.Context, stdin io.Reader, stdout, stderr io.W
 				return err
 			}
 		}
-		names := make([]string, 0, len(f.exportedFiles))
-		for name := range f.exportedFiles {
-			names = append(names, name)
+		// A real export carries the base's nsswitch.conf; tests replace it
+		// through exportedFiles, or drop it with a nil entry.
+		files := map[string][]byte{"etc/nsswitch.conf": []byte("hosts: files dns\n")}
+		for name, data := range f.exportedFiles {
+			files[name] = data
+		}
+		names := make([]string, 0, len(files))
+		for name, data := range files {
+			if data != nil {
+				names = append(names, name)
+			}
 		}
 		sort.Strings(names)
 		for _, name := range names {
-			data := f.exportedFiles[name]
+			data := files[name]
 			if err := tw.WriteHeader(&tar.Header{Name: name, Typeflag: tar.TypeReg, Mode: 0o644, Size: int64(len(data))}); err != nil {
 				return err
 			}

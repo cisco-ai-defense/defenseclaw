@@ -513,7 +513,7 @@ func directResolverProblem(refusal string) string {
 	case "preload":
 		return "the MicroVM image loads code into every program ahead of libc (/etc/ld.so.preload), so DefenseClaw cannot verify what its programs resolve localhost to"
 	case "nss":
-		return "the MicroVM image answers host lookups with an NSS source besides libc's files and dns (/etc/nsswitch.conf), so DefenseClaw cannot verify what its programs resolve localhost to; set `hosts: files dns` in the image"
+		return "the MicroVM image's /etc/nsswitch.conf lets an NSS module or DNS answer localhost besides /etc/hosts, so DefenseClaw cannot verify what its programs resolve localhost to; set `hosts: files dns` in the image"
 	case "nonloopback", "family":
 		return "the MicroVM resolver did not return only its loopback ingress for localhost"
 	case "noanswer":

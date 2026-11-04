@@ -48,14 +48,21 @@ type exportedHosts struct {
 	preload string
 	// sawPreload is set once an /etc/ld.so.preload entry was read.
 	sawPreload bool
-	// nss says why the export's /etc/nsswitch.conf lets code other than
-	// libc answer host lookups ("" when its hosts sources are only files
-	// and dns, or the file is absent: glibc's default uses only those two,
-	// both built into libc). An NSS module is image code that can answer
-	// DefenseClaw's resolver caller unlike every other program.
+	// nss says why the export's /etc/nsswitch.conf lets something besides
+	// /etc/hosts answer localhost ("" when its one hosts line asks libc's
+	// files source first and at most libc's dns source after it, with only
+	// return actions). An NSS module is image code that can answer
+	// DefenseClaw's resolver caller unlike every other program, and DNS
+	// that answers before or after a successful /etc/hosts lookup can give
+	// a later lookup another address.
 	nss string
 	// sawNSS is set once an /etc/nsswitch.conf entry was read.
 	sawNSS bool
+	// resolv says why the export's /etc/resolv.conf could let the workload
+	// pick the DNS server ("" when it is absent or a regular file). Guest
+	// init writes the relay's address through that path, so a link would
+	// put the file where the workload can rewrite it.
+	resolv string
 }
 
 func (h exportedHosts) initializedByGuest() bool {
@@ -68,6 +75,9 @@ func parseExportedHosts(r io.Reader) (exportedHosts, error) {
 	for {
 		h, err := tr.Next()
 		if err == io.EOF {
+			if !result.sawNSS {
+				result.nss = "is missing, so glibc's default asks DNS before /etc/hosts"
+			}
 			return result, nil
 		}
 		if err != nil {
@@ -91,6 +101,12 @@ func parseExportedHosts(r io.Reader) (exportedHosts, error) {
 			result.sawNSS = true
 			if result.nss, err = exportedNSS(h, tr); err != nil {
 				return result, err
+			}
+			continue
+		}
+		if name == "etc/resolv.conf" {
+			if h.Typeflag != tar.TypeReg {
+				result.resolv = "is not a regular file"
 			}
 			continue
 		}
@@ -144,8 +160,8 @@ func exportedPreload(h *tar.Header, r io.Reader) (string, error) {
 	return "", nil
 }
 
-// exportedNSS says why the export's /etc/nsswitch.conf entry h lets code
-// besides libc answer host lookups, or "".
+// exportedNSS says why the export's /etc/nsswitch.conf entry h lets
+// something besides /etc/hosts answer localhost, or "".
 func exportedNSS(h *tar.Header, r io.Reader) (string, error) {
 	if h.Typeflag != tar.TypeReg {
 		return "is not a regular file", nil
@@ -161,40 +177,83 @@ func exportedNSS(h *tar.Header, r io.Reader) (string, error) {
 }
 
 // hostsSourcesProblem judges nsswitch.conf data as the pinned caller does
-// (testdata/localhost-resolver.c, hosts_sources_builtin): every line whose
-// database is hosts, in any letter case, may name only the files and dns
-// sources and [status=action] items, and only one such line may exist.
+// (testdata/localhost-resolver.c, hosts_files_first): exactly one line whose
+// database is hosts, in any letter case, asking libc's files source first and
+// at most libc's dns source after it, with only return actions. Those can only
+// end a lookup sooner, so DNS never answers before /etc/hosts or after it
+// succeeded. A file without a hosts line gets glibc's default, which asks DNS
+// first.
 func hostsSourcesProblem(data []byte) string {
+	const space = " \t\r\f\v"
 	hosts := 0
 	for _, line := range strings.Split(string(data), "\n") {
 		if len(line) >= 4095 {
 			return "has a line too long to check"
 		}
 		line, _, _ = strings.Cut(line, "#")
-		key, rest, ok := strings.Cut(strings.TrimLeft(line, " \t\r\f\v"), ":")
-		if !ok || !strings.EqualFold(strings.TrimRight(key, " \t\r\f\v"), "hosts") || strings.ContainsAny(strings.TrimRight(key, " \t\r\f\v"), " \t") {
+		key, rest, ok := strings.Cut(strings.TrimLeft(line, space), ":")
+		key = strings.TrimRight(key, space)
+		if !ok || !strings.EqualFold(key, "hosts") {
 			continue
 		}
 		if hosts++; hosts > 1 {
 			return "has more than one hosts line"
 		}
-		for rest = strings.TrimSpace(rest); rest != ""; rest = strings.TrimSpace(rest) {
+		state := 0 // 0: files is next; 1: after files; 2: after dns
+		for rest = strings.Trim(rest, space); rest != ""; rest = strings.TrimLeft(rest, space) {
 			if strings.HasPrefix(rest, "[") {
 				action, after, ok := strings.Cut(rest[1:], "]")
-				if !ok || strings.Trim(action, "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ=! \t\r\f\v") != "" {
+				if !ok || state == 0 {
 					return "has a hosts action it cannot read"
+				}
+				if problem := hostsActionProblem(action); problem != "" {
+					return problem
 				}
 				rest = after
 				continue
 			}
-			end := strings.IndexAny(rest, " \t\r\f\v[")
+			end := strings.IndexAny(rest, space+"[")
 			if end < 0 {
 				end = len(rest)
 			}
-			if source := rest[:end]; source != "files" && source != "dns" {
+			switch source := rest[:end]; {
+			case state == 0 && source == "files":
+				state = 1
+			case state == 1 && source == "dns":
+				state = 2
+			case source != "files" && source != "dns":
 				return fmt.Sprintf("names the hosts source %q", source)
+			default:
+				return "does not ask files first and at most dns after it on its hosts line"
 			}
 			rest = rest[end:]
+		}
+		if state == 0 {
+			return "does not ask files first and at most dns after it on its hosts line"
+		}
+	}
+	if hosts == 0 {
+		return "has no hosts line, so glibc's default asks DNS before /etc/hosts"
+	}
+	return ""
+}
+
+// hostsActionProblem judges the text of one [status=action ...] item: only
+// return actions on known statuses, which end a lookup sooner.
+func hostsActionProblem(text string) string {
+	items := strings.Fields(text)
+	if len(items) == 0 {
+		return "has a hosts action it cannot read"
+	}
+	for _, item := range items {
+		status, action, ok := strings.Cut(strings.TrimPrefix(item, "!"), "=")
+		switch strings.ToLower(status) {
+		case "success", "notfound", "unavail", "tryagain":
+		default:
+			return "has a hosts action it cannot read"
+		}
+		if !ok || !strings.EqualFold(action, "return") {
+			return fmt.Sprintf("has the hosts action %q, which can let DNS answer after /etc/hosts", "["+text+"]")
 		}
 	}
 	return ""
@@ -257,10 +316,15 @@ func (b *Builder) verifyExportedResolver(ctx context.Context, c *Context) (err e
 			"runs that code ahead of libc and no check can show what they resolve localhost to; remove the preload from the base image",
 			c.Tag, c.Spec.BaseImage, hosts.preload)
 	}
+	if hosts.resolv != "" {
+		return fmt.Errorf("MicroVM image %s localhost check failed for %s: its /etc/resolv.conf %s, so OpenShell's guest init would write "+
+			"the DNS relay's address where the workload may change it; make /etc/resolv.conf a regular file (or remove it) in the base image",
+			c.Tag, c.Spec.BaseImage, hosts.resolv)
+	}
 	if hosts.nss != "" {
-		return fmt.Errorf("MicroVM image %s localhost check failed for %s: its /etc/nsswitch.conf %s; a MicroVM image may resolve hosts only "+
-			"with the files and dns sources built into libc, the same code for every program, which DefenseClaw can verify: set the line to "+
-			"`hosts: files dns` and map localhost in /etc/hosts (or leave /etc/hosts empty)", c.Tag, c.Spec.BaseImage, hosts.nss)
+		return fmt.Errorf("MicroVM image %s localhost check failed for %s: its /etc/nsswitch.conf %s; a MicroVM image must look hosts up "+
+			"in /etc/hosts first with libc's files source and at most libc's dns source after it, so no module or DNS answer can replace "+
+			"localhost: set the line to `hosts: files dns` and map localhost in /etc/hosts (or leave /etc/hosts empty)", c.Tag, c.Spec.BaseImage, hosts.nss)
 	}
 	if hosts.initializedByGuest() {
 		return nil

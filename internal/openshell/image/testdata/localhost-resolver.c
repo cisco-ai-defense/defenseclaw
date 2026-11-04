@@ -18,9 +18,11 @@
 // image's own libc, the way every program in the guest does, and passes only
 // when every answer of every address family is loopback.
 //
-// Only libc's own code may answer: the image's hosts sources must be the
-// files and dns sources built into libc, and no other object may be mapped
-// into this process before or during the lookups. An NSS module or a preload
+// Only libc's own code may answer, and DNS never before or after a
+// successful /etc/hosts lookup: the image's hosts line must ask libc's files
+// source first and at most libc's dns source after it, with only return
+// actions, and no other object may be mapped into this process before or
+// during the lookups. An NSS module or a preload
 // is image code that can tell this program from any other and answer it
 // alone with loopback, so no probe could show what the harness gets.
 //
@@ -29,9 +31,9 @@
 // "loopback-only" and exit status 0. A refusal prints "refused <reason>" and
 // exits 1: noanswer (the unspec query has no answer), nonloopback (some answer
 // is not 127.0.0.1 or ::1), family (an answer of another family than asked),
-// preload (code an image injects into every process) or nss (a hosts source
-// besides files and dns in /etc/nsswitch.conf, or an object the lookups
-// loaded).
+// preload (code an image injects into every process) or nss (a hosts line
+// other than files, then optionally dns, with only return actions in
+// /etc/nsswitch.conf, or an object the lookups loaded).
 
 #define _GNU_SOURCE
 #include <arpa/inet.h>
@@ -82,13 +84,33 @@ static int preloaded(struct loaded *l) {
     return l->other != 0 || l->libc > 1 || l->loader > 1 || l->vdso > 1;
 }
 
-// hosts_sources_builtin reports whether every hosts line of nsswitch.conf
-// names only the files and dns sources (with any [status=action] items).
-// A missing file is glibc's default, which uses only those two. Every line
-// whose database is hosts in any letter case counts, and only one may exist.
-static int hosts_sources_builtin(void) {
+// action_returns reports whether the [status=action ...] item text (without
+// the brackets) holds only return actions on known statuses: those can only
+// end the lookup sooner, never let a later source answer after /etc/hosts.
+static int action_returns(char *text) {
+    char *save = NULL;
+    int items = 0;
+    for (char *item = strtok_r(text, " \t\r\f\v", &save); item != NULL; item = strtok_r(NULL, " \t\r\f\v", &save)) {
+        items++;
+        if (*item == '!') item++;
+        char *eq = strchr(item, '=');
+        if (eq == NULL) return 0;
+        *eq = 0;
+        if (strcasecmp(item, "success") != 0 && strcasecmp(item, "notfound") != 0 &&
+            strcasecmp(item, "unavail") != 0 && strcasecmp(item, "tryagain") != 0) return 0;
+        if (strcasecmp(eq + 1, "return") != 0) return 0;
+    }
+    return items > 0;
+}
+
+// hosts_files_first reports whether nsswitch.conf has exactly one hosts line
+// (its database name in any letter case) that asks libc's files source first
+// and at most libc's dns source after it, with only return actions. A
+// missing file, or one without a hosts line, is glibc's default, which asks
+// DNS before /etc/hosts.
+static int hosts_files_first(void) {
     FILE *f = fopen("/etc/nsswitch.conf", "re");
-    if (f == NULL) return errno == ENOENT;
+    if (f == NULL) return 0;
     char line[4096];
     int hosts = 0, good = 1;
     while (good && fgets(line, sizeof line, f) != NULL) {
@@ -111,17 +133,21 @@ static int hosts_sources_builtin(void) {
             break;
         }
         p++;
+        // 0: files is next; 1: after files; 2: after dns.
+        int state = 0;
         for (;;) {
             while (isspace((unsigned char)*p)) p++;
             if (*p == 0) break;
             if (*p == '[') {
                 char *end = strchr(p, ']');
-                if (end == NULL) {
+                if (end == NULL || state == 0) {
                     good = 0;
                     break;
                 }
-                for (char *c = p + 1; c < end; c++) {
-                    if (!isalpha((unsigned char)*c) && *c != '=' && *c != '!' && !isspace((unsigned char)*c)) good = 0;
+                *end = 0;
+                if (!action_returns(p + 1)) {
+                    good = 0;
+                    break;
                 }
                 p = end + 1;
                 continue;
@@ -129,15 +155,20 @@ static int hosts_sources_builtin(void) {
             char *word = p;
             while (*p != 0 && !isspace((unsigned char)*p) && *p != '[') p++;
             size_t len = (size_t)(p - word);
-            if (!((len == 5 && strncmp(word, "files", 5) == 0) || (len == 3 && strncmp(word, "dns", 3) == 0))) {
+            if (state == 0 && len == 5 && strncmp(word, "files", 5) == 0) {
+                state = 1;
+            } else if (state == 1 && len == 3 && strncmp(word, "dns", 3) == 0) {
+                state = 2;
+            } else {
                 good = 0;
                 break;
             }
         }
+        if (state == 0) good = 0;
     }
     if (ferror(f)) good = 0;
     fclose(f);
-    return good;
+    return good && hosts == 1;
 }
 
 static const char *refusal;
@@ -189,7 +220,7 @@ int main(void) {
         printf("refused preload\n");
         return 1;
     }
-    if (!hosts_sources_builtin()) {
+    if (!hosts_files_first()) {
         printf("refused nss\n");
         return 1;
     }

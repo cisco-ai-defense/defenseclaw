@@ -52,7 +52,7 @@ const DefaultRepository = "defenseclaw/sandbox"
 
 // contextSchema versions image admission and the Dockerfile layout; bump it
 // when either changes so older records stop matching.
-const contextSchema = 8
+const contextSchema = 9
 
 // The VM resolver check runs this pinned caller against the completed
 // image's libc and NSS configuration.

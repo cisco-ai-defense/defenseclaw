@@ -974,25 +974,40 @@ func TestMicroVMExportedPreloadClassification(t *testing.T) {
 }
 
 // hostsSourcesProblem reads nsswitch.conf the way the pinned caller does:
-// only files, dns and [status=action] items on the one hosts line.
+// one hosts line asking files first and at most dns after it, with only
+// return actions, so neither a module nor DNS can answer localhost besides
+// /etc/hosts (osmin23c reviews 1 and 2).
 func TestMicroVMExportedNSSClassification(t *testing.T) {
+	const fallback = "does not ask files first and at most dns after it on its hosts line"
 	for _, tc := range []struct {
 		name, data, want string
 	}{
 		{"stock", "passwd: files\nhosts:          files dns\nnetworks: files\n", ""},
-		{"actions", "hosts: files [NOTFOUND=return] dns [!UNAVAIL=return]\n", ""},
+		{"files only", "hosts: files\n", ""},
+		{"return actions", "hosts: files [NOTFOUND=return] dns [!UNAVAIL=return]\n", ""},
+		{"return action in lower case", "hosts: files [notfound=Return] dns\n", ""},
 		{"comment and CRLF", "# hosts: evil\r\nhosts: files dns # mdns\r\n", ""},
 		{"other databases may use modules", "passwd: files systemd\nhosts: files dns\n", ""},
-		{"no hosts line", "passwd: files\n", ""},
+		{"no hosts line", "passwd: files\n", "has no hosts line, so glibc's default asks DNS before /etc/hosts"},
+		{"empty hosts line", "hosts:\n", fallback},
+		{"DNS first", "hosts: dns files\n", fallback},
+		{"DNS only", "hosts: dns\n", fallback},
+		{"files twice", "hosts: files files\n", fallback},
+		{"DNS continues after files", "hosts: files [SUCCESS=continue] dns\n", `has the hosts action "[SUCCESS=continue]", which can let DNS answer after /etc/hosts`},
+		{"continue in lower case", "hosts: files [success=continue] dns\n", `has the hosts action "[success=continue]", which can let DNS answer after /etc/hosts`},
+		{"merge", "hosts: files [SUCCESS=merge] dns\n", `has the hosts action "[SUCCESS=merge]", which can let DNS answer after /etc/hosts`},
+		{"continue after dns", "hosts: files dns [NOTFOUND=continue]\n", `has the hosts action "[NOTFOUND=continue]", which can let DNS answer after /etc/hosts`},
+		{"action before files", "hosts: [NOTFOUND=return] files dns\n", "has a hosts action it cannot read"},
+		{"unknown status", "hosts: files [FOUND=return] dns\n", "has a hosts action it cannot read"},
 		{"local module", "hosts: files localtest\n", `names the hosts source "localtest"`},
 		{"module only", "hosts: familytest\n", `names the hosts source "familytest"`},
 		{"myhostname", "hosts: files myhostname dns\n", `names the hosts source "myhostname"`},
 		{"upper-case database", "HOSTS: files familytest\n", `names the hosts source "familytest"`},
 		{"space before the colon", "hosts : familytest\n", `names the hosts source "familytest"`},
-		{"module glued to an action", "hosts: files [NOTFOUND=continue]familytest\n", `names the hosts source "familytest"`},
+		{"module glued to an action", "hosts: files [NOTFOUND=return]familytest\n", `names the hosts source "familytest"`},
 		{"two hosts lines", "hosts: files dns\nhosts: familytest\n", "has more than one hosts line"},
 		{"unterminated action", "hosts: files [NOTFOUND=return dns\n", "has a hosts action it cannot read"},
-		{"odd action", "hosts: files [NOTFOUND=/x] dns\n", "has a hosts action it cannot read"},
+		{"odd action", "hosts: files [NOTFOUND=/x] dns\n", `has the hosts action "[NOTFOUND=/x]", which can let DNS answer after /etc/hosts`},
 		{"long line", "hosts: files " + strings.Repeat(" ", 5000) + "dns\n", "has a line too long to check"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -1001,29 +1016,99 @@ func TestMicroVMExportedNSSClassification(t *testing.T) {
 			}
 		})
 	}
-	var link bytes.Buffer
-	tw := tar.NewWriter(&link)
-	if err := tw.WriteHeader(&tar.Header{Name: "etc/nsswitch.conf", Typeflag: tar.TypeSymlink, Linkname: "/sandbox/nsswitch.conf", Mode: 0o777}); err != nil {
-		t.Fatal(err)
+	exported := func(entries ...*tar.Header) exportedHosts {
+		t.Helper()
+		var data bytes.Buffer
+		tw := tar.NewWriter(&data)
+		for _, h := range entries {
+			if err := tw.WriteHeader(h); err != nil {
+				t.Fatal(err)
+			}
+		}
+		if err := tw.Close(); err != nil {
+			t.Fatal(err)
+		}
+		hosts, err := parseExportedHosts(&data)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return hosts
 	}
-	if err := tw.Close(); err != nil {
-		t.Fatal(err)
+	if hosts := exported(&tar.Header{Name: "etc/nsswitch.conf", Typeflag: tar.TypeSymlink, Linkname: "/sandbox/nsswitch.conf", Mode: 0o777}); hosts.nss != "is not a regular file" {
+		t.Fatalf("linked nsswitch.conf = %q", hosts.nss)
 	}
-	if hosts, err := parseExportedHosts(&link); err != nil || hosts.nss != "is not a regular file" {
-		t.Fatalf("linked nsswitch.conf = %q, %v", hosts.nss, err)
+	if hosts := exported(); hosts.nss != "is missing, so glibc's default asks DNS before /etc/hosts" {
+		t.Fatalf("missing nsswitch.conf = %q", hosts.nss)
+	}
+	if hosts := exported(&tar.Header{Name: "etc/resolv.conf", Typeflag: tar.TypeSymlink, Linkname: "/sandbox/resolv.conf", Mode: 0o777}); hosts.resolv != "is not a regular file" {
+		t.Fatalf("linked resolv.conf = %q", hosts.resolv)
+	}
+	if hosts := exported(&tar.Header{Name: "etc/resolv.conf", Typeflag: tar.TypeReg, Mode: 0o644}); hosts.resolv != "" {
+		t.Fatalf("regular resolv.conf = %q", hosts.resolv)
+	}
+}
+
+// The osmin23c review-2 forms (DNS before /etc/hosts, DNS continuing after
+// a successful /etc/hosts lookup, glibc's DNS-first default) are refused by
+// the export check and by the caller in the completed image; the stock and
+// return-action twins pass both.
+func TestMicroVMResolverRefusesDNSBesideFiles(t *testing.T) {
+	localDocker(t)
+	for _, tc := range []struct {
+		name, change string
+		want         bool
+	}{
+		{"DNS continues after a successful files lookup", "RUN sed -i 's/^hosts:.*/hosts: files [SUCCESS=continue] dns/' /etc/nsswitch.conf\n", false},
+		{"DNS first", "RUN sed -i 's/^hosts:.*/hosts: dns files/' /etc/nsswitch.conf\n", false},
+		{"no nsswitch.conf", "RUN rm /etc/nsswitch.conf\n", false},
+		{"stock files dns", "", true},
+		{"return action", "RUN sed -i 's/^hosts:.*/hosts: files [NOTFOUND=return] dns/' /etc/nsswitch.conf\n", true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			dir := t.TempDir()
+			layout := microVMResolverFixtureStage(t, dir) + "FROM " + openshell.DefaultBaseImage + " AS dc-complete\nUSER root\n" +
+				tc.change + microVMResolverCopyStep() + "USER sandbox\n"
+			if err := os.WriteFile(filepath.Join(dir, "Dockerfile"), []byte(layout), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			tag := testImageTag(dir)
+			t.Cleanup(func() { exec.Command("docker", "image", "rm", "-f", tag).Run() })
+			if out, err := dockerCommand(t, "build", "--pull=false", "--progress=plain", "-t", tag, dir).CombinedOutput(); err != nil {
+				t.Fatalf("build the completed image: %v\n%s", err, out)
+			}
+			exported, err := (&Builder{Docker: CLI{}}).exportHosts(t.Context(), tag)
+			if err != nil || (exported.nss == "") != tc.want || exported.resolv != "" {
+				t.Fatalf("export nss = %q, resolv = %q, error %v; want accepted %t", exported.nss, exported.resolv, err, tc.want)
+			}
+			caller, err := dockerCommand(t, "run", "--rm", "--network=none", "--entrypoint", microVMResolverPath, tag).Output()
+			if tc.want {
+				if err != nil || !strings.HasSuffix(string(caller), "loopback-only\n") {
+					t.Fatalf("caller = %q, %v", caller, err)
+				}
+				return
+			}
+			var exitErr *exec.ExitError
+			if !errors.As(err, &exitErr) || exitErr.ExitCode() != 1 || string(caller) != "refused nss\n" {
+				t.Fatalf("caller = %q, %v; want \"refused nss\"", caller, err)
+			}
+		})
 	}
 }
 
 // The osmin23c review-1 image (an empty hosts file, hosts answered only by
-// a module) is refused before any resolver build and before a record, with
-// the repair; its twin with the stock NSS configuration records.
+// a module) and the review-2 DNS forms are refused before any resolver
+// build and before a record, with the repair; the stock twin records.
 func TestBuildRejectsCustomNSSMicroVMBeforeRecord(t *testing.T) {
 	for _, tc := range []struct {
-		name, nsswitch string
-		want           bool
+		name     string
+		nsswitch []byte
+		reason   string // "" records
 	}{
-		{"module answers hosts", "hosts: familytest\n", false},
-		{"stock NSS configuration", "hosts: files dns\n", true},
+		{"module answers hosts", []byte("hosts: familytest\n"), `names the hosts source "familytest"`},
+		{"DNS continues after files", []byte("hosts: files [SUCCESS=continue] dns\n"), `has the hosts action "[SUCCESS=continue]"`},
+		{"DNS first", []byte("hosts: dns files\n"), "does not ask files first"},
+		{"no nsswitch.conf", nil, "is missing, so glibc's default asks DNS before /etc/hosts"},
+		{"stock NSS configuration", []byte("hosts: files dns\n"), ""},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			spec := testSpec(harness.Codex)
@@ -1031,17 +1116,18 @@ func TestBuildRejectsCustomNSSMicroVMBeforeRecord(t *testing.T) {
 			c := mustContext(t, spec)
 			docker := imageDocker(t, c, goodProbeOutput(c))
 			docker.exportedHosts = exportedHosts{present: true, typeflag: tar.TypeReg}
-			docker.exportedFiles = map[string][]byte{"etc/nsswitch.conf": []byte(tc.nsswitch)}
+			docker.exportedFiles = map[string][]byte{"etc/nsswitch.conf": tc.nsswitch}
 			store := testStore(t)
 			_, err := (&Builder{Docker: docker, Store: store}).Build(t.Context(), spec, BuildOptions{SkipHookFire: true})
-			if (err == nil) != tc.want {
-				t.Fatalf("build error = %v, want success %t", err, tc.want)
+			want := tc.reason == ""
+			if (err == nil) != want {
+				t.Fatalf("build error = %v, want success %t", err, want)
 			}
-			if err != nil && (!strings.Contains(err.Error(), `names the hosts source "familytest"`) || !strings.Contains(err.Error(), "`hosts: files dns`")) {
-				t.Fatalf("refusal does not name the source and the repair: %v", err)
+			if err != nil && (!strings.Contains(err.Error(), tc.reason) || !strings.Contains(err.Error(), "`hosts: files dns`")) {
+				t.Fatalf("refusal does not name the cause and the repair: %v", err)
 			}
 			items, listErr := store.List()
-			if listErr != nil || (len(items) == 0) == tc.want {
+			if listErr != nil || (len(items) == 0) == want {
 				t.Fatalf("records = %+v, %v", items, listErr)
 			}
 		})
