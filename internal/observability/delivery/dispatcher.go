@@ -13,6 +13,7 @@ package delivery
 import (
 	"context"
 	"math/rand/v2"
+	"reflect"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -108,6 +109,9 @@ func NewDispatcher(config Config, adapter Adapter) (*Dispatcher, error) {
 		return nil, newError(ErrorInvalidConfig)
 	}
 	config.Circuit = circuit
+	if nilDeliveryDependency(config.Observer) {
+		config.Observer = nil
+	}
 	if config.Enabled && !validEnabledConfig(config, adapter) {
 		return nil, newError(ErrorInvalidConfig)
 	}
@@ -128,7 +132,7 @@ func NewDispatcher(config Config, adapter Adapter) (*Dispatcher, error) {
 }
 
 func validEnabledConfig(config Config, adapter Adapter) bool {
-	return adapter != nil &&
+	return !nilDeliveryDependency(adapter) &&
 		config.MaxQueueItems > 0 && config.MaxQueueItems <= maxQueueItems &&
 		config.MaxQueueBytes > 0 && config.MaxQueueBytes <= maxQueueBytes &&
 		config.MaxBatchItems > 0 && config.MaxBatchItems <= maxBatchItems &&
@@ -138,6 +142,19 @@ func validEnabledConfig(config Config, adapter Adapter) bool {
 		config.Retry.MaxAttempts > 0 && config.Retry.MaxAttempts <= maxAttempts &&
 		config.Retry.InitialBackoff >= 0 && config.Retry.MaxBackoff >= 0 &&
 		config.Retry.InitialBackoff <= config.Retry.MaxBackoff
+}
+
+func nilDeliveryDependency(value any) bool {
+	if value == nil {
+		return true
+	}
+	reflected := reflect.ValueOf(value)
+	switch reflected.Kind() {
+	case reflect.Chan, reflect.Func, reflect.Interface, reflect.Map, reflect.Pointer, reflect.Slice:
+		return reflected.IsNil()
+	default:
+		return false
+	}
 }
 
 // Activate implements runtimegraph.Component. It is infallible, nonblocking,
