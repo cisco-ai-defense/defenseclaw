@@ -1366,7 +1366,7 @@ func TestStrictAvailabilityBlocksDisabledOrMissingHome(t *testing.T) {
 	}
 }
 
-func TestManagedEnterpriseMissingHomeFollowsFailModeAndSentinelBlocks(t *testing.T) {
+func TestManagedEnterpriseMissingOrDisabledHomeFailsClosed(t *testing.T) {
 	for _, connectorName := range []string{"claudecode", "codex"} {
 		for _, tc := range []struct {
 			name       string
@@ -1413,9 +1413,8 @@ func TestManagedEnterpriseMissingHomeFollowsFailModeAndSentinelBlocks(t *testing
 				requireManagedStderr(t, errb.String(), true)
 				requireManagedRecordReason(t, *records, tc.diagnostic)
 
-				// Under the default open fail mode a missing home (an
-				// availability gap) is allowed; the disable sentinel is
-				// tampering and still blocks.
+				// A removed home and the disable sentinel are tampering and
+				// block under the default open fail mode too.
 				out.Reset()
 				errb.Reset()
 				options.FailMode = "open"
@@ -1430,17 +1429,10 @@ func TestManagedEnterpriseMissingHomeFollowsFailModeAndSentinelBlocks(t *testing
 				if rt.requests != 0 {
 					t.Fatalf("open mode: gateway called %d times, want 0", rt.requests)
 				}
-				if tc.name == "disabled" {
-					if code != failClosedExit(connectorName) {
-						t.Fatalf("open mode sentinel: code = %d, want fail-closed %d", code, failClosedExit(connectorName))
-					}
-					requireManagedStderr(t, errb.String(), true)
-					return
+				if code != failClosedExit(connectorName) {
+					t.Fatalf("open mode: code = %d, want fail-closed %d", code, failClosedExit(connectorName))
 				}
-				if code != 0 {
-					t.Fatalf("open mode: code = %d, want an allow; stderr=%q", code, errb.String())
-				}
-				requireManagedStderr(t, errb.String(), false)
+				requireManagedStderr(t, errb.String(), true)
 			})
 		}
 	}

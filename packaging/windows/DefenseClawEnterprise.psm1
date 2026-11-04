@@ -29974,6 +29974,12 @@ function Invoke-DefenseClawEnterpriseLifecycle {
         # deployment.
         try {
             $preLockMetadata = Get-DefenseClawDeploymentMetadata -Layout $layout
+            if ($null -eq $preLockMetadata -and $installAutoRecoveryEligible) {
+                # The file exists but its reader gave up after its own
+                # recovery; take the same registered-service check as a read
+                # that throws, so this cannot purge a live deployment.
+                throw "deployment metadata is unreadable: $($layout.MetadataPath)"
+            }
             $installLiveDeployment = [bool](
                 $null -ne $preLockMetadata -and
                 (Test-DefenseClawMetadataInstalled -Metadata $preLockMetadata)

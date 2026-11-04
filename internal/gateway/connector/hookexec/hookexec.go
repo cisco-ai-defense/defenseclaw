@@ -262,17 +262,18 @@ func Run(ctx context.Context, opts Options) int {
 	}
 
 	// DEFENSECLAW_HOME guard: an ordinary removed/disabled installation is an
-	// intentional no-op. A missing home under an administrator-managed hook
-	// is an availability gap, so the configured fail mode decides and is
-	// logged; strict availability still blocks. Nothing in a managed
-	// deployment writes the .disabled sentinel, and the user can write the
-	// home, so a sentinel there is tampering and always blocks.
+	// intentional no-op. A managed hook reaches this check only after its
+	// runtime resolved from that home (an interrupted install, upgrade or
+	// purge is a runtime failure handled above), so a home that is now
+	// missing was removed underneath it. Nothing in a managed deployment
+	// writes the .disabled sentinel, and the user can write the home. Both
+	// are tampering and always block.
 	if info, err := os.Stat(opts.Home); err != nil || !info.IsDir() {
 		if opts.ManagedEnterprise {
 			return failUnreachable(
 				opts,
 				sp,
-				failMode,
+				"closed",
 				managedRuntimeHomeMissingReason,
 			)
 		}
