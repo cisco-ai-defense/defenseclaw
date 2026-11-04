@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"time"
 )
@@ -206,6 +207,44 @@ func (p *preparedFailureLog) setFallbackFrame(frame []byte) {
 		p.fallbackFrame = append(p.fallbackFrame[:0], frame...)
 	}
 	p.mu.Unlock()
+}
+
+// localFailureFallbackFrame is ready before a logger can wait on a file or
+// a caller-provided clock. The watchdog writes it only when logging has not
+// finished by the answer deadline.
+func localFailureFallbackFrame(opts Options, sp spec, reason, category, failMode string, blocked bool) []byte {
+	if opts.ManagedEnterprise || opts.SecureClient || opts.Home == "" {
+		return nil
+	}
+	sessionID, callID, toolID := hookFailureCorrelation(opts.failurePayload)
+	outcome := "fail_open"
+	if blocked {
+		outcome = "fail_closed"
+	}
+	entry := hookFailureEntry{
+		TS:        time.Now().UTC().Format("2006-01-02T15:04:05Z"),
+		Connector: sp.connector,
+		Hook:      sp.hookName,
+		Event:     strings.TrimSpace(opts.Event),
+		SessionID: sessionID,
+		CallID:    callID,
+		ToolID:    toolID,
+		Reason:    reason,
+		Category:  category,
+		FailMode:  loggedFailMode(opts, sp, failMode),
+		Outcome:   outcome,
+	}
+	if len(entry.Reason) > 1024 {
+		entry.Reason = strings.ToValidUTF8(entry.Reason[:1024], "")
+	}
+	if len(entry.Event) > 128 {
+		entry.Event = strings.ToValidUTF8(entry.Event[:128], "")
+	}
+	line, err := json.Marshal(entry)
+	if err != nil {
+		return nil
+	}
+	return append(append([]byte("DCID"), line...), '\n')
 }
 
 func (p *preparedFailureLog) promoteFallbackClosed() {

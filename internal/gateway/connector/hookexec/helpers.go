@@ -274,7 +274,8 @@ func logHookFailureOf(opts Options, sp spec, reason, category, failMode string, 
 	if w := opts.answerWatch; w != nil {
 		// Before anything below can block: a closed failure keeps the
 		// watchdog's answer closed (claimFailureLog).
-		done, claimed := w.claimFailureLog(opts, sp, blocked, reason, failMode, unreachableAnswer)
+		frame := localFailureFallbackFrame(opts, sp, reason, category, failMode, blocked)
+		done, claimed := w.claimFailureLog(opts, sp, blocked, reason, failMode, unreachableAnswer, frame)
 		if !claimed {
 			return
 		}

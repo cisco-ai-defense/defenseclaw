@@ -194,6 +194,7 @@ func ArmAnswerWatchdog(opts Options, payload []byte) *AnswerWatchdog {
 	}
 	opts.Stdin = strings.NewReader("")
 	opts = withDefaults(opts)
+	opts.failurePayload = payload
 	if copilotVSCodeLocal(opts) {
 		sp = copilotVSCodeLocalSpec
 	}
@@ -254,6 +255,10 @@ func prepareAnswerWatchdog(opts *Options, sp spec, failMode string, ceiling time
 		w.fallbackOut, w.fallbackErr, w.fallbackCode, w.logFailure
 	w.fallbackBlocked = watchdogNoAnswerBlocks(*opts, sp, failMode)
 	w.noDecisionBlocked = w.fallbackBlocked
+	if w.failureLog.markerEnabled {
+		w.failureLog.setFallbackFrame(localFailureFallbackFrame(*opts, sp, perUserGatewayNoAnswerReason,
+			"transport", noAnswerFailMode(*opts, failMode), w.fallbackBlocked))
+	}
 	w.installCheck, w.installOut, w.installErr, w.installCode, w.installLogFailure = renderInstallAnswer(*opts, sp, failMode)
 	opts.Stdout, opts.Stderr = &w.out, &w.err
 	opts.answerWatch = w
@@ -418,7 +423,7 @@ func (w *answerWatchdog) closeForAnsweredError(opts Options, sp spec) {
 // enterprise_managed_gateway_not_running and, when the deadline passed while
 // the row was written, showed enterprise_managed_gateway_no_answer
 // (rel-1-0-6 GAP-0294).
-func (w *answerWatchdog) claimFailureLog(opts Options, sp spec, closed bool, reason, failMode string, unreachableAnswer bool) (chan struct{}, bool) {
+func (w *answerWatchdog) claimFailureLog(opts Options, sp spec, closed bool, reason, failMode string, unreachableAnswer bool, frame ...[]byte) (chan struct{}, bool) {
 	var out, errb []byte
 	var code int
 	var logFailure func()
@@ -448,6 +453,9 @@ func (w *answerWatchdog) claimFailureLog(opts Options, sp spec, closed bool, rea
 			w.fallbackBlocked = true
 		}
 		return nil, false
+	}
+	if len(frame) > 0 && len(frame[0]) > 0 {
+		w.failureLog.setFallbackFrame(frame[0])
 	}
 	w.failureLogged = true
 	w.failureLogDone = make(chan struct{})
@@ -915,7 +923,6 @@ func (w *answerWatchdog) watch(deadline time.Time) {
 				}
 				if !w.failureLog.appendFallback() {
 					w.failureLog.forceFallback()
-					logFailure()
 				}
 			}
 		}
