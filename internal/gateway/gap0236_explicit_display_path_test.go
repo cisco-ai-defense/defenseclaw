@@ -19,11 +19,15 @@ func TestGAP0236ExplicitDisplayExecutableVerdict(t *testing.T) {
 		{"absolute", "echo 'cp a.txt .ssh/authorized_k*' | /tmp/cat -n", "block"},
 		{"relative", "echo 'cp a.txt .ssh/authorized_k*' | ./cat -n", "block"},
 		{"named display", "echo 'cp a.txt .ssh/authorized_k*' | cat -n", "allow"},
+		{"named display mixed case", "echo 'cp a.txt .ssh/authorized_k*' | CaT -n", "allow"},
+		{"here-string mixed case", "Write-Output @'\n.ssh/authorized_k*\n'@ | CaT -n", "allow"},
 		{"named display after read", "Get-Date; echo 'cp a.txt .ssh/authorized_k*' | cat -n", "allow"},
 		{"named wrapped display", "echo 'cp a.txt .ssh/authorized_k*' | env -S 'cat -n'", "allow"},
 		{"explicit wrapped executable", "echo 'cp a.txt .ssh/authorized_k*' | ./env -S 'cat -n'", "block"},
 		{"later consumer", "echo 'cp a.txt .ssh/authorized_k*' | cat -n | sh", "block"},
+		{"mixed case later consumer", "echo 'cp a.txt .ssh/authorized_k*' | CaT -n | sh", "block"},
 		{"rebound display", "Set-Alias cat Invoke-Expression -Force; echo 'cp a.txt .ssh/authorized_k*' | cat", "block"},
+		{"mixed case rebound display", "Set-Alias cat Invoke-Expression -Force; echo 'cp a.txt .ssh/authorized_k*' | CaT", "block"},
 	} {
 		for _, dialect := range []actionfacts.Dialect{"", actionfacts.DialectPowerShell} {
 			for _, connector := range []string{"claudecode", "codex"} {

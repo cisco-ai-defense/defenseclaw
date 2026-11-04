@@ -3622,7 +3622,7 @@ func actionWindowsPrintOnlyDisplays(scan actionWindowsScanResult, start, end int
 			k += 2
 		} else if !actionWindowsDisplaySinks[programBase(words[k])] ||
 			programBase(words[k]) == "cat" &&
-				(words[k] != "cat" || !actionWindowsDisplayBindingStable(words[:start])) {
+				(!strings.EqualFold(words[k], "cat") || !actionWindowsDisplayBindingStable(words[:start])) {
 			// An explicit path or an earlier binding change cannot prove
 			// the named display command's behavior.
 			return false
