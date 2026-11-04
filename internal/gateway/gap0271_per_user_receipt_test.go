@@ -10,6 +10,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/defenseclaw/defenseclaw/internal/config"
 	"github.com/defenseclaw/defenseclaw/internal/gateway/connector/hookexec"
 )
 
@@ -48,5 +49,19 @@ func TestGAP0271PerUserOnTimeBenignCallStaysAllowed(t *testing.T) {
 	f.api.handleAgentHook("claudecode").ServeHTTP(reply, request)
 	if reply.Code != http.StatusOK || !strings.Contains(reply.Body.String(), `"action":"allow"`) {
 		t.Fatalf("benign answer status=%d body=%q", reply.Code, reply.Body.String())
+	}
+}
+
+func TestGAP0271PerUserLegacyDisconnectHasUnconfirmedDecision(t *testing.T) {
+	api := &APIServer{scannerCfg: &config.Config{DeploymentMode: "per_user"}}
+	proposal := agentHookResponse{Action: "allow", RawAction: "allow", Mode: "action"}
+	for _, connector := range []string{"claudecode", "codex", "opencode"} {
+		event := map[string]string{"claudecode": "PreToolUse", "codex": "PreToolUse", "opencode": "tool.execute.before"}[connector]
+		if got := api.unreceiptedHookDecision(false, true, connector, event, proposal); got.Action != hookActionUnconfirmed {
+			t.Errorf("%s disconnected call recorded %s", connector, got.Action)
+		}
+		if got := api.unreceiptedHookDecision(false, false, connector, event, proposal); got.Action != "allow" {
+			t.Errorf("%s on-time call recorded %s", connector, got.Action)
+		}
 	}
 }
