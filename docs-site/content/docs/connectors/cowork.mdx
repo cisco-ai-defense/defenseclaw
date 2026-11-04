@@ -230,6 +230,7 @@ Claude Desktop keeps the engine in the user's own data folder, under `claude-cod
 | Hook decision telemetry | The attribute `defenseclaw.agent.surface` is `cowork`. It is absent for a terminal call |
 | Gateway health | `connectors[name=claudecode].surfaces.cowork` with `requests`, `last_activity_at` and `last_session_start_at`. It appears after the first Cowork call |
 | AI Discovery | Claude Desktop, whether Cowork is set up on the machine, the engine version, the VM bundle and its size, and the Cowork plugin names. See [AI Discovery](/docs/ai-discovery) |
+| Cowork's own window | No DefenseClaw hook warning or notice. Check `defenseclaw status`, `defenseclaw doctor` or the TUI instead. See [Limits](#limits) |
 
 The user's identity comes from the operating system, never from Cowork's environment.
 
@@ -246,7 +247,7 @@ The user's identity comes from the operating system, never from Cowork's environ
 | Detection gaps | No built-in rule flags JavaScript that exfiltrates data, such as `fetch(url + document.cookie)` in `javascript_tool`, or a download-and-execute instruction in a scheduled task prompt |
 | Secrets in tool results | A secret in a file Cowork reads, such as a key in a `.env` file, is detected and recorded after the read, not prevented, in action mode too. The model is told the rule, never the value. To prevent the read, block it at `PreToolUse` with a path rule: see [Secrets in tool results](/docs/connectors/claudecode#secrets-in-tool-results) |
 | Gateway outage | The hook follows the Claude Code connector's fail mode. On a managed computer that is closed by default: on managed macOS, with the gateway service stopped, Cowork blocked the prompt with `enterprise_managed_gateway_not_running`. See [Fail modes](/docs/reference/fail-modes) |
-| Notices | Claude Desktop's Cowork (4.16336.0) does not show DefenseClaw hook notices to the user. When the gateway is down, Cowork keeps working without a visible warning; a plugin left after an uninstall blocks Cowork tool calls until you remove it; `defenseclaw status` and `doctor` show the state. What an outage does is in the [capability matrix](/docs/connectors/capability-matrix#gateway-outage) |
+| Notices | Cowork does not show DefenseClaw's hook warnings and notices anywhere in its window: not in the reply, the tool details or a banner (measured with Claude Desktop 4.16336.0 on macOS and Windows). When the gateway is down, Cowork keeps working without a visible warning; a plugin left after an uninstall blocks Cowork tool calls until you remove it. See DefenseClaw's state with `defenseclaw status` or `defenseclaw doctor` (the gateway and the Cowork row), in the TUI, and in the audit log: `~/.defenseclaw/logs/hook-failures.jsonl` lists each call the hook let run unchecked. What an outage does is in the [capability matrix](/docs/connectors/capability-matrix#gateway-outage) |
 
 ## See also
 
