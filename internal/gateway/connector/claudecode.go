@@ -1426,6 +1426,34 @@ func claudeCodePerUserGuardTarget(hook map[string]interface{}, hooksDir string) 
 		claudeCodeLoopbackGatewayEndpoint("http://"+args[8]))
 }
 
+// claudeCodePerUserFallbackTarget recognizes the companion native handler
+// that serves a call when the registered guard is unavailable.
+func claudeCodePerUserFallbackTarget(hook map[string]interface{}, hooksDir string) bool {
+	if runtime.GOOS == "windows" || filepath.Base(hooksDir) != "hooks" {
+		return false
+	}
+	home := filepath.Dir(hooksDir)
+	if filepath.Base(home) != ".defenseclaw" {
+		return false
+	}
+	account := filepath.Dir(home)
+	native := filepath.Join(account, ".local", "bin", "defenseclaw-hook-user")
+	guard := filepath.Join(account, ".local", "bin", "defenseclaw-hook-post")
+	command, _ := hook["command"].(string)
+	args, ok := claudeCodeNativeExecArguments(hook)
+	if !ok || command != native || (len(args) != 7 && len(args) != 9) {
+		return false
+	}
+	want := []string{"fallback-guard-user-hook", guard, "hook", "--connector", "claudecode", "--hook-home", home}
+	for i, value := range want {
+		if args[i] != value {
+			return false
+		}
+	}
+	return len(args) == 7 || (args[7] == "--api-addr" &&
+		claudeCodeLoopbackGatewayEndpoint("http://"+args[8]))
+}
+
 // claudeCodePerUserNativeHook selects the installed native launcher only for
 // per-user Linux hooks in the account's default data directory. macOS keeps
 // the shell hook until its startup path is measured (GAP-0559). A separate
@@ -1657,6 +1685,13 @@ func appendClaudeCodeHookMatrixForSetup(
 func appendClaudeCodeHookGroups(
 	hooks map[string]interface{}, hookCommand string, hookArgs []string, groups []claudeCodeHookGroup,
 ) {
+	fallback := false
+	if len(hookArgs) == 7 || len(hookArgs) == 9 {
+		fallback = claudeCodePerUserGuardTarget(
+			map[string]interface{}{"command": hookCommand, "args": hookArgs},
+			filepath.Join(hookArgs[6], "hooks"),
+		)
+	}
 	for _, group := range groups {
 		command, args := claudeCodeHandlerInvocation(group.eventType, hookCommand, hookArgs)
 		handler := map[string]interface{}{
@@ -1670,7 +1705,16 @@ func appendClaudeCodeHookGroups(
 		if args != nil {
 			handler["args"] = args
 		}
-		entry := map[string]interface{}{"hooks": []interface{}{handler}}
+		handlers := []interface{}{handler}
+		if fallback && !group.async {
+			handlers = append(handlers, map[string]interface{}{
+				"type":    "command",
+				"command": hookArgs[1],
+				"args":    append([]string{"fallback-guard-user-hook", hookCommand}, hookArgs[2:]...),
+				"timeout": group.timeout,
+			})
+		}
+		entry := map[string]interface{}{"hooks": handlers}
 		if group.matcher != "" {
 			entry["matcher"] = group.matcher
 		}
@@ -2922,6 +2966,9 @@ func isOwnedHookHandler(rawHook interface{}, hooksDir string) bool {
 	if claudeCodePerUserGuardTarget(hook, hooksDir) {
 		return true
 	}
+	if claudeCodePerUserFallbackTarget(hook, hooksDir) {
+		return true
+	}
 	if hooksDir != "" && strings.HasPrefix(command, hooksDir+"/") {
 		return true
 	}
@@ -3107,7 +3154,7 @@ func verifyClaudeCodeHookMatrixForSetup(
 
 // verifyClaudeCodeHookGroups validates the exact DefenseClaw-owned effective
 // registration. Unrelated operator hooks may coexist, but every selected event
-// must have exactly one owned command with its expected matcher, timeout, argv,
+// must have its expected owned commands with their matcher, timeout, argv,
 // and synchronous/asynchronous behavior, and no unselected event may remain
 // DefenseClaw-owned.
 func verifyClaudeCodeHookGroups(
@@ -3127,8 +3174,16 @@ func verifyClaudeCodeHookGroups(
 		if err != nil {
 			return fmt.Errorf("%s: %w", expected.eventType, err)
 		}
-		if len(locations) != 1 {
-			return fmt.Errorf("%s has %d DefenseClaw handlers, want 1", expected.eventType, len(locations))
+		fallback := !expected.async && len(expectedArgs) >= 7 &&
+			expectedArgs[0] == "guard-user-hook" && claudeCodePerUserGuardTarget(
+			map[string]interface{}{"command": expectedCommand, "args": expectedArgs}, hooksDir,
+		)
+		want := 1
+		if fallback {
+			want = 2
+		}
+		if len(locations) != want {
+			return fmt.Errorf("%s has %d DefenseClaw handlers, want %d", expected.eventType, len(locations), want)
 		}
 		location := locations[0]
 		var expectedMatcher interface{}
@@ -3164,6 +3219,34 @@ func verifyClaudeCodeHookGroups(
 				return fmt.Errorf("%s DefenseClaw handler is asynchronous and cannot enforce policy", expected.eventType)
 			}
 			return fmt.Errorf("%s observational handler must be asynchronous", expected.eventType)
+		}
+		if fallback {
+			second := locations[1]
+			for _, owned := range []claudeCodeOwnedHookLocation{location, second} {
+				if _, exists := owned.handler["shell"]; exists {
+					return fmt.Errorf("%s direct handler has a shell setting", expected.eventType)
+				}
+				if condition, exists := owned.handler["if"]; exists {
+					value, ok := condition.(string)
+					if !ok || value != "" {
+						return fmt.Errorf("%s direct handler has a condition", expected.eventType)
+					}
+				}
+			}
+			fallbackArgs := append([]string{"fallback-guard-user-hook", expectedCommand}, expectedArgs[2:]...)
+			fallbackTimeout, timeoutOK := claudeCodeHookInteger(second.handler["timeout"])
+			fallbackType, _ := second.handler["type"].(string)
+			fallbackCommand, _ := second.handler["command"].(string)
+			if second.groupIndex != location.groupIndex || !codexValueMatches(second.matcher, location.matcher) ||
+				fallbackType != "command" || fallbackCommand != expectedArgs[1] ||
+				!codexValueMatches(second.handler["args"], fallbackArgs) ||
+				!timeoutOK || fallbackTimeout != expected.timeout {
+				return fmt.Errorf("%s fallback handler differs from the registered native hook", expected.eventType)
+			}
+			fallbackAsync, err := claudeCodeHandlerAsync(second.handler)
+			if err != nil || fallbackAsync {
+				return fmt.Errorf("%s fallback handler must be synchronous", expected.eventType)
+			}
 		}
 	}
 	for eventType, rawGroups := range hooks {

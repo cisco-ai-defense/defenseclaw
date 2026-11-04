@@ -461,12 +461,23 @@ func claudeCodeHooksInEarlierReleaseForm(
 		for _, rawGroup := range groups {
 			group, _ := rawGroup.(map[string]interface{})
 			handlers, _ := group["hooks"].([]interface{})
+			kept := handlers[:0]
 			for _, rawHandler := range handlers {
 				handler, ok := rawHandler.(map[string]interface{})
+				if ok && goos != "windows" &&
+					claudeCodePerUserFallbackTarget(handler, filepath.Dir(script)) {
+					command, _ := handler["command"].(string)
+					if owned(command) {
+						changed++
+						continue
+					}
+				}
 				if ok && claudeCodeHandlerInEarlierReleaseForm(handler, goos, script, owned) {
 					changed++
 				}
+				kept = append(kept, rawHandler)
 			}
+			group["hooks"] = kept
 		}
 	}
 	return changed

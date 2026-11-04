@@ -106,3 +106,52 @@ func TestGAP0322ClaudeOrdinaryRegistrationTwin(t *testing.T) {
 		t.Fatalf("ordinary: exit %d, output %q", code, output)
 	}
 }
+
+func TestGAP0322ClaudeMissingGuardFallbackRegistration(t *testing.T) {
+	command, args, _ := gap0322ClaudeRegistrationFixture(t)
+	opts := SetupOpts{DataDir: args[6], HookExecutable: args[1]}
+	hooks := map[string]interface{}{}
+	if err := appendClaudeCodeHookMatrixForSetup(hooks, command, args, opts); err != nil {
+		t.Fatal(err)
+	}
+	if err := verifyClaudeCodeHookMatrixForSetup(hooks, command, args, filepath.Join(opts.DataDir, "hooks"), opts); err != nil {
+		t.Fatalf("registered matrix: %v", err)
+	}
+	groups := hooks["PreToolUse"].([]interface{})
+	handlers := groups[0].(map[string]interface{})["hooks"].([]interface{})
+	if len(handlers) != 2 {
+		t.Fatalf("PreToolUse handlers = %d, want 2", len(handlers))
+	}
+	fallback := handlers[1].(map[string]interface{})
+	wantArgs := append([]string{"fallback-guard-user-hook", command}, args[2:]...)
+	if fallback["command"] != args[1] || !codexValueMatches(fallback["args"], wantArgs) {
+		t.Fatalf("fallback registration = %#v", fallback)
+	}
+	groups[0].(map[string]interface{})["hooks"] = handlers[:1]
+	if err := verifyClaudeCodeHookMatrixForSetup(hooks, command, args, filepath.Join(opts.DataDir, "hooks"), opts); err == nil {
+		t.Fatal("missing fallback was accepted")
+	}
+	groups[0].(map[string]interface{})["hooks"] = handlers
+	fallback["if"] = "Bash(ls)"
+	if err := verifyClaudeCodeHookMatrixForSetup(hooks, command, args, filepath.Join(opts.DataDir, "hooks"), opts); err == nil {
+		t.Fatal("conditional fallback was accepted")
+	}
+	delete(fallback, "if")
+	fallback["shell"] = "bash"
+	if err := verifyClaudeCodeHookMatrixForSetup(hooks, command, args, filepath.Join(opts.DataDir, "hooks"), opts); err == nil {
+		t.Fatal("shell fallback was accepted")
+	}
+	delete(fallback, "shell")
+	script := filepath.Join(opts.DataDir, "hooks", "claude-code-hook.sh")
+	settings := map[string]interface{}{"hooks": hooks}
+	changed := claudeCodeHooksInEarlierReleaseForm(settings, runtime.GOOS, script, func(path string) bool {
+		return path == args[1]
+	})
+	if changed < 2 {
+		t.Fatalf("rollback changed %d handlers, want the guard pair", changed)
+	}
+	rolled := hooks["PreToolUse"].([]interface{})[0].(map[string]interface{})["hooks"].([]interface{})
+	if len(rolled) != 1 || rolled[0].(map[string]interface{})["command"] != script {
+		t.Fatalf("rollback PreToolUse handlers = %#v", rolled)
+	}
+}

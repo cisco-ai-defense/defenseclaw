@@ -51,12 +51,61 @@ func main() {
 		}{1, "defenseclaw-hook-user", version, commit, date})
 		return
 	}
+	if len(os.Args) > 1 && os.Args[1] == "fallback-guard-user-hook" {
+		self, err := os.Executable()
+		if err != nil {
+			os.Exit(2)
+		}
+		os.Exit(runFallbackGuardAt(self, os.Args[1:], os.Stdin, os.Stdout, os.Stderr, hookexec.ProcessStartTime()))
+	}
 	home, addr, ok := registeredArgs(os.Args[1:])
 	if !ok {
 		fmt.Fprintln(os.Stderr, "defenseclaw-hook-user: invalid hook command")
 		os.Exit(2)
 	}
 	os.Exit(run(home, addr, os.Stdin, os.Stdout, os.Stderr, hookexec.ProcessStartTime()))
+}
+
+// runFallbackGuardAt uses the native hook only when its companion guard is
+// unavailable, so a healthy registration issues one gateway decision.
+func runFallbackGuardAt(self string, args []string, stdin io.Reader, stdout, stderr io.Writer, startedAt time.Time) int {
+	if len(args) != 7 && len(args) != 9 {
+		return 2
+	}
+	home, addr, ok := registeredArgs(args[2:])
+	if !ok || args[0] != "fallback-guard-user-hook" || filepath.Base(home) != ".defenseclaw" {
+		return 2
+	}
+	account := filepath.Dir(home)
+	native := filepath.Join(account, ".local", "bin", "defenseclaw-hook-user")
+	guard := filepath.Join(account, ".local", "bin", "defenseclaw-hook-post")
+	if args[1] != guard || !sameExecutable(self, native) {
+		return 2
+	}
+	info, err := os.Lstat(guard)
+	if err == nil && info.Mode().IsRegular() && info.Mode()&0o111 != 0 && info.Mode().Perm()&0o022 == 0 {
+		ctx, cancel := context.WithTimeout(context.Background(), 200*time.Millisecond)
+		defer cancel()
+		check := exec.CommandContext(ctx, guard, "--version")
+		check.Stderr = io.Discard
+		versionLine, checkErr := check.Output()
+		if checkErr == nil && bytes.HasPrefix(versionLine, []byte("defenseclaw-hook-post version ")) {
+			return 0
+		}
+	}
+	return run(home, addr, stdin, stdout, stderr, startedAt)
+}
+
+func sameExecutable(self, registered string) bool {
+	if self == registered {
+		return true
+	}
+	actual, err := os.Stat(self)
+	if err != nil || !actual.Mode().IsRegular() {
+		return false
+	}
+	expected, err := os.Stat(registered)
+	return err == nil && expected.Mode().IsRegular() && os.SameFile(actual, expected)
 }
 
 func stdinPiped() bool {
