@@ -748,7 +748,7 @@ func readSecureHookAPITokenFile(dataDir, path string) (string, error) {
 	if !info.Mode().IsRegular() {
 		return "", fmt.Errorf("hook API token %s is not a regular file", path)
 	}
-	if err := otlpValidatePerm(path, info); err != nil {
+	if err := otlpValidateCredentialPerm(path, info); err != nil {
 		return "", err
 	}
 	if err := hookAPIValidateOwner(path, info); err != nil {

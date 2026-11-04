@@ -48,3 +48,9 @@ func tokenPermissionVerdict(err error) error {
 func tokenDriftStrict() bool {
 	return managed.TrustStrictAncestors() || managed.StandaloneTrustScope()
 }
+
+// otlpValidateCredentialPerm is otlpValidatePerm: the Windows broad-reader
+// rule for credentials has no counterpart in the mode bits checked here.
+func otlpValidateCredentialPerm(path string, info os.FileInfo) error {
+	return otlpValidatePerm(path, info)
+}

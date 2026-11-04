@@ -9,6 +9,8 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+
+	"golang.org/x/sys/windows"
 )
 
 // usersWriteDACL grants BUILTIN\Users write: drift no standard user may hold.
@@ -275,4 +277,56 @@ func TestStandaloneServiceRuntimeFileKeepsGatewayWriter(t *testing.T) {
 	if err := AcceptServiceRuntimeFileDrift(path, "hook token", account); err == nil {
 		t.Fatal("standalone accepted a token with a Users writer")
 	}
+}
+
+// inheritedCreateChildDirForTest returns a folder whose only extra entry is
+// the container-only BUILTIN\Users create-child grant it inherits from its
+// parent, the shape a folder takes after its protection is reset to inherit
+// from C:\ProgramData.
+func inheritedCreateChildDirForTest(t *testing.T) string {
+	t.Helper()
+	t.Setenv(TrustStrictAncestorsEnv, "")
+	parent := filepath.Join(t.TempDir(), "parent")
+	if err := os.Mkdir(parent, 0o700); err != nil {
+		t.Fatalf("Mkdir: %v", err)
+	}
+	setTestFileDACL(t, parent, testDACL(t, "D:P(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)(A;CI;0x1201bf;;;BU)"), true)
+	dir := filepath.Join(parent, "policies")
+	if err := os.Mkdir(dir, 0o700); err != nil {
+		t.Fatalf("Mkdir: %v", err)
+	}
+	return dir
+}
+
+// GAP-0566: the normal walk's acceptance of an inherited Users create-child
+// entry is the Secure Client rule. On standalone a standard user who can add
+// a file to a folder whose every file is loaded changes what is enforced, so
+// the folder is refused there.
+func TestStandaloneTrustRefusesInheritedCreateChild(t *testing.T) {
+	t.Run("secure client accepts", func(t *testing.T) {
+		dir := inheritedCreateChildDirForTest(t)
+		pinTrustProfileForTest(t, false)
+		if err := ValidateTrustedRuntimeDir(dir, "policy folder"); err != nil {
+			t.Fatalf("Secure Client refused the inherited create-child folder: %v", err)
+		}
+	})
+	t.Run("standalone refuses", func(t *testing.T) {
+		dir := inheritedCreateChildDirForTest(t)
+		pinTrustProfileForTest(t, true)
+		if err := ValidateTrustedRuntimeDir(dir, "policy folder"); err == nil {
+			t.Fatal("standalone accepted a policy folder standard users can add files to")
+		}
+		if AcceptInheritedCreateChild(dir, "audit store", windows.INHERITED_ACE|windows.CONTAINER_INHERIT_ACE, 0x1201bf, usersSIDForTest(t)) {
+			t.Fatal("standalone accepted an inherited create-child entry for the audit store and token folders")
+		}
+	})
+}
+
+func usersSIDForTest(t *testing.T) *windows.SID {
+	t.Helper()
+	sid, err := windows.CreateWellKnownSid(windows.WinBuiltinUsersSid)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return sid
 }
