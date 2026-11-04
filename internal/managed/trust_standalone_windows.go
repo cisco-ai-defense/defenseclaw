@@ -95,6 +95,12 @@ var windowsStandaloneTrustScope = func() bool {
 	return StandaloneTrustScope() || WindowsStandaloneInstallExecutable()
 }
 
+// WindowsStandaloneTrustScope is windowsStandaloneTrustScope for drift
+// acceptances outside this package (the Codex machine requirements gate).
+func WindowsStandaloneTrustScope() bool {
+	return windowsStandaloneTrustScope()
+}
+
 // WindowsStandaloneInstallExecutable reports whether the running binary sits
 // in <standalone install root>\bin, a production or run-scoped certification
 // root under the protected Program Files registration. Hooks never carry the

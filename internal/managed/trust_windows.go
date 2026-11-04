@@ -89,6 +89,7 @@ var windowsConfigEnsureCanonical = EnsureCanonical
 // by other installers, which is why that profile tolerates the drift.
 //
 // A standalone process (windowsStandaloneTrustScope) keeps the strict verdict,
+// as every drift-tolerant walk does there (windowsTrustScope.driftTolerated),
 // as before 26.8.4: there DefenseClaw owns the whole tree, and a standard
 // user who gained write access to config.yaml or the guardian manifest could
 // otherwise change the fail mode or drop an account from enforcement
@@ -684,14 +685,25 @@ func (scope windowsTrustScope) tolerant() windowsTrustScope {
 	return scope
 }
 
+// driftTolerated reports whether this drift-tolerant scope may accept a
+// permission verdict: the scope is tolerant, strict mode is off, and the
+// process is not on the standalone profile (windowsStandaloneTrustScope).
+// The drift acceptances exist for the Secure Client tree, which other Cisco
+// installers re-ACL; a standalone install owns its whole tree, so there a
+// tolerant walk gives the strict verdict, as before 26.8.4 (GAP-0561).
+func (scope windowsTrustScope) driftTolerated() bool {
+	return scope.drift && !trustStrictAncestors() && !windowsStandaloneTrustScope()
+}
+
 // relaxVerdict is the single exit for a permission verdict on one element.
 // Drift wins over advisory so a tolerant walk tags its warnings with the drift
-// marker; strict mode makes both fall through to the verdict.
+// marker; strict mode, and the standalone profile for drift, make both fall
+// through to the verdict.
 func (scope windowsTrustScope) relaxVerdict(path, label string, verdict error) error {
 	if verdict == nil {
 		return nil
 	}
-	if scope.drift && !trustStrictAncestors() {
+	if scope.driftTolerated() {
 		reportTrustDrift(path, label, verdict.Error())
 		return nil
 	}
@@ -984,7 +996,7 @@ func rejectUntrustedWindowsWriteACEsWithWriter(
 			verdict := fmt.Errorf(
 				"%s: unsupported allow ACE type 0x%x; refusing managed trust", path, ace.Header.AceType,
 			)
-			if !scope.drift {
+			if !scope.driftTolerated() {
 				return verdict
 			}
 			if err := scope.relaxVerdict(path, label, verdict); err != nil {
@@ -1045,7 +1057,7 @@ func acceptUnreadableDescriptor(scope windowsTrustScope, err error) bool {
 	if !errors.Is(err, windows.ERROR_ACCESS_DENIED) || trustStrictAncestors() || scope.strictPrincipals {
 		return false
 	}
-	return scope.advisory || scope.drift
+	return scope.advisory || scope.driftTolerated()
 }
 
 // acceptAdminEquivalent accepts and logs an owner or writer that is an
