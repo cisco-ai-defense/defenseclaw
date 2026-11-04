@@ -18,8 +18,12 @@ Only the process's own token changes, only its default owner, and only to the
 token's own user SID, which Windows always accepts as an owner. Nothing is
 granted. A token that is not elevated already uses the user as owner, so the
 call changes nothing there. A computer with a managed (enterprise) deployment
-is left alone, as are ``defenseclaw enterprise`` commands: their elevated runs
-write machine state whose checks expect an administrator owner.
+(the standalone marker or either profile's install root), a process that
+deployment pinned (DEFENSECLAW_DEPLOYMENT_MODE=managed_enterprise) and
+``defenseclaw enterprise`` commands are left alone: their elevated runs
+write machine state whose checks expect an administrator owner. The Go hook,
+gateway and ACP guard make the same change with the same exclusions
+(internal/managed UseCurrentUserAsWindowsDefaultOwner, GAP-0063).
 """
 
 from __future__ import annotations
@@ -35,6 +39,12 @@ _TOKEN_OWNER = 4
 # The marker a machine-wide managed deployment registers (install.ps1 refuses
 # a per-user install beside it for the same reason).
 _MANAGED_MARKER_KEY = r"SOFTWARE\Cisco\DefenseClaw\Enterprise"
+_CURRENT_VERSION_KEY = r"SOFTWARE\Microsoft\Windows\CurrentVersion"
+# The enterprise install roots under Program Files: Secure Client, standalone
+# (internal/winpath EnterpriseRootsFor).
+_ENTERPRISE_VENDOR_DIRS = (("Cisco", "Cisco Secure Client"), ("Cisco",))
+_DEPLOYMENT_MODE_ENV = "DEFENSECLAW_DEPLOYMENT_MODE"
+_MANAGED_ENTERPRISE = "managed_enterprise"
 
 
 def use_current_user_as_default_owner(argv: list[str] | None = None) -> bool:
@@ -46,11 +56,54 @@ def use_current_user_as_default_owner(argv: list[str] | None = None) -> bool:
     if os.name != "nt" or (argv and argv[0] == "enterprise"):
         return False
     try:
-        if _managed_marker_present():
+        if _managed_deployment_present():
             return False
         return _swap_default_owner()
     except Exception:  # noqa: BLE001 - never block the CLI on this
         return False
+
+
+def _managed_deployment_present() -> bool:
+    """A managed deployment, a process it pinned, or state that cannot be read.
+
+    Only the standalone profile writes the marker: a Secure Client deployment,
+    or a first standalone install before its marker is written, has only its
+    install root, and the children of Setup and of the managed service carry
+    the deployment pin (GAP-0063 review). A stray pin only keeps the token as
+    it is.
+    """
+    if os.environ.get(_DEPLOYMENT_MODE_ENV, "").strip().lower() == _MANAGED_ENTERPRISE:
+        return True
+    return _managed_marker_present() or _enterprise_install_root_present()
+
+
+def _enterprise_install_root_present() -> bool:
+    program_files = _program_files_dir()
+    if not program_files:
+        return True  # unreadable: do not guess, leave the token alone
+    for vendor in _ENTERPRISE_VENDOR_DIRS:
+        try:
+            os.lstat(os.path.join(program_files, *vendor, "DefenseClaw"))
+        except FileNotFoundError:
+            continue
+        except OSError:
+            return True
+        return True
+    return False
+
+
+def _program_files_dir() -> str:
+    """Program Files from the machine registration, not the environment; "" if unreadable."""
+    import winreg
+
+    try:
+        with winreg.OpenKey(
+            winreg.HKEY_LOCAL_MACHINE, _CURRENT_VERSION_KEY, 0, winreg.KEY_READ | winreg.KEY_WOW64_64KEY
+        ) as key:
+            value, _ = winreg.QueryValueEx(key, "ProgramFilesDir")
+    except OSError:
+        return ""
+    return value.strip() if isinstance(value, str) else ""
 
 
 def _managed_marker_present() -> bool:

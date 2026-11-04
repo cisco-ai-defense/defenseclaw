@@ -115,6 +115,7 @@ def test_the_console_says_the_cleanup_will_not_finish_and_names_the_entry(monkey
     assert "not finished yet" not in output
     assert f"this account cannot remove {entry}: Windows denies it access" in output
     assert "An elevated defenseclaw uninstall removes it" in output
+    assert "probably created by an earlier elevated run" in output
     assert "Run as administrator" in output
 
 

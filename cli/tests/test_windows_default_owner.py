@@ -32,15 +32,46 @@ def test_not_windows_changes_nothing() -> None:
 )
 def test_windows_swaps_the_owner_except_for_managed_machines(argv, managed, called) -> None:
     with patch.object(windows_owner, "os", SimpleNamespace(name="nt")), \
-            patch.object(windows_owner, "_managed_marker_present", return_value=managed), \
+            patch.object(windows_owner, "_managed_deployment_present", return_value=managed), \
             patch.object(windows_owner, "_swap_default_owner", return_value=True) as swap:
         assert windows_owner.use_current_user_as_default_owner(argv) is called
     assert swap.called is called
 
 
+def test_a_managed_pin_keeps_the_owner(monkeypatch) -> None:
+    # GAP-0063 review: the children of Setup and of the managed service carry the pin.
+    monkeypatch.setenv("DEFENSECLAW_DEPLOYMENT_MODE", "managed_enterprise")
+    with patch.object(windows_owner, "os", SimpleNamespace(name="nt", environ=os.environ)), \
+            patch.object(windows_owner, "_managed_marker_present") as marker, \
+            patch.object(windows_owner, "_swap_default_owner") as swap:
+        assert windows_owner.use_current_user_as_default_owner(["policy", "reload"]) is False
+    marker.assert_not_called()
+    swap.assert_not_called()
+
+
+@pytest.mark.parametrize(
+    ("layout", "program_files_readable", "present"),
+    [
+        ((), True, False),
+        ((("Cisco", "Cisco Secure Client", "DefenseClaw"),), True, True),
+        ((("Cisco", "DefenseClaw"),), True, True),
+        ((), False, True),
+    ],
+)
+def test_an_enterprise_install_root_keeps_the_owner(tmp_path, monkeypatch, layout, program_files_readable, present) -> None:
+    # Only the standalone profile writes the marker: Secure Client, and a first
+    # standalone install before its marker, have only their install root.
+    monkeypatch.delenv("DEFENSECLAW_DEPLOYMENT_MODE", raising=False)
+    for parts in layout:
+        tmp_path.joinpath(*parts).mkdir(parents=True)
+    with patch.object(windows_owner, "_managed_marker_present", return_value=False), \
+            patch.object(windows_owner, "_program_files_dir", return_value=str(tmp_path) if program_files_readable else ""):
+        assert windows_owner._managed_deployment_present() is present  # noqa: SLF001
+
+
 def test_a_token_error_never_stops_the_cli() -> None:
     with patch.object(windows_owner, "os", SimpleNamespace(name="nt")), \
-            patch.object(windows_owner, "_managed_marker_present", return_value=False), \
+            patch.object(windows_owner, "_managed_deployment_present", return_value=False), \
             patch.object(windows_owner, "_swap_default_owner", side_effect=OSError("access denied")):
         assert windows_owner.use_current_user_as_default_owner(["init"]) is False
 

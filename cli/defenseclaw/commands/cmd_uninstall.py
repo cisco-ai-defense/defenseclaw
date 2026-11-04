@@ -2879,9 +2879,9 @@ def _execute_plan(plan: UninstallPlan) -> ExecutionResult:
         )
     if denied:
         ux.warn(
-            f"this account cannot remove {_denied_note(denied)}: Windows denies it access (an elevated "
-            "DefenseClaw run, such as a hook an elevated Claude Desktop ran, created it as the "
-            f"Administrators group), so the cleanup cannot remove {plan.data_dir}. An elevated "
+            f"this account cannot remove {_denied_note(denied)}: Windows denies it access (probably created "
+            "by an earlier elevated run, such as a hook an elevated Claude Desktop ran), so the cleanup "
+            f"cannot remove {plan.data_dir}. An elevated "
             "defenseclaw uninstall removes it: open a prompt with Run as administrator and run "
             "this uninstall command again"
         )

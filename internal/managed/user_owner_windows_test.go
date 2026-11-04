@@ -11,8 +11,8 @@ import (
 	"path/filepath"
 	"testing"
 
+	"github.com/defenseclaw/defenseclaw/internal/winpath"
 	"golang.org/x/sys/windows"
-	"golang.org/x/sys/windows/registry"
 )
 
 // GAP-0063: an elevated per-user hook (Claude Desktop runs elevated as the
@@ -75,14 +75,65 @@ func TestEnterpriseCommandsKeepTheTokenOwner(t *testing.T) {
 	}
 }
 
-func windowsManagedMarkerPresentHere(t *testing.T) bool {
-	t.Helper()
-	key, err := registry.OpenKey(registry.LOCAL_MACHINE, WindowsEnterpriseMarkerKey, registry.QUERY_VALUE|registry.WOW64_64KEY)
-	if err != nil {
-		return false
+func TestManagedPinKeepsTheTokenOwner(t *testing.T) {
+	original := openWindowsProcessTokenOwner
+	t.Cleanup(func() { openWindowsProcessTokenOwner = original })
+	opened := 0
+	openWindowsProcessTokenOwner = func() (windowsTokenOwnerSetter, func(), error) {
+		opened++
+		return nil, nil, errors.New("not opened in this test")
 	}
-	_ = key.Close()
-	return true
+	t.Setenv(DeploymentModeEnv, DeploymentModeManagedEnterprise)
+	if UseCurrentUserAsWindowsDefaultOwner([]string{"policy", "reload"}) || opened != 0 {
+		t.Fatalf("a managed-pinned process opened its token %d times", opened)
+	}
+}
+
+// Only the standalone profile writes the marker: a Secure Client deployment,
+// or a first standalone install before its marker, has only its install root.
+func TestManagedDeploymentAbsentNeedsNoMarkerAndNoInstallRoot(t *testing.T) {
+	roots := func(profile string) (winpath.EnterpriseRoots, error) {
+		return winpath.EnterpriseRootsFor(profile, `C:\Program Files`, `C:\ProgramData`)
+	}
+	notFound := func() error { return windows.ERROR_FILE_NOT_FOUND }
+	noRoot := func(string) (os.FileInfo, error) { return nil, os.ErrNotExist }
+	rootAt := func(want string) func(string) (os.FileInfo, error) {
+		return func(path string) (os.FileInfo, error) {
+			if path == want {
+				return nil, nil
+			}
+			return nil, os.ErrNotExist
+		}
+	}
+	for _, test := range []struct {
+		name   string
+		marker func() error
+		roots  func(string) (winpath.EnterpriseRoots, error)
+		lstat  func(string) (os.FileInfo, error)
+		absent bool
+	}{
+		{"nothing installed", notFound, roots, noRoot, true},
+		{"marker present", func() error { return nil }, roots, noRoot, false},
+		{"marker read error", func() error { return windows.ERROR_ACCESS_DENIED }, roots, noRoot, false},
+		{"Secure Client install root", notFound, roots, rootAt(`C:\Program Files\Cisco\Cisco Secure Client\DefenseClaw`), false},
+		{"standalone install root before its marker", notFound, roots, rootAt(`C:\Program Files\Cisco\DefenseClaw`), false},
+		{"install root unreadable", notFound, roots, func(string) (os.FileInfo, error) { return nil, os.ErrPermission }, false},
+		{"machine roots unreadable", notFound, func(string) (winpath.EnterpriseRoots, error) {
+			return winpath.EnterpriseRoots{}, errors.New("no registration")
+		}, noRoot, false},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			if got := managedDeploymentAbsent(test.marker, test.roots, test.lstat); got != test.absent {
+				t.Fatalf("absent = %v, want %v", got, test.absent)
+			}
+		})
+	}
+}
+
+// windowsManagedDeploymentHere is the real check: a marker or an install root.
+func windowsManagedDeploymentHere(t *testing.T) bool {
+	t.Helper()
+	return !windowsManagedDeploymentMarkerAbsent()
 }
 
 // The live shape of the hook's outage marker: a folder made with MkdirAll
@@ -144,11 +195,11 @@ func TestLiveProcessCreatesTheOutageMarkerAsItsUser(t *testing.T) {
 	}
 }
 
-// On a computer with a managed deployment the real marker read keeps the
-// token as it is, elevated or not.
+// On a computer with a managed deployment the real check (marker or install
+// root) keeps the token as it is, elevated or not.
 func TestLiveManagedComputerKeepsTheTokenOwner(t *testing.T) {
-	if !windowsManagedMarkerPresentHere(t) {
-		t.Skip("no managed deployment marker on this computer")
+	if !windowsManagedDeploymentHere(t) {
+		t.Skip("no managed deployment on this computer")
 	}
 	token, closeToken, err := openWindowsProcessTokenOwner()
 	if err != nil {

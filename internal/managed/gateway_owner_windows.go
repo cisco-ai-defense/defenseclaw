@@ -232,12 +232,18 @@ func WindowsCurrentProcessRunsAsService(serviceSID *windows.SID) (bool, error) {
 // a file gets the owner a run without elevation gives it. A token that is not
 // elevated already names its user and is left as it is. Services and other
 // non-user accounts (the managed gateway service sets its own owner in
-// AdoptWindowsGatewayServiceFileOwner), `enterprise` commands and a computer
-// with a managed deployment (or a marker that cannot be read) are left alone:
-// their elevated runs write machine state whose checks expect an
-// administrator owner. A failure leaves the token as it was.
+// AdoptWindowsGatewayServiceFileOwner), `enterprise` commands, a process the
+// managed deployment pinned (DEFENSECLAW_DEPLOYMENT_MODE=managed_enterprise:
+// the children of Setup and of the managed service) and a computer with a
+// managed deployment of either profile are left alone: their elevated runs
+// write machine state whose checks expect an administrator owner. A failure
+// leaves the token as it was.
 func UseCurrentUserAsWindowsDefaultOwner(args []string) bool {
 	if len(args) > 0 && args[0] == "enterprise" {
+		return false
+	}
+	// A stray pin in a user's shell only keeps the token as it is.
+	if IsManagedEnterprise(os.Getenv(DeploymentModeEnv)) {
 		return false
 	}
 	token, closeToken, err := openWindowsProcessTokenOwner()
@@ -266,13 +272,40 @@ func useTokenUserAsDefaultOwner(token windowsTokenOwnerSetter, markerAbsent func
 	return token.setDefaultOwner(user.User.Sid) == nil
 }
 
-// windowsManagedDeploymentMarkerAbsent reports a definitely absent managed
-// deployment marker; one that is there or cannot be read counts as managed.
+// windowsManagedDeploymentMarkerAbsent reports a computer with no managed
+// deployment: no HKLM marker and no enterprise install root of either
+// profile. Only the standalone profile writes the marker; a Secure Client
+// deployment, or a first standalone install before its marker is written,
+// has only its install root. Anything that cannot be read counts as managed.
 var windowsManagedDeploymentMarkerAbsent = func() bool {
+	return managedDeploymentAbsent(openWindowsEnterpriseMarker, winpath.TrustedEnterpriseRoots, os.Lstat)
+}
+
+func openWindowsEnterpriseMarker() error {
 	key, err := registry.OpenKey(registry.LOCAL_MACHINE, WindowsEnterpriseMarkerKey, registry.QUERY_VALUE|registry.WOW64_64KEY)
 	if err == nil {
 		_ = key.Close()
+	}
+	return err
+}
+
+func managedDeploymentAbsent(
+	openMarker func() error,
+	trustedRoots func(profile string) (winpath.EnterpriseRoots, error),
+	lstat func(path string) (os.FileInfo, error),
+) bool {
+	err := openMarker()
+	if err == nil || (!errors.Is(err, windows.ERROR_FILE_NOT_FOUND) && !errors.Is(err, windows.ERROR_PATH_NOT_FOUND)) {
 		return false
 	}
-	return errors.Is(err, windows.ERROR_FILE_NOT_FOUND) || errors.Is(err, windows.ERROR_PATH_NOT_FOUND)
+	for _, profile := range []string{winpath.EnterpriseProfileSecureClient, winpath.EnterpriseProfileStandalone} {
+		roots, err := trustedRoots(profile)
+		if err != nil {
+			return false
+		}
+		if _, err := lstat(roots.InstallRoot); !errors.Is(err, os.ErrNotExist) {
+			return false
+		}
+	}
+	return true
 }
