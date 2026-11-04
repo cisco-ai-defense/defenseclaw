@@ -5,6 +5,7 @@
 from __future__ import annotations
 
 import json
+import os
 import plistlib
 from pathlib import Path
 from xml.sax.saxutils import escape
@@ -186,6 +187,7 @@ dc_main "$@"
     return result, trace, observed, observed_signature, parent
 
 
+@pytest.mark.skipif(os.name != "posix", reason="POSIX shell scripts")
 def test_mdm_cowork_inputs_are_private_copies_forwarded_to_ensure(tmp_path: Path) -> None:
     archive = tmp_path / "defenseclaw-cowork-arm64.tar.gz"
     signature = tmp_path / "release.sig"
@@ -205,6 +207,7 @@ def test_mdm_cowork_inputs_are_private_copies_forwarded_to_ensure(tmp_path: Path
     assert any(arg.startswith(b"--cowork-signature=") and str(parent).encode() in arg for arg in args)
 
 
+@pytest.mark.skipif(os.name != "posix", reason="POSIX shell scripts")
 def test_mdm_cowork_signature_can_arrive_after_the_archive(tmp_path: Path) -> None:
     signature = tmp_path / "later.sig"
     signature.write_bytes(b"later signature")
@@ -215,6 +218,7 @@ def test_mdm_cowork_signature_can_arrive_after_the_archive(tmp_path: Path) -> No
     assert observed_signature.read_bytes() == b"later signature"
 
 
+@pytest.mark.skipif(os.name != "posix", reason="POSIX shell scripts")
 def test_mdm_cowork_off_path_passes_no_inputs(tmp_path: Path) -> None:
     result, trace, observed, signature, _ = _run_unix_wrapper(tmp_path, [])
     assert result.returncode == 0, result.stderr + result.stdout
@@ -222,6 +226,7 @@ def test_mdm_cowork_off_path_passes_no_inputs(tmp_path: Path) -> None:
     assert not observed.exists() and not signature.exists()
 
 
+@pytest.mark.skipif(os.name != "posix", reason="POSIX shell scripts")
 @pytest.mark.parametrize(
     ("platform", "extra"),
     [
