@@ -52,6 +52,11 @@ func TestTransientGatewayStatusUsesSameHomeAndAccount(t *testing.T) {
 		return daemon.PortHolder{PID: child.Process.Pid, UID: os.Getuid()}, nil
 	}
 	gatewayManagedState = func() (bool, int) { return false, 0 }
+	// Wait until the helper's /proc entries name it, so the check below
+	// does not race the child's start.
+	for deadline := time.Now().Add(5 * time.Second); !sameHomeGatewayProcess(child.Process.Pid, home) && time.Now().Before(deadline); {
+		time.Sleep(10 * time.Millisecond)
+	}
 	cfg := config.DefaultConfig()
 	if problem := foreignGatewayListener(cfg); problem != "" {
 		t.Fatalf("same-home transient gateway reported foreign: %s", problem)
