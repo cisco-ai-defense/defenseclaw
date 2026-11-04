@@ -67,81 +67,129 @@ func (e *perIPLimiterEntry) lastSeen() time.Time {
 //
 // Entries idle for >5 minutes are evicted, keeping memory bounded under
 // sustained scans of the IPv4/IPv6 address space (the `sync.Map` plus
-// rate.Limiter pair is ~200 bytes per IP). The eviction sweep runs at most
-// once a minute and only when a non-loopback request arrives: entries are
-// only added by such requests, so the bound is the same as a timer's, and
-// the middleware owns no goroutine. A sweeper goroutine with its own ticker
-// had no way to stop, so every APIServer route table built (each test
-// server, each managed hook socket) leaked one (rel-1-0-6:GAP-0550).
+// rate.Limiter pair is ~200 bytes per IP). The eviction sweep is a runtime
+// timer (time.AfterFunc) armed when the first entry is added and re-armed
+// every minute only while entries remain, so idle entries expire whatever
+// traffic follows (loopback only, or none) and a limiter without remote
+// entries owns neither a goroutine nor a timer. A sweeper goroutine with its
+// own ticker had no way to stop, so every APIServer route table built (each
+// test server, each managed hook socket) leaked one (rel-1-0-6:GAP-0550).
 //
 // rps and burst are intentionally small for /api/v1/inspect/* — see plan
 // F19/A2: a misbehaving / compromised local agent should never be able to
 // blast the inspect path; legitimate hook callers send <1 req/s per agent.
 func perIPRateLimiter(rps, burst int) func(http.Handler) http.Handler {
-	return newPerIPRateLimiter(rps, burst, time.Now, nil)
+	return newPerIPLimiterSet(rps, burst, perIPLimiterOptions{}).middleware
 }
 
-// newPerIPRateLimiter is perIPRateLimiter with an injectable clock; swept,
-// when set, is told how many entries each eviction sweep dropped (tests).
-func newPerIPRateLimiter(rps, burst int, now func() time.Time, swept func(evicted int)) func(http.Handler) http.Handler {
+// perIPLimiterOptions are the eviction knobs; zero values take the
+// production defaults (tests shorten or fake them).
+type perIPLimiterOptions struct {
+	idleEviction  time.Duration
+	sweepInterval time.Duration
+	now           func() time.Time
+	// schedule runs f once after d (time.AfterFunc).
+	schedule func(d time.Duration, f func())
+	// swept, when set, is told what each sweep evicted and kept.
+	swept func(evicted, remaining int)
+}
+
+// perIPLimiterSet is the per-IP limiter map and its self-ending sweep.
+type perIPLimiterSet struct {
+	rps, burst int
+	opts       perIPLimiterOptions
+	limiters   sync.Map
+
+	mu    sync.Mutex
+	armed bool
+}
+
+func newPerIPLimiterSet(rps, burst int, opts perIPLimiterOptions) *perIPLimiterSet {
 	if rps <= 0 {
 		rps = 1
 	}
 	if burst <= 0 {
 		burst = rps
 	}
-	limiters := &sync.Map{}
-	const idleEviction = 5 * time.Minute
-	const sweepInterval = 1 * time.Minute
-	var lastSweep atomic.Int64
-	lastSweep.Store(now().UnixNano())
-	sweep := func(current time.Time) {
-		last := lastSweep.Load()
-		if current.UnixNano()-last < int64(sweepInterval) ||
-			!lastSweep.CompareAndSwap(last, current.UnixNano()) {
+	if opts.idleEviction <= 0 {
+		opts.idleEviction = 5 * time.Minute
+	}
+	if opts.sweepInterval <= 0 {
+		opts.sweepInterval = 1 * time.Minute
+	}
+	if opts.now == nil {
+		opts.now = time.Now
+	}
+	if opts.schedule == nil {
+		opts.schedule = func(d time.Duration, f func()) { time.AfterFunc(d, f) }
+	}
+	return &perIPLimiterSet{rps: rps, burst: burst, opts: opts}
+}
+
+// arm schedules a sweep unless one is already pending.
+func (s *perIPLimiterSet) arm() {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if !s.armed {
+		s.armed = true
+		s.opts.schedule(s.opts.sweepInterval, s.sweep)
+	}
+}
+
+// sweep evicts idle entries and re-arms only while entries remain. An entry
+// stored after the count below arms again through arm, which waits for mu.
+func (s *perIPLimiterSet) sweep() {
+	cutoff := s.opts.now().Add(-s.opts.idleEviction)
+	evicted, remaining := 0, 0
+	s.limiters.Range(func(k, v interface{}) bool {
+		if e, ok := v.(*perIPLimiterEntry); ok && e.lastSeen().Before(cutoff) {
+			s.limiters.Delete(k)
+			evicted++
+		} else {
+			remaining++
+		}
+		return true
+	})
+	s.mu.Lock()
+	if remaining == 0 {
+		s.armed = false
+	} else {
+		s.opts.schedule(s.opts.sweepInterval, s.sweep)
+	}
+	s.mu.Unlock()
+	if s.opts.swept != nil {
+		s.opts.swept(evicted, remaining)
+	}
+}
+
+func (s *perIPLimiterSet) middleware(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if connector.IsLoopback(r) {
+			next.ServeHTTP(w, r)
 			return
 		}
-		cutoff := current.Add(-idleEviction)
-		evicted := 0
-		limiters.Range(func(k, v interface{}) bool {
-			if e, ok := v.(*perIPLimiterEntry); ok && e.lastSeen().Before(cutoff) {
-				limiters.Delete(k)
-				evicted++
-			}
-			return true
-		})
-		if swept != nil {
-			swept(evicted)
+		ip := clientIPForLimiter(r)
+		if ip == "" {
+			// Unparseable RemoteAddr — refuse rather than fail open;
+			// caller can retry with a well-formed source.
+			writeJSONRefusal(w, `{"error":"unparseable client address"}`, http.StatusForbidden)
+			return
 		}
-	}
-
-	return func(next http.Handler) http.Handler {
-		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			if connector.IsLoopback(r) {
-				next.ServeHTTP(w, r)
-				return
-			}
-			current := now()
-			sweep(current)
-			ip := clientIPForLimiter(r)
-			if ip == "" {
-				// Unparseable RemoteAddr — refuse rather than fail open;
-				// caller can retry with a well-formed source.
-				writeJSONRefusal(w, `{"error":"unparseable client address"}`, http.StatusForbidden)
-				return
-			}
-			fresh := &perIPLimiterEntry{limiter: rate.NewLimiter(rate.Limit(rps), burst)}
-			fresh.touch(current)
-			val, _ := limiters.LoadOrStore(ip, fresh)
-			entry := val.(*perIPLimiterEntry)
-			entry.touch(current)
-			if !entry.limiter.Allow() {
-				writeJSONRefusal(w, `{"error":"rate limit exceeded"}`, http.StatusTooManyRequests)
-				return
-			}
-			next.ServeHTTP(w, r)
-		})
-	}
+		current := s.opts.now()
+		fresh := &perIPLimiterEntry{limiter: rate.NewLimiter(rate.Limit(s.rps), s.burst)}
+		fresh.touch(current)
+		val, loaded := s.limiters.LoadOrStore(ip, fresh)
+		if !loaded {
+			s.arm()
+		}
+		entry := val.(*perIPLimiterEntry)
+		entry.touch(current)
+		if !entry.limiter.Allow() {
+			writeJSONRefusal(w, `{"error":"rate limit exceeded"}`, http.StatusTooManyRequests)
+			return
+		}
+		next.ServeHTTP(w, r)
+	})
 }
 
 // clientIPForLimiter extracts the bare IP (no port) from r.RemoteAddr.
