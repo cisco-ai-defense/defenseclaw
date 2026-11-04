@@ -412,7 +412,10 @@ func TestRunAuthenticatedManagedTokenSnapshotEmptyFailsClosedWithoutFallback(t *
 				}
 				opts.ManagedEnterprise = true
 				opts.SecureClient = secureClient
-				opts.FailMode = "open"
+				// Closed fail mode: a Secure Client hook follows it for an
+				// empty token (open allows; see
+				// TestSecureClientAvailabilityGapsFollowFailMode).
+				opts.FailMode = "closed"
 				empty := "  "
 				opts.AuthenticatedManagedToken = &empty
 			})

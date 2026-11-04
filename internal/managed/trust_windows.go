@@ -1125,36 +1125,12 @@ func windowsVirtualServiceSID(account string) (*windows.SID, error) {
 	if err != nil {
 		return nil, fmt.Errorf("derive Windows service SID for %q: %w", account, err)
 	}
-	sid, _, _, err := windows.LookupSID("", account)
-	if errors.Is(err, windows.ERROR_NONE_MAPPED) {
-		// A virtual account that logged on stays resolvable after its
-		// service is deleted. The LocalSystem gateway never logs on as
-		// NT SERVICE\<name>, so once Uninstall deletes the service the name
-		// no longer maps, and the managed data_dir check during teardown
-		// finalize failed (Setup /uninstall exit 1603). The service SID is
-		// a pure function of the name, as `sc.exe showsid` computes it.
-		return derived, nil
-	}
-	if err != nil {
-		return nil, fmt.Errorf("resolve Windows virtual service account %q: %w", account, err)
-	}
-	if !sid.Equals(derived) {
-		return nil, fmt.Errorf(
-			"resolved Windows virtual service account %q is %s, not its service SID %s",
-			account, sidString(sid), sidString(derived),
-		)
-	}
-	// LookupSID resolved the `NT SERVICE\<name>` string, but a compromised
-	// registrar could point the lookup at any SID. Bind trust to the NT
-	// SERVICE authority (S-1-5-80-...) before returning: reject any SID
-	// that is not under NT AUTHORITY (Value 5) with SubAuthority(0) == 80.
-	if !sidIsNTService(sid) {
-		return nil, fmt.Errorf(
-			"resolved Windows virtual service account %q is not under NT SERVICE (S-1-5-80): %s",
-			account, sidString(sid),
-		)
-	}
-	return sid, nil
+	// Return the SID computed from the validated name instead of asking LSA.
+	// Before the service exists LSA does not know the name and forwards it
+	// to a domain controller; a domain-joined host off the corporate network
+	// then fails the lookup (ERROR_TRUSTED_RELATIONSHIP_FAILURE) even though
+	// the SID depends only on the name.
+	return derived, nil
 }
 
 // windowsDerivedServiceSID is the service SID SCM assigns to a service name
@@ -1189,23 +1165,6 @@ func ntServiceName(account string) (string, error) {
 		return "", fmt.Errorf("%s service name is too long", WindowsServiceAccountEnv)
 	}
 	return name, nil
-}
-
-func sidIsNTService(sid *windows.SID) bool {
-	if sid == nil || !sid.IsValid() {
-		return false
-	}
-	authority := sid.IdentifierAuthority()
-	// NT authority: {0, 0, 0, 0, 0, 5}. Only the last byte varies for known
-	// authorities on modern Windows, so a byte-exact comparison is safe.
-	if authority.Value != [6]byte{0, 0, 0, 0, 0, 5} {
-		return false
-	}
-	if sid.SubAuthorityCount() < 1 {
-		return false
-	}
-	const ntServiceSubAuthority uint32 = 80
-	return sid.SubAuthority(0) == ntServiceSubAuthority
 }
 
 // WindowsServiceAccountSID resolves a narrowly validated NT SERVICE virtual
