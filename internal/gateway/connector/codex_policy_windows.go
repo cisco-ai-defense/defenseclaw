@@ -48,7 +48,10 @@ func readCodexSystemRequirements(path string, managedEnterprise bool) ([]byte, b
 		if !parentInfo.IsDir() || parentInfo.Mode()&os.ModeSymlink != 0 {
 			return nil, false, fmt.Errorf("managed Codex requirements parent is not a regular directory: %s", parent)
 		}
-		if trustErr := managed.ValidateTrustedRuntimeDir(parent, "managed Codex requirements parent"); trustErr != nil {
+		// Same judgement the machine requirements writer applies: structure
+		// stays fatal, while permission drift such as the inherited
+		// ProgramData "Users create" grant is accepted and logged.
+		if trustErr := ensureWindowsCodexMachineDirTrust(parent, "managed Codex requirements parent"); trustErr != nil {
 			return nil, false, fmt.Errorf("managed Codex requirements parent is untrusted: %w", trustErr)
 		}
 		return nil, false, nil
@@ -62,7 +65,7 @@ func readCodexSystemRequirements(path string, managedEnterprise bool) ([]byte, b
 	if info.Size() > codexPolicyMessageLimit {
 		return nil, false, fmt.Errorf("exceeds %d bytes", codexPolicyMessageLimit)
 	}
-	if err := managed.ValidateTrustedFilePath(path, "managed Codex requirements source"); err != nil {
+	if err := managed.ValidateTrustedPolicyFilePath(path, "managed Codex requirements source"); err != nil {
 		return nil, false, fmt.Errorf("managed Codex requirements source is untrusted: %w", err)
 	}
 	return readBoundedCodexSystemRequirements(path)

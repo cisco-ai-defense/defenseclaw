@@ -64,6 +64,12 @@ func ValidateTrustedInstallMarkerDir(path, label string) error {
 	}
 }
 
+// ValidateTrustedPolicyFilePath is ValidateTrustedFilePath on Unix. On Windows
+// it accepts and logs permission drift on a managed policy or data file.
+func ValidateTrustedPolicyFilePath(path, label string) error {
+	return ValidateTrustedFilePath(path, label)
+}
+
 // ValidateTrustedFilePath rejects managed_enterprise policy/input files that a
 // standard user could replace or edit. The managed service may run as a
 // dedicated non-root user, but authoritative inputs must stay admin-owned.
@@ -446,3 +452,25 @@ func trustedServiceAccounts(goos, custom string) []string {
 	}
 	return []string{StandaloneLinuxServiceUser}
 }
+
+// ValidateExecutableFilePath validates a binary or library DefenseClaw loads.
+// The advisory code-integrity rule is Windows-only; here it is the strict
+// ValidateTrustedFilePath check, unchanged.
+func ValidateExecutableFilePath(path, label string) error {
+	return ValidateTrustedFilePath(path, label)
+}
+
+// AcceptServiceRuntimeFileDrift is the gateway's drift-accepting judgement of
+// a runtime file it reads. Descriptor drift is a Windows concept; here it is
+// the existing ValidateTrustedServiceRuntimeFilePath check.
+func AcceptServiceRuntimeFileDrift(path, label, serviceAccount string) error {
+	return ValidateTrustedServiceRuntimeFilePath(path, label, serviceAccount)
+}
+
+// osRootAncestor is Windows-only; on Unix only PlatformInstallerOwnedRoots
+// make an ancestor advisory.
+func osRootAncestor(string) bool { return false }
+
+// trustedMachineInstallBases is Windows-only; PlatformInstallerOwnedRoots
+// returns fixed roots on Unix.
+func trustedMachineInstallBases() []string { return nil }

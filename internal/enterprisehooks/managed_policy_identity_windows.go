@@ -88,7 +88,7 @@ func VerifyWindowsClaudeManagedPolicyIdentity(
 }
 
 func claudeManagedPolicyMatchesKnownContract(
-	provider *connector.ClaudeCodeConnector,
+	provider connector.ManagedHookPolicyProvider,
 	policy []byte,
 	setup connector.SetupOpts,
 ) bool {
@@ -128,7 +128,7 @@ func VerifyWindowsCursorManagedPolicyIdentity(
 		if err != nil {
 			return err
 		}
-		artifacts, err = validateWindowsCursorManagedArtifacts(artifacts)
+		artifacts, err = validateWindowsCursorManagedArtifactsForLockedRead(artifacts)
 		if err != nil {
 			return err
 		}

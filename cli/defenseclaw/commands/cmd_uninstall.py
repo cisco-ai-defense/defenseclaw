@@ -2946,19 +2946,22 @@ def _orphan_copilot_handler_owned(handler: object) -> bool:
             "$ErrorActionPreference='Stop'",
             "$env:NoDefaultCurrentDirectoryInExePath='1'",
         ]
-        run = [
-            "if ($ExecutionContext.SessionState.LanguageMode -ne 'FullLanguage') { "
-            f"$ErrorActionPreference='Continue'; & {binary} {args} | Microsoft.PowerShell.Core\\Out-Host; "
-            "exit $LASTEXITCODE }",
-            f"$hookStart=[System.Diagnostics.ProcessStartInfo]::new({binary},'{argv}')",
-            "$hookStart.UseShellExecute=$false",
-            "$hookStart.RedirectStandardError=$true",
-            "$hookProcess=[System.Diagnostics.Process]::Start($hookStart)",
-            "$hookProcess.StandardError.BaseStream.CopyTo([Console]::OpenStandardError())",
-            "$hookProcess.WaitForExit()",
-            "exit $hookProcess.ExitCode",
-        ]
-        if script == "; ".join([*statements, *run]):
+
+        def run(constrained_fail_closed: str) -> list[str]:
+            return [
+                "if ($ExecutionContext.SessionState.LanguageMode -ne 'FullLanguage') { "
+                f"$ErrorActionPreference='Continue'; & {binary} {args} | Microsoft.PowerShell.Core\\Out-Host; "
+                f"{constrained_fail_closed}exit $LASTEXITCODE }}",
+                f"$hookStart=[System.Diagnostics.ProcessStartInfo]::new({binary},'{argv}')",
+                "$hookStart.UseShellExecute=$false",
+                "$hookStart.RedirectStandardError=$true",
+                "$hookProcess=[System.Diagnostics.Process]::Start($hookStart)",
+                "$hookProcess.StandardError.BaseStream.CopyTo([Console]::OpenStandardError())",
+                "$hookProcess.WaitForExit()",
+                "exit $hookProcess.ExitCode",
+            ]
+
+        if script == "; ".join([*statements, *run("")]):
             return True  # 1.0.0 render, before the removed-deployment guard
         unquoted = binary[1:-1].replace("''", "'")
         gateway = "'" + ntpath.join(ntpath.dirname(unquoted), "defenseclaw-gateway.exe").replace("'", "''") + "'"
@@ -2969,7 +2972,12 @@ def _orphan_copilot_handler_owned(handler: object) -> bool:
             f"elseif (-not [System.IO.File]::Exists({binary}) -and "
             f"-not [System.IO.File]::Exists({gateway})) {{ exit 0 }}"
         )
-        return script == "; ".join([*statements, guard, *run])
+        # The guarded render through 1.0.6, and the current one, whose
+        # Constrained Language branch exits 1 when the launcher never started.
+        return script in {
+            "; ".join([*statements, guard, *run(fail_closed)])
+            for fail_closed in ("", "if ($null -eq $LASTEXITCODE) { exit 1 }; ")
+        }
 
     prefix, sep, tail = command.partition(" hook --connector copilot --enterprise-managed --event '")
     if not sep:

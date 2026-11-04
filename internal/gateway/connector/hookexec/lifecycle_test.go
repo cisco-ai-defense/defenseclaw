@@ -125,8 +125,10 @@ func TestInvalidActionOnLifecycleEventsAllowsBothStandaloneShapes(t *testing.T) 
 	}
 }
 
-// The Secure Client bytes remain pinned to the historical golden. Other
-// profiles keep lifecycle events neutral when a gateway action is unusable.
+// The Secure Client bytes remain pinned to the historical golden, except
+// that a Secure Client failure writes only ManagedHookBlockMessage to stderr
+// (writeFailureDiagnostic). Other profiles keep lifecycle events neutral
+// when a gateway action is unusable.
 func TestInvalidActionOnLifecycleEventsKeepsPerUserAndSecureClientBytes(t *testing.T) {
 	f, err := os.Open("testdata/lifecycle_invalid_action_6210dbcee.jsonl")
 	if err != nil {
@@ -170,6 +172,10 @@ func TestInvalidActionOnLifecycleEventsKeepsPerUserAndSecureClientBytes(t *testi
 			continue
 		}
 		gotStderr := stderr.String()
+		if strings.HasPrefix(want.Stderr, "defenseclaw: ") {
+			// The golden predates the quiet Secure Client failure stderr.
+			want.Stderr = ManagedHookBlockMessage + "\n"
+		}
 		if code != want.Code || stdout.String() != want.Stdout || gotStderr != want.Stderr {
 			t.Errorf("%s/%s %s body=%s:\n got code=%d stdout=%q stderr=%q\nwant code=%d stdout=%q stderr=%q",
 				want.Connector, want.Event, want.Profile, want.Body,

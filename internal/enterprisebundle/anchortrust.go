@@ -26,7 +26,9 @@ func AnchorsPath(goos string) (string, error) {
 // managed policy-file check (on Linux and macOS owned by root, not group
 // or other writable and no ACL write entry, on Windows owned by SYSTEM or
 // Administrators with no write entry for other accounts; no links), for the
-// file and every folder above it.
+// file and every folder above it. It keeps that exact owner and writer
+// rule on every profile, without the Secure Client drift acceptances of the
+// ordinary walk.
 func TrustAnchorFile(path string) error {
-	return managed.ValidateTrustedFilePath(path, "bundle trust anchors")
+	return managed.ValidateTrustedFilePathStandalone(path, "bundle trust anchors")
 }

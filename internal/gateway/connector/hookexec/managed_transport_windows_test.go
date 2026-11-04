@@ -18,6 +18,8 @@ import (
 	"sync"
 	"testing"
 	"time"
+
+	"golang.org/x/sys/windows"
 )
 
 var managedTransportTestMu sync.Mutex
@@ -378,11 +380,14 @@ func TestRunningManagedGatewayServiceNeedsAnIPv4Listener(t *testing.T) {
 }
 
 // A stopped gateway service is an outage only when nothing listens on its
-// port: another process on the port, or a listen table that cannot be read,
-// is an integrity failure that no fail mode lets through.
+// port: another process on the port is an integrity failure that no fail
+// mode lets through. A listen table that cannot be read identifies no owner
+// (errManagedGatewayPeerUnconfirmed): a Secure Client hook follows its fail
+// mode, the standalone profile stays closed.
 func TestStoppedManagedGatewayServiceWithAPortListenerIsNotAnOutage(t *testing.T) {
 	managedTransportTestMu.Lock()
 	defer managedTransportTestMu.Unlock()
+	fastManagedPeerRetries(t)
 
 	listener := listenManagedTransportTest(t)
 	defer listener.Close()
@@ -414,22 +419,23 @@ func TestStoppedManagedGatewayServiceWithAPortListenerIsNotAnOutage(t *testing.T
 		{name: "nothing listens", known: true, standaloneOutage: true, secureClientOutage: true},
 	} {
 		for _, profile := range []struct {
-			name   string
-			client func() (*http.Client, error)
-			opts   Options
-			outage bool
+			name         string
+			client       func() (*http.Client, error)
+			opts         Options
+			outage       bool
+			secureClient bool
 		}{
 			{"standalone", func() (*http.Client, error) {
 				return managedEnterpriseHTTPClientFor(time.Second, addr, "DefenseClawGateway", false)
-			}, standalone, tc.standaloneOutage},
+			}, standalone, tc.standaloneOutage, false},
 			{"secure client", func() (*http.Client, error) {
 				return managedEnterpriseHTTPClientFor(time.Second, addr, "DefenseClawGateway", true)
-			}, secureClient, tc.secureClientOutage},
+			}, secureClient, tc.secureClientOutage, true},
 			// The Secure Client plugin hook states no profile; it gets both
 			// checks.
 			{"plugin hook", func() (*http.Client, error) {
 				return NewManagedEnterpriseGatewayHTTPClient(time.Second, addr, "DefenseClawGateway")
-			}, secureClient, tc.secureClientOutage},
+			}, secureClient, tc.secureClientOutage, true},
 		} {
 			t.Run(tc.name+"/"+profile.name, func(t *testing.T) {
 				managedEnterpriseListening = func(string) (bool, bool) { return tc.any, tc.known }
@@ -449,8 +455,11 @@ func TestStoppedManagedGatewayServiceWithAPortListenerIsNotAnOutage(t *testing.T
 				if got := errors.Is(err, errManagedGatewayPortHeld); got != wantHeld {
 					t.Fatalf("port held = %v, want %v (err %v)", got, wantHeld, err)
 				}
+				if got := errors.Is(err, errManagedGatewayPeerUnconfirmed); got != !tc.known {
+					t.Fatalf("unconfirmed = %v, want %v (err %v)", got, !tc.known, err)
+				}
 				want := "closed"
-				if profile.outage {
+				if profile.outage || (!tc.known && profile.secureClient) {
 					want = "open"
 				}
 				if got := managedPeerFailMode(profile.opts, "open", err); got != want {
@@ -565,5 +574,37 @@ func TestManagedEnterpriseClientAwaitingStartWaitsForTheListener(t *testing.T) {
 	}
 	if elapsed := time.Since(started); elapsed > 2*time.Second || looks < 2 {
 		t.Fatalf("awaiting client past its budget took %v and %d looks", elapsed, looks)
+	}
+}
+
+// A service security descriptor that denies the user a status query is
+// permission drift: the hook follows its fail mode instead of failing closed,
+// reports its own reason, and never dials the port.
+func TestManagedEnterpriseTransportUnreadableServiceFollowsFailMode(t *testing.T) {
+	managedTransportTestMu.Lock()
+	defer managedTransportTestMu.Unlock()
+	restoreManagedTransportSeams(t,
+		func(string) (uint32, error) { return 0, windows.ERROR_ACCESS_DENIED },
+		func(net.Conn) (uint32, error) { return 0, errors.New("must not resolve a connection") },
+	)
+	client, err := managedEnterpriseHTTPClient(time.Second, "127.0.0.1:18970", "DefenseClawGateway")
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = client.Post("http://127.0.0.1:18970/api/v1/hook", "application/json", strings.NewReader(`{}`))
+	if !errors.Is(err, errManagedGatewayPeerUnverified) || !errors.Is(err, errManagedGatewayServiceUnreadable) {
+		t.Fatalf("unreadable service error = %v", err)
+	}
+	secureClient := Options{ManagedEnterprise: true, SecureClient: true}
+	if got := managedPeerFailureReason(secureClient, err); got != managedGatewayServiceUnreadableReason {
+		t.Fatalf("reason = %q", got)
+	}
+	if managedPeerFailMode(secureClient, "open", err) != "open" || managedPeerFailMode(secureClient, "closed", err) != "closed" {
+		t.Fatal("unreadable service did not follow the Secure Client hook's fail mode")
+	}
+	// A standalone hook's outage is only a proven stopped service.
+	standalone := Options{ManagedEnterprise: true, ManagedStandalone: true}
+	if got := managedPeerFailMode(standalone, "open", err); got != "closed" {
+		t.Fatalf("standalone unreadable service fail mode = %q, want closed", got)
 	}
 }

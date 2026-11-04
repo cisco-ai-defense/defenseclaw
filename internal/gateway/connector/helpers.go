@@ -1017,7 +1017,13 @@ func nativeHookBridgeArguments(connector, event, contractID string, extra []stri
 // awaited on the handle PowerShell started it with, and $LASTEXITCODE is its
 // status. Its stdout then reaches the agent as console-encoded text lines.
 // Continue keeps a host that turns native stderr into error records from
-// ending the script with 1.
+// ending the script with 1. When the launcher cannot start at all (it is
+// missing, or WDAC/AppLocker blocks it) the call operator raises an error
+// that Continue lets pass and $LASTEXITCODE stays $null; exit $null is 0,
+// which agents read as allow, so that case exits 1 instead
+// (windowsAwaitedHookFallbackExit). Releases up to 1.0.6 rendered the
+// fallback without that check; their registrations stay owned
+// (legacyWindowsAwaitedHookCommand).
 //
 // Outside Constrained Language mode the statements call no cmdlet, and
 // Out-Host is module-qualified, so a fresh Windows PowerShell process does
@@ -1031,7 +1037,7 @@ func windowsAwaitedHookStatements(hookBinary string, arguments []string) []strin
 	}
 	return []string{
 		"if ($ExecutionContext.SessionState.LanguageMode -ne 'FullLanguage') { $ErrorActionPreference='Continue'; & " +
-			powershellQuoteLiteral(hookBinary) + " " + strings.Join(quoted, " ") + " | Microsoft.PowerShell.Core\\Out-Host; exit $LASTEXITCODE }",
+			powershellQuoteLiteral(hookBinary) + " " + strings.Join(quoted, " ") + windowsAwaitedHookFallbackExit,
 		"$hookStart=[System.Diagnostics.ProcessStartInfo]::new(" + powershellQuoteLiteral(hookBinary) + "," +
 			powershellQuoteLiteral(strings.Join(escaped, " ")) + ")",
 		"$hookStart.UseShellExecute=$false",
@@ -1041,6 +1047,61 @@ func windowsAwaitedHookStatements(hookBinary string, arguments []string) []strin
 		"$hookProcess.WaitForExit()",
 		"exit $hookProcess.ExitCode",
 	}
+}
+
+// windowsAwaitedHookFallbackExit ends the Constrained Language fallback of
+// windowsAwaitedHookStatements; legacyWindowsAwaitedHookFallbackExit is the
+// end releases up to 1.0.6 rendered, which exited 0 when the launcher never
+// started.
+const (
+	windowsAwaitedHookFallbackExit       = " | Microsoft.PowerShell.Core\\Out-Host; if ($null -eq $LASTEXITCODE) { exit 1 }; exit $LASTEXITCODE }"
+	legacyWindowsAwaitedHookFallbackExit = " | Microsoft.PowerShell.Core\\Out-Host; exit $LASTEXITCODE }"
+)
+
+// legacyWindowsAwaitedHookCommand reconstructs, byte for byte, the form
+// releases up to 1.0.6 rendered of command, a command this release renders
+// with windowsAwaitedHookStatements (an encoded bridge, the Kiro cmd.exe
+// wrapper around one, or a plain PowerShell program): the same command with
+// the fallback end legacyWindowsAwaitedHookFallbackExit. Those registrations
+// stay DefenseClaw's own, so setup and the guardian rewrite them and
+// teardown removes them. ok is false for a command that carries no current
+// fallback end.
+func legacyWindowsAwaitedHookCommand(command string) (string, bool) {
+	return rewriteWindowsAwaitedHookFallback(command, windowsAwaitedHookFallbackExit, legacyWindowsAwaitedHookFallbackExit)
+}
+
+// currentWindowsAwaitedHookCommand is the inverse of
+// legacyWindowsAwaitedHookCommand: the current form of a 1.0.x command, for
+// a caller that compares a registration against the commands it renders now.
+// The result is DefenseClaw's only when it equals one of them byte for byte.
+func currentWindowsAwaitedHookCommand(command string) (string, bool) {
+	return rewriteWindowsAwaitedHookFallback(command, legacyWindowsAwaitedHookFallbackExit, windowsAwaitedHookFallbackExit)
+}
+
+// rewriteWindowsAwaitedHookFallback replaces the one fallback end from in
+// command, or in the script of its first -EncodedCommand value, with to. An
+// encoded value that is not the canonical encoding of its script, or a
+// script without exactly one from, is left alone (ok false).
+func rewriteWindowsAwaitedHookFallback(command, from, to string) (string, bool) {
+	const marker = " -EncodedCommand "
+	index := strings.Index(command, marker)
+	if index < 0 {
+		if strings.Count(command, from) != 1 {
+			return "", false
+		}
+		return strings.Replace(command, from, to, 1), true
+	}
+	start := index + len(marker)
+	end := start
+	for end < len(command) && !unicode.IsSpace(rune(command[end])) {
+		end++
+	}
+	encoded := command[start:end]
+	script, ok := powershellDecodedCommand(encoded)
+	if !ok || powershellEncodedCommand(script) != encoded || strings.Count(script, from) != 1 {
+		return "", false
+	}
+	return command[:start] + powershellEncodedCommand(strings.Replace(script, from, to, 1)) + command[end:], true
 }
 
 // windowsCommandLineArgument quotes one argument for
@@ -1370,7 +1431,14 @@ func nativeHookExactCommands(hookBinaries []string) map[string]struct{} {
 		return cache.commands
 	}
 	commands := make(map[string]struct{})
-	add := func(cmd string) { commands[cmd] = struct{}{} }
+	add := func(cmd string) {
+		commands[cmd] = struct{}{}
+		// The 1.0.x render of an awaited bridge stays owned, so setup
+		// rewrites it to the current one and teardown removes it.
+		if legacy, ok := legacyWindowsAwaitedHookCommand(cmd); ok {
+			commands[legacy] = struct{}{}
+		}
+	}
 	for _, connectorName := range []string{"codex", "antigravity"} {
 		for _, hookBinary := range hookBinaries {
 			add(windowsNativePowerShellHookCommandForBinary(connectorName, hookBinary))

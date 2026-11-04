@@ -7254,13 +7254,15 @@ function Read-PID([string]$Path) {
 # Get-AwaitedHookBridge parses a decoded hook bridge script: the launcher is
 # started with Process.Start, which keeps the handle CreateProcess returned so
 # a launcher that exits at once still returns its status, and with the call
-# operator piped to Out-Host in Constrained Language mode. It returns the
-# launcher and its arguments, or $null when the script is not exactly that
-# bridge with the same launcher and arguments in both branches.
+# operator piped to Out-Host in Constrained Language mode, which exits 1 when
+# the launcher never started. It returns the launcher and its arguments, or
+# $null when the script is not exactly that bridge with the same launcher and
+# arguments in both branches.
 function Get-AwaitedHookBridge([string]$Script) {
     $pattern = '^\$ErrorActionPreference=''Stop''; \$env:NoDefaultCurrentDirectoryInExePath=''1''; ' +
         'if \(\$ExecutionContext\.SessionState\.LanguageMode -ne ''FullLanguage''\) \{ \$ErrorActionPreference=''Continue''; ' +
-        '& (?<file>''(?:''''|[^''])+'')(?<quoted>(?: ''[^'' ]+'')+) \| Microsoft\.PowerShell\.Core\\Out-Host; exit \$LASTEXITCODE \}; ' +
+        '& (?<file>''(?:''''|[^''])+'')(?<quoted>(?: ''[^'' ]+'')+) \| Microsoft\.PowerShell\.Core\\Out-Host; ' +
+        'if \(\$null -eq \$LASTEXITCODE\) \{ exit 1 \}; exit \$LASTEXITCODE \}; ' +
         '\$hookStart=\[System\.Diagnostics\.ProcessStartInfo\]::new\(\k<file>,''(?<arguments>[^'' ]+(?: [^'' ]+)*)''\); ' +
         '\$hookStart\.UseShellExecute=\$false; \$hookStart\.RedirectStandardError=\$true; ' +
         '\$hookProcess=\[System\.Diagnostics\.Process\]::Start\(\$hookStart\); ' +

@@ -7,6 +7,7 @@
 package connector
 
 import (
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -15,6 +16,7 @@ import (
 	"unsafe"
 
 	"github.com/defenseclaw/defenseclaw/internal/managed"
+	"github.com/defenseclaw/defenseclaw/internal/safefile"
 	"github.com/defenseclaw/defenseclaw/internal/winpath"
 	"golang.org/x/sys/windows"
 )
@@ -226,7 +228,14 @@ func hookAPIValidateDirectoryFor(path, trustedOwnerSID string) error {
 		// one of those ancestors is reported, not fatal. The named directory,
 		// ancestors outside that tree, and structural failures stay fatal.
 		advisory := cur != clean && managed.PlatformInstallerOwnedPath(cur)
-		if err := hookAPIValidateWindowsPathElementTrusting(cur, true, protectChildren, advisory, extra); err != nil {
+		// Same drift rule as hookAPIValidateDirectory: an ancestor the target
+		// user owns accepts and logs permission drift; the named directory
+		// keeps its rules.
+		mode := hookAPIDriftStrict
+		if cur != clean {
+			mode = hookAPIDriftUserOwned
+		}
+		if err := hookAPIValidateWindowsPathElementModeTrusting(cur, true, protectChildren, advisory, mode, extra); err != nil {
 			return err
 		}
 		protectChildren = false
@@ -293,11 +302,58 @@ func hookAPIValidateDirectory(path string) error {
 		// managed data and hooks directories live under, so an untrusted grant on
 		// one of those ancestors is reported, not fatal. The named directory,
 		// ancestors outside that tree, and structural failures stay fatal.
-		advisory := cur != clean && managed.PlatformInstallerOwnedPath(cur)
-		if err := hookAPIValidateWindowsPathElement(cur, true, protectChildren, advisory); err != nil {
+		advisory := cur != clean && managed.AdvisoryAncestorPath(cur)
+		// An ancestor the user owns (the profile root) accepts and logs
+		// permission drift; helpdesk and Domain Admins grants there are
+		// routine. The named directory keeps its rules.
+		mode := hookAPIDriftStrict
+		if cur != clean {
+			mode = hookAPIDriftUserOwned
+		}
+		if err := hookAPIValidateWindowsPathElementMode(cur, true, protectChildren, advisory, mode); err != nil {
 			return err
 		}
 		protectChildren = false
+		if cur == filepath.Dir(cur) {
+			break
+		}
+	}
+	return nil
+}
+
+// hookAPIValidateUserConfigDirectory validates an agent's per-user config
+// directory (~\.claude, ~\.codex) and its ancestors. Permission drift on the
+// directory itself (owned by the user or a trusted administrator principal)
+// and on any ancestor the user owns, typically the profile root, is accepted
+// and logged: enterprise helpdesk and Domain Admins grants there are routine
+// and must not stop hook enrollment. A directory DefenseClaw just created that
+// still fails is re-stamped with its private descriptor. Ancestors the user
+// does not own and every structural failure keep the existing rules.
+func hookAPIValidateUserConfigDirectory(path string, created bool) error {
+	if !filepath.IsAbs(path) {
+		return fmt.Errorf("hook API token directory must be absolute: %q", path)
+	}
+	clean := filepath.Clean(path)
+	err := hookAPIValidateWindowsPathElementMode(clean, true, true, false, hookAPIDriftTrustedOwned)
+	if err != nil && created {
+		if repairErr := safefile.ProtectDirectory(clean); repairErr == nil {
+			if recheck := hookAPIValidateWindowsPathElementMode(
+				clean, true, true, false, hookAPIDriftTrustedOwned,
+			); recheck == nil {
+				emitManagedResilience(managed.MarkerRepair, clean,
+					"re-stamped private protection on a new config directory: "+err.Error(), nil)
+				err = nil
+			}
+		}
+	}
+	if err != nil {
+		return err
+	}
+	for cur := filepath.Dir(clean); ; cur = filepath.Dir(cur) {
+		advisory := managed.AdvisoryAncestorPath(cur)
+		if err := hookAPIValidateWindowsPathElementMode(cur, true, false, advisory, hookAPIDriftUserOwned); err != nil {
+			return err
+		}
 		if cur == filepath.Dir(cur) {
 			break
 		}
@@ -313,10 +369,43 @@ func hookAPIValidateDirectoryElement(path string) error {
 }
 
 func hookAPIValidateWindowsPathElement(path string, wantDir, protectChildren, advisory bool) error {
-	return hookAPIValidateWindowsPathElementTrusting(path, wantDir, protectChildren, advisory, nil)
+	return hookAPIValidateWindowsPathElementMode(path, wantDir, protectChildren, advisory, hookAPIDriftStrict)
 }
 
 func hookAPIValidateWindowsPathElementTrusting(path string, wantDir, protectChildren, advisory bool, extra *windows.SID) error {
+	return hookAPIValidateWindowsPathElementModeTrusting(path, wantDir, protectChildren, advisory, hookAPIDriftStrict, extra)
+}
+
+// hookAPIDriftMode says which permission verdicts on one path element are
+// accepted and logged instead of failing. Structural failures (reparse
+// points, wrong type, unparseable entries) are fatal in every mode.
+type hookAPIDriftMode int
+
+const (
+	// hookAPIDriftStrict keeps the existing verdicts.
+	hookAPIDriftStrict hookAPIDriftMode = iota
+	// hookAPIDriftUserOwned accepts permission drift on an element the
+	// effective user owns: the profile root and the agent's own config
+	// directory, where helpdesk and Domain Admins grants are routine.
+	hookAPIDriftUserOwned
+	// hookAPIDriftTrustedOwned also accepts drift on an element owned by
+	// Administrators, LocalSystem or TrustedInstaller.
+	hookAPIDriftTrustedOwned
+)
+
+func hookAPIValidateWindowsPathElementMode(
+	path string, wantDir, protectChildren, advisory bool, mode hookAPIDriftMode,
+) error {
+	return hookAPIValidateWindowsPathElementModeTrusting(path, wantDir, protectChildren, advisory, mode, nil)
+}
+
+// hookAPIValidateWindowsPathElementModeTrusting is the element check with a
+// drift mode and an extra trusted owner (the per-user target a privileged
+// guardian verifies without that user's token). For the drift modes, an
+// element owned by extra counts as user-owned.
+func hookAPIValidateWindowsPathElementModeTrusting(
+	path string, wantDir, protectChildren, advisory bool, mode hookAPIDriftMode, extra *windows.SID,
+) error {
 	info, err := os.Lstat(path)
 	if err != nil {
 		return err
@@ -357,8 +446,9 @@ func hookAPIValidateWindowsPathElementTrusting(path string, wantDir, protectChil
 	if err != nil {
 		return fmt.Errorf("inspect Windows owner for %s: %w", path, err)
 	}
+	relax := hookAPIDriftRelaxer(path, owner, advisory, mode, extra)
 	if !hookAPIWindowsTrustedPrincipalOrExtra(owner, extra) {
-		if err := managed.RelaxAncestorTrustVerdict(advisory, path, hookAPITrustLabel, fmt.Errorf(
+		if err := relax(fmt.Errorf(
 			"owner %s is not trusted for hook API token path %s", hookAPIWindowsSIDString(owner), path,
 		)); err != nil {
 			return err
@@ -369,11 +459,11 @@ func hookAPIValidateWindowsPathElementTrusting(path string, wantDir, protectChil
 		return fmt.Errorf("inspect Windows DACL for %s: %w", path, err)
 	}
 	if dacl == nil {
-		return managed.RelaxAncestorTrustVerdict(advisory, path, hookAPITrustLabel, fmt.Errorf(
+		return relax(fmt.Errorf(
 			"null Windows DACL is not trusted: %s", path,
 		))
 	}
-	return hookAPIRejectUntrustedWindowsWriteACEsTrusting(path, dacl, wantDir, protectChildren, advisory, extra)
+	return hookAPIRejectUntrustedWindowsWriteACEsWith(path, dacl, wantDir, protectChildren, extra, relax)
 }
 
 func hookAPIWindowsTrustedPrincipalOrExtra(sid, extra *windows.SID) bool {
@@ -383,11 +473,76 @@ func hookAPIWindowsTrustedPrincipalOrExtra(sid, extra *windows.SID) bool {
 	return hookAPIWindowsTrustedPrincipal(sid)
 }
 
+// hookAPIDriftRelaxer returns the verdict exit for one element: accept and
+// log when mode covers the element's owner, otherwise the existing ancestor
+// advisory rule. Strict-ancestors mode keeps every verdict fatal.
+func hookAPIDriftRelaxer(
+	path string, owner *windows.SID, advisory bool, mode hookAPIDriftMode, extra *windows.SID,
+) func(error) error {
+	accept := false
+	switch mode {
+	case hookAPIDriftUserOwned, hookAPIDriftTrustedOwned:
+		if current, err := windowsEffectiveUserSID(); err == nil && current != nil && owner != nil && owner.Equals(current) {
+			accept = true
+		}
+		if extra != nil && owner != nil && owner.Equals(extra) {
+			accept = true
+		}
+		if mode == hookAPIDriftTrustedOwned && managed.IsWindowsTrustedAdminOwner(owner) {
+			accept = true
+		}
+	}
+	return func(verdict error) error {
+		if verdict == nil {
+			return nil
+		}
+		var replace hookAPIReplaceVerdict
+		if accept && !managed.TrustStrictAncestors() && !errors.As(verdict, &replace) {
+			emitManagedResilience(managed.MarkerAccept, path, verdict.Error(),
+				map[string]string{"label": hookAPITrustLabel})
+			return nil
+		}
+		if err := managed.RelaxAncestorTrustVerdict(advisory, path, hookAPITrustLabel, verdict); err != nil {
+			return managedDriftError{err: err}
+		}
+		return nil
+	}
+}
+
+// hookAPIReplaceVerdict marks an untrusted, non-administrator grant that can
+// rename, delete or re-ACL an element (DELETE, DELETE_CHILD, WRITE_DAC,
+// WRITE_OWNER, GENERIC_ALL). Such a principal can swap the token directory
+// for a tree it controls, so owner-based drift acceptance never covers it.
+type hookAPIReplaceVerdict struct{ error }
+
+func (v hookAPIReplaceVerdict) Unwrap() error { return v.error }
+
+// hookAPIWindowsReplaceAccess reports whether mask lets its holder replace the
+// element or a child of it, rather than only add to or annotate it.
+func hookAPIWindowsReplaceAccess(mask windows.ACCESS_MASK) bool {
+	const fileDeleteChild windows.ACCESS_MASK = 0x00000040
+	replace := windows.ACCESS_MASK(
+		windows.GENERIC_ALL |
+			windows.DELETE |
+			windows.WRITE_DAC |
+			windows.WRITE_OWNER,
+	)
+	return mask&(replace|fileDeleteChild) != 0
+}
+
 func hookAPIRejectUntrustedWindowsWriteACEs(path string, dacl *windows.ACL, wantDir, protectChildren, advisory bool) error {
 	return hookAPIRejectUntrustedWindowsWriteACEsTrusting(path, dacl, wantDir, protectChildren, advisory, nil)
 }
 
 func hookAPIRejectUntrustedWindowsWriteACEsTrusting(path string, dacl *windows.ACL, wantDir, protectChildren, advisory bool, extra *windows.SID) error {
+	return hookAPIRejectUntrustedWindowsWriteACEsWith(path, dacl, wantDir, protectChildren, extra, func(verdict error) error {
+		return managed.RelaxAncestorTrustVerdict(advisory, path, hookAPITrustLabel, verdict)
+	})
+}
+
+func hookAPIRejectUntrustedWindowsWriteACEsWith(
+	path string, dacl *windows.ACL, wantDir, protectChildren bool, extra *windows.SID, relax func(error) error,
+) error {
 	const (
 		accessAllowedCompoundACEType       = 0x4
 		accessAllowedObjectACEType         = 0x5
@@ -435,11 +590,22 @@ func hookAPIRejectUntrustedWindowsWriteACEsTrusting(path string, dacl *windows.A
 		if !protectChildren && hookAPIWindowsStockAncestorGrant(ace.Mask, sid) {
 			continue
 		}
+		if wantDir && managed.AcceptInheritedCreateChild(path, hookAPITrustLabel, ace.Header.AceFlags, ace.Mask, sid) {
+			// C:\ProgramData's container-only Users create-child entry,
+			// inherited after a reset: it cannot change, rename or delete an
+			// existing token file, and files do not inherit it. Accepted and
+			// logged; the guardian re-stamps the folder.
+			continue
+		}
 		if !hookAPIWindowsTrustedPrincipalOrExtra(sid, extra) {
-			if err := managed.RelaxAncestorTrustVerdict(advisory, path, hookAPITrustLabel, fmt.Errorf(
+			verdict := fmt.Errorf(
 				"untrusted Windows principal %s has write-like access mask 0x%x on %s",
 				hookAPIWindowsSIDString(sid), uint32(ace.Mask), path,
-			)); err != nil {
+			)
+			if hookAPIWindowsReplaceAccess(ace.Mask) && !managed.WindowsAdminEquivalentPrincipal(sid) {
+				verdict = hookAPIReplaceVerdict{error: verdict}
+			}
+			if err := relax(verdict); err != nil {
 				return err
 			}
 		}

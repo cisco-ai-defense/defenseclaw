@@ -301,6 +301,10 @@ func TestWindowsCodexMachineGuardArtifactRepairTable(t *testing.T) {
 		apply        func(t *testing.T, opts WindowsCodexMachineRequirementsOptions)
 		keepsTargets bool
 		keepsOwn     bool
+		// pinOnly damage leaves the exact managed hooks in place: the
+		// guard stays active with its targets, the mismatch is logged, and
+		// the next reconcile re-pins it.
+		pinOnly bool
 	}{
 		{name: "requirements missing", keepsTargets: true, apply: func(t *testing.T, opts WindowsCodexMachineRequirementsOptions) {
 			if err := os.Remove(opts.RequirementsPath); err != nil {
@@ -327,7 +331,7 @@ func TestWindowsCodexMachineGuardArtifactRepairTable(t *testing.T) {
 				t.Fatal(err)
 			}
 		}},
-		{name: "registry stale", keepsTargets: true, apply: func(t *testing.T, opts WindowsCodexMachineRequirementsOptions) {
+		{name: "registry stale", keepsTargets: true, pinOnly: true, apply: func(t *testing.T, opts WindowsCodexMachineRequirementsOptions) {
 			data, err := os.ReadFile(opts.ManagedStatePath)
 			if err != nil {
 				t.Fatal(err)
@@ -404,8 +408,12 @@ func TestWindowsCodexMachineGuardArtifactRepairTable(t *testing.T) {
 					t.Fatalf("fixture guard: %+v err=%v", registry, err)
 				}
 				damage.apply(t, opts)
-				if registry, err := ResolveWindowsCodexManagedRuntimeRegistry(hook); err == nil && registry.Active &&
-					slices.Equal(registry.Targets, want) {
+				registry, err = ResolveWindowsCodexManagedRuntimeRegistry(hook)
+				healthy := err == nil && registry.Active && slices.Equal(registry.Targets, want)
+				if damage.pinOnly && !healthy {
+					t.Fatalf("a stale pin beside the exact managed hooks dropped the guard: %+v err=%v", registry, err)
+				}
+				if !damage.pinOnly && healthy {
 					t.Fatal("the damaged guard appeared healthy")
 				}
 				if report, err := ReconcileWindowsCodexMachineRequirements(opts); err != nil || !report.OK {
@@ -418,8 +426,8 @@ func TestWindowsCodexMachineGuardArtifactRepairTable(t *testing.T) {
 				if err != nil || !registry.Active || !slices.Equal(registry.Targets, want) {
 					t.Fatalf("rebuilt guard: %+v (want targets %v) err=%v", registry, want, err)
 				}
-				if _, err := VerifyWindowsCodexMachineRequirements(opts); err != nil {
-					t.Fatalf("the rebuilt guard does not verify: %v", err)
+				if report, err := VerifyWindowsCodexMachineRequirements(opts); err != nil || report.PinMismatch {
+					t.Fatalf("the rebuilt guard does not verify: %+v err=%v", report, err)
 				}
 				requirements, err := os.ReadFile(opts.RequirementsPath)
 				if err != nil {

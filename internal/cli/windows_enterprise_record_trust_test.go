@@ -114,10 +114,25 @@ func TestPlantedDeploymentRecordDoesNotAffectLifecycleProfile(t *testing.T) {
 	if err := os.WriteFile(planted, []byte(`{}`), 0o600); err != nil {
 		t.Fatal(err)
 	}
+	// Users can write it, as a standard account can write what it planted.
+	// The test account alone is not enough: an elevated run is an
+	// administrator account, which the record check accepts as drift.
+	plantedSD, err := windows.SecurityDescriptorFromString("D:P(A;;FA;;;SY)(A;;FA;;;BA)(A;;FA;;;BU)")
+	if err != nil {
+		t.Fatal(err)
+	}
+	plantedDACL, _, err := plantedSD.DACL()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := windows.SetNamedSecurityInfo(planted, windows.SE_FILE_OBJECT,
+		windows.DACL_SECURITY_INFORMATION|windows.PROTECTED_DACL_SECURITY_INFORMATION,
+		nil, nil, plantedDACL, nil); err != nil {
+		t.Fatal(err)
+	}
 	validate := func(path string) error {
 		if strings.EqualFold(path, planted) {
-			// The real validator: the test's temporary directory is
-			// writable by the current user, exactly like a planted tree.
+			// The real validator, over a record a standard user can write.
 			return windowsEnterpriseRecordValidatorDefault(path)
 		}
 		return nil
