@@ -2897,11 +2897,12 @@ func TestHookManagedAIDOnly_LogsToolCallWire(t *testing.T) {
 		}
 	}
 
-	// Agent-supplied names, ids and keys are bounded in the line.
+	// Agent-supplied names, ids, keys and the event are bounded in the line,
+	// after escaping: a key of control characters quotes to four times its size.
 	longName := strings.Repeat("n", 4096)
 	manyKeys := map[string]string{}
 	for i := 0; i < aidLogMaxArgKeys+8; i++ {
-		manyKeys[fmt.Sprintf("%s%03d", strings.Repeat("k", 1024), i)] = "v"
+		manyKeys[fmt.Sprintf("%s%03d", strings.Repeat("\x01", 1024), i)] = "v"
 	}
 	manyArgs, err := json.Marshal(manyKeys)
 	if err != nil {
@@ -2910,7 +2911,7 @@ func TestHookManagedAIDOnly_LogsToolCallWire(t *testing.T) {
 	bounded := captureStderr(t, func() {
 		_ = a.inspectToolPolicy(&ToolInspectRequest{
 			Tool: longName, Args: manyArgs, Direction: "tool_call", Connector: "claudecode",
-			toolUseID: strings.Repeat("i", 4096), aidToolCallDeclared: true, hookEvent: "PreToolUse",
+			toolUseID: strings.Repeat("i", 4096), aidToolCallDeclared: true, hookEvent: "PreToolUse" + strings.Repeat("-", 4096),
 		})
 	})
 	line := ""
@@ -2922,20 +2923,22 @@ func TestHookManagedAIDOnly_LogsToolCallWire(t *testing.T) {
 	if line == "" {
 		t.Fatalf("no tool-call line in %q", bounded)
 	}
-	if max := 3*aidLogFieldMaxBytes + aidLogMaxArgKeys*(aidLogFieldMaxBytes+8) + 512; len(line) > max {
+	const fieldMax = aidLogFieldMaxBytes + len(`..."`)
+	if max := 4*fieldMax + aidLogMaxArgKeys*(fieldMax+1) + 256; len(line) > max {
 		t.Errorf("tool-call line is %d bytes, want at most %d", len(line), max)
 	}
-	if !strings.Contains(line, `tool="`+strings.Repeat("n", aidLogFieldMaxBytes)+`..."`) ||
-		!strings.Contains(line, `id="`+strings.Repeat("i", aidLogFieldMaxBytes)+`..."`) ||
-		!strings.Contains(line, " (+8 more) wire=") {
-		t.Errorf("tool-call line not cut as expected: %.400q", line)
+	if !strings.Contains(line, `tool="`+strings.Repeat("n", aidLogFieldMaxBytes-1)+`..."`) ||
+		!strings.Contains(line, `id="`+strings.Repeat("i", aidLogFieldMaxBytes-1)+`..." (agent)`) ||
+		!strings.Contains(line, "event=PreToolUse"+strings.Repeat("-", aidLogFieldMaxBytes-len("PreToolUse"))+"... ") ||
+		!strings.Contains(line, `arg_keys=["\x01`) || !strings.Contains(line, " (+8 more) wire=") {
+		t.Errorf("tool-call line not cut as expected: %.600q", line)
 	}
 	textBounded := captureStderr(t, func() {
 		_ = a.inspectToolPolicy(&ToolInspectRequest{
 			Tool: longName, Args: args, Direction: "tool_call", Connector: "claudecode",
 		})
 	})
-	if !strings.Contains(textBounded, `tool="`+strings.Repeat("n", aidLogFieldMaxBytes)+`..." reason=contract_undeclared`) {
+	if !strings.Contains(textBounded, `tool="`+strings.Repeat("n", aidLogFieldMaxBytes-1)+`..." reason=contract_undeclared`) {
 		t.Errorf("text-only line not cut as expected: %.400q", textBounded)
 	}
 

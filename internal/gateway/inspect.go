@@ -512,7 +512,7 @@ func (a *APIServer) logAIDToolCallTextOnly(
 	if reason == "" || reason == "not_a_tool_call" || !a.aidHookSurfaceWired(ctx) {
 		return
 	}
-	tool := strconv.Quote(aidLogField(toolName))
+	tool := aidLogQuoted(toolName)
 	if nameIsLabel || strings.TrimSpace(toolName) == "" {
 		tool = "<none>"
 	}
@@ -524,12 +524,12 @@ func aidLogEvent(event string) string {
 	if strings.TrimSpace(event) == "" {
 		return "<unknown>"
 	}
-	return event
+	return aidLogField(event)
 }
 
-// The tool name, id and argument keys of an [aid] line come from the agent and
-// are bounded only by the request body cap; these limits keep one call's line
-// short.
+// The event, tool name, id and argument keys of an [aid] line come from the
+// agent and are bounded only by the request body cap; these limits keep one
+// call's line short.
 const (
 	aidLogFieldMaxBytes = 128
 	aidLogMaxArgKeys    = 32
@@ -542,6 +542,17 @@ func aidLogField(s string) string {
 		return s
 	}
 	return truncateToRuneBoundary(s, aidLogFieldMaxBytes) + "..."
+}
+
+// aidLogQuoted is s quoted, so a crafted value cannot forge a line, and then
+// cut to aidLogFieldMaxBytes: escaping can make a value up to four times
+// longer, so the bound applies to the escaped form. A cut ends in `..."`.
+func aidLogQuoted(s string) string {
+	q := strconv.Quote(s)
+	if len(q) <= aidLogFieldMaxBytes {
+		return q
+	}
+	return truncateToRuneBoundary(q, aidLogFieldMaxBytes) + `..."`
 }
 
 // logAIDToolCallCarried records the shape of a tool call sent to AID: the
@@ -565,13 +576,13 @@ func logAIDToolCallCarried(call aidToolCall, wireID string) {
 		keys = keys[:aidLogMaxArgKeys]
 	}
 	for i := range keys {
-		keys[i] = aidLogField(keys[i])
+		keys[i] = aidLogQuoted(keys[i])
 	}
-	// The id and the argument keys come from the agent: quote them so a
-	// crafted value cannot forge a log line, and bound them.
-	fmt.Fprintf(os.Stderr, "[aid] PreToolUse sent as a tool call: connector=%s event=%s tool=%q id=%q (%s) arg_keys=%q%s wire=%s messages=[assistant:tool_calls, user:text]\n",
-		call.Connector, aidLogEvent(call.Event), aidLogField(call.Name), aidLogField(wireID), idSource, keys, moreKeys,
-		connector.AIDWireVersionChatToolCalls)
+	// The name, id and argument keys come from the agent: aidLogQuoted quotes
+	// and bounds them.
+	fmt.Fprintf(os.Stderr, "[aid] PreToolUse sent as a tool call: connector=%s event=%s tool=%s id=%s (%s) arg_keys=[%s]%s wire=%s messages=[assistant:tool_calls, user:text]\n",
+		call.Connector, aidLogEvent(call.Event), aidLogQuoted(call.Name), aidLogQuoted(wireID), idSource,
+		strings.Join(keys, " "), moreKeys, connector.AIDWireVersionChatToolCalls)
 }
 
 // hookAIDInspectTool sends the invocation as a tool call ahead of the text form,
