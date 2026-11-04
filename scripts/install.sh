@@ -113,7 +113,7 @@ readonly MACOS_SYSCTL_BIN="/usr/sbin/sysctl"
 # Real files in BIN_DIR. Connector hooks record these paths, so they never move.
 # defenseclaw-sensor-helper is kept on Linux only: it is what `sudo
 # defenseclaw-gateway sandbox kernel-feed install` copies into a root service.
-readonly MANAGED_BINARIES="defenseclaw-gateway defenseclaw-hook-post defenseclaw-acp defenseclaw-sensor-helper"
+readonly MANAGED_BINARIES="defenseclaw-gateway defenseclaw-hook-user defenseclaw-hook-post defenseclaw-acp defenseclaw-sensor-helper"
 # The sandbox kernel feed's unit and its root copy of the helper.
 readonly SANDBOX_FEED_UNIT="/etc/systemd/system/defenseclaw-sandbox-feed.service"
 readonly SANDBOX_FEED_HELPER="/usr/local/libexec/defenseclaw/defenseclaw-sensor-helper"

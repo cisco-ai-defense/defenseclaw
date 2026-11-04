@@ -1538,6 +1538,8 @@ dist-gateway: _checkout-write-preflight sync-openclaw-extension
 		CGO_ENABLED=0 GOOS=$$goos GOARCH=$$goarch go build -trimpath -ldflags "-s -w -X main.version=$(VERSION) $(BUILD_INFO_LDFLAGS)" \
 			-o "$$stage/defenseclaw-acp$$exe" ./cmd/defenseclaw-acp; \
 		if [ "$$goos" != windows ]; then \
+			CGO_ENABLED=0 GOOS=$$goos GOARCH=$$goarch go build -trimpath -ldflags "-s -w -X main.version=$(VERSION) $(BUILD_INFO_LDFLAGS)" \
+				-o "$$stage/defenseclaw-hook-user" ./cmd/defenseclaw-hook-user; \
 			CGO_ENABLED=0 GOOS=$$goos GOARCH=$$goarch go build -trimpath -ldflags "-s -w -X main.version=$(VERSION)" \
 				-o "$$stage/defenseclaw-hook-post" ./cmd/defenseclaw-hook-post; \
 		fi; \

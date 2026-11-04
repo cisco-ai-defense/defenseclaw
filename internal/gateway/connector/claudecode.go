@@ -1347,6 +1347,10 @@ func claudeCodeHandlerTargetsCurrentRuntime(handler map[string]interface{}, opts
 		"claudecode",
 		filepath.ToSlash(filepath.Join(opts.DataDir, "hooks", "claude-code-hook.sh")),
 	))
+	if native := claudeCodePerUserNativeHook(opts); native != "" {
+		registered, _ := claudeCodeHookInvocation(opts, filepath.Join(opts.DataDir, "hooks", "claude-code-hook.sh"))
+		return command == registered
+	}
 	return claudeCodeUnguardedHookCommand(command) == expected
 }
 
@@ -1363,6 +1367,13 @@ func claudeCodeHookInvocation(opts SetupOpts, hookScript string) (string, []stri
 		}
 		return claudeCodeWindowsHookInvocation(opts, executable)
 	}
+	if native := claudeCodePerUserNativeHook(opts); native != "" {
+		command := posixHookCommandWord(native) + " hook --connector claudecode --hook-home " + posixHookCommandWord(opts.DataDir)
+		if opts.APIAddr != "" {
+			command += " --api-addr " + posixHookCommandWord(opts.APIAddr)
+		}
+		return claudeCodeMissingHookGuard(command), nil
+	}
 	command := posixHookCommandWord(hookCommand)
 	if shellHookSecureClientProfile(opts) {
 		return command, nil
@@ -1371,6 +1382,56 @@ func claudeCodeHookInvocation(opts SetupOpts, hookScript string) (string, []stri
 		return claudeCodeMissingHookGuardWith(command, claudeCodeManagedMissingHookGuardMessage), nil
 	}
 	return claudeCodeMissingHookGuard(command), nil
+}
+
+// claudeCodePerUserNativeHook selects the installed native launcher only for
+// per-user Unix hooks in the account's default data directory. A separate
+// data root keeps the shell's two-home install-lock checks. Managed and
+// Secure Client registrations keep their existing transport. Source installs
+// without this binary keep the script.
+func claudeCodePerUserNativeHook(opts SetupOpts) string {
+	if runtime.GOOS == "windows" || opts.ManagedEnterprise || opts.SecureClientHookDelivery ||
+		!filepath.IsAbs(opts.DataDir) || filepath.Clean(opts.DataDir) != opts.DataDir ||
+		opts.DataDir != filepath.Join(userHomeDir(), ".defenseclaw") ||
+		strings.ContainsAny(opts.DataDir, "\x00\r\n") ||
+		(opts.APIAddr != "" && !claudeCodeLoopbackGatewayEndpoint("http://"+opts.APIAddr)) {
+		return ""
+	}
+	dataDirInfo, err := os.Lstat(opts.DataDir)
+	if err != nil || !dataDirInfo.IsDir() {
+		return ""
+	}
+	hooksDir := filepath.Join(opts.DataDir, "hooks")
+	hooksInfo, err := os.Lstat(hooksDir)
+	if err != nil || !hooksInfo.IsDir() {
+		return ""
+	}
+	record := filepath.Join(hooksDir, ".gateway-helper")
+	recordInfo, err := os.Lstat(record)
+	if err != nil || !recordInfo.Mode().IsRegular() || recordInfo.Size() > 4097 ||
+		recordInfo.Mode().Perm()&0o022 != 0 {
+		return ""
+	}
+	data, err := os.ReadFile(record)
+	if err != nil || len(data) > 4097 {
+		return ""
+	}
+	gateway := strings.TrimSuffix(string(data), "\n")
+	if !filepath.IsAbs(gateway) || filepath.Clean(gateway) != gateway ||
+		strings.ContainsAny(gateway, "\x00\r\n") || filepath.Base(gateway) != "defenseclaw-gateway" ||
+		filepath.Base(filepath.Dir(gateway)) != "bin" ||
+		filepath.Base(filepath.Dir(filepath.Dir(gateway))) != ".local" {
+		return ""
+	}
+	executable := filepath.Join(filepath.Dir(gateway), "defenseclaw-hook-user")
+	if override := strings.TrimSpace(opts.HookExecutable); override != "" && override != executable {
+		return ""
+	}
+	info, err := os.Lstat(executable)
+	if err != nil || !info.Mode().IsRegular() || info.Mode()&0o111 == 0 || info.Mode().Perm()&0o022 != 0 {
+		return ""
+	}
+	return executable
 }
 
 // claudeCodeMissingHookGuardSeparator starts the clause that
