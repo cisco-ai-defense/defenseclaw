@@ -31,9 +31,9 @@
 // "loopback-only" and exit status 0. A refusal prints "refused <reason>" and
 // exits 1: noanswer (the unspec query has no answer), nonloopback (some answer
 // is not 127.0.0.1 or ::1), family (an answer of another family than asked),
-// preload (code an image injects into every process) or nss (a hosts line
-// other than files, then optionally dns, with only return actions in
-// /etc/nsswitch.conf, or an object the lookups loaded).
+// preload (code an image injects into every process) or nss (an effective
+// hosts line other than files, then optionally dns, with only return actions,
+// in /etc/nsswitch.conf, or an object the lookups loaded).
 
 #define _GNU_SOURCE
 #include <arpa/inet.h>
@@ -103,72 +103,69 @@ static int action_returns(char *text) {
     return items > 0;
 }
 
-// hosts_files_first reports whether nsswitch.conf has exactly one hosts line
-// (its database name in any letter case) that asks libc's files source first
-// and at most libc's dns source after it, with only return actions. A
-// missing file, or one without a hosts line, is glibc's default, which asks
-// DNS before /etc/hosts.
+// hosts_list_files_first judges one hosts service list as glibc 2.39 reads
+// it (nss_action_parse): sources end at white space or '[', '#' starts no
+// comment, and names are case-sensitive. It must be files, then optionally
+// dns, with only return actions.
+static int hosts_list_files_first(char *p) {
+    int state = 0; // 0: files is next; 1: after files; 2: after dns
+    for (;;) {
+        while (isspace((unsigned char)*p)) p++;
+        if (*p == 0) break;
+        if (*p == '[') {
+            char *end = strchr(p, ']');
+            if (end == NULL || state == 0) return 0;
+            *end = 0;
+            if (!action_returns(p + 1)) return 0;
+            p = end + 1;
+            continue;
+        }
+        char *word = p;
+        while (*p != 0 && !isspace((unsigned char)*p) && *p != '[') p++;
+        size_t len = (size_t)(p - word);
+        if (state == 0 && len == 5 && strncmp(word, "files", 5) == 0) {
+            state = 1;
+        } else if (state == 1 && len == 3 && strncmp(word, "dns", 3) == 0) {
+            state = 2;
+        } else {
+            return 0;
+        }
+    }
+    return state != 0;
+}
+
+// hosts_files_first reports whether the hosts lookup asks libc's files source
+// first and at most libc's dns source after it, reading /etc/nsswitch.conf
+// as glibc 2.39 does (nss_database.c process_line): a line's database name
+// runs to white space or ':', is case-sensitive, and is followed by any white
+// space and colons; '#' starts no comment, so a "#hosts" line names another
+// database; the last hosts line wins. A missing file or one without a hosts
+// line gets glibc's default, files dns (this program needs glibc 2.34 or
+// later to run at all).
 static int hosts_files_first(void) {
     FILE *f = fopen("/etc/nsswitch.conf", "re");
-    if (f == NULL) return 0;
+    if (f == NULL) return errno == ENOENT;
     char line[4096];
-    int hosts = 0, good = 1;
-    while (good && fgets(line, sizeof line, f) != NULL) {
+    int good = 1, last = 1;
+    while (fgets(line, sizeof line, f) != NULL) {
         size_t n = strlen(line);
         if (n == sizeof line - 1 && line[n - 1] != '\n') {
             good = 0;
             break;
         }
-        char *hash = strchr(line, '#');
-        if (hash != NULL) *hash = 0;
         char *p = line;
         while (isspace((unsigned char)*p)) p++;
-        char *key = p;
-        while (*p != 0 && *p != ':' && !isspace((unsigned char)*p)) p++;
-        size_t keylen = (size_t)(p - key);
-        while (isspace((unsigned char)*p)) p++;
-        if (*p != ':' || keylen != 5 || strncasecmp(key, "hosts", 5) != 0) continue;
-        if (hosts++) {
-            good = 0;
-            break;
-        }
-        p++;
-        // 0: files is next; 1: after files; 2: after dns.
-        int state = 0;
-        for (;;) {
-            while (isspace((unsigned char)*p)) p++;
-            if (*p == 0) break;
-            if (*p == '[') {
-                char *end = strchr(p, ']');
-                if (end == NULL || state == 0) {
-                    good = 0;
-                    break;
-                }
-                *end = 0;
-                if (!action_returns(p + 1)) {
-                    good = 0;
-                    break;
-                }
-                p = end + 1;
-                continue;
-            }
-            char *word = p;
-            while (*p != 0 && !isspace((unsigned char)*p) && *p != '[') p++;
-            size_t len = (size_t)(p - word);
-            if (state == 0 && len == 5 && strncmp(word, "files", 5) == 0) {
-                state = 1;
-            } else if (state == 1 && len == 3 && strncmp(word, "dns", 3) == 0) {
-                state = 2;
-            } else {
-                good = 0;
-                break;
-            }
-        }
-        if (state == 0) good = 0;
+        char *name = p;
+        while (*p != 0 && !isspace((unsigned char)*p) && *p != ':') p++;
+        if (*p == 0 || p == name) continue;
+        size_t len = (size_t)(p - name);
+        while (isspace((unsigned char)*p) || *p == ':') p++;
+        if (len != 5 || strncmp(name, "hosts", 5) != 0) continue;
+        last = hosts_list_files_first(p);
     }
     if (ferror(f)) good = 0;
     fclose(f);
-    return good && hosts == 1;
+    return good && last;
 }
 
 static const char *refusal;

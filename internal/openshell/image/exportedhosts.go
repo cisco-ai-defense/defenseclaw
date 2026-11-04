@@ -49,9 +49,10 @@ type exportedHosts struct {
 	// sawPreload is set once an /etc/ld.so.preload entry was read.
 	sawPreload bool
 	// nss says why the export's /etc/nsswitch.conf lets something besides
-	// /etc/hosts answer localhost ("" when its one hosts line asks libc's
-	// files source first and at most libc's dns source after it, with only
-	// return actions). An NSS module is image code that can answer
+	// /etc/hosts answer localhost ("" when its effective hosts line asks
+	// libc's files source first and at most libc's dns source after it, with
+	// only return actions, or when the file or its hosts line is absent:
+	// glibc's default is then files dns). An NSS module is image code that can answer
 	// DefenseClaw's resolver caller unlike every other program, and DNS
 	// that answers before or after a successful /etc/hosts lookup can give
 	// a later lookup another address.
@@ -75,9 +76,6 @@ func parseExportedHosts(r io.Reader) (exportedHosts, error) {
 	for {
 		h, err := tr.Next()
 		if err == io.EOF {
-			if !result.sawNSS {
-				result.nss = "is missing, so glibc's default asks DNS before /etc/hosts"
-			}
 			return result, nil
 		}
 		if err != nil {
@@ -176,64 +174,67 @@ func exportedNSS(h *tar.Header, r io.Reader) (string, error) {
 	return hostsSourcesProblem(data), nil
 }
 
+// nssSpace is what glibc's isspace accepts in the C locale.
+const nssSpace = " \t\n\v\f\r"
+
 // hostsSourcesProblem judges nsswitch.conf data as the pinned caller does
-// (testdata/localhost-resolver.c, hosts_files_first): exactly one line whose
-// database is hosts, in any letter case, asking libc's files source first and
-// at most libc's dns source after it, with only return actions. Those can only
-// end a lookup sooner, so DNS never answers before /etc/hosts or after it
-// succeeded. A file without a hosts line gets glibc's default, which asks DNS
-// first.
+// (testdata/localhost-resolver.c, hosts_files_first), which reads it as glibc
+// 2.39 does: a line's database name runs to white space or ':', is
+// case-sensitive, and is followed by any white space and colons; '#' starts
+// no comment, so a "#hosts" line names another database and "files#x" is not
+// files; the last hosts line wins. Its service list must ask libc's files
+// source first and at most libc's dns source after it, with only return
+// actions, which can only end a lookup sooner. A file without a hosts line
+// gets glibc's default, files dns.
 func hostsSourcesProblem(data []byte) string {
-	const space = " \t\r\f\v"
-	hosts := 0
+	list, found := "", false
 	for _, line := range strings.Split(string(data), "\n") {
 		if len(line) >= 4095 {
 			return "has a line too long to check"
 		}
-		line, _, _ = strings.Cut(line, "#")
-		key, rest, ok := strings.Cut(strings.TrimLeft(line, space), ":")
-		key = strings.TrimRight(key, space)
-		if !ok || !strings.EqualFold(key, "hosts") {
+		line = strings.TrimLeft(line, nssSpace)
+		end := strings.IndexAny(line, nssSpace+":")
+		if end <= 0 {
 			continue
 		}
-		if hosts++; hosts > 1 {
-			return "has more than one hosts line"
-		}
-		state := 0 // 0: files is next; 1: after files; 2: after dns
-		for rest = strings.Trim(rest, space); rest != ""; rest = strings.TrimLeft(rest, space) {
-			if strings.HasPrefix(rest, "[") {
-				action, after, ok := strings.Cut(rest[1:], "]")
-				if !ok || state == 0 {
-					return "has a hosts action it cannot read"
-				}
-				if problem := hostsActionProblem(action); problem != "" {
-					return problem
-				}
-				rest = after
-				continue
-			}
-			end := strings.IndexAny(rest, space+"[")
-			if end < 0 {
-				end = len(rest)
-			}
-			switch source := rest[:end]; {
-			case state == 0 && source == "files":
-				state = 1
-			case state == 1 && source == "dns":
-				state = 2
-			case source != "files" && source != "dns":
-				return fmt.Sprintf("names the hosts source %q", source)
-			default:
-				return "does not ask files first and at most dns after it on its hosts line"
-			}
-			rest = rest[end:]
-		}
-		if state == 0 {
-			return "does not ask files first and at most dns after it on its hosts line"
+		if line[:end] == "hosts" {
+			list, found = strings.TrimLeft(line[end:], nssSpace+":"), true
 		}
 	}
-	if hosts == 0 {
-		return "has no hosts line, so glibc's default asks DNS before /etc/hosts"
+	if !found {
+		return ""
+	}
+	state := 0 // 0: files is next; 1: after files; 2: after dns
+	for rest := strings.TrimLeft(list, nssSpace); rest != ""; rest = strings.TrimLeft(rest, nssSpace) {
+		if strings.HasPrefix(rest, "[") {
+			action, after, ok := strings.Cut(rest[1:], "]")
+			if !ok || state == 0 {
+				return "has a hosts action it cannot read"
+			}
+			if problem := hostsActionProblem(action); problem != "" {
+				return problem
+			}
+			rest = after
+			continue
+		}
+		end := strings.IndexAny(rest, nssSpace+"[")
+		if end < 0 {
+			end = len(rest)
+		}
+		switch source := rest[:end]; {
+		case state == 0 && source == "files":
+			state = 1
+		case state == 1 && source == "dns":
+			state = 2
+		case source != "files" && source != "dns":
+			return fmt.Sprintf("names the hosts source %q", source)
+		default:
+			return "does not ask files first and at most dns after it on its hosts line"
+		}
+		rest = rest[end:]
+	}
+	if state == 0 {
+		return "does not ask files first and at most dns after it on its hosts line"
 	}
 	return ""
 }

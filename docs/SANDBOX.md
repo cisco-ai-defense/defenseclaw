@@ -271,11 +271,12 @@ not the driver's name or `runtime.GOOS`.
   loopback one. Only libc's own code may answer: a vm image whose
   `/etc/ld.so.preload` names a library is refused, because that code could
   answer the check unlike the harness. So is one whose `/etc/nsswitch.conf`
-  hosts line is anything but `files`, optionally followed by `dns`, with
-  only `=return` actions (or that has no such file or line, which gives
-  glibc's DNS-first default): an NSS module, or DNS asked before or after
-  a successful `/etc/hosts` lookup, could give a later lookup another
-  answer. Docker-driver images keep their normal hook verification.
+  hosts line, read as glibc reads it (no inline comments, so `files#x` is
+  not `files`; the last hosts line wins), is anything but `files`,
+  optionally followed by `dns`, with only `=return` actions: an NSS module,
+  or DNS asked before or after a successful `/etc/hosts` lookup, could give
+  a later lookup another answer. A missing file or hosts line gets glibc's
+  default, `files dns`, and passes. Docker-driver images keep their normal hook verification.
   If a custom base supplies a nonempty hosts file, it must provide that
   mapping. A MicroVM created
   by DefenseClaw 1.0.7 or earlier has no resolver caller and keeps the

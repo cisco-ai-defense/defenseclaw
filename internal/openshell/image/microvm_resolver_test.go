@@ -973,10 +973,11 @@ func TestMicroVMExportedPreloadClassification(t *testing.T) {
 	}
 }
 
-// hostsSourcesProblem reads nsswitch.conf the way the pinned caller does:
-// one hosts line asking files first and at most dns after it, with only
-// return actions, so neither a module nor DNS can answer localhost besides
-// /etc/hosts (osmin23c reviews 1 and 2).
+// hostsSourcesProblem reads nsswitch.conf as glibc 2.39 does (each row's
+// glibc result was probed on the pinned base with a fake DNS server; see
+// IN-r108-osmin23c.md): the effective hosts line must ask files first and at
+// most dns after it, with only return actions, so neither a module nor DNS
+// can answer localhost besides /etc/hosts (osmin23c reviews 1 to 3).
 func TestMicroVMExportedNSSClassification(t *testing.T) {
 	const fallback = "does not ask files first and at most dns after it on its hosts line"
 	for _, tc := range []struct {
@@ -985,12 +986,24 @@ func TestMicroVMExportedNSSClassification(t *testing.T) {
 		{"stock", "passwd: files\nhosts:          files dns\nnetworks: files\n", ""},
 		{"files only", "hosts: files\n", ""},
 		{"return actions", "hosts: files [NOTFOUND=return] dns [!UNAVAIL=return]\n", ""},
-		{"return action in lower case", "hosts: files [notfound=Return] dns\n", ""},
-		{"comment and CRLF", "# hosts: evil\r\nhosts: files dns # mdns\r\n", ""},
+		{"return action in other case", "hosts: files [notfound=RETURN] dns\n", ""},
+		{"action glued to the sources", "hosts: files[NOTFOUND=return]dns\n", ""},
+		{"full-line comment and CRLF", "# hosts: dns\r\nhosts: files dns\r\n", ""},
+		{"indented comment line", "   #hosts: dns files\nhosts: files dns\n", ""},
 		{"other databases may use modules", "passwd: files systemd\nhosts: files dns\n", ""},
-		{"no hosts line", "passwd: files\n", "has no hosts line, so glibc's default asks DNS before /etc/hosts"},
+		{"no hosts line: glibc's files dns default", "passwd: files\n", ""},
+		{"upper-case database is another database", "HOSTS: dns\n", ""},
+		{"no colon", "hosts files dns\n", ""},
+		{"colons and spaces", "hosts : :files dns\n", ""},
+		{"last hosts line wins", "hosts: dns files\nhosts: files dns\n", ""},
+		{"last hosts line asks DNS first", "hosts: files dns\nhosts: dns files\n", fallback},
+		{"hash glued to files", "hosts: files#x dns\n", `names the hosts source "files#x"`},
+		{"hash after the sources is a source", "hosts: files dns # mdns\n", `names the hosts source "#"`},
+		{"hash before the sources", "hosts: #c dns files\n", `names the hosts source "#c"`},
+		{"files spelled in capitals", "hosts: Files dns\n", `names the hosts source "Files"`},
 		{"empty hosts line", "hosts:\n", fallback},
 		{"DNS first", "hosts: dns files\n", fallback},
+		{"DNS first without a colon", "hosts dns files\n", fallback},
 		{"DNS only", "hosts: dns\n", fallback},
 		{"files twice", "hosts: files files\n", fallback},
 		{"DNS continues after files", "hosts: files [SUCCESS=continue] dns\n", `has the hosts action "[SUCCESS=continue]", which can let DNS answer after /etc/hosts`},
@@ -1002,10 +1015,8 @@ func TestMicroVMExportedNSSClassification(t *testing.T) {
 		{"local module", "hosts: files localtest\n", `names the hosts source "localtest"`},
 		{"module only", "hosts: familytest\n", `names the hosts source "familytest"`},
 		{"myhostname", "hosts: files myhostname dns\n", `names the hosts source "myhostname"`},
-		{"upper-case database", "HOSTS: files familytest\n", `names the hosts source "familytest"`},
 		{"space before the colon", "hosts : familytest\n", `names the hosts source "familytest"`},
 		{"module glued to an action", "hosts: files [NOTFOUND=return]familytest\n", `names the hosts source "familytest"`},
-		{"two hosts lines", "hosts: files dns\nhosts: familytest\n", "has more than one hosts line"},
 		{"unterminated action", "hosts: files [NOTFOUND=return dns\n", "has a hosts action it cannot read"},
 		{"odd action", "hosts: files [NOTFOUND=/x] dns\n", `has the hosts action "[NOTFOUND=/x]", which can let DNS answer after /etc/hosts`},
 		{"long line", "hosts: files " + strings.Repeat(" ", 5000) + "dns\n", "has a line too long to check"},
@@ -1037,8 +1048,8 @@ func TestMicroVMExportedNSSClassification(t *testing.T) {
 	if hosts := exported(&tar.Header{Name: "etc/nsswitch.conf", Typeflag: tar.TypeSymlink, Linkname: "/sandbox/nsswitch.conf", Mode: 0o777}); hosts.nss != "is not a regular file" {
 		t.Fatalf("linked nsswitch.conf = %q", hosts.nss)
 	}
-	if hosts := exported(); hosts.nss != "is missing, so glibc's default asks DNS before /etc/hosts" {
-		t.Fatalf("missing nsswitch.conf = %q", hosts.nss)
+	if hosts := exported(); hosts.nss != "" {
+		t.Fatalf("missing nsswitch.conf (glibc's files dns default) = %q", hosts.nss)
 	}
 	if hosts := exported(&tar.Header{Name: "etc/resolv.conf", Typeflag: tar.TypeSymlink, Linkname: "/sandbox/resolv.conf", Mode: 0o777}); hosts.resolv != "is not a regular file" {
 		t.Fatalf("linked resolv.conf = %q", hosts.resolv)
@@ -1048,10 +1059,11 @@ func TestMicroVMExportedNSSClassification(t *testing.T) {
 	}
 }
 
-// The osmin23c review-2 forms (DNS before /etc/hosts, DNS continuing after
-// a successful /etc/hosts lookup, glibc's DNS-first default) are refused by
-// the export check and by the caller in the completed image; the stock and
-// return-action twins pass both.
+// The osmin23c review-2 and review-3 forms (DNS before /etc/hosts, DNS
+// continuing after a successful /etc/hosts lookup, files#x, which glibc
+// does not read as files) are refused by the export check and by the caller
+// in the completed image; the stock, return-action and missing-file twins
+// (glibc 2.39's default is files dns) pass both.
 func TestMicroVMResolverRefusesDNSBesideFiles(t *testing.T) {
 	localDocker(t)
 	for _, tc := range []struct {
@@ -1060,7 +1072,8 @@ func TestMicroVMResolverRefusesDNSBesideFiles(t *testing.T) {
 	}{
 		{"DNS continues after a successful files lookup", "RUN sed -i 's/^hosts:.*/hosts: files [SUCCESS=continue] dns/' /etc/nsswitch.conf\n", false},
 		{"DNS first", "RUN sed -i 's/^hosts:.*/hosts: dns files/' /etc/nsswitch.conf\n", false},
-		{"no nsswitch.conf", "RUN rm /etc/nsswitch.conf\n", false},
+		{"source glued to a hash", "RUN sed -i 's/^hosts:.*/hosts: files#x dns/' /etc/nsswitch.conf\n", false},
+		{"no nsswitch.conf: glibc's files dns default", "RUN rm /etc/nsswitch.conf\n", true},
 		{"stock files dns", "", true},
 		{"return action", "RUN sed -i 's/^hosts:.*/hosts: files [NOTFOUND=return] dns/' /etc/nsswitch.conf\n", true},
 	} {
@@ -1107,7 +1120,8 @@ func TestBuildRejectsCustomNSSMicroVMBeforeRecord(t *testing.T) {
 		{"module answers hosts", []byte("hosts: familytest\n"), `names the hosts source "familytest"`},
 		{"DNS continues after files", []byte("hosts: files [SUCCESS=continue] dns\n"), `has the hosts action "[SUCCESS=continue]"`},
 		{"DNS first", []byte("hosts: dns files\n"), "does not ask files first"},
-		{"no nsswitch.conf", nil, "is missing, so glibc's default asks DNS before /etc/hosts"},
+		{"source glued to a hash", []byte("hosts: files#x dns\n"), `names the hosts source "files#x"`},
+		{"no nsswitch.conf: glibc's files dns default", nil, ""},
 		{"stock NSS configuration", []byte("hosts: files dns\n"), ""},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
