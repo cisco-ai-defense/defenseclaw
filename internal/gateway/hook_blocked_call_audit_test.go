@@ -107,9 +107,10 @@ func TestHookBlockAfterTheAnswerBudgetIsAuditedAsTheBlockTheAgentGot(t *testing.
 	if code == 0 && !strings.Contains(out, "deny") {
 		t.Fatalf("late call: exit %d %q, want the hook's block at its answer budget", code, out)
 	}
-	// The injected divergence: the gateway recorded allow for both calls.
-	if got := deliveredVerdicts(t, fixture.api.store); got[onTime] != "allow" || got[late] != "allow" {
-		t.Fatalf("gateway rows before the report = %v, want allow for both", got)
+	// This synthetic transport does not return a receipt. The gateway
+	// retains both decisions as unconfirmed until a local outcome arrives.
+	if got := deliveredVerdicts(t, fixture.api.store); got[onTime] != "unconfirmed" || got[late] != "unconfirmed" {
+		t.Fatalf("gateway rows before the report = %v, want both unconfirmed", got)
 	}
 	logDir := filepath.Join(home, "logs")
 	for range 2 {
@@ -118,8 +119,8 @@ func TestHookBlockAfterTheAnswerBudgetIsAuditedAsTheBlockTheAgentGot(t *testing.
 		}
 	}
 	got := deliveredVerdicts(t, fixture.api.store)
-	if got[onTime] != "allow" || got[late] != "block" {
-		t.Fatalf("audit verdicts = %v, want %s allow and %s block, as the agent got them", got, onTime, late)
+	if got[onTime] != "unconfirmed" || got[late] != "block" {
+		t.Fatalf("audit verdicts = %v, want %s unconfirmed and %s block", got, onTime, late)
 	}
 	events, err := fixture.api.store.ListEvents(500)
 	if err != nil {
