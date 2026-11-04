@@ -322,6 +322,11 @@ var windowsClaudeDesktopPublishers = codesig.AnthropicPublishers
 // replace it.
 var verifyWindowsClaudeDesktopEngine = codesig.VerifyAuthenticode
 
+// verifyWindowsClaudeDesktopEngineDigest is verifyWindowsClaudeDesktopEngine
+// that also hashes the file through the handle it verified; tests replace
+// it.
+var verifyWindowsClaudeDesktopEngineDigest = codesig.VerifyAuthenticodeWithSHA256
+
 // windowsClaudeDesktopEnginesMax bounds the executables one version folder
 // is searched for.
 const windowsClaudeDesktopEnginesMax = 4
@@ -332,13 +337,15 @@ const windowsClaudeDesktopEnginesMax = 4
 // signature from windowsClaudeDesktopPublishers. It runs under the user's
 // token, executes nothing and refuses reparse points.
 func verifyWindowsClaudeDesktopBuild(versionDir string) string {
-	_, reason := verifiedWindowsClaudeDesktopBuild(versionDir)
+	_, _, reason := verifiedWindowsClaudeDesktopBuild(versionDir, verifyWindowsClaudeDesktopEngine)
 	return reason
 }
 
-// verifiedWindowsClaudeDesktopBuild is verifyWindowsClaudeDesktopBuild that
-// also returns the claude.exe that verified ("" with the reason otherwise).
-func verifiedWindowsClaudeDesktopBuild(versionDir string) (executable, reason string) {
+// verifiedWindowsClaudeDesktopBuild is verifyWindowsClaudeDesktopBuild,
+// checking each claude.exe with verify, that also returns the claude.exe
+// that verified and the sha256 verify reported for it ("" with the reason
+// otherwise).
+func verifiedWindowsClaudeDesktopBuild(versionDir string, verify func(string, []string) codesig.Result) (executable, digest, reason string) {
 	candidates, _ := filepath.Glob(filepath.Join(versionDir, "*", "claude.exe"))
 	sort.Strings(candidates)
 	candidates = append([]string{filepath.Join(versionDir, "claude.exe")}, candidates...)
@@ -351,7 +358,7 @@ func verifiedWindowsClaudeDesktopBuild(versionDir string) (executable, reason st
 		if checked++; checked > windowsClaudeDesktopEnginesMax {
 			break
 		}
-		result := verifyWindowsClaudeDesktopEngine(candidate, windowsClaudeDesktopPublishers)
+		result := verify(candidate, windowsClaudeDesktopPublishers)
 		switch {
 		case !result.Verified:
 			reason = result.Reason
@@ -362,13 +369,13 @@ func verifiedWindowsClaudeDesktopBuild(versionDir string) (executable, reason st
 			// select the newer hook contract.
 			reason = candidate + " is signed as version " + result.Version + ", not " + folder
 		default:
-			return candidate, ""
+			return candidate, result.SHA256, ""
 		}
 	}
 	if reason == "" {
-		return "", "no claude.exe in " + versionDir
+		return "", "", "no claude.exe in " + versionDir
 	}
-	return "", reason
+	return "", "", reason
 }
 
 // discoverWindowsCodexApp reports the Codex app's MSIX package data folder.

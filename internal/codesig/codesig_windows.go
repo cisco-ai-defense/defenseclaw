@@ -14,8 +14,11 @@ package codesig
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"errors"
 	"fmt"
+	"io"
 	"path/filepath"
 	"strings"
 	"syscall"
@@ -68,6 +71,19 @@ var readFileVersion = fileProductVersion
 // checked. Revocation is not fetched, so an offline device can verify; the
 // chain must still build to a locally trusted root.
 func VerifyAuthenticode(path string, publishers []string) Result {
+	return verifyAuthenticode(path, publishers, false)
+}
+
+// VerifyAuthenticodeWithSHA256 is VerifyAuthenticode that also sets SHA256:
+// the file is hashed through the handle whose signature just verified, still
+// held without write or delete sharing, so the digest is of the bytes the
+// signature check read. A caller that binds a file by its hash (Windows
+// per-user setup, cowork-1-0-8 GAP-0039) compares its own hash with it.
+func VerifyAuthenticodeWithSHA256(path string, publishers []string) Result {
+	return verifyAuthenticode(path, publishers, true)
+}
+
+func verifyAuthenticode(path string, publishers []string, digest bool) Result {
 	if !filepath.IsAbs(path) {
 		return refused("%s is not an absolute path", path)
 	}
@@ -103,7 +119,35 @@ func VerifyAuthenticode(path string, publishers []string) Result {
 	}
 	// Still under the handle that denies writes: the version resource is
 	// part of the signed image just verified.
-	return Result{Verified: true, Version: readFileVersion(path)}
+	result := Result{Verified: true, Version: readFileVersion(path)}
+	if digest {
+		sum, err := handleSHA256(handle)
+		if err != nil {
+			return refused("%s could not be hashed after its signature verified: %v", path, err)
+		}
+		result.SHA256 = sum
+	}
+	return result
+}
+
+// handleSHA256 is the sha256 of the whole file open at handle, read from
+// its start (the signature check moved the file pointer).
+func handleSHA256(handle windows.Handle) (string, error) {
+	if _, err := windows.Seek(handle, 0, io.SeekStart); err != nil {
+		return "", err
+	}
+	hash := sha256.New()
+	buffer := make([]byte, 1<<20)
+	for {
+		var read uint32
+		if err := windows.ReadFile(handle, buffer, &read, nil); err != nil {
+			return "", err
+		}
+		if read == 0 {
+			return hex.EncodeToString(hash.Sum(nil)), nil
+		}
+		hash.Write(buffer[:read])
+	}
 }
 
 // fileProductVersion is the product version of path's VS_FIXEDFILEINFO as

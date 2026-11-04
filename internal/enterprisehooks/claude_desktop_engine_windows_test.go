@@ -64,3 +64,37 @@ func TestClaudeDesktopEngineIsTheNewestSignedBuildOnWindows(t *testing.T) {
 		t.Fatalf("unsigned = %+v", got)
 	}
 }
+
+// GAP-0039: setup's lookup reports the digest its last signature check took
+// over the verified handle; the gateway's lookup hashes nothing.
+func TestClaudeDesktopEngineWithDigestReportsTheVerifiedHash(t *testing.T) {
+	home := t.TempDir()
+	f := claudedesktop.FoldersForHome("windows", home)
+	exe := windowsDesktopEngine(t, filepath.Join(f.LocalAppData, "Claude-3p"), "2.1.317")
+	stubWindowsEngineSignature(t, signedAsFolder)
+	previous := verifyWindowsClaudeDesktopEngineDigest
+	t.Cleanup(func() { verifyWindowsClaudeDesktopEngineDigest = previous })
+	var hashed []string
+	verifyWindowsClaudeDesktopEngineDigest = func(path string, publishers []string) codesig.Result {
+		hashed = append(hashed, path)
+		result := signedAsFolder(path)
+		result.SHA256 = "5f84a2a8"
+		return result
+	}
+
+	if got := ClaudeDesktopEngine(context.Background(), home); got.Executable != exe || got.SHA256 != "" || len(hashed) != 0 {
+		t.Fatalf("gateway lookup = %+v (hashed %q), want no digest", got, hashed)
+	}
+	got := ClaudeDesktopEngineWithDigest(context.Background(), home)
+	if got.Executable != exe || got.Version != "2.1.317" || got.SHA256 != "5f84a2a8" || len(hashed) != 1 || hashed[0] != exe {
+		t.Fatalf("setup lookup = %+v (hashed %q)", got, hashed)
+	}
+
+	// The last check refuses (the file changed after discovery): nothing.
+	verifyWindowsClaudeDesktopEngineDigest = func(string, []string) codesig.Result {
+		return codesig.Result{Reason: "claude.exe changed"}
+	}
+	if got := ClaudeDesktopEngineWithDigest(context.Background(), home); got.Executable != "" || got.SHA256 != "" || !strings.Contains(got.Unverified, "changed") {
+		t.Fatalf("refused last check = %+v", got)
+	}
+}

@@ -382,7 +382,12 @@ def test_windows_selection_takes_the_signed_engine_without_a_cli(host, monkeypat
 
     def gateway():
         calls.append(1)
-        return {"version": "2.1.317", "engine_dir": str(exe.parent.parent.parent), "executable": str(exe)}
+        return {
+            "version": "2.1.317",
+            "engine_dir": str(exe.parent.parent.parent),
+            "executable": str(exe),
+            "sha256": agent_selection.stable_executable_sha256(str(exe)),
+        }
 
     monkeypatch.setattr(agent_selection, "_verified_claude_desktop_engine", gateway)
     spec = ad._SPECS["claudecode"]
@@ -401,13 +406,53 @@ def test_windows_selection_takes_the_signed_engine_without_a_cli(host, monkeypat
 
 
 @pytest.mark.parametrize(
+    ("swapped", "message"),
+    [
+        # The gateway verified a signed file, then a same-user process put
+        # another file in its place before setup hashed it (and back again
+        # before the second check would see it).
+        ("first", "changed while setup checked it"),
+        # Setup hashed the file and probed it, then the signed file was put
+        # back for the gateway's second check.
+        ("second", "changed while setup checked it"),
+        # A gateway that reports no digest cannot bind the signature.
+        ("missing", "does not report the hash of the Claude Desktop engine it verified; update DefenseClaw"),
+    ],
+)
+def test_windows_selection_refuses_an_engine_hash_the_signature_check_did_not_take(
+    host, monkeypatch, tmp_path, swapped, message
+):
+    """GAP-0039 review: the digest setup records must be the one the gateway
+    took over the handle whose Authenticode signature verified, in both
+    checks; a gateway digest of other bytes refuses the selection."""
+    folders = host("windows")
+    exe = _engine("windows", _data_dir(folders, "localappdata", "Claude-3p"), "2.1.317")
+    _probe(monkeypatch, {str(exe): "2.1.317 (Claude Code)"})
+    own = agent_selection.stable_executable_sha256(str(exe))
+    other = "0" * 64
+    answers = {
+        "first": [other, own],
+        "second": [own, other],
+        "missing": ["", ""],
+    }[swapped]
+
+    def gateway():
+        return {"version": "2.1.317", "engine_dir": "", "executable": str(exe), "sha256": answers.pop(0)}
+
+    monkeypatch.setattr(agent_selection, "_verified_claude_desktop_engine", gateway)
+    with pytest.raises(OSError, match=message):
+        agent_selection._select_agent_executable(str(tmp_path / "dc"), "claudecode")
+
+
+@pytest.mark.parametrize(
     ("answer", "message"),
     [
         (
             {"reason": "not_found", "unverified": "Claude Desktop engine 2.1.317: claude.exe is not signed"},
             "is not signed",
         ),
-        ({"version": "2.1.317", "executable": "C:/elsewhere/claude.exe"}, "not one of this account's engine builds"),
+        ({"version": "2.1.317", "executable": "C:/elsewhere/claude.exe", "sha256": "0" * 64},
+         "not one of this account's engine builds"),
         (OSError("this defenseclaw-gateway cannot check Claude Desktop's engine"), "cannot check"),
     ],
 )
@@ -482,7 +527,12 @@ def test_windows_setup_receipt_binds_the_engine(host, monkeypatch, tmp_path):
     monkeypatch.setattr(
         agent_selection,
         "_verified_claude_desktop_engine",
-        lambda: {"version": "2.1.317", "engine_dir": "", "executable": str(exe)},
+        lambda: {
+            "version": "2.1.317",
+            "engine_dir": "",
+            "executable": str(exe),
+            "sha256": agent_selection.stable_executable_sha256(str(exe)),
+        },
     )
     data_dir = tmp_path / "dc"
     data_dir.mkdir()

@@ -25,8 +25,10 @@ var connectorClaudeDesktopEngineCmd = &cobra.Command{
 	Short: "Print this account's verified Claude Desktop Claude Code engine (run by setup)",
 	Long: `Print, as JSON, the newest Claude Code engine build Claude Desktop keeps for
 this account whose code signature verifies: {"version", "engine_dir",
-"executable" (Windows)}. It reads files and runs nothing from them; it
-changes nothing.
+"executable" and "sha256" (Windows)}. On Windows sha256 is computed over the
+handle whose Authenticode signature verified, which is held without write or
+delete sharing; setup binds the engine only when its own hash equals it. It
+reads files and runs nothing from them; it changes nothing.
 
 Exit codes:
   0   a verified build is printed on stdout
@@ -46,9 +48,9 @@ func init() {
 	connectorCmd.AddCommand(connectorClaudeDesktopEngineCmd)
 }
 
-// claudeDesktopEngineLookup is enterprisehooks.ClaudeDesktopEngine; tests
-// replace it.
-var claudeDesktopEngineLookup = enterprisehooks.ClaudeDesktopEngine
+// claudeDesktopEngineLookup is enterprisehooks.ClaudeDesktopEngineWithDigest;
+// tests replace it.
+var claudeDesktopEngineLookup = enterprisehooks.ClaudeDesktopEngineWithDigest
 
 func runConnectorClaudeDesktopEngine(cmd *cobra.Command, _ []string) error {
 	home, err := os.UserHomeDir()

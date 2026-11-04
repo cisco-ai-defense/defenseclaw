@@ -17,6 +17,11 @@ type ClaudeDesktopEngineBuild struct {
 	// Executable is the claude.exe whose signature verified (Windows only:
 	// per-user setup binds it as the Claude Code executable, GAP-0039).
 	Executable string `json:"executable,omitempty"`
+	// SHA256 is Executable's sha256, read through the handle whose
+	// signature verified (ClaudeDesktopEngineWithDigest on Windows only).
+	// Setup requires its own hash of Executable to equal it, so the
+	// selection it records is bound to the signed bytes (GAP-0039).
+	SHA256 string `json:"sha256,omitempty"`
 	// Unverified is why the newest build of a folder did not verify, when
 	// no build did.
 	Unverified string `json:"unverified,omitempty"`

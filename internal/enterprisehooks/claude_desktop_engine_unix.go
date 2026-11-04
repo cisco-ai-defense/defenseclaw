@@ -50,3 +50,10 @@ func ClaudeDesktopEngine(ctx context.Context, home string) (build ClaudeDesktopE
 	}
 	return build
 }
+
+// ClaudeDesktopEngineWithDigest is ClaudeDesktopEngine: SHA256 is reported
+// only on Windows, the one platform whose setup binds the engine as the
+// Claude Code executable (GAP-0039).
+func ClaudeDesktopEngineWithDigest(ctx context.Context, home string) ClaudeDesktopEngineBuild {
+	return ClaudeDesktopEngine(ctx, home)
+}

@@ -8,11 +8,9 @@ package enterprisehooks
 import (
 	"context"
 	"path/filepath"
-)
 
-// windowsClaudeDesktopBuildExecutable is verifiedWindowsClaudeDesktopBuild;
-// tests replace it.
-var windowsClaudeDesktopBuildExecutable = verifiedWindowsClaudeDesktopBuild
+	"github.com/defenseclaw/defenseclaw/internal/codesig"
+)
 
 // ClaudeDesktopEngine returns the newest Claude Code engine build Claude
 // Desktop keeps under the profile home (every data folder of
@@ -27,7 +25,22 @@ var windowsClaudeDesktopBuildExecutable = verifiedWindowsClaudeDesktopBuild
 // agent discovery recorded no claude version (cowork-1-0-8 GAP-0037), and
 // per-user setup binds Executable as the Claude Code executable of an
 // account with Claude Desktop and no claude CLI (GAP-0039).
-func ClaudeDesktopEngine(_ context.Context, home string) (build ClaudeDesktopEngineBuild) {
+func ClaudeDesktopEngine(_ context.Context, home string) ClaudeDesktopEngineBuild {
+	return claudeDesktopEngine(home, verifyWindowsClaudeDesktopEngine)
+}
+
+// ClaudeDesktopEngineWithDigest is ClaudeDesktopEngine whose last check of
+// Executable also hashes it through the handle whose signature verified
+// (codesig.VerifyAuthenticodeWithSHA256) and reports that digest in SHA256.
+// Per-user setup runs it (connector claude-desktop-engine) and binds only an
+// engine whose own hash equals it (GAP-0039).
+func ClaudeDesktopEngineWithDigest(_ context.Context, home string) ClaudeDesktopEngineBuild {
+	return claudeDesktopEngine(home, verifyWindowsClaudeDesktopEngineDigest)
+}
+
+// claudeDesktopEngine checks the newest build's claude.exe a second time
+// with verify.
+func claudeDesktopEngine(home string, verify func(string, []string) codesig.Result) (build ClaudeDesktopEngineBuild) {
 	if home == "" {
 		return build
 	}
@@ -50,11 +63,11 @@ func ClaudeDesktopEngine(_ context.Context, home string) (build ClaudeDesktopEng
 		return build
 	}
 	build.Unverified = ""
-	executable, reason := windowsClaudeDesktopBuildExecutable(filepath.Join(build.EngineDir, build.Version))
+	executable, digest, reason := verifiedWindowsClaudeDesktopBuild(filepath.Join(build.EngineDir, build.Version), verify)
 	if executable == "" {
 		// Changed between the two checks: report nothing verified.
 		return ClaudeDesktopEngineBuild{Unverified: reason}
 	}
-	build.Executable = executable
+	build.Executable, build.SHA256 = executable, digest
 	return build
 }

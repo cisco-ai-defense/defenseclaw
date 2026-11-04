@@ -38,8 +38,8 @@ func TestConnectorClaudeDesktopEngineExitCodes(t *testing.T) {
 		}
 		return code, doc
 	}
-	code, doc := run(enterprisehooks.ClaudeDesktopEngineBuild{Version: "2.1.317", EngineDir: `C:\u\Claude-3p\claude-code`, Executable: `C:\u\Claude-3p\claude-code\2.1.317\b\claude.exe`})
-	if code != 0 || doc["version"] != "2.1.317" || doc["executable"] != `C:\u\Claude-3p\claude-code\2.1.317\b\claude.exe` {
+	code, doc := run(enterprisehooks.ClaudeDesktopEngineBuild{Version: "2.1.317", EngineDir: `C:\u\Claude-3p\claude-code`, Executable: `C:\u\Claude-3p\claude-code\2.1.317\b\claude.exe`, SHA256: "5f84a2a8"})
+	if code != 0 || doc["version"] != "2.1.317" || doc["executable"] != `C:\u\Claude-3p\claude-code\2.1.317\b\claude.exe` || doc["sha256"] != "5f84a2a8" {
 		t.Fatalf("verified: exit %d %v", code, doc)
 	}
 	code, doc = run(enterprisehooks.ClaudeDesktopEngineBuild{Unverified: "Claude Desktop engine 2.1.317: claude.exe is not signed"})

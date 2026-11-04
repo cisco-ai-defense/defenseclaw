@@ -69,6 +69,10 @@ type Result struct {
 	// one (Windows: the VS_FIXEDFILEINFO product version, a.b.c.d, read
 	// while the file is held open); "" when it has none.
 	Version string
+	// SHA256 is the lowercase hex sha256 of the verified file, read through
+	// the handle whose signature verified (VerifyAuthenticodeWithSHA256
+	// only); "" otherwise.
+	SHA256 string
 	// Unsigned: the code carries no signature at all (macOS codesign:
 	// "code object is not signed at all"), as opposed to a signature that
 	// does not verify or names another signer. Reason still says why.

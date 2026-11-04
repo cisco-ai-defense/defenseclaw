@@ -407,8 +407,9 @@ def _verified_claude_desktop_engine() -> dict:
     """This account's Claude Desktop engine build whose Authenticode signature
     verifies, as the gateway checks it for enrolment
     (``defenseclaw-gateway connector claude-desktop-engine --json``):
-    ``{"version", "engine_dir", "executable"}``, or ``{"reason":
-    "not_found", "unverified"}``. Python has no signature check of its own."""
+    ``{"version", "engine_dir", "executable", "sha256"}``, sha256 computed
+    over the handle whose signature verified, or ``{"reason": "not_found",
+    "unverified"}``. Python has no signature check of its own."""
     import subprocess
 
     from defenseclaw.commands.cmd_setup import _gateway_lifecycle_executable
@@ -472,30 +473,43 @@ def _select_claude_desktop_engine(data_dir: str, spec) -> tuple[SetupAgentSelect
     trusts it: it is admitted by its Authenticode signature instead, as
     enrolment and the gateway admit it (GAP-0037). The build must be one this
     account's discovery lists, answer ``--version`` with its folder's version
-    (the discovery check), and hash the same before and after a second
-    signature check.
+    (the discovery check), and hash, before the version probe and after it,
+    to the sha256 the gateway took over the very handle whose signature it
+    verified, in both signature checks. So the digest setup records is of the
+    signed bytes, not of a file swapped in between the checks (GAP-0039).
     """
 
-    def verified() -> tuple[str, str, str]:
+    def verified() -> tuple[str, str, str, str]:
         document = _verified_claude_desktop_engine()
         executable = str(document.get("executable") or "")
         if not executable:
             found = agent_discovery._claude_desktop_engine_candidates()
             detail = str(document.get("unverified") or "") or "no build is signed by Anthropic"
-            return "", "", (
+            return "", "", "", (
                 f"Claude Desktop's Claude Code engine ({found[0] if found else 'none'}) did not verify: {detail}; "
                 "update Claude Desktop or install the claude CLI, then re-run setup"
             )
-        return executable, str(document.get("version") or ""), ""
+        signed = str(document.get("sha256") or "").strip().lower()
+        if not signed:
+            return "", "", "", (
+                "this defenseclaw-gateway does not report the hash of the Claude Desktop engine it verified; "
+                "update DefenseClaw and re-run setup"
+            )
+        return executable, str(document.get("version") or ""), signed, ""
+
+    def changed(path: str) -> str:
+        return f"Claude Desktop's engine {path} changed while setup checked it"
 
     try:
-        executable, version, problem = verified()
+        executable, version, signed, problem = verified()
         if problem:
             return None, problem
         engine = agent_discovery._claude_desktop_engine(executable)
         if engine is None or engine.version != version:
             return None, f"the verified Claude Desktop engine {executable} is not one of this account's engine builds"
         digest = stable_executable_sha256(executable)
+        if digest != signed:
+            return None, changed(executable)
         raw_version, probe_error = agent_discovery._version_for_agent_binary(
             "claudecode",
             executable,
@@ -506,11 +520,11 @@ def _select_claude_desktop_engine(data_dir: str, spec) -> tuple[SetupAgentSelect
         )
         if probe_error or not raw_version:
             return None, f"Claude Desktop's engine {executable}: {probe_error or 'version probe returned no version'}"
-        again, _version, problem = verified()
+        again, _version, signed_again, problem = verified()
         if problem or os.path.normcase(again) != os.path.normcase(executable):
             return None, problem or f"Claude Desktop's verified engine changed while setup checked {executable}"
-        if stable_executable_sha256(executable) != digest:
-            return None, f"Claude Desktop's engine {executable} changed while setup checked it"
+        if signed_again != digest or stable_executable_sha256(executable) != digest:
+            return None, changed(executable)
     except OSError as exc:
         return None, str(exc)
     return (
