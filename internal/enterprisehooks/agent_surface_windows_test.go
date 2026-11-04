@@ -225,9 +225,10 @@ func TestWindowsClaudeDesktopVersionOverflowIsIncomplete(t *testing.T) {
 		}
 	}
 	const sid = "S-1-5-21-1-2-3-1001"
-	previousReadAs := windowsSurfaceReadAs
+	previousReadAs, previousBuildCheck := windowsSurfaceReadAs, windowsClaudeDesktopBuildCheck
 	windowsSurfaceReadAs = func(_, _ string, fn func() error) error { return fn() }
-	t.Cleanup(func() { windowsSurfaceReadAs = previousReadAs })
+	windowsClaudeDesktopBuildCheck = func(string) string { return "" } // every build signed
+	t.Cleanup(func() { windowsSurfaceReadAs, windowsClaudeDesktopBuildCheck = previousReadAs, previousBuildCheck })
 	if observed, complete, err := discoverWindowsAgentSurfaces(sid, home, "claudecode"); err != nil || len(observed) != 1 || len(complete) != 1 {
 		t.Fatalf("exactly %d version folders: observed=%+v complete=%+v err=%v", windowsSurfaceMaxEntries, observed, complete, err)
 	}

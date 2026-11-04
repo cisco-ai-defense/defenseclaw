@@ -291,6 +291,9 @@ const windowsManagedHooksPurgeUserStateEnv = "DEFENSECLAW_WINDOWS_UNINSTALL_PURG
 var (
 	windowsManagedHooksStandaloneUserStatePurger    = enterprisehooks.PurgeWindowsUserState
 	windowsManagedHooksStandaloneUserBinariesPurger = enterprisehooks.PurgeWindowsUserBinaries
+	// windowsManagedHooksStandaloneUserRuntimeRemover removes, without purge,
+	// what the managed runtime wrote into an account's folder (GAP-0045).
+	windowsManagedHooksStandaloneUserRuntimeRemover = enterprisehooks.RemoveWindowsManagedUserRuntime
 )
 
 // windowsManagedHooksAccountsKeepingRegistrations reports whether an
@@ -322,17 +325,21 @@ func windowsManagedHooksAccountsKeepingRegistrations(cleanup enterpriseHookUserC
 // each account it could not purge ("user (SID): path: reason") and each one
 // it purged ("user (SID): path"), so the result names every account whose
 // data went. An account that keeps registrations (keepsRegistrations) keeps
-// its folder. Without purge it lists each folder that exists ("user (SID):
-// path") and purges nothing.
+// its folder. Without purge, as LocalSystem, it removes from the folder of
+// each account whose registrations all went what DefenseClaw's managed
+// runtime wrote there (hooks, logs, the hook contract lock, the foreign-hook
+// policy's files; enterprisehooks.RemoveWindowsManagedUserRuntime), and the
+// folder once nothing else is in it: a plain uninstall kept those files with
+// their managed DACL, and a later per-user install of the account failed its
+// first run on them (cowork-1-0-8 GAP-0045). It lists each folder that stays
+// ("user (SID): path", with why it stays when the cleanup ran) and purges no
+// data or binaries.
 func windowsManagedHooksStandaloneUserState(
 	manifest enterprisehooks.Manifest,
 	purge bool,
 	keepsRegistrations func(sid string) bool,
 ) ([]string, []string) {
-	var identityErr error
-	if purge {
-		identityErr = enterpriseHookWindowsUserCleanupIdentity()
-	}
+	identityErr := enterpriseHookWindowsUserCleanupIdentity()
 	seen := map[string]bool{}
 	var remaining, purged []string
 	for _, target := range manifest.Targets {
@@ -354,8 +361,20 @@ func windowsManagedHooksStandaloneUserState(
 		var reason string
 		switch {
 		case !purge:
-			if statErr == nil {
+			if statErr != nil {
+				continue
+			}
+			if identityErr != nil || keepsRegistrations(sid) {
+				// An account whose registrations stay keeps the folder: its
+				// connector_backups restore them.
 				remaining = append(remaining, label)
+				continue
+			}
+			kept, err := windowsManagedHooksStandaloneUserRuntimeRemover(home, sid, target.DataDir)
+			if err != nil {
+				remaining = append(remaining, label+": "+boundedEnterpriseHookUserCleanupText(err.Error()))
+			} else if kept != "" {
+				remaining = append(remaining, label+": "+boundedEnterpriseHookUserCleanupText(kept))
 			}
 			continue
 		case errors.Is(statErr, os.ErrNotExist):

@@ -110,6 +110,11 @@ type HookAuditEnvelope struct {
 	StepIdx     int    `json:"step_idx,omitempty"`
 	Enforced    bool   `json:"enforced,omitempty"`
 	RulePackDir string `json:"-"`
+	// WorkspaceHostPaths are the folders a Claude Cowork session connected
+	// (hookexec.CoworkContext). Like RulePackDir they are filesystem paths,
+	// so they travel in their own path-class field, never in the envelope
+	// text.
+	WorkspaceHostPaths []string `json:"-"`
 	// SecureClientRulePackDir is RulePackDir inside the envelope text, where
 	// the Secure Client profile keeps it as on main (issue #1092).
 	SecureClientRulePackDir string `json:"rule_pack_dir,omitempty"`

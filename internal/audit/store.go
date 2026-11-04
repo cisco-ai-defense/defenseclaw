@@ -145,6 +145,12 @@ type Event struct {
 	// a path-class record field (issue #1092).
 	RulePackDirInEnvelope bool `json:"-"`
 
+	// WorkspaceHostPaths are the folders connected to the Claude Cowork
+	// session of a claudecode hook row. There is no SQLite column: the
+	// compatibility record carries them in its v8 body as a path-class
+	// field, so a profile that hashes or removes paths reaches them.
+	WorkspaceHostPaths []string `json:"-"`
+
 	// SandboxID and SandboxName attribute an event to the OpenShell
 	// sandbox whose request produced it. They are filled from the
 	// correlation envelope, which takes them only from the authenticated

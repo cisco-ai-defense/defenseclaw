@@ -170,6 +170,8 @@ from defenseclaw.tui.services.overview_state import (
     SubsystemHealth,
     _rule_pack_label,
     admission_action_overrides,
+    cowork_line,
+    cowork_overview_rows,
     format_duration,
 )
 from defenseclaw.tui.services.read_repository import (
@@ -1279,7 +1281,7 @@ class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, App[None]):
 
     BINDINGS = [
         Binding("ctrl+c", "cancel_or_quit", "Cancel/Quit", priority=True),
-        Binding("q", "local_close", "Close", show=False),
+        Binding("q", "local_close", "Close or quit", show=False),
         Binding("?", "toggle_help", "Help"),
         Binding(":", "open_command", "Command"),
         Binding("ctrl+k", "open_command", "Command"),
@@ -2846,6 +2848,7 @@ class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, App[None]):
 
     def on_resize(self, event: events.Resize) -> None:
         self._update_tab_labels()
+        self._sync_overview_metrics_compact()
         # Fit again once the new size has settled, so a label chosen for an
         # in-between size does not stay ("R Registry…" with room left, GAP-1751).
         self.call_after_refresh(self._update_tab_labels)
@@ -3690,8 +3693,19 @@ class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, App[None]):
             return
         visible = self.active_panel == "overview" and not self.help_open
         metrics.set_class(not visible, "hidden")
+        self._sync_overview_metrics_compact(metrics)
         if visible:
             metrics.refresh_metrics(metrics_data)
+
+    def _sync_overview_metrics_compact(self, metrics: OverviewMetrics | None = None) -> None:
+        """4-row KPI cards on a short terminal, so the Overview body shows more than a few lines (GAP-0048)."""
+
+        if metrics is None:
+            try:
+                metrics = self.query_one("#overview-metrics", OverviewMetrics)
+            except NoMatches:
+                return
+        metrics.set_compact(overview_metrics_compact(int(getattr(self.size, "height", 0) or 0)))
 
     def _apply_overview_scope_text(self, text: str) -> None:
         try:
@@ -3980,10 +3994,32 @@ class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, App[None]):
             self._strip_clear()
             self._set_status("Cleared command status.")
             return
-        # Nothing to close. The status line is not drawn on every tab, so a
-        # toast says how to quit wherever the operator is.
-        self._set_status("Nothing to close. Press Ctrl+C to quit.")
-        self.notify("Nothing to close. Press Ctrl+C to quit DefenseClaw.", timeout=4)
+        if self._panel_detail_open():
+            # q closes an open detail the way Esc does; a second q quits.
+            self._handle_active_panel_key(events.Key("escape", None))
+            return
+        if self.command_running or self.executor.is_running:
+            # q never cancels a running command; Ctrl+C does.
+            self._set_status("A command is running. Press Ctrl+C to cancel it, then q to quit.")
+            return
+        # Nothing to close: q quits, as the hint bar and ? help say (GAP-0048).
+        self.exit()
+
+    def _panel_detail_open(self) -> bool:
+        """True while the active panel shows a row's detail that Esc closes."""
+
+        panel = self.active_panel
+        if panel in self.catalog_models:
+            return bool(self.catalog_models[panel].detail_open)
+        model = {
+            "alerts": self.alerts_model,
+            "registries": self.registries_model,
+            "audit": self.audit_model,
+            "inventory": self.inventory_model,
+            "ai": self.ai_discovery_model,
+            "runtime": self.runtime_model,
+        }.get(panel)
+        return bool(getattr(model, "detail_open", False))
 
     def action_cancel_or_quit(self) -> None:
         if self.command_running or self.executor.is_running:
@@ -4963,7 +4999,7 @@ class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, App[None]):
             ("Y / Ctrl+S", "Copy / save the last command's output"),
             ("D", "Run doctor in the background"),
             ("Ctrl+C", "Quit DefenseClaw (cancels the running command first)"),
-            ("q", "Close the drawer or overlay (does not quit)"),
+            ("q", "Close the drawer, overlay or detail; quit when nothing is open"),
         ]
 
         # ``m`` filters by connector only when more than one is set up; with
@@ -5531,6 +5567,7 @@ class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, App[None]):
             return
         overview_visible = self.active_panel == "overview" and not self.help_open
         metrics.set_class(not overview_visible, "hidden")
+        self._sync_overview_metrics_compact(metrics)
         if overview_visible:
             if self._connector_hook_event_cache_enabled:
                 metric_data = self._overview_metric_data()
@@ -7835,6 +7872,11 @@ class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, App[None]):
                 return row
         return None
 
+    def _overview_cowork_rows(self) -> tuple[tuple[str, str], ...]:
+        """The Cowork rows of ``defenseclaw status`` for CONFIGURATION, or ()."""
+
+        return cowork_overview_rows(self.overview_model.cowork_status, home=str(Path.home()))
+
     def _connector_configuration_lines(self, connector: str) -> tuple[tuple[str, str], ...]:
         """Connector-scoped CONFIGURATION rows for the filtered Overview."""
 
@@ -7861,6 +7903,12 @@ class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, App[None]):
             ("Redaction", redaction),
             ("Human approval", approval),
         ]
+        if connector == "claudecode":
+            cowork_status = getattr(self.overview_model, "cowork_status", None)
+            if cowork_rows := cowork_overview_rows(cowork_status, home=str(Path.home())):
+                lines.extend(cowork_rows)
+            elif cowork := cowork_line(self.overview_model.health):
+                lines.append(("Cowork", cowork))
         if cfg and cfg.environment:
             lines.append(("Environment", f"{cfg.environment} (global)"))
         return tuple(lines)
@@ -9314,6 +9362,14 @@ class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, App[None]):
                     style=TOKENS.text_secondary,
                 ),
             )
+        if not selected_connector:
+            # Cowork is a Claude Code surface: its row sits under the agent (GAP-0046).
+            cowork_status = self.overview_model.cowork_status
+            cowork_style = TOKENS.accent_green if getattr(cowork_status, "protected", False) else TOKENS.accent_amber
+            cfg_rows[1:1] = [
+                (label, Text(value, style=cowork_style if label == "Cowork" else TOKENS.text_secondary))
+                for label, value in self._overview_cowork_rows()
+            ]
         llm_provider = (cfg.llm_provider if cfg else "") or (cfg.inspect_llm_provider if cfg else "")
         llm_model = (cfg.llm_model if cfg else "") or (cfg.inspect_llm_model if cfg else "")
         if llm_provider:
@@ -9796,9 +9852,16 @@ class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, App[None]):
         if connectors_panel is not None:
             connectors_block = [connectors_panel, Text("")]
 
+        if overview_metrics_compact(int(getattr(self.size, "height", 0) or 0)):
+            # A short terminal gets the wordmark and the tagline on one row
+            # (GAP-0048): the logo or two header rows pushed SERVICES below the fold.
+            header: tuple[RenderableType, ...] = (
+                Text.assemble((_DEFENSECLAW_WORDMARK, f"bold {TOKENS.accent_cyan}"), tagline, no_wrap=True, overflow="ellipsis"),
+            )
+        else:
+            header = (banner, tagline)
         return Group(
-            banner,
-            tagline,
+            *header,
             # At 24 rows, two notices need the line otherwise used by
             # this spacer (Doctor recovery plus Runtime details).
             *([] if self.size.height <= 24 and len(notice_block) > 1 else [Text("")]),
@@ -9832,7 +9895,8 @@ class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, App[None]):
         # Multiple notices use compact spacing at 24 rows. A height-only
         # resize must invalidate a render prepared for the other layout.
         height = int(getattr(self.size, "height", 0) or 0)
-        return (width, int(height <= 24))
+        # Under 32 rows the KPI cards and the header are compact (GAP-0048).
+        return (width, int(height <= 24) + int(overview_metrics_compact(height)))
 
     def _runtime_sample_time(self) -> str:
         """When the last runtime sample was taken ("14:02:11", "Oct 02 14:02"), or "".
@@ -10383,6 +10447,9 @@ class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, App[None]):
                 "Agents",
                 _agents_summary(cfg, len(overview_connector_rows), self.overview_model.gateway_down()),
             )
+        if not enf_selected:
+            # Cowork is a Claude Code surface: its row sits under the agent (GAP-0046).
+            config_lines[1:1] = list(self._overview_cowork_rows())
         config_text = "\n".join(f"  {key:<16} {value}" for key, value in config_lines)
 
         connectors_text = self._overview_connectors_text(overview_connector_rows)
@@ -15487,6 +15554,11 @@ class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, App[None]):
             self.overview_model.set_health(snapshot)
             self._propagate_connector(snapshot)
             await self._refresh_guardrail_profile()
+        # The Cowork row reads the plugin state and the gateway's Cowork
+        # activity file, so it loads here, off the render path (GAP-0046).
+        self.overview_model.set_cowork_status(
+            await asyncio.to_thread(_fetch_cowork_status, self.config, self.overview_model.health, result.state)
+        )
         # Mirror Go: clear the queued-restart banner once the gateway
         # has actually restarted (its StartedAt moved). Without this
         # the banner sticks around forever even though the restart
@@ -16986,7 +17058,61 @@ def _connector_from_mapping(raw: Any) -> ConnectorHealth | None:
         subprocess_blocks=_coerce_int(
             raw.get("subprocess_blocks") or raw.get("subprocessBlocks")
         ),
+        **_cowork_surface_from_mapping(raw),
     )
+
+
+def _fetch_cowork_status(config: object | None, health: HealthSnapshot | None, gateway_state: str) -> Any | None:
+    """The Cowork row ``defenseclaw status`` prints (cowork.cowork_status), or None.
+
+    Reads small local files (the plugin state, the gateway's Cowork activity
+    record, the Claude Desktop install), so it runs in a worker thread.
+    *health* is the last authenticated /health snapshot; its Claude Code
+    connector carries the live Cowork activity.
+    """
+
+    if config is None or not callable(getattr(config, "active_connectors", None)):
+        return None
+    from defenseclaw import cowork
+
+    authenticated = health is not None and gateway_state not in {"offline", "error"}
+    raw: dict[str, Any] | None = None
+    if authenticated and health is not None:
+        rows = [*health.connectors, *((health.connector,) if health.connector is not None else ())]
+        raw = {
+            "connectors": [
+                {"name": row.name, "surfaces": {"cowork": {"last_activity_at": row.cowork_last_activity_at}}}
+                for row in rows
+                if row.cowork_last_activity_at
+            ]
+        }
+    try:
+        return cowork.cowork_status(
+            config,
+            raw,
+            gateway_running=gateway_state != "offline",
+            health_authenticated=authenticated,
+        )
+    except Exception:  # noqa: BLE001 - the Cowork row is best effort, like status
+        return None
+
+
+def overview_metrics_compact(height: int) -> bool:
+    """True when the Overview KPI cards use their 4-row layout (terminals under 32 rows)."""
+
+    return 0 < height < 32
+
+
+def _cowork_surface_from_mapping(raw: dict[str, Any]) -> dict[str, Any]:
+    """``surfaces.cowork`` of a /health connector entry, as ConnectorHealth fields."""
+    surfaces = raw.get("surfaces")
+    cowork = surfaces.get("cowork") if isinstance(surfaces, dict) else None
+    if not isinstance(cowork, dict):
+        return {}
+    return {
+        "cowork_requests": max(_coerce_int(cowork.get("requests")), 0),
+        "cowork_last_activity_at": _coerce_str(cowork.get("last_activity_at")),
+    }
 
 
 def _connectors_from_mapping(raw: Any) -> tuple[ConnectorHealth, ...]:

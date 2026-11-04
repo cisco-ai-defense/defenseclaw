@@ -10,7 +10,11 @@
 
 package connector
 
-import "strings"
+import (
+	"strings"
+
+	"github.com/defenseclaw/defenseclaw/internal/claudedesktop"
+)
 
 // An agent reaches DefenseClaw through one of several host surfaces: its
 // terminal CLI, a desktop app, or an editor extension. Each surface embeds
@@ -62,6 +66,11 @@ type AgentSurface struct {
 	// hook contract.
 	HostVersion string `json:"host_version,omitempty"`
 	Path        string `json:"path,omitempty"`
+	// EngineUnverified says why discovery did not take the engine version
+	// of a build it found: the build lives in a folder its user can write
+	// and its code signature did not verify (Claude Desktop's engine on
+	// macOS and Windows). EngineVersion is then empty.
+	EngineUnverified string `json:"engine_unverified,omitempty"`
 }
 
 // SurfaceResolution is how one surface maps to a hook contract.
@@ -151,10 +160,10 @@ func (r SurfaceResolution) Admitted(policy string) (bool, string) {
 var agentSurfaceMarkers = map[string]map[string][]string{
 	"claudecode": {
 		HostSurfaceExtension: {"/anthropic.claude-code-", "/jetbrains/"},
-		HostSurfaceDesktop: {
-			"/claude/claude-code/", "/claude.app/", "/windowsapps/claude_",
-			"/packages/claude_",
-		},
+		// The engine Claude Desktop keeps in its data folders
+		// (claude-code/<version>/..., every deployment) is
+		// agentSurfaceDesktopPaths.
+		HostSurfaceDesktop: {"/claude.app/", "/windowsapps/claude_", "/packages/claude_"},
 	},
 	"codex": {
 		HostSurfaceExtension: {"/openai.chatgpt-", "/jetbrains/"},
@@ -167,6 +176,43 @@ var agentSurfaceMarkers = map[string]map[string][]string{
 		HostSurfaceDesktop: {"/cursor.app/", "/usr/share/cursor/", "/opt/cursor/", "/programs/cursor/"},
 	},
 }
+
+// agentSurfaceDesktopPaths recognize a desktop app's engine by a path rule
+// that a fixed fragment cannot express, per connector.
+var agentSurfaceDesktopPaths = map[string]func(string) bool{
+	"claudecode": claudedesktop.EngineBuildPath,
+}
+
+// ClaudeDesktopEngineCaseSH is the case pattern the per-user Claude Code
+// shell hook (claude-code-hook.sh, defenseclaw_cowork_engine) matches the
+// lower-cased executable of an ancestor against, so the shell names the same
+// Claude Desktop engines as the native runner (ClassifyAgentSurface): the
+// claudecode desktop markers of agentSurfaceMarkers, and an engine folder
+// (<name>/claude-code/...) under every data folder name of the
+// claudedesktop table (roots.json). It is rendered from those tables, so a
+// new data folder needs no shell change (GAP-0029: a hand-written pattern
+// missed Linux ~/.config/Claude-3p). A "*" in a folder name (an MSIX id)
+// also matches "/" in a shell pattern, so the shell can tag a path the
+// native runner does not; the tag is attribution, never a policy input.
+func (templateData) ClaudeDesktopEngineCaseSH() string { return claudeDesktopEngineCaseSH }
+
+var claudeDesktopEngineCaseSH = func() string {
+	var alternatives []string
+	for _, marker := range agentSurfaceMarkers["claudecode"][HostSurfaceDesktop] {
+		alternatives = append(alternatives, "*"+marker+"*")
+	}
+	for _, name := range claudedesktop.EngineFolderNames() {
+		alternatives = append(alternatives, "*/"+name+"/"+claudedesktop.EngineFolder+"/*")
+	}
+	for _, alternative := range alternatives {
+		// Rendered unquoted into the hook: only characters that are literal
+		// in a shell pattern, plus "*".
+		if strings.Trim(alternative, "abcdefghijklmnopqrstuvwxyz0123456789._-/*") != "" {
+			panic("connector: Claude Desktop engine pattern " + alternative + " is not shell-safe")
+		}
+	}
+	return strings.Join(alternatives, "|")
+}()
 
 // agentSurfaceCLINames are engine executables that are always the CLI
 // surface, even where a desktop app's bundle carries them.
@@ -206,6 +252,9 @@ func ClassifyAgentSurface(connectorName, executable string, getenv func(string) 
 					return surface
 				}
 			}
+		}
+		if match := agentSurfaceDesktopPaths[name]; match != nil && match(path) {
+			return HostSurfaceDesktop
 		}
 	}
 	if variable, ok := agentSurfaceVariables[name]; ok && getenv != nil {

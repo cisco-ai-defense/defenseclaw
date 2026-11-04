@@ -74,6 +74,7 @@ var validDetectorKeys = map[string]bool{
 	"local_endpoint":   true,
 	"editor_extension": true,
 	"application":      true,
+	"claude_desktop":   true,
 	"env":              true,
 	"shell_history":    true,
 }

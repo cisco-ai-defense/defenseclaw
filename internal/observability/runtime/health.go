@@ -43,7 +43,11 @@ type DestinationHealth struct {
 	LastSuccess         time.Time
 	LastFailure         time.Time
 	Sources             []delivery.HealthSnapshot
-	MetricRejectsScoped bool
+	// MetricExportsScoped keeps the metric signal out of Counters: its
+	// export attempts are cumulative, a rejected one is replaced by the next,
+	// so they are counted in its own source row only. Counters then cover
+	// the log and trace records alone, every counter in the same scope.
+	MetricExportsScoped bool
 }
 
 // DestinationHealthSnapshot is pinned to exactly one active graph generation.
@@ -96,7 +100,7 @@ func (runtime *Runtime) DestinationHealthSnapshot(
 			Name: destination.Name, Kind: destination.Kind, Enabled: destination.Enabled,
 			Signals: signals, CircuitState: delivery.CircuitClosed,
 		}
-		row.MetricRejectsScoped = !runtime.secureClient &&
+		row.MetricExportsScoped = !runtime.secureClient &&
 			destination.Kind == config.ObservabilityV8DestinationOTLP &&
 			containsHealthSignal(signals, observability.SignalMetrics)
 		if !destination.Enabled {
@@ -178,14 +182,13 @@ func (runtime *Runtime) DestinationHealthSnapshot(
 			source.Counters.Dropped, runtime.carriedDropped(graph.Generation(), source.Destination, source.Signal),
 		)
 		row.Sources = append(row.Sources, source)
-		// Metric exports are cumulative. A rejected attempt can be replaced
-		// by the next export, so it stays in the signal's counters without
-		// appearing as a lost record in the destination total.
-		aggregateCounters := source.Counters
-		if row.MetricRejectsScoped && signal == observability.SignalMetrics {
-			aggregateCounters.Rejected = 0
+		// Metric exports stay in the signal's own counters (MetricExportsScoped):
+		// counting their accepted and delivered attempts in the destination
+		// total but not their rejections left that total unbalanced
+		// (cowork-1-0-8 GAP-0027).
+		if !row.MetricExportsScoped || signal != observability.SignalMetrics {
+			row.Counters = addCounters(row.Counters, source.Counters)
 		}
-		row.Counters = addCounters(row.Counters, aggregateCounters)
 		if healthStateRank(source.State) > healthStateRank(row.State) {
 			row.State = source.State
 			row.Reason = source.Reason

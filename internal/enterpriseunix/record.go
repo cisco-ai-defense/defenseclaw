@@ -70,8 +70,9 @@ type Deployment struct {
 	// SHA-256 of its installed bytes.
 	Files map[string]string `json:"files"`
 	// CreatedDirs lists directories outside the DefenseClaw tree that the
-	// lifecycle created (vendor machine-policy parents). Uninstall removes
-	// them only while they are empty.
+	// lifecycle created (vendor machine-policy parents, the Cowork folders)
+	// and the Cowork lifecycle cache. Uninstall removes them only while
+	// they are empty; turning Cowork delivery off removes its own.
 	CreatedDirs []string `json:"created_dirs"`
 	// MachinePolicyConnectors are the connectors whose DefenseClaw hooks the
 	// last transaction left in place in vendor machine policy; the runtime

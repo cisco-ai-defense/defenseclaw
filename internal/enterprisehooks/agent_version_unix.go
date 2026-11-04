@@ -824,28 +824,46 @@ func rootOwnedChain(path string) bool {
 	}
 }
 
-// newestVersionDir returns the highest semver-named child of dir.
-func newestVersionDir(dir string) string {
-	entries, err := os.ReadDir(dir)
+// unixVersionDirsMax bounds the entries read from one version folder.
+const unixVersionDirsMax = 4096
+
+// unixVersionDirs returns the semver-named children of dir, newest first,
+// from at most unixVersionDirsMax entries. complete is false when dir holds
+// more entries than are read (a newer version may be among those left out)
+// or could not be listed for another reason than being absent or out of
+// the account's reach.
+func unixVersionDirs(dir string) (versions []string, complete bool) {
+	entries, err := readUnixDirBounded(dir, unixVersionDirsMax)
 	if err != nil {
-		return ""
+		return nil, unixEntryAbsent(err)
 	}
-	var versions []string
+	complete = len(entries) <= unixVersionDirsMax
+	if !complete {
+		entries = entries[:unixVersionDirsMax]
+	}
 	for _, entry := range entries {
-		name := entry.Name()
-		if validUnixAgentVersion(name) {
+		if name := entry.Name(); validUnixAgentVersion(name) {
 			versions = append(versions, name)
 		}
-		if len(versions) > 256 {
-			break
-		}
 	}
-	if len(versions) == 0 {
-		return ""
-	}
-	sort.Slice(versions, func(i, j int) bool { return compareUnixVersions(versions[i], versions[j]) < 0 })
-	return versions[len(versions)-1]
+	sort.SliceStable(versions, func(i, j int) bool { return compareUnixVersions(versions[i], versions[j]) > 0 })
+	return versions, complete
 }
+
+// newestVersionDir returns the highest semver-named child of dir among the
+// entries unixVersionDirs reads (the CLI version probe, whose folders hold
+// a handful of versions; the Claude Desktop surfaces, which decide
+// coverage, use unixVersionDirs and report a folder over the bound).
+func newestVersionDir(dir string) string {
+	if versions, _ := unixVersionDirs(dir); len(versions) != 0 {
+		return versions[0]
+	}
+	return ""
+}
+
+// CompareUnixAgentVersions orders two agent versions (ValidUnixAgentVersion)
+// as the enumerator does: by major, minor and patch, then by text.
+func CompareUnixAgentVersions(a, b string) int { return compareUnixVersions(a, b) }
 
 func compareUnixVersions(a, b string) int {
 	parse := func(v string) [3]int {

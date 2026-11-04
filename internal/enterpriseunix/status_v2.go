@@ -71,7 +71,8 @@ func (l *lifecycle) describeConnectors(record *Deployment) {
 		return ok
 	}}
 	var cfg *config.Config
-	if raw, err := readBounded(env.P(env.Layout.ConfigPath), maxInputBytes); err == nil {
+	raw, err := readBounded(env.P(env.Layout.ConfigPath), maxInputBytes)
+	if err == nil {
 		if loaded, err := env.loadConfigCandidate(raw); err == nil && loaded != nil {
 			cfg = loaded
 		} else {
@@ -88,9 +89,11 @@ func (l *lifecycle) describeConnectors(record *Deployment) {
 		in.Disabled = cfg.Guardrail.DisabledConnectors()
 		in.Mode = cfg.EffectiveGuardrailModeForConnector
 	}
+	var targets []enterprisehooks.ManifestTarget
 	switch manifest, err := enterprisehooks.LoadStandaloneManifest(env.P(env.Layout.ManifestPath)); {
 	case err == nil:
 		in.ManifestRead = true
+		targets = manifest.Targets
 		for _, target := range manifest.Targets {
 			in.Manifest = append(in.Manifest, enterprisestatus.ConnectorInstall{Connector: target.Connector, Version: target.AgentVersion, Enabled: target.IsEnabled()})
 		}
@@ -149,6 +152,7 @@ func (l *lifecycle) describeConnectors(record *Deployment) {
 		}
 	}
 	r.AddHookProcessFailureWarnings(block)
+	l.describeCowork(cfg, raw, block, record, targets)
 	if l.statusV2() {
 		r.Connectors = block
 		if hidden > 0 {
@@ -281,12 +285,8 @@ func machinePolicyCoverage(connectors []string, states map[string]enterprisestat
 		switch {
 		case !ok:
 			coverage[name] = enterprisestatus.HooksInstalledUnknown
-		case state.OwnedEntries == 0:
-			coverage[name] = enterprisestatus.HooksInstalledNone
-		case len(state.Conflicts) > 0:
-			coverage[name] = enterprisestatus.HooksInstalledPartial
 		default:
-			coverage[name] = enterprisestatus.HooksInstalledAll
+			coverage[name] = state.HooksInstalled()
 		}
 	}
 	return coverage

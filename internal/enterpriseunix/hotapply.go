@@ -56,6 +56,9 @@ func (l *lifecycle) hotConfigApply(ctx context.Context, record *Deployment, p *p
 		p.version != record.ProductVersion || p.channel != record.Channel || p.secretsSHA != record.SecretsSHA256 {
 		return false
 	}
+	if len(p.coworkRetiredDirs) > 0 {
+		return false // the transaction removes the folders delivery created
+	}
 	policySetChanged := !slices.Equal(p.machinePolicy, record.MachinePolicyConnectors)
 	for _, path := range p.stale {
 		if !policySetChanged || !hotConnectorSetFile(env, path) || path == env.Layout.DescriptorPath {

@@ -13,6 +13,7 @@
 from __future__ import annotations
 
 import os
+import re
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from typing import Any, Literal
@@ -95,6 +96,31 @@ class ConnectorHealth:
     tool_inspections: int = 0
     tool_blocks: int = 0
     subprocess_blocks: int = 0
+    # Claude Cowork is a surface of claudecode: /health counts its hook
+    # events under connectors[claudecode].surfaces.cowork, machine-wide,
+    # since the gateway started.
+    cowork_requests: int = 0
+    cowork_last_activity_at: str = ""
+
+
+def cowork_line(health: HealthSnapshot | None) -> str:
+    """The Cowork row of the Claude Code connector, from ``/health``.
+
+    Claude Cowork runs Claude Desktop's bundled Claude Code engine, which
+    runs the Claude Code hooks DefenseClaw installed, so its events reach the
+    claudecode connector. Returns "" when the gateway reports no claudecode
+    connector.
+    """
+    if health is None:
+        return ""
+    for connector in health.connectors:
+        if connector.name.strip().lower() != "claudecode":
+            continue
+        if connector.cowork_requests <= 0:
+            return "no Cowork event since the gateway started"
+        last = connector.cowork_last_activity_at or "unknown"
+        return f"{connector.cowork_requests} event(s) since the gateway started, last {last}"
+    return ""
 
 
 @dataclass(frozen=True)
@@ -117,6 +143,51 @@ class ConnectorOverviewRow:
     # Raw source timestamp retained separately from the human label so the
     # shell can distinguish a new event from the normal passage of time.
     last_activity_at: datetime | None = None
+
+
+def cowork_overview_rows(status: Any | None, *, home: str = "") -> tuple[tuple[str, str], ...]:
+    """The Overview's Cowork rows from the ``defenseclaw status`` Cowork row.
+
+    *status* is a ``cowork.CoworkStatus`` (protected, detail, step,
+    last_event_at), None when Cowork plays no part on this account. The first
+    row says protected or not and when the last Cowork event arrived (a clock
+    time: the Overview redraws only when its content changes); a second row
+    names the missing step. *home* is shortened to "~" in the step.
+    """
+
+    if status is None:
+        return ()
+    protected = bool(getattr(status, "protected", False))
+    detail = str(getattr(status, "detail", "") or "").strip()
+    state = re.split(r"[:,(]", detail, maxsplit=1)[0].strip() if detail else ""
+    if not state:
+        state = "protected" if protected else "not protected"
+    last = _clock_text(str(getattr(status, "last_event_at", "") or ""))
+    value = f"{state}, last event {last}" if last else f"{state}, no Cowork event yet"
+    rows = [("Cowork", value)]
+    step = str(getattr(status, "step", "") or "").strip()
+    if step and not protected:
+        if home and home not in {"/", "~"}:
+            step = step.replace(home.rstrip("/\\"), "~")
+        rows.append(("Cowork next", step))
+    return tuple(rows)
+
+
+def _clock_text(raw: str) -> str:
+    """A clock time: "14:02:11" today, "Oct 02 14:02" earlier, "" when unparseable."""
+
+    try:
+        stamp = datetime.fromisoformat(raw.strip().replace("Z", "+00:00")) if raw.strip() else None
+    except ValueError:
+        return ""
+    if stamp is None:
+        return ""
+    if stamp.tzinfo is None:
+        stamp = stamp.replace(tzinfo=timezone.utc)
+    local = stamp.astimezone()
+    if local.date() == datetime.now(local.tzinfo).date():
+        return local.strftime("%H:%M:%S")
+    return local.strftime("%b %d %H:%M")
 
 
 @dataclass(frozen=True)
@@ -646,6 +717,12 @@ class OverviewPanelModel:
         # True until the first audit-history read finishes; a large audit.db
         # can take a minute, and the counts read 0 until then (GAP-1240).
         self.history_loading = False
+        # The Cowork row of ``defenseclaw status`` (cowork.cowork_status),
+        # loaded with the health poll; None when Cowork plays no part.
+        self.cowork_status: Any | None = None
+
+    def set_cowork_status(self, status: Any | None) -> None:
+        self.cowork_status = status
 
     def set_cfg(self, cfg: OverviewConfig | None) -> None:
         """Hot-swap the cached config snapshot (e.g. after ``setup``).
@@ -1988,6 +2065,8 @@ def _connector_saw_traffic(connector: ConnectorHealth) -> bool:
         or connector.tool_inspections
         or connector.tool_blocks
         or connector.subprocess_blocks
+        # A Cowork hook call is a Claude Code hook call (GAP-0046).
+        or connector.cowork_requests
     )
 
 
@@ -2028,7 +2107,7 @@ def zero_connector_requests_notice(connector_name: str, uptime: timedelta) -> st
         case "claudecode":
             return (
                 f"{name} connector has seen 0 hook events since the gateway started {formatted} ago - "
-                "normal until Claude Code emits a hook event; verify Claude Code hooks if this persists"
+                "normal until Claude Code or Claude Cowork emits a hook event; verify Claude Code hooks if this persists"
             )
         case "hermes" | "cursor" | "devin" | "copilot" | "antigravity" | "opencode" | "amp":
             return (
@@ -2422,6 +2501,7 @@ __all__ = [
     "sort_ai_discovery_signals_for_overview",
     "string_detail",
     "zero_connector_requests_notice",
+    "cowork_overview_rows",
 ]
 
 

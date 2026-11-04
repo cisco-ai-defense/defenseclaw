@@ -123,10 +123,24 @@
     "openshell": { "$ref": "#/$defs/openshellCapability", "description": "status and verify, standalone profile, from 1.0.3: whether users on this host can run DefenseClaw sandboxes and on which driver. Windows always reports platform_unsupported. Optional." },
     "identity": { "$ref": "#/$defs/identityHealth", "description": "status and verify, standalone profile, from 1.0.3: the gateway's directory lookups, from its /health. Source tokens, counts and ages only. Optional." },
     "account_join": { "$ref": "#/$defs/accountJoin", "description": "status and verify run as root or an administrator, standalone profile, from 1.0.7, only while enterprise.account_join is on: how many account join keys each generation has for the enrolled accounts the guardian saw in the last 30 days (at most 64), and reason codes. Never a key, an account name, an identifier or a secret: the keys are only in the output of enterprise account-keys. Optional." },
+    "cowork": { "$ref": "#/$defs/coworkState", "description": "status and verify run as root or an administrator, standalone profile, from 1.0.8: Claude Cowork runs the Claude Code engine Claude Desktop bundles, which loads the Claude Code machine policy. Whether DefenseClaw's Claude Code machine policy hooks are in place for it, the managed_hooks_only lock, the gateway's Cowork events since it started, and each enrolled account's last Cowork event (account names: administrator views only). Optional." },
+    "cowork_vm_sensor": { "$ref": "#/$defs/coworkVMSensor", "description": "Optional standalone host-delivery observation. host_ready checks the architecture package, detached signature, install arguments and their trust; settings_ready checks the two managed Claude Desktop settings. Neither field proves Claude accepted or ran the package inside its VM. Absent under Secure Client." },
     "log_path": { "type": "string" },
     "exit_code": { "type": "integer" }
   },
   "allOf": [
+    {
+      "if": { "required": ["profile"], "properties": { "profile": { "const": "secure_client" } } },
+      "then": { "properties": { "cowork_vm_sensor": false } }
+    },
+    {
+      "if": { "required": ["platform"], "properties": { "platform": { "const": "linux" } } },
+      "then": {
+        "properties": {
+          "cowork_vm_sensor": { "properties": { "host_ready": { "const": false }, "settings_ready": { "const": false } } }
+        }
+      }
+    },
     {
       "if": { "properties": { "ok": { "const": true } } },
       "then": { "properties": { "errors": { "maxItems": 0 } } },
@@ -148,7 +162,7 @@
       "else": { "properties": { "exit_code": { "not": { "enum": [0, 3010] } }, "pending_apply": { "const": false } } }
     },
     {
-      "$comment": "Only Linux and macOS have machine-policy-only connectors (managed_hook true, no per-user target). On Windows every connector entry carries targets unless hooks_installed is unknown.",
+      "$comment": "On Windows every connector entry carries targets unless hooks_installed is unknown. A Windows connector counted from its machine policy before any account enrolls carries zero targets; Linux and macOS machine-policy-only connectors (managed_hook true, no per-user target) carry none.",
       "if": { "required": ["platform"], "properties": { "platform": { "const": "windows" } } },
       "then": {
         "properties": {
@@ -187,7 +201,7 @@
         "properties": {
           "installed": false, "installed_version": false, "transaction_pending": false, "services": false,
           "readiness": false, "inspection": false, "machine_policy": false, "enrollment": false, "destinations": false, "audit_store": false,
-          "connectors": false, "openshell": false, "identity": false
+          "connectors": false, "openshell": false, "identity": false, "cowork_vm_sensor": false
         }
       },
       "else": {
@@ -197,6 +211,24 @@
   ],
 
   "$defs": {
+    "coworkVMSensor": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["enabled", "host_ready", "settings_ready"],
+      "properties": {
+        "enabled": { "type": "boolean", "description": "enterprise.cowork_vm_sensor.mode is on in the installed standalone config." },
+        "host_ready": { "type": "boolean", "description": "The configured architecture package, signature and arguments are present with their expected content and administrator-only write access." },
+        "settings_ready": { "type": "boolean", "description": "The two observed machine settings match the configured package path and vendor. Claude diagnostic acceptance is checked separately." },
+        "package_path": { "type": "string" },
+        "reason_codes": { "type": "array", "items": { "type": "string", "pattern": "^[a-z][a-z0-9_]*$" } }
+      },
+      "allOf": [
+        {
+          "if": { "properties": { "enabled": { "const": false } } },
+          "then": { "properties": { "host_ready": { "const": false }, "settings_ready": { "const": false } } }
+        }
+      ]
+    },
     "service": {
       "type": "object",
       "additionalProperties": false,
@@ -434,6 +466,67 @@
           "else": { "required": ["failing_accounts", "stale_accounts", "serving_offline_cache"], "properties": { "reason_code": false } }
         }
       ]
+    },
+    "coworkState": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["configured", "requests", "accounts_known"],
+      "properties": {
+        "configured": { "type": "boolean", "description": "The claudecode connector is enabled, DefenseClaw's Claude Code machine policy hooks are in place (connectors.claudecode.hooks_installed all) and the gateway does not refuse the Claude Desktop surface. It says nothing about calls: requests, last_event_at and an account's last_event_at count hook calls that reported themselves as Cowork (caller-reported attribution, not proof that the hooks ran in Cowork)." },
+        "reason": { "enum": ["claudecode_not_enabled", "claudecode_machine_policy_not_in_place", "claudecode_desktop_surface_refused"], "description": "Why configured is false. claudecode_desktop_surface_refused: enterprise.enrollment.unverified_versions is refuse and the Claude Desktop surface is not live-verified, so the gateway refuses Cowork's hook calls." },
+        "managed_hooks_only": { "enum": ["enforce", "preserve"], "description": "The claudecode machine policy managed_hooks_only. enforce (the default): only managed hooks are meant to run, so customers' own Cowork plugin hooks are meant not to, as Anthropic documents (the 1.0.8 live tests did not cover plugin hooks); preserve: they are meant to run too." },
+        "requests": { "type": "integer", "minimum": 0, "description": "Hook calls that reported themselves as Cowork (caller-reported) the gateway accepted since it started, machine-wide." },
+        "last_event_at": { "type": "string", "format": "date-time", "description": "The gateway's last hook call that reported itself as Cowork (caller-reported) since it started, machine-wide." },
+        "accounts_known": { "type": "boolean", "description": "The audit store answered the per-account lookup." },
+        "accounts": { "type": "array", "maxItems": 64, "items": { "$ref": "#/$defs/coworkAccount" }, "description": "The enrolled accounts and every account with a Cowork event, sorted by name. Absent when accounts_known is false." },
+        "accounts_truncated": { "type": "boolean", "description": "More accounts exist than accounts lists: over 64 accounts, or the audit lookup hit its bound of 256 accounts. Absent otherwise." },
+        "claude_desktop": { "$ref": "#/$defs/coworkDesktop", "description": "Linux and macOS, from 1.0.8: the Claude Desktop installs of every account enrollment includes (the enumerator's eligible accounts and enabled manifest rows), with the newest Claude Code engine build in each data folder and its trust, read from disk by status and verify (no running engine needed, the engine is never run). Claude Code is a machine-policy connector there, so such an account has no enrollment row. Absent on Windows and when not run as root. Optional." }
+      }
+    },
+    "coworkAccount": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["account"],
+      "properties": {
+        "account": { "type": "string", "minLength": 1, "description": "The account name, or its uid or SID when the name is unknown." },
+        "last_event_at": { "type": "string", "format": "date-time", "description": "The account's last Cowork hook event in the audit store; absent when it has none (never)." }
+      }
+    },
+    "coworkDesktop": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["accounts_known", "trusted", "untrusted", "unsigned", "not_found"],
+      "properties": {
+        "accounts_known": { "type": "boolean", "description": "The enumerator's eligible-accounts record was read, or is absent (no cycle ran yet; only the manifest names accounts)." },
+        "accounts": { "type": "array", "maxItems": 64, "items": { "$ref": "#/$defs/coworkDesktopAccount" }, "description": "Every included account, sorted by name (account names: administrator views only)." },
+        "accounts_truncated": { "type": "boolean", "description": "More than 64 accounts are included; absent otherwise." },
+        "trusted": { "type": "integer", "minimum": 0, "description": "Listed installs whose newest engine build is trusted." },
+        "untrusted": { "type": "integer", "minimum": 0, "description": "Listed installs whose newest engine build is untrusted." },
+        "unsigned": { "type": "integer", "minimum": 0, "description": "Listed installs whose newest engine build is unsigned." },
+        "not_found": { "type": "integer", "minimum": 0, "description": "Listed installs with no engine build." }
+      }
+    },
+    "coworkDesktopAccount": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["account"],
+      "properties": {
+        "account": { "type": "string", "minLength": 1, "description": "The account name." },
+        "installs": { "type": "array", "maxItems": 8, "items": { "$ref": "#/$defs/coworkDesktopInstall" }, "description": "The account's Claude Desktop data folders that exist, one per deployment; absent: no Claude Desktop data folder." }
+      }
+    },
+    "coworkDesktopInstall": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["deployment", "path", "trust"],
+      "properties": {
+        "deployment": { "enum": ["1p", "3p"], "description": "1p: signed in with a Claude account (Claude); 3p: third-party inference (Claude-3p)." },
+        "path": { "type": "string", "minLength": 1, "description": "The data folder." },
+        "engine_version": { "type": "string", "minLength": 1, "description": "The newest engine build's version (its folder name); absent when trust is not_found." },
+        "engine_path": { "type": "string", "minLength": 1, "description": "The engine build checked (macOS: its claude.app; Linux: its version folder); absent when trust is not_found." },
+        "trust": { "enum": ["trusted", "untrusted", "unsigned", "not_found"], "description": "trusted: on macOS the code signature verifies as Anthropic's Claude Code (Developer ID team Q6L2SF6YDW, identifier com.anthropic.claude-code; codesign runs as the account) and its Info.plist names the folder's version; untrusted: a signature that does not verify or names another signer, a version mismatch, or a check that could not run; unsigned: no signature (every Linux build); not_found: no engine build in the folder." },
+        "reason": { "type": "string", "description": "Why the build is not trusted, or a limit of a trusted one (claude_version_unverified)." }
+      }
     },
     "accountJoin": {
       "type": "object",

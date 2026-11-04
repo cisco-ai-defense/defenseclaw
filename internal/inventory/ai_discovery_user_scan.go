@@ -688,7 +688,7 @@ func (s *ContinuousDiscoveryService) attributeUserScanSignal(sig AISignal, uid, 
 	sort.Strings(pathHashes)
 	sig.PathHashes = pathHashes
 	sig.WorkspaceHash = namespace(sig.WorkspaceHash)
-	sig.EvidenceHash = hashEvidence(evidence)
+	sig.EvidenceHash = claudeDesktopEvidenceHash(hashEvidence(evidence), sig.ClaudeDesktop)
 	sig.Fingerprint = namespace(sig.Fingerprint)
 	sig.SignalID = stableSignalID(sig.Fingerprint)
 	sig.Source = AISourceUserScan

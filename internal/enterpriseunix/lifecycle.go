@@ -59,6 +59,10 @@ type Options struct {
 	Action string
 	// PayloadDir holds the binaries to install (payload channel).
 	PayloadDir string
+	// CoworkPackage and CoworkSignature are optional release-artifact inputs.
+	// The transaction admits their configured hashes and retains its own copy.
+	CoworkPackage   string
+	CoworkSignature string
 	// FromPackage installs the binaries the deb/rpm/pkg already placed in
 	// the layout's bin directory (package channel).
 	FromPackage bool
@@ -193,6 +197,15 @@ type lifecycle struct {
 	keepThroughRollback map[string]bool
 	// serviceUID is the gateway account of the running transaction.
 	serviceUID int
+	// coworkPlanQuiet is set while ensureNoop builds its read-only plan, so
+	// the plan does not report kept Cowork files (coworkKeptWarning).
+	coworkPlanQuiet bool
+	// claudeDesktopVerdicts caches the launch coverage of Claude Desktop
+	// engine builds for one status or verify run (claudeDesktopVerdictFor).
+	claudeDesktopVerdicts map[string]claudeDesktopVerdict
+	// gatewayHealthBody is the gateway's /health document describe read,
+	// for the status blocks that report its counters (the cowork block).
+	gatewayHealthBody []byte
 	// planned are the inputs the last transaction of this run applied.
 	planned *plannedInputs
 	// reportChanges is set while a repair or ensure re-applies an installed
@@ -1109,6 +1122,19 @@ func (l *lifecycle) validateOptions() int {
 	if o.PayloadDir != "" && o.FromPackage {
 		return bad("--payload and --from-package are mutually exclusive")
 	}
+	if o.CoworkPackage != "" || o.CoworkSignature != "" {
+		if l.env.GOOS != "darwin" || !contains([]string{ActionInstall, ActionUpgrade, ActionRepair, ActionEnsure}, o.Action) {
+			return bad("--cowork-package and --cowork-signature apply only to macOS install, upgrade, repair or ensure")
+		}
+		if o.Bundle != "" || o.BundleInbox {
+			return bad("Cowork artifact inputs cannot accompany a policy bundle")
+		}
+		for _, path := range []string{o.CoworkPackage, o.CoworkSignature} {
+			if path != "" && (!filepath.IsAbs(path) || filepath.Clean(path) != path) {
+				return bad("Cowork artifact input paths must be canonical absolute paths")
+			}
+		}
+	}
 	if (o.PayloadDir != "" || o.FromPackage || o.ConfigFile != "" || o.AdoptExisting || o.NoStart) &&
 		!contains([]string{ActionInstall, ActionUpgrade, ActionRepair, ActionEnsure}, o.Action) {
 		return bad(fmt.Sprintf("--payload, --from-package, --config, --adopt-existing and --no-start do not apply to %s", o.Action))
@@ -1375,6 +1401,9 @@ type plan struct {
 	// openshell is the sandbox subsystem: its rendered files, user units and
 	// links (openshell.go).
 	openshell *openshellPlan
+	// coworkRetiredDirs are the folders Cowork delivery created that a
+	// plan with delivery off removes once empty (GAP-0035).
+	coworkRetiredDirs []string
 }
 
 // buildPlan computes the desired state without mutating the host. account
@@ -1696,6 +1725,13 @@ func (l *lifecycle) buildPlan(ctx context.Context, record *Deployment, account A
 	if err := l.planOpenShell(p); err != nil {
 		return nil, &codedError{code: codeOpenShell, err: err}
 	}
+	if err := l.planCoworkVM(p, record); err != nil {
+		var coded *codedError
+		if errors.As(err, &coded) {
+			return nil, err
+		}
+		return nil, &codedError{code: codePayload, err: err}
+	}
 
 	// The override a package-kept uninstall wrote over the package's
 	// tmpfiles.d entries goes with the next install.
@@ -1712,6 +1748,9 @@ func (l *lifecycle) buildPlan(ctx context.Context, record *Deployment, account A
 	if record != nil {
 		for path := range record.Files {
 			if !want[path] {
+				if !l.removeCoworkFileAllowed(record, path) {
+					continue
+				}
 				if p.channel == ChannelPackage && env.packageOwns(path) {
 					continue // the package owns the binaries, units and OpenCode plugin now
 				}
@@ -2442,6 +2481,7 @@ func (l *lifecycle) applyAdopting(ctx context.Context, record *Deployment, adopt
 	}
 	newRecord.CreatedServiceAccount = newRecord.CreatedServiceAccount || account.Created
 	newRecord.CreatedDirs = mergeUnique(newRecord.CreatedDirs, createdDirs)
+	newRecord.CreatedDirs = slices.DeleteFunc(newRecord.CreatedDirs, func(dir string) bool { return slices.Contains(p.coworkRetiredDirs, dir) })
 	for _, file := range p.files {
 		newRecord.Files[file.Path] = file.SHA
 	}
@@ -2509,6 +2549,7 @@ func (l *lifecycle) applyAdopting(ctx context.Context, record *Deployment, adopt
 	}
 	l.settleRejectedConfig()
 	env.discardSnapshot(snap)
+	l.removeRetiredCoworkDirs(p)
 	r.Installed = true
 	r.InstalledVersion = newRecord.ProductVersion
 	// Accounts follow the committed deployment: a daemon without a running
@@ -2639,6 +2680,12 @@ func (l *lifecycle) applyDirs(p *plan) ([]string, error) {
 	created := []string{}
 	for _, dir := range p.dirs {
 		path := env.P(dir.Path)
+		// Cowork's owned folders: the public leaf outside the install tree
+		// and the lifecycle cache. Track their creation for disable and
+		// uninstall while still repairing their modes.
+		if (dir.Path == macCoworkDir || dir.Path == env.coworkCacheDir()) && !dir.External && !exists(path) {
+			created = append(created, dir.Path)
+		}
 		if dir.External {
 			if exists(path) {
 				if info, err := os.Lstat(path); err == nil && (info.Mode()&os.ModeSymlink != 0 || !info.IsDir()) {
@@ -3560,13 +3607,18 @@ func (l *lifecycle) ensureNoop(ctx context.Context, record *Deployment) (bool, s
 	if err != nil || !ok || account.UID != record.ServiceUID || account.GID != record.ServiceGID {
 		return false, ""
 	}
+	l.coworkPlanQuiet = true
 	p, err := l.buildPlan(ctx, record, account)
+	l.coworkPlanQuiet = false
 	if err != nil || p.configWritable != "" {
 		// apply reports the same error with rollback semantics, or replaces
 		// a config.yaml another account could write.
 		return false, ""
 	}
 	if p.version != record.ProductVersion || p.channel != record.Channel || p.config.SHA != record.ConfigSHA256 || p.secretsSHA != record.SecretsSHA256 || len(p.stale) > 0 {
+		return false, ""
+	}
+	if env.coworkRetirePending(p) {
 		return false, ""
 	}
 	if l.opts.NoStart != record.NoStart {
@@ -4002,6 +4054,9 @@ func (l *lifecycle) uninstall(ctx context.Context, record *Deployment) int {
 	for _, path := range paths {
 		if path == env.Layout.ConfigPath {
 			continue // machine state: removed with its directory below
+		}
+		if !l.removeCoworkFileAllowed(record, path) {
+			continue
 		}
 		if err := removeFile(env.P(path)); err != nil {
 			errs = append(errs, err)
