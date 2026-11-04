@@ -6,8 +6,10 @@
 package managed
 
 import (
+	"errors"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"golang.org/x/sys/windows"
@@ -90,169 +92,128 @@ func TestStandaloneTrustRefusesDriftedConfigAndManifest(t *testing.T) {
 			if err == nil {
 				t.Fatalf("standalone accepted a %s with a Users writer", tc.file)
 			}
-			if err.Error() != strict.Error() {
+			if !strings.HasPrefix(err.Error(), strict.Error()) {
 				t.Fatalf("standalone error = %q, want the strict verdict %q", err, strict)
+			}
+			var principal *UntrustedPrincipalError
+			if !errors.As(err, &principal) {
+				t.Fatalf("standalone error %v does not carry the untrusted principal", err)
 			}
 		})
 	}
 }
 
-// trustedThenDriftedConfigForTest pins the standalone profile and the
-// service config path, reads config.yaml once while it is trusted (which
-// records its content), then grants BUILTIN\Users write.
-func trustedThenDriftedConfigForTest(t *testing.T) string {
+// openRetainedHandleForTest opens path the way a standard user holding a
+// drift grant would, with full sharing so a trusted rewrite can still replace
+// the name, and returns the handle.
+func openRetainedHandleForTest(t *testing.T, path string, access uint32) windows.Handle {
 	t.Helper()
-	path := driftedPolicyFileForTest(t, "config.yaml")
-	setTestFileDACL(t, path, testDACL(t, canonicalTestDACL), true)
-	pinTrustProfileForTest(t, true)
-	t.Setenv(ConfigPathEnv, path)
-	if err := ValidateTrustedConfigPath(path); err != nil {
-		t.Fatalf("trusted config.yaml refused: %v", err)
-	}
-	setTestFileDACL(t, path, testDACL(t, usersWriteDACL), true)
-	return path
-}
-
-func restampRepairForTest(t *testing.T) func(string) CanonicalOutcome {
-	return func(repaired string) CanonicalOutcome {
-		setTestFileDACL(t, repaired, testDACL(t, canonicalTestDACL), true)
-		return CanonicalRepaired
-	}
-}
-
-// GAP-0561: the service-pinned config.yaml gets its repair attempt first; a
-// repair that leaves the Users writer in place is refused on standalone.
-func TestStandaloneTrustRefusesConfigTheRepairCannotFix(t *testing.T) {
-	path := trustedThenDriftedConfigForTest(t)
-	calls := stubConfigRepairForTest(t, func(string) CanonicalOutcome { return CanonicalBoundary })
-	if err := ValidateTrustedConfigPath(path); err == nil {
-		t.Fatal("standalone accepted config.yaml that the repair could not fix")
-	}
-	if *calls != 1 {
-		t.Fatalf("repair calls = %d, want 1", *calls)
-	}
-}
-
-// Twin: ACL-only drift (the bytes are the ones last read while trusted) ends
-// trusted and accepted on standalone once the repair fixed the descriptor.
-func TestStandaloneTrustAcceptsConfigTheRepairFixed(t *testing.T) {
-	path := trustedThenDriftedConfigForTest(t)
-	calls := stubConfigRepairForTest(t, restampRepairForTest(t))
-	if err := ValidateTrustedConfigPath(path); err != nil {
-		t.Fatalf("standalone refused config.yaml after an ACL-only repair: %v", err)
-	}
-	if *calls != 1 {
-		t.Fatalf("repair calls = %d, want 1", *calls)
-	}
-	if err := ValidateTrustedFilePath(path, "managed config"); err != nil {
-		t.Fatalf("config.yaml is not trusted after the repair: %v", err)
-	}
-}
-
-// GAP-0561 review 1: a user who edited config.yaml through the write grant
-// gains nothing from a repair. The edited bytes are refused with the strict
-// verdict, and the file is left unrepaired so every other process refuses
-// it too.
-func TestStandaloneTrustRefusesConfigEditedBeforeRepair(t *testing.T) {
-	path := trustedThenDriftedConfigForTest(t)
-	if err := os.WriteFile(path, []byte("edited"), 0o600); err != nil {
-		t.Fatalf("edit config.yaml: %v", err)
-	}
-	calls := stubConfigRepairForTest(t, restampRepairForTest(t))
-	strict := ValidateTrustedFilePath(path, "managed config")
-	err := ValidateTrustedConfigPath(path)
-	if err == nil {
-		t.Fatal("standalone accepted config.yaml a user edited before the repair")
-	}
-	if strict == nil || err.Error() != strict.Error() {
-		t.Fatalf("standalone error = %v, want the strict verdict %v", err, strict)
-	}
-	if *calls != 0 {
-		t.Fatalf("repair calls = %d, want none for unproven content", *calls)
-	}
-	if ValidateTrustedFilePath(path, "managed config") == nil {
-		t.Fatal("the edited config.yaml was made to look trusted")
-	}
-}
-
-// GAP-0561 review 2: the repair runs while no other handle can write the
-// file, so a write during the repair fails and the proven bytes are the ones
-// accepted.
-func TestStandaloneTrustBlocksWritesDuringRepair(t *testing.T) {
-	path := trustedThenDriftedConfigForTest(t)
-	var writeErr error
-	stubConfigRepairForTest(t, func(repaired string) CanonicalOutcome {
-		writeErr = os.WriteFile(repaired, []byte("edited"), 0o600)
-		setTestFileDACL(t, repaired, testDACL(t, canonicalTestDACL), true)
-		return CanonicalRepaired
-	})
-	if err := ValidateTrustedConfigPath(path); err != nil {
-		t.Fatalf("standalone refused an ACL-only repair: %v", err)
-	}
-	if writeErr == nil {
-		t.Fatal("a write during the repair succeeded")
-	}
-	if got, err := os.ReadFile(path); err != nil || string(got) != "ok" {
-		t.Fatalf("config.yaml = %q, %v; want the proven bytes", got, err)
-	}
-}
-
-// GAP-0561 review 2: a write handle opened during the drift keeps working
-// after a DACL change. While it is open the repair does not run, and the
-// file keeps the descriptor the strict check refuses, so a fresh process
-// refuses it too; bytes written through it are refused, without a repair,
-// after it closes.
-func TestStandaloneTrustRefusesConfigWithRetainedWriteHandle(t *testing.T) {
-	path := trustedThenDriftedConfigForTest(t)
-	calls := stubConfigRepairForTest(t, restampRepairForTest(t))
-	handle, err := os.OpenFile(path, os.O_RDWR, 0)
+	pointer, err := windows.UTF16PtrFromString(path)
 	if err != nil {
-		t.Fatalf("open a write handle during the drift: %v", err)
-	}
-	if err := ValidateTrustedConfigPath(path); err == nil {
-		t.Fatal("standalone accepted config.yaml while another handle could write it")
-	}
-	if ValidateTrustedFilePath(path, "managed config") == nil {
-		t.Fatal("config.yaml was made to look trusted while another handle could write it")
-	}
-	if _, err := handle.WriteAt([]byte("edited"), 0); err != nil {
-		t.Fatalf("write through the retained handle: %v", err)
-	}
-	if err := handle.Close(); err != nil {
 		t.Fatal(err)
 	}
-	if err := ValidateTrustedConfigPath(path); err == nil {
-		t.Fatal("standalone accepted bytes written through a retained handle")
+	handle, err := windows.CreateFile(pointer, access,
+		windows.FILE_SHARE_READ|windows.FILE_SHARE_WRITE|windows.FILE_SHARE_DELETE,
+		nil, windows.OPEN_EXISTING, windows.FILE_ATTRIBUTE_NORMAL, 0)
+	if err != nil {
+		t.Fatalf("open retained handle: %v", err)
 	}
-	if *calls != 0 {
-		t.Fatalf("repair calls = %d, want none", *calls)
+	t.Cleanup(func() { _ = windows.CloseHandle(handle) })
+	return handle
+}
+
+// trustedRewriteForTest is what Setup does: a fresh file under the canonical
+// descriptor, moved over the old name, so a handle to the old file points at
+// the replaced object.
+func trustedRewriteForTest(t *testing.T, path string, content []byte) {
+	t.Helper()
+	fresh := path + ".setup"
+	if err := os.WriteFile(fresh, content, 0o600); err != nil {
+		t.Fatal(err)
 	}
-	// A fresh process has no record of the trusted read and only the
-	// descriptor, which still refuses.
-	trustedContentDigests.Range(func(key, _ any) bool {
-		trustedContentDigests.Delete(key)
-		return true
-	})
-	if err := ValidateTrustedConfigPath(path); err == nil {
-		t.Fatal("a fresh standalone process accepted the edited config.yaml")
+	setTestFileDACL(t, fresh, testDACL(t, canonicalTestDACL), true)
+	from, err := windows.UTF16PtrFromString(fresh)
+	if err != nil {
+		t.Fatal(err)
 	}
-	if *calls != 0 {
-		t.Fatalf("repair calls = %d, want none", *calls)
+	to, err := windows.UTF16PtrFromString(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := windows.MoveFileEx(from, to, windows.MOVEFILE_REPLACE_EXISTING|windows.MOVEFILE_WRITE_THROUGH); err != nil {
+		t.Fatalf("replace %s: %v", path, err)
 	}
 }
 
-// A process that never read config.yaml while it was trusted has no
-// provenance for its bytes, so a drifted file is refused without a repair.
-func TestStandaloneTrustRefusesDriftedConfigWithoutProvenance(t *testing.T) {
+// GAP-0561 review 3: on standalone a drifted config.yaml is never repaired in
+// place, not even the service-pinned one; it is refused with the strict
+// verdict plus what to run, and keeps the descriptor every process refuses.
+func TestStandaloneTrustNeverRepairsDriftedConfigInPlace(t *testing.T) {
 	path := driftedPolicyFileForTest(t, "config.yaml")
 	pinTrustProfileForTest(t, true)
 	t.Setenv(ConfigPathEnv, path)
-	calls := stubConfigRepairForTest(t, restampRepairForTest(t))
-	if err := ValidateTrustedConfigPath(path); err == nil {
-		t.Fatal("standalone accepted drifted config.yaml with no trusted read")
+	calls := stubConfigRepairForTest(t, func(repaired string) CanonicalOutcome {
+		setTestFileDACL(t, repaired, testDACL(t, canonicalTestDACL), true)
+		return CanonicalRepaired
+	})
+	err := ValidateTrustedConfigPath(path)
+	if err == nil {
+		t.Fatal("standalone accepted a drifted config.yaml")
+	}
+	if !strings.Contains(err.Error(), "Setup /ensure") {
+		t.Fatalf("standalone refusal %q does not say how to recover", err)
 	}
 	if *calls != 0 {
-		t.Fatalf("repair calls = %d, want none", *calls)
+		t.Fatalf("repair calls = %d, want none on standalone", *calls)
+	}
+	if ValidateTrustedFilePath(path, "managed config") == nil {
+		t.Fatal("the drifted config.yaml was made to look trusted")
+	}
+}
+
+// GAP-0561 review 3: writes through a write or WRITE_DAC handle opened
+// during the drift leave the file refused while the drift is in place. Only a
+// trusted rewrite recovers it, and a handle to the old file cannot change the
+// new one.
+func TestStandaloneTrustRecoversOnlyThroughTrustedRewrite(t *testing.T) {
+	path := driftedPolicyFileForTest(t, "config.yaml")
+	pinTrustProfileForTest(t, true)
+	t.Setenv(ConfigPathEnv, path)
+	calls := stubConfigRepairForTest(t, func(string) CanonicalOutcome { return CanonicalRepaired })
+	writer := openRetainedHandleForTest(t, path, windows.GENERIC_READ|windows.GENERIC_WRITE)
+	dacl := openRetainedHandleForTest(t, path, windows.READ_CONTROL|windows.WRITE_DAC)
+	var written uint32
+	if err := windows.WriteFile(writer, []byte("edited"), &written, nil); err != nil {
+		t.Fatalf("write through the retained handle: %v", err)
+	}
+	everyone := testDACL(t, "D:P(A;;FA;;;SY)(A;;FA;;;BA)(A;;FA;;;WD)")
+	if err := windows.SetSecurityInfo(dacl, windows.SE_FILE_OBJECT,
+		windows.DACL_SECURITY_INFORMATION|windows.PROTECTED_DACL_SECURITY_INFORMATION, nil, nil, everyone, nil); err != nil {
+		t.Fatalf("regrant through the retained WRITE_DAC handle: %v", err)
+	}
+	if err := ValidateTrustedConfigPath(path); err == nil {
+		t.Fatal("standalone accepted config.yaml after writes through retained handles")
+	}
+
+	trustedRewriteForTest(t, path, []byte("approved"))
+	if err := ValidateTrustedConfigPath(path); err != nil {
+		t.Fatalf("standalone refused config.yaml after a trusted rewrite: %v", err)
+	}
+	if err := windows.WriteFile(writer, []byte("late edit"), &written, nil); err != nil {
+		t.Fatalf("write through the old handle: %v", err)
+	}
+	if err := windows.SetSecurityInfo(dacl, windows.SE_FILE_OBJECT,
+		windows.DACL_SECURITY_INFORMATION|windows.PROTECTED_DACL_SECURITY_INFORMATION, nil, nil, everyone, nil); err != nil {
+		t.Fatalf("regrant through the old WRITE_DAC handle: %v", err)
+	}
+	if got, err := os.ReadFile(path); err != nil || string(got) != "approved" {
+		t.Fatalf("config.yaml = %q, %v after old-handle writes; want the rewritten bytes", got, err)
+	}
+	if err := ValidateTrustedConfigPath(path); err != nil {
+		t.Fatalf("an old handle changed the rewritten config.yaml: %v", err)
+	}
+	if *calls != 0 {
+		t.Fatalf("repair calls = %d, want none on standalone", *calls)
 	}
 }
 

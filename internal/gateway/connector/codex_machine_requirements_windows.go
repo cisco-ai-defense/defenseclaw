@@ -2134,18 +2134,17 @@ func WindowsCodexManagedHookContract(hookBinary string) string {
 // logged on Secure Client so it never stops reconcile, verify or the hook,
 // and refused on standalone (GAP-0561).
 //
-// On standalone the repair runs only through managed.RepairWithContentProof:
-// a repair restores the descriptor, not hooks an untrusted writer removed,
-// and an unproven file keeps the descriptor every process refuses (GAP-0561
-// reviews 1 and 2).
+// On standalone a drifted file is refused with the strict verdict and never
+// repaired in place (managed.StandaloneRefusesContentDrift): a repair restores
+// the descriptor, not hooks an untrusted writer removed. Setup /repair
+// rewrites it (GAP-0561).
 func ensureWindowsCodexMachineFileTrust(path, label string, repairable bool) error {
-	needsProof := managed.StandaloneRepairNeedsProvenance()
 	strictErr := windowsCodexMachineTrustedFileCheck(path, label)
 	if strictErr == nil {
-		if needsProof {
-			managed.RecordTrustedContent(path)
-		}
 		return nil
+	}
+	if managed.StandaloneRefusesContentDrift() {
+		return managed.RefuseStandaloneContentDrift(strictErr)
 	}
 	if err := windowsCodexMachineStructureFileCheck(path, label); err != nil {
 		return err
@@ -2162,21 +2161,7 @@ func ensureWindowsCodexMachineFileTrust(path, label string, repairable bool) err
 		reason = drift.Reason() + ": " + reason
 	}
 	if repairable && driftErr == nil && !drift.Canonical && windowsManagedCanRepair() {
-		var repairErr error
-		repair := func() { repairErr = repairWindowsCodexMachineFileProtection(path) }
-		proven := true
-		if needsProof {
-			proven = managed.RepairWithContentProof(path, repair)
-		} else {
-			repair()
-		}
-		if !proven {
-			if repairErr != nil {
-				return errors.Join(strictErr, repairErr)
-			}
-			return strictErr
-		}
-		if repairErr != nil {
+		if repairErr := repairWindowsCodexMachineFileProtection(path); repairErr != nil {
 			reason += "; repair failed: " + repairErr.Error()
 		} else if recheckErr := windowsCodexMachineTrustedFileCheck(path, label); recheckErr == nil {
 			emitManagedRepairResilience(drift, true, path,
@@ -2189,11 +2174,7 @@ func ensureWindowsCodexMachineFileTrust(path, label string, repairable bool) err
 			reason = "re-stamped leaf; remaining: " + recheckErr.Error()
 		}
 	}
-	// A standalone process keeps the strict verdict once the repair had its
-	// chance: the drift acceptance is for the Secure Client tree, and a
-	// standard user who can write this file could remove the DefenseClaw
-	// hooks from Codex (GAP-0561).
-	if managed.TrustStrictAncestors() || managed.WindowsStandaloneTrustScope() {
+	if managed.TrustStrictAncestors() {
 		return strictErr
 	}
 	emitManagedResilience(managedDriftMarker(drift, false, true), path,

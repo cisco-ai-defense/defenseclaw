@@ -16,10 +16,10 @@ import (
 )
 
 // GAP-0561: on the standalone profile the guardian manifest gate refuses a
-// targets.yaml whose untrusted writer the repair did not remove, or whose
-// bytes are not the ones last read while it was trusted, and accepts ACL-only
-// drift once a repair has made it trusted. The Secure Client twin is
-// TestEnterpriseHooksReconcileManagedUntrustedWriterOnManifest.
+// drifted targets.yaml with the strict verdict and never repairs it in place,
+// so a handle kept from the drift cannot leave an edited roster under a
+// trusted descriptor; only a trusted rewrite recovers it. The Secure Client
+// twin is TestEnterpriseHooksReconcileManagedUntrustedWriterOnManifest.
 func TestEnterpriseHookManifestTrustCheckStandaloneDrift(t *testing.T) {
 	skipIfLocalSystem(t, "LocalSystem owns its t.TempDir() tree, so the fixture cannot stand in for a file a standard account owns")
 	check := enterpriseHookManifestFileTrustCheck
@@ -30,129 +30,86 @@ func TestEnterpriseHookManifestTrustCheckStandaloneDrift(t *testing.T) {
 	enterpriseHooksRuntimeGOOS = func() string { return "windows" }
 	t.Setenv(managed.TrustStrictAncestorsEnv, "")
 	t.Setenv(managed.EnterpriseProfileEnv, managed.ProfileStandalone)
-
-	// write creates targets.yaml, reads it once through the gate while it is
-	// trusted (which records its content), then grants Everyone write.
-	write := func(t *testing.T) string {
-		t.Helper()
-		path := filepath.Join(t.TempDir(), "targets.yaml")
-		if err := os.WriteFile(path, []byte("version: 1\ntargets: []\n"), 0o600); err != nil {
-			t.Fatalf("write manifest: %v", err)
-		}
+	calls := 0
+	enterpriseHookManifestACLRepair = func(path string) error {
+		calls++
 		ownerOnlyDACLForTest(t, path)
-		if err := check(path); err != nil {
-			t.Fatalf("trusted manifest refused: %v", err)
-		}
-		grantUntrustedWriterForTest(t, path)
-		return path
+		return nil
 	}
 
-	t.Run("unrepaired drift is refused", func(t *testing.T) {
-		manifest := write(t)
-		calls := 0
-		enterpriseHookManifestACLRepair = func(string) error { calls++; return nil }
-		err := check(manifest)
-		if err == nil {
-			t.Fatal("standalone accepted a guardian manifest with an Everyone writer")
-		}
-		if calls != 1 {
-			t.Fatalf("repair calls = %d, want 1", calls)
-		}
-		if !strings.Contains(err.Error(), "untrusted Windows principal") {
-			t.Fatalf("manifest trust error = %v, want the strict untrusted-writer verdict", err)
-		}
-	})
+	manifest := filepath.Join(t.TempDir(), "targets.yaml")
+	if err := os.WriteFile(manifest, []byte("version: 1\ntargets: []\n"), 0o600); err != nil {
+		t.Fatalf("write manifest: %v", err)
+	}
+	ownerOnlyDACLForTest(t, manifest)
+	if err := check(manifest); err != nil {
+		t.Fatalf("trusted manifest refused: %v", err)
+	}
+	grantUntrustedWriterForTest(t, manifest)
+	writer := openManifestHandleForTest(t, manifest, windows.GENERIC_READ|windows.GENERIC_WRITE)
 
-	t.Run("repaired ACL-only drift is accepted", func(t *testing.T) {
-		manifest := write(t)
-		enterpriseHookManifestACLRepair = func(path string) error {
-			ownerOnlyDACLForTest(t, path)
-			return nil
-		}
-		if err := check(manifest); err != nil {
-			t.Fatalf("standalone refused a guardian manifest the repair made trusted: %v", err)
-		}
-	})
+	err := check(manifest)
+	if err == nil || !strings.Contains(err.Error(), "untrusted Windows principal") ||
+		!strings.Contains(err.Error(), "Setup /ensure") {
+		t.Fatalf("drifted manifest = %v, want the strict verdict and the Setup step", err)
+	}
+	if calls != 0 {
+		t.Fatalf("repair calls = %d, want none on standalone", calls)
+	}
+	var written uint32
+	if err := windows.WriteFile(writer, []byte("# edited\n"), &written, nil); err != nil {
+		t.Fatalf("write through the retained handle: %v", err)
+	}
+	if err := check(manifest); err == nil {
+		t.Fatal("standalone accepted a roster written through a retained handle")
+	}
 
-	// GAP-0561 review 1: a roster edited through the write grant is refused
-	// with the strict verdict and left unrepaired.
-	t.Run("edited before repair is refused", func(t *testing.T) {
-		manifest := write(t)
-		if err := os.WriteFile(manifest, []byte("version: 1\ntargets: []\n# edited\n"), 0o600); err != nil {
-			t.Fatalf("edit manifest: %v", err)
-		}
-		calls := 0
-		enterpriseHookManifestACLRepair = func(path string) error {
-			calls++
-			ownerOnlyDACLForTest(t, path)
-			return nil
-		}
-		err := check(manifest)
-		if err == nil || !strings.Contains(err.Error(), "untrusted Windows principal") {
-			t.Fatalf("edited manifest = %v, want the strict untrusted-writer verdict", err)
-		}
-		if calls != 0 {
-			t.Fatalf("repair calls = %d, want none for unproven content", calls)
-		}
-	})
+	// Setup writes a fresh manifest and replaces the old name; the old
+	// handle points at the replaced object.
+	fresh := manifest + ".setup"
+	if err := os.WriteFile(fresh, []byte("version: 1\ntargets: []\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	ownerOnlyDACLForTest(t, fresh)
+	from, _ := windows.UTF16PtrFromString(fresh)
+	to, _ := windows.UTF16PtrFromString(manifest)
+	if err := windows.MoveFileEx(from, to, windows.MOVEFILE_REPLACE_EXISTING|windows.MOVEFILE_WRITE_THROUGH); err != nil {
+		t.Fatalf("replace manifest: %v", err)
+	}
+	if err := check(manifest); err != nil {
+		t.Fatalf("standalone refused a manifest Setup rewrote: %v", err)
+	}
+	if err := windows.WriteFile(writer, []byte("# late edit\n"), &written, nil); err != nil {
+		t.Fatalf("write through the old handle: %v", err)
+	}
+	if got, err := os.ReadFile(manifest); err != nil || string(got) != "version: 1\ntargets: []\n" {
+		t.Fatalf("manifest = %q, %v after an old-handle write; want the rewritten roster", got, err)
+	}
+	if calls != 0 {
+		t.Fatalf("repair calls = %d, want none on standalone", calls)
+	}
+}
 
-	// GAP-0561 review 2: the repair runs while no other handle can write
-	// the manifest.
-	t.Run("writes during the repair are blocked", func(t *testing.T) {
-		manifest := write(t)
-		var writeErr error
-		enterpriseHookManifestACLRepair = func(path string) error {
-			writeErr = os.WriteFile(path, []byte("version: 1\ntargets: []\n# edited\n"), 0o600)
-			ownerOnlyDACLForTest(t, path)
-			return nil
-		}
-		if err := check(manifest); err != nil {
-			t.Fatalf("standalone refused an ACL-only manifest repair: %v", err)
-		}
-		if writeErr == nil {
-			t.Fatal("a write during the manifest repair succeeded")
-		}
-	})
-
-	// GAP-0561 review 2: a write handle kept from the drift blocks the
-	// repair, so the manifest keeps the descriptor every process refuses,
-	// and bytes written through it are refused after it closes.
-	t.Run("retained write handle is refused", func(t *testing.T) {
-		manifest := write(t)
-		calls := 0
-		enterpriseHookManifestACLRepair = func(path string) error {
-			calls++
-			ownerOnlyDACLForTest(t, path)
-			return nil
-		}
-		handle, err := os.OpenFile(manifest, os.O_RDWR, 0)
-		if err != nil {
-			t.Fatalf("open a write handle during the drift: %v", err)
-		}
-		if err := check(manifest); err == nil {
-			t.Fatal("standalone accepted a manifest another handle could write")
-		}
-		if managed.ValidateTrustedFilePath(manifest, "hook guardian manifest") == nil {
-			t.Fatal("the manifest was made to look trusted while another handle could write it")
-		}
-		if _, err := handle.WriteAt([]byte("# edited\n"), 0); err != nil {
-			t.Fatalf("write through the retained handle: %v", err)
-		}
-		if err := handle.Close(); err != nil {
-			t.Fatal(err)
-		}
-		if err := check(manifest); err == nil {
-			t.Fatal("standalone accepted a roster written through a retained handle")
-		}
-		if calls != 0 {
-			t.Fatalf("repair calls = %d, want none", calls)
-		}
-	})
+func openManifestHandleForTest(t *testing.T, path string, access uint32) windows.Handle {
+	t.Helper()
+	pointer, err := windows.UTF16PtrFromString(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	handle, err := windows.CreateFile(pointer, access,
+		windows.FILE_SHARE_READ|windows.FILE_SHARE_WRITE|windows.FILE_SHARE_DELETE,
+		nil, windows.OPEN_EXISTING, windows.FILE_ATTRIBUTE_NORMAL, 0)
+	if err != nil {
+		t.Fatalf("open retained handle: %v", err)
+	}
+	t.Cleanup(func() { _ = windows.CloseHandle(handle) })
+	return handle
 }
 
 // ownerOnlyDACLForTest stamps a protected DACL that grants only SYSTEM and
-// Administrators, the shape the manifest repair leaves; the owner keeps its
-// implicit WRITE_DAC. An OWNER RIGHTS entry would be an untrusted writer.
+// Administrators, the shape Setup and the manifest repair leave; the owner
+// keeps its implicit WRITE_DAC. An OWNER RIGHTS entry would be an untrusted
+// writer.
 func ownerOnlyDACLForTest(t *testing.T, path string) {
 	t.Helper()
 	descriptor, err := windows.SecurityDescriptorFromString("D:P(A;;FA;;;SY)(A;;FA;;;BA)")
@@ -166,6 +123,6 @@ func ownerOnlyDACLForTest(t *testing.T, path string) {
 	if err := windows.SetNamedSecurityInfo(path, windows.SE_FILE_OBJECT,
 		windows.DACL_SECURITY_INFORMATION|windows.PROTECTED_DACL_SECURITY_INFORMATION,
 		nil, nil, dacl, nil); err != nil {
-		t.Fatalf("repair DACL on %s: %v", path, err)
+		t.Fatalf("set DACL on %s: %v", path, err)
 	}
 }

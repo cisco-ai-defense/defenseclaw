@@ -43,54 +43,33 @@ type UntrustedPrincipalError struct {
 
 func (e *UntrustedPrincipalError) Error() string { return e.text }
 
-// ValidateTrustedConfigPath validates config.yaml. Drift on its owner or DACL
-// is repaired first when the caller can (a LocalSystem service or an elevated
-// administrator; never the gateway, whose token cannot re-ACL it), and the
-// strict check runs again. On standalone the repair runs only through
-// RepairWithContentProof (trust_content.go): a repair restores the
-// descriptor, not the content an untrusted writer may have changed. What
-// survives is handled by ValidateTrustedPolicyFilePath: accepted and logged on
-// Secure Client, refused with the strict verdict on standalone (GAP-0561).
-// Structural failures stay fatal.
+// ValidateTrustedConfigPath validates config.yaml. On Secure Client drift on
+// its owner or DACL is repaired first when the caller can (a LocalSystem
+// service or an elevated administrator; never the gateway, whose token cannot
+// re-ACL it), the strict check runs again, and what survives is accepted and
+// logged by ValidateTrustedPolicyFilePath. On standalone a drifted
+// config.yaml is refused with the strict verdict and never repaired in place
+// (StandaloneRefusesContentDrift, GAP-0561). Structural failures stay fatal.
 func ValidateTrustedConfigPath(path string) error {
 	const label = "managed config"
-	needsProof := StandaloneRepairNeedsProvenance()
 	err := ValidateTrustedFilePath(path, label)
-	if err == nil {
-		if needsProof {
-			RecordTrustedContent(path)
-		}
-		return nil
+	if err != nil && StandaloneRefusesContentDrift() {
+		return RefuseStandaloneContentDrift(err)
 	}
-	if trustStrictAncestors() {
+	if err == nil || trustStrictAncestors() {
 		return err
 	}
 	// Only the service-pinned managed config is ever re-stamped, never an
 	// arbitrary path a caller passed in.
 	if pinned := strings.TrimSpace(os.Getenv(ConfigPathEnv)); pinned != "" &&
 		strings.EqualFold(filepath.Clean(pinned), filepath.Clean(path)) {
-		repaired := false
-		var ensureErr error
-		repair := func() {
-			var result CanonicalResult
-			result, ensureErr = windowsConfigEnsureCanonical(path, ObjectConfigFile, CanonicalOptions{})
-			repaired = ensureErr == nil && result.Outcome == CanonicalRepaired
-		}
-		proven := true
-		if needsProof {
-			proven = RepairWithContentProof(path, repair)
-		} else {
-			repair()
-		}
+		result, ensureErr := windowsConfigEnsureCanonical(path, ObjectConfigFile, CanonicalOptions{})
 		if ensureErr != nil {
 			return errors.Join(err, ensureErr)
 		}
-		if proven && repaired && ValidateTrustedFilePath(path, label) == nil {
+		if result.Outcome == CanonicalRepaired && ValidateTrustedFilePath(path, label) == nil {
 			return nil
 		}
-	}
-	if needsProof {
-		return err
 	}
 	return ValidateTrustedPolicyFilePath(path, label)
 }
