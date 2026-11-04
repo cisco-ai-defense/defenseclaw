@@ -180,6 +180,15 @@ func TestWindowsClaudeManagedHooksOnlyChangeNeedsNoAccountSession(t *testing.T) 
 		t.Fatalf("repair in the account's session: %v", err)
 	}
 
+	// A Secure Client process never writes the lock, even with a real change
+	// pending on DefenseClaw's own drop-in: only the standalone gate stops it.
+	setStandaloneProfileForTest(t, false)
+	SetWindowsClaudeManagedHooksOnlyPolicy(func() bool { return true })
+	if written, err := ApplyWindowsClaudeManagedHooksOnlyLock(); err != nil || written {
+		t.Fatalf("Secure Client: written=%v err=%v, want nothing written", written, err)
+	}
+	setStandaloneProfileForTest(t, true)
+
 	// A drop-in edited outside DefenseClaw is not a setting change.
 	original, err := os.ReadFile(fixture.policyPath)
 	if err != nil {
@@ -200,9 +209,4 @@ func TestWindowsClaudeManagedHooksOnlyChangeNeedsNoAccountSession(t *testing.T) 
 		t.Fatal("Verify accepted a drop-in edited outside DefenseClaw")
 	}
 
-	// A Secure Client process never writes the lock.
-	setStandaloneProfileForTest(t, false)
-	if written, err := ApplyWindowsClaudeManagedHooksOnlyLock(); err != nil || written {
-		t.Fatalf("Secure Client: written=%v err=%v, want nothing written", written, err)
-	}
 }
