@@ -680,7 +680,7 @@ class WindowsManagedVenvResetTests(unittest.TestCase):
             output = (uninstall.stdout + uninstall.stderr).decode("utf-8")
             self.assertEqual(uninstall.returncode, 0, output)
             self.assertIn("deferred cleanup: scheduled", output)
-            match = re.search(r"result: ([^)]+\.json)", output)
+            match = re.search(r"the result is written to (.+?\.json), kept for you to read", output)
             self.assertIsNotNone(match, output)
             status_path = Path(match.group(1))
 
