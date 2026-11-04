@@ -498,7 +498,7 @@ func claudeCodeHandlerInEarlierReleaseForm(
 			posixHookCommandWord(filepath.Dir(filepath.Dir(script)))
 		if rest == homeArg ||
 			(strings.HasPrefix(rest, homeArg+" --api-addr ") &&
-				claudeCodeLoopbackGatewayEndpoint("http://"+strings.TrimPrefix(rest, homeArg+" --api-addr "))) {
+				claudeCodeRollbackAPIAddr(strings.TrimPrefix(rest, homeArg+" --api-addr "))) {
 			handler["command"] = script
 			return true
 		}
@@ -509,4 +509,12 @@ func claudeCodeHandlerInEarlierReleaseForm(
 	}
 	handler["command"] = script
 	return true
+}
+
+// claudeCodeRollbackAPIAddr accepts only the exact shell word this release
+// renders for a local gateway address, including a quoted bracketed IPv6 word.
+func claudeCodeRollbackAPIAddr(rendered string) bool {
+	addr, rest, ok := posixHookCommandSplit(rendered)
+	return ok && rest == "" && posixHookCommandWord(addr) == rendered &&
+		claudeCodeLoopbackGatewayEndpoint("http://"+addr)
 }
