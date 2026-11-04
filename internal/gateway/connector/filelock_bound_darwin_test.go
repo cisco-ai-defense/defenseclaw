@@ -302,3 +302,90 @@ func TestR108MAINREVP3SecureClientLockWaitTwin(t *testing.T) {
 		t.Fatalf("Secure Client lock: err=%v callback=%v, want bounded wait", err, ran)
 	}
 }
+
+func TestR108MAINREVP3OrdinaryReplacedPersistentLock(t *testing.T) {
+	for _, profile := range []struct {
+		name       string
+		deployment string
+		enterprise string
+	}{
+		{"per-user", "", ""},
+		{"standalone", managed.DeploymentModeManagedEnterprise, managed.ProfileStandalone},
+	} {
+		t.Run(profile.name, func(t *testing.T) {
+			t.Setenv(managed.DeploymentModeEnv, profile.deployment)
+			t.Setenv(managed.EnterpriseProfileEnv, profile.enterprise)
+			lockPath := filepath.Join(t.TempDir(), ".token.lock")
+			releaseOld := holdFlock(t, lockPath)
+			oldReleased := false
+			defer func() {
+				if !oldReleased {
+					releaseOld()
+				}
+			}()
+			waiter, err := os.OpenFile(lockPath, os.O_RDWR, 0)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer waiter.Close()
+			result := make(chan error, 1)
+			go func() {
+				var deadline time.Time
+				result <- acquireFlock(waiter, lockPath, &deadline)
+			}()
+
+			if err := os.Remove(lockPath); err != nil {
+				t.Fatal(err)
+			}
+			releaseNew := holdFlock(t, lockPath)
+			defer releaseNew()
+			releaseOld()
+			oldReleased = true
+			select {
+			case err := <-result:
+				if !errors.Is(err, errLockReplaced) {
+					t.Fatalf("replaced persistent lock: got %v, want errLockReplaced", err)
+				}
+			case <-time.After(5 * time.Second):
+				t.Fatal("waiter did not finish after old lock released")
+			}
+		})
+	}
+}
+
+func TestR108MAINREVP3OrdinaryReleasedPersistentLockTwin(t *testing.T) {
+	t.Setenv(managed.DeploymentModeEnv, "")
+	t.Setenv(managed.EnterpriseProfileEnv, "")
+	lockPath := filepath.Join(t.TempDir(), ".token.lock")
+	release := holdFlock(t, lockPath)
+	released := false
+	defer func() {
+		if !released {
+			release()
+		}
+	}()
+	waiter, err := os.OpenFile(lockPath, os.O_RDWR, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer waiter.Close()
+	result := make(chan error, 1)
+	go func() {
+		var deadline time.Time
+		result <- acquireFlock(waiter, lockPath, &deadline)
+	}()
+	release()
+	released = true
+	select {
+	case err := <-result:
+		if err != nil {
+			t.Fatalf("released persistent lock: %v", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("waiter did not finish after lock released")
+	}
+	if !lockStillNamesFile(waiter, lockPath) {
+		t.Fatal("released persistent lock no longer names the acquired inode")
+	}
+	_ = syscall.Flock(int(waiter.Fd()), syscall.LOCK_UN)
+}

@@ -37,12 +37,19 @@ var lockBusyStreaks = struct {
 const lockBusyStreakGap = 10 * time.Minute
 
 // acquireFlock blocks for ordinary profiles and uses a bounded retry for
-// Secure Client. The bounded path confirms that lockPath still names the
-// locked inode. Its deadline is shared by retries after a replaced file, so
-// the whole acquisition waits at most userLockWait.
+// Secure Client. Both paths confirm that lockPath still names the locked
+// inode. The bounded deadline is shared by retries after a replaced file,
+// so the whole acquisition waits at most userLockWait.
 func acquireFlock(file *os.File, lockPath string, deadline *time.Time) error {
 	if !secureClientManagedRuntime() {
-		return syscall.Flock(int(file.Fd()), syscall.LOCK_EX)
+		if err := syscall.Flock(int(file.Fd()), syscall.LOCK_EX); err != nil {
+			return err
+		}
+		if lockStillNamesFile(file, lockPath) {
+			return nil
+		}
+		_ = syscall.Flock(int(file.Fd()), syscall.LOCK_UN)
+		return errLockReplaced
 	}
 	if deadline.IsZero() {
 		*deadline = time.Now().Add(userLockWait)
