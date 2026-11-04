@@ -9825,89 +9825,6 @@ function Get-DefenseClawServiceChecked {
     }
 }
 
-function Read-DefenseClawPrefixedServiceQuery {
-    # The only SCM query that lists more than one service. Callers need the
-    # DefenseClaw* scopes, so it asks the SCM for those names alone:
-    # Get-Service on PowerShell 7.4 and 7.5 opens every service it returns to
-    # read its configuration, and on Windows 11 24H2 SYSTEM cannot read
-    # IsolationSession, so an unfiltered Get-Service -ErrorAction Stop failed
-    # ensure with 1603 and rolled the install back (GAP-0023). Query errors
-    # are returned, not thrown, so Get-DefenseClawPrefixedServices decides
-    # which ones matter. The GAP-0023 smoke replaces the Get-Service call
-    # below (not this function) to inject them.
-    $queryErrors = $null
-    $services = @(Microsoft.PowerShell.Management\Get-Service `
-        -Name 'DefenseClaw*' `
-        -ErrorAction SilentlyContinue `
-        -ErrorVariable queryErrors)
-    return [pscustomobject]@{
-        Services = $services
-        Errors = @($queryErrors)
-    }
-}
-
-function Get-DefenseClawServiceQueryErrorName {
-    param([Parameter(Mandatory)]$ErrorRecord)
-    $target = $null
-    if ($ErrorRecord -is [Management.Automation.ErrorRecord]) {
-        $target = $ErrorRecord.TargetObject
-    }
-    if ($target -is [string]) {
-        return [string]$target
-    }
-    if ($null -ne $target) {
-        foreach ($propertyName in @('ServiceName', 'Name')) {
-            $property = $target.PSObject.Properties[$propertyName]
-            if ($null -ne $property -and
-                -not [string]::IsNullOrEmpty([string]$property.Value)) {
-                return [string]$property.Value
-            }
-        }
-    }
-    return ''
-}
-
-function Get-DefenseClawPrefixedServices {
-    # Every DefenseClaw* service in the SCM, own scope and foreign scopes.
-    # A service this query cannot read fails the call when it is, or may be,
-    # a DefenseClaw service: scope-exclusivity checks must never pass on a
-    # partial view of DefenseClaw. Any other unreadable service is not ours,
-    # so it is skipped and named in the verbose output, never a lifecycle
-    # error.
-    $query = Read-DefenseClawPrefixedServiceQuery
-    foreach ($record in @($query.Errors)) {
-        if ($null -eq $record) { continue }
-        $name = Get-DefenseClawServiceQueryErrorName -ErrorRecord $record
-        $message = if ($record -is [Management.Automation.ErrorRecord]) {
-            [string]$record.Exception.Message
-        }
-        else {
-            [string]$record
-        }
-        if ([string]::IsNullOrEmpty($name)) {
-            throw "DefenseClaw service query failed: $message"
-        }
-        if ($name.StartsWith('DefenseClaw', [StringComparison]::OrdinalIgnoreCase)) {
-            throw "DefenseClaw service $name cannot be read: $message"
-        }
-        # Not dead code, though the name-filtered query never reaches it
-        # today: Get-Service reads the configuration only of the services
-        # -Name matches. It keeps a PowerShell that reads every service
-        # before it filters from failing on a third-party service again (the
-        # GAP-0023 smoke models one).
-        Microsoft.PowerShell.Utility\Write-Verbose (
-            "skipped unreadable non-DefenseClaw service ${name}: $message"
-        )
-    }
-    return @(@($query.Services) | Microsoft.PowerShell.Core\Where-Object {
-            $null -ne $_ -and
-            ([string]$_.Name).StartsWith(
-                'DefenseClaw',
-                [StringComparison]::OrdinalIgnoreCase
-            )
-        })
-}
-
 function Write-DefenseClawLifecyclePhase {
     param([Parameter(Mandatory)][string]$Stage)
     if (Test-DefenseClawStandaloneProfile) {
@@ -24877,6 +24794,30 @@ function Get-DefenseClawSharedManagedHookOwners {
     return @($owners)
 }
 
+# Lists every service SCM will describe. A third-party service whose security
+# descriptor denies query is reported and skipped instead of failing the whole
+# enumeration; it cannot be a DefenseClaw service, whose descriptor the
+# installer applies.
+function Get-DefenseClawServiceInventory {
+    $queryErrors = @()
+    $services = @(Microsoft.PowerShell.Management\Get-Service `
+        -ErrorAction SilentlyContinue `
+        -ErrorVariable queryErrors)
+    foreach ($queryError in @($queryErrors)) {
+        $target = if ($null -ne $queryError.TargetObject) {
+            [string]$queryError.TargetObject
+        }
+        else {
+            ''
+        }
+        Write-DefenseClawResilienceEvent -Marker defenseclaw_accept -Fields @{
+            service = $target
+            reason  = "service could not be queried: $($queryError.Exception.Message)"
+        }
+    }
+    return $services
+}
+
 function Assert-DefenseClawInstallSharedHookScopeExclusive {
     param(
         [Parameter(Mandatory)][hashtable]$Layout,
@@ -24888,7 +24829,7 @@ function Assert-DefenseClawInstallSharedHookScopeExclusive {
         -Layout $Layout `
         -GatewayServiceName $GatewayServiceName `
         -GuardianServiceName $GuardianServiceName `
-        -Services @(Get-DefenseClawPrefixedServices) `
+        -Services @(Get-DefenseClawServiceInventory) `
         -Operation 'managed-hook install' `
         -ActiveOnly `
         -SharedHookOwners $sharedHookOwners
@@ -24961,7 +24902,7 @@ function Assert-DefenseClawTargetRuntimeCleanupScopeExclusive {
         -Layout $Layout `
         -GatewayServiceName $GatewayServiceName `
         -GuardianServiceName $GuardianServiceName `
-        -Services @(Get-DefenseClawPrefixedServices) `
+        -Services @(Get-DefenseClawServiceInventory) `
         -Operation 'shared target runtime cleanup'
     foreach ($receipt in @(Microsoft.PowerShell.Management\Get-ChildItem `
             -LiteralPath ([string]$Layout.LifecycleLockDirectory) `
