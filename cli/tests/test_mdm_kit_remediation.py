@@ -69,6 +69,10 @@ def _fix_script() -> str:
         ], "changes": ["applied the config change in the running gateway"]},
          "0|repaired (ensure_config_applied): applied the config change in the running gateway"),
         ({"ok": True, "noop": False, "errors": [], "warnings": [
+            {"code": "ensure_config_restart", "message": "applied a configuration change and upgraded nothing"},
+        ], "changes": ["applied the administrator config"]},
+         "0|repaired (ensure_config_restart): applied the administrator config"),
+        ({"ok": True, "noop": False, "errors": [], "warnings": [
             {"code": "scanner_runtime_unavailable", "message": "runtime missing"},
         ]}, "1603|not repaired (scanner_runtime_unavailable): runtime missing"),
         ({"ok": True, "noop": False, "errors": [], "warnings": [

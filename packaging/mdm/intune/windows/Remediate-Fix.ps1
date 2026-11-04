@@ -551,7 +551,7 @@ try {
     # These Windows ensure warnings describe a repair; other warnings are
     # informational and must not be named as the repaired problem.
     $repairWarnings = @($warnings | Where-Object {
-        $null -ne $_ -and @('config_reverted', 'ensure_config_applied') -contains [string]$_.code
+        $null -ne $_ -and @('config_reverted', 'ensure_config_applied', 'ensure_config_restart') -contains [string]$_.code
     } | Select-Object -First 1)
     $specificProblem = $null
     if ($specificErrors.Count -gt 0) { $specificProblem = $specificErrors[0] }
