@@ -709,7 +709,9 @@ func (a *APIServer) lookupOTLPPathToken(source string) string {
 	a.otlpPathTokenLastStatAt[scope] = time.Now()
 
 	tok, err := connector.LoadOTLPPathToken(dataDir, scope)
-	if err != nil && connector.IsManagedPermissionDrift(err) && haveCached {
+	// A credential every local account could read is not drift: the value
+	// may be copied, so the cached token is dropped below (GAP-0566).
+	if err != nil && connector.IsManagedPermissionDrift(err) && !errors.Is(err, connector.ErrCredentialDisclosed) && haveCached {
 		// Owner or writer drift on the token file is not a reason to fail
 		// every OTLP request: keep the cached token and let the guardian
 		// republish the file.
@@ -760,7 +762,9 @@ func (a *APIServer) hookAPITokenMatches(connectorName, presented string) bool {
 		return cached != "" && constantTimeStringMatch(presented, cached)
 	}
 	tok, err := connector.LoadHookAPIToken(dataDir, name)
-	if err != nil && connector.IsManagedPermissionDrift(err) {
+	// A credential every local account could read is not drift: the value
+	// may be copied, so the cached token is dropped below (GAP-0566).
+	if err != nil && connector.IsManagedPermissionDrift(err) && !errors.Is(err, connector.ErrCredentialDisclosed) {
 		// Owner or writer drift on the token file must not reject every hook
 		// request: keep authenticating against the cached token and let the
 		// guardian republish the file.

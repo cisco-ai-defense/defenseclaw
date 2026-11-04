@@ -229,10 +229,11 @@ func otlpWindowsRejectUntrustedReadACEs(path string, dacl *windows.ACL) error {
 	return nil
 }
 
-// otlpWindowsBroadReader returns a permission drift naming the first
-// principal that stands for every local account (Everyone, Users,
+// otlpWindowsBroadReader returns an ErrCredentialDisclosed error naming the
+// first principal that stands for every local account (Everyone, Users,
 // Authenticated Users, Interactive, Guests, Anonymous) with read-like access
-// to a credential, or nil.
+// to a credential, or nil. It is not permission drift: the value may already
+// be copied, so the gateway drops its cached copy and Ensure rotates it.
 func otlpWindowsBroadReader(path string, dacl *windows.ACL) error {
 	readLike := windows.ACCESS_MASK(
 		windows.GENERIC_ALL |
@@ -260,9 +261,9 @@ func otlpWindowsBroadReader(path string, dacl *windows.ACL) error {
 		sid := (*windows.SID)(unsafe.Pointer(&ace.SidStart))
 		for _, kind := range broad {
 			if sid.IsWellKnown(kind) {
-				return managedPermissionDrift(
-					"every local account can read this credential: %s has read access mask 0x%x on %s",
-					hookAPIWindowsSIDString(sid), uint32(ace.Mask), path,
+				return fmt.Errorf(
+					"every local account can read this credential: %s has read access mask 0x%x on %s: %w",
+					hookAPIWindowsSIDString(sid), uint32(ace.Mask), path, ErrCredentialDisclosed,
 				)
 			}
 		}
