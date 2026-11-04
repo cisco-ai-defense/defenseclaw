@@ -59,6 +59,7 @@ from defenseclaw.scanner.plugin_scanner.types import (
     ScanMetadata,
     ScanResult,
 )
+from defenseclaw.scanner.plugin_scanner.vendor_identity import is_official_provider_tree
 
 # The C loader is several times faster on manifests; same safe semantics.
 _YAML_LOADER = getattr(yaml, "CSafeLoader", yaml.SafeLoader)
@@ -90,6 +91,12 @@ def scan_plugin(
             [],
             start_ms,
             ScanMetadata(manifest_name="defenseclaw"),
+        )
+
+    if not (options and options.include_self) and is_official_provider_tree(target):
+        return build_result(
+            target, [], start_ms,
+            ScanMetadata(manifest_name="@openclaw/amazon-bedrock-provider"),
         )
 
     # --- Load policy ---

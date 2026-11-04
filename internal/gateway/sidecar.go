@@ -4566,10 +4566,10 @@ func (s *Sidecar) handleSkillAdmission(r watcher.AdmissionResult) {
 	}()
 }
 
-// sendEnforcementAlert sends a security notification to all active sessions
-// via the gateway's sessions.send RPC so each chat learns about the enforcement.
+// sendEnforcementAlert records an enforcement notice. OpenClaw plugin notices
+// use one request; other notices also reach active sessions through the gateway.
 // Runs in a goroutine to avoid blocking the watcher callback.
-func (s *Sidecar) sendEnforcementAlert(subjectType, subjectName, severity string, findings int, actions []string, reason string) {
+func (s *Sidecar) sendEnforcementAlert(subjectType, subjectName, severity string, findings int, actions []string, reason string, connector ...string) {
 	parent := s.alertCtx
 	if parent == nil {
 		parent = context.Background()
@@ -4591,6 +4591,22 @@ func (s *Sidecar) sendEnforcementAlert(subjectType, subjectName, severity string
 	// rule IDs, scrubs literals) so every path is safe.
 	safeReason := redaction.ForSinkReason(reason)
 	msg := formatEnforcementMessage(subjectType, subjectName, severity, findings, actions, safeReason)
+	standalonePluginNotice := false
+	if subjectType == "plugin" {
+		if cfg := s.currentConfig(); cfg != nil && !cfg.SecureClientIntegration() {
+			owner := ""
+			if len(connector) > 0 {
+				owner = connector[0]
+			}
+			if owner == "" {
+				active := cfg.ActiveConnectors()
+				if len(active) == 1 {
+					owner = active[0]
+				}
+			}
+			standalonePluginNotice = strings.EqualFold(owner, "openclaw")
+		}
+	}
 	notification := SecurityNotification{
 		SubjectType: subjectType,
 		SkillName:   subjectName,
@@ -4598,6 +4614,7 @@ func (s *Sidecar) sendEnforcementAlert(subjectType, subjectName, severity string
 		Findings:    findings,
 		Actions:     actions,
 		Reason:      safeReason,
+		OneShot:     standalonePluginNotice,
 	}
 	if s.notify != nil {
 		s.notify.Push(notification)
@@ -4614,6 +4631,11 @@ func (s *Sidecar) sendEnforcementAlert(subjectType, subjectName, severity string
 			Severity:  severity,
 		}
 		webhooks.Dispatch(event)
+	}
+	if standalonePluginNotice {
+		// Keep this notice tied to one model request and out of the
+		// durable chat transcript. The plugin decision remains in audit.
+		return
 	}
 
 	sessionKeys := s.activeSessionKeys()
@@ -4701,7 +4723,7 @@ func (s *Sidecar) handlePluginAdmission(r watcher.AdmissionResult) {
 	s.alertWg.Add(1)
 	go func() {
 		defer s.alertWg.Done()
-		s.sendEnforcementAlert("plugin", r.Event.Name, r.MaxSeverity, r.FindingCount, actions, r.Reason)
+		s.sendEnforcementAlert("plugin", r.Event.Name, r.MaxSeverity, r.FindingCount, actions, r.Reason, r.Event.Connector)
 	}()
 }
 
