@@ -50,7 +50,7 @@ AI Discovery. The quick-action row at the end of Overview lists both as
 line above the status line is not a key list on Overview: it shows the most
 urgent notice, for example `500 recent critical/high alert events need review.
 Press 2 for Alerts.`, and a rotating tip when there is none; press `?` for
-every key.
+every key. Under 32 rows the Overview cards are four rows tall and the title shares a row with the tagline, so the services and enforcement summaries are on the first screen at 80x24.
 
 Switch panels with the number/letter key shown, from any panel (only an open
 Setup form or a `/` search box types digits and letters), or cycle with `Tab` /
@@ -228,6 +228,14 @@ block NAME`, `defenseclaw mcp allow NAME` or `defenseclaw tool block NAME
 `?` opens the help overlay for the panel you are on. `q` closes an open drawer, overlay or detail, and quits when nothing is open. `Ctrl+C` quits from anywhere.
 
 With two or more connectors, `m` filters most panels by connector.
+
+## Claude Cowork in the TUI
+
+Claude Cowork has no panel. It is a surface of the Claude Code connector, and the TUI shows it in three places.
+
+- **Overview.** Under **Configuration**, a **Cowork** row gives the state (`protected`, `not protected yet`, `not protected` or `not confirmed`) and the clock time of the last Cowork event, or `no Cowork event yet`. While Cowork is not protected, a **Cowork next** row gives the missing step. These are the rows `defenseclaw status` prints, so they show only on a per-user install where Claude Desktop is present or a plugin was built. With the Claude Code connector selected (`m`), the view shows the same rows, or, where there are none, how many Cowork events the gateway has seen since it started. A Cowork call counts as Claude Code traffic, so a Cowork-only user does not get the "0 hook events" note.
+- **Setup.** The **Protect Claude Cowork** task, under **Get protected**, runs `defenseclaw setup cowork --yes`. It builds the plugin zip and sets up the Claude Code connector if it is off. It does not open Claude Desktop and does not wait, so upload the zip as described in [Claude Cowork](/docs/connectors/cowork#set-up-for-one-user). The command palette has the same command as `setup cowork`.
+- **Alerts.** A finding from a Cowork call shows the target `cowork:PreToolUse` in the row and in the detail, and the detail has a `Surface: Cowork (Claude Code)` line. A Claude Code call from the terminal keeps `claudecode:PreToolUse`.
 
 ## Handy keys
 
