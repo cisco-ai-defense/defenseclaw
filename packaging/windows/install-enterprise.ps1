@@ -29,6 +29,9 @@ param(
     [string]$NativeCleanupBinary,
     [string]$Config,
     [string]$Manifest,
+    # Standalone-only authenticated Cowork release inputs.
+    [string]$CoworkPackagePath,
+    [string]$CoworkSignaturePath,
 
     # QA-friendly shorthand: when -Mode + -Connector are supplied and
     # -Config / -Manifest are empty, the installer renders a minimal
@@ -113,6 +116,10 @@ param(
 
 Microsoft.PowerShell.Core\Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
+
+if ($EnterpriseProfile -cne 'Standalone' -and ($CoworkPackagePath -or $CoworkSignaturePath)) {
+    throw 'Cowork release inputs require the standalone enterprise profile'
+}
 
 if ($EnterpriseProfile -ceq 'Standalone') {
     # The standalone lifecycle runs only on the engine, bitness, and
@@ -4531,6 +4538,8 @@ try {
         EnterpriseProfile = $EnterpriseProfile
     }
     if ($EnterpriseProfile -ceq 'Standalone') {
+        if ($CoworkPackagePath) { $arguments['CoworkPackagePath'] = $CoworkPackagePath }
+        if ($CoworkSignaturePath) { $arguments['CoworkSignaturePath'] = $CoworkSignaturePath }
         $arguments['TrustMode'] = $TrustMode
         $arguments['PayloadManifest'] = $PayloadManifest
         $arguments['AllowedSigners'] = [string[]]$bootstrapAllowedSigners

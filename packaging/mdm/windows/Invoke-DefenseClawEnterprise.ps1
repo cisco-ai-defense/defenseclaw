@@ -63,6 +63,8 @@ param(
     [string[]]$AllowedSigners = @(),
     [string]$ConfigPath = '',
     [switch]$ConfigFromStdin,
+    [string]$CoworkPackagePath = '',
+    [string]$CoworkSignaturePath = '',
     [string]$BundlePath = '',
     [string]$TrustAnchorPath = '',
 	[switch]$RefuseCapabilityLoss,
@@ -329,6 +331,8 @@ $script:MaxConfigBytes = 1MB
 $script:MaxSecretBytes = 16KB
 $script:MaxBundleBytes = 4MB
 $script:MaxAnchorBytes = 256KB
+$script:MaxCoworkPackageBytes = 512MB
+$script:MaxCoworkSignatureBytes = 1MB
 $script:Staging = $null
 $script:LogPath = $null
 $script:ResultAction = 'ensure'
@@ -485,8 +489,21 @@ function New-WrapperAdminOnlyDirectory {
 }
 
 function New-WrapperStaging {
-    $windows = [Environment]::GetFolderPath([Environment+SpecialFolder]::Windows)
-    $path = Join-Path $windows ('Temp\defenseclaw-mdm-' + [Guid]::NewGuid().ToString('N'))
+    if ($CoworkPackagePath -or $CoworkSignaturePath) {
+        # Windows\Temp can inherit ordinary-user Delete rights on managed
+        # hosts. Cowork inputs use a protected child of native ProgramData.
+        $programData = [Environment]::GetFolderPath([Environment+SpecialFolder]::CommonApplicationData)
+        if (-not $programData -or $programData -notmatch '^[A-Za-z]:\\') {
+            Exit-Wrapper $script:ExitFailure 'mdm_staging_untrusted' 'the native ProgramData folder could not be resolved for Cowork inputs'
+        }
+        $path = Join-Path $programData ('DefenseClaw-MDM-Cowork-' + [Guid]::NewGuid().ToString('N'))
+        if (-not (Test-WrapperAdminOnlyAncestors -Path $path)) {
+            Exit-Wrapper $script:ExitFailure 'mdm_staging_untrusted' 'the ProgramData source-staging ancestors are not protected'
+        }
+    } else {
+        $windows = [Environment]::GetFolderPath([Environment+SpecialFolder]::Windows)
+        $path = Join-Path $windows ('Temp\defenseclaw-mdm-' + [Guid]::NewGuid().ToString('N'))
+    }
     if (Test-Path -LiteralPath $path) { Exit-Wrapper $script:ExitFailure 'mdm_staging_untrusted' "staging folder $path already exists" }
     New-WrapperAdminOnlyDirectory -Path $path
     $script:Staging = $path
@@ -712,10 +729,13 @@ if ($SecretName) {
 if ($BundlePath -and ($ConfigPath -or $ConfigFromStdin)) {
     Exit-Wrapper $script:ExitInvalid 'mdm_invalid_arguments' '-BundlePath cannot be combined with -ConfigPath or -ConfigFromStdin: the signed bundle carries the config'
 }
+if ($BundlePath -and ($CoworkPackagePath -or $CoworkSignaturePath)) {
+    Exit-Wrapper $script:ExitInvalid 'mdm_invalid_arguments' 'Cowork artifact inputs cannot be combined with -BundlePath; deliver them with an administrator config'
+}
 if ($RefuseCapabilityLoss -and -not $BundlePath) {
 	Exit-Wrapper $script:ExitInvalid 'mdm_invalid_arguments' '-RefuseCapabilityLoss requires -BundlePath'
 }
-if ($normalizedAction -ne 'ensure' -and ($ConfigPath -or $ConfigFromStdin -or $SecretName -or $BundlePath -or $TrustAnchorPath)) {
+if ($normalizedAction -ne 'ensure' -and ($ConfigPath -or $ConfigFromStdin -or $SecretName -or $BundlePath -or $TrustAnchorPath -or $CoworkPackagePath -or $CoworkSignaturePath)) {
     Exit-Wrapper $script:ExitInvalid 'mdm_invalid_arguments' "-Action $Action is read-only and takes no config or secret"
 }
 if ($ProductVersion -and $ProductVersion -notmatch '^v?[0-9]+\.[0-9]+\.[0-9]+([.+-][0-9A-Za-z.+-]+)?$') {
@@ -738,6 +758,22 @@ if ($ConfigFromStdin) {
     Copy-WrapperInput -Source $ConfigPath -Destination $config -Limit $script:MaxConfigBytes -Label 'config' -RequireAdminOnly
 }
 $script:StagedConfig = $config
+# The lifecycle authenticates these private copies against config pins and
+# persists them in its transaction. No wrapper writes the source cache.
+$coworkPackage = ''
+if ($CoworkPackagePath) {
+    $coworkName = [IO.Path]::GetFileName($CoworkPackagePath)
+    if ($coworkName -cnotin @('defenseclaw-cowork-amd64.tar.gz', 'defenseclaw-cowork-arm64.tar.gz')) {
+        Exit-Wrapper $script:ExitInvalid 'mdm_invalid_arguments' '-CoworkPackagePath must name defenseclaw-cowork-amd64.tar.gz or defenseclaw-cowork-arm64.tar.gz'
+    }
+    $coworkPackage = Join-Path $staging $coworkName
+    Copy-WrapperInput -Source $CoworkPackagePath -Destination $coworkPackage -Limit $script:MaxCoworkPackageBytes -Label 'Cowork package'
+}
+$coworkSignature = ''
+if ($CoworkSignaturePath) {
+    $coworkSignature = Join-Path $staging 'cowork-package.sig'
+    Copy-WrapperInput -Source $CoworkSignaturePath -Destination $coworkSignature -Limit $script:MaxCoworkSignatureBytes -Label 'Cowork signature'
+}
 $bundle = ''
 if ($BundlePath) {
     # Signed and hash-checked by the lifecycle on its own copy, so it may
@@ -1261,6 +1297,8 @@ try {
         # '/' + $normalizedAction, 'JSON=1' is one string "/ensure JSON=1".
         $arguments = @(('/' + $normalizedAction), 'JSON=1')
         if ($config) { $arguments += "CONFIG=$config" }
+        if ($coworkPackage) { $arguments += "COWORKPACKAGE=$coworkPackage" }
+        if ($coworkSignature) { $arguments += "COWORKSIGNATURE=$coworkSignature" }
         if ($bundle) { $arguments += "BUNDLE=$bundle" }
         if ($anchors) { $arguments += "TRUSTANCHORS=$anchors" }
 		if ($RefuseCapabilityLoss) { $arguments += 'REFUSECAPABILITYLOSS=1' }
@@ -1274,6 +1312,8 @@ try {
         }
         $arguments = @('enterprise', 'windows', $normalizedAction, '--profile', 'standalone', '--json')
         if ($config) { $arguments += @('--config', $config) }
+        if ($coworkPackage) { $arguments += @('--cowork-package', $coworkPackage) }
+        if ($coworkSignature) { $arguments += @('--cowork-signature', $coworkSignature) }
         if ($bundle) { $arguments += @('--bundle', $bundle) }
         if ($anchors) { $arguments += @('--trust-anchors', $anchors) }
 		if ($RefuseCapabilityLoss) { $arguments += '--refuse-capability-loss' }
