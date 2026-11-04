@@ -225,6 +225,10 @@ def test_managed_custody_reads_the_windows_access_list(tmp_path):
             check=True,
             capture_output=True,
         )
+        # icacls /inheritance:r can keep the profile's inherited entries as
+        # explicit ones (SYSTEM, Administrators, the account), so drop the
+        # Administrators entry: "own" is only this account and SYSTEM.
+        subprocess.run(["icacls", str(path), "/remove:g", "*S-1-5-32-544"], check=True, capture_output=True)
     # The field lock: Administrators full control and a read-only OWNER RIGHTS entry.
     subprocess.run(
         ["icacls", str(managed), "/grant", "*S-1-5-32-544:(F)", "*S-1-3-4:(RC)"], check=True, capture_output=True
