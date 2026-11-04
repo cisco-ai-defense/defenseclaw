@@ -353,6 +353,9 @@ func logHookFailureOf(opts Options, sp spec, reason, category, failMode string, 
 	}
 	frame := append(append([]byte("DCID"), markerLine...), '\n')
 	opts.failureLog.setFallbackFrame(frame)
+	if opts.failureLog.fallbackRecorded() {
+		return
+	}
 	appendMarker := func() bool {
 		marker := opts.failureLog.takeMarker(home)
 		if marker == nil {
@@ -394,6 +397,9 @@ func logHookFailureOf(opts Options, sp spec, reason, category, failMode string, 
 		}
 	}
 	defer f.Close()
+	if opts.failureLog.fallbackRecorded() {
+		return
+	}
 	n, err := f.Write(line)
 	if (err != nil || n != len(line)) && blocked && !opts.ManagedEnterprise && !opts.SecureClient && appendMarker() {
 		return
