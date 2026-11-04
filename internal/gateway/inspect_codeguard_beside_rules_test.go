@@ -108,3 +108,33 @@ func TestWriteCallCodeGuardPanicReachesTheCaller(t *testing.T) {
 	wait()
 	t.Fatal("no panic")
 }
+
+func TestStartCodeGuardOnArgsNilInputs(t *testing.T) {
+	api := &APIServer{}
+	for _, tc := range []struct {
+		name string
+		api  *APIServer
+		req  *ToolInspectRequest
+	}{
+		{name: "request", api: api},
+		{name: "server", req: &ToolInspectRequest{}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			got := tc.api.startCodeGuardOnArgs(context.Background(), tc.req)()
+			if got.complete || len(got.findings) != 0 {
+				t.Fatalf("nil input produced scan: %+v", got)
+			}
+		})
+	}
+	got := api.startCodeGuardOnArgs(context.Background(), &ToolInspectRequest{Args: json.RawMessage(`{}`)})()
+	if got.complete || len(got.findings) != 0 {
+		t.Fatalf("ordinary empty scan = %+v", got)
+	}
+	prior := inspectCodeGuardArgs
+	inspectCodeGuardArgs = nil
+	t.Cleanup(func() { inspectCodeGuardArgs = prior })
+	got = api.startCodeGuardOnArgs(context.Background(), &ToolInspectRequest{})()
+	if got.complete || len(got.findings) != 0 {
+		t.Fatalf("missing scanner produced scan: %+v", got)
+	}
+}

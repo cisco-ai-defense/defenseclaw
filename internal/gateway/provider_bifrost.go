@@ -186,7 +186,7 @@ func evictOldestBifrostTenantLocked() {
 		// below the 8 KiB goroutine stack into the neighbouring heap, and a
 		// later GC dies on the corrupted span (golang/go#81238,
 		// rel-1-0-6:GAP-0550).
-		if entry.client == nil {
+		if entry == nil || entry.client == nil || shutdownEvictedBifrostClient == nil {
 			return
 		}
 		// Shutdown asynchronously so we don't hold the write

@@ -24,6 +24,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"reflect"
 	"runtime"
 	"strconv"
 	"strings"
@@ -752,6 +753,16 @@ const sqliteBusyDetachedReportTimeout = 5 * time.Second
 // fresh native sessions were refused with HTTP 429 while /health answered
 // 200 (rel-1-0-4 GAP-0944).
 func reportSQLiteBusyDetached(ctx context.Context, observer SQLiteBusyObservabilityV8, op string) {
+	if observer == nil {
+		return
+	}
+	value := reflect.ValueOf(observer)
+	switch value.Kind() {
+	case reflect.Chan, reflect.Func, reflect.Interface, reflect.Map, reflect.Pointer, reflect.Slice:
+		if value.IsNil() {
+			return
+		}
+	}
 	select {
 	case sqliteBusyDetachedReports <- struct{}{}:
 	default:
