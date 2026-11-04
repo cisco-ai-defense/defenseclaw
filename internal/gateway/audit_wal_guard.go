@@ -43,7 +43,29 @@ const (
 	// auditWALAlarmRepeat is how often a WAL that stays over the bound is
 	// reported again.
 	auditWALAlarmRepeat = 10 * time.Minute
+	// auditWALGuardBusyInterval is the next pass's delay after a pass that
+	// found a log past a quarter of the trigger (the hooks are writing fast),
+	// and auditWALGuardRetryInterval after a pass that needed the writer and
+	// did not get it to the end of the log. At 100 hook calls/s the log grew
+	// by about 55 MiB/s, so a 2 s tick could find it past the trigger, whose
+	// catch-up holds the writer without settling the backlog first, and its
+	// file past the 256 MiB bound (r108 SWEEP-100). Passing sooner keeps it
+	// in the settled catch-up and its short hold (audit walSettledHoldCap).
+	auditWALGuardBusyInterval  = time.Second
+	auditWALGuardRetryInterval = 250 * time.Millisecond
 )
+
+// auditWALGuardNextInterval is how long the guard waits after pass.
+func auditWALGuardNextInterval(pass audit.WALCheckpoint) time.Duration {
+	switch {
+	case pass.WriterDeferred:
+		return auditWALGuardRetryInterval
+	case pass.LogBytes > auditWALGuardTriggerBytes/4:
+		return auditWALGuardBusyInterval
+	default:
+		return auditWALGuardInterval
+	}
+}
 
 // auditWALCheckpointer is the part of *audit.Store the WAL guard uses.
 type auditWALCheckpointer interface {
@@ -56,31 +78,33 @@ func (s *Sidecar) runAuditWALGuard(ctx context.Context) {
 	if s == nil || s.store == nil || s.currentConfig().SecureClientIntegration() {
 		return
 	}
-	ticker := time.NewTicker(auditWALGuardInterval)
-	defer ticker.Stop()
+	timer := time.NewTimer(auditWALGuardInterval)
+	defer timer.Stop()
 	var alarm auditWALAlarm
 	for {
 		select {
 		case <-ctx.Done():
 			return
-		case <-ticker.C:
+		case <-timer.C:
 		}
+		next := auditWALGuardInterval
 		// A signed bundle's config rename starts this gate before its
 		// generation rebuild. Defer maintenance until that swap has settled.
-		if !configReloadInFlight.wait(0) {
-			continue
+		if configReloadInFlight.wait(0) {
+			next = auditWALGuardNextInterval(auditWALGuardPass(ctx, s.store, &alarm, time.Now(), os.Stderr))
 		}
-		auditWALGuardPass(ctx, s.store, &alarm, time.Now(), os.Stderr)
+		timer.Reset(next)
 	}
 }
 
-// auditWALGuardPass runs one checkpoint pass and reports its outcome.
-func auditWALGuardPass(ctx context.Context, store auditWALCheckpointer, alarm *auditWALAlarm, now time.Time, log io.Writer) {
+// auditWALGuardPass runs one checkpoint pass, reports its outcome and
+// returns it.
+func auditWALGuardPass(ctx context.Context, store auditWALCheckpointer, alarm *auditWALAlarm, now time.Time, log io.Writer) audit.WALCheckpoint {
 	copyCtx, cancel := context.WithTimeout(ctx, auditWALCopyTimeout)
 	pass, err := store.CheckpointWALIfLarge(copyCtx, auditWALGuardTriggerBytes, auditWALWriterBudget)
 	cancel()
 	if ctx.Err() != nil {
-		return
+		return pass
 	}
 	// A pass that yields is retried at the next tick; the dedicated
 	// connection's copy is kept.
@@ -111,6 +135,7 @@ func auditWALGuardPass(ctx context.Context, store auditWALCheckpointer, alarm *a
 	if line := alarm.observe(now, pass.FileBytes); line != "" {
 		fmt.Fprintln(log, line)
 	}
+	return pass
 }
 
 // auditWALAlarm says when the audit WAL file passes auditWALAlarmBytes, again

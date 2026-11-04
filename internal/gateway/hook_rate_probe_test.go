@@ -132,6 +132,7 @@ func TestHookRateProbe(t *testing.T) {
 	loops.Add(2)
 	go func() {
 		defer loops.Done()
+		stallDumped := false
 		tick := time.NewTicker(20 * time.Millisecond)
 		defer tick.Stop()
 		for {
@@ -146,6 +147,15 @@ func TestHookRateProbe(t *testing.T) {
 			if queueSnapshot != nil {
 				depth, oldest = queueSnapshot()
 			}
+			if out != "" && oldest >= 500*time.Millisecond && !stallDumped {
+				// What the writer and its queue were doing during the first
+				// long wait.
+				stallDumped = true
+				if file, err := os.Create(filepath.Join(out, "goroutines-stall.txt")); err == nil {
+					_ = pprof.Lookup("goroutine").WriteTo(file, 2)
+					_ = file.Close()
+				}
+			}
 			statsMu.Lock()
 			walPeak = max(walPeak, wal)
 			queuePeak = max(queuePeak, depth)
@@ -155,13 +165,15 @@ func TestHookRateProbe(t *testing.T) {
 	}()
 	go func() {
 		defer loops.Done()
-		tick := time.NewTicker(auditWALGuardInterval)
-		defer tick.Stop()
+		// The sidecar's guard (runAuditWALGuard): each pass sets the delay
+		// of the next.
+		timer := time.NewTimer(auditWALGuardInterval)
+		defer timer.Stop()
 		for {
 			select {
 			case <-ctx.Done():
 				return
-			case <-tick.C:
+			case <-timer.C:
 			}
 			began := time.Now()
 			pass, passCancel := context.WithTimeout(ctx, auditWALCopyTimeout)
@@ -191,6 +203,7 @@ func TestHookRateProbe(t *testing.T) {
 			}
 			passMax = max(passMax, time.Since(began))
 			statsMu.Unlock()
+			timer.Reset(auditWALGuardNextInterval(result))
 		}
 	}()
 
