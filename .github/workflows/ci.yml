@@ -1264,10 +1264,11 @@ jobs:
           fi
           # hookexec took ~11 minutes here, and with the hook answer and
           # gateway-start tests of 1.0.7 it ran past the 14-minute -timeout,
-          # so its tests run in two parts (go_test_shards.py covers every
-          # test exactly once).
+          # so its tests run in two time-balanced parts (go_test_shards.py
+          # covers every test exactly once; one test alone takes ~200 s).
           test_regex="$(python3 scripts/go_test_shards.py \
             --package-dir internal/gateway/connector/hookexec \
+            --timings scripts/test-timings/go-darwin.json \
             --shard-count 2 \
             --shard-index "$GO_TEST_SHARD")"
           go test -count=1 -timeout 14m -run "$test_regex" ./internal/gateway/connector/hookexec
