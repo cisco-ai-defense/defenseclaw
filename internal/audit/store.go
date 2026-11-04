@@ -298,9 +298,6 @@ type Store struct {
 	// callGroup groups the flushes of concurrent hook calls' write batches
 	// into one transaction (CallWriteBatch).
 	callGroup writeGroup
-	// occurrenceGroup runs concurrent correlation occurrences in one
-	// transaction (correlation_occurrence_group.go).
-	occurrenceGroup writeGroup
 
 	sqliteBusyMu       sync.RWMutex
 	sqliteBusyObserver SQLiteBusyObservabilityV8
