@@ -45,8 +45,10 @@ func (e *UntrustedPrincipalError) Error() string { return e.text }
 
 // ValidateTrustedConfigPath validates config.yaml. Drift on its owner or DACL
 // is repaired first when the caller can (a LocalSystem service or an elevated
-// administrator; never the gateway, whose token cannot re-ACL it), and what
-// survives is accepted and logged by ValidateTrustedPolicyFilePath. Structural
+// administrator; never the gateway, whose token cannot re-ACL it), and the
+// strict check runs again. What survives is handled by
+// ValidateTrustedPolicyFilePath: accepted and logged on Secure Client,
+// refused with the strict verdict on standalone (GAP-0561). Structural
 // failures stay fatal.
 func ValidateTrustedConfigPath(path string) error {
 	const label = "managed config"
@@ -58,7 +60,7 @@ func ValidateTrustedConfigPath(path string) error {
 	// arbitrary path a caller passed in.
 	if pinned := strings.TrimSpace(os.Getenv(ConfigPathEnv)); pinned != "" &&
 		strings.EqualFold(filepath.Clean(pinned), filepath.Clean(path)) {
-		result, ensureErr := EnsureCanonical(path, ObjectConfigFile, CanonicalOptions{})
+		result, ensureErr := windowsConfigEnsureCanonical(path, ObjectConfigFile, CanonicalOptions{})
 		if ensureErr != nil {
 			return errors.Join(err, ensureErr)
 		}
@@ -69,19 +71,33 @@ func ValidateTrustedConfigPath(path string) error {
 	return ValidateTrustedPolicyFilePath(path, label)
 }
 
+// windowsConfigEnsureCanonical is the config.yaml repair; tests replace it to
+// model a repair that cannot fix the drift.
+var windowsConfigEnsureCanonical = EnsureCanonical
+
 // ValidateTrustedPolicyFilePath validates a managed policy or data file that
 // DefenseClaw reads but a service cannot always repair (config.yaml,
-// targets.yaml, deployment.json). It walks like ValidateTrustedFilePath, but a
-// permission verdict on the file or an ancestor is accepted and logged instead
-// of refusing the file, and an untrusted owner or writer on the file itself is
-// logged once as a MarkerBoundary finding naming the principal. The installer
-// re-stamps the canonical descriptor on its next Install, Upgrade or Repair.
-// Structural failures (missing element, symlink, reparse point, wrong type,
-// non-NTFS mount) stay fatal. Pin TrustStrictAncestorsEnv to make every
-// verdict fatal again.
+// targets.yaml, deployment.json, env_config.json). It runs the strict
+// ValidateTrustedFilePath check, so a caller that repaired the file first
+// gets a fresh verdict.
+//
+// On Secure Client a permission verdict on the file or an ancestor is then
+// accepted and logged instead of refusing the file, and an untrusted owner or
+// writer on the file itself is logged once as a MarkerBoundary finding naming
+// the principal; the installer re-stamps the canonical descriptor on its next
+// Install, Upgrade or Repair. The shared Cisco Secure Client tree is re-ACLed
+// by other installers, which is why that profile tolerates the drift.
+//
+// A standalone process (windowsStandaloneTrustScope) keeps the strict verdict,
+// as before 26.8.4: there DefenseClaw owns the whole tree, and a standard
+// user who gained write access to config.yaml or the guardian manifest could
+// otherwise change the fail mode or drop an account from enforcement
+// (GAP-0561). Structural failures (missing element, symlink, reparse point,
+// wrong type, non-NTFS mount) stay fatal on both profiles. Pin
+// TrustStrictAncestorsEnv to make every verdict fatal again.
 func ValidateTrustedPolicyFilePath(path, label string) error {
 	err := ValidateTrustedFilePath(path, label)
-	if err == nil || trustStrictAncestors() {
+	if err == nil || trustStrictAncestors() || windowsStandaloneTrustScope() {
 		return err
 	}
 	leaf := windowsTrustLeaf.tolerant()

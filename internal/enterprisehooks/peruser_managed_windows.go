@@ -13,7 +13,6 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
-	"sync"
 	"time"
 
 	"github.com/defenseclaw/defenseclaw/internal/gateway/connector"
@@ -143,23 +142,8 @@ var windowsPerUserRuntimeStandalone = func() bool {
 }
 
 // windowsStandaloneInstallExecutable reports whether the running binary sits
-// in <standalone install root>\bin, a production or run-scoped certification
-// root under the protected Program Files registration.
-var windowsStandaloneInstallExecutable = sync.OnceValue(func() bool {
-	executable, err := os.Executable()
-	if err != nil || !filepath.IsAbs(executable) {
-		return false
-	}
-	bin := filepath.Dir(filepath.Clean(executable))
-	if !strings.EqualFold(filepath.Base(bin), "bin") {
-		return false
-	}
-	roots, err := winpath.TrustedEnterpriseRoots(winpath.EnterpriseProfileStandalone)
-	if err != nil {
-		return false
-	}
-	return winpath.ValidateEnterpriseInstallRoot(roots, filepath.Dir(bin)) == nil
-})
+// in the standalone install root; tests replace it.
+var windowsStandaloneInstallExecutable = managed.WindowsStandaloneInstallExecutable
 
 // windowsProfilePerUserConnector reports whether the profile this process
 // serves manages name per user: every per-user connector on the standalone
