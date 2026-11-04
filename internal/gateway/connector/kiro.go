@@ -634,10 +634,17 @@ func kiroWindowsOwnedHookCommands() []string {
 	var commands []string
 	for _, binary := range nativeHookBinaryOwnershipCandidates() {
 		for _, managed := range []bool{false, true} {
-			commands = append(commands,
+			for _, command := range []string{
 				windowsKiroHookCommandForBinary(binary, "", managed),
 				windowsKiroHookCommandForBinary(binary, KiroHookSurfaceV3, managed),
-			)
+			} {
+				commands = append(commands, command)
+				// The 1.0.x render of the bridge stays owned, so setup
+				// rewrites it and teardown removes it.
+				if legacy, ok := legacyWindowsAwaitedHookCommand(command); ok {
+					commands = append(commands, legacy)
+				}
+			}
 		}
 	}
 	return uniqueNonEmptyStrings(commands)

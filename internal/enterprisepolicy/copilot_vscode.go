@@ -120,6 +120,7 @@ func copilotVSCodeLocalCommandOwned(goos, hookBinary, command string) bool {
 	}
 	for _, event := range connector.CopilotVSCodeLocalHookEvents {
 		if command == strings.TrimSpace(connector.CopilotVSCodeLocalManagedHookCommand(goos, hookBinary, event)) ||
+			command == strings.TrimSpace(connector.CopilotVSCodeLocalGuardedPriorReleaseHookCommand(goos, hookBinary, event)) ||
 			command == strings.TrimSpace(connector.CopilotVSCodeLocalPriorReleaseHookCommand(goos, hookBinary, event)) {
 			return true
 		}

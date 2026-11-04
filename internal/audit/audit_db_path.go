@@ -243,32 +243,8 @@ func prepareAuditDatabasePath(path string, hooks auditDBPathHooks) (*preparedAud
 			return fail(err)
 		}
 		if needsHardening {
-			hardening := pinned
-			closeHardening := false
-			if auditDBPlatformHardeningNeedsCapabilityReopen() {
-				hardening, err = reopenPinnedAuditDBLeaf(absolute, pinned, true)
-				if err != nil {
-					return fail(fmt.Errorf("audit: reopen existing database file for ACL hardening: %w", err))
-				}
-				closeHardening = true
-			}
-			secureErr := hooks.securePlatformFile(hardening, false)
-			var closeErr error
-			if closeHardening {
-				closeErr = hardening.Close()
-			}
-			if secureErr != nil {
-				return fail(secureErr)
-			}
-			if closeErr != nil {
-				return fail(fmt.Errorf("audit: close database ACL-hardening handle: %w", closeErr))
-			}
-			if auditDBPlatformHardeningNeedsCapabilityReopen() {
-				if stillNeedsHardening, err := auditDBPlatformFileNeedsHardening(pinned); err != nil {
-					return fail(err)
-				} else if stillNeedsHardening {
-					return fail(errors.New("audit: existing database DACL remains noncanonical after hardening"))
-				}
+			if err := hardenExistingAuditDBFile(absolute, pinned, hooks, "database"); err != nil {
+				return fail(err)
 			}
 		}
 	}
@@ -439,40 +415,13 @@ func pinAndSecureAuditDBSQLiteSidecars(
 			return retained, retired, fmt.Errorf("audit: inspect SQLite sidecar %s platform ACL: %w", suffix, err)
 		}
 		if needsHardening {
-			hardening := pinned
-			closeHardening := false
-			if auditDBPlatformHardeningNeedsCapabilityReopen() {
-				hardening, err = hooks.reopenSidecarForHardening(path, pinned)
-				if err != nil {
-					if errors.Is(err, os.ErrPermission) && discardIdleAuditDBSidecar(path, suffix, pinned) {
-						delete(retained, suffix)
-						continue
-					}
-					return retained, retired, fmt.Errorf("audit: reopen SQLite sidecar %s for ACL hardening: %w", suffix, err)
-				}
-				closeHardening = true
+			discarded, err := hardenExistingAuditDBSidecar(path, suffix, pinned, hooks)
+			if err != nil {
+				return retained, retired, err
 			}
-			secureErr := hooks.securePlatformFile(hardening, false)
-			var closeErr error
-			if closeHardening {
-				closeErr = hardening.Close()
-			}
-			if secureErr != nil {
-				return retained, retired, fmt.Errorf("audit: secure SQLite sidecar %s platform ACL: %w", suffix, secureErr)
-			}
-			if closeErr != nil {
-				return retained, retired, fmt.Errorf("audit: close SQLite sidecar %s ACL-hardening handle: %w", suffix, closeErr)
-			}
-			if auditDBPlatformHardeningNeedsCapabilityReopen() {
-				// Match the sidecar-scoped predicate used above so the
-				// post-hardening check proves the decision the branch
-				// took, even if the sidecar rule ever diverges from
-				// the file rule.
-				if stillNeedsHardening, err := auditDBPlatformSidecarNeedsHardening(pinned); err != nil {
-					return retained, retired, fmt.Errorf("audit: verify SQLite sidecar %s platform ACL: %w", suffix, err)
-				} else if stillNeedsHardening {
-					return retained, retired, fmt.Errorf("audit: SQLite sidecar %s DACL remains noncanonical after hardening", suffix)
-				}
+			if discarded {
+				delete(retained, suffix)
+				continue
 			}
 		}
 		if err := safefile.ReclaimToDirectoryOwner(path); err != nil {
@@ -522,6 +471,121 @@ func discardIdleAuditDBSidecar(path, suffix string, pinned *os.File) bool {
 	}
 	_ = pinned.Close()
 	return true
+}
+
+// hardenExistingAuditDBSidecar re-stamps an existing SQLite sidecar whose
+// descriptor is trusted but not canonical, like hardenExistingAuditDBFile. A
+// sidecar this process may not re-stamp because another account created it
+// is removed when it is idle (discardIdleAuditDBSidecar) and reported as
+// discarded. The gateway service accepts and logs one it does not own that
+// still holds pages; the guardian repairs it. Any other process whose reopen
+// for ACL hardening is denied keeps failing closed on a sidecar with pages.
+func hardenExistingAuditDBSidecar(path, suffix string, pinned *os.File, hooks auditDBPathHooks) (bool, error) {
+	if auditDBPlatformProcessCannotRestamp(pinned) {
+		if discardIdleAuditDBSidecar(path, suffix, pinned) {
+			return true, nil
+		}
+		auditDBPlatformReportAccept(path, "descriptor is trusted but not canonical; the gateway service does not re-stamp a file it does not own")
+		return false, nil
+	}
+	hardening := pinned
+	closeHardening := false
+	if auditDBPlatformHardeningNeedsCapabilityReopen() {
+		reopened, err := hooks.reopenSidecarForHardening(path, pinned)
+		if err != nil {
+			if errors.Is(err, os.ErrPermission) && discardIdleAuditDBSidecar(path, suffix, pinned) {
+				return true, nil
+			}
+			return false, fmt.Errorf("audit: reopen SQLite sidecar %s for ACL hardening: %w", suffix, err)
+		}
+		hardening = reopened
+		closeHardening = true
+	}
+	secureErr := hooks.securePlatformFile(hardening, false)
+	var closeErr error
+	if closeHardening {
+		closeErr = hardening.Close()
+	}
+	if secureErr != nil {
+		if auditDBPlatformHardeningFailureIsDrift(secureErr) {
+			auditDBPlatformReportAccept(path, "descriptor is trusted but not canonical; re-stamp denied")
+			return false, nil
+		}
+		return false, fmt.Errorf("audit: secure SQLite sidecar %s platform ACL: %w", suffix, secureErr)
+	}
+	if closeErr != nil {
+		return false, fmt.Errorf("audit: close SQLite sidecar %s ACL-hardening handle: %w", suffix, closeErr)
+	}
+	if auditDBPlatformHardeningNeedsCapabilityReopen() {
+		// Match the sidecar-scoped predicate the caller used so the
+		// post-hardening check proves the decision it took, even if the
+		// sidecar rule ever diverges from the file rule.
+		stillNeedsHardening, err := auditDBPlatformSidecarNeedsHardening(pinned)
+		if err != nil {
+			return false, fmt.Errorf("audit: verify SQLite sidecar %s platform ACL: %w", suffix, err)
+		}
+		if stillNeedsHardening {
+			auditDBPlatformReportAccept(path, "descriptor is trusted but remains noncanonical after hardening")
+		}
+	}
+	return false, nil
+}
+
+// hardenExistingAuditDBFile re-stamps the protected descriptor on an existing
+// file whose descriptor is trusted but not canonical (inheritance re-enabled,
+// entries reordered, a TrustedInstaller owner). Trust was already proven by
+// the caller: no untrusted principal can write the file. When the process
+// lacks the right to re-stamp it (the gateway's write-restricted token cannot
+// open an installer-owned or OWNER RIGHTS-stamped file for WRITE_DAC), or the
+// descriptor stays noncanonical, the drift is accepted and logged; the hook
+// guardian repairs it with its own privileges.
+func hardenExistingAuditDBFile(path string, pinned *os.File, hooks auditDBPathHooks, label string) error {
+	if auditDBPlatformProcessCannotRestamp(pinned) {
+		// The gateway service's write-restricted token cannot re-ACL a file
+		// it does not own; the guardian repairs it. Accept and log instead of
+		// trying.
+		auditDBPlatformReportAccept(path, "descriptor is trusted but not canonical; the gateway service does not re-stamp a file it does not own")
+		return nil
+	}
+	hardening := pinned
+	closeHardening := false
+	if auditDBPlatformHardeningNeedsCapabilityReopen() {
+		reopened, err := reopenPinnedAuditDBLeaf(path, pinned, true)
+		if err != nil {
+			if auditDBPlatformHardeningFailureIsDrift(err) {
+				auditDBPlatformReportAccept(path, "descriptor is trusted but not canonical; this process cannot re-stamp it")
+				return nil
+			}
+			return fmt.Errorf("audit: reopen existing %s for ACL hardening: %w", label, err)
+		}
+		hardening = reopened
+		closeHardening = true
+	}
+	secureErr := hooks.securePlatformFile(hardening, false)
+	var closeErr error
+	if closeHardening {
+		closeErr = hardening.Close()
+	}
+	if secureErr != nil {
+		if auditDBPlatformHardeningFailureIsDrift(secureErr) {
+			auditDBPlatformReportAccept(path, "descriptor is trusted but not canonical; re-stamp denied")
+			return nil
+		}
+		return fmt.Errorf("audit: secure %s platform ACL: %w", label, secureErr)
+	}
+	if closeErr != nil {
+		return fmt.Errorf("audit: close %s ACL-hardening handle: %w", label, closeErr)
+	}
+	if auditDBPlatformHardeningNeedsCapabilityReopen() {
+		stillNeedsHardening, err := auditDBPlatformFileNeedsHardening(pinned)
+		if err != nil {
+			return fmt.Errorf("audit: verify %s platform ACL: %w", label, err)
+		}
+		if stillNeedsHardening {
+			auditDBPlatformReportAccept(path, "descriptor is trusted but remains noncanonical after hardening")
+		}
+	}
+	return nil
 }
 
 func openPinnedAuditDBLeaf(path string) (*os.File, bool, error) {

@@ -2392,6 +2392,11 @@ func readStableHookRuntimeSidecar(
 	)
 }
 
+// ErrManagedRuntimeFileTooLarge marks a managed runtime file larger than its
+// caller's read ceiling, so callers can tell an enlarged file from a denied
+// or busy one.
+var ErrManagedRuntimeFileTooLarge = errors.New("managed runtime file is larger than its read limit")
+
 // ReadManagedHookRuntimeFile reads an already-authorized target-owned runtime
 // leaf through an identity-pinned, no-reparse, single-link handle. Callers
 // provide a format-specific allocation ceiling; trust in the owning directory
@@ -2436,9 +2441,10 @@ func readStableManagedRuntimeFileForOwner(
 	}
 	if expected.Size() < 0 || expected.Size() > maxBytes {
 		return nil, false, fmt.Errorf(
-			"%s exceeds %d-byte limit",
+			"%s exceeds %d-byte limit: %w",
 			label,
 			maxBytes,
+			ErrManagedRuntimeFileTooLarge,
 		)
 	}
 	file, err := openConnectorStateFileWithRetry(path)
@@ -2467,9 +2473,10 @@ func readStableManagedRuntimeFileForOwner(
 		}
 		if int64(len(data)) > maxBytes {
 			return nil, fmt.Errorf(
-				"%s exceeds %d-byte limit",
+				"%s exceeds %d-byte limit: %w",
 				label,
 				maxBytes,
+				ErrManagedRuntimeFileTooLarge,
 			)
 		}
 		return data, nil

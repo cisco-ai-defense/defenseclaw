@@ -252,7 +252,9 @@ func managedOpenCodeBackgroundEvent(opts Options, sp spec) bool {
 // decision. blocked is the delivery outcome the caller applies; a connector
 // without a fail-closed contract records what the call got instead
 // (loggedFailMode), so the fail-open report finds the calls that ran. Managed
-// OpenCode callbacks that cannot admit a tool are diagnostics.
+// OpenCode callbacks that cannot admit a tool are diagnostics. A managed
+// hook may have no Home at all, so it also leaves a durable platform record
+// of the decision (recordManagedHookDecision).
 func logHookFailure(opts Options, sp spec, reason, category, failMode string, blocked bool) {
 	logHookFailureOf(opts, sp, reason, category, failMode, blocked, false)
 }
@@ -277,6 +279,9 @@ func logHookFailureOf(opts Options, sp spec, reason, category, failMode string, 
 		}
 		defer close(done)
 	}
+	if opts.ManagedEnterprise {
+		recordManagedHookDecision(opts, sp, reason, category, loggedFailMode(opts, sp, failMode), blocked)
+	}
 	outcome := "fail_closed"
 	if managedOpenCodeBackgroundEvent(opts, sp) {
 		outcome = "diagnostic"
@@ -284,8 +289,10 @@ func logHookFailureOf(opts Options, sp spec, reason, category, failMode string, 
 		outcome = "fail_open"
 		// Quote diagnostics so an unexpected transport error cannot forge lines.
 		// Never include request/response bodies or authentication credentials.
+		// A Secure Client fail-open is in the durable record only; it would
+		// print on every call while the account is not enrolled yet.
 		if !opts.perUserOutage {
-			fmt.Fprintf(opts.Stderr, "defenseclaw: WARNING hook fail-open; inspection bypassed (connector=%s hook=%s category=%s): %q\n", sp.connector, sp.hookName, category, reason)
+			writeFailureDiagnostic(opts, false, "defenseclaw: WARNING hook fail-open; inspection bypassed (connector=%s hook=%s category=%s): %q\n", sp.connector, sp.hookName, category, reason)
 		}
 	}
 	home := opts.Home
@@ -343,10 +350,12 @@ func logHookFailureOf(opts Options, sp spec, reason, category, failMode string, 
 		}
 	}
 	defer f.Close()
-	if _, err := f.Write(append(line, '\n')); err == nil && entry.EventID != "" && opts.Stderr != nil {
+	if _, err := f.Write(append(line, '\n')); err == nil && entry.EventID != "" && opts.Stderr != nil &&
+		!quietManagedFailureStderr(opts) {
 		// The answer names the record, so the refusal can be looked up
 		// although the gateway that writes the audit log did not see it
-		// (mgmt-p1 GAP-0134).
+		// (mgmt-p1 GAP-0134). A Secure Client block shows only
+		// ManagedHookBlockMessage; its row keeps the event id.
 		fmt.Fprintf(opts.Stderr, "defenseclaw: event_id=%s: this refusal is recorded in %s\n",
 			entry.EventID, filepath.Join(logDir, "hook-failures.jsonl"))
 	}

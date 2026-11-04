@@ -15,6 +15,7 @@ package main
 import (
 	"context"
 	"fmt"
+	"log"
 	"os"
 	"path/filepath"
 	"strings"
@@ -23,6 +24,7 @@ import (
 
 	"golang.org/x/sys/windows"
 	"golang.org/x/sys/windows/svc"
+	"golang.org/x/sys/windows/svc/eventlog"
 
 	"github.com/defenseclaw/defenseclaw/internal/lazyregexp"
 	"github.com/defenseclaw/defenseclaw/internal/managed"
@@ -84,18 +86,22 @@ func runWindowsService(execute windowsServiceExecutor) (bool, int) {
 	// LocalSystem it owns what it writes as its service SID, as the 1.0.0
 	// virtual account did, so its write-restricted token can secure its own
 	// audit database and logs. A no-op for every other service.
-	if err := adoptGatewayFileOwner(); err != nil {
-		fmt.Fprintf(os.Stderr, "defenseclaw: %v\n", err)
-		return true, 1
-	}
+	ownerErr := adoptGatewayFileOwner()
 
+	// Neither failure stops the service (26.8.4). A service log that can't be
+	// opened sends output to the Application event log instead; without the
+	// file owner, files the gateway creates later may fail to harden, and
+	// that is reported where it happens instead of the process exiting
+	// before SCM sees it.
 	closeLog, err := redirectWindowsServiceOutput()
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "defenseclaw: initialize Windows service log: %v\n", err)
-		return true, 1
+		closeLog = redirectWindowsServiceOutputToEventLog(name, err)
 	}
 	if closeLog != nil {
 		defer closeLog()
+	}
+	if ownerErr != nil {
+		reportWindowsServiceDegraded(name, "default-owner", ownerErr)
 	}
 
 	handler := &defenseClawWindowsService{
@@ -103,7 +109,9 @@ func runWindowsService(execute windowsServiceExecutor) (bool, int) {
 		sessionEvents: windowsServiceSessionEvents(os.Args[1:], os.Getenv(managed.EnterpriseProfileEnv)),
 	}
 	if err := runSCMService(name, handler); err != nil {
-		fmt.Fprintf(os.Stderr, "defenseclaw: run Windows service %s: %v\n", name, err)
+		// Through the standard logger: the service log, or the event log
+		// when the service log could not be opened.
+		log.Printf("defenseclaw: run Windows service %s: %v", name, err)
 		return true, 1
 	}
 	return true, 0
@@ -121,13 +129,93 @@ func redirectWindowsServiceOutput() (func(), error) {
 	if !filepath.IsAbs(path) {
 		return nil, fmt.Errorf("%s must be an absolute path", windowsServiceLogEnv)
 	}
-	file, err := os.OpenFile(filepath.Clean(path), os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o600)
+	var file *os.File
+	var err error
+	for attempt := 0; attempt < 5; attempt++ {
+		file, err = os.OpenFile(filepath.Clean(path), os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o600)
+		if err == nil || !managed.IsTransientWindowsError(err) {
+			break
+		}
+		// A log shipper or backup agent holding the file without write
+		// sharing usually lets go within a moment.
+		time.Sleep(time.Duration(attempt+1) * 100 * time.Millisecond)
+	}
 	if err != nil {
 		return nil, err
 	}
 	os.Stdout = file
 	os.Stderr = file
+	// The standard logger captured the original stderr handle at init, which
+	// SCM discards; point it at the service log so managed trust advisories
+	// (managed_trust_ancestor_advisory, managed_trust_drift_advisory) are kept.
+	log.SetOutput(file)
 	return func() { _ = file.Close() }, nil
+}
+
+// openWindowsServiceEventLog is a seam for tests.
+var openWindowsServiceEventLog = func(source string) (windowsServiceEventSink, error) {
+	return eventlog.Open(source)
+}
+
+type windowsServiceEventSink interface {
+	Info(eid uint32, msg string) error
+	Warning(eid uint32, msg string) error
+	Close() error
+}
+
+// reportWindowsServiceDegraded writes one degraded-subsystem line to the
+// current log output and to the Application event log.
+func reportWindowsServiceDegraded(serviceName, subsystem string, cause error) {
+	line := managed.FormatResilienceEvent(managed.MarkerDegraded, map[string]string{
+		"subsystem": subsystem,
+		"reason":    cause.Error(),
+	})
+	log.Print(line)
+	if events, err := openWindowsServiceEventLog(serviceName); err == nil {
+		_ = events.Warning(1, line)
+		_ = events.Close()
+	}
+}
+
+// eventLogLineWriter forwards each log line to the Application event log.
+type eventLogLineWriter struct {
+	mu     sync.Mutex
+	events windowsServiceEventSink
+}
+
+func (writer *eventLogLineWriter) Write(line []byte) (int, error) {
+	writer.mu.Lock()
+	defer writer.mu.Unlock()
+	if writer.events != nil {
+		if message := strings.TrimRight(string(line), "\r\n"); message != "" {
+			_ = writer.events.Info(2, message)
+		}
+	}
+	return len(line), nil
+}
+
+// redirectWindowsServiceOutputToEventLog points the standard logger at the
+// Application event log after the service log could not be opened, records
+// why, and returns the closer. Process stdout and stderr stay where SCM put
+// them.
+func redirectWindowsServiceOutputToEventLog(serviceName string, cause error) func() {
+	events, err := openWindowsServiceEventLog(serviceName)
+	if err != nil {
+		return nil
+	}
+	writer := &eventLogLineWriter{events: events}
+	log.SetOutput(writer)
+	_ = events.Warning(1, managed.FormatResilienceEvent(managed.MarkerDegraded, map[string]string{
+		"subsystem": "service-log",
+		"reason":    cause.Error(),
+		"fallback":  "event-log",
+	}))
+	return func() {
+		writer.mu.Lock()
+		defer writer.mu.Unlock()
+		_ = writer.events.Close()
+		writer.events = nil
+	}
 }
 
 type defenseClawWindowsService struct {

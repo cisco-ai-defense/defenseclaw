@@ -1866,7 +1866,7 @@ func validateManagedStandalonePolicyInputs(cfg *Config) error {
 		return err
 	}
 	for _, label := range RulePackCheckOrder(dirs) {
-		if err := check(label, dirs[label], managed.ValidateTrustedServiceRuntimeDir); err != nil {
+		if err := check(label, dirs[label], managed.ValidateTrustedServiceRuntimeDirStandalone); err != nil {
 			return err
 		}
 	}
@@ -1880,9 +1880,13 @@ type policyTreeChecks struct {
 }
 
 // managedPolicyTreeChecks are the checks of a managed standalone policy_dir
-// tree (a test replaces them: the real ones need root-owned folders).
+// tree (a test replaces them: the real ones need root-owned folders). They
+// are the standalone validators: these checks can run without the standalone
+// process pin, and the Secure Client drift acceptances never apply to them.
 var managedPolicyTreeChecks = policyTreeChecks{
-	dir: managed.ValidateTrustedServiceRuntimeDir, tree: managed.ValidateTrustedServiceRuntimeTree, file: managed.ValidateTrustedServiceRuntimeFilePath,
+	dir:  managed.ValidateTrustedServiceRuntimeDirStandalone,
+	tree: managed.ValidateTrustedServiceRuntimeTreeStandalone,
+	file: managed.ValidateTrustedServiceRuntimeFilePathStandalone,
 }
 
 // ValidateManagedPolicyDir is the trust check of a managed standalone

@@ -19,6 +19,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"unsafe"
 
 	"github.com/defenseclaw/defenseclaw/internal/winpath"
@@ -42,8 +43,50 @@ type UntrustedPrincipalError struct {
 
 func (e *UntrustedPrincipalError) Error() string { return e.text }
 
+// ValidateTrustedConfigPath validates config.yaml. Drift on its owner or DACL
+// is repaired first when the caller can (a LocalSystem service or an elevated
+// administrator; never the gateway, whose token cannot re-ACL it), and what
+// survives is accepted and logged by ValidateTrustedPolicyFilePath. Structural
+// failures stay fatal.
 func ValidateTrustedConfigPath(path string) error {
-	return ValidateTrustedFilePath(path, "managed config")
+	const label = "managed config"
+	err := ValidateTrustedFilePath(path, label)
+	if err == nil || trustStrictAncestors() {
+		return err
+	}
+	// Only the service-pinned managed config is ever re-stamped, never an
+	// arbitrary path a caller passed in.
+	if pinned := strings.TrimSpace(os.Getenv(ConfigPathEnv)); pinned != "" &&
+		strings.EqualFold(filepath.Clean(pinned), filepath.Clean(path)) {
+		result, ensureErr := EnsureCanonical(path, ObjectConfigFile, CanonicalOptions{})
+		if ensureErr != nil {
+			return errors.Join(err, ensureErr)
+		}
+		if result.Outcome == CanonicalRepaired && ValidateTrustedFilePath(path, label) == nil {
+			return nil
+		}
+	}
+	return ValidateTrustedPolicyFilePath(path, label)
+}
+
+// ValidateTrustedPolicyFilePath validates a managed policy or data file that
+// DefenseClaw reads but a service cannot always repair (config.yaml,
+// targets.yaml, deployment.json). It walks like ValidateTrustedFilePath, but a
+// permission verdict on the file or an ancestor is accepted and logged instead
+// of refusing the file, and an untrusted owner or writer on the file itself is
+// logged once as a MarkerBoundary finding naming the principal. The installer
+// re-stamps the canonical descriptor on its next Install, Upgrade or Repair.
+// Structural failures (missing element, symlink, reparse point, wrong type,
+// non-NTFS mount) stay fatal. Pin TrustStrictAncestorsEnv to make every
+// verdict fatal again.
+func ValidateTrustedPolicyFilePath(path, label string) error {
+	err := ValidateTrustedFilePath(path, label)
+	if err == nil || trustStrictAncestors() {
+		return err
+	}
+	leaf := windowsTrustLeaf.tolerant()
+	leaf.code = true
+	return validateTrustedFilePathTolerant(path, label, leaf)
 }
 
 // ValidateTrustedFilePath is the Windows counterpart of the unix
@@ -76,6 +119,18 @@ func ValidateTrustedFilePath(path, label string) error {
 	if label == "" {
 		label = "managed file"
 	}
+	return validateTrustedWindowsFilePath(path, label, nil, windowsTrustLeaf, windowsAncestorScope)
+}
+
+// validateTrustedWindowsFilePath checks a regular file with the leaf scope
+// and every folder above it, the volume root included, with the scope
+// ancestors picks.
+func validateTrustedWindowsFilePath(
+	path, label string,
+	allowedWriter *windows.SID,
+	leaf windowsTrustScope,
+	ancestors func(string) windowsTrustScope,
+) error {
 	if path == "" {
 		return fmt.Errorf("%s path is empty", label)
 	}
@@ -86,11 +141,11 @@ func ValidateTrustedFilePath(path, label string) error {
 	if _, err := winpath.ValidateFixedNTFSMountedPath(clean); err != nil {
 		return fmt.Errorf("%s is not on a trusted mount-manager NTFS drive: %w", label, err)
 	}
-	if err := validateTrustedWindowsPathElementWithWriter(clean, false, label, nil, windowsTrustLeaf); err != nil {
+	if err := validateTrustedWindowsPathElementWithWriter(clean, false, label, allowedWriter, leaf); err != nil {
 		return err
 	}
 	for dir := filepath.Dir(clean); dir != filepath.Dir(dir); dir = filepath.Dir(dir) {
-		if err := validateTrustedWindowsPathElementWithWriter(dir, true, label, nil, windowsAncestorScope(dir)); err != nil {
+		if err := validateTrustedWindowsPathElementWithWriter(dir, true, label, allowedWriter, ancestors(dir)); err != nil {
 			return err
 		}
 	}
@@ -99,18 +154,19 @@ func ValidateTrustedFilePath(path, label string) error {
 		root,
 		true,
 		label,
-		nil,
-		windowsAncestorScope(root),
+		allowedWriter,
+		ancestors(root),
 	)
 }
 
 // ValidateTrustedFilePathStrictAncestors is ValidateTrustedFilePath with no
 // advisory verdict: every folder above the file, the installer-owned Cisco
-// folders included, gets the narrow ancestor mask with fatal verdicts. It is
-// for an image an elevated process runs. A standard user who can delete the
-// children of a folder above it, or rename or re-ACL that folder, can swap
-// the image between the check and the launch, so drift on the Cisco tree
-// must refuse here, not warn.
+// folders included, gets the narrow ancestor mask with fatal verdicts, and
+// neither the file nor a folder above it takes the principal drift
+// acceptances of the ordinary walk. It is for an image an elevated process
+// runs. A standard user who can delete the children of a folder above it, or
+// rename or re-ACL that folder, can swap the image between the check and the
+// launch, so drift on the Cisco tree must refuse here, not warn.
 func ValidateTrustedFilePathStrictAncestors(path, label string) error {
 	if label == "" {
 		label = "managed file"
@@ -125,11 +181,11 @@ func ValidateTrustedFilePathStrictAncestors(path, label string) error {
 	if _, err := winpath.ValidateFixedNTFSMountedPath(clean); err != nil {
 		return fmt.Errorf("%s is not on a trusted mount-manager NTFS drive: %w", label, err)
 	}
-	if err := validateTrustedWindowsPathElementWithWriter(clean, false, label, nil, windowsTrustLeaf); err != nil {
+	if err := validateTrustedWindowsPathElementWithWriter(clean, false, label, nil, windowsTrustStrictLeaf); err != nil {
 		return err
 	}
 	for dir := filepath.Dir(clean); ; dir = filepath.Dir(dir) {
-		if err := validateTrustedWindowsPathElementWithWriter(dir, true, label, nil, windowsTrustForeignAncestor); err != nil {
+		if err := validateTrustedWindowsPathElementWithWriter(dir, true, label, nil, windowsTrustStrictAncestor); err != nil {
 			return err
 		}
 		if dir == filepath.Dir(dir) {
@@ -242,6 +298,120 @@ func ValidateTrustedRuntimeCodeTree(root, label string) error {
 	})
 }
 
+// ValidateTrustedFilePathTolerant walks exactly like ValidateTrustedFilePath,
+// with the same per-element masks, but downgrades every permission verdict —
+// on the named file as well as on each ancestor — to a
+// TrustDriftAdvisoryMarker warning and continues. Structural failures
+// (missing element, symlink, reparse point, wrong type, non-NTFS mount,
+// security-descriptor API errors) stay fatal.
+//
+// It exists for the CMID broker's own objects (its executable, the CMID
+// library; the auth key uses ValidateTrustedFileStructureTolerant), whose ACLs the platform installer and Cloud Management
+// re-stamp on their own schedule. A permission drift there must not stop the
+// broker, and with it the gateway that depends on it. Pin
+// TrustStrictAncestorsEnv to make every verdict fatal again.
+//
+// Do not use this for paths whose permissions DefenseClaw alone owns; keep
+// ValidateTrustedFilePath for those.
+func ValidateTrustedFilePathTolerant(path, label string) error {
+	return ValidateExecutableFilePath(path, label)
+}
+
+// ValidateExecutableFilePath validates a binary or library that DefenseClaw or
+// LocalSystem executes or loads (the CMID broker executable, cmidapi.dll, a
+// gateway or hook executable). Code integrity is advisory: structural failures
+// (missing element, symlink, reparse point, wrong type, non-NTFS mount) stay
+// fatal, every permission verdict is accepted, and an untrusted writer or
+// owner on the file itself is additionally logged once as a critical
+// MarkerBoundary finding naming the path and principal. The caller keeps
+// running and loading the file; a privileged component re-stamps the ACL and
+// Install, Upgrade and Repair re-copy the binary. Pin TrustStrictAncestorsEnv
+// to make every verdict fatal again.
+func ValidateExecutableFilePath(path, label string) error {
+	leaf := windowsTrustLeaf.tolerant()
+	leaf.code = true
+	return validateTrustedFilePathTolerant(path, label, leaf)
+}
+
+// ValidateTrustedFileStructureTolerant is ValidateTrustedFilePathTolerant for
+// a caller that validates the named file's owner and DACL itself, on its own
+// open handle, with a stricter rule than this walk applies (the CMID broker
+// auth key). The named file gets the structural checks only — symlink,
+// reparse point, regular file — so its permission drift is reported once, by
+// the caller; every ancestor is walked drift-tolerantly as usual.
+//
+// The named file's owner and DACL are never checked here, even with
+// TrustStrictAncestorsEnv pinned; the pin only affects the ancestors. A caller
+// that needs strict leaf checks under the pin must switch to
+// ValidateTrustedFilePath itself, as the CMID broker key loader does.
+func ValidateTrustedFileStructureTolerant(path, label string) error {
+	return validateTrustedFilePathTolerant(path, label, windowsTrustScope{structureOnly: true})
+}
+
+func validateTrustedFilePathTolerant(path, label string, leaf windowsTrustScope) error {
+	if label == "" {
+		label = "managed file"
+	}
+	if path == "" {
+		return fmt.Errorf("%s path is empty", label)
+	}
+	clean, err := filepath.Abs(path)
+	if err != nil {
+		return fmt.Errorf("resolve %s path: %w", label, err)
+	}
+	if _, err := winpath.ValidateFixedNTFSMountedPath(clean); err != nil {
+		return fmt.Errorf("%s is not on a trusted mount-manager NTFS drive: %w", label, err)
+	}
+	if err := validateTrustedWindowsPathElementWithWriter(clean, false, label, nil, leaf); err != nil {
+		return err
+	}
+	for dir := filepath.Dir(clean); dir != filepath.Dir(dir); dir = filepath.Dir(dir) {
+		if err := validateTrustedWindowsPathElementWithWriter(dir, true, label, nil, windowsAncestorScope(dir).tolerant()); err != nil {
+			return err
+		}
+	}
+	root := filepath.VolumeName(clean) + string(filepath.Separator)
+	return validateTrustedWindowsPathElementWithWriter(
+		root,
+		true,
+		label,
+		nil,
+		windowsAncestorScope(root).tolerant(),
+	)
+}
+
+// ValidateTrustedRuntimeDirTolerant is ValidateTrustedRuntimeDir with every
+// permission verdict downgraded to a drift advisory, for the same reason as
+// ValidateTrustedFilePathTolerant. Structural failures stay fatal.
+func ValidateTrustedRuntimeDirTolerant(path, label string) error {
+	if label == "" {
+		label = "managed runtime dir"
+	}
+	if path == "" {
+		return fmt.Errorf("%s path is empty", label)
+	}
+	clean, err := filepath.Abs(path)
+	if err != nil {
+		return fmt.Errorf("resolve %s path: %w", label, err)
+	}
+	if _, err := winpath.ValidateFixedNTFSMountedPath(clean); err != nil {
+		return fmt.Errorf("%s is not on a trusted mount-manager NTFS drive: %w", label, err)
+	}
+	for cur := clean; ; cur = filepath.Dir(cur) {
+		scope := windowsAncestorScope(cur)
+		if cur == clean {
+			scope = windowsTrustLeaf
+		}
+		if err := validateTrustedWindowsPathElementWithWriter(cur, true, label, nil, scope.tolerant()); err != nil {
+			return err
+		}
+		if cur == filepath.Dir(cur) {
+			break
+		}
+	}
+	return nil
+}
+
 // ValidateTrustedDirectoryAncestor validates an existing directory that will
 // contain a new protected child. Unlike ValidateTrustedRuntimeDir, the named
 // directory is evaluated with the narrow ancestor-replacement mask as well as
@@ -249,13 +419,15 @@ func ValidateTrustedRuntimeCodeTree(root, label string) error {
 // while still rejecting DELETE_CHILD, DELETE, WRITE_DAC, WRITE_OWNER, generic
 // write, reparse points, non-NTFS mounts, and untrusted owners.
 //
-// The named directory keeps every verdict FATAL. Callers use this as a
-// pre-write and pre-delete guard on directories DefenseClaw itself creates and
-// ACLs below the state root (hook-guardian manifests, managed policy, namespace
-// purge), so an untrusted write ACE there is real breakage, not AVC's drift on
-// the shared tree. Only its parents are advisory, which is what AIFW-34262
-// needed: the untrusted grant lands on ...\Cisco Secure Client\DefenseClaw, one
-// level above every directory named here.
+// A named directory DefenseClaw itself creates and ACLs below the state root
+// (hook-guardian manifests, managed policy, namespace purge) keeps every
+// verdict FATAL: an untrusted write ACE there is real breakage, not AVC's drift
+// on the shared tree. Callers also name folders DefenseClaw does not own — the
+// first existing ancestor of a not-yet-created policy root (C:\Program Files,
+// C:\ProgramData) or the purge root's parent (...\Cisco Secure Client). Those
+// get the advisory ancestor scope (windowsNamedDirectoryScope), because
+// DefenseClaw never repairs their permissions. Structural checks stay fatal
+// everywhere, and TrustStrictAncestorsEnv keeps every verdict fatal.
 func ValidateTrustedDirectoryAncestor(path, label string) error {
 	if label == "" {
 		label = "managed directory ancestor"
@@ -273,7 +445,7 @@ func ValidateTrustedDirectoryAncestor(path, label string) error {
 	for cur := clean; ; cur = filepath.Dir(cur) {
 		scope := windowsAncestorScope(cur)
 		if cur == clean {
-			scope = windowsTrustNamedDir
+			scope = windowsNamedDirectoryScope(cur)
 		}
 		if err := validateTrustedWindowsPathElementWithWriter(cur, true, label, nil, scope); err != nil {
 			return err
@@ -307,32 +479,7 @@ func ValidateTrustedServiceRuntimeFilePath(path, label, serviceAccount string) e
 	if err != nil {
 		return err
 	}
-	if path == "" {
-		return fmt.Errorf("%s path is empty", label)
-	}
-	clean, err := filepath.Abs(path)
-	if err != nil {
-		return fmt.Errorf("resolve %s path: %w", label, err)
-	}
-	if _, err := winpath.ValidateFixedNTFSMountedPath(clean); err != nil {
-		return fmt.Errorf("%s is not on a trusted mount-manager NTFS drive: %w", label, err)
-	}
-	if err := validateTrustedWindowsPathElementWithWriter(clean, false, label, serviceSID, windowsTrustLeaf); err != nil {
-		return err
-	}
-	for dir := filepath.Dir(clean); dir != filepath.Dir(dir); dir = filepath.Dir(dir) {
-		if err := validateTrustedWindowsPathElementWithWriter(dir, true, label, serviceSID, windowsAncestorScope(dir)); err != nil {
-			return err
-		}
-	}
-	root := filepath.VolumeName(clean) + string(filepath.Separator)
-	return validateTrustedWindowsPathElementWithWriter(
-		root,
-		true,
-		label,
-		serviceSID,
-		windowsAncestorScope(root),
-	)
+	return validateTrustedWindowsFilePath(path, label, serviceSID, windowsTrustLeaf, windowsAncestorScope)
 }
 
 // windowsRulePackTreeMaxEntries bounds the walk of an administrator rule pack.
@@ -352,11 +499,21 @@ var errWindowsRulePackTreeTooLarge = errors.New("too many entries")
 // (GAP-0672). A service account that does not resolve yet (before the first
 // install) is held to the administrator-only rule.
 func ValidateTrustedRulePackTree(dir, label, serviceAccount string) error {
+	return validateTrustedWindowsRulePackTree(dir, label, serviceAccount, windowsTrustLeaf, windowsAncestorScope)
+}
+
+// validateTrustedWindowsRulePackTree checks dir as a runtime folder and every
+// folder and file below it with the leaf scope.
+func validateTrustedWindowsRulePackTree(
+	dir, label, serviceAccount string,
+	leaf windowsTrustScope,
+	ancestors func(string) windowsTrustScope,
+) error {
 	writer, err := windowsVirtualServiceSID(serviceAccount)
 	if err != nil {
 		writer = nil
 	}
-	if err := validateTrustedWindowsRuntimeDir(dir, label, writer); err != nil {
+	if err := validateTrustedWindowsRuntimeDirWith(dir, label, writer, leaf, ancestors); err != nil {
 		return err
 	}
 	root, err := filepath.Abs(dir)
@@ -364,7 +521,7 @@ func ValidateTrustedRulePackTree(dir, label, serviceAccount string) error {
 		return fmt.Errorf("resolve %s path: %w", label, err)
 	}
 	return walkWindowsRulePackTree(root, func(path string, isDir bool) error {
-		return validateTrustedWindowsPathElementWithWriter(path, isDir, label, writer, windowsTrustLeaf)
+		return validateTrustedWindowsPathElementWithWriter(path, isDir, label, writer, leaf)
 	})
 }
 
@@ -410,12 +567,24 @@ func validateTrustedWindowsRuntimeDir(path, label string, allowedWriter *windows
 }
 
 // windowsStrictAncestorScope gives every ancestor the narrow mask with fatal
-// verdicts, the installer-owned Cisco folders included.
-func windowsStrictAncestorScope(string) windowsTrustScope { return windowsTrustForeignAncestor }
+// verdicts and the exact principal rule, the installer-owned Cisco folders
+// included.
+func windowsStrictAncestorScope(string) windowsTrustScope { return windowsTrustStrictAncestor }
 
 // validateTrustedWindowsRuntimeDirWithAncestors checks the named folder with
 // the leaf rule and each folder above it with the scope ancestors picks.
 func validateTrustedWindowsRuntimeDirWithAncestors(path, label string, allowedWriter *windows.SID, ancestors func(string) windowsTrustScope) error {
+	return validateTrustedWindowsRuntimeDirWith(path, label, allowedWriter, windowsTrustLeaf, ancestors)
+}
+
+// validateTrustedWindowsRuntimeDirWith checks the named folder with leaf and
+// each folder above it with the scope ancestors picks.
+func validateTrustedWindowsRuntimeDirWith(
+	path, label string,
+	allowedWriter *windows.SID,
+	leaf windowsTrustScope,
+	ancestors func(string) windowsTrustScope,
+) error {
 	if label == "" {
 		label = "managed runtime dir"
 	}
@@ -432,7 +601,7 @@ func validateTrustedWindowsRuntimeDirWithAncestors(path, label string, allowedWr
 	for cur := clean; ; cur = filepath.Dir(cur) {
 		scope := ancestors(cur)
 		if cur == clean {
-			scope = windowsTrustLeaf
+			scope = leaf
 		}
 		if err := validateTrustedWindowsPathElementWithWriter(cur, true, label, allowedWriter, scope); err != nil {
 			return err
@@ -459,11 +628,58 @@ func validateTrustedWindowsRuntimeDirWithAncestors(path, label string, allowedWr
 //   - systemAdminOnly allows only LocalSystem and Administrators to own or
 //     change a code path, never TrustedInstaller.
 //   - ownerSystemOnly requires LocalSystem to own a Secure Client marker.
+//   - strictPrincipals keeps the exact owner and writer rule on an element of
+//     an elevated-image or marker walk: the principal drift acceptances (an
+//     administrator-equivalent owner or writer, an inherited create-child
+//     entry) do not apply. systemAdminOnly and ownerSystemOnly imply it.
+//   - drift downgrades every permission verdict on the element, the named leaf
+//     included, to a TrustDriftAdvisoryMarker warning. Unlike advisory it also
+//     downgrades an allow ACE whose type the walk cannot evaluate. Only the
+//     *Tolerant entry points set it. Structural and API failures are never
+//     downgraded, and TrustStrictAncestorsEnv restores fatality.
+//   - structureOnly skips the owner and DACL checks on the element entirely,
+//     for a named file whose caller checks its permissions on its own handle.
+//     Never set on an ancestor.
+//   - code marks the named file as executable code: an untrusted writer or
+//     owner is also logged as a MarkerBoundary finding. Only meaningful with
+//     drift, and never set on an ancestor.
 type windowsTrustScope struct {
-	narrowMask      bool
-	advisory        bool
-	systemAdminOnly bool
-	ownerSystemOnly bool
+	narrowMask       bool
+	advisory         bool
+	systemAdminOnly  bool
+	ownerSystemOnly  bool
+	strictPrincipals bool
+	drift            bool
+	structureOnly    bool
+	code             bool
+}
+
+// acceptsPrincipalDrift reports whether the principal drift acceptances (an
+// administrator-equivalent owner or writer, an inherited create-child entry)
+// may apply to the element. The code and marker walks keep their exact rule,
+// and a structure-only element never reaches a principal verdict.
+func (scope windowsTrustScope) acceptsPrincipalDrift() bool {
+	return !scope.structureOnly && !scope.systemAdminOnly && !scope.ownerSystemOnly && !scope.strictPrincipals
+}
+
+// tolerant returns the scope with the same mask and drift tolerance set.
+func (scope windowsTrustScope) tolerant() windowsTrustScope {
+	scope.drift = true
+	return scope
+}
+
+// relaxVerdict is the single exit for a permission verdict on one element.
+// Drift wins over advisory so a tolerant walk tags its warnings with the drift
+// marker; strict mode makes both fall through to the verdict.
+func (scope windowsTrustScope) relaxVerdict(path, label string, verdict error) error {
+	if verdict == nil {
+		return nil
+	}
+	if scope.drift && !trustStrictAncestors() {
+		reportTrustDrift(path, label, verdict.Error())
+		return nil
+	}
+	return relaxAncestorTrustVerdict(scope.advisory, path, label, verdict)
 }
 
 var (
@@ -492,6 +708,12 @@ var (
 	// so an untrusted owner or a replace-capable ACE means the artifact below can
 	// be swapped.
 	windowsTrustForeignAncestor = windowsTrustScope{narrowMask: true}
+	// windowsTrustStrictLeaf and windowsTrustStrictAncestor are the leaf and
+	// foreign-ancestor rules for an image an elevated process runs and for a
+	// Secure Client marker: verdicts fatal, and no administrator-equivalent or
+	// inherited create-child acceptance.
+	windowsTrustStrictLeaf     = windowsTrustScope{strictPrincipals: true}
+	windowsTrustStrictAncestor = windowsTrustScope{narrowMask: true, strictPrincipals: true}
 )
 
 // windowsAncestorScope picks the ancestor scope from the ancestor's position:
@@ -499,10 +721,112 @@ var (
 // everywhere else. Every ancestor walk in this file routes through here so the
 // allowlist cannot be forgotten at one call site.
 func windowsAncestorScope(path string) windowsTrustScope {
-	if PlatformInstallerOwnedPath(path) {
+	if AdvisoryAncestorPath(path) {
 		return windowsTrustAncestor
 	}
 	return windowsTrustForeignAncestor
+}
+
+// osRootAncestor reports whether path is one of the fixed operating
+// system roots every managed path sits under: the system drive root, the
+// Windows and System32 directories, ProgramData and Program Files. Their
+// permissions belong to Windows and to whatever hardening the host applies,
+// not to DefenseClaw, so drift there is advisory like the platform
+// installer's roots. Temp, profile and other prefixes stay fatal.
+func osRootAncestor(path string) bool {
+	clean := filepath.Clean(path)
+	var roots []string
+	if dir, err := windows.GetWindowsDirectory(); err == nil && dir != "" {
+		roots = append(roots, dir, filepath.VolumeName(dir)+`\`)
+	}
+	if dir, err := windows.GetSystemDirectory(); err == nil && dir != "" {
+		roots = append(roots, dir)
+	}
+	// Every root comes from Windows or the HKLM machine registration, never
+	// the process environment, which the invoking user controls.
+	roots = append(roots, trustedMachineInstallBases()...)
+	for _, root := range roots {
+		if strings.EqualFold(clean, filepath.Clean(root)) {
+			return true
+		}
+	}
+	return false
+}
+
+// windowsNamedDirectoryScope picks the scope for the directory named to
+// ValidateTrustedDirectoryAncestor. An OS root, or a platform installer root
+// and the shared folders between it and DefenseClaw's own tree (...\Cisco,
+// ...\Cisco\Cisco Secure Client), gets the advisory ancestor scope; everything
+// else, including every folder at or below a DefenseClaw folder, stays
+// windowsTrustNamedDir. Strict mode keeps the named directory fatal.
+func windowsNamedDirectoryScope(path string) windowsTrustScope {
+	if !trustStrictAncestors() && (osRootAncestor(path) || installerSharedFolder(path)) {
+		return windowsTrustAncestor
+	}
+	return windowsTrustNamedDir
+}
+
+// installerSharedFolder reports whether path is at or below a platform
+// installer root without crossing a DefenseClaw-named folder, i.e. a folder
+// whose permissions belong to AVC rather than to DefenseClaw.
+func installerSharedFolder(path string) bool {
+	clean := filepath.Clean(path)
+	for _, root := range PlatformInstallerOwnedRoots() {
+		root = filepath.Clean(root)
+		if !pathAtOrUnder(clean, root) {
+			continue
+		}
+		rel, err := filepath.Rel(root, clean)
+		if err != nil {
+			return false
+		}
+		for _, element := range strings.Split(rel, string(filepath.Separator)) {
+			if strings.HasPrefix(strings.ToLower(element), "defenseclaw") {
+				return false
+			}
+		}
+		return true
+	}
+	return false
+}
+
+// trustedMachineInstallBases returns ProgramData, Program Files and Program
+// Files (x86) from the HKLM machine registration. A base that cannot be
+// resolved is left out.
+func trustedMachineInstallBases() []string {
+	var bases []string
+	for _, resolve := range []func() (string, error){
+		winpath.TrustedProgramData, winpath.TrustedProgramFiles, winpath.TrustedProgramFilesX86,
+	} {
+		if dir, err := resolve(); err == nil && dir != "" {
+			bases = append(bases, dir)
+		}
+	}
+	testMachineInstallBases.Lock()
+	defer testMachineInstallBases.Unlock()
+	return append(bases, testMachineInstallBases.bases...)
+}
+
+var testMachineInstallBases struct {
+	sync.Mutex
+	bases []string
+}
+
+// AddTrustedMachineInstallBaseForTest makes base count as a registered machine
+// base (ProgramData, Program Files) for PlatformInstallerOwnedRoots and the
+// OS-root ancestor scope, so a test can stand a temporary folder in for one:
+// the process environment no longer adds a base. Production code never calls
+// it. restore removes base again.
+func AddTrustedMachineInstallBaseForTest(base string) (restore func()) {
+	testMachineInstallBases.Lock()
+	defer testMachineInstallBases.Unlock()
+	previous := testMachineInstallBases.bases
+	testMachineInstallBases.bases = append(append([]string(nil), previous...), base)
+	return func() {
+		testMachineInstallBases.Lock()
+		defer testMachineInstallBases.Unlock()
+		testMachineInstallBases.bases = previous
+	}
 }
 
 func validateTrustedWindowsPathElementWithWriter(
@@ -528,6 +852,9 @@ func validateTrustedWindowsPathElementWithWriter(
 	if !wantDir && !info.Mode().IsRegular() {
 		return fmt.Errorf("%s: expected regular %s file", path, label)
 	}
+	if scope.structureOnly {
+		return nil
+	}
 	extendedPath, err := winpath.Extended(path)
 	if err != nil {
 		return fmt.Errorf("%s: encode extended Windows path: %w", path, err)
@@ -538,6 +865,14 @@ func validateTrustedWindowsPathElementWithWriter(
 		windows.OWNER_SECURITY_INFORMATION|windows.DACL_SECURITY_INFORMATION,
 	)
 	if err != nil {
+		if acceptUnreadableDescriptor(scope, err) {
+			// The element's DACL no longer grants this caller READ_CONTROL.
+			// Its type and reparse state were checked above through
+			// attributes, which is all an ancestor or a drift-tolerant
+			// element needs; the permissions belong to whoever re-ACLed it.
+			reportTrustDrift(path, label, "security descriptor is not readable: "+err.Error())
+			return nil
+		}
 		return fmt.Errorf("%s: inspect Windows security descriptor: %w", path, err)
 	}
 	if sd == nil {
@@ -554,7 +889,13 @@ func validateTrustedWindowsPathElementWithWriter(
 	if scope.ownerSystemOnly {
 		trustedOwner = owner != nil && owner.IsWellKnown(windows.WinLocalSystemSid)
 	}
-	if !trustedOwner {
+	if !trustedOwner && acceptAdminEquivalent(scope, path, label, "owner", owner) {
+		// An administrator account or domain admin group owns the element:
+		// accepted and logged, never fatal.
+	} else if !trustedOwner {
+		if scope.code {
+			reportCodeIntegrityFinding(path, label, sidString(owner), "untrusted owner")
+		}
 		expected := "Administrators, LocalSystem, or TrustedInstaller"
 		if scope.systemAdminOnly {
 			expected = "Administrators or LocalSystem"
@@ -565,7 +906,7 @@ func validateTrustedWindowsPathElementWithWriter(
 		if allowedWriter != nil {
 			expected = fmt.Sprintf("%s, or the pinned service SID %s", expected, sidString(allowedWriter))
 		}
-		if err := relaxAncestorTrustVerdict(scope.advisory, path, label, &UntrustedPrincipalError{
+		if err := scope.relaxVerdict(path, label, &UntrustedPrincipalError{
 			Path:  path,
 			SID:   sidString(owner),
 			Owner: true,
@@ -579,7 +920,10 @@ func validateTrustedWindowsPathElementWithWriter(
 		return fmt.Errorf("%s: inspect Windows DACL: %w", path, err)
 	}
 	if dacl == nil {
-		return relaxAncestorTrustVerdict(scope.advisory, path, label, fmt.Errorf(
+		if scope.code {
+			reportCodeIntegrityFinding(path, label, "Everyone", "null DACL")
+		}
+		return scope.relaxVerdict(path, label, fmt.Errorf(
 			"%s: null Windows DACL is not trusted", path,
 		))
 	}
@@ -611,23 +955,40 @@ func rejectUntrustedWindowsWriteACEsWithWriter(
 			continue
 		}
 		switch ace.Header.AceType {
-		case accessAllowedObjectACEType, accessAllowedCallbackACEType, accessAllowedCallbackObjectACEType:
+		case accessAllowedObjectACEType, accessAllowedCallbackObjectACEType:
 			// Not a permission verdict: the ACE layout differs from
 			// ACCESS_ALLOWED_ACE, so ace.Mask and ace.SidStart cannot be read
 			// and this walk has no idea who was granted what. Advisory mode
 			// must not turn "cannot evaluate" into "trusted" — stock NTFS never
 			// carries these types, and AIFW-34262's grant was a plain
 			// ACCESS_ALLOWED_ACE, so keeping them fatal costs no install.
-			return fmt.Errorf(
+			// Only a drift scope (the broker's own objects) accepts them,
+			// because there the product decision is to never stop on
+			// permissions alone.
+			verdict := fmt.Errorf(
 				"%s: unsupported allow ACE type 0x%x; refusing managed trust", path, ace.Header.AceType,
 			)
-		case windows.ACCESS_ALLOWED_ACE_TYPE:
+			if !scope.drift {
+				return verdict
+			}
+			if err := scope.relaxVerdict(path, label, verdict); err != nil {
+				return err
+			}
+			continue
+		case windows.ACCESS_ALLOWED_ACE_TYPE, accessAllowedCallbackACEType:
+			// A callback (conditional) allow entry has the ACCESS_ALLOWED_ACE
+			// layout followed by its condition, so its trustee and mask are
+			// judged like a plain entry: the condition can only narrow it.
 		default:
 			continue
 		}
 		sid := (*windows.SID)(unsafe.Pointer(&ace.SidStart))
 		writeLike := windowsWriteLikeAccess(ace.Mask)
-		if scope.narrowMask && !windowsWorldSID(sid) {
+		// The narrower ancestor rule ignores create-child bits, which an
+		// object-inheritable entry would hand to every new file as write
+		// data and append data; those entries keep the full rule.
+		if scope.narrowMask && !windowsWorldSID(sid) &&
+			ace.Header.AceFlags&windows.OBJECT_INHERIT_ACE == 0 {
 			writeLike = WindowsAncestorReplaceAccess(ace.Mask)
 		}
 		if !writeLike {
@@ -638,7 +999,16 @@ func rejectUntrustedWindowsWriteACEsWithWriter(
 			trustedWriter = windowsSystemOrAdmin(sid)
 		}
 		if !trustedWriter {
-			if err := relaxAncestorTrustVerdict(scope.advisory, path, label, &UntrustedPrincipalError{
+			if acceptAdminEquivalent(scope, path, label, fmt.Sprintf("writer mask 0x%x", uint32(ace.Mask)), sid) {
+				continue
+			}
+			if scope.acceptsPrincipalDrift() && acceptInheritedCreateChild(path, label, ace.Header.AceFlags, ace.Mask, sid) {
+				continue
+			}
+			if scope.code {
+				reportCodeIntegrityFinding(path, label, sidString(sid), fmt.Sprintf("write-like access mask 0x%x", uint32(ace.Mask)))
+			}
+			if err := scope.relaxVerdict(path, label, &UntrustedPrincipalError{
 				Path: path,
 				SID:  sidString(sid),
 				text: fmt.Sprintf("%s: untrusted Windows principal %s has write-like access mask 0x%x", path, sidString(sid), uint32(ace.Mask)),
@@ -648,6 +1018,47 @@ func rejectUntrustedWindowsWriteACEsWithWriter(
 		}
 	}
 	return nil
+}
+
+// acceptUnreadableDescriptor reports whether an error reading an element's
+// security descriptor is drift rather than a structural failure: access denied
+// on an ancestor inside the platform installer's roots, or on any element of
+// a drift-tolerant walk. Strict mode and the exact principal rule keep it
+// fatal.
+func acceptUnreadableDescriptor(scope windowsTrustScope, err error) bool {
+	if !errors.Is(err, windows.ERROR_ACCESS_DENIED) || trustStrictAncestors() || scope.strictPrincipals {
+		return false
+	}
+	return scope.advisory || scope.drift
+}
+
+// acceptAdminEquivalent accepts and logs an owner or writer that is an
+// administrator principal outside the core trusted set (the built-in
+// Administrator account, Domain Admins, Enterprise Admins, a local
+// Administrators member). It reports false, leaving the verdict to the caller,
+// in strict mode or when sid is not administrator-equivalent.
+func acceptAdminEquivalent(scope windowsTrustScope, path, label, what string, sid *windows.SID) bool {
+	if !scope.acceptsPrincipalDrift() || trustStrictAncestors() || !windowsAdminEquivalentOwner(sid) {
+		return false
+	}
+	reportTrustDrift(path, label, fmt.Sprintf("%s %s is an administrator principal, not a canonical owner or writer", what, sidString(sid)))
+	return true
+}
+
+// reportCodeIntegrityFinding logs an untrusted writer or owner on executable
+// code once per (path, principal, reason) as a critical, non-fatal boundary
+// finding.
+func reportCodeIntegrityFinding(path, label, principal, reason string) {
+	fields := map[string]string{
+		"path":      path,
+		"object":    label,
+		"principal": principal,
+		"reason":    reason,
+	}
+	if !advisoryLogDedupe.shouldEmit(path, MarkerBoundary, FormatResilienceEvent(MarkerBoundary, fields)) {
+		return
+	}
+	EmitResilienceEvent(MarkerBoundary, fields)
 }
 
 // WindowsAncestorReplaceAccess reports whether mask lets a principal replace a
@@ -879,6 +1290,52 @@ func windowsTokenRunsAsService(token windowsTokenIdentity, serviceSID *windows.S
 
 func sameWindowsSID(left, right *windows.SID) bool {
 	return left != nil && right != nil && left.Equals(right)
+}
+
+// windowsCreateChildOnlyMask is what an inherited ProgramData entry grants
+// BUILTIN\Users on a folder (0x116 plus read and traverse): list, read, add
+// files and subfolders, and set the folder's own attributes. None of it can
+// change, rename or delete anything already in the folder.
+const windowsCreateChildOnlyMask windows.ACCESS_MASK = 0x001201bf
+
+var acceptedCreateChild sync.Map
+
+// AcceptInheritedCreateChild is acceptInheritedCreateChild for the gateway's
+// own trust walks (audit store, judge-body store, hook token folders), so a
+// folder reset to inherit from C:\ProgramData is judged the same way
+// everywhere. It reports whether the entry is accepted, logging it once.
+func AcceptInheritedCreateChild(path, label string, flags uint8, mask windows.ACCESS_MASK, sid *windows.SID) bool {
+	return acceptInheritedCreateChild(path, label, flags, mask, sid)
+}
+
+// acceptInheritedCreateChild accepts, and logs once per path, an inherited
+// create-child-only entry for Users or Authenticated Users on a directory:
+// the shape a folder takes after its protection is reset to inherit from
+// C:\ProgramData. Strict mode keeps it fatal.
+func acceptInheritedCreateChild(path, label string, flags uint8, mask windows.ACCESS_MASK, sid *windows.SID) bool {
+	// An object-inheritable entry would pass these bits to new files, where
+	// add-file and add-subfolder mean write data and append data.
+	if trustStrictAncestors() || flags&windows.INHERITED_ACE == 0 || flags&windows.OBJECT_INHERIT_ACE != 0 ||
+		mask&^windowsCreateChildOnlyMask != 0 {
+		return false
+	}
+	if sid == nil || !(sid.IsWellKnown(windows.WinBuiltinUsersSid) || sid.IsWellKnown(windows.WinAuthenticatedUserSid)) {
+		return false
+	}
+	info, err := os.Lstat(path)
+	if err != nil || !info.IsDir() || info.Mode()&os.ModeSymlink != 0 {
+		return false
+	}
+	key := strings.ToLower(filepath.Clean(path)) + "\x00" + sidString(sid)
+	if _, seen := acceptedCreateChild.LoadOrStore(key, struct{}{}); !seen {
+		EmitResilienceEvent(MarkerAccept, map[string]string{
+			"path":      path,
+			"label":     label,
+			"principal": sidString(sid),
+			"reason":    fmt.Sprintf("inherited create-child-only access mask 0x%x on a folder", uint32(mask)),
+		})
+	}
+	return true
 }
 
 func windowsWriteLikeAccess(mask windows.ACCESS_MASK) bool {

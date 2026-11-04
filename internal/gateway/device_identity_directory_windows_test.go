@@ -24,8 +24,30 @@ func stubGatewayServiceProcess(t *testing.T, isGateway bool) {
 	t.Cleanup(func() { currentProcessIsGatewayService = previous })
 }
 
-func TestFreshIdentityManagedServiceDirectorySelection(t *testing.T) {
+// untrustedIdentityTempDir is a temp dir a standard user can write. The
+// caller's ownership alone is not enough: an elevated test run may be the
+// built-in Administrator, which the managed trust walk accepts as drift.
+func untrustedIdentityTempDir(t *testing.T) string {
+	t.Helper()
 	dir := t.TempDir()
+	sd, err := windows.SecurityDescriptorFromString("D:P(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)(A;OICI;FA;;;BU)")
+	if err != nil {
+		t.Fatal(err)
+	}
+	dacl, _, err := sd.DACL()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := windows.SetNamedSecurityInfo(dir, windows.SE_FILE_OBJECT,
+		windows.DACL_SECURITY_INFORMATION|windows.PROTECTED_DACL_SECURITY_INFORMATION,
+		nil, nil, dacl, nil); err != nil {
+		t.Fatal(err)
+	}
+	return dir
+}
+
+func TestFreshIdentityManagedServiceDirectorySelection(t *testing.T) {
+	dir := untrustedIdentityTempDir(t)
 	t.Setenv(managed.DeploymentModeEnv, managed.DeploymentModeManagedEnterprise)
 	t.Setenv(managed.WindowsServiceAccountEnv, `NT SERVICE\DefenseClawGateway`)
 
@@ -36,8 +58,8 @@ func TestFreshIdentityManagedServiceDirectorySelection(t *testing.T) {
 	}
 
 	// The Secure Client gateway service gets the managed service trust model
-	// for its Administrators-owned runtime tree; a caller-owned temp dir is
-	// still refused by it.
+	// for its Administrators-owned runtime tree; a temp dir a standard user
+	// can write is still refused by it.
 	stubGatewayServiceProcess(t, true)
 	handled, err := validateFreshIdentityManagedServiceDirectory(dir)
 	if !handled || err == nil {
@@ -63,7 +85,7 @@ func TestFreshIdentityManagedServiceDirectorySelection(t *testing.T) {
 }
 
 func TestFreshIdentityManagedServiceFileSelection(t *testing.T) {
-	path := t.TempDir() + `\device.key`
+	path := untrustedIdentityTempDir(t) + `\device.key`
 	t.Setenv(managed.DeploymentModeEnv, managed.DeploymentModeManagedEnterprise)
 	t.Setenv(managed.WindowsServiceAccountEnv, `NT SERVICE\DefenseClawGateway`)
 	t.Setenv(managed.EnterpriseProfileEnv, "")

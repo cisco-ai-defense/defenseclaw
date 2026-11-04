@@ -189,19 +189,18 @@ func rootPersistentPreRunE(cmd *cobra.Command, _ []string) (err error) {
 	// Every command that resolves directory facts verifies an account of a
 	// child AD domain only when the administrator lists it (GAP-1255).
 	useridentity.SetTrustedADChildDomains(cfg.AIDiscovery.TrustedADChildDomains)
-	if auditDir := filepath.Dir(cfg.AuditDB); auditDir != "." {
-		if err := managed.PrepareServiceRuntimeDir(cfg.DeploymentMode, auditDir, "audit store directory"); err != nil {
-			return fmt.Errorf("failed to prepare audit store directory: %w", err)
-		}
-	}
 	if cmd != nil && !cmd.HasParent() {
 		// The daemon owns the store: it moves a corrupt one aside and starts
-		// on a new one instead of failing.
-		auditStore, err = audit.OpenDaemonStore(cfg.AuditDB, os.Stderr, auditStoreOptions(cfg)...)
+		// on a new one instead of failing. Only the daemon waits out an audit
+		// store repair; subcommands fail fast.
+		auditStore, err = openDaemonAuditStore(cmd.Context(), cfg)
 		if err != nil {
-			return fmt.Errorf("failed to open audit store: %w", err)
+			return err
 		}
 	} else {
+		if err := prepareAuditStoreDir(cfg.DeploymentMode, cfg.AuditDB); err != nil {
+			return err
+		}
 		auditStore, err = openCommandAuditStore(cfg.AuditDB, auditStoreOptions(cfg)...)
 		if err != nil {
 			if cmd == nil || cmd.Annotations[auditOptionalAnnotation] != "true" {
@@ -223,6 +222,36 @@ func rootPersistentPreRunE(cmd *cobra.Command, _ []string) (err error) {
 		loadDotEnvIntoOS(resolved)
 	}
 	return nil
+}
+
+// prepareAuditStoreDir prepares the directory of the audit store at path.
+func prepareAuditStoreDir(deploymentMode, path string) error {
+	if auditDir := filepath.Dir(path); auditDir != "." {
+		if err := managed.PrepareServiceRuntimeDir(deploymentMode, auditDir, "audit store directory"); err != nil {
+			return fmt.Errorf("failed to prepare audit store directory: %w", err)
+		}
+	}
+	return nil
+}
+
+// openDaemonAuditStore prepares the audit store directory and opens the
+// store the way the daemon does (audit.OpenDaemonStore). A managed daemon
+// that can't open it usually lost its write entry to permission drift, which
+// the LocalSystem guardian puts back within a tick, so it retries on the
+// gatewayAuditOpen* backoff instead of exiting into an SCM restart loop, and
+// stops when ctx ends. Outside managed mode the first failure is returned.
+func openDaemonAuditStore(ctx context.Context, cfg *config.Config) (*audit.Store, error) {
+	attempt := func() (*audit.Store, error) {
+		if err := prepareAuditStoreDir(cfg.DeploymentMode, cfg.AuditDB); err != nil {
+			return nil, err
+		}
+		store, err := audit.OpenDaemonStore(cfg.AuditDB, os.Stderr, auditStoreOptions(cfg)...)
+		if err != nil {
+			return nil, fmt.Errorf("failed to open audit store: %w", err)
+		}
+		return store, nil
+	}
+	return openAuditStoreWaitingForRepair(ctx, cfg.DeploymentMode, cfg.AuditDB, attempt)
 }
 
 // auditStoreOptions are the options every opener of cfg's audit.db passes:

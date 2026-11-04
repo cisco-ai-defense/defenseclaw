@@ -244,7 +244,7 @@ func (a *APIServer) inspectManagedAIDOnly(ctx context.Context, toolName, content
 	failOpenReason := aidFailOpenUnavailable
 	if !managedAIDHookContentIsInspectable(toolName, content) {
 		failOpenReason = aidFailOpenNoContent
-	} else if a == nil || a.ciscoInspector == nil || cfg == nil ||
+	} else if a == nil || a.currentCiscoInspector() == nil || cfg == nil ||
 		!cfg.CiscoAIDefense.HookSurfaceEnabled() {
 		failOpenReason = aidFailOpenUnwired
 	}
@@ -384,7 +384,8 @@ func (a *APIServer) recordManagedAIDFailOpenForSelectedNativeHookResult(
 }
 
 func (a *APIServer) hookAIDInspect(ctx context.Context, toolName string, content string) *ScanVerdict {
-	if a == nil || a.ciscoInspector == nil {
+	inspector := a.currentCiscoInspector()
+	if inspector == nil {
 		return nil
 	}
 	if cfg := a.decisionConfig(ctx); cfg == nil || !cfg.CiscoAIDefense.HookSurfaceEnabled() {
@@ -403,7 +404,7 @@ func (a *APIServer) hookAIDInspect(ctx context.Context, toolName string, content
 		body = fmt.Sprintf("Tool call: %s\n%s", toolName, content)
 	}
 	defer yieldHookRunSlot(ctx)()
-	return a.ciscoInspector.Inspect(ctx, []ChatMessage{{Role: "user", Content: body}})
+	return inspector.Inspect(ctx, []ChatMessage{{Role: "user", Content: body}})
 }
 
 // managedAIDHookContentIsInspectable applies text trimming only to the

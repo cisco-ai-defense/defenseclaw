@@ -10,8 +10,12 @@ import (
 	"fmt"
 	"strings"
 	"sync"
+	"time"
+	"unsafe"
 
+	"github.com/defenseclaw/defenseclaw/internal/managed"
 	"github.com/defenseclaw/defenseclaw/internal/winmutex"
+	"golang.org/x/sys/windows"
 )
 
 // windowsUserRuntimeTransactionLocks serialize the complete per-SID managed
@@ -37,9 +41,9 @@ func lockWindowsUserRuntimeTransaction(rawSID string) (func(), error) {
 		return nil, err
 	}
 	// Acquire the in-process lock first so that goroutines inside the
-	// same process serialize on the sync.Mutex (which blocks) rather
-	// than fighting the machine-wide named mutex (which fails fast).
-	// Only one goroutine per process ever reaches CreateMutex below.
+	// same process serialize on the sync.Mutex rather than on the
+	// machine-wide named mutex, which is recursive per thread. Only one
+	// goroutine per process ever waits on the named mutex below.
 	lock := windowsUserRuntimeTransactionMutexForSID(target.String())
 	lock.Lock()
 	release, err := windowsUserRuntimeMachineMutexAcquire(target.String())
@@ -69,16 +73,37 @@ func windowsUserRuntimeTransactionMutexForSID(canonicalSID string) *sync.Mutex {
 	return value.(*sync.Mutex)
 }
 
+// windowsUserRuntimeMachineMutexTimeout bounds how long a transaction waits
+// for another process (a Guardian tick, an installer step) to finish with the
+// same target. Waiting replaces the old fail-fast behaviour, which failed an
+// install whenever a Guardian tick overlapped it.
+var windowsUserRuntimeMachineMutexTimeout = 90 * time.Second
+
+// windowsUserRuntimeMachineMutexSDDL lets both the LocalSystem Guardian and
+// an elevated installer open a mutex the other created.
+const windowsUserRuntimeMachineMutexSDDL = "D:P(A;;GA;;;SY)(A;;GA;;;BA)"
+
 func acquireWindowsUserRuntimeMachineMutex(canonicalSID string) (func() error, error) {
+	descriptor, err := windows.SecurityDescriptorFromString(windowsUserRuntimeMachineMutexSDDL)
+	if err != nil {
+		return nil, fmt.Errorf("enterprise hooks: build runtime transaction lock descriptor: %w", err)
+	}
+	attributes := &windows.SecurityAttributes{
+		Length:             uint32(unsafe.Sizeof(windows.SecurityAttributes{})),
+		SecurityDescriptor: descriptor,
+	}
 	// winmutex holds the mutex on one goroutine locked to its OS thread:
 	// only the owning thread can release a Windows mutex, and callers unlock
 	// from whatever thread their goroutine has moved to.
-	release, err := winmutex.TryAcquire(
-		`Global\Cisco.DefenseClaw.EnterpriseHooks.`+strings.ToUpper(canonicalSID), nil,
+	release, abandoned, err := winmutex.Acquire(
+		`Global\Cisco.DefenseClaw.EnterpriseHooks.`+strings.ToUpper(canonicalSID),
+		attributes,
+		windowsUserRuntimeMachineMutexTimeout,
 	)
-	if errors.Is(err, winmutex.ErrBusy) {
-		return nil, errors.New(
-			"enterprise hooks: another DefenseClaw enterprise hook transaction is already in progress for this target",
+	if errors.Is(err, winmutex.ErrTimeout) {
+		return nil, fmt.Errorf(
+			"enterprise hooks: another DefenseClaw enterprise hook transaction for this target did not finish within %s",
+			windowsUserRuntimeMachineMutexTimeout,
 		)
 	}
 	if err != nil {
@@ -86,6 +111,14 @@ func acquireWindowsUserRuntimeMachineMutex(canonicalSID string) (func() error, e
 			"enterprise hooks: acquire machine-wide runtime transaction lock: %w",
 			err,
 		)
+	}
+	if abandoned {
+		// The previous holder exited without releasing. Each transaction
+		// re-validates everything it touches, so taking over is safe.
+		managed.EmitResilienceEvent(managed.MarkerAccept, map[string]string{
+			"sid":    canonicalSID,
+			"reason": "runtime transaction lock was abandoned by a process that exited; taking it over",
+		})
 	}
 	return release, nil
 }

@@ -81,6 +81,7 @@ func newHookCmd() *cobra.Command {
 		PersistentPreRunE: func(*cobra.Command, []string) error { return nil },
 		PersistentPostRun: func(*cobra.Command, []string) {},
 		RunE: func(cmd *cobra.Command, _ []string) error {
+			defer RecoverHookPanic()
 			if err := validateHookSurface(connector, hookSurface); err != nil {
 				return hookFailure(hookFailureContext{connector: connector}, err)
 			}
@@ -103,6 +104,15 @@ func newHookCmd() *cobra.Command {
 			}
 			if !enterpriseManaged && implicitEnterpriseManagedHook() {
 				enterpriseManaged = true
+			}
+			if enterpriseManaged && runtime.GOOS == "windows" {
+				// Keep managed diagnostics off the agent-visible streams when
+				// the hook runs through this binary instead of
+				// defenseclaw-hook.exe (which installed them already): the
+				// agent shows hook stderr, and Claude Code makes it the block
+				// message. Unix hooks keep their stderr diagnostics; they
+				// have no platform record to send them to.
+				hookexec.InstallManagedHookDiagnosticSinks()
 			}
 			startedAt := hookInvocationStart()
 			// At the answer deadline of a tool call the hook writes its
@@ -529,6 +539,9 @@ func buildHookOptionsForRuntime(connector, event, apiAddr, _ string, enterpriseM
 			SecureClient:          secureClientHost(),
 			ManagedRuntimeFailure: enterpriseManagedHookRuntimeFailureReason(),
 		}
+		if failMode, strict, ok := secureClientRuntimeFailureDelivery(opts.SecureClient, opts.ManagedRuntimeFailure); ok {
+			opts.FailMode, opts.StrictAvailability = failMode, strict
+		}
 		opts.FailureLogHome = managedHookFailureLogHome
 		// Marks a failed Unix standalone runtime as the standalone profile's
 		// (no transport is selected); a no-op elsewhere.
@@ -671,15 +684,22 @@ func buildHookOptionsForRuntime(connector, event, apiAddr, _ string, enterpriseM
 		// decision 2026-10-20: explicit open or closed wins, unset is closed,
 		// and open under Secure Client, #1163). A runtime failure, and
 		// anything but open, keeps the fail-closed, strict-availability
-		// contract. The agent's environment never changes it.
+		// contract, except a Secure Client account that is not enrolled yet
+		// or whose runtime state drifted (secureClientRuntimeFailureDelivery).
+		// The agent's environment never opens it.
 		opts.FailMode = enterpriseManagedHookRuntimeFailMode()
-		if managedRuntimeFailure != "" || opts.FailMode != "open" {
+		if failMode, strict, ok := secureClientRuntimeFailureDelivery(opts.SecureClient, managedRuntimeFailure); ok {
+			opts.FailMode, opts.StrictAvailability = failMode, strict
+		} else if managedRuntimeFailure != "" || opts.FailMode != "open" {
 			opts.FailMode = "closed"
 			opts.StrictAvailability = true
 		}
 	}
 
-	if v := os.Getenv("DEFENSECLAW_HOOK_MAX_BODY"); v != "" {
+	// A managed hook keeps the fixed cap: the variable comes from the agent's
+	// or project's environment, and a tiny cap would make every payload
+	// oversized, before its event could be read.
+	if v := os.Getenv("DEFENSECLAW_HOOK_MAX_BODY"); v != "" && !opts.ManagedEnterprise {
 		if n, err := strconv.ParseInt(v, 10, 64); err == nil && n > 0 {
 			if !trustedNativeState || n <= 1<<20 {
 				// Packaged hooks allow projects to lower the cap, never raise it.
@@ -790,6 +810,31 @@ func hookIsLoopbackAddr(addr string) bool {
 		return ip.IsLoopback()
 	}
 	return false
+}
+
+// secureClientRuntimeFailureDelivery is the delivery of a Secure Client
+// hook's managed runtime failure that is not an integrity boundary. An
+// account that is not enrolled yet (hookexec.ManagedEnrollmentGap: absent
+// from the protected target set, or registered with no published runtime)
+// has no authenticated generation that names a mode, so it takes the
+// profile's open default (#1163). Drifted runtime state
+// (hookexec.ManagedRuntimeDriftReason) takes the configured mode the
+// resolver recovered from authenticated state, closed when none could be
+// established (enterpriseManagedHookRuntimeDriftFailMode). In both,
+// DEFENSECLAW_STRICT_AVAILABILITY can only close it, and hookexec records
+// every decision. ok is false for the standalone hook, for every other
+// runtime failure and off a Secure Client host: they keep the fail-closed,
+// strict-availability contract.
+func secureClientRuntimeFailureDelivery(secureClient bool, reason string) (failMode string, strict, ok bool) {
+	gap := hookexec.ManagedEnrollmentGap(reason)
+	if !secureClient || (!gap && reason != hookexec.ManagedRuntimeDriftReason) || implicitEnterpriseManagedHook() {
+		return "", false, false
+	}
+	strict = hookEnvTrue(os.Getenv("DEFENSECLAW_STRICT_AVAILABILITY"))
+	if gap {
+		return "open", strict, true
+	}
+	return enterpriseManagedHookRuntimeDriftFailMode(), strict, true
 }
 
 // hookEnvTrue mirrors defenseclaw_should_fail_closed_on_unreachable's truthy

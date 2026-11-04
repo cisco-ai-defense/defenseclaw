@@ -27,7 +27,7 @@ func TestWindowsManagedRuntimeMissingChildProbeUsesValidSynchronousOpen(t *testi
 		t.Fatal(err)
 	}
 	err = windowsManagedRuntimeSetupPrivilege(func() error {
-		parent, err := openWindowsManagedRuntimeProfile(targetInfo)
+		parent, err := openWindowsManagedRuntimeProfile(targetInfo, windowsManagedRuntimeProfileRead)
 		if err != nil {
 			return err
 		}
@@ -277,7 +277,7 @@ func TestWindowsManagedRuntimeFinalizeRecoversMarkerOwnerAfterHandleRename(t *te
 		t.Fatal(err)
 	}
 	err = windowsManagedRuntimeSetupPrivilege(func() error {
-		parent, err := openWindowsManagedRuntimeProfile(targetInfo)
+		parent, err := openWindowsManagedRuntimeProfile(targetInfo, windowsManagedRuntimeProfileMutate)
 		if err != nil {
 			return err
 		}
@@ -460,28 +460,38 @@ func TestWindowsManagedRuntimeStandaloneInstallAdoptsAFolderAPurgeKept(t *testin
 	if err != nil {
 		t.Fatal(err)
 	}
-	for _, path := range []string{dataDir, hookDir} {
-		if err := windows.SetNamedSecurityInfo(path, windows.SE_FILE_OBJECT,
-			windows.DACL_SECURITY_INFORMATION|windows.PROTECTED_DACL_SECURITY_INFORMATION,
-			nil, nil, relaxedDACL, nil); err != nil {
-			t.Fatal(err)
+	purge := func() {
+		t.Helper()
+		for _, path := range []string{dataDir, hookDir} {
+			if err := windows.SetNamedSecurityInfo(path, windows.SE_FILE_OBJECT,
+				windows.DACL_SECURITY_INFORMATION|windows.PROTECTED_DACL_SECURITY_INFORMATION,
+				nil, nil, relaxedDACL, nil); err != nil {
+				t.Fatal(err)
+			}
 		}
 	}
 	manifest := windowsManagedRuntimeTestManifest(home, target)
 	digest := strings.Repeat("5", 64)
 
+	// A Secure Client plan re-stamps the retained root as drift (26.8.4: a
+	// purge followed by a reinstall failed 1603) and records the repair.
+	purge()
 	windowsEnterpriseStandaloneProcess = func() bool { return false }
-	if _, err := PlanWindowsManagedRuntimeRoots(manifest, `C:\ProgramData\DefenseClaw\etc\targets.yaml`, digest); err == nil {
-		t.Fatal("a Secure Client plan adopted the folder a purge kept")
-	}
-
-	windowsEnterpriseStandaloneProcess = func() bool { return true }
 	plan, err := PlanWindowsManagedRuntimeRoots(manifest, `C:\ProgramData\DefenseClaw\etc\targets.yaml`, digest)
+	if err != nil || len(plan.Roots) != 1 || len(plan.RepairedProfiles) != 1 {
+		t.Fatalf("Secure Client plan over the folder a purge kept = %+v, %v; want the root repaired", plan, err)
+	}
+	assertWindowsTargetOwnedCanonicalDirectory(t, dataDir, target)
+
+	// The standalone plan adopts it as a folder its own purge kept.
+	purge()
+	windowsEnterpriseStandaloneProcess = func() bool { return true }
+	plan, err = PlanWindowsManagedRuntimeRoots(manifest, `C:\ProgramData\DefenseClaw\etc\targets.yaml`, digest)
 	if err != nil {
 		t.Fatalf("standalone install plan refused the folder a purge kept: %v", err)
 	}
-	if len(plan.Roots) != 1 || plan.Roots[0].Baseline != windowsManagedRuntimeBaselineCanonical {
-		t.Fatalf("plan roots = %+v, want canonical baseline", plan.Roots)
+	if len(plan.Roots) != 1 || plan.Roots[0].Baseline != windowsManagedRuntimeBaselineCanonical || len(plan.RepairedProfiles) != 0 {
+		t.Fatalf("plan = %+v, want the folder adopted as a canonical baseline", plan)
 	}
 	assertWindowsTargetOwnedCanonicalDirectory(t, dataDir, target)
 	assertWindowsTargetOwnedCanonicalDirectory(t, hookDir, target)
@@ -525,39 +535,50 @@ func TestWindowsManagedRuntimePreflightRefusesAPerUserInstallFolder(t *testing.T
 
 // GAP-0416: the refused hook of an unenrolled account creates its own
 // %USERPROFILE%\.defenseclaw. A fresh standalone install takes that folder
-// over instead of failing for every account; Secure Client keeps refusing.
+// over instead of failing for every account. A Secure Client plan re-stamps
+// it as it does any drifted retained root (26.8.4).
 func TestWindowsManagedRuntimeStandaloneInstallTakesOverAnAccountCreatedFolder(t *testing.T) {
 	previous := windowsEnterpriseStandaloneProcess
 	t.Cleanup(func() { windowsEnterpriseStandaloneProcess = previous })
 	target := currentWindowsTestSID(t)
 	home := newWindowsTargetOwnedTestHome(t, target)
 	dataDir := filepath.Join(home, ".defenseclaw")
-	logs := filepath.Join(dataDir, "logs")
-	if err := os.MkdirAll(logs, 0o700); err != nil {
-		t.Fatal(err)
-	}
-	record := filepath.Join(logs, "hook-failures.jsonl")
-	if err := os.WriteFile(record, []byte("{}\n"), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	for _, path := range []string{dataDir, logs, record} {
-		setWindowsTestPathExactOwner(t, path, target)
+	create := func() {
+		t.Helper()
+		if err := os.RemoveAll(dataDir); err != nil {
+			t.Fatal(err)
+		}
+		logs := filepath.Join(dataDir, "logs")
+		if err := os.MkdirAll(logs, 0o700); err != nil {
+			t.Fatal(err)
+		}
+		record := filepath.Join(logs, "hook-failures.jsonl")
+		if err := os.WriteFile(record, []byte("{}\n"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		for _, path := range []string{dataDir, logs, record} {
+			setWindowsTestPathExactOwner(t, path, target)
+		}
 	}
 	manifest := windowsManagedRuntimeTestManifest(home, target)
 	digest := strings.Repeat("6", 64)
 
+	create()
 	windowsEnterpriseStandaloneProcess = func() bool { return false }
-	if _, err := PlanWindowsManagedRuntimeRoots(manifest, `C:\ProgramData\DefenseClaw\etc\targets.yaml`, digest); err == nil {
-		t.Fatal("a Secure Client plan took over the folder the account created")
-	}
-
-	windowsEnterpriseStandaloneProcess = func() bool { return true }
 	plan, err := PlanWindowsManagedRuntimeRoots(manifest, `C:\ProgramData\DefenseClaw\etc\targets.yaml`, digest)
+	if err != nil || len(plan.Roots) != 1 || len(plan.RepairedProfiles) != 1 {
+		t.Fatalf("Secure Client plan over the folder the account created = %+v, %v; want the root repaired", plan, err)
+	}
+	assertWindowsTargetOwnedCanonicalDirectory(t, dataDir, target)
+
+	create()
+	windowsEnterpriseStandaloneProcess = func() bool { return true }
+	plan, err = PlanWindowsManagedRuntimeRoots(manifest, `C:\ProgramData\DefenseClaw\etc\targets.yaml`, digest)
 	if err != nil {
 		t.Fatalf("standalone install plan refused the folder the account created: %v", err)
 	}
-	if len(plan.Roots) != 1 || plan.Roots[0].Baseline != windowsManagedRuntimeBaselineCanonical {
-		t.Fatalf("plan roots = %+v, want canonical baseline", plan.Roots)
+	if len(plan.Roots) != 1 || plan.Roots[0].Baseline != windowsManagedRuntimeBaselineCanonical || len(plan.RepairedProfiles) != 0 {
+		t.Fatalf("plan = %+v, want the folder taken over as a canonical baseline", plan)
 	}
 	assertWindowsTargetOwnedCanonicalDirectory(t, dataDir, target)
 }
@@ -1235,7 +1256,7 @@ func TestWindowsManagedRuntimeCleanupAuthenticatesUnjournaledMarkerStage(t *test
 		t.Fatal(err)
 	}
 	err = windowsManagedRuntimeSetupPrivilege(func() error {
-		parent, err := openWindowsManagedRuntimeProfile(targetInfo)
+		parent, err := openWindowsManagedRuntimeProfile(targetInfo, windowsManagedRuntimeProfileMutate)
 		if err != nil {
 			return err
 		}

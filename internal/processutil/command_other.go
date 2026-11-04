@@ -19,6 +19,8 @@
 package processutil
 
 import (
+	"bytes"
+	"errors"
 	"os/exec"
 	"runtime"
 )
@@ -27,6 +29,20 @@ func configureCapturedCommand(_ *exec.Cmd) {}
 
 func combinedOutputTree(cmd *exec.Cmd, _ bool) ([]byte, error) {
 	return cmd.CombinedOutput()
+}
+
+func outputTree(cmd *exec.Cmd, _ bool) ([]byte, []byte, error) {
+	if cmd.Stdout != nil {
+		return nil, nil, errors.New("exec: Stdout already set")
+	}
+	if cmd.Stderr != nil {
+		return nil, nil, errors.New("exec: Stderr already set")
+	}
+	var stdout, stderr bytes.Buffer
+	cmd.Stdout = &stdout
+	cmd.Stderr = &stderr
+	err := cmd.Run()
+	return stdout.Bytes(), stderr.Bytes(), err
 }
 
 // runTree runs cmd on a thread locked to this goroutine until it is reaped:

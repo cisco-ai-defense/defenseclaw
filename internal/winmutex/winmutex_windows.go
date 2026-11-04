@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"runtime"
 	"sync"
+	"time"
 
 	"golang.org/x/sys/windows"
 )
@@ -15,6 +16,9 @@ import (
 // ErrBusy reports that the named mutex already exists, so another holder (in
 // this process or another one) has it.
 var ErrBusy = errors.New("named mutex is already held")
+
+// ErrTimeout reports that the named mutex stayed held for Acquire's whole wait.
+var ErrTimeout = errors.New("named mutex stayed held for the whole wait")
 
 // TryAcquire creates the named mutex as its first owner, without waiting. It
 // returns ErrBusy when the mutex already exists.
@@ -70,4 +74,80 @@ func TryAcquire(name string, attrs *windows.SecurityAttributes) (release func() 
 		})
 		return releaseErr
 	}, nil
+}
+
+// Acquire opens the named mutex, creating it when it does not exist, and
+// waits up to timeout to own it. abandoned reports that the previous owner's
+// thread ended without releasing it; the caller owns it either way. Release
+// has TryAcquire's contract: one locked goroutine owns the mutex for the
+// whole hold, and release may be called from any goroutine, more than once.
+func Acquire(name string, attrs *windows.SecurityAttributes, timeout time.Duration) (release func() error, abandoned bool, err error) {
+	namePtr, err := windows.UTF16PtrFromString(name)
+	if err != nil {
+		return nil, false, fmt.Errorf("encode mutex name: %w", err)
+	}
+	type acquireResult struct {
+		abandoned bool
+		err       error
+	}
+	acquired := make(chan acquireResult, 1)
+	releaseRequested := make(chan struct{})
+	released := make(chan error, 1)
+	go func() {
+		runtime.LockOSThread()
+		handle, err := windows.CreateMutex(attrs, false, namePtr)
+		if err != nil && !errors.Is(err, windows.ERROR_ALREADY_EXISTS) {
+			if handle != 0 {
+				_ = windows.CloseHandle(handle)
+			}
+			runtime.UnlockOSThread()
+			acquired <- acquireResult{err: err}
+			return
+		}
+		// A bounded wait: a non-positive timeout polls once, and a huge one
+		// stops short of INFINITE instead of wrapping.
+		wait := uint32(windows.INFINITE - 1)
+		if timeout <= 0 {
+			wait = 0
+		} else if timeout < time.Duration(wait)*time.Millisecond {
+			wait = uint32(timeout / time.Millisecond)
+		}
+		event, err := windows.WaitForSingleObject(handle, wait)
+		switch {
+		case err != nil:
+			_ = windows.CloseHandle(handle)
+			runtime.UnlockOSThread()
+			acquired <- acquireResult{err: fmt.Errorf("wait for mutex: %w", err)}
+			return
+		case event == windows.WAIT_OBJECT_0, event == windows.WAIT_ABANDONED:
+			acquired <- acquireResult{abandoned: event == windows.WAIT_ABANDONED}
+		default:
+			_ = windows.CloseHandle(handle)
+			runtime.UnlockOSThread()
+			acquired <- acquireResult{err: ErrTimeout}
+			return
+		}
+		<-releaseRequested
+		if err := windows.ReleaseMutex(handle); err != nil {
+			_ = windows.CloseHandle(handle)
+			// Exit still locked, as in TryAcquire.
+			released <- fmt.Errorf("release mutex: %w", err)
+			return
+		}
+		runtime.UnlockOSThread()
+		released <- windows.CloseHandle(handle)
+	}()
+	result := <-acquired
+	if result.err != nil {
+		return nil, false, result.err
+	}
+	var once sync.Once
+	var releaseErr error
+	return func() error {
+		once.Do(func() {
+			close(releaseRequested)
+			releaseErr = <-released
+		})
+		return releaseErr
+	}, result.abandoned, nil
 }

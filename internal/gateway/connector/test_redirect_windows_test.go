@@ -9,6 +9,8 @@ package connector
 import (
 	"os/exec"
 	"testing"
+
+	"golang.org/x/sys/windows"
 )
 
 func createTestDirectoryRedirect(t *testing.T, link, target string) {
@@ -21,4 +23,13 @@ func createTestDirectoryRedirect(t *testing.T, link, target string) {
 	).CombinedOutput(); err != nil {
 		t.Fatalf("create directory junction fixture: %v\n%s", err, output)
 	}
+}
+
+// grantTestUntrustedWriter gives Everyone write access to path. A mode bit
+// does not do this on Windows, and the process user may itself be an
+// administrator principal, which the trust walk accepts as drift; Everyone
+// is a standard-user writer on every runner.
+func grantTestUntrustedWriter(t *testing.T, path string) {
+	t.Helper()
+	setHookAPITokenWindowsUntrustedDACL(t, path, windows.GENERIC_WRITE)
 }

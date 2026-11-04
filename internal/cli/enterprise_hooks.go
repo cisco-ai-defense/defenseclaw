@@ -264,9 +264,23 @@ var (
 			os.Getenv(managed.WindowsServiceAccountEnv),
 		)
 	}
+	// Permission drift on targets.yaml is re-stamped first when the caller is
+	// privileged (the LocalSystem guardian or enumerator, or the installer);
+	// what survives is accepted and logged (an untrusted writer as a boundary
+	// finding). Structure stays fatal.
 	enterpriseHookManifestFileTrustCheck = func(path string) error {
-		return managed.ValidateTrustedFilePath(path, "hook guardian manifest")
+		const label = "hook guardian manifest"
+		if err := managed.ValidateTrustedFilePath(path, label); err == nil {
+			return nil
+		}
+		if enterpriseHooksRuntimeGOOS() == "windows" &&
+			enterpriseHookManifestACLRepair(path) == nil &&
+			managed.ValidateTrustedFilePath(path, label) == nil {
+			return nil
+		}
+		return managed.ValidateTrustedPolicyFilePath(path, label)
 	}
+	enterpriseHookManifestACLRepair     = repairEnterpriseHookManifestACL
 	enterpriseHooksRemoveManagedPolicy  = enterprisehooks.RemoveManagedPolicy
 	enterpriseHookScopedTokenMinter     = enterpriseHookScopedToken
 	enterpriseHookScopedOTLPTokenMinter = enterpriseHookScopedOTLPToken
@@ -2981,15 +2995,12 @@ func runEnterpriseHookReconcileOnce(ctx context.Context) (enterpriseHookReconcil
 
 	rows := make([]enterpriseHookReconcileRow, 0, len(manifest.Targets))
 	failures := 0
-	// awaitingSignIn counts the failures that wait for their signed-out
-	// account's next sign-in (errEnterpriseHookAwaitingSignIn).
-	awaitingSignIn := 0
-	accountLinks := 0
 	pending := 0
 	repairs := 0
 	var restored []enterpriseHookGuardianRestore
 	var notices []enterpriseHookGuardianNotice
 	pendingTargets := make([]enterprisehooks.ManifestTarget, 0)
+	unenrolled := map[string]struct{}{}
 	watchDirs := map[string]struct{}{}
 	exclusiveFiles := map[string]struct{}{}
 	sharedFiles := map[string]struct{}{}
@@ -3020,7 +3031,12 @@ func runEnterpriseHookReconcileOnce(ctx context.Context) (enterpriseHookReconcil
 		token := ""
 		otlpToken := ""
 		var previousProtection enterpriseHookPreviousProtection
+		// ledgerUnreadable records that the protection ledger could not be
+		// read for this target, so "not protected" is unknown rather than
+		// confirmed and the target must keep its enrollment.
+		ledgerUnreadable := false
 		resolved, err := resolveEnterpriseHookTargetValues(target.User, target.UserHome, intPtrValue(target.UID), intPtrValue(target.GID), target.SID, target.DataDir)
+		resolveFailed := err != nil
 		if err == nil {
 			row.SID = strings.TrimSpace(resolved.sid)
 			row.UserHome = strings.TrimSpace(resolved.home)
@@ -3034,6 +3050,7 @@ func runEnterpriseHookReconcileOnce(ctx context.Context) (enterpriseHookReconcil
 			)
 			if authorizationErr != nil {
 				err = authorizationErr
+				ledgerUnreadable = true
 			}
 		}
 		if err == nil {
@@ -3170,6 +3187,7 @@ func runEnterpriseHookReconcileOnce(ctx context.Context) (enterpriseHookReconcil
 			row.RevokeProtection = retired
 			pending++
 			pendingTargets = append(pendingTargets, target)
+			enterpriseHookTargetHealth.clear(row)
 			rows = append(rows, row)
 			continue
 		}
@@ -3178,15 +3196,41 @@ func runEnterpriseHookReconcileOnce(ctx context.Context) (enterpriseHookReconcil
 			recheck = false
 		}
 		if err != nil {
+			protected := previousProtection.PreviouslyProtected
+			if resolveFailed {
+				// The profile no longer resolves (an FSLogix or roaming
+				// profile detached, a renamed folder). Look the target up by
+				// its manifest identity so a protected user keeps protection.
+				var ledgerErr error
+				protected, ledgerErr = previousEnterpriseHookSuccess(
+					cfg.DataDir,
+					target.User,
+					target.UserHome,
+					target.SID,
+					target.Connector,
+				)
+				if ledgerErr != nil {
+					ledgerUnreadable = true
+				}
+			}
 			failures++
-			if errors.Is(err, errEnterpriseHookAwaitingSignIn) {
-				awaitingSignIn++
-			}
-			if err.Error() == enterpriseHookAccountLinkFailure {
-				accountLinks++
-			}
 			row.OK = false
 			row.Error = err.Error()
+			if !protected && enterpriseHookTargetUnavailable(err) {
+				// A never-protected user who is signed out or whose profile
+				// is detached has nothing to protect yet. It is recorded as a
+				// failed row rather than a new pending kind so that state
+				// files stay readable by earlier releases after a rollback;
+				// the reason says it is waiting, and it is retried every
+				// tick without blocking anyone else.
+				row.Error = "pending: " + enterpriseHookBoundReason(err.Error())
+			}
+			if enterpriseHookFailedTargetUnenrolls(protected, ledgerUnreadable) {
+				unenrolled[enterpriseHookEnrollmentUnit(target)] = struct{}{}
+			}
+			enterpriseHookTargetHealth.observe(row, row.Error)
+		} else {
+			enterpriseHookTargetHealth.clear(row)
 		}
 		rows = append(rows, row)
 		if recheck {
@@ -3232,9 +3276,6 @@ func runEnterpriseHookReconcileOnce(ctx context.Context) (enterpriseHookReconcil
 				return
 			}
 			failures++
-			if errors.Is(err, errEnterpriseHookAwaitingSignIn) {
-				awaitingSignIn++
-			}
 			row.Error = err.Error()
 		})
 	enterpriseHookStartup.target(os.Stderr, len(manifest.Targets), len(manifest.Targets))
@@ -3252,19 +3293,22 @@ func runEnterpriseHookReconcileOnce(ctx context.Context) (enterpriseHookReconcil
 		writeEnterpriseHookGuardianNotices(os.Stderr, cfg.DataDir, notices)
 	}
 
-	// A target waiting for its account's sign-in, or an account-owned folder
-	// link left for that account, does not hold back exact machine enrollment
-	// for the other targets. Every other failure blocks publication.
-	var enrollmentErr error
-	if failures == awaitingSignIn+accountLinks {
-		enrollmentErr = enterpriseHookReconcileStageDeferredPolicies(
-			manifest,
-			pendingTargets,
-			apiAddr,
-		)
-		if enrollmentErr == nil {
-			enrollmentErr = enterpriseHookReconcileSyncEnrollments(manifest, apiAddr, true)
-		}
+	// One failed target never blocks the others. Deferred staging and the
+	// exact enrollment publication run for every target that succeeded, is
+	// pending, or failed but still holds its last protected state; that
+	// includes a target an earlier release protected that waits for its
+	// signed-out account (GAP-0644), which keeps the SID enrollment that
+	// release published. A failed target that was never protected, and a
+	// non-deferred pending target, are left out of the published set until a
+	// later tick succeeds for them.
+	enrollmentManifest := enterpriseHookEnrollmentManifest(manifest, rows, unenrolled)
+	enrollmentErr := enterpriseHookReconcileStageDeferredPolicies(
+		enrollmentManifest,
+		pendingTargets,
+		apiAddr,
+	)
+	if enrollmentErr == nil {
+		enrollmentErr = enterpriseHookReconcileSyncEnrollments(enrollmentManifest, apiAddr, true)
 	}
 	stateErr := writeEnterpriseHookGuardianState(
 		cfg.DataDir,
@@ -3413,9 +3457,19 @@ func runEnterpriseHooksWatch(cmd *cobra.Command, _ []string) error {
 		_, needed := repairRetries.nextDue()
 		return needed
 	}
+	// degraded is set when the startup reconcile failed in managed mode. The
+	// service keeps running and retrying instead of exiting into an SCM
+	// restart loop; the first successful reconcile clears it.
+	degraded := false
 	reconcile := func(reason string, overrideCtx ...context.Context) (bool, error) {
 		enterpriseHookStandaloneConfigRefresh(cmd.ErrOrStderr())
 		enterpriseHookBeforeWatchReconcile(cmd.ErrOrStderr())
+		// Repair the gateway's data objects at start and on every pass. The
+		// results are logged by the helper and never fail the pass.
+		repairEnterpriseHookGatewayDataPathsPlatform()
+		// Then the install tree, StateRoot records, policy folders and
+		// service descriptors, so later drift heals without Setup Repair.
+		repairEnterpriseHookManagedInstallPlatform()
 		reconcileCtx := cmd.Context()
 		if len(overrideCtx) != 0 {
 			reconcileCtx = overrideCtx[0]
@@ -3434,6 +3488,11 @@ func runEnterpriseHooksWatch(cmd *cobra.Command, _ []string) error {
 				repairRetries.observe(reason, run, err, time.Now())
 			}
 			return false, err
+		}
+		if degraded {
+			degraded = false
+			fmt.Fprintf(cmd.ErrOrStderr(), "[hook-guardian] recovered from degraded startup after %s reconcile\n", reason)
+			writeGuardianStateOrLog(cmd.ErrOrStderr(), guardianstate.StateReady)
 		}
 		enterpriseHookAfterWatchReconcile(cmd.Context(), cmd.ErrOrStderr(), run)
 		dirs := append([]string{filepath.Dir(filepath.Clean(enterpriseHookManifest))}, run.WatchDirs...)
@@ -3543,32 +3602,63 @@ func runEnterpriseHooksWatch(cmd *cobra.Command, _ []string) error {
 	// Non-managed-enterprise deployments retain the existing hard-exit
 	// behaviour (an operator explicitly asked for a manifest that
 	// isn't there; loudly refusing is the right thing).
+	managedMode := cfg != nil && managed.IsManagedEnterprise(cfg.DeploymentMode)
+	if managedMode {
+		dataDir := cfg.DataDir
+		enterprisehooks.WindowsManagedRuntimeRetirePreviousGenerationAllowed = func() bool {
+			return enterpriseHookNoLifecycleTransactionPending(dataDir)
+		}
+	}
 	// The standalone Windows guardian records how far this first reconcile
 	// has come, for the Setup coverage wait (GAP-0401).
 	enterpriseHookStartup.begin(cmd.ErrOrStderr(), cfg.DataDir)
 	_, startupErr := reconcile("startup")
 	enterpriseHookStartup.end(cmd.ErrOrStderr())
-	if err := startupErr; err != nil {
-		if !isMissingManifestErr(err) || cfg == nil || !managed.IsManagedEnterprise(cfg.DeploymentMode) {
-			return err
+	if startupErr != nil {
+		if !managedMode {
+			return startupErr
 		}
-		if waitErr := waitForEnterpriseHookManifestManaged(cmd.Context(), cmd.ErrOrStderr(), fsw, events); waitErr != nil {
-			return waitErr
+		if isMissingManifestErr(startupErr) {
+			if waitErr := waitForEnterpriseHookManifestManaged(cmd.Context(), cmd.ErrOrStderr(), fsw, events); waitErr != nil {
+				if contextErr := cmd.Context().Err(); contextErr != nil {
+					return contextErr
+				}
+				startupErr = waitErr
+			} else {
+				// Manifest is present now — re-run the startup reconcile so
+				// the watch loop enters its main select with a valid row
+				// set, hashes, and watched dirs.
+				_, startupErr = reconcile("startup_after_wait")
+			}
 		}
-		// Manifest is present now — re-run the startup reconcile so
-		// the watch loop enters its main select with a valid row set,
-		// hashes, and watched dirs. Any other error from THIS retry
-		// (parse failure, missing file races back to gone, etc.) is
-		// fatal — we've done our one bounded wait; further retries
-		// belong to the SCM restart cycle.
-		if _, err := reconcile("startup_after_wait"); err != nil {
-			return err
+		if startupErr != nil {
+			// A managed guardian never exits on a startup reconcile error.
+			// It starts degraded, keeps the manifest folder watched, and
+			// retries on the repair backoff until a reconcile succeeds.
+			degraded = true
+			if legacyWatch {
+				legacyRepairRetryNeeded = true
+			} else {
+				repairRetries.observe("startup", enterpriseHookReconcileRun{}, startupErr, time.Now())
+			}
+			managed.EmitResilienceEvent(managed.MarkerDegraded, map[string]string{
+				"component": "hook-guardian",
+				"path":      filepath.Clean(enterpriseHookManifest),
+				"reason":    "startup reconcile failed: " + startupErr.Error(),
+			})
+			manifestPath := filepath.Clean(enterpriseHookManifest)
+			if err := syncEnterpriseHookWatchDirs(fsw, watched, []string{filepath.Dir(manifestPath)}); err != nil {
+				fmt.Fprintf(cmd.ErrOrStderr(), "[hook-guardian] degraded: could not watch manifest folder: %s\n", err)
+			}
+			exclusiveOwned[manifestPath] = struct{}{}
 		}
 	}
-	// Successful startup reconcile ⇒ manifest is loaded ⇒ publish
-	// the guardian-side "ready" state so the sidecar's health surface
-	// can collapse to overall `ready`.
-	writeGuardianStateOrLog(cmd.ErrOrStderr(), guardianstate.StateReady)
+	if !degraded {
+		// Successful startup reconcile ⇒ manifest is loaded ⇒ publish
+		// the guardian-side "ready" state so the sidecar's health surface
+		// can collapse to overall `ready`.
+		writeGuardianStateOrLog(cmd.ErrOrStderr(), guardianstate.StateReady)
+	}
 
 	ticker := time.NewTicker(enterpriseHookWatchInterval)
 	defer ticker.Stop()
@@ -4636,8 +4726,15 @@ func validateEnterpriseHookManagedRuntime() error {
 	); err != nil {
 		return fmt.Errorf("enterprise hooks: data_dir trust check failed: %w", err)
 	}
+	// Repair the guardian ledger before the first read of this run. A
+	// drifted ledger otherwise fails every target and, at startup, the
+	// whole service.
+	ledgerRepairErr := repairEnterpriseHookGuardianLedger(cfg.DataDir)
 	if err := managed.ValidateTrustedRuntimeDir(managed.HookGuardianAuthorizationDir(cfg.DataDir), "hook guardian authorization directory"); err != nil {
-		return fmt.Errorf("enterprise hooks: authorization directory trust check failed: %w", err)
+		return fmt.Errorf(
+			"enterprise hooks: authorization directory trust check failed: %w",
+			errors.Join(err, ledgerRepairErr),
+		)
 	}
 	return nil
 }
@@ -4965,7 +5062,11 @@ func previousEnterpriseHookProtection(
 	var protection enterpriseHookPreviousProtection
 	connectorName = strings.ToLower(strings.TrimSpace(connectorName))
 	userName = strings.TrimSpace(userName)
-	userHome = filepath.Clean(strings.TrimSpace(userHome))
+	// An unresolved profile has no home; filepath.Clean would turn "" into
+	// "." and the SID match would then never find the ledger row.
+	if userHome = strings.TrimSpace(userHome); userHome != "" {
+		userHome = filepath.Clean(userHome)
+	}
 	sid = strings.TrimSpace(sid)
 	if dataDir == "" || connectorName == "" {
 		return protection, nil
@@ -4988,6 +5089,26 @@ func previousEnterpriseHookProtection(
 		return protection, nil
 	}
 	return protection, nil
+}
+
+// previousEnterpriseHookSuccess reports whether the ledger records the target
+// as protected. The reconcile uses it to look up a target whose profile no
+// longer resolves by its manifest identity.
+func previousEnterpriseHookSuccess(
+	dataDir,
+	userName,
+	userHome,
+	sid,
+	connectorName string,
+) (bool, error) {
+	protection, err := previousEnterpriseHookProtection(
+		dataDir,
+		userName,
+		userHome,
+		sid,
+		connectorName,
+	)
+	return protection.PreviouslyProtected, err
 }
 
 func loadEnterpriseHookGuardianAuthorization(dataDir string) (enterpriseHookGuardianAuthorization, bool, error) {

@@ -14,6 +14,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/defenseclaw/defenseclaw/internal/managed"
 	"golang.org/x/sys/windows"
 )
 
@@ -37,7 +38,14 @@ func NewClientProvider(config ClientConfig) (*ClientProvider, error) {
 	); err != nil {
 		return nil, err
 	}
-	key, err := LoadAuthKey(config.AuthKeyPath, config.GatewayServiceName)
+	// The gateway never repairs the key: it runs with a write-restricted token,
+	// and the broker it depends on has already repaired it at startup. Drift
+	// that is still there is logged and the key is used anyway.
+	key, err := LoadAuthKey(config.AuthKeyPath, config.GatewayServiceName, KeyDriftPolicy{
+		Report: func(report KeyDriftReport) {
+			managed.EmitTrustDriftAdvisory(report.Path, report.Object, report.Reason)
+		},
+	})
 	if err != nil {
 		return nil, err
 	}

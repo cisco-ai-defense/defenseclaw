@@ -487,28 +487,41 @@ func TestRunUsesAuthenticatedManagedTokenSnapshotWithoutRereadingSidecars(t *tes
 }
 
 func TestRunAuthenticatedManagedTokenSnapshotEmptyFailsClosedWithoutFallback(t *testing.T) {
-	result := run(t, "codex", ok(`{"action":"allow"}`), func(opts *Options) {
-		path := filepath.Join(opts.HookDir, ".hook-codex.token")
-		if err := os.WriteFile(path, []byte("valid-but-different-generation-token\n"), 0o600); err != nil {
-			t.Fatalf("write scoped token: %v", err)
-		}
-		opts.ManagedEnterprise = true
-		opts.FailMode = "open"
-		empty := "  "
-		opts.AuthenticatedManagedToken = &empty
-	})
-	if result.code != 0 {
-		t.Fatalf("Run code = %d, want structured fail-closed exit 0; stderr=%s", result.code, result.stderr)
-	}
-	wantStdout := `{"hookSpecificOutput":{"hookEventName":"PreToolUse","permissionDecision":"deny","permissionDecisionReason":"DefenseClaw hook failed closed"}}` + "\n"
-	if result.stdout != wantStdout {
-		t.Fatalf("stdout = %q, want structured fail-closed output %q", result.stdout, wantStdout)
-	}
-	if result.rt.requests != 0 {
-		t.Fatalf("gateway requests = %d, want 0", result.rt.requests)
-	}
-	if !strings.Contains(result.stderr, "authenticated managed runtime token is empty") {
-		t.Fatalf("stderr = %q, want authenticated-snapshot diagnostic", result.stderr)
+	for _, secureClient := range []bool{false, true} {
+		t.Run(map[bool]string{false: "standalone", true: "secure-client"}[secureClient], func(t *testing.T) {
+			records := captureManagedHookDecisions(t)
+			result := run(t, "codex", ok(`{"action":"allow"}`), func(opts *Options) {
+				path := filepath.Join(opts.HookDir, ".hook-codex.token")
+				if err := os.WriteFile(path, []byte("valid-but-different-generation-token\n"), 0o600); err != nil {
+					t.Fatalf("write scoped token: %v", err)
+				}
+				opts.ManagedEnterprise = true
+				opts.SecureClient = secureClient
+				opts.FailMode = "open"
+				empty := "  "
+				opts.AuthenticatedManagedToken = &empty
+			})
+			if result.code != 0 {
+				t.Fatalf("Run code = %d, want structured fail-closed exit 0; stderr=%s", result.code, result.stderr)
+			}
+			wantStdout := `{"hookSpecificOutput":{"hookEventName":"PreToolUse","permissionDecision":"deny","permissionDecisionReason":"DefenseClaw hook failed closed"}}` + "\n"
+			if result.stdout != wantStdout {
+				t.Fatalf("stdout = %q, want structured fail-closed output %q", result.stdout, wantStdout)
+			}
+			if result.rt.requests != 0 {
+				t.Fatalf("gateway requests = %d, want 0", result.rt.requests)
+			}
+			requireManagedRecordReason(t, *records, managedRuntimeTokenEmptyReason)
+			if secureClient {
+				// A Secure Client hook keeps the reason off the agent's
+				// stderr; it is in the durable record.
+				requireManagedStderr(t, result.stderr, true)
+				return
+			}
+			if !strings.Contains(result.stderr, "authenticated managed runtime token is empty") {
+				t.Fatalf("stderr = %q, want authenticated-snapshot diagnostic", result.stderr)
+			}
+		})
 	}
 }
 
@@ -2340,34 +2353,46 @@ func TestManagedEnterpriseMissingOrDisabledHomeFailsClosed(t *testing.T) {
 				return filepath.Join(t.TempDir(), "missing")
 			}, diagnostic: "enterprise_managed_runtime_home_missing"},
 		} {
-			t.Run(connectorName+"/"+tc.name, func(t *testing.T) {
-				rt := ok(`{"action":"allow"}`)
-				var out, errb bytes.Buffer
-				home := tc.home(t)
-				code := Run(context.Background(), Options{
-					Connector:          connectorName,
-					APIAddr:            "127.0.0.1:1",
-					Home:               home,
-					HookDir:            filepath.Join(home, "hooks"),
-					Token:              "target-readable-token",
-					FailMode:           "open",
-					ManagedEnterprise:  true,
-					StrictAvailability: false,
-					Stdin:              strings.NewReader("{}"),
-					Stdout:             &out,
-					Stderr:             &errb,
-					HTTPClient:         &http.Client{Transport: rt},
+			for _, secureClient := range []bool{false, true} {
+				profile := map[bool]string{false: "standalone", true: "secure-client"}[secureClient]
+				t.Run(connectorName+"/"+tc.name+"/"+profile, func(t *testing.T) {
+					records := captureManagedHookDecisions(t)
+					rt := ok(`{"action":"allow"}`)
+					var out, errb bytes.Buffer
+					home := tc.home(t)
+					code := Run(context.Background(), Options{
+						Connector:          connectorName,
+						APIAddr:            "127.0.0.1:1",
+						Home:               home,
+						HookDir:            filepath.Join(home, "hooks"),
+						Token:              "target-readable-token",
+						FailMode:           "open",
+						ManagedEnterprise:  true,
+						SecureClient:       secureClient,
+						StrictAvailability: false,
+						Stdin:              strings.NewReader("{}"),
+						Stdout:             &out,
+						Stderr:             &errb,
+						HTTPClient:         &http.Client{Transport: rt},
+					})
+					if code != failClosedExit(connectorName) {
+						t.Fatalf("code = %d, want fail-closed %d; stdout=%q stderr=%q", code, failClosedExit(connectorName), out.String(), errb.String())
+					}
+					if rt.requests != 0 {
+						t.Fatalf("gateway called %d times, want 0", rt.requests)
+					}
+					requireManagedRecordReason(t, *records, tc.diagnostic)
+					if secureClient {
+						// The reason is in the durable record, not on the
+						// agent's stderr.
+						requireManagedStderr(t, errb.String(), true)
+						return
+					}
+					if !strings.Contains(errb.String(), tc.diagnostic) {
+						t.Fatalf("stderr = %q, want stable diagnostic %q", errb.String(), tc.diagnostic)
+					}
 				})
-				if code != blockExit {
-					t.Fatalf("code = %d, want fail-closed %d; stdout=%q stderr=%q", code, blockExit, out.String(), errb.String())
-				}
-				if rt.requests != 0 {
-					t.Fatalf("gateway called %d times, want 0", rt.requests)
-				}
-				if !strings.Contains(errb.String(), tc.diagnostic) {
-					t.Fatalf("stderr = %q, want stable diagnostic %q", errb.String(), tc.diagnostic)
-				}
-			})
+			}
 		}
 	}
 }
@@ -2509,6 +2534,52 @@ func TestManagedEnterpriseResolverFailureBlocksBeforeRuntimeOrGateway(t *testing
 // stderr line, so the Windows refusal of a new account leads with the wait
 // and the next step instead of "defenseclaw: blocking claude-code tool: this
 // account is not enrolled in DefenseClaw on t...".
+// A Secure Client account that is not enrolled yet (absent from the target
+// set, or registered without a published runtime) follows the hook's fail
+// mode, open by default, without contacting the gateway. Closed, strict
+// availability, any other runtime failure, and the same account outside
+// Secure Client still block.
+func TestSecureClientUnenrolledAccountFollowsFailMode(t *testing.T) {
+	events := map[string]string{
+		"codex": "PreToolUse", "claudecode": "PreToolUse",
+		"cursor": "beforeShellExecution", "copilot": "preToolUse",
+	}
+	blocked := func(r runResult) bool {
+		return r.code == blockExit || strings.Contains(r.stdout, `"deny"`) || strings.Contains(r.stdout, `"block"`)
+	}
+	for connector, event := range events {
+		for _, reason := range []string{managedSIDUnregisteredReason, managedEnrollmentPendingReason} {
+			for _, tc := range []struct {
+				name     string
+				mutate   func(*Options)
+				wantOpen bool
+			}{
+				{"open", func(*Options) {}, true},
+				{"closed", func(o *Options) { o.FailMode = "closed" }, false},
+				{"strict", func(o *Options) { o.StrictAvailability = true }, false},
+				{"not secure client", func(o *Options) { o.SecureClient = false }, false},
+				{"state invalid", func(o *Options) { o.ManagedRuntimeFailure = "enterprise_managed_runtime_state_invalid" }, false},
+			} {
+				name := connector + " " + reason + " " + tc.name
+				rt := ok(`{"action":"block"}`)
+				r := run(t, connector, rt, func(o *Options) {
+					o.Event = event
+					o.ManagedEnterprise = true
+					o.SecureClient = true
+					o.ManagedRuntimeFailure = reason
+					tc.mutate(o)
+				})
+				if rt.requests != 0 {
+					t.Fatalf("%s: a runtime failure must not contact the gateway", name)
+				}
+				if got := !blocked(r); got != tc.wantOpen {
+					t.Errorf("%s: allowed = %t, want %t; code=%d stdout=%q stderr=%q", name, got, tc.wantOpen, r.code, r.stdout, r.stderr)
+				}
+			}
+		}
+	}
+}
+
 func TestWindowsUnenrolledRefusalLeadsWithTheNextStep(t *testing.T) {
 	const lead = "DefenseClaw: this account is not enrolled yet; restart the agent in 5 minutes."
 	for _, reason := range []string{managedSIDUnregisteredReason, managedEnrollmentPendingReason} {
@@ -3446,4 +3517,11 @@ func TestUnreachable(t *testing.T) {
 			t.Errorf("stdout = %q", r.stdout)
 		}
 	})
+}
+
+// failClosedExit is the exit a fail-closed result uses when the hook event
+// is unknown: the bare block exit for every connector. A Codex hook with a
+// bound event answers with Codex's block for it instead (emitCodexBlock).
+func failClosedExit(string) int {
+	return blockExit
 }

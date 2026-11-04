@@ -108,6 +108,11 @@ func codexWindowsHookFormReplacement(command, eventType, launcher string, toBrid
 	if !strings.HasPrefix(command, prefix) {
 		return "", false
 	}
+	// A 1.0.x bridge (legacyWindowsAwaitedHookCommand) is compared in its
+	// current form.
+	if current, ok := currentWindowsAwaitedHookCommand(command); ok {
+		command = current
+	}
 	script, decoded := powershellDecodedCommand(strings.TrimPrefix(command, prefix))
 	if !decoded {
 		return "", false

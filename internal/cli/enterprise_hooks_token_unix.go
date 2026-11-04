@@ -296,3 +296,6 @@ func validateEnterpriseHookManagedDir(path, label string, requireExisting bool) 
 	}
 	return info, nil
 }
+
+// repairEnterpriseHookGatewayDataPathsPlatform is Windows-only.
+func repairEnterpriseHookGatewayDataPathsPlatform() {}

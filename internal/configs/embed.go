@@ -12,6 +12,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 )
 
 // maxOverlayBytes bounds the operator overlay read so a runaway
@@ -169,8 +170,9 @@ type ProvidersConfig struct {
 //     rather than replaced, so an operator can add a custom domain
 //     to a built-in provider without copy-pasting the whole record.
 //   - OllamaPorts values are unioned; duplicates are collapsed.
-//   - Overlay parse errors are logged to stderr (same surface as the
-//     gateway's runtime alerts) but do not fail the load.
+//   - Overlay open/read/parse errors go to the overlay reporter (stderr,
+//     the gateway's runtime alert surface, unless SetOverlayReporter
+//     installed another sink) but do not fail the load.
 func LoadProviders() (*ProvidersConfig, error) {
 	cfg, _, err := LoadProvidersWithOverlay()
 	return cfg, err
@@ -199,12 +201,55 @@ func LoadEmbeddedProviders() (*ProvidersConfig, error) {
 	return &cfg, nil
 }
 
+// overlayState holds the process-wide overlay settings: where load
+// diagnostics go and whether DEFENSECLAW_CUSTOM_PROVIDERS_PATH applies.
+var overlayState struct {
+	sync.RWMutex
+	reporter  func(string)
+	ignoreEnv bool
+}
+
+// SetOverlayReporter routes overlay load diagnostics to fn for the rest of
+// the process. A nil fn restores the default, which writes them to stderr
+// for the interactive CLI and the gateway log. A managed hook installs its
+// durable recorder here: agents surface hook stderr to the user.
+func SetOverlayReporter(fn func(msg string)) {
+	overlayState.Lock()
+	overlayState.reporter = fn
+	overlayState.Unlock()
+}
+
+// SetIgnoreCustomProvidersPathEnv makes CustomProvidersPath disregard
+// DEFENSECLAW_CUSTOM_PROVIDERS_PATH. Managed enterprise processes set it:
+// the variable can arrive from an agent or project environment, and the
+// overlay decides which hosts the guardrail treats as LLM providers.
+func SetIgnoreCustomProvidersPathEnv(ignore bool) {
+	overlayState.Lock()
+	overlayState.ignoreEnv = ignore
+	overlayState.Unlock()
+}
+
+func reportOverlay(format string, args ...any) {
+	overlayState.RLock()
+	fn := overlayState.reporter
+	overlayState.RUnlock()
+	msg := fmt.Sprintf(format, args...)
+	if fn != nil {
+		fn(msg)
+		return
+	}
+	fmt.Fprintln(os.Stderr, msg)
+}
+
 // CustomProvidersPath returns the location of the operator overlay:
-// DEFENSECLAW_CUSTOM_PROVIDERS_PATH for test / container installs, else
-// custom-providers.json in the DefenseClaw data dir: DEFENSECLAW_HOME when
-// set (a managed service's data_dir, or a per-user install relocated with
-// it, which is where the Python CLI writes the overlay), otherwise
-// ~/.defenseclaw. Empty return value means no overlay applies.
+// DEFENSECLAW_CUSTOM_PROVIDERS_PATH for test / container installs, unless
+// SetIgnoreCustomProvidersPathEnv disabled it, else custom-providers.json in
+// the DefenseClaw data dir: DEFENSECLAW_HOME when set (a managed service's
+// data_dir, or a per-user install relocated with it, which is where the
+// Python CLI writes the overlay), otherwise ~/.defenseclaw. The explicit
+// variable must name an absolute local path: a relative value or a UNC /
+// device path is reported and refused, and no overlay applies. Empty return
+// value means no overlay applies.
 func CustomProvidersPath() string {
 	path, _ := customProvidersPath()
 	return path
@@ -213,7 +258,14 @@ func CustomProvidersPath() string {
 // customProvidersPath is CustomProvidersPath, and whether the path is the
 // ~/.defenseclaw fallback rather than a location the process was pointed at.
 func customProvidersPath() (path string, fallback bool) {
-	if p := os.Getenv("DEFENSECLAW_CUSTOM_PROVIDERS_PATH"); p != "" {
+	overlayState.RLock()
+	ignoreEnv := overlayState.ignoreEnv
+	overlayState.RUnlock()
+	if p := os.Getenv("DEFENSECLAW_CUSTOM_PROVIDERS_PATH"); p != "" && !ignoreEnv {
+		if !overlayEnvPathAllowed(p) {
+			reportOverlay("[defenseclaw] custom-providers overlay path ignored: DEFENSECLAW_CUSTOM_PROVIDERS_PATH must be an absolute local path")
+			return "", false
+		}
 		return p, false
 	}
 	if dataDir := strings.TrimSpace(os.Getenv("DEFENSECLAW_HOME")); dataDir != "" {
@@ -224,6 +276,17 @@ func customProvidersPath() (path string, fallback bool) {
 		return "", true
 	}
 	return filepath.Join(home, ".defenseclaw", "custom-providers.json"), true
+}
+
+// overlayEnvPathAllowed accepts an absolute path on a local volume. UNC
+// and device paths (\\server\share, //server/share, \\?\, \\.\) are
+// refused on every platform so the overlay read can never reach a remote
+// share or a device namespace.
+func overlayEnvPathAllowed(p string) bool {
+	if len(p) >= 2 && (p[0] == '\\' || p[0] == '/') && (p[1] == '\\' || p[1] == '/') {
+		return false
+	}
+	return filepath.IsAbs(p)
 }
 
 // mergeCustomProviders applies the operator overlay in place, with the
@@ -244,7 +307,7 @@ func mergeCustomProviders(cfg *ProvidersConfig) bool {
 		// path) that it cannot read is logged, since its providers are then
 		// silently missing. Every error is non-fatal.
 		if !os.IsNotExist(err) && !(fallback && os.IsPermission(err)) {
-			fmt.Fprintf(os.Stderr, "[defenseclaw] custom-providers overlay open error: %v\n", err)
+			reportOverlay("[defenseclaw] custom-providers overlay open error: %v", err)
 		}
 		return false
 	}
@@ -255,18 +318,18 @@ func mergeCustomProviders(cfg *ProvidersConfig) bool {
 	// after the stat).
 	data, err := io.ReadAll(io.LimitReader(f, maxOverlayBytes+1))
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "[defenseclaw] custom-providers overlay read error: %v\n", err)
+		reportOverlay("[defenseclaw] custom-providers overlay read error: %v", err)
 		return false
 	}
 	if len(data) > maxOverlayBytes {
-		fmt.Fprintf(os.Stderr,
-			"[defenseclaw] custom-providers overlay rejected: exceeds %d-byte cap (got at least %d bytes)\n",
+		reportOverlay(
+			"[defenseclaw] custom-providers overlay rejected: exceeds %d-byte cap (got at least %d bytes)",
 			maxOverlayBytes, len(data))
 		return false
 	}
 	var overlay ProvidersConfig
 	if err := json.Unmarshal(data, &overlay); err != nil {
-		fmt.Fprintf(os.Stderr, "[defenseclaw] custom-providers overlay parse error: %v\n", err)
+		reportOverlay("[defenseclaw] custom-providers overlay parse error: %v", err)
 		return false
 	}
 	if overlay.DerivedFrom != "" {
