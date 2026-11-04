@@ -96,20 +96,56 @@ func TestEnterpriseHookManifestTrustCheckStandaloneDrift(t *testing.T) {
 		}
 	})
 
-	t.Run("edited during repair is refused", func(t *testing.T) {
+	// GAP-0561 review 2: the repair runs while no other handle can write
+	// the manifest.
+	t.Run("writes during the repair are blocked", func(t *testing.T) {
 		manifest := write(t)
+		var writeErr error
 		enterpriseHookManifestACLRepair = func(path string) error {
-			if err := os.WriteFile(path, []byte("version: 1\ntargets: []\n# edited\n"), 0o600); err != nil {
-				t.Fatalf("edit manifest: %v", err)
-			}
+			writeErr = os.WriteFile(path, []byte("version: 1\ntargets: []\n# edited\n"), 0o600)
 			ownerOnlyDACLForTest(t, path)
 			return nil
 		}
-		if err := check(manifest); err == nil {
-			t.Fatal("standalone accepted a guardian manifest whose bytes changed during the repair")
+		if err := check(manifest); err != nil {
+			t.Fatalf("standalone refused an ACL-only manifest repair: %v", err)
+		}
+		if writeErr == nil {
+			t.Fatal("a write during the manifest repair succeeded")
+		}
+	})
+
+	// GAP-0561 review 2: a write handle kept from the drift blocks the
+	// repair, so the manifest keeps the descriptor every process refuses,
+	// and bytes written through it are refused after it closes.
+	t.Run("retained write handle is refused", func(t *testing.T) {
+		manifest := write(t)
+		calls := 0
+		enterpriseHookManifestACLRepair = func(path string) error {
+			calls++
+			ownerOnlyDACLForTest(t, path)
+			return nil
+		}
+		handle, err := os.OpenFile(manifest, os.O_RDWR, 0)
+		if err != nil {
+			t.Fatalf("open a write handle during the drift: %v", err)
 		}
 		if err := check(manifest); err == nil {
-			t.Fatal("standalone accepted the bytes that changed during the repair on the next read")
+			t.Fatal("standalone accepted a manifest another handle could write")
+		}
+		if managed.ValidateTrustedFilePath(manifest, "hook guardian manifest") == nil {
+			t.Fatal("the manifest was made to look trusted while another handle could write it")
+		}
+		if _, err := handle.WriteAt([]byte("# edited\n"), 0); err != nil {
+			t.Fatalf("write through the retained handle: %v", err)
+		}
+		if err := handle.Close(); err != nil {
+			t.Fatal(err)
+		}
+		if err := check(manifest); err == nil {
+			t.Fatal("standalone accepted a roster written through a retained handle")
+		}
+		if calls != 0 {
+			t.Fatalf("repair calls = %d, want none", calls)
 		}
 	})
 }
