@@ -23764,8 +23764,11 @@ function Get-DefenseClawTargetRuntimeSkippedProfiles {
         throw "target runtime plan $propertyName is not an array"
     }
     $profiles = @($property.Value)
-    if ($profiles.Count -gt 128) {
-        throw "target runtime plan lists more than 128 profiles in $propertyName"
+    # Repaired profiles each have a root (at most 128). Skipped profiles also
+    # carry the users past the 128-root cap, up to the 384-row plan limit.
+    $maxProfiles = if ($Repaired) { 128 } else { 384 }
+    if ($profiles.Count -gt $maxProfiles) {
+        throw "target runtime plan lists more than $maxProfiles profiles in $propertyName"
     }
     $seen = @{}
     foreach ($profile in $profiles) {

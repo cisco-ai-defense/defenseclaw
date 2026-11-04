@@ -19,33 +19,30 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/audit"
 )
 
-func stubGatewayAuditOpen(t *testing.T, failures int) *int {
+func stubGatewayAuditOpen(t *testing.T, failures int) (*int, func() (*audit.Store, error)) {
 	t.Helper()
 	attempts := 0
-	originalAttempt := gatewayAuditOpenAttempt
 	originalBudget, originalInitial, originalMax :=
 		gatewayAuditOpenBudget, gatewayAuditOpenInitialDelay, gatewayAuditOpenMaxDelay
 	gatewayAuditOpenBudget = time.Second
 	gatewayAuditOpenInitialDelay = time.Millisecond
 	gatewayAuditOpenMaxDelay = 2 * time.Millisecond
-	gatewayAuditOpenAttempt = func(string, string) (*audit.Store, error) {
+	t.Cleanup(func() {
+		gatewayAuditOpenBudget, gatewayAuditOpenInitialDelay, gatewayAuditOpenMaxDelay =
+			originalBudget, originalInitial, originalMax
+	})
+	return &attempts, func() (*audit.Store, error) {
 		attempts++
 		if attempts <= failures {
 			return nil, errors.New("access is denied")
 		}
 		return &audit.Store{}, nil
 	}
-	t.Cleanup(func() {
-		gatewayAuditOpenAttempt = originalAttempt
-		gatewayAuditOpenBudget, gatewayAuditOpenInitialDelay, gatewayAuditOpenMaxDelay =
-			originalBudget, originalInitial, originalMax
-	})
-	return &attempts
 }
 
 func TestOpenGatewayAuditStoreWaitsForRepairInManagedMode(t *testing.T) {
-	attempts := stubGatewayAuditOpen(t, 3)
-	store, err := openGatewayAuditStore(context.Background(), "managed_enterprise", "audit.db", true)
+	attempts, attempt := stubGatewayAuditOpen(t, 3)
+	store, err := openAuditStoreWaitingForRepair(context.Background(), "managed_enterprise", "audit.db", attempt)
 	if err != nil || store == nil {
 		t.Fatalf("open = %v, %v; want the store once the guardian repaired it", store, err)
 	}
@@ -55,8 +52,8 @@ func TestOpenGatewayAuditStoreWaitsForRepairInManagedMode(t *testing.T) {
 }
 
 func TestOpenGatewayAuditStoreFailsFastOutsideManagedMode(t *testing.T) {
-	attempts := stubGatewayAuditOpen(t, 3)
-	if _, err := openGatewayAuditStore(context.Background(), "", "audit.db", true); err == nil {
+	attempts, attempt := stubGatewayAuditOpen(t, 3)
+	if _, err := openAuditStoreWaitingForRepair(context.Background(), "", "audit.db", attempt); err == nil {
 		t.Fatal("unmanaged open succeeded after a failure")
 	}
 	if *attempts != 1 {
@@ -65,20 +62,10 @@ func TestOpenGatewayAuditStoreFailsFastOutsideManagedMode(t *testing.T) {
 }
 
 func TestOpenGatewayAuditStoreStopsWhenCancelled(t *testing.T) {
-	stubGatewayAuditOpen(t, 1000)
+	_, attempt := stubGatewayAuditOpen(t, 1000)
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
-	if _, err := openGatewayAuditStore(ctx, "managed_enterprise", "audit.db", true); err == nil {
+	if _, err := openAuditStoreWaitingForRepair(ctx, "managed_enterprise", "audit.db", attempt); err == nil {
 		t.Fatal("cancelled open succeeded")
-	}
-}
-
-func TestOpenGatewayAuditStoreFailsFastForSubcommandsInManagedMode(t *testing.T) {
-	attempts := stubGatewayAuditOpen(t, 3)
-	if _, err := openGatewayAuditStore(context.Background(), "managed_enterprise", "audit.db", false); err == nil {
-		t.Fatal("subcommand open succeeded after a failure")
-	}
-	if *attempts != 1 {
-		t.Fatalf("attempts = %d, want 1", *attempts)
 	}
 }

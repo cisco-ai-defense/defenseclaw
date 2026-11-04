@@ -12,8 +12,6 @@ package cli
 
 import (
 	"context"
-	"fmt"
-	"path/filepath"
 	"time"
 
 	"github.com/defenseclaw/defenseclaw/internal/audit"
@@ -30,12 +28,18 @@ var (
 	gatewayAuditOpenBudget       = 3 * time.Minute
 	gatewayAuditOpenInitialDelay = 5 * time.Second
 	gatewayAuditOpenMaxDelay     = 30 * time.Second
-	gatewayAuditOpenAttempt      = openGatewayAuditStoreOnce
 )
 
-func openGatewayAuditStore(ctx context.Context, deploymentMode, path string, waitForRepair bool) (*audit.Store, error) {
-	store, err := gatewayAuditOpenAttempt(deploymentMode, path)
-	if err == nil || !waitForRepair || !managed.IsManagedEnterprise(deploymentMode) {
+// openAuditStoreWaitingForRepair runs attempt and, in a managed deployment,
+// retries it on the gatewayAuditOpen* backoff until it succeeds, the budget
+// runs out or ctx ends. Outside managed mode the first failure is returned.
+func openAuditStoreWaitingForRepair(
+	ctx context.Context,
+	deploymentMode, path string,
+	attempt func() (*audit.Store, error),
+) (*audit.Store, error) {
+	store, err := attempt()
+	if err == nil || !managed.IsManagedEnterprise(deploymentMode) {
 		return store, err
 	}
 	if ctx == nil {
@@ -56,7 +60,7 @@ func openGatewayAuditStore(ctx context.Context, deploymentMode, path string, wai
 			return nil, err
 		case <-timer.C:
 		}
-		if store, err = gatewayAuditOpenAttempt(deploymentMode, path); err == nil {
+		if store, err = attempt(); err == nil {
 			managed.EmitResilienceEvent(managed.MarkerRepair, map[string]string{
 				"subsystem": "audit store",
 				"path":      path,
@@ -69,21 +73,4 @@ func openGatewayAuditStore(ctx context.Context, deploymentMode, path string, wai
 		}
 	}
 	return nil, err
-}
-
-func openGatewayAuditStoreOnce(deploymentMode, path string) (*audit.Store, error) {
-	if auditDir := filepath.Dir(path); auditDir != "." {
-		if err := managed.PrepareServiceRuntimeDir(deploymentMode, auditDir, "audit store directory"); err != nil {
-			return nil, fmt.Errorf("failed to prepare audit store directory: %w", err)
-		}
-	}
-	store, err := audit.NewStore(path)
-	if err != nil {
-		return nil, fmt.Errorf("failed to open audit store: %w", err)
-	}
-	if err := store.Init(); err != nil {
-		_ = store.Close()
-		return nil, fmt.Errorf("failed to init audit store: %w", err)
-	}
-	return store, nil
 }

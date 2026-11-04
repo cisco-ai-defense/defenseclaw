@@ -701,6 +701,7 @@ func runWindowsEnterpriseLifecycle(
 			opts.installRoot,
 			executable,
 			opts.cliBinary,
+			windowsEnterpriseStandalone(opts),
 		)
 		if conflictErr != nil {
 			return failPreflight(conflictErr)
@@ -822,12 +823,13 @@ func windowsEnterpriseSelfUpgradeConflict(
 	installRoot string,
 	executable string,
 	cliBinary string,
+	standalone bool,
 ) (bool, error) {
 	if !strings.EqualFold(strings.TrimSpace(action), "upgrade") ||
 		strings.TrimSpace(cliBinary) == "" {
 		return false, nil
 	}
-	resolvedInstallRoot, err := resolveWindowsEnterpriseSelfUpgradeInstallRoot(installRoot)
+	resolvedInstallRoot, err := resolveWindowsEnterpriseSelfUpgradeInstallRoot(installRoot, standalone)
 	if err != nil {
 		return false, err
 	}
@@ -872,7 +874,7 @@ func windowsEnterpriseSelfUpgradeConflict(
 	return os.SameFile(executableInfo, expectedInfo), nil
 }
 
-func resolveWindowsEnterpriseSelfUpgradeInstallRoot(explicit string) (string, error) {
+func resolveWindowsEnterpriseSelfUpgradeInstallRoot(explicit string, standalone bool) (string, error) {
 	root := strings.TrimSpace(explicit)
 	if root != "" {
 		if !filepath.IsAbs(root) {
@@ -898,8 +900,13 @@ func resolveWindowsEnterpriseSelfUpgradeInstallRoot(explicit string) (string, er
 				"the trusted default Windows Program Files directory is not an absolute path",
 			)
 		}
-		// The installer's default InstallRoot (install-enterprise.ps1).
-		root = filepath.Join(programFiles, "Cisco", "Cisco Secure Client", "DefenseClaw")
+		// The installer's default InstallRoot for the profile
+		// (install-enterprise.ps1).
+		if standalone {
+			root = filepath.Join(programFiles, "Cisco", "DefenseClaw")
+		} else {
+			root = filepath.Join(programFiles, "Cisco", "Cisco Secure Client", "DefenseClaw")
+		}
 	}
 	root, err := filepath.Abs(root)
 	if err != nil {
