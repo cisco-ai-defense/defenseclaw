@@ -6721,3 +6721,41 @@ def test_config_only_ensure_skips_the_restart_barrier_only_after_clean_stops() -
         "-CleanStopProven:(Test-DefenseClawCleanQuiescenceBarrier `\n"
         "                        -ServicesQuiescedAt $activationQuiescedAt)"
     ) in install_like
+
+
+def test_install_like_run_keeps_a_byte_identical_release_binary() -> None:
+    """cowork-1-0-8 GAP-0044: a config-only ensure runs the upgrade
+    transaction on the installed release, and copied every release binary
+    again (about 530 MB, rescanned by the antivirus) while the services were
+    stopped. The install-like loop now keeps a binary whose installed bytes
+    are the source's: both are hashed, a different one is still replaced, and
+    the descriptor checks still run on the destination afterwards."""
+    module = read(MODULE)
+    install = _module_function(module, "Install-DefenseClawSourceDescriptor")
+    assert "[switch]$SkipIfContentMatches" in install
+    assert "-SkipIfContentMatches:$SkipIfContentMatches" in install
+    # The destination is checked after the copy or the kept file alike.
+    assert install.index("-SkipIfContentMatches:$SkipIfContentMatches") < install.index(
+        "Assert-DefenseClawRegularSource `"
+    )
+
+    atomic = _module_function(module, "Install-DefenseClawFileAtomic")
+    skip = atomic.index("if ($SkipIfContentMatches -and [IO.File]::Exists($Destination))")
+    copy = atomic.index("Copy-Item -LiteralPath $Source -Destination $temporary")
+    assert skip < copy
+    kept = atomic[skip:copy]
+    # Kept only when the source still has its authorized digest and the
+    # destination has the same bytes.
+    assert "throw \"source changed while checking managed artifact: $Source\"" in kept
+    assert "$sourceHash,\n                $destinationHash" in kept
+
+    lifecycle = _module_function(module, "Invoke-DefenseClawInstallLikeLifecycle")
+    release = lifecycle.index("$_ -notin $deferredPolicySources -and $_ -ne 'provider_library'")
+    policy = lifecycle.index("foreach ($name in @($deferredPolicySources")
+    binaries = lifecycle[release:policy]
+    assert "-Destination $destination `\n                -SkipIfContentMatches\n" in binaries
+    # The config and manifest keep their unconditional install.
+    assert "-SkipIfContentMatches" not in lifecycle[policy : policy + 600]
+    # The transaction snapshot is taken before, as before: a rollback still
+    # restores any binary the run replaced.
+    assert lifecycle.index("$snapshot = New-DefenseClawTransaction") < release

@@ -5731,7 +5731,11 @@ function Assert-DefenseClawSourceDescriptorCurrent {
 function Install-DefenseClawSourceDescriptor {
     param(
         [Parameter(Mandatory)][hashtable]$Source,
-        [Parameter(Mandatory)][string]$Destination
+        [Parameter(Mandatory)][string]$Destination,
+        # The installed file already has the source's bytes (both hashed
+        # here): it is kept instead of copied again. The checks below run on
+        # the destination either way.
+        [switch]$SkipIfContentMatches
     )
     $sourcePath = [string]$Source.path
     # Recheck mount-manager identity, ancestry, ACLs, digest, and signer
@@ -5747,7 +5751,8 @@ function Install-DefenseClawSourceDescriptor {
         Install-DefenseClawFileAtomic `
             -Source $sourcePath `
             -Destination $destinationPath `
-            -ExpectedSHA256 ([string]$current.sha256)
+            -ExpectedSHA256 ([string]$current.sha256) `
+            -SkipIfContentMatches:$SkipIfContentMatches
     }
     else {
         $actual = (Microsoft.PowerShell.Utility\Get-FileHash -LiteralPath $destinationPath -Algorithm SHA256).Hash
@@ -40751,9 +40756,15 @@ function Invoke-DefenseClawInstallLikeLifecycle {
             $_ -notin $deferredPolicySources -and $_ -ne 'provider_library'
         })) {
             $destination = Get-DefenseClawArtifactPath -Layout $Layout -Name $name
+            # A release binary whose installed bytes are the source's is
+            # kept: a config-only ensure on the installed release copied
+            # and rescanned about 530 MB of identical binaries while the
+            # services were stopped (cowork-1-0-8 GAP-0044). A changed one is
+            # replaced as before; the snapshot above is unchanged.
             Install-DefenseClawSourceDescriptor `
                 -Source $Sources[$name] `
-                -Destination $destination
+                -Destination $destination `
+                -SkipIfContentMatches
             $publishedManifestReplacement = [bool](
                 $name -ceq 'manifest' -and
                 (Test-DefenseClawSourceDescriptorPublishesReplacement `
