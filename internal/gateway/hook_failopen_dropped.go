@@ -63,6 +63,8 @@ func writeDroppedFailurePosition(logDir string, position droppedFailurePosition)
 // reportDroppedHookFailuresIn reads the prepared local record when the
 // ordinary failure log could not finish before a hook process ended.
 func reportDroppedHookFailuresIn(logDir string, logger *audit.Logger) error {
+	hookFailOpenReportMu.Lock()
+	defer hookFailOpenReportMu.Unlock()
 	f, err := os.Open(filepath.Join(logDir, hookFailuresDroppedFile))
 	if errors.Is(err, os.ErrNotExist) {
 		return nil
