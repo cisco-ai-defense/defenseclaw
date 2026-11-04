@@ -78,3 +78,13 @@ test('Kiro IDE floor and unknown Kiro versions read the same on every page', () 
     assert.doesNotMatch(source, /per-user setup (still )?accepts an older IDE|older IDE in every profile/i);
   }
 });
+
+test('Claude Cowork support matrix labels every route on every OS', () => {
+  const page = readFileSync(new URL('../content/docs/support-matrix.mdx', import.meta.url), 'utf8');
+  const section = page.split('\n## Claude Cowork\n')[1]?.split('\n## ')[0];
+  assert.ok(section, 'Claude Cowork section');
+  assert.match(section, /^\| Route \| Linux \| macOS \| Windows \|$/m);
+  assert.match(section, /^\| Per user \(open source\)[^|]*\| Preview \| Supported \| Supported \|$/m);
+  assert.match(section, /^\| Managed computer \(enterprise standalone\)[^|]*\| Preview \| Supported \| Supported \|$/m);
+  assert.match(section, /Cowork on Linux is not certified/);
+});

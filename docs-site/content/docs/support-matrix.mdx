@@ -69,7 +69,14 @@ Enterprise managed mode supports ACP editors through enrollment: an administrato
 
 ## Claude Cowork
 
-[Claude Cowork](/docs/connectors/cowork) is the agent mode of Claude Desktop. It is a surface of the Claude Code connector, not a connector of its own. The 1.0.8 tests ran Cowork on managed macOS and Windows with Claude Desktop 4.16336.0 (engine 2.1.317) using third-party inference through Amazon Bedrock. On Linux the managed drop-in and per-user setup were verified, but Cowork itself was not run.
+[Claude Cowork](/docs/connectors/cowork) is the agent mode of Claude Desktop. It is a surface of the Claude Code connector, not a connector of its own. The 1.0.8 tests ran Cowork on managed macOS and Windows with Claude Desktop 4.16336.0 (engine 2.1.317) using third-party inference through Amazon Bedrock. The per-user route (`defenseclaw setup cowork`) was also run on macOS and Windows, and in action mode a deny rule blocked a Cowork shell command on both. On Linux the managed drop-in and per-user setup were verified, but Cowork itself was not run.
+
+| Route | Linux | macOS | Windows |
+| --- | --- | --- | --- |
+| Per user (open source): `defenseclaw setup cowork` and an account plugin | Preview | Supported | Supported |
+| Managed computer (enterprise standalone): the Claude Code machine policy drop-in | Preview | Supported | Supported |
+
+**Supported** means a live Cowork task reached the gateway with surface `cowork` and a deny rule blocked a call on that OS. **Preview** on Linux means the code allows the route and the setup was checked, but no Cowork task ran: Claude Desktop for Linux is a beta, and Cowork on Linux is not certified.
 
 | Capability | Open source (per user) | Enterprise (standalone) | Status |
 | --- | --- | --- | --- |
