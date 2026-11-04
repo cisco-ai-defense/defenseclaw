@@ -269,14 +269,25 @@ var (
 	// and the check runs again. What survives is accepted and logged (an
 	// untrusted writer as a boundary finding) on Secure Client only; a
 	// standalone process refuses it (GAP-0561). Structure stays fatal.
+	//
+	// On standalone the repair runs only when the bytes are the ones this
+	// process last read while the manifest was trusted, and they must still
+	// be after it: a repair restores the descriptor, not a roster an
+	// untrusted writer edited (GAP-0561 review 1).
 	enterpriseHookManifestFileTrustCheck = func(path string) error {
 		const label = "hook guardian manifest"
+		needsProof := managed.StandaloneRepairNeedsProvenance()
 		if err := managed.ValidateTrustedFilePath(path, label); err == nil {
+			if needsProof {
+				managed.RecordTrustedContent(path)
+			}
 			return nil
 		}
 		if (enterpriseHooksRuntimeGOOS() == "windows" || enterpriseHooksRuntimeGOOS() == "darwin") &&
+			(!needsProof || managed.TrustedContentUnchanged(path)) &&
 			enterpriseHookManifestACLRepair(path) == nil &&
-			managed.ValidateTrustedFilePath(path, label) == nil {
+			managed.ValidateTrustedFilePath(path, label) == nil &&
+			(!needsProof || managed.TrustedContentUnchanged(path)) {
 			return nil
 		}
 		return managed.ValidateTrustedPolicyFilePath(path, label)

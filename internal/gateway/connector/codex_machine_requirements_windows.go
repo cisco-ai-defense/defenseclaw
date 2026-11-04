@@ -2133,10 +2133,22 @@ func WindowsCodexManagedHookContract(hookBinary string) string {
 // be repaired, including drift seen by a standard-user hook, is accepted and
 // logged on Secure Client so it never stops reconcile, verify or the hook,
 // and refused on standalone (GAP-0561).
+//
+// On standalone a repair runs only when the bytes are the ones this process
+// last read while the file was trusted, and they must still be after it
+// (managed.TrustedContentUnchanged): a repair restores the descriptor, not
+// hooks an untrusted writer removed (GAP-0561 review 1).
 func ensureWindowsCodexMachineFileTrust(path, label string, repairable bool) error {
+	needsProof := managed.StandaloneRepairNeedsProvenance()
 	strictErr := windowsCodexMachineTrustedFileCheck(path, label)
 	if strictErr == nil {
+		if needsProof {
+			managed.RecordTrustedContent(path)
+		}
 		return nil
+	}
+	if needsProof && !managed.TrustedContentUnchanged(path) {
+		return strictErr
 	}
 	if err := windowsCodexMachineStructureFileCheck(path, label); err != nil {
 		return err
@@ -2156,6 +2168,9 @@ func ensureWindowsCodexMachineFileTrust(path, label string, repairable bool) err
 		if repairErr := repairWindowsCodexMachineFileProtection(path); repairErr != nil {
 			reason += "; repair failed: " + repairErr.Error()
 		} else if recheckErr := windowsCodexMachineTrustedFileCheck(path, label); recheckErr == nil {
+			if needsProof && !managed.TrustedContentUnchanged(path) {
+				return strictErr
+			}
 			emitManagedRepairResilience(drift, true, path,
 				"re-stamped canonical protection: "+reason, map[string]string{"label": label})
 			return nil

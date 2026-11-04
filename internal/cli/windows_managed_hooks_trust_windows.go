@@ -17,8 +17,10 @@ import (
 // is stopped, degraded, or skipping self-heal because a transaction is
 // pending, so nothing else re-stamps these objects first. Permission drift is
 // repaired here when the object has a canonical form, and what survives is
-// accepted and logged: every file read below is schema-validated and the
-// lifecycle files are hash-bound to the transaction. Structural failures
+// accepted and logged on Secure Client: every file read below is
+// schema-validated and the lifecycle files are hash-bound to the transaction.
+// A standalone process refuses what survives, and repairs a file only when its
+// bytes are the ones it last read while the file was trusted (GAP-0561). Structural failures
 // (missing element, reparse point, hard link, wrong type, non-NTFS) stay
 // fatal, and TrustStrictAncestorsEnv keeps every verdict fatal.
 var (
@@ -30,14 +32,30 @@ var (
 // validateWindowsManagedHooksTrustedFile validates a protected file the
 // lifecycle or teardown reads. kind names the object's canonical form; pass
 // windowsManagedHooksObjectKind(path) or "" when it has none.
+//
+// On standalone a repair runs only when the bytes are the ones this process
+// last read while the file was trusted, and they must still be after it
+// (managed.TrustedContentUnchanged): a repair restores the descriptor, not
+// content an untrusted writer changed (GAP-0561 review 1).
 func validateWindowsManagedHooksTrustedFile(path string, kind managed.ObjectKind, label string) error {
+	needsProof := managed.StandaloneRepairNeedsProvenance()
 	err := windowsManagedHooksStrictFileCheck(path, label)
-	if err == nil || managed.TrustStrictAncestors() {
+	if err == nil {
+		if needsProof {
+			managed.RecordTrustedContent(path)
+		}
+		return nil
+	}
+	if managed.TrustStrictAncestors() {
 		return err
+	}
+	if needsProof && !managed.TrustedContentUnchanged(path) {
+		return managed.ValidateTrustedPolicyFilePath(path, label)
 	}
 	if repaired, ensureErr := repairWindowsManagedHooksObject(path, kind); ensureErr != nil {
 		return errors.Join(err, ensureErr)
-	} else if repaired && windowsManagedHooksStrictFileCheck(path, label) == nil {
+	} else if repaired && windowsManagedHooksStrictFileCheck(path, label) == nil &&
+		(!needsProof || managed.TrustedContentUnchanged(path)) {
 		return nil
 	}
 	return managed.ValidateTrustedPolicyFilePath(path, label)
@@ -49,16 +67,33 @@ func validateWindowsManagedHooksTrustedFile(path string, kind managed.ObjectKind
 // descriptors to privileged restores, so drift is repaired to the canonical
 // admin-file descriptor and the strict owner/DACL check must then pass:
 // residual owner or writer drift after repair is fatal here.
+//
+// On standalone the content must also be the bytes this process last read
+// while the journal was trusted, before and after the repair (GAP-0561
+// review 1).
 func validateWindowsManagedHooksTeardownJournalFile(path string) error {
 	const label = "managed-hook teardown journal"
+	needsProof := managed.StandaloneRepairNeedsProvenance()
 	err := windowsManagedHooksStrictFileCheck(path, label)
-	if err == nil || managed.TrustStrictAncestors() {
+	if err == nil {
+		if needsProof {
+			managed.RecordTrustedContent(path)
+		}
+		return nil
+	}
+	if managed.TrustStrictAncestors() || (needsProof && !managed.TrustedContentUnchanged(path)) {
 		return err
 	}
 	if _, ensureErr := repairWindowsManagedHooksObject(path, managed.ObjectAdminFile); ensureErr != nil {
 		return errors.Join(err, ensureErr)
 	}
-	return windowsManagedHooksStrictFileCheck(path, label)
+	if recheck := windowsManagedHooksStrictFileCheck(path, label); recheck != nil {
+		return recheck
+	}
+	if needsProof && !managed.TrustedContentUnchanged(path) {
+		return err
+	}
+	return nil
 }
 
 // validateWindowsManagedHooksTrustedDir is validateWindowsManagedHooksTrustedFile
