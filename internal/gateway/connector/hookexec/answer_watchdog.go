@@ -272,7 +272,11 @@ func prepareAnswerWatchdog(opts *Options, sp spec, failMode string, ceiling time
 }
 
 func watchdogNoAnswerBlocks(opts Options, sp spec, failMode string) bool {
-	return !sp.failOpenOnly && noAnswerFailMode(opts, failMode) == "closed" && !failClosedStopEvent(opts, sp)
+	mode := noAnswerFailMode(opts, failMode)
+	if sp.failOpenOnly {
+		return !opts.SecureClient && loggedFailMode(opts, sp, mode) == "closed"
+	}
+	return mode == "closed" && !failClosedStopEvent(opts, sp)
 }
 
 // renderNoAnswer renders the answer of a call whose gateway did not answer
@@ -927,7 +931,7 @@ func (w *answerWatchdog) watch(deadline time.Time) {
 						if w.fallbackBlocked {
 							w.failureLog.promoteFallbackClosed()
 						}
-						if !w.failureLog.appendFallback() {
+						if saved, _ := w.failureLog.appendFallbackWithin(answerWatchdogLogWait); !saved {
 							fmt.Fprintln(os.Stderr, "defenseclaw: local failure record could not be appended before exit")
 						}
 					}
@@ -944,8 +948,15 @@ func (w *answerWatchdog) watch(deadline time.Time) {
 		if w.fallbackBlocked {
 			w.failureLog.promoteFallbackClosed()
 		}
-		if w.failureLog.appendFallback() {
+		saved, finished := w.failureLog.appendFallbackWithin(answerWatchdogLogWait)
+		if saved {
 			w.failureLog.close()
+			w.exit(w.fallbackCode)
+			return
+		}
+		// A stalled marker cannot hold the answer while the ordinary log is
+		// also opening. The append continues only until process exit.
+		if !finished {
 			w.exit(w.fallbackCode)
 			return
 		}
@@ -967,7 +978,7 @@ func (w *answerWatchdog) watch(deadline time.Time) {
 				if w.fallbackBlocked {
 					w.failureLog.promoteFallbackClosed()
 				}
-				if !w.failureLog.appendFallback() {
+				if saved, finished := w.failureLog.appendFallbackWithin(answerWatchdogLogWait); !saved && finished {
 					w.failureLog.forceFallback()
 				}
 			}
@@ -1014,6 +1025,10 @@ func (w *answerWatchdog) gatewayAnsweredError(opts Options, sp spec, status int)
 	w.fallbackOut, w.fallbackErr, w.fallbackCode, w.logFailure = out, errb, code, logFailure
 	w.visibleOutage = nil
 	w.fallbackBlocked = true
+	if status >= 200 && status < 300 && w.failureLog.markerEnabled {
+		w.failureLog.replaceFallbackFrame(localFailureFallbackFrame(closedOpts, sp,
+			"incomplete gateway response", "response", "closed", true))
+	}
 }
 
 // waitForLog waits for the watchdog's hook-failures row (done) for at most
