@@ -229,6 +229,24 @@ After a migration that moved values:
   [PASS] Config migration  -  migrated to 9 on 2026-10-06: 21 value(s) moved, 0 conflict(s); details in /home/alice/.defenseclaw/migration-v9.json
 ```
 
+### Cowork row in `status` and `doctor`
+
+On a per-user install, `defenseclaw status` and `defenseclaw doctor` show a **Cowork** row when Claude Desktop is installed or `defenseclaw setup cowork` built a plugin. Neither shows it on a managed computer, where machine policy covers Cowork and the `cowork` line of the managed `status` and `verify` takes its place (see [Configured versus covered](/docs/connectors/cowork#configured-versus-covered)). The reason codes and what to do about each are in [Check it](/docs/connectors/cowork#check-it).
+
+`doctor` reports it as the check `doctor.cowork`, labelled `Cowork`. The status is `pass` when Cowork is protected and `warn` otherwise. In `doctor --json` the check carries the `reason_code` and a `remediation` with the step.
+
+`status --json` has a `cowork` object only when the row is shown:
+
+| Field | Meaning |
+| --- | --- |
+| `protected` | `true` when a Cowork hook call reached this account's gateway after the current plugin build |
+| `detail` | The sentence the text row prints |
+| `step` | What to run or do next. An empty string when protected |
+| `reason_code` | Why Cowork is not protected, such as `cowork_plugin_not_built` or `cowork_no_events`. An empty string when protected |
+| `last_event_at` | The time of the last Cowork event as an ISO 8601 string, or `null` |
+| `plugin_version` | The plugin version setup built, or `null` |
+| `plugin_zip` | The path of the plugin zip, or `null` |
+
 ## Observability rows
 
 | Row | Status | What to do |

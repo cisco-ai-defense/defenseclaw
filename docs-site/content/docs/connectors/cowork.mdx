@@ -190,9 +190,12 @@ On a managed standalone install, DefenseClaw's Claude Code machine policy drop-i
 | --- | --- |
 | `cowork: configured` | The Claude Code connector is enabled, its machine policy hooks are in place, and the Claude Desktop surface is not refused by `enterprise.enrollment.unverified_versions: refuse`. It says nothing about calls: the same line says how many hook calls reported themselves as Cowork since the gateway started and when the last one came, or that none has yet |
 | `cowork <account>: last Cowork event <time or never>` | The last hook call from that account that reported itself as Cowork. This is the evidence that the hook ran. Root or an administrator sees it |
+| `reason` | Why `configured` is false: `claudecode_not_enabled`, `claudecode_machine_policy_not_in_place` or `claudecode_desktop_surface_refused` |
 | `managed_hooks_only` | Whether the `allowManagedHooksOnly` lock is on |
 | `requests`, `last_event_at` | Hook calls that reported themselves as Cowork since the gateway started, machine-wide |
+| `accounts_known` | `true` when the audit store answered the per-account lookup, so the account list can be trusted. When it is `false`, the per-account last-event lines are missing, not "never" |
 | `accounts_truncated` | More than 64 accounts have Cowork rows, so the list is cut |
+| `claude_desktop` | For each included account: its Claude Desktop data folders (`1p`, `3p`), the newest engine build in each and its trust (`trusted`, `untrusted`, `unsigned`, `not_found`), with the counts of each. An account whose folders were not checked has a `reason` (on Windows, for example, no signed-in session during an MDM run). Read from disk; only root or an elevated administrator sees it |
 
 Account names stay on the computer and are not in the data that is forwarded. The TUI shows only the gateway's machine-wide Cowork count on the Claude Code connector. In the 1.0.8 tests on managed macOS and Windows, Cowork's hook calls reached the gateway with surface `cowork` under the drop-in, and an administrator deny rule blocked `mcp__workspace__bash`.
 

@@ -121,6 +121,7 @@ You are an AI agent. Find out why DefenseClaw is not working, map each failure t
    | nothing is blocked | `defenseclaw guardrail status` | Switching to action mode |
    | tools blocked while gateway down | start the gateway | Changing the fail mode |
    | "DefenseClaw is not checking this session" | start the gateway (`defenseclaw-gateway start`), then `defenseclaw doctor` if it does not start | Switching the policy |
+   | `doctor.cowork` warns, or `status --json` has `cowork.protected: false` | Run the command in `cowork.step` when it is a `defenseclaw` command (for example `defenseclaw setup cowork`). See [Claude Cowork](/docs/connectors/cowork#check-it) for each `reason_code` | Uploading the plugin zip in Claude Desktop, or removing the plugin there: only the user can |
 
 5. Preview repairs. Never skip this.
 
