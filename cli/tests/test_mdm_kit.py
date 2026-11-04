@@ -4318,6 +4318,11 @@ def test_windows_wrapper_runs_an_administrator_only_setup_in_place_while_it_hold
     # The handle is taken before any check, so the checked file is the run one.
     assert opened < body.index("Test-DefenseClawAdminOnlyItem -Path $item.FullName")
     assert opened < body.index("Test-WrapperAdminOnlyAncestors -Path $item.FullName")
+    # Setup runs as SYSTEM from its own folder: no other account may create
+    # files there (a planted DLL or .local folder), so that folder must be
+    # administrator-only too, not only the folders above it.
+    folder_check = "Test-DefenseClawAdminOnlyItem -Path ([System.IO.Path]::GetDirectoryName($item.FullName))"
+    assert opened < body.index(folder_check) < body.index("return $stream")
     assert "FileShare]::ReadWrite" not in body and "FileShare]::Delete" not in body
     assert "$item.Length -gt $Limit" in body
     assert "[System.IO.FileAttributes]::ReparsePoint" in body

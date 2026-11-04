@@ -18,8 +18,9 @@
          against -Sha256 (hash-pinned trust, required) and/or its Authenticode
          signature against -AllowedSigners (SHA-256 thumbprints of the signer
          certificate; Cisco or your own re-signing certificate). A Setup in an
-         administrator-only file whose folders no other account can rename,
-         delete or re-permission is verified and run where it is, held open
+         administrator-only file, in a folder where no other account can
+         create files or folders, whose folders no other account can rename,
+         delete or re-permission, is verified and run where it is, held open
          with no write or delete sharing from before the checks until it
          exits; any other Setup is first copied into a new SYSTEM- and
          Administrators-only staging folder and the copy is verified and run;
@@ -614,7 +615,11 @@ function Open-WrapperSetupInPlace {
     # write, replace, rename or delete the file, and the file and every
     # folder above it are administrator-only (no other account can change
     # the file or move a folder), so the bytes Setup runs are the bytes
-    # checked. A fresh copy of the 700 MB Setup was scanned again by the
+    # checked. Its own folder must also be administrator-only for creating
+    # files and folders: Setup and its recovery watchdog run as SYSTEM from
+    # it, so no other account may place a DLL or a .local folder beside it
+    # (a new C:\ProgramData subfolder lets users create files; that Setup is
+    # copied into staging). A fresh copy of the 700 MB Setup was scanned again by the
     # antivirus on its first start, about 20 s, and copied in about 5 s,
     # on every run (cowork-1-0-8 GAP-0044).
     param([Parameter(Mandatory = $true)][string]$Source, [long]$Limit)
@@ -626,6 +631,7 @@ function Open-WrapperSetupInPlace {
         if ($item.PSIsContainer -or ($item.Attributes -band [System.IO.FileAttributes]::ReparsePoint) -or
             $item.Length -gt $Limit -or $stream.Length -ne $item.Length -or
             -not (Test-DefenseClawAdminOnlyItem -Path $item.FullName) -or
+            -not (Test-DefenseClawAdminOnlyItem -Path ([System.IO.Path]::GetDirectoryName($item.FullName))) -or
             -not (Test-WrapperAdminOnlyAncestors -Path $item.FullName)) {
             $stream.Dispose()
             return $null
