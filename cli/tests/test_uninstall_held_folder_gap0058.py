@@ -162,6 +162,31 @@ def test_a_lasting_hold_is_reported():
     assert held.call_count == cmd_uninstall._HELD_FOLDER_CHECKS  # noqa: SLF001
 
 
+def test_a_failing_held_folder_check_still_schedules_the_cleanup(monkeypatch):
+    # The held-folder check is advisory: an error in it reports nothing and
+    # never keeps the deferred cleanup from being scheduled.
+    plan = _plan(r"C:\Users\u\.defenseclaw")
+    result = r"C:\Users\u\AppData\Local\Temp\defenseclaw-uninstall-result-ab.json"
+    monkeypatch.setattr(cmd_uninstall, "_agent_config_wiring_files", lambda: [])
+    with patch.object(cmd_uninstall.windows_uninstall_helper, "held_folders", side_effect=OSError("boom")):
+        assert cmd_uninstall._deferred_cleanup_held_folders(plan) == []  # noqa: SLF001
+    buffer = io.StringIO()
+    with (
+        patch.object(cmd_uninstall, "_validate_plan"),
+        patch.object(cmd_uninstall, "_requires_deferred_cleanup", return_value=True),
+        patch.object(cmd_uninstall.windows_uninstall_helper, "held_folders", side_effect=RuntimeError("boom")),
+        patch.object(cmd_uninstall, "_schedule_deferred_cleanup", return_value=result) as schedule,
+        patch.object(cmd_uninstall, "_remove_empty_plugin_cache"),
+        patch.object(cmd_uninstall, "remove_own_api_port_claims"),
+        contextlib.redirect_stdout(buffer),
+    ):
+        cmd_uninstall._execute_plan(plan)  # noqa: SLF001
+    schedule.assert_called_once()
+    output = " ".join(buffer.getvalue().split())
+    assert "deferred cleanup: scheduled (not finished yet:" in output
+    assert "is open in another program" not in output
+
+
 def test_the_console_says_the_cleanup_is_not_finished_and_names_the_held_folder(monkeypatch):
     plan = _plan(r"C:\Users\u\.defenseclaw")
     folder = r"C:\Users\u\.defenseclaw\hooks\.outage-warnings"

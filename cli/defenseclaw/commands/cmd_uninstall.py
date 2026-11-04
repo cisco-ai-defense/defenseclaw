@@ -3516,22 +3516,27 @@ _HELD_FOLDER_CHECK_INTERVAL = 0.5
 def _deferred_cleanup_held_folders(plan: UninstallPlan) -> list[str]:
     """The data folders another program holds, which the deferred cleanup cannot remove (GAP-0058).
 
-    The cleanup runs after this CLI exits, with no console, so a folder held
-    open (hooks\\.outage-warnings, by a window whose current folder it was)
-    left the whole data folder behind while the console said nothing. The
-    check changes nothing; the runtime this CLI runs from and the Python the
-    helper runs on are not checked (they go after it exits). A brief hold is
-    re-checked before it is reported.
+    The cleanup runs after this CLI exits, with no console, so a folder it
+    could not remove (on the test computer hooks\\.outage-warnings; which
+    program, if any, held it was not identified) left the whole data folder
+    behind while the console said nothing. The check changes nothing; the
+    runtime this CLI runs from and the Python the helper runs on are not
+    checked (they go after it exits). A brief hold is re-checked before it is
+    reported. The check is advisory: if it fails, it reports nothing and the
+    cleanup is still scheduled.
     """
     skip = {plan.managed_venv, os.path.join(plan.data_dir, ".uv")}
     skip.update(os.path.join(plan.data_dir, name) for name in plan.preserve_data_entries)
-    held = windows_uninstall_helper.held_folders(plan.data_dir, skip)
-    for _ in range(_HELD_FOLDER_CHECKS - 1):
-        if not held:
-            break
-        time.sleep(_HELD_FOLDER_CHECK_INTERVAL)
-        still = set(windows_uninstall_helper.held_folders(plan.data_dir, skip))
-        held = [folder for folder in held if folder in still]
+    try:
+        held = windows_uninstall_helper.held_folders(plan.data_dir, skip)
+        for _ in range(_HELD_FOLDER_CHECKS - 1):
+            if not held:
+                break
+            time.sleep(_HELD_FOLDER_CHECK_INTERVAL)
+            still = set(windows_uninstall_helper.held_folders(plan.data_dir, skip))
+            held = [folder for folder in held if folder in still]
+    except Exception:  # noqa: BLE001 - an advisory check must never stop the cleanup.
+        return []
     return held
 
 
