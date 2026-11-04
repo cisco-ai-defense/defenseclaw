@@ -712,6 +712,23 @@ namespace $nativeNamespace
         [DllImport("wtsapi32.dll")]
         private static extern void WTSFreeMemory(IntPtr memory);
 
+        [DllImport("wtsapi32.dll", SetLastError = true)]
+        [return: MarshalAs(UnmanagedType.Bool)]
+        private static extern bool WTSQueryUserToken(int sessionId, out IntPtr token);
+
+        [DllImport("advapi32.dll", SetLastError = true)]
+        [return: MarshalAs(UnmanagedType.Bool)]
+        private static extern bool GetTokenInformation(
+            IntPtr token,
+            int tokenInformationClass,
+            IntPtr tokenInformation,
+            int tokenInformationLength,
+            out int returnLength);
+
+        [DllImport("kernel32.dll", SetLastError = true)]
+        [return: MarshalAs(UnmanagedType.Bool)]
+        private static extern bool CloseHandle(IntPtr handle);
+
         [DllImport("netapi32.dll", CharSet = CharSet.Unicode)]
         private static extern int NetLocalGroupGetMembers(
             string serverName,
@@ -879,6 +896,74 @@ namespace $nativeNamespace
             return GetActiveSessionSIDs(false);
         }
 
+        // Session accounts (DOMAIN\user) whose name did not translate on the
+        // last GetActiveSessionSIDs call: those the session token resolved,
+        // and those neither resolved. The caller resolves the second set
+        // locally or leaves those users to the Guardian.
+        public static string[] LastTokenFallbackSessionAccounts = new string[0];
+        public static string[] LastUnresolvedSessionAccounts = new string[0];
+
+        // The name lookup asks LSA, which forwards a domain account to a
+        // domain controller when its SID is not cached: on a domain laptop
+        // off VPN or with a broken trust it fails. The session's own token
+        // carries the SID with no lookup; reading it needs SeTcbPrivilege,
+        // which Setup has when it runs as LocalSystem (the AVC custom
+        // action). A session neither resolves is reported, never fatal.
+        private static SecurityIdentifier ResolveSessionUserSID(
+            int sessionId,
+            string domain,
+            string user,
+            List<string> tokenFallbacks,
+            List<string> unresolved)
+        {
+            string label = String.IsNullOrEmpty(domain) ? user : domain + "\\" + user;
+            try
+            {
+                NTAccount account = String.IsNullOrEmpty(domain)
+                    ? new NTAccount(user)
+                    : new NTAccount(domain, user);
+                return (SecurityIdentifier)account.Translate(
+                    typeof(SecurityIdentifier));
+            }
+            catch (IdentityNotMappedException) { }
+            catch (SystemException) { }
+            SecurityIdentifier fromToken = SessionTokenUserSID(sessionId);
+            if (fromToken != null)
+            {
+                tokenFallbacks.Add(label);
+                return fromToken;
+            }
+            unresolved.Add(label);
+            return null;
+        }
+
+        private static SecurityIdentifier SessionTokenUserSID(int sessionId)
+        {
+            IntPtr token;
+            if (!WTSQueryUserToken(sessionId, out token) || token == IntPtr.Zero)
+                return null;
+            IntPtr buffer = IntPtr.Zero;
+            try
+            {
+                const int tokenUser = 1;
+                int needed;
+                GetTokenInformation(token, tokenUser, IntPtr.Zero, 0, out needed);
+                if (needed <= 0 || needed > 4096)
+                    return null;
+                buffer = Marshal.AllocHGlobal(needed);
+                if (!GetTokenInformation(token, tokenUser, buffer, needed, out needed))
+                    return null;
+                IntPtr sidPointer = Marshal.ReadIntPtr(buffer);
+                return sidPointer == IntPtr.Zero ? null : new SecurityIdentifier(sidPointer);
+            }
+            finally
+            {
+                if (buffer != IntPtr.Zero)
+                    Marshal.FreeHGlobal(buffer);
+                CloseHandle(token);
+            }
+        }
+
         // includeEntra admits Microsoft Entra ID user SIDs (S-1-12-1-...)
         // for the standalone profile; the parameterless Secure Client form
         // keeps the historical S-1-5-21 filter exactly.
@@ -904,6 +989,8 @@ namespace $nativeNamespace
                 int size = Marshal.SizeOf(typeof(WTSSessionInfo));
                 HashSet<string> active = new HashSet<string>(
                     StringComparer.OrdinalIgnoreCase);
+                List<string> tokenFallbacks = new List<string>();
+                List<string> unresolved = new List<string>();
                 for (int index = 0; index < count; index++)
                 {
                     IntPtr pointer = new IntPtr(
@@ -926,14 +1013,17 @@ namespace $nativeNamespace
                         row.SessionId,
                         7,
                         "domain name").Trim();
-                    NTAccount account = String.IsNullOrEmpty(domain)
-                        ? new NTAccount(user)
-                        : new NTAccount(domain, user);
-                    SecurityIdentifier sid = (SecurityIdentifier)account.Translate(
-                        typeof(SecurityIdentifier));
-                    if (IsInteractiveUserSID(sid))
+                    SecurityIdentifier sid = ResolveSessionUserSID(
+                        row.SessionId,
+                        domain,
+                        user,
+                        tokenFallbacks,
+                        unresolved);
+                    if (sid != null && IsInteractiveUserSID(sid))
                         active.Add(sid.Value);
                 }
+                LastTokenFallbackSessionAccounts = tokenFallbacks.ToArray();
+                LastUnresolvedSessionAccounts = unresolved.ToArray();
                 List<string> ordered = new List<string>(active);
                 ordered.Sort(StringComparer.OrdinalIgnoreCase);
                 return ordered.ToArray();
@@ -2818,6 +2908,81 @@ function Test-DefenseClawInteractiveUserSID {
         ) -and $componentCount -eq 8)
 }
 
+# The SIDs of the signed-in interactive users. A session whose account name
+# does not translate (a domain account with no LSA answer, as on a domain
+# laptop off VPN) is resolved from its session token when Setup runs as
+# LocalSystem, else from the one ProfileList profile whose folder is named
+# after the user (user, or user.DOMAIN...). A session neither resolves is
+# left out and logged: its rows stay deferred and the Guardian enrolls the
+# user once it reads the session. No lookup failure stops the install.
+function Get-DefenseClawActiveSessionSIDs {
+    param([string]$EnterpriseProfile)
+
+    $native = Initialize-DefenseClawBootstrapNativePath
+    $sids = [Collections.Generic.List[string]]::new()
+    foreach ($sid in @($native::GetActiveSessionSIDs($EnterpriseProfile -ceq 'Standalone'))) {
+        $sids.Add([string]$sid)
+    }
+    foreach ($account in @($native::LastTokenFallbackSessionAccounts)) {
+        Add-DefenseClawBootstrapResilienceEvent `
+            -Marker defenseclaw_accept `
+            -Fields @{
+                account = [string]$account
+                reason  = 'signed-in account did not translate; using the SID from its session token'
+            }
+    }
+    $unresolved = @($native::LastUnresolvedSessionAccounts)
+    if ($unresolved.Count -eq 0) {
+        return $sids.ToArray()
+    }
+    $profiles = [Collections.Generic.List[psobject]]::new()
+    $rootKey = 'HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion\ProfileList'
+    foreach ($sub in @(Microsoft.PowerShell.Management\Get-ChildItem -LiteralPath $rootKey -ErrorAction SilentlyContinue)) {
+        try {
+            $profileSID = [Security.Principal.SecurityIdentifier]::new($sub.PSChildName)
+            $image = (Microsoft.PowerShell.Management\Get-ItemProperty -LiteralPath $sub.PSPath `
+                -Name ProfileImagePath -ErrorAction Stop).ProfileImagePath
+        }
+        catch { continue }
+        if (-not (Test-DefenseClawInteractiveUserSID -SID $profileSID) -or
+            [string]::IsNullOrWhiteSpace($image)) {
+            continue
+        }
+        $leaf = [IO.Path]::GetFileName(
+            [Environment]::ExpandEnvironmentVariables([string]$image).TrimEnd('\')
+        )
+        $profiles.Add([pscustomobject]@{ SID = $profileSID.Value; Leaf = $leaf })
+    }
+    foreach ($account in $unresolved) {
+        $parts = ([string]$account).Split('\')
+        $user = $parts[-1]
+        $domain = if ($parts.Count -gt 1) { $parts[0] } else { '' }
+        $found = @($profiles | Microsoft.PowerShell.Core\Where-Object {
+            [string]::Equals($_.Leaf, $user, [StringComparison]::OrdinalIgnoreCase) -or
+            (-not [string]::IsNullOrEmpty($domain) -and
+                $_.Leaf.StartsWith("$user.$domain", [StringComparison]::OrdinalIgnoreCase))
+        })
+        if ($found.Count -eq 1) {
+            $sids.Add([string]$found[0].SID)
+            Add-DefenseClawBootstrapResilienceEvent `
+                -Marker defenseclaw_accept `
+                -Fields @{
+                    account = [string]$account
+                    sid     = [string]$found[0].SID
+                    reason  = 'signed-in account did not translate; matched its ProfileList profile folder'
+                }
+            continue
+        }
+        Add-DefenseClawBootstrapResilienceEvent `
+            -Marker defenseclaw_degraded `
+            -Fields @{
+                account = [string]$account
+                reason  = "signed-in account did not translate and matched $($found.Count) profile folders; the Guardian enrolls it later"
+            }
+    }
+    return @($sids | Microsoft.PowerShell.Utility\Sort-Object -Unique)
+}
+
 function Select-DefenseClawActiveInteractiveUserProfiles {
     param(
         [AllowEmptyCollection()][object[]]$Profiles = @(),
@@ -2872,10 +3037,7 @@ function Get-DefenseClawEligibleInteractiveUserProfiles {
     }
     if ($RequireActiveSession -and
         -not $PSBoundParameters.ContainsKey('ActiveSessionSIDs')) {
-        $native = Initialize-DefenseClawBootstrapNativePath
-        $ActiveSessionSIDs = @($native::GetActiveSessionSIDs(
-            $EnterpriseProfile -ceq 'Standalone'
-        ))
+        $ActiveSessionSIDs = @(Get-DefenseClawActiveSessionSIDs -EnterpriseProfile $EnterpriseProfile)
     }
 
     # Walk HKLM\SOFTWARE\Microsoft\Windows NT\CurrentVersion\ProfileList
@@ -4106,10 +4268,7 @@ function Get-DefenseClawRenderedEnterpriseTargets {
     $activeProfiles = @()
     if ($DeferInactiveProfiles) {
         if (-not $PSBoundParameters.ContainsKey('ActiveSessionSIDs')) {
-            $native = Initialize-DefenseClawBootstrapNativePath
-            $ActiveSessionSIDs = @($native::GetActiveSessionSIDs(
-                $EnterpriseProfile -ceq 'Standalone'
-            ))
+            $ActiveSessionSIDs = @(Get-DefenseClawActiveSessionSIDs -EnterpriseProfile $EnterpriseProfile)
         }
         $activeProfiles = @(
             Select-DefenseClawActiveInteractiveUserProfiles `
