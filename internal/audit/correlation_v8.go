@@ -795,6 +795,20 @@ type CorrelationTx struct {
 	closed                    bool
 	existingSemanticEventID   SemanticEventID
 	existingConnectorInstance ConnectorInstanceID
+	// lease and stmtCtx are set on an occurrence of the occurrence group: its
+	// statements run in the shared transaction with stmtCtx's lifetime
+	// (correlation_occurrence_group.go).
+	lease   *occurrenceLease
+	stmtCtx context.Context
+}
+
+// stmt is the context of one statement of the transaction: ctx, or for a
+// grouped occurrence ctx's values with the shared transaction's lifetime.
+func (tx *CorrelationTx) stmt(ctx context.Context) context.Context {
+	if tx.stmtCtx == nil {
+		return ctx
+	}
+	return groupedWriteCtx{Context: tx.stmtCtx, values: ctx}
 }
 
 // BeginExistingOccurrence opens a write transaction scoped to one immutable
@@ -944,16 +958,25 @@ func (repo *CorrelationRepository) BeginOccurrence(
 			return nil, empty, err
 		}
 	}
-	release, err := repo.store.acquireReady()
-	if err != nil {
-		return nil, empty, err
+	var correlationTx *CorrelationTx
+	if repo.store.secureClientSchema {
+		release, err := repo.store.acquireReady()
+		if err != nil {
+			return nil, empty, err
+		}
+		tx, err := repo.store.db.BeginTx(ctx, nil)
+		if err != nil {
+			release()
+			return nil, empty, fmt.Errorf("audit: begin correlation occurrence: %w", err)
+		}
+		correlationTx = &CorrelationTx{repo: repo, tx: tx, release: release}
+	} else {
+		grouped, err := repo.store.beginGroupedCorrelationTx(ctx, repo)
+		if err != nil {
+			return nil, empty, fmt.Errorf("audit: begin correlation occurrence: %w", err)
+		}
+		correlationTx = grouped
 	}
-	tx, err := repo.store.db.BeginTx(ctx, nil)
-	if err != nil {
-		release()
-		return nil, empty, fmt.Errorf("audit: begin correlation occurrence: %w", err)
-	}
-	correlationTx := &CorrelationTx{repo: repo, tx: tx, release: release}
 	fail := func(cause error) (*CorrelationTx, CorrelationOccurrenceResult, error) {
 		_ = correlationTx.Rollback()
 		return nil, empty, cause
@@ -1023,7 +1046,7 @@ func (tx *CorrelationTx) claimExactIdentities(
 	ownedClaims := make([]bool, len(claims))
 	for claimIndex, claim := range claims {
 		railA, railB := canonicalRailPair(claim.Rail, claim.CompatibleRail)
-		result, err := txExecContextObserved(ctx, tx.tx, "correlation_identity_claim_insert",
+		result, err := txExecContextObserved(tx.stmt(ctx), tx.tx, "correlation_identity_claim_insert",
 			tx.repo.store.sqliteBusyObservabilityV8(), `INSERT OR IGNORE INTO correlation_identity_claims (
 				connector_instance_id, namespace, identifier_kind, value_digest, event_name,
 				rail_a, rail_b, rule_id, rule_version, source_rail, semantic_event_id,
@@ -1041,7 +1064,7 @@ func (tx *CorrelationTx) claimExactIdentities(
 		}
 		if inserted == 0 {
 			var existingSemantic, existingLogical string
-			err = tx.tx.QueryRowContext(ctx, `SELECT semantic_event_id, logical_group_id
+			err = tx.tx.QueryRowContext(tx.stmt(ctx), `SELECT semantic_event_id, logical_group_id
 				FROM correlation_identity_claims WHERE connector_instance_id=? AND namespace=?
 				AND identifier_kind=? AND value_digest=? AND event_name=? AND rail_a=? AND rail_b=?
 				AND rule_id=? AND rule_version=? AND source_rail=?`,
@@ -1079,7 +1102,7 @@ func (tx *CorrelationTx) claimExactIdentities(
 		}
 
 		var counterpartSemantic, counterpartLogical string
-		err = tx.tx.QueryRowContext(ctx, `SELECT semantic_event_id, logical_group_id
+		err = tx.tx.QueryRowContext(tx.stmt(ctx), `SELECT semantic_event_id, logical_group_id
 			FROM correlation_identity_claims WHERE connector_instance_id=? AND namespace=?
 			AND identifier_kind=? AND value_digest=? AND event_name=? AND rail_a=? AND rail_b=?
 			AND rule_id=? AND rule_version=? AND source_rail=?`,
@@ -1108,7 +1131,7 @@ func (tx *CorrelationTx) claimExactIdentities(
 			continue
 		}
 		railA, railB := canonicalRailPair(claim.Rail, claim.CompatibleRail)
-		result, err := txExecContextObserved(ctx, tx.tx, "correlation_identity_claim_group",
+		result, err := txExecContextObserved(tx.stmt(ctx), tx.tx, "correlation_identity_claim_group",
 			tx.repo.store.sqliteBusyObservabilityV8(), `UPDATE correlation_identity_claims
 			SET logical_group_id=? WHERE connector_instance_id=? AND namespace=? AND identifier_kind=?
 			AND value_digest=? AND event_name=? AND rail_a=? AND rail_b=? AND rule_id=?
@@ -1145,7 +1168,7 @@ func (tx *CorrelationTx) putEvent(ctx context.Context, event CorrelationEvent) (
 	if err := validateCorrelationEvent(event); err != nil {
 		return false, err
 	}
-	result, err := txExecContextObserved(ctx, tx.tx, "correlation_event_insert",
+	result, err := txExecContextObserved(tx.stmt(ctx), tx.tx, "correlation_event_insert",
 		tx.repo.store.sqliteBusyObservabilityV8(), `INSERT OR IGNORE INTO correlation_events (
 			semantic_event_id, logical_group_id, connector, connector_instance_id, source_rail,
 			event_name, source_time_unix_nano, received_time_unix_nano, source_event_digest,
@@ -1168,7 +1191,7 @@ func (tx *CorrelationTx) putEvent(ctx context.Context, event CorrelationEvent) (
 		return true, nil
 	}
 	var logical, connector, instance, rail, eventName, profile string
-	err = tx.tx.QueryRowContext(ctx, `SELECT logical_group_id, connector, connector_instance_id, source_rail,
+	err = tx.tx.QueryRowContext(tx.stmt(ctx), `SELECT logical_group_id, connector, connector_instance_id, source_rail,
 		event_name, profile_version FROM correlation_events WHERE semantic_event_id=?`,
 		string(event.SemanticEventID)).Scan(&logical, &connector, &instance, &rail, &eventName, &profile)
 	if err != nil {
@@ -1201,7 +1224,7 @@ func (tx *CorrelationTx) claimReceipt(
 	var semantic, logical string
 	var deliveries uint64
 	var accepted sql.NullInt64
-	err := tx.tx.QueryRowContext(ctx, `SELECT receipt.semantic_event_id, event.logical_group_id,
+	err := tx.tx.QueryRowContext(tx.stmt(ctx), `SELECT receipt.semantic_event_id, event.logical_group_id,
 		receipt.delivery_count, receipt.accepted_time_unix_nano
 		FROM correlation_receipts receipt JOIN correlation_events event
 			ON event.semantic_event_id=receipt.semantic_event_id
@@ -1209,7 +1232,7 @@ func (tx *CorrelationTx) claimReceipt(
 		AND receipt.fingerprint_sha256=?`, string(event.ConnectorInstanceID), claim.SourceKeyDigest,
 		claim.FingerprintSHA256).Scan(&semantic, &logical, &deliveries, &accepted)
 	if err == nil {
-		updated, updateErr := txExecContextObserved(ctx, tx.tx, "correlation_receipt_replay",
+		updated, updateErr := txExecContextObserved(tx.stmt(ctx), tx.tx, "correlation_receipt_replay",
 			tx.repo.store.sqliteBusyObservabilityV8(), `UPDATE correlation_receipts SET
 			last_received_time_unix_nano=MAX(last_received_time_unix_nano, ?), delivery_count=delivery_count+1,
 			expires_time_unix_nano=MAX(expires_time_unix_nano, ?)
@@ -1235,7 +1258,7 @@ func (tx *CorrelationTx) claimReceipt(
 		return result, fmt.Errorf("audit: query exact correlation receipt: %w", err)
 	}
 	var conflicting string
-	err = tx.tx.QueryRowContext(ctx, `SELECT semantic_event_id FROM correlation_receipts
+	err = tx.tx.QueryRowContext(tx.stmt(ctx), `SELECT semantic_event_id FROM correlation_receipts
 		WHERE connector_instance_id=? AND source_key_digest=? AND fingerprint_sha256<>?
 		ORDER BY first_received_time_unix_nano, semantic_event_id LIMIT 1`,
 		string(event.ConnectorInstanceID), claim.SourceKeyDigest, claim.FingerprintSHA256).Scan(&conflicting)
@@ -1247,7 +1270,7 @@ func (tx *CorrelationTx) claimReceipt(
 		// transaction; it closes the race between a read-only MatchOccurrence
 		// preflight and the authoritative receipt claim.
 		var exists int
-		existsErr := tx.tx.QueryRowContext(ctx, `SELECT 1 FROM correlation_events
+		existsErr := tx.tx.QueryRowContext(tx.stmt(ctx), `SELECT 1 FROM correlation_events
 			WHERE semantic_event_id=?`, string(event.SemanticEventID)).Scan(&exists)
 		if existsErr == nil {
 			fresh, freshErr := NewSemanticEventID()
@@ -1275,7 +1298,7 @@ func (tx *CorrelationTx) insertClaimedReceipt(
 	claim CorrelationReceiptClaim,
 	result CorrelationOccurrenceResult,
 ) error {
-	_, err := txExecContextObserved(ctx, tx.tx, "correlation_receipt_insert",
+	_, err := txExecContextObserved(tx.stmt(ctx), tx.tx, "correlation_receipt_insert",
 		tx.repo.store.sqliteBusyObservabilityV8(), `INSERT INTO correlation_receipts (
 			connector_instance_id, source_key_digest, fingerprint_sha256, semantic_event_id,
 			conflicts_with_semantic_event_id, first_received_time_unix_nano,
@@ -1386,7 +1409,7 @@ func (tx *CorrelationTx) PutObservation(ctx context.Context, observation Correla
 	if err := tx.requireExistingOccurrenceTarget(observation.SemanticEventID, ""); err != nil {
 		return err
 	}
-	return putCorrelationObservationTx(ctx, tx.tx, tx.repo.store, observation)
+	return putCorrelationObservationTx(tx.stmt(ctx), tx.tx, tx.repo.store, observation)
 }
 
 // RecordObservations durably commits metadata for already accepted
@@ -1515,7 +1538,7 @@ func (tx *CorrelationTx) PutIdentifier(ctx context.Context, identifier Correlati
 	id := deterministicCorrelationID("id_", string(identifier.ConnectorInstanceID),
 		identifier.Namespace, string(identifier.Kind), identifier.ValueDigest,
 		string(identifier.SemanticEventID))
-	result, err := txExecContextObserved(ctx, tx.tx, "correlation_identifier_upsert",
+	result, err := txExecContextObserved(tx.stmt(ctx), tx.tx, "correlation_identifier_upsert",
 		tx.repo.store.sqliteBusyObservabilityV8(), `INSERT INTO correlation_identifiers (
 			identifier_id, semantic_event_id, connector_instance_id, namespace, identifier_kind,
 			value_digest, normalized_value, source_field, origin, profile_version, created_time_unix_nano,
@@ -1562,14 +1585,14 @@ func (tx *CorrelationTx) PutRelationship(
 		string(input.ToKind), input.ToID, string(input.Type), string(input.Method), input.RuleID,
 		input.RuleVersion)
 	var previous string
-	switch err := tx.tx.QueryRowContext(ctx, `SELECT status FROM correlation_relationships
+	switch err := tx.tx.QueryRowContext(tx.stmt(ctx), `SELECT status FROM correlation_relationships
 		WHERE relationship_id = ?`, id).Scan(&previous); {
 	case errors.Is(err, sql.ErrNoRows):
 		previous = ""
 	case err != nil:
 		return CorrelationRelationship{}, fmt.Errorf("audit: read correlation relationship: %w", err)
 	}
-	_, err := txExecContextObserved(ctx, tx.tx, "correlation_relationship_upsert",
+	_, err := txExecContextObserved(tx.stmt(ctx), tx.tx, "correlation_relationship_upsert",
 		tx.repo.store.sqliteBusyObservabilityV8(), `INSERT INTO correlation_relationships (
 			relationship_id, from_kind, from_id, to_kind, to_id, relationship_type, method,
 			confidence, rule_id, rule_version, status, created_time_unix_nano,
@@ -1616,7 +1639,7 @@ func (tx *CorrelationTx) PutRelationshipEvidence(
 		evidenceValue = string(evidence.SemanticEventID)
 	}
 	id := deterministicCorrelationID("ev_", evidence.RelationshipID, evidenceValue, string(evidence.Role))
-	_, err := txExecContextObserved(ctx, tx.tx, "correlation_evidence_upsert",
+	_, err := txExecContextObserved(tx.stmt(ctx), tx.tx, "correlation_evidence_upsert",
 		tx.repo.store.sqliteBusyObservabilityV8(), `INSERT INTO correlation_relationship_evidence (
 			evidence_id, relationship_id, evidence_record_id, semantic_event_id, evidence_role,
 			integrity_state, created_time_unix_nano
@@ -1648,7 +1671,7 @@ func (tx *CorrelationTx) RelationshipEvidenceCount(
 		return 0, err
 	}
 	var count int64
-	if err := tx.tx.QueryRowContext(ctx, `SELECT COUNT(*)
+	if err := tx.tx.QueryRowContext(tx.stmt(ctx), `SELECT COUNT(*)
 		FROM correlation_relationship_evidence WHERE relationship_id = ?`,
 		relationshipID).Scan(&count); err != nil {
 		return 0, fmt.Errorf("audit: count correlation relationship evidence: %w", err)
@@ -1682,7 +1705,7 @@ func (tx *CorrelationTx) PutCursor(ctx context.Context, cursor CorrelationCursor
 	if err := validateCursor(cursor); err != nil {
 		return err
 	}
-	result, err := txExecContextObserved(ctx, tx.tx, "correlation_cursor_upsert",
+	result, err := txExecContextObserved(tx.stmt(ctx), tx.tx, "correlation_cursor_upsert",
 		tx.repo.store.sqliteBusyObservabilityV8(), `INSERT INTO correlation_cursors (
 			connector_instance_id, session_id, agent_id, lifecycle_id, execution_id,
 			active_turn_id, active_prompt_id, phase, sequence, root_agent_id, parent_agent_id,
@@ -1732,7 +1755,7 @@ func (tx *CorrelationTx) PutPendingOperation(
 	if err := validatePendingOperation(operation); err != nil {
 		return err
 	}
-	result, err := txExecContextObserved(ctx, tx.tx, "correlation_pending_insert",
+	result, err := txExecContextObserved(tx.stmt(ctx), tx.tx, "correlation_pending_insert",
 		tx.repo.store.sqliteBusyObservabilityV8(), `INSERT INTO correlation_pending_operations (
 			connector_instance_id, operation_namespace, operation_kind, operation_id,
 			operation_type, scope_kind, scope_id, operation_name, session_id, turn_id,
@@ -1759,7 +1782,7 @@ func (tx *CorrelationTx) PutPendingOperation(
 	if inserted == 1 {
 		return nil
 	}
-	existing, err := scanCorrelationPending(tx.tx.QueryRowContext(ctx, correlationPendingSelect+`
+	existing, err := scanCorrelationPending(tx.tx.QueryRowContext(tx.stmt(ctx), correlationPendingSelect+`
 		WHERE connector_instance_id=? AND operation_namespace=? AND operation_kind=?
 		AND operation_id=? AND operation_type=? AND scope_kind=? AND scope_id=?`,
 		string(operation.ConnectorInstanceID), operation.Namespace, string(operation.Kind),
@@ -1772,7 +1795,7 @@ func (tx *CorrelationTx) PutPendingOperation(
 	}
 	if samePendingOperationIdentityContext(existing, operation) {
 		var occurrences, groups int
-		if err := tx.tx.QueryRowContext(ctx, `SELECT COUNT(*), COUNT(DISTINCT logical_group_id)
+		if err := tx.tx.QueryRowContext(tx.stmt(ctx), `SELECT COUNT(*), COUNT(DISTINCT logical_group_id)
 			FROM correlation_events WHERE semantic_event_id IN (?, ?)`,
 			string(existing.StartSemanticEventID), string(operation.StartSemanticEventID)).Scan(
 			&occurrences, &groups,
@@ -1811,7 +1834,7 @@ func (tx *CorrelationTx) ResolvePendingOperation(
 	if terminalAt.IsZero() {
 		terminalAt = time.Now().UTC()
 	}
-	result, err := txExecContextObserved(ctx, tx.tx, "correlation_pending_resolve",
+	result, err := txExecContextObserved(tx.stmt(ctx), tx.tx, "correlation_pending_resolve",
 		tx.repo.store.sqliteBusyObservabilityV8(), `UPDATE correlation_pending_operations SET
 		terminal_semantic_event_id=?, terminal_time_unix_nano=?, status=?, updated_time_unix_nano=?
 		WHERE connector_instance_id=? AND operation_namespace=? AND operation_kind=?
@@ -1830,7 +1853,7 @@ func (tx *CorrelationTx) ResolvePendingOperation(
 		return nil
 	}
 	var exactStatus string
-	err = tx.tx.QueryRowContext(ctx, `SELECT status FROM correlation_pending_operations
+	err = tx.tx.QueryRowContext(tx.stmt(ctx), `SELECT status FROM correlation_pending_operations
 		WHERE connector_instance_id=? AND operation_namespace=? AND operation_kind=?
 		AND operation_id=? AND operation_type=? AND scope_kind=? AND scope_id=?`,
 		string(locator.ConnectorInstanceID), locator.Namespace, string(locator.Kind), locator.OperationID,
@@ -1842,7 +1865,7 @@ func (tx *CorrelationTx) ResolvePendingOperation(
 		return fmt.Errorf("audit: inspect unresolved exact pending operation: %w", err)
 	}
 	var otherScope int
-	err = tx.tx.QueryRowContext(ctx, `SELECT 1 FROM correlation_pending_operations
+	err = tx.tx.QueryRowContext(tx.stmt(ctx), `SELECT 1 FROM correlation_pending_operations
 		WHERE connector_instance_id=? AND operation_namespace=? AND operation_kind=?
 		AND operation_id=? AND operation_type=? AND status='active' LIMIT 1`,
 		string(locator.ConnectorInstanceID), locator.Namespace, string(locator.Kind), locator.OperationID,
@@ -1860,6 +1883,12 @@ func (tx *CorrelationTx) Commit() error {
 	if tx == nil || tx.tx == nil || tx.closed {
 		return errors.New("audit: correlation transaction is closed")
 	}
+	if tx.lease != nil {
+		// Keep the savepoint and wait for the shared transaction.
+		tx.closed = true
+		tx.lease.finished <- true
+		return <-tx.lease.done
+	}
 	err := tx.tx.Commit()
 	tx.finish()
 	if err != nil {
@@ -1870,6 +1899,12 @@ func (tx *CorrelationTx) Commit() error {
 
 func (tx *CorrelationTx) Rollback() error {
 	if tx == nil || tx.closed {
+		return nil
+	}
+	if tx.lease != nil {
+		// Only this occurrence's savepoint is rolled back.
+		tx.closed = true
+		tx.lease.finished <- false
 		return nil
 	}
 	err := tx.tx.Rollback()
