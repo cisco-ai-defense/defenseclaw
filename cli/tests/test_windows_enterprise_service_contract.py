@@ -7007,6 +7007,53 @@ def _function_text(source: str, name: str) -> str:
     return source[start:] if following < 0 else source[start:following]
 
 
+
+def test_untrusted_config_acl_is_refused_before_the_transaction_stops_a_service() -> None:
+    """GAP-0590: an untrusted owner or writer on a managed config path made the
+    standalone ACL drift repair refuse after the transaction had stopped the
+    services, and the rollback refused the same repair, so the gateway,
+    guardian and enumerator stayed stopped with the transaction pending. The
+    transaction now asks the same question read-only before any service
+    changes; the repair after the stop and the rollback keep theirs."""
+
+    module = read(MODULE).replace("\r\n", "\n")
+    transaction = _function_text(module, "New-DefenseClawTransaction")
+    check = transaction.index("-RedactionKeyClass $precheckRedactionKeyClass `\n                -CheckOnly)")
+    assert check < transaction.index("Write-DefenseClawJsonAtomic `\n            -Value $quiescingIntent")
+    assert check < transaction.index("Set-DefenseClawServiceStartMode -Name $name -StartMode 4")
+    assert check < transaction.index("Stop-DefenseClawService -Name $enumeratorServiceName")
+    guard = transaction[transaction.rindex("if (", 0, check) : check]
+    assert "(Test-DefenseClawStandaloneProfile) -and $PriorDeploymentActive" in guard
+    assert "Test-DefenseClawServiceExists -Name $GatewayServiceName" in guard
+    assert transaction.count("Repair-DefenseClawDeploymentAclDrift `") == 3
+    repair = _function_text(module, "Repair-DefenseClawDeploymentAclDrift")
+    assert repair.index("Assert-DefenseClawRepairableConfigAcl -Layout $Layout") < repair.index(
+        "if ($CheckOnly) {"
+    ) < repair.index("Set-DefenseClawRetainedRuntimeAcls")
+    refusal = _function_text(module, "Assert-DefenseClawRepairableConfigAcl")
+    assert "Remove that entry, then run Setup /ensure again." in refusal
+    assert "CONFIG=<the approved config> writes a new config.yaml" in refusal
+
+    # The install-like lifecycle refuses every content path another account
+    # can change before the transaction stops anything, and before Repair
+    # re-stamps those paths in place (Set-DefenseClawManagedAcls).
+    lifecycle = _function_text(module, "Invoke-DefenseClawInstallLikeLifecycle")
+    gate = lifecycle.index("Assert-DefenseClawStandaloneContentTrusted -Layout $Layout")
+    assert gate < lifecycle.index("$snapshot = New-DefenseClawTransaction")
+    assert gate < lifecycle.index("Set-DefenseClawManagedAcls `")
+    assert "if ((Test-DefenseClawStandaloneProfile) -and $priorDeploymentActive) {" in lifecycle[gate - 400 : gate]
+    content = _function_text(module, "Assert-DefenseClawStandaloneContentTrusted")
+    restamped = _function_text(module, "Set-DefenseClawManagedAcls")
+    for path in (
+        "StateRoot", "ConfigDirectory", "GuardianDirectory", "InstallStateDirectory", "ConfigPath", "ManifestPath",
+        "MetadataPath", "AgentApplicationControlAttestationPath", "CodexRequirementsOwnershipPath",
+        "CodexRequirementsAclBackupPath", "ManagedHooksTeardownJournalPath", "CodexMachinePolicyPath",
+        "CodexManagedHooksStatePath",
+    ):
+        assert f"$Layout.{path}" in content and f"$Layout.{path}" in restamped, path
+    assert "$Layout.ManagedHooksLifecycleJournalPath" in content
+    assert "-SelfHealKind" not in content and "Set-DefenseClawPathAcl" not in content
+
 def test_constrained_language_guards_run_before_any_dotnet_use() -> None:
     installer = read(INSTALLER).replace("\r\n", "\n")
     module = read(MODULE).replace("\r\n", "\n")

@@ -5179,21 +5179,6 @@ function Get-DefenseClawPlatformInstallerOwnedRoots {
     return $roots.ToArray()
 }
 
-function Test-DefenseClawPlatformInstallerOwnedPath {
-    param([Parameter(Mandatory)][string]$Path)
-    if ([string]::IsNullOrWhiteSpace($Path)) {
-        return $false
-    }
-    $full = [IO.Path]::GetFullPath($Path).TrimEnd('\')
-    foreach ($root in Get-DefenseClawPlatformInstallerOwnedRoots) {
-        if ([string]::Equals($full, $root, [StringComparison]::OrdinalIgnoreCase) -or
-            $full.StartsWith($root + '\', [StringComparison]::OrdinalIgnoreCase)) {
-            return $true
-        }
-    }
-    return $false
-}
-
 function Test-DefenseClawTrustStrictAncestors {
     $raw = [Environment]::GetEnvironmentVariable(
         $script:TrustStrictAncestorsEnv,
@@ -16666,7 +16651,74 @@ function Assert-DefenseClawRepairableConfigAcl {
                 -IgnoreCreatorTemplates
         }
         catch {
-            throw "refusing ACL repair for untrusted managed config path: $($_.Exception.Message)"
+            throw ("refusing ACL repair for untrusted managed config path: $($_.Exception.Message). " +
+                'Remove that entry, then run Setup /ensure again. For an entry on config.yaml itself, Setup /ensure ' +
+                'CONFIG=<the approved config> writes a new config.yaml from that administrator-only file instead.')
+        }
+    }
+}
+
+function Assert-DefenseClawStandaloneContentTrusted {
+    <#
+        Standalone, read-only, before an install-like lifecycle stops any
+        service. A managed content file or folder that an account other than
+        SYSTEM, Administrators and TrustedInstaller can change is never given
+        a trusted descriptor back in place: its bytes may be that account's,
+        and a handle it opened keeps working after a re-stamp (GAP-0561).
+        Repair used to re-stamp each of these after the stop
+        (Set-DefenseClawManagedAcls), and the config ACL repair refused
+        config.yaml only after the stop, leaving the transaction pending
+        (GAP-0590). Setup writes config.yaml and targets.yaml new from the
+        approved CONFIG= and MANIFEST= before the lifecycle runs; whatever
+        is still drifted here is refused with the services as they were,
+        naming the path, the account and the recovery. Trusted-only drift
+        (missing service rights, an inherited trusted entry) passes for the
+        repair to put back (GAP-0920); an administrator-equivalent owner is
+        left to the readers.
+    #>
+    param([Parameter(Mandatory)][hashtable]$Layout)
+    $adminWriters = @($script:SystemSID, $script:AdministratorsSID, $script:TrustedInstallerSID)
+    $folder = 'Remove that entry, then run Setup /ensure again.'
+    $record = 'Setup does not write this file from an administrator source: remove that entry and check the file, then run Setup /ensure again.'
+    $entries = [Collections.Generic.List[object]]::new()
+    foreach ($path in @($Layout.StateRoot, $Layout.ConfigDirectory, $Layout.GuardianDirectory, $Layout.InstallStateDirectory)) {
+        $entries.Add(@($path, $folder))
+    }
+    $entries.Add(@($Layout.ConfigPath, 'Run Setup /ensure CONFIG=<the approved administrator-only config>: Setup writes a new config.yaml from it.'))
+    $entries.Add(@($Layout.ManifestPath, 'Run Setup /ensure CONFIG=<the approved config>: Setup writes a new targets.yaml enumerated from it (in manifest enrollment mode, add MANIFEST=<the approved administrator-only targets.yaml>).'))
+    $records = @(
+        $Layout.MetadataPath,
+        $Layout.AgentApplicationControlAttestationPath,
+        $Layout.CodexRequirementsOwnershipPath,
+        $Layout.CodexRequirementsAclBackupPath,
+        $Layout.ManagedHooksLifecycleJournalPath,
+        $Layout.ManagedHooksTeardownJournalPath
+    )
+    if ([bool]$Layout.CodexTargetEnabled) {
+        $records += @($Layout.CodexMachinePolicyPath, $Layout.CodexManagedHooksStatePath)
+    }
+    foreach ($path in $records) {
+        $entries.Add(@($path, $record))
+    }
+    foreach ($entry in $entries) {
+        $path = [string]$entry[0]
+        if ([string]::IsNullOrWhiteSpace($path) -or
+            -not (Microsoft.PowerShell.Management\Test-Path -LiteralPath $path)) {
+            continue
+        }
+        $owner = Get-DefenseClawAclOwnerSID -Acl (Microsoft.PowerShell.Security\Get-Acl -LiteralPath $path)
+        try {
+            Assert-DefenseClawPathAcl `
+                -Path $path `
+                -AllowedWriterSIDs $adminWriters `
+                -AllowedOwnerSIDs @($adminWriters + @($owner) | Microsoft.PowerShell.Core\Where-Object { $_ }) `
+                -AllowInheritance `
+                -IgnoreCreatorTemplates
+        }
+        catch {
+            throw ("refusing to change the deployment, and nothing was changed: $($_.Exception.Message). " +
+                'DefenseClaw does not give a file another account could change a trusted access list back in place. ' +
+                [string]$entry[1])
         }
     }
 }
@@ -16685,7 +16737,10 @@ function Repair-DefenseClawDeploymentAclDrift {
     param(
         [Parameter(Mandatory)][hashtable]$Layout,
         [Parameter(Mandatory)][string]$GatewayServiceName,
-        [string]$RedactionKeyClass
+        [string]$RedactionKeyClass,
+        # Read-only: refuse what the repair would refuse, change nothing, and
+        # return whether it would repair (GAP-0590).
+        [switch]$CheckOnly
     )
     $drifted = [string]$RedactionKeyClass -ceq 'trusted_drift'
     if (-not $drifted) {
@@ -16702,6 +16757,9 @@ function Repair-DefenseClawDeploymentAclDrift {
         return $false
     }
     Assert-DefenseClawRepairableConfigAcl -Layout $Layout
+    if ($CheckOnly) {
+        return $true
+    }
     Set-DefenseClawRetainedRuntimeAcls `
         -RuntimeDirectory $Layout.RuntimeDirectory `
         -GatewayServiceSID (Get-DefenseClawServiceSID -ServiceName $GatewayServiceName)
@@ -16889,6 +16947,19 @@ function New-DefenseClawTransaction {
                     -Layout $Layout `
                     -GatewayServiceSID $precheckGatewaySID
             ).preimage_class
+        }
+        if ((Test-DefenseClawStandaloneProfile) -and $PriorDeploymentActive -and
+            (Test-DefenseClawServiceExists -Name $GatewayServiceName)) {
+            # Read-only too: a config path the ACL drift repair below must
+            # refuse is refused with the services as they were. The same
+            # refusal after the stop left the gateway, guardian and enumerator
+            # stopped and the transaction pending, and the rollback refused
+            # the same repair again (GAP-0590).
+            [void](Repair-DefenseClawDeploymentAclDrift `
+                -Layout $Layout `
+                -GatewayServiceName $GatewayServiceName `
+                -RedactionKeyClass $precheckRedactionKeyClass `
+                -CheckOnly)
         }
         # Publish prior service state before the first explicit stop. If this
         # process is terminated after either stop or while copying preimages,
@@ -44432,6 +44503,11 @@ function Invoke-DefenseClawInstallLikeLifecycle {
             -ConfigPath $coworkConfigSource `
             -CoworkPackagePath $CoworkPackagePath -CoworkSignaturePath $CoworkSignaturePath `
             -BeforeAclRepair
+    }
+    if ((Test-DefenseClawStandaloneProfile) -and $priorDeploymentActive) {
+        # Before any service stops: Repair below re-stamps these paths, which
+        # must never re-trust content another account could change (GAP-0590).
+        Assert-DefenseClawStandaloneContentTrusted -Layout $Layout
     }
     $snapshot = New-DefenseClawTransaction `
         -Layout $Layout `
