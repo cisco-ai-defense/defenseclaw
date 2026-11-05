@@ -239,10 +239,14 @@ def _ace(sid: str, mask: int, flags: int = 0) -> tuple[int, int, int, str]:
         ),
         # foreign-hook-env.json: written by the runtime in the locked folder, no OWNER RIGHTS entry.
         ([_ace(ACCOUNT, _M_DC), _ace("S-1-5-18", _FA), _ace("S-1-5-32-544", _FA)], True),
+        # logs\\hook-failures.jsonl: a file the hook created later, inheriting the folder's lock.
+        ([_ace(ACCOUNT, _M_DC, 0x10), _ace("S-1-5-18", _FA, 0x10), _ace("S-1-5-32-544", _FA, 0x10)], True),
         # The profile's own access list (GAP-0069): the account has full control.
         ([_ace("S-1-5-18", _FA, 0x10), _ace("S-1-5-32-544", _FA, 0x10), _ace(ACCOUNT, _FA, 0x10)], False),
+        # The per-user private writer: SYSTEM and OWNER RIGHTS full control.
+        ([_ace("S-1-5-18", _FA), _ace("S-1-3-4", _FA)], False),
     ],
-    ids=["lock-file", "hooks-folder", "foreign-hook-env", "profile-inherited"],
+    ids=["lock-file", "hooks-folder", "foreign-hook-env", "inherited-child", "profile-inherited", "per-user-private"],
 )
 def test_field_lock_is_the_managed_runtime_access_list(entries, locked):
     assert managed_leftovers.field_locked(entries, ACCOUNT) is locked
@@ -258,7 +262,7 @@ def test_managed_custody_reads_the_windows_access_list(tmp_path):
     # One icacls call per file: once OWNER RIGHTS is read-only, a standard
     # account can no longer change the access list.
     grants = {
-        # The profile's access list (icacls /inheritance:r keeps it as explicit entries).
+        # The profile's access list, set as explicit entries.
         plain: [f"{user}:(F)", f"{system}:(F)", f"{administrators}:(F)"],
         # The field lock: the account Modify and a read-only OWNER RIGHTS entry.
         managed: [f"{user}:(M)", f"{system}:(F)", f"{administrators}:(F)", f"{owner_rights}:(RC)"],

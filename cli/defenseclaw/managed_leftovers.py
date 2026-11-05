@@ -150,11 +150,12 @@ def managed_custody(path: str) -> bool:
     if windows_acl_custody_write_error(path, allow_current_user=True) is not None:
         return False
     try:
-        _owner, null_dacl, entries = _windows_acl_snapshot(os.fspath(path))
+        # A null DACL has no entries, so it is never the field lock.
+        _owner, _null_dacl, entries = _windows_acl_snapshot(os.fspath(path))
         account_sid = _windows_current_user_sid()
     except OSError:
         return False
-    return not null_dacl and bool(account_sid) and field_locked(entries, account_sid)
+    return bool(account_sid) and field_locked(entries, account_sid)
 
 
 def _plain_entry(path: str) -> bool:
