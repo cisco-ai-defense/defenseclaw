@@ -175,6 +175,59 @@ func TestManifestCachedDuringTheClientExecIsUsed(t *testing.T) {
 	}
 }
 
+// cowork-1-0-8 GAP-0067, the cause: the helper read the fork event of the
+// client's process after the child exec'd, so that event already carried the
+// client image, its digest and argv; the exec's own event followed for the
+// same pid. With the manifest not cached yet (the first client exec after a
+// gateway start) both were held, and the second hold recorded the first as
+// a replaced exec. The same exec seen twice now waits as one record; a
+// different exec of the pid still records the first.
+func TestClientExecSeenTwiceWaitsAsOneRecord(t *testing.T) {
+	release := sha256.Sum256([]byte("claude release image"))
+	other := sha256.Sum256([]byte("another program"))
+	signed, unsigned := hex.EncodeToString(release[:]), hex.EncodeToString(other[:])
+	const prompt = `/sessions/cwk-v1/.local/bin/claude -p use @modelcontextprotocol/server-filesystem`
+	for _, tc := range []struct {
+		name             string
+		cmdline, digest  string
+		want, duplicates int64
+	}{
+		{"fork read after the exec, then the exec", prompt, signed, 0, 1},
+		{"a later exec of the pid with other arguments", prompt + " again", signed, 1, 0},
+		{"a later exec of the pid with another image", prompt, unsigned, 2, 0},
+	} {
+		t.Run(tc.name, bubbled(func(t *testing.T) {
+			host := newHost(newFake(fullCoverage()))
+			host.coldHold, host.coldPoll = 300*time.Millisecond, 5*time.Millisecond
+			var cached atomic.Bool
+			host.clientChecksums = func(string) ([][32]byte, bool) {
+				if !cached.Load() {
+					return nil, false
+				}
+				return [][32]byte{release}, true
+			}
+			uid := os.Getuid() + 1000
+			at := time.Unix(1_760_000_000, 0)
+			for i, e := range []struct{ cmdline, digest string }{{prompt, signed}, {tc.cmdline, tc.digest}} {
+				host.handle(plane.Event{Kind: plane.KindExec, PID: 500, PPID: 1, Name: "claude", Cmdline: e.cmdline,
+					UID: &uid, At: at.Add(time.Duration(i) * time.Millisecond), ImageVersion: "2.1.317",
+					ImageSHA256: e.digest, ImageDigestState: plane.DigestRead})
+			}
+			time.Sleep(50 * time.Millisecond)
+			cached.Store(true)
+			time.Sleep(2 * host.coldHold)
+			classified, _, _, _ := host.stats()
+			host.mu.Lock()
+			held := len(host.coldClients)
+			host.mu.Unlock()
+			if classified != tc.want || held != 0 || host.clientExecs.duplicates.Load() != tc.duplicates {
+				t.Fatalf("classified=%d held=%d duplicates=%d, want %d, 0, %d",
+					classified, held, host.clientExecs.duplicates.Load(), tc.want, tc.duplicates)
+			}
+		}))
+	}
+}
+
 // A wrapper whose client child is waiting for its image digest waits with
 // it: both are dropped when the signed manifest lists the digest, and both
 // are recorded when the read fails.

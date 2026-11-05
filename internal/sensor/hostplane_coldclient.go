@@ -65,6 +65,16 @@ func (h *hostPlane) holdColdClientLocked(
 	}
 	pid := event.PID
 	if previous := h.coldClients[pid]; previous != nil {
+		if previous.digest != "" && previous.digest == event.ImageSHA256 &&
+			previous.event.ImageVersion == event.ImageVersion && previous.event.Cmdline == event.Cmdline {
+			// The same exec seen twice (GAP-0067): the event of a fork
+			// that the source read after the child exec'd carries the
+			// exec's own image and argv, and the exec's event follows.
+			// One record waits; this one is not made.
+			h.clientExecs.duplicates.Add(1)
+			return previous
+		}
+		h.clientExecs.replaced.Add(1)
 		h.releaseColdClientLocked(pid, previous)
 	}
 	if h.coldClients == nil {
@@ -148,6 +158,10 @@ func (h *hostPlane) releaseColdClientLocked(pid int, held *heldWrapper) {
 type clientExecCounts struct {
 	seen, reported [4]atomic.Int64
 	digestDropped  atomic.Int64
+	// duplicates are client execs seen twice while held (a fork read after
+	// its exec, then the exec); replaced are held records a later held exec
+	// of the same pid recorded.
+	duplicates, replaced atomic.Int64
 }
 
 var digestStateNames = [4]string{"read", "pending", "failed", "unstated"}
@@ -182,5 +196,7 @@ func (c *clientExecCounts) counts() map[string]int64 {
 		put(name+"_reported", c.reported[i].Load())
 	}
 	put("pending_dropped", c.digestDropped.Load())
+	put("held_duplicate", c.duplicates.Load())
+	put("held_replaced", c.replaced.Load())
 	return counts
 }
