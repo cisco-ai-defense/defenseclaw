@@ -234,7 +234,9 @@ var windowsEnterpriseRepairDataDirBeforePlan = func() string {
 	if err != nil || strings.TrimSpace(layout.DataDir) == "" {
 		return ""
 	}
-	repaired, err := managed.EnsureCanonical(layout.DataDir, managed.ObjectRuntimeDirectory, managed.CanonicalOptions{})
+	// The gateway service account is named: this process carries no
+	// service pins, from which the guardian's repair resolves it.
+	repaired, err := managed.EnsureCanonical(layout.DataDir, managed.ObjectRuntimeDirectory, managed.CanonicalOptions{GatewayServiceAccount: layout.ServiceUser})
 	if err != nil || repaired.Outcome != managed.CanonicalRepaired {
 		return ""
 	}
