@@ -5,7 +5,7 @@
 
 import { createHmac } from "node:crypto";
 import { createServer, request, type IncomingMessage, type Server, type ServerResponse } from "node:http";
-import type { AddressInfo } from "node:net";
+import { Socket, type AddressInfo } from "node:net";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import {
   ListenerProofError,
@@ -98,12 +98,15 @@ describe("listener proof (GAP-0594)", () => {
 
     // Another account's process takes the port while the gateway restarts.
     const seen: Seen = { proofs: 0, authorized: [], remotePorts: [] };
+    const others: string[] = [];
     const squatter = createServer((req, res) => {
-      if (req.url === LISTENER_PROOF_PATH) {
+      if (req.url === LISTENER_PROOF_PATH && req.method === "GET") {
         seen.proofs++;
         res.writeHead(401).end();
         return;
       }
+      // Any other request reached the squatter: record it whatever it carries.
+      others.push(`${req.method} ${req.url} auth=${req.headers.authorization ? "yes" : "no"}`);
       if (req.headers.authorization) seen.authorized.push(String(req.headers.authorization));
       res.writeHead(200, { "Content-Type": "application/json" }).end(JSON.stringify({ action: "allow" }));
     });
@@ -116,6 +119,41 @@ describe("listener proof (GAP-0594)", () => {
     await expect(client.buildOutboundHeaders()).rejects.toBeInstanceOf(ListenerProofError);
     expect(seen.proofs).toBe(3);
     expect(seen.authorized).toEqual([]);
+    expect(others).toEqual([]);
+  });
+
+  it("fails a connection that never comes up within the proof bound", async () => {
+    const stalled = new Socket();
+    const started = Date.now();
+    const err = await new Promise<Error | null>((resolve) => {
+      provenCreateConnection("127.0.0.1", 9, TOKEN, () => stalled)({}, (e) => resolve(e));
+    });
+    expect(err).toBeInstanceOf(ListenerProofError);
+    expect(String(err?.message)).toContain("connect timed out");
+    expect(Date.now() - started).toBeLessThan(2_000);
+    expect(stalled.destroyed).toBe(true);
+  });
+
+  it("reports a body cut off mid-response as no answer", async () => {
+    const server = createServer((req, res) => {
+      if (req.url === LISTENER_PROOF_PATH) {
+        const nonce = String(req.headers["x-defenseclaw-listener-nonce"] || "");
+        const proof = createHmac("sha256", TOKEN)
+          .update(`defenseclaw.listener-proof.v1\u0000openclaw\u0000${nonce}`)
+          .digest("hex");
+        res.writeHead(204, { "X-DefenseClaw-Listener-Proof": proof }).end();
+        return;
+      }
+      res.writeHead(200, { "Content-Type": "application/json", "Content-Length": "200" });
+      res.write('{"action":"allow",');
+      setTimeout(() => req.socket.destroy(), 20);
+    });
+    await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+    servers.push(server);
+    const port = (server.address() as AddressInfo).port;
+    const client = new DaemonClient({ baseUrl: `http://127.0.0.1:${port}`, token: TOKEN });
+    const res = await client.postRaw("/api/v1/inspect/tool", { tool: "exec" });
+    expect(res.status).toBe(0);
   });
 
   it("names localhost as the 127.0.0.1 the gateway binds", async () => {

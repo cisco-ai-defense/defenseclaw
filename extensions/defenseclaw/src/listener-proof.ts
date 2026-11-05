@@ -231,9 +231,18 @@ type CreateConnection = (
 /**
  * A node:http createConnection that proves the TCP connection before the
  * request is written on it. node:http uses it only when the request has no
- * agent (agent undefined, not false).
+ * agent (agent undefined, not false). The connect is bounded by
+ * LISTENER_PROOF_TIMEOUT_MS, as the proof is: a listener that never accepts
+ * (a wedged gateway, a full accept queue, a squatter that never calls
+ * accept) fails the request at once instead of after the kernel's connect
+ * timeout of about two minutes. connectImpl is replaceable in tests.
  */
-export function provenCreateConnection(host: string, port: number, token: string): CreateConnection {
+export function provenCreateConnection(
+  host: string,
+  port: number,
+  token: string,
+  connectImpl: (options: { host: string; port: number }) => Socket = netConnect,
+): CreateConnection {
   return (_options, oncreate) => {
     try {
       checkTarget(host, token);
@@ -241,20 +250,35 @@ export function provenCreateConnection(host: string, port: number, token: string
       process.nextTick(() => oncreate(err as Error));
       return undefined;
     }
+    let done = false;
+    const once = (err: Error | null, socket?: Socket) => {
+      if (done) return;
+      done = true;
+      oncreate(err, socket);
+    };
     const address = canonicalLoopbackHost(host);
-    const socket = netConnect({ host: address, port });
+    const socket = connectImpl({ host: address, port });
     const prove = proofOverride
       ? () => proofOverride!(host, port, token)
       : () => proveSocket(socket, address, port, token);
-    const onConnectError = (err: Error) => oncreate(new ListenerProofError(`${notProven(host, port).message}: ${err.message}`));
+    const connectTimer = setTimeout(() => {
+      socket.removeListener("error", onConnectError);
+      socket.destroy();
+      once(new ListenerProofError(`${notProven(host, port).message}: connect timed out`));
+    }, LISTENER_PROOF_TIMEOUT_MS);
+    const onConnectError = (err: Error) => {
+      clearTimeout(connectTimer);
+      once(new ListenerProofError(`${notProven(host, port).message}: ${err.message}`));
+    };
     socket.once("error", onConnectError);
     socket.once("connect", () => {
+      clearTimeout(connectTimer);
       socket.removeListener("error", onConnectError);
       prove().then(
-        () => oncreate(null, socket),
+        () => once(null, socket),
         (err) => {
           socket.destroy();
-          oncreate(err);
+          once(err);
         },
       );
     });
