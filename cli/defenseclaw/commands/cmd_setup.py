@@ -14271,13 +14271,6 @@ def _remove_connector(
         ux.echo(f"  ✓ Remaining connector(s): {', '.join(sorted(remaining))}")
     else:
         ux.echo("  ✓ No connectors configured — DefenseClaw enforces nothing until you run `setup` again.")
-    if normalize_connector(match) == "claudecode":
-        from defenseclaw import cowork
-
-        # The Cowork plugin runs this connector's hook, which the teardown
-        # retires, and only the user can remove an account plugin.
-        if os.path.exists(cowork.state_path(str(cfg.data_dir))):
-            ux.warn("Cowork is no longer protected; remove the DefenseClaw plugin in Claude (Customize > Plugins)")
 
     if restart:
         click.echo()
@@ -14327,6 +14320,17 @@ def _remove_connector(
                 "  --no-restart: config updated, but the removed connector's hooks are "
                 "still installed until you restart defenseclaw-gateway."
             )
+
+    if normalize_connector(match) == "claudecode":
+        from defenseclaw import cowork
+
+        # The Cowork plugin runs this connector's hook, which the teardown
+        # retires, and only the user can remove an account plugin. Printed
+        # after the restart: on Windows a failed restart rolls the removal
+        # back, and Cowork is then still protected (cowork audit S5).
+        if os.path.exists(cowork.state_path(str(cfg.data_dir))):
+            click.echo()
+            ux.warn("Cowork is no longer protected; remove the DefenseClaw plugin in Claude (Customize > Plugins)")
 
     remaining_label = ",".join(sorted(remaining)) if remaining else "(none)"
     _log_setup_action(
