@@ -73,7 +73,7 @@ func TestPendingClientDigestIsAwaited(t *testing.T) {
 		{"client starts a positional server", `claude @modelcontextprotocol/server-filesystem /w`,
 			plane.DigestPending, nil, false, false, false, false, true, 1, 0},
 	} {
-		t.Run(tc.name, func(t *testing.T) {
+		t.Run(tc.name, bubbled(func(t *testing.T) {
 			host := newHost(newFake(fullCoverage()))
 			host.coldHold, host.coldPoll = 80*time.Millisecond, 5*time.Millisecond
 			host.indicators.KeepClientMCP = tc.keepClientMCP
@@ -128,7 +128,50 @@ func TestPendingClientDigestIsAwaited(t *testing.T) {
 			if dropped := host.clientExecs.digestDropped.Load(); dropped != tc.dropped {
 				t.Fatalf("pending records dropped = %d, want %d", dropped, tc.dropped)
 			}
-		})
+		}))
+	}
+}
+
+// cowork-1-0-8 GAP-0067 as the live run named it: the first client exec
+// after a gateway start carries its digest (state read), the release
+// manifest is not cached when the exec is classified, and the fetch that
+// lookup started ends before the hold is taken. The client is then decided
+// with the manifest now cached, not recorded because it was not cached a
+// moment earlier.
+func TestManifestCachedDuringTheClientExecIsUsed(t *testing.T) {
+	release := sha256.Sum256([]byte("claude release image"))
+	other := sha256.Sum256([]byte("another program"))
+	const prompt = `/sessions/cwk-v1/.local/bin/claude -p use @modelcontextprotocol/server-filesystem`
+	for _, tc := range []struct {
+		name   string
+		digest [32]byte
+		want   int64
+	}{
+		{"manifest lists the image", release, 0},
+		{"manifest does not list the image", other, 1},
+	} {
+		t.Run(tc.name, bubbled(func(t *testing.T) {
+			host := newHost(newFake(fullCoverage()))
+			host.coldHold, host.coldPoll = time.Hour, time.Hour
+			var lookups atomic.Int64
+			host.clientChecksums = func(string) ([][32]byte, bool) {
+				// The first lookup starts the fetch; it is in by the next.
+				if lookups.Add(1) == 1 {
+					return nil, false
+				}
+				return [][32]byte{release}, true
+			}
+			uid := os.Getuid() + 1000
+			host.handle(plane.Event{Kind: plane.KindExec, PID: 500, PPID: 1, Name: "claude", Cmdline: prompt, UID: &uid,
+				ImageVersion: "2.1.317", ImageSHA256: hex.EncodeToString(tc.digest[:]), ImageDigestState: plane.DigestRead})
+			classified, _, _, _ := host.stats()
+			host.mu.Lock()
+			held := len(host.coldClients)
+			host.mu.Unlock()
+			if classified != tc.want || held != 0 {
+				t.Fatalf("classified=%d held=%d right after the exec, want %d and 0", classified, held, tc.want)
+			}
+		}))
 	}
 }
 
@@ -149,7 +192,7 @@ func TestWrapperOfAPendingClientWaitsForItsDigest(t *testing.T) {
 		// The wrapper, its fork and the client.
 		{"read failed", plane.DigestFailed, "", 3},
 	} {
-		t.Run(tc.name, func(t *testing.T) {
+		t.Run(tc.name, bubbled(func(t *testing.T) {
 			host := newHost(newFake(fullCoverage()))
 			host.wrapperHold = 20 * time.Millisecond
 			host.coldHold, host.coldPoll = 300*time.Millisecond, 5*time.Millisecond
@@ -181,7 +224,7 @@ func TestWrapperOfAPendingClientWaitsForItsDigest(t *testing.T) {
 				t.Fatalf("classified=%d held wrappers=%d cold=%d linked=%d, want %d and 0, 0, 0",
 					classified, wrappers, cold, linked, tc.want)
 			}
-		})
+		}))
 	}
 }
 

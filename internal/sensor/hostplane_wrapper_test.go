@@ -300,7 +300,7 @@ func TestTetragonWrapperIsMatchedByItsInstalledImage(t *testing.T) {
 			{pid: child, ppid: wrapper, exe: exe, cmdline: client, digest: signed, source: tg},
 		}, 2},
 	} {
-		t.Run(tc.name, func(t *testing.T) {
+		t.Run(tc.name, bubbled(func(t *testing.T) {
 			host := newHost(newFake(fullCoverage()))
 			host.wrapperHold = 30 * time.Millisecond
 			host.coldHold = 0
@@ -331,7 +331,7 @@ func TestTetragonWrapperIsMatchedByItsInstalledImage(t *testing.T) {
 			if classified != tc.want || held != 0 || linked != 0 {
 				t.Fatalf("classified=%d held=%d linked=%d, want %d and 0, 0", classified, held, linked, tc.want)
 			}
-		})
+		}))
 	}
 }
 

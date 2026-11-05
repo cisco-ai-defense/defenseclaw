@@ -50,12 +50,13 @@ func (h *hostPlane) holdColdClientLocked(
 		len(h.coldClients) >= maxHeldWrappers {
 		return nil
 	}
-	switch {
-	case event.ImageSHA256 != "":
-		if _, cached := h.clientChecksums(event.ImageVersion); cached {
-			return nil
-		}
-	case event.ImageDigestState != plane.DigestPending:
+	// An exec with a digest is held even when the manifest is cached by
+	// now: the fetch the classification's lookup started can end before
+	// this runs, and returning here recorded the very client that cached
+	// manifest verifies (GAP-0067: the first client exec after a gateway
+	// start, digest read, recorded). The caller decides such a hold at once
+	// with settleColdClientLocked.
+	if event.ImageSHA256 == "" && event.ImageDigestState != plane.DigestPending {
 		return nil
 	}
 	observation.ClaudeClient = true

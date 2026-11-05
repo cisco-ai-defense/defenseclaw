@@ -439,6 +439,10 @@ func (h *hostPlane) handle(event plane.Event) {
 		h.recordLocked(event, lineage, match, at, instance)
 	case held.level() > 0:
 		h.holdWrapperLocked(held)
+	default:
+		// A client hold whose manifest came in since the lookup above is
+		// decided now, with the wrappers just linked to it.
+		h.settleColdClientLocked(event.PID, held, false)
 	}
 }
 
