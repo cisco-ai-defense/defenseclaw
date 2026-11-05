@@ -68,6 +68,7 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/redaction"
 	"github.com/defenseclaw/defenseclaw/internal/routing"
 	"github.com/defenseclaw/defenseclaw/internal/safefile"
+	"github.com/defenseclaw/defenseclaw/internal/scanner"
 	"github.com/defenseclaw/defenseclaw/internal/sensor"
 	"github.com/defenseclaw/defenseclaw/internal/version"
 	"github.com/defenseclaw/defenseclaw/internal/watcher"
@@ -103,6 +104,9 @@ type Sidecar struct {
 	// hookMCP are the MCP servers the hooks of a managed Linux or macOS
 	// gateway report, which its install watcher admits (GAP-2591).
 	hookMCP hookReportedMCPServers
+	// mcpTools joins scanner listings and authenticated hook observations to
+	// currently configured server IDs for managed inventory publication.
+	mcpTools mcpToolInventory
 
 	startedAt  time.Time
 	cfg        *config.Config
@@ -594,6 +598,10 @@ func NewSidecar(cfg *config.Config, store *audit.Store, logger *audit.Logger) (*
 		judgeBodiesReadyPending: judgeBodiesReadyPending,
 		judgeBodiesReadyDetails: judgeBodiesReadyDetails,
 	}
+	sidecar.mcpTools.metric = func(ctx context.Context, stage, outcome, reason string) {
+		runtime, _ := sidecar.observabilityV8LifecycleRuntime().(hookLifecycleMetricV8Runtime)
+		recordMCPToolInventoryMetric(ctx, runtime, stage, outcome, reason)
+	}
 	// Commit the already-validated cold-start policy candidate only after every
 	// fallible constructor has succeeded. A rejected candidate must leave the
 	// process-global scanners unchanged, and must not publish a rule pack to
@@ -1082,7 +1090,7 @@ func (s *Sidecar) Run(ctx context.Context) (runErr error) {
 			snapshotFn = discovery.Snapshot
 		}
 		inventoryEmit := makeEndpointInventoryEmitter(
-			s.currentConfig(), s.observabilityV8Emitter(), snapshotFn, s.inventoryPublish,
+			s.currentConfig(), s.observabilityV8Emitter(), snapshotFn, s.inventoryPublish, &s.mcpTools,
 		)
 		if discovery != nil {
 			discovery.SetManagedInventoryEmitHook(inventoryEmit)
@@ -2606,7 +2614,7 @@ func (s *Sidecar) applyConfigReloadSnapshot(
 			snapshotFn = svc.Snapshot
 		}
 		inventoryEmit := makeEndpointInventoryEmitter(
-			s.currentConfig(), s.observabilityV8Emitter(), snapshotFn, s.inventoryPublish,
+			s.currentConfig(), s.observabilityV8Emitter(), snapshotFn, s.inventoryPublish, &s.mcpTools,
 		)
 		if svc != nil {
 			svc.SetManagedInventoryEmitHook(inventoryEmit)
@@ -4359,6 +4367,33 @@ func (s *Sidecar) runWatcherOnce(ctx context.Context) (restart bool, err error) 
 	}
 	w := watcher.New(s.currentConfig(), skillDirs, pluginDirs, s.store, s.logger, nil, func(r watcher.AdmissionResult) {
 		s.handleAdmissionResult(r)
+	})
+	w.SetMCPToolObserver(func(ctx context.Context, connectorName, serverName string, result *scanner.ScanResult, scanErr error) {
+		cfg := s.currentConfig()
+		if cfg == nil || !managed.IsManagedEnterprise(cfg.DeploymentMode) {
+			return
+		}
+		// Managed inventory publication refreshes parent identities on startup
+		// and on config changes; avoid re-reading every connector on each scan.
+		if scanErr != nil || result == nil || result.MCPAdvertisedTools == nil {
+			s.mcpTools.recordListingFailure(connectorName, serverName)
+			if scanErr != nil || result == nil {
+				s.mcpTools.recordMetric(ctx, "list", "error", "scan_failed")
+			} else {
+				s.mcpTools.recordMetric(ctx, "list", "partial", "incomplete")
+			}
+			return
+		}
+		s.mcpTools.recordAdvertised(connectorName, serverName, result.MCPAdvertisedTools, result.Timestamp, result.MCPToolListPartial)
+		outcome := "success"
+		if len(result.MCPAdvertisedTools) == 0 {
+			outcome = "empty"
+		}
+		reason := "none"
+		if result.MCPToolListPartial {
+			outcome, reason = "partial", "incomplete"
+		}
+		s.mcpTools.recordMetric(ctx, "list", outcome, reason)
 	})
 	if enrolled != nil {
 		// A folder that appeared since the previous watcher (a user made
@@ -8765,6 +8800,7 @@ func (s *Sidecar) runAPI(ctx context.Context) error {
 	}
 	api.projectSkills = &s.projectSkills
 	api.hookMCP = &s.hookMCP
+	api.mcpTools = &s.mcpTools
 	s.setAPIServer(api)
 	defer s.setAPIServer(nil)
 	if set := api.guardrailProfileSet(); set != nil {

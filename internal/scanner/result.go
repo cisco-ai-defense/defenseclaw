@@ -167,6 +167,10 @@ type ScanResult struct {
 	// gateway scan reports the skip (GAP-2621). Process-local, never part of
 	// scanner JSON.
 	Warnings []string `json:"-"`
+	// MCPAdvertisedTools contains bounded names returned by tools/list, even
+	// when the analyzer reports no findings. It is never raw scan evidence.
+	MCPAdvertisedTools []string `json:"-"`
+	MCPToolListPartial bool     `json:"-"`
 }
 
 // EffectiveTargetType returns TargetType when set, otherwise InferTargetType(Scanner).
