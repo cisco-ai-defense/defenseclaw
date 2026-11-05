@@ -599,15 +599,17 @@ func TestCodexRequirementsAdminConflictIsTypedAndReadOnly(t *testing.T) {
 		want string
 		cfg  func() map[string]interface{}
 	}{
-		{"allow_managed_hooks_only=false conflicts with required DefenseClaw managed-hook isolation",
-			func() map[string]interface{} { return map[string]interface{}{"allow_managed_hooks_only": false} }},
 		{"features.hooks=false conflicts with required DefenseClaw managed hooks",
 			func() map[string]interface{} {
 				return map[string]interface{}{"features": map[string]interface{}{"hooks": false}}
 			}},
-		{"hooks.state is not valid in DefenseClaw managed requirements",
+		// features.hooks=false wins over the other isolation controls.
+		{"features.hooks=false conflicts with required DefenseClaw managed hooks",
 			func() map[string]interface{} {
-				return map[string]interface{}{"hooks": map[string]interface{}{"state": map[string]interface{}{}}}
+				return map[string]interface{}{
+					"allow_managed_hooks_only": false,
+					"features":                 map[string]interface{}{"hooks": false},
+				}
 			}},
 	}
 	layout := windowsCodexMachineLayout(testWindowsCodexMachineOptions())
@@ -623,6 +625,25 @@ func TestCodexRequirementsAdminConflictIsTypedAndReadOnly(t *testing.T) {
 		}
 		if err := layout.reconcile(tc.cfg()); !errors.Is(err, ErrCodexRequirementsAdminConflict) || err.Error() != tc.want {
 			t.Fatalf("reconcile = %v, want typed %q", err, tc.want)
+		}
+	}
+	// Codex still runs DefenseClaw's hooks with these, so they keep refusing
+	// with their untyped errors.
+	for _, tc := range []struct {
+		want string
+		cfg  map[string]interface{}
+	}{
+		{"allow_managed_hooks_only=false conflicts with required DefenseClaw managed-hook isolation",
+			map[string]interface{}{"allow_managed_hooks_only": false}},
+		{"hooks.state is not valid in DefenseClaw managed requirements",
+			map[string]interface{}{"hooks": map[string]interface{}{"state": map[string]interface{}{}}}},
+	} {
+		if err := codexRequirementsAdminConflict(tc.cfg); err != nil {
+			t.Fatalf("%q is not a skippable administrator conflict: %v", tc.want, err)
+		}
+		err := layout.reconcile(tc.cfg)
+		if err == nil || errors.Is(err, ErrCodexRequirementsAdminConflict) || err.Error() != tc.want {
+			t.Fatalf("reconcile = %v, want the untyped refusal %q", err, tc.want)
 		}
 	}
 	allowed := map[string]interface{}{

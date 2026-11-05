@@ -16,7 +16,7 @@ import (
 // as an unregistered account, which Secure Client delivers open, with the
 // setting in the reason. Any other inactive or active registry is unchanged.
 func TestWindowsCodexAdminConflictRuntimeErrorIsUnregisteredAndNamed(t *testing.T) {
-	conflict := "allow_managed_hooks_only=false conflicts with required DefenseClaw managed-hook isolation"
+	conflict := "features.hooks=false conflicts with required DefenseClaw managed hooks"
 	err := windowsCodexAdminConflictRuntimeError(connector.WindowsCodexManagedRuntimeRegistry{
 		AdminConflict: conflict,
 	})
