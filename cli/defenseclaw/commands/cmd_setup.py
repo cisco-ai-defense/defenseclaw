@@ -6141,8 +6141,15 @@ def _connector_contract_upgrade_guidance(
     key = normalize_connector(connector)
     rerun = rerun or f"defenseclaw setup {'claude-code' if key == 'claudecode' else key}"
     if key == "opencode":
+        # V1 (opencode-ai) and V2 install the same `opencode` command, so npm
+        # refuses V2 beside an npm-installed V1 (GAP-0053).
+        remove_v1 = (
+            "Remove OpenCode V1 first: 'npm uninstall -g opencode-ai' (with the same --prefix if you gave one). "
+            if normalized_version.split(".", 1)[0] == "1"
+            else ""
+        )
         return (
-            f"Install OpenCode V2 with 'npm install -g @opencode/cli@2' (where you cannot write npm's global "
+            f"{remove_v1}Install OpenCode V2 with 'npm install -g @opencode/cli@2' (where you cannot write npm's global "
             "prefix, for your account: 'npm install -g --prefix ~/.npm-global @opencode/cli@2', with "
             f"~/.npm-global/bin first on PATH), then run: {rerun}."
         )
@@ -6685,7 +6692,12 @@ def _refuse_opencode_v1_before_questions(app: AppContext) -> None:
     raw = (getattr(signal, "version", "") or "").strip() if signal is not None else ""
     if signal is None or not signal.installed or not raw or not opencode_requires_v2_upgrade(raw):
         return
-    ux.err(_opencode_v2_required(raw.rstrip("."), _connector_contract_upgrade_guidance("opencode", "OpenCode")))
+    ux.err(
+        _opencode_v2_required(
+            raw.rstrip("."),
+            _connector_contract_upgrade_guidance("opencode", "OpenCode", normalize_agent_version(raw)),
+        )
+    )
     raise click.ClickException("OpenCode setup stopped before any change; nothing was changed")
 
 
@@ -16382,8 +16394,8 @@ def _preflight_opencode_plugin_folder() -> None:
 
     if loose := opencode_writable_plugin_folder(connector_config_files("opencode")[:1]):
         raise click.ClickException(
-            f"OpenCode plugin folder {loose} is group/other writable; "
-            f"run `chmod go-w {shlex.quote(loose)}` and retry setup. No changes made."
+            f"OpenCode plugin folder {loose} is group/other writable, and the group is not your own private "
+            f"group; run `chmod go-w {shlex.quote(loose)}` and retry setup. No changes made."
         )
 
 
@@ -16485,8 +16497,13 @@ def _restart_services(
         # wait, so that wait sees the plugin the restarted server loads.
         from defenseclaw import opencode_service
 
+        opencode_binary = opencode_service.account_binary(data_dir)
+        if not teardown:
+            # Its default port is shared by every account on a computer
+            # (GAP-0053); set before the restart so the server moves now.
+            opencode_service.report_port(opencode_service.ensure_account_port(opencode_binary))
         opencode_service.report(
-            opencode_service.restart_if_running(opencode_service.account_binary(data_dir)),
+            opencode_service.restart_if_running(opencode_binary),
             what="runs the plugin as it is now",
         )
 

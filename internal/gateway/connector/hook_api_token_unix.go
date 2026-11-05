@@ -54,11 +54,20 @@ func hookAPIValidateOwner(path string, info os.FileInfo) error {
 }
 
 func hookAPIValidateDirectory(path string) error {
+	return hookAPIValidateDirectoryWith(path, false)
+}
+
+// hookAPIValidateDirectoryWith is hookAPIValidateDirectory. With
+// ownerPrivateGroupOK set, a folder its owner's own private group can write
+// passes (ownerPrivateGroup); write for any other group or for everyone does
+// not. Only agent plugin folders ask for it (GAP-0053); hook token and data
+// folders keep the strict rule.
+func hookAPIValidateDirectoryWith(path string, ownerPrivateGroupOK bool) error {
 	if !filepath.IsAbs(path) {
 		return fmt.Errorf("hook API token directory must be absolute: %q", path)
 	}
 	clean := filepath.Clean(path)
-	if err := hookAPIValidateDirectoryChain(clean); err != nil {
+	if err := hookAPIValidateDirectoryChain(clean, ownerPrivateGroupOK); err != nil {
 		return err
 	}
 	resolved, err := filepath.EvalSymlinks(clean)
@@ -66,7 +75,7 @@ func hookAPIValidateDirectory(path string) error {
 		return err
 	}
 	if resolved != clean {
-		return hookAPIValidateDirectoryChain(resolved)
+		return hookAPIValidateDirectoryChain(resolved, ownerPrivateGroupOK)
 	}
 	return nil
 }
@@ -85,7 +94,7 @@ func hookAPIValidateDirectoryElement(path string) error {
 	if !info.IsDir() {
 		return fmt.Errorf("expected directory: %s", path)
 	}
-	return hookAPIValidateDirectoryMetadata(path, info, false, false)
+	return hookAPIValidateDirectoryMetadata(path, info, false, false, false)
 }
 
 // hookAPIValidateDirectoryChain walks every ancestor of clean. Ancestors inside
@@ -94,7 +103,7 @@ func hookAPIValidateDirectoryElement(path string) error {
 // directories live below it, so drift there must not stop the gateway from
 // binding its hook API. The named directory, every ancestor outside that tree,
 // and every structural failure anywhere stay fatal.
-func hookAPIValidateDirectoryChain(clean string) error {
+func hookAPIValidateDirectoryChain(clean string, ownerPrivateGroupOK bool) error {
 	for cur := clean; ; cur = filepath.Dir(cur) {
 		advisory := cur != clean && managed.AdvisoryAncestorPath(cur)
 		info, err := os.Lstat(cur)
@@ -120,7 +129,7 @@ func hookAPIValidateDirectoryChain(clean string) error {
 		if !info.IsDir() {
 			return fmt.Errorf("expected directory: %s", cur)
 		}
-		if err := hookAPIValidateDirectoryMetadata(cur, info, cur != clean, advisory); err != nil {
+		if err := hookAPIValidateDirectoryMetadata(cur, info, cur != clean, advisory, ownerPrivateGroupOK); err != nil {
 			return err
 		}
 		if cur == filepath.Dir(cur) {
@@ -158,14 +167,20 @@ func hookAPITrustedSystemSymlink(path string, info os.FileInfo) bool {
 // hookAPIValidateDirectoryMetadata judges one element. With advisory set, the
 // mode, owner, and ACL verdicts become TrustAdvisoryMarker warnings; failures to
 // inspect the element at all stay fatal, as does an ACL helper that could not
-// read or parse the ACL (only its judgements are tagged as downgradable).
-func hookAPIValidateDirectoryMetadata(path string, info os.FileInfo, allowStickyAncestor, advisory bool) error {
+// read or parse the ACL (only its judgements are tagged as downgradable). With
+// ownerPrivateGroupOK set, group write by the owner's own private group is
+// not counted (see hookAPIValidateDirectoryWith).
+func hookAPIValidateDirectoryMetadata(path string, info os.FileInfo, allowStickyAncestor, advisory, ownerPrivateGroupOK bool) error {
 	stat, ok := info.Sys().(*syscall.Stat_t)
 	if !ok {
 		return fmt.Errorf("cannot inspect directory owner: %s", path)
 	}
 	const label = "hook API token path"
-	if mode := info.Mode().Perm(); mode&0o022 != 0 &&
+	mode := info.Mode().Perm()
+	if ownerPrivateGroupOK && mode&0o022 == 0o020 && ownerPrivateGroup(path, info) {
+		mode &^= 0o020
+	}
+	if mode&0o022 != 0 &&
 		((!(allowStickyAncestor) || info.Mode()&os.ModeSticky == 0) || stat.Uid != 0) {
 		if err := managed.RelaxAncestorTrustVerdict(advisory, path, label, fmt.Errorf(
 			"%s has group/other writable mode %04o", path, mode,
@@ -225,7 +240,8 @@ func hookAPIValidateOwnerFor(path string, info os.FileInfo, _ string) error {
 }
 
 // hookAPIValidateDirectoryFor matches the Windows signature (see
-// hookAPIValidateOwnerFor).
+// hookAPIValidateOwnerFor). It checks agent plugin folders only, so a folder
+// of the owner's own private group passes (GAP-0053).
 func hookAPIValidateDirectoryFor(path, _ string) error {
-	return hookAPIValidateDirectory(path)
+	return hookAPIValidateDirectoryWith(path, true)
 }

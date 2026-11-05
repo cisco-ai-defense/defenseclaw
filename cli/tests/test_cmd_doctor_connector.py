@@ -2569,7 +2569,10 @@ class TestCheckHookHealth(unittest.TestCase):
     def test_opencode_group_writable_plugin_folder_is_named_with_a_fix(self) -> None:
         # Ubuntu's umask 002 left ~/.config/opencode/plugins at 0775; the
         # gateway would not start and doctor only said the hook file is missing.
-        with tempfile.TemporaryDirectory() as tmp, patch.dict(os.environ, {"HOME": tmp}):
+        # A shared group: the runner's own group may be its private group (GAP-0053).
+        with tempfile.TemporaryDirectory() as tmp, patch.dict(os.environ, {"HOME": tmp}), patch(
+            "defenseclaw.connector_paths.owner_private_group", return_value=False
+        ):
             plugins = Path(tmp) / ".config" / "opencode" / "plugins"
             plugins.mkdir(parents=True)
             plugins.chmod(0o775)
