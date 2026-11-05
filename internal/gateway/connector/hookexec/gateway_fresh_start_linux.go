@@ -12,6 +12,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -32,6 +33,53 @@ const perUserFreshGatewayWindow = 12 * time.Second
 func PerUserGatewayFreshStartNoAnswer(dataDir string, peer *PerUserPeerRecord) bool {
 	current, ok := verifiedFreshGatewayPeer(dataDir, peer)
 	if !ok {
+		return false
+	}
+	answered, valid := perUserGatewayAnswerSeen(dataDir, current)
+	return valid && !answered
+}
+
+// perUserGatewayRecentlyStarted is the cheap first look of the native hook
+// (one lstat per call): this account's gateway record was written within
+// the fresh-start window, so a gateway may have started moments ago.
+func perUserGatewayRecentlyStarted(dataDir string) bool {
+	if dataDir == "" || !filepath.IsAbs(dataDir) {
+		return false
+	}
+	info, err := os.Lstat(filepath.Join(dataDir, "gateway.pid"))
+	if err != nil || !info.Mode().IsRegular() {
+		return false
+	}
+	age := time.Since(info.ModTime())
+	return age > -2*time.Second && age <= perUserFreshGatewayWindow+2*time.Second
+}
+
+// perUserFreshGatewayHoldsCall is the native hook's restart-window proof
+// (rel-1-0-6 GAP-0295): the server end of the call's proven connection
+// (check) is held by the gateway this account's record names, that process
+// started within perUserFreshGatewayWindow (kernel start time, executable and
+// start identity all match the record), and it has completed no hook answer
+// yet. A gateway that answered any call, an old gateway, an unknown holder
+// and an unreadable record are no proof.
+func perUserFreshGatewayHoldsCall(dataDir string, check *perUserPeerCheck) bool {
+	if check == nil {
+		return false
+	}
+	ends := check.ends.Load()
+	if ends == nil {
+		return false
+	}
+	client, okc := ends.local.(*net.TCPAddr)
+	server, oks := ends.remote.(*net.TCPAddr)
+	if !okc || !oks {
+		return false
+	}
+	current, ok := freshGatewayFromRecord(dataDir)
+	if !ok || !perUserProcessHoldsConnection(current.pid, client, server) {
+		return false
+	}
+	// The pid was not reused while its files were read.
+	if identity, ok := procidentity.Of(current.pid); !ok || identity != current.identity {
 		return false
 	}
 	answered, valid := perUserGatewayAnswerSeen(dataDir, current)

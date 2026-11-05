@@ -13,3 +13,9 @@ func PerUserGatewayRecordLocalAnswer(string) error { return nil }
 
 // PerUserGatewayRecordObservedAnswer has no fresh-start window on other platforms.
 func PerUserGatewayRecordObservedAnswer(string, *PerUserPeerRecord) {}
+
+// perUserGatewayRecentlyStarted has no fresh-start window on other platforms.
+func perUserGatewayRecentlyStarted(string) bool { return false }
+
+// perUserFreshGatewayHoldsCall has no fresh-start window on other platforms.
+func perUserFreshGatewayHoldsCall(string, *perUserPeerCheck) bool { return false }
