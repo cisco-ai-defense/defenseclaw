@@ -73,7 +73,7 @@ func TestVerifyRuntimeHashesTheFilesInParallel(t *testing.T) {
 		mu.Unlock()
 		return previousHash(path)
 	}
-	if err := verifyRuntime(dir, archive, archive.Size(), true); err != nil {
+	if err := verifyRuntime(dir, archive, archive.Size(), true, nil); err != nil {
 		t.Fatalf("verify an untouched tree: %v", err)
 	}
 	if peak.Load() < 2 {
@@ -103,13 +103,50 @@ func TestVerifyRuntimeNamesTheFirstChangedFileInArchiveOrder(t *testing.T) {
 		}
 	}
 	for range 50 {
-		err := verifyRuntime(dir, archive, archive.Size(), true)
+		err := verifyRuntime(dir, archive, archive.Size(), true, nil)
 		if err == nil || !strings.Contains(err.Error(), names[5]) {
 			t.Fatalf("want the error for %s, got %v", names[5], err)
 		}
 	}
 	// The size-only check (status, verify) is unchanged: it hashes nothing.
-	if err := verifyRuntime(dir, archive, archive.Size(), false); err != nil {
+	if err := verifyRuntime(dir, archive, archive.Size(), false, nil); err != nil {
 		t.Fatalf("the size-only check failed on same-size files: %v", err)
+	}
+}
+
+// GAP-0044: prepare compares each unpacked file with the entry digest the
+// build embedded instead of inflating the entry; an entry the list does not
+// name is still inflated and hashed.
+func TestVerifyRuntimeUsesTheEmbeddedEntryDigests(t *testing.T) {
+	dir, archive, names := unpackedTestRuntime(t, 6)
+	digests := map[string][sha256.Size]byte{}
+	for _, name := range names[1:] {
+		body, err := os.ReadFile(filepath.Join(dir, filepath.FromSlash(name)))
+		if err != nil {
+			t.Fatal(err)
+		}
+		digests[name] = sha256.Sum256(body)
+	}
+	if err := verifyRuntime(dir, archive, archive.Size(), true, digests); err != nil {
+		t.Fatalf("verify with the embedded digests: %v", err)
+	}
+	// The listed digest is what is compared: one that names other bytes
+	// fails an untouched file the archive itself would pass.
+	digests[names[3]] = sha256.Sum256([]byte("other bytes"))
+	if err := verifyRuntime(dir, archive, archive.Size(), true, digests); err == nil || !strings.Contains(err.Error(), names[3]) {
+		t.Fatalf("a listed digest of other bytes passed: %v", err)
+	}
+	delete(digests, names[3])
+	path := filepath.Join(dir, filepath.FromSlash(names[0]))
+	body, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	body[0] = byte(0x79)
+	if err := os.WriteFile(path, body, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := verifyRuntime(dir, archive, archive.Size(), true, digests); err == nil || !strings.Contains(err.Error(), names[0]) {
+		t.Fatalf("a changed file the list does not name passed: %v", err)
 	}
 }
