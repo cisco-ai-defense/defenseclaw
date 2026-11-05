@@ -14,6 +14,7 @@ import (
 
 	"github.com/defenseclaw/defenseclaw/internal/config"
 	"github.com/defenseclaw/defenseclaw/internal/daemon"
+	"github.com/defenseclaw/defenseclaw/internal/safefile"
 )
 
 // A listener this home did not start (a gateway leaked by another home or
@@ -243,8 +244,13 @@ func TestForeignGatewayListenerAcceptsThisHomesGatewayRunByAnotherAccount(t *tes
 
 	gatewayManagedState = func() (bool, int) { return true, 36347 }
 	record := filepath.Join(c.DataDir, "gateway-api.json")
+	// Published as the gateway publishes it: 0600 on POSIX, an owner-only
+	// protected DACL on Windows (safefile.ProtectFile).
 	publish := func(body string) {
 		if err := os.WriteFile(record, []byte(body), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		if err := safefile.ProtectFile(record); err != nil {
 			t.Fatal(err)
 		}
 	}
