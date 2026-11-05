@@ -588,11 +588,10 @@ func (l codexMachineRequirementsLayout) groupMatches(raw interface{}, expected c
 	return ok && timeout == expected.timeout
 }
 
-// ErrCodexRequirementsAdminConflict matches, with errors.Is, an
-// administrator setting in the Codex machine requirements that turns
-// DefenseClaw's managed hooks off: allow_managed_hooks_only=false,
-// features.hooks=false, or a hooks.state table.
-var ErrCodexRequirementsAdminConflict = errors.New("Codex machine requirements turn DefenseClaw managed hooks off")
+// ErrCodexRequirementsAdminConflict matches, with errors.Is, the
+// administrator setting in the Codex machine requirements that turns every
+// Codex hook off: features.hooks=false.
+var ErrCodexRequirementsAdminConflict = errors.New("administrator requirements turn Codex hooks off")
 
 type codexRequirementsAdminConflictError struct{ msg string }
 
