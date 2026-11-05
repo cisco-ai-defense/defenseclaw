@@ -8,6 +8,22 @@ for released versions and assets, and the
 [documentation website](https://cisco-ai-defense.github.io/defenseclaw/docs/)
 for current behavior.
 
+## [Unreleased] — 1.0.9
+
+### Security
+- **DefenseClaw no longer writes OpenClaw's device pairing.** On a refused connection the gateway rewrote `~/.openclaw/devices/paired.json` and approved its own device with `operator.read`, `write`, `admin` and `approvals`, past OpenClaw's approval. It now leaves pairing to OpenClaw. OpenClaw approves a new device on a loopback connection by itself, so a normal single-user install needs no step. When OpenClaw asks for an approval, the gateway keeps retrying and logs the device ID and the step (`openclaw devices list`, then `openclaw devices approve <requestId>`); `defenseclaw doctor` and `defenseclaw-gateway status` show it. A rotated OpenClaw gateway token is still read again from `openclaw.json`; that read changes no OpenClaw file. (rel-1-0-6 GAP-0592)
+- **A failed audit write on the inspect route follows the policy tier.** `/api/v1/inspect/tool`, which the OpenClaw plugin calls for every tool check and prompt, ignored a failed audit write. It now follows the rule of the hook routes: the strict policy and managed installs block the call; the default and permissive policies allow it with a degraded-audit warning. The guardrail proxy applies the same rule to a prompt whose evaluation record could not be written. Tool results and model responses keep their verdict. Secure Client is unchanged. (rel-1-0-6 GAP-0593)
+
+### Fixed
+- **Stale master key text.** The 0.x changelog entry H9, a code comment and the environment variable reference said the `sk-dc-` master key is logged to `gateway.log` or read from `DEFENSECLAW_MASTER_KEY`. No release logs it and nothing reads that variable. The text is corrected and the variable is removed from the reference.
+
+### Removed
+- **The OpenClaw pairing repair** (`RepairPairing`) and the unused OpenClaw RPC helpers `GetStatus` and `GetSkillsBins`.
+
+### Changed
+- **OpenClaw:** the DefenseClaw and OpenClaw gateways run as the same OS user, one account per pair with its own ports; the tested OpenClaw versions; device pairing and the operator scopes DefenseClaw asks for; model calls from Node worker threads are not intercepted, and doctor's interception row reports them.
+- **Observability:** local history is authoritative against other accounts, not against its own; use a remote SIEM as the system of record and deduplicate on the record ID.
+
 ## [Unreleased] — 1.0.8
 
 DefenseClaw 1.0.8 follows 1.0.7. It brings Claude Cowork protection, a faster Claude Code hook on Linux, a stricter OpenShell sandbox floor and image check, and a long list of fixes for managed Windows, macOS and Linux. It also restores the `judge_fallback` field on hook audit rows, which 1.0.7 dropped. Secure Client is not part of 1.0.x. There are no breaking changes; the OpenShell 0.1.6 floor and the MicroVM image check can stop sandboxes that ran on 1.0.7 (see Changed).
@@ -3635,8 +3651,9 @@ branch's baseline. Each is additive — there is no removed protection.
   **BREAKING for any persisted `sk-dc-` value derived under the old
   algorithm:** those will no longer match the master key the proxy
   recomputes at boot. `sk-dc-` is an internal fallback credential and
-  not the supported caller-side bearer; operators relying on it must
-  re-read it from `gateway.log` after upgrade. Adds direct
+  not the supported caller-side bearer; use the connector-issued
+  bearer instead. (Corrected in 1.0.9: no release logs the value to
+  `gateway.log`.) Adds direct
   `golang.org/x/crypto` dep (was indirect).
 - **M1** `isPrivateHost()` resolves hostnames through `net.LookupHost`
   and inspects every returned address before deciding whether to

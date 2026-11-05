@@ -2361,7 +2361,17 @@ func (a *APIServer) handleInspectTool(w http.ResponseWriter, r *http.Request) {
 		// A block, confirm or alert row carries the verdict's severity.
 		toolEvent.Severity = verdict.Severity
 	}
-	_ = a.logger.LogEventCtx(r.Context(), toolEvent)
+	if auditErr := a.logger.LogEventCtx(r.Context(), toolEvent); auditErr != nil {
+		// The tier rule of the hook routes (GAP-0593): strict, managed and
+		// sandbox calls fail closed; a default or permissive allow stays
+		// allowed with the degraded-audit warning.
+		denied := a.inspectAuditFailureVerdict(r.Context(), serverConnector, &req, verdict)
+		if denied && a.recordsConnectorHealth(r.Context()) {
+			a.health.RecordToolBlockFor(serverConnector)
+		}
+		fmt.Fprintf(os.Stderr, "[inspect] inspect audit persistence failed tool=%q action=%s denied_for_audit=%t: %v\n",
+			req.Tool, verdict.Action, denied, auditErr)
+	}
 
 	a.emitCodeGuardTelemetry(r.Context(), &req, verdict, elapsed)
 

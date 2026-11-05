@@ -167,11 +167,6 @@ func (c *Client) PatchConfig(ctx context.Context, path string, value interface{}
 	return nil
 }
 
-// GetStatus fetches gateway status.
-func (c *Client) GetStatus(ctx context.Context) (json.RawMessage, error) {
-	return c.Request(ctx, "status", nil)
-}
-
 // GetToolsCatalog fetches the runtime tool catalog with provenance metadata.
 func (c *Client) GetToolsCatalog(ctx context.Context) (json.RawMessage, error) {
 	return c.Request(ctx, "tools.catalog", nil)
@@ -180,11 +175,6 @@ func (c *Client) GetToolsCatalog(ctx context.Context) (json.RawMessage, error) {
 // GetSkillsStatus fetches the installed skills and their current status.
 func (c *Client) GetSkillsStatus(ctx context.Context) (json.RawMessage, error) {
 	return c.Request(ctx, "skills.status", nil)
-}
-
-// GetSkillsBins fetches the available skill binaries/entries.
-func (c *Client) GetSkillsBins(ctx context.Context) (json.RawMessage, error) {
-	return c.Request(ctx, "skills.bins", nil)
 }
 
 // SessionsSubscribe subscribes this connection to the events of every session

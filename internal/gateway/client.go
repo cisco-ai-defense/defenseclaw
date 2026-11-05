@@ -75,14 +75,19 @@ type Client struct {
 	// OnEvent is called for every non-connect event frame.
 	OnEvent func(EventFrame)
 
-	// refreshedToken is the gateway token tryAuthRepair adopted from
+	// OnConnectError, when set, is called after every failed connect
+	// attempt of ConnectWithRetry. hint is the operator step for an
+	// OpenClaw pairing or token rejection, and "" for any other failure.
+	OnConnectError func(err error, hint string)
+
+	// refreshedToken is the gateway token handleConnectRejection adopted from
 	// openclaw.json after boot. The API server accepts it next to its
 	// boot token until the next restart (GAP-2259).
 	refreshedToken atomic.Pointer[string]
 }
 
-// RefreshedToken returns the gateway token adopted at runtime by auth
-// repair, or "" when none was adopted since boot.
+// RefreshedToken returns the gateway token re-read from openclaw.json at
+// runtime, or "" when none was adopted since boot.
 func (c *Client) RefreshedToken() string {
 	if c == nil {
 		return ""
@@ -641,7 +646,10 @@ func (c *Client) ConnectWithRetry(ctx context.Context) error {
 		fmt.Fprintf(os.Stderr, "[gateway] connect failed (attempt #%d): %v (retry in %s)\n",
 			attempt, err, backoff)
 
-		c.tryAuthRepair(err)
+		hint := c.handleConnectRejection(err)
+		if c.OnConnectError != nil {
+			c.OnConnectError(err, hint)
+		}
 
 		select {
 		case <-ctx.Done():
@@ -654,33 +662,52 @@ func (c *Client) ConnectWithRetry(ctx context.Context) error {
 }
 
 // ---------------------------------------------------------------------------
-// Auth auto-repair: when the OpenClaw gateway rejects a connect handshake
-// with an auth error (token_missing, token_mismatch, unauthorized, etc.),
-// the sidecar can self-heal by:
+// Connect rejections. OpenClaw owns its device pairing state and DefenseClaw
+// never writes it (GAP-0592: the sidecar used to rewrite
+// devices/paired.json and grant itself operator.read, write, admin and
+// approvals). OpenClaw approves a first-time device on a direct loopback
+// connection itself (gateway.nodes.pairing.autoApproveLocal, on by
+// default). Any other pairing request, and every role or scope upgrade
+// OpenClaw does not approve on its own, waits for the operator:
+// `openclaw devices list`, then `openclaw devices approve <requestId>`. The
+// sidecar logs that step, publishes it in /health and keeps retrying.
 //
-//  1. Re-injecting its device entry into OpenClaw's devices/paired.json
-//     (handles NOT_PAIRED after OpenClaw restarts and clears pairing state)
-//  2. Re-reading the shared gateway.auth.token from openclaw.json
-//     (handles token_mismatch if the token was rotated)
-//
-// OpenClaw auth checks the shared gateway.auth.token first; the per-device
-// token in device-auth.json is a Node.js client-side cache irrelevant here.
+// A rotated shared gateway.auth.token is re-read from openclaw.json. The
+// read changes no OpenClaw state; the token is written only to
+// DefenseClaw's own .env and hooks/.token.
 // ---------------------------------------------------------------------------
 
-// tryAuthRepair attempts to repair device pairing and refresh the shared
-// gateway token when a connect attempt fails with an auth-related error,
-// in the OpenClaw home under ClawHome (the user's real home directory).
-func (c *Client) tryAuthRepair(connectErr error) {
-	if !c.shouldAutoRepair(connectErr) {
-		return
+// openClawTokenRejectedHint is the operator step for a rejected gateway token.
+const openClawTokenRejectedHint = "OpenClaw rejected the gateway token. DefenseClaw re-reads gateway.auth.token " +
+	"from openclaw.json on every retry; when it is a secret reference, give the DefenseClaw gateway the token " +
+	"in OPENCLAW_GATEWAY_TOKEN or DEFENSECLAW_GATEWAY_TOKEN and restart it"
+
+// openClawPairingApprovalHint is the operator step for a device OpenClaw has
+// not approved (yet) for the role and scopes DefenseClaw asks for.
+func openClawPairingApprovalHint(deviceID string) string {
+	return "OpenClaw has not approved the DefenseClaw device " + deviceID + " (client gateway-client). " +
+		"Run 'openclaw devices list', then 'openclaw devices approve <requestId>' for its pending request. " +
+		"DefenseClaw keeps retrying and connects once it is approved"
+}
+
+// handleConnectRejection reacts to a failed connect attempt. It returns the
+// operator step for an OpenClaw pairing or token rejection, or "" for any
+// other failure. It never writes OpenClaw state.
+func (c *Client) handleConnectRejection(connectErr error) string {
+	hint := ""
+	switch {
+	case openClawPairingApprovalNeeded(connectErr):
+		hint = openClawPairingApprovalHint(c.device.DeviceID)
+		fmt.Fprintf(os.Stderr, "[gateway] %s\n", hint)
+	case isAuthError(connectErr):
+		hint = openClawTokenRejectedHint
+	}
+	if !c.shouldRefreshToken(connectErr) {
+		return hint
 	}
 
 	home := c.cfg.ClawHome
-	fmt.Fprintf(os.Stderr, "[gateway] auth rejected — repairing device pairing and token (home=%s) ...\n", home)
-
-	if err := c.device.RepairPairing(home); err != nil {
-		fmt.Fprintf(os.Stderr, "[gateway] repair pairing failed: %v\n", err)
-	}
+	fmt.Fprintf(os.Stderr, "[gateway] auth rejected — re-reading the gateway token from openclaw.json (home=%s) ...\n", home)
 
 	newToken, ok, tokenErr := readOpenClawGatewayToken(home)
 	if tokenErr != nil {
@@ -708,6 +735,7 @@ func (c *Client) tryAuthRepair(connectErr error) {
 			}
 		}
 	}
+	return hint
 }
 
 // persistRefreshedToken writes newToken into the on-disk token sources
@@ -801,14 +829,38 @@ func updateEnvFileToken(path, newToken string) error {
 	)
 }
 
-// shouldAutoRepair returns true when auth auto-repair should be attempted.
-func (c *Client) shouldAutoRepair(err error) bool {
+// shouldRefreshToken reports whether the gateway token is re-read from
+// openclaw.json after err.
+func (c *Client) shouldRefreshToken(err error) bool {
 	return c.cfg.ClawHome != "" && isAuthError(err)
+}
+
+// openClawPairingApprovalNeeded reports a connect rejection that only an
+// OpenClaw device approval resolves: a device OpenClaw has not paired, a
+// changed device identity, or a role or scope upgrade. OpenClaw sends these
+// as NOT_PAIRED with a "pairing required: ..." message, or as
+// AUTH_SCOPE_MISMATCH.
+func openClawPairingApprovalNeeded(err error) bool {
+	if err == nil {
+		return false
+	}
+	msg := strings.ToLower(err.Error())
+	for _, needle := range []string{
+		"not_paired", "not paired", "pairing required", "pairing_required",
+		"device identity changed", "higher role than", "more scopes than",
+		"scope_mismatch",
+	} {
+		if strings.Contains(msg, needle) {
+			return true
+		}
+	}
+	return false
 }
 
 // isAuthError returns true if the error message indicates the OpenClaw
 // gateway rejected the connect handshake due to a missing/invalid token
-// or device pairing.
+// or device pairing. It decides when the gateway token is re-read from
+// openclaw.json.
 //
 // The needles cover three OpenClaw error formats simultaneously:
 //
@@ -820,26 +872,20 @@ func (c *Client) shouldAutoRepair(err error) bool {
 //     "higher role than", "more scopes than") that come from the
 //     metadata-upgrade / role-upgrade / scope-upgrade subreasons —
 //     these signal the device record exists but disagrees with the
-//     handshake, so RepairPairing rewriting the record can fix it.
+//     handshake.
 //
 // Past bug: this list previously included "pairing_required" (underscore)
 // and "not paired" (lowercased phrase), neither of which match the wire
-// format. Auto-repair never ran and the sidecar stayed in RECONNECTING
-// forever when paired.json had stale metadata. Do not regress this.
+// format. Do not regress this.
 func isAuthError(err error) bool {
 	if err == nil {
 		return false
 	}
 	msg := strings.ToLower(err.Error())
-	// role-upgrade and scope-upgrade rejections
-	// MUST NOT trigger auto-repair. RepairPairing hard-codes
-	// operator.admin and operator.approvals into the pairing record,
-	// so treating "higher role than" / "more scopes than" as a
-	// repairable auth failure converted an explicit-approval reject
-	// from OpenClaw into a local self-elevation. We short-circuit
-	// these explicit-approval-only sub-reasons to false BEFORE the
-	// generic "pairing required" needle below would otherwise match
-	// them.
+	// Role-upgrade and scope-upgrade rejections are not token failures:
+	// only an OpenClaw approval resolves them
+	// (openClawPairingApprovalNeeded). Short-circuit them BEFORE the
+	// generic "pairing required" needle below would otherwise match.
 	if strings.Contains(msg, "higher role than") ||
 		strings.Contains(msg, "more scopes than") {
 		return false
