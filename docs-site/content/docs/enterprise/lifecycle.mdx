@@ -864,8 +864,8 @@ machine state for a reinstall instead.
   one runs, and restores the files of any agent that DefenseClaw changed and still has backups for.
   It then removes all of `~/.defenseclaw` (hook scripts, hook credentials and
   `~/.defenseclaw/foreign-hooks-backup` included) and, from `~/.local/bin`, `defenseclaw-gateway`,
-  `defenseclaw-acp`, the hook helpers (`defenseclaw-hook-post`, and on Linux `defenseclaw-hook-user`
-  and `defenseclaw-sensor-helper`), the launcher links, the `uv` the per-user installer added (when unchanged) and
+  `defenseclaw-acp`, the hook helpers (`defenseclaw-hook-post`, `defenseclaw-hook-user`
+  and, on Linux, `defenseclaw-sensor-helper`), the launcher links, the `uv` the per-user installer added (when unchanged) and
   its bookkeeping. A user enrolled only for machine-policy connectors loses `~/.defenseclaw` the same
   way when it holds no own install (only the session cache `~/.defenseclaw/session-facts.json` and
   what DefenseClaw wrote there, an earlier failed install's hook files and backups included). It follows no symlink there and removes only a file the user owns; the
