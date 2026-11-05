@@ -327,6 +327,39 @@ func pathTraversalView(line string) string {
 	return pathTraversalProse.ReplaceAllString(line, " ")
 }
 
+// CG-EXEC-001 reads a call of a command or code interpreter, not a name that
+// ends in exec, eval or system (GAP-0056): a method of another object
+// (re.exec(s), model.eval()), a longer name (parseEval(, createFlysystem()
+// and an argument-list subprocess.call([...]) without shell=True run no
+// command string. The receivers (os, child_process and its usual handles cp
+// and childProcess), module expressions (__import__('os')
+// .system(, require('child_process').exec() and names that do are listed. A
+// call right after an escaped line break or tab of a string literal (\n, \r,
+// \t) is code in that string and still counts.
+const (
+	// cgExecCommandCalls run a command string. CG-EXEC-002 also reports a
+	// subprocess shell=True call; this rule keeps it at its own severity.
+	cgExecCommandCalls = `os\.system|child_process\.exec|\b(?:cp|childprocess)\.exec\(|(?:__import__|import_module|require)\(\s*['"](?:os|(?:node:)?child_process)['"]\s*\)\.(?:system|exec)\(|(?:shell|pcntl)_exec\(|(?:kernel|(?:__)?builtins(?:__)?)\.(?:exec|system)\(|` +
+		`subprocess\.call\((?:\s*[^\s\[]|\s*$)|subprocess\.call\(.*shell\s*=\s*true|(?:^|[^.\w$]|\\[nrt])(?:exec|system)\(`
+	// cgExecEvalCalls evaluate source text.
+	cgExecEvalCalls = `(?:^|[^.\w$]|\\[nrt])eval\(|(?:instance|class|module)_eval\b|(?:__)?(?:builtins(?:__)?|kernel|window|globalthis)\.eval\(`
+)
+
+// cgExecView is the part of a line CG-EXEC-001 reads. A line that starts
+// with "//" or "#" is a comment up to its first "{": from there it can be a
+// template, f-string, JSX or interpolated ("#{...}") expression that runs
+// (GAP-0056).
+func cgExecView(line string) string {
+	trimmed := strings.TrimLeft(line, " \t")
+	if !strings.HasPrefix(trimmed, "//") && !strings.HasPrefix(trimmed, "#") {
+		return line
+	}
+	if brace := strings.IndexByte(trimmed, '{'); brace >= 0 {
+		return trimmed[brace:]
+	}
+	return ""
+}
+
 var builtinRules = codeOwnedBuiltinRules([]rule{
 	{
 		id:          "CG-CRED-001",
@@ -353,9 +386,10 @@ var builtinRules = codeOwnedBuiltinRules([]rule{
 		id:          "CG-EXEC-001",
 		severity:    SeverityHigh,
 		title:       "Unsafe command execution",
-		pattern:     regexp.MustCompile(`(?i)(os\.system|subprocess\.call|exec\(|child_process\.exec|eval\(|system\()`),
+		pattern:     regexp.MustCompile(`(?i)` + cgExecCommandCalls + `|` + cgExecEvalCalls),
 		remediation: "Use parameterized execution or an allowlist of commands",
 		extensions:  []string{".py", ".js", ".ts", ".rb", ".php"},
+		view:        cgExecView,
 	},
 	{
 		id:          "CG-EXEC-002",
