@@ -87,6 +87,9 @@ func (a *APIServer) inspectSandboxShellToolPolicyCtx(
 	command json.RawMessage,
 	commandTool string,
 ) *ToolInspectVerdict {
+	if cfg := a.decisionConfig(ctx); cfg != nil && !cfg.SecureClientIntegration() {
+		action.balancedSourceDestination = cfg.HookPolicyTierForConnector(action.Connector) != config.HookPolicyTierStrict
+	}
 	connectorName := action.Connector
 	if req != nil {
 		connectorName = firstNonEmpty(req.Connector, action.Connector)
@@ -140,6 +143,7 @@ func (a *APIServer) inspectSandboxShellToolPolicyCtx(
 		LegacyText:                    string(command),
 		Connector:                     action.Connector,
 		EnforcementCapable:            action.EnforcementCapable,
+		balancedSourceDestination:     action.balancedSourceDestination,
 		ManagedHookOverflowHold:       action.ManagedHookOverflowHold,
 		DowngradeReadOnlyDataArgs:     action.DowngradeReadOnlyDataArgs,
 		SkipLocalFilesystemResolution: action.SkipLocalFilesystemResolution,

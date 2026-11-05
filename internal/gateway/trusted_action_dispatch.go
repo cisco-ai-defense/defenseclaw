@@ -175,6 +175,10 @@ type trustedActionRequest struct {
 	// ProtectedHomeHook is set only from a kernel-verified managed hook peer.
 	// Its gateway cannot inspect the caller's home when ProtectHome is active.
 	ProtectedHomeHook bool
+	// balancedSourceDestination permits the hook's default and permissive
+	// profiles to leave an unresolved sourced-file destination to the
+	// ordinary action decision. Strict profiles retain the conservative rule.
+	balancedSourceDestination bool
 	// ManagedHookOverflowHold retains a bounded state reading on an
 	// authenticated managed Windows hook without changing path resolution.
 	ManagedHookOverflowHold bool
@@ -319,6 +323,18 @@ func dispatchTrustedAction(
 				facts = actionfacts.Analyze(request.Input)
 			}
 			request.record(toolChainPlacedFacts(facts, request), findings)
+		}()
+	}
+	// The sourced-file view can leave a later variable destination unknown.
+	// Apply the hook profile's tier after all rule lanes have reported, so a
+	// conservative child finding follows the same decision as its parent.
+	if !request.simpleCommandPass {
+		defer func() {
+			if balancedSourcedDestination(request, facts) {
+				findings = slices.DeleteFunc(findings, func(f RuleFinding) bool {
+					return f.RuleID == "persistence.ssh_authorized_keys_command"
+				})
+			}
 		}()
 	}
 	if parent == nil {
