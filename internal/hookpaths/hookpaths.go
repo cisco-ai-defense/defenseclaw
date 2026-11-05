@@ -1339,8 +1339,7 @@ func ResolveConnector(connector, surface, event string, payload []byte) string {
 					// Where each link-walk spelling of the command lies, for a
 					// gateway that cannot walk the home itself (GAP-2569).
 					walkFacts = LinkWalkFacts(command, cwd, home)
-					// An opaque link walk is separate from an incomplete
-					// target map. The gateway reads opacity from the command.
+					truncated = truncated || links.opaque
 				}
 				break
 			}
@@ -4194,12 +4193,6 @@ func (l Links) Known() bool {
 	return l.links.known && !l.links.opaque
 }
 
-// Opaque reports that a shell operation may create an unread link scope.
-// A merely incomplete walk does not make the client's target map incomplete.
-func (l Links) Opaque() bool {
-	return l.links.opaque
-}
-
 // ProtectedCopyDestination reports a protected write reached by a copy with
 // a validated dynamic operand, including a child of a destination directory.
 func (l Links) ProtectedCopyDestination(home string) bool {
@@ -4207,21 +4200,6 @@ func (l Links) ProtectedCopyDestination(home string) bool {
 		return false
 	}
 	return l.links.protectedCopyDestinationWith(newProtectedFiles(home))
-}
-
-// UnverifiedClientResolution reports a client link reading that changes a
-// named path while the client also reports an uncertain write.
-// A replacement reading alone cannot prove that write ordinary.
-func UnverifiedClientResolution(facts map[string]string) bool {
-	if facts[UnprovenReasonKey] == "" {
-		return false
-	}
-	for path, resolved := range facts {
-		if filepath.IsAbs(path) && filepath.IsAbs(resolved) && filepath.Clean(resolved) != filepath.Clean(path) {
-			return true
-		}
-	}
-	return false
 }
 
 func (l shellLinks) protectedCopyDestinationWith(protected protectedFiles) bool {
