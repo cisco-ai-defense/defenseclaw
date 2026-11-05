@@ -311,8 +311,14 @@ func TestWindowsGuardianOrdersTheHooksOnlyLockAndTheGuardSummary(t *testing.T) {
 	})
 	var order []string
 	enterpriseHookWindowsClaudeHooksOnlyLock = func() (bool, error) { order = append(order, "lock"); return true, nil }
-	enterpriseHookWindowsPublishGoOwned = func(enterprisepolicy.Options, []string) (enterprisepolicy.Result, error) {
-		order = append(order, "summary")
+	enterpriseHookWindowsPublishGoOwned = func(opts enterprisepolicy.Options, _ []string) (enterprisepolicy.Result, error) {
+		// A publish without the summary path still reconciles the other
+		// connectors' machine policy.
+		if opts.PublicPolicyPath == "" {
+			order = append(order, "reconcile")
+		} else {
+			order = append(order, "summary")
+		}
 		return enterprisepolicy.Result{}, nil
 	}
 	enterpriseHookWindowsEligibleProfiles = func(context.Context) ([]enterprisehooks.TargetCredentials, error) { return nil, nil }
@@ -322,7 +328,7 @@ func TestWindowsGuardianOrdersTheHooksOnlyLockAndTheGuardSummary(t *testing.T) {
 		return enterprisepolicy.State{}, nil
 	}
 	enterpriseHookWindowsGuardianOptions = func() (enterprisepolicy.Options, []string, bool, error) {
-		return enterprisepolicy.Options{HookBinary: `C:\hook.exe`}, []string{"claudecode"}, true, nil
+		return enterprisepolicy.Options{HookBinary: `C:\hook.exe`, PublicPolicyPath: `C:\policy\summary.json`}, []string{"claudecode"}, true, nil
 	}
 	for _, tc := range []struct{ mode, want string }{
 		{config.ManagedHooksOnlyEnforce, "lock,summary"},
@@ -336,12 +342,13 @@ func TestWindowsGuardianOrdersTheHooksOnlyLockAndTheGuardSummary(t *testing.T) {
 			t.Errorf("managed_hooks_only %s: order %s, want %s", tc.mode, got, tc.want)
 		}
 	}
-	// REVIEW-2: a lock that fails on the way to enforce keeps the summary
-	// (and so the guard) as it was; on the way to preserve the summary still
-	// turns the guard on first.
+	// REVIEW-2/3: a lock that fails on the way to enforce keeps the summary
+	// (and so the guard) as it was but still reconciles the other
+	// connectors; on the way to preserve the summary still turns the guard
+	// on first.
 	enterpriseHookWindowsClaudeHooksOnlyLock = func() (bool, error) { order = append(order, "lock"); return false, errors.New("drop-in busy") }
 	for _, tc := range []struct{ mode, want string }{
-		{config.ManagedHooksOnlyEnforce, "lock"},
+		{config.ManagedHooksOnlyEnforce, "lock,reconcile"},
 		{config.ManagedHooksOnlyPreserve, "summary,lock"},
 	} {
 		cfg = &config.Config{}

@@ -338,20 +338,20 @@ func enterpriseHookStandalonePlatformPrepare(stderr io.Writer) {
 	// guardian-only restart (GAP-0044), so that span is live.
 	// A lock that could not be written on the way to enforce leaves the
 	// published summary as it was, so the guard stays on until a pass
-	// writes the lock (or an undo goes back to preserve).
+	// writes the lock (or an undo goes back to preserve). Only the summary
+	// is held back: the other connectors' machine policy is reconciled as
+	// on every pass. opts itself stays whole for the steps below.
 	lockFirst := windowsClaudeManagedHooksOnlyEnforced()
-	publish := true
+	publishOpts := opts
 	if lockFirst && applyHooksOnlyLock() != nil {
-		publish = false
-		fmt.Fprintf(stderr, "defenseclaw: enterprise machine policy (Windows): the hook-side summary was not published, so the Claude Code foreign-hook guard stays on until the managed_hooks_only lock is written\n")
+		publishOpts.PublicPolicyPath = ""
+		fmt.Fprintf(stderr, "defenseclaw: enterprise machine policy (Windows): the hook-side summary was not updated, so the Claude Code foreign-hook guard stays on until the managed_hooks_only lock is written\n")
 	}
-	if publish {
-		windowsStandaloneGoOwnedPolicyMu.Lock()
-		_, err = enterpriseHookWindowsPublishGoOwned(opts, connectors)
-		windowsStandaloneGoOwnedPolicyMu.Unlock()
-		if err != nil {
-			fmt.Fprintf(stderr, "defenseclaw: enterprise machine policy (Windows): %v\n", err)
-		}
+	windowsStandaloneGoOwnedPolicyMu.Lock()
+	_, err = enterpriseHookWindowsPublishGoOwned(publishOpts, connectors)
+	windowsStandaloneGoOwnedPolicyMu.Unlock()
+	if err != nil {
+		fmt.Fprintf(stderr, "defenseclaw: enterprise machine policy (Windows): %v\n", err)
 	}
 	if _, err := enterpriseHookWindowsClaudeVersionFloor(opts, connectors); err != nil {
 		fmt.Fprintf(stderr, "defenseclaw: enterprise machine policy (Windows): Claude Code version floor: %v\n", err)
