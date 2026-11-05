@@ -175,6 +175,9 @@ type trustedActionRequest struct {
 	// ProtectedHomeHook is set only from a kernel-verified managed hook peer.
 	// Its gateway cannot inspect the caller's home when ProtectHome is active.
 	ProtectedHomeHook bool
+	// StrictPolicy keeps uncertain path proofs closed for the strict rule pack.
+	// Secure Client uses the same conservative path behavior as before.
+	StrictPolicy bool
 	// ManagedHookOverflowHold retains a bounded state reading on an
 	// authenticated managed Windows hook without changing path resolution.
 	ManagedHookOverflowHold bool

@@ -29,6 +29,7 @@ func TestGAP0395And0397FourCell(t *testing.T) {
 	}
 	linked := projects["protected"]
 	for name, target := range map[string]string{
+		"build/README.md": "../../.ssh/authorized_keys",
 		"build/opt1.cfg": "../../.ssh/authorized_keys",
 		"out.debug":      "../.ssh/authorized_keys",
 		"a.txt.bak":      "../.ssh/authorized_keys",
@@ -54,6 +55,8 @@ func TestGAP0395And0397FourCell(t *testing.T) {
 		{"GAP0395/P07-name-mkdir-link", "protected", `cd ~/linked && NAME=../.ssh; mkdir -p $NAME && cp authorized_keys $NAME/ && tar -czf $NAME.tgz $NAME`, "block"},
 		{"GAP0395/P17-D-build-sub", "ordinary", `cd ~/clean && D=build/sub; mkdir -p $D; cp a.txt $D; cp b.txt "$D/"`, "allow"},
 		{"GAP0395/P17-D-build-sub-link", "protected", `cd ~/linked && D=../.ssh; mkdir -p $D; cp authorized_keys $D; cp b.txt "$D/"`, "block"},
+		{"GAP0395/P07-variable-source", "ordinary", `cd ~/clean && f=README.md && cp -v $f build/ && echo copied`, "allow"},
+		{"GAP0395/P07-variable-source-link", "protected", `cd ~/linked && f=README.md && cp -v $f build/ && echo copied`, "block"},
 	}
 	var payloads [][]byte
 	for _, row := range rows {
