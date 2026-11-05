@@ -6378,8 +6378,8 @@
     {
       "name": "DEFENSECLAW_TOOL_INSPECT_FAIL_OPEN",
       "category": "security_opt_out",
-      "purpose": "Make the plugin-side tool-inspect hook fail-open (allow tool) when the gateway is unreachable. Default is fail-closed (block).",
-      "default": "unset (fail-closed)",
+      "purpose": "Legacy OpenClaw tool-inspection outage override through 1.0.8. The 1.0.9 plugin ignores it and reads the saved guardrail tier instead.",
+      "default": "ignored by 1.0.9",
       "accepted_values": [
         "1",
         "true",
@@ -6390,8 +6390,8 @@
       "managed": "ignore",
       "consumers": [
         {
-          "location": "extensions/defenseclaw/src/index.ts",
-          "description": "OpenClaw plugin tool-inspect handler"
+          "location": "extensions/defenseclaw/src/__tests__/index.test.ts",
+          "description": "Regression check that the 1.0.9 plugin ignores the legacy override"
         }
       ],
       "since": "0.4.0"

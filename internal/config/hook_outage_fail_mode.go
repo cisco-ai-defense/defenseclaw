@@ -62,6 +62,12 @@ func (c *Config) EffectiveHookOutageFailModeForConnector(connector string) strin
 	if managedInstall {
 		return HookOutageFailMode(true, c.EffectiveHookFailModeForConnector(connector), "")
 	}
+	// OpenClaw's plugin tool inspection is an in-process check. Its strict
+	// policy stays closed even when an older saved hook setting says open.
+	if strings.EqualFold(strings.TrimSpace(connector), "openclaw") &&
+		c.HookPolicyTierForConnector(connector) == HookPolicyTierStrict {
+		return "closed"
+	}
 	return HookOutageFailMode(false, c.configuredHookFailModeForConnector(connector), c.HookPolicyTierForConnector(connector))
 }
 

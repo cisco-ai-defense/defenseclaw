@@ -93,6 +93,26 @@ func TestHookOutageFailModeDecision(t *testing.T) {
 	}
 }
 
+func TestOpenClawToolOutageStrictFloor(t *testing.T) {
+	for _, tc := range []struct {
+		name, pack, saved, want string
+	}{
+		{"default", "default", "", "open"},
+		{"permissive", "permissive", "", "open"},
+		{"strict", "strict", "", "closed"},
+		{"strict with old saved open", "strict", "open", "closed"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			cfg := &Config{}
+			cfg.Guardrail.RulePack = tc.pack
+			cfg.Guardrail.HookFailMode = tc.saved
+			if got := cfg.EffectiveHookOutageFailModeForConnector("openclaw"); got != tc.want {
+				t.Fatalf("openclaw outage mode = %q, want %q", got, tc.want)
+			}
+		})
+	}
+}
+
 // A custom pack's tier is its manifest posture, else its folder name, as the
 // gateway reads it (packPosture): a strict custom pack closes the outage.
 func TestHookPolicyTierOfACustomPack(t *testing.T) {

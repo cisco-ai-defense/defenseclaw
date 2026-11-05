@@ -21,7 +21,10 @@ import { join } from "node:path";
 
 vi.mock("node:os", () => ({
   homedir: () => "/mock-home",
+  userInfo: () => ({ homedir: "/mock-home" }),
 }));
+
+vi.mock("node:child_process", () => ({ execFileSync: vi.fn() }));
 
 vi.mock("node:fs", () => ({
   readFileSync: vi.fn(),
@@ -29,10 +32,51 @@ vi.mock("node:fs", () => ({
 }));
 
 import { readFileSync, statSync } from "node:fs";
-import { loadSidecarConfig, _resetSidecarConfigCache } from "../sidecar-config.js";
+import { execFileSync } from "node:child_process";
+import { loadSidecarConfig, loadOpenClawOutageMode, _resetSidecarConfigCache } from "../sidecar-config.js";
 
 const mockReadFileSync = vi.mocked(readFileSync);
 const mockStatSync = vi.mocked(statSync);
+const mockExecFileSync = vi.mocked(execFileSync);
+
+describe("loadOpenClawOutageMode", () => {
+  beforeEach(() => mockExecFileSync.mockReset());
+  afterEach(() => mockExecFileSync.mockReset());
+
+  it.each([
+    ["default or permissive", "open\n", "open"],
+    ["strict or managed", "closed\n", "closed"],
+  ] as const)("uses the installed resolver for %s", (_tier, answer, expected) => {
+    mockExecFileSync.mockReturnValue(answer);
+    expect(loadOpenClawOutageMode()).toBe(expected);
+    expect(mockExecFileSync).toHaveBeenCalledWith(
+      "/mock-home/.local/bin/defenseclaw-gateway",
+      ["hook-outage-mode", "--connector", "openclaw", "--hook-dir", "/mock-home/.defenseclaw/hooks"],
+      expect.objectContaining({ env: { HOME: "/mock-home", PATH: "/usr/bin:/bin" } }),
+    );
+  });
+
+  it("closes on an unreadable resolver answer", () => {
+    mockExecFileSync.mockImplementation(() => { throw new Error("unavailable"); });
+    expect(loadOpenClawOutageMode()).toBe("closed");
+  });
+
+  it("uses the saved resolver for a per-user Windows install", () => {
+    const previous = Object.getOwnPropertyDescriptor(process, "platform");
+    Object.defineProperty(process, "platform", { value: "win32", configurable: true });
+    try {
+      mockExecFileSync.mockReturnValue("open\n");
+      expect(loadOpenClawOutageMode()).toBe("open");
+      expect(mockExecFileSync).toHaveBeenCalledWith(
+        "/mock-home/.local/bin/defenseclaw-gateway.exe",
+        ["hook-outage-mode", "--connector", "openclaw", "--hook-dir", "/mock-home/.defenseclaw/hooks"],
+        expect.objectContaining({ env: expect.objectContaining({ USERPROFILE: "/mock-home" }) }),
+      );
+    } finally {
+      if (previous) Object.defineProperty(process, "platform", previous);
+    }
+  });
+});
 
 describe("loadSidecarConfig", () => {
   const savedDefenseClawHome = process.env.DEFENSECLAW_HOME;

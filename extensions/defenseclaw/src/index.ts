@@ -72,7 +72,7 @@ import type {
 } from "./types.js";
 import { compareSeverity, maxSeverity } from "./types.js";
 import { patchAwsSdkHttp1ForGuardrail } from "./aws-sdk-http1-for-guardrail.js";
-import { loadSidecarConfig } from "./sidecar-config.js";
+import { loadOpenClawOutageMode, loadSidecarConfig } from "./sidecar-config.js";
 import { createFetchInterceptor } from "./fetch-interceptor.js";
 import { HealthMonitor } from "./health-monitor.js";
 
@@ -144,22 +144,35 @@ function failClosedVerdict(reason: string): InspectVerdict {
   };
 }
 
-// DEFENSECLAW_TOOL_INSPECT_FAIL_OPEN applies only when no sidecar
-// verdict is available because the request itself failed.
+// Only a classified outage or timeout can use the account's saved mode.
 function unavailableVerdict(reason: string): InspectVerdict {
-  const failOpen =
-    (process.env.DEFENSECLAW_TOOL_INSPECT_FAIL_OPEN || "")
-      .trim()
-      .toLowerCase() === "1";
-  if (failOpen) {
+  if (loadOpenClawOutageMode() === "open") {
+    const warning = `DefenseClaw warning: ${reason}; tool call is running without inspection.`;
+    console.warn(warning);
     return {
       action: "allow",
       severity: "NONE",
-      reason: `${reason} (fail-open opt-in)`,
+      reason: warning,
       mode: "observe",
     };
   }
   return failClosedVerdict(reason);
+}
+
+function isOutageOrTimeout(err: unknown): boolean {
+  const outageCodes = new Set([
+    "ECONNREFUSED", "ECONNRESET", "ETIMEDOUT", "EPIPE",
+    "EHOSTUNREACH", "ENETUNREACH", "UND_ERR_CONNECT_TIMEOUT",
+    "UND_ERR_HEADERS_TIMEOUT", "UND_ERR_SOCKET",
+  ]);
+  let current: unknown = err;
+  for (let depth = 0; depth < 3 && current && typeof current === "object"; depth++) {
+    const candidate = current as { name?: unknown; code?: unknown; cause?: unknown };
+    if (candidate.name === "AbortError" || candidate.name === "TimeoutError" ||
+        (typeof candidate.code === "string" && outageCodes.has(candidate.code))) return true;
+    current = candidate.cause;
+  }
+  return false;
 }
 
 function approvalSeverity(severity: string): "info" | "warning" | "critical" {
@@ -489,12 +502,14 @@ export default function (api: DefenseClawPluginHost) {
       } catch (err) {
         // Structurally unreadable JSON stays fail-closed. Abort/reset
         // while reading the body is an availability failure and follows
-        // DEFENSECLAW_TOOL_INSPECT_FAIL_OPEN.
+        // the saved outage mode.
         if (err instanceof SyntaxError) {
           return failClosedVerdict("sidecar returned malformed verdict");
         }
         const msg = err instanceof Error ? err.message : String(err);
-        return unavailableVerdict(`sidecar body unavailable: ${msg}`);
+        return isOutageOrTimeout(err)
+          ? unavailableVerdict(`sidecar body unavailable: ${msg}`)
+          : failClosedVerdict(`sidecar body unavailable: ${msg}`);
       }
     } catch (err) {
       const duration_ms = Math.round(performance.now() - started);
@@ -506,11 +521,40 @@ export default function (api: DefenseClawPluginHost) {
         duration_ms,
       });
       const msg = err instanceof Error ? err.message : String(err);
-      return unavailableVerdict(`sidecar unreachable: ${msg}`);
+      return isOutageOrTimeout(err)
+        ? unavailableVerdict(`sidecar unreachable: ${msg}`)
+        : failClosedVerdict(`sidecar request failed: ${msg}`);
     } finally {
       clearTimeout(timer);
     }
   }
+
+  const outageWarnings = new Map<string, string>();
+  const outageWarningKey = (toolCallId?: string, sessionKey?: string, toolName?: string): string =>
+    toolCallId ? `call:${toolCallId}` : sessionKey && toolName ? `session:${sessionKey}:${toolName}` : "";
+  const rememberOutageWarning = (
+    event: { toolCallId?: string; toolName: string }, ctx: ToolContext | undefined, verdict: InspectVerdict,
+  ): void => {
+    if (!verdict.reason.startsWith("DefenseClaw warning:")) return;
+    const key = outageWarningKey(event.toolCallId ?? ctx?.toolCallId, ctx?.sessionKey, event.toolName);
+    if (!key) return;
+    if (outageWarnings.size >= 256) outageWarnings.delete(outageWarnings.keys().next().value ?? "");
+    outageWarnings.set(key, verdict.reason);
+  };
+
+  // OpenClaw writes this tool result into the agent transcript. Attach the
+  // outage notice there so the agent and its user can see it with the call.
+  api.on("tool_result_persist", (event, ctx) => {
+    const key = outageWarningKey(event.toolCallId ?? ctx?.toolCallId, ctx?.sessionKey, event.toolName ?? ctx?.toolName);
+    const warning = outageWarnings.get(key);
+    if (!warning) return;
+    outageWarnings.delete(key);
+    const message = event.message;
+    if (!message || typeof message !== "object" || Array.isArray(message)) return;
+    const record = message as Record<string, unknown>;
+    if (record.role !== "toolResult" || !Array.isArray(record.content)) return;
+    return { message: { ...record, content: [...record.content, { type: "text", text: warning }] } };
+  });
 
   api.on("before_tool_call", async (event, ctx) => {
     // Cache the current session/run so subsequent LLM fetch interceptions
@@ -535,6 +579,8 @@ export default function (api: DefenseClawPluginHost) {
         ctx,
       );
 
+      rememberOutageWarning(event, ctx, verdict);
+
       console.log(
         `[defenseclaw] message-tool verdict:${verdict.action} severity:${verdict.severity}`,
       );
@@ -555,6 +601,8 @@ export default function (api: DefenseClawPluginHost) {
       },
       ctx,
     );
+
+    rememberOutageWarning(event, ctx, verdict);
 
     console.log(
       `[defenseclaw] tool:${event.toolName} verdict:${verdict.action} severity:${verdict.severity}`,
