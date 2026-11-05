@@ -53,10 +53,18 @@ func dynamicWordParityProject(t *testing.T) (home, project string) {
 // when it is set; a per-user cell is judged without it, as shipped.
 func postDynamicWordParity(t *testing.T, home, project, connector string, managed bool, command string,
 	evidence func(map[string]string)) string {
+	return postDynamicWordParityCell(t, home, project, connector, managed, false, false, command, evidence)
+}
+
+func postDynamicWordParityCell(t *testing.T, home, project, connector string, managed, blind, strict bool, command string,
+	evidence func(map[string]string)) string {
 	t.Helper()
 	cfg := &config.Config{}
 	cfg.Guardrail.Mode = "action"
 	cfg.Guardrail.Connector = connector
+	if strict {
+		cfg.Guardrail.RulePack = "strict"
+	}
 	api := &APIServer{scannerCfg: cfg, health: NewSidecarHealth()}
 	body := mustJSON(t, map[string]any{"session_id": "parity-session", "hook_event_name": "PreToolUse",
 		"tool_name": "Bash", "cwd": project, "tool_input": map[string]any{"command": command, "description": "d"}})
@@ -81,6 +89,16 @@ func postDynamicWordParity(t *testing.T, home, project, connector string, manage
 		req.Header.Set(hookpaths.Header, header)
 		req = req.WithContext(withManagedHookPeer(req.Context(), managedHookPeer{Home: home}))
 	}
+	if managed && blind {
+		if err := os.Chmod(home, 0); err != nil {
+			t.Fatal(err)
+		}
+		defer func() {
+			if err := os.Chmod(home, 0o700); err != nil {
+				t.Fatal(err)
+			}
+		}()
+	}
 	recorder := httptest.NewRecorder()
 	api.handleAgentHook(connector).ServeHTTP(recorder, req)
 	return recorder.Body.String()
@@ -91,15 +109,15 @@ func checkDynamicWordParity(t *testing.T, allowed, blocked []string) {
 	home, project := dynamicWordParityProject(t)
 	const block, allow = `{"action":"block"`, `{"action":"allow"`
 	for _, connector := range []string{"claudecode", "codex"} {
-		for _, managed := range []bool{false, true} {
-			t.Run(fmt.Sprintf("%s managed=%v", connector, managed), func(t *testing.T) {
+		for _, cell := range []struct{ managed, blind bool }{{false, false}, {true, false}, {true, true}} {
+			t.Run(fmt.Sprintf("%s managed=%v blind=%v", connector, cell.managed, cell.blind), func(t *testing.T) {
 				for _, command := range allowed {
-					if got := postDynamicWordParity(t, home, project, connector, managed, command, nil); !strings.HasPrefix(got, allow) {
+					if got := postDynamicWordParityCell(t, home, project, connector, cell.managed, cell.blind, false, command, nil); !strings.HasPrefix(got, allow) {
 						t.Errorf("%s = %.300s, want allow", command, got)
 					}
 				}
 				for _, command := range blocked {
-					got := postDynamicWordParity(t, home, project, connector, managed, command, nil)
+					got := postDynamicWordParityCell(t, home, project, connector, cell.managed, cell.blind, false, command, nil)
 					if !strings.HasPrefix(got, block) || !strings.Contains(got, "persistence.ssh_authorized_keys_command") {
 						t.Errorf("%s = %.300s, want block", command, got)
 					}

@@ -1318,7 +1318,11 @@ func ResolveConnector(connector, surface, event string, payload []byte) string {
 				// to a protected file (GAP-1505). The command of an
 				// apply_patch tool is a patch envelope, not shell.
 				if !isApplyPatchToolName(tool) {
-					links = commandLinksWithFacts(command, cwd, home, sourceFacts, true)
+					links = commandLinksWithFactsBalanced(command, cwd, home, sourceFacts, true)
+					if !protectedDecision && (len(links.copyDestinations) > 0 || len(links.copyWrittenChildren) > 0) {
+						protectedFiles := newProtectedFiles(home)
+						protectedDecision = links.protectedCopyDestinationWith(protectedFiles)
+					}
 					// The gateway also judges each simple command in the
 					// directory actionfacts places it in, which follows a
 					// pushd of a bare name as it follows cd. The copy source
@@ -1335,9 +1339,8 @@ func ResolveConnector(connector, surface, event string, payload []byte) string {
 					// Where each link-walk spelling of the command lies, for a
 					// gateway that cannot walk the home itself (GAP-2569).
 					walkFacts = LinkWalkFacts(command, cwd, home)
-					// An unresolved program word alone does not make a
-					// concrete write operand or its link walk incomplete.
-					truncated = truncated || links.opaque
+					// An opaque link walk is separate from an incomplete
+					// target map. The gateway reads opacity from the command.
 				}
 				break
 			}
@@ -1604,7 +1607,7 @@ func ResolveConnector(connector, surface, event string, payload []byte) string {
 			}
 		}
 		callLinks := links
-		links = commandLinksWithFacts(reading, cwd, home, sourceFacts, true)
+		links = commandLinksWithFactsBalanced(reading, cwd, home, sourceFacts, true)
 		for _, path := range readingPaths {
 			key := OperandPath(path, cwd)
 			old, listed := targets[key]
@@ -2288,9 +2291,12 @@ type shellLinks struct {
 	cdDirs []string
 	// scopedMoves: destinations of plain mv calls that land directly in an
 	// opaque scope and can only rename an entry there (scopedMoveSafe).
-	scopedMoves            map[string]bool
-	opaqueScopes           []opaqueScope
-	copyDestinations       []string
+	scopedMoves      map[string]bool
+	opaqueScopes     []opaqueScope
+	copyDestinations []string
+	// A dynamic source with one known value copied into an existing
+	// directory writes this child. Keep it out of copy-scope decisions.
+	copyWrittenChildren    []string
 	placedCopyDestinations []string // copy destinations placed by the statement walk
 	// copyEnds: the end offset of the copy call that wrote a destination,
 	// when that call is a plain top-level statement of a ; / && / || list
@@ -2339,6 +2345,7 @@ func (l *shellLinks) merge(inner shellLinks) {
 	l.globalOther = l.globalOther || inner.globalOpaque
 	l.opaqueScopes = append(l.opaqueScopes, inner.opaqueScopes...)
 	l.copyDestinations = append(l.copyDestinations, inner.copyDestinations...)
+	l.copyWrittenChildren = append(l.copyWrittenChildren, inner.copyWrittenChildren...)
 	l.placedCopyDestinations = append(l.placedCopyDestinations, inner.placedCopyDestinations...)
 	for _, destination := range inner.copyDestinations {
 		l.noteCopyEnd(destination, -1)
@@ -2761,19 +2768,23 @@ func withDirectoryStackOperands(args []*syntax.Word, words []string, static []bo
 }
 
 func commandLinksWithFacts(command, cwd, home string, facts map[string]string, record bool) shellLinks {
-	return commandLinks(command, cwd, home, facts, record, false)
+	return commandLinks(command, cwd, home, facts, record, false, false)
+}
+
+func commandLinksWithFactsBalanced(command, cwd, home string, facts map[string]string, record bool) shellLinks {
+	return commandLinks(command, cwd, home, facts, record, false, true)
 }
 
 // commandLinks reads the links of command. A nested literal shell body
 // returns its facts without the end checks: its caller runs them once
 // over its own links and the body links together.
-func commandLinks(command, cwd, home string, facts map[string]string, record, nested bool) shellLinks {
-	links, fallback := commandLinksRead(command, cwd, home, facts, record, nested, true)
+func commandLinks(command, cwd, home string, facts map[string]string, record, nested, balanced bool) shellLinks {
+	links, fallback := commandLinksRead(command, cwd, home, facts, record, nested, true, balanced)
 	if fallback {
 		// A copy of links on disk that the end of the command does not let
 		// us read is read as before, an opaque copy scope at the copy call
 		// (rel-1-0-6:GAP-0274).
-		links, _ = commandLinksRead(command, cwd, home, facts, record, nested, false)
+		links, _ = commandLinksRead(command, cwd, home, facts, record, nested, false, balanced)
 	}
 	return links
 }
@@ -2781,7 +2792,7 @@ func commandLinks(command, cwd, home string, facts map[string]string, record, ne
 // commandLinksRead is commandLinks; readDisk reads the link-keeping copies
 // of links on disk as those links (copyDiskLinks). fallback reports such a
 // copy that could not be read so.
-func commandLinksRead(command, cwd, home string, facts map[string]string, record, nested, readDisk bool) (shellLinks, bool) {
+func commandLinksRead(command, cwd, home string, facts map[string]string, record, nested, readDisk, balanced bool) (shellLinks, bool) {
 	links := shellLinks{known: true, callAt: -1}
 	file, parsed := parseShell(command)
 	if !parsed {
@@ -2797,7 +2808,7 @@ func commandLinksRead(command, cwd, home string, facts map[string]string, record
 	}
 	linkCall, linkCWD := staticChangedDirectoryLink(file, cwd, home)
 	linkDirs, nestedCopyDirs, linkDirsKnown := topLevelLinkDirectories(file, cwd, home)
-	knownWords, knownValues := knownWordParameters(command, file, home, cdEnterable(cwd, facts, record), linkDirs)
+	knownWords, knownValues := knownWordParameters(command, file, home, cdEnterable(cwd, facts, record), linkDirs, balanced)
 	var boundedLoopCopies map[*syntax.CallExpr][]string
 	if strings.Contains(command, "for") && strings.Contains(command, "cp") {
 		boundedLoopCopies = boundedLoopCopyCalls(file, cwd, home)
@@ -2913,12 +2924,14 @@ func commandLinksRead(command, cwd, home string, facts map[string]string, record
 		// fixed words bash makes of it, read like any other operand: a
 		// non-static word would open an unbounded copy scope that makes
 		// every write of the call opaque (rel-1-0-6 GAP-0202).
+		dynamicResolved := false
 		if slices.Contains(copyPrograms, program) || slices.Contains(archivePrograms, program) {
 			// A copy operand named by a parameter with one known plain
 			// value is that fixed word (rel-1-0-6:GAP-0235).
 			for i := 1; i < len(args); i++ {
 				if value, known := knownValues[args[i]]; known && !static[i] {
 					words[i], static[i] = value, true
+					dynamicResolved = true
 				}
 			}
 			if slices.Contains(copyPrograms, program) {
@@ -3080,6 +3093,17 @@ func commandLinksRead(command, cwd, home string, facts map[string]string, record
 				if destination != "" {
 					links.copyDestinations = append(links.copyDestinations, destination)
 					links.noteCopyEnd(destination, copyEnd)
+					if dynamicResolved {
+						parsed := cpOperands(words[1:], static[1:])
+						if parsed.ok && !parsed.noTargetDir && !parsed.parents && !parsed.preserves && !parsed.hard && !parsed.symbolic {
+							if info, err := os.Stat(destination); err == nil && info.IsDir() {
+								for _, source := range parsed.sources {
+									child := filepath.Join(destination, filepath.Base(source))
+									links.copyWrittenChildren = append(links.copyWrittenChildren, child)
+								}
+							}
+						}
+					}
 				}
 				option, dynamic := copyLinkOptions(args[1:], words[1:], static[1:])
 				if copyPreservesLinks(words[1:], static[1:]) {
@@ -3189,13 +3213,34 @@ func commandLinksRead(command, cwd, home string, facts map[string]string, record
 			// links made outside it (a top-level link renamed by sh -c
 			// "mv c d"), so they count as facts of this command too.
 			body, bodyDir, placedBody := literalShellBody(program, words, static), cwd, false
+			if balanced && len(call.Assigns) > 0 {
+				// A plain prefix assignment is in the child shell's
+				// environment. Read the same literal body with that value.
+				prefix := ""
+				for _, assign := range call.Assigns {
+					if assign.Name == nil || assign.Value == nil || assign.Append || assign.Array != nil || assign.Index != nil ||
+						slices.Contains(shellSpecialParameters, assign.Name.Value) ||
+						strings.HasPrefix(assign.Name.Value, "BASH_") {
+						prefix = ""
+						break
+					}
+					value, fixed := StaticWord(assign.Value, home)
+					if !fixed || value == "" || strings.HasPrefix(value, "-") ||
+						strings.ContainsAny(value, " \t\r\n*?[]{}$`\\\"'()|&;<>!~#=,\x00") {
+						prefix = ""
+						break
+					}
+					prefix += assign.Name.Value + "=" + value + "; "
+				}
+				body = prefix + body
+			}
 			if changesDirectory && !bodyOnlyChangesDirectory(command, call) {
 				// After static top-level cd statements a body with no
 				// directory change of its own runs where the statement walk
 				// placed its call (rel-1-0-6:GAP-0260).
 				bodyDir, placedBody = callDirs[0], true
 			}
-			inner := commandLinks(body, bodyDir, home, facts, record, true)
+			inner := commandLinks(body, bodyDir, home, facts, record, true, balanced)
 			links.merge(inner)
 			renames = renames || inner.renames
 			cds = cds || inner.cds
@@ -4083,6 +4128,20 @@ func CommandLinksWithFacts(tool, command, cwd, home string, facts map[string]str
 	return links
 }
 
+// CommandLinksWithFactsBalanced reads safe always-run plain bindings as
+// values. It is used by the client and balanced gateway; strict keeps the
+// narrower proof of CommandLinksWithFacts.
+func CommandLinksWithFactsBalanced(tool, command, cwd, home string, facts map[string]string) Links {
+	if command == "" || isApplyPatchToolName(tool) {
+		return Links{links: shellLinks{known: true}}
+	}
+	links := Links{links: commandLinksWithFactsBalanced(command, cwd, home, facts, false)}
+	if len(links.links.aliases) > 0 {
+		links.protected = newProtectedFiles(home)
+	}
+	return links
+}
+
 // OpaqueTargetWithFacts reports whether an unreadable link operation can
 // affect path. Such operations include a wrapper or multicall binary running
 // ln, an interpreter or Windows link call, an archive or sync link option, or
@@ -4132,6 +4191,32 @@ func SplitOpaqueScopeFacts(targets map[string]string) (rest, facts map[string]st
 // answers each name as the user-side hook's Resolve does.
 func (l Links) Known() bool {
 	return l.links.known && !l.links.opaque
+}
+
+// ProtectedCopyDestination reports a copy destination the link walk can
+// place on a protected file, including the child of an existing directory
+// when a plain source word has one known value.
+func (l Links) ProtectedCopyDestination(home string) bool {
+	if len(l.links.copyDestinations) == 0 && len(l.links.copyWrittenChildren) == 0 {
+		return false
+	}
+	return l.links.protectedCopyDestinationWith(newProtectedFiles(home))
+}
+
+func (l shellLinks) protectedCopyDestinationWith(protected protectedFiles) bool {
+	check := func(destinations []string) bool {
+		for _, destination := range destinations {
+			resolved, known := l.resolve(destination, protected)
+			if !known {
+				resolved, known = ResolveWriteTarget(destination)
+			}
+			if known && protected.has(resolved) {
+				return true
+			}
+		}
+		return false
+	}
+	return check(l.copyDestinations) || check(l.copyWrittenChildren)
 }
 
 // KnownOutsideScopes reports that Target answers path as the user-side

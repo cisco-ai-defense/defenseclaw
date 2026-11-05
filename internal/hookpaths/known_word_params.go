@@ -56,7 +56,7 @@ func literalProgramWord(word *syntax.Word, home string) (string, bool) {
 // unknown. command is the text file was parsed from; most commands leave at
 // its cheap gate.
 func knownWordParameterUses(command string, file *syntax.File, home string) map[*syntax.Word]bool {
-	uses, _ := knownWordParameters(command, file, home, nil, nil)
+	uses, _ := knownWordParameters(command, file, home, nil, nil, false)
 	return uses
 }
 
@@ -66,7 +66,7 @@ func knownWordParameterUses(command string, file *syntax.File, home string) map[
 // binds f for what follows as a top-level assignment does. The same holds
 // within a sole subshell (rel-1-0-6:GAP-0320, GAP-0362).
 func knownWordParameterUsesAt(command string, file *syntax.File, home string, cdOK func(string) bool, placed map[*syntax.CallExpr][]string) map[*syntax.Word]bool {
-	uses, _ := knownWordParameters(command, file, home, cdOK, placed)
+	uses, _ := knownWordParameters(command, file, home, cdOK, placed, false)
 	return uses
 }
 
@@ -120,11 +120,11 @@ func cdEnterable(cwd string, facts map[string]string, record bool) func(string) 
 // on the hook client and the gateway alike (rel-1-0-6:GAP-0235). A name
 // bound to more than one value has none.
 func knownWordParameterValues(command string, file *syntax.File, home string) map[*syntax.Word]string {
-	_, values := knownWordParameters(command, file, home, nil, nil)
+	_, values := knownWordParameters(command, file, home, nil, nil, false)
 	return values
 }
 
-func knownWordParameters(command string, file *syntax.File, home string, cdOK func(string) bool, placed map[*syntax.CallExpr][]string) (map[*syntax.Word]bool, map[*syntax.Word]string) {
+func knownWordParameters(command string, file *syntax.File, home string, cdOK func(string) bool, placed map[*syntax.CallExpr][]string, balanced bool) (map[*syntax.Word]bool, map[*syntax.Word]string) {
 	if file == nil || !mayHaveKnownCopyWord(command) {
 		return nil, nil
 	}
@@ -149,6 +149,40 @@ func knownWordParameters(command string, file *syntax.File, home string, cdOK fu
 	afterDirectory := map[string]bool{}
 	rejected := false
 	statements := file.Stmts
+	// A declared function whose body cannot rebind a name is evaluated at
+	// its direct call, not at the earlier declaration. This supplies a
+	// known value for a copy in the body without treating an unknown call
+	// as a proof.
+	balancedFunctions := map[string]*syntax.FuncDecl{}
+	functionUseAt := map[*syntax.Word]uint{}
+	if balanced {
+		for _, stmt := range file.Stmts {
+			if fn, ok := stmt.Cmd.(*syntax.FuncDecl); ok && fn.Name != nil &&
+				!slices.Contains(knownWordPrograms, fn.Name.Value) && balancedFunctionBody(fn, home) {
+				balancedFunctions[fn.Name.Value] = fn
+			}
+		}
+		for name, fn := range balancedFunctions {
+			var callAt uint
+			syntax.Walk(file, func(node syntax.Node) bool {
+				if call, ok := node.(*syntax.CallExpr); ok && call.Pos().Offset() > fn.End().Offset() && len(call.Args) == 1 {
+					if program, fixed := literalProgramWord(call.Args[0], home); fixed && program == name &&
+						(callAt == 0 || call.Pos().Offset() < callAt) {
+						callAt = call.Pos().Offset()
+					}
+				}
+				return true
+			})
+			if callAt != 0 {
+				syntax.Walk(fn.Body, func(node syntax.Node) bool {
+					if word, ok := node.(*syntax.Word); ok {
+						functionUseAt[word] = callAt
+					}
+					return true
+				})
+			}
+		}
+	}
 	subshellScope := false
 	if cdOK != nil && len(statements) == 1 && len(statements[0].Redirs) == 0 &&
 		!statements[0].Background && !statements[0].Negated && !statements[0].Coprocess {
@@ -222,7 +256,11 @@ func knownWordParameters(command string, file *syntax.File, home string, cdOK fu
 			return false
 		}
 		switch node := node.(type) {
-		case *syntax.FuncDecl, *syntax.ArithmCmd, *syntax.ArithmExp, *syntax.LetClause, *syntax.TestClause,
+		case *syntax.FuncDecl:
+			if !balanced || node.Name == nil || balancedFunctions[node.Name.Value] != node {
+				rejected = true
+			}
+		case *syntax.ArithmCmd, *syntax.ArithmExp, *syntax.LetClause, *syntax.TestClause,
 			*syntax.DeclClause, *syntax.CoprocClause, *syntax.ProcSubst:
 			rejected = true
 		case *syntax.Assign:
@@ -295,6 +333,17 @@ func knownWordParameters(command string, file *syntax.File, home string, cdOK fu
 				// parameter word (rel-1-0-6:GAP-0320, GAP-0362).
 				break
 			}
+			if balanced && static && program == "printf" && len(node.Args) >= 2 {
+				// printf without its binding option cannot change the
+				// caller's variable. A dynamic first argument may be -v.
+				option, fixed := StaticWord(node.Args[1], home)
+				if fixed && option != "" && !strings.HasPrefix(option, "-") {
+					break
+				}
+			}
+			if balanced && static && len(node.Args) == 1 && balancedFunctions[program] != nil {
+				break
+			}
 			if !static || !slices.Contains(knownWordPrograms, programBase(program)) {
 				rejected = true
 			}
@@ -347,6 +396,51 @@ func knownWordParameters(command string, file *syntax.File, home string, cdOK fu
 			}
 		}
 	}
+	// Within one AND chain, reaching a later call proves that the plain
+	// assignment in an earlier leg ran. This includes a chain beginning
+	// with a static directory change. The value is scoped to that chain:
+	// a statement after it may run even if the directory change failed.
+	chainAfter := map[string]uint{}
+	chainEnd := map[string]uint{}
+	if balanced {
+		validChain := true
+		var leaves func(*syntax.Stmt) []*syntax.Stmt
+		leaves = func(stmt *syntax.Stmt) []*syntax.Stmt {
+			if stmt == nil || stmt.Background || stmt.Negated || stmt.Coprocess {
+				validChain = false
+				return nil
+			}
+			if pair, ok := stmt.Cmd.(*syntax.BinaryCmd); ok && pair.Op == syntax.AndStmt {
+				return append(leaves(pair.X), leaves(pair.Y)...)
+			}
+			return []*syntax.Stmt{stmt}
+		}
+		for _, top := range statements {
+			validChain = true
+			chain := leaves(top)
+			if !validChain || len(chain) < 2 {
+				continue
+			}
+			if dir, ok := leadingDirectoryOperand(chain[0], home); ok && (cdOK == nil || !cdOK(dir)) {
+				continue
+			}
+			for _, stmt := range chain[:len(chain)-1] {
+				if len(stmt.Redirs) != 0 {
+					continue
+				}
+				call, ok := stmt.Cmd.(*syntax.CallExpr)
+				if !ok || len(call.Args) != 0 {
+					continue
+				}
+				for _, assign := range call.Assigns {
+					if assign.Name != nil && chainAfter[assign.Name.Value] == 0 {
+						chainAfter[assign.Name.Value] = stmt.End().Offset()
+						chainEnd[assign.Name.Value] = top.End().Offset()
+					}
+				}
+			}
+		}
+	}
 	uses := map[*syntax.Word]bool{}
 	values := map[*syntax.Word]string{}
 	syntax.Walk(file, func(node syntax.Node) bool {
@@ -381,13 +475,19 @@ func knownWordParameters(command string, file *syntax.File, home string, cdOK fu
 				continue
 			}
 			name, at := param.Param.Value, word.Pos().Offset()
+			if calledAt := functionUseAt[word]; calledAt != 0 {
+				at = calledAt
+			}
 			known := false
 			if end, bound := after[name]; bound && at > end {
 				// Only placed calls have client destination evidence after a
 				// directory change. A nested use must retain the unknown
 				// reading at a managed gateway (GAP-0402).
 				_, isPlaced := placed[call]
-				known = !afterDirectory[name] || isPlaced
+				known = !afterDirectory[name] || isPlaced || balanced
+			}
+			if balanced && at > chainAfter[name] && at < chainEnd[name] {
+				known = true
 			}
 			for _, body := range loops[name] {
 				known = known || at > body.from && at < body.to
@@ -406,6 +506,32 @@ func knownWordParameters(command string, file *syntax.File, home string, cdOK fu
 		return true
 	})
 	return uses, values
+}
+
+func balancedFunctionBody(fn *syntax.FuncDecl, home string) bool {
+	if fn == nil || fn.Body == nil {
+		return false
+	}
+	safe := true
+	syntax.Walk(fn.Body, func(node syntax.Node) bool {
+		if !safe {
+			return false
+		}
+		switch node := node.(type) {
+		case *syntax.Assign, *syntax.FuncDecl, *syntax.ForClause, *syntax.ArithmCmd,
+			*syntax.ArithmExp, *syntax.LetClause, *syntax.TestClause, *syntax.DeclClause,
+			*syntax.CoprocClause, *syntax.ProcSubst:
+			safe = false
+		case *syntax.CallExpr:
+			if len(node.Args) == 0 {
+				return true
+			}
+			program, fixed := literalProgramWord(node.Args[0], home)
+			safe = fixed && slices.Contains(knownWordPrograms, programBase(program))
+		}
+		return safe
+	})
+	return safe
 }
 
 // shellSpecialParameters are names bash sets itself (on every command, at
