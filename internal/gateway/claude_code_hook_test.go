@@ -121,6 +121,68 @@ func TestEvaluateClaudeCodeHook_AIDSubmissionDoesNotRequireVerdict(t *testing.T)
 	}
 }
 
+func TestEvaluateClaudeCodeHook_SubagentStartRetainsOnlyDistinctSubmittedContent(t *testing.T) {
+	tests := []struct {
+		name        string
+		payload     map[string]interface{}
+		wantContent string
+	}{
+		{name: "task matches event", payload: map[string]interface{}{"task": "same task", "task_description": "same task"}},
+		{name: "description matches event", payload: map[string]interface{}{"description": "same description", "task_description": "same description"}},
+		{name: "distinct event", payload: map[string]interface{}{"task": "canonical task", "task_description": "separate detail"}, wantContent: "separate detail"},
+		{name: "lifecycle fallback", payload: map[string]interface{}{"task_description": "event without task"}, wantContent: "event without task"},
+		{name: "task only", payload: map[string]interface{}{"task": "canonical task"}},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			var calls int
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				calls++
+				http.Error(w, "unavailable", http.StatusServiceUnavailable)
+			}))
+			t.Cleanup(server.Close)
+
+			cfg := &config.Config{}
+			cfg.Guardrail.Mode = "action"
+			cfg.Guardrail.Connector = "claudecode"
+			api := &APIServer{
+				scannerCfg: cfg,
+				ciscoInspector: &CiscoInspectClient{
+					apiKey:   "test-key",
+					endpoint: server.URL,
+					client:   server.Client(),
+				},
+			}
+			resp := api.evaluateClaudeCodeHook(t.Context(), claudeCodeHookRequest{
+				HookEventName: "SubagentStart",
+				Payload:       test.payload,
+			})
+			if calls != 1 {
+				t.Fatalf("AI Defense calls = %d, want 1", calls)
+			}
+			if resp.InspectedContent != test.wantContent || resp.InspectedContentPresent != (test.wantContent != "") {
+				t.Fatalf("SubagentStart content = (%q, %t), want (%q, %t)", resp.InspectedContent, resp.InspectedContentPresent, test.wantContent, test.wantContent != "")
+			}
+		})
+	}
+}
+
+func TestClaudeCodeSubagentPromptSelection(t *testing.T) {
+	for _, test := range []struct {
+		payload map[string]interface{}
+		want    string
+	}{
+		{map[string]interface{}{"task": "task", "prompt": "prompt", "description": "description"}, "task"},
+		{map[string]interface{}{"prompt": "prompt", "description": "description"}, "prompt"},
+		{map[string]interface{}{"description": "description"}, "description"},
+		{map[string]interface{}{}, "synthetic fallback"},
+	} {
+		if got := claudeCodeSubagentPrompt(claudeCodeHookRequest{Payload: test.payload}, "synthetic fallback"); got != test.want {
+			t.Fatalf("prompt selection for %+v = %q, want %q", test.payload, got, test.want)
+		}
+	}
+}
+
 func TestEvaluateClaudeCodeHook_DoesNotDuplicateCompanionCanonicalContent(t *testing.T) {
 	cfg := &config.Config{}
 	cfg.Guardrail.Mode = "action"
