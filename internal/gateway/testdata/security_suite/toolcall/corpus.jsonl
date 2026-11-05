@@ -699,3 +699,11 @@
 {"id":"credential-file-write-project-fixture","rule_id":"secrets.credential_file_write","tool":"write_file","args":{"path":"/repo/fixtures/.aws/credentials","content":"[default]\n"},"active_home":"/home/alice","is_attack":false,"expect_route":"none","no_other_finding":true}
 {"id":"credential-file-write-project-kubeconfig","rule_id":"secrets.credential_file_write","command":"printf x > /repo/.kube/config","is_attack":false,"expect_route":"none","no_other_finding":true}
 {"id":"credential-file-write-read-is-not-a-write","rule_id":"secrets.credential_file_write","command":"cat /home/alice/.aws/config","is_attack":false,"expect_route":"none"}
+{"id":"credential-file-write-npmrc-structured","rule_id":"secrets.credential_file_write","tool":"write_file","args":{"path":"/home/alice/.npmrc","content":"//registry.npmjs.org/:_authToken=x\n"},"active_home":"/home/alice","is_attack":true,"expect_route":"fallback"}
+{"id":"credential-file-write-git-credentials-append","rule_id":"secrets.credential_file_write","command":"printf x >> \"$HOME/.git-credentials\"","is_attack":true,"expect_route":"fallback"}
+{"id":"credential-file-write-gcloud-adc-copy","rule_id":"secrets.credential_file_write","command":"cp /repo/adc.json /home/alice/.config/gcloud/application_default_credentials.json","is_attack":true,"expect_route":"fallback"}
+{"id":"credential-file-write-gnupg-agent-conf","rule_id":"secrets.credential_file_write","command":"printf x > ~/.gnupg/gpg-agent.conf","is_attack":true,"expect_route":"fallback"}
+{"id":"credential-file-write-kubeconfig-move-away","rule_id":"secrets.credential_file_write","command":"mv /home/alice/.kube/config /repo/kubeconfig","is_attack":true,"expect_route":"fallback"}
+{"id":"credential-file-write-project-npmrc","rule_id":"secrets.credential_file_write","command":"printf x > /repo/.npmrc","is_attack":false,"expect_route":"none","no_other_finding":true}
+{"id":"credential-file-write-aws-cli-cache","rule_id":"secrets.credential_file_write","command":"printf x > /home/alice/.aws/cli/cache/token.json","is_attack":false,"expect_route":"none"}
+{"id":"credential-file-write-powershell-netrc","rule_id":"secrets.credential_file_write","command":"Add-Content -Path C:\\Users\\alice\\_netrc -Value x","dialect":"powershell","cwd":"C:\\repo","active_home":"C:\\Users\\alice","is_attack":true,"expect_route":"fallback"}

@@ -1490,7 +1490,7 @@ func sshPrivateKeyMutationPrerequisite(facts actionfacts.Facts) bool {
 		command, ok := integrityCommandByID(facts, candidate.CommandID)
 		if ok && !strings.EqualFold(command.Program, "ssh-keygen") &&
 			matchesActiveSSHPrivateKey(facts, candidate) &&
-			integrityCommandMutatesPath(command, candidate) {
+			credentialPathMutated(command, candidate) {
 			return true
 		}
 	}
@@ -2685,29 +2685,182 @@ func matchesSafeShellProfileCandidate(
 		value != "/etc/profile"
 }
 
-// credentialFileWritePrerequisite proves secrets.credential_file_write: an
-// executing write, append or delete of one of the CLI credential files in
-// the active user's home (gas-ux-r1:GAP-0052). The read owners of these
-// files (PATH-AWS-CREDS, PATH-KUBE, PATH-DOCKER) never see a write.
-var credentialFileWritePrerequisite = integrityMutationPrerequisite(matchesActiveCredentialFileWrite)
+// credentialFileWriteLeg is the write leg of credential read rules: the
+// active-home matcher their read owner uses, so the files a write is judged
+// on are the files a read is judged on.
+type credentialFileWriteLeg struct {
+	readRules []string
+	matches   integrityPathMatcher
+}
 
-// matchesActiveCredentialFileWrite is the AWS shared credentials or config
-// file, the kubeconfig or the Docker config in the active user's home: the
-// files the user's aws, kubectl and docker read.
+// credentialFileWriteLegs gives every credential read rule of the shipped
+// sensitive-path packs its write, append and delete leg in one rule,
+// secrets.credential_file_write (gas-ux-r1:GAP-0052). The read rules are
+// read-only by design (pathOwnerPrerequisite skips every non-read path
+// fact), and several are CRITICAL, so the leg is its own HIGH rule: it
+// alerts in balanced, so aws configure or kubectl config keep working, and
+// blocks in strict. TestEveryCredentialReadRuleHasAWriteLeg fails when a
+// credential read rule is in neither this table nor
+// credentialReadRulesWithoutFileWriteLeg.
+var credentialFileWriteLegs = []credentialFileWriteLeg{
+	{[]string{"PATH-AWS-CREDS", "PATH-WIN-AWS-CREDS"}, matchesActiveAWSCredentials},
+	{[]string{"PATH-AWS-CONFIG"}, matchesActiveHomeRelativeFile(".aws/config")},
+	{[]string{"PATH-KUBE", "PATH-WIN-KUBE-CONFIG"}, matchesActiveKubeConfig},
+	{[]string{"PATH-DOCKER", "PATH-NPMRC", "PATH-PYPIRC"}, matchesActivePackageCredentialFile},
+	{[]string{"PATH-GIT-CREDS", "PATH-NETRC", "PATH-WIN-GIT-CREDS", "PATH-WIN-NETRC"}, matchesActiveGitCredentialFile},
+	{[]string{"secrets.cloud_credential_read"}, matchesActiveCloudCredentialFile},
+	{[]string{"PATH-GNUPG"}, matchesActiveGnuPGFile},
+}
+
+// credentialReadRulesWithoutFileWriteLeg names the credential-tagged
+// sensitive-path rules that need no leg in credentialFileWriteLegs, and why.
+var credentialReadRulesWithoutFileWriteLeg = map[string]string{
+	"PATH-SSH-DIR":                           "is the write leg of SSH keys (sshDirectoryPrerequisite)",
+	"PATH-SSH-KEY":                           "its write leg is PATH-SSH-DIR (GAP-1666)",
+	"PATH-HISTORY":                           "owns history mutations itself",
+	"PATH-ETC-SHADOW":                        "owns shadow mutations itself (shadowContentAccessPrerequisite)",
+	"PATH-ENV-FILE":                          "creating or editing a project .env file is ordinary work",
+	"PATH-PROC-ENVIRON":                      "a process environment is not a writable file",
+	"PATH-PASSWORD-CRACKER-POTFILE":          "a recovered-password store no tool trusts for identity",
+	"secrets.cloud_metadata_credential_read": "a metadata endpoint, not a file",
+	"secrets.structured_credential_extract":  "an extraction tool, not a file",
+	"secrets.workload_identity_token_read":   "a read-only projected service-account mount",
+	"secrets.browser_session_store_read":     "browser stores: write detection is 1.0.10 (#1189)",
+	"secrets.credential_file_write":          "is the write leg",
+	"PATH-WIN-SSH-KEY":                       "its write leg is PATH-SSH-DIR (GAP-1666)",
+	"PATH-WIN-PS-HISTORY":                    "PATH-HISTORY owns history mutations",
+	"PATH-WIN-CREDENTIAL-MANAGER":            "an OS store written through its API: 1.0.10 (#1189)",
+	"PATH-WIN-DPAPI":                         "an OS store written through its API: 1.0.10 (#1189)",
+	"PATH-WIN-SAM":                           "a registry hive the OS holds open",
+	"PATH-WIN-SECURITY-HIVE":                 "a registry hive the OS holds open",
+	"PATH-WIN-SYSTEM-HIVE":                   "a registry hive the OS holds open",
+}
+
+// credentialFileWritePrerequisite proves secrets.credential_file_write: an
+// executing command that writes, appends, truncates, deletes, or copies,
+// moves or links onto a file of a credentialFileWriteLegs leg, or moves it
+// away (which deletes it as surely as rm).
+func credentialFileWritePrerequisite(facts actionfacts.Facts) bool {
+	for _, candidate := range facts.Paths {
+		command, ok := integrityCommandByID(facts, candidate.CommandID)
+		if !ok || !matchesActiveCredentialFileWrite(facts, candidate) {
+			continue
+		}
+		if credentialPathMutated(command, candidate) {
+			return true
+		}
+	}
+	return false
+}
+
+// credentialPathMutated reports a command that changes the credential file
+// at candidate: it writes, appends, truncates or deletes it, copies, moves
+// or links onto it (integrityCommandMutatesPath), or moves it away, which
+// removes it as surely as rm does.
+func credentialPathMutated(command actionfacts.CommandFact, candidate actionfacts.PathFact) bool {
+	return integrityCommandMutatesPath(command, candidate) ||
+		command.Effect == actionfacts.EffectExecute &&
+			candidate.Access == actionfacts.PathAccessDelete &&
+			hasOperation(command, actionfacts.OperationMove)
+}
+
+// credentialLinkWriteLegs are the credential write legs a write through a
+// link reaches: the rule and its proof on the linked target.
+var credentialLinkWriteLegs = []struct {
+	ruleID string
+	proves func(actionfacts.Facts) bool
+}{
+	{"secrets.credential_file_write", credentialFileWritePrerequisite},
+	{"PATH-SSH-DIR", sshPrivateKeyMutationPrerequisite},
+}
+
+// appendTrustedCredentialLinkWriteFinding judges a write whose operand is a
+// link onto a credential file as a write of that file. The hook client
+// resolves every absolute write operand as the user
+// (request.ResolvedWriteTargets, hookpaths.ResolveConnector), so the same
+// evidence serves a per-user gateway and a managed one behind ProtectHome.
+func appendTrustedCredentialLinkWriteFinding(
+	findings []RuleFinding,
+	generation *compiledRulePackCategories,
+	request trustedActionRequest,
+	facts actionfacts.Facts,
+) []RuleFinding {
+	if len(request.ResolvedWriteTargets) == 0 || !facts.Authoritative() {
+		return findings
+	}
+	linked := facts
+	linked.Paths = append([]actionfacts.PathFact(nil), facts.Paths...)
+	changed := false
+	for index, candidate := range linked.Paths {
+		operand := candidate.Resolved
+		if operand == "" {
+			operand = candidate.Normalized
+		}
+		target := request.ResolvedWriteTargets[operand]
+		if target == "" || target == operand || !isAbsoluteSemanticPath(canonicalSemanticPath(target)) {
+			continue
+		}
+		candidate.Resolved = target
+		linked.Paths[index] = candidate
+		changed = true
+	}
+	if !changed {
+		return findings
+	}
+	for _, leg := range credentialLinkWriteLegs {
+		if findingWithRuleID(findings, leg.ruleID) || !leg.proves(linked) {
+			continue
+		}
+		_, rule, ok := trustedActionCatalogRule(generation, leg.ruleID)
+		if !ok {
+			continue
+		}
+		enforcement := findingEnforcementAllowed
+		if !request.EnforcementCapable {
+			enforcement = findingEnforcementDetectionOnly
+		}
+		findings = append(findings, adjustConfidence(request.Input.Tool, RuleFinding{
+			RuleID: rule.ID, Title: rule.Title, Severity: rule.Severity, Confidence: rule.Confidence,
+			Evidence: trustedActionInputText(request.Input, ""), Tags: append([]string(nil), rule.Tags...),
+			LineNumber: 1, enforcement: enforcement,
+		}))
+	}
+	return findings
+}
+
+func findingWithRuleID(findings []RuleFinding, ruleID string) bool {
+	for _, finding := range findings {
+		if finding.RuleID == ruleID {
+			return true
+		}
+	}
+	return false
+}
+
 func matchesActiveCredentialFileWrite(
 	facts actionfacts.Facts,
 	candidate actionfacts.PathFact,
 ) bool {
+	for _, leg := range credentialFileWriteLegs {
+		if leg.matches(facts, candidate) {
+			return true
+		}
+	}
+	return false
+}
+
+func matchesActiveHomeRelativeFile(relative string) integrityPathMatcher {
+	return func(facts actionfacts.Facts, candidate actionfacts.PathFact) bool {
+		got, ok := activeHomeRelative(facts, candidate)
+		return ok && got == relative
+	}
+}
+
+// matchesActiveGnuPGFile is a file in the active user's ~/.gnupg (keyrings,
+// gpg.conf, gpg-agent.conf), as PATH-GNUPG names the folder.
+func matchesActiveGnuPGFile(facts actionfacts.Facts, candidate actionfacts.PathFact) bool {
 	relative, ok := activeHomeRelative(facts, candidate)
-	if !ok {
-		return false
-	}
-	switch relative {
-	case ".aws/config", ".kube/config", ".docker/config.json":
-		return true
-	}
-	name, ok := strings.CutPrefix(relative, ".aws/")
-	return ok && matchesAWSCredentialsName(name)
+	return ok && strings.HasPrefix(relative, ".gnupg/") && relative != ".gnupg/"
 }
 
 func matchesGitHookCandidate(value string) bool {
