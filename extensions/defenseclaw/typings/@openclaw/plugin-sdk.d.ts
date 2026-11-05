@@ -71,8 +71,6 @@ declare module "@openclaw/plugin-sdk" {
     on(event: string, handler: (...args: any[]) => void | Promise<void>): void;
     registerCommand(def: CommandRegistration): void;
     registerService(def: ServiceRegistration): void;
-    /** OpenClaw plugin configuration (see openclaw.plugin.json configSchema). */
-    getPluginConfig?: () => Promise<Record<string, unknown>>;
     /** VS Code–style extension globalState for stable ids (optional). */
     globalState?: {
       get(key: string): unknown;

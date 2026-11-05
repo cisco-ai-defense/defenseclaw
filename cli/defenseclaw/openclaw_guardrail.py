@@ -56,6 +56,27 @@ from contextlib import contextmanager
 from pathlib import Path
 
 
+def _remove_defenseclaw_entry_keys(entries: dict) -> bool:
+    """Take back what setup wrote under ``plugins.entries.defenseclaw``.
+
+    Removes only ``enabled`` and drops the entry when nothing an operator
+    wrote (hooks, config) is left, or when it is not an object. Same rule as
+    ``removeDefenseClawEntryKeys`` in the Go OpenClaw connector, so the Go
+    ``VerifyClean`` never sees an ``enabled`` residue. Returns True when an
+    entry was present.
+    """
+    if "defenseclaw" not in entries:
+        return False
+    entry = entries["defenseclaw"]
+    if not isinstance(entry, dict):
+        del entries["defenseclaw"]
+        return True
+    entry.pop("enabled", None)
+    if not entry:
+        del entries["defenseclaw"]
+    return True
+
+
 def patch_openclaw_config(
     openclaw_config_file: str,
     model_name: str,  # kept for API compat — no longer used (fetch interceptor handles routing)
@@ -106,12 +127,17 @@ def patch_openclaw_config(
     if "defenseclaw" not in allow:
         allow.append("defenseclaw")
 
-    # Re-enable plugin entry (may have been disabled by restore_openclaw_config).
-    entries = plugins.setdefault("entries", {})
-    if "defenseclaw" not in entries:
-        entries["defenseclaw"] = {"enabled": True}
+    # Merge plugins.entries.defenseclaw: set enabled=true and keep any other
+    # key an operator wrote (hooks, config). A null or non-object entry is
+    # treated as absent (GAP-0598, matches the Go connector).
+    entries = plugins.get("entries")
+    if not isinstance(entries, dict):
+        entries = plugins["entries"] = {}
+    entry = entries.get("defenseclaw")
+    if isinstance(entry, dict):
+        entry["enabled"] = True
     else:
-        entries["defenseclaw"]["enabled"] = True
+        entries["defenseclaw"] = {"enabled": True}
 
     oc_home = os.path.dirname(path)
     install_path = os.path.join(oc_home, "extensions", "defenseclaw")
@@ -155,9 +181,9 @@ def restore_openclaw_config(openclaw_config_file: str, original_model: str) -> b
         allow = plugins.get("allow", [])
         if "defenseclaw" in allow:
             allow.remove("defenseclaw")
-        entries = plugins.get("entries", {})
-        if "defenseclaw" in entries:
-            entries["defenseclaw"]["enabled"] = False
+        entries = plugins.get("entries")
+        if isinstance(entries, dict):
+            _remove_defenseclaw_entry_keys(entries)
         oc_home = os.path.dirname(path)
         install_path = os.path.join(oc_home, "extensions", "defenseclaw")
         paths = plugins.get("load", {}).get("paths", [])
@@ -262,9 +288,8 @@ def _unregister_plugin_from_config(openclaw_config: str) -> None:
     plugins = cfg.get("plugins", {})
     changed = False
 
-    entries = plugins.get("entries", {})
-    if "defenseclaw" in entries:
-        del entries["defenseclaw"]
+    entries = plugins.get("entries")
+    if isinstance(entries, dict) and _remove_defenseclaw_entry_keys(entries):
         changed = True
 
     installs = plugins.get("installs", {})
