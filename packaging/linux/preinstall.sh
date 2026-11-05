@@ -65,7 +65,11 @@ fi
 # created the root-owned rollback marker; the postinstall then applies the
 # package with --allow-downgrade and deletes the marker. The release build
 # stamps the package version below (.goreleaser.yaml); an unstamped copy
-# leaves the refusal to the postinstall ensure.
+# leaves the refusal to the postinstall ensure. The refusal starts with the
+# lifecycle code downgrade_refused, as Windows Setup and the macOS package
+# report it; rpm, dnf and apt print it, and it is not written to
+# last-package-result.json, which keeps the result of the package that is
+# applied (GAP-0582).
 package_version="@DC_PKG_VERSION@"
 state=/var/lib/defenseclaw-enterprise
 record="$state/deployment.json"
@@ -250,7 +254,7 @@ case "$package_version" in
         if root_owned "$record" && ! root_owned "$marker"; then
             installed=$(sed -n 's/.*"product_version": *"\([^"]*\)".*/\1/p' "$record" 2>/dev/null | head -n 1)
             if [ -n "$installed" ] && ! not_older "$package_version" "$installed"; then
-                echo "defenseclaw-enterprise: DefenseClaw $installed is deployed; refusing to downgrade to $package_version. Nothing was changed. For a deliberate rollback, create the rollback marker first (sudo touch $marker) and install this package again: it is then applied with 'enterprise linux ensure --from-package --allow-downgrade'." >&2
+                echo "defenseclaw-enterprise: downgrade_refused: DefenseClaw $installed is deployed; refusing to downgrade to $package_version. Nothing was changed. For a deliberate rollback, create the rollback marker first (sudo touch $marker) and install this package again: it is then applied with 'enterprise linux ensure --from-package --allow-downgrade'." >&2
                 exit 1
             fi
         fi

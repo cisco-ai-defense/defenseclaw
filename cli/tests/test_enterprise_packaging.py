@@ -1220,7 +1220,11 @@ def test_linux_preinstall_refuses_a_downgrade_without_the_rollback_marker(tmp_pa
     refused = host.run(script.replace("@DC_PKG_VERSION@", older), "2")
     assert refused.returncode == 1
     assert "Nothing was changed" in refused.stderr and "--allow-downgrade" in refused.stderr
+    # GAP-0582: rpm and dnf print the lifecycle code the docs name for every
+    # lifecycle; the refusal changes nothing, the package result included.
+    assert f"downgrade_refused: DefenseClaw {deployed} is deployed; refusing to downgrade to {older}." in refused.stderr
     assert host.calls() == []
+    assert sorted(p.name for p in host.state.iterdir()) == ["deployment.json"]
     assert host.run(script.replace("@DC_PKG_VERSION@", deployed), "2").returncode == 0
     marker = host.state / "allow-downgrade"
     marker.write_text("", encoding="utf-8")
@@ -1403,7 +1407,7 @@ def test_linux_apt_hook_refuses_a_deb_downgrade_unless_the_marker_exists(
     assert result.returncode == exit_code, (result.stdout, result.stderr)
     assert allow.exists() == marker  # left for the older package's preinstall and postinstall (GAP-1115)
     if exit_code:
-        assert f"refusing to downgrade to {line.split()[3]}" in result.stderr
+        assert f"downgrade_refused: {line.split()[1]} is installed; refusing to downgrade to {line.split()[3]}." in result.stderr
         assert f"sudo touch {allow}" in result.stderr
         assert "postinstall applies it" in result.stderr
         assert f"--config {previous_config if backup else config}" in result.stderr
