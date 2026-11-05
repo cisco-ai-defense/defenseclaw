@@ -194,6 +194,16 @@ cmd.exe asks this whenever Ctrl+C reaches a batch file. This happens when you ru
 
 </Accordion>
 
+<Accordion title="init stops: a rollback source is not protected">
+
+Before it changes anything, `defenseclaw init` reads the files it may have to put back. It refuses one in `%USERPROFILE%\.defenseclaw` that another account could change, such as a `hook_contract_lock.json` you copied there or made by hand, and names it: `hook_contract_lock.json rollback source is not protected: <path> is not protected the way DefenseClaw writes its files`. It does not move or delete the file for you.
+
+**Fix.** Move the named file out of the folder, or delete it if you did not create it, then run `defenseclaw init` again. Files a removed managed install left are moved aside on the first run, to `%USERPROFILE%\.defenseclaw-managed-leftovers-<UTC time>`.
+
+**Check.** `defenseclaw init` finishes and `defenseclaw doctor` shows no failures.
+
+</Accordion>
+
 <Accordion title="An install, upgrade or rollback fails">
 
 **Fix.** Read the newest `%USERPROFILE%\.defenseclaw\logs\install-*.log`. A failed upgrade restores the previous install and keeps the attempt in `%USERPROFILE%\.defenseclaw\.failed-<time>`. To remove it, run `cmd /c rd /s /q "%USERPROFILE%\.defenseclaw\.failed-<time>"` (`Remove-Item -Force` stops at the copy's read-only key file). Close the TUI and other DefenseClaw commands if the installer reports files in use, then run the install command again.

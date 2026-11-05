@@ -189,7 +189,15 @@ def test_first_run_refuses_the_leftover_as_its_rollback_source(tmp_path):
     report = _first_run(data_dir)
     assert report.status == "needs_attention"
     step = next(s for s in report.setup if s.name == "First-run transaction")
-    assert "hook_contract_lock.json rollback source is not private" in step.detail
+    lock = data_dir / "hook_contract_lock.json"
+    # GAP-0074: the first run names the file and the command that fixes it.
+    assert step.detail == (
+        "could not establish the protected first-run rollback point: "
+        "hook_contract_lock.json rollback source is not private: "
+        f"other accounts can read or change {lock}; make it owner-only (chmod 600 {lock}) "
+        "and run defenseclaw init again"
+    )
+    assert lock.stat().st_mode & 0o777 == 0o666
 
 
 @pytest.mark.skipif(os.name == "nt", reason="the unprotected stand-in lock uses POSIX modes")
@@ -280,3 +288,66 @@ def test_managed_custody_reads_the_windows_access_list(tmp_path):
     assert managed_leftovers.managed_custody(str(plain)) is False
     assert managed_leftovers.managed_custody(str(managed)) is True
     assert managed_leftovers.managed_custody(str(other)) is False
+
+
+class _WindowsOs:
+    """``os`` as cmd_setup sees it on Windows; everything else is the real module."""
+
+    name = "nt"
+
+    def __getattr__(self, attribute):
+        return getattr(os, attribute)
+
+
+_MOVE_OR_DELETE = "Move it out of the folder, or delete it if you did not create it, then"
+
+
+def _plain_lock(tmp_path: Path) -> Path:
+    lock = Path(os.path.realpath(tmp_path)) / "hook_contract_lock.json"
+    lock.write_text("{}", encoding="utf-8")
+    return lock
+
+
+def test_an_unprotected_windows_rollback_source_names_the_file_and_the_way_out(tmp_path):
+    # cowork-1-0-8 GAP-0074: a plain hook_contract_lock.json the user made is
+    # still refused; the first run now says which file and what to do.
+    from defenseclaw.commands import cmd_setup
+
+    lock = _plain_lock(tmp_path)
+    with (
+        patch.object(cmd_setup, "os", _WindowsOs()),
+        patch.object(
+            cmd_setup, "windows_acl_write_error", return_value="owner SID S-1-5-32-544 is not the current user"
+        ),
+        pytest.raises(cmd_setup.RollbackSourceRefusedError) as raised,
+    ):
+        cmd_setup._capture_protected_setup_file(str(lock), 1 << 20, "hook_contract_lock.json")
+    assert raised.value.for_user("defenseclaw init") == (
+        f"hook_contract_lock.json rollback source is not protected: {lock} is not protected the way "
+        f"DefenseClaw writes its files. {_MOVE_OR_DELETE} run defenseclaw init again"
+    )
+    # Setup commands wrap and record the plain message, which names no path.
+    assert str(raised.value) == (
+        "hook_contract_lock.json rollback source is not protected: the file is not protected the way "
+        f"DefenseClaw writes its files. {_MOVE_OR_DELETE} run the command again"
+    )
+    assert lock.read_text(encoding="utf-8") == "{}"  # never moved or deleted for the user
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX owners")
+def test_a_foreign_owned_rollback_source_is_worded_the_same(tmp_path):
+    from defenseclaw.commands import cmd_setup
+
+    lock = _plain_lock(tmp_path)
+    lock.chmod(0o600)
+    with (
+        patch.object(cmd_setup, "trusted_runtime_owner", return_value=False),
+        pytest.raises(cmd_setup.RollbackSourceRefusedError) as raised,
+    ):
+        cmd_setup._capture_protected_setup_file(str(lock), 1 << 20, "hook_contract_lock.json")
+    assert raised.value.for_user("defenseclaw init") == (
+        f"hook_contract_lock.json rollback source is not owned by a trusted principal: {lock} is not "
+        f"protected the way DefenseClaw writes its files. {_MOVE_OR_DELETE} run defenseclaw init again"
+    )
+    assert str(lock) not in str(raised.value)
+    assert lock.exists()
