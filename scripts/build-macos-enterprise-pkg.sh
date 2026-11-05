@@ -217,7 +217,7 @@ cat >"$SCRIPTS/preinstall" <<'EOF'
 #!/bin/sh
 if [ -e /opt/cisco/secureclient/defenseclaw ] ||
     ls /Library/LaunchDaemons/com.cisco.secureclient.defenseclaw*.plist >/dev/null 2>&1; then
-    echo "DefenseClaw is already managed by Cisco Secure Client on this Mac; the standalone package cannot be installed beside it." >&2
+    echo "profile_conflict: DefenseClaw is already managed by Cisco Secure Client on this Mac; the standalone package cannot be installed beside it." >&2
     exit 1
 fi
 state=/opt/cisco/defenseclaw/lifecycle
@@ -333,6 +333,11 @@ fi
 refuse() {
     code=$1 said=${3:-$2}
     message=$(printf '%s' "$2" | tr -d '"\\|&')
+    # install.log names the code too, as the Linux packages print it (GAP-0582).
+    case $said in
+        "defenseclaw-enterprise: "*) said="defenseclaw-enterprise: $code: ${said#defenseclaw-enterprise: }" ;;
+        *) said="$code: $said" ;;
+    esac
     echo "$said" >&2
     umask 077
     result="$state/last-package-result.json"

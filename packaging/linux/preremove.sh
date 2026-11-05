@@ -288,15 +288,15 @@ if [ -x "$gateway" ] && [ -d /run/systemd/system ]; then
     fi
     rm -rf "$work"
     if [ "$status" = 75 ]; then
-        echo "defenseclaw-enterprise: another DefenseClaw lifecycle run held the lock for 8 minutes; nothing was removed. Retry the removal." >&2
+        echo "defenseclaw-enterprise: lifecycle_busy: another DefenseClaw lifecycle run held the lock for 8 minutes; nothing was removed. Retry the removal." >&2
         exit 1
     fi
     if [ "$precheck_refused" = 1 ]; then
-        echo "defenseclaw-enterprise: hook-removal precheck refused; package files were kept. See $state/last-package-result.json and retry removal after fixing the listed accounts." >&2
+        echo "defenseclaw-enterprise: uninstall_precheck_refused: hook-removal precheck refused; package files were kept. See $state/last-package-result.json and retry removal after fixing the listed accounts." >&2
         exit 1
     fi
     if [ "$incomplete" = 1 ]; then
-        echo "defenseclaw-enterprise: the uninstall stopped before removing the binaries, because per-user hook registrations or vendor machine policy still name them; package files were kept and the services started again. See $state/last-package-result.json, fix the cause it names and retry the removal." >&2
+        echo "defenseclaw-enterprise: uninstall_incomplete: the uninstall stopped before removing the binaries, because per-user hook registrations or vendor machine policy still name them; package files were kept and the services started again. See $state/last-package-result.json, fix the cause it names and retry the removal." >&2
         exit 1
     fi
     [ "$status" = 0 ] ||
