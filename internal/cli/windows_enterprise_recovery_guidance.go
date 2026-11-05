@@ -443,7 +443,7 @@ func windowsEnterpriseInstallerBuildMismatchText(message, action string, purge b
 	}
 	return "this CLI does not match the installed DefenseClaw: the enterprise installer module it carries is not the one the installed deployment recorded" +
 		" (a CLI from another DefenseClaw build, or a changed module file), so the " + action + " stopped before it changed anything." +
-		" Next step: run the installed CLI, " + windowsEnterpriseAdminCommand(action, flags...) +
+		" Next step: from an elevated PowerShell prompt run the installed CLI, " + windowsEnterpriseAdminCommand(action, flags...) +
 		", or the DefenseClaw Setup of the installed release; to move to another release, run that release's Setup", true
 }
 

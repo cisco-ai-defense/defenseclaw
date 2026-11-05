@@ -106,7 +106,7 @@ func windowsEnterpriseHookRuntimeDriftMessage(dir string, drift enterprisepolicy
 	}
 	return dir + ": " + strings.Join(parts, "; ") +
 		". Every enrolled user's agent hook refuses the machine policy summary in it (enterprise_machine_policy_summary_untrusted) and fails closed." +
-		" Fix: run " + windowsEnterpriseAdminCommand("repair") + ", which writes the folder's permissions back, or " + fix
+		" Fix: from an elevated PowerShell prompt run " + windowsEnterpriseAdminCommand("repair") + ", which writes the folder's permissions back, or " + fix
 }
 
 // applyWindowsEnterpriseHookRuntimeAccess fails status and verify on a
@@ -140,7 +140,7 @@ func windowsEnterpriseHookRuntimeMissing() string {
 	}
 	return dir + " is missing. It holds the machine policy summary (" + enterprisepolicy.PublicPolicyFileName +
 		") every enrolled user's agent hook reads; without it the hook skips its foreign-hook check." +
-		" Fix: run " + windowsEnterpriseAdminCommand("repair") + "; the hook guardian writes the folder and the summary back"
+		" Fix: from an elevated PowerShell prompt run " + windowsEnterpriseAdminCommand("repair") + "; the hook guardian writes the folder and the summary back"
 }
 
 // repairWindowsEnterpriseHookRuntimeAccess writes the hook runtime folder's

@@ -23,6 +23,7 @@ import (
 
 	"github.com/spf13/cobra"
 
+	"github.com/defenseclaw/defenseclaw/internal/enterprisestatus"
 	"github.com/defenseclaw/defenseclaw/internal/managed"
 )
 
@@ -109,7 +110,8 @@ func TestManagedWindowsSetupAnswer(t *testing.T) {
 		// GAP-0523: the refusals name the administrator's view of the rules.
 		{root, "skill", []string{"list"}, "defenseclaw.exe' policy show`. Nothing was changed."},
 		{root, "mcp", []string{"allow", "x"}, "mcp allow did not change it. The admission policy"},
-		{root, "plugin", []string{"scan", "--json", `C:\p`}, "defenseclaw.exe' scan plugin <path>`, which runs the gateway's plugin scanner"},
+		{root, "plugin", []string{"scan", "--json", `C:\p`}, "an administrator scans a plugin from an elevated PowerShell prompt with `& '" + managedWindowsAdminCLI() +
+			"' scan plugin <path>` (a folder outside the user profiles; copy it out first), which runs the gateway's plugin scanner"},
 	} {
 		child, _, err := tc.parent.Find([]string{tc.name})
 		if err != nil || child == tc.parent {
@@ -528,8 +530,10 @@ func TestManagedWindowsStatusAnswerNamesTheStandardUserStatus(t *testing.T) {
 // PowerShell on a managed Windows computer: a bare `defenseclaw` or
 // `defenseclaw-gateway` (Setup puts neither on PATH), a `& '<path>' ...`
 // whose path is not the installed defenseclaw.exe or the
-// defenseclaw-gateway.exe beside it or that has no arguments, and an
-// unbalanced backtick (cowork-1-0-8 GAP-0076).
+// defenseclaw-gateway.exe beside it or that has no arguments, an unbalanced
+// backtick, and a `& '...'` command in text that does not say PowerShell
+// (cmd.exe answers "& was unexpected at this time") or, when it says
+// elevated, not an elevated PowerShell prompt (cowork-1-0-8 GAP-0076).
 func managedWindowsCommandProblems(text string) []string {
 	cli := managedWindowsAdminCLI()
 	gateway := cli[:strings.LastIndexAny(cli, `/\`)+1] + "defenseclaw-gateway.exe"
@@ -537,6 +541,14 @@ func managedWindowsCommandProblems(text string) []string {
 	var problems []string
 	if len(parts)%2 == 0 {
 		problems = append(problems, "unbalanced backtick")
+	}
+	if strings.Contains(text, "& '") {
+		switch {
+		case !strings.Contains(text, "PowerShell"):
+			problems = append(problems, "a PowerShell command in text that does not say PowerShell")
+		case strings.Contains(text, "elevated") && !strings.Contains(text, "elevated PowerShell prompt"):
+			problems = append(problems, "an elevated prompt that is not named an elevated PowerShell prompt")
+		}
 	}
 	for index := 1; index < len(parts); index += 2 {
 		span := strings.TrimSpace(parts[index])
@@ -589,7 +601,12 @@ func TestManagedWindowsRefusalsNameRunnableCommands(t *testing.T) {
 	answers["mutation repair"] = windowsEnterpriseStandardUserMutationAnswer("repair", "--attest-claude-effective-policy")
 	answers["unchecked health"] = windowsEnterpriseUncheckedHealthMessage("standalone", false)
 	answers["unchecked health untrusted pwsh"] = windowsEnterpriseUncheckedHealthMessage("standalone", true)
-	answers["admin command"] = windowsEnterpriseAdminCommand("repair")
+	answers["stopped service next step"] = windowsEnterpriseStoppedServiceNextStep([]enterprisestatus.Service{
+		{Name: "DefenseClawHookGuardian", Kind: "guardian", State: "stopped", Required: true}})
+	answers["not healthy"] = windowsEnterpriseNotHealthyMessage(nil, 1)
+	if text, ok := windowsEnterpriseInstallerBuildMismatchText("installer module SHA-256 does not match the pinned payload manifest", "uninstall", true); ok {
+		answers["build mismatch"] = text
+	}
 	if err := refusePerUserGatewayOnManagedHost(); err != nil {
 		answers["per-user gateway"] = err.Error()
 	}
@@ -634,21 +651,107 @@ func TestManagedWindowsRefusalsNameRunnableCommands(t *testing.T) {
 	if !applyManagedHostHelp(help) || !strings.Contains(help.Long, "& '"+managedWindowsAdminCLI()+"' enterprise windows status --profile standalone") {
 		t.Fatalf("managed root help = %q", help.Long)
 	}
-	// The checker itself: a bare command, a wrong path and a path with no
-	// arguments are problems; the installed CLI and gateway are not.
+	// The checker itself: a bare command, a wrong path, a path with no
+	// arguments and a command without its shell are problems; the installed
+	// CLI and gateway in PowerShell are not.
 	gateway := strings.TrimSuffix(managedWindowsAdminCLI(), "defenseclaw.exe") + "defenseclaw-gateway.exe"
 	for text, want := range map[string]int{
-		"run `defenseclaw status`":                                  1,
-		"run `defenseclaw-gateway.exe enterprise windows status`":   1,
-		"run `& 'C:\\Tools\\defenseclaw.exe' status`":               1,
-		"run `& '" + managedWindowsAdminCLI() + "'`":                1,
-		"run `& '" + managedWindowsAdminCLI() + "' status`":         0,
-		"run `& '" + gateway + "' enterprise windows sandbox list`": 0,
-		"so `status` has no per-user deployment":                    0,
-		"an `unbalanced span":                                       1,
+		"run `defenseclaw status`":                                                        1,
+		"run `defenseclaw-gateway.exe enterprise windows status`":                         1,
+		"in PowerShell run `& 'C:\\Tools\\defenseclaw.exe' status`":                       1,
+		"in PowerShell run `& '" + managedWindowsAdminCLI() + "'`":                        1,
+		"in PowerShell run `& '" + managedWindowsAdminCLI() + "' status`":                 0,
+		"in PowerShell run `& '" + gateway + "' enterprise windows sandbox list`":         0,
+		"run `& '" + managedWindowsAdminCLI() + "' status`":                               1,
+		"from an elevated prompt run `& '" + managedWindowsAdminCLI() + "' status`":       1,
+		"from an elevated PowerShell prompt run `& '" + managedWindowsAdminCLI() + "' x`": 0,
+		"so `status` has no per-user deployment":                                          0,
+		"an `unbalanced span":                                                             1,
 	} {
 		if got := len(managedWindowsCommandProblems(text)); got != want {
 			t.Errorf("managedWindowsCommandProblems(%q) = %d problems, want %d", text, got, want)
+		}
+	}
+}
+
+// cowork-1-0-8 GAP-0076: the skill, mcp and plugin scan answer named a
+// command the people who get it cannot run: a standard account is refused,
+// the gateway service refuses a folder inside a user profile, and cmd.exe
+// cannot run the `&` form. It says an administrator runs it from an elevated
+// PowerShell prompt, on a copy outside the user profiles, and names an MCP
+// server as one.
+func TestManagedWindowsScanAnswerNamesTheElevatedPowerShellPrompt(t *testing.T) {
+	restore, restoreAccount, restoreReport := managedHostWindowsStandalone, managedHostCurrentAccount, reportManagedCommandRefusal
+	t.Cleanup(func() {
+		managedHostWindowsStandalone, managedHostCurrentAccount, reportManagedCommandRefusal = restore, restoreAccount, restoreReport
+	})
+	managedHostWindowsStandalone = func() (string, bool) { return `HKLM\SOFTWARE\Cisco\DefenseClaw\Enterprise`, true }
+	reportManagedCommandRefusal = func(string, string) {}
+	t.Setenv(managed.DeploymentModeEnv, "")
+	t.Setenv(managed.ConfigPathEnv, "")
+	cli := managedWindowsAdminCLI()
+	for _, account := range []string{`HOST\std1`, `HOST\dcadmin`} {
+		managedHostCurrentAccount = func() string { return account }
+		root := &cobra.Command{Use: "defenseclaw", PersistentPreRunE: rootPersistentPreRunE}
+		root.SetOut(io.Discard)
+		root.SetErr(io.Discard)
+		addManagedWindowsSetupAnswer(root)
+		for _, row := range []struct {
+			args []string
+			want []string
+		}{
+			{[]string{"skill", "scan", `C:\Users\std1\.claude\skills\x`}, []string{
+				"an administrator scans a skill from an elevated PowerShell prompt with `& '" + cli + "' scan skill <path>`",
+				"(a folder outside the user profiles; copy it out first), which runs the gateway's skill scanner"}},
+			{[]string{"plugin", "scan", "--json", `C:\p`}, []string{
+				"an administrator scans a plugin from an elevated PowerShell prompt with `& '" + cli + "' scan plugin <path>`",
+				"(a folder outside the user profiles; copy it out first), which runs the gateway's plugin scanner"}},
+			{[]string{"mcp", "scan", "https://example.test/mcp"}, []string{
+				"an administrator scans an MCP server from an elevated PowerShell prompt with `& '" + cli + "' scan mcp <url>`, which runs the gateway's MCP scanner"}},
+		} {
+			root.SetArgs(row.args)
+			err := root.Execute()
+			if err == nil || commandExitCode(err) != 3 {
+				t.Fatalf("%s: %v gave %v, want the exit 3 answer", account, row.args, err)
+			}
+			for _, want := range row.want {
+				if !strings.Contains(err.Error(), want) {
+					t.Errorf("%s: %v answer lacks %q: %s", account, row.args, want, err)
+				}
+			}
+			if problems := managedWindowsCommandProblems(err.Error()); len(problems) > 0 || strings.Contains(err.Error(), "a mcp") {
+				t.Errorf("%s: %v answer %q: %s", account, row.args, problems, err)
+			}
+		}
+	}
+}
+
+// cowork-1-0-8 GAP-0076: the account a managed Windows answer names in its
+// command is one PowerShell argument, as typed: "John Smith" was two
+// arguments, "O'Brien" broke the quoting and "svc$" expanded as a variable.
+func TestManagedWindowsAnswersQuoteTheAccount(t *testing.T) {
+	restoreAccount := managedHostCurrentAccount
+	t.Cleanup(func() { managedHostCurrentAccount = restoreAccount })
+	where := `HKLM\SOFTWARE\Cisco\DefenseClaw\Enterprise`
+	for account, want := range map[string]string{
+		`HOST\John Smith`: "--user 'John Smith'`",
+		`HOST\O'Brien`:    "--user 'O''Brien'`",
+		`HOST\svc$`:       "--user 'svc$'`",
+		`HOST\dcadmin`:    "--user dcadmin`",
+	} {
+		managedHostCurrentAccount = func() string { return account }
+		for name, answer := range map[string]string{
+			"status":  managedWindowsAdminCommandAnswer(where, "status").Error(),
+			"tui":     managedWindowsTUIAnswer(where).Error(),
+			"inspect": windowsEnterpriseStandardUserInspectionAnswer("verify"),
+			"sandbox": windowsManagedStandardUserViewAnswer("The sandbox registrations", "enterprise", "windows", "sandbox", "list", "--user", managedHostCurrentAccountName()),
+		} {
+			if !strings.Contains(answer, want) {
+				t.Errorf("%s: %s answer lacks %q: %s", account, name, want, answer)
+			}
+			if problems := managedWindowsCommandProblems(answer); len(problems) > 0 {
+				t.Errorf("%s: %s answer %q: %s", account, name, problems, answer)
+			}
 		}
 	}
 }

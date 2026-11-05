@@ -8,6 +8,9 @@ package cli
 import (
 	"strings"
 	"testing"
+
+	"github.com/defenseclaw/defenseclaw/internal/enterprisebundle"
+	"github.com/defenseclaw/defenseclaw/internal/enterprisepolicy"
 )
 
 // cowork-1-0-8 GAP-0076, as a class: the managed answers built only on
@@ -27,6 +30,11 @@ func TestManagedWindowsOnlyAnswersNameRunnableCommands(t *testing.T) {
 		"secret status":         windowsSecretStandardUserAnswer("status", nil),
 		"secret set":            windowsSecretStandardUserAnswer("set", &enterpriseSecretOptions{name: "ai_defense_api_key"}),
 		"own status next steps": strings.Join(ownStatusNextSteps(), " "),
+		"hook runtime drift": windowsEnterpriseHookRuntimeDriftMessage(`C:\ProgramData\Cisco\DefenseClaw-HookRuntime`,
+			enterprisepolicy.WindowsPublicDirDrift{Owner: "S-1-5-21-1-2-3-1001"}),
+		"claude drop-in drift":  windowsEnterpriseClaudeDropInDriftMessage(`C:\Program Files\ClaudeCode\managed-settings.d\defenseclaw.json`, true),
+		"bundle pending":        windowsBundlePendingReportMessage(enterprisebundle.SettleReport{Pending: []string{"r-1"}}),
+		"service access repair": windowsEnterpriseRepairServiceAccess(),
 	}
 	for name, answer := range answers {
 		if problems := managedWindowsCommandProblems(answer); len(problems) > 0 {

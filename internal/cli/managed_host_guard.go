@@ -126,13 +126,18 @@ func addManagedWindowsSetupAnswer(root *cobra.Command) {
 		addManagedWindowsAnswer(root, kind, func(args []string) error {
 			if len(args) > 0 && args[0] == "scan" && kind != "tool" {
 				// A scan changes no policy; the refusal said asset_policy
-				// was set in the admin config (GAP-0975).
-				target := "<path>"
+				// was set in the admin config (GAP-0975). The answer says
+				// who runs the scan, where and on what: a standard account
+				// is refused (managedScanAdministratorOnly), the gateway
+				// service refuses a folder inside a user profile
+				// (windowsProfileScanNextStep), and cmd.exe cannot run the
+				// `&` form (cowork-1-0-8 GAP-0076).
+				what, target, where, scanner := "a "+kind, "<path>", " (a folder outside the user profiles; copy it out first)", kind
 				if kind == "mcp" {
-					target = "<url>"
+					what, target, where, scanner = "an MCP server", "<url>", "", "MCP"
 				}
-				return withExitCode(managedDeviceAnswer(fmt.Sprintf("This device is managed: scan a %s with %s, "+
-					"which runs the gateway's %s scanner", kind, managedWindowsCommand("scan", kind, target), kind)), 3)
+				return withExitCode(managedDeviceAnswer(fmt.Sprintf("This device is managed: an administrator scans %s from an elevated PowerShell prompt with %s%s, "+
+					"which runs the gateway's %s scanner", what, managedWindowsCommand("scan", kind, target), where, scanner)), 3)
 			}
 			// The refusal named no next step (GAP-0523): the compiled
 			// admission policy is the administrator's view of these rules.
