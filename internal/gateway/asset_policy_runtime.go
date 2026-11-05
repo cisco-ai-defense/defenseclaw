@@ -18,12 +18,15 @@ import (
 	"path/filepath"
 	"slices"
 	"strings"
+	"time"
 
 	"github.com/defenseclaw/defenseclaw/internal/audit"
 	"github.com/defenseclaw/defenseclaw/internal/config"
 	"github.com/defenseclaw/defenseclaw/internal/enforce"
 	"github.com/defenseclaw/defenseclaw/internal/gateway/notifier"
+	"github.com/defenseclaw/defenseclaw/internal/managed"
 	"github.com/defenseclaw/defenseclaw/internal/redaction"
+	"github.com/defenseclaw/defenseclaw/internal/watcher"
 )
 
 type mcpRuntimeProbe struct {
@@ -96,12 +99,12 @@ func (a *APIServer) claudeCodeMCPAssetDecision(ctx context.Context, req claudeCo
 		return decision, true
 	}
 	a.noteHookReportedMCPServer(ctx, "claudecode", req.HookEventName, probe)
-	if decision, refused := a.mcpAdmissionPendingDecision(ctx, "claudecode", req.HookEventName, probe); refused {
-		return decision, true
-	}
 	if decision, refused := unresolvedPluginMCPDefinitionDecision(a.requestConfig(ctx), rawServer, probe); refused {
 		a.emitAssetPolicyDecisionFindings(ctx, decision, "mcp", "claudecode", req.HookEventName)
 		a.logAssetPolicyAudit(ctx, "claudecode", "mcp:"+rawServer, "action=block source=mcp-definition-unproven")
+		return decision, true
+	}
+	if decision, refused := a.mcpAdmissionPendingDecision(ctx, "claudecode", req.HookEventName, probe); refused {
 		return decision, true
 	}
 	return a.evaluateRuntimeMCPAssetPolicy(ctx, "claudecode", req.HookEventName, probe)
@@ -159,9 +162,9 @@ func (a *APIServer) mcpStateUnreadableDecision(ctx context.Context, connectorNam
 // run, so the unreadable-state and pending checks that follow see the
 // definition the user has now: a server changed under the same name is then
 // refused until its own scan, never run on the old verdict (GAP-0216). A
-// refresh that fails refuses the call as not admitted yet (fail closed);
-// gateway.log says why. Every other gateway has nothing to refresh. Secure
-// Client keeps main (#1092).
+// refresh that fails follows the connector's outage tier and records a
+// warning or refusal; gateway.log says why. Every other gateway has nothing
+// to refresh. Secure Client keeps main (#1092).
 func (a *APIServer) mcpDefinitionRefreshDecision(ctx context.Context, connectorName, hookEvent string, probe mcpRuntimeProbe) (config.AssetPolicyDecision, bool) {
 	cfg := a.requestConfig(ctx)
 	if a.mcpRefreshBeforeCall == nil || cfg == nil || cfg.SecureClientIntegration() || !probe.Matched ||
@@ -171,12 +174,8 @@ func (a *APIServer) mcpDefinitionRefreshDecision(ctx context.Context, connectorN
 	if err := a.mcpRefreshBeforeCall(ctx, connectorName); err == nil {
 		return config.AssetPolicyDecision{}, false
 	}
-	reason := fmt.Sprintf("mcp server %q is not scanned yet: DefenseClaw could not read its current definition; try again in a minute", probe.ServerName)
-	decision := runtimeAssetDisableBlockDecision("mcp", probe.ServerName, connectorName, "hook", reason, "mcp-admission-pending")
-	decision.RegistryStatus = "unknown"
-	a.logAssetPolicyAudit(ctx, connectorName, "mcp:"+probe.ServerName, fmt.Sprintf(
-		"action=block source=%s hook=%s tool=%s connector=%s reason=%s", decision.Source, hookEvent, probe.ToolName, connectorName, reason))
-	return decision, true
+	return a.mcpAdmissionStatusDecision(ctx, cfg, connectorName, hookEvent, probe,
+		watcher.MCPAdmissionStatus{Name: probe.ServerName, Unavailable: true, RetryAfter: enrolledMCPRefreshBudget})
 }
 
 // mcpCallAboutToRun reports a hook event sent before a tool runs, however
@@ -189,31 +188,81 @@ func mcpCallAboutToRun(hookEvent string) bool {
 	return false
 }
 
-// mcpAdmissionPendingDecision refuses the tool call of an MCP server the
-// install watcher admits but has not admitted yet (GAP-0112). Claude Code
-// starts a project's servers when it opens the project, before the
-// discovery poll finds them, so the first calls reached a server nothing
-// had scanned, a rejected decoy included. The call fails closed, the
-// watcher admits the server at once, and a call after an allowing verdict
-// goes through; a rejected server is then refused by its runtime disable.
-// Only calls about to run are refused. Secure Client keeps main (#1092).
+// mcpAdmissionPendingDecision reports a new server's admission state on
+// calls about to run. The default and permissive OSS tiers allow a pending
+// call with a visible warning; strict and managed tiers wait for the scan.
+// A completed scan failure and an existing asset-policy block always refuse
+// the call. Secure Client keeps its existing path.
 func (a *APIServer) mcpAdmissionPendingDecision(ctx context.Context, connectorName, hookEvent string, probe mcpRuntimeProbe) (config.AssetPolicyDecision, bool) {
 	cfg := a.requestConfig(ctx)
-	if a.mcpAdmissionPending == nil || cfg == nil || cfg.SecureClientIntegration() || !probe.Matched ||
+	if (a.mcpAdmissionPending == nil && a.mcpAdmissionStatus == nil) || cfg == nil || cfg.SecureClientIntegration() || !probe.Matched ||
 		probe.Surface != "hook" || !mcpCallAboutToRun(hookEvent) {
 		return config.AssetPolicyDecision{}, false
 	}
 	home, _ := callerHomeForAssets(ctx)
-	name, pending := a.mcpAdmissionPending(connectorName, probe.ServerName, home, probe.WorkspaceDir)
-	if !pending {
+	status := watcher.MCPAdmissionStatus{}
+	if a.mcpAdmissionStatus != nil {
+		status = a.mcpAdmissionStatus(connectorName, probe.ServerName, home, probe.WorkspaceDir)
+	} else {
+		status.Name, status.Pending = a.mcpAdmissionPending(connectorName, probe.ServerName, home, probe.WorkspaceDir)
+		status.RetryAfter = time.Minute
+	}
+	return a.mcpAdmissionStatusDecision(ctx, cfg, connectorName, hookEvent, probe, status)
+}
+
+func (a *APIServer) mcpAdmissionStatusDecision(ctx context.Context, cfg *config.Config, connectorName, hookEvent string,
+	probe mcpRuntimeProbe, status watcher.MCPAdmissionStatus) (config.AssetPolicyDecision, bool) {
+	if !status.Pending && !status.Failed && !status.Unavailable {
 		return config.AssetPolicyDecision{}, false
 	}
-	reason := fmt.Sprintf("mcp server %q is not scanned yet: DefenseClaw is admitting it now; try again in a minute", name)
+	// Pending admission must not override a listed deny or an earlier runtime
+	// disable. This check uses the request's pinned configuration generation.
+	if existing, matched := a.evaluateRuntimeMCPAssetPolicy(ctx, connectorName, hookEvent, probe); matched && existing.Action == "block" {
+		return existing, true
+	}
+	name := status.Name
+	if name == "" {
+		name = probe.ServerName
+	}
+	if status.Failed {
+		reason := fmt.Sprintf("MCP server %q has a failed admission scan; its calls stay blocked until a completed admission allows it", name)
+		decision := runtimeAssetDisableBlockDecision("mcp", name, connectorName, "hook", reason, "mcp-admission-failed")
+		decision.RegistryStatus = "unknown"
+		a.recordMCPAdmissionDecision(ctx, connectorName, hookEvent, probe, decision)
+		return decision, true
+	}
+	retrySeconds := int((status.RetryAfter + time.Second - 1) / time.Second)
+	if retrySeconds < 1 {
+		retrySeconds = 1
+	}
+	if retrySeconds > 300 {
+		retrySeconds = 300
+	}
+	reason := fmt.Sprintf("DefenseClaw is still scanning the new MCP server %q; retry in about %d s", name, retrySeconds)
+	if status.Unavailable {
+		reason = fmt.Sprintf("DefenseClaw could not read admission for MCP server %q; retry in about %d s", name, retrySeconds)
+	}
 	decision := runtimeAssetDisableBlockDecision("mcp", probe.ServerName, connectorName, "hook", reason, "mcp-admission-pending")
+	if status.Unavailable {
+		decision.Source = "mcp-admission-unavailable"
+	}
 	decision.RegistryStatus = "unknown"
-	a.logAssetPolicyAudit(ctx, connectorName, "mcp:"+probe.ServerName, fmt.Sprintf(
-		"action=block source=%s hook=%s tool=%s connector=%s reason=%s", decision.Source, hookEvent, probe.ToolName, connectorName, reason))
+	decision.TargetName = name
+	decision.RetryAfterSeconds = retrySeconds
+	if !managed.IsManagedEnterprise(cfg.DeploymentMode) && cfg.HookPolicyTierForConnector(connectorName) != config.HookPolicyTierStrict {
+		decision.Action = "allow"
+		decision.Mode = config.AssetPolicyModeObserve
+	}
+	a.recordMCPAdmissionDecision(ctx, connectorName, hookEvent, probe, decision)
 	return decision, true
+}
+
+func (a *APIServer) recordMCPAdmissionDecision(ctx context.Context, connectorName, hookEvent string, probe mcpRuntimeProbe, decision config.AssetPolicyDecision) {
+	evalCtx := a.emitAssetPolicyDecisionFindings(ctx, decision, "mcp", connectorName, hookEvent)
+	a.logAssetPolicyAudit(ctx, connectorName, "mcp:"+decision.TargetName, fmt.Sprintf(
+		"action=%s source=%s hook=%s tool=%s connector=%s would_block=%v reason=%s",
+		decision.Action, decision.Source, hookEvent, probe.ToolName, connectorName, decision.Action == "allow", decision.Reason))
+	a.dispatchAssetPolicyNotification(decision, "mcp", connectorName, hookEvent, evalCtx)
 }
 
 // A plugin tool name does not prove its command or URL. If the installed
@@ -2042,6 +2091,9 @@ func assetPolicyResponseReason(decision config.AssetPolicyDecision) string {
 	parts = append(parts, fmt.Sprintf("registry_configured=%t", decision.RegistryConfigured))
 	if decision.RuntimeSurface != "" {
 		parts = append(parts, "surface="+decision.RuntimeSurface)
+	}
+	if (decision.Source == "mcp-admission-pending" || decision.Source == "mcp-admission-unavailable") && decision.RetryAfterSeconds > 0 {
+		parts = append(parts, fmt.Sprintf("retry_after_s=%d", decision.RetryAfterSeconds))
 	}
 	return strings.Join(parts, " ")
 }
