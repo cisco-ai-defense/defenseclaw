@@ -1625,8 +1625,14 @@ class Store:
             self._safe_json_extract(payload, path)
             for path in ('$."defenseclaw.agent.surface"', "$.surface", "$.extra.surface")
         )
+        # A row with a valid structured payload (the one alerts read, as
+        # coworkMarkerSQL in internal/audit/cowork_alert_target.go does) takes
+        # its surface from that payload only; its details hold free text
+        # (cowork audit review 2 N1).
+        structured = self._structured_sql("h")
+        has_payload = f"CASE WHEN COALESCE({structured}, '') <> '' AND json_valid({structured}) THEN 1 ELSE 0 END"
         cur = self.db.execute(
-            f"""SELECT f.id, h.action, h.details, {facts}, {surfaces}
+            f"""SELECT f.id, h.action, h.details, {facts}, {has_payload}, {surfaces}
                FROM audit_events AS f
                JOIN audit_events AS h
                  ON h.request_id = f.request_id
@@ -1639,7 +1645,9 @@ class Store:
         out: dict[str, list[str]] = {}
         rows = cur.fetchall()
         for (alert_id, action, details, effective, would_block, mode, acp_method, acp_client, raw, sandbox,
-             *row_surfaces) in rows:
+             has_payload, *row_surfaces) in rows:
+            if has_payload:
+                details = _without_detail_surface(details or "")
             surface = next((str(v).strip().lower() for v in row_surfaces if isinstance(v, str) and v.strip()), "")
             if surface and not any(ch.isspace() for ch in surface):
                 out.setdefault(alert_id, []).append(f"surface={surface}")
@@ -2370,6 +2378,19 @@ def _event_connector_value(event: Event) -> str:
     if connector:
         return connector
     return _details_connector(event.details)
+
+
+def _without_detail_surface(details: str) -> str:
+    """The details with no ``surface=`` token before ``details_json``.
+
+    The connector-hook details of a row with a structured payload hold free
+    text split on spaces (an unquoted ``reason=``, a ``raw_payload=``); its
+    surface is the payload's, which hook_details_for_alerts adds as its own
+    entry (cowork audit review 2 N1). The decision fields are kept."""
+    if details.startswith("details_json="):
+        return details
+    head, sep, tail = details.partition(" details_json=")
+    return " ".join(tok for tok in head.split(" ") if not tok.startswith("surface=")) + sep + tail
 
 
 def _details_connector(details: str) -> str:
