@@ -24,6 +24,7 @@ struct CoworkStatusTests {
         aMissingOrMalformedCoworkKeyIsNoRow()
         notProtectedShowsTheNextStep()
         protectedShowsTheLastEventClock()
+        theClockFormattersAreBuiltOnce()
         commandRegistryHasSetupCowork()
         print("Cowork status tests passed")
     }
@@ -45,9 +46,8 @@ struct CoworkStatusTests {
     private static func parsesTheCoworkObjectOfStatusJSON() {
         let status = CoworkStatus.parse(protectedJSON)
         expect(status?.protected == true, "protected flag")
-        expect(status?.reasonCode == "", "empty reason code")
-        expect(status?.pluginVersion == "1.0.3", "plugin version")
-        expect(status?.pluginZip.hasSuffix("defenseclaw-cowork-1.0.3.zip") == true, "plugin zip")
+        expect(status?.detail == "protected, 3 calls (last 14:02:11)", "detail")
+        expect(status?.step == "", "no step while protected")
         expect(status?.lastEventAt == "2026-11-05T14:02:11Z", "last event")
     }
 
@@ -57,6 +57,15 @@ struct CoworkStatusTests {
         expect(CoworkStatus.parse(#"{"cowork": {"detail": "x"}}"#) == nil, "no protected flag: no row")
         expect(CoworkStatus.parse("not json") == nil, "not json: no row")
         expect(CoworkStatus.parse("") == nil, "empty output: no row")
+        // A failed run keeps the last row; a report without the key clears it.
+        expect(CoworkStatus.report("not json") == .unreadable, "not json: a failed run")
+        expect(CoworkStatus.report("Error: no such command") == .unreadable, "an error message: a failed run")
+        expect(CoworkStatus.report("") == .unreadable, "empty output: a failed run")
+        expect(CoworkStatus.report(#"{"gateway": {}}"#) == .noCowork, "a report without cowork clears the row")
+        expect(CoworkStatus.report(#"{"cowork": null}"#) == .noCowork, "null cowork clears the row")
+        // status --json exits 1 when it reports config problems; the report counts.
+        let problems = #"{"config": {"problems": ["x"]}, "cowork": {"protected": false, "detail": "not protected", "step": "s"}}"#
+        expect(CoworkStatus.report(problems) == .cowork(CoworkStatus.parse(problems)!), "a report with problems is data")
     }
 
     private static func notProtectedShowsTheNextStep() {
@@ -66,8 +75,7 @@ struct CoworkStatusTests {
          "last_event_at": null, "plugin_version": "1.0.3", "plugin_zip": null}}
         """
         guard let status = CoworkStatus.parse(json) else { expect(false, "parse"); return }
-        expect(status.reasonCode == "cowork_no_events", "reason code")
-        expect(status.lastEventAt.isEmpty && status.pluginZip.isEmpty, "null fields read as empty")
+        expect(status.lastEventAt.isEmpty, "null fields read as empty")
         let rows = status.overviewRows(home: "/Users/me")
         expect(rows.count == 2, "two rows while not protected")
         expect(rows[0].label == "Cowork" && rows[0].value == "not protected yet, no Cowork event yet", "first row: \(rows[0].value)")
@@ -87,6 +95,20 @@ struct CoworkStatusTests {
         let later = status.overviewRows(home: "", now: nextDay, calendar: utc)
         expect(later[0].value == "protected, last event Nov 05 14:02", "earlier-day clock: \(later[0].value)")
         expect(CoworkStatus.clockText("garbage") == "", "unparseable stamp reads empty")
+    }
+
+    private static func theClockFormattersAreBuiltOnce() {
+        // The Overview evaluates the rows on every render (audit review S4).
+        expect(CoworkStatus.clockFormatter(sameDay: true, calendar: .current) === CoworkStatus.todayClock,
+               "today's clock formatter is cached")
+        expect(CoworkStatus.clockFormatter(sameDay: false, calendar: .current) === CoworkStatus.earlierClock,
+               "the earlier-day clock formatter is cached")
+        let stamp = "2026-11-05T14:02:11.250Z"
+        expect(!CoworkStatus.clockText(stamp).isEmpty, "a fractional stamp parses with the cached parsers")
+        var utc = Calendar(identifier: .gregorian)
+        utc.timeZone = TimeZone(identifier: "UTC")!
+        let sameDay = utc.date(from: DateComponents(year: 2026, month: 11, day: 5, hour: 18))!
+        expect(CoworkStatus.clockText(stamp, now: sameDay, calendar: utc) == "14:02:11", "fractional stamp, UTC")
     }
 
     private static func commandRegistryHasSetupCowork() {

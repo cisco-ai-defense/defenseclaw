@@ -25,35 +25,46 @@ struct CoworkStatus: Sendable, Equatable {
     var protected: Bool
     var detail: String
     var step: String
-    var reasonCode: String
     var lastEventAt: String
-    var pluginVersion: String
-    var pluginZip: String
 
-    /// Parse the `cowork` object out of `status --json` output. Diagnostic
-    /// text around the JSON is tolerated, as for the other CLI reports.
-    static func parse(_ output: String) -> CoworkStatus? {
+    /// What one `status --json` run says about Cowork. `status` exits 1 when
+    /// it reports problems and still prints the report, so the caller reads
+    /// the output, not the exit code: `.unreadable` (no JSON object, a
+    /// failed run) keeps the last row; `.noCowork` clears it.
+    enum Report: Equatable {
+        case unreadable
+        case noCowork
+        case cowork(CoworkStatus)
+    }
+
+    /// Read the report out of `status --json` output. Diagnostic text around
+    /// the JSON is tolerated, as for the other CLI reports.
+    static func report(_ output: String) -> Report {
         guard let start = output.firstIndex(of: "{"),
               let end = output.lastIndex(of: "}"),
               start <= end,
               let root = try? JSONSerialization.jsonObject(
                   with: Data(output[start...end].utf8)
-              ) as? [String: Any],
-              let cowork = root["cowork"] as? [String: Any],
+              ) as? [String: Any]
+        else { return .unreadable }
+        guard let cowork = root["cowork"] as? [String: Any],
               let protected = cowork["protected"] as? Bool
-        else { return nil }
+        else { return .noCowork }
         func text(_ key: String) -> String {
             (cowork[key] as? String)?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
         }
-        return CoworkStatus(
+        return .cowork(CoworkStatus(
             protected: protected,
             detail: text("detail"),
             step: text("step"),
-            reasonCode: text("reason_code"),
-            lastEventAt: text("last_event_at"),
-            pluginVersion: text("plugin_version"),
-            pluginZip: text("plugin_zip")
-        )
+            lastEventAt: text("last_event_at")
+        ))
+    }
+
+    /// The Cowork row of the output, or nil when it has none.
+    static func parse(_ output: String) -> CoworkStatus? {
+        if case .cowork(let status) = report(output) { return status }
+        return nil
     }
 
     /// The Overview rows, as the TUI's `cowork_overview_rows`: "Cowork" says
@@ -84,20 +95,51 @@ struct CoworkStatus: Sendable, Equatable {
         return rows
     }
 
-    /// "14:02:11" for today, "Oct 02 14:02" earlier, "" when unparseable.
-    static func clockText(_ raw: String, now: Date = Date(), calendar: Calendar = .current) -> String {
-        let trimmed = raw.trimmingCharacters(in: .whitespaces)
-        guard !trimmed.isEmpty else { return "" }
-        let fractional = ISO8601DateFormatter()
-        fractional.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
-        let plain = ISO8601DateFormatter()
-        plain.formatOptions = [.withInternetDateTime]
-        guard let stamp = fractional.date(from: trimmed) ?? plain.date(from: trimmed) else { return "" }
+    // SwiftUI evaluates the Overview rows on every render, so the formatters
+    // are built once. Parsing and formatting with them is thread-safe; they
+    // are never changed after they are built.
+    private static let fractionalStamp: ISO8601DateFormatter = {
+        let formatter = ISO8601DateFormatter()
+        formatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+        return formatter
+    }()
+    private static let plainStamp: ISO8601DateFormatter = {
+        let formatter = ISO8601DateFormatter()
+        formatter.formatOptions = [.withInternetDateTime]
+        return formatter
+    }()
+    /// "HH:mm:ss" and "MMM dd HH:mm" in the user's current calendar and time
+    /// zone (they follow a change of either).
+    static let todayClock = makeClock("HH:mm:ss", calendar: .autoupdatingCurrent, timeZone: .autoupdatingCurrent)
+    static let earlierClock = makeClock("MMM dd HH:mm", calendar: .autoupdatingCurrent, timeZone: .autoupdatingCurrent)
+
+    private static func makeClock(_ format: String, calendar: Calendar, timeZone: TimeZone) -> DateFormatter {
         let formatter = DateFormatter()
         formatter.locale = Locale(identifier: "en_US_POSIX")
         formatter.calendar = calendar
-        formatter.timeZone = calendar.timeZone
-        formatter.dateFormat = calendar.isDate(stamp, inSameDayAs: now) ? "HH:mm:ss" : "MMM dd HH:mm"
-        return formatter.string(from: stamp)
+        formatter.timeZone = timeZone
+        formatter.dateFormat = format
+        return formatter
+    }
+
+    /// The cached formatter for the user's calendar, a new one for any other
+    /// (the tests pass a UTC calendar).
+    static func clockFormatter(sameDay: Bool, calendar: Calendar) -> DateFormatter {
+        let format = sameDay ? "HH:mm:ss" : "MMM dd HH:mm"
+        let current = Calendar.current
+        guard calendar.identifier == current.identifier, calendar.timeZone == current.timeZone else {
+            return makeClock(format, calendar: calendar, timeZone: calendar.timeZone)
+        }
+        return sameDay ? todayClock : earlierClock
+    }
+
+    /// "14:02:11" for today, "Oct 02 14:02" earlier, "" when unparseable.
+    static func clockText(_ raw: String, now: Date = Date(), calendar: Calendar = .current) -> String {
+        let trimmed = raw.trimmingCharacters(in: .whitespaces)
+        guard !trimmed.isEmpty,
+              let stamp = fractionalStamp.date(from: trimmed) ?? plainStamp.date(from: trimmed)
+        else { return "" }
+        let sameDay = calendar.isDate(stamp, inSameDayAs: now)
+        return clockFormatter(sameDay: sameDay, calendar: calendar).string(from: stamp)
     }
 }

@@ -297,6 +297,8 @@ final class AppState {
     /// runtime predates the block. TUI parity: overview_model.cowork_status.
     var coworkStatus: CoworkStatus?
     @ObservationIgnored private var lastCoworkStatusFetch: Date?
+    /// The installation generation of the `status --json` run in flight, if any.
+    @ObservationIgnored private var coworkStatusInFlight: Int?
     static let coworkStatusInterval: TimeInterval = 30
     /// Silent LLM bypass egress events in the last 5 minutes (pulse-fed).
     var silentBypassCount = 0
@@ -553,6 +555,7 @@ final class AppState {
         doctorCache = nil
         coworkStatus = nil
         lastCoworkStatusFetch = nil
+        coworkStatusInFlight = nil
         silentBypassCount = 0
         sessionTotalScans = 0
         alertPanelRequest = nil
@@ -833,8 +836,7 @@ final class AppState {
         let guardrailState = health.subsystems.first { $0.name == "guardrail" }?.state
         // Doctor cache: keep last-good on parse failure (TUI semantics).
         doctorCache = DoctorCache.load(dataDirectory: installationContext.dataDirectory) ?? doctorCache
-        await refreshCoworkStatus(generation: generation)
-        guard installationSnapshotIsCurrent(generation) else { return }
+        refreshCoworkStatusInBackground(generation: generation)
         scanners = ScannerProbe.statuses(
             config: config,
             guardrailState: guardrailState,
@@ -2108,24 +2110,44 @@ final class AppState {
 
     // MARK: - Cowork status row
 
-    /// Read the Cowork block of `defenseclaw status --json`. Cowork is a Claude
-    /// Code surface, so the call is skipped unless that connector is active, and
-    /// it runs at most every `coworkStatusInterval` seconds because `status`
-    /// probes the plugin state and the gateway. A failed run keeps the last good
-    /// row; a run that carries no `cowork` object (older runtime, no Cowork on
-    /// this account) clears it.
-    private func refreshCoworkStatus(generation: Int) async {
+    /// Read the Cowork block of `defenseclaw status --json` off the pulse, so the
+    /// refresh never waits on it: `status` starts Python and probes the gateway,
+    /// the sidecar and the plugin state, which takes the probe timeouts when the
+    /// gateway hangs. Cowork is a Claude Code surface, so the run is skipped
+    /// unless that connector is active; it starts at most every
+    /// `coworkStatusInterval` seconds and one at a time. `status` exits 1 when it
+    /// reports problems and still prints the report, so the output decides: no
+    /// readable report (a failed run) keeps the last row, and a report without a
+    /// `cowork` object (older runtime, no Cowork on this account) clears it. The
+    /// result of a run for an earlier installation is dropped.
+    private func refreshCoworkStatusInBackground(generation: Int) {
         guard activeConnectorNames.contains(where: { $0.lowercased() == "claudecode" }) else {
             coworkStatus = nil
             lastCoworkStatusFetch = nil
             return
         }
+        guard coworkStatusInFlight == nil else { return }
         if let last = lastCoworkStatusFetch, Date().timeIntervalSince(last) < Self.coworkStatusInterval { return }
         lastCoworkStatusFetch = Date()
-        let result = await cli.run(arguments: ["status", "--json"], mutation: false)
-        guard installationSnapshotIsCurrent(generation), result.succeeded else { return }
-        let parsed = CoworkStatus.parse(result.output)
-        if parsed != coworkStatus { coworkStatus = parsed }
+        coworkStatusInFlight = generation
+        Task { [weak self] in
+            guard let self else { return }
+            let result = await self.cli.run(arguments: ["status", "--json"], mutation: false)
+            if self.coworkStatusInFlight == generation { self.coworkStatusInFlight = nil }
+            guard self.installationSnapshotIsCurrent(generation),
+                  self.activeConnectorNames.contains(where: { $0.lowercased() == "claudecode" }),
+                  !result.cancelled, !result.outputTruncated,
+                  result.exitCode == 0 || result.exitCode == 1
+            else { return }
+            switch CoworkStatus.report(result.output) {
+            case .unreadable:
+                return
+            case .noCowork:
+                if self.coworkStatus != nil { self.coworkStatus = nil }
+            case .cowork(let parsed):
+                if parsed != self.coworkStatus { self.coworkStatus = parsed }
+            }
+        }
     }
 
     /// The Cowork rows for the CONFIGURATION box (TUI cowork_overview_rows).
@@ -2166,9 +2188,9 @@ final class AppState {
 
         // Cowork is a Claude Code surface: its rows sit under the agent row
         // (TUI GAP-0046), in the all-connectors view only.
-        var rows: [ConfigurationRow] = [
-            agentRow,
-        ] + coworkConfigurationRows + [
+        var rows: [ConfigurationRow] = [agentRow]
+        rows += coworkConfigurationRows
+        rows += [
             .init(label: "Redaction", value: redaction),
             .init(label: "Policy posture", value: policyPosture),
             .init(label: "Enforcement", value: enforcementLabel),
