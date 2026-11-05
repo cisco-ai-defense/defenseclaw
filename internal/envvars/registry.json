@@ -2526,7 +2526,7 @@
     {
       "name": "DEFENSECLAW_HOOK_MAX_BODY",
       "category": "hook_internal",
-      "purpose": "Request-body cap (in bytes) for hooks; a per-user hook sends at most 921600 bytes (900 KiB) of a call to its own gateway and treats a larger call as oversized input. Default 1048576 (1 MiB).",
+      "purpose": "Request-body cap (in bytes) for per-user hooks: a value from 1 to 1048576 lowers it, anything else is ignored; a per-user hook sends at most 921600 bytes (900 KiB) of a call to its own gateway and treats a larger call as oversized input. Managed hooks ignore it and keep the fixed 1 MiB cap. Default 1048576 (1 MiB).",
       "default": "1048576",
       "accepted_values": [
         "positive integer"
