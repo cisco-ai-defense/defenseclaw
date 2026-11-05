@@ -2000,6 +2000,8 @@ func finalizeWindowsManagedHooksTeardown(
 var (
 	windowsManagedHooksTeardownStandaloneMachineFinalizer = finalizeWindowsManagedHooksTeardownStandaloneMachineState
 	windowsManagedHooksTeardownJournalWriter              = writeWindowsManagedHooksTeardownJournal
+	// Which activation-drift rule teardown applies (GAP-0583); tests pin it.
+	windowsManagedHooksTeardownStandaloneProcess = enterprisehooks.WindowsStandaloneProcess
 )
 
 func finalizeWindowsManagedHooksTeardownStandaloneMachineState() error {
@@ -2375,6 +2377,26 @@ func validateWindowsManagedHooksTeardownActivation(
 		return windowsManagedHooksActivationRecord{}, errors.New(
 			"protected managed-hook activation evidence does not match the current manifest",
 		)
+	}
+	// rel-1-0-6:GAP-0583: standalone refuses the drift, as the standalone
+	// lifecycle binding does (windowsManagedHooksLifecycleCommittedTransactionID)
+	// and as 1.0.7 did. The PowerShell side pins the teardown journal and the
+	// contract cleanup receipt to the deployment's activation manifest, so a
+	// teardown that accepted a republished manifest (an enumerator pass that
+	// dropped a deleted enrolled account) let the uninstall pre-commit check
+	// pass, committed the tombstone, then wrote a journal and receipt the
+	// tombstone could never authenticate: every retry and Setup /ensure failed
+	// 1603 until /uninstall FORCE=1. The refusal is the catch-up refusal the
+	// uninstall check waits on (GAP-0319/GAP-0346): it rebinds the activation
+	// evidence to the manifest the guardian adopted, then commits. Secure
+	// Client keeps the 26.8.4 accept-and-log handling.
+	if windowsManagedHooksTeardownStandaloneProcess() {
+		if activation.ManifestSHA256 != manifestSHA256 || activation.TargetCount != targetCount {
+			return windowsManagedHooksActivationRecord{}, errors.New(
+				"protected managed-hook activation evidence does not match the current manifest",
+			)
+		}
+		return activation, nil
 	}
 	acceptWindowsManagedHooksActivationDrift(activation, manifestSHA256, targetCount)
 	return activation, nil

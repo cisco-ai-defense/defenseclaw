@@ -2321,3 +2321,192 @@ def test_cowork_source_plan_reaches_the_runtime_acl_repair() -> None:
     assert "loadWindowsEnterpriseStandaloneConfig(path)" in fallback
     assert "errors.As(err, &drift)" in fallback
     assert "config.ValidateManagedStandaloneRuntimeCandidate(candidate)" in fallback
+
+
+_GAP_0583_TOMBSTONE_HARNESS = r"""
+$ErrorActionPreference = 'Stop'
+$root = '__ROOT__'
+$G = ('b' * 32)
+$script:AdministratorsSID = 'S-1-5-32-544'
+$layout = @{
+    MetadataPath = [IO.Path]::Combine($root, 'install', 'deployment.json')
+    PendingPath = [IO.Path]::Combine($root, 'install', 'pending.json')
+    ManifestPath = [IO.Path]::Combine($root, 'hook-guardian', 'targets.yaml')
+    ManagedHooksTeardownJournalPath = [IO.Path]::Combine($root, 'install', 'managed-hooks-teardown-journal.json')
+    ManagedHookContractCleanupReceiptPath = [IO.Path]::Combine($root, 'lock', 'managed-hook-contract-cleanup-scope.json')
+    LifecycleLockDirectory = [IO.Path]::Combine($root, 'lock')
+    PurgeScopeSHA256 = ('e' * 64)
+}
+function Test-DefenseClawStandaloneProfile { return $true }
+function Get-DefenseClawDeploymentMetadata {
+    param($Layout, [switch]$Required)
+    return ([IO.File]::ReadAllText($Layout.MetadataPath) | ConvertFrom-Json)
+}
+function Assert-DefenseClawNoReparsePath { param($Path) }
+function Test-DefenseClawInstalledGatewayRecorded { return $true }
+function Get-DefenseClawStandaloneManifestAdoption {
+    param($Layout, $GatewayServiceName, $Activation, $InstalledManifestSHA256, $GatewaySource)
+    return [pscustomobject]@{ ok = $global:Adopted; reason = 'guardian last activated another manifest'; target_count = 2; untrusted_folders = @() }
+}
+function Add-DefenseClawSignedOutUntrustedFolders { param($Adoption) }
+function Set-DefenseClawPathAcl { param($Path, $Kind, $GatewayServiceSID) }
+function Test-DefenseClawPathPresentNoFollow { param($Path) return (Test-Path -LiteralPath $Path) }
+function Write-DefenseClawLifecyclePhase { param($Stage) $global:Phases += $Stage }
+function Assert-DefenseClawDescendant { param($Path, $Root, $Label) return $Path }
+function Get-DefenseClawTargetRuntimeExchangeValue { param($Path, $TransactionDirectory) return ([IO.File]::ReadAllText($Path) | ConvertFrom-Json) }
+function Assert-DefenseClawMetadataIdentity { param($Metadata, $GatewayServiceName, $GuardianServiceName) }
+
+function Write-Json([string]$Path, $Value) {
+    [IO.File]::WriteAllText($Path, ($Value | ConvertTo-Json -Depth 8))
+}
+function New-Case([string]$ReceiptManifest, [string]$ReceiptGeneration, [bool]$Adopted) {
+    if ([IO.Directory]::Exists($root)) { [IO.Directory]::Delete($root, $true) }
+    foreach ($folder in 'install', 'lock', 'hook-guardian') { [void][IO.Directory]::CreateDirectory([IO.Path]::Combine($root, $folder)) }
+    # The enumerator pass after the deleted account dropped its rows: 2 targets now, 4 activated.
+    [IO.File]::WriteAllText($layout.ManifestPath, "targets: [claudecode r108-kept, codex r108-kept]`n")
+    $script:Live = (Get-FileHash -LiteralPath $layout.ManifestPath -Algorithm SHA256).Hash.ToLowerInvariant()
+    if ($ReceiptManifest -ceq 'LIVE') { $ReceiptManifest = $script:Live }
+    Write-Json $layout.MetadataPath ([ordered]@{
+        schema_version = 6
+        installed = $false
+        managed_hooks_activation = [ordered]@{
+            schema_version = 1; deployment_generation_id = $G; state = 'activated'
+            manifest_sha256 = ('a' * 64); target_count = 4
+        }
+    })
+    Write-Json $layout.ManagedHooksTeardownJournalPath ([ordered]@{
+        schema_version = 6; phase = 'prepared'; manifest_sha256 = $script:Live; deployment_generation_id = $G
+    })
+    $claims = @(
+        foreach ($connector in 'claudecode', 'codex') {
+            [ordered]@{ connector = $connector; sid = 'S-1-5-21-1-2-3-1001'; data_dir = 'C:\Users\r108-kept\.defenseclaw'
+                gateway_service_name = 'DefenseClawGateway'; entry_present = $false; entry_sha256 = '' }
+        }
+    )
+    Write-Json $layout.ManagedHookContractCleanupReceiptPath ([ordered]@{
+        schema_version = 1; phase = 'prepared'; identity_sha256 = 'sha256:' + ('c' * 64)
+        scope_sha256 = $layout.PurgeScopeSHA256; manifest_sha256 = $ReceiptManifest
+        manifest_fingerprint = 'sha256:' + ('d' * 64); deployment_generation_id = $ReceiptGeneration
+        gateway_service_name = 'DefenseClawGateway'; claims = $claims
+    })
+    $global:Adopted = $Adopted
+    $global:Phases = @()
+}
+function Test-Receipt {
+    try {
+        [void](Get-DefenseClawManagedHookContractCleanupReceipt -Layout $layout -GatewayServiceName DefenseClawGateway `
+            -GuardianServiceName DefenseClawHookGuardian -Metadata (Get-DefenseClawDeploymentMetadata -Layout $layout -Required) -Required)
+        return 'ok'
+    }
+    catch { return $_.Exception.Message }
+}
+function Invoke-Case([string]$Name, [string]$ReceiptManifest, [string]$ReceiptGeneration, [bool]$Adopted) {
+    New-Case $ReceiptManifest $ReceiptGeneration $Adopted
+    $before = Test-Receipt
+    $plain = Sync-DefenseClawStandaloneManagedHooksActivationBinding -Layout $layout -GatewayServiceName DefenseClawGateway
+    $first = Sync-DefenseClawStandaloneUninstallTombstoneBinding -Layout $layout -GatewayServiceName DefenseClawGateway
+    $bytes = [IO.File]::ReadAllText($layout.MetadataPath)
+    $second = Sync-DefenseClawStandaloneUninstallTombstoneBinding -Layout $layout -GatewayServiceName DefenseClawGateway
+    $activation = (Get-DefenseClawDeploymentMetadata -Layout $layout -Required).managed_hooks_activation
+    [pscustomobject]@{
+        name = $Name; before = $before; plain = [bool]$plain; first = [bool]$first; second = [bool]$second
+        unchanged_after_second = ($bytes -ceq [IO.File]::ReadAllText($layout.MetadataPath))
+        bound_live = ([string]$activation.manifest_sha256 -ceq $script:Live)
+        target_count = [int64]$activation.target_count; generation = [string]$activation.deployment_generation_id
+        state = [string]$activation.state; after = Test-Receipt; phases = @($global:Phases)
+    } | ConvertTo-Json -Compress -Depth 4
+}
+Invoke-Case 'deleted account' 'LIVE' $G $true
+Invoke-Case 'tampered receipt' ('f' * 64) $G $true
+Invoke-Case 'other deployment' 'LIVE' ('9' * 32) $true
+Invoke-Case 'not adopted' 'LIVE' $G $false
+"""
+
+
+def test_gap_0583_deleted_account_tombstone_rebinds_only_adopted_matching_artifacts(tmp_path: Path) -> None:
+    """rel-1-0-6:GAP-0583: the enumerator pass after a deleted enrolled
+    account republished targets.yaml after the uninstall's pre-commit check,
+    so the tombstone kept the old activation manifest while the teardown
+    journal and the contract cleanup receipt named the new one. Every retry
+    and Setup /ensure then failed 1603 ("contract cleanup receipt does not
+    match the inactive deployment tombstone") until FORCE=1. The committed
+    finalization and the Install recovery now rebind the tombstone to the
+    manifest the guardian adopted, once, when every artifact already names it
+    and the deployment generation. A tampered receipt, a receipt of another
+    deployment and an unadopted manifest still refuse."""
+    import json
+    import shutil
+
+    shell = _portable_pwsh() or shutil.which("pwsh")
+    if not shell:
+        pytest.skip("PowerShell 7 (pwsh) is not installed")
+    module = _text(MODULE)
+    functions = "\n".join(
+        _function_body(module, name)
+        for name in (
+            "Test-DefenseClawMetadataInstalled",
+            "Assert-DefenseClawManagedHooksActivationRecord",
+            "Get-DefenseClawManagedHookContractCleanupReceipt",
+            "Test-DefenseClawTombstoneTeardownArtifactsBindManifest",
+            "Sync-DefenseClawStandaloneUninstallTombstoneBinding",
+            "Sync-DefenseClawStandaloneManagedHooksActivationBinding",
+        )
+    )
+    script = tmp_path / "gap0583.ps1"
+    root = tmp_path / "state"
+    script.write_text(
+        functions + "\n" + _GAP_0583_TOMBSTONE_HARNESS.replace("__ROOT__", str(root)), encoding="utf-8"
+    )
+    result = subprocess.run([shell, "-NoProfile", "-File", str(script)], capture_output=True, text=True, timeout=60)
+    assert result.returncode == 0, result.stdout + result.stderr
+    rows = {row["name"]: row for row in (json.loads(line) for line in result.stdout.splitlines() if line.startswith("{"))}
+    mismatch = "contract cleanup receipt does not match the inactive deployment tombstone"
+
+    deleted = rows["deleted account"]
+    assert deleted["before"] == mismatch  # the field symptom
+    assert deleted["plain"] is False  # installed-only callers never touch a tombstone
+    assert deleted["first"] is True and deleted["after"] == "ok"
+    assert deleted["bound_live"] and deleted["target_count"] == 2
+    assert deleted["generation"] == "b" * 32 and deleted["state"] == "activated"
+    assert deleted["second"] is False and deleted["unchanged_after_second"]  # repeated uninstall: idempotent
+    assert any("enrolled account was deleted" in phase for phase in deleted["phases"])
+
+    for name in ("tampered receipt", "other deployment"):
+        row = rows[name]
+        assert row["first"] is False and row["second"] is False and not row["bound_live"], name
+        assert row["target_count"] == 4 and row["after"] == mismatch, name
+
+    unadopted = rows["not adopted"]
+    assert unadopted["first"] is False and not unadopted["bound_live"]
+    assert unadopted["after"] == mismatch
+    assert any("has not adopted" in phase for phase in unadopted["phases"])
+
+
+def test_gap_0583_standalone_teardown_refuses_activation_drift_before_the_commit() -> None:
+    """rel-1-0-6:GAP-0583: the 26.8.4 forward-port made the native teardown
+    accept a republished manifest on every profile, so the standalone
+    uninstall pre-commit check passed over a stale activation binding. The
+    standalone refusal is the catch-up refusal the check waits on
+    (GAP-0319/GAP-0346); Secure Client keeps accept-and-log. Both the
+    committed finalization and the Install (ensure) recovery rebind the
+    tombstone before their first binding check."""
+    go = _text(ROOT / "internal" / "cli" / "windows_managed_hooks_teardown.go")
+    validator = go[go.index("func validateWindowsManagedHooksTeardownActivation(") :]
+    validator = validator[: validator.index("\n}\n") + 3]
+    strict = validator.index("if windowsManagedHooksTeardownStandaloneProcess() {")
+    assert strict < validator.index("acceptWindowsManagedHooksActivationDrift(activation, manifestSHA256, targetCount)")
+    refusal = "protected managed-hook activation evidence does not match the current manifest"
+    assert validator[strict:].count(refusal) == 1
+    module = _text(MODULE)
+    assert f"'{refusal}'" in _function_body(module, "Test-DefenseClawManifestCatchUpTeardownRefusal")
+
+    finalization = _function_body(module, "Complete-DefenseClawCommittedManagedHooksFinalization")
+    rebind = finalization.index("Sync-DefenseClawStandaloneUninstallTombstoneBinding")
+    assert finalization.index("throw 'managed-hook finalization requires an uninstall tombstone'") < rebind
+    assert rebind < finalization.index("Get-DefenseClawManagedHooksTeardownJournalPhase")
+    assert rebind < finalization.index("Get-DefenseClawManagedHookContractCleanupReceipt")
+
+    recovery = _function_body(module, "Invoke-DefenseClawPreLayoutRecovery")
+    rebind = recovery.index("Sync-DefenseClawStandaloneUninstallTombstoneBinding")
+    assert rebind < recovery.index("$retiredContractReceipt =")
+    assert "$committedMetadata = Get-DefenseClawDeploymentMetadata" in recovery[rebind : rebind + 400]
