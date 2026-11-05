@@ -40,6 +40,14 @@ def _opencode_home(tmp_path: Path, mode: int = 0o775) -> tuple[Path, Path]:
     plugins.chmod(0o700)
     for folder in (home / ".config", home / ".config" / "opencode"):
         folder.chmod(mode)
+    # Some hosts give their temp root a default ACL; with one the group bits
+    # are the ACL mask and the rule rightly refuses.
+    for folder in (tmp_path, home, home / ".config", home / ".config" / "opencode", plugins):
+        for name in ("system.posix_acl_access", "system.posix_acl_default"):
+            try:
+                os.removexattr(folder, name)
+            except (AttributeError, OSError):
+                pass
     return home, plugins / "defenseclaw.js"
 
 

@@ -14,6 +14,8 @@ import (
 	"strings"
 	"syscall"
 	"testing"
+
+	"golang.org/x/sys/unix"
 )
 
 // gas-ux-r1 GAP-0053: Ubuntu's umask 002 with user private groups leaves
@@ -46,6 +48,7 @@ func TestPluginDestinationAcceptsOnlyTheOwnersPrivateGroup(t *testing.T) {
 					t.Fatal(err)
 				}
 			}
+			dropInheritedACLs(t, root)
 			info, err := os.Lstat(filepath.Join(root, ".config"))
 			if err != nil {
 				t.Fatal(err)
@@ -61,7 +64,10 @@ func TestPluginDestinationAcceptsOnlyTheOwnersPrivateGroup(t *testing.T) {
 			passwd := filepath.Join(files, "passwd")
 			groupFile := filepath.Join(files, "group")
 			line := fmt.Sprintf("%s:x:%s:%s::%s:/bin/sh\n", me.Username, me.Uid, gid, root)
-			if err := os.WriteFile(passwd, []byte(line+fmt.Sprintf(tc.passwdExtra, me.Username, gid, os.Geteuid()+1)), 0o600); err != nil {
+			if tc.passwdExtra != "" {
+				line += fmt.Sprintf(tc.passwdExtra, me.Username, gid, os.Geteuid()+1)
+			}
+			if err := os.WriteFile(passwd, []byte(line), 0o600); err != nil {
 				t.Fatal(err)
 			}
 			groupLine := fmt.Sprintf("%s:x:%s:\n", me.Username, gid)
@@ -107,6 +113,7 @@ func TestPluginDestinationAcceptsARealPrivateGroupFolder(t *testing.T) {
 	if err := os.MkdirAll(pluginDir, 0o700); err != nil {
 		t.Fatal(err)
 	}
+	dropInheritedACLs(t, root)
 	for _, dir := range []string{filepath.Join(root, ".config"), filepath.Join(root, ".config", "opencode")} {
 		if err := os.Chmod(dir, 0o775); err != nil {
 			t.Fatal(err)
@@ -130,5 +137,19 @@ func TestPluginDestinationAcceptsARealPrivateGroupFolder(t *testing.T) {
 	}
 	if err := validatePluginArtifactDestination(filepath.Join(pluginDir, "defenseclaw.js")); err != nil {
 		t.Fatalf("a 0775 folder of the account's own private group was refused: %v", err)
+	}
+}
+
+// dropInheritedACLs removes the access and default ACLs a temp folder may
+// inherit (some hosts set a default ACL on their temp root): with one the
+// group bits are the ACL mask and the rule rightly refuses.
+func dropInheritedACLs(t *testing.T, root string) {
+	t.Helper()
+	for _, dir := range []string{root, filepath.Join(root, ".config"), filepath.Join(root, ".config", "opencode"), filepath.Join(root, ".config", "opencode", "plugins")} {
+		for _, name := range []string{"system.posix_acl_access", "system.posix_acl_default"} {
+			if err := unix.Removexattr(dir, name); err != nil && err != unix.ENODATA && err != unix.ENOTSUP {
+				t.Fatalf("remove %s on %s: %v", name, dir, err)
+			}
+		}
 	}
 }
