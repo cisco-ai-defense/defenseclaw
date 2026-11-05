@@ -15,7 +15,7 @@
 #     accepts gives exit 17 "did not report healthy": the health check is
 #     bound to the PID this run started (install.sh listener_is)
 #   - a helper that does not broker gives exit 17 and no root gateway
-#   - under systemd and without it, the helper holds exactly its six
+#   - under systemd and without it, the helper holds exactly its five
 #     capabilities (install.sh HELPER_CAPS) and the gateway none
 # It changes the host (account defenseclaw-cowork, /opt/defenseclaw-cowork,
 # /etc and /var/lib folders, transient units) and removes it all at the end
@@ -61,14 +61,14 @@ copy() { rm -rf "${t:?}/$1"; cp -a "$t/pkg" "$t/$1"; }
 as_acct() { setpriv --reuid="$A" --regid="$A" --init-groups -- "$@"; }
 mode() { stat -c %a "$1"; }
 # install.sh HELPER_CAPS as a /proc/<pid>/status mask: CAP_CHOWN (0),
-# CAP_DAC_READ_SEARCH (2), CAP_NET_ADMIN (12), CAP_NET_RAW (13),
-# CAP_SYS_PTRACE (19), CAP_SYS_ADMIN (21).
-HELPER_CAPMASK=0000000000283005 NO_CAPS=0000000000000000
+# CAP_DAC_READ_SEARCH (2), CAP_NET_RAW (13), CAP_SYS_PTRACE (19),
+# CAP_SYS_ADMIN (21).
+HELPER_CAPMASK=0000000000282005 NO_CAPS=0000000000000000
 cap() { awk -v k="$2:" '$1 == k { print $2 }' "/proc/$1/status" 2> /dev/null; }
 caps_check() { # caps_check <how> <helper pid> <gateway pid>
   local h=$1 hp=$2 gp=$3
   if [ "$(cap "$hp" CapBnd)" = "$HELPER_CAPMASK" ] && [ "$(cap "$hp" CapEff)" = "$HELPER_CAPMASK" ] && [ "$(cap "$hp" CapAmb)" = "$NO_CAPS" ]; then
-    ok "$h: the helper holds only its six capabilities (CapBnd = CapEff = $HELPER_CAPMASK)"
+    ok "$h: the helper holds only its five capabilities (CapBnd = CapEff = $HELPER_CAPMASK)"
   else bad "$h: helper pid $hp CapBnd $(cap "$hp" CapBnd) CapEff $(cap "$hp" CapEff) CapAmb $(cap "$hp" CapAmb), want $HELPER_CAPMASK"; fi
   if [ "$(cap "$gp" CapBnd)" = "$NO_CAPS" ] && [ "$(cap "$gp" CapEff)" = "$NO_CAPS" ] && [ "$(cap "$gp" CapPrm)" = "$NO_CAPS" ]; then
     ok "$h: the gateway holds no capability, bounding set empty"
