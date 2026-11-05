@@ -438,6 +438,8 @@ def _finding_facts(
         # A Cowork finding reads cowork:PreToolUse; the decision and the
         # location still compare against the stored claudecode target.
         "target": cowork_hook_target(target, _event_surface(e, hook_details)),
+        # alerts --json keeps the stored spelling and adds "surface" (cowork audit S2).
+        "stored_target": target,
         "decision": _hook_decision(hook_details.get(e.id, []), target),
         "connector": _event_connector(e),
         "rule": f"{rule_id}: {title}" if title else rule_id,
@@ -801,16 +803,20 @@ def _alerts_json(app: AppContext, limit: int, connector: str | None) -> None:
             "timestamp": e.timestamp.isoformat() if e.timestamp else "",
             "severity": e.severity,
             "action": e.action,
-            "target": _event_target(e),
+            # The stored target, as before 1.0.9, so scripts that join on it
+            # keep working; "surface" says Cowork (cowork audit S2). The
+            # table and --show print cowork:* (GAP-0047).
+            "target": e.target,
             "actor": e.actor,
             "connector": _event_connector(e),
+            "surface": _event_surface(e, hook_details),
             "details": e.details,
         }
         # The same facts the table and --show print: a finding row's own
         # target and details are empty or only "finding.observed" (GAP-1615).
         facts = _finding_facts(e, hook_details, targets) or _quarantine_facts(e, targets) or {}
         if facts.get("target"):
-            row["target"] = facts["target"]
+            row["target"] = facts.get("stored_target") or facts["target"]
         for key in (
             "decision", "route", "rule", "scanner", "location",
             "sandbox", "path", "moved_to", "description", "next_step",

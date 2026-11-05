@@ -127,8 +127,11 @@ class AlertFindingRowsTests(unittest.TestCase):
         listed = {row["id"]: row for row in json.loads(
             self.runner.invoke(alerts, ["--json"], obj=self.app, catch_exceptions=False).output
         )}
-        self.assertEqual(listed[cowork_id]["target"], "cowork:PreToolUse")
+        # Cowork audit S2: --json keeps the stored target and adds surface.
+        self.assertEqual(listed[cowork_id]["target"], "claudecode:PreToolUse")
+        self.assertEqual(listed[cowork_id]["surface"], "cowork")
         self.assertEqual(listed[cli_id]["target"], "claudecode:PreToolUse")
+        self.assertEqual(listed[cli_id]["surface"], "")
 
     def test_a_cowork_finding_keeps_its_label_when_the_hook_details_are_dropped(self):
         # Cowork audit S1: a redaction profile can drop the connector-hook
@@ -183,6 +186,7 @@ class AlertFindingRowsTests(unittest.TestCase):
         self.assertNotIn("cowork", shown.lower())
         row = json.loads(self.runner.invoke(alerts, ["--json"], obj=self.app, catch_exceptions=False).output)[0]
         self.assertEqual(row["target"], "mcp:unregistered")
+        self.assertEqual(row["surface"], "")
 
     def test_printed_cowork_target_round_trips_into_dismiss(self):
         # Cowork audit M1: alerts print cowork:PreToolUse for a Cowork finding
