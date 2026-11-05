@@ -151,7 +151,7 @@ func (h *hostPlane) settleImageDigestLocked(event plane.Event) {
 // the fork flag and the digest state (neither event states one): the same
 // digest, version and argv, and the same exec id and start time wherever
 // both events carry them, so two real execs never merge. Kept until every
-// supported helper flags forks (1.0.9 helpers and later do).
+// supported helper flags forks (1.0.9 helpers and later do); remove in 1.0.10.
 func sameClientExecOfAnOldHelper(previous *heldWrapper, event plane.Event) bool {
 	was := previous.event
 	if was.ImageDigestState != "" || event.ImageDigestState != "" || event.Fork ||
