@@ -507,7 +507,14 @@ func shellDirectoryWriteOperandsWithFile(command, cwd, home string, directoryFac
 				functions[cmd.Name.Value] = cmd.Body
 			}
 		case *syntax.CallExpr:
-			if name, _, static := shellCommandWord(cmd, home); static && functions[name] != nil {
+			// Resolve the invoked word before unwrapping builtin or command:
+			// either name may itself be a shell function, while a real
+			// wrapper does not invoke a function of its wrapped name.
+			name, static := "", false
+			if len(cmd.Args) > 0 {
+				name, static = staticProgramWord(cmd.Args[0], home)
+			}
+			if static && functions[name] != nil {
 				if functionDepth < 8 && functionStatements < maxFunctionStatements {
 					functionDepth++
 					walk(functions[name], s)

@@ -148,7 +148,7 @@ func TestGAP0428PrintfAttachedValueTracking(t *testing.T) {
 			if got := values["f"]; got != "keylink" {
 				t.Errorf("tracked value %q, want keylink", got)
 			}
-			actionForgetValues(file.Stmts[0], values, "/tmp/home")
+			actionForgetValues(file.Stmts[0], values, "/tmp/project", "/tmp/home")
 			if _, kept := values["f"]; kept {
 				t.Error("bound name still has a known value after a nested printf")
 			}

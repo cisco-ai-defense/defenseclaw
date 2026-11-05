@@ -21,6 +21,8 @@ import (
 // an unset, append, read or command substitution changed it.
 type actionValues map[string]string
 
+const actionReadonlyValuePrefix = "\x00readonly:"
+
 // AdjacentAssignedWriteOperands proves a redirect whose immediately preceding
 // AND-list statement assigns its path. Earlier commands may create files, but
 // cannot change the value between that assignment and the redirect.
@@ -88,24 +90,43 @@ const actionGeneratedMarker = "\x1f"
 
 // printf accepts both -v NAME and -vNAME. Return the position of the
 // format word so both value trackers handle the same binding.
-func actionPrintfBoundName(call *syntax.CallExpr, home string) (string, int, bool) {
+func actionPrintfBoundName(call *syntax.CallExpr, values actionValues, cwd, home string) (string, int, bool) {
 	if call == nil || len(call.Args) < 2 {
 		return "", 0, false
 	}
-	option, fixed := StaticWord(call.Args[1], home)
+	program, fixed := StaticWord(call.Args[0], home)
+	if !fixed {
+		return "", 0, false
+	}
+	optionIndex := 1
+	if program == "builtin" || program == "command" {
+		if _, defined := values[actionFunctionValuePrefix+program]; defined || len(call.Args) < 3 {
+			return "", 0, false
+		}
+		wrapped, known := StaticWord(call.Args[1], home)
+		if !known || wrapped != "printf" {
+			return "", 0, false
+		}
+		optionIndex = 2
+	} else if program != "printf" {
+		return "", 0, false
+	} else if _, defined := values[actionFunctionValuePrefix+program]; defined {
+		return "", 0, false
+	}
+	option, fixed := actionWordValue(call.Args[optionIndex], values, cwd, home)
 	if !fixed {
 		return "", 0, false
 	}
 	if option == "-v" {
-		if len(call.Args) < 3 {
+		if len(call.Args) <= optionIndex+1 {
 			return "", 0, false
 		}
-		name, fixed := StaticWord(call.Args[2], home)
-		return name, 3, fixed && actionEvalAssignmentName(name)
+		name, fixed := actionWordValue(call.Args[optionIndex+1], values, cwd, home)
+		return name, optionIndex + 2, fixed && actionEvalAssignmentName(name)
 	}
 	if strings.HasPrefix(option, "-v") {
 		name := strings.TrimPrefix(option, "-v")
-		return name, 2, actionEvalAssignmentName(name)
+		return name, optionIndex + 1, actionEvalAssignmentName(name)
 	}
 	return "", 0, false
 }
@@ -189,15 +210,28 @@ func actionPrintfLiteral(format string) (string, bool) {
 // Assignments in a conditional, loop, function or pipeline may never execute
 // or may execute more than once. They invalidate a prior straight-line value;
 // their branch-local value cannot certify a later write target.
-func actionForgetValues(stmt *syntax.Stmt, values actionValues, home string) {
+func actionForgetValues(stmt *syntax.Stmt, values actionValues, cwd, home string) {
 	forget := func(assign *syntax.Assign) {
 		if assign.Name != nil {
 			delete(values, assign.Name.Value)
 		}
 	}
 	if declaration, ok := stmt.Cmd.(*syntax.DeclClause); ok {
+		if declaration.Variant != nil && declaration.Variant.Value == "readonly" {
+			for _, assign := range declaration.Args {
+				if assign.Name != nil {
+					values[actionReadonlyValuePrefix+assign.Name.Value] = "?"
+				}
+			}
+		}
 		for _, assign := range declaration.Args {
 			forget(assign)
+		}
+		return
+	}
+	if function, ok := stmt.Cmd.(*syntax.FuncDecl); ok {
+		if function.Name != nil {
+			values[actionFunctionValuePrefix+function.Name.Value] = actionFunctionUnknownValue
 		}
 		return
 	}
@@ -215,15 +249,36 @@ func actionForgetValues(stmt *syntax.Stmt, values actionValues, home string) {
 	if !fixed {
 		return
 	}
-	switch programBase(program) {
-	case "read", "mapfile", "readarray", "export", "unset", "set", "declare", "local", "typeset":
-		for name := range values {
-			if name != "HOME" && name != "PWD" && name != "RANDOM" && name != "$" {
+	if _, defined := values[actionFunctionValuePrefix+program]; defined {
+		next := maps.Clone(values)
+		if _, known := actionApplyFunctionValue(program, next, 0); !known {
+			actionClearFunctionValues(values)
+			return
+		}
+		for name, value := range values {
+			if !strings.HasPrefix(name, "\x00") && next[name] != value {
 				delete(values, name)
 			}
 		}
-	case "printf":
-		if name, _, ok := actionPrintfBoundName(call, home); ok {
+		return
+	}
+	switch programBase(program) {
+	case "read", "mapfile", "readarray", "export", "unset", "set", "declare", "local", "typeset":
+		for name := range values {
+			if name != "HOME" && name != "PWD" && name != "RANDOM" && name != "$" &&
+				!strings.HasPrefix(name, actionFunctionValuePrefix) && !strings.HasPrefix(name, actionReadonlyValuePrefix) {
+				delete(values, name)
+			}
+		}
+	case "readonly":
+		for _, arg := range call.Args[1:] {
+			if name, ok := StaticWord(arg, home); ok && actionEvalAssignmentName(name) {
+				values[actionReadonlyValuePrefix+name] = "?"
+				delete(values, name)
+			}
+		}
+	case "printf", "builtin", "command":
+		if name, _, ok := actionPrintfBoundName(call, values, cwd, home); ok {
 			delete(values, name)
 		}
 	case "cd", "pushd", "popd":
@@ -416,6 +471,11 @@ func actionSubstitutionValue(sub *syntax.CmdSubst, values actionValues, cwd, hom
 			return "", false
 		}
 	}
+	if !strings.Contains(words[0], "/") {
+		if _, defined := values[actionFunctionValuePrefix+words[0]]; defined {
+			return actionFunctionSubstitutionValue(words[0], values)
+		}
+	}
 	switch programBase(words[0]) {
 	case "cat":
 		if len(words) == 2 {
@@ -501,11 +561,11 @@ func actionUpdateValuesKept(stmt *syntax.Stmt, candidates []actionValues, cwd, h
 	for _, values := range candidates {
 		*steps += 1
 		if *steps > actionMaxValueSteps {
-			return actionSaturateValues(stmt, candidates, home)
+			return actionSaturateValues(stmt, candidates, cwd, home)
 		}
 		next = actionAppendValueCandidates(next, actionKeptStatement(stmt, values, cwd, home, steps))
 		if actionKeptSaturated(next) {
-			return actionSaturateValues(stmt, candidates, home)
+			return actionSaturateValues(stmt, candidates, cwd, home)
 		}
 	}
 	return next
@@ -530,7 +590,7 @@ func actionKeptSaturated(candidates []actionValues) bool {
 // On a candidate or step cap, keep only values shared by every input path.
 // The current statement may be only partly explored, so its assignments
 // cannot certify a value even when the paths explored so far agree.
-func actionSaturateValues(stmt *syntax.Stmt, candidates []actionValues, home string) []actionValues {
+func actionSaturateValues(stmt *syntax.Stmt, candidates []actionValues, cwd, home string) []actionValues {
 	stable := actionValues{actionKeptSaturatedKey: "1"}
 	if len(candidates) > 0 {
 		for name, value := range candidates[0] {
@@ -545,8 +605,21 @@ func actionSaturateValues(stmt *syntax.Stmt, candidates []actionValues, home str
 				stable[name] = value
 			}
 		}
+		for _, candidate := range candidates {
+			for name := range candidate {
+				if strings.HasPrefix(name, actionReadonlyValuePrefix) {
+					if _, certain := stable[name]; !certain {
+						stable[name] = "?"
+					}
+				}
+			}
+		}
 	}
-	actionInvalidateSaturatedValues(stmt, stable, home)
+	if _, function := stmt.Cmd.(*syntax.FuncDecl); function {
+		actionUpdateValuesAs(stmt, stable, cwd, home, false)
+	} else {
+		actionInvalidateSaturatedValues(stmt, stable, cwd, home)
+	}
 	return []actionValues{stable}
 }
 
@@ -569,15 +642,23 @@ func actionUpdateSaturatedValues(stmt *syntax.Stmt, stable actionValues, cwd, ho
 		}
 		if len(call.Args) > 0 {
 			program, fixed := staticProgramWord(call.Args[0], home)
+			if fixed {
+				if _, defined := next[actionFunctionValuePrefix+program]; defined {
+					actionUpdateValuesAs(stmt, next, cwd, home, false)
+					return []actionValues{next}
+				}
+			}
 			switch programBase(program) {
-			case "eval", "source", ".", "unset", "export", "printf", "read", "mapfile", "readarray", "set", "declare", "local", "typeset":
+			case "eval", "source", ".", "unset", "export", "printf", "builtin", "command", "read", "mapfile", "readarray", "set", "declare", "local", "typeset":
 				fixed = false
 			}
 			if !fixed {
-				actionInvalidateSaturatedValues(stmt, next, home)
+				actionInvalidateSaturatedValues(stmt, next, cwd, home)
 				return []actionValues{next}
 			}
 		}
+		actionUpdateValuesAs(stmt, next, cwd, home, false)
+	case *syntax.FuncDecl:
 		actionUpdateValuesAs(stmt, next, cwd, home, false)
 	case *syntax.DeclClause:
 		for _, assign := range stmt.Cmd.(*syntax.DeclClause).Args {
@@ -588,7 +669,7 @@ func actionUpdateSaturatedValues(stmt *syntax.Stmt, stable actionValues, cwd, ho
 		actionUpdateValuesAs(stmt, next, cwd, home, false)
 	default:
 		if !actionSaturatedIfAlternates(stmt, next, cwd, home) {
-			actionInvalidateSaturatedValues(stmt, next, home)
+			actionInvalidateSaturatedValues(stmt, next, cwd, home)
 		}
 	}
 	return []actionValues{next}
@@ -709,7 +790,7 @@ func actionSaturatedWordValues(word *syntax.Word, stable actionValues, cwd, home
 	return values, true
 }
 
-func actionInvalidateSaturatedValues(stmt *syntax.Stmt, stable actionValues, home string) {
+func actionInvalidateSaturatedValues(stmt *syntax.Stmt, stable actionValues, cwd, home string) {
 	for name := range stable {
 		if strings.HasPrefix(name, actionKeptAlternatesKey) {
 			delete(stable, name)
@@ -717,7 +798,11 @@ func actionInvalidateSaturatedValues(stmt *syntax.Stmt, stable actionValues, hom
 	}
 	clear := func() {
 		for name := range stable {
-			if name != actionKeptSaturatedKey {
+			if strings.HasPrefix(name, actionFunctionValuePrefix) {
+				stable[name] = actionFunctionUnknownValue
+			} else if strings.HasPrefix(name, actionReadonlyValuePrefix) {
+				stable[name] = "?"
+			} else if name != actionKeptSaturatedKey {
 				delete(stable, name)
 			}
 		}
@@ -727,7 +812,7 @@ func actionInvalidateSaturatedValues(stmt *syntax.Stmt, stable actionValues, hom
 		if !ok {
 			return true
 		}
-		actionForgetValues(nested, stable, home)
+		actionForgetValues(nested, stable, cwd, home)
 		if call, ok := nested.Cmd.(*syntax.CallExpr); ok && len(call.Args) > 0 {
 			program, fixed := staticProgramWord(call.Args[0], home)
 			if !fixed || programBase(program) == "eval" || programBase(program) == "source" || program == "." {
@@ -787,12 +872,18 @@ func actionKeptStatement(stmt *syntax.Stmt, values actionValues, cwd, home strin
 			if !fixed {
 				return []actionValues{values}
 			}
-			switch programBase(program) {
-			case "eval", "unset", "export", "printf", "read", "mapfile", "readarray":
-			default:
-				return []actionValues{values}
+			if _, defined := values[actionFunctionValuePrefix+program]; !defined {
+				switch programBase(program) {
+				case "eval", "unset", "export", "printf", "builtin", "command", "readonly", "read", "mapfile", "readarray":
+				default:
+					return []actionValues{values}
+				}
 			}
 		}
+		next := maps.Clone(values)
+		actionUpdateValuesAs(stmt, next, cwd, home, false)
+		return []actionValues{next}
+	case *syntax.FuncDecl:
 		next := maps.Clone(values)
 		actionUpdateValuesAs(stmt, next, cwd, home, false)
 		return []actionValues{next}
@@ -916,6 +1007,12 @@ func actionUpdateValuesAs(stmt *syntax.Stmt, values actionValues, cwd, home stri
 			return
 		}
 		name := assign.Name.Value
+		if readonly := values[actionReadonlyValuePrefix+name]; readonly != "" {
+			if readonly == "?" {
+				delete(values, name)
+			}
+			return
+		}
 		value, fixed := actionWordValue(assign.Value, values, cwd, home)
 		if assign.Append {
 			old, known := values[name]
@@ -933,7 +1030,20 @@ func actionUpdateValuesAs(stmt *syntax.Stmt, values actionValues, cwd, home stri
 	}
 	if declaration, ok := stmt.Cmd.(*syntax.DeclClause); ok {
 		for _, assign := range declaration.Args {
-			update(assign)
+			if declaration.Variant != nil && declaration.Variant.Value == "readonly" && assign.Name != nil {
+				if assign.Value != nil {
+					update(assign)
+				}
+				values[actionReadonlyValuePrefix+assign.Name.Value] = "1"
+			} else {
+				update(assign)
+			}
+		}
+		return
+	}
+	if function, ok := stmt.Cmd.(*syntax.FuncDecl); ok {
+		if function.Name != nil {
+			values[actionFunctionValuePrefix+function.Name.Value] = actionFunctionValue(function, home)
 		}
 		return
 	}
@@ -948,7 +1058,7 @@ func actionUpdateValuesAs(stmt *syntax.Stmt, values actionValues, cwd, home stri
 		// reads its default (rel-1-0-2:GAP-0409, unset inside an if).
 		syntax.Walk(stmt, func(node syntax.Node) bool {
 			if nested, ok := node.(*syntax.Stmt); ok && nested != stmt {
-				actionForgetValues(nested, values, home)
+				actionForgetValues(nested, values, cwd, home)
 			}
 			return true
 		})
@@ -964,7 +1074,41 @@ func actionUpdateValuesAs(stmt *syntax.Stmt, values actionValues, cwd, home stri
 	if !fixed {
 		return
 	}
+	if _, defined := values[actionFunctionValuePrefix+program]; defined {
+		if _, known := actionApplyFunctionValue(program, values, 0); !known {
+			actionClearFunctionValues(values)
+		}
+		return
+	}
+	if program == "builtin" || program == "command" {
+		if len(call.Args) < 2 {
+			return
+		}
+		wrapped, known := StaticWord(call.Args[1], home)
+		if !known || wrapped != "printf" {
+			return
+		}
+		program = "printf"
+	}
+	if program != "printf" && programBase(program) == "printf" {
+		return
+	}
 	switch programBase(program) {
+	case "readonly":
+		for _, arg := range call.Args[1:] {
+			word, known := StaticWord(arg, home)
+			if !known {
+				continue
+			}
+			name, value, assigned := strings.Cut(word, "=")
+			if !actionEvalAssignmentName(name) {
+				continue
+			}
+			if assigned && values[actionReadonlyValuePrefix+name] == "" {
+				values[name] = value
+			}
+			values[actionReadonlyValuePrefix+name] = "1"
+		}
 	case "eval":
 		// eval of static name=value words assigns them; any other eval
 		// may change every name (rel-1-0-2:GAP-0409, eval f=<link>).
@@ -990,9 +1134,19 @@ func actionUpdateValuesAs(stmt *syntax.Stmt, values actionValues, cwd, home stri
 			values[name] = value
 		}
 	case "unset":
+		functionOnly := false
+		for _, arg := range call.Args[1:] {
+			if flag, ok := StaticWord(arg, home); ok && flag == "-f" {
+				functionOnly = true
+			}
+		}
 		for _, arg := range call.Args[1:] {
 			if name, ok := StaticWord(arg, home); ok {
-				delete(values, name)
+				if functionOnly {
+					delete(values, actionFunctionValuePrefix+name)
+				} else if values[actionReadonlyValuePrefix+name] == "" {
+					delete(values, name)
+				}
 			}
 		}
 	case "export":
@@ -1006,8 +1160,14 @@ func actionUpdateValuesAs(stmt *syntax.Stmt, values actionValues, cwd, home stri
 			}
 		}
 	case "printf":
-		name, formatIndex, ok := actionPrintfBoundName(call, home)
+		name, formatIndex, ok := actionPrintfBoundName(call, values, cwd, home)
 		if !ok {
+			return
+		}
+		if readonly := values[actionReadonlyValuePrefix+name]; readonly != "" {
+			if readonly == "?" {
+				delete(values, name)
+			}
 			return
 		}
 		if len(call.Args) <= formatIndex {
@@ -1016,6 +1176,18 @@ func actionUpdateValuesAs(stmt *syntax.Stmt, values actionValues, cwd, home stri
 		}
 		format, fixed := StaticWord(call.Args[formatIndex], home)
 		if !fixed {
+			delete(values, name)
+			return
+		}
+		if format == "%b" {
+			if len(call.Args) == formatIndex+2 {
+				if argument, known := actionWordValue(call.Args[formatIndex+1], values, cwd, home); known {
+					if decoded, plain := actionPrintfLiteral(argument); plain {
+						values[name] = decoded
+						return
+					}
+				}
+			}
 			delete(values, name)
 			return
 		}

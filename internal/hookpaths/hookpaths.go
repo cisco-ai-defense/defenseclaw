@@ -1201,12 +1201,15 @@ func ResolveConnector(connector, surface, event string, payload []byte) string {
 				}
 				if !isApplyPatchToolName(tool) && !protectedDecision {
 					protectedDecision = actionConcreteProtectedWriteOnWithOperands(command, cwd, home, false, nil, &concreteOperands)
+					if protectedDecision && actionClientProvedSafeVariableTargetsForHook(command, cwd, home) {
+						protectedDecision = false
+					}
 					if !protectedDecision && actionClientVariableWriteCandidate(command, home) {
 						// A per-user gateway can resolve a variable write through
 						// the user's links. Carry that positive decision to managed
 						// gateways, excluding an unconditionally overwritten value.
 						protectedDecision = ActionCommandDecision(command, cwd, home) != "" &&
-							!actionClientProvedSafeVariableTargets(command, cwd, home) &&
+							!actionClientProvedSafeVariableTargetsForHook(command, cwd, home) &&
 							!actionClientProvedOverwrittenRedirect(command, cwd, home)
 					}
 					if !protectedDecision {

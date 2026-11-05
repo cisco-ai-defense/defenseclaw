@@ -1531,6 +1531,17 @@ func appendTrustedHomeResolvedSSHKeyWriteFinding(
 	evidence.overBudgetOmission = &overBudget
 	evidence.unresolvedTarget = &unresolved
 	symlinkWrite := trustedExistingAuthorizedKeysSymlinkWrite(evidence, facts)
+	if !symlinkWrite && !request.ProtectedHomeHook && trustedPOSIXShellCall(input, facts) &&
+		(request.Connector == "claudecode" || request.Connector == "codex") &&
+		hookpaths.ProvedOrdinaryVariableTargets(input.Command, input.CWD, facts.ActiveHome) {
+		kept := findings[:0]
+		for _, finding := range findings {
+			if finding.RuleID != "persistence.ssh_authorized_keys_command" && finding.RuleID != "PATH-SSH-DIR" {
+				kept = append(kept, finding)
+			}
+		}
+		return kept
+	}
 	if symlinkWrite && overBudget {
 		// The only write found is an operand the client's full bounded map
 		// left out. The call still blocks, as over the evaluation budget,

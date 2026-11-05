@@ -491,6 +491,8 @@ func dispatchTrustedActionWith(
 		defer func() {
 			checkedWholeWrite := false
 			wholeWriteSafe := false
+			checkedLocalOrdinary := false
+			localOrdinary := false
 			wholeCommand, wholeCommandKnown := trustedBashCommandInput(request.Input)
 			simples := actionfacts.SimpleCommands(request.Input, facts)
 			if len(simples) == 0 && wholeCommandKnown &&
@@ -577,11 +579,34 @@ func dispatchTrustedActionWith(
 						wholeWriteSafe = wholeCommandKnown &&
 							request.targetMemo.ActionCommandDecisionWithDialectAndGlobFacts(wholeCommand,
 								request.Input.CWD, request.Input.ActiveHome, request.Input.DialectHint, clientGlobFacts(request)) == ""
+						if !wholeWriteSafe && wholeCommandKnown && !request.ProtectedHomeHook &&
+							(request.Connector == "claudecode" || request.Connector == "codex") &&
+							trustedPOSIXShellCall(request.Input, facts) {
+							wholeWriteSafe = hookpaths.ProvedOrdinaryVariableTargets(
+								wholeCommand, request.Input.CWD, request.Input.ActiveHome)
+						}
 					}
 					if wholeWriteSafe {
 						// A child with a missing action-local value cannot prove a
 						// protected write by itself. The full action's class resolver
 						// has already judged that binding; retain every other rule.
+						childFindings = slices.DeleteFunc(childFindings, func(f RuleFinding) bool {
+							return f.RuleID == "persistence.ssh_authorized_keys_command"
+						})
+					}
+				}
+				if !simple.UnresolvedBoundVariable && wholeCommandKnown && !request.ProtectedHomeHook &&
+					(request.Connector == "claudecode" || request.Connector == "codex") &&
+					trustedPOSIXShellCall(request.Input, facts) &&
+					slices.ContainsFunc(childFindings, func(f RuleFinding) bool {
+						return f.RuleID == "persistence.ssh_authorized_keys_command"
+					}) {
+					if !checkedLocalOrdinary {
+						checkedLocalOrdinary = true
+						localOrdinary = hookpaths.ProvedOrdinaryVariableTargets(
+							wholeCommand, request.Input.CWD, request.Input.ActiveHome)
+					}
+					if localOrdinary {
 						childFindings = slices.DeleteFunc(childFindings, func(f RuleFinding) bool {
 							return f.RuleID == "persistence.ssh_authorized_keys_command"
 						})

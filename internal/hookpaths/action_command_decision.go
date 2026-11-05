@@ -911,7 +911,7 @@ func actionPosixCommandDecision(command, cwd, home string, depth int) string {
 			}
 			actionUpdateValues(stmt, values, cwd, home)
 		} else {
-			actionForgetValues(stmt, values, home)
+			actionForgetValues(stmt, values, cwd, home)
 		}
 		for _, redirect := range stmt.Redirs {
 			if redirect.Word == nil {
