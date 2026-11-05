@@ -19,7 +19,11 @@ Antigravity). Only these files may still name them:
   section of the upgrade guide, and the enterprise manual test plan, whose
   migration rows configure the retired ids.
 
-``openwiki/`` is generated and excluded. This test is scanned like any other
+``openwiki/`` is generated and excluded. Vendored upstream modules under
+``third_party/<module>/`` (a folder that ships the upstream ``LICENSE``) keep
+the upstream source as published, so their files are excluded too, except the
+module ``README.md`` DefenseClaw writes; a ``third_party`` folder without a
+``LICENSE`` is not a vendored copy and is scanned. This test is scanned like any other
 file, so it builds every retired name from fragments (and the old Desktop
 strings from ``defenseclaw.legacy_connector``) instead of spelling them.
 """
@@ -100,6 +104,12 @@ UPGRADE_SECTION = "## Renamed and removed connectors"
 # Released hook renders the upgrade tests run byte for byte, as they shipped.
 EXCLUDED_PREFIXES = ("openwiki/", "internal/gateway/connector/testdata/released-hooks/")
 MAX_SCAN_BYTES = 8 * 1024 * 1024
+# Vendored upstream Go modules (go.mod replace targets such as the Bifrost core
+# copy of GAP-0564). Upstream code names vendor CLIs in its own user-agent
+# tables; those are not DefenseClaw connectors and are not ours to edit.
+VENDORED_ROOT = "third_party/"
+VENDORED_MARKER = "LICENSE"
+VENDORED_OWN_FILES = frozenset({"README.md"})
 
 
 def _tracked_files() -> list[str]:
@@ -111,6 +121,28 @@ def _tracked_files() -> list[str]:
         check=True,
     )
     return [name for name in result.stdout.decode("utf-8").split("\0") if name]
+
+
+def _vendored_modules(tracked: list[str]) -> frozenset[str]:
+    """Return the ``third_party/<module>/`` prefixes that ship an upstream LICENSE."""
+    modules = set()
+    for relative in tracked:
+        parts = relative.split("/")
+        if len(parts) == 3 and relative.startswith(VENDORED_ROOT) and parts[2] == VENDORED_MARKER:
+            modules.add(f"{parts[0]}/{parts[1]}/")
+    return frozenset(modules)
+
+
+def _scanned_files(tracked: list[str]) -> list[str]:
+    """Return the tracked files the tripwire reads (vendored upstream code skipped)."""
+    modules = _vendored_modules(tracked)
+    scanned = []
+    for relative in tracked:
+        module = next((prefix for prefix in modules if relative.startswith(prefix)), None)
+        if module is not None and relative[len(module) :] not in VENDORED_OWN_FILES:
+            continue
+        scanned.append(relative)
+    return scanned
 
 
 def _read_text(relative: str) -> str | None:
@@ -162,7 +194,7 @@ def _violations(relative: str, text: str) -> list[str]:
 
 def test_retired_connector_names_do_not_reappear() -> None:
     violations: list[str] = []
-    for relative in _tracked_files():
+    for relative in _scanned_files(_tracked_files()):
         text = _read_text(relative)
         if text is not None:
             violations.extend(_violations(relative, text))
@@ -210,6 +242,37 @@ def test_gemini_list_pattern_matches_connector_lists_only() -> None:
     assert GEMINI_LIST_RE.search(f"{gemini}, Copilot")
     assert not GEMINI_LIST_RE.search(f"OpenAI, Anthropic, {gemini}, Bedrock")
     assert not GEMINI_LIST_RE.search("~/.gemini/config/hooks.json")
+
+
+def test_only_vendored_upstream_code_is_skipped() -> None:
+    tracked = [
+        "third_party/upstream/LICENSE",
+        "third_party/upstream/README.md",
+        "third_party/upstream/schemas/useragents.go",
+        "third_party/unlicensed/notes.go",
+        "third_party/top-level.go",
+        "internal/gateway/provider_bifrost.go",
+        "cli/defenseclaw/example.py",
+    ]
+    assert _scanned_files(tracked) == [
+        "third_party/upstream/README.md",
+        "third_party/unlicensed/notes.go",
+        "third_party/top-level.go",
+        "internal/gateway/provider_bifrost.go",
+        "cli/defenseclaw/example.py",
+    ]
+
+
+def test_tree_scan_still_reads_our_code() -> None:
+    tracked = _tracked_files()
+    scanned = set(_scanned_files(tracked))
+    for relative in (THIS_FILE, "cli/defenseclaw/legacy_connector.py", "internal/gateway/provider_bifrost.go"):
+        assert relative in scanned, relative
+    for module in _vendored_modules(tracked):
+        assert module + "README.md" in scanned, module
+    skipped = set(tracked) - scanned
+    assert skipped, "no vendored module found; drop the exclusion if third_party/ is gone"
+    assert all(relative.startswith(VENDORED_ROOT) for relative in skipped), sorted(skipped)[:5]
 
 
 def test_allowlisted_files_still_exist() -> None:
