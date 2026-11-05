@@ -319,6 +319,20 @@ func TestForkOfAClientIsNeverAClientExec(t *testing.T) {
 	}
 }
 
+// S1 review 3 F2: the Secure Client profile classifies a client's own argv,
+// so a flagged fork is classified there as before.
+func TestForkIsStillClassifiedUnderSecureClient(t *testing.T) {
+	host := newHost(newFake(fullCoverage()))
+	host.indicators.KeepClientMCP = true
+	uid := os.Getuid() + 1000
+	host.handle(plane.Event{Kind: plane.KindExec, Fork: true, PID: 500, PPID: 1, Name: "claude", UID: &uid,
+		Cmdline:      `/sessions/cwk-v1/.local/bin/claude -p use @modelcontextprotocol/server-filesystem`,
+		ImageVersion: "2.1.317", ImageDigestState: plane.DigestFailed})
+	if classified, _, _, _ := host.stats(); classified != 1 || host.clientExecs.forks.Load() != 0 {
+		t.Fatalf("classified=%d forks skipped=%d, want 1 and 0", classified, host.clientExecs.forks.Load())
+	}
+}
+
 // A wrapper whose client child is waiting for its image digest waits with
 // it: both are dropped when the signed manifest lists the digest, and both
 // are recorded when the read fails.
