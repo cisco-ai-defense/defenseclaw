@@ -242,6 +242,22 @@ func TestForeignGatewayListenerAcceptsThisHomesGatewayRunByAnotherAccount(t *tes
 	c.Gateway.APIPort = 18970
 
 	gatewayManagedState = func() (bool, int) { return true, 36347 }
+	record := filepath.Join(c.DataDir, "gateway-api.json")
+	publish := func(body string) {
+		if err := os.WriteFile(record, []byte(body), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	// The gateway's own record must name this endpoint; a running gateway
+	// alone vouches for no port.
+	if problem := foreignGatewayListener(c); !strings.Contains(problem, "publishes no listener at that address") {
+		t.Fatalf("an unlisted holder was this account's gateway without its record: %q", problem)
+	}
+	publish(`{"pid":36347,"host":"127.0.0.1","port":18971}`)
+	if problem := foreignGatewayListener(c); !strings.Contains(problem, "publishes no listener at that address") {
+		t.Fatalf("an unlisted holder on another port than the record was this account's gateway: %q", problem)
+	}
+	publish(`{"pid":36347,"host":"127.0.0.1","port":18970}`)
 	if problem := foreignGatewayListener(c); problem != "" {
 		t.Fatalf("this home's running gateway reported as foreign: %q", problem)
 	}

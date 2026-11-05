@@ -6248,10 +6248,19 @@ def _other_account_gateway_listener_evidence(cfg, pid: int, host: str, api_port:
         return None
     if not _loopback_hosts_match(record_host, host):
         return None
+    # Probe the record's exact endpoint, not the configured host: with
+    # ``localhost`` a probe could reach another same-account listener on the
+    # other loopback address, which the record does not name.
+    expected = record_host.strip("[]")
     try:
-        with socket.create_connection((str(host).strip("[]"), api_port), timeout=1):
-            pass
+        with socket.create_connection((expected, api_port), timeout=1) as probe:
+            peer = probe.getpeername()
     except OSError:
+        return None
+    try:
+        if ipaddress.ip_address(str(peer[0]).split("%", 1)[0]) != ipaddress.ip_address(expected) or peer[1] != api_port:
+            return None
+    except ValueError:
         return None
     return ListenerEvidence("ok", pid=pid, reason="the gateway's own runtime record names this endpoint")
 

@@ -409,7 +409,7 @@ def test_this_homes_gateway_run_by_another_account_gets_the_token(monkeypatch) -
     monkeypatch.setattr(
         gateway, "_foreign_loopback_listener_uncached", lambda port, *_a, **_k: "a process of another account"
     )
-    monkeypatch.setattr(gateway, "_this_accounts_gateway_as_another_account", lambda port: port == 18970)
+    monkeypatch.setattr(gateway, "_this_accounts_gateway_as_another_account", lambda host, port: port == 18970)
 
     assert gateway.foreign_loopback_listener("127.0.0.1", 18970) == ""
     assert "a process of another account" in gateway.foreign_loopback_listener("127.0.0.1", 18980)
@@ -423,6 +423,7 @@ def test_only_a_complete_proof_for_the_port_makes_an_unlisted_listener_this_acco
     from defenseclaw.commands import cmd_doctor
 
     monkeypatch.setattr(config, "load", lambda **_kwargs: SimpleNamespace())
+    monkeypatch.setattr(cmd_doctor, "_gateway_api_host", lambda _cfg: "127.0.0.1")
     proven: list[int] = []
 
     def trust(code: str, uid: int):
@@ -442,14 +443,20 @@ def test_only_a_complete_proof_for_the_port_makes_an_unlisted_listener_this_acco
         ("missing", -1, False),
     ]:
         monkeypatch.setattr(cmd_doctor, "_trusted_gateway_listener", trust(code, uid))
-        assert gateway._this_accounts_gateway_as_another_account(18970) is expected, (code, uid)
+        assert gateway._this_accounts_gateway_as_another_account("127.0.0.1", 18970) is expected, (code, uid)
     assert proven == [18970] * 4
+    # The proof is for the configured gateway host; another loopback address
+    # on the same port is still another account's.
+    monkeypatch.setattr(cmd_doctor, "_trusted_gateway_listener", trust("trusted", 0))
+    assert gateway._this_accounts_gateway_as_another_account("::1", 18970) is False
+    assert gateway._this_accounts_gateway_as_another_account("localhost", 18970) is True
+    assert proven == [18970] * 5
 
     def unavailable(*_args, **_kwargs):
         raise RuntimeError("config does not load")
 
     monkeypatch.setattr(cmd_doctor, "_trusted_gateway_listener", unavailable)
-    assert gateway._this_accounts_gateway_as_another_account(18970) is False
+    assert gateway._this_accounts_gateway_as_another_account("127.0.0.1", 18970) is False
 
 
 @pytest.mark.skipif(os.name == "nt", reason="POSIX account semantics")
@@ -483,8 +490,8 @@ def test_doctor_binds_another_accounts_gateway_to_its_own_runtime_record(tmp_pat
     protect_private_file(pid_file)
     record = tmp_path / "gateway-api.json"
 
-    def publish(record_pid: int, record_port: int) -> None:
-        record.write_text(json.dumps({"pid": record_pid, "host": "127.0.0.1", "port": record_port}), encoding="utf-8")
+    def publish(record_pid: int, record_port: int, record_host: str = "127.0.0.1") -> None:
+        record.write_text(json.dumps({"pid": record_pid, "host": record_host, "port": record_port}), encoding="utf-8")
         protect_private_file(record)
 
     class Evidence(evidence_module.GatewayEvidence):
@@ -523,6 +530,12 @@ def test_doctor_binds_another_accounts_gateway_to_its_own_runtime_record(tmp_pat
         assert prove().code == "missing_listener"
         publish(pid + 1, port)
         assert prove().code == "missing_listener"
+        # The probe goes to the record's own endpoint: a record naming the
+        # other loopback address proves nothing about a listener on this one.
+        publish(pid, port, "::1")
+        monkeypatch.setattr(cmd_doctor, "_gateway_api_host", lambda _cfg: "localhost")
+        assert prove().code == "missing_listener"
+        monkeypatch.setattr(cmd_doctor, "_gateway_api_host", lambda _cfg: "127.0.0.1")
         # A record that is not private vouches for nothing.
         publish(pid, port)
         record.chmod(0o644)
