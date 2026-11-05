@@ -63,6 +63,17 @@ func TestInspectToolAuditWriteFailureFollowsPolicyTier(t *testing.T) {
 			t.Fatalf("healthy store: verdict %v, want allow", out)
 		}
 	})
+	t.Run("strict tier without an audit logger keeps the verdict", func(t *testing.T) {
+		// No logger means no audit record to lose (the benchmark harness):
+		// the hook routes skip errHookAuditNotConfigured the same way. A
+		// configured logger whose write fails still blocks (next cases).
+		fixture := newAuditFailureHookFixture(t, "")
+		fixture.api.scannerCfg.Guardrail.RulePack = "strict"
+		fixture.api.logger = nil
+		if out := fixture.inspectTool(t, benignInspectCall()); out["action"] != "allow" {
+			t.Fatalf("strict tier, no audit logger: verdict %v, want allow", out)
+		}
+	})
 	t.Run("default tier allows with the degraded warning", func(t *testing.T) {
 		fixture := newAuditFailureHookFixture(t, "")
 		fixture.emitter.fail = true
