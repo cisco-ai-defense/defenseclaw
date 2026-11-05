@@ -14271,6 +14271,13 @@ def _remove_connector(
         ux.echo(f"  ✓ Remaining connector(s): {', '.join(sorted(remaining))}")
     else:
         ux.echo("  ✓ No connectors configured — DefenseClaw enforces nothing until you run `setup` again.")
+    if normalize_connector(match) == "claudecode":
+        from defenseclaw import cowork
+
+        # The Cowork plugin runs this connector's hook, which the teardown
+        # retires, and only the user can remove an account plugin.
+        if os.path.exists(cowork.state_path(str(cfg.data_dir))):
+            ux.warn("Cowork is no longer protected; remove the DefenseClaw plugin in Claude (Customize > Plugins)")
 
     if restart:
         click.echo()

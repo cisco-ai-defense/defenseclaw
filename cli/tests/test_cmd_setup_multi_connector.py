@@ -1708,6 +1708,24 @@ class TestRemoveConnector(unittest.TestCase):
         self.assertNotEqual(result.exit_code, 0)
         self.assertEqual(set(self.app.cfg.guardrail.connectors), {"codex", "cursor"})
 
+    # Cowork audit P4-2: the Cowork plugin runs the Claude Code hook, so
+    # removing claudecode leaves Cowork unchecked; say so when it was built.
+    def test_remove_claudecode_says_cowork_is_no_longer_protected(self):
+        from defenseclaw import cowork
+
+        notice = "Cowork is no longer protected; remove the DefenseClaw plugin in Claude (Customize > Plugins)"
+        self._seed_map("claudecode", "codex", "cursor")
+        with self._no_restart_bounce():
+            result = _invoke(["remove", "cursor", "--yes", "--no-restart"], self.app)
+        self.assertEqual(result.exit_code, 0, msg=result.output)
+        self.assertNotIn("Cowork", result.output)
+        cowork.save_state(self.app.cfg.data_dir, {"version": "1.0.1", "built_at": "2026-11-04T08:00:00+00:00"})
+        with self._no_restart_bounce():
+            result = _invoke(["remove", "claude-code", "--yes", "--no-restart"], self.app)
+        self.assertEqual(result.exit_code, 0, msg=result.output)
+        self.assertEqual(" ".join(result.output.split()).count(notice), 1, result.output)
+        self.assertEqual(set(self.app.cfg.guardrail.connectors), {"codex"})
+
     def test_remove_known_absent_is_idempotent(self):
         self._seed_map("codex", "cursor")
         with self._no_restart_bounce():
