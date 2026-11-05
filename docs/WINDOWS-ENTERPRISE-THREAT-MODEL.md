@@ -966,8 +966,9 @@ to the scan; runtime hook rules still apply to its tool calls.
     is not measured on Windows yet. The default `enforce` writes
     `allowManagedHooksOnly`. Claude Desktop keeps the engine in the user's own
     data folder: DefenseClaw accepts a build only with a valid Authenticode
-    signature by `Anthropic, PBC` on `claude.exe` whose file version equals the
-    folder, and reports any other as `surface_unverified`. Web fetch
+    signature by `Anthropic, PBC` (or `Anthropic PBC`) on `claude.exe` whose
+    file version equals the folder, and reports any other as
+    `surface_unverified`. Web fetch
     (Anthropic's side) and the Cowork VM's outbound traffic (Anthropic's
     proxy) are outside the host's egress controls, also though the VM runs
     on Windows. A DefenseClaw plugin a user uploaded to their Claude account

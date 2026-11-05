@@ -29,6 +29,13 @@ GO_CODESIG = ROOT / "internal/codesig/codesig.go"
 COWORK_PY = ROOT / "cli/defenseclaw/cowork.py"
 DOCTOR_PY = ROOT / "cli/defenseclaw/commands/cmd_doctor.py"
 CONTRACTS = ROOT / "cli/defenseclaw/inventory/hook_contracts.json"
+THREAT_MODELS = (
+    ROOT / "docs-site/content/docs/enterprise/threat-model.mdx",
+    ROOT / "docs/ENTERPRISE-THREAT-MODEL.md",
+    ROOT / "docs/LINUX-ENTERPRISE-THREAT-MODEL.md",
+    ROOT / "docs/MACOS-ENTERPRISE-THREAT-MODEL.md",
+    ROOT / "docs/WINDOWS-ENTERPRISE-THREAT-MODEL.md",
+)
 
 _NUMBER_WORDS = {1: "one", 2: "two", 3: "three", 4: "four", 5: "five", 6: "six", 7: "seven", 8: "eight", 9: "nine", 10: "ten"}
 
@@ -261,6 +268,24 @@ def test_the_engine_trust_rows_match_the_code_signature_constants():
     assert f"team `{team}`" in rows["macOS"] and f"identifier `{signing_id}`" in rows["macOS"]
     for publisher in publishers:
         assert f"`{publisher}`" in rows["Windows"]
+    # Audit review S6: the threat models name both signer names too.
+    windows_model = " ".join((ROOT / "docs/WINDOWS-ENTERPRISE-THREAT-MODEL.md").read_text(encoding="utf-8").split())
+    (r38,) = [line for line in (ROOT / "docs/ENTERPRISE-THREAT-MODEL.md").read_text(encoding="utf-8").splitlines()
+              if line.startswith("| R38 |")]
+    for text in (windows_model, r38):
+        assert all(f"`{publisher}`" in text for publisher in publishers), text[:200]
+
+
+def test_the_vm_limit_is_scoped_to_the_hook():
+    # Audit review S6: DefenseClaw's hook does not see what a command did
+    # inside the VM; say it of the hook, as the Cowork page does.
+    for path in (PAGE, *THREAT_MODELS):
+        text = " ".join(path.read_text(encoding="utf-8").split())
+        for match in re.finditer(r"what a (?:shell )?command (?:did|ran)", text, re.I):
+            before = text[max(0, match.start() - 40) : match.start()]
+            after = text[match.end() : match.end() + 60]
+            scoped = before.endswith("hook sees tool calls, not ") or "is not visible from the hook" in after
+            assert scoped, (path.name, before + match.group(0) + after)
 
 
 def test_the_engine_version_is_the_vocabulary_engine_version():
