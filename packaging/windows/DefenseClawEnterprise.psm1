@@ -28952,14 +28952,58 @@ function Assert-DefenseClawRepairRollbackConfig {
             -RepairRollback
     }
     catch {
+        $validationError = $_.Exception.Message
+        if (-not $Sources.ContainsKey('config')) {
+            try {
+                $metadata = Get-DefenseClawDeploymentMetadata -Layout $Layout
+                $approved = Get-DefenseClawRepairRollbackApprovedConfigSource `
+                    -Layout $Layout -Metadata $metadata
+                if ($null -ne $approved) {
+                    # Keep the installed path's directory for relative policy
+                    # paths and credential lookup. The candidate is checked
+                    # before Repair changes config.yaml or stops the gateway.
+                    $candidate = [IO.Path]::Combine(
+                        [string]$Layout.ConfigDirectory,
+                        "config.repair-rollback.$([Guid]::NewGuid().ToString('N')).yaml"
+                    )
+                    try {
+                        Install-DefenseClawFileAtomic `
+                            -Source ([string]$approved.path) `
+                            -Destination $candidate `
+                            -ExpectedSHA256 ([string]$approved.sha256)
+                        Set-DefenseClawPathAcl -Path $candidate -Kind ConfigFile `
+                            -GatewayServiceSID (Get-DefenseClawServiceSID -ServiceName $GatewayServiceName)
+                        $candidateLayout = $Layout.Clone()
+                        $candidateLayout.ConfigPath = $candidate
+                        Assert-DefenseClawInstalledConfig `
+                            -Layout $candidateLayout `
+                            -GatewayServiceName $GatewayServiceName `
+                            -GatewaySource $gatewaySource `
+                            -RepairRollback
+                        return
+                    }
+                    finally {
+                        if (Microsoft.PowerShell.Management\Test-Path -LiteralPath $candidate) {
+                            Microsoft.PowerShell.Management\Remove-Item -LiteralPath $candidate -Force
+                        }
+                    }
+                }
+            }
+            catch {
+                $validationError = $_.Exception.Message
+            }
+        }
         throw (
             "Repair refused: the running gateway's installed config cannot " +
             'be validated for rollback (services and deployment metadata ' +
-            'were not changed): ' + $_.Exception.Message +
+            'were not changed): ' + $validationError +
             ' Next step: fix the named config setting or administrator-selected ' +
             'path permissions, restore an approved gateway-valid config.yaml ' +
             'if needed, and retry Setup /repair; or run Setup /ensure ' +
-            'CONFIG=<approved config> when deployment metadata is readable.'
+            'CONFIG=<approved config> when deployment metadata is readable. ' +
+            'For a signed-bundle deployment, run ' +
+            (Get-DefenseClawStandaloneBundleRepairCommand -Layout $Layout) +
+            ' from an elevated PowerShell prompt.'
         )
     }
 }
@@ -31989,19 +32033,29 @@ function Get-DefenseClawApprovedPolicyHash {
     return [string]$entry.Value
 }
 
+function Get-DefenseClawStandaloneBundleRepairCommand {
+    param([Parameter(Mandatory)][hashtable]$Layout)
+    $cli = [string]$Layout['CLIPath']
+    if ([string]::IsNullOrWhiteSpace($cli)) { $cli = 'defenseclaw.exe' }
+    return "& '$($cli.Replace("'", "''"))' enterprise windows repair --profile standalone --json"
+}
+
 function Get-DefenseClawApprovedPolicySource {
     param(
         [Parameter(Mandatory)][hashtable]$Layout,
         [Parameter(Mandatory)]$Metadata,
         [Parameter(Mandatory)][ValidateSet('config', 'manifest')][string]$Name
     )
+    $bundleRepair = Get-DefenseClawStandaloneBundleRepairCommand -Layout $Layout
+    $inputName = if ($Name -ceq 'config') { 'CONFIG' } else { 'MANIFEST' }
+    $nextStep = "run Setup /ensure $inputName=<approved absolute path>, or $bundleRepair on a signed-bundle deployment"
     $expected = Get-DefenseClawApprovedPolicyHash -Metadata $Metadata -Name $Name
     if ([string]::IsNullOrEmpty($expected)) {
-        throw "Repair has no recorded approved $Name source; run Setup /ensure with the approved CONFIG= input, or BUNDLE= on a signed-bundle deployment"
+        throw "Repair has no recorded approved $Name source; $nextStep"
     }
     $path = Get-DefenseClawApprovedPolicyPath -Layout $Layout -Name $Name
     if (-not (Microsoft.PowerShell.Management\Test-Path -LiteralPath $path -PathType Leaf)) {
-        throw "Repair cannot read the recorded approved $Name source; run Setup /ensure with the approved CONFIG= input, or BUNDLE= on a signed-bundle deployment"
+        throw "Repair cannot read the recorded approved $Name source; $nextStep"
     }
     Assert-DefenseClawPathAcl `
         -Path $path `
@@ -32012,9 +32066,51 @@ function Get-DefenseClawApprovedPolicySource {
         -IgnoreCreatorTemplates
     $source = Get-DefenseClawSourceDescriptor -Path $path -Label "approved $Name source"
     if ([string]$source.sha256 -ne $expected) {
-        throw "Repair found a changed approved $Name source; run Setup /ensure with the approved CONFIG= input, or BUNDLE= on a signed-bundle deployment"
+        throw "Repair found a changed approved $Name source; $nextStep"
     }
     return $source
+}
+
+function Get-DefenseClawRecordedConfigGenerationHash {
+    param([Parameter(Mandatory)][hashtable]$Layout)
+    $generationPath = [IO.Path]::Combine([string]$Layout.ConfigDirectory, 'config.generation.json')
+    if (-not (Microsoft.PowerShell.Management\Test-Path -LiteralPath $generationPath -PathType Leaf)) {
+        return ''
+    }
+    Assert-DefenseClawPathAcl -Path $generationPath `
+        -AllowedWriterSIDs @($script:SystemSID, $script:AdministratorsSID, $script:TrustedInstallerSID) `
+        -AllowInheritance -IgnoreCreatorTemplates
+    $generation = Microsoft.PowerShell.Management\Get-Content `
+        -LiteralPath $generationPath -Raw |
+        Microsoft.PowerShell.Utility\ConvertFrom-Json
+    $activeHash = [string]$generation.config_sha256
+    if ($activeHash -cnotmatch '^[0-9a-f]{64}$') {
+        throw 'Repair cannot read the recorded config generation; run Setup /ensure CONFIG=<approved absolute config path>'
+    }
+    return $activeHash
+}
+
+function Get-DefenseClawRepairRollbackApprovedConfigSource {
+    param(
+        [Parameter(Mandatory)][hashtable]$Layout,
+        [Parameter(Mandatory)]$Metadata
+    )
+    $activeHash = Get-DefenseClawRecordedConfigGenerationHash -Layout $Layout
+    if ([string]::IsNullOrEmpty($activeHash)) { return $null }
+    Assert-DefenseClawNoReparsePath -Path $Layout.ConfigPath -AllowMissingLeaf
+    if (Microsoft.PowerShell.Management\Test-Path -LiteralPath $Layout.ConfigPath -PathType Leaf) {
+        $installedHash = (
+            Microsoft.PowerShell.Utility\Get-FileHash -LiteralPath $Layout.ConfigPath -Algorithm SHA256
+        ).Hash.ToLowerInvariant()
+        if ($installedHash -ceq $activeHash) { return $null }
+    }
+    $approved = Get-DefenseClawApprovedPolicySource -Layout $Layout -Metadata $Metadata -Name config
+    if ([string]$approved.sha256 -cne $activeHash) {
+        throw ('Repair cannot prove that the recorded approved config source is current; ' +
+            'run ' + (Get-DefenseClawStandaloneBundleRepairCommand -Layout $Layout) + ' ' +
+            'on a signed-bundle deployment, or Setup /ensure CONFIG=<approved absolute config path> otherwise')
+    }
+    return $approved
 }
 
 function Invoke-DefenseClawRepairApprovedPolicyRecovery {
@@ -32047,18 +32143,7 @@ function Invoke-DefenseClawRepairApprovedPolicyRecovery {
         }
         $activeHash = ''
         if ($name -ceq 'config') {
-            $generationPath = [IO.Path]::Combine([string]$Layout.ConfigDirectory, 'config.generation.json')
-            if (Microsoft.PowerShell.Management\Test-Path -LiteralPath $generationPath -PathType Leaf) {
-                Assert-DefenseClawPathAcl -Path $generationPath `
-                    -AllowedWriterSIDs $adminWriters -AllowInheritance -IgnoreCreatorTemplates
-                $generation = Microsoft.PowerShell.Management\Get-Content `
-                    -LiteralPath $generationPath -Raw |
-                    Microsoft.PowerShell.Utility\ConvertFrom-Json
-                $activeHash = [string]$generation.config_sha256
-                if ($activeHash -cnotmatch '^[0-9a-f]{64}$') {
-                    throw 'Repair cannot read the recorded config generation; run Setup /ensure CONFIG=<approved absolute config path>'
-                }
-            }
+            $activeHash = Get-DefenseClawRecordedConfigGenerationHash -Layout $Layout
         }
         else {
             $activeHash = [string]$Metadata.managed_hooks_activation.manifest_sha256
@@ -32085,7 +32170,11 @@ function Invoke-DefenseClawRepairApprovedPolicyRecovery {
             -Layout $Layout -Metadata $Metadata -Name $name
         if ([string]::IsNullOrEmpty($activeHash) -or
             [string]$approved.sha256 -ne $activeHash) {
-            throw "Repair cannot prove that the recorded approved $name source is current; run Setup /ensure with the approved CONFIG= input, or BUNDLE= on a signed-bundle deployment"
+            $inputName = if ($name -ceq 'config') { 'CONFIG' } else { 'MANIFEST' }
+            throw ("Repair cannot prove that the recorded approved $name source is current; " +
+                "run Setup /ensure $inputName=<approved absolute path>, or " +
+                (Get-DefenseClawStandaloneBundleRepairCommand -Layout $Layout) +
+                ' on a signed-bundle deployment')
         }
         Install-DefenseClawSourceDescriptor -Source $approved -Destination $destination
         $kind = if ($name -ceq 'config') { 'ConfigFile' } else { 'AdminFile' }

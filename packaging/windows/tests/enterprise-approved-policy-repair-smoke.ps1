@@ -18,16 +18,40 @@ if (@($parseErrors).Count -ne 0) { throw "module parse failed: $($parseErrors[0]
 foreach ($name in @(
     'Get-DefenseClawApprovedPolicyPath',
     'Get-DefenseClawApprovedPolicyHash',
+    'Get-DefenseClawStandaloneBundleRepairCommand',
     'Get-DefenseClawApprovedPolicySource',
+    'Get-DefenseClawRecordedConfigGenerationHash',
+    'Get-DefenseClawRepairRollbackApprovedConfigSource',
     'Invoke-DefenseClawRepairApprovedPolicyRecovery',
     'Publish-DefenseClawApprovedPolicySources',
-    'Install-DefenseClawSourceDescriptor'
+    'Install-DefenseClawSourceDescriptor',
+    'Assert-DefenseClawInstalledConfig',
+    'Assert-DefenseClawRepairRollbackConfig'
 )) {
     $definition = $ast.Find({ param($node)
         $node -is [Management.Automation.Language.FunctionDefinitionAst] -and $node.Name -eq $name
     }, $true)
-    if ($null -eq $definition) { throw "module does not define $name" }
+    if ($null -eq $definition) {
+        if ($name -in @(
+            'Get-DefenseClawStandaloneBundleRepairCommand',
+            'Get-DefenseClawRecordedConfigGenerationHash',
+            'Get-DefenseClawRepairRollbackApprovedConfigSource'
+        )) { continue }
+        throw "module does not define $name"
+    }
     . ([scriptblock]::Create($definition.Extent.Text))
+}
+$lifecycle = $ast.Find({ param($node)
+    $node -is [Management.Automation.Language.FunctionDefinitionAst] -and
+    $node.Name -eq 'Invoke-DefenseClawEnterpriseLifecycle'
+}, $true)
+if ($null -eq $lifecycle) { throw 'enterprise lifecycle is missing' }
+$preflightCall = $lifecycle.Extent.Text.IndexOf('Assert-DefenseClawRepairRollbackConfig `',
+    [StringComparison]::Ordinal)
+$installCall = $lifecycle.Extent.Text.IndexOf('Invoke-DefenseClawInstallLikeLifecycle `',
+    [StringComparison]::Ordinal)
+if ($preflightCall -lt 0 -or $installCall -le $preflightCall) {
+    throw 'Repair does not validate rollback before the install-like lifecycle'
 }
 
 $script:SystemSID = 'S-1-5-18'
@@ -37,6 +61,7 @@ $script:DriftConfig = $false
 $script:DriftManifest = $false
 $script:Copies = 0
 $script:AclWrites = 0
+$script:ValidatedConfigPaths = [Collections.Generic.List[string]]::new()
 function Get-DefenseClawArtifactPath {
     param($Layout, $Name)
     if ($Name -ceq 'config') { return $Layout.ConfigPath }
@@ -79,6 +104,22 @@ function Get-DefenseClawStandaloneManifestAdoption {
     param($Layout, $GatewayServiceName, $Activation, $InstalledManifestSHA256)
     return @{ ok = $false }
 }
+function Get-DefenseClawServiceChecked {
+    param($Name)
+    return [pscustomobject]@{ Status = 'Running' }
+}
+function Get-DefenseClawDeploymentMetadata {
+    param($Layout)
+    return $script:MetadataForPreflight
+}
+function Invoke-DefenseClawGatewayCommand {
+    param($Layout, $GatewayServiceName, $Arguments, $GatewayPath)
+    $path = [string]$Arguments[[array]::IndexOf([string[]]$Arguments, '--config') + 1]
+    $script:ValidatedConfigPaths.Add($path)
+    if ([IO.File]::ReadAllText($path) -match 'invalid: true') {
+        throw 'invalid config setting'
+    }
+}
 
 $root = [IO.Path]::Combine([IO.Path]::GetTempPath(),
     'dc-approved-policy-' + [Guid]::NewGuid().ToString('N'))
@@ -95,6 +136,10 @@ try {
         ConfigDirectory = $etc
         GuardianDirectory = $guardian
         InstallStateDirectory = $install
+        PendingPath = [IO.Path]::Combine($install, 'pending.json')
+        RuntimeDirectory = [IO.Path]::Combine($state, 'runtime')
+        GatewayPath = [IO.Path]::Combine($state, 'gateway.exe')
+        CLIPath = [IO.Path]::Combine($state, 'bin', 'defenseclaw.exe')
         ConfigPath = [IO.Path]::Combine($etc, 'config.yaml')
         ManifestPath = [IO.Path]::Combine($guardian, 'targets.yaml')
     }
@@ -169,6 +214,54 @@ try {
     catch { $refusal = $_.Exception.Message }
     if ($refusal -notmatch 'cannot prove' -or $script:Copies -ne $priorCopies) {
         throw 'Repair accepted an approved copy from a prior config generation'
+    }
+    # The running-gateway preflight must validate the recorded bytes before
+    # the install-like recovery rewrites an invalid installed config.
+    [IO.File]::WriteAllText([IO.Path]::Combine($etc, 'config.generation.json'),
+        ('{"config_sha256":"' + $record.config + '"}'))
+    [IO.File]::WriteAllText($script:Layout.ConfigPath, "invalid: true`n")
+    $script:MetadataForPreflight = $metadata
+    $script:ValidatedConfigPaths.Clear()
+    Assert-DefenseClawRepairRollbackConfig -Layout $script:Layout `
+        -Sources @{} -GatewayServiceName 'gateway'
+    if ($script:ValidatedConfigPaths.Count -ne 2 -or
+        $script:ValidatedConfigPaths[0] -cne $script:Layout.ConfigPath -or
+        $script:ValidatedConfigPaths[1] -ceq $script:Layout.ConfigPath -or
+        [IO.File]::ReadAllText($script:Layout.ConfigPath) -cne "invalid: true`n" -or
+        [IO.File]::Exists($script:ValidatedConfigPaths[1])) {
+        throw 'Repair preflight did not validate a temporary approved candidate without changing the installed file'
+    }
+    Invoke-DefenseClawRepairApprovedPolicyRecovery -Layout $script:Layout `
+        -Sources @{} -Metadata $metadata -GatewayServiceName 'gateway'
+    if (-not [Linq.Enumerable]::SequenceEqual([byte[]][IO.File]::ReadAllBytes($script:Layout.ConfigPath), $approvedConfig)) {
+        throw 'Repair did not rewrite the invalid installed config after preflight'
+    }
+    $script:DriftConfig = $false
+    $script:ValidatedConfigPaths.Clear()
+    Assert-DefenseClawRepairRollbackConfig -Layout $script:Layout `
+        -Sources @{} -GatewayServiceName 'gateway'
+    if ($script:ValidatedConfigPaths.Count -ne 1 -or
+        $script:ValidatedConfigPaths[0] -cne $script:Layout.ConfigPath) {
+        throw 'an undrifted config did not use the installed preflight path'
+    }
+
+    # A later signed bundle makes Setup's old approved copy stale. Its
+    # source-less refusal must name the installed CLI's bundle repair path.
+    [IO.File]::WriteAllText($script:Layout.ConfigPath, "invalid: true`n")
+    [IO.File]::WriteAllText([IO.Path]::Combine($etc, 'config.generation.json'),
+        ('{"config_sha256":"' + ('a' * 64) + '"}'))
+    $copiesBeforeRefusal = $script:Copies
+    $refusal = ''
+    try {
+        Assert-DefenseClawRepairRollbackConfig -Layout $script:Layout `
+            -Sources @{} -GatewayServiceName 'gateway'
+    }
+    catch { $refusal = $_.Exception.Message }
+    $bundleCommand = Get-DefenseClawStandaloneBundleRepairCommand -Layout $script:Layout
+    if (-not $refusal.Contains($bundleCommand) -or
+        $script:Copies -ne $copiesBeforeRefusal -or
+        [IO.File]::ReadAllText($script:Layout.ConfigPath) -cne "invalid: true`n") {
+        throw 'stale approved copy lacked a working bundle-mode recovery command'
     }
     'approved policy Repair smoke passed'
 }
