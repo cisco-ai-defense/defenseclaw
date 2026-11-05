@@ -308,3 +308,115 @@ func TestGAP0193PurgeReportsLinkAppearingAfterInitialRead(t *testing.T) {
 			stateCalls, binaryCalls, purged, links, remaining)
 	}
 }
+
+func TestGAP0193PurgeRecordsLinkCreatedDuringStatePurge(t *testing.T) {
+	oldIdentity := enterpriseHookWindowsUserCleanupIdentity
+	oldState := windowsManagedHooksStandaloneUserStatePurger
+	oldBinaries := windowsManagedHooksStandaloneUserBinariesPurger
+	oldCopies := windowsManagedHooksStandaloneACPUserCopies
+	oldACP := windowsManagedHooksStandaloneACPUserPurger
+	t.Cleanup(func() {
+		enterpriseHookWindowsUserCleanupIdentity = oldIdentity
+		windowsManagedHooksStandaloneUserStatePurger = oldState
+		windowsManagedHooksStandaloneUserBinariesPurger = oldBinaries
+		windowsManagedHooksStandaloneACPUserCopies = oldCopies
+		windowsManagedHooksStandaloneACPUserPurger = oldACP
+	})
+	accountSID := currentAccountSID()
+	if accountSID == "" {
+		t.Fatal("current account SID unavailable")
+	}
+	enterpriseHookWindowsUserCleanupIdentity = func() error { return nil }
+
+	for _, mode := range []string{"account link", "foreign link", "plain folder"} {
+		t.Run(mode, func(t *testing.T) {
+			home := filepath.Join(t.TempDir(), "account")
+			dataDir := filepath.Join(home, ".defenseclaw")
+			outside := filepath.Join(t.TempDir(), "outside")
+			if err := os.MkdirAll(dataDir, 0o700); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.MkdirAll(outside, 0o700); err != nil {
+				t.Fatal(err)
+			}
+			canary := filepath.Join(outside, "canary.txt")
+			if err := os.WriteFile(canary, []byte("kept"), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			sid := accountSID
+			if mode == "foreign link" {
+				sid = "S-1-5-21-1-2-3-1002"
+				if strings.EqualFold(sid, accountSID) {
+					sid = "S-1-5-21-1-2-3-1003"
+				}
+			}
+			manifest := enterprisehooks.Manifest{Version: 1, Targets: []enterprisehooks.ManifestTarget{{
+				User: "account", UserHome: home, SID: sid, Connector: "claudecode", DataDir: dataDir,
+			}}}
+			if windowsManagedHooksAccountOwnedRootLink(home, sid) {
+				t.Fatal("plain folder reported as a link before the state purge")
+			}
+			stateCalls := 0
+			windowsManagedHooksStandaloneUserStatePurger = func(string, string, string) error {
+				stateCalls++
+				if mode == "plain folder" {
+					return nil
+				}
+				if err := os.Remove(dataDir); err != nil {
+					t.Fatal(err)
+				}
+				g193AccountOwnedJunction(t, dataDir, outside, accountSID)
+				t.Cleanup(func() { _ = os.Remove(dataDir) })
+				return enterprisehooks.ErrWindowsUserStateOnlyLink
+			}
+			windowsManagedHooksStandaloneUserBinariesPurger = func(string, string) ([]string, error) {
+				return nil, nil
+			}
+			windowsManagedHooksStandaloneACPUserCopies = func() ([]enterprisehooks.WindowsACPUserCopy, error) {
+				return []enterprisehooks.WindowsACPUserCopy{{SID: sid, Home: home}}, nil
+			}
+			acpCalls := 0
+			windowsManagedHooksStandaloneACPUserPurger = func(string, string) error {
+				acpCalls++
+				if mode != "plain folder" {
+					return errors.New("ACP folder was not available")
+				}
+				return nil
+			}
+
+			remaining, purged, links := windowsManagedHooksStandaloneUserState(manifest, true, func(string) bool { return false })
+			acpRemaining, _ := windowsManagedHooksStandaloneACPUserState(links)
+			if stateCalls != 1 {
+				t.Fatalf("state purge calls: %d", stateCalls)
+			}
+			if body, err := os.ReadFile(canary); err != nil || string(body) != "kept" {
+				t.Fatalf("link target changed: %q, %v", body, err)
+			}
+			body, err := json.Marshal(append(remaining, acpRemaining...))
+			if err != nil {
+				t.Fatal(err)
+			}
+			result := enterprisestatus.New("uninstall", managed.ProfileStandalone, "windows", "test")
+			addWindowsEnterpriseUserStateWarning(result, &windowsEnterpriseInstallerReport{UserStateRemaining: body})
+			code := result.Finish("windows", windowsEnterpriseFailureCodeFor(result))
+			switch mode {
+			case "account link":
+				if len(links) != 1 || acpCalls != 0 || len(acpRemaining) != 0 || len(remaining) != 1 ||
+					!strings.HasSuffix(remaining[0], windowsManagedHooksAccountLinkKeptReason) ||
+					code != 0 || !result.OK || len(result.Warnings) != 1 || len(result.Errors) != 0 {
+					t.Fatalf("account link: links=%v ACP calls=%d remaining=%v ACP remaining=%v result=%+v", links, acpCalls, remaining, acpRemaining, result)
+				}
+			case "foreign link":
+				if len(links) != 0 || acpCalls != 1 || len(acpRemaining) != 1 || len(remaining) != 1 ||
+					code == 0 || len(result.Errors) == 0 {
+					t.Fatalf("foreign link: links=%v ACP calls=%d remaining=%v ACP remaining=%v result=%+v", links, acpCalls, remaining, acpRemaining, result)
+				}
+			case "plain folder":
+				if len(links) != 0 || acpCalls != 1 || len(remaining) != 0 || len(acpRemaining) != 0 ||
+					len(purged) != 1 || code != 0 || !result.OK {
+					t.Fatalf("plain folder: links=%v ACP calls=%d remaining=%v ACP remaining=%v purged=%v result=%+v", links, acpCalls, remaining, acpRemaining, purged, result)
+				}
+			}
+		})
+	}
+}

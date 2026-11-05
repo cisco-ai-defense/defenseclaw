@@ -429,6 +429,7 @@ func windowsManagedHooksStandaloneUserState(
 			if errors.Is(err, enterprisehooks.ErrWindowsUserStateOnlyLink) &&
 				sameWindowsEnterprisePathCLI(dataDir, filepath.Join(home, ".defenseclaw")) &&
 				windowsEnterpriseAccountOwnedDataDirLink(home, sid) {
+				accountLink = true
 				if _, binaryErr := windowsManagedHooksStandaloneUserBinariesPurger(home, sid); binaryErr != nil {
 					addRemaining(label + ": " + windowsManagedHooksUserBinariesReason(binaryErr))
 				}
