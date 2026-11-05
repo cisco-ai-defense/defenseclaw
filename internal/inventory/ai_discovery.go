@@ -2553,56 +2553,6 @@ func mcpConfigShape(path, connector string) string {
 	}
 }
 
-// parseMCPConfigBytesForNames is parseMCPConfigForNames, with
-// readMCPServerNamesWithErr's blank-file rule, for a config the caller
-// already read: the sensor helper reads it without following links
-// (brokered_homes_read_linux.go). ~/.claude.json (mcpShapeClaudeState), up to
-// maxBrokeredClaudeStateBytes, is walked by parseClaudeDiscoveryStateNames,
-// which keeps at most limit names and reports truncated past them; the other
-// shapes, up to maxBrokeredFileBytes, give every name. source names the file
-// for the OpenCode resolver; nothing is opened.
-func parseMCPConfigBytesForNames(shape, source string, data []byte, limit int) (names []string, truncated bool, err error) {
-	if shape == mcpShapeClaudeState {
-		return parseClaudeDiscoveryStateNames(data, limit)
-	}
-	if len(data) <= 4096 && strings.TrimSpace(string(data)) == "" {
-		return nil, false, nil
-	}
-	var entries []config.MCPServerEntry
-	switch shape {
-	case mcpShapeAmp:
-		entries, err = config.ParseMCPFromAmpSettings(data)
-	case mcpShapeCodexTOML:
-		entries, err = config.ParseMCPFromCodexConfigTOML(data)
-	case mcpShapeHermesYAML:
-		entries, err = config.ParseMCPFromYAMLPaths(data, hermesMCPKeyPaths...)
-	case mcpShapeClaudeJSON:
-		entries, err = config.ParseMCPFromClaudeJSONBothScopes(data)
-	case mcpShapeSettings:
-		entries, err = config.ParseMCPFromJSONCPaths(data, settingsMCPKeyPaths...)
-	case mcpShapeOpenCode:
-		entries, err = config.ParseMCPFromOpenCodeConfig(source, data)
-	case mcpShapeClaudeDesktop:
-		entries, err = config.ParseMCPFromJSONCPaths(data, []string{"mcpServers"})
-	case mcpShapeNestedServers:
-		entries, err = config.ParseMCPFromJSONCPaths(data, []string{"mcp", "servers"})
-	case mcpShapeDotMCP:
-		entries, err = config.ParseMCPFromDotMCPJSON(data)
-	default:
-		return nil, false, fmt.Errorf("unknown MCP config shape %q", shape)
-	}
-	if err != nil {
-		return nil, false, err
-	}
-	names = make([]string, 0, len(entries))
-	for _, e := range entries {
-		if name := strings.TrimSpace(e.Name); name != "" {
-			names = append(names, name)
-		}
-	}
-	return names, false, nil
-}
-
 // dirHasEntry reports whether path exists AND, if it's a directory,
 // contains at least one entry. Non-directory targets (a file at the
 // path) count as "populated" so operator-authored single-file surfaces

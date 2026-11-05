@@ -66,30 +66,6 @@ const (
 	brokeredHomeDetector = "sensor_helper"
 
 	maxBrokeredHomes = 256
-	// The helper runs under MemoryMax=300M and parses one file at a time.
-	// maxBrokeredFileBytes bounds one JSON or JSONC MCP config: real ones are
-	// kilobytes, and the parsers build the whole document, so 1 MiB of tiny
-	// members peaks near 110 MB. maxBrokeredYAMLTOMLBytes bounds a YAML or
-	// TOML one: those parsers check duplicate keys in quadratic time, so 1
-	// MiB of tiny keys takes tens of seconds of the helper's one CPU, and 128
-	// KiB under a second. maxBrokeredClaudeStateBytes bounds
-	// ~/.claude.json, which carries Claude Code's conversation state; it is
-	// walked for names, not decoded (parseClaudeDiscoveryStateNames).
-	// maxBrokeredHomeReadBytes bounds what one home reads, so one account's
-	// files cannot leave the homes after it unread, and maxBrokeredReadBytes
-	// what one request reads in all.
-	maxBrokeredFileBytes        = 1 << 20
-	maxBrokeredYAMLTOMLBytes    = 128 << 10
-	maxBrokeredClaudeStateBytes = 32 << 20
-	maxBrokeredHomeReadBytes    = 40 << 20
-	maxBrokeredReadBytes        = 64 << 20
-	// maxBrokeredHomeReplyBytes and maxBrokeredReplyBytes bound the encoded
-	// entries one home, and one request, answer with in full. Past them an
-	// entry is answered without its names (brokeredReadBudget.fit), so the
-	// answer stays well inside the helper's 64 MiB frame (maxFrameBytes in
-	// internal/sensor/acquire).
-	maxBrokeredHomeReplyBytes = 1 << 20
-	maxBrokeredReplyBytes     = 16 << 20
 	// maxBrokeredChildren bounds the child names of one folder, enough for
 	// the detectors' own cap of maxEvidencePerSignal rows after filtering.
 	maxBrokeredChildren = 2 * maxEvidencePerSignal
