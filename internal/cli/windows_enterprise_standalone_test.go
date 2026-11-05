@@ -1316,6 +1316,25 @@ func TestWindowsEnterpriseEnsureProbesCarryNoMutationInputs(t *testing.T) {
 	if !result.OK || result.Noop || !strings.Contains(fmt.Sprint(result.Warnings), "guardian_repaired_drift") {
 		t.Fatalf("guardian repair: result %+v", result)
 	}
+	// REVIEW-2: the run's flag outlives a pass. The re-planned pass after a
+	// concurrent install finds the drift already gone and must not make the
+	// run a no-op or name the guardian repair twice.
+	repaired := false
+	passResult := newWindowsEnterpriseStandaloneResult("ensure", opts)
+	noteWindowsEnterpriseEnsureDriftRepairs(passResult, &repaired)
+	windowsEnterpriseGuardianRepairsSinceLastRun = func() []string { return nil }
+	noteWindowsEnterpriseEnsureDriftRepairs(passResult, &repaired)
+	windowsEnterpriseGuardianRepairsSinceLastRun = func() []string { return []string{"again"} }
+	noteWindowsEnterpriseEnsureDriftRepairs(passResult, &repaired)
+	count := 0
+	for _, warning := range passResult.Warnings {
+		if warning.Code == "guardian_repaired_drift" {
+			count++
+		}
+	}
+	if !repaired || count != 1 {
+		t.Fatalf("drift flag across passes: repaired=%t guardian warnings=%d", repaired, count)
+	}
 }
 
 // A compliant ensure runs the recorded Cursor correction once, and only after

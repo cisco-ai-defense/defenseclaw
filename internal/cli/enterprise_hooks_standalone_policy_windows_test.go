@@ -336,6 +336,22 @@ func TestWindowsGuardianOrdersTheHooksOnlyLockAndTheGuardSummary(t *testing.T) {
 			t.Errorf("managed_hooks_only %s: order %s, want %s", tc.mode, got, tc.want)
 		}
 	}
+	// REVIEW-2: a lock that fails on the way to enforce keeps the summary
+	// (and so the guard) as it was; on the way to preserve the summary still
+	// turns the guard on first.
+	enterpriseHookWindowsClaudeHooksOnlyLock = func() (bool, error) { order = append(order, "lock"); return false, errors.New("drop-in busy") }
+	for _, tc := range []struct{ mode, want string }{
+		{config.ManagedHooksOnlyEnforce, "lock"},
+		{config.ManagedHooksOnlyPreserve, "summary,lock"},
+	} {
+		cfg = &config.Config{}
+		cfg.Enterprise.MachinePolicy.Default.ManagedHooksOnly = tc.mode
+		order = nil
+		enterpriseHookStandalonePlatformPrepare(io.Discard)
+		if got := strings.Join(order, ","); got != tc.want {
+			t.Errorf("failed lock, managed_hooks_only %s: order %s, want %s", tc.mode, got, tc.want)
+		}
+	}
 }
 
 // The uninstall's teardown loads no config, so a standalone removal of

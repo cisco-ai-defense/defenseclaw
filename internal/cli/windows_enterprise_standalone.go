@@ -219,8 +219,6 @@ const windowsEnterpriseLifecycleBusyMarker = "holds the protected file lock"
 // which Repair rebuilds.
 const windowsEnterpriseUnreadableMetadataMarker = "could not read the installed deployment metadata"
 
-// windowsEnterpriseRemoveReplacementCopies removes the unused replacement
-// copies in the production bin folder; replaceable in tests.
 // windowsEnterpriseRepairDataDirBeforePlan stamps the canonical protection
 // on the runtime folder (data_dir) of an installed standalone deployment
 // when it drifted, as the guardian's data-path repair does, and returns the
@@ -282,6 +280,27 @@ var windowsEnterpriseGuardianRepairsSinceLastRun = func() []string {
 	return windowsGuardianRepairsAfter(string(raw), last.ModTime(), time.Local)
 }
 
+// noteWindowsEnterpriseEnsureDriftRepairs puts a drifted runtime folder ACL
+// back and names the repairs the guardian made since the last lifecycle run
+// (GAP-0573). repaired is the run's flag, kept across the re-planned pass
+// after a concurrent install, so that pass cannot report a no-op either; it
+// adds no second warning.
+func noteWindowsEnterpriseEnsureDriftRepairs(result *enterprisestatus.Result, repaired *bool) {
+	if change := windowsEnterpriseRepairDataDirBeforePlan(); change != "" {
+		result.Changes = append(result.Changes, change)
+		*repaired = true
+	}
+	if healed := windowsEnterpriseGuardianRepairsSinceLastRun(); len(healed) > 0 {
+		if !windowsEnterpriseResultHasWarning(result, "guardian_repaired_drift") {
+			result.AddWarning("guardian_repaired_drift", "since the last lifecycle run the hook guardian put back the canonical protection of "+
+				windowsEnterpriseBoundedDiagnostic(strings.Join(healed, "; ")))
+		}
+		*repaired = true
+	}
+}
+
+// windowsEnterpriseRemoveReplacementCopies removes the unused replacement
+// copies in the production bin folder; replaceable in tests.
 var windowsEnterpriseRemoveReplacementCopies = func() []string {
 	roots, err := winpath.TrustedEnterpriseRoots(managed.ProfileStandalone)
 	if err != nil {
@@ -3658,13 +3677,16 @@ func runWindowsEnterpriseStandaloneEnsure(
 			return finishWindowsEnterpriseStandalone(cmd, opts, result, windowsEnterpriseFailureCodeFor(result))
 		}
 	}
-	retry, err := runWindowsEnterpriseStandaloneEnsureOnce(ctx, cmd, opts, script, result, true)
+	// A drift repair recorded by the first pass keeps the re-planned pass
+	// from reporting a no-op (GAP-0573).
+	driftRepaired := false
+	retry, err := runWindowsEnterpriseStandaloneEnsureOnce(ctx, cmd, opts, script, result, true, &driftRepaired)
 	if !retry {
 		return err
 	}
 	// The plan went stale while ensure waited for the lifecycle lock: a
 	// concurrent run installed the host. Re-plan once from a fresh status.
-	_, err = runWindowsEnterpriseStandaloneEnsureOnce(ctx, cmd, opts, script, result, false)
+	_, err = runWindowsEnterpriseStandaloneEnsureOnce(ctx, cmd, opts, script, result, false, &driftRepaired)
 	return err
 }
 
@@ -3855,6 +3877,7 @@ func runWindowsEnterpriseStandaloneEnsureOnce(
 	script string,
 	result *enterprisestatus.Result,
 	allowRetry bool,
+	driftRepaired *bool,
 ) (bool, error) {
 	statusReport, statusRun, err := runWindowsEnterpriseStandaloneInstaller(ctx, cmd, opts, script, windowsEnterprisePowerShellArgs("status", windowsEnterpriseEnsureProbeOptions(opts)))
 	if err != nil {
@@ -3909,17 +3932,8 @@ func runWindowsEnterpriseStandaloneEnsureOnce(
 	// The guardian usually wins that race: it watches the runtime folder
 	// and puts the ACL back within seconds, so ensure names each repair the
 	// guardian logged since the last lifecycle run too.
-	driftRepaired := false
 	if statusReport.Installed && !statusReport.TransactionPending {
-		if repaired := windowsEnterpriseRepairDataDirBeforePlan(); repaired != "" {
-			result.Changes = append(result.Changes, repaired)
-			driftRepaired = true
-		}
-		if healed := windowsEnterpriseGuardianRepairsSinceLastRun(); len(healed) > 0 {
-			result.AddWarning("guardian_repaired_drift", "since the last lifecycle run the hook guardian put back the canonical protection of "+
-				windowsEnterpriseBoundedDiagnostic(strings.Join(healed, "; ")))
-			driftRepaired = true
-		}
+		noteWindowsEnterpriseEnsureDriftRepairs(result, driftRepaired)
 	}
 	alreadyAppliedNeedsRepair := false
 	alreadyAppliedCoworkDrift := ""
@@ -3985,7 +3999,7 @@ func runWindowsEnterpriseStandaloneEnsureOnce(
 				applyWindowsEnterpriseInstallerReport(result, opts, &accepted, verifyRun)
 				result.Noop = true
 				result.NoopReason = "already_applied"
-				if driftRepaired {
+				if *driftRepaired {
 					result.Noop, result.NoopReason = false, ""
 				}
 				applyWindowsEnterprisePolicy(ctx, result)
@@ -4082,7 +4096,7 @@ func runWindowsEnterpriseStandaloneEnsureOnce(
 			}
 			result.Noop = true
 			result.NoopReason = plan.Reason
-			if driftRepaired {
+			if *driftRepaired {
 				result.Noop, result.NoopReason = false, ""
 			}
 			applyWindowsEnterprisePolicy(ctx, result)

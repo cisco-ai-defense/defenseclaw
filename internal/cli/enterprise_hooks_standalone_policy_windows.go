@@ -321,12 +321,14 @@ func enterpriseHookStandalonePlatformPrepare(stderr io.Writer) {
 	// A managed_hooks_only change is machine policy only: write it into the
 	// Claude Code drop-in here, before any row, so no enrolled account needs
 	// its own Windows session for it (cowork-1-0-8 GAP-0064).
-	applyHooksOnlyLock := func() {
-		if written, err := enterpriseHookWindowsClaudeHooksOnlyLock(); err != nil {
+	applyHooksOnlyLock := func() error {
+		written, err := enterpriseHookWindowsClaudeHooksOnlyLock()
+		if err != nil {
 			fmt.Fprintf(stderr, "defenseclaw: enterprise machine policy (Windows): Claude Code managed_hooks_only: %v\n", err)
 		} else if written {
 			fmt.Fprintf(stderr, "[hook-guardian] wrote the configured managed_hooks_only setting into DefenseClaw's Claude Code drop-in\n")
 		}
+		return err
 	}
 	// The summary the hook-side guard reads turns the Claude Code
 	// foreign-hook guard off under the lock and on without it. The lock goes
@@ -334,21 +336,28 @@ func enterpriseHookStandalonePlatformPrepare(stderr io.Writer) {
 	// the summary turned the guard on, so a session that starts between the
 	// two writes always has one of them. The gateway keeps serving during a
 	// guardian-only restart (GAP-0044), so that span is live.
+	// A lock that could not be written on the way to enforce leaves the
+	// published summary as it was, so the guard stays on until a pass
+	// writes the lock (or an undo goes back to preserve).
 	lockFirst := windowsClaudeManagedHooksOnlyEnforced()
-	if lockFirst {
-		applyHooksOnlyLock()
+	publish := true
+	if lockFirst && applyHooksOnlyLock() != nil {
+		publish = false
+		fmt.Fprintf(stderr, "defenseclaw: enterprise machine policy (Windows): the hook-side summary was not published, so the Claude Code foreign-hook guard stays on until the managed_hooks_only lock is written\n")
 	}
-	windowsStandaloneGoOwnedPolicyMu.Lock()
-	_, err = enterpriseHookWindowsPublishGoOwned(opts, connectors)
-	windowsStandaloneGoOwnedPolicyMu.Unlock()
-	if err != nil {
-		fmt.Fprintf(stderr, "defenseclaw: enterprise machine policy (Windows): %v\n", err)
+	if publish {
+		windowsStandaloneGoOwnedPolicyMu.Lock()
+		_, err = enterpriseHookWindowsPublishGoOwned(opts, connectors)
+		windowsStandaloneGoOwnedPolicyMu.Unlock()
+		if err != nil {
+			fmt.Fprintf(stderr, "defenseclaw: enterprise machine policy (Windows): %v\n", err)
+		}
 	}
 	if _, err := enterpriseHookWindowsClaudeVersionFloor(opts, connectors); err != nil {
 		fmt.Fprintf(stderr, "defenseclaw: enterprise machine policy (Windows): Claude Code version floor: %v\n", err)
 	}
 	if !lockFirst {
-		applyHooksOnlyLock()
+		_ = applyHooksOnlyLock()
 	}
 	if _, err := enterpriseHookWindowsWSL(opts); err != nil {
 		fmt.Fprintf(stderr, "defenseclaw: enterprise machine policy (Windows): WSL agent sessions: %v\n", err)
