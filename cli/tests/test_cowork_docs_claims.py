@@ -12,6 +12,7 @@ imported. A change to either side fails here until the other follows.
 
 from __future__ import annotations
 
+import ast
 import json
 import re
 from pathlib import Path
@@ -114,10 +115,28 @@ def test_the_python_event_set_matches_the_go_event_list():
 # ---- reason codes
 
 
+def _cowork_status_reason_codes() -> set[str]:
+    """The reason_code of every CoworkStatus(...) cowork.py builds: the
+    fourth positional argument or the reason_code keyword."""
+    tree = ast.parse(COWORK_PY.read_text(encoding="utf-8"))
+    codes: set[str] = set()
+    for node in ast.walk(tree):
+        if not (isinstance(node, ast.Call) and isinstance(node.func, ast.Name) and node.func.id == "CoworkStatus"):
+            continue
+        values = [kw.value for kw in node.keywords if kw.arg == "reason_code"]
+        positional = [arg for arg in node.args if not isinstance(arg, ast.Starred)]
+        if len(positional) >= 4:
+            values.append(positional[3])
+        for value in values:
+            assert isinstance(value, ast.Constant) and isinstance(value.value, str), ast.dump(value)
+            if value.value:
+                codes.add(value.value)
+    return codes
+
+
 def test_the_reason_code_table_is_the_cowork_py_reason_codes():
-    source = COWORK_PY.read_text(encoding="utf-8")
-    codes = set(re.findall(r'"(cowork_[a-z_]+)"', source))
-    assert len(codes) == 6, codes
+    codes = _cowork_status_reason_codes()
+    assert codes and all(code.startswith("cowork_") for code in codes), codes
     section = _section(_page(), "### Check it")
     documented = set()
     for row in _table(section, "Row says"):
@@ -310,7 +329,14 @@ def test_the_engine_version_is_the_vocabulary_engine_version():
     assert floor <= tuple(int(p) for p in version.split(".")), contract["agent_version"]
 
 
-@pytest.mark.parametrize("term", ["cowork_vm", "vm_sensor", "cowork-vm", "COWORK_VM"])
-def test_the_page_does_not_name_the_vm_sensor(term):
+# The sensor's names, its package and its asset names. "Cowork VM" alone is
+# Anthropic's VM and is named on purpose (R39).
+_SENSOR_TERMS = re.compile(r"vm[ _-]?sensor|sensor package|cowork[_-]vm|defenseclaw-cowork-(?:amd64|arm64)", re.I)
+
+
+@pytest.mark.parametrize("path", [PAGE, *THREAT_MODELS], ids=lambda path: path.name)
+def test_the_page_does_not_name_the_vm_sensor(path):
     # The Cowork VM sensor is undocumented by owner decision.
-    assert term not in _page()
+    text = path.read_text(encoding="utf-8")
+    assert not _SENSOR_TERMS.findall(text), _SENSOR_TERMS.findall(text)
+    assert _SENSOR_TERMS.search("the Cowork VM sensor") and not _SENSOR_TERMS.search("the Cowork VM")
