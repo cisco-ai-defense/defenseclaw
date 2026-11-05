@@ -495,6 +495,35 @@ func TestManagedWindowsConfigOnlyAnswerNamesTheCommand(t *testing.T) {
 	}
 }
 
+// cowork-1-0-8 GAP-0076: on managed Windows an elevated prompt (every prompt
+// of the built-in Administrator) got only the administrator's checks from
+// `status`, and Setup puts no DefenseClaw command on PATH. The answer names
+// the user-facing status in full, and only for status.
+func TestManagedWindowsStatusAnswerNamesTheStandardUserStatus(t *testing.T) {
+	restoreAccount := managedHostCurrentAccount
+	t.Cleanup(func() { managedHostCurrentAccount = restoreAccount })
+	managedHostCurrentAccount = func() string { return `HOST\dcadmin` }
+	where := `HKLM\SOFTWARE\Cisco\DefenseClaw\Enterprise`
+	cli := managedWindowsAdminCLI()
+	answer := managedWindowsAdminCommandAnswer(where, "status").Error()
+	for _, want := range []string{
+		"from an elevated PowerShell prompt with `& '" + cli + "' enterprise windows status --profile standalone`",
+		"`& '" + cli + "' enterprise policy show --user dcadmin`",
+		"sign in as that standard account and run `& '" + cli + "' status` in a PowerShell prompt that is not elevated",
+		"every prompt of the built-in Administrator account",
+	} {
+		if !strings.Contains(answer, want) {
+			t.Fatalf("status answer lacks %q: %s", want, answer)
+		}
+	}
+	if !strings.HasSuffix(answer, " Nothing was changed.") {
+		t.Fatalf("status answer does not end with Nothing was changed: %s", answer)
+	}
+	if other := managedWindowsAdminCommandAnswer(where, "doctor").Error(); strings.Contains(other, "' status`") {
+		t.Fatalf("doctor answer names the standard user's status: %s", other)
+	}
+}
+
 // GAP-1182, GAP-1192: --help on a managed computer describes the managed
 // gateway and hides the per-user daemon commands it refuses.
 func TestManagedHostHelpDescribesTheManagedGateway(t *testing.T) {

@@ -369,6 +369,21 @@ hook, and returns a nonzero exit code when anything fails. Healthy values:
 Add/Remove Programs lists **Cisco DefenseClaw Enterprise**, and the `DefenseClaw`
 event log has one entry per lifecycle run ([event IDs](/docs/enterprise/operations)).
 
+### A user's own status
+
+`defenseclaw status` shows an account's own protection (its agents and Cowork) only
+in a PowerShell prompt that is not elevated. Setup puts no DefenseClaw command on
+`PATH`, so use the full path. Sign in as the standard account and run:
+
+```powershell
+& 'C:\Program Files\Cisco\DefenseClaw\bin\defenseclaw.exe' status
+```
+
+An elevated prompt, and every prompt of the built-in Administrator account, gets the
+administrator's commands instead: `enterprise windows status --profile standalone`
+for the deployment and `enterprise policy show --user <account>` for one account's
+agents.
+
 ### What Windows shows after an install
 
 The four services run under Automatic start, and Add/Remove Programs lists

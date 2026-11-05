@@ -211,14 +211,23 @@ func managedAnswerHelpArgs(args []string) ([]string, bool) {
 // It names the administrator's check for this account as well, because the
 // deployment status has no per-account detail.
 func managedWindowsAdminCommandAnswer(where, command string) error {
-	coverage := ""
-	if command == "doctor" {
-		coverage = " If Hermes is enrolled, a session-only HERMES_HOME is NOT COVERED because the managed service cannot observe a home selected only by your shell; the administrator's status and verify name this limit."
+	detail := ""
+	switch command {
+	case "doctor":
+		detail = " If Hermes is enrolled, a session-only HERMES_HOME is NOT COVERED because the managed service cannot observe a home selected only by your shell; the administrator's status and verify name this limit."
+	case "status":
+		// Only an elevated prompt gets this answer to status: one that is
+		// not elevated shows the account's own state (GAP-0060). The
+		// built-in Administrator's prompts are always elevated, and Setup
+		// puts no DefenseClaw command on PATH, so the user-facing status
+		// is named in full (cowork-1-0-8 GAP-0076).
+		detail = " To see an account's own protection (its agents and Cowork), sign in as that standard account and run `& '" +
+			managedWindowsAdminCLI() + "' status` in a PowerShell prompt that is not elevated; an elevated prompt, and every prompt of the built-in Administrator account, gets this answer."
 	}
 	return fmt.Errorf("this computer's DefenseClaw is managed by your organization (%s), so `%s` has no per-user "+
 		"deployment to check and nothing for you to do; your administrator can check the managed deployment %s, "+
 		"and your account's agents with `& '%s' enterprise policy show --user %s`.%s Nothing was changed.",
-		where, command, managedWindowsAdminStatusHint(), managedWindowsAdminCLI(), managedHostCurrentAccountName(), coverage)
+		where, command, managedWindowsAdminStatusHint(), managedWindowsAdminCLI(), managedHostCurrentAccountName(), detail)
 }
 
 // managedWindowsTUIAnswer tells a user on a managed Windows computer that
