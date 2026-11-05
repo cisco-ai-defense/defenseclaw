@@ -7050,8 +7050,8 @@ def test_untrusted_config_acl_is_refused_before_the_transaction_stops_a_service(
         "CodexRequirementsAclBackupPath", "ManagedHooksTeardownJournalPath", "CodexMachinePolicyPath",
         "CodexManagedHooksStatePath",
     ):
-        assert f"$Layout.{path}" in content and f"$Layout.{path}" in restamped, path
-    assert "$Layout.ManagedHooksLifecycleJournalPath" in content
+        assert f"'{path}'" in content and f"$Layout.{path}" in restamped, path
+    assert "'ManagedHooksLifecycleJournalPath'" in content
     assert "-SelfHealKind" not in content and "Set-DefenseClawPathAcl" not in content
 
 def test_constrained_language_guards_run_before_any_dotnet_use() -> None:
