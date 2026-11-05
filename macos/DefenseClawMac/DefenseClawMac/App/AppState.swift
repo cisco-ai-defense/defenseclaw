@@ -300,6 +300,8 @@ final class AppState {
     /// The installation generation of the `status --json` run in flight, if any.
     @ObservationIgnored private var coworkStatusInFlight: Int?
     static let coworkStatusInterval: TimeInterval = 30
+    /// The budget of one `status --json` run; a run past it is cancelled.
+    static let coworkStatusTimeout: Duration = .seconds(60)
     /// Silent LLM bypass egress events in the last 5 minutes (pulse-fed).
     var silentBypassCount = 0
     /// Session-scoped "Total scans" for the Activity card (pulse-fed).
@@ -2119,7 +2121,11 @@ final class AppState {
     /// reports problems and still prints the report, so the output decides: no
     /// readable report (a failed run) keeps the last row, and a report without a
     /// `cowork` object (older runtime, no Cowork on this account) clears it. The
-    /// result of a run for an earlier installation is dropped.
+    /// result of a run for an earlier installation is dropped. A run that takes
+    /// longer than `coworkStatusTimeout` is cancelled by its run id, as the
+    /// background diagnose is, so a wedged `status` cannot hold the in-flight
+    /// marker and freeze the row; the cancelled run keeps the last row
+    /// (cowork audit review 2 N2).
     private func refreshCoworkStatusInBackground(generation: Int) {
         guard activeConnectorNames.contains(where: { $0.lowercased() == "claudecode" }) else {
             coworkStatus = nil
@@ -2130,9 +2136,17 @@ final class AppState {
         if let last = lastCoworkStatusFetch, Date().timeIntervalSince(last) < Self.coworkStatusInterval { return }
         lastCoworkStatusFetch = Date()
         coworkStatusInFlight = generation
+        let cli = self.cli
+        let timeout = Self.coworkStatusTimeout
         Task { [weak self] in
+            let runID = UUID()
+            let watchdog = Task {
+                try? await Task.sleep(for: timeout)
+                if !Task.isCancelled { await cli.cancel(runID: runID) }
+            }
+            let result = await cli.run(arguments: ["status", "--json"], mutation: false, runID: runID)
+            watchdog.cancel()
             guard let self else { return }
-            let result = await self.cli.run(arguments: ["status", "--json"], mutation: false)
             if self.coworkStatusInFlight == generation { self.coworkStatusInFlight = nil }
             guard self.installationSnapshotIsCurrent(generation),
                   self.activeConnectorNames.contains(where: { $0.lowercased() == "claudecode" }),
