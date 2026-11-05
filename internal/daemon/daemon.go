@@ -203,13 +203,24 @@ func (d *Daemon) IsRunning() (bool, int) {
 		d.removePIDFileIfStarted(info)
 		return false, 0
 	}
+	if !processSignalable(info.PID) && !d.recordBindsThisHome(info) {
+		// Another account's process can be this home's gateway only on a
+		// record that carries its kernel start identity and names this data
+		// directory (every record since 1.0.0 does). Any other record keeps
+		// the answer it had before 1.0.9 read EPERM as alive: not running,
+		// and the record is stale.
+		d.removePIDFileIfStarted(info)
+		return false, 0
+	}
 	if !d.verifyProcess(info) && !d.verifyProcessForAuthenticatedMigration(info) &&
 		!d.verifyReplacedExecutable(info) {
 		if !processSignalable(info.PID) {
 			// A live process this account may not signal is another
-			// account's. Its record may name the gateway an administrator
-			// started for this home whose identity this account could not
-			// read; that is not stale evidence this account may discard.
+			// account's. Its record (start identity and this data
+			// directory, checked above) may name the gateway an
+			// administrator started for this home whose identity this
+			// account could not read; that is not stale evidence this
+			// account may discard.
 			return false, 0
 		}
 		// Closes (chain ): a stale gateway.pid
@@ -310,6 +321,16 @@ func (d *Daemon) verifyProcess(info pidInfo) bool {
 		return false
 	}
 	return true
+}
+
+// recordBindsThisHome reports whether info can name a process of another
+// account as this home's gateway: it carries the kernel start identity that
+// verifyStartIdentity compares, and it names this data directory. Without
+// both, nothing this account can read ties that process to this home.
+func (d *Daemon) recordBindsThisHome(info pidInfo) bool {
+	return strings.TrimSpace(info.StartIdentity) != "" &&
+		strings.TrimSpace(info.DataDir) != "" &&
+		pathidentity.Same(info.DataDir, d.dataDir)
 }
 
 // verifyProcessForControl authorizes lifecycle mutations only for a record
@@ -450,12 +471,14 @@ func (d *Daemon) verifyExecutable(info pidInfo) bool {
 	case "linux":
 		exePath, err := os.Readlink(fmt.Sprintf("/proc/%d/exe", info.PID))
 		if err != nil {
-			if errors.Is(err, fs.ErrPermission) && !processSignalable(info.PID) {
+			if errors.Is(err, fs.ErrPermission) && !processSignalable(info.PID) && d.recordBindsThisHome(info) {
 				// Another account's process: /proc/<pid>/exe is readable
 				// only by that account, while /proc/<pid>/comm names its
-				// program to everyone. The gateway an administrator started
-				// for this home is verified by that name here and by its
-				// kernel start identity next.
+				// program to everyone. comm is the process's own choice, so
+				// it counts only on a record that binds this home and
+				// carries the kernel start identity verifyStartIdentity
+				// checks next. The gateway an administrator started for
+				// this home is verified by that name and that identity.
 				return linuxCommNamesExecutable("/proc", info.PID, info.Executable)
 			}
 			// /proc/<pid>/exe should be readable for any LIVE process the

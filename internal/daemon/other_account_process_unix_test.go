@@ -6,10 +6,15 @@
 package daemon
 
 import (
+	"encoding/json"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strconv"
+	"strings"
 	"testing"
+
+	"github.com/defenseclaw/defenseclaw/internal/safefile"
 )
 
 // PID 1 belongs to root: kill(2) answers EPERM, and the process exists. The
@@ -84,6 +89,95 @@ func TestLinuxCommNamesExecutable(t *testing.T) {
 	for _, tc := range cases {
 		if got := linuxCommNamesExecutable(root, tc.pid, tc.executable); got != tc.want {
 			t.Errorf("linuxCommNamesExecutable(%d, %q) = %v, want %v", tc.pid, tc.executable, got, tc.want)
+		}
+	}
+}
+
+// pid1RecordedExecutable is an executable path the record of PID 1 (another
+// account's process here) would need for its identity to verify: on Linux,
+// /proc/1/exe is unreadable, so a path whose base name is /proc/1/comm; on
+// macOS, the program ps names.
+func pid1RecordedExecutable(t *testing.T) string {
+	t.Helper()
+	switch runtime.GOOS {
+	case "linux":
+		raw, err := os.ReadFile("/proc/1/comm")
+		if err != nil || strings.TrimSpace(string(raw)) == "" {
+			t.Skipf("/proc/1/comm unavailable: %v", err)
+		}
+		if _, err := os.Readlink("/proc/1/exe"); err == nil {
+			t.Skip("/proc/1/exe is readable here; the comm fallback is not reached")
+		}
+		return "/opt/defenseclaw/" + strings.TrimSpace(string(raw))
+	case "darwin":
+		executable, err := processExecutableDarwin(1)
+		if err != nil || executable == "" {
+			t.Skipf("ps cannot name PID 1: %v", err)
+		}
+		return executable
+	default:
+		t.Skip("no process identity for another account's process on " + runtime.GOOS)
+		return ""
+	}
+}
+
+// Another account's process is this home's gateway only on a record that
+// carries its kernel start identity and names this data directory. Records
+// without either keep the answer they had before EPERM read as alive (not
+// running, record removed): the review of PR #1426 showed that a record with
+// no start identity made any root process with a matching name "running".
+func TestIsRunningNeedsStartIdentityAndDataDirForAnotherAccountsProcess(t *testing.T) {
+	if os.Geteuid() == 0 || processSignalable(1) {
+		t.Skip("needs a live process of another account (PID 1 is this account's here)")
+	}
+	t.Setenv(EnvDaemon, "")
+	executable := pid1RecordedExecutable(t)
+	identity, err := processStartIdentity(1)
+	if err != nil || identity == "" {
+		t.Skipf("start identity of PID 1 unavailable: identity=%q err=%v", identity, err)
+	}
+	dir := t.TempDir()
+	d := New(dir)
+	write := func(info pidInfo) {
+		t.Helper()
+		data, err := json.Marshal(info)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := safefile.WritePrivate(d.pidFile, data); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	// The strong record verifies: name and kernel start identity.
+	strong := pidInfo{PID: 1, Executable: executable, DataDir: dir, StartIdentity: identity}
+	write(strong)
+	if !d.recordBindsThisHome(strong) || !d.verifyExecutable(strong) {
+		t.Fatal("a record with start identity and this data dir must reach the identity checks")
+	}
+	if running, pid := d.IsRunning(); !running || pid != 1 {
+		t.Fatalf("IsRunning(strong record) = (%v, %d), want (true, 1)", running, pid)
+	}
+
+	other := t.TempDir()
+	for name, info := range map[string]pidInfo{
+		"no start identity":    {PID: 1, Executable: executable, DataDir: dir},
+		"blank start identity": {PID: 1, Executable: executable, DataDir: dir, StartIdentity: "  "},
+		"no data dir":          {PID: 1, Executable: executable, StartIdentity: identity},
+		"another data dir":     {PID: 1, Executable: executable, DataDir: other, StartIdentity: identity},
+	} {
+		write(info)
+		if d.recordBindsThisHome(info) {
+			t.Errorf("%s: recordBindsThisHome = true", name)
+		}
+		if runtime.GOOS == "linux" && d.verifyExecutable(info) {
+			t.Errorf("%s: /proc/1/comm accepted as the executable", name)
+		}
+		if running, pid := d.IsRunning(); running || pid != 0 {
+			t.Errorf("%s: IsRunning = (%v, %d), want (false, 0)", name, running, pid)
+		}
+		if _, err := os.Stat(d.pidFile); !os.IsNotExist(err) {
+			t.Errorf("%s: the weak record of another account's process was kept (stat err %v)", name, err)
 		}
 	}
 }
