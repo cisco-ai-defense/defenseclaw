@@ -78,4 +78,18 @@ func TestGAP0295FreshStartRequiresCurrentPeerIdentity(t *testing.T) {
 	if PerUserGatewayFreshStartNoAnswer(dataDir, peer) {
 		t.Fatal("changed peer identity recognized")
 	}
+	peer.peer.identity = identity
+	writeRecord(identity)
+	peer.at = time.Now()
+	time.Sleep(50 * time.Millisecond)
+	if err := recordPerUserGatewayAnswer(dataDir, perUserPeerProcess{pid: cmd.Process.Pid, identity: identity}); err != nil {
+		t.Fatal(err)
+	}
+	if !PerUserGatewayFreshStartNoAnswer(dataDir, peer) {
+		t.Fatal("a call connected before the first completed answer lost its restart window")
+	}
+	peer.at = time.Now()
+	if PerUserGatewayFreshStartNoAnswer(dataDir, peer) {
+		t.Fatal("a call connected after the first completed answer entered the restart window")
+	}
 }

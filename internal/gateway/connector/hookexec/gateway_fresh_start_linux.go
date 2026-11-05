@@ -30,13 +30,14 @@ const perUserFreshGatewayWindow = 12 * time.Second
 // PerUserGatewayFreshStartNoAnswer recognizes a no-status call sent to a
 // recently started gateway recorded for this account. The connected peer,
 // record, executable and kernel start identity must all name one process.
+// An answer counts only if it finished before this connection was proven.
 func PerUserGatewayFreshStartNoAnswer(dataDir string, peer *PerUserPeerRecord) bool {
 	current, ok := verifiedFreshGatewayPeer(dataDir, peer)
 	if !ok {
 		return false
 	}
-	answered, valid := perUserGatewayAnswerSeen(dataDir, current)
-	return valid && !answered
+	before, valid := perUserGatewayAnsweredBefore(dataDir, current, peer.at)
+	return valid && !before
 }
 
 // perUserGatewayRecentlyStarted is the cheap first look of the native hook
