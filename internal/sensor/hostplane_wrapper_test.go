@@ -263,7 +263,7 @@ func TestTetragonWrapperIsMatchedByItsInstalledImage(t *testing.T) {
 			{pid: wrapper, ppid: agent, exe: copied, cmdline: copied + " 300 " + typed, source: tg},
 			{pid: child, ppid: wrapper, exe: exe, cmdline: client, digest: signed, source: tg},
 		}, 1},
-		{"a link to the installed timeout", []string{bin}, false, []exec{
+		{"a link to the installed timeout", []string{bin, filepath.Dir(linked)}, false, []exec{
 			{pid: wrapper, ppid: agent, exe: linked, cmdline: linked + " 300 " + typed, source: tg},
 			{pid: child, ppid: wrapper, exe: exe, cmdline: client, digest: signed, source: tg},
 		}, 1},

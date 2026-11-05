@@ -496,9 +496,11 @@ func (b *Buffer) Push(event Event) {
 		return
 	default:
 	}
-	if !event.Kind.lineage() {
+	if !event.Kind.lineage() && event.Kind != KindImageDigest {
 		// A file event that arrives at a full buffer is simply late. It does
-		// not get to displace the tree.
+		// not get to displace the tree. An image digest may: it is the one
+		// event a held client record waits for, and it comes exactly when
+		// a client's start floods the buffer (cowork-1-0-8 GAP-0067).
 		b.dropped.Add(1)
 		return
 	}

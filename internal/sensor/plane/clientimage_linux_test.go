@@ -467,6 +467,32 @@ func TestClientImageDigestIsDroppedWhenTheFileChangesDuringTheRead(t *testing.T)
 	}
 }
 
+// A read that fails tells its waiters so: the host plane records the held
+// client at once instead of at the end of its hold.
+func TestFailedClientImageReadIsFollowedUp(t *testing.T) {
+	hasher := newImageHasher()
+	hasher.hash = func(*os.File, int64, time.Time) (string, error) { return "", errImageDeadline }
+	path := filepath.Join(t.TempDir(), "image")
+	if err := os.WriteFile(path, []byte("release image fixture"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	file, err := os.Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	key, _ := statImageKey(file)
+	var heard []string
+	if _, state := hasher.digestOf(file, key, "", func(sum string, read bool) {
+		heard = append(heard, fmt.Sprintf("%q %t", sum, read))
+	}); state != DigestPending {
+		t.Fatalf("state %q, want pending", state)
+	}
+	hasher.idle()
+	if len(heard) != 1 || heard[0] != `"" false` || len(hasher.digest) != 0 || hasher.waiting != 0 {
+		t.Fatalf("heard %v, cached %d, waiting %d; want one failed read and nothing left", heard, len(hasher.digest), hasher.waiting)
+	}
+}
+
 // R108-COWORK-3 review 1: an overflowed cn_proc socket (ENOBUFS) is loss to
 // count and report; the reader keeps reading.
 func TestProcessConnectorOverflowIsReportedNotTheEnd(t *testing.T) {

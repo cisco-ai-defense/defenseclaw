@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"slices"
 	"strings"
 	"time"
 
@@ -259,8 +260,12 @@ var wrapperBinaryDirs = []string{"/usr/bin", "/bin"}
 // wrapper, a binary only named like one, and a file installed under more
 // than one wrapper's name (a multi-call binary, whose resolved path does not
 // say which tool ran) are none.
+//
+// Only a path directly in one of dirs is looked at, so no other path (an
+// agent's own binary in a home, perhaps on a slow network file system) is
+// ever read under the host plane's lock.
 func installedWrapper(exe string, dirs []string) string {
-	if !filepath.IsAbs(exe) || filepath.Clean(exe) != exe {
+	if !filepath.IsAbs(exe) || filepath.Clean(exe) != exe || !slices.Contains(dirs, filepath.Dir(exe)) {
 		return ""
 	}
 	image, err := os.Lstat(exe)

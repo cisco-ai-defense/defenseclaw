@@ -73,17 +73,20 @@ func TestBufferProtectsLineageUnderBackPressure(t *testing.T) {
 	// More file traffic must not displace anything.
 	buffer.Push(Event{Kind: KindFileRead, Path: "/home/dev/.claude/again.json"})
 
-	// An exec must get in, because the tree depends on it.
+	// An exec must get in, because the tree depends on it, and so must the
+	// image digest a held client record waits for (GAP-0067).
 	buffer.Push(Event{Kind: KindExec, PID: 4242, PPID: 1, Name: "claude"})
+	buffer.Push(Event{Kind: KindImageDigest, PID: 4242, ImageDigestState: DigestRead})
 
 	events := buffer.Events()
-	foundExec := false
+	foundExec, foundDigest := false, false
 	for drained := 0; drained < eventBuffer; drained++ {
 		select {
 		case event := <-events:
 			if event.Kind == KindExec && event.Name == "claude" {
 				foundExec = true
 			}
+			foundDigest = foundDigest || event.Kind == KindImageDigest
 		default:
 			drained = eventBuffer
 		}
@@ -91,6 +94,9 @@ func TestBufferProtectsLineageUnderBackPressure(t *testing.T) {
 	if !foundExec {
 		t.Fatal("an exec was dropped in favour of file reads: the process tree " +
 			"loses the ancestor and every tactic below it becomes unattributable")
+	}
+	if !foundDigest {
+		t.Fatal("an image digest was dropped in favour of file reads: its held client record is reported")
 	}
 	if buffer.Dropped() == 0 {
 		t.Fatal("the buffer overflowed without counting a drop; reduced coverage " +
