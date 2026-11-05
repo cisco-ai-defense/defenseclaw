@@ -72,6 +72,13 @@ func (m *TargetMemo) ActionCommandDecisionInShell(command, cwd, home string, fac
 	return actionTargetDecision(command, cwd, home, "", posixShell, facts, m)
 }
 
+// ProvedReadOnlyPOSIXCommand uses the existing bounded shell reader to
+// establish that every reached statement only reads or displays data.
+func ProvedReadOnlyPOSIXCommand(command, home string) bool {
+	file, parsed := parseShell(command)
+	return parsed && actionKnownReadOnlyShell(file, home)
+}
+
 func actionTargetDecision(command, cwd, home string, dialect actionfacts.Dialect, posixShell bool, facts map[string]string, memo *TargetMemo) string {
 	if safe, protected := noDereferenceTouchStatus(command, cwd, home); protected {
 		return "protected-target"

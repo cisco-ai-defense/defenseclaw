@@ -1006,6 +1006,14 @@ func (a *APIServer) inspectTrustedToolPolicyCtx(
 	// Keep all static checks in this decision on the request snapshot. The
 	// Secure Client path keeps its pre-1.0 live policy source (issue #1092).
 	policyConfig := a.decisionConfig(ctx)
+	if policyConfig == nil || policyConfig.SecureClientIntegration() ||
+		policyConfig.HookPolicyTierForConnector(firstNonEmpty(req.Connector, action.Connector)) == config.HookPolicyTierStrict {
+		action.StrictPolicy = true
+	}
+	if policyConfig != nil && !policyConfig.SecureClientIntegration() &&
+		policyConfig.HookPolicyTierForConnector(firstNonEmpty(req.Connector, action.Connector)) == config.HookPolicyTierStrict {
+		action.strictHookProfile = true
+	}
 	policySource := func() *config.Config { return policyConfig }
 	if a.scannerCfg != nil && a.scannerCfg.SecureClientIntegration() {
 		policySource = a.liveConfig

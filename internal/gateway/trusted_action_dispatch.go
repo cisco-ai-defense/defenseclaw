@@ -156,6 +156,10 @@ type trustedActionRequest struct {
 	LegacyText         string
 	Connector          string
 	EnforcementCapable bool
+	// StrictPolicy keeps the conservative SSH path-mention disposition.
+	// The balanced profile admits only the ordinary forms proved below.
+	StrictPolicy      bool
+	strictHookProfile bool
 	// ArtifactBody is set when LegacyText and Input.Command are the whole
 	// body of a script the call runs (the artifact lane): its comments and
 	// data are not tool-call text, so a migrated literal rule must match a
@@ -285,6 +289,50 @@ func dispatchTrustedAction(
 ) (findings []RuleFinding) {
 	if ManagedEnterpriseActive() {
 		return nil
+	}
+	// Run after the call's child readings have joined their findings. Those
+	// readings can retain a path mention from an ordinary command even when
+	// the full command has no matching write.
+	if !request.StrictPolicy && balancedOrdinarySSHKeysRequest(request) {
+		defer func() {
+			possible := false
+			for i := range findings {
+				if findings[i].RuleID == "persistence.ssh_authorized_keys_command" || findings[i].RuleID == "PATH-SSH-DIR" {
+					findings[i].enforcement = findingEnforcementDetectionOnly
+					findings[i].Title = "Possible SSH path mention"
+					possible = true
+				}
+			}
+			if !possible {
+				findings = append(findings, RuleFinding{
+					RuleID: "persistence.ssh_authorized_keys_command", Title: "Possible SSH path mention",
+					Severity: "HIGH", Confidence: 0.5, Evidence: request.Input.Command,
+					Tags: []string{"persistence", "ssh"}, LineNumber: 1,
+					enforcement: findingEnforcementDetectionOnly,
+				})
+			}
+		}()
+	}
+	if request.strictHookProfile {
+		if command := strictBashListingCommand(request); command != "" {
+			defer func() {
+				for _, finding := range findings {
+					if finding.RuleID == "persistence.ssh_authorized_keys_command" {
+						return
+					}
+				}
+				enforcement := findingEnforcementDetectionOnly
+				if request.EnforcementCapable {
+					enforcement = findingEnforcementAllowed
+				}
+				findings = append(findings, RuleFinding{
+					RuleID: "persistence.ssh_authorized_keys_command", Title: "SSH authorized keys mutation",
+					Severity: "CRITICAL", Confidence: 0.98, Evidence: command,
+					Tags: []string{"persistence", "credential", "ssh"}, LineNumber: 1,
+					enforcement: enforcement,
+				})
+			}()
+		}
 	}
 	if _, ok := managedHookPeerFromContext(parent); ok {
 		request.ProtectedHomeHook = true

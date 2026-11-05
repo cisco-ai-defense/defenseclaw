@@ -3478,8 +3478,8 @@ func actionWindowsTextWords(scan actionWindowsScanResult, depth int, multiline b
 
 // actionWindowsHereStringText marks as text (skip) the here-string words of
 // a statement words[start:end] that only prints them (Write-Output, echo,
-// Write-Host ...; not git) or only assigns one to a variable no later word
-// of the command names ($t = @'...'@): PowerShell writes nothing there, so
+// Write-Host ...; not git) or assigns a pattern to a variable that later
+// reaches only displays: PowerShell writes nothing there, so
 // a keys pattern in the body is no target (rel-1-0-6:GAP-0236). The caller
 // excludes a statement piped into a later stage, and the nested-argument
 // rule runs first. An expandable @"..."@ body with a $( subexpression runs
@@ -3510,10 +3510,8 @@ func actionWindowsHereStringText(scan actionWindowsScanResult, start, end int, s
 	if len(name) < 2 || name[0] != '$' || !actionEvalAssignmentName(name[1:]) {
 		return
 	}
-	// The variable is text only when every later statement prints or
-	// reads and none names it, also not as $global:t, $script:t, a
-	// variable: drive path or through Get-Variable (rel-1-0-6:GAP-0236
-	// review): the assignment then reaches no writer.
+	// The variable is text only when every later statement is a pure
+	// display or a reader that does not consume the assigned value.
 	bare := name[1:]
 	for k, s := end+1, end+1; k <= len(words); k++ {
 		if k < len(words) && words[k] != ";" && words[k] != "|" && words[k] != "||" && words[k] != "&" && words[k] != "&&" {
@@ -3531,6 +3529,10 @@ func actionWindowsHereStringText(scan actionWindowsScanResult, start, end int, s
 						return
 					}
 				}
+				// A display that reads the variable does not turn its value
+				// into a path. The named value matters only when a later
+				// statement can consume it as a target or executable text.
+				continue
 			} else if !actionKnownReadOnlyWindowsStatement(statement) {
 				return
 			}
@@ -3545,6 +3547,53 @@ func actionWindowsHereStringText(scan actionWindowsScanResult, start, end int, s
 		s = k + 1
 	}
 	skip[start+2] = true
+}
+
+// ProvedDisplayOnlyHereString reports a here-string that the existing
+// Windows statement reading treats only as displayed text. Callers still
+// check the full command for other protected targets.
+func ProvedDisplayOnlyHereString(command string) bool {
+	if !strings.Contains(command, "@'") && !strings.Contains(command, `@"`) {
+		return false
+	}
+	if strings.Contains(strings.ToLower(command), "authorized_keys") {
+		return false
+	}
+	scan := actionWindowsScan(actionWindowsBlankPatchText(command), actionWindowsLiteralDollar)
+	if !scan.ok {
+		return false
+	}
+	skip := actionWindowsTextWords(scan, 0, strings.ContainsAny(command, "\r\n"))
+	// The possibility belongs to displayed text only. A second statement
+	// outside the display and assignment roles is read by the ordinary
+	// target proof, including commands before the assignment.
+	start := 0
+	for i := 0; i <= len(scan.words); i++ {
+		if i < len(scan.words) && actionWindowsRedirectOperator(scan.words[i]) != "" {
+			return false
+		}
+		if i < len(scan.words) && scan.words[i] != ";" && scan.words[i] != "|" && scan.words[i] != "&" && scan.words[i] != "&&" && scan.words[i] != "||" {
+			continue
+		}
+		if i < len(scan.words) && scan.words[i] != ";" {
+			return false
+		}
+		if i > start {
+			statement := scan.words[start:i]
+			assignment := len(statement) == 3 && statement[1] == "=" && actionWindowsHereStringBody(statement[2]) != statement[2]
+			if !assignment && !actionWindowsTextStatement(statement) {
+				return false
+			}
+		}
+		start = i + 1
+	}
+	for i, word := range scan.words {
+		if skip[i] && actionWindowsHereStringBody(word) != word &&
+			strings.ContainsAny(word, "*?[") && !strings.Contains(strings.ToLower(word), "authorized_keys") {
+			return true
+		}
+	}
+	return false
 }
 
 // actionWindowsDisplaySinks only show or filter what reaches them; they
