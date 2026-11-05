@@ -1617,8 +1617,16 @@ class Store:
                 "guardrail.raw_action", "sandbox.name",
             )
         )
+        # The structured agent surface of the request's hook rows (the hook
+        # decision's defenseclaw.agent.surface, the hook audit envelope's
+        # surface or extra.surface) survives a profile that drops the
+        # details, so alerts and the TUI agree on a Cowork call (cowork audit S1).
+        surfaces = ", ".join(
+            self._safe_json_extract(payload, path)
+            for path in ('$."defenseclaw.agent.surface"', "$.surface", "$.extra.surface")
+        )
         cur = self.db.execute(
-            f"""SELECT f.id, h.action, h.details, {facts}
+            f"""SELECT f.id, h.action, h.details, {facts}, {surfaces}
                FROM audit_events AS f
                JOIN audit_events AS h
                  ON h.request_id = f.request_id
@@ -1630,7 +1638,11 @@ class Store:
         )
         out: dict[str, list[str]] = {}
         rows = cur.fetchall()
-        for alert_id, action, details, effective, would_block, mode, acp_method, acp_client, raw, sandbox in rows:
+        for (alert_id, action, details, effective, would_block, mode, acp_method, acp_client, raw, sandbox,
+             *row_surfaces) in rows:
+            surface = next((str(v).strip().lower() for v in row_surfaces if isinstance(v, str) and v.strip()), "")
+            if surface and not any(ch.isspace() for ch in surface):
+                out.setdefault(alert_id, []).append(f"surface={surface}")
             # Only the hook decision of the request names the sandbox whose
             # session raised the finding (GAP-0232); names hold no spaces.
             sandbox = str(sandbox or "").strip()

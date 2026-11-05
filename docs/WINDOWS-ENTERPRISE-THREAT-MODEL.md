@@ -955,6 +955,26 @@ to the scan; runtime hook rules still apply to its tool calls.
     restores the plugin on its next pass (about a minute), and
     `enterprise policy verify` reports it untrusted until then. Tracked in
     issue #930.
+24. Claude Cowork is a surface of the Claude Code connector, and its residuals
+    follow the machine policy that covers Claude Code
+    ([R36 to R40](ENTERPRISE-THREAT-MODEL.md#residual-risks)). The surface
+    marker `CLAUDE_CODE_IS_COWORK=1` is set by the caller, so any process of
+    the user can send it; it is used for attribution, never for identity or a
+    verdict. With `managed_hooks_only: preserve`, hooks in Cowork plugins run
+    next to DefenseClaw's and can change a tool call's input after it was
+    inspected, and the foreign-hook guard does not read Cowork plugins; this
+    is not measured on Windows yet. The default `enforce` writes
+    `allowManagedHooksOnly`. Claude Desktop keeps the engine in the user's own
+    data folder: DefenseClaw accepts a build only with a valid Authenticode
+    signature by `Anthropic, PBC` (or `Anthropic PBC`) on `claude.exe` whose
+    file version equals the folder, and reports any other as
+    `surface_unverified`. Web fetch
+    (Anthropic's side) and the Cowork VM's outbound traffic (Anthropic's
+    proxy) are outside the host's egress controls, also though the VM runs
+    on Windows. A DefenseClaw plugin a user uploaded to their Claude account
+    stays after DefenseClaw is removed and blocks Cowork tool calls while its
+    hook launcher is gone (GAP-0051); `setup cowork` refuses a managed
+    computer, so this concerns a plugin uploaded earlier.
 
 ## Certification gate
 

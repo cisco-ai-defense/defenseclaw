@@ -5,9 +5,11 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import sys
 import unittest
 from datetime import datetime, timedelta, timezone
+from pathlib import Path
 
 from click.testing import CliRunner
 
@@ -18,6 +20,12 @@ from defenseclaw.commands.cmd_alerts import _alert_selector, alerts
 from defenseclaw.models import Event
 
 from tests.helpers import cleanup_app, make_app_context
+
+# Rows the gateway writes for a Cowork and a terminal call, with the Target
+# alerts print for each Cowork alert (cowork audit M1).
+COWORK_TARGET_FIXTURE = (
+    Path(__file__).resolve().parents[2] / "internal" / "audit" / "testdata" / "cowork_alert_target.json"
+)
 
 FINDING = {
     "defenseclaw.finding.rule_id": "SF2-MARKER-BLOCK",
@@ -89,6 +97,156 @@ class AlertFindingRowsTests(unittest.TestCase):
                          (request_id, hook.id, finding.id))
         store.db.commit()
         return finding.id
+
+    def test_a_cowork_finding_reads_cowork_like_the_tui(self):
+        # Cowork audit P3-1 (GAP-0047): a Cowork call's hook row records
+        # surface=cowork. `alerts` labels its finding cowork:PreToolUse, as
+        # the TUI does; a Claude Code terminal call keeps claudecode:*.
+        now = datetime.now(timezone.utc)
+        cowork_id = self._finding(
+            "req-cowork",
+            "connector=claudecode result=ok action=block raw_action=block mode=action "
+            "cowork_session_id=local_1 surface=cowork",
+            now,
+        )
+        cli_id = self._finding(
+            "req-cli", "connector=claudecode result=ok action=block raw_action=block mode=action",
+            now - timedelta(seconds=5),
+        )
+        table = self.runner.invoke(alerts, ["-n", "10"], obj=self.app, catch_exceptions=False)
+        self.assertEqual(table.exit_code, 0, table.output)
+        self.assertIn("cowork:PreToolUse", table.output)
+        self.assertIn("claudecode:PreToolUse", table.output)
+        shown = self.runner.invoke(alerts, ["--show", "1"], obj=self.app, catch_exceptions=False).output
+        self.assertRegex(shown, r"Target:\s+cowork:PreToolUse")
+        self.assertRegex(shown, r"Surface:\s+Cowork \(Claude Code\)")
+        self.assertRegex(shown, r"Decision:\s+blocked")
+        shown = self.runner.invoke(alerts, ["--show", "2"], obj=self.app, catch_exceptions=False).output
+        self.assertRegex(shown, r"Target:\s+claudecode:PreToolUse")
+        self.assertNotIn("Surface:", shown)
+        listed = {row["id"]: row for row in json.loads(
+            self.runner.invoke(alerts, ["--json"], obj=self.app, catch_exceptions=False).output
+        )}
+        # Cowork audit S2: --json keeps the stored target and adds surface.
+        self.assertEqual(listed[cowork_id]["target"], "claudecode:PreToolUse")
+        self.assertEqual(listed[cowork_id]["surface"], "cowork")
+        self.assertEqual(listed[cli_id]["target"], "claudecode:PreToolUse")
+        self.assertEqual(listed[cli_id]["surface"], "")
+
+    def test_a_cowork_finding_keeps_its_label_when_the_hook_details_are_dropped(self):
+        # Cowork audit S1: a redaction profile can drop the connector-hook
+        # row's details (GAP-2096). The hook decision row of the request
+        # keeps defenseclaw.agent.surface, which the TUI reads; alerts read
+        # it too. A surface= inside details_json or a reason word is not one.
+        now = datetime.now(timezone.utc)
+        cowork_id = self._finding("req-redacted", "", now)
+        decision = Event(action="hook_decision", severity="INFO", connector="claudecode",
+                         structured={"defenseclaw.agent.surface": "cowork",
+                                     "defenseclaw.guardrail.effective_action": "block"},
+                         timestamp=now)
+        self.app.store.log_event(decision)
+        self.app.store.db.execute("UPDATE audit_events SET request_id=? WHERE id=?", ("req-redacted", decision.id))
+        self.app.store.db.commit()
+        cli_id = self._finding(
+            "req-cli",
+            'connector=claudecode result=ok action=block mode=action reason=surface=cowork '
+            'details_json="{\\"surface\\":\\"cowork\\"} surface=cowork"',
+            now - timedelta(seconds=5),
+        )
+        details = self.app.store.hook_details_for_alerts([cowork_id, cli_id])
+        self.assertIn("surface=cowork", details[cowork_id])
+        listed = [e.id for e in self.app.store.list_alerts(10)]
+        shown = self.runner.invoke(
+            alerts, ["--show", str(listed.index(cowork_id) + 1)], obj=self.app, catch_exceptions=False
+        ).output
+        self.assertRegex(shown, r"Target:\s+cowork:PreToolUse")
+        self.assertRegex(shown, r"Surface:\s+Cowork \(Claude Code\)")
+        shown = self.runner.invoke(
+            alerts, ["--show", str(listed.index(cli_id) + 1)], obj=self.app, catch_exceptions=False
+        ).output
+        self.assertRegex(shown, r"Target:\s+claudecode:PreToolUse")
+        self.assertNotIn("Surface:", shown)
+
+    def test_an_asset_policy_surface_is_not_an_agent_surface(self):
+        # Cowork audit M2: the asset policy writes surface=hook (where the
+        # MCP call was seen). That is not an agent surface, so --show prints
+        # no Surface line and the target is unchanged.
+        self.app.store.log_event(Event(
+            action="asset-policy", target="mcp:unregistered", severity="HIGH", connector="claudecode",
+            details="action=block source=registry registry_status=unregistered registry_configured=true "
+                    "surface=hook hook=PreToolUse tool=mcp__x__y connector=claudecode would_block=false "
+                    "reason=not-in-registry",
+            timestamp=datetime.now(timezone.utc),
+        ))
+        listed = self.app.store.list_alerts(10)
+        self.assertEqual([e.action for e in listed], ["asset-policy"])
+        shown = self.runner.invoke(alerts, ["--show", "1"], obj=self.app, catch_exceptions=False).output
+        self.assertRegex(shown, r"Target:\s+mcp:unregistered\n")
+        self.assertNotIn("Surface:", shown)
+        self.assertNotIn("cowork", shown.lower())
+        row = json.loads(self.runner.invoke(alerts, ["--json"], obj=self.app, catch_exceptions=False).output)[0]
+        self.assertEqual(row["target"], "mcp:unregistered")
+        self.assertEqual(row["surface"], "")
+
+    def test_printed_cowork_target_round_trips_into_dismiss(self):
+        # Cowork audit M1: alerts print cowork:PreToolUse for a Cowork finding
+        # and "cowork PreToolUse" for a Cowork hook block. dismiss --target
+        # sends that Target unchanged; the gateway selects only the Cowork
+        # alert for it on the same rows (internal/audit/cowork_alert_target_test.go).
+        from unittest.mock import MagicMock, patch
+
+        from defenseclaw.config import default_config, prepare_fresh_v8_config
+
+        fixture = json.loads(COWORK_TARGET_FIXTURE.read_text())
+        store = self.app.store
+        columns = {row[1] for row in store.db.execute("PRAGMA table_info(audit_events)")}
+        base = datetime.now(timezone.utc)
+        for offset, row in enumerate(fixture["rows"]):
+            store.log_event(Event(
+                id=row["id"], action=row["action"], target=row["target"], severity=row["severity"],
+                connector=row["connector"], details=row["details"], structured=dict(row["structured"]),
+                timestamp=base - timedelta(seconds=offset),
+            ))
+            store.db.execute("UPDATE audit_events SET request_id=? WHERE id=?", (row["request_id"], row["id"]))
+            if "enforced" in columns and row.get("enforced"):
+                store.db.execute("UPDATE audit_events SET enforced=1 WHERE id=?", (row["id"],))
+        store.db.commit()
+
+        listed = [e.id for e in store.list_alerts(50)]
+        table = self.runner.invoke(alerts, ["-n", "50"], obj=self.app, catch_exceptions=False)
+        self.assertEqual(table.exit_code, 0, table.output)
+        cfg = prepare_fresh_v8_config(default_config())
+        cfg.audit_db = self.db_path
+        cfg.gateway.token = "test-alert-review-token"
+        for selection in fixture["selections"]:
+            alert_id, printed = selection["alert"], selection["printed"]
+            self.assertIn(alert_id, listed)
+            self.assertIn(printed, table.output)
+            shown = self.runner.invoke(
+                alerts, ["--show", str(listed.index(alert_id) + 1)], obj=self.app, catch_exceptions=False
+            ).output
+            self.assertRegex(shown, r"Target:\s+" + re.escape(printed) + r"\n")
+
+            client = MagicMock()
+            client.set_alert_disposition.return_value = {
+                "_http_status": 200,
+                "matched": len(selection["selected"]),
+                "selection_digest": "sha256:v1:" + "0" * 64,
+                "targets": [{"id": i, "projection_version": 0} for i in selection["selected"]],
+            }
+            saved, self.app.cfg = self.app.cfg, cfg
+            try:
+                with patch("defenseclaw.commands.cmd_alerts.OrchestratorClient", return_value=client):
+                    result = self.runner.invoke(
+                        alerts, ["dismiss", "--target", printed, "--dry-run"], obj=self.app, catch_exceptions=False
+                    )
+            finally:
+                self.app.cfg = saved
+            self.assertEqual(result.exit_code, 0, result.output)
+            self.assertEqual(client.set_alert_disposition.call_args.kwargs["selector"], {"target": printed})
+            self.assertEqual(selection["selected"], [alert_id])
+            self.assertIn(f"  {alert_id}\n", result.output)
+            self.assertIn("Preview: 1 alert(s) matched.", result.output)
 
     def test_judge_finding_names_the_judge_and_no_repeated_id(self):
         # GAP-1886: a judge finding read "Rule: JUDGE-EXFIL-FILE: JUDGE-EXFIL-FILE"

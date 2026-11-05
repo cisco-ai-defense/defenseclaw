@@ -125,6 +125,8 @@ jobs:
           persist-credentials: false
       - name: Test connector onboarding
         run: macos/DefenseClawMac/script/test_connector_onboarding.sh
+      - name: Test Cowork status row and setup command
+        run: macos/DefenseClawMac/script/test_cowork_status.sh
       - name: Test installer download verification
         run: macos/DefenseClawMac/script/test_update_checker_verification.sh
       - name: Test main window lifecycle contract

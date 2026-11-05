@@ -54,6 +54,7 @@ Cowork runs ten hook events. DefenseClaw registers all ten for the plugin route.
 | `PostToolUse`, `PostToolUseFailure` | The tool result or the error | Recorded, with secrets redacted. The result has already reached the model, so these cannot block it or take it back |
 | `SubagentStart`, `SubagentStop` | Sub-agent lineage. Tool calls of a sub-agent carry an `agent_id` | Recorded |
 | `SessionStart`, `Stop`, `SessionEnd` | Session boundaries and the Cowork session id | Recorded |
+| A tool call with a confirm (ask) verdict, from [human approval](/docs/hitl) | An administrator rule at or above the HILT minimum severity and below the block threshold, in action mode | Cowork shows its own permission card ("Claude wants to use bash" in the test) with the command and **Deny** and **Allow once**, and the task waits. Allow once runs the command, and Deny stops the task. The card does not name DefenseClaw or show the rule or the reason: the reason is only in the audit. The audit has the `PreToolUse` confirm and a `PermissionRequest` alert, and does not record who approved or denied. Measured once on managed macOS in the 1.0.8 tests (Claude Desktop 4.16336.0), in Cowork's default permission setting. Not measured on Windows or in other permission modes |
 
 Whether a policy hit blocks depends on the Claude Code connector's mode. In observe mode DefenseClaw records what it would block and lets the call run. In action mode a policy hit is blocked. A first `defenseclaw setup claude-code` starts in observe mode: turn blocking on with `defenseclaw setup claude-code --mode action`.
 
@@ -84,6 +85,7 @@ DefenseClaw maps a closed list of Cowork tool names, measured on engines 2.1.309
 | `mcp__cowork__request_cowork_directory` | Claude Desktop | Class `scope_change`. Generic MCP path | Not read |
 | `mcp__session_info__read_transcript`, `list_sessions` | Claude Desktop | Class `transcript_access`. Generic MCP path | Not read |
 | `mcp__mcp-registry__*` | Claude Desktop | Class `mcp_admission`. Generic MCP path | Not read |
+| Other tools of the `cowork`, `scheduled-tasks`, `session_info` and `skills` servers | Claude Desktop | Class `desktop`. Generic MCP path | Not read |
 | `mcp__<connector id>__*` | Your connectors | The existing MCP tool rules | As MCP |
 
 Asked for a plugin in the 1.0.8 tests, Claude called `search_plugins` and `search_connectors`, not `suggest_plugin_install`. Claude Desktop 4.16336.0 in third-party (Amazon Bedrock) mode does not offer the `mcp__Claude_Browser__*` tools to Cowork: a tool search for them found nothing.
@@ -170,7 +172,7 @@ How each command treats the plugin:
 | --- | --- |
 | `defenseclaw uninstall`, `defenseclaw uninstall --dry-run` | Prints the removal step when `setup cowork` built a plugin from this data folder. The dry run lists it with the plan |
 | `defenseclaw reset` | Deletes the data folder, the hook script and the Cowork state with it. It reads the state first and prints the same removal step when a plugin was built, because the plugin now blocks Cowork tool calls |
-| `defenseclaw setup remove claudecode` | Turns off the Claude Code hooks. It does not touch the plugin in your Claude account and prints no Cowork step. Remove the plugin in Claude too, because Cowork is no longer protected through it |
+| `defenseclaw setup remove claudecode` | Turns off the Claude Code hooks. It does not touch the plugin in your Claude account. When `setup cowork` built a plugin, it prints that Cowork is no longer protected. Remove the plugin in Claude too |
 
 All three leave the plugin in your Claude account. Only you can remove it.
 
@@ -270,6 +272,7 @@ The user's identity comes from the operating system, never from Cowork's environ
 | DefenseClaw's hook sees tool calls, not what a command did | What a shell command ran inside the VM is not visible from the hook |
 | The Cowork surface is caller-reported | The hook marks a call as Cowork when `CLAUDE_CODE_IS_COWORK=1` is set and the agent is the Desktop engine. Any local process can send that marker. It is used for attribution, never for identity, so "protected" and "last Cowork event" are evidence and not proof |
 | Unmeasured input shapes | The 1.0.8 tests captured the input of `save_skill`, `search_plugins` and `search_connectors`. They did not capture `suggest_plugin_install`, which Cowork did not call, or `form_input`, `javascript_tool` and `navigate`, which the tested third-party build does not offer, or the format of `CLAUDE_CODE_WORKSPACE_HOST_PATHS`. A call with a shape DefenseClaw does not read keeps the generic MCP path |
+| Cowork plugins are not inventoried | [AI Discovery](/docs/ai-discovery) lists the names of the plugins enabled in Cowork (`cowork_plugins`, read from `local-agent-mode-sessions/<account>/<org>/rpm/manifest.json`). Those plugins are not in the Claude Code skill and plugin inventory, and the watcher and the scanners do not read them, so DefenseClaw does not scan their skills, commands or MCP servers |
 | Unmeasured folders | Some Claude Desktop folders on Windows and Linux, such as the VM bundle and the Linux `~/.config/Claude-3p` folder, are not measured yet. [AI Discovery](/docs/ai-discovery) lists them |
 | Detection gaps | No built-in rule flags JavaScript that exfiltrates data, such as `fetch(url + document.cookie)` in `javascript_tool`, or a download-and-execute instruction in a scheduled task prompt |
 | Secrets in tool results | A secret in a file Cowork reads, such as a key in a `.env` file, is detected and recorded after the read, not prevented, in action mode too. The model is told the rule, never the value. To prevent the read, block it at `PreToolUse` with a path rule: see [Secrets in tool results](/docs/connectors/claudecode#secrets-in-tool-results) |

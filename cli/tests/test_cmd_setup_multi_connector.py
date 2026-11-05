@@ -1708,6 +1708,60 @@ class TestRemoveConnector(unittest.TestCase):
         self.assertNotEqual(result.exit_code, 0)
         self.assertEqual(set(self.app.cfg.guardrail.connectors), {"codex", "cursor"})
 
+    # Cowork audit P4-2: the Cowork plugin runs the Claude Code hook, so
+    # removing claudecode leaves Cowork unchecked; say so when it was built.
+    def test_remove_claudecode_says_cowork_is_no_longer_protected(self):
+        from defenseclaw import cowork
+
+        notice = "Cowork is no longer protected; remove the DefenseClaw plugin in Claude (Customize > Plugins)"
+        self._seed_map("claudecode", "codex", "cursor")
+        with self._no_restart_bounce():
+            result = _invoke(["remove", "cursor", "--yes", "--no-restart"], self.app)
+        self.assertEqual(result.exit_code, 0, msg=result.output)
+        self.assertNotIn("Cowork", result.output)
+        cowork.save_state(self.app.cfg.data_dir, {"version": "1.0.1", "built_at": "2026-11-04T08:00:00+00:00"})
+        with self._no_restart_bounce():
+            result = _invoke(["remove", "claude-code", "--yes", "--no-restart"], self.app)
+        self.assertEqual(result.exit_code, 0, msg=result.output)
+        self.assertEqual(" ".join(result.output.split()).count(notice), 1, result.output)
+        self.assertEqual(set(self.app.cfg.guardrail.connectors), {"codex"})
+
+    # Audit review S5: on Windows a failed gateway restart rolls the removal
+    # back, so the notice prints only once the removal has stuck.
+    def test_cowork_notice_prints_only_after_the_removal_sticks(self):
+        from defenseclaw import cowork
+
+        notice = "Cowork is no longer protected"
+        cowork.save_state(self.app.cfg.data_dir, {"version": "1.0.1", "built_at": "2026-11-04T08:00:00+00:00"})
+
+        def rollback(_app, _snapshot, _cause):
+            raise click.ClickException("injected restart failure")
+
+        for restart_ok in (False, True):
+            with self.subTest(restart_ok=restart_ok):
+                self._seed_map("claudecode", "codex")
+                with (
+                    self._no_restart_bounce() as bounce,
+                    patch("defenseclaw.commands.cmd_setup._windows_runtime_rollback", return_value=True),
+                    patch("defenseclaw.commands.cmd_setup._capture_setup_config_snapshot", return_value=object()),
+                    patch(
+                        "defenseclaw.commands.cmd_setup._rollback_failed_connector_application",
+                        side_effect=rollback,
+                    ) as rolled,
+                ):
+                    bounce.return_value = restart_ok
+                    result = _invoke(["remove", "claudecode", "--yes"], self.app)
+                bounce.assert_called_once()
+                if restart_ok:
+                    self.assertEqual(result.exit_code, 0, msg=result.output)
+                    rolled.assert_not_called()
+                    self.assertIn(notice, result.output)
+                    self.assertLess(result.output.index("Restarting gateway"), result.output.index(notice))
+                else:
+                    self.assertNotEqual(result.exit_code, 0, msg=result.output)
+                    rolled.assert_called_once()
+                    self.assertNotIn(notice, result.output)
+
     def test_remove_known_absent_is_idempotent(self):
         self._seed_map("codex", "cursor")
         with self._no_restart_bounce():
