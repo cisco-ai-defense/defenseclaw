@@ -7,9 +7,13 @@ package gateway
 
 import (
 	"encoding/json"
+	"net/http"
+	"net/http/httptest"
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/defenseclaw/defenseclaw/internal/gateway/connector"
 )
 
 func TestGAP0574HermesBlockTextStartsWithRuleAndReason(t *testing.T) {
@@ -50,4 +54,43 @@ func TestGAP0574HermesBlockTextStartsWithRuleAndReason(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestGAP0574HermesBlockTextVariants(t *testing.T) {
+	t.Run("bounded-review", func(t *testing.T) {
+		profile := connector.HookProfile{
+			Name:         "hermes",
+			Capabilities: connector.HookCapability{CanBlock: true, BlockEvents: []string{"pre_tool_call"}},
+		}
+		req := agentHookRequest{ConnectorName: "hermes", HookEventName: "pre_tool_call", ToolName: "terminal"}
+		answer := oversizeUninspectedHookResponse(profile, req, "action", agentHookResponse{Action: "allow", RawAction: "allow"})
+		if answer.Action != "block" {
+			t.Fatalf("action=%q, want block", answer.Action)
+		}
+		message, _ := answer.HookOutput["reason"].(string)
+		if !strings.HasPrefix(message, "DefenseClaw blocked this call: "+hookOversizeUninspectedRuleID+": ") {
+			t.Fatalf("bounded-review block text=%q", message)
+		}
+	})
+	t.Run("conflicting-event", func(t *testing.T) {
+		api := &APIServer{}
+		body := `{"hook_event_name":"post_tool_call","event":"pre_tool_call","tool_name":"terminal","tool_input":{"command":"echo hello"}}`
+		request := httptest.NewRequest(http.MethodPost, "/api/v1/hermes/hook", strings.NewReader(body))
+		request.Header.Set("Content-Type", "application/json")
+		out := httptest.NewRecorder()
+		api.handleAgentHook("hermes")(out, request)
+		var answer struct {
+			Action     string            `json:"action"`
+			HookOutput map[string]string `json:"hook_output"`
+		}
+		if err := json.Unmarshal(out.Body.Bytes(), &answer); err != nil {
+			t.Fatal(err)
+		}
+		if answer.Action != "block" {
+			t.Fatalf("action=%q, want block", answer.Action)
+		}
+		if !strings.HasPrefix(answer.HookOutput["message"], "DefenseClaw blocked this call: ") {
+			t.Fatalf("event-conflict block text=%q", answer.HookOutput["message"])
+		}
+	})
 }

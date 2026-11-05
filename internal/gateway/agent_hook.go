@@ -528,9 +528,15 @@ func (a *APIServer) handleAgentHook(connectorName string) http.HandlerFunc {
 				// A conflicting event is not a valid policy boundary. Return the
 				// native block even if an administrator chose open for outages.
 				a.recordConnectorHookRejection(r.Context(), connectorName, "unknown", "conflicting_event", int64(len(b)))
+				resp := agentHookResponse{
+					Action: "block", Reason: "Hermes hook event fields disagree",
+					HookOutput: map[string]interface{}{"action": "block", "message": "DefenseClaw blocked this tool call because its hook event could not be verified."},
+				}
+				if cfg := a.decisionConfig(r.Context()); cfg == nil || !cfg.SecureClientIntegration() {
+					resp = hermesBlockText(agentHookRequest{ConnectorName: "hermes", HookEventName: "pre_tool_call"}, resp)
+				}
 				a.writeJSON(w, http.StatusOK, map[string]interface{}{
-					"action": "block", "reason": "Hermes hook event fields disagree",
-					"hook_output": map[string]string{"action": "block", "message": "DefenseClaw blocked this tool call because its hook event could not be verified."},
+					"action": resp.Action, "reason": resp.Reason, "hook_output": resp.HookOutput,
 				})
 				return
 			}
@@ -1286,6 +1292,12 @@ func (a *APIServer) handleAgentHook(connectorName string) http.HandlerFunc {
 // does not change the answer, which may already be finalized. It cannot
 // panic.
 func (a *APIServer) hookAnswerBody(ctx context.Context, profile connector.HookProfile, connectorName string, req agentHookRequest, resp agentHookResponse, receiptID string) []byte {
+	if req.ConnectorName == "" {
+		req.ConnectorName = connectorName
+	}
+	if cfg := a.decisionConfig(ctx); cfg == nil || !cfg.SecureClientIntegration() {
+		resp = hermesBlockText(req, resp)
+	}
 	resp = a.withHookAnswerAgentIDs(ctx, resp)
 	counted := false
 	onPanic := func(recovered any) {
@@ -1301,9 +1313,6 @@ func (a *APIServer) hookAnswerBody(ctx context.Context, profile connector.HookPr
 	}
 	fmt.Fprintf(os.Stderr, "[gateway] hook answer render failed connector=%s event=%s action=%s: %v; answering with its native fallback output\n",
 		connectorName, req.HookEventName, resp.Action, err)
-	if req.ConnectorName == "" {
-		req.ConnectorName = connectorName
-	}
 	fallback := resp
 	fallback.HookOutput = func() (output map[string]interface{}) {
 		defer func() {
@@ -3690,41 +3699,6 @@ func (a *APIServer) evaluateAgentHook(ctx context.Context, req agentHookRequest)
 	// evaluation_id.
 	resp.EvaluationID = evalCtx.EvaluationID
 	resp.RuleIDs = hookResponseRuleIDs(evalCtx.RuleIDs, rawActionBeforeAssets, assetDecisions)
-	if req.ConnectorName == "hermes" && canonicalEvent(req.HookEventName) == "pretoolcall" && action == "block" {
-		if cfg := a.decisionConfig(ctx); cfg == nil || !cfg.SecureClientIntegration() {
-			rule := "policy"
-			for _, id := range resp.RuleIDs {
-				if agentRuleIDPattern.MatchString(id) {
-					rule = id
-					break
-				}
-			}
-			if rule == "policy" {
-				matched := strings.TrimPrefix(agentMatchedRules(reason), "rule ")
-				matched = strings.TrimPrefix(matched, "rules ")
-				candidate, _, _ := strings.Cut(matched, ",")
-				candidate, _, _ = strings.Cut(candidate, ":")
-				if agentRuleIDPattern.MatchString(candidate) {
-					rule = candidate
-				}
-			}
-			field := "reason"
-			if resp.HookOutput["action"] == "block" {
-				field = "message"
-			}
-			message := resp.Reason
-			if native, ok := resp.HookOutput[field].(string); ok && native != "" {
-				message = native
-			}
-			if !strings.HasPrefix(message, "DefenseClaw blocked this call: ") {
-				message = "DefenseClaw blocked this call: " + rule + ": " + message
-			}
-			resp.Reason = message
-			if resp.HookOutput != nil {
-				resp.HookOutput[field] = message
-			}
-		}
-	}
 	resp.RedactionEnabled = verdict.RedactionEnabled
 	resp.laneVerdict = verdict.laneVerdict
 	resp.SuppressNotification = hookNotificationCoveredByAssetPolicy(rawActionBeforeAssets, assetDecisions)
@@ -3761,6 +3735,50 @@ func oversizeUninspectedHookResponse(profile connector.HookProfile, req agentHoo
 	resp := agentHookResponseForProfile(profile, req, action, "block", "HIGH", oversizeUninspectedReason,
 		findings, mode, wouldBlock, profile.Capabilities)
 	resp.RuleIDs = ruleIDs
+	return hermesBlockText(req, resp)
+}
+
+// hermesBlockText gives every blocked Hermes tool-call answer the same
+// model-facing reason, including blocks produced after the main evaluator.
+func hermesBlockText(req agentHookRequest, resp agentHookResponse) agentHookResponse {
+	if req.ConnectorName != "hermes" || canonicalEvent(req.HookEventName) != "pretoolcall" || resp.Action != "block" {
+		return resp
+	}
+	rule := "policy"
+	for _, id := range resp.RuleIDs {
+		if agentRuleIDPattern.MatchString(id) {
+			rule = id
+			break
+		}
+	}
+	if rule == "policy" {
+		source := resp.SourceReason
+		if source == "" {
+			source = resp.Reason
+		}
+		matched := strings.TrimPrefix(agentMatchedRules(source), "rule ")
+		matched = strings.TrimPrefix(matched, "rules ")
+		candidate, _, _ := strings.Cut(matched, ",")
+		candidate, _, _ = strings.Cut(candidate, ":")
+		if agentRuleIDPattern.MatchString(candidate) {
+			rule = candidate
+		}
+	}
+	field := "reason"
+	if resp.HookOutput["action"] == "block" {
+		field = "message"
+	}
+	message := resp.Reason
+	if native, ok := resp.HookOutput[field].(string); ok && native != "" {
+		message = native
+	}
+	if !strings.HasPrefix(message, "DefenseClaw blocked this call: ") {
+		message = "DefenseClaw blocked this call: " + rule + ": " + message
+	}
+	resp.Reason = message
+	if resp.HookOutput != nil {
+		resp.HookOutput[field] = message
+	}
 	return resp
 }
 
