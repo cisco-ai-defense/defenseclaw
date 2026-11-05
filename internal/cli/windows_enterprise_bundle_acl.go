@@ -24,6 +24,12 @@ func windowsBundleReceiptSDDL(serviceSID string) string {
 	return "O:BAG:BAD:P(A;;FA;;;SY)(A;;FA;;;BA)(A;;FR;;;BU)(A;;FR;;;" + serviceSID + ")"
 }
 
+// windowsConfigFileSDDL is Setup's ConfigFile descriptor for config.yaml:
+// SYSTEM and Administrators full control, the gateway service read.
+func windowsConfigFileSDDL(serviceSID string) string {
+	return "O:BAG:BAD:P(A;;FA;;;SY)(A;;FA;;;BA)(A;;FR;;;" + serviceSID + ")"
+}
+
 func windowsBundleVersionSDDL(serviceSID string, directory bool) string {
 	inherit := ""
 	if directory {
