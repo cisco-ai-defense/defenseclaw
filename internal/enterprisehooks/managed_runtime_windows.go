@@ -695,6 +695,10 @@ func resolveWindowsCodexManagedHookRuntime(
 		return result, err
 	}
 	if !registry.Active {
+		if err := windowsCodexAdminConflictRuntimeError(registry); err != nil {
+			result.PolicyActive = true
+			return result, err
+		}
 		return result, nil
 	}
 	result.PolicyActive = true
@@ -752,4 +756,21 @@ func windowsCodexMachineRequirementsPath() (string, error) {
 		return "", fmt.Errorf("enterprise hooks: resolve trusted ProgramData: %w", err)
 	}
 	return filepath.Join(programData, "OpenAI", "Codex", "requirements.toml"), nil
+}
+
+// windowsCodexAdminConflictRuntimeError is the Codex hook's answer when the
+// administrator's requirements.toml turned DefenseClaw's managed hooks off
+// while they are still listed, which the resolver marks only on a Secure
+// Client host outside strict mode. No account is registered then, and Secure
+// Client answers an unregistered account with its open fail mode; the reason
+// names the setting so the allow is never silent.
+func windowsCodexAdminConflictRuntimeError(registry connector.WindowsCodexManagedRuntimeRegistry) error {
+	if registry.Active || registry.AdminConflict == "" {
+		return nil
+	}
+	return fmt.Errorf(
+		"%w: the administrator's Codex requirements.toml turns DefenseClaw managed hooks off (%s)",
+		ErrWindowsManagedSIDUnregistered,
+		registry.AdminConflict,
+	)
 }

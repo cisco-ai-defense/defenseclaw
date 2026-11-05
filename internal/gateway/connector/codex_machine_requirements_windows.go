@@ -976,12 +976,9 @@ func resolveWindowsCodexManagedRuntimeRegistryLocked(
 	// no hooks then, so there is no active managed Codex runtime to
 	// resolve; Codex is left unauthorized and reported, instead of failing
 	// the Guardian's enrollment publication for every agent on the host.
-	if !managed.StandaloneTrustScope() && !managed.TrustStrictAncestors() {
+	if windowsCodexAdminConflictAllowed() {
 		if cfg, parseErr := parseWindowsCodexRequirements(requirements.data); parseErr == nil {
 			if conflict := codexRequirementsAdminConflict(cfg); conflict != nil {
-				fmt.Fprintf(os.Stderr,
-					"[enterprise-hooks] Codex managed runtime: no active registry on this host, Codex stays unhooked: %s\n",
-					conflict.Error())
 				result.AdminConflict = conflict.Error()
 				return result, nil
 			}
@@ -2312,8 +2309,25 @@ func windowsCodexAdminConflictReport(
 	report.Disposition = "admin_conflict"
 	report.CodexRequirementsConflict = conflict.Error()
 	report.SecurityComplete = false
-	fmt.Fprintf(os.Stderr,
-		"[enterprise-hooks] Codex machine requirements %s: leaving Codex unhooked on this host: %s\n",
-		action, conflict.Error())
+	ReportWindowsCodexAdminConflict(opts.RequirementsPath, conflict.Error())
 	return report
+}
+
+// windowsCodexAdminConflictAllowed reports whether this process may leave
+// Codex unhooked on the administrator's own setting: a Secure Client host
+// outside strict mode. The standalone profile and strict mode keep refusing.
+func windowsCodexAdminConflictAllowed() bool {
+	return !managed.StandaloneTrustScope() && !managed.TrustStrictAncestors()
+}
+
+// ReportWindowsCodexAdminConflict logs, once per process, that the
+// administrator's requirements.toml leaves Codex unhooked on this host. Setup,
+// the Guardian's reconcile, its exact enrollment and deferred staging all
+// report the same line.
+func ReportWindowsCodexAdminConflict(requirementsPath, conflict string) {
+	managed.EmitResilienceEventOnce(requirementsPath, managed.MarkerDegraded, map[string]string{
+		"subsystem": "codex_requirements",
+		"path":      requirementsPath,
+		"reason":    "Codex is not hooked on this host: the administrator's requirements.toml turns DefenseClaw managed hooks off (" + conflict + ")",
+	})
 }

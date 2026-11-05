@@ -419,7 +419,9 @@ func syncEnterpriseHookManagedMachineEnrollments(
 		// (Secure Client without the strict pin): Codex has no registry to
 		// publish, its rows report the failure, and the other agents'
 		// enrollment is still published.
-		if currentCodex.AdminConflict == "" {
+		if currentCodex.AdminConflict != "" {
+			connector.ReportWindowsCodexAdminConflict(codexOpts.RequirementsPath, currentCodex.AdminConflict)
+		} else {
 			if !currentCodex.Active {
 				return fmt.Errorf("Codex managed policy is absent after target runtime installation")
 			}
