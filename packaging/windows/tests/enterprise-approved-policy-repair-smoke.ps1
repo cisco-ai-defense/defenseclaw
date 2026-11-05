@@ -81,7 +81,7 @@ function Assert-DefenseClawNoReparsePath { param($Path) }
 function Get-DefenseClawSourceDescriptor {
     param($Path, $Label)
     return @{ path = $Path; label = $Label; authenticode = $false;
-        allow_unsigned = $false; sha256 = (Get-FileHash -LiteralPath $Path -Algorithm SHA256).Hash.ToLowerInvariant() }
+        allow_unsigned = $false; sha256 = (Get-FileHash -LiteralPath $Path -Algorithm SHA256).Hash }
 }
 function Assert-DefenseClawSourceDescriptorCurrent { param($Source) return $Source }
 function Install-DefenseClawFileAtomic {

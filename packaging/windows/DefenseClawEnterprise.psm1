@@ -32105,7 +32105,7 @@ function Get-DefenseClawRepairRollbackApprovedConfigSource {
         if ($installedHash -ceq $activeHash) { return $null }
     }
     $approved = Get-DefenseClawApprovedPolicySource -Layout $Layout -Metadata $Metadata -Name config
-    if ([string]$approved.sha256 -cne $activeHash) {
+    if (([string]$approved.sha256).ToLowerInvariant() -cne $activeHash) {
         throw ('Repair cannot prove that the recorded approved config source is current; ' +
             'run ' + (Get-DefenseClawStandaloneBundleRepairCommand -Layout $Layout) + ' ' +
             'on a signed-bundle deployment, or Setup /ensure CONFIG=<approved absolute config path> otherwise')
