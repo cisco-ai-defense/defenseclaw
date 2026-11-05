@@ -552,7 +552,7 @@ func windowsEnterpriseHotConfigApply(
 			// machine policy: it reconciles the restored config, and its
 			// targets are proven, before the gateway goes back (GAP-0044).
 			if targetsErr == nil && guardianRestartAttempted {
-				if err := windowsEnterpriseHotConfigGuardianReconcile(restoreCtx, layout); err != nil {
+				if err := windowsEnterpriseHotConfigGuardianReconcile(restoreCtx, layout, true); err != nil {
 					guardianErr = fmt.Errorf("the hook guardian did not prove the enrolled targets on the restored config: %w", err)
 				}
 			}
@@ -715,7 +715,7 @@ func windowsEnterpriseHotConfigApply(
 		// gateway restarts only once every published target is proven with
 		// the new config, as the transaction starts the guardian first.
 		guardianRestartAttempted = true
-		if err := windowsEnterpriseHotConfigGuardianReconcile(ctx, layout); err != nil {
+		if err := windowsEnterpriseHotConfigGuardianReconcile(ctx, layout, false); err != nil {
 			noteWindowsEnterpriseEnsure(cmd, opts, "[ensure] the hook guardian did not prove the enrolled targets on the new config ("+
 				windowsEnterpriseBoundedDiagnostic(err.Error())+"); the previous config goes back and the upgrade transaction applies the change")
 			undo()
@@ -890,14 +890,16 @@ func windowsEnterpriseHotConfigApply(
 // published target verified or pending with complete protected authorization
 // (windowsEnterpriseHotConfigTargetHooksProven). Readiness verifies each
 // target against the config it loads, so it passes once the guardian has
-// rendered that config's machine policy. A guardian that is not running is a
-// failure: this never starts one. A seam for tests.
-var windowsEnterpriseHotConfigGuardianReconcile = func(ctx context.Context, layout managed.StandaloneLayout) error {
-	restarted, err := restartWindowsStandaloneGuardian()
-	if err != nil {
+// rendered that config's machine policy. The apply needs a running guardian
+// and never starts a stopped one. The undo (restore) puts the guardian back
+// as it was: one whose restart failed after its stop is started again, and
+// the proof then decides. A seam for tests.
+var windowsEnterpriseHotConfigGuardianReconcile = func(ctx context.Context, layout managed.StandaloneLayout, restore bool) error {
+	restarted, err := restartWindowsStandaloneGuardian(restore)
+	switch {
+	case err != nil:
 		return fmt.Errorf("restart the hook guardian: %w", err)
-	}
-	if !restarted {
+	case !restarted && !restore:
 		return errors.New("the hook guardian service is not running")
 	}
 	targets, err := windowsEnterpriseHotConfigPublishedTargets(layout)
@@ -909,8 +911,9 @@ var windowsEnterpriseHotConfigGuardianReconcile = func(ctx context.Context, layo
 
 // restartWindowsStandaloneGuardian stops the running hook guardian service
 // and starts it again, as the gateway restart does; false when it was not
-// running.
-func restartWindowsStandaloneGuardian() (bool, error) {
+// running. With startStopped a guardian that is stopped after that, or
+// whose restart failed, is started.
+func restartWindowsStandaloneGuardian(startStopped bool) (bool, error) {
 	manager, err := mgr.Connect()
 	if err != nil {
 		return false, err
@@ -921,7 +924,12 @@ func restartWindowsStandaloneGuardian() (bool, error) {
 		return false, err
 	}
 	defer service.Close()
-	return restartWindowsGatewayServiceBeforeStop(scmGatewayService{service}, windowsStandaloneGuardianService, 60*time.Second, 250*time.Millisecond, nil)
+	control := scmGatewayService{service}
+	restarted, err := restartWindowsGatewayServiceBeforeStop(control, windowsStandaloneGuardianService, 60*time.Second, 250*time.Millisecond, nil)
+	if startStopped && (err != nil || !restarted) {
+		return startWindowsGatewayServiceIfStopped(control, windowsStandaloneGuardianService, 60*time.Second, 250*time.Millisecond)
+	}
+	return restarted, err
 }
 
 // noteWindowsEnterpriseEnsure records a line for the lifecycle log of a JSON

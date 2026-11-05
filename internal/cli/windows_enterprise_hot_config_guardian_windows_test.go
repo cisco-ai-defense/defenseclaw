@@ -34,7 +34,10 @@ func TestWindowsEnterpriseEnsureRestartsOnlyTheGuardianAndGatewayForTheHooksOnly
 		})
 		var order []string
 		windowsEnterpriseHotConfigRestart = func() (bool, error) { order = append(order, "gateway"); return true, nil }
-		windowsEnterpriseHotConfigGuardianReconcile = func(context.Context, managed.StandaloneLayout) error {
+		windowsEnterpriseHotConfigGuardianReconcile = func(_ context.Context, _ managed.StandaloneLayout, restore bool) error {
+			if restore != (len(order) > 0) {
+				t.Errorf("guardian reconcile restore=%t after %v", restore, order)
+			}
 			installed, _ := os.ReadFile(host.configPath)
 			order = append(order, "guardian:"+map[bool]string{true: "next", false: "previous"}[string(installed) == host.next])
 			if len(guardianErrs) == 0 {
