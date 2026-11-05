@@ -207,6 +207,31 @@ def test_linux_gateway_shards_separate_the_ci_timeout_cluster() -> None:
         assert projected * 1.3 < 660, (index, projected)
 
 
+def test_linux_gateway_cowork_corpus_replay_has_a_shard_of_its_own() -> None:
+    root = Path(__file__).resolve().parents[2]
+    seconds = json.loads((root / "scripts/test-timings/go-linux.json").read_text(encoding="utf-8"))["tests"][
+        "internal/gateway"
+    ]
+    files = discover_test_files(root / "internal/gateway")
+    shards = partition_test_files(files, 36, seconds)
+
+    # The slowest top-level elapsed seconds from the rel/1.0.8 CI artifacts
+    # after the Cowork merge (runs 41940219567 to 41962459501). Unrecorded,
+    # the corpus replay weighed 0.21 seconds and joined a full shard 15,
+    # which then ran 657 and 660 seconds into the 11-minute Go test budget.
+    observed = {
+        "TestCoworkShellReplaysTheToolCallCorpusWithBashVerdicts": 401.5,
+        "TestRecoveredHookFailModeByDeployment": 94.9,
+        "TestStrictInstallWindowGatesEveryRefusableInspectedCall": 43.7,
+        "TestStrictTierBlocksAnsweredCallsDuringTheInstallWindow": 43.2,
+        "TestGAP0563HookJudgeFallbackPersistsAfterEarlyTelemetry": 16.5,
+    }
+    assert all(name in seconds for name in observed)
+    corpus = next(shard for shard in shards if "TestCoworkShellReplaysTheToolCallCorpusWithBashVerdicts" in shard)
+    assert corpus == ["TestCoworkShellReplaysTheToolCallCorpusWithBashVerdicts"]
+    assert observed["TestCoworkShellReplaysTheToolCallCorpusWithBashVerdicts"] * 1.3 < 660
+
+
 def test_linux_gateway_shards_keep_ordinary_tests_covered() -> None:
     root = Path(__file__).resolve().parents[2]
     seconds = json.loads((root / "scripts/test-timings/go-linux.json").read_text(encoding="utf-8"))["tests"][
