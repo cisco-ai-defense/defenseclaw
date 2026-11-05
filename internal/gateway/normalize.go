@@ -485,6 +485,8 @@ func canonicalDottedRuleID(ruleID string) (string, bool) {
 	switch strings.ToLower(ruleID) {
 	case "secrets.cloud_credential_read":
 		return "secrets.cloud_credential_read", true
+	case "secrets.credential_file_write":
+		return "secrets.credential_file_write", true
 	case "secrets.browser_session_store_read":
 		return "secrets.browser_session_store_read", true
 	case "secrets.cloud_secret_manager_read":
