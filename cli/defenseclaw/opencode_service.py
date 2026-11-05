@@ -161,12 +161,18 @@ def ensure_account_port(binary: str) -> str:
             continue
         done = _service(binary, "set", "port", str(port))
         if done is None or done.returncode != 0:
-            return f"!OpenCode's background server port could not be set ({DEFAULT_SERVICE_PORT} is shared by every account here): {manual}."
+            return (
+                f"!OpenCode's background server port could not be set "
+                f"({DEFAULT_SERVICE_PORT} is shared by every account here): {manual}."
+            )
         return (
             f"OpenCode's background server uses port {port} for this account (opencode service set port {port}): "
             f"its default, {DEFAULT_SERVICE_PORT}, is shared by every account on this computer."
         )
-    return f"!No free port for OpenCode's background server ({DEFAULT_SERVICE_PORT} is shared by every account here): {manual}."
+    return (
+        f"!No free port for OpenCode's background server ({DEFAULT_SERVICE_PORT} is shared by every account here): "
+        f"{manual}."
+    )
 
 
 def report_port(line: str) -> None:

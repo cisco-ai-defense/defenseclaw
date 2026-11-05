@@ -90,6 +90,10 @@ func TestPluginDestinationAcceptsOnlyTheOwnersPrivateGroup(t *testing.T) {
 			if tc.want != "" && (err == nil || !strings.Contains(err.Error(), tc.want)) {
 				t.Fatalf("err=%v, want %q", err, tc.want)
 			}
+			// Agent executable folders (Codex policy, Hermes admission) ask the same rule.
+			if err := hookAPIValidateAgentDirectory(pluginDir); (err == nil) != (tc.want == "") {
+				t.Fatalf("agent directory check err=%v, want accepted=%v", err, tc.want == "")
+			}
 			// Hook token and data folders keep the strict rule.
 			if err := hookAPIValidateDirectory(pluginDir); err == nil || !strings.Contains(err.Error(), "group/other writable") {
 				t.Fatalf("hook API directory check accepted a group-writable ancestor: %v", err)

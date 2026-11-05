@@ -688,3 +688,9 @@ func hookAPIWindowsSIDString(sid *windows.SID) string {
 	}
 	return sid.String()
 }
+
+// hookAPIValidateAgentDirectory is hookAPIValidateDirectory on Windows; user
+// private groups are a POSIX convention (see hook_api_token_unix.go).
+func hookAPIValidateAgentDirectory(path string) error {
+	return hookAPIValidateDirectory(path)
+}
