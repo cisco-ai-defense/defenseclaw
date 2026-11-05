@@ -1992,18 +1992,27 @@ func (a *APIServer) runHookJudgeSingle(ctx context.Context, strategyDirection, j
 		return hookJudgeLaneVerdict(cfg, connector, strategyDirection, v)
 	}
 
-	// A bounded hook keeps the rule/AID verdict when the judge has not
-	// answered inside its answer window. Cancel the model request when the
-	// hook stops waiting, including a disconnected caller. The completion
-	// path still records a response that arrives before cancellation.
-	callCtx, cancel := context.WithCancel(ctx)
-	defer cancel()
+	// A bounded action hook cancels the model request when its answer
+	// window closes. An observe hook returns immediately while its judge
+	// runs until that same window; it still records an answer in time.
+	observe := sandboxHookMode(ctx, connector, cfg.HookModeForConnector(connector)) != "action"
+	var callCtx context.Context
+	var cancel context.CancelFunc
+	if observe {
+		callCtx, cancel = context.WithDeadline(context.WithoutCancel(ctx), answerEnd)
+	} else {
+		callCtx, cancel = context.WithCancel(ctx)
+		defer cancel()
+	}
 	done := make(chan *ScanVerdict, 1)
 	go func() {
 		defer func() { <-a.hookJudgeSem }()
+		if observe {
+			defer cancel()
+		}
 		done <- call(callCtx)
 	}()
-	if sandboxHookMode(ctx, connector, cfg.HookModeForConnector(connector)) != "action" {
+	if observe {
 		fmt.Fprintf(os.Stderr, "[inspect] hook judge does not hold the answer (observe) connector=%s direction=%s\n",
 			connector, strategyDirection)
 		return nil

@@ -56,20 +56,45 @@ func boundedHookContext(start time.Time) context.Context {
 }
 
 // GAP-2625: a bounded hook does not hold an observe answer for a slow judge.
-// GAP-0564: no model request remains after that answer.
+// GAP-0564: the detached request ends within the hook answer window.
 func TestHookJudgeDoesNotHoldAnObserveAnswer(t *testing.T) {
-	a, _ := newAnswerWindowJudgeServer("observe", 2*time.Second)
+	a, p := newAnswerWindowJudgeServer("observe", 2*time.Second)
 	t0 := time.Now()
 	got := a.runHookJudge(boundedHookContext(t0), "prompt", "prompt", "codex", "please list the files in this folder", "", nil)
 	if elapsed := time.Since(t0); got != nil || elapsed > 500*time.Millisecond {
 		t.Fatalf("observe answer waited %s for the judge (verdict %v), want an immediate answer without it", elapsed, got)
 	}
-	deadline := time.Now().Add(time.Second)
+	select {
+	case err := <-p.finished:
+		if err != nil {
+			t.Fatalf("observe judge failed inside its answer window: %v", err)
+		}
+	case <-time.After(hookJudgeAnswerWindow):
+		t.Fatal("observe judge did not finish inside the hook answer window")
+	}
+	deadline := t0.Add(hookJudgeAnswerWindow)
 	for len(a.hookJudgeSem) != 0 {
 		if time.Now().After(deadline) {
-			t.Fatal("observe judge kept a model slot after its answer")
+			t.Fatal("observe judge kept a model slot after the hook answer window")
 		}
 		time.Sleep(time.Millisecond)
+	}
+}
+
+func TestGAP0564ObserveJudgeEndsAtAnswerWindow(t *testing.T) {
+	a, p := newAnswerWindowJudgeServer("observe", 5*time.Second)
+	t0 := time.Now()
+	got := a.runHookJudge(boundedHookContext(t0), "prompt", "prompt", "codex", "please list the files in this folder", "", nil)
+	if got != nil || time.Since(t0) > 500*time.Millisecond {
+		t.Fatalf("observe answer waited for the judge: %v", got)
+	}
+	select {
+	case err := <-p.finished:
+		if err != context.DeadlineExceeded {
+			t.Fatalf("observe judge ended with %v, want its answer-window deadline", err)
+		}
+	case <-time.After(hookJudgeAnswerWindow + time.Second):
+		t.Fatal("observe judge outlived its answer window")
 	}
 }
 
