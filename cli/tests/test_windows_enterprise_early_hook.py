@@ -388,6 +388,10 @@ foreach ($name in @(
         'Assert-DefenseClawEarlyHookPublished',
         'Hold-DefenseClawEarlyHookGuard',
         'Get-DefenseClawSourceDescriptor',
+        'Get-DefenseClawPinnedSourceDescriptor',
+        'Get-DefenseClawSourcePinTrustPolicy',
+        'Test-DefenseClawSourcePinEligible',
+        'Open-DefenseClawSourcePin',
         'Assert-DefenseClawSourceDescriptorCurrent',
         'Install-DefenseClawSourceDescriptor',
         'Assert-DefenseClawRegularSource',
@@ -405,6 +409,10 @@ foreach ($name in @(
 }
 # The real strict-pin switch reads this variable; the harness runs unpinned.
 $script:TrustStrictAncestorsEnv = 'DEFENSECLAW_MANAGED_TRUST_STRICT_ANCESTORS'
+# The module's source-pin table (cowork-1-0-8 GAP-0044). The staged hook is
+# not in a DefenseClaw-Enterprise-Setup-* folder, so it is never pinned and
+# every check reads its bytes again.
+$script:DefenseClawSourcePins = @{}
 function Get-TestAuthenticodeSignature {
     param([string]$LiteralPath)
     [pscustomobject]@{ Status = [Management.Automation.SignatureStatus]::NotSigned; SignerCertificate = $null }

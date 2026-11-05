@@ -313,6 +313,13 @@ type verifyRecord struct {
 	UID   int          `json:"uid"`
 	GID   int          `json:"gid"`
 	Files []verifyFile `json:"files,omitempty"`
+	// LocalhostResolver marks a MicroVM created with DefenseClaw's guest
+	// localhost check: every check of it runs the image's pinned resolver
+	// caller. A MicroVM recorded before (DefenseClaw 1.0.7 and earlier) has
+	// no caller in its image; its create passed the hook-fire MicroVM
+	// verdict instead, and its starts keep that check. Kept for those
+	// sandboxes while 1.0.x upgrades from 1.0.7 are supported.
+	LocalhostResolver bool `json:"localhost_resolver,omitempty"`
 }
 
 // verifyFile is one file the workload check proves unchanged.

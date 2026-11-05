@@ -31,6 +31,9 @@ import "runtime"
 // acquisition but not its indicators reports a clean host because it is
 // looking in the wrong place, which is worse than refusing to run.
 type IndicatorSet struct {
+	// KeepClientMCP preserves the Secure Client's existing classification of
+	// the agent client when its own arguments mention an MCP package.
+	KeepClientMCP bool
 	// CredentialPaths are fixed substrings identifying a secret at rest.
 	// Fixed strings rather than patterns so the match is cheap enough for the
 	// event hot path.

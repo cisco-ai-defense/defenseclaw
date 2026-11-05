@@ -185,7 +185,7 @@ func AccountGroupIDsChecking(ctx context.Context, account *user.User, named []st
 		return platformAccountGroupIDs(ctx, runTrustedCommand, account, nil, nil, nil)
 	}
 	ids, err := account.GroupIds()
-	return platformAccountGroupIDs(ctx, runTrustedCommand, account, ids, err, named)
+	return platformAccountGroupIDs(ctx, accountGroupsRunner, account, ids, err, named)
 }
 
 // ListUsers enumerates local accounts; directory accounts are not listed.

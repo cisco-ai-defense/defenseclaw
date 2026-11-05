@@ -111,7 +111,9 @@ describe('Cursor observe outage mode', () => {
     for (const stale of ['guardrail/index.mdx', 'reference/setup-commands.mdx', 'segmentation.mdx']) {
       assert.ok(!/Per-user Cursor (?:in )?observe (?:mode )?(?:still|also) blocks/i.test(page(stale)), stale);
     }
-    assert.match(failModes, /On a per-user install, an explicit saved `guardrail\.hook_fail_mode` selects the outage mode.{0,600}Every other failure blocks in every tier/i);
+    assert.match(failModes, /On a per-user install, an explicit saved `guardrail\.hook_fail_mode` selects the outage mode.{0,600}A verified gateway that gives no final decision before the hook deadline blocks in every tier and saved mode/i);
+    assert.match(failModes, /On a per-user install, an explicit saved `guardrail\.hook_fail_mode` selects the outage mode.{0,600}Other transport and answer failures block in every tier/i);
+    assert.match(perUser, /A verified gateway that accepts the call but gives no final decision before the hook.s fixed deadline blocks in every tier/i);
     const managedRegistration = source('internal/gateway/connector/cursor_enterprise_hooks.go');
     assert.match(managedRegistration, /"failClosed": normalizeHookFailMode\(failMode\) == "closed",/);
     assert.match(page('connectors/cursor.mdx'), /sets `failClosed: true`, so a hook process that never answers blocks the call\. Under Secure Client the flag follows the administrator's resolved fail mode instead: `open`, the default there, lets Cursor run the call when the hook process never answers, and `closed` keeps `failClosed: true`\. The administrator's resolved fail mode decides/i);
@@ -123,6 +125,24 @@ describe('Cursor observe outage mode', () => {
     const mapping = page('connectors/cursor.mdx').split('## Verdict mapping')[1]?.split('## Native ask')[0] ?? '';
     assert.match(mapping, /\| Observe \| `failClosed: true` \|[^|]*policy findings[^|]*gateway outage/i);
     assert.ok(!/observe cannot become blocking/i.test(mapping));
+  });
+
+  it('scopes the managed Cursor host flag claim to standalone installs', () => {
+    assert.match(page('connectors/cursor.mdx'), /On a managed standalone host, each entry runs the administrator's hook binary[^.]*sets `failClosed: true`, so a hook process that never answers blocks the call\./i);
+  });
+
+  it('keeps the managed standalone host flag closed', () => {
+    const registration = source('internal/gateway/connector/cursor_enterprise_hooks.go');
+    const entry = registration.split('func windowsCursorEnterpriseHookEntry(')[1]?.split('\n}')[0] ?? '';
+    const fixed = /"failClosed":\s*true,/.test(entry);
+    const selected = /"failClosed":\s*normalizeHookFailMode\(failMode\) == "closed",/.test(entry);
+    assert.ok(fixed || selected, 'the managed Cursor entry must close a standalone unanswered hook');
+    if (selected) {
+      const managed = source('internal/enterprisehooks/managed_cursor_windows.go');
+      const mode = managed.split('func cursorMachineHookFlagMode(')[1]?.split('\n}')[0] ?? '';
+      assert.match(mode, /if secureClientHookDelivery\(\) \{\s*return failMode\s*\}\s*return "closed"/);
+      assert.match(managed, /SpliceWindowsCursorEnterpriseHooksInPlace\(base, adapterPath, cursorMachineHookFlagMode\(failMode\)\)/);
+    }
   });
 });
 
@@ -496,7 +516,7 @@ describe('fail mode of Copilot CLI and Antigravity hooks', () => {
     assert.ok(page('get-started/upgrade.mdx').includes('Per-user hooks honor an explicitly saved outage mode'));
     assert.ok(page('get-started/upgrade.mdx').includes('The upgrade keeps that saved `open`, so strict does not close it'));
     assert.ok(source('cli/defenseclaw/migrations.py').includes('defenseclaw config unset {path}'));
-    assert.ok(page('get-started/upgrade.mdx').includes('Every other failure blocks'));
+    assert.ok(page('get-started/upgrade.mdx').includes('An answered or local failure blocks'));
     assert.ok(page('reference/fail-modes.mdx').includes('`closed` outside Secure Client; `open` under it'));
     assert.ok(page('reference/fail-modes.mdx').includes('A per-user 1.0.4 hook reads `config.yaml` next to its own hooks on each call'));
     assert.ok(page('reference/fail-modes.mdx').includes('A per-user (OSS) install honors a saved connector or global'));
@@ -628,6 +648,29 @@ describe('Amp rejected command display', () => {
 });
 
 describe('setup and rollback recovery guides', () => {
+  it('shows the release floor before rollback (GAP-0086)', () => {
+    const lifecycle = page('enterprise/lifecycle.mdx');
+    assert.match(lifecycle, /`bundle status` shows the floor as `current\.min_product_version`/);
+    assert.match(lifecycle, /If the floor is higher, contact your administrator before the rollback/);
+    assert.doesNotMatch(lifecycle, /deliver a bundle signed with a lower `--min-product-version` before installing the older release/);
+    assert.match(lifecycle, /confirmed floor must be unset or 1\.0\.4 or lower/);
+    assert.match(lifecycle, /check that the release you install meets the floor first/);
+  });
+
+  it('shows package refusal results and a matching reinstall (GAP-0086)', () => {
+    const lifecycle = page('enterprise/lifecycle.mdx');
+    const troubleshooting = page('enterprise/troubleshooting.mdx');
+    assert.match(lifecycle, /RPM `%prein` \(also Debian `preinst`\) \| `defenseclaw-enterprise: refusing to install 1\.0\.5: the signed policy bundle needs DefenseClaw 1\.0\.8 or later/);
+    assert.match(lifecycle, /macOS pkg `preinstall` \| `installer` reports an error running package scripts/);
+    assert.match(lifecycle, /\/var\/log\/install\.log` contains `Refusing to install DefenseClaw 1\.0\.5: the signed policy bundle needs DefenseClaw 1\.0\.8 or later/);
+    assert.match(lifecycle, /Windows Setup 1\.0\.7 \| Setup returns `1603`; with `JSON=1`, `errors\[\]\.code` is `product_floor_refused`/);
+    assert.match(lifecycle, /\/opt\/cisco\/defenseclaw\/lifecycle\/last-package-result\.json`/);
+    assert.match(lifecycle, /preinstall text does not name `product_floor_refused` or update `\/var\/lib\/defenseclaw-enterprise\/last-package-result\.json`/);
+    assert.match(lifecycle, /reinstall at the floor is allowed by this check, including 1\.0\.8 over 1\.0\.8 with a confirmed 1\.0\.8 floor/);
+    assert.match(troubleshooting, /Check `bundle status` for `current\.min_product_version` and install a release that meets the floor/);
+    assert.match(troubleshooting, /contact your administrator/);
+  });
+
   it('says a refused Cursor action setup makes no change and gives an explicit observe command', () => {
     const setup = readFileSync(join(repo, 'cli/defenseclaw/commands/cmd_setup.py'), 'utf8');
     assert.ok(setup.includes('connector was not detected locally; refusing action-mode hook setup.'));
@@ -1716,7 +1759,7 @@ const r105Rows: DocRow[] = [
   { gap: "GAP-2451", page: "enterprise/troubleshooting.mdx", section: "Warnings", has: ["| `agent_settings_not_restored` (exporter removed) | Windows |", "`.claude\\settings.json.defenseclaw-otlp-removed.bak` or `.codex\\config.toml.defenseclaw-otlp-removed.bak`", "Delete the copy to clear the warning.", "On Windows this code also reports an earlier per-user install's native OTLP exporter"], lacks: ["| `native_otlp_marked_removed` | Windows |"] },
   { gap: "GAP-2451", page: "enterprise/troubleshooting.mdx", section: "Warnings", has: ["| `agent_settings_not_restored` (exporter not removed) | Windows |", "still holds the native OTLP exporter of an earlier per-user DefenseClaw install", "| `native_otlp_config_unchecked` | Linux, macOS, Windows |"], lacks: ["| `native_otlp_take_back_pending` | Windows |"] },
   { gap: "GAP-0059", page: "get-started/upgrade.mdx", has: ["the upgrade also prints, after `Upgraded from`, why no sandbox runs and the fix", "Until then DefenseClaw starts no sandbox and `defenseclaw doctor` fails its Gateway check. Stop running sandboxes first, then run: defenseclaw sandbox setup --install-openshell"] },
-  { gap: "GAP-1613", page: "enterprise/sandboxes.mdx", has: ["`sandboxes are unavailable: OpenShell 0.1.3 runs no DefenseClaw sandbox:"], lacks: ["OpenShell 0.1.3 is installed, but that release is unsupported"] },
+  { gap: "GAP-1613", page: "enterprise/sandboxes.mdx", has: ["`sandboxes are unavailable: OpenShell 0.1.5 runs no DefenseClaw sandbox: OpenShell 0.1.6 or later is required; ask your administrator to upgrade OpenShell`"], lacks: ["OpenShell 0.1.5 is installed, but that release is unsupported"] },
   { gap: "GAP-1619", page: "guardrail/user-and-group-policies.mdx", has: ["`defenseclaw-gateway config validate FILE`", "`enterprise macos ensure --config FILE`", "`enterprise macos profile-explain`"] },
   { gap: "GAP-1635", page: "policies/admission.mdx", has: ["`tool list` prints one table per connector", "`UPDATED` shows `-` for an entry until it is changed"] },
   { gap: "GAP-1659", page: "guardrail/user-and-group-policies.mdx", section: "A complete example", has: ["hilt: {enabled: true, min_severity: LOW}"], lacks: ["hilt: {enabled: true, min_severity: HIGH}"] },
@@ -1824,7 +1867,7 @@ const r105Rows: DocRow[] = [
   { gap: "GAP-2264", page: "hitl.mdx", has: ["Outside Manual mode Claude Code cannot ask, so the call is blocked and its row shows `decision=blocked` in the list and `blocked` on the `Decision` line of `--show`."], lacks: ["Outside Manual mode, the decision is `block`."] },
   { gap: "GAP-2264", page: "stories/hitl-approvals.mdx", has: ["Outside Manual mode Claude Code cannot ask, so the call is blocked and its row shows `decision=blocked` in the list and `blocked` on the `Decision` line of `--show`."], lacks: ["Outside Manual mode, the decision is `block`."] },
   { gap: "GAP-2260", page: "guardrail/semantic-routing.mdx", has: ["Native Windows is not supported: there `defenseclaw setup routing` says so and refuses `--enable`, and `--disable` still turns off a routing block copied from another machine."] },
-  { gap: "GAP-2334", page: "enterprise/mdm/linux-config-management.mdx", section: "Check health", has: ["| Kit detection script | `packaging/mdm/linux/detect.sh --require-healthy` (exit `1`, or `unhealthy` with `--format value`, when `verify` reports a problem or `security_complete` is `false`: a host whose `verify` passes with incomplete security still fails it, and the message says which) |"], lacks: ["| Kit detection script | `packaging/mdm/linux/detect.sh --require-healthy` |"] },
+  { gap: "GAP-2334", page: "enterprise/mdm/linux-config-management.mdx", section: "Check health", has: ["| Kit detection script | `packaging/mdm/linux/detect.sh --require-healthy` (exit `1`, or `unhealthy` with `--format value`, when `verify` reports a problem, `coverage_complete` is `false`, or `security_complete` is `false` for any reason other than `hook_process_fail_open`, `unprivileged_user_namespaces` and `unprivileged_ptrace`; a host with only those warnings passes and gets them on standard error). Add `--require-security-complete` to fail on incomplete security too |"], lacks: ["| Kit detection script | `packaging/mdm/linux/detect.sh --require-healthy` |", "a host whose `verify` passes with incomplete security still fails it", "a host whose `verify` passes with only incomplete security passes"] },
   // pod docs r105 loop i1 (2026-10-28)
   { gap: "GAP-2411", page: "enterprise/troubleshooting.mdx", has: ["On Linux and macOS `status` warns `policy_not_applied` with `policy.applied: false` and `security_complete: false`, and `verify` reports it as an error and exits `1`."], lacks: ["`policy.applied: false` and do not warn"] },
   { gap: "GAP-2411", page: "enterprise/operations.mdx", has: ["`verify` reports `policy_not_applied` or `policy_reload_rejected` as an error"] },
@@ -2215,7 +2258,8 @@ describe('Setup properties and the Windows unknown-flag exit match the code (GAP
   it('lists every property standalone Setup /? prints', () => {
     const main = source('cmd/defenseclaw-enterprise-setup/main.go');
     const usage = main.slice(main.indexOf('func writeStandaloneSetupUsage('), main.indexOf('Exit codes: 0 success, 1603 failure'));
-    const props = [...usage.matchAll(/"  ([A-Z]+)=/g)].map((m) => m[1]);
+    // The COWORK* Setup properties stay out of the public docs in 1.0.8.
+    const props = [...usage.matchAll(/"  ([A-Z]+)=/g)].map((m) => m[1]).filter((p) => !p.startsWith('COWORK'));
     assert.ok(props.length >= 12, `Setup usage parse found ${props.length} properties`);
     for (const page of ['enterprise/windows.mdx', 'reference/cli.mdx']) {
       const text = pageSection(page);
@@ -2280,12 +2324,19 @@ describe('Linux MDM wrapper busy retries match intune-linux.mdx (GAP-1537)', () 
   });
 });
 
-// GAP-2334: detect.sh --require-healthy fails on security_complete false as
-// well as on a verify problem; the Linux config-management page says so.
-describe('kit detect.sh health gate matches the Linux Check health row (GAP-2334)', () => {
-  it('fails on a verify problem and on incomplete security', () => {
+// GAP-2334: detect.sh --require-healthy fails on a verify problem and on
+// coverage_complete false; since cowork-1-0-8 GAP-0021 incomplete security from
+// host-hardening reasons alone (DC_HARDENING_REASONS) only warns, any other reason
+// only warns, and --require-security-complete fails on it. The Linux
+// config-management page says so.
+describe('kit detect.sh health gate matches the Linux Check health row (GAP-2334, GAP-0021)', () => {
+  it('fails on a verify problem, incomplete coverage and non-hardening security reasons; hardening only with --require-security-complete', () => {
     const detect = source('packaging/mdm/linux/detect.sh');
-    assert.ok(detect.includes('dc_json_true "$verify" ok || dc_report 0 unhealthy') && detect.includes('dc_json_true "$verify" security_complete || dc_report 0 unhealthy "verify reported incomplete security'), 'detect.sh --require-healthy gate changed: re-check enterprise/mdm/linux-config-management.mdx Check health');
+    assert.ok(detect.includes('dc_json_true "$verify" ok || dc_report 0 unhealthy') && detect.includes('dc_json_true "$verify" coverage_complete ||')
+      && detect.includes('[ "$DC_REQUIRE_SECURITY_COMPLETE" = 0 ] ||\n            dc_report 0 unhealthy "verify reported incomplete security')
+      && detect.includes("DC_HARDENING_REASONS='hook_process_fail_open unprivileged_user_namespaces unprivileged_ptrace'")
+      && detect.includes('dc_hardening_only "$note" ||\n            dc_report 0 unhealthy "verify reported incomplete security beyond host hardening')
+      && !detect.includes('dc_json_true "$verify" security_complete || dc_report'), 'detect.sh --require-healthy gate changed: re-check enterprise/mdm/linux-config-management.mdx Check health');
   });
 });
 

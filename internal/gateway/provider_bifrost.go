@@ -179,6 +179,16 @@ func evictOldestBifrostTenantLocked() {
 	}
 	if entry, ok := bifrostTenants[oldestKey]; ok {
 		delete(bifrostTenants, oldestKey)
+		// An entry without a client has nothing to shut down. Calling
+		// Shutdown on nil took a hardware access violation on a fresh
+		// goroutine, which recover() turned into a panic; on Windows hosts
+		// with large exception frames (AMX) the kernel writes that frame
+		// below the 8 KiB goroutine stack into the neighbouring heap, and a
+		// later GC dies on the corrupted span (golang/go#81238,
+		// rel-1-0-6:GAP-0550).
+		if entry == nil || entry.client == nil || shutdownEvictedBifrostClient == nil {
+			return
+		}
 		// Shutdown asynchronously so we don't hold the write
 		// lock across an SDK teardown that may block on
 		// in-flight streams. The SDK's Shutdown is documented
@@ -186,10 +196,14 @@ func evictOldestBifrostTenantLocked() {
 		// invocations.
 		go func(c *bifrost.Bifrost) {
 			defer func() { _ = recover() }()
-			c.Shutdown()
+			shutdownEvictedBifrostClient(c)
 		}(entry.client)
 	}
 }
+
+// shutdownEvictedBifrostClient tears down an evicted tenant client
+// (replaceable in tests).
+var shutdownEvictedBifrostClient = func(c *bifrost.Bifrost) { c.Shutdown() }
 
 // tenantAccount implements schemas.Account and is frozen at construction
 // time: it returns the same single key + config for its pinned provider and
@@ -587,7 +601,7 @@ func getBifrostClient(
 // misconfigurations surface early instead of at first API call.
 func mapProviderKey(provider string) (schemas.ModelProvider, error) {
 	switch strings.ToLower(provider) {
-	case "openai":
+	case "openai", "openai-compatible", "custom-openai":
 		return schemas.OpenAI, nil
 	// OpenAI-compatible providers the setup wizard offers. They are
 	// reached through their own base_url with the standard chat

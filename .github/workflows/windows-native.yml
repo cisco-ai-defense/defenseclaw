@@ -62,9 +62,10 @@ jobs:
     # Each part has its own runner: gwN runs shard N of 16 of the gateway
     # package and shard N of 16 of the connector package, both balanced on
     # recorded Windows test times (scripts/test-timings/go-windows.json);
-    # pkN one of six timing-balanced parts of the remaining packages (still
-    # -p=1 within the part); checks the DACL, redaction, isolated connector
-    # tests, vet and builds; stress the single-flight and executable
+    # pkN one of six timing-balanced parts of the remaining packages and hxN
+    # one of five test-level parts of hookexec (still -p=1 within each part).
+    # The checks part runs DACL, redaction, isolated connector tests, vet, and
+    # builds; stress runs the single-flight and executable
     # lifecycle stress loops; and tm0-tm2 repeat 20 times the Windows timing
     # tests that once flaked on hosted runners. Every part stays under 15
     # minutes. Shard names stay short: they are part of the state path, and a
@@ -95,6 +96,11 @@ jobs:
           - { shard: pk3, kind: packages, index: 3 }
           - { shard: pk4, kind: packages, index: 4 }
           - { shard: pk5, kind: packages, index: 5 }
+          - { shard: hx0, kind: hookexec, index: 0 }
+          - { shard: hx1, kind: hookexec, index: 1 }
+          - { shard: hx2, kind: hookexec, index: 2 }
+          - { shard: hx3, kind: hookexec, index: 3 }
+          - { shard: hx4, kind: hookexec, index: 4 }
           - { shard: checks, kind: checks, index: 0 }
           - { shard: stress, kind: stress, index: 0 }
           - { shard: tm0, kind: timing, index: 0 }
@@ -115,7 +121,7 @@ jobs:
       - uses: ./.github/actions/setup-go
         id: go
       - uses: astral-sh/setup-uv@08807647e7069bb48b6ef5acd8ec9567f424441b # v8.1.0
-        if: ${{ matrix.kind == 'packages' || matrix.kind == 'gateway' }}
+        if: ${{ matrix.kind == 'packages' || matrix.kind == 'gateway' || matrix.kind == 'hookexec' }}
         with:
           enable-cache: true
           # Only main writes the uv cache; other refs restore it.
@@ -250,10 +256,39 @@ jobs:
           $matrixShard = [int]$env:GO_SUITE_INDEX
           $nativeTestShardCount = 16
           $remainingPackageShardCount = 6
+          $hookexecTestShardCount = 5
           $goTestLog = Join-Path $env:DC_STATE_ROOT 'go-test.log'
           $goFailureSummary = Join-Path $env:DC_STATE_ROOT 'go-test-failure-summary.log'
-          if ($suiteKind -notin @('gateway', 'packages', 'checks')) {
+          if ($suiteKind -notin @('gateway', 'packages', 'hookexec', 'checks')) {
             throw "invalid native Windows Go suite kind $suiteKind"
+          }
+          if ($suiteKind -eq 'hookexec') {
+            if ($matrixShard -lt 0 -or $matrixShard -ge $hookexecTestShardCount) {
+              throw "invalid native Windows hookexec shard $matrixShard"
+            }
+            $uv = (Get-Command uv.exe -ErrorAction Stop).Source
+            # The selector checks that every discovered test belongs to one
+            # shard. Tests from other platforms match nothing on Windows.
+            $selection = Invoke-WindowsNativeProcess $uv @(
+              'run', '--no-project', '--python', '3.12', 'python', 'scripts/go_test_shards.py',
+              '--package-dir', 'internal/gateway/connector/hookexec',
+              '--split-tests',
+              '--timings', 'scripts/test-timings/go-windows.json',
+              '--shard-count', [string]$hookexecTestShardCount,
+              '--shard-index', [string]$matrixShard
+            ) -TimeoutSeconds 300 -LogPath (Join-Path $env:DC_STATE_ROOT 'go-hookexec-shard-select.log')
+            $shardPattern = ([string]$selection.StdOut).Trim()
+            if ($shardPattern -notmatch '^\^\(\?:.+\)\$$') {
+              throw "go_test_shards.py selected no hookexec tests for shard $matrixShard"
+            }
+            Invoke-WindowsNativeProcess $go @(
+              'test', '-vet=off', '-json', '-count=1', '-timeout=11m', '-p=1',
+              '-skip', $windowsInapplicable, '-run', $shardPattern,
+              './internal/gateway/connector/hookexec'
+            ) -TimeoutSeconds 840 `
+              -LogPath (Join-Path $env:DC_STATE_ROOT ("go-hookexec-shard-$matrixShard.log")) `
+              -GoTestFailureSummaryPath $goFailureSummary -GoTestTimingSummary | Out-Null
+            return
           }
           if ($suiteKind -eq 'packages') {
             if ($matrixShard -lt 0 -or $matrixShard -ge $remainingPackageShardCount) {
@@ -273,6 +308,7 @@ jobs:
               '--packages-file', $listedPackages,
               '--exclude', 'github.com/defenseclaw/defenseclaw/internal/gateway',
               '--exclude', 'github.com/defenseclaw/defenseclaw/internal/gateway/connector',
+              '--exclude', 'github.com/defenseclaw/defenseclaw/internal/gateway/connector/hookexec',
               '--timings', 'scripts/test-timings/go-windows.json',
               '--shard-count', [string]$remainingPackageShardCount,
               '--shard-index', [string]$matrixShard
@@ -286,9 +322,8 @@ jobs:
               throw 'native Go package discovery selected no non-gateway packages'
             }
             Write-Host "Native Windows remaining-package part $matrixShard of $remainingPackageShardCount runs $($remainingPackages.Count) packages."
-            # hookexec alone (pk0) runs about 12 minutes on a runner: 14m
-            # leaves headroom below the step's 1020 s and the job's 20 minutes
-            # (rel-1-0-6:GAP-0477).
+            # The remaining packages retain their 14m timeout below the
+            # step's 1020 s and the job's 20 minutes (rel-1-0-6:GAP-0477).
             $remainingArguments = @(
               'test', '-vet=off', '-json', '-count=1', '-timeout=14m', '-p=1',
               '-skip', $windowsInapplicable

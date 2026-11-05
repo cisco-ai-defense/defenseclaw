@@ -167,3 +167,56 @@ func TestEnumerateUnixIncludeUsersNoteNeedsAnInspectedAccount(t *testing.T) {
 		})
 	}
 }
+
+// An included account whose only agent is a machine-policy connector (Claude
+// Desktop with Claude Code on macOS) is covered without a row. The note named
+// only the per-user connector it lacks ("no installation of hermes"), which
+// read as if the account were not covered (cowork-1-0-8 GAP-0031).
+func TestEnumerateUnixIncludeUsersNoteSaysMachinePolicyCovers(t *testing.T) {
+	root := trustedTestDir(t)
+	homes := filepath.Join(root, "Users")
+	if err := os.MkdirAll(homes, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	uid, gid := os.Getuid(), os.Getgid()
+	accounts := map[string]unixidentity.Account{}
+	for _, name := range []string{"bare", "desk"} {
+		accounts[name] = unixidentity.Account{Name: name, UID: uid, GID: gid, Home: makeHome(t, homes, name), Shell: "/bin/zsh"}
+	}
+	opts := UnixEnumerateOptions{
+		Resolver:                &fakeResolver{accounts: accounts, listed: []string{"bare", "desk"}},
+		HomeRoots:               []string{homes},
+		UIDMin:                  uid,
+		UIDMax:                  uid + 1,
+		MachinePolicyConnectors: []string{"claudecode"},
+		DiscoverSurfaces: func(_ context.Context, account unixidentity.Account, _ []string) (UnixDiscovery, error) {
+			found := UnixDiscovery{Reasons: map[string]string{"hermes": "no hermes installation found for this user"}}
+			if account.Name == "desk" {
+				found.Surfaces = map[string][]connector.AgentSurface{"claudecode": {{Surface: connector.HostSurfaceDesktop, Host: "claude-desktop", EngineVersion: "2.1.317"}}}
+			}
+			return found, nil
+		},
+	}
+	cfg := enumeratorConfig("hermes", "claudecode")
+	cfg.Enterprise.Enrollment.IncludeUsers = []string{"bare", "desk"}
+	manifest, report, err := EnumerateUnix(context.Background(), cfg, connector.NewDefaultRegistry(), opts)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(manifest.Targets) != 0 {
+		t.Fatalf("rows = %+v, want none", manifest.Targets)
+	}
+	var noted []string
+	for _, skipped := range report.Skipped {
+		if strings.Contains(skipped, "include_users") {
+			noted = append(noted, skipped)
+		}
+	}
+	want := []string{
+		"bare: named in enterprise.enrollment.include_users but not enrolled: no installation of hermes found for this account; it is enrolled on the next cycle after one is installed in it",
+		"desk: named in enterprise.enrollment.include_users: no per-user connector install (no hermes found); covered by machine policy (claudecode), which needs no per-user row",
+	}
+	if strings.Join(noted, "|") != strings.Join(want, "|") {
+		t.Fatalf("include_users notes = %q, want %q", noted, want)
+	}
+}

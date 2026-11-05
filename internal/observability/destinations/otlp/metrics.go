@@ -610,7 +610,7 @@ func (exporter *MetricExporter) observeTransition(
 ) {
 	observer := exporter.config.health
 	generation := exporter.healthGeneration.Load()
-	if observer == nil || generation == 0 || (previous == state && previousReason == reason) {
+	if nilCanonicalInterface(observer) || generation == 0 || (previous == state && previousReason == reason) {
 		return
 	}
 	unhealthy := func(value delivery.HealthState) bool {

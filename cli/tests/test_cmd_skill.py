@@ -51,6 +51,7 @@ from defenseclaw.models import ActionState, Finding, ScanResult
 
 from tests.environment import requires_symlink_privilege
 from tests.helpers import cleanup_app, make_app_context
+from tests.os_view import os_view
 
 
 def _installed_path(path):
@@ -1510,7 +1511,7 @@ class TestClawHubWindowsLauncher(unittest.TestCase):
             self.assertNotIn("Traceback", result.output)
 
     @patch("defenseclaw.commands.cmd_skill.shutil.which", return_value="/opt/bin/clawhub")
-    @patch("defenseclaw.commands.cmd_skill.os.name", "posix")
+    @patch("defenseclaw.commands.cmd_skill.os", os_view("posix"))
     def test_non_windows_resolver_keeps_extensionless_executable(self, _which):
         from defenseclaw.commands.cmd_skill import _resolve_command
 

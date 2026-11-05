@@ -59,7 +59,7 @@ func TestReadOnlyHookBinaryChecksNeverBlockAnInstallerReplace(t *testing.T) {
 		"stableNativeWindowsPE":       func() { _ = stableNativeWindowsPE(hook) },
 		"readStableNativeWindowsFile": func() { _, _ = readStableNativeWindowsFile(hook, 1<<20) },
 		"managed hook digest":         func() { _, _ = managedHookBinarySHA256Hex(hook, false, 1<<20, 0) },
-		"hook script digests":         func() { _, _ = readNativeFileShared(hook) },
+		"hook script digests":         func() { _, _ = digestNativeFileShared(hook) },
 	}
 	for index, name := range slices.Sorted(maps.Keys(checks)) {
 		check := checks[name]

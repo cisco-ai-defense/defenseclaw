@@ -128,6 +128,7 @@ def test_modeled_paths_through_dict_and_renamed_fields() -> None:
     assert is_python_modeled(None, "gateway.port")
     assert is_python_modeled(None, "guardrail.connectors.codex.mode")
     assert is_python_modeled(None, "openshell.mcp.import")
+    assert not is_python_modeled(None, "openshell.middleware.enabled")
     assert not is_python_modeled(None, "gateway.nope")
     assert not is_python_modeled(None, "gateway.port.deeper")
 

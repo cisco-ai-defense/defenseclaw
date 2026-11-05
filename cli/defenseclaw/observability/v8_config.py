@@ -1350,8 +1350,33 @@ def _semantic_error(source_name: str, path: str, action: str) -> None:
     raise V8ConfigError(source_name, f"$.{path}", "semantic", action)
 
 
+def validate_judge_extra_body(value: Any, source_name: str) -> None:
+    """Check the extra fields before a config write or runtime load."""
+    path = "guardrail.judge.extra_body"
+    if not isinstance(value, dict):
+        _semantic_error(source_name, path, "use a mapping of additional request fields")
+    reserved = {
+        "model", "messages", "tools", "toolchoice", "stream", "streamoptions",
+        "maxtokens", "maxcompletiontokens", "maxoutputtokens", "responseformat",
+        "temperature", "topp", "frequencypenalty", "presencepenalty", "stop",
+        "fallbacks", "provider", "baseurl", "url", "endpoint",
+    }
+    alphabet = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_-."
+    for key in sorted(value, key=str):
+        if not isinstance(key, str) or not key or not key.isascii() or any(ch not in alphabet for ch in key):
+            _semantic_error(source_name, path, f"remove invalid key {key!r}; use ASCII letters, digits, _, - or .")
+        normalized = key.lower().replace("_", "").replace("-", "").replace(".", "")
+        if normalized in reserved or any(
+            part in normalized for part in (
+                "auth", "credential", "token", "secret", "password", "header", "key", "url", "endpoint", "certificate",
+            )
+        ):
+            _semantic_error(source_name, path, f"remove reserved key {key!r}")
+
+
 def _validate_semantics(document: dict[str, Any], source_name: str) -> None:
     _validate_private_upstream_allowlist(document.get("guardrail") or {}, source_name)
+    validate_judge_extra_body(((document.get("guardrail") or {}).get("judge") or {}).get("extra_body", {}), source_name)
     _validate_openshell(document, source_name)
     observability = document.get("observability") or {}
     profiles = observability.get("redaction_profiles", {})

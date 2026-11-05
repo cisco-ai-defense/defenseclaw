@@ -45,6 +45,11 @@ function Test-DefenseClawServiceExists { param($Name) $false }
 function Assert-DefenseClawNoReparsePath { param($Path) }
 function Exit-DefenseClawPurgeBundleLock { }
 function Restore-DefenseClawForcedUninstallPreparation { param($Preparation) return @() }
+# A standalone computer with no Cowork delivery recorded (cowork-1-0-8): the
+# forced uninstall reads the Cowork ownership record before it moves
+# StateRoot aside, and there is none to retire.
+function Test-DefenseClawStandaloneProfile { $true }
+function Get-DefenseClawCoworkOwnership { param($Layout) $null }
 $layout = @{ StateRoot = $StateRoot; GatewayPath = 'gateway'; ManifestPath = 'manifest';
     SensorHelperServiceName = 'helper'; SensorHelperPath = 'helper.exe' }
 try {

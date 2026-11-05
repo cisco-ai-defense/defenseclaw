@@ -49,7 +49,7 @@ const (
 	launcherCommand = "defenseclaw"
 
 	// launcherRefusal answers every command the launcher does not offer.
-	launcherRefusal = "This computer is managed; use `defenseclaw sandbox status` for your read-only status and `defenseclaw sandbox policy explain` for your policy. Other commands require an administrator."
+	launcherRefusal = "This computer is managed; use `defenseclaw status` for your protection state, `defenseclaw sandbox status` for your sandboxes and `defenseclaw sandbox policy explain` for your policy. Other commands require an administrator."
 )
 
 // launcherArgv0 is the name the process was started under; a seam for tests.
@@ -90,6 +90,9 @@ func launcherOffers(args []string) bool {
 	switch args[0] {
 	case "sandbox", "-h", "--help", "--version":
 		return true
+	case "status":
+		// The user's own protection state (cowork-1-0-8 GAP-0053).
+		return true
 	case "guardrail":
 		// The user's own guardrail profile (GAP-0431, GAP-0422), and nothing
 		// else of the guardrail tree.
@@ -103,7 +106,7 @@ func launcherOffers(args []string) bool {
 			return true
 		}
 		switch args[1] {
-		case "sandbox", "-h", "--help":
+		case "sandbox", "status", "-h", "--help":
 			return true
 		}
 		return false
@@ -125,11 +128,15 @@ func prepareLauncherRoot(root *cobra.Command) {
 	if guardrail := newLauncherGuardrailCommand(); guardrail != nil {
 		root.AddCommand(guardrail)
 	}
+	if status := newLauncherStatusCommand(); status != nil {
+		root.AddCommand(status)
+	}
 	root.Use = launcherCommand
 	root.Short = "Run coding agents in sandboxes on this managed computer"
 	root.Long = `Your organization manages DefenseClaw on this computer. Here defenseclaw runs
 your coding agents in sandboxes under the policy your organization set for you:
 
+  defenseclaw status                 show whether your Claude Code and Cowork are protected
   defenseclaw sandbox run claude     run Claude Code in a sandbox
   defenseclaw sandbox status         show your sandbox and managed policy state
   defenseclaw sandbox policy explain show the policy that applies to you

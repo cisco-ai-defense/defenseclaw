@@ -32,11 +32,11 @@ param(
 Set-StrictMode -Version Latest
 $ErrorActionPreference = "Stop"
 
-$PythonVersion = "3.13.15"
+$PythonVersion = "3.13.17"
 $PythonTargetVersion = "3.13"
 $PythonEmbedName = "python-$PythonVersion-embed-amd64.zip"
 $PythonEmbedUrl = "https://www.python.org/ftp/python/$PythonVersion/$PythonEmbedName"
-$PythonEmbedSha256 = "D1F04D990AEE1253D8569E8E5104E30FA9F5FA830899F14843448872D936A2CF"
+$PythonEmbedSha256 = "9E35319BFFEDAB8B36AD44D8F377CB4F1733BCEC257A0B6D04D94F01486DDB38"
 $VCRuntimeVersion = '14.42.34438'
 $VCRuntimeSourceName = 'Microsoft.VC.14.42.17.12.CRT.Redist.X64.base.vsix'
 $VCRuntimeSourceUrl = 'https://download.visualstudio.microsoft.com/download/pr/53b2bf3d-716a-455a-bcc0-39cfb7447fe0/49d70db282f1c74d456206501120134f021c2bc3aaabb41577fe18dea35d1454/Microsoft.VC.14.42.17.12.CRT.Redist.X64.base.vsix'
@@ -68,18 +68,34 @@ $VCRuntimeTimestampSignerThumbprintSha256 = '8d2e0d6834085b1e2b12b7035ea5d70ac8c
 #
 # Review log -- keep the most recent entry, and say what was checked:
 #
-#   2026-09-10, 3.13.14 -> 3.13.15 (released 2026-08-05, current 3.13 security
-#   release; no 3.13.16 exists). Artifact verified beyond its digest: the
-#   sigstore bundle published beside it validates against certificate identity
-#   thomas@python.org (the 3.13 release manager) via accounts.google.com, with
-#   the Rekor inclusion proof checked. 3.13.15 carries ten Security entries,
-#   two of which matter directly to this product because the CLI extracts
-#   archives: gh-151558, a bypass of the tarfile data/tar extraction filters
-#   letting a crafted archive create a symlink outside the destination, and
-#   gh-151987, extract() not applying the filter to a link target. Also
-#   gh-150743 (unbounded http.client trailer/1xx reads), gh-153030 (quadratic
-#   html.parser DoS) and libexpat 2.8.2. Next review 2026-11-05.
-$PythonRuntimeReviewDeadlineUTC = [DateTimeOffset]::Parse('2026-11-05T00:00:00Z')
+#   2026-11-05, 3.13.15 -> 3.13.17 (released 2026-10-21). 3.13 is now in
+#   security-only mode: 3.13.17 is the last 3.13 release with Windows binaries
+#   and 3.13.18 (2026-10-25) is source-only, so 3.13.17 is the newest
+#   embeddable zip python.org publishes. Artifact verified beyond its digest:
+#   the sigstore bundle published beside it validates (sigstore-python 4.5.1,
+#   Rekor inclusion proof checked) against certificate identity
+#   thomas@python.org (the 3.13 release manager) via accounts.google.com, a
+#   wrong identity is refused, and the SHA-256 equals the one on the
+#   python.org release page. Gained over 3.13.15: 3.13.16 moves the Windows
+#   build to OpenSSL 3.5.9 (3.0 left public support in September 2026) and
+#   fixes, among others, tarfile data/tar filter escapes that matter here
+#   because the CLI extracts archives (gh-157190, CVE-2026-82049, a hard link
+#   to a symlink touching files outside the destination; gh-155999,
+#   directories created outside it by a ../ round trip; gh-157265), ssl
+#   wrap_bio() and asyncio start_tls() completing a handshake without the
+#   hostname check (gh-156793), an ssl sni_callback crash (gh-156293,
+#   CVE-2026-19445), HTTPPasswordMgr credentials crossing from https to http
+#   (gh-155694, CVE-2026-15806), unbounded bzip2/LZMA/zstd zipfile reads
+#   (gh-156002) and libexpat 2.8.5; 3.13.17 bundles pip 26.2.2 (certifi
+#   without the distrusted eMudhra/emSign CAs). Not in any Windows binary:
+#   3.13.18's gh-160097 (CVE-2026-114583, tar_filter only; the CLI extracts
+#   with filter="data", which already rejected it), gh-160040
+#   (CVE-2026-115557, eMudhra key denylist in ssl), gh-157579
+#   (CVE-2026-12345, TemporaryDirectory cleanup race), gh-160300
+#   (cookiejar), gh-159428 (Windows mimetypes) and libexpat 2.9.0. Next
+#   review 2027-01-21; as 3.13 gets no more Windows binaries, it should
+#   move the runtime to a line that still ships them (3.14 or later).
+$PythonRuntimeReviewDeadlineUTC = [DateTimeOffset]::Parse('2027-01-21T00:00:00Z')
 $WinUnicodeSourceName = 'win_unicode_console-0.5.zip'
 $WinUnicodeSourceUrl = 'https://files.pythonhosted.org/packages/89/8d/7aad74930380c8972ab282304a2ff45f3d4927108bb6693cabcc9fc6a099/win_unicode_console-0.5.zip'
 $WinUnicodeSourceSha256 = 'D4142D4D56D46F449D6F00536A73625A871CBA040F0BC1A2E305A04578F07D1E'

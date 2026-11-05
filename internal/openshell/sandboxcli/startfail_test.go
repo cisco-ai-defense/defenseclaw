@@ -33,10 +33,10 @@ func TestOutputTailKeepsTheEnd(t *testing.T) {
 	}
 }
 
-// The sandbox's localhost check asks the system resolver and /etc/hosts
-// by absolute path, and reports one line.
+// The sandbox's localhost check asks the system resolver by absolute path
+// and reports one line.
 func TestLocalhostCheckScript(t *testing.T) {
-	for _, want := range []string{"/usr/bin/getent hosts localhost", "/usr/bin/grep -qsw localhost /etc/hosts", `echo "::localhost=$r $h"`} {
+	for _, want := range []string{"/usr/bin/getent hosts localhost", "echo ::localhost=resolves", "echo ::localhost=unresolved"} {
 		if !strings.Contains(localhostCheckScript, want) {
 			t.Errorf("check lacks %q: %s", want, localhostCheckScript)
 		}

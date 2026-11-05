@@ -579,14 +579,14 @@ func newProviderV8Inactive(
 		cleanupV8MetricPipelines(pipelines.MetricPipelines, options.PrepareCleanupTimeout)
 		v8BoundedPrepareCleanup(options.PrepareCleanupTimeout, func(cleanupContext context.Context) {
 			for index := len(preparedReaders) - 1; index >= 0; index-- {
-				if preparedReaders[index] != nil {
+				if !nilV8Dependency(preparedReaders[index]) {
 					_ = preparedReaders[index].Shutdown(cleanupContext)
 				}
 			}
 		})
 		v8BoundedPrepareCleanup(options.PrepareCleanupTimeout, func(cleanupContext context.Context) {
 			for index := len(preparedProcessors) - 1; index >= 0; index-- {
-				if preparedProcessors[index] != nil {
+				if !nilV8Dependency(preparedProcessors[index]) {
 					_ = preparedProcessors[index].Shutdown(cleanupContext)
 				}
 			}
@@ -648,7 +648,7 @@ func newProviderV8Inactive(
 	}
 	if options.SpanProcessorFactory != nil {
 		processor, processorErr := callV8SpanProcessorFactory(options.SpanProcessorFactory, generation)
-		if processorErr != nil || processor == nil {
+		if processorErr != nil || nilV8Dependency(processor) {
 			cleanupPrepared()
 			return nil, newV8ProviderError(V8ProviderErrorProcessorInitialization, processorErr)
 		}
@@ -705,7 +705,9 @@ func newProviderV8Inactive(
 		cleanupReaders := func() {
 			v8BoundedPrepareCleanup(options.PrepareCleanupTimeout, func(cleanupContext context.Context) {
 				for index := len(preparedReaders) - 1; index >= 0; index-- {
-					_ = preparedReaders[index].Shutdown(cleanupContext)
+					if !nilV8Dependency(preparedReaders[index]) {
+						_ = preparedReaders[index].Shutdown(cleanupContext)
+					}
 				}
 			})
 		}
@@ -719,7 +721,7 @@ func newProviderV8Inactive(
 				return nil, newV8ProviderError(V8ProviderErrorReaderInitialization, nil)
 			}
 			reader, readerErr := callV8MetricReaderFactory(readerFactory, generation, metricSpec)
-			if readerErr != nil || reader == nil {
+			if readerErr != nil || nilV8Dependency(reader) {
 				cleanupReaders()
 				cleanupV8MetricPipelines(pipelines.MetricPipelines, options.PrepareCleanupTimeout)
 				v8BoundedPrepareCleanup(options.PrepareCleanupTimeout, func(cleanupContext context.Context) {
@@ -844,7 +846,7 @@ func validV8GenerationPipelines(
 		return false
 	}
 	for _, reader := range pipelines.MetricReaders {
-		if reader == nil || reflect.ValueOf(reader).Kind() == reflect.Pointer && reflect.ValueOf(reader).IsNil() {
+		if nilV8Dependency(reader) {
 			return false
 		}
 	}
@@ -852,6 +854,19 @@ func validV8GenerationPipelines(
 		return false
 	}
 	return true
+}
+
+func nilV8Dependency(value any) bool {
+	if value == nil {
+		return true
+	}
+	reflected := reflect.ValueOf(value)
+	switch reflected.Kind() {
+	case reflect.Chan, reflect.Func, reflect.Interface, reflect.Map, reflect.Pointer, reflect.Slice:
+		return reflected.IsNil()
+	default:
+		return false
+	}
 }
 
 func cleanupV8MetricPipelines(pipelines []V8GenerationMetricPipeline, timeout time.Duration) {

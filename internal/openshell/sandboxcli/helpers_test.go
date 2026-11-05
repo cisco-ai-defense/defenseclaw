@@ -720,10 +720,6 @@ type fakeImages struct {
 	// answer.
 	pruned      []image.PruneOptions
 	pruneReport *image.PruneReport
-	// microVMProblem, by harness, is why a built image fails the probe's
-	// MicroVM scenario, and microVMInconclusive why that scenario settled
-	// nothing (neither: it passes).
-	microVMProblem, microVMInconclusive map[string]string
 	// buildOutput is what Build writes to the build log; buildErr, when
 	// set, fails it.
 	buildOutput string
@@ -753,9 +749,8 @@ func (f *fakeImages) Build(_ context.Context, spec *harness.Spec, microVM, _ boo
 	if f.buildErr != nil {
 		return image.Record{}, true, f.buildErr
 	}
-	rec := image.Record{Tag: "defenseclaw/sandbox:" + spec.Name, Connector: spec.Name, HarnessVersion: spec.DefaultVersion, HookFireVerified: true,
-		MicroVM: microVM, MicroVMVerified: microVM && f.microVMProblem[spec.Name] == "" && f.microVMInconclusive[spec.Name] == "",
-		MicroVMProblem: f.microVMProblem[spec.Name], MicroVMInconclusive: f.microVMInconclusive[spec.Name]}
+	rec := image.Record{Tag: "defenseclaw/sandbox:" + spec.Name, Connector: spec.Name, HarnessVersion: spec.DefaultVersion,
+		HookFireVerified: true, MicroVM: microVM}
 	f.built = append(f.built, spec.Name)
 	f.recs = append(f.recs, rec)
 	return rec, true, nil

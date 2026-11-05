@@ -33,6 +33,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"golang.org/x/sys/unix"
@@ -58,6 +59,9 @@ const (
 
 // cnMsg header sizes, in bytes, for the packed netlink payload.
 const (
+	// procReceiveBuffer is the cn_proc socket's receive buffer.
+	procReceiveBuffer = 4 << 20
+
 	nlMsgHdrLen  = 16
 	cnMsgHdrLen  = 20
 	procEventHdr = 16
@@ -74,6 +78,13 @@ const (
 // capability.
 type linuxSource struct {
 	buffer *Buffer
+	// recv reads one cn_proc datagram; tests replace it.
+	recv func(fd int, buffer []byte) (int, error)
+	// procOverflows counts cn_proc receive-buffer overflows (ENOBUFS): the
+	// kernel dropped process events this source never saw.
+	procOverflows atomic.Int64
+	// stopped is closed by Close; it ends the loops no descriptor unblocks.
+	stopped chan struct{}
 
 	procFD     int
 	fanotifyFD int
@@ -83,15 +94,16 @@ type linuxSource struct {
 	closed   bool
 	wg       sync.WaitGroup
 
-	// credentialRoots are the directories fanotify marks. Marking a whole
-	// mount would deliver every open on the system, which on a build host is
-	// millions of events a minute for no gain.
-	credentialRoots []credentialRoot
+	// Only these narrow directories are marked; wildcard homes are expanded
+	// again while the source runs so a newly created session can be watched.
+	homeDirs    []string
+	markedRoots map[string]struct{}
+	markRoot    func(int, credentialRoot) bool
 }
 
 // NewSource returns the Linux Plane C source.
 func NewSource(homeDirs []string) Source {
-	return &linuxSource{buffer: NewBuffer(), credentialRoots: credentialRoots(homeDirs)}
+	return &linuxSource{buffer: NewBuffer(), homeDirs: append([]string(nil), homeDirs...)}
 }
 
 // credentialRoot is one location fanotify marks. A root below a user's home
@@ -114,8 +126,9 @@ var homeCredentialSuffixes = []string{
 // filter, so every additional root is delivered events the classifier then has
 // to discard.
 func credentialRoots(homeDirs []string) []credentialRoot {
-	roots := make([]credentialRoot, 0, len(homeDirs)*len(homeCredentialSuffixes)+2)
-	for _, home := range homeDirs {
+	homes := expandHomes(homeDirs)
+	roots := make([]credentialRoot, 0, len(homes)*len(homeCredentialSuffixes)+2)
+	for _, home := range homes {
 		home = strings.TrimSpace(home)
 		if home == "" {
 			continue
@@ -126,6 +139,52 @@ func credentialRoots(homeDirs []string) []credentialRoot {
 		}
 	}
 	return append(roots, credentialRoot{path: "/etc/shadow"}, credentialRoot{path: "/etc/sudoers.d"})
+}
+
+// expandHomes is homeDirs with each dynamic pattern (/sessions/*) expanded to
+// the home directories it matches now.
+func expandHomes(homeDirs []string) []string {
+	homes := make([]string, 0, len(homeDirs))
+	seen := make(map[string]struct{}, len(homeDirs))
+	for _, entry := range homeDirs {
+		entry = strings.TrimSpace(entry)
+		if entry == "" {
+			continue
+		}
+		if strings.ContainsAny(entry, "*?[]") {
+			if !dynamicHomePattern(entry) {
+				continue
+			}
+			matches, err := filepath.Glob(entry)
+			if err != nil {
+				continue
+			}
+			for _, match := range matches {
+				if len(homes) >= 4096 {
+					break
+				}
+				if info, err := os.Lstat(match); err == nil && info.IsDir() {
+					if _, exists := seen[match]; !exists {
+						homes = append(homes, match)
+						seen[match] = struct{}{}
+					}
+				}
+			}
+			continue
+		}
+		entry = filepath.Clean(entry)
+		if _, exists := seen[entry]; !exists {
+			homes = append(homes, entry)
+			seen[entry] = struct{}{}
+		}
+	}
+	return homes
+}
+
+func dynamicHomePattern(home string) bool {
+	return strings.HasSuffix(home, "/*") && filepath.IsAbs(home) &&
+		filepath.Clean(strings.TrimSuffix(home, "/*")) != "/" &&
+		!strings.ContainsAny(strings.TrimSuffix(home, "/*"), "*?[]")
 }
 
 // openHomeCredentialRoot opens a credential directory below a user's home so
@@ -176,7 +235,15 @@ func openHomeCredentialRoot(home, root string) (int, error) {
 }
 
 func (s *linuxSource) Events() <-chan Event { return s.buffer.Events() }
-func (s *linuxSource) Coverage() Coverage   { return s.coverage }
+func (s *linuxSource) Coverage() Coverage {
+	coverage := s.coverage
+	if lost := s.procOverflows.Load(); lost > 0 {
+		// Reduced, not absent: the reader carries on after an overflow.
+		coverage.Limitations = append(append([]string(nil), coverage.Limitations...), fmt.Sprintf(
+			"process events were lost %d times when the netlink receive buffer overflowed (ENOBUFS)", lost))
+	}
+	return coverage
+}
 
 func (s *linuxSource) Start(ctx context.Context) error {
 	procErr := s.startProcessConnector()
@@ -210,13 +277,25 @@ func (s *linuxSource) Start(ctx context.Context) error {
 	}
 	s.coverage = coverage
 
+	s.stopped = make(chan struct{})
 	if procErr == nil {
 		s.wg.Add(1)
 		go func() { defer s.wg.Done(); s.readProcessConnector(ctx) }()
+		if !clientImages.off.Load() {
+			s.wg.Add(1)
+			go func() { defer s.wg.Done(); s.prewarm(ctx) }()
+		}
 	}
 	if fanErr == nil {
 		s.wg.Add(1)
 		go func() { defer s.wg.Done(); s.readFanotify(ctx) }()
+		for _, home := range s.homeDirs {
+			if dynamicHomePattern(home) {
+				s.wg.Add(1)
+				go func() { defer s.wg.Done(); s.refreshHomeRoots(ctx) }()
+				break
+			}
+		}
 	}
 	go func() {
 		<-ctx.Done()
@@ -232,6 +311,9 @@ func (s *linuxSource) Close() error {
 		return nil
 	}
 	s.closed = true
+	if s.stopped != nil {
+		close(s.stopped)
+	}
 	procFD, fanFD := s.procFD, s.fanotifyFD
 	s.procFD, s.fanotifyFD = -1, -1
 	s.mu.Unlock()
@@ -263,6 +345,11 @@ func (s *linuxSource) startProcessConnector() error {
 	}); err != nil {
 		_ = unix.Close(fd)
 		return fmt.Errorf("bind: %w", err)
+	}
+	// A burst of execs outruns the default receive buffer; the helper is
+	// root, so the forced size is tried first.
+	if unix.SetsockoptInt(fd, unix.SOL_SOCKET, unix.SO_RCVBUFFORCE, procReceiveBuffer) != nil {
+		_ = unix.SetsockoptInt(fd, unix.SOL_SOCKET, unix.SO_RCVBUF, procReceiveBuffer)
 	}
 	if err := unix.Sendto(fd, listenMessage(), 0, &unix.SockaddrNetlink{Family: unix.AF_NETLINK}); err != nil {
 		_ = unix.Close(fd)
@@ -305,9 +392,22 @@ func (s *linuxSource) readProcessConnector(ctx context.Context) {
 		if fd <= 0 {
 			return
 		}
-		read, _, err := unix.Recvfrom(fd, buffer, 0)
+		recv := s.recv
+		if recv == nil {
+			recv = func(fd int, buffer []byte) (int, error) {
+				read, _, err := unix.Recvfrom(fd, buffer, 0)
+				return read, err
+			}
+		}
+		read, err := recv(fd, buffer)
 		if err != nil {
 			if err == unix.EINTR {
+				continue
+			}
+			if err == unix.ENOBUFS {
+				// The kernel dropped events while the buffer was full. That is
+				// loss to report, not the end of the stream.
+				s.procOverflows.Add(1)
 				continue
 			}
 			// EBADF is the ordinary shutdown path: Close() closed the socket
@@ -360,14 +460,14 @@ func (s *linuxSource) decodeProcessEvent(body []byte) {
 			return
 		}
 		pid := int(binary.LittleEndian.Uint32(union[0:]))
-		s.pushProcess(KindExec, pid, now)
+		s.pushProcess(KindExec, pid, now, false)
 	case procEventFork:
 		// fork_proc_event: parent_pid parent_tgid child_pid child_tgid
 		if len(union) < 16 {
 			return
 		}
 		child := int(binary.LittleEndian.Uint32(union[8:]))
-		s.pushProcess(KindExec, child, now)
+		s.pushProcess(KindExec, child, now, true)
 	case procEventExit:
 		if len(union) < 8 {
 			return
@@ -399,12 +499,96 @@ func (s *linuxSource) decodeProcessEvent(body []byte) {
 // A partially-read event is still worth delivering -- the pid and the exec
 // itself are the lineage fact -- so missing fields are left zero rather than
 // dropping the event.
-func (s *linuxSource) pushProcess(kind Kind, pid int, at time.Time) {
-	event := s.describe(pid)
+//
+// The /proc reads race an exec too. A fork is delivered as an exec of the
+// child, which still runs its parent's image with its parent's command line
+// until it execs; if it execs while it is described, its command line and its
+// image would come from different programs. So a Claude-layout image is opened
+// before the command line is read -- the open pins the image -- and the read
+// counts only if /proc/<pid>/exe still names that image afterwards; otherwise
+// it is retried. Only such a snapshot carries the image identity, so a
+// command line is never paired with an image it did not run under
+// (R108-COWORK-3). A process that never reads stable keeps no command line.
+func (s *linuxSource) pushProcess(kind Kind, pid int, at time.Time, fromFork bool) {
+	var (
+		event    Event
+		image    imageKey
+		pinned   *os.File
+		version  string
+		identity bool
+		execed   bool
+		vanished bool
+	)
+	for attempt := 0; attempt < 3; attempt++ {
+		if pinned != nil {
+			pinned.Close()
+			pinned = nil
+		}
+		var path string
+		var live bool
+		path, image, live = procImage(pid)
+		version = ""
+		if live && kind == KindExec {
+			if version = claudeImageVersion(path); version != "" {
+				pinned = pinProcImage(pid, image)
+			}
+		}
+		if procSnapshotHook != nil {
+			procSnapshotHook("pinned")
+		}
+		event = s.describe(pid)
+		if procSnapshotHook != nil {
+			procSnapshotHook("described")
+		}
+		afterPath, afterImage, afterLive := procImage(pid)
+		// A process that exited keeps what was read (a short-lived cat is
+		// still worth its command line); one that now runs another image is
+		// read again.
+		execed = live && afterLive && (afterPath != path || afterImage != image)
+		if !execed {
+			identity = live && afterLive && version != "" && pinned != nil
+			vanished = live && !afterLive
+			break
+		}
+	}
 	event.Kind = kind
 	event.At = at
+	if execed {
+		// The process kept exec-ing while it was read, so its command line
+		// may be another program's. Its new image has an exec event of its
+		// own; this one keeps the lineage facts only.
+		event.Cmdline = ""
+	}
+	if vanished && version != "" {
+		// A client-layout process gone before the read was checked cannot be
+		// identified. A fork of the client that ran a quick tool command (ls,
+		// cat) and exited still carries the client's command line, which its
+		// parent's own exec already carries with the identity; classifying
+		// that copy reported the client as an MCP server (cowork-1-0-8
+		// VERIFY-row3-r2), so a fork keeps the lineage facts only. An exec
+		// event's command line is that program's own and is kept, classified
+		// as any unidentified exec is.
+		if fromFork {
+			event.Cmdline = ""
+		}
+		version = ""
+	}
+	if identity {
+		event.ImageVersion = version
+		event.ImageSHA256 = clientImages.digestOf(pinned, image, eventAccount(event))
+		pinned = nil
+	} else if version != "" && !execed {
+		event.ImageVersion = version
+	}
+	if pinned != nil {
+		pinned.Close()
+	}
 	s.buffer.Push(event)
 }
+
+// procSnapshotHook runs between the steps of pushProcess's snapshot; tests
+// set it to exec a process mid-read.
+var procSnapshotHook func(stage string)
 
 func (s *linuxSource) describe(pid int) Event {
 	event := Event{PID: pid}
@@ -441,40 +625,76 @@ func (s *linuxSource) startFanotify() error {
 	if err != nil {
 		return fmt.Errorf("fanotify_init: %w", err)
 	}
-	// FAN_OPEN and the modify/close-write pair cover the read and write
-	// halves. FAN_EVENT_ON_CHILD extends a directory mark to its entries,
-	// which is what makes marking ~/.aws catch ~/.aws/credentials.
-	const mask = unix.FAN_OPEN | unix.FAN_MODIFY | unix.FAN_CLOSE_WRITE | unix.FAN_EVENT_ON_CHILD
-	marked := 0
-	for _, root := range s.credentialRoots {
-		if root.home != "" {
-			// A root in a user's home is marked through a descriptor that
-			// was opened without following links.
-			rootFD, openErr := openHomeCredentialRoot(root.home, root.path)
-			if openErr != nil {
-				continue
-			}
-			markErr := unix.FanotifyMark(fd, unix.FAN_MARK_ADD|unix.FAN_MARK_ONLYDIR, mask, rootFD, "")
-			_ = unix.Close(rootFD)
-			if markErr == nil {
-				marked++
-			}
-			continue
-		}
-		if _, statErr := os.Stat(root.path); statErr != nil {
-			continue
-		}
-		if err := unix.FanotifyMark(fd, unix.FAN_MARK_ADD, mask, unix.AT_FDCWD, root.path); err != nil {
-			continue
-		}
-		marked++
-	}
+	marked := s.markCredentialRoots(fd)
 	if marked == 0 {
 		_ = unix.Close(fd)
 		return fmt.Errorf("no credential root could be marked")
 	}
 	s.fanotifyFD = fd
 	return nil
+}
+
+func (s *linuxSource) markCredentialRoots(fd int) int {
+	if s.markedRoots == nil {
+		s.markedRoots = make(map[string]struct{})
+	}
+	mark := s.markRoot
+	if mark == nil {
+		mark = markLinuxCredentialRoot
+	}
+	marked := 0
+	for _, root := range credentialRoots(s.homeDirs) {
+		if _, exists := s.markedRoots[root.path]; exists {
+			continue
+		}
+		if mark(fd, root) {
+			s.markedRoots[root.path] = struct{}{}
+			marked++
+		}
+	}
+	return marked
+}
+
+func markLinuxCredentialRoot(fd int, root credentialRoot) bool {
+	// FAN_EVENT_ON_CHILD makes a directory mark cover its credential files.
+	const mask = unix.FAN_OPEN | unix.FAN_MODIFY | unix.FAN_CLOSE_WRITE | unix.FAN_EVENT_ON_CHILD
+	if root.home != "" {
+		// A root in a user's home is marked through a descriptor that
+		// was opened without following links.
+		rootFD, openErr := openHomeCredentialRoot(root.home, root.path)
+		if openErr != nil {
+			return false
+		}
+		markErr := unix.FanotifyMark(fd, unix.FAN_MARK_ADD|unix.FAN_MARK_ONLYDIR, mask, rootFD, "")
+		_ = unix.Close(rootFD)
+		return markErr == nil
+	}
+	if _, statErr := os.Stat(root.path); statErr != nil {
+		return false
+	}
+	if err := unix.FanotifyMark(fd, unix.FAN_MARK_ADD, mask, unix.AT_FDCWD, root.path); err != nil {
+		return false
+	}
+	return true
+}
+
+func (s *linuxSource) refreshHomeRoots(ctx context.Context) {
+	ticker := time.NewTicker(time.Second)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			s.mu.Lock()
+			fd, closed := s.fanotifyFD, s.closed
+			s.mu.Unlock()
+			if closed || fd <= 0 {
+				return
+			}
+			s.markCredentialRoots(fd)
+		}
+	}
 }
 
 func (s *linuxSource) readFanotify(ctx context.Context) {

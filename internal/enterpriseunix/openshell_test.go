@@ -265,7 +265,7 @@ func TestUnpinnedSetupCannotUseMatchingDeploymentRecord(t *testing.T) {
 			requireOK(t, h.ensure(pinned))
 			beforePrerequisites := h.read(h.env.prerequisitesPath())
 			beforeApplied := h.env.loadOpenShellState().Applied
-			if beforeApplied == nil || beforeApplied.Version != "0.1.5" {
+			if beforeApplied == nil || beforeApplied.Version != "0.1.6" || beforeApplied.RaisedFrom != "0.1.5" {
 				t.Fatalf("initial setup state = %+v", beforeApplied)
 			}
 
@@ -1136,11 +1136,11 @@ func TestSandboxPrerequisiteRows(t *testing.T) {
 				t.Fatal(err)
 			}
 		}
-		h.runner.replies = map[string]fakeReply{"rpm -q --qf %{VERSION} openshell": {result: CommandResult{Stdout: []byte("0.1.5")}},
-			"rpm -q --qf %{VERSION} openshell-gateway": {result: CommandResult{Stdout: []byte("0.1.5")}}}
+		h.runner.replies = map[string]fakeReply{"rpm -q --qf %{VERSION} openshell": {result: CommandResult{Stdout: []byte(openshell.SupportedMin)}},
+			"rpm -q --qf %{VERSION} openshell-gateway": {result: CommandResult{Stdout: []byte(openshell.SupportedMin)}}}
 		r := h.ensure(sandboxConfig(t, "linux", true, map[string]any{"install": "prerequisite", "driver": "docker", "version": ">=0.1.1 <0.2.0"}))
 		requireOK(t, r)
-		if state, _ := rowState(r, "sandbox openshell cli"); !strings.HasPrefix(state, "ok: 0.1.5") {
+		if state, _ := rowState(r, "sandbox openshell cli"); !strings.HasPrefix(state, "ok: "+openshell.SupportedMin) {
 			t.Errorf("cli row = %q", state)
 		}
 		if hasWarning(r, codeOpenShellPrerequisite) {
@@ -1153,10 +1153,8 @@ func TestSandboxPrerequisiteRows(t *testing.T) {
 			t.Errorf("cli row = %q", state)
 		}
 	})
-	// OpenShell before 0.1.5 runs no sandbox (its network broker could let a
-	// sandbox's connections bypass the policy, NVIDIA/OpenShell#4494),
-	// whatever the pin allows: the administrator's install is named, with
-	// the pin to set.
+	// A release below SupportedMin runs no sandbox, whatever the pin allows:
+	// the administrator's install is named, with the pin to set.
 	t.Run("a prerequisite OpenShell older than the release sandboxes need", func(t *testing.T) {
 		h := newOSHost(t, "linux")
 		for _, p := range []string{"/usr/bin/openshell", "/usr/bin/openshell-gateway", "/usr/bin/docker", "/usr/sbin/mke2fs"} {
@@ -1184,7 +1182,7 @@ func TestSandboxPrerequisiteRows(t *testing.T) {
 		}
 	})
 	// The hosts DefenseClaw 1.0.3 set up pin "0.1.3", which runs no sandbox:
-	// setup mode installs 0.1.5 for it, and each account switches once none
+	// setup mode installs InstallerVersion for it, and each account switches once none
 	// of its sandboxes runs (the in-place migration).
 	t.Run("the 1.0.3 setup pin moves to the release sandboxes need", func(t *testing.T) {
 		h := newOSHost(t, "linux")
@@ -1221,17 +1219,17 @@ func TestSandboxPrerequisiteRows(t *testing.T) {
 	})
 	t.Run("setup mode checks the pin, not the host's OpenShell", func(t *testing.T) {
 		h := newOSHost(t, "linux")
-		r := h.ensure(sandboxConfig(t, "linux", true, map[string]any{"install": "setup", "driver": "docker", "version": "0.1.5"}))
+		r := h.ensure(sandboxConfig(t, "linux", true, map[string]any{"install": "setup", "driver": "docker", "version": openshell.InstallerVersion}))
 		requireOK(t, r)
-		if state, _ := rowState(r, "sandbox openshell pin"); !strings.HasPrefix(state, "ok: 0.1.5") {
+		if state, _ := rowState(r, "sandbox openshell pin"); !strings.HasPrefix(state, "ok: "+openshell.InstallerVersion) {
 			t.Errorf("pin row = %q", state)
 		}
 		if _, ok := rowState(r, "sandbox openshell cli"); ok {
 			t.Error("setup mode checks the host's OpenShell")
 		}
-		h.installTarballFiles(t, h.alice, "0.1.5")
+		h.installTarballFiles(t, h.alice, openshell.InstallerVersion)
 		r = h.run(Options{Action: ActionStatus})
-		if state, ok := rowState(r, "sandbox user-installed"); !ok || !strings.Contains(state, "alice: OpenShell 0.1.5 (user-installed, unmanaged)") {
+		if state, ok := rowState(r, "sandbox user-installed"); !ok || !strings.Contains(state, "alice: OpenShell "+openshell.InstallerVersion+" (user-installed, unmanaged)") {
 			t.Errorf("user-installed row = %q %v", state, ok)
 		}
 		// GAP-0236: ensure refuses a release this build has no digests for,
@@ -1241,7 +1239,7 @@ func TestSandboxPrerequisiteRows(t *testing.T) {
 		if r.OK || !strings.Contains(fmt.Sprint(r.Errors, r.Warnings), `"9.9.9" is not a release this DefenseClaw build can install`) {
 			t.Errorf("an unpinned release is accepted: %+v", r)
 		}
-		if h.read(h.env.renderedTOMLPath()) != before || h.env.loadOpenShellState().Applied.Version != "0.1.5" {
+		if h.read(h.env.renderedTOMLPath()) != before || h.env.loadOpenShellState().Applied.Version != openshell.InstallerVersion {
 			t.Error("a refused pin changed the applied sandbox configuration")
 		}
 	})

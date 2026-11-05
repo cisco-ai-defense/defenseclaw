@@ -65,7 +65,10 @@ func (b *Builder) localBase(ctx context.Context, c *Context) ([]ContextFile, ima
 		return nil, imageFacts{}, false, fmt.Errorf("openshell image: name the local base image %s: %w", ref, err)
 	}
 	files := slices.Clone(c.Files)
-	files[0].Data = bytes.Replace(files[0].Data, from, []byte("FROM "+alias+"\n"), 1)
+	// A MicroVM image can also start with a pinned resolver-tool stage.
+	// The final base stage is the last matching FROM line.
+	index := bytes.LastIndex(files[0].Data, from)
+	files[0].Data = slices.Concat(files[0].Data[:index], []byte("FROM "+alias+"\n"), files[0].Data[index+len(from):])
 	return files, facts, true, nil
 }
 

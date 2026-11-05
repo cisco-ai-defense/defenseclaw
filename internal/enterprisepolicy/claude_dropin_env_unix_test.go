@@ -127,3 +127,40 @@ func TestClaudeVerifyNamesAnEmptyManagedShellopts(t *testing.T) {
 		t.Fatalf("details lack the empty SHELLOPTS note:\n%s", details)
 	}
 }
+
+func TestClaudeVerifyReportsManagedShelloptsNoexec(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		value  string
+		higher bool
+		want   bool
+	}{
+		{"file source", "braceexpand:noexec", false, true},
+		{"managed preferences", "noexec:braceexpand", true, true},
+		{"ordinary options", "braceexpand:hashall", false, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			opts := testOptions(t)
+			opts.GOOS = "darwin"
+			withHigherSources(t)
+			if _, err := (claudeTarget{}).Reconcile(opts); err != nil {
+				t.Fatal(err)
+			}
+			body := `{"env":{"SHELLOPTS":"` + tc.value + `"}}`
+			if tc.higher {
+				withHigherSources(t, higherSource(t, "managed preferences", body))
+			} else {
+				writeFile(t, filepath.Join(claudeDir(t, opts), "managed-settings.json"), body)
+			}
+			state, err := (claudeTarget{}).Verify(opts)
+			if err != nil {
+				t.Fatal(err)
+			}
+			details := strings.Join(state.Details, "\n")
+			got := strings.Contains(details, "sets env SHELLOPTS with noexec")
+			if got != tc.want {
+				t.Fatalf("noexec detail = %v, want %v: %s", got, tc.want, details)
+			}
+		})
+	}
+}

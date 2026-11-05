@@ -101,6 +101,10 @@ func literalWriteOperandsWithParsed(command, cwd, home string, depth int, file *
 	// A definition runs nothing. A body is read once, where it is defined,
 	// when the command may call it, so an uncalled body stays inert.
 	called := calledFunctions(file, home)
+	var noEffectCopies map[*syntax.CallExpr]bool
+	if strings.Contains(command, "for") && strings.Contains(command, "cp") {
+		noEffectCopies = actionClientLoopCopyNoEffectCalls(file, cwd, home)
+	}
 	var knownValues map[*syntax.Word]string
 	knownValuesRead := false
 	for _, root := range file.Stmts {
@@ -131,6 +135,9 @@ func literalWriteOperandsWithParsed(command, cwd, home string, depth int, file *
 			}
 			call, ok := stmt.Cmd.(*syntax.CallExpr)
 			if !ok || len(call.Args) == 0 {
+				return true
+			}
+			if noEffectCopies[call] {
 				return true
 			}
 			// A copy operand with one known parameter value can also be a

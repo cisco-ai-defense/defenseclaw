@@ -23,10 +23,10 @@ import (
 )
 
 var windowsSupportedConnectorNames = []string{
-	"amp", "antigravity", "claudecode", "codex", "copilot", "cursor", "devin", "hermes", "kiro",
+	"amp", "antigravity", "claudecode", "codex", "copilot", "cursor", "devin", "hermes", "kiro", "opencode",
 }
 
-var windowsPreviewConnectorNames = []string{"opencode"}
+var windowsPreviewConnectorNames = []string{}
 
 var windowsNotCertifiedConnectorNames = []string{}
 
@@ -132,9 +132,6 @@ func TestConnectorSupportOnOS(t *testing.T) {
 	for _, goos := range []string{"linux", "darwin"} {
 		for _, name := range allWindowsConnectorNames() {
 			want := PlatformSupported
-			if name == "opencode" {
-				want = PlatformPreview
-			}
 			if got := ConnectorSupportOnOS(name, goos).Status; got != want {
 				t.Errorf("%s on %s status=%q, want %q", name, goos, got, want)
 			}
@@ -143,6 +140,25 @@ func TestConnectorSupportOnOS(t *testing.T) {
 
 	if got := ConnectorSupportOnOS("plugin-example", "windows").Status; got != PlatformNotCertified {
 		t.Fatalf("unknown plugin status=%q, want not_certified", got)
+	}
+}
+
+func TestOpenCodeV2PlatformSupportMatchesLiveCertificationGAP0552(t *testing.T) {
+	for _, goos := range []string{"linux", "darwin", "windows"} {
+		if support := ConnectorSupportOnOS("opencode", goos); support.Status != PlatformSupported {
+			t.Errorf("opencode on %s status=%q, want supported", goos, support.Status)
+		}
+		if warning, err := CheckPlatformSupport("opencode", goos); warning != "" || err != nil {
+			t.Errorf("opencode on %s warning=%q err=%v, want no warning or error", goos, warning, err)
+		}
+	}
+}
+
+func TestClaudeCodePlatformSupportStaysSupportedGAP0552BenignTwin(t *testing.T) {
+	for _, goos := range []string{"linux", "darwin", "windows"} {
+		if support := ConnectorSupportOnOS("claudecode", goos); support.Status != PlatformSupported {
+			t.Errorf("claudecode on %s status=%q, want supported", goos, support.Status)
+		}
 	}
 }
 

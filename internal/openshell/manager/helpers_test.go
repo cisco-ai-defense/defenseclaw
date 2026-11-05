@@ -791,7 +791,7 @@ func newDaemonEnv(t *testing.T, d daemonOptions, edit func(*config.Config)) *har
 	e.store = store
 	e.images = &fakeImages{rec: image.Record{
 		Tag: "defenseclaw/sandbox-claudecode:test", ImageID: "sha256:" + strings.Repeat("a", 64),
-		HarnessVersion: "2.1.156", HookContract: claudeContract(t), HookFireVerified: true, MicroVMVerified: true,
+		HarnessVersion: "2.1.156", HookContract: claudeContract(t), HookFireVerified: true,
 		NetworkBinaries: []image.Binary{{Name: "claude", Realpath: testClaudeBin}},
 	}}
 	e.ws = &fakeWorkspace{snapshots: map[string]*workspace.SnapshotRecord{}}

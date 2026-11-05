@@ -60,6 +60,14 @@ func TestClassifyAgentSurface(t *testing.T) {
 		{"claudecode", "/srv/ext/anthropic.claude-code-2.1.220-linux-x64/resources/native-binary/claude", nil, HostSurfaceExtension},
 		{"claudecode", "/home/u/.local/bin/claude", env("CLAUDE_CODE_ENTRYPOINT", "claude-desktop"), HostSurfaceDesktop},
 		{"claudecode", "/Users/u/Library/Application Support/Claude/claude-code/2.1.220/claude", env("CLAUDE_CODE_ENTRYPOINT", "cli"), HostSurfaceDesktop},
+		// Every data folder of Claude Desktop holds its engine (cowork-1-0-8
+		// GAP-0024, measured on 4.16336.0): third-party inference and MSIX.
+		{"claudecode", "/Users/u/Library/Application Support/Claude-3p/claude-code/2.1.317/91184d3d9ba3/claude.app/Contents/MacOS/claude", env("CLAUDE_CODE_ENTRYPOINT", "cli"), HostSurfaceDesktop},
+		{"claudecode", `C:\Users\u\AppData\Local\Claude-3p\claude-code\2.1.317\a33aa5518497\claude.exe`, nil, HostSurfaceDesktop},
+		{"claudecode", `C:\Users\u\AppData\Local\Claude-Data\claude_pzs8sxrjxfjjc\claude-code\2.1.317\a33aa5518497\claude.exe`, nil, HostSurfaceDesktop},
+		{"claudecode", `C:\Users\u\AppData\Roaming\Claude\claude-code\2.1.309\claude.exe`, nil, HostSurfaceDesktop},
+		{"claudecode", "/home/u/.config/Claude-3p/claude-code/2.1.317/claude", nil, HostSurfaceDesktop},
+		{"claudecode", "/home/u/.config/Claude-3p/claude-code-vm/2.1.317/claude", nil, ""},
 		{"codex", "/home/u/code-ext/extensions/openai.chatgpt-26.5908.31748-linux-x64/bin/linux-x86_64/codex", nil, HostSurfaceExtension},
 		{"codex", "/usr/local/bin/codex", env("CODEX_INTERNAL_ORIGINATOR_OVERRIDE", "codex_cli_rs"), HostSurfaceCLI},
 		{"antigravity", "/Applications/Antigravity.app/Contents/Resources/app/bin/agy", nil, HostSurfaceCLI},

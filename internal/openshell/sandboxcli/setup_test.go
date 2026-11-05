@@ -581,7 +581,7 @@ func TestSetupNeedsTheUpgradeOnAReleaseThatRunsNoSandbox(t *testing.T) {
 			wantErr(t, err, "the OpenShell gateway is not usable yet (Gateway version)")
 			// The upgrade was offered (and kept) before setup stopped.
 			has(t, ta.output(), "OpenShell 0.1.1 at /usr/bin/openshell; OpenShell "+openshell.InstallerVersion+" fixes a supervisor bug",
-				"✗ Gateway version: OpenShell 0.1.1 runs no DefenseClaw sandbox: before "+openshell.SupportedMin,
+				"✗ Gateway version: OpenShell 0.1.1 runs no DefenseClaw sandbox: OpenShell "+openshell.SupportedMin+" or later is required",
 				"→ upgrade OpenShell to "+openshell.InstallerVersion+" in place: defenseclaw sandbox setup --install-openshell")
 		})
 	}
@@ -2117,19 +2117,12 @@ func TestDoctorCountsTheImagesForTheGatewayDriver(t *testing.T) {
 		name         string
 		driver       openshell.ComputeDriver
 		microVMImage bool
-		// verdict is the MicroVM check's: "pass", "problem" or "" (it
-		// settled nothing).
-		verdict string
-		want    string
+		want         string
 	}{
-		{"docker image, docker gateway", openshell.DriverDocker, false, "", "hook-verified: claudecode 2.1.156"},
-		{"docker image, vm gateway", openshell.DriverVM, false, "", "not built yet: claudecode"},
-		{"MicroVM image, vm gateway", openshell.DriverVM, true, "pass", "hook-verified: claudecode 2.1.156"},
-		{"MicroVM image, docker gateway", openshell.DriverDocker, true, "pass", "not built yet: claudecode"},
-		// The next run checks an unsettled image again, and refuses one the
-		// check found cannot start in a MicroVM: neither is ready.
-		{"unchecked MicroVM image", openshell.DriverVM, true, "", "not checked for an OpenShell MicroVM yet: claudecode"},
-		{"MicroVM image with a problem", openshell.DriverVM, true, "problem", "cannot start in an OpenShell MicroVM: claudecode"},
+		{"docker image, docker gateway", openshell.DriverDocker, false, "hook-verified: claudecode 2.1.156"},
+		{"docker image, vm gateway", openshell.DriverVM, false, "not built yet: claudecode"},
+		{"MicroVM image, vm gateway", openshell.DriverVM, true, "hook-verified: claudecode 2.1.156"},
+		{"MicroVM image, docker gateway", openshell.DriverDocker, true, "not built yet: claudecode"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			ta := newTestApp(t, "")
@@ -2137,12 +2130,6 @@ func TestDoctorCountsTheImagesForTheGatewayDriver(t *testing.T) {
 			ta.HostDoctor = hostReport(func(r *openshell.DoctorReport) { r.Driver = tc.driver })
 			ta.images.recs = readyImages(ta)
 			ta.images.recs[0].MicroVM = tc.microVMImage
-			switch tc.verdict {
-			case "pass":
-				ta.images.recs[0].MicroVMVerified = true
-			case "problem":
-				ta.images.recs[0].MicroVMProblem = "it could not resolve localhost"
-			}
 			_ = ta.RunDoctor(bg, DoctorOptions{})
 			has(t, ta.output(), tc.want)
 		})

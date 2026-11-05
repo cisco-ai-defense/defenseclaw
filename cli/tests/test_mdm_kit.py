@@ -2217,7 +2217,16 @@ echo "version=$(dc_json_field "$doc" installed_version)"
 
 @pytest.mark.skipif(os.name != "posix", reason="POSIX shell scripts")
 @pytest.mark.parametrize("platform", ["linux", "macos"])
-def test_unix_detect_requires_complete_security_for_health(tmp_path: Path, platform: str) -> None:
+def test_unix_detect_health_requires_coverage_not_host_hardening(tmp_path: Path, platform: str) -> None:
+    # A default Ubuntu 24.04 managed install reports verify ok and
+    # coverage_complete true with security_complete false (agent hook-process
+    # limits, open user namespace and ptrace routes). --require-healthy read it
+    # unhealthy, so an MDM gating on it reinstalled in a loop (cowork-1-0-8
+    # GAP-0021). Health keys on coverage and excuses only those host-hardening
+    # reasons, printing them as a warning; any other security_complete reason
+    # (sessions needing a restart, a pending guardian repair, an unreadable
+    # enrolled home, an unprotected agent) or a note it cannot read is
+    # unhealthy. --require-security-complete keeps the strict check.
     gateway = tmp_path / "gateway"
     state = tmp_path / "verify.json"
     gateway.write_text(
@@ -2238,11 +2247,71 @@ def test_unix_detect_requires_complete_security_for_health(tmp_path: Path, platf
     source = source.replace(original, f'gateway="{gateway}" group={platform}', 1)
     detect = tmp_path / "detect.sh"
     detect.write_text(source, encoding="ascii")
-    for complete, expected in ((False, "unhealthy"), (True, "9.9.9")):
-        state.write_text(json.dumps({"ok": True, "security_complete": complete}), encoding="ascii")
-        result = subprocess.run(["sh", str(detect), "--require-healthy", "--format", "value"],
-                                capture_output=True, text=True)
-        assert (result.returncode, result.stdout) == (0, expected + "\n"), (platform, complete, result)
+    note = "security_complete is false because of: hook_process_fail_open, unprivileged_ptrace; coverage_complete is true"
+    stock = {"ok": True, "coverage_complete": True, "security_complete": False,
+             "warnings": [{"code": "unprivileged_ptrace", "message": "standard users can trace \"their\" processes"},
+                          {"code": "security_incomplete", "message": note + "; each warning above says what to do"}]}
+    uncovered = {"ok": True, "coverage_complete": False, "security_complete": False, "warnings": [
+        {"code": "security_incomplete", "message": "security_complete is false because of: hook_contract_unverified; "
+                                                    "coverage_complete is false because of: hook_contract_unverified"}]}
+    complete = {"ok": True, "coverage_complete": True, "security_complete": True, "warnings": []}
+    failed = {"ok": False, "coverage_complete": True, "security_complete": False, "errors": [{"code": "verify"}]}
+
+    def _note(message: str) -> dict:
+        return {"ok": True, "coverage_complete": True, "security_complete": False,
+                "warnings": [{"code": "security_incomplete", "message": message + "; each warning above says what to do"}]}
+
+    # Every host-hardening reason at once (a stock Ubuntu 24.04 host).
+    hardening_note = ("security_complete is false because of: hook_process_fail_open, unprivileged_user_namespaces, "
+                      "unprivileged_ptrace; coverage_complete is true")
+    hardening = _note(hardening_note)
+    cases = (
+        (stock, ["--require-healthy", "--format", "value"], 0, "9.9.9\n", "warning: " + note + "; run: "),
+        (stock, ["--require-healthy"], 0, "DefenseClaw Enterprise 9.9.9\n", "warning: " + note + "; run: "),
+        (stock, ["--require-security-complete", "--format", "value"], 0, "unhealthy\n", ""),
+        (stock, ["--require-security-complete"], 1, "", "incomplete security (" + note + ")"),
+        (uncovered, ["--require-healthy", "--format", "value"], 0, "unhealthy\n", ""),
+        (uncovered, ["--require-healthy"], 1, "", "incomplete coverage (security_complete is false because of: hook_contract_unverified"),
+        (failed, ["--require-healthy", "--format", "value"], 0, "unhealthy\n", ""),
+        (complete, ["--require-security-complete", "--format", "value"], 0, "9.9.9\n", None),
+        (complete, ["--require-healthy"], 0, "DefenseClaw Enterprise 9.9.9\n", None),
+        (hardening, ["--require-healthy"], 0, "DefenseClaw Enterprise 9.9.9\n", "warning: " + hardening_note + "; run: "),
+        (hardening, ["--require-healthy", "--format", "jamf"], 0, "<result>9.9.9</result>\n", "warning: " + hardening_note),
+        # No security_incomplete note: detect.sh cannot tell why, so unhealthy.
+        ({"ok": True, "coverage_complete": True, "security_complete": False},
+         ["--require-healthy", "--format", "jamf"], 0, "<result>unhealthy</result>\n", ""),
+        ({"ok": True, "coverage_complete": True, "security_complete": False},
+         ["--require-healthy"], 1, "", "beyond host hardening (security_complete is false); run: "),
+    )
+    for code_name in ("agent_sessions_restart_required", "guardian_repair_pending", "enrolled_home_unavailable",
+                      "agent_unprotected", "the sensor helper is not ready", "unprivileged_ptrace and the errors above"):
+        other = f"security_complete is false because of: hook_process_fail_open, {code_name}; coverage_complete is true"
+        document = _note(other)
+        cases += (
+            (document, ["--require-healthy"], 1, "", "incomplete security beyond host hardening (" + other + "); run: "),
+            (document, ["--require-healthy", "--format", "value"], 0, "unhealthy\n", ""),
+        )
+    for malformed in ("security_complete is false because of: ; coverage_complete is true",
+                      "security_complete is false because of: unprivileged_ptrace,, hook_process_fail_open; coverage_complete is true",
+                      "security_complete is false because of: unprivileged_ptrace",
+                      "security_complete is false because of: unprivileged_ptrace; coverage_complete is false because of: x"):
+        cases += ((_note(malformed), ["--require-healthy", "--format", "value"], 0, "unhealthy\n", ""),)
+    for document, args, code, stdout, stderr in cases:
+        state.write_text(json.dumps(document, indent=2), encoding="ascii")
+        result = subprocess.run(["sh", str(detect), *args], capture_output=True, text=True)
+        assert (result.returncode, result.stdout) == (code, stdout), (platform, args, document, result)
+        if stderr is None:
+            assert result.stderr == "", (platform, args, result.stderr)
+        else:
+            assert stderr in result.stderr and "each warning above" not in result.stderr, (platform, args, result.stderr)
+    # DC_REQUIRE_SECURITY_COMPLETE=1 in the settings block, no flag: strict.
+    strict = tmp_path / "detect-strict.sh"
+    assert "\nDC_REQUIRE_SECURITY_COMPLETE=0 " in source
+    strict.write_text(source.replace("\nDC_REQUIRE_SECURITY_COMPLETE=0 ", "\nDC_REQUIRE_SECURITY_COMPLETE=1 ", 1), encoding="ascii")
+    state.write_text(json.dumps(hardening, indent=2), encoding="ascii")
+    result = subprocess.run(["sh", str(strict)], capture_output=True, text=True)
+    assert (result.returncode, result.stdout) == (1, ""), (platform, result)
+    assert "incomplete security (" + hardening_note + ")" in result.stderr, (platform, result.stderr)
 
 
 _NOT_READY = json.dumps(
@@ -3171,7 +3240,8 @@ dc_report 1 1.2.3 ""
                 status = run(fmt, name, "status")
                 assert (status.returncode, status.stdout) == (0, f"{out}\n"), (shell, name, fmt)
     detect = str(MDM / _host_os_dir() / "detect.sh")
-    for args in (["--require-bundle", "b-lower"], ["--require-bundle", ""], ["--bundle-status", "--require-healthy"]):
+    for args in (["--require-bundle", "b-lower"], ["--require-bundle", ""], ["--bundle-status", "--require-healthy"],
+                 ["--bundle-status", "--require-security-complete"]):
         bad = _run([detect, *args])
         assert bad.returncode == 2 and bad.stderr, args
     if os.geteuid() != 0:
@@ -4230,3 +4300,42 @@ dc_journal_ready && echo journal
     assert result.returncode == 0, (result.stdout, result.stderr)
     assert result.stdout.split() == ["staged", "journal"], result.stdout
     assert (state / "rotation").is_dir()
+
+
+def test_windows_wrapper_runs_an_administrator_only_setup_in_place_while_it_holds_it() -> None:
+    """cowork-1-0-8 GAP-0044: every wrapper run copied the 700 MB Setup into
+    staging (about 5 s) and the antivirus scanned the fresh copy again when it
+    first ran (about 20 s on vm-dc-cowork-win11). A Setup whose file and
+    folders are administrator-only now runs where it is, held open with read
+    sharing only from before its hash and signature checks until the wrapper
+    exits; any other Setup is copied and checked as before."""
+    text = _text(MDM / "windows" / "Invoke-DefenseClawEnterprise.ps1")
+    start = text.index("function Open-WrapperSetupInPlace {")
+    body = text[start : text.index("\nfunction ", start + 1)]
+    opened = body.index(
+        "[System.IO.File]::Open($Source, [System.IO.FileMode]::Open, [System.IO.FileAccess]::Read, [System.IO.FileShare]::Read)"
+    )
+    # The handle is taken before any check, so the checked file is the run one.
+    assert opened < body.index("Test-DefenseClawAdminOnlyItem -Path $item.FullName")
+    assert opened < body.index("Test-WrapperAdminOnlyAncestors -Path $item.FullName")
+    # Setup runs as SYSTEM from its own folder: no other account may create
+    # files there (a planted DLL or .local folder), so that folder must be
+    # administrator-only too, not only the folders above it.
+    folder_check = "Test-DefenseClawAdminOnlyItem -Path ([System.IO.Path]::GetDirectoryName($item.FullName))"
+    assert opened < body.index(folder_check) < body.index("return $stream")
+    assert "FileShare]::ReadWrite" not in body and "FileShare]::Delete" not in body
+    assert "$item.Length -gt $Limit" in body
+    assert "[System.IO.FileAttributes]::ReparsePoint" in body
+    assert body.count("$stream.Dispose()") == 2
+
+    main = text[text.index("    if ($SetupPath) {\n        $script:SetupPin") :]
+    main = main[: main.index("$exitCode = Write-LifecycleResult -Run $run -Label 'Setup'")]
+    assert "$script:SetupPin = Open-WrapperSetupInPlace -Source $SetupPath -Limit 1GB" in main
+    assert "$stagedSetup = $script:SetupPin.Name" in main
+    # Anything else keeps the copy into the administrator-only staging folder.
+    assert "Copy-WrapperInput -Source $SetupPath -Destination $stagedSetup -Limit 1GB -Label 'Setup'" in main
+    # Both run only after the same SHA-256 and signer checks.
+    assert main.index("Assert-WrapperSetup -Staged $stagedSetup") < main.index(
+        "Invoke-DefenseClawNative -FilePath $stagedSetup"
+    )
+    assert "$script:SetupPin.Dispose()" not in text

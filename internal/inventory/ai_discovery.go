@@ -42,6 +42,7 @@ import (
 	"time"
 	"unicode"
 
+	"github.com/defenseclaw/defenseclaw/internal/claudedesktop"
 	"github.com/defenseclaw/defenseclaw/internal/config"
 	"github.com/defenseclaw/defenseclaw/internal/enforce"
 	"github.com/defenseclaw/defenseclaw/internal/hermesskills"
@@ -374,11 +375,12 @@ type LocalModelProvenance struct {
 // paths, command lines, prompt text, or secret values (unless the operator
 // has explicitly opted into `StoreRawLocalPaths`).
 //
-// The `Component`, `Model`, and `Runtime` blocks are nil-omitted: only
-// detectors that actually have framework, local-model, or liveness fidelity
-// populate them (today: `package_manifest` for components, local model API /
-// artifact detectors for models, and process/model-runtime detectors for
-// runtimes).
+// The `Component`, `Model`, `Runtime` and `ClaudeDesktop` blocks are
+// nil-omitted: only detectors that actually have framework, local-model,
+// liveness or desktop-app fidelity populate them (today: `package_manifest`
+// for components, local model API / artifact detectors for models,
+// process/model-runtime detectors for runtimes, and `claude_desktop` for
+// the Claude Desktop block).
 // `LastActiveAt` is a separate timestamp from `LastSeen` so consumers
 // can distinguish "we scanned and the signature still exists on disk"
 // (`LastSeen`) from "the underlying thing was running / used since the
@@ -407,6 +409,11 @@ type AISignal struct {
 	FirstSeen          time.Time       `json:"first_seen"`
 	LastSeen           time.Time       `json:"last_seen"`
 	LastActiveAt       *time.Time      `json:"last_active_at,omitempty"`
+
+	// ClaudeDesktop is the Claude Desktop and Cowork block of a
+	// claude_desktop signal (ai_discovery_claude_desktop.go).
+	ClaudeDesktop *ClaudeDesktopInfo `json:"claude_desktop,omitempty"`
+
 	// UserID (a uid) and UserName name the account a per-user scan ran as.
 	// The gateway takes both from the guardian's spool record, never from
 	// the scan's own output.
@@ -1673,6 +1680,9 @@ func (s *ContinuousDiscoveryService) scanSignals(
 	measure("config", func() ([]AISignal, int, error) { return s.detectConfigPaths(), 0, nil })
 	measure("binary", func() ([]AISignal, int, error) { return s.detectBinaries(), 0, nil })
 	measure("application", func() ([]AISignal, int, error) { return s.detectApplications(), 0, nil })
+	if !s.opts.SecureClient {
+		measure(claudeDesktopDetector, func() ([]AISignal, int, error) { return s.detectClaudeDesktop(), 0, nil })
+	}
 	measure("editor_extension", func() ([]AISignal, int, error) {
 		out, ide := s.detectEditorExtensions()
 		stats.ideInventory = mergeIDEInventory(stats.ideInventory, ide)
@@ -2444,6 +2454,12 @@ func parseMCPConfigForNames(path, connector string) ([]config.MCPServerEntry, er
 		return config.ReadMCPFromJSONCPaths(path, []string{"mcpServers"}, []string{"amp.mcpServers"})
 	case base == "opencode.json" || base == "opencode.jsonc":
 		return config.ReadMCPFromOpenCodeConfig(path)
+	case base == "claude_desktop_config.json":
+		// Claude Desktop (first- and third-party) keeps its servers under
+		// mcpServers, next to preferences and, in third-party mode,
+		// deploymentMode and coworkUserFilesPath. Read as a bare map, each of
+		// those keys was listed as a server (cowork-1-0-8 GAP-0026).
+		return config.ReadMCPFromJSONCPaths(path, []string{"mcpServers"})
 	case base == "openclaw.json" || (base == "config.json" && filepath.Base(filepath.Dir(path)) == ".zeptoclaw"):
 		// Read as a bare map, every top-level key was listed as a server.
 		return config.ReadMCPFromJSONCPaths(path, []string{"mcp", "servers"})
@@ -4071,6 +4087,34 @@ func (s *ContinuousDiscoveryService) scanRoots() []string {
 }
 
 func (s *ContinuousDiscoveryService) expandCandidatePath(candidate string) []string {
+	paths, _ := s.expandCandidatePathBounded(candidate)
+	return paths
+}
+
+// expandCandidatePathBounded is expandCandidatePath with the overflow of its
+// glob. A catalog candidate may hold one "*" (Claude Desktop's MSIX data
+// folders): each expanded pattern becomes the paths that exist, through
+// claudedesktop.Glob (bounded reads, at most claudedesktop.MaxGlobMatches
+// paths, the installed MSIX package's publisher id first). overflowed lists
+// the patterns whose matches were cut.
+func (s *ContinuousDiscoveryService) expandCandidatePathBounded(candidate string) (paths, overflowed []string) {
+	for _, pattern := range s.expandCandidatePattern(candidate) {
+		if !strings.Contains(pattern, "*") {
+			paths = append(paths, pattern)
+			continue
+		}
+		matches, overflow := claudedesktop.Glob(discoveryGOOS, pattern)
+		paths = append(paths, matches...)
+		if overflow {
+			overflowed = append(overflowed, pattern)
+		}
+	}
+	return paths, overflowed
+}
+
+// expandCandidatePattern expands a catalog candidate's variables, "~" and
+// relative form, leaving a "*" in place.
+func (s *ContinuousDiscoveryService) expandCandidatePattern(candidate string) []string {
 	candidate = strings.TrimSpace(candidate)
 	if candidate == "" {
 		return nil
@@ -4659,6 +4703,9 @@ func ValidateSanitizedAIDiscoveryReport(report AIDiscoveryReport) error {
 			if strings.Contains(value, "/") || strings.Contains(value, "\\") {
 				return errors.New("raw paths are not allowed")
 			}
+		}
+		if err := validateClaudeDesktopInfo(sig); err != nil {
+			return err
 		}
 		if sig.Model != nil {
 			model := sig.Model

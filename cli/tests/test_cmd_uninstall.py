@@ -330,6 +330,31 @@ class ResetCommandTests(unittest.TestCase):
             self.assertEqual(plan.preserve_data_entries, (".venv", ".uv"))
             self.assertIn("preserve runtime:", result.output)
 
+    def test_reset_says_the_cowork_plugin_stays_in_the_claude_account(self):
+        # setup cowork recorded a plugin; reset wipes that record, so it says
+        # what only the user can remove, as uninstall does.
+        from defenseclaw import cowork
+
+        state = Path(cowork.state_path(self._tmp.name))
+        state.parent.mkdir(parents=True, exist_ok=True)
+        state.write_text("{}")
+        runner = CliRunner()
+        with patch("defenseclaw.commands.cmd_uninstall._execute_plan"):
+            result = runner.invoke(cmd_uninstall.reset_cmd, ["--yes"])
+        self.assertEqual(result.exit_code, 0, msg=result.output)
+        flat = " ".join(result.output.split())
+        self.assertIn("cannot remove its Cowork plugin from your Claude account", flat)
+        self.assertIn("Customize > Plugins, then the ... menu > Remove", flat)
+        self.assertIn("Until then Cowork tool calls are blocked.", flat)
+        self.assertLess(flat.index("Cowork plugin"), flat.index("Reset complete"))
+
+    def test_reset_without_a_cowork_plugin_prints_no_cowork_line(self):
+        runner = CliRunner()
+        with patch("defenseclaw.commands.cmd_uninstall._execute_plan"):
+            result = runner.invoke(cmd_uninstall.reset_cmd, ["--yes"])
+        self.assertEqual(result.exit_code, 0, msg=result.output)
+        self.assertNotIn("Cowork", result.output)
+
     def test_reset_failure_is_nonzero_and_never_reports_complete(self):
         runner = CliRunner()
         with (
@@ -2766,6 +2791,45 @@ class RetiredSourceInstallCopyTests(unittest.TestCase):
             plan["binary_targets"] = [str(bin_dir / "claude.exe.old-20261026T103423123")]
             with self.assertRaises(ValueError):
                 windows_uninstall_helper._validate_plan(plan)
+
+
+@unittest.skipIf(sys.platform == "win32", "the per-user Linux and macOS install")
+class NativeHookLauncherRemovalTests(unittest.TestCase):
+    """GAP-0571: --binaries left ~/.local/bin/defenseclaw-hook-user behind."""
+
+    def test_binaries_removes_the_native_hook_launcher_and_skips_it_when_absent(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            home = Path(tmp).resolve()
+            bin_dir = home / ".local" / "bin"
+            bin_dir.mkdir(parents=True)
+            native = bin_dir / "defenseclaw-hook-user"
+            native.write_bytes(b"\x7fELF native launcher")
+            (bin_dir / "defenseclaw-hook-post").write_bytes(b"\x7fELF guard")
+            unrelated = bin_dir / "rg"
+            unrelated.write_bytes(b"ripgrep")
+            with patch.dict(os.environ, {"HOME": str(home)}):
+                install_root, targets = cmd_uninstall._owned_binary_targets("linux")
+            self.assertEqual(install_root, str(bin_dir))
+            self.assertIn(str(native), targets)
+            plan = cmd_uninstall.UninstallPlan(
+                platform_name="linux",
+                install_root=install_root,
+                gateway_path=str(bin_dir / "defenseclaw-gateway"),
+                binary_targets=targets,
+                remove_binaries=True,
+            )
+
+            with patch.object(cmd_uninstall.ux, "ok"):
+                cmd_uninstall._remove_binaries(plan)
+            self.assertFalse(os.path.lexists(native))
+            self.assertFalse(os.path.lexists(bin_dir / "defenseclaw-hook-post"))
+            self.assertTrue(unrelated.is_file())
+
+            # An install without the launcher (macOS, 1.0.7, a source build): a no-op.
+            with patch.object(cmd_uninstall.ux, "ok") as ok:
+                cmd_uninstall._remove_binaries(plan)
+            ok.assert_not_called()
+            self.assertEqual(sorted(os.listdir(bin_dir)), ["rg"])
 
 
 if __name__ == "__main__":

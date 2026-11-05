@@ -370,7 +370,8 @@ func officialFamilyShape(name, base string, metricType dto.MetricType) bool {
 		return suffix == "_bytes" || suffix == "_milliseconds" ||
 			suffix == "_nanoseconds" || suffix == "_seconds"
 	case dto.MetricType_GAUGE:
-		return suffix == "_bytes" || suffix == "_seconds" ||
+		// _milliseconds: a gauge in ms, such as defenseclaw.queue.oldest_age.
+		return suffix == "_bytes" || suffix == "_milliseconds" || suffix == "_seconds" ||
 			suffix == "_ratio" || suffix == "_USD"
 	default:
 		return false

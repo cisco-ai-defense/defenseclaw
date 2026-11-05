@@ -269,6 +269,8 @@ const windowsManagedHooksSignedOutPathEntryReason = "only its user Path entry fo
 // restore them, so the purge keeps it on purpose.
 const windowsManagedHooksKeptForRegistrationsReason = "kept: the account's agent registrations were not all removed, and its connector_backups restore them"
 
+const windowsManagedHooksAccountLinkKeptReason = "kept: the account owns a link at its DefenseClaw folder; the link and its contents were left as found"
+
 // windowsManagedHooksUserBinariesReason is the user_state_remaining reason of
 // a failed per-user binaries purge.
 func windowsManagedHooksUserBinariesReason(err error) string {
@@ -289,6 +291,9 @@ const windowsManagedHooksPurgeUserStateEnv = "DEFENSECLAW_WINDOWS_UNINSTALL_PURG
 var (
 	windowsManagedHooksStandaloneUserStatePurger    = enterprisehooks.PurgeWindowsUserState
 	windowsManagedHooksStandaloneUserBinariesPurger = enterprisehooks.PurgeWindowsUserBinaries
+	// windowsManagedHooksStandaloneUserRuntimeRemover removes, without purge,
+	// what the managed runtime wrote into an account's folder (GAP-0045).
+	windowsManagedHooksStandaloneUserRuntimeRemover = enterprisehooks.RemoveWindowsManagedUserRuntime
 )
 
 // windowsManagedHooksAccountsKeepingRegistrations reports whether an
@@ -320,17 +325,21 @@ func windowsManagedHooksAccountsKeepingRegistrations(cleanup enterpriseHookUserC
 // each account it could not purge ("user (SID): path: reason") and each one
 // it purged ("user (SID): path"), so the result names every account whose
 // data went. An account that keeps registrations (keepsRegistrations) keeps
-// its folder. Without purge it lists each folder that exists ("user (SID):
-// path") and purges nothing.
+// its folder. Without purge, as LocalSystem, it removes from the folder of
+// each account whose registrations all went what DefenseClaw's managed
+// runtime wrote there (hooks, logs, the hook contract lock, the foreign-hook
+// policy's files; enterprisehooks.RemoveWindowsManagedUserRuntime), and the
+// folder once nothing else is in it: a plain uninstall kept those files with
+// their managed DACL, and a later per-user install of the account failed its
+// first run on them (cowork-1-0-8 GAP-0045). It lists each folder that stays
+// ("user (SID): path", with why it stays when the cleanup ran) and purges no
+// data or binaries.
 func windowsManagedHooksStandaloneUserState(
 	manifest enterprisehooks.Manifest,
 	purge bool,
 	keepsRegistrations func(sid string) bool,
 ) ([]string, []string) {
-	var identityErr error
-	if purge {
-		identityErr = enterpriseHookWindowsUserCleanupIdentity()
-	}
+	identityErr := enterpriseHookWindowsUserCleanupIdentity()
 	seen := map[string]bool{}
 	var remaining, purged []string
 	for _, target := range manifest.Targets {
@@ -352,8 +361,20 @@ func windowsManagedHooksStandaloneUserState(
 		var reason string
 		switch {
 		case !purge:
-			if statErr == nil {
+			if statErr != nil {
+				continue
+			}
+			if identityErr != nil || keepsRegistrations(sid) {
+				// An account whose registrations stay keeps the folder: its
+				// connector_backups restore them.
 				remaining = append(remaining, label)
+				continue
+			}
+			kept, err := windowsManagedHooksStandaloneUserRuntimeRemover(home, sid, target.DataDir)
+			if err != nil {
+				remaining = append(remaining, label+": "+boundedEnterpriseHookUserCleanupText(err.Error()))
+			} else if kept != "" {
+				remaining = append(remaining, label+": "+boundedEnterpriseHookUserCleanupText(kept))
 			}
 			continue
 		case errors.Is(statErr, os.ErrNotExist):
@@ -376,6 +397,15 @@ func windowsManagedHooksStandaloneUserState(
 			reason = windowsManagedHooksKeptForRegistrationsReason
 		default:
 			err := windowsManagedHooksStandaloneUserStatePurger(home, sid, target.DataDir)
+			if errors.Is(err, enterprisehooks.ErrWindowsUserStateOnlyLink) &&
+				sameWindowsEnterprisePathCLI(dataDir, filepath.Join(home, ".defenseclaw")) &&
+				windowsEnterpriseAccountOwnedDataDirLink(home, sid) {
+				if _, binaryErr := windowsManagedHooksStandaloneUserBinariesPurger(home, sid); binaryErr != nil {
+					remaining = append(remaining, label+": "+windowsManagedHooksUserBinariesReason(binaryErr))
+				}
+				remaining = append(remaining, label+": "+windowsManagedHooksAccountLinkKeptReason)
+				continue
+			}
 			var binaries []string
 			if err == nil {
 				binaries, err = windowsManagedHooksStandaloneUserBinariesPurger(home, sid)
@@ -1970,6 +2000,8 @@ func finalizeWindowsManagedHooksTeardown(
 var (
 	windowsManagedHooksTeardownStandaloneMachineFinalizer = finalizeWindowsManagedHooksTeardownStandaloneMachineState
 	windowsManagedHooksTeardownJournalWriter              = writeWindowsManagedHooksTeardownJournal
+	// Which activation-drift rule teardown applies (GAP-0583); tests pin it.
+	windowsManagedHooksTeardownStandaloneProcess = enterprisehooks.WindowsStandaloneProcess
 )
 
 func finalizeWindowsManagedHooksTeardownStandaloneMachineState() error {
@@ -2345,6 +2377,26 @@ func validateWindowsManagedHooksTeardownActivation(
 		return windowsManagedHooksActivationRecord{}, errors.New(
 			"protected managed-hook activation evidence does not match the current manifest",
 		)
+	}
+	// rel-1-0-6:GAP-0583: standalone refuses the drift, as the standalone
+	// lifecycle binding does (windowsManagedHooksLifecycleCommittedTransactionID)
+	// and as 1.0.7 did. The PowerShell side pins the teardown journal and the
+	// contract cleanup receipt to the deployment's activation manifest, so a
+	// teardown that accepted a republished manifest (an enumerator pass that
+	// dropped a deleted enrolled account) let the uninstall pre-commit check
+	// pass, committed the tombstone, then wrote a journal and receipt the
+	// tombstone could never authenticate: every retry and Setup /ensure failed
+	// 1603 until /uninstall FORCE=1. The refusal is the catch-up refusal the
+	// uninstall check waits on (GAP-0319/GAP-0346): it rebinds the activation
+	// evidence to the manifest the guardian adopted, then commits. Secure
+	// Client keeps the 26.8.4 accept-and-log handling.
+	if windowsManagedHooksTeardownStandaloneProcess() {
+		if activation.ManifestSHA256 != manifestSHA256 || activation.TargetCount != targetCount {
+			return windowsManagedHooksActivationRecord{}, errors.New(
+				"protected managed-hook activation evidence does not match the current manifest",
+			)
+		}
+		return activation, nil
 	}
 	acceptWindowsManagedHooksActivationDrift(activation, manifestSHA256, targetCount)
 	return activation, nil

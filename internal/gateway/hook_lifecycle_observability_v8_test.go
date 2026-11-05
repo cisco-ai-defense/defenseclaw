@@ -11,6 +11,7 @@ import (
 	"fmt"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/defenseclaw/defenseclaw/internal/config"
 	"github.com/defenseclaw/defenseclaw/internal/observability"
@@ -749,6 +750,37 @@ func TestHookLifecycleV8FinalizesGenericOperationAfterTraceIdentity(t *testing.T
 	}
 	if first == second {
 		t.Fatalf("distinct generic deliveries reused operation %q", first)
+	}
+}
+
+func TestHookTraceEventIDDistinctWithinOneClockTick(t *testing.T) {
+	meta := llmEventMeta{
+		Source: "copilot", SessionID: "event-session", AgentID: "event-agent",
+		ExecutionID: "execution-1", LifecycleEvent: "event",
+	}
+	at := time.Unix(100, 0)
+	seen := make(map[string]struct{})
+	for range 64 {
+		meta.TraceEventID = hookTraceEventIDAt(t.Context(), meta, at)
+		operationID := hookOperationID(meta)
+		if _, exists := seen[operationID]; exists {
+			t.Fatalf("generic deliveries within one clock tick reused operation %q", operationID)
+		}
+		seen[operationID] = struct{}{}
+	}
+}
+
+func TestHookTraceEventIDKeepsReportedToolOperation(t *testing.T) {
+	meta := llmEventMeta{
+		Source: "copilot", SessionID: "event-session", AgentID: "event-agent",
+		ExecutionID: "execution-1", LifecycleEvent: "tool_start", ToolID: "tool-call-1",
+	}
+	at := time.Unix(100, 0)
+	meta.TraceEventID = hookTraceEventIDAt(t.Context(), meta, at)
+	firstOperation := hookOperationID(meta)
+	meta.TraceEventID = hookTraceEventIDAt(t.Context(), meta, at)
+	if operationID := hookOperationID(meta); operationID != firstOperation {
+		t.Fatalf("reported tool operation changed from %q to %q", firstOperation, operationID)
 	}
 }
 

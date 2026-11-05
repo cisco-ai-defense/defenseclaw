@@ -32,6 +32,11 @@ func TestStatusV2SchemaDescribesEveryMember(t *testing.T) {
 		"#/$defs/identitySource":        reflect.TypeOf(IdentitySource{}),
 		"#/$defs/accountJoin":           reflect.TypeOf(accountjoin.Summary{}),
 		"#/$defs/accountJoinGeneration": reflect.TypeOf(accountjoin.GenerationCount{}),
+		"#/$defs/coworkState":           reflect.TypeOf(CoworkState{}),
+		"#/$defs/coworkAccount":         reflect.TypeOf(CoworkAccount{}),
+		"#/$defs/coworkDesktop":         reflect.TypeOf(CoworkDesktopState{}),
+		"#/$defs/coworkDesktopAccount":  reflect.TypeOf(CoworkDesktopAccount{}),
+		"#/$defs/coworkDesktopInstall":  reflect.TypeOf(CoworkDesktopInstall{}),
 	} {
 		contracttest.RequireMembers(t, lifecycleSchema+pointer, typ)
 	}

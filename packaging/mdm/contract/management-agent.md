@@ -111,8 +111,8 @@ Some members name accounts, hold credential names or free text, or describe
 local detail and the administrator's tenant and key choices. Keep them on
 the device: warning and error messages (with their `subject`, `detail`,
 `reason` and `path`, and a receipt's `error_message`), `enrollment.accounts`,
-`excluded_users` and `excluded_groups`, `services`, `machine_policy`,
-`destinations`, `audit_store`, `scanners`, `api_port_holders`, `log_path`,
+`cowork.accounts` and `cowork.claude_desktop.accounts`, `excluded_users` and `excluded_groups`, `services`,
+`machine_policy`, `destinations`, `audit_store`, `scanners`, `api_port_holders`, `log_path`, `package_path`,
 `last_reload_error`, `changes`, `sessions_restart_required.entries`, a
 receipt's `actor` and `principal`, the bundle `created_by` and
 `change_summary`, the credential names (`secret_refs[].name`,

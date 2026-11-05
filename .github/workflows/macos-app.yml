@@ -55,15 +55,14 @@ jobs:
       - if: ${{ github.event_name == 'pull_request' }}
         uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
         with:
-          fetch-depth: 0
+          # The PR merge commit and its base parent cover the path diff below.
+          fetch-depth: 2
           persist-credentials: false
       - name: Select macOS app validation
         id: detect
         shell: bash
         env:
           EVENT_NAME: ${{ github.event_name }}
-          BASE_SHA: ${{ github.event.pull_request.base.sha }}
-          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
         run: |
           set -euo pipefail
 
@@ -80,29 +79,16 @@ jobs:
               ;;
           esac
 
-          if [[ ! "$BASE_SHA" =~ ^[0-9a-f]{40}$ ]]; then
-            echo "::error::pull request base SHA is not an exact commit ID"
-            exit 1
-          fi
-          if [[ ! "$HEAD_SHA" =~ ^[0-9a-f]{40}$ ]]; then
-            echo "::error::pull request head SHA is not an exact commit ID"
-            exit 1
-          fi
-          if [[ "$BASE_SHA" == "$HEAD_SHA" ]]; then
-            echo "::error::pull request base and head SHAs must differ"
-            exit 1
-          fi
-
           read -r -a macos_paths <<< "$MACOS_PATHS"
           if ((${#macos_paths[@]} == 0)); then
             echo "::error::macOS app path contract is empty"
             exit 1
           fi
 
-          git cat-file -e "${BASE_SHA}^{commit}"
-          git cat-file -e "${HEAD_SHA}^{commit}"
+          git cat-file -e "HEAD^1^{commit}"
+          git cat-file -e "HEAD^{commit}"
           set +e
-          git diff --quiet --no-renames "$BASE_SHA...$HEAD_SHA" -- "${macos_paths[@]}"
+          git diff --quiet --no-renames HEAD^1 HEAD -- "${macos_paths[@]}"
           diff_status=$?
           set -e
 

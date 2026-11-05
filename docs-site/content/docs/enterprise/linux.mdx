@@ -486,8 +486,9 @@ the kernel setting. Otherwise the text depends on the host:
 Otherwise it asks for `kernel.yama.ptrace_scope=2`, because a tracer such as
 PRoot can rewrite the paths an agent opens. Both warnings end with the same
 advice: ask the host administrator to apply optional kernel hardening with
-their own tools. With either warning, `security_complete` is `false`, and
-`detect.sh --require-healthy` reports the host as not healthy.
+their own tools. With either warning, `security_complete` is `false`.
+`detect.sh --require-healthy` still reports a stock host healthy and prints the
+warnings on standard error; `--require-security-complete` reports it `unhealthy`.
 
 #### What a private-namespace refusal looks like
 
@@ -527,6 +528,17 @@ settings, `enterprise linux tetragon verify`, approval, pause and removal are in
 [Tetragon on a Linux fleet](/docs/enterprise/tetragon); how this fits with hooks,
 sandboxes and the egress proxy is in [Agent segmentation](/docs/segmentation).
 
+## Claude Cowork
+
+Claude Desktop for Linux is a beta, and Cowork on Linux is not certified. In the 1.0.8 tests the managed drop-in and per-user setup were verified on Linux, but Cowork itself was not run. The Claude Code drop-in (`/etc/claude-code/managed-settings.d/90-defenseclaw.json`) is meant to cover Cowork where it runs. There is nothing to configure for Cowork itself.
+
+| Item | Linux |
+| --- | --- |
+| Engine folder | `claude-code/<version>/` in `~/.config/Claude`, or in `~/.config/Claude-3p` for third-party inference. These follow the vendor's convention; no Linux engine build has been measured. A relocated `XDG_CONFIG_HOME` is not followed |
+| Engine identity | Linux builds carry no vendor signature. A build counts only when its version folder holds an executable `claude`. It is reported as unsigned, and as unidentified while it runs, so `verify` fails while Cowork or the Code tab runs |
+
+See [Claude Cowork](/docs/connectors/cowork) for the tools, `managed_hooks_only` and the limits.
+
 ## Sandboxes
 
 A Linux standalone install can run coding agents in OpenShell sandboxes under the
@@ -562,7 +574,7 @@ its own gateway. If such an installer says "existing installation detected" and
 points to the upgrade resolver, that text is not meant for managed computers.
 Nothing migrates a per-user install. Before you deploy, have each user run
 `defenseclaw uninstall --binaries --yes` (add `--all` to delete `~/.defenseclaw`;
-[Uninstall](/docs/get-started/download)).
+[Uninstall](/docs/get-started/download)). If a user set up Claude Cowork, they also remove the DefenseClaw plugin in Claude Desktop (**Customize > Plugins**, then the **...** menu on DefenseClaw, **Remove**); until then Cowork tool calls are blocked.
 
 A `config.yaml` a per-user install left in `~/.defenseclaw` is not the policy the
 device enforces: `defenseclaw config get`, `guardrail`, `status` and other

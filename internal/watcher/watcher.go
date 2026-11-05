@@ -174,8 +174,9 @@ type InstallWatcher struct {
 	debounce         time.Duration
 	onAdmit          OnAdmission
 
-	mu      sync.Mutex
-	pending map[string]time.Time // path → first-seen, for debounce
+	mu               sync.Mutex
+	pending          map[string]time.Time // path → first-seen, for debounce
+	quarantineMoveMu sync.Mutex
 
 	// pluginWaiting holds plugin-root folders that had nothing to admit yet
 	// (empty or category folders, GAP-2449) and skill folders without a
@@ -3082,6 +3083,15 @@ func (w *InstallWatcher) quarantineAssetWith(ctx context.Context, evt InstallEve
 		w.emitQuarantineFailure(ctx, evt, err)
 		return err
 	}
+	if evt.Type == InstallPlugin && !w.secureClientActive() {
+		// A rescan and a filesystem event can share one quarantine record and
+		// stage. Keep their filesystem and journal transitions in order.
+		w.quarantineMoveMu.Lock()
+		defer w.quarantineMoveMu.Unlock()
+		if _, err := os.Lstat(evt.Path); errors.Is(err, fs.ErrNotExist) {
+			return nil
+		}
+	}
 	if honorRestore && w.preserveRestoredBlockedAsset(evt) {
 		_ = w.logger.LogAction(string(audit.ActionWatcherBlock), evt.Path,
 			fmt.Sprintf("type=%s restored physical files retained while install block remains", evt.Type))
@@ -3109,6 +3119,14 @@ func (w *InstallWatcher) quarantineAssetWith(ctx context.Context, evt InstallEve
 	if err != nil {
 		w.emitQuarantineFailure(ctx, evt, err)
 		return err
+	}
+	if evt.Type == InstallPlugin && !w.secureClientActive() &&
+		!strings.Contains(evt.Name, "/") && evt.Name != physicalName {
+		plan, err = plan.WithPluginQuarantineName(evt.Name)
+		if err != nil {
+			w.emitQuarantineFailure(ctx, evt, err)
+			return err
+		}
 	}
 	if category, _, nested := strings.Cut(evt.Name, "/"); nested && evt.Type == InstallPlugin {
 		// A plugin in a category folder keeps its category in quarantine, so
@@ -3351,6 +3369,14 @@ func (w *InstallWatcher) linkedAssetScanTarget(evt InstallEvent) (string, error)
 	}
 	for _, root := range w.sourceRootsFor(evt.Type) {
 		if watcherPathAtOrBelow(target, root) {
+			return target, nil
+		}
+		// OpenClaw installs npm plugins in a managed project beside its
+		// extensions folder and links the extension entry to that package.
+		// Read only that project's package tree for an extension entry.
+		if evt.Type == InstallPlugin && w.eventConnector(evt) == "openclaw" &&
+			filepath.Base(root) == "extensions" && sameWatcherPath(filepath.Dir(evt.Path), root) &&
+			watcherPathAtOrBelow(target, filepath.Join(filepath.Dir(root), "npm", "projects")) {
 			return target, nil
 		}
 	}

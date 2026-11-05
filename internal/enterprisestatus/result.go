@@ -103,6 +103,20 @@ type MachinePolicyState struct {
 	LiveVerifiedAt   string   `json:"live_verified_at,omitempty"`
 }
 
+// HooksInstalled is the hooks_installed value the machine policy gives a
+// connector no account row is counted for: none without a DefenseClaw
+// entry, partial with conflicts, all otherwise.
+func (s MachinePolicyState) HooksInstalled() string {
+	switch {
+	case s.OwnedEntries == 0:
+		return HooksInstalledNone
+	case len(s.Conflicts) > 0:
+		return HooksInstalledPartial
+	default:
+		return HooksInstalledAll
+	}
+}
+
 // Enrollment summarizes guardian targets.
 type Enrollment struct {
 	Targets int `json:"targets"`
@@ -236,8 +250,13 @@ type Result struct {
 	// enterprise.account_join on; nil (omitted) otherwise. The keys are
 	// only in the output of `enterprise account-keys` (internal/accountjoin).
 	AccountJoin *accountjoin.Summary `json:"account_join,omitempty"`
-	LogPath     string               `json:"log_path,omitempty"`
-	ExitCode    int                  `json:"exit_code"`
+	// Cowork is the Claude Cowork block (cowork_block.go) of status and
+	// verify on the standalone profile, for an administrator; nil (omitted)
+	// elsewhere.
+	Cowork         *CoworkState         `json:"cowork,omitempty"`
+	CoworkVMSensor *CoworkVMSensorState `json:"cowork_vm_sensor,omitempty"`
+	LogPath        string               `json:"log_path,omitempty"`
+	ExitCode       int                  `json:"exit_code"`
 	// ConfigRefused marks a run that refused the submitted config before it
 	// changed anything: the policy, services and advisories it reports are
 	// the running deployment's. Text output only (GAP-0564).

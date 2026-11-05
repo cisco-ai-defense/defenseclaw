@@ -200,18 +200,26 @@ have the account sign in, and run Setup `/ensure JSON=1` again.
 ## Roll back
 
 With bundle trust anchors, DefenseClaw refuses to install a release below the
-confirmed bundle's `min_product_version` (`product_floor_refused`): on Linux
-and macOS from 1.0.4, in Windows Setup from 1.0.6. The rollback marker, `--allow-downgrade` and
+confirmed bundle's `min_product_version`: on Linux and macOS from 1.0.4, in
+Windows Setup from 1.0.6. The lifecycle reason is `product_floor_refused`,
+but an older package's preinstall does not necessarily print that code. The
+rollback marker, `--allow-downgrade` and
 `uninstall --keep-state` do not lift this floor. A package older than 1.0.4
 does not check the floor itself and can complete below it. A floor that cannot
-be read refuses the install too. Install a release that meets the floor; to go
-below it, contact your administrator. [Release floor
+be read refuses the install too. Check `bundle status` for
+`current.min_product_version` and install a release that meets it; to go below
+it, contact your administrator. A reinstall at the floor is allowed by this
+check, including 1.0.8 over 1.0.8 with a confirmed 1.0.8 floor. [Release floor
 limits](/docs/enterprise/lifecycle#release-floor-limits) says when the
-floor is checked, and what older packages and Windows Setup do.
+floor is checked, where each installer reports a refusal, and what older
+packages and Windows Setup do.
 
 A failed action rolls itself back. You only need the steps below to go back to an older
 release on purpose. Try the rollback on one test host before the fleet. Every lifecycle
-refuses an older release unless you ask for the rollback (`downgrade_refused`). For an
+refuses an older release unless you ask for the rollback. Windows Setup stops with exit `1603`
+and the code `downgrade_refused`, and the macOS package records `downgrade_refused` in
+`last-package-result.json`. The Debian and RHEL packages print "refusing to downgrade ...
+Nothing was changed.", exit with `1` and record nothing. For an
 Intune Win32 deployment, remove the superseding **Required** assignment before assigning
 the older app; otherwise Intune can reapply the newer release.
 
@@ -334,15 +342,29 @@ verified copy of DefenseClaw, and refuse a release below it
 too. The check also works after an uninstall that kept the state. A 1.0.5 or
 older Setup does not check the floor and can install below it.
 
+**Refusal messages.** These are excerpts from a confirmed 1.0.8 floor; the
+ellipsis omits the older installer's rollback instruction:
+
+| Installer | Refusal excerpt and result |
+| --- | --- |
+| RPM `%prein` (also Debian `preinst`) | `defenseclaw-enterprise: refusing to install 1.0.5: the signed policy bundle needs DefenseClaw 1.0.8 or later, and this is 1.0.5; … Nothing was changed.` RPM exits `1`. The preinstall text does not name `product_floor_refused` or update `/var/lib/defenseclaw-enterprise/last-package-result.json`. |
+| macOS pkg `preinstall` | `installer` reports an error running package scripts. `/var/log/install.log` contains `Refusing to install DefenseClaw 1.0.5: the signed policy bundle needs DefenseClaw 1.0.8 or later, and this is 1.0.5; … Nothing was changed.` The pkg records `product_floor_refused` in `errors[].code` at `/opt/cisco/defenseclaw/lifecycle/last-package-result.json`. |
+| Windows Setup 1.0.7 | Setup returns `1603`; with `JSON=1`, `errors[].code` is `product_floor_refused` and `errors[].message` begins `product_floor_refused: the signed policy bundle needs DefenseClaw 1.0.8 or later, and this is 1.0.7; …; nothing was changed`. Windows Setup reports this in its result, not in a `last-package-result.json` file. |
+
+The 1.0.8 pkg and RPM reinstall at the confirmed 1.0.8 floor complete; the
+floor check also permits the matching Windows Setup version. Other lifecycle
+checks still apply.
+
 On every OS, a 1.0.6 or later release that finds itself below the floor
 reports `product_below_floor` in `status`, `verify` and `bundle status`. It is
 a warning only: the policy keeps enforcing and nothing is repaired or
-reinstalled.
+reinstalled. `bundle status` shows the floor as `current.min_product_version`;
+check it before deploying an older release.
 
 To roll back to 1.0.4, the confirmed floor must be unset or 1.0.4 or lower.
+If the floor is higher, contact your administrator before the rollback.
 Keep package deployment under administrator control, and check that the
-release you install meets the floor first. To go below the floor, contact
-your administrator. See [Roll back](/docs/enterprise/lifecycle#roll-back) for
+release you install meets the floor first. See [Roll back](/docs/enterprise/lifecycle#roll-back) for
 the supported procedure.
 
 ### The kept version 8 config
@@ -378,7 +400,7 @@ The managed config is administrator-owned. For what it contains, see
 **Leave bundle mode on Windows.** `/repair`, a new `CONFIG=` and moving the anchor file away do not turn bundle mode off: while a signed bundle is current, Setup still refuses `CONFIG=` with `bundle_required`. To go back to a local admin config:
 
 1. Stop delivering bundles to the computer in your MDM (remove the bundle app or package assignment). A later `BUNDLE=` with `TRUSTANCHORS=` puts it back in bundle mode.
-2. Run Setup as LocalSystem ([Run Setup as LocalSystem](/docs/enterprise/windows#run-setup-as-localsystem)) with `/uninstall JSON=1`, without `PURGE=1`, so each user's `%USERPROFILE%\.defenseclaw` stays. It removes the trust anchors, the bundle state and the rest of the machine state ([Remove](/docs/enterprise/windows#remove)). It removes the connector registrations of each user with an active (connected) session. A user who is signed out, or whose session is disconnected, keeps an inert registration and is named in the `user_registrations_pending` warning; that is expected here and needs no `/repair`. From an elevated prompt instead of LocalSystem every user is named, except the Claude Code registration of the account running Setup, which is removed.
+2. Run Setup as LocalSystem ([Run Setup as LocalSystem](/docs/enterprise/windows#run-setup-as-localsystem)) with `/uninstall JSON=1`, without `PURGE=1`, so each user's `%USERPROFILE%\.defenseclaw` keeps the user's own files (it loses only the files the managed runtime wrote there; see [Windows: Remove](/docs/enterprise/windows#remove)). It removes the trust anchors, the bundle state and the rest of the machine state ([Remove](/docs/enterprise/windows#remove)). It removes the connector registrations of each user with an active (connected) session. A user who is signed out, or whose session is disconnected, keeps an inert registration and is named in the `user_registrations_pending` warning; that is expected here and needs no `/repair`. From an elevated prompt instead of LocalSystem every user is named, except the Claude Code registration of the account running Setup, which is removed.
 3. Run Setup as LocalSystem with `/ensure CONFIG=<file> JSON=1`. It installs again from that config and enrolls the users again: a signed-in user at once, a signed-out user at their next sign-in (until then `status` counts their connectors as pending). Later changes go through `/ensure CONFIG=` as on any device without anchors.
 
 A change is applied by the apply trigger on Linux and macOS. While it runs, `status` reports the change as pending apply (`ok: true`, `pending_apply: true`, a `lifecycle_busy` warning) and `verify` reports `lifecycle_busy`; both exit `75`. That is not a failure, so run them again. A hand edit of the config as root is applied, not reported as drift.
@@ -708,11 +730,21 @@ of change take this path:
   registers or removes the hooks without a restart.
 
 If the gateway does not report the policy in time, or the lifecycle lock is busy, `ensure` puts
-the previous config back and runs the full upgrade. A change to a process-level key restarts the
-gateway: `gateway.*`, `guardrail.hook_self_heal`, `enterprise.network`, the other `enterprise`
-keys and the keys that [Source of truth](/docs/reference/source-of-truth) lists. That `ensure`
-stops every service for one to three minutes and takes two to six minutes; its `ensure_upgrade`
-warning names the keys that made it restart.
+the previous config back and runs the lifecycle transaction instead. A change to a process-level
+key runs it too: `gateway.*`, `guardrail.hook_self_heal`, `enterprise.network`, the other
+`enterprise` keys and the keys that [Source of truth](/docs/reference/source-of-truth) lists. The
+other `enterprise` keys include `enterprise.machine_policy` (for example `managed_hooks_only`):
+the gateway reads them only at start, so they need a restart.
+The transaction is the one an upgrade runs, with the installed release's own payload: it stops
+every service, puts the same release back in place, starts the services and verifies the
+deployment. On the 1.0.8 test VM the `ensure` took about 110 seconds, against about a minute for a
+change applied in the running gateway. Before 1.0.8 the same change took about 183 seconds. It
+skips a fixed wait of about 65 seconds when every service stopped cleanly; a service that did not
+stop cleanly keeps the full wait, and a slower or busier host takes longer, so give the MDM script
+a time limit of several minutes. Nothing is upgraded: the result carries the warning `ensure_config_restart`,
+which names the keys that made it restart. Only a newer release reports `ensure_upgrade`. When
+the transaction fails or rolls back, the warning is `ensure_config_failed` instead: the change is
+not confirmed applied, and the errors say what failed.
 
 ## Uninstall
 
@@ -835,7 +867,8 @@ machine state for a reinstall instead.
   one runs, and restores the files of any agent that DefenseClaw changed and still has backups for.
   It then removes all of `~/.defenseclaw` (hook scripts, hook credentials and
   `~/.defenseclaw/foreign-hooks-backup` included) and, from `~/.local/bin`, `defenseclaw-gateway`,
-  `defenseclaw-acp`, the launcher links, the `uv` the per-user installer added (when unchanged) and
+  `defenseclaw-acp`, the hook helpers (`defenseclaw-hook-post`, `defenseclaw-hook-user`
+  and, on Linux, `defenseclaw-sensor-helper`), the launcher links, the `uv` the per-user installer added (when unchanged) and
   its bookkeeping. A user enrolled only for machine-policy connectors loses `~/.defenseclaw` the same
   way when it holds no own install (only the session cache `~/.defenseclaw/session-facts.json` and
   what DefenseClaw wrote there, an earlier failed install's hook files and backups included). It follows no symlink there and removes only a file the user owns; the

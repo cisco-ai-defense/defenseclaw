@@ -42,6 +42,8 @@ Connectors are the adapter layer between agent frameworks and DefenseClaw. They 
 
 Where an agent cannot ask, a confirm verdict becomes an alert with the original action kept; Copilot CLI blocks it instead. You can review it in audit or the TUI, but you cannot resume the call. The [capability matrix](/docs/connectors/capability-matrix) has the full per-connector detail, and [Human approval](/docs/guardrail) has the per-event matrix.
 
+Claude Cowork, the agent mode of Claude Desktop, runs through the Claude Code connector's hooks. It is not a connector of its own. See [Claude Cowork](/docs/connectors/cowork).
+
 One gateway can serve several hook connectors, each with its own posture under `guardrail.connectors.<name>`. Choose **Add**, not Replace, when you run a second `setup <connector>`. Proxy connectors own the traffic plane and cannot be combined this way. See [Multi-connector](/docs/guardrail/multi-connector).
 
 ## Platform support

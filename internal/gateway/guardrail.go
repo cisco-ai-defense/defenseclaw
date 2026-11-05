@@ -547,7 +547,14 @@ func (g *GuardrailInspector) startPhaseSpan(ctx context.Context, phase string) (
 	if g.tracer == nil || g.tracer.startPhase == nil {
 		return ctx, func(string, string, time.Duration) {}
 	}
-	return g.tracer.startPhase(ctx, phase)
+	phaseCtx, end := g.tracer.startPhase(ctx, phase)
+	if phaseCtx == nil {
+		phaseCtx = ctx
+	}
+	if end == nil {
+		end = func(string, string, time.Duration) {}
+	}
+	return phaseCtx, end
 }
 
 // SetDetectionStrategy configures the multi-strategy dispatch fields.
@@ -1300,7 +1307,7 @@ func (g *GuardrailInspector) inspectJudgeFirst(ctx context.Context, direction, c
 	// fall back to an error sentinel so the parent always proceeds
 	// (judge → regex fallback, triage → empty signal set) even under
 	// a pathological policy / scanner bug.
-	if judge := g.requestJudge(ctx); judge != nil {
+	if judge := g.requestJudge(ctx); judge != nil && judge.cfg != nil {
 		go func() {
 			defer func() {
 				if rec := recover(); rec != nil {

@@ -290,5 +290,12 @@ func (s *darwinSource) readEvents(stdout interface{ Read([]byte) (int, error) })
 }
 
 func (s *darwinSource) translate(message esMessage) (Event, bool) {
-	return translateES(message, s.watched, s.owner)
+	event, ok := translateES(message, s.watched, s.owner)
+	if ok && event.Kind == KindExec && event.Exe != "" {
+		var payload esEvent
+		if json.Unmarshal(message.Event, &payload) == nil && payload.Exec != nil {
+			event.ImageSHA256, event.ImageVersion = darwinClientImage(payload.Exec.Target.Executable, eventAccount(event))
+		}
+	}
+	return event, ok
 }

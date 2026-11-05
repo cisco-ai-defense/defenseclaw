@@ -37,9 +37,7 @@ const maxLookupLine = 240
 
 // LocalhostLookupFailure returns the first line of output that reports a
 // failed lookup of localhost, trimmed and cut to a few hundred bytes, and
-// whether output has one. A harness that exits at once with such a line
-// could not resolve localhost in its sandbox: a MicroVM's /etc/hosts is
-// empty (Driver.HostsFile).
+// whether output has one.
 func LocalhostLookupFailure(output string) (string, bool) {
 	for _, line := range strings.Split(output, "\n") {
 		if !localhostLookupRE.MatchString(line) {

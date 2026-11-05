@@ -257,6 +257,26 @@ func matrixFor(goos string) []matrixCase {
 			Observation{Kind: KindExec, Name: "node", Cmdline: "npx @modelcontextprotocol/server-filesystem /"},
 			fires(LocalInference, "agent_local_mcp_server"),
 		},
+		{
+			"Claude client names an MCP package",
+			Observation{Kind: KindExec, Name: "claude", ClaudeClient: true, Cmdline: "claude --mcp-config @modelcontextprotocol/server-filesystem"},
+			quiet,
+		},
+		{
+			"Claude client on Windows names an MCP package",
+			Observation{Kind: KindExec, Name: "claude.exe", ClaudeClient: true, Cmdline: "claude.exe --mcp-config @modelcontextprotocol/server-filesystem"},
+			quiet,
+		},
+		{
+			"MCP server executable is named claude",
+			Observation{Kind: KindExec, Name: "claude", Cmdline: "claude @modelcontextprotocol/server-filesystem /"},
+			fires(LocalInference, "agent_local_mcp_server"),
+		},
+		{
+			"MCP server executable is named claude.exe",
+			Observation{Kind: KindExec, Name: "claude.exe", Cmdline: "claude.exe @modelcontextprotocol/server-filesystem C:\\data"},
+			fires(LocalInference, "agent_local_mcp_server"),
+		},
 
 		// --- agent-config persistence --------------------------------------
 		{
@@ -468,6 +488,47 @@ func TestMatrixKeepsBenignCasesQuiet(t *testing.T) {
 		t.Fatalf("only %d benign cases; the quiet half is what keeps this deployable", quietCases)
 	}
 	t.Logf("%d benign cases stay quiet", quietCases)
+}
+
+func TestSecureClientKeepsClientMCPClassification(t *testing.T) {
+	indicators := IndicatorsFor("linux")
+	indicators.KeepClientMCP = true
+	match, ok := Classify(Observation{
+		Kind: KindExec, Name: "claude", Cmdline: "claude --mcp-config @modelcontextprotocol/server-filesystem",
+	}, indicators)
+	if !ok || match.Tactic != LocalInference || match.SignalID != "agent_local_mcp_server" {
+		t.Fatalf("Secure Client classification changed: match=%+v classified=%v", match, ok)
+	}
+}
+
+func TestClaudeMCPArgumentOwnership(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		process string
+		cmdline string
+		server  bool
+	}{
+		{"configuration value", "claude", `claude --mcp-config @modelcontextprotocol/server-filesystem`, false},
+		{"attached configuration value", "claude.exe", `claude.exe --mcp-config=@modelcontextprotocol/server-filesystem`, false},
+		{"print prompt", "claude", `claude -p "Explain @modelcontextprotocol/server-filesystem"`, false},
+		{"long print prompt", "claude", `claude --print "Document this mcp_server package"`, false},
+		{"ordinary print prompt", "claude", `claude --print "Summarize the notes"`, false},
+		{"package after configuration terminator", "claude", `claude --mcp-config server.json -- @modelcontextprotocol/server-filesystem /workspace`, true},
+		{"package after attached configuration", "claude", `claude --mcp-config=server.json @modelcontextprotocol/server-filesystem /workspace`, true},
+		{"package immediately after print option", "claude", `claude --print @modelcontextprotocol/server-filesystem /workspace`, false},
+		{"server named like client", "claude.exe", `claude.exe @modelcontextprotocol/server-filesystem C:\data`, true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			match, ok := Classify(Observation{Kind: KindExec, Name: tc.process, ClaudeClient: true, Cmdline: tc.cmdline}, IndicatorSet{})
+			if tc.server {
+				if !ok || match.Tactic != LocalInference || match.SignalID != "agent_local_mcp_server" {
+					t.Fatalf("server classification = (%+v, %t)", match, ok)
+				}
+			} else if ok {
+				t.Fatalf("client classification = %+v, want none", match)
+			}
+		})
+	}
 }
 
 // claudeToolCall is the argv Claude Code runs a Bash tool call with,

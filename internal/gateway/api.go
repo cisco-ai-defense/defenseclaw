@@ -1564,7 +1564,15 @@ func (a *APIServer) Run(ctx context.Context) error {
 	}()
 	go func() {
 		defer close(refusalsDone)
+		// A standard account's own `defenseclaw status` on the same
+		// profile (GAP-0060); a no-op on every other one.
+		ownStatusDone := make(chan struct{})
+		go func() {
+			defer close(ownStatusDone)
+			a.serveOwnStatusPipe(refusalCtx)
+		}()
 		a.serveUnenrolledRefusals(refusalCtx)
+		<-ownStatusDone
 	}()
 
 	errCh := make(chan error, 2)

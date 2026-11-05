@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"sync"
 	"sync/atomic"
+	"time"
 
 	"github.com/defenseclaw/defenseclaw/internal/observability"
 	observabilityredaction "github.com/defenseclaw/defenseclaw/internal/observability/redaction"
@@ -43,9 +44,13 @@ type writeGroup struct {
 // groupedWrite is one caller's write. run performs it inside the shared
 // transaction; data is the caller's state for the commit callback.
 type groupedWrite struct {
-	ctx  context.Context
-	run  func(ctx context.Context, tx *sql.Tx) error
-	data any
+	ctx      context.Context
+	queuedAt time.Time
+	run      func(ctx context.Context, tx *sql.Tx) error
+	data     any
+	// committed, when set, runs once the shared transaction that ran this
+	// write has committed (runCallGroupBatch).
+	committed func()
 	// result receives exactly one message: the outcome of the write, or lead
 	// when the write heads the queue and runs the next transaction.
 	result  chan groupedWriteResult
@@ -79,6 +84,7 @@ func (group *writeGroup) removeLocked(write *groupedWrite) bool {
 func (group *writeGroup) do(write *groupedWrite, execute func([]*groupedWrite)) error {
 	write.result = make(chan groupedWriteResult, 1)
 	group.mu.Lock()
+	write.queuedAt = time.Now()
 	group.pending = append(group.pending, write)
 	lead := !group.active
 	group.active = true
@@ -121,6 +127,42 @@ func (group *writeGroup) do(write *groupedWrite, execute func([]*groupedWrite)) 
 	return batch[0].err
 }
 
+// WriteQueueSnapshot is the number of writes waiting for the next grouped
+// transaction and the age of the oldest one. A transaction in progress is
+// excluded because its writes have left the queue.
+type WriteQueueSnapshot struct {
+	Depth     int64
+	OldestAge time.Duration
+}
+
+func (group *writeGroup) snapshot(now time.Time) WriteQueueSnapshot {
+	group.mu.Lock()
+	defer group.mu.Unlock()
+	if len(group.pending) == 0 {
+		return WriteQueueSnapshot{}
+	}
+	return WriteQueueSnapshot{
+		Depth:     int64(len(group.pending)),
+		OldestAge: max(now.Sub(group.pending[0].queuedAt), 0),
+	}
+}
+
+// CallWriteQueueSnapshot reports the foreground hook-call write queue.
+func (s *Store) CallWriteQueueSnapshot() WriteQueueSnapshot {
+	if s == nil {
+		return WriteQueueSnapshot{}
+	}
+	return s.callGroup.snapshot(time.Now())
+}
+
+// ObservationWriteQueueSnapshot reports the correlation-observation queue.
+func (s *Store) ObservationWriteQueueSnapshot() WriteQueueSnapshot {
+	if s == nil {
+		return WriteQueueSnapshot{}
+	}
+	return s.observationGroup.snapshot(time.Now())
+}
+
 // groupedTxHooks are the per-kind parts of a grouped transaction.
 type groupedTxHooks struct {
 	op string
@@ -135,6 +177,16 @@ type groupedTxHooks struct {
 // and the others commit. The transaction is cancelled only when every caller
 // in it has given up; a write whose caller gave up before its turn is not
 // attempted (skipped). A failed begin or commit fails every write in it.
+//
+// The first attempt runs the writes without savepoints (groupedWriteDirect).
+// A savepoint copies every page a write changes into SQLite's in-memory
+// sub-journal before it changes it, so a batch of hook calls, each with a
+// savepoint per write and per call, copied the same index pages again and
+// again while it held the one writer connection: a third of the writer's time
+// at 100 hook calls/s (r108 SWEEP-100). When a write fails in that attempt,
+// the whole attempt is rolled back and the batch runs again with a savepoint
+// per write, so the writes that commit, and the errors each caller sees, are
+// those of the savepoint form.
 func (s *Store) runGroupedTx(batch []*groupedWrite, hooks groupedTxHooks) error {
 	if writeGroupBatchObserved != nil {
 		writeGroupBatchObserved(hooks.op, len(batch))
@@ -158,44 +210,15 @@ func (s *Store) runGroupedTx(batch []*groupedWrite, hooks groupedTxHooks) error 
 		defer stop()
 	}
 	single := len(batch) == 1
+	isolate := false
 	err := retryBusyObserved(batchCtx, hooks.op, s.groupedTxBusyObservabilityV8(), func() error {
-		tx, beginErr := s.db.BeginTx(batchCtx, nil)
-		if beginErr != nil {
-			return hooks.begin(beginErr)
-		}
-		ran := make([]*groupedWrite, 0, len(batch))
-		for _, item := range batch {
-			item.ran = false
-			if item.skipped {
-				continue
+		for {
+			err, fallBack := s.attemptGroupedTx(batchCtx, batch, hooks, single, isolate)
+			if !fallBack {
+				return err
 			}
-			if !single {
-				if ctxErr := item.ctx.Err(); ctxErr != nil {
-					item.err, item.skipped = ctxErr, true
-					continue
-				}
-			}
-			item.err = nil
-			if runErr := s.runGroupedWrite(batchCtx, tx, item, single); runErr != nil {
-				if single || isSQLiteBusy(runErr) || errors.Is(runErr, errGroupedTxLost) {
-					_ = tx.Rollback()
-					return runErr
-				}
-				item.err = runErr
-				continue
-			}
-			item.ran = true
-			ran = append(ran, item)
+			isolate = true
 		}
-		commitCtx := batchCtx
-		if single {
-			commitCtx = batch[0].ctx
-		}
-		if commitErr := hooks.commit(commitCtx, tx, ran); commitErr != nil {
-			_ = tx.Rollback()
-			return commitErr
-		}
-		return nil
 	})
 	for _, item := range batch {
 		if err != nil && !item.skipped {
@@ -203,6 +226,84 @@ func (s *Store) runGroupedTx(batch []*groupedWrite, hooks groupedTxHooks) error 
 		}
 	}
 	return err
+}
+
+// attemptGroupedTx makes one attempt at the batch's transaction. Without
+// isolate, a write that fails other than on a busy store rolls the attempt
+// back and reports fallBack: the caller runs the batch again with isolate.
+func (s *Store) attemptGroupedTx(
+	batchCtx context.Context,
+	batch []*groupedWrite,
+	hooks groupedTxHooks,
+	single, isolate bool,
+) (err error, fallBack bool) {
+	tx, beginErr := s.db.BeginTx(batchCtx, nil)
+	if beginErr != nil {
+		return hooks.begin(beginErr), false
+	}
+	ran := make([]*groupedWrite, 0, len(batch))
+	for _, item := range batch {
+		item.ran = false
+		if item.skipped {
+			continue
+		}
+		if !single {
+			if ctxErr := item.ctx.Err(); ctxErr != nil {
+				item.err, item.skipped = ctxErr, true
+				continue
+			}
+		}
+		item.err = nil
+		if !isolate {
+			if runErr := runGroupedWriteDirect(batchCtx, tx, item, single); runErr != nil {
+				_ = tx.Rollback()
+				if isSQLiteBusy(runErr) || batchCtx.Err() != nil || (single && item.ctx.Err() != nil) {
+					return runErr, false
+				}
+				return nil, true
+			}
+		} else if runErr := s.runGroupedWrite(batchCtx, tx, item, single); runErr != nil {
+			if single || isSQLiteBusy(runErr) || errors.Is(runErr, errGroupedTxLost) {
+				_ = tx.Rollback()
+				return runErr, false
+			}
+			item.err = runErr
+			continue
+		}
+		item.ran = true
+		ran = append(ran, item)
+	}
+	commitCtx := batchCtx
+	if single {
+		commitCtx = batch[0].ctx
+	}
+	if commitErr := hooks.commit(commitCtx, tx, ran); commitErr != nil {
+		_ = tx.Rollback()
+		return commitErr, false
+	}
+	return nil, false
+}
+
+// groupedWriteDirectKey marks the context of a write that runs in the first,
+// savepoint-free attempt of its shared transaction (runGroupedTx).
+type groupedWriteDirectKey struct{}
+
+// groupedWriteDirect reports whether a write with ctx runs without
+// savepoints: a write made of several writes (writeCallBatch) then runs them
+// without a savepoint each and returns the first error.
+func groupedWriteDirect(ctx context.Context) bool {
+	direct, _ := ctx.Value(groupedWriteDirectKey{}).(bool)
+	return direct
+}
+
+// runGroupedWriteDirect runs one write of the savepoint-free attempt, with
+// the same contexts as runGroupedWrite.
+func runGroupedWriteDirect(batchCtx context.Context, tx *sql.Tx, item *groupedWrite, single bool) error {
+	values := context.WithValue(item.ctx, groupedWriteDirectKey{}, true)
+	if single {
+		return item.run(values, tx)
+	}
+	return item.run(groupedWriteCtx{Context: batchCtx, values: values}, tx)
 }
 
 // runGroupedWrite runs one write. In a shared transaction it runs in a

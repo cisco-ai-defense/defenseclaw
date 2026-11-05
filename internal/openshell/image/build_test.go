@@ -19,6 +19,7 @@
 package image
 
 import (
+	"archive/tar"
 	"bytes"
 	"context"
 	"crypto/sha256"
@@ -41,12 +42,15 @@ import (
 // It has the buildx plugin unless noBuildx is set; the handler never sees
 // `docker buildx version`. It runs in env, not the test's environment.
 type fakeDocker struct {
-	mu       sync.Mutex
-	calls    [][]string
-	stdin    map[int][]byte
-	handler  func(args []string, stdin []byte) (stdout string, exit int)
-	noBuildx bool
-	env      map[string]string
+	mu            sync.Mutex
+	calls         [][]string
+	stdin         map[int][]byte
+	handler       func(args []string, stdin []byte) (stdout string, exit int)
+	noBuildx      bool
+	env           map[string]string
+	exportedHosts exportedHosts
+	// exportedFiles are further regular files of the export, by tar name.
+	exportedFiles map[string][]byte
 }
 
 func (f *fakeDocker) Getenv(key string) string { return f.env[key] }
@@ -73,6 +77,49 @@ func (f *fakeDocker) Run(_ context.Context, stdin io.Reader, stdout, stderr io.W
 			return &CommandError{Args: args, ExitCode: 1}
 		}
 		_, _ = io.WriteString(stdout, "github.com/docker/buildx v0.30.1 c6f062d0eef6a18ae703d0433e2c8a4dd34d4513\n")
+		return nil
+	}
+	if len(args) == 2 && args[0] == "create" {
+		_, _ = io.WriteString(stdout, strings.Repeat("c", 64)+"\n")
+		return nil
+	}
+	if len(args) == 2 && args[0] == "export" {
+		tw := tar.NewWriter(stdout)
+		if f.exportedHosts.present {
+			h := &tar.Header{Name: "etc/hosts", Typeflag: f.exportedHosts.typeflag, Linkname: f.exportedHosts.link, Mode: 0o644,
+				Size: int64(len(f.exportedHosts.data))}
+			if err := tw.WriteHeader(h); err != nil {
+				return err
+			}
+			if _, err := tw.Write(f.exportedHosts.data); err != nil {
+				return err
+			}
+		}
+		// A real export carries the base's nsswitch.conf; tests replace it
+		// through exportedFiles, or drop it with a nil entry.
+		files := map[string][]byte{"etc/nsswitch.conf": []byte("hosts: files dns\n")}
+		for name, data := range f.exportedFiles {
+			files[name] = data
+		}
+		names := make([]string, 0, len(files))
+		for name, data := range files {
+			if data != nil {
+				names = append(names, name)
+			}
+		}
+		sort.Strings(names)
+		for _, name := range names {
+			data := files[name]
+			if err := tw.WriteHeader(&tar.Header{Name: name, Typeflag: tar.TypeReg, Mode: 0o644, Size: int64(len(data))}); err != nil {
+				return err
+			}
+			if _, err := tw.Write(data); err != nil {
+				return err
+			}
+		}
+		return tw.Close()
+	}
+	if len(args) == 3 && args[0] == "rm" && args[1] == "-f" {
 		return nil
 	}
 	out, exit := f.handler(args, in)
@@ -887,6 +934,49 @@ func TestStoreRoundTripAndStrictness(t *testing.T) {
 		if _, err := store.List(); err == nil {
 			t.Errorf("%s: corrupt store accepted", name)
 		}
+	}
+}
+
+func TestLegacyMicroVMRecordsRemainReadable(t *testing.T) {
+	for _, tc := range []struct {
+		name, field string
+	}{
+		{"verified", `"microvm_verified":true`},
+		{"problem", `"microvm_problem":"previous result"`},
+		{"inconclusive", `"microvm_inconclusive":"previous result"`},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			store := NewStore(t.TempDir())
+			if err := os.MkdirAll(filepath.Dir(store.Path()), 0o700); err != nil {
+				t.Fatal(err)
+			}
+			prior := `{"version":1,"images":[{"tag":"old-vm","microvm":true,` + tc.field + `}]}`
+			if err := os.WriteFile(store.Path(), []byte(prior), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			got, err := store.List()
+			if err != nil || len(got) != 1 || got[0].Tag != "old-vm" || !got[0].MicroVM {
+				t.Fatalf("legacy record = %+v, %v", got, err)
+			}
+			if err := store.Put(Record{Tag: "new-vm", MicroVM: true}); err != nil {
+				t.Fatal(err)
+			}
+			written, err := os.ReadFile(store.Path())
+			if err != nil || strings.Contains(string(written), "microvm_verified") ||
+				strings.Contains(string(written), "microvm_problem") || strings.Contains(string(written), "microvm_inconclusive") {
+				t.Fatalf("retired fields survived write: %v %s", err, written)
+			}
+			if got, err := store.List(); err != nil || len(got) != 2 {
+				t.Fatalf("rewritten store = %+v, %v", got, err)
+			}
+			unknown := `{"version":1,"images":[{"tag":"old-vm","unexpected_field":true}]}`
+			if err := os.WriteFile(store.Path(), []byte(unknown), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := store.List(); err == nil {
+				t.Fatal("unrelated record field was accepted")
+			}
+		})
 	}
 }
 

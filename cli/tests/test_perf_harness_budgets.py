@@ -393,8 +393,122 @@ def test_the_registered_claude_code_and_codex_hook_commands_are_the_ones_measure
         f"command = '{inst.dc}/hooks/codex-hook.sh --event PreToolUse'\ntype = 'command'\n",
         encoding="utf-8",
     )
-    assert dcperf.registered_hook(inst, "claudecode") == f"{inst.dc}/hooks/claude-code-hook.sh || exit 2"
-    assert dcperf.registered_hook(inst, "codex") == f"{inst.dc}/hooks/codex-hook.sh --event PreToolUse"
+    assert dcperf.registered_hooks(inst, "claudecode") == [
+        ["/bin/sh", "-c", f"{inst.dc}/hooks/claude-code-hook.sh || exit 2"]
+    ]
+    assert dcperf.registered_hooks(inst, "codex") == [
+        ["/bin/sh", "-c", f"{inst.dc}/hooks/codex-hook.sh --event PreToolUse"]
+    ]
+
+
+def _exec_form_install(tmp_path: Path, guard_body: str, fallback_body: str) -> dcperf.Install:
+    """A Linux per-user Claude Code registration in the GAP-0322 form: the
+    PreToolUse group holds two exec-form handlers (command + args, no shell)."""
+    inst = dcperf.Install(tmp_path)
+    inst.bin.mkdir(parents=True)
+    guard, native = inst.bin / "defenseclaw-hook-post", inst.bin / "defenseclaw-hook-user"
+    for path, body in ((guard, guard_body), (native, fallback_body)):
+        path.write_text("#!/bin/sh\n" + body, encoding="utf-8")
+        path.chmod(0o755)
+    tail = ["hook", "--connector", "claudecode", "--hook-home", str(inst.dc), "--api-addr", "127.0.0.1:1"]
+    (tmp_path / ".claude").mkdir()
+    (tmp_path / ".claude" / "settings.json").write_text(
+        json.dumps(
+            {
+                "hooks": {
+                    "PreToolUse": [
+                        {"matcher": "Bash", "hooks": [{"type": "command", "command": f"{inst.dc}/other-tool.sh"}]},
+                        {
+                            "matcher": "*",
+                            "hooks": [
+                                {"type": "command", "command": "/opt/other-hook.sh"},
+                                {
+                                    "type": "command",
+                                    "command": str(guard),
+                                    "args": ["guard-user-hook", str(native)] + tail,
+                                },
+                                {
+                                    "type": "command",
+                                    "command": str(native),
+                                    "args": ["fallback-guard-user-hook", str(guard)] + tail,
+                                },
+                            ],
+                        },
+                    ]
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+    return inst
+
+
+# The registered guard refuses a start without its argv, as
+# cmd/defenseclaw-hook-post does when /bin/sh -c runs the command alone.
+_GUARD = '[ "$1" = guard-user-hook ] || { echo "DefenseClaw hook registration is invalid" >&2; exit 2; }\n'
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="POSIX hook programs")
+def test_exec_form_handlers_are_started_with_their_args_and_no_shell(tmp_path: Path) -> None:
+    inst = _exec_form_install(tmp_path, _GUARD + "cat >/dev/null; exit 0\n", "cat >/dev/null; exit 0\n")
+    argvs = dcperf.registered_hooks(inst, "claudecode")
+    guard, native = str(inst.bin / "defenseclaw-hook-post"), str(inst.bin / "defenseclaw-hook-user")
+    # Only the DefenseClaw handlers of the group that selects Read, each as its
+    # own argv: Claude Code runs both, in parallel, with no shell.
+    assert [argv[:3] for argv in argvs] == [
+        [guard, "guard-user-hook", native],
+        [native, "fallback-guard-user-hook", guard],
+    ]
+    assert all(argv[0] != "/bin/sh" and argv[-2:] == ["--api-addr", "127.0.0.1:1"] for argv in argvs)
+    ms, rc, denied = dcperf.call_hook(inst, inst.env(), argvs, "claudecode", "s")
+    assert (rc, denied) == (0, False)
+    # The pre-GAP-0322 harness started the command alone through the shell: the
+    # guard refused it, so every benign call counted as not allowed.
+    assert dcperf.call_hook(inst, inst.env(), [["/bin/sh", "-c", guard]], "claudecode", "s")[1:] == (2, True)
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="POSIX hook programs")
+def test_a_call_is_allowed_only_when_every_handler_allows_it(tmp_path: Path) -> None:
+    deny = 'cat >/dev/null; echo \'{"hookSpecificOutput":{"permissionDecision":"deny"}}\'; exit 0\n'
+    inst = _exec_form_install(tmp_path, _GUARD + "cat >/dev/null; exit 0\n", deny)
+    argvs = dcperf.registered_hooks(inst, "claudecode")
+    assert dcperf.call_hook(inst, inst.env(), argvs, "claudecode", "s")[1:] == (0, True)
+    inst = _exec_form_install(tmp_path / "b", _GUARD + "cat >/dev/null; exit 1\n", "cat >/dev/null; exit 0\n")
+    assert dcperf.call_hook(inst, inst.env(), dcperf.registered_hooks(inst, "claudecode"), "claudecode", "s")[1] == 1
+
+
+def test_eslogger_counts_every_exec_form_handler_of_a_call() -> None:
+    import calendar as _cal
+    import time as _time
+
+    base = _cal.timegm(_time.strptime("2026-11-04T10:00:00", "%Y-%m-%dT%H:%M:%S"))
+
+    def ev(at, kind, pid, ppid, name=""):
+        # eslogger numbers each event type on its own: exec and fork seq_num
+        # run 1, 2, 3 here, with no gap.
+        seq = (at + 1) // 2
+        stamp = f"2026-11-04T10:00:00.{at:02d}0000000Z"
+        if kind == "exec":
+            body = {
+                "exec": {"target": {"audit_token": {"pid": pid}, "ppid": ppid, "executable": {"path": "/x/" + name}}}
+            }
+        else:
+            body = {"fork": {"child": {"audit_token": {"pid": pid}, "ppid": ppid}}}
+        return json.dumps({"time": stamp, "event_type": 9 if kind == "exec" else 11, "seq_num": seq, "event": body})
+
+    lines = [
+        ev(1, "fork", 101, 50),
+        ev(2, "exec", 101, 50, "defenseclaw-hook-post"),
+        ev(3, "fork", 102, 50),
+        ev(4, "exec", 102, 50, "defenseclaw-hook-user"),
+        ev(5, "fork", 103, 101),
+        ev(6, "exec", 103, 101, "defenseclaw-hook-user"),
+    ]
+    roots = ("defenseclaw-hook-post", "defenseclaw-hook-user")
+    parsed = dcperf.parse_eslogger(lines, [(base, base + 0.5)], 50, None, roots)
+    assert (parsed["calls"], parsed["per_call_p50"]) == (1, 3)
+    # The default roots are the shell of a shell-form command: none here.
+    assert dcperf.parse_eslogger(lines, [(base, base + 0.5)], 50, None)["calls_dropped"] == 1
 
 
 def test_the_gateway_port_is_read_from_the_gateway_section(tmp_path: Path) -> None:

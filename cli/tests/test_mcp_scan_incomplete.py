@@ -16,6 +16,8 @@ import pytest
 from defenseclaw.config import MCPScannerConfig, MCPServerEntry
 from defenseclaw.scanner import mcp
 
+from tests.os_view import os_view
+
 _SDK_LOGGER = "mcpscanner.core.scanner"
 
 
@@ -80,7 +82,7 @@ def test_windows_scan_with_a_failed_analyzer_fails_instead_of_clean() -> None:
         return [_tool_result("ping", ["yara"])], 0
 
     with (
-        patch.object(mcp.os, "name", "nt"),
+        patch.object(mcp, "os", os_view("nt")),
         patch.object(mcp, "_windows_stdio_launch_plan", return_value=plan),
         patch.object(mcp, "_scan_windows_stdio_tools", scan),
         pytest.raises(mcp.MCPScanIncompleteError, match="'decoy' is incomplete"),
@@ -97,7 +99,7 @@ def test_windows_scan_that_inspected_every_tool_returns_its_findings() -> None:
         return [SimpleNamespace(tool_name="ping", analyzers=["yara"], findings=[finding])], 0
 
     with (
-        patch.object(mcp.os, "name", "nt"),
+        patch.object(mcp, "os", os_view("nt")),
         patch.object(mcp, "_windows_stdio_launch_plan", return_value=plan),
         patch.object(mcp, "_scan_windows_stdio_tools", scan),
     ):

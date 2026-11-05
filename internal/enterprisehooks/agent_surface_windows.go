@@ -23,6 +23,8 @@ import (
 	"sort"
 	"strings"
 
+	"github.com/defenseclaw/defenseclaw/internal/claudedesktop"
+	"github.com/defenseclaw/defenseclaw/internal/codesig"
 	"github.com/defenseclaw/defenseclaw/internal/gateway/connector"
 	"github.com/defenseclaw/defenseclaw/internal/legacyconnector"
 	"github.com/defenseclaw/defenseclaw/internal/winpath"
@@ -110,12 +112,35 @@ var windowsExtensionRoots = []struct{ host, dir string }{
 var windowsSurfaceExtensions = map[string]struct {
 	id             string
 	engineIsHost   bool
-	desktopProbers []func(profileHome string) (connector.AgentSurface, bool, error)
+	desktopProbers []windowsDesktopProber
 }{
-	"claudecode": {id: "anthropic.claude-code", engineIsHost: true, desktopProbers: []func(string) (connector.AgentSurface, bool, error){discoverWindowsClaudeDesktop}},
-	"codex":      {id: "openai.chatgpt", desktopProbers: []func(string) (connector.AgentSurface, bool, error){discoverWindowsCodexApp}},
+	"claudecode": {id: "anthropic.claude-code", engineIsHost: true, desktopProbers: []windowsDesktopProber{discoverWindowsClaudeDesktop}},
+	"codex":      {id: "openai.chatgpt", desktopProbers: []windowsDesktopProber{windowsSingleDesktop(discoverWindowsCodexApp)}},
 	// Devin Desktop has no extension (surface_probes_devin.go).
-	"devin": {desktopProbers: []func(string) (connector.AgentSurface, bool, error){discoverWindowsDevinDesktop}},
+	"devin": {desktopProbers: []windowsDesktopProber{windowsSingleDesktop(discoverWindowsDevinDesktop)}},
+}
+
+// windowsDesktopSurface is one surface a desktop prober found; complete is
+// false when it comes from a folder that was not read in full, so it may
+// warn but not select a row version.
+type windowsDesktopSurface struct {
+	surface  connector.AgentSurface
+	complete bool
+}
+
+// windowsDesktopProber lists a desktop app's surfaces in a profile.
+type windowsDesktopProber func(profileHome string) ([]windowsDesktopSurface, error)
+
+// windowsSingleDesktop adapts a prober of one app install, whose surface is
+// complete when it was read without an error.
+func windowsSingleDesktop(probe func(string) (connector.AgentSurface, bool, error)) windowsDesktopProber {
+	return func(profileHome string) ([]windowsDesktopSurface, error) {
+		surface, ok, err := probe(profileHome)
+		if !ok {
+			return nil, err
+		}
+		return []windowsDesktopSurface{{surface: surface, complete: err == nil}}, err
+	}
 }
 
 const windowsSurfaceMaxEntries = 4096
@@ -169,11 +194,11 @@ func discoverWindowsAgentSurfaces(sid, profileHome, connectorName string) ([]con
 			}
 		}
 		for _, prober := range probe.desktopProbers {
-			surface, ok, err := prober(profileHome)
+			found, err := prober(profileHome)
 			scanErr = errors.Join(scanErr, err)
-			if ok {
-				out = append(out, surface)
-				if err == nil {
+			for _, desktop := range found {
+				out = append(out, desktop.surface)
+				if desktop.complete {
 					completeIndexes = append(completeIndexes, len(out)-1)
 				}
 			}
@@ -204,27 +229,153 @@ func discoverWindowsAgentSurfaces(sid, profileHome, connectorName string) ([]con
 	return out, complete, errors.Join(scanErr, readErr)
 }
 
-// discoverWindowsClaudeDesktop finds the Claude Code build Claude Desktop
-// runs, kept as claude-code\<version> under its roaming data folder; the
-// MSIX package keeps it in the package's LocalCache (live check).
-func discoverWindowsClaudeDesktop(profileHome string) (connector.AgentSurface, bool, error) {
-	dirs := []string{filepath.Join(profileHome, "AppData", "Roaming", "Claude", "claude-code")}
-	if packages, _ := filepath.Glob(filepath.Join(profileHome, "AppData", "Local", "Packages", "Claude_*")); len(packages) != 0 {
-		sort.Strings(packages)
-		for _, pkg := range packages[:min(len(packages), 4)] {
-			dirs = append(dirs, filepath.Join(pkg, "LocalCache", "Roaming", "Claude", "claude-code"))
-		}
-	}
+// windowsClaudeDesktopCandidatesMax bounds the version folders of one data
+// folder that are checked, newest first, for a build that verifies.
+const windowsClaudeDesktopCandidatesMax = 4
+
+// discoverWindowsClaudeDesktop finds the Claude Code builds Claude Desktop
+// runs, kept as claude-code\<version> under each of its data folders
+// (internal/claudedesktop: %APPDATA%\Claude, the MSIX package's
+// %LOCALAPPDATA%\Claude-Data\claude_<id>, and %LOCALAPPDATA%\Claude-3p on
+// third-party inference; measured on Claude Desktop 4.16336.0). Each data
+// folder is a surface of its own with its newest build whose Authenticode
+// signature names Anthropic (the folder is the user's own), and, as another
+// surface with EngineUnverified, the folder's newest build when that one is
+// not signed: a newer unsigned or half-written folder never hides a genuine
+// build, and admitSurfaces sees every folder's build, so the row follows
+// the oldest admitted one. A surface is incomplete when its folder was not
+// read in full, when the data folder glob left folders out, or when the
+// newest candidates all failed and older ones were not checked; the scan
+// error then reports the coverage as incomplete.
+func discoverWindowsClaudeDesktop(profileHome string) ([]windowsDesktopSurface, error) {
 	var scanErr error
-	var best connector.AgentSurface
-	for _, dir := range dirs {
-		version, err := newestWindowsVersionDir(dir)
+	dirs, overflow := claudedesktop.EngineDirs("windows", claudedesktop.FoldersForHome("windows", profileHome))
+	if overflow {
+		scanErr = fmt.Errorf("more Claude Desktop data folders match than the %d read in %s", claudedesktop.MaxGlobMatches, profileHome)
+	}
+	var out []windowsDesktopSurface
+	for _, engineDir := range dirs {
+		dir := engineDir.Path
+		versions, err := windowsEngineVersionDirs(dir)
 		scanErr = errors.Join(scanErr, err)
-		if version != "" && (best.EngineVersion == "" || compareWindowsEnterpriseVersion(version, best.EngineVersion) > 0) {
-			best = connector.AgentSurface{Surface: connector.HostSurfaceDesktop, Host: "claude-desktop", EngineVersion: version, Path: dir}
+		complete := err == nil && !engineDir.Overflow
+		var newestRejected *connector.AgentSurface
+		var chosen []windowsDesktopSurface
+		for i, version := range versions {
+			if i == windowsClaudeDesktopCandidatesMax {
+				complete = false
+				scanErr = errors.Join(scanErr, fmt.Errorf("no signed Claude Desktop engine among the %d newest builds in %s", i, dir))
+				break
+			}
+			reason := windowsClaudeDesktopBuildCheck(filepath.Join(dir, version))
+			if reason == "" {
+				chosen = []windowsDesktopSurface{{surface: connector.AgentSurface{Surface: connector.HostSurfaceDesktop, Host: "claude-desktop", EngineVersion: version, Path: dir}}}
+				break
+			}
+			if newestRejected == nil {
+				newestRejected = &connector.AgentSurface{Surface: connector.HostSurfaceDesktop, Host: "claude-desktop", Path: dir,
+					EngineUnverified: boundEngineUnverifiedReason("Claude Desktop engine " + version + ": " + reason)}
+			}
+		}
+		if newestRejected != nil {
+			chosen = append(chosen, windowsDesktopSurface{surface: *newestRejected})
+		}
+		for i := range chosen {
+			chosen[i].complete = complete
+		}
+		out = append(out, chosen...)
+	}
+	return out, scanErr
+}
+
+// windowsClaudeDesktopBuildCheck is verifyWindowsClaudeDesktopBuild; tests
+// replace it.
+var windowsClaudeDesktopBuildCheck = verifyWindowsClaudeDesktopBuild
+
+// windowsSignedVersionIs reports whether a signed file version (a.b.c.d)
+// is folder's major.minor.patch.
+func windowsSignedVersionIs(fileVersion, folder string) bool {
+	file := strings.Split(strings.TrimSpace(fileVersion), ".")
+	want := strings.Split(strings.TrimSpace(folder), ".")
+	if len(file) < 3 || len(want) != 3 {
+		return false
+	}
+	for i := range want {
+		if strings.TrimLeft(file[i], "0") != strings.TrimLeft(want[i], "0") {
+			return false
 		}
 	}
-	return best, best.EngineVersion != "", scanErr
+	for _, rest := range file[3:] {
+		if strings.Trim(rest, "0") != "" {
+			return false
+		}
+	}
+	return true
+}
+
+// windowsClaudeDesktopPublishers are the Authenticode signers a Claude
+// Desktop engine build may carry: the names DefenseClaw's Windows installer
+// accepts for Claude Code.
+var windowsClaudeDesktopPublishers = codesig.AnthropicPublishers
+
+// verifyWindowsClaudeDesktopEngine checks one engine executable; tests
+// replace it.
+var verifyWindowsClaudeDesktopEngine = codesig.VerifyAuthenticode
+
+// verifyWindowsClaudeDesktopEngineDigest is verifyWindowsClaudeDesktopEngine
+// that also hashes the file through the handle it verified; tests replace
+// it.
+var verifyWindowsClaudeDesktopEngineDigest = codesig.VerifyAuthenticodeWithSHA256
+
+// windowsClaudeDesktopEnginesMax bounds the executables one version folder
+// is searched for.
+const windowsClaudeDesktopEnginesMax = 4
+
+// verifyWindowsClaudeDesktopBuild returns why the engine build in
+// versionDir is not identified, or "" when a claude.exe in it (the folder
+// itself or one level below, live check) has a valid Authenticode
+// signature from windowsClaudeDesktopPublishers. It runs under the user's
+// token, executes nothing and refuses reparse points.
+func verifyWindowsClaudeDesktopBuild(versionDir string) string {
+	_, _, reason := verifiedWindowsClaudeDesktopBuild(versionDir, verifyWindowsClaudeDesktopEngine)
+	return reason
+}
+
+// verifiedWindowsClaudeDesktopBuild is verifyWindowsClaudeDesktopBuild,
+// checking each claude.exe with verify, that also returns the claude.exe
+// that verified and the sha256 verify reported for it ("" with the reason
+// otherwise).
+func verifiedWindowsClaudeDesktopBuild(versionDir string, verify func(string, []string) codesig.Result) (executable, digest, reason string) {
+	candidates, _ := filepath.Glob(filepath.Join(versionDir, "*", "claude.exe"))
+	sort.Strings(candidates)
+	candidates = append([]string{filepath.Join(versionDir, "claude.exe")}, candidates...)
+	folder := filepath.Base(versionDir)
+	checked := 0
+	for _, candidate := range candidates {
+		if info, err := os.Lstat(candidate); err != nil || !info.Mode().IsRegular() {
+			continue
+		}
+		if checked++; checked > windowsClaudeDesktopEnginesMax {
+			break
+		}
+		result := verify(candidate, windowsClaudeDesktopPublishers)
+		switch {
+		case !result.Verified:
+			reason = result.Reason
+		case result.Version == "":
+			reason = candidate + " is signed but has no file version to compare with its " + folder + " folder"
+		case !windowsSignedVersionIs(result.Version, folder):
+			// An older signed build copied into a newer folder must not
+			// select the newer hook contract.
+			reason = candidate + " is signed as version " + result.Version + ", not " + folder
+		default:
+			return candidate, result.SHA256, ""
+		}
+	}
+	if reason == "" {
+		return "", "", "no claude.exe in " + versionDir
+	}
+	return "", "", reason
 }
 
 // discoverWindowsCodexApp reports the Codex app's MSIX package data folder.
@@ -312,24 +463,24 @@ func newestWindowsExtensionDir(root, id string) (string, string, error) {
 	return best, bestVersion, nil
 }
 
-// newestWindowsVersionDir returns the highest dotted-numeric folder name
-// under dir.
-func newestWindowsVersionDir(dir string) (string, error) {
-	best := ""
+// windowsEngineVersionDirs returns the dotted-numeric folder names under dir,
+// newest first.
+func windowsEngineVersionDirs(dir string) ([]string, error) {
 	entries, overflow, err := readWindowsDirBounded(dir)
 	if err != nil {
-		return "", err
+		return nil, err
 	}
+	var versions []string
 	for _, entry := range entries {
-		name := entry.Name()
-		if entry.IsDir() && windowsNativeClaudeVersionName(name) && (best == "" || compareWindowsEnterpriseVersion(name, best) > 0) {
-			best = name
+		if name := entry.Name(); entry.IsDir() && windowsNativeClaudeVersionName(name) {
+			versions = append(versions, name)
 		}
 	}
+	sort.SliceStable(versions, func(i, j int) bool { return compareWindowsEnterpriseVersion(versions[i], versions[j]) > 0 })
 	if overflow {
-		return best, fmt.Errorf("version folder %s has more than %d entries", dir, windowsSurfaceMaxEntries)
+		return versions, fmt.Errorf("version folder %s has more than %d entries", dir, windowsSurfaceMaxEntries)
 	}
-	return best, nil
+	return versions, nil
 }
 
 // newestWindowsPackageVersion reads "<prefix><version>_<arch>__<publisher>"

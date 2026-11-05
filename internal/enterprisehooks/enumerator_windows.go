@@ -803,6 +803,19 @@ func WriteTargetsManifestAtomic(path string, m Manifest) (changed bool, err erro
 	if _, statErr := os.Lstat(path); statErr == nil {
 		destinationExists = true
 		if err := validateWindowsTargetsManifestObject(path, false); err != nil {
+			// Standalone: a manifest the strict trust walk refuses (an
+			// untrusted writer or owner) is never re-stamped in place. The
+			// restamp would put a trusted descriptor over a roster that
+			// account may have edited, and the byte-identical shortcut below
+			// would then keep it. Leave it refused; Setup /ensure writes a
+			// fresh one (GAP-0561). ACL-only drift is still re-stamped.
+			if windowsTargetsManifestRefusesContentDrift() {
+				if strictErr := windowsTargetsManifestStrictTrust(path); strictErr != nil {
+					return false, managed.RefuseStandaloneContentDrift(fmt.Errorf(
+						"enterprise hooks: validate existing hook guardian manifest: %w", strictErr,
+					))
+				}
+			}
 			// Bulldoze: an existing manifest with a non-canonical owner or
 			// DACL (left behind by a prior unsigned certification install
 			// whose scoped guardian wrote it under a different token) must

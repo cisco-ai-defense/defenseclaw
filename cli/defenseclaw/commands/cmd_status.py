@@ -208,8 +208,6 @@ def _opencode_runtime_truth(
     return raw_state, f"managed bridge authenticated load heartbeat is fresh (received at {heartbeat_raw.strip()})"
 
 
-
-
 # GAP-1149: counting alerts reads every audit row, which took minutes on a
 # 2 GB audit database; status shows "not counted" (JSON: null) after this.
 _ALERT_COUNT_SECONDS = 3.0
@@ -524,6 +522,7 @@ def status(app: AppContext, as_json: bool) -> None:
         _print_retention_cap_warning(health)
         _print_agent_identity_ledger(health)
         _print_agents(cfg, health=health)
+        _print_cowork(cfg, health, gateway_running=True)
         _print_guardrail_profile(cfg)
         _print_application_protection(cfg, health=health)
         _print_semantic_routing(cfg, health=health)
@@ -595,6 +594,7 @@ def status(app: AppContext, as_json: bool) -> None:
             sidecar_unread=bool(unread),
             sidecar_unconfirmed=unconfirmed,
         )
+        _print_cowork(cfg, None, gateway_running=bool(hung_pid))
         _print_application_protection(cfg)
         _print_semantic_routing(cfg)
         _print_hook_guardian(cfg)
@@ -669,8 +669,7 @@ def _sidecar_listener_state(port: int, host: str) -> tuple[bool | None, str]:
     except OSError:
         return None, "API listener state is unconfirmed; loopback connection could not be checked"
     return None, (
-        f"the API port answers at {port} and is held by another account; "
-        "its owner is not visible to this account"
+        f"the API port answers at {port} and is held by another account; its owner is not visible to this account"
     )
 
 
@@ -699,16 +698,10 @@ def _status_refused_detail(cfg, client, public) -> str:
                 if sys.platform == "win32"
                 else f"restore read access (chmod 600 {dotenv})"
             )
-            return (
-                f"this account cannot read {dotenv}, so status has no gateway token to read the live "
-                f"state; {repair}"
-            )
+            return f"this account cannot read {dotenv}, so status has no gateway token to read the live state; {repair}"
         except OSError:
             pass
-        return (
-            "status has no gateway token (DEFENSECLAW_GATEWAY_TOKEN) to read the live state; "
-            "run defenseclaw doctor"
-        )
+        return "status has no gateway token (DEFENSECLAW_GATEWAY_TOKEN) to read the live state; run defenseclaw doctor"
     try:
         from defenseclaw.commands.cmd_doctor import _trusted_gateway_listener
 
@@ -920,6 +913,7 @@ def _print_agents(
 
     gc = getattr(cfg, "guardrail", None)
     agent_missing = {c for c in actives if _agent_missing(cfg, c, health_map.get(c))}
+    desktop_engine = _claude_desktop_engine_version(cfg) if "claudecode" in actives else ""
     # ``guardrail.enabled: false`` (``setup guardrail --disable``, or the
     # default ``uninstall``) makes the gateway tear every hook connector
     # down, so none of them enforces (GAP-1312). The OpenClaw row reports the
@@ -944,12 +938,7 @@ def _print_agents(
     disabled_count = len(actives) - enabled_count
     # GAP-1937: a connector whose setup failed at gateway start is not
     # enforced; count it the way `defenseclaw-gateway status` does.
-    not_running_count = sum(
-        1 for c in actives if _is_enabled(c) and (
-            c in agent_missing
-            or c in not_started
-        )
-    )
+    not_running_count = sum(1 for c in actives if _is_enabled(c) and (c in agent_missing or c in not_started))
     header = f"{enabled_count - not_running_count} active"
     if not_running_count:
         header += f", {not_running_count} not running"
@@ -1012,6 +1001,9 @@ def _print_agents(
             continue
         hc = health_map.get(conn.strip().lower())
         source_suffix = f" source={source}"
+        if conn == "claudecode" and desktop_engine:
+            # GAP-0036: no claude CLI; Claude Desktop's engine runs the hooks.
+            source_suffix += f" agent=Claude Desktop engine {desktop_engine}"
         if hc:
             runtime_detail = ""
             runtime_state = str(hc.get("state") or "")
@@ -1184,11 +1176,19 @@ def print_gateway_while_config_unloadable(config_error: str, *, as_json: bool = 
             health = None
     policy = _policy_status(health if isinstance(health, dict) else None)
     if as_json:
-        click.echo(json.dumps({
-            "config_error": config_error,
-            "sidecar": {"running": isinstance(health, dict), "api": f"{address[0]}:{address[1]}" if address else ""},
-            "policy": policy,
-        }, indent=2))
+        click.echo(
+            json.dumps(
+                {
+                    "config_error": config_error,
+                    "sidecar": {
+                        "running": isinstance(health, dict),
+                        "api": f"{address[0]}:{address[1]}" if address else "",
+                    },
+                    "policy": policy,
+                },
+                indent=2,
+            )
+        )
         return
     if address is None:
         _status_row("Sidecar", "not running")
@@ -1269,6 +1269,37 @@ def _fetch_health_connectors(
     return out
 
 
+def _cowork_status(cfg, health: dict | None, *, gateway_running: bool):
+    """The Cowork row (cowork.cowork_status), or None when Cowork plays no part.
+
+    *health* is the runtime-bound authenticated status; *gateway_running* says
+    whether this account's gateway runs even when that status is unreadable (a
+    live PID that refuses /status or hangs), which reads as unconfirmed, not as
+    a stopped gateway.
+    """
+    from defenseclaw import cowork
+
+    try:
+        return cowork.cowork_status(
+            cfg,
+            health,
+            gateway_running=gateway_running,
+            health_authenticated=health is not None,
+            claudecode_skipped="claudecode" in _connectors_not_started(health),
+        )
+    except Exception:  # noqa: BLE001 - status stays best effort
+        return None
+
+
+def _print_cowork(cfg, health: dict | None, *, gateway_running: bool) -> None:
+    row = _cowork_status(cfg, health, gateway_running=gateway_running)
+    if row is None:
+        return
+    _status_row("Cowork", ux._style(row.detail, fg="green" if row.protected else "yellow"))
+    if row.step:
+        _echo_wrapped(" " * 16 + ux.dim(f"Next: {row.step}"), 16)
+
+
 def _effective_status_mode(cfg, connector: str, source: str = "manual") -> str:
     if source == "automatic":
         try:
@@ -1316,8 +1347,7 @@ def _effective_status_fail_mode(cfg, connector: str) -> dict:
 
 
 _HOOK_CREDENTIAL_REFUSED_DETAIL = (
-    "the scoped hook credential is refused by the gateway (HTTP 401), "
-    "so hook calls cannot obtain policy decisions"
+    "the scoped hook credential is refused by the gateway (HTTP 401), so hook calls cannot obtain policy decisions"
 )
 
 
@@ -1352,11 +1382,13 @@ def _hook_runtime_degraded_suffix(cfg, connector: str, *, credential_refused: bo
         )
 
         problems = (
-            [HookProblem(
-                _HOOK_CREDENTIAL_REFUSED_DETAIL,
-                "run `defenseclaw doctor --passive` to diagnose the scoped hook credential",
-                blocking=True,
-            )]
+            [
+                HookProblem(
+                    _HOOK_CREDENTIAL_REFUSED_DETAIL,
+                    "run `defenseclaw doctor --passive` to diagnose the scoped hook credential",
+                    blocking=True,
+                )
+            ]
             if credential_refused
             # An agent setting that turns every hook off (Claude Code or
             # Copilot disableAllHooks, Codex [features] hooks = false) is
@@ -1458,6 +1490,23 @@ def _agent_missing(cfg, connector: str, live: dict | None = None) -> bool:
         )
     except Exception:  # noqa: BLE001 - status must survive incomplete evidence.
         return False
+
+
+def _claude_desktop_engine_version(cfg) -> str:
+    """The Claude Code version the last agent discovery read from Claude
+    Desktop's engine (no claude CLI, GAP-0036), or "". Reads the cache only."""
+    try:
+        from defenseclaw.inventory import agent_discovery
+
+        disc = agent_discovery._read_cache(data_dir=str(getattr(cfg, "data_dir", "") or "") or None)
+    except Exception:  # noqa: BLE001 - the note is optional.
+        return ""
+    signal = disc.agents.get("claudecode") if disc is not None else None
+    if signal is None or signal.source != agent_discovery.SOURCE_CLAUDE_DESKTOP or not signal.installed:
+        return ""
+    from defenseclaw.connector_contracts import normalize_agent_version
+
+    return normalize_agent_version(signal.version) or "(version not read)"
 
 
 def _agent_missing_detail(connector: str) -> str:
@@ -1994,9 +2043,7 @@ def _native_delivery_summary(cfg, *, audit_db: str = ""):
     database = database or str(getattr(cfg, "audit_db", "") or "")
     if not database:
         database = os.path.join(data_dir, "audit.db")
-    return summarize_native_delivery(
-        inspect_connector_custody(database, data_dir, api_addr=gateway_api_addr(cfg))
-    )
+    return summarize_native_delivery(inspect_connector_custody(database, data_dir, api_addr=gateway_api_addr(cfg)))
 
 
 def _print_native_delivery_status(summary, *, configured: set[str] | None = None) -> None:
@@ -2298,6 +2345,7 @@ def _status_payload(app) -> dict:
     skip_live_health = config_invalid and profile != "secure_client"
     health = None
     client = None
+    live_pid = 0
     if not skip_live_health:
         from defenseclaw.gateway import OrchestratorClient, gateway_api_client_host
 
@@ -2322,8 +2370,10 @@ def _status_payload(app) -> dict:
             holder = _foreign_gateway_port_holder(cfg)
         except Exception:  # noqa: BLE001 - a failed probe cannot prove the gateway stopped
             payload["sidecar"] = {"running": None, "reason": "API listener inspection failed"}
+            # As the human view (hung_pid): a live PID still means a running gateway.
+            live_pid = _live_gateway_pid(cfg)
         else:
-            pid = 0 if holder else _live_gateway_pid(cfg)
+            pid = live_pid = 0 if holder else _live_gateway_pid(cfg)
             if holder:
                 reason = f"port {cfg.gateway.api_port} is held by {holder}; this gateway's state is unconfirmed"
                 payload["sidecar"] = {"running": None, "reason": reason}
@@ -2350,6 +2400,12 @@ def _status_payload(app) -> dict:
     if (policy := _policy_status(health)) is not None:
         payload["policy"] = policy
     payload["connectors"] = _connector_roster(cfg, health=health)
+    if (
+        not skip_live_health
+        and (cowork_row := _cowork_status(cfg, health, gateway_running=health is not None or bool(live_pid)))
+        is not None
+    ):
+        payload["cowork"] = cowork_row.as_dict()
     payload["application_protection"] = _application_protection_status(cfg, health=health)
     payload["semantic_routing"] = _semantic_routing_status(cfg, health=health)
     payload["hook_guardian"] = _hook_guardian_status(cfg)

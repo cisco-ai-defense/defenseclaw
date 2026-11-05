@@ -162,6 +162,12 @@ type Event struct {
 	// Identity prefers it to Name, whose basename can be a version number
 	// (a native Claude install runs as .../versions/2.1.292).
 	Exe string
+	// ImageSHA256 and ImageVersion identify the image of an exec whose install
+	// layout names a Claude Code release: the hex SHA-256 the source read at
+	// exec time, and the version the layout names (clientimage.go). Empty when
+	// the image is no such layout or could not be read; the host plane then
+	// grants the image nothing.
+	ImageSHA256, ImageVersion string
 	// UID and AUID are the process's kernel uid and audit login uid. nil is
 	// "not observed": uid 0 is root, which is a value, not an absence.
 	UID  *int

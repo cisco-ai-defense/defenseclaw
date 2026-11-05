@@ -17,6 +17,7 @@
 package config
 
 import (
+	"bytes"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -117,6 +118,45 @@ func TestOpenShellLoaderDefaults(t *testing.T) {
 	}
 }
 
+func TestOpenShellRetiredMiddlewareIsIgnored(t *testing.T) {
+	path := filepath.Join(t.TempDir(), DefaultConfigName)
+	raw := []byte("config_version: 9\nopenshell:\n  middleware: {enabled: true}\n  token_delivery: env\n")
+	if err := os.WriteFile(path, raw, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	for name, load := range map[string]func(string) (*Config, error){
+		"ordinary": LoadFromFile, "runtime": LoadRuntimeV8File,
+	} {
+		t.Run(name, func(t *testing.T) {
+			cfg, err := load(path)
+			if err != nil {
+				t.Fatalf("1.0.6 config did not load: %v", err)
+			}
+			if cfg.OpenShell.TokenDelivery != "env" {
+				t.Fatalf("adjacent token_delivery = %q, want env", cfg.OpenShell.TokenDelivery)
+			}
+			encoded, err := yaml.Marshal(cfg.OpenShell)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if bytes.Contains(encoded, []byte("middleware:")) {
+				t.Fatal("retired key is still emitted by the config model")
+			}
+		})
+	}
+}
+
+func TestOpenShellTokenDeliveryWithoutRetiredKey(t *testing.T) {
+	path := writeOpenShellConfig(t, "openshell:\n  token_delivery: env\n")
+	cfg, err := LoadFromFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.OpenShell.TokenDelivery != "env" {
+		t.Fatalf("token_delivery = %q, want env", cfg.OpenShell.TokenDelivery)
+	}
+}
+
 // openShellTestRoot is an absolute root on this OS: "/", or the temp
 // directory's volume ("C:" plus a backslash).
 func openShellTestRoot() string {
@@ -151,7 +191,6 @@ openshell:
   mcp: {import: false, host_ports: [5432]}
   upstream_telemetry: true
   token_delivery: env
-  middleware: {enabled: true}
   admin:
     required_pack: strict
     min_profile: balanced
@@ -192,7 +231,6 @@ openshell:
 		Harnesses:         []string{"claude-code", "codex"},
 		Wrappers:          []string{"claudecode"},
 		MCP:               OpenShellMCPConfig{Import: &f, HostPorts: []int{5432}},
-		Middleware:        OpenShellMiddlewareConfig{Enabled: true},
 		TokenDelivery:     "env",
 		UpstreamTelemetry: true,
 		Admin: OpenShellAdminConfig{

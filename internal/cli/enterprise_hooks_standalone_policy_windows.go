@@ -327,6 +327,14 @@ func enterpriseHookStandalonePlatformPrepare(stderr io.Writer) {
 	if _, err := enterpriseHookWindowsClaudeVersionFloor(opts, connectors); err != nil {
 		fmt.Fprintf(stderr, "defenseclaw: enterprise machine policy (Windows): Claude Code version floor: %v\n", err)
 	}
+	// A managed_hooks_only change is machine policy only: write it into the
+	// Claude Code drop-in here, before any row, so no enrolled account needs
+	// its own Windows session for it (cowork-1-0-8 GAP-0064).
+	if written, err := enterpriseHookWindowsClaudeHooksOnlyLock(); err != nil {
+		fmt.Fprintf(stderr, "defenseclaw: enterprise machine policy (Windows): Claude Code managed_hooks_only: %v\n", err)
+	} else if written {
+		fmt.Fprintf(stderr, "[hook-guardian] wrote the configured managed_hooks_only setting into DefenseClaw's Claude Code drop-in\n")
+	}
 	if _, err := enterpriseHookWindowsWSL(opts); err != nil {
 		fmt.Fprintf(stderr, "defenseclaw: enterprise machine policy (Windows): WSL agent sessions: %v\n", err)
 	}
@@ -336,6 +344,9 @@ func enterpriseHookStandalonePlatformPrepare(stderr io.Writer) {
 		fmt.Fprintf(stderr, "[hook-guardian] rewrote the Cursor enterprise adapter for this release\n")
 	}
 }
+
+// enterpriseHookWindowsClaudeHooksOnlyLock is replaceable in tests.
+var enterpriseHookWindowsClaudeHooksOnlyLock = enterprisehooks.ApplyWindowsClaudeManagedHooksOnlyLock
 
 // enterpriseHookWindowsCursorAdapterRefresh is replaceable in tests.
 var enterpriseHookWindowsCursorAdapterRefresh = enterprisehooks.RefreshWindowsCursorManagedAdapter

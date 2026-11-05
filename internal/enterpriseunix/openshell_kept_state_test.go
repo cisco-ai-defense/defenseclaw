@@ -328,11 +328,11 @@ func TestKeptOpenShellSetupAdoptionHygiene(t *testing.T) {
 				t.Fatal("uninstall did not keep the sandbox setup record")
 			}
 			active := h.env.loadOpenShellState()
-			active.Applied = &openshellApplied{Enabled: true, Install: "setup", Driver: "docker", Version: "0.1.5", GatewayPort: 17671, DockerNamespace: openshell.ManagedDockerNamespace}
+			active.Applied = &openshellApplied{Enabled: true, Install: "setup", Driver: "docker", Version: openshell.InstallerVersion, GatewayPort: 17671, DockerNamespace: openshell.ManagedDockerNamespace}
 			if err := h.env.saveOpenShellState(active); err != nil {
 				t.Fatal(err)
 			}
-			r := ensureKeptHost(t, h, map[string]any{"install": "setup", "driver": "docker", "version": "0.1.5", "gateway_port": 17671})
+			r := ensureKeptHost(t, h, map[string]any{"install": "setup", "driver": "docker", "version": openshell.InstallerVersion, "gateway_port": 17671})
 			requireOK(t, r)
 			if containsLine(r.Changes, "switched the sandbox setup") || physicalExists(h.env.openshellKeptStatePath()) {
 				t.Errorf("stale kept record influenced an active setup: %v", r.Changes)

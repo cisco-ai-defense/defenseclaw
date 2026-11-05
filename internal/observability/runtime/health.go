@@ -43,6 +43,11 @@ type DestinationHealth struct {
 	LastSuccess         time.Time
 	LastFailure         time.Time
 	Sources             []delivery.HealthSnapshot
+	// MetricExportsScoped keeps the metric signal out of Counters: its
+	// export attempts are cumulative, a rejected one is replaced by the next,
+	// so they are counted in its own source row only. Counters then cover
+	// the log and trace records alone, every counter in the same scope.
+	MetricExportsScoped bool
 }
 
 // DestinationHealthSnapshot is pinned to exactly one active graph generation.
@@ -95,6 +100,9 @@ func (runtime *Runtime) DestinationHealthSnapshot(
 			Name: destination.Name, Kind: destination.Kind, Enabled: destination.Enabled,
 			Signals: signals, CircuitState: delivery.CircuitClosed,
 		}
+		row.MetricExportsScoped = !runtime.secureClient &&
+			destination.Kind == config.ObservabilityV8DestinationOTLP &&
+			containsHealthSignal(signals, observability.SignalMetrics)
 		if !destination.Enabled {
 			row.State = delivery.HealthDisabled
 		} else if destination.Kind == config.ObservabilityV8DestinationLocalSQLite {
@@ -174,7 +182,13 @@ func (runtime *Runtime) DestinationHealthSnapshot(
 			source.Counters.Dropped, runtime.carriedDropped(graph.Generation(), source.Destination, source.Signal),
 		)
 		row.Sources = append(row.Sources, source)
-		row.Counters = addCounters(row.Counters, source.Counters)
+		// Metric exports stay in the signal's own counters (MetricExportsScoped):
+		// counting their accepted and delivered attempts in the destination
+		// total but not their rejections left that total unbalanced
+		// (cowork-1-0-8 GAP-0027).
+		if !row.MetricExportsScoped || signal != observability.SignalMetrics {
+			row.Counters = addCounters(row.Counters, source.Counters)
+		}
 		if healthStateRank(source.State) > healthStateRank(row.State) {
 			row.State = source.State
 			row.Reason = source.Reason

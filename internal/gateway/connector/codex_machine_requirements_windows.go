@@ -2131,11 +2131,20 @@ func WindowsCodexManagedHookContract(hookBinary string) string {
 // stays fatal. Permission drift is repaired first when repairable is set and
 // the process is the installer or the LocalSystem guardian; whatever cannot
 // be repaired, including drift seen by a standard-user hook, is accepted and
-// logged so it never stops reconcile, verify or the hook.
+// logged on Secure Client so it never stops reconcile, verify or the hook,
+// and refused on standalone (GAP-0561).
+//
+// On standalone a drifted file is refused with the strict verdict and never
+// repaired in place (managed.StandaloneRefusesContentDrift): a repair restores
+// the descriptor, not hooks an untrusted writer removed. Setup /repair
+// rewrites it (GAP-0561).
 func ensureWindowsCodexMachineFileTrust(path, label string, repairable bool) error {
 	strictErr := windowsCodexMachineTrustedFileCheck(path, label)
 	if strictErr == nil {
 		return nil
+	}
+	if managed.StandaloneRefusesContentDrift() {
+		return managed.RefuseStandaloneContentDrift(strictErr)
 	}
 	if err := windowsCodexMachineStructureFileCheck(path, label); err != nil {
 		return err

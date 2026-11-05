@@ -129,6 +129,9 @@ type securityReader struct {
 	buffer  *Buffer
 	now     func() time.Time
 	cursors [2]*securityCursor
+	// image reads the exec-time identity of a client image named by a
+	// process-creation record (windowsClientImage); nil reads none.
+	image func(path string, at time.Time, account string) (sum, version string)
 	// held is the signal records waiting for the process stream to reach
 	// them (GAP-1487). Only the polling goroutine touches it.
 	held []heldSignal
@@ -223,6 +226,9 @@ func (r *securityReader) pollOnce() {
 	sort.Slice(records, func(i, j int) bool { return records[i].RecordID < records[j].RecordID })
 	for _, record := range records {
 		if event, ok := translateSecurityRecord(record); ok {
+			if event.Kind == KindExec && r.image != nil {
+				event.ImageSHA256, event.ImageVersion = r.image(event.Exe, event.At, eventAccount(event))
+			}
 			r.buffer.Push(event)
 		}
 	}
@@ -425,6 +431,7 @@ func translateSecurityRecord(record securityRecord) (Event, bool) {
 			PPID:           parseHexOrDecimal(record.data("ProcessId")),
 			ResponsiblePID: parseHexOrDecimal(record.data("ProcessId")),
 			Name:           baseName(record.data("NewProcessName")),
+			Exe:            record.data("NewProcessName"),
 			Cmdline:        record.data("CommandLine"),
 			User:           user,
 			UserSID:        sid,

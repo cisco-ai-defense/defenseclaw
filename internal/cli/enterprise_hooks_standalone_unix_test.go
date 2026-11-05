@@ -140,7 +140,16 @@ func TestEnterpriseHookWorkerHelperProcess(t *testing.T) {
 		}
 		return "", "not installed"
 	}
+	enterpriseHookWorkerDiscoverVersionInAccountHome = func(_ context.Context, _, connector string) (string, string) {
+		if connector == "hermes" {
+			return "0.21.5", ""
+		}
+		return "", "not installed"
+	}
 	enterpriseHookWorkerDiscoverStaticVersion = func(_ context.Context, home, connector string) (string, string) {
+		if connector == "hermes" {
+			return "0.21.5", ""
+		}
 		if connector == "codex" {
 			return "", enterprisehooks.UnixAgentUnversionedReasonPrefix + filepath.Join(home, ".local", "bin", "codex")
 		}
@@ -2052,7 +2061,7 @@ func TestStandaloneUnixRemovedAccountRowIsExcused(t *testing.T) {
 		{User: "carol", Connector: "claudecode", Error: `enterprise hooks: target account "carol" does not exist: no such account`},
 	}}
 	removedAccountFailures := func(state enterpriseHookGuardianState) int {
-		removed, _ := enterpriseHookExcusedFailures(state)
+		removed, _, _ := enterpriseHookExcusedFailures(state)
 		return removed
 	}
 	if got := removedAccountFailures(state); got != 1 {

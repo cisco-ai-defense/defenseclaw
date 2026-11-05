@@ -189,7 +189,7 @@ The continuous scanner in the gateway classifies every signal into one of the wi
 | `shell_history_match` | Shell-history references to AI binaries (last-touched timestamps) |
 | `provider_domain` | DNS resolutions to known provider endpoints |
 | `workspace_artifact` | `.openclaw/`, `.claude/`, `.cursor/` directories in active workspaces |
-| `desktop_app` | Claude Desktop, Cursor, and Devin macOS / Windows app installs |
+| `desktop_app` | Claude Desktop, Cursor, and Devin macOS / Windows app installs. Claude Desktop also gets a [Cowork block](#claude-desktop-and-cowork) |
 | `local_ai_endpoint` | Vetted Ollama, Lemonade, LM Studio, LocalAI, and vLLM loopback metadata endpoints |
 | `local_model` | Models installed on disk or reported as loaded by a vetted loopback model server |
 
@@ -202,6 +202,64 @@ records. Full scans default to a five-minute cadence. The process-only tick
 refreshes local process state between full scans, but it does not republish the
 `ai_discovery` snapshot or the companion managed connector/MCP inventory to AI
 Defense.
+
+### Claude Desktop and Cowork
+
+Cowork is the agent mode of Claude Desktop. For each user who has run Claude Desktop, a full scan adds one `desktop_app` signal with detector `claude_desktop` and a `claude_desktop` block. A machine with the app but no data folder (never started) only shows the plain application signal.
+
+```json
+"claude_desktop": {
+  "installed": true,
+  "installed_source": "app_bundle",
+  "version": "4.4212.0",
+  "cowork_enabled": true,
+  "cowork_enabled_source": "cowork_sessions",
+  "engine_version": "2.1.309",
+  "vm_bundle_present": true,
+  "vm_bundle_bytes": 12161047888,
+  "cowork_plugins": ["finance", "sales-tools"],
+  "deployment": "1p"
+}
+```
+
+| Field | Meaning |
+| --- | --- |
+| `installed`, `installed_source` | The app was found: `app_bundle` (macOS `Claude.app`), `install_folder` or `msix_package` (Windows). On Linux nothing is probed, so the data folder counts (`data_folder`). A data folder without the app is `installed: false`. |
+| `version` | The app version: `Info.plist` on macOS, the `app-<version>` install folder on Windows. Empty for an MSIX install and on Linux, which have no version tied to the account. |
+| `cowork_enabled`, `cowork_enabled_source` | `true` when this machine shows Cowork set up: a session on disk (`cowork_sessions`) or the VM bundle (`vm_bundle`). `false` only when Claude Desktop recorded that the machine cannot run the VM (`vm_support_probe`). `null` is unknown and is never guessed. This is local evidence; it does not read your organization's setting for Cowork. |
+| `engine_version` | The newest Claude Code build that Claude Desktop bundles (the engine behind Cowork). |
+| `vm_bundle_present`, `vm_bundle_bytes` | The Cowork VM bundle and the combined size of its files. The bundle is several gigabytes; the size comes from the file sizes, never from reading the images. |
+| `cowork_plugins` | Names of the plugins enabled in Cowork, sorted, at most 64. Names only. |
+| `deployment` | Which Claude Desktop deployment the data folder belongs to: `1p` (signed in to Claude) or `3p` (third-party inference: Amazon Bedrock, Google Vertex AI, Microsoft Foundry). The value comes from the folder (the table below), not from the `deploymentMode` in its `claude_desktop_config.json`; on the measured machines the two always agreed. Each deployment has its own data folder, so a user who runs both gets two signals. |
+
+The data folders the scan reads:
+
+| OS | `1p` | `3p` |
+| --- | --- | --- |
+| macOS | `~/Library/Application Support/Claude` | `~/Library/Application Support/Claude-3p` |
+| Windows | `%APPDATA%\Claude`; the MSIX app's `%LOCALAPPDATA%\Claude-Data\claude_<id>` (older MSIX builds: `%LOCALAPPDATA%\Packages\Claude_*\LocalCache\Roaming\Claude`) | `%LOCALAPPDATA%\Claude-3p` |
+| Linux | `~/.config/Claude` | `~/.config/Claude-3p` |
+
+Where the scan looks, relative to each data folder:
+
+- `claude-code/<version>` for the engine,
+- `vm_bundles/claudevm.bundle` for the VM bundle,
+- `local-agent-mode-sessions/<account>/<org>` for sessions (`local_*.json`) and the plugin manifest (`rpm/manifest.json`),
+- `vm-support-probe.json` for the VM check.
+
+The scan lists and reads these paths with fixed limits and never starts Claude Desktop, its engine or the VM. It refuses a symbolic link, junction or other reparse point on the data folder, on any folder between the home and the data folder (`Library/Application Support` as a link, say), or on any folder below it, so one user's data cannot carry another account's facts; a refused link below the data folder makes the signal partial (`read_error`). Connectors (an account's remote MCP servers) have no local file and are not listed.
+
+On Windows the MSIX folders (`claude_<id>`, `Claude_*`) are matched by name, at most four per folder. The folder whose id matches an installed MSIX package (`%LOCALAPPDATA%\Packages\Claude_<id>`) is read first. When more folders match than are read, every signal of that account is partial (`cap_exceeded`). A data folder that holds only Claude Desktop's migration marker (`.user-data-left.claude_<id>`, left behind in the older MSIX folder once the data moved to `Claude-Data`) is not reported. The catalog reads `claude_desktop_config.json` (configs and MCP servers) in the same folders, MSIX folders included.
+
+The macOS folders and the Windows MSIX folders were measured on Claude Desktop 4.16336.0, for both deployments. These are still unmeasured and follow the macOS layout until a Cowork host confirms them:
+
+- the VM bundle name and place (`vm_bundles\claudevm.bundle`); the scan falls back to the first `*.bundle` folder in `vm_bundles`,
+- the session and plugin files under `local-agent-mode-sessions`, and `vm-support-probe.json`,
+- the Squirrel install folder `%LOCALAPPDATA%\AnthropicClaude\app-<version>` and the MSIX package folder,
+- the Linux `3p` folder `~/.config/Claude-3p`,
+- Linux install evidence: only the data folders are checked, so `installed` there means the app has run.
+
+The Secure Client profile and sandbox scans do not run this detector. When a fact changes (Cowork turns on, a new engine), the signal is `changed`; a change in the VM size alone is not.
 
 ### Local model inventory
 

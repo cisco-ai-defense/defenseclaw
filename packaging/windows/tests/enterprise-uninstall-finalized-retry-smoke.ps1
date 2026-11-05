@@ -49,6 +49,13 @@ $script:DefenseClawUninstallPurgeUserState = $false
 # The retry contract is the profile-neutral finalization (no standalone
 # post-commit preparation).
 function Test-DefenseClawStandaloneProfile { return $false }
+# rel-1-0-6:GAP-0583: the tombstone rebinding has its own contract harness
+# (cli/tests/test_windows_enterprise_standalone_contract.py); here it finds
+# nothing to rebind.
+function Sync-DefenseClawStandaloneUninstallTombstoneBinding {
+    param([hashtable]$Layout, [string]$GatewayServiceName)
+    return $false
+}
 
 function Get-DefenseClawDeploymentMetadata {
     param([hashtable]$Layout, [switch]$Required)

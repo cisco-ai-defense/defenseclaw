@@ -80,6 +80,7 @@ func TestShellToolCallWithExtraArgumentKeys(t *testing.T) {
 		{"claudecode", "Bash", "workdir"},
 		{"devin", "exec", "workdir"},
 		{"kiro", "execute_bash", "working_dir"},
+		{"kiro", "execute_pwsh", "cwd"},
 		{"kiro", "shell", "working_dir"},
 		{"hermes", "terminal", "workdir"},
 		{"codex", "Bash", "workdir"},

@@ -578,15 +578,17 @@ func enterpriseHookWorkerMain(ctx context.Context, stdin io.Reader, stdout, stde
 }
 
 // enterpriseHookWorkerDiscoverVersion,
+// enterpriseHookWorkerDiscoverVersionInAccountHome,
 // enterpriseHookWorkerDiscoverStaticVersion,
 // enterpriseHookWorkerDiscoverSurfaces and
 // enterpriseHookWorkerDiscoverKiroIDE are replaceable in tests.
 var (
-	enterpriseHookWorkerDiscoverVersion         = enterprisehooks.DiscoverUnixAgentVersion
-	enterpriseHookWorkerDiscoverStaticVersion   = enterprisehooks.DiscoverUnixAgentVersionStatically
-	enterpriseHookWorkerDiscoverSurfaces        = enterprisehooks.DiscoverUnixAgentSurfaces
-	enterpriseHookWorkerDiscoverKiroIDE         = enterprisehooks.DiscoverUnixKiroIDEForms
-	enterpriseHookWorkerDiscoverPrivateInstalls = enterprisehooks.DiscoverUnixPrivateAgentInstalls
+	enterpriseHookWorkerDiscoverVersion              = enterprisehooks.DiscoverUnixAgentVersion
+	enterpriseHookWorkerDiscoverVersionInAccountHome = enterprisehooks.DiscoverUnixAgentVersionInAccountHome
+	enterpriseHookWorkerDiscoverStaticVersion        = enterprisehooks.DiscoverUnixAgentVersionStatically
+	enterpriseHookWorkerDiscoverSurfaces             = enterprisehooks.DiscoverUnixAgentSurfaces
+	enterpriseHookWorkerDiscoverKiroIDE              = enterprisehooks.DiscoverUnixKiroIDEForms
+	enterpriseHookWorkerDiscoverPrivateInstalls      = enterprisehooks.DiscoverUnixPrivateAgentInstalls
 )
 
 func validateEnterpriseHookWorkerIdentity(request enterpriseHookWorkerRequest) error {
@@ -1905,6 +1907,8 @@ func enterpriseHookWorkerDiscover(ctx context.Context, request enterpriseHookWor
 		var version, reason string
 		if request.StaticDiscovery {
 			version, reason = enterpriseHookWorkerDiscoverStaticVersion(ctx, request.Home, name)
+		} else if name == "hermes" {
+			version, reason = enterpriseHookWorkerDiscoverVersionInAccountHome(ctx, request.Home, name)
 		} else {
 			version, reason = enterpriseHookWorkerDiscoverVersion(ctx, request.Home, name, true)
 		}

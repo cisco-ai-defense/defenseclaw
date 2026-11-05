@@ -1779,12 +1779,11 @@ func HookScriptDigests(opts SetupOpts, conn Connector) map[string]string {
 	out := map[string]string{}
 	for _, path := range hookRuntimeArtifactPaths(opts, conn) {
 		// On Windows the paths include the installed hook binary.
-		data, err := readNativeFileShared(path)
+		digest, err := digestNativeFileShared(path)
 		if err != nil {
 			continue
 		}
-		sum := sha256.Sum256(data)
-		out[filepath.Base(path)] = "sha256:" + hex.EncodeToString(sum[:])
+		out[filepath.Base(path)] = digest
 	}
 	if len(out) == 0 {
 		return nil

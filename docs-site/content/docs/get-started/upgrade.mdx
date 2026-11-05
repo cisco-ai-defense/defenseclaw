@@ -27,7 +27,7 @@ The command downloads the latest release's installer (`install.sh` on macOS and 
 3. Stops the gateway, keeps the current install in `~/.defenseclaw/previous`, swaps in the new version and runs `defenseclaw migrate`.
 4. Starts the gateway and waits for it to report healthy.
 
-An upgrade refreshes the installed hooks. Per-user hooks honor an explicitly saved outage mode; when it is unset, the default and permissive policies let a classified gateway outage run with a warning and strict blocks it. Every other failure blocks; restart running agents so they discard old hook and native telemetry settings already loaded in memory. 1.0.0–1.0.3 setup also saved `open` on its own for an observe-mode Cursor, and those releases did not record whether the user chose it. The upgrade keeps that saved `open`, so strict does not close it, and names it with the `defenseclaw config unset` command that lets the policy tier decide. Managed standalone hooks default closed and honor an administrator's explicit outage-only `open`; Secure Client keeps its managed fail mode.
+An upgrade refreshes the installed hooks. Per-user hooks honor an explicitly saved outage mode; when it is unset, the default and permissive policies let a gateway outage run with a warning, and strict blocks it. A verified gateway that gives no final decision blocks. An answered or local failure blocks; restart running agents so they discard old hook and native telemetry settings already loaded in memory. 1.0.0–1.0.3 setup also saved `open` on its own for an observe-mode Cursor, and those releases did not record whether the user chose it. The upgrade keeps that saved `open`, so strict does not close it, and names it with the `defenseclaw config unset` command that lets the policy tier decide. Managed standalone hooks default closed and honor an administrator's explicit outage-only `open`; Secure Client keeps its managed fail mode.
 
 While an install or upgrade of your account runs, DefenseClaw refuses every agent call that gets no answer from the gateway. The window lasts as long as the installer holds its install lock (`.install.lock` in `~/.defenseclaw`); in practice it is the time the gateway is stopped for the swap. It holds in every policy tier, with a saved `open` too: an install or upgrade is not a gateway outage, so the default policy's warning-and-run does not apply to a call that gets no answer. The strict policy tier also refuses calls the running gateway could answer. The agent shows this message (`tool call` reads `prompt`, `tool result` or `request` for other events):
 
@@ -45,10 +45,10 @@ Gateway outages now let calls run with a warning (the default and permissive pol
 
 Releases before 1.0.4 blocked those calls. The line is not printed when a fail mode is saved (globally or for a connector), in the strict tier, or on a managed install. How the saved mode and the policy tier combine is in [Fail modes](/docs/reference/fail-modes).
 
-When sandboxes are on (`openshell.enabled: true`) and your OpenShell gateway runs a release older than 0.1.5, the upgrade also prints, after `Upgraded from`, why no sandbox runs and the fix. `defenseclaw doctor` fails its **Gateway** check until OpenShell is upgraded:
+When sandboxes are on (`openshell.enabled: true`) and your OpenShell gateway runs a release older than 0.1.6, the upgrade also prints, after `Upgraded from`, why no sandbox runs and the fix. `defenseclaw doctor` fails its **Gateway** check until OpenShell is upgraded:
 
 ```text
-Sandboxes: OpenShell 0.1.3 runs no DefenseClaw sandbox: before 0.1.5 its network broker let a sandbox's connections bypass the sandbox policy when it could not inspect them (NVIDIA/OpenShell#4494); upgrade OpenShell to 0.1.5 in place. Until then DefenseClaw starts no sandbox and `defenseclaw doctor` fails its Gateway check. Stop running sandboxes first, then run: defenseclaw sandbox setup --install-openshell
+Sandboxes: OpenShell 0.1.3 runs no DefenseClaw sandbox: OpenShell 0.1.6 or later is required; upgrade OpenShell to 0.1.6 in place. Until then DefenseClaw starts no sandbox and `defenseclaw doctor` fails its Gateway check. Stop running sandboxes first, then run: defenseclaw sandbox setup --install-openshell
 ```
 
 End every running agent session before upgrading. Quit OpenCode and Amp

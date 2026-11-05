@@ -44,7 +44,7 @@ defenseclaw init --non-interactive --yes --observe-all --action-connectors codex
 | `--observe-all` | Configure every detected hook connector in `observe`. |
 | `--action-connectors a,b` | Connectors to configure in `action`. Works with `--observe-all`. |
 | `--non-interactive` | Skip every prompt. |
-| `--yes` / `-y` | Accept the default for every prompt. |
+| `--yes` / `-y` | Accept the default for every prompt. The gateway prompt defaults to yes, so `--yes` starts the gateway and writes the agent hooks, as the wizard does. |
 | `--profile` | Protection profile (`observe` or `action`). |
 | `--scanner-mode` | `local`, `remote` or `both`. |
 | `--fail-mode open\|closed` | Hook fail mode. |
@@ -58,7 +58,7 @@ defenseclaw init --non-interactive --yes --observe-all --action-connectors codex
 | `--cisco-endpoint`, `--cisco-api-key-env` | Cisco AI Defense. |
 | `--cisco-api-key` | Cisco AI Defense key to save into `.env`. Prefer `DEFENSECLAW_INIT_CISCO_API_KEY`, for the same reason. |
 | `--enable-guardrail` | Configure the LLM guardrail during `init`. |
-| `--start-gateway` / `--no-start-gateway` | Answer the gateway prompt in advance. |
+| `--start-gateway` / `--no-start-gateway` | Answer the gateway prompt in advance. Without either flag, `--non-interactive` alone leaves a stopped gateway stopped, and `defenseclaw doctor` fails its gateway and hook rows until you run `defenseclaw-gateway start`. |
 | `--verify` / `--no-verify` | Run readiness checks before exiting. |
 | `--rescan-agents` | Refresh cached agent discovery. |
 | `--json-summary` | Print the report as JSON. |

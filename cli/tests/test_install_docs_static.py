@@ -1042,6 +1042,19 @@ def test_v9_migration_docs_name_the_released_config_v8_source() -> None:
     assert "Configuration schema v8 is required" in back  # what the 0.8.x CLI prints
     assert "reads up to 8" not in migrate and "migrate --check` on" not in back  # 0.8.x has `migrations`, not `migrate`
 
+
+def test_retired_middleware_upgrade_note_names_its_release() -> None:
+    text = (ROOT / "docs-site/content/docs/reference/configuration.mdx").read_text(encoding="utf-8")
+    note = next(line for line in text.splitlines() if "openshell.middleware.enabled" in line)
+    assert "1.0.8" in note and "1.1.0" in note
+    assert "1.0.x" not in note
+
+
+def test_configuration_reference_still_names_v8_source() -> None:
+    text = (ROOT / "docs-site/content/docs/reference/configuration.mdx").read_text(encoding="utf-8")
+    assert "A version 8 file (written by 0.8.5 to 0.8.10)" in text
+
+
 def test_admission_docs_explain_take_action_false_limits() -> None:
     text = (ROOT / "docs-site/content/docs/policies/admission.mdx").read_text(encoding="utf-8")
     section = text.split("Where it runs:", 1)[1].split("## The admission block", 1)[0]

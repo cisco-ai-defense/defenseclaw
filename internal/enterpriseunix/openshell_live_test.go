@@ -112,8 +112,8 @@ func TestCommandOpsCountsComputeThatMayStillRun(t *testing.T) {
 }
 
 // TestPrerequisiteVersionRefusesPrereleases: in prerequisite mode the
-// administrator's OpenShell, read from rpm (%{VERSION} 0.1.5~pre.3), dpkg
-// (0.1.5~pre.3-1) or `--version` (0.1.5-pre.3), fails its row when it is a
+// administrator's OpenShell, read from rpm (%{VERSION} 0.1.6~pre.3), dpkg
+// (0.1.6~pre.3-1) or `--version` (0.1.6-pre.3), fails its row when it is a
 // prerelease of the release sandboxes need, whatever the pin allows; a
 // range's ceiling holds its own prereleases out.
 func TestPrerequisiteVersionRefusesPrereleases(t *testing.T) {
@@ -129,16 +129,17 @@ func TestPrerequisiteVersionRefusesPrereleases(t *testing.T) {
 		spec, have string
 		ok         bool
 	}{
-		{"", "0.1.5~pre.3", false},
-		{"", "0.1.5~pre.3-1", false},
-		{"", "openshell 0.1.5-pre.3", false},
-		{">=0.1.1 <0.2.0", "0.1.5-pre.7", false},
-		{">=0.1.5 <0.2.0", "0.1.5-pre.7", false},
-		{"0.1.5", "0.1.5-pre.7", false},
-		{"", "0.1.5-1", true},
-		{"0.1.5", "0.1.5-1", true},
-		{">=0.1.5 <0.1.9", "0.1.9-pre.1", false},
-		{">=0.1.5 <0.2.0", "0.1.6-pre.1", true},
+		{"", "0.1.6~pre.3", false},
+		{"", "0.1.6~pre.3-1", false},
+		{"", "openshell 0.1.6-pre.3", false},
+		{">=0.1.1 <0.2.0", "0.1.6-pre.7", false},
+		{">=0.1.6 <0.2.0", "0.1.6-pre.7", false},
+		{"0.1.6", "0.1.6-pre.7", false},
+		{"", "0.1.5-1", false},
+		{"", "0.1.6-1", true},
+		{"0.1.6", "0.1.6-1", true},
+		{">=0.1.6 <0.1.9", "0.1.9-pre.1", false},
+		{">=0.1.6 <0.2.0", "0.1.7-pre.1", true},
 	} {
 		if ok, why := versionAllowed(tc.spec, parse(tc.have)); ok != tc.ok {
 			t.Errorf("versionAllowed(%q, %s) = %v (%s)", tc.spec, tc.have, ok, why)

@@ -808,7 +808,7 @@ func TestMissingLinuxVMDriverUsesConfiguredInstallDirectory(t *testing.T) {
 	}
 }
 
-// The pinned 0.1.5 driver cannot repair a newer supported gateway: doctor
+// The pinned 0.1.6 driver cannot repair a newer supported gateway: doctor
 // must give a manual matching-release path instead of a stale install command.
 func TestNewerSupportedGatewayNeedsMatchingMicroVMDriver(t *testing.T) {
 	for _, goarch := range []string{"amd64", "arm64"} {
@@ -816,12 +816,12 @@ func TestNewerSupportedGatewayNeedsMatchingMicroVMDriver(t *testing.T) {
 			f := newDoctorFixture(t)
 			f.onLinuxMicroVMs()
 			f.doctor.GOARCH = goarch
-			f.atRelease("0.1.6")
+			f.atRelease("0.1.7")
 			f.runner.On(f.linuxDriverPath()+" --version", "openshell-driver-vm "+openshell.InstallerVersion+"\n", nil)
 			r := f.run()
-			c := expectCheck(t, r, openshell.CheckIDVMDriver, openshell.StatusFail, "older than the gateway's 0.1.6")
-			if r.MicroVM.DriverOlderThan != "0.1.6" || c.Fix == nil || c.Fix.Command != "" || c.Fix.Automatic ||
-				!strings.Contains(c.Fix.Summary, "OpenShell 0.1.6") || !strings.Contains(c.Fix.Summary, filepath.Dir(f.linuxDriverPath())) ||
+			c := expectCheck(t, r, openshell.CheckIDVMDriver, openshell.StatusFail, "older than the gateway's 0.1.7")
+			if r.MicroVM.DriverOlderThan != "0.1.7" || c.Fix == nil || c.Fix.Command != "" || c.Fix.Automatic ||
+				!strings.Contains(c.Fix.Summary, "OpenShell 0.1.7") || !strings.Contains(c.Fix.Summary, filepath.Dir(f.linuxDriverPath())) ||
 				!strings.Contains(c.Fix.Summary, "verify") || !strings.Contains(c.Fix.Summary, "restart the OpenShell gateway") {
 				t.Fatalf("gateway %q, driver %+v, repair %+v", r.GatewayVersion, r.MicroVM, c.Fix)
 			}
@@ -834,14 +834,14 @@ func TestNewerSupportedGatewayNeedsMatchingMicroVMDriver(t *testing.T) {
 func TestNewerSupportedGatewayMissingMicroVMDriver(t *testing.T) {
 	f := newDoctorFixture(t)
 	f.kvm = nil
-	f.atRelease("0.1.6")
+	f.atRelease("0.1.7")
 	r := f.run()
 	if r.MicroVM == nil || r.MicroVM.DriverBinary != "" || r.MicroVM.DriverRunning {
 		t.Fatalf("MicroVM facts = %+v", r.MicroVM)
 	}
 	fixes := r.MicroVM.Fixes("arm64")
 	if len(fixes) != 2 || fixes[1].Command != "" ||
-		!strings.Contains(fixes[1].Summary, "OpenShell 0.1.6") ||
+		!strings.Contains(fixes[1].Summary, "OpenShell 0.1.7") ||
 		!strings.Contains(fixes[1].Summary, "independently trusted SHA-256") {
 		t.Fatalf("MicroVM fixes = %+v", fixes)
 	}

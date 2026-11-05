@@ -42,9 +42,9 @@ package gateway
 //     which is the mode that refuses an unversioned contract;
 //   - it accepts only the image a sandbox started now would run: the record of
 //     exactly the build context this config, this host user and this release
-//     render (image.Store.Current), whose hooks were fire-verified (and, for
-//     an image built for the MicroVM driver, whose MicroVM scenario passed),
-//     whose tag Docker still resolves to the verified image ID, and whose
+//     render (image.Store.Current), whose hooks were fire-verified (an image
+//     built for the MicroVM driver also passed its resolver check before it
+//     was recorded), whose tag Docker still resolves to the verified image ID, and whose
 //     harness version resolves to a Known sandbox contract.
 //
 // Everything else keeps refusing exactly as before: an unknown host version, an
@@ -198,7 +198,7 @@ func sandboxHarnessHookContractFor(cfg *config.Config, connectorName string, hos
 		if err != nil {
 			return sandboxHarnessContract{}, false, fmt.Errorf("sandbox harness hook contract: %w", err)
 		}
-		if !ok || !rec.HookFireVerified || (rec.MicroVM && !rec.MicroVMVerified) {
+		if !ok || !rec.HookFireVerified {
 			continue
 		}
 		resolution := connector.ResolveSandboxHookContract(rec.Connector, strings.TrimSpace(rec.HarnessVersion))

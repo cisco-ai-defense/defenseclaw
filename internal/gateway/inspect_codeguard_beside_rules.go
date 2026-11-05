@@ -29,6 +29,12 @@ var (
 // for its result. A panic in the scan is raised again by the wait, on the
 // caller's goroutine, so the hook's panic recovery sees it as before.
 func (a *APIServer) startCodeGuardOnArgs(ctx context.Context, req *ToolInspectRequest) func() codeGuardArgsScan {
+	if a == nil || req == nil || inspectCodeGuardArgs == nil {
+		return func() codeGuardArgsScan { return codeGuardArgsScan{} }
+	}
+	if ctx == nil {
+		ctx = context.Background()
+	}
 	done := make(chan struct{})
 	var scan codeGuardArgsScan
 	var panicked any

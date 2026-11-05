@@ -214,6 +214,8 @@ If you set up an editor with `defenseclaw acp setup` or `defenseclaw setup acp`,
 
 An agent config file you have not changed since setup is restored from its checked backup. If you edited it, only DefenseClaw's entries are removed.
 
+If you set up Claude Cowork with `defenseclaw setup cowork`, uninstall cannot remove the plugin from your Claude account, and `defenseclaw reset` cannot either. In Claude Desktop, open **Customize > Plugins**, then the **...** menu on DefenseClaw, and choose **Remove**. Until you remove the plugin, Cowork tool calls are blocked. `--dry-run` lists this step. See [Remove the Cowork plugin](/docs/connectors/cowork#remove).
+
 <Callout type="warn">
 `--all` deletes the audit log. Export what you need first with `defenseclaw-gateway audit export`.
 </Callout>

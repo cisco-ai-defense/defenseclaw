@@ -474,7 +474,7 @@ func (d *SandboxDaemon) buildConfigWith(floor *config.OpenShellAdminConfig) *con
 	o.Approvals.DebounceMs, o.Approvals.AgentProposals = op.Approvals.DebounceMs, op.Approvals.AgentProposals
 	o.MCP.Import, o.MCP.HostPorts = op.MCP.Import, op.MCP.HostPorts
 	o.Harnesses, o.Wrappers = op.Harnesses, op.Wrappers
-	o.TokenDelivery, o.Middleware.Enabled = op.TokenDelivery, op.Middleware
+	o.TokenDelivery = op.TokenDelivery
 	o.LLM, o.KeepHeadless, o.UpstreamTelemetry = op.LLM, op.KeepHeadless, op.UpstreamTelemetry
 	// Only the administrator's trusted CAs: the account names none.
 	o.TrustedCAPEM, o.TrustedCAError = op.TrustedCAs, op.TrustedCAError

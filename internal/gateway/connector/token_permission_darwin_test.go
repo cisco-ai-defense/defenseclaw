@@ -11,7 +11,15 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/defenseclaw/defenseclaw/internal/managed"
 )
+
+func pinSecureClientTokenTest(t *testing.T) {
+	t.Helper()
+	t.Setenv(managed.DeploymentModeEnv, managed.DeploymentModeManagedEnterprise)
+	t.Setenv(managed.EnterpriseProfileEnv, managed.ProfileSecureClient)
+}
 
 func writeHookTokenForTest(t *testing.T, mode os.FileMode) (string, string) {
 	t.Helper()
@@ -43,6 +51,7 @@ func TestDarwinTokenAcceptsTighterMode(t *testing.T) {
 // A looser token is refused, but as permission drift, so the gateway keeps
 // its cached token instead of rejecting every hook request.
 func TestDarwinTokenModeDriftIsManagedPermissionDrift(t *testing.T) {
+	pinSecureClientTokenTest(t)
 	for _, mode := range []os.FileMode{0o640, 0o644, 0o660} {
 		dir, _ := writeHookTokenForTest(t, mode)
 		_, err := LoadHookAPIToken(dir, "codex")
@@ -56,6 +65,7 @@ func TestDarwinTokenModeDriftIsManagedPermissionDrift(t *testing.T) {
 }
 
 func TestDarwinTokenFolderModeDriftIsManagedPermissionDrift(t *testing.T) {
+	pinSecureClientTokenTest(t)
 	dir, _ := writeHookTokenForTest(t, 0o600)
 	if err := os.Chmod(filepath.Join(dir, "hooks"), 0o770); err != nil {
 		t.Fatal(err)
@@ -82,10 +92,86 @@ func TestDarwinTokenStructureIsNeverDrift(t *testing.T) {
 }
 
 func TestDarwinTokenOwnerVerdictIsDrift(t *testing.T) {
+	pinSecureClientTokenTest(t)
 	if err := tokenPermissionVerdict(os.ErrPermission); !IsManagedPermissionDrift(err) {
 		t.Fatalf("owner verdict not marked as drift: %v", err)
 	}
 	if tokenPermissionVerdict(nil) != nil {
 		t.Fatal("nil verdict became an error")
+	}
+}
+
+func TestR108MAINREVP3PerUserTokenPermissionRefused(t *testing.T) {
+	t.Setenv(managed.DeploymentModeEnv, "")
+	t.Setenv(managed.EnterpriseProfileEnv, "")
+	dir, path := writeHookTokenForTest(t, 0o640)
+	if _, err := LoadHookAPIToken(dir, "codex"); err == nil || IsManagedPermissionDrift(err) {
+		t.Fatalf("per-user hook token mode verdict = %v, want plain refusal", err)
+	}
+	if err := os.Chmod(path, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(filepath.Join(dir, "hooks"), 0o770); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := LoadHookAPIToken(dir, "codex"); err == nil || IsManagedPermissionDrift(err) {
+		t.Fatalf("per-user hook folder verdict = %v, want plain refusal", err)
+	}
+	if err := tokenPermissionVerdict(os.ErrPermission); IsManagedPermissionDrift(err) {
+		t.Fatalf("per-user owner verdict = %v, want plain refusal", err)
+	}
+}
+
+func TestR108MAINREVP3PerUserOTLPTokenPermissionRefused(t *testing.T) {
+	t.Setenv(managed.DeploymentModeEnv, "")
+	t.Setenv(managed.EnterpriseProfileEnv, "")
+	dir := t.TempDir()
+	path, err := OTLPPathTokenFilePath(dir, OTLPScopeCodex)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, []byte(strings.Repeat("a", 64)+"\n"), 0o640); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(path, 0o640); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := LoadOTLPPathToken(dir, OTLPScopeCodex); err == nil || IsManagedPermissionDrift(err) {
+		t.Fatalf("per-user OTLP token verdict = %v, want plain refusal", err)
+	}
+	if err := os.Chmod(path, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if token, err := LoadOTLPPathToken(dir, OTLPScopeCodex); err != nil || token != strings.Repeat("a", 64) {
+		t.Fatalf("per-user private OTLP token = %q, %v", token, err)
+	}
+}
+
+func TestR108MAINREVP3SecureClientTokenDriftTwin(t *testing.T) {
+	pinSecureClientTokenTest(t)
+	dir, _ := writeHookTokenForTest(t, 0o640)
+	if _, err := LoadHookAPIToken(dir, "codex"); err == nil || !IsManagedPermissionDrift(err) {
+		t.Fatalf("Secure Client hook token verdict = %v, want managed drift", err)
+	}
+}
+
+func TestR108MAINREVP3SecureClientDefaultProfileTokenDrift(t *testing.T) {
+	t.Setenv(managed.DeploymentModeEnv, managed.DeploymentModeManagedEnterprise)
+	t.Setenv(managed.EnterpriseProfileEnv, "")
+	dir, _ := writeHookTokenForTest(t, 0o640)
+	if _, err := LoadHookAPIToken(dir, "codex"); err == nil || !IsManagedPermissionDrift(err) {
+		t.Fatalf("default Secure Client token verdict = %v, want managed drift", err)
+	}
+}
+
+func TestR108MAINREVP3StandaloneTokenPermissionRefused(t *testing.T) {
+	t.Setenv(managed.DeploymentModeEnv, managed.DeploymentModeManagedEnterprise)
+	t.Setenv(managed.EnterpriseProfileEnv, managed.ProfileStandalone)
+	dir, _ := writeHookTokenForTest(t, 0o640)
+	if _, err := LoadHookAPIToken(dir, "codex"); err == nil || IsManagedPermissionDrift(err) {
+		t.Fatalf("standalone token verdict = %v, want plain refusal", err)
 	}
 }

@@ -20,6 +20,7 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
@@ -337,6 +338,24 @@ func TestExec(t *testing.T) {
 	}
 	if _, err := c.Exec(ctx, "box", nil, openshell.ExecOptions{}); err == nil {
 		t.Fatal("empty argv accepted")
+	}
+}
+
+func TestExecDirect(t *testing.T) {
+	f, c := newClient(t)
+	createReady(t, c, "box", nil)
+	f.HandleExec(func(_ context.Context, call openshelltest.ExecCall) openshelltest.ExecResponse {
+		return openshelltest.ExecResponse{Stdout: []byte("ready\n")}
+	})
+	res, err := c.Exec(context.Background(), "box", []string{"/usr/local/lib/defenseclaw/localhost-resolver"},
+		openshell.ExecOptions{Timeout: time.Second, Attempts: 1, NoSandboxTimeout: true})
+	if err != nil || string(res.Stdout) != "ready\n" {
+		t.Fatalf("direct exec = %+v, %v", res, err)
+	}
+	call := f.ExecCalls()[0]
+	if !slices.Equal(call.Argv, []string{"/usr/local/lib/defenseclaw/localhost-resolver"}) ||
+		!slices.Equal(call.Command, call.Argv) || !call.NoLoginShell {
+		t.Fatalf("direct exec call = %+v", call)
 	}
 }
 

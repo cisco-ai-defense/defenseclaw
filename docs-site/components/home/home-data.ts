@@ -8,6 +8,12 @@ import { connectorById } from '@/data/support-matrix';
  *
  * Proxy-family connectors (OpenClaw, ZeptoClaw) are not featured on the
  * landing page; everything else in the matrix is a hook connector.
+ *
+ * Claude Cowork is the one extra tile: it is a surface of the Claude Code
+ * connector, so it has no row in the capability matrix, but it has its own
+ * setup command and its own per-OS labels in the Claude Cowork table of
+ * content/docs/support-matrix.mdx (scripts/test-support-matrix.ts keeps the
+ * two in step).
  */
 
 export type OsStatus = 'supported' | 'preview' | 'unsupported';
@@ -58,11 +64,21 @@ export const HOME_CONNECTORS: HomeConnector[] = matrix.connectors
     };
   });
 
-export const AGENT_COUNT = HOME_CONNECTORS.length;
+const COWORK: HomeConnector = {
+  id: 'cowork',
+  label: 'Claude Cowork',
+  short: 'Cowork',
+  os: { linux: 'preview', macos: 'supported', windows: 'supported' },
+  windowsNote: 'Claude Cowork runs on Windows with Claude Desktop; see the Claude Cowork page.',
+};
 
-/** "Claude Code, Codex, Copilot, Cursor and 8 more". */
+export const HOME_TILES: HomeConnector[] = [...HOME_CONNECTORS, COWORK];
+
+export const AGENT_COUNT = HOME_TILES.length;
+
+/** "Claude Code, Codex, Copilot, Cursor and 7 more". */
 export function agentSummary(named = 4) {
-  const names = HOME_CONNECTORS.slice(0, named).map((connector) => connector.short);
+  const names = HOME_TILES.slice(0, named).map((connector) => connector.short);
   const rest = AGENT_COUNT - names.length;
   return rest > 0 ? `${names.join(', ')} and ${rest} more` : names.join(', ');
 }

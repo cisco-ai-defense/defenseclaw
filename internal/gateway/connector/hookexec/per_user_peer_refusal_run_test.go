@@ -216,7 +216,7 @@ func TestPerUserNativeHookOutageStillOpensForThisAccountsGateway(t *testing.T) {
 // unverified, and a try with no connection as not connected (an outage).
 func TestConnectByTellsAnUnfinishedOwnerCheckFromNoConnection(t *testing.T) {
 	for _, pending := range []bool{false, true} {
-		tryCtx, release := connectBy(context.Background(), time.Now().Add(20*time.Millisecond))
+		tryCtx, release := connectBy(context.Background(), time.Now().Add(20*time.Millisecond), nil)
 		if check, _ := tryCtx.Value(perUserPeerCheckKey{}).(*perUserPeerCheck); check == nil {
 			t.Fatal("connectBy gives the transport no owner-check mark")
 		} else {

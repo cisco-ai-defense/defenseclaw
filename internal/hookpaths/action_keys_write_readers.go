@@ -36,13 +36,16 @@ func actionExpandedWordGlob(word *syntax.Word, values actionValues, cwd, home st
 // actionOversizedBraceTarget keeps the fixed literal parts of a brace word
 // whose expansion exceeds the field budget. The intervening alternatives
 // become pathname patterns, so a long range cannot hide a protected target.
-func actionOversizedBraceTarget(word *syntax.Word, home, cwd string, check func(string, bool, string) bool) bool {
+func actionOversizedBraceTarget(word *syntax.Word, home, cwd string, check func(string, bool, string) bool, quick func([]string) bool) bool {
 	if word == nil || !actionWordHasBraceText(word) || shellparse.MinBraceFields(word) <= maxMentionBraceFields {
 		return false
 	}
 	// For a modest range past the normal field cap, check its exact
 	// members. Replacing {1..300} with * would include unrelated links.
 	if fields := actionExactOversizedTouchFields(word, home); len(fields) > 0 {
+		if quick != nil && quick(fields) {
+			return false
+		}
 		for _, field := range fields {
 			if check(field, false, cwd) {
 				return true
@@ -79,11 +82,11 @@ func actionOversizedBraceTarget(word *syntax.Word, home, cwd string, check func(
 
 // actionOversizedTouchOperands reads over-cap brace file operands in one
 // touch call. Printed brace ranges and touch option values are not targets.
-func actionOversizedTouchOperands(call *syntax.CallExpr, home, cwd string, check func(string, bool, string) bool) bool {
+func actionOversizedTouchOperands(call *syntax.CallExpr, home, cwd string, check func(string, bool, string) bool, quick func([]string) bool) bool {
 	found := false
 	touchBraceFileOperands(call, home, func(word *syntax.Word) bool {
 		if actionWordHasBraceText(word) && shellparse.MinBraceFields(word) > maxMentionBraceFields &&
-			actionOversizedBraceTarget(word, home, cwd, check) {
+			actionOversizedBraceTarget(word, home, cwd, check, quick) {
 			found = true
 			return false
 		}

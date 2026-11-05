@@ -107,7 +107,8 @@ BOOTSTRAP_PYTHON := $(shell if [ -x "$(VENV_BIN)/python$(EXE)" ]; then printf '%
         set-version \
         _bundle-data _stage-extension-fingerprint _checkout-write-preflight _source-install-preflight _source-install-dev-preflight _source-dev-install source-migrate source-acp-refresh source-restart-gateway \
         proto proto-check proto-tools \
-        dist dist-cli dist-fleet-assets dist-gateway dist-installers dist-requirements dist-test dist-checksums dist-clean
+        dist dist-cli dist-fleet-assets dist-gateway dist-installers dist-requirements dist-test dist-checksums dist-clean \
+        cowork-vm-packages cowork-vm-test
 
 # ---------------------------------------------------------------------------
 # Developer workflow help
@@ -1538,6 +1539,8 @@ dist-gateway: _checkout-write-preflight sync-openclaw-extension
 		CGO_ENABLED=0 GOOS=$$goos GOARCH=$$goarch go build -trimpath -ldflags "-s -w -X main.version=$(VERSION) $(BUILD_INFO_LDFLAGS)" \
 			-o "$$stage/defenseclaw-acp$$exe" ./cmd/defenseclaw-acp; \
 		if [ "$$goos" != windows ]; then \
+			CGO_ENABLED=0 GOOS=$$goos GOARCH=$$goarch go build -trimpath -ldflags "-s -w -X main.version=$(VERSION) $(BUILD_INFO_LDFLAGS)" \
+				-o "$$stage/defenseclaw-hook-user" ./cmd/defenseclaw-hook-user; \
 			CGO_ENABLED=0 GOOS=$$goos GOARCH=$$goarch go build -trimpath -ldflags "-s -w -X main.version=$(VERSION)" \
 				-o "$$stage/defenseclaw-hook-post" ./cmd/defenseclaw-hook-post; \
 		fi; \
@@ -1553,6 +1556,32 @@ dist-gateway: _checkout-write-preflight sync-openclaw-extension
 		fi; \
 		rm -rf "$$stage"; \
 	done
+
+# Claude Cowork VM sensor packages (packaging/cowork-vm): the linux gateway
+# and sensor helper, then defenseclaw-cowork-<arch>.tar.gz per VM architecture
+# in COWORK_VM_OUT. Signing is a separate step (packaging/cowork-vm/sign.sh;
+# the release workflow's cowork-vm job). The rule packs ship until the gateway
+# starts without them with guardrails off (R108-COWORK-4): set
+# COWORK_VM_POLICIES= to leave them out. COWORK_VM_CA adds a collector CA.
+COWORK_VM_OUT ?= dist/cowork-vm
+COWORK_VM_POLICIES ?= policies
+COWORK_VM_CA ?=
+cowork-vm-packages: _checkout-write-preflight sync-openclaw-extension
+	@set -e; for arch in amd64 arm64; do \
+		bin="$(COWORK_VM_OUT)/bin/$$arch"; mkdir -p "$$bin"; \
+		echo "Building the Cowork VM sensor for linux/$$arch..."; \
+		CGO_ENABLED=0 GOOS=linux GOARCH=$$arch go build -trimpath -buildvcs=false \
+			-ldflags "-s -w -X main.version=$(VERSION) $(BUILD_INFO_LDFLAGS)" -o "$$bin/defenseclaw-gateway" ./cmd/defenseclaw; \
+		CGO_ENABLED=0 GOOS=linux GOARCH=$$arch go build -trimpath -buildvcs=false \
+			-ldflags "-s -w -X main.version=$(VERSION) -X main.commit=$(GIT_COMMIT)" -o "$$bin/defenseclaw-sensor-helper" ./cmd/defenseclaw-sensor-helper; \
+		packaging/cowork-vm/build.sh --arch $$arch --version $(VERSION) --gateway "$$bin/defenseclaw-gateway" \
+			--helper "$$bin/defenseclaw-sensor-helper" --out-dir $(COWORK_VM_OUT) \
+			$(if $(COWORK_VM_POLICIES),--policies $(COWORK_VM_POLICIES)) $(if $(COWORK_VM_CA),--collector-ca $(COWORK_VM_CA)); \
+	done
+
+# The package, signature and install.sh refusal contract (no Go build).
+cowork-vm-test:
+	packaging/cowork-vm/test-package.sh
 
 # The installers and the 0.8.x handoff, stamped with this version.
 dist-installers:

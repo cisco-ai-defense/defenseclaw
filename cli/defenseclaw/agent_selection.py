@@ -390,7 +390,153 @@ def _select_agent_executable(data_dir: str, connector: str) -> SetupAgentSelecti
             "if you installed it, run `defenseclaw setup trusted-paths add "
             f"{os.path.dirname(untrusted_found)}` and re-run setup"
         )
+    if (
+        connector == "claudecode"
+        and not untrusted_found
+        and agent_discovery._is_windows_host()
+        and agent_discovery._claude_desktop_engine_candidates()
+    ):
+        # No claude CLI: an account with Claude Desktop only (GAP-0039).
+        selection, rejection = _select_claude_desktop_engine(data_dir, spec)
+        if selection is not None:
+            return selection
     raise OSError(f"cannot select {connector} executable: {rejection}")
+
+
+def _verified_claude_desktop_engine() -> dict:
+    """This account's Claude Desktop engine build whose Authenticode signature
+    verifies, as the gateway checks it for enrolment
+    (``defenseclaw-gateway connector claude-desktop-engine --json``):
+    ``{"version", "engine_dir", "executable", "sha256"}``, sha256 computed
+    over the handle whose signature verified, or ``{"reason": "not_found",
+    "unverified"}``. Python has no signature check of its own."""
+    import subprocess
+
+    from defenseclaw.commands.cmd_setup import _gateway_lifecycle_executable
+    from defenseclaw.pinned_exec import run_pinned_executable
+
+    gateway = _gateway_lifecycle_executable()
+    if not gateway:
+        raise OSError("defenseclaw-gateway was not found, so Claude Desktop's engine signature cannot be checked")
+    try:
+        result = run_pinned_executable(
+            [gateway, "connector", "claude-desktop-engine", "--json"],
+            capture_output=True,
+            text=True,
+            shell=False,
+            stdin=subprocess.DEVNULL,
+            timeout=60,
+        )
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        raise OSError(f"the signature of Claude Desktop's engine could not be checked ({exc})") from exc
+    try:
+        document = json.loads(result.stdout or "")
+    except ValueError:
+        document = None
+    if not isinstance(document, dict):
+        raise OSError(_engine_check_failure(result))
+    return document
+
+
+def _engine_check_failure(result) -> str:
+    """Why the gateway's engine check gave no JSON answer, in one sentence.
+
+    Only a gateway without the hidden command (older than this CLI) needs an
+    update; any other failure names what the gateway said (cowork-1-0-8
+    GAP-0043: a missing config.yaml read as "update DefenseClaw")."""
+    detail = ""
+    for stream in (result.stderr, result.stdout):
+        for line in str(stream or "").splitlines():
+            line = line.strip()
+            if line:
+                detail = line.removeprefix("Error: ")[:300]
+                break
+        if detail:
+            break
+    if "unknown command" in detail or "unknown flag" in detail:
+        return (
+            "this defenseclaw-gateway is older than this CLI and cannot check Claude Desktop's engine; "
+            "update DefenseClaw and re-run setup"
+        )
+    said = f": {detail}" if detail else " and printed nothing"
+    return (
+        f"defenseclaw-gateway could not check Claude Desktop's engine signature (exit {result.returncode}{said}); "
+        "run defenseclaw doctor, then re-run setup"
+    )
+
+
+def _select_claude_desktop_engine(data_dir: str, spec) -> tuple[SetupAgentSelection | None, str]:
+    """Claude Desktop's Claude Code engine as the selected executable of an
+    account without the claude CLI (Windows, cowork-1-0-8 GAP-0039).
+
+    The engine sits in the account's own data folder, so no setup prefix
+    trusts it: it is admitted by its Authenticode signature instead, as
+    enrolment and the gateway admit it (GAP-0037). The build must be one this
+    account's discovery lists, answer ``--version`` with its folder's version
+    (the discovery check), and hash, before the version probe and after it,
+    to the sha256 the gateway took over the very handle whose signature it
+    verified, in both signature checks. So the digest setup records is of the
+    signed bytes, not of a file swapped in between the checks (GAP-0039).
+    """
+
+    def verified() -> tuple[str, str, str, str]:
+        document = _verified_claude_desktop_engine()
+        executable = str(document.get("executable") or "")
+        if not executable:
+            found = agent_discovery._claude_desktop_engine_candidates()
+            detail = str(document.get("unverified") or "") or "no build is signed by Anthropic"
+            return "", "", "", (
+                f"Claude Desktop's Claude Code engine ({found[0] if found else 'none'}) did not verify: {detail}; "
+                "update Claude Desktop or install the claude CLI, then re-run setup"
+            )
+        signed = str(document.get("sha256") or "").strip().lower()
+        if not signed:
+            return "", "", "", (
+                "this defenseclaw-gateway does not report the hash of the Claude Desktop engine it verified; "
+                "update DefenseClaw and re-run setup"
+            )
+        return executable, str(document.get("version") or ""), signed, ""
+
+    def changed(path: str) -> str:
+        return f"Claude Desktop's engine {path} changed while setup checked it"
+
+    try:
+        executable, version, signed, problem = verified()
+        if problem:
+            return None, problem
+        engine = agent_discovery._claude_desktop_engine(executable)
+        if engine is None or engine.version != version:
+            return None, f"the verified Claude Desktop engine {executable} is not one of this account's engine builds"
+        digest = stable_executable_sha256(executable)
+        if digest != signed:
+            return None, changed(executable)
+        raw_version, probe_error = agent_discovery._version_for_agent_binary(
+            "claudecode",
+            executable,
+            spec.version_args,
+            require_trusted_binary_paths=False,
+            data_dir=data_dir,
+            timeout_override=SELECTION_VERSION_TIMEOUT_SECONDS,
+        )
+        if probe_error or not raw_version:
+            return None, f"Claude Desktop's engine {executable}: {probe_error or 'version probe returned no version'}"
+        again, _version, signed_again, problem = verified()
+        if problem or os.path.normcase(again) != os.path.normcase(executable):
+            return None, problem or f"Claude Desktop's verified engine changed while setup checked {executable}"
+        if signed_again != digest or stable_executable_sha256(executable) != digest:
+            return None, changed(executable)
+    except OSError as exc:
+        return None, str(exc)
+    return (
+        SetupAgentSelection(
+            connector="claudecode",
+            executable=executable,
+            raw_version=raw_version,
+            normalized_version=normalize_agent_version(raw_version),
+            sha256=digest,
+        ),
+        "",
+    )
 
 
 
@@ -538,6 +684,11 @@ def _setup_agent_candidates(connector: str, spec, data_dir: str) -> tuple[str, .
         )
 
     discovered = list(agent_discovery._binary_candidates_for_agent(connector, spec))
+    if connector == "claudecode":
+        # Claude Desktop's engine counts as an installation (GAP-0036), but it
+        # sits in this account's own data folder, so no setup prefix trusts
+        # it: _select_claude_desktop_engine admits it by its signature.
+        discovered = [path for path in discovered if agent_discovery._claude_desktop_engine(path) is None]
     _require, configured = agent_discovery._ai_discovery_trust_config(data_dir)
     roots = agent_discovery._expand_bin_prefixes((*_builtin_setup_trusted_prefixes(), *configured))
     if connector == "hermes" and os.name == "nt":

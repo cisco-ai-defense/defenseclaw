@@ -63,23 +63,6 @@ func TestPerUserTransportVerifiesConnectedPeerBeforeSending(t *testing.T) {
 	}
 }
 
-func TestConnectedSocketNameRequiresTheExactClientPort(t *testing.T) {
-	want := "127.0.0.1:18970->127.0.0.1:1234"
-	for _, tc := range []struct {
-		name    string
-		matches bool
-	}{
-		{want, true},
-		{"TCP " + want + " (ESTABLISHED)", true},
-		{"127.0.0.1:18970->127.0.0.1:12345", false},
-		{"127.0.0.1:18971->127.0.0.1:1234", false},
-	} {
-		if got := connectedSocketNameMatches(tc.name, want); got != tc.matches {
-			t.Errorf("connected socket %q matched %v, want %v", tc.name, got, tc.matches)
-		}
-	}
-}
-
 func TestPerUserGatewayClientCanUseARequestContextWithoutAnOverallTimeout(t *testing.T) {
 	client, err := NewPerUserGatewayHTTPClient(0, "127.0.0.1:18970")
 	if err != nil {

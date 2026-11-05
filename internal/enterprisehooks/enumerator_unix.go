@@ -895,8 +895,23 @@ func EnumerateUnix(ctx context.Context, cfg *config.Config, registry *connector.
 			// administrator who names an account with none must be told why
 			// it is not enrolled (rel-1-0-6:GAP-0290), on macOS (local and
 			// mobile accounts alike) as on Linux.
-			skip(fmt.Sprintf("named in enterprise.enrollment.include_users but not enrolled: no installation of %s found for this account; it is enrolled on the next cycle after one is installed in it",
-				strings.Join(notInstalled, ", ")))
+			// A machine-policy connector the account has installed covers
+			// it without a row (Claude Desktop with Claude Code on macOS):
+			// naming only the missing per-user connectors read as if the
+			// account were not covered at all (cowork-1-0-8 GAP-0031).
+			var covered []string
+			for _, conn := range machineInspect {
+				if versions[conn] != "" || len(surfaces[conn]) > 0 {
+					covered = append(covered, conn)
+				}
+			}
+			if len(covered) > 0 {
+				skip(fmt.Sprintf("named in enterprise.enrollment.include_users: no per-user connector install (no %s found); covered by machine policy (%s), which needs no per-user row",
+					strings.Join(notInstalled, ", "), strings.Join(covered, ", ")))
+			} else {
+				skip(fmt.Sprintf("named in enterprise.enrollment.include_users but not enrolled: no installation of %s found for this account; it is enrolled on the next cycle after one is installed in it",
+					strings.Join(notInstalled, ", ")))
+			}
 		}
 	}
 

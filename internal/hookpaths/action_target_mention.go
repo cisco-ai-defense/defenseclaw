@@ -314,7 +314,13 @@ func actionPosixTargetMention(command, cwd, home string, depth int, stateOnly bo
 				// moved file under that name (rel-1-0-6:GAP-0217).
 				readOnly := !stateOnly && actionKnownReadOnlyShell(&syntax.File{Stmts: []*syntax.Stmt{stmt}}, home)
 				readsReplaced := len(replacedEntries) > 0 && readOnly
-				if strings.Contains(command, "{") && actionOversizedTouchOperands(call, home, effectiveCWD, check) {
+				var quick func([]string) bool
+				if !stateOnly {
+					quick = func(fields []string) bool {
+						return actionMissingSimpleTargets(fields, effectiveCWD, protected, ssh, memo)
+					}
+				}
+				if strings.Contains(command, "{") && actionOversizedTouchOperands(call, home, effectiveCWD, check, quick) {
 					found = true
 					return false
 				}
@@ -1584,6 +1590,11 @@ func (g *actionGlobs) answer(pattern string) string {
 // actionGlobFacts expands, as the user, each pathname pattern the action
 // target scan of command checks, and returns the answers for the gateway.
 func actionGlobFacts(command, cwd, home string) map[string]string {
+	// A pathname pattern needs a glob metacharacter or an expansion that
+	// can produce one. Fixed brace ranges alone cannot add a glob.
+	if !strings.ContainsAny(command, "*?[$`") {
+		return nil
+	}
 	globs := &actionGlobs{record: map[string]string{}}
 	actionProtectedTargetMentionDepth(command, cwd, home, 0, false, globs)
 	return globs.record
@@ -3542,6 +3553,7 @@ var actionWindowsDisplaySinks = map[string]bool{
 	"out-host": true, "oh": true, "out-null": true, "out-string": true, "out-default": true,
 	"format-table": true, "ft": true, "format-list": true, "fl": true, "format-wide": true, "fw": true,
 	"format-custom": true, "fc": true, "select-string": true, "sls": true, "findstr": true, "grep": true, "more": true,
+	"cat": true,
 }
 
 // actionWindowsSinkParameters are the parameters a display sink may carry
@@ -3575,6 +3587,9 @@ var actionWindowsPrintParameters = map[string]bool{
 // delay-bound -Path {$_} take the printed text as a path).
 func actionWindowsPrintOnlyDisplays(scan actionWindowsScanResult, start, end int) bool {
 	words := scan.words
+	if actionWindowsPipelineShellReader(words, end) {
+		return false
+	}
 	for j := start + 1; j < end; j++ {
 		word := words[j]
 		if operator := actionWindowsRedirectOperator(word); operator != "" {
@@ -3605,7 +3620,11 @@ func actionWindowsPrintOnlyDisplays(scan actionWindowsScanResult, start, end int
 		if words[k] == "env" && k+2 < len(words) && words[k+1] == "-S" && words[k+2] == "cat -n" &&
 			(k+3 == len(words) || words[k+3] == "|" || words[k+3] == ";" || words[k+3] == "&" || words[k+3] == "&&" || words[k+3] == "||") {
 			k += 2
-		} else if !actionWindowsDisplaySinks[programBase(words[k])] {
+		} else if !actionWindowsDisplaySinks[programBase(words[k])] ||
+			programBase(words[k]) == "cat" &&
+				(!strings.EqualFold(words[k], "cat") || !actionWindowsDisplayBindingStable(words[:start])) {
+			// An explicit path or an earlier binding change cannot prove
+			// the named display command's behavior.
 			return false
 		}
 		// A sink stage that keeps or forwards what it shows (-OutVariable,
@@ -3629,6 +3648,59 @@ func actionWindowsPrintOnlyDisplays(scan actionWindowsScanResult, start, end int
 	return true
 }
 
+// actionWindowsPipelineShellReader identifies a later stage that interprets
+// the printed text, including a shell launched through env. Its input must
+// remain part of the command reading.
+func actionWindowsPipelineShellReader(words []string, end int) bool {
+	for i := end; i < len(words) && words[i] == "|"; {
+		i++
+		if i >= len(words) {
+			return false
+		}
+		program := strings.TrimSuffix(strings.ToLower(programBase(words[i])), ".exe")
+		if program == "env" {
+			i++
+			for i < len(words) && words[i] != "|" && words[i] != ";" && words[i] != "&" && words[i] != "&&" && words[i] != "||" &&
+				(strings.Contains(words[i], "=") || strings.HasPrefix(words[i], "-")) {
+				// These env options consume the following word.
+				if words[i] == "-u" || words[i] == "--unset" || words[i] == "-C" || words[i] == "--chdir" {
+					i++
+				}
+				i++
+			}
+			if i >= len(words) {
+				return false
+			}
+			program = strings.TrimSuffix(strings.ToLower(programBase(words[i])), ".exe")
+		}
+		switch program {
+		case "sh", "bash", "zsh", "fish", "pwsh", "powershell", "cmd", "iex", "invoke-expression":
+			return true
+		}
+		for i++; i < len(words) && words[i] != "|" && words[i] != ";" && words[i] != "&" && words[i] != "&&" && words[i] != "||"; i++ {
+		}
+	}
+	return false
+}
+
+// A named display command keeps its usual meaning only when earlier
+// statements in the same call leave command bindings unchanged.
+func actionWindowsDisplayBindingStable(words []string) bool {
+	start := 0
+	for i, word := range words {
+		switch word {
+		case ";", "|", "||", "&", "&&":
+		default:
+			continue
+		}
+		if i > start && !powerShellReadBindingsUnchanged(strings.Join(words[start:i], " ")) {
+			return false
+		}
+		start = i + 1
+	}
+	return start >= len(words) || powerShellReadBindingsUnchanged(strings.Join(words[start:], " "))
+}
+
 // actionWindowsNestedArgument reports a statement words[start:end] with an
 // unquoted argument that opens a PowerShell grouping or subexpression:
 // (, $( or @( (rel-1-0-6:GAP-0234), anywhere in the word, not only at its
@@ -3649,13 +3721,86 @@ func actionWindowsNestedArgument(scan actionWindowsScanResult, start, end int) b
 // a script: a shell (sh, bash, pwsh, cmd ...) or Invoke-Expression.
 func actionWindowsPipedIntoShell(words []string, end int) bool {
 	for k := end; k < len(words) && words[k] == "|"; {
-		if k+1 < len(words) && actionWindowsScriptReader(words[k+1]) {
+		stage := k + 1
+		if stage >= len(words) {
+			return false
+		}
+		last := stage
+		for last < len(words) && words[last] != ";" && words[last] != "|" && words[last] != "||" && words[last] != "&" && words[last] != "&&" {
+			last++
+		}
+		if actionWindowsPipelineStageReadsScript(words[stage:last]) {
 			return true
 		}
-		for k++; k < len(words) && words[k] != ";" && words[k] != "|" && words[k] != "||" && words[k] != "&" && words[k] != "&&"; k++ {
-		}
+		k = last
 	}
 	return false
+}
+
+// A plain shell reads stdin, as does one launched by env. Keep the env
+// argument grammar here so an assignment after -- and a split string do
+// not turn an executable pipeline into display text (GAP-0227).
+func actionWindowsPipelineStageReadsScript(stage []string) bool {
+	if len(stage) == 0 {
+		return false
+	}
+	if strings.TrimSuffix(strings.ToLower(programBase(strings.ReplaceAll(stage[0], `\`, "/"))), ".exe") != "env" {
+		return actionWindowsScriptReader(stage[0])
+	}
+	options := true
+	for i := 1; i < len(stage); i++ {
+		word := stage[i]
+		if word == "--" {
+			options = false
+			continue
+		}
+		if options {
+			switch {
+			case word == "-i" || word == "--ignore-environment" || word == "-0" || word == "--null" || word == "-v" || word == "--debug":
+				continue
+			case word == "-u" || word == "--unset" || word == "-C" || word == "--chdir":
+				i++
+				if i >= len(stage) {
+					return false
+				}
+				continue
+			case strings.HasPrefix(word, "--unset=") || strings.HasPrefix(word, "--chdir="):
+				continue
+			case word == "-S" || word == "--split-string":
+				if i+1 >= len(stage) {
+					return false
+				}
+				return actionWindowsEnvSplitReadsScript(stage[i+1])
+			case strings.HasPrefix(word, "--split-string="):
+				return actionWindowsEnvSplitReadsScript(strings.TrimPrefix(word, "--split-string="))
+			}
+		}
+		if actionWindowsEnvAssignment(word) {
+			continue
+		}
+		return actionWindowsScriptReader(word)
+	}
+	return false
+}
+
+func actionWindowsEnvAssignment(word string) bool {
+	name, _, ok := strings.Cut(word, "=")
+	if !ok || name == "" {
+		return false
+	}
+	for i := 0; i < len(name); i++ {
+		c := name[i]
+		if c == '_' || c >= 'a' && c <= 'z' || c >= 'A' && c <= 'Z' || i > 0 && c >= '0' && c <= '9' {
+			continue
+		}
+		return false
+	}
+	return true
+}
+
+func actionWindowsEnvSplitReadsScript(value string) bool {
+	words := strings.Fields(value)
+	return len(words) > 0 && actionWindowsScriptReader(words[0])
 }
 
 // actionWindowsScriptReader reports a program that runs the text it reads

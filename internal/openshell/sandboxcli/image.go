@@ -118,11 +118,9 @@ func (b *builderImages) Build(ctx context.Context, h *harness.Spec, microVM, for
 		return image.Record{}, false, err
 	}
 	if !force {
-		// An image for the MicroVM driver not checked for it yet is
-		// probed again by the build (image.Record.MicroVMUnchecked).
 		if rec, ok, err := builder.Current(spec); err != nil {
 			return image.Record{}, false, err
-		} else if ok && rec.HookFireVerified && !rec.MicroVMUnchecked() {
+		} else if ok && rec.HookFireVerified {
 			return rec, false, nil
 		}
 	}
@@ -152,9 +150,7 @@ func (b *builderImages) Current(h *harness.Spec, microVM bool) (bool, error) {
 		return false, err
 	}
 	rec, ok, err := builder.Current(spec)
-	// A MicroVM image whose MicroVM check settled nothing is checked
-	// again before its next sandbox, so it is not current yet.
-	return ok && rec.HookFireVerified && !rec.MicroVMUnchecked(), err
+	return ok && rec.HookFireVerified, err
 }
 
 func (b *builderImages) List() ([]image.Record, error) { return b.store().List() }
@@ -368,18 +364,6 @@ func (a *App) buildImage(ctx context.Context, spec *harness.Spec, microVM, force
 		} else if warning != "" {
 			a.warn(warning)
 		}
-	}
-	if !rec.MicroVM || rec.MicroVMVerified {
-		return nil
-	}
-	recheck := "`" + CommandName + " image build " + spec.Name + " --force`"
-	switch {
-	case rec.MicroVMProblem != "":
-		a.warn(spec.DisplayName + " cannot start in an OpenShell MicroVM, so a gateway on the vm driver (a Mac's) refuses to run it: " + rec.MicroVMProblem +
-			"; " + recheck + " checks it again")
-	case rec.MicroVMInconclusive != "":
-		a.warn(spec.DisplayName + "'s image is not checked for an OpenShell MicroVM yet: " + rec.MicroVMInconclusive +
-			"; the next `" + CommandName + " run " + spec.Name + "` on the vm driver checks it again, as does " + recheck)
 	}
 	return nil
 }

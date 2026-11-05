@@ -68,6 +68,10 @@ func TestPurgeUserStateRemovesPerUserBinariesAndLinks(t *testing.T) {
 	// ~/.local/bin as install.sh leaves it, plus the account's own tools.
 	write(filepath.Join(binDir, "defenseclaw-gateway"), "gateway", 0o755)
 	write(filepath.Join(binDir, "defenseclaw-acp"), "acp", 0o755)
+	// GAP-0571: the hook helpers and the Linux sensor helper go too.
+	for _, name := range []string{"defenseclaw-hook-post", "defenseclaw-hook-user", "defenseclaw-sensor-helper"} {
+		write(filepath.Join(binDir, name), name, 0o755)
+	}
 	link(filepath.Join(dataDir, ".venv", "bin", "defenseclaw"), filepath.Join(binDir, "defenseclaw"))
 	link(filepath.Join(dataDir, ".venv", "bin", "skill-scanner"), filepath.Join(binDir, "skill-scanner"))
 	link("../../.defenseclaw/.venv/bin/mcp-scanner", filepath.Join(binDir, "mcp-scanner"))

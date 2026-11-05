@@ -492,10 +492,6 @@ type Doctor struct {
 	Username      func() (string, error)
 	HomeDir       func() (string, error)
 	DockerDesktop func() (*DockerDesktop, error)
-	// TempDir is the parent of the files the hook-fire probe of an image
-	// build mounts into its containers (default HookFireProbeDir, the
-	// default of image.Builder, whose TempDir overrides it the same way).
-	TempDir func() string
 	// DockerGroup reports whether the user belongs to the docker group
 	// and whether this session already carries that membership.
 	DockerGroup func() (member, inSession bool, err error)
@@ -593,9 +589,6 @@ func (d *Doctor) defaults() {
 	}
 	if d.DockerDesktop == nil {
 		d.DockerDesktop = func() (*DockerDesktop, error) { return readDockerDesktop(d.GOOS, d.HomeDir) }
-	}
-	if d.TempDir == nil {
-		d.TempDir = HookFireProbeDir
 	}
 	if d.DockerGroup == nil {
 		d.DockerGroup = dockerGroupMembership

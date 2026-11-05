@@ -418,6 +418,13 @@ func claudeCodeRollbackConversion(opts SetupOpts, settingsPath string) func([]by
 		launcher = defenseclawHookBinary()
 	}
 	owned := func(path string) bool {
+		if runtime.GOOS != "windows" {
+			for _, root := range []string{userHomeDir(), opts.DataDir} {
+				if pathidentity.Same(path, filepath.Join(root, ".local", "bin", "defenseclaw-hook-user")) {
+					return true
+				}
+			}
+		}
 		return pathidentity.Same(path, launcher) || isDefenseClawHookExecutable(path)
 	}
 	script := filepath.ToSlash(filepath.Join(opts.DataDir, "hooks", "claude-code-hook.sh"))
@@ -454,12 +461,23 @@ func claudeCodeHooksInEarlierReleaseForm(
 		for _, rawGroup := range groups {
 			group, _ := rawGroup.(map[string]interface{})
 			handlers, _ := group["hooks"].([]interface{})
+			kept := handlers[:0]
 			for _, rawHandler := range handlers {
 				handler, ok := rawHandler.(map[string]interface{})
+				if ok && goos != "windows" &&
+					claudeCodePerUserFallbackTarget(handler, filepath.Dir(script)) {
+					command, _ := handler["command"].(string)
+					if owned(command) {
+						changed++
+						continue
+					}
+				}
 				if ok && claudeCodeHandlerInEarlierReleaseForm(handler, goos, script, owned) {
 					changed++
 				}
+				kept = append(kept, rawHandler)
 			}
+			group["hooks"] = kept
 		}
 	}
 	return changed
@@ -484,11 +502,38 @@ func claudeCodeHandlerInEarlierReleaseForm(
 		return true
 	}
 	// 1.0.0 matched its handlers by the unquoted script path prefix.
+	if claudeCodePerUserGuardTarget(handler, filepath.Dir(script)) {
+		native := filepath.Join(filepath.Dir(filepath.Dir(filepath.Dir(script))), ".local", "bin", "defenseclaw-hook-user")
+		if owned(native) {
+			handler["command"] = script
+			delete(handler, "args")
+			return true
+		}
+	}
 	command, _ := handler["command"].(string)
+	if word, rest, ok := posixHookCommandSplit(claudeCodeUnguardedHookCommand(command)); ok &&
+		filepath.IsAbs(word) && filepath.Base(word) == "defenseclaw-hook-user" && owned(word) {
+		homeArg := " hook --connector claudecode --hook-home " +
+			posixHookCommandWord(filepath.Dir(filepath.Dir(script)))
+		if rest == homeArg ||
+			(strings.HasPrefix(rest, homeArg+" --api-addr ") &&
+				claudeCodeRollbackAPIAddr(strings.TrimPrefix(rest, homeArg+" --api-addr "))) {
+			handler["command"] = script
+			return true
+		}
+	}
 	quoted := posixHookCommandWord(script)
 	if quoted == script || claudeCodeUnguardedHookCommand(command) != quoted {
 		return false
 	}
 	handler["command"] = script
 	return true
+}
+
+// claudeCodeRollbackAPIAddr accepts only the exact shell word this release
+// renders for a local gateway address, including a quoted bracketed IPv6 word.
+func claudeCodeRollbackAPIAddr(rendered string) bool {
+	addr, rest, ok := posixHookCommandSplit(rendered)
+	return ok && rest == "" && posixHookCommandWord(addr) == rendered &&
+		claudeCodeLoopbackGatewayEndpoint("http://"+addr)
 }

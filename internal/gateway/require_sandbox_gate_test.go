@@ -216,11 +216,11 @@ func TestSandboxPrerequisiteRecord(t *testing.T) {
 		// GAP-0266: an installed release the host refuses is named, never
 		// "not installed".
 		"unsupported release": {write("old.json", `{"version":1,"install":"prerequisite","driver":"docker","ready":false,"missing":[{"item":"openshell cli","detail":"d","fix":"f","version":"0.1.3"},{"item":"openshell gateway","version":"0.1.3"}]}`),
-			docker, "OpenShell 0.1.3 is installed, but that release is unsupported: sandboxes need OpenShell 0.1.5 or later, below 0.2.0"},
+			docker, "OpenShell 0.1.3 is installed, but that release is unsupported: sandboxes need OpenShell 0.1.6 or later, below 0.2.0"},
 		"unsupported prerelease": {write("pre.json", `{"version":1,"install":"prerequisite","driver":"vm","ready":false,"missing":[{"item":"microvm driver","version":"0.1.5-pre.3"}]}`),
-			vm, "OpenShell 0.1.5-pre.3 is installed, but that release is unsupported: sandboxes need OpenShell 0.1.5 or later, below 0.2.0"},
+			vm, "OpenShell 0.1.5-pre.3 is installed, but that release is unsupported: sandboxes need OpenShell 0.1.6 or later, below 0.2.0"},
 		"release above the window": {write("new.json", `{"version":1,"install":"prerequisite","driver":"docker","ready":false,"missing":[{"item":"openshell gateway","version":"0.2.0"}]}`),
-			docker, "OpenShell 0.2.0 is installed, but that release is unsupported: sandboxes need OpenShell 0.1.5 or later, below 0.2.0"},
+			docker, "OpenShell 0.2.0 is installed, but that release is unsupported: sandboxes need OpenShell 0.1.6 or later, below 0.2.0"},
 		"not the pinned release": {write("pin.json", `{"version":1,"install":"prerequisite","driver":"docker","ready":false,"missing":[{"item":"openshell cli","version":"0.1.6"}]}`),
 			docker, "OpenShell 0.1.6 is installed, but it is not the release your organization requires"},
 		"unreadable release": {write("junk.json", `{"version":1,"install":"prerequisite","driver":"docker","ready":false,"missing":[{"item":"openshell cli","version":"x.y"}]}`),

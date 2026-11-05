@@ -62,6 +62,12 @@ The sidecar must be running for this command to work.`,
 	// On a standalone managed host an administrator's status reads the
 	// managed deployment without extra environment variables.
 	PersistentPreRunE: func(cmd *cobra.Command, _ []string) error {
+		// A standard account of a managed Windows computer sees its own
+		// protection state; it has no gateway status to read (GAP-0060).
+		gatewayStatusOwnState = statusShowsOwnState()
+		if gatewayStatusOwnState {
+			return nil
+		}
 		if err := managedStandardUserGatewayRefusal(); err != nil {
 			return err
 		}
@@ -80,6 +86,9 @@ The sidecar must be running for this command to work.`,
 	},
 	PersistentPostRun: func(_ *cobra.Command, _ []string) {},
 	RunE: func(cmd *cobra.Command, args []string) error {
+		if gatewayStatusOwnState {
+			return showOwnStatus(cmd, gatewayStatusJSON)
+		}
 		err := runSidecarStatus(cmd, args)
 		if gatewayStatusConfigProblem != nil {
 			return gatewayStatusConfigProblem
@@ -91,6 +100,10 @@ The sidecar must be running for this command to work.`,
 // gatewayStatusConfigProblem is the config.yaml error that status reports
 // after the gateway's health when only a destination secret is missing.
 var gatewayStatusConfigProblem error
+
+// gatewayStatusOwnState: this status shows the caller's own protection
+// state (statusShowsOwnState) instead of the gateway's.
+var gatewayStatusOwnState bool
 
 // gatewayStatusRelaxedConfig loads config.yaml without compiling the
 // observability destinations when err is only a missing destination secret,

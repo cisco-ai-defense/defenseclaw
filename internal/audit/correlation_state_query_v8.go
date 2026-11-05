@@ -52,7 +52,7 @@ func (repo *CorrelationRepository) GetCursor(
 		return CorrelationCursor{}, err
 	}
 	defer release()
-	return scanCorrelationCursor(repo.store.db.QueryRowContext(ctx, correlationCursorSelect+
+	return scanCorrelationCursor(repo.store.queryPool().QueryRowContext(ctx, correlationCursorSelect+
 		` WHERE connector_instance_id=? AND session_id=? AND agent_id=?`,
 		string(connectorInstanceID), sessionID, agentID))
 }
@@ -96,7 +96,7 @@ func (repo *CorrelationRepository) findUniqueActiveCursor(
 		return CorrelationCursor{}, err
 	}
 	defer release()
-	rows, err := repo.store.db.QueryContext(ctx, correlationCursorSelect+`
+	rows, err := repo.store.queryPool().QueryContext(ctx, correlationCursorSelect+`
 		WHERE connector_instance_id=? AND session_id=? AND active=1`+extraWhere+`
 		ORDER BY updated_time_unix_nano DESC, agent_id LIMIT 2`, string(connectorInstanceID), sessionID)
 	if err != nil {
@@ -199,7 +199,7 @@ func (repo *CorrelationRepository) ListPendingOperations(
 		return nil, err
 	}
 	defer release()
-	rows, err := repo.store.db.QueryContext(ctx, correlationPendingSelect+` WHERE `+
+	rows, err := repo.store.queryPool().QueryContext(ctx, correlationPendingSelect+` WHERE `+
 		strings.Join(clauses, " AND ")+`
 		ORDER BY updated_time_unix_nano DESC, operation_id, operation_type LIMIT ?`, args...)
 	if err != nil {

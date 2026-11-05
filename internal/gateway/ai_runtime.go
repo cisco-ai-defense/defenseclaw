@@ -23,9 +23,14 @@ package gateway
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"log"
+	"os"
+	"runtime"
+	"sort"
 	"time"
 
 	"github.com/defenseclaw/defenseclaw/internal/config"
@@ -113,20 +118,23 @@ func (s *Sidecar) runAIRuntime(ctx context.Context) error {
 		return ctx.Err()
 	}
 
-	acquirer := ownAccountProcesses(activeConfig, chooseAcquirer(activeConfig))
+	acquirer := ownAccountProcesses(activeConfig, chooseAcquirer(ctx, activeConfig))
 	if acquirer.Brokered() {
 		defer inventory.SetProcessAccountLookup(brokeredProcessAccounts(ctx, acquirer))()
 	}
 	service, err := sensor.New(sensor.Options{
-		Config:    runtimeConfig,
-		Acquirer:  acquirer,
-		Inventory: discoveryCorrelationSource{sidecar: s},
+		Config:       runtimeConfig,
+		SecureClient: activeConfig.SecureClientIntegration(),
+		Acquirer:     acquirer,
+		Inventory:    discoveryCorrelationSource{sidecar: s},
+		// The hook ring labels hook_seen only where hooks are machine policy.
+		ManagedHooks: managed.IsManagedEnterprise(activeConfig.DeploymentMode),
 		// The same home list the inventory scanner walks. Under launchd or a
 		// Windows service the daemon's own $HOME is not a real user's, so the
 		// host plane would watch the wrong paths without this; in
 		// managed_enterprise the hook-enumerator already populates it from the
 		// eligible-users enumeration that renders targets.yaml.
-		HomeDirs: activeConfig.AIDiscovery.HomeDirs,
+		HomeDirs: aiRuntimeHomeDirs(activeConfig, runtime.GOOS == "linux" && os.Geteuid() == 0 && !acquirer.Brokered()),
 		Owners:   s.aiRuntimeOwnerLookups(activeConfig),
 	})
 	if err != nil {
@@ -163,6 +171,7 @@ func (s *Sidecar) runAIRuntime(ctx context.Context) error {
 	defer ticker.Stop()
 	// The scan time of the last snapshot whose findings were emitted.
 	var lastEmitted time.Time
+	var emittedFindings map[string][sha256.Size]byte
 	for {
 		select {
 		case err := <-errCh:
@@ -194,6 +203,10 @@ func (s *Sidecar) runAIRuntime(ctx context.Context) error {
 			snapshot = service.TakeSnapshot()
 			lastEmitted = snapshot.ScannedAt
 			notifyKernelBlocks(s.OSNotifier(), snapshot)
+			var nextFindings map[string][sha256.Size]byte
+			snapshot.Findings, nextFindings = newAIRuntimeFindings(
+				snapshot.Findings, emittedFindings, activeConfig.SecureClientIntegration(),
+			)
 			// Emission is best-effort and never blocks the planes. A
 			// destination being unreachable must not stop the sensor from
 			// observing; the snapshot the API serves is unaffected either way.
@@ -211,6 +224,8 @@ func (s *Sidecar) runAIRuntime(ctx context.Context) error {
 						"[ai-runtime] canonical snapshot emission failed (error_code=%s); dashboard data may be incomplete",
 						errorCode,
 					)
+				} else {
+					emittedFindings = nextFindings
 				}
 			}
 		case <-ctx.Done():
@@ -237,6 +252,90 @@ func (s *Sidecar) runAIRuntime(ctx context.Context) error {
 			return ctx.Err()
 		}
 	}
+}
+
+// aiRuntimeHomeDirs follows session accounts on a direct, unmanaged root
+// gateway. Managed helpers retain their independently enrolled home scope.
+func aiRuntimeHomeDirs(cfg *config.Config, directRootLinux bool) []string {
+	if cfg == nil {
+		return nil
+	}
+	homes := append([]string(nil), cfg.AIDiscovery.HomeDirs...)
+	if directRootLinux && !managed.IsManagedEnterprise(cfg.DeploymentMode) &&
+		!cfg.StandaloneEnterprise() && !cfg.SecureClientIntegration() {
+		return append(homes, "/home/*", "/sessions/*")
+	}
+	return homes
+}
+
+// newAIRuntimeFindings keeps one emission per observed finding state. The
+// cursor contains digests only and is replaced each poll, so an absent finding
+// can be reported again if it returns. A failed emission leaves the prior
+// cursor in place and the next poll can retry it.
+func newAIRuntimeFindings(
+	findings []sensor.Finding, previous map[string][sha256.Size]byte, secureClient bool,
+) ([]sensor.Finding, map[string][sha256.Size]byte) {
+	if secureClient {
+		return findings, previous
+	}
+	next := make(map[string][sha256.Size]byte, len(findings))
+	changed := make([]sensor.Finding, 0, len(findings))
+	for _, finding := range findings {
+		if finding.FindingID == "" {
+			changed = append(changed, finding)
+			continue
+		}
+		digest, ok := aiRuntimeFindingDigest(finding)
+		if !ok {
+			changed = append(changed, finding)
+			continue
+		}
+		if prior, ok := previous[finding.FindingID]; !ok || prior != digest {
+			changed = append(changed, finding)
+		}
+		next[finding.FindingID] = digest
+	}
+	return changed, next
+}
+
+func aiRuntimeFindingDigest(finding sensor.Finding) ([sha256.Size]byte, bool) {
+	activities := make([]string, 0, len(finding.Activities))
+	for _, activity := range finding.Activities {
+		encoded, err := json.Marshal(activity)
+		if err != nil {
+			return [sha256.Size]byte{}, false
+		}
+		activities = append(activities, string(encoded))
+	}
+	sort.Strings(activities)
+	state := struct {
+		PID, Score               int
+		Process, Cmdline, User   string
+		UserSID, Attribution     string
+		AttributionReason, Agent string
+		Severity, Exe, Connector string
+		NotEnforcedReason        string
+		UID, AUID                *int
+		Signals, Providers       []string
+		CorrelationVerdict       string
+		CorrelationReason        string
+		Activities               []string
+	}{
+		PID: finding.PID, Score: finding.Score,
+		Process: finding.Process, Cmdline: finding.Cmdline, User: finding.User,
+		UserSID: finding.UserSID, Attribution: finding.Attribution,
+		AttributionReason: finding.AttributionReason, Agent: finding.AgentName,
+		Severity: string(finding.Severity), Exe: finding.Exe, Connector: finding.Connector,
+		NotEnforcedReason: finding.NotEnforcedReason, UID: finding.UID, AUID: finding.AUID,
+		Signals: renderRuntimeSignals(finding), Providers: renderRuntimeProviders(finding),
+		CorrelationVerdict: string(finding.Correlation.Verdict),
+		CorrelationReason:  finding.Correlation.Reason, Activities: activities,
+	}
+	encoded, err := json.Marshal(state)
+	if err != nil {
+		return [sha256.Size]byte{}, false
+	}
+	return sha256.Sum256(encoded), true
 }
 
 // shouldEmitAIRuntimeSnapshot reports whether this snapshot's findings have
@@ -372,8 +471,13 @@ func brokeredProcessAccounts(ctx context.Context, acquirer acquire.Acquirer) fun
 // to this account's processes: other accounts' argv must not reach this
 // user's findings and telemetry (GAP-1105). Managed and standalone enterprise
 // gateways keep the machine-wide view.
+//
+// A gateway brokering through a root sensor helper keeps the helper's
+// machine-wide view too: root started that helper for this account as the
+// machine's sensor, as the Claude Cowork VM package does (packaging/cowork-vm).
 func ownAccountProcesses(activeConfig *config.Config, acquirer acquire.Acquirer) acquire.Acquirer {
-	if managed.IsManagedEnterprise(activeConfig.DeploymentMode) || activeConfig.StandaloneEnterprise() {
+	if managed.IsManagedEnterprise(activeConfig.DeploymentMode) || activeConfig.StandaloneEnterprise() ||
+		acquirer.Brokered() {
 		return acquirer
 	}
 	name, _ := inventory.CurrentProcessOwner()
@@ -408,8 +512,9 @@ func (a ownerProcessAcquirer) Processes(ctx context.Context) ([]procprobe.Proces
 // what the planes need, so brokering is the only way it sees anything. An
 // unmanaged install is the operator's own process with whatever privilege
 // they granted it, where inserting a broker would add a failure mode and buy
-// nothing. There is no setting: the managed socket path is part of what the
-// installer owns, and an unmanaged gateway has no helper to ask.
+// nothing. There is no config setting: the managed socket path is part of
+// what the installer owns, and an unmanaged gateway normally has no helper to
+// ask.
 //
 // Broker only where this process was de-privileged on purpose and a helper is
 // therefore installed. Both halves matter.
@@ -425,10 +530,23 @@ func (a ownerProcessAcquirer) Processes(ctx context.Context) ([]procprobe.Proces
 // running without sudo also lacks wide coverage, and there is no helper
 // installed for it to ask. It should read what it can and report the
 // shortfall, not dial a socket nobody is serving.
-func chooseAcquirer(activeConfig *config.Config) acquire.Acquirer {
-	managedEnterprise := managed.IsManagedEnterprise(activeConfig.DeploymentMode)
-	if !managedEnterprise || acquire.NewLocal().WideCoverage() {
+//
+// One unmanaged case brokers: a de-privileged gateway whose service
+// environment names a root helper socket (DEFENSECLAW_SENSOR_HELPER_SOCKET),
+// as the Claude Cowork VM package does (packaging/cowork-vm/install.sh). The
+// variable only names the path: the gateway trusts it only when the socket and
+// every folder above it are root-owned and writable by root alone, and the
+// serving process is root on every connect (unmanagedHelperSocket). A per-user
+// install never sets it, and the helper accepts only the peer uids root allowed.
+func chooseAcquirer(ctx context.Context, activeConfig *config.Config) acquire.Acquirer {
+	if acquire.NewLocal().WideCoverage() {
 		return acquire.NewLocal()
 	}
-	return acquire.NewHelper(acquire.DefaultSocketPath(activeConfig.DataDir, managedEnterprise))
+	if managed.IsManagedEnterprise(activeConfig.DeploymentMode) {
+		return acquire.NewHelper(acquire.DefaultSocketPath(activeConfig.DataDir, true))
+	}
+	if socket := unmanagedHelperSocket(ctx); socket != "" {
+		return acquire.NewRootHelper(socket)
+	}
+	return acquire.NewLocal()
 }

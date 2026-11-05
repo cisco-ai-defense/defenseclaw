@@ -2870,6 +2870,30 @@ def _data_dir_writer_problem(path: str) -> str | None:
     return darwin_acl_write_error(path)
 
 
+# BUILTIN\Administrators: the default owner of what an elevated token creates.
+_WINDOWS_ADMINISTRATORS_SID = "S-1-5-32-544"
+
+
+def _administrators_owner_step(data_dir: str, paths: list[str]) -> str:
+    """The cause and the fix for private files the Administrators group owns.
+
+    The fix names the account by its SID (icacls ``*SID``): USERDOMAIN can
+    name another account's domain (an SSH session on dc-win2 had DCLAB for a
+    local Administrator), and icacls then gave the files to that account.
+    """
+    from defenseclaw.file_permissions import _windows_current_user_sid
+
+    try:
+        account = "*" + _windows_current_user_sid()
+    except (OSError, ValueError):
+        account = os.environ.get("USERNAME", "").strip() or "<your account>"
+    return (
+        ", ".join(paths) + " belong to the Administrators group because DefenseClaw ran from an elevated "
+        "administrator session; from an elevated prompt run: "
+        f'icacls "{data_dir}" /setowner "{account}" /T /C /Q, then defenseclaw doctor'
+    )
+
+
 def _check_private_file_exposure(cfg, r: _DoctorResult) -> None:
     """FAIL when other local accounts can read DefenseClaw secrets or state.
 
@@ -2894,6 +2918,7 @@ def _check_private_file_exposure(cfg, r: _DoctorResult) -> None:
     exposed: list[str] = []
     unverified: list[str] = []
     files: list[str] = []
+    admin_owned: list[str] = []
     dotenv_requires_review = False
     # Another account that can write the data directory can replace the
     # private files in it, so this fails like an exposed file (GAP-1329).
@@ -2934,6 +2959,8 @@ def _check_private_file_exposure(cfg, r: _DoctorResult) -> None:
                 else:
                     exposed.append(f"{path} (unsafe Windows ACL: {problem})")
                     files.append(path)
+                    if f"owner SID {_WINDOWS_ADMINISTRATORS_SID} " in problem:
+                        admin_owned.append(path)
                     if path == dotenv and ("write" in problem.lower() or "owner SID" in problem):
                         dotenv_requires_review = True
             continue
@@ -2972,7 +2999,12 @@ def _check_private_file_exposure(cfg, r: _DoctorResult) -> None:
     # other accounts; another unsafe Windows ACL, such as a write grant or
     # another owner, needs a review (GAP-0715).
     fixable = [path for path in others if os.name != "nt" or _private_state_file_exposed(path)]
-    review = [path for path in others if path not in fixable]
+    review = [path for path in others if path not in fixable and path not in admin_owned]
+    if admin_owned:
+        # An elevated token names Administrators as the owner of what it
+        # creates; this CLI now creates files as the user (windows_owner), but
+        # files an earlier elevated run made keep that owner (GAP-0050).
+        steps.append(_administrators_owner_step(data_dir, admin_owned))
     if fixable:
         steps.append("defenseclaw doctor --fix --yes (makes " + ", ".join(fixable) + " private)")
     if review:
@@ -4268,10 +4300,15 @@ def _check_component_connector_compatibility(
             remediation=remediation,
         )
 
+    agents = getattr(discovery, "agents", None)
     for finding in report.connectors:
         detail = finding.summary
         if finding.installed_version:
             detail += f"; installed={finding.installed_version}"
+            signal = agents.get(finding.connector) if isinstance(agents, dict) else None
+            if getattr(signal, "source", "") == "claude-desktop":
+                # GAP-0036: the version is the one of Claude Desktop's engine.
+                detail += " (Claude Desktop's Claude Code engine)"
         if finding.contract_id:
             detail += f"; contract={finding.contract_id}"
         if finding.supported_agent_ranges:
@@ -7931,6 +7968,30 @@ def _emit_agent_hook_env_warnings(cfg, connector: str, label: str, r: _DoctorRes
         _emit("warn", label, str(warning), r=r, remediation=warning.repair)
 
 
+def _claude_missing_registration_problem(cfg, settings_path: str, settings):
+    """The first required Claude Code event whose rendered registration is missing, or "" (rel-1-0-2 GAP-0645).
+
+    The same check status reads (fail_mode.claude_missing_registration):
+    every event of the recorded contract needs the guard and, for a
+    synchronous event, its companion on a per-user Linux install, or the
+    hook script elsewhere. Counting handlers passed a file without PreToolUse.
+    """
+    from defenseclaw.fail_mode import claude_missing_registration
+    from defenseclaw.hook_guard_matrix import TOOL_GUARD_HOOKS
+    from defenseclaw.hook_integrity import HookProblem, setup_command, tool_inspection_hook_problem
+
+    missing = claude_missing_registration(cfg, settings)
+    if missing is None:
+        return ""
+    event, what = missing
+    if what == "hook is not registered" and event in TOOL_GUARD_HOOKS["claudecode"].events:
+        return tool_inspection_hook_problem("claudecode", event, settings_path)
+    return HookProblem(
+        f"the DefenseClaw {event} {what} in {settings_path}",
+        f"run `{setup_command('claudecode')} --yes`; it registers the missing hook",
+    )
+
+
 def _check_claudecode_hooks(
     cfg,
     r: _DoctorResult,
@@ -8008,10 +8069,14 @@ def _check_claudecode_hooks(
     switched_off = _agent_hook_switch_problem(cfg, "claudecode") if dc_hooks > 0 else ""
     edited = _edited_hook_problem(cfg, "claudecode") if dc_hooks > 0 else ""
     uninspected = _unguarded_tool_call_problem(cfg, "claudecode", settings_path, settings) if dc_hooks > 0 else ""
+    if dc_hooks > 0 and not uninspected:
+        uninspected = _claude_missing_registration_problem(cfg, settings_path, settings)
     if uninspected:
         # Counting hooks kept a settings file without PreToolUse, or with an
         # edited PreToolUse entry, passing while no tool call was inspected
-        # (GAP-0645, rel-1-0-4 GAP-0538).
+        # (GAP-0645, rel-1-0-4 GAP-0538). The per-user Linux native handlers
+        # name no hook script, so each required event is checked for the
+        # exact registration Setup renders (rel-1-0-2 GAP-0645).
         _emit(
             "fail",
             "Claude Code hooks",
@@ -9148,6 +9213,45 @@ def _installed_kiro_ide_forms() -> list:
         unread = f"Kiro IDE at {path} is installed, but its version could not be read"
         forms.append(judge_kiro_form(KIRO_FORM_IDE, version, unread=unread, path=path))
     return forms
+
+
+def _check_cowork(cfg, live_health: dict | None, r: _DoctorResult) -> None:
+    """Report whether Claude Cowork reaches DefenseClaw on this account.
+
+    Cowork runs the Claude Code connector's hook from an account plugin
+    (``defenseclaw setup cowork``), so it passes only on Cowork activity in
+    the gateway's authenticated status or a Cowork event setup recorded for
+    the current plugin build; the public /health snapshot is no evidence.
+    Managed hosts are covered by machine policy and get no row; neither does
+    an account without Claude Desktop or a plugin.
+    """
+    from defenseclaw import cowork
+    from defenseclaw.commands.cmd_status import _connectors_not_started
+
+    authenticated = None
+    if live_health is not None:
+        try:
+            authenticated, _reason, _checked = _authenticated_gateway_health(cfg)
+        except Exception:  # noqa: BLE001 - reported below as unreadable
+            authenticated = None
+    row = cowork.cowork_status(
+        cfg,
+        authenticated,
+        gateway_running=live_health is not None,
+        health_authenticated=authenticated is not None,
+        claudecode_skipped="claudecode" in _connectors_not_started(live_health),
+    )
+    if row is None:
+        return
+    _emit(
+        "pass" if row.protected else "warn",
+        "Cowork",
+        row.detail,
+        r=r,
+        check_id="doctor.cowork",
+        reason_code=row.reason_code,
+        remediation=row.step,
+    )
 
 
 def _check_kiro_global_scope(r: _DoctorResult) -> None:
@@ -14844,6 +14948,7 @@ def doctor(
             # hook rows) instead of only the primary.
             _check_hilt_support(cfg, _conn, r, observe_only=_hilt_observe_only)
     _emit_hilt_observe_summary(_hilt_observe_only, r, tagged=_multi_hooks)
+    _check_cowork(cfg, sidecar_health, r)
     _check_guardrail_proxy(cfg, r)
     _check_proxy_interception(cfg, r, live_health=sidecar_health)
     _check_kernel_sensor(r)

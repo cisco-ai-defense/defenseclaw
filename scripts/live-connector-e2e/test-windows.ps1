@@ -1875,6 +1875,19 @@ private-secret-name = "DefenseClaw must remain redacted"
     $argvOwnedDescendant = Start-Process -FilePath $pwsh -ArgumentList @(
         '-NoProfile', '-File', $mock, '-Action', 'child', '-StateRoot', $ownedRoot
     ) -PassThru -WindowStyle Hidden
+    $null = Register-IsolatedProcess $argvOwnedDescendant
+    $untrackedArgvProcess = Start-Process -FilePath $pwsh -ArgumentList @(
+        '-NoProfile', '-File', $mock, '-Action', 'child', '-StateRoot', $ownedRoot
+    ) -PassThru -WindowStyle Hidden
+    $trackedNoArgvProcess = Start-Process -FilePath $pwsh -ArgumentList @(
+        '-NoProfile', '-Command', 'Start-Sleep -Seconds 30'
+    ) -PassThru -WindowStyle Hidden
+    $null = Register-IsolatedProcess $trackedNoArgvProcess
+    $staleIdentityProcess = Start-Process -FilePath $pwsh -ArgumentList @(
+        '-NoProfile', '-File', $mock, '-Action', 'child', '-StateRoot', $ownedRoot
+    ) -PassThru -WindowStyle Hidden
+    $staleRecord = Register-IsolatedProcess $staleIdentityProcess
+    $staleRecord.CreationDate = [DateTime]::UtcNow.AddDays(-1).ToString('O')
     $productExecutable = (Get-Command ping.exe -CommandType Application -ErrorAction Stop).Source
     $productDescendant = Start-Process -FilePath $productExecutable -ArgumentList @(
         '-t', '127.0.0.1'
@@ -1886,20 +1899,25 @@ private-secret-name = "DefenseClaw must remain redacted"
         $argvOwnedStopwatch = [Diagnostics.Stopwatch]::StartNew()
         try {
             do {
-                $argvOwnedRows = @(Get-CimInstance Win32_Process `
-                    -Filter "ProcessId = $($argvOwnedDescendant.Id)" `
-                    -ErrorAction SilentlyContinue)
-                $argvOwnedCommandLine = if ($argvOwnedRows.Count -eq 1) {
-                    [string]$argvOwnedRows[0].CommandLine
-                } else {
-                    ''
+                $argvOwnedReady = $true
+                foreach ($fixtureProcess in @(
+                    $argvOwnedDescendant, $untrackedArgvProcess, $staleIdentityProcess
+                )) {
+                    $argvOwnedRows = @(Get-CimInstance Win32_Process `
+                        -Filter "ProcessId = $($fixtureProcess.Id)" `
+                        -ErrorAction SilentlyContinue)
+                    $argvOwnedCommandLine = if ($argvOwnedRows.Count -eq 1) {
+                        [string]$argvOwnedRows[0].CommandLine
+                    } else { '' }
+                    if ([string]::IsNullOrWhiteSpace($argvOwnedCommandLine) -or
+                        $argvOwnedCommandLine.IndexOf(
+                            [IO.Path]::GetFullPath($StateRoot),
+                            [StringComparison]::OrdinalIgnoreCase
+                        ) -lt 0) {
+                        $argvOwnedReady = $false
+                        break
+                    }
                 }
-                $argvOwnedReady =
-                    -not [string]::IsNullOrWhiteSpace($argvOwnedCommandLine) -and
-                    $argvOwnedCommandLine.IndexOf(
-                        [IO.Path]::GetFullPath($StateRoot),
-                        [StringComparison]::OrdinalIgnoreCase
-                    ) -ge 0
                 if ($argvOwnedReady) { break }
                 Start-Sleep -Milliseconds 100
             } while ($argvOwnedStopwatch.Elapsed -lt [TimeSpan]::FromSeconds(5))
@@ -1907,7 +1925,7 @@ private-secret-name = "DefenseClaw must remain redacted"
             $argvOwnedStopwatch.Stop()
         }
         if (-not $argvOwnedReady) {
-            throw 'isolated cleanup fixture setup failed: exact argv-owned process and StateRoot were not queryable within 5 seconds'
+            throw 'isolated cleanup fixture setup failed: process command lines were not queryable within 5 seconds'
         }
 
         $expectedProductExecutable = Get-NormalizedExecutablePath $productExecutable
@@ -1955,6 +1973,12 @@ private-secret-name = "DefenseClaw must remain redacted"
             -ProductDataRoot $ownedRoot -Confirm:$false
         Assert-True ($argvOwnedDescendant.WaitForExit(5000)) `
             'isolated cleanup killed a process with StateRoot on argv'
+        Assert-True ($trackedNoArgvProcess.WaitForExit(5000)) `
+            'isolated cleanup killed a tracked process without StateRoot on argv'
+        Assert-True (-not $untrackedArgvProcess.HasExited) `
+            'isolated cleanup preserved an untracked process with StateRoot on argv'
+        Assert-True (-not $staleIdentityProcess.HasExited) `
+            'isolated cleanup preserved a process with a mismatched start identity'
         Assert-True ($productDescendant.WaitForExit(5000)) `
             'isolated cleanup killed the exact managed product process without StateRoot on argv'
         Assert-True (-not $unrelatedDescendant.HasExited) `
@@ -1962,9 +1986,15 @@ private-secret-name = "DefenseClaw must remain redacted"
     } finally {
         Stop-Process -Id $unrelatedDescendant.Id -Force -ErrorAction SilentlyContinue
         Stop-Process -Id $argvOwnedDescendant.Id -Force -ErrorAction SilentlyContinue
+        Stop-Process -Id $untrackedArgvProcess.Id -Force -ErrorAction SilentlyContinue
+        Stop-Process -Id $trackedNoArgvProcess.Id -Force -ErrorAction SilentlyContinue
+        Stop-Process -Id $staleIdentityProcess.Id -Force -ErrorAction SilentlyContinue
         Stop-Process -Id $productDescendant.Id -Force -ErrorAction SilentlyContinue
         $unrelatedDescendant.Dispose()
         $argvOwnedDescendant.Dispose()
+        $untrackedArgvProcess.Dispose()
+        $trackedNoArgvProcess.Dispose()
+        $staleIdentityProcess.Dispose()
         $productDescendant.Dispose()
         $StateRoot = $originalStateRoot
         if (Test-Path -LiteralPath $cleanupFixtureStateRoot) {
@@ -2948,12 +2978,14 @@ threading.Event().wait()
     Assert-True ($nativeWorkflowText -match '''test'', ''-vet=off'', ''-v'', ''-count=1'', ''-run'', \$daclTestPattern, ''\./internal/safefile'', ''\./internal/managed'', ''\./internal/gateway/connector''') 'Go DACL regressions execute in every owning package without cache reuse'
     $gatewayMatrixIndexes = @([regex]::Matches($nativeWorkflowText,
         '- \{ shard: gw(\d+), kind: gateway, index: \1 \}') | ForEach-Object { [int]$_.Groups[1].Value } | Sort-Object)
+    $hookexecMatrixIndexes = @([regex]::Matches($nativeWorkflowText,
+        '- \{ shard: hx(\d+), kind: hookexec, index: \1 \}') | ForEach-Object { [int]$_.Groups[1].Value } | Sort-Object)
     Assert-True ($nativeWorkflowText -match
         '@\{ Dir = ''internal/gateway''; Skip = \$windowsInapplicable; Extra = @\(''-parallel=1''\) \}' -and
         $nativeWorkflowText -match '@\{ Dir = ''internal/gateway/connector''; Skip = \$connectorSkip; Extra = @\(\) \}' -and
         $nativeWorkflowText -match '''--package-dir'', \$part\.Dir,' -and
         $nativeWorkflowText -match '''--shard-count'', \[string\]\$nativeTestShardCount,' -and
-        [regex]::Matches($nativeWorkflowText, '''--shard-index'', \[string\]\$matrixShard').Count -eq 2 -and
+        [regex]::Matches($nativeWorkflowText, '''--shard-index'', \[string\]\$matrixShard').Count -eq 3 -and
         $nativeWorkflowText -match 'foreach \(\$part in @\(' -and
         $nativeWorkflowText -match 'throw "go_test_shards\.py selected no \$\(\$part\.Dir\) tests for shard \$matrixShard"' -and
         $nativeWorkflowText -match '\$suiteKind -eq ''gateway'' -and \(\$matrixShard -lt 0 -or \$matrixShard -ge \$nativeTestShardCount\)' -and
@@ -2969,9 +3001,20 @@ threading.Event().wait()
         $nativeWorkflowText -match '''-run'', \(''\^'' \+ \[regex\]::Escape\(\$isolatedTest\) \+ ''\$''\), ''\./internal/gateway/connector''' -and
         $nativeWorkflowText -match '''--exclude'', ''github\.com/defenseclaw/defenseclaw/internal/gateway'',' -and
         $nativeWorkflowText -match '''--exclude'', ''github\.com/defenseclaw/defenseclaw/internal/gateway/connector'',' -and
-        [regex]::Matches($nativeWorkflowText, '''--timings'', ''scripts/test-timings/go-windows\.json''').Count -eq 2 -and
+        $nativeWorkflowText -match '''--exclude'', ''github\.com/defenseclaw/defenseclaw/internal/gateway/connector/hookexec'',' -and
+        [regex]::Matches($nativeWorkflowText, '''--timings'', ''scripts/test-timings/go-windows\.json''').Count -eq 3 -and
         $nativeWorkflowText -match '\$remainingArguments = @\(') `
-        'full native Go suite runs one timing-balanced gateway and connector shard per runner across all sixteen matrix shards, isolates native lifecycle regressions, serializes gateway tests with process-global capture state, and separately selects every remaining package'
+        'full native Go suite runs gateway, connector, hookexec, and remaining-package shards with the declared coverage and time limits'
+    Assert-True (($hookexecMatrixIndexes -join ',') -eq ((0..4) -join ',') -and
+        $nativeWorkflowText -match '\$hookexecTestShardCount = 5' -and
+        $nativeWorkflowText -match '\$suiteKind -eq ''hookexec''' -and
+        $nativeWorkflowText -match '''--package-dir'', ''internal/gateway/connector/hookexec''' -and
+        $nativeWorkflowText -match '''--split-tests''' -and
+        $nativeWorkflowText -match '''--shard-count'', \[string\]\$hookexecTestShardCount,' -and
+        $nativeWorkflowText -match '''--shard-index'', \[string\]\$matrixShard' -and
+        $nativeWorkflowText -match '''-timeout=11m'', ''-p=1''' -and
+        $nativeWorkflowText -match '\) -TimeoutSeconds 840') `
+        'native hookexec suite runs all five test-level shards within the declared time limits'
     Assert-True ($nativeWorkflowText -match '(?s)''-p=1''.*?''-skip''.*?\$windowsInapplicable') 'native Go suite serializes packages and excludes only declared Windows-inapplicable tests'
     Assert-True ([regex]::Matches($nativeWorkflowText, '''test'', ''-vet=off''').Count -eq
         [regex]::Matches($nativeWorkflowText, '''test''').Count -and
@@ -5152,13 +5195,15 @@ threading.Event().wait()
     $isolatedCleanup = [regex]::Match($harnessText, '(?s)function Stop-IsolatedProcessTree\b.*?\n\}').Value
     Assert-True ($isolatedCleanup -match 'HashSet\[int\]' -and
         $isolatedCleanup -match '\$ancestor\[0\]\.ParentProcessId' -and
-        $isolatedCleanup -match '-not \$ancestorIds\.Contains\(\$processId\)') `
+        $isolatedCleanup -match '\$ancestorIds\.Contains\(\$processId\)') `
         'isolated process cleanup excludes the complete ancestor wrapper chain'
     Assert-True ($isolatedCleanup -match 'Stop-CanonicalAuditProjector') `
         'isolated process cleanup stops the long-lived canonical audit projector'
-    Assert-True ($isolatedCleanup -match '\$matchesRoot -and' -and
-        $isolatedCleanup -notmatch 'descendantIds') `
-        'isolated process cleanup only terminates state-root-owned processes'
+    Assert-True ($isolatedCleanup -match '\$script:IsolatedProcessRoots\.Values' -and
+        $isolatedCleanup -match 'Get-ProcessTreeSnapshot' -and
+        $isolatedCleanup -match '\$native\.StartTime\.ToUniversalTime\(\)' -and
+        $isolatedCleanup -notmatch '\.CommandLine') `
+        'isolated process cleanup uses tracked process identities'
     Assert-True ($isolatedCleanup -match 'gateway\.pid' -and
         $isolatedCleanup -match 'watchdog\.pid' -and
         $isolatedCleanup -match '\$livePath, \$recordedPath, \[StringComparison\]::OrdinalIgnoreCase') `

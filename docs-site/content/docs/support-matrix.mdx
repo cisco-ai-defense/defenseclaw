@@ -67,6 +67,26 @@ Enterprise managed mode supports ACP editors through enrollment: an administrato
 
 <ConnectorOsMatrix edition="enterprise" />
 
+## Claude Cowork
+
+[Claude Cowork](/docs/connectors/cowork) is the agent mode of Claude Desktop. It is a surface of the Claude Code connector, not a connector of its own. The 1.0.8 tests ran Cowork on managed macOS and Windows with Claude Desktop 4.16336.0 (engine 2.1.317) using third-party inference through Amazon Bedrock. The per-user route (`defenseclaw setup cowork`) was also run on macOS and Windows, and in action mode a deny rule blocked a Cowork shell command on both. On Linux the managed drop-in and per-user setup were verified, but Cowork itself was not run.
+
+| Route | Linux | macOS | Windows |
+| --- | --- | --- | --- |
+| Per user (open source): `defenseclaw setup cowork` and an account plugin | Preview | Supported | Supported |
+| Managed computer (enterprise standalone): the Claude Code machine policy drop-in | Preview | Supported | Supported |
+
+**Supported** means a live Cowork task reached the gateway with surface `cowork` and a deny rule blocked a call on that OS. **Preview** on Linux means the code allows the route and the setup was checked, but no Cowork task ran: Claude Desktop for Linux is a beta, and Cowork on Linux is not certified.
+
+| Capability | Open source (per user) | Enterprise (standalone) | Status |
+| --- | --- | --- | --- |
+| Prompt and tool-call hooks | `defenseclaw setup cowork` and an account plugin | The Claude Code machine policy drop-in | Measured on managed macOS and Windows: Cowork's hook calls reach the gateway with surface `cowork`, and an administrator deny rule blocks `mcp__workspace__bash`. Cowork was not run on Linux |
+| Shell and fetch mapping | Yes | Yes | Replay-tested against the `Bash` verdicts. The `save_skill` input was captured live. `suggest_plugin_install` was not called, and the browser tools are not offered in the tested third-party build |
+| `allowManagedHooksOnly` | Not applicable | On by default, set with `managed_hooks_only` | Measured on managed macOS: under `enforce` an organization plugin's hooks did not run, under `preserve` they did, and DefenseClaw's hooks ran under both. Windows not measured yet |
+| AI Discovery of Claude Desktop and Cowork | Yes | Yes | The macOS folders and the Windows MSIX folders were measured on Claude Desktop 4.16336.0. Some Windows and Linux folders are unmeasured, see [AI Discovery](/docs/ai-discovery) |
+
+Cowork's web fetch runs on Anthropic's side, and the VM shell goes through Anthropic's proxy, so host egress controls do not see either. The Cowork surface is caller-reported. [Limits](/docs/connectors/cowork#limits) has the detail.
+
 ## Kernel sensor (Tetragon)
 
 On managed Linux, the enterprise sensor helper can use the
@@ -297,7 +317,7 @@ Every other bug that 1.0.4 listed here is fixed in 1.0.5; the release notes list
 ### Fail mode and outages
 
 - **OpenCode and Amp keep their start-up state:** a session started while the gateway was down keeps blocking after the gateway is back, and a running OpenCode session keeps the outage mode it loaded with. Restart OpenCode or Amp after the gateway is healthy and after you change the fail mode or policy.
-- **Outage warnings:** Hermes shows no DefenseClaw warning in the chat when a call runs during an outage. Copilot CLI shows it once per session under the first tool call's output (expand the tool output to read it), and OpenCode V2 adds it to the tool call's result. Codex and Claude Code show it once per hook event, so one command can show it two or three times. Check `defenseclaw status`; each unchecked call is in `~/.defenseclaw/logs/hook-failures.jsonl`.
+- **Outage warnings:** Hermes shows no DefenseClaw warning in the chat when a call runs during an outage. Copilot CLI shows it once per session under the first tool call's output (expand the tool output to read it), and OpenCode V2 adds it to the tool call's result. Claude Code shows it once per session, with the session's first prompt or tool call, in the terminal; Claude Desktop's Cowork shows no DefenseClaw hook warning or notice anywhere in its window (measured on macOS and Windows with Claude Desktop 4.16336.0), so check Cowork with `defenseclaw status`, `defenseclaw doctor` or the TUI. Codex shows it once per session. Check `defenseclaw status`; each unchecked call is in `~/.defenseclaw/logs/hook-failures.jsonl`.
 
 ### Agents and hooks
 
