@@ -253,8 +253,23 @@ func shellWordHasSlash(word *syntax.Word) bool {
 // A body's call sites do not make it reachable on their own. Each definition
 // is visited once, including duplicate definitions of the same name.
 func calledFunctions(file *syntax.File, home string) map[string]bool {
+	return calledFunctionsWithBudget(file, home, nil)
+}
+
+// calledFunctionsWithBudget charges the walks and handler re-parses to the
+// recovered-write proof when it supplies a budget. Other readers use the
+// same reachability result without that proof's limit.
+func calledFunctionsWithBudget(file *syntax.File, home string, budget *unprovenParseBudget) map[string]bool {
+	walk := syntax.Walk
+	if budget != nil {
+		walk = func(node syntax.Node, visit func(syntax.Node) bool) {
+			syntax.Walk(node, func(part syntax.Node) bool {
+				return budget.visit() && visit(part)
+			})
+		}
+	}
 	definitions := map[string][]*syntax.Stmt{}
-	syntax.Walk(file, func(node syntax.Node) bool {
+	walk(file, func(node syntax.Node) bool {
 		if declaration, ok := node.(*syntax.FuncDecl); ok && declaration.Name != nil {
 			definitions[declaration.Name.Value] = append(definitions[declaration.Name.Value], declaration.Body)
 		}
@@ -285,12 +300,20 @@ func calledFunctions(file *syntax.File, home string) map[string]bool {
 			markAll()
 			return
 		}
+		if budget != nil {
+			if budget.nodes < 0 || len(value) > budget.bytes {
+				budget.bounded = true
+				markAll()
+				return
+			}
+			budget.bytes -= len(value)
+		}
 		handler, ok := parseShell(value)
 		if !ok {
 			mark(strings.TrimSpace(value))
 			return
 		}
-		syntax.Walk(handler, func(node syntax.Node) bool {
+		walk(handler, func(node syntax.Node) bool {
 			call, ok := node.(*syntax.CallExpr)
 			if !ok || len(call.Args) == 0 {
 				return true
@@ -353,12 +376,12 @@ func calledFunctions(file *syntax.File, home string) map[string]bool {
 		}
 		return true
 	}
-	syntax.Walk(file, scan)
+	walk(file, scan)
 	for len(queue) > 0 {
 		name := queue[0]
 		queue = queue[1:]
 		for _, body := range definitions[name] {
-			syntax.Walk(body, scan)
+			walk(body, scan)
 		}
 	}
 	return called

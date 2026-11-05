@@ -79,17 +79,27 @@ var (
 // such a form and a path in its bounded text can reach a protected file. A
 // dynamic interpreter write operand can name the protected file directly.
 func UnprovenProtectedWrite(command, cwd, home string) string {
-	budget := unprovenParseBudget{bytes: 8 * MaxPayloadBytes, calls: 512}
+	budget := unprovenParseBudget{bytes: 8 * MaxPayloadBytes, calls: 512, nodes: 8 * MaxPayloadBytes}
 	return unprovenProtectedWriteDepth(command, cwd, home, 0, &budget)
 }
 
 // The budget is shared by every nested and recovered parse of one hook call.
-// It caps total input and rendered-call text, even if each individual parse
-// stays below MaxPayloadBytes.
+// It caps input, rendered-call text, and AST visits across those readings,
+// even if each individual parse stays below MaxPayloadBytes.
 type unprovenParseBudget struct {
 	bytes   int
 	calls   int
+	nodes   int
 	bounded bool
+}
+
+func (b *unprovenParseBudget) visit() bool {
+	b.nodes--
+	if b.nodes < 0 {
+		b.bounded = true
+		return false
+	}
+	return true
 }
 
 func unprovenProtectedWriteDepth(command, cwd, home string, depth int, budget *unprovenParseBudget) string {
@@ -101,7 +111,7 @@ func unprovenProtectedWriteDepth(command, cwd, home string, depth int, budget *u
 	}
 	budget.bytes -= len(command)
 	if depth >= 4 {
-		if protectedReachFromText(command, cwd, home) {
+		if unprovenRecoveredProtectedReach(command, cwd, home) {
 			return "dynamic-command"
 		}
 		return ""
@@ -129,10 +139,16 @@ func unprovenProtectedWriteDepth(command, cwd, home string, depth int, budget *u
 		return ""
 	}
 	reachable := false
-	called := calledFunctions(file, home)
+	called := calledFunctionsWithBudget(file, home, budget)
+	if budget.bounded && unprovenRecoveredProtectedReach(command, cwd, home) {
+		return "shell-parse-bound"
+	}
 	reachText := command
 	if strings.Contains(command, "()") || strings.Contains(command, "function ") {
-		reachText = reachableShellWords(file, called, home)
+		reachText = reachableShellWords(file, called, home, budget)
+		if budget.bounded && unprovenRecoveredProtectedReach(command, cwd, home) {
+			return "shell-parse-bound"
+		}
 	}
 	checkReach := func() bool {
 		if !reachable {
@@ -151,6 +167,10 @@ func unprovenProtectedWriteDepth(command, cwd, home string, depth int, budget *u
 		if reason != "" {
 			return false
 		}
+		if !budget.visit() {
+			set("shell-parse-bound", false)
+			return false
+		}
 		if redirect, ok := node.(*syntax.Redirect); ok && redirect.Word != nil {
 			switch redirect.Op {
 			case syntax.RdrOut, syntax.AppOut, syntax.RdrClob, syntax.RdrAll, syntax.AppAll, syntax.RdrInOut:
@@ -159,6 +179,10 @@ func unprovenProtectedWriteDepth(command, cwd, home string, depth int, budget *u
 						var target strings.Builder
 						runtimeExpansion := false
 						syntax.Walk(redirect.Word, func(part syntax.Node) bool {
+							if !budget.visit() {
+								runtimeExpansion = true
+								return false
+							}
 							switch part.(type) {
 							case *syntax.ParamExp, *syntax.CmdSubst, *syntax.ArithmExp, *syntax.ProcSubst:
 								runtimeExpansion = true
@@ -179,7 +203,7 @@ func unprovenProtectedWriteDepth(command, cwd, home string, depth int, budget *u
 			if function.Name == nil || !called[function.Name.Value] {
 				return false
 			}
-			if functionBodyMayWrite(function.Body, cwd, home) {
+			if functionBodyMayWrite(function.Body, cwd, home, budget) {
 				set("function", false)
 			}
 			return true
@@ -398,16 +422,20 @@ func unprovenProtectedWriteDepth(command, cwd, home string, depth int, budget *u
 		}
 		return true
 	})
+	if reason == "" && budget.bounded && unprovenRecoveredProtectedReach(command, cwd, home) {
+		return "shell-parse-bound"
+	}
 	return reason
 }
 
 // Recoverable syntax errors may leave executable calls and redirects in the
 // syntax tree. Check those effects before discarding the failed parse.
 func unprovenShellParseWrite(command, cwd, home string, depth int, budget *unprovenParseBudget) bool {
-	if len(command) > MaxPayloadBytes || shellparse.TooDeep(command) {
+	if len(command) > MaxPayloadBytes || shellparse.TooDeep(command) || len(command) > budget.bytes {
 		budget.bounded = true
 		return true // Beyond the command proof bound, effects are unknown.
 	}
+	budget.bytes -= len(command)
 	file, _ := syntax.NewParser(syntax.Variant(syntax.LangBash), syntax.RecoverErrors(8)).Parse(shellparse.Reader(command), "")
 	if file == nil {
 		return strings.Contains(command, ">") ||
@@ -416,9 +444,16 @@ func unprovenShellParseWrite(command, cwd, home string, depth int, budget *unpro
 	protected := newProtectedFiles(home)
 	ssh := filepath.Join(home, ".ssh")
 	unknown := false
-	called := calledFunctions(file, home)
+	called := calledFunctionsWithBudget(file, home, budget)
+	if budget.bounded && unprovenRecoveredProtectedReach(command, cwd, home) {
+		return true
+	}
 	syntax.Walk(file, func(node syntax.Node) bool {
 		if unknown {
+			return false
+		}
+		if !budget.visit() {
+			unknown = unprovenRecoveredProtectedReach(command, cwd, home)
 			return false
 		}
 		if declaration, ok := node.(*syntax.FuncDecl); ok {
@@ -440,15 +475,31 @@ func unprovenShellParseWrite(command, cwd, home string, depth int, budget *unpro
 				return false
 			}
 			prefix := rendered.String()
-			if prefix == command || depth+1 >= 4 {
+			budget.bytes -= len(prefix)
+			if len(prefix) > len(command) || prefix == command || depth+1 >= 4 {
+				// A recovered call can print back to the same input, or to
+				// longer text. Neither is progress toward a bounded proof.
+				// A protected reach or unresolved redirect keeps the
+				// incomplete verdict; an ordinary target stays allowed.
 				budget.bounded = true
-				unknown = true // A fixed point or the recursion bound is unproved.
-				return false
-			}
-			if unprovenProtectedWriteDepth(prefix, cwd, home, depth+1, budget) != "" {
+				if (prefix == command || len(prefix) > len(command)) && strings.Contains(powerShellExecutableText(prefix), ">") {
+					unknown = true // The recovered call retains an unresolved redirect.
+					return false
+				}
+				if unprovenRecoveredProtectedReach(command, cwd, home) || unprovenRecoveredProtectedReach(prefix, cwd, home) {
+					unknown = true
+					return false
+				}
+			} else if unprovenProtectedWriteDepth(prefix, cwd, home, depth+1, budget) != "" {
 				unknown = true
 				return false
 			}
+			if len(prefix) > budget.bytes {
+				budget.bounded = true
+				unknown = true
+				return false
+			}
+			budget.bytes -= len(prefix)
 			for _, operand := range literalWriteOperandsDepth(prefix, cwd, home, 0) {
 				if protectedReachPath(operand, protected, ssh) {
 					unknown = true
@@ -488,7 +539,35 @@ func unprovenShellParseWrite(command, cwd, home string, depth int, budget *unpro
 		}
 		return !unknown
 	})
-	return unknown
+	return unknown || budget.bounded && unprovenRecoveredProtectedReach(command, cwd, home)
+}
+
+// A recovered shell call may keep a PowerShell target as text. The exact
+// active-state root is included because a recursive operation on the root
+// affects its protected children; the ordinary sibling is distinct.
+func unprovenRecoveredProtectedReach(command, cwd, home string) bool {
+	if protectedReachFromText(command, cwd, home) {
+		return true
+	}
+	if !powerShellMayWriteStatePath(command) {
+		return false
+	}
+	if ActionStateTargetMention(command, cwd, home) {
+		return true
+	}
+	root := filepath.Join(home, ".defenseclaw")
+	for _, token := range unprovenPathToken.FindAllString(command, 513) {
+		if token == "~" || strings.HasPrefix(token, "~/") {
+			token = filepath.Join(home, strings.TrimPrefix(strings.TrimPrefix(token, "~"), "/"))
+		}
+		if strings.ContainsAny(token, "*?[]") {
+			continue
+		}
+		if target, ok := ResolveWriteTarget(OperandPath(token, cwd)); ok && samePathName(target, root) {
+			return true
+		}
+	}
+	return false
 }
 
 type unprovenBoundedWriter struct {
@@ -1259,9 +1338,12 @@ func boundedBasenameAssignment(stmt *syntax.Stmt, home string) (name, value stri
 	return assignment.Name.Value, filepath.Base(path), true
 }
 
-func reachableShellWords(file *syntax.File, called map[string]bool, home string) string {
+func reachableShellWords(file *syntax.File, called map[string]bool, home string, budget *unprovenParseBudget) string {
 	var text strings.Builder
 	syntax.Walk(file, func(node syntax.Node) bool {
+		if !budget.visit() {
+			return false
+		}
 		if function, ok := node.(*syntax.FuncDecl); ok {
 			return function.Name != nil && called[function.Name.Value]
 		}
@@ -1288,9 +1370,13 @@ func slicesContainsString(values []string, value string) bool {
 	return false
 }
 
-func functionBodyMayWrite(body *syntax.Stmt, cwd, home string) bool {
+func functionBodyMayWrite(body *syntax.Stmt, cwd, home string, budget *unprovenParseBudget) bool {
 	mayWrite := false
 	syntax.Walk(body, func(node syntax.Node) bool {
+		if !budget.visit() {
+			mayWrite = true
+			return false
+		}
 		if redirect, ok := node.(*syntax.Redirect); ok {
 			switch redirect.Op {
 			case syntax.RdrOut, syntax.AppOut, syntax.RdrClob, syntax.RdrAll, syntax.AppAll, syntax.RdrInOut:
