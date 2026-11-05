@@ -373,30 +373,35 @@ var wrapperSwitches = map[string]string{
 // arguments, past variable assignments, keywords and wrappers such as sudo,
 // env, nice or xargs.
 func commandProgram(words []shellWord) (string, []shellWord) {
-	program, args, _ := resolveProgram(words)
+	program, args, _, _ := resolveProgram(words)
 	return program, args
 }
 
 // resolveProgram is commandProgram that also reports whether the program is
 // certain. It is not when a wrapper has an option it does not know (a long
 // option, an unknown letter, a value option ending a cluster) or when the
-// program or a wrapper option is a dynamic word ($VAR, $(...)).
-func resolveProgram(words []shellWord) (string, []shellWord, bool) {
-	certain := true
+// program or a wrapper option is a dynamic word ($VAR, $(...)). lookup
+// reports a command wrapper with a -v or -V option it reads: command -v and
+// command -V print how the names after them resolve and run none of them
+// (gas-ux-r1 GAP-0055).
+func resolveProgram(words []shellWord) (program string, args []shellWord, certain, lookup bool) {
+	certain = true
 	for index := 0; index < len(words); index++ {
 		word := words[index]
 		if !word.quoted && (shellKeywords[word.text] || shellAssignment.MatchString(word.text)) {
 			continue
 		}
-		program := programName(word.text)
+		program = programName(word.text)
 		certain = certain && !strings.Contains(word.text, "$")
 		valued, wrapper := commandWrappers[program]
 		if !wrapper {
-			return program, words[index+1:], certain
+			return program, words[index+1:], certain, lookup
 		}
 		for index+1 < len(words) && strings.HasPrefix(words[index+1].text, "-") {
 			index++
-			certain = certain && knownWrapperOption(program, words[index].text, valued)
+			known := knownWrapperOption(program, words[index].text, valued)
+			certain = certain && known
+			lookup = lookup || program == "command" && known && strings.ContainsAny(strings.TrimPrefix(words[index].text, "-"), "vV")
 			if slices.Contains(valued, words[index].text) {
 				index++
 			}
@@ -405,7 +410,7 @@ func resolveProgram(words []shellWord) (string, []shellWord, bool) {
 			index++ // the duration
 		}
 	}
-	return "", nil, certain
+	return "", nil, certain, lookup
 }
 
 // knownWrapperOption reports whether resolveProgram skips option of wrapper
@@ -440,9 +445,10 @@ func knownWrapperOption(wrapper, option string, valued []string) bool {
 // (lowercased basenames without ".exe"): past assignments, keywords and
 // wrappers (env, sudo, nice, nohup, time, exec, command, ...), in lists,
 // pipelines and substitutions, and in the scripts handed to sh -c, eval,
-// PowerShell -Command and cmd /c. It fails closed: a command whose program
-// is uncertain, or a script nested past the limit, counts when one of its
-// words names one of programs.
+// PowerShell -Command and cmd /c. A lookup (command -v, command -V) runs
+// none of the names it is given and does not count (gas-ux-r1 GAP-0055). It
+// fails closed: a command whose program is uncertain, or a script nested
+// past the limit, counts when one of its words names one of programs.
 func RunsProgram(cmdline string, programs ...string) bool {
 	lexer := &shellLexer{}
 	lexer.parse(cmdline, 0)
@@ -457,7 +463,10 @@ func RunsProgram(cmdline string, programs ...string) bool {
 		return false
 	}
 	for _, command := range lexer.commands {
-		program, _, certain := resolveProgram(command.words)
+		program, _, certain, lookup := resolveProgram(command.words)
+		if lookup && certain {
+			continue
+		}
 		if slices.Contains(programs, program) || !certain && names(joinWords(command.words, false)) {
 			return true
 		}
