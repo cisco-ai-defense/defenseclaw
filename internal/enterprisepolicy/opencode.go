@@ -55,12 +55,13 @@ func OpenCodeManagedPlugin() []byte {
 	return append([]byte(nil), openCodeManagedPlugin...)
 }
 
-// openCodeManagedPluginVendorLimit is the OpenCode behavior no machine file
-// can override (observed with OpenCode 1.18.32): pure mode drops managed
-// config plugins too, and a variable release builds honor replaces the
-// managed config directory. Such a session never calls DefenseClaw, so
-// status can report the entry in place while that session runs without it.
-const openCodeManagedPluginVendorLimit = "OpenCode skips the managed plugin in pure mode (--pure or OPENCODE_PURE=1) and when OPENCODE_TEST_MANAGED_CONFIG_DIR points at another directory; a session started that way runs without DefenseClaw's hooks on either route"
+// openCodeManagedPluginVendorLimit says what an OpenCode launch can do to the
+// managed plugin. OpenCode V1 (1.18.32) skipped it in pure mode and when
+// OPENCODE_TEST_MANAGED_CONFIG_DIR moved the managed folder. OpenCode 2.2.5,
+// the supported release, has neither: no --pure flag, neither variable, and
+// a managed folder fixed per OS (checked live and in its binary, GAP-0053).
+// The launch scan still reports those variables on a running OpenCode.
+const openCodeManagedPluginVendorLimit = "OpenCode 2.2.5 always loads the managed plugin from its fixed machine config folder: it has no pure mode (no --pure flag) and does not read OPENCODE_PURE or OPENCODE_TEST_MANAGED_CONFIG_DIR, which made OpenCode V1 skip it; status and verify still report a running OpenCode started with those variables"
 
 // OpenCodeManagedPluginPath is where a standalone install places the
 // administrator-owned managed OpenCode plugin. StandaloneOptions always

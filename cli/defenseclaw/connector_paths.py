@@ -3098,12 +3098,104 @@ def devin_rule_files(workspace_dir: str | None = None) -> list[str]:
     return _dedup(files)
 
 
-def opencode_writable_plugin_folder(plugin_paths: list[str]) -> str:
-    """Return a folder of an OpenCode plugin destination that group or other can write.
+# The account and group files the private-group rule reads; the gateway reads
+# the same two (internal/gateway/connector/private_group_linux.go).
+_PASSWD_FILE = "/etc/passwd"
+_GROUP_FILE = "/etc/group"
 
-    The gateway refuses to install its plugin there and does not start.
-    Linux distributions with a umask of 002 create ~/.config/opencode/plugins
-    as 0775. Only the folders inside the home directory are checked.
+
+def _colon_records(path: str) -> list[list[str]] | None:
+    """The records of a passwd or group file, or None when it cannot be read
+    or holds NIS compat (+/-) lines whose members this check cannot see."""
+    try:
+        with open(path, encoding="utf-8", errors="strict") as handle:
+            lines = handle.read().splitlines()
+    except (OSError, UnicodeDecodeError):
+        return None
+    records = []
+    for line in lines:
+        if not line.strip() or line.lstrip().startswith("#"):
+            continue
+        if line.startswith(("+", "-")):
+            return None
+        records.append(line.split(":"))
+    return records
+
+
+def _has_access_acl(path: str) -> bool:
+    """Whether a Linux access ACL may be set on *path* (then the group bits of
+    the mode are the ACL mask, not the owning group's access)."""
+    getxattr = getattr(os, "getxattr", None)
+    if getxattr is None:
+        return False
+    try:
+        getxattr(path, "system.posix_acl_access", follow_symlinks=False)
+    except OSError as exc:
+        return exc.errno not in (errno.ENODATA, errno.ENOTSUP, getattr(errno, "ENOATTR", errno.ENODATA))
+    return True
+
+
+def owner_private_group(path: str, info: os.stat_result) -> bool:
+    """Whether the group of *path* is its owner's own private group (GAP-0053).
+
+    Ubuntu and Debian give each account a group of its own name with no other
+    member, and a umask of 002, so the folders OpenCode creates are 0775.
+    Group write there lets nobody but the owner write. True only on Linux,
+    when this account owns *path*, its group is the account's primary group
+    and carries the account's name, no other account is a member or has it as
+    primary group (in /etc/passwd and /etc/group, and as the system group
+    database answers), and no ACL is set. Anything unreadable, duplicated or
+    ambiguous answers False, so a shared group stays refused.
+    """
+    if not sys.platform.startswith("linux") or os.name == "nt":
+        return False
+    uid, gid = os.geteuid(), info.st_gid
+    if info.st_uid != uid or _has_access_acl(path):
+        return False
+    passwd = _colon_records(_PASSWD_FILE)
+    groups = _colon_records(_GROUP_FILE)
+    if passwd is None or groups is None:
+        return False
+    try:
+        names = {rec[0] for rec in passwd if len(rec) >= 4 and int(rec[2]) == uid}
+        if len(names) != 1:
+            return False
+        name = next(iter(names))
+        for rec in passwd:
+            if len(rec) < 4:
+                return False
+            if int(rec[3]) == gid and rec[0] != name:
+                return False
+            if rec[0] == name and int(rec[3]) != gid:
+                return False
+        matches = [rec for rec in groups if len(rec) >= 4 and rec[2].strip() and int(rec[2]) == gid]
+    except ValueError:
+        return False
+    if not matches:
+        return False
+    for rec in matches:
+        members = {member.strip() for member in rec[3].split(",") if member.strip()}
+        if rec[0] != name or not members <= {name}:
+            return False
+    try:
+        import grp
+        import pwd
+
+        account = pwd.getpwuid(uid)
+        group = grp.getgrgid(gid)
+    except (ImportError, KeyError, OSError):
+        return False
+    return account.pw_name == name and account.pw_gid == gid and group.gr_name == name and set(group.gr_mem) <= {name}
+
+
+def opencode_writable_plugin_folder(plugin_paths: list[str]) -> str:
+    """Return a folder of an OpenCode plugin destination that another account can write.
+
+    The gateway refuses to install its plugin there and does not start. A
+    folder writable by its group passes when that group is the owner's own
+    private group (see owner_private_group: Ubuntu's umask of 002 creates
+    ~/.config and ~/.config/opencode as 0775); write for a shared group or for
+    everyone does not. Only the folders inside the home directory are checked.
     """
     if os.name == "nt":
         return ""
@@ -3112,11 +3204,12 @@ def opencode_writable_plugin_folder(plugin_paths: list[str]) -> str:
         folder = os.path.dirname(os.path.realpath(plugin_path))
         while folder.startswith(home + os.sep):
             try:
-                mode = os.lstat(folder).st_mode
+                info = os.lstat(folder)
             except OSError:
                 folder = os.path.dirname(folder)
                 continue
-            if stat.S_ISDIR(mode) and stat.S_IMODE(mode) & 0o022:
+            loose = stat.S_IMODE(info.st_mode) & 0o022
+            if stat.S_ISDIR(info.st_mode) and loose and not (loose == 0o020 and owner_private_group(folder, info)):
                 return folder
             folder = os.path.dirname(folder)
     return ""

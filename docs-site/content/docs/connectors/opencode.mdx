@@ -47,6 +47,10 @@ A re-run without `--mode` keeps the current mode. On a terminal setup still asks
 
 **OpenCode's background server.** OpenCode V2 keeps a background server running after its window closes, and that server keeps the plugin it loaded. On Linux and macOS, `defenseclaw setup opencode` (also with `--mode`) and `defenseclaw uninstall` restart your account's own server when it runs, and say so; an open OpenCode window reconnects to it. After an upgrade, on Windows, or when setup says it could not, run `opencode service restart` yourself. Until OpenCode starts, `defenseclaw status` shows it as `IDLE`, which is normal.
 
+**One server port per account.** The server's default port, 49374, is the same for every account on a computer, so a second account's server cannot start while the first one runs. On Linux and macOS, when your server still uses that default and you have not set a port, setup gives your account its own: 24000 plus your uid modulo 8000 (the next free one if another account holds it), recorded with `opencode service set port`, so it stays the same on later runs. Setup keeps a port you set yourself.
+
+**Folder modes.** Setup refuses to install the plugin in a folder another account can write. On Ubuntu and Debian (umask `002`), `~/.config` and `~/.config/opencode` are group-writable, but the group is your own private group (named after you, with no other member), so setup accepts them. A folder whose group has other members, or that everyone can write, is refused with the `chmod go-w` command to run.
+
 ### Check it
 
 ```bash
@@ -141,8 +145,8 @@ The image pins OpenCode 2.1.4 from the official `@opencode/cli` package, with pa
 - Only V2 is supported. No setting or override enables a detected V1.
 - The plugin checks tool calls and their results; it does not intercept model traffic.
 - There is no native approval: a confirm verdict runs with a notice.
-- Running OpenCode with `--pure` turns external plugins off, and DefenseClaw sees nothing.
-- The default background-server port (49374) is shared by every account on a computer: on a shared host, give each account its own with `opencode service set port <port>`.
+- OpenCode 2.2.5 has no pure mode: there is no `--pure` flag, and it does not read `OPENCODE_PURE` (OpenCode V1 skipped plugins with them).
+- On Windows and on a managed computer, setup does not change the background-server port: on a shared host, give each account its own with `opencode service set port <port>`.
 - OpenCode keeps runtime files in `/tmp/opencode`, which belongs to the first account that ran it; another account's OpenCode then fails with `EACCES`. Point `TMPDIR` at a folder of your own before you start OpenCode (for example `export TMPDIR=$HOME/.cache/tmp`, after `mkdir -p` of it). Both are OpenCode's own behavior.
 
 ## Disable

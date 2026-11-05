@@ -179,6 +179,9 @@ class FirstRunOptions:
     # the trust decision into the final v8 transaction instead of treating it
     # as transient discovery input. None keeps non-init callers unchanged.
     trusted_binary_prefixes: tuple[str, ...] | None = None
+    # init --api-port / --proxy-port (GAP-0053): 0 lets a new config choose.
+    api_port: int = 0
+    proxy_port: int = 0
 
 
 @dataclass
@@ -264,6 +267,9 @@ _API_PORT_CLAIM_PREFIX = "defenseclaw-api-port-"
 # init claims a guardrail proxy port the same way, so two accounts that run
 # init at the same time don't both pick it (GAP-2198). Only init writes these.
 _GUARDRAIL_PORT_CLAIM_PREFIX = "defenseclaw-guardrail-port-"
+# setup claims the OpenCode V2 background-server port it gives an account
+# (opencode_service.PORT_CLAIM_PREFIX, GAP-0053).
+_OPENCODE_PORT_CLAIM_PREFIX = "defenseclaw-opencode-port-"
 _WINDOWS_CLAIM_SID = re.compile(r"S-1-[0-9]+(?:-[0-9]+)+")
 
 
@@ -330,7 +336,7 @@ def remove_own_api_port_claims() -> None:
         return
     own = _windows_own_sid() if windows else ""
     for name in names:
-        if not name.startswith((_API_PORT_CLAIM_PREFIX, _GUARDRAIL_PORT_CLAIM_PREFIX)):
+        if not name.startswith((_API_PORT_CLAIM_PREFIX, _GUARDRAIL_PORT_CLAIM_PREFIX, _OPENCODE_PORT_CLAIM_PREFIX)):
             continue
         path = os.path.join(claim_dir, name)
         if windows:
@@ -474,6 +480,67 @@ def choose_first_run_guardrail_port(cfg: Config) -> str:
         "claimed by other accounts; choose a free guardrail proxy port with "
         "`defenseclaw setup guardrail --port <free port> --non-interactive`"
     )
+
+
+def apply_first_run_ports(cfg: Config, api_port: int, proxy_port: int, *, new_config: bool) -> list[StepResult]:
+    """Use the ports given to init with --api-port and --proxy-port (GAP-0053).
+
+    A new config takes them instead of the automatic choice, and they are
+    claimed like a chosen port. An existing config keeps its ports: moving
+    them re-registers every connector, which ``setup gateway --api-port`` and
+    ``setup guardrail --port`` do, so the row names that command.
+    """
+    from defenseclaw.config import api_bind_host
+
+    steps: list[StepResult] = []
+    if api_port:
+        current = int(getattr(cfg.gateway, "api_port", 0) or 0)
+        host = (api_bind_host(cfg) or "127.0.0.1").strip("[]")
+        if host == "localhost":
+            host = "127.0.0.1"
+        if not new_config:
+            if api_port != current:
+                steps.append(StepResult(
+                    "Gateway API port", "warn",
+                    f"this configuration keeps API port {current}; init sets ports only in a new configuration",
+                    f"defenseclaw setup gateway --api-port {api_port} --non-interactive",
+                ))
+        else:
+            cfg.gateway.api_port = api_port
+            if _api_port_available(host, api_port) and _reserve_api_port(api_port):
+                steps.append(StepResult("Gateway API port", "pass", f"this account's gateway uses port {api_port} (--api-port)"))
+            else:
+                steps.append(StepResult(
+                    "Gateway API port", "warn",
+                    f"{host}:{api_port} (--api-port) is in use or claimed by another account; "
+                    "the gateway cannot listen there until it is free",
+                    "defenseclaw setup gateway --api-port <free port> --non-interactive",
+                ))
+    if proxy_port:
+        gc = cfg.guardrail
+        current = int(getattr(gc, "port", 0) or 0)
+        host = str(getattr(gc, "host", "") or "").strip().strip("[]")
+        if host.lower() in {"", "localhost", "::1"}:
+            host = "127.0.0.1"
+        if not new_config:
+            if proxy_port != current:
+                steps.append(StepResult(
+                    "Guardrail proxy port", "warn",
+                    f"this configuration keeps guardrail proxy port {current}; init sets ports only in a new configuration",
+                    f"defenseclaw setup guardrail --port {proxy_port} --non-interactive",
+                ))
+        else:
+            gc.port = proxy_port
+            if _guardrail_port_available(host, proxy_port):
+                steps.append(StepResult("Guardrail proxy port", "pass", f"this account's guardrail proxy uses port {proxy_port} (--proxy-port)"))
+            else:
+                steps.append(StepResult(
+                    "Guardrail proxy port", "warn",
+                    f"{host}:{proxy_port} (--proxy-port) is in use or claimed by another account; "
+                    "the guardrail proxy cannot listen there until it is free",
+                    "defenseclaw setup guardrail --port <free port> --non-interactive",
+                ))
+    return steps
 
 
 def finalize_first_run_config(cfg: Config, *, was_config_absent: bool) -> None:
@@ -724,12 +791,13 @@ def run_first_run(options: FirstRunOptions) -> FirstRunReport:
         if new_config and getattr(cfg, "_source_config_version", 0) == 0:
             cfg_mod.prepare_fresh_v8_config(cfg)
 
+    setup.extend(apply_first_run_ports(cfg, options.api_port, options.proxy_port, new_config=new_config))
     if new_config:
-        port_note = choose_first_run_api_port(cfg)
+        port_note = "" if options.api_port else choose_first_run_api_port(cfg)
         if port_note:
             status = "pass" if cfg.gateway.api_port != _DEFAULT_API_PORT else "warn"
             setup.append(StepResult("Gateway API port", status, port_note))
-        proxy_note = choose_first_run_guardrail_port(cfg)
+        proxy_note = "" if options.proxy_port else choose_first_run_guardrail_port(cfg)
         if proxy_note:
             status = "pass" if cfg.guardrail.port != _DEFAULT_GUARDRAIL_PORT else "warn"
             setup.append(StepResult("Guardrail proxy port", status, proxy_note))

@@ -685,6 +685,7 @@ def test_opencode_writable_plugin_folder_is_named_before_restart(monkeypatch, tm
     folder.chmod(0o775)
     plugin = folder / "defenseclaw.js"
     monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.setattr(connector_paths, "owner_private_group", lambda *_a: False)  # a shared group (GAP-0053)
     monkeypatch.setattr(connector_paths, "connector_config_files", lambda _name: [str(plugin)])
     restarted = []
     monkeypatch.setattr(cmd_setup, "_restart_defense_gateway", lambda *_args, **_kwargs: restarted.append(True))
@@ -705,6 +706,7 @@ def test_opencode_preflight_precedes_config_write(monkeypatch, tmp_path: Path, b
     folder.mkdir(mode=0o775)
     folder.chmod(0o775)
     monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.setattr(connector_paths, "owner_private_group", lambda *_a: False)  # a shared group (GAP-0053)
     monkeypatch.setattr(
         connector_paths, "connector_config_files", lambda _name: [str(folder / "defenseclaw.js")]
     )
