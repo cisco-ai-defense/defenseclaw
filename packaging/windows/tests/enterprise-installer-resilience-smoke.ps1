@@ -77,6 +77,7 @@ function Get-DefenseClawSmokeFunctionText {
 foreach ($name in @(
         'ConvertTo-DefenseClawResilienceFieldValue',
         'Format-DefenseClawResilienceEvent',
+        'Get-DefenseClawServicePendingDeleteRemedy',
         'Get-DefenseClawServicePendingDeleteMessage',
         'Test-DefenseClawServicePendingDeleteFailure',
         'Invoke-DefenseClawTransientFileRetry',
@@ -99,8 +100,16 @@ function Write-DefenseClawResilienceEvent {
 }
 
 # A pending delete names the exact prerequisite, and auto-recovery sees it.
+# The remedy names open MMC consoles when one is running, a restart otherwise.
+$remedy = Get-DefenseClawServicePendingDeleteRemedy
+if ($remedy -cnotin @(
+        'restart Windows to finish deleting the service, then run Setup again',
+        'close Services, Event Viewer and other MMC consoles that are open, then run Setup again; if it still fails, restart Windows'
+    )) {
+    throw "pending-delete remedy is unexpected: $remedy"
+}
 $message = Get-DefenseClawServicePendingDeleteMessage -Name 'DefenseClawGateway'
-if ($message -cne 'defenseclaw_prereq check="service_pending_delete" remedy="restart Windows to finish deleting the service, then run Setup again" service="DefenseClawGateway"') {
+if ($message -cne ('defenseclaw_prereq check="service_pending_delete" remedy="' + $remedy + '" service="DefenseClawGateway"')) {
     throw "pending-delete prerequisite is not in the shared format: $message"
 }
 if (-not (Test-DefenseClawServicePendingDeleteFailure -Message "Install failed: $message") -or

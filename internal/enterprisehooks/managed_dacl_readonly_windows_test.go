@@ -206,10 +206,33 @@ func TestWindowsManagedRuntimeInstallPlanRestampsAReadOnlyGrant(t *testing.T) {
 	if err := os.WriteFile(perUser, []byte("gateway: {}\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := PlanWindowsManagedRuntimeRoots(manifest, manifestPath, digest); err == nil ||
-		!strings.Contains(err.Error(), dataDir+" holds config.yaml") {
-		t.Fatalf("install plan over a per-user install folder = %v, want the refusal", err)
+	// Secure Client skips only this user and leaves the folder as it is;
+	// a strict or standalone plan refuses it.
+	skippedPlan, err := PlanWindowsManagedRuntimeRoots(manifest, manifestPath, digest)
+	if err != nil || len(skippedPlan.Roots) != 0 || len(skippedPlan.SkippedProfiles) != 1 ||
+		!strings.Contains(skippedPlan.SkippedProfiles[0].Reason, dataDir+" holds config.yaml") {
+		t.Fatalf("Secure Client install plan over a per-user install folder = %+v, %v; want that user skipped", skippedPlan, err)
 	}
+	if got := windowsReadOnlyTestACECount(t, dataDir); got != canonicalCount+1 {
+		t.Fatalf("skipping the per-user install folder changed its DACL (%d ACEs)", got)
+	}
+	// Strict and standalone refuse the whole plan, never skip the user. The
+	// folder also carries this test's read-only grant, which they refuse
+	// first, so the refusal is asserted rather than its reason.
+	t.Setenv(managed.TrustStrictAncestorsEnv, "1")
+	if refused, err := PlanWindowsManagedRuntimeRoots(manifest, manifestPath, digest); err == nil ||
+		len(refused.SkippedProfiles) != 0 ||
+		!strings.Contains(err.Error(), "reject noncanonical managed runtime baseline") {
+		t.Fatalf("strict install plan over a per-user install folder = %+v, %v; want the refusal", refused, err)
+	}
+	t.Setenv(managed.TrustStrictAncestorsEnv, "")
+	windowsEnterpriseStandaloneProcess = func() bool { return true }
+	if refused, err := PlanWindowsManagedRuntimeRoots(manifest, manifestPath, digest); err == nil ||
+		len(refused.SkippedProfiles) != 0 ||
+		!strings.Contains(err.Error(), "reject noncanonical managed runtime baseline") {
+		t.Fatalf("standalone install plan over a per-user install folder = %+v, %v; want the refusal", refused, err)
+	}
+	windowsEnterpriseStandaloneProcess = func() bool { return false }
 	if err := os.Remove(perUser); err != nil {
 		t.Fatal(err)
 	}

@@ -118,7 +118,10 @@ func TestEnumerateWindowsStandaloneAdmitsEntraUsersAndDefersNewRows(t *testing.T
 	}
 }
 
-func TestEnumerateWindowsSecureClientKeepsLegacyFilterAndRowState(t *testing.T) {
+// An Entra-joined or Autopilot laptop has only S-1-12-1 users, and the
+// 26.8.4 Secure Client release enrolls them, so the Secure Client profile
+// admits them too. Its new rows stay immediate (Deferred=false).
+func TestEnumerateWindowsSecureClientAdmitsEntraUsersAndKeepsRowState(t *testing.T) {
 	stubMachineWinGet(t, map[string]string{"OpenAI.Codex": "0.150.0"})
 	injectWindowsProfileList(t, map[string]string{
 		testLocalUserSID: codexProfile(t, "0.140.0"),
@@ -131,14 +134,15 @@ func TestEnumerateWindowsSecureClientKeepsLegacyFilterAndRowState(t *testing.T) 
 	if err != nil {
 		t.Fatalf("EnumerateWindows: %v", err)
 	}
-	if len(manifest.Targets) != 1 || manifest.Targets[0].SID != testLocalUserSID {
-		t.Fatalf("Secure Client targets = %+v, want only the S-1-5-21 user", manifest.Targets)
+	seen := map[string]bool{}
+	for _, target := range manifest.Targets {
+		seen[target.SID] = true
+		if target.Deferred {
+			t.Fatalf("Secure Client new row %s must keep Deferred=false", target.SID)
+		}
 	}
-	if manifest.Targets[0].Deferred {
-		t.Fatal("Secure Client new row must keep Deferred=false")
-	}
-	if !strings.Contains(strings.Join(logged, "\n"), testEntraUserSID+": not an interactive-user SID (S-1-5-21-…)") {
-		t.Fatalf("Secure Client must refuse the Entra ID SID with the historical reason; log:\n%s", strings.Join(logged, "\n"))
+	if len(manifest.Targets) != 2 || !seen[testLocalUserSID] || !seen[testEntraUserSID] {
+		t.Fatalf("Secure Client targets = %+v, want the local and the Entra ID user; log:\n%s", manifest.Targets, strings.Join(logged, "\n"))
 	}
 }
 
