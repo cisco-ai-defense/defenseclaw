@@ -229,25 +229,75 @@ func actionPrintfFormatBindings(call *syntax.CallExpr, values actionValues, cwd,
 		return nil, "", false
 	}
 	if known {
+		if format == "%n" && index+2 == len(call.Args) {
+			if split, exact := actionPrintfSplitNames(call.Args[index+1], values, cwd, home); exact {
+				if len(split) == 0 {
+					return nil, "", false
+				}
+				return split, "0", false
+			}
+		}
 		if name, count, exact := actionPrintfExactNameBinding(format, call.Args[index+1:], values, cwd, home); exact {
 			return []string{name}, count, false
 		}
 	}
 	var names []string
 	for _, arg := range call.Args[index+1:] {
-		value, fixed := actionWordValue(arg, values, cwd, home)
+		value, fixed := actionPrintfNameValue(arg, values, cwd, home)
 		if !fixed {
 			return nil, "", true
 		}
-		name, _, bound := actionPrintfScalarName(value, 0)
-		if !bound {
+		if actionEvalAssignmentName(value) {
+			names = append(names, value)
+		} else if actionPrintfNameMaySplit(arg) {
 			return nil, "", true
-		}
-		if name != "" {
-			names = append(names, name)
 		}
 	}
 	return names, "", false
+}
+
+// With the default IFS, one unquoted scalar may supply several %n names.
+// Each repetition of a bare %n format writes the same zero count.
+func actionPrintfSplitNames(word *syntax.Word, values actionValues, cwd, home string) ([]string, bool) {
+	if word == nil || len(word.Parts) != 1 {
+		return nil, false
+	}
+	if _, changedIFS := values["IFS"]; changedIFS {
+		return nil, false
+	}
+	param, ok := word.Parts[0].(*syntax.ParamExp)
+	if !ok || param.Param == nil || param.Excl || param.Length || param.Width || param.IsSet ||
+		param.Index != nil || param.Slice != nil || param.Repl != nil || param.NestedParam != nil ||
+		param.Flags != nil || len(param.Modifiers) != 0 || param.Exp != nil {
+		return nil, false
+	}
+	value, known := actionWordValue(word, values, cwd, home)
+	if !known || len(value) > 256 || strings.ContainsAny(value, "*?[]\\") {
+		return nil, false
+	}
+	names := strings.FieldsFunc(value, func(r rune) bool { return r == ' ' || r == '\t' || r == '\n' })
+	if len(names) > 16 {
+		return nil, false
+	}
+	for _, name := range names {
+		if !actionEvalAssignmentName(name) || values[actionReadonlyValuePrefix+name] != "" {
+			return nil, false
+		}
+	}
+	return names, true
+}
+
+func actionPrintfNameMaySplit(word *syntax.Word) bool {
+	if word == nil {
+		return false
+	}
+	for _, part := range word.Parts {
+		switch part.(type) {
+		case *syntax.ParamExp, *syntax.CmdSubst, *syntax.ArithmExp:
+			return true
+		}
+	}
+	return false
 }
 
 // A literal prefix and plain %s operands make %n's count exact. Other
@@ -290,20 +340,53 @@ func actionPrintfExactNameBinding(format string, args []*syntax.Word, values act
 			if i+2 != len(format) || argIndex+1 != len(args) {
 				return "", "", false
 			}
-			destination, fixed := actionWordValue(args[argIndex], values, cwd, home)
+			destination, fixed := actionPrintfNameValue(args[argIndex], values, cwd, home)
 			if !fixed {
 				return "", "", false
 			}
-			name, _, bound := actionPrintfScalarName(destination, 0)
-			if !bound || name == "" {
+			if !actionEvalAssignmentName(destination) {
 				return "", "", false
 			}
-			return name, strconv.Itoa(count), true
+			return destination, strconv.Itoa(count), true
 		default:
 			return "", "", false
 		}
 	}
 	return "", "", false
+}
+
+// Bash %n accepts a scalar identifier. Resolve a literal suffix removal on
+// a known scalar so the resulting identifier can be checked before binding.
+func actionPrintfNameValue(word *syntax.Word, values actionValues, cwd, home string) (string, bool) {
+	if value, known := actionWordValue(word, values, cwd, home); known {
+		return value, true
+	}
+	if word == nil || len(word.Parts) != 1 {
+		return "", false
+	}
+	part := word.Parts[0]
+	if quoted, ok := part.(*syntax.DblQuoted); ok {
+		if len(quoted.Parts) != 1 {
+			return "", false
+		}
+		part = quoted.Parts[0]
+	}
+	param, ok := part.(*syntax.ParamExp)
+	if !ok || param.Param == nil || param.Excl || param.Length || param.Width || param.IsSet ||
+		param.Index != nil || param.Slice != nil || param.Repl != nil || param.NestedParam != nil ||
+		param.Flags != nil || len(param.Modifiers) != 0 || param.Exp == nil ||
+		param.Exp.Op != syntax.RemSmallSuffix && param.Exp.Op != syntax.RemLargeSuffix {
+		return "", false
+	}
+	value, known := values[param.Param.Value]
+	if !known || param.Exp.Word == nil || len(param.Exp.Word.Parts) != 1 {
+		return "", false
+	}
+	literal, ok := param.Exp.Word.Parts[0].(*syntax.Lit)
+	if !ok || literal.Value == "" || strings.ContainsAny(literal.Value, "*?[]\\()@+!|") {
+		return "", false
+	}
+	return strings.TrimSuffix(value, literal.Value), true
 }
 
 func actionPrintfASCII(value string) bool {
@@ -1386,8 +1469,10 @@ func actionUpdateValuesAs(stmt *syntax.Stmt, values actionValues, cwd, home stri
 		names, count, unknown := actionPrintfFormatBindings(call, values, cwd, home)
 		defer func() {
 			actionForgetPrintfFormatBindings(values, names, unknown)
-			if count != "" && name != names[0] && values[actionReadonlyValuePrefix+names[0]] == "" && names[0] != "HOME" && names[0] != "PWD" {
-				values[names[0]] = count
+			for _, target := range names {
+				if count != "" && name != target && values[actionReadonlyValuePrefix+target] == "" && target != "HOME" && target != "PWD" {
+					values[target] = count
+				}
 			}
 		}()
 		if !ok {

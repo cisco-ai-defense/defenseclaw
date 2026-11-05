@@ -29,6 +29,15 @@ func TestGAP0428PrintfFormatBindingsFourCell(t *testing.T) {
 		{"unrelated_name_ordinary", `f=out.txt; printf -v 'g[1]' '%n' g; echo m >> "$f"`, "allow"},
 		{"prior_conversion_ordinary", `f=out.txt; printf -v 'g[1+0]' '%s%n' abc g; echo m >> "$f"`, "allow"},
 		{"literal_percent_ordinary", `f=out.txt; printf -v 'g[1]' '%%n' f; echo m >> "$f"`, "allow"},
+		{"invalid_index_plain_protected", `f=keylink; printf '%n' 'f[0]'; echo m >> "$f"`, "block"},
+		{"invalid_index_with_binding_protected", `f=keylink; printf -v 'g[1]' '%n' 'f[0]'; echo m >> "$f"`, "block"},
+		{"invalid_index_with_binding_ordinary", `f=out.txt; printf -v 'g[1]' '%n' 'g[1*1]'; echo m >> "$f"`, "allow"},
+		{"suffix_name_protected", `f=out.txt; name=fa; printf '%n' "${name%a}"; echo m >> "$f"`, "block"},
+		{"suffix_name_ordinary", `f=out.txt; name=ga; printf '%n' "${name%a}"; echo m >> "$f"`, "allow"},
+		{"suffix_name_with_binding_protected", `f=out.txt; name=fa; printf -v 'g[1]' '%n' "${name%a}"; echo m >> "$f"`, "block"},
+		{"suffix_name_with_binding_ordinary", `f=out.txt; name=ga; printf -v 'g[1]' '%n' "${name%a}"; echo m >> "$f"`, "allow"},
+		{"split_name_protected", `f=out.txt; name='f x'; printf '%n' $name; echo m >> "$f"`, "block"},
+		{"split_name_ordinary", `f=out.txt; name='g x'; printf '%n' $name; echo m >> "$f"`, "allow"},
 	}
 	payloads := make([][]byte, len(rows))
 	for i, row := range rows {
