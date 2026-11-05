@@ -56,7 +56,9 @@ func foreignGatewayListenerAt(cfg *config.Config, host string, port int) string 
 	addr := net.JoinHostPort(host, strconv.Itoa(port))
 	holder, holderErr := gatewayPortHolder(host, port)
 	// lsof on macOS does not list another account's sockets, so a missing
-	// holder is confirmed with a connection attempt.
+	// holder is confirmed with a connection attempt. Such a holder can still
+	// be this account's gateway: the macOS app's privileged helper runs it as
+	// root for this home, and this home's live PID record (IsRunning) says so.
 	if holderErr != nil && !gatewayPortAnswers(addr) {
 		return ""
 	}

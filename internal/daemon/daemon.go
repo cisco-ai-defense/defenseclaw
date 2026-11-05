@@ -20,12 +20,14 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io/fs"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"runtime"
 	"strconv"
 	"strings"
+	"syscall"
 	"time"
 
 	"github.com/defenseclaw/defenseclaw/internal/envvars"
@@ -69,6 +71,10 @@ var (
 	ErrNotRunning            = errors.New("daemon is not running")
 	ErrStopTimeout           = errors.New("daemon did not stop within timeout")
 	ErrUnsafeProcessIdentity = errors.New("daemon process identity file is unsafe")
+	// ErrOtherAccountProcess: this home's gateway runs as another account
+	// (an administrator started it, as the macOS app's privileged helper
+	// does), so this account cannot signal it.
+	ErrOtherAccountProcess = errors.New("the gateway runs as another account")
 )
 
 const (
@@ -199,6 +205,13 @@ func (d *Daemon) IsRunning() (bool, int) {
 	}
 	if !d.verifyProcess(info) && !d.verifyProcessForAuthenticatedMigration(info) &&
 		!d.verifyReplacedExecutable(info) {
+		if !processSignalable(info.PID) {
+			// A live process this account may not signal is another
+			// account's. Its record may name the gateway an administrator
+			// started for this home whose identity this account could not
+			// read; that is not stale evidence this account may discard.
+			return false, 0
+		}
 		// Closes (chain ): a stale gateway.pid
 		// pointing at a reused PID must NOT keep status/stop/restart
 		// pinned to the unrelated process. Treat the file as garbage
@@ -437,6 +450,14 @@ func (d *Daemon) verifyExecutable(info pidInfo) bool {
 	case "linux":
 		exePath, err := os.Readlink(fmt.Sprintf("/proc/%d/exe", info.PID))
 		if err != nil {
+			if errors.Is(err, fs.ErrPermission) && !processSignalable(info.PID) {
+				// Another account's process: /proc/<pid>/exe is readable
+				// only by that account, while /proc/<pid>/comm names its
+				// program to everyone. The gateway an administrator started
+				// for this home is verified by that name here and by its
+				// kernel start identity next.
+				return linuxCommNamesExecutable("/proc", info.PID, info.Executable)
+			}
 			// /proc/<pid>/exe should be readable for any LIVE process the
 			// caller can signal (we already passed processExists). Failing
 			// here means the process is a zombie or has a permission
@@ -472,6 +493,27 @@ func (d *Daemon) verifyExecutable(info pidInfo) bool {
 	default:
 		return true
 	}
+}
+
+// linuxCommNamesExecutable reports whether /proc/<pid>/comm under procRoot
+// names executable. The kernel keeps the first 15 bytes of the program's
+// base name there, readable by every account, where /proc/<pid>/exe is
+// readable only by the process's own account. An empty recorded executable
+// names nothing.
+func linuxCommNamesExecutable(procRoot string, pid int, executable string) bool {
+	base := filepath.Base(strings.TrimSpace(executable))
+	if base == "" || base == "." || base == string(filepath.Separator) {
+		return false
+	}
+	raw, err := os.ReadFile(filepath.Join(procRoot, strconv.Itoa(pid), "comm"))
+	if err != nil {
+		return false
+	}
+	comm := strings.TrimSpace(string(raw))
+	if len(base) > 15 {
+		base = base[:15]
+	}
+	return comm != "" && comm == base
 }
 
 func (d *Daemon) verifyStartIdentity(info pidInfo) bool {
@@ -963,6 +1005,13 @@ func (d *Daemon) stop(timeout time.Duration, request GracefulStopRequest) error 
 		if waitForProcessExit(proc, pid, forcedStopWait) {
 			d.removePIDFileIfStarted(started)
 			return nil
+		}
+		if errors.Is(err, syscall.EPERM) {
+			return fmt.Errorf(
+				"%w: PID %d was started with administrator rights for %s; stop it the same way "+
+					"(the app that started it, or sudo defenseclaw-gateway stop)",
+				ErrOtherAccountProcess, pid, d.dataDir,
+			)
 		}
 		return fmt.Errorf("daemon: send term signal: %w", err)
 	}

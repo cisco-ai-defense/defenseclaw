@@ -6,6 +6,7 @@ package pathidentity
 import (
 	"os"
 	"path/filepath"
+	"runtime"
 	"testing"
 )
 
@@ -53,5 +54,38 @@ func TestSameFailsClosedOnAsymmetricExistence(t *testing.T) {
 	}
 	if Same(existing, filepath.Join(dir, "missing")) {
 		t.Fatal("an existing path must not match a missing path")
+	}
+}
+
+// The gateway a privileged helper runs for this home lives under an
+// administrator's private folder: this account cannot stat it, so the
+// recorded path and the live process's path can only be compared by spelling.
+func TestSameAcceptsEqualPathsThisAccountCannotInspect(t *testing.T) {
+	if runtime.GOOS == "windows" || os.Geteuid() == 0 {
+		t.Skip("needs a folder this account cannot open")
+	}
+	private := filepath.Join(t.TempDir(), "private")
+	if err := os.Mkdir(private, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	gateway := filepath.Join(private, "gateway")
+	if err := os.WriteFile(gateway, []byte("x"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(private, 0); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.Chmod(private, 0o700) })
+	if _, err := os.Stat(gateway); err == nil {
+		t.Skip("this account can inspect the private folder")
+	}
+	if !Same(gateway, gateway) {
+		t.Fatal("the same path this account cannot inspect must compare as identical")
+	}
+	if Same(gateway, filepath.Join(private, "other")) {
+		t.Fatal("different paths this account cannot inspect must not compare as identical")
+	}
+	if Same(gateway, filepath.Join(t.TempDir(), "missing")) {
+		t.Fatal("an uninspectable path must not match a missing one")
 	}
 }
