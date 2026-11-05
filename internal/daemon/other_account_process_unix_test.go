@@ -51,6 +51,8 @@ func TestIsRunningKeepsRecordOfAnotherAccountsProcess(t *testing.T) {
 	}
 }
 
+// /proc/<pid>/comm holds the first 15 bytes of the program's base name; the
+// recorded executable is matched by that prefix and nothing else.
 func TestLinuxCommNamesExecutable(t *testing.T) {
 	root := t.TempDir()
 	write := func(pid int, comm string) {

@@ -169,6 +169,8 @@ func TestThisHomesGatewayRunByAnotherAccountNeedsARecord(t *testing.T) {
 	}
 }
 
+// The home resolves as config.DefaultDataPath does: DEFENSECLAW_HOME, else
+// ~/.defenseclaw.
 func TestPerUserGatewayHomeFollowsDefenseClawHome(t *testing.T) {
 	t.Setenv("DEFENSECLAW_HOME", "/tmp/dc-home")
 	if got := perUserGatewayHome(); got != "/tmp/dc-home" {

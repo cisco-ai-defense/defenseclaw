@@ -478,6 +478,7 @@ def test_pid_record_rejects_foreign_non_root_leaf(monkeypatch, tmp_path) -> None
 
 
 def _refused(pid: int):
+    """Stand in for libproc refusing another account's process."""
     raise PermissionError(pid)
 
 
@@ -504,6 +505,7 @@ def test_darwin_process_evidence_reads_another_accounts_process_as_ps_does(monke
 
 
 def test_darwin_process_evidence_stays_denied_without_the_program_path(monkeypatch):
+    """A start identity without the program path proves nothing: the evidence stays denied."""
     monkeypatch.setattr(doctor_gateway, "_darwin_native_process_identity", _refused)
     monkeypatch.setattr(doctor_gateway, "_darwin_kinfo_proc", lambda inspected_pid: ("1793776207.630838", 0))
     monkeypatch.setattr(doctor_gateway, "_darwin_process_executable", lambda inspected_pid: "")
@@ -515,7 +517,10 @@ def test_darwin_process_evidence_stays_denied_without_the_program_path(monkeypat
 
 
 def test_darwin_process_evidence_reports_a_refused_process_that_exited_as_missing(monkeypatch):
+    """A process libproc refused that is gone by the sysctl read is missing, not denied."""
+
     def gone(pid: int):
+        """Stand in for sysctl answering an unknown PID."""
         raise ProcessLookupError(pid)
 
     monkeypatch.setattr(doctor_gateway, "_darwin_native_process_identity", _refused)
@@ -525,6 +530,7 @@ def test_darwin_process_evidence_reports_a_refused_process_that_exited_as_missin
 
 
 def test_darwin_process_evidence_names_this_accounts_own_processes(monkeypatch):
+    """The owner's uid rides along with this account's own process evidence."""
     monkeypatch.setattr(
         doctor_gateway,
         "_darwin_native_process_identity",
@@ -537,6 +543,7 @@ def test_darwin_process_evidence_names_this_accounts_own_processes(monkeypatch):
 
 @pytest.mark.skipif(sys.platform != "darwin", reason="sysctl kern.proc.pid is a macOS record")
 def test_darwin_kinfo_proc_describes_this_and_other_accounts_processes():
+    """Real sysctl and ps reads: this process, root's launchd, and an unknown PID."""
     own_executable, own_identity = doctor_gateway._darwin_native_process_identity(os.getpid())
     identity, uid = doctor_gateway._darwin_kinfo_proc(os.getpid())
     assert identity == own_identity

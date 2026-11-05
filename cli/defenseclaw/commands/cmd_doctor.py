@@ -6210,6 +6210,7 @@ def _loopback_hosts_match(left: str, right: str) -> bool:
     """Whether two loopback API hosts name the same listener (``localhost`` is any)."""
 
     def parse(value: str) -> ipaddress.IPv4Address | ipaddress.IPv6Address | None | bool:
+        """A loopback address, None for ``localhost`` (any loopback), False otherwise."""
         value = str(value).strip().strip("[]")
         if value.casefold() == "localhost":
             return None

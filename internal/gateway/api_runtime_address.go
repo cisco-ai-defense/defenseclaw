@@ -61,6 +61,7 @@ func (a *APIServer) recordRuntimeAPIAddress(listener net.Listener) error {
 	return safefile.ReclaimToDirectoryOwner(path)
 }
 
+// runtimeAPIAddressPath is the record's path in dataDir.
 func runtimeAPIAddressPath(dataDir string) string {
 	return filepath.Join(dataDir, "gateway-api.json")
 }

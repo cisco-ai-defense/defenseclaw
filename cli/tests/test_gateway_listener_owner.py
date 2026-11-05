@@ -417,6 +417,7 @@ def test_this_homes_gateway_run_by_another_account_gets_the_token(monkeypatch) -
 
 @pytest.mark.skipif(os.name == "nt", reason="POSIX account semantics")
 def test_only_a_complete_proof_for_the_port_makes_an_unlisted_listener_this_accounts(monkeypatch) -> None:
+    """Only a trusted proof for the port, for a process of another account, excuses the listener."""
     from types import SimpleNamespace
 
     from defenseclaw import config
@@ -427,7 +428,10 @@ def test_only_a_complete_proof_for_the_port_makes_an_unlisted_listener_this_acco
     proven: list[int] = []
 
     def trust(code: str, uid: int):
+        """Build a doctor proof stub with the given trust code and process owner."""
+
         def prove(_cfg, *, api_port=None, **_kwargs):
+            """Record the port asked about and answer with the stubbed trust."""
             proven.append(api_port)
             trusted = code == "trusted"
             return SimpleNamespace(
@@ -453,6 +457,7 @@ def test_only_a_complete_proof_for_the_port_makes_an_unlisted_listener_this_acco
     assert proven == [18970] * 5
 
     def unavailable(*_args, **_kwargs):
+        """Stand in for a proof that cannot run at all."""
         raise RuntimeError("config does not load")
 
     monkeypatch.setattr(cmd_doctor, "_trusted_gateway_listener", unavailable)
@@ -491,15 +496,20 @@ def test_doctor_binds_another_accounts_gateway_to_its_own_runtime_record(tmp_pat
     record = tmp_path / "gateway-api.json"
 
     def publish(record_pid: int, record_port: int, record_host: str = "127.0.0.1") -> None:
+        """Write the gateway's private runtime record as the gateway publishes it."""
         record.write_text(json.dumps({"pid": record_pid, "host": record_host, "port": record_port}), encoding="utf-8")
         protect_private_file(record)
 
     class Evidence(evidence_module.GatewayEvidence):
+        """Doctor evidence whose process answers belong to the given uid."""
+
         def __init__(self, uid: int) -> None:
+            """Remember the uid every process answer reports."""
             super().__init__(platform_name="darwin")
             self.uid = uid
 
         def process(self, inspected_pid: int) -> evidence_module.ProcessEvidence:
+            """Answer with the verified gateway identity, owned by the stubbed uid."""
             return evidence_module.ProcessEvidence(
                 "ok",
                 pid=inspected_pid,
@@ -517,6 +527,7 @@ def test_doctor_binds_another_accounts_gateway_to_its_own_runtime_record(tmp_pat
     )
 
     def prove(uid: int = 0) -> cmd_doctor._GatewayTrust:
+        """Run the listener proof with a process of the given owner."""
         return cmd_doctor._trusted_gateway_listener(cfg, evidence=Evidence(uid), platform_name="darwin")
 
     try:

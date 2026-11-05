@@ -12,6 +12,8 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/safefile"
 )
 
+// Only a private record naming the asked PID and a loopback endpoint names a
+// listener; another PID, a public address, a shared file or no file do not.
 func TestRuntimeAPIAddressNamesOnlyThePublishedPrivateLoopbackListener(t *testing.T) {
 	dir := t.TempDir()
 	record := filepath.Join(dir, "gateway-api.json")
