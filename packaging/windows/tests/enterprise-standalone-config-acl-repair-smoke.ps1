@@ -53,11 +53,89 @@ try {
                 -RedactionKeyClass trusted_drift)
         }
         catch {
-            $refused = $_.Exception.Message -match 'untrusted managed config path'
+            $refused = $_.Exception.Message -match 'untrusted managed config path' -and
+                $_.Exception.Message -match 'Setup /ensure CONFIG='
         }
         if (-not $refused -or $script:repairCalls -ne 0) {
-            throw 'ACL repair accepted a user-writable config or changed ACLs before refusing it'
+            throw 'ACL repair accepted a user-writable config, changed ACLs before refusing it, or named no recovery'
         }
+
+        # GAP-0590: the transaction asks the same question read-only before
+        # it stops any service; the answer is the same refusal, with nothing
+        # changed.
+        $checkRefused = $false
+        try {
+            [void](Repair-DefenseClawDeploymentAclDrift `
+                -Layout $layout -GatewayServiceName 'DefenseClawGateway' `
+                -RedactionKeyClass trusted_drift -CheckOnly)
+        }
+        catch {
+            $checkRefused = $_.Exception.Message -match 'untrusted managed config path'
+        }
+        if (-not $checkRefused -or $script:repairCalls -ne 0) {
+            throw 'the read-only drift check did not refuse a user-writable config, or changed ACLs'
+        }
+
+        # GAP-0590: the content gate an install-like lifecycle runs before any
+        # service stops refuses every managed content path another account can
+        # change, names it and its recovery, and changes nothing.
+        $manifest = [IO.Path]::Combine($State, 'targets.yaml')
+        $metadata = [IO.Path]::Combine($State, 'deployment.json')
+        foreach ($file in @($manifest, $metadata)) {
+            [IO.File]::WriteAllText($file, '{}')
+            Set-DefenseClawPathAcl -Path $file -Kind AdminFile -GatewayServiceSID $script:AdministratorsSID
+        }
+        $gateLayout = @{
+            StateRoot = $State
+            ConfigDirectory = $ConfigDirectory
+            ConfigPath = $Config
+            ManifestPath = $manifest
+            MetadataPath = $metadata
+            CodexTargetEnabled = $false
+        }
+        function Assert-GateRefuses([string]$Path, [string]$Recovery) {
+            $message = ''
+            try {
+                Assert-DefenseClawStandaloneContentTrusted -Layout $gateLayout
+            }
+            catch {
+                $message = $_.Exception.Message
+            }
+            if (-not $message.Contains($Path) -or -not $message.Contains($Recovery) -or
+                -not $message.StartsWith('refusing to change the deployment, and nothing was changed')) {
+                throw "content gate on ${Path}: '$message'"
+            }
+        }
+        function Add-UsersWrite([string]$Path) {
+            $acl = Microsoft.PowerShell.Security\Get-Acl -LiteralPath $Path
+            [void]$acl.AddAccessRule([Security.AccessControl.FileSystemAccessRule]::new(
+                [Security.Principal.SecurityIdentifier]::new($script:UsersSID),
+                [Security.AccessControl.FileSystemRights]::Write,
+                [Security.AccessControl.AccessControlType]::Allow))
+            Microsoft.PowerShell.Security\Set-Acl -LiteralPath $Path -AclObject $acl
+        }
+        Assert-GateRefuses -Path $Config -Recovery 'Setup /ensure CONFIG=<the approved administrator-only config>'
+        if (-not @((Microsoft.PowerShell.Security\Get-Acl -LiteralPath $Config).Access | Microsoft.PowerShell.Core\Where-Object {
+            (ConvertTo-DefenseClawSID -Identity $_.IdentityReference) -eq $script:UsersSID
+        }).Count) {
+            throw 'the content gate changed the config ACL'
+        }
+        Set-DefenseClawPathAcl -Path $Config -Kind ConfigFile -GatewayServiceSID $sid
+        Assert-DefenseClawStandaloneContentTrusted -Layout $gateLayout
+        Add-UsersWrite -Path $manifest
+        Assert-GateRefuses -Path $manifest -Recovery 'Setup writes a new targets.yaml enumerated from it'
+        Set-DefenseClawPathAcl -Path $manifest -Kind AdminFile -GatewayServiceSID $script:AdministratorsSID
+        Add-UsersWrite -Path $metadata
+        Assert-GateRefuses -Path $metadata -Recovery 'remove that entry and check the file'
+        Set-DefenseClawPathAcl -Path $metadata -Kind AdminFile -GatewayServiceSID $script:AdministratorsSID
+        Add-UsersWrite -Path $ConfigDirectory
+        Assert-GateRefuses -Path $ConfigDirectory -Recovery 'Remove that entry, then run Setup /ensure again.'
+        Set-DefenseClawPathAcl -Path $ConfigDirectory -Kind ConfigDirectory -GatewayServiceSID $sid
+        Assert-DefenseClawStandaloneContentTrusted -Layout $gateLayout
+        if ($script:repairCalls -ne 0) {
+            throw 'the content gate repaired ACLs'
+        }
+        Add-UsersWrite -Path $Config
         $after = Microsoft.PowerShell.Security\Get-Acl -LiteralPath $Config
         if (-not @($after.Access | Microsoft.PowerShell.Core\Where-Object {
             (ConvertTo-DefenseClawSID -Identity $_.IdentityReference) -eq $script:UsersSID -and
@@ -124,6 +202,13 @@ try {
         $trusted = Microsoft.PowerShell.Security\Get-Acl -LiteralPath $Config
         $trusted.SetAccessRuleProtection($false, $false)
         Microsoft.PowerShell.Security\Set-Acl -LiteralPath $Config -AclObject $trusted
+        # Trusted-only drift passes the content gate for the repair to put back.
+        Assert-DefenseClawStandaloneContentTrusted -Layout $gateLayout
+        if (-not (Repair-DefenseClawDeploymentAclDrift `
+            -Layout $layout -GatewayServiceName 'DefenseClawGateway' `
+            -RedactionKeyClass trusted_drift -CheckOnly) -or $script:repairCalls -ne 0) {
+            throw 'the read-only drift check refused trusted ACL drift or repaired it'
+        }
         if (-not (Repair-DefenseClawDeploymentAclDrift `
             -Layout $layout -GatewayServiceName 'DefenseClawGateway' `
             -RedactionKeyClass trusted_drift) -or $script:repairCalls -ne 2) {
