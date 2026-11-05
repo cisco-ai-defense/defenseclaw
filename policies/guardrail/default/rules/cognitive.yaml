@@ -109,3 +109,27 @@ rules:
     severity: CRITICAL
     confidence: 0.98
     tags: [cognitive-tampering, tampering, security-state]
+  - id: tamper.agent_hook_config_disable
+    tool_call_only: true
+    # Code-owned (agentHookConfigFindings, GAP-0048): a native file tool
+    # call (Write, Edit, MultiEdit, apply_patch) on an agent hook file whose
+    # resulting document turns DefenseClaw off: disableAllHooks or
+    # allowManagedHooksOnly set, a DefenseClaw hook entry removed or changed,
+    # Codex [features] hooks = false, the OpenCode bridge dropped, removed or
+    # rewritten. Every other edit of these files stays allowed. The inert
+    # regex cannot match alone.
+    pattern: 'a^'
+    title: "Turn off the agent's DefenseClaw hooks"
+    severity: CRITICAL
+    confidence: 0.98
+    tags: [cognitive-tampering, tampering, security-state]
+  - id: tamper.agent_hook_config_write
+    tool_call_only: true
+    # Code-owned (agentHookConfigFindings, GAP-0048): a shell write to an
+    # agent hook file, whose content the gateway does not read. HIGH: an
+    # alert in the default pack, a block in strict.
+    pattern: 'a^'
+    title: "Shell write to an agent hook config"
+    severity: HIGH
+    confidence: 0.80
+    tags: [cognitive-tampering, tampering]
