@@ -310,13 +310,16 @@ final class GatewayAdminInstallation {
             throw GatewayAdminFailure.refused("Could not open the filesystem root.")
         }
         do {
-            for component in account.home.split(separator: "/").map(String.init) {
+            let homeComponents = account.home.split(separator: "/").map(String.init)
+            for (index, component) in homeComponents.enumerated() {
                 let next = openat(current, component, O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC)
                 guard next >= 0 else {
                     throw GatewayAdminFailure.refused("Could not open your account home without following a symbolic link (errno \(errno)).")
                 }
                 close(current)
                 current = next
+                // The account home itself is checked below.
+                guard index < homeComponents.count - 1 else { break }
                 var metadata = stat()
                 guard fstat(current, &metadata) == 0, metadata.st_mode & S_IFMT == S_IFDIR, metadata.st_uid == 0,
                       metadata.st_mode & 0o022 == 0 || metadata.st_mode & S_ISVTX != 0 else {
