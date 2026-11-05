@@ -240,6 +240,12 @@ Claude Desktop keeps the engine in the user's own data folder, under `claude-cod
 
 `status` and `verify` use the verified version to check coverage, as for the Claude Code CLI. Engine 2.1.309 resolves to a known contract (`claudecode-hooks-v2`), and a newer engine is followed. A build whose signature does not verify is reported as `surface_unverified`, and as `managed_launch_uninspected` while it runs.
 
+## Approval prompts
+
+When a rule asks (a `confirm` verdict, see [Human approval](/docs/hitl)), Cowork shows its own approval card, for example "Claude wants to use bash", with the command and the buttons Deny and Allow once. The card does not show the DefenseClaw name, the rule id or the reason, so nothing on it says the prompt came from your organization policy. Allow once runs the command. Deny stops the task.
+
+To see why Cowork asked, look in DefenseClaw. `defenseclaw alerts --connector claudecode` lists a `claudecode:PreToolUse` row with `decision=confirm`, and its rule and reason show when you open that row by number, as in [Check it worked](/docs/hitl#check-it-worked). The TUI Alerts panel and the audit log have the same row. DefenseClaw records the verdict, not who answered the card.
+
 ## What you see afterwards
 
 | Where | What |
@@ -249,7 +255,7 @@ Claude Desktop keeps the engine in the user's own data folder, under `claude-cod
 | Hook decision telemetry | The attribute `defenseclaw.agent.surface` is `cowork`. It is absent for a terminal call |
 | Gateway health | `connectors[name=claudecode].surfaces.cowork` with `requests`, `last_activity_at` and `last_session_start_at`. It appears after the first Cowork call |
 | AI Discovery | Claude Desktop, whether Cowork is set up on the machine, the engine version, the VM bundle and its size, and the Cowork plugin names. See [AI Discovery](/docs/ai-discovery) |
-| Cowork's own window | No DefenseClaw hook warning or notice. Check `defenseclaw status`, `defenseclaw doctor` or the TUI instead. See [Limits](#limits) |
+| Cowork's own window | No DefenseClaw hook warning or notice. An ask shows Cowork's own approval card without the DefenseClaw reason: see [Approval prompts](#approval-prompts). Check `defenseclaw status`, `defenseclaw doctor` or the TUI instead. See [Limits](#limits) |
 
 In the example below, an administrator deny rule blocked a shell command in a Cowork task on a managed Windows computer. Cowork's window shows no notice from DefenseClaw. The block shows in the model's reply, which names the rule.
 
