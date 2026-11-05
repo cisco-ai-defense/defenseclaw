@@ -9,6 +9,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -2018,6 +2019,24 @@ func TestWindowsEnterpriseLeaveInstallRootMovesTheWorkingDirectoryOut(t *testing
 
 // GAP-1794: a self-uninstall typed into cmd.exe whose folder is inside
 // InstallRoot is refused before anything changes, and says how to proceed.
+// windowsTestProcessState says whether a child process still runs, or the
+// status it exited with.
+func windowsTestProcessState(pid int) string {
+	handle, err := windows.OpenProcess(windows.PROCESS_QUERY_LIMITED_INFORMATION, false, uint32(pid))
+	if err != nil {
+		return fmt.Sprintf("process %d cannot be opened: %v", pid, err)
+	}
+	defer windows.CloseHandle(handle)
+	var code uint32
+	if err := windows.GetExitCodeProcess(handle, &code); err != nil {
+		return fmt.Sprintf("process %d exit code unreadable: %v", pid, err)
+	}
+	if code == 259 { // STILL_ACTIVE
+		return fmt.Sprintf("process %d still runs", pid)
+	}
+	return fmt.Sprintf("process %d exited with %#x", pid, code)
+}
+
 func TestWindowsEnterpriseSelfUninstallRefusesAPromptInsideInstallRoot(t *testing.T) {
 	installRoot := t.TempDir()
 	bin := filepath.Join(installRoot, "bin")
@@ -2045,7 +2064,7 @@ func TestWindowsEnterpriseSelfUninstallRefusesAPromptInsideInstallRoot(t *testin
 	deadline := time.Now().Add(10 * time.Second)
 	for !windowsDirectoryOpenWithoutDeleteSharing(bin) {
 		if time.Now().After(deadline) {
-			t.Fatal("a prompt's working folder was not reported in use")
+			t.Fatalf("a prompt's working folder was not reported in use (%s)", windowsTestProcessState(prompt.Process.Pid))
 		}
 		time.Sleep(100 * time.Millisecond)
 	}
