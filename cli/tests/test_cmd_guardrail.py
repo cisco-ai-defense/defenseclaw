@@ -1491,16 +1491,17 @@ class PerConnectorFailModeTests(unittest.TestCase):
         self.assertIn("GitHub Copilot CLI will remain fail-open; closed is stored only", result.output)
         self.assertNotIn("BLOCK", result.output)
 
-    def test_connector_flag_rejected_on_single_connector_install(self):
+    def test_other_connector_flag_rejected_on_single_connector_install(self):
         runner = CliRunner()
         app = make_ctx(enabled=True, connector="codex")
         result = runner.invoke(
             cmd_guardrail.fail_mode_cmd,
-            ["closed", "--connector", "codex", "--yes"],
+            ["closed", "--connector", "kiro", "--yes"],
             obj=app,
         )
         self.assertNotEqual(result.exit_code, 0)
         self.assertIn("multi-connector", result.output)
+        self.assertIn("Installed connector: codex", result.output)
 
     def test_unknown_connector_errors(self):
         runner = CliRunner()

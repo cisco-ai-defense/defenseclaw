@@ -56,6 +56,7 @@ from defenseclaw.config_inspect import (
     config_v8_schema,
     inspect_v8_config,
 )
+from defenseclaw.connector_contracts import normalize_connector
 from defenseclaw.context import AppContext, pass_ctx
 from defenseclaw.file_permissions import UNSAFE_PATH_NAMESPACE_VIEW
 from defenseclaw.observability.v8_config import (
@@ -1078,6 +1079,12 @@ def _refresh_stopped_gateway_hooks(before: object) -> list[str]:
     refreshed: list[str] = []
     with fail_mode_transaction_lock(after):
         for name, mode in changed:
+            if normalize_connector(name) in {"openclaw", "zeptoclaw"}:
+                notes.append(
+                    f"{name} PATH shims read the saved fail-{mode} mode when they run; "
+                    "their installed fallback is refreshed at the next gateway start."
+                )
+                continue
             if name not in _RECONCILE_CONNECTORS:
                 notes.append(
                     f"warning: {name} hooks keep their previous fail mode until the next "
@@ -1202,7 +1209,32 @@ def config_set(app: AppContext, key: str, value: str, as_json: bool, expect_sha2
         raise click.ClickException(
             f"an empty value does not set {key}; use defenseclaw config unset {key}"
         )
+    _refuse_proxy_connector_beside_hooks(app, parts)
     _write_config_change(app, [Change(key, parsed)], expect_sha256, "set")
+
+
+def _refuse_proxy_connector_beside_hooks(app: AppContext, parts: list) -> None:
+    """Keep a hook-only roster startable when config set adds a proxy connector."""
+    if len(parts) < 3 or parts[:2] != ["guardrail", "connectors"] or not isinstance(parts[2], str):
+        return
+    proxy = normalize_connector(parts[2])
+    if proxy not in {"openclaw", "zeptoclaw"}:
+        return
+    try:
+        cfg = app.cfg if app.cfg is not None else config_module.load()
+        from defenseclaw.enforce.asset_lists import is_secure_client
+
+        if is_secure_client(cfg):
+            return
+        installed = [normalize_connector(name) for name in cfg.active_connectors()]
+    except Exception:  # noqa: BLE001 - let the config writer report an unreadable file
+        return
+    hooks = sorted(name for name in installed if name not in {"openclaw", "zeptoclaw"})
+    if hooks:
+        raise click.ClickException(
+            f"config.yaml was not changed: {proxy} needs a proxy binding and cannot share a "
+            f"gateway process with hook connectors ({', '.join(hooks)})."
+        )
 
 
 def _refuse_retired_scanner_key(key: str, parts: list) -> None:
