@@ -2993,7 +2993,11 @@ targets:
             param(
                 [Parameter(Mandatory)][string]$ServicesQuiescedAt,
                 [Parameter(Mandatory)][string]$GatewayServiceName,
-                [Parameter(Mandatory)][string]$GuardianServiceName
+                [Parameter(Mandatory)][string]$GuardianServiceName,
+                # The production switch (GAP-0044) skips only the rest of the
+                # wait; the disable and stop still run, so the barrier this
+                # mock models and checks is the same either way.
+                [switch]$CleanStopProven
             )
             [void](ConvertFrom-DefenseClawServiceQuiescenceTimestamp `
                 -Value $ServicesQuiescedAt)
@@ -3049,7 +3053,12 @@ targets:
         function script:Install-DefenseClawSourceDescriptor {
             param(
                 [Parameter(Mandatory)]$Source,
-                [Parameter(Mandatory)][string]$Destination
+                [Parameter(Mandatory)][string]$Destination,
+                # The production switch keeps an installed file that already
+                # has the source's bytes. This mock always writes the
+                # destination, which publishes the same bytes, so the
+                # ordering it records is unchanged.
+                [switch]$SkipIfContentMatches
             )
             $sourcePath = if ($Source -is [Collections.IDictionary] -and
                 $Source.Contains('path')) {
