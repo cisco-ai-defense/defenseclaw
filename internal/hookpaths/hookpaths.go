@@ -5613,8 +5613,12 @@ func archiveMayLink(program string, args []string, static []bool) bool {
 	if program == "unzip" || strings.HasPrefix(program, "7z") {
 		// Listing and test modes do not extract. 7z needs an x or e command.
 		if program == "unzip" {
-			// -v prints the version without an archive, or lists one
-			// archive verbosely. Neither form extracts (GAP-0395).
+			// A bare unzip prints its usage (gas-ux-r1 GAP-0055). -v prints
+			// the version without an archive, or lists one archive
+			// verbosely. None of these forms extracts (GAP-0395).
+			if len(args) == 0 {
+				return false
+			}
 			if static[0] && args[0] == "-v" &&
 				(len(args) == 1 || len(args) == 2 && static[1] && args[1] != "" && !strings.HasPrefix(args[1], "-")) {
 				return false
