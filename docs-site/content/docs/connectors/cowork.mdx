@@ -242,9 +242,11 @@ Claude Desktop keeps the engine in the user's own data folder, under `claude-cod
 
 ## Approval prompts
 
-When a rule asks (a `confirm` verdict, see [Human approval](/docs/hitl)), Cowork shows its own approval card, for example "Claude wants to use bash", with the command and the buttons Deny and Allow once. The card does not show the DefenseClaw name, the rule id or the reason, so nothing on it says the prompt came from your organization policy. Allow once runs the command. Deny stops the task.
+When a rule asks (a `confirm` verdict, see [Human approval](/docs/hitl)), Cowork shows its own approval card, for example "Claude wants to use bash", with the command and the buttons Deny and Allow once. The card does not show the DefenseClaw name, the rule id or the reason, so nothing on it says the prompt came from DefenseClaw. Allow once runs the command. Deny stops the task.
 
-To see why Cowork asked, look in DefenseClaw. `defenseclaw alerts --connector claudecode` lists a `claudecode:PreToolUse` row with `decision=confirm`, and its rule and reason show when you open that row by number, as in [Check it worked](/docs/hitl#check-it-worked). The TUI Alerts panel and the audit log have the same row. DefenseClaw records the verdict, not who answered the card.
+To see why Cowork asked, look in DefenseClaw. On a per-user install, `defenseclaw alerts --connector claudecode` lists a `claudecode:PreToolUse` row with `decision=confirm`, and its rule and reason show when you open that row by number, as in [Check it worked](/docs/hitl#check-it-worked). The TUI Alerts panel and the audit log have the same row. On a managed computer an administrator reads the audit with `sudo /opt/cisco/defenseclaw/bin/defenseclaw-gateway audit export --since 2h --connector claudecode` (macOS; see [Review activity from the CLI](/docs/enterprise/operations#review-activity-from-the-cli-linux-and-macos)). It shows a `PreToolUse` row with `confirm` for the tool, then a `PermissionRequest` row with `alert`.
+
+DefenseClaw records the verdict, not who answered the card. A `PostToolUse` row follows either answer, so it does not show whether the command ran.
 
 ## What you see afterwards
 
