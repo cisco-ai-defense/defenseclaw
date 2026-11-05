@@ -200,6 +200,16 @@ def test_claude_code_prerequisite_yes_and_decline(app) -> None:
     assert os.path.exists(cowork.zip_path(_data_dir(app)))
 
 
+@pytest.mark.parametrize(("host_os", "shown"), [("linux", True), ("darwin", False)])
+def test_setup_cowork_says_cowork_on_linux_is_a_preview(app, host_os, shown) -> None:
+    # Cowork audit P4-3: the support matrix lists Cowork on Linux as Preview.
+    notice = "Cowork on Linux is a preview: Claude Desktop for Linux is a beta, and Cowork on Linux is not certified."
+    with patch("defenseclaw.platform_support.host_os", return_value=host_os):
+        result, _ = _setup(app, "--yes")
+    assert result.exit_code == 0, result.output
+    assert (notice in " ".join(result.output.split())) is shown, result.output
+
+
 def test_setup_cowork_refuses_beside_a_managed_install(app) -> None:
     with (
         patch.object(cowork, "managed_host", return_value="standalone"),

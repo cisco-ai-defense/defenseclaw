@@ -90,6 +90,38 @@ class AlertFindingRowsTests(unittest.TestCase):
         store.db.commit()
         return finding.id
 
+    def test_a_cowork_finding_reads_cowork_like_the_tui(self):
+        # Cowork audit P3-1 (GAP-0047): a Cowork call's hook row records
+        # surface=cowork. `alerts` labels its finding cowork:PreToolUse, as
+        # the TUI does; a Claude Code terminal call keeps claudecode:*.
+        now = datetime.now(timezone.utc)
+        cowork_id = self._finding(
+            "req-cowork",
+            "connector=claudecode result=ok action=block raw_action=block mode=action "
+            "cowork_session_id=local_1 surface=cowork",
+            now,
+        )
+        cli_id = self._finding(
+            "req-cli", "connector=claudecode result=ok action=block raw_action=block mode=action",
+            now - timedelta(seconds=5),
+        )
+        table = self.runner.invoke(alerts, ["-n", "10"], obj=self.app, catch_exceptions=False)
+        self.assertEqual(table.exit_code, 0, table.output)
+        self.assertIn("cowork:PreToolUse", table.output)
+        self.assertIn("claudecode:PreToolUse", table.output)
+        shown = self.runner.invoke(alerts, ["--show", "1"], obj=self.app, catch_exceptions=False).output
+        self.assertRegex(shown, r"Target:\s+cowork:PreToolUse")
+        self.assertRegex(shown, r"Surface:\s+Cowork \(Claude Code\)")
+        self.assertRegex(shown, r"Decision:\s+blocked")
+        shown = self.runner.invoke(alerts, ["--show", "2"], obj=self.app, catch_exceptions=False).output
+        self.assertRegex(shown, r"Target:\s+claudecode:PreToolUse")
+        self.assertNotIn("Surface:", shown)
+        listed = {row["id"]: row for row in json.loads(
+            self.runner.invoke(alerts, ["--json"], obj=self.app, catch_exceptions=False).output
+        )}
+        self.assertEqual(listed[cowork_id]["target"], "cowork:PreToolUse")
+        self.assertEqual(listed[cli_id]["target"], "claudecode:PreToolUse")
+
     def test_judge_finding_names_the_judge_and_no_repeated_id(self):
         # GAP-1886: a judge finding read "Rule: JUDGE-EXFIL-FILE: JUDGE-EXFIL-FILE"
         # and "Scanner: hook-rules", like a regex rule.

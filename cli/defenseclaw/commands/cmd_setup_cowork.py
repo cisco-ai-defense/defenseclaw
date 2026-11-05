@@ -26,7 +26,7 @@ from datetime import datetime, timezone
 
 import click
 
-from defenseclaw import cowork, ux
+from defenseclaw import cowork, platform_support, ux
 from defenseclaw.context import AppContext, pass_ctx
 
 _POLL_SECONDS = 3.0
@@ -227,6 +227,11 @@ def setup_cowork(
     from defenseclaw import __version__
 
     _refuse_on_managed_host(app.cfg)
+    if platform_support.host_os() == "linux":
+        # The support matrix lists Cowork on Linux as Preview (cowork audit P4-3).
+        ux.warn(
+            "Cowork on Linux is a preview: Claude Desktop for Linux is a beta, and Cowork on Linux is not certified."
+        )
     if not cowork._claudecode_enabled(app.cfg):
         # Ask the gateway first: one that cannot build the plugin must not
         # leave the Claude Code connector switched on for nothing.
