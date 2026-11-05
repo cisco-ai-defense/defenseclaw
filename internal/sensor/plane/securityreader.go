@@ -148,7 +148,7 @@ type securityReader struct {
 	heldBack int64
 	// lastDropped is the buffer drop count at the last poll: a poll that
 	// dropped events leaves the reader behind. The count itself is named
-	// once, by the source (withBufferDrops), and stays named after the
+	// once, by the source (WithBufferDrops), and stays named after the
 	// reader catches up (cowork-1-0-8 GAP-0072).
 	lastDropped int64
 	// released counts signal records delivered before the process records

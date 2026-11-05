@@ -12,6 +12,11 @@ package plane
 
 import (
 	"fmt"
+	"go/ast"
+	"go/parser"
+	"go/token"
+	"os"
+	"path/filepath"
 	"reflect"
 	"strings"
 	"sync"
@@ -251,5 +256,151 @@ func wantBufferDrops(t *testing.T, coverage Coverage, dropped int64) {
 	case dropped > 0 && (lines != 1 || !strings.Contains(joined, fmt.Sprintf(
 		"%d events were dropped from the sensor's event buffer under back-pressure", dropped))):
 		t.Fatalf("limitations = %q, want one line naming %d dropped events", joined, dropped)
+	}
+}
+
+// cowork-1-0-8 GAP-0072 (review S5): TestEverySourceNamesItsBufferDropsInCoverage
+// runs the sources each OS lists by hand, so a new source that forgot its
+// drops was not caught. Every Coverage method of this package, whatever its
+// build tags, calls WithBufferDrops, and so does every Coverage of the
+// acquire package whose type owns a Buffer (the gateway's buffer for the
+// helper stream): one function owns the line.
+func TestEveryCoverageNamesItsBufferDrops(t *testing.T) {
+	checked := map[string]bool{}
+	for _, dir := range []string{".", "../acquire"} {
+		paths, err := filepath.Glob(filepath.Join(dir, "*.go"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		fset := token.NewFileSet()
+		var files []*ast.File
+		for _, path := range paths {
+			if strings.HasSuffix(path, "_test.go") {
+				continue
+			}
+			file, err := parser.ParseFile(fset, path, nil, 0)
+			if err != nil {
+				t.Fatal(err)
+			}
+			files = append(files, file)
+		}
+		buffered := map[string]bool{}
+		for _, file := range files {
+			ast.Inspect(file, func(node ast.Node) bool {
+				spec, ok := node.(*ast.TypeSpec)
+				if !ok {
+					return true
+				}
+				if structType, ok := spec.Type.(*ast.StructType); ok {
+					for _, field := range structType.Fields.List {
+						if isBufferPointer(field.Type) {
+							buffered[spec.Name.Name] = true
+						}
+					}
+				}
+				return false
+			})
+		}
+		for _, file := range files {
+			for _, decl := range file.Decls {
+				fn, ok := decl.(*ast.FuncDecl)
+				if !ok || fn.Recv == nil || fn.Name.Name != "Coverage" || fn.Body == nil ||
+					len(fn.Type.Params.List) != 0 || fn.Type.Results == nil || len(fn.Type.Results.List) != 1 ||
+					!isCoverageType(fn.Type.Results.List[0].Type) {
+					continue
+				}
+				receiver := receiverName(fn.Recv.List[0].Type)
+				if dir != "." && !buffered[receiver] {
+					continue // a wrapper that passes another source's coverage on
+				}
+				checked[dir+":"+receiver] = true
+				if !callsWithBufferDrops(fn.Body) {
+					t.Errorf("%s: (%s).Coverage does not name its buffer drops with WithBufferDrops",
+						fset.Position(fn.Pos()), receiver)
+				}
+			}
+		}
+	}
+	for _, want := range []string{".:linuxSource", ".:tetragonSource", ".:darwinSource", ".:windowsSource", "../acquire:helperPlaneSource"} {
+		if !checked[want] {
+			t.Errorf("%s was not checked; checked %v", want, checked)
+		}
+	}
+}
+
+func isBufferPointer(expr ast.Expr) bool {
+	star, ok := expr.(*ast.StarExpr)
+	if !ok {
+		return false
+	}
+	switch x := star.X.(type) {
+	case *ast.Ident:
+		return x.Name == "Buffer"
+	case *ast.SelectorExpr:
+		return x.Sel.Name == "Buffer"
+	}
+	return false
+}
+
+func isCoverageType(expr ast.Expr) bool {
+	switch x := expr.(type) {
+	case *ast.Ident:
+		return x.Name == "Coverage"
+	case *ast.SelectorExpr:
+		return x.Sel.Name == "Coverage"
+	}
+	return false
+}
+
+func receiverName(expr ast.Expr) string {
+	if star, ok := expr.(*ast.StarExpr); ok {
+		expr = star.X
+	}
+	if ident, ok := expr.(*ast.Ident); ok {
+		return ident.Name
+	}
+	return ""
+}
+
+func callsWithBufferDrops(body *ast.BlockStmt) bool {
+	found := false
+	ast.Inspect(body, func(node ast.Node) bool {
+		call, ok := node.(*ast.CallExpr)
+		if !ok {
+			return !found
+		}
+		switch fun := call.Fun.(type) {
+		case *ast.Ident:
+			found = found || fun.Name == "WithBufferDrops"
+		case *ast.SelectorExpr:
+			found = found || fun.Sel.Name == "WithBufferDrops"
+		}
+		return !found
+	})
+	return found
+}
+
+// The check itself: a Coverage without the call is caught, one with it (also
+// inside a deferred closure, as Tetragon's) is not.
+func TestCallsWithBufferDrops(t *testing.T) {
+	for source, want := range map[string]bool{
+		`package p; func (s *x) Coverage() Coverage { return s.coverage }`:                                                    false,
+		`package p; func (s *x) Coverage() Coverage { return WithBufferDrops(s.coverage, 1, SensorEventBuffer) }`:             true,
+		`package p; func (s *x) Coverage() (c Coverage) { defer func() { c = WithBufferDrops(c, 1, "b") }(); return }`:        true,
+		`package p; func (s *x) Coverage() plane.Coverage { return plane.WithBufferDrops(s.c, 1, plane.HelperStreamBuffer) }`: true,
+	} {
+		file, err := parser.ParseFile(token.NewFileSet(), "x.go", source, 0)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got := callsWithBufferDrops(file.Decls[0].(*ast.FuncDecl).Body); got != want {
+			t.Errorf("callsWithBufferDrops(%s) = %t, want %t", source, got, want)
+		}
+	}
+	if !isBufferPointer(&ast.StarExpr{X: &ast.SelectorExpr{X: ast.NewIdent("plane"), Sel: ast.NewIdent("Buffer")}}) {
+		t.Error("*plane.Buffer is not a buffer field")
+	}
+	if _, err := os.Stat("plane.go"); err != nil {
+		t.Fatalf("the source check runs in the plane directory: %v", err)
 	}
 }

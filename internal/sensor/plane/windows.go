@@ -108,7 +108,7 @@ func (s *windowsSource) Coverage() Coverage {
 			coverage.Limitations = append(append([]string(nil), coverage.Limitations...), live...)
 		}
 	}
-	return withBufferDrops(coverage, s.buffer.Dropped())
+	return WithBufferDrops(coverage, s.buffer.Dropped(), SensorEventBuffer)
 }
 
 func (s *windowsSource) Start(ctx context.Context) error {

@@ -119,7 +119,7 @@ func (s *darwinSource) Events() <-chan Event { return s.buffer.Events() }
 // back-pressure after eslogger delivered them: counted, and never reported
 // before (cowork-1-0-8 GAP-0072).
 func (s *darwinSource) Coverage() Coverage {
-	return withBufferDrops(s.coverage, s.buffer.Dropped())
+	return WithBufferDrops(s.coverage, s.buffer.Dropped(), SensorEventBuffer)
 }
 
 func (s *darwinSource) Start(ctx context.Context) error {

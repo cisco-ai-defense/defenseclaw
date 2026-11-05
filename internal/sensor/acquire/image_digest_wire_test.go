@@ -103,7 +103,8 @@ func TestImageDigestsTravelInTheirOwnFrame(t *testing.T) {
 		gateway.buffer.Push(plane.Event{Kind: plane.KindFileRead, PID: index})
 	}
 	if limits := gateway.Coverage().Limitations; len(limits) != 1 ||
-		limits[0] != "1 events from the sensor helper were dropped from the gateway's event buffer under back-pressure" {
+		limits[0] != "1 events were dropped from the gateway's event buffer for the sensor helper's stream under back-pressure "+
+			"(file events first; process events displaced the oldest)" {
 		t.Fatalf("gateway buffer limitations = %v", limits)
 	}
 
