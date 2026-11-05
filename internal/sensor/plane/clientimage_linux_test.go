@@ -556,6 +556,34 @@ func TestProcessConnectorOverflowIsReportedNotTheEnd(t *testing.T) {
 	}
 }
 
+// cowork-1-0-8 GAP-0071: an event the source's own buffer drops after the
+// kernel delivered it is named in the coverage, as an ENOBUFS loss is, for
+// the native source and for the Tetragon stream (its buffer and its native
+// process half's).
+func TestBufferDropsAreReportedInCoverage(t *testing.T) {
+	fill := func(buffer *Buffer) {
+		for index := 0; index <= eventBuffer; index++ {
+			buffer.Push(Event{Kind: KindFileRead, PID: index})
+		}
+	}
+	native := &linuxSource{buffer: NewBuffer()}
+	if limits := strings.Join(native.Coverage().Limitations, "; "); strings.Contains(limits, "dropped") {
+		t.Fatalf("limitations before any drop = %q", limits)
+	}
+	fill(native.buffer)
+	if limits := strings.Join(native.Coverage().Limitations, "; "); !strings.Contains(limits, "1 events were dropped from the sensor's event buffer") {
+		t.Fatalf("native limitations = %q, want the buffer drop", limits)
+	}
+	stream := NewTetragonSource(nil, TetragonOptions{Mode: "consume"}).(*tetragonSource)
+	half := &linuxSource{buffer: NewBuffer()}
+	stream.proc = halfSource{linuxSource: half, cancel: func() {}}
+	fill(stream.buffer)
+	fill(half.buffer)
+	if limits := strings.Join(stream.Coverage().Limitations, "; "); !strings.Contains(limits, "2 events were dropped from the sensor's event buffer") {
+		t.Fatalf("Tetragon limitations = %q, want both buffers' drops", limits)
+	}
+}
+
 func TestClaudeImageVersionFromInstallLayout(t *testing.T) {
 	root := t.TempDir()
 	npm := filepath.Join(root, "lib/node_modules/@anthropic-ai/claude-code")

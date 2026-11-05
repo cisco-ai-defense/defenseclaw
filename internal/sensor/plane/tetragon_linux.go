@@ -789,13 +789,24 @@ func (s *tetragonSource) changed() {
 }
 
 // Coverage names both halves and the backend.
-func (s *tetragonSource) Coverage() Coverage {
+func (s *tetragonSource) Coverage() (coverage Coverage) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	backend := s.backend
 	backend.Policies = append([]BackendPolicy(nil), s.backend.Policies...)
 	backend.EventsLost = s.dropped + s.knownLost
-	coverage := Coverage{Backend: &backend}
+	coverage = Coverage{Backend: &backend}
+	// The stream's own buffer and the native process half's are DefenseClaw
+	// losses, not Tetragon's: named apart from EventsLost (GAP-0071).
+	dropped := s.buffer.Dropped()
+	if half, ok := s.proc.(interface{ bufferDropped() int64 }); ok {
+		dropped += half.bufferDropped()
+	}
+	defer func() {
+		if dropped > 0 {
+			coverage.Limitations = append(coverage.Limitations, bufferDropLimitation(dropped))
+		}
+	}()
 
 	var process, files string
 	switch {
