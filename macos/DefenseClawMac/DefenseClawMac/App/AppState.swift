@@ -613,7 +613,7 @@ final class AppState {
 
     /// One automatic attempt per app launch. First-run completion uses a new
     /// coordinator because an explicit setup retry is a new user action.
-    /// The exact lifecycle command preserves administrator routing and Activity.
+    /// The exact lifecycle command preserves the root-state repair and Activity.
     @discardableResult
     func ensureGatewayStarted(
         origin: String,
@@ -630,6 +630,12 @@ final class AppState {
             snapshot: snapshot,
             currentSnapshot: { self.gatewayStartupSnapshot() },
             probe: {
+                // A gateway an earlier app version ran as root for this home
+                // answers health but must run as this account: treat it as
+                // absent so the start below repairs it first (CLIRunner).
+                if !GatewayRootState.rootOwnedMarkers(home: self.installationContext.homeRoot).isEmpty {
+                    return .offline
+                }
                 do {
                     _ = try await self.gateway.health()
                     return .running
@@ -992,7 +998,7 @@ final class AppState {
         }
         if let startupRunID = gatewayStartupRunID, startupRunID != runID,
            binary == "defenseclaw-gateway", let action = arguments.first,
-           GatewayAdminAction(rawValue: action) != nil {
+           CLIRunner.gatewayLifecycleActions.contains(action) {
             return CLIResult(
                 exitCode: 75,
                 output: "Automatic gateway startup is still running. Wait for its result or cancel it in Activity before starting, stopping, or restarting the gateway."

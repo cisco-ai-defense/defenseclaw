@@ -1824,11 +1824,79 @@ def _check_sudo_runtime_leftovers(cfg, r: _DoctorResult) -> None:
     )
 
 
+def _process_uid(pid: int) -> int | None:
+    """Return the real-user owner of *pid* from the kernel, or None."""
+
+    if pid <= 0:
+        return None
+    if sys.platform.startswith("linux"):
+        try:
+            return os.stat(f"/proc/{pid}").st_uid
+        except OSError:
+            return None
+    if sys.platform != "darwin":
+        return None
+    try:
+        completed = subprocess.run(
+            ["/bin/ps", "-o", "uid=", "-p", str(pid)],
+            capture_output=True,
+            text=True,
+            timeout=5,
+            check=False,
+            env={"PATH": "/usr/bin:/bin", "LC_ALL": "C"},
+        )
+    except (OSError, subprocess.SubprocessError):
+        return None
+    value = completed.stdout.strip()
+    return int(value) if completed.returncode == 0 and value.isdecimal() else None
+
+
+def _check_gateway_account(cfg, r: _DoctorResult) -> None:
+    """Warn when this per-user home's live gateway runs as root.
+
+    A per-user gateway runs as its account. DefenseClawMac up to 1.0.8 could
+    run it as root ("Run gateway as administrator"), and ``sudo
+    defenseclaw-gateway start`` does the same; both leave root-owned files in
+    the home. A managed install is skipped: its macOS gateway is root by design.
+    """
+
+    if os.name == "nt" or _doctor_managed(cfg) or os.geteuid() == 0:
+        return
+    data_dir = _configured_gateway_data_dir(cfg)
+    if not data_dir:
+        return
+    record = read_pid_record(os.path.join(data_dir, "gateway.pid"))
+    if record.status != "ok" or not pid_alive(record.pid):
+        return
+    if _process_uid(record.pid) != 0:
+        return
+    remediation = (
+        "on macOS open DefenseClawMac and choose Start Gateway: it stops the root gateway with "
+        "administrator approval, returns its files to you and starts the gateway as you. "
+        "Otherwise: sudo defenseclaw-gateway stop && sudo chown -R "
+        + getpass.getuser()
+        + " "
+        + data_dir
+        + " && defenseclaw-gateway start"
+    )
+    _emit(
+        "warn",
+        "Gateway account",
+        f"the gateway for this per-user home (pid {record.pid}) runs as root; a per-user gateway "
+        "must run as its account (root-run gateways leave root-owned files in the home and the CLI "
+        "cannot verify them)",
+        r=r,
+        check_id="doctor.gateway.account",
+        reason_code="per-user-gateway-runs-as-root",
+        remediation=remediation,
+    )
+
+
 # Vendor machine-policy folders agents read administrator policy from. An
 # agent treats the folder's presence as policy: Codex pauses every launch with
 # "Organization settings could not be loaded" when /etc/codex exists but it
-# cannot read it. A gateway run as root (the Mac app's administrator mode, or
-# sudo) used to create /etc/codex with mode 0700 for its /etc/codex/skills
+# cannot read it. A gateway run as root (the Mac app's administrator mode up to
+# 1.0.8, or sudo) used to create /etc/codex with mode 0700 for its /etc/codex/skills
 # watch; the watcher no longer creates vendor folders and a root gateway
 # removes the empty ones it recorded, but a folder left by an older release
 # needs an administrator. Keyed by platform so tests can substitute paths.
@@ -14980,6 +15048,7 @@ def doctor(
         if not auth_attempted:
             _check_gateway_token_drift(cfg, r)
         _check_gateway_home_mismatch(cfg, r)
+        _check_gateway_account(cfg, r)
     _check_connector_hook_credentials(cfg, r)
     _check_windows_watchdog_diagnostics(cfg, r)
     # Run the per-connector hook/health check for EVERY active connector,

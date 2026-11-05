@@ -96,24 +96,14 @@ private enum GatewayAdminHelperTests {
             try GatewayAdminTrust.validateInstallation(home: home.path, config: config.path, account: account)
         }
 
-        let virtualenvBin = home.appendingPathComponent(".venv/bin", isDirectory: true)
-        try FileManager.default.createDirectory(at: virtualenvBin, withIntermediateDirectories: true,
-                                               attributes: [.posixPermissions: NSNumber(value: 0o700)])
-        let searchPath = GatewayAdminTrust.scannerSearchPath(home: home.path, account: account)
-        check(searchPath.hasPrefix("/usr/bin:/bin:/usr/sbin:/sbin:"), "System executables must precede user scanner paths")
-        check(searchPath.split(separator: ":").contains(Substring(virtualenvBin.path)), "The safe selected scanner environment was omitted")
-        _ = chmod(virtualenvBin.path, 0o777)
-        let restrictedPath = GatewayAdminTrust.scannerSearchPath(home: home.path, account: account)
-        check(!restrictedPath.split(separator: ":").contains(Substring(virtualenvBin.path)), "An unsafe scanner search directory was accepted")
-        _ = chmod(virtualenvBin.path, 0o700)
-
         rejects("Malformed authorization was accepted") { try GatewayAdminTrust.validateAuthorization(Data()) }
-        rejects("An unsigned file was accepted as the gateway") {
-            try GatewayAdminTrust.verifySignature(at: config.path, requirement: GatewayAdminPolicy.gatewayRequirement)
+        rejects("An unsigned file was accepted as the helper") {
+            try GatewayAdminTrust.verifySignature(at: config.path, requirement: GatewayAdminPolicy.helperRequirement)
         }
-        check(GatewayAdminAction.allCases.map(\.rawValue).sorted() == ["restart", "start", "stop"], "Gateway action allowlist changed")
-        for action in ["start --help", "watchdog start", "/bin/sh", "", "START"] {
-            check(GatewayAdminAction(rawValue: action) == nil, "An unsupported operation was accepted")
+        check(GatewayAdminAction.allCases.map(\.rawValue) == ["repair"],
+              "The helper must offer only the repair action; it never starts a gateway")
+        for action in ["start", "restart", "stop", "start --help", "watchdog start", "/bin/sh", "", "REPAIR"] {
+            check(GatewayAdminAction(rawValue: action) == nil, "An unsupported operation was accepted: \(action)")
         }
         for path in ["/Users/person/../root", "relative/path", "/Users/person\nroot", "/Users/person\0root", "/Users/person/./config"] {
             check(!GatewayAdminPolicy.isCanonicalAbsolutePath(path), "A noncanonical path was accepted")
@@ -158,12 +148,14 @@ private enum GatewayAdminHelperTests {
                 check(recordedStatus == status, "The diagnostic must preserve the safe macOS status code")
                 check(error.exitCode == (status == errAuthorizationCanceled ? 130 : 77),
                       "Native cancellation must remain distinct from authorization failure")
-                check(privilegedWorkCount == 1, "A failed authorization must not stage or execute the gateway")
+                check(privilegedWorkCount == 1, "A failed authorization must not stop a gateway or change files")
                 check(error.localizedDescription.contains(String(status)), "The safe status code must remain available for diagnosis")
             }
         }
-        try testInstalledGatewayCopy(root: root, account: account)
-        try testGatewayLifecycle()
+        try testStagedGatewayCopy(root: root)
+        try testOwnershipRepair(root: root)
+        try testRepairOrder()
+        testRootProcessRecord()
         try testVendorPolicyGuard(root: root)
 
         var idle = GatewayAdminIdleState()
@@ -183,146 +175,172 @@ private enum GatewayAdminHelperTests {
         check(idle.canExit(observedGeneration: idle.generation), "The new idle generation should permit exit")
         print("Gateway administrator helper: \(checks) security checks passed")
     }
-    private static func testInstalledGatewayCopy(root: URL, account: InvokingAccount) throws {
-        check(GatewayAdminTrust.installedGatewayPath(account: account) == account.home + "/.local/bin/defenseclaw-gateway",
-              "The privileged source must be derived from the authenticated account")
+
+    /// The only program the helper runs is the private copy an earlier app
+    /// version staged for the same account, and only to stop it.
+    private static func testStagedGatewayCopy(root: URL) throws {
         let firstAccountDirectory = GatewayAdminTrust.stagingDirectory(uid: 501)
         let secondAccountDirectory = GatewayAdminTrust.stagingDirectory(uid: 502)
-        check(firstAccountDirectory != secondAccountDirectory, "Operator-controlled gateway copies must be isolated by authenticated UID")
+        check(firstAccountDirectory != secondAccountDirectory, "Private gateway copies must be isolated by authenticated UID")
         check(firstAccountDirectory == GatewayAdminTrust.stagingRoot + "/uid-501" &&
               secondAccountDirectory == GatewayAdminTrust.stagingRoot + "/uid-502",
               "Each account must use only its own fixed root-private directory")
-        check(!firstAccountDirectory.contains(account.home), "The privileged destination must not derive from a user-selected path")
-        let fixture = root.appendingPathComponent("runtime-copy", isDirectory: true)
-        let sourceDirectory = fixture.appendingPathComponent("installed", isDirectory: true)
-        let destinationDirectory = fixture.appendingPathComponent("private", isDirectory: true)
-        for directory in [fixture, sourceDirectory, destinationDirectory] {
-            try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: false,
-                                                   attributes: [.posixPermissions: NSNumber(value: 0o700)])
-        }
-        let source = sourceDirectory.appendingPathComponent("defenseclaw-gateway")
-        try FileManager.default.copyItem(atPath: CommandLine.arguments[0], toPath: source.path)
-        _ = chmod(source.path, 0o700)
+        let fixture = root.appendingPathComponent("staged", isDirectory: true)
+        try FileManager.default.createDirectory(at: fixture, withIntermediateDirectories: false,
+                                               attributes: [.posixPermissions: NSNumber(value: 0o700)])
+        let native = fixture.appendingPathComponent("defenseclaw-gateway")
+        try FileManager.default.copyItem(atPath: CommandLine.arguments[0], toPath: native.path)
+        _ = chmod(native.path, 0o700)
         let signer = Process()
         signer.executableURL = URL(fileURLWithPath: "/usr/bin/codesign")
-        signer.arguments = ["--force", "--sign", "-", source.path]
+        signer.arguments = ["--force", "--sign", "-", native.path]
         signer.standardOutput = FileHandle.nullDevice
         signer.standardError = FileHandle.nullDevice
         try signer.run()
         signer.waitUntilExit()
-        check(signer.terminationStatus == 0, "Could not prepare the ad-hoc signed native source fixture")
-        let original = try Data(contentsOf: source)
-        try GatewayAdminTrust.verifyGatewayIntegrity(at: source.path)
+        check(signer.terminationStatus == 0, "Could not prepare the ad-hoc signed native fixture")
+        try GatewayAdminTrust.verifyGatewayIntegrity(at: native.path)
         checks += 1
-        rejects("An operator's ad-hoc executable was accepted as a legacy global gateway") {
-            try GatewayAdminTrust.verifyLegacyGateway(at: source.path)
-        }
-        let descriptor = open(destinationDirectory.path, O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC)
-        check(descriptor >= 0, "Could not open the private fixture directory")
-        defer { close(descriptor) }
-        func prepare() throws -> GatewayAdminCandidate {
-            try GatewayAdminTrust.prepareGatewayCopy(source: source.path, permittedOwner: account.uid,
-                directory: descriptor, directoryPath: destinationDirectory.path)
-        }
-        let current = destinationDirectory.appendingPathComponent("defenseclaw-gateway")
-        let originalCurrent = Data("previous gateway remains until activation".utf8)
-        try originalCurrent.write(to: current)
-        _ = chmod(current.path, 0o500)
-
-        do {
-            var candidate: GatewayAdminCandidate? = try prepare()
-            let temporaryPath = candidate!.path
-            check(try Data(contentsOf: current) == originalCurrent, "Preparing a candidate replaced the current gateway")
-            check(try Data(contentsOf: URL(fileURLWithPath: temporaryPath)) == original, "The private copy differs from the signed source")
-            check(try GatewayAdminTrust.gatewayDigest(at: temporaryPath) == GatewayAdminTrust.gatewayDigest(at: source.path),
-                  "Identical immutable copies must have equal SHA-256 digests")
-            check(try GatewayAdminTrust.gatewayDigest(at: temporaryPath) != GatewayAdminTrust.gatewayDigest(at: current.path),
-                  "Different copies must have different SHA-256 digests")
-            candidate = nil
-            check(!FileManager.default.fileExists(atPath: temporaryPath), "An abandoned candidate was not cleaned up")
-            check(try Data(contentsOf: current) == originalCurrent, "Candidate cleanup changed the current gateway")
-        }
-        do {
-            let candidate = try prepare()
-            let temporaryPath = candidate.path
-            check(try candidate.activate() == current.path, "Activation did not use the stable private gateway path")
-            check(!FileManager.default.fileExists(atPath: temporaryPath), "Activation left its temporary file behind")
-            check(try Data(contentsOf: current) == original, "Activation changed the verified executable bytes")
-        }
-        check(try Data(contentsOf: source) == original, "Staging modified the operator's installed runtime")
-        let activated = try Data(contentsOf: current)
-        let entriesBeforeFailure = try FileManager.default.contentsOfDirectory(atPath: destinationDirectory.path)
-
-        GatewayAdminTrust.sourceCopiedForTesting = {
-            let handle = try FileHandle(forWritingTo: source)
-            try handle.seekToEnd()
-            try handle.write(contentsOf: Data("changed".utf8))
-            try handle.close()
-        }
-        rejects("A source changed during copying was accepted") { _ = try prepare() }
-        GatewayAdminTrust.sourceCopiedForTesting = nil
-        try original.write(to: source)
-        _ = chmod(source.path, 0o700)
-
-        GatewayAdminTrust.sourceCopiedForTesting = {
-            let replacement = sourceDirectory.appendingPathComponent("replacement")
-            try original.write(to: replacement)
-            _ = chmod(replacement.path, 0o700)
-            guard rename(replacement.path, source.path) == 0 else { fatalError("Cannot replace the isolated source fixture") }
-        }
-        rejects("A replaced source filename was accepted") { _ = try prepare() }
-        GatewayAdminTrust.sourceCopiedForTesting = nil
-        check(try Data(contentsOf: current) == activated, "Rejected source changes modified the active private copy")
-        check(try FileManager.default.contentsOfDirectory(atPath: destinationDirectory.path) == entriesBeforeFailure,
-              "Rejected source changes left private candidate files behind")
-
-        let link = sourceDirectory.appendingPathComponent("linked-gateway")
-        try FileManager.default.createSymbolicLink(at: link, withDestinationURL: source)
-        rejects("A symlink source was accepted") {
-            let fd = try GatewayAdminTrust.openInstalledGateway(link.path, permittedOwner: account.uid)
-            close(fd)
-        }
-        let linkedParent = fixture.appendingPathComponent("linked-installation")
-        try FileManager.default.createSymbolicLink(at: linkedParent, withDestinationURL: sourceDirectory)
-        rejects("A symlink source ancestor was accepted") {
-            let fd = try GatewayAdminTrust.openInstalledGateway(linkedParent.appendingPathComponent(source.lastPathComponent).path,
-                                                               permittedOwner: account.uid)
-            close(fd)
-        }
-        let pipePath = sourceDirectory.appendingPathComponent("gateway-pipe")
-        check(mkfifo(pipePath.path, 0o700) == 0, "Could not prepare a named-pipe fixture")
-        rejects("A named-pipe source was accepted") {
-            let fd = try GatewayAdminTrust.openInstalledGateway(pipePath.path, permittedOwner: account.uid)
-            close(fd)
-        }
-        let script = sourceDirectory.appendingPathComponent("gateway-script")
+        let script = fixture.appendingPathComponent("gateway-script")
         try Data("#!/bin/sh\nexit 0\n".utf8).write(to: script)
         _ = chmod(script.path, 0o700)
-        rejects("A script was accepted as a native gateway") {
-            _ = try GatewayAdminTrust.prepareGatewayCopy(source: script.path, permittedOwner: account.uid,
-                directory: descriptor, directoryPath: destinationDirectory.path)
+        rejects("A script was accepted as the private gateway copy") {
+            try GatewayAdminTrust.verifyGatewayIntegrity(at: script.path)
         }
-        let invalid = sourceDirectory.appendingPathComponent("unsigned-native")
+        let invalid = fixture.appendingPathComponent("unsigned-native")
         try Data([0xcf, 0xfa, 0xed, 0xfe, 0, 0, 0, 0]).write(to: invalid)
         _ = chmod(invalid.path, 0o700)
-        rejects("Unsigned bytes were accepted as a legacy global gateway") {
-            try GatewayAdminTrust.verifyLegacyGateway(at: invalid.path)
-        }
         rejects("Invalid unsigned Mach-O bytes were accepted") {
-            _ = try GatewayAdminTrust.prepareGatewayCopy(source: invalid.path, permittedOwner: account.uid,
-                directory: descriptor, directoryPath: destinationDirectory.path)
+            try GatewayAdminTrust.verifyGatewayIntegrity(at: invalid.path)
         }
-        _ = chmod(source.path, 0o777)
-        rejects("A shared-writable installed executable was accepted") { _ = try prepare() }
-        _ = chmod(source.path, 0o700)
-        let grantACL = Process()
-        grantACL.executableURL = URL(fileURLWithPath: "/bin/chmod")
-        grantACL.arguments = ["+a", "everyone allow write", source.path]
-        try grantACL.run()
-        grantACL.waitUntilExit()
-        check(grantACL.terminationStatus == 0, "Could not prepare source ACL fixture")
-        rejects("An ACL-writable source was accepted through its descriptor") { _ = try prepare() }
-        check(try Data(contentsOf: current) == activated, "Rejected source validation changed the current gateway")
+        let linked = fixture.appendingPathComponent("linked-gateway")
+        try FileManager.default.createSymbolicLink(at: linked, withDestinationURL: native)
+        rejects("A symlinked private copy was accepted") {
+            try GatewayAdminTrust.verifyGatewayIntegrity(at: linked.path)
+        }
+    }
+
+    /// The ownership repair changes only folders and single-link regular files
+    /// owned by the repaired owner inside the home, through their own
+    /// descriptors; it never follows a symlink and skips hard links and
+    /// special files. This account stands in for root and a recorder stands
+    /// in for fchown, so the walk is observable without privilege.
+    private static func testOwnershipRepair(root: URL) throws {
+        let fm = FileManager.default
+        let home = root.appendingPathComponent("repair-home", isDirectory: true)
+        let outside = root.appendingPathComponent("outside", isDirectory: true)
+        for directory in [home, outside, home.appendingPathComponent("hooks", isDirectory: true),
+                          home.appendingPathComponent("hooks/nested", isDirectory: true)] {
+            try fm.createDirectory(at: directory, withIntermediateDirectories: false,
+                                   attributes: [.posixPermissions: NSNumber(value: 0o700)])
+        }
+        for name in ["gateway.pid", "hook_contract_lock.json", "hooks/.hook-codex.token", "hooks/nested/state.json"] {
+            try Data("x".utf8).write(to: home.appendingPathComponent(name))
+            _ = chmod(home.appendingPathComponent(name).path, 0o600)
+        }
+        let secret = outside.appendingPathComponent("system-file")
+        try Data("not DefenseClaw's".utf8).write(to: secret)
+        try fm.createSymbolicLink(at: home.appendingPathComponent("linked-file"), withDestinationURL: secret)
+        try fm.createSymbolicLink(at: home.appendingPathComponent("linked-folder"), withDestinationURL: outside)
+        check(link(secret.path, home.appendingPathComponent("hard-linked").path) == 0, "Could not prepare the hard-link fixture")
+        check(mkfifo(home.appendingPathComponent("pipe").path, 0o600) == 0, "Could not prepare the named-pipe fixture")
+
+        var changed: [String] = []
+        var descriptorsWereOpen = true
+        let outcome = try GatewayAdminOwnershipRepair.restore(
+            home: home.path, from: getuid(), to: (getuid(), getgid()),
+            change: { descriptor, relative in
+                var metadata = stat()
+                descriptorsWereOpen = descriptorsWereOpen && fstat(descriptor, &metadata) == 0
+                changed.append(relative)
+                return 0
+            })
+        check(descriptorsWereOpen, "Every change must go through an open descriptor")
+        check(Set(changed) == [".", "gateway.pid", "hook_contract_lock.json", "hooks", "hooks/.hook-codex.token",
+                               "hooks/nested", "hooks/nested/state.json"],
+              "Only the home's own folders and files are returned: \(changed)")
+        check(!changed.contains(where: { $0.hasPrefix("linked") || $0 == "hard-linked" || $0 == "pipe" }),
+              "Symlinks, hard links and special files must never be changed")
+        check(Set(outcome.skipped) == ["hard-linked", "pipe"], "Skipped root-owned items are reported: \(outcome.skipped)")
+        check(outcome.restored.count == changed.count && !outcome.incomplete, "The outcome must match the changes")
+        check(outcome.summary.contains("Returned 7 root-owned files and folders"), "The summary must count the repair: \(outcome.summary)")
+
+        let bounded = try GatewayAdminOwnershipRepair.restore(
+            home: home.path, from: getuid(), to: (getuid(), getgid()), maximumEntries: 2,
+            change: { _, _ in 0 })
+        check(bounded.incomplete, "A walk over its entry budget must report itself incomplete")
+        let untouched = try GatewayAdminOwnershipRepair.restore(
+            home: home.path, from: getuid() &+ 1, to: (getuid(), getgid()),
+            change: { _, relative in fatalError("A file of another owner was changed: \(relative)") })
+        check(untouched.restored.isEmpty && untouched.summary.contains("No root-owned"), "Nothing else is changed")
+        rejects("A symlinked home was walked") {
+            _ = try GatewayAdminOwnershipRepair.restore(
+                home: home.appendingPathComponent("linked-folder").path, from: getuid(), to: (getuid(), getgid()),
+                change: { _, relative in fatalError("A symlinked home was followed: \(relative)") })
+        }
+    }
+
+    /// Stop first, and only through the helper's own copy; never change files
+    /// while a root gateway still serves the home; then return the files and
+    /// delete the copy.
+    private static func testRepairOrder() throws {
+        var calls: [String] = []
+        var liveAfterStop = false
+        var live = true
+        func perform(staged: String?) throws -> (Int32, String) {
+            try GatewayAdminRepair.perform(
+                stagedGateway: staged,
+                liveRootGateway: { calls.append("live?"); return live ? 42 : nil },
+                stop: { gateway in
+                    calls.append("stop " + gateway)
+                    live = liveAfterStop
+                    return (0, "stopped\n")
+                },
+                restoreOwnership: {
+                    calls.append("restore")
+                    return GatewayAdminOwnershipRepair.Outcome(restored: ["gateway.pid"])
+                },
+                removeStagedGateway: { calls.append("remove") })
+        }
+        var result = try perform(staged: "private-copy")
+        check(result.0 == 0 && calls == ["stop private-copy", "live?", "restore", "remove"],
+              "A staged root gateway is stopped before its files are returned and its copy deleted: \(calls)")
+        check(result.1.contains("Stopped the gateway") && result.1.contains("Returned 1"), "The repair reports what it did")
+
+        calls = []; live = true; liveAfterStop = true
+        result = try perform(staged: "private-copy")
+        check(result.0 != 0 && calls == ["stop private-copy", "live?"], "A gateway that did not stop keeps its files untouched")
+
+        calls = []; live = true
+        result = try perform(staged: nil)
+        check(result.0 != 0 && calls == ["live?"] && result.1.contains("sudo defenseclaw-gateway stop"),
+              "A root gateway the helper did not start is never stopped or touched by the helper")
+
+        calls = []; live = false
+        result = try perform(staged: nil)
+        check(result.0 == 0 && calls == ["live?", "restore", "remove"], "Leftover root files are returned when nothing runs")
+    }
+
+    private static func testRootProcessRecord() {
+        check(GatewayAdminRootProcess.record(from: Data("1234\n".utf8))! == (1234, ""), "The plain PID format is read")
+        let json = Data(#"{"pid": 4321, "executable": "/Library/PrivilegedHelperTools/x/defenseclaw-gateway"}"#.utf8)
+        check(GatewayAdminRootProcess.record(from: json)! == (4321, "/Library/PrivilegedHelperTools/x/defenseclaw-gateway"),
+              "The JSON PID envelope is read")
+        for bad in ["", "abc", "-1", "0", #"{"pid": "12"}"#, #"{"pid": 1.5}"#, #"[1]"#] {
+            check(GatewayAdminRootProcess.record(from: Data(bad.utf8)) == nil, "A malformed PID record was accepted: \(bad)")
+        }
+        check(GatewayAdminRootProcess.owner(of: getpid()) == getuid(), "The process owner comes from the kernel")
+        let gateway = (pid: pid_t(7), executable: "/opt/staged/defenseclaw-gateway")
+        check(GatewayAdminRootProcess.isRootGateway(gateway, owner: { _ in 0 }, executable: { _ in gateway.executable }),
+              "A live root process running the recorded executable is the root gateway")
+        check(!GatewayAdminRootProcess.isRootGateway(gateway, owner: { _ in 501 }, executable: { _ in gateway.executable }),
+              "A gateway run as the account is not a root gateway")
+        check(!GatewayAdminRootProcess.isRootGateway(gateway, owner: { _ in 0 }, executable: { _ in "/usr/sbin/cron" }),
+              "A reused PID of another root program is not the gateway")
+        check(GatewayAdminRootProcess.isRootGateway((7, ""), owner: { _ in 0 }, executable: { _ in "/x/defenseclaw-gateway" }),
+              "A legacy integer record matches a defenseclaw-gateway program")
+        check(GatewayAdminRootProcess.liveRootGateway(home: "/nonexistent-defenseclaw-home") == nil,
+              "A home without a PID record has no root gateway")
     }
 
     /// The vendor policy repair only ever touches the fixed list, only real
@@ -389,91 +407,15 @@ private enum GatewayAdminHelperTests {
         check(foreign.removed.isEmpty && foreign.preserved.isEmpty && mode(claude) == 0o700,
               "A folder owned by another account must be left alone")
 
-        // settle reports nothing when nothing needs repair, and a stop action does a single pass.
-        check(GatewayAdminVendorPolicyGuard.settle(after: .stop, owner: owner, directories: [copilot.path]).isEmpty,
+        // settle reports nothing when nothing needs repair.
+        check(GatewayAdminVendorPolicyGuard.settle(owner: owner, directories: [copilot.path]).isEmpty,
               "A clean sweep must add nothing to the activity record")
-        let preservedNote = GatewayAdminVendorPolicyGuard.settle(
-            after: .start, owner: owner, directories: [cursor.path], window: .milliseconds(600))
+        let preservedNote = GatewayAdminVendorPolicyGuard.settle(owner: owner, directories: [cursor.path])
         check(preservedNote.components(separatedBy: "Left \(cursor.path) private:").count == 2,
-              "Repeated sweeps must report a preserved private policy only once")
+              "A preserved private policy is reported once")
         _ = chmod(claude.path, 0o700)
-        let settled = GatewayAdminVendorPolicyGuard.settle(after: .start, owner: owner, directories: [claude.path], window: .zero)
-        check(settled.contains("Removed " + claude.path), "A start settle must report the repair: \(settled)")
+        let settled = GatewayAdminVendorPolicyGuard.settle(owner: owner, directories: [claude.path])
+        check(settled.contains("Removed " + claude.path), "A settle pass must report the repair: \(settled)")
         check(!fm.fileExists(atPath: claude.path), "The settle pass must perform the repair")
     }
-
-    private static func testGatewayLifecycle() throws {
-        var calls: [String] = []
-        var rejectPreparation = false
-        var stopCode: Int32 = 0
-        var candidateMatches = true
-        var rejectComparison = false
-        func perform(_ action: GatewayAdminAction, current: String?) throws -> (Int32, String) {
-            try GatewayAdminLifecycle.perform(action: action, currentGateway: current, prepare: {
-                calls.append("prepare")
-                if rejectPreparation { throw GatewayAdminFailure.refused("invalid installed runtime") }
-                return "candidate"
-            }, path: { $0 }, matches: { candidate, current in
-                calls.append("compare " + candidate + " " + current)
-                if rejectComparison { throw GatewayAdminFailure.refused("comparison unavailable") }
-                return candidateMatches
-            }, activate: { candidate in
-                calls.append("activate " + candidate)
-                return "new-private-copy"
-            }, run: { action, gateway in
-                calls.append(action.rawValue + " " + gateway)
-                return (action == .stop ? stopCode : 0, action.rawValue + " output\n")
-            })
-        }
-        _ = try perform(.restart, current: "current-private-copy")
-        check(calls == ["prepare", "stop current-private-copy", "activate candidate", "start new-private-copy"],
-              "Restart must verify first, stop the old copy, activate, and start in that order")
-        calls = []
-        rejectPreparation = true
-        rejects("A rejected installed runtime reached gateway lifecycle work") { _ = try perform(.restart, current: "current-private-copy") }
-        check(calls == ["prepare"], "A rejected candidate must preserve the running gateway")
-        calls = []
-        _ = try perform(.stop, current: "current-private-copy")
-        check(calls == ["stop current-private-copy"], "Stop must work even when the installed runtime is missing or invalid")
-        calls = []
-        rejects("Start accepted an invalid installed runtime") { _ = try perform(.start, current: "current-private-copy") }
-        check(calls == ["prepare"], "Start must validate the installed runtime before reusing the private copy")
-        calls = []
-        rejectPreparation = false
-        _ = try perform(.start, current: "current-private-copy")
-        check(calls == ["prepare", "compare candidate current-private-copy", "start current-private-copy"],
-              "An idempotent Start must compare installed bytes without replacing the existing private runtime")
-        calls = []
-        candidateMatches = false
-        do {
-            _ = try perform(.start, current: "current-private-copy")
-            fatalError("Start accepted a different installed runtime")
-        } catch {
-            check(error.localizedDescription.contains("Restart Gateway as Administrator"), "A changed runtime needs actionable Restart guidance")
-        }
-        check(calls == ["prepare", "compare candidate current-private-copy"], "A different runtime must require Restart before lifecycle work")
-        calls = []
-        candidateMatches = true
-        rejectComparison = true
-        rejects("A failed comparison reached gateway lifecycle work") { _ = try perform(.start, current: "current-private-copy") }
-        check(calls == ["prepare", "compare candidate current-private-copy"], "A failed comparison must preserve the running gateway")
-        calls = []
-        rejectComparison = false
-        stopCode = 1
-        let stopped = try perform(.restart, current: "current-private-copy")
-        check(stopped.0 == 1 && calls == ["prepare", "stop current-private-copy"],
-              "A failed Stop must not replace or start a gateway")
-        calls = []
-        stopCode = 0
-        _ = try perform(.start, current: nil)
-        check(calls == ["prepare", "activate candidate", "start new-private-copy"], "First Start must activate only a verified candidate")
-        calls = []
-        _ = try perform(.restart, current: nil)
-        check(calls == ["prepare", "stop candidate", "activate candidate", "start new-private-copy"],
-              "First Restart must stop the selected installation before starting its private copy")
-        calls = []
-        _ = try perform(.stop, current: nil)
-        check(calls == ["prepare", "stop candidate"], "First Stop must not persist or start a candidate")
-    }
-
 }
