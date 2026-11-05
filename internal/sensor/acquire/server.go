@@ -55,6 +55,10 @@ type ServerConfig struct {
 	// everywhere else: the per-user gateway's Local acquirer never builds a
 	// Tetragon source, even when it runs as root.
 	Tetragon *TetragonConfig
+	// Discovery answers OpDiscovery with the discovery read of HomeDirs
+	// (inventory.ReadBrokeredHomes). nil -- every managed helper -- answers
+	// "unsupported operation".
+	Discovery func(ctx context.Context) (any, error)
 }
 
 // TetragonConfig is the helper's Tetragon intent: the values the enterprise
@@ -100,6 +104,11 @@ type Server struct {
 	listener net.Listener
 	closed   bool
 	wg       sync.WaitGroup
+
+	// discoveryMu runs one discovery read at a time: a client that asks
+	// again before the last read finished is told to wait, so it cannot
+	// multiply the reads' memory.
+	discoveryMu sync.Mutex
 }
 
 // NewServer returns a helper serving from direct reads.
@@ -208,6 +217,15 @@ func (s *Server) handle(ctx context.Context, conn net.Conn) {
 		s.serveDNS(ctx, conn, request)
 	case OpKernelStatus:
 		s.serveKernelStatus(ctx, conn, request)
+	case OpDiscovery:
+		if s.config.Discovery == nil {
+			_ = writeFrame(conn, Response{
+				Version: protocolVersion, Op: request.Op,
+				Error: errUnsupportedOperation,
+			}, responseDeadline)
+			return
+		}
+		s.serveDiscovery(ctx, conn, request)
 	default:
 		// An unknown op is a protocol error, not something to guess at.
 		_ = writeFrame(conn, Response{
@@ -459,6 +477,35 @@ func (s *Server) serveKernelStatus(ctx context.Context, conn net.Conn, request R
 		} else {
 			response.Error = err.Error()
 		}
+	}
+	_ = writeFrame(conn, response, responseDeadline)
+}
+
+// discoveryDeadline bounds one discovery read, inside the client's
+// responseDeadline so a slow read is answered, not abandoned.
+const discoveryDeadline = 45 * time.Second
+
+// errDiscoveryBusy answers a discovery request made while another runs.
+const errDiscoveryBusy = "a discovery read is already running"
+
+// serveDiscovery answers OpDiscovery from the configured homes.
+func (s *Server) serveDiscovery(ctx context.Context, conn net.Conn, request Request) {
+	response := Response{Version: protocolVersion, Op: request.Op}
+	if !s.discoveryMu.TryLock() {
+		response.Error = errDiscoveryBusy
+		_ = writeFrame(conn, response, responseDeadline)
+		return
+	}
+	defer s.discoveryMu.Unlock()
+	readCtx, cancel := context.WithTimeout(ctx, discoveryDeadline)
+	defer cancel()
+	report, err := s.config.Discovery(readCtx)
+	if err != nil {
+		response.Error = err.Error()
+	} else if body, marshalErr := json.Marshal(report); marshalErr == nil {
+		response.Body = body
+	} else {
+		response.Error = marshalErr.Error()
 	}
 	_ = writeFrame(conn, response, responseDeadline)
 }
