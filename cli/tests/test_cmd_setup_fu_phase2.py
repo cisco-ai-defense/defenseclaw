@@ -790,7 +790,8 @@ class TestPerConnectorWriteSurface(_BaseSetup):
         )
         self.assertEqual(res.output.count("detected-but-unsupported-version"), 1)
         self.assertIn("installed version Hermes Agent v0.17.0", res.output)
-        self.assertIn("hermes-hooks-v1 requires >=0.19.0", res.output)
+        # GAP-0049: the whole supported range, then the nearest contract.
+        self.assertIn("DefenseClaw supports Hermes >=0.19.0 and <0.22.0; hermes-hooks-v1 covers >=0.19.0", res.output)
         self.assertIn("defenseclaw setup hermes --yes --mode action", res.output)
         self.assertNotIn("connector was not detected locally", res.output)
         self.assertEqual(self.app.cfg.guardrail, before)
