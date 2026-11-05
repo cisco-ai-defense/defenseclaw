@@ -605,7 +605,7 @@ func provenWithin(proof func() bool, wait time.Duration) bool {
 // every other call, which keeps the closed no-answer answer.
 func failPerUserRestartWindow(ctx context.Context, opts Options, sp spec, failMode string) (int, bool) {
 	if opts.answeredErrorStatus != 0 || !perUserRestartWindowCall(opts, sp) ||
-		!(gatewayNoAnswer(ctx) || opts.answerWatch.hasPendingDecision()) {
+		(!gatewayNoAnswer(ctx) && !opts.answerWatch.hasPendingDecision()) {
 		return 0, false
 	}
 	mode, ok := opts.answerWatch.restartWindowProven()

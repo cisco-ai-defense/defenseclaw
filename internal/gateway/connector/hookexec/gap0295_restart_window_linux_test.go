@@ -35,6 +35,12 @@ func TestGAP0295FreshListenerHelper(t *testing.T) {
 	}
 	_, _ = fmt.Fprintln(os.Stdout, listener.Addr().String())
 	var held []net.Conn
+	// Hold every accepted connection open until the helper ends.
+	defer func() {
+		for _, conn := range held {
+			_ = conn.Close()
+		}
+	}()
 	deadline := time.Now().Add(time.Minute)
 	for time.Now().Before(deadline) {
 		conn, err := listener.Accept()
