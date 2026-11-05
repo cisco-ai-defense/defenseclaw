@@ -1061,7 +1061,8 @@ func (a *APIServer) inspectTrustedToolPolicyCtx(
 	if allowed {
 		cfg := a.decisionConfig(ctx)
 		if (cfg == nil || !cfg.SecureClientIntegration()) &&
-			len(provedHighWriteFindings(ctx, action, nil)) != 0 {
+			(len(provedHighWriteFindings(ctx, action, nil)) != 0 ||
+				len(agentHookConfigFindings(ctx, action, nil)) != 0) {
 			allowed = false
 		}
 	}
@@ -1109,6 +1110,11 @@ func (a *APIServer) inspectTrustedToolPolicyCtx(
 	}
 	ruleFindings := inspectDispatchTrustedAction(ctx, action)
 	ruleFindings = provedHighWriteFindings(ctx, action, ruleFindings)
+	// A Secure Client install keeps its own tool policy (GAP-0048 adds no
+	// finding there).
+	if cfg := a.decisionConfig(ctx); cfg == nil || !cfg.SecureClientIntegration() {
+		ruleFindings = agentHookConfigFindings(ctx, action, ruleFindings)
+	}
 	var cgScan codeGuardArgsScan
 	if waitCodeGuard != nil {
 		cgScan = waitCodeGuard()
