@@ -125,6 +125,10 @@ func literalProgramOperands(words []string, stmt *syntax.Stmt, cwd, home string,
 					index++
 					goto execDone
 				case "-a":
+					// exec -a NAME: a missing name leaves no program to read.
+					if index+1 >= len(words) {
+						return nil
+					}
 					index += 2
 				case "-c", "-l":
 					index++

@@ -4,6 +4,7 @@
 package gateway
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -70,6 +71,67 @@ func TestGAP0055CommandLookupFourCell(t *testing.T) {
 	for i, call := range calls {
 		if want := rows[i/4].want; call.verdict != want {
 			t.Errorf("%s: verdict %s, want %s; body %.300s", call.name, call.verdict, want, call.body)
+		}
+		if strings.Contains(call.body, "internal evaluator error") || strings.Contains(call.body, "panics.total") {
+			t.Errorf("%s: panic answer: %.300s", call.name, call.body)
+		}
+	}
+}
+
+// TestGAP0055ProgramLookupsAndShortArgvFourCell is the gateway side of the
+// GAP-0055 class: each program the hook path reads by name (archive, copy,
+// link, rename, directory and multicall programs) behind a lookup is
+// allowed, and bare or behind a wrapper with no arguments gets a verdict
+// that is not the panic answer, for both connectors, managed and per-user.
+// A race build runs the lookups and the bare forms.
+func TestGAP0055ProgramLookupsAndShortArgvFourCell(t *testing.T) {
+	f := newB36ManagedHookFixture(t)
+	var programs []string
+	for _, list := range [][]string{
+		{"rsync", "cpio", "bsdcpio", "pax", "tar", "gtar", "bsdtar", "unzip", "7z", "7za", "7zr", "jar", "ditto"},
+		{"cp", "gcp", "ln", "gln", "link", "mv", "gmv", "install", "cd", "pushd", "popd", "busybox", "toybox"},
+	} {
+		programs = append(programs, list...)
+	}
+	lookups := []string{"command -v %s", "command -V %s", "command -v %s && command -v tar", "type %s", "hash %s"}
+	others := []string{"%s", "env %s", "sudo -n %s", "nice %s", "command %s", "exec -a x %s"}
+	if hookAnswerRaceBuild {
+		lookups, others = lookups[:1], others[:1]
+	}
+	type row struct{ name, command, want string }
+	var rows []row
+	for _, program := range programs {
+		for _, form := range lookups {
+			rows = append(rows, row{fmt.Sprintf(form, program), fmt.Sprintf(form, program), "allow"})
+		}
+		for _, form := range others {
+			rows = append(rows, row{fmt.Sprintf(form, program), fmt.Sprintf(form, program), ""})
+		}
+	}
+	if err := os.Chmod(f.homes, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	calls := make([]*hookCall, 0, 4*len(rows))
+	for _, r := range rows {
+		payload := f.payload(t, r.command)
+		var header string
+		func() {
+			defer func() {
+				if recovered := recover(); recovered != nil {
+					t.Errorf("%s: managed hook client panic: %v", r.name, recovered)
+				}
+			}()
+			header = hookpaths.Resolve(payload)
+		}()
+		calls = append(calls, everyMode(r.name, payload, header)...)
+	}
+	f.answerAll(t, calls)
+	for i, call := range calls {
+		if want := rows[i/4].want; want != "" && call.verdict != want {
+			t.Errorf("%s: verdict %s, want %s; body %.300s", call.name, call.verdict, want, call.body)
+		}
+		if call.verdict != "allow" && call.verdict != "block" {
+			t.Errorf("%s: no verdict: %s", call.name, call.verdict)
 		}
 		if strings.Contains(call.body, "internal evaluator error") || strings.Contains(call.body, "panics.total") {
 			t.Errorf("%s: panic answer: %.300s", call.name, call.body)
