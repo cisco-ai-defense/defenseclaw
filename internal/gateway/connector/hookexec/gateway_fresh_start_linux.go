@@ -62,25 +62,32 @@ func perUserGatewayRecentlyStarted(dataDir string) bool {
 // yet. A gateway that answered any call, an old gateway, an unknown holder
 // and an unreadable record are no proof.
 func perUserFreshGatewayHoldsCall(dataDir string, check *perUserPeerCheck) bool {
+	return perUserFreshGatewayProof(dataDir, check).ok
+}
+
+func perUserFreshGatewayProof(dataDir string, check *perUserPeerCheck) restartProofResult {
 	if check == nil {
-		return false
+		return restartProofResult{reason: "no_verified_connection"}
 	}
 	ends := check.ends.Load()
 	if ends == nil {
-		return false
+		return restartProofResult{reason: "no_verified_connection"}
 	}
 	client, okc := ends.local.(*net.TCPAddr)
 	server, oks := ends.remote.(*net.TCPAddr)
 	if !okc || !oks {
-		return false
+		return restartProofResult{reason: "no_verified_connection"}
 	}
 	current, ok := freshGatewayFromRecord(dataDir)
-	if !ok || !perUserProcessHoldsConnection(current.pid, client, server) {
-		return false
+	if !ok {
+		return restartProofResult{reason: "not_fresh"}
+	}
+	if !perUserProcessHoldsConnection(current.pid, client, server) {
+		return restartProofResult{reason: "no_holder"}
 	}
 	// The pid was not reused while its files were read.
 	if identity, ok := procidentity.Of(current.pid); !ok || identity != current.identity {
-		return false
+		return restartProofResult{reason: "not_fresh"}
 	}
 	// Calls that reach a restarted gateway together are answered in no
 	// set order: a sibling answered first does not make this one a call
@@ -88,7 +95,13 @@ func perUserFreshGatewayHoldsCall(dataDir string, check *perUserPeerCheck) bool 
 	// gateway had completed any answer before this connection reached it
 	// (rel-1-0-6 GAP-0295, v108k).
 	before, valid := perUserGatewayAnsweredBefore(dataDir, current, ends.at)
-	return valid && !before
+	if !valid {
+		return restartProofResult{reason: "answer_record_unavailable"}
+	}
+	if before {
+		return restartProofResult{reason: "answered_before"}
+	}
+	return restartProofResult{ok: true}
 }
 
 func verifiedFreshGatewayPeer(dataDir string, peer *PerUserPeerRecord) (perUserPeerProcess, bool) {

@@ -122,11 +122,17 @@ func TestGAP0295FreshGatewayHoldsCallProof(t *testing.T) {
 	if perUserFreshGatewayHoldsCall(dataDir, &perUserPeerCheck{}) {
 		t.Fatal("a try with no proven connection is proven")
 	}
+	if got := perUserFreshGatewayProof(dataDir, &perUserPeerCheck{}).reason; got != "no_verified_connection" {
+		t.Fatalf("missing connection reason = %q", got)
+	}
 
 	// A stale record: its recorded start is far older than the process.
 	writeRecord(time.Now().Add(-time.Minute))
 	if perUserFreshGatewayHoldsCall(dataDir, check) {
 		t.Fatal("a stale gateway record is proven fresh")
+	}
+	if got := perUserFreshGatewayProof(dataDir, check).reason; got != "not_fresh" {
+		t.Fatalf("stale record reason = %q", got)
 	}
 	writeRecord(time.Now().Add(-time.Second))
 	if !perUserFreshGatewayHoldsCall(dataDir, check) {
@@ -154,6 +160,9 @@ func TestGAP0295FreshGatewayHoldsCallProof(t *testing.T) {
 	}
 	if perUserFreshGatewayHoldsCall(dataDir, checkFor(otherConn)) {
 		t.Fatal("a connection another process holds is proven")
+	}
+	if got := perUserFreshGatewayProof(dataDir, checkFor(otherConn)).reason; got != "no_holder" {
+		t.Fatalf("other holder reason = %q", got)
 	}
 
 	// A sibling call that reached the gateway with this one is answered
@@ -191,6 +200,9 @@ func TestGAP0295FreshGatewayHoldsCallProof(t *testing.T) {
 	}
 	if perUserFreshGatewayHoldsCall(dataDir, lateCheck) {
 		t.Fatal("a call that reached the gateway after its first answer is proven fresh")
+	}
+	if got := perUserFreshGatewayProof(dataDir, lateCheck).reason; got != "answered_before" {
+		t.Fatalf("answer before connection reason = %q", got)
 	}
 }
 

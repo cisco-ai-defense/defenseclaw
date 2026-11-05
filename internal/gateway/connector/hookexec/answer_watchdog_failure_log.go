@@ -37,6 +37,26 @@ type preparedFailureLog struct {
 	file   *os.File
 	taken  bool
 	closed bool
+	// restartReason is the bounded proof's result for a per-user no-answer.
+	restartReason string
+}
+
+func (p *preparedFailureLog) setRestartReason(reason string) {
+	if p == nil || reason == "" {
+		return
+	}
+	p.mu.Lock()
+	p.restartReason = reason
+	p.mu.Unlock()
+}
+
+func (p *preparedFailureLog) getRestartReason() string {
+	if p == nil {
+		return ""
+	}
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return p.restartReason
 }
 
 func newPreparedFailureLog() *preparedFailureLog {

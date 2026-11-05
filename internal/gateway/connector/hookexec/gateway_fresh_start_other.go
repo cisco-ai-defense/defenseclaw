@@ -19,3 +19,7 @@ func perUserGatewayRecentlyStarted(string) bool { return false }
 
 // perUserFreshGatewayHoldsCall has no fresh-start window on other platforms.
 func perUserFreshGatewayHoldsCall(string, *perUserPeerCheck) bool { return false }
+
+func perUserFreshGatewayProof(string, *perUserPeerCheck) restartProofResult {
+	return restartProofResult{reason: "not_fresh"}
+}
