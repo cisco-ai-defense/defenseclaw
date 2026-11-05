@@ -27,6 +27,7 @@ import json
 import os
 import tempfile
 import unittest
+from types import SimpleNamespace
 
 from defenseclaw.openclaw_guardrail import (
     _unregister_plugin_from_config,
@@ -139,6 +140,80 @@ class TestPatchMergesEntry(unittest.TestCase):
             self._patch(path)
             self.assertTrue(restore_openclaw_config(path, ""))
             self.assertNotIn("defenseclaw", _read(path)["plugins"]["entries"])
+
+
+def _plugin_dir(tmpdir: str) -> str:
+    path = os.path.join(tmpdir, "extensions", "defenseclaw")
+    os.makedirs(path)
+    return path
+
+
+class TestRestoreKeepsPluginDisabledWhenFolderStays(unittest.TestCase):
+    """defenseclaw reset keeps the plugin folder: the entry must stay enabled=false."""
+
+    def test_folder_present_keeps_enabled_false_and_operator_keys(self):
+        with tempfile.TemporaryDirectory() as d:
+            _plugin_dir(d)
+            path = _write(
+                d,
+                {"plugins": {"allow": ["defenseclaw"], "entries": {"defenseclaw": {"enabled": True, **OPERATOR_KEYS}}}},
+            )
+            self.assertTrue(restore_openclaw_config(path, "", keep_disabled_if_plugin_present=True))
+            cfg = _read(path)
+            self.assertEqual(cfg["plugins"]["entries"]["defenseclaw"], {"enabled": False, **OPERATOR_KEYS})
+            self.assertNotIn("defenseclaw", cfg["plugins"]["allow"])
+
+    def test_folder_present_and_bad_entry_writes_a_disabled_entry(self):
+        for bad in (None, "x"):
+            with self.subTest(entry=bad), tempfile.TemporaryDirectory() as d:
+                _plugin_dir(d)
+                path = _write(d, {"plugins": {"entries": {"defenseclaw": bad}}})
+                self.assertTrue(restore_openclaw_config(path, "", keep_disabled_if_plugin_present=True))
+                self.assertEqual(_read(path)["plugins"]["entries"]["defenseclaw"], {"enabled": False})
+
+    def test_benign_twin_folder_gone_drops_the_entry(self):
+        with tempfile.TemporaryDirectory() as d:
+            path = _write(d, {"plugins": {"entries": {"defenseclaw": {"enabled": True}}}})
+            self.assertTrue(restore_openclaw_config(path, "", keep_disabled_if_plugin_present=True))
+            self.assertNotIn("defenseclaw", _read(path)["plugins"]["entries"])
+
+    def test_flag_off_drops_the_entry_even_with_folder(self):
+        with tempfile.TemporaryDirectory() as d:
+            _plugin_dir(d)
+            path = _write(d, {"plugins": {"entries": {"defenseclaw": {"enabled": True}}}})
+            self.assertTrue(restore_openclaw_config(path, ""))
+            self.assertNotIn("defenseclaw", _read(path)["plugins"]["entries"])
+
+
+class TestRevertOpenclawPythonFallback(unittest.TestCase):
+    """The uninstall/reset fallback when the Go teardown failed and there is no pristine backup."""
+
+    def _revert(self, d: str, config: dict, remove_plugin: bool) -> dict:
+        from defenseclaw.commands.cmd_uninstall import _revert_openclaw_python
+
+        data_dir = os.path.join(d, "dc-data")
+        os.makedirs(data_dir)
+        path = _write(d, config)
+        plan = SimpleNamespace(openclaw_config_file=path, data_dir=data_dir, remove_plugin=remove_plugin)
+        _revert_openclaw_python(plan)
+        return _read(path)
+
+    def test_reset_with_plugin_folder_keeps_enabled_false(self):
+        with tempfile.TemporaryDirectory() as d:
+            _plugin_dir(d)
+            cfg = self._revert(d, {"plugins": {"entries": {"defenseclaw": {"enabled": True}}}}, remove_plugin=False)
+            self.assertEqual(cfg["plugins"]["entries"]["defenseclaw"], {"enabled": False})
+
+    def test_uninstall_drops_the_entry_because_the_plugin_is_removed_next(self):
+        with tempfile.TemporaryDirectory() as d:
+            _plugin_dir(d)
+            cfg = self._revert(d, {"plugins": {"entries": {"defenseclaw": {"enabled": True}}}}, remove_plugin=True)
+            self.assertNotIn("defenseclaw", cfg["plugins"]["entries"])
+
+    def test_reset_without_plugin_folder_drops_the_entry(self):
+        with tempfile.TemporaryDirectory() as d:
+            cfg = self._revert(d, {"plugins": {"entries": {"defenseclaw": {"enabled": True}}}}, remove_plugin=False)
+            self.assertNotIn("defenseclaw", cfg["plugins"]["entries"])
 
 
 if __name__ == "__main__":

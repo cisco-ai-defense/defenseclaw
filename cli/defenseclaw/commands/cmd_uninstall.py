@@ -4486,7 +4486,13 @@ def _revert_openclaw_python(plan: UninstallPlan) -> None:
     # Fall back to the surgical restore — removes our plugin registration
     # without rolling the file back to its exact prior state.
     try:
-        ok = restore_openclaw_config(plan.openclaw_config_file, original_model="")
+        # defenseclaw reset keeps the plugin folder (remove_plugin=False): leave the
+        # entry disabled so OpenClaw cannot load it again (GAP-0598).
+        ok = restore_openclaw_config(
+            plan.openclaw_config_file,
+            original_model="",
+            keep_disabled_if_plugin_present=not plan.remove_plugin,
+        )
         if ok:
             ux.ok(f"removed DefenseClaw entries from {plan.openclaw_config_file}")
         else:
