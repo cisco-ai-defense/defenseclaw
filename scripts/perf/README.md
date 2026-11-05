@@ -9,7 +9,7 @@ measures. It never reads or prints a credential.
 
 | Metric (JSON key) | What it measures |
 |---|---|
-| `hook.<claudecode,codex>.idle` | p50/p95/max of 100 sequential benign PreToolUse calls through the hook command the connector registered (`~/.claude/settings.json`, `~/.codex/config.toml`), run with `/bin/sh -c` as the agent runs it |
+| `hook.<claudecode,codex>.idle` | p50/p95/max of 100 sequential benign PreToolUse calls through the hook handlers the connector registered (`~/.claude/settings.json`, `~/.codex/config.toml`), started as the agent starts them: every handler of the matching groups at once, a Claude Code handler with `args` in exec form (no shell), any other command line with `/bin/sh -c` |
 | `hook.<connector>.burst` | the same, 128 calls 32 at a time |
 | `hook.<connector>.*.not_allowed` | benign calls that were denied or failed (must be 0) |
 | `hook_execs.claudecode` | execs and processes per hook call, by program (Linux `strace -f`, also by parent; macOS an `eslogger exec fork` log) |
