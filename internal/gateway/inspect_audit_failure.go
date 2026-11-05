@@ -43,8 +43,10 @@ const (
 // tool and prompt checks arrive only on this route.
 //
 //   - An existing block is never weakened.
-//   - A computed allow in a per-user default or permissive tier stays
-//     allowed, with the degraded-audit warning as its reason.
+//   - A computed allow or alert in a per-user default or permissive tier
+//     stays allowed: an allow carries the degraded-audit warning as its
+//     reason, an alert keeps its finding (the hook routes' allow, whose raw
+//     action is alert, is the same decision).
 //   - Every other verdict, and every verdict in the strict tier, on a managed
 //     install or for a sandbox, becomes a block in action mode, as a failed
 //     check does on the hook route.
@@ -65,9 +67,13 @@ func (a *APIServer) inspectAuditFailureVerdict(ctx context.Context, connectorNam
 	if cfg != nil && cfg.SecureClientIntegration() {
 		return false
 	}
-	if verdict.Action == "allow" && cfg != nil && !managed.IsManagedEnterprise(cfg.DeploymentMode) &&
+	if (verdict.Action == "allow" || verdict.Action == "alert") && cfg != nil &&
+		!managed.IsManagedEnterprise(cfg.DeploymentMode) &&
 		cfg.HookPolicyTierForConnector(connectorName) != config.HookPolicyTierStrict &&
 		!sandboxHookForConnector(ctx, connectorName) {
+		if verdict.Action == "alert" {
+			return false
+		}
 		verdict.RawAction = "alert"
 		verdict.Severity = "WARN"
 		verdict.WouldBlock = false
