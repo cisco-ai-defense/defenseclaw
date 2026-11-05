@@ -84,6 +84,7 @@ type workloadAnswer struct {
 	localhost           []string
 	localhostFailed     bool
 	localhostUnreported bool
+	rootdir             string
 	// cut leaves out the end line.
 	cut bool
 }
@@ -100,6 +101,9 @@ type answerFile struct {
 func (a workloadAnswer) stdout() []byte {
 	var b strings.Builder
 	fmt.Fprintf(&b, "uid %d\ngid %d\nhostname %s\nhome %s\ncapeff %s\ncpus %d\nmemtotal %d\n", a.uid, a.gid, a.hostname, a.home, a.capEff, a.cpus, a.memKB)
+	if a.rootdir != "" {
+		fmt.Fprintf(&b, "rootdir %s\n", a.rootdir)
+	}
 	for _, f := range a.files {
 		if f.sha256 != "" {
 			fmt.Fprintf(&b, "sha256 %s %s\n", f.sha256, f.path)
@@ -134,7 +138,7 @@ func (a workloadAnswer) stdout() []byte {
 // answerFor is the answer of a sandbox named hostname (a MicroVM's
 // hostname is its name) that runs as want expects.
 func answerFor(want verifyRecord, hostname string) workloadAnswer {
-	a := workloadAnswer{uid: want.UID, gid: want.GID, hostname: hostname, home: "writable", capEff: "0000000000000000", cpus: 2, memKB: 2000000,
+	a := workloadAnswer{uid: want.UID, gid: want.GID, hostname: hostname, home: "writable", capEff: "0000000000000000", cpus: 2, memKB: 2000000, rootdir: "root",
 		localhost: []string{"unspec 127.0.0.1", "inet 127.0.0.1", "loopback-only"}}
 	for _, f := range want.Files {
 		af := answerFile{path: f.Path, sha256: f.SHA256, uid: f.UID, gid: f.GID, mode: f.Mode}
@@ -220,6 +224,11 @@ func TestWorkloadProblems(t *testing.T) {
 	}{
 		{"as prepared on vm", vm, nil, "", none},
 		{"as prepared on docker", docker, nil, "", none},
+		{"vm root owned by workload with a fixed boundary", vm, func(a *workloadAnswer) { a.rootdir = "fixed" }, "", none},
+		{"vm root writable to workload", vm, func(a *workloadAnswer) { a.rootdir = "writable" }, "can add or rename entries of its root folder", none},
+		{"vm root owned by another account", vm, func(a *workloadAnswer) { a.rootdir = "owner 1234" }, "root folder is owned by uid 1234", none},
+		{"vm root protection missing", vm, func(a *workloadAnswer) { a.rootdir = "" }, "did not report the root folder's protection", none},
+		{"docker root protection tag is ignored", docker, func(a *workloadAnswer) { a.rootdir = "writable" }, "", none},
 		{"the vm driver's default identity", vm, func(a *workloadAnswer) { a.uid, a.gid = 1000, 1000 },
 			"the OpenShell vm driver runs sandboxes as uid 1000:1000, but DefenseClaw's images are built for 501:20; " +
 				"set sandbox_uid = 501 and sandbox_gid = 20 under [openshell.drivers.vm]", none},
@@ -274,6 +283,121 @@ func TestWorkloadProblems(t *testing.T) {
 		if _, err := parseWorkloadFacts([]byte(out)); err == nil {
 			t.Fatalf("parsed %q", out)
 		}
+	}
+	for _, out := range []string{"rootdir fixed\nrootdir fixed\nend\n", "rootdir owner\nend\n", "rootdir owner -1\nend\n", "rootdir unknown\nend\n"} {
+		if _, err := parseWorkloadFacts([]byte(out)); err == nil {
+			t.Fatalf("parsed malformed root directory result %q", out)
+		}
+	}
+}
+
+// GAP-0570: a MicroVM with a workload-owned root and a fixed top-level
+// boundary passes the same resolver check as a root-owned guest. This test
+// also runs unchanged on the release base, where the new tag is rejected.
+func TestGAP0570MicroVMRootOwnerRule(t *testing.T) {
+	vm, _ := openshell.LookupDriver("vm")
+	raw := answerFor(testVerify(), "vmbox").stdout()
+	raw = []byte(strings.Replace(string(raw), "rootdir root\n", "", 1))
+	raw = []byte(strings.Replace(string(raw), "end\n", "rootdir fixed\nend\n", 1))
+	facts, err := parseWorkloadFacts(raw)
+	if err != nil {
+		t.Fatal(err)
+	}
+	facts.DirectResolverOK = true
+	if problems := workloadProblems(testVerify(), facts, vm, workloadLimits{}); len(problems) != 0 {
+		t.Fatalf("workload-owned root under a fixed boundary: %v", problems)
+	}
+}
+
+// The real guest script distinguishes a workload-owned root protected by
+// Landlock from one the workload can edit. Docker gives this test an
+// isolated root directory with the same ownership as the VM guest.
+func TestGAP0570MicroVMRootOwnerRuleInGuestShell(t *testing.T) {
+	if runtime.GOOS != "linux" {
+		t.Skip("the guest check uses Linux /proc and Landlock")
+	}
+	for _, args := range [][]string{{"info", "--format", "{{.ServerVersion}}"}, {"image", "inspect", openshell.DefaultBaseImage}} {
+		if err := exec.CommandContext(t.Context(), "docker", args...).Run(); err != nil {
+			t.Skipf("local Docker and the pinned base are needed: %v", err)
+		}
+	}
+	dir := t.TempDir()
+	source, err := os.ReadFile(filepath.Join("testdata", "landlock-root-check.c"))
+	must(t, err)
+	must(t, os.WriteFile(filepath.Join(dir, "landlock-root-check.c"), source, 0o600))
+	dockerfile := "FROM " + openshell.DefaultBaseImage + "\nUSER root\n" +
+		"COPY landlock-root-check.c /tmp/landlock-root-check.c\n" +
+		"RUN gcc -O2 -Wall -Wextra -Werror -o /usr/local/bin/landlock-root-check /tmp/landlock-root-check.c && chown 1000:1000 /\n" +
+		"USER 1000:1000\n"
+	must(t, os.WriteFile(filepath.Join(dir, "Dockerfile"), []byte(dockerfile), 0o600))
+	sum := sha256.Sum256(source)
+	tag := fmt.Sprintf("dc-g570-root:%x", sum[:6])
+	if out, err := exec.CommandContext(t.Context(), "docker", "build", "--pull=false", "-t", tag, dir).CombinedOutput(); err != nil {
+		t.Fatalf("build guest fixture: %v\n%s", err, out)
+	}
+	t.Cleanup(func() { _ = exec.Command("docker", "image", "rm", "-f", tag).Run() })
+	readonlyTag := tag + "-readonly"
+	readonlyDockerfile := "FROM " + tag + "\nUSER root\nRUN chmod 0555 /\nUSER 1000:1000\n"
+	must(t, os.WriteFile(filepath.Join(dir, "Dockerfile.readonly"), []byte(readonlyDockerfile), 0o600))
+	if out, err := exec.CommandContext(t.Context(), "docker", "build", "--pull=false", "-f", "Dockerfile.readonly", "-t", readonlyTag, dir).CombinedOutput(); err != nil {
+		t.Fatalf("build read-only root fixture: %v\n%s", err, out)
+	}
+	t.Cleanup(func() { _ = exec.Command("docker", "image", "rm", "-f", readonlyTag).Run() })
+	run := func(imageTag, entrypoint string, argv ...string) ([]byte, error) {
+		t.Helper()
+		args := []string{"run", "--rm", "--network=none", "--cap-drop=ALL", "--security-opt=no-new-privileges", "--security-opt=seccomp=unconfined", "--user", "1000:1000", "--entrypoint", entrypoint, imageTag}
+		args = append(args, argv...)
+		return exec.CommandContext(t.Context(), "docker", args...).CombinedOutput()
+	}
+	check := verifyArgv(verifyRecord{}, true)
+	for _, tc := range []struct {
+		name, imageTag, entrypoint, want string
+		args                             []string
+	}{
+		{"root-owned guest", openshell.DefaultBaseImage, check[0], "root", check[1:]},
+		{"workload-owned root without a boundary", tag, "/bin/sh", "writable", append([]string{"-c", `"$@"; for p in /.defenseclaw-verify-*; do [ ! -e "$p" ] || { echo probe-leaked; exit 1; }; done`, "check"}, check...)},
+		{"preexisting probe entry", tag, "/bin/sh", "writable", append([]string{"-c", `mkdir "/.defenseclaw-verify-$$"; exec "$@"`, "check"}, check...)},
+		{"owner write bit removed before the check", readonlyTag, check[0], "writable", check[1:]},
+		{"workload-owned root under Landlock", tag, "/usr/local/bin/landlock-root-check", "fixed", check},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			out, err := run(tc.imageTag, tc.entrypoint, tc.args...)
+			if tc.want == "fixed" {
+				var exit *exec.ExitError
+				if errors.As(err, &exit) && exit.ExitCode() == 77 {
+					t.Skip("Landlock ABI 3 is unavailable in this container")
+				}
+			}
+			must(t, err)
+			if strings.Contains(string(out), "probe-leaked") {
+				t.Fatalf("the root probe left an entry: %s", out)
+			}
+			facts, err := parseWorkloadFacts(out)
+			must(t, err)
+			if facts.RootDir != tc.want {
+				t.Fatalf("rootdir = %q, want %q; output:\n%s", facts.RootDir, tc.want, out)
+			}
+		})
+	}
+	rootArgs := []string{"run", "--rm", "--network=none", "--cap-drop=ALL", "--user", "0:0", "--entrypoint", check[0], openshell.DefaultBaseImage}
+	rootArgs = append(rootArgs, check[1:]...)
+	rootOut, err := exec.CommandContext(t.Context(), "docker", rootArgs...).CombinedOutput()
+	must(t, err)
+	rootFacts, err := parseWorkloadFacts(rootOut)
+	must(t, err)
+	if rootFacts.RootDir != "writable" {
+		t.Fatalf("a root workload without the boundary: rootdir %q, want writable", rootFacts.RootDir)
+	}
+	for _, command := range []string{"mv /usr /usr.x", "mkdir /x", "ln -s /usr /x"} {
+		out, err := run(tag, "/usr/local/bin/landlock-root-check", "/bin/sh", "-c", command)
+		var exit *exec.ExitError
+		if errors.As(err, &exit) && exit.ExitCode() == 77 {
+			t.Skip("Landlock ABI 3 is unavailable in this container")
+		}
+		if err == nil {
+			t.Fatalf("root operation succeeded under Landlock: %s", command)
+		}
+		_ = out
 	}
 }
 
@@ -619,6 +743,7 @@ func TestWorkloadCheckRunsNothingFromThePath(t *testing.T) {
 func TestCreateChecksTheWorkload(t *testing.T) {
 	e := newVMEnv(t, nil)
 	useOpenCode(t, e)
+	e.fake.HandleExec(e.workloadChecks(func(_ string, a *workloadAnswer) { a.rootdir = "fixed" }, nil))
 	e.create(sandboxapi.CreateRequest{Name: "vmcheck", Harness: "opencode", Copy: true})
 	calls := e.workloadCheckCalls("vmcheck")
 	if len(calls) != 1 || calls[0].NoLoginShell != true || calls[0].Timeout != verifyTimeout {
@@ -683,6 +808,8 @@ func TestCreateRollsBackASandboxNotAsPrepared(t *testing.T) {
 		{"a changed hook", false, func(a *workloadAnswer) { a.files[0].sha256 = strings.Repeat("0", 64) }, nil,
 			sandboxapi.CodePolicyRejected, "is not the file DefenseClaw delivered"},
 		{"a writable hook", false, func(a *workloadAnswer) { a.files[0].mode = 0o777 }, nil, sandboxapi.CodePolicyRejected, "writable by its group or others"},
+		{"a writable VM root", false, func(a *workloadAnswer) { a.rootdir = "writable" }, nil, sandboxapi.CodePolicyRejected, "can add or rename entries of its root folder"},
+		{"a VM root owned by another account", false, func(a *workloadAnswer) { a.rootdir = "owner 1234" }, nil, sandboxapi.CodePolicyRejected, "root folder is owned by uid 1234"},
 		{"no answer", false, nil, &types.StatusError{Code: types.ErrorInternal, Message: "exec relay closed"}, sandboxapi.CodeUpstream, "exec relay closed"},
 		{"a changed hook on docker", true, func(a *workloadAnswer) { a.files[0].sha256 = strings.Repeat("0", 64) }, nil,
 			sandboxapi.CodePolicyRejected, "is not the file DefenseClaw delivered"},
@@ -777,6 +904,7 @@ func TestStartChecksTheWorkloadAgainstTheRecord(t *testing.T) {
 	// The sandbox answers with the files create left in it, whatever the
 	// start expects.
 	created := answerFor(recorded, "restart")
+	created.rootdir = "fixed"
 	resolverCalls := 0
 	e.fake.HandleExec(func(_ context.Context, call openshelltest.ExecCall) openshelltest.ExecResponse {
 		if isResolverCall(call) {
@@ -822,6 +950,13 @@ func TestStartChecksTheWorkloadAgainstTheRecord(t *testing.T) {
 	}
 	if phases := e.tel.phases("restart"); phases[len(phases)-1] != audit.SandboxPhaseStopped {
 		t.Fatalf("lifecycle = %v", phases)
+	}
+	e.fake.HandleExec(e.workloadChecks(func(_ string, a *workloadAnswer) { a.rootdir = "writable" }, nil))
+	stops = e.fake.Calls(openshelltest.MethodStopSandbox)
+	_, err = e.m.Start(t.Context(), "restart", sandboxapi.StartRequest{})
+	apiErr = wantCode(t, err, sandboxapi.CodePolicyRejected)
+	if !strings.Contains(apiErr.Detail, "can add or rename entries of its root folder") || e.fake.Calls(openshelltest.MethodStopSandbox) != stops+1 {
+		t.Fatalf("writable root at restart: %+v, stops %d", apiErr, e.fake.Calls(openshelltest.MethodStopSandbox)-stops)
 	}
 }
 

@@ -72,9 +72,11 @@ const (
 // (under /sandbox) would otherwise answer for itself. The shell reads the
 // hostname, the capabilities, the processors and the memory (in kB) itself.
 // The arguments are the files to check; a "mount" line names each that is a
-// mount point, with its options. Only the vm check name adds the localhost
-// resolver result; the docker check retains its original work and output.
-const verifyScript = `printf 'uid %s\n' "$(/usr/bin/id -u)"
+// mount point, with its options. Only the vm check name adds the guest root
+// boundary and localhost resolver results; the docker check retains its
+// original work and output.
+const verifyScript = `workload_uid=$(/usr/bin/id -u)
+printf 'uid %s\n' "$workload_uid"
 printf 'gid %s\n' "$(/usr/bin/id -g)"
 host=
 read -r host < /proc/sys/kernel/hostname
@@ -92,8 +94,36 @@ while read -r key value rest; do
   [ "$key" = MemTotal: ] && printf 'memtotal %s\n' "$value"
 done < /proc/meminfo
 if [ "$0" = defenseclaw-verify-vm ]; then
+  rootdir=writable
+  if [ ! -L / ] && [ -d / ]; then
+    root_owner=$(/usr/bin/stat -c %u /) || root_owner=
+    root_mode=$(/usr/bin/stat -c %a /) || root_mode=777
+    if [ $((0$root_mode & 022)) -eq 0 ]; then
+      if [ "$root_owner" = 0 ] && [ "$workload_uid" != 0 ]; then
+        rootdir=root
+      elif [ "$root_owner" = "$workload_uid" ]; then
+        # The owner can restore its own write bit after the check, so a
+        # non-writable mode cannot establish the mandatory boundary.
+        if [ $((0$root_mode & 0200)) -ne 0 ]; then
+          probe=/.defenseclaw-verify-$$
+          if [ ! -e "$probe" ] && [ ! -L "$probe" ]; then
+            if /usr/bin/mkdir -- "$probe" 2>/dev/null; then
+              /usr/bin/rmdir -- "$probe" 2>/dev/null || :
+            elif ( set -C; : > "$probe" ) 2>/dev/null; then
+              /usr/bin/rm -f -- "$probe" 2>/dev/null || :
+            elif [ ! -e "$probe" ] && [ ! -L "$probe" ]; then
+              rootdir=fixed
+            fi
+          fi
+        fi
+      else
+        rootdir="owner $root_owner"
+      fi
+    fi
+  fi
+  printf 'rootdir %s\n' "$rootdir"
   trusted_resolver() {
-    for d in / /usr /usr/local /usr/local/lib /usr/local/lib/defenseclaw; do
+    for d in /usr /usr/local /usr/local/lib /usr/local/lib/defenseclaw; do
       [ ! -L "$d" ] && [ -d "$d" ] && [ "$(/usr/bin/stat -c %u "$d")" = 0 ] || return 1
       mode=$(/usr/bin/stat -c %a "$d") || return 1
       [ $((0$mode & 022)) -eq 0 ] || return 1
@@ -103,7 +133,7 @@ if [ "$0" = defenseclaw-verify-vm ]; then
     mode=$(/usr/bin/stat -c %a "$f") || return 1
     [ $((0$mode & 022)) -eq 0 ]
   }
-  if trusted_resolver && localhost=$(/usr/local/lib/defenseclaw/localhost-resolver 2>/dev/null); then
+  if { [ "$rootdir" = root ] || [ "$rootdir" = fixed ]; } && trusted_resolver && localhost=$(/usr/local/lib/defenseclaw/localhost-resolver 2>/dev/null); then
     printf '%s\n' "$localhost" | while IFS= read -r answer; do printf 'localhost %s\n' "$answer"; done
     echo localhost-ok
   else
@@ -173,6 +203,8 @@ type workloadFacts struct {
 	LocalhostAnswers  []string
 	LocalhostOK       bool
 	LocalhostReported bool
+	RootDir           string
+	RootDirOwner      int
 	// DirectResolverOK is set only by a separate exec of the pinned caller,
 	// and DirectResolverRefusal to the reason that caller refused with.
 	DirectResolverOK      bool
@@ -220,7 +252,7 @@ func parseWorkloadFacts(out []byte) (workloadFacts, error) {
 		}
 		tag, rest, _ := strings.Cut(line, " ")
 		switch tag {
-		case "uid", "gid", "hostname", "home", "capeff", "cpus", "memtotal":
+		case "uid", "gid", "hostname", "home", "capeff", "cpus", "memtotal", "rootdir":
 			if facts.seen[tag] {
 				return facts, fmt.Errorf("the answer has %s twice", tag)
 			}
@@ -242,6 +274,23 @@ func parseWorkloadFacts(out []byte) (workloadFacts, error) {
 			facts.CPUs, err = strconv.Atoi(rest)
 		case "memtotal":
 			facts.MemTotalKB, err = strconv.ParseInt(rest, 10, 64)
+		case "rootdir":
+			switch rest {
+			case "root", "fixed", "writable":
+				facts.RootDir = rest
+			default:
+				owner, ok := strings.CutPrefix(rest, "owner ")
+				if !ok || owner == "" {
+					err = fmt.Errorf("a malformed root directory result")
+					break
+				}
+				facts.RootDirOwner, err = strconv.Atoi(owner)
+				if err == nil && facts.RootDirOwner >= 0 {
+					facts.RootDir = "owner"
+				} else if err == nil {
+					err = fmt.Errorf("a malformed root directory owner")
+				}
+			}
 		case "sha256":
 			sum, path, ok := strings.Cut(rest, " ")
 			if !ok || path == "" {
@@ -413,8 +462,19 @@ func workloadProblems(want verifyRecord, got workloadFacts, d openshell.Driver, 
 		out = append(out, sharedLimitProblems(got, d, limits)...)
 	}
 	if d.Name == openshell.DriverVM && !got.ResolverExempt {
-		if problem := microVMResolverProblem(got); problem != "" {
-			out = append(out, problem)
+		switch got.RootDir {
+		case "root", "fixed":
+		case "writable":
+			out = append(out, "the MicroVM workload can add or rename entries of its root folder, so DefenseClaw cannot trust what it resolves localhost to")
+		case "owner":
+			out = append(out, fmt.Sprintf("the MicroVM root folder is owned by uid %d, not root or the workload uid %d", got.RootDirOwner, got.UID))
+		default:
+			out = append(out, "the MicroVM check did not report the root folder's protection")
+		}
+		if got.RootDir == "root" || got.RootDir == "fixed" {
+			if problem := microVMResolverProblem(got); problem != "" {
+				out = append(out, problem)
+			}
 		}
 		if !got.DirectResolverOK {
 			out = append(out, directResolverProblem(got.DirectResolverRefusal))
