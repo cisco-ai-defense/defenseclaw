@@ -2767,17 +2767,21 @@ func withDirectoryStackOperands(args []*syntax.Word, words []string, static []bo
 }
 
 func commandLinksWithFacts(command, cwd, home string, facts map[string]string, record bool) shellLinks {
-	return commandLinks(command, cwd, home, facts, record, false, false)
+	return commandLinks(command, cwd, home, facts, record, false)
 }
 
 func commandLinksWithFactsBalanced(command, cwd, home string, facts map[string]string, record bool) shellLinks {
-	return commandLinks(command, cwd, home, facts, record, false, true)
+	return commandLinksWithMode(command, cwd, home, facts, record, false, true)
 }
 
 // commandLinks reads the links of command. A nested literal shell body
 // returns its facts without the end checks: its caller runs them once
 // over its own links and the body links together.
-func commandLinks(command, cwd, home string, facts map[string]string, record, nested, balanced bool) shellLinks {
+func commandLinks(command, cwd, home string, facts map[string]string, record, nested bool) shellLinks {
+	return commandLinksWithMode(command, cwd, home, facts, record, nested, false)
+}
+
+func commandLinksWithMode(command, cwd, home string, facts map[string]string, record, nested, balanced bool) shellLinks {
 	links, fallback := commandLinksRead(command, cwd, home, facts, record, nested, true, balanced)
 	if fallback {
 		// A copy of links on disk that the end of the command does not let
@@ -3240,7 +3244,7 @@ func commandLinksRead(command, cwd, home string, facts map[string]string, record
 				// placed its call (rel-1-0-6:GAP-0260).
 				bodyDir, placedBody = callDirs[0], true
 			}
-			inner := commandLinks(body, bodyDir, home, facts, record, true, balanced)
+			inner := commandLinksWithMode(body, bodyDir, home, facts, record, true, balanced)
 			links.merge(inner)
 			renames = renames || inner.renames
 			cds = cds || inner.cds
