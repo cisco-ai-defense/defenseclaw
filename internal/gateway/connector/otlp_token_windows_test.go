@@ -392,6 +392,49 @@ func TestWindowsCredentialsLocalAccountReadAndExecuteOnly(t *testing.T) {
 	}
 }
 
+func TestOTLPPathTokenWindowsPrivilegedRepairKeepsUndisclosedValue(t *testing.T) {
+	t.Setenv(managed.TrustStrictAncestorsEnv, "")
+	for _, tc := range []struct {
+		name string
+		mask windows.ACCESS_MASK
+	}{
+		{name: "execute only", mask: windows.GENERIC_EXECUTE},
+		{name: "attributes only", mask: windows.FILE_READ_ATTRIBUTES},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			previousRepair := windowsManagedCanRepair
+			windowsManagedCanRepair = func() bool { return true }
+			t.Cleanup(func() { windowsManagedCanRepair = previousRepair })
+
+			dataDir := testenv.PrivateTempDir(t)
+			first, err := EnsureOTLPPathToken(dataDir, OTLPScopeCodex)
+			if err != nil {
+				t.Fatalf("create token: %v", err)
+			}
+			path, err := OTLPPathTokenFilePath(dataDir, OTLPScopeCodex)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := setOTLPWindowsBroadDACL(path, tc.mask); err != nil {
+				t.Fatalf("set token permissions: %v", err)
+			}
+			if loaded, err := LoadOTLPPathToken(dataDir, OTLPScopeCodex); err != nil || loaded != first {
+				t.Fatalf("load token with permission drift: same=%v err=%v", loaded == first, err)
+			}
+			after, err := EnsureOTLPPathToken(dataDir, OTLPScopeCodex)
+			if err != nil || after != first {
+				t.Fatalf("repair token: same=%v err=%v", after == first, err)
+			}
+			if replace, err := otlpPathTokenNeedsSecureReplacement(path); err != nil || replace {
+				t.Fatalf("repair left permission drift: replace=%v err=%v", replace, err)
+			}
+			if loaded, err := LoadOTLPPathToken(dataDir, OTLPScopeCodex); err != nil || loaded != after {
+				t.Fatalf("load repaired token: same=%v err=%v", loaded == after, err)
+			}
+		})
+	}
+}
+
 func TestWindowsBroadCredentialReaderRequiresDataAccess(t *testing.T) {
 	localAccount, err := windows.CreateWellKnownSid(windows.WinLocalAccountSid)
 	if err != nil {

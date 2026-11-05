@@ -185,13 +185,9 @@ func otlpWindowsPathSecurity(path string) (*windows.ACL, error) {
 	return dacl, nil
 }
 
+const otlpWindowsDataReadMask windows.ACCESS_MASK = windows.GENERIC_ALL | windows.GENERIC_READ | windows.FILE_READ_DATA
+
 func otlpWindowsRejectUntrustedReadACEs(path string, dacl *windows.ACL) error {
-	const (
-		accessAllowedCompoundACEType       = 0x4
-		accessAllowedObjectACEType         = 0x5
-		accessAllowedCallbackACEType       = 0x9
-		accessAllowedCallbackObjectACEType = 0xB
-	)
 	readLike := windows.ACCESS_MASK(
 		windows.GENERIC_ALL |
 			windows.GENERIC_READ |
@@ -200,6 +196,16 @@ func otlpWindowsRejectUntrustedReadACEs(path string, dacl *windows.ACL) error {
 			windows.FILE_READ_EA |
 			windows.FILE_READ_ATTRIBUTES |
 			windows.FILE_EXECUTE,
+	)
+	return otlpWindowsRejectUntrustedACEs(path, dacl, readLike)
+}
+
+func otlpWindowsRejectUntrustedACEs(path string, dacl *windows.ACL, readLike windows.ACCESS_MASK) error {
+	const (
+		accessAllowedCompoundACEType       = 0x4
+		accessAllowedObjectACEType         = 0x5
+		accessAllowedCallbackACEType       = 0x9
+		accessAllowedCallbackObjectACEType = 0xB
 	)
 	for i := uint16(0); i < dacl.AceCount; i++ {
 		var ace *windows.ACCESS_ALLOWED_ACE
@@ -234,11 +240,6 @@ func otlpWindowsRejectUntrustedReadACEs(path string, dacl *windows.ACL) error {
 // to a credential, or nil. It is not permission drift: the value may already
 // be copied, so the gateway drops its cached copy and Ensure rotates it.
 func otlpWindowsBroadReader(path string, dacl *windows.ACL) error {
-	dataRead := windows.ACCESS_MASK(
-		windows.GENERIC_ALL |
-			windows.GENERIC_READ |
-			windows.FILE_READ_DATA,
-	)
 	broad := []windows.WELL_KNOWN_SID_TYPE{
 		windows.WinWorldSid,
 		windows.WinBuiltinUsersSid,
@@ -254,7 +255,7 @@ func otlpWindowsBroadReader(path string, dacl *windows.ACL) error {
 			return fmt.Errorf("inspect Windows ACE %d for %s: %w", i, path, err)
 		}
 		if ace == nil || ace.Header.AceType != windows.ACCESS_ALLOWED_ACE_TYPE ||
-			ace.Header.AceFlags&windows.INHERIT_ONLY_ACE != 0 || ace.Mask&dataRead == 0 {
+			ace.Header.AceFlags&windows.INHERIT_ONLY_ACE != 0 || ace.Mask&otlpWindowsDataReadMask == 0 {
 			continue
 		}
 		sid := (*windows.SID)(unsafe.Pointer(&ace.SidStart))
@@ -394,5 +395,5 @@ func otlpPathTokenDriftDisclosedValue(path string) bool {
 		// The descriptor cannot be judged; rotating is the safe choice.
 		return true
 	}
-	return otlpWindowsRejectUntrustedReadACEs(path, dacl) != nil
+	return otlpWindowsRejectUntrustedACEs(path, dacl, otlpWindowsDataReadMask) != nil
 }
