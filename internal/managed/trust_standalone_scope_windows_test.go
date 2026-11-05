@@ -8,6 +8,7 @@ package managed
 import (
 	"errors"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -273,6 +274,56 @@ func TestStandaloneFileLeafDriftIsOnlyTheFileItself(t *testing.T) {
 	}
 }
 
+// GAP-0603: on real descriptors, an untrusted owner with a canonical DACL,
+// an untrusted entry with an administrator owner, and both are each drift on
+// the file itself, and name the principal. icacls sets the owner (it enables
+// the restore privilege an elevated administrator holds).
+func TestStandaloneFileLeafDriftOwnerEntryAndBoth(t *testing.T) {
+	t.Setenv(TrustStrictAncestorsEnv, "")
+	t.Setenv(ConfigPathEnv, "")
+	for _, tc := range []struct {
+		name         string
+		owner, entry bool
+	}{
+		{"owner untrusted, ACL canonical", true, false},
+		{"entry untrusted, owner administrators", false, true},
+		{"both untrusted", true, true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			path := filepath.Join(t.TempDir(), "deployment.json")
+			if err := os.WriteFile(path, []byte("{}"), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			setTestFileDACL(t, path, testDACL(t, canonicalTestDACL), true)
+			if err := exec.Command("icacls.exe", path, "/setowner", "*S-1-5-32-544").Run(); err != nil {
+				t.Skipf("icacls cannot set the owner here (needs an elevated administrator): %v", err)
+			}
+			if ValidateTrustedFilePathStandalone(path, "fixture") != nil {
+				t.Skip("the temp folders are not trusted by the standalone walk here")
+			}
+			if tc.entry {
+				setTestFileDACL(t, path, testDACL(t, usersWriteDACL), true)
+			}
+			if tc.owner {
+				if out, err := exec.Command("icacls.exe", path, "/setowner", "*S-1-5-32-545").CombinedOutput(); err != nil {
+					t.Fatalf("icacls /setowner Users: %v %s", err, out)
+				}
+			}
+			got := StandaloneFileLeafDrift(path, "fixture")
+			if got == nil || got.SID != "S-1-5-32-545" || !strings.EqualFold(got.Path, path) {
+				t.Fatalf("leaf drift = %+v, want BUILTIN\\Users on %s", got, path)
+			}
+			// The owner verdict comes first when both are drifted.
+			if got.Owner != tc.owner {
+				t.Fatalf("leaf drift Owner = %t, want %t", got.Owner, tc.owner)
+			}
+			if !strings.Contains(RefuseStandaloneContentDrift(got).Error(), "give the file back to Administrators") {
+				t.Fatalf("refusal %q does not name the owner fix", RefuseStandaloneContentDrift(got))
+			}
+		})
+	}
+}
+
 // GAP-0590: a content-drift refusal names the recovery that works for that
 // file: Setup writes config.yaml and targets.yaml new from the approved
 // source; any other content file is the administrator's to check.
@@ -280,8 +331,8 @@ func TestStandaloneContentDriftNamesTheWorkingRecovery(t *testing.T) {
 	for name, want := range map[string]string{
 		"config.yaml":     "CONFIG=<the approved administrator-only config>` so Setup writes a new config.yaml",
 		"targets.yaml":    "Setup writes a new targets.yaml enumerated from it",
-		"deployment.json": "remove that entry and check the file",
-		"journal.json":    "remove that entry and check the file",
+		"deployment.json": "remove that entry, or give the file back to Administrators, and check the file",
+		"journal.json":    "remove that entry, or give the file back to Administrators, and check the file",
 	} {
 		refused := RefuseStandaloneContentDrift(&UntrustedPrincipalError{Path: `C:\ProgramData\Cisco\DefenseClaw\etc\` + name, SID: "S-1-5-32-545", text: "x"})
 		if !strings.Contains(refused.Error(), want) || !strings.HasPrefix(refused.Error(), "x; a standalone install does not repair this file in place") {

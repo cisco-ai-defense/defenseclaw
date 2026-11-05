@@ -9098,6 +9098,11 @@ function Get-DefenseClawPathAclVerdicts {
     return $verdicts.ToArray()
 }
 
+# The SID of the account this process runs as (Setup's own account).
+function Get-DefenseClawCurrentProcessUserSID {
+    return [string][Security.Principal.WindowsIdentity]::GetCurrent().User.Value
+}
+
 function Assert-DefenseClawPathAcl {
     param(
         [Parameter(Mandatory)][string]$Path,
@@ -9170,15 +9175,32 @@ function Assert-DefenseClawPathAcl {
         # Standalone keeps the rel-1-0-3 main-sync review finding 4 contract:
         # a re-stamp repairs Contract and Rights verdicts (and a deny entry)
         # only, so a foreign writer or a lost protected flag stays fatal.
+        # A file whose owner is an untrusted account, or that has no DACL,
+        # is not given a trusted descriptor back in place either: that owner
+        # (or anyone) may have changed its bytes, so it stays fatal and is
+        # restored from its approved source or refused and named (GAP-0603).
+        # Setup's own account may own a file it just created: that owner is
+        # still repaired.
         $repairableKinds = if ($standalone) {
             @('Contract', 'Rights', 'Advisory')
         }
         else {
             @('Contract', 'Rights', 'Access')
         }
+        $untrustedContract = @()
+        if ($standalone) {
+            $untrustedContract = @('Dacl')
+            $currentOwner = Get-DefenseClawAclOwnerSID -Acl (Microsoft.PowerShell.Security\Get-Acl -LiteralPath $Path)
+            if ([string]$currentOwner -cne [string](Get-DefenseClawCurrentProcessUserSID)) {
+                $untrustedContract += 'Owner'
+            }
+        }
         $repairable = @(
             $verdicts |
                 Microsoft.PowerShell.Core\Where-Object { $_.Kind -in $repairableKinds } |
+                Microsoft.PowerShell.Core\Where-Object {
+                    -not ($_.Kind -eq 'Contract' -and $_.Severity -in $untrustedContract)
+                } |
                 Microsoft.PowerShell.Core\Where-Object {
                     $standalone -or -not $HealOnlyUntrusted -or
                     -not (($_.Kind -eq 'Access' -and $_.Severity -in @('Read', 'Inheritance', 'CreateChild')) -or
@@ -16651,9 +16673,9 @@ function Assert-DefenseClawRepairableConfigAcl {
                 -IgnoreCreatorTemplates
         }
         catch {
-            throw ("refusing ACL repair for untrusted managed config path: $($_.Exception.Message). " +
-                'Remove that entry, then run Setup /ensure again. For an entry on config.yaml itself, Setup /ensure ' +
-                'CONFIG=<the approved config> writes a new config.yaml from that administrator-only file instead.')
+            throw ('refusing ACL repair for untrusted managed config path (remove that entry, then run Setup /ensure ' +
+                'again; for config.yaml itself, Setup /ensure CONFIG=<the approved config> writes a new config.yaml ' +
+                "from that administrator-only file instead): $($_.Exception.Message)")
         }
     }
 }
@@ -16662,7 +16684,7 @@ function Assert-DefenseClawStandaloneContentTrusted {
     <#
         Standalone, read-only, before an install-like lifecycle stops any
         service. A managed content file or folder that an account other than
-        SYSTEM, Administrators and TrustedInstaller can change is never given
+        SYSTEM, Administrators and TrustedInstaller owns or can change is never given
         a trusted descriptor back in place: its bytes may be that account's,
         and a handle it opened keeps working after a re-stamp (GAP-0561).
         Repair used to re-stamp each of these after the stop
@@ -16673,19 +16695,19 @@ function Assert-DefenseClawStandaloneContentTrusted {
         is still drifted here is refused with the services as they were,
         naming the path, the account and the recovery. Trusted-only drift
         (missing service rights, an inherited trusted entry) passes for the
-        repair to put back (GAP-0920); an administrator-equivalent owner is
-        left to the readers.
+        repair to put back (GAP-0920); an owner that is Setup's own account
+        passes, as the self-heal repairs it (GAP-0603).
     #>
     param([Parameter(Mandatory)][hashtable]$Layout)
     $adminWriters = @($script:SystemSID, $script:AdministratorsSID, $script:TrustedInstallerSID)
-    $folder = 'Remove that entry, then run Setup /ensure again.'
-    $record = 'Setup does not write this file from an administrator source: remove that entry and check the file, then run Setup /ensure again.'
+    $folder = 'remove that entry, or give the folder back to Administrators, then run Setup /ensure again'
+    $record = 'Setup does not write this file from an administrator source: remove that entry, or give the file back to Administrators, and check the file, then run Setup /ensure again'
     $entries = [Collections.Generic.List[object]]::new()
     foreach ($name in @('StateRoot', 'ConfigDirectory', 'GuardianDirectory', 'InstallStateDirectory')) {
         $entries.Add(@($name, $folder))
     }
-    $entries.Add(@('ConfigPath', 'Run Setup /ensure CONFIG=<the approved administrator-only config>: Setup writes a new config.yaml from it.'))
-    $entries.Add(@('ManifestPath', 'Run Setup /ensure CONFIG=<the approved config>: Setup writes a new targets.yaml enumerated from it (in manifest enrollment mode, add MANIFEST=<the approved administrator-only targets.yaml>).'))
+    $entries.Add(@('ConfigPath', 'run Setup /ensure CONFIG=<the approved administrator-only config>: Setup writes a new config.yaml from it'))
+    $entries.Add(@('ManifestPath', 'run Setup /ensure CONFIG=<the approved config>: Setup writes a new targets.yaml enumerated from it, or from MANIFEST=<the approved administrator-only targets.yaml> in manifest enrollment mode'))
     $records = @(
         'MetadataPath',
         'AgentApplicationControlAttestationPath',
@@ -16707,19 +16729,20 @@ function Assert-DefenseClawStandaloneContentTrusted {
             -not (Microsoft.PowerShell.Management\Test-Path -LiteralPath $path)) {
             continue
         }
-        $owner = Get-DefenseClawAclOwnerSID -Acl (Microsoft.PowerShell.Security\Get-Acl -LiteralPath $path)
         try {
             Assert-DefenseClawPathAcl `
                 -Path $path `
                 -AllowedWriterSIDs $adminWriters `
-                -AllowedOwnerSIDs @($adminWriters + @($owner) | Microsoft.PowerShell.Core\Where-Object { $_ }) `
+                -AllowedOwnerSIDs @($adminWriters + @(Get-DefenseClawCurrentProcessUserSID)) `
                 -AllowInheritance `
                 -IgnoreCreatorTemplates
         }
         catch {
-            throw ("refusing to change the deployment, and nothing was changed: $($_.Exception.Message). " +
-                'DefenseClaw does not give a file another account could change a trusted access list back in place. ' +
-                [string]$entry[1])
+            # The verdict comes last: the result names its account and the
+            # icacls fix from it.
+            throw ('refusing to change the deployment, and nothing was changed (DefenseClaw does not give a file ' +
+                'another account owns or could change a trusted access list back in place; ' + [string]$entry[1] +
+                "): $($_.Exception.Message)")
         }
     }
 }
