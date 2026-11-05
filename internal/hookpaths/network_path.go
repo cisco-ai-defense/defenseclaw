@@ -156,16 +156,129 @@ func networkShareError(op, name string) error {
 	return &fs.PathError{Op: op, Path: name, Err: errNetworkShareUnanswered}
 }
 
+// The gateway needs file identity, not only a root-share answer. A share
+// root can answer slowly while an already reachable file answers at once.
+// Read that file with the same answer bound and cache a timeout per share.
+// The slot bound limits blocked operating-system calls if many shares stop
+// answering at once. A completed root probe permits a later retry.
+var shareInfoReads = struct {
+	mu       sync.Mutex
+	timeouts map[string]shareInfoTimeout
+	slots    chan struct{}
+}{slots: make(chan struct{}, networkShareProbeLimit)}
+
+type shareInfoTimeout struct {
+	since      time.Time
+	retryAfter time.Time
+}
+
+var readShareInfo = func(name string, follow bool) (os.FileInfo, error) {
+	if follow {
+		return os.Stat(name)
+	}
+	return os.Lstat(name)
+}
+
+func shareBoundedInfo(name string, follow bool) (os.FileInfo, error) {
+	root := networkShareRootOf(name)
+	if root == "" {
+		return readShareInfo(name, follow)
+	}
+	if networkPathUnanswered(name) {
+		return nil, networkShareError("stat", name)
+	}
+	key := strings.ToLower(filepath.ToSlash(root))
+	now := time.Now()
+	shareInfoReads.mu.Lock()
+	if timed, present := shareInfoReads.timeouts[key]; present {
+		if now.Before(timed.retryAfter) && !shareProbeRecoveredSince(key, timed.since) {
+			shareInfoReads.mu.Unlock()
+			return nil, networkShareError("stat", name)
+		}
+		delete(shareInfoReads.timeouts, key)
+	}
+	shareInfoReads.mu.Unlock()
+	select {
+	case shareInfoReads.slots <- struct{}{}:
+	default:
+		return nil, networkShareError("stat", name)
+	}
+	type result struct {
+		info os.FileInfo
+		err  error
+	}
+	ready := make(chan result, 1)
+	go func() {
+		info, err := readShareInfo(name, follow)
+		ready <- result{info, err}
+		<-shareInfoReads.slots
+	}()
+	wait := networkShareAnswerWait
+	if wait < 0 {
+		wait = 0
+	}
+	timer := time.NewTimer(wait)
+	defer timer.Stop()
+	select {
+	case got := <-ready:
+		return got.info, got.err
+	case <-timer.C:
+		// Prefer an answer that raced the deadline.
+		select {
+		case got := <-ready:
+			return got.info, got.err
+		default:
+		}
+		// A root answer before this read timed out does not prove that
+		// this file answered.
+		timedOutAt := time.Now()
+		shareInfoReads.mu.Lock()
+		if shareInfoReads.timeouts == nil {
+			shareInfoReads.timeouts = make(map[string]shareInfoTimeout)
+		}
+		if _, known := shareInfoReads.timeouts[key]; !known && len(shareInfoReads.timeouts) >= networkShareProbeLimit {
+			oldestKey := ""
+			var oldest time.Time
+			for previous, timed := range shareInfoReads.timeouts {
+				if oldestKey == "" || timed.retryAfter.Before(oldest) {
+					oldestKey, oldest = previous, timed.retryAfter
+				}
+			}
+			delete(shareInfoReads.timeouts, oldestKey)
+		}
+		shareInfoReads.timeouts[key] = shareInfoTimeout{since: timedOutAt, retryAfter: timedOutAt.Add(networkShareQuietFor)}
+		shareInfoReads.mu.Unlock()
+		go networkPathUnanswered(name)
+		return nil, networkShareError("stat", name)
+	}
+}
+
+func shareProbeRecoveredSince(key string, since time.Time) bool {
+	networkShares.mu.Lock()
+	defer networkShares.mu.Unlock()
+	probe := networkShares.probes[key]
+	if probe == nil {
+		return false
+	}
+	select {
+	case <-probe.done:
+		return probe.took <= networkShareDeadAfter && probe.started.Add(probe.took).After(since)
+	default:
+		return false
+	}
+}
+
+// ShareUnanswered distinguishes an unknown network path from a missing one.
+func ShareUnanswered(err error) bool { return errors.Is(err, errNetworkShareUnanswered) }
+
+// SharePath reports a network-share spelling without reading the share.
+func SharePath(name string) bool { return networkShareRootOf(name) != "" }
+
 // The file system reads of the target scans and of the write-target walk.
 // Each reads a local path as the os function does, and a path below a
 // network share only once the share has answered (networkPathUnanswered).
 
-func pathStat(name string) (os.FileInfo, error) {
-	if networkPathUnanswered(name) {
-		return nil, networkShareError("stat", name)
-	}
-	return os.Stat(name)
-}
+func pathStat(name string) (os.FileInfo, error) { return shareBoundedInfo(name, true) }
 
 // pathStatPinned is pathStat with the file identity read at once, for a
 // FileInfo that a later os.SameFile compares with the opened file.
@@ -176,12 +289,7 @@ func pathStatPinned(name string) (os.FileInfo, error) {
 	return pathidentity.StatPinned(name)
 }
 
-func pathLstat(name string) (os.FileInfo, error) {
-	if networkPathUnanswered(name) {
-		return nil, networkShareError("lstat", name)
-	}
-	return os.Lstat(name)
-}
+func pathLstat(name string) (os.FileInfo, error) { return shareBoundedInfo(name, false) }
 
 func pathOpen(name string) (*os.File, error) {
 	if networkPathUnanswered(name) {
@@ -210,3 +318,7 @@ func pathEvalSymlinks(name string) (string, error) {
 	}
 	return filepath.EvalSymlinks(name)
 }
+
+// PathStat and PathLstat share the hook path reader and its network bound.
+func PathStat(name string) (os.FileInfo, error)  { return pathStat(name) }
+func PathLstat(name string) (os.FileInfo, error) { return pathLstat(name) }

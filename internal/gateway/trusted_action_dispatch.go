@@ -175,6 +175,11 @@ type trustedActionRequest struct {
 	// ProtectedHomeHook is set only from a kernel-verified managed hook peer.
 	// Its gateway cannot inspect the caller's home when ProtectHome is active.
 	ProtectedHomeHook bool
+	// StrictPolicy keeps uncertain path proofs closed for the strict rule pack.
+	// Secure Client uses the same conservative path behavior as before.
+	StrictPolicy bool
+	// possibleTarget records a write whose spelling is ordinary but identity is unknown.
+	possibleTarget *bool
 	// ManagedHookOverflowHold retains a bounded state reading on an
 	// authenticated managed Windows hook without changing path resolution.
 	ManagedHookOverflowHold bool
@@ -4195,7 +4200,7 @@ func stateDirectoryEntryTarget(
 		return "", false
 	}
 	entry := filepath.Join(parent, path.Base(filepath.ToSlash(value)))
-	if info, err := os.Stat(entry); err == nil && info.IsDir() && (moveDestination || windows) {
+	if info, err := hookpaths.PathStat(entry); err == nil && info.IsDir() && (moveDestination || windows) {
 		return "", false
 	}
 	if candidate.Flavor == actionfacts.PathFlavorPOSIX {

@@ -194,7 +194,7 @@ func TestR104InterpreterTextNeedsAnExecutableWrite(t *testing.T) {
 			// this proof: ActionFacts may reject it, so give the command argv.
 			input.Command = ""
 			input.Argv = []string{"python3", "-c", tc.code}
-			if got := trustedInlineAuthorizedKeysWrite(input, actionfacts.Analyze(input)); got != tc.want {
+			if got := trustedInlineAuthorizedKeysWrite(input, actionfacts.Analyze(input), true); got != tc.want {
 				t.Fatalf("inline write proof = %v, want %v", got, tc.want)
 			}
 		})

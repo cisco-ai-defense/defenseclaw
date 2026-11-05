@@ -4815,7 +4815,7 @@ func (c *linkCopy) readDiskLinks(facts map[string]string, record bool) bool {
 // the disk. ok is false when path cannot be read, the walk fails or is over
 // its bounds, or a link names a missing entry or another link.
 func sourceDiskLinks(path string) ([]diskLink, bool) {
-	info, err := os.Lstat(path)
+	info, err := pathLstat(path)
 	if err != nil {
 		// The disk-link check read this source as one that may hold a
 		// link; a gateway behind ProtectHome sees ENOENT for it.
@@ -4823,7 +4823,7 @@ func sourceDiskLinks(path string) ([]diskLink, bool) {
 	}
 	var found []diskLink
 	add := func(name, rest string) bool {
-		text, err := os.Readlink(name)
+		text, err := pathReadlink(name)
 		if err != nil || text == "" || len(found) >= maxSourceLinks {
 			return false
 		}
@@ -4831,7 +4831,7 @@ func sourceDiskLinks(path string) ([]diskLink, bool) {
 		if !filepath.IsAbs(target) {
 			target = filepath.Join(filepath.Dir(name), text)
 		}
-		if hop, err := os.Lstat(target); err != nil || hop.Mode()&os.ModeSymlink != 0 {
+		if hop, err := pathLstat(target); err != nil || hop.Mode()&os.ModeSymlink != 0 {
 			return false
 		}
 		found = append(found, diskLink{rest: rest, text: text})
@@ -5095,7 +5095,7 @@ func cpDiskSymlink(args []string, static []bool, cwd, home string, facts map[str
 		return true
 	}
 	for _, source := range parsed.sources {
-		if diskSourceMayLink(source, cwd, home, facts, record, os.Lstat) {
+		if diskSourceMayLink(source, cwd, home, facts, record, pathLstat) {
 			return true
 		}
 	}
@@ -5126,7 +5126,7 @@ func archiveCopiesDiskSymlink(program string, args []string, static []bool, cwd,
 			// materialize a link at any name in the destination tree.
 			return true
 		}
-		if diskSourceMayLink(source, cwd, home, facts, record, os.Lstat) {
+		if diskSourceMayLink(source, cwd, home, facts, record, pathLstat) {
 			return true
 		}
 	}
