@@ -552,28 +552,31 @@ actor CLIRunner {
     /// The root-owned gateway state an exact lifecycle command must repair
     /// before it runs as this account; empty for every other command.
     nonisolated static func rootStateToRepair(
-        binary: String, arguments: [String], home: URL, rootOwnedState: (URL) -> [String]
-    ) -> [String] {
+        binary: String, arguments: [String], home: URL, rootOwnedState: (URL) -> [GatewayRootState.Marker]
+    ) -> [GatewayRootState.Marker] {
         guard binary == "defenseclaw-gateway", arguments.count == 1,
               gatewayLifecycleActions.contains(arguments[0]) else { return [] }
         return rootOwnedState(home)
     }
 
-    private let rootOwnedState: @Sendable (URL) -> [String]
+    private let rootOwnedState: @Sendable (URL) -> [GatewayRootState.Marker]
     private let administratorRepair: @Sendable (InstallationContext, GatewayAdministratorOperation) async -> CLIResult
+    private let repairMemory: GatewayRepairMemory
 
     init(
         context: InstallationContext = .resolve(),
-        rootOwnedState: @escaping @Sendable (URL) -> [String] = {
+        rootOwnedState: @escaping @Sendable (URL) -> [GatewayRootState.Marker] = {
             GatewayRootState.rootOwnedMarkers(home: $0)
         },
         administratorRepair: @escaping @Sendable (InstallationContext, GatewayAdministratorOperation) async -> CLIResult = {
             await GatewayAdministratorClient.repair(context: $0, operation: $1)
-        }
+        },
+        repairMemory: GatewayRepairMemory = .standard
     ) {
         self.installationContext = context
         self.rootOwnedState = rootOwnedState
         self.administratorRepair = administratorRepair
+        self.repairMemory = repairMemory
     }
 
     func rebind(to context: InstallationContext) {
@@ -1015,11 +1018,16 @@ actor CLIRunner {
             }) else {
                 return CLIResult(exitCode: 125, output: "Another gateway repair is still running. Wait for its result in Activity before retrying.\n")
             }
+            let home = installationContext.homeRoot
+            if repairMemory.load() == GatewayRootState.fingerprint(rootOwned) {
+                // A repair already ran and could not clear exactly these.
+                return CLIResult(exitCode: 77, output: GatewayRootState.unresolvedMessage(rootOwned, home: home))
+            }
             let context = installationContext
             let operation = GatewayAdministratorOperation()
             runStates[executionID] = .administrator(operation)
             if let onLine {
-                await onLine("This installation's gateway ran as root (root-owned: \(rootOwned.joined(separator: ", "))). "
+                await onLine("This installation's gateway ran as root (root-owned: \(rootOwned.map(\.name).joined(separator: ", "))). "
                     + "Requesting macOS administrator authorization to stop it and return these files to your account, "
                     + "so the gateway runs as you…")
             }
@@ -1032,6 +1040,17 @@ actor CLIRunner {
             if let onLine {
                 for line in repaired.output.split(separator: "\n", omittingEmptySubsequences: false) {
                     await onLine(String(line))
+                }
+            }
+            // The helper ran (not cancelled, authorization not refused): remember
+            // what it could not clear so the prompt does not come back for it.
+            if !repaired.cancelled, [0, 1, 75].contains(repaired.exitCode) {
+                let remaining = rootOwnedState(home)
+                repairMemory.save(remaining.isEmpty ? nil : GatewayRootState.fingerprint(remaining))
+                if !remaining.isEmpty, repaired.succeeded {
+                    let message = GatewayRootState.unresolvedMessage(remaining, home: home)
+                    if let onLine { await onLine(message) }
+                    return CLIResult(exitCode: 1, output: repaired.output + message)
                 }
             }
             guard repaired.succeeded, arguments[0] != "stop" else { return repaired }
