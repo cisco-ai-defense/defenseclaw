@@ -15142,7 +15142,13 @@ function New-DefenseClawDeploymentMetadata {
                 if (-not (Microsoft.PowerShell.Management\Test-Path `
                     -LiteralPath $entry[0] `
                     -PathType Leaf)) {
-                    throw "cannot record installed metadata without Codex $($entry[1]): $($entry[0])"
+                    if ($entry[1] -ceq 'managed hooks state' -and
+                        (Test-DefenseClawCodexStateAbsentByAdminConflict `
+                            -Layout $Layout `
+                            -GatewayServiceName $GatewayServiceName)) {
+                        continue
+                    }
+                    throw "cannot record installed metadata without Codex $($entry[1]): expected the file at $($entry[0]); it does not exist and the Codex machine requirements report no administrator conflict"
                 }
             }
             $codexMachinePolicySha256 = (
@@ -16999,6 +17005,40 @@ function Assert-DefenseClawCodexManagedHooksStateFilePreflight {
         -AllowInheritance `
         -SelfHealKind MachinePolicyFile `
         -SelfHealGatewayServiceSID $script:AdministratorsSID
+}
+
+# The Codex managed-hooks state is absent only because the administrator's
+# requirements.toml turns DefenseClaw's managed hooks off (Secure Client
+# outside strict mode): Setup wrote no DefenseClaw policy or state, and Codex
+# is reported as not security-complete. When this run has not seen the
+# conflict yet, the Codex verify command is asked; it reports the conflict
+# before it reads any state. The standalone profile and strict mode never
+# skip the state.
+function Test-DefenseClawCodexStateAbsentByAdminConflict {
+    param(
+        [Parameter(Mandatory)][hashtable]$Layout,
+        [Parameter(Mandatory)][string]$GatewayServiceName
+    )
+    if ((Test-DefenseClawStandaloneProfile) -or (Test-DefenseClawTrustStrictAncestors)) {
+        return $false
+    }
+    if (Microsoft.PowerShell.Management\Test-Path `
+        -LiteralPath $Layout.CodexManagedHooksStatePath `
+        -PathType Leaf) {
+        return $false
+    }
+    if ([string]::IsNullOrEmpty([string]$Layout.CodexRequirementsConflict)) {
+        try {
+            [void](Invoke-DefenseClawCodexRequirementsCommand `
+                -Layout $Layout `
+                -GatewayServiceName $GatewayServiceName `
+                -Action verify)
+        }
+        catch {
+            return $false
+        }
+    }
+    return -not [string]::IsNullOrEmpty([string]$Layout.CodexRequirementsConflict)
 }
 
 function Assert-DefenseClawCodexManagedHooksStateFile {
@@ -30134,7 +30174,11 @@ function Assert-DefenseClawEnterpriseDeployment {
         Assert-DefenseClawCodexMachinePolicyDirectory `
             -Path $Layout.CodexMachinePolicyDirectory
         Assert-DefenseClawCodexMachinePolicyFile -Layout $Layout
-        Assert-DefenseClawCodexManagedHooksStateFile -Layout $Layout
+        if (-not (Test-DefenseClawCodexStateAbsentByAdminConflict `
+            -Layout $Layout `
+            -GatewayServiceName $GatewayServiceName)) {
+            Assert-DefenseClawCodexManagedHooksStateFile -Layout $Layout
+        }
         [void](Get-DefenseClawCodexRequirementsAclBackup -Layout $Layout)
     }
     else {
@@ -44154,7 +44198,11 @@ function Invoke-DefenseClawReconcileLifecycle {
         -GuardianServiceName $GuardianServiceName
     if ([bool]$Layout.CodexTargetEnabled) {
         Assert-DefenseClawCodexMachinePolicyFile -Layout $Layout
-        Assert-DefenseClawCodexManagedHooksStateFile -Layout $Layout
+        if (-not (Test-DefenseClawCodexStateAbsentByAdminConflict `
+            -Layout $Layout `
+            -GatewayServiceName $GatewayServiceName)) {
+            Assert-DefenseClawCodexManagedHooksStateFile -Layout $Layout
+        }
         [void](Invoke-DefenseClawCodexRequirementsCommand `
             -Layout $Layout `
             -GatewayServiceName $GatewayServiceName `
