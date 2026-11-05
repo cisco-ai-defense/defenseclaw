@@ -154,6 +154,74 @@ def _set_in_file(
     return result, before, path.read_bytes()
 
 
+def _unset_in_file(
+    tmp_path: Path, app: AppContext, roster: str, *keys: str
+) -> tuple[object, bytes, bytes]:
+    path = tmp_path / "config.yaml"
+    path.write_text(
+        f"config_version: 9\ndata_dir: {tmp_path}\nguardrail:\n{roster}", encoding="utf-8"
+    )
+    before = path.read_bytes()
+
+    with (
+        patch.object(cmd_config.config_module, "config_path", return_value=path),
+        patch.object(config_writer, "_use_go_validator", return_value=False),
+        patch("defenseclaw.gateway.local_policy_digest", return_value=None),
+        patch.object(cmd_config, "_refresh_stopped_gateway_hooks", return_value=[]),
+    ):
+        result = CliRunner().invoke(cmd_config.config_unset, list(keys), obj=app)
+    return result, before, path.read_bytes()
+
+
+@pytest.mark.parametrize("proxy", ["openclaw", "zeptoclaw"])
+@pytest.mark.parametrize("loaded_app", [True, False])
+def test_config_unset_refuses_enabled_proxy_in_final_multi_roster(
+    tmp_path: Path, proxy: str, loaded_app: bool
+) -> None:
+    app = _app(tmp_path, ["kiro"])
+    if not loaded_app:
+        app.cfg = None
+    roster = (
+        "  connector: kiro\n  connectors:\n    kiro: {}\n"
+        f"    {proxy}:\n      enabled: false\n"
+    )
+    result, before, after = _unset_in_file(
+        tmp_path, app, roster, f"guardrail.connectors.{proxy}.enabled"
+    )
+    assert result.exit_code != 0
+    assert f"{proxy} needs a proxy binding" in result.output
+    assert after == before
+
+
+@pytest.mark.parametrize("proxy", ["openclaw", "zeptoclaw"])
+def test_config_unset_valid_roster_remains_allowed(tmp_path: Path, proxy: str) -> None:
+    app = _app(tmp_path, ["kiro"])
+    roster = (
+        "  connector: kiro\n  connectors:\n    kiro: {}\n"
+        f"    {proxy}:\n      enabled: false\n"
+    )
+    result, before, after = _unset_in_file(
+        tmp_path, app, roster, f"guardrail.connectors.{proxy}"
+    )
+    assert result.exit_code == 0, result.output
+    assert after != before
+
+
+def test_config_unset_checks_final_roster_for_batch(tmp_path: Path) -> None:
+    app = _app(tmp_path, ["kiro"])
+    roster = (
+        "  connector: kiro\n  hook_fail_mode: closed\n  connectors:\n"
+        "    kiro: {}\n    openclaw:\n      enabled: false\n"
+    )
+    result, before, after = _unset_in_file(
+        tmp_path, app, roster,
+        "guardrail.hook_fail_mode", "guardrail.connectors.openclaw.enabled",
+    )
+    assert result.exit_code != 0
+    assert "openclaw needs a proxy binding" in result.output
+    assert after == before
+
+
 @pytest.mark.parametrize(
     ("installed", "roster", "key", "value", "as_json"),
     [

@@ -1298,7 +1298,12 @@ def config_unset(app: AppContext, keys: tuple[str, ...], expect_sha256: str | No
         )
         for key, parts in parsed
     ]
-    if _write_config_change(app, changes, expect_sha256, "unset"):
+    roster_change = any(
+        parts == ["guardrail"] or parts[:2] == ["guardrail", "connectors"]
+        for _key, parts in parsed
+    )
+    check_candidate = _check_guardrail_connector_roster if roster_change else None
+    if _write_config_change(app, changes, expect_sha256, "unset", check_candidate=check_candidate):
         for note in _left_roster_notes(parsed, roster):
             click.echo(note)
         return
