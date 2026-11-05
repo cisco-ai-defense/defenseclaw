@@ -408,8 +408,8 @@ func actionPrintfHasNameConversion(format string) bool {
 		if format[i] == '%' {
 			continue
 		}
-		for i < len(format) && !('a' <= format[i] && format[i] <= 'z') &&
-			!('A' <= format[i] && format[i] <= 'Z') && format[i] != '%' {
+		for i < len(format) && (format[i] < 'a' || format[i] > 'z') &&
+			(format[i] < 'A' || format[i] > 'Z') && format[i] != '%' {
 			i++
 		}
 		if i < len(format) && format[i] == 'n' {
