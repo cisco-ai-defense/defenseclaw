@@ -7691,6 +7691,11 @@ def _check_windows_native_hooks(
     if _hermes_passive_unverified(check, r):
         _emit("warn", label, f"{check.state}: {check.detail}", r=r, remediation=_HERMES_PASSIVE_STEP)
         return
+    if connector == "hermes" and check.state == "pending-reload":
+        host_detail, step = _hermes_running_host_warning()
+        _emit("warn", label, f"{check.state}: {check.detail}; {host_detail}", r=r,
+              remediation=f"{step}; run 'defenseclaw doctor'")
+        return
     if not check.healthy and check.state == "missing" and _hook_runtime_file_problems(cfg, connector):
         # The registered adapter is gone with the hooks folder: the Hook
         # runtime files row names the one repair (p0-round GAP-0402).
@@ -10680,7 +10685,7 @@ def _hermes_proc_argv(pid: str, proc_root: str = "/proc") -> tuple[str, ...] | N
     return tuple(arg.decode("utf-8", "replace") for arg in data.rstrip(b"\0").split(b"\0")) if data else None
 
 
-def _hermes_host_running() -> bool | None:
+def _hermes_host_running(found_pids: list[str] | None = None) -> bool | None:
     """Whether a Hermes host runs as this account; ``None`` when unknown.
 
     Hermes reads its hook registration only at startup, so doctor can not
@@ -10688,7 +10693,7 @@ def _hermes_host_running() -> bool | None:
     reload: the next host starts with the registration.
     """
     if os.name == "nt":
-        return _hermes_host_running_windows()
+        return _hermes_host_running_windows(found_pids=found_pids)
     if not hasattr(os, "getuid"):
         return None
     try:
@@ -10700,12 +10705,18 @@ def _hermes_host_running() -> bool | None:
             check=False,
         )
     except (FileNotFoundError, subprocess.SubprocessError, OSError):
-        return _hermes_host_running_from_proc()
+        return (
+            _hermes_host_running_from_proc()
+            if found_pids is None else _hermes_host_running_from_proc(found_pids=found_pids)
+        )
     if proc.returncode != 0:
         # ps fails where /proc hides its system files (hidepid=2,subset=pid
         # has no /proc/stat): this account's own processes are still there
         # (GAP-0015).
-        return _hermes_host_running_from_proc()
+        return (
+            _hermes_host_running_from_proc()
+            if found_pids is None else _hermes_host_running_from_proc(found_pids=found_pids)
+        )
     uid = str(os.getuid())
     own = {str(os.getpid()), str(os.getppid())}
     wrapped = False
@@ -10722,13 +10733,15 @@ def _hermes_host_running() -> bool | None:
             if complete:
                 verdict = _hermes_argv_verdict(complete)
         if verdict is True:
-            return True
+            if found_pids is None:
+                return True
+            found_pids.append(fields[0])
         if verdict is None:
             wrapped = True
-    return None if wrapped else False
+    return True if found_pids else None if wrapped else False
 
 
-def _hermes_host_running_from_proc(proc_root: str = "/proc") -> bool | None:
+def _hermes_host_running_from_proc(proc_root: str = "/proc", found_pids: list[str] | None = None) -> bool | None:
     """:func:`_hermes_host_running` from /proc when ps cannot list processes.
 
     Reads each process's real uid from ``status`` and its argv from
@@ -10764,10 +10777,12 @@ def _hermes_host_running_from_proc(proc_root: str = "/proc") -> bool | None:
             continue
         verdict = _hermes_argv_verdict(list(argv))
         if verdict is True:
-            return True
+            if found_pids is None:
+                return True
+            found_pids.append(pid)
         if verdict is None:
             wrapped = True
-    return None if wrapped else False
+    return True if found_pids else None if wrapped else False
 
 
 _WINDOWS_PROCESS_LISTING_PS = (
@@ -10931,7 +10946,9 @@ def _windows_process_listing_powershell() -> str | None:
     return proc.stdout
 
 
-def _hermes_host_running_windows(tasklist_output: str | None = None) -> bool | None:
+def _hermes_host_running_windows(
+    tasklist_output: str | None = None, found_pids: list[str] | None = None
+) -> bool | None:
     """Windows form of :func:`_hermes_host_running` (GAP-1298).
 
     ``tasklist`` lists this account's processes by image name only, so a
@@ -10983,7 +11000,10 @@ def _hermes_host_running_windows(tasklist_output: str | None = None) -> bool | N
         program = fields[0].strip().lower().removesuffix(".exe")
         if program in _HERMES_HOST_EXECUTABLES:
             if not all_accounts:
-                return True
+                if found_pids is None:
+                    return True
+                found_pids.append(pid)
+                continue
             hosts.add(pid)  # ours unless this account may not open it
             candidates.append(pid)
         elif program.startswith("python") or program in _HERMES_LAUNCHERS:
@@ -10991,7 +11011,7 @@ def _hermes_host_running_windows(tasklist_output: str | None = None) -> bool | N
     if not listed:
         return None  # tasklist printed only an "INFO: no tasks" line or nothing usable
     if not candidates:
-        return False
+        return bool(found_pids)
     command_lines = _windows_process_command_lines(candidates)
     if command_lines is None:
         return None
@@ -11006,14 +11026,37 @@ def _hermes_host_running_windows(tasklist_output: str | None = None) -> bool | N
                 wrapped = True
             continue
         if pid in hosts:
-            return True
+            if found_pids is None:
+                return True
+            found_pids.append(pid)
+            continue
         argv = _windows_command_line_argv(command_lines[pid])
         verdict = _hermes_argv_verdict(argv, ntpath.basename) if argv else None
         if verdict is True:
-            return True
+            if found_pids is None:
+                return True
+            found_pids.append(pid)
         if verdict is None:
             wrapped = True
-    return None if wrapped else False
+    return True if found_pids else None if wrapped else False
+
+
+def _hermes_running_host_warning() -> tuple[str, str]:
+    """Describe a current registration whose running host cannot be inspected."""
+    pids: list[str] = []
+    _hermes_host_running(pids)
+    if pids:
+        names = ", ".join(dict.fromkeys(pids))
+        stop = f"Stop-Process -Id {', '.join(pids)}" if os.name == "nt" else f"kill {' '.join(pids)}"
+        process = f"Hermes PID(s) {names}"
+        step = f"close the Hermes session or run `{stop}`, then start Hermes again"
+    else:
+        process = "Hermes PID unavailable"
+        step = "close every running Hermes CLI/TUI/gateway/desktop/service host, then start Hermes again"
+    return (
+        f"{process}; loaded hooks cannot be verified; a new Hermes session loads the current hooks; live=false",
+        step,
+    )
 
 
 def _hermes_idle_native_check(check: WindowsHookCheck, r: _DoctorResult) -> WindowsHookCheck:
@@ -11213,18 +11256,9 @@ def _check_hook_health(cfg, connector: str, r: _DoctorResult) -> None:
                         remediation=_HERMES_PASSIVE_STEP,
                     )
                     return
-                _emit(
-                    "fail",
-                    label,
-                    f"on-disk registration is present at {path}, but running Hermes hosts "
-                    "are unverified: doctor cannot verify which hooks an already running host loaded, "
-                    "even after a restart or successful hook traffic; live=false",
-                    r=r,
-                remediation=(
-                    "close every Hermes CLI/TUI/gateway/desktop/service host, then run 'defenseclaw doctor'; "
-                    "start Hermes again after the on-disk checks pass. Running-host load verification is unavailable"
-                ),
-                )
+                host_detail, step = _hermes_running_host_warning()
+                _emit("warn", label, f"on-disk registration is present at {path}; {host_detail}",
+                      r=r, remediation=f"{step}; run 'defenseclaw doctor'")
             elif connector == "amp":
                 _emit(
                     "pass",
@@ -18182,6 +18216,15 @@ def _check_hook_contract_lock(
         _emit("warn", "Hook contract", detail, r=r, remediation=_CODEX_PROBE_TIMEOUT_STEP)
     elif _hermes_passive_unverified(native_runtime, r) and status in {"known", "unversioned"}:
         _emit("warn", "Hook contract", detail, r=r, remediation=_HERMES_PASSIVE_STEP)
+    elif (
+        connector == "hermes"
+        and native_runtime is not None
+        and native_runtime.state == "pending-reload"
+        and status in {"known", "unversioned"}
+    ):
+        host_detail, step = _hermes_running_host_warning()
+        _emit("warn", "Hook contract", f"{detail}; {host_detail}", r=r,
+              remediation=f"{step}; run 'defenseclaw doctor'")
     elif (
         native_runtime is not None
         and not native_runtime.healthy
