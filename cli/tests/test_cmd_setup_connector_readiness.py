@@ -411,9 +411,21 @@ def test_windows_hermes_doctor_pending_reload_warns_for_current_registration(mon
     pending = WindowsHookCheck(
         "pending-reload",
         "on-disk Windows-native executable registration is valid; running Hermes hosts are unverified; live=false",
+        target="registered-hermes-hook.exe",
         repair="close every Hermes host and run 'defenseclaw doctor'",
     )
+    class WindowsOS:
+        name = "nt"
+
+        def __getattr__(self, key):
+            return getattr(os, key)
+
+    monkeypatch.setattr(cmd_doctor, "os", WindowsOS())
     monkeypatch.setattr(cmd_doctor, "_windows_native_hook_check", lambda *_args, **_kwargs: pending)
+    monkeypatch.setattr(
+        cmd_doctor, "_run_hermes_execution_probe",
+        lambda _argv: (0, cmd_doctor._HERMES_EXECUTION_PROBE_RESPONSE),
+    )
     monkeypatch.setattr(cmd_doctor, "_hermes_host_running", lambda: True)
     monkeypatch.setattr(cmd_doctor, "_hermes_running_host_warning", lambda: ("Hermes PID 4300; a new Hermes session loads the current hooks", "close Hermes PID 4300"), raising=False)
     monkeypatch.setattr(agent_selection, "setup_agent_lock_executable_invariant", lambda *_args: "")
@@ -430,10 +442,47 @@ def test_windows_hermes_doctor_pending_reload_warns_for_current_registration(mon
     assert contract.checks[-1]["status"] == "warn"
     assert "Hermes PID 4300" in contract.checks[-1]["detail"]
 
+    monkeypatch.setattr(cmd_doctor, "_run_hermes_execution_probe", lambda _argv: (1, b""))
+    unusable_hooks = cmd_doctor._DoctorResult(quiet=True)
+    cmd_doctor._check_windows_native_hooks(cfg, "hermes", "Hermes hooks", unusable_hooks)
+    assert unusable_hooks.failed == 1
+    assert unusable_hooks.checks[-1]["status"] == "fail"
+
+    unusable_contract = cmd_doctor._DoctorResult(quiet=True)
+    cmd_doctor._check_hook_contract_lock(cfg, "hermes", unusable_contract, platform_name="nt")
+    assert unusable_contract.failed == 1
+    assert unusable_contract.checks[-1]["status"] == "fail"
+
     monkeypatch.setattr(cmd_doctor, "_windows_native_hook_check", lambda *_args, **_kwargs: WindowsHookCheck("missing", "registration missing"))
     missing = cmd_doctor._DoctorResult(quiet=True)
     cmd_doctor._check_windows_native_hooks(cfg, "hermes", "Hermes hooks", missing)
     assert missing.checks[-1]["status"] == "fail"
+
+
+def test_windows_hermes_pending_reload_requires_executable_probe(monkeypatch) -> None:
+    pending = WindowsHookCheck(
+        "pending-reload", "registration is current; running host is unverified",
+        target="registered-hermes-hook.exe",
+    )
+    calls: list[list[str]] = []
+
+    def probe(argv: list[str]) -> tuple[int, bytes]:
+        calls.append(argv)
+        return 1, b""
+
+    monkeypatch.setattr(cmd_doctor, "_run_hermes_execution_probe", probe)
+    failed = cmd_doctor._hermes_windows_execution_probe(pending)
+    assert failed.state == "unexecutable"
+    assert calls == [["registered-hermes-hook.exe", "hook", "--connector", "hermes", "--defenseclaw-execution-probe"]]
+
+    monkeypatch.setattr(
+        cmd_doctor, "_run_hermes_execution_probe",
+        lambda _argv: (0, cmd_doctor._HERMES_EXECUTION_PROBE_RESPONSE),
+    )
+    assert cmd_doctor._hermes_windows_execution_probe(pending).state == "pending-reload"
+    assert cmd_doctor._hermes_windows_execution_probe(
+        WindowsHookCheck("pending-reload", "registration is current")
+    ).state == "unexecutable"
 
 
 def test_hermes_running_host_warning_names_detected_pids(monkeypatch) -> None:

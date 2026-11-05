@@ -8166,8 +8166,14 @@ def _collect_hermes_execution_probe(
 
 def _hermes_windows_execution_probe(check: WindowsHookCheck) -> WindowsHookCheck:
     """Execute the exact active Windows target after the registration validator read it."""
-    if not check.healthy:
+    if not check.healthy and check.state != "pending-reload":
         return check
+    if not check.target:
+        return WindowsHookCheck(
+            "unexecutable", "registered Hermes command has no active runtime target",
+            check.command, check.target, check.raw_target,
+            "run 'defenseclaw setup hermes --yes --restart', then rerun 'defenseclaw doctor'",
+        )
     returncode, stdout = _run_hermes_execution_probe(
         [check.target, "hook", "--connector", "hermes", "--defenseclaw-execution-probe"],
     )
