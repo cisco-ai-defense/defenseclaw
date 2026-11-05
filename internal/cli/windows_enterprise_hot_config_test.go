@@ -786,12 +786,15 @@ func TestWindowsEnterpriseEnsureRewritesAContentFileAnotherAccountCanChange(t *t
 			if string(got) != want {
 				t.Fatalf("%s = %q, want the approved source", tc.file, got)
 			}
-			wantDACL := "D:P(A;;FA;;;SY)(A;;FA;;;BA)"
+			// Exactly Setup's entries, protected; SetNamedSecurityInfo also
+			// marks the DACL auto-inherited (AI), which grants nothing.
+			wantACEs := "(A;;FA;;;SY)(A;;FA;;;BA)"
 			if tc.file == "config.yaml" {
-				wantDACL += "(A;;FR;;;" + gatewaySID + ")"
+				wantACEs += "(A;;FR;;;" + gatewaySID + ")"
 			}
-			if dacl := hotConfigTestDACL(t, target); dacl != wantDACL {
-				t.Fatalf("%s DACL = %s, want Setup's descriptor %s", tc.file, dacl, wantDACL)
+			dacl := hotConfigTestDACL(t, target)
+			if control, aces, _ := strings.Cut(dacl, "("); (control != "D:P" && control != "D:PAI") || "("+aces != wantACEs {
+				t.Fatalf("%s DACL = %s, want Setup's protected descriptor D:P%s", tc.file, dacl, wantACEs)
 			}
 			if string(kept) != installed {
 				t.Fatalf("%s = %q (%v), want the replaced file's bytes", rejected, kept, keptErr)
