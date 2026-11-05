@@ -950,6 +950,20 @@ func resolveWindowsCodexManagedRuntimeRegistryLocked(
 	if err != nil {
 		return result, err
 	}
+	// Secure Client (not strict): the administrator turned DefenseClaw's
+	// managed Codex hooks off, whether or not DefenseClaw's state was ever
+	// written for them, so this is checked before the state. Codex runs
+	// no hooks then, so there is no active managed Codex runtime to
+	// resolve; Codex is left unauthorized and reported, instead of failing
+	// the Guardian's enrollment publication for every agent on the host.
+	if windowsCodexAdminConflictAllowed() {
+		if cfg, parseErr := parseWindowsCodexRequirements(requirements.data); parseErr == nil {
+			if conflict := codexRequirementsAdminConflict(cfg); conflict != nil {
+				result.AdminConflict = conflict.Error()
+				return result, nil
+			}
+		}
+	}
 	identityOpts := WindowsCodexMachineRequirementsOptions{
 		RequirementsPath:   requirementsPath,
 		ManagedDir:         filepath.Dir(hookExecutable),
@@ -970,19 +984,6 @@ func resolveWindowsCodexManagedRuntimeRegistryLocked(
 			return result, errors.New("active Codex machine requirements are missing protected managed runtime state")
 		}
 		return result, nil
-	}
-	// Secure Client (not strict): the administrator turned DefenseClaw's
-	// managed Codex hooks off after DefenseClaw installed them. Codex runs
-	// no hooks then, so there is no active managed Codex runtime to
-	// resolve; Codex is left unauthorized and reported, instead of failing
-	// the Guardian's enrollment publication for every agent on the host.
-	if windowsCodexAdminConflictAllowed() {
-		if cfg, parseErr := parseWindowsCodexRequirements(requirements.data); parseErr == nil {
-			if conflict := codexRequirementsAdminConflict(cfg); conflict != nil {
-				result.AdminConflict = conflict.Error()
-				return result, nil
-			}
-		}
 	}
 	if err := verifyWindowsCodexRequirementsBytes(requirements.data, identityOpts); err != nil {
 		return result, fmt.Errorf("verify active Codex machine requirements: %w", err)
