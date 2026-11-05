@@ -8,16 +8,16 @@ import (
 	"context"
 	"path/filepath"
 	"testing"
+	"time"
 
 	"github.com/defenseclaw/defenseclaw/internal/config"
 	"github.com/defenseclaw/defenseclaw/internal/scanner"
 )
 
 // GAP-0112: Claude Code started a project's server and called its tool
-// before the discovery poll had admitted it, so a decoy that a scan rejects
-// answered the call. A call of a watched server without an admission
-// outcome is pending: refused, and its admission runs at once. Once the
-// rejected verdict is recorded the runtime disable refuses it instead.
+// before the discovery poll had admitted it, so a server with no admission
+// outcome is pending and its admission runs at once. The hook selects its
+// pending behavior by tier. A rejected verdict records a runtime disable.
 func TestMCPServerWithoutAdmissionIsPendingUntilAdmitted(t *testing.T) {
 	cfg, store, logger, _ := setupTestEnv(t)
 	cfg.Gateway.Watcher.MCP.TakeAction = true
@@ -50,6 +50,43 @@ func TestMCPServerWithoutAdmissionIsPendingUntilAdmitted(t *testing.T) {
 	entry, err := store.GetActionForConnector("mcp", "gb05-decoy", "claudecode")
 	if err != nil || entry == nil || entry.Actions.Runtime != "disable" {
 		t.Fatalf("journal %+v (err %v), want the rejected server disabled at runtime", entry, err)
+	}
+}
+
+func TestGAP0034WatcherDistinguishesPendingFromCompletedFailure(t *testing.T) {
+	cfg, store, logger, _ := setupTestEnv(t)
+	cfg.Gateway.Watcher.MCP.TakeAction = true
+	cfg.Scanners.MCPScanner.UnverifiedServer = "warn"
+	server := config.MCPServerEntry{Name: "notes", Command: "npx", Args: []string{"-y", "."},
+		Connector: "claudecode", Project: filepath.Join(t.TempDir(), "proj"), SourceScope: "project"}
+	w := New(cfg, nil, nil, store, logger, nil, nil)
+	w.SetMCPServerSource(func() ([]config.MCPServerEntry, error) { return []config.MCPServerEntry{server}, nil })
+	w.firstCycleDone.Store(true)
+	query := MCPAdmissionQuery{Connector: "claudecode", Server: "notes", CWD: server.Project}
+	initial := w.MCPAdmissionStatus(query)
+	if !initial.Pending || initial.Failed || initial.Name != "notes" || initial.RetryAfter <= 0 || initial.RetryAfter > defaultScanTimeout {
+		t.Fatalf("pending status: %+v", initial)
+	}
+	path := MCPEventPath(server)
+	w.mcpClaims = map[string]time.Time{path: time.Now().Add(-2 * time.Minute)}
+	inProgress := w.MCPAdmissionStatus(query)
+	if inProgress.RetryAfter < 3*time.Minute-time.Second || inProgress.RetryAfter > 3*time.Minute {
+		t.Fatalf("scan progress was not reflected in the retry time: %+v", inProgress)
+	}
+	w.releaseMCP(path)
+	w.scannerFactory = func(InstallEvent) scanner.Scanner { return &failingScanner{countingScanner{name: "mcp-scanner"}} }
+	w.admitAddedMCPServers(context.Background())
+	failed := w.MCPAdmissionStatus(query)
+	if !failed.Failed || failed.Pending || failed.Name != "notes" {
+		t.Fatalf("completed scan failure was reported as pending or clean: %+v", failed)
+	}
+	if _, pending := w.MCPAdmissionPending(query); pending {
+		t.Fatal("a completed scan failure was reported as pending")
+	}
+	server.Args = []string{"-y", "changed"}
+	changed := w.MCPAdmissionStatus(query)
+	if !changed.Failed || changed.Pending {
+		t.Fatalf("a changed definition cleared the prior failed scan before readmission: %+v", changed)
 	}
 }
 

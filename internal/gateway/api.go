@@ -146,6 +146,9 @@ type APIServer struct {
 	// mcpAdmissionPending names an MCP server the install watcher admits
 	// but has not admitted yet (GAP-0112). Set once before serving.
 	mcpAdmissionPending func(connector, server, home, cwd string) (string, bool)
+	// mcpAdmissionStatus also distinguishes a completed scan failure from a
+	// pending scan and carries the scan's remaining timeout.
+	mcpAdmissionStatus func(connector, server, home, cwd string) watcher.MCPAdmissionStatus
 	// mcpRefreshBeforeCall brings the gateway's view of the enrolled users'
 	// MCP servers up to date before an MCP tool call is decided (GAP-0216).
 	// Set once before serving.
@@ -1206,6 +1209,14 @@ func (a *APIServer) SetMCPAdmissionPending(pending func(connector, server, home,
 		return
 	}
 	a.mcpAdmissionPending = pending
+}
+
+// SetMCPAdmissionStatus wires the watcher's current admission state.
+func (a *APIServer) SetMCPAdmissionStatus(status func(connector, server, home, cwd string) watcher.MCPAdmissionStatus) {
+	if a == nil {
+		return
+	}
+	a.mcpAdmissionStatus = status
 }
 
 // SetMCPRefreshBeforeCall wires the refresh of the enrolled users' MCP

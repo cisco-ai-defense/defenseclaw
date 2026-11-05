@@ -8796,8 +8796,8 @@ func (s *Sidecar) runAPI(ctx context.Context) error {
 	addr := apiListenAddr(s.currentConfig())
 	api := newAPIServer(addr, s.health, s.client, s.store, s.logger, cloneConfig(s.currentConfig()))
 	api.SetShutdownRequester(s.requestProcessShutdown)
-	api.SetMCPAdmissionPending(func(connector, server, home, cwd string) (string, bool) {
-		return s.installWatcher.Load().MCPAdmissionPending(watcher.MCPAdmissionQuery{
+	api.SetMCPAdmissionStatus(func(connector, server, home, cwd string) watcher.MCPAdmissionStatus {
+		return s.installWatcher.Load().MCPAdmissionStatus(watcher.MCPAdmissionQuery{
 			Connector: connector, Server: server, Home: home, CWD: cwd,
 		})
 	})
