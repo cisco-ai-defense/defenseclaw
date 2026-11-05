@@ -490,8 +490,20 @@ func perConnectorMCPEntriesForOSWithHomeGuard(cfg *config.Config, reg *connector
 			groups, readPartial := readMCPServersUnderHomeForOSWithStatus(connectorName, home, goos)
 			partial = partial || readPartial
 			var servers []config.MCPServerEntry
+			// Native readers return sources in precedence order. A later file
+			// cannot replace a name found in an earlier file. Entries within one
+			// source may represent separate native project scopes.
+			seenPriorNames := make(map[string]struct{})
 			for _, group := range groups {
-				servers = append(servers, group...)
+				for _, server := range group {
+					if _, seen := seenPriorNames[server.Name]; seen {
+						continue
+					}
+					servers = append(servers, server)
+				}
+				for _, server := range group {
+					seenPriorNames[server.Name] = struct{}{}
+				}
 			}
 			appendServers(connectorName, homeScope, home, servers)
 		}
