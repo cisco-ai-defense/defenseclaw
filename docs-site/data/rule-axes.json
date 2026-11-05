@@ -553,6 +553,12 @@
       ]
     },
     {
+      "id": "secrets.credential_file_write",
+      "axes": [
+        "sensitive_access"
+      ]
+    },
+    {
       "id": "secrets.workload_identity_token_read",
       "axes": [
         "sensitive_access"

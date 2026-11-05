@@ -197,6 +197,7 @@ func axesFromTags(tags []string) []DataAxis {
 // typos and a reviewer can audit the full list in one place.
 var ruleAxes = map[string][]DataAxis{
 	"secrets.cloud_credential_read":               {AxisSensitiveAccess},
+	"secrets.credential_file_write":               {AxisSensitiveAccess},
 	"secrets.browser_session_store_read":          {AxisSensitiveAccess},
 	"secrets.cloud_secret_manager_read":           {AxisSensitiveAccess},
 	"secrets.workload_identity_token_read":        {AxisSensitiveAccess},

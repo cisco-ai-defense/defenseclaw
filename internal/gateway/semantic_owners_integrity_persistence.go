@@ -2685,6 +2685,31 @@ func matchesSafeShellProfileCandidate(
 		value != "/etc/profile"
 }
 
+// credentialFileWritePrerequisite proves secrets.credential_file_write: an
+// executing write, append or delete of one of the CLI credential files in
+// the active user's home (gas-ux-r1:GAP-0052). The read owners of these
+// files (PATH-AWS-CREDS, PATH-KUBE, PATH-DOCKER) never see a write.
+var credentialFileWritePrerequisite = integrityMutationPrerequisite(matchesActiveCredentialFileWrite)
+
+// matchesActiveCredentialFileWrite is the AWS shared credentials or config
+// file, the kubeconfig or the Docker config in the active user's home: the
+// files the user's aws, kubectl and docker read.
+func matchesActiveCredentialFileWrite(
+	facts actionfacts.Facts,
+	candidate actionfacts.PathFact,
+) bool {
+	relative, ok := activeHomeRelative(facts, candidate)
+	if !ok {
+		return false
+	}
+	switch relative {
+	case ".aws/config", ".kube/config", ".docker/config.json":
+		return true
+	}
+	name, ok := strings.CutPrefix(relative, ".aws/")
+	return ok && matchesAWSCredentialsName(name)
+}
+
 func matchesGitHookCandidate(value string) bool {
 	value = canonicalSemanticPath(value)
 	components := strings.Split(strings.Trim(value, "/"), "/")

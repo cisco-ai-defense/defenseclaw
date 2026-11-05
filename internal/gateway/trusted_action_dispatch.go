@@ -4662,6 +4662,18 @@ var exactFallbackContracts = map[string]exactFallbackContract{
 			return owner.prerequisite != nil && owner.prerequisite(facts)
 		},
 	},
+	// A code-owned lane, not a CEL rule: the shipped default keeps its
+	// semantic-rule budget for partner extensions.
+	"secrets.credential_file_write": {
+		proves: func(_ actionfacts.Input, facts actionfacts.Facts) bool {
+			return credentialFileWritePrerequisite(facts)
+		},
+		boundedSubgraphProves: func(_ actionfacts.Input, facts actionfacts.Facts) bool {
+			return credentialFileWritePrerequisite(facts)
+		},
+		requiresExactDetectionProof: true,
+		codeOwnedDetection:          true,
+	},
 	"credential.windows_registry_hive_dump": {
 		proves: func(_ actionfacts.Input, facts actionfacts.Facts) bool {
 			return actionfacts.SensitiveRegistryHiveDumpPair(facts)

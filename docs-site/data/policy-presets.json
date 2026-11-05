@@ -3163,6 +3163,18 @@
                   ]
                 },
                 {
+                  "id": "secrets.credential_file_write",
+                  "tool_call_only": true,
+                  "pattern": "a^",
+                  "title": "Cloud, cluster or registry credential file write",
+                  "severity": "HIGH",
+                  "confidence": 0.92,
+                  "tags": [
+                    "credential",
+                    "file-sensitive"
+                  ]
+                },
+                {
                   "id": "persistence.shell_profile_write",
                   "tool_call_only": true,
                   "expression": "f.paths.exists(p, p.access in [defenseclaw.guardrail.semantic.v1.PathAccess.PATH_ACCESS_WRITE, defenseclaw.guardrail.semantic.v1.PathAccess.PATH_ACCESS_APPEND, defenseclaw.guardrail.semantic.v1.PathAccess.PATH_ACCESS_DELETE])",
@@ -7131,6 +7143,18 @@
                   ]
                 },
                 {
+                  "id": "secrets.credential_file_write",
+                  "tool_call_only": true,
+                  "pattern": "a^",
+                  "title": "Cloud, cluster or registry credential file write",
+                  "severity": "HIGH",
+                  "confidence": 0.92,
+                  "tags": [
+                    "credential",
+                    "file-sensitive"
+                  ]
+                },
+                {
                   "id": "persistence.shell_profile_write",
                   "tool_call_only": true,
                   "expression": "f.commands.exists(c, f.paths.exists(p, p.command_id == c.id && p.access in [defenseclaw.guardrail.semantic.v1.PathAccess.PATH_ACCESS_WRITE, defenseclaw.guardrail.semantic.v1.PathAccess.PATH_ACCESS_APPEND, defenseclaw.guardrail.semantic.v1.PathAccess.PATH_ACCESS_DELETE]))",
@@ -10808,6 +10832,18 @@
                     "privilege",
                     "container",
                     "socket"
+                  ]
+                },
+                {
+                  "id": "secrets.credential_file_write",
+                  "tool_call_only": true,
+                  "pattern": "a^",
+                  "title": "Cloud, cluster or registry credential file write",
+                  "severity": "HIGH",
+                  "confidence": 0.92,
+                  "tags": [
+                    "credential",
+                    "file-sensitive"
                   ]
                 },
                 {
