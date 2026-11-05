@@ -3690,6 +3690,41 @@ func (a *APIServer) evaluateAgentHook(ctx context.Context, req agentHookRequest)
 	// evaluation_id.
 	resp.EvaluationID = evalCtx.EvaluationID
 	resp.RuleIDs = hookResponseRuleIDs(evalCtx.RuleIDs, rawActionBeforeAssets, assetDecisions)
+	if req.ConnectorName == "hermes" && canonicalEvent(req.HookEventName) == "pretoolcall" && action == "block" {
+		if cfg := a.decisionConfig(ctx); cfg == nil || !cfg.SecureClientIntegration() {
+			rule := "policy"
+			for _, id := range resp.RuleIDs {
+				if agentRuleIDPattern.MatchString(id) {
+					rule = id
+					break
+				}
+			}
+			if rule == "policy" {
+				matched := strings.TrimPrefix(agentMatchedRules(reason), "rule ")
+				matched = strings.TrimPrefix(matched, "rules ")
+				candidate, _, _ := strings.Cut(matched, ",")
+				candidate, _, _ = strings.Cut(candidate, ":")
+				if agentRuleIDPattern.MatchString(candidate) {
+					rule = candidate
+				}
+			}
+			field := "reason"
+			if resp.HookOutput["action"] == "block" {
+				field = "message"
+			}
+			message := resp.Reason
+			if native, ok := resp.HookOutput[field].(string); ok && native != "" {
+				message = native
+			}
+			if !strings.HasPrefix(message, "DefenseClaw blocked this call: ") {
+				message = "DefenseClaw blocked this call: " + rule + ": " + message
+			}
+			resp.Reason = message
+			if resp.HookOutput != nil {
+				resp.HookOutput[field] = message
+			}
+		}
+	}
 	resp.RedactionEnabled = verdict.RedactionEnabled
 	resp.laneVerdict = verdict.laneVerdict
 	resp.SuppressNotification = hookNotificationCoveredByAssetPolicy(rawActionBeforeAssets, assetDecisions)
