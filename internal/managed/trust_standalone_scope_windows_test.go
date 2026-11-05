@@ -223,6 +223,73 @@ func TestStandaloneTrustRecoversOnlyThroughTrustedRewrite(t *testing.T) {
 	}
 }
 
+// GAP-0590: only an untrusted owner or writer on the file itself, under
+// folders the standalone walk trusts, is leaf drift: that is what a fresh
+// file from the approved source recovers. A trusted file, drift on a folder
+// above it, and a structural failure are not.
+func TestStandaloneFileLeafDriftIsOnlyTheFileItself(t *testing.T) {
+	t.Setenv(TrustStrictAncestorsEnv, "")
+	t.Setenv(ConfigPathEnv, "")
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.yaml")
+	if err := os.WriteFile(path, []byte("ok"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	setTestFileDACL(t, path, testDACL(t, canonicalTestDACL), true)
+	trusted := ValidateTrustedFilePathStandalone(path, "fixture") == nil
+	if got := StandaloneFileLeafDrift(path, "fixture"); got != nil {
+		t.Fatalf("leaf drift on a canonical file: %v", got)
+	}
+	setTestFileDACL(t, path, testDACL(t, usersWriteDACL), true)
+	got := StandaloneFileLeafDrift(path, "fixture")
+	switch {
+	case trusted && (got == nil || got.SID != "S-1-5-32-545" || !strings.EqualFold(got.Path, path) || got.Owner):
+		t.Fatalf("leaf drift = %+v, want the BUILTIN\\Users writer on %s", got, path)
+	case !trusted && got != nil:
+		t.Fatalf("leaf drift %+v under folders the standalone walk refuses", got)
+	}
+
+	// Drift on the folder that holds the file: a new file there is no safer.
+	nested := filepath.Join(dir, "etc")
+	if err := os.Mkdir(nested, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	inner := filepath.Join(nested, "config.yaml")
+	if err := os.WriteFile(inner, []byte("ok"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	setTestFileDACL(t, inner, testDACL(t, usersWriteDACL), true)
+	setTestFileDACL(t, nested, testDACL(t, "D:P(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)(A;OICI;FA;;;OW)(A;;FA;;;BU)"), true)
+	if got := StandaloneFileLeafDrift(inner, "fixture"); got != nil {
+		t.Fatalf("leaf drift %+v with an untrusted writer on the folder above", got)
+	}
+
+	// A folder where the file should be is a structural failure.
+	if got := StandaloneFileLeafDrift(nested, "fixture"); got != nil {
+		t.Fatalf("leaf drift %+v for a folder", got)
+	}
+	if !trusted {
+		t.Skip("the temp folders are not trusted by the standalone walk here; the positive case ran only as a negative")
+	}
+}
+
+// GAP-0590: a content-drift refusal names the recovery that works for that
+// file: Setup writes config.yaml and targets.yaml new from the approved
+// source; any other content file is the administrator's to check.
+func TestStandaloneContentDriftNamesTheWorkingRecovery(t *testing.T) {
+	for name, want := range map[string]string{
+		"config.yaml":     "CONFIG=<the approved administrator-only config>` so Setup writes a new config.yaml",
+		"targets.yaml":    "Setup writes a new targets.yaml enumerated from it",
+		"deployment.json": "remove that entry and check the file",
+		"journal.json":    "remove that entry and check the file",
+	} {
+		refused := RefuseStandaloneContentDrift(&UntrustedPrincipalError{Path: `C:\ProgramData\Cisco\DefenseClaw\etc\` + name, SID: "S-1-5-32-545", text: "x"})
+		if !strings.Contains(refused.Error(), want) || !strings.HasPrefix(refused.Error(), "x; a standalone install does not repair this file in place") {
+			t.Errorf("%s: refusal %q, want it to name %q", name, refused, want)
+		}
+	}
+}
+
 // Twin: Secure Client keeps the 26.8.4 behaviour, accepting the drift the
 // repair could not fix and logging it, edited bytes included.
 func TestSecureClientTrustStillAcceptsAndLogsDrift(t *testing.T) {

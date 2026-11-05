@@ -6,6 +6,7 @@
 package managed
 
 import (
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
@@ -114,6 +115,54 @@ func WindowsStandaloneTrustScope() bool {
 // such a file unrepaired too.
 func StandaloneRefusesContentDrift() bool {
 	return windowsStandaloneTrustScope()
+}
+
+// StandaloneFileLeafDrift returns the untrusted owner or write-like entry
+// of path itself when that is the standalone walk's only objection to it:
+// path fails the standalone check on its own descriptor, and every folder
+// above it passes. A trusted rewrite recovers exactly this drift: a fresh
+// file from the administrator's approved source, under the admin-only
+// descriptor, takes the name, and the old object moves aside (GAP-0561,
+// GAP-0590). It returns nil for a trusted path, a structural failure, and
+// drift on a folder above path, which a new file in that folder does not
+// recover.
+func StandaloneFileLeafDrift(path, label string) *UntrustedPrincipalError {
+	if label == "" {
+		label = "managed file"
+	}
+	var refused *UntrustedPrincipalError
+	if err := ValidateTrustedFilePathStandalone(path, label); err == nil || !errors.As(err, &refused) {
+		return nil
+	}
+	clean, err := filepath.Abs(path)
+	if err != nil || !strings.EqualFold(filepath.Clean(refused.Path), clean) {
+		return nil
+	}
+	for dir := filepath.Dir(clean); ; dir = filepath.Dir(dir) {
+		if validateTrustedWindowsPathElementWithWriter(dir, true, label, nil, windowsStandaloneAncestorScope(dir)) != nil {
+			return nil
+		}
+		if dir == filepath.Dir(dir) {
+			return refused
+		}
+	}
+}
+
+// standaloneContentDriftRecovery is the recovery that works for the file
+// err refuses: Setup writes config.yaml and the guardian manifest new from
+// the approved source; every other content file is the administrator's to
+// check (GAP-0590).
+func standaloneContentDriftRecovery(err error) string {
+	var refused *UntrustedPrincipalError
+	if errors.As(err, &refused) {
+		switch strings.ToLower(filepath.Base(refused.Path)) {
+		case "config.yaml":
+			return standaloneConfigDriftRecovery()
+		case "targets.yaml":
+			return standaloneManifestDriftRecovery()
+		}
+	}
+	return standaloneRecordDriftRecovery()
 }
 
 // WindowsStandaloneInstallExecutable reports whether the running binary sits
