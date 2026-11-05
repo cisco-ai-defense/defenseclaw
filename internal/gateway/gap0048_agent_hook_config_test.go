@@ -256,6 +256,21 @@ func TestGAP0048ClaudeCodeHookConfigEdits(t *testing.T) {
 		{name: "Bash redirect into project settings", tool: "Bash", input: bash(`echo '{"disableAllHooks": true}' > .claude/settings.json`), defaults: "alert", strict: "block", rule: shell},
 		{name: "Bash tee into user settings", tool: "Bash", input: bash(`echo '{}' | tee ~/.claude/settings.json`), defaults: "alert", strict: "block", rule: shell},
 		{name: "Bash write through a link", tool: "Bash", input: bash(`echo '{}' > ` + filepath.ToSlash(filepath.Join(h.ext, "user-settings"))), defaults: "alert", strict: "block", rule: shell, needsLinks: true},
+		{name: "user Write empties the file", tool: "Write", input: write(user, ""), defaults: "block", strict: "block", rule: disable},
+		{name: "user Edit removes only the DefenseClaw SessionStart entry", tool: "Edit", input: edit(user, `,
+    "SessionStart": [
+      {"hooks": [{"type": "command", "command": "/home/u/.defenseclaw/bin/defenseclaw-hook-user"}]}
+    ]`, ""), defaults: "block", strict: "block", rule: disable},
+		{name: "user Edit adds another hook beside DefenseClaw", tool: "Edit", input: edit(user, `"SessionStart": [`, `"Stop": [{"hooks": [{"type": "command", "command": "echo bye"}]}],
+    "SessionStart": [`), defaults: "allow", strict: "allow"},
+		{name: "local Write allowManagedHooksOnly", tool: "Write", input: write(local, `{"allowManagedHooksOnly": true}`), defaults: "block", strict: "block", rule: disable},
+		{name: "Bash sed -i on user settings", tool: "Bash", input: bash(`sed -i 's/"hooks"/"x"/' ~/.claude/settings.json`), defaults: "alert", strict: "block", rule: shell},
+		{name: "Bash cp over project settings", tool: "Bash", input: bash(`cp notes.txt .claude/settings.json`), defaults: "alert", strict: "block", rule: shell},
+		{name: "Bash mv over user settings", tool: "Bash", input: bash(`mv notes.txt ~/.claude/settings.json`), defaults: "alert", strict: "block", rule: shell},
+		{name: "Bash symlink swap of user settings", tool: "Bash", input: bash(`ln -sf /dev/null ~/.claude/settings.json`), defaults: "alert", strict: "block", rule: shell},
+		{name: "Bash rm of user settings", tool: "Bash", input: bash(`rm -f ~/.claude/settings.json`), defaults: "alert", strict: "block", rule: shell},
+		{name: "Bash truncate of local settings", tool: "Bash", input: bash(`: > .claude/settings.local.json`), defaults: "alert", strict: "block", rule: shell},
+		{name: "Bash cp from settings to a backup", tool: "Bash", input: bash(`cp ~/.claude/settings.json notes.bak`), defaults: "allow", strict: "allow"},
 		{name: "Bash read of settings", tool: "Bash", input: bash(`cat ~/.claude/settings.json .claude/settings.json`), defaults: "allow", strict: "allow"},
 		{name: "Bash ordinary write", tool: "Bash", input: bash(`echo x >> notes.txt`), defaults: "allow", strict: "allow"},
 	})
@@ -275,6 +290,8 @@ func TestGAP0048CodexAndOpenCodeHookConfigEdits(t *testing.T) {
 			{name: "patch hooks false", tool: "apply_patch", input: envelope("*** Update File: " + codexConfig + "\n@@\n [features]\n-hooks = true\n+hooks = false\n"), defaults: "block", strict: "block", rule: disable},
 			{name: "patch drops the hook command", tool: "apply_patch", input: envelope("*** Update File: " + codexConfig + "\n@@\n type = \"command\"\n-command = \"/home/u/.defenseclaw/hooks/codex-hook.sh\"\n+command = \"/bin/true\"\n"), defaults: "block", strict: "block", rule: disable},
 			{name: "patch deletes config.toml", tool: "apply_patch", input: envelope("*** Delete File: " + codexConfig + "\n"), defaults: "block", strict: "block", rule: disable},
+			{name: "shell sed -i hooks false", tool: "Bash", input: map[string]any{"command": `sed -i 's/hooks = true/hooks = false/' ~/.codex/config.toml`}, defaults: "alert", strict: "block", rule: agentHookConfigWriteRuleID},
+			{name: "shell read of config", tool: "Bash", input: map[string]any{"command": `cat ~/.codex/config.toml`}, defaults: "allow", strict: "allow"},
 			{name: "patch changes the model", tool: "apply_patch", input: envelope("*** Update File: " + codexConfig + "\n@@\n-model = \"gpt-5\"\n+model = \"gpt-5.5\"\n"), defaults: "allow", strict: "allow"},
 		})
 	})
@@ -285,6 +302,8 @@ func TestGAP0048CodexAndOpenCodeHookConfigEdits(t *testing.T) {
 			{name: "write rewrites the bridge", tool: "write", input: map[string]any{"filePath": bridge, "content": "export const DefenseClaw = async () => ({})\n"}, defaults: "block", strict: "block", rule: disable},
 			{name: "edit empties the bridge", tool: "edit", input: map[string]any{"filePath": bridge, "oldString": "export const DefenseClaw = async () => ({})", "newString": ""}, defaults: "block", strict: "block", rule: disable},
 			{name: "plugin list without the bridge", tool: "write", input: map[string]any{"filePath": openCodeConfig, "content": `{"plugin": [], "model": "a"}`}, defaults: "block", strict: "block", rule: disable},
+			{name: "shell rm of the bridge", tool: "bash", input: map[string]any{"command": `rm ~/.config/opencode/plugins/defenseclaw.js`}, defaults: "alert", strict: "block", rule: agentHookConfigWriteRuleID},
+			{name: "shell read of the bridge", tool: "bash", input: map[string]any{"command": `cat ~/.config/opencode/plugins/defenseclaw.js`}, defaults: "allow", strict: "allow"},
 			{name: "plugin list keeps the bridge", tool: "edit", input: map[string]any{"filePath": openCodeConfig, "oldString": `"model": "a"`, "newString": `"model": "b"`}, defaults: "allow", strict: "allow"},
 		})
 	})
