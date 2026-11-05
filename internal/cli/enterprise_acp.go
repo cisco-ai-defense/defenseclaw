@@ -95,7 +95,7 @@ func pinEnterpriseACPAdministratorEnv(cmd *cobra.Command) error {
 	applyManagedStandaloneAdminEnv(cmd.ErrOrStderr())
 	return pinManagedAdministratorEnvironment("enterprise acp", func() string {
 		return windowsManagedStandardUserViewAnswer("the ACP enrollments",
-			"enterprise acp "+cmd.Name()+" --user <name> --client <client> --agent <agent> --profile <profile>")
+			"enterprise", "acp", cmd.Name(), "--user", "<name>", "--client", "<client>", "--agent", "<agent>", "--profile", "<profile>")
 	})
 }
 

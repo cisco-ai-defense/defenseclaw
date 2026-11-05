@@ -12,6 +12,7 @@ import (
 	"sync"
 
 	"github.com/defenseclaw/defenseclaw/internal/config"
+	"github.com/defenseclaw/defenseclaw/internal/managed"
 	"github.com/defenseclaw/defenseclaw/internal/useridentity"
 )
 
@@ -533,7 +534,7 @@ func (set *guardrailProfileSet) identityUncertaintyReason(subject *profileSubjec
 		why = append(why, subject.tokenGroupsCause)
 	}
 	return "DefenseClaw refused this request: " + strings.Join(why, "; ") +
-		"; run `" + set.profileExplainCommand(subject, connectorName, agent, slices.Contains(facts, "agent:unknown")) + "` to inspect the identity decision"
+		"; run `" + set.profileExplainCommand(subject, connectorName, agent, slices.Contains(facts, "agent:unknown")) + "`" + set.profileExplainPrompt() + " to inspect the identity decision"
 }
 
 // explainOnRequestPaths is explain's decision for connectorName's requests:
@@ -590,6 +591,16 @@ func sandboxRefusedWarning(connectorName, reason string) string {
 	return fmt.Sprintf("a sandbox run of this account for %s is refused (%s); its hook and inspect requests are not", connectorName, reason)
 }
 
+// profileExplainPrompt says where the managed Windows explain command runs:
+// its `& '...'` form is PowerShell's, and an administrator's (cowork-1-0-8
+// GAP-0076).
+func (set *guardrailProfileSet) profileExplainPrompt() string {
+	if runtime.GOOS == "windows" && set.base != nil && set.base.StandaloneEnterprise() {
+		return " from an elevated PowerShell prompt"
+	}
+	return ""
+}
+
 // profileExplainCommand names the installed administrator command for the
 // verified ID. A missing agent ownership fact includes the current verified
 // agent ID so explain checks the same assignment as the refused hook.
@@ -601,22 +612,24 @@ func (set *guardrailProfileSet) profileExplainCommand(subject *profileSubject, c
 	if subject != nil && subject.UserID == strings.TrimSpace(subject.UserID) && useridentity.KindForID(subject.UserID) != "" {
 		user = subject.UserID
 	}
-	managed := set.base != nil && set.base.StandaloneEnterprise()
+	standalone := set.base != nil && set.base.StandaloneEnterprise()
 	if user == "" {
-		if !managed {
+		if !standalone {
 			return "defenseclaw guardrail profile list"
 		}
 		user = "<user>"
 	}
 	command := "defenseclaw guardrail profile explain --user " + user
-	if managed {
+	if standalone {
 		switch runtime.GOOS {
 		case "linux":
 			command = "sudo /opt/defenseclaw/bin/defenseclaw-gateway enterprise linux profile-explain --user " + user
 		case "darwin":
 			command = "sudo /opt/cisco/defenseclaw/bin/defenseclaw-gateway enterprise macos profile-explain --user " + user
 		case "windows":
-			command = `& 'C:\Program Files\Cisco\DefenseClaw\bin\defenseclaw.exe' enterprise windows profile-explain --user ` + user
+			// The installed CLI under %ProgramFiles%, with the user quoted
+			// for PowerShell (cowork-1-0-8 GAP-0076).
+			command = managed.WindowsAdminCommand("enterprise", "windows", "profile-explain", "--user", user)
 		}
 	}
 	if profileCommandToken(connectorName) {

@@ -68,7 +68,7 @@ func windowsEnterpriseStandaloneConfigPreflight(configPath string) error {
 			return fmt.Errorf("%s: %w; nothing was changed", configPath, err)
 		}
 		if refusal, found := config.ScanManagedEnvSecretReferences(raw).Refusal(configPath,
-			"from an elevated prompt with `defenseclaw.exe enterprise secret set --name <name> --from-file <key file>`",
+			"from an elevated PowerShell prompt with "+managedWindowsCommand("enterprise", "secret", "set", "--name", "<name>", "--from-file", "<key file>"),
 			config.EnterpriseSettingsReferenceURL); found {
 			return fmt.Errorf("%s; fix it and run again (nothing was changed)", refusal)
 		}

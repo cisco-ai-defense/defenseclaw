@@ -582,8 +582,8 @@ func TestManagedWindowsRefusalsNameRunnableCommands(t *testing.T) {
 	for _, args := range [][]string{nil, {"codex"}, {"rotate-token"}, {"kiro"}, {"trusted-paths", "add", "x"}} {
 		answers["setup "+strings.Join(args, " ")] = managedWindowsSetupRefusal(where, args).Error()
 	}
-	answers["view policy"] = windowsManagedStandardUserViewAnswer("The admission policy", "policy show")
-	answers["view sandbox"] = windowsManagedStandardUserViewAnswer("The sandbox registrations", "enterprise windows sandbox list --user dcadmin")
+	answers["view policy"] = windowsManagedStandardUserViewAnswer("The admission policy", "policy", "show")
+	answers["view sandbox"] = windowsManagedStandardUserViewAnswer("The sandbox registrations", "enterprise", "windows", "sandbox", "list", "--user", "dcadmin")
 	answers["inspect status"] = windowsEnterpriseStandardUserInspectionAnswer("status")
 	answers["inspect verify"] = windowsEnterpriseStandardUserInspectionAnswer("verify")
 	answers["mutation repair"] = windowsEnterpriseStandardUserMutationAnswer("repair", "--attest-claude-effective-policy")

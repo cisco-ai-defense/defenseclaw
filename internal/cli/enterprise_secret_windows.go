@@ -125,14 +125,14 @@ func init() {
 // changed.
 func windowsSecretStandardUserAnswer(action string, opts *enterpriseSecretOptions) string {
 	if action == "status" {
-		return windowsManagedStandardUserViewAnswer("The protected credentials", "enterprise secret status")
+		return windowsManagedStandardUserViewAnswer("The protected credentials", "enterprise", "secret", "status")
 	}
-	command := "enterprise secret " + action
+	command := []string{"enterprise", "secret", action}
 	if opts != nil && managed.ValidCredentialName(opts.name) {
-		command += " --name " + opts.name
+		command = append(command, "--name", opts.name)
 	}
 	return "a standard account cannot " + action + " a protected credential of the managed deployment. Ask your administrator, who runs it from an elevated PowerShell prompt with " +
-		managedWindowsCommand(command) + ". Nothing was changed."
+		managedWindowsCommand(command...) + ". Nothing was changed."
 }
 
 type windowsSecretState struct {

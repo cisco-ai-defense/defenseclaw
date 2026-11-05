@@ -58,7 +58,7 @@ func accountGroupNames(uid int) ([]string, error) {
 func pinStandaloneManagedEnv() error {
 	return pinManagedAdministratorEnvironment("enterprise policy", func() string {
 		return windowsManagedStandardUserViewAnswer("the machine policy",
-			"enterprise policy show --user "+managedHostCurrentAccountName())
+			"enterprise", "policy", "show", "--user", managedHostCurrentAccountName())
 	})
 }
 
@@ -157,8 +157,8 @@ func enterprisePolicyLiveAvailable() error {
 		return nil
 	}
 	return errors.New("enterprise policy verify --live is not available on a managed Windows host: Windows cannot start the client as another account, and a standard account cannot read the managed configuration. " +
-		"Run " + managedWindowsCommand("enterprise policy verify") + " from an elevated Administrator prompt for the static check; to see the hooks run, make a tool call in the client from the user's own session, " +
-		"then read its record from the elevated prompt with " + managedWindowsCommand("audit export --connector <connector> -o <file>"))
+		"Run " + managedWindowsCommand("enterprise", "policy", "verify") + " from an elevated Administrator prompt for the static check; to see the hooks run, make a tool call in the client from the user's own session, " +
+		"then read its record from the elevated prompt with " + managedWindowsCommand("audit", "export", "--connector", "<connector>", "-o", "<file>"))
 }
 
 // enterprisePolicyLiveCredential: Windows has no setuid; the agent must be

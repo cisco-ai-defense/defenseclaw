@@ -1549,8 +1549,8 @@ func addWindowsEnterpriseMissingCredentialWarnings(result *enterprisestatus.Resu
 			continue
 		}
 		result.AddWarning("credential_missing", fmt.Sprintf(
-			"the config names the protected credential %s (%s) but it is not stored, so %s; store it from an elevated prompt with `defenseclaw.exe enterprise secret set --name %s --from-file <key file>`",
-			name, named.key, named.effect, name))
+			"the config names the protected credential %s (%s) but it is not stored, so %s; store it from an elevated PowerShell prompt with %s",
+			name, named.key, named.effect, managedWindowsCommand("enterprise", "secret", "set", "--name", name, "--from-file", "<key file>")))
 	}
 }
 
@@ -2568,14 +2568,16 @@ func applyWindowsEnterpriseGatewayStartFailure(result *enterprisestatus.Result, 
 	message := fmt.Sprintf("the %s service is not running; the last error it logged: %s (log: %s)",
 		report.GatewayService, windowsEnterpriseBoundedDiagnostic(reason), logPath)
 	if strings.Contains(reason, "Access is denied") {
-		message += "; " + windowsEnterpriseRepairServiceAccess
+		message += "; " + windowsEnterpriseRepairServiceAccess()
 	}
 	result.AddError("gateway_start_failed", message)
 }
 
 // windowsEnterpriseRepairServiceAccess is what restores a DefenseClaw
 // service's access to its folders.
-const windowsEnterpriseRepairServiceAccess = "run defenseclaw enterprise windows repair --profile standalone from an elevated prompt to restore the service's access"
+func windowsEnterpriseRepairServiceAccess() string {
+	return "run " + windowsEnterpriseAdminCommand("repair") + " from an elevated PowerShell prompt to restore the service's access"
+}
 
 // windowsEnterpriseServiceRightsPattern matches the lifecycle's report that a
 // managed path lacks the rights of a service's virtual account, which it
@@ -2613,7 +2615,7 @@ func windowsEnterpriseNameServiceRights(message string, repair bool) string {
 	text := fmt.Sprintf("the %s service (NT SERVICE\\%s, %s) is missing required rights on %s (required %s, has %s)",
 		name, name, sid, message[match[8]:match[9]], message[match[4]:match[5]], message[match[6]:match[7]])
 	if repair {
-		text += "; " + windowsEnterpriseRepairServiceAccess
+		text += "; " + windowsEnterpriseRepairServiceAccess()
 	}
 	return message[:match[0]] + text
 }

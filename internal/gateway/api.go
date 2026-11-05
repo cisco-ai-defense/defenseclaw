@@ -3524,11 +3524,11 @@ func windowsProfileScanNextStep(kind, target string) string {
 	}
 	review := `C:\DefenseClawReview`
 	copyTo := review + `\` + name
-	quote := func(s string) string { return "'" + strings.ReplaceAll(s, "'", "''") + "'" }
+	quote := managed.PowerShellLiteral
 	return "standard accounts cannot run managed scans, so an administrator copies the folder out of the profiles and scans the copy " +
 		"from an elevated PowerShell prompt: `New-Item -ItemType Directory -Force " + quote(review) + " | Out-Null; " +
-		"Copy-Item -Recurse -Force -LiteralPath " + quote(target) + " -Destination " + quote(copyTo) + "`, then `& " +
-		quote(managed.WindowsStandaloneAdminCLI()) + " scan " + kind + " " + quote(copyTo) + "`"
+		"Copy-Item -Recurse -Force -LiteralPath " + quote(target) + " -Destination " + quote(copyTo) + "`, then `" +
+		managed.WindowsAdminCommand("scan", kind, copyTo) + "`"
 }
 
 func (a *APIServer) isBundledMCPScanRequest(req mcpScanRequest) bool {

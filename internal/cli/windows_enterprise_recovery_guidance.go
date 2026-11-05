@@ -437,13 +437,13 @@ func windowsEnterpriseInstallerBuildMismatchText(message, action string, purge b
 	if !strings.Contains(message, "installer module SHA-256 does not match the pinned payload manifest") {
 		return "", false
 	}
-	command := action
+	var flags []string
 	if action == "uninstall" && purge {
-		command += " --purge"
+		flags = append(flags, "--purge")
 	}
 	return "this CLI does not match the installed DefenseClaw: the enterprise installer module it carries is not the one the installed deployment recorded" +
 		" (a CLI from another DefenseClaw build, or a changed module file), so the " + action + " stopped before it changed anything." +
-		" Next step: run the installed CLI, " + windowsEnterpriseAdminCommand(command) +
+		" Next step: run the installed CLI, " + windowsEnterpriseAdminCommand(action, flags...) +
 		", or the DefenseClaw Setup of the installed release; to move to another release, run that release's Setup", true
 }
 
@@ -673,8 +673,10 @@ func windowsEnterpriseStoppedServiceNextStep(services []enterprisestatus.Service
 // for the standalone profile as an administrator types it. Setup puts no
 // DefenseClaw command on PATH, so a bare `defenseclaw ...` hint was "not
 // recognized"; the installed CLI is named by its path (GAP-1183, GAP-1338).
-func windowsEnterpriseAdminCommand(action string) string {
-	return managedWindowsCommand("enterprise windows " + action + " --profile standalone")
+// flags come before --profile.
+func windowsEnterpriseAdminCommand(action string, flags ...string) string {
+	args := append([]string{"enterprise", "windows", action}, flags...)
+	return managedWindowsCommand(append(args, "--profile", "standalone")...)
 }
 
 // windowsEnterpriseStandaloneLifecycleAction reports whether a standalone
