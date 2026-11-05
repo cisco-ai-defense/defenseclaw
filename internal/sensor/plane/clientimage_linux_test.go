@@ -576,11 +576,23 @@ func TestBufferDropsAreReportedInCoverage(t *testing.T) {
 	}
 	stream := NewTetragonSource(nil, TetragonOptions{Mode: "consume"}).(*tetragonSource)
 	half := &linuxSource{buffer: NewBuffer()}
+	files := &linuxSource{buffer: NewBuffer()}
 	stream.proc = halfSource{linuxSource: half, cancel: func() {}}
+	stream.files = halfSource{linuxSource: files, cancel: func() {}}
 	fill(stream.buffer)
 	fill(half.buffer)
-	if limits := strings.Join(stream.Coverage().Limitations, "; "); !strings.Contains(limits, "2 events were dropped from the sensor's event buffer") {
-		t.Fatalf("Tetragon limitations = %q, want both buffers' drops", limits)
+	fill(files.buffer)
+	if limits := strings.Join(stream.Coverage().Limitations, "; "); !strings.Contains(limits, "3 events were dropped from the sensor's event buffer") {
+		t.Fatalf("Tetragon limitations = %q, want the stream's, the process half's and the file half's drops", limits)
+	}
+	// A half that stops keeps its drops in the count (S1 review 3 F4): the
+	// process half at a Tetragon reconnect, the file half at the hand-off.
+	stream.mu.Lock()
+	stream.retiredDropped += halfDropped(stream.proc) + halfDropped(stream.files)
+	stream.proc, stream.files = nil, nil
+	stream.mu.Unlock()
+	if limits := strings.Join(stream.Coverage().Limitations, "; "); !strings.Contains(limits, "3 events were dropped from the sensor's event buffer") {
+		t.Fatalf("Tetragon limitations after the halves stopped = %q, want 3 still", limits)
 	}
 }
 

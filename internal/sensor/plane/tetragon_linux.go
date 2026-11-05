@@ -161,6 +161,9 @@ type tetragonSource struct {
 	files    nativeHalf
 	filesErr error
 	handed   bool // fanotify stopped after the hand-off
+	// retiredDropped are the buffer drops of native halves since stopped,
+	// kept so the coverage still names them (GAP-0071).
+	retiredDropped int64
 
 	// Loss: rate-limit drops in the stream, and growth of Tetragon's own
 	// loss counters since each session opened (lastLost is the counter at
@@ -297,6 +300,7 @@ func (s *tetragonSource) dial(ctx context.Context) error {
 		s.observeSince = s.switchedAt
 	}
 	proc := s.proc
+	s.retiredDropped += halfDropped(s.proc)
 	s.proc, s.procErr = nil, nil
 	s.mu.Unlock()
 	if proc != nil {
@@ -366,6 +370,7 @@ func (s *tetragonSource) startFiles(ctx context.Context) {
 		}
 		return
 	}
+	s.retiredDropped += halfDropped(s.files)
 	s.files, s.filesErr, s.handed = files, err, false
 	s.mu.Unlock()
 	if files != nil {
@@ -427,6 +432,14 @@ func (s *tetragonSource) handleBatch(batch KernelBatch) {
 			delivery.execSent()
 		}
 	}
+}
+
+// halfDropped is the buffer drops of a native half (GAP-0071).
+func halfDropped(half nativeHalf) int64 {
+	if h, ok := half.(interface{ bufferDropped() int64 }); ok {
+		return h.bufferDropped()
+	}
+	return 0
 }
 
 // pushUnlessClosed delivers an event from outside the feed (an image digest
@@ -725,6 +738,7 @@ func (s *tetragonSource) evaluateHandoff(ctx context.Context, now time.Time) {
 	takeBack := s.handed && !healthy && (!enabled || s.throttled || s.lossAt.After(since))
 	files := s.files
 	if handOff {
+		s.retiredDropped += halfDropped(s.files)
 		s.files, s.handed = nil, true
 	}
 	policiesChanged := !samePolicies(previous.Policies, current.Policies)
@@ -796,12 +810,10 @@ func (s *tetragonSource) Coverage() (coverage Coverage) {
 	backend.Policies = append([]BackendPolicy(nil), s.backend.Policies...)
 	backend.EventsLost = s.dropped + s.knownLost
 	coverage = Coverage{Backend: &backend}
-	// The stream's own buffer and the native process half's are DefenseClaw
-	// losses, not Tetragon's: named apart from EventsLost (GAP-0071).
-	dropped := s.buffer.Dropped()
-	if half, ok := s.proc.(interface{ bufferDropped() int64 }); ok {
-		dropped += half.bufferDropped()
-	}
+	// The stream's own buffer and the native halves' (running or stopped)
+	// are DefenseClaw losses, not Tetragon's: named apart from EventsLost
+	// (GAP-0071).
+	dropped := s.buffer.Dropped() + s.retiredDropped + halfDropped(s.proc) + halfDropped(s.files)
 	defer func() {
 		if dropped > 0 {
 			coverage.Limitations = append(coverage.Limitations, bufferDropLimitation(dropped))

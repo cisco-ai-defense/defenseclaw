@@ -93,6 +93,20 @@ func TestImageDigestsTravelInTheirOwnFrame(t *testing.T) {
 		t.Fatalf("an old gateway saw %v and skipped %d frames", kinds, skipped)
 	}
 
+	// GAP-0071 (S1 review 3 F3): events the gateway's own buffer for the
+	// helper stream drops are named in the coverage.
+	gateway := &helperPlaneSource{buffer: plane.NewBuffer(), coverage: plane.Coverage{Mechanism: "cn_proc"}}
+	if limits := gateway.Coverage().Limitations; len(limits) != 0 {
+		t.Fatalf("limitations before any drop: %v", limits)
+	}
+	for index := 0; index <= 4096; index++ {
+		gateway.buffer.Push(plane.Event{Kind: plane.KindFileRead, PID: index})
+	}
+	if limits := gateway.Coverage().Limitations; len(limits) != 1 ||
+		limits[0] != "1 events from the sensor helper were dropped from the gateway's event buffer under back-pressure" {
+		t.Fatalf("gateway buffer limitations = %v", limits)
+	}
+
 	// An exec from a helper that predates the state decodes with none.
 	var wire wireEvent
 	if err := json.Unmarshal([]byte(`{"kind":"exec","pid":7,"image_version":"2.1.317"}`), &wire); err != nil {
