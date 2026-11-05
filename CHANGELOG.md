@@ -11,6 +11,7 @@ for current behavior.
 ## [Unreleased] — 1.0.9
 
 ### Fixed
+- **A refused rollback source names the file and the fix.** `defenseclaw init` refuses a file in its data folder that it did not write the way DefenseClaw writes its files (on Windows, a plain `hook_contract_lock.json` copied or made by hand: "hook_contract_lock.json rollback source is not protected"), and the message named no file and no way out. The first run now names the full path and says to move the file out of the folder, or delete it if you did not create it, then run `defenseclaw init` again; a file other accounts can read gets the same path and its `chmod 600` command. Setup commands keep the message without the path. The check is unchanged, and DefenseClaw still never moves or deletes the file. (cowork-1-0-8 GAP-0074)
 - **A per-user first run on Windows moves only what a managed install left.** It moved an entry with a managed leftover's name (for example `hooks` or `hook_contract_lock.json`) whenever only the account, LocalSystem and Administrators could write it, which is also the plain access list a profile gives every new file. It now moves an entry only when it still carries the managed access list: Administrators full control, the account Modify (not the right to change permissions or take ownership) and, where the managed install set one, a read-only OWNER RIGHTS entry. (cowork-1-0-8 GAP-0069)
 
 ## [Unreleased] — 1.0.8

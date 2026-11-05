@@ -736,7 +736,7 @@ def run_first_run(options: FirstRunOptions) -> FirstRunReport:
 
     transaction_app = AppContext()
     transaction_app.cfg = cfg
-    from defenseclaw.commands.cmd_setup import _capture_setup_config_snapshot
+    from defenseclaw.commands.cmd_setup import RollbackSourceRefusedError, _capture_setup_config_snapshot
 
     preserved_trusted_prefixes: tuple[str, ...] | None = None
     if options.trusted_binary_prefixes is not None:
@@ -807,11 +807,13 @@ def run_first_run(options: FirstRunOptions) -> FirstRunReport:
     try:
         setup_snapshot = _capture_setup_config_snapshot(cfg)
     except OSError as exc:
+        # The file is in this account's own data folder: name it (GAP-0074).
+        reason = exc.for_user("defenseclaw init") if isinstance(exc, RollbackSourceRefusedError) else str(exc)
         setup.append(
             StepResult(
                 "First-run transaction",
                 "fail",
-                f"could not establish the protected first-run rollback point: {exc}",
+                f"could not establish the protected first-run rollback point: {reason}",
                 "defenseclaw init",
             )
         )

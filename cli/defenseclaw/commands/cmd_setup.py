@@ -8753,6 +8753,40 @@ class _SetupAppliedRuntimeEvidence:
     registration_locations: tuple[_SetupRegistrationLocationEvidence, ...] = ()
 
 
+class RollbackSourceRefusedError(OSError):
+    """A rollback source DefenseClaw did not write: refused, with the way out.
+
+    The refusal stays: a file another account could change is never read as
+    a rollback point, and DefenseClaw never moves or deletes it for the user.
+    ``str()`` names the file by its label only, like every rollback-source
+    error, because setup commands wrap and record these messages.
+    :meth:`for_user` names the full path for the account's own first run
+    (``defenseclaw init``), so the user knows which file to move
+    (cowork-1-0-8 GAP-0074).
+    """
+
+    def __init__(self, label: str, path: str, problem: str, kind: str) -> None:
+        self.label = label
+        self.path = path
+        self.problem = problem
+        self.kind = kind
+        super().__init__(self._render("the file", "run the command again"))
+
+    def _render(self, file: str, rerun: str) -> str:
+        head = f"{self.label} rollback source is {self.problem}: "
+        if self.kind == "shared":
+            chmod = f"chmod 600 {shlex.quote(self.path)}" if file == self.path else "chmod 600"
+            return f"{head}other accounts can read or change {file}; make it owner-only ({chmod}) and {rerun}"
+        return (
+            f"{head}{file} is not protected the way DefenseClaw writes its files. "
+            f"Move it out of the folder, or delete it if you did not create it, then {rerun}"
+        )
+
+    def for_user(self, command: str) -> str:
+        """The message with the full path, for the account that owns the file."""
+        return self._render(self.path, f"run {command} again")
+
+
 def _capture_protected_setup_file(
     path: str,
     maximum: int,
@@ -8800,12 +8834,12 @@ def _capture_protected_setup_file(
             if acl_error is not None:
                 if skip_if_untrusted:
                     return False, b"", None
-                raise OSError(f"{label} rollback source is not protected")
+                raise RollbackSourceRefusedError(label, path, "not protected", "foreign")
         else:
             if not trusted_runtime_owner(info.st_uid):
                 if skip_if_untrusted:
                     return False, b"", None
-                raise OSError(f"{label} rollback source is not owned by a trusted principal")
+                raise RollbackSourceRefusedError(label, path, "not owned by a trusted principal", "foreign")
             extra_bits = stat.S_IMODE(info.st_mode) & 0o077
             if extra_bits:
                 can_repair = (
@@ -8820,10 +8854,7 @@ def _capture_protected_setup_file(
                 if extra_bits:
                     if skip_if_untrusted:
                         return False, b"", None
-                    raise OSError(
-                        f"{label} rollback source is not private; "
-                        "make it owner-only (chmod 600) and run the command again"
-                    )
+                    raise RollbackSourceRefusedError(label, path, "not private", "shared")
         body = bytearray()
         size = 0
         while size <= maximum:
