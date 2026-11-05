@@ -57,7 +57,7 @@ Use one OS account for each DefenseClaw and OpenClaw pair. On a shared machine, 
 DefenseClaw checks the listener before it sends a token. This protects against a process of another account that takes a port while a gateway restarts:
 
 - The plugin sends the DefenseClaw token and provider keys only to a loopback `gateway.host`. `localhost` means `127.0.0.1`. With any other host the plugin sends nothing, and `defenseclaw doctor` fails the **OpenClaw gateway.host** row.
-- The listener must prove it holds the same token (`/api/v1/hook-listener-proof`). The gateway answers that proof only to its own OS account. When the proof fails, nothing is sent: a tool check follows the plugin's outage mode, and a model call fails as in a gateway outage.
+- The listener must prove it holds the same token (`/api/v1/hook-listener-proof`). The gateway answers that proof only to its own OS account. When the proof fails, nothing is sent. A listener that answers without the proof is not an outage: a tool check is blocked in every policy, and a model call fails as in a gateway outage.
 - Tool checks and the plugin's other gateway calls prove the very connection that carries the token. Model calls, health checks and telemetry prove the listener right before each request. A process that takes the port in the gap between that proof and the request, well under a millisecond on loopback, could still receive that one request.
 - Before it connects to a loopback OpenClaw gateway port, the DefenseClaw gateway checks who owns the listener. On Linux it must be the same account or root; on macOS, the same account. Otherwise it sends nothing, keeps retrying, and `defenseclaw doctor` names the step.
 
@@ -227,7 +227,7 @@ The gateway answers allow, alert, confirm or block. In action mode a block stops
 
 ### Fail mode
 
-OpenClaw is a proxy connector with no hooks. While the gateway is down, requests are blocked ([gateway outage table](/docs/connectors/capability-matrix#gateway-outage)). `guardrail fail-mode` lists it as `closed (proxy-backed, no hooks ...)`. See [Fail modes](/docs/reference/fail-modes).
+OpenClaw model requests use the proxy and are blocked while the gateway is down ([gateway outage table](/docs/connectors/capability-matrix#gateway-outage)). The plugin's tool-inspection call follows the saved guardrail outage mode: on a per-user default or permissive policy, an outage (nothing listens on the gateway port) or timeout lets the tool run with a warning in its result; strict and managed policy blocks it. A listener that does not prove it is the account's gateway blocks the tool in every policy. `DEFENSECLAW_TOOL_INSPECT_FAIL_OPEN` is ignored by the 1.0.9 plugin. See [Fail modes](/docs/reference/fail-modes).
 
 When the gateway cannot write the audit record of a tool check or a prompt, for example on a full disk, the strict policy blocks the call. The default and permissive policies allow it and say that DefenseClaw audit is degraded. Tool results and model responses keep their verdict.
 

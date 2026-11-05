@@ -84,10 +84,24 @@ const MAX_PROOF_RESPONSE_BYTES = 16 * 1024;
 
 export class ListenerProofError extends Error {
   readonly code = "DC_PEER_UNVERIFIED";
-  constructor(message: string) {
+  /**
+   * True only when nothing answered: the connection was refused, or the
+   * connect or the proof ran out of time. A listener that answered without a
+   * valid proof, a non-loopback host and a missing token are never
+   * unreachable, so the saved outage mode never applies to them.
+   */
+  readonly unreachable: boolean;
+  constructor(message: string, unreachable = false) {
     super(message);
     this.name = "ListenerProofError";
+    this.unreachable = unreachable;
   }
+}
+
+/** A connect error that means nothing listens on the port. */
+function nothingListens(err: Error): boolean {
+  const code = (err as { code?: unknown }).code;
+  return code === "ECONNREFUSED" || code === "EHOSTUNREACH" || code === "ENETUNREACH";
 }
 
 /** host as the plugin connects to it: localhost names the gateway's 127.0.0.1. */
@@ -133,9 +147,10 @@ function proofMatches(token: string, nonce: string, status: number, proof: strin
   return timingSafeEqual(Buffer.from(proof, "hex"), Buffer.from(want, "hex"));
 }
 
-const notProven = (host: string, port: number) =>
+const notProven = (host: string, port: number, unreachable = false) =>
   new ListenerProofError(
     `the listener on ${host}:${port} did not prove it is this account's DefenseClaw gateway; nothing was sent to it`,
+    unreachable,
   );
 
 type RequestImpl = typeof httpRequest;
@@ -161,10 +176,12 @@ function proveOnce(host: string, port: number, token: string, requestImpl: Reque
         else reject(notProven(host, port));
       },
     );
-    const cancel = deadlineTimer(LISTENER_PROOF_DEADLINE_MS, () => req.destroy(notProven(host, port)));
+    const cancel = deadlineTimer(LISTENER_PROOF_DEADLINE_MS, () => req.destroy(notProven(host, port, true)));
     req.on("error", (err) => {
       cancel();
-      reject(err instanceof ListenerProofError ? err : new ListenerProofError(`${notProven(host, port).message}: ${err.message}`));
+      reject(err instanceof ListenerProofError
+        ? err
+        : new ListenerProofError(`${notProven(host, port).message}: ${err.message}`, nothingListens(err)));
     });
     req.end();
   });
@@ -218,7 +235,7 @@ function proveSocket(socket: Socket, host: string, port: number, token: string, 
   for (const [name, value] of Object.entries(proofHeaders(token, nonce))) lines.push(`${name}: ${value}`);
   return new Promise((resolve, reject) => {
     let buf = Buffer.alloc(0);
-    const cancel = deadlineTimer(deadlineAt - Date.now(), () => finish(notProven(host, port)));
+    const cancel = deadlineTimer(deadlineAt - Date.now(), () => finish(notProven(host, port, true)));
     const finish = (err?: Error) => {
       cancel();
       socket.removeListener("data", onData);
@@ -300,11 +317,11 @@ export function provenCreateConnection(
     const cancelConnect = deadlineTimer(deadlineMs, () => {
       socket.removeListener("error", onConnectError);
       socket.destroy();
-      once(new ListenerProofError(`${notProven(host, port).message}: connect timed out`));
+      once(new ListenerProofError(`${notProven(host, port).message}: connect timed out`, true));
     });
     const onConnectError = (err: Error) => {
       cancelConnect();
-      once(new ListenerProofError(`${notProven(host, port).message}: ${err.message}`));
+      once(new ListenerProofError(`${notProven(host, port).message}: ${err.message}`, nothingListens(err)));
     };
     socket.once("error", onConnectError);
     socket.once("connect", () => {

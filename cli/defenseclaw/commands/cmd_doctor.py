@@ -12594,8 +12594,8 @@ def _openclaw_plugin_host_is_loopback(host: str) -> bool:
 
 def _check_openclaw_gateway_host(cfg, r: _DoctorResult) -> None:
     """GAP-0594: the OpenClaw plugin sends its token only to a loopback
-    gateway.host. With any other host every tool check follows the plugin's
-    outage mode and every model call fails, so say it here."""
+    gateway.host. With any other host every tool check is blocked and every
+    model call fails, so say it here."""
     if "openclaw" not in _doctor_active_connectors(cfg) or not _connector_enabled(cfg, "openclaw"):
         return
     host = str(getattr(getattr(cfg, "gateway", None), "host", "") or "127.0.0.1")
@@ -12605,7 +12605,7 @@ def _check_openclaw_gateway_host(cfg, r: _DoctorResult) -> None:
         "fail",
         "OpenClaw gateway.host",
         f"{host} is not a loopback address: the OpenClaw plugin sends nothing to it, so tool checks "
-        "follow the outage mode and model calls fail",
+        "are blocked and model calls fail",
         r=r,
         remediation=(
             "defenseclaw config set gateway.host 127.0.0.1, then defenseclaw-gateway restart and restart OpenClaw"
