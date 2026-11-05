@@ -1147,7 +1147,7 @@ func TestPerConnectorMCPInventoryCountsCollisionsAcrossClaudeFiles(t *testing.T)
 	t.Setenv("HOME", t.TempDir())
 	for path, body := range map[string]string{
 		filepath.Join(home, ".claude.json"):             `{"mcpServers":{"alpha":{"command":"uvx","args":["notes-mcp"]}}}`,
-		filepath.Join(home, ".claude", "settings.json"): `{"mcpServers":{"beta":{"command":"uvx","args":["notes-mcp"]}}}`,
+		filepath.Join(home, ".claude", "settings.json"): `{"mcpServers":{"alpha":{"command":"npx","args":["ignored"]},"beta":{"command":"uvx","args":["notes-mcp"]}}}`,
 		filepath.Join(home, ".mcp.json"):                `{"mcpServers":{"alpha":{"command":"uvx","args":["notes-mcp"]}}}`,
 	} {
 		if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
@@ -1168,6 +1168,11 @@ func TestPerConnectorMCPInventoryCountsCollisionsAcrossClaudeFiles(t *testing.T)
 	}
 	if rows[0].id == rows[1].id || rows[0].itemName == rows[1].itemName {
 		t.Fatalf("cross-file aliases lost distinct IDs: %+v", rows)
+	}
+	for _, row := range rows {
+		if row.itemName == "alpha" && row.mcpCommandBasename != "uvx" {
+			t.Fatalf("later Claude definition replaced first source: %+v", row)
+		}
 	}
 }
 
