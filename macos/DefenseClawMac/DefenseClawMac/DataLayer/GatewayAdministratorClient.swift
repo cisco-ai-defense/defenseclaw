@@ -94,7 +94,13 @@ enum GatewayRootState {
         "These DefenseClaw files are still owned by root: \(markers.map(\.name).joined(separator: ", ")). "
             + "DefenseClawMac will not ask to repair them again until they change. If a gateway started with sudo "
             + "is running, stop it first: sudo defenseclaw-gateway stop. Then return the files to your account "
-            + "in Terminal and start the gateway again: sudo chown -R \"$(id -un)\" '\(home.path)'\n"
+            + "in Terminal and start the gateway again: sudo chown -R \"$(id -un)\" \(shellQuoted(home.path))\n"
+    }
+
+    /// A POSIX shell single-quoted word: safe to paste for any path,
+    /// including spaces, `;` and embedded single quotes.
+    static func shellQuoted(_ value: String) -> String {
+        "'" + value.replacingOccurrences(of: "'", with: "'\\''") + "'"
     }
 }
 
@@ -217,7 +223,7 @@ enum GatewayAdministratorClient {
               SecRequirementCreateWithString(GatewayAdminPolicy.appRequirement as CFString, [], &requirement) == errSecSuccess,
               let code, let requirement,
               SecCodeCheckValidity(code, [], requirement) == errSecSuccess else {
-            throw AdministratorError(message: "This installation has gateway files owned by root, and only a Developer ID signed DefenseClawMac build can repair them from the app. Repair it in Terminal, then start the gateway again: sudo defenseclaw-gateway stop && sudo chown -R \"$(id -un)\" '\(home)'\n")
+            throw AdministratorError(message: "This installation has gateway files owned by root, and only a Developer ID signed DefenseClawMac build can repair them from the app. Repair it in Terminal, then start the gateway again: sudo defenseclaw-gateway stop && sudo chown -R \"$(id -un)\" \(GatewayRootState.shellQuoted(home))\n")
         }
         guard bundledServiceAvailable else {
             throw AdministratorError(message: "This app build does not include its administrator helper. Install the complete signed DefenseClawMac build.")

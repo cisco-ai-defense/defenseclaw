@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import ctypes
 import os
+import shlex
 import stat
 import subprocess
 import sys
@@ -703,6 +704,17 @@ def test_doctor_warns_when_per_user_gateway_runs_as_root(monkeypatch, tmp_path) 
     assert check["reason_code"] == "per-user-gateway-runs-as-root"
     assert "DefenseClawMac" in check["remediation"]
     assert "sudo defenseclaw-gateway stop" in check["remediation"]
+
+
+@pytest.mark.skipif(os.name == "nt" or os.geteuid() == 0, reason="POSIX per-user gateway account")
+def test_doctor_gateway_account_hint_quotes_the_home(monkeypatch, tmp_path) -> None:
+    home = tmp_path / "my home; touch pwned"
+    home.mkdir()
+    result = _gateway_account_fixture(monkeypatch, home, process_uid=0)
+
+    remediation = result.checks[-1]["remediation"]
+    assert shlex.quote(os.fspath(home)) in remediation
+    assert shlex.split(remediation.split("Otherwise: ", 1)[1])[8] == os.fspath(home)
 
 
 @pytest.mark.skipif(os.name == "nt" or os.geteuid() == 0, reason="POSIX per-user gateway account")

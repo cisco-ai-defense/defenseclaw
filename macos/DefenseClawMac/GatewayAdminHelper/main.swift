@@ -284,11 +284,13 @@ enum GatewayAdminTrust {
 
 /// The selected DefenseClaw home, opened by descriptor. The walk starts at "/"
 /// and opens every component with openat and O_NOFOLLOW, checking each on its
-/// own descriptor: the folders above the account home must be root-owned, the
-/// account home and everything below it real folders owned by root or the
-/// account, none writable by group or others or through a write ACL, and
-/// everything from the account home down on the account home's volume. A folder swapped for a symlink at any point
-/// is refused; one renamed away keeps the descriptor on the verified folder.
+/// own descriptor: the folders above the account home are root-owned and not
+/// writable by group or others (a sticky folder excepted) or through a write
+/// ACL; the account home is owned by the account; everything below it is a
+/// real folder owned by root or the account, not writable by group or others
+/// or through a write ACL; and everything from the account home down is on the
+/// account home's volume. A folder swapped for a symlink at any point is
+/// refused; one renamed away keeps the descriptor on the verified folder.
 /// Everything the repair reads or changes is reached from this descriptor.
 /// The home must hold a DefenseClaw config.yaml.
 final class GatewayAdminInstallation {
@@ -316,12 +318,17 @@ final class GatewayAdminInstallation {
                 close(current)
                 current = next
                 var metadata = stat()
-                guard fstat(current, &metadata) == 0, metadata.st_mode & S_IFMT == S_IFDIR,
+                guard fstat(current, &metadata) == 0, metadata.st_mode & S_IFMT == S_IFDIR, metadata.st_uid == 0,
                       metadata.st_mode & 0o022 == 0 || metadata.st_mode & S_ISVTX != 0 else {
-                    throw GatewayAdminFailure.refused("A folder above the DefenseClaw home is writable by other accounts.")
+                    throw GatewayAdminFailure.refused("A folder above your account home is not root-owned or is writable by other accounts.")
                 }
+                try GatewayAdminTrust.rejectWriteACL(descriptor: current)
             }
             let volume = try Self.verify(current, account: account, directory: true, device: nil)
+            var accountHome = stat()
+            guard fstat(current, &accountHome) == 0, accountHome.st_uid == account.uid else {
+                throw GatewayAdminFailure.refused("Your account home is not owned by your account.")
+            }
             let components = home.dropFirst(account.home.count + 1).split(separator: "/").map(String.init)
             for (index, component) in components.enumerated() {
                 let next = openat(current, component, O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC)
@@ -486,7 +493,10 @@ enum GatewayAdminRootProcess {
         return named ? (.other, started) : nil
     }
 
-    static func readRecord(in home: Int32, name: String) -> Record? {
+    /// The record and whether it can be trusted to choose a process to
+    /// signal: only a root-owned file with a single link, which a root gateway
+    /// writes itself and the account can neither forge nor hard-link in.
+    static func readRecord(in home: Int32, name: String) -> (record: Record, trusted: Bool)? {
         let descriptor = openat(home, name, O_RDONLY | O_NOFOLLOW | O_NONBLOCK | O_NOCTTY | O_CLOEXEC)
         guard descriptor >= 0 else { return nil }
         defer { close(descriptor) }
@@ -495,17 +505,29 @@ enum GatewayAdminRootProcess {
               metadata.st_size > 0, metadata.st_size <= maximumRecordBytes else { return nil }
         var buffer = [UInt8](repeating: 0, count: Int(metadata.st_size))
         let count = buffer.withUnsafeMutableBytes { Darwin.read(descriptor, $0.baseAddress, $0.count) }
-        return count > 0 ? record(from: Data(buffer.prefix(count))) : nil
+        guard count > 0, let parsed = record(from: Data(buffer.prefix(count))) else { return nil }
+        return (parsed, metadata.st_uid == 0 && metadata.st_nlink == 1)
+    }
+
+    /// Where a classified record goes: a helper-started process is signalled
+    /// only when its record is trusted; otherwise the repair refuses and
+    /// changes nothing, like for a root gateway the helper did not start.
+    static func place(_ kind: Kind, trusted: Bool) -> Kind {
+        kind == .helperStarted && trusted ? .helperStarted : .other
     }
 
     static func live(in home: Int32, uid: uid_t) -> Found {
         let staged = GatewayAdminTrust.stagedExecutables(uid: uid)
         var found = Found()
         for name in recordNames {
-            guard let parsed = readRecord(in: home, name: name),
+            guard let (parsed, trusted) = readRecord(in: home, name: name),
                   let (kind, started) = classify(parsed, staged: staged) else { continue }
             let process = Live(record: name, pid: parsed.pid, startIdentity: started)
-            if kind == .helperStarted { found.helperStarted.append(process) } else { found.other.append(process) }
+            if place(kind, trusted: trusted) == .helperStarted {
+                found.helperStarted.append(process)
+            } else {
+                found.other.append(process)
+            }
         }
         return found
     }
@@ -685,8 +707,9 @@ enum GatewayAdminOwnershipRepair {
 enum GatewayAdminRepair {
     static let stillRunning = """
         A gateway is still running as root for this DefenseClaw home, and it was not started by DefenseClawMac \
-        (for example `sudo defenseclaw-gateway start`). Stop it with `sudo defenseclaw-gateway stop`, then start \
-        the gateway again from DefenseClawMac. Nothing was changed.
+        (for example `sudo defenseclaw-gateway start`) or its PID record is not the root-owned file that gateway \
+        wrote. Stop it with `sudo defenseclaw-gateway stop`, then start the gateway again from DefenseClawMac. \
+        Nothing was changed.
 
         """
 

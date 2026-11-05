@@ -56,6 +56,7 @@ struct GatewayAdministratorTests {
         await testFailedRepairStopsTheCommand()
         await testUnresolvedRepairDoesNotPromptAgain()
         testRetiredPreferenceRemoved()
+        testRepairHintQuotesTheHome()
         await testRefusalBeforeAuthorization()
         await testTaskCancellationAfterReservationRefusesDispatch()
         await testRebindCancelsPendingAuthorization()
@@ -285,6 +286,16 @@ struct GatewayAdministratorTests {
         let cleared = makeRunner(context(), clearedState, repair: { _, _ in CLIResult(exitCode: 0, output: "repaired") })
         _ = await cleared.run(binary: "defenseclaw-gateway", arguments: ["stop"])
         expect(clearedState.remembered == nil, "a home the repair cleared leaves nothing remembered")
+    }
+
+    /// REVIEW-2 NH-6: every pasted sudo chown hint quotes the home as one shell word.
+    private static func testRepairHintQuotesTheHome() {
+        let home = URL(fileURLWithPath: "/Users/admin-test/My Home;touch pwned'x")
+        let message = GatewayRootState.unresolvedMessage(
+            [GatewayRootState.Marker(name: "gateway.pid", identity: "gateway.pid:1")], home: home)
+        expect(message.hasSuffix("sudo chown -R \"$(id -un)\" '/Users/admin-test/My Home;touch pwned'\\''x'\n"),
+               "the home path is one single-quoted word: \(message)")
+        expect(GatewayRootState.shellQuoted("plain") == "'plain'", "a plain path is single-quoted")
     }
 
     /// NH-5: the switch of app versions up to 1.0.8 leaves no stale default.
