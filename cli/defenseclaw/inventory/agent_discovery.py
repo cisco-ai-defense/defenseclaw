@@ -2270,24 +2270,30 @@ def _windows_acl_chain_is_safe(resolved: str, prefix: str) -> bool:
     return False
 
 
-def _trusted_prefix_dir_mode_error(st: os.stat_result) -> str | None:
+def _system_group(st: os.stat_result) -> bool:
+    if _grp is None:
+        return False
+    try:
+        return _grp.getgrgid(st.st_gid).gr_name in ("root", "wheel", "admin")
+    except (KeyError, OSError):
+        return False
+
+
+def _trusted_prefix_dir_mode_error(st: os.stat_result, path: str = "") -> str | None:
     """Return a human-readable refusal when a directory mode is unsafe to trust.
 
     Mirrors the parent-directory permission checks in ``_is_trusted_binary_path``
     so ``trusted-paths add`` cannot succeed on directories discovery would still
-    reject for version probing.
+    reject for version probing. Group write passes for a system group, and,
+    given *path*, for the owner's own private group (an npm prefix made under
+    umask 002, GAP-0053).
     """
+    from defenseclaw.file_permissions import owner_private_group
+
     if st.st_mode & 0o002:
         return "directory is world-writable"
-    if st.st_mode & 0o020:
-        grp_name = ""
-        if _grp is not None:
-            try:
-                grp_name = _grp.getgrgid(st.st_gid).gr_name
-            except (KeyError, OSError):
-                grp_name = ""
-        if grp_name not in ("root", "wheel", "admin"):
-            return "directory is group-writable"
+    if st.st_mode & 0o020 and not _system_group(st) and not (path and owner_private_group(path, st)):
+        return "directory is group-writable"
     return None
 
 
@@ -2329,7 +2335,7 @@ def validate_trusted_prefix(path: str) -> tuple[str, str | None]:
         return resolved, f"cannot stat path ({exc})"
     if not os.path.isdir(resolved):
         return resolved, "path is not a directory"
-    mode_err = _windows_acl_write_error(resolved) if os.name == "nt" else _trusted_prefix_dir_mode_error(st)
+    mode_err = _windows_acl_write_error(resolved) if os.name == "nt" else _trusted_prefix_dir_mode_error(st, resolved)
     if mode_err:
         return resolved, mode_err
     return resolved, None
@@ -2368,22 +2374,11 @@ def _is_trusted_binary_path(
             parent_st = os.stat(parent)
         except OSError:
             return False
-        # World-writable parent → an attacker who can write to that dir
-        # could swap the binary at any time. Treat as untrusted.
-        if parent_st.st_mode & 0o002:
+        # A parent another account can write lets it swap the binary at any
+        # time: world write, or group write for a group that is neither a
+        # system group nor the owner's own private group (GAP-0053).
+        if _trusted_prefix_dir_mode_error(parent_st, parent) is not None:
             return False
-        # also reject group-writable parents unless the
-        # group is the system root group. A non-root user that shares a
-        # group with the parent dir can swap the binary.
-        if parent_st.st_mode & 0o020:
-            grp_name = ""
-            if _grp is not None:
-                try:
-                    grp_name = _grp.getgrgid(parent_st.st_gid).gr_name
-                except (KeyError, OSError):
-                    grp_name = ""
-            if grp_name not in ("root", "wheel", "admin"):
-                return False
         # refuse a binary whose own file is writable by
         # anyone other than the trusted system owner. The user-writable
         # ~/.local/bin/* case is the canonical exploit path; even if an
@@ -2394,7 +2389,9 @@ def _is_trusted_binary_path(
             bin_st = os.stat(resolved)
         except OSError:
             return False
-        if bin_st.st_mode & 0o022:
+        from defenseclaw.file_permissions import other_accounts_can_write
+
+        if other_accounts_can_write(resolved, bin_st):
             return False
     prefixes = _trusted_bin_prefixes(data_dir)
     default_prefixes = _default_trusted_bin_prefixes()

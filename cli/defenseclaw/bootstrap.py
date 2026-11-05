@@ -508,7 +508,9 @@ def apply_first_run_ports(cfg: Config, api_port: int, proxy_port: int, *, new_co
         else:
             cfg.gateway.api_port = api_port
             if _api_port_available(host, api_port) and _reserve_api_port(api_port):
-                steps.append(StepResult("Gateway API port", "pass", f"this account's gateway uses port {api_port} (--api-port)"))
+                steps.append(
+                    StepResult("Gateway API port", "pass", f"this account's gateway uses port {api_port} (--api-port)")
+                )
             else:
                 steps.append(StepResult(
                     "Gateway API port", "warn",
@@ -526,13 +528,15 @@ def apply_first_run_ports(cfg: Config, api_port: int, proxy_port: int, *, new_co
             if proxy_port != current:
                 steps.append(StepResult(
                     "Guardrail proxy port", "warn",
-                    f"this configuration keeps guardrail proxy port {current}; init sets ports only in a new configuration",
+                    f"this configuration keeps guardrail proxy port {current}; "
+                    "init sets ports only in a new configuration",
                     f"defenseclaw setup guardrail --port {proxy_port} --non-interactive",
                 ))
         else:
             gc.port = proxy_port
             if _guardrail_port_available(host, proxy_port):
-                steps.append(StepResult("Guardrail proxy port", "pass", f"this account's guardrail proxy uses port {proxy_port} (--proxy-port)"))
+                detail = f"this account's guardrail proxy uses port {proxy_port} (--proxy-port)"
+                steps.append(StepResult("Guardrail proxy port", "pass", detail))
             else:
                 steps.append(StepResult(
                     "Guardrail proxy port", "warn",

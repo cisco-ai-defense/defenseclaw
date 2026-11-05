@@ -240,8 +240,15 @@ func hookAPIValidateOwnerFor(path string, info os.FileInfo, _ string) error {
 }
 
 // hookAPIValidateDirectoryFor matches the Windows signature (see
-// hookAPIValidateOwnerFor). It checks agent plugin folders only, so a folder
-// of the owner's own private group passes (GAP-0053).
+// hookAPIValidateOwnerFor). It checks agent plugin folders only.
 func hookAPIValidateDirectoryFor(path, _ string) error {
+	return hookAPIValidateAgentDirectory(path)
+}
+
+// hookAPIValidateAgentDirectory checks a folder an agent, npm or the account
+// made under its own umask (agent plugin and config folders, agent
+// executable folders): a folder of the owner's own private group passes, as
+// in the CLI (file_permissions.other_accounts_can_write, GAP-0053).
+func hookAPIValidateAgentDirectory(path string) error {
 	return hookAPIValidateDirectoryWith(path, true)
 }

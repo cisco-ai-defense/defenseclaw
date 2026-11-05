@@ -293,7 +293,7 @@ func validateCodexPolicyExecutable(opts SetupOpts) (string, error) {
 	if info.Mode()&os.ModeSymlink != 0 || !info.Mode().IsRegular() {
 		return "", fmt.Errorf("selected Codex executable is not a regular non-link file: %s", executable)
 	}
-	if err := hookAPIValidateDirectory(filepath.Dir(executable)); err != nil {
+	if err := hookAPIValidateAgentDirectory(filepath.Dir(executable)); err != nil {
 		return "", agentInstallNotTrusted(fmt.Errorf("validate selected Codex executable ancestry: %w", err))
 	}
 	if err := hookAPIValidateOwner(executable, info); err != nil {

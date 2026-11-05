@@ -22,7 +22,7 @@ from types import SimpleNamespace
 
 import click
 import pytest
-from defenseclaw import bootstrap, connector_paths, opencode_service
+from defenseclaw import bootstrap, connector_paths, file_permissions, opencode_service
 from defenseclaw.config import default_config
 
 linux_only = pytest.mark.skipif(not sys.platform.startswith("linux"), reason="user private groups are a Linux convention")
@@ -58,8 +58,8 @@ def _accounts(monkeypatch, tmp_path: Path, gid: int, *, passwd_extra: str = "", 
     group = tmp_path / "group"
     passwd.write_text(f"me:x:{uid}:{gid}::/home/me:/bin/bash\n" + passwd_extra, encoding="utf-8")
     group.write_text(group_line or f"me:x:{gid}:\n", encoding="utf-8")
-    monkeypatch.setattr(connector_paths, "_PASSWD_FILE", str(passwd), raising=False)
-    monkeypatch.setattr(connector_paths, "_GROUP_FILE", str(group), raising=False)
+    monkeypatch.setattr(file_permissions, "_PASSWD_FILE", str(passwd), raising=False)
+    monkeypatch.setattr(file_permissions, "_GROUP_FILE", str(group), raising=False)
     import grp
     import pwd
 
@@ -305,3 +305,75 @@ def test_init_passes_the_given_ports_to_first_run(monkeypatch):
     bad = CliRunner().invoke(cmd_init.init_cmd, ["--api-port", "70000"], obj=SimpleNamespace(cfg=None))
     assert bad.exit_code == 2 and "70000" in bad.output
 
+
+
+# ---------------------------------------------------------------- the class: every agent folder and binary check
+
+
+def _npm_prefix(tmp_path: Path, mode: int = 0o775) -> tuple[Path, Path]:
+    """An npm prefix made under umask 002: ~/.npm-global/bin/opencode 0775 in 0775 folders."""
+    prefix = tmp_path / "home" / ".npm-global"
+    bin_dir = prefix / "bin"
+    bin_dir.mkdir(parents=True)
+    binary = bin_dir / "opencode"
+    binary.write_text("#!/bin/sh\necho 2.2.5\n", encoding="utf-8")
+    for path in (prefix, bin_dir):
+        path.chmod(mode)
+    binary.chmod(0o775 if mode == 0o775 else 0o777)
+    for path in (tmp_path, tmp_path / "home", prefix, bin_dir):
+        for name in ("system.posix_acl_access", "system.posix_acl_default"):
+            try:
+                os.removexattr(path, name)
+            except (AttributeError, OSError):
+                pass
+    return prefix, binary
+
+
+def _agent_checks(binary: Path, prefix: Path, monkeypatch) -> dict[str, bool]:
+    """What each agent-binary check says about *binary* (True = trusted)."""
+    from defenseclaw import agent_selection
+    from defenseclaw.inventory import agent_discovery
+
+    monkeypatch.setenv("DEFENSECLAW_TRUSTED_BIN_PREFIXES", str(prefix / "bin"))
+    _, prefix_error = agent_discovery.validate_trusted_prefix(str(prefix / "bin"))
+    return {
+        "trusted-paths add": prefix_error is None,
+        "discovery": agent_discovery._is_trusted_binary_path(str(binary)),
+        "setup chain": agent_selection._posix_setup_chain_is_safe(str(binary), str(prefix)),
+    }
+
+
+@linux_only
+def test_agent_binaries_in_a_private_group_npm_prefix_are_trusted(monkeypatch, tmp_path):
+    prefix, binary = _npm_prefix(tmp_path)
+    _accounts(monkeypatch, tmp_path, os.stat(prefix).st_gid)
+    assert _agent_checks(binary, prefix, monkeypatch) == {"trusted-paths add": True, "discovery": True, "setup chain": True}
+
+
+@linux_only
+@pytest.mark.parametrize("case", ["shared-group", "member-in-private-group", "everyone-writable"])
+def test_agent_binaries_another_account_can_write_stay_untrusted(monkeypatch, tmp_path, case):
+    prefix, binary = _npm_prefix(tmp_path, 0o777 if case == "everyone-writable" else 0o775)
+    gid = os.stat(prefix).st_gid
+    group_line = {"shared-group": f"devs:x:{gid}:me,bob\n", "member-in-private-group": f"me:x:{gid}:me,bob\n"}.get(case, "")
+    _accounts(monkeypatch, tmp_path, gid, group_line=group_line)
+    assert _agent_checks(binary, prefix, monkeypatch) == {
+        "trusted-paths add": False, "discovery": False, "setup chain": False,
+    }
+
+
+@linux_only
+@pytest.mark.parametrize("private", [True, False])
+def test_other_accounts_can_write_is_the_one_rule(monkeypatch, tmp_path, private):
+    folder = tmp_path / "f"
+    folder.mkdir()
+    gid = os.stat(folder).st_gid
+    _accounts(monkeypatch, tmp_path, gid, group_line="" if private else f"devs:x:{gid}:me,bob\n")
+    for mode, expected in ((0o700, False), (0o755, False), (0o775, not private), (0o757, True), (0o777, True)):
+        folder.chmod(mode)
+        for name in ("system.posix_acl_access", "system.posix_acl_default"):
+            try:
+                os.removexattr(folder, name)
+            except (AttributeError, OSError):
+                pass
+        assert file_permissions.other_accounts_can_write(str(folder), os.stat(folder)) is expected, oct(mode)

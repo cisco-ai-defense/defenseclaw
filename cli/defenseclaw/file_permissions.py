@@ -19,6 +19,7 @@
 from __future__ import annotations
 
 import contextlib
+import errno
 import os
 import shlex
 import socket
@@ -53,6 +54,114 @@ UNSAFE_PATH_INSPECTION_FAILED = "unsafe-path-inspection-failed"
 UNSAFE_PATH_NAMESPACE_VIEW = "unsafe-path-namespace-view"
 
 _tracked_host_stat_lock = threading.Lock()
+
+
+
+# The account and group files the private-group rule reads; the gateway reads
+# the same two (internal/gateway/connector/private_group_linux.go).
+# GAP-0053: every check of a folder or file that an agent or npm created
+# under the account's umask asks other_accounts_can_write, not the raw bits.
+_PASSWD_FILE = "/etc/passwd"
+_GROUP_FILE = "/etc/group"
+
+
+def _colon_records(path: str) -> list[list[str]] | None:
+    """The records of a passwd or group file, or None when it cannot be read
+    or holds NIS compat (+/-) lines whose members this check cannot see."""
+    try:
+        with open(path, encoding="utf-8", errors="strict") as handle:
+            lines = handle.read().splitlines()
+    except (OSError, UnicodeDecodeError):
+        return None
+    records = []
+    for line in lines:
+        if not line.strip() or line.lstrip().startswith("#"):
+            continue
+        if line.startswith(("+", "-")):
+            return None
+        records.append(line.split(":"))
+    return records
+
+
+def _has_access_acl(path: str) -> bool:
+    """Whether a Linux access ACL may be set on *path* (then the group bits of
+    the mode are the ACL mask, not the owning group's access)."""
+    getxattr = getattr(os, "getxattr", None)
+    if getxattr is None:
+        return False
+    try:
+        getxattr(path, "system.posix_acl_access", follow_symlinks=False)
+    except OSError as exc:
+        return exc.errno not in (errno.ENODATA, errno.ENOTSUP, getattr(errno, "ENOATTR", errno.ENODATA))
+    return True
+
+
+def owner_private_group(path: str, info: os.stat_result) -> bool:
+    """Whether the group of *path* is its owner's own private group (GAP-0053).
+
+    Ubuntu and Debian give each account a group of its own name with no other
+    member, and a umask of 002, so the folders OpenCode creates are 0775.
+    Group write there lets nobody but the owner write. True only on Linux,
+    when this account owns *path*, its group is the account's primary group
+    and carries the account's name, no other account is a member or has it as
+    primary group (in /etc/passwd and /etc/group, and as the system group
+    database answers), and no ACL is set. Anything unreadable, duplicated or
+    ambiguous answers False, so a shared group stays refused.
+    """
+    if not sys.platform.startswith("linux") or os.name == "nt":
+        return False
+    uid, gid = os.geteuid(), info.st_gid
+    if info.st_uid != uid or _has_access_acl(path):
+        return False
+    passwd = _colon_records(_PASSWD_FILE)
+    groups = _colon_records(_GROUP_FILE)
+    if passwd is None or groups is None:
+        return False
+    try:
+        names = {rec[0] for rec in passwd if len(rec) >= 4 and int(rec[2]) == uid}
+        if len(names) != 1:
+            return False
+        name = next(iter(names))
+        for rec in passwd:
+            if len(rec) < 4:
+                return False
+            if int(rec[3]) == gid and rec[0] != name:
+                return False
+            if rec[0] == name and int(rec[3]) != gid:
+                return False
+        matches = [rec for rec in groups if len(rec) >= 4 and rec[2].strip() and int(rec[2]) == gid]
+    except ValueError:
+        return False
+    if not matches:
+        return False
+    for rec in matches:
+        members = {member.strip() for member in rec[3].split(",") if member.strip()}
+        if rec[0] != name or not members <= {name}:
+            return False
+    try:
+        import grp
+        import pwd
+
+        account = pwd.getpwuid(uid)
+        group = grp.getgrgid(gid)
+    except (ImportError, KeyError, OSError):
+        return False
+    return account.pw_name == name and account.pw_gid == gid and group.gr_name == name and set(group.gr_mem) <= {name}
+
+
+def other_accounts_can_write(path: str, info: os.stat_result) -> bool:
+    """Whether the mode of *path* lets an account other than its owner write it.
+
+    Write for everyone always counts. Write for the group does not when the
+    group is the owner's own private group (owner_private_group): Ubuntu,
+    Debian and RHEL give each account one, and with their umask of 002 npm,
+    pip and the agents create 0775 folders and 0664 files. The owner's own
+    write bit and root are the caller's business. POSIX only.
+    """
+    mode = stat.S_IMODE(info.st_mode)
+    if mode & 0o002:
+        return True
+    return bool(mode & 0o020) and not owner_private_group(path, info)
 
 
 def tracked_host_owner_uid(path: str | os.PathLike[str], info: os.stat_result) -> int:

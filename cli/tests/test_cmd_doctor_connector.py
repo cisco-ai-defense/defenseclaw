@@ -2568,7 +2568,7 @@ class TestCheckHookHealth(unittest.TestCase):
         # gateway would not start and doctor only said the hook file is missing.
         # A shared group: the runner's own group may be its private group (GAP-0053).
         with tempfile.TemporaryDirectory() as tmp, patch.dict(os.environ, {"HOME": tmp}), patch(
-            "defenseclaw.connector_paths.owner_private_group", return_value=False
+            "defenseclaw.file_permissions.owner_private_group", return_value=False
         ):
             plugins = Path(tmp) / ".config" / "opencode" / "plugins"
             plugins.mkdir(parents=True)

@@ -6148,7 +6148,8 @@ def _connector_contract_upgrade_guidance(
             else ""
         )
         return (
-            f"{remove_v1}Install OpenCode V2 with 'npm install -g @opencode/cli@2' (where you cannot write npm's global "
+            f"{remove_v1}Install OpenCode V2 with 'npm install -g @opencode/cli@2' "
+            "(where you cannot write npm's global "
             "prefix, for your account: 'npm install -g --prefix ~/.npm-global @opencode/cli@2', with "
             f"~/.npm-global/bin first on PATH), then run: {rerun}."
         )
