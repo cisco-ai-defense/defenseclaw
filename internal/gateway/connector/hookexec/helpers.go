@@ -335,7 +335,7 @@ func logHookFailureOf(opts Options, sp spec, reason, category, failMode string, 
 		Outcome:   outcome,
 		EventID:   eventID,
 	}
-	if reason == perUserGatewayNoAnswerReason && !opts.ManagedEnterprise && !opts.SecureClient {
+	if reason == perUserGatewayNoAnswerReason && perUserRestartWindowCall(opts, sp) {
 		entry.RestartProof = opts.failureLog.getRestartReason()
 		if entry.RestartProof == "" {
 			entry.RestartProof = "no_verified_connection"

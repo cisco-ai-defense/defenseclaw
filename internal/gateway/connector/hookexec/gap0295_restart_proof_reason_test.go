@@ -40,6 +40,28 @@ func TestGAP0295NoAnswerRecordsProofReason(t *testing.T) {
 	}
 }
 
+func TestGAP0295RestartProofFieldIsPerUserOnly(t *testing.T) {
+	for _, tc := range []struct {
+		name         string
+		mutate       func(*Options)
+		failOpenOnly bool
+	}{
+		{"managed socket", func(o *Options) { o.ManagedUnixSocket = "/not-used-by-test/hook.sock" }, false},
+		{"Secure Client", func(o *Options) { o.SecureClient = true }, false},
+		{"fail-open-only connector", nil, true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			opts, sp, _ := restartWindowCall(t, "open", false, tc.mutate)
+			sp.failOpenOnly = tc.failOpenOnly
+			opts.failureLog.setRestartReason("no_holder")
+			logHookFailure(opts, sp, perUserGatewayNoAnswerReason, "transport", "closed", true)
+			if row := restartProofRow(t, opts.Home); row["restart_proof"] != "" {
+				t.Fatalf("non-per-user no-answer row has restart proof: %+v", row)
+			}
+		})
+	}
+}
+
 func TestGAP0295WatchdogNoAnswerRecordsProofReason(t *testing.T) {
 	previous := perUserRestartWindowProof
 	perUserRestartWindowProof = func(string, *perUserPeerCheck) restartProofResult {
@@ -71,10 +93,14 @@ func TestGAP0295NoAnswerReasonTaxonomy(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			proofDone := make(chan struct{}, 1)
+			releaseProof := make(chan struct{})
+			if tc.timeout {
+				defer close(releaseProof)
+			}
 			previous := perUserRestartWindowProof
 			perUserRestartWindowProof = func(string, *perUserPeerCheck) restartProofResult {
 				if tc.timeout {
-					time.Sleep(50 * time.Millisecond)
+					<-releaseProof
 					proofDone <- struct{}{}
 				}
 				return tc.proof
