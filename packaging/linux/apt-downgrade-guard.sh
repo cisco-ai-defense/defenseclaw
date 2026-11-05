@@ -22,7 +22,8 @@
 # its own. A deliberate rollback creates the root-owned marker first. The
 # hook leaves it in place: the older package's preinstall checks it as well,
 # and its postinstall applies the package with --allow-downgrade and deletes
-# it.
+# it. A refusal starts with the code downgrade_refused, as the package
+# preinstall's does (GAP-0582).
 
 set -u
 state=/var/lib/defenseclaw-enterprise
@@ -220,7 +221,7 @@ check() {
         # deletes it.
         return 0
     fi
-    echo "defenseclaw-enterprise: $installed is installed; refusing to downgrade to $incoming. The older release may not read the current config. Nothing was changed." >&2
+    echo "defenseclaw-enterprise: downgrade_refused: $installed is installed; refusing to downgrade to $incoming. The older release may not read the current config. Nothing was changed." >&2
     echo "  For a deliberate rollback create the marker first: sudo touch $marker" >&2
     if [ -f "$previous_config" ]; then
         config=$previous_config
