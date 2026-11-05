@@ -54,7 +54,6 @@ import {
   HEADER_DEFENSECLAW_SESSION_ID,
   HEADER_DEFENSECLAW_SIDECAR_INSTANCE_ID,
   HEADER_DEFENSECLAW_TRACE_ID,
-  HEADER_HTTP_CONTENT_TYPE,
 } from "./correlation-headers.js";
 
 /** OpenClaw passes full gateway config and the defenseclaw plugin entry config. */
@@ -73,7 +72,7 @@ import type {
 import { compareSeverity, maxSeverity } from "./types.js";
 import { patchAwsSdkHttp1ForGuardrail } from "./aws-sdk-http1-for-guardrail.js";
 import { loadSidecarConfig } from "./sidecar-config.js";
-import { forgetListenerProof, isLoopbackHost } from "./listener-proof.js";
+import { isLoopbackHost } from "./listener-proof.js";
 import { createFetchInterceptor } from "./fetch-interceptor.js";
 import { HealthMonitor } from "./health-monitor.js";
 
@@ -456,69 +455,35 @@ export default function (api: DefenseClawPluginHost) {
     toolCtx?: ToolContext,
   ): Promise<InspectVerdict> {
     const sessionId = toolCtx?.sessionId ?? toolCtx?.sessionKey;
-    const controller = new AbortController();
-    const timer = setTimeout(() => controller.abort(), INSPECT_TIMEOUT_MS);
-    const started = performance.now();
-    try {
-      const base = await daemonClient.buildOutboundHeaders({
-        runId: toolCtx?.runId,
-        sessionId,
-      });
-      const headers: Record<string, string> = {
-        ...base,
-        [HEADER_HTTP_CONTENT_TYPE]: "application/json",
-      };
-      const bodyPayload = sessionId
-        ? { ...payload, session_id: sessionId, approval_surface: "native" }
-        : { ...payload, approval_surface: "native" };
-      const res = await fetch(`${SIDECAR_API}/api/v1/inspect/tool`, {
-        method: "POST",
-        headers,
-        body: JSON.stringify(bodyPayload),
-        signal: controller.signal,
-      });
-      daemonClient.applyStickyFromHttpResponse(res);
-      const duration_ms = Math.round(performance.now() - started);
-      logOutboundRequest({
-        runId: toolCtx?.runId,
-        sessionId,
-        agentId: identityCache?.agentId ?? "unknown",
-        status_code: res.status,
-        duration_ms,
-      });
-      if (!res.ok) {
-        return failClosedVerdict(`sidecar returned ${res.status}`);
-      }
-      try {
-        const verdict: unknown = await res.json();
-        return isInspectVerdict(verdict)
-          ? verdict
-          : failClosedVerdict("sidecar returned invalid verdict");
-      } catch (err) {
-        // Structurally unreadable JSON stays fail-closed. Abort/reset
-        // while reading the body is an availability failure and follows
-        // DEFENSECLAW_TOOL_INSPECT_FAIL_OPEN.
-        if (err instanceof SyntaxError) {
-          return failClosedVerdict("sidecar returned malformed verdict");
-        }
-        const msg = err instanceof Error ? err.message : String(err);
-        return unavailableVerdict(`sidecar body unavailable: ${msg}`);
-      }
-    } catch (err) {
-      const duration_ms = Math.round(performance.now() - started);
-      logOutboundRequest({
-        runId: toolCtx?.runId,
-        sessionId,
-        agentId: identityCache?.agentId ?? "unknown",
-        status_code: 0,
-        duration_ms,
-      });
-      const msg = err instanceof Error ? err.message : String(err);
-      forgetListenerProof(sidecarConfig.host, sidecarConfig.apiPort);
-      return unavailableVerdict(`sidecar unreachable: ${msg}`);
-    } finally {
-      clearTimeout(timer);
+    const bodyPayload = sessionId
+      ? { ...payload, session_id: sessionId, approval_surface: "native" }
+      : { ...payload, approval_surface: "native" };
+    // The check goes over a connection that proved it reaches this account's
+    // gateway, and its verdict comes back on that connection (GAP-0594). The
+    // budget counts from the proven connection, so the proof does not use it.
+    const res = await daemonClient.postRaw("/api/v1/inspect/tool", bodyPayload, {
+      timeoutMs: INSPECT_TIMEOUT_MS,
+      correlation: { runId: toolCtx?.runId, sessionId },
+    });
+    if (res.status === 0) {
+      // No verdict is available: the request failed, the listener did not
+      // prove itself, or the body broke off. This follows
+      // DEFENSECLAW_TOOL_INSPECT_FAIL_OPEN.
+      return unavailableVerdict(`sidecar unreachable: ${res.error ?? "no answer"}`);
     }
+    if (res.status < 200 || res.status >= 300) {
+      return failClosedVerdict(`sidecar returned ${res.status}`);
+    }
+    let verdict: unknown;
+    try {
+      verdict = JSON.parse(res.body);
+    } catch {
+      // Structurally unreadable JSON stays fail-closed.
+      return failClosedVerdict("sidecar returned malformed verdict");
+    }
+    return isInspectVerdict(verdict)
+      ? verdict
+      : failClosedVerdict("sidecar returned invalid verdict");
   }
 
   api.on("before_tool_call", async (event, ctx) => {

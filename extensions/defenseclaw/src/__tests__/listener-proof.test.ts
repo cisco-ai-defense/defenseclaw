@@ -11,9 +11,8 @@ import {
   ListenerProofError,
   LISTENER_PROOF_PATH,
   _setListenerProofForTest,
-  forgetListenerProof,
+  canonicalLoopbackHost,
   isLoopbackHost,
-  listenerProofFresh,
   proveListener,
   provenCreateConnection,
 } from "../listener-proof.js";
@@ -72,27 +71,69 @@ describe("listener proof (GAP-0594)", () => {
     expect(isLoopbackHost("127.0.0.256")).toBe(false);
   });
 
-  it("proves this account's gateway once and reuses the proof", async () => {
+  it("proves the listener again for every request (no reuse)", async () => {
     const { server, port, seen } = await listener(TOKEN);
     servers.push(server);
     await proveListener("127.0.0.1", port, TOKEN);
-    await proveListener("127.0.0.1", port, TOKEN);
-    expect(seen.proofs).toBe(1);
-    expect(listenerProofFresh("127.0.0.1", port, TOKEN)).toBe(true);
-    forgetListenerProof("127.0.0.1", port);
-    expect(listenerProofFresh("127.0.0.1", port, TOKEN)).toBe(false);
     await proveListener("127.0.0.1", port, TOKEN);
     expect(seen.proofs).toBe(2);
   });
 
-  it("proves again once the proof is older than the refresh window", async () => {
+  it("shares only a proof that is still in flight", async () => {
     const { server, port, seen } = await listener(TOKEN);
     servers.push(server);
-    let clock = 1_000_000;
-    await proveListener("127.0.0.1", port, TOKEN, request, () => clock);
-    clock += 60_000;
-    await proveListener("127.0.0.1", port, TOKEN, request, () => clock);
+    await Promise.all([proveListener("127.0.0.1", port, TOKEN), proveListener("127.0.0.1", port, TOKEN)]);
+    expect(seen.proofs).toBe(1);
+    await proveListener("127.0.0.1", port, TOKEN);
     expect(seen.proofs).toBe(2);
+  });
+
+  it("sends nothing to a listener that replaced the gateway after a good proof", async () => {
+    const good = await listener(TOKEN);
+    const port = good.port;
+    const client = new DaemonClient({ baseUrl: `http://127.0.0.1:${port}`, token: TOKEN });
+    expect((await client.status()).ok).toBe(true);
+    await proveListener("127.0.0.1", port, TOKEN);
+    await new Promise((r) => good.server.close(r));
+
+    // Another account's process takes the port while the gateway restarts.
+    const seen: Seen = { proofs: 0, authorized: [], remotePorts: [] };
+    const squatter = createServer((req, res) => {
+      if (req.url === LISTENER_PROOF_PATH) {
+        seen.proofs++;
+        res.writeHead(401).end();
+        return;
+      }
+      if (req.headers.authorization) seen.authorized.push(String(req.headers.authorization));
+      res.writeHead(200, { "Content-Type": "application/json" }).end(JSON.stringify({ action: "allow" }));
+    });
+    await new Promise<void>((resolve) => squatter.listen(port, "127.0.0.1", resolve));
+    servers.push(squatter);
+
+    const res = await client.postRaw("/api/v1/inspect/tool", { tool: "exec" });
+    expect(res.status).toBe(0);
+    await expect(proveListener("127.0.0.1", port, TOKEN)).rejects.toBeInstanceOf(ListenerProofError);
+    await expect(client.buildOutboundHeaders()).rejects.toBeInstanceOf(ListenerProofError);
+    expect(seen.proofs).toBe(3);
+    expect(seen.authorized).toEqual([]);
+  });
+
+  it("names localhost as the 127.0.0.1 the gateway binds", async () => {
+    expect(canonicalLoopbackHost("localhost")).toBe("127.0.0.1");
+    expect(canonicalLoopbackHost("[::1]")).toBe("::1");
+    const { server, port, seen } = await listener(TOKEN);
+    servers.push(server);
+    await proveListener("localhost", port, TOKEN);
+    expect(seen.proofs).toBe(1);
+  });
+
+  it("sends nothing without a token to prove with", async () => {
+    const { server, port, seen } = await listener(TOKEN);
+    servers.push(server);
+    const client = new DaemonClient({ baseUrl: `http://127.0.0.1:${port}`, token: "" });
+    const res = await client.postRaw("/api/v1/inspect/tool", { tool: "exec" });
+    expect(res.status).toBe(0);
+    expect(seen.remotePorts).toEqual([]);
   });
 
   it("refuses a listener that cannot prove the token", async () => {
@@ -100,7 +141,6 @@ describe("listener proof (GAP-0594)", () => {
       const { server, port } = await listener(key);
       servers.push(server);
       await expect(proveListener("127.0.0.1", port, TOKEN)).rejects.toBeInstanceOf(ListenerProofError);
-      expect(listenerProofFresh("127.0.0.1", port, TOKEN)).toBe(false);
     }
   });
 

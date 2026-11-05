@@ -28,11 +28,15 @@
  * the gateway restarts gets the digest and the nonce, never the token.
  *
  * Two forms:
- *  - proveListener(): a proof per host:port, cached for
- *    LISTENER_PROOF_REFRESH_MS and dropped after a connection error, for
- *    fetch and dispatcher calls that cannot pick their connection.
  *  - provenCreateConnection(): proves the very TCP connection a node:http
- *    request then uses, for the requests that open their own connection.
+ *    request then uses. The tool check, every DaemonClient call and the
+ *    http(s).request proxy hop use it: nothing is written on a connection
+ *    that has not proven itself.
+ *  - proveListener(): proves the listener right before one fetch or undici
+ *    dispatcher request, which cannot pick its connection. Nothing is
+ *    reused; requests made while a proof is in flight share it. The residual
+ *    is the gap between the proof and the request (sub-millisecond on
+ *    loopback), the ENTERPRISE-THREAT-MODEL B7 / R7 class.
  */
 
 import { createHash, createHmac, randomBytes, timingSafeEqual } from "node:crypto";
@@ -42,9 +46,8 @@ import { connect as netConnect, type Socket } from "node:net";
 export const LISTENER_PROOF_PATH = "/api/v1/hook-listener-proof";
 const LISTENER_PROOF_DOMAIN = "defenseclaw.listener-proof.v1";
 const LISTENER_PROOF_CONNECTOR = "openclaw";
-/** A cached proof is used for this long, then proven again before use. */
-export const LISTENER_PROOF_REFRESH_MS = 2_000;
-const LISTENER_PROOF_TIMEOUT_MS = 2_000;
+/** A proof on loopback takes well under a millisecond; it never uses a call's budget. */
+const LISTENER_PROOF_TIMEOUT_MS = 500;
 const MAX_PROOF_RESPONSE_BYTES = 16 * 1024;
 
 export class ListenerProofError extends Error {
@@ -53,6 +56,12 @@ export class ListenerProofError extends Error {
     super(message);
     this.name = "ListenerProofError";
   }
+}
+
+/** host as the plugin connects to it: localhost names the gateway's 127.0.0.1. */
+export function canonicalLoopbackHost(host: string): string {
+  const h = String(host || "").trim().replace(/^\[|\]$/g, "");
+  return h.toLowerCase() === "localhost" ? "127.0.0.1" : h;
 }
 
 /** A loopback host name or address: 127.0.0.0/8, ::1 or localhost. */
@@ -69,7 +78,9 @@ function checkTarget(host: string, token: string): void {
       `DefenseClaw sends its gateway token only to a loopback listener; gateway.host ${host} is not one`,
     );
   }
-  if (!token) {
+  // A test proof (the other suites run without a gateway or token) stands in
+  // for the token check too; the loopback rule always holds.
+  if (!token && !proofOverride) {
     throw new ListenerProofError("no DefenseClaw gateway token to prove the listener with");
   }
 }
@@ -126,14 +137,6 @@ function proveOnce(host: string, port: number, token: string, requestImpl: Reque
   });
 }
 
-interface ProofEntry {
-  token: string;
-  provenAt: number;
-  pending?: Promise<void>;
-}
-
-const proofs = new Map<string, ProofEntry>();
-
 type ProofOverride = (host: string, port: number, token: string) => Promise<void>;
 let proofOverride: ProofOverride | undefined;
 
@@ -143,58 +146,36 @@ let proofOverride: ProofOverride | undefined;
  */
 export function _setListenerProofForTest(fn: ProofOverride | undefined): void {
   proofOverride = fn;
-  proofs.clear();
+  inflight.clear();
 }
+
+const inflight = new Map<string, { token: string; pending: Promise<void> }>();
 const keyOf = (host: string, port: number) => `${host.toLowerCase()}:${port}`;
 
 /**
- * Prove the listener on host:port before a request that carries the token
- * or a provider key. A proof younger than LISTENER_PROOF_REFRESH_MS is
- * reused; concurrent callers share one proof. Throws ListenerProofError.
+ * Prove the listener on host:port right before one request that carries the
+ * token or a provider key. No proof is reused once it has settled; callers
+ * that ask while one is in flight share it. Throws ListenerProofError.
  */
 export async function proveListener(
   host: string,
   port: number,
   token: string,
   requestImpl: RequestImpl = httpRequest,
-  now: () => number = Date.now,
 ): Promise<void> {
   checkTarget(host, token);
+  host = canonicalLoopbackHost(host);
   if (proofOverride) return proofOverride(host, port, token);
   const key = keyOf(host, port);
-  const entry = proofs.get(key);
-  if (entry && entry.token === token) {
-    if (entry.provenAt > 0 && now() - entry.provenAt < LISTENER_PROOF_REFRESH_MS) return;
-    if (entry.pending) return entry.pending;
-  }
-  const pending = proveOnce(host, port, token, requestImpl).then(
-    () => {
-      proofs.set(key, { token, provenAt: now() });
-    },
-    (err) => {
-      proofs.delete(key);
-      throw err;
-    },
-  );
-  proofs.set(key, { token, provenAt: 0, pending });
-  return pending;
-}
-
-/** Whether host:port holds a proof for token younger than LISTENER_PROOF_REFRESH_MS. */
-export function listenerProofFresh(host: string, port: number, token: string, now: () => number = Date.now): boolean {
-  if (proofOverride) return isLoopbackHost(host) && token !== "";
-  const entry = proofs.get(keyOf(host, port));
-  return Boolean(entry && entry.token === token && entry.provenAt > 0 && now() - entry.provenAt < LISTENER_PROOF_REFRESH_MS);
-}
-
-/** Drop the proof of host:port, after a connection error to it. */
-export function forgetListenerProof(host: string, port: number): void {
-  proofs.delete(keyOf(host, port));
-}
-
-/** Clear every cached proof (tests). */
-export function _resetListenerProofs(): void {
-  proofs.clear();
+  const current = inflight.get(key);
+  if (current && current.token === token) return current.pending;
+  const entry = { token, pending: proveOnce(host, port, token, requestImpl) };
+  inflight.set(key, entry);
+  const settle = () => {
+    if (inflight.get(key) === entry) inflight.delete(key);
+  };
+  entry.pending.then(settle, settle);
+  return entry.pending;
 }
 
 /** Prove an open socket by sending the proof request on it (HTTP/1.1 keep-alive). */
@@ -260,10 +241,11 @@ export function provenCreateConnection(host: string, port: number, token: string
       process.nextTick(() => oncreate(err as Error));
       return undefined;
     }
-    const socket = netConnect({ host: host.replace(/^\[|\]$/g, ""), port });
+    const address = canonicalLoopbackHost(host);
+    const socket = netConnect({ host: address, port });
     const prove = proofOverride
       ? () => proofOverride!(host, port, token)
-      : () => proveSocket(socket, host, port, token);
+      : () => proveSocket(socket, address, port, token);
     const onConnectError = (err: Error) => oncreate(new ListenerProofError(`${notProven(host, port).message}: ${err.message}`));
     socket.once("error", onConnectError);
     socket.once("connect", () => {

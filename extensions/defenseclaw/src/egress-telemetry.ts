@@ -29,7 +29,7 @@
  */
 
 import { loadSidecarConfig } from "./sidecar-config.js";
-import { forgetListenerProof, proveListener } from "./listener-proof.js";
+import { proveListener } from "./listener-proof.js";
 
 // Kept in sync with fetch-interceptor.ts::DC_AUTH_HEADER. Inlined to
 // avoid an import cycle between the reporter and its consumer.
@@ -203,7 +203,6 @@ export function createEgressReporter(
         })
           .catch(() => {
             // Telemetry is best-effort. Errors here never propagate.
-            forgetListenerProof("127.0.0.1", opts.guardrailPort);
           })
           .finally(() => {
             if (fallbackTimer !== undefined) clearTimeout(fallbackTimer);

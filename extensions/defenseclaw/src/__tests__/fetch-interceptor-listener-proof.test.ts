@@ -71,6 +71,35 @@ describe("proxy hop listener proof", () => {
     expect(calls.filter((c) => c.url.includes(":14011/v1/chat/completions"))).toEqual([]);
   });
 
+  it("sends no provider key without a token to prove the listener with", async () => {
+    const savedLegacy = process.env.OPENCLAW_GATEWAY_TOKEN;
+    process.env.DEFENSECLAW_GATEWAY_TOKEN = "";
+    process.env.OPENCLAW_GATEWAY_TOKEN = "";
+    _resetSidecarConfigCache();
+    try {
+      // The real proof: with no token it refuses before any connection.
+      _setListenerProofForTest(undefined);
+      const res = await modelCall();
+      expect(res.status).toBe(503);
+      expect(calls.filter((c) => c.url.includes(":14011/v1/chat/completions"))).toEqual([]);
+    } finally {
+      if (savedLegacy === undefined) delete process.env.OPENCLAW_GATEWAY_TOKEN;
+      else process.env.OPENCLAW_GATEWAY_TOKEN = savedLegacy;
+    }
+  });
+
+  it("proves the listener before every proxied model call", async () => {
+    let proofs = 0;
+    _setListenerProofForTest(async () => {
+      proofs++;
+    });
+    await modelCall();
+    await modelCall();
+    // One proof per model call; egress telemetry proves for its own posts too.
+    expect(proofs).toBeGreaterThanOrEqual(2);
+    expect(calls.filter((c) => c.url.includes(":14011/v1/chat/completions"))).toHaveLength(2);
+  });
+
   it("sends the provider key and the token to a proven listener", async () => {
     const proven: string[] = [];
     _setListenerProofForTest(async (host, port) => {

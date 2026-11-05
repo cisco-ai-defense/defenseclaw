@@ -31,12 +31,7 @@ import { realpathSync } from "node:fs";
 import { createRequire } from "node:module";
 import { createEgressReporter, type EgressReporter } from "./egress-telemetry.js";
 import { loadSidecarConfig } from "./sidecar-config.js";
-import {
-  forgetListenerProof,
-  listenerProofFresh,
-  proveListener,
-  provenCreateConnection,
-} from "./listener-proof.js";
+import { proveListener, provenCreateConnection } from "./listener-proof.js";
 import {
   HEADER_DEFENSECLAW_AGENT_ID,
   HEADER_DEFENSECLAW_AGENT_INSTANCE_ID,
@@ -1261,6 +1256,21 @@ function completeUndiciGatewayDown(handler: unknown): void {
   }
 }
 
+/** Report err to an undici handler whose deferred dispatch threw (GAP-0594). */
+function failUndiciHandler(handler: unknown, err: unknown): void {
+  const sink = handler as { onResponseError?: (controller: unknown, err: Error) => void; onError?: (err: Error) => void };
+  const error = err instanceof Error ? err : new Error(String(err));
+  try {
+    if (typeof sink.onResponseError === "function") {
+      sink.onResponseError({ abort: () => undefined }, error);
+    } else {
+      sink.onError?.(error);
+    }
+  } catch {
+    // The handler cannot be told; never let it escape as an unhandled rejection.
+  }
+}
+
 /** The undici copy the host application ships, as far as the interceptor needs it. */
 type HostUndici = {
   Agent: (new () => { close?: () => Promise<void> }) & { prototype: object };
@@ -1457,23 +1467,6 @@ export function createFetchInterceptor(
       const proxyHdrs = buildProxyHeaders(new URL(origin).origin, providerKey, getCorrelationHeaders);
       opts.headers = { ...existingHeaders, ...proxyHdrs };
       const isProbe = readUndiciHeader(opts.headers, INTERCEPTION_PROBE_HEADER) === "1";
-      const token = loadSidecarConfig().token;
-      if (!isProbe && token && !listenerProofFresh("127.0.0.1", guardrailPort, token)) {
-        // The provider key and token go only to a guardrail listener that
-        // proved it is this account's gateway (GAP-0594). Dispatch once the
-        // proof is in; a failed proof answers as a gateway outage and sends
-        // nothing.
-        proveListener("127.0.0.1", guardrailPort, token).then(
-          () => {
-            next(opts, handler);
-          },
-          () => {
-            completeUndiciGatewayDown(handler);
-          },
-        );
-        noteInterceptLayer(layer === "host" ? "undici-host" : "undici", urlStr);
-        return true;
-      }
 
       noteInterceptLayer(layer === "host" ? "undici-host" : "undici", urlStr);
       egressReporter?.report({
@@ -1494,6 +1487,23 @@ export function createFetchInterceptor(
         if (layer === "host") lastHostProbeDestination = destination;
         return completeUndiciProbe(handler);
       }
+      // The provider key and token go only to a guardrail listener that
+      // proves it is this account's gateway right before this request
+      // (GAP-0594). Dispatch once the proof is in; a failed proof, or no
+      // token to prove with, answers as a gateway outage and sends nothing.
+      proveListener("127.0.0.1", guardrailPort, loadSidecarConfig().token).then(
+        () => {
+          try {
+            next(opts, handler);
+          } catch (err) {
+            failUndiciHandler(handler, err);
+          }
+        },
+        () => {
+          completeUndiciGatewayDown(handler);
+        },
+      );
+      return true;
     }
 
     return next(opts, handler);
@@ -1605,13 +1615,11 @@ export function createFetchInterceptor(
       // The provider key and token go only to a guardrail listener that
       // proved it is this account's gateway (GAP-0594); a failed proof
       // answers as a gateway outage and sends nothing.
-      const hopToken = loadSidecarConfig().token;
-      if (hopToken) {
-        try {
-          await proveListener("127.0.0.1", guardrailPort, hopToken);
-        } catch {
-          return gatewayDownResponse();
-        }
+      // No token to prove with sends nothing either.
+      try {
+        await proveListener("127.0.0.1", guardrailPort, loadSidecarConfig().token);
+      } catch {
+        return gatewayDownResponse();
       }
 
       // Merge effective headers (Request + init overrides) and add
@@ -1688,7 +1696,6 @@ export function createFetchInterceptor(
       try {
         response = await originalFetch!(proxied, newInit);
       } catch (err) {
-        forgetListenerProof("127.0.0.1", guardrailPort);
         if (!isConnectionRefused(err)) throw err;
         return gatewayDownResponse();
       }
@@ -1959,22 +1966,17 @@ export function createFetchInterceptor(
           protocol: "http:",
           path: `${originalUrl.pathname}${originalUrl.search}`,
           headers: { ...hdrs, ...proxyHdrs },
-          // Force Node to pick a default http.Agent for this request. Leaving
-          // the caller's https.Agent in place would throw at socket allocation.
-          agent: false,
-          // The hop's own connection proves it reaches this account's gateway
-          // before the provider key and token are written on it (GAP-0594).
+          // The caller's https.Agent is dropped: left in place it would throw
+          // at socket allocation. The hop's own connection proves it reaches this account's gateway
+          // before the provider key and token are written on it (GAP-0594);
+          // with no token the connection fails and nothing is written.
           // node:http uses createConnection only without an agent.
-          ...(loadSidecarConfig().token
-            ? {
-                agent: undefined,
-                createConnection: provenCreateConnection(
-                  "127.0.0.1",
-                  guardrailPort,
-                  loadSidecarConfig().token,
-                ) as unknown as NodeRequestOptions["createConnection"],
-              }
-            : {}),
+          agent: undefined,
+          createConnection: provenCreateConnection(
+            "127.0.0.1",
+            guardrailPort,
+            loadSidecarConfig().token,
+          ) as unknown as NodeRequestOptions["createConnection"],
         };
 
         if (!knownForHTTPS && shapedForHTTPS) {
