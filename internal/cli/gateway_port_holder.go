@@ -56,7 +56,9 @@ func foreignGatewayListenerAt(cfg *config.Config, host string, port int) string 
 	addr := net.JoinHostPort(host, strconv.Itoa(port))
 	holder, holderErr := gatewayPortHolder(host, port)
 	// lsof on macOS does not list another account's sockets, so a missing
-	// holder is confirmed with a connection attempt.
+	// holder is confirmed with a connection attempt. Such a holder can still
+	// be this account's gateway: the macOS app's privileged helper runs it as
+	// root for this home, and this home's live PID record (IsRunning) says so.
 	if holderErr != nil && !gatewayPortAnswers(addr) {
 		return ""
 	}
@@ -79,12 +81,39 @@ func foreignGatewayListenerAt(cfg *config.Config, host string, port int) string 
 			"%s is held by %s, not by this account's gateway: no gateway started for %s is running",
 			addr, who, config.DefaultDataPath(),
 		)
+	case holderErr != nil && !runtimeRecordNamesEndpoint(cfg, managedPID, host, port):
+		return fmt.Sprintf(
+			"%s is held by %s, not by this account's gateway (PID %d publishes no listener at that address)",
+			addr, who, managedPID,
+		)
 	case holderErr == nil && holder.PID > 0 && holder.PID != managedPID:
 		return fmt.Sprintf(
 			"%s is held by %s, not by this account's gateway (PID %d)", addr, who, managedPID,
 		)
 	}
 	return ""
+}
+
+// runtimeRecordNamesEndpoint reports whether this account's running gateway
+// (pid, from its PID record) publishes host:port as its listener in its data
+// directory (gateway-api.json, recordRuntimeAPIAddress). A holder no socket
+// table names (another account's process; lsof on macOS lists this
+// account's sockets only) is this account's gateway only where that gateway's
+// own record says so; a running gateway alone would vouch for any port.
+func runtimeRecordNamesEndpoint(cfg *config.Config, pid int, host string, port int) bool {
+	dataDir := config.DefaultDataPath()
+	if cfg != nil && cfg.DataDir != "" {
+		dataDir = cfg.DataDir
+	}
+	published := daemon.RuntimeAPIAddress(dataDir, pid)
+	if published == nil || published.Port != port {
+		return false
+	}
+	if strings.EqualFold(strings.TrimSpace(host), "localhost") {
+		return published.IP.IsLoopback()
+	}
+	ip := net.ParseIP(strings.Trim(strings.TrimSpace(host), "[]"))
+	return ip != nil && ip.Equal(published.IP)
 }
 
 // sameHomeGatewayProcess recognises a gateway launched without a daemon PID

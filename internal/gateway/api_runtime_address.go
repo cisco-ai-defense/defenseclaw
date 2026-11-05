@@ -49,5 +49,47 @@ func (a *APIServer) recordRuntimeAPIAddress(listener net.Listener) error {
 	// inherits that folder's ACEs, which the CLI refuses, so every saved
 	// listener edit's audit fact went to the saved port (GAP-2322). Protect
 	// the temp file before it is renamed into place.
-	return configwrite.WriteFileDurablePublished(filepath.Join(cfg.DataDir, "gateway-api.json"), body, 0o600, safefile.ProtectFile)
+	path := runtimeAPIAddressPath(cfg.DataDir)
+	if err := configwrite.WriteFileDurablePublished(path, body, 0o600, safefile.ProtectFile); err != nil {
+		return err
+	}
+	// A gateway an administrator runs for this home (the macOS app's
+	// privileged helper runs it as root) must leave a record the account can
+	// read: a first record created by root would stay root's, and the
+	// account's CLI could not bind the gateway to its port. Like gateway.pid
+	// (safefile.WritePrivate), the record goes to the data directory's owner.
+	return safefile.ReclaimToDirectoryOwner(path)
+}
+
+// runtimeAPIAddressPath is the record's path in dataDir.
+func runtimeAPIAddressPath(dataDir string) string {
+	return filepath.Join(dataDir, "gateway-api.json")
+}
+
+// removeRuntimeAPIAddress withdraws this process's record before its API
+// listener closes. The CLI proves a gateway it cannot inspect (one an
+// administrator runs for this home) by this record and the process being
+// alive; a record outliving the listener would let another account that
+// binds the port during the shutdown receive a token-bearing request.
+// Another process's record is left alone.
+func (a *APIServer) removeRuntimeAPIAddress() {
+	cfg := a.runtimeConfigSnapshot()
+	if cfg == nil || cfg.DataDir == "" {
+		return
+	}
+	path := runtimeAPIAddressPath(cfg.DataDir)
+	if err := safefile.ValidatePrivateFile(path); err != nil {
+		return
+	}
+	raw, err := safefile.ReadRegularFileBounded(path, 4<<10)
+	if err != nil {
+		return
+	}
+	var published struct {
+		PID int `json:"pid"`
+	}
+	if json.Unmarshal(raw, &published) != nil || published.PID != os.Getpid() {
+		return
+	}
+	_ = os.Remove(path)
 }

@@ -1650,6 +1650,9 @@ func (a *APIServer) Run(ctx context.Context) error {
 	go systemd.RunWatchdog(watchdogCtx, nil)
 
 	shutdown := func() error {
+		// Withdraw this process's listener record before the listener closes
+		// (removeRuntimeAPIAddress).
+		a.removeRuntimeAPIAddress()
 		return shutdownAPIServers(apiShutdownGrace, srv, hookSrv)
 	}
 

@@ -124,3 +124,64 @@ func TestPerUserDarwinConnectedCheckDoesNotSpawn(t *testing.T) {
 			before.Utime, before.Stime, after.Utime, after.Stime)
 	}
 }
+
+// The macOS app's privileged helper runs this account's gateway as root for
+// this home: the socket inspection sees this account's processes only, so
+// the accepted tuple never shows there and every token-bearing request was
+// refused as another account's. This home's own evidence (its verified PID
+// record and the gateway's runtime record naming the endpoint) proves it.
+func TestPerUserDarwinAcceptsThisHomesGatewayRunByAnotherAccount(t *testing.T) {
+	t.Setenv("DEFENSECLAW_HOME", t.TempDir())
+	client := &net.TCPAddr{IP: net.IPv4(127, 0, 0, 1), Port: 55233}
+	server := &net.TCPAddr{IP: net.IPv4(127, 0, 0, 1), Port: 18970}
+	old := perUserOtherAccountGateway
+	t.Cleanup(func() { perUserOtherAccountGateway = old })
+
+	perUserOtherAccountGateway = func(asked *net.TCPAddr) (int, bool) {
+		return 50721, asked.IP.Equal(server.IP) && asked.Port == server.Port
+	}
+	if proven, err := perUserDarwinConnectedTupleProven(context.Background(), client, server); err != nil || !proven {
+		t.Fatalf("this home's gateway run by another account was refused: proven=%v err=%v", proven, err)
+	}
+	if err := verifyPerUserConnectedTuple(client, server); err != nil {
+		t.Fatalf("verifyPerUserConnectedTuple refused this home's gateway: %v", err)
+	}
+	other := &net.TCPAddr{IP: net.IPv4(127, 0, 0, 1), Port: 18980}
+	if proven, err := perUserDarwinConnectedTupleProven(context.Background(), client, other); err != nil || proven {
+		t.Fatalf("a port this home's gateway does not hold was accepted: proven=%v err=%v", proven, err)
+	}
+	perUserOtherAccountGateway = func(*net.TCPAddr) (int, bool) { return 0, false }
+	if proven, err := perUserDarwinConnectedTupleProven(context.Background(), client, server); err != nil || proven {
+		t.Fatalf("an unproven peer was accepted: proven=%v err=%v", proven, err)
+	}
+}
+
+// With no gateway recorded for a fresh home, nothing is proven; a gateway of
+// this account's own is seen by the socket inspection and never excused.
+func TestThisHomesGatewayRunByAnotherAccountNeedsARecord(t *testing.T) {
+	t.Setenv("DEFENSECLAW_HOME", t.TempDir())
+	server := &net.TCPAddr{IP: net.IPv4(127, 0, 0, 1), Port: 18970}
+	if pid, ok := thisHomesGatewayRunByAnotherAccountListensAt(server); ok || pid != 0 {
+		t.Fatalf("an empty home proved a listener: pid=%d ok=%v", pid, ok)
+	}
+	if pid, ok := thisHomesGatewayRunByAnotherAccountListensAt(nil); ok || pid != 0 {
+		t.Fatalf("a nil endpoint proved a listener: pid=%d ok=%v", pid, ok)
+	}
+}
+
+// The home resolves as config.DefaultDataPath does: DEFENSECLAW_HOME, else
+// ~/.defenseclaw.
+func TestPerUserGatewayHomeFollowsDefenseClawHome(t *testing.T) {
+	t.Setenv("DEFENSECLAW_HOME", "/tmp/dc-home")
+	if got := perUserGatewayHome(); got != "/tmp/dc-home" {
+		t.Fatalf("perUserGatewayHome() = %q", got)
+	}
+	t.Setenv("DEFENSECLAW_HOME", "")
+	home, err := os.UserHomeDir()
+	if err != nil {
+		t.Skip(err)
+	}
+	if got := perUserGatewayHome(); got != home+"/.defenseclaw" {
+		t.Fatalf("perUserGatewayHome() = %q", got)
+	}
+}

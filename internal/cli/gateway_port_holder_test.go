@@ -14,6 +14,7 @@ import (
 
 	"github.com/defenseclaw/defenseclaw/internal/config"
 	"github.com/defenseclaw/defenseclaw/internal/daemon"
+	"github.com/defenseclaw/defenseclaw/internal/safefile"
 )
 
 // A listener this home did not start (a gateway leaked by another home or
@@ -221,5 +222,54 @@ func TestCheckAPIPortRefusesOnlyAnotherAccountsListener(t *testing.T) {
 	}
 	if err := checkAPIPort(filepath.Join(t.TempDir(), "missing.yaml"), false); err != nil {
 		t.Fatalf("a missing config refused: %v", err)
+	}
+}
+
+// The macOS app's privileged helper runs this account's gateway as root for
+// this home. lsof lists only this account's sockets, so it names no holder
+// while the port answers; with this home's PID record alive that is this
+// account's gateway, not another account's. Status said "no gateway started
+// for <home> is running" and told the user to move to another port.
+func TestForeignGatewayListenerAcceptsThisHomesGatewayRunByAnotherAccount(t *testing.T) {
+	t.Setenv("DEFENSECLAW_HOME", t.TempDir())
+	oldHolder, oldAnswers, oldState := gatewayPortHolder, gatewayPortAnswers, gatewayManagedState
+	t.Cleanup(func() { gatewayPortHolder, gatewayPortAnswers, gatewayManagedState = oldHolder, oldAnswers, oldState })
+	gatewayPortHolder = func(string, int) (daemon.PortHolder, error) {
+		return daemon.PortHolder{UID: -1}, daemon.ErrNoListener
+	}
+	gatewayPortAnswers = func(string) bool { return true }
+	c := config.DefaultConfig()
+	c.Gateway.APIBind = "127.0.0.1"
+	c.Gateway.APIPort = 18970
+
+	gatewayManagedState = func() (bool, int) { return true, 36347 }
+	record := filepath.Join(c.DataDir, "gateway-api.json")
+	// Published as the gateway publishes it: 0600 on POSIX, an owner-only
+	// protected DACL on Windows (safefile.ProtectFile).
+	publish := func(body string) {
+		if err := os.WriteFile(record, []byte(body), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		if err := safefile.ProtectFile(record); err != nil {
+			t.Fatal(err)
+		}
+	}
+	// The gateway's own record must name this endpoint; a running gateway
+	// alone vouches for no port.
+	if problem := foreignGatewayListener(c); !strings.Contains(problem, "publishes no listener at that address") {
+		t.Fatalf("an unlisted holder was this account's gateway without its record: %q", problem)
+	}
+	publish(`{"pid":36347,"host":"127.0.0.1","port":18971}`)
+	if problem := foreignGatewayListener(c); !strings.Contains(problem, "publishes no listener at that address") {
+		t.Fatalf("an unlisted holder on another port than the record was this account's gateway: %q", problem)
+	}
+	publish(`{"pid":36347,"host":"127.0.0.1","port":18970}`)
+	if problem := foreignGatewayListener(c); problem != "" {
+		t.Fatalf("this home's running gateway reported as foreign: %q", problem)
+	}
+	gatewayManagedState = func() (bool, int) { return false, 0 }
+	problem := foreignGatewayListener(c)
+	if !strings.Contains(problem, "no gateway started for") || !strings.Contains(problem, "held by another process") {
+		t.Fatalf("with no record the unlisted holder is not this account's gateway: %q", problem)
 	}
 }

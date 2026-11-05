@@ -392,3 +392,168 @@ def test_listener_proof_checks_the_named_running_port(monkeypatch) -> None:
     cmd_doctor._trusted_gateway_listener(cfg, evidence=object(), platform_name="linux", api_port=19080)
     cmd_doctor._trusted_gateway_listener(cfg, evidence=object(), platform_name="linux")
     assert seen == [19080, 19082]
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX account semantics")
+def test_this_homes_gateway_run_by_another_account_gets_the_token(monkeypatch) -> None:
+    """The macOS app's privileged helper runs this account's gateway as root.
+
+    lsof lists only this account's sockets, so the listener looked like another
+    account's and the CLI withheld the token from its own gateway (status:
+    "port 18970 is held by a process of another account"). Doctor's complete
+    proof for the port makes it this account's; any other port stays foreign.
+    """
+    from defenseclaw import upgrade_shim
+
+    monkeypatch.setattr(upgrade_shim, "managed_descriptor", lambda: None)
+    monkeypatch.setattr(
+        gateway, "_foreign_loopback_listener_uncached", lambda port, *_a, **_k: "a process of another account"
+    )
+    monkeypatch.setattr(gateway, "_this_accounts_gateway_as_another_account", lambda host, port: port == 18970)
+
+    assert gateway.foreign_loopback_listener("127.0.0.1", 18970) == ""
+    assert "a process of another account" in gateway.foreign_loopback_listener("127.0.0.1", 18980)
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX account semantics")
+def test_only_a_complete_proof_for_the_port_makes_an_unlisted_listener_this_accounts(monkeypatch) -> None:
+    """Only a trusted proof for the port, for a process of another account, excuses the listener."""
+    from types import SimpleNamespace
+
+    from defenseclaw import config
+    from defenseclaw.commands import cmd_doctor
+
+    monkeypatch.setattr(config, "load", lambda **_kwargs: SimpleNamespace())
+    monkeypatch.setattr(cmd_doctor, "_gateway_api_host", lambda _cfg: "127.0.0.1")
+    proven: list[int] = []
+
+    def trust(code: str, uid: int):
+        """Build a doctor proof stub with the given trust code and process owner."""
+
+        def prove(_cfg, *, api_port=None, **_kwargs):
+            """Record the port asked about and answer with the stubbed trust."""
+            proven.append(api_port)
+            trusted = code == "trusted"
+            return SimpleNamespace(
+                trusted=trusted, code=code, pid=36347 if trusted else 0, process=SimpleNamespace(uid=uid)
+            )
+
+        return prove
+
+    for code, uid, expected in [
+        ("trusted", 0, True),
+        ("trusted", os.getuid(), False),  # this account's own gateway is listed by lsof; nothing to excuse
+        ("missing_listener", 0, False),
+        ("missing", -1, False),
+    ]:
+        monkeypatch.setattr(cmd_doctor, "_trusted_gateway_listener", trust(code, uid))
+        assert gateway._this_accounts_gateway_as_another_account("127.0.0.1", 18970) is expected, (code, uid)
+    assert proven == [18970] * 4
+    # The proof is for the configured gateway host; another loopback address
+    # on the same port is still another account's.
+    monkeypatch.setattr(cmd_doctor, "_trusted_gateway_listener", trust("trusted", 0))
+    assert gateway._this_accounts_gateway_as_another_account("::1", 18970) is False
+    assert gateway._this_accounts_gateway_as_another_account("localhost", 18970) is True
+    assert proven == [18970] * 5
+
+    def unavailable(*_args, **_kwargs):
+        """Stand in for a proof that cannot run at all."""
+        raise RuntimeError("config does not load")
+
+    monkeypatch.setattr(cmd_doctor, "_trusted_gateway_listener", unavailable)
+    assert gateway._this_accounts_gateway_as_another_account("127.0.0.1", 18970) is False
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX account semantics")
+def test_doctor_binds_another_accounts_gateway_to_its_own_runtime_record(tmp_path, monkeypatch) -> None:
+    """Without a socket table it may read, doctor binds the verified gateway of
+    another account to the endpoint through the gateway's own private
+    runtime record (gateway-api.json) and a listener that answers there.
+    Anything less leaves the listener unproven.
+    """
+    import json
+    import socket
+    from types import SimpleNamespace
+
+    from defenseclaw import doctor_gateway as evidence_module
+    from defenseclaw.commands import cmd_doctor
+    from defenseclaw.file_permissions import protect_private_file
+
+    executable = "/Library/PrivilegedHelperTools/DefenseClawMacGatewayAdmin/uid-501/defenseclaw-gateway"
+    pid = os.getpid()  # the records must name a live process
+    listener = socket.socket()
+    listener.bind(("127.0.0.1", 0))
+    listener.listen(1)
+    port = listener.getsockname()[1]
+    pid_file = tmp_path / "gateway.pid"
+    pid_file.write_text(
+        json.dumps(
+            {"pid": pid, "executable": executable, "data_dir": str(tmp_path), "start_identity": "1793776207.630838"}
+        ),
+        encoding="utf-8",
+    )
+    protect_private_file(pid_file)
+    record = tmp_path / "gateway-api.json"
+
+    def publish(record_pid: int, record_port: int, record_host: str = "127.0.0.1") -> None:
+        """Write the gateway's private runtime record as the gateway publishes it."""
+        record.write_text(json.dumps({"pid": record_pid, "host": record_host, "port": record_port}), encoding="utf-8")
+        protect_private_file(record)
+
+    class Evidence(evidence_module.GatewayEvidence):
+        """Doctor evidence whose process answers belong to the given uid."""
+
+        def __init__(self, uid: int) -> None:
+            """Remember the uid every process answer reports."""
+            super().__init__(platform_name="darwin")
+            self.uid = uid
+
+        def process(self, inspected_pid: int) -> evidence_module.ProcessEvidence:
+            """Answer with the verified gateway identity, owned by the stubbed uid."""
+            return evidence_module.ProcessEvidence(
+                "ok",
+                pid=inspected_pid,
+                executable=executable,
+                start_identity="1793776207.630838",
+                uid=self.uid,
+            )
+
+    cfg = SimpleNamespace(data_dir=str(tmp_path), gateway=SimpleNamespace(api_bind="127.0.0.1", api_port=port))
+    monkeypatch.setattr(cmd_doctor, "_gateway_api_host", lambda _cfg: "127.0.0.1")
+    monkeypatch.setattr(
+        cmd_doctor,
+        "_managed_gateway_listener_evidence",
+        lambda *_a, **_k: evidence_module.ListenerEvidence("missing", reason="no TCP listener"),
+    )
+
+    def prove(uid: int = 0) -> cmd_doctor._GatewayTrust:
+        """Run the listener proof with a process of the given owner."""
+        return cmd_doctor._trusted_gateway_listener(cfg, evidence=Evidence(uid), platform_name="darwin")
+
+    try:
+        publish(pid, port)
+        trust = prove()
+        assert (trust.code, trust.pid, trust.trusted) == ("trusted", pid, True)
+        # This account's own gateway is listed by lsof: no listener means none.
+        assert prove(os.getuid()).code == "missing_listener"
+        # The record must name this port, and this process.
+        publish(pid, port + 1)
+        assert prove().code == "missing_listener"
+        publish(pid + 1, port)
+        assert prove().code == "missing_listener"
+        # The probe goes to the record's own endpoint: a record naming the
+        # other loopback address proves nothing about a listener on this one.
+        publish(pid, port, "::1")
+        monkeypatch.setattr(cmd_doctor, "_gateway_api_host", lambda _cfg: "localhost")
+        assert prove().code == "missing_listener"
+        monkeypatch.setattr(cmd_doctor, "_gateway_api_host", lambda _cfg: "127.0.0.1")
+        # A record that is not private vouches for nothing.
+        publish(pid, port)
+        record.chmod(0o644)
+        assert prove().code == "missing_listener"
+        # And a gateway must answer there.
+        protect_private_file(record)
+        listener.close()
+        assert prove().code == "missing_listener"
+    finally:
+        listener.close()
