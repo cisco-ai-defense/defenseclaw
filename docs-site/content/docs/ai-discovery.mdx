@@ -981,6 +981,19 @@ agent inventory received through agent discovery uses the same per-item model.
 Incomplete, overflowed, or otherwise non-authoritative collections are retained
 as local diagnostics instead of being exported as authoritative snapshots.
 
+Managed MCP inventory treats an unreadable connector configuration, a malformed
+server entry in otherwise valid JSON, an invalid Codex or Amp configuration,
+or an incomplete discovery scan as a partial observation. Valid entries from
+other sources remain in the local diagnostic. The gateway emits a local,
+redacted inventory diagnostic and keeps the last complete managed snapshot;
+it does not report the missing entries as removals. A complete scan can publish
+a genuinely empty inventory when servers have been removed. The partial
+summary contains a source and counts; any observed component rows stay on the
+local diagnostic route and are not exported as managed inventory.
+On Windows, a LocalSystem gateway cannot read configured user-profile MCP
+files. That collection remains partial until a per-user source provides them;
+the gateway does not replace the last complete cloud snapshot with an empty one.
+
 The release-owned managed agent, connector, MCP, skill, and plugin inventory
 actions are blocked from operator-configured remote destinations. Mandatory
 SQLite remains authoritative locally, and the generated CMID-authenticated AI
