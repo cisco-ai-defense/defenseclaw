@@ -31,13 +31,30 @@ const perUserFreshGatewayWindow = 12 * time.Second
 // recently started gateway recorded for this account. The connected peer,
 // record, executable and kernel start identity must all name one process.
 // An answer counts only if it finished before this connection was proven.
-func PerUserGatewayFreshStartNoAnswer(dataDir string, peer *PerUserPeerRecord) bool {
-	current, ok := verifiedFreshGatewayPeer(dataDir, peer)
+// The second result names the bounded reason when the proof is unavailable.
+func PerUserGatewayFreshStartNoAnswer(dataDir string, peer *PerUserPeerRecord) (bool, string) {
+	if dataDir == "" || !filepath.IsAbs(dataDir) || peer == nil {
+		return false, "no_verified_connection"
+	}
+	connected, ok := peer.wait(50 * time.Millisecond)
+	if !ok || connected.pid <= 0 || connected.identity == "" {
+		return false, "no_holder"
+	}
+	current, ok := freshGatewayFromRecord(dataDir)
 	if !ok {
-		return false
+		return false, "not_fresh"
+	}
+	if current.pid != connected.pid || current.identity != connected.identity {
+		return false, "no_holder"
 	}
 	before, valid := perUserGatewayAnsweredBefore(dataDir, current, peer.at)
-	return valid && !before
+	if !valid {
+		return false, "answer_record_unavailable"
+	}
+	if before {
+		return false, "answered_before"
+	}
+	return true, ""
 }
 
 // perUserGatewayRecentlyStarted is the cheap first look of the native hook
@@ -141,18 +158,6 @@ func perUserCaptureFreshGatewayOwner(check *perUserPeerCheck) {
 			check.owner.Store(&perUserPeerProcess{pid: pid, identity: identity})
 		}
 	}()
-}
-
-func verifiedFreshGatewayPeer(dataDir string, peer *PerUserPeerRecord) (perUserPeerProcess, bool) {
-	if dataDir == "" || !filepath.IsAbs(dataDir) || peer == nil {
-		return perUserPeerProcess{}, false
-	}
-	before, ok := peer.wait(50 * time.Millisecond)
-	if !ok || before.pid <= 0 || before.identity == "" {
-		return perUserPeerProcess{}, false
-	}
-	current, ok := freshGatewayFromRecord(dataDir)
-	return current, ok && current.pid == before.pid && current.identity == before.identity
 }
 
 func freshGatewayFromRecord(dataDir string) (perUserPeerProcess, bool) {

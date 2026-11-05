@@ -1437,7 +1437,7 @@ defenseclaw_log_hook_failure() {
   local log_file="${log_dir}/hook-failures.jsonl"
   local ts
   ts="$(date -u +"%Y-%m-%dT%H:%M:%SZ" 2>/dev/null || date 2>/dev/null || printf unknown)"
-  local safe_ts safe_connector safe_hook_name safe_reason safe_category safe_fail_mode
+  local safe_ts safe_connector safe_hook_name safe_reason safe_category safe_fail_mode restart_proof="" restart_field=""
 	local correlation_payload="${PAYLOAD:-${CONTENT:-}}" session_id="" call_id="" tool_id="" hook_event=""
 	if [ -n "$correlation_payload" ]; then
 	  # The hook event, as the native hook's line names it: the gateway tells a
@@ -1471,12 +1471,28 @@ defenseclaw_log_hook_failure() {
   safe_reason="$(defenseclaw_json_escape "$reason")"
   safe_category="$(defenseclaw_json_escape "$category")"
   safe_fail_mode="$(defenseclaw_json_escape "$fail_mode")"
+  # Exit 9 is a verified per-user call with no HTTP status. The helper's
+  # fixed token records which restart-window check did not complete.
+  case "${DEFENSECLAW_MANAGED_HOOK:-0}" in
+    1|true|TRUE|yes|YES) ;;
+    *)
+      if [ "$category" = transport ] && [ "${_DC_TRANSPORT_STATUS:-}" = 9 ] &&
+         [ -z "${DEFENSECLAW_HOOK_SOCKET:-}" ] && [ "${_DC_SECURE_CLIENT_HOOK:-0}" != 1 ]; then
+        case "${RESPONSE:-}" in
+          DCPOSTPROOF1:no_verified_connection|DCPOSTPROOF1:no_holder|DCPOSTPROOF1:not_fresh|DCPOSTPROOF1:answer_record_unavailable|DCPOSTPROOF1:answered_before|DCPOSTPROOF1:proof_unavailable)
+            restart_proof="${RESPONSE#DCPOSTPROOF1:}"
+            restart_field=',"restart_proof":"'"$restart_proof"'"'
+            ;;
+        esac
+      fi
+      ;;
+  esac
   # stderr is redirected before the append so a failed open of the log
   # (full disk, read-only home) cannot print a shell diagnostic naming this
   # script into the agent-visible block reason (GAP-1974).
-  printf '{"ts":"%s","connector":"%s","hook":"%s","event":"%s","reason":"%s","category":"%s","fail_mode":"%s","outcome":"%s","session_id":"%s","call_id":"%s","tool_id":"%s"}\n' \
+  printf '{"ts":"%s","connector":"%s","hook":"%s","event":"%s","reason":"%s","category":"%s","fail_mode":"%s","outcome":"%s","session_id":"%s","call_id":"%s","tool_id":"%s"%s}\n' \
     "$safe_ts" "$safe_connector" "$safe_hook_name" "$(defenseclaw_json_escape "$hook_event")" "$safe_reason" "$safe_category" "$safe_fail_mode" "$outcome" \
-    "$(defenseclaw_json_escape "$session_id")" "$(defenseclaw_json_escape "$call_id")" "$(defenseclaw_json_escape "$tool_id")" \
+    "$(defenseclaw_json_escape "$session_id")" "$(defenseclaw_json_escape "$call_id")" "$(defenseclaw_json_escape "$tool_id")" "$restart_field" \
     2>/dev/null >> "$log_file" || true
   chmod 600 "$log_file" 2>/dev/null || true
   return 0
@@ -4128,7 +4144,14 @@ _dc_gateway_post_once() {
         # must not change the outage decision (rel-1-0-6 GAP-0497).
         11) return 7 ;;
         126|127) ;;
-        9) _dc_post_sent_noanswer=1; return 9 ;;
+        9)
+          _dc_post_sent_noanswer=1
+          case "$_dc_post_output" in
+            DCPOSTPROOF1:no_verified_connection|DCPOSTPROOF1:no_holder|DCPOSTPROOF1:not_fresh|DCPOSTPROOF1:answer_record_unavailable|DCPOSTPROOF1:answered_before)
+              printf '%s' "$_dc_post_output" ;;
+            *) printf '%s' 'DCPOSTPROOF1:proof_unavailable' ;;
+          esac
+          return 9 ;;
         # 10 (hookexec.PerUserPostRestartNoAnswerExit): no status while a
         # start or restart of this account's gateway holds its start lock and
         # the process behind the call's connection exited or gave up the port

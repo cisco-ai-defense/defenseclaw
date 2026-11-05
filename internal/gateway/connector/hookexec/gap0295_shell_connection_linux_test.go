@@ -83,19 +83,19 @@ func TestGAP0295ShellFreshStartUsesConnectionTime(t *testing.T) {
 	}
 	firstConn, first := connect()
 	defer firstConn.Close()
-	if !PerUserGatewayFreshStartNoAnswer(dataDir, first) {
+	if fresh, _ := PerUserGatewayFreshStartNoAnswer(dataDir, first); !fresh {
 		t.Fatal("first connection did not enter the fresh-start window")
 	}
 	time.Sleep(50 * time.Millisecond)
 	if err := recordPerUserGatewayAnswer(dataDir, perUserPeerProcess{pid: pid, identity: identity}); err != nil {
 		t.Fatal(err)
 	}
-	if !PerUserGatewayFreshStartNoAnswer(dataDir, first) {
+	if fresh, _ := PerUserGatewayFreshStartNoAnswer(dataDir, first); !fresh {
 		t.Fatal("sibling answer after this connection ended its restart window")
 	}
 	lateConn, late := connect()
 	defer lateConn.Close()
-	if PerUserGatewayFreshStartNoAnswer(dataDir, late) {
+	if fresh, _ := PerUserGatewayFreshStartNoAnswer(dataDir, late); fresh {
 		t.Fatal("connection after the completed answer entered the restart window")
 	}
 }

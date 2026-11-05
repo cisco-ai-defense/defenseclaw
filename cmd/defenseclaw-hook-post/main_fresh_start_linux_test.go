@@ -72,8 +72,12 @@ func TestGAP0295FreshGatewayNoAnswerUsesOutageExit(t *testing.T) {
 	if err := os.WriteFile(pidPath, badRecord, 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if got := runMain(args, bytes.NewReader(frame), io.Discard, io.Discard); got != hookexec.PerUserPostNoAnswerExit {
+	var proof bytes.Buffer
+	if got := runMain(args, bytes.NewReader(frame), &proof, io.Discard); got != hookexec.PerUserPostNoAnswerExit {
 		t.Fatalf("unverified gateway no-answer exit = %d, want closed", got)
+	}
+	if got := proof.String(); got != "DCPOSTPROOF1:not_fresh" {
+		t.Fatalf("unverified gateway proof result = %q, want not_fresh", got)
 	}
 }
 
@@ -179,7 +183,11 @@ func checkGAP0295FirstAnswerEndsFreshWindow(t *testing.T, publishBeforeAnswer bo
 		writeRecord()
 	}
 	second := []byte("DCPOST1\x00/api/v1/claude-code/hook\x00{\"hook_event_name\":\"PreToolUse\",\"tool_name\":\"Bash\",\"tool_input\":{\"command\":\"rm -rf ~/.defenseclaw\"}}\x00Content-Type\x00application/json\x00")
-	if got := runMain(args, bytes.NewReader(second), io.Discard, io.Discard); got != hookexec.PerUserPostNoAnswerExit {
+	var proof bytes.Buffer
+	if got := runMain(args, bytes.NewReader(second), &proof, io.Discard); got != hookexec.PerUserPostNoAnswerExit {
 		t.Fatalf("post-answer no-answer exit = %d, want closed", got)
+	}
+	if got := proof.String(); got != "DCPOSTPROOF1:answered_before" {
+		t.Fatalf("post-answer proof result = %q, want answered_before", got)
 	}
 }
