@@ -317,7 +317,7 @@ final class GatewayAdminInstallation {
                 current = next
                 try Self.verify(current, account: account, directory: true, device: volume)
                 #if GATEWAY_ADMIN_HELPER_TESTING
-                componentOpenedForTesting?(index)
+                Self.componentOpenedForTesting?(index)
                 #endif
             }
             let marker = openat(current, "config.yaml", O_RDONLY | O_NOFOLLOW | O_NONBLOCK | O_NOCTTY | O_CLOEXEC)
