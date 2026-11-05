@@ -70,12 +70,12 @@ function ConvertTo-DefenseClawBoundedDiagnostic { param($Value) [string]$Value }
 
 $startedAfter = [DateTime]::Parse('2026-10-29T00:00:00Z').ToUniversalTime()
 $digest = 'a' * 64
-function New-Report([int]$Failures, [int]$Rows = 3, [bool]$WithState = $true, [string]$ActivationDigest = '') {
+function New-Report([int]$Failures, [int]$Rows = 3, [bool]$WithState = $true, [string]$ActivationDigest = '', [string]$FailedLabel = 'claudecode@S-1-5-21-1-2-3-1003') {
     $report = [ordered]@{
         ok = ($Failures -eq 0)
         # The exact lines `enterprise hooks status` emits for a failed target.
         errors = @($(if ($Failures -gt 0) {
-                    'last guardian reconcile failed for claudecode@S-1-5-21-1-2-3-1003: hook write denied'
+                    "last guardian reconcile failed for ${FailedLabel}: hook write denied"
                     "last guardian reconcile is incomplete ($(3 - $Failures - 1) succeeded, 1 pending, 3 total)"
                     "protected guardian authorization is incomplete ($(3 - $Failures - 1) succeeded, 1 pending, 3 total)"
                 }))
@@ -131,6 +131,11 @@ Assert-Result (Test-Coverage (New-Report -Failures 1 -ActivationDigest ('c' * 64
 Assert-Result (Test-Coverage (New-Report -Failures 1 -ActivationDigest $digest) -Digest $digest) $false 'degraded activation without -AllowFailedTargets'
 Assert-Result (Test-Coverage (New-Report -Failures 1 -Rows 2) -Allow) $false 'incomplete degraded reconcile'
 Assert-Result (Test-Coverage (New-Report -Failures 1 -WithState $false) -Allow) $false 'not-ok report without state'
+# The Windows Guardian names a failed account "user (SID)"; a user name may
+# carry spaces. Only the failed row's own SID is accepted.
+Assert-Result (Test-Coverage (New-Report -Failures 1 -FailedLabel 'claudecode@dana (S-1-5-21-1-2-3-1003)') -Allow) $true 'degraded reconcile with a Windows account label'
+Assert-Result (Test-Coverage (New-Report -Failures 1 -FailedLabel 'claudecode@Dana Smith (S-1-5-21-1-2-3-1003)') -Allow) $true 'degraded reconcile with a spaced Windows account label'
+Assert-Result (Test-Coverage (New-Report -Failures 1 -FailedLabel 'claudecode@dana (S-1-5-21-1-2-3-1001)') -Allow) $false 'degraded reconcile naming another SID'
 
 # The readiness wait that follows uses `enterprise hooks status`, which exits
 # non-zero for a degraded Guardian. The same rollback-only allowance applies.
