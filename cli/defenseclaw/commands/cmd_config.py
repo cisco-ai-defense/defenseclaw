@@ -899,7 +899,10 @@ def _seed_moved_policies(cfg) -> list[str]:
     return [f"Seeded the rule packs and Rego policies in {policy_dir} for the new data_dir."]
 
 
-def _write_config_change(app: AppContext, changes: list, expect_sha256: str | None, verb: str) -> bool:
+def _write_config_change(
+    app: AppContext, changes: list, expect_sha256: str | None, verb: str,
+    *, check_candidate=None,
+) -> bool:
     """Apply the changes in one write through the writer; False when they changed nothing."""
     from defenseclaw import config_writer
 
@@ -931,6 +934,7 @@ def _write_config_change(app: AppContext, changes: list, expect_sha256: str | No
             f"defenseclaw config {verb}",
             expect_sha256,
             path=path,
+            check_candidate=check_candidate,
         )
     except config_writer.ManagedConfigWriteError as exc:
         from defenseclaw.enforce.asset_lists import audit_managed_config_refusal
@@ -1209,31 +1213,38 @@ def config_set(app: AppContext, key: str, value: str, as_json: bool, expect_sha2
         raise click.ClickException(
             f"an empty value does not set {key}; use defenseclaw config unset {key}"
         )
-    _refuse_proxy_connector_beside_hooks(app, parts)
-    _write_config_change(app, [Change(key, parsed)], expect_sha256, "set")
+    roster_change = parts == ["guardrail"] or parts[:2] == ["guardrail", "connectors"]
+    check_candidate = _check_guardrail_connector_roster if roster_change else None
+    _write_config_change(app, [Change(key, parsed)], expect_sha256, "set", check_candidate=check_candidate)
 
 
-def _refuse_proxy_connector_beside_hooks(app: AppContext, parts: list) -> None:
-    """Keep a hook-only roster startable when config set adds a proxy connector."""
-    if len(parts) < 3 or parts[:2] != ["guardrail", "connectors"] or not isinstance(parts[2], str):
-        return
-    proxy = normalize_connector(parts[2])
-    if proxy not in {"openclaw", "zeptoclaw"}:
-        return
-    try:
-        cfg = app.cfg if app.cfg is not None else config_module.load()
-        from defenseclaw.enforce.asset_lists import is_secure_client
+def _check_guardrail_connector_roster(_path: str, candidate: bytes) -> None:
+    """Check the final enabled roster while the writer holds config.yaml.lock."""
+    from defenseclaw import config_writer
 
-        if is_secure_client(cfg):
-            return
-        installed = [normalize_connector(name) for name in cfg.active_connectors()]
-    except Exception:  # noqa: BLE001 - let the config writer report an unreadable file
+    document = config_writer._parse_config_document(candidate)
+    if config_writer.secure_client_document(document):
         return
-    hooks = sorted(name for name in installed if name not in {"openclaw", "zeptoclaw"})
-    if hooks:
-        raise click.ClickException(
-            f"config.yaml was not changed: {proxy} needs a proxy binding and cannot share a "
-            f"gateway process with hook connectors ({', '.join(hooks)})."
+    guardrail = document.get("guardrail", {}) if isinstance(document, dict) else {}
+    roster = guardrail.get("connectors", {}) if isinstance(guardrail, dict) else {}
+    if not isinstance(roster, dict):
+        return
+    configured = {normalize_connector(name) for name in roster if isinstance(name, str)}
+    if len(configured) < 2:
+        return
+    enabled = {
+        normalize_connector(name)
+        for name, entry in roster.items()
+        if isinstance(name, str) and isinstance(entry, dict) and entry.get("enabled") is not False
+    }
+    proxies = sorted(enabled & {"openclaw", "zeptoclaw"})
+    if proxies:
+        proxy = proxies[0]
+        others = sorted(configured - {proxy})
+        label = "hook connectors" if not set(others) & {"openclaw", "zeptoclaw"} else "other connectors"
+        raise config_writer.ConfigWriteError(
+            f"{proxy} needs a proxy binding and cannot share a gateway process "
+            f"with {label} ({', '.join(others)})."
         )
 
 

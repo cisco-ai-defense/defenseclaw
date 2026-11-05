@@ -10,6 +10,7 @@ from unittest.mock import MagicMock, patch
 import pytest
 from click.testing import CliRunner
 from defenseclaw import config as dcconfig
+from defenseclaw import config_writer
 from defenseclaw.commands import cmd_config, cmd_guardrail
 from defenseclaw.context import AppContext
 from defenseclaw.fail_mode import ConnectorFailModeState
@@ -132,32 +133,115 @@ def test_multi_connector_claudecode_scope_stays_available(tmp_path: Path) -> Non
     assert "Claude Code (claudecode) hook_fail_mode" in result.output
 
 
-def test_config_set_refuses_proxy_entry_beside_hook_connector(tmp_path: Path) -> None:
-    app = _app(tmp_path, ["kiro"])
+def _set_in_file(
+    tmp_path: Path, app: AppContext, roster: str, key: str, value: str, *, as_json: bool = False
+) -> tuple[object, bytes, bytes]:
     path = tmp_path / "config.yaml"
-    path.write_text("guardrail:\n  connector: kiro\n", encoding="utf-8")
+    path.write_text(
+        f"config_version: 9\ndata_dir: {tmp_path}\nguardrail:\n{roster}", encoding="utf-8"
+    )
     before = path.read_bytes()
-    with patch.object(cmd_config, "_write_config_change") as write:
+
+    with (
+        patch.object(cmd_config.config_module, "config_path", return_value=path),
+        patch.object(config_writer, "_use_go_validator", return_value=False),
+        patch("defenseclaw.gateway.local_policy_digest", return_value=None),
+        patch.object(cmd_config, "_refresh_stopped_gateway_hooks", return_value=[]),
+    ):
         result = CliRunner().invoke(
-            cmd_config.config_set,
-            ["guardrail.connectors.openclaw.hook_fail_mode", "closed"],
-            obj=app,
+            cmd_config.config_set, [key, value, *(["--json"] if as_json else [])], obj=app
         )
+    return result, before, path.read_bytes()
+
+
+@pytest.mark.parametrize(
+    ("installed", "roster", "key", "value", "as_json"),
+    [
+        ("kiro", "  connector: kiro\n  connectors:\n    kiro: {}\n", "guardrail.connectors.openclaw.hook_fail_mode", "closed", False),
+        ("openclaw", "  connector: openclaw\n  connectors:\n    openclaw: {}\n", "guardrail.connectors.kiro.hook_fail_mode", "closed", False),
+        ("kiro", "  connector: kiro\n  connectors:\n    kiro: {}\n", "guardrail.connectors", '{"kiro": {}, "openclaw": {}}', True),
+        ("kiro", "  connector: kiro\n  connectors:\n    kiro: {}\n", "guardrail", '{"connector": "kiro", "connectors": {"kiro": {}, "openclaw": {}}}', True),
+        ("kiro", "  connector: kiro\n  connectors:\n    kiro: {}\n    openclaw:\n      enabled: false\n", "guardrail.connectors.openclaw.enabled", "true", False),
+    ],
+)
+def test_config_set_refuses_enabled_proxy_in_final_multi_roster(
+    tmp_path: Path, installed: str, roster: str, key: str, value: str, as_json: bool
+) -> None:
+    app = _app(tmp_path, [installed])
+    result, before, after = _set_in_file(tmp_path, app, roster, key, value, as_json=as_json)
     assert result.exit_code != 0
     assert "openclaw needs a proxy binding" in result.output
     assert "hook connectors (kiro)" in result.output
-    assert path.read_bytes() == before
-    write.assert_not_called()
+    assert after == before
 
 
-def test_config_set_hook_entry_and_single_proxy_entry_remain_allowed(tmp_path: Path) -> None:
-    for name, changed in (("kiro", "kiro"), ("openclaw", "openclaw")):
-        app = _app(tmp_path / name, [name])
-        with patch.object(cmd_config, "_write_config_change") as write:
-            result = CliRunner().invoke(
-                cmd_config.config_set,
-                [f"guardrail.connectors.{changed}.hook_fail_mode", "closed"],
-                obj=app,
-            )
-        assert result.exit_code == 0, result.output
-        write.assert_called_once()
+@pytest.mark.parametrize(
+    ("installed", "roster", "key", "value"),
+    [
+        ("kiro", "  connector: kiro\n  connectors:\n    kiro: {}\n", "guardrail.connectors.kiro.hook_fail_mode", "closed"),
+        ("openclaw", "  connector: openclaw\n  connectors:\n    openclaw: {}\n", "guardrail.connectors.openclaw.hook_fail_mode", "closed"),
+        ("kiro", "  connector: kiro\n  connectors:\n    kiro: {}\n", "guardrail.connectors.openclaw.enabled", "false"),
+        ("openclaw", "  connector: openclaw\n  connectors:\n    openclaw:\n      enabled: false\n", "guardrail.connectors.kiro.hook_fail_mode", "closed"),
+    ],
+)
+def test_config_set_valid_roster_remains_allowed(
+    tmp_path: Path, installed: str, roster: str, key: str, value: str
+) -> None:
+    app = _app(tmp_path, [installed])
+    result, before, after = _set_in_file(tmp_path, app, roster, key, value)
+    assert result.exit_code == 0, result.output
+    assert after != before
+
+
+def test_config_set_checks_roster_after_another_writer_changes_it(tmp_path: Path) -> None:
+    app = _app(tmp_path, ["openclaw"])
+    path = tmp_path / "config.yaml"
+    path.write_text(
+        f"config_version: 9\ndata_dir: {tmp_path}\nguardrail:\n"
+        "  connector: openclaw\n  connectors:\n    openclaw: {}\n", encoding="utf-8"
+    )
+    latest = b""
+
+    original_apply = config_writer.apply
+
+    def write(changes, actor, reason, *args, **kwargs):
+        nonlocal latest
+        original_apply(
+            [config_writer.Change("guardrail.connectors.kiro.hook_fail_mode", "closed")],
+            "cli:test", "another writer", path=path,
+        )
+        latest = path.read_bytes()
+        return original_apply(changes, actor, reason, *args, **kwargs)
+
+    with (
+        patch.object(cmd_config.config_module, "config_path", return_value=path),
+        patch.object(config_writer, "apply", side_effect=write),
+        patch.object(config_writer, "_use_go_validator", return_value=False),
+    ):
+        result = CliRunner().invoke(
+            cmd_config.config_set,
+            ["guardrail.connectors.openclaw.hook_fail_mode", "closed"], obj=app,
+        )
+    assert result.exit_code != 0
+    assert "openclaw needs a proxy binding" in result.output
+    assert path.read_bytes() == latest
+
+
+def test_config_set_refuses_zeptoclaw_in_final_multi_roster(tmp_path: Path) -> None:
+    app = _app(tmp_path, ["kiro"])
+    result, before, after = _set_in_file(
+        tmp_path, app, "  connector: kiro\n  connectors:\n    kiro: {}\n",
+        "guardrail.connectors.zeptoclaw.hook_fail_mode", "closed",
+    )
+    assert result.exit_code != 0
+    assert "zeptoclaw needs a proxy binding" in result.output
+    assert after == before
+
+
+def test_secure_client_roster_check_keeps_existing_scope(tmp_path: Path) -> None:
+    candidate = (
+        b"config_version: 9\ndeployment_mode: managed_enterprise\n"
+        b"enterprise:\n  profile: secure_client\nguardrail:\n"
+        b"  connectors:\n    kiro: {}\n    openclaw: {}\n"
+    )
+    cmd_config._check_guardrail_connector_roster(str(tmp_path / "config.yaml"), candidate)
