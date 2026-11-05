@@ -19,8 +19,9 @@ import (
 // repaired here when the object has a canonical form, and what survives is
 // accepted and logged on Secure Client: every file read below is
 // schema-validated and the lifecycle files are hash-bound to the transaction.
-// A standalone process refuses a drifted file without repairing it in place;
-// Setup /repair rewrites it (GAP-0561). Structural failures
+// A standalone process refuses a drifted file without repairing it in place,
+// and Setup refuses it before it stops anything (GAP-0561, GAP-0590).
+// Structural failures
 // (missing element, reparse point, hard link, wrong type, non-NTFS) stay
 // fatal, and TrustStrictAncestorsEnv keeps every verdict fatal.
 var (

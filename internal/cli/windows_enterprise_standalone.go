@@ -820,18 +820,26 @@ func runWindowsEnterpriseStandaloneAction(
 		hookRuntimeRepaired = repairWindowsEnterpriseHookRuntimeAccess()
 		claudeDropInRepaired = repairWindowsEnterpriseClaudeDropIn()
 	}
-	configReplaced := ""
+	var configReplaced []string
 	if action == "repair" || action == "upgrade" {
-		// As ensure does: never load an installed config.yaml that does not
-		// parse before the supplied one (GAP-0948).
-		kept, err := installWindowsEnterpriseSuppliedConfigOverUnparseable(opts.configPath)
+		// As ensure does: never load an installed config.yaml or manifest
+		// the transaction refuses before the approved source (GAP-0948,
+		// GAP-0590).
+		kept, untrusted, err := installWindowsEnterpriseSuppliedConfigOverRefused(opts.configPath)
+		if err == nil && kept != "" {
+			configReplaced = append(configReplaced, windowsEnterpriseReplacedFileChange("config.yaml", kept, untrusted, action))
+		}
+		if err == nil {
+			kept, untrusted, err = installWindowsEnterpriseApprovedManifestOverDrift(ctx, windowsEnterpriseEnsureEnumerationLogger(cmd, opts), opts.configPath, opts.manifestPath)
+			if err == nil && kept != "" {
+				configReplaced = append(configReplaced, windowsEnterpriseReplacedFileChange("targets.yaml", kept, untrusted, action))
+			}
+		}
 		if err != nil {
 			result := newWindowsEnterpriseStandaloneResult(action, opts)
+			result.Changes = append(result.Changes, configReplaced...)
 			result.AddError("preflight_failed", err.Error())
 			return finishWindowsEnterpriseStandalone(cmd, opts, result, windowsEnterpriseFailureCodeFor(result))
-		}
-		if kept != "" {
-			configReplaced = windowsEnterpriseUnparseableConfigChange(kept, action)
 		}
 	}
 	report, run, err := runWindowsEnterpriseStandaloneInstaller(ctx, cmd, opts, script, args)
@@ -843,8 +851,8 @@ func runWindowsEnterpriseStandaloneAction(
 	if claudeDropInRepaired != "" {
 		result.Changes = append(result.Changes, claudeDropInRepaired)
 	}
-	if configReplaced != "" {
-		result.Changes = append(result.Changes, configReplaced)
+	if len(configReplaced) != 0 {
+		result.Changes = append(result.Changes, configReplaced...)
 	}
 	if err != nil {
 		result.AddError(windowsEnterpriseMessageCode(err.Error(), "lifecycle_launch_failed"), err.Error())
@@ -1224,6 +1232,59 @@ func writeWindowsEnterprisePolicyState(state *enterprisestatus.PolicyState) erro
 		return err
 	}
 	return writeFileKeepingDACL(filepath.Join(filepath.Dir(deployment.MetadataPath), enterprisestatus.PolicyStateFileName), append(data, '\n'), deployment.MetadataPath)
+}
+
+// writeFreshFileWithDACL replaces path with a new file object that holds
+// data under the protected DACL of sddl, as Setup's [IO.File]::Replace does:
+// the old file is renamed aside before the new one takes the name, so a
+// handle another account opened on it while it could write it keeps pointing
+// at the replaced object, which is then deleted (GAP-0561, GAP-0590). A
+// failed rename puts the old file back.
+func writeFreshFileWithDACL(path string, data []byte, sddl string) error {
+	descriptor, err := windows.SecurityDescriptorFromString(sddl)
+	if err != nil {
+		return err
+	}
+	dacl, _, err := descriptor.DACL()
+	if err != nil {
+		return err
+	}
+	staging, err := os.CreateTemp(filepath.Dir(path), filepath.Base(path)+".*.tmp")
+	if err != nil {
+		return err
+	}
+	temporary := staging.Name()
+	_, writeErr := staging.Write(data)
+	if closeErr := staging.Close(); writeErr == nil {
+		writeErr = closeErr
+	}
+	if writeErr == nil {
+		var extended string
+		if extended, writeErr = winpath.Extended(temporary); writeErr == nil {
+			writeErr = windows.SetNamedSecurityInfo(extended, windows.SE_FILE_OBJECT,
+				windows.DACL_SECURITY_INFORMATION|windows.PROTECTED_DACL_SECURITY_INFORMATION, nil, nil, dacl, nil)
+		}
+	}
+	if writeErr != nil {
+		_ = os.Remove(temporary)
+		return writeErr
+	}
+	aside := temporary + ".replaced"
+	if err := os.Rename(path, aside); err != nil {
+		_ = os.Remove(temporary)
+		return err
+	}
+	if err := os.Rename(temporary, path); err != nil {
+		if restoreErr := os.Rename(aside, path); restoreErr != nil {
+			err = fmt.Errorf("%w; the previous file stays at %s: %v", err, aside, restoreErr)
+		}
+		_ = os.Remove(temporary)
+		return err
+	}
+	if err := os.Remove(aside); err != nil {
+		return fmt.Errorf("the new %s is in place, but the replaced file %s could not be deleted: %w", path, aside, err)
+	}
+	return nil
 }
 
 // windowsStandaloneGatewayHealth reads /health of the standalone gateway on
@@ -4250,17 +4311,26 @@ func runWindowsEnterpriseStandaloneEnsureOnce(
 	}
 	if (plan.Action == "upgrade" || plan.Action == "repair") && !statusReport.TransactionPending {
 		// The transaction must not load an installed config.yaml that does
-		// not parse before it uses the supplied one (GAP-0948).
-		kept, err := installWindowsEnterpriseSuppliedConfigOverUnparseable(opts.configPath)
+		// not parse (GAP-0948), or a config.yaml or manifest another account
+		// could change (GAP-0590), before it uses the approved source.
+		kept, untrusted, err := installWindowsEnterpriseSuppliedConfigOverRefused(opts.configPath)
+		if err == nil && kept != "" {
+			if untrusted == nil {
+				keptConfig = kept
+			}
+			result.Changes = append(result.Changes, windowsEnterpriseReplacedFileChange("config.yaml", kept, untrusted, plan.Action))
+		}
+		if err == nil {
+			kept, untrusted, err = installWindowsEnterpriseApprovedManifestOverDrift(ctx, windowsEnterpriseEnsureEnumerationLogger(cmd, opts), opts.configPath, opts.manifestPath)
+			if err == nil && kept != "" {
+				result.Changes = append(result.Changes, windowsEnterpriseReplacedFileChange("targets.yaml", kept, untrusted, plan.Action))
+			}
+		}
 		if err != nil {
 			applyWindowsEnterpriseInstallerReport(result, opts, statusReport, statusRun)
 			result.Errors = []enterprisestatus.Message{}
 			result.AddError("preflight_failed", err.Error())
 			return false, finishEnsure(windowsEnterpriseFailureCodeFor(result))
-		}
-		if kept != "" {
-			keptConfig = kept
-			result.Changes = append(result.Changes, windowsEnterpriseUnparseableConfigChange(kept, plan.Action))
 		}
 	}
 
