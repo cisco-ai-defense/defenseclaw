@@ -394,6 +394,10 @@ export class DaemonClient {
           });
 
           res.on("error", (err) => finish({ status: 0, body: "", error: err.message }, ctx));
+          // A body cut off mid-response is no answer, not a short 2xx.
+          res.on("close", () => {
+            if (!res.complete) finish({ status: 0, body: "", error: "response body cut off" }, ctx);
+          });
         },
       );
 
