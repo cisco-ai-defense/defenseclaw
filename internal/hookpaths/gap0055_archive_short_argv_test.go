@@ -6,7 +6,17 @@ package hookpaths
 import (
 	"encoding/json"
 	"fmt"
+	"go/ast"
+	"go/parser"
+	"go/token"
+	"path/filepath"
+	"regexp"
+	"runtime"
+	"slices"
+	"sort"
+	"strconv"
 	"strings"
+	"sync"
 	"testing"
 )
 
@@ -31,8 +41,70 @@ var gap0055Commands = []string{
 	"nohup unzip",
 	"unzip",
 	"busybox unzip",
+	"exec -a",
+	"exec -a name",
 	"sh -c 'command -v unzip'",
 	"bash -lc 'command -v unzip && command -v tar'",
+}
+
+// gap0055Wrappers put a program behind a lookup, a wrapper, a nested shell,
+// a substitution, a pipe or a list.
+var gap0055Wrappers = []string{
+	"command -v %s", "command -V %s", "command -pv %s", "type %s", "type -p %s", "hash %s",
+	"env %s", "env -u X %s", "sudo %s", "sudo -n %s", "nice %s", "nice -n 5 %s", "nohup %s",
+	"exec %s", "exec -a x %s", "command %s", "builtin %s", "xargs %s", "busybox %s", "time %s",
+	"timeout 5 %s", "sh -c '%s'", "bash -lc '%s'", "x=$(%s)", "echo a | %s", "true && %s",
+	"%s; echo hi > out.txt",
+}
+
+var (
+	gap0055WordLiteral   = regexp.MustCompile(`^[A-Za-z.:][A-Za-z0-9._+-]{0,23}$`)
+	gap0055OptionLiteral = regexp.MustCompile(`^(-[A-Za-z0-9-]{1,23}=?|/[A-Za-z]{1,3})$`)
+)
+
+// gap0055SourceLiterals are the program-shaped and option-shaped string
+// literals of this package's own source: every word a program-specific
+// branch compares an argv word with. A new branch is swept without a test
+// change.
+func gap0055SourceLiterals(t *testing.T) (words, options []string) {
+	t.Helper()
+	files, err := filepath.Glob("*.go")
+	if err != nil {
+		t.Fatal(err)
+	}
+	wordSet, optionSet := map[string]bool{}, map[string]bool{}
+	fset := token.NewFileSet()
+	for _, name := range files {
+		if strings.HasSuffix(name, "_test.go") {
+			continue
+		}
+		file, err := parser.ParseFile(fset, name, nil, 0)
+		if err != nil {
+			t.Fatal(err)
+		}
+		ast.Inspect(file, func(node ast.Node) bool {
+			if literal, ok := node.(*ast.BasicLit); ok && literal.Kind == token.STRING {
+				if value, err := strconv.Unquote(literal.Value); err == nil {
+					wordSet[value] = wordSet[value] || gap0055WordLiteral.MatchString(value)
+					optionSet[value] = optionSet[value] || gap0055OptionLiteral.MatchString(value)
+				}
+			}
+			return true
+		})
+	}
+	for value, ok := range wordSet {
+		if ok {
+			words = append(words, value)
+		}
+	}
+	for value, ok := range optionSet {
+		if ok {
+			options = append(options, value)
+		}
+	}
+	sort.Strings(words)
+	sort.Strings(options)
+	return words, options
 }
 
 // gap0055NoPanic runs read and reports a panic as a test failure, so one
@@ -47,32 +119,114 @@ func gap0055NoPanic(t *testing.T, name string, read func()) {
 	read()
 }
 
-// TestGAP0055ArchiveProgramsShortArgvNoPanic: every archive program with
-// zero, one and two arguments, called directly, through a wrapper and as a
-// lookup, is read without a panic, by the link reader, the extraction
-// check and the hook client's evidence (Resolve).
-func TestGAP0055ArchiveProgramsShortArgvNoPanic(t *testing.T) {
+// TestGAP0055ProgramBranchesShortArgvNoPanic is the class test of GAP-0055:
+// a program-specific branch that reads an argv word by position, or skips
+// an option's value, without checking that the word is there. Every word
+// and option the package's branches compare with is run with zero, one and
+// two arguments, alone and behind each lookup and wrapper, and every option
+// is put last with its value missing, through the hook client's evidence
+// (Resolve) and the extraction check. None may panic. A race build runs a
+// fixed stride of the forms and every archive program form.
+func TestGAP0055ProgramBranchesShortArgvNoPanic(t *testing.T) {
+	words, options := gap0055SourceLiterals(t)
+	if len(words) < 400 || len(options) < 200 {
+		t.Fatalf("source literals: %d words, %d options; the harvest is broken", len(words), len(options))
+	}
 	cwd, home := t.TempDir(), t.TempDir()
-	argvs := [][]string{nil, {"-v"}, {"-v", "a.zip"}, {"a"}, {"a", "b"}, {"x"}, {"-x"}}
 	commands := append([]string(nil), gap0055Commands...)
-	for _, program := range archivePrograms {
-		for _, argv := range argvs {
-			name := fmt.Sprintf("%s/%q", program, argv)
-			gap0055NoPanic(t, "archiveMayLink "+name, func() { archiveMayLink(program, argv, makeStatic(len(argv))) })
-			gap0055NoPanic(t, "archiveCopiesLinks "+name, func() { archiveCopiesLinks(program, argv, makeStatic(len(argv))) })
-			call := strings.TrimSpace(program + " " + strings.Join(argv, " "))
-			commands = append(commands, call, "command "+call, "env "+call, "sudo "+call, "command -v "+call)
+	for _, word := range words {
+		for _, argv := range []string{"", " -v", " -", " --", " a", " a b", " ''", " $X"} {
+			commands = append(commands, word+argv)
+		}
+		for _, wrapper := range gap0055Wrappers {
+			commands = append(commands, fmt.Sprintf(wrapper, word))
 		}
 	}
-	for _, command := range commands {
-		gap0055NoPanic(t, "commandLinks "+command, func() { commandLinks(command, cwd, home, nil, false, false) })
-		gap0055NoPanic(t, "ArchiveBeforeWrite "+command, func() { ArchiveBeforeWrite(command+"; echo hi > out.txt", home) })
-		payload, err := json.Marshal(map[string]any{"session_id": "gap0055", "hook_event_name": "PreToolUse", "cwd": cwd,
-			"tool_name": "Bash", "tool_input": map[string]any{"command": command}})
-		if err != nil {
-			t.Fatal(err)
+	var programs []string
+	for _, list := range [][]string{archivePrograms, copyPrograms, linkPrograms, renamePrograms, cdPrograms, multicallPrograms,
+		braceOperandPrograms, dataPrograms, hiddenDirectoryPrograms, knownWordPrograms, readOnlyLinkWordPrograms, readerPrograms,
+		{"env", "sudo", "doas", "nice", "exec", "timeout", "xargs", "command", "builtin", "nohup", "time", "stdbuf",
+			"sh", "bash", "eval", "find", "git", "printf", "sed", "awk", "python3", "node", "perl", "cmd", "powershell", "pwsh"}} {
+		for _, program := range list {
+			if !slices.Contains(programs, program) {
+				programs = append(programs, program)
+			}
 		}
-		gap0055NoPanic(t, "Resolve "+command, func() { Resolve(payload) })
+	}
+	for _, program := range programs {
+		for _, option := range options {
+			commands = append(commands, program+" "+option, program+" a "+option)
+		}
+	}
+	if gap0055RaceBuild {
+		var sample []string
+		for i, command := range commands {
+			if i%11 == 0 || slices.Contains(archivePrograms, strings.Fields(command + " x")[0]) {
+				sample = append(sample, command)
+			}
+		}
+		commands = sample
+	}
+	var mu sync.Mutex
+	reported := map[string]bool{}
+	failures := 0
+	jobs := make(chan string)
+	var wg sync.WaitGroup
+	for range runtime.GOMAXPROCS(0) {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for command := range jobs {
+				payload, err := json.Marshal(map[string]any{"session_id": "gap0055", "hook_event_name": "PreToolUse", "cwd": cwd,
+					"tool_name": "Bash", "tool_input": map[string]any{"command": command}})
+				if err != nil {
+					panic(err)
+				}
+				func() {
+					defer func() {
+						if recovered := recover(); recovered != nil {
+							mu.Lock()
+							defer mu.Unlock()
+							failures++
+							if key := fmt.Sprint(recovered); !reported[key] && len(reported) < 40 {
+								reported[key] = true
+								t.Errorf("%q: panic: %v", command, recovered)
+							}
+						}
+					}()
+					Resolve(payload)
+					ArchiveBeforeWrite(command, home)
+				}()
+			}
+		}()
+	}
+	for _, command := range commands {
+		jobs <- command
+	}
+	close(jobs)
+	wg.Wait()
+	t.Logf("%d words, %d options, %d programs, %d commands, %d panics", len(words), len(options), len(programs), len(commands), failures)
+}
+
+// TestGAP0055ArchiveProgramsShortArgvNoPanic: the archive readers take an
+// argv of any length, with static flags of any length.
+func TestGAP0055ArchiveProgramsShortArgvNoPanic(t *testing.T) {
+	for _, program := range archivePrograms {
+		for _, argv := range [][]string{nil, {"-v"}, {"-v", "a.zip"}, {"a"}, {"a", "b"}, {"x"}, {"-x"}} {
+			for _, static := range [][]bool{makeStatic(len(argv)), nil, makeStatic(len(argv) / 2)} {
+				name := fmt.Sprintf("%s/%q/static=%d", program, argv, len(static))
+				gap0055NoPanic(t, "archiveMayLink "+name, func() { archiveMayLink(program, argv, static) })
+				gap0055NoPanic(t, "archiveCopiesLinks "+name, func() { archiveCopiesLinks(program, argv, static) })
+			}
+		}
+	}
+	if archiveMayLink("unzip", nil, nil) {
+		t.Error("a bare unzip prints its usage; it extracts nothing")
+	}
+	for _, argv := range [][]string{{"x.zip"}, {"-o", "x.zip"}, {"x.zip", "-d", "out"}} {
+		if !archiveMayLink("unzip", argv, makeStatic(len(argv))) {
+			t.Errorf("unzip %q extracts", argv)
+		}
 	}
 }
 
@@ -114,16 +268,17 @@ func TestGAP0055LookupRunsNoLinkProgram(t *testing.T) {
 	}
 }
 
-// FuzzGAP0055CommandLinksRead: the link reader never panics. The seeds are
-// the GAP-0055 forms and every archive program bare and as a lookup.
+// FuzzGAP0055CommandLinksRead: the link reader and the hook client's
+// evidence never panic. The seeds are the GAP-0055 forms and every archive
+// program bare, as a lookup and wrapped.
 func FuzzGAP0055CommandLinksRead(f *testing.F) {
 	for _, command := range gap0055Commands {
 		f.Add(command)
 	}
 	for _, program := range archivePrograms {
-		f.Add(program)
-		f.Add("command -v " + program)
-		f.Add("env " + program + " -v")
+		for _, wrapper := range gap0055Wrappers {
+			f.Add(fmt.Sprintf(wrapper, program))
+		}
 	}
 	cwd, home := f.TempDir(), f.TempDir()
 	f.Fuzz(func(t *testing.T, command string) {
@@ -133,5 +288,11 @@ func FuzzGAP0055CommandLinksRead(f *testing.F) {
 		commandLinksRead(command, cwd, home, nil, false, false, true)
 		commandLinksRead(command, cwd, home, nil, false, false, false)
 		ArchiveBeforeWrite(command, home)
+		payload, err := json.Marshal(map[string]any{"session_id": "gap0055", "hook_event_name": "PreToolUse", "cwd": cwd,
+			"tool_name": "Bash", "tool_input": map[string]any{"command": command}})
+		if err != nil {
+			t.Skip()
+		}
+		Resolve(payload)
 	})
 }
