@@ -571,9 +571,11 @@ def is_setup_trusted_binary(candidate: str, data_dir: str, *, connector: str = "
         parent_info = os.stat(os.path.dirname(resolved))
     except OSError:
         return False
-    if binary_info.st_mode & 0o022:
+    from defenseclaw.file_permissions import other_accounts_can_write
+
+    if other_accounts_can_write(resolved, binary_info):
         return False
-    if agent_discovery._trusted_prefix_dir_mode_error(parent_info) is not None:
+    if agent_discovery._trusted_prefix_dir_mode_error(parent_info, os.path.dirname(resolved)) is not None:
         return False
     # Setup's built-in roots are explicit executable authority, but they still
     # receive the same per-file and parent permission checks as passive
@@ -586,6 +588,7 @@ def is_setup_trusted_binary(candidate: str, data_dir: str, *, connector: str = "
 
 def _posix_setup_chain_is_safe(executable: str, root: str) -> bool:
     """Validate every executable-path element through its admitted root."""
+    from defenseclaw.file_permissions import other_accounts_can_write
 
     try:
         resolved = os.path.abspath(executable)
@@ -598,7 +601,9 @@ def _posix_setup_chain_is_safe(executable: str, root: str) -> bool:
         reached_boundary = False
         while True:
             info = os.lstat(current)
-            writable = bool(info.st_mode & 0o022)
+            # Group write by the owner's own private group is the owner's
+            # (an npm prefix made under umask 002, GAP-0053).
+            writable = other_accounts_can_write(current, info)
             trusted_sticky_ancestor = (
                 not leaf
                 and stat.S_ISDIR(info.st_mode)
