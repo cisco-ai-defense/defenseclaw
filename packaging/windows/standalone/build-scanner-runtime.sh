@@ -6,7 +6,7 @@
 # scanner runtime that cmd/defenseclaw-scanners embeds for the standalone
 # Windows enterprise payload:
 #
-#   python/                       CPython 3.13.15 embeddable x64 (pinned) and
+#   python/                       CPython 3.13.17 embeddable x64 (pinned) and
 #                                 the app-local VC++ runtime closure
 #   python/Lib/site-packages/     the locked dependency tree from uv.lock
 #                                 (skill-scanner, mcp-scanner, LiteLLM, ...),
@@ -36,11 +36,11 @@ done
 command -v uv >/dev/null || die "uv is required"
 command -v python3 >/dev/null || die "python3 is required"
 
-PYTHON_VERSION=3.13.15
+PYTHON_VERSION=3.13.17
 PYTHON_TARGET=3.13
 PYTHON_EMBED="python-${PYTHON_VERSION}-embed-amd64.zip"
 PYTHON_EMBED_URL="https://www.python.org/ftp/python/${PYTHON_VERSION}/${PYTHON_EMBED}"
-PYTHON_EMBED_SHA256=d1f04d990aee1253d8569e8e5104e30fa9f5fa830899f14843448872d936a2cf
+PYTHON_EMBED_SHA256=9e35319bffedab8b36ad44d8f377cb4f1733bcec257a0b6d04d94f01486ddb38
 VC_SOURCE=Microsoft.VC.14.42.17.12.CRT.Redist.X64.base.vsix
 VC_SOURCE_URL=https://download.visualstudio.microsoft.com/download/pr/53b2bf3d-716a-455a-bcc0-39cfb7447fe0/49d70db282f1c74d456206501120134f021c2bc3aaabb41577fe18dea35d1454/Microsoft.VC.14.42.17.12.CRT.Redist.X64.base.vsix
 VC_SOURCE_SHA256=49d70db282f1c74d456206501120134f021c2bc3aaabb41577fe18dea35d1454

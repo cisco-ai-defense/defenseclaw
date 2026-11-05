@@ -32,11 +32,11 @@ param(
 Set-StrictMode -Version Latest
 $ErrorActionPreference = "Stop"
 
-$PythonVersion = "3.13.15"
+$PythonVersion = "3.13.17"
 $PythonTargetVersion = "3.13"
 $PythonEmbedName = "python-$PythonVersion-embed-amd64.zip"
 $PythonEmbedUrl = "https://www.python.org/ftp/python/$PythonVersion/$PythonEmbedName"
-$PythonEmbedSha256 = "D1F04D990AEE1253D8569E8E5104E30FA9F5FA830899F14843448872D936A2CF"
+$PythonEmbedSha256 = "9E35319BFFEDAB8B36AD44D8F377CB4F1733BCEC257A0B6D04D94F01486DDB38"
 $VCRuntimeVersion = '14.42.34438'
 $VCRuntimeSourceName = 'Microsoft.VC.14.42.17.12.CRT.Redist.X64.base.vsix'
 $VCRuntimeSourceUrl = 'https://download.visualstudio.microsoft.com/download/pr/53b2bf3d-716a-455a-bcc0-39cfb7447fe0/49d70db282f1c74d456206501120134f021c2bc3aaabb41577fe18dea35d1454/Microsoft.VC.14.42.17.12.CRT.Redist.X64.base.vsix'
@@ -68,18 +68,24 @@ $VCRuntimeTimestampSignerThumbprintSha256 = '8d2e0d6834085b1e2b12b7035ea5d70ac8c
 #
 # Review log -- keep the most recent entry, and say what was checked:
 #
-#   2026-09-10, 3.13.14 -> 3.13.15 (released 2026-08-05, current 3.13 security
-#   release; no 3.13.16 exists). Artifact verified beyond its digest: the
-#   sigstore bundle published beside it validates against certificate identity
-#   thomas@python.org (the 3.13 release manager) via accounts.google.com, with
-#   the Rekor inclusion proof checked. 3.13.15 carries ten Security entries,
-#   two of which matter directly to this product because the CLI extracts
-#   archives: gh-151558, a bypass of the tarfile data/tar extraction filters
-#   letting a crafted archive create a symlink outside the destination, and
-#   gh-151987, extract() not applying the filter to a link target. Also
-#   gh-150743 (unbounded http.client trailer/1xx reads), gh-153030 (quadratic
-#   html.parser DoS) and libexpat 2.8.2. Next review 2026-11-05.
-$PythonRuntimeReviewDeadlineUTC = [DateTimeOffset]::Parse('2026-11-05T00:00:00Z')
+#   2026-11-05, 3.13.15 -> 3.13.17 (released 2026-10-21, a special security
+#   release and the last 3.13 release with Windows binaries: 3.13 entered
+#   security-only mode, and 3.13.18 of 2026-10-25 is source only). The embed
+#   zip matches the SHA-256 on the python.org release page, and its sigstore
+#   bundle validates against certificate identity thomas@python.org (the 3.13
+#   release manager) via accounts.google.com, with the Rekor inclusion proof
+#   checked. Taken in: 3.13.16's tarfile fixes (CVE-2026-82049, a hard link to
+#   a symlink changing a file outside the destination; gh-155999 directories
+#   outside the destination; gh-157265), zipfile decompression bounds
+#   (gh-156002), ssl hostname validation (gh-156793) and the sni_callback
+#   crash (CVE-2026-19445), scheme-scoped HTTP credentials (CVE-2026-15806),
+#   OpenSSL 3.5.9, libexpat 2.8.5, and 3.13.17's pip 26.2.2 / certifi
+#   2026.10.19 for the eMudhra / emSign CA incident. Not available on Windows:
+#   3.13.18's tarfile link-to-destination fix (CVE-2026-114583), the ssl
+#   rejection of the compromised eMudhra intermediates (CVE-2026-115557) and
+#   the tempfile cleanup race; the next review has to choose between 3.14 and
+#   a source build. Next review 2027-01-21.
+$PythonRuntimeReviewDeadlineUTC = [DateTimeOffset]::Parse('2027-01-21T00:00:00Z')
 $WinUnicodeSourceName = 'win_unicode_console-0.5.zip'
 $WinUnicodeSourceUrl = 'https://files.pythonhosted.org/packages/89/8d/7aad74930380c8972ab282304a2ff45f3d4927108bb6693cabcc9fc6a099/win_unicode_console-0.5.zip'
 $WinUnicodeSourceSha256 = 'D4142D4D56D46F449D6F00536A73625A871CBA040F0BC1A2E305A04578F07D1E'
