@@ -29,6 +29,10 @@ func TestGAP0055ManagedHookResolvesCommandLookups(t *testing.T) {
 		"env unzip",
 		"command unzip",
 		"unzip",
+		"command -V unzip",
+		"type unzip && hash tar",
+		"exec -a",
+		"nice unzip",
 	} {
 		payload, err := json.Marshal(map[string]any{"session_id": "gap0055", "hook_event_name": "PreToolUse", "cwd": cwd,
 			"tool_name": "Bash", "tool_input": map[string]any{"command": command}})
