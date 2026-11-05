@@ -207,11 +207,13 @@ func TestPostExecutionHookBlockIsNotTheVerdictOfACallThatRan(t *testing.T) {
 		t.Fatal(err)
 	}
 	const ran, blocked = "toolu_0271_ran", "toolu_0271_pre"
+	server := httptest.NewServer(fixture.api.handleAgentHook("claudecode"))
+	t.Cleanup(server.Close)
 	var stdout, stderr bytes.Buffer
 	if code := hookexec.Run(t.Context(), hookexec.Options{
-		Connector: "claudecode", Event: "PreToolUse", APIAddr: "127.0.0.1:8787", FailMode: "open",
+		Connector: "claudecode", Event: "PreToolUse", APIAddr: strings.TrimPrefix(server.URL, "http://"), FailMode: "open",
 		Home: home, HookDir: hookDir, Stdin: bytes.NewReader(preToolUseBody(t, ran)),
-		Stdout: &stdout, Stderr: &stderr, HTTPClient: &http.Client{Transport: handlerTransport{handler: fixture.api.handleAgentHook("claudecode")}},
+		Stdout: &stdout, Stderr: &stderr, HTTPClient: server.Client(),
 	}); code != 0 || strings.Contains(stdout.String(), "deny") {
 		t.Fatalf("PreToolUse: exit %d %q %q, want the gateway's allow", code, stdout.String(), stderr.String())
 	}
