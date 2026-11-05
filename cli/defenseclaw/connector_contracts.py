@@ -979,15 +979,25 @@ def openclaw_needs_interception_advisory(raw_version: str | None) -> bool:
 OPENCLAW_PLUGIN_APPROVALS_SINCE = "2026.3.28"
 
 
-# Where OpenClaw shows a plugin approval request: the Control UI and chat
-# channels that forward /approve. openclaw tui and local openclaw chat do not
-# show it, so a confirm verdict asked there is denied when the request times
+# Where OpenClaw shows a plugin approval request: the Control UI, chat
+# channels that forward /approve, and openclaw tui in OpenClaw 2026.10.9,
+# where Allow once works too (GAP-0597, TST-17954, TST-17958). A confirm
+# verdict asked where no request is shown is denied when the request times
 # out (GAP-1958).
+OPENCLAW_TUI_APPROVALS_SINCE = "2026.10.9"
 OPENCLAW_APPROVAL_SURFACES = (
-    "OpenClaw shows DefenseClaw approval requests in its Control UI (openclaw dashboard) "
-    "and on chat channels that forward /approve; openclaw tui and local openclaw chat do "
-    "not show them, so a call that needs approval there is denied when the request times out"
+    "OpenClaw shows DefenseClaw approval requests in its Control UI (openclaw dashboard), "
+    "on chat channels that forward /approve, and in openclaw tui from OpenClaw 2026.10.9; "
+    "a call that needs approval where no request is shown is denied when the request times out"
 )
+
+
+def openclaw_tui_shows_approvals(raw_version: str | None) -> bool:
+    """Return True for an OpenClaw whose openclaw tui shows DefenseClaw
+    approval requests (OPENCLAW_TUI_APPROVALS_SINCE or later)."""
+
+    normalized = normalize_agent_version(raw_version or "")
+    return bool(normalized) and compare_agent_versions(normalized, OPENCLAW_TUI_APPROVALS_SINCE) >= 0
 
 # First OpenClaw release that no longer bundles the Amazon Bedrock provider:
 # from it, Bedrock models need the external plugin (GAP-1959).

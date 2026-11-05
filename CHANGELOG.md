@@ -15,6 +15,7 @@ for current behavior.
 - **A failed audit write on the inspect route follows the policy tier.** `/api/v1/inspect/tool`, which the OpenClaw plugin calls for every tool check and prompt, ignored a failed audit write. It now follows the rule of the hook routes: the strict policy and managed installs block the call; the default and permissive policies allow it (an allowed call with a degraded-audit warning, an alert with its finding). The guardrail proxy applies the same rule to a prompt whose evaluation record could not be written. Tool results and model responses keep their verdict. Secure Client is unchanged. (rel-1-0-6 GAP-0593)
 
 ### Fixed
+- **OpenClaw approvals in `openclaw tui` are named.** OpenClaw 2026.10.9 shows DefenseClaw approval requests in `openclaw tui`, and **Allow once** works there. Setup, `doctor`, the plugin's timeout hint and the OpenClaw page said the TUI does not show them. They now name it from 2026.10.9, and setup with `--human-approval` warns only for an older or unknown OpenClaw. (rel-1-0-6 GAP-0597)
 - **Stale master key text.** The 0.x changelog entry H9, a code comment and the environment variable reference said the `sk-dc-` master key is logged to `gateway.log` or read from `DEFENSECLAW_MASTER_KEY`. No release logs it and nothing reads that variable. The text is corrected and the variable is removed from the reference.
 
 ### Removed
