@@ -39,7 +39,7 @@ func TestClaudeClientClassifiesFromExecTimeImageDigest(t *testing.T) {
 		{"release of another version", `claude -p "use @modelcontextprotocol/server-filesystem"`, hex.EncodeToString(release[:]), "2.1.318", false, 1},
 		{"Secure Client profile", `claude -p "use @modelcontextprotocol/server-filesystem"`, hex.EncodeToString(release[:]), "2.1.317", true, 1},
 	} {
-		t.Run(tc.name, func(t *testing.T) {
+		t.Run(tc.name, bubbled(func(t *testing.T) {
 			host := newHost(newFake(fullCoverage()))
 			host.indicators.KeepClientMCP = tc.keepClientMCP
 			// A version without a manifest is held for it (GAP-0065), then reported.
@@ -62,7 +62,7 @@ func TestClaudeClientClassifiesFromExecTimeImageDigest(t *testing.T) {
 			if classified != tc.classified {
 				t.Fatalf("classified=%d, want %d", classified, tc.classified)
 			}
-		})
+		}))
 	}
 }
 
