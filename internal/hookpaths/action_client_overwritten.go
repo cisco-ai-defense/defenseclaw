@@ -193,9 +193,15 @@ func actionClientProvedSafeVariableTargetsWithBindings(command, cwd, home string
 		if call, ok := stmt.Cmd.(*syntax.CallExpr); ok && len(call.Args) >= 2 {
 			if program, fixed := staticProgramWord(call.Args[0], home); fixed && programBase(program) == "printf" {
 				_, dynamicPrintf = actionSimpleProgramParameter(call.Args[1])
-				if dynamicPrintf && trackBindings {
+				if trackBindings {
 					resolved := true
 					for _, values := range kept {
+						if _, shadowed := values[actionFunctionValuePrefix+program]; shadowed || program != "printf" {
+							if dynamicPrintf {
+								resolved = false
+							}
+							continue
+						}
 						option, known := actionWordValue(call.Args[1], values, cwd, home)
 						if !known {
 							resolved = false

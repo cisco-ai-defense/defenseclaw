@@ -89,7 +89,9 @@ func AdjacentAssignedWriteOperands(command, cwd, home string) []string {
 const actionGeneratedMarker = "\x1f"
 
 // printf accepts both -v NAME and -vNAME. Return the position of the
-// format word so both value trackers handle the same binding.
+// format word so both value trackers handle the same binding. An indexed
+// destination may replace element zero of an existing scalar; only a bounded
+// numeric index has an effect the tracker can recover.
 func actionPrintfBoundName(call *syntax.CallExpr, values actionValues, cwd, home string) (string, int, bool) {
 	if call == nil || len(call.Args) < 2 {
 		return "", 0, false
@@ -122,13 +124,65 @@ func actionPrintfBoundName(call *syntax.CallExpr, values actionValues, cwd, home
 			return "", 0, false
 		}
 		name, fixed := actionWordValue(call.Args[optionIndex+1], values, cwd, home)
-		return name, optionIndex + 2, fixed && actionEvalAssignmentName(name)
+		if !fixed {
+			return "", 0, false
+		}
+		return actionPrintfScalarName(name, optionIndex+2)
 	}
 	if strings.HasPrefix(option, "-v") {
 		name := strings.TrimPrefix(option, "-v")
-		return name, optionIndex + 1, actionEvalAssignmentName(name)
+		return actionPrintfScalarName(name, optionIndex+1)
 	}
 	return "", 0, false
+}
+
+func actionPrintfScalarName(destination string, formatIndex int) (string, int, bool) {
+	if actionEvalAssignmentName(destination) {
+		return destination, formatIndex, true
+	}
+	name, index, indexed := strings.Cut(destination, "[")
+	if !indexed || !actionEvalAssignmentName(name) {
+		return "", formatIndex, false
+	}
+	if strings.HasSuffix(index, "]") {
+		if number, known := actionPrintfStaticIndex(index[:len(index)-1]); known {
+			if number == 0 {
+				return name, formatIndex, true
+			}
+			if number > 0 {
+				return "", formatIndex, true
+			}
+		}
+	}
+	// Other index expressions may evaluate to zero or change another binding.
+	return name, formatIndex, false
+}
+
+func actionPrintfStaticIndex(index string) (int64, bool) {
+	parse := func(term string) (int64, bool) {
+		if term == "" || len(term) > 1 && term[0] == '0' || strings.Trim(term, "0123456789") != "" {
+			return 0, false
+		}
+		number, err := strconv.ParseInt(term, 10, 64)
+		return number, err == nil
+	}
+	position := strings.IndexAny(index, "+-")
+	if position < 0 {
+		return parse(index)
+	}
+	left, leftOK := parse(index[:position])
+	right, rightOK := parse(index[position+1:])
+	if !leftOK || !rightOK {
+		return 0, false
+	}
+	if index[position] == '+' {
+		const maxInt64 int64 = 1<<63 - 1
+		if right > maxInt64-left {
+			return 0, false
+		}
+		return left + right, true
+	}
+	return left - right, true
 }
 
 // actionPrintfLiteral expands the pathname-relevant escapes in a Bash printf
@@ -278,8 +332,9 @@ func actionForgetValues(stmt *syntax.Stmt, values actionValues, cwd, home string
 			}
 		}
 	case "printf", "builtin", "command":
-		if name, _, ok := actionPrintfBoundName(call, values, cwd, home); ok {
+		if name, _, _ := actionPrintfBoundName(call, values, cwd, home); name != "" {
 			delete(values, name)
+			delete(values, name+"[0]")
 		}
 	case "cd", "pushd", "popd":
 		delete(values, "PWD")
@@ -1162,8 +1217,16 @@ func actionUpdateValuesAs(stmt *syntax.Stmt, values actionValues, cwd, home stri
 	case "printf":
 		name, formatIndex, ok := actionPrintfBoundName(call, values, cwd, home)
 		if !ok {
+			if name != "" {
+				delete(values, name)
+				delete(values, name+"[0]")
+			}
 			return
 		}
+		if name == "" {
+			return
+		}
+		delete(values, name+"[0]")
 		if readonly := values[actionReadonlyValuePrefix+name]; readonly != "" {
 			if readonly == "?" {
 				delete(values, name)

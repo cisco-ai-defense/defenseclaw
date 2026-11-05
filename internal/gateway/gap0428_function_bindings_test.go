@@ -5,6 +5,38 @@ package gateway
 
 import "testing"
 
+func TestGAP0428IndexedPrintfBindingsFourCell(t *testing.T) {
+	f := newB36ManagedHookFixture(t)
+	rows := []struct{ name, command, want string }{
+		{"separate_index_protected", `f=out.txt; printf -v 'f[0]' %s keylink; echo m >> "$f"`, "block"},
+		{"separate_index_ordinary", `f=keylink; printf -v 'f[0]' %s out.txt; echo m >> "$f"`, "allow"},
+		{"attached_index_protected", `f=out.txt; printf '-vf[0]' %s keylink; echo m >> "$f"`, "block"},
+		{"attached_index_ordinary", `f=keylink; printf '-vf[0]' %s out.txt; echo m >> "$f"`, "allow"},
+		{"dynamic_name_protected", `f=out.txt; dest='f[0]'; printf -v "$dest" %s keylink; echo m >> "$f"`, "block"},
+		{"dynamic_name_ordinary", `f=keylink; dest='f[0]'; printf -v "$dest" %s out.txt; echo m >> "$f"`, "allow"},
+		{"positive_index_protected", `f=keylink; printf -v 'f[1]' %s out.txt; echo m >> "$f"`, "block"},
+		{"positive_index_ordinary", `f=out.txt; printf -v 'f[1]' %s keylink; echo m >> "$f"`, "allow"},
+		{"expression_index_protected", `f=out.txt; printf -v 'f[1-1]' %s keylink; echo m >> "$f"`, "block"},
+		{"expression_index_ordinary", `f=keylink; printf -v 'f[1-1]' %s out.txt; echo m >> "$f"`, "allow"},
+	}
+	payloads := make([][]byte, len(rows))
+	for i, row := range rows {
+		payloads[i] = f.payload(t, row.command)
+	}
+	headers := f.clientHeaders(t, payloads)
+	var calls []*hookCall
+	for i, row := range rows {
+		calls = append(calls, everyMode(row.name, payloads[i], headers[i])...)
+	}
+	f.answerAll(t, calls)
+	for i, call := range calls {
+		want := rows[i/4].want
+		if call.verdict != want {
+			t.Errorf("%s: verdict %s, want %s", call.name, call.verdict, want)
+		}
+	}
+}
+
 func TestGAP0428FunctionBindingEffectsFourCell(t *testing.T) {
 	f := newB36ManagedHookFixture(t)
 	rows := []struct{ name, command, want string }{
