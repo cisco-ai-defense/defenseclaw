@@ -379,10 +379,20 @@ in a PowerShell prompt that is not elevated. Setup puts no DefenseClaw command o
 & 'C:\Program Files\Cisco\DefenseClaw\bin\defenseclaw.exe' status
 ```
 
+The `&` form is PowerShell's. In a Command Prompt (`cmd.exe`) quote the path with
+double quotes instead: `"C:\Program Files\Cisco\DefenseClaw\bin\defenseclaw.exe" status`.
+
 An elevated prompt, and every prompt of the built-in Administrator account, gets the
-administrator's commands instead: `enterprise windows status --profile standalone`
-for the deployment and `enterprise policy show --user <account>` for one account's
-agents.
+administrator's commands instead. From an elevated PowerShell prompt, check the
+deployment and one account's agents:
+
+```powershell title="Elevated PowerShell prompt"
+& 'C:\Program Files\Cisco\DefenseClaw\bin\defenseclaw.exe' enterprise windows status --profile standalone
+& 'C:\Program Files\Cisco\DefenseClaw\bin\defenseclaw.exe' enterprise policy show --user <account>
+```
+
+Quote an account name that has a space or an apostrophe, as PowerShell does:
+`--user 'John Smith'`, `--user 'O''Brien'`.
 
 ### What Windows shows after an install
 
@@ -697,10 +707,14 @@ an elevated prompt.
 `show` lists each connector's route, lock and coverage. `verify` exits `1` while
 coverage is incomplete. A missing machine policy is a protection failure, even
 with zero enrolled users: stop the affected agent with application control, fix
-the reported cause, and from an elevated session run
-`defenseclaw enterprise windows reconcile --profile standalone` or
-`defenseclaw enterprise windows repair --profile standalone`, then rerun
-`enterprise policy verify`. A missing hook executable is also a protection
+the reported cause, and from an elevated PowerShell prompt run one of:
+
+```powershell title="Elevated PowerShell prompt"
+& 'C:\Program Files\Cisco\DefenseClaw\bin\defenseclaw.exe' enterprise windows reconcile --profile standalone
+& 'C:\Program Files\Cisco\DefenseClaw\bin\defenseclaw.exe' enterprise windows repair --profile standalone
+```
+
+Then rerun `enterprise policy verify` as above. A missing hook executable is also a protection
 failure for Claude Code, Codex, Cursor and Copilot while their machine policy files
 stay installed. Stop affected agent use, repair the installation, and require the full
 `enterprise windows verify --profile standalone --json` check to pass before

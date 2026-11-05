@@ -121,12 +121,15 @@ inside `/Users` or `/var/root`. On macOS a folder in `/tmp` is scanned. See
 [Linux](/docs/enterprise/linux#scan-skills-mcp-servers-and-plugins) and
 [macOS](/docs/enterprise/macos#scan-skills-mcp-servers-and-plugins).
 
-On managed Windows, use `defenseclaw enterprise windows status --profile standalone --json`
-from an elevated administrator prompt. The `enrollment.accounts` field lists each
-account's connectors and their enrolled, pending or failed state.
-`enterprise hooks status` is the Linux and macOS guardian view.
+On managed Windows, run this from an elevated PowerShell prompt (Setup puts no
+DefenseClaw command on `PATH`, so it names the installed CLI by its path). The
+`enrollment.accounts` field lists each account's connectors and their enrolled,
+pending or failed state. `enterprise hooks status` is the Linux and macOS guardian
+view.
 
-On managed Windows, read `enrollment.accounts` in `defenseclaw enterprise windows status --profile standalone --json` from an elevated prompt.
+```powershell title="Elevated PowerShell prompt"
+& 'C:\Program Files\Cisco\DefenseClaw\bin\defenseclaw.exe' enterprise windows status --profile standalone --json
+```
 
 ### Audit fields on a standalone host
 
