@@ -204,6 +204,7 @@ func TestManagedInventoryDigestDetectsMeaningfulFields(t *testing.T) {
 		"mcpCommandFingerprint":       func(c *endpointInventoryComponent) { c.mcpCommandFingerprint = "hmac-sha256:changed" },
 		"mcpArgumentsFingerprint":     func(c *endpointInventoryComponent) { c.mcpArgumentsFingerprint = "hmac-sha256:changed" },
 		"mcpSourceScope":              func(c *endpointInventoryComponent) { c.mcpSourceScope = "project" },
+		"mcpServerURL":                func(c *endpointInventoryComponent) { c.mcpServerURL = "https://mcp.example.com/v1" },
 		"mcpURLHost":                  func(c *endpointInventoryComponent) { c.mcpURLHost = "127.0.0.1:9000" },
 		"mcpAuthProviderType":         func(c *endpointInventoryComponent) { c.mcpAuthProviderType = "none" },
 		"mcpDisabled":                 func(c *endpointInventoryComponent) { c.mcpDisabled = &otherBool },
