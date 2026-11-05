@@ -78,7 +78,9 @@ try {
 
         # GAP-0590: the content gate an install-like lifecycle runs before any
         # service stops refuses every managed content path another account can
-        # change, names it and its recovery, and changes nothing.
+        # change, names it and its recovery, and changes nothing. It runs only
+        # on the standalone profile, whose verdicts it uses.
+        function Test-DefenseClawStandaloneProfile { return $true }
         $manifest = [IO.Path]::Combine($State, 'targets.yaml')
         $metadata = [IO.Path]::Combine($State, 'deployment.json')
         foreach ($file in @($manifest, $metadata)) {
@@ -128,10 +130,13 @@ try {
         Add-UsersWrite -Path $metadata
         Assert-GateRefuses -Path $metadata -Recovery 'remove that entry and check the file'
         Set-DefenseClawPathAcl -Path $metadata -Kind AdminFile -GatewayServiceSID $script:AdministratorsSID
-        # Modify, as icacls /grant (M) plants it: more than adding children.
-        Add-UsersWrite -Path $ConfigDirectory -Rights Modify
-        Assert-GateRefuses -Path $ConfigDirectory -Recovery 'Remove that entry, then run Setup /ensure again.'
-        Set-DefenseClawPathAcl -Path $ConfigDirectory -Kind ConfigDirectory -GatewayServiceSID $sid
+        # Modify, as icacls /grant (M) plants it, and an entry that only adds
+        # children, which could plant a file the lifecycle reads.
+        foreach ($rights in 'Modify', 'Write') {
+            Add-UsersWrite -Path $ConfigDirectory -Rights $rights
+            Assert-GateRefuses -Path $ConfigDirectory -Recovery 'Remove that entry, then run Setup /ensure again.'
+            Set-DefenseClawPathAcl -Path $ConfigDirectory -Kind ConfigDirectory -GatewayServiceSID $sid
+        }
         Assert-DefenseClawStandaloneContentTrusted -Layout $gateLayout
         if ($script:repairCalls -ne 0) {
             throw 'the content gate repaired ACLs'
