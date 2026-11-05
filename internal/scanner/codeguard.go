@@ -350,6 +350,12 @@ const (
 // template, f-string, JSX or interpolated ("#{...}") expression that runs
 // (GAP-0056).
 func cgExecView(line string) string {
+	// Every pattern names exec, eval, system or subprocess: a line without
+	// one is not read, which keeps the rule as fast as the substring rule
+	// it replaced.
+	if !cgExecHasNeedle(line) {
+		return ""
+	}
 	trimmed := strings.TrimLeft(line, " \t")
 	if !strings.HasPrefix(trimmed, "//") && !strings.HasPrefix(trimmed, "#") {
 		return line
@@ -358,6 +364,38 @@ func cgExecView(line string) string {
 		return trimmed[brace:]
 	}
 	return ""
+}
+
+// cgExecHasNeedle reports whether line holds exec, eval, system or
+// subprocess in any ASCII case.
+func cgExecHasNeedle(line string) bool {
+	for i := 0; i+4 <= len(line); i++ {
+		switch line[i] | 0x20 {
+		case 'e':
+			if hasFoldASCII(line[i:], "exec") || hasFoldASCII(line[i:], "eval") {
+				return true
+			}
+		case 's':
+			if hasFoldASCII(line[i:], "system") || hasFoldASCII(line[i:], "subprocess") {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// hasFoldASCII reports whether s starts with the lower-case letters word in
+// any ASCII case.
+func hasFoldASCII(s, word string) bool {
+	if len(s) < len(word) {
+		return false
+	}
+	for j := 0; j < len(word); j++ {
+		if s[j]|0x20 != word[j] {
+			return false
+		}
+	}
+	return true
 }
 
 var builtinRules = codeOwnedBuiltinRules([]rule{
