@@ -902,6 +902,10 @@ namespace $nativeNamespace
         // locally or leaves those users to the Guardian.
         public static string[] LastTokenFallbackSessionAccounts = new string[0];
         public static string[] LastUnresolvedSessionAccounts = new string[0];
+        // What was tried for each account in either set: its session, the
+        // name lookup error and the session token result.
+        public static Dictionary<string, string> LastSessionResolutionDetail =
+            new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
 
         // The name lookup asks LSA, which forwards a domain account to a
         // domain controller when its SID is not cached: on a domain laptop
@@ -914,9 +918,11 @@ namespace $nativeNamespace
             string domain,
             string user,
             List<string> tokenFallbacks,
-            List<string> unresolved)
+            List<string> unresolved,
+            Dictionary<string, string> details)
         {
             string label = String.IsNullOrEmpty(domain) ? user : domain + "\\" + user;
+            string lookupError;
             try
             {
                 NTAccount account = String.IsNullOrEmpty(domain)
@@ -925,9 +931,13 @@ namespace $nativeNamespace
                 return (SecurityIdentifier)account.Translate(
                     typeof(SecurityIdentifier));
             }
-            catch (IdentityNotMappedException) { }
-            catch (SystemException) { }
-            SecurityIdentifier fromToken = SessionTokenUserSID(sessionId);
+            catch (IdentityNotMappedException ex) { lookupError = ex.GetType().Name + ": " + ex.Message; }
+            catch (SystemException ex) { lookupError = ex.GetType().Name + ": " + ex.Message; }
+            string tokenResult;
+            SecurityIdentifier fromToken = SessionTokenUserSID(sessionId, out tokenResult);
+            details[label] = "session " + sessionId +
+                "; name lookup failed (" + lookupError + ")" +
+                "; session token: " + tokenResult;
             if (fromToken != null)
             {
                 tokenFallbacks.Add(label);
@@ -937,11 +947,20 @@ namespace $nativeNamespace
             return null;
         }
 
-        private static SecurityIdentifier SessionTokenUserSID(int sessionId)
+        private static string Win32ErrorText(string call)
+        {
+            int code = Marshal.GetLastWin32Error();
+            return call + " failed (Win32 " + code + ": " + new Win32Exception(code).Message + ")";
+        }
+
+        private static SecurityIdentifier SessionTokenUserSID(int sessionId, out string result)
         {
             IntPtr token;
             if (!WTSQueryUserToken(sessionId, out token) || token == IntPtr.Zero)
+            {
+                result = Win32ErrorText("WTSQueryUserToken");
                 return null;
+            }
             IntPtr buffer = IntPtr.Zero;
             try
             {
@@ -949,12 +968,25 @@ namespace $nativeNamespace
                 int needed;
                 GetTokenInformation(token, tokenUser, IntPtr.Zero, 0, out needed);
                 if (needed <= 0 || needed > 4096)
+                {
+                    result = "GetTokenInformation reported a TokenUser size of " + needed + " bytes";
                     return null;
+                }
                 buffer = Marshal.AllocHGlobal(needed);
                 if (!GetTokenInformation(token, tokenUser, buffer, needed, out needed))
+                {
+                    result = Win32ErrorText("GetTokenInformation");
                     return null;
+                }
                 IntPtr sidPointer = Marshal.ReadIntPtr(buffer);
-                return sidPointer == IntPtr.Zero ? null : new SecurityIdentifier(sidPointer);
+                if (sidPointer == IntPtr.Zero)
+                {
+                    result = "the token has no user SID";
+                    return null;
+                }
+                SecurityIdentifier sid = new SecurityIdentifier(sidPointer);
+                result = "resolved " + sid.Value;
+                return sid;
             }
             finally
             {
@@ -991,6 +1023,8 @@ namespace $nativeNamespace
                     StringComparer.OrdinalIgnoreCase);
                 List<string> tokenFallbacks = new List<string>();
                 List<string> unresolved = new List<string>();
+                Dictionary<string, string> details = new Dictionary<string, string>(
+                    StringComparer.OrdinalIgnoreCase);
                 for (int index = 0; index < count; index++)
                 {
                     IntPtr pointer = new IntPtr(
@@ -1018,11 +1052,13 @@ namespace $nativeNamespace
                         domain,
                         user,
                         tokenFallbacks,
-                        unresolved);
+                        unresolved,
+                        details);
                     if (sid != null && IsInteractiveUserSID(sid))
                         active.Add(sid.Value);
                 }
                 LastTokenFallbackSessionAccounts = tokenFallbacks.ToArray();
+                LastSessionResolutionDetail = details;
                 LastUnresolvedSessionAccounts = unresolved.ToArray();
                 List<string> ordered = new List<string>(active);
                 ordered.Sort(StringComparer.OrdinalIgnoreCase);
@@ -2923,15 +2959,38 @@ function Get-DefenseClawActiveSessionSIDs {
     foreach ($sid in @($native::GetActiveSessionSIDs($EnterpriseProfile -ceq 'Standalone'))) {
         $sids.Add([string]$sid)
     }
-    foreach ($account in @($native::LastTokenFallbackSessionAccounts)) {
+    $fallbacks = @($native::LastTokenFallbackSessionAccounts)
+    $unresolved = @($native::LastUnresolvedSessionAccounts)
+    $detail = {
+        param([string]$Account)
+        if ($native::LastSessionResolutionDetail.ContainsKey($Account)) {
+            return [string]$native::LastSessionResolutionDetail[$Account]
+        }
+        return 'no detail recorded'
+    }
+    # The standalone profile and strict mode resolve a signed-in account only
+    # through the name lookup, as before; Secure Client falls back to the
+    # session token and then to a single matching ProfileList folder.
+    if (($EnterpriseProfile -ceq 'Standalone') -or (Test-DefenseClawBootstrapStrictAncestors)) {
+        $refused = @($fallbacks) + @($unresolved)
+        if ($refused.Count -gt 0) {
+            $account = [string]$refused[0]
+            throw ("signed-in account $account did not translate to a SID: $(& $detail $account). " +
+                'Expected: the name lookup returns its SID. The standalone profile and strict mode do not ' +
+                'fall back to the session token or the profile folder; restore the domain trust (or connect ' +
+                'to the corporate network) and run Setup again.')
+        }
+        return $sids.ToArray()
+    }
+    foreach ($account in $fallbacks) {
         Add-DefenseClawBootstrapResilienceEvent `
             -Marker defenseclaw_accept `
             -Fields @{
                 account = [string]$account
+                detail  = (& $detail ([string]$account))
                 reason  = 'signed-in account did not translate; using the SID from its session token'
             }
     }
-    $unresolved = @($native::LastUnresolvedSessionAccounts)
     if ($unresolved.Count -eq 0) {
         return $sids.ToArray()
     }
@@ -2957,10 +3016,16 @@ function Get-DefenseClawActiveSessionSIDs {
         $parts = ([string]$account).Split('\')
         $user = $parts[-1]
         $domain = if ($parts.Count -gt 1) { $parts[0] } else { '' }
+        # Windows names a profile folder after the user, or user.DOMAIN when
+        # that name is taken, with a .000-style suffix on a further collision.
+        $pattern = '^' + [regex]::Escape($user) + '$'
+        $expected = "a ProfileList folder named $user"
+        if (-not [string]::IsNullOrEmpty($domain)) {
+            $pattern = '^' + [regex]::Escape($user) + '(\.' + [regex]::Escape($domain) + '(\.\d{3})?)?$'
+            $expected = "exactly one ProfileList folder named $user, $user.$domain or $user.$domain.NNN"
+        }
         $found = @($profiles | Microsoft.PowerShell.Core\Where-Object {
-            [string]::Equals($_.Leaf, $user, [StringComparison]::OrdinalIgnoreCase) -or
-            (-not [string]::IsNullOrEmpty($domain) -and
-                $_.Leaf.StartsWith("$user.$domain", [StringComparison]::OrdinalIgnoreCase))
+            [regex]::IsMatch([string]$_.Leaf, $pattern, [Text.RegularExpressions.RegexOptions]::IgnoreCase)
         })
         if ($found.Count -eq 1) {
             $sids.Add([string]$found[0].SID)
@@ -2969,15 +3034,25 @@ function Get-DefenseClawActiveSessionSIDs {
                 -Fields @{
                     account = [string]$account
                     sid     = [string]$found[0].SID
-                    reason  = 'signed-in account did not translate; matched its ProfileList profile folder'
+                    detail  = (& $detail ([string]$account))
+                    reason  = "signed-in account did not translate; matched its ProfileList profile folder $($found[0].Leaf)"
                 }
             continue
+        }
+        $foundText = if ($found.Count -eq 0) {
+            "none of $($profiles.Count) interactive profile folders matched"
+        }
+        else {
+            ((@($found | Microsoft.PowerShell.Utility\Select-Object -First 5 | Microsoft.PowerShell.Core\ForEach-Object { "$($_.Leaf)=$($_.SID)" })) -join ', ')
         }
         Add-DefenseClawBootstrapResilienceEvent `
             -Marker defenseclaw_degraded `
             -Fields @{
-                account = [string]$account
-                reason  = "signed-in account did not translate and matched $($found.Count) profile folders; the Guardian enrolls it later"
+                account  = [string]$account
+                detail   = (& $detail ([string]$account))
+                expected = $expected
+                found    = $foundText
+                reason   = "signed-in account did not translate and matched $($found.Count) profile folders; the Guardian enrolls it later"
             }
     }
     return @($sids | Microsoft.PowerShell.Utility\Sort-Object -Unique)
