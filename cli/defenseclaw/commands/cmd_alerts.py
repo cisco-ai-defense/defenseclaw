@@ -212,21 +212,40 @@ def _event_connector(event) -> str:
     return _kv(event.details or "").get("connector", "").lower()
 
 
+def _structured_surface(structured) -> str | None:
+    """The agent surface a row's structured payload records: the hook
+    decision's ``defenseclaw.agent.surface``, or the hook audit envelope's
+    ``surface`` or ``extra.surface``. None when it records none."""
+    if not isinstance(structured, dict):
+        return None
+    extra = structured.get("extra")
+    for value in (
+        structured.get("defenseclaw.agent.surface"),
+        structured.get("surface"),
+        extra.get("surface") if isinstance(extra, dict) else None,
+    ):
+        if isinstance(value, str) and value.strip():
+            return value
+    return None
+
+
 def _event_surface(event, hook_details: dict[str, list[str]] | None = None) -> str:
     """The agent surface of an alert: ``cowork`` for a Claude Cowork call.
 
-    A hook call's audit row records it (``surface=cowork``); a finding takes
-    it from the hook row of the same request. "" for every other call: only
-    a known agent surface counts, not the asset policy's ``surface=hook``
-    (cowork audit M2)."""
-    structured = getattr(event, "structured", None)
-    if isinstance(structured, dict):
-        if surface := known_surface(str(structured.get("defenseclaw.agent.surface") or "")):
-            return surface
-    if surface := known_surface(_kv(event.details or "").get("surface", "")):
+    The row's structured surface decides when it records one; else the
+    ``surface=`` detail before ``details_json``. A finding takes it from the
+    hook rows of the same request, their structured surface included, so a
+    redaction profile that drops the details does not change it (cowork
+    audit S1). "" for every other call: only a known agent surface counts,
+    not the asset policy's ``surface=hook`` (cowork audit M2).
+    internal/audit/cowork_alert_target.go selects the same rows."""
+    structured = _structured_surface(getattr(event, "structured", None))
+    if structured is not None:
+        return known_surface(structured)
+    if surface := known_surface(_kv(_strip_details_json(event.details or "")).get("surface", "")):
         return surface
     for raw in (hook_details or {}).get(getattr(event, "id", ""), []):
-        if surface := known_surface(_kv(raw).get("surface", "")):
+        if surface := known_surface(_kv(_strip_details_json(raw)).get("surface", "")):
             return surface
     return ""
 

@@ -130,6 +130,40 @@ class AlertFindingRowsTests(unittest.TestCase):
         self.assertEqual(listed[cowork_id]["target"], "cowork:PreToolUse")
         self.assertEqual(listed[cli_id]["target"], "claudecode:PreToolUse")
 
+    def test_a_cowork_finding_keeps_its_label_when_the_hook_details_are_dropped(self):
+        # Cowork audit S1: a redaction profile can drop the connector-hook
+        # row's details (GAP-2096). The hook decision row of the request
+        # keeps defenseclaw.agent.surface, which the TUI reads; alerts read
+        # it too. A surface= inside details_json or a reason word is not one.
+        now = datetime.now(timezone.utc)
+        cowork_id = self._finding("req-redacted", "", now)
+        decision = Event(action="hook_decision", severity="INFO", connector="claudecode",
+                         structured={"defenseclaw.agent.surface": "cowork",
+                                     "defenseclaw.guardrail.effective_action": "block"},
+                         timestamp=now)
+        self.app.store.log_event(decision)
+        self.app.store.db.execute("UPDATE audit_events SET request_id=? WHERE id=?", ("req-redacted", decision.id))
+        self.app.store.db.commit()
+        cli_id = self._finding(
+            "req-cli",
+            'connector=claudecode result=ok action=block mode=action reason=surface=cowork '
+            'details_json="{\\"surface\\":\\"cowork\\"} surface=cowork"',
+            now - timedelta(seconds=5),
+        )
+        details = self.app.store.hook_details_for_alerts([cowork_id, cli_id])
+        self.assertIn("surface=cowork", details[cowork_id])
+        listed = [e.id for e in self.app.store.list_alerts(10)]
+        shown = self.runner.invoke(
+            alerts, ["--show", str(listed.index(cowork_id) + 1)], obj=self.app, catch_exceptions=False
+        ).output
+        self.assertRegex(shown, r"Target:\s+cowork:PreToolUse")
+        self.assertRegex(shown, r"Surface:\s+Cowork \(Claude Code\)")
+        shown = self.runner.invoke(
+            alerts, ["--show", str(listed.index(cli_id) + 1)], obj=self.app, catch_exceptions=False
+        ).output
+        self.assertRegex(shown, r"Target:\s+claudecode:PreToolUse")
+        self.assertNotIn("Surface:", shown)
+
     def test_an_asset_policy_surface_is_not_an_agent_surface(self):
         # Cowork audit M2: the asset policy writes surface=hook (where the
         # MCP call was seen). That is not an agent surface, so --show prints
