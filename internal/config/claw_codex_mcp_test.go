@@ -156,7 +156,7 @@ enabled = true
 	})
 }
 
-func TestReadMCPServersCodexContinuesPastUnsafeProjectLayer(t *testing.T) {
+func TestReadMCPServersCodexReportsUnsafeProjectLayerAndKeepsUserEntry(t *testing.T) {
 	homeDir := t.TempDir()
 	cwdDir := t.TempDir()
 	testenv.SetHome(t, homeDir)
@@ -182,8 +182,8 @@ func TestReadMCPServersCodexContinuesPastUnsafeProjectLayer(t *testing.T) {
 	}
 
 	entries, err := readMCPServersCodex(cwdDir)
-	if err != nil {
-		t.Fatalf("read MCP layers: %v", err)
+	if err == nil {
+		t.Fatal("unsafe project layer was not reported as partial")
 	}
 	if len(entries) != 1 || entries[0].Name != "user-safe" || entries[0].SourceScope != "user" {
 		t.Fatalf("entries after unsafe project layer = %+v, want user-safe only", entries)
@@ -258,6 +258,46 @@ command = "project-node"
 				t.Errorf("project override did not win: %+v", entry)
 			}
 		}
+	}
+}
+
+func TestReadMCPServersCodexReportsMalformedLayerAndKeepsValidEntries(t *testing.T) {
+	home := t.TempDir()
+	testenv.SetHome(t, home)
+	t.Setenv("CODEX_HOME", filepath.Join(home, ".codex"))
+	workspace := t.TempDir()
+	userPath := filepath.Join(home, ".codex", "config.toml")
+	projectPath := filepath.Join(workspace, ".codex", "config.toml")
+	for _, dir := range []string{filepath.Dir(userPath), filepath.Dir(projectPath)} {
+		if err := os.MkdirAll(dir, 0o700); err != nil {
+			t.Fatal(err)
+		}
+	}
+	write := func(path, body string) {
+		t.Helper()
+		if err := os.WriteFile(path, []byte(body), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	cfg := &Config{Claw: ClawConfig{WorkspaceDir: workspace}}
+	write(userPath, "[mcp_servers")
+	write(projectPath, "[mcp_servers.project]\ncommand = \"node\"\n")
+	entries, err := cfg.ReadMCPServersForConnector("codex")
+	if err == nil || !hasMCPEntry(entries, "project") {
+		t.Fatalf("malformed user layer: entries=%+v err=%v", entries, err)
+	}
+	write(userPath, "[mcp_servers.user]\ncommand = \"uvx\"\n")
+	write(projectPath, "[mcp_servers")
+	entries, err = cfg.ReadMCPServersForConnector("codex")
+	if err == nil || !hasMCPEntry(entries, "user") {
+		t.Fatalf("malformed project layer: entries=%+v err=%v", entries, err)
+	}
+	if err := os.Remove(projectPath); err != nil {
+		t.Fatal(err)
+	}
+	entries, err = cfg.ReadMCPServersForConnector("codex")
+	if err != nil || !hasMCPEntry(entries, "user") {
+		t.Fatalf("missing project layer: entries=%+v err=%v", entries, err)
 	}
 }
 
