@@ -108,3 +108,51 @@ func TestR105StaticRedirectTargetIsAWriteWhateverTheCommand(t *testing.T) {
 		}
 	}
 }
+
+// GAP-0428 regression of the GAP-2298 class (PR #1427 CI, gateway shard 35):
+// the shell expands and opens a command's redirects before the command runs,
+// so what the command binds (printf %n or -v, an unknown printf format that
+// may hold %n, read) cannot move its own redirect target. An assignment-only
+// statement assigns first, so its target is read after the assignment.
+func TestGAP0428RedirectIsOpenedBeforeTheCommandBinds(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("POSIX shell grammar; the Windows readings have their own rows")
+	}
+	home, cwd := r104ReviewHome(t)
+	if err := os.MkdirAll(filepath.Join(home, ".defenseclaw"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(home, ".defenseclaw", "config.yaml"), []byte("x\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	rows := []struct {
+		command string
+		block   bool
+	}{
+		{`printf "$X" > "$HOME"/.defenseclaw/config.yaml`, true},
+		{`printf "$X" > "$HOME"/build.log`, false},
+		{`printf '%n' HOME > "$HOME"/.defenseclaw/config.yaml`, true},
+		{`printf 'ab%n' HOME > "$HOME"/build.log`, false},
+		{`printf -v HOME x > "$HOME"/.defenseclaw/config.yaml`, true},
+		{`printf -v HOME x > "$HOME"/build.log`, false},
+		{`read HOME < /dev/null > "$HOME"/.defenseclaw/config.yaml`, true},
+		{`printf "$X"; echo > "$HOME"/build.log`, false},
+		{`HOME=/tmp/elsewhere > "$HOME"/.defenseclaw/config.yaml`, false},
+	}
+	for _, connectorName := range []string{"claudecode", "codex"} {
+		installDefaultProfileConnector(t, connectorName)
+		for _, row := range rows {
+			input := actionfacts.Input{
+				Tool: "Bash", Command: row.command, CWD: cwd,
+				ActiveHome: home, DialectHint: actionfacts.DialectPOSIX,
+			}
+			findings := dispatchTrustedAction(t.Context(), trustedActionRequest{
+				Input: input, Connector: connectorName, EnforcementCapable: true,
+			})
+			if blocked := buildVerdict(findings, "tool_call").Action == "block"; blocked != row.block {
+				t.Errorf("%s %q: blocked=%v, want %v (%v)",
+					connectorName, row.command, blocked, row.block, FindingStrings(findings))
+			}
+		}
+	}
+}
