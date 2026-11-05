@@ -502,11 +502,17 @@ func NewBuffer() *Buffer { return &Buffer{events: make(chan Event, eventBuffer)}
 // bias costs nothing when the buffer is keeping up and preserves
 // attribution when it is not.
 func (b *Buffer) Push(event Event) {
-	if b.lateCount.Load() > 0 {
+	lineage := event.Kind.lineage()
+	if !lineage && b.lateCount.Load() > 0 {
+		// A kept image digest goes ahead of a file event or a digest.
 		b.deliverLate()
 	}
 	select {
 	case b.events <- event:
+		if lineage && b.lateCount.Load() > 0 {
+			// It never takes the room an exec or exit needs: it follows it.
+			b.deliverLate()
+		}
 		return
 	default:
 	}
@@ -526,7 +532,7 @@ func (b *Buffer) Push(event Event) {
 		b.lateMu.Unlock()
 		return
 	}
-	if !event.Kind.lineage() {
+	if !lineage {
 		// A file event that arrives at a full buffer is simply late. It does
 		// not get to displace the tree.
 		b.dropped.Add(1)
