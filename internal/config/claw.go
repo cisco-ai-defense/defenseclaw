@@ -1508,23 +1508,25 @@ func parseClaudeJSONScopes(data []byte) (user, projects []MCPServerEntry, err er
 	}
 	for name, s := range doc.MCPServers {
 		user = append(user, MCPServerEntry{
-			Name:      name,
-			Command:   s.Command,
-			Args:      s.Args,
-			Env:       s.Env,
-			URL:       s.URL,
-			Transport: s.Type,
+			Name:        name,
+			SourceScope: "user",
+			Command:     s.Command,
+			Args:        s.Args,
+			Env:         s.Env,
+			URL:         s.URL,
+			Transport:   s.Type,
 		})
 	}
 	for _, project := range doc.Projects {
 		for name, s := range project.MCPServers {
 			projects = append(projects, MCPServerEntry{
-				Name:      name,
-				Command:   s.Command,
-				Args:      s.Args,
-				Env:       s.Env,
-				URL:       s.URL,
-				Transport: s.Type,
+				Name:        name,
+				SourceScope: "local",
+				Command:     s.Command,
+				Args:        s.Args,
+				Env:         s.Env,
+				URL:         s.URL,
+				Transport:   s.Type,
 			})
 		}
 	}

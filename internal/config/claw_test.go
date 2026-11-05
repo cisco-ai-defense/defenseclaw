@@ -634,6 +634,20 @@ func TestReadMCPServersClaudeCodeLocalProjectUserPrecedence(t *testing.T) {
 	}
 }
 
+func TestParseClaudeJSONScopesPreservesNativeScope(t *testing.T) {
+	data := []byte(`{"mcpServers":{"user-server":{"command":"user-command"}},"projects":{"/workspace":{"mcpServers":{"local-server":{"command":"local-command"}}}}}`)
+	user, projects, err := parseClaudeJSONScopes(data)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(user) != 1 || user[0].Name != "user-server" || user[0].SourceScope != "user" {
+		t.Fatalf("user entries = %+v, want user scope", user)
+	}
+	if len(projects) != 1 || projects[0].Name != "local-server" || projects[0].SourceScope != "local" {
+		t.Fatalf("project entries = %+v, want local scope", projects)
+	}
+}
+
 func TestReadMCPServersClaudeCodeDoesNotInferWorkspaceFromCWD(t *testing.T) {
 	t.Setenv("CLAUDE_CONFIG_DIR", "")
 	root := t.TempDir()
