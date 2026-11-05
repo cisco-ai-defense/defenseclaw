@@ -292,10 +292,20 @@ func (a *APIServer) evaluateClaudeCodeHook(ctx context.Context, req claudeCodeHo
 			verdict = a.inspectMessageContent(ctx, inspectReq)
 		}
 	case "SubagentStart":
-		// SubagentStart already emits a canonical prompt event for the task.
-		verdict = a.inspectMessageContent(ctx, claudeCodeContentInspectRequest(
-			claudeCodeEventContent(req), "prompt",
-		))
+		// The task has a companion prompt event. Retain submitted event text
+		// only when it contains content distinct from that prompt. Without a
+		// reported task, the companion uses a synthetic lifecycle fallback,
+		// so any nonempty connector event text is distinct.
+		eventContent := claudeCodeEventContent(req)
+		canonicalPrompt := claudeCodeSubagentPrompt(req, "")
+		content := eventContent
+		if strings.TrimSpace(content) == "" {
+			content = canonicalPrompt
+		}
+		verdict = a.inspectMessageContent(ctx, claudeCodeContentInspectRequest(content, "prompt"))
+		if strings.TrimSpace(eventContent) != "" && strings.TrimSpace(eventContent) != strings.TrimSpace(canonicalPrompt) {
+			inspectedContent = eventContent
+		}
 	case "CwdChanged", "DirectoryAdded", "WorktreeRemove",
 		"TaskCreated", "TaskCompleted", "TeammateIdle",
 		"PreCompact", "PostCompact", "Elicitation", "ElicitationResult", "Notification":
@@ -1016,6 +1026,16 @@ func claudeCodeEventContent(req claudeCodeHookRequest) string {
 		claudeCodePayloadString(req.Payload, "reason"),
 	}
 	return strings.Join(nonEmptyStrings(fields...), "\n")
+}
+
+// claudeCodeSubagentPrompt selects the same reported task for inspection and
+// the companion prompt event. The emitter supplies its lifecycle fallback
+// when Claude Code reports no task, prompt, or description.
+func claudeCodeSubagentPrompt(req claudeCodeHookRequest, fallback string) string {
+	if prompt := firstString(req.Payload, "task", "prompt", "description"); prompt != "" {
+		return prompt
+	}
+	return fallback
 }
 
 func nonEmptyStrings(values ...string) []string {

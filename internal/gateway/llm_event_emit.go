@@ -857,10 +857,7 @@ func (a *APIServer) emitClaudeCodeHookLLMEvent(ctx context.Context, req claudeCo
 		}
 		a.emitLLMResponseEventV8(ctx, meta, req.Delta, string(rawPayload), []string{finish})
 	case "SubagentStart":
-		prompt := firstString(req.Payload, "task", "prompt", "description")
-		if prompt == "" {
-			prompt = hookLifecycleContent(meta, "subagent_input_not_reported")
-		}
+		prompt := claudeCodeSubagentPrompt(req, hookLifecycleContent(meta, "subagent_input_not_reported"))
 		meta.PromptID = hookPromptID("claudecode", req.SessionID, "", prompt, rawPayload)
 		a.emitLLMPromptEventV8(ctx, meta, prompt, rawPayload)
 		a.rememberHookLLMSpanPrompt(meta, prompt)
