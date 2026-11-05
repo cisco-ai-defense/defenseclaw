@@ -377,9 +377,15 @@ func windowsManagedHooksStandaloneUserState(
 		}
 		label += ": " + dataDir
 		_, statErr := os.Lstat(dataDir)
-		if purge && sameWindowsEnterprisePathCLI(dataDir, filepath.Join(home, ".defenseclaw")) &&
-			windowsManagedHooksAccountOwnedRootLink(home, sid) {
-			accountLinks = append(accountLinks, windowsManagedHooksAccountLink{home: home, sid: sid})
+		accountLink := purge && sameWindowsEnterprisePathCLI(dataDir, filepath.Join(home, ".defenseclaw")) &&
+			windowsManagedHooksAccountOwnedRootLink(home, sid)
+		accountLinkReported := false
+		addRemaining := func(entry string) {
+			remaining = append(remaining, entry)
+			if accountLink && !accountLinkReported {
+				accountLinks = append(accountLinks, windowsManagedHooksAccountLink{home: home, sid: sid})
+				accountLinkReported = true
+			}
 		}
 		var reason string
 		switch {
@@ -390,17 +396,17 @@ func windowsManagedHooksStandaloneUserState(
 			if identityErr != nil || keepsRegistrations(sid) {
 				// An account whose registrations stay keeps the folder: its
 				// connector_backups restore them.
-				remaining = append(remaining, label)
+				addRemaining(label)
 				continue
 			}
 			kept, err := windowsManagedHooksStandaloneUserRuntimeRemover(home, sid, target.DataDir)
 			if err != nil {
-				remaining = append(remaining, label+": "+boundedEnterpriseHookUserCleanupText(err.Error()))
+				addRemaining(label + ": " + boundedEnterpriseHookUserCleanupText(err.Error()))
 			} else if kept != "" {
-				remaining = append(remaining, label+": "+boundedEnterpriseHookUserCleanupText(kept))
+				addRemaining(label + ": " + boundedEnterpriseHookUserCleanupText(kept))
 			}
 			continue
-		case errors.Is(statErr, os.ErrNotExist):
+		case errors.Is(statErr, os.ErrNotExist) && !accountLink:
 			// Nothing to remove, unless the account has a roaming or container
 			// profile, which is off the computer while the account is signed
 			// out and brings the folder back at its next sign-in.
@@ -408,7 +414,7 @@ func windowsManagedHooksStandaloneUserState(
 				if home != "" && !errors.Is(err, os.ErrNotExist) && identityErr == nil && !keepsRegistrations(sid) {
 					// The folder is gone; the binaries may still be there.
 					if _, err := windowsManagedHooksStandaloneUserBinariesPurger(home, sid); err != nil {
-						remaining = append(remaining, label+": "+windowsManagedHooksUserBinariesReason(err))
+						addRemaining(label + ": " + windowsManagedHooksUserBinariesReason(err))
 					}
 				}
 				continue
@@ -424,9 +430,9 @@ func windowsManagedHooksStandaloneUserState(
 				sameWindowsEnterprisePathCLI(dataDir, filepath.Join(home, ".defenseclaw")) &&
 				windowsEnterpriseAccountOwnedDataDirLink(home, sid) {
 				if _, binaryErr := windowsManagedHooksStandaloneUserBinariesPurger(home, sid); binaryErr != nil {
-					remaining = append(remaining, label+": "+windowsManagedHooksUserBinariesReason(binaryErr))
+					addRemaining(label + ": " + windowsManagedHooksUserBinariesReason(binaryErr))
 				}
-				remaining = append(remaining, label+": "+windowsManagedHooksAccountLinkKeptReason)
+				addRemaining(label + ": " + windowsManagedHooksAccountLinkKeptReason)
 				continue
 			}
 			var binaries []string
@@ -444,7 +450,7 @@ func windowsManagedHooksStandaloneUserState(
 			}
 			reason = windowsManagedHooksUserBinariesReason(err)
 		}
-		remaining = append(remaining, label+": "+reason)
+		addRemaining(label + ": " + reason)
 	}
 	sort.Strings(remaining)
 	sort.Strings(purged)

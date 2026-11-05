@@ -204,3 +204,107 @@ func TestGAP0193PurgeAccountLinkDoesNotReportItsACPPathAsFailure(t *testing.T) {
 		t.Fatalf("link target changed after plain purge: %q, %v", body, err)
 	}
 }
+
+func TestGAP0193PurgeReportsLinkAppearingAfterInitialRead(t *testing.T) {
+	oldIdentity := enterpriseHookWindowsUserCleanupIdentity
+	oldRootLink := windowsManagedHooksAccountOwnedRootLink
+	oldAccountLink := windowsEnterpriseAccountOwnedDataDirLink
+	oldState := windowsManagedHooksStandaloneUserStatePurger
+	oldBinaries := windowsManagedHooksStandaloneUserBinariesPurger
+	oldCopies := windowsManagedHooksStandaloneACPUserCopies
+	oldACP := windowsManagedHooksStandaloneACPUserPurger
+	t.Cleanup(func() {
+		enterpriseHookWindowsUserCleanupIdentity = oldIdentity
+		windowsManagedHooksAccountOwnedRootLink = oldRootLink
+		windowsEnterpriseAccountOwnedDataDirLink = oldAccountLink
+		windowsManagedHooksStandaloneUserStatePurger = oldState
+		windowsManagedHooksStandaloneUserBinariesPurger = oldBinaries
+		windowsManagedHooksStandaloneACPUserCopies = oldCopies
+		windowsManagedHooksStandaloneACPUserPurger = oldACP
+	})
+
+	sid := currentAccountSID()
+	if sid == "" {
+		t.Fatal("current account SID unavailable")
+	}
+	home := filepath.Join(t.TempDir(), "account")
+	if err := os.Mkdir(home, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	dataDir := filepath.Join(home, ".defenseclaw")
+	outside := filepath.Join(t.TempDir(), "outside")
+	if err := os.Mkdir(outside, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	canary := filepath.Join(outside, "canary")
+	if err := os.WriteFile(canary, []byte("kept"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	manifest := enterprisehooks.Manifest{Version: 1, Targets: []enterprisehooks.ManifestTarget{{
+		User: "account", UserHome: home, SID: sid, Connector: "claudecode", DataDir: dataDir,
+	}}}
+	enterpriseHookWindowsUserCleanupIdentity = func() error { return nil }
+	checks := 0
+	windowsManagedHooksAccountOwnedRootLink = func(gotHome, gotSID string) bool {
+		checks++
+		if checks == 1 {
+			g193AccountOwnedJunction(t, dataDir, outside, sid)
+			t.Cleanup(func() { _ = os.Remove(dataDir) })
+		}
+		return oldRootLink(gotHome, gotSID)
+	}
+	windowsEnterpriseAccountOwnedDataDirLink = func(gotHome, gotSID string) bool {
+		return gotHome == home && gotSID == sid
+	}
+	stateCalls := 0
+	windowsManagedHooksStandaloneUserStatePurger = func(string, string, string) error {
+		stateCalls++
+		return enterprisehooks.ErrWindowsUserStateOnlyLink
+	}
+	binaryCalls := 0
+	windowsManagedHooksStandaloneUserBinariesPurger = func(string, string) ([]string, error) {
+		binaryCalls++
+		return nil, nil
+	}
+	windowsManagedHooksStandaloneACPUserCopies = func() ([]enterprisehooks.WindowsACPUserCopy, error) {
+		return []enterprisehooks.WindowsACPUserCopy{{SID: sid, Home: home}}, nil
+	}
+	acpCalls := 0
+	windowsManagedHooksStandaloneACPUserPurger = func(string, string) error {
+		acpCalls++
+		return errors.New("ACP folder was not available")
+	}
+
+	remaining, purged, links := windowsManagedHooksStandaloneUserState(manifest, true, func(string) bool { return false })
+	acpRemaining, _ := windowsManagedHooksStandaloneACPUserState(links)
+	if stateCalls != 1 || binaryCalls != 1 || acpCalls != 0 || len(purged) != 0 ||
+		len(links) != 1 || len(acpRemaining) != 0 || len(remaining) != 1 ||
+		!strings.Contains(remaining[0], "account ("+sid+")") ||
+		!strings.HasSuffix(remaining[0], windowsManagedHooksAccountLinkKeptReason) {
+		t.Fatalf("late account link: state=%d binaries=%d ACP=%d purged=%v links=%v remaining=%v ACP remaining=%v",
+			stateCalls, binaryCalls, acpCalls, purged, links, remaining, acpRemaining)
+	}
+	if body, err := os.ReadFile(canary); err != nil || string(body) != "kept" {
+		t.Fatalf("link target changed: %q, %v", body, err)
+	}
+	body, err := json.Marshal(remaining)
+	if err != nil {
+		t.Fatal(err)
+	}
+	result := enterprisestatus.New("uninstall", managed.ProfileStandalone, "windows", "test")
+	addWindowsEnterpriseUserStateWarning(result, &windowsEnterpriseInstallerReport{UserStateRemaining: body})
+	if code := result.Finish("windows", windowsEnterpriseFailureCodeFor(result)); code != 0 || !result.OK ||
+		len(result.Warnings) != 1 || len(result.Errors) != 0 {
+		t.Fatalf("late account link result: exit=%d result=%+v", code, result)
+	}
+
+	if err := os.Remove(dataDir); err != nil {
+		t.Fatal(err)
+	}
+	windowsManagedHooksAccountOwnedRootLink = oldRootLink
+	remaining, purged, links = windowsManagedHooksStandaloneUserState(manifest, true, func(string) bool { return false })
+	if stateCalls != 1 || binaryCalls != 2 || len(remaining) != 0 || len(purged) != 0 || len(links) != 0 {
+		t.Fatalf("missing plain folder: state=%d binaries=%d purged=%v links=%v remaining=%v",
+			stateCalls, binaryCalls, purged, links, remaining)
+	}
+}
