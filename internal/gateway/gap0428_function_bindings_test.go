@@ -38,6 +38,14 @@ func TestGAP0428PrintfFormatBindingsFourCell(t *testing.T) {
 		{"suffix_name_with_binding_ordinary", `f=out.txt; name=ga; printf -v 'g[1]' '%n' "${name%a}"; echo m >> "$f"`, "allow"},
 		{"split_name_protected", `f=out.txt; name='f x'; printf '%n' $name; echo m >> "$f"`, "block"},
 		{"split_name_ordinary", `f=out.txt; name='g x'; printf '%n' $name; echo m >> "$f"`, "allow"},
+		{"suffix_split_name_protected", `f=out.txt; name='f xa'; printf '%n' ${name%a}; echo m >> "$f"`, "block"},
+		{"suffix_split_name_ordinary", `f=out.txt; name='g xa'; printf '%n' ${name%a}; echo m >> "$f"`, "allow"},
+		{"suffix_trim_name_protected", `f=out.txt; name='f a'; printf '%n' ${name%a}; echo m >> "$f"`, "block"},
+		{"suffix_trim_name_ordinary", `f=out.txt; name='g a'; printf '%n' ${name%a}; echo m >> "$f"`, "allow"},
+		{"suffix_split_v_protected", `f=out.txt; name='f xa'; printf -v 'g[1]' '%n' ${name%a}; echo m >> "$f"`, "block"},
+		{"suffix_split_v_ordinary", `f=out.txt; name='g xa'; printf -v 'g[1]' '%n' ${name%a}; echo m >> "$f"`, "allow"},
+		{"suffix_split_attached_v_protected", `f=out.txt; name='f xa'; printf '-vg[1]' '%n' ${name%a}; echo m >> "$f"`, "block"},
+		{"suffix_split_attached_v_ordinary", `f=out.txt; name='g xa'; printf '-vg[1]' '%n' ${name%a}; echo m >> "$f"`, "allow"},
 	}
 	payloads := make([][]byte, len(rows))
 	for i, row := range rows {

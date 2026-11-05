@@ -268,10 +268,11 @@ func actionPrintfSplitNames(word *syntax.Word, values actionValues, cwd, home st
 	param, ok := word.Parts[0].(*syntax.ParamExp)
 	if !ok || param.Param == nil || param.Excl || param.Length || param.Width || param.IsSet ||
 		param.Index != nil || param.Slice != nil || param.Repl != nil || param.NestedParam != nil ||
-		param.Flags != nil || len(param.Modifiers) != 0 || param.Exp != nil {
+		param.Flags != nil || len(param.Modifiers) != 0 ||
+		param.Exp != nil && param.Exp.Op != syntax.RemSmallSuffix && param.Exp.Op != syntax.RemLargeSuffix {
 		return nil, false
 	}
-	value, known := actionWordValue(word, values, cwd, home)
+	value, known := actionPrintfNameValue(word, values, cwd, home)
 	if !known || len(value) > 256 || strings.ContainsAny(value, "*?[]\\") {
 		return nil, false
 	}
