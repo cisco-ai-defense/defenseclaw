@@ -28,6 +28,7 @@ CLANG_MODULE_CACHE_PATH="$MODULE_CACHE" xcrun swiftc \
   "$ROOT/DefenseClawMac/DataLayer/Models.swift" \
   "$ROOT/DefenseClawMac/DataLayer/AuditStore.swift" \
   "$ROOT/DefenseClawMac/DataLayer/EventStreamReader.swift" \
+  "$ROOT/DefenseClawMac/DataLayer/OperatorAssetLists.swift" \
   "$ROOT/Tests/CanonicalEventHistoryTests.swift" \
   -lsqlite3 -o "$BUILD_DIR/CanonicalEventHistoryTests"
 
