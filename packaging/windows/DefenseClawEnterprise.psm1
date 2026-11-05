@@ -31759,6 +31759,14 @@ $script:GuardianFirstReconcileTimeoutSeconds = 600
 $script:GuardianFirstReconcileStallSeconds = 180
 $script:GuardianFirstReconcileCheckSeconds = 5
 
+# The guardian writes its startup record, and the coverage wait extends while
+# it progresses, on the standalone profile and on Secure Client outside strict
+# mode. A strict Secure Client host keeps the fixed wait.
+function Test-DefenseClawGuardianStartupRecordEnabled {
+    return (Test-DefenseClawStandaloneProfile) -or
+        -not (Test-DefenseClawTrustStrictAncestors)
+}
+
 function Get-DefenseClawGuardianStartupProgress {
     <#
         The startup record of the LocalSystem guardian
@@ -31773,7 +31781,7 @@ function Get-DefenseClawGuardianStartupProgress {
         [Parameter(Mandatory)][uint32]$ProcessId,
         [Parameter(Mandatory)][DateTime]$StartedAfter
     )
-    if ($ProcessId -eq 0) {
+    if ($ProcessId -eq 0 -or -not (Test-DefenseClawGuardianStartupRecordEnabled)) {
         return $null
     }
     try {
@@ -32154,7 +32162,10 @@ function Wait-DefenseClawFreshGuardianReconcile {
             return [uint32]0
         }
     }
-    $guardianProcessId = & $guardianProcess
+    $guardianProcessId = [uint32]0
+    if (Test-DefenseClawGuardianStartupRecordEnabled) {
+        $guardianProcessId = & $guardianProcess
+    }
     $deadline = $begin.AddSeconds($TimeoutSeconds)
     $limit = $begin.AddSeconds([Math]::Max(
             $TimeoutSeconds,
