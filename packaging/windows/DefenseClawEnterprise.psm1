@@ -31889,7 +31889,8 @@ function Test-DefenseClawGuardianReportCompletedWithFailedTargets {
 
 # Degraded coverage is accepted only when every status error comes from the
 # failed targets themselves: one "last guardian reconcile failed for
-# <connector>@<sid>" line per failed row, and the reconcile, authorization and
+# <connector>@<sid>" line per failed row (the Windows Guardian names the
+# account "<connector>@<user> (<sid>)"), and the reconcile, authorization and
 # activation "is incomplete" lines carrying exactly the state's counts. Any
 # other error (a missing or unreadable authorization or activation, an
 # untrusted manifest, an unreadable state) rejects the report.
@@ -31928,9 +31929,13 @@ function Test-DefenseClawGuardianReportErrorsAttributable {
     $countsPattern = '^(?:last guardian reconcile|protected guardian authorization|protected guardian activation) is incomplete \((\d+) succeeded, (\d+) pending, (\d+) total\)$'
     foreach ($entry in @($errorsProperty.Value)) {
         $text = ([string]$entry).Trim()
-        $failed = [regex]::Match($text, '^last guardian reconcile failed for (\S+): ')
+        $failed = [regex]::Match($text, '^last guardian reconcile failed for (.+?)(?: \((S-1-[0-9-]+)\))?: ')
         if ($failed.Success) {
-            if (-not $failedLabels.ContainsKey($failed.Groups[1].Value)) {
+            $label = $failed.Groups[1].Value
+            if ($failed.Groups[2].Success) {
+                $label = $label.Split('@')[0] + '@' + $failed.Groups[2].Value
+            }
+            if (-not $failedLabels.ContainsKey($label)) {
                 return $false
             }
             continue
