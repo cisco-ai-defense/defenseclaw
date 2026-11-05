@@ -23,3 +23,5 @@ func perUserFreshGatewayHoldsCall(string, *perUserPeerCheck) bool { return false
 func perUserFreshGatewayProof(string, *perUserPeerCheck) restartProofResult {
 	return restartProofResult{reason: "not_fresh"}
 }
+
+func perUserCaptureFreshGatewayOwner(*perUserPeerCheck) {}

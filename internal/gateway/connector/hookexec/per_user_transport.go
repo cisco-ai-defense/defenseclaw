@@ -117,6 +117,9 @@ var errPerUserPeerCheckUnfinished = fmt.Errorf("%w: its owner was still being ch
 type perUserPeerCheck struct {
 	pending atomic.Bool
 	ends    atomic.Pointer[perUserConnEnds]
+	// owner is the sole holder of the accepted socket observed while the
+	// verified connection was still open during a fresh gateway start.
+	owner atomic.Pointer[perUserPeerProcess]
 }
 
 // perUserConnEnds is the client and server address of one proven per-user

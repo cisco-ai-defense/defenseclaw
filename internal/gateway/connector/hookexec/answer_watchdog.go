@@ -531,7 +531,11 @@ func (w *answerWatchdog) restartWindowContact(opts Options, sp spec, failMode st
 	w.restartProof = func() restartProofResult { return perUserRestartWindowProof(home, check) }
 	prepared := w.restart != nil
 	w.mu.Unlock()
-	if prepared || !perUserGatewayRecentlyStarted(home) {
+	if !perUserGatewayRecentlyStarted(home) {
+		return
+	}
+	perUserCaptureFreshGatewayOwner(check)
+	if prepared {
 		return
 	}
 	go func() {
@@ -545,8 +549,8 @@ func (w *answerWatchdog) restartWindowContact(opts Options, sp spec, failMode st
 }
 
 // perUserRestartWindowProof reports whether the connection of check is held
-// by this account's gateway that started moments ago and has answered no
-// hook call yet; tests replace it.
+// by this account's gateway that started moments ago and had answered no
+// hook call before the connection; tests replace it.
 var perUserRestartWindowProof = perUserFreshGatewayProof
 
 type restartProofResult struct {

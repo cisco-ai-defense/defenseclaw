@@ -22,6 +22,7 @@ import (
 )
 
 const freshListenerHelperEnv = "DC_TEST_FRESH_LISTENER_PROCESS"
+const freshListenerCloseAcceptedEnv = "DC_TEST_FRESH_LISTENER_CLOSE_ACCEPTED"
 
 // TestGAP0295FreshListenerHelper is a gateway that takes connections and
 // never answers.
@@ -47,7 +48,82 @@ func TestGAP0295FreshListenerHelper(t *testing.T) {
 		if err != nil {
 			return
 		}
+		if os.Getenv(freshListenerCloseAcceptedEnv) == "1" {
+			_, _ = fmt.Fprintln(os.Stdout, "accepted")
+			time.Sleep(2 * time.Second)
+			_ = conn.Close()
+			_, _ = fmt.Fprintln(os.Stdout, "closed")
+			continue
+		}
 		held = append(held, conn)
+	}
+}
+
+// TestGAP0295FreshOwnerSurvivesSocketClose covers a verified connection
+// whose accepted socket closes as its answer deadline ends. The owner proof
+// captured while it was open is still valid for that call.
+func TestGAP0295FreshOwnerSurvivesSocketClose(t *testing.T) {
+	cmd := exec.Command(os.Args[0], "-test.run=^TestGAP0295FreshListenerHelper$")
+	cmd.Env = append(os.Environ(), freshListenerHelperEnv+"=1", freshListenerCloseAcceptedEnv+"=1")
+	stdout, err := cmd.StdoutPipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := cmd.Start(); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = cmd.Process.Kill(); _ = cmd.Wait() })
+	lines := bufio.NewReader(stdout)
+	line, err := lines.ReadString('\n')
+	if err != nil {
+		t.Fatal(err)
+	}
+	pid := cmd.Process.Pid
+	identity, ok := procidentity.Of(pid)
+	if !ok {
+		t.Fatal("helper identity unavailable")
+	}
+	executable, err := os.Readlink("/proc/" + strconv.Itoa(pid) + "/exe")
+	if err != nil {
+		t.Fatal(err)
+	}
+	dataDir := t.TempDir()
+	record, err := json.Marshal(map[string]any{
+		"pid": pid, "executable": strings.TrimSuffix(executable, " (deleted)"), "data_dir": dataDir,
+		"start_time": time.Now().Add(-time.Second).Unix(), "start_identity": identity,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dataDir, "gateway.pid"), record, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	conn, err := net.Dial("tcp", strings.TrimSpace(line))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer conn.Close()
+	if line, err := lines.ReadString('\n'); err != nil || strings.TrimSpace(line) != "accepted" {
+		t.Fatalf("accept signal = %q, %v", line, err)
+	}
+	check := &perUserPeerCheck{}
+	check.ends.Store(&perUserConnEnds{local: conn.LocalAddr(), remote: conn.RemoteAddr(), at: time.Now()})
+	perUserCaptureFreshGatewayOwner(check)
+	for end := time.Now().Add(time.Second); time.Now().Before(end) && check.owner.Load() == nil; time.Sleep(10 * time.Millisecond) {
+	}
+	if owner := check.owner.Load(); owner == nil || owner.pid != pid {
+		t.Fatalf("captured owner = %+v, want the fresh gateway", owner)
+	}
+	if line, err := lines.ReadString('\n'); err != nil || strings.TrimSpace(line) != "closed" {
+		t.Fatalf("close signal = %q, %v", line, err)
+	}
+	if result := perUserFreshGatewayProof(dataDir, check); !result.ok {
+		t.Fatalf("captured connection proof = %+v", result)
+	}
+	uncaptured := &perUserPeerCheck{}
+	uncaptured.ends.Store(check.ends.Load())
+	if result := perUserFreshGatewayProof(dataDir, uncaptured); result.ok || result.reason != "no_holder" {
+		t.Fatalf("closed connection without its owner proof = %+v", result)
 	}
 }
 
@@ -193,7 +269,8 @@ func TestGAP0295FreshGatewayHoldsCallProof(t *testing.T) {
 	client, server := late.LocalAddr().(*net.TCPAddr), late.RemoteAddr().(*net.TCPAddr)
 	held := false
 	for end := time.Now().Add(5 * time.Second); time.Now().Before(end) && !held; time.Sleep(10 * time.Millisecond) {
-		held = perUserProcessHoldsConnection(pid, client, server)
+		owner, unique := perUserConnectedPeerPID(client, server)
+		held = unique && owner == pid
 	}
 	if !held {
 		t.Fatal("the helper never accepted the late connection")
