@@ -829,11 +829,7 @@ func (s *tetragonSource) Coverage() (coverage Coverage) {
 	// are DefenseClaw losses, not Tetragon's: named apart from EventsLost
 	// (GAP-0071).
 	dropped := s.buffer.Dropped() + s.retiredDropped + halfDropped(s.proc) + halfDropped(s.files)
-	defer func() {
-		if dropped > 0 {
-			coverage.Limitations = append(coverage.Limitations, bufferDropLimitation(dropped))
-		}
-	}()
+	defer func() { coverage = withBufferDrops(coverage, dropped) }()
 
 	var process, files string
 	switch {

@@ -11,6 +11,9 @@
 package plane
 
 import (
+	"fmt"
+	"reflect"
+	"strings"
 	"sync"
 	"testing"
 )
@@ -188,5 +191,65 @@ func TestBufferStillReportsEveryDrop(t *testing.T) {
 	buffer.Push(Event{Kind: KindExec})
 	if buffer.Dropped() != before+2 {
 		t.Fatalf("an eviction made room without being counted: %d", buffer.Dropped())
+	}
+}
+
+// cowork-1-0-8 GAP-0072 (the class of GAP-0071): every host sensor source this
+// OS builds (bufferedSources) names the events its own buffer dropped in its
+// coverage, the same way, whatever dropped them: a file event at a full
+// buffer, a process event displacing the oldest, an image digest past the
+// late queue. A full buffer that dropped nothing is not a loss.
+func TestEverySourceNamesItsBufferDropsInCoverage(t *testing.T) {
+	sources := bufferedSources()
+	if len(sources) == 0 {
+		t.Fatal("no host sensor source listed for this OS")
+	}
+	for name, build := range sources {
+		t.Run(name, func(t *testing.T) {
+			source, buffer := build()
+			before := source.Coverage()
+			wantBufferDrops(t, before, 0)
+			for index := 0; index < eventBuffer; index++ {
+				buffer.Push(Event{Kind: KindFileRead, PID: index})
+			}
+			wantBufferDrops(t, source.Coverage(), 0)
+			buffer.Push(Event{Kind: KindFileRead, PID: -1})
+			wantBufferDrops(t, source.Coverage(), 1)
+			buffer.Push(Event{Kind: KindExec, PID: -2})
+			wantBufferDrops(t, source.Coverage(), 2)
+			for index := 0; index <= maxLateDigests; index++ {
+				buffer.Push(Event{Kind: KindImageDigest, PID: -3 - index})
+			}
+			after := source.Coverage()
+			wantBufferDrops(t, after, 3)
+			if again := source.Coverage(); !reflect.DeepEqual(again, after) {
+				t.Fatalf("coverage changed between calls:\n%+v\n%+v", after, again)
+			}
+			if len(after.Limitations) != len(before.Limitations)+1 ||
+				strings.Join(after.Limitations[:len(before.Limitations)], "\n") != strings.Join(before.Limitations, "\n") {
+				t.Fatalf("limitations before the drops %q, after %q: want the same plus one drop line",
+					before.Limitations, after.Limitations)
+			}
+		})
+	}
+}
+
+// wantBufferDrops checks that coverage names exactly dropped buffer drops,
+// in one line, or none when dropped is 0.
+func wantBufferDrops(t *testing.T, coverage Coverage, dropped int64) {
+	t.Helper()
+	lines := 0
+	for _, limitation := range coverage.Limitations {
+		if strings.Contains(limitation, "dropped from the sensor's event buffer") {
+			lines++
+		}
+	}
+	joined := strings.Join(coverage.Limitations, "; ")
+	switch {
+	case dropped == 0 && lines != 0:
+		t.Fatalf("limitations = %q, want no buffer drop line", joined)
+	case dropped > 0 && (lines != 1 || !strings.Contains(joined, fmt.Sprintf(
+		"%d events were dropped from the sensor's event buffer under back-pressure", dropped))):
+		t.Fatalf("limitations = %q, want one line naming %d dropped events", joined, dropped)
 	}
 }

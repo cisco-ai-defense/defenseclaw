@@ -29,6 +29,25 @@ import (
 	"testing"
 )
 
+// bufferedSources are the host sensor sources Windows builds, each with the
+// buffer its Coverage counts (TestEverySourceNamesItsBufferDropsInCoverage):
+// before Start (no reader), and with a reader that is behind, whose line
+// clears once it catches up while the drops stay named.
+func bufferedSources() map[string]func() (Source, *Buffer) {
+	return map[string]func() (Source, *Buffer){
+		"security log before start": func() (Source, *Buffer) {
+			source := NewSource(nil).(*windowsSource)
+			return source, source.buffer
+		},
+		"security log reader behind": func() (Source, *Buffer) {
+			source := NewSource(nil).(*windowsSource)
+			source.coverage = Coverage{Mechanism: "Windows Security event log (wevtapi)", Limitations: []string{"start limitation"}}
+			source.reader = &securityReader{buffer: source.buffer, behind: true, heldBack: 1}
+			return source, source.buffer
+		},
+	}
+}
+
 // A representative Security-channel 4688 record, in the exact XML wevtapi
 // renders. Decoding is tested against the real wire shape because the shape is
 // what a Windows release can change.

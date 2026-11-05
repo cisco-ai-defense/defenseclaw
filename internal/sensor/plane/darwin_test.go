@@ -344,6 +344,18 @@ func TestExecCarriesTheRealParentPID(t *testing.T) {
 	}
 }
 
+// bufferedSources are the host sensor sources macOS builds, each with the
+// buffer its Coverage counts (TestEverySourceNamesItsBufferDropsInCoverage).
+func bufferedSources() map[string]func() (Source, *Buffer) {
+	return map[string]func() (Source, *Buffer){
+		"eslogger": func() (Source, *Buffer) {
+			source := NewSource(nil).(*darwinSource)
+			source.coverage = Coverage{Mechanism: "Endpoint Security", Limitations: []string{"start limitation"}}
+			return source, source.buffer
+		},
+	}
+}
+
 // cowork-1-0-8 GAP-0072: an event the macOS source's own buffer drops after
 // eslogger delivered it is named in the coverage, as on Linux (GAP-0071).
 func TestDarwinBufferDropsAreReportedInCoverage(t *testing.T) {

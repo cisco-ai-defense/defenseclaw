@@ -40,6 +40,7 @@ package plane
 
 import (
 	"context"
+	"fmt"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -580,6 +581,27 @@ func (b *Buffer) Events() <-chan Event { return b.events }
 
 // Dropped is how many events were discarded under back-pressure.
 func (b *Buffer) Dropped() int64 { return b.dropped.Load() }
+
+// withBufferDrops ends every source's Coverage: it names the events the
+// source's own buffer dropped under back-pressure after the OS delivered
+// them, as the ENOBUFS loss is named, so a loss is reduced coverage and
+// never a silence. The count is cumulative: a dropped event stays lost after
+// the source catches up. The limitations are copied, so the coverage a
+// source recorded at Start does not grow. Linux native and Tetragon
+// (GAP-0071), macOS and Windows (cowork-1-0-8 GAP-0072) report it the same
+// way.
+func withBufferDrops(coverage Coverage, dropped int64) Coverage {
+	if dropped > 0 {
+		coverage.Limitations = append(append([]string(nil), coverage.Limitations...), bufferDropLimitation(dropped))
+	}
+	return coverage
+}
+
+// bufferDropLimitation is the limitation withBufferDrops adds.
+func bufferDropLimitation(dropped int64) string {
+	return fmt.Sprintf("%d events were dropped from the sensor's event buffer under back-pressure "+
+		"(file events first; process events displaced the oldest)", dropped)
+}
 
 // Close closes the delivery channel.
 func (b *Buffer) Close() { close(b.events) }

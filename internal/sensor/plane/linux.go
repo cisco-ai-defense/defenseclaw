@@ -248,10 +248,7 @@ func (s *linuxSource) Coverage() Coverage {
 		coverage.Limitations = append(append([]string(nil), coverage.Limitations...), fmt.Sprintf(
 			"process events were lost %d times when the netlink receive buffer overflowed (ENOBUFS)", lost))
 	}
-	if dropped := s.bufferDropped(); dropped > 0 {
-		coverage.Limitations = append(append([]string(nil), coverage.Limitations...), bufferDropLimitation(dropped))
-	}
-	return coverage
+	return withBufferDrops(coverage, s.bufferDropped())
 }
 
 // bufferDropped is how many events this source's own buffer dropped under
