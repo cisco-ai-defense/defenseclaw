@@ -29,6 +29,7 @@
  */
 
 import { loadSidecarConfig } from "./sidecar-config.js";
+import { forgetListenerProof, proveListener } from "./listener-proof.js";
 
 // Kept in sync with fetch-interceptor.ts::DC_AUTH_HEADER. Inlined to
 // avoid an import cycle between the reporter and its consumer.
@@ -163,12 +164,21 @@ export function createEgressReporter(
         reason: e.reason ?? "",
       };
 
-      queueMicrotask(() => {
+      queueMicrotask(async () => {
         const headers: Record<string, string> = {
           "Content-Type": "application/json",
         };
         const token = loadSidecarConfig().token;
-        if (token) headers[DC_AUTH_HEADER] = `Bearer ${token}`;
+        if (token) {
+          // Telemetry goes only to a listener that proves it is this
+          // account's gateway (GAP-0594); otherwise it is dropped.
+          try {
+            await proveListener("127.0.0.1", opts.guardrailPort, token);
+          } catch {
+            return;
+          }
+          headers[DC_AUTH_HEADER] = `Bearer ${token}`;
+        }
 
         // 2s ceiling — egress telemetry is disposable by design.
         // Prefer AbortSignal.timeout when available; fall back to a
@@ -193,6 +203,7 @@ export function createEgressReporter(
         })
           .catch(() => {
             // Telemetry is best-effort. Errors here never propagate.
+            forgetListenerProof("127.0.0.1", opts.guardrailPort);
           })
           .finally(() => {
             if (fallbackTimer !== undefined) clearTimeout(fallbackTimer);

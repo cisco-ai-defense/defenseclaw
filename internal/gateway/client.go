@@ -24,6 +24,7 @@ import (
 	"errors"
 	"fmt"
 	"math"
+	"net"
 	"net/url"
 	"os"
 	"path/filepath"
@@ -37,6 +38,7 @@ import (
 	"github.com/google/uuid"
 	"github.com/gorilla/websocket"
 
+	"github.com/defenseclaw/defenseclaw/internal/gateway/connector/hookexec"
 	"github.com/defenseclaw/defenseclaw/internal/managed"
 
 	"github.com/defenseclaw/defenseclaw/internal/config"
@@ -154,6 +156,7 @@ func (c *Client) Connect(ctx context.Context) error {
 
 	dialer := websocket.Dialer{
 		HandshakeTimeout: 10 * time.Second,
+		NetDialContext:   dialOpenClawListener,
 	}
 	if c.cfg.RequiresTLS() {
 		dialer.TLSClientConfig = &tls.Config{
@@ -210,6 +213,47 @@ func (c *Client) Connect(ctx context.Context) error {
 		c.dispatchEvent(evt)
 	}
 	return nil
+}
+
+// errOpenClawListenerUnverified is a loopback OpenClaw gateway port whose
+// listener is not this account's (GAP-0594).
+var errOpenClawListenerUnverified = errors.New("the OpenClaw gateway listener does not belong to this account")
+
+// verifyOpenClawListener checks the account of the accepted server socket:
+// this account or the system account. Replaceable in tests.
+var verifyOpenClawListener = hookexec.VerifyLocalPeer
+
+// dialOpenClawListener opens the TCP connection of the OpenClaw WebSocket.
+// On Linux and macOS a loopback listener must belong to this account (or
+// the system account) before DefenseClaw writes any byte to it, so a process
+// of another account that holds the port while OpenClaw restarts never gets
+// the WebSocket upgrade, the gateway token or the device signature
+// (GAP-0594). A listener on another host is protected by TLS, not by this
+// check. Windows does not run the OpenClaw connector.
+func dialOpenClawListener(ctx context.Context, network, addr string) (net.Conn, error) {
+	var dialer net.Dialer
+	conn, err := dialer.DialContext(ctx, network, addr)
+	if err != nil {
+		return nil, err
+	}
+	if !openClawListenerOwnerChecked(conn) {
+		return conn, nil
+	}
+	if err := verifyOpenClawListener(conn); err != nil {
+		_ = conn.Close()
+		return nil, fmt.Errorf("%w (%s): %v", errOpenClawListenerUnverified, addr, err)
+	}
+	return conn, nil
+}
+
+// openClawListenerOwnerChecked reports whether conn's listener account is
+// checked: a loopback connection on Linux or macOS.
+func openClawListenerOwnerChecked(conn net.Conn) bool {
+	if runtime.GOOS != "linux" && runtime.GOOS != "darwin" {
+		return false
+	}
+	remote, ok := conn.RemoteAddr().(*net.TCPAddr)
+	return ok && remote.IP.IsLoopback()
 }
 
 // joinPreviousReader closes the previous connection, if its readLoop is
@@ -682,6 +726,12 @@ const openClawTokenRejectedHint = "OpenClaw rejected the gateway token. DefenseC
 	"from openclaw.json on every retry; when it is a secret reference, give the DefenseClaw gateway the token " +
 	"in OPENCLAW_GATEWAY_TOKEN or DEFENSECLAW_GATEWAY_TOKEN and restart it"
 
+// openClawListenerUnverifiedHint is the operator step for an OpenClaw
+// gateway port that another account's process holds.
+const openClawListenerUnverifiedHint = "The OpenClaw gateway port is held by a process of another account. " +
+	"DefenseClaw sends it nothing and keeps retrying. Stop that process, or give this account's OpenClaw " +
+	"gateway its own port (gateway.port in openclaw.json) and run 'defenseclaw setup openclaw'"
+
 // openClawPairingApprovalHint is the operator step for a device OpenClaw has
 // not approved (yet) for the role and scopes DefenseClaw asks for.
 func openClawPairingApprovalHint(deviceID string) string {
@@ -696,6 +746,10 @@ func openClawPairingApprovalHint(deviceID string) string {
 func (c *Client) handleConnectRejection(connectErr error) string {
 	hint := ""
 	switch {
+	case errors.Is(connectErr, errOpenClawListenerUnverified):
+		hint = openClawListenerUnverifiedHint
+		fmt.Fprintf(os.Stderr, "[gateway] %s\n", hint)
+		return hint
 	case openClawPairingApprovalNeeded(connectErr):
 		hint = openClawPairingApprovalHint(c.device.DeviceID)
 		fmt.Fprintf(os.Stderr, "[gateway] %s\n", hint)

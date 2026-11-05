@@ -73,6 +73,7 @@ import type {
 import { compareSeverity, maxSeverity } from "./types.js";
 import { patchAwsSdkHttp1ForGuardrail } from "./aws-sdk-http1-for-guardrail.js";
 import { loadSidecarConfig } from "./sidecar-config.js";
+import { forgetListenerProof, isLoopbackHost } from "./listener-proof.js";
 import { createFetchInterceptor } from "./fetch-interceptor.js";
 import { HealthMonitor } from "./health-monitor.js";
 
@@ -281,6 +282,13 @@ export default function (api: DefenseClawPluginHost) {
 
   const sidecarConfig = loadSidecarConfig();
   const SIDECAR_API = sidecarConfig.baseUrl;
+  if (!isLoopbackHost(sidecarConfig.host)) {
+    // The plugin sends its token only to a loopback listener that proves it
+    // is this account's gateway (GAP-0594).
+    console.warn(
+      `[defenseclaw] gateway.host ${sidecarConfig.host} is not a loopback address: the plugin sends nothing to it, so tool checks follow the outage mode`,
+    );
+  }
   const INSPECT_TIMEOUT_MS = sidecarConfig.hiltEnabled
     ? Math.max(2_000, (sidecarConfig.approvalTimeoutS + 5) * 1_000)
     : 2_000;
@@ -506,6 +514,7 @@ export default function (api: DefenseClawPluginHost) {
         duration_ms,
       });
       const msg = err instanceof Error ? err.message : String(err);
+      forgetListenerProof(sidecarConfig.host, sidecarConfig.apiPort);
       return unavailableVerdict(`sidecar unreachable: ${msg}`);
     } finally {
       clearTimeout(timer);
