@@ -334,11 +334,13 @@ def test_the_engine_version_is_the_vocabulary_engine_version():
 _SENSOR_TERMS = re.compile(r"vm[ _-]?sensor|sensor package|cowork[_-]vm|defenseclaw-cowork-(?:amd64|arm64)", re.I)
 
 
-# Every public doc: the docs site, docs/ and the CHANGELOG (audit review 2 N3).
+# Every public doc: the docs site, docs/, the CHANGELOG and the README
+# (audit review 2 N3, review 3).
 _PUBLIC_DOCS = (
     *sorted((ROOT / "docs-site/content").rglob("*.mdx")),
     *sorted((ROOT / "docs").rglob("*.md")),
     ROOT / "CHANGELOG.md",
+    ROOT / "README.md",
 )
 
 

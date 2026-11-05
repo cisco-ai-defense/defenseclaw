@@ -25,6 +25,7 @@ from __future__ import annotations
 import json
 import math
 import os
+import re
 import sqlite3
 import stat
 import threading
@@ -2380,6 +2381,9 @@ def _event_connector_value(event: Event) -> str:
     return _details_connector(event.details)
 
 
+_DETAIL_SURFACE_TOKEN = re.compile(r"(?<!\S)surface=\S*")
+
+
 def _without_detail_surface(details: str) -> str:
     """The details with no ``surface=`` token before ``details_json``.
 
@@ -2390,7 +2394,8 @@ def _without_detail_surface(details: str) -> str:
     if details.startswith("details_json="):
         return details
     head, sep, tail = details.partition(" details_json=")
-    return " ".join(tok for tok in head.split(" ") if not tok.startswith("surface=")) + sep + tail
+    # Any whitespace splits a token, as _kv reads it (audit review 3 S-1).
+    return _DETAIL_SURFACE_TOKEN.sub("", head) + sep + tail
 
 
 def _details_connector(details: str) -> str:
