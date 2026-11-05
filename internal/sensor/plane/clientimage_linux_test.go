@@ -585,15 +585,9 @@ func TestBufferDropsAreReportedInCoverage(t *testing.T) {
 	if limits := strings.Join(stream.Coverage().Limitations, "; "); !strings.Contains(limits, "3 events were dropped from the sensor's event buffer") {
 		t.Fatalf("Tetragon limitations = %q, want the stream's, the process half's and the file half's drops", limits)
 	}
-	// A half that stops keeps its drops in the count (S1 review 3 F4): the
-	// process half at a Tetragon reconnect, the file half at the hand-off.
-	stream.mu.Lock()
-	stream.retiredDropped += halfDropped(stream.proc) + halfDropped(stream.files)
-	stream.proc, stream.files = nil, nil
-	stream.mu.Unlock()
-	if limits := strings.Join(stream.Coverage().Limitations, "; "); !strings.Contains(limits, "3 events were dropped from the sensor's event buffer") {
-		t.Fatalf("Tetragon limitations after the halves stopped = %q, want 3 still", limits)
-	}
+	// A half that stops keeps its drops: TestTetragonSourceFallsBackInStreamAndRecovers
+	// (cn_proc at a Tetragon reconnect) and
+	// TestTetragonSourceHandsTheFileHalfOverAndTakesItBack (fanotify at the hand-off).
 }
 
 func TestClaudeImageVersionFromInstallLayout(t *testing.T) {

@@ -23,6 +23,7 @@ import (
 	"errors"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -34,7 +35,11 @@ type fakeHalf struct {
 	events chan Event
 	once   sync.Once
 	closed chan struct{}
+	// dropped stands in for the half's buffer drops (GAP-0071).
+	dropped atomic.Int64
 }
+
+func (h *fakeHalf) bufferDropped() int64 { return h.dropped.Load() }
 
 func newFakeHalf() *fakeHalf {
 	return &fakeHalf{events: make(chan Event, 64), closed: make(chan struct{})}
@@ -234,8 +239,14 @@ func TestTetragonSourceFallsBackInStreamAndRecovers(t *testing.T) {
 	// Tetragon comes up: the source switches without a reconnect, cn_proc
 	// stops, the subscriber is told to read the coverage again.
 	first := newFakeFeed(Backend{Kind: BackendTetragon, Version: "v1.7.1", Socket: "/var/run/tetragon/tetragon.sock"})
+	// The cn_proc half dropped 3 events; the coverage keeps naming them once
+	// it stops (S1 review 4 F5, GAP-0071).
+	h.lastProc().dropped.Store(3)
 	h.feeds <- first
 	waitFor(t, "the switch to Tetragon", func() bool { return source.Coverage().Backend.Kind == BackendTetragon })
+	if limits := strings.Join(source.Coverage().Limitations, "; "); !strings.Contains(limits, "3 events were dropped from the sensor's event buffer") {
+		t.Fatalf("after the switch: limitations %q, want the stopped cn_proc half's drops", limits)
+	}
 	select {
 	case <-source.CoverageChanges():
 	case <-time.After(time.Second):
@@ -317,7 +328,10 @@ func TestTetragonSourceHandsTheFileHalfOverAndTakesItBack(t *testing.T) {
 	}
 
 	// DefenseClaw's observe policy, enabled and delivering with no loss for
-	// the window: fanotify stops.
+	// the window: fanotify stops, and its 5 buffer drops stay named
+	// (S1 review 4 F5, GAP-0071).
+	files.dropped.Store(5)
+	const fileDrops = "5 events were dropped from the sensor's event buffer"
 	feed.setPolicies(BackendPolicy{Name: "defenseclaw-observe-89abcdef", Mode: "monitor", State: "enabled"})
 	time.Sleep(2 * handoffInterval)
 	feed.batches <- KernelBatch{Events: []Event{{Kind: KindFileRead, PID: 7, Path: "/home/dcr-std1/.aws/config", Policy: "defenseclaw-observe-89abcdef"}}}
@@ -326,12 +340,18 @@ func TestTetragonSourceHandsTheFileHalfOverAndTakesItBack(t *testing.T) {
 	if mechanism := source.Coverage().Mechanism; !strings.Contains(mechanism, "observe policy") || strings.Contains(mechanism, "fanotify") {
 		t.Fatalf("after the hand-off: %q", mechanism)
 	}
+	if limits := strings.Join(source.Coverage().Limitations, "; "); !strings.Contains(limits, fileDrops) {
+		t.Fatalf("after the hand-off: limitations %q, want the stopped fanotify half's drops", limits)
+	}
 
 	// A loss signal brings fanotify straight back.
 	feed.batches <- KernelBatch{ThrottleStart: true}
 	waitFor(t, "fanotify to restart", func() bool { return h.lastFiles() != files && !h.lastFiles().isClosed() })
 	if !strings.HasSuffix(source.Coverage().Mechanism, " + fanotify") {
 		t.Fatalf("after the loss: %q", source.Coverage().Mechanism)
+	}
+	if limits := strings.Join(source.Coverage().Limitations, "; "); !strings.Contains(limits, fileDrops) {
+		t.Fatalf("after fanotify restarted: limitations %q, want the first half's drops", limits)
 	}
 }
 
