@@ -211,7 +211,6 @@ describe("DefenseClaw OpenClaw Plugin", () => {
           { status: 200, headers: { "content-type": "application/json" } },
         ),
       );
-      
       const result = await listeners.before_tool_call(
         { toolName: "exec", params: { command: "printenv" } },
         { sessionKey: "agent:main:main", runId: "run-1", toolName: "exec" },
