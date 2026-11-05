@@ -36,7 +36,7 @@ import click
 import requests
 
 from defenseclaw import ux
-from defenseclaw.alert_semantics import copilot_hook_target
+from defenseclaw.alert_semantics import copilot_hook_target, cowork_hook_target, surface_label
 from defenseclaw.context import AppContext, pass_ctx
 from defenseclaw.gateway import OrchestratorClient, alert_disposition_timeout_seconds
 from defenseclaw.logger import _gateway_api_host
@@ -210,6 +210,32 @@ def _event_connector(event) -> str:
         if connector:
             return connector
     return _kv(event.details or "").get("connector", "").lower()
+
+
+def _event_surface(event, hook_details: dict[str, list[str]] | None = None) -> str:
+    """The agent surface of an alert: ``cowork`` for a Claude Cowork call.
+
+    A hook call's audit row records it (``surface=cowork``); a finding takes
+    it from the hook row of the same request. "" for every other call."""
+    structured = getattr(event, "structured", None)
+    if isinstance(structured, dict):
+        surface = str(structured.get("defenseclaw.agent.surface") or "").strip().lower()
+        if surface:
+            return surface
+    surface = _kv(event.details or "").get("surface", "").strip().lower()
+    if surface:
+        return surface
+    for raw in (hook_details or {}).get(getattr(event, "id", ""), []):
+        if surface := _kv(raw).get("surface", "").strip().lower():
+            return surface
+    return ""
+
+
+def _event_target(event, hook_details: dict[str, list[str]] | None = None) -> str:
+    """The Target an alert row shows: one Copilot spelling (GAP-2619), and
+    ``cowork:*`` for a Claude Cowork call (GAP-0047), as the TUI shows it."""
+    target = copilot_hook_target(event.target or "", _event_connector(event))
+    return cowork_hook_target(target, _event_surface(event, hook_details)) if target else target
 
 
 def _hook_decision(hook_details: list[str], hook_event: str = "") -> str:
@@ -390,7 +416,9 @@ def _finding_facts(
         }
     target = copilot_hook_target(target)
     facts = {
-        "target": target,
+        # A Cowork finding reads cowork:PreToolUse; the decision and the
+        # location still compare against the stored claudecode target.
+        "target": cowork_hook_target(target, _event_surface(e, hook_details)),
         "decision": _hook_decision(hook_details.get(e.id, []), target),
         "connector": _event_connector(e),
         "rule": f"{rule_id}: {title}" if title else rule_id,
@@ -606,7 +634,7 @@ def _render_table(alert_list: list, store, connector: str | None = None, *, secu
         sev_cell = f"[{sev_style}]{e.severity}[/{sev_style}]" if sev_style else e.severity
         ts     = e.timestamp.strftime("%H:%M") if e.timestamp else ""
         action = _trunc(e.action or "", _W_ACTION)
-        hook_target = copilot_hook_target(e.target or "", _event_connector(e))
+        hook_target = _event_target(e)
         shown_target = _short_hook_target(hook_target, _event_connector(e)) if secure_client else hook_target
         target = _trunc_path(shown_target, w_target)
         kv_map = _kv(e.details or "")
@@ -754,7 +782,7 @@ def _alerts_json(app: AppContext, limit: int, connector: str | None) -> None:
             "timestamp": e.timestamp.isoformat() if e.timestamp else "",
             "severity": e.severity,
             "action": e.action,
-            "target": e.target,
+            "target": _event_target(e),
             "actor": e.actor,
             "connector": _event_connector(e),
             "details": e.details,
@@ -849,7 +877,8 @@ def _alerts_default(
             return ux._style(f"{name}:".ljust(10), fg="bright_black", bold=True)
 
         targets = _alert_targets_for(app.store, [e])
-        facts = _finding_facts(e, _hook_details_for(app.store, [e]), targets)
+        hook_details = _hook_details_for(app.store, [e])
+        facts = _finding_facts(e, hook_details, targets)
         quarantined = _quarantine_facts(e, targets)
         click.echo(f"{ux.bold(f'Alert #{show_idx}')}")
         if e.id:
@@ -859,9 +888,11 @@ def _alerts_default(
         ts = e.timestamp.strftime("%Y-%m-%d %H:%M:%S") if e.timestamp else ""
         click.echo(f"  {label('Timestamp')} {ts}")
         click.echo(f"  {label('Action')} {e.action}")
-        target = facts["target"] if facts else (quarantined["target"] if quarantined else e.target)
+        target = facts["target"] if facts else (quarantined["target"] if quarantined else _event_target(e))
         if target:
             click.echo(f"  {label('Target')} {target}")
+        if surface := _event_surface(e, hook_details):
+            click.echo(f"  {label('Surface')} {surface_label(surface)}")
         if facts:
             for key, name in (("decision", "Decision"), ("route", "Route"), ("connector", "Connector"),
                               ("rule", "Rule"), ("scanner", "Scanner"), ("location", "Location"),
