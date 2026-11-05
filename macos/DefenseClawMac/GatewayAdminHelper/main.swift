@@ -376,6 +376,9 @@ enum GatewayAdminDirectory {
             return nil
         }
         defer { closedir(stream) }
+        // The duplicate shares the original descriptor offset; start over so
+        // a second listing of the same folder is complete.
+        rewinddir(stream)
         var names: [String] = []
         while let entry = readdir(stream) {
             var field = entry.pointee.d_name
