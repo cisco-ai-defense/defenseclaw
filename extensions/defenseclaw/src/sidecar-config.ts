@@ -18,7 +18,8 @@
 
 import { readFileSync, statSync } from "node:fs";
 import { isAbsolute, join, normalize } from "node:path";
-import { homedir } from "node:os";
+import { homedir, userInfo } from "node:os";
+import { execFileSync } from "node:child_process";
 import yaml from "js-yaml";
 
 const DEFAULT_HOST = "127.0.0.1";
@@ -223,4 +224,33 @@ function readDotEnvToken(defenseClawHome: string, key: string): string {
 export function _resetSidecarConfigCache(): void {
   cached = undefined;
   cachedKey = "";
+}
+
+/** Ask the installed gateway binary for the saved OpenClaw outage mode. */
+export function loadOpenClawOutageMode(): "open" | "closed" {
+  try {
+    // The account home comes from the OS, not the agent's HOME or
+    // DEFENSECLAW_HOME. The helper reads the account's saved config and
+    // applies the managed and install-window gates used by hook connectors.
+    const accountHome = userInfo().homedir;
+    if (!isAbsolute(accountHome)) return "closed";
+    const binary = join(accountHome, ".local", "bin",
+      process.platform === "win32" ? "defenseclaw-gateway.exe" : "defenseclaw-gateway");
+    const hookDir = join(accountHome, ".defenseclaw", "hooks");
+    const env = process.platform === "win32"
+      ? { HOME: accountHome, USERPROFILE: accountHome,
+          SystemRoot: process.env.SystemRoot || "C:\\Windows",
+          PATH: join(process.env.SystemRoot || "C:\\Windows", "System32") }
+      : { HOME: accountHome, PATH: "/usr/bin:/bin" };
+    const answer = execFileSync(binary, [
+      "hook-outage-mode", "--connector", "openclaw", "--hook-dir", hookDir,
+    ], {
+      encoding: "utf8", timeout: 3000, maxBuffer: 64,
+      env,
+      stdio: ["ignore", "pipe", "ignore"],
+    });
+    return answer.trim() === "open" ? "open" : "closed";
+  } catch {
+    return "closed";
+  }
 }

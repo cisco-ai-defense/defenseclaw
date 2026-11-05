@@ -6,7 +6,7 @@
 import { createHmac } from "node:crypto";
 import { execFile } from "node:child_process";
 import { createServer, request, type IncomingMessage, type Server, type ServerResponse } from "node:http";
-import { Socket, type AddressInfo } from "node:net";
+import { Socket, createServer as createNetServer, type AddressInfo } from "node:net";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import {
   ListenerProofError,
@@ -328,5 +328,124 @@ describe("listener proof (GAP-0594)", () => {
     expect(seen.authorized).toEqual([`Bearer ${TOKEN}`]);
     const headers = await client.buildOutboundHeaders();
     expect(headers.Authorization).toBe(`Bearer ${TOKEN}`);
+  });
+});
+
+// GAP-0600 with GAP-0594: the plugin applies the saved outage mode to a tool
+// check only when the gateway did not answer. A listener that answered
+// without a valid proof is not an outage and is blocked in every tier.
+describe("outage classification of a check that got no answer", () => {
+  const closedPort = async (): Promise<number> => {
+    const probe = createServer();
+    await new Promise<void>((resolve) => probe.listen(0, "127.0.0.1", resolve));
+    const port = (probe.address() as AddressInfo).port;
+    await new Promise((resolve) => probe.close(resolve));
+    return port;
+  };
+
+  /** A listener that proves itself, then handles the check with onCheck. */
+  async function provenGateway(onCheck: (req: IncomingMessage, res: ServerResponse) => void): Promise<number> {
+    const server = createServer((req, res) => {
+      if (req.url === LISTENER_PROOF_PATH) {
+        const nonce = String(req.headers["x-defenseclaw-listener-nonce"] || "");
+        const proof = createHmac("sha256", TOKEN)
+          .update(`defenseclaw.listener-proof.v1\u0000openclaw\u0000${nonce}`)
+          .digest("hex");
+        res.writeHead(204, { "X-DefenseClaw-Listener-Proof": proof }).end();
+        return;
+      }
+      onCheck(req, res);
+    });
+    const sockets = new Set<Socket>();
+    server.on("connection", (socket) => {
+      sockets.add(socket);
+      socket.on("close", () => sockets.delete(socket));
+    });
+    const close = server.close.bind(server);
+    server.close = ((cb?: (err?: Error) => void) => {
+      for (const socket of sockets) socket.destroy();
+      return close(cb);
+    }) as typeof server.close;
+    await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+    servers.push(server);
+    return (server.address() as AddressInfo).port;
+  }
+
+  it("reports nothing listening on the gateway port as an outage", async () => {
+    const port = await closedPort();
+    const client = new DaemonClient({ baseUrl: `http://127.0.0.1:${port}`, token: TOKEN });
+    const res = await client.postRaw("/api/v1/inspect/tool", { tool: "exec" });
+    expect(res.status).toBe(0);
+    expect(res.outage).toBe(true);
+    const err = await proveListener("127.0.0.1", port, TOKEN).catch((e: unknown) => e);
+    expect(err).toBeInstanceOf(ListenerProofError);
+    expect((err as ListenerProofError).unreachable).toBe(true);
+  });
+
+  it("reports a listener that never answers the proof as an outage", async () => {
+    const accepted: Socket[] = [];
+    const mute = createNetServer((socket) => {
+      accepted.push(socket);
+    });
+    await new Promise<void>((resolve) => mute.listen(0, "127.0.0.1", resolve));
+    try {
+      const port = (mute.address() as AddressInfo).port;
+      const err = await new Promise<Error | null>((resolve) => {
+        provenCreateConnection("127.0.0.1", port, TOKEN, undefined, 200)({}, (e) => resolve(e));
+      });
+      expect(err).toBeInstanceOf(ListenerProofError);
+      expect((err as ListenerProofError).unreachable).toBe(true);
+      const stalled = new Socket();
+      const connectErr = await new Promise<Error | null>((resolve) => {
+        provenCreateConnection("127.0.0.1", 9, TOKEN, () => stalled, 200)({}, (e) => resolve(e));
+      });
+      expect((connectErr as ListenerProofError).unreachable).toBe(true);
+    } finally {
+      for (const socket of accepted) socket.destroy();
+      await new Promise((resolve) => mute.close(resolve));
+    }
+  });
+
+  it("never reports a listener that fails the proof as an outage, and sends it nothing", async () => {
+    for (const key of [null, "b".repeat(64)]) {
+      const { server, port, seen } = await listener(key);
+      servers.push(server);
+      const client = new DaemonClient({ baseUrl: `http://127.0.0.1:${port}`, token: TOKEN });
+      const res = await client.postRaw("/api/v1/inspect/tool", { tool: "exec", args: { command: "date" } });
+      expect(res.status).toBe(0);
+      expect(res.outage).toBe(false);
+      expect(seen.authorized).toEqual([]);
+      const err = await proveListener("127.0.0.1", port, TOKEN).catch((e: unknown) => e);
+      expect(err).toBeInstanceOf(ListenerProofError);
+      expect((err as ListenerProofError).unreachable).toBe(false);
+    }
+  });
+
+  it("never reports a missing token or a non-loopback gateway.host as an outage", async () => {
+    const port = await closedPort();
+    const noToken = new DaemonClient({ baseUrl: `http://127.0.0.1:${port}`, token: "" });
+    const unsent = await noToken.postRaw("/api/v1/inspect/tool", { tool: "exec" });
+    expect(unsent.status).toBe(0);
+    expect(unsent.outage).toBe(false);
+    const remote = new DaemonClient({ baseUrl: "http://192.0.2.10:18970", token: TOKEN });
+    const refused = await remote.postRaw("/api/v1/inspect/tool", { tool: "exec" });
+    expect(refused.status).toBe(0);
+    expect(refused.outage).toBe(false);
+  });
+
+  it("reports a proven connection that breaks off, is cut off or times out as an outage", async () => {
+    const reset = await provenGateway((req) => req.socket.destroy());
+    const cut = await provenGateway((req, res) => {
+      res.writeHead(200, { "Content-Type": "application/json", "Content-Length": "200" });
+      res.write("{\"action\":\"allow\",");
+      setTimeout(() => req.socket.destroy(), 20);
+    });
+    const silent = await provenGateway(() => undefined);
+    for (const [port, timeoutMs] of [[reset, 2_000], [cut, 2_000], [silent, 200]]) {
+      const client = new DaemonClient({ baseUrl: `http://127.0.0.1:${port}`, token: TOKEN });
+      const res = await client.postRaw("/api/v1/inspect/tool", { tool: "exec" }, { timeoutMs });
+      expect(res.status).toBe(0);
+      expect(res.outage).toBe(true);
+    }
   });
 });

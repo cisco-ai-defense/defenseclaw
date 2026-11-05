@@ -74,7 +74,7 @@ import type {
 } from "./types.js";
 import { compareSeverity, maxSeverity } from "./types.js";
 import { patchAwsSdkHttp1ForGuardrail } from "./aws-sdk-http1-for-guardrail.js";
-import { loadSidecarConfig } from "./sidecar-config.js";
+import { loadOpenClawOutageMode, loadSidecarConfig } from "./sidecar-config.js";
 import { isLoopbackHost } from "./listener-proof.js";
 import { createFetchInterceptor } from "./fetch-interceptor.js";
 import { HealthMonitor } from "./health-monitor.js";
@@ -129,18 +129,15 @@ function failClosedVerdict(reason: string): InspectVerdict {
   };
 }
 
-// DEFENSECLAW_TOOL_INSPECT_FAIL_OPEN applies only when no sidecar
-// verdict is available because the request itself failed.
+// Only a classified outage or timeout can use the account's saved mode.
 function unavailableVerdict(reason: string): InspectVerdict {
-  const failOpen =
-    (process.env.DEFENSECLAW_TOOL_INSPECT_FAIL_OPEN || "")
-      .trim()
-      .toLowerCase() === "1";
-  if (failOpen) {
+  if (loadOpenClawOutageMode() === "open") {
+    const warning = `DefenseClaw warning: ${reason}; tool call is running without inspection.`;
+    console.warn(warning);
     return {
       action: "allow",
       severity: "NONE",
-      reason: `${reason} (fail-open opt-in)`,
+      reason: warning,
       mode: "observe",
     };
   }
@@ -273,7 +270,7 @@ export default function (api: DefenseClawPluginHost) {
     // The plugin sends its token only to a loopback listener that proves it
     // is this account's gateway (GAP-0594).
     console.warn(
-      `[defenseclaw] gateway.host ${sidecarConfig.host} is not a loopback address: the plugin sends nothing to it, so tool checks follow the outage mode`,
+      `[defenseclaw] gateway.host ${sidecarConfig.host} is not a loopback address: the plugin sends nothing to it, so tool checks are blocked`,
     );
   }
   const INSPECT_TIMEOUT_MS = sidecarConfig.hiltEnabled
@@ -460,10 +457,15 @@ export default function (api: DefenseClawPluginHost) {
       correlation: { runId: toolCtx?.runId, sessionId },
     });
     if (res.status === 0) {
-      // No verdict is available: the request failed, the listener did not
-      // prove itself, or the body broke off. This follows
-      // DEFENSECLAW_TOOL_INSPECT_FAIL_OPEN.
-      return unavailableVerdict(`sidecar unreachable: ${res.error ?? "no answer"}`);
+      // No verdict is available. Only a gateway that did not answer (nothing
+      // listening, a timeout, or a proven connection that broke off) follows
+      // the saved outage mode. A listener that did not prove it is this
+      // account's gateway, a non-loopback gateway.host and a missing token
+      // stay closed in every tier; nothing was sent to them.
+      const msg = res.error ?? "no answer";
+      return res.outage
+        ? unavailableVerdict(`sidecar unreachable: ${msg}`)
+        : failClosedVerdict(`sidecar request failed: ${msg}`);
     }
     if (res.status < 200 || res.status >= 300) {
       return failClosedVerdict(`sidecar returned ${res.status}`);
@@ -479,6 +481,33 @@ export default function (api: DefenseClawPluginHost) {
       ? verdict
       : failClosedVerdict("sidecar returned invalid verdict");
   }
+
+  const outageWarnings = new Map<string, string>();
+  const outageWarningKey = (toolCallId?: string, sessionKey?: string, toolName?: string): string =>
+    toolCallId ? `call:${toolCallId}` : sessionKey && toolName ? `session:${sessionKey}:${toolName}` : "";
+  const rememberOutageWarning = (
+    event: { toolCallId?: string; toolName: string }, ctx: ToolContext | undefined, verdict: InspectVerdict,
+  ): void => {
+    if (!verdict.reason.startsWith("DefenseClaw warning:")) return;
+    const key = outageWarningKey(event.toolCallId ?? ctx?.toolCallId, ctx?.sessionKey, event.toolName);
+    if (!key) return;
+    if (outageWarnings.size >= 256) outageWarnings.delete(outageWarnings.keys().next().value ?? "");
+    outageWarnings.set(key, verdict.reason);
+  };
+
+  // OpenClaw writes this tool result into the agent transcript. Attach the
+  // outage notice there so the agent and its user can see it with the call.
+  api.on("tool_result_persist", (event, ctx) => {
+    const key = outageWarningKey(event.toolCallId ?? ctx?.toolCallId, ctx?.sessionKey, event.toolName ?? ctx?.toolName);
+    const warning = outageWarnings.get(key);
+    if (!warning) return;
+    outageWarnings.delete(key);
+    const message = event.message;
+    if (!message || typeof message !== "object" || Array.isArray(message)) return;
+    const record = message as Record<string, unknown>;
+    if (record.role !== "toolResult" || !Array.isArray(record.content)) return;
+    return { message: { ...record, content: [...record.content, { type: "text", text: warning }] } };
+  });
 
   api.on("before_tool_call", async (event, ctx) => {
     // Cache the current session/run so subsequent LLM fetch interceptions
@@ -503,6 +532,8 @@ export default function (api: DefenseClawPluginHost) {
         ctx,
       );
 
+      rememberOutageWarning(event, ctx, verdict);
+
       console.log(
         `[defenseclaw] message-tool verdict:${verdict.action} severity:${verdict.severity}`,
       );
@@ -524,6 +555,8 @@ export default function (api: DefenseClawPluginHost) {
       },
       ctx,
     );
+
+    rememberOutageWarning(event, ctx, verdict);
 
     console.log(
       `[defenseclaw] tool:${event.toolName} verdict:${verdict.action} severity:${verdict.severity}`,
