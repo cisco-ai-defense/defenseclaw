@@ -399,6 +399,12 @@ func TestStandaloneTrustRefusesInheritedCreateChild(t *testing.T) {
 	t.Run("secure client accepts", func(t *testing.T) {
 		dir := inheritedCreateChildDirForTest(t)
 		pinTrustProfileForTest(t, false)
+		previousHost, previousPath := SecureClientHostVerified, SecureClientProcessPathVerified
+		t.Cleanup(func() { SecureClientHostVerified, SecureClientProcessPathVerified = previousHost, previousPath })
+		SecureClientHostVerified = func() bool {
+			return ValidateTrustedSecureClientHostDir(dir, "Secure Client installation") == nil
+		}
+		SecureClientProcessPathVerified = func(path string) bool { return strings.EqualFold(path, dir) }
 		if err := ValidateTrustedRuntimeDir(dir, "policy folder"); err != nil {
 			t.Fatalf("Secure Client refused the inherited create-child folder: %v", err)
 		}
@@ -468,6 +474,27 @@ func TestStandaloneTrustRefusesInheritedCreateChild(t *testing.T) {
 			t.Fatal("standalone accepted an inherited create-child entry for the audit store and token folders")
 		}
 	})
+}
+
+func TestTrustedRuntimeDirRequiresManagedProcessForInheritedCreateChild(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		host func() bool
+		path func(string) bool
+	}{
+		{name: "unverified process"},
+		{name: "verified host with OSS process", host: func() bool { return true }, path: func(string) bool { return false }},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			pinTrustProfileForTest(t, false)
+			previousHost, previousPath := SecureClientHostVerified, SecureClientProcessPathVerified
+			t.Cleanup(func() { SecureClientHostVerified, SecureClientProcessPathVerified = previousHost, previousPath })
+			SecureClientHostVerified, SecureClientProcessPathVerified = tc.host, tc.path
+			if err := ValidateTrustedRuntimeDir(inheritedCreateChildDirForTest(t), "policy folder"); err == nil {
+				t.Fatal("ordinary runtime trust accepted an inherited create-child entry outside managed state")
+			}
+		})
+	}
 }
 
 // The process environment cannot turn a per-user Cisco-root directory into

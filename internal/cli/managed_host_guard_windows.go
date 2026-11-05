@@ -71,7 +71,7 @@ func secureClientManagedProcessPath(path string) bool {
 	if err != nil || !secureClientManagedLayoutMatches(roots, executable, path, managed.WindowsCurrentProcessIsGatewayService()) {
 		return false
 	}
-	return managed.ValidateTrustedFilePath(executable, "Secure Client process executable") == nil
+	return managed.ValidateTrustedSecureClientHostFile(executable, "Secure Client process executable") == nil
 }
 
 func secureClientManagedLayoutMatches(roots winpath.EnterpriseRoots, executable, path string, gatewayService bool) bool {
@@ -89,10 +89,10 @@ var secureClientHost = func() bool {
 	return classifySecureClientHost(secureClientClassificationChecks{
 		roots:              winpath.TrustedEnterpriseRoots,
 		deployment:         winpath.InspectEnterpriseDeploymentAt,
-		trustedDir:         managed.ValidateTrustedRuntimeDir,
+		trustedDir:         managed.ValidateTrustedSecureClientHostDir,
 		trustedMarker:      managed.ValidateTrustedInstallMarkerDir,
-		trustedFile:        managed.ValidateTrustedFilePath,
-		trustedTransaction: managed.ValidateTrustedFilePath,
+		trustedFile:        managed.ValidateTrustedSecureClientHostFile,
+		trustedTransaction: managed.ValidateTrustedSecureClientHostFile,
 		serviceImage:       windowsServiceImagePath,
 	})
 }

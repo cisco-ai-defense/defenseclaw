@@ -230,14 +230,13 @@ func otlpWindowsRejectUntrustedReadACEs(path string, dacl *windows.ACL) error {
 
 // otlpWindowsBroadReader returns an ErrCredentialDisclosed error naming the
 // first principal that stands for every local account (Everyone, Users,
-// Authenticated Users, Interactive, Guests, Anonymous) with read-like access
+// Authenticated Users, Interactive, Guests, Anonymous, Local Account) with data-read access
 // to a credential, or nil. It is not permission drift: the value may already
 // be copied, so the gateway drops its cached copy and Ensure rotates it.
 func otlpWindowsBroadReader(path string, dacl *windows.ACL) error {
-	readLike := windows.ACCESS_MASK(
+	dataRead := windows.ACCESS_MASK(
 		windows.GENERIC_ALL |
 			windows.GENERIC_READ |
-			windows.GENERIC_EXECUTE |
 			windows.FILE_READ_DATA,
 	)
 	broad := []windows.WELL_KNOWN_SID_TYPE{
@@ -247,6 +246,7 @@ func otlpWindowsBroadReader(path string, dacl *windows.ACL) error {
 		windows.WinInteractiveSid,
 		windows.WinBuiltinGuestsSid,
 		windows.WinAnonymousSid,
+		windows.WinLocalAccountSid,
 	}
 	for i := uint16(0); dacl != nil && i < dacl.AceCount; i++ {
 		var ace *windows.ACCESS_ALLOWED_ACE
@@ -254,7 +254,7 @@ func otlpWindowsBroadReader(path string, dacl *windows.ACL) error {
 			return fmt.Errorf("inspect Windows ACE %d for %s: %w", i, path, err)
 		}
 		if ace == nil || ace.Header.AceType != windows.ACCESS_ALLOWED_ACE_TYPE ||
-			ace.Header.AceFlags&windows.INHERIT_ONLY_ACE != 0 || ace.Mask&readLike == 0 {
+			ace.Header.AceFlags&windows.INHERIT_ONLY_ACE != 0 || ace.Mask&dataRead == 0 {
 			continue
 		}
 		sid := (*windows.SID)(unsafe.Pointer(&ace.SidStart))

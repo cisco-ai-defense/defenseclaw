@@ -142,6 +142,18 @@ func ValidateTrustedFilePath(path, label string) error {
 	return validateTrustedWindowsFilePath(path, label, nil, windowsTrustLeaf, windowsAncestorScope)
 }
 
+// ValidateTrustedSecureClientHostFile checks an installed file while the
+// Secure Client host classifier is being established. The classifier cannot
+// call the process-and-state-tree verifier that depends on its own result.
+func ValidateTrustedSecureClientHostFile(path, label string) error {
+	if label == "" {
+		label = "Secure Client installation file"
+	}
+	leaf := windowsTrustLeaf
+	leaf.hostClassification = true
+	return validateTrustedWindowsFilePath(path, label, nil, leaf, windowsHostClassificationAncestorScope)
+}
+
 // validateTrustedWindowsFilePath checks a regular file with the leaf scope
 // and every folder above it, the volume root included, with the scope
 // ancestors picks.
@@ -216,6 +228,14 @@ func ValidateTrustedFilePathStrictAncestors(path, label string) error {
 
 func ValidateTrustedRuntimeDir(path, label string) error {
 	return validateTrustedWindowsRuntimeDir(path, label, nil)
+}
+
+// ValidateTrustedSecureClientHostDir checks the installation root before
+// the Secure Client host classifier has established its own result.
+func ValidateTrustedSecureClientHostDir(path, label string) error {
+	leaf := windowsTrustLeaf
+	leaf.hostClassification = true
+	return validateTrustedWindowsRuntimeDirWith(path, label, nil, leaf, windowsHostClassificationAncestorScope)
 }
 
 // ValidateTrustedInstallMarkerDir requires a SYSTEM-owned marker whose only
@@ -665,15 +685,18 @@ func validateTrustedWindowsRuntimeDirWith(
 //   - code marks the named file as executable code: an untrusted writer or
 //     owner is also logged as a MarkerBoundary finding. Only meaningful with
 //     drift, and never set on an ancestor.
+//   - hostClassification keeps the installation checks nonrecursive while
+//     the Secure Client host classifier is being established.
 type windowsTrustScope struct {
-	narrowMask       bool
-	advisory         bool
-	systemAdminOnly  bool
-	ownerSystemOnly  bool
-	strictPrincipals bool
-	drift            bool
-	structureOnly    bool
-	code             bool
+	narrowMask         bool
+	advisory           bool
+	systemAdminOnly    bool
+	ownerSystemOnly    bool
+	strictPrincipals   bool
+	drift              bool
+	structureOnly      bool
+	code               bool
+	hostClassification bool
 }
 
 // acceptsPrincipalDrift reports whether the principal drift acceptances (an
@@ -758,6 +781,12 @@ func windowsAncestorScope(path string) windowsTrustScope {
 		return windowsTrustAncestor
 	}
 	return windowsTrustForeignAncestor
+}
+
+func windowsHostClassificationAncestorScope(path string) windowsTrustScope {
+	scope := windowsAncestorScope(path)
+	scope.hostClassification = true
+	return scope
 }
 
 // osRootAncestor reports whether path is one of the fixed operating
@@ -1035,8 +1064,13 @@ func rejectUntrustedWindowsWriteACEsWithWriter(
 			if acceptAdminEquivalent(scope, path, label, fmt.Sprintf("writer mask 0x%x", uint32(ace.Mask)), sid) {
 				continue
 			}
-			if scope.acceptsPrincipalDrift() && acceptInheritedCreateChild(path, label, ace.Header.AceFlags, ace.Mask, sid) {
-				continue
+			if scope.acceptsPrincipalDrift() {
+				if scope.hostClassification && acceptInheritedCreateChild(path, label, ace.Header.AceFlags, ace.Mask, sid) {
+					continue
+				}
+				if !scope.hostClassification && AcceptInheritedCreateChild(path, label, ace.Header.AceFlags, ace.Mask, sid) {
+					continue
+				}
 			}
 			if scope.code {
 				reportCodeIntegrityFinding(path, label, sidString(sid), fmt.Sprintf("write-like access mask 0x%x", uint32(ace.Mask)))
@@ -1292,10 +1326,9 @@ const windowsCreateChildOnlyMask windows.ACCESS_MASK = 0x001201bf
 
 var acceptedCreateChild sync.Map
 
-// AcceptInheritedCreateChild is acceptInheritedCreateChild for the gateway's
-// own trust walks (audit store, judge-body store, hook token folders), so a
-// folder reset to inherit from C:\ProgramData is judged the same way
-// everywhere. It reports whether the entry is accepted, logging it once.
+// AcceptInheritedCreateChild is the shared inherited-entry decision for
+// ordinary managed trust walks and gateway-owned folders. It reports whether
+// the entry is accepted, logging it once.
 //
 // Those walks run on every profile, so the acceptance requires the verified
 // Secure Client process and its state tree. A per-user data directory under
