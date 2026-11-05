@@ -355,6 +355,75 @@ func TestTetragonSourceHandsTheFileHalfOverAndTakesItBack(t *testing.T) {
 	}
 }
 
+// cowork-1-0-8 GAP-0073: a feed end and a take-back can both start the file
+// half at once. Only one starts and runs; a start while one is starting does
+// nothing; a half whose start ends after Close is closed.
+func TestTetragonSourceRunsAtMostOneFileHalf(t *testing.T) {
+	saved := startFileHalf
+	t.Cleanup(func() { startFileHalf = saved })
+	entered, release := make(chan struct{}, 4), make(chan struct{})
+	var mu sync.Mutex
+	var started []*fakeHalf
+	startFileHalf = func(context.Context, []string) (nativeHalf, error) {
+		entered <- struct{}{}
+		<-release
+		half := newFakeHalf()
+		mu.Lock()
+		started = append(started, half)
+		mu.Unlock()
+		return half, nil
+	}
+
+	source := NewTetragonSource([]string{"/home/dcr-std1"}, TetragonOptions{Mode: "consume"}).(*tetragonSource)
+	done := make(chan struct{})
+	go func() { source.startFiles(context.Background()); close(done) }()
+	<-entered // the first start is inside startFileHalf, outside s.mu
+	var others sync.WaitGroup
+	for range 2 {
+		others.Add(1)
+		go func() { defer others.Done(); source.startFiles(context.Background()) }()
+	}
+	returned := make(chan struct{})
+	go func() { others.Wait(); close(returned) }()
+	select {
+	case <-returned:
+	case <-time.After(200 * time.Millisecond): // they started halves of their own
+	}
+	close(release)
+	<-done
+	others.Wait()
+	source.startFiles(context.Background()) // one runs: nothing to start
+	mu.Lock()
+	count := len(started)
+	mu.Unlock()
+	source.mu.Lock()
+	running := source.files
+	source.mu.Unlock()
+	if count != 1 || running != nativeHalf(started[0]) || started[0].isClosed() {
+		t.Fatalf("started %d halves, running %v, want exactly one, running and open", count, running)
+	}
+	_ = source.Close()
+	if !started[0].isClosed() {
+		t.Fatal("Close left the file half open")
+	}
+
+	// A start that ends after Close closes its half.
+	entered, release = make(chan struct{}, 1), make(chan struct{})
+	late := NewTetragonSource([]string{"/home/dcr-std1"}, TetragonOptions{Mode: "consume"}).(*tetragonSource)
+	finished := make(chan struct{})
+	go func() { late.startFiles(context.Background()); close(finished) }()
+	<-entered
+	_ = late.Close()
+	close(release)
+	<-finished
+	mu.Lock()
+	last := started[len(started)-1]
+	mu.Unlock()
+	if !last.isClosed() {
+		t.Fatal("a file half started after Close was left open")
+	}
+}
+
 // GAP-0060: with no enrolled home (users enrolled only through vendor
 // machine policy) fanotify never starts, so nothing was ever handed over and
 // the coverage blamed CAP_SYS_ADMIN for ever. The observe policy is the file

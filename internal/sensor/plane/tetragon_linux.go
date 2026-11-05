@@ -164,6 +164,9 @@ type tetragonSource struct {
 	// retiredDropped are the buffer drops of native halves since stopped,
 	// kept so the coverage still names them (GAP-0071).
 	retiredDropped int64
+	// filesStarting is a fanotify half being started outside s.mu
+	// (startFiles, GAP-0073).
+	filesStarting bool
 
 	// Loss: rate-limit drops in the stream, and growth of Tetragon's own
 	// loss counters since each session opened (lastLost is the counter at
@@ -360,9 +363,22 @@ func (s *tetragonSource) startFallback(ctx context.Context, reason string) {
 }
 
 // startFiles starts fanotify (at start, and again after any loss signal).
+// At most one file half runs: a feed end and a take-back can both ask for
+// it at once, and the second start replaced the first half without closing
+// it, which then forwarded every file event twice until the source closed
+// (cowork-1-0-8 GAP-0073). A start while one runs or is starting does
+// nothing; a half started after Close is closed.
 func (s *tetragonSource) startFiles(ctx context.Context) {
+	s.mu.Lock()
+	if s.closed || s.files != nil || s.filesStarting {
+		s.mu.Unlock()
+		return
+	}
+	s.filesStarting = true
+	s.mu.Unlock()
 	files, err := startFileHalf(ctx, s.homes)
 	s.mu.Lock()
+	s.filesStarting = false
 	if s.closed {
 		s.mu.Unlock()
 		if files != nil {
@@ -370,7 +386,6 @@ func (s *tetragonSource) startFiles(ctx context.Context) {
 		}
 		return
 	}
-	s.retiredDropped += halfDropped(s.files)
 	s.files, s.filesErr, s.handed = files, err, false
 	s.mu.Unlock()
 	if files != nil {
