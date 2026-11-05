@@ -58,25 +58,25 @@ func TestClaudeCodeSandboxRunFiles(t *testing.T) {
 		{
 			name:      "yolo-block-none",
 			run:       SandboxRunConfig{},
-			files:     []string{ClaudeCodeSandboxManagedMCPPath, ClaudeCodeSandboxRunDropInPath},
+			files:     []string{ClaudeCodeSandboxManagedMCPPath, ClaudeCodeSandboxDropInPath, ClaudeCodeSandboxRunDropInPath},
 			allowlist: `[]`,
 		},
 		{
 			name:      "safe-block-servers",
 			run:       SandboxRunConfig{Safe: true, MCPServers: []SandboxMCPServer{remote, stdio}},
-			files:     []string{ClaudeCodeSandboxManagedMCPPath, ClaudeCodeSandboxRunDropInPath},
+			files:     []string{ClaudeCodeSandboxManagedMCPPath, ClaudeCodeSandboxDropInPath, ClaudeCodeSandboxRunDropInPath},
 			safe:      true,
 			allowlist: `[{"serverCommand":["npx","-y","@modelcontextprotocol/server-github"]},{"serverUrl":"https://mcp.linear.app/mcp"}]`,
 		},
 		{
 			name:  "allow-servers",
 			run:   SandboxRunConfig{AllowProjectMCPServers: true, MCPServers: []SandboxMCPServer{stdio}},
-			files: []string{ClaudeCodeSandboxRunDropInPath, ClaudeCodeSandboxRunMCPServersPath},
+			files: []string{ClaudeCodeSandboxDropInPath, ClaudeCodeSandboxRunDropInPath, ClaudeCodeSandboxRunMCPServersPath},
 		},
 		{
 			name:  "allow-none",
 			run:   SandboxRunConfig{AllowProjectMCPServers: true},
-			files: []string{ClaudeCodeSandboxRunDropInPath},
+			files: []string{ClaudeCodeSandboxDropInPath, ClaudeCodeSandboxRunDropInPath},
 		},
 	}
 	for _, tc := range cases {
@@ -212,7 +212,8 @@ func TestClaudeCodeSandboxRunFilesKeepImageControls(t *testing.T) {
 		t.Fatal(err)
 	}
 	source, err := stageClaudeCodeManagedSettings(map[string][]byte{
-		claudeCodeSandboxDropInName: base, claudeCodeSandboxRunDropInName: runFileMap(t, files)[ClaudeCodeSandboxRunDropInPath],
+		claudeCodeSandboxDropInName:    runFileMap(t, files)[ClaudeCodeSandboxDropInPath],
+		claudeCodeSandboxRunDropInName: runFileMap(t, files)[ClaudeCodeSandboxRunDropInPath],
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -223,12 +224,13 @@ func TestClaudeCodeSandboxRunFilesKeepImageControls(t *testing.T) {
 	if source.settings["skipDangerousModePermissionPrompt"] != false {
 		t.Fatal("safe mode kept the image's pre-accepted bypass prompt")
 	}
-	var baseDoc map[string]interface{}
+	var baseDoc, runHookDoc map[string]interface{}
 	_ = json.Unmarshal(base, &baseDoc)
+	_ = json.Unmarshal(runFileMap(t, files)[ClaudeCodeSandboxDropInPath], &runHookDoc)
 	merged, _ := json.Marshal(source.settings["hooks"])
-	image, _ := json.Marshal(baseDoc["hooks"])
-	if string(merged) != string(image) {
-		t.Fatalf("the run drop-in changed the image's hooks:\n%s\n%s", merged, image)
+	runHooks, _ := json.Marshal(runHookDoc["hooks"])
+	if string(merged) != string(runHooks) || jsonValuesEqual(baseDoc["hooks"], runHookDoc["hooks"]) {
+		t.Fatalf("the run hook replacement did not become the managed hook contract:\n%s\n%s", merged, runHooks)
 	}
 }
 
@@ -416,14 +418,10 @@ func TestCodexSandboxRunFiles(t *testing.T) {
 	}
 }
 
-// rel-1-0-6:GAP-0334: every run drop-in pins the shell variables that stop a
-// shell-form hook command and that the image drop-in leaves open, to "", and
-// the merged managed tier (image drop-in, then run drop-in) holds "" for every
-// name of HookShellEnvPins but SHELLOPTS and BASHOPTS, which neither sets
-// (rel-1-0-6:GAP-0465: bash exports either from the environment, even "", and
-// passes the tool shell's options, onecmd among them, to every script). The image
-// drop-in itself is unchanged, so images built by an earlier release keep
-// their content hash.
+// rel-1-0-6:GAP-0334: the merged managed tier pins the remaining FUNCNEST
+// setting while the per-run replacement supplies the hook launch. SHELLOPTS
+// and BASHOPTS remain absent so Bash tool scripts run normally (GAP-0465).
+// The image drop-in itself keeps its original content hash.
 func TestClaudeCodeSandboxRunFilesPinHookShellEnv(t *testing.T) {
 	if got, want := claudeCodeSandboxRunShellPins(), []string{"FUNCNEST"}; !slices.Equal(got, want) {
 		t.Fatalf("run shell pins = %v, want %v", got, want)
@@ -433,23 +431,15 @@ func TestClaudeCodeSandboxRunFilesPinHookShellEnv(t *testing.T) {
 			t.Fatalf("%s is pinned by the image drop-in too", key)
 		}
 	}
-	rt, err := resolveSandboxTarget("claudecode", claudeRunTarget)
-	if err != nil {
-		t.Fatal(err)
-	}
-	base, err := renderClaudeCodeSandboxDropIn(rt)
-	if err != nil {
-		t.Fatal(err)
-	}
 	for _, run := range []SandboxRunConfig{{}, {Safe: true}, {AllowProjectMCPServers: true}} {
 		files, err := NewClaudeCodeConnector().SandboxRunFiles(claudeRunTarget, run)
 		if err != nil {
 			t.Fatal(err)
 		}
-		dropIn := runFileMap(t, files)[ClaudeCodeSandboxRunDropInPath]
+		runFiles := runFileMap(t, files)
 		source, err := stageClaudeCodeManagedSettings(map[string][]byte{
-			claudeCodeSandboxDropInName:    base,
-			claudeCodeSandboxRunDropInName: dropIn,
+			claudeCodeSandboxDropInName:    runFiles[ClaudeCodeSandboxDropInPath],
+			claudeCodeSandboxRunDropInName: runFiles[ClaudeCodeSandboxRunDropInPath],
 		})
 		if err != nil {
 			t.Fatal(err)

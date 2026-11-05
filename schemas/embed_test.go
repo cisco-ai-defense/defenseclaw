@@ -826,7 +826,6 @@ openshell:
   mcp: {import: true, host_ports: [5432]}
   upstream_telemetry: false
   token_delivery: provider
-  middleware: {enabled: false}
   admin:
     required_pack: balanced
     required_pack_digest: sha256:0000000000000000000000000000000000000000000000000000000000000000

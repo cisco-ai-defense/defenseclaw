@@ -41,7 +41,7 @@ NOT_RESTARTED = "not-restarted"
 def account_binary(data_dir: str | None = None) -> str:
     """The OpenCode V2 this account runs (the discovery probe setup uses), or "".
 
-    Windows keeps the documented command (OpenCode V2 there is Preview),
+    Windows keeps the documented command,
     and OpenCode V1 has no background server.
     """
     if os.name == "nt":

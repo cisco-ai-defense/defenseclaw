@@ -43,14 +43,19 @@ type UntrustedPrincipalError struct {
 
 func (e *UntrustedPrincipalError) Error() string { return e.text }
 
-// ValidateTrustedConfigPath validates config.yaml. Drift on its owner or DACL
-// is repaired first when the caller can (a LocalSystem service or an elevated
-// administrator; never the gateway, whose token cannot re-ACL it), and what
-// survives is accepted and logged by ValidateTrustedPolicyFilePath. Structural
-// failures stay fatal.
+// ValidateTrustedConfigPath validates config.yaml. On Secure Client drift on
+// its owner or DACL is repaired first when the caller can (a LocalSystem
+// service or an elevated administrator; never the gateway, whose token cannot
+// re-ACL it), the strict check runs again, and what survives is accepted and
+// logged by ValidateTrustedPolicyFilePath. On standalone a drifted
+// config.yaml is refused with the strict verdict and never repaired in place
+// (StandaloneRefusesContentDrift, GAP-0561). Structural failures stay fatal.
 func ValidateTrustedConfigPath(path string) error {
 	const label = "managed config"
 	err := ValidateTrustedFilePath(path, label)
+	if err != nil && StandaloneRefusesContentDrift() {
+		return RefuseStandaloneContentDrift(err)
+	}
 	if err == nil || trustStrictAncestors() {
 		return err
 	}
@@ -58,7 +63,7 @@ func ValidateTrustedConfigPath(path string) error {
 	// arbitrary path a caller passed in.
 	if pinned := strings.TrimSpace(os.Getenv(ConfigPathEnv)); pinned != "" &&
 		strings.EqualFold(filepath.Clean(pinned), filepath.Clean(path)) {
-		result, ensureErr := EnsureCanonical(path, ObjectConfigFile, CanonicalOptions{})
+		result, ensureErr := windowsConfigEnsureCanonical(path, ObjectConfigFile, CanonicalOptions{})
 		if ensureErr != nil {
 			return errors.Join(err, ensureErr)
 		}
@@ -69,19 +74,34 @@ func ValidateTrustedConfigPath(path string) error {
 	return ValidateTrustedPolicyFilePath(path, label)
 }
 
+// windowsConfigEnsureCanonical is the config.yaml repair; tests replace it to
+// model a repair that cannot fix the drift.
+var windowsConfigEnsureCanonical = EnsureCanonical
+
 // ValidateTrustedPolicyFilePath validates a managed policy or data file that
 // DefenseClaw reads but a service cannot always repair (config.yaml,
-// targets.yaml, deployment.json). It walks like ValidateTrustedFilePath, but a
-// permission verdict on the file or an ancestor is accepted and logged instead
-// of refusing the file, and an untrusted owner or writer on the file itself is
-// logged once as a MarkerBoundary finding naming the principal. The installer
-// re-stamps the canonical descriptor on its next Install, Upgrade or Repair.
-// Structural failures (missing element, symlink, reparse point, wrong type,
-// non-NTFS mount) stay fatal. Pin TrustStrictAncestorsEnv to make every
-// verdict fatal again.
+// targets.yaml, deployment.json, env_config.json). It runs the strict
+// ValidateTrustedFilePath check, so a caller that repaired the file first
+// gets a fresh verdict.
+//
+// On Secure Client a permission verdict on the file or an ancestor is then
+// accepted and logged instead of refusing the file, and an untrusted owner or
+// writer on the file itself is logged once as a MarkerBoundary finding naming
+// the principal; the installer re-stamps the canonical descriptor on its next
+// Install, Upgrade or Repair. The shared Cisco Secure Client tree is re-ACLed
+// by other installers, which is why that profile tolerates the drift.
+//
+// A standalone process (windowsStandaloneTrustScope) keeps the strict verdict,
+// as every drift-tolerant walk does there (windowsTrustScope.driftTolerated),
+// as before 26.8.4: there DefenseClaw owns the whole tree, and a standard
+// user who gained write access to config.yaml or the guardian manifest could
+// otherwise change the fail mode or drop an account from enforcement
+// (GAP-0561). Structural failures (missing element, symlink, reparse point,
+// wrong type, non-NTFS mount) stay fatal on both profiles. Pin
+// TrustStrictAncestorsEnv to make every verdict fatal again.
 func ValidateTrustedPolicyFilePath(path, label string) error {
 	err := ValidateTrustedFilePath(path, label)
-	if err == nil || trustStrictAncestors() {
+	if err == nil || trustStrictAncestors() || windowsStandaloneTrustScope() {
 		return err
 	}
 	leaf := windowsTrustLeaf.tolerant()
@@ -326,7 +346,9 @@ func ValidateTrustedFilePathTolerant(path, label string) error {
 // MarkerBoundary finding naming the path and principal. The caller keeps
 // running and loading the file; a privileged component re-stamps the ACL and
 // Install, Upgrade and Repair re-copy the binary. Pin TrustStrictAncestorsEnv
-// to make every verdict fatal again.
+// to make every verdict fatal again. A standalone process gets every verdict
+// fatal too (windowsTrustScope.driftTolerated, GAP-0561); no caller repairs
+// an executable before this check, so there is no repaired-content case.
 func ValidateExecutableFilePath(path, label string) error {
 	leaf := windowsTrustLeaf.tolerant()
 	leaf.code = true
@@ -668,14 +690,25 @@ func (scope windowsTrustScope) tolerant() windowsTrustScope {
 	return scope
 }
 
+// driftTolerated reports whether this drift-tolerant scope may accept a
+// permission verdict: the scope is tolerant, strict mode is off, and the
+// process is not on the standalone profile (windowsStandaloneTrustScope).
+// The drift acceptances exist for the Secure Client tree, which other Cisco
+// installers re-ACL; a standalone install owns its whole tree, so there a
+// tolerant walk gives the strict verdict, as before 26.8.4 (GAP-0561).
+func (scope windowsTrustScope) driftTolerated() bool {
+	return scope.drift && !trustStrictAncestors() && !windowsStandaloneTrustScope()
+}
+
 // relaxVerdict is the single exit for a permission verdict on one element.
 // Drift wins over advisory so a tolerant walk tags its warnings with the drift
-// marker; strict mode makes both fall through to the verdict.
+// marker; strict mode, and the standalone profile for drift, make both fall
+// through to the verdict.
 func (scope windowsTrustScope) relaxVerdict(path, label string, verdict error) error {
 	if verdict == nil {
 		return nil
 	}
-	if scope.drift && !trustStrictAncestors() {
+	if scope.driftTolerated() {
 		reportTrustDrift(path, label, verdict.Error())
 		return nil
 	}
@@ -968,7 +1001,7 @@ func rejectUntrustedWindowsWriteACEsWithWriter(
 			verdict := fmt.Errorf(
 				"%s: unsupported allow ACE type 0x%x; refusing managed trust", path, ace.Header.AceType,
 			)
-			if !scope.drift {
+			if !scope.driftTolerated() {
 				return verdict
 			}
 			if err := scope.relaxVerdict(path, label, verdict); err != nil {
@@ -1029,7 +1062,7 @@ func acceptUnreadableDescriptor(scope windowsTrustScope, err error) bool {
 	if !errors.Is(err, windows.ERROR_ACCESS_DENIED) || trustStrictAncestors() || scope.strictPrincipals {
 		return false
 	}
-	return scope.advisory || scope.drift
+	return scope.advisory || scope.driftTolerated()
 }
 
 // acceptAdminEquivalent accepts and logs an owner or writer that is an

@@ -218,17 +218,38 @@ func inspectClaudeShellEnvironment(opts Options, sources []claudeSource, state *
 				}
 			}
 		}
-		if value, ok := claudeEnvValue(source.doc, "SHELLOPTS"); ok {
-			if text, isText := value.(string); !isText || strings.TrimSpace(text) != "" {
-				state.detail("%s sets env SHELLOPTS, which Claude Code passes to Bash tool commands; review shell startup options if scripts stop early (rel-1-0-6:GAP-0465)", source.name)
-			} else {
-				// An empty value is exported by bash, so the options of
-				// Claude Code's shell snapshot (onecmd) reach every script.
-				state.detail("%s sets env SHELLOPTS to \"\", which breaks Bash tool scripts: bash exports it, so the onecmd option of Claude Code's shell snapshot reaches every script the Bash tool starts and each runs its first command only; remove SHELLOPTS from that env block (rel-1-0-6:GAP-0465)", source.name)
-			}
-		}
+		inspectClaudeShellopts(source.name, source.doc, state)
 	}
 	return prefix, prefixSet
+}
+
+// inspectClaudeShellopts reports settings that reach Bash tool scripts. The
+// native managed hook uses exec form and does not read shell options.
+func inspectClaudeShellopts(name string, doc *object, state *State) {
+	value, ok := claudeEnvValue(doc, "SHELLOPTS")
+	if !ok {
+		return
+	}
+	text, isText := value.(string)
+	switch {
+	case isText && strings.TrimSpace(text) == "":
+		// An empty value is exported by bash, so the options of Claude
+		// Code's shell snapshot reach every script.
+		state.detail("%s sets env SHELLOPTS to \"\", which breaks Bash tool scripts: bash exports it, so the onecmd option of Claude Code's shell snapshot reaches every script the Bash tool starts and each runs its first command only; remove SHELLOPTS from that env block (rel-1-0-6:GAP-0465)", name)
+	case isText && claudeShelloptsNoexec(text):
+		state.detail("%s sets env SHELLOPTS with noexec; managed exec-form hooks are unaffected, but Bash tool scripts can inherit that option (rel-1-0-6:GAP-0322)", name)
+	default:
+		state.detail("%s sets env SHELLOPTS, which Claude Code passes to Bash tool commands; review shell startup options if scripts stop early (rel-1-0-6:GAP-0465)", name)
+	}
+}
+
+func claudeShelloptsNoexec(value string) bool {
+	for _, option := range strings.Split(value, ":") {
+		if strings.TrimSpace(option) == "noexec" {
+			return true
+		}
+	}
+	return false
 }
 
 // countClaudeHooks counts DefenseClaw and foreign handlers in a settings
@@ -601,6 +622,9 @@ func inspectClaude(opts Options, policy config.ResolvedConnectorPolicy, state *S
 		}
 	}
 	for _, source := range higher {
+		if opts.goos() != "windows" {
+			inspectClaudeShellopts(source.name, source.doc, state)
+		}
 		hooks, _ := source.doc.get("hooks")
 		_, _, missing := countClaudeHooks(opts, hooks, groups)
 		behavior, _ := source.doc.get("managedSourcesBehavior")

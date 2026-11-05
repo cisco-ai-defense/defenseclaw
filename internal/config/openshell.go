@@ -178,18 +178,17 @@ type OpenShellConfig struct {
 	// in the foreground, as `sandbox run --keep` does for one run. By default
 	// that sandbox is deleted when the run ends and nothing is left in it to
 	// bring back or undo, by the rules of --rm.
-	KeepHeadless      bool                      `mapstructure:"keep_headless"      yaml:"keep_headless,omitempty"`
-	Workdir           OpenShellWorkdirConfig    `mapstructure:"workdir"            yaml:"workdir,omitempty"`
-	Egress            OpenShellEgressConfig     `mapstructure:"egress"             yaml:"egress,omitempty"`
-	Image             OpenShellImageConfig      `mapstructure:"image"              yaml:"image,omitempty"`
-	Approvals         OpenShellApprovalsConfig  `mapstructure:"approvals"          yaml:"approvals,omitempty"`
-	Resources         OpenShellResourcesConfig  `mapstructure:"resources"          yaml:"resources,omitempty"`
-	Harnesses         []string                  `mapstructure:"harnesses"          yaml:"harnesses,omitempty"`
-	Wrappers          []string                  `mapstructure:"wrappers"           yaml:"wrappers,omitempty"`
-	MCP               OpenShellMCPConfig        `mapstructure:"mcp"                yaml:"mcp,omitempty"`
-	UpstreamTelemetry bool                      `mapstructure:"upstream_telemetry" yaml:"upstream_telemetry,omitempty"`
-	TokenDelivery     string                    `mapstructure:"token_delivery"     yaml:"token_delivery,omitempty"`
-	Middleware        OpenShellMiddlewareConfig `mapstructure:"middleware"         yaml:"middleware,omitempty"`
+	KeepHeadless      bool                     `mapstructure:"keep_headless"      yaml:"keep_headless,omitempty"`
+	Workdir           OpenShellWorkdirConfig   `mapstructure:"workdir"            yaml:"workdir,omitempty"`
+	Egress            OpenShellEgressConfig    `mapstructure:"egress"             yaml:"egress,omitempty"`
+	Image             OpenShellImageConfig     `mapstructure:"image"              yaml:"image,omitempty"`
+	Approvals         OpenShellApprovalsConfig `mapstructure:"approvals"          yaml:"approvals,omitempty"`
+	Resources         OpenShellResourcesConfig `mapstructure:"resources"          yaml:"resources,omitempty"`
+	Harnesses         []string                 `mapstructure:"harnesses"          yaml:"harnesses,omitempty"`
+	Wrappers          []string                 `mapstructure:"wrappers"           yaml:"wrappers,omitempty"`
+	MCP               OpenShellMCPConfig       `mapstructure:"mcp"                yaml:"mcp,omitempty"`
+	UpstreamTelemetry bool                     `mapstructure:"upstream_telemetry" yaml:"upstream_telemetry,omitempty"`
+	TokenDelivery     string                   `mapstructure:"token_delivery"     yaml:"token_delivery,omitempty"`
 	// TrustedCABundle names a PEM file of CA certificates sandboxes trust
 	// besides the image's public roots: the root of a TLS-inspecting proxy
 	// that re-signs provider certificates (#1296). Every overlay image
@@ -357,11 +356,6 @@ type OpenShellMCPConfig struct {
 	// HostPorts are host localhost ports the user consented to open for
 	// host-side MCP servers.
 	HostPorts []int `mapstructure:"host_ports" yaml:"host_ports,omitempty"`
-}
-
-// OpenShellMiddlewareConfig is the experimental supervisor-middleware switch.
-type OpenShellMiddlewareConfig struct {
-	Enabled bool `mapstructure:"enabled" yaml:"enabled,omitempty"`
 }
 
 // OpenShellAdminConfig is the administrator's sandbox policy. Every field is

@@ -50,7 +50,7 @@ func TestSandboxPrerequisiteSkipsUntrustedBinaries(t *testing.T) {
 		}
 		return nil
 	}
-	cfg := sandboxConfig(t, "darwin", true, map[string]any{"install": "prerequisite", "version": "0.1.5"})
+	cfg := sandboxConfig(t, "darwin", true, map[string]any{"install": "prerequisite", "version": openshell.SupportedMin})
 	r := h.ensure(cfg)
 	requireOK(t, r)
 	for _, row := range []string{"sandbox openshell cli", "sandbox openshell gateway", "sandbox microvm driver"} {
@@ -64,17 +64,17 @@ func TestSandboxPrerequisiteSkipsUntrustedBinaries(t *testing.T) {
 
 	h.writeExecutables(t, "/usr/local/bin/openshell", "/usr/local/bin/openshell-gateway", "/usr/local/libexec/openshell/openshell-driver-vm")
 	h.runner.replies = map[string]fakeReply{
-		"openshell --version":           {result: CommandResult{Stdout: []byte("openshell 0.1.5\n")}},
-		"openshell-gateway --version":   {result: CommandResult{Stdout: []byte("openshell-gateway 0.1.5\n")}},
-		"openshell-driver-vm --version": {result: CommandResult{Stdout: []byte("openshell-driver-vm 0.1.5\n")}},
+		"openshell --version":           {result: CommandResult{Stdout: []byte("openshell " + openshell.SupportedMin + "\n")}},
+		"openshell-gateway --version":   {result: CommandResult{Stdout: []byte("openshell-gateway " + openshell.SupportedMin + "\n")}},
+		"openshell-driver-vm --version": {result: CommandResult{Stdout: []byte("openshell-driver-vm " + openshell.SupportedMin + "\n")}},
 	}
 	r = h.ensure(cfg)
 	requireOK(t, r)
 	for row, want := range map[string]string{
-		"sandbox openshell cli":     "ok: 0.1.5 (/usr/local/bin/openshell)",
-		"sandbox openshell gateway": "ok: 0.1.5 (/usr/local/bin/openshell-gateway)",
-		"sandbox microvm driver":    "ok: 0.1.5 (/usr/local/libexec/openshell/openshell-driver-vm)",
-		"sandbox openshell release": "ok: openshell, openshell-gateway, openshell-driver-vm are all 0.1.5",
+		"sandbox openshell cli":     "ok: " + openshell.SupportedMin + " (/usr/local/bin/openshell)",
+		"sandbox openshell gateway": "ok: " + openshell.SupportedMin + " (/usr/local/bin/openshell-gateway)",
+		"sandbox microvm driver":    "ok: " + openshell.SupportedMin + " (/usr/local/libexec/openshell/openshell-driver-vm)",
+		"sandbox openshell release": "ok: openshell, openshell-gateway, openshell-driver-vm are all " + openshell.SupportedMin,
 	} {
 		if state, _ := rowState(r, row); !strings.HasPrefix(state, want) {
 			t.Errorf("%s = %q, want %q", row, state, want)
@@ -93,18 +93,18 @@ func TestSandboxPrerequisiteVersions(t *testing.T) {
 		h := newOSHost(t, "darwin")
 		h.writeExecutables(t, "/usr/local/bin/openshell", "/usr/local/bin/openshell-gateway", "/usr/local/libexec/openshell/openshell-driver-vm")
 		h.runner.replies = map[string]fakeReply{
-			"openshell --version":           {result: CommandResult{Stdout: []byte("openshell 0.1.5\n")}},
-			"openshell-gateway --version":   {result: CommandResult{Stdout: []byte("openshell-gateway 0.1.5\n")}},
-			"openshell-driver-vm --version": {result: CommandResult{Stdout: []byte("openshell-driver-vm 0.1.5\n")}},
+			"openshell --version":           {result: CommandResult{Stdout: []byte("openshell " + openshell.SupportedMin + "\n")}},
+			"openshell-gateway --version":   {result: CommandResult{Stdout: []byte("openshell-gateway " + openshell.SupportedMin + "\n")}},
+			"openshell-driver-vm --version": {result: CommandResult{Stdout: []byte("openshell-driver-vm " + openshell.SupportedMin + "\n")}},
 		}
-		r := h.ensure(sandboxConfig(t, "darwin", true, map[string]any{"install": "prerequisite", "version": "0.1.4"}))
+		r := h.ensure(sandboxConfig(t, "darwin", true, map[string]any{"install": "prerequisite", "version": "0.1.7"}))
 		requireOK(t, r)
 		for _, row := range []string{"sandbox openshell cli", "sandbox openshell gateway", "sandbox microvm driver"} {
-			if state, _ := rowState(r, row); !strings.HasPrefix(state, "missing:") || !strings.Contains(state, "0.1.5 is installed, enterprise.openshell.version pins 0.1.4") {
+			if state, _ := rowState(r, row); !strings.HasPrefix(state, "missing:") || !strings.Contains(state, "0.1.6 is installed, enterprise.openshell.version pins 0.1.7") {
 				t.Errorf("%s = %q, want the pin mismatch", row, state)
 			}
 		}
-		requireRefusedReleases(t, h, "0.1.5", "openshell cli", "openshell gateway", "microvm driver")
+		requireRefusedReleases(t, h, openshell.SupportedMin, "openshell cli", "openshell gateway", "microvm driver")
 	})
 	// GAP-0266: an installed release below SupportedMin is recorded with
 	// its version, so the gateway says it is installed and unsupported.

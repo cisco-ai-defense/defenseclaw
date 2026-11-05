@@ -10,6 +10,7 @@ validated first and must hold no cmd.exe metacharacter.
 from __future__ import annotations
 
 import ctypes
+import errno
 import json
 import os
 import re
@@ -346,6 +347,29 @@ _EMPTY_DIR_RD_TRIES = 30
 # leaves a chain of empty folders behind (GAP-2233). About 2 s per try.
 _TREE_RD_TRIES = 15
 _LOCK_CLOCK_SLACK_SECONDS = 0.5
+# The waits of one removal retry loop (_retry). A file removal waits 10 s for
+# its holder to let go. The data folder waits a minute: a folder that a
+# terminal, File Explorer or an agent still has open stays held until that
+# program lets go, and the 10 s wait left the whole data folder behind
+# (cowork-1-0-8 GAP-0058), while the CLI had already told the user which
+# folders were held (held_folders).
+_FILE_RETRY_DELAYS = (0.125,) * 80
+_DATA_RETRY_DELAYS = _FILE_RETRY_DELAYS + (1.0,) * 50
+# The Windows errors of a file or folder another program holds.
+_ERROR_ACCESS_DENIED = 5
+_ERROR_SHARING_VIOLATION = 32
+_ERROR_LOCK_VIOLATION = 33
+_ERROR_DIR_NOT_EMPTY = 145
+# held_folders: open a folder for delete, as rmdir does, with full sharing.
+_DELETE = 0x00010000
+_FILE_SHARE_ALL = 0x00000007
+_OPEN_EXISTING = 3
+_FILE_FLAG_BACKUP_SEMANTICS = 0x02000000
+_FILE_FLAG_OPEN_REPARSE_POINT = 0x00200000
+_INVALID_HANDLE_VALUE = ctypes.c_void_p(-1).value
+_HELD_FOLDERS_MAX_SCANNED = 2000
+# denied_entries: at most this many files and folders are opened.
+_DENIED_ENTRIES_MAX_PROBED = 20000
 
 
 class _SupersededError(Exception):
@@ -513,9 +537,9 @@ def _contains(parent: str, child: str) -> bool:
         return False
 
 
-def _retry(action, description: str) -> None:
+def _retry(action, description: str, delays: tuple[float, ...] = _FILE_RETRY_DELAYS) -> None:
     last_error: Exception | None = None
-    for _ in range(80):
+    for delay in delays:
         try:
             action()
             return
@@ -523,13 +547,162 @@ def _retry(action, description: str) -> None:
             return
         except (OSError, ValueError) as exc:
             last_error = exc
-            time.sleep(0.125)
-    raise OSError(f"{description} failed after waiting for file release: {last_error}") from last_error
+            time.sleep(delay)
+    waited = round(sum(delays))
+    raise OSError(f"{description} failed after waiting {waited} s for file release: {last_error}") from last_error
+
+
+def _held_reason(error: BaseException | None) -> tuple[str, str]:
+    """Say why a path could not go, and what to do, from its OSError (GAP-0058).
+
+    Every error that named a path read "is in use by another program", also
+    an access denial, so the result could send the user to close a program
+    that did not exist. The Windows error decides; an error without one (a
+    test double, or not from Windows) keeps the in-use wording.
+    """
+    winerror = getattr(error, "winerror", None)
+    code = getattr(error, "errno", None)
+    if winerror in (_ERROR_SHARING_VIOLATION, _ERROR_LOCK_VIOLATION) or (
+        winerror is None and code in (errno.EACCES, errno.EPERM, errno.EBUSY)
+    ):
+        return "is in use by another program", "Close that program"
+    if winerror == _ERROR_DIR_NOT_EMPTY or (winerror is None and code == errno.ENOTEMPTY):
+        return "is not empty: a program is still writing in it", "Close that program"
+    if winerror == _ERROR_ACCESS_DENIED:
+        return (
+            "cannot be removed by your account (Windows denied access)",
+            "Remove it from an elevated prompt, or give your account full control of it",
+        )
+    reason = getattr(error, "strerror", None) or str(error)
+    return f"could not be removed ({reason})", "Fix that"
+
+
+def _walk_folders(root: str, skip: set[str] | None):
+    """Yield (folder, entries, error) for root and the folders under it.
+
+    entries is the folder's listing, or None with the OSError that refused
+    it. Reparse points are not followed, the folders in skip (normalized) and
+    everything below them are not visited, and the walk stops after a bounded
+    number of folders.
+    """
+    skip = {_norm(path) for path in (skip or set())}
+    pending = [root]
+    scanned = 0
+    while pending and scanned < _HELD_FOLDERS_MAX_SCANNED:
+        folder = pending.pop()
+        if _norm(folder) in skip or _is_reparse(folder):
+            continue
+        scanned += 1
+        try:
+            with os.scandir(folder) as listing:
+                entries = list(listing)
+        except OSError as error:
+            yield folder, None, error
+            continue
+        yield folder, entries, None
+        pending.extend(entry.path for entry in entries if entry.is_dir(follow_symlinks=False))
+
+
+def held_folders(root: str, skip: set[str] | None = None, *, opener=None) -> list[str]:
+    """The folders under root (root included) another program holds open.
+
+    A folder that is some program's current folder, or that a program opened
+    without delete sharing, cannot be removed or renamed until that program
+    lets go (cowork-1-0-8 GAP-0058: hooks\\.outage-warnings stopped the deferred
+    cleanup, and nothing said so at the console). The check opens each folder
+    for delete with full sharing, as rmdir does, and closes it at once: it
+    changes nothing. Off Windows nothing is held.
+    """
+    if opener is None:
+        if sys.platform != "win32":
+            return []
+        opener = _folder_held
+    return sorted(folder for folder, _entries, _error in _walk_folders(root, skip) if opener(folder))
+
+
+def denied_entries(root: str, skip: set[str] | None = None, *, prober=None) -> list[str]:
+    """The files and folders under root this account cannot remove (GAP-0063).
+
+    An elevated run (Claude Desktop runs elevated as the built-in
+    Administrator, and runs the hooks) left hooks\\.outage-warnings owned by
+    Administrators with only SYSTEM and OWNER RIGHTS in its DACL. A token
+    without elevation can neither list nor remove such a folder, so the
+    deferred cleanup failed after the CLI had exited and the data folder
+    stayed. Windows lets nobody but an administrator take such a file over,
+    so the CLI says so before it exits. A folder this account cannot list is
+    reported as a whole; every other file and folder is opened for delete
+    with full sharing, as removal does, and closed at once: nothing changes.
+    The folders in skip and what is below them are not checked; the walk is
+    bounded. Off Windows nothing is denied.
+    """
+    if prober is None:
+        if sys.platform != "win32":
+            return []
+        prober = _delete_denied
+    skipped = {_norm(path) for path in (skip or set())}
+    denied: list[str] = []
+    probed = 0
+    for folder, entries, error in _walk_folders(root, skip):
+        if entries is None:
+            if getattr(error, "winerror", None) == _ERROR_ACCESS_DENIED or isinstance(error, PermissionError):
+                denied.append(folder)
+            continue
+        for entry in entries:
+            if _norm(entry.path) in skipped:
+                continue
+            if probed >= _DENIED_ENTRIES_MAX_PROBED:
+                return sorted(denied)
+            probed += 1
+            # A folder that can be listed is checked on its own visit.
+            if not entry.is_dir(follow_symlinks=False) and prober(entry.path):
+                denied.append(entry.path)
+    return sorted(denied)
+
+
+def _open_for_delete_error(path: str) -> int:
+    """Open path for delete with full sharing and close it; 0 or the Windows error."""
+    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    kernel32.CreateFileW.argtypes = (
+        wintypes.LPCWSTR,
+        wintypes.DWORD,
+        wintypes.DWORD,
+        wintypes.LPVOID,
+        wintypes.DWORD,
+        wintypes.DWORD,
+        wintypes.HANDLE,
+    )
+    kernel32.CreateFileW.restype = wintypes.HANDLE
+    kernel32.CloseHandle.argtypes = (wintypes.HANDLE,)
+    kernel32.CloseHandle.restype = wintypes.BOOL
+    handle = kernel32.CreateFileW(
+        path,
+        _DELETE,
+        _FILE_SHARE_ALL,
+        None,
+        _OPEN_EXISTING,
+        _FILE_FLAG_BACKUP_SEMANTICS | _FILE_FLAG_OPEN_REPARSE_POINT,
+        None,
+    )
+    if handle is None or handle == _INVALID_HANDLE_VALUE:
+        return ctypes.get_last_error()
+    kernel32.CloseHandle(handle)
+    return 0
+
+
+def _folder_held(path: str) -> bool:
+    """Whether another program holds the folder open without delete sharing."""
+    return _open_for_delete_error(path) == _ERROR_SHARING_VIOLATION
+
+
+def _delete_denied(path: str) -> bool:
+    """Whether Windows refuses this account the right to delete path."""
+    return _open_for_delete_error(path) == _ERROR_ACCESS_DENIED
 
 
 def _data_left_detail(plan: dict[str, object], data_dir: str, error: OSError) -> str:
     """Say what is left of a data folder that could not go and what to do (GAP-2055)."""
-    held = getattr(error.__cause__, "filename", "") or ""
+    cause = error.__cause__
+    held = getattr(cause, "filename", "") or ""
     shim = os.path.join(str(plan["install_root"]), "defenseclaw.cmd")
     flags = " --binaries" if plan.get("remove_empty_install_root") else ""
     # PowerShell (the Windows Terminal default) needs the & call operator
@@ -540,9 +713,10 @@ def _data_left_detail(plan: dict[str, object], data_dir: str, error: OSError) ->
         else "remove it by hand"
     )
     if held:
-        detail = f"could not remove {data_dir}: {held} is in use by another program. Close that program, then {rerun}."
+        reason, remedy = _held_reason(cause)
+        detail = f"could not remove {data_dir}: {held} {reason}. {remedy}, then {rerun}."
     else:
-        detail = f"could not remove {data_dir}: {error.__cause__ or error}. To finish, {rerun}."
+        detail = f"could not remove {data_dir}: {cause or error}. To finish, {rerun}."
     try:
         left = sorted(os.listdir(data_dir))
     except OSError:
@@ -646,7 +820,7 @@ def main() -> int:
             # Data first: if it cannot go, the launchers stay, so the
             # uninstall can run again (GAP-2055).
             try:
-                _retry(remove_data, f"remove {data_dir}")
+                _retry(remove_data, f"remove {data_dir}", _DATA_RETRY_DELAYS)
             except OSError as exc:
                 raise OSError(_data_left_detail(plan, data_dir, exc)) from exc
         # The data dir is gone (or only the helper's .uv is left in it), so

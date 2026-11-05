@@ -781,6 +781,29 @@ def run_first_run(options: FirstRunOptions) -> FirstRunReport:
         preserved_trusted_prefixes = tuple(preserved)
         cfg.ai_discovery.trusted_binary_prefixes = list(preserved_trusted_prefixes)
 
+    if was_config_absent:
+        # Files a removed managed (enterprise) install left in the data
+        # folder are moved aside, never read or restored, before the
+        # rollback point is taken (cowork-1-0-8 GAP-0045).
+        from defenseclaw import managed_leftovers
+
+        try:
+            set_aside = managed_leftovers.set_aside_managed_leftovers(cfg.data_dir)
+        except OSError as exc:
+            setup.append(StepResult("Managed leftovers", "fail", str(exc), "defenseclaw init"))
+            return FirstRunReport(
+                status="needs_attention",
+                config_file=str(cfg_mod.config_path()),
+                data_dir=cfg.data_dir,
+                connector=connector,
+                profile=profile,
+                setup=setup,
+                next_commands=["defenseclaw init"],
+                connector_mode_warnings=connector_mode_warnings,
+            )
+        if set_aside is not None:
+            setup.append(StepResult("Managed leftovers", "pass", set_aside.detail(cfg.data_dir)))
+
     try:
         setup_snapshot = _capture_setup_config_snapshot(cfg)
     except OSError as exc:
@@ -1368,6 +1391,14 @@ def _first_run_setup_refusal(connector: str, data_dir, rerun: str = "defenseclaw
     it is left out instead of downgraded to observe. A version that is only
     unverified (not probed, or outside a trusted prefix) still gets observe.
     *rerun* is the command the refusal names for after the upgrade.
+
+    The probe publishes the version it read to the discovery cache, as setup's
+    own version check does (cowork-1-0-8 GAP-0033). The default connector is
+    picked from a scan that ran before config.yaml named it, so that scan did
+    not run the agent's CLI and cached it unversioned. In observe nothing else
+    probes it, so the gateway started on that cache with an unversioned hook
+    contract and the first doctor warned that the version was not observed,
+    until `agent discover --refresh`.
     """
     from defenseclaw import envvars
     from defenseclaw.agent_selection import codex_setup_version_problem
@@ -1375,6 +1406,7 @@ def _first_run_setup_refusal(connector: str, data_dir, rerun: str = "defenseclaw
         _CONNECTOR_META,
         _connector_contract_upgrade_guidance,
         _no_hook_contract_detail,
+        _version_scan_persists,
     )
     from defenseclaw.connector_contracts import STATUS_UNKNOWN, resolve_connector_contract
 
@@ -1386,7 +1418,7 @@ def _first_run_setup_refusal(connector: str, data_dir, rerun: str = "defenseclaw
         return ""
     try:
         discovery = agent_discovery.discover_with_probes(
-            [key], use_cache=False, refresh=True, data_dir=data_dir, persist_cache=False
+            [key], use_cache=False, refresh=True, data_dir=data_dir, persist_cache=_version_scan_persists(key)
         )
     except Exception:  # noqa: BLE001 - setup continues in observe without discovery too
         return ""

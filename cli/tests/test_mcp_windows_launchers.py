@@ -24,6 +24,8 @@ from defenseclaw.config import MCPScannerConfig, MCPServerEntry
 from defenseclaw.inventory import agent_discovery
 from defenseclaw.scanner import mcp
 
+from tests.os_view import os_view
+
 FIXTURES = Path(__file__).parent / "fixtures" / "mcp_launchers"
 PYTHON_FIXTURE = FIXTURES / "python" / "defenseclaw_mcp_launcher_fixture.py"
 HOST_LOCALAPPDATA = os.environ.get("LOCALAPPDATA", "")
@@ -225,7 +227,7 @@ def test_failed_start_reads_only_bounded_stderr_tail(capsys: pytest.CaptureFixtu
     ["npx.bat", "npx.ps1", r"C:\tools\npx", "node"],
 )
 def test_unsupported_npx_spellings_remain_outside_allowlist(command: str) -> None:
-    with patch.object(mcp.os, "name", "nt"):
+    with patch.object(mcp, "os", os_view("nt")):
         error = mcp._stdio_scan_command_error(command, ["package"])
         # GAP-0385: npx.cmd and uvx.exe name the same launchers on Windows
         # and go through the same trusted-path resolution as npx and uvx.
@@ -951,7 +953,7 @@ def test_windows_scan_preserves_cancellation() -> None:
         raise asyncio.CancelledError
 
     with (
-        patch.object(mcp.os, "name", "nt"),
+        patch.object(mcp, "os", os_view("nt")),
         patch.object(mcp, "_windows_stdio_launch_plan", return_value=plan),
         patch.object(mcp, "_scan_windows_stdio_tools", cancel),
         pytest.raises(asyncio.CancelledError),
@@ -1099,7 +1101,7 @@ def test_non_windows_local_scan_preserves_existing_scanner_config_path(
             return []
 
     wrapper = mcp.MCPScannerWrapper(MCPScannerConfig(analyzers="yara"))
-    monkeypatch.setattr(mcp.os, "name", "posix")
+    monkeypatch.setattr(mcp, "os", os_view("posix"))
     result = wrapper._scan_local(
         FakeScanner(),
         MCPServerEntry(name="fixture", command="npx", args=["package"], env={}),

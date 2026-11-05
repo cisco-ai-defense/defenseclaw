@@ -136,7 +136,7 @@ func launcherTestRoot(ran *[]string) *cobra.Command {
 
 func TestLauncherRefusesEveryCommandThatIsNotSandbox(t *testing.T) {
 	for _, args := range [][]string{
-		{"status"}, {"setup", "gateway"}, {"enterprise", "linux", "status"}, {"start"},
+		{"policy", "explain"}, {"setup", "gateway"}, {"enterprise", "linux", "status"}, {"start"},
 		{"sandboxes"}, {"--bogus"}, {"-v"}, {"--version-json"}, {"unknown-command"},
 	} {
 		var ran []string
@@ -154,14 +154,14 @@ func TestLauncherRefusesEveryCommandThatIsNotSandbox(t *testing.T) {
 			t.Errorf("%v: ran %v and printed %q before refusing", args, ran, stdout.String())
 		}
 	}
-	const want = "This computer is managed; use `defenseclaw sandbox status` for your read-only status and `defenseclaw sandbox policy explain` for your policy. Other commands require an administrator."
+	const want = "This computer is managed; use `defenseclaw status` for your protection state, `defenseclaw sandbox status` for your sandboxes and `defenseclaw sandbox policy explain` for your policy. Other commands require an administrator."
 	if launcherRefusal != want {
 		t.Fatalf("refusal text = %q, want %q", launcherRefusal, want)
 	}
 }
 
-func TestLauncherStatusAndTUIPointToTheManagedDailyView(t *testing.T) {
-	for _, name := range []string{"status", "tui"} {
+func TestLauncherTUIPointsToTheManagedDailyView(t *testing.T) {
+	for _, name := range []string{"tui"} {
 		t.Run(name, func(t *testing.T) {
 			var ran []string
 			root := launcherTestRoot(&ran)
@@ -201,11 +201,12 @@ func TestLauncherHelpShowsOnlySandbox(t *testing.T) {
 				t.Errorf("%v: help mentions %q:\n%s", args, hidden, out)
 			}
 		}
-		for _, line := range strings.Split(out, "\n") {
-			if line == "  status" || strings.HasPrefix(line, "  status ") || strings.HasPrefix(line, "  status\t") ||
-				line == "  defenseclaw status" || strings.HasPrefix(line, "  defenseclaw status ") {
-				t.Errorf("%v: help offers the administrator-only status command:\n%s", args, out)
-			}
+		// `status` is the user's own protection state (cowork-1-0-8
+		// GAP-0053), not the administrator's status. Windows has no
+		// launcher, so it has no launcher status command
+		// (own_status_windows.go).
+		if runtime.GOOS != "windows" && (!strings.Contains(out, "  defenseclaw status ") || !strings.Contains(out, "Show whether DefenseClaw protects your Claude Code and Cowork sessions")) {
+			t.Errorf("%v: help does not offer the user's own status:\n%s", args, out)
 		}
 		if len(ran) != 0 {
 			t.Errorf("%v: ran %v", args, ran)
@@ -225,8 +226,13 @@ func TestPrepareLauncherRootKeepsOnlyTheSandboxTree(t *testing.T) {
 			names = append(names, command.Name())
 		}
 	}
-	if !reflect.DeepEqual(names, []string{"sandbox"}) {
-		t.Fatalf("commands = %v, want [sandbox]", names)
+	want := []string{"sandbox", "status"}
+	if runtime.GOOS == "windows" {
+		// Windows has no launcher and no launcher status command.
+		want = []string{"sandbox"}
+	}
+	if !reflect.DeepEqual(names, want) {
+		t.Fatalf("commands = %v, want %v", names, want)
 	}
 	if root.Use != "defenseclaw" {
 		t.Fatalf("Use = %q", root.Use)

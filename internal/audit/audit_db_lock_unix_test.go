@@ -114,7 +114,7 @@ func TestJudgeBodySQLiteRetainsLocksUntilClose(t *testing.T) {
 	assertAuditDBUnlockedByPeerProcess(t, path)
 }
 
-// A timed-out startup check on a large store can drop the pool's only
+// A timed-out startup check on a large store can drop every SQLite
 // connection. SQLite then deletes -wal and -shm and recreates them on the next
 // open; that must not stop the store, while a hard-linked replacement still
 // must.
@@ -140,8 +140,14 @@ func TestAuditStoreAcceptsSQLiteSidecarsRecreatedAfterLastClose(t *testing.T) {
 		t.Fatalf("stat WAL after open: %v", err)
 	}
 	dropPool := func() {
+		if store.readDB != nil {
+			store.readDB.SetMaxIdleConns(0)
+		}
 		store.db.SetMaxIdleConns(0)
 		store.db.SetMaxIdleConns(1)
+		if store.readDB != nil {
+			store.readDB.SetMaxIdleConns(auditReadPoolSize)
+		}
 		if _, err := os.Lstat(path + "-wal"); !os.IsNotExist(err) {
 			t.Fatalf("SQLite kept the WAL after its last connection closed: %v", err)
 		}
@@ -149,6 +155,9 @@ func TestAuditStoreAcceptsSQLiteSidecarsRecreatedAfterLastClose(t *testing.T) {
 	dropPool()
 	if err := store.Init(); err != nil {
 		t.Fatalf("Init after SQLite recreated its sidecars: %v", err)
+	}
+	if store.readDB == nil || store.readDB.Stats().Idle == 0 {
+		t.Fatal("read pool has no idle connection after Init")
 	}
 	recreated, err := os.Stat(path + "-wal")
 	if err != nil || os.SameFile(original, recreated) {

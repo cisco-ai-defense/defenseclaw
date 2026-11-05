@@ -73,6 +73,14 @@ func (m *TargetMemo) ActionCommandDecisionInShell(command, cwd, home string, fac
 }
 
 func actionTargetDecision(command, cwd, home string, dialect actionfacts.Dialect, posixShell bool, facts map[string]string, memo *TargetMemo) string {
+	if safe, protected := noDereferenceTouchStatus(command, cwd, home); protected {
+		return "protected-target"
+	} else if safe {
+		return ""
+	}
+	if actionStartupConditionalAliasRedirect(command) {
+		return "protected-target"
+	}
 	// A single quoted print piped to the named env/cat display has no
 	// writable operand. Prove its full shape before the target scans: an
 	// extra stage, redirect or explicit executable must take the normal
@@ -178,6 +186,9 @@ func actionConcreteProtectedWriteOnWithOperands(command, cwd, home string, windo
 	if command == "" || home == "" || actionWindowsHome(home) && !windowsHome || !filepath.IsAbs(cwd) {
 		return false
 	}
+	if NoDereferenceTouchSafe(command, cwd, home) {
+		return false
+	}
 	protected := memo.protectedFiles(home)
 	ssh := filepath.Join(home, ".ssh")
 	var file *syntax.File
@@ -247,12 +258,28 @@ func actionConcreteProtectedWriteOnWithOperands(command, cwd, home string, windo
 		patches, _ := ApplyPatchWriteTargets("Bash", nil, command, cwd, home)
 		writes = append(writes, patches...)
 	}
-	writes = append(writes, touchBraceWriteOperands(command, home)...)
+	if parsed {
+		writes = append(writes, touchBraceWriteOperands(command, home, file)...)
+	}
 	msys := func(value string) string {
 		if windowsHome && runtime.GOOS == "windows" {
 			return actionMSYSDrivePath(value) // Git Bash /c/... (GAP-0781 RV8-1)
 		}
 		return value
+	}
+	// One plain touch call with a single fixed brace operand has no other
+	// write or directory step. The batch proof covered every expanded name.
+	if parsed && len(file.Stmts) == 1 {
+		stmt := file.Stmts[0]
+		if call, ok := stmt.Cmd.(*syntax.CallExpr); ok && !stmt.Background && !stmt.Negated &&
+			len(stmt.Redirs) == 0 && len(call.Assigns) == 0 && len(call.Args) == 2 &&
+			actionWordHasBraceText(call.Args[1]) {
+			if program, fixed := StaticWord(call.Args[0], home); fixed &&
+				(programBase(program) == "touch" || programBase(program) == "gtouch") &&
+				actionMissingSimpleTargets(writes, cwd, protected, ssh, memo) {
+				return false
+			}
+		}
 	}
 	// The new name of a disk link to the keys file that the command moves
 	// does not exist on the disk yet (rel-1-0-6:GAP-0045), nor does the

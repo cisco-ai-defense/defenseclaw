@@ -1337,10 +1337,20 @@ func claudeCodeHandlerTargetsCurrentRuntime(handler map[string]interface{}, opts
 		return codexValueMatches(args, expectedArgs)
 	}
 	command, _ := handler["command"].(string)
+	if opts.DataDir == SandboxLibDir {
+		sandboxCommand, sandboxArgs := claudeCodeSandboxHookInvocation()
+		if command == sandboxCommand && codexValueMatches(handler["args"], sandboxArgs) {
+			return true
+		}
+	}
 	expected := posixHookCommandWord(hookInvocationCommand(
 		"claudecode",
 		filepath.ToSlash(filepath.Join(opts.DataDir, "hooks", "claude-code-hook.sh")),
 	))
+	if native := claudeCodePerUserNativeHook(opts); native != "" {
+		registered, args := claudeCodeHookInvocation(opts, filepath.Join(opts.DataDir, "hooks", "claude-code-hook.sh"))
+		return command == registered && codexValueMatches(handler["args"], args)
+	}
 	return claudeCodeUnguardedHookCommand(command) == expected
 }
 
@@ -1357,6 +1367,20 @@ func claudeCodeHookInvocation(opts SetupOpts, hookScript string) (string, []stri
 		}
 		return claudeCodeWindowsHookInvocation(opts, executable)
 	}
+	if native := claudeCodePerUserNativeHook(opts); native != "" {
+		if guard := claudeCodePerUserNativeGuard(native); guard != "" {
+			args := []string{"guard-user-hook", native, "hook", "--connector", "claudecode", "--hook-home", opts.DataDir}
+			if opts.APIAddr != "" {
+				args = append(args, "--api-addr", opts.APIAddr)
+			}
+			return guard, args
+		}
+		command := posixHookCommandWord(native) + " hook --connector claudecode --hook-home " + posixHookCommandWord(opts.DataDir)
+		if opts.APIAddr != "" {
+			command += " --api-addr " + posixHookCommandWord(opts.APIAddr)
+		}
+		return claudeCodeMissingHookGuard(command), nil
+	}
 	command := posixHookCommandWord(hookCommand)
 	if shellHookSecureClientProfile(opts) {
 		return command, nil
@@ -1365,6 +1389,120 @@ func claudeCodeHookInvocation(opts SetupOpts, hookScript string) (string, []stri
 		return claudeCodeMissingHookGuardWith(command, claudeCodeManagedMissingHookGuardMessage), nil
 	}
 	return claudeCodeMissingHookGuard(command), nil
+}
+
+func claudeCodePerUserNativeGuard(native string) string {
+	guard := filepath.Join(filepath.Dir(native), "defenseclaw-hook-post")
+	info, err := os.Lstat(guard)
+	if err != nil || !info.Mode().IsRegular() || info.Mode()&0o111 == 0 || info.Mode().Perm()&0o022 != 0 {
+		return ""
+	}
+	return guard
+}
+
+func claudeCodePerUserGuardTarget(hook map[string]interface{}, hooksDir string) bool {
+	if runtime.GOOS == "windows" || filepath.Base(hooksDir) != "hooks" {
+		return false
+	}
+	home := filepath.Dir(hooksDir)
+	if filepath.Base(home) != ".defenseclaw" {
+		return false
+	}
+	account := filepath.Dir(home)
+	guard := filepath.Join(account, ".local", "bin", "defenseclaw-hook-post")
+	native := filepath.Join(account, ".local", "bin", "defenseclaw-hook-user")
+	command, _ := hook["command"].(string)
+	args, ok := claudeCodeNativeExecArguments(hook)
+	if !ok || command != guard || (len(args) != 7 && len(args) != 9) {
+		return false
+	}
+	want := []string{"guard-user-hook", native, "hook", "--connector", "claudecode", "--hook-home", home}
+	for i, value := range want {
+		if args[i] != value {
+			return false
+		}
+	}
+	return len(args) == 7 || (args[7] == "--api-addr" &&
+		claudeCodeLoopbackGatewayEndpoint("http://"+args[8]))
+}
+
+// claudeCodePerUserFallbackTarget recognizes the companion native handler
+// that serves a call when the registered guard is unavailable.
+func claudeCodePerUserFallbackTarget(hook map[string]interface{}, hooksDir string) bool {
+	if runtime.GOOS == "windows" || filepath.Base(hooksDir) != "hooks" {
+		return false
+	}
+	home := filepath.Dir(hooksDir)
+	if filepath.Base(home) != ".defenseclaw" {
+		return false
+	}
+	account := filepath.Dir(home)
+	native := filepath.Join(account, ".local", "bin", "defenseclaw-hook-user")
+	guard := filepath.Join(account, ".local", "bin", "defenseclaw-hook-post")
+	command, _ := hook["command"].(string)
+	args, ok := claudeCodeNativeExecArguments(hook)
+	if !ok || command != native || (len(args) != 7 && len(args) != 9) {
+		return false
+	}
+	want := []string{"fallback-guard-user-hook", guard, "hook", "--connector", "claudecode", "--hook-home", home}
+	for i, value := range want {
+		if args[i] != value {
+			return false
+		}
+	}
+	return len(args) == 7 || (args[7] == "--api-addr" &&
+		claudeCodeLoopbackGatewayEndpoint("http://"+args[8]))
+}
+
+// claudeCodePerUserNativeHook selects the installed native launcher only for
+// per-user Linux hooks in the account's default data directory. macOS keeps
+// the shell hook until its startup path is measured (GAP-0559). A separate
+// data root keeps the shell's two-home install-lock checks. Managed and
+// Secure Client registrations keep their existing transport. Source installs
+// without this binary keep the script.
+func claudeCodePerUserNativeHook(opts SetupOpts) string {
+	if runtime.GOOS != "linux" || opts.ManagedEnterprise || opts.SecureClientHookDelivery ||
+		!filepath.IsAbs(opts.DataDir) || filepath.Clean(opts.DataDir) != opts.DataDir ||
+		opts.DataDir != filepath.Join(userHomeDir(), ".defenseclaw") ||
+		strings.ContainsAny(opts.DataDir, "\x00\r\n") ||
+		(opts.APIAddr != "" && !claudeCodeLoopbackGatewayEndpoint("http://"+opts.APIAddr)) {
+		return ""
+	}
+	dataDirInfo, err := os.Lstat(opts.DataDir)
+	if err != nil || !dataDirInfo.IsDir() {
+		return ""
+	}
+	hooksDir := filepath.Join(opts.DataDir, "hooks")
+	hooksInfo, err := os.Lstat(hooksDir)
+	if err != nil || !hooksInfo.IsDir() {
+		return ""
+	}
+	record := filepath.Join(hooksDir, ".gateway-helper")
+	recordInfo, err := os.Lstat(record)
+	if err != nil || !recordInfo.Mode().IsRegular() || recordInfo.Size() > 4097 ||
+		recordInfo.Mode().Perm()&0o022 != 0 {
+		return ""
+	}
+	data, err := os.ReadFile(record)
+	if err != nil || len(data) > 4097 {
+		return ""
+	}
+	gateway := strings.TrimSuffix(string(data), "\n")
+	if !filepath.IsAbs(gateway) || filepath.Clean(gateway) != gateway ||
+		strings.ContainsAny(gateway, "\x00\r\n") || filepath.Base(gateway) != "defenseclaw-gateway" ||
+		filepath.Base(filepath.Dir(gateway)) != "bin" ||
+		filepath.Base(filepath.Dir(filepath.Dir(gateway))) != ".local" {
+		return ""
+	}
+	executable := filepath.Join(filepath.Dir(gateway), "defenseclaw-hook-user")
+	if override := strings.TrimSpace(opts.HookExecutable); override != "" && override != executable {
+		return ""
+	}
+	info, err := os.Lstat(executable)
+	if err != nil || !info.Mode().IsRegular() || info.Mode()&0o111 == 0 || info.Mode().Perm()&0o022 != 0 {
+		return ""
+	}
+	return executable
 }
 
 // claudeCodeMissingHookGuardSeparator starts the clause that
@@ -1547,6 +1685,13 @@ func appendClaudeCodeHookMatrixForSetup(
 func appendClaudeCodeHookGroups(
 	hooks map[string]interface{}, hookCommand string, hookArgs []string, groups []claudeCodeHookGroup,
 ) {
+	fallback := false
+	if len(hookArgs) == 7 || len(hookArgs) == 9 {
+		fallback = claudeCodePerUserGuardTarget(
+			map[string]interface{}{"command": hookCommand, "args": hookArgs},
+			filepath.Join(hookArgs[6], "hooks"),
+		)
+	}
 	for _, group := range groups {
 		command, args := claudeCodeHandlerInvocation(group.eventType, hookCommand, hookArgs)
 		handler := map[string]interface{}{
@@ -1560,7 +1705,16 @@ func appendClaudeCodeHookGroups(
 		if args != nil {
 			handler["args"] = args
 		}
-		entry := map[string]interface{}{"hooks": []interface{}{handler}}
+		handlers := []interface{}{handler}
+		if fallback && !group.async {
+			handlers = append(handlers, map[string]interface{}{
+				"type":    "command",
+				"command": hookArgs[1],
+				"args":    append([]string{"fallback-guard-user-hook", hookCommand}, hookArgs[2:]...),
+				"timeout": group.timeout,
+			})
+		}
+		entry := map[string]interface{}{"hooks": handlers}
 		if group.matcher != "" {
 			entry["matcher"] = group.matcher
 		}
@@ -1570,7 +1724,8 @@ func appendClaudeCodeHookGroups(
 }
 
 func (c *ClaudeCodeConnector) patchClaudeCodeHooks(opts SetupOpts, hookScript string) error {
-	// On Unix the agent runs the bundled .sh hook (ToSlash is a no-op there).
+	// On Unix a packaged per-user install uses the native guard; the script
+	// remains the fallback for other installation layouts.
 	// On Windows Claude Code's exec form invokes the native launcher directly,
 	// without Git Bash or PowerShell parsing an absolute path that may contain
 	// spaces. Older shell-form commands are still recognized during migration.
@@ -2808,6 +2963,12 @@ func isOwnedHookHandler(rawHook interface{}, hooksDir string) bool {
 		return false
 	}
 	command = posixHookCommandUnquoted(claudeCodeUnguardedHookCommand(command))
+	if claudeCodePerUserGuardTarget(hook, hooksDir) {
+		return true
+	}
+	if claudeCodePerUserFallbackTarget(hook, hooksDir) {
+		return true
+	}
 	if hooksDir != "" && strings.HasPrefix(command, hooksDir+"/") {
 		return true
 	}
@@ -2993,7 +3154,7 @@ func verifyClaudeCodeHookMatrixForSetup(
 
 // verifyClaudeCodeHookGroups validates the exact DefenseClaw-owned effective
 // registration. Unrelated operator hooks may coexist, but every selected event
-// must have exactly one owned command with its expected matcher, timeout, argv,
+// must have its expected owned commands with their matcher, timeout, argv,
 // and synchronous/asynchronous behavior, and no unselected event may remain
 // DefenseClaw-owned.
 func verifyClaudeCodeHookGroups(
@@ -3013,8 +3174,16 @@ func verifyClaudeCodeHookGroups(
 		if err != nil {
 			return fmt.Errorf("%s: %w", expected.eventType, err)
 		}
-		if len(locations) != 1 {
-			return fmt.Errorf("%s has %d DefenseClaw handlers, want 1", expected.eventType, len(locations))
+		fallback := !expected.async && len(expectedArgs) >= 7 &&
+			expectedArgs[0] == "guard-user-hook" && claudeCodePerUserGuardTarget(
+			map[string]interface{}{"command": expectedCommand, "args": expectedArgs}, hooksDir,
+		)
+		want := 1
+		if fallback {
+			want = 2
+		}
+		if len(locations) != want {
+			return fmt.Errorf("%s has %d DefenseClaw handlers, want %d", expected.eventType, len(locations), want)
 		}
 		location := locations[0]
 		var expectedMatcher interface{}
@@ -3050,6 +3219,34 @@ func verifyClaudeCodeHookGroups(
 				return fmt.Errorf("%s DefenseClaw handler is asynchronous and cannot enforce policy", expected.eventType)
 			}
 			return fmt.Errorf("%s observational handler must be asynchronous", expected.eventType)
+		}
+		if fallback {
+			second := locations[1]
+			for _, owned := range []claudeCodeOwnedHookLocation{location, second} {
+				if _, exists := owned.handler["shell"]; exists {
+					return fmt.Errorf("%s direct handler has a shell setting", expected.eventType)
+				}
+				if condition, exists := owned.handler["if"]; exists {
+					value, ok := condition.(string)
+					if !ok || value != "" {
+						return fmt.Errorf("%s direct handler has a condition", expected.eventType)
+					}
+				}
+			}
+			fallbackArgs := append([]string{"fallback-guard-user-hook", expectedCommand}, expectedArgs[2:]...)
+			fallbackTimeout, timeoutOK := claudeCodeHookInteger(second.handler["timeout"])
+			fallbackType, _ := second.handler["type"].(string)
+			fallbackCommand, _ := second.handler["command"].(string)
+			if second.groupIndex != location.groupIndex || !codexValueMatches(second.matcher, location.matcher) ||
+				fallbackType != "command" || fallbackCommand != expectedArgs[1] ||
+				!codexValueMatches(second.handler["args"], fallbackArgs) ||
+				!timeoutOK || fallbackTimeout != expected.timeout {
+				return fmt.Errorf("%s fallback handler differs from the registered native hook", expected.eventType)
+			}
+			fallbackAsync, err := claudeCodeHandlerAsync(second.handler)
+			if err != nil || fallbackAsync {
+				return fmt.Errorf("%s fallback handler must be synchronous", expected.eventType)
+			}
 		}
 	}
 	for eventType, rawGroups := range hooks {

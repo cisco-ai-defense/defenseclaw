@@ -224,15 +224,25 @@ func TestWindowsOpenCodeMachinePolicyCheckNamesTheManagedConfig(t *testing.T) {
 	}
 }
 
-// Every guardian reconcile re-checks the Claude Code version floor, even
-// when the Go-owned policy fails, and only in the standalone profile.
+// Every guardian reconcile re-checks the Claude Code version floor and the
+// managed_hooks_only setting of the Claude Code drop-in (cowork-1-0-8
+// GAP-0064), even when the Go-owned policy fails, and only in the
+// standalone profile.
 func TestWindowsGuardianRechecksTheClaudeVersionFloor(t *testing.T) {
 	previousOptions, previousFloor, previousWSL := enterpriseHookWindowsGuardianOptions, enterpriseHookWindowsClaudeVersionFloor, enterpriseHookWindowsWSL
 	previousCursor, previousProfiles := enterpriseHookWindowsCursorAdapterRefresh, enterpriseHookWindowsEligibleProfiles
+	previousLock := enterpriseHookWindowsClaudeHooksOnlyLock
 	t.Cleanup(func() {
 		enterpriseHookWindowsGuardianOptions, enterpriseHookWindowsClaudeVersionFloor, enterpriseHookWindowsWSL = previousOptions, previousFloor, previousWSL
 		enterpriseHookWindowsCursorAdapterRefresh, enterpriseHookWindowsEligibleProfiles = previousCursor, previousProfiles
+		enterpriseHookWindowsClaudeHooksOnlyLock = previousLock
 	})
+	lockCalls := 0
+	lockErr := errors.New("drop-in locked")
+	enterpriseHookWindowsClaudeHooksOnlyLock = func() (bool, error) {
+		lockCalls++
+		return lockErr == nil, lockErr
+	}
 	// The pass migrates the profiles this test names, never the host's own.
 	enterpriseHookWindowsEligibleProfiles = func(context.Context) ([]enterprisehooks.TargetCredentials, error) { return nil, nil }
 	// GAP-2467: every standalone pass also refreshes a stale Cursor adapter.
@@ -257,7 +267,7 @@ func TestWindowsGuardianRechecksTheClaudeVersionFloor(t *testing.T) {
 	}
 	var log bytes.Buffer
 	enterpriseHookStandalonePlatformPrepare(&log)
-	if len(calls) != 0 || wslCalls != 0 || len(cursorHooks) != 0 || log.Len() != 0 {
+	if len(calls) != 0 || wslCalls != 0 || len(cursorHooks) != 0 || lockCalls != 0 || log.Len() != 0 {
 		t.Fatalf("a Secure Client guardian must not touch the floor, the WSL policy or the Cursor adapter: %v %d %v %q", calls, wslCalls, cursorHooks, log.String())
 	}
 	standalone = true
@@ -273,6 +283,15 @@ func TestWindowsGuardianRechecksTheClaudeVersionFloor(t *testing.T) {
 	}
 	if strings.Join(cursorHooks, ",") != `C:\hook.exe` || !strings.Contains(log.String(), "rewrote the Cursor enterprise adapter") {
 		t.Fatalf("the Cursor adapter must be refreshed for the guardian's hook binary every pass: %v %q", cursorHooks, log.String())
+	}
+	if lockCalls != 1 || !strings.Contains(log.String(), "Claude Code managed_hooks_only: drop-in locked") {
+		t.Fatalf("the managed_hooks_only setting must be written every pass and its failure reported: %d %q", lockCalls, log.String())
+	}
+	lockErr = nil
+	log.Reset()
+	enterpriseHookStandalonePlatformPrepare(&log)
+	if lockCalls != 2 || !strings.Contains(log.String(), "wrote the configured managed_hooks_only setting") {
+		t.Fatalf("a written managed_hooks_only setting must be logged: %d %q", lockCalls, log.String())
 	}
 }
 

@@ -6,7 +6,7 @@
 //
 // Where each fact comes from:
 // - OS allowed at all: internal/gateway/connector/platform_support.go
-//   (windowsConnectorSupport; OpenCode V2 is preview on every OS).
+//   (windowsConnectorSupport for native Windows connectors).
 // - Minimum agent version: cli/defenseclaw/inventory/hook_contracts.json
 //   (lowest min_inclusive, or the exact builds); Kiro's CLI floor also lives in
 //   internal/gateway/connector/kiro.go and is enforced by every setup path.
@@ -203,9 +203,6 @@ interface ConnectorSource {
   notes?: Partial<Record<OsId, string>>;
   route: Record<OsId, Route>;
   routeNote?: string;
-  // A runtime upgrade can invalidate the historical live-test ledger.
-  // Remove after fresh certification of this runtime is recorded there.
-  preview?: boolean;
 }
 
 const MACHINE: Record<OsId, Route> = { linux: 'machine policy', macos: 'machine policy', windows: 'machine policy' };
@@ -270,8 +267,7 @@ const connectorSources: ConnectorSource[] = [
     id: 'opencode',
     integration: 'Plugin',
     minVersion: '2.0.0',
-    versionNote: 'V2-only preview contract covers 2.0.0 up to 2.3.0 (2.2.3 checked live on Linux). Newer V2 minors are untested; V1 and unversioned git builds are refused. The historical V1 live-test ledger does not certify V2.',
-    preview: true,
+    versionNote: 'V2-only contract covers 2.0.0 up to 2.3.0. Version 2.2.5 was checked live on Linux, macOS and native Windows in per-user and managed installs; 2.2.3 and 2.2.4 were checked on selected platforms. Newer V2 minors are untested; V1 and unversioned git builds are refused.',
     route: MACHINE,
     routeNote: 'Machine policy through the managed OpenCode plugin that the standalone package installs; per-user when that plugin is missing.',
   },
@@ -324,17 +320,16 @@ function buildConnector(source: ConnectorSource): ConnectorRow {
   const entStatus = perOs(entCodes, `${source.id} enterprise`);
   const oss = {} as Record<OsId, ConnectorOsCell>;
   const enterprise = {} as ConnectorRow['enterprise'];
-  const currentStatus = (status: Status): Status => source.preview && status === 'supported' ? 'preview' : status;
   OS_IDS.forEach((os, i) => {
-    const status = currentStatus(decode(pairs[i][0], `${source.id} ${os}`));
+    const status = decode(pairs[i][0], `${source.id} ${os}`);
     oss[os] = {
       status,
       block: cap.hooks.canBlock && status !== 'unsupported',
-      observability: currentStatus(decode(pairs[i][1], `${source.id} ${os} observability`)),
+      observability: decode(pairs[i][1], `${source.id} ${os} observability`),
       note: source.notes?.[os],
     };
     const route = source.route[os];
-    enterprise[os] = { route, status: route === 'unsupported' ? 'unsupported' : currentStatus(entStatus[os]) };
+    enterprise[os] = { route, status: route === 'unsupported' ? 'unsupported' : entStatus[os] };
   });
   return {
     id: source.id,

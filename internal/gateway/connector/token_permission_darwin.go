@@ -33,7 +33,7 @@ func otlpValidatePerm(path string, info os.FileInfo) error {
 // tokenPermissionVerdict marks a token or token folder owner and mode verdict
 // as permission drift, so the gateway keeps its cached token and the root
 // services repair the file, instead of rejecting every hook request.
-// Structural failures never come through here. A standalone process and
+// Structural failures never come through here. Per-user, standalone and
 // TrustStrictAncestorsEnv keep the verdict unclassified (tokenDriftStrict).
 func tokenPermissionVerdict(err error) error {
 	if err == nil || isManagedPermissionDrift(err) || tokenDriftStrict() {
@@ -43,8 +43,7 @@ func tokenPermissionVerdict(err error) error {
 }
 
 // tokenDriftStrict reports that token verdicts stay plain refusals: strict
-// mode is pinned, or this process follows the standalone profile, whose
-// gateway keeps main's token checks.
+// mode is pinned, or this is not a managed Secure Client process.
 func tokenDriftStrict() bool {
-	return managed.TrustStrictAncestors() || managed.StandaloneTrustScope()
+	return managed.TrustStrictAncestors() || !secureClientManagedRuntime()
 }

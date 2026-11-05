@@ -1489,13 +1489,21 @@ func validateWindowsManagedHooksGuardianActivation(
 		// at that account's next sign-in, and a 1.0.2 guardian records it
 		// that way (#1105, GAP-0211).
 		_, untrustedFolder := enterpriseHookSignedOutUntrustedFolder(row, target.DataDir)
-		waiting := target.Deferred && (enterpriseHookAwaitingSignInError(row) || untrustedFolder)
+		waiting := (target.Deferred && (enterpriseHookAwaitingSignInError(row) || untrustedFolder)) ||
+			(enterprisehooks.WindowsStandaloneProcess() && enterpriseHookAccountLinkRowStandalone(row))
 		// Any other row is one of three dispositions: active (OK), pending
 		// (deferred, no evidence) or failed (neither, with the reconcile error
 		// recorded). A row marked both, or a non-OK row with no error, is
 		// ambiguous. The refusal names the row so it says what to repair
 		// (GAP-0571).
 		failedRow := !row.OK && !row.Pending
+		if row.Error == enterpriseHookAccountLinkFailure && !waiting {
+			return nil, nil, fmt.Errorf(
+				"protected Guardian account link for %s target %s cannot be verified for teardown",
+				target.Connector,
+				target.SID,
+			)
+		}
 		if row.OK && row.Pending {
 			return nil, nil, fmt.Errorf(
 				"protected Guardian state contains an ambiguous target disposition: %s target %s is both protected and pending",
@@ -1545,7 +1553,7 @@ func validateWindowsManagedHooksGuardianActivation(
 		}
 		if waiting {
 			if row.Result != nil {
-				return nil, nil, errors.New("protected Guardian target waiting for a sign-in contains contradictory runtime evidence")
+				return nil, nil, errors.New("protected Guardian target with an excused account condition contains contradictory runtime evidence")
 			}
 			awaitingSignIn++
 		} else if failedRow {

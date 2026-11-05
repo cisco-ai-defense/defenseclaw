@@ -11,6 +11,7 @@ import (
 	"strings"
 	"sync"
 	"sync/atomic"
+	"syscall"
 	"testing"
 	"time"
 )
@@ -268,6 +269,27 @@ func TestPerUserInstallLockThatCannotBeReadIsHeld(t *testing.T) {
 	}
 	if perUserInstallInProgress(Options{Home: home, ManagedEnterprise: true}) {
 		t.Fatal("a managed hook read the per-user install lock")
+	}
+}
+
+func TestPerUserOutageWatchdogChecksInstallStartedAfterRefusal(t *testing.T) {
+	home := t.TempDir()
+	watchdog := &answerWatchdog{}
+	opts := Options{
+		Connector:         "claudecode",
+		Event:             "PreToolUse",
+		FailMode:          "open",
+		Home:              home,
+		OutageFailModeNow: func() string { return "open" },
+		answerWatch:       watchdog,
+	}
+	watchdog.perUserOutageSeen(opts, specs["claudecode"], "open", syscall.ECONNREFUSED)
+	if watchdog.installCheck == nil || watchdog.installCheck() {
+		t.Fatal("outage did not prepare a future install check")
+	}
+	mkdirInstallLock(t, home)
+	if !watchdog.installCheck() || !nativeAnswerBlocks(watchdog.installCode, string(watchdog.installOut)) {
+		t.Fatal("an install started after a refusal did not close the deadline answer")
 	}
 }
 

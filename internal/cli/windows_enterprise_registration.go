@@ -42,7 +42,7 @@ const (
 	// WindowsEnterpriseMarkerKey is read by the per-user installers
 	// (scripts/install.ps1, `defenseclaw upgrade`) to refuse a per-user
 	// install on a managed host.
-	WindowsEnterpriseMarkerKey = `SOFTWARE\Cisco\DefenseClaw\Enterprise`
+	WindowsEnterpriseMarkerKey = managed.WindowsEnterpriseMarkerKey
 	windowsEnterpriseARPKey    = `SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall\CiscoDefenseClawEnterprise`
 	// windowsEnterprisePolicyKey holds the DisableSelfUpdate policy every
 	// shipped per-user installer and update notice already honors. The

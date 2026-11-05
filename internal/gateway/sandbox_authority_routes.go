@@ -211,7 +211,6 @@ func sandboxOperational(cfg *config.Config, floor config.OpenShellAdminConfig) s
 		Harnesses:        slices.Clone(o.Harnesses),
 		Wrappers:         slices.Clone(o.Wrappers),
 		TokenDelivery:    o.TokenDelivery,
-		Middleware:       o.Middleware.Enabled,
 		LLM:              o.LLM,
 		KeepHeadless:     o.KeepHeadless,
 		// OpenShell's own telemetry stays off on a managed host unless the

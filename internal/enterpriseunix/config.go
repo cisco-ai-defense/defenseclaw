@@ -224,6 +224,33 @@ func (e *Env) loadConfigCandidate(raw []byte) (*config.Config, error) {
 	return config.LoadRuntimeV8InspectionCandidateFromBytes(e.Layout.ConfigPath, raw)
 }
 
+// auditStorePath is the audit store the gateway opens for the installed
+// config raw: config.LocalAuditStorePath, the resolution of the gateway
+// start and `audit export`, with checkConfig's compile options and the
+// service pins, so a config ensure accepted resolves here too. It is never
+// the runtime decode's AuditDB, which names a file in the config folder
+// (/etc/defenseclaw/audit.db on Linux) whenever data_dir is set
+// (cowork-1-0-8 GAP-0025).
+func (e *Env) auditStorePath(raw []byte) (string, error) {
+	if len(raw) == 0 {
+		return "", errors.New("the installed config could not be read")
+	}
+	envPinMu.Lock()
+	defer envPinMu.Unlock()
+	restore := pinEnv(map[string]string{
+		managed.DeploymentModeEnv:    managed.DeploymentModeManagedEnterprise,
+		managed.EnterpriseProfileEnv: managed.ProfileStandalone,
+	})
+	defer restore()
+	path, err := config.LocalAuditStorePath(e.Layout.ConfigPath, config.V8ManagedChecksView(raw), config.ObservabilityV8CompileOptions{
+		DefaultDataDir: e.Layout.DataDir, CredentialsDir: e.P(e.Layout.SecretsDir),
+	})
+	if err != nil {
+		return "", fmt.Errorf("the installed config names no audit store: %w", err)
+	}
+	return e.P(path), nil
+}
+
 // InstalledConfig loads the installed config.yaml as the gateway does, for
 // the read-only commands that need what it enables (`enterprise secret
 // check`). A missing file is fs.ErrNotExist.

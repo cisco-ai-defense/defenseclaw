@@ -154,6 +154,19 @@ func TestSetPanicRecorderFunc_IndependentFromTracing(t *testing.T) {
 	}
 }
 
+func TestStartPhaseSpanHandlesEmptyTracerResult(t *testing.T) {
+	g := NewGuardrailInspector("local", nil, nil)
+	g.SetPhaseTracerFunc(func(context.Context, string) (context.Context, func(string, string, time.Duration)) {
+		return nil, nil
+	})
+	ctx := context.Background()
+	gotCtx, end := g.startPhaseSpan(ctx, "regex")
+	if gotCtx != ctx || end == nil {
+		t.Fatalf("phase context = %v, end missing = %t", gotCtx, end == nil)
+	}
+	end("", "", 0)
+}
+
 func TestPhaseHelpers_HandleNilAndNone(t *testing.T) {
 	if got := phaseAction(nil); got != "" {
 		t.Errorf("phaseAction(nil) = %q, want empty", got)

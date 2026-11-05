@@ -29,6 +29,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"runtime"
+	"strconv"
 	"strings"
 	"sync/atomic"
 	"syscall"
@@ -54,7 +55,21 @@ type stubRT struct {
 func (s *stubRT) RoundTrip(req *http.Request) (*http.Response, error) {
 	s.requests++
 	if req.Body != nil {
-		s.gotBody, _ = io.ReadAll(req.Body)
+		if length := req.Header.Get(HookDeliveryPayloadBytesHeader); length != "" {
+			size, err := strconv.Atoi(length)
+			if err != nil || size < 0 {
+				return nil, fmt.Errorf("invalid hook payload length %q", length)
+			}
+			s.gotBody = make([]byte, size)
+			if _, err := io.ReadFull(req.Body, s.gotBody); err != nil {
+				return nil, err
+			}
+			// An HTTP transport keeps sending the delivery tail after the
+			// gateway has read the payload and returned its answer.
+			go func() { _, _ = io.Copy(io.Discard, req.Body) }()
+		} else {
+			s.gotBody, _ = io.ReadAll(req.Body)
+		}
 	}
 	s.gotReq = req
 	if s.onRequest != nil {
@@ -68,6 +83,76 @@ func (s *stubRT) RoundTrip(req *http.Request) (*http.Response, error) {
 		Body:       io.NopCloser(strings.NewReader(s.body)),
 		Header:     make(http.Header),
 	}, nil
+}
+
+func TestStubRTReadsManagedPayloadBeforeDeliveryTail(t *testing.T) {
+	for _, tc := range []struct {
+		name     string
+		managed  bool
+		wantBody string
+	}{
+		{name: "managed", managed: true, wantBody: "payload"},
+		{name: "ordinary request", wantBody: "payloadtail"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			req, err := http.NewRequest(http.MethodPost, "http://localhost/hook", strings.NewReader("payloadtail"))
+			if err != nil {
+				t.Fatal(err)
+			}
+			if tc.managed {
+				req.Header.Set(HookDeliveryPayloadBytesHeader, "7")
+			}
+			rt := ok(`{"action":"allow"}`)
+			resp, err := rt.RoundTrip(req)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer resp.Body.Close()
+			if string(rt.gotBody) != tc.wantBody {
+				t.Fatalf("body=%q, want %q", rt.gotBody, tc.wantBody)
+			}
+		})
+	}
+}
+
+func TestStubRTDrainsManagedDeliveryTailAfterReply(t *testing.T) {
+	reader, writer := io.Pipe()
+	defer writer.Close()
+	req, err := http.NewRequest(http.MethodPost, "http://localhost/hook", reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	req.Header.Set(HookDeliveryPayloadBytesHeader, "7")
+	rt := ok(`{"action":"allow"}`)
+	response := make(chan error, 1)
+	go func() {
+		_, err := rt.RoundTrip(req)
+		response <- err
+	}()
+	if _, err := writer.Write([]byte("payload")); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case err := <-response:
+		if err != nil {
+			t.Fatal(err)
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("the gateway fixture waited for the delivery tail before replying")
+	}
+	consumed := make(chan error, 1)
+	go func() {
+		_, err := writer.Write([]byte("tail"))
+		consumed <- err
+	}()
+	select {
+	case err := <-consumed:
+		if err != nil {
+			t.Fatal(err)
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("the gateway fixture did not consume the delivery tail")
+	}
 }
 
 type runResult struct {

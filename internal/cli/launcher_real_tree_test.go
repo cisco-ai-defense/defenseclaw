@@ -100,7 +100,7 @@ func TestLauncherOnTheRealCommandTree(t *testing.T) {
 	})
 	t.Run("everything outside the sandbox tree is refused with exit 2", func(t *testing.T) {
 		for _, args := range [][]string{
-			{"status"}, {"enterprise", "linux", "status"}, {"help", "status"},
+			{"policy", "explain"}, {"enterprise", "linux", "status"}, {"help", "tui"},
 			{"--version-json"}, {"--host", "example"}, {"--port", "1"}, {"completion"},
 		} {
 			stdout, stderr, code := runLauncherRealTree(t, args...)
@@ -173,7 +173,8 @@ func TestLauncherOffersHelpOnlyForTheSandboxTree(t *testing.T) {
 		{[]string{"help"}, true},
 		{[]string{"help", "sandbox"}, true},
 		{[]string{"help", "sandbox", "run"}, true},
-		{[]string{"help", "status"}, false},
+		{[]string{"help", "status"}, true},
+		{[]string{"help", "tui"}, false},
 		{[]string{"help", "--help"}, true},
 		{[]string{"help", "-h"}, true},
 		{[]string{"help", "--host"}, false},

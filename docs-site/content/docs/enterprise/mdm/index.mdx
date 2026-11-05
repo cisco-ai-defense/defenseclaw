@@ -502,8 +502,10 @@ hooks and machine policy are intact.
 
 On Linux, DefenseClaw leaves host kernel settings as found. `status` and
 `verify` report open user namespace and ptrace routes as observed warnings,
-with incomplete security. `detect.sh --require-healthy` reports `unhealthy`
-while either route remains open. An administrator may apply optional host
+with incomplete security. `detect.sh --require-healthy` checks coverage, not
+host hardening: it reports such a host healthy and prints the warnings on standard
+error. `--require-security-complete` reports `unhealthy` while either route
+remains open. An administrator may apply optional host
 hardening with their own tools after testing affected workloads. No
 DefenseClaw lifecycle step schedules or waits for a reboot.
 
@@ -514,7 +516,7 @@ error; "not detected" is exit `1` with the reason on standard error. It reads th
 marker through the 64-bit registry view, so it works in 32-bit Windows
 PowerShell.
 
-`detect.sh [--min-version X.Y.Z] [--require-healthy] [--require-tetragon MODE] [--require-sessions-protected] [--format exit|value|jamf]`
+`detect.sh [--min-version X.Y.Z] [--require-healthy] [--require-security-complete] [--require-tetragon MODE] [--require-sessions-protected] [--format exit|value|jamf]`
 asks the installed, root-owned gateway for its status instead of trusting files,
 so run it as root. A standard user gets `unknown` in `value` and `jamf` format.
 
@@ -524,6 +526,14 @@ so run it as root. A standard user gets `unknown` in `value` and `jamf` format.
 | `value` | Always `0` (except for a failed session check) | The installed version, or `not-installed`, `outdated` (with `--min-version`), `unhealthy` (with `--require-healthy`), `unknown` (not run as root) or `busy` (a lifecycle run holds its lock; transient). For inventory attributes. |
 | `jamf` | Always `0` (same exception) | The same values inside `<result>...</result>`, for Jamf Pro extension attributes |
 
+- `--require-healthy` requires `verify` to pass with `coverage_complete: true`.
+  When `security_complete` is false, every reason `verify` gives for it must be a
+  host-hardening warning: `hook_process_fail_open`, `unprivileged_user_namespaces` and `unprivileged_ptrace`. Those
+  are printed on standard error and the host is healthy. Any other reason (for
+  example `agent_sessions_restart_required`, `guardian_repair_pending`,
+  `enrolled_home_unavailable` or `agent_unprotected`) reports `unhealthy`.
+  `--require-security-complete` (`DC_REQUIRE_SECURITY_COMPLETE=1` in the settings
+  block) also requires `security_complete: true`.
 - `--min-version` takes a dotted release such as `X.Y.Z`; a bad value exits `2`.
   A leading `v` and build metadata (`+...`) are ignored, and a prerelease sorts
   before its release.
@@ -544,9 +554,12 @@ so run it as root. A standard user gets `unknown` in `value` and `jamf` format.
   standard output.
 
 When an installed agent runs without DefenseClaw hooks for one account
-(`agent_unprotected`, `hook_contract_unverified`), `verify`, and so the health
-checks above, reports a warning for that account and passes, with
-`security_complete: false`. To collect `security_complete` across a fleet, read it
+(`agent_unprotected`, `hook_contract_unverified`), `verify` reports a warning for
+that account and passes, with `security_complete: false`. On Windows,
+`detect.ps1 -RequireHealthy` follows the `verify` exit code, so the device stays
+healthy. On Linux and macOS, `detect.sh --require-healthy` reports it `unhealthy`:
+`hook_contract_unverified` makes `coverage_complete` false, and `agent_unprotected`
+is not a host-hardening warning. To collect `security_complete` across a fleet, read it
 from the last lifecycle result (`%WINDIR%\Logs\DefenseClaw\last-result.json` on
 Windows; the `--json` output of `status` on Linux and macOS) with a custom
 compliance script or inventory attribute.
@@ -649,7 +662,7 @@ no-op result and exit `0`.
 | --- | --- | --- |
 | Linux | `uninstall.sh [--purge] [--keep-package] [--log FILE]`, or `DC_PURGE=1` and `DC_KEEP_PACKAGE=1` in its settings block | The services, DefenseClaw's hooks and machine-policy entries (administrator entries stay), config, credentials, most state and logs, and the `defenseclaw` service account, then the deb or rpm unless `--keep-package`. Your policies in `/etc/defenseclaw/policies` stay; `--purge` removes them. `--purge` also removes each enrolled account's `~/.defenseclaw` and per-user binaries, the kept sandbox store and key, and the wrapper's state folder (`/var/lib/defenseclaw-mdm` on Linux, `/var/db/defenseclaw-mdm` on macOS), including the rotation journal and the staging folders of wrapper runs that were killed. If an enrolled account had its own DefenseClaw install before the enrollment (its `~/.defenseclaw` holds `config.yaml`, `.env`, `audit.db` or `previous/`), `--purge` leaves that folder and the install's binaries exactly as they are and names the account in the result (`kept the DefenseClaw per-user data of user <name> ...` and a `per_user_state_remaining` warning). A machine uninstall never deletes or moves an account's own data. Every completed uninstall, through `uninstall.sh` or `enterprise linux|macos uninstall`, overwrites and removes the rotation journal; `uninstall --keep-state`, or an uninstall that fails and keeps the credentials for a rerun, keeps it. |
 | macOS | `uninstall.sh [--purge] [--staging-dir DIR] [--log FILE]`, or `DC_PURGE=1` in its settings block | The same, with the `_defenseclaw` account; the lifecycle forgets the pkg receipt. `--purge` also removes the wrapper's empty state folder `/var/db/defenseclaw-mdm` and the staging folders that killed wrapper runs left in `/var/tmp` (and in the `--staging-dir` folder, if your wrapper runs used one). |
-| Windows | `uninstall.ps1 [-Purge]`, or `DefenseClawSetup-Enterprise-Standalone-x64.exe /uninstall JSON=1` with optional `PURGE=1` | The services, hooks and machine-policy entries, the machine state (config, key and state), the Add/Remove Programs entry and the marker. Purge also removes each enrolled account's `%USERPROFILE%\.defenseclaw` and per-user binaries, and the kit's rotation journal `C:\ProgramData\Cisco\DefenseClaw-MDM\rotation`. A plain uninstall keeps that journal and the JSON result names it (`mdm_rotation_journal_kept`). |
+| Windows | `uninstall.ps1 [-Purge]`, or `DefenseClawSetup-Enterprise-Standalone-x64.exe /uninstall JSON=1` with optional `PURGE=1` | The services, hooks and machine-policy entries, the machine state (config, key and state), the Add/Remove Programs entry and the marker, and the files the managed runtime wrote in each enrolled account's `%USERPROFILE%\.defenseclaw` once that account's registrations are removed. Purge also removes each enrolled account's `%USERPROFILE%\.defenseclaw` and per-user binaries, and the kit's rotation journal `C:\ProgramData\Cisco\DefenseClaw-MDM\rotation`. A plain uninstall keeps that journal and the JSON result names it (`mdm_rotation_journal_kept`). |
 
 Without `--purge`, if an account keeps sandboxes, the gateway's sandbox store and
 `redaction-correlation.key` stay root-owned until the next `ensure` adopts them.

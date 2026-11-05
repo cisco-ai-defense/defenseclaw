@@ -360,88 +360,33 @@ func TestRunAsUserStepNamesTheUID(t *testing.T) {
 	}
 }
 
-// TestDockerfileAnswersLocalhost pins AG-MAC-F1: an image for the MicroVM
-// driver resolves localhost without /etc/hosts, which a MicroVM boots
-// empty. The pinned nss-myhostname .deb of the build architecture is
-// downloaded, checked with sha256sum -c and installed with dpkg -i as
-// root, without a package index, before the harness is installed (so the
-// harness's own version check already runs with it); it is asked right
-// after files and before dns, and the build fails unless it answers
-// localhost with 127.0.0.1. An image for the docker driver, whose sandboxes
-// get Docker's /etc/hosts, has no such step: its Dockerfile, content hash
-// and tag are what they were before MicroVM images, and its build needs no
-// network beyond the harness's own pinned downloads.
-func TestDockerfileAnswersLocalhost(t *testing.T) {
-	step := localhostStep()
+// TestR108OSMINNoHostsWorkaround keeps both image layouts free of the
+// earlier MicroVM name-resolution package step. The driver still has a
+// distinct image identity for its prepared disk cache.
+func TestR108OSMINNoHostsWorkaround(t *testing.T) {
 	for _, name := range harness.Names() {
 		h, _ := harness.Get(name)
 		docker := mustContext(t, testSpec(h))
 		spec := testSpec(h)
 		spec.MicroVM = true
 		vm := mustContext(t, spec)
-		if df := string(docker.Dockerfile); strings.Contains(df, "myhostname") || strings.Contains(df, "nsswitch") {
-			t.Fatalf("%s: the docker driver's Dockerfile answers localhost itself:\n%s", name, df)
-		}
 		if vm.ContentHash == docker.ContentHash || vm.Tag == docker.Tag {
-			t.Fatalf("%s: the MicroVM image shares the docker image's content hash %s (tag %s)", name, vm.ContentHash, vm.Tag)
+			t.Fatalf("%s: driver images share a content hash", name)
 		}
-		df := string(vm.Dockerfile)
-		at := strings.Index(df, step)
-		if at < 0 || strings.Count(df, step) != 1 {
-			t.Fatalf("%s: Dockerfile carries the localhost step %d times:\n%s", name, strings.Count(df, step), df)
+		base := string(docker.Dockerfile)
+		if !strings.HasSuffix(base, "USER sandbox\n") {
+			t.Fatalf("%s: docker image has no final sandbox user", name)
 		}
-		// The MicroVM Dockerfile is the docker one with the step added.
-		if strings.Replace(df, step, "", 1) != string(docker.Dockerfile) {
-			t.Fatalf("%s: the MicroVM Dockerfile differs from the docker one by more than the localhost step:\n%s", name, df)
+		want := strings.Replace(base, "FROM "+docker.Spec.BaseImage+"\n",
+			microVMResolverToolStage()+"FROM "+docker.Spec.BaseImage+"\n", 1)
+		want = strings.TrimSuffix(want, "USER sandbox\n") + microVMResolverCopyStep() + "USER sandbox\n"
+		if string(vm.Dockerfile) != want {
+			t.Fatalf("%s: vm image has an unexpected driver-specific Dockerfile step", name)
 		}
-		root, user := strings.Index(df, "USER root\n"), strings.LastIndex(df, "\nUSER sandbox\n")
-		steps, err := h.InstallSteps(h.DefaultVersion)
-		if err != nil {
-			t.Fatal(err)
-		}
-		if root < 0 || root > at || user < at || len(steps) == 0 || strings.Index(df, "RUN "+steps[0].Run+"\n") < at {
-			t.Fatalf("%s: the localhost step is not a root step before the harness install:\n%s", name, df)
-		}
-	}
-	// Every architecture's pinned file, by URL and sha256, checked before
-	// it is installed.
-	if len(openshell.NSSMyhostnameDebs) != 2 {
-		t.Fatalf("pinned architectures = %v", openshell.NSSMyhostnameDebs)
-	}
-	for _, arch := range []string{"amd64", "arm64"} {
-		deb, ok := openshell.NSSMyhostnameDebs[arch]
-		if !ok {
-			t.Fatalf("no pinned libnss-myhostname for %s", arch)
-		}
-		want := arch + ") want=" + shQuote(deb.SHA256) + "; urls=" + shQuote(strings.Join(deb.URLs, " ")) + " ;; "
-		if !strings.Contains(step, want) {
-			t.Errorf("localhost step lacks the %s pin %q:\n%s", arch, want, step)
-		}
-	}
-	for _, want := range []string{
-		// dpkg needs ldconfig and start-stop-daemon, which the base's
-		// PATH leaves out.
-		"RUN set -eu; PATH=" + connector.SandboxHookPATH + "; if ! getent -s hosts:myhostname hosts localhost >/dev/null 2>&1; then ",
-		`arch="$(dpkg --print-architecture)"; case "$arch" in `,
-		`*) echo "libnss-myhostname ` + openshell.NSSMyhostnameVersion + ` is pinned for amd64 and arm64 only, not $arch" >&2; exit 1 ;; esac; `,
-		`curl -fsSL --proto '=https' --tlsv1.2 --retry 3 -o "$deb" "$url" && printf '%s  %s\n' "$want" "$deb" | sha256sum -c --status - && { ok=1; break; }; `,
-		`[ -n "$ok" ] || { echo "could not download the pinned libnss-myhostname ` + openshell.NSSMyhostnameVersion + ` for $arch" >&2; exit 1; }; `,
-		`dpkg -i "$deb"; rm -rf "$tmp"; fi; `,
-		// The postinst appends myhostname after dns: it moves right after files.
-		`s/[[:space:]]+myhostname([[:space:]]|$)/\1/g;s/^hosts:([[:space:]]+)files([[:space:]]|$)/hosts:\1files myhostname\2/`,
-		`grep -Eq '^hosts:[[:space:]]+files myhostname([[:space:]]|$)' /etc/nsswitch.conf || `,
-		`getent -s hosts:myhostname ahosts localhost | grep -q '^127\.0\.0\.1[[:space:]]' || `,
-	} {
-		if !strings.Contains(step, want) {
-			t.Errorf("localhost step lacks %q:\n%s", want, step)
-		}
-	}
-	// Only the pinned file and only loopback names: no package index, no
-	// hosts file written and no resolver added.
-	run := step[strings.Index(step, "\nRUN ")+1:]
-	for _, forbidden := range []string{"apt-get", "apt ", "/etc/hosts", "/etc/resolv.conf", "nameserver", "mdns", "resolve "} {
-		if strings.Contains(run, forbidden) {
-			t.Errorf("localhost step contains %q", forbidden)
+		for _, df := range [][]byte{docker.Dockerfile, vm.Dockerfile} {
+			if bytes.Contains(df, []byte("libnss-myhostname")) || bytes.Contains(df, []byte("nsswitch.conf")) {
+				t.Fatalf("%s: image still adds the old name-resolution package", name)
+			}
 		}
 	}
 }

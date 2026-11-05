@@ -47,6 +47,7 @@ const (
 	// failure: the hooks are in place, and the floor stops no build older
 	// than 2.1.163, which predates the setting.
 	codeClaudeVersionFloorMissing = "claude_version_floor_missing"
+	codeClaudeShellOptions        = "claudecode_shell_options"
 	// codeMachinePolicyOff names an enabled connector whose machine policy
 	// ownership is off: its sessions run without DefenseClaw's hooks. It is
 	// a warning, not a verify failure: the administrator chose it.
@@ -307,6 +308,13 @@ func (e *Env) reportMachinePolicyExcept(r *enterprisestatus.Result, intended []s
 			continue
 		}
 		r.MachinePolicy[state.Connector] = state.ToStatus()
+		if state.Connector == enterprisepolicy.ConnectorClaudeCode && (r.Action == ActionStatus || r.Action == ActionVerify) {
+			for _, detail := range state.Details {
+				if strings.Contains(detail, " sets env SHELLOPTS with noexec") || strings.Contains(detail, " sets env SHELLOPTS to \"\"") {
+					r.AddWarning(codeClaudeShellOptions, detail)
+				}
+			}
+		}
 	}
 	var missing, exportOnly []string
 	covered := coveredMachinePolicy(intended, result)

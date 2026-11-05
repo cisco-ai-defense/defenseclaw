@@ -9,6 +9,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/defenseclaw/defenseclaw/internal/managed"
@@ -58,6 +59,33 @@ func TestEnsureWindowsCodexMachineFileTrustAcceptsPermissionDriftForHook(t *test
 	}
 	if len(*markers) != 1 {
 		t.Fatalf("resilience events = %v, want exactly one", *markers)
+	}
+}
+
+// GAP-0561: the standalone profile refuses the drift Secure Client accepts
+// (TestEnsureWindowsCodexMachineFileTrustAcceptsPermissionDriftForHook), once
+// the repair had its chance; a standard user who can write this file could
+// remove the DefenseClaw hooks from Codex.
+func TestEnsureWindowsCodexMachineFileTrustStandaloneRefusesDrift(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "requirements.toml")
+	if err := os.WriteFile(path, []byte("x = 1\n"), 0o600); err != nil {
+		t.Fatalf("write fixture: %v", err)
+	}
+	t.Setenv(managed.TrustStrictAncestorsEnv, "")
+	t.Setenv(managed.EnterpriseProfileEnv, managed.ProfileStandalone)
+	markers := captureManagedResilienceEvents(t)
+	verdict := errors.New("untrusted Windows principal S-1-1-0 has write-like access")
+	stubWindowsCodexMachineFileChecks(t,
+		func(string, string) error { return verdict },
+		func(string, string) error { return nil },
+		true,
+	)
+	if err := ensureWindowsCodexMachineFileTrust(path, "Codex machine requirements", true); !errors.Is(err, verdict) ||
+		!strings.Contains(err.Error(), "Setup /ensure") {
+		t.Fatalf("standalone drift = %v, want %v and the Setup step", err, verdict)
+	}
+	if len(*markers) != 0 {
+		t.Fatalf("resilience events = %v, want none for a refused file", *markers)
 	}
 }
 

@@ -22,7 +22,7 @@ from textual.app import ComposeResult
 from textual.containers import Horizontal, Vertical
 from textual.message import Message
 from textual.renderables.digits import DIGITS
-from textual.widgets import Digits, ProgressBar, Sparkline, Static
+from textual.widgets import Digits, Sparkline, Static
 
 from defenseclaw.tui.theme import DEFAULT_TOKENS
 
@@ -243,15 +243,7 @@ class MetricTile(Vertical):
     }}
 
     /* The tile is 8 rows: border (2) + title, digits (3), sparkline and
-       detail. The progress bar used to take the detail's row, so the
-       severity breakdown / guardrail mode line was always clipped. It
-       stays mounted (and updated) but is not drawn. */
-    MetricTile .metric-progress {{
-        display: none;
-        height: 1;
-        margin-top: 0;
-    }}
-
+       detail. */
     MetricTile .metric-sparkline {{
         height: 1;
         color: {TOKENS.accent_violet};
@@ -262,6 +254,12 @@ class MetricTile(Vertical):
         color: {TOKENS.text_secondary};
         text-wrap: nowrap;
         text-overflow: ellipsis;
+    }}
+
+    /* Short terminals: border, "title value" and the detail, so the
+       Overview body under the cards gets the rows (GAP-0048). */
+    MetricTile.-compact {{
+        height: 4;
     }}
     """
 
@@ -275,12 +273,6 @@ class MetricTile(Vertical):
         # as "ON" / "OFF" came out as a jumble of glyph fragments, so words
         # are shown as plain bold text of the same height instead.
         self._word = Static("", classes="metric-word", markup=False)
-        self._progress = ProgressBar(
-            total=100,
-            show_eta=False,
-            show_percentage=False,
-            classes="metric-progress",
-        )
         self._sparkline = Sparkline(metric.trend or (0,), classes="metric-sparkline")
         self._detail = Static(metric.detail, classes="metric-detail", markup=True)
 
@@ -288,9 +280,27 @@ class MetricTile(Vertical):
         yield self._title
         yield self._digits
         yield self._word
-        yield self._progress
         yield self._sparkline
         yield self._detail
+
+    def set_compact(self, compact: bool) -> None:
+        """Show the 4-row layout (the value beside the title) or the full tile."""
+
+        if self.has_class("-compact") == compact:
+            return
+        self.set_class(compact, "-compact")
+        if not compact:
+            self._title.update(fit_metric_title(self.metric.label, self.content_size.width))
+        self._sync_layout()
+
+    def _sync_layout(self) -> None:
+        compact = self.has_class("-compact")
+        as_word = not self.digits_renderable(self._digits_text(self.metric))
+        self._digits.display = not compact and not as_word
+        self._word.display = not compact and as_word
+        self._sparkline.display = not compact
+        if compact:
+            self._title.update(compact_metric_title(self.metric.label, self._digits_text(self.metric), self.content_size.width))
 
     def on_mount(self) -> None:
         self.refresh_metric(self.metric)
@@ -308,17 +318,10 @@ class MetricTile(Vertical):
 
         digits_text = self._digits_text(metric)
         if previous is None or self._digits_text(previous) != digits_text:
-            as_word = not self.digits_renderable(digits_text)
-            self._digits.display = not as_word
-            self._word.display = as_word
-            if as_word:
-                self._word.update(digits_text)
-            else:
+            if self.digits_renderable(digits_text):
                 self._digits.update(digits_text)
-
-        progress = _clamp(metric.progress)
-        if previous is None or _clamp(previous.progress) != progress:
-            self._progress.update(total=100, progress=progress)
+            else:
+                self._word.update(digits_text)
 
         trend = metric.trend or (0,)
         if previous is None or (previous.trend or (0,)) != trend:
@@ -326,6 +329,7 @@ class MetricTile(Vertical):
 
         if previous is None or previous.detail != metric.detail:
             self._detail.update(fit_metric_detail(metric.detail, self.content_size.width))
+        self._sync_layout()
 
         class_map = self._class_map(metric)
         if previous is None or self._class_map(previous) != class_map:
@@ -340,8 +344,11 @@ class MetricTile(Vertical):
     def on_resize(self, _event: events.Resize) -> None:
         # The title and detail are fitted to the tile width (GAP-2430).
         width = self.content_size.width
-        self._title.update(fit_metric_title(self.metric.label, width))
         self._detail.update(fit_metric_detail(self.metric.detail, width))
+        if self.has_class("-compact"):
+            self._sync_layout()
+        else:
+            self._title.update(fit_metric_title(self.metric.label, width))
 
     def _apply_class_map(self, classes: dict[str, bool]) -> None:
         """Apply a class map atomically using the Textual 8 API."""
@@ -395,6 +402,10 @@ class OverviewMetrics(Horizontal):
     OverviewMetrics.hidden {{
         display: none;
     }}
+
+    OverviewMetrics.compact {{
+        height: 4;
+    }}
     """
 
     def __init__(self, metrics: Sequence[MetricDatum] = (), **kwargs: object) -> None:
@@ -407,6 +418,13 @@ class OverviewMetrics(Horizontal):
             tile = MetricTile(metric)
             self._tiles[metric.key] = tile
             yield tile
+
+    def set_compact(self, compact: bool) -> None:
+        """Use the 4-row tiles (short terminals) or the full 8-row tiles."""
+
+        self.set_class(compact, "compact")
+        for tile in self._tiles.values():
+            tile.set_compact(compact)
 
     def refresh_metrics(self, metrics: Sequence[MetricDatum]) -> None:
         """Refresh an already-mounted metric row."""
@@ -422,5 +440,13 @@ class OverviewMetrics(Horizontal):
         self.metrics = incoming
 
 
-def _clamp(value: float) -> float:
-    return max(0.0, min(100.0, value))
+def compact_metric_title(label: str, value: str, width: int) -> Text:
+    """The title row of a compact tile: the title fitted to the room left, then the value in bold."""
+
+    room = width - len(value) - 1 if width > 0 else 0
+    title = Text(fit_metric_title(label, room) if room > 0 else label, style=f"bold {TOKENS.accent_cyan}")
+    if width > 0 and room > 0:
+        title.truncate(room, overflow="ellipsis")
+    title.append(" ")
+    title.append(value, style=f"bold {TOKENS.text_primary}")
+    return title

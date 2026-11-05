@@ -47,6 +47,13 @@ foreach ($name in @(
     }
     . ([scriptblock]::Create($functionAst[0].Extent.Text))
 }
+# rel-1-0-6:GAP-0583: the tombstone rebinding has its own contract harness
+# (cli/tests/test_windows_enterprise_standalone_contract.py); here it finds
+# nothing to rebind.
+function Sync-DefenseClawStandaloneUninstallTombstoneBinding {
+    param([hashtable]$Layout, [string]$GatewayServiceName)
+    return $false
+}
 
 $root = Microsoft.PowerShell.Management\Join-Path `
     ([IO.Path]::GetTempPath()) `

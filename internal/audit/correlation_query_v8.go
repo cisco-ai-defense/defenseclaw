@@ -665,7 +665,7 @@ func (repo *CorrelationRepository) loadEvidence(
 
 func (repo *CorrelationRepository) ingestWatermark(ctx context.Context) (time.Time, error) {
 	var watermark sql.NullInt64
-	if err := repo.store.db.QueryRowContext(ctx,
+	if err := repo.store.queryPool().QueryRowContext(ctx,
 		`SELECT MAX(received_time_unix_nano) FROM correlation_events`).Scan(&watermark); err != nil {
 		return time.Time{}, fmt.Errorf("audit: read correlation ingest watermark: %w", err)
 	}

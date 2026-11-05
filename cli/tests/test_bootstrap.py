@@ -41,6 +41,7 @@ from defenseclaw.config import (
 )
 
 from tests.helpers import record_test_setup_agent_selections
+from tests.os_view import os_view
 
 
 def _cfg_for(tmp: str) -> Config:
@@ -1083,7 +1084,7 @@ class StartGatewayStructuredDriftTests(unittest.TestCase):
             stderr="",
         )
         with (
-            patch.object(os, "name", "nt"),
+            patch("defenseclaw.bootstrap.os", os_view("nt")),
             patch(
                 "defenseclaw.bootstrap.shutil.which",
                 return_value=r"C:\Program Files\DefenseClaw\defenseclaw-gateway.exe",
@@ -1125,7 +1126,7 @@ class StartGatewayStructuredDriftTests(unittest.TestCase):
 
         self._write_pid_file()
         with (
-            patch.object(os, "name", "nt"),
+            patch("defenseclaw.bootstrap.os", os_view("nt")),
             patch(
                 "defenseclaw.process_liveness.read_pid_file",
                 return_value=os.getpid(),

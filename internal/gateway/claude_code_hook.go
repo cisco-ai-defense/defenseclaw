@@ -212,10 +212,25 @@ func (a *APIServer) evaluateClaudeCodeHook(ctx context.Context, req claudeCodeHo
 			toolArgsAbsent:      req.ToolInput == nil,
 			hookEvent:           req.HookEventName,
 		}
-		command, commandTool := sandboxShellCommand(ctx, "claudecode", req.HookEventName, toolName, actionTool, toolArgs)
+		// Cowork's VM shell, web fetch and browser navigation are judged as
+		// Bash, WebFetch and a WebFetch URL (claudeCodeCoworkInspectionFor).
+		// Secure Client keeps the request of main (coworkInspected).
+		actionArgs, shellTool := toolArgs, toolName
+		var coworkDialect actionfacts.Dialect
+		var coworkDeny *ToolInspectVerdict
+		if cowork, ok := claudeCodeCoworkInspectionUnder(cfg, toolName, toolArgs, req.Payload); ok {
+			actionTool, actionArgs, shellTool, coworkDialect = cowork.actionTool, cowork.args, cowork.actionTool, cowork.dialect
+			if cowork.requestTool != "" {
+				toolRequest.Tool, resourceIdentity = cowork.requestTool, ""
+				// The native name and its server keep their static denies
+				// and MCP server blocks: a deny of either wins.
+				coworkDeny = a.claudeCodeCoworkNativeDeny(ctx, strings.TrimSpace(toolName), req.CWD)
+			}
+		}
+		command, commandTool := sandboxShellCommand(ctx, "claudecode", req.HookEventName, shellTool, actionTool, actionArgs)
 		actionInput := actionfacts.Input{
 			Tool:                                     actionTool,
-			Args:                                     toolArgs,
+			Args:                                     actionArgs,
 			CWD:                                      req.CWD,
 			ActiveHome:                               hookActiveHome(ctx),
 			ToolResourceIdentity:                     resourceIdentity,
@@ -228,20 +243,33 @@ func (a *APIServer) evaluateClaudeCodeHook(ctx context.Context, req claudeCodeHo
 		if a.agentHookWindowsDialectHint(ctx) {
 			actionInput.DialectHint = claudeCodeWindowsShellDialect(actionInput)
 		}
-		verdict = a.inspectSandboxShellToolPolicyCtx(ctx, toolRequest, trustedActionRequest{
-			Input:                         actionInput,
-			LegacyText:                    string(toolArgs),
-			Connector:                     "claudecode",
-			EnforcementCapable:            true,
-			ManagedHookOverflowHold:       managedWindowsHookOverflowHold(ctx, a.scannerCfg, "claudecode", runtime.GOOS),
-			SkipLocalFilesystemResolution: isSandboxHookRequest(ctx),
-			ResolvedWriteTargets:          commandHookResolvedWrites(ctx, cfg, actionfacts.Input{Tool: actionTool, Args: toolArgs}),
-			ActiveAgentFileIdentities:     activeAgentContext.identities,
-			SandboxGuestCWD:               req.guestCWD,
-			record:                        toolChainRecorderFromContext(ctx),
-		}, command, commandTool)
-		if decision, matched := a.claudeCodeMCPAssetDecision(ctx, req); matched {
-			assetDecisions = append(assetDecisions, runtimeAssetDecision{targetType: "mcp", decision: decision})
+		if coworkDialect != "" {
+			// The Cowork shell runs in a Linux VM on every host.
+			actionInput.DialectHint = coworkDialect
+		}
+		if coworkDeny != nil {
+			verdict = coworkDeny
+		} else {
+			verdict = a.inspectSandboxShellToolPolicyCtx(ctx, toolRequest, trustedActionRequest{
+				Input:                         actionInput,
+				LegacyText:                    string(toolArgs),
+				Connector:                     "claudecode",
+				EnforcementCapable:            true,
+				ManagedHookOverflowHold:       managedWindowsHookOverflowHold(ctx, a.scannerCfg, "claudecode", runtime.GOOS),
+				SkipLocalFilesystemResolution: isSandboxHookRequest(ctx),
+				ResolvedWriteTargets:          commandHookResolvedWrites(ctx, cfg, actionfacts.Input{Tool: actionTool, Args: actionArgs}),
+				ActiveAgentFileIdentities:     activeAgentContext.identities,
+				SandboxGuestCWD:               req.guestCWD,
+				record:                        toolChainRecorderFromContext(ctx),
+			}, command, commandTool)
+		}
+		verdict = mergeCoworkPageContentVerdict(verdict, a.inspectClaudeCodeCoworkPageContent(ctx, req))
+		// Cowork's own workspace shell and fetch are no MCP server the user
+		// configured: no MCP admission or server policy applies to them.
+		if !coworkInspected(cfg) || !claudeCodeCoworkNativeTool(req) {
+			if decision, matched := a.claudeCodeMCPAssetDecision(ctx, req); matched {
+				assetDecisions = append(assetDecisions, runtimeAssetDecision{targetType: "mcp", decision: decision})
+			}
 		}
 		if decision, matched := a.claudeCodeSkillAssetDecision(ctx, req); matched {
 			assetDecisions = append(assetDecisions, runtimeAssetDecision{targetType: "skill", decision: decision})
@@ -251,8 +279,12 @@ func (a *APIServer) evaluateClaudeCodeHook(ctx context.Context, req claudeCodeHo
 		}
 	case "PostToolUse", "PostToolUseFailure", "PermissionDenied", "PostToolBatch":
 		verdict = a.inspectClaudeCodeToolResult(ctx, req, mode)
-		if decision, matched := a.claudeCodeMCPAssetDecision(ctx, req); matched {
-			assetDecisions = append(assetDecisions, runtimeAssetDecision{targetType: "mcp", decision: decision})
+		// Cowork's own workspace shell and fetch are no MCP server the user
+		// configured: no MCP admission or server policy applies to them.
+		if !coworkInspected(cfg) || !claudeCodeCoworkNativeTool(req) {
+			if decision, matched := a.claudeCodeMCPAssetDecision(ctx, req); matched {
+				assetDecisions = append(assetDecisions, runtimeAssetDecision{targetType: "mcp", decision: decision})
+			}
 		}
 		if decision, matched := a.claudeCodeSkillAssetDecision(ctx, req); matched {
 			assetDecisions = append(assetDecisions, runtimeAssetDecision{targetType: "skill", decision: decision})

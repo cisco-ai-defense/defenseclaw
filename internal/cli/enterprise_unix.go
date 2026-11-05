@@ -29,6 +29,8 @@ import (
 // unixLifecycleOptions are the flags of `enterprise linux|macos <action>`.
 type unixLifecycleOptions struct {
 	payload            string
+	coworkPackage      string
+	coworkSignature    string
 	fromPackage        bool
 	config             string
 	noStart            bool
@@ -296,6 +298,10 @@ func newUnixLifecycleCommand(platform, action, summary string) *cobra.Command {
 	switch action {
 	case "install", "upgrade", "repair", "ensure":
 		flags.StringVar(&opts.payload, "payload", "", "absolute directory holding the staged binaries to install")
+		if platform == "macos" {
+			flags.StringVar(&opts.coworkPackage, "cowork-package", "", "protected release package input to cache and deliver atomically (requires configured SHA-256 pin)")
+			flags.StringVar(&opts.coworkSignature, "cowork-signature", "", "protected detached signature input to cache and deliver atomically (requires configured SHA-256 pin)")
+		}
 		flags.BoolVar(&opts.fromPackage, "from-package", false, "use the binaries the defenseclaw-enterprise package installed")
 		flags.StringVar(&opts.config, "config", "", "absolute path of the administrator config to install")
 		flags.BoolVar(&opts.noStart, "no-start", false, "install without starting the services")

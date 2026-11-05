@@ -4,6 +4,7 @@
 package hookpaths
 
 import (
+	"strconv"
 	"strings"
 
 	"mvdan.cc/sh/v3/expand"
@@ -60,9 +61,19 @@ func copyBraceWordFields(args []*syntax.Word, static []bool, env expand.Environ)
 		if uint64(total)+shellparse.MinBraceFields(arg) > maxCopyBraceWords+1 {
 			return nil
 		}
-		expanded, err := expand.Fields(&expand.Config{Env: env}, arg)
-		if err != nil {
-			return nil
+		var expanded []string
+		if actionHasExactBraceRange(braced.Parts) {
+			var ok bool
+			expanded, ok = actionPaddedBraceFields(&braced, env)
+			if !ok {
+				return nil
+			}
+		} else {
+			var err error
+			expanded, err = expand.Fields(&expand.Config{Env: env}, arg)
+			if err != nil {
+				return nil
+			}
 		}
 		words := make([]string, 0, len(expanded))
 		for _, word := range expanded {
@@ -83,6 +94,147 @@ func copyBraceWordFields(args []*syntax.Word, static []bool, env expand.Environ)
 		fields[i] = words
 	}
 	return fields
+}
+
+// expand.Fields adds the endpoints' leading-zero count to every number in
+// a numeric range. Bash instead keeps the width of the endpoints. Expand
+// these bounded ranges here so a middle member has its actual file name.
+func actionPaddedBraceFields(word *syntax.Word, env expand.Environ) ([]string, bool) {
+	var fields []string
+	visited := 0
+	var visit func([]syntax.WordPart) bool
+	visit = func(parts []syntax.WordPart) bool {
+		if visited > maxCopyBraceWords {
+			return false
+		}
+		for i, part := range parts {
+			brace, ok := part.(*syntax.BraceExp)
+			if !ok {
+				continue
+			}
+			add := func(middle []syntax.WordPart) bool {
+				next := make([]syntax.WordPart, 0, len(parts)-1+len(middle))
+				next = append(next, parts[:i]...)
+				next = append(next, middle...)
+				next = append(next, parts[i+1:]...)
+				return visit(next)
+			}
+			if !brace.Sequence {
+				for _, elem := range brace.Elems {
+					if !add(elem.Parts) {
+						return false
+					}
+				}
+				return true
+			}
+			if len(brace.Elems) < 2 {
+				return false
+			}
+			fromText, toText := brace.Elems[0].Lit(), brace.Elems[1].Lit()
+			from, fromErr := strconv.Atoi(fromText)
+			to, toErr := strconv.Atoi(toText)
+			chars := fromErr != nil || toErr != nil
+			if chars {
+				if fromText == "" || toText == "" {
+					return false
+				}
+				from, to = int(fromText[0]), int(toText[0])
+			}
+			upward := from <= to
+			step := 1
+			if !upward {
+				step = -1
+			}
+			if len(brace.Elems) > 2 {
+				if value, err := strconv.Atoi(brace.Elems[2].Lit()); err == nil && value != 0 {
+					if value < 0 {
+						value = -value
+						if value < 0 { // The magnitude does not fit in an int.
+							return false
+						}
+					}
+					step = value
+					if !upward {
+						step = -step
+					}
+				}
+			}
+			width := max(len(fromText), len(toText))
+			pad := actionPaddedNumber(fromText) || actionPaddedNumber(toText)
+			for n := from; ; {
+				if upward && n > to || !upward && n < to {
+					break
+				}
+				value := strconv.Itoa(n)
+				if chars {
+					value = string(rune(n))
+				} else if pad {
+					sign := ""
+					if strings.HasPrefix(value, "-") {
+						sign, value = "-", value[1:]
+					}
+					value = sign + strings.Repeat("0", max(0, width-len(sign)-len(value))) + value
+				}
+				if !add([]syntax.WordPart{&syntax.Lit{Value: value}}) {
+					return false
+				}
+				if n == to {
+					break
+				}
+				next := n + step
+				if next == n || upward && next < n || !upward && next > n {
+					return false
+				}
+				n = next
+			}
+			return true
+		}
+		visited++
+		values, err := expand.Fields(&expand.Config{Env: env}, &syntax.Word{Parts: parts})
+		if err != nil || len(fields)+len(values) > maxCopyBraceWords {
+			return false
+		}
+		fields = append(fields, values...)
+		return true
+	}
+	ok := visit(word.Parts)
+	return fields, ok
+}
+
+func actionPaddedNumber(value string) bool {
+	value = strings.TrimPrefix(value, "-")
+	return len(value) > 1 && value[0] == '0'
+}
+
+func actionHasExactBraceRange(parts []syntax.WordPart) bool {
+	for _, part := range parts {
+		brace, ok := part.(*syntax.BraceExp)
+		if !ok {
+			continue
+		}
+		if brace.Sequence && len(brace.Elems) >= 2 {
+			if actionPaddedNumber(brace.Elems[0].Lit()) || actionPaddedNumber(brace.Elems[1].Lit()) {
+				return true
+			}
+			// expand.Fields treats a step whose sign opposes the range
+			// direction as a unit step. Bash uses its magnitude. Read all
+			// stepped numeric ranges here so skipped names stay skipped.
+			if len(brace.Elems) > 2 {
+				_, fromErr := strconv.Atoi(brace.Elems[0].Lit())
+				_, toErr := strconv.Atoi(brace.Elems[1].Lit())
+				_, stepErr := strconv.Atoi(brace.Elems[2].Lit())
+				if fromErr == nil && toErr == nil && stepErr == nil {
+					return true
+				}
+			}
+		}
+		for _, elem := range brace.Elems {
+			if actionHasExactBraceRange(elem.Parts) {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 // braceWordFixed reports whether parts expand to fixed text: unquoted
@@ -208,12 +360,8 @@ func actionWordHasBraceText(word *syntax.Word) bool {
 // (rel-1-0-6:GAP-0233). They are not listed in the client target map, so a
 // long benign touch cannot overflow it (GAP-0151). The values of -d, -r and
 // -t (and --date, --reference, --time) are not files touch writes.
-func touchBraceWriteOperands(command, home string) []string {
-	if !strings.Contains(command, "touch") || !strings.Contains(command, "{") {
-		return nil
-	}
-	file, ok := parseShell(command)
-	if !ok {
+func touchBraceWriteOperands(command, home string, file *syntax.File) []string {
+	if file == nil || !strings.Contains(command, "touch") || !strings.Contains(command, "{") {
 		return nil
 	}
 	var operands []string

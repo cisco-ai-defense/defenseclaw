@@ -36,6 +36,7 @@
 #       [--allowed-team-id TEAMID]... (macOS signed)
 #       [--gpg-keyring FILE] [--signature FILE | --signature-url URL] (Linux signed)
 #       [--config-file FILE | --config-stdin]
+#       [--cowork-package FILE] [--cowork-signature FILE] (macOS ensure)
 #       [--secret-name NAME (--secret-file FILE | --secret-stdin)]
 #       [--bundle-file FILE.dcbundle] [--trust-anchor-file FILE]
 #       [--format json|jamf]
@@ -90,6 +91,8 @@ DC_SIGNATURE=""             # Linux signed: detached signature (default: <source
 DC_SIGNATURE_URL=""         # Linux signed: or an https:// URL for it
 DC_PRODUCT_VERSION=""       # refuse unless the source is exactly this version
 DC_CONFIG_FILE=""           # absolute path of the administrator config
+DC_COWORK_PACKAGE=""        # local release archive; config supplies its SHA-256
+DC_COWORK_SIGNATURE=""      # optional detached signature; config supplies its SHA-256
 DC_SECRET_NAME=""           # e.g. ai-defense-api-key (value only via file or stdin)
 DC_SECRET_FILE=""
 DC_REFUSE_CAPABILITY_LOSS=0 # opt in: refuse a bundle that disables an enforced capability
@@ -143,6 +146,8 @@ DC_CHILD=""
 DC_RESULT=""
 DC_CONFIG_STAGED=""
 DC_CONFIG_ORIGIN=""
+DC_COWORK_PACKAGE_STAGED=""
+DC_COWORK_SIGNATURE_STAGED=""
 DC_PACKAGE_ACTION=""   # install | upgrade when the package manager ran
 DC_PACKAGE_PREVIOUS="" # the version it replaced
 DC_PACKAGE_VERSION=""  # the version it installed
@@ -272,10 +277,17 @@ dc_stage_parent() {
     DC_STAGE_PARENT=$DC_STAGING_DIR DC_TRUST_ACL=""
     if [ -z "$DC_STAGE_PARENT" ]; then
         if [ "$DC_SCRIPT_OS" = darwin ]; then
-            DC_STAGE_PARENT=/var/tmp
-            return 0
+            if [ -n "$DC_COWORK_PACKAGE$DC_COWORK_SIGNATURE" ]; then
+                # Cowork sources require every ancestor to resist writes;
+                # /var/tmp is sticky but still publicly writable.
+                DC_STAGE_PARENT=/private/var/root
+            else
+                DC_STAGE_PARENT=/var/tmp
+                return 0
+            fi
+        else
+            DC_STAGE_PARENT=/var/lib/defenseclaw-mdm
         fi
-        DC_STAGE_PARENT=/var/lib/defenseclaw-mdm
         # A concurrent first run may create it first: the folder existing
         # is what counts, and the trust check below decides (GAP-1850).
         [ -d "$DC_STAGE_PARENT" ] || mkdir -m 0700 "$DC_STAGE_PARENT" 2>/dev/null || [ -d "$DC_STAGE_PARENT" ] ||
@@ -458,6 +470,26 @@ dc_stage_file() {
     dc_read_bounded "$dest" "$limit" "$label" <"$src"
 }
 
+# Cowork files are untrusted inputs until the lifecycle matches config pins.
+# Copy them privately before installing anything; the lifecycle persists them
+# in its transaction, so this wrapper never writes the configured source_dir.
+dc_stage_cowork() {
+    DC_COWORK_PACKAGE_STAGED="" DC_COWORK_SIGNATURE_STAGED=""
+    if [ -n "$DC_COWORK_PACKAGE" ]; then
+        cowork_name=$(basename "$DC_COWORK_PACKAGE")
+        case "$cowork_name" in
+            defenseclaw-cowork-amd64.tar.gz | defenseclaw-cowork-arm64.tar.gz) ;;
+            *) dc_fail_result "$DC_EXIT_INVALID" mdm_invalid_arguments "--cowork-package must name defenseclaw-cowork-amd64.tar.gz or defenseclaw-cowork-arm64.tar.gz" ;;
+        esac
+        DC_COWORK_PACKAGE_STAGED="$DC_STAGE/$cowork_name"
+        dc_stage_file "$DC_COWORK_PACKAGE" "$DC_COWORK_PACKAGE_STAGED" 536870912 "Cowork package"
+    fi
+    if [ -n "$DC_COWORK_SIGNATURE" ]; then
+        DC_COWORK_SIGNATURE_STAGED="$DC_STAGE/cowork-package.sig"
+        dc_stage_file "$DC_COWORK_SIGNATURE" "$DC_COWORK_SIGNATURE_STAGED" 1048576 "Cowork signature"
+    fi
+}
+
 # Read the raw credential before putting it in a shell variable, since command
 # substitution discards NUL bytes. The temporary copy is removed immediately.
 dc_read_secret() {
@@ -522,6 +554,8 @@ dc_parse_args() {
             --product-version) DC_PRODUCT_VERSION=${2:-}; shift 2 ;;
             --config-file) DC_CONFIG_FILE=${2:-}; shift 2 ;;
             --config-stdin) DC_CONFIG_STDIN=1; shift ;;
+            --cowork-package) DC_COWORK_PACKAGE=${2:-}; shift 2 ;;
+            --cowork-signature) DC_COWORK_SIGNATURE=${2:-}; shift 2 ;;
             --secret-name) DC_SECRET_NAME=${2:-}; shift 2 ;;
             --secret-file) DC_SECRET_FILE=${2:-}; shift 2 ;;
             --secret-stdin) DC_SECRET_STDIN=1; shift ;;
@@ -585,9 +619,16 @@ dc_validate_args() {
         dc_fail_result "$DC_EXIT_INVALID" mdm_invalid_arguments "a secret value needs --secret-name"
     fi
     if [ "$DC_ACTION" != ensure ] &&
-        { [ -n "$DC_SOURCE$DC_SOURCE_URL$DC_CONFIG_FILE$DC_SECRET_NAME$DC_SECRET_FILE$DC_BUNDLE_FILE$DC_TRUST_ANCHOR_FILE" ] ||
+        { [ -n "$DC_SOURCE$DC_SOURCE_URL$DC_CONFIG_FILE$DC_SECRET_NAME$DC_SECRET_FILE$DC_BUNDLE_FILE$DC_TRUST_ANCHOR_FILE$DC_COWORK_PACKAGE$DC_COWORK_SIGNATURE" ] ||
             [ "$DC_CONFIG_STDIN$DC_SECRET_STDIN" != 00 ] || [ "$DC_REFUSE_CAPABILITY_LOSS" = 1 ]; }; then
         dc_fail_result "$DC_EXIT_INVALID" mdm_invalid_arguments "--action $DC_ACTION is read-only and takes no source, config, secret, bundle or trust anchor file"
+    fi
+    if [ -n "$DC_COWORK_PACKAGE$DC_COWORK_SIGNATURE" ]; then
+        [ "$DC_SCRIPT_OS" = darwin ] ||
+            dc_fail_result "$DC_EXIT_INVALID" mdm_invalid_arguments "Cowork VM host delivery is not supported on Linux"
+        if [ -n "$DC_BUNDLE_FILE" ] || dc_inline_bundle | grep -q '[^[:space:]]'; then
+            dc_fail_result "$DC_EXIT_INVALID" mdm_invalid_arguments "Cowork artifact inputs cannot be combined with a policy bundle; deliver them with an administrator config"
+        fi
     fi
     if [ "$DC_REFUSE_CAPABILITY_LOSS" = 1 ] && [ -z "$DC_BUNDLE_FILE" ] && ! dc_inline_bundle | grep -q '[^[:space:]]'; then
         dc_fail_result "$DC_EXIT_INVALID" mdm_invalid_arguments "--refuse-capability-loss requires a bundle"
@@ -2056,6 +2097,8 @@ dc_main() {
         dc_read_secret
     fi
 
+    dc_stage_cowork
+
     DC_CHANNEL_FLAG=""
     DC_PAYLOAD_GATEWAY=""
     # Whether a deployment existed before this run delivered one (the
@@ -2108,6 +2151,8 @@ dc_main() {
         [ -z "$DC_CHANNEL_FLAG" ] || set -- "$@" "$DC_CHANNEL_FLAG"
         [ -z "$ensure_config" ] || set -- "$@" "--config=$ensure_config"
         [ -z "$DC_PRODUCT_VERSION" ] || set -- "$@" "--product-version=$DC_PRODUCT_VERSION"
+        [ -z "$DC_COWORK_PACKAGE_STAGED" ] || set -- "$@" "--cowork-package=$DC_COWORK_PACKAGE_STAGED"
+        [ -z "$DC_COWORK_SIGNATURE_STAGED" ] || set -- "$@" "--cowork-signature=$DC_COWORK_SIGNATURE_STAGED"
         status=0
         dc_run_lifecycle_retry "$gateway" "$@" || status=$?
         if [ "$status" != 0 ] || [ -z "$bundle$anchors" ]; then

@@ -89,6 +89,8 @@ func TestAgentHookTrustedActionArgsGivesLiveKiroCommandsCompleteFacts(t *testing
 	for _, tc := range []struct{ name, tool, args string }{
 		{"cli 2.x shell", "shell", `{"command":"echo dc-marker","__tool_use_purpose":"Running the exact command as requested"}`},
 		{"v3 execute_bash", "execute_bash", `{"command":"echo dc-marker","description":null,"cwd":null,"run_in_background":false,"timeout":null}`},
+		// kiro-cli 2.35.1 --v3 on Windows (rel-1-0-6:GAP-0589).
+		{"v3 execute_pwsh", "execute_pwsh", `{"command":"echo dc-marker","cwd":"c:\\Users\\alice\\proj","description":null,"run_in_background":false,"timeout":null}`},
 	} {
 		raw := json.RawMessage(tc.args)
 		status := func(args json.RawMessage) actionfacts.ParseStatus {

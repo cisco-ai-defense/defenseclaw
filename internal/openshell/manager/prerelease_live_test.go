@@ -46,23 +46,20 @@ func connectAtFakeRelease(e *harnessEnv) {
 	}
 }
 
-// TestAPrereleaseOfSandboxMinRunsNoSandbox: NVIDIA/OpenShell#4494, the
-// broker fix SupportedMin stands for, landed in 0.1.5-pre.4, so a gateway
-// that reports a prerelease of 0.1.5 (pre.1 to pre.3 have the hole) runs no
-// sandbox: a create and a start are refused with the upgrade, and a
-// session it started is named, as for 0.1.4. A prerelease of a later
-// release (0.1.6-pre.1) comes after 0.1.5 and runs them.
+// TestAPrereleaseOfSandboxMinRunsNoSandbox: every release below the
+// supported floor, including a prerelease of it, is held for upgrade.
+// A session started outside DefenseClaw remains visible until its user
+// stops it. The stable release at the floor starts normally.
 func TestAPrereleaseOfSandboxMinRunsNoSandbox(t *testing.T) {
 	e := newEnv(t, nil)
 	connectAtFakeRelease(e)
 	e.create(sandboxapi.CreateRequest{Name: "kept"})
 	e.stopBox("kept")
-	for _, release := range []string{"0.1.5-pre.1", "0.1.5-pre.3", "0.1.5-pre.7"} {
+	for _, release := range []string{"0.1.5-pre.1", "0.1.5-pre.3", "0.1.5-pre.7", "0.1.6-pre.1"} {
 		e.fake.SetRelease(release)
 		_, err := e.tryCreate(sandboxapi.CreateRequest{Name: "fresh", Project: e.otherProject("other")})
 		apiErr := wantCode(t, err, sandboxapi.CodeUnavailable)
-		if !strings.Contains(apiErr.Message, "OpenShell "+release+" is a prerelease, which runs no DefenseClaw sandbox") ||
-			!strings.Contains(apiErr.Message, "NVIDIA/OpenShell#4494") ||
+		if !strings.Contains(apiErr.Message, "OpenShell "+release+" runs no DefenseClaw sandbox: OpenShell "+openshell.SupportedMin+" or later is required") ||
 			apiErr.Detail != "upgrade OpenShell "+release+" to "+openshell.InstallerVersion+" in place with `defenseclaw sandbox setup --install-openshell`" {
 			t.Fatalf("create on %s = %+v", release, apiErr)
 		}
@@ -70,30 +67,29 @@ func TestAPrereleaseOfSandboxMinRunsNoSandbox(t *testing.T) {
 			t.Fatalf("the refused create on %s left a sandbox behind", release)
 		}
 		_, err = e.m.Start(t.Context(), "kept", sandboxapi.StartRequest{})
-		if apiErr := wantCode(t, err, sandboxapi.CodeUnavailable); !strings.Contains(apiErr.Message, "OpenShell "+release+" is a prerelease") {
+		if apiErr := wantCode(t, err, sandboxapi.CodeUnavailable); !strings.Contains(apiErr.Message, "OpenShell "+release+" runs no DefenseClaw sandbox") {
 			t.Fatalf("start on %s = %+v", release, apiErr)
 		}
 	}
 	// A session that starts on a prerelease (outside DefenseClaw) runs its
 	// supervisor, and is named unprotected and kept until its user stops it
-	// (the gateway the manager last reached runs 0.1.5-pre.7, which has the
-	// broker fix but is still a prerelease).
+	// (the gateway the manager last reached runs 0.1.6-pre.1).
 	must(t, e.fake.SetPhase(openshell.DefaultWorkspace, "kept", openshell.PhaseReady))
 	e.m.statusEvent(t.Context(), e.boxOf("kept"), &stream.Status{Phase: openshell.PhaseProvisioning})
 	e.m.statusEvent(t.Context(), e.boxOf("kept"), &stream.Status{Phase: openshell.PhaseReady})
 	e.m.tamperStops.Wait()
 	if found := e.events("kept", sandboxapi.ActivityFinding, sandboxapi.ReasonOldSupervisor); len(found) != 1 ||
-		!strings.Contains(found[0].Message, "kept: "+legacyUnprotected+": its session started on OpenShell 0.1.5-pre.7") {
+		!strings.Contains(found[0].Message, "kept: "+legacyUnprotected+": its session started on OpenShell 0.1.6-pre.1") {
 		t.Fatalf("old-supervisor findings on a prerelease = %+v", found)
 	}
 	if got := e.get("kept"); got.Phase != "ready" || !got.OldSupervisor {
-		t.Fatalf("a session on the 0.1.5-pre.7 supervisor is %s (old supervisor %v), want kept ready", got.Phase, got.OldSupervisor)
+		t.Fatalf("a session on the 0.1.6-pre.1 supervisor is %s (old supervisor %v), want kept ready", got.Phase, got.OldSupervisor)
 	}
 	e.stopBox("kept")
-	e.fake.SetRelease("0.1.6-pre.1")
+	e.fake.SetRelease("0.1.6")
 	e.startBox("kept", sandboxapi.StartRequest{})
-	if got := e.boxOf("kept").rec.SessionRelease; got != "0.1.6-pre.1" || !openshell.RunsSandboxes(got) {
-		t.Fatalf("session release on 0.1.6-pre.1 = %q", got)
+	if got := e.boxOf("kept").rec.SessionRelease; got != "0.1.6" || !openshell.RunsSandboxes(got) {
+		t.Fatalf("session release on 0.1.6 = %q", got)
 	}
 }
 

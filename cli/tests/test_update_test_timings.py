@@ -51,6 +51,8 @@ def test_go_timings_reads_events_after_a_log_prefix(tmp_path: Path) -> None:
             [
                 prefix + _event("pass", "internal/gateway", 61.0, "TestSlow"),
                 prefix + _event("pass", "internal/gateway", 62.0),
+                prefix + _event("pass", "internal/gateway/connector/hookexec", 119.0, "TestHook"),
+                prefix + _event("pass", "internal/gateway/connector/hookexec", 120.0),
                 f"{prefix}[go-package-time] {MODULE}/internal/cli pass 40.5",
                 prefix + "=== RUN   TestSlow",
             ]
@@ -58,10 +60,16 @@ def test_go_timings_reads_events_after_a_log_prefix(tmp_path: Path) -> None:
         encoding="utf-8",
     )
 
-    assert go_timings([log], MODULE)["tests"] == {"internal/gateway": {"TestSlow": 61.0, "*": 0.1}}
+    assert go_timings([log], MODULE)["tests"] == {
+        "internal/gateway": {"TestSlow": 61.0, "*": 0.1},
+        "internal/gateway/connector/hookexec": {"TestHook": 119.0, "*": 0.1},
+    }
     windows = windows_go_timings([log], MODULE)
     assert windows["packages"] == {f"{MODULE}/internal/cli": 46.5}
-    assert windows["tests"] == {"internal/gateway": {"TestSlow": 61.0, "*": 0.1}}
+    assert windows["tests"] == {
+        "internal/gateway": {"TestSlow": 61.0, "*": 0.1},
+        "internal/gateway/connector/hookexec": {"TestHook": 119.0, "*": 0.1},
+    }
 
 
 def test_merge_go_timings_replaces_only_the_measured_packages() -> None:

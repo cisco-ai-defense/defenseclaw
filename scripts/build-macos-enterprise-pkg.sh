@@ -553,7 +553,8 @@ downgrade=""
 if [ -f "$state/allow-downgrade" ] && [ ! -L "$state/allow-downgrade" ] && [ "$(stat -f %u "$state/allow-downgrade")" = 0 ]; then
     downgrade=--allow-downgrade
 fi
-"$gateway" enterprise macos ensure --from-package $downgrade --reason package --json --lock-wait 8m \
+DEFENSECLAW_DEPLOYMENT_MODE=managed_enterprise DEFENSECLAW_ENTERPRISE_PROFILE=standalone \
+    "$gateway" enterprise macos ensure --from-package $downgrade --reason package --json --lock-wait 8m \
     >"$state/last-package-result.json" 2>"$state/last-package-result.log"
 status=$?
 rm -f "$state/allow-downgrade"

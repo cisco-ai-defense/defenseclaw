@@ -15,6 +15,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"math"
+	"strconv"
 	"strings"
 	"time"
 
@@ -197,6 +198,14 @@ func compatibilityAuditV8Body(event Event) (map[string]any, map[string]observabi
 	if dir := strings.TrimSpace(event.RulePackDir); dir != "" && !event.RulePackDirInEnvelope {
 		body["rule_pack_dir"] = dir
 		classes["/rule_pack_dir"] = observability.FieldClassPath
+	}
+	// The connected folders of a Claude Cowork session are paths too.
+	// Every array leaf is classified, as the record requires.
+	if paths := boundedWorkspaceHostPaths(event.WorkspaceHostPaths); len(paths) > 0 {
+		body["workspace_host_paths"] = paths
+		for i := range paths {
+			classes["/workspace_host_paths/"+strconv.Itoa(i)] = observability.FieldClassPath
+		}
 	}
 	// Sandbox attribution has no generic correlation field yet, so a
 	// sandbox's codex notify, inspect and other generic rows carry it in

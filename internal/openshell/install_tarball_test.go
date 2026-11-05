@@ -334,14 +334,14 @@ func TestTarballInstallNeedsAPinnedExactVersion(t *testing.T) {
 		}
 	}
 	_, err := (&TarballInstaller{Version: "9.9.9", Home: home}).Install(context.Background())
-	if !errors.Is(err, ErrTarballNotPinned) || !strings.Contains(err.Error(), "0.1.5") {
+	if !errors.Is(err, ErrTarballNotPinned) || !strings.Contains(err.Error(), InstallerVersion) {
 		t.Errorf("unpinned release: err = %v", err)
 	}
-	_, err = (&TarballInstaller{Version: "0.1.5", Home: "relative/home"}).Install(context.Background())
+	_, err = (&TarballInstaller{Version: InstallerVersion, Home: "relative/home"}).Install(context.Background())
 	if err == nil || !strings.Contains(err.Error(), "absolute") {
 		t.Errorf("relative home: err = %v", err)
 	}
-	_, err = (&TarballInstaller{Version: "0.1.5", Home: home, GOOS: "darwin", GOARCH: "amd64"}).Install(context.Background())
+	_, err = (&TarballInstaller{Version: InstallerVersion, Home: home, GOOS: "darwin", GOARCH: "amd64"}).Install(context.Background())
 	if !errors.Is(err, ErrTarballPlatform) {
 		t.Errorf("Intel macOS: err = %v", err)
 	}
@@ -397,7 +397,7 @@ func TestTarballInstallUsesTheAdministratorsProxy(t *testing.T) {
 	}))
 	defer proxy.Close()
 	inst := &TarballInstaller{
-		Version: "0.1.5", Home: t.TempDir(), GOOS: "linux", GOARCH: "amd64",
+		Version: InstallerVersion, Home: t.TempDir(), GOOS: "linux", GOARCH: "amd64",
 		Proxy:  netguard.EgressProxy{HTTPSProxy: proxy.URL},
 		Runner: &fakeRunner{version: "0.1.5"},
 	}

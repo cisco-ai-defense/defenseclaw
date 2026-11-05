@@ -77,8 +77,9 @@ WINDOWS_SUPPORTED: set[str] = {
     "kiro",
     "devin",
     "antigravity",
+    "opencode",
 }
-WINDOWS_PREVIEW: set[str] = {"opencode"}
+WINDOWS_PREVIEW: set[str] = set()
 WINDOWS_NOT_CERTIFIED: set[str] = set()
 WINDOWS_UNSUPPORTED = {"openclaw", "zeptoclaw"}
 ALL_CONNECTORS = WINDOWS_SUPPORTED | WINDOWS_PREVIEW | WINDOWS_NOT_CERTIFIED | WINDOWS_UNSUPPORTED
@@ -180,12 +181,25 @@ def test_unknown_windows_connector_requires_certification() -> None:
     assert support.available is False
 
 
-def test_non_windows_behavior_is_unchanged() -> None:
+def test_non_windows_connectors_are_supported() -> None:
     for os_name in ("linux", "darwin"):
         for name in ALL_CONNECTORS:
             support = connector_platform_support(name, os_name)
-            assert support.status == (PREVIEW if name == "opencode" else SUPPORTED)
+            assert support.status == SUPPORTED
             assert support.available
+
+
+def test_opencode_v2_platform_status_matches_live_certification_gap0552() -> None:
+    for os_name in ("linux", "darwin", "windows"):
+        support = connector_platform_support("opencode", os_name)
+        assert support.status == SUPPORTED, os_name
+        assert connector_preview_on_os("opencode", os_name) is False, os_name
+        assert "OpenCode V2" in support.reason, os_name
+
+
+def test_claude_code_platform_status_stays_supported_gap0552_benign_twin() -> None:
+    for os_name in ("linux", "darwin", "windows"):
+        assert connector_platform_support("claudecode", os_name).status == SUPPORTED
 
 
 def test_supported_connectors_preserves_order_and_available_windows_scope() -> None:
@@ -265,10 +279,7 @@ def test_non_windows_views_are_unfiltered() -> None:
     modes = visible_mode_picker_choices("darwin")
     assert tuple(choice.wire for choice in modes) == tuple(choice.wire for choice in MODE_PICKER_CHOICES)
     for original, shown in zip(MODE_PICKER_CHOICES, modes, strict=True):
-        if shown.wire == "opencode":
-            assert "preview" in shown.label.lower()
-        else:
-            assert shown == original
+        assert shown == original
     assert visible_connector_choices("linux") == tuple(CONNECTOR_CHOICES)
 
 

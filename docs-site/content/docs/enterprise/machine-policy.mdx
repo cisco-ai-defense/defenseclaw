@@ -8,6 +8,7 @@ keywords:
   - Cursor enterprise hooks
   - Copilot policy.d
   - allowManagedHooksOnly
+  - Claude Cowork
 ---
 
 Some agents read a machine-wide policy file that standard users cannot change. For those agents, the standalone profile uses that file instead of each user's own config. On managed Windows, configured Claude Code, Codex and Cursor machine hooks stay installed before the first enrollment and after the last enrolled user is removed. Even with zero enrolled users, their hooks refuse an unenrolled account. The other agents are protected per user: the guardian writes DefenseClaw's hook into each enrolled user's agent config and repairs it. Terms are in [Concepts](/docs/enterprise/concepts).
@@ -176,6 +177,39 @@ With `managed_hooks_only: enforce` (the default):
 - **Your own values win.** If your policy sets a lock to `false` (for example `allow_managed_hooks_only = false` in `requirements.toml`, or `allowManagedHooksOnly: false` in a Claude Code `managed-settings.d` file that sorts after `90-defenseclaw.json`), DefenseClaw does not rewrite it. It reports a conflict and the connector counts as not covered. The same applies to a managed `disableAllHooks: true` or a `policyHelper` for Claude Code, and to `hooks.state` in Codex requirements.
 
 With the lock on, hooks your developers need run only if you deploy them through machine policy. Set `managed_hooks_only: preserve` for a connector to leave its lock off; the foreign-hook guard then covers it.
+
+## Claude Cowork
+
+Claude Cowork runs its agent loop on the device, as the signed-in user, with the Claude Code engine that Claude Desktop bundles. That engine reads Claude Code machine policy, so DefenseClaw's Claude Code drop-in (`90-defenseclaw.json`, see [Machine policy files](#machine-policy-files)) is meant to cover Cowork as well. There is nothing to configure for Cowork itself.
+
+What was measured, on macOS with Claude Desktop 4.4212.0: test hooks placed in Claude Code managed settings, including a `managed-settings.d` drop-in, ran in Cowork turns, and a deny from them stopped the tool. In the 1.0.8 tests on managed macOS and Windows, with Claude Desktop 4.16336.0 (engine 2.1.317) using third-party inference through Amazon Bedrock, Cowork's hook calls reached the DefenseClaw gateway with surface `cowork`, and an administrator deny rule blocked `mcp__workspace__bash`. A read of a `.env` file was not blocked: its contents reached the model, which chose not to repeat the key (DefenseClaw did not withhold it), and on macOS DefenseClaw recorded the secret after the read. To prevent such a read, deny the path at `PreToolUse`: see [Secrets in tool results](/docs/connectors/claudecode#secrets-in-tool-results). On Windows, an account that has only Claude Desktop is enrolled. On managed macOS, with the gateway service stopped, Cowork prompts were blocked with `enterprise_managed_gateway_not_running`. Those tests did not cover whether Cowork's built-in hook that keeps file tools inside the connected folders still runs under `enforce`. On Linux, the managed drop-in and per-user setup were verified, but Cowork itself was not run: Claude Desktop for Linux is a beta, and Cowork on Linux is not certified.
+
+**Customers' own Cowork plugin hooks.** `managed_hooks_only` for `claudecode` decides whether they run. Measured on managed macOS with Claude Desktop 4.16336.0: under `enforce` an organization plugin's hooks did not run, under `preserve` they did, and DefenseClaw's own hooks ran under both. Windows has not been measured yet.
+
+- `enforce` (the default) sets `allowManagedHooksOnly: true`. Anthropic documents that Claude Code then runs only the hooks in managed settings, in Cowork as in the terminal, so hooks in Cowork plugins do not run: plugins your users upload, marketplace plugins and organization plugins (`org-plugins/`). The other parts of those plugins (skills, commands, MCP servers) are not affected. Claude Desktop 4.16336.0 installs an organization plugin only when its `.claude-plugin/plugin.json` sets `"installationPreference": "required"`; otherwise the plugin is only listed as available.
+- `preserve` leaves the lock out, so those plugin hooks run too, and a plugin hook can change a tool call's input after DefenseClaw inspected it. The [foreign-hook guard](/docs/enterprise/foreign-hook-guard) does not read Cowork plugins, so it does not stop those hooks either.
+
+To let your users' Cowork plugin hooks run, set `preserve` for Claude Code only, then apply the config (`ensure` on Linux and macOS, Setup `/ensure` on Windows):
+
+```yaml title="config.yaml (excerpt)"
+enterprise:
+  machine_policy:
+    connectors:
+      claudecode:
+        managed_hooks_only: preserve
+```
+
+**The engine build.** Claude Desktop keeps that engine in the user's own data folder, under `claude-code/<version>/`. Each deployment has its own folder, and DefenseClaw looks in all of them:
+
+| OS | Signed in to Claude | Third-party inference (Bedrock, Vertex AI, Foundry) |
+| --- | --- | --- |
+| macOS | `~/Library/Application Support/Claude` | `~/Library/Application Support/Claude-3p` |
+| Windows | `%APPDATA%\Claude`, or for the Microsoft Store (MSIX) app `%LOCALAPPDATA%\Claude-Data\claude_<id>` | `%LOCALAPPDATA%\Claude-3p` |
+| Linux | `~/.config/Claude` | `~/.config/Claude-3p` |
+
+DefenseClaw trusts the engine by its code signature, not by its folder: on macOS a valid Developer ID signature of Anthropic (team `Q6L2SF6YDW`, identifier `com.anthropic.claude-code`), on Windows a valid Authenticode signature by `Anthropic, PBC` (or `Anthropic PBC`) on a `claude.exe` whose file version is the folder's version. The engine's version then selects the hook contract, as for the Claude Code CLI. In each data folder DefenseClaw takes the newest build that verifies, so a newer unsigned or half-downloaded build does not hide a signed one. Each data folder counts on its own, and the user's row follows the oldest admitted engine, so its hooks work for both deployments. A build whose signature does not verify is reported with the reason: `surface_unverified` in the unprotected agents, and `managed_launch_uninspected` while it runs. Linux builds carry no vendor signature. A Linux build counts only when its version folder holds an executable `claude`; it is always reported as unsigned (`status` shows `unsigned`) and as unidentified while it runs, so `verify` fails while one runs. Its version still selects the hook contract, as before. On Windows, when more `Claude-Data\claude_<id>` folders exist than DefenseClaw reads (four), the one of the installed MSIX package is read first, and the scan reports the app inventory as incomplete.
+
+**Status.** `status` and `verify` print a `cowork` line and a `cowork` JSON member: whether DefenseClaw's side is `configured` (claudecode enabled, its machine policy hooks in place, and the Claude Desktop surface not refused by `enterprise.enrollment.unverified_versions: refuse`), the lock, the Cowork events the gateway saw since it started, and, for each enrolled account, its last Cowork event or `never`. The line says how many hook calls reported themselves as Cowork since the gateway started and when the last one came, or that none has yet. The last Cowork event is the last hook call that reported itself as Cowork: the hook names its surface (caller-reported attribution, which any local process can send), so it is not proof that the DefenseClaw hook ran in Cowork. `accounts_truncated` says more accounts exist than are listed. Run as root (Linux, macOS) or as an elevated administrator (Windows), the block also lists, for every account enrollment includes, its Claude Desktop data folders (`1p` and `3p`), the newest Claude Code engine build in each, and that build's trust: `trusted` (macOS: the code signature verifies as Anthropic's Claude Code and its Info.plist names the folder's version, and codesign runs as the account; Windows: a `claude.exe` in the build has an Authenticode signature by Anthropic whose signed file version is the folder's), `untrusted`, `unsigned` (every Linux build) or `not_found` (JSON `claude_desktop`), for example `cowork alice: Claude Desktop 3p (...), engine 2.1.317 trusted`. It is read from disk when status runs, so no Cowork session has to be open, and the engine is never run. On Windows a status run as LocalSystem (an MDM run) reads each account's folders as that account, so an account with no signed-in session is listed as `not checked`. On Linux and macOS Claude Code is a machine-policy connector, so these accounts have no enrollment row and `enrollment.targets` does not count them. Account names are in this administrator view only and are not in the forward schema; the forward schema keeps only the counts. The TUI shows only the gateway's Cowork event count on the Claude Code connector.
 
 ## Copilot in VS Code
 

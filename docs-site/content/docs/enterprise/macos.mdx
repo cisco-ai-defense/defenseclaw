@@ -311,6 +311,19 @@ its members get the default profile; `status` and `verify` warn
 `defenseclaw guardrail profile` commands. Monitoring is in
 [Status and verify](/docs/enterprise/operations).
 
+## Claude Cowork
+
+Claude Cowork runs its agent loop on the Mac, as the user, with the Claude Code engine that Claude Desktop bundles. The Claude Code drop-in (`/Library/Application Support/ClaudeCode/managed-settings.d/90-defenseclaw.json`) is meant to cover it. There is nothing to configure for Cowork itself.
+
+| Item | macOS |
+| --- | --- |
+| Measured | Test hooks in managed settings and in a `managed-settings.d` drop-in ran in Cowork turns on Claude Desktop 4.4212.0, and a deny held. In the 1.0.8 tests on a managed Mac with Claude Desktop 4.16336.0 (engine 2.1.317) using third-party inference through Amazon Bedrock, Cowork's hook calls reached the gateway with surface `cowork`, and an administrator deny rule blocked `mcp__workspace__bash`. A read of a `.env` file was not blocked: its contents reached the model, which chose not to repeat the key (DefenseClaw did not withhold it), and DefenseClaw recorded the secret after the read; to prevent such a read, deny the path at `PreToolUse` ([Secrets in tool results](/docs/connectors/claudecode#secrets-in-tool-results)). With `managed_hooks_only: enforce` an organization plugin's hooks did not run, with `preserve` they did, and DefenseClaw's hooks ran under both. With the gateway service stopped, Cowork prompts were blocked with `enterprise_managed_gateway_not_running` |
+| Organization plugins | Claude Desktop 4.16336.0 installs a plugin in `/Library/Application Support/Claude/org-plugins/` only when its `.claude-plugin/plugin.json` sets `"installationPreference": "required"`; otherwise it is only listed as available |
+| Engine folder | `~/Library/Application Support/Claude/claude-code/<version>/`, or `Claude-3p` instead of `Claude` for third-party inference. DefenseClaw trusts it by Anthropic's Developer ID signature, checked as the user with `codesign`, and by an `Info.plist` version equal to the folder |
+| Shell | Runs in the Cowork Linux VM on the Mac |
+
+See [Claude Cowork](/docs/connectors/cowork) for the tools, `managed_hooks_only` and the limits.
+
 ## Sandboxes
 
 A macOS standalone install can run coding agents in OpenShell MicroVM sandboxes on
@@ -345,7 +358,7 @@ the upgrade resolver.
 
 Nothing migrates a per-user install. Before you deploy, have each user run
 `defenseclaw uninstall --binaries --yes` (add `--all` to delete `~/.defenseclaw`;
-[Uninstall](/docs/get-started/download)).
+[Uninstall](/docs/get-started/download)). If a user set up Claude Cowork, they also remove the DefenseClaw plugin in Claude Desktop (**Customize > Plugins**, then the **...** menu on DefenseClaw, **Remove**); until then Cowork tool calls are blocked.
 
 A `config.yaml` a per-user install left in `~/.defenseclaw` is not the policy the
 device enforces. The installed managed `defenseclaw` launcher offers only `sandbox`

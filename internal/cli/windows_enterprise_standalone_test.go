@@ -1169,10 +1169,15 @@ func (stub *ensureStub) install(t *testing.T) {
 	})
 	originalHookRuntime := windowsEnterpriseHookRuntimeDir
 	originalCopies := windowsEnterpriseRemoveReplacementCopies
+	originalCowork := windowsEnterpriseCoworkEnsureDrift
 	t.Cleanup(func() {
 		windowsEnterpriseHookRuntimeDir = originalHookRuntime
 		windowsEnterpriseRemoveReplacementCopies = originalCopies
+		windowsEnterpriseCoworkEnsureDrift = originalCowork
 	})
+	// The host's real Cowork check stays out of scripted ensures; the
+	// Cowork drift tests replace this after install.
+	windowsEnterpriseCoworkEnsureDrift = func() (string, string) { return "", "" }
 	windowsEnterpriseHookRuntimeDir = func() (string, error) { return "", nil }
 	windowsEnterpriseRemoveReplacementCopies = func() []string { return nil }
 	windowsEnterprisePolicyDigest = func(context.Context) ([]byte, error) { return nil, nil }

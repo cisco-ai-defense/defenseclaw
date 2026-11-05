@@ -6,6 +6,8 @@
 package enterprisehooks
 
 import (
+	"bytes"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
@@ -113,27 +115,134 @@ func renderRecordedWindowsClaudeManagedPolicy(record windowsClaudeManagedPolicyS
 	if !filepath.IsAbs(record.HookExecutable) || filepath.Clean(record.HookExecutable) != record.HookExecutable {
 		return nil, errors.New("enterprise hooks: the Claude Code managed policy ownership record names no canonical hook executable")
 	}
-	provider := connector.NewClaudeCodeConnector()
-	contracts := []string{""}
-	for _, contract := range connector.KnownHookContracts("claudecode") {
-		contracts = append(contracts, contract.ContractID)
-	}
-	for _, contract := range contracts {
+	for _, contract := range windowsClaudeRecordedPolicyContracts() {
 		for _, lock := range []bool{true, false} {
-			body, err := provider.ManagedHookPolicy(connector.SetupOpts{
-				APIAddr:                     record.GatewayAddr,
-				HookFailMode:                "closed",
-				ManagedEnterprise:           true,
-				HookExecutable:              record.HookExecutable,
-				HookContractID:              contract,
-				ClaudeAllowManagedHooksOnly: lock,
-			})
+			body, err := renderWindowsClaudeRecordedPolicy(record, contract, lock)
 			if err == nil && windowsManagedPolicyDigest(body) == record.PolicySHA256 {
 				return body, nil
 			}
 		}
 	}
 	return nil, fmt.Errorf("enterprise hooks: no Claude Code policy this release renders for %s has the digest its ownership record keeps, so the changed drop-in is left as it is", record.HookExecutable)
+}
+
+// windowsClaudeRecordedPolicyContracts is every hook contract a recorded
+// drop-in may have been rendered under: none, then each known one.
+func windowsClaudeRecordedPolicyContracts() []string {
+	contracts := []string{""}
+	for _, contract := range connector.KnownHookContracts("claudecode") {
+		contracts = append(contracts, contract.ContractID)
+	}
+	return contracts
+}
+
+// renderWindowsClaudeRecordedPolicy renders the drop-in for the record's hook
+// executable and gateway under contract, with or without the
+// managed-hooks-only lock.
+func renderWindowsClaudeRecordedPolicy(record windowsClaudeManagedPolicyState, contract string, lock bool) ([]byte, error) {
+	return connector.NewClaudeCodeConnector().ManagedHookPolicy(connector.SetupOpts{
+		APIAddr:                     record.GatewayAddr,
+		HookFailMode:                "closed",
+		ManagedEnterprise:           true,
+		HookExecutable:              record.HookExecutable,
+		HookContractID:              contract,
+		ClaudeAllowManagedHooksOnly: lock,
+	})
+}
+
+// ApplyWindowsClaudeManagedHooksOnlyLock writes the configured
+// managed_hooks_only setting into DefenseClaw's own Claude Code drop-in
+// (90-defenseclaw.json) and reports whether it wrote it. The lock is machine
+// policy only: no file in an account's profile carries it. Only a target's
+// own install rewrote the drop-in, and the guardian installs a target only in
+// its account's Windows session, so a config-only Setup /ensure that changed
+// managed_hooks_only while an enrolled account was signed out failed every
+// such target's verification, could not repair it, and failed 1603 with a
+// rollback (cowork-1-0-8 GAP-0064).
+//
+// It replaces the drop-in only when it is, byte for byte, the rendering its
+// ownership record keeps with the other lock (the same hook executable,
+// gateway and contract), and keeps the enrolled SIDs. Any other drop-in is
+// left alone: an edit outside DefenseClaw stays a verification failure, and
+// RestoreWindowsClaudeManagedPolicyDrift puts DefenseClaw's own bytes back.
+// Standalone only: a Secure Client drop-in never carries the lock.
+func ApplyWindowsClaudeManagedHooksOnlyLock() (bool, error) {
+	if !windowsEnterpriseStandaloneProcess() {
+		return false, nil
+	}
+	// LocalSystem (the guardian) or an elevated administrator, as for
+	// RestoreWindowsClaudeManagedPolicyDrift.
+	if err := windowsEnterpriseMutationIdentityCheck(); err != nil {
+		if requireWindowsClaudeTeardownAdministrator() != nil {
+			return false, err
+		}
+	}
+	want := windowsClaudeManagedHooksOnlyEnforced()
+	written := false
+	err := windowsClaudeManagedPolicyTransaction(func() error {
+		path, err := windowsClaudeManagedPolicyPath()
+		if err != nil {
+			return err
+		}
+		statePath := filepath.Join(filepath.Dir(path), windowsClaudeManagedStateFile)
+		state, err := snapshotWindowsManagedFileWithLimit(statePath, windowsClaudeManagedStateLimit)
+		if err != nil {
+			return err
+		}
+		policy, err := snapshotWindowsManagedFileWithLimit(path, windowsClaudeManagedPolicyLimit)
+		if err != nil || !policy.existed || !state.existed {
+			return err
+		}
+		if windowsClaudeManagedPolicyHasLock(policy.data) == want {
+			return nil
+		}
+		record, err := validateExistingWindowsManagedPolicyOwnership(policy, state)
+		if err != nil || record.SchemaVersion != 2 {
+			// A changed drop-in or an earlier release's record is not a
+			// setting change: the target verification reports it.
+			return nil
+		}
+		var body []byte
+		for _, contract := range windowsClaudeRecordedPolicyContracts() {
+			current, renderErr := renderWindowsClaudeRecordedPolicy(record, contract, !want)
+			if renderErr != nil || !bytes.Equal(current, policy.data) {
+				continue
+			}
+			if body, err = renderWindowsClaudeRecordedPolicy(record, contract, want); err != nil {
+				return err
+			}
+			break
+		}
+		if body == nil {
+			return nil
+		}
+		record.PolicySHA256 = windowsManagedPolicyDigest(body)
+		stateBody, err := json.MarshalIndent(record, "", "  ")
+		if err != nil {
+			return err
+		}
+		stateBody = append(stateBody, '\n')
+		rollback := func(cause error) error {
+			for _, snapshot := range []windowsManagedFileSnapshot{policy, state} {
+				if restoreErr := restoreWindowsManagedFile(snapshot); restoreErr != nil {
+					cause = errors.Join(cause, fmt.Errorf("enterprise hooks: put back the Claude Code drop-in: %w", restoreErr))
+				}
+			}
+			return cause
+		}
+		if err := windowsManagedPolicyWriter(path, body, true); err != nil {
+			return rollback(err)
+		}
+		if err := windowsManagedPolicyWriter(statePath, stateBody, true); err != nil {
+			return rollback(err)
+		}
+		if err := verifyWindowsClaudeManagedPolicy(path, body); err != nil {
+			return rollback(err)
+		}
+		written = true
+		return nil
+	})
+	return written, err
 }
 
 // WindowsClaudeManagedPolicyDrift names DefenseClaw's own Claude Code drop-in

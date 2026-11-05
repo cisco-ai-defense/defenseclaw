@@ -8,8 +8,10 @@ import (
 	"fmt"
 	"net"
 	"os"
+	"path/filepath"
 	"runtime"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/defenseclaw/defenseclaw/internal/config"
@@ -23,6 +25,7 @@ var (
 	gatewayPortAnswers        = gatewayPortAcceptsConnections
 	gatewayManagedState       = func() (bool, int) { return daemon.New(config.DefaultDataPath()).IsRunning() }
 	gatewayRunsReplacedBinary = func() bool { return daemon.New(config.DefaultDataPath()).RunsReplacedExecutable() }
+	gatewayExecutable         = os.Executable
 )
 
 // foreignGatewayListener explains a listener on the configured API port that
@@ -69,6 +72,8 @@ func foreignGatewayListenerAt(cfg *config.Config, host string, port int) string 
 	switch {
 	case holderErr == nil && holder.UID >= 0 && holder.UID != ownUID:
 		return fmt.Sprintf("%s is held by %s, not by this account's gateway", addr, who)
+	case holderErr == nil && holder.UID == ownUID && sameHomeGatewayProcess(holder.PID, config.DefaultDataPath()):
+		return ""
 	case !running:
 		return fmt.Sprintf(
 			"%s is held by %s, not by this account's gateway: no gateway started for %s is running",
@@ -80,6 +85,43 @@ func foreignGatewayListenerAt(cfg *config.Config, host string, port int) string 
 		)
 	}
 	return ""
+}
+
+// sameHomeGatewayProcess recognises a gateway launched without a daemon PID
+// file, such as a transient service. The listener's account is checked by
+// the caller before this process identity is accepted.
+func sameHomeGatewayProcess(pid int, home string) bool {
+	if runtime.GOOS != "linux" || pid <= 0 || !filepath.IsAbs(home) {
+		return false
+	}
+	executable, err := gatewayExecutable()
+	if err != nil || filepath.Base(executable) != "defenseclaw-gateway" {
+		return false
+	}
+	expected, err := os.Stat(executable)
+	if err != nil {
+		return false
+	}
+	actual, err := os.Stat("/proc/" + strconv.Itoa(pid) + "/exe")
+	if err != nil || !os.SameFile(expected, actual) {
+		return false
+	}
+	environment, err := os.ReadFile("/proc/" + strconv.Itoa(pid) + "/environ")
+	if err != nil || len(environment) == 0 || len(environment) > 4*1024*1024 {
+		return false
+	}
+	count := 0
+	for _, entry := range strings.Split(string(environment), "\x00") {
+		if !strings.HasPrefix(entry, "DEFENSECLAW_HOME=") {
+			continue
+		}
+		value := strings.TrimPrefix(entry, "DEFENSECLAW_HOME=")
+		if !filepath.IsAbs(value) || filepath.Clean(value) != filepath.Clean(home) {
+			return false
+		}
+		count++
+	}
+	return count == 1
 }
 
 // otherAccountListenerAt explains a listener on host:port that belongs to

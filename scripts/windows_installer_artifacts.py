@@ -235,6 +235,27 @@ def _pe_machine(path: Path) -> int | None:
     return int.from_bytes(signature[4:6], "little")
 
 
+def _portable_executables(root: Path) -> tuple[int, list[tuple[str, int]]]:
+    """Count the PEs under *root* and list the non-x64 ones.
+
+    Files are read the way an archive step reads them (a symlink counts as the
+    file it names), so nothing that is shipped escapes the check.
+    """
+
+    inspected = 0
+    foreign: list[tuple[str, int]] = []
+    for path in sorted(root.rglob("*")):
+        if not path.is_file():
+            continue
+        machine = _pe_machine(path)
+        if machine is None:
+            continue
+        inspected += 1
+        if machine != IMAGE_FILE_MACHINE_AMD64:
+            foreign.append((path.relative_to(root).as_posix(), machine))
+    return inspected, foreign
+
+
 def prune_foreign_portable_executables(root: Path) -> dict[str, object]:
     """Remove the listed non-x64 PEs from site-packages and repair RECORD.
 
@@ -247,15 +268,9 @@ def prune_foreign_portable_executables(root: Path) -> dict[str, object]:
         raise ArtifactError(f"site-packages root is not a directory: {root}")
     removed: list[str] = []
     unexpected: list[str] = []
-    for path in sorted(root.rglob("*")):
-        if not path.is_file() or path.is_symlink():
-            continue
-        machine = _pe_machine(path)
-        if machine is None or machine == IMAGE_FILE_MACHINE_AMD64:
-            continue
-        relative = path.relative_to(root).as_posix()
+    for relative, machine in _portable_executables(root)[1]:
         if relative in FOREIGN_PE_REMOVALS:
-            path.unlink()
+            (root / relative).unlink()
             removed.append(relative)
         else:
             unexpected.append(f"{relative} (machine 0x{machine:04x})")
@@ -276,6 +291,28 @@ def prune_foreign_portable_executables(root: Path) -> dict[str, object]:
         record.write_text(output.getvalue(), encoding="utf-8", newline="\n")
         rewritten_records += 1
     return {"removed_foreign_pe": removed, "rewritten_records": rewritten_records}
+
+
+def refuse_foreign_portable_executables(root: Path) -> dict[str, int]:
+    """Fail unless every PE in a whole runtime tree is Windows x64.
+
+    The last check before a Windows x64 runtime is archived (the standalone
+    scanner runtime, rel-1-0-6:GAP-0107): it removes nothing, and a tree with
+    no PE at all is refused as the wrong root.
+    """
+
+    root = root.resolve(strict=True)
+    if not root.is_dir():
+        raise ArtifactError(f"runtime root is not a directory: {root}")
+    inspected, foreign = _portable_executables(root)
+    if foreign:
+        raise ArtifactError(
+            "non-x64 portable executables in the Windows x64 runtime (Setup refuses them): "
+            + ", ".join(f"{relative} (machine 0x{machine:04x})" for relative, machine in foreign)
+        )
+    if not inspected:
+        raise ArtifactError(f"no portable executable under {root}: not a Windows runtime")
+    return {"x64_pe": inspected}
 
 
 def _parse_go_build_info(output: str) -> dict:
@@ -1314,6 +1351,11 @@ def _parser() -> argparse.ArgumentParser:
     )
     prune_parser.add_argument("--root", type=Path, required=True)
 
+    x64_parser = subparsers.add_parser(
+        "check-x64-pe", help="refuse a runtime tree that holds any non-x64 PE"
+    )
+    x64_parser.add_argument("--root", type=Path, required=True)
+
     go_parser = subparsers.add_parser("go-inventory", help="inventory Go modules in exact payload binaries")
     go_parser.add_argument("--go", type=Path, required=True)
     go_parser.add_argument("--output", type=Path, required=True)
@@ -1344,6 +1386,8 @@ def main() -> int:
             result = normalize_site_packages(args.root)
         elif args.command == "prune-foreign-pe":
             result = prune_foreign_portable_executables(args.root)
+        elif args.command == "check-x64-pe":
+            result = refuse_foreign_portable_executables(args.root)
         elif args.command == "go-inventory":
             result = create_go_inventory(args.go, args.output, args.component)
         else:

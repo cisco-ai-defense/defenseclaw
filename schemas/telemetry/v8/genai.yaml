@@ -949,6 +949,23 @@ attributes:
       - exempt
     notes: exempt for an account enterprise.enrollment.exempt_users lists (allowed and inspected, not enrolled); absent for every other account
   introduced_in: telemetry-registry-v2
+- id: defenseclaw.agent.surface
+  type: string
+  brief: Product surface of the agent a hook call came from, as the hook reported it
+  examples:
+  - cowork
+  stability: stable
+  owner: defenseclaw
+  field_class: metadata
+  sensitivity: safe
+  cardinality: low
+  normalization:
+    id: enum-v1
+    overrides:
+      enum:
+      - cowork
+    notes: cowork for a claudecode hook call from Claude Cowork (the Claude Code engine Claude Desktop bundles, with CLAUDE_CODE_IS_COWORK set); absent for every other call. Caller-reported attribution, never a policy input or an identity
+  introduced_in: telemetry-registry-v3
 - id: defenseclaw.user.group_count
   type: int64
   brief: Number of directory groups the end-user account belongs to

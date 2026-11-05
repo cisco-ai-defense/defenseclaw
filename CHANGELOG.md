@@ -8,6 +8,82 @@ for released versions and assets, and the
 [documentation website](https://cisco-ai-defense.github.io/defenseclaw/docs/)
 for current behavior.
 
+## [Unreleased] — 1.0.8
+
+DefenseClaw 1.0.8 follows 1.0.7. It brings Claude Cowork protection, a faster Claude Code hook on Linux, a stricter OpenShell sandbox floor and image check, and a long list of fixes for managed Windows, macOS and Linux. It also restores the `judge_fallback` field on hook audit rows, which 1.0.7 dropped. Secure Client is not part of 1.0.x. There are no breaking changes; the OpenShell 0.1.6 floor and the MicroVM image check can stop sandboxes that ran on 1.0.7 (see Changed).
+
+### Added
+- **Claude Cowork is protected.** DefenseClaw checks every Cowork terminal command, file change and connected tool call before it runs, on macOS and Windows (Linux is Preview). Block mode and custom rules work as they do for Claude Code, every decision is in the audit trail labelled `cowork:*`, and `status`, `doctor` and the TUI show Cowork protection and the last Cowork event. Per user, `defenseclaw setup cowork` builds the plugin and prints the Claude Desktop upload step (Customize > Plugins > Add > Upload plugin). Managed installs cover Cowork through the machine policy, with nothing for users to install. On macOS and Windows, DefenseClaw trusts Claude Desktop's bundled Claude Code engine only by Anthropic's code signature.
+- **A faster Claude Code hook on Linux.** Per-user Claude Code on Linux uses a small native launcher, `defenseclaw-hook-user`, instead of the shell hook. It is started directly, not through a shell, and starts faster. Managed hosts, a custom data folder and hosts without the launcher keep the shell hook. The hook entry changes to the native launcher on the next `setup` or upgrade, and `defenseclaw rollback` puts the shell form back. In our load test, per-user Linux and macOS keep every benign call allowed up to about 50 calls a second, up from about 25.
+- **`guardrail.judge.extra_body` passes extra fields to a local LLM judge.** The new setting passes extra request fields to an OpenAI-compatible judge server, for example to turn off a model's reasoning step. Releases before 1.0.8 refuse it; unset it before you go back.
+- **A standard user on a managed host can run `defenseclaw status`** to see their own Claude Code and Cowork protection.
+- **AI Discovery reports Claude Desktop and Cowork,** including Claude Desktop on third-party inference.
+- **MDM `detect.sh --require-security-complete`** is the strict check; `--require-healthy` no longer fails a stock Linux or macOS host.
+- **Managed Windows `Setup /ensure` reports `ensure_config_restart` and `ensure_config_failed` warnings.**
+
+### Changed
+- **OpenShell sandboxes need OpenShell 0.1.6.** `setup` installs 0.1.6 and upgrades 0.1.1 to 0.1.5 in place. On an older OpenShell, DefenseClaw still lists, stops, deletes and pulls from sandboxes but creates and starts none, and `doctor` says why. A managed `enterprise.openshell.version` pin older than 0.1.6 is moved to 0.1.6 once none of a person's sandboxes is running. With sandboxes on, plan for OpenShell 0.1.6.
+- **MicroVM images must resolve `localhost` locally.** At image build and again in the guest, DefenseClaw checks that `localhost` resolves to 127.0.0.1 through the image's own resolver without a DNS query. An image whose hosts lookup asks DNS first, loads other name-service modules, or preloads libraries through `/etc/ld.so.preload` is refused at create. Stock images pass the image check; see Known limits for MicroVMs on a per-user OpenShell gateway.
+- **Hook fail modes are unchanged.** Per-user hooks follow the saved outage mode: when it is unset, default and permissive run a call with a warning while the gateway is down, and strict blocks it. A gateway that is up, accepted the call and gave no final decision before the hook deadline blocks the call in every tier. One exception on per-user Linux: a call that reaches a gateway that has just restarted and has not answered anything yet follows the outage mode. Managed hosts fail closed.
+- **In an OpenShell sandbox, the Claude Code hook launches directly,** so shell options in the agent environment cannot stop it. Per-user Claude Code hooks outside a sandbox launch the same way.
+- **Managed Unix Claude Code hooks are re-rendered in exec form on upgrade.**
+- **The sudoers rule covers `/etc/sudoers` itself, not only `sudoers.d`:** on managed Linux and macOS, and on managed Windows for Claude Code `Write`, `Edit` and `MultiEdit` and Claude Code shell writes to `/etc/sudoers`. Other Windows spellings are listed under Known limits.
+- **OpenCode V2 is listed as Supported.**
+- **AI Defense: PreToolUse is sent to AI Defense as a tool call,** with the flattened text kept.
+- **`defenseclaw init --non-interactive --yes` starts the gateway.**
+- **Per-user macOS checks group membership and session facts in process,** so a hook call no longer starts `dsmemberutil`, `defaults`, `plutil`, `lsof` or `klist`.
+- **The hook audit path is faster:** fewer database writes per hook call and shorter write holds.
+- **The Windows gateway computes hook artifact digests as a stream:** its memory after start peaks near 190 MB instead of about 650 MB.
+- **The Python runtime bundled with the Windows installers moves from 3.13.15 to 3.13.17,** the last 3.13 release with Windows builds. It brings OpenSSL 3.5, tarfile and SSL fixes, and the current pip and certifi.
+- **Managed Windows: a config-only `Setup /ensure` takes about 110 seconds instead of about 183.**
+- **The runtime records one finding when a finding is new or changes,** not on every scan.
+- **`openshell.middleware.enabled` is retired.** It did nothing. Configs that carry it still load and ignore it; `config set` refuses it.
+
+### Fixed
+- **`judge_fallback` is back on hook audit rows.** Since 1.0.7, a late or missing LLM judge verdict was counted in health and metrics but not written to the hook's audit row. 1.0.8 writes it again, on the Claude Code route and the agent-gateway route, with or without `X-DefenseClaw-Hook-Answer-Within-Ms`.
+- **Ordinary loop copies, including padded and stepped brace ranges, are no longer blocked;** protected destinations still are.
+- **Claude Code plugins: `plugin block`, `restore` and `unblock` in quick succession leave the state the last command asked for,** and a quarantined plugin has one quarantine location that `info`, `restore` and `unblock` find.
+- **`guardrail fail-mode --connector kiro` works.**
+- **The native Linux Claude Code hook honours a lowered `DEFENSECLAW_HOOK_MAX_BODY`.** Managed hooks ignore this variable and keep the fixed 1 MiB limit.
+- **`doctor` checks each required Claude Code hook event and names a missing one.**
+- **`uninstall --all --binaries` also removes `defenseclaw-hook-user`,** and a managed purge removes the per-user hook helpers.
+- **Managed Windows Setup installs, upgrades and uninstalls with permission drift and busy profile folders instead of failing,** and works on a domain-joined host that is off the corporate network.
+- **Managed Windows: uninstall and `/ensure` keep working after an administrator deletes an enrolled user account.**
+- **Managed Windows: a config-only `Setup /ensure` no longer fails with 1603 when the enrolled user is signed out or disconnected.**
+- **Managed Windows: the scanner runtime that Setup installs holds x64 programs only.**
+- **Standalone managed Windows: a trust file whose permissions drifted is not repaired in place.** DefenseClaw refuses it and names it in `status` and `verify` (see Known limits for how to recover).
+- **Managed Windows: a user's `.defenseclaw` folder that is a link the user created no longer fails `/ensure` for the whole machine;** the account is reported and the rest goes on. A link or folder there that an administrator created still stops a config-changing `/ensure` until it is removed (fixed in the next release). The managed policy file stays published on volumes that refuse an atomic rename.
+- **Managed Windows: the gateway reports a config or guardrail error in health and retries instead of stopping.**
+- **Managed macOS and Linux: a no-op `ensure` no longer holds status busy,** and two config pushes five seconds apart restart the gateway once.
+- **Managed `verify` right after an interrupted bundle apply no longer reports DefenseClaw's own agent-version probe as an uninspected launch.**
+- **Hermes audit rows carry the agent id and instance id from the first tool call of an enrolled session.**
+- **OTLP records are kept through a collector outage and replayed.** Health counts destination rejections per destination.
+- **`defenseclaw-gateway status` recognises a gateway started as a transient systemd unit in the same home.** (`defenseclaw status` does not yet; see Known limits.)
+- **With the guardrail disabled, the gateway starts without the policies folder,** and a configured custom global pack is kept.
+
+### Removed
+- `openshell.middleware.enabled`, and the code behind it in the CLI, the macOS app's config editor and the gateway sandbox routes.
+- The old MicroVM `/etc/hosts` probe path, replaced by the image and guest resolver check, and the pinned `libnss-myhostname` install in the sandbox image.
+- The per-call `defaults`, `plutil`, `lsof` and `klist` runs on macOS and the per-call Kerberos lookup.
+- Several unused Windows trust and Setup helpers, and unused CLI and TUI helpers.
+
+### Known limits
+- **Some shell and PowerShell forms are still read more strictly or more loosely than the shell runs them.** On managed Windows this includes the Git Bash `/c/etc/sudoers` spelling and Codex shell writes to `/etc/sudoers`. These are tracked for the next release; the LLM judge remains the second layer.
+- **Codex starts its hooks through a shell.** If the shell Codex picks is started with options that stop it from running commands, the Codex hook never starts and the call goes ahead without a DefenseClaw decision, even in a closed fail mode. `doctor` and `status` warn when the current shell carries such options. Claude Code is not affected: its hook launches directly.
+- **OpenClaw: the official `@openclaw/amazon-bedrock-provider` plugin is still blocked right after `openclaw plugins install`,** as in 1.0.7. Allow it with `defenseclaw plugin allow`. A fix that tells the official plugin apart from a modified copy is planned for the next release.
+- **Standalone managed Windows: if someone gives a standard user write access to a DefenseClaw install file or to a Claude Code, Codex or Cursor machine policy file, DefenseClaw resets that file's permissions but does not trust its contents.** `Setup /verify` reports any changed file, and `Setup /ensure` with your approved `CONFIG=` restores it. If that write access was given to DefenseClaw's deployment record or attestation, Setup refuses the record, and the host must be uninstalled with `PURGE=1` and installed again. More permission-check hardening is planned for the next release.
+- **With OpenShell 0.1.6, MicroVM sandboxes on a per-user (non-root) OpenShell gateway do not start.** OpenShell gives the sandbox's own account ownership of the guest root folder, so DefenseClaw cannot trust how `localhost` resolves inside it, and it refuses and deletes the sandbox with "the MicroVM could not resolve localhost to its loopback ingress". This is confirmed on Linux with KVM; macOS may be affected the same way. Until a fixed OpenShell release is supported, use the Docker driver: run `defenseclaw sandbox setup` and answer no to MicroVMs. Sandboxes created before 1.0.8 still start.
+- **Standalone managed Windows: if `config.yaml` is refused because a standard user was given write access to it, `Setup /ensure` refuses too and the DefenseClaw services stay stopped.** Remove that permission from `config.yaml`, then run `Setup /ensure` with your approved `CONFIG=`. A refused guardian manifest (`targets.yaml`) is restored by `Setup /ensure` directly.
+- **Managed Windows bundle mode: after a hand edit of `config.yaml` is undone, status keeps reporting the edit until you run `Setup /repair`.**
+- **Hook throughput above about 50 calls a second (25 on Windows), measured on a pre-release build, is the target of the next release's performance work.**
+- **Per-user Linux under heavy CPU load: while the gateway restarts (for example after a config change), a few ordinary Claude Code calls can still be blocked with "did not answer in time".** Retry the call. A fix is planned for the next release.
+- **`defenseclaw status` reports a gateway started with `systemd-run --user` as not running,** although it is running and enforcing; `defenseclaw-gateway status` shows the right state.
+- **Hermes: blocks and audit rows work, but the Hermes screen does not show the DefenseClaw reason or the outage notice.**
+- **`guardrail fail-mode --connector openclaw` is refused on a single-connector OpenClaw install;** set the mode with the global `guardrail fail-mode` instead.
+- **Cowork: after a per-user `defenseclaw uninstall` (or `reset`), remove the DefenseClaw plugin in Claude Desktop under Customize > Plugins,** or Cowork tool calls stay blocked. `uninstall` and `reset` print this step.
+- **DefenseClaw shows no hook notices inside Cowork, and a `.env` read in Cowork is not withheld by default.**
+- **Rollback:** use `defenseclaw rollback` or `defenseclaw upgrade --version <x>`. Before you deploy an older release on a managed host, check `defenseclaw enterprise bundle status`: if `current.min_product_version` is higher than the target, ask your administrator first. The 1.0.7 notes about `observability.local.max_store_mb`, `guardrail.judge.max_parallel` and `legacy sandbox running` still apply. Upgrades are supported from 1.0.2 to 1.0.7; upgrades from 0.8.x are not.
+
 ## [Unreleased] — 1.0.7
 
 ### Changed

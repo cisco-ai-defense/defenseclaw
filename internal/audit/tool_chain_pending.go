@@ -192,6 +192,24 @@ func (repo *ToolChainRepository) PreparePending(
 		return result, err
 	}
 
+	if !repo.store.secureClientSchema {
+		// The hook-call write group: concurrent calls' pending actions share
+		// one commit with their audit rows (r108 SWEEP-100). A conflict still
+		// commits the deletion of the original before it is reported.
+		var attempt ToolChainPreparePendingResult
+		var prepareErr error
+		err = repo.store.callGroupWrite(ctx, func(ctx context.Context, tx *sql.Tx) error {
+			attempt, prepareErr = repo.preparePendingTx(ctx, tx, input, now)
+			if prepareErr != nil && !errors.Is(prepareErr, ErrToolChainPendingConflict) {
+				return prepareErr
+			}
+			return nil
+		})
+		if err != nil {
+			return result, err
+		}
+		return attempt, prepareErr
+	}
 	var postCommitErr error
 	err = retryBusyObserved(ctx, "guardrail_chain_pending_prepare",
 		repo.store.sqliteBusyObservabilityV8(), func() error {

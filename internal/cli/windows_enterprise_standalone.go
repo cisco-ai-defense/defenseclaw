@@ -1862,7 +1862,7 @@ func addWindowsEnterpriseUserStateWarning(result *enterprisestatus.Result, repor
 	for _, entry := range windowsEnterpriseReportStrings(report.UserStatePurged) {
 		result.Changes = append(result.Changes, windowsEnterprisePurgedUserStateChange(entry))
 	}
-	var notLocalSystem, pathEntryKept, keptForRegistrations, remaining []string
+	var notLocalSystem, pathEntryKept, keptForRegistrations, accountLinksKept, remaining []string
 	for _, entry := range windowsEnterpriseReportStrings(report.UserStateRemaining) {
 		if account, found := strings.CutSuffix(entry, ": "+windowsManagedHooksNotLocalSystemReason); found {
 			notLocalSystem = append(notLocalSystem, account)
@@ -1870,6 +1870,10 @@ func addWindowsEnterpriseUserStateWarning(result *enterprisestatus.Result, repor
 		}
 		if account, found := strings.CutSuffix(entry, ": "+windowsManagedHooksKeptForRegistrationsReason); found {
 			keptForRegistrations = append(keptForRegistrations, account)
+			continue
+		}
+		if account, found := strings.CutSuffix(entry, ": "+windowsManagedHooksAccountLinkKeptReason); found {
+			accountLinksKept = append(accountLinksKept, account)
 			continue
 		}
 		if account, found := strings.CutSuffix(entry, ": "+windowsManagedHooksSignedOutPathEntryReason); found {
@@ -1913,6 +1917,11 @@ func addWindowsEnterpriseUserStateWarning(result *enterprisestatus.Result, repor
 			windowsEnterpriseLocalSystemRemedy("/uninstall PURGE=1"),
 			windowsEnterpriseBoundedLabels(keptForRegistrations),
 		))
+	}
+	if len(accountLinksKept) > 0 {
+		result.AddWarning("per_user_state_remaining", fmt.Sprintf(
+			"--purge left the account-owned link at the DefenseClaw folder of %d account(s) as found. Accounts: %s",
+			len(accountLinksKept), windowsEnterpriseBoundedLabels(accountLinksKept)))
 	}
 	if len(remaining) > 0 {
 		result.AddError("per_user_state_remaining", windowsEnterpriseUserStateRemainingMessage(
@@ -3051,6 +3060,10 @@ func writeWindowsEnterpriseStandaloneSummary(output io.Writer, result *enterpris
 		if line := enterprisestatus.ConnectorsLine(result.Connectors); line != "" {
 			fmt.Fprintf(output, "  %s\n", line)
 		}
+		for _, line := range enterprisestatus.CoworkLines(result.Cowork) {
+			fmt.Fprintf(output, "  %s\n", line)
+		}
+		enterprisestatus.WriteCoworkVMSensor(output, result.CoworkVMSensor)
 	}
 	writeWindowsEnterpriseScanners(output, result.Scanners)
 	if result.Policy != nil {
@@ -3774,10 +3787,6 @@ func windowsEnterpriseVerifyFailureDetail(report *windowsEnterpriseInstallerRepo
 	return "the installed deployment failed verification without a diagnostic"
 }
 
-// windowsEnterpriseCodexTargetTransactionReason is how the ensure result
-// says why a config change ran the upgrade transaction.
-const windowsEnterpriseCodexTargetTransactionReason = "the config turns Codex protection on or off, or its Codex target differs from the protected deployment record, and only the lifecycle transaction installs and removes Codex's machine policy, so every service was restarted"
-
 func runWindowsEnterpriseStandaloneEnsureOnce(
 	ctx context.Context,
 	cmd *cobra.Command,
@@ -3833,6 +3842,7 @@ func runWindowsEnterpriseStandaloneEnsureOnce(
 		result.Changes = append(result.Changes, "recovered config generation from the approved config and proven previous counter")
 	}
 	alreadyAppliedNeedsRepair := false
+	alreadyAppliedCoworkDrift := ""
 	verifyFailure := ""
 	if run := opts.bundle; !configStateRepaired && run != nil && run.prepared != nil && run.prepared.AlreadyApplied &&
 		statusReport.Installed && !statusReport.TransactionPending &&
@@ -3882,7 +3892,11 @@ func runWindowsEnterpriseStandaloneEnsureOnce(
 					return false, finishEnsure(windowsEnterpriseFailureCodeFor(result))
 				}
 			}
+			coworkReason, coworkDetail := "", ""
 			if !pending {
+				coworkReason, coworkDetail = windowsEnterpriseCoworkEnsureDrift()
+			}
+			if !pending && coworkReason == "" {
 				// The module can set ok:false for security_incomplete with no
 				// failed check. Keep its warning, without turning that into a
 				// synthetic not_ready error during result translation.
@@ -3895,6 +3909,9 @@ func runWindowsEnterpriseStandaloneEnsureOnce(
 				return false, finishEnsure(windowsEnterpriseFailureCodeFor(result))
 			}
 			verifyFailure = "recorded Cursor fail-mode repair"
+			if coworkReason != "" {
+				alreadyAppliedCoworkDrift, verifyFailure = coworkReason, coworkDetail
+			}
 		}
 		if !compilerDrift {
 			alreadyAppliedNeedsRepair = true
@@ -3904,6 +3921,9 @@ func runWindowsEnterpriseStandaloneEnsureOnce(
 		}
 	}
 	plan := windowsEnterpriseEnsurePlan{Action: "repair", Reason: "verify_failed", Detail: verifyFailure}
+	if alreadyAppliedCoworkDrift != "" {
+		plan.Reason = alreadyAppliedCoworkDrift
+	}
 	var planErr error
 	switch {
 	case configStateRepaired:
@@ -3918,6 +3938,9 @@ func runWindowsEnterpriseStandaloneEnsureOnce(
 		result.Errors = []enterprisestatus.Message{}
 		result.AddError(windowsEnterpriseMessageCode(planErr.Error(), "ensure_refused"), planErr.Error())
 		return false, finishEnsure(windowsEnterpriseFailureCodeFor(result))
+	}
+	if plan.Action == "" && (opts.coworkPackagePath != "" || opts.coworkSignaturePath != "") {
+		plan = windowsEnterpriseEnsurePlan{Action: "repair", Reason: "cowork_artifact_delivery"}
 	}
 	if plan.Action == "" {
 		// A compliant deployment can still owe the one-time Cursor fail-mode
@@ -3948,9 +3971,17 @@ func runWindowsEnterpriseStandaloneEnsureOnce(
 		}
 		_, drifted := windowsEnterpriseHookRuntimeDrift()
 		verified := windowsEnterpriseVerifyAcceptable(verifyReport) && drifted == ""
+		coworkReason, coworkDetail := "", ""
+		if verified && !cursorRepairPending {
+			coworkReason, coworkDetail = windowsEnterpriseCoworkEnsureDrift()
+		}
 		switch {
 		case verified && cursorRepairPending:
 			plan = windowsEnterpriseEnsurePlan{Action: "repair", Reason: "recorded_cursor_fail_mode"}
+		case verified && coworkReason != "":
+			// PowerShell verify does not check the Cowork VM host delivery:
+			// converge it as macOS ensure does (drift:cowork_vm_sensor).
+			plan = windowsEnterpriseEnsurePlan{Action: "repair", Reason: coworkReason, Detail: coworkDetail}
 		case verified:
 			accepted := *verifyReport
 			accepted.OK = true
@@ -4213,17 +4244,13 @@ func runWindowsEnterpriseStandaloneEnsureOnce(
 		result.AddWarning("config_reverted", "config.yaml had been changed outside the lifecycle; ensure put the managed config back and kept the edited file at "+keptConfig)
 	}
 	applyWindowsEnterprisePolicy(ctx, result)
-	reason := plan.Reason
-	if len(startOnlyKeys) > 0 {
-		// Say why a config-only change stopped the services (GAP-0719).
-		reason += " (the services read " + strings.Join(startOnlyKeys, ", ") + " only at start, so every service was restarted)"
-	} else if opts.codexTargetTransaction {
-		reason += " (" + windowsEnterpriseCodexTargetTransactionReason + ")"
+	// The release the run left installed; a re-planned run after a recovery
+	// started from an older status.
+	installedVersion := result.InstalledVersion
+	if strings.TrimSpace(installedVersion) == "" {
+		installedVersion = statusReport.InstalledVersion
 	}
-	if plan.Reason == "verify_failed" && plan.Detail != "" {
-		reason += ": " + plan.Detail
-	}
-	result.AddWarning("ensure_"+plan.Action, "ensure ran "+plan.Action+": "+reason)
+	result.AddWarning(windowsEnterpriseEnsureActionWarning(plan, installedVersion, startOnlyKeys, opts.codexTargetTransaction, len(result.Errors) == 0))
 	return false, finishEnsure(windowsEnterpriseFailureCodeFor(result))
 }
 

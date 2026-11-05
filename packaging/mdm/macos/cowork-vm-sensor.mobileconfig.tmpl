@@ -1,0 +1,43 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!-- Copyright 2026 Cisco Systems, Inc. and its affiliates -->
+<!-- SPDX-License-Identifier: Apache-2.0 -->
+<!-- Replace __ARCH__ with amd64 or arm64, and __VENDOR_ID__ with the
+     lowercase identifier Anthropic assigned to the vendor. Deploy with MDM. -->
+<plist version="1.0">
+<dict>
+  <key>PayloadType</key>
+  <string>Configuration</string>
+  <key>PayloadVersion</key>
+  <integer>1</integer>
+  <key>PayloadIdentifier</key>
+  <string>com.cisco.defenseclaw.cowork-vm-sensor</string>
+  <key>PayloadUUID</key>
+  <string>358F3F47-2168-42AD-A8B5-F06F865D475A</string>
+  <key>PayloadDisplayName</key>
+  <string>DefenseClaw Cowork VM sensor</string>
+  <key>PayloadDescription</key>
+  <string>Points Claude Desktop at the DefenseClaw sensor package delivered by the standalone enterprise lifecycle.</string>
+  <key>PayloadScope</key>
+  <string>System</string>
+  <key>PayloadContent</key>
+  <array>
+    <dict>
+      <key>PayloadType</key>
+      <string>com.anthropic.claudefordesktop</string>
+      <key>PayloadVersion</key>
+      <integer>1</integer>
+      <key>PayloadIdentifier</key>
+      <string>com.cisco.defenseclaw.cowork-vm-sensor.settings</string>
+      <key>PayloadUUID</key>
+      <string>1543FCCF-09C7-4A31-9B97-1E1CA00282F2</string>
+      <key>PayloadDisplayName</key>
+      <string>Claude Desktop Cowork EDR settings</string>
+      <key>coworkEDRIntegration</key>
+      <string>/Library/Application Support/Cisco/DefenseClaw/Cowork/defenseclaw-cowork-__ARCH__.tar.gz</string>
+      <key>coworkEDRIntegrationVendor</key>
+      <string>__VENDOR_ID__</string>
+    </dict>
+  </array>
+</dict>
+</plist>

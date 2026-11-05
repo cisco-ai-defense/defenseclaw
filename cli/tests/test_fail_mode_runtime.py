@@ -18,7 +18,7 @@ from defenseclaw import config as dcconfig
 from defenseclaw import fail_mode as fail_mode_runtime
 from defenseclaw.commands import cmd_doctor, cmd_guardrail
 from defenseclaw.context import AppContext
-from defenseclaw.doctor_hooks import _HERMES_REQUIRED_HOOKS
+from defenseclaw.doctor_hooks import _CLAUDE_CONTRACT_EVENTS, _CLAUDE_REQUIRED_HOOKS, _HERMES_REQUIRED_HOOKS
 from defenseclaw.fail_mode import (
     ConnectorFailModeState,
     connector_fail_mode_report,
@@ -2805,3 +2805,413 @@ def test_a_stale_lock_is_still_drift_on_a_managed_host(monkeypatch: pytest.Monke
     assert not fail_mode_runtime._outage_mode_read_at_call_time(cfg, "claudecode", ("hook-script", "closed"))
     state = resolve_connector_fail_mode(cfg, "claudecode")
     assert {"registration-stale", "registration-lock-open"} <= set(state.drift), state.drift
+
+
+# rel-1-0-6 GAP-0569: a packaged per-user Linux install registers the native
+# direct-argv handlers (GAP-0322), which name no claude-code-hook.sh. The
+# expected handlers come from the golden the Go render test pins
+# (internal/gateway/connector/claudecode_linux_peruser_handlers_golden_test.go).
+_CLAUDE_LINUX_GOLDEN = json.loads(
+    (
+        Path(__file__).resolve().parents[2]
+        / "internal"
+        / "gateway"
+        / "connector"
+        / "testdata"
+        / "claudecode_linux_peruser_handlers.json"
+    ).read_text(encoding="utf-8")
+)
+
+
+def _claude_native_layout(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, *, hook_user: bool = True, hook_post: bool = True
+) -> tuple[SimpleNamespace, Path]:
+    home = tmp_path / "home"
+    data_dir = home / ".defenseclaw"
+    bin_dir = home / ".local" / "bin"
+    for directory in (data_dir / "hooks", bin_dir, home / ".claude"):
+        directory.mkdir(parents=True, exist_ok=True)
+    for name, wanted in (("defenseclaw-hook-user", hook_user), ("defenseclaw-hook-post", hook_post)):
+        if wanted:
+            (bin_dir / name).write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+            (bin_dir / name).chmod(0o700)
+    helper = data_dir / "hooks" / ".gateway-helper"
+    helper.write_text(str(bin_dir / "defenseclaw-gateway") + "\n", encoding="utf-8")
+    helper.chmod(0o600)
+    monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(home / ".claude"))
+    monkeypatch.setattr(fail_mode_runtime.Path, "home", lambda: home)
+    monkeypatch.setattr(fail_mode_runtime, "_is_linux", lambda: True)
+    monkeypatch.setattr(fail_mode_runtime, "_is_windows", lambda: False)
+    cfg = SimpleNamespace(
+        data_dir=str(data_dir),
+        deployment_mode="",
+        gateway=SimpleNamespace(host="127.0.0.1", port=18789, api_port=18970, api_bind=""),
+    )
+    return cfg, home
+
+
+def _claude_golden_hooks(home: Path) -> dict:
+    return json.loads(json.dumps(_CLAUDE_LINUX_GOLDEN["hooks"]).replace(_CLAUDE_LINUX_GOLDEN["account"], str(home)))
+
+
+def _claude_contract_hooks(template: dict) -> dict:
+    """Every event Setup registers (doctor_hooks._CLAUDE_REQUIRED_HOOKS), each shaped like *template*.
+
+    The golden pins one synchronous event (PreToolUse) and the asynchronous
+    MessageDisplay; the other events carry the same handlers.
+    """
+
+    hooks = {}
+    for event, (matcher, timeout) in _CLAUDE_REQUIRED_HOOKS.items():
+        source = template.get(event) or template["PreToolUse"]
+        group = json.loads(json.dumps(source[0]))
+        group.pop("matcher", None)
+        if matcher is not None:
+            group["matcher"] = matcher
+        for handler in group["hooks"]:
+            handler["timeout"] = timeout
+        hooks[event] = [group]
+    return hooks
+
+
+def _write_claude_hooks(home: Path, hooks: dict) -> None:
+    (home / ".claude" / "settings.json").write_text(json.dumps({"hooks": hooks}), encoding="utf-8")
+
+
+def _claude_shell_hooks(data_dir: str) -> dict:
+    script = os.path.join(data_dir, "hooks", "claude-code-hook.sh")
+    command = script + " || { rc=$?; echo 'DefenseClaw blocked this' >&2; exit 2; }"
+    return {"PreToolUse": [{"matcher": "*", "hooks": [{"type": "command", "command": command, "timeout": 30}]}]}
+
+
+@pytest.mark.skipif(os.name == "nt", reason="the Linux and macOS hook script and registration")
+def test_claude_linux_per_user_native_registration_is_current(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    cfg, home = _claude_native_layout(monkeypatch, tmp_path)
+    _write_claude_hooks(home, _claude_golden_hooks(home))
+    assert fail_mode_runtime._unix_registration_freshness(cfg, "claudecode") is None
+
+
+def _doctor_claude_hooks_row(cfg: SimpleNamespace, home: Path) -> dict:
+    result = cmd_doctor._DoctorResult()
+    cmd_doctor._check_claudecode_hooks(
+        cfg, result, platform_name="posix", config_path=str(home / ".claude" / "settings.json")
+    )
+    rows = [check for check in result.checks if check["label"] == "Claude Code hooks"]
+    assert len(rows) == 1, result.checks
+    return rows[0]
+
+
+def _claude_shell_contract_hooks(data_dir: str) -> dict:
+    return _claude_contract_hooks(_claude_shell_hooks(data_dir))
+
+
+@pytest.mark.skipif(os.name == "nt", reason="the Linux and macOS hook script and registration")
+@pytest.mark.parametrize("form", ["native", "shell"])
+def test_doctor_claude_hooks_checks_each_required_event(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, form: str
+) -> None:
+    # rel-1-0-2 GAP-0645: 1.0.8 registers a guard and its companion per
+    # synchronous event on per-user Linux (GAP-0322). Doctor counted
+    # DefenseClaw handlers and passed "55 DefenseClaw hook(s) registered"
+    # with PreToolUse gone while status said DEGRADED.
+    cfg, home, _app = _claude_native_runtime(monkeypatch, tmp_path, "open")
+    if form == "native":
+        full = _claude_contract_hooks(_claude_golden_hooks(home))
+    else:
+        # macOS (and managed) installs keep the shell hook (GAP-0559).
+        monkeypatch.setattr(fail_mode_runtime, "_is_linux", lambda: False)
+        full = _claude_shell_contract_hooks(cfg.data_dir)
+    # The lock records claudecode-hooks-v1, which has no DirectoryAdded.
+    assert fail_mode_runtime.claude_required_events(cfg) == _CLAUDE_CONTRACT_EVENTS["claudecode-hooks-v1"]
+
+    _write_claude_hooks(home, full)
+    row = _doctor_claude_hooks_row(cfg, home)
+    assert row["status"] == "pass", row
+
+    # A foreign handler beside DefenseClaw's, and a foreign event, change nothing.
+    foreign = json.loads(json.dumps(full))
+    foreign["PreToolUse"][0]["hooks"].append({"type": "command", "command": "/usr/local/bin/audit-tool", "timeout": 5})
+    foreign["PreToolUse"].append({"matcher": "Bash", "hooks": [{"type": "command", "command": "/usr/bin/true"}]})
+    foreign["Setup"] = [{"hooks": [{"type": "command", "command": "/usr/bin/true"}]}]
+    _write_claude_hooks(home, foreign)
+    row = _doctor_claude_hooks_row(cfg, home)
+    assert row["status"] == "pass", row
+
+    for event in ("PreToolUse", "SessionStart", "MessageDisplay"):
+        cut = json.loads(json.dumps(full))
+        del cut[event]
+        _write_claude_hooks(home, cut)
+        row = _doctor_claude_hooks_row(cfg, home)
+        assert row["status"] == "fail", (event, row)
+        assert f"the DefenseClaw {event} hook" in row["detail"] and "is not registered" in row["detail"], row
+        assert "setup claude-code --yes" in row["remediation"], row
+        if form == "native":
+            assert fail_mode_runtime._unix_registration_freshness(cfg, "claudecode") == "registration-missing"
+
+    # Only DefenseClaw's handler of an event gone, a foreign one left behind.
+    cut = json.loads(json.dumps(full))
+    cut["PreToolUse"][0]["hooks"] = [{"type": "command", "command": "/usr/local/bin/audit-tool"}]
+    _write_claude_hooks(home, cut)
+    row = _doctor_claude_hooks_row(cfg, home)
+    assert row["status"] == "fail" and "PreToolUse hook is not registered" in row["detail"], row
+
+
+@pytest.mark.skipif(os.name == "nt", reason="the Linux and macOS hook script and registration")
+def test_doctor_claude_hooks_fails_a_native_event_without_its_companion(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    cfg, home, _app = _claude_native_runtime(monkeypatch, tmp_path, "open")
+    full = _claude_contract_hooks(_claude_golden_hooks(home))
+    for event in ("PreToolUse", "Stop"):
+        cut = json.loads(json.dumps(full))
+        cut[event][0]["hooks"] = cut[event][0]["hooks"][:1]
+        _write_claude_hooks(home, cut)
+        row = _doctor_claude_hooks_row(cfg, home)
+        assert row["status"] == "fail", (event, row)
+        assert f"the DefenseClaw {event} hook has no fallback-guard-user-hook companion" in row["detail"], row
+        assert fail_mode_runtime._unix_registration_freshness(cfg, "claudecode") is not None
+    # The companion in a group of its own does not guard the event either.
+    split = json.loads(json.dumps(full))
+    guard, companion = split["PreToolUse"][0]["hooks"]
+    split["PreToolUse"] = [{"matcher": "*", "hooks": [guard]}, {"matcher": "*", "hooks": [companion]}]
+    _write_claude_hooks(home, split)
+    row = _doctor_claude_hooks_row(cfg, home)
+    assert row["status"] == "fail" and "PreToolUse hook has no fallback-guard-user-hook companion" in row["detail"]
+    # An asynchronous guard does not block a synchronous event.
+    async_guard = json.loads(json.dumps(full))
+    async_guard["PreToolUse"][0]["hooks"][0]["async"] = True
+    _write_claude_hooks(home, async_guard)
+    row = _doctor_claude_hooks_row(cfg, home)
+    assert row["status"] == "fail" and "PreToolUse" in row["detail"], row
+    # MessageDisplay is asynchronous and has no companion.
+    _write_claude_hooks(home, full)
+    assert len(full["MessageDisplay"][0]["hooks"]) == 1
+    assert _doctor_claude_hooks_row(cfg, home)["status"] == "pass"
+    assert fail_mode_runtime._unix_registration_freshness(cfg, "claudecode") is None
+
+
+@pytest.mark.skipif(os.name == "nt", reason="the Linux and macOS hook script and registration")
+def test_claude_shell_form_is_current_where_setup_writes_it(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    cfg, home = _claude_native_layout(monkeypatch, tmp_path)
+    for platform_linux, managed in ((False, ""), (True, "managed_enterprise")):
+        # macOS and managed installs keep the shell hook (GAP-0559), so the
+        # native handlers are not what Setup wrote there.
+        monkeypatch.setattr(fail_mode_runtime, "_is_linux", lambda value=platform_linux: value)
+        cfg.deployment_mode = managed
+        _write_claude_hooks(home, _claude_shell_hooks(cfg.data_dir))
+        assert fail_mode_runtime._unix_registration_freshness(cfg, "claudecode") is None
+        _write_claude_hooks(home, _claude_golden_hooks(home))
+        assert fail_mode_runtime._unix_registration_freshness(cfg, "claudecode") == "registration-command-stale"
+
+
+@pytest.mark.skipif(os.name == "nt", reason="the Linux and macOS hook script and registration")
+def test_claude_linux_custom_data_dir_keeps_the_shell_form(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    cfg, home = _claude_native_layout(monkeypatch, tmp_path)
+    custom = tmp_path / "custom-data"
+    (custom / "hooks").mkdir(parents=True)
+    cfg.data_dir = str(custom)
+    _write_claude_hooks(home, _claude_shell_hooks(cfg.data_dir))
+    assert fail_mode_runtime._unix_registration_freshness(cfg, "claudecode") is None
+
+
+@pytest.mark.skipif(os.name == "nt", reason="the Linux and macOS hook script and registration")
+def test_claude_stale_1_0_7_shell_entry_on_linux_is_drift(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    # An upgrade to 1.0.8 without Setup leaves the 1.0.7 shell handlers.
+    cfg, home = _claude_native_layout(monkeypatch, tmp_path)
+    _write_claude_hooks(home, _claude_shell_hooks(cfg.data_dir))
+    assert fail_mode_runtime._unix_registration_freshness(cfg, "claudecode") == "registration-command-stale"
+    # The current handlers next to a 1.0.7 entry left behind are drift too.
+    hooks = _claude_golden_hooks(home)
+    hooks["Stop"] = _claude_shell_hooks(cfg.data_dir)["PreToolUse"]
+    _write_claude_hooks(home, hooks)
+    assert fail_mode_runtime._unix_registration_freshness(cfg, "claudecode") == "registration-command-stale"
+
+
+def _tamper_guard_path(hooks: dict) -> None:
+    hooks["PreToolUse"][0]["hooks"][0]["command"] = "/opt/other/defenseclaw-hook-post"
+
+
+def _tamper_drop_api_addr(hooks: dict) -> None:
+    hooks["PreToolUse"][0]["hooks"][0]["args"] = hooks["PreToolUse"][0]["hooks"][0]["args"][:-2]
+
+
+def _tamper_hook_home(hooks: dict) -> None:
+    args = hooks["PreToolUse"][0]["hooks"][0]["args"]
+    args[args.index("--hook-home") + 1] = "/tmp/other/.defenseclaw"
+
+
+def _tamper_drop_companion(hooks: dict) -> None:
+    del hooks["PreToolUse"][0]["hooks"][1]
+
+
+def _tamper_companion_args(hooks: dict) -> None:
+    hooks["PreToolUse"][0]["hooks"][1]["args"][0] = "guard-user-hook"
+
+
+def _tamper_shell_type(hooks: dict) -> None:
+    hooks["PreToolUse"][0]["hooks"][0]["type"] = "prompt"
+
+
+def _tamper_api_port(hooks: dict) -> None:
+    hooks["PreToolUse"][0]["hooks"][0]["args"][-1] = "127.0.0.1:1"
+
+
+@pytest.mark.skipif(os.name == "nt", reason="the Linux and macOS hook script and registration")
+@pytest.mark.parametrize(
+    "tamper",
+    [
+        _tamper_guard_path,
+        _tamper_drop_api_addr,
+        _tamper_hook_home,
+        _tamper_drop_companion,
+        _tamper_companion_args,
+        _tamper_shell_type,
+        _tamper_api_port,
+    ],
+)
+def test_claude_tampered_native_registration_is_drift(monkeypatch: pytest.MonkeyPatch, tmp_path: Path, tamper) -> None:
+    cfg, home = _claude_native_layout(monkeypatch, tmp_path)
+    hooks = _claude_golden_hooks(home)
+    tamper(hooks)
+    _write_claude_hooks(home, hooks)
+    assert fail_mode_runtime._unix_registration_freshness(cfg, "claudecode") == "registration-command-stale"
+
+
+@pytest.mark.skipif(os.name == "nt", reason="the Linux and macOS hook script and registration")
+def test_claude_native_registration_without_guard_uses_the_launcher_shell_form(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    cfg, home = _claude_native_layout(monkeypatch, tmp_path, hook_post=False)
+    native = str(home / ".local" / "bin" / "defenseclaw-hook-user")
+    command = (
+        f"{native} hook --connector claudecode --hook-home {cfg.data_dir} --api-addr 127.0.0.1:18970"
+        " || { rc=$?; echo 'DefenseClaw blocked this' >&2; exit 2; }"
+    )
+    _write_claude_hooks(home, {"PreToolUse": [{"matcher": "*", "hooks": [{"type": "command", "command": command}]}]})
+    assert fail_mode_runtime._unix_registration_freshness(cfg, "claudecode") is None
+    _write_claude_hooks(home, _claude_golden_hooks(home))
+    assert fail_mode_runtime._unix_registration_freshness(cfg, "claudecode") == "registration-command-stale"
+
+
+@pytest.mark.skipif(os.name == "nt", reason="the Linux and macOS hook script and registration")
+def test_claude_rollback_form_is_current_in_the_rolled_back_layout(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    # ConvertHooksForRollback rewrites the native handlers to the bare script
+    # path 1.0.7 owns; 1.0.7 installs no defenseclaw-hook-user, so its layout
+    # expects the shell form.
+    cfg, home = _claude_native_layout(monkeypatch, tmp_path, hook_user=False)
+    script = os.path.join(cfg.data_dir, "hooks", "claude-code-hook.sh")
+    hooks = _claude_golden_hooks(home)
+    for groups in hooks.values():
+        for group in groups:
+            group["hooks"] = [{"type": "command", "command": script, "timeout": group["hooks"][0]["timeout"]}]
+    _write_claude_hooks(home, hooks)
+    assert fail_mode_runtime._unix_registration_freshness(cfg, "claudecode") is None
+
+
+def _claude_native_runtime(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, start: str
+) -> tuple[SimpleNamespace, Path, AppContext]:
+    """A per-user Linux install with the native handlers and a current lock and render."""
+
+    cfg, home = _runtime_cfg(monkeypatch, tmp_path, {"claudecode": start})
+    cfg.data_dir = str(home / ".defenseclaw")
+    (home / ".defenseclaw" / "hooks").mkdir(parents=True)
+    _write_current_runtime(cfg, home, {"claudecode": start})
+    bin_dir = home / ".local" / "bin"
+    for name in ("defenseclaw-hook-user", "defenseclaw-hook-post"):
+        (bin_dir / name).write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+        (bin_dir / name).chmod(0o700)
+    helper = home / ".defenseclaw" / "hooks" / ".gateway-helper"
+    helper.write_text(str(bin_dir / "defenseclaw-gateway") + "\n", encoding="utf-8")
+    helper.chmod(0o600)
+    _write_claude_hooks(home, _claude_contract_hooks(_claude_golden_hooks(home)))
+    # A 1.0.8 per-user render: closed baked in, the outage mode read from
+    # config at call time by the shared helper.
+    hardening = Path(cfg.data_dir) / "hooks" / "_hardening.sh"
+    hardening.write_text("# defenseclaw-call-time-outage-v1\n", encoding="utf-8")
+    hardening.chmod(0o700)
+    lock_path = Path(cfg.data_dir) / "hook_contract_lock.json"
+    lock = json.loads(lock_path.read_text(encoding="utf-8"))
+    lock["shared_hook_script_digests"]["_hardening.sh"] = "sha256:" + hashlib.sha256(hardening.read_bytes()).hexdigest()
+    lock_path.write_text(json.dumps(lock), encoding="utf-8")
+    _install_render(cfg, "claudecode", "\n".join(_HOOK_FAIL_MODE_LINES["claude-code-hook.sh/closed"]))
+    monkeypatch.setattr(fail_mode_runtime.Path, "home", lambda: home)
+    monkeypatch.setattr(fail_mode_runtime, "_is_linux", lambda: True)
+    monkeypatch.setattr(fail_mode_runtime, "_is_windows", lambda: False)
+    app = AppContext()
+    app.cfg = cfg
+    app.logger = MagicMock()
+    return cfg, home, app
+
+
+def _claude_fake_reconcile(cfg: SimpleNamespace, mode: str, calls: list[list[str]]):
+    """Stand in for `defenseclaw-gateway connector reconcile`: record *mode* in .hookcfg and the lock."""
+
+    def run(args, **_kwargs):
+        calls.append(list(args))
+        _install_render(cfg, "claudecode", "\n".join(_HOOK_FAIL_MODE_LINES["claude-code-hook.sh/closed"]))
+        lock_path = Path(cfg.data_dir) / "hook_contract_lock.json"
+        lock = json.loads(lock_path.read_text(encoding="utf-8"))
+        lock["connectors"]["claudecode"]["hook_fail_mode"] = mode
+        lock_path.write_text(json.dumps(lock), encoding="utf-8")
+        (Path(cfg.data_dir) / "hooks" / ".hookcfg").write_text(
+            json.dumps({"version": 2, "gateway_addr": "127.0.0.1:18970", "fail_modes": {"claudecode": mode}}),
+            encoding="utf-8",
+        )
+        return SimpleNamespace(returncode=0, stdout="{}", stderr="")
+
+    return run
+
+
+@pytest.mark.skipif(os.name == "nt", reason="the Linux and macOS hook script and registration")
+@pytest.mark.parametrize("scope", [["--connector", "claudecode"], []])
+@pytest.mark.parametrize(("start", "mode"), [("open", "closed"), ("closed", "open")])
+def test_fail_mode_change_applies_and_verifies_on_a_native_claude_registration(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, scope: list[str], start: str, mode: str
+) -> None:
+    # rel-1-0-6 GAP-0572: the runtime verification after the reconcile judged
+    # the native handlers by claude-code-hook.sh, so every fail-mode change
+    # for Claude Code on a per-user Linux install was refused and rolled back.
+    cfg, home, app = _claude_native_runtime(monkeypatch, tmp_path, start)
+    calls: list[list[str]] = []
+    with (
+        patch.object(fail_mode_runtime.shutil, "which", return_value="/usr/bin/defenseclaw-gateway"),
+        patch.object(fail_mode_runtime.subprocess, "run", side_effect=_claude_fake_reconcile(cfg, mode, calls)),
+    ):
+        result = CliRunner().invoke(cmd_guardrail.fail_mode_cmd, [mode, *scope, "--yes"], obj=app)
+        state = resolve_connector_fail_mode(cfg, "claudecode")
+    assert result.exit_code == 0, result.output
+    assert "restored" not in result.output
+    assert "refreshed and verified" in result.output
+    assert calls and calls[0][1:5] == ["connector", "reconcile", "--connector", "claudecode"]
+    assert state.current and state.desired == mode, state.drift
+    assert "registration-command-stale" not in state.drift
+
+
+@pytest.mark.skipif(os.name == "nt", reason="the Linux and macOS hook script and registration")
+def test_fail_mode_change_rolls_back_over_a_stale_claude_shell_entry(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    # A 1.0.7 shell handler the refresh did not replace is still stale: the
+    # update fails and the previous config and registration come back.
+    cfg, home, app = _claude_native_runtime(monkeypatch, tmp_path, "open")
+    _write_claude_hooks(home, _claude_shell_hooks(cfg.data_dir))
+    settings = home / ".claude" / "settings.json"
+    script = Path(cfg.data_dir) / "hooks" / "claude-code-hook.sh"
+    before = (settings.read_bytes(), script.read_bytes())
+    calls: list[list[str]] = []
+    with (
+        patch.object(fail_mode_runtime.shutil, "which", return_value="/usr/bin/defenseclaw-gateway"),
+        patch.object(fail_mode_runtime.subprocess, "run", side_effect=_claude_fake_reconcile(cfg, "closed", calls)),
+    ):
+        result = CliRunner().invoke(
+            cmd_guardrail.fail_mode_cmd, ["closed", "--connector", "claudecode", "--yes"], obj=app
+        )
+    assert result.exit_code != 0, result.output
+    assert calls
+    assert "previous config and registration restored" in result.output
+    assert "registration-command-stale" in result.output
+    assert (settings.read_bytes(), script.read_bytes()) == before
+    assert cfg.guardrail.connectors["claudecode"].hook_fail_mode == "open"

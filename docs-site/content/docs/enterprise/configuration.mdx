@@ -173,7 +173,7 @@ Under `enterprise.machine_policy`. See [Machine policy](/docs/enterprise/machine
 | Key | Values and default | What it does |
 | --- | --- | --- |
 | `default.ownership` | `merge`, `verify_only`, `off`. Default: `merge` | **Linux and macOS; Copilot, OpenCode and the Claude Code version floor on Windows.** Whether DefenseClaw writes its entries, only checks them, or leaves the agent's machine policy alone. |
-| `default.managed_hooks_only` | `enforce`, `preserve`. Default: `enforce` | **Codex and Claude Code.** Sets the vendor lock that stops user and project hooks. See [`managed_hooks_only` on Windows](#managed_hooks_only-on-windows). |
+| `default.managed_hooks_only` | `enforce`, `preserve`. Default: `enforce` | **Codex and Claude Code.** Sets the vendor lock that stops user and project hooks. For Claude Code it also stops the hooks in Claude Cowork plugins, as Anthropic documents (measured on managed macOS: under `enforce` an organization plugin's hooks did not run, under `preserve` they did); see [Claude Cowork](/docs/enterprise/machine-policy#claude-cowork). See [`managed_hooks_only` on Windows](#managed_hooks_only-on-windows). |
 | `default.foreign_hooks` | `remove`, `report`, `allow`. Default: `remove` | What the [foreign-hook guard](/docs/enterprise/foreign-hook-guard) does with unapproved hooks. |
 | `default.higher_precedence_sources` | `fail`, `warn`. Default: `fail` | **macOS (Codex, Claude Code); Windows (Claude Code, in `policy show` and `verify` only).** Whether a policy source that outranks DefenseClaw's file counts as a coverage failure or only a warning. |
 | `default.allowed_hooks` | List of SHA-256 digests, 64 hex characters, with or without `sha256:`. Default: empty | Hooks the foreign-hook guard approves. |

@@ -36,6 +36,12 @@ _CONNECTOR_SECTION_REFERENCE_PAGES = {"capability-matrix", "compatibility", "ope
 # Windows statement instead.
 _CONNECTOR_SECTION_ROUTE_PAGES = {"agent-gateway"}
 
+# Agent surfaces a connector covers, each with its connector (cowork-1-0-8).
+# Claude Cowork runs Claude Code hooks from the engine Claude Desktop bundles:
+# it has no setup connector and no platform status of its own, so its page
+# points at its connector's page, which holds the status rows.
+_CONNECTOR_SECTION_SURFACE_PAGES = {"cowork": "claudecode"}
+
 
 def _active_connector_docs() -> dict[str, Path]:
     """The per-connector reference pages, which carry the platform status table."""
@@ -53,6 +59,7 @@ def _active_connector_docs() -> dict[str, Path]:
             and not item.startswith("---")
             and item not in _CONNECTOR_SECTION_REFERENCE_PAGES
             and item not in _CONNECTOR_SECTION_ROUTE_PAGES
+            and item not in _CONNECTOR_SECTION_SURFACE_PAGES
         ):
             connector_ids.append(item)
     return {connector_id: reference_dir / f"{connector_id}.mdx" for connector_id in connector_ids}
@@ -98,6 +105,22 @@ def test_windows_guide_has_unambiguous_platform_claims_and_powershell_examples()
     assert text.count("```powershell") >= 8
     assert "OpenShell sandboxes run on Linux and macOS only" in text
     assert "enterprise hooks status" in enterprise_deployment
+
+
+def test_connector_surface_pages_point_at_their_connector() -> None:
+    connectors_dir = ROOT / "docs-site/content/docs/connectors"
+    navigation = json.loads((connectors_dir / "meta.json").read_text(encoding="utf-8"))["pages"]
+    connector_docs = _active_connector_docs()
+    for surface, connector in sorted(_CONNECTOR_SECTION_SURFACE_PAGES.items()):
+        assert surface in navigation, surface
+        # A surface is not a setup connector: its connector's page holds the
+        # per-OS status rows, kept in parity by the canonical source test.
+        assert surface not in WINDOWS_CONNECTOR_SUPPORT, surface
+        assert connector in connector_docs, (surface, connector)
+        text = " ".join((connectors_dir / f"{surface}.mdx").read_text(encoding="utf-8").split())
+        assert "## Platform support" not in text, surface
+        assert f"](/docs/connectors/{connector})" in text, surface
+        assert "is a surface of that connector, not a connector of its own" in text, surface
 
 
 def test_connector_route_pages_are_listed_and_state_their_windows_limit() -> None:
@@ -223,6 +246,8 @@ def test_release_builds_only_the_four_supported_targets_with_flat_names() -> Non
         "defenseclaw-acp-posix",
         "defenseclaw-acp-windows-amd64",
         "defenseclaw-hook-posix",
+        # The per-user Linux Claude Code hook launcher (GAP-0558).
+        "defenseclaw-hook-user-posix",
         "defenseclaw-sensor-helper-posix",
         # The managed Linux and macOS packages' scanner launcher (GAP-1527);
         # no archive carries it (the payload archive has no scanners).
@@ -236,6 +261,7 @@ def test_release_builds_only_the_four_supported_targets_with_flat_names() -> Non
         "defenseclaw-hook-post",
         "defenseclaw-acp-posix",
         "defenseclaw-hook-posix",
+        "defenseclaw-hook-user-posix",
         "defenseclaw-sensor-helper-posix",
         "defenseclaw-scanners-posix",
     ):
@@ -256,7 +282,7 @@ def test_release_builds_only_the_four_supported_targets_with_flat_names() -> Non
     archives = {archive["id"]: archive for archive in release["archives"]}
     flat_name = "{{ .ProjectName }}-{{ .Version }}-{{ .Os }}-{{ .Arch }}"
     assert set(archives) == {"default", "enterprise-posix", "windows-amd64"}
-    assert archives["default"]["ids"] == ["defenseclaw", "defenseclaw-hook-post", "defenseclaw-acp-posix", "defenseclaw-sensor-helper-posix"]
+    assert archives["default"]["ids"] == ["defenseclaw", "defenseclaw-hook-post", "defenseclaw-hook-user-posix", "defenseclaw-acp-posix", "defenseclaw-sensor-helper-posix"]
     # The standalone managed-enterprise payload is its own flat asset family;
     # per-user installers never fetch it.
     enterprise = archives.pop("enterprise-posix")
@@ -439,7 +465,10 @@ def test_opencode_docs_exclude_unqualified_enforcement_media() -> None:
         "min_inclusive": "2.0.0",
         "max_exclusive": "2.3.0",
     }
-    assert "V2 support is currently a preview" in connector_page
+    assert (
+        "OpenCode V2 2.2.5 was checked live in per-user and managed installs on Linux, macOS and native Windows."
+        in connector_page
+    )
     assert validated["live"] is False
     assert validated["os"]["windows"] == {
         "last_validated_version": "",

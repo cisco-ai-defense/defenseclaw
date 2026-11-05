@@ -94,6 +94,10 @@ func TestKiroWindowsAuthorizedKeysPermissionCheck(t *testing.T) {
 		{"powershell wrapper", "shell", `powershell -Command "Add-Content -Path ~/.ssh/authorized_keys -Value marker"`, true},
 		{"quoted home", "execute_bash", "Add-Content -Path \"$HOME\\.ssh\\authorized_keys\" -Value marker", true},
 		{"benign", "execute_bash", `Add-Content -Path ~/project/notes.txt -Value marker`, false},
+		// kiro-cli --v3 names its Windows shell tool execute_pwsh (rel-1-0-6:GAP-0589).
+		{"v3 add tilde", "execute_pwsh", `Add-Content -Path ~/.ssh/authorized_keys -Value marker`, true},
+		{"v3 echo home", "execute_pwsh", `echo marker >> $HOME\.ssh\authorized_keys`, true},
+		{"v3 benign", "execute_pwsh", `Add-Content -Path ~/project/notes.txt -Value marker`, false},
 	}
 	for _, mode := range []string{"action", "observe"} {
 		for _, test := range tests {

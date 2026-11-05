@@ -127,6 +127,8 @@ func (a *APIServer) logConnectorHookAuditEnvelope(ctx context.Context, env HookA
 		StepIdx:     env.StepIdx,
 		Enforced:    env.Enforced,
 		RulePackDir: env.RulePackDir,
+		// The connected folders of a Cowork call (path class).
+		WorkspaceHostPaths: env.WorkspaceHostPaths,
 		// Secure Client keeps the directory in the envelope and the raw
 		// column, as on main (issue #1092).
 		RulePackDirInEnvelope: env.SecureClientRulePackDir != "",

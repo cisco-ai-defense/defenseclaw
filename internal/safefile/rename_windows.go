@@ -145,12 +145,13 @@ func retryBusyRename(
 // keeps its own access list, so a caller sets the protection of source first.
 //
 // Where the POSIX-semantics rename is refused (a volume without it, or a
-// filter driver that refuses FileRenameInfoEx), an ordinary replacing rename
-// is used. It also swaps the name in one step, but Windows refuses it while
+// filter driver that refuses FileRenameInfoEx), a FileRenameInfo replacement
+// is used. It swaps the name in one operation, but Windows refuses it while
 // any handle has the destination open, so it is retried while readers come
 // and go. If they never let go within the budget, the error is returned and
 // the old file stays in place; the caller's next ensure writes it again.
-// ReplaceFile is never the fallback: a reader would find no file (GAP-2644).
+// Neither ReplaceFileW nor MoveFileEx is the fallback: both have exposed a
+// missing destination to a concurrent reader (GAP-2644, GAP-0546).
 func ReplaceFileAtomically(source, destination string) error {
 	refused := false
 	err := retryBusyRename(source, destination, func(source, destination string) error {
@@ -161,7 +162,7 @@ func ReplaceFileAtomically(source, destination string) error {
 			return err
 		}
 		refused = true
-		return moveFileReplace(source, destination)
+		return renameReplace(source, destination, windows.FileRenameInfo, fileRenameReplaceIfExists)
 	}, time.Sleep, atomicReplaceMaxAttempts, atomicReplaceRetryDelay)
 	if err != nil && refused {
 		return fmt.Errorf("%w (the volume refuses the POSIX-semantics rename; %s is unchanged)", err, destination)
@@ -182,18 +183,4 @@ func RefusePOSIXRenameForTest() (restore func()) {
 	previous := atomicRenameReplace
 	atomicRenameReplace = func(string, string) error { return windows.ERROR_NOT_SUPPORTED }
 	return func() { atomicRenameReplace = previous }
-}
-
-// moveFileReplace renames source over destination with an ordinary replacing
-// rename.
-func moveFileReplace(source, destination string) error {
-	from, err := winpath.UTF16Ptr(source)
-	if err != nil {
-		return err
-	}
-	to, err := winpath.UTF16Ptr(destination)
-	if err != nil {
-		return err
-	}
-	return windows.MoveFileEx(from, to, windows.MOVEFILE_REPLACE_EXISTING|windows.MOVEFILE_WRITE_THROUGH)
 }

@@ -115,7 +115,7 @@ var (
 	}
 	startFileHalf = func(ctx context.Context, homes []string) (nativeHalf, error) {
 		ctx, cancel := context.WithCancel(ctx)
-		half := &linuxSource{buffer: NewBuffer(), credentialRoots: credentialRoots(homes)}
+		half := &linuxSource{buffer: NewBuffer(), homeDirs: homes}
 		if err := half.startFanotify(); err != nil {
 			cancel()
 			return nil, err
@@ -410,6 +410,11 @@ func (s *tetragonSource) handleBatch(batch KernelBatch) {
 	for _, event := range batch.Events {
 		if event.Kind == KindExec && s.duplicateOfNative(event.PID, now) {
 			continue
+		}
+		if event.Kind == KindExec && event.Exe != "" {
+			// The helper reads the image while the event is fresh, only if
+			// the pid still runs the binary the event names.
+			event.ImageSHA256, event.ImageVersion = tetragonClientImage(event.PID, event.Exe, eventAccount(event))
 		}
 		if event.Kind == KindFileRead || event.Kind == KindFileWrite {
 			s.noteTetragonFile(event, now)

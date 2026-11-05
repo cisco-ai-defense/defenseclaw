@@ -37,11 +37,11 @@ import (
 )
 
 // legacyWarned reports whether the view v warns that its legacy guest is
-// not protected, that DefenseClaw does not contain the old broker, and
+// not protected, that DefenseClaw cannot verify the earlier supervisor under the current policy, and
 // names way, the command that ends it.
 func legacyWarned(v *sandboxapi.Sandbox, way string) bool {
 	for _, w := range v.Warnings {
-		if strings.HasPrefix(w, legacyUnprotected) && strings.Contains(w, "does not contain the old broker") && strings.Contains(w, way) {
+		if strings.HasPrefix(w, legacyUnprotected) && strings.Contains(w, "cannot verify the earlier supervisor under the current policy") && strings.Contains(w, way) {
 			return true
 		}
 	}
@@ -161,7 +161,7 @@ func TestDefenseClawStopsNoLegacyGuest(t *testing.T) {
 				t.Fatalf("the MicroVM note of the stop (vm %v): %v", tc.vm, got.Warnings)
 			}
 			if found := findingsSaying(e, "kept", "kept: "+legacyUnprotected+": its session started on OpenShell 0.1.3"); len(found) != 1 || found[0].Severity != "HIGH" ||
-				!strings.Contains(found[0].Message, "does not contain the old broker") || !strings.Contains(found[0].Message, "`defenseclaw sandbox stop kept`") {
+				!strings.Contains(found[0].Message, "cannot verify the earlier supervisor under the current policy") || !strings.Contains(found[0].Message, "`defenseclaw sandbox stop kept`") {
 				t.Fatalf("no single HIGH finding naming the guest unprotected: %+v", e.events("kept", sandboxapi.ActivityFinding, sandboxapi.ReasonOldSupervisor))
 			}
 			kept := findingsSaying(e, "kept", legacyRulesKept)
@@ -303,7 +303,7 @@ func TestAHostLeftOnAnOlderOpenShellUpgradesInPlace(t *testing.T) {
 	e.fake.SetRelease("0.1.3")
 	_, err := e.tryCreate(sandboxapi.CreateRequest{Name: "fresh", Project: e.otherProject("other")})
 	apiErr := wantCode(t, err, sandboxapi.CodeUnavailable)
-	if !strings.Contains(apiErr.Message, "OpenShell 0.1.3 runs no DefenseClaw sandbox") || !strings.Contains(apiErr.Message, "NVIDIA/OpenShell#4494") ||
+	if !strings.Contains(apiErr.Message, "OpenShell 0.1.3 runs no DefenseClaw sandbox") || !strings.Contains(apiErr.Message, "OpenShell 0.1.6 or later is required") ||
 		apiErr.Detail != "upgrade OpenShell 0.1.3 to "+openshell.InstallerVersion+" in place with `defenseclaw sandbox setup --install-openshell`" {
 		t.Fatalf("create on 0.1.3 = %+v", apiErr)
 	}
@@ -348,7 +348,7 @@ func TestAHostLeftOnAnOlderOpenShellUpgradesInPlace(t *testing.T) {
 func TestOldSupervisorWordsForARecordWithoutARelease(t *testing.T) {
 	msg := oldSupervisorMessage("box", "", audit.SandboxPhaseReady, "", "")
 	if !strings.HasPrefix(msg, "⚠ box: "+legacyUnprotected+": its session started before DefenseClaw kept the OpenShell release a session starts on, so it may run a supervisor older than "+openshell.SupportedMin) ||
-		!strings.Contains(msg, "does not contain the old broker") ||
+		!strings.Contains(msg, "cannot verify the earlier supervisor under the current policy") ||
 		!strings.HasSuffix(msg, "save the work you need, then run `defenseclaw sandbox stop box`; then `defenseclaw sandbox start box` (or `connect`) starts it again on this gateway's supervisor") {
 		t.Fatalf("message = %q", msg)
 	}

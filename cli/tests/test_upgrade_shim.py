@@ -33,6 +33,8 @@ from click.testing import CliRunner
 from defenseclaw import entry, update_notice, upgrade_shim
 from defenseclaw.commands import cmd_upgrade
 
+from tests.os_view import os_view
+
 ROOT = Path(__file__).resolve().parents[2]
 _FIND_COSIGN = upgrade_shim._cosign
 
@@ -634,7 +636,7 @@ def test_notice_respects_the_windows_self_update_policy(home: Path, monkeypatch:
         QueryValueEx=lambda _key, name: (1, 4) if name == "DisableSelfUpdate" else (0, 4),
     )
     monkeypatch.setitem(sys.modules, "winreg", fake_winreg)
-    monkeypatch.setattr(update_notice.os, "name", "nt")
+    monkeypatch.setattr(update_notice, "os", os_view("nt"))
     monkeypatch.setattr(upgrade_shim.os, "name", "nt")
 
     assert update_notice.available_message() is None

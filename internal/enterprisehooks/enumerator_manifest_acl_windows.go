@@ -22,6 +22,12 @@ var (
 	}
 	windowsTargetsManifestProtect = protectWindowsTargetsManifestObject
 	windowsTargetsManifestReplace = safefile.ReplaceFile
+	// The standalone content-drift rule and the strict walk the manifest
+	// gate uses (GAP-0561). Tests replace them.
+	windowsTargetsManifestRefusesContentDrift = managed.StandaloneRefusesContentDrift
+	windowsTargetsManifestStrictTrust         = func(path string) error {
+		return managed.ValidateTrustedFilePath(path, "hook guardian manifest")
+	}
 )
 
 const (

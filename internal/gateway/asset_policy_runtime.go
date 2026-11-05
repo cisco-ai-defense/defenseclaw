@@ -306,6 +306,9 @@ func (a *APIServer) claudeCodeSkillAssetDecision(ctx context.Context, req claude
 	a.noteProjectSkillFolders(ctx, "claudecode", req.CWD)
 	probe := skillProbeFromFields(req.ToolName, req.ToolInput, req.Payload)
 	if !probe.Matched {
+		if saved := claudeCodeCoworkSkillProbe(req); saved.Matched && coworkInspected(a.requestConfig(ctx)) {
+			return a.evaluateRuntimeSkillAssetPolicy(ctx, "claudecode", req.HookEventName, saved)
+		}
 		return a.skillFolderAccessDecision(ctx, "claudecode", req.HookEventName, req.CWD, req.ToolName, req.ToolInput)
 	}
 	probe.DeclaredNames = a.declaredSkillNames(ctx, "claudecode", req.CWD, probe)
@@ -907,6 +910,11 @@ func (a *APIServer) claudeCodePluginAssetDecision(ctx context.Context, req claud
 	cfg := a.requestConfig(ctx)
 	if cfg == nil || cfg.SecureClientIntegration() {
 		return config.AssetPolicyDecision{}, false
+	}
+	if offered := claudeCodeCoworkPluginProbe(req); offered.Matched {
+		if decision, matched := a.evaluateRuntimeSkillAssetPolicy(ctx, "claudecode", req.HookEventName, offered); matched {
+			return decision, true
+		}
 	}
 	owners, candidates := a.claudeCodeToolPlugins(ctx, req)
 	for _, plugin := range owners {

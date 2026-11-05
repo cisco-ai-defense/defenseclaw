@@ -110,6 +110,9 @@ type AgentRegistry struct {
 	// hook traffic of the same session. A session seen under two agent
 	// identities is ambiguous and joins neither.
 	sessionAgents map[string]sessionAgentRef
+	// recentHermes keeps the two most recently observed host sessions per
+	// verified agent. A sessionless event can use only one recent session.
+	recentHermes map[string][]agentSessionKey
 }
 
 // agentSessionKey is the registry key. agent is "" for traffic that carries
@@ -146,8 +149,14 @@ type sessionEntry struct {
 	LastSeen        time.Time
 	// Hermes reports its logical agent id on some events in a session and
 	// omits it on others. Keep the first reported id with the bounded session.
-	HermesAgentID string
+	HermesAgentID     string
+	HermesHostSession bool
 }
+
+// A sessionless Hermes transform follows a sessionful event in the same
+// tool exchange. Older sessions and concurrent sessions are not evidence of
+// which exchange produced it.
+const hermesSessionlessAuditWindow = 2 * time.Second
 
 // NewAgentRegistry constructs a registry with a fresh sidecar
 // instance id and the configured agent identity (may be empty).
@@ -160,6 +169,7 @@ func NewAgentRegistry(agentID, agentName string) *AgentRegistry {
 		configuredAgentName: agentName,
 		sessions:            make(map[agentSessionKey]sessionEntry),
 		sessionAgents:       make(map[string]sessionAgentRef),
+		recentHermes:        make(map[string][]agentSessionKey),
 	}
 }
 
@@ -242,6 +252,9 @@ func (r *AgentRegistry) agentInstanceFor(agentIdentityID, sessionID string) (str
 		// sessions stay near the top of the LRU.
 		entry.LastSeen = now
 		r.sessions[key] = entry
+		if entry.HermesHostSession && entry.HermesAgentID != "" {
+			r.trackRecentHermesLocked(key)
+		}
 		return entry.AgentInstanceID, false
 	}
 	if len(r.sessions) >= agentRegistryMaxSessions {
@@ -280,6 +293,7 @@ func (r *AgentRegistry) hermesAgentIDForSession(ctx context.Context, agentIdenti
 	if r == nil || ManagedEnterpriseActive() || agentIdentityID == "" || sessionID == "" {
 		return ""
 	}
+	hostSession := sandboxSessionStateKey(ctx, sessionID) == sessionID
 	sessionID = sandboxSessionStateKey(ctx, sessionID)
 	r.mu.Lock()
 	defer r.mu.Unlock()
@@ -290,9 +304,57 @@ func (r *AgentRegistry) hermesAgentIDForSession(ctx context.Context, agentIdenti
 	}
 	if entry.HermesAgentID == "" && reportedID != "" {
 		entry.HermesAgentID = reportedID
-		r.sessions[key] = entry
+	}
+	if hostSession && entry.HermesAgentID != "" {
+		entry.HermesHostSession = true
+	}
+	r.sessions[key] = entry
+	if entry.HermesHostSession && entry.HermesAgentID != "" {
+		r.trackRecentHermesLocked(key)
 	}
 	return entry.HermesAgentID
+}
+
+// trackRecentHermesLocked retains only the two newest eligible sessions.
+// It runs on session activity, leaving the sessionless hook lookup bounded.
+func (r *AgentRegistry) trackRecentHermesLocked(key agentSessionKey) {
+	keys := r.recentHermes[key.agent]
+	for i := 0; i < len(keys); i++ {
+		if keys[i] == key {
+			keys = append(keys[:i], keys[i+1:]...)
+			break
+		}
+	}
+	keys = append(keys, key)
+	if len(keys) > 2 {
+		keys = keys[len(keys)-2:]
+	}
+	r.recentHermes[key.agent] = keys
+}
+
+// hermesRecentSession supplies audit correlation for an event that carries no
+// session fields only when one recent host session of the verified agent
+// matches. Scoped sessions cannot be identified from a sessionless event.
+// This never creates a session or changes a verdict.
+func (r *AgentRegistry) hermesRecentSession(ctx context.Context, agentIdentityID string, now time.Time) (sessionID, agentID, instanceID string) {
+	if r == nil || ManagedEnterpriseActive() || agentIdentityID == "" {
+		return "", "", ""
+	}
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	for _, key := range r.recentHermes[agentIdentityID] {
+		entry, ok := r.sessions[key]
+		if !ok || entry.HermesAgentID == "" || key.session == "" ||
+			now.Before(entry.LastSeen) || now.Sub(entry.LastSeen) > hermesSessionlessAuditWindow ||
+			sandboxSessionStateKey(ctx, key.session) != key.session {
+			continue
+		}
+		if sessionID != "" && sessionID != key.session {
+			return "", "", ""
+		}
+		sessionID, agentID, instanceID = key.session, entry.HermesAgentID, entry.AgentInstanceID
+	}
+	return sessionID, agentID, instanceID
 }
 
 // keyLocked returns the cache key of a lookup. Traffic without an agent
@@ -338,6 +400,14 @@ func (r *AgentRegistry) evictOldestLocked() {
 		return
 	}
 	delete(r.sessions, oldestKey)
+	if oldestEntry, ok := r.recentHermes[oldestKey.agent]; ok {
+		for _, key := range oldestEntry {
+			if key == oldestKey {
+				r.rebuildRecentHermesLocked(oldestKey.agent)
+				break
+			}
+		}
+	}
 	ref, ok := r.sessionAgents[oldestKey.session]
 	if !ok || (!ref.ambiguous && ref.agent != oldestKey.agent) {
 		return
@@ -354,6 +424,33 @@ func (r *AgentRegistry) evictOldestLocked() {
 		}
 	}
 	delete(r.sessionAgents, oldestKey.session)
+}
+
+// Eviction already scans the bounded registry. Rebuild the affected agent's
+// small index when one of its indexed sessions leaves.
+func (r *AgentRegistry) rebuildRecentHermesLocked(agent string) {
+	delete(r.recentHermes, agent)
+	for key, entry := range r.sessions {
+		if key.agent != agent || !entry.HermesHostSession || entry.HermesAgentID == "" {
+			continue
+		}
+		keys := r.recentHermes[agent]
+		inserted := false
+		for i, existing := range keys {
+			if entry.LastSeen.Before(r.sessions[existing].LastSeen) {
+				keys = append(keys[:i], append([]agentSessionKey{key}, keys[i:]...)...)
+				inserted = true
+				break
+			}
+		}
+		if !inserted {
+			keys = append(keys, key)
+		}
+		if len(keys) > 2 {
+			keys = keys[len(keys)-2:]
+		}
+		r.recentHermes[agent] = keys
+	}
 }
 
 func agentSessionKeyLess(a, b agentSessionKey) bool {
@@ -481,6 +578,9 @@ func (r *AgentRegistry) peekAgentInstance(agentIdentityID, sessionID string) str
 	}
 	entry.LastSeen = time.Now()
 	r.sessions[key] = entry
+	if entry.HermesHostSession && entry.HermesAgentID != "" {
+		r.trackRecentHermesLocked(key)
+	}
 	return entry.AgentInstanceID
 }
 

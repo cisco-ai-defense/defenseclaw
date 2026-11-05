@@ -59,6 +59,10 @@ type Options struct {
 	Action string
 	// PayloadDir holds the binaries to install (payload channel).
 	PayloadDir string
+	// CoworkPackage and CoworkSignature are optional release-artifact inputs.
+	// The transaction admits their configured hashes and retains its own copy.
+	CoworkPackage   string
+	CoworkSignature string
 	// FromPackage installs the binaries the deb/rpm/pkg already placed in
 	// the layout's bin directory (package channel).
 	FromPackage bool
@@ -175,6 +179,11 @@ type lifecycle struct {
 	env    *Env
 	opts   Options
 	result *enterprisestatus.Result
+	// A path-triggered ensure waits at most once. A change first seen at the
+	// later apply decision asks Run to release the lock and marker before it
+	// waits, then start a fresh attempt against the settled inputs.
+	pathTriggerDebounced bool
+	pathTriggerLateWait  bool
 	// gatewayAuditFailure is the active mandatory event-history write failure
 	// in the gateway's latest /health answer, used when describe computes
 	// security_complete after reading that answer.
@@ -188,6 +197,15 @@ type lifecycle struct {
 	keepThroughRollback map[string]bool
 	// serviceUID is the gateway account of the running transaction.
 	serviceUID int
+	// coworkPlanQuiet is set while ensureNoop builds its read-only plan, so
+	// the plan does not report kept Cowork files (coworkKeptWarning).
+	coworkPlanQuiet bool
+	// claudeDesktopVerdicts caches the launch coverage of Claude Desktop
+	// engine builds for one status or verify run (claudeDesktopVerdictFor).
+	claudeDesktopVerdicts map[string]claudeDesktopVerdict
+	// gatewayHealthBody is the gateway's /health document describe read,
+	// for the status blocks that report its counters (the cowork block).
+	gatewayHealthBody []byte
 	// planned are the inputs the last transaction of this run applied.
 	planned *plannedInputs
 	// reportChanges is set while a repair or ensure re-applies an installed
@@ -406,8 +424,40 @@ func Run(ctx context.Context, env *Env, opts Options) *enterprisestatus.Result {
 			l.result.Changes = append(l.result.Changes, fmt.Sprintf("cleared the macOS %s flag of %s, which stopped DefenseClaw from managing the folder", flags, path))
 		}
 	}
-	failure := l.run(ctx)
+	var failure int
+	carriedChanges := false
+	for {
+		failure = l.run(ctx)
+		if !l.pathTriggerLateWait {
+			break
+		}
+		if !l.waitForApplyTriggerBeforeLock(ctx) {
+			break
+		}
+		env.agentDigest = ""
+		// The first attempt may have repaired host state before it noticed
+		// the later config write. Its result is replaced for the new plan,
+		// but completed repairs must remain visible to the caller.
+		next := enterprisestatus.New(opts.Action, managed.ProfileStandalone, env.GOOS, env.ProductVersion)
+		next.Changes = append(next.Changes, l.result.Changes...)
+		carriedChanges = len(next.Changes) != 0
+		for _, warning := range l.result.Warnings {
+			switch warning.Code {
+			case codeConfigMetadataRestored, codeRecovered, "selinux_relabel":
+				next.Warnings = append(next.Warnings, warning)
+			}
+		}
+		l = &lifecycle{
+			env: env, opts: opts,
+			result:               next,
+			pathTriggerDebounced: true,
+		}
+	}
 	env.dirFlagsCleared = nil
+	if carriedChanges && l.result.Noop {
+		l.result.Noop = false
+		l.result.NoopReason = ""
+	}
 	// A no-op ensure and a committed change report the same observed host
 	// limits as status and verify. They do not change these kernel settings.
 	if l.result.Installed && opts.Action != ActionStatus && opts.Action != ActionVerify && opts.Action != ActionUninstall {
@@ -493,21 +543,9 @@ func (l *lifecycle) run(ctx context.Context) (failure int) {
 	if readOnly {
 		return l.readOnly(ctx)
 	}
-	if l.opts.Action == ActionEnsure && l.opts.Reason == ApplyTriggerReason && l.opts.ConfigFile == "" && env.ApplyTriggerDebounce != nil {
-		waitCtx, stop := l.untilInterrupted(ctx)
-		err := env.ApplyTriggerDebounce(waitCtx, env.P(env.Layout.ConfigPath))
-		stop()
-		if err != nil {
-			if l.interrupted() || errors.Is(err, context.Canceled) {
-				r.AddError(codeInterrupted, "the run stopped while it waited for the config push to settle; nothing was changed")
-			} else {
-				r.AddError(codeState, "wait for config push: "+err.Error())
-			}
-			return 0
-		}
-	}
 	// Before the lock, which another run can hold for the readiness timeout.
 	env.closePrivateDirs(ctx)
+	debounced := l.pathTriggerDebounced
 
 	// The lock stays at one inode while anything is in the lifecycle
 	// directory; only an uninstall that leaves it empty removes it (see
@@ -521,40 +559,54 @@ func (l *lifecycle) run(ctx context.Context) (failure int) {
 	// A stop signal ends the wait for the lock: the run that waited could
 	// otherwise take it later and remove or change the deployment after
 	// the command was told to stop.
-	lockCtx, stopLockWait := l.untilInterrupted(ctx)
-	lock, err := env.acquireLock(lockCtx)
-	stopLockWait()
-	if err != nil && l.interrupted() {
-		r.AddError(codeInterrupted, "the run got a stop signal (SIGTERM or an interrupt) while it waited for the lifecycle lock; nothing was changed")
-		return 0
-	}
-	if err != nil {
-		if errors.Is(err, errLockBusy) {
-			r.AddError(codeBusy, err.Error()+"; "+lockBusyNextStep(env.LockTimeout))
-			return enterprisestatus.BusyExitCode(env.GOOS)
+	var lock *lifecycleLock
+	for {
+		lockCtx, stopLockWait := l.untilInterrupted(ctx)
+		var err error
+		lock, err = env.acquireLock(lockCtx)
+		stopLockWait()
+		if err != nil && l.interrupted() {
+			r.AddError(codeInterrupted, "the run got a stop signal (SIGTERM or an interrupt) while it waited for the lifecycle lock; nothing was changed")
+			return 0
 		}
-		if errors.Is(err, errLockRemoved) {
-			if l.opts.Action == ActionUninstall {
-				// Only an uninstall that left the lifecycle directory empty
-				// removes the lock: the run this one waited for removed the
-				// deployment, so there is nothing left to remove. A busy exit
-				// here aborted the rpm or deb removal whose preremove waited
-				// for a concurrent MDM purge, after the purge had removed
-				// everything (GAP-0112).
-				r.Noop, r.NoopReason = true, "not_installed"
-				message := "DefenseClaw enterprise was uninstalled by the lifecycle run this uninstall waited for; nothing was left to remove"
-				if l.opts.Purge {
-					message += " (each account keeps its per-user DefenseClaw files if that run was not a purge)"
-				}
-				r.AddWarning(codeNotInstalled, message)
-				return 0
+		if err != nil {
+			if errors.Is(err, errLockBusy) {
+				r.AddError(codeBusy, err.Error()+"; "+lockBusyNextStep(env.LockTimeout))
+				return enterprisestatus.BusyExitCode(env.GOOS)
 			}
-			r.AddError(codeBusy, err.Error()+"; rerun the command if it is still needed")
-			return enterprisestatus.BusyExitCode(env.GOOS)
+			if errors.Is(err, errLockRemoved) {
+				if l.opts.Action == ActionUninstall {
+					// Only an uninstall that left the lifecycle directory empty
+					// removes the lock: the run this one waited for removed the
+					// deployment, so there is nothing left to remove. A busy exit
+					// here aborted the rpm or deb removal whose preremove waited
+					// for a concurrent MDM purge, after the purge had removed
+					// everything (GAP-0112).
+					r.Noop, r.NoopReason = true, "not_installed"
+					message := "DefenseClaw enterprise was uninstalled by the lifecycle run this uninstall waited for; nothing was left to remove"
+					if l.opts.Purge {
+						message += " (each account keeps its per-user DefenseClaw files if that run was not a purge)"
+					}
+					r.AddWarning(codeNotInstalled, message)
+					return 0
+				}
+				r.AddError(codeBusy, err.Error()+"; rerun the command if it is still needed")
+				return enterprisestatus.BusyExitCode(env.GOOS)
+			}
+			r.AddError(codeState, err.Error())
+			l.reportNoSpace(err)
+			return 0
 		}
-		r.AddError(codeState, err.Error())
-		l.reportNoSpace(err)
-		return 0
+		// A push can start while the run waits for the lock. Release it
+		// before the quiet window so status and verify can observe the host.
+		if debounced || !l.pathTriggerNeedsQuiet(ctx) {
+			break
+		}
+		lock.release()
+		if !l.waitForApplyTriggerBeforeLock(ctx) {
+			return 0
+		}
+		debounced, l.pathTriggerDebounced = true, true
 	}
 	defer lock.release()
 	if l.interrupted() {
@@ -573,12 +625,16 @@ func (l *lifecycle) run(ctx context.Context) (failure int) {
 	if l.opts.FromPackage && l.opts.Reason != "package" {
 		// Recorded before the lock goes, so a package run that waits for it
 		// writes its own result after this one.
-		defer func() { l.recordPackageResult(failure) }()
+		defer func() {
+			if !l.pathTriggerLateWait {
+				l.recordPackageResult(failure)
+			}
+		}()
 	}
 	if l.opts.Action == ActionInstall || l.opts.Action == ActionUpgrade ||
 		l.opts.Action == ActionEnsure || l.opts.Action == ActionRepair {
 		defer func() {
-			if len(r.Errors) != 0 || !r.Installed || r.InstalledVersion != env.ProductVersion {
+			if l.pathTriggerLateWait || len(r.Errors) != 0 || !r.Installed || r.InstalledVersion != env.ProductVersion {
 				return
 			}
 			current, err := env.loadDeployment()
@@ -622,7 +678,7 @@ func (l *lifecycle) run(ctx context.Context) (failure int) {
 		// receipt the new gateway disproves gets the last good bundle back
 		// in this run.
 		defer func() {
-			if l.opts.Bundle != "" || len(r.Errors) != 0 {
+			if l.pathTriggerLateWait || l.opts.Bundle != "" || len(r.Errors) != 0 {
 				return
 			}
 			latest, err := env.loadDeployment()
@@ -744,7 +800,11 @@ func (l *lifecycle) run(ctx context.Context) (failure int) {
 		if l.opts.Bundle != "" {
 			return l.requireProtectedTargets(l.applyBundle(ctx, record))
 		}
-		return l.requireProtectedTargets(l.ensureInstalled(ctx, record, l.apply))
+		code := l.ensureInstalled(ctx, record, l.apply)
+		if l.pathTriggerLateWait {
+			return 0
+		}
+		return l.requireProtectedTargets(code)
 	case ActionReconcile:
 		if record == nil {
 			r.AddError(codeNotInstalled, "DefenseClaw enterprise is not installed")
@@ -787,6 +847,10 @@ func (l *lifecycle) ensureInstalled(ctx context.Context, record *Deployment, app
 	// while the installed bytes are still the applied config.
 	for retry := 0; !noop && retry < maxMetadataRechecks && l.restoreUnchangedConfigMetadata(ctx, record); retry++ {
 		noop, reason = l.ensureNoop(ctx, record)
+	}
+	if !noop && l.hasApplyTriggerDebounce() && !l.pathTriggerDebounced {
+		l.pathTriggerLateWait = true
+		return 0
 	}
 	if noop {
 		// A run that put a tampered file back changed the host.
@@ -1058,6 +1122,19 @@ func (l *lifecycle) validateOptions() int {
 	if o.PayloadDir != "" && o.FromPackage {
 		return bad("--payload and --from-package are mutually exclusive")
 	}
+	if o.CoworkPackage != "" || o.CoworkSignature != "" {
+		if l.env.GOOS != "darwin" || !contains([]string{ActionInstall, ActionUpgrade, ActionRepair, ActionEnsure}, o.Action) {
+			return bad("--cowork-package and --cowork-signature apply only to macOS install, upgrade, repair or ensure")
+		}
+		if o.Bundle != "" || o.BundleInbox {
+			return bad("Cowork artifact inputs cannot accompany a policy bundle")
+		}
+		for _, path := range []string{o.CoworkPackage, o.CoworkSignature} {
+			if path != "" && (!filepath.IsAbs(path) || filepath.Clean(path) != path) {
+				return bad("Cowork artifact input paths must be canonical absolute paths")
+			}
+		}
+	}
 	if (o.PayloadDir != "" || o.FromPackage || o.ConfigFile != "" || o.AdoptExisting || o.NoStart) &&
 		!contains([]string{ActionInstall, ActionUpgrade, ActionRepair, ActionEnsure}, o.Action) {
 		return bad(fmt.Sprintf("--payload, --from-package, --config, --adopt-existing and --no-start do not apply to %s", o.Action))
@@ -1324,6 +1401,9 @@ type plan struct {
 	// openshell is the sandbox subsystem: its rendered files, user units and
 	// links (openshell.go).
 	openshell *openshellPlan
+	// coworkRetiredDirs are the folders Cowork delivery created that a
+	// plan with delivery off removes once empty (GAP-0035).
+	coworkRetiredDirs []string
 }
 
 // buildPlan computes the desired state without mutating the host. account
@@ -1645,6 +1725,13 @@ func (l *lifecycle) buildPlan(ctx context.Context, record *Deployment, account A
 	if err := l.planOpenShell(p); err != nil {
 		return nil, &codedError{code: codeOpenShell, err: err}
 	}
+	if err := l.planCoworkVM(p, record); err != nil {
+		var coded *codedError
+		if errors.As(err, &coded) {
+			return nil, err
+		}
+		return nil, &codedError{code: codePayload, err: err}
+	}
 
 	// The override a package-kept uninstall wrote over the package's
 	// tmpfiles.d entries goes with the next install.
@@ -1661,6 +1748,9 @@ func (l *lifecycle) buildPlan(ctx context.Context, record *Deployment, account A
 	if record != nil {
 		for path := range record.Files {
 			if !want[path] {
+				if !l.removeCoworkFileAllowed(record, path) {
+					continue
+				}
 				if p.channel == ChannelPackage && env.packageOwns(path) {
 					continue // the package owns the binaries, units and OpenCode plugin now
 				}
@@ -2391,6 +2481,7 @@ func (l *lifecycle) applyAdopting(ctx context.Context, record *Deployment, adopt
 	}
 	newRecord.CreatedServiceAccount = newRecord.CreatedServiceAccount || account.Created
 	newRecord.CreatedDirs = mergeUnique(newRecord.CreatedDirs, createdDirs)
+	newRecord.CreatedDirs = slices.DeleteFunc(newRecord.CreatedDirs, func(dir string) bool { return slices.Contains(p.coworkRetiredDirs, dir) })
 	for _, file := range p.files {
 		newRecord.Files[file.Path] = file.SHA
 	}
@@ -2458,6 +2549,7 @@ func (l *lifecycle) applyAdopting(ctx context.Context, record *Deployment, adopt
 	}
 	l.settleRejectedConfig()
 	env.discardSnapshot(snap)
+	l.removeRetiredCoworkDirs(p)
 	r.Installed = true
 	r.InstalledVersion = newRecord.ProductVersion
 	// Accounts follow the committed deployment: a daemon without a running
@@ -2588,6 +2680,12 @@ func (l *lifecycle) applyDirs(p *plan) ([]string, error) {
 	created := []string{}
 	for _, dir := range p.dirs {
 		path := env.P(dir.Path)
+		// Cowork's owned folders: the public leaf outside the install tree
+		// and the lifecycle cache. Track their creation for disable and
+		// uninstall while still repairing their modes.
+		if (dir.Path == macCoworkDir || dir.Path == env.coworkCacheDir()) && !dir.External && !exists(path) {
+			created = append(created, dir.Path)
+		}
 		if dir.External {
 			if exists(path) {
 				if info, err := os.Lstat(path); err == nil && (info.Mode()&os.ModeSymlink != 0 || !info.IsDir()) {
@@ -3509,13 +3607,18 @@ func (l *lifecycle) ensureNoop(ctx context.Context, record *Deployment) (bool, s
 	if err != nil || !ok || account.UID != record.ServiceUID || account.GID != record.ServiceGID {
 		return false, ""
 	}
+	l.coworkPlanQuiet = true
 	p, err := l.buildPlan(ctx, record, account)
+	l.coworkPlanQuiet = false
 	if err != nil || p.configWritable != "" {
 		// apply reports the same error with rollback semantics, or replaces
 		// a config.yaml another account could write.
 		return false, ""
 	}
 	if p.version != record.ProductVersion || p.channel != record.Channel || p.config.SHA != record.ConfigSHA256 || p.secretsSHA != record.SecretsSHA256 || len(p.stale) > 0 {
+		return false, ""
+	}
+	if env.coworkRetirePending(p) {
 		return false, ""
 	}
 	if l.opts.NoStart != record.NoStart {
@@ -3951,6 +4054,9 @@ func (l *lifecycle) uninstall(ctx context.Context, record *Deployment) int {
 	for _, path := range paths {
 		if path == env.Layout.ConfigPath {
 			continue // machine state: removed with its directory below
+		}
+		if !l.removeCoworkFileAllowed(record, path) {
+			continue
 		}
 		if err := removeFile(env.P(path)); err != nil {
 			errs = append(errs, err)

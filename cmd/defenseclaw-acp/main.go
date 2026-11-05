@@ -44,6 +44,8 @@ const startupErrorCode = -32603
 const startupLinger = 30 * time.Second
 
 func main() {
+	// An elevated editor's guard creates its files as its user (GAP-0063).
+	managed.UseCurrentUserAsWindowsDefaultOwner(os.Args[1:])
 	if err := run(os.Args[1:]); err != nil {
 		var startup *startupError
 		if errors.As(err, &startup) {

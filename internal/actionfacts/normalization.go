@@ -373,7 +373,10 @@ func derivePathWithContext(
 	}
 	switch context.syntax {
 	case pathSyntaxPOSIX:
-		if context.trustedSyntax && context.windowsShellCWD {
+		// A literal Git Bash drive operand is absolute on the host even
+		// before a shell command changes the working directory.
+		if context.trustedSyntax &&
+			(context.windowsShellCWD || DriveSlashPath(fact.Value)) {
 			if normalized, absolute, resolved, ok := derivePOSIXPathUnderWindowsCWD(fact.Value, cwd, activeHome, context.expansion); ok {
 				return normalized, absolute, resolved
 			}

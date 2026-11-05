@@ -2838,6 +2838,8 @@ func installDefaultProfileConnector(t *testing.T, connector string) {
 	ruleCategoriesMu.Lock()
 	savedCategories, hadCategories := connectorRuleCategories[connector]
 	savedGeneration, hadGeneration := connectorRuleGenerations[connector]
+	savedLiveRules := liveRegisteredRules
+	savedLive, hadLive := savedLiveRules[connector]
 	ruleCategoriesMu.Unlock()
 	t.Cleanup(func() {
 		ruleCategoriesMu.Lock()
@@ -2850,6 +2852,13 @@ func installDefaultProfileConnector(t *testing.T, connector string) {
 			connectorRuleGenerations[connector] = savedGeneration
 		} else {
 			delete(connectorRuleGenerations, connector)
+		}
+		if savedLiveRules != nil {
+			if hadLive {
+				savedLiveRules[connector] = savedLive
+			} else {
+				delete(savedLiveRules, connector)
+			}
 		}
 		ruleCategoriesMu.Unlock()
 	})

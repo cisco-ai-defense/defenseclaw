@@ -24,6 +24,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"reflect"
 	"runtime"
 	"strconv"
 	"strings"
@@ -144,6 +145,12 @@ type Event struct {
 	// a path-class record field (issue #1092).
 	RulePackDirInEnvelope bool `json:"-"`
 
+	// WorkspaceHostPaths are the folders connected to the Claude Cowork
+	// session of a claudecode hook row. There is no SQLite column: the
+	// compatibility record carries them in its v8 body as a path-class
+	// field, so a profile that hashes or removes paths reaches them.
+	WorkspaceHostPaths []string `json:"-"`
+
 	// SandboxID and SandboxName attribute an event to the OpenShell
 	// sandbox whose request produced it. They are filled from the
 	// correlation envelope, which takes them only from the authenticated
@@ -220,7 +227,10 @@ type ActionEntry struct {
 }
 
 type Store struct {
-	db          *sql.DB
+	db *sql.DB
+	// readDB serves point-in-time queries outside Secure Client. The
+	// writer remains a single connection for ordered durable transactions.
+	readDB      *sql.DB
 	dbPath      string
 	dbPathGuard *preparedAuditDatabasePath
 
@@ -494,19 +504,12 @@ func secureClientMmapSizeBytes() int64 {
 }
 
 // openSQLiteWithPragmas opens a SQLite connection with the audit-tier hardening
-// applied (DSN pragmas + a single-connection pool). Sharing this
-// helper between NewStore and the upcoming judge_body_store keeps
-// the contention guarantees in lockstep.
+// applied (DSN pragmas + a single-connection pool). NewStore,
+// JudgeBodyStore, and maintenance connections share these settings.
 //
-// Pool sizing: SQLite serializes writers internally, so opening
-// multiple connections for the same DB just races them for the same
-// write lock and surfaces as SQLITE_BUSY. We cap MaxOpenConns at 1
-// and let Go's database/sql mutex serialize callers — this is the
-// canonical pattern recommended by modernc.org/sqlite. Reads share
-// the same connection, which is fine in practice because every
-// audit write completes in microseconds; if read latency ever
-// becomes a problem, we can introduce a separate read-only pool
-// without touching this hot path.
+// Pool sizing: SQLite serializes writers internally. The Store's main pool
+// has one connection; selected point reads use a separate read-only WAL
+// pool once the store is ready.
 func openSQLiteWithPragmas(dbPath, pragmas string) (*sql.DB, error) {
 	db, err := sql.Open("sqlite", dbPath+pragmas)
 	if err != nil {
@@ -545,6 +548,11 @@ func (s *Store) StoreOptions() []StoreOption {
 		return []StoreOption{WithSecureClientSchema()}
 	}
 	return nil
+}
+
+// SecureClientSchema reports whether this store uses the Secure Client layout.
+func (s *Store) SecureClientSchema() bool {
+	return s != nil && s.secureClientSchema
 }
 
 // WithSecureClientSchema keeps audit.db identical to main's on a Secure
@@ -752,6 +760,16 @@ const sqliteBusyDetachedReportTimeout = 5 * time.Second
 // fresh native sessions were refused with HTTP 429 while /health answered
 // 200 (rel-1-0-4 GAP-0944).
 func reportSQLiteBusyDetached(ctx context.Context, observer SQLiteBusyObservabilityV8, op string) {
+	if observer == nil {
+		return
+	}
+	value := reflect.ValueOf(observer)
+	switch value.Kind() {
+	case reflect.Chan, reflect.Func, reflect.Interface, reflect.Map, reflect.Pointer, reflect.Slice:
+		if value.IsNil() {
+			return
+		}
+	}
 	select {
 	case sqliteBusyDetachedReports <- struct{}{}:
 	default:
@@ -2306,6 +2324,16 @@ func (s *Store) Init() error {
 	}
 
 	s.prepareStatements(context.Background())
+	if !s.secureClientSchema && s.dbPathGuard != nil && !s.dbPathGuard.inMemory {
+		if s.readDB == nil {
+			readDB, readErr := s.openReadPool()
+			if readErr == nil {
+				s.readDB = readDB
+			} else if err := revalidateHardenedAuditSQLite(s.dbPathGuard); err != nil {
+				return fmt.Errorf("audit: revalidate database paths after read pool open: %w", err)
+			}
+		}
+	}
 	s.ready.Store(true)
 	return nil
 }
@@ -2335,7 +2363,7 @@ func (s *Store) HasAuditEventID(ctx context.Context, id string) (bool, error) {
 		return false, errors.New("audit: event lookup requires a ready store and id")
 	}
 	var one int
-	err := s.scanRow(ctx, "audit", s.db.QueryRowContext(ctx,
+	err := s.scanRow(ctx, "audit", s.queryPool().QueryRowContext(ctx,
 		`SELECT 1 FROM audit_events WHERE id = ?`, id), &one)
 	if errors.Is(err, sql.ErrNoRows) {
 		return false, nil
@@ -2359,7 +2387,7 @@ func (s *Store) StoredHookVerdict(ctx context.Context, id string) (verdict Store
 		return StoredHookVerdict{}, false, errors.New("audit: hook decision lookup requires a ready store and id")
 	}
 	var envelope, decision StoredHookVerdict
-	err = s.scanRow(ctx, "audit", s.db.QueryRowContext(ctx, `SELECT
+	err = s.scanRow(ctx, "audit", s.queryPool().QueryRowContext(ctx, `SELECT
 		CASE WHEN json_valid(COALESCE(structured_json,''))
 			THEN COALESCE(json_extract(structured_json,'$.action'),'') ELSE '' END,
 		CASE WHEN json_valid(COALESCE(structured_json,'')) AND json_type(structured_json,'$.reason') = 'text'
@@ -3663,7 +3691,7 @@ func (s *Store) GetActionForConnector(targetType, targetName, connector string) 
 	var e ActionEntry
 	var sourcePath, reason, actionsJSON sql.NullString
 	err := s.scanRow(context.Background(), "get_action",
-		s.db.QueryRowContext(context.Background(),
+		s.queryPool().QueryRowContext(context.Background(),
 			`SELECT id, target_type, target_name, source_path, actions_json, reason, updated_at, connector
 		 FROM actions WHERE target_type = ? AND target_name = ? AND connector = ?`,
 			targetType, targetName, connector,
@@ -3701,7 +3729,7 @@ func (s *Store) HasActionForConnector(targetType, targetName, connector, field, 
 		`SELECT COUNT(*) FROM actions WHERE target_type = ? AND target_name = ? AND connector = ? AND json_extract(actions_json, '$.%s') = ?`,
 		field)
 	err := s.scanRow(context.Background(), "has_action",
-		s.db.QueryRowContext(context.Background(), query, targetType, targetName, connector, value), &count)
+		s.queryPool().QueryRowContext(context.Background(), query, targetType, targetName, connector, value), &count)
 	if err != nil {
 		return false, fmt.Errorf("audit: has action: %w", err)
 	}
@@ -4881,7 +4909,14 @@ func (s *Store) Close() error {
 	// transactions to release the lifecycle read lock.
 	s.ready.Store(false)
 	s.closed = true
+	var readErr error
+	if s.readDB != nil {
+		readErr = s.readDB.Close()
+	}
 	err := s.db.Close()
+	if readErr != nil {
+		err = errors.Join(err, readErr)
+	}
 	s.checkpointMu.Lock()
 	if s.checkpointDB != nil {
 		err = errors.Join(err, s.checkpointDB.Close())

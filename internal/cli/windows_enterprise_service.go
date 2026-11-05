@@ -48,16 +48,18 @@ const (
 )
 
 type windowsEnterpriseLifecycleOptions struct {
-	brokerBinary       string
-	gatewayBinary      string
-	acpBinary          string
-	hookBinary         string
-	sensorHelperBinary string
-	policyCompiler     string
-	cliBinary          string
-	configPath         string
-	manifestPath       string
-	installerPath      string
+	brokerBinary        string
+	gatewayBinary       string
+	acpBinary           string
+	hookBinary          string
+	sensorHelperBinary  string
+	policyCompiler      string
+	cliBinary           string
+	coworkPackagePath   string
+	coworkSignaturePath string
+	configPath          string
+	manifestPath        string
+	installerPath       string
 	// resolvedInstaller is the install-enterprise.ps1 the standalone
 	// lifecycle runs; the payload's scanner runtime is staged beside it.
 	resolvedInstaller             string
@@ -325,6 +327,7 @@ func init() {
 	enterpriseWindowsCmd.AddCommand(recovery)
 	enterpriseWindowsCmd.AddCommand(newWindowsServiceConfigValidationCommand())
 	enterpriseWindowsCmd.AddCommand(newWindowsStandaloneFleetInspectCommand())
+	enterpriseWindowsCmd.AddCommand(newWindowsEnterpriseCoworkInspectCommand())
 	enterpriseWindowsCmd.AddCommand(newWindowsCodexRequirementsCommand())
 	enterpriseWindowsCmd.AddCommand(newWindowsManagedHooksTeardownCommand())
 	enterpriseWindowsCmd.AddCommand(newWindowsManagedHooksLifecycleCommand())
@@ -363,6 +366,8 @@ func newWindowsEnterpriseLifecycleCommand(action string) *cobra.Command {
 	flags.StringVar(&opts.policyCompiler, "policy-compiler", "", "standalone source policy_compiler.py")
 	flags.StringVar(&opts.cliBinary, "cli-binary", "", "optional source defenseclaw.exe")
 	flags.StringVar(&opts.configPath, "config", "", "administrator-approved managed config.yaml")
+	flags.StringVar(&opts.coworkPackagePath, "cowork-package", "", "release Cowork archive authenticated by config SHA-256")
+	flags.StringVar(&opts.coworkSignaturePath, "cowork-signature", "", "detached Cowork signature authenticated by config SHA-256")
 	flags.StringVar(&opts.manifestPath, "manifest", "", "administrator-approved guardian targets.yaml")
 	flags.StringVar(&opts.installerPath, "installer", "", "explicit install-enterprise.ps1 path")
 	flags.StringVar(&opts.installRoot, "install-root", "", "certification-only exact protected binary root override")
@@ -583,6 +588,11 @@ func runWindowsEnterpriseLifecycle(
 			return failPreflight(windowsEnterpriseInvalidArguments("--purge is valid only with enterprise windows uninstall"))
 		}
 		return failPreflight(errors.New("--purge is valid only with enterprise windows uninstall"))
+	}
+	if opts.coworkPackagePath != "" || opts.coworkSignaturePath != "" {
+		if !windowsEnterpriseStandalone(opts) || (action != "ensure" && action != "install" && action != "upgrade" && action != "repair") || opts.bundlePath != "" {
+			return failPreflight(windowsEnterpriseInvalidArguments("Cowork artifact inputs require standalone install, ensure, upgrade or repair without a signed bundle"))
+		}
 	}
 	if opts.force && !windowsEnterpriseStandalone(opts) {
 		return failPreflight(errors.New("--force is valid only with enterprise windows uninstall --profile standalone"))
@@ -1074,6 +1084,8 @@ func windowsEnterprisePowerShellArgs(action string, opts *windowsEnterpriseLifec
 	appendValue("-PolicyCompiler", opts.policyCompiler)
 	appendValue("-CLIBinary", opts.cliBinary)
 	appendValue("-Config", opts.configPath)
+	appendValue("-CoworkPackagePath", opts.coworkPackagePath)
+	appendValue("-CoworkSignaturePath", opts.coworkSignaturePath)
 	appendValue("-Manifest", opts.manifestPath)
 	appendValue("-Mode", opts.mode)
 	appendValue("-Connector", opts.connector)

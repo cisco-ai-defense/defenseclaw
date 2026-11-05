@@ -47,6 +47,7 @@ from defenseclaw.inventory import agent_discovery
 from defenseclaw.inventory.agent_discovery import AgentDiscovery, AgentSignal
 
 from tests.helpers import record_test_setup_agent_selections
+from tests.os_view import os_view
 
 
 def test_init_health_probe_refuses_an_unverified_gateway() -> None:
@@ -529,18 +530,50 @@ class TestInitFirstRunBackend(unittest.TestCase):
             )
 
         for flags, want in (
-            (["--no-start-gateway"], "not started (--no-start-gateway)"),
-            ([], "not started (init starts it only with --start-gateway)"),
+            (["--yes", "--no-start-gateway"], "not started (--no-start-gateway)"),
+            ([], "not started: run defenseclaw-gateway start to write the agent hooks and turn protection on "
+             "(doctor reports the gateway and the hooks missing until then; --yes or --start-gateway starts it)"),
         ):
             self.tmp_dir = os.path.realpath(tempfile.mkdtemp(prefix="dclaw-init-sidecar-word-"))
             self.addCleanup(shutil.rmtree, self.tmp_dir, True)
             result = self._invoke([
-                "--non-interactive", "--yes", "--connector", "codex", "--scanner-mode", "local",
+                "--non-interactive", "--connector", "codex", "--scanner-mode", "local",
                 "--skip-install", "--no-verify", "--json-summary", *flags,
             ])
             summary = json.loads(result.output)
             sidecar = [s for s in summary["setup"] if s["name"] == "Sidecar"]
             self.assertEqual([s["detail"] for s in sidecar], [want], summary["setup"])
+            self.assertIn("defenseclaw-gateway start", [s["next_command"] for s in sidecar], summary["setup"])
+
+    def test_scripted_init_with_yes_starts_the_gateway_like_the_wizard(self):
+        # cowork-1-0-8 GAP-0061: `init --non-interactive --yes` accepts the
+        # wizard's default "Start gateway after setup? yes", so it ends with
+        # the gateway running and the hooks written, not with doctor FAIL
+        # rows. An explicit --no-start-gateway still wins.
+        from defenseclaw.bootstrap import StepResult
+
+        self.addCleanup(shutil.rmtree, self.tmp_dir, True)
+        for flags, started in ((["--yes"], True), (["--yes", "--no-start-gateway"], False), ([], False)):
+            self.tmp_dir = os.path.realpath(tempfile.mkdtemp(prefix="dclaw-init-yes-gw-"))
+            self.addCleanup(shutil.rmtree, self.tmp_dir, True)
+            with (
+                patch("defenseclaw.bootstrap._pid_file_running", return_value=False),
+                patch(
+                    "defenseclaw.bootstrap._start_gateway_structured",
+                    return_value=StepResult("Sidecar", "pass", "started"),
+                ) as start,
+            ):
+                result = self._invoke([
+                    "--non-interactive", "--connector", "codex", "--scanner-mode", "local",
+                    "--skip-install", "--no-verify", "--json-summary", *flags,
+                ])
+            summary = json.loads(result.output)
+            sidecar = [s["detail"] for s in summary["setup"] if s["name"] == "Sidecar"]
+            self.assertEqual(start.called, started, (flags, summary["setup"]))
+            if started:
+                self.assertEqual(sidecar, ["started"], summary["setup"])
+            else:
+                self.assertTrue(all(detail.startswith("not started") for detail in sidecar), summary["setup"])
 
     def test_scripted_reinit_reconciles_a_running_gateway(self):
         # GAP-1539: with the gateway already running, a scripted init that
@@ -1460,8 +1493,8 @@ class TestInitFirstRunBackend(unittest.TestCase):
         self.assertEqual(result.exit_code, 0, result.output + (result.stderr or ""))
         summary = json.loads(result.output)
         self.assertEqual(summary["connector"], "codex")
-        # The hook-contract gate adds a read-only probe (persist_cache=False).
-        scans = [c.kwargs for c in mock_discover.call_args_list if c.kwargs.get("persist_cache") is not False]
+        # The hook-contract gate and readiness add their own version probes (use_cache=False).
+        scans = [c.kwargs for c in mock_discover.call_args_list if c.kwargs.get("use_cache") is not False]
         self.assertEqual(scans, [{"refresh": False}])
 
         import yaml
@@ -1489,6 +1522,11 @@ class TestInitFirstRunBackend(unittest.TestCase):
         self.assertEqual(result.exit_code, 0, result.output + (result.stderr or ""))
         summary = json.loads(result.output)
         self.assertEqual(summary["connector"], "claudecode")
+        # The default was picked from a scan that ran no agent CLI, so the
+        # hook-contract gate's probe publishes the version it read for the
+        # gateway and the first doctor (cowork-1-0-8 GAP-0033).
+        probes = [c.kwargs for c in mock_discover.call_args_list if c.kwargs.get("use_cache") is False]
+        self.assertTrue(any(p.get("refresh") is True and p.get("persist_cache") is True for p in probes), probes)
 
         import yaml
         with open(os.path.join(self.tmp_dir, "config.yaml"), encoding="utf-8") as fh:
@@ -1539,8 +1577,8 @@ class TestInitFirstRunBackend(unittest.TestCase):
         ])
 
         self.assertEqual(result.exit_code, 0, result.output + (result.stderr or ""))
-        # The hook-contract gate adds a read-only probe (persist_cache=False).
-        scans = [c.kwargs for c in mock_discover.call_args_list if c.kwargs.get("persist_cache") is not False]
+        # The hook-contract gate and readiness add their own version probes (use_cache=False).
+        scans = [c.kwargs for c in mock_discover.call_args_list if c.kwargs.get("use_cache") is not False]
         self.assertEqual(scans, [{"refresh": True}])
 
 class TestInitVersionDisplay(unittest.TestCase):
@@ -4168,14 +4206,14 @@ class TestMultiConnectorInit(unittest.TestCase):
         from defenseclaw.commands import cmd_init
 
         with patch.object(cmd_init.terminal_checkbox, "stdout_is_tty", return_value=True), \
-                patch.object(cmd_init.os, "name", "nt"):
+                patch.object(cmd_init.terminal_checkbox, "os", os_view("nt")):
             self.assertTrue(cmd_init._supports_terminal_redraw())
 
     def test_checkbox_windows_terminal_hint_keeps_redraw_when_stdout_is_wrapped(self):
         from defenseclaw.commands import cmd_init
 
         with patch.object(cmd_init.terminal_checkbox, "stdout_is_tty", return_value=False), \
-                patch.object(cmd_init.os, "name", "nt"), \
+                patch.object(cmd_init.terminal_checkbox, "os", os_view("nt")), \
                 patch.dict(cmd_init.os.environ, {"WT_SESSION": "test-session"}, clear=True):
             self.assertTrue(cmd_init._supports_terminal_redraw())
 

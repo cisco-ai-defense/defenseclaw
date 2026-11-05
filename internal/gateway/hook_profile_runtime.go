@@ -147,7 +147,13 @@ func decodeCodexRequestForContext(ctx context.Context, rawBody []byte, payload m
 	_ = json.Unmarshal(rawBody, &req)
 	req.Payload = payload
 	req.guestCWD = sandboxHookGuestCWD(ctx, req.CWD, "")
+	reportedCWD := req.CWD
 	req.CWD = hookCWDForContext(ctx, req.CWD)
+	if req.CWD == "" && !ManagedEnterpriseActive() && strings.EqualFold(req.ToolName, "apply_patch") {
+		// A managed service may not be able to read the caller's project.
+		// Keep the patch base only inside the verified caller's home.
+		req.CWD = managedPeerLexicalCWD(ctx, reportedCWD, "")
+	}
 	req.sandboxView, _ = sandboxHookView(ctx)
 	return req
 }

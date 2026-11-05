@@ -18,9 +18,11 @@ package connector
 
 import (
 	"bytes"
+	"crypto/sha256"
 	"crypto/subtle"
 	"encoding/base64"
 	"encoding/binary"
+	"encoding/hex"
 	"encoding/json"
 	"flag"
 	"fmt"
@@ -741,14 +743,19 @@ func sameWindowsInstallPath(left, right string) bool {
 // keep their identity comparisons, which a replace fails. Tests replace it.
 var openNativeReadOnly = winpath.OpenReadShared
 
-// readNativeFileShared is os.ReadFile through openNativeReadOnly.
-func readNativeFileShared(path string) ([]byte, error) {
+// digestNativeFileShared hashes an installed file without retaining its bytes.
+func digestNativeFileShared(path string) (string, error) {
 	file, err := openNativeReadOnly(path)
 	if err != nil {
-		return nil, err
+		return "", err
 	}
-	defer file.Close()
-	return io.ReadAll(file)
+	hash := sha256.New()
+	_, err = io.Copy(hash, file)
+	_ = file.Close()
+	if err != nil {
+		return "", err
+	}
+	return "sha256:" + hex.EncodeToString(hash.Sum(nil)), nil
 }
 
 func stableNativeWindowsPE(path string) bool {

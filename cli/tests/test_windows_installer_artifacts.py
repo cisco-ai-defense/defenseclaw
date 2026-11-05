@@ -23,6 +23,7 @@ import pytest
 ROOT = Path(__file__).resolve().parents[2]
 HELPER_PATH = ROOT / "scripts" / "windows_installer_artifacts.py"
 BUILD_PS1 = ROOT / "scripts" / "build-windows-installer.ps1"
+SCANNER_RUNTIME_SH = ROOT / "packaging" / "windows" / "standalone" / "build-scanner-runtime.sh"
 PACKAGED_V8_VALIDATOR = ROOT / "scripts" / "validate_packaged_v8_resources.py"
 AUTHENTICODE_PS1 = ROOT / "scripts" / "windows-authenticode.ps1"
 BINARY_IDENTITY_PS1 = ROOT / "scripts" / "windows-binary-identity.ps1"
@@ -203,7 +204,7 @@ def _fixture(tmp_path: Path) -> argparse.Namespace:
     payload.mkdir()
 
     stdlib = _zip_bytes({"json/__init__.py": b"# stdlib\n"})
-    python_name = "python-3.13.15-embed-amd64.zip"
+    python_name = "python-3.13.17-embed-amd64.zip"
     _write_zip(payload / python_name, {"python.exe": b"python", "python313.zip": stdlib})
     vc_runtime_name = "microsoft-vc-runtime-14.42.34438-x64.zip"
     _write_zip(
@@ -270,7 +271,7 @@ def _fixture(tmp_path: Path) -> argparse.Namespace:
         "version": version,
         "source_commit": source_commit,
         "distribution_flavor": "oss",
-        "python_version": "3.13.15",
+        "python_version": "3.13.17",
         "gateway_archive": gateway_name,
         "wheel": wheel_name,
         "python_embed": python_name,
@@ -376,7 +377,7 @@ def _fixture(tmp_path: Path) -> argparse.Namespace:
         version=version,
         source_commit=source_commit,
         source_epoch=1_700_000_000,
-        python_version="3.13.15",
+        python_version="3.13.17",
         cosign_version="2.6.2",
         go_inventory=go_inventory,
         authenticode_inventory=authenticode_inventory,
@@ -500,6 +501,82 @@ def test_foreign_pe_prune_refuses_an_unlisted_non_x64_pe(tmp_path: Path, machine
     assert (site / "example" / "helper.dll").exists()
 
 
+def test_x64_pe_check_accepts_an_x64_only_runtime(tmp_path: Path) -> None:
+    runtime = tmp_path / "runtime"
+    (runtime / "python" / "Lib" / "site-packages" / "pip").mkdir(parents=True)
+    (runtime / "python" / "python.exe").write_bytes(_pe_bytes(0x8664))
+    (runtime / "python" / "Lib" / "site-packages" / "pip" / "t64.exe").write_bytes(_pe_bytes(0x8664))
+    (runtime / "python" / "README.txt").write_text("not a PE\n", encoding="utf-8")
+
+    assert artifacts.refuse_foreign_portable_executables(runtime) == {"x64_pe": 2}
+
+
+@pytest.mark.parametrize("machine", [0x014C, 0xAA64])
+@pytest.mark.parametrize(
+    "relative",
+    ["python/Lib/site-packages/pip/_vendor/distlib/t32.exe", "python/vcruntime140.dll"],
+)
+def test_x64_pe_check_refuses_any_non_x64_pe_and_removes_nothing(tmp_path: Path, machine: int, relative: str) -> None:
+    # The whole-tree check before the scanner runtime is archived: even a
+    # launcher prune-foreign-pe would remove fails here (rel-1-0-6:GAP-0107).
+    runtime = tmp_path / "runtime"
+    (runtime / "python").mkdir(parents=True)
+    (runtime / "python" / "python.exe").write_bytes(_pe_bytes(0x8664))
+    foreign = runtime / relative
+    foreign.parent.mkdir(parents=True, exist_ok=True)
+    foreign.write_bytes(_pe_bytes(machine))
+
+    with pytest.raises(artifacts.ArtifactError, match=re.escape(f"{relative} (machine 0x{machine:04x})")):
+        artifacts.refuse_foreign_portable_executables(runtime)
+    assert foreign.exists()
+
+
+def test_x64_pe_check_refuses_a_tree_without_a_pe(tmp_path: Path) -> None:
+    (tmp_path / "runtime").mkdir()
+    (tmp_path / "runtime" / "README.txt").write_text("x\n", encoding="utf-8")
+
+    with pytest.raises(artifacts.ArtifactError, match="not a Windows runtime"):
+        artifacts.refuse_foreign_portable_executables(tmp_path / "runtime")
+
+
+@pytest.mark.skipif(not hasattr(os, "symlink") or os.name == "nt", reason="POSIX symlinks")
+def test_foreign_pe_checks_follow_a_symlinked_file(tmp_path: Path) -> None:
+    # The archive step reads a symlink as the file it names, so the checks do too.
+    outside = tmp_path / "outside.dll"
+    outside.write_bytes(_pe_bytes(0x014C))
+    site = tmp_path / "runtime" / "site-packages"
+    (site / "example").mkdir(parents=True)
+    (site / "example" / "x64.dll").write_bytes(_pe_bytes(0x8664))
+    os.symlink(outside, site / "example" / "helper.dll")
+
+    with pytest.raises(artifacts.ArtifactError, match=r"example/helper\.dll"):
+        artifacts.prune_foreign_portable_executables(site)
+    with pytest.raises(artifacts.ArtifactError, match=r"example/helper\.dll"):
+        artifacts.refuse_foreign_portable_executables(tmp_path / "runtime")
+
+
+def test_scanner_runtime_builder_prunes_and_checks_pes_before_the_archive() -> None:
+    # The standalone Windows scanner runtime (ProgramData\Cisco\
+    # DefenseClaw-ScannerRuntime) is built by its own script; rc FINAL of
+    # 1.0.8 still shipped pip's t32/w32/t64-arm/w64-arm.exe in it
+    # (rel-1-0-6:GAP-0107).
+    build = SCANNER_RUNTIME_SH.read_text(encoding="utf-8")
+    helper = 'python3 -I "${REPO_ROOT}/scripts/windows_installer_artifacts.py"'
+    prune = f'{helper} prune-foreign-pe --root "${{SITE}}"'
+    check = f'{helper} check-x64-pe --root "${{RT}}"'
+    assert build.count(prune) == 1
+    assert build.count(check) == 1
+    prune_at, check_at = build.index(prune), build.index(check)
+    archive_at = build.index('echo "==> runtime.zip"')
+    # After the last write into site-packages, before the archive.
+    assert build.rindex('--target "${SITE}"') < prune_at < check_at < archive_at
+    for writer in ("normalize_tiktoken_ranks.py", "win_unicode_console-0.5/", "DC_WHEEL"):
+        assert build.rindex(writer) < prune_at
+    # The archive step only removes files after the check; it adds none.
+    tail = build[check_at:]
+    assert "uv pip" not in tail and "write_bytes" not in tail
+
+
 def test_builder_prunes_foreign_pes_before_staging_and_inventory() -> None:
     build = BUILD_PS1.read_text(encoding="utf-8")
     prune = "'-I', $WindowsArtifactHelper, 'prune-foreign-pe', '--root', $sitePackages"
@@ -527,9 +604,9 @@ def test_builder_binds_authenticode_inventory_to_payload_provenance_and_sbom() -
 
 def test_builder_pins_a_project_supported_embedded_python_and_checks_metadata() -> None:
     build = BUILD_PS1.read_text(encoding="utf-8")
-    assert '$PythonVersion = "3.13.15"' in build
+    assert '$PythonVersion = "3.13.17"' in build
     assert '$PythonTargetVersion = "3.13"' in build
-    assert '$PythonEmbedSha256 = "D1F04D990AEE1253D8569E8E5104E30FA9F5FA830899F14843448872D936A2CF"' in build
+    assert '$PythonEmbedSha256 = "9E35319BFFEDAB8B36AD44D8F377CB4F1733BCEC257A0B6D04D94F01486DDB38"' in build
     # The metadata check is the shared checker (GAP-0020 LiteLLM override allowance).
     assert "Invoke-CheckedProcess $validationPython @('-I', $DependencyMetadataChecker)" in build
     checker = (ROOT / "scripts" / "check_python_dependency_metadata.py").read_text(encoding="utf-8")

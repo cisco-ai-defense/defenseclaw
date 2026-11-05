@@ -32,6 +32,7 @@ from defenseclaw.tui.executor import (
     managed_subprocess_kwargs,
     resolve_subprocess_argv,
 )
+from tests.os_view import os_view
 
 
 @pytest.mark.asyncio
@@ -596,7 +597,7 @@ async def test_windows_process_tree_none_stops_suspended_command(monkeypatch) ->
 
     monkeypatch.setattr(asyncio, "create_subprocess_exec", fake_exec)
     monkeypatch.setattr("defenseclaw.tui.executor.managed_subprocess_kwargs", lambda: {})
-    monkeypatch.setattr("defenseclaw.tui.executor.os.name", "nt")
+    monkeypatch.setattr("defenseclaw.tui.executor.os", os_view("nt"))
     executor = CommandExecutor(use_pty=False, process_tree_factory=lambda _pid: None)
 
     events = [event async for event in executor.run("defenseclaw", ("doctor",))]

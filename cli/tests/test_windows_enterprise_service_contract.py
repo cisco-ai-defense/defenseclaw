@@ -6665,3 +6665,148 @@ def test_native_privilege_reparse_and_service_dacl_contract() -> None:
 
     tree = _function_text(module, "Assert-DefenseClawManagedTreeNoReparse")
     assert "Test-DefenseClawBenignFileReparseTag -Item $item" in tree
+
+
+def test_config_only_ensure_skips_the_restart_barrier_only_after_clean_stops() -> None:
+    """cowork-1-0-8 GAP-0044: a config-only ensure (drift:config that the
+    services read only at start) runs the upgrade transaction on the installed
+    release, and spent the whole 65-second SCM failure-restart barrier with
+    nothing to drain. The barrier is skipped only when this process proved, at
+    the quiesce, that every service it stopped had run through the window and
+    stopped cleanly (exit codes 0, nothing terminated); the disable and stop
+    after the wait still run, and every other path keeps the full wait."""
+    module = read(MODULE)
+    assert "$script:ServiceFailureRestartQuiescenceSeconds = 65\n" in module
+    assert "$script:DefenseClawCleanQuiescenceBarrier = $null\n" in module
+
+    ran = _module_function(module, "Test-DefenseClawServiceRanThroughBarrier")
+    assert "$null -eq $Identity -or $null -eq $Identity.StartTime" in ran
+    assert "-ge $script:ServiceFailureRestartQuiescenceSeconds" in ran
+
+    exit_state = _module_function(module, "Get-DefenseClawServiceExitState")
+    assert "@('queryex', $Name)" in exit_state
+    assert "WIN32_EXIT_CODE" in exit_state and "SERVICE_EXIT_CODE" in exit_state
+    clean = _module_function(module, "Test-DefenseClawServiceStoppedCleanly")
+    assert "$exit.state -ceq 'STOPPED'" in clean
+    assert "$exit.win32_exit_code -eq 0" in clean
+    assert "$exit.service_exit_code -eq 0" in clean
+
+    transaction = _module_function(module, "New-DefenseClawTransaction")
+    reset = transaction.index("$script:DefenseClawCleanQuiescenceBarrier = $null")
+    identity = transaction.index("Test-DefenseClawServiceRanThroughBarrier -Identity $identity")
+    disable = transaction.index("Write-DefenseClawLifecyclePhase -Stage 'transaction quiesce disable services'")
+    stopped = transaction.index("Write-DefenseClawLifecyclePhase -Stage 'transaction services stopped'")
+    proof = transaction.index("Test-DefenseClawServiceStoppedCleanly -Name $name")
+    bound = transaction.index("$script:DefenseClawCleanQuiescenceBarrier =\n")
+    assert reset < identity < disable < stopped < proof < bound
+    assert "@($script:DefenseClawTerminatedServiceProcesses).Count -eq $terminatedBefore" in transaction
+
+    wait = _module_function(module, "Wait-DefenseClawServiceFailureRestartQuiescence")
+    assert "[switch]$CleanStopProven" in wait
+    skip = wait.index("if ($CleanStopProven) {")
+    sleep = wait.index("Start-Sleep -Milliseconds $milliseconds")
+    redisable = wait.index("Set-DefenseClawServiceStartMode -Name $name -StartMode 4")
+    restop = wait.index("Stop-DefenseClawService -Name $name")
+    assert skip < sleep < redisable < restop
+
+    barrier = _module_function(module, "Test-DefenseClawCleanQuiescenceBarrier")
+    assert "ConvertFrom-DefenseClawServiceQuiescenceTimestamp -Value $ServicesQuiescedAt" in barrier
+    assert ".Ticks -eq" in barrier
+
+    # Only the in-process install-like activation passes the proof; the
+    # rollback and recovery activation keeps the whole barrier.
+    assert module.count("-CleanStopProven:") == 1
+    install_like = _module_function(module, "Invoke-DefenseClawInstallLikeLifecycle")
+    assert (
+        "-CleanStopProven:(Test-DefenseClawCleanQuiescenceBarrier `\n"
+        "                        -ServicesQuiescedAt $activationQuiescedAt)"
+    ) in install_like
+
+
+def test_install_like_run_keeps_a_byte_identical_release_binary() -> None:
+    """cowork-1-0-8 GAP-0044: a config-only ensure runs the upgrade
+    transaction on the installed release, and copied every release binary
+    again (about 530 MB, rescanned by the antivirus) while the services were
+    stopped. The install-like loop now keeps a binary whose installed bytes
+    are the source's: both are hashed, a different one is still replaced, and
+    the descriptor checks still run on the destination afterwards."""
+    module = read(MODULE)
+    install = _module_function(module, "Install-DefenseClawSourceDescriptor")
+    assert "[switch]$SkipIfContentMatches" in install
+    assert "-SkipIfContentMatches:$SkipIfContentMatches" in install
+    # The destination is checked after the copy or the kept file alike.
+    assert install.index("-SkipIfContentMatches:$SkipIfContentMatches") < install.index(
+        "Assert-DefenseClawRegularSource `"
+    )
+
+    atomic = _module_function(module, "Install-DefenseClawFileAtomic")
+    skip = atomic.index("if ($SkipIfContentMatches -and [IO.File]::Exists($Destination))")
+    copy = atomic.index("Copy-Item -LiteralPath $Source -Destination $temporary")
+    assert skip < copy
+    kept = atomic[skip:copy]
+    # Kept only when the source still has its authorized digest and the
+    # destination has the same bytes.
+    assert "throw \"source changed while checking managed artifact: $Source\"" in kept
+    assert "$sourceHash,\n                $destinationHash" in kept
+
+    lifecycle = _module_function(module, "Invoke-DefenseClawInstallLikeLifecycle")
+    release = lifecycle.index("$_ -notin $deferredPolicySources -and $_ -ne 'provider_library'")
+    policy = lifecycle.index("foreach ($name in @($deferredPolicySources")
+    binaries = lifecycle[release:policy]
+    assert "-Destination $destination `\n                -SkipIfContentMatches\n" in binaries
+    # The config and manifest keep their unconditional install.
+    assert "-SkipIfContentMatches" not in lifecycle[policy : policy + 600]
+    # The transaction snapshot is taken before, as before: a rollback still
+    # restores any binary the run replaced.
+    assert lifecycle.index("$snapshot = New-DefenseClawTransaction") < release
+
+
+def test_a_pinned_staged_source_is_admitted_once_per_lifecycle_run() -> None:
+    """cowork-1-0-8 GAP-0044: every lifecycle source was hashed and its
+    signature verified again before and after lifecycle.lock and before each
+    copy, about 530 MB each time. A source Setup staged is now pinned (read
+    handle, no write or delete sharing) before its digest and signature are
+    read; a later check of the same source reuses them only while that pin
+    holds the same file under the same trust policy, after the path,
+    ancestry and ACL checks. Anything else reads the file again."""
+    module = read(MODULE)
+    eligible = _module_function(module, "Test-DefenseClawSourcePinEligible")
+    assert "if (-not (Test-DefenseClawStandaloneProfile)) {\n        return $false" in eligible
+    assert "'DefenseClaw-Enterprise-Setup-'" in eligible
+    assert "$programData + '\\Cisco'" in eligible
+
+    pin = _module_function(module, "Open-DefenseClawSourcePin")
+    assert "[IO.FileAccess]::Read,\n            [IO.FileShare]::Read\n" in pin
+    assert "FileShare]::ReadWrite" not in pin and "FileShare]::Delete" not in pin
+    assert "identity = (Get-DefenseClawFileIdentity -Path $Path)" in pin
+
+    describe = _module_function(module, "Get-DefenseClawSourceDescriptor")
+    opened = describe.index("$pin = Open-DefenseClawSourcePin -Path $full")
+    assert opened < describe.index("Assert-DefenseClawRegularSource `")
+    assert opened < describe.index("Get-FileHash -LiteralPath $full")
+    assert opened < describe.index("Get-AuthenticodeSignature `")
+    # Recorded only after a successful admission; a refused one lets go.
+    assert describe.index("policy = (Get-DefenseClawSourcePinTrustPolicy)") > describe.index(
+        "VersionInfo.FileVersion"
+    )
+    assert "catch {\n        if ($null -ne $pin) {\n            $pin.stream.Dispose()\n        }\n        throw" in describe
+
+    reuse = _module_function(module, "Get-DefenseClawPinnedSourceDescriptor")
+    for condition in (
+        "-not $pin.stream.CanRead",
+        "[string]$pin.policy -cne (Get-DefenseClawSourcePinTrustPolicy)",
+        "[bool]$cached.authenticode -ne [bool]$Source.authenticode",
+        "[bool]$cached.allow_unsigned -ne [bool]$Source.allow_unsigned",
+    ):
+        assert condition in reuse
+    assert reuse.index("Assert-DefenseClawTrustedSource") < reuse.index("return $cached.Clone()")
+    assert "(Get-DefenseClawFileIdentity -Path $full) -cne [string]$pin.identity" in reuse
+
+    policy = _module_function(module, "Get-DefenseClawSourcePinTrustPolicy")
+    for part in ("DefenseClawTrustMode", "DefenseClawAllowedSignerSHA256", "DefenseClawPinnedPayloadSHA256"):
+        assert part in policy
+
+    current = _module_function(module, "Assert-DefenseClawSourceDescriptorCurrent")
+    cached = current.index("$current = Get-DefenseClawPinnedSourceDescriptor -Source $Source")
+    fallback = current.index("$current = Get-DefenseClawSourceDescriptor `")
+    assert cached < fallback < current.index("foreach ($field in @('path', 'label', 'sha256'))")

@@ -471,16 +471,27 @@ sandbox_files_gone() {
 }
 
 # launcher_offers_only_sandbox: an unprivileged account that runs the launcher
-# is told the computer is managed, and sees the sandbox tree in its help.
+# is told the computer is managed, sees only its own protection state in
+# `defenseclaw status` (cowork-1-0-8 GAP-0053), sees the sandbox tree and that
+# status in its help, and is refused every administrator command.
 launcher_offers_only_sandbox() {
-    local output rc=0 text="This computer is managed; use \`defenseclaw sandbox status\` for your read-only status and \`defenseclaw sandbox policy explain\` for your policy. Other commands require an administrator."
+    local output rc=0 text="This computer is managed; use \`defenseclaw status\` for your protection state, \`defenseclaw sandbox status\` for your sandboxes and \`defenseclaw sandbox policy explain\` for your policy. Other commands require an administrator."
     output=$(as_standard_user "$launcher" status 2>&1) || rc=$?
-    [ "$rc" = 2 ] || die "defenseclaw status exited $rc as a standard user, want 2: $output"
-    [ "$output" = "$text" ] || die "defenseclaw status printed '$output', want '$text'"
+    [ "$rc" = 0 ] || die "defenseclaw status exited $rc as a standard user, want 0 (the user's own status): $output"
+    [ "$(head -n 1 <<<"$output")" = "This computer is managed by your organization." ] ||
+        die "defenseclaw status as a standard user does not say the computer is managed: $output"
+    grep -Eq '^  Account +' <<<"$output" && grep -Eq '^  Claude Code +(protected|not protected)$' <<<"$output" &&
+        grep -Eq '^  Cowork +' <<<"$output" ||
+        die "defenseclaw status as a standard user does not show its own protection state: $output"
+    rc=0
+    output=$(as_standard_user "$launcher" setup 2>&1) || rc=$?
+    [ "$rc" = 2 ] || die "defenseclaw setup exited $rc as a standard user, want 2: $output"
+    [ "$output" = "$text" ] || die "defenseclaw setup printed '$output', want '$text'"
     output=$(as_standard_user "$launcher" --help 2>&1) || die "defenseclaw --help failed as a standard user: $output"
     grep -Fq "defenseclaw sandbox" <<<"$output" || die "the launcher help does not offer the sandbox commands: $output"
-    ! grep -Eq '^[[:space:]]+(enterprise|setup|status)[[:space:]]' <<<"$output" || die "the launcher help lists gateway commands: $output"
-    echo "defenseclaw offers only the sandbox commands to a standard user"
+    grep -Eq '^[[:space:]]+status[[:space:]]' <<<"$output" || die "the launcher help does not offer the user's own status: $output"
+    ! grep -Eq '^[[:space:]]+(enterprise|setup)[[:space:]]' <<<"$output" || die "the launcher help lists gateway commands: $output"
+    echo "defenseclaw offers only the sandbox commands and the user's own status to a standard user"
 }
 
 policy_entries() {
@@ -899,16 +910,37 @@ step "MDM detection (detect.sh)"
 detected=$(detect_settled --min-version "$version")
 [ "$detected" = "$version" ] || die "detect.sh printed '$detected', want '$version'"
 echo "detect.sh: $detected"
-# --require-healthy requires verify.ok and verify.security_complete
-# (packaging/mdm/contract/detection.md): with the hook-process limit of the
-# enabled Claude Code and Codex, and on a kernel with open policy-view routes,
-# verify is ok with incomplete security, so the device reports unhealthy.
+# --require-healthy requires verify.ok, verify.coverage_complete and, when
+# security_complete is false, only host-hardening reasons in verify's
+# security_incomplete note (packaging/mdm/contract/detection.md): the
+# hook-process limit of the enabled Claude Code and Codex and open kernel
+# policy-view routes, which only --require-security-complete reports
+# unhealthy. The note is parsed here in Python, apart from detect.sh's awk.
 want_healthy=$version
-[ "$(json_field "$results/04-verify.json" ok)" = True ] && [ "$(json_field "$results/04-verify.json" security_complete)" = True ] ||
-    want_healthy=unhealthy
+"$python" - "$results/04-verify.json" <<'PY' || want_healthy=unhealthy
+import json, sys
+r = json.load(open(sys.argv[1], encoding="utf-8-sig"))
+if r.get("ok") is not True or r.get("coverage_complete") is not True:
+    sys.exit(1)
+if r.get("security_complete") is True:
+    sys.exit(0)
+note = next((w.get("message") or "" for w in r.get("warnings") or [] if w.get("code") == "security_incomplete"), "")
+prefix = "security_complete is false because of: "
+suffix = "; coverage_complete is true; each warning above says what to do"
+if not (note.startswith(prefix) and note.endswith(suffix)):
+    sys.exit(1)
+reasons = note[len(prefix):-len(suffix)].split(", ")
+sys.exit(0 if all(reason in {"hook_process_fail_open", "unprivileged_user_namespaces", "unprivileged_ptrace"}
+                  for reason in reasons) else 1)
+PY
 detected=$(detect_settled --require-healthy --min-version "$version")
 [ "$detected" = "$want_healthy" ] || die "detect.sh --require-healthy printed '$detected', want '$want_healthy'"
 echo "detect.sh --require-healthy: $detected"
+want_secure=$want_healthy
+[ "$(json_field "$results/04-verify.json" security_complete)" = True ] || want_secure=unhealthy
+detected=$(detect_value --require-security-complete --min-version "$version" || true)
+[ "$detected" = "$want_secure" ] || die "detect.sh --require-security-complete printed '$detected', want '$want_secure'"
+echo "detect.sh --require-security-complete: $detected"
 
 # ---- uninstall ---------------------------------------------------------------
 step "uninstall (the machine config and state go too)"

@@ -531,8 +531,8 @@ unset DEFENSECLAW_GATEWAY_TOKEN{{end}}
 {{end}}fail_unreachable() {
 {{if and (not .Managed) (not .Sandbox)}}  defenseclaw_close_during_install
 {{end}}  defenseclaw_log_hook_delivery_failure antigravity antigravity-hook "$1" transport "$FAIL_MODE"
-  defenseclaw_emit_unreachable_stderr "antigravity tool" "$1"
-  if defenseclaw_should_fail_closed_on_unreachable; then
+{{if not (and .Managed (not .SecureClient) (not .Sandbox))}}  defenseclaw_emit_unreachable_stderr "antigravity tool" "$1"
+{{end}}  if defenseclaw_should_fail_closed_on_unreachable; then
     antigravity_emit_fallback 1{{if and (not .Sandbox) (not .SecureClient)}} "$(antigravity_outage_block_reason "$1")"{{end}}
   else
     antigravity_emit_fallback 0

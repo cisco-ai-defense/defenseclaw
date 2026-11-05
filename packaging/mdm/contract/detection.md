@@ -38,8 +38,8 @@ checks the installed config's SHA-256.
 | Mechanism | Value |
 | --- | --- |
 | Package database | `dpkg-query -W -f='${Status} ${Version}' defenseclaw-enterprise` or `rpm -q defenseclaw-enterprise`. This works only for the deb/rpm channel. |
-| Script | `linux/detect.sh [--min-version X.Y.Z] [--require-healthy] [--format exit\|value\|jamf]`. It asks the installed gateway (`/opt/defenseclaw/bin/defenseclaw-gateway`, which must be root-owned) for `enterprise linux status --json`, so it also covers the payload channel. Run it as root; otherwise it reports `not-installed`. |
-| Health | `detect.sh --require-healthy` requires both `verify.ok` and `verify.security_complete`, so a default host with open user namespace or ptrace routes reports `unhealthy` even when verify exits 0 with warnings. It also reports `unhealthy` while dpkg lists the package half-configured or half-installed, or rpm lists two versions of it (an interrupted install or upgrade). |
+| Script | `linux/detect.sh [--min-version X.Y.Z] [--require-healthy] [--require-security-complete] [--format exit\|value\|jamf]`. It asks the installed gateway (`/opt/defenseclaw/bin/defenseclaw-gateway`, which must be root-owned) for `enterprise linux status --json`, so it also covers the payload channel. Run it as root; otherwise it reports `not-installed`. |
+| Health | `detect.sh --require-healthy` requires `verify.ok` and `verify.coverage_complete`. When `security_complete` is false, every reason in verify's `security_incomplete` warning must be a host-hardening warning (`hook_process_fail_open`, and on a stock kernel `unprivileged_user_namespaces` and `unprivileged_ptrace`): a default install is healthy, and detect.sh prints `defenseclaw detect: warning: security_complete is false because of: ...` on STDERR. Any other reason (such as `agent_sessions_restart_required`, `guardian_repair_pending`, `enrolled_home_unavailable` or `agent_unprotected`), or a warning detect.sh cannot read, reports `unhealthy`. `--require-security-complete` (`DC_REQUIRE_SECURITY_COMPLETE=1`) also requires `verify.security_complete` and reports `unhealthy` without it. `--require-healthy` also reports `unhealthy` while dpkg lists the package half-configured or half-installed, or rpm lists two versions of it (an interrupted install or upgrade). |
 | Last package result | `/var/lib/defenseclaw-enterprise/last-package-result.json`: the result of the package's own `ensure --from-package`. |
 | Wrapper log | `/var/log/defenseclaw-enterprise-mdm.log` (root, 0600). |
 
@@ -49,7 +49,7 @@ checks the installed config's SHA-256.
 | --- | --- |
 | pkg receipt | `pkgutil --pkg-info com.cisco.defenseclaw.enterprise` reports `version: X.Y.Z`. The lifecycle forgets the receipt when you uninstall. A pkg whose postinstall failed records no receipt, and `ensure --from-package` adds none: after you fix the cause, install the pkg again. |
 | Script | `macos/detect.sh`, the same options as on Linux. For Intune custom attributes use `--format value` (String), and for Jamf Pro extension attributes use `--format jamf`. |
-| Health | `detect.sh --require-healthy` requires both `verify.ok` and `verify.security_complete`; a verify exit of 0 with incomplete security is unhealthy. |
+| Health | The same as on Linux: `--require-healthy` requires `verify.ok`, `verify.coverage_complete` and only host-hardening reasons for a false `security_complete` (on a stock Mac, `hook_process_fail_open`), which it prints on STDERR; `--require-security-complete` also requires `verify.security_complete`. |
 | Last package result | `/opt/cisco/defenseclaw/lifecycle/last-package-result.json`. |
 | Wrapper log | `/Library/Logs/Cisco/DefenseClaw/mdm-wrapper.log` (root, 0600). |
 
@@ -107,7 +107,7 @@ option (exit 2).
 | `<version>` | The assigned deployment was detected. |
 | `not-installed` | No trusted installed deployment was found. |
 | `outdated` | The installed version is below `--min-version`. |
-| `unhealthy` | The deployment failed a required health check. |
+| `unhealthy` | The deployment failed a required health check (with `--require-healthy`: verify errors, incomplete coverage, or a `security_complete` reason other than the host-hardening warnings; with `--require-security-complete`: any incomplete security). |
 | `bundle-missing`, `bundle-mismatch`, `bundle-outdated`, `bundle-not-enforced` | With `--require-bundle`: the requested signed policy bundle is not the confirmed, enforcing bundle (see [Signed policy bundles](#signed-policy-bundles)). |
 | `unknown` | Detection could not assess the host; run the script as root. |
 | `sessions-need-restart` | With `--require-sessions-protected`: running agent sessions predate their managed hook settings and need a restart. Exits 1 in every format, as does an unknown session scan. |
@@ -120,7 +120,7 @@ In every format, an unknown argument or a bad `--format` exits 2 and prints
 nothing on STDOUT.
 
 Script-only MDMs set `DC_MIN_VERSION`, `DC_REQUIRE_HEALTHY`,
-`DC_REQUIRE_TETRAGON`, `DC_REQUIRE_BUNDLE`, `DC_BUNDLE_STATUS` and `DC_FORMAT`
+`DC_REQUIRE_SECURITY_COMPLETE`, `DC_REQUIRE_TETRAGON`, `DC_REQUIRE_BUNDLE`, `DC_BUNDLE_STATUS` and `DC_FORMAT`
 (`DC_REQUIRE_SESSIONS_PROTECTED` for the session check)
 in the settings block instead of flags.
 

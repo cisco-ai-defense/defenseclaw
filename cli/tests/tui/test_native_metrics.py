@@ -73,7 +73,6 @@ def test_metric_tile_skips_all_child_updates_for_identical_metric(monkeypatch) -
 
     monkeypatch.setattr(tile._title, "update", unexpected_update)
     monkeypatch.setattr(tile._digits, "update", unexpected_update)
-    monkeypatch.setattr(tile._progress, "update", unexpected_update)
     monkeypatch.setattr(tile._detail, "update", unexpected_update)
     monkeypatch.setattr(tile, "_apply_class_map", unexpected_update)
     original_sparkline_data = tile._sparkline.data
@@ -100,11 +99,6 @@ def test_metric_tile_only_updates_changed_rendered_field(monkeypatch) -> None:
 
     monkeypatch.setattr(tile._title, "update", lambda value: updates.append(("title", value)))
     monkeypatch.setattr(tile._digits, "update", lambda value: updates.append(("digits", value)))
-    monkeypatch.setattr(
-        tile._progress,
-        "update",
-        lambda **values: updates.append(("progress", values)),
-    )
     monkeypatch.setattr(tile._detail, "update", lambda value: updates.append(("detail", value)))
     monkeypatch.setattr(tile, "_apply_class_map", lambda value: updates.append(("classes", value)))
 

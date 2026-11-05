@@ -12,6 +12,7 @@ import (
 	"sync"
 	"testing"
 
+	"github.com/defenseclaw/defenseclaw/internal/config"
 	"github.com/defenseclaw/defenseclaw/internal/enterprisehooks"
 	"github.com/defenseclaw/defenseclaw/internal/managed"
 )
@@ -137,6 +138,10 @@ func TestDarwinManifestSkippedRowsLoggedOncePerStreak(t *testing.T) {
 }
 
 func TestDarwinWatchFailureIsDegradedNotFatal(t *testing.T) {
+	previousCfg := cfg
+	cfg = &config.Config{DeploymentMode: managed.DeploymentModeManagedEnterprise}
+	cfg.Enterprise.Profile = managed.ProfileSecureClient
+	t.Cleanup(func() { cfg = previousCfg })
 	lines := captureCLIResilience(t)
 	enterpriseHookWatchDegraded.Lock()
 	enterpriseHookWatchDegraded.last = ""
@@ -150,6 +155,30 @@ func TestDarwinWatchFailureIsDegradedNotFatal(t *testing.T) {
 	got := lines()
 	if len(got) != 1 || !strings.Contains(got[0], `subsystem="watch"`) || !strings.HasPrefix(got[0], managed.MarkerDegraded) {
 		t.Fatalf("lines = %v", got)
+	}
+}
+
+func TestR108MAINREVP3StandaloneWatchFailureRetries(t *testing.T) {
+	previousCfg := cfg
+	cfg = &config.Config{DeploymentMode: managed.DeploymentModeManagedEnterprise}
+	cfg.Enterprise.Profile = managed.ProfileStandalone
+	t.Cleanup(func() { cfg = previousCfg })
+	lines := captureCLIResilience(t)
+	if enterpriseHookWatchFailureToleratedPlatform(errors.New("watch unavailable")) {
+		t.Fatal("standalone watch failure was deferred to the reconcile tick")
+	}
+	if got := lines(); len(got) != 0 {
+		t.Fatalf("standalone watch failure emitted a degraded marker: %v", got)
+	}
+}
+
+func TestR108MAINREVP3SecureClientWatchFailureTwin(t *testing.T) {
+	previousCfg := cfg
+	cfg = &config.Config{DeploymentMode: managed.DeploymentModeManagedEnterprise}
+	cfg.Enterprise.Profile = managed.ProfileSecureClient
+	t.Cleanup(func() { cfg = previousCfg })
+	if !enterpriseHookWatchFailureToleratedPlatform(errors.New("watch unavailable")) {
+		t.Fatal("Secure Client watch failure stopped the reconcile pass")
 	}
 }
 

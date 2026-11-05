@@ -187,6 +187,9 @@ var enterpriseHookWatchDegraded = struct {
 // per-user euid drop is active) from failing the pass: the periodic tick
 // still repairs, so it is logged once as defenseclaw_degraded.
 func enterpriseHookWatchFailureToleratedPlatform(err error) bool {
+	if enterpriseHooksStandaloneUnixActive() {
+		return false
+	}
 	reason := err.Error()
 	if enterprisehooks.OwnerCredentialsDropped() {
 		reason += " (during a per-user credential drop; retried next tick)"

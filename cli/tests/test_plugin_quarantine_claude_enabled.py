@@ -29,6 +29,7 @@ from unittest.mock import patch
 
 from defenseclaw.enforce import claude_plugin_enablement as enablement
 
+from tests.os_view import os_view
 from tests.test_cmd_plugin import PluginCommandTestBase
 
 
@@ -119,8 +120,9 @@ class ClaudePluginQuarantineShowsDisabled(PluginCommandTestBase):
 
         def check_as_another_account(path):
             # Exercise the POSIX guard without changing the command's platform.
-            with patch.object(os, "name", "posix"), patch.object(
-                os, "geteuid", return_value=before.st_uid + 1, create=True
+            private_os = os_view("posix")
+            with patch.object(enablement, "os", private_os), patch.object(
+                private_os, "geteuid", return_value=before.st_uid + 1, create=True
             ):
                 return check_settings_file(path)
 

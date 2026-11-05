@@ -85,14 +85,14 @@ func TestHermesHookRendersUnchangedWithoutTheForeignHookGuard(t *testing.T) {
 		t.Fatal("hermes-hook.sh no longer carries the foreign-hook guard directive this test removes")
 	}
 	if !strings.Contains(shellHookSocketTransportBlock, "@GUARD@") ||
-		shellHookSocketTransport("/var/run/defenseclaw/hook.sock", 461, "", "") != strings.Replace(renderShellHookSocket(strings.Replace(shellHookSocketTransportBlock, "@GUARD@", "", 1), "/var/run/defenseclaw/hook.sock", 461), "@FACTS@", "", 1) {
+		shellHookSocketTransport("/var/run/defenseclaw/hook.sock", 461, "", "", "hermes", runtime.GOOS) != strings.Replace(renderShellHookSocket(strings.Replace(shellHookSocketTransportBlock, "@GUARD@", "", 1), "/var/run/defenseclaw/hook.sock", 461), "@FACTS@", "", 1) {
 		t.Fatal("the socket transport without the guard differs from its render without the guard placeholder")
 	}
 	for _, data := range []templateData{
 		{APIAddr: "127.0.0.1:18970", FailMode: "closed", TokenFile: ".token"},
 		{APIAddr: "127.0.0.1:18970", FailMode: "closed", Managed: true, TokenFile: ".token-hermes", ScopedToken: true, ConnectorName: "hermes"},
 		{APIAddr: "127.0.0.1:18970", FailMode: "closed", Managed: true, TokenFile: ".token-hermes", ScopedToken: true, ConnectorName: "hermes",
-			HookSocketTransportSH: shellHookSocketTransport("/var/run/defenseclaw/hook.sock", 461, "", "")},
+			HookSocketTransportSH: shellHookSocketTransport("/var/run/defenseclaw/hook.sock", 461, "", "", "hermes", runtime.GOOS)},
 	} {
 		want, err := renderTemplate(previous, data)
 		if err != nil {

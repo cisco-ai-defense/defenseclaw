@@ -26,8 +26,8 @@ weighs an estimate. Refresh after a large test change:
            scripts/update_test_timings.py python junit-windows-*.xml --out scripts/test-timings/python-windows.json
   windows-go  Windows Native CI job logs of the windows-go parts -> go-windows.json:
          package times from the packages parts ("[go-package-time] <package>
-         <result> <seconds>") and the gateway and connector test times from
-         the go test -json events the gw parts print
+         <result> <seconds>") and the gateway, connector, and hookexec test
+         times from the go test -json events their parts print
            gh run view <run> --log > win.log; scripts/update_test_timings.py windows-go win.log
 """
 
@@ -112,7 +112,7 @@ def python_timings(files: list[Path]) -> dict:
 # pays for linking its test binary, which its reported elapsed time leaves out.
 WINDOWS_LINK_SECONDS = 6.0
 # The packages Windows Native CI splits by test (go_test_shards.py test mode).
-WINDOWS_TEST_SHARDED = ("internal/gateway", "internal/gateway/connector")
+WINDOWS_TEST_SHARDED = ("internal/gateway", "internal/gateway/connector", "internal/gateway/connector/hookexec")
 
 
 def windows_go_timings(files: list[Path], module: str) -> dict:
@@ -121,7 +121,7 @@ def windows_go_timings(files: list[Path], module: str) -> dict:
     for file in files:
         for match in pattern.finditer(file.read_text(encoding="utf-8", errors="replace")):
             packages[match.group(1)] = float(match.group(2)) + WINDOWS_LINK_SECONDS
-    # The gateway and connector shards balance on their test times.
+    # The test-level shards balance on their recorded test times.
     tests = {rel: names for rel, names in go_timings(files, module)["tests"].items() if rel in WINDOWS_TEST_SHARDED}
     return {"packages": {package: round(value, 1) for package, value in sorted(packages.items())}, "tests": tests}
 

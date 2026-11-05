@@ -33,8 +33,20 @@ type AssetQuarantinePlan struct {
 	SourceRoot     string
 	QuarantineRoot string
 	QuarantinePath string
+	QuarantineName string
 	ContentHash    string
 	OwnershipJSON  string
+}
+
+// WithPluginQuarantineName keeps a plugin's physical source name separate from
+// the name operators use to find its quarantine copy.
+func (plan AssetQuarantinePlan) WithPluginQuarantineName(name string) (AssetQuarantinePlan, error) {
+	if plan.TargetType != "plugin" || !safePathSegment(name) {
+		return AssetQuarantinePlan{}, fmt.Errorf("enforce: invalid plugin quarantine name")
+	}
+	plan.QuarantineName = name
+	plan.QuarantinePath = filepath.Join(plan.QuarantineRoot, "plugins", plan.Connector, name)
+	return plan, nil
 }
 
 // AssetRestorePlan binds a journalled quarantine copy to an allowed restore
@@ -149,10 +161,14 @@ func (plan AssetQuarantinePlan) PerSourceQuarantinePath() string {
 	if plan.Connector != "" {
 		parts = append(parts, plan.Connector)
 	}
-	if extendedTrailingNamePath(plan.SourcePath) && strings.HasSuffix(plan.TargetName, " ") {
-		return filepath.Join(append(parts, hex.EncodeToString(sum[:8]))...) + string(filepath.Separator) + plan.TargetName
+	name := plan.TargetName
+	if plan.QuarantineName != "" {
+		name = plan.QuarantineName
 	}
-	return filepath.Join(append(parts, hex.EncodeToString(sum[:8]), plan.TargetName)...)
+	if extendedTrailingNamePath(plan.SourcePath) && strings.HasSuffix(name, " ") {
+		return filepath.Join(append(parts, hex.EncodeToString(sum[:8]))...) + string(filepath.Separator) + name
+	}
+	return filepath.Join(append(parts, hex.EncodeToString(sum[:8]), name)...)
 }
 
 // ErrQuarantinePublished marks an ExecuteAssetQuarantine failure that came
@@ -416,8 +432,15 @@ func validateQuarantinePlan(plan AssetQuarantinePlan) error {
 		!pathWithin(plan.QuarantinePath, plan.QuarantineRoot, false) {
 		return fmt.Errorf("enforce: quarantine plan escaped an allowed root")
 	}
+	quarantineName := plan.TargetName
+	if plan.QuarantineName != "" {
+		if plan.TargetType != "plugin" || !safePathSegment(plan.QuarantineName) {
+			return fmt.Errorf("enforce: invalid quarantine destination name")
+		}
+		quarantineName = plan.QuarantineName
+	}
 	if exactAssetBase(plan.SourcePath) != plan.TargetName ||
-		exactAssetBase(plan.QuarantinePath) != plan.TargetName {
+		exactAssetBase(plan.QuarantinePath) != quarantineName {
 		return fmt.Errorf("enforce: quarantine plan identity mismatch")
 	}
 	if err := validateSHA256Hex(plan.ContentHash); err != nil {
