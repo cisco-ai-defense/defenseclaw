@@ -475,6 +475,7 @@ def test_receipt_version_name_selects_creator_acl_on_every_asset() -> None:
         "BundleVersionFile": creator_sddl("windowsBundleVersionSDDL"),
         "AdminDirectory": creator_sddl("windowsBundlePrivateSDDL"),
         "AdminFile": creator_sddl("windowsBundleAdminFileSDDL"),
+        "ConfigFile": creator_sddl("windowsConfigFileSDDL"),
     }
     assert 'inherit = "OICI"' in go_acl.split("func windowsBundleVersionSDDL(", 1)[1].split("\n}", 1)[0]
     for kind, actual in creators.items():

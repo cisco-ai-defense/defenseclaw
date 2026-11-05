@@ -2181,8 +2181,9 @@ func WindowsCodexManagedHookContract(hookBinary string) string {
 //
 // On standalone a drifted file is refused with the strict verdict and never
 // repaired in place (managed.StandaloneRefusesContentDrift): a repair restores
-// the descriptor, not hooks an untrusted writer removed. Setup /repair
-// rewrites it (GAP-0561).
+// the descriptor, not hooks an untrusted writer removed. Setup refuses it as
+// well, before it stops anything, and the refusal names the recovery
+// (GAP-0561, GAP-0590).
 func ensureWindowsCodexMachineFileTrust(path, label string, repairable bool) error {
 	strictErr := windowsCodexMachineTrustedFileCheck(path, label)
 	if strictErr == nil {
