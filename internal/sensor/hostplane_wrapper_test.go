@@ -152,7 +152,7 @@ func TestTransparentWrapperOfTheVerifiedClientIsNotReported(t *testing.T) {
 			{wrapper, agent, "claude", client, signed, "2.1.317"},
 		}, 2},
 	} {
-		t.Run(tc.name, func(t *testing.T) {
+		t.Run(tc.name, bubbled(func(t *testing.T) {
 			host := newHost(newFake(fullCoverage()))
 			host.wrapperHold = 30 * time.Millisecond
 			host.coldHold, host.coldPoll = 30*time.Millisecond, 5*time.Millisecond
@@ -181,7 +181,7 @@ func TestTransparentWrapperOfTheVerifiedClientIsNotReported(t *testing.T) {
 			if classified != tc.want || held != 0 || linked != 0 {
 				t.Fatalf("classified=%d held=%d linked=%d, want %d and 0, 0", classified, held, linked, tc.want)
 			}
-		})
+		}))
 	}
 }
 
