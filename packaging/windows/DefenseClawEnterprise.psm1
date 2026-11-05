@@ -15237,13 +15237,16 @@ function New-DefenseClawDeploymentMetadata {
             (-not $Layout.ClaudeTargetEnabled -or
                 $Layout.ClaudeEffectivePolicyVerified)
         )
+        # An administrator's Codex conflict leaves Codex unhooked, so the
+        # deployment is not security-complete while it lasts.
         security_complete = [bool](
             $Installed -and
             ($Layout.ClaudeTargetEnabled -or
                 $Layout.CodexTargetEnabled -or
                 $Layout.CursorTargetEnabled) -and
             (-not $Layout.ClaudeTargetEnabled -or
-                $Layout.ClaudeEffectivePolicyVerified)
+                $Layout.ClaudeEffectivePolicyVerified) -and
+            [string]::IsNullOrEmpty([string]$Layout.CodexRequirementsConflict)
         )
         updated_at = [DateTime]::UtcNow.ToString('o')
         uninstalled_at = $uninstalledAt
@@ -17019,12 +17022,26 @@ function Test-DefenseClawCodexStateAbsentByAdminConflict {
         [Parameter(Mandatory)][hashtable]$Layout,
         [Parameter(Mandatory)][string]$GatewayServiceName
     )
-    if ((Test-DefenseClawStandaloneProfile) -or (Test-DefenseClawTrustStrictAncestors)) {
-        return $false
-    }
     if (Microsoft.PowerShell.Management\Test-Path `
         -LiteralPath $Layout.CodexManagedHooksStatePath `
         -PathType Leaf) {
+        return $false
+    }
+    return (Test-DefenseClawCodexAdminConflictActive `
+        -Layout $Layout `
+        -GatewayServiceName $GatewayServiceName)
+}
+
+# True when the administrator's requirements.toml turns DefenseClaw's
+# managed Codex hooks off, on Secure Client outside strict mode. Uses the
+# conflict this run already saw, or asks the Codex verify command, which
+# reports it before it reads any DefenseClaw state.
+function Test-DefenseClawCodexAdminConflictActive {
+    param(
+        [Parameter(Mandatory)][hashtable]$Layout,
+        [Parameter(Mandatory)][string]$GatewayServiceName
+    )
+    if ((Test-DefenseClawStandaloneProfile) -or (Test-DefenseClawTrustStrictAncestors)) {
         return $false
     }
     if ([string]::IsNullOrEmpty([string]$Layout.CodexRequirementsConflict)) {
@@ -30179,7 +30196,14 @@ function Assert-DefenseClawEnterpriseDeployment {
             -GatewayServiceName $GatewayServiceName)) {
             Assert-DefenseClawCodexManagedHooksStateFile -Layout $Layout
         }
-        [void](Get-DefenseClawCodexRequirementsAclBackup -Layout $Layout)
+        if ((Microsoft.PowerShell.Management\Test-Path `
+                -LiteralPath $Layout.CodexRequirementsAclBackupPath `
+                -PathType Leaf) -or
+            -not (Test-DefenseClawCodexAdminConflictActive `
+                -Layout $Layout `
+                -GatewayServiceName $GatewayServiceName)) {
+            [void](Get-DefenseClawCodexRequirementsAclBackup -Layout $Layout)
+        }
     }
     else {
         foreach ($ownedPath in @(
@@ -30338,8 +30362,19 @@ function Assert-DefenseClawEnterpriseDeployment {
         )
     }
     if ($codexTargetEnabled) {
-        $adminOnlyPaths.Add([string]$Layout.CodexRequirementsOwnershipPath)
-        $adminOnlyPaths.Add([string]$Layout.CodexRequirementsAclBackupPath)
+        # An administrator's Codex conflict can leave no ownership record or
+        # ACL backup to check; whatever exists is still checked.
+        foreach ($codexPath in @(
+                [string]$Layout.CodexRequirementsOwnershipPath,
+                [string]$Layout.CodexRequirementsAclBackupPath
+            )) {
+            if ((Microsoft.PowerShell.Management\Test-Path -LiteralPath $codexPath -PathType Leaf) -or
+                -not (Test-DefenseClawCodexAdminConflictActive `
+                    -Layout $Layout `
+                    -GatewayServiceName $GatewayServiceName)) {
+                $adminOnlyPaths.Add($codexPath)
+            }
+        }
     }
     foreach ($path in $adminOnlyPaths) {
         $kind = if (Microsoft.PowerShell.Management\Test-Path `
@@ -31491,7 +31526,8 @@ function Get-DefenseClawLifecycleStatus {
         claude_effective_policy_verified = [bool]$claudeEffectivePolicyVerified
         security_complete = [bool](
             $healthy -and
-            $externalSecuritySatisfied
+            $externalSecuritySatisfied -and
+            [string]::IsNullOrEmpty([string]$Layout.CodexRequirementsConflict)
         )
         guardian_generation = $generation
         errors = @($errors)
