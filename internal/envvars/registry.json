@@ -2538,6 +2538,14 @@
         {
           "location": "internal/gateway/connector/hooks/_hardening.sh",
           "description": "Body-cap enforcement"
+        },
+        {
+          "location": "cmd/defenseclaw-hook-user/main.go",
+          "description": "Body-cap enforcement in the native per-user Claude Code hook"
+        },
+        {
+          "location": "internal/cli/hook.go",
+          "description": "Body-cap enforcement in the native hook command"
         }
       ],
       "since": "0.4.0"
