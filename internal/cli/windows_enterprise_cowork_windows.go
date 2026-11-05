@@ -322,8 +322,13 @@ func buildWindowsCoworkPlanWith(c *config.Config, delivery bool, ops windowsCowo
 
 func newWindowsEnterpriseCoworkInspectCommand() *cobra.Command {
 	var configPath, packagePath, signaturePath string
+	var beforeACLRepair bool
 	cmd := &cobra.Command{Use: "inspect-cowork", Hidden: true, SilenceUsage: true, RunE: func(cmd *cobra.Command, _ []string) error {
-		c, err := loadWindowsEnterpriseStandaloneConfig(configPath)
+		load := loadWindowsEnterpriseStandaloneConfig
+		if beforeACLRepair {
+			load = loadWindowsCoworkSourceConfig
+		}
+		c, err := load(configPath)
 		if err != nil {
 			return err
 		}
@@ -336,7 +341,51 @@ func newWindowsEnterpriseCoworkInspectCommand() *cobra.Command {
 	cmd.Flags().StringVar(&configPath, "config", "", "installed standalone administrator config")
 	cmd.Flags().StringVar(&packagePath, "cowork-package", "", "SHA-pinned Cowork archive input")
 	cmd.Flags().StringVar(&signaturePath, "cowork-signature", "", "SHA-pinned Cowork detached signature input")
+	cmd.Flags().BoolVar(&beforeACLRepair, "before-acl-repair", false, "the lifecycle source plan, read before the transaction repairs the runtime ACL")
 	return cmd
+}
+
+// loadWindowsCoworkSourceConfig is the load of the Cowork source plan, which
+// install, upgrade and ensure read before their transaction re-stamps the
+// runtime access list. With GAP-0561 the data_dir walk is strict on
+// standalone, so a drifted runtime ACL refused this read and ensure failed
+// 1603 before it reached the repair. Only that refusal falls back to the
+// checks the config preflight runs at the same point: every service-time rule
+// except the data_dir ACL. Delivery loads the installed config strictly again
+// after the repair, so drift the transaction cannot repair still fails it.
+func loadWindowsCoworkSourceConfig(path string) (*config.Config, error) {
+	c, err := loadWindowsEnterpriseStandaloneConfig(path)
+	var drift *config.ManagedDataDirTrustError
+	if err == nil || !errors.As(err, &drift) {
+		return c, err
+	}
+	layout, layoutErr := managed.StandaloneWindowsLayout()
+	if layoutErr != nil {
+		return nil, err
+	}
+	if strings.TrimSpace(path) == "" {
+		path = layout.ConfigPath
+	}
+	abs, absErr := filepath.Abs(path)
+	if absErr != nil {
+		return nil, err
+	}
+	raw, readErr := readConfigV8Source(abs)
+	if readErr != nil {
+		return nil, err
+	}
+	pins := windowsEnterpriseServicePins(layout)
+	pins[managed.ConfigPathEnv] = abs
+	restore := setTemporaryEnvironment(pins)
+	defer restore()
+	candidate, candidateErr := config.LoadRuntimeV8InspectionCandidateFromBytes(abs, config.V8ManagedChecksView(raw))
+	if candidateErr != nil {
+		return nil, err
+	}
+	if err := config.ValidateManagedStandaloneRuntimeCandidate(candidate); err != nil {
+		return nil, err
+	}
+	return candidate, nil
 }
 
 func applyWindowsEnterpriseCoworkStatus(result *enterprisestatus.Result, c *config.Config) {

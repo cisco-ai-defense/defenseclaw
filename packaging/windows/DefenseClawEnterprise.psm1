@@ -27822,9 +27822,12 @@ function Get-DefenseClawCoworkPlan {
     param([Parameter(Mandatory)][hashtable]$Layout,
         [Parameter(Mandatory)][string]$GatewayServiceName,
         [hashtable]$GatewaySource, [string]$ConfigPath,
-        [string]$CoworkPackagePath, [string]$CoworkSignaturePath)
+        [string]$CoworkPackagePath, [string]$CoworkSignaturePath, [switch]$BeforeAclRepair)
     $args = @('enterprise', 'windows', 'inspect-cowork')
     if (-not [string]::IsNullOrWhiteSpace($ConfigPath)) { $args += @('--config', $ConfigPath) }
+    # The lifecycle source plan runs before the transaction re-stamps the
+    # runtime ACL; delivery, after it, inspects without this switch (strict).
+    if ($BeforeAclRepair) { $args += @('--before-acl-repair') }
     if (-not [string]::IsNullOrWhiteSpace($CoworkPackagePath)) { $args += @('--cowork-package', $CoworkPackagePath) }
     if (-not [string]::IsNullOrWhiteSpace($CoworkSignaturePath)) { $args += @('--cowork-signature', $CoworkSignaturePath) }
     $probe = Invoke-DefenseClawGatewayCommand -Layout $Layout `
@@ -40788,7 +40791,8 @@ function Invoke-DefenseClawInstallLikeLifecycle {
         $coworkSourcePlan = Get-DefenseClawCoworkPlan -Layout $Layout `
             -GatewayServiceName $GatewayServiceName -GatewaySource $Sources['gateway'] `
             -ConfigPath $coworkConfigSource `
-            -CoworkPackagePath $CoworkPackagePath -CoworkSignaturePath $CoworkSignaturePath
+            -CoworkPackagePath $CoworkPackagePath -CoworkSignaturePath $CoworkSignaturePath `
+            -BeforeAclRepair
     }
     $snapshot = New-DefenseClawTransaction `
         -Layout $Layout `

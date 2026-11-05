@@ -2288,3 +2288,36 @@ def test_cowork_policy_key_defaults_are_pinned() -> None:
     key = re.findall(r"^\s*\$script:CoworkPolicyKey\s*=\s*(.+?)\s*$", text, re.M)
     assert hive == ["[Microsoft.Win32.RegistryHive]::LocalMachine"]
     assert key == ["'SOFTWARE\\Policies\\Claude'"]
+
+
+def test_cowork_source_plan_reaches_the_runtime_acl_repair() -> None:
+    """Setup /ensure reads the Cowork source plan before its transaction
+    re-stamps the runtime ACL. That read passes --before-acl-repair (only a
+    data_dir ACL refusal falls back to the preflight checks), so a drifted
+    runtime ACL no longer fails ensure 1603 before the repair (CI step 04,
+    GAP-0561). Delivery inspects again after the ACLs are re-stamped, strictly."""
+    text = _text(MODULE)
+    plan = text[text.index("function Get-DefenseClawCoworkPlan"):]
+    plan = plan[: plan.index("\nfunction ", 1)]
+    assert "[switch]$BeforeAclRepair" in plan
+    assert "if ($BeforeAclRepair) { $args += @('--before-acl-repair') }" in plan
+    life = text[text.index("function Invoke-DefenseClawInstallLikeLifecycle"):]
+    life = life[: life.index("\nfunction ", 1)]
+    source = life.index("$coworkSourcePlan = Get-DefenseClawCoworkPlan")
+    transaction = life.index("$snapshot = New-DefenseClawTransaction", source)
+    assert "-BeforeAclRepair" in life[source:transaction]
+    delivery = life.index("Invoke-DefenseClawCoworkDelivery -Layout $Layout")
+    restamp = life.index("Set-DefenseClawManagedAcls", transaction)
+    assert transaction < restamp < delivery
+    deliver = text[text.index("function Invoke-DefenseClawCoworkDelivery"):]
+    deliver = deliver[: deliver.index("\nfunction ", 1)]
+    assert "Get-DefenseClawCoworkPlan" in deliver
+    assert "BeforeAclRepair" not in deliver
+    assert text.count("-BeforeAclRepair") == 1
+    go = _text(ROOT / "internal" / "cli" / "windows_enterprise_cowork_windows.go")
+    assert '"before-acl-repair"' in go
+    fallback = go[go.index("func loadWindowsCoworkSourceConfig"):]
+    fallback = fallback[: fallback.index("\n}\n") + 3]
+    assert "loadWindowsEnterpriseStandaloneConfig(path)" in fallback
+    assert "errors.As(err, &drift)" in fallback
+    assert "config.ValidateManagedStandaloneRuntimeCandidate(candidate)" in fallback
