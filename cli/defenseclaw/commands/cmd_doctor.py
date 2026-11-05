@@ -5263,6 +5263,19 @@ def _check_sidecar(cfg, r: _DoctorResult) -> dict | None:
                         )
                     else:
                         _emit("warn", f"  └─ {sub}", f"degraded — {reason}" if reason else "degraded", r=r)
+                elif sub == "gateway" and isinstance(details, dict) and isinstance(details.get("hint"), str):
+                    # The OpenClaw gateway refused this sidecar's device or
+                    # token, and only the operator can fix it: the gateway
+                    # keeps retrying and names the step (GAP-0592).
+                    last_error = info.get("last_error")
+                    reason = last_error.strip() if isinstance(last_error, str) else ""
+                    _emit(
+                        "fail",
+                        f"  └─ {sub}",
+                        f"{state} — {reason}" if reason else state,
+                        r=r,
+                        remediation=details["hint"].strip(),
+                    )
                 else:
                     audit_db = str(getattr(cfg, "audit_db", "") or "")
                     reason = _telemetry_error_reason(details, audit_db) if sub == "telemetry" else ""

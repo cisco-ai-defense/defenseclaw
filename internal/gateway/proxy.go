@@ -1435,9 +1435,10 @@ func (p *GuardrailProxy) handlePassthrough(w http.ResponseWriter, r *http.Reques
 		}
 		elapsed := time.Since(t0)
 		p.logPreCall(label, partial.Messages, verdict, elapsed)
-		p.recordTelemetry(r.Context(), "prompt", label, verdict, elapsed, mode,
+		overlay := p.recordTelemetry(r.Context(), "prompt", label, verdict, elapsed, mode,
 			verdict.Action == "block" && mode == "action")
-		if verdict.Action == "block" && mode == "action" {
+		auditClosed := p.promptAuditFailedClosed(r.Context(), verdict, mode, overlay.evaluationLogErr)
+		if (verdict.Action == "block" && mode == "action") || auditClosed {
 			msg := blockMessage(customBlockMsg, "prompt", verdict.Reason)
 			// Enqueue a notification BEFORE writing the block
 			// response so the next proxy call (this client's retry,
@@ -3140,8 +3141,9 @@ func (p *GuardrailProxy) handleChatCompletion(w http.ResponseWriter, r *http.Req
 		overlay := p.recordTelemetry(agentCtx, "prompt", req.Model, verdict, elapsed, mode,
 			verdict.Action == "block" && mode == "action")
 		requestTrace.AddGuardrailOverlay(overlay)
+		auditClosed := p.promptAuditFailedClosed(agentCtx, verdict, mode, overlay.evaluationLogErr)
 
-		if verdict.Action == "block" && mode == "action" {
+		if (verdict.Action == "block" && mode == "action") || auditClosed {
 			traceResult = proxyV8TraceResult{Outcome: observability.OutcomeBlocked, Streaming: req.Stream}
 			msg := blockMessage(customBlockMsg, "prompt", verdict.Reason)
 			p.enqueueBlockNotification(verdict, "prompt", req.Model)
@@ -4609,11 +4611,9 @@ func (p *GuardrailProxy) emitProxyAuthFailure(r *http.Request, metricReason stri
 //
 // BREAKING for any persisted `sk-dc-…` value derived under the old
 // algorithm: those will no longer match the master key the proxy
-// recomputes at boot. Operators who cached the literal string need to
-// re-read it from the running proxy (the value is logged once at boot
-// to gateway.log) or, more commonly, simply continue using whichever
-// connector-issued bearer their tooling has — `sk-dc-` master keys are
-// an internal fallback, not the supported credential.
+// recomputes at boot. The gateway never logs or prints the value. Callers
+// use the connector-issued bearer their tooling has: `sk-dc-` master keys
+// are an internal fallback, not a supported credential.
 func deriveMasterKey(dataDir string) string {
 	keyFile := filepath.Join(dataDir, "device.key")
 	data, err := os.ReadFile(keyFile)
