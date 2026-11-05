@@ -2256,6 +2256,11 @@ def test_activation_rollback_and_guardian_failure_contracts_are_durable() -> Non
     assert "boundaryDeadline" not in wait
     assert "Get-DefenseClawGuardianStateIdentity" in wait
     assert "last_status=$lastStatus" in wait
+    # GAP-0044: standalone starts a status process only when the guardian
+    # state file changed or 2 s after the last one, not every 0.25 s.
+    assert "$probeOnChange = Test-DefenseClawStandaloneProfile" in wait
+    assert "TotalMilliseconds -lt 2000" in wait
+    assert "$probedStateIdentity = $currentStateIdentity" in wait
     guardian_failure = module[
         module.index(
             "function Get-DefenseClawGuardianVerificationFailureDiagnostic"
