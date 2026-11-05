@@ -1319,7 +1319,7 @@ func ResolveConnector(connector, surface, event string, payload []byte) string {
 				// apply_patch tool is a patch envelope, not shell.
 				if !isApplyPatchToolName(tool) {
 					links = commandLinksWithFactsBalanced(command, cwd, home, sourceFacts, true)
-					if !protectedDecision && (len(links.copyDestinations) > 0 || len(links.copyWrittenChildren) > 0) {
+					if !protectedDecision && len(links.copyWrittenTargets) > 0 {
 						protectedFiles := newProtectedFiles(home)
 						protectedDecision = links.protectedCopyDestinationWith(protectedFiles)
 					}
@@ -2296,7 +2296,7 @@ type shellLinks struct {
 	copyDestinations []string
 	// A dynamic source with one known value copied into an existing
 	// directory writes this child. Keep it out of copy-scope decisions.
-	copyWrittenChildren    []string
+	copyWrittenTargets     []string
 	placedCopyDestinations []string // copy destinations placed by the statement walk
 	// copyEnds: the end offset of the copy call that wrote a destination,
 	// when that call is a plain top-level statement of a ; / && / || list
@@ -2345,7 +2345,7 @@ func (l *shellLinks) merge(inner shellLinks) {
 	l.globalOther = l.globalOther || inner.globalOpaque
 	l.opaqueScopes = append(l.opaqueScopes, inner.opaqueScopes...)
 	l.copyDestinations = append(l.copyDestinations, inner.copyDestinations...)
-	l.copyWrittenChildren = append(l.copyWrittenChildren, inner.copyWrittenChildren...)
+	l.copyWrittenTargets = append(l.copyWrittenTargets, inner.copyWrittenTargets...)
 	l.placedCopyDestinations = append(l.placedCopyDestinations, inner.placedCopyDestinations...)
 	for _, destination := range inner.copyDestinations {
 		l.noteCopyEnd(destination, -1)
@@ -3096,10 +3096,11 @@ func commandLinksRead(command, cwd, home string, facts map[string]string, record
 					if dynamicResolved {
 						parsed := cpOperands(words[1:], static[1:])
 						if parsed.ok && !parsed.noTargetDir && !parsed.parents && !parsed.preserves && !parsed.hard && !parsed.symbolic {
+							links.copyWrittenTargets = append(links.copyWrittenTargets, destination)
 							if info, err := os.Stat(destination); err == nil && info.IsDir() {
 								for _, source := range parsed.sources {
 									child := filepath.Join(destination, filepath.Base(source))
-									links.copyWrittenChildren = append(links.copyWrittenChildren, child)
+									links.copyWrittenTargets = append(links.copyWrittenTargets, child)
 								}
 							}
 						}
@@ -4193,14 +4194,34 @@ func (l Links) Known() bool {
 	return l.links.known && !l.links.opaque
 }
 
-// ProtectedCopyDestination reports a copy destination the link walk can
-// place on a protected file, including the child of an existing directory
-// when a plain source word has one known value.
+// Opaque reports that a shell operation may create an unread link scope.
+// A merely incomplete walk does not make the client's target map incomplete.
+func (l Links) Opaque() bool {
+	return l.links.opaque
+}
+
+// ProtectedCopyDestination reports a protected write reached by a copy with
+// a validated dynamic operand, including a child of a destination directory.
 func (l Links) ProtectedCopyDestination(home string) bool {
-	if len(l.links.copyDestinations) == 0 && len(l.links.copyWrittenChildren) == 0 {
+	if len(l.links.copyWrittenTargets) == 0 {
 		return false
 	}
 	return l.links.protectedCopyDestinationWith(newProtectedFiles(home))
+}
+
+// UnverifiedClientResolution reports a client link reading that changes a
+// named path while the client also reports an uncertain write.
+// A replacement reading alone cannot prove that write ordinary.
+func UnverifiedClientResolution(facts map[string]string) bool {
+	if facts[UnprovenReasonKey] == "" {
+		return false
+	}
+	for path, resolved := range facts {
+		if filepath.IsAbs(path) && filepath.IsAbs(resolved) && filepath.Clean(resolved) != filepath.Clean(path) {
+			return true
+		}
+	}
+	return false
 }
 
 func (l shellLinks) protectedCopyDestinationWith(protected protectedFiles) bool {
@@ -4216,7 +4237,7 @@ func (l shellLinks) protectedCopyDestinationWith(protected protectedFiles) bool 
 		}
 		return false
 	}
-	return check(l.copyDestinations) || check(l.copyWrittenChildren)
+	return check(l.copyWrittenTargets)
 }
 
 // KnownOutsideScopes reports that Target answers path as the user-side

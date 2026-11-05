@@ -102,15 +102,21 @@ func TestGAP0362CdVariableCopyDestination(t *testing.T) {
 							t.Fatal(err)
 						}
 					}
-					// GAP-0402 records the conservative managed false block for
-					// these nested pushd, cd-option and subshell benign twins.
-					wantBlock := row.block || managed && strings.Contains(row.name, "/")
+					// The ordinary nested forms now share the balanced verdict.
+					// Strict retains the conservative decision in a blind cell.
+					wantBlock := row.block
 					want := `{"action":"allow"`
 					if wantBlock {
 						want = `{"action":"block"`
 					}
 					if !strings.HasPrefix(got, want) || wantBlock && !strings.Contains(got, "persistence.ssh_authorized_keys_command") {
 						t.Errorf("%q = %.300s, want %s", row.command, got, want)
+					}
+					if managed && !row.block && strings.Contains(row.name, "/") {
+						strict := postDynamicWordParityCell(t, home, project, connector, true, true, true, row.command, nil)
+						if !strings.HasPrefix(strict, `{"action":"block"`) {
+							t.Errorf("strict %q = %.300s, want block", row.command, strict)
+						}
 					}
 				})
 			}
