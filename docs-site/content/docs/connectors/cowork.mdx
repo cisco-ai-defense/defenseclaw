@@ -172,7 +172,7 @@ How each command treats the plugin:
 | --- | --- |
 | `defenseclaw uninstall`, `defenseclaw uninstall --dry-run` | Prints the removal step when `setup cowork` built a plugin from this data folder. The dry run lists it with the plan |
 | `defenseclaw reset` | Deletes the data folder, the hook script and the Cowork state with it. It reads the state first and prints the same removal step when a plugin was built, because the plugin now blocks Cowork tool calls |
-| `defenseclaw setup remove claudecode` | Turns off the Claude Code hooks. It does not touch the plugin in your Claude account and prints no Cowork step. Remove the plugin in Claude too, because Cowork is no longer protected through it |
+| `defenseclaw setup remove claudecode` | Turns off the Claude Code hooks. It does not touch the plugin in your Claude account. When `setup cowork` built a plugin, it prints that Cowork is no longer protected. Remove the plugin in Claude too |
 
 All three leave the plugin in your Claude account. Only you can remove it.
 
