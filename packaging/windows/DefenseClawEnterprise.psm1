@@ -24138,14 +24138,22 @@ function Get-DefenseClawTargetRuntimeSkippedProfiles {
 function Write-DefenseClawTargetRuntimeSkippedProfiles {
     param(
         [Parameter(Mandatory)]$Plan,
-        [Parameter(Mandatory)][hashtable]$Layout
+        [Parameter(Mandatory)][hashtable]$Layout,
+        [switch]$ValidationOnly
     )
     $entries = @()
     foreach ($profile in @(Get-DefenseClawTargetRuntimeSkippedProfiles -Plan $Plan)) {
-        $entries += ((
-            'target_runtime_profile_skipped: user {0} at {1} was left out of this install ' +
-            'and is not protected until the Guardian enrolls it after the folder is free: {2}'
-        ) -f [string]$profile.sid, [string]$profile.user_home, [string]$profile.reason)
+        $description = if ($ValidationOnly) {
+            'was left pending in this lifecycle run; its folder was not changed. ' +
+            'Correct the named account profile and run Setup /ensure to retry enrollment: {0}'
+        }
+        else {
+            'was left out of this install and is not protected until the Guardian ' +
+            'enrolls it after the folder is free: {0}'
+        }
+        $entries += ('target_runtime_profile_skipped: user {0} at {1} {2}' -f `
+            [string]$profile.sid, [string]$profile.user_home,
+            ($description -f [string]$profile.reason))
     }
     foreach ($profile in @(Get-DefenseClawTargetRuntimeSkippedProfiles -Plan $Plan -Repaired)) {
         $entries += ((
@@ -24568,7 +24576,7 @@ function Invoke-DefenseClawTargetRuntimePreparation {
         $ValidationOnly -and (Test-DefenseClawStandaloneProfile)
     )
     if ($standaloneValidation) {
-        $planArguments += '--validate-only'
+        $planArguments += @('--validate-only', '--skip-account-failures')
     }
     if ($AllowSkipBusyProfiles) {
         # Last, so the plan helper's argument shape stays fixed otherwise.
@@ -24595,7 +24603,7 @@ function Invoke-DefenseClawTargetRuntimePreparation {
     # cannot open in every mode, so Upgrade and Repair heal one user without
     # failing all of them. A skipped user keeps its manifest row and simply
     # has no root in this plan; each one is recorded.
-    Write-DefenseClawTargetRuntimeSkippedProfiles -Plan $plan -Layout $Layout
+    Write-DefenseClawTargetRuntimeSkippedProfiles -Plan $plan -Layout $Layout -ValidationOnly:$ValidationOnly
     if ($ValidationOnly) {
         # A standalone deferred account's pending root (absent, or created by
         # the account before enrollment) is the guardian's to create or adopt
@@ -29216,7 +29224,8 @@ function Get-DefenseClawGuardianReadinessProbe {
         # As in Wait-DefenseClawFreshGuardianReconcile: a complete reconcile
         # whose only problem is failed targets is accepted (rollback restores it;
         # activation runs degraded). With -LiveVerify, only Guardian-failed targets.
-        [switch]$AllowFailedTargets
+        [switch]$AllowFailedTargets,
+        [string[]]$AllowedFailedTargetSIDs
     )
     $service = Microsoft.PowerShell.Management\Get-Service -Name $GuardianServiceName -ErrorAction SilentlyContinue
     if ($null -eq $service -or
@@ -29239,7 +29248,9 @@ function Get-DefenseClawGuardianReadinessProbe {
         $report = Get-DefenseClawGuardianStatusReport `
             -Layout $Layout `
             -GatewayServiceName $GatewayServiceName
-        if (Test-DefenseClawGuardianReportCompletedWithFailedTargets -Report $report) {
+        if ((Test-DefenseClawGuardianReportCompletedWithFailedTargets -Report $report) -and
+            (Test-DefenseClawGuardianFailedTargetsWithinSIDs `
+                -Report $report -AllowedSIDs $AllowedFailedTargetSIDs)) {
             $accepted = -not $LiveVerify
             if ($LiveVerify) {
                 # A live verify may fail only on the targets the Guardian
@@ -29299,14 +29310,16 @@ function Test-DefenseClawGuardianReady {
         [Parameter(Mandatory)][string]$GatewayServiceName,
         [Parameter(Mandatory)][string]$GuardianServiceName,
         [switch]$LiveVerify,
-        [switch]$AllowFailedTargets
+        [switch]$AllowFailedTargets,
+        [string[]]$AllowedFailedTargetSIDs
     )
     $readiness = Get-DefenseClawGuardianReadinessProbe `
         -Layout $Layout `
         -GatewayServiceName $GatewayServiceName `
         -GuardianServiceName $GuardianServiceName `
         -LiveVerify:$LiveVerify `
-        -AllowFailedTargets:$AllowFailedTargets
+        -AllowFailedTargets:$AllowFailedTargets `
+        -AllowedFailedTargetSIDs $AllowedFailedTargetSIDs
     return [bool]$readiness.ready
 }
 
@@ -29319,7 +29332,8 @@ function Wait-DefenseClawEnterpriseReadiness {
         [bool]$RequireEnumerator = $true,
         [int]$TimeoutSeconds = 90,
         # Rollback, recovery and activation; see Get-DefenseClawGuardianReadinessProbe.
-        [switch]$AllowFailedTargets
+        [switch]$AllowFailedTargets,
+        [string[]]$AllowedFailedTargetSIDs
     )
     $deadline = [DateTime]::UtcNow.AddSeconds($TimeoutSeconds)
     Write-DefenseClawLifecyclePhase -Stage 'enterprise readiness wait'
@@ -29350,7 +29364,8 @@ function Wait-DefenseClawEnterpriseReadiness {
                 -Layout $Layout `
                 -GatewayServiceName $GatewayServiceName `
                 -GuardianServiceName $GuardianServiceName `
-                -AllowFailedTargets:$AllowFailedTargets
+                -AllowFailedTargets:$AllowFailedTargets `
+                -AllowedFailedTargetSIDs $AllowedFailedTargetSIDs
         }
         $enumerator = Microsoft.PowerShell.Management\Get-Service `
             -Name $enumeratorServiceName `
@@ -30676,7 +30691,8 @@ function Assert-DefenseClawEnterpriseDeployment {
         # Install/Upgrade activation: live readiness accepts a completed
         # reconcile whose only failures are user targets the Guardian itself
         # reported failed (see Get-DefenseClawGuardianReadinessProbe).
-        [switch]$AcceptDegradedTargets
+        [switch]$AcceptDegradedTargets,
+        [string[]]$AllowedFailedTargetSIDs
     )
     if ($null -eq $ExpectedGatewayAccount -or $ExpectedGatewayAccount.Count -eq 0) {
         $ExpectedGatewayAccount = Get-DefenseClawAcceptedGatewayServiceAccounts `
@@ -31608,7 +31624,8 @@ function Assert-DefenseClawEnterpriseDeployment {
             -GatewayServiceName $GatewayServiceName `
             -GuardianServiceName $GuardianServiceName `
             -LiveVerify `
-            -AllowFailedTargets:$AcceptDegradedTargets
+            -AllowFailedTargets:$AcceptDegradedTargets `
+            -AllowedFailedTargetSIDs $AllowedFailedTargetSIDs
         if (-not [bool]$guardianReadiness.ready) {
             throw (
                 'guardian SCM process is running but protected target ' +
@@ -32068,7 +32085,8 @@ function Get-DefenseClawLifecycleStatus {
         # The result of an activation that accepted a completed reconcile
         # with failed user targets: those targets are logged as
         # defenseclaw_degraded instead of failing the result.
-        [switch]$AcceptDegradedTargets
+        [switch]$AcceptDegradedTargets,
+        [string[]]$AllowedFailedTargetSIDs
     )
     $errors = [Collections.Generic.List[string]]::new()
     $metadata = $null
@@ -32142,14 +32160,17 @@ function Get-DefenseClawLifecycleStatus {
                 -Layout $Layout `
                 -GatewayServiceName $GatewayServiceName `
                 -GuardianServiceName $GuardianServiceName `
-                -AllowFailedTargets:$AcceptDegradedTargets
+                -AllowFailedTargets:$AcceptDegradedTargets `
+                -AllowedFailedTargetSIDs $AllowedFailedTargetSIDs
             $guardianReport = Get-DefenseClawGuardianStatusReport `
                 -Layout $Layout `
                 -GatewayServiceName $GatewayServiceName
             $generation = Get-DefenseClawGuardianGeneration -Report $guardianReport
             $guardianDegraded = [bool](
                 $AcceptDegradedTargets -and
-                (Test-DefenseClawGuardianReportCompletedWithFailedTargets -Report $guardianReport)
+                (Test-DefenseClawGuardianReportCompletedWithFailedTargets -Report $guardianReport) -and
+                (Test-DefenseClawGuardianFailedTargetsWithinSIDs `
+                    -Report $guardianReport -AllowedSIDs $AllowedFailedTargetSIDs)
             )
             if ($guardianDegraded) {
                 Write-DefenseClawGuardianDegradedTargets -Report $guardianReport
@@ -32422,7 +32443,8 @@ function Test-DefenseClawGuardianCoverageReport {
         [AllowEmptyString()][string]$CurrentStateIdentity,
         [AllowEmptyString()][string]$ExpectedManifestSHA256,
         [Parameter(Mandatory)][DateTime]$StartedAfter,
-        [switch]$AllowFailedTargets
+        [switch]$AllowFailedTargets,
+        [string[]]$AllowedFailedTargetSIDs
     )
     $reject = {
         param([string]$Reason)
@@ -32436,7 +32458,9 @@ function Test-DefenseClawGuardianCoverageReport {
     # A digest-bound activation still has to prove its exact activation
     # identity below; only the report's ok=false is excused.
     $degradedAccepted = $AllowFailedTargets -and
-        (Test-DefenseClawGuardianReportCompletedWithFailedTargets -Report $Report)
+        (Test-DefenseClawGuardianReportCompletedWithFailedTargets -Report $Report) -and
+        (Test-DefenseClawGuardianFailedTargetsWithinSIDs `
+            -Report $Report -AllowedSIDs $AllowedFailedTargetSIDs)
     if (-not $degradedAccepted -and
         ($null -eq $Report -or
         $null -eq $Report.PSObject.Properties['ok'] -or
@@ -32806,6 +32830,35 @@ function Get-DefenseClawGuardianFailedTargets {
     return @($failed.ToArray())
 }
 
+# An activation that skipped account roots may accept Guardian failures only
+# for those accounts. An empty list preserves the existing Secure Client and
+# rollback behavior, where any completed per-target failure is reported as
+# degraded. The caller must first validate the report as complete.
+function Test-DefenseClawGuardianFailedTargetsWithinSIDs {
+    param(
+        [Parameter(Mandatory)]$Report,
+        [string[]]$AllowedSIDs
+    )
+    if ($null -eq $AllowedSIDs -or $AllowedSIDs.Count -eq 0) {
+        return $true
+    }
+    $allowed = [Collections.Generic.HashSet[string]]::new(
+        [StringComparer]::OrdinalIgnoreCase
+    )
+    foreach ($sid in $AllowedSIDs) {
+        if ([string]::IsNullOrWhiteSpace($sid)) {
+            return $false
+        }
+        [void]$allowed.Add($sid)
+    }
+    foreach ($target in @(Get-DefenseClawGuardianFailedTargets -Report $Report)) {
+        if (-not $allowed.Contains([string]$target.sid)) {
+            return $false
+        }
+    }
+    return $true
+}
+
 # Install and Upgrade succeed when the Guardian completed a fresh reconcile in
 # which some user targets failed: the deployment is live and every other user
 # is protected. Each failed target is recorded once as defenseclaw_degraded.
@@ -32922,7 +32975,8 @@ function Wait-DefenseClawFreshGuardianReconcile {
         # Upgrade activation the deployment is live and degraded (each
         # failed target is logged). A reconcile that never completes, or a
         # status that is not fresh, still fails.
-        [switch]$AllowFailedTargets
+        [switch]$AllowFailedTargets,
+        [string[]]$AllowedFailedTargetSIDs
     )
     if (-not [string]::IsNullOrWhiteSpace($ExpectedManifestSHA256) -and
         $ExpectedManifestSHA256 -cnotmatch '^[0-9a-f]{64}$') {
@@ -33014,7 +33068,8 @@ function Wait-DefenseClawFreshGuardianReconcile {
             -CurrentStateIdentity $currentStateIdentity `
             -ExpectedManifestSHA256 $ExpectedManifestSHA256 `
             -StartedAfter $startedAfter `
-            -AllowFailedTargets:$AllowFailedTargets
+            -AllowFailedTargets:$AllowFailedTargets `
+            -AllowedFailedTargetSIDs $AllowedFailedTargetSIDs
         if ([bool]$coverage.ok) {
             if ($AllowFailedTargets) {
                 Write-DefenseClawGuardianDegradedTargets -Report $report
@@ -41221,6 +41276,14 @@ function Invoke-DefenseClawInstallLikeLifecycle {
                 $Action -eq 'Install' -and -not $reconcileInstall -and
                 $targetRuntimePreparationMode -ceq 'prepare'
             )
+        $allowedFailedTargetSIDs = [string[]]@(
+            Get-DefenseClawTargetRuntimeSkippedProfiles -Plan $targetRuntimePlan |
+                Microsoft.PowerShell.Core\ForEach-Object { [string]$_.sid }
+        )
+        if ((Test-DefenseClawStandaloneProfile) -and
+            $allowedFailedTargetSIDs.Count -gt 0) {
+            $acceptDegradedTargets = $true
+        }
         $expectedGuardianManifestSHA256 = [string]$targetRuntimePlan.manifest_sha256
         if ($expectedGuardianManifestSHA256 -cnotmatch '^[0-9a-f]{64}$') {
             throw 'target runtime plan did not bind an exact manifest SHA-256'
@@ -41521,17 +41584,17 @@ function Invoke-DefenseClawInstallLikeLifecycle {
             Set-DefenseClawServiceStartMode `
                 -Name $GuardianServiceName `
                 -StartMode 3
-            # Secure Client: one user's failed target does not fail the
-            # deployment: a completed, fresh, digest-bound reconcile with
-            # failed targets activates degraded and logs each failed target.
-            # Standalone still requires every target to reconcile.
+            # A completed, fresh, digest-bound reconcile with failed targets
+            # activates degraded only for Secure Client or for accounts the
+            # standalone target runtime plan explicitly skipped.
             try {
                 [void](Wait-DefenseClawFreshGuardianReconcile `
                     -Layout $Layout `
                     -GatewayServiceName $GatewayServiceName `
                     -GuardianServiceName $GuardianServiceName `
                     -ExpectedManifestSHA256 $expectedGuardianManifestSHA256 `
-                    -AllowFailedTargets:$acceptDegradedTargets)
+                    -AllowFailedTargets:$acceptDegradedTargets `
+                    -AllowedFailedTargetSIDs $allowedFailedTargetSIDs)
             }
             finally {
                 if (Test-DefenseClawStandaloneProfile) {
@@ -41586,7 +41649,8 @@ function Invoke-DefenseClawInstallLikeLifecycle {
                 -Layout $Layout `
                 -GatewayServiceName $GatewayServiceName `
                 -GuardianServiceName $GuardianServiceName `
-                -AllowFailedTargets:$acceptDegradedTargets
+                -AllowFailedTargets:$acceptDegradedTargets `
+                -AllowedFailedTargetSIDs $allowedFailedTargetSIDs
             # Canonicalize dynamic logs/authorization after the service-created
             # files exist, then verify exact effective rights.
             Set-DefenseClawManagedAcls -Layout $Layout -GatewayServiceName $GatewayServiceName
@@ -41596,7 +41660,8 @@ function Invoke-DefenseClawInstallLikeLifecycle {
                 -GuardianServiceName $GuardianServiceName `
                 -RequireReadiness `
                 -PendingTransaction `
-                -AcceptDegradedTargets:$acceptDegradedTargets
+                -AcceptDegradedTargets:$acceptDegradedTargets `
+                -AllowedFailedTargetSIDs $allowedFailedTargetSIDs
             # Only fully verified live state may become boot-active. A crash
             # before pending cleanup can start only validated services.
             Set-DefenseClawServiceStartMode `
@@ -41626,7 +41691,8 @@ function Invoke-DefenseClawInstallLikeLifecycle {
                 -GatewayServiceName $GatewayServiceName `
                 -GuardianServiceName $GuardianServiceName `
                 -RequireReadiness `
-                -AcceptDegradedTargets:$acceptDegradedTargets
+                -AcceptDegradedTargets:$acceptDegradedTargets `
+                -AllowedFailedTargetSIDs $allowedFailedTargetSIDs
             if ($priorDeferredConfigPending) {
                 # Keep the authenticated activation marker set through every
                 # mutable policy/runtime step and the complete live readiness
@@ -41735,7 +41801,8 @@ function Invoke-DefenseClawInstallLikeLifecycle {
         -Layout $Layout `
         -GatewayServiceName $GatewayServiceName `
         -GuardianServiceName $GuardianServiceName `
-        -AcceptDegradedTargets:$acceptDegradedTargets
+        -AcceptDegradedTargets:$acceptDegradedTargets `
+        -AllowedFailedTargetSIDs $allowedFailedTargetSIDs
     if ($NoStart) {
         $result.ok = $true
     }
