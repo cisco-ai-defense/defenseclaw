@@ -8,6 +8,7 @@ package pathidentity
 
 import (
 	"errors"
+	"io/fs"
 	"os"
 	"path/filepath"
 )
@@ -31,6 +32,12 @@ func Same(left, right string) bool {
 		return os.SameFile(leftInfo, rightInfo)
 	}
 	if errors.Is(leftStatErr, os.ErrNotExist) && errors.Is(rightStatErr, os.ErrNotExist) {
+		return sameMissingPath(leftAbs, rightAbs)
+	}
+	if errors.Is(leftStatErr, fs.ErrPermission) && errors.Is(rightStatErr, fs.ErrPermission) {
+		// Neither path can be inspected by this account, such as the gateway
+		// a privileged helper runs for this home from an administrator's
+		// private folder: the same spelling is the same path.
 		return sameMissingPath(leftAbs, rightAbs)
 	}
 	return false

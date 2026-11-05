@@ -87,6 +87,9 @@ class ProcessEvidence:
     executable: str = ""
     start_identity: str = ""
     reason: str = ""
+    #: The process owner's effective uid where the platform reports it, else
+    #: -1. A gateway an administrator started for this home runs as root.
+    uid: int = -1
 
 
 @dataclass(frozen=True)
@@ -876,6 +879,122 @@ def _darwin_native_process_identity(pid: int) -> tuple[str, str]:
     return executable, f"{info.start_tvsec}.{info.start_tvusec:06d}"
 
 
+# struct kinfo_proc as sysctl kern.proc.pid returns it on 64-bit macOS, the
+# record ps(1) reads for every account's processes (libproc answers only for
+# this account's). The layout is part of the kernel ABI: kp_proc.p_un
+# (__p_starttime, a timeval) at byte 0, kp_proc.p_pid at byte 40,
+# kp_eproc.e_ucred.cr_uid at byte 420; 648 bytes in all.
+_DARWIN_KINFO_PROC_SIZE = 648
+_DARWIN_KINFO_PROC_START_OFFSET = 0
+_DARWIN_KINFO_PROC_PID_OFFSET = 40
+_DARWIN_KINFO_PROC_UID_OFFSET = 420
+
+
+def _darwin_kinfo_proc(pid: int) -> tuple[str, int]:
+    """Return ``(start identity, effective uid)`` of ``pid`` from sysctl.
+
+    ``kern.proc.pid`` describes every account's processes, as ``ps`` shows
+    them, where libproc refuses another account's. The start identity has the
+    daemon's native format (``sec.usec``, darwinProcessStartIdentity), so it
+    compares with the PID record.
+    """
+    import errno
+    import struct
+
+    libc = ctypes.CDLL("/usr/lib/libSystem.B.dylib", use_errno=True)
+    sysctl = libc.sysctl
+    sysctl.argtypes = (
+        ctypes.POINTER(ctypes.c_int),
+        ctypes.c_uint,
+        ctypes.c_void_p,
+        ctypes.POINTER(ctypes.c_size_t),
+        ctypes.c_void_p,
+        ctypes.c_size_t,
+    )
+    sysctl.restype = ctypes.c_int
+    # CTL_KERN, KERN_PROC, KERN_PROC_PID, pid
+    mib = (ctypes.c_int * 4)(1, 14, 1, pid)
+    buffer = ctypes.create_string_buffer(_DARWIN_KINFO_PROC_SIZE)
+    size = ctypes.c_size_t(len(buffer))
+    ctypes.set_errno(0)
+    if sysctl(mib, 4, buffer, ctypes.byref(size), None, 0) != 0:
+        error = ctypes.get_errno()
+        if error == errno.ESRCH:
+            raise ProcessLookupError(pid)
+        if error in {errno.EACCES, errno.EPERM}:
+            raise PermissionError(pid)
+        raise OSError(error, "sysctl kern.proc.pid failed")
+    if size.value == 0:
+        # The kernel answers an unknown PID with an empty record, not ESRCH.
+        raise ProcessLookupError(pid)
+    if size.value < _DARWIN_KINFO_PROC_SIZE:
+        raise OSError("sysctl kern.proc.pid returned a short record")
+    raw = buffer.raw
+    start_sec, start_usec = struct.unpack_from("@qi", raw, _DARWIN_KINFO_PROC_START_OFFSET)
+    (record_pid,) = struct.unpack_from("@i", raw, _DARWIN_KINFO_PROC_PID_OFFSET)
+    (uid,) = struct.unpack_from("@I", raw, _DARWIN_KINFO_PROC_UID_OFFSET)
+    if record_pid != pid or start_sec <= 0 or not 0 <= start_usec < 1_000_000:
+        raise OSError("sysctl kern.proc.pid returned an inconsistent record")
+    return f"{start_sec}.{start_usec:06d}", int(uid)
+
+
+def _darwin_process_executable(pid: int) -> str:
+    """Return the executable path ``ps`` reports for ``pid``, or "".
+
+    ``/bin/ps -o comm=`` prints the path the kernel saved at exec, for every
+    account's processes; it is what the daemon compares
+    (processExecutableDarwin). The fixed OS binary runs with a locale-only
+    environment, so no gateway credential or PATH entry reaches it.
+    """
+    if not 0 < pid <= MAX_PLATFORM_PID:
+        return ""
+    try:
+        proc = subprocess.run(
+            ["/bin/ps", "-p", str(pid), "-o", "comm="],
+            capture_output=True,
+            text=True,
+            check=False,
+            timeout=5,
+            stdin=subprocess.DEVNULL,
+            env=trusted_system_subprocess_env(),
+        )
+    except (OSError, subprocess.SubprocessError):
+        return ""
+    if proc.returncode != 0:
+        return ""
+    return proc.stdout.strip()
+
+
+def _darwin_other_account_process_evidence(pid: int) -> ProcessEvidence:
+    """Identity of a process libproc refused: another account's, read as ``ps`` does.
+
+    The macOS app's privileged helper starts this account's gateway as root
+    for this home. libproc answers only for this account's processes, so the
+    recorded gateway read as ``denied`` and status called the port another
+    account's. sysctl ``kern.proc.pid`` and ``ps -o comm=`` describe every
+    process, with the executable path and start identity the daemon verifies,
+    and name the owner.
+    """
+    try:
+        start_identity, uid = _darwin_kinfo_proc(pid)
+    except ProcessLookupError:
+        return ProcessEvidence("missing", pid=pid, reason="recorded process does not exist")
+    except PermissionError:
+        return ProcessEvidence("denied", pid=pid, reason="process identity access denied")
+    except OSError:
+        return ProcessEvidence("unavailable", pid=pid, reason="process identity could not be queried")
+    executable = _darwin_process_executable(pid)
+    if not executable:
+        return ProcessEvidence("denied", pid=pid, uid=uid, reason="process identity access denied")
+    return ProcessEvidence(
+        "ok",
+        pid=pid,
+        executable=executable,
+        start_identity=start_identity,
+        uid=uid,
+    )
+
+
 def _darwin_process_evidence(pid: int) -> ProcessEvidence:
     """Read a full Darwin executable path and microsecond start identity."""
     if not 0 < pid <= MAX_PLATFORM_PID:
@@ -885,15 +1004,22 @@ def _darwin_process_evidence(pid: int) -> ProcessEvidence:
     except ProcessLookupError:
         return ProcessEvidence("missing", pid=pid, reason="recorded process does not exist")
     except PermissionError:
-        return ProcessEvidence("denied", pid=pid, reason="process identity access denied")
+        return _darwin_other_account_process_evidence(pid)
     except OSError:
         return ProcessEvidence("unavailable", pid=pid, reason="process identity could not be queried")
+    uid = -1
+    try:
+        _, uid = _darwin_kinfo_proc(pid)
+    except OSError:
+        pass
     return ProcessEvidence(
         "ok",
         pid=pid,
         executable=executable,
         start_identity=start_identity,
+        uid=uid,
     )
+
 
 def _windows_process_evidence(pid: int) -> ProcessEvidence:  # pragma: no cover - native Windows only
     from ctypes import wintypes
