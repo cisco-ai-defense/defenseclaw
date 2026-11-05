@@ -857,10 +857,7 @@ func (a *APIServer) emitClaudeCodeHookLLMEvent(ctx context.Context, req claudeCo
 		}
 		a.emitLLMResponseEventV8(ctx, meta, req.Delta, string(rawPayload), []string{finish})
 	case "SubagentStart":
-		prompt := firstString(req.Payload, "task", "prompt", "description")
-		if prompt == "" {
-			prompt = hookLifecycleContent(meta, "subagent_input_not_reported")
-		}
+		prompt := claudeCodeSubagentPrompt(req, hookLifecycleContent(meta, "subagent_input_not_reported"))
 		meta.PromptID = hookPromptID("claudecode", req.SessionID, "", prompt, rawPayload)
 		a.emitLLMPromptEventV8(ctx, meta, prompt, rawPayload)
 		a.rememberHookLLMSpanPrompt(meta, prompt)
@@ -941,6 +938,7 @@ func (a *APIServer) emitClaudeCodeHookLLMEvent(ctx context.Context, req claudeCo
 func hookLLMEventMeta(ctx context.Context, source, sessionID, turnID, model, hookSource, agentID, agentName, agentType string, payload map[string]interface{}) llmEventMeta {
 	user := resolveHookUserIdentity(ctx, firstNonEmpty(source, hookSource), payload)
 	provider := hookReportedProvider(source, model, hookSource, payload)
+	requestID := strings.TrimSpace(audit.EnvelopeFromContext(ctx).RequestID)
 	lifecycleEvent := canonicalHookLifecycleEvent(firstString(payload,
 		"hook_event_name", "hookEventName", "event_type", "eventType", "event_name", "eventName",
 	))
@@ -1040,6 +1038,7 @@ func hookLLMEventMeta(ctx context.Context, source, sessionID, turnID, model, hoo
 		Provider:  provider,
 		Model:     telemetryModelID(model),
 		SessionID: sessionID,
+		RequestID: requestID,
 		TurnID:    turnID,
 		AgentID:   agentID,
 		// Prefer a readable runtime name in UIs. The stable opaque identity is
