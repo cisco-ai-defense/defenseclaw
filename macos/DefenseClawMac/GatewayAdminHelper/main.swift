@@ -264,7 +264,9 @@ enum GatewayAdminTrust {
             throw GatewayAdminFailure.refused("Could not inspect the private gateway directory.")
         }
         try validatePath(directory, permittedOwner: nil, finalIsDirectory: true)
-        let descriptor = open(directory, O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_NOFOLLOW_ANY | O_CLOEXEC)
+        // Every folder on this path is root-owned (validatePath), so the
+        // account cannot swap any of them.
+        let descriptor = open(directory, O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC)
         guard descriptor >= 0 else {
             throw GatewayAdminFailure.refused("Could not open the private gateway directory.")
         }
@@ -280,12 +282,12 @@ enum GatewayAdminTrust {
     }
 }
 
-/// The selected DefenseClaw home, opened by descriptor. The walk starts at the
-/// authenticated account home (opened with O_NOFOLLOW_ANY, so no component of
-/// its path may be a symlink) and opens every further component with openat
-/// and O_NOFOLLOW, checking each on its own descriptor: a real folder owned by
-/// root or the account, not writable by group or others, without a write ACL,
-/// on the account home's volume. A folder swapped for a symlink at any point
+/// The selected DefenseClaw home, opened by descriptor. The walk starts at "/"
+/// and opens every component with openat and O_NOFOLLOW, checking each on its
+/// own descriptor: the folders above the account home must be root-owned, the
+/// account home and everything below it real folders owned by root or the
+/// account, none writable by group or others or through a write ACL, and
+/// everything from the account home down on the account home's volume. A folder swapped for a symlink at any point
 /// is refused; one renamed away keeps the descriptor on the verified folder.
 /// Everything the repair reads or changes is reached from this descriptor.
 /// The home must hold a DefenseClaw config.yaml.
@@ -301,11 +303,24 @@ final class GatewayAdminInstallation {
         guard GatewayAdminPolicy.isStrictDescendant(home, of: account.home), config == home + "/config.yaml" else {
             throw GatewayAdminFailure.refused("Gateway repair only changes a DefenseClaw home inside your own account home, with its config.yaml.")
         }
-        var current = open(account.home, O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_NOFOLLOW_ANY | O_CLOEXEC)
+        var current = open("/", O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC)
         guard current >= 0 else {
-            throw GatewayAdminFailure.refused("Could not open your account home without following a symbolic link.")
+            throw GatewayAdminFailure.refused("Could not open the filesystem root.")
         }
         do {
+            for component in account.home.split(separator: "/").map(String.init) {
+                let next = openat(current, component, O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC)
+                guard next >= 0 else {
+                    throw GatewayAdminFailure.refused("Could not open your account home without following a symbolic link (errno \(errno)).")
+                }
+                close(current)
+                current = next
+                var metadata = stat()
+                guard fstat(current, &metadata) == 0, metadata.st_mode & S_IFMT == S_IFDIR,
+                      metadata.st_mode & 0o022 == 0 || metadata.st_mode & S_ISVTX != 0 else {
+                    throw GatewayAdminFailure.refused("A folder above the DefenseClaw home is writable by other accounts.")
+                }
+            }
             let volume = try Self.verify(current, account: account, directory: true, device: nil)
             let components = home.dropFirst(account.home.count + 1).split(separator: "/").map(String.init)
             for (index, component) in components.enumerated() {
