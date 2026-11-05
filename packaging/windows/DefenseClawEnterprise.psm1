@@ -16681,27 +16681,28 @@ function Assert-DefenseClawStandaloneContentTrusted {
     $folder = 'Remove that entry, then run Setup /ensure again.'
     $record = 'Setup does not write this file from an administrator source: remove that entry and check the file, then run Setup /ensure again.'
     $entries = [Collections.Generic.List[object]]::new()
-    foreach ($path in @($Layout.StateRoot, $Layout.ConfigDirectory, $Layout.GuardianDirectory, $Layout.InstallStateDirectory)) {
-        $entries.Add(@($path, $folder))
+    foreach ($name in @('StateRoot', 'ConfigDirectory', 'GuardianDirectory', 'InstallStateDirectory')) {
+        $entries.Add(@($name, $folder))
     }
-    $entries.Add(@($Layout.ConfigPath, 'Run Setup /ensure CONFIG=<the approved administrator-only config>: Setup writes a new config.yaml from it.'))
-    $entries.Add(@($Layout.ManifestPath, 'Run Setup /ensure CONFIG=<the approved config>: Setup writes a new targets.yaml enumerated from it (in manifest enrollment mode, add MANIFEST=<the approved administrator-only targets.yaml>).'))
+    $entries.Add(@('ConfigPath', 'Run Setup /ensure CONFIG=<the approved administrator-only config>: Setup writes a new config.yaml from it.'))
+    $entries.Add(@('ManifestPath', 'Run Setup /ensure CONFIG=<the approved config>: Setup writes a new targets.yaml enumerated from it (in manifest enrollment mode, add MANIFEST=<the approved administrator-only targets.yaml>).'))
     $records = @(
-        $Layout.MetadataPath,
-        $Layout.AgentApplicationControlAttestationPath,
-        $Layout.CodexRequirementsOwnershipPath,
-        $Layout.CodexRequirementsAclBackupPath,
-        $Layout.ManagedHooksLifecycleJournalPath,
-        $Layout.ManagedHooksTeardownJournalPath
+        'MetadataPath',
+        'AgentApplicationControlAttestationPath',
+        'CodexRequirementsOwnershipPath',
+        'CodexRequirementsAclBackupPath',
+        'ManagedHooksLifecycleJournalPath',
+        'ManagedHooksTeardownJournalPath'
     )
-    if ([bool]$Layout.CodexTargetEnabled) {
-        $records += @($Layout.CodexMachinePolicyPath, $Layout.CodexManagedHooksStatePath)
+    if ((Get-DefenseClawOptionalLayoutValue -Layout $Layout -Name CodexTargetEnabled) -eq 'True') {
+        $records += @('CodexMachinePolicyPath', 'CodexManagedHooksStatePath')
     }
-    foreach ($path in $records) {
-        $entries.Add(@($path, $record))
+    foreach ($name in $records) {
+        $entries.Add(@($name, $record))
     }
     foreach ($entry in $entries) {
-        $path = [string]$entry[0]
+        # Partial layouts (older records, test fixtures) may not carry a key.
+        $path = Get-DefenseClawOptionalLayoutValue -Layout $Layout -Name ([string]$entry[0])
         if ([string]::IsNullOrWhiteSpace($path) -or
             -not (Microsoft.PowerShell.Management\Test-Path -LiteralPath $path)) {
             continue
