@@ -55,7 +55,7 @@ func perUserGatewayRecentlyStarted(dataDir string) bool {
 	return age > -2*time.Second && age <= perUserFreshGatewayWindow+2*time.Second
 }
 
-// perUserFreshGatewayHoldsCall is the native hook's restart-window proof
+// perUserFreshGatewayProof is the native hook's restart-window proof
 // (rel-1-0-6 GAP-0295): the server end of the call's proven connection
 // (check) was held by the gateway this account's record names when the
 // connection was open, or is still held at the deadline. That process
@@ -63,10 +63,6 @@ func perUserGatewayRecentlyStarted(dataDir string) bool {
 // start identity all match the record), and it had completed no hook answer
 // before the connection. An old gateway, an unknown holder and an unreadable
 // record are no proof.
-func perUserFreshGatewayHoldsCall(dataDir string, check *perUserPeerCheck) bool {
-	return perUserFreshGatewayProof(dataDir, check).ok
-}
-
 func perUserFreshGatewayProof(dataDir string, check *perUserPeerCheck) restartProofResult {
 	if check == nil {
 		return restartProofResult{reason: "no_verified_connection"}

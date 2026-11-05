@@ -110,8 +110,8 @@ type answerWatchdog struct {
 	// restart is the outage answer of a per-user call that met its own
 	// gateway's restart (perUserOutageSeen) or reached a gateway that only
 	// just started (restartWindowContact). restartProof says, at the
-	// deadline, whether the call's connection is held by a gateway that
-	// started moments ago and has answered no call yet (GAP-0295).
+	// deadline, whether the call's connection was held by a gateway that
+	// started moments ago and had answered no call before it (GAP-0295).
 	restart      *perUserRestartAnswer
 	restartProof func() restartProofResult
 	// failureLog is the call's hook-failure log, opened

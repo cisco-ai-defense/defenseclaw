@@ -24,6 +24,10 @@ import (
 const freshListenerHelperEnv = "DC_TEST_FRESH_LISTENER_PROCESS"
 const freshListenerCloseAcceptedEnv = "DC_TEST_FRESH_LISTENER_CLOSE_ACCEPTED"
 
+func perUserFreshGatewayHoldsCall(dataDir string, check *perUserPeerCheck) bool {
+	return perUserFreshGatewayProof(dataDir, check).ok
+}
+
 // TestGAP0295FreshListenerHelper is a gateway that takes connections and
 // never answers.
 func TestGAP0295FreshListenerHelper(t *testing.T) {
@@ -108,7 +112,9 @@ func TestGAP0295FreshOwnerSurvivesSocketClose(t *testing.T) {
 	}
 	check := &perUserPeerCheck{}
 	check.ends.Store(&perUserConnEnds{local: conn.LocalAddr(), remote: conn.RemoteAddr(), at: time.Now()})
-	perUserCaptureFreshGatewayOwner(check)
+	sp, _ := specFor("claudecode")
+	w := &answerWatchdog{restart: &perUserRestartAnswer{mode: "open"}}
+	w.restartWindowContact(Options{Home: dataDir}, sp, "open", check)
 	for end := time.Now().Add(time.Second); time.Now().Before(end) && check.owner.Load() == nil; time.Sleep(10 * time.Millisecond) {
 	}
 	if owner := check.owner.Load(); owner == nil || owner.pid != pid {

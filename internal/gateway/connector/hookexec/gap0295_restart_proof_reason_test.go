@@ -33,12 +33,26 @@ func TestGAP0295NoAnswerRecordsProofReason(t *testing.T) {
 	if _, ok := failPerUserRestartWindow(answerDeadlineEnded(), opts, sp, "open"); ok {
 		t.Fatal("rejected proof took the restart answer")
 	}
-	logged := opts
-	logged.answerWatch = nil
-	logHookFailure(logged, sp, perUserGatewayNoAnswerReason, "transport", "closed", true)
+	_ = failNoAnswer(opts, sp, "closed")
 	row := restartProofRow(t, opts.Home)
 	if row["restart_proof"] != "proof_rejected" || row["outcome"] != "fail_closed" {
 		t.Fatalf("no-answer row = %+v, want the rejected proof and closed outcome", row)
+	}
+}
+
+func TestGAP0295WatchdogNoAnswerRecordsProofReason(t *testing.T) {
+	previous := perUserRestartWindowProof
+	perUserRestartWindowProof = func(string, *perUserPeerCheck) restartProofResult {
+		return restartProofResult{reason: "no_holder"}
+	}
+	t.Cleanup(func() { perUserRestartWindowProof = previous })
+	opts, _, w := restartWindowCall(t, "open", false, nil)
+	// Without an exit callback, the watchdog writes its row before returning.
+	w.exit = nil
+	w.watch(time.Now())
+	row := restartProofRow(t, opts.Home)
+	if row["restart_proof"] != "no_holder" || row["outcome"] != "fail_closed" {
+		t.Fatalf("watchdog no-answer row = %+v", row)
 	}
 }
 
@@ -56,14 +70,25 @@ func TestGAP0295NoAnswerReasonTaxonomy(t *testing.T) {
 		{"proof timeout", "proof_timeout", restartProofResult{ok: true}, false, true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
+			proofDone := make(chan struct{}, 1)
 			previous := perUserRestartWindowProof
 			perUserRestartWindowProof = func(string, *perUserPeerCheck) restartProofResult {
 				if tc.timeout {
 					time.Sleep(50 * time.Millisecond)
+					proofDone <- struct{}{}
 				}
 				return tc.proof
 			}
 			t.Cleanup(func() { perUserRestartWindowProof = previous })
+			t.Cleanup(func() {
+				if tc.timeout {
+					select {
+					case <-proofDone:
+					case <-time.After(time.Second):
+						t.Error("timed-out proof did not finish")
+					}
+				}
+			})
 			previousWait := restartProofWait
 			if tc.timeout {
 				restartProofWait = 5 * time.Millisecond
