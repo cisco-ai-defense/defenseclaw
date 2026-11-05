@@ -2864,12 +2864,14 @@ def _claude_shell_hooks(data_dir: str) -> dict:
     return {"PreToolUse": [{"matcher": "*", "hooks": [{"type": "command", "command": command, "timeout": 30}]}]}
 
 
+@pytest.mark.skipif(os.name == "nt", reason="the Linux and macOS hook script and registration")
 def test_claude_linux_per_user_native_registration_is_current(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     cfg, home = _claude_native_layout(monkeypatch, tmp_path)
     _write_claude_hooks(home, _claude_golden_hooks(home))
     assert fail_mode_runtime._unix_registration_freshness(cfg, "claudecode") is None
 
 
+@pytest.mark.skipif(os.name == "nt", reason="the Linux and macOS hook script and registration")
 def test_claude_shell_form_is_current_where_setup_writes_it(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     cfg, home = _claude_native_layout(monkeypatch, tmp_path)
     for platform_linux, managed in ((False, ""), (True, "managed_enterprise")):
@@ -2883,6 +2885,7 @@ def test_claude_shell_form_is_current_where_setup_writes_it(monkeypatch: pytest.
         assert fail_mode_runtime._unix_registration_freshness(cfg, "claudecode") == "registration-command-stale"
 
 
+@pytest.mark.skipif(os.name == "nt", reason="the Linux and macOS hook script and registration")
 def test_claude_linux_custom_data_dir_keeps_the_shell_form(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     cfg, home = _claude_native_layout(monkeypatch, tmp_path)
     custom = tmp_path / "custom-data"
@@ -2892,6 +2895,7 @@ def test_claude_linux_custom_data_dir_keeps_the_shell_form(monkeypatch: pytest.M
     assert fail_mode_runtime._unix_registration_freshness(cfg, "claudecode") is None
 
 
+@pytest.mark.skipif(os.name == "nt", reason="the Linux and macOS hook script and registration")
 def test_claude_stale_1_0_7_shell_entry_on_linux_is_drift(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     # An upgrade to 1.0.8 without Setup leaves the 1.0.7 shell handlers.
     cfg, home = _claude_native_layout(monkeypatch, tmp_path)
@@ -2933,6 +2937,7 @@ def _tamper_api_port(hooks: dict) -> None:
     hooks["PreToolUse"][0]["hooks"][0]["args"][-1] = "127.0.0.1:1"
 
 
+@pytest.mark.skipif(os.name == "nt", reason="the Linux and macOS hook script and registration")
 @pytest.mark.parametrize(
     "tamper",
     [
@@ -2953,6 +2958,7 @@ def test_claude_tampered_native_registration_is_drift(monkeypatch: pytest.Monkey
     assert fail_mode_runtime._unix_registration_freshness(cfg, "claudecode") == "registration-command-stale"
 
 
+@pytest.mark.skipif(os.name == "nt", reason="the Linux and macOS hook script and registration")
 def test_claude_native_registration_without_guard_uses_the_launcher_shell_form(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
@@ -2968,6 +2974,7 @@ def test_claude_native_registration_without_guard_uses_the_launcher_shell_form(
     assert fail_mode_runtime._unix_registration_freshness(cfg, "claudecode") == "registration-command-stale"
 
 
+@pytest.mark.skipif(os.name == "nt", reason="the Linux and macOS hook script and registration")
 def test_claude_rollback_form_is_current_in_the_rolled_back_layout(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
@@ -3039,6 +3046,7 @@ def _claude_fake_reconcile(cfg: SimpleNamespace, mode: str, calls: list[list[str
     return run
 
 
+@pytest.mark.skipif(os.name == "nt", reason="the Linux and macOS hook script and registration")
 @pytest.mark.parametrize("scope", [["--connector", "claudecode"], []])
 @pytest.mark.parametrize(("start", "mode"), [("open", "closed"), ("closed", "open")])
 def test_fail_mode_change_applies_and_verifies_on_a_native_claude_registration(
@@ -3063,6 +3071,7 @@ def test_fail_mode_change_applies_and_verifies_on_a_native_claude_registration(
     assert "registration-command-stale" not in state.drift
 
 
+@pytest.mark.skipif(os.name == "nt", reason="the Linux and macOS hook script and registration")
 def test_fail_mode_change_rolls_back_over_a_stale_claude_shell_entry(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
