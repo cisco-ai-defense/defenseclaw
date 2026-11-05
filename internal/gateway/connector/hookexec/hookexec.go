@@ -71,6 +71,28 @@ const defaultMaxBody int64 = 1 << 20
 // payload before Run (ArmAnswerWatchdog).
 const DefaultMaxBody = defaultMaxBody
 
+// LoweredMaxBody reads DEFENSECLAW_HOOK_MAX_BODY for a native per-user hook
+// as the shell hooks' _dc_stdin_cap does: a decimal number of one to seven
+// digits, from 1 to DefaultMaxBody, is the body cap. Any other value (empty,
+// signed, spaced, a longer number or above DefaultMaxBody) leaves the
+// built-in cap, so the variable can only lower it (rel-1-0-6:GAP-0578). Zero
+// is not a positive integer (the registry's type) and leaves it too.
+func LoweredMaxBody(value string) (int64, bool) {
+	if value == "" || len(value) > 7 {
+		return 0, false
+	}
+	for i := 0; i < len(value); i++ {
+		if value[i] < '0' || value[i] > '9' {
+			return 0, false
+		}
+	}
+	n, err := strconv.ParseInt(value, 10, 64)
+	if err != nil || n <= 0 || n > defaultMaxBody {
+		return 0, false
+	}
+	return n, true
+}
+
 const (
 	defaultHookRequestTimeout = 10 * time.Second
 	hookResponseGrace         = time.Second
