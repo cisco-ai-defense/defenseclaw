@@ -1554,7 +1554,16 @@ def _apply_scoped_fail_mode_transaction(
             )
             raise SystemExit(1) from exc
 
-        if restart and gc.enabled:
+        if restart and gc.enabled and _is_proxy_connector(key):
+            # A proxy connector has no hook registration for `connector
+            # reconcile` to render (it refused one and the change was rolled
+            # back, rel-1-0-6 GAP-0576). Its PATH shims read the saved mode
+            # when they run; refresh-fail-modes rewrites the mode installed
+            # in them for when the gateway program cannot run.
+            _refresh_hook_outage_modes(app)
+            ux.ok(f"{label} PATH shims now use fail={mode} while no gateway answers.", indent="  ")
+            click.echo()
+        elif restart and gc.enabled:
             try:
                 reconcile_connector_registration(app.cfg, key)
             except (OSError, RuntimeError) as exc:
@@ -1571,6 +1580,13 @@ def _apply_scoped_fail_mode_transaction(
                 raise click.Abort() from exc
             ux.ok(f"{label} runtime registration refreshed and verified with fail={mode}.", indent="  ")
             click.echo()
+        elif not restart and _is_proxy_connector(key):
+            ux.subhead(
+                f"--no-restart saved the value. {label}'s PATH shims read it when they run; the mode "
+                "installed in them (used only when the gateway program cannot run) is refreshed when the "
+                "gateway next reloads or starts.",
+                indent="  ",
+            )
         elif not restart:
             ux.warn(
                 "--no-restart saved the desired value, but runtime registration was not refreshed; "
@@ -1682,23 +1698,6 @@ def _set_connector_fail_mode(app: AppContext, requested: str, mode: str | None, 
         click.echo()
         return
 
-    if _is_proxy_connector(key) and restart and gc.enabled:
-        # OpenClaw and ZeptoClaw are proxy-backed: they have no hook
-        # registration the gateway's selected refresh renders, so a scoped
-        # change was saved, refused by `connector reconcile` and rolled back
-        # (rel-1-0-6 GAP-0576). Say so before anything changes.
-        ux.err(
-            f"{label} is proxy-backed and has no hook registration to refresh, so "
-            f"'--connector {key}' cannot apply a fail mode. Nothing was changed.",
-            indent="  ",
-        )
-        ux.subhead(
-            f"{label} requests stay blocked while the gateway is down. Its PATH shims follow the global "
-            f"mode: defenseclaw guardrail fail-mode {mode}",
-            indent="    ",
-        )
-        raise SystemExit(1)
-
     if has_override and mode == configured_mode and runtime_state.desired == mode and runtime_state.current:
         ux.echo(f"  {ux.dim(f'{label} hook fail mode is already')} {mode!r} {ux.dim('— nothing to do.')}")
         return
@@ -1723,7 +1722,13 @@ def _set_connector_fail_mode(app: AppContext, requested: str, mode: str | None, 
             f"  {ux.bold(f'Changing {label} hook fail mode:')} {configured_mode} {ux.dim('→')} {ux.accent(mode)}"
         )
     outage_only = not _secure_client_fail_mode(app)
-    if outage_only and mode == "closed":
+    if _is_proxy_connector(key):
+        # OpenClaw and ZeptoClaw have no hooks: the override sets the outage
+        # mode of their PATH shims, which ask the gateway program for it each
+        # time they run (rel-1-0-6 GAP-0576).
+        ux.subhead(_proxy_shim_fail_mode_note(label, mode), indent="  ")
+        ux.subhead(_PROXY_REQUESTS_NOTE, indent="    ")
+    elif outage_only and mode == "closed":
         ux.warn(f"A gateway outage will now BLOCK supported {label} calls.", indent="  ")
         ux.subhead("Other delivery and response failures remain closed.", indent="    ")
         if normalize_connector(key) == "hermes":
@@ -2460,6 +2465,20 @@ def _is_proxy_connector(name: str) -> bool:
     from defenseclaw.platform_support import PROXY_CONNECTORS
 
     return normalize_connector(name) in PROXY_CONNECTORS
+
+
+_PROXY_REQUESTS_NOTE = "Its proxied model requests are blocked while the gateway is down, whatever this value says."
+
+
+def _proxy_shim_fail_mode_note(label: str, mode: str) -> str:
+    """What a scoped fail mode changes for a proxy-backed connector: its PATH shims."""
+    shims = f"{label}'s PATH shims (curl, wget, ssh, nc, pip, npm)"
+    if mode == "closed":
+        return f"While no gateway answers, {shims} will refuse the tool."
+    return (
+        f"While no gateway answers, {shims} will run the real tool with one warning and a "
+        "~/.defenseclaw/logs/hook-failures.jsonl record."
+    )
 
 
 # What fail mode closed cannot change for Hermes on Linux and macOS: its hook
