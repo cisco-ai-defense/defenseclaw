@@ -41,8 +41,9 @@ var installLockCheckWait = 100 * time.Millisecond
 // answer reaches the agent. On Windows the watchdog waits on its own thread
 // at the highest priority of the process (answerDeadlineWaiter), so
 // ordinary-priority work that fills the CPU does not delay it. Its result
-// stays closed without a gateway decision. A proven outage may use the
-// account's outage mode. Once the call logged a closed failure (an
+// stays closed without a gateway decision, except a locally proved ordinary
+// per-user call in an open tier. A proven outage may use the account's
+// outage mode. Once the call logged a closed failure (an
 // unverified gateway peer, an invalid runtime) it is that call's closed
 // answer in every fail mode (claimFailureLog). While this account's
 // installer holds its data directory (.install.lock) the answer is closed
@@ -112,8 +113,10 @@ type answerWatchdog struct {
 	// just started (restartWindowContact). restartProof says, at the
 	// deadline, whether the call's connection is held by a gateway that
 	// started moments ago and has answered no call yet (GAP-0295).
-	restart      *perUserRestartAnswer
-	restartProof func() bool
+	restart          *perUserRestartAnswer
+	restartProof     func() bool
+	ordinaryNoAnswer *perUserRestartAnswer
+	verifiedContact  bool
 	// failureLog is the call's hook-failure log, opened
 	// answerWatchdogLogPrepareLead before the deadline (watch).
 	failureLog     *preparedFailureLog
@@ -200,6 +203,7 @@ func prepareAnswerWatchdog(opts *Options, sp spec, failMode string, ceiling time
 	w.noDecisionOut, w.noDecisionErr, w.noDecisionCode, w.noDecisionLog =
 		w.fallbackOut, w.fallbackErr, w.fallbackCode, w.logFailure
 	w.installCheck, w.installOut, w.installErr, w.installCode, w.installLogFailure = renderInstallAnswer(*opts, sp, failMode)
+	w.ordinaryNoAnswer = renderOrdinaryNoAnswer(*opts, sp, failMode)
 	opts.Stdout, opts.Stderr = &w.out, &w.err
 	opts.answerWatch = w
 	return w
@@ -303,6 +307,7 @@ func (w *answerWatchdog) adopt(opts *Options, sp spec, failMode string) {
 	opts.failureLog = w.failureLog
 	stdout, stderr, code, logFailure := renderNoAnswer(*opts, sp, failMode)
 	installCheck, installOut, installErr, installCode, installLogFailure := renderInstallAnswer(*opts, sp, failMode)
+	ordinary := renderOrdinaryNoAnswer(*opts, sp, failMode)
 	w.mu.Lock()
 	defer w.mu.Unlock()
 	if w.fired || w.claimedAnswer || (w.closedKnown && !closed) {
@@ -313,6 +318,11 @@ func (w *answerWatchdog) adopt(opts *Options, sp spec, failMode string) {
 	w.visibleOutage = nil
 	w.installCheck, w.installOut, w.installErr, w.installCode, w.installLogFailure =
 		installCheck, installOut, installErr, installCode, installLogFailure
+	w.ordinaryNoAnswer = ordinary
+	if w.verifiedContact && ordinary != nil && !w.answeredStatus && !w.failureClosed && !w.failureLogged {
+		w.closedKnown = false
+		w.useRestartAnswerLocked(ordinary)
+	}
 }
 
 // closeForAnsweredError makes the watchdog's answer the closed response of a
@@ -486,6 +496,22 @@ type perUserRestartAnswer struct {
 }
 
 func renderPerUserRestartAnswer(opts Options, sp spec, failMode string) *perUserRestartAnswer {
+	return renderPerUserOutageAnswer(opts, sp, failMode, perUserGatewayRestartingReason)
+}
+
+func renderOrdinaryNoAnswer(opts Options, sp spec, failMode string) *perUserRestartAnswer {
+	if opts.answerSpentLocally || !perUserRestartWindowCall(opts, sp) ||
+		!OrdinaryNoAnswerPayload(opts.failurePayload) {
+		return nil
+	}
+	answer := renderPerUserOutageAnswer(opts, sp, failMode, perUserGatewayNoAnswerReason)
+	if answer.mode != "open" {
+		return nil
+	}
+	return answer
+}
+
+func renderPerUserOutageAnswer(opts Options, sp spec, failMode, reason string) *perUserRestartAnswer {
 	outage := withPerUserOutage(opts)
 	outage.answerWatch = nil
 	mode := perUserOutageMode(&outage, closeDuringInstall(&outage, failMode))
@@ -495,14 +521,14 @@ func renderPerUserRestartAnswer(opts Options, sp spec, failMode string) *perUser
 	rendered.Stdout, rendered.Stderr = &out, &errb
 	rendered.Home, rendered.FailureLogHome, rendered.HookDir = "", nil, ""
 	answer := &perUserRestartAnswer{mode: mode}
-	answer.code = failUnreachable(rendered, sp, mode, perUserGatewayRestartingReason)
+	answer.code = failUnreachable(rendered, sp, mode, reason)
 	answer.out, answer.err = out.Bytes(), errb.Bytes()
 	logged := outage
 	logged.Stdout, logged.Stderr = io.Discard, io.Discard
-	answer.logFailure = func() { _ = failUnreachable(logged, sp, mode, perUserGatewayRestartingReason) }
+	answer.logFailure = func() { _ = failUnreachable(logged, sp, mode, reason) }
 	if mode == "open" {
 		answer.visible = func() ([]byte, []byte, int) {
-			return renderVisibleOutage(outage, sp, mode, perUserGatewayRestartingReason)
+			return renderVisibleOutage(outage, sp, mode, reason)
 		}
 	}
 	answer.installCheck, answer.installOut, answer.installErr, answer.installCode, answer.installLogFailure =
@@ -542,6 +568,36 @@ func (w *answerWatchdog) restartWindowContact(opts Options, sp spec, failMode st
 		}
 		w.mu.Unlock()
 	}()
+}
+
+// verifiedOrdinaryContact selects the prepared outage-mode answer only for
+// a proved ordinary call on a verified per-user connection without a status.
+func (w *answerWatchdog) verifiedOrdinaryContact() {
+	if w == nil {
+		return
+	}
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	w.verifiedContact = true
+	if w.fired || w.ordinaryNoAnswer == nil || w.answeredStatus || w.failureClosed ||
+		w.claimedAnswer || w.failureLogged {
+		return
+	}
+	w.closedKnown = false
+	w.useRestartAnswerLocked(w.ordinaryNoAnswer)
+}
+
+func (w *answerWatchdog) ordinaryNoAnswerMode() (string, bool) {
+	if w == nil {
+		return "", false
+	}
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	if !w.verifiedContact || w.ordinaryNoAnswer == nil || w.answeredStatus ||
+		w.failureClosed || w.claimedAnswer || w.failureLogged {
+		return "", false
+	}
+	return w.ordinaryNoAnswer.mode, true
 }
 
 // perUserRestartWindowProof reports whether the connection of check is held
@@ -839,6 +895,11 @@ func (w *answerWatchdog) noDecisionPending() {
 	}
 	w.decisionPending = true
 	if !w.fired && !w.claimedAnswer && !w.failureClosed {
+		if w.verifiedContact && w.ordinaryNoAnswer != nil && !w.answeredStatus && !w.failureLogged {
+			w.closedKnown = false
+			w.useRestartAnswerLocked(w.ordinaryNoAnswer)
+			return
+		}
 		w.closedKnown = true
 		w.fallbackOut, w.fallbackErr, w.fallbackCode, w.logFailure =
 			w.noDecisionOut, w.noDecisionErr, w.noDecisionCode, w.noDecisionLog

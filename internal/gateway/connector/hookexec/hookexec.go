@@ -1037,6 +1037,7 @@ func doRequest(ctx context.Context, opts Options, sp spec, failMode string, payl
 			// call yet may still be warming up: the deadline then follows
 			// the outage mode, as the shell hook does (GAP-0295).
 			opts.answerWatch.restartWindowContact(opts, sp, failMode, check)
+			opts.answerWatch.verifiedOrdinaryContact()
 		}
 		tryCtx, release := connectBy(ctx, connectDeadline, onConnect)
 		check, _ = tryCtx.Value(perUserPeerCheckKey{}).(*perUserPeerCheck)
@@ -1126,8 +1127,7 @@ func doRequest(ctx context.Context, opts Options, sp spec, failMode string, payl
 			return
 		}
 		markManagedAnsweredError(&opts, sp, resp.StatusCode)
-		if resp != nil && !opts.SecureClient &&
-			(resp.StatusCode >= 200 && resp.StatusCode < 300 || managedNativeDecision(opts)) {
+		if resp != nil && !opts.SecureClient {
 			knownStatus = resp.StatusCode
 			opts.answerWatch.gatewayAnsweredError(opts, sp, resp.StatusCode)
 		}

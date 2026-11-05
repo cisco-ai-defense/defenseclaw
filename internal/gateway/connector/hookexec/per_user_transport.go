@@ -157,6 +157,11 @@ const PerUserPostPeerUnverifiedExit = 8
 // An older shell hook reads it as any other failure.
 const PerUserPostNoAnswerExit = 9
 
+// PerUserPostOrdinaryNoAnswerExit is a verified no-status deadline for a
+// locally proved ordinary tool call. The shell still reads its configured
+// outage mode; strict and managed hooks keep their closed outcome.
+const PerUserPostOrdinaryNoAnswerExit = 12
+
 // PerUserPostRestartNoAnswerExit is the exit status of `hook-post` for such a
 // call while a start or restart of this account's gateway holds or held its
 // start lock during the call and the process behind the call's connection changed

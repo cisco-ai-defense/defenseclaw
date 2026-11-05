@@ -104,6 +104,36 @@ if defenseclaw_should_fail_closed_on_unreachable; then printf 'block\n'; else pr
 	}
 }
 
+func TestGAP0518ShellOrdinaryDeadlineFollowsTier(t *testing.T) {
+	dir := t.TempDir()
+	hookDir := filepath.Join(dir, ".defenseclaw", "hooks")
+	if err := os.MkdirAll(hookDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	helper := writeBridgeReviewHelper(t, dir)
+	for _, tc := range []struct {
+		name, status, mode, extra string
+		open                      bool
+	}{
+		{"ordinary default", "12", "open", "", true},
+		{"ordinary strict", "12", "closed", "", false},
+		{"protected no-status", "9", "open", "", false},
+		{"managed", "12", "open", "DEFENSECLAW_MANAGED_HOOK=1", false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			script := `set -euo pipefail; . "$1"; HOOK_DIR="$2"; DEFENSECLAW_HOME="$3"
+DEFENSECLAW_HOOK_CONNECTOR=codex; _DC_TRANSPORT_STATUS="$4"; _DC_CONFIG_OUTAGE_MODE="$5"; ` + tc.extra + `
+if defenseclaw_per_user_outage_open; then printf 'open'; else printf 'closed'; fi`
+			cmd := exec.Command("bash", "-c", script, "bash", helper, hookDir, filepath.Dir(hookDir), tc.status, tc.mode)
+			cmd.Env = append(sanitizedTestEnv(), "HOME="+dir)
+			out, err := cmd.CombinedOutput()
+			if err != nil || (string(out) == "open") != tc.open {
+				t.Fatalf("tier answer %q, err %v, want open=%t", out, err, tc.open)
+			}
+		})
+	}
+}
+
 func TestShellOutageWarningIsOncePerSessionAcrossHookProcesses(t *testing.T) {
 	dir := t.TempDir()
 	hookDir := filepath.Join(dir, ".defenseclaw", "hooks")

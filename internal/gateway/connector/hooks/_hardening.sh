@@ -1499,9 +1499,10 @@ defenseclaw_log_hook_delivery_failure() {
 # defenseclaw_per_user_outage_open returns 0 (true) when a per-user hook lets
 # the call through because this account's gateway is down (owner decision
 # 2026-10-23, config.HookOutageFailMode): the call's last transport status
-# (_DC_TRANSPORT_STATUS, defenseclaw_await_gateway) is 7 (no connection),
-# and the connector's current config selects an open tier. A verified peer
-# that gives no HTTP status stays closed. Strict availability, this account's install
+# (_DC_TRANSPORT_STATUS, defenseclaw_await_gateway) is 7 (no connection)
+# or 12 (verified no-status for a locally proved ordinary call), and the
+# connector's current config selects an open tier. Other verified calls
+# without an HTTP status stay closed. Strict availability, this account's install
 # window, an answer the gateway gave (any HTTP status, a cut-off or
 # malformed body), another program on the port, a missing token and a
 # config that is missing, malformed or strict keep the call closed. Managed,
@@ -1514,7 +1515,7 @@ defenseclaw_per_user_outage_open() {
   esac
   [ -z "${DEFENSECLAW_HOOK_SOCKET:-}" ] || return 1
   [ "${_DC_SECURE_CLIENT_HOOK:-0}" != 1 ] || return 1
-  [ "${_DC_TRANSPORT_STATUS:-}" = 7 ] || return 1
+  case "${_DC_TRANSPORT_STATUS:-}" in 7|12) ;; *) return 1 ;; esac
   case "${DEFENSECLAW_STRICT_AVAILABILITY:-0}" in
     1|true|TRUE|yes|YES) return 1 ;;
   esac
@@ -2213,7 +2214,8 @@ defenseclaw_await_gateway() {
   local status="${1:-1}" post="${2:-}" launched="" tries=0
   local data="${DEFENSECLAW_HOME:-${DEFENSECLAW_AGENT_HOME:-${HOME}}/.defenseclaw}"
   # The final transport status: 7 is no connection; 9 is a verified
-  # gateway that gave no HTTP status. Only a call that was not sent may open.
+  # gateway that gave no HTTP status. A locally proved ordinary call may
+  # also open with status 12; other sent calls stay closed.
   if [ "$status" = 75 ]; then
     defenseclaw_refused_while_coming_up && return 7
     status=1
@@ -2914,9 +2916,11 @@ defenseclaw_unreachable_mode_note() {
   case "${DEFENSECLAW_STRICT_AVAILABILITY:-0}" in
     1|true|TRUE|yes|YES) printf '%s' "$closed"; return 0 ;;
   esac
-  # A refused connection (7) follows the configured mode. A verified
-  # no-status deadline (9) stays closed in every mode.
-  if [ "${_DC_TRANSPORT_STATUS:-}" = 7 ] || [ -n "${DEFENSECLAW_HOOK_SOCKET:-}" ] ||
+  # A refused connection (7) and a locally proved ordinary no-status
+  # deadline (12) follow the configured mode. Other no-status calls (9)
+  # stay closed in every mode.
+  if [ "${_DC_TRANSPORT_STATUS:-}" = 7 ] || [ "${_DC_TRANSPORT_STATUS:-}" = 12 ] ||
+    [ -n "${DEFENSECLAW_HOOK_SOCKET:-}" ] ||
     [ "${_DC_SECURE_CLIENT_HOOK:-0}" = 1 ] || defenseclaw_install_held ||
     ! defenseclaw_own_gateway_alive; then
     printf '%s' "$closed"
@@ -4129,6 +4133,7 @@ _dc_gateway_post_once() {
         11) return 7 ;;
         126|127) ;;
         9) _dc_post_sent_noanswer=1; return 9 ;;
+        12) return 12 ;;
         # 10 (hookexec.PerUserPostRestartNoAnswerExit): no status while a
         # start or restart of this account's gateway holds its start lock and
         # the process behind the call's connection exited or gave up the port

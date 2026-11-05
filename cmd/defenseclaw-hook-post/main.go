@@ -31,9 +31,10 @@ const maxInput = hookexec.MaxPerUserPluginRequest
 const userGuardCapability = "defenseclaw-hook-post guard-user-hook v1\n"
 
 var (
-	version = "dev"
-	commit  = "unknown"
-	date    = "unknown"
+	version             = "dev"
+	commit              = "unknown"
+	date                = "unknown"
+	errOrdinaryNoAnswer = errors.New("verified ordinary hook timed out")
 )
 
 func run(args []string, input io.Reader, output io.Writer) error {
@@ -110,6 +111,10 @@ func runWithPeer(args []string, input io.Reader, output io.Writer, peer *hookexe
 	defer cancel()
 	response, err := hookexec.PostPerUserHook(ctx, *apiAddr, request.Path, request.Headers, []byte(request.Body))
 	if err != nil {
+		if *curlOutput && hookexec.PerUserPostNoAnswer(err) &&
+			hookexec.OrdinaryNoAnswerPayload([]byte(request.Body)) {
+			return fmt.Errorf("%w: %w", errOrdinaryNoAnswer, err)
+		}
 		return err
 	}
 	hookexec.PerUserGatewayRecordObservedAnswer(os.Getenv(hookPostDataDirEnv), peer)
@@ -278,6 +283,9 @@ func runMain(args []string, input io.Reader, output, errOutput io.Writer) int {
 		if startObservation.changed || hookexec.PerUserGatewayRestartProvenDuringCall(dataDir, peer, startObservation.start) ||
 			hookexec.PerUserGatewayFreshStartNoAnswer(dataDir, peer) {
 			return hookexec.PerUserPostRestartNoAnswerExit
+		}
+		if errors.Is(err, errOrdinaryNoAnswer) {
+			return hookexec.PerUserPostOrdinaryNoAnswerExit
 		}
 		return hookexec.PerUserPostNoAnswerExit
 	}

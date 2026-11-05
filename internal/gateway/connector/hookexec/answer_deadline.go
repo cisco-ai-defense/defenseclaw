@@ -331,6 +331,11 @@ func failNoAnswer(opts Options, sp spec, failMode string) int {
 	if managedNativeDecision(opts) && opts.answeredErrorStatus != 0 {
 		return failAfterErrorStatus(opts, sp, "closed", opts.answeredErrorStatus)
 	}
+	if mode, ordinary := opts.answerWatch.ordinaryNoAnswerMode(); ordinary && !opts.answerSpentLocally {
+		outage := withPerUserOutage(opts)
+		outage.OutageFailModeNow = func() string { return mode }
+		return failUnreachable(outage, sp, mode, noAnswerReason(opts))
+	}
 	failMode = noAnswerFailMode(opts, failMode)
 	if opts.ManagedEnterprise {
 		return failUnreachable(opts, sp, failMode, managedNoAnswerReason(opts))
