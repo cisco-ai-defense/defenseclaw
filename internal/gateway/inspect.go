@@ -2369,7 +2369,16 @@ func (a *APIServer) handleInspectTool(w http.ResponseWriter, r *http.Request) {
 		// A block, confirm or alert row carries the verdict's severity.
 		toolEvent.Severity = verdict.Severity
 	}
-	if auditErr := a.logger.LogEventCtx(r.Context(), toolEvent); auditErr != nil {
+	// A server built without an audit logger (the deterministic benchmark
+	// harness and unit servers; a running gateway always has one) has no
+	// audit record to lose, so its verdict stands: the hook routes skip
+	// errHookAuditNotConfigured and a proxy without an observability
+	// runtime reports no evaluation-log error, for the same reason.
+	var auditErr error
+	if a.logger != nil {
+		auditErr = a.logger.LogEventCtx(r.Context(), toolEvent)
+	}
+	if auditErr != nil {
 		// The tier rule of the hook routes (GAP-0593): strict, managed and
 		// sandbox calls fail closed; a default or permissive allow stays
 		// allowed with the degraded-audit warning.
