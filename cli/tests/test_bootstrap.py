@@ -260,7 +260,10 @@ class BootstrapEnvTests(unittest.TestCase):
         plugin_dir = os.path.join(self._tmp.name, ".config", "opencode", "plugins")
         os.makedirs(plugin_dir)
         os.chmod(plugin_dir, 0o775)
-        with patch.dict(os.environ, {"HOME": self._tmp.name}):
+        # A shared group: the runner's own group may be its private group (GAP-0053).
+        with patch.dict(os.environ, {"HOME": self._tmp.name}), patch(
+            "defenseclaw.connector_paths.owner_private_group", return_value=False
+        ):
             os.environ.pop("OPENCODE_CONFIG_DIR", None)
             os.environ.pop("XDG_CONFIG_HOME", None)
             result = _connector_readiness(cfg, "opencode")

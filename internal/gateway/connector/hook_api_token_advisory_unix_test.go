@@ -38,12 +38,12 @@ func TestHookAPIDirectoryMetadataAdvisoryAncestor(t *testing.T) {
 		t.Fatalf("Lstat: %v", err)
 	}
 
-	if err := hookAPIValidateDirectoryMetadata(dir, info, false, false); err == nil {
+	if err := hookAPIValidateDirectoryMetadata(dir, info, false, false, false); err == nil {
 		t.Fatal("group/other writable directory accepted as a named path")
 	}
 
 	advisories := captureConnectorTrustAdvisories(t)
-	if err := hookAPIValidateDirectoryMetadata(dir, info, false, true); err != nil {
+	if err := hookAPIValidateDirectoryMetadata(dir, info, false, true, false); err != nil {
 		t.Fatalf("advisory ancestor refused instead of warning: %v", err)
 	}
 	if len(*advisories) != 1 {
@@ -55,7 +55,7 @@ func TestHookAPIDirectoryMetadataAdvisoryAncestor(t *testing.T) {
 	}
 
 	t.Setenv(managed.TrustStrictAncestorsEnv, "1")
-	if err := hookAPIValidateDirectoryMetadata(dir, info, false, true); err == nil {
+	if err := hookAPIValidateDirectoryMetadata(dir, info, false, true, false); err == nil {
 		t.Fatal("strict pin did not restore the fatal ancestor verdict")
 	}
 }
@@ -76,7 +76,7 @@ func TestHookAPIDirectoryChainKeepsForeignAncestorsFatal(t *testing.T) {
 		t.Fatalf("Mkdir: %v", err)
 	}
 	advisories := captureConnectorTrustAdvisories(t)
-	err := hookAPIValidateDirectoryChain(child)
+	err := hookAPIValidateDirectoryChain(child, false)
 	if err == nil {
 		t.Fatal("world-writable non-Cisco ancestor was accepted")
 	}
