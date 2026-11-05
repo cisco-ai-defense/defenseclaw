@@ -948,18 +948,14 @@ func (w *answerWatchdog) watch(deadline time.Time) {
 		if w.fallbackBlocked {
 			w.failureLog.promoteFallbackClosed()
 		}
-		saved, finished := w.failureLog.appendFallbackWithin(answerWatchdogLogWait)
+		saved, _ := w.failureLog.appendFallbackWithin(answerWatchdogLogWait)
 		if saved {
 			w.failureLog.close()
 			w.exit(w.fallbackCode)
 			return
 		}
-		// A stalled marker cannot hold the answer while the ordinary log is
-		// also opening. The append continues only until process exit.
-		if !finished {
-			w.exit(w.fallbackCode)
-			return
-		}
+		// If the marker is stalled, the ordinary logger still has a
+		// bounded chance to leave the call's decision before exit.
 	}
 	logged := make(chan struct{})
 	logFailure := w.logFailure
