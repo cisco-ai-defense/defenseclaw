@@ -346,8 +346,9 @@ func (s *linuxSource) startProcessConnector() error {
 		_ = unix.Close(fd)
 		return fmt.Errorf("bind: %w", err)
 	}
-	// A burst of execs outruns the default receive buffer; the helper is
-	// root, so the forced size is tried first.
+	// A burst of execs outruns the default receive buffer. The forced size
+	// needs CAP_NET_ADMIN, which the sensor helper units keep for this;
+	// without it SO_RCVBUF is capped by net.core.rmem_max.
 	if unix.SetsockoptInt(fd, unix.SOL_SOCKET, unix.SO_RCVBUFFORCE, procReceiveBuffer) != nil {
 		_ = unix.SetsockoptInt(fd, unix.SOL_SOCKET, unix.SO_RCVBUF, procReceiveBuffer)
 	}

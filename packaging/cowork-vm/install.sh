@@ -8,7 +8,7 @@
 # this script as root, with no arguments, at every VM start (at most once per
 # boot). It installs the sensor out of the unpack folder and starts it in
 # detection-only mode:
-#   defenseclaw-sensor-helper  root bounded to five capabilities (HELPER_CAPS),
+#   defenseclaw-sensor-helper  root bounded to six capabilities (HELPER_CAPS),
 #                              no network (AF_UNIX, AF_NETLINK, AF_PACKET only):
 #                              the process table, connections, kernel events
 #                              (cn_proc, fanotify) and DNS answers
@@ -287,6 +287,10 @@ gateway_pid() {
 # capabilities: the socket it publishes and the peer checks it makes are
 # root's. Each one was taken out in turn on the amd64 and arm64 stand-ins
 # (R109-COWORK-S3), and what is named here stopped working without it:
+#   CAP_NET_ADMIN        the cn_proc socket's 4 MiB receive buffer (SO_RCVBUFFORCE;
+#                        without it net.core.rmem_max caps it near 416 KiB and an
+#                        exec burst overflows it), and joining cn_proc at all on
+#                        kernels before 6.6 (Plane C)
 #   CAP_SYS_ADMIN        fanotify_init for the credential-path watch (Plane C)
 #   CAP_NET_RAW          the AF_PACKET socket of the DNS capture (Plane B)
 #   CAP_SYS_PTRACE       /proc/<pid>/fd and /proc/<pid>/exe of the session users'
@@ -296,10 +300,14 @@ gateway_pid() {
 #                        folders: the credential paths fanotify marks, the
 #                        installed client images it hashes, connection owners
 #   CAP_CHOWN            the socket and its folder go to the gateway's group
-# Not CAP_NET_ADMIN: since Linux 6.6 the netlink process connector (cn_proc)
-# takes subscribers without it, and the Cowork VM runs 6.8. A VM kernel older
-# than 6.6 would need it back for cn_proc.
-HELPER_CAPS="CAP_SYS_ADMIN CAP_NET_RAW CAP_SYS_PTRACE CAP_DAC_READ_SEARCH CAP_CHOWN"
+# The bound limits what a faulty helper can do, not what a compromised one can:
+# uid 0 with CAP_SYS_PTRACE and CAP_SYS_ADMIN is still close to root. Under
+# systemd, HELPER_SYSCALLS also refuses the calls it never makes and an
+# attacker would want first: ptrace and the cross-process memory calls (its
+# /proc reads need only the ptrace access check, not the call) and mounts.
+# The no-systemd fallback cannot carry that filter.
+HELPER_CAPS="CAP_NET_ADMIN CAP_SYS_ADMIN CAP_NET_RAW CAP_SYS_PTRACE CAP_DAC_READ_SEARCH CAP_CHOWN"
+HELPER_SYSCALLS="~ptrace process_vm_readv process_vm_writev @mount"
 helper_bset="-all"; for c in $HELPER_CAPS; do c="${c#CAP_}"; helper_bset="$helper_bset,+${c,,}"; done
 # Unit hardening both processes get. Each directive was checked on the stand-ins
 # with every plane up. Left out: MemoryDenyWriteExecute (bytedance/sonic, which
@@ -325,6 +333,7 @@ start_systemd() {
     --description="DefenseClaw Cowork VM sensor helper (root, no network)" \
     -p Restart=always -p RestartSec=2 -p CapabilityBoundingSet="$HELPER_CAPS" -p AmbientCapabilities= \
     -p RestrictAddressFamilies="AF_UNIX AF_NETLINK AF_PACKET" -p IPAddressDeny=any -p RestrictNamespaces=yes \
+    -p SystemCallFilter="$HELPER_SYSCALLS" \
     -p ProtectSystem=full "${HARDEN[@]}" -p MemoryMax=300M \
     "${helper_cmd[@]}" > "$work/start.log" 2>&1 ||
     { tail -n 3 "$work/start.log"; fail "systemd could not start $HELPER_UNIT" 16; }
@@ -410,8 +419,10 @@ listener_is() { # listener_is <pid>
 }
 HEALTH_REASON=""
 # wait_healthy <seconds>: 0 when the started gateway answers its status and
-# Plane C runs through the sensor helper; 1 when it answers but Plane C does
-# not (after PLANE_GRACE seconds); 2 when it never answers.
+# Plane C runs the process connector (cn_proc) through the sensor helper; 1
+# when it answers but Plane C does not (after PLANE_GRACE seconds), including a
+# Plane C on fanotify alone, which has no exec, exit or privilege events; 2
+# when it never answers.
 PLANE_GRACE=20
 wait_healthy() {
   local deadline=$((SECONDS + $1)) up_at="" pid
@@ -422,7 +433,7 @@ wait_healthy() {
         [ "$(json_field running < "$work/status.json")" = true ] && listener_is "$pid"; then
       [ -n "$up_at" ] || up_at=$SECONDS
       if [ "$(json_field health.ai_runtime.details.planes.c.running < "$work/status.json")" = true ] &&
-          [[ "$(json_field health.ai_runtime.details.planes.c.mechanism < "$work/status.json")" == *"(via the sensor helper)"* ]]; then
+          [[ "$(json_field health.ai_runtime.details.planes.c.mechanism < "$work/status.json")" == *"cn_proc"*"(via the sensor helper)"* ]]; then
         HEALTH_SECONDS=$((SECONDS - START_SECONDS)); return 0
       fi
       HEALTH_REASON="$(json_field health.ai_runtime.details.planes.c.reason < "$work/status.json")"
@@ -453,7 +464,7 @@ if [ "$rc" != 0 ]; then
   else
     tail -n 6 "$RUNDIR/helper.log" "$RUNDIR/gateway.log" 2> /dev/null
   fi
-  [ "$rc" = 1 ] && fail "the sensor answers but its kernel event plane (Plane C) is not running through the sensor helper${HEALTH_REASON:+: $HEALTH_REASON}" 17
+  [ "$rc" = 1 ] && fail "the sensor answers but its kernel event plane (Plane C) is not running the process connector (cn_proc) through the sensor helper${HEALTH_REASON:+: $HEALTH_REASON}" 17
   fail "the sensor gateway did not report healthy on 127.0.0.1:$API_PORT within $HEALTH_WAIT s" 17
 fi
 fingerprint > "$RUNDIR/fingerprint" || fail "cannot write $RUNDIR/fingerprint" 18
