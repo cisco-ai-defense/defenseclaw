@@ -296,7 +296,8 @@ jobs:
   # Claude Cowork VM sensor packages (packaging/cowork-vm), one per VM
   # architecture, from the gateway and sensor helper of this release's
   # enterprise Linux archives. Signed with the Cowork-only key when the release
-  # environment has it; otherwise they ship unsigned and the notes say so.
+  # environment has it; otherwise they ship unsigned and only the run summary
+  # says so (the release notes never name them).
   cowork-vm:
     name: Build the Cowork VM sensor packages
     if: inputs.operation == 'release'
@@ -1004,16 +1005,4 @@ jobs:
             defenseclaw-cowork-amd64.tar.gz defenseclaw-cowork-arm64.tar.gz
           gh release upload "$VERSION" --repo "$GITHUB_REPOSITORY" --clobber \
             defenseclaw-cowork-amd64.tar.gz.sig defenseclaw-cowork-arm64.tar.gz.sig defenseclaw-cowork-signing-key.asc
-          # Until 1.0.8's packages are signed: the release workflow before 1.0.9
-          # wrote an unsigned-packages paragraph into the notes (main still does
-          # for 1.0.8). Remove it then; later releases never write it.
-          gh release view "$VERSION" --repo "$GITHUB_REPOSITORY" --json body -q .body > notes.md
-          python3 - notes.md << 'EOF'
-          import re, sys
-          path = sys.argv[1]
-          text = open(path, encoding="utf-8").read()
-          text = re.sub(r"<!-- cowork-vm-unsigned -->[^\n]*\n*", "", text)
-          open(path, "w", encoding="utf-8").write(text)
-          EOF
-          gh release edit "$VERSION" --repo "$GITHUB_REPOSITORY" --notes-file notes.md
           echo "Signed and attached the Cowork VM package signatures to $VERSION" >> "$GITHUB_STEP_SUMMARY"

@@ -465,6 +465,16 @@ def test_a_release_workflow_change_runs_the_cowork_vm_install_suite() -> None:
     assert "needs.changes.outputs.cowork_vm != 'false'" in job["if"]
 
 
+def test_cowork_sign_attaches_signatures_and_leaves_the_notes_alone() -> None:
+    # Audit review S3: the release notes never name the Cowork packages
+    # (P2-1), so cowork-sign has no notes paragraph to remove.
+    steps = _workflow("release.yaml")["jobs"]["cowork-sign"]["steps"]
+    script = "\n".join(str(step.get("run", "")) for step in steps)
+    assert "gh release upload" in script
+    assert "gh release edit" not in script and "--notes" not in script
+    assert "cowork-vm-unsigned" not in (WORKFLOWS / "release.yaml").read_text(encoding="utf-8")
+
+
 def test_repro_paths_mirror_the_deterministic_build_push_paths() -> None:
     push = _workflow("windows-deterministic-build.yml")[True]["push"]["paths"]
     mirrored = {path[: -len("**")] if path.endswith("/**") else path for path in push}
