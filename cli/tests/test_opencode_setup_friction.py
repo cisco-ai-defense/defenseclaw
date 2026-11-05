@@ -381,3 +381,23 @@ def test_other_accounts_can_write_is_the_one_rule(monkeypatch, tmp_path, private
             except (AttributeError, OSError):
                 pass
         assert file_permissions.other_accounts_can_write(str(folder), os.stat(folder)) is expected, oct(mode)
+
+
+@linux_only
+@pytest.mark.parametrize("shared", [False, True])
+def test_the_folder_holding_the_npm_link_counts_too(monkeypatch, tmp_path, shared):
+    """npm links ~/.npm-global/bin/opencode to the package: both folders are checked."""
+    from defenseclaw.inventory import agent_discovery
+
+    prefix, target = _npm_prefix(tmp_path)
+    package_bin = prefix / "lib" / "node_modules" / "@opencode" / "cli" / "bin"
+    package_bin.mkdir(parents=True)
+    real = package_bin / "opencode.exe"
+    target.rename(real)
+    target.symlink_to(real)
+    for folder in (prefix / "lib", prefix / "lib" / "node_modules", package_bin.parent.parent, package_bin.parent, package_bin):
+        folder.chmod(0o755)
+    gid = os.stat(prefix / "bin").st_gid
+    _accounts(monkeypatch, tmp_path, gid, group_line=f"devs:x:{gid}:me,bob\n" if shared else "")
+    monkeypatch.setenv("DEFENSECLAW_TRUSTED_BIN_PREFIXES", str(prefix))
+    assert agent_discovery._is_trusted_binary_path(str(target)) is not shared
