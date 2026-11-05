@@ -163,6 +163,13 @@ func TestTrustedShellArgs(t *testing.T) {
 		{"devin-exec", "devin", "exec", `{"command":"ls","workdir":"/w"}`, `{"command":"ls"}`, "/w", true},
 		{"kiro-shell", "kiro", "shell", `{"command":"ls","working_dir":"/w"}`, `{"command":"ls"}`, "/w", true},
 		{"kiro-execute-bash", "kiro", "execute_bash", `{"command":"ls","working_dir":"/w"}`, `{"command":"ls"}`, "/w", true},
+		// rel-1-0-6:GAP-0589: kiro-cli 2.35.1 --v3 on Windows, as captured.
+		{"kiro-v3-execute-pwsh", "kiro", "execute_pwsh",
+			`{"command":"echo hi","cwd":"c:\\Users\\alice\\proj","description":null,"run_in_background":false,"timeout":null}`,
+			`{"command":"echo hi","run_in_background":false}`, `c:\Users\alice\proj`, true},
+		{"kiro-v3-execute-pwsh-unset-cwd", "kiro", "execute_pwsh",
+			`{"command":"ls","cwd":null,"description":null,"run_in_background":false,"timeout":null}`,
+			`{"command":"ls","run_in_background":false}`, "", true},
 		{"null-dir", "opencode", "shell", `{"command":"ls","workdir":null}`, `{"command":"ls"}`, "", true},
 		{"operators-kept", "opencode", "shell", `{"command":"a && b > c","workdir":"/w"}`, `{"command":"a && b > c"}`, "/w", true},
 		// Refused: the arguments are left for the parser to judge.
@@ -310,6 +317,7 @@ func TestShellCommandCWD(t *testing.T) {
 		{"agy", "antigravity", "run_command", `{"CommandLine":"ls","Cwd":"/w","Extra":1}`, "/w"},
 		{"amp-shell-command", "amp", "shell_command", `{"command":"ls","workdir":"/w","timeout_ms":"x"}`, "/w"},
 		{"kiro-two-same", "kiro", "execute_bash", `{"command":"ls","working_dir":"/w","cwd":"/w"}`, "/w"},
+		{"kiro-v3-pwsh", "kiro", "execute_pwsh", `{"command":"ls","cwd":"/w","zz":1}`, "/w"},
 		{"opencode-bash", "opencode", "bash", `{"command":"ls","workdir":"/w","zz":1}`, "/w"},
 		// None: no directory, a mistyped or blank one, two different ones,
 		// a tool that names none, a tool that is no shell.

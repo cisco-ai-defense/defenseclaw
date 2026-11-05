@@ -1226,11 +1226,16 @@ func TestAgentHookTrustedActionToolAliasesKiroShell(t *testing.T) {
 		if got := agentHookTrustedActionTool("kiro", "execute_bash", platform); got != "shell" {
 			t.Errorf("kiro execute_bash on %s = %q, want shell", platform, got)
 		}
+		// kiro-cli --v3 on Windows (rel-1-0-6:GAP-0589).
+		if got := agentHookTrustedActionTool("kiro", "execute_pwsh", platform); got != "shell" {
+			t.Errorf("kiro execute_pwsh on %s = %q, want shell", platform, got)
+		}
 	}
 	// The alias is scoped to Kiro and to that one name: it must not rewrite
 	// another connector's tool, nor Kiro's file tools.
 	for _, test := range []struct{ connector, tool string }{
 		{"opencode", "execute_bash"},
+		{"opencode", "execute_pwsh"},
 		{"kiro", "fs_write"},
 		{"kiro", "str_replace"},
 		{"kiro", "use_aws"},

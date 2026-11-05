@@ -76,7 +76,11 @@ var copilotShellArgs = map[string]trustedShellArg{
 //   - Devin 3000.10 exec: workdir, absolute; timeout, tty.
 //   - Kiro CLI 2.24 shell: working_dir and the __tool_use_purpose note;
 //     execute_bash (also --v3): also summary, and cwd, description and
-//     timeout, which v3 sends unset (null).
+//     timeout, which v3 sends unset (null). On Windows the --v3 engine
+//     (kiro-cli 2.35.1) names its shell tool execute_pwsh, with the same
+//     v3 arguments (command, cwd, description, run_in_background, timeout);
+//     run_in_background is left to the exact shell schema, as for
+//     execute_bash (rel-1-0-6:GAP-0589).
 //   - Copilot CLI 1.0.8x bash and powershell: copilotShellArgs.
 //   - OpenClaw 2026.3 exec (judged through /api/v1/inspect/tool): workdir;
 //     yieldMs, background, timeout, pty, and OpenClaw's own approval modes
@@ -102,6 +106,9 @@ var trustedShellTools = map[string]map[string]map[string]trustedShellArg{
 		"shell": {"working_dir": trustedShellWorkdir, "__tool_use_purpose": trustedShellLabel},
 		"execute_bash": {
 			"working_dir": trustedShellWorkdir, "summary": trustedShellLabel,
+			"cwd": trustedShellWorkdir, "description": trustedShellLabel, "timeout": trustedShellNumber,
+		},
+		"execute_pwsh": {
 			"cwd": trustedShellWorkdir, "description": trustedShellLabel, "timeout": trustedShellNumber,
 		},
 	},
@@ -226,7 +233,7 @@ var shellCommandKeys = map[string]map[string]string{
 	"amp":         {"shell_command": "command", "Bash": "cmd"},
 	"cursor":      {"Shell": "command"},
 	"devin":       {"exec": "command"},
-	"kiro":        {"shell": "command", "execute_bash": "command"},
+	"kiro":        {"shell": "command", "execute_bash": "command", "execute_pwsh": "command"},
 	"copilot":     {"bash": "command", "powershell": "command"},
 	"antigravity": {"run_command": "CommandLine"},
 	"claudecode":  {"Bash": "command"},
