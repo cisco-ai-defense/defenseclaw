@@ -110,7 +110,18 @@ var errPerUserPeerCheckUnfinished = fmt.Errorf("%w: its owner was still being ch
 // listener's owner is not proven yet (verifiedPerUserHTTPClient). The dial
 // outlives a canceled request, so only this mark says the try had reached a
 // listener when connectBy ended it.
-type perUserPeerCheck struct{ pending atomic.Bool }
+//
+// ends is the proven connection's local and remote address, set once its
+// owner is proven: the restart-window proof of a call with no decision reads
+// which process holds it (perUserRestartWindowProof, rel-1-0-6 GAP-0295).
+type perUserPeerCheck struct {
+	pending atomic.Bool
+	ends    atomic.Pointer[perUserConnEnds]
+}
+
+// perUserConnEnds is the client and server address of one proven per-user
+// gateway connection.
+type perUserConnEnds struct{ local, remote net.Addr }
 
 type perUserPeerCheckKey struct{}
 
@@ -286,6 +297,7 @@ func verifiedPerUserHTTPClient(
 				}
 				if check != nil {
 					check.pending.Store(false)
+					check.ends.Store(&perUserConnEnds{local: conn.LocalAddr(), remote: conn.RemoteAddr()})
 				}
 				// hook-post reads the process behind the proven socket, for
 				// a no-answer during a restart (PerUserGatewayRestartProven).
