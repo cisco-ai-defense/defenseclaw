@@ -8,13 +8,14 @@ import (
 	"context"
 	"encoding/json"
 	"math"
-	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"reflect"
 	"strings"
 	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/defenseclaw/defenseclaw/internal/config"
 	"github.com/defenseclaw/defenseclaw/internal/gateway/connector"
@@ -227,18 +228,20 @@ func TestNativeHookAppliesTheAuditedAnswerAfterALateFailure(t *testing.T) {
 			if err := os.WriteFile(filepath.Join(hookDir, ".token"), []byte("DEFENSECLAW_GATEWAY_TOKEN=\"tkn\"\n"), 0o600); err != nil {
 				t.Fatal(err)
 			}
+			server := httptest.NewServer(fixture.api.handleAgentHook("claudecode"))
+			t.Cleanup(server.Close)
 			var stdout, stderr bytes.Buffer
 			code := hookexec.Run(t.Context(), hookexec.Options{
 				Connector:  "claudecode",
 				Event:      "PreToolUse",
-				APIAddr:    "127.0.0.1:8787",
+				APIAddr:    strings.TrimPrefix(server.URL, "http://"),
 				FailMode:   tc.failMode,
 				Home:       home,
 				HookDir:    hookDir,
 				Stdin:      bytes.NewReader(preToolUseBody(t, "toolu-late")),
 				Stdout:     &stdout,
 				Stderr:     &stderr,
-				HTTPClient: &http.Client{Transport: handlerTransport{handler: fixture.api.handleAgentHook("claudecode")}},
+				HTTPClient: server.Client(),
 			})
 			var output map[string]interface{}
 			if text := bytes.TrimSpace(stdout.Bytes()); len(text) > 0 {
@@ -249,6 +252,29 @@ func TestNativeHookAppliesTheAuditedAnswerAfterALateFailure(t *testing.T) {
 			denied := code != 0 || panicWireDenies(output)
 			if denied != (tc.action == "block") {
 				t.Fatalf("native hook exit %d stdout %q stderr %q: denied=%t, want the recorded %s", code, stdout.String(), stderr.String(), denied, tc.action)
+			}
+			// The receipt lets the hook return before the gateway finishes
+			// persisting its terminal row. Wait for that exact row.
+			deadline := time.Now().Add(5 * time.Second)
+			for {
+				events, err := fixture.api.store.ListEvents(4)
+				if err != nil {
+					t.Fatal(err)
+				}
+				found := false
+				for _, event := range events {
+					if event.SessionID == "s-audit-toolu-late" && event.Action == "connector-hook" {
+						found = true
+						break
+					}
+				}
+				if found {
+					break
+				}
+				if time.Now().After(deadline) {
+					t.Fatal("native hook terminal row was not persisted")
+				}
+				time.Sleep(10 * time.Millisecond)
 			}
 			row := newestHookDecision(t, fixture.api.store, "s-audit-toolu-late")
 			if row.Structured["action"] != tc.action || row.Structured["result"] != "ok" || row.Enforced != (tc.action == "block") {

@@ -1829,9 +1829,13 @@ func (a *APIServer) hookAuditFailureResponse(
 		return resp, false
 	}
 	cfg := a.decisionConfig(ctx)
-	if resp.Action == "allow" && cfg != nil && !managed.IsManagedEnterprise(cfg.DeploymentMode) &&
+	if (resp.Action == "allow" || resp.Action == hookActionUnconfirmed && resp.RawAction == "allow") &&
+		cfg != nil && !managed.IsManagedEnterprise(cfg.DeploymentMode) &&
 		cfg.HookPolicyTierForConnector(connectorName) != config.HookPolicyTierStrict &&
 		!sandboxHookForConnector(ctx, connectorName) {
+		// A missing receipt leaves a decision unconfirmed, but an audit
+		// failure still gives a balanced caller its visible allow answer.
+		resp.Action = "allow"
 		resp.RawAction = "alert"
 		resp.Severity = "WARN"
 		resp.WouldBlock = false
