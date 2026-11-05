@@ -221,6 +221,27 @@ const windowsEnterpriseUnreadableMetadataMarker = "could not read the installed 
 
 // windowsEnterpriseRemoveReplacementCopies removes the unused replacement
 // copies in the production bin folder; replaceable in tests.
+// windowsEnterpriseRepairDataDirBeforePlan stamps the canonical protection
+// on the runtime folder (data_dir) of an installed standalone deployment
+// when it drifted, as the guardian's data-path repair does, and returns the
+// change it made ("" when none). The strict trust walk refuses a runtime
+// folder another account can write (GAP-0561). A seam for tests.
+var windowsEnterpriseRepairDataDirBeforePlan = func() string {
+	if !windowsEnterpriseIsElevated() {
+		return ""
+	}
+	layout, err := managed.StandaloneWindowsLayout()
+	if err != nil || strings.TrimSpace(layout.DataDir) == "" {
+		return ""
+	}
+	repaired, err := managed.EnsureCanonical(layout.DataDir, managed.ObjectRuntimeDirectory, managed.CanonicalOptions{})
+	if err != nil || repaired.Outcome != managed.CanonicalRepaired {
+		return ""
+	}
+	return "restored the access control of " + layout.DataDir + ", which had drifted (" +
+		windowsEnterpriseBoundedDiagnostic(strings.Join(repaired.Drift, "; ")) + ")"
+}
+
 var windowsEnterpriseRemoveReplacementCopies = func() []string {
 	roots, err := winpath.TrustedEnterpriseRoots(managed.ProfileStandalone)
 	if err != nil {
@@ -3841,6 +3862,16 @@ func runWindowsEnterpriseStandaloneEnsureOnce(
 	if configStateRepaired {
 		result.Changes = append(result.Changes, "recovered config generation from the approved config and proven previous counter")
 	}
+	// A runtime folder another account was given write access to is put
+	// back before anything is planned, as the guardian does on its pass,
+	// and the run says so: a compliant ensure reported noop while the
+	// guardian healed it behind it (GAP-0573).
+	dataDirRepaired := ""
+	if statusReport.Installed && !statusReport.TransactionPending {
+		if dataDirRepaired = windowsEnterpriseRepairDataDirBeforePlan(); dataDirRepaired != "" {
+			result.Changes = append(result.Changes, dataDirRepaired)
+		}
+	}
 	alreadyAppliedNeedsRepair := false
 	alreadyAppliedCoworkDrift := ""
 	verifyFailure := ""
@@ -3905,6 +3936,9 @@ func runWindowsEnterpriseStandaloneEnsureOnce(
 				applyWindowsEnterpriseInstallerReport(result, opts, &accepted, verifyRun)
 				result.Noop = true
 				result.NoopReason = "already_applied"
+				if dataDirRepaired != "" {
+					result.Noop, result.NoopReason = false, ""
+				}
 				applyWindowsEnterprisePolicy(ctx, result)
 				return false, finishEnsure(windowsEnterpriseFailureCodeFor(result))
 			}
@@ -3999,6 +4033,9 @@ func runWindowsEnterpriseStandaloneEnsureOnce(
 			}
 			result.Noop = true
 			result.NoopReason = plan.Reason
+			if dataDirRepaired != "" {
+				result.Noop, result.NoopReason = false, ""
+			}
 			applyWindowsEnterprisePolicy(ctx, result)
 			return false, finishEnsure(windowsEnterpriseFailureCodeFor(result))
 		default:

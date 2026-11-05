@@ -1170,11 +1170,14 @@ func (stub *ensureStub) install(t *testing.T) {
 	originalHookRuntime := windowsEnterpriseHookRuntimeDir
 	originalCopies := windowsEnterpriseRemoveReplacementCopies
 	originalCowork := windowsEnterpriseCoworkEnsureDrift
+	originalDataDir := windowsEnterpriseRepairDataDirBeforePlan
 	t.Cleanup(func() {
 		windowsEnterpriseHookRuntimeDir = originalHookRuntime
 		windowsEnterpriseRemoveReplacementCopies = originalCopies
 		windowsEnterpriseCoworkEnsureDrift = originalCowork
+		windowsEnterpriseRepairDataDirBeforePlan = originalDataDir
 	})
+	windowsEnterpriseRepairDataDirBeforePlan = func() string { return "" }
 	// The host's real Cowork check stays out of scripted ensures; the
 	// Cowork drift tests replace this after install.
 	windowsEnterpriseCoworkEnsureDrift = func() (string, string) { return "", "" }
@@ -1273,6 +1276,25 @@ func TestWindowsEnterpriseEnsureProbesCarryNoMutationInputs(t *testing.T) {
 	}
 	if !result.OK || !result.Noop || result.NoopReason != "compliant" {
 		t.Fatalf("result %+v", result)
+	}
+
+	// GAP-0573: a compliant ensure that put a drifted runtime folder ACL
+	// back says so and is not a no-op.
+	stub = &ensureStub{t: t, replies: []map[string]any{installedStatus("status"), installedStatus("verify")}}
+	stub.install(t)
+	windowsEnterpriseRepairDataDirBeforePlan = func() string {
+		return `restored the access control of C:\ProgramData\Cisco\DefenseClaw\runtime, which had drifted (untrusted writer S-1-5-32-545)`
+	}
+	stdout.Reset()
+	if err := runWindowsEnterpriseStandaloneEnsure(context.Background(), command, opts, `C:\stage\install-enterprise.ps1`); err != nil {
+		t.Fatalf("ensure after a runtime ACL repair: %v\n%s", err, stdout.String())
+	}
+	result = enterprisestatus.Result{}
+	if err := json.Unmarshal(stdout.Bytes(), &result); err != nil {
+		t.Fatal(err)
+	}
+	if !result.OK || result.Noop || result.NoopReason != "" || !strings.Contains(strings.Join(result.Changes, "\n"), `restored the access control of C:\ProgramData\Cisco\DefenseClaw\runtime`) {
+		t.Fatalf("runtime ACL repair: result %+v", result)
 	}
 }
 
