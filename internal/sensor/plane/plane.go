@@ -285,6 +285,13 @@ type Coverage struct {
 	// helper: Tetragon, or the native one with the reason Tetragon is not in
 	// use. nil everywhere else.
 	Backend *Backend
+	// BufferDropped is how many events DefenseClaw's own event buffers
+	// dropped under back-pressure, each named in Limitations by
+	// WithBufferDrops. The host plane adds the drops of the sources a
+	// restart replaced (WithRetiredBufferDrops), so the count outlives a
+	// helper reconnect (cowork-1-0-8 GAP-0080). Tetragon's own losses are
+	// Backend.EventsLost.
+	BufferDropped int64
 }
 
 // Backend kinds.
@@ -601,10 +608,26 @@ const (
 // not grow. Linux native and Tetragon (GAP-0071), macOS and Windows, and the
 // gateway's buffer for the helper stream (cowork-1-0-8 GAP-0072) report it
 // with this one function; TestEveryCoverageNamesItsBufferDrops checks the
-// sources.
+// sources. The count is added to BufferDropped, which the host plane
+// carries across a restart of the source (cowork-1-0-8 GAP-0080).
 func WithBufferDrops(coverage Coverage, dropped int64, buffer string) Coverage {
 	if dropped > 0 {
 		coverage.Limitations = append(append([]string(nil), coverage.Limitations...), bufferDropLimitation(dropped, buffer))
+		coverage.BufferDropped += dropped
+	}
+	return coverage
+}
+
+// WithRetiredBufferDrops adds to coverage the events the buffers of earlier
+// sources dropped: a helper restart (a package upgrade, a config push)
+// replaces the source and its buffers, and those losses vanished from status
+// with them (cowork-1-0-8 GAP-0080). They are one line of their own, and
+// count in BufferDropped.
+func WithRetiredBufferDrops(coverage Coverage, retired int64) Coverage {
+	if retired > 0 {
+		coverage.Limitations = append(append([]string(nil), coverage.Limitations...), fmt.Sprintf(
+			"%d events were dropped under back-pressure before the sensor's event stream last restarted", retired))
+		coverage.BufferDropped += retired
 	}
 	return coverage
 }

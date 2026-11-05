@@ -256,6 +256,9 @@ func wantBufferDrops(t *testing.T, coverage Coverage, dropped int64) {
 	case dropped > 0 && (lines != 1 || !strings.Contains(joined, fmt.Sprintf(
 		"%d events were dropped from the sensor's event buffer under back-pressure", dropped))):
 		t.Fatalf("limitations = %q, want one line naming %d dropped events", joined, dropped)
+	case coverage.BufferDropped != dropped:
+		// The count the host plane carries across a restart (GAP-0080).
+		t.Fatalf("BufferDropped = %d, want %d", coverage.BufferDropped, dropped)
 	}
 }
 
@@ -378,6 +381,24 @@ func callsWithBufferDrops(body *ast.BlockStmt) bool {
 		return !found
 	})
 	return found
+}
+
+// cowork-1-0-8 GAP-0080: the drops of replaced sources are one line of
+// their own, add to the count, and add nothing when there are none.
+func TestWithRetiredBufferDrops(t *testing.T) {
+	start := Coverage{Mechanism: "m", Limitations: []string{"start limitation"}}
+	current := WithBufferDrops(start, 2, HelperStreamBuffer)
+	if got := WithRetiredBufferDrops(current, 0); !reflect.DeepEqual(got, current) {
+		t.Fatalf("no retired drops changed the coverage: %+v", got)
+	}
+	got := WithRetiredBufferDrops(current, 3)
+	if got.BufferDropped != 5 || len(got.Limitations) != 3 ||
+		got.Limitations[2] != "3 events were dropped under back-pressure before the sensor's event stream last restarted" {
+		t.Fatalf("retired drops = %+v", got)
+	}
+	if len(current.Limitations) != 2 || len(start.Limitations) != 1 {
+		t.Fatalf("the limitations were changed in place: %q, %q", start.Limitations, current.Limitations)
+	}
 }
 
 // The check itself: a Coverage without the call is caught, one with it (also
