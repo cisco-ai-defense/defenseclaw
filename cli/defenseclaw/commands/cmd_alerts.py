@@ -36,7 +36,7 @@ import click
 import requests
 
 from defenseclaw import ux
-from defenseclaw.alert_semantics import copilot_hook_target, cowork_hook_target, surface_label
+from defenseclaw.alert_semantics import copilot_hook_target, cowork_hook_target, known_surface, surface_label
 from defenseclaw.context import AppContext, pass_ctx
 from defenseclaw.gateway import OrchestratorClient, alert_disposition_timeout_seconds
 from defenseclaw.logger import _gateway_api_host
@@ -216,17 +216,17 @@ def _event_surface(event, hook_details: dict[str, list[str]] | None = None) -> s
     """The agent surface of an alert: ``cowork`` for a Claude Cowork call.
 
     A hook call's audit row records it (``surface=cowork``); a finding takes
-    it from the hook row of the same request. "" for every other call."""
+    it from the hook row of the same request. "" for every other call: only
+    a known agent surface counts, not the asset policy's ``surface=hook``
+    (cowork audit M2)."""
     structured = getattr(event, "structured", None)
     if isinstance(structured, dict):
-        surface = str(structured.get("defenseclaw.agent.surface") or "").strip().lower()
-        if surface:
+        if surface := known_surface(str(structured.get("defenseclaw.agent.surface") or "")):
             return surface
-    surface = _kv(event.details or "").get("surface", "").strip().lower()
-    if surface:
+    if surface := known_surface(_kv(event.details or "").get("surface", "")):
         return surface
     for raw in (hook_details or {}).get(getattr(event, "id", ""), []):
-        if surface := _kv(raw).get("surface", "").strip().lower():
+        if surface := known_surface(_kv(raw).get("surface", "")):
             return surface
     return ""
 

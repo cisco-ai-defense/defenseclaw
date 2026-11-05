@@ -115,6 +115,16 @@ def surface_label(surface: str) -> str:
     return _SURFACE_LABELS.get(surface, surface)
 
 
+def known_surface(surface: str) -> str:
+    """``surface`` when it is an agent surface alerts label (today only
+    ``cowork``), else "". Other writers put ``surface=`` in the details with
+    other meanings, such as the asset policy's ``surface=hook``, and those are
+    not agent surfaces (cowork audit M2)."""
+
+    surface = (surface or "").strip().lower()
+    return surface if surface in _SURFACE_LABELS else ""
+
+
 def cowork_hook_target(target: str, surface: str) -> str:
     """``claudecode:PreToolUse`` reads ``cowork:PreToolUse`` for a Cowork call
     (GAP-0047); any other surface keeps the target."""

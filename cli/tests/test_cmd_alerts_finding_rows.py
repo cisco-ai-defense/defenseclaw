@@ -130,6 +130,26 @@ class AlertFindingRowsTests(unittest.TestCase):
         self.assertEqual(listed[cowork_id]["target"], "cowork:PreToolUse")
         self.assertEqual(listed[cli_id]["target"], "claudecode:PreToolUse")
 
+    def test_an_asset_policy_surface_is_not_an_agent_surface(self):
+        # Cowork audit M2: the asset policy writes surface=hook (where the
+        # MCP call was seen). That is not an agent surface, so --show prints
+        # no Surface line and the target is unchanged.
+        self.app.store.log_event(Event(
+            action="asset-policy", target="mcp:unregistered", severity="HIGH", connector="claudecode",
+            details="action=block source=registry registry_status=unregistered registry_configured=true "
+                    "surface=hook hook=PreToolUse tool=mcp__x__y connector=claudecode would_block=false "
+                    "reason=not-in-registry",
+            timestamp=datetime.now(timezone.utc),
+        ))
+        listed = self.app.store.list_alerts(10)
+        self.assertEqual([e.action for e in listed], ["asset-policy"])
+        shown = self.runner.invoke(alerts, ["--show", "1"], obj=self.app, catch_exceptions=False).output
+        self.assertRegex(shown, r"Target:\s+mcp:unregistered\n")
+        self.assertNotIn("Surface:", shown)
+        self.assertNotIn("cowork", shown.lower())
+        row = json.loads(self.runner.invoke(alerts, ["--json"], obj=self.app, catch_exceptions=False).output)[0]
+        self.assertEqual(row["target"], "mcp:unregistered")
+
     def test_printed_cowork_target_round_trips_into_dismiss(self):
         # Cowork audit M1: alerts print cowork:PreToolUse for a Cowork finding
         # and "cowork PreToolUse" for a Cowork hook block. dismiss --target
