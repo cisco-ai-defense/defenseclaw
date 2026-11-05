@@ -111,8 +111,11 @@ def test_folders_another_account_can_write_stay_refused(monkeypatch, tmp_path, c
 # ---------------------------------------------------------------- per-account service port
 
 
-def _fake_opencode(tmp_path: Path, config_home: Path, channel_port: int = 49374) -> str:
-    """`opencode service get|set port` and `status`, with service.json as OpenCode keeps it."""
+def _fake_opencode(tmp_path: Path, config_home: Path, channel_port: int | str = "") -> str:
+    """`opencode service get|set port` and `status`, with service.json as OpenCode keeps it.
+
+    Like OpenCode 2.2.5, `get port` prints nothing while no port is set.
+    """
     service = config_home / "opencode" / "service.json"
     tmp_path.mkdir(parents=True, exist_ok=True)
     binary = tmp_path / "opencode"
@@ -123,7 +126,7 @@ def _fake_opencode(tmp_path: Path, config_home: Path, channel_port: int = 49374)
         "data = json.load(open(path)) if os.path.exists(path) else {}\n"
         "args = sys.argv[1:]\n"
         "if args[:3] == ['service', 'get', 'port']:\n"
-        f"    print(data.get('port', {channel_port}))\n"
+        f"    print(data.get('port', {channel_port!r}))\n"
         "elif args[:3] == ['service', 'set', 'port']:\n"
         "    data['port'] = int(args[3]); data.setdefault('password', 'x')\n"
         "    os.makedirs(os.path.dirname(path), exist_ok=True); json.dump(data, open(path, 'w'))\n"
@@ -170,12 +173,13 @@ def _account(monkeypatch, tmp_path: Path, host: _Host, uid: int, **fake) -> tupl
 
 
 @posix_only
-def test_two_accounts_get_their_own_stable_service_ports(monkeypatch, tmp_path):
+@pytest.mark.parametrize("unset_prints", ["", 49374])
+def test_two_accounts_get_their_own_stable_service_ports(monkeypatch, tmp_path, unset_prints):
     host = _Host()
     host.install(monkeypatch)
     ports = {}
     for uid in (1001, 1002):
-        binary, service = _account(monkeypatch, tmp_path, host, uid)
+        binary, service = _account(monkeypatch, tmp_path, host, uid, channel_port=unset_prints)
         line = opencode_service.ensure_account_port(binary)
         ports[uid] = json.loads(service.read_text())["port"]
         assert f"uses port {ports[uid]} for this account" in line and "49374" in line
