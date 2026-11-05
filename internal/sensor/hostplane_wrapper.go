@@ -45,6 +45,9 @@ type heldWrapper struct {
 	// depth is the number of wrappers in this record's chain: its own level
 	// (1 for a wrapper, 0 for a client exec) and its deepest linked record's.
 	depth int
+	// digest is a held client exec's image digest: the exec event's, or the
+	// one a later KindImageDigest event delivered ("" until then).
+	digest string
 }
 
 // level is the number of wrappers the record itself adds to a chain.
