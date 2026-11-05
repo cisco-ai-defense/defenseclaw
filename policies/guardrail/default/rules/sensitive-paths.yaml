@@ -3,8 +3,8 @@ category: sensitive-path
 # Home-prefix sub-pattern shared across the credential-file rules
 # below. Closes by adding `\$\{?HOME\}?` so the braced
 # shell form `${HOME}/.aws/credentials` matches in addition to `~`,
-# `$HOME`, `/home/<user>`, and `/root`. Keep this sub-pattern in sync
-# with the compiled-in defaults in `internal/gateway/rules.go`.
+# `$HOME`, `/home/<user>`, and `/root`. make generate-guardrail-catalog
+# regenerates internal/gateway/rules_catalog_generated.go from this file.
 rules:
   - id: PATH-SSH-DIR
     expression: >-
@@ -112,8 +112,7 @@ rules:
     tags: [credential, file-sensitive]
   - id: PATH-ENV-FILE
     expression: 'false'
-    # Closes `;` (shell command separator) added to
-    # the suffix delimiter class so `cat .env; true` also matches.
+    # Off in balanced; strict keeps typed .env reads and uploads.
     pattern: 'a^'
     title: "Environment file"
     severity: HIGH
