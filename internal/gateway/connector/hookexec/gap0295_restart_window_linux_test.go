@@ -115,6 +115,16 @@ func TestGAP0295FreshGatewayHoldsCallProof(t *testing.T) {
 		t.Fatal("a try with no proven connection is proven")
 	}
 
+	// A stale record: its recorded start is far older than the process.
+	writeRecord(time.Now().Add(-time.Minute))
+	if perUserFreshGatewayHoldsCall(dataDir, check) {
+		t.Fatal("a stale gateway record is proven fresh")
+	}
+	writeRecord(time.Now().Add(-time.Second))
+	if !perUserFreshGatewayHoldsCall(dataDir, check) {
+		t.Fatal("the restored record is not proven")
+	}
+
 	// A connection held by another process (this test's own listener).
 	other, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
@@ -144,5 +154,33 @@ func TestGAP0295FreshGatewayHoldsCallProof(t *testing.T) {
 	}
 	if perUserFreshGatewayHoldsCall(dataDir, check) {
 		t.Fatal("a gateway that answered a call is proven fresh")
+	}
+}
+
+// TestGAP0295FirstTryOutageModeNotReadyStaysClosed (review N2): when the
+// first try connects straight to a fresh gateway, the outage answer is
+// prepared in the background because it reads the outage mode. If that read
+// is not done by the deadline the call keeps the closed no-answer answer:
+// never an allow without the account's mode.
+func TestGAP0295FirstTryOutageModeNotReadyStaysClosed(t *testing.T) {
+	previousLogWait := answerWatchdogLogWait
+	answerWatchdogLogWait = time.Minute
+	t.Cleanup(func() { answerWatchdogLogWait = previousLogWait })
+	stubRestartWindowProof(t, true)
+	sp, _ := specFor("claudecode")
+	home := t.TempDir()
+	writeFreshGatewayRecordStub(t, home)
+	release := make(chan struct{})
+	t.Cleanup(func() { close(release) })
+	stdout, stderr := newClaimedStopWriter(), newClaimedStopWriter()
+	exited := make(chan int, 1)
+	opts := perUserRestartOptions(home, "open", false, stdout, stderr, func(code int) { exited <- code })
+	opts.OutageFailModeNow = func() string { <-release; return "open" }
+	w := prepareAnswerWatchdog(&opts, sp, "open", time.Time{})
+	w.noDecisionPending()
+	w.restartWindowContact(opts, sp, "open", &perUserPeerCheck{})
+	code, shown := fireAnswerDeadline(t, w, exited, stdout, stderr)
+	if !nativeAnswerBlocks(code, stdout.String()) || !strings.Contains(shown, "did not answer in time") {
+		t.Fatalf("exit %d answer %q, want the closed no-answer while the outage mode is unread", code, shown)
 	}
 }
