@@ -20,7 +20,7 @@ import (
 func TestImageDigestsTravelInTheirOwnFrame(t *testing.T) {
 	at := time.Unix(0, 1_791_336_250_111_000_000)
 	exec := plane.Event{Kind: plane.KindExec, PID: 42, Name: "claude", Cmdline: "claude -p x", At: at,
-		ImageVersion: "2.1.317", ImageDigestState: plane.DigestPending}
+		ImageVersion: "2.1.317", ImageDigestState: plane.DigestPending, Fork: true}
 	digest := plane.Event{Kind: plane.KindImageDigest, PID: 42, At: at, ImageVersion: "2.1.317",
 		ImageSHA256: "ab12", ImageDigestState: plane.DigestRead}
 
@@ -98,7 +98,7 @@ func TestImageDigestsTravelInTheirOwnFrame(t *testing.T) {
 	if err := json.Unmarshal([]byte(`{"kind":"exec","pid":7,"image_version":"2.1.317"}`), &wire); err != nil {
 		t.Fatal(err)
 	}
-	if event := decodeEvent(wire); event.ImageDigestState != "" || event.ImageVersion != "2.1.317" {
+	if event := decodeEvent(wire); event.ImageDigestState != "" || event.Fork || event.ImageVersion != "2.1.317" {
 		t.Fatalf("old helper exec = %+v", event)
 	}
 }

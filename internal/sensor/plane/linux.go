@@ -553,6 +553,7 @@ func (s *linuxSource) pushProcess(kind Kind, pid int, at time.Time, fromFork boo
 	}
 	event.Kind = kind
 	event.At = at
+	event.Fork = fromFork
 	if execed {
 		// The process kept exec-ing while it was read, so its command line
 		// may be another program's. Its new image has an exec event of its
@@ -575,11 +576,16 @@ func (s *linuxSource) pushProcess(kind Kind, pid int, at time.Time, fromFork boo
 	}
 	var delivery *digestDelivery
 	if identity {
-		delivery = newDigestDelivery(s.pushUnlessClosed, pid, at)
-		delivery.version = version
+		// A fork's digest is never waited for (its exec has an event of its
+		// own), so it takes no waiter: read, or failed while hashing.
+		var follow func(string, bool)
+		if !fromFork {
+			delivery = newDigestDelivery(s.pushUnlessClosed, pid, at)
+			delivery.version, follow = version, delivery.follow
+		}
 		event.ImageVersion = version
 		event.ImageSHA256, event.ImageDigestState = clientImages.digestOf(
-			pinned, image, eventAccount(event), delivery.follow)
+			pinned, image, eventAccount(event), follow)
 		pinned = nil
 	} else if version != "" && !execed {
 		event.ImageVersion, event.ImageDigestState = version, DigestFailed

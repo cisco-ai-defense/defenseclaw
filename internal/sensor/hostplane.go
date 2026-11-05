@@ -355,6 +355,16 @@ func (h *hostPlane) handle(event plane.Event) {
 		h.recordConnect(event)
 		return
 	}
+	if event.Kind == plane.KindExec && event.Fork && event.ImageVersion != "" {
+		// The fork of a process in a Claude release image: its image and
+		// argv are its parent's, already classified on the parent's exec,
+		// or, read after the child exec'd, that exec's, whose own event
+		// follows. It is never a client exec of its own: classifying or
+		// holding it recorded the client a second time (GAP-0067). The
+		// tracker has its lineage.
+		h.clientExecs.forks.Add(1)
+		return
+	}
 
 	var (
 		lineage    agentchain.Lineage

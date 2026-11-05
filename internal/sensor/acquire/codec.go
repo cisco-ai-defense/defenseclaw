@@ -166,6 +166,10 @@ type wireEvent struct {
 	// it, and a helper that predates it sends none, which the host plane
 	// treats as no digest coming (cowork-1-0-8 GAP-0067).
 	ImageDigestState string `json:"image_digest_state,omitempty"`
+	// Fork is plane.Event's: an exec event that is the kernel's fork of the
+	// process. omitempty: a gateway that predates it ignores it, and from a
+	// helper that predates it every event is an exec, as before.
+	Fork bool `json:"fork,omitempty"`
 }
 
 func encodeEvent(event plane.Event) wireEvent {
@@ -183,7 +187,7 @@ func encodeEvent(event plane.Event) wireEvent {
 		KernelAction: event.KernelAction, PolicyMode: event.PolicyMode, PolicyTags: copyStrings(event.PolicyTags),
 		PolicyMessage: event.PolicyMessage, Target: event.Target, Count: event.Count,
 		ImageSHA256: event.ImageSHA256, ImageVersion: event.ImageVersion,
-		ImageDigestState: string(event.ImageDigestState),
+		ImageDigestState: string(event.ImageDigestState), Fork: event.Fork,
 	}
 	if !event.At.IsZero() {
 		out.AtUnixNano = event.At.UnixNano()
@@ -206,7 +210,7 @@ func decodeEvent(event wireEvent) plane.Event {
 		KernelAction: event.KernelAction, PolicyMode: event.PolicyMode, PolicyTags: copyStrings(event.PolicyTags),
 		PolicyMessage: event.PolicyMessage, Target: event.Target, Count: event.Count,
 		ImageSHA256: event.ImageSHA256, ImageVersion: event.ImageVersion,
-		ImageDigestState: plane.DigestState(event.ImageDigestState),
+		ImageDigestState: plane.DigestState(event.ImageDigestState), Fork: event.Fork,
 	}
 	if event.AtUnixNano != 0 {
 		out.At = time.Unix(0, event.AtUnixNano)

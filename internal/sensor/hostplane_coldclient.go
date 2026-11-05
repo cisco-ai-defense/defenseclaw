@@ -65,12 +65,12 @@ func (h *hostPlane) holdColdClientLocked(
 	}
 	pid := event.PID
 	if previous := h.coldClients[pid]; previous != nil {
-		if previous.digest != "" && previous.digest == event.ImageSHA256 &&
-			previous.event.ImageVersion == event.ImageVersion && previous.event.Cmdline == event.Cmdline {
+		if sameClientExecOfAnOldHelper(previous, event) {
 			// The same exec seen twice (GAP-0067): the event of a fork
 			// that the source read after the child exec'd carries the
 			// exec's own image and argv, and the exec's event follows.
-			// One record waits; this one is not made.
+			// One record waits; this one is not made. A current helper
+			// flags the fork, which never reaches the hold.
 			h.clientExecs.duplicates.Add(1)
 			return previous
 		}
@@ -146,6 +146,25 @@ func (h *hostPlane) settleImageDigestLocked(event plane.Event) {
 	h.settleColdClientLocked(event.PID, held, false)
 }
 
+// sameClientExecOfAnOldHelper reports a held client exec and a later exec
+// event of its pid that are one exec seen twice, from a helper that predates
+// the fork flag and the digest state (neither event states one): the same
+// digest, version and argv, and the same exec id and start time wherever
+// both events carry them, so two real execs never merge. Kept until every
+// supported helper flags forks (1.0.9 helpers and later do).
+func sameClientExecOfAnOldHelper(previous *heldWrapper, event plane.Event) bool {
+	was := previous.event
+	if was.ImageDigestState != "" || event.ImageDigestState != "" || event.Fork ||
+		previous.digest == "" || previous.digest != event.ImageSHA256 ||
+		was.ImageVersion != event.ImageVersion || was.Cmdline != event.Cmdline {
+		return false
+	}
+	if was.ExecID != "" && event.ExecID != "" && was.ExecID != event.ExecID {
+		return false
+	}
+	return was.StartNS == 0 || event.StartNS == 0 || was.StartNS == event.StartNS
+}
+
 func (h *hostPlane) releaseColdClientLocked(pid int, held *heldWrapper) {
 	delete(h.coldClients, pid)
 	h.finishHeldLocked(held, true)
@@ -162,6 +181,8 @@ type clientExecCounts struct {
 	// its exec, then the exec); replaced are held records a later held exec
 	// of the same pid recorded.
 	duplicates, replaced atomic.Int64
+	// forks are fork events of release images, never classified.
+	forks atomic.Int64
 }
 
 var digestStateNames = [4]string{"read", "pending", "failed", "unstated"}
@@ -198,5 +219,6 @@ func (c *clientExecCounts) counts() map[string]int64 {
 	put("pending_dropped", c.digestDropped.Load())
 	put("held_duplicate", c.duplicates.Load())
 	put("held_replaced", c.replaced.Load())
+	put("fork_skipped", c.forks.Load())
 	return counts
 }

@@ -252,6 +252,12 @@ type Event struct {
 	// Self marks DefenseClaw's own gateway, helper and ACP processes. They
 	// are excluded from scoring, never hidden.
 	Self bool
+	// Fork marks a KindExec event that is the kernel's fork of the process,
+	// not an exec (cn_proc): its snapshot runs the parent's image and argv
+	// or, read after the child exec'd, that exec's, which has an event of
+	// its own (cowork-1-0-8 GAP-0067). False from a source that reports no
+	// forks or predates the flag.
+	Fork bool
 	// Hook is the self-filter's verdict (empty for everything else).
 	Hook HookMark
 	// HookTools, on a verified hook's exit, counts the hook's own tool

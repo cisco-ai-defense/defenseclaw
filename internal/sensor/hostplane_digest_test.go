@@ -180,8 +180,11 @@ func TestManifestCachedDuringTheClientExecIsUsed(t *testing.T) {
 // client image, its digest and argv; the exec's own event followed for the
 // same pid. With the manifest not cached yet (the first client exec after a
 // gateway start) both were held, and the second hold recorded the first as
-// a replaced exec. The same exec seen twice now waits as one record; a
-// different exec of the pid still records the first.
+// a replaced exec. A current helper flags the fork
+// (TestForkOfAClientIsNeverAClientExec); from a helper that predates the
+// flag (no digest state either) the same exec seen twice waits as one
+// record, and two real execs (another argv, image, exec id or start time)
+// never merge.
 func TestClientExecSeenTwiceWaitsAsOneRecord(t *testing.T) {
 	release := sha256.Sum256([]byte("claude release image"))
 	other := sha256.Sum256([]byte("another program"))
@@ -190,11 +193,18 @@ func TestClientExecSeenTwiceWaitsAsOneRecord(t *testing.T) {
 	for _, tc := range []struct {
 		name             string
 		cmdline, digest  string
+		state            plane.DigestState
+		execIDs          [2]string
+		starts           [2]int64
 		want, duplicates int64
 	}{
-		{"fork read after the exec, then the exec", prompt, signed, 0, 1},
-		{"a later exec of the pid with other arguments", prompt + " again", signed, 1, 0},
-		{"a later exec of the pid with another image", prompt, unsigned, 2, 0},
+		{"fork read after the exec, then the exec (old helper)", prompt, signed, "", [2]string{}, [2]int64{}, 0, 1},
+		{"same exec id and start time (old helper)", prompt, signed, "", [2]string{"e1", "e1"}, [2]int64{7, 7}, 0, 1},
+		{"a later exec of the pid with other arguments", prompt + " again", signed, "", [2]string{}, [2]int64{}, 1, 0},
+		{"a later exec of the pid with another image", prompt, unsigned, "", [2]string{}, [2]int64{}, 2, 0},
+		{"two execs with other exec ids", prompt, signed, "", [2]string{"e1", "e2"}, [2]int64{}, 1, 0},
+		{"two execs with other start times", prompt, signed, "", [2]string{}, [2]int64{7, 8}, 1, 0},
+		{"a current helper's two unflagged execs", prompt, signed, plane.DigestRead, [2]string{}, [2]int64{}, 1, 0},
 	} {
 		t.Run(tc.name, bubbled(func(t *testing.T) {
 			host := newHost(newFake(fullCoverage()))
@@ -211,7 +221,7 @@ func TestClientExecSeenTwiceWaitsAsOneRecord(t *testing.T) {
 			for i, e := range []struct{ cmdline, digest string }{{prompt, signed}, {tc.cmdline, tc.digest}} {
 				host.handle(plane.Event{Kind: plane.KindExec, PID: 500, PPID: 1, Name: "claude", Cmdline: e.cmdline,
 					UID: &uid, At: at.Add(time.Duration(i) * time.Millisecond), ImageVersion: "2.1.317",
-					ImageSHA256: e.digest, ImageDigestState: plane.DigestRead})
+					ImageSHA256: e.digest, ImageDigestState: tc.state, ExecID: tc.execIDs[i], StartNS: tc.starts[i]})
 			}
 			time.Sleep(50 * time.Millisecond)
 			cached.Store(true)
@@ -223,6 +233,87 @@ func TestClientExecSeenTwiceWaitsAsOneRecord(t *testing.T) {
 			if classified != tc.want || held != 0 || host.clientExecs.duplicates.Load() != tc.duplicates {
 				t.Fatalf("classified=%d held=%d duplicates=%d, want %d, 0, %d",
 					classified, held, host.clientExecs.duplicates.Load(), tc.want, tc.duplicates)
+			}
+		}))
+	}
+}
+
+// cowork-1-0-8 GAP-0067 at the source: a current helper flags the kernel's
+// fork, so the fork of a process into or out of a Claude release image is
+// never a client exec of its own: never classified, never held. The exec
+// that follows is the one that counts, also while its digest is pending
+// (review 2 N2: no merge needed). The tracker still learns the fork.
+func TestForkOfAClientIsNeverAClientExec(t *testing.T) {
+	release := sha256.Sum256([]byte("claude release image"))
+	signed := hex.EncodeToString(release[:])
+	const prompt = `/sessions/cwk-v1/.local/bin/claude -p use @modelcontextprotocol/server-filesystem`
+	at := time.Unix(1_760_000_000, 0)
+	for _, tc := range []struct {
+		name    string
+		events  []plane.Event
+		cached  bool // the manifest is cached from the start
+		want    int64
+		replace int64
+	}{
+		{"fork read after the exec, then the exec, digest pending", []plane.Event{
+			{Kind: plane.KindExec, Fork: true, PID: 500, PPID: 1, Name: "claude", Cmdline: prompt, At: at,
+				ImageVersion: "2.1.317", ImageDigestState: plane.DigestFailed},
+			{Kind: plane.KindExec, PID: 500, PPID: 1, Name: "claude", Cmdline: prompt, At: at.Add(time.Millisecond),
+				ImageVersion: "2.1.317", ImageDigestState: plane.DigestPending},
+			{Kind: plane.KindImageDigest, PID: 500, At: at.Add(time.Millisecond), ImageVersion: "2.1.317",
+				ImageSHA256: signed, ImageDigestState: plane.DigestRead},
+		}, true, 0, 0},
+		{"fork read after the exec, manifest not cached yet", []plane.Event{
+			{Kind: plane.KindExec, Fork: true, PID: 500, PPID: 1, Name: "claude", Cmdline: prompt, At: at,
+				ImageVersion: "2.1.317", ImageSHA256: signed, ImageDigestState: plane.DigestRead},
+			{Kind: plane.KindExec, PID: 500, PPID: 1, Name: "claude", Cmdline: prompt, At: at.Add(time.Millisecond),
+				ImageVersion: "2.1.317", ImageSHA256: signed, ImageDigestState: plane.DigestRead},
+		}, false, 0, 0},
+		{"a fork alone, digest read, manifest not cached: never held", []plane.Event{
+			{Kind: plane.KindExec, Fork: true, PID: 500, PPID: 1, Name: "claude", Cmdline: prompt, At: at,
+				ImageVersion: "2.1.317", ImageSHA256: signed, ImageDigestState: plane.DigestRead},
+		}, false, 0, 0},
+	} {
+		t.Run(tc.name, bubbled(func(t *testing.T) {
+			host := newHost(newFake(fullCoverage()))
+			host.coldHold, host.coldPoll = 300*time.Millisecond, 5*time.Millisecond
+			var cached atomic.Bool
+			cached.Store(tc.cached)
+			host.clientChecksums = func(string) ([][32]byte, bool) {
+				if !cached.Load() {
+					return nil, false
+				}
+				return [][32]byte{release}, true
+			}
+			uid := os.Getuid() + 1000
+			for _, event := range tc.events {
+				if event.Kind == plane.KindExec {
+					event.UID = &uid
+				}
+				host.handle(event)
+				if event.Fork {
+					host.mu.Lock()
+					held := len(host.coldClients)
+					host.mu.Unlock()
+					if classified, _, _, _ := host.stats(); classified != 0 || held != 0 {
+						t.Fatalf("fork: classified=%d held=%d, want 0 and 0", classified, held)
+					}
+				}
+			}
+			time.Sleep(50 * time.Millisecond)
+			cached.Store(true)
+			time.Sleep(2 * host.coldHold)
+			classified, _, _, _ := host.stats()
+			host.mu.Lock()
+			held := len(host.coldClients)
+			host.mu.Unlock()
+			if classified != tc.want || held != 0 || host.clientExecs.replaced.Load() != tc.replace ||
+				host.clientExecs.forks.Load() != 1 {
+				t.Fatalf("classified=%d held=%d replaced=%d forks=%d, want %d, 0, %d, 1", classified, held,
+					host.clientExecs.replaced.Load(), host.clientExecs.forks.Load(), tc.want, tc.replace)
+			}
+			if _, attributed := host.tracker.Lineage(500, ""); !attributed {
+				t.Fatal("the tracker lost the fork's lineage")
 			}
 		}))
 	}

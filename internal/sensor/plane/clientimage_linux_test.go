@@ -467,6 +467,33 @@ func TestClientImageDigestIsDroppedWhenTheFileChangesDuringTheRead(t *testing.T)
 	}
 }
 
+// cowork-1-0-8 GAP-0067: a fork event is flagged, and its digest is never
+// followed up (the exec has an event of its own), so it takes no waiter.
+func TestForkEventIsFlaggedAndNotFollowedUp(t *testing.T) {
+	useHasher(t, newImageHasher())
+	sleep, err := os.ReadFile("/bin/sleep")
+	if err != nil {
+		t.Fatal(err)
+	}
+	pid := startImage(t, filepath.Join(t.TempDir(), ".local/share/claude/versions/2.1.317"), sleep)
+	source := &linuxSource{buffer: NewBuffer()}
+	source.pushProcess(KindExec, pid, time.Now(), true)
+	if event := <-source.buffer.Events(); !event.Fork || event.ImageVersion != "2.1.317" ||
+		event.ImageDigestState != DigestFailed {
+		t.Fatalf("fork event = %+v, want flagged, the version, no digest coming", event)
+	}
+	clientImages.idle()
+	select {
+	case event := <-source.buffer.Events():
+		t.Fatalf("a fork was followed up: %+v", event)
+	default:
+	}
+	source.pushProcess(KindExec, pid, time.Now(), false)
+	if event := <-source.buffer.Events(); event.Fork || event.ImageDigestState != DigestRead {
+		t.Fatalf("exec event = %+v, want unflagged with the digest the fork's read cached", event)
+	}
+}
+
 // A read that fails tells its waiters so: the host plane records the held
 // client at once instead of at the end of its hold.
 func TestFailedClientImageReadIsFollowedUp(t *testing.T) {
