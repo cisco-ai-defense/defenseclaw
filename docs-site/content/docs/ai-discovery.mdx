@@ -1003,7 +1003,8 @@ environment variables, headers, and OAuth material are not exported. A gateway
 token rotation changes these fingerprints. A local MCP component ID derives
 from the command and ordered-argument fingerprints, so rotating the token also
 changes that ID. Renaming a server without changing its command or arguments
-does not change its ID; the connector and user scope still distinguish separate
+preserves its ID when no other alias in that connector and user scope has the
+same command and arguments; the connector and user scope still distinguish separate
 installations on one endpoint. If two aliases in the same connector and scope
 use identical commands and ordered arguments, the alias distinguishes their
 IDs so both configured rows remain visible.
