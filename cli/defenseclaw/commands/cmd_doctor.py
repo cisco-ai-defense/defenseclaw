@@ -5661,7 +5661,7 @@ def _read_pid_from_file(pid_file: str) -> int:
 
 @dataclass(frozen=True)
 class _GatewayTrust:
-    """Result of proving that the configured API target is the managed PID."""
+    """Result of proving that the configured API target is this home's gateway."""
 
     code: str
     detail: str
@@ -6177,6 +6177,19 @@ def _trusted_gateway_listener(
         platform_name=platform_name,
     )
     if not process_trust.trusted:
+        from defenseclaw.enforce import asset_lists
+
+        if (
+            process_trust.code == "missing"
+            and platform_name.startswith("linux")
+            and not asset_lists.is_secure_client(cfg)
+            and str(getattr(cfg, "deployment_mode", "") or "").strip().lower() != "managed_enterprise"
+            and api_port == _gateway_api_port(cfg)
+            and _gateway_api_host_is_loopback(cfg)
+        ):
+            transient = _transient_same_home_gateway_listener(cfg, evidence, host, api_port)
+            if transient is not None:
+                return transient
         return process_trust
     listener = _managed_gateway_listener_evidence(
         api_port,
@@ -6257,6 +6270,50 @@ def _other_account_gateway_listener_evidence(cfg, pid: int, host: str, api_port:
     except OSError:
         return None
     return ListenerEvidence("ok", pid=pid, reason="the gateway's own runtime record names this endpoint")
+
+
+def _transient_same_home_gateway_listener(
+    cfg, evidence: GatewayEvidence, host: str, api_port: int
+) -> _GatewayTrust | None:
+    """Read the gateway's own status proof for a Linux process without a PID file."""
+    from defenseclaw.gateway import resolve_trusted_gateway_binary
+
+    home = gateway_home_for_data_dir(cfg.data_dir)
+    if not os.path.isabs(home):
+        return None
+    listener = _managed_gateway_listener_evidence(
+        api_port, host=host, platform_name="linux", evidence=evidence
+    )
+    if listener.status != "ok" or listener.pid <= 0 or _linux_foreign_listener_accounts(api_port):
+        return None
+    try:
+        binary = resolve_trusted_gateway_binary()
+        if not binary:
+            return None
+        env = dict(os.environ)
+        env["DEFENSECLAW_HOME"] = home
+        report = subprocess.run(
+            [binary, "status", "--json"],
+            stdin=subprocess.DEVNULL,
+            capture_output=True,
+            text=True,
+            timeout=8,
+            env=env,
+            check=False,
+        )
+        if report.returncode != 0 or len(report.stdout) > 2 << 20:
+            return None
+        status = json.loads(report.stdout)
+    except (OSError, subprocess.SubprocessError, ValueError, TypeError):
+        return None
+    if not isinstance(status, dict) or status.get("running") is not True or not isinstance(status.get("health"), dict):
+        return None
+    after = _managed_gateway_listener_evidence(
+        api_port, host=host, platform_name="linux", evidence=evidence
+    )
+    if after.status != "ok" or after.pid != listener.pid:
+        return None
+    return _GatewayTrust("trusted", "this account's gateway owns the API endpoint", listener.pid, home_bound=True)
 
 
 def _trusted_gateway_listener_for_lifecycle(

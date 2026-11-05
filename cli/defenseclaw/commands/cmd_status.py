@@ -1090,11 +1090,11 @@ def _print_agents(
 
 
 def _fetch_runtime_bound_health(client, cfg) -> dict | None:
-    """Fetch health only from the verified managed sidecar listener.
+    """Fetch health only from this home's verified gateway listener.
 
     ``/health`` is intentionally unauthenticated and a different profile may
     already own the configured loopback port. The authenticated ``/status``
-    response is accepted only when Doctor's existing process/listener trust
+    response is accepted only when Doctor's process/listener trust
     proves the endpoint and its runtime PID plus canonical data directory bind
     back to that exact listener. Treat missing, malformed, or mismatched
     identity as unavailable so status never splices another process or
