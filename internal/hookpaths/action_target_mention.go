@@ -267,14 +267,16 @@ func actionPosixTargetMention(command, cwd, home string, depth int, stateOnly bo
 				return true
 			}
 			values["PWD"] = effectiveCWD
-			// The shell expands and opens a command's redirects before the
+			// The shell expands and opens a statement's redirects before the
 			// command runs, so what the command itself binds (printf -v and
-			// %n, read, cd) cannot move them. The values from before the
-			// command name are read too (GAP-0428 regression of the GAP-2298
-			// class: printf "$X" > "$HOME"/.defenseclaw/config.yaml). An
-			// assignment-only statement assigns first, so it keeps one reading.
+			// %n, read, cd, export, declare, local) cannot move them. The
+			// values from before the statement are read too (GAP-0428
+			// regression of the GAP-2298 class: printf "$X" >
+			// "$HOME"/.defenseclaw/config.yaml). An assignment-only statement
+			// gets both readings: bash assigns first, dash opens the redirect
+			// first, and the hook cannot tell which shell runs it.
 			var before actionValues
-			if call, isCall := stmt.Cmd.(*syntax.CallExpr); isCall && len(call.Args) > 0 && len(stmt.Redirs) > 0 {
+			if len(stmt.Redirs) > 0 {
 				before = maps.Clone(values)
 			}
 			actionUpdateValues(stmt, values, effectiveCWD, home)
