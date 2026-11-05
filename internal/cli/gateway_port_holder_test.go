@@ -223,3 +223,31 @@ func TestCheckAPIPortRefusesOnlyAnotherAccountsListener(t *testing.T) {
 		t.Fatalf("a missing config refused: %v", err)
 	}
 }
+
+// The macOS app's privileged helper runs this account's gateway as root for
+// this home. lsof lists only this account's sockets, so it names no holder
+// while the port answers; with this home's PID record alive that is this
+// account's gateway, not another account's. Status said "no gateway started
+// for <home> is running" and told the user to move to another port.
+func TestForeignGatewayListenerAcceptsThisHomesGatewayRunByAnotherAccount(t *testing.T) {
+	t.Setenv("DEFENSECLAW_HOME", t.TempDir())
+	oldHolder, oldAnswers, oldState := gatewayPortHolder, gatewayPortAnswers, gatewayManagedState
+	t.Cleanup(func() { gatewayPortHolder, gatewayPortAnswers, gatewayManagedState = oldHolder, oldAnswers, oldState })
+	gatewayPortHolder = func(string, int) (daemon.PortHolder, error) {
+		return daemon.PortHolder{UID: -1}, daemon.ErrNoListener
+	}
+	gatewayPortAnswers = func(string) bool { return true }
+	c := config.DefaultConfig()
+	c.Gateway.APIBind = "127.0.0.1"
+	c.Gateway.APIPort = 18970
+
+	gatewayManagedState = func() (bool, int) { return true, 36347 }
+	if problem := foreignGatewayListener(c); problem != "" {
+		t.Fatalf("this home's running gateway reported as foreign: %q", problem)
+	}
+	gatewayManagedState = func() (bool, int) { return false, 0 }
+	problem := foreignGatewayListener(c)
+	if !strings.Contains(problem, "no gateway started for") || !strings.Contains(problem, "held by another process") {
+		t.Fatalf("with no record the unlisted holder is not this account's gateway: %q", problem)
+	}
+}

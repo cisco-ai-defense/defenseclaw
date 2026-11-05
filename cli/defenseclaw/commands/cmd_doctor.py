@@ -6184,7 +6184,76 @@ def _trusted_gateway_listener(
         platform_name=platform_name,
         evidence=evidence,
     )
+    unlisted = getattr(listener, "status", "") in {"missing", "unavailable"}
+    if unlisted and _gateway_runs_as_another_account(process_trust):
+        corroborated = _other_account_gateway_listener_evidence(cfg, process_trust.pid, host, api_port)
+        if corroborated is not None:
+            listener = corroborated
     return _gateway_listener_trust(process_trust, listener)
+
+
+def _gateway_runs_as_another_account(trust: _GatewayTrust) -> bool:
+    """Whether the verified gateway process belongs to another account (POSIX).
+
+    The macOS app's privileged helper starts this account's gateway as root
+    for this home. Its identity verifies (sysctl and ``ps`` describe every
+    account's processes), but ``lsof`` lists only this account's sockets, so
+    the listener proof sees no listener on the port it holds.
+    """
+    if os.name == "nt" or trust.process is None:
+        return False
+    uid = getattr(trust.process, "uid", -1)
+    return isinstance(uid, int) and not isinstance(uid, bool) and uid >= 0 and uid != os.getuid()
+
+
+def _loopback_hosts_match(left: str, right: str) -> bool:
+    """Whether two loopback API hosts name the same listener (``localhost`` is any)."""
+
+    def parse(value: str) -> ipaddress.IPv4Address | ipaddress.IPv6Address | None | bool:
+        value = str(value).strip().strip("[]")
+        if value.casefold() == "localhost":
+            return None
+        try:
+            address = ipaddress.ip_address(value)
+        except ValueError:
+            return False
+        return address if address.is_loopback else False
+
+    first, second = parse(left), parse(right)
+    if first is False or second is False:
+        return False
+    return first is None or second is None or first == second
+
+
+def _other_account_gateway_listener_evidence(cfg, pid: int, host: str, api_port: int) -> ListenerEvidence | None:
+    """Bind another account's verified gateway to ``host:api_port``, or None.
+
+    No socket table this account may read names that process's listener. The
+    gateway publishes its own listener beside gateway.pid (gateway-api.json,
+    recordRuntimeAPIAddress): a private file in this home that names the
+    verified PID and this exact loopback endpoint, with a listener answering
+    there, is the proof ``lsof`` cannot give. Anything less keeps the
+    listener unproven, and no token is sent.
+    """
+    from defenseclaw.logger import _running_gateway_record
+
+    data_dir = _configured_gateway_data_dir(cfg)
+    if not data_dir or pid <= 0 or not 1 <= api_port <= 65_535:
+        return None
+    record = _running_gateway_record(data_dir, "gateway-api.json")
+    if not record or record.get("pid") != pid:
+        return None
+    record_host, record_port = record.get("host"), record.get("port")
+    if type(record_port) is not int or record_port != api_port or not isinstance(record_host, str):
+        return None
+    if not _loopback_hosts_match(record_host, host):
+        return None
+    try:
+        with socket.create_connection((str(host).strip("[]"), api_port), timeout=1):
+            pass
+    except OSError:
+        return None
+    return ListenerEvidence("ok", pid=pid, reason="the gateway's own runtime record names this endpoint")
 
 
 def _trusted_gateway_listener_for_lifecycle(

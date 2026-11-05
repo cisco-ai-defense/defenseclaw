@@ -579,6 +579,8 @@ def foreign_loopback_listener(host: str, port: int) -> str:
         problem = _windows_foreign_listener(str(host), int(port))
     else:
         problem = _foreign_loopback_listener_uncached(int(port), host=str(host))
+    if problem and _this_accounts_gateway_as_another_account(int(port)):
+        return ""
     if problem:
         problem = (
             f"{_url_host(str(host))}:{port} is held by {problem}, not by this account's gateway, "
@@ -586,6 +588,30 @@ def foreign_loopback_listener(host: str, port: int) -> str:
             "move this account's gateway to a free port"
         )
     return problem
+
+
+def _this_accounts_gateway_as_another_account(port: int) -> bool:
+    """Whether the listener another account holds on ``port`` is this home's own gateway.
+
+    The macOS app's privileged helper starts this account's gateway as root
+    for this home. ``lsof`` lists only this account's sockets, so that
+    listener looked like another account's and the CLI withheld the token
+    from its own gateway: status said the port is held by a process of
+    another account and sent the user to another port. Doctor's proof reads
+    the recorded process as ``ps`` does (sysctl describes every account's
+    processes) and binds it to this endpoint through the gateway's own
+    runtime record; only a complete proof for this port makes the listener
+    this account's. Anything unknown stays foreign.
+    """
+    try:
+        from defenseclaw import config
+        from defenseclaw.commands.cmd_doctor import _gateway_runs_as_another_account, _trusted_gateway_listener
+
+        cfg = config.load(without_guardrail_profiles=True)
+        trust = _trusted_gateway_listener(cfg, api_port=int(port))
+    except Exception:  # noqa: BLE001 - unknown ownership stays foreign
+        return False
+    return trust.trusted and _gateway_runs_as_another_account(trust)
 
 
 def _unproven_per_user_gateway_target(host: str, port: int) -> str:
