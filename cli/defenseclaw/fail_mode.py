@@ -1582,7 +1582,8 @@ def _unix_registration_freshness(cfg: Any, connector: str) -> str | None:
         # reported every fresh or upgraded install stale (rel-1-0-6 GAP-0569).
         native = _claude_per_user_native_registration(cfg)
         if native is not None:
-            return _claude_native_registration_problem(registration, native, str(cfg.data_dir))
+            problem = _claude_native_registration_problem(registration, native, str(cfg.data_dir))
+            return problem or _claude_missing_registration_drift(cfg, registration)
     hook = Path(cfg.data_dir).expanduser() / "hooks" / script_name
     # Setup writes the data dir's own spelling; a HOME below a symlinked
     # directory resolves elsewhere, and either names this install's hook
@@ -1594,6 +1595,20 @@ def _unix_registration_freshness(cfg: Any, connector: str) -> str | None:
     if not any(candidate in registration for candidate in expected_forms):
         return "registration-command-stale"
     return None
+
+
+def _claude_missing_registration_drift(cfg: Any, registration: str) -> str | None:
+    """registration-missing when a required event lost its native handlers, as doctor reports (rel-1-0-2 GAP-0645).
+
+    The shell form keeps the script check above; its tool-guard events are
+    hook_integrity's unguarded check, which status reads too.
+    """
+
+    try:
+        settings = json.loads(registration)
+    except ValueError:
+        return "registration-command-stale"
+    return "registration-missing" if claude_missing_registration(cfg, settings) else None
 
 
 @dataclass(frozen=True)
@@ -1745,7 +1760,8 @@ def _claude_native_registration_problem(
     without the guard, the launcher's shell command behind the missing-hook
     guard. Any other DefenseClaw handler is stale: a 1.0.7 shell entry left
     behind, another binary or data directory, edited arguments or a missing
-    companion. Event coverage, matchers and timeouts are doctor's checks.
+    companion. Event coverage is claude_missing_registration's check (doctor
+    and status), matchers and timeouts are doctor's.
     testdata/claudecode_linux_peruser_handlers.json pins this to the Go render.
     """
 
@@ -1792,6 +1808,104 @@ def _claude_native_registration_problem(
             if companions != synchronous:
                 return stale
     return None if primaries else stale
+
+
+# claudeCodeAllHookGroups (internal/gateway/connector/claudecode.go): only
+# MessageDisplay is registered asynchronously, so it has no companion.
+_CLAUDE_ASYNC_EVENTS = frozenset({"MessageDisplay"})
+
+
+def claude_required_events(cfg: Any) -> tuple[str, ...]:
+    """The Claude Code events Setup registers for this install.
+
+    The contract Setup recorded in hook_contract_lock.json names them; without
+    a readable record only the tool-guard events of the shared table
+    (hook_guard_matrix.TOOL_GUARD_HOOKS) are required.
+    """
+
+    from defenseclaw.doctor_hooks import _CLAUDE_CONTRACT_EVENTS
+    from defenseclaw.hook_guard_matrix import TOOL_GUARD_HOOKS
+
+    data = _read_small_file(Path(cfg.data_dir) / "hook_contract_lock.json")
+    try:
+        payload = json.loads(data) if data else None
+    except ValueError:
+        payload = None
+    connectors = payload.get("connectors") if isinstance(payload, dict) else None
+    entry = connectors.get("claudecode") if isinstance(connectors, dict) else None
+    contract = entry.get("contract_id") if isinstance(entry, dict) else None
+    events = _CLAUDE_CONTRACT_EVENTS.get(contract) if isinstance(contract, str) else None
+    return tuple(events) if events else tuple(TOOL_GUARD_HOOKS["claudecode"].events)
+
+
+def claude_missing_registration(cfg: Any, settings: Any) -> tuple[str, str] | None:
+    """The first required Claude Code event without the handlers Setup renders here, or None (GAP-0645).
+
+    Returns (event, what is missing). Each event of claude_required_events
+    must hold, in one group, the exact registration appendClaudeCodeHookGroups
+    writes: on a per-user Linux install with the guard, the guard
+    (``defenseclaw-hook-post guard-user-hook ...``) and, for a synchronous
+    event, its ``defenseclaw-hook-user fallback-guard-user-hook ...``
+    companion; without the guard, the launcher behind the missing-hook guard;
+    elsewhere a command that runs claude-code-hook.sh.
+    Counting DefenseClaw handlers passed a file that had lost PreToolUse once
+    1.0.8 wrote two handlers per synchronous event. Foreign handlers are
+    ignored; stale DefenseClaw handlers are _claude_native_registration_problem's.
+    """
+
+    hooks = settings.get("hooks") if isinstance(settings, dict) else None
+    if not isinstance(hooks, dict):
+        hooks = {}
+    native = _claude_per_user_native_registration(cfg)
+    if native is not None:
+        primary_args = ["guard-user-hook", native.native, *native.hook_args]
+        companion_args = ["fallback-guard-user-hook", native.guard, *native.hook_args]
+        shell_prefix = (
+            " ".join(_claude_posix_word(word) for word in (native.native, *native.hook_args))
+            + _CLAUDE_MISSING_HOOK_GUARD_SEPARATOR
+        )
+
+    def guard(handler: dict[str, Any], synchronous: bool) -> bool:
+        if handler.get("type") != "command" or (synchronous and handler.get("async") is True):
+            return False
+        command, args = handler.get("command"), handler.get("args")
+        if native is None:
+            # Which copy of the script runs is the freshness and edited-hook
+            # checks' question; this one asks whether the event runs it at all.
+            return isinstance(command, str) and "claude-code-hook.sh" in command
+        if not native.guard:
+            return args is None and isinstance(command, str) and command.startswith(shell_prefix)
+        return command == native.guard and args == primary_args
+
+    def companion(handler: dict[str, Any]) -> bool:
+        return (
+            native is not None
+            and handler.get("type") == "command"
+            and handler.get("async") is not True
+            and handler.get("command") == native.native
+            and handler.get("args") == companion_args
+        )
+
+    needs_companion = native is not None and bool(native.guard)
+    for event in claude_required_events(cfg):
+        synchronous = event not in _CLAUDE_ASYNC_EVENTS
+        groups = hooks.get(event)
+        guarded = False
+        for group in groups if isinstance(groups, list) else ():
+            handlers = group.get("hooks") if isinstance(group, dict) else None
+            if not isinstance(handlers, list):
+                continue
+            handlers = [handler for handler in handlers if isinstance(handler, dict)]
+            if not any(guard(handler, synchronous) for handler in handlers):
+                continue
+            guarded = True
+            if not (needs_companion and synchronous) or any(companion(handler) for handler in handlers):
+                break
+        else:
+            if not guarded:
+                return event, "hook is not registered"
+            return event, "hook has no fallback-guard-user-hook companion (defenseclaw-hook-user) in its group"
+    return None
 
 
 def _read_small_file(path: Path) -> str | None:
