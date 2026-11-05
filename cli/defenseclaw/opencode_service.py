@@ -153,7 +153,9 @@ def ensure_account_port(binary: str) -> str:
     if not binary or os.name == "nt" or _configured_port() is not None:
         return ""
     current = _service(binary, "get", "port")
-    if current is None or current.returncode != 0 or current.stdout.strip() != str(DEFAULT_SERVICE_PORT):
+    # OpenCode 2.2.5 prints nothing while no port is set (its server then
+    # listens on the default); a channel with a port of its own prints it.
+    if current is None or current.returncode != 0 or current.stdout.strip() not in ("", str(DEFAULT_SERVICE_PORT)):
         return ""
     manual = "give this account its own with 'opencode service set port <free port>'"
     for port in account_port_candidates(os.getuid()):
