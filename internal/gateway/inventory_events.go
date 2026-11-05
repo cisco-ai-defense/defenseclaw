@@ -438,9 +438,9 @@ func perConnectorMCPEntriesForOSWithHomeGuard(cfg *config.Config, reg *connector
 			continue
 		}
 		// Native readers check each file at its open, including links.
-		if servers, err := cfg.ReadMCPServersForConnector(connectorName); err == nil {
-			appendServers(connectorName, "", daemonHomeForInventoryAttribution(), servers)
-		} else if !errors.Is(err, fs.ErrNotExist) {
+		servers, err := cfg.ReadMCPServersForConnector(connectorName)
+		appendServers(connectorName, "", daemonHomeForInventoryAttribution(), servers)
+		if err != nil && !errors.Is(err, fs.ErrNotExist) {
 			partial = true
 		}
 	}
@@ -647,9 +647,11 @@ func readMCPServersUnderHomeForOSWithStatus(connectorName, home, goos string) ([
 			}
 			return
 		}
-		if entries, err := reader(full); err == nil && len(entries) > 0 {
+		entries, err := reader(full)
+		if len(entries) > 0 {
 			results = append(results, entries)
-		} else if err != nil && !errors.Is(err, fs.ErrNotExist) {
+		}
+		if err != nil && !errors.Is(err, fs.ErrNotExist) {
 			partial = true
 		}
 	}
@@ -658,9 +660,11 @@ func readMCPServersUnderHomeForOSWithStatus(connectorName, home, goos string) ([
 			partial = true
 			return
 		}
-		if entries, err := reader(home); err == nil && len(entries) > 0 {
+		entries, err := reader(home)
+		if len(entries) > 0 {
 			results = append(results, entries)
-		} else if err != nil && !errors.Is(err, fs.ErrNotExist) {
+		}
+		if err != nil && !errors.Is(err, fs.ErrNotExist) {
 			partial = true
 		}
 	}

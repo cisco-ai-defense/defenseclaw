@@ -363,7 +363,7 @@ func LookupMCPServerUnderHome(connector, home, workspaceDir, name string) (MCPSe
 		}
 		return lookupClaudePluginMCPServer(filepath.Join(home, ".claude"), name)
 	case "codex":
-		entries = readMCPServersCodexAt(filepath.Join(home, ".codex", "config.toml"), workspaceDir)
+		entries, _ = readMCPServersCodexAt(filepath.Join(home, ".codex", "config.toml"), workspaceDir)
 	default:
 		return MCPServerEntry{}, false
 	}
@@ -416,7 +416,7 @@ func CodexMCPToolServerAmbiguousUnderHome(home, workspaceDir, toolServer string)
 	if !filepath.IsAbs(home) {
 		return false
 	}
-	entries := readMCPServersCodexAt(filepath.Join(home, ".codex", "config.toml"), workspaceDir)
+	entries, _ := readMCPServersCodexAt(filepath.Join(home, ".codex", "config.toml"), workspaceDir)
 	return codexMCPToolServerAmbiguous(entries, toolServer)
 }
 
@@ -1620,12 +1620,12 @@ func ReadMCPFromClaudeJSONBothScopes(path string) ([]MCPServerEntry, error) {
 }
 
 func readMCPServersCodex(workspaceDir string) ([]MCPServerEntry, error) {
-	return readMCPServersCodexAt(filepath.Join(connectorEnvHome("CODEX_HOME", ".codex"), "config.toml"), workspaceDir), nil
+	return readMCPServersCodexAt(filepath.Join(connectorEnvHome("CODEX_HOME", ".codex"), "config.toml"), workspaceDir)
 }
 
 // readMCPServersCodexAt reads the Codex servers from the user config.toml at
 // userPath and the project layers of workspaceDir.
-func readMCPServersCodexAt(userPath, workspaceDir string) []MCPServerEntry {
+func readMCPServersCodexAt(userPath, workspaceDir string) ([]MCPServerEntry, error) {
 	return readMCPServersCodexLayers(userPath, workspaceDir, false)
 }
 
@@ -1633,7 +1633,7 @@ func readMCPServersCodexAt(userPath, workspaceDir string) []MCPServerEntry {
 // With effectiveOnly, a project layer Codex does not activate (one the user
 // config does not trust) is left out, so the entries are the servers a
 // session runs rather than the ones discovery should scan.
-func readMCPServersCodexLayers(userPath, workspaceDir string, effectiveOnly bool) []MCPServerEntry {
+func readMCPServersCodexLayers(userPath, workspaceDir string, effectiveOnly bool) ([]MCPServerEntry, error) {
 	// Codex stores user and project MCP registries in config.toml
 	// [mcp_servers] tables. Candidate project layers are read closest-first so
 	// their entries take precedence, then the user layer fills remaining names.
@@ -1646,19 +1646,36 @@ func readMCPServersCodexLayers(userPath, workspaceDir string, effectiveOnly bool
 	}
 
 	var entries []MCPServerEntry
+	var firstErr error
+	read := func(path string, reader func(string) ([]MCPServerEntry, error)) []MCPServerEntry {
+		if err := managed.RequireWindowsGatewayPathOutsideUserProfiles(path); err != nil {
+			if firstErr == nil {
+				firstErr = err
+			}
+			return nil
+		}
+		if _, err := os.Lstat(path); err != nil {
+			if !errors.Is(err, fs.ErrNotExist) && firstErr == nil {
+				firstErr = err
+			}
+			return nil
+		}
+		found, err := reader(path)
+		if err != nil && firstErr == nil {
+			firstErr = err
+		}
+		return found
+	}
 	for _, layer := range gatewayconnector.CodexProjectLayerDirs(cwd) {
 		if effectiveOnly && !trusted.covers(layer, cwd) {
 			continue
 		}
 		projectPath := filepath.Join(layer, ".codex", "config.toml")
-		if e, err := readMCPFromCodexConfigTOML(projectPath); err == nil {
-			entries = append(entries, annotateCodexMCPEntries(e, projectPath, "project", true)...)
-		}
+		e := read(projectPath, readMCPFromCodexConfigTOML)
+		entries = append(entries, annotateCodexMCPEntries(e, projectPath, "project", true)...)
 	}
-	if e, err := ReadMCPFromCodexUserConfigTOML(userPath); err == nil {
-		entries = append(entries, e...)
-	}
-	return dedupMCPEntries(entries)
+	entries = append(entries, read(userPath, ReadMCPFromCodexUserConfigTOML)...)
+	return dedupMCPEntries(entries), firstErr
 }
 
 // LookupEffectiveCodexMCPToolServer finds the Codex MCP server a tool call
@@ -1672,7 +1689,8 @@ func LookupEffectiveCodexMCPToolServer(workspaceDir, name string) (MCPServerEntr
 		return MCPServerEntry{}, false
 	}
 	userPath := filepath.Join(connectorEnvHome("CODEX_HOME", ".codex"), "config.toml")
-	return lookupMCPToolServer("codex", readMCPServersCodexLayers(userPath, workspaceDir, true), name)
+	entries, _ := readMCPServersCodexLayers(userPath, workspaceDir, true)
+	return lookupMCPToolServer("codex", entries, name)
 }
 
 func annotateCodexMCPEntries(entries []MCPServerEntry, source, scope string, trustRequired bool) []MCPServerEntry {
@@ -2080,6 +2098,7 @@ func readMCPFromYAMLPath(path string, paths ...[]string) ([]MCPServerEntry, erro
 
 func readMCPFromAnyPaths(doc any, paths ...[]string) ([]MCPServerEntry, error) {
 	var entries []MCPServerEntry
+	var firstErr error
 	for _, path := range paths {
 		cursor := doc
 		for _, key := range path {
@@ -2098,6 +2117,9 @@ func readMCPFromAnyPaths(doc any, paths ...[]string) ([]MCPServerEntry, error) {
 		}
 		data, err := json.Marshal(cursor)
 		if err != nil {
+			if firstErr == nil {
+				firstErr = fmt.Errorf("config: encode MCP server collection: %w", err)
+			}
 			continue
 		}
 		trimmed := bytes.TrimSpace(data)
@@ -2111,13 +2133,20 @@ func readMCPFromAnyPaths(doc any, paths ...[]string) ([]MCPServerEntry, error) {
 		case '[':
 			parsed, err = parseMCPServersJSONArray(trimmed)
 		default:
+			if firstErr == nil {
+				firstErr = fmt.Errorf("config: invalid MCP server collection")
+			}
 			continue
 		}
-		if err == nil {
-			entries = append(entries, parsed...)
+		if err != nil {
+			if firstErr == nil {
+				firstErr = err
+			}
+			continue
 		}
+		entries = append(entries, parsed...)
 	}
-	return dedupMCPEntries(entries), nil
+	return dedupMCPEntries(entries), firstErr
 }
 
 func readMCPFromDotMCPJSON(path string) ([]MCPServerEntry, error) {
@@ -2453,35 +2482,44 @@ func ReadMCPFromAmpSettings(path string) ([]MCPServerEntry, error) {
 
 func readMCPServersAMPFromHome(home, workspace string, settingsPaths, skillSettingsPaths []string) ([]MCPServerEntry, error) {
 	var entries []MCPServerEntry
+	var firstErr error
+	recordErr := func(err error) {
+		if err != nil && !errors.Is(err, fs.ErrNotExist) && firstErr == nil {
+			firstErr = err
+		}
+	}
 
 	for _, path := range settingsPaths {
 		doc, err := readJSONObjectJSONC(path)
 		if err != nil {
+			recordErr(err)
 			continue
 		}
-		if found, err := readMCPFromAnyPaths(doc, []string{"amp.mcpServers"}); err == nil {
-			entries = append(entries, found...)
-		}
+		found, err := readMCPFromAnyPaths(doc, []string{"amp.mcpServers"})
+		entries = append(entries, found...)
+		recordErr(err)
 	}
 
 	for _, skillRoot := range ampSkillDirsFromSettings(home, workspace, skillSettingsPaths) {
-		if managed.RequireWindowsGatewayPathOutsideUserProfiles(skillRoot) != nil {
+		if err := managed.RequireWindowsGatewayPathOutsideUserProfiles(skillRoot); err != nil {
+			recordErr(err)
 			continue
 		}
 		children, err := os.ReadDir(skillRoot)
 		if err != nil {
+			recordErr(err)
 			continue
 		}
 		for _, child := range children {
 			if !child.IsDir() {
 				continue
 			}
-			if found, err := readMCPFromDotMCPJSON(filepath.Join(skillRoot, child.Name(), "mcp.json")); err == nil {
-				entries = append(entries, found...)
-			}
+			found, err := readMCPFromDotMCPJSON(filepath.Join(skillRoot, child.Name(), "mcp.json"))
+			entries = append(entries, found...)
+			recordErr(err)
 		}
 	}
-	return dedupMCPEntries(entries), nil
+	return dedupMCPEntries(entries), firstErr
 }
 
 func readStableAMPSettingsFile(path string) ([]byte, error) {

@@ -726,6 +726,75 @@ drain:
 	}
 }
 
+func TestPerConnectorMCPInventoryMarksMalformedDaemonCodexConfigPartial(t *testing.T) {
+	withManagedEnterprise(t, true)
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("USERPROFILE", home)
+	codexHome := filepath.Join(home, ".codex")
+	if err := os.MkdirAll(codexHome, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("CODEX_HOME", codexHome)
+	path := filepath.Join(codexHome, "config.toml")
+	if err := os.WriteFile(path, []byte("[mcp_servers"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	registry := connector.NewRegistry()
+	if err := registry.RegisterPlugin(&endpointInventoryPluginConnector{name: "codex", description: "test"}); err != nil {
+		t.Fatal(err)
+	}
+	cfg := &config.Config{}
+	rows, partial := perConnectorMCPEntriesWithStatus(cfg, registry)
+	if !partial || len(rows) != 0 {
+		t.Fatalf("malformed daemon Codex config: rows=%+v partial=%v", rows, partial)
+	}
+	workspace := t.TempDir()
+	projectDir := filepath.Join(workspace, ".codex")
+	if err := os.MkdirAll(projectDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(projectDir, "config.toml"), []byte("[mcp_servers.project]\ncommand = \"uvx\"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	cfg.Claw.WorkspaceDir = workspace
+	rows, partial = perConnectorMCPEntriesWithStatus(cfg, registry)
+	if !partial || len(rows) != 1 || rows[0].itemName != "project" {
+		t.Fatalf("valid project entry with malformed user config: rows=%+v partial=%v", rows, partial)
+	}
+	cfg.Claw.WorkspaceDir = ""
+	if err := os.WriteFile(path, []byte("[mcp_servers.notes]\ncommand = \"node\"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	rows, partial = perConnectorMCPEntriesWithStatus(cfg, registry)
+	if partial || len(rows) != 1 || rows[0].itemName != "notes" {
+		t.Fatalf("repaired daemon Codex config: rows=%+v partial=%v", rows, partial)
+	}
+}
+
+func TestPerConnectorMCPInventoryKeepsValidAmpRowsOnPartialRead(t *testing.T) {
+	home := t.TempDir()
+	settingsDir := filepath.Join(home, ".config", "amp")
+	skillDir := filepath.Join(home, ".agents", "skills", "bad")
+	for _, dir := range []string{settingsDir, skillDir} {
+		if err := os.MkdirAll(dir, 0o700); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for path, body := range map[string]string{
+		filepath.Join(settingsDir, "settings.json"): `{"amp.mcpServers":{"good":{"command":"node"}}}`,
+		filepath.Join(skillDir, "mcp.json"):         `{"bad":{"args":"invalid"}}`,
+	} {
+		if err := os.WriteFile(path, []byte(body), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	groups, partial := readMCPServersUnderHomeForOSWithStatus("amp", home, runtime.GOOS)
+	if !partial || len(groups) != 1 || len(groups[0]) != 1 || groups[0][0].Name != "good" {
+		t.Fatalf("Amp partial read discarded valid rows: groups=%+v partial=%v", groups, partial)
+	}
+}
+
 func TestManagedAgentInventoryPersistsAndExportsWhenAgentLifecycleDisabled(t *testing.T) {
 	withManagedEnterprise(t, true)
 	runtime, path, adapter := newManagedAIDFailOpenRuntime(t)

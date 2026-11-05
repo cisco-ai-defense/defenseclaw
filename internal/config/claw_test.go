@@ -1022,6 +1022,15 @@ func TestReadMCPServersForConnector_AntigravityMissingAndMalformedSafeNoOpenClaw
 	if err == nil || !hasMCPEntry(entries, "valid") || hasMCPEntry(entries, "leaked") {
 		t.Fatalf("mixed Antigravity sources: entries=%+v err=%v, want valid entry and partial error", entries, err)
 	}
+	// A syntactically valid document can still have an invalid mcpServers
+	// value. Keep the valid workspace entry and report the failed home read.
+	if err := os.WriteFile(filepath.Join(agyDir, "mcp_config.json"), []byte(`{"mcpServers":{"broken":{"args":"invalid"}}}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	entries, err = cfg.ReadMCPServersForConnector("antigravity")
+	if err == nil || !hasMCPEntry(entries, "valid") || hasMCPEntry(entries, "broken") {
+		t.Fatalf("invalid Antigravity server: entries=%+v err=%v, want valid entry and partial error", entries, err)
+	}
 }
 
 // TestSkillPluginDirs_OpenCodeEmptyAntigravityNativePaths pins that
@@ -1172,6 +1181,54 @@ func TestAMPReadsJSONCSettingsAndSkillBundledMCPWithPrecedence(t *testing.T) {
 	}
 	if got := byName["remote"].Headers["Authorization"]; got != "${TOKEN}" {
 		t.Fatalf("remote header=%q", got)
+	}
+}
+
+func TestAMPReaderReportsInvalidSourcesAndKeepsValidServers(t *testing.T) {
+	home := t.TempDir()
+	testenv.SetHome(t, home)
+	settingsDir := filepath.Join(home, ".config", "amp")
+	skillDir := filepath.Join(home, ".agents", "skills", "notes")
+	for _, dir := range []string{settingsDir, skillDir} {
+		if err := os.MkdirAll(dir, 0o700); err != nil {
+			t.Fatal(err)
+		}
+	}
+	good := filepath.Join(settingsDir, "settings.json")
+	bad := filepath.Join(settingsDir, "settings.jsonc")
+	skill := filepath.Join(skillDir, "mcp.json")
+	for path, body := range map[string]string{
+		good:  `{"amp.mcpServers":{"good":{"command":"node"}}}`,
+		bad:   `{"amp.mcpServers":{"bad":{"args":"invalid"}}}`,
+		skill: `{"skill":{"command":"uvx"}}`,
+	} {
+		if err := os.WriteFile(path, []byte(body), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	read := func() ([]MCPServerEntry, error) {
+		return readMCPServersAMPFromHome(home, "", []string{good, bad}, []string{good})
+	}
+	entries, err := read()
+	if err == nil || !hasMCPEntry(entries, "good") || !hasMCPEntry(entries, "skill") {
+		t.Fatalf("invalid settings lost valid Amp servers: entries=%+v err=%v", entries, err)
+	}
+	if err := os.Remove(bad); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(skill, []byte(`{"skill":{"args":"invalid"}}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	entries, err = read()
+	if err == nil || !hasMCPEntry(entries, "good") {
+		t.Fatalf("invalid skill MCP lost valid settings: entries=%+v err=%v", entries, err)
+	}
+	if err := os.Remove(skill); err != nil {
+		t.Fatal(err)
+	}
+	entries, err = read()
+	if err != nil || !hasMCPEntry(entries, "good") {
+		t.Fatalf("missing optional sources: entries=%+v err=%v", entries, err)
 	}
 }
 
