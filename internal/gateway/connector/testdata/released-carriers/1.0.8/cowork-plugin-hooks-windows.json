@@ -1,0 +1,488 @@
+{
+  "hooks": {
+    "PermissionRequest": [
+      {
+        "hooks": [
+          {
+            "args": [
+              "/d",
+              "/c",
+              "if",
+              "exist",
+              "__HOME__\\.local\\bin\\defenseclaw-hook.exe",
+              "(",
+              "__HOME__\\.local\\bin\\defenseclaw-hook.exe",
+              "hook",
+              "--connector",
+              "claudecode",
+              ")",
+              "else",
+              "(",
+              "echo",
+              "DefenseClaw",
+              "blocked",
+              "this:",
+              "its",
+              "Claude",
+              "Code",
+              "hook",
+              "launcher",
+              "is",
+              "missing.",
+              "Run",
+              "the",
+              "DefenseClaw",
+              "installer",
+              "again",
+              "to",
+              "repair",
+              "it.",
+              "1>&2",
+              "&",
+              "exit",
+              "/b",
+              "2",
+              ")"
+            ],
+            "command": "C:\\Windows\\system32\\cmd.exe",
+            "timeout": 30,
+            "type": "command"
+          }
+        ],
+        "matcher": "*"
+      }
+    ],
+    "PostToolUse": [
+      {
+        "hooks": [
+          {
+            "args": [
+              "/d",
+              "/c",
+              "if",
+              "exist",
+              "__HOME__\\.local\\bin\\defenseclaw-hook.exe",
+              "(",
+              "__HOME__\\.local\\bin\\defenseclaw-hook.exe",
+              "hook",
+              "--connector",
+              "claudecode",
+              ")",
+              "else",
+              "(",
+              "echo",
+              "DefenseClaw",
+              "blocked",
+              "this:",
+              "its",
+              "Claude",
+              "Code",
+              "hook",
+              "launcher",
+              "is",
+              "missing.",
+              "Run",
+              "the",
+              "DefenseClaw",
+              "installer",
+              "again",
+              "to",
+              "repair",
+              "it.",
+              "1>&2",
+              "&",
+              "exit",
+              "/b",
+              "2",
+              ")"
+            ],
+            "command": "C:\\Windows\\system32\\cmd.exe",
+            "timeout": 30,
+            "type": "command"
+          }
+        ],
+        "matcher": "*"
+      }
+    ],
+    "PostToolUseFailure": [
+      {
+        "hooks": [
+          {
+            "args": [
+              "/d",
+              "/c",
+              "if",
+              "exist",
+              "__HOME__\\.local\\bin\\defenseclaw-hook.exe",
+              "(",
+              "__HOME__\\.local\\bin\\defenseclaw-hook.exe",
+              "hook",
+              "--connector",
+              "claudecode",
+              ")",
+              "else",
+              "(",
+              "echo",
+              "DefenseClaw",
+              "blocked",
+              "this:",
+              "its",
+              "Claude",
+              "Code",
+              "hook",
+              "launcher",
+              "is",
+              "missing.",
+              "Run",
+              "the",
+              "DefenseClaw",
+              "installer",
+              "again",
+              "to",
+              "repair",
+              "it.",
+              "1>&2",
+              "&",
+              "exit",
+              "/b",
+              "2",
+              ")"
+            ],
+            "command": "C:\\Windows\\system32\\cmd.exe",
+            "timeout": 30,
+            "type": "command"
+          }
+        ],
+        "matcher": "*"
+      }
+    ],
+    "PreToolUse": [
+      {
+        "hooks": [
+          {
+            "args": [
+              "launcher-guard",
+              "__HOME__\\.local\\bin\\defenseclaw-hook.exe",
+              "hook",
+              "--connector",
+              "claudecode"
+            ],
+            "command": "__HOME__\\.local\\bin\\defenseclaw-hook-guard.exe",
+            "timeout": 30,
+            "type": "command"
+          }
+        ],
+        "matcher": "*"
+      }
+    ],
+    "SessionEnd": [
+      {
+        "hooks": [
+          {
+            "args": [
+              "/d",
+              "/c",
+              "if",
+              "exist",
+              "__HOME__\\.local\\bin\\defenseclaw-hook.exe",
+              "(",
+              "__HOME__\\.local\\bin\\defenseclaw-hook.exe",
+              "hook",
+              "--connector",
+              "claudecode",
+              ")",
+              "else",
+              "(",
+              "echo",
+              "DefenseClaw",
+              "blocked",
+              "this:",
+              "its",
+              "Claude",
+              "Code",
+              "hook",
+              "launcher",
+              "is",
+              "missing.",
+              "Run",
+              "the",
+              "DefenseClaw",
+              "installer",
+              "again",
+              "to",
+              "repair",
+              "it.",
+              "1>&2",
+              "&",
+              "exit",
+              "/b",
+              "2",
+              ")"
+            ],
+            "command": "C:\\Windows\\system32\\cmd.exe",
+            "timeout": 60,
+            "type": "command"
+          }
+        ]
+      }
+    ],
+    "SessionStart": [
+      {
+        "hooks": [
+          {
+            "args": [
+              "/d",
+              "/c",
+              "if",
+              "exist",
+              "__HOME__\\.local\\bin\\defenseclaw-hook.exe",
+              "(",
+              "__HOME__\\.local\\bin\\defenseclaw-hook.exe",
+              "hook",
+              "--connector",
+              "claudecode",
+              ")",
+              "else",
+              "(",
+              "echo",
+              "DefenseClaw",
+              "blocked",
+              "this:",
+              "its",
+              "Claude",
+              "Code",
+              "hook",
+              "launcher",
+              "is",
+              "missing.",
+              "Run",
+              "the",
+              "DefenseClaw",
+              "installer",
+              "again",
+              "to",
+              "repair",
+              "it.",
+              "1>&2",
+              "&",
+              "exit",
+              "/b",
+              "2",
+              ")"
+            ],
+            "command": "C:\\Windows\\system32\\cmd.exe",
+            "timeout": 30,
+            "type": "command"
+          }
+        ],
+        "matcher": "startup|resume|clear|compact|fork"
+      }
+    ],
+    "Stop": [
+      {
+        "hooks": [
+          {
+            "args": [
+              "/d",
+              "/c",
+              "if",
+              "exist",
+              "__HOME__\\.local\\bin\\defenseclaw-hook.exe",
+              "(",
+              "__HOME__\\.local\\bin\\defenseclaw-hook.exe",
+              "hook",
+              "--connector",
+              "claudecode",
+              ")",
+              "else",
+              "(",
+              "echo",
+              "DefenseClaw",
+              "blocked",
+              "this:",
+              "its",
+              "Claude",
+              "Code",
+              "hook",
+              "launcher",
+              "is",
+              "missing.",
+              "Run",
+              "the",
+              "DefenseClaw",
+              "installer",
+              "again",
+              "to",
+              "repair",
+              "it.",
+              "1>&2",
+              "&",
+              "exit",
+              "/b",
+              "2",
+              ")"
+            ],
+            "command": "C:\\Windows\\system32\\cmd.exe",
+            "timeout": 90,
+            "type": "command"
+          }
+        ]
+      }
+    ],
+    "SubagentStart": [
+      {
+        "hooks": [
+          {
+            "args": [
+              "/d",
+              "/c",
+              "if",
+              "exist",
+              "__HOME__\\.local\\bin\\defenseclaw-hook.exe",
+              "(",
+              "__HOME__\\.local\\bin\\defenseclaw-hook.exe",
+              "hook",
+              "--connector",
+              "claudecode",
+              ")",
+              "else",
+              "(",
+              "echo",
+              "DefenseClaw",
+              "blocked",
+              "this:",
+              "its",
+              "Claude",
+              "Code",
+              "hook",
+              "launcher",
+              "is",
+              "missing.",
+              "Run",
+              "the",
+              "DefenseClaw",
+              "installer",
+              "again",
+              "to",
+              "repair",
+              "it.",
+              "1>&2",
+              "&",
+              "exit",
+              "/b",
+              "2",
+              ")"
+            ],
+            "command": "C:\\Windows\\system32\\cmd.exe",
+            "timeout": 30,
+            "type": "command"
+          }
+        ],
+        "matcher": "*"
+      }
+    ],
+    "SubagentStop": [
+      {
+        "hooks": [
+          {
+            "args": [
+              "/d",
+              "/c",
+              "if",
+              "exist",
+              "__HOME__\\.local\\bin\\defenseclaw-hook.exe",
+              "(",
+              "__HOME__\\.local\\bin\\defenseclaw-hook.exe",
+              "hook",
+              "--connector",
+              "claudecode",
+              ")",
+              "else",
+              "(",
+              "echo",
+              "DefenseClaw",
+              "blocked",
+              "this:",
+              "its",
+              "Claude",
+              "Code",
+              "hook",
+              "launcher",
+              "is",
+              "missing.",
+              "Run",
+              "the",
+              "DefenseClaw",
+              "installer",
+              "again",
+              "to",
+              "repair",
+              "it.",
+              "1>&2",
+              "&",
+              "exit",
+              "/b",
+              "2",
+              ")"
+            ],
+            "command": "C:\\Windows\\system32\\cmd.exe",
+            "timeout": 90,
+            "type": "command"
+          }
+        ],
+        "matcher": "*"
+      }
+    ],
+    "UserPromptSubmit": [
+      {
+        "hooks": [
+          {
+            "args": [
+              "/d",
+              "/c",
+              "if",
+              "exist",
+              "__HOME__\\.local\\bin\\defenseclaw-hook.exe",
+              "(",
+              "__HOME__\\.local\\bin\\defenseclaw-hook.exe",
+              "hook",
+              "--connector",
+              "claudecode",
+              ")",
+              "else",
+              "(",
+              "echo",
+              "DefenseClaw",
+              "blocked",
+              "this:",
+              "its",
+              "Claude",
+              "Code",
+              "hook",
+              "launcher",
+              "is",
+              "missing.",
+              "Run",
+              "the",
+              "DefenseClaw",
+              "installer",
+              "again",
+              "to",
+              "repair",
+              "it.",
+              "1>&2",
+              "&",
+              "exit",
+              "/b",
+              "2",
+              ")"
+            ],
+            "command": "C:\\Windows\\system32\\cmd.exe",
+            "timeout": 30,
+            "type": "command"
+          }
+        ]
+      }
+    ]
+  }
+}
