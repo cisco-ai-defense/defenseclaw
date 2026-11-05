@@ -87,6 +87,7 @@ func ClassifyToolName(tool string) ToolCapabilityClass {
 // secret or injection findings do not masquerade as tool activity.
 var ruleCapabilities = map[string]ToolCapabilityClass{
 	"secrets.cloud_credential_read":             CapReadFS,
+	"secrets.credential_file_write":             CapWriteFS,
 	"secrets.browser_session_store_read":        CapReadFS,
 	"secrets.cloud_secret_manager_read":         CapReadFS,
 	"secrets.workload_identity_token_read":      CapReadFS,

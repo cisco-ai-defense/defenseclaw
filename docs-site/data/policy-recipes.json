@@ -6757,6 +6757,34 @@
       "data_axis": []
     },
     {
+      "id": "RECIPE-secrets.credential_file_write",
+      "title": "Cloud, cluster or registry credential file write",
+      "kind": "rule:sensitive-path",
+      "body": {
+        "id": "secrets.credential_file_write",
+        "tool_call_only": true,
+        "pattern": "a^",
+        "title": "Cloud, cluster or registry credential file write",
+        "severity": "HIGH",
+        "confidence": 0.92,
+        "tags": [
+          "credential",
+          "file-sensitive"
+        ]
+      },
+      "why": "Pattern shipped in the bundled strict rule pack (sensitive-paths.yaml). Severity HIGH.",
+      "examples": [],
+      "counterexamples": [],
+      "source": "policies/guardrail/strict/rules/sensitive-paths.yaml",
+      "tags": [
+        "credential",
+        "file-sensitive"
+      ],
+      "data_axis": [
+        "sensitive_access"
+      ]
+    },
+    {
       "id": "RECIPE-persistence.shell_profile_write",
       "title": "Shell startup profile mutation",
       "kind": "rule:sensitive-path",
