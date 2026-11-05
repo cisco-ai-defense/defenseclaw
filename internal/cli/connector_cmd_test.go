@@ -55,9 +55,19 @@ func TestMain(m *testing.M) {
 		os.Exit(1)
 	}
 	restore := isolateTestHost()
+	checkMachine, checkProcess := guardTestMachine(), guardTestProcessState()
 	code := m.Run()
+	processErr := checkProcess()
 	restore()
 	cleanupHermes()
+	for _, err := range []error{processErr, checkMachine()} {
+		if err != nil {
+			fmt.Fprintln(os.Stderr, err)
+			if code == 0 {
+				code = 1
+			}
+		}
+	}
 	os.Exit(code)
 }
 
