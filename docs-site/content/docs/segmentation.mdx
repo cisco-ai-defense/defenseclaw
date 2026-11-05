@@ -108,6 +108,8 @@ DefenseClaw's own state, agent hook registrations, and files that run code
 
 With the default rule pack, the hook rules deny a read of an SSH private key (`PATH-SSH-KEY`, for example `cat ~/.ssh/id_rsa`), also in action mode. A plain local read of another credential file, for example `cat ~/.aws/credentials` (`PATH-AWS-CREDS`), is a `MEDIUM` alert and the command goes ahead: agents and their tools read these files to sign in. The agent shows `DefenseClaw observed a MEDIUM ... finding: rule PATH-AWS-CREDS`, and the alert is in `defenseclaw alerts`.
 
+A change to one of these files is a separate finding, `secrets.credential_file_write` (`HIGH`): a write, append, truncation or delete by a file tool, `apply_patch` or the shell, a copy or move onto the file, a move away, or a write through a link to it. That covers the AWS, Kubernetes, Docker, npm, PyPI, Git, netrc, gcloud, GitHub CLI, Azure and GnuPG files in your home. Balanced alerts and lets it run, so `aws configure` and `kubectl config` keep working; strict blocks it. A write of an SSH private key is `PATH-SSH-DIR`, with the same split.
+
 ### Persistence
 
 Shell profiles, user systemd units and autostart entries, cron, LaunchAgents,
