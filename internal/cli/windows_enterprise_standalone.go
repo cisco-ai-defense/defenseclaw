@@ -1099,6 +1099,9 @@ func applyWindowsEnterprisePolicyAs(ctx context.Context, result *enterprisestatu
 	if state != nil && state.ConfigUnrecorded {
 		result.SecurityComplete, result.Noop, result.NoopReason = false, false, ""
 		result.AddError("lifecycle_error", "config generation is unproven or records a hand edit; run DefenseClawSetup-Enterprise-Standalone-x64.exe /ensure CONFIG=<approved absolute config path> JSON=1 from an elevated prompt")
+		if current, err := windowsBundleCurrent(); err == nil && current {
+			windowsEnterpriseConfigRecoveryGuidance(result, true)
+		}
 	}
 	if state == nil {
 		result.SecurityComplete = false

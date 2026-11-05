@@ -50,6 +50,27 @@ func TestWindowsEnterpriseDeploymentRecordOwnerMessages(t *testing.T) {
 	}
 }
 
+func TestWindowsEnterpriseConfigRecoveryGuidance(t *testing.T) {
+	for _, tc := range []struct {
+		name, profile, platform string
+		bundle                  bool
+		want                    string
+	}{
+		{name: "signed bundle", profile: "standalone", platform: "windows", bundle: true, want: "/repair JSON=1"},
+		{name: "standalone config", profile: "standalone", platform: "windows", want: "/ensure CONFIG="},
+		{name: "secure client", profile: "secure_client", platform: "windows", bundle: true, want: "/ensure CONFIG="},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			result := enterprisestatus.New("verify", tc.profile, tc.platform, "1.0.9")
+			result.AddError("lifecycle_error", "config generation is unproven or records a hand edit; run DefenseClawSetup-Enterprise-Standalone-x64.exe /ensure CONFIG=<approved absolute config path> JSON=1 from an elevated prompt")
+			windowsEnterpriseConfigRecoveryGuidance(result, tc.bundle)
+			if len(result.Errors) != 1 || !strings.Contains(result.Errors[0].Message, tc.want) {
+				t.Fatalf("recovery errors = %+v, want %s", result.Errors, tc.want)
+			}
+		})
+	}
+}
+
 func TestWindowsEnterpriseUntrustedDeploymentRecordCases(t *testing.T) {
 	standalone := `C:\ProgramData\Cisco\DefenseClaw\install\deployment.json`
 	secureClient := `C:\ProgramData\Cisco\Cisco Secure Client\DefenseClaw\install\deployment.json`
