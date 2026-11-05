@@ -91,7 +91,13 @@ func NewContextTransport() fasthttp.RoundTripper {
 	return &contextTransport{}
 }
 
-type contextTransport struct{}
+type contextTransport struct {
+	// ConfigureDialer moves a HostClient's write timeout here so fasthttp
+	// returns the TLS connection before handshaking it. The watcher can then
+	// close that connection if the request context ends during the handshake.
+	writeTimeout   time.Duration
+	hostConfigured bool
+}
 
 // maxInterimResponses mirrors fasthttp's unexported cap on 1xx responses parsed
 // before the final status line.
@@ -130,7 +136,13 @@ func (t *contextTransport) RoundTrip(hc *fasthttp.HostClient, req *fasthttp.Requ
 	watcher := startCancelWatcher(ctx, conn)
 	defer watcher.stop()
 
-	if err = conn.SetWriteDeadline(deadlineFor(hc.WriteTimeout, ctx)); err != nil {
+	writeTimeout := hc.WriteTimeout
+	if t.hostConfigured {
+		writeTimeout = t.writeTimeout
+	}
+	// The first write also performs a deferred TLS handshake. Bound its read
+	// phase by the same timeout that fasthttp previously used in AcquireConn.
+	if err = conn.SetDeadline(deadlineFor(writeTimeout, ctx)); err != nil {
 		hc.CloseConn(cc)
 		return retryOn(err), watcher.classify(err)
 	}

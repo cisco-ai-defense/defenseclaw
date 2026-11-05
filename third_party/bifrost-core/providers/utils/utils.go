@@ -365,6 +365,22 @@ func ConfigureDialer(client *fasthttp.Client, allowPrivateNetwork bool) *fasthtt
 	// Configure stale-connection retry policy
 	client.RetryIfErr = network.StaleConnectionRetryIfErr
 	client.Transport = NewContextTransport()
+	previousConfigureClient := client.ConfigureClient
+	client.ConfigureClient = func(hc *fasthttp.HostClient) error {
+		if previousConfigureClient != nil {
+			if err := previousConfigureClient(hc); err != nil {
+				return err
+			}
+		}
+		if transport, ok := hc.Transport.(*contextTransport); ok && !transport.hostConfigured {
+			// A zero HostClient write timeout makes fasthttp return the TLS
+			// connection before its handshake. RoundTrip applies the original
+			// timeout after its cancellation watcher owns the connection.
+			hc.Transport = &contextTransport{writeTimeout: hc.WriteTimeout, hostConfigured: true}
+			hc.WriteTimeout = 0
+		}
+		return nil
+	}
 
 	existingDial := client.Dial
 	existingDialTimeout := client.DialTimeout
