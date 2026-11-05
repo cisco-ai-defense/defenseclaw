@@ -29,6 +29,7 @@ def _config(tmp_path: Path):
 
 
 def _proof_patches(cfg, *, report: dict, foreign_accounts: str = "") -> ExitStack:
+    report = {"endpoint": cmd_doctor._gateway_api_url(cfg, "/health"), **report}
     stack = ExitStack()
     stack.enter_context(patch.object(cmd_doctor, "_managed_gateway_process_trust", return_value=cmd_doctor._GatewayTrust("missing", "no PID file")))
     stack.enter_context(patch.object(cmd_doctor, "_managed_gateway_listener_evidence", return_value=ListenerEvidence("ok", pid=4242)))
@@ -120,3 +121,22 @@ def test_transient_gateway_authenticated_runtime_must_match_listener(tmp_path: P
     }
     with _proof_patches(cfg, report={"running": True, "health": {}}):
         assert cmd_status._fetch_runtime_bound_health(client, cfg) is None
+
+
+@pytest.mark.parametrize("endpoint", [None, "http://127.0.0.1:18790/health"])
+def test_transient_gateway_report_must_name_inspected_endpoint(tmp_path: Path, endpoint: str | None) -> None:
+    cfg = _config(tmp_path)
+    with _proof_patches(cfg, report={"running": True, "endpoint": endpoint, "health": {}}):
+        assert "PID 4242" in cmd_doctor._foreign_gateway_port_holder(cfg)
+
+
+def test_transient_gateway_listener_pid_must_remain_stable(tmp_path: Path) -> None:
+    cfg = _config(tmp_path)
+    with (
+        _proof_patches(cfg, report={"running": True, "health": {}}),
+        patch.object(
+            cmd_doctor, "_managed_gateway_listener_evidence",
+            side_effect=[ListenerEvidence("ok", pid=4242), ListenerEvidence("ok", pid=4343)],
+        ),
+    ):
+        assert not cmd_doctor._trusted_gateway_listener(cfg).trusted

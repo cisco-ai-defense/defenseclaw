@@ -6306,7 +6306,14 @@ def _transient_same_home_gateway_listener(
         status = json.loads(report.stdout)
     except (OSError, subprocess.SubprocessError, ValueError, TypeError):
         return None
-    if not isinstance(status, dict) or status.get("running") is not True or not isinstance(status.get("health"), dict):
+    # Go status checks the process at its reported endpoint. That endpoint
+    # must be the listener whose PID was inspected before and after the call.
+    if (
+        not isinstance(status, dict)
+        or status.get("running") is not True
+        or status.get("endpoint") != _gateway_api_url(cfg, "/health")
+        or not isinstance(status.get("health"), dict)
+    ):
         return None
     after = _managed_gateway_listener_evidence(
         api_port, host=host, platform_name="linux", evidence=evidence
