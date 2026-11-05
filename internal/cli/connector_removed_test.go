@@ -127,9 +127,10 @@ func TestConnectorTeardownRemovedOmnigentHonoursConfigHome(t *testing.T) {
 }
 
 // A removed connector can be torn down but never reconciled, and the
-// selected refresh stays limited to the connectors native Setup refreshes.
+// selected refresh stays limited to the hook connectors native Setup
+// refreshes: the proxy-backed OpenClaw and ZeptoClaw have no hooks.
 func TestConnectorReconcileRefusesUnsupportedConnectors(t *testing.T) {
-	for _, name := range []string{"omnigent", "openhands", "kiro"} {
+	for _, name := range []string{"omnigent", "openhands", "openclaw", "zeptoclaw"} {
 		t.Run(name, func(t *testing.T) {
 			dataDir := testenv.PrivateTempDir(t)
 			defer withConnectorState(t, dataDir, "codex")()

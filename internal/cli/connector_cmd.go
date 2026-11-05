@@ -541,10 +541,14 @@ func resolveConnectorOptsFor(dataDir, name string) connector.SetupOpts {
 }
 
 // reconcileSupportedConnectors are the connectors whose selected refresh
-// native Setup runs; any other connector is refused before it changes
-// anything.
+// native Setup runs: every built-in hook connector. Any other connector (the
+// proxy-backed OpenClaw and ZeptoClaw, which have no hooks, and plugin
+// connectors, which --every-connector refreshes) is refused before it
+// changes anything. Kiro renders through the same Setup and contract-lock
+// path as Cursor and Devin; leaving it out refused `guardrail fail-mode
+// --connector kiro` on every install (rel-1-0-6 GAP-0576).
 var reconcileSupportedConnectors = []string{
-	"amp", "antigravity", "claudecode", "codex", "copilot", "cursor", "devin", "hermes", "opencode",
+	"amp", "antigravity", "claudecode", "codex", "copilot", "cursor", "devin", "hermes", "kiro", "opencode",
 }
 
 func reconcileSupportedConnector(name string) bool {

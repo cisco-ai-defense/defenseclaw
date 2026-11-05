@@ -19,8 +19,8 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/gateway/connector"
 )
 
-// A connector the selected policy refresh does not take (Kiro) was only read
-// back after a stopped upgrade. Its registration names the data-dir script,
+// Kiro was only read back after a stopped upgrade, when the selected policy
+// refresh did not take it. Its registration names the data-dir script,
 // so the hook an earlier release rendered read back as present and the
 // upgrade exited 0 on it. --every-connector renders it as the gateway's start
 // does and seals the current bytes.
@@ -66,5 +66,47 @@ func TestConnectorReconcileEveryReplacesAnEarlierReleasesKiroHook(t *testing.T) 
 	lock := connector.LoadHookContractLockEntry(dataDir, "kiro")
 	if got, want := lock.HookScriptDigests["kiro-hook.sh"], "sha256:"+hex.EncodeToString(sum[:]); got != want {
 		t.Fatalf("the lock seals kiro-hook.sh as %q, want the rendered bytes %q", got, want)
+	}
+}
+
+// A selected refresh of Kiro (what `guardrail fail-mode --connector kiro`
+// runs) was refused with "selected refresh is supported only for ...", and
+// the fail-mode change was rolled back on every install (rel-1-0-6
+// GAP-0576). It renders Kiro's hook as the gateway's start does and seals
+// the saved per-connector outage mode, closed and then open, in the lock the
+// fail-mode check reads back.
+func TestConnectorReconcileSelectedKiroAppliesEachFailMode(t *testing.T) {
+	dataDir, _, _ := reconcileEveryFixture(t)
+	connectorReconcileEvery = false
+	previousName, previousJSON := connectorFlagName, connectorFlagJSON
+	t.Cleanup(func() { connectorFlagName, connectorFlagJSON = previousName, previousJSON })
+	connectorFlagName, connectorFlagJSON = "kiro", true
+	conn, _ := connector.NewDefaultRegistry().Get("kiro")
+
+	for _, mode := range []string{"closed", "open"} {
+		cfg.Guardrail.Connectors = map[string]config.PerConnectorGuardrailConfig{"kiro": {HookFailMode: mode}}
+		stdout, stderr, err := runReconcileEvery(t)
+		if err != nil {
+			t.Fatalf("reconcile --connector kiro (%s): %v\nstderr: %s", mode, err, stderr)
+		}
+		if !strings.Contains(stdout, `"connector":"kiro"`) || !strings.Contains(stdout, `"fail_mode":"`+mode+`"`) {
+			t.Fatalf("reconcile --connector kiro (%s) stdout = %q", mode, stdout)
+		}
+		opts := reconcileConnectorOpts(dataDir, "kiro")
+		if present, err := connector.OwnedHooksPresent(conn, opts); err != nil || !present {
+			t.Fatalf("Kiro registration after reconcile (%s): present=%v err=%v", mode, present, err)
+		}
+		script, err := os.ReadFile(filepath.Join(dataDir, "hooks", "kiro-hook.sh"))
+		if err != nil {
+			t.Fatalf("rendered Kiro hook (%s): %v", mode, err)
+		}
+		sum := sha256.Sum256(script)
+		lock := connector.LoadHookContractLockEntry(dataDir, "kiro")
+		if lock.Connector != "kiro" || lock.HookFailMode != mode {
+			t.Fatalf("Kiro lock after reconcile (%s) = %+v, want the saved outage mode", mode, lock)
+		}
+		if got, want := lock.HookScriptDigests["kiro-hook.sh"], "sha256:"+hex.EncodeToString(sum[:]); got != want {
+			t.Fatalf("the lock seals kiro-hook.sh as %q, want the rendered bytes %q (%s)", got, want, mode)
+		}
 	}
 }

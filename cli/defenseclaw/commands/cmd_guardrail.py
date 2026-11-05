@@ -1682,6 +1682,23 @@ def _set_connector_fail_mode(app: AppContext, requested: str, mode: str | None, 
         click.echo()
         return
 
+    if _is_proxy_connector(key) and restart and gc.enabled:
+        # OpenClaw and ZeptoClaw are proxy-backed: they have no hook
+        # registration the gateway's selected refresh renders, so a scoped
+        # change was saved, refused by `connector reconcile` and rolled back
+        # (rel-1-0-6 GAP-0576). Say so before anything changes.
+        ux.err(
+            f"{label} is proxy-backed and has no hook registration to refresh, so "
+            f"'--connector {key}' cannot apply a fail mode. Nothing was changed.",
+            indent="  ",
+        )
+        ux.subhead(
+            f"{label} requests stay blocked while the gateway is down. Its PATH shims follow the global "
+            f"mode: defenseclaw guardrail fail-mode {mode}",
+            indent="    ",
+        )
+        raise SystemExit(1)
+
     if has_override and mode == configured_mode and runtime_state.desired == mode and runtime_state.current:
         ux.echo(f"  {ux.dim(f'{label} hook fail mode is already')} {mode!r} {ux.dim('— nothing to do.')}")
         return
