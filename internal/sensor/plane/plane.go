@@ -40,6 +40,7 @@ package plane
 
 import (
 	"context"
+	"sync"
 	"sync/atomic"
 	"time"
 )
@@ -466,7 +467,17 @@ type Buffer struct {
 	// number reported as reduced coverage. Undercounting the drops is the
 	// silent degradation this package exists to make impossible.
 	dropped atomic.Int64
+	// late are the image digests that found the buffer full, at most
+	// maxLateDigests, delivered by the next Push that finds room (lateCount
+	// lets every other Push skip the lock).
+	lateMu    sync.Mutex
+	late      []Event
+	lateCount atomic.Int32
 }
+
+// maxLateDigests bounds the image digests kept for a full buffer: one per
+// pending client exec, which the image hasher bounds the same way.
+const maxLateDigests = 64
 
 // NewBuffer returns an empty buffer.
 func NewBuffer() *Buffer { return &Buffer{events: make(chan Event, eventBuffer)} }
@@ -491,16 +502,33 @@ func NewBuffer() *Buffer { return &Buffer{events: make(chan Event, eventBuffer)}
 // bias costs nothing when the buffer is keeping up and preserves
 // attribution when it is not.
 func (b *Buffer) Push(event Event) {
+	if b.lateCount.Load() > 0 {
+		b.deliverLate()
+	}
 	select {
 	case b.events <- event:
 		return
 	default:
 	}
-	if !event.Kind.lineage() && event.Kind != KindImageDigest {
+	if event.Kind == KindImageDigest {
+		// An image digest displaces nothing, the tree least of all, but it
+		// is the one event a held client record waits for, and it comes
+		// when a client's start floods the buffer (cowork-1-0-8 GAP-0067).
+		// It waits for the next Push that finds room; past maxLateDigests
+		// it is dropped, and the hold records the client at its deadline.
+		b.lateMu.Lock()
+		if len(b.late) < maxLateDigests {
+			b.late = append(b.late, event)
+			b.lateCount.Add(1)
+		} else {
+			b.dropped.Add(1)
+		}
+		b.lateMu.Unlock()
+		return
+	}
+	if !event.Kind.lineage() {
 		// A file event that arrives at a full buffer is simply late. It does
-		// not get to displace the tree. An image digest may: it is the one
-		// event a held client record waits for, and it comes exactly when
-		// a client's start floods the buffer (cowork-1-0-8 GAP-0067).
+		// not get to displace the tree.
 		b.dropped.Add(1)
 		return
 	}
@@ -513,6 +541,22 @@ func (b *Buffer) Push(event Event) {
 	case b.events <- event:
 	default:
 		b.dropped.Add(1)
+	}
+}
+
+// deliverLate queues the image digests that found the buffer full, oldest
+// first, while there is room.
+func (b *Buffer) deliverLate() {
+	b.lateMu.Lock()
+	defer b.lateMu.Unlock()
+	for len(b.late) > 0 {
+		select {
+		case b.events <- b.late[0]:
+			b.late = b.late[1:]
+			b.lateCount.Add(-1)
+		default:
+			return
+		}
 	}
 }
 

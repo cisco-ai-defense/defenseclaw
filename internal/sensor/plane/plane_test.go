@@ -73,20 +73,17 @@ func TestBufferProtectsLineageUnderBackPressure(t *testing.T) {
 	// More file traffic must not displace anything.
 	buffer.Push(Event{Kind: KindFileRead, Path: "/home/dev/.claude/again.json"})
 
-	// An exec must get in, because the tree depends on it, and so must the
-	// image digest a held client record waits for (GAP-0067).
+	// An exec must get in, because the tree depends on it.
 	buffer.Push(Event{Kind: KindExec, PID: 4242, PPID: 1, Name: "claude"})
-	buffer.Push(Event{Kind: KindImageDigest, PID: 4242, ImageDigestState: DigestRead})
 
 	events := buffer.Events()
-	foundExec, foundDigest := false, false
+	foundExec := false
 	for drained := 0; drained < eventBuffer; drained++ {
 		select {
 		case event := <-events:
 			if event.Kind == KindExec && event.Name == "claude" {
 				foundExec = true
 			}
-			foundDigest = foundDigest || event.Kind == KindImageDigest
 		default:
 			drained = eventBuffer
 		}
@@ -95,12 +92,50 @@ func TestBufferProtectsLineageUnderBackPressure(t *testing.T) {
 		t.Fatal("an exec was dropped in favour of file reads: the process tree " +
 			"loses the ancestor and every tactic below it becomes unattributable")
 	}
-	if !foundDigest {
-		t.Fatal("an image digest was dropped in favour of file reads: its held client record is reported")
-	}
 	if buffer.Dropped() == 0 {
 		t.Fatal("the buffer overflowed without counting a drop; reduced coverage " +
 			"has to be reported, not absorbed")
+	}
+}
+
+// cowork-1-0-8 GAP-0067 (S1 review 1 N1): an image digest that finds the
+// buffer full displaces no exec or exit, and still reaches the consumer
+// once there is room, ahead of the event that found the room.
+func TestBufferKeepsTheTreeAndTheImageDigest(t *testing.T) {
+	t.Parallel()
+	buffer := NewBuffer()
+	for index := 0; index < eventBuffer; index++ {
+		kind := KindExec
+		if index%2 == 1 {
+			kind = KindExit
+		}
+		buffer.Push(Event{Kind: kind, PID: index})
+	}
+	buffer.Push(Event{Kind: KindImageDigest, PID: 4242, ImageDigestState: DigestRead})
+	if dropped := buffer.Dropped(); dropped != 0 {
+		t.Fatalf("dropped %d with the digest kept for later", dropped)
+	}
+	events := buffer.Events()
+	for index := 0; index < eventBuffer; index++ {
+		if event := <-events; event.PID != index || !event.Kind.lineage() {
+			t.Fatalf("event %d = %+v, want the tree's event %d in order", index, event, index)
+		}
+	}
+	buffer.Push(Event{Kind: KindFileRead, PID: 7})
+	if event := <-events; event.Kind != KindImageDigest || event.PID != 4242 {
+		t.Fatalf("after room = %+v, want the kept digest", event)
+	}
+	if event := <-events; event.Kind != KindFileRead {
+		t.Fatalf("then %+v, want the file read", event)
+	}
+	for index := 0; index <= maxLateDigests; index++ {
+		for len(events) < eventBuffer {
+			buffer.Push(Event{Kind: KindExec, PID: index})
+		}
+		buffer.Push(Event{Kind: KindImageDigest, PID: index})
+	}
+	if dropped := buffer.Dropped(); dropped != 1 {
+		t.Fatalf("dropped %d past maxLateDigests kept digests, want 1", dropped)
 	}
 }
 
