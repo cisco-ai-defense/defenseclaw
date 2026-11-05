@@ -131,8 +131,8 @@ func addManagedWindowsSetupAnswer(root *cobra.Command) {
 				if kind == "mcp" {
 					target = "<url>"
 				}
-				return withExitCode(managedDeviceAnswer(fmt.Sprintf("This device is managed: scan a %s with `defenseclaw scan %s %s`, "+
-					"which runs the gateway's %s scanner", kind, kind, target, kind)), 3)
+				return withExitCode(managedDeviceAnswer(fmt.Sprintf("This device is managed: scan a %s with %s, "+
+					"which runs the gateway's %s scanner", kind, managedWindowsCommand("scan "+kind+" "+target), kind)), 3)
 			}
 			// The refusal named no next step (GAP-0523): the compiled
 			// admission policy is the administrator's view of these rules.
@@ -221,13 +221,13 @@ func managedWindowsAdminCommandAnswer(where, command string) error {
 		// built-in Administrator's prompts are always elevated, and Setup
 		// puts no DefenseClaw command on PATH, so the user-facing status
 		// is named in full (cowork-1-0-8 GAP-0076).
-		detail = " To see an account's own protection (its agents and Cowork), sign in as that standard account and run `& '" +
-			managedWindowsAdminCLI() + "' status` in a PowerShell prompt that is not elevated; an elevated prompt, and every prompt of the built-in Administrator account, gets this answer."
+		detail = " To see an account's own protection (its agents and Cowork), sign in as that standard account and run " +
+			managedWindowsCommand("status") + " in a PowerShell prompt that is not elevated; an elevated prompt, and every prompt of the built-in Administrator account, gets this answer."
 	}
 	return fmt.Errorf("this computer's DefenseClaw is managed by your organization (%s), so `%s` has no per-user "+
 		"deployment to check and nothing for you to do; your administrator can check the managed deployment %s, "+
-		"and your account's agents with `& '%s' enterprise policy show --user %s`.%s Nothing was changed.",
-		where, command, managedWindowsAdminStatusHint(), managedWindowsAdminCLI(), managedHostCurrentAccountName(), detail)
+		"and your account's agents with %s.%s Nothing was changed.",
+		where, command, managedWindowsAdminStatusHint(), managedWindowsAccountAgentsCommand(), detail)
 }
 
 // managedWindowsTUIAnswer tells a user on a managed Windows computer that
@@ -236,9 +236,9 @@ func managedWindowsAdminCommandAnswer(where, command string) error {
 func managedWindowsTUIAnswer(where string) error {
 	return managedDeviceAnswer(fmt.Sprintf("this computer's DefenseClaw is managed by your organization (%s), so the DefenseClaw TUI is not installed on this computer: "+
 		"it is part of the per-user DefenseClaw, which a managed computer does not have, and there is nothing for you to set up. "+
-		"Your administrator can check the managed deployment %s, and your account's agents with `& '%s' enterprise policy show --user %s`. "+
+		"Your administrator can check the managed deployment %s, and your account's agents with %s. "+
 		"Nothing was changed.",
-		where, managedWindowsAdminStatusHint(), managedWindowsAdminCLI(), managedHostCurrentAccountName()))
+		where, managedWindowsAdminStatusHint(), managedWindowsAccountAgentsCommand()))
 }
 
 // managedWindowsVersionChangeAnswer tells a user on a managed Windows
@@ -257,10 +257,30 @@ func managedWindowsVersionChangeAnswer(where, command, done string) error {
 // "not recognized" (GAP-1183). A seam for tests.
 var managedWindowsAdminCLI = managed.WindowsStandaloneAdminCLI
 
+// managedWindowsCommand is a defenseclaw.exe command as it is typed in
+// PowerShell on a managed Windows computer, in backticks: the installed CLI
+// by its full path. Setup puts no DefenseClaw command on PATH, so a bare
+// `defenseclaw ...` is "not recognized" (GAP-1183, GAP-1338, cowork-1-0-8
+// GAP-0076). Every managed Windows answer names its commands with it, and
+// TestManagedWindowsRefusalsNameRunnableCommands checks them.
+func managedWindowsCommand(args string) string { return "`" + managedWindowsCommandLine(args) + "`" }
+
+// managedWindowsCommandLine is managedWindowsCommand without the backticks,
+// for help text.
+func managedWindowsCommandLine(args string) string {
+	return "& '" + managedWindowsAdminCLI() + "' " + args
+}
+
+// managedWindowsAccountAgentsCommand is the administrator's view of the
+// signed-in account's agents.
+func managedWindowsAccountAgentsCommand() string {
+	return managedWindowsCommand("enterprise policy show --user " + managedHostCurrentAccountName())
+}
+
 // managedWindowsAdminStatusHint is the administrator's status check on a
 // managed Windows computer, as a PowerShell command that runs as typed.
 func managedWindowsAdminStatusHint() string {
-	return "from an elevated PowerShell prompt with `& '" + managedWindowsAdminCLI() + "' enterprise windows status --profile standalone`"
+	return "from an elevated PowerShell prompt with " + managedWindowsCommand("enterprise windows status --profile standalone")
 }
 
 // managedHostPerUserDaemonCommands are the per-user gateway commands a
@@ -304,7 +324,7 @@ func applyManagedHostHelp(root *cobra.Command) bool {
 	admin, adminLead := "", "An administrator checks the deployment with:"
 	where, present := managedHostWindowsStandalone()
 	if present {
-		admin = "& '" + managedWindowsAdminCLI() + "' enterprise windows status --profile standalone"
+		admin = managedWindowsCommandLine("enterprise windows status --profile standalone")
 		adminLead = "An administrator checks it from an elevated PowerShell prompt with:"
 	} else if where, present = managedHostUnixRecord(nil); present {
 		admin = "sudo " + managedHostGatewayCommand() + " enterprise " + managedHostPlatform() + " status"

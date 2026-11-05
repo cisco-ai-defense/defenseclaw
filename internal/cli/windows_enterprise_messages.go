@@ -151,8 +151,8 @@ func windowsEnterpriseStandardUserMutationAnswer(action string, flags ...string)
 	for _, flag := range flags {
 		command += " " + flag
 	}
-	return "a standard account cannot " + action + " the managed deployment. Ask your administrator, who runs it from an elevated PowerShell prompt with `& '" +
-		managedWindowsAdminCLI() + "' " + command + "`. Nothing was changed."
+	return "a standard account cannot " + action + " the managed deployment. Ask your administrator, who runs it from an elevated PowerShell prompt with " +
+		managedWindowsCommand(command) + ". Nothing was changed."
 }
 
 // windowsManagedStandardUserViewAnswer answers a standard account's
@@ -202,9 +202,9 @@ func managedHostCurrentAccountName() string {
 // gave administrator-only advice (GAP-1720).
 func windowsEnterpriseStandardUserInspectionAnswer(action string) string {
 	return "the managed deployment's " + action + " needs an elevated prompt: a standard account cannot run the installer's own checks, " +
-		"so this says nothing about the deployment's health. Ask your administrator, who checks it from an elevated PowerShell prompt with `& '" +
-		managedWindowsAdminCLI() + "' enterprise windows " + action + " --profile standalone`, and your account's agents with `& '" +
-		managedWindowsAdminCLI() + "' enterprise policy show --user " + managedHostCurrentAccountName() + "`. Nothing was changed."
+		"so this says nothing about the deployment's health. Ask your administrator, who checks it from an elevated PowerShell prompt with " +
+		managedWindowsCommand("enterprise windows "+action+" --profile standalone") + ", and your account's agents with " +
+		managedWindowsAccountAgentsCommand() + ". Nothing was changed."
 }
 
 // A host refusal has no enrollment or readiness result. An untrusted engine
@@ -215,5 +215,5 @@ func windowsEnterpriseUncheckedHealthMessage(profile string, untrustedPowerShell
 		next = "First restore a non-link PowerShell 7 installation with trusted ownership and administrator-only write access, including its parent folders, then run "
 	}
 	return "this request was refused before any health check ran, so readiness.gateway, readiness.guardian, coverage_complete, security_complete and enrollment were not checked (booleans read false and enrollment counts read zero); only the recorded deployment and the service states are reported. " + next +
-		"`& '" + managedWindowsAdminCLI() + "' enterprise windows verify --profile " + profile + " --json` from an elevated PowerShell prompt"
+		managedWindowsCommand("enterprise windows verify --profile "+profile+" --json") + " from an elevated PowerShell prompt"
 }

@@ -131,8 +131,8 @@ func windowsSecretStandardUserAnswer(action string, opts *enterpriseSecretOption
 	if opts != nil && managed.ValidCredentialName(opts.name) {
 		command += " --name " + opts.name
 	}
-	return "a standard account cannot " + action + " a protected credential of the managed deployment. Ask your administrator, who runs it from an elevated PowerShell prompt with `& '" +
-		managedWindowsAdminCLI() + "' " + command + "`. Nothing was changed."
+	return "a standard account cannot " + action + " a protected credential of the managed deployment. Ask your administrator, who runs it from an elevated PowerShell prompt with " +
+		managedWindowsCommand(command) + ". Nothing was changed."
 }
 
 type windowsSecretState struct {

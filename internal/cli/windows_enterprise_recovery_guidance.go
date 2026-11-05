@@ -674,7 +674,7 @@ func windowsEnterpriseStoppedServiceNextStep(services []enterprisestatus.Service
 // DefenseClaw command on PATH, so a bare `defenseclaw ...` hint was "not
 // recognized"; the installed CLI is named by its path (GAP-1183, GAP-1338).
 func windowsEnterpriseAdminCommand(action string) string {
-	return "`& '" + managedWindowsAdminCLI() + "' enterprise windows " + action + " --profile standalone`"
+	return managedWindowsCommand("enterprise windows " + action + " --profile standalone")
 }
 
 // windowsEnterpriseStandaloneLifecycleAction reports whether a standalone
