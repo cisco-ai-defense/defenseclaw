@@ -69,7 +69,8 @@ func windowsClientImage(path string, at time.Time, account string) (sum, version
 	if !ok {
 		return "", version
 	}
-	return clientImages.digestOf(file, key, account), version
+	sum, _ = clientImages.digestOf(file, key, account, nil)
+	return sum, version
 }
 
 // openImageUnchangedSince opens the regular file at path for reading, with

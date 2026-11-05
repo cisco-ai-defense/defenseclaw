@@ -9,10 +9,20 @@ import (
 	"os"
 	"sync/atomic"
 	"testing"
+	"testing/synctest"
 	"time"
 
 	"github.com/defenseclaw/defenseclaw/internal/sensor/plane"
 )
+
+// bubbled runs a hold test in a synctest bubble. The hold timers, polls and
+// sleeps use the bubble's fake clock, which moves only when every goroutine
+// of the test is blocked, so a loaded runner cannot end a hold before the
+// test's events are handled or after its sleep (r108-sensorflake: the 20 ms
+// wrapper hold ran out between two execs on CI).
+func bubbled(f func(t *testing.T)) func(t *testing.T) {
+	return func(t *testing.T) { synctest.Test(t, f) }
+}
 
 // cowork-1-0-8 GAP-0065: the first client exec of a version after a gateway
 // start finds its release manifest not cached; the fetch starts on that exec.
@@ -39,7 +49,7 @@ func TestColdClientExecWaitsForTheReleaseManifest(t *testing.T) {
 		{"Secure Client profile", prompt, release, true, true, false, 1},
 		{"client starts a positional server", `claude @modelcontextprotocol/server-filesystem /w`, release, true, false, false, 1},
 	} {
-		t.Run(tc.name, func(t *testing.T) {
+		t.Run(tc.name, bubbled(func(t *testing.T) {
 			host := newHost(newFake(fullCoverage()))
 			host.coldHold, host.coldPoll = 60*time.Millisecond, 5*time.Millisecond
 			host.indicators.KeepClientMCP = tc.keepClientMCP
@@ -68,7 +78,7 @@ func TestColdClientExecWaitsForTheReleaseManifest(t *testing.T) {
 			if classified != tc.want || held != 0 {
 				t.Fatalf("classified=%d held=%d, want %d and 0", classified, held, tc.want)
 			}
-		})
+		}))
 	}
 }
 
@@ -161,10 +171,12 @@ func TestWrapperOfAColdClientWaitsForItsManifest(t *testing.T) {
 			{child, wrapper, "claude", client, signed},
 		}, false, false, false, false, true, 4},
 	} {
-		t.Run(tc.name, func(t *testing.T) {
+		t.Run(tc.name, bubbled(func(t *testing.T) {
 			host := newHost(newFake(fullCoverage()))
 			// The wrapper's own hold is shorter than the time the manifest
 			// takes: a linked wrapper waits for the client, not its timer.
+			// The bubble's clock stands still while the execs are handled, so
+			// the wrapper hold cannot end before its child links it.
 			host.wrapperHold = 20 * time.Millisecond
 			host.coldHold, host.coldPoll = 300*time.Millisecond, 5*time.Millisecond
 			host.indicators.KeepClientMCP = tc.keepClientMCP
@@ -222,6 +234,6 @@ func TestWrapperOfAColdClientWaitsForItsManifest(t *testing.T) {
 				t.Fatalf("classified=%d held wrappers=%d cold=%d linked=%d, want %d and 0, 0, 0",
 					classified, wrappers, cold, linked, tc.want)
 			}
-		})
+		}))
 	}
 }

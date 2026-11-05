@@ -161,6 +161,12 @@ type tetragonSource struct {
 	files    nativeHalf
 	filesErr error
 	handed   bool // fanotify stopped after the hand-off
+	// retiredDropped are the buffer drops of native halves since stopped,
+	// kept so the coverage still names them (GAP-0071).
+	retiredDropped int64
+	// filesStarting is a fanotify half being started outside s.mu
+	// (startFiles, GAP-0073).
+	filesStarting bool
 
 	// Loss: rate-limit drops in the stream, and growth of Tetragon's own
 	// loss counters since each session opened (lastLost is the counter at
@@ -297,6 +303,7 @@ func (s *tetragonSource) dial(ctx context.Context) error {
 		s.observeSince = s.switchedAt
 	}
 	proc := s.proc
+	s.retiredDropped += halfDropped(s.proc)
 	s.proc, s.procErr = nil, nil
 	s.mu.Unlock()
 	if proc != nil {
@@ -356,9 +363,22 @@ func (s *tetragonSource) startFallback(ctx context.Context, reason string) {
 }
 
 // startFiles starts fanotify (at start, and again after any loss signal).
+// At most one file half runs: a feed end and a take-back can both ask for
+// it at once, and the second start replaced the first half without closing
+// it, which then forwarded every file event twice until the source closed
+// (cowork-1-0-8 GAP-0073). A start while one runs or is starting does
+// nothing; a half started after Close is closed.
 func (s *tetragonSource) startFiles(ctx context.Context) {
+	s.mu.Lock()
+	if s.closed || s.files != nil || s.filesStarting {
+		s.mu.Unlock()
+		return
+	}
+	s.filesStarting = true
+	s.mu.Unlock()
 	files, err := startFileHalf(ctx, s.homes)
 	s.mu.Lock()
+	s.filesStarting = false
 	if s.closed {
 		s.mu.Unlock()
 		if files != nil {
@@ -411,14 +431,38 @@ func (s *tetragonSource) handleBatch(batch KernelBatch) {
 		if event.Kind == KindExec && s.duplicateOfNative(event.PID, now) {
 			continue
 		}
+		var delivery *digestDelivery
 		if event.Kind == KindExec && event.Exe != "" {
 			// The helper reads the image while the event is fresh, only if
 			// the pid still runs the binary the event names.
-			event.ImageSHA256, event.ImageVersion = tetragonClientImage(event.PID, event.Exe, eventAccount(event))
+			delivery = newDigestDelivery(s.pushUnlessClosed, event.PID, event.At)
+			event.ImageSHA256, event.ImageVersion, event.ImageDigestState = tetragonClientImage(
+				event.PID, event.Exe, eventAccount(event), delivery)
 		}
 		if event.Kind == KindFileRead || event.Kind == KindFileWrite {
 			s.noteTetragonFile(event, now)
 		}
+		s.buffer.Push(event)
+		if delivery != nil {
+			delivery.execSent()
+		}
+	}
+}
+
+// halfDropped is the buffer drops of a native half (GAP-0071).
+func halfDropped(half nativeHalf) int64 {
+	if h, ok := half.(interface{ bufferDropped() int64 }); ok {
+		return h.bufferDropped()
+	}
+	return 0
+}
+
+// pushUnlessClosed delivers an event from outside the feed (an image digest
+// read after its exec went out); nothing once the source is closed.
+func (s *tetragonSource) pushUnlessClosed(event Event) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if !s.closed {
 		s.buffer.Push(event)
 	}
 }
@@ -709,6 +753,7 @@ func (s *tetragonSource) evaluateHandoff(ctx context.Context, now time.Time) {
 	takeBack := s.handed && !healthy && (!enabled || s.throttled || s.lossAt.After(since))
 	files := s.files
 	if handOff {
+		s.retiredDropped += halfDropped(s.files)
 		s.files, s.handed = nil, true
 	}
 	policiesChanged := !samePolicies(previous.Policies, current.Policies)
@@ -773,13 +818,22 @@ func (s *tetragonSource) changed() {
 }
 
 // Coverage names both halves and the backend.
-func (s *tetragonSource) Coverage() Coverage {
+func (s *tetragonSource) Coverage() (coverage Coverage) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	backend := s.backend
 	backend.Policies = append([]BackendPolicy(nil), s.backend.Policies...)
 	backend.EventsLost = s.dropped + s.knownLost
-	coverage := Coverage{Backend: &backend}
+	coverage = Coverage{Backend: &backend}
+	// The stream's own buffer and the native halves' (running or stopped)
+	// are DefenseClaw losses, not Tetragon's: named apart from EventsLost
+	// (GAP-0071).
+	dropped := s.buffer.Dropped() + s.retiredDropped + halfDropped(s.proc) + halfDropped(s.files)
+	defer func() {
+		if dropped > 0 {
+			coverage.Limitations = append(coverage.Limitations, bufferDropLimitation(dropped))
+		}
+	}()
 
 	var process, files string
 	switch {

@@ -134,6 +134,15 @@ func (s *helperPlaneSource) drain(ctx context.Context, conn net.Conn) {
 			event := decodeEvent(*frame.PolicyEvent)
 			event.PolicyOwner, event.Kind = plane.PolicyOwnerCustomer, plane.KindPolicyEvent
 			s.buffer.Push(event)
+		case frame.ImageDigest != nil:
+			// The member names the kind: only the image digest fields of
+			// an earlier exec, never a process event (GAP-0067).
+			wire := frame.ImageDigest
+			s.buffer.Push(plane.Event{
+				Kind: plane.KindImageDigest, PID: wire.PID, At: decodeEvent(*wire).At,
+				ImageSHA256: wire.ImageSHA256, ImageVersion: wire.ImageVersion,
+				ImageDigestState: plane.DigestState(wire.ImageDigestState),
+			})
 		}
 	}
 }
@@ -149,6 +158,12 @@ func (s *helperPlaneSource) Coverage() plane.Coverage {
 	coverage := s.coverage
 	if coverage.Mechanism != "" {
 		coverage.Mechanism += " (via the sensor helper)"
+	}
+	if dropped := s.buffer.Dropped(); dropped > 0 {
+		// The gateway's own buffer for the helper's stream: a host plane
+		// that falls behind drops here, not in the helper (GAP-0071).
+		coverage.Limitations = append(append([]string(nil), coverage.Limitations...), fmt.Sprintf(
+			"%d events from the sensor helper were dropped from the gateway's event buffer under back-pressure", dropped))
 	}
 	return coverage
 }

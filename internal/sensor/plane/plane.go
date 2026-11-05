@@ -40,6 +40,7 @@ package plane
 
 import (
 	"context"
+	"sync"
 	"sync/atomic"
 	"time"
 )
@@ -73,6 +74,27 @@ const (
 	// and bounded in the helper. It never enters the classifier, a score,
 	// Plane B or the fanotify hand-off, which are DefenseClaw's.
 	KindPolicyEvent Kind = "policy_event"
+	// KindImageDigest is the image digest of an earlier exec whose event
+	// went out while the image was still being hashed (ImageDigestState
+	// pending): PID, At and ImageVersion are that exec event's, and
+	// ImageSHA256 and ImageDigestState (read or failed) say how the read
+	// ended. It is no process event of its own (cowork-1-0-8 GAP-0067).
+	KindImageDigest Kind = "image_digest"
+)
+
+// DigestState is how the image digest of an exec stands when its event is
+// delivered (Event.ImageDigestState).
+type DigestState string
+
+const (
+	// DigestRead is an event that carries the digest.
+	DigestRead DigestState = "read"
+	// DigestPending is an image being hashed: a KindImageDigest event for the
+	// same exec follows once the read ends.
+	DigestPending DigestState = "pending"
+	// DigestFailed is an image whose digest is not coming: it could not be
+	// pinned or read, hashing is off, or its hash could not be queued.
+	DigestFailed DigestState = "failed"
 )
 
 // Policy owners of a kprobe or LSM event (Event.PolicyOwner).
@@ -168,6 +190,10 @@ type Event struct {
 	// the image is no such layout or could not be read; the host plane then
 	// grants the image nothing.
 	ImageSHA256, ImageVersion string
+	// ImageDigestState is set with ImageVersion: whether this event carries
+	// the digest, a KindImageDigest event follows with it, or none is
+	// coming. Empty from a source that predates it.
+	ImageDigestState DigestState
 	// UID and AUID are the process's kernel uid and audit login uid. nil is
 	// "not observed": uid 0 is root, which is a value, not an absence.
 	UID  *int
@@ -226,6 +252,12 @@ type Event struct {
 	// Self marks DefenseClaw's own gateway, helper and ACP processes. They
 	// are excluded from scoring, never hidden.
 	Self bool
+	// Fork marks a KindExec event that is the kernel's fork of the process,
+	// not an exec (cn_proc): its snapshot runs the parent's image and argv
+	// or, read after the child exec'd, that exec's, which has an event of
+	// its own (cowork-1-0-8 GAP-0067). False from a source that reports no
+	// forks or predates the flag.
+	Fork bool
 	// Hook is the self-filter's verdict (empty for everything else).
 	Hook HookMark
 	// HookTools, on a verified hook's exit, counts the hook's own tool
@@ -441,7 +473,17 @@ type Buffer struct {
 	// number reported as reduced coverage. Undercounting the drops is the
 	// silent degradation this package exists to make impossible.
 	dropped atomic.Int64
+	// late are the image digests that found the buffer full, at most
+	// maxLateDigests, delivered by the next Push that finds room (lateCount
+	// lets every other Push skip the lock).
+	lateMu    sync.Mutex
+	late      []Event
+	lateCount atomic.Int32
 }
+
+// maxLateDigests bounds the image digests kept for a full buffer: one per
+// pending client exec, which the image hasher bounds the same way.
+const maxLateDigests = 64
 
 // NewBuffer returns an empty buffer.
 func NewBuffer() *Buffer { return &Buffer{events: make(chan Event, eventBuffer)} }
@@ -466,12 +508,37 @@ func NewBuffer() *Buffer { return &Buffer{events: make(chan Event, eventBuffer)}
 // bias costs nothing when the buffer is keeping up and preserves
 // attribution when it is not.
 func (b *Buffer) Push(event Event) {
+	lineage := event.Kind.lineage()
+	if !lineage && b.lateCount.Load() > 0 {
+		// A kept image digest goes ahead of a file event or a digest.
+		b.deliverLate()
+	}
 	select {
 	case b.events <- event:
+		if lineage && b.lateCount.Load() > 0 {
+			// It never takes the room an exec or exit needs: it follows it.
+			b.deliverLate()
+		}
 		return
 	default:
 	}
-	if !event.Kind.lineage() {
+	if event.Kind == KindImageDigest {
+		// An image digest displaces nothing, the tree least of all, but it
+		// is the one event a held client record waits for, and it comes
+		// when a client's start floods the buffer (cowork-1-0-8 GAP-0067).
+		// It waits for the next Push that finds room; past maxLateDigests
+		// it is dropped, and the hold records the client at its deadline.
+		b.lateMu.Lock()
+		if len(b.late) < maxLateDigests {
+			b.late = append(b.late, event)
+			b.lateCount.Add(1)
+		} else {
+			b.dropped.Add(1)
+		}
+		b.lateMu.Unlock()
+		return
+	}
+	if !lineage {
 		// A file event that arrives at a full buffer is simply late. It does
 		// not get to displace the tree.
 		b.dropped.Add(1)
@@ -486,6 +553,22 @@ func (b *Buffer) Push(event Event) {
 	case b.events <- event:
 	default:
 		b.dropped.Add(1)
+	}
+}
+
+// deliverLate queues the image digests that found the buffer full, oldest
+// first, while there is room.
+func (b *Buffer) deliverLate() {
+	b.lateMu.Lock()
+	defer b.lateMu.Unlock()
+	for len(b.late) > 0 {
+		select {
+		case b.events <- b.late[0]:
+			b.late = b.late[1:]
+			b.lateCount.Add(-1)
+		default:
+			return
+		}
 	}
 }
 

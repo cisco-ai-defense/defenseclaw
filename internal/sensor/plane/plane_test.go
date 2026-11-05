@@ -98,6 +98,81 @@ func TestBufferProtectsLineageUnderBackPressure(t *testing.T) {
 	}
 }
 
+// cowork-1-0-8 GAP-0067 (S1 review 1 N1): an image digest that finds the
+// buffer full displaces no exec or exit, and still reaches the consumer
+// once there is room, ahead of the event that found the room.
+func TestBufferKeepsTheTreeAndTheImageDigest(t *testing.T) {
+	t.Parallel()
+	buffer := NewBuffer()
+	for index := 0; index < eventBuffer; index++ {
+		kind := KindExec
+		if index%2 == 1 {
+			kind = KindExit
+		}
+		buffer.Push(Event{Kind: kind, PID: index})
+	}
+	buffer.Push(Event{Kind: KindImageDigest, PID: 4242, ImageDigestState: DigestRead})
+	if dropped := buffer.Dropped(); dropped != 0 {
+		t.Fatalf("dropped %d with the digest kept for later", dropped)
+	}
+	events := buffer.Events()
+	for index := 0; index < eventBuffer; index++ {
+		if event := <-events; event.PID != index || !event.Kind.lineage() {
+			t.Fatalf("event %d = %+v, want the tree's event %d in order", index, event, index)
+		}
+	}
+	buffer.Push(Event{Kind: KindFileRead, PID: 7})
+	if event := <-events; event.Kind != KindImageDigest || event.PID != 4242 {
+		t.Fatalf("after room = %+v, want the kept digest", event)
+	}
+	if event := <-events; event.Kind != KindFileRead {
+		t.Fatalf("then %+v, want the file read", event)
+	}
+	for index := 0; index <= maxLateDigests; index++ {
+		for len(events) < eventBuffer {
+			buffer.Push(Event{Kind: KindExec, PID: index})
+		}
+		buffer.Push(Event{Kind: KindImageDigest, PID: index})
+	}
+	if dropped := buffer.Dropped(); dropped != 1 {
+		t.Fatalf("dropped %d past maxLateDigests kept digests, want 1", dropped)
+	}
+}
+
+// S1 review 2 F1: a kept digest never takes the room an exec or exit that
+// frees it needs; it follows that event.
+func TestKeptImageDigestNeverDisplacesTheTree(t *testing.T) {
+	t.Parallel()
+	buffer := NewBuffer()
+	for index := 0; index < eventBuffer; index++ {
+		kind := KindExec
+		if index%2 == 1 {
+			kind = KindExit
+		}
+		buffer.Push(Event{Kind: kind, PID: index})
+	}
+	buffer.Push(Event{Kind: KindImageDigest, PID: 4242})
+	events := buffer.Events()
+	if event := <-events; event.PID != 0 {
+		t.Fatalf("first event %+v", event)
+	}
+	buffer.Push(Event{Kind: KindExec, PID: 9999})
+	if dropped := buffer.Dropped(); dropped != 0 {
+		t.Fatalf("dropped %d: the kept digest displaced a tree event", dropped)
+	}
+	for index := 1; index < eventBuffer; index++ {
+		if event := <-events; event.PID != index || !event.Kind.lineage() {
+			t.Fatalf("event %+v, want tree event %d in order", event, index)
+		}
+	}
+	if event := <-events; event.PID != 9999 {
+		t.Fatalf("last tree event %+v, want the exec that found room", event)
+	}
+	if kept := buffer.lateCount.Load(); kept != 1 {
+		t.Fatalf("kept digests %d, want 1", kept)
+	}
+}
+
 // TestBufferStillReportsEveryDrop keeps the counter honest for both classes.
 func TestBufferStillReportsEveryDrop(t *testing.T) {
 	t.Parallel()
