@@ -95,10 +95,10 @@ server name refuses the call.
 
 A verdict is for a server's definition, not only its name. When the command,
 arguments, folder or environment of a server change under the same name,
-DefenseClaw refuses its tool calls ("is not scanned yet") until admission has
-scanned the new definition, and it starts that admission at once: at the
-first tool call, or within 30 seconds when no call comes first. The new
-verdict then decides. A rejected definition stays blocked. When a server
+DefenseClaw starts admission for the new definition at once: at the first
+tool call, or within 30 seconds when no call comes first. While the scan is
+pending, the hook behavior follows the tier table below. The new verdict
+then decides. A rejected definition stays blocked. When a server
 that admission rejected is changed back to a definition that scans clean,
 DefenseClaw lifts its own block and the server's tool calls are allowed
 again. A block an administrator set stays. On a per-user gateway, two
@@ -117,11 +117,15 @@ decided on the list read before, and the gateway log says why.
 Admission decides on tool calls, not on process starts. Claude Code starts
 the servers of a project it opens as soon as the user approves the
 project's `.mcp.json`, as the user and before DefenseClaw has scanned them.
-Until admission allows a server, DefenseClaw refuses every tool call to it
-("is not scanned yet"), and it keeps refusing the calls of a server that
-admission rejected or could not scan. The server process itself can run
-until Claude Code stops it. It runs with the user's own rights, the same
-rights the user has to start any program.
+
+| Hook tier | New server while admission is pending or unavailable | Completed failed or rejected scan |
+| --- | --- | --- |
+| Per-user default or permissive | The call runs with a warning naming the server and pending scan. The audit records `allow`, `would_block=true`, and the admission reason. | The call is blocked. |
+| Per-user strict or managed standalone | The call is blocked with the server name and a retry time based on the scan timeout. | The call is blocked. |
+
+An explicit asset-policy deny or runtime disable blocks in every tier. The
+server process itself can run until Claude Code stops it. It runs with the
+user's own rights, the same rights the user has to start any program.
 
 On managed Windows, a project server whose `cwd` is a relative path, or
 names a folder the server cannot start in, is blocked as not scanned. The
