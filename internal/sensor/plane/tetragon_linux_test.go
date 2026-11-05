@@ -59,7 +59,6 @@ type fakeFeed struct {
 	batches chan KernelBatch
 	mu      sync.Mutex
 	backend Backend
-	err     error
 	once    sync.Once
 	done    chan struct{}
 }
