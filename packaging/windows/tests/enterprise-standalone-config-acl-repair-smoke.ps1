@@ -128,18 +128,129 @@ try {
         Assert-GateRefuses -Path $manifest -Recovery 'Setup writes a new targets.yaml enumerated from it'
         Set-DefenseClawPathAcl -Path $manifest -Kind AdminFile -GatewayServiceSID $script:AdministratorsSID
         Add-UsersWrite -Path $metadata
-        Assert-GateRefuses -Path $metadata -Recovery 'remove that entry and check the file'
+        Assert-GateRefuses -Path $metadata -Recovery 'remove that entry, or give the file back to Administrators'
         Set-DefenseClawPathAcl -Path $metadata -Kind AdminFile -GatewayServiceSID $script:AdministratorsSID
         # Modify, as icacls /grant (M) plants it, and an entry that only adds
         # children, which could plant a file the lifecycle reads.
         foreach ($rights in 'Modify', 'Write') {
             Add-UsersWrite -Path $ConfigDirectory -Rights $rights
-            Assert-GateRefuses -Path $ConfigDirectory -Recovery 'Remove that entry, then run Setup /ensure again.'
+            Assert-GateRefuses -Path $ConfigDirectory -Recovery 'remove that entry, or give the folder back to Administrators'
             Set-DefenseClawPathAcl -Path $ConfigDirectory -Kind ConfigDirectory -GatewayServiceSID $sid
         }
         Assert-DefenseClawStandaloneContentTrusted -Layout $gateLayout
         if ($script:repairCalls -ne 0) {
             throw 'the content gate repaired ACLs'
+        }
+
+        # GAP-0603: every Setup-owned record kind and both content files,
+        # each with an untrusted owner and a canonical ACL, an untrusted entry
+        # and an administrator owner, and both: refused before the stop and
+        # named, nothing changed. The standalone self-heal leaves an
+        # untrusted owner and a missing DACL as they are; Secure Client still
+        # repairs, and Setup's own account as owner is still repaired.
+        $users = $script:UsersSID
+        function Get-OwnerSID([string]$Path) {
+            return Get-DefenseClawAclOwnerSID -Acl (Microsoft.PowerShell.Security\Get-Acl -LiteralPath $Path)
+        }
+        function Set-TestOwner([string]$Path, [string]$SID) {
+            $out = & icacls.exe $Path /setowner "*$SID" 2>&1
+            if ($LASTEXITCODE -ne 0) { throw "icacls /setowner $SID ${Path}: $out" }
+        }
+        foreach ($name in @(
+            'deployment.json', 'agent-application-control-attestation.json', 'codex-requirements-ownership.json',
+            'codex-requirements-acl-backup.json', 'managed-hooks-lifecycle.json', 'managed-hooks-teardown.json'
+        )) {
+            $file = [IO.Path]::Combine($State, $name)
+            [IO.File]::WriteAllText($file, '{}')
+            Set-DefenseClawPathAcl -Path $file -Kind AdminFile -GatewayServiceSID $script:AdministratorsSID
+        }
+        $kinds = [ordered]@{
+            MetadataPath = 'deployment.json'
+            AgentApplicationControlAttestationPath = 'agent-application-control-attestation.json'
+            CodexRequirementsOwnershipPath = 'codex-requirements-ownership.json'
+            CodexRequirementsAclBackupPath = 'codex-requirements-acl-backup.json'
+            ManagedHooksLifecycleJournalPath = 'managed-hooks-lifecycle.json'
+            ManagedHooksTeardownJournalPath = 'managed-hooks-teardown.json'
+        }
+        foreach ($key in $kinds.Keys) {
+            $gateLayout[$key] = [IO.Path]::Combine($State, $kinds[$key])
+        }
+        $variants = @(
+            @{ Name = 'owner'; Owner = $true; Entry = $false },
+            @{ Name = 'entry'; Owner = $false; Entry = $true },
+            @{ Name = 'both'; Owner = $true; Entry = $true }
+        )
+        foreach ($key in @($kinds.Keys) + @('ConfigPath', 'ManifestPath')) {
+            $path = [string]$gateLayout[$key]
+            $kind = if ($key -eq 'ConfigPath') { 'ConfigFile' } else { 'AdminFile' }
+            $gatewaySID = if ($key -eq 'ConfigPath') { $sid } else { $script:AdministratorsSID }
+            $recovery = switch ($key) {
+                'ConfigPath' { 'Setup /ensure CONFIG=<the approved administrator-only config>' }
+                'ManifestPath' { 'Setup writes a new targets.yaml enumerated from it' }
+                default { 'remove that entry, or give the file back to Administrators' }
+            }
+            foreach ($variant in $variants) {
+                if ($variant.Owner) { Set-TestOwner -Path $path -SID $users }
+                if ($variant.Entry) { Add-UsersWrite -Path $path -Rights Modify }
+                $before = (Microsoft.PowerShell.Security\Get-Acl -LiteralPath $path).Sddl
+                Assert-GateRefuses -Path $path -Recovery $recovery
+                if ((Microsoft.PowerShell.Security\Get-Acl -LiteralPath $path).Sddl -cne $before) {
+                    throw "the content gate changed $key ($($variant.Name))"
+                }
+                Set-TestOwner -Path $path -SID $script:AdministratorsSID
+                Set-DefenseClawPathAcl -Path $path -Kind $kind -GatewayServiceSID $gatewaySID
+            }
+        }
+        Assert-DefenseClawStandaloneContentTrusted -Layout $gateLayout
+
+        # The self-heal path itself (Verify, the attestation, the journals and
+        # the Codex records read through it).
+        $healed = [IO.Path]::Combine($State, 'self-heal.json')
+        [IO.File]::WriteAllText($healed, '{}')
+        Set-DefenseClawPathAcl -Path $healed -Kind AdminFile -GatewayServiceSID $script:AdministratorsSID
+        $writers = @($script:SystemSID, $script:AdministratorsSID, $script:TrustedInstallerSID)
+        Set-TestOwner -Path $healed -SID $users
+        $healError = ''
+        try {
+            Assert-DefenseClawPathAcl -Path $healed -AllowedWriterSIDs $writers `
+                -SelfHealKind AdminFile -SelfHealGatewayServiceSID $script:AdministratorsSID
+        }
+        catch {
+            $healError = $_.Exception.Message
+        }
+        if ($healError -notmatch [regex]::Escape("untrusted owner $users on managed path: $healed") -or
+            (Get-OwnerSID -Path $healed) -ne $users) {
+            throw "standalone self-heal re-stamped an untrusted owner in place: '$healError', owner $(Get-OwnerSID -Path $healed)"
+        }
+        Add-UsersWrite -Path $healed -Rights Modify
+        $healError = ''
+        try {
+            Assert-DefenseClawPathAcl -Path $healed -AllowedWriterSIDs $writers `
+                -SelfHealKind AdminFile -SelfHealGatewayServiceSID $script:AdministratorsSID
+        }
+        catch {
+            $healError = $_.Exception.Message
+        }
+        if (-not $healError -or (Get-OwnerSID -Path $healed) -ne $users) {
+            throw "standalone self-heal re-stamped an untrusted owner and entry in place: '$healError'"
+        }
+        # Secure Client keeps repairing a foreign owner (unchanged there).
+        function Test-DefenseClawStandaloneProfile { return $false }
+        Assert-DefenseClawPathAcl -Path $healed -AllowedWriterSIDs $writers `
+            -SelfHealKind AdminFile -SelfHealGatewayServiceSID $script:AdministratorsSID
+        if ((Get-OwnerSID -Path $healed) -ne $script:AdministratorsSID) {
+            throw 'Secure Client self-heal no longer repairs a foreign owner'
+        }
+        function Test-DefenseClawStandaloneProfile { return $true }
+        # Setup's own account as owner is still repaired on standalone.
+        $self = Get-DefenseClawCurrentProcessUserSID
+        if ($self -notin $writers) {
+            Set-TestOwner -Path $healed -SID $self
+            Assert-DefenseClawPathAcl -Path $healed -AllowedWriterSIDs $writers `
+                -SelfHealKind AdminFile -SelfHealGatewayServiceSID $script:AdministratorsSID
+            if ((Get-OwnerSID -Path $healed) -ne $script:AdministratorsSID) {
+                throw "standalone self-heal refused Setup's own account as owner"
+            }
         }
         Add-UsersWrite -Path $Config
         $after = Microsoft.PowerShell.Security\Get-Acl -LiteralPath $Config

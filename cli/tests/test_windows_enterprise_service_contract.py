@@ -7031,8 +7031,16 @@ def test_untrusted_config_acl_is_refused_before_the_transaction_stops_a_service(
         "if ($CheckOnly) {"
     ) < repair.index("Set-DefenseClawRetainedRuntimeAcls")
     refusal = _function_text(module, "Assert-DefenseClawRepairableConfigAcl")
-    assert "Remove that entry, then run Setup /ensure again." in refusal
-    assert "CONFIG=<the approved config> writes a new config.yaml" in refusal
+    assert "(remove that entry, then run Setup /ensure " in refusal
+    assert "CONFIG=<the approved config> writes a new config.yaml " in refusal
+    assert '"from that administrator-only file instead): $($_.Exception.Message)")' in refusal
+
+    # GAP-0603: the standalone self-heal never re-stamps an untrusted owner
+    # or a null DACL; Setup's own account as owner is still repaired.
+    heal = _function_text(module, "Assert-DefenseClawPathAcl")
+    assert "$untrustedContract = @('Dacl')" in heal
+    assert "if ([string]$currentOwner -cne [string](Get-DefenseClawCurrentProcessUserSID)) {" in heal
+    assert "-not ($_.Kind -eq 'Contract' -and $_.Severity -in $untrustedContract)" in heal
 
     # The install-like lifecycle refuses every content path another account
     # can change before the transaction stops anything, and before Repair
@@ -7053,6 +7061,7 @@ def test_untrusted_config_acl_is_refused_before_the_transaction_stops_a_service(
         assert f"'{path}'" in content and f"$Layout.{path}" in restamped, path
     assert "'ManagedHooksLifecycleJournalPath'" in content
     assert "-SelfHealKind" not in content and "Set-DefenseClawPathAcl" not in content
+    assert "-AllowedOwnerSIDs @($adminWriters + @(Get-DefenseClawCurrentProcessUserSID))" in content
 
 def test_constrained_language_guards_run_before_any_dotnet_use() -> None:
     installer = read(INSTALLER).replace("\r\n", "\n")
