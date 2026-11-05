@@ -106,11 +106,11 @@ try {
                 throw "content gate on ${Path}: '$message'"
             }
         }
-        function Add-UsersWrite([string]$Path) {
+        function Add-UsersWrite([string]$Path, [string]$Rights = 'Write') {
             $acl = Microsoft.PowerShell.Security\Get-Acl -LiteralPath $Path
             [void]$acl.AddAccessRule([Security.AccessControl.FileSystemAccessRule]::new(
                 [Security.Principal.SecurityIdentifier]::new($script:UsersSID),
-                [Security.AccessControl.FileSystemRights]::Write,
+                [Security.AccessControl.FileSystemRights]$Rights,
                 [Security.AccessControl.AccessControlType]::Allow))
             Microsoft.PowerShell.Security\Set-Acl -LiteralPath $Path -AclObject $acl
         }
@@ -128,7 +128,8 @@ try {
         Add-UsersWrite -Path $metadata
         Assert-GateRefuses -Path $metadata -Recovery 'remove that entry and check the file'
         Set-DefenseClawPathAcl -Path $metadata -Kind AdminFile -GatewayServiceSID $script:AdministratorsSID
-        Add-UsersWrite -Path $ConfigDirectory
+        # Modify, as icacls /grant (M) plants it: more than adding children.
+        Add-UsersWrite -Path $ConfigDirectory -Rights Modify
         Assert-GateRefuses -Path $ConfigDirectory -Recovery 'Remove that entry, then run Setup /ensure again.'
         Set-DefenseClawPathAcl -Path $ConfigDirectory -Kind ConfigDirectory -GatewayServiceSID $sid
         Assert-DefenseClawStandaloneContentTrusted -Layout $gateLayout
