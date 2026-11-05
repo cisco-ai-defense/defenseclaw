@@ -1734,7 +1734,11 @@ def test_doctor_never_passes_an_unverified_managed_windows_mode(
     assert not state.runtime_verified and not state.current
     assert report["runtime_verified"] is False and report["current"] is False
     assert report["provenance"] == "windows-managed-runtime-unverified"
-    assert "defenseclaw enterprise windows verify" in report["note"]
+    # cowork-1-0-8 GAP-0076: the installed CLI as typed in PowerShell; Setup
+    # puts no DefenseClaw command on PATH.
+    verify = r"`& 'C:\Program Files\Cisco\DefenseClaw\bin\defenseclaw.exe' enterprise windows verify --profile standalone`"
+    assert verify + " from an elevated PowerShell prompt" in report["note"], report["note"]
+    assert "`defenseclaw enterprise windows" not in report["note"]
     emitted: list[tuple[str, str, str, str]] = []
     with (
         patch("defenseclaw.fail_mode.connector_fail_mode_report", return_value=report),
@@ -1750,7 +1754,7 @@ def test_doctor_never_passes_an_unverified_managed_windows_mode(
         cmd_doctor._check_connector_inventory(cfg, "codex", cmd_doctor._DoctorResult())
     rows = [row for row in emitted if row[1] == "Mode"]
     assert [row[0] for row in rows] == ["warn"], rows
-    assert "unverified" in rows[0][2] and "enterprise windows verify" in rows[0][3]
+    assert "unverified" in rows[0][2] and rows[0][3] == "from an elevated PowerShell prompt run " + verify, rows
 
 
 @pytest.mark.parametrize(

@@ -143,6 +143,18 @@ def normalize_fail_mode(value: object, *, default: str = "closed") -> str:
     return raw if raw in _VALID_MODES else default
 
 
+def managed_windows_verify_command() -> str:
+    """The managed Windows deployment's verify as an administrator types it.
+
+    Setup puts no DefenseClaw command on PATH, so the installed CLI is named
+    by its path under %ProgramFiles%, as a PowerShell literal: the form of
+    managed.WindowsAdminCommand in the Go CLI (cowork-1-0-8 GAP-0076).
+    """
+    root = os.environ.get("ProgramFiles", "").strip().rstrip("\\") or r"C:\Program Files"
+    cli = root + r"\Cisco\DefenseClaw\bin\defenseclaw.exe"
+    return "& '" + cli.replace("'", "''") + "' enterprise windows verify --profile standalone"
+
+
 @dataclass(frozen=True)
 class ConnectorFailModeState:
     connector: str
@@ -246,8 +258,8 @@ class ConnectorFailModeState:
         if not self.runtime_verified and self._managed_windows_runtime:
             notes.append(
                 "the managed native hook runs the mode of the runtime generation the guardian publishes, "
-                "which this command cannot verify: `defenseclaw enterprise windows verify` from an elevated "
-                "prompt checks it"
+                f"which this command cannot verify: `{managed_windows_verify_command()}` from an elevated "
+                "PowerShell prompt checks it"
             )
         elif not self.runtime_verified:
             default = f" (default {self.runtime})" if self.runtime else ""

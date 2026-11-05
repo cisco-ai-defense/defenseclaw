@@ -17634,6 +17634,7 @@ def _check_connector_mode(cfg, gc, connector: str, r: _DoctorResult) -> None:
             try:
                 from defenseclaw.fail_mode import (
                     connector_fail_mode_report,
+                    managed_windows_verify_command,
                     rendered_fail_mode,
                     report_renders_fail_mode,
                 )
@@ -17675,7 +17676,7 @@ def _check_connector_mode(cfg, gc, connector: str, r: _DoctorResult) -> None:
                         "Mode",
                         f"{detail}; runtime fail mode unverified: the guardian's runtime generation sets it",
                         r=r,
-                        remediation="run `defenseclaw enterprise windows verify` from an elevated prompt",
+                        remediation=f"from an elevated PowerShell prompt run `{managed_windows_verify_command()}`",
                     )
                 elif fail_mode.get("runtime_verified") is False:
                     # The installed hook takes its mode from the agent's

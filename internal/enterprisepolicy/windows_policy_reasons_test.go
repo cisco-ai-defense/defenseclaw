@@ -12,6 +12,8 @@ import (
 	"strconv"
 	"strings"
 	"testing"
+
+	"github.com/defenseclaw/defenseclaw/internal/managed"
 )
 
 // A missing Windows machine hook is drift even when no user is enrolled.
@@ -60,5 +62,42 @@ func TestWindowsPolicyReasonsDoNotConditionPublicationOnEnrollment(t *testing.T)
 				return false
 			})
 		}
+	}
+}
+
+// cowork-1-0-8 GAP-0076: the details an administrator of a managed Windows
+// computer reads name the installed CLI as typed in an elevated PowerShell
+// prompt; Setup puts no DefenseClaw command on PATH. Linux and macOS keep
+// the gateway command.
+func TestWindowsPolicyDetailsNameTheInstalledCLI(t *testing.T) {
+	t.Setenv("ProgramFiles", `C:\Program Files`)
+	cli := "`& 'C:\\Program Files\\Cisco\\DefenseClaw\\bin\\defenseclaw.exe' "
+	if got, want := policyExportCommand("windows", "--connector", "claudecode", "--format", "claude-hklm-json"),
+		cli+"enterprise policy export --connector claudecode --format claude-hklm-json` (from an elevated PowerShell prompt)"; got != want {
+		t.Errorf("windows export = %s, want %s", got, want)
+	}
+	for _, goos := range []string{"linux", "darwin"} {
+		if got, want := policyExportCommand(goos, "--connector", "codex"), "`defenseclaw-gateway enterprise policy export --connector codex`"; got != want {
+			t.Errorf("%s export = %s, want %s", goos, got, want)
+		}
+	}
+	missing := windowsMissingMachineHookDiagnostic("Codex")
+	for _, want := range []string{"From an elevated PowerShell prompt, run " + cli + "enterprise windows reconcile --profile standalone` or " +
+		cli + "enterprise windows repair --profile standalone`"} {
+		if !strings.Contains(missing, want) {
+			t.Errorf("missing machine hook diagnostic lacks %q: %s", want, missing)
+		}
+	}
+	state := &State{Connector: "codex"}
+	flapConflict("windows", state, "codex", `C:\ProgramData\OpenAI\Codex\requirements.toml`, flapThreshold)
+	if len(state.Conflicts) != 1 || !strings.Contains(state.Conflicts[0], cli+"enterprise policy export --connector codex` (from an elevated PowerShell prompt)") ||
+		strings.Contains(state.Conflicts[0], "`defenseclaw-gateway ") {
+		t.Errorf("windows flap conflict = %q", state.Conflicts)
+	}
+	// The renderer follows %ProgramFiles%.
+	t.Setenv("ProgramFiles", `D:\Apps`)
+	if got := policyExportCommand("windows", "--connector", "wsl"); !strings.HasPrefix(got, "`"+managed.WindowsAdminCommand()) ||
+		!strings.Contains(got, `D:\Apps\Cisco`) {
+		t.Errorf("export with another ProgramFiles = %s", got)
 	}
 }

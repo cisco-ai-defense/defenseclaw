@@ -565,7 +565,7 @@ func (codexTarget) Reconcile(opts Options) (State, error) {
 			return state, err
 		}
 		if state.OwnedEntries == 0 {
-			state.detail("missing_defenseclaw_hooks: deploy the output of `defenseclaw-gateway enterprise policy export --connector codex` through your policy tool")
+			state.detail("missing_defenseclaw_hooks: deploy the output of %s through your policy tool", policyExportCommand(opts.goos(), "--connector", "codex"))
 		}
 		state.finish()
 		return state, nil

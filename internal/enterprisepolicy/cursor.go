@@ -280,7 +280,7 @@ func (t cursorTarget) Reconcile(opts Options) (State, error) {
 		return state, err
 	}
 	if policy.Ownership == config.MachinePolicyOwnershipVerifyOnly && state.OwnedEntries == 0 {
-		state.detail("missing_defenseclaw_hooks: deploy the output of `defenseclaw-gateway enterprise policy export --connector cursor` through your policy tool")
+		state.detail("missing_defenseclaw_hooks: deploy the output of %s through your policy tool", policyExportCommand(opts.goos(), "--connector", "cursor"))
 	}
 	state.detail("Cursor applies enterprise hooks.json on plans that support enterprise hooks; confirm with `enterprise policy verify --live` on a real client")
 	state.finish()
