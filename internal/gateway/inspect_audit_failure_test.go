@@ -150,6 +150,24 @@ func TestInspectAuditFailureVerdictReasons(t *testing.T) {
 	}
 }
 
+// A default-tier alert lets the call run with its finding, as the hook
+// routes' allow with raw action alert does; strict closes it.
+func TestInspectAuditFailureVerdictKeepsADefaultTierAlert(t *testing.T) {
+	fixture := newAuditFailureHookFixture(t, "")
+	alert := &ToolInspectVerdict{Action: "alert", RawAction: "alert", Severity: "MEDIUM", Reason: "matched: rule"}
+	if fixture.api.inspectAuditFailureVerdict(t.Context(), "claudecode", &ToolInspectRequest{Tool: "exec"}, alert) {
+		t.Fatal("default tier alert was blocked")
+	}
+	if alert.Action != "alert" || alert.Severity != "MEDIUM" || alert.Reason != "matched: rule" {
+		t.Fatalf("default tier alert changed: %+v", alert)
+	}
+	fixture.api.scannerCfg.Guardrail.RulePack = "strict"
+	strict := &ToolInspectVerdict{Action: "alert", RawAction: "alert", Severity: "MEDIUM"}
+	if !fixture.api.inspectAuditFailureVerdict(t.Context(), "claudecode", &ToolInspectRequest{Tool: "exec"}, strict) {
+		t.Fatal("strict tier alert was not blocked")
+	}
+}
+
 // A failed audit write never weakens a block.
 func TestInspectAuditFailureVerdictKeepsABlock(t *testing.T) {
 	fixture := newAuditFailureHookFixture(t, "")
