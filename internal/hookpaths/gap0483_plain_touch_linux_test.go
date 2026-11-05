@@ -38,6 +38,30 @@ func TestGAP0483PlainTouchMissingLeavesSkipPathWalk(t *testing.T) {
 	if walked, _ := memo.WorkParts(); walked > 64 {
 		t.Fatalf("ordinary leaves walked %d path parts, want at most 64", walked)
 	}
+	for _, prefix := range []string{"touch -- ", "touch -c ", "touch -amc ", "touch --no-create --time=atime -- "} {
+		for _, operands := range [][]string{names, func() []string {
+			withDot := make([]string, len(names))
+			for i, name := range names {
+				withDot[i] = "./" + name
+			}
+			return withDot
+		}()} {
+			command := prefix + strings.Join(operands, " ")
+			memo := NewTargetMemo()
+			if got := memo.ActionCommandDecisionWithDialectAndGlobFacts(command, cwd, home, actionfacts.DialectPOSIX, nil); got != "" {
+				t.Fatalf("ordinary variant %q = %q, want allow", prefix, got)
+			}
+			if walked, _ := memo.WorkParts(); walked > 64 {
+				t.Fatalf("ordinary variant %q walked %d path parts, want at most 64", prefix, walked)
+			}
+			if !OrdinaryLongTouchMissingLeaves(command, cwd, home) {
+				t.Fatalf("ordinary variant %q has no late proof", prefix)
+			}
+		}
+	}
+	if OrdinaryLongTouchMissingLeaves("touch "+strings.Join(names[:128], " ")+"\necho hello", cwd, home) {
+		t.Fatal("a second shell statement received a touch-only proof")
+	}
 	for _, index := range []int{0, len(names) / 2, len(names) - 1} {
 		withKey := append([]string(nil), names...)
 		withKey[index] = "../.ssh/authorized_keys"
