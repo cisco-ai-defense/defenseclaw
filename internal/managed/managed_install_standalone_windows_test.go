@@ -134,3 +134,31 @@ func TestSecureClientManagedInstallRepairStillRepairsContentFiles(t *testing.T) 
 		}
 	}
 }
+
+// The decision itself needs no privilege: it only reads the descriptor. A
+// content file with an untrusted writer is refused with the Setup step and
+// left as it is; ACL-only drift is handed back to the repair.
+func TestRefuseStandaloneContentRepairDecision(t *testing.T) {
+	_, drifted := standaloneInstallStateForTest(t, usersWriteDACL)
+	for _, name := range []string{"config", "manifest", "deployment"} {
+		kind := ObjectAdminFile
+		if name == "config" {
+			kind = ObjectConfigFile
+		}
+		result, refused := refuseStandaloneContentRepair(
+			managedDataTarget{path: drifted[name], kind: kind, content: true}, CanonicalOptions{Quiet: true},
+		)
+		if !refused || result.Outcome != CanonicalBoundary || !strings.Contains(result.RepairError, "Setup /ensure") {
+			t.Fatalf("%s: refused=%t result=%+v, want a boundary refusal naming Setup /ensure", name, refused, result)
+		}
+		if err := ValidateTrustedFilePath(drifted[name], name); err == nil {
+			t.Fatalf("%s: the refusal changed the descriptor", name)
+		}
+	}
+	_, readers := standaloneInstallStateForTest(t, extraReaderDACL)
+	if _, refused := refuseStandaloneContentRepair(
+		managedDataTarget{path: readers["manifest"], kind: ObjectAdminFile, content: true}, CanonicalOptions{Quiet: true},
+	); refused {
+		t.Fatal("ACL-only drift (an extra reader) was refused; it must keep its repair")
+	}
+}
