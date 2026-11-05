@@ -211,30 +211,68 @@ def test_first_run_moves_the_managed_leftover_aside_before_its_rollback_point(tm
     assert not lock.exists() or "2026-11-04T07:25:38Z" not in lock.read_text(encoding="utf-8")
 
 
+ACCOUNT = "S-1-5-21-4053867087-1811248452-1158138866-1001"
+_FA, _M, _M_DC, _RC = 0x1F01FF, 0x1301BF, 0x1301FF, 0x20000
+
+
+def _ace(sid: str, mask: int, flags: int = 0) -> tuple[int, int, int, str]:
+    return (mask, 1, flags, sid)
+
+
+@pytest.mark.parametrize(
+    ("entries", "locked"),
+    [
+        # hook_contract_lock.json as a 1.0.8 managed uninstall left it (vm-dc-cowork-win11).
+        ([_ace("S-1-3-4", _RC), _ace(ACCOUNT, _M), _ace("S-1-5-18", _FA), _ace("S-1-5-32-544", _FA)], True),
+        # hooks\: the same lock on a folder, with inherit-only copies for its children.
+        (
+            [
+                _ace("S-1-3-4", _RC),
+                _ace(ACCOUNT, _M_DC),
+                _ace(ACCOUNT, 0xE0010040, 0x0B),
+                _ace("S-1-5-18", _FA),
+                _ace("S-1-5-18", 0x10000000, 0x0B),
+                _ace("S-1-5-32-544", _FA),
+                _ace("S-1-5-32-544", 0x10000000, 0x0B),
+            ],
+            True,
+        ),
+        # foreign-hook-env.json: written by the runtime in the locked folder, no OWNER RIGHTS entry.
+        ([_ace(ACCOUNT, _M_DC), _ace("S-1-5-18", _FA), _ace("S-1-5-32-544", _FA)], True),
+        # The profile's own access list (GAP-0069): the account has full control.
+        ([_ace("S-1-5-18", _FA, 0x10), _ace("S-1-5-32-544", _FA, 0x10), _ace(ACCOUNT, _FA, 0x10)], False),
+    ],
+    ids=["lock-file", "hooks-folder", "foreign-hook-env", "profile-inherited"],
+)
+def test_field_lock_is_the_managed_runtime_access_list(entries, locked):
+    assert managed_leftovers.field_locked(entries, ACCOUNT) is locked
+
+
 @pytest.mark.skipif(os.name != "nt", reason="Windows access lists")
 def test_managed_custody_reads_the_windows_access_list(tmp_path):
     user = os.environ.get("USERDOMAIN", "") + "\\" + getpass.getuser()
-    own = tmp_path / "own.json"
+    administrators, system, owner_rights = "*S-1-5-32-544", "*S-1-5-18", "*S-1-3-4"
+    plain = tmp_path / "plain.json"
     managed = tmp_path / "managed.json"
     other = tmp_path / "other.json"
-    for path in (own, managed, other):
+    # One icacls call per file: once OWNER RIGHTS is read-only, a standard
+    # account can no longer change the access list.
+    grants = {
+        # The profile's access list (icacls /inheritance:r keeps it as explicit entries).
+        plain: [f"{user}:(F)", f"{system}:(F)", f"{administrators}:(F)"],
+        # The field lock: the account Modify and a read-only OWNER RIGHTS entry.
+        managed: [f"{user}:(M)", f"{system}:(F)", f"{administrators}:(F)", f"{owner_rights}:(RC)"],
+        # The same, but every user can write it: not DefenseClaw's custody.
+        other: [f"{user}:(M)", f"{system}:(F)", f"{administrators}:(F)", f"{owner_rights}:(RC)", "*S-1-5-32-545:(M)"],
+    }
+    for path, grant in grants.items():
         path.write_text("{}", encoding="utf-8")
         subprocess.run(["icacls", str(path), "/setowner", user], check=True, capture_output=True)
-        subprocess.run(
-            ["icacls", str(path), "/inheritance:r", "/grant:r", f"{user}:(F)", "*S-1-5-18:(F)"],
-            check=True,
-            capture_output=True,
-        )
-        # icacls /inheritance:r can keep the profile's inherited entries as
-        # explicit ones (SYSTEM, Administrators, the account), so drop the
-        # Administrators entry: "own" is only this account and SYSTEM.
-        subprocess.run(["icacls", str(path), "/remove:g", "*S-1-5-32-544"], check=True, capture_output=True)
-    # The field lock: Administrators full control and a read-only OWNER RIGHTS entry.
-    subprocess.run(
-        ["icacls", str(managed), "/grant", "*S-1-5-32-544:(F)", "*S-1-3-4:(RC)"], check=True, capture_output=True
-    )
-    # Writable by every user: not DefenseClaw's custody.
-    subprocess.run(["icacls", str(other), "/grant", "*S-1-5-32-545:(M)"], check=True, capture_output=True)
-    assert managed_leftovers.managed_custody(str(own)) is False
+        subprocess.run(["icacls", str(path), "/inheritance:r", "/grant:r", *grant], check=True, capture_output=True)
+    from defenseclaw.file_permissions import windows_acl_write_error
+
+    # The per-user rule refuses the plain entry too, so only the lock tells them apart.
+    assert windows_acl_write_error(str(plain)) is not None
+    assert managed_leftovers.managed_custody(str(plain)) is False
     assert managed_leftovers.managed_custody(str(managed)) is True
     assert managed_leftovers.managed_custody(str(other)) is False

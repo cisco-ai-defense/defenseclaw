@@ -8,6 +8,11 @@ for released versions and assets, and the
 [documentation website](https://cisco-ai-defense.github.io/defenseclaw/docs/)
 for current behavior.
 
+## [Unreleased] — 1.0.9
+
+### Fixed
+- **A per-user first run on Windows moves only what a managed install left.** It moved an entry with a managed leftover's name (for example `hooks` or `hook_contract_lock.json`) whenever only the account, LocalSystem and Administrators could write it, which is also the plain access list a profile gives every new file. It now moves an entry only when it still carries the managed access list: Administrators full control, the account Modify (not the right to change permissions or take ownership) and, where the managed install set one, a read-only OWNER RIGHTS entry. (cowork-1-0-8 GAP-0069)
+
 ## [Unreleased] — 1.0.8
 
 ### Added
