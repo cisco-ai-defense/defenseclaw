@@ -3,7 +3,49 @@
 
 package gateway
 
-import "testing"
+import (
+	"os"
+	"path/filepath"
+	"testing"
+)
+
+func TestGAP0428PrintfFormatBindingsFourCell(t *testing.T) {
+	f := newB36ManagedHookFixture(t)
+	if err := os.Symlink("../.ssh/authorized_keys", filepath.Join(f.project, "0")); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink("../.ssh/authorized_keys", filepath.Join(f.project, "3")); err != nil {
+		t.Fatal(err)
+	}
+	rows := []struct{ name, command, want string }{
+		{"indexed_name_protected", `f=out.txt; printf -v 'f[1+0]' '%n' f; echo m >> "$f"`, "block"},
+		{"attached_name_protected", `f=out.txt; printf '-vf[1+0]' '%n' f; echo m >> "$f"`, "block"},
+		{"plain_name_protected", `f=out.txt; printf '%n' f; echo m >> "$f"`, "block"},
+		{"end_option_protected", `f=out.txt; printf -- '%n' f; echo m >> "$f"`, "block"},
+		{"dynamic_name_protected", `f=out.txt; target=f; printf -v 'g[1]' '%n' "$target"; echo m >> "$f"`, "block"},
+		{"literal_prefix_protected", `f=out.txt; printf -v 'f[1+0]' 'abc%n' f; echo m >> "$f"`, "block"},
+		{"prior_conversion_protected", `f=out.txt; printf -v 'f[1+0]' '%s%n' abc f; echo m >> "$f"`, "block"},
+		{"plain_prefix_protected", `f=out.txt; printf 'abc%n' f; echo m >> "$f"`, "block"},
+		{"unrelated_name_ordinary", `f=out.txt; printf -v 'g[1]' '%n' g; echo m >> "$f"`, "allow"},
+		{"prior_conversion_ordinary", `f=out.txt; printf -v 'g[1+0]' '%s%n' abc g; echo m >> "$f"`, "allow"},
+		{"literal_percent_ordinary", `f=out.txt; printf -v 'g[1]' '%%n' f; echo m >> "$f"`, "allow"},
+	}
+	payloads := make([][]byte, len(rows))
+	for i, row := range rows {
+		payloads[i] = f.payload(t, row.command)
+	}
+	headers := f.clientHeaders(t, payloads)
+	var calls []*hookCall
+	for i, row := range rows {
+		calls = append(calls, everyMode(row.name, payloads[i], headers[i])...)
+	}
+	f.answerAll(t, calls)
+	for i, call := range calls {
+		if want := rows[i/4].want; call.verdict != want {
+			t.Errorf("%s: verdict %s, want %s", call.name, call.verdict, want)
+		}
+	}
+}
 
 func TestGAP0428IndexedPrintfBindingsFourCell(t *testing.T) {
 	f := newB36ManagedHookFixture(t)

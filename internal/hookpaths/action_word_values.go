@@ -185,6 +185,171 @@ func actionPrintfStaticIndex(index string) (int64, bool) {
 	return left - right, true
 }
 
+// printf's %n conversion assigns through an argument as well as -v's
+// destination. Forget those names before a later redirect uses their values.
+func actionPrintfFormatBindings(call *syntax.CallExpr, values actionValues, cwd, home string) ([]string, string, bool) {
+	if call == nil || len(call.Args) < 2 {
+		return nil, "", false
+	}
+	program, fixed := StaticWord(call.Args[0], home)
+	if !fixed {
+		return nil, "", false
+	}
+	index := 1
+	if program == "builtin" || program == "command" {
+		if _, defined := values[actionFunctionValuePrefix+program]; defined || len(call.Args) < 3 {
+			return nil, "", false
+		}
+		wrapped, known := StaticWord(call.Args[1], home)
+		if !known || wrapped != "printf" {
+			return nil, "", false
+		}
+		index = 2
+	} else if program != "printf" {
+		return nil, "", false
+	} else if _, defined := values[actionFunctionValuePrefix+program]; defined {
+		return nil, "", false
+	}
+	option, known := actionWordValue(call.Args[index], values, cwd, home)
+	if !known {
+		return nil, "", true
+	}
+	if option == "-v" {
+		index += 2
+	} else if strings.HasPrefix(option, "-v") {
+		index++
+	} else if option == "--" {
+		index++
+	}
+	if index >= len(call.Args) {
+		return nil, "", false
+	}
+	format, known := actionWordValue(call.Args[index], values, cwd, home)
+	if known && !actionPrintfHasNameConversion(format) {
+		return nil, "", false
+	}
+	if known {
+		if name, count, exact := actionPrintfExactNameBinding(format, call.Args[index+1:], values, cwd, home); exact {
+			return []string{name}, count, false
+		}
+	}
+	var names []string
+	for _, arg := range call.Args[index+1:] {
+		value, fixed := actionWordValue(arg, values, cwd, home)
+		if !fixed {
+			return nil, "", true
+		}
+		name, _, bound := actionPrintfScalarName(value, 0)
+		if !bound {
+			return nil, "", true
+		}
+		if name != "" {
+			names = append(names, name)
+		}
+	}
+	return names, "", false
+}
+
+// A literal prefix and plain %s operands make %n's count exact. Other
+// conversions leave the target unknown to the value tracker.
+func actionPrintfExactNameBinding(format string, args []*syntax.Word, values actionValues, cwd, home string) (string, string, bool) {
+	count, argIndex := 0, 0
+	for i := 0; i < len(format); {
+		if format[i] != '%' {
+			end := strings.IndexByte(format[i:], '%')
+			if end < 0 {
+				return "", "", false
+			}
+			literal, ok := actionPrintfLiteral(format[i : i+end])
+			if !ok || !actionPrintfASCII(literal) {
+				return "", "", false
+			}
+			count += len(literal)
+			i += end
+			continue
+		}
+		if i+1 == len(format) {
+			return "", "", false
+		}
+		switch format[i+1] {
+		case '%':
+			count++
+			i += 2
+		case 's':
+			if argIndex >= len(args) {
+				return "", "", false
+			}
+			value, fixed := StaticWord(args[argIndex], home)
+			if !fixed || !actionPrintfASCII(value) {
+				return "", "", false
+			}
+			count += len(value)
+			argIndex++
+			i += 2
+		case 'n':
+			if i+2 != len(format) || argIndex+1 != len(args) {
+				return "", "", false
+			}
+			destination, fixed := actionWordValue(args[argIndex], values, cwd, home)
+			if !fixed {
+				return "", "", false
+			}
+			name, _, bound := actionPrintfScalarName(destination, 0)
+			if !bound || name == "" {
+				return "", "", false
+			}
+			return name, strconv.Itoa(count), true
+		default:
+			return "", "", false
+		}
+	}
+	return "", "", false
+}
+
+func actionPrintfASCII(value string) bool {
+	for i := 0; i < len(value); i++ {
+		if value[i] >= 0x80 {
+			return false
+		}
+	}
+	return true
+}
+
+func actionPrintfHasNameConversion(format string) bool {
+	for i := 0; i < len(format); i++ {
+		if format[i] != '%' || i+1 == len(format) {
+			continue
+		}
+		i++
+		if format[i] == '%' {
+			continue
+		}
+		for i < len(format) && !('a' <= format[i] && format[i] <= 'z') &&
+			!('A' <= format[i] && format[i] <= 'Z') && format[i] != '%' {
+			i++
+		}
+		if i < len(format) && format[i] == 'n' {
+			return true
+		}
+	}
+	return false
+}
+
+func actionForgetPrintfFormatBindings(values actionValues, names []string, unknown bool) {
+	if unknown {
+		for name := range values {
+			if !strings.HasPrefix(name, "\x00") {
+				delete(values, name)
+			}
+		}
+		return
+	}
+	for _, name := range names {
+		delete(values, name)
+		delete(values, name+"[0]")
+	}
+}
+
 // actionPrintfLiteral expands the pathname-relevant escapes in a Bash printf
 // format. An unfamiliar escape leaves the binding unknown rather than
 // retaining a value from before printf -v.
@@ -332,10 +497,12 @@ func actionForgetValues(stmt *syntax.Stmt, values actionValues, cwd, home string
 			}
 		}
 	case "printf", "builtin", "command":
+		names, _, unknown := actionPrintfFormatBindings(call, values, cwd, home)
 		if name, _, _ := actionPrintfBoundName(call, values, cwd, home); name != "" {
 			delete(values, name)
 			delete(values, name+"[0]")
 		}
+		actionForgetPrintfFormatBindings(values, names, unknown)
 	case "cd", "pushd", "popd":
 		delete(values, "PWD")
 	}
@@ -1216,6 +1383,13 @@ func actionUpdateValuesAs(stmt *syntax.Stmt, values actionValues, cwd, home stri
 		}
 	case "printf":
 		name, formatIndex, ok := actionPrintfBoundName(call, values, cwd, home)
+		names, count, unknown := actionPrintfFormatBindings(call, values, cwd, home)
+		defer func() {
+			actionForgetPrintfFormatBindings(values, names, unknown)
+			if count != "" && name != names[0] && values[actionReadonlyValuePrefix+names[0]] == "" && names[0] != "HOME" && names[0] != "PWD" {
+				values[names[0]] = count
+			}
+		}()
 		if !ok {
 			if name != "" {
 				delete(values, name)
