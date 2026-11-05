@@ -437,7 +437,8 @@ class TestRestoreOpenclawConfig(unittest.TestCase):
 
             # Plugin removed from all plugin sections
             self.assertNotIn("defenseclaw", cfg["plugins"]["allow"])
-            self.assertFalse(cfg["plugins"]["entries"]["defenseclaw"]["enabled"])
+            # GAP-0598: an entry that only held "enabled" is dropped, not left as enabled=false.
+            self.assertNotIn("defenseclaw", cfg["plugins"]["entries"])
             # Legacy provider entries removed
             self.assertNotIn("litellm", cfg["models"]["providers"])
             self.assertNotIn("defenseclaw", cfg["models"]["providers"])

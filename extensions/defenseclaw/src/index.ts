@@ -60,7 +60,10 @@ import {
 /** OpenClaw passes full gateway config and the defenseclaw plugin entry config. */
 type DefenseClawPluginHost = PluginApi & {
   config?: unknown;
-  pluginConfig?: { awsHttp1Shim?: "auto" | "on" | "off" };
+  pluginConfig?: {
+    awsHttp1Shim?: "auto" | "on" | "off";
+    agent?: { id?: unknown; name?: unknown; policyId?: unknown };
+  };
 };
 import { PolicyEnforcer, runSkillScan, runPluginScan, runCodeScan } from "./policy/enforcer.js";
 import { scanMCPServer } from "./scanners/mcp-scanner.js";
@@ -210,18 +213,15 @@ function buildApprovalRequest(toolName: string, verdict: InspectVerdict) {
   };
 }
 
-async function readPluginAgentSection(api: PluginApi): Promise<{
+// OpenClaw hands the plugin its `plugins.entries.defenseclaw.config` object as
+// `api.pluginConfig`. It has no `getPluginConfig()` (GAP-0598).
+async function readPluginAgentSection(api: DefenseClawPluginHost): Promise<{
   id?: string;
   name?: string;
   policyId?: string;
 }> {
-  const ext = api as PluginApi & {
-    getPluginConfig?: () => Promise<Record<string, unknown>>;
-  };
-  if (typeof ext.getPluginConfig !== "function") return {};
   try {
-    const c = await ext.getPluginConfig();
-    const agent = c?.agent as Record<string, unknown> | undefined;
+    const agent = api.pluginConfig?.agent;
     if (!agent || typeof agent !== "object") return {};
     const id = agent.id;
     const name = agent.name;
