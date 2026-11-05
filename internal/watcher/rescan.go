@@ -1519,7 +1519,23 @@ func (w *InstallWatcher) admissionSnapshot(evt InstallEvent) *TargetSnapshot {
 // alerts for one install (GAP-2507). A target admission moved away gets no
 // baseline.
 func (w *InstallWatcher) recordAdmissionBaseline(evt InstallEvent, snap *TargetSnapshot, res AdmissionResult) {
-	if w.movedByAdmission(evt) || snap == nil || res.ScanID == "" {
+	if w.movedByAdmission(evt) || res.ScanID == "" {
+		return
+	}
+	if !w.cfg.Watch.RescanEnabled {
+		if evt.Type != InstallPlugin || w.secureClientActive() ||
+			(res.Verdict != VerdictRejected && res.Verdict != VerdictBlocked) {
+			return
+		}
+		if snap == nil {
+			var err error
+			snap, err = w.snapshotForEvent(evt)
+			if err != nil {
+				return
+			}
+		}
+	}
+	if snap == nil {
 		return
 	}
 	if _, err := os.Lstat(evt.Path); err != nil {

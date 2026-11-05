@@ -119,7 +119,7 @@ def skill_name(skill_dir: str) -> str:
     return fallback
 
 
-def _tree_sha256(skill_dir: str) -> str | None:
+def _tree_sha256(skill_dir: str, *, tolerated_links: frozenset[str] = frozenset()) -> str | None:
     """Hash the complete skill tree for comparison with the vendor digest."""
 
     root = os.path.abspath(skill_dir)
@@ -140,7 +140,11 @@ def _tree_sha256(skill_dir: str) -> str | None:
             safe_dirs: list[str] = []
             for name in dirs:
                 child = os.path.join(current, name)
-                if _is_real_directory(os.stat(child, follow_symlinks=False)):
+                info = os.stat(child, follow_symlinks=False)
+                relative = os.path.relpath(child, root).replace("\\", "/")
+                if stat.S_ISLNK(info.st_mode) and relative in tolerated_links:
+                    continue
+                if _is_real_directory(info):
                     safe_dirs.append(name)
                 else:
                     return None
@@ -148,6 +152,9 @@ def _tree_sha256(skill_dir: str) -> str | None:
             for name in names:
                 full = os.path.join(current, name)
                 info = os.stat(full, follow_symlinks=False)
+                relative = os.path.relpath(full, root).replace("\\", "/")
+                if stat.S_ISLNK(info.st_mode) and relative in tolerated_links:
+                    continue
                 if not _is_regular_file(info):
                     return None
                 if info.st_size > _SKILL_FILE_MAX_BYTES:
@@ -155,7 +162,7 @@ def _tree_sha256(skill_dir: str) -> str | None:
                 tree_bytes += info.st_size
                 if tree_bytes > _SKILL_TREE_MAX_BYTES:
                     return None
-                files.append((os.path.relpath(full, root).replace("\\", "/"), full, info.st_size))
+                files.append((relative, full, info.st_size))
     except OSError:
         return None
 
