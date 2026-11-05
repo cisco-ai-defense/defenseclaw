@@ -1297,31 +1297,28 @@ var acceptedCreateChild sync.Map
 // folder reset to inherit from C:\ProgramData is judged the same way
 // everywhere. It reports whether the entry is accepted, logging it once.
 //
-// Those walks run on every profile, so the acceptance also needs a verified
-// Secure Client host (SecureClientHostVerified) and a folder inside the
-// platform installer's roots. A per-user (OSS) data_dir under C:\ProgramData,
-// the Cisco folder included, inherits the same entry when it is created, and
-// there another standard user could add a file beside the audit database, a
-// SQLite journal included, so outside a verified Secure Client host it is
-// refused, as before 26.8.4. The default per-user data_dir in the profile
-// never carries the entry (GAP-0566 reviews 1 and 2).
+// Those walks run on every profile, so the acceptance requires the verified
+// Secure Client process and its state tree. A per-user data directory under
+// the Cisco ProgramData root is still outside that tree.
 func AcceptInheritedCreateChild(path, label string, flags uint8, mask windows.ACCESS_MASK, sid *windows.SID) bool {
-	return PlatformInstallerOwnedPath(path) && SecureClientHostVerified() &&
+	return SecureClientManagedPathVerified(path) &&
 		acceptInheritedCreateChild(path, label, flags, mask, sid)
 }
 
-// SecureClientHostVerified reports whether this computer is an authenticated
-// Secure Client deployment. internal/cli sets it to its strict host
-// classifier (protected deployment record, trusted install tree and
-// registered gateway service), the same one behind
-// connector.SecureClientDeploymentVerified; every binary that runs a
-// per-user (OSS) gateway or hook links internal/cli. A managed helper that
-// does not link it (the sensor helper, enterprise Setup) falls back to its
-// protected service pin: a managed_enterprise deployment outside the
-// standalone profile. A standard user cannot set either for another
-// account's process.
-var SecureClientHostVerified = func() bool {
-	return IsManagedEnterprise(PinnedDeploymentMode()) && !windowsStandaloneTrustScope()
+// SecureClientHostVerified is registered by the Windows gateway and hook
+// binaries after their installation classifier is linked. The default is a
+// refusal: process environment pins alone do not verify an installation.
+var SecureClientHostVerified func() bool
+
+// SecureClientProcessPathVerified is registered by the same binaries. It
+// requires their installed executable and a path in the installed state tree.
+var SecureClientProcessPathVerified func(string) bool
+
+// SecureClientManagedPathVerified is the shared boundary for managed folder
+// and credential exceptions. An unset callback is a refusal.
+func SecureClientManagedPathVerified(path string) bool {
+	return SecureClientHostVerified != nil && SecureClientHostVerified() &&
+		SecureClientProcessPathVerified != nil && SecureClientProcessPathVerified(path)
 }
 
 // acceptInheritedCreateChild accepts, and logs once per path, an inherited

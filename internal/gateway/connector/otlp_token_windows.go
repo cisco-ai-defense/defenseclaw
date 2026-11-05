@@ -69,12 +69,11 @@ func otlpValidatePerm(path string, _ os.FileInfo) error {
 
 // otlpValidateCredentialPerm is otlpValidatePerm for a credential the caller
 // is about to read (an OTLP path token, the hook API token). A reader every
-// local account holds discloses the credential to all of them: outside a
-// verified Secure Client deployment (standalone and per-user installs) that
-// is refused, and the next Ensure rotates the token
-// (otlpPathTokenNeedsSecureReplacement). A narrow extra reader (a backup
-// agent, a helpdesk group) is still accepted and logged, and data-free locks
-// keep otlpValidatePerm (GAP-0566).
+// local account holds discloses the credential to all of them: outside the
+// verified Secure Client process and state tree that is refused, and Ensure
+// rotates the token (otlpPathTokenNeedsSecureReplacement). A narrow extra
+// reader (a backup agent, a helpdesk group) is still accepted and logged.
+// Data-free locks keep otlpValidatePerm (GAP-0566).
 func otlpValidateCredentialPerm(path string, info os.FileInfo) error {
 	if err := otlpValidatePerm(path, info); err != nil {
 		return err
@@ -83,7 +82,7 @@ func otlpValidateCredentialPerm(path string, info os.FileInfo) error {
 	if err != nil {
 		return err
 	}
-	if broad := otlpWindowsBroadReader(path, dacl); broad != nil && !SecureClientDeploymentVerified() {
+	if broad := otlpWindowsBroadReader(path, dacl); broad != nil && !managed.SecureClientManagedPathVerified(path) {
 		return broad
 	}
 	return nil

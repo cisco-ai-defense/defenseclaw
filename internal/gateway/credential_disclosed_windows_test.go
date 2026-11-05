@@ -52,8 +52,14 @@ func pinSecureClientHostForTest(t *testing.T, verified bool) {
 	t.Helper()
 	t.Setenv(managed.TrustStrictAncestorsEnv, "")
 	previous := connector.SecureClientDeploymentVerified
-	t.Cleanup(func() { connector.SecureClientDeploymentVerified = previous })
+	previousHost, previousPath := managed.SecureClientHostVerified, managed.SecureClientProcessPathVerified
+	t.Cleanup(func() {
+		connector.SecureClientDeploymentVerified = previous
+		managed.SecureClientHostVerified, managed.SecureClientProcessPathVerified = previousHost, previousPath
+	})
 	connector.SecureClientDeploymentVerified = func() bool { return verified }
+	managed.SecureClientHostVerified = func() bool { return verified }
+	managed.SecureClientProcessPathVerified = func(string) bool { return verified }
 }
 
 // GAP-0566 review 1: outside a verified Secure Client host, a cached OTLP
@@ -140,4 +146,28 @@ func TestHookAPITokenDisclosedIsDroppedAndRotated(t *testing.T) {
 			t.Fatal("Secure Client stopped accepting a hook token with an extra reader")
 		}
 	})
+}
+
+func TestHookAPITokenPerUserOnSecureClientHostIsDroppedAndRotated(t *testing.T) {
+	pinSecureClientHostForTest(t, true)
+	managed.SecureClientProcessPathVerified = func(string) bool { return false }
+	dataDir := t.TempDir()
+	old, err := connector.EnsureHookAPIToken(dataDir, "codex")
+	if err != nil {
+		t.Fatal(err)
+	}
+	api := &APIServer{scannerCfg: &config.Config{DataDir: dataDir}}
+	api.SetHookAPITokens(map[string]string{"codex": old})
+	path, err := connector.HookAPITokenFilePath(dataDir, "codex")
+	if err != nil {
+		t.Fatal(err)
+	}
+	grantEveryoneReadForTest(t, path)
+	if api.hookAPITokenMatches("codex", old) {
+		t.Fatal("a broadly readable per-user hook token remained authorized")
+	}
+	rotated, err := connector.EnsureHookAPIToken(dataDir, "codex")
+	if err != nil || rotated == "" || rotated == old {
+		t.Fatalf("per-user hook token rotation failed: rotated=%v err=%v", rotated != old, err)
+	}
 }

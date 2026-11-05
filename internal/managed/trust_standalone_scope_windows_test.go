@@ -403,30 +403,45 @@ func TestStandaloneTrustRefusesInheritedCreateChild(t *testing.T) {
 			t.Fatalf("Secure Client refused the inherited create-child folder: %v", err)
 		}
 	})
-	// GAP-0566 review 2: inside the Cisco root the exported helper still
-	// needs a verified Secure Client host; an OSS data_dir there is refused.
-	t.Run("inside the installer roots it needs a verified Secure Client host", func(t *testing.T) {
+	// A verified host alone does not make a per-user directory managed.
+	t.Run("verified host refuses a per-user directory", func(t *testing.T) {
 		base := t.TempDir()
 		t.Cleanup(AddTrustedMachineInstallBaseForTest(base))
 		t.Setenv(TrustStrictAncestorsEnv, "")
 		pinTrustProfileForTest(t, false)
-		dir := filepath.Join(base, "Cisco", "oss-data", "audit")
-		if err := os.MkdirAll(dir, 0o700); err != nil {
+		state := filepath.Join(base, "Cisco", "Cisco Secure Client", "DefenseClaw")
+		oss := filepath.Join(base, "Cisco", "oss-data", "audit")
+		managedDir := filepath.Join(state, "audit")
+		if err := os.MkdirAll(oss, 0o700); err != nil {
 			t.Fatal(err)
 		}
-		if !PlatformInstallerOwnedPath(dir) {
+		if err := os.MkdirAll(managedDir, 0o700); err != nil {
+			t.Fatal(err)
+		}
+		if !PlatformInstallerOwnedPath(oss) || !PlatformInstallerOwnedPath(managedDir) {
 			t.Fatal("the test folder is not inside the stand-in Cisco root")
 		}
-		previous := SecureClientHostVerified
-		t.Cleanup(func() { SecureClientHostVerified = previous })
+		previousHost, previousPath := SecureClientHostVerified, SecureClientProcessPathVerified
+		t.Cleanup(func() { SecureClientHostVerified, SecureClientProcessPathVerified = previousHost, previousPath })
 		flags := uint8(windows.INHERITED_ACE | windows.CONTAINER_INHERIT_ACE)
-		SecureClientHostVerified = func() bool { return false }
-		if AcceptInheritedCreateChild(dir, "audit store", flags, 0x1201bf, usersSIDForTest(t)) {
+		SecureClientHostVerified = func() bool { return true }
+		SecureClientProcessPathVerified = func(path string) bool {
+			return strings.HasPrefix(strings.ToLower(filepath.Clean(path)), strings.ToLower(state)+string(filepath.Separator))
+		}
+		if AcceptInheritedCreateChild(oss, "audit store", flags, 0x1201bf, usersSIDForTest(t)) {
 			t.Fatal("an OSS audit folder under the Cisco root accepted an inherited create-child entry")
 		}
+		if !AcceptInheritedCreateChild(managedDir, "audit store", flags, 0x1201bf, usersSIDForTest(t)) {
+			t.Fatal("the managed Secure Client folder refused the inherited create-child entry")
+		}
+		SecureClientHostVerified = nil
+		if AcceptInheritedCreateChild(managedDir, "audit store", flags, 0x1201bf, usersSIDForTest(t)) {
+			t.Fatal("an unset host verifier accepted an inherited create-child entry")
+		}
 		SecureClientHostVerified = func() bool { return true }
-		if !AcceptInheritedCreateChild(dir, "audit store", flags, 0x1201bf, usersSIDForTest(t)) {
-			t.Fatal("a verified Secure Client host refused the inherited create-child entry under the Cisco root")
+		SecureClientProcessPathVerified = nil
+		if AcceptInheritedCreateChild(managedDir, "audit store", flags, 0x1201bf, usersSIDForTest(t)) {
+			t.Fatal("an unset process verifier accepted an inherited create-child entry")
 		}
 	})
 	// GAP-0566 review 1: the audit store, judge-body and hook token walks
@@ -453,6 +468,29 @@ func TestStandaloneTrustRefusesInheritedCreateChild(t *testing.T) {
 			t.Fatal("standalone accepted an inherited create-child entry for the audit store and token folders")
 		}
 	})
+}
+
+// The process environment cannot turn a per-user Cisco-root directory into
+// a managed Secure Client state directory. This also exercises the default
+// callback before internal/cli registers the installed-process classifier.
+func TestInheritedCreateChildEnvironmentPinDoesNotVerifyManagedPath(t *testing.T) {
+	base := t.TempDir()
+	t.Cleanup(AddTrustedMachineInstallBaseForTest(base))
+	t.Setenv(TrustStrictAncestorsEnv, "")
+	t.Setenv(DeploymentModeEnv, DeploymentModeManagedEnterprise)
+	for _, profile := range []string{"", ProfileSecureClient} {
+		t.Run("profile="+profile, func(t *testing.T) {
+			t.Setenv(EnterpriseProfileEnv, profile)
+			path := filepath.Join(base, "Cisco", "oss-data", "audit")
+			if err := os.MkdirAll(path, 0o700); err != nil {
+				t.Fatal(err)
+			}
+			if AcceptInheritedCreateChild(path, "audit store", windows.INHERITED_ACE|windows.CONTAINER_INHERIT_ACE,
+				0x1201bf, usersSIDForTest(t)) {
+				t.Fatal("an environment pin accepted a per-user folder")
+			}
+		})
+	}
 }
 
 func usersSIDForTest(t *testing.T) *windows.SID {

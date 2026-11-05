@@ -190,9 +190,14 @@ func TestOTLPPathTokenWindowsSecureCreationAndRepairsBroadDACL(t *testing.T) {
 				// verified Secure Client deployment accepts (GAP-0566);
 				// TestOTLPPathTokenWindowsRefusesBroadReaderOutsideSecureClient
 				// covers standalone and per-user installs.
-				originalSecureClient := SecureClientDeploymentVerified
-				t.Cleanup(func() { SecureClientDeploymentVerified = originalSecureClient })
-				SecureClientDeploymentVerified = func() bool { return true }
+				originalHost, originalPath := managed.SecureClientHostVerified, managed.SecureClientProcessPathVerified
+				t.Cleanup(func() {
+					managed.SecureClientHostVerified, managed.SecureClientProcessPathVerified = originalHost, originalPath
+				})
+				managed.SecureClientHostVerified = func() bool { return true }
+				managed.SecureClientProcessPathVerified = func(candidate string) bool {
+					return strings.HasPrefix(strings.ToLower(filepath.Clean(candidate)), strings.ToLower(dataDir)+string(filepath.Separator))
+				}
 				if token, err := LoadOTLPPathToken(dataDir, OTLPScopeCodex); err != nil || token != first {
 					t.Fatalf("LoadOTLPPathToken with an extra reader matched=%v err=%v, want the token", token == first, err)
 				}
@@ -287,6 +292,39 @@ func TestOTLPPathTokenWindowsRefusesBroadReaderOutsideSecureClient(t *testing.T)
 	}
 	if loaded, err := LoadOTLPPathToken(dataDir, OTLPScopeCodex); err != nil || loaded != rotated {
 		t.Fatalf("LoadOTLPPathToken with a narrow extra reader matched=%v err=%v, want the token", loaded == rotated, err)
+	}
+}
+
+func TestOTLPPathTokenWindowsRevokesPerUserTokenOnSecureClientHost(t *testing.T) {
+	t.Setenv(managed.TrustStrictAncestorsEnv, "")
+	previousHost, previousPath := managed.SecureClientHostVerified, managed.SecureClientProcessPathVerified
+	t.Cleanup(func() {
+		managed.SecureClientHostVerified, managed.SecureClientProcessPathVerified = previousHost, previousPath
+	})
+	managed.SecureClientHostVerified = func() bool { return true }
+	managed.SecureClientProcessPathVerified = func(string) bool { return false }
+	previousCanRepair := windowsManagedCanRepair
+	t.Cleanup(func() { windowsManagedCanRepair = previousCanRepair })
+	windowsManagedCanRepair = func() bool { return false }
+
+	dataDir := testenv.PrivateTempDir(t)
+	first, err := EnsureOTLPPathToken(dataDir, OTLPScopeCodex)
+	if err != nil {
+		t.Fatal(err)
+	}
+	path, err := OTLPPathTokenFilePath(dataDir, OTLPScopeCodex)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := setOTLPWindowsBroadDACL(path, windows.GENERIC_READ); err != nil {
+		t.Fatal(err)
+	}
+	if token, err := LoadOTLPPathToken(dataDir, OTLPScopeCodex); err == nil || token != "" {
+		t.Fatal("a per-user token remained readable after its credential was broadly readable")
+	}
+	rotated, err := EnsureOTLPPathToken(dataDir, OTLPScopeCodex)
+	if err != nil || rotated == "" || rotated == first {
+		t.Fatalf("per-user token rotation failed: rotated=%v err=%v", rotated != first, err)
 	}
 }
 

@@ -36,9 +36,9 @@ var (
 	hookAPITokenMu      sync.Mutex
 	hookAPITokenScopeRE = lazyregexp.New(`^[a-z0-9][a-z0-9_-]*$`)
 	// ErrCredentialDisclosed marks a token file every local account could
-	// read (Windows, outside a verified Secure Client host). It is not
-	// permission drift: the gateway stops authenticating its cached copy and
-	// Ensure rotates the value (GAP-0566).
+	// read (Windows, outside a verified Secure Client process and state
+	// tree). It is not permission drift: the gateway stops authenticating
+	// its cached copy and Ensure rotates the value (GAP-0566).
 	ErrCredentialDisclosed = errors.New("credential is readable by every local account")
 	// errHookAPITokenMalformed marks a trusted token file (location, owner and
 	// permissions checked) whose content is not a token.

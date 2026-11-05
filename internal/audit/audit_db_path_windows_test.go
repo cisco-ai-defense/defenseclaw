@@ -433,8 +433,9 @@ func TestAuditDBWindowsAcceptsInheritedContainerOnlyCreateChild(t *testing.T) {
 	const createChild windows.ACCESS_MASK = 0x116
 	base := t.TempDir()
 	t.Cleanup(managed.AddTrustedMachineInstallBaseForTest(base))
-	verifySecureClientHostForAuditTest(t, true)
-	parent := filepath.Join(base, "Cisco", "parent")
+	state := filepath.Join(base, "Cisco", "Cisco Secure Client", "DefenseClaw")
+	verifySecureClientHostForAuditTest(t, true, state)
+	parent := filepath.Join(state, "parent")
 	directory := filepath.Join(parent, "audit")
 	if err := os.MkdirAll(parent, 0o700); err != nil {
 		t.Fatal(err)
@@ -489,44 +490,59 @@ func TestAuditDBWindowsRefusesInheritedCreateChildOutsideInstallerRoots(t *testi
 	}
 }
 
-// verifySecureClientHostForAuditTest stands in for the strict Secure Client
-// host classifier, which internal/cli installs in the shipped binaries.
-func verifySecureClientHostForAuditTest(t *testing.T, verified bool) {
+// verifySecureClientHostForAuditTest models the installed process and its
+// state tree. internal/cli registers the production classifiers.
+func verifySecureClientHostForAuditTest(t *testing.T, verified bool, state string) {
 	t.Helper()
-	previous := managed.SecureClientHostVerified
-	t.Cleanup(func() { managed.SecureClientHostVerified = previous })
+	previousHost, previousPath := managed.SecureClientHostVerified, managed.SecureClientProcessPathVerified
+	t.Cleanup(func() {
+		managed.SecureClientHostVerified, managed.SecureClientProcessPathVerified = previousHost, previousPath
+	})
 	managed.SecureClientHostVerified = func() bool { return verified }
+	managed.SecureClientProcessPathVerified = func(path string) bool {
+		return strings.HasPrefix(strings.ToLower(filepath.Clean(path)), strings.ToLower(filepath.Clean(state))+string(filepath.Separator))
+	}
 }
 
-// GAP-0566 review 2: an OSS audit folder under the Cisco ProgramData root,
-// with no verified Secure Client host, is refused too.
+// A per-user audit folder under the Cisco ProgramData root is refused even
+// when Secure Client is installed on the same computer.
 func TestAuditDBWindowsRefusesInheritedCreateChildForOSSUnderCiscoRoot(t *testing.T) {
-	users, err := windows.CreateWellKnownSid(windows.WinBuiltinUsersSid)
-	if err != nil {
-		t.Fatal(err)
-	}
-	const createChild windows.ACCESS_MASK = 0x116
-	base := t.TempDir()
-	t.Cleanup(managed.AddTrustedMachineInstallBaseForTest(base))
-	verifySecureClientHostForAuditTest(t, false)
-	parent := filepath.Join(base, "Cisco", "oss")
-	directory := filepath.Join(parent, "audit")
-	if err := os.MkdirAll(parent, 0o700); err != nil {
-		t.Fatal(err)
-	}
-	if err := secureAuditDBPlatformPath(parent, true); err != nil {
-		t.Fatal(err)
-	}
-	addJudgeBodyWindowsContainerOnlyGrant(t, parent, users, createChild)
-	if err := os.Mkdir(directory, 0o700); err != nil {
-		t.Fatal(err)
-	}
-	sd, err := windows.GetNamedSecurityInfo(directory, windows.SE_FILE_OBJECT, windows.OWNER_SECURITY_INFORMATION|windows.DACL_SECURITY_INFORMATION)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := validateAuditDBWindowsSecurityDescriptor(directory, sd, true, true); err == nil {
-		t.Fatal("an OSS audit folder under the Cisco root accepted an inherited create-child entry")
+	for _, tc := range []struct {
+		name string
+		sid  func() (*windows.SID, error)
+	}{
+		{"Users", func() (*windows.SID, error) { return windows.CreateWellKnownSid(windows.WinBuiltinUsersSid) }},
+		{"Authenticated Users", func() (*windows.SID, error) { return windows.CreateWellKnownSid(windows.WinAuthenticatedUserSid) }},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			principal, err := tc.sid()
+			if err != nil {
+				t.Fatal(err)
+			}
+			base := t.TempDir()
+			t.Cleanup(managed.AddTrustedMachineInstallBaseForTest(base))
+			verifySecureClientHostForAuditTest(t, true, filepath.Join(base, "Cisco", "Cisco Secure Client", "DefenseClaw"))
+			parent := filepath.Join(base, "Cisco", "oss")
+			directory := filepath.Join(parent, "audit")
+			if err := os.MkdirAll(parent, 0o700); err != nil {
+				t.Fatal(err)
+			}
+			if err := secureAuditDBPlatformPath(parent, true); err != nil {
+				t.Fatal(err)
+			}
+			addJudgeBodyWindowsContainerOnlyGrant(t, parent, principal, 0x116)
+			if err := os.Mkdir(directory, 0o700); err != nil {
+				t.Fatal(err)
+			}
+			sd, err := windows.GetNamedSecurityInfo(directory, windows.SE_FILE_OBJECT,
+				windows.OWNER_SECURITY_INFORMATION|windows.DACL_SECURITY_INFORMATION)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := validateAuditDBWindowsSecurityDescriptor(directory, sd, true, true); err == nil {
+				t.Fatal("a per-user audit folder accepted an inherited create-child entry")
+			}
+		})
 	}
 }
 
