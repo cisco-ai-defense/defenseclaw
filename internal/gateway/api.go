@@ -4320,6 +4320,20 @@ func (a *APIServer) tokenAuth(next http.Handler) http.Handler {
 			a.serveUserScopedListenerProof(w, r)
 			return
 		}
+		if isGatewayTokenListenerProofRequest(r) && (a.scannerCfg == nil || !a.scannerCfg.SecureClientIntegration()) {
+			// The per-user OpenClaw plugin proves this listener with the
+			// gateway token before it sends that token (GAP-0594).
+			expected := ""
+			if a.scannerCfg != nil {
+				expected = a.scannerCfg.Gateway.Token
+			}
+			if !writeGatewayTokenListenerProof(w, r, expected, a.client.RefreshedToken()) {
+				a.emitHTTPAuthFailure(r.Context(), r, connector.UserScopedListenerProofPath,
+					gatewaylog.ErrCodeAuthInvalidToken, userScopedListenerProofRefusedReason)
+				writeJSONRefusal(w, `{"error":"unauthorized"}`, http.StatusUnauthorized)
+			}
+			return
+		}
 		route := r.Pattern
 		if route == "" {
 			// Sanitize so the OTLP path-token is never recorded as a

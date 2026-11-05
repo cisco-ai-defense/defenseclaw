@@ -54,6 +54,11 @@ Run the DefenseClaw gateway and the OpenClaw gateway as the same OS user. The pl
 
 Use one OS account for each DefenseClaw and OpenClaw pair. On a shared machine, give each account its own ports: `gateway.api_port` and `guardrail.port` for DefenseClaw, `gateway.port` in `openclaw.json` for OpenClaw.
 
+DefenseClaw checks the listener before it sends a token, so a process of another account that takes a port while a gateway restarts gets nothing:
+
+- The plugin sends the DefenseClaw token and provider keys only to a loopback `gateway.host`. The listener must first prove it holds the same token (`/api/v1/hook-listener-proof`), and the gateway answers that proof only to its own OS account. When the proof fails, nothing is sent: a tool check follows the plugin's outage mode and a model call fails as in a gateway outage.
+- On Linux and macOS, the DefenseClaw gateway checks that a loopback OpenClaw gateway port belongs to its own account (or root) before it connects. Otherwise it sends nothing, keeps retrying, and `defenseclaw doctor` names the step.
+
 ### Tested OpenClaw versions
 
 We test DefenseClaw with OpenClaw 2026.6.8, 2026.9.8 and 2026.10.9. We test against new OpenClaw releases as they come out.

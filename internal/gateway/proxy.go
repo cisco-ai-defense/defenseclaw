@@ -206,6 +206,20 @@ func (p *GuardrailProxy) SetNotifier(n *notifier.Dispatcher) {
 	p.notifier = n
 }
 
+// handleListenerProof answers the OpenClaw plugin's listener proof on the
+// guardrail port (writeGatewayTokenListenerProof). Secure Client serves no
+// proof.
+func (p *GuardrailProxy) handleListenerProof(w http.ResponseWriter, r *http.Request) {
+	refreshed := ""
+	if p.refreshedGatewayToken != nil {
+		refreshed = p.refreshedGatewayToken()
+	}
+	if ManagedEnterpriseActive() || !writeGatewayTokenListenerProof(w, r, p.gatewayToken, refreshed) {
+		p.emitProxyAuthFailure(r, "listener_proof_refused")
+		writeJSONRefusal(w, `{"error":"unauthorized"}`, http.StatusUnauthorized)
+	}
+}
+
 // SetRefreshedGatewayTokenSource wires the OpenClaw client's runtime-adopted
 // gateway token into proxy authentication (GAP-2346). Call it before the
 // proxy starts serving.
@@ -774,6 +788,9 @@ func (p *GuardrailProxy) Run(ctx context.Context) error {
 	// mutating endpoint) to prevent a hostile local process from
 	// rolling the registry.
 	mux.HandleFunc("/v1/config/providers/reload", p.handleReloadProviders)
+	// The OpenClaw plugin proves this listener with the gateway token before
+	// it sends that token or a provider key (GAP-0594).
+	mux.HandleFunc(connector.UserScopedListenerProofPath, p.handleListenerProof)
 	// Catch-all for provider-native paths (e.g. /v1/messages for Anthropic,
 	// /v1beta/models/*/generateContent for Gemini). The fetch interceptor
 	// preserves the original path; we inspect the content then forward verbatim

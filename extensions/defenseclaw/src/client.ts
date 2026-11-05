@@ -17,7 +17,7 @@
  */
 
 import { randomUUID } from "node:crypto";
-import { request as httpRequest } from "node:http";
+import { request as httpRequest, type RequestOptions } from "node:http";
 import { URL } from "node:url";
 import {
   HEADER_DEFENSECLAW_CLIENT,
@@ -35,6 +35,7 @@ import type {
   OutboundSidecarRequestLog,
 } from "./types.js";
 import { loadSidecarConfig } from "./sidecar-config.js";
+import { proveListener, provenCreateConnection } from "./listener-proof.js";
 
 const REQUEST_TIMEOUT_MS = 30_000;
 const MAX_RESPONSE_BYTES = 10 * 1024 * 1024;
@@ -158,8 +159,13 @@ export class DaemonClient {
       outboundAgentInstanceId: outboundInstance,
     });
     h[HEADER_DEFENSECLAW_CLIENT] = "openclaw-plugin";
-    if (this.token) {
-      h.Authorization = `Bearer ${this.token}`;
+    const token = this.token;
+    if (token) {
+      // The listener proves it is this account's gateway before a caller
+      // sends it the token (GAP-0594). Throws ListenerProofError.
+      const target = new URL(this.baseUrl);
+      await proveListener(target.hostname, Number(target.port) || 80, token);
+      h.Authorization = `Bearer ${token}`;
     }
     return h;
   }
@@ -269,6 +275,7 @@ export class DaemonClient {
       outboundAgentInstanceId: outboundInstance,
     });
 
+    const token = this.token;
     return new Promise((resolve) => {
       const url = new URL(path, this.baseUrl);
       const payload = body !== undefined ? JSON.stringify(body) : undefined;
@@ -279,8 +286,8 @@ export class DaemonClient {
         [HEADER_DEFENSECLAW_CLIENT]: "openclaw-plugin",
         ...correlationHeaders,
       };
-      if (this.token) {
-        headers.Authorization = `Bearer ${this.token}`;
+      if (token) {
+        headers.Authorization = `Bearer ${token}`;
       }
       if (payload !== undefined) {
         headers["Content-Length"] = Buffer.byteLength(payload);
@@ -294,6 +301,20 @@ export class DaemonClient {
           method,
           timeout: this.timeoutMs,
           headers,
+          // The connection that carries the token is proven first: a
+          // listener of another account gets the proof request only
+          // (GAP-0594).
+          // node:http uses createConnection only without an agent.
+          ...(token
+            ? {
+                agent: undefined,
+                createConnection: provenCreateConnection(
+                  url.hostname,
+                  Number(url.port) || 80,
+                  token,
+                ) as unknown as RequestOptions["createConnection"],
+              }
+            : {}),
         },
         (res) => {
           const chunks: Buffer[] = [];
