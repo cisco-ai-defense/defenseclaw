@@ -44,6 +44,7 @@ from collections.abc import Iterator, Mapping
 from contextlib import ExitStack, contextmanager, nullcontext
 from dataclasses import dataclass, field, replace
 from datetime import datetime, timezone
+from functools import cmp_to_key
 from pathlib import Path
 from typing import Any
 from urllib.parse import urlparse
@@ -125,6 +126,7 @@ from defenseclaw.connector_contracts import (
     stable_agent_version,
 )
 from defenseclaw.context import SETUP_RESTART_HANDLED_META_KEY, SETUP_SECRET_CHANGED_META_KEY, AppContext, pass_ctx
+from defenseclaw.doctor_health import VersionRange, supported_range_text, version_range_label
 from defenseclaw.file_permissions import (
     MAX_DOTENV_BYTES,
     UnsafePathError,
@@ -6158,53 +6160,21 @@ def _connector_contract_upgrade_guidance(
         return f"Use a {label} version covered by a DefenseClaw hook contract, then run: {rerun}."
 
     contract = contracts[0]
-    if len(contracts) > 1 and normalized_version:
+    ranged = _ranged_contracts(contracts)
+    if len(contracts) > 1 and normalized_version and ranged:
         # A connector may carry consecutive reviewed contracts. For a version
         # below or above the entire covered span, point at the nearest exact
         # contract so remediation names a useful boundary instead of falling
-        # back to a generic "covered version" message.
-        ranged = [
-            candidate
-            for candidate in contracts
-            if candidate.min_agent_version or candidate.max_agent_version
-        ]
-        if ranged:
-            first = ranged[0]
-            last = ranged[0]
-            for candidate in ranged[1:]:
-                if candidate.min_agent_version and (
-                    not first.min_agent_version
-                    or compare_agent_versions(
-                        candidate.min_agent_version,
-                        first.min_agent_version,
-                    )
-                    < 0
-                ):
-                    first = candidate
-                if candidate.max_agent_version and (
-                    not last.max_agent_version
-                    or compare_agent_versions(
-                        candidate.max_agent_version,
-                        last.max_agent_version,
-                    )
-                    > 0
-                ):
-                    last = candidate
-            if first.min_agent_version and compare_agent_versions(
-                normalized_version,
-                first.min_agent_version,
-            ) < 0:
-                contract = first
-            elif last.max_agent_version and compare_agent_versions(
-                normalized_version,
-                last.max_agent_version,
-            ) >= 0:
-                contract = last
-            else:
-                return (
-                    f"Use a {label} version covered by a DefenseClaw hook contract, "
-                    f"then run: {rerun}."
-                )
+        # back to a generic "covered version" message. The latest contract is
+        # the one that starts last: without an upper bound, nothing is above
+        # the span (a capped older contract was taken for the last one).
+        first, last = ranged[0], ranged[-1]
+        if first.min_agent_version and compare_agent_versions(normalized_version, first.min_agent_version) < 0:
+            contract = first
+        elif last.max_agent_version and compare_agent_versions(normalized_version, last.max_agent_version) >= 0:
+            contract = last
+        else:
+            return f"Use a {label} version covered by a DefenseClaw hook contract, then run: {rerun}."
     requirement_parts: list[str] = []
     pins = contract.exact_agent_versions
     if normalized_version:
@@ -6220,21 +6190,37 @@ def _connector_contract_upgrade_guidance(
         )
     if pins:
         requirement_parts.append("one of " + ", ".join(pins))
-    range_requirement = ""
-    if contract.min_agent_version and contract.max_agent_version:
-        range_requirement = f">={contract.min_agent_version} and <{contract.max_agent_version}"
-    elif contract.min_agent_version:
-        range_requirement = f">={contract.min_agent_version}"
-    elif contract.max_agent_version:
-        range_requirement = f"<{contract.max_agent_version}"
+    range_requirement = version_range_label(contract.min_agent_version, contract.max_agent_version)
     if range_requirement:
         requirement_parts.append(range_requirement)
     requirement = " or ".join(requirement_parts) if requirement_parts else "an explicitly supported version"
+    # With consecutive contracts, the nearest one alone reads as if newer
+    # releases were unsupported (GAP-0049: "claudecode-hooks-v1 requires
+    # >=2.1.154 and <2.1.219" for Claude Code 2.1.121, though
+    # claudecode-hooks-v2 covers >=2.1.219). Name the whole supported range.
+    supported = (
+        supported_range_text(
+            VersionRange(
+                contract_id=c.contract_id,
+                min_inclusive=c.min_agent_version,
+                max_exclusive=c.max_agent_version,
+            )
+            for c in ranged
+        )
+        if len(contracts) > 1
+        else ""
+    )
     if normalized_version and range_requirement:
         if contract.min_agent_version and compare_agent_versions(
             normalized_version,
             contract.min_agent_version,
         ) < 0:
+            if supported:
+                return (
+                    f"Upgrade {label}; installed version {normalized_version} is older than the validated "
+                    f"minimum. DefenseClaw supports {label} {supported}; {contract.contract_id} covers "
+                    f"{requirement}. Then run: {rerun}."
+                )
             return (
                 f"Upgrade {label}; installed version {normalized_version} is older than the validated "
                 f"minimum. {contract.contract_id} requires {requirement}. Then run: {rerun}."
@@ -6245,12 +6231,20 @@ def _connector_contract_upgrade_guidance(
         ) >= 0:
             return (
                 f"{label} {normalized_version} is newer than DefenseClaw's validated range "
-                f"({requirement}). Use a validated version, or update DefenseClaw when a matching "
-                f"hook contract is available; then run: {rerun}."
+                f"({supported or requirement}). Use a validated version, or update DefenseClaw when a "
+                f"matching hook contract is available; then run: {rerun}."
             )
     return (
         f"{label} {normalized_version or 'version'} is outside the validated hook contract; "
         f"{contract.contract_id} requires {requirement}. Use a covered version, then run: {rerun}."
+    )
+
+
+def _ranged_contracts(contracts: tuple[Any, ...]) -> list[Any]:
+    """The contracts that bound a version range, oldest first."""
+    return sorted(
+        (c for c in contracts if c.min_agent_version or c.max_agent_version),
+        key=cmp_to_key(lambda a, b: compare_agent_versions(a.min_agent_version or "0", b.min_agent_version or "0")),
     )
 
 

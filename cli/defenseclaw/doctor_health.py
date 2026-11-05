@@ -1076,7 +1076,7 @@ def _known_broken_connector_remediations(connector: str, broken: dict[str, Any])
 def supported_range_text(ranges: Iterable[VersionRange]) -> str:
     """Render supported agent ranges, joining contracts that continue each other.
 
-    claudecode-hooks-v1 (>=2.1.154 <2.1.219) and claudecode-hooks-v2
+    claudecode-hooks-v1 (>=2.1.154 and <2.1.219) and claudecode-hooks-v2
     (>=2.1.219) read as ">=2.1.154", not as two overlapping-looking ranges.
     """
 
@@ -1091,16 +1091,17 @@ def supported_range_text(ranges: Iterable[VersionRange]) -> str:
             )
         else:
             merged.append(item)
-    return ", ".join(_range_label(item) for item in merged)
+    return ", ".join(version_range_label(item.min_inclusive, item.max_exclusive) or item.contract_id for item in merged)
 
 
-def _range_label(value: VersionRange) -> str:
-    parts: list[str] = []
-    if value.min_inclusive:
-        parts.append(f">={value.min_inclusive}")
-    if value.max_exclusive:
-        parts.append(f"<{value.max_exclusive}")
-    return " ".join(parts) or value.contract_id
+def version_range_label(minimum: str, maximum: str) -> str:
+    """Render one version range as setup and doctor name it: ">=a and <b"."""
+
+    if minimum and maximum:
+        return f">={minimum} and <{maximum}"
+    if minimum:
+        return f">={minimum}"
+    return f"<{maximum}" if maximum else ""
 
 
 def _remediation_dict(choice: RemediationChoice) -> dict[str, Any]:
