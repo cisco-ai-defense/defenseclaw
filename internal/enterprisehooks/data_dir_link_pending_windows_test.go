@@ -6,12 +6,29 @@
 package enterprisehooks
 
 import (
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
 
 	"golang.org/x/sys/windows"
 )
+
+func TestWindowsAccountOwnedRootDataDirLinkExcludesChildLink(t *testing.T) {
+	target := deferredPendingProofFixture(t, true)
+	sid := currentWindowsTestSID(t)
+	dataDir := filepath.Join(target.UserHome, ".defenseclaw")
+	if err := os.MkdirAll(dataDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	outside, canary := outsideDataDirTree(t, target.UserHome)
+	plantWindowsAccountJunction(t, filepath.Join(dataDir, "hooks"), outside, sid)
+	if !WindowsAccountOwnedDataDirLink(target.UserHome, sid.String()) ||
+		WindowsAccountOwnedRootDataDirLink(target.UserHome, sid.String()) {
+		t.Fatal("a child link was classified as a root link")
+	}
+	requireOutsideDataDirTreeUnchanged(t, outside, canary)
+}
 
 func planValidationRootsForTarget(target ManifestTarget) (WindowsManagedRuntimePlan, error) {
 	return PlanWindowsManagedRuntimeRootsForValidation(
@@ -42,6 +59,9 @@ func TestStandaloneSignedOutAccountOwnDataDirLinkStaysPending(t *testing.T) {
 	}
 	if !WindowsAccountOwnedDataDirLink(target.UserHome, sid.String()) {
 		t.Fatal("status does not name the account's own link")
+	}
+	if !WindowsAccountOwnedRootDataDirLink(target.UserHome, sid.String()) {
+		t.Fatal("the root link was not identified")
 	}
 	if WindowsAccountCreatedDataDir(target.UserHome, sid.String()) {
 		t.Fatal("the account's junction reads as an account-created folder the guardian would adopt")
@@ -106,6 +126,9 @@ func TestStandaloneForeignOwnedDataDirLinkStaysRefused(t *testing.T) {
 	}
 	if WindowsAccountOwnedDataDirLink(target.UserHome, currentWindowsTestSID(t).String()) {
 		t.Fatal("status names a junction the account does not own as its own")
+	}
+	if WindowsAccountOwnedRootDataDirLink(target.UserHome, currentWindowsTestSID(t).String()) {
+		t.Fatal("the root link was attributed to a different account")
 	}
 	if !windowsEnterpriseStandaloneProcess() || windowsEnterpriseStandaloneDeferredDataDirAccountLink(target.UserHome, dataDir, currentWindowsTestSID(t)) {
 		t.Fatal("the retire would skip a junction the account does not own")

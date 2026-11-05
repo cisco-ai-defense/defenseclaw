@@ -2000,7 +2000,7 @@ func addWindowsEnterpriseUserStateWarning(result *enterprisestatus.Result, repor
 	}
 	if len(accountLinksKept) > 0 {
 		result.AddWarning("per_user_state_remaining", fmt.Sprintf(
-			"--purge left the account-owned link at the DefenseClaw folder of %d account(s) as found. Accounts: %s",
+			"--purge left the account-owned link at the DefenseClaw folder of %d account(s) as found. To finish per-user cleanup, remove each named link itself from the account profile; its target was left unchanged. Accounts: %s",
 			len(accountLinksKept), windowsEnterpriseBoundedLabels(accountLinksKept)))
 	}
 	if len(remaining) > 0 {

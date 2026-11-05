@@ -167,9 +167,10 @@ func completeWindowsManagedHooksTeardownUserCleanup(
 			"gateway/AI discovery read access on users' agent folders: "+boundedEnterpriseHookUserCleanupText(revokeErr.Error()))
 	}
 	purge := os.Getenv(windowsManagedHooksPurgeUserStateEnv) == "1"
-	report.UserStateRemaining, report.UserStatePurged = windowsManagedHooksStandaloneUserState(manifest, purge, windowsManagedHooksAccountsKeepingRegistrations(cleanup))
+	var accountLinks []windowsManagedHooksAccountLink
+	report.UserStateRemaining, report.UserStatePurged, accountLinks = windowsManagedHooksStandaloneUserState(manifest, purge, windowsManagedHooksAccountsKeepingRegistrations(cleanup))
 	if purge {
-		remaining, purged := windowsManagedHooksStandaloneACPUserState()
+		remaining, purged := windowsManagedHooksStandaloneACPUserState(accountLinks)
 		report.UserStateRemaining = append(report.UserStateRemaining, remaining...)
 		report.UserStatePurged = append(report.UserStatePurged, purged...)
 		if err := windowsManagedHooksStandaloneFloorPurger(); err != nil {
@@ -213,12 +214,18 @@ func finishWindowsCursorTombstoneCleanup(report *windowsManagedHooksTeardownRepo
 	}
 }
 
+type windowsManagedHooksAccountLink struct {
+	home string
+	sid  string
+}
+
 // windowsManagedHooksStandaloneACPUserState removes, with purge, the managed
 // ACP folder (token copies and editor contract locks) of every account that
 // still has one: signed out, revoked, ACP-only or kept for its
-// connector_backups (GAP-0773). It returns what stays ("SID: path: reason")
-// and what went ("SID: path").
-func windowsManagedHooksStandaloneACPUserState() ([]string, []string) {
+// connector_backups (GAP-0773). An account-owned link already reported at
+// the parent folder also covers its ACP path. It returns what stays
+// ("SID: path: reason") and what went ("SID: path").
+func windowsManagedHooksStandaloneACPUserState(accountLinks []windowsManagedHooksAccountLink) ([]string, []string) {
 	if err := enterpriseHookWindowsUserCleanupIdentity(); err != nil {
 		return nil, nil
 	}
@@ -228,6 +235,16 @@ func windowsManagedHooksStandaloneACPUserState() ([]string, []string) {
 	}
 	var remaining, purged []string
 	for _, copy := range copies {
+		covered := false
+		for _, link := range accountLinks {
+			if strings.EqualFold(copy.SID, link.sid) && sameWindowsEnterprisePathCLI(copy.Home, link.home) {
+				covered = true
+				break
+			}
+		}
+		if covered && windowsManagedHooksAccountOwnedRootLink(copy.Home, copy.SID) {
+			continue
+		}
 		label := copy.SID + ": " + filepath.Join(copy.Home, ".defenseclaw", "acp")
 		if err := windowsManagedHooksStandaloneACPUserPurger(copy.Home, copy.SID); err != nil {
 			remaining = append(remaining, label+": "+boundedEnterpriseHookUserCleanupText(err.Error()))
@@ -245,6 +262,7 @@ func windowsManagedHooksStandaloneACPUserState() ([]string, []string) {
 var (
 	windowsManagedHooksStandaloneACPUserCopies = enterprisehooks.WindowsManagedACPUserCopies
 	windowsManagedHooksStandaloneACPUserPurger = enterprisehooks.PurgeWindowsACPUserState
+	windowsManagedHooksAccountOwnedRootLink    = enterprisehooks.WindowsAccountOwnedRootDataDirLink
 )
 
 // windowsManagedHooksStandaloneCursorTombstonePurger is replaceable in tests.
@@ -338,10 +356,11 @@ func windowsManagedHooksStandaloneUserState(
 	manifest enterprisehooks.Manifest,
 	purge bool,
 	keepsRegistrations func(sid string) bool,
-) ([]string, []string) {
+) ([]string, []string, []windowsManagedHooksAccountLink) {
 	identityErr := enterpriseHookWindowsUserCleanupIdentity()
 	seen := map[string]bool{}
 	var remaining, purged []string
+	var accountLinks []windowsManagedHooksAccountLink
 	for _, target := range manifest.Targets {
 		home, sid := strings.TrimSpace(target.UserHome), strings.TrimSpace(target.SID)
 		dataDir := strings.TrimSpace(target.DataDir)
@@ -358,6 +377,10 @@ func windowsManagedHooksStandaloneUserState(
 		}
 		label += ": " + dataDir
 		_, statErr := os.Lstat(dataDir)
+		if purge && sameWindowsEnterprisePathCLI(dataDir, filepath.Join(home, ".defenseclaw")) &&
+			windowsManagedHooksAccountOwnedRootLink(home, sid) {
+			accountLinks = append(accountLinks, windowsManagedHooksAccountLink{home: home, sid: sid})
+		}
 		var reason string
 		switch {
 		case !purge:
@@ -425,7 +448,7 @@ func windowsManagedHooksStandaloneUserState(
 	}
 	sort.Strings(remaining)
 	sort.Strings(purged)
-	return remaining, purged
+	return remaining, purged, accountLinks
 }
 
 func newWindowsManagedHooksTeardownCommand() *cobra.Command {
