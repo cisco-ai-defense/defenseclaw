@@ -1093,6 +1093,7 @@ macos-app-test:
 	macos/DefenseClawMac/script/test_installation_context.sh
 	macos/DefenseClawMac/script/test_local_model_discovery.sh
 	macos/DefenseClawMac/script/test_setup_definitions_parity.sh
+	macos/DefenseClawMac/script/test_cowork_status.sh
 	macos/DefenseClawMac/script/test_gateway_auto_start.sh
 	macos/DefenseClawMac/script/test_gateway_administrator.sh
 	macos/DefenseClawMac/script/test_gateway_admin_helper.sh

@@ -292,6 +292,12 @@ final class AppState {
     var connectorStatsAllTimeCache: [String: AuditStore.ConnectorStats] = [:]
     /// Last-good doctor cache from <data_dir>/doctor_cache.json (pulse-fed).
     var doctorCache: DoctorCache?
+    /// The Cowork block of `defenseclaw status --json` (pulse-fed, at most every
+    /// `coworkStatusInterval` seconds); nil when Cowork plays no part here or the
+    /// runtime predates the block. TUI parity: overview_model.cowork_status.
+    var coworkStatus: CoworkStatus?
+    @ObservationIgnored private var lastCoworkStatusFetch: Date?
+    static let coworkStatusInterval: TimeInterval = 30
     /// Silent LLM bypass egress events in the last 5 minutes (pulse-fed).
     var silentBypassCount = 0
     /// Session-scoped "Total scans" for the Activity card (pulse-fed).
@@ -545,6 +551,8 @@ final class AppState {
         connectorStatsCache = [:]
         connectorStatsAllTimeCache = [:]
         doctorCache = nil
+        coworkStatus = nil
+        lastCoworkStatusFetch = nil
         silentBypassCount = 0
         sessionTotalScans = 0
         alertPanelRequest = nil
@@ -825,6 +833,8 @@ final class AppState {
         let guardrailState = health.subsystems.first { $0.name == "guardrail" }?.state
         // Doctor cache: keep last-good on parse failure (TUI semantics).
         doctorCache = DoctorCache.load(dataDirectory: installationContext.dataDirectory) ?? doctorCache
+        await refreshCoworkStatus(generation: generation)
+        guard installationSnapshotIsCurrent(generation) else { return }
         scanners = ScannerProbe.statuses(
             config: config,
             guardrailState: guardrailState,
@@ -2096,6 +2106,33 @@ final class AppState {
         }
     }
 
+    // MARK: - Cowork status row
+
+    /// Read the Cowork block of `defenseclaw status --json`. Cowork is a Claude
+    /// Code surface, so the call is skipped unless that connector is active, and
+    /// it runs at most every `coworkStatusInterval` seconds because `status`
+    /// probes the plugin state and the gateway. A failed run keeps the last good
+    /// row; a run that carries no `cowork` object (older runtime, no Cowork on
+    /// this account) clears it.
+    private func refreshCoworkStatus(generation: Int) async {
+        guard activeConnectorNames.contains(where: { $0.lowercased() == "claudecode" }) else {
+            coworkStatus = nil
+            lastCoworkStatusFetch = nil
+            return
+        }
+        if let last = lastCoworkStatusFetch, Date().timeIntervalSince(last) < Self.coworkStatusInterval { return }
+        lastCoworkStatusFetch = Date()
+        let result = await cli.run(arguments: ["status", "--json"], mutation: false)
+        guard installationSnapshotIsCurrent(generation), result.succeeded else { return }
+        let parsed = CoworkStatus.parse(result.output)
+        if parsed != coworkStatus { coworkStatus = parsed }
+    }
+
+    /// The Cowork rows for the CONFIGURATION box (TUI cowork_overview_rows).
+    private var coworkConfigurationRows: [ConfigurationRow] {
+        (coworkStatus?.overviewRows(home: NSHomeDirectory()) ?? []).map { .init(label: $0.label, value: $0.value) }
+    }
+
     // MARK: - Configuration box (Overview, parity with the TUI CONFIGURATION panel)
 
     /// The global CONFIGURATION rows shown above the Connectors table, mirroring
@@ -2127,8 +2164,11 @@ final class AppState {
         let redaction = "default \(redactionProfile)"
         let approval = config.hiltEnabled ? "ON (min \(config.hiltMinSeverity))" : "OFF"
 
+        // Cowork is a Claude Code surface: its rows sit under the agent row
+        // (TUI GAP-0046), in the all-connectors view only.
         var rows: [ConfigurationRow] = [
             agentRow,
+        ] + coworkConfigurationRows + [
             .init(label: "Redaction", value: redaction),
             .init(label: "Policy posture", value: policyPosture),
             .init(label: "Enforcement", value: enforcementLabel),
@@ -2178,6 +2218,8 @@ final class AppState {
             .init(label: "Redaction", value: redaction),
             .init(label: "Human approval", value: approval),
         ]
+        // The claudecode view also carries the Cowork rows (TUI _connector_configuration_lines).
+        if name.lowercased() == "claudecode" { rows += coworkConfigurationRows }
         if let env = config.environment?.nonEmpty {
             rows.append(.init(label: "Environment", value: "\(env) (global)"))
         }
