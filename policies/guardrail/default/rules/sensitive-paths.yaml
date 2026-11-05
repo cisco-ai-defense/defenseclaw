@@ -244,6 +244,23 @@ rules:
     severity: HIGH
     confidence: 0.95
     tags: [privilege, container, socket]
+  - id: secrets.credential_file_write
+    tool_call_only: true
+    # GAP-0052 (gas-ux-r1): the read rules of these files (PATH-AWS-CREDS,
+    # PATH-AWS-CONFIG, PATH-KUBE, PATH-DOCKER) never match a write. A write,
+    # append or delete of the active user's ~/.aws/credentials, ~/.aws/config,
+    # ~/.kube/config or ~/.docker/config.json can swap the identity of later
+    # CLI calls or plant a command the CLI runs (credential_process, a
+    # kubeconfig exec user, docker credHelpers). The code-owned lane proves
+    # an executing write, append or delete of that file in the active home;
+    # reads, path mentions and look-alikes elsewhere never match, and the
+    # regex lane is off. HIGH alerts in balanced, so aws configure and
+    # kubectl config keep working, and blocks in strict.
+    pattern: 'a^'
+    title: "Cloud, cluster or registry credential file write"
+    severity: HIGH
+    confidence: 0.92
+    tags: [credential, file-sensitive]
   - id: persistence.shell_profile_write
     tool_call_only: true
     # The rule owner checks the executing command and its path before CEL
