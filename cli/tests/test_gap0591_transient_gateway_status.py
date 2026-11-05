@@ -1,9 +1,18 @@
-"""A same-home transient gateway remains visible in CLI status."""
+"""A same-home transient gateway remains visible in CLI status.
+
+The proof is Linux-only by design (GAP-0591): a gateway started as a
+transient ``systemd --user`` unit has no PID file, and only Linux lets the
+CLI prove that no other account listens on the port (``/proc/net`` socket
+owners). Elsewhere a PID-file-less holder stays reported as a port holder.
+The proof itself is exercised on every OS through ``platform_name``; the
+end-to-end status checks run where the proof applies.
+"""
 
 from __future__ import annotations
 
 import json
 import subprocess
+import sys
 from contextlib import ExitStack
 from pathlib import Path
 from types import SimpleNamespace
@@ -16,6 +25,11 @@ from defenseclaw.commands import cmd_doctor, cmd_status
 from defenseclaw.doctor_gateway import ListenerEvidence
 
 from tests.helpers import cleanup_app, make_app_context
+
+linux_only = pytest.mark.skipif(
+    not sys.platform.startswith("linux"),
+    reason="the same-home transient gateway proof is Linux-only (GAP-0591)",
+)
 
 
 def _config(tmp_path: Path):
@@ -31,11 +45,21 @@ def _config(tmp_path: Path):
 def _proof_patches(cfg, *, report: dict, foreign_accounts: str = "") -> ExitStack:
     report = {"endpoint": cmd_doctor._gateway_api_url(cfg, "/health"), **report}
     stack = ExitStack()
-    stack.enter_context(patch.object(cmd_doctor, "_managed_gateway_process_trust", return_value=cmd_doctor._GatewayTrust("missing", "no PID file")))
-    stack.enter_context(patch.object(cmd_doctor, "_managed_gateway_listener_evidence", return_value=ListenerEvidence("ok", pid=4242)))
+    stack.enter_context(
+        patch.object(
+            cmd_doctor,
+            "_managed_gateway_process_trust",
+            return_value=cmd_doctor._GatewayTrust("missing", "no PID file"),
+        )
+    )
+    stack.enter_context(
+        patch.object(cmd_doctor, "_managed_gateway_listener_evidence", return_value=ListenerEvidence("ok", pid=4242))
+    )
     stack.enter_context(patch.object(cmd_doctor, "_linux_foreign_listener_accounts", return_value=foreign_accounts))
     stack.enter_context(patch.object(cmd_doctor, "_gateway_port_holder", return_value="PID 4242 (defenseclaw-gateway)"))
-    stack.enter_context(patch.object(gateway, "resolve_trusted_gateway_binary", return_value="/opt/defenseclaw-gateway"))
+    stack.enter_context(
+        patch.object(gateway, "resolve_trusted_gateway_binary", return_value="/opt/defenseclaw-gateway")
+    )
     stack.enter_context(
         patch.object(
             cmd_doctor.subprocess,
@@ -48,6 +72,7 @@ def _proof_patches(cfg, *, report: dict, foreign_accounts: str = "") -> ExitStac
     return stack
 
 
+@linux_only
 def test_same_home_transient_gateway_status_has_live_health_and_agents(tmp_path: Path) -> None:
     cfg = _config(tmp_path)
     client = MagicMock()
@@ -65,6 +90,7 @@ def test_same_home_transient_gateway_status_has_live_health_and_agents(tmp_path:
     client.status.assert_called_once()
 
 
+@linux_only
 def test_status_cli_shows_same_home_transient_gateway_and_agent_running() -> None:
     app, tmp_dir, db_path = make_app_context()
     app.cfg.guardrail.connector = "claudecode"
@@ -92,6 +118,27 @@ def test_status_cli_shows_same_home_transient_gateway_and_agent_running() -> Non
         assert payload["connectors"][0]["state"] == "running"
     finally:
         cleanup_app(app, db_path, tmp_dir)
+
+
+def test_transient_gateway_proof_trusts_this_homes_listener(tmp_path: Path) -> None:
+    cfg = _config(tmp_path)
+    with _proof_patches(cfg, report={"running": True, "health": {}}):
+        trust = cmd_doctor._trusted_gateway_listener(cfg, platform_name="linux")
+    assert trust.trusted
+    assert trust.pid == 4242
+
+
+@pytest.mark.parametrize("platform_name", ["win32", "darwin"])
+def test_transient_gateway_proof_is_not_used_off_linux(tmp_path: Path, platform_name: str) -> None:
+    cfg = _config(tmp_path)
+    with (
+        _proof_patches(cfg, report={"running": True, "health": {}}),
+        patch.object(cmd_doctor, "_transient_same_home_gateway_listener") as transient,
+    ):
+        trust = cmd_doctor._trusted_gateway_listener(cfg, platform_name=platform_name)
+    assert not trust.trusted
+    assert trust.code == "missing"
+    transient.assert_not_called()
 
 
 @pytest.mark.parametrize(
@@ -135,7 +182,8 @@ def test_transient_gateway_listener_pid_must_remain_stable(tmp_path: Path) -> No
     with (
         _proof_patches(cfg, report={"running": True, "health": {}}),
         patch.object(
-            cmd_doctor, "_managed_gateway_listener_evidence",
+            cmd_doctor,
+            "_managed_gateway_listener_evidence",
             side_effect=[ListenerEvidence("ok", pid=4242), ListenerEvidence("ok", pid=4343)],
         ),
     ):
