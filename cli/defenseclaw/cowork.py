@@ -44,12 +44,14 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Any
 
+from defenseclaw.file_permissions import atomic_write_private_bytes
 from defenseclaw.inventory.claude_desktop import GLOB_MAX, claude_desktop_data_dirs, desktop_platform
 
 PLUGIN_NAME = "defenseclaw"
 STATE_DIR = "cowork"
 ZIP_NAME = "defenseclaw-cowork-plugin.zip"
 STATE_NAME = "plugin-state.json"
+UNINSTALLED_SUFFIX = ".cowork-uninstalled"
 # The gateway's last Cowork hook call (Go gateway.CoworkActivityFile), kept
 # across gateway restarts (cowork-1-0-8 GAP-0038).
 ACTIVITY_NAME = "gateway-activity.json"
@@ -90,6 +92,40 @@ def zip_path(data_dir: str) -> str:
 
 def state_path(data_dir: str) -> str:
     return os.path.join(state_dir(data_dir), STATE_NAME)
+
+
+def uninstalled_marker_path(data_dir: str) -> str:
+    return os.path.normpath(os.fspath(data_dir)) + UNINSTALLED_SUFFIX
+
+
+def mark_uninstalled(data_dir: str) -> None:
+    """Record a completed per-user removal outside the removed data folder."""
+    marker = uninstalled_marker_path(data_dir)
+    for suffix in (".notice", ".context"):
+        try:
+            os.rmdir(marker + suffix)
+        except OSError:
+            pass
+    atomic_write_private_bytes(
+        marker,
+        b"removed\n",
+        protect_parent=False,
+        allow_windows_system_controllers_in_parent=os.name == "nt",
+    )
+
+
+def clear_uninstalled_marker(data_dir: str) -> None:
+    """A new Cowork build is an installed account again."""
+    marker = uninstalled_marker_path(data_dir)
+    try:
+        os.unlink(marker)
+    except FileNotFoundError:
+        pass
+    for suffix in (".notice", ".context"):
+        try:
+            os.rmdir(marker + suffix)
+        except OSError:
+            pass
 
 
 def load_state(data_dir: str) -> dict[str, Any]:

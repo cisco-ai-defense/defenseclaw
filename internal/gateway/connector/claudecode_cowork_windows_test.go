@@ -22,15 +22,15 @@ import (
 	"encoding/json"
 	"errors"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
 )
 
-// TestCoworkPluginHooksUseClaudeCodeExecFormOnWindows pins the literal argv of
-// the Windows plugin handlers in the one-line install layout (launcher and
-// guard side by side): PreToolUse runs the guard program, every other event
-// the cmd.exe launcher guard, and no handler is the managed form.
+// TestCoworkPluginHooksUseClaudeCodeExecFormOnWindows pins the Windows plugin
+// handler in the one-line install layout. The cmd.exe entry checks completed
+// removal and runs the launcher guard while the account is installed.
 func TestCoworkPluginHooksUseClaudeCodeExecFormOnWindows(t *testing.T) {
 	dataDir := t.TempDir()
 	bin := t.TempDir()
@@ -66,26 +66,94 @@ func TestCoworkPluginHooksUseClaudeCodeExecFormOnWindows(t *testing.T) {
 	if len(doc.Hooks) != len(CoworkPluginHookEvents) {
 		t.Fatalf("%d events, want %d", len(doc.Hooks), len(CoworkPluginHookEvents))
 	}
-	cmdGuard := append([]string{"/d", "/c", "if", "exist", launcher, "(", launcher, "hook", "--connector", "claudecode",
-		")", "else", "(", "echo"},
-		strings.Fields("DefenseClaw blocked this: its Claude Code hook launcher is missing. Run the DefenseClaw installer again to repair it.")...)
-	cmdGuard = append(cmdGuard, "1>&2", "&", "exit", "/b", "2", ")")
-	preTool := []string{"launcher-guard", launcher, "hook", "--connector", "claudecode"}
 	for event, entries := range doc.Hooks {
 		handler := entries[0].Hooks[0]
 		got := strings.Join(handler.Args, "\x00")
-		if event == "PreToolUse" {
-			if !strings.EqualFold(handler.Command, guard) || got != strings.Join(preTool, "\x00") {
-				t.Fatalf("PreToolUse: %q %q, want %q %q", handler.Command, handler.Args, guard, preTool)
-			}
-			continue
-		}
 		if !strings.EqualFold(filepath.Base(handler.Command), "cmd.exe") || !filepath.IsAbs(handler.Command) ||
-			got != strings.Join(cmdGuard, "\x00") {
-			t.Fatalf("%s: %q %q, want <system>\\cmd.exe %q", event, handler.Command, handler.Args, cmdGuard)
+			!strings.Contains(got, dataDir+coworkRemovalMarkerSuffix) ||
+			!strings.Contains(got, filepath.Join(dataDir, "config.yaml")) ||
+			!strings.Contains(got, filepath.Join(dataDir, hookContractLockFile)) ||
+			!strings.Contains(got, filepath.Join(dataDir, "gateway.pid")) ||
+			!strings.Contains(got, guard+"\x00launcher-guard\x00"+launcher) ||
+			!strings.Contains(got, "if\x00errorlevel\x001\x00exit\x00/b\x002") {
+			t.Fatalf("%s: %q %q does not guard the installed launcher and distinguish removal", event, handler.Command, handler.Args)
 		}
 		if strings.Contains(got, "--enterprise-managed") {
 			t.Fatalf("%s: per-user plugin handler carries --enterprise-managed", event)
 		}
+	}
+}
+
+func TestCoworkWindowsPluginDistinguishesRemovalFromLauncherFailure(t *testing.T) {
+	root := t.TempDir()
+	dataDir := filepath.Join(root, "account data")
+	bin := filepath.Join(root, "bin")
+	if err := os.MkdirAll(bin, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	launcher := filepath.Join(bin, "defenseclaw-hook.exe")
+	guard := filepath.Join(bin, "defenseclaw-hook-guard.exe")
+	for _, path := range []string{launcher, guard} {
+		if err := os.WriteFile(path, []byte("not an executable"), 0o700); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := SaveHookContractLockEntry(dataDir, HookContractLockEntry{Connector: "claudecode", ContractID: "claudecode-test"}); err != nil {
+		t.Fatal(err)
+	}
+	raw, err := CoworkPluginHooks(SetupOpts{DataDir: dataDir, HookExecutable: launcher})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var doc struct {
+		Hooks map[string][]struct {
+			Hooks []struct {
+				Command string   `json:"command"`
+				Args    []string `json:"args"`
+			} `json:"hooks"`
+		} `json:"hooks"`
+	}
+	if err := json.Unmarshal(raw, &doc); err != nil {
+		t.Fatal(err)
+	}
+	run := func() (int, string) {
+		t.Helper()
+		handler := doc.Hooks["PreToolUse"][0].Hooks[0]
+		out, err := exec.Command(handler.Command, handler.Args...).CombinedOutput()
+		if err == nil {
+			return 0, string(out)
+		}
+		if exit, ok := err.(*exec.ExitError); ok {
+			return exit.ExitCode(), string(out)
+		}
+		t.Fatal(err)
+		return -1, ""
+	}
+	if code, out := run(); code != 2 {
+		t.Fatalf("launcher cannot start: exit %d output %q, want 2", code, out)
+	}
+	if err := os.Remove(launcher); err != nil {
+		t.Fatal(err)
+	}
+	if code, out := run(); code != 2 {
+		t.Fatalf("launcher missing with installed data: exit %d output %q, want 2", code, out)
+	}
+	if err := os.WriteFile(launcher, []byte("not an executable"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Remove(guard); err != nil {
+		t.Fatal(err)
+	}
+	if code, out := run(); code != 2 {
+		t.Fatalf("launcher guard missing: exit %d output %q, want 2", code, out)
+	}
+	if err := os.RemoveAll(dataDir); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(dataDir+coworkRemovalMarkerSuffix, []byte("removed\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if code, out := run(); code != 0 || !strings.Contains(out, "Customize") {
+		t.Fatalf("completed removal: exit %d output %q, want notice", code, out)
 	}
 }

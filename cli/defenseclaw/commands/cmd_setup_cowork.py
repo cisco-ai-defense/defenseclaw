@@ -266,6 +266,7 @@ def setup_cowork(
         }
     )
     cowork.save_state(data_dir, state)
+    cowork.clear_uninstalled_marker(data_dir)
 
     ux.ok(f"Built the DefenseClaw Cowork plugin {version}: {path}")
     ux.echo(f"    Cowork calls will run in the Claude Code connector's {cowork.mode_text(cfg)}.")

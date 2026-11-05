@@ -303,11 +303,13 @@ class KeptAndNextStepsTests(unittest.TestCase):
 class ResetCommandTests(unittest.TestCase):
     def setUp(self) -> None:
         self._tmp = tempfile.TemporaryDirectory()
+        self._data = Path(self._tmp.name) / "data"
+        self._data.mkdir()
         self.addCleanup(self._tmp.cleanup)
-        (Path(self._tmp.name) / ".venv").mkdir()
+        (self._data / ".venv").mkdir()
         patcher = patch(
             "defenseclaw.commands.cmd_uninstall.config_module.default_data_path",
-            return_value=self._tmp.name,
+            return_value=self._data,
         )
         patcher.start()
         self.addCleanup(patcher.stop)
@@ -335,7 +337,7 @@ class ResetCommandTests(unittest.TestCase):
         # what only the user can remove, as uninstall does.
         from defenseclaw import cowork
 
-        state = Path(cowork.state_path(self._tmp.name))
+        state = Path(cowork.state_path(self._data))
         state.parent.mkdir(parents=True, exist_ok=True)
         state.write_text("{}")
         runner = CliRunner()
@@ -345,7 +347,8 @@ class ResetCommandTests(unittest.TestCase):
         flat = " ".join(result.output.split())
         self.assertIn("cannot remove its Cowork plugin from your Claude account", flat)
         self.assertIn("Customize > Plugins, then the ... menu > Remove", flat)
-        self.assertIn("Until then Cowork tool calls are blocked.", flat)
+        self.assertIn("A plugin built with 1.0.9 lets Cowork calls run after the data folder is removed", flat)
+        self.assertEqual(Path(cowork.uninstalled_marker_path(self._data)).read_text(), "removed\n")
         self.assertLess(flat.index("Cowork plugin"), flat.index("Reset complete"))
 
     def test_reset_without_a_cowork_plugin_prints_no_cowork_line(self):

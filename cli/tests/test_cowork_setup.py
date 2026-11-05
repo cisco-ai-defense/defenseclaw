@@ -25,6 +25,7 @@ import subprocess
 import sys
 import zipfile
 from datetime import datetime, timedelta, timezone
+from pathlib import Path
 from unittest.mock import patch
 
 import pytest
@@ -265,6 +266,34 @@ def test_uninstall_dry_run_names_the_cowork_removal_step(app) -> None:
     assert result.exit_code == 0, result.output
     assert "Customize > Plugins, then the ... menu > Remove" in result.output
     execute.assert_not_called()
+
+
+def test_completed_uninstall_records_cowork_removal(app) -> None:
+    data_dir = _data_dir(app)
+    cowork.save_state(data_dir, {"build": 1, "version": "1.0.1"})
+    plan = cmd_uninstall.UninstallPlan(data_dir=data_dir, remove_data_dir=True)
+    with (
+        patch("defenseclaw.commands.windows_native_uninstall.prepare_native_windows_uninstall", return_value=None),
+        patch.object(cmd_uninstall, "_build_plan", return_value=plan),
+        patch.object(cmd_uninstall, "_render_plan"),
+        patch.object(cmd_uninstall, "_execute_plan"),
+        patch.object(cmd_uninstall, "_configured_gateway_ports", return_value=frozenset()),
+        patch.object(cmd_uninstall, "_remove_marked_native_otel_left"),
+        patch.object(cmd_uninstall, "_render_kept_and_next_steps"),
+    ):
+        result = CliRunner().invoke(cmd_uninstall.uninstall_cmd, ["--all", "--yes"])
+    assert result.exit_code == 0, result.output
+    assert Path(cowork.uninstalled_marker_path(data_dir)).read_text(encoding="utf-8") == "removed\n"
+    assert "Customize > Plugins, then the ... menu > Remove" in result.output
+
+
+def test_new_cowork_build_clears_a_previous_removal_record(app) -> None:
+    data_dir = _data_dir(app)
+    assert cowork.uninstalled_marker_path(data_dir + os.sep) == cowork.uninstalled_marker_path(data_dir)
+    cowork.mark_uninstalled(data_dir)
+    result, _ = _setup(app, "--yes")
+    assert result.exit_code == 0, result.output
+    assert not os.path.exists(cowork.uninstalled_marker_path(data_dir))
 
 
 def test_live_activity_before_the_build_is_not_protection(app) -> None:
