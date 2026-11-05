@@ -4206,6 +4206,27 @@ func (l Links) ProtectedCopyDestination(home string) bool {
 	return l.links.protectedCopyDestinationWith(newProtectedFiles(home))
 }
 
+// KnownDynamicCopyTarget reports a copy whose dynamic operand has one
+// validated value. Strict keeps its earlier answer when only the balanced
+// proof can supply that value.
+func (l Links) KnownDynamicCopyTarget() bool {
+	return len(l.links.copyWrittenTargets) > 0
+}
+
+// UnverifiedClientResolution reports a client link reading that changes a
+// named path while the client also reports an uncertain write.
+func UnverifiedClientResolution(facts map[string]string) bool {
+	if facts[UnprovenReasonKey] == "" {
+		return false
+	}
+	for path, resolved := range facts {
+		if filepath.IsAbs(path) && filepath.IsAbs(resolved) && filepath.Clean(resolved) != filepath.Clean(path) {
+			return true
+		}
+	}
+	return false
+}
+
 func (l shellLinks) protectedCopyDestinationWith(protected protectedFiles) bool {
 	check := func(destinations []string) bool {
 		for _, destination := range destinations {

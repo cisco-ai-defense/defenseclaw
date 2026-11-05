@@ -1362,10 +1362,19 @@ func trustedExistingAuthorizedKeysSymlinkWrite(request trustedActionRequest, fac
 	}
 	if request.StrictPolicy {
 		links = hookpaths.CommandLinksWithFacts(request.Input.Tool, input.Command, input.CWD, facts.ActiveHome, request.ResolvedWriteTargets)
+		if request.ProtectedHomeHook {
+			balanced := hookpaths.CommandLinksWithFactsBalanced(request.Input.Tool, input.Command, input.CWD, facts.ActiveHome, request.ResolvedWriteTargets)
+			if balanced.KnownDynamicCopyTarget() && !links.KnownDynamicCopyTarget() {
+				return true
+			}
+		}
 	} else {
 		links = hookpaths.CommandLinksWithFactsBalanced(request.Input.Tool, input.Command, input.CWD, facts.ActiveHome, request.ResolvedWriteTargets)
 	}
 	if links.ProtectedCopyDestination(facts.ActiveHome) {
+		return true
+	}
+	if cannotResolveLocally && hookpaths.UnverifiedClientResolution(clientTargets) {
 		return true
 	}
 	safeRedirects = hookpaths.SafeShellRedirectOccurrencesWithFacts(input.Command, input.CWD, facts.ActiveHome, request.ResolvedWriteTargets)
