@@ -13062,6 +13062,15 @@ function Set-DefenseClawManagedAcls {
     Invoke-DefenseClawBundleAclContract -Layout $Layout -GatewayServiceSID $gatewaySID -Repair
     Set-DefenseClawPathAcl -Path $Layout.ConfigPath -Kind ConfigFile -GatewayServiceSID $gatewaySID
     Set-DefenseClawPathAcl -Path $Layout.ManifestPath -Kind AdminFile -GatewayServiceSID $gatewaySID
+    if (Test-DefenseClawStandaloneProfile) {
+        foreach ($name in @('config', 'manifest')) {
+            $approvedPath = Get-DefenseClawApprovedPolicyPath -Layout $Layout -Name $name
+            if (Microsoft.PowerShell.Management\Test-Path -LiteralPath $approvedPath -PathType Leaf) {
+                Set-DefenseClawPathAcl -Path $approvedPath -Kind AdminFile `
+                    -GatewayServiceSID $script:AdministratorsSID
+            }
+        }
+    }
     Set-DefenseClawPathAcl -Path $Layout.RuntimeDirectory -Kind RuntimeDirectory -GatewayServiceSID $gatewaySID
     $runtimeEnv = [IO.Path]::Combine([string]$Layout.RuntimeDirectory, '.env')
     if ((Test-DefenseClawStandaloneProfile) -and
@@ -15288,7 +15297,8 @@ function New-DefenseClawDeploymentMetadata {
         [string]$InstallRootIdentity = '',
         [string]$StateRootIdentity = '',
         [bool]$UninstallPurgeRequested = $false,
-        [bool]$UninstallPurgeUserStateRequested = $false
+        [bool]$UninstallPurgeUserStateRequested = $false,
+        [hashtable]$ApprovedPolicySources = @{}
     )
     if ($Installed -and
         ($UninstallPurgeRequested -or $UninstallPurgeUserStateRequested)) {
@@ -15461,6 +15471,9 @@ function New-DefenseClawDeploymentMetadata {
         # Client metadata keeps its historical field set exactly.
         $metadata['broker_account'] = ''
         $metadata['profile'] = 'standalone'
+        if ($Installed -and $ApprovedPolicySources.Count -gt 0) {
+            $metadata['approved_policy_sources'] = $ApprovedPolicySources
+        }
         $metadata['trust_mode'] = if ([string]$script:DefenseClawTrustMode -ceq 'HashPinned') {
             'hash_pinned'
         }
@@ -16374,6 +16387,9 @@ function New-DefenseClawTransaction {
     }
     # Standalone only: the Secure Client snapshot is unchanged.
     if (Test-DefenseClawStandaloneProfile) {
+        foreach ($name in @('config', 'manifest')) {
+            $destinations.Add((Get-DefenseClawApprovedPolicyPath -Layout $Layout -Name $name))
+        }
         foreach ($destination in @(Get-DefenseClawConfigSidecarPaths -Layout $Layout)) {
             # An existing generation record is not snapshotted: the counter
             # never goes back, so a rollback leaves it and records the
@@ -31943,6 +31959,169 @@ function Get-DefenseClawLifecycleSources {
     return $sources
 }
 
+function Get-DefenseClawApprovedPolicyPath {
+    param(
+        [Parameter(Mandatory)][hashtable]$Layout,
+        [Parameter(Mandatory)][ValidateSet('config', 'manifest')][string]$Name
+    )
+    $leaf = if ($Name -ceq 'config') { 'approved-config.yaml' } else { 'approved-targets.yaml' }
+    return [IO.Path]::Combine([string]$Layout.InstallStateDirectory, $leaf)
+}
+
+function Get-DefenseClawApprovedPolicyHash {
+    param(
+        [Parameter(Mandatory)]$Metadata,
+        [Parameter(Mandatory)][ValidateSet('config', 'manifest')][string]$Name
+    )
+    $record = $Metadata.PSObject.Properties['approved_policy_sources']
+    if ($null -eq $record) { return '' }
+    if ($record.Value -isnot [Management.Automation.PSCustomObject]) {
+        throw 'deployment metadata has an invalid approved policy source record'
+    }
+    foreach ($property in $record.Value.PSObject.Properties) {
+        if ($property.Name -notin @('config', 'manifest') -or
+            [string]$property.Value -cnotmatch '^[0-9a-f]{64}$') {
+            throw 'deployment metadata has an invalid approved policy source digest'
+        }
+    }
+    $entry = $record.Value.PSObject.Properties[$Name]
+    if ($null -eq $entry) { return '' }
+    return [string]$entry.Value
+}
+
+function Get-DefenseClawApprovedPolicySource {
+    param(
+        [Parameter(Mandatory)][hashtable]$Layout,
+        [Parameter(Mandatory)]$Metadata,
+        [Parameter(Mandatory)][ValidateSet('config', 'manifest')][string]$Name
+    )
+    $expected = Get-DefenseClawApprovedPolicyHash -Metadata $Metadata -Name $Name
+    if ([string]::IsNullOrEmpty($expected)) {
+        throw "Repair has no recorded approved $Name source; run Setup /ensure with the approved CONFIG= input, or BUNDLE= on a signed-bundle deployment"
+    }
+    $path = Get-DefenseClawApprovedPolicyPath -Layout $Layout -Name $Name
+    if (-not (Microsoft.PowerShell.Management\Test-Path -LiteralPath $path -PathType Leaf)) {
+        throw "Repair cannot read the recorded approved $Name source; run Setup /ensure with the approved CONFIG= input, or BUNDLE= on a signed-bundle deployment"
+    }
+    Assert-DefenseClawPathAcl `
+        -Path $path `
+        -AllowedWriterSIDs @($script:SystemSID, $script:AdministratorsSID, $script:TrustedInstallerSID) `
+        -AllowedReaderSIDs @($script:SystemSID, $script:AdministratorsSID, $script:TrustedInstallerSID) `
+        -RejectUntrustedRead `
+        -AllowInheritance `
+        -IgnoreCreatorTemplates
+    $source = Get-DefenseClawSourceDescriptor -Path $path -Label "approved $Name source"
+    if ([string]$source.sha256 -ne $expected) {
+        throw "Repair found a changed approved $Name source; run Setup /ensure with the approved CONFIG= input, or BUNDLE= on a signed-bundle deployment"
+    }
+    return $source
+}
+
+function Invoke-DefenseClawRepairApprovedPolicyRecovery {
+    param(
+        [Parameter(Mandatory)][hashtable]$Layout,
+        [Parameter(Mandatory)][hashtable]$Sources,
+        [Parameter(Mandatory)]$Metadata,
+        [Parameter(Mandatory)][string]$GatewayServiceName
+    )
+    $adminWriters = @($script:SystemSID, $script:AdministratorsSID, $script:TrustedInstallerSID)
+    foreach ($name in @('config', 'manifest')) {
+        if ($Sources.ContainsKey($name)) { continue }
+        $destination = Get-DefenseClawArtifactPath -Layout $Layout -Name $name
+        $directory = [IO.Path]::GetDirectoryName([string]$destination)
+        $parentPaths = @($Layout.StateRoot, $directory)
+        foreach ($parent in $parentPaths) {
+            Assert-DefenseClawPathAcl -Path ([string]$parent) `
+                -AllowedWriterSIDs $adminWriters -AllowInheritance -IgnoreCreatorTemplates
+        }
+        $needsRewrite = -not (Microsoft.PowerShell.Management\Test-Path `
+            -LiteralPath $destination -PathType Leaf)
+        if (-not $needsRewrite) {
+            try {
+                Assert-DefenseClawPathAcl -Path $destination `
+                    -AllowedWriterSIDs $adminWriters -AllowInheritance -IgnoreCreatorTemplates
+            }
+            catch {
+                $needsRewrite = $true
+            }
+        }
+        $activeHash = ''
+        if ($name -ceq 'config') {
+            $generationPath = [IO.Path]::Combine([string]$Layout.ConfigDirectory, 'config.generation.json')
+            if (Microsoft.PowerShell.Management\Test-Path -LiteralPath $generationPath -PathType Leaf) {
+                Assert-DefenseClawPathAcl -Path $generationPath `
+                    -AllowedWriterSIDs $adminWriters -AllowInheritance -IgnoreCreatorTemplates
+                $generation = Microsoft.PowerShell.Management\Get-Content `
+                    -LiteralPath $generationPath -Raw |
+                    Microsoft.PowerShell.Utility\ConvertFrom-Json
+                $activeHash = [string]$generation.config_sha256
+                if ($activeHash -cnotmatch '^[0-9a-f]{64}$') {
+                    throw 'Repair cannot read the recorded config generation; run Setup /ensure CONFIG=<approved absolute config path>'
+                }
+            }
+        }
+        else {
+            $activeHash = [string]$Metadata.managed_hooks_activation.manifest_sha256
+        }
+        if (-not $needsRewrite -and -not [string]::IsNullOrEmpty($activeHash)) {
+            $installedHash = (
+                Microsoft.PowerShell.Utility\Get-FileHash -LiteralPath $destination -Algorithm SHA256
+            ).Hash.ToLowerInvariant()
+            if ($installedHash -ne $activeHash) {
+                if ($name -ceq 'config') {
+                    $needsRewrite = $true
+                }
+                else {
+                    $adoption = Get-DefenseClawStandaloneManifestAdoption `
+                        -Layout $Layout -GatewayServiceName $GatewayServiceName `
+                        -Activation $Metadata.managed_hooks_activation `
+                        -InstalledManifestSHA256 $installedHash
+                    $needsRewrite = -not [bool]$adoption.ok
+                }
+            }
+        }
+        if (-not $needsRewrite) { continue }
+        $approved = Get-DefenseClawApprovedPolicySource `
+            -Layout $Layout -Metadata $Metadata -Name $name
+        if ([string]::IsNullOrEmpty($activeHash) -or
+            [string]$approved.sha256 -ne $activeHash) {
+            throw "Repair cannot prove that the recorded approved $name source is current; run Setup /ensure with the approved CONFIG= input, or BUNDLE= on a signed-bundle deployment"
+        }
+        Install-DefenseClawSourceDescriptor -Source $approved -Destination $destination
+        $kind = if ($name -ceq 'config') { 'ConfigFile' } else { 'AdminFile' }
+        Set-DefenseClawPathAcl -Path $destination -Kind $kind `
+            -GatewayServiceSID (Get-DefenseClawServiceSID -ServiceName $GatewayServiceName)
+    }
+}
+
+function Publish-DefenseClawApprovedPolicySources {
+    param(
+        [Parameter(Mandatory)][hashtable]$Layout,
+        [Parameter(Mandatory)][hashtable]$Sources,
+        $PriorMetadata
+    )
+    $record = @{}
+    if ($null -ne $PriorMetadata) {
+        foreach ($name in @('config', 'manifest')) {
+            $priorHash = Get-DefenseClawApprovedPolicyHash -Metadata $PriorMetadata -Name $name
+            if (-not [string]::IsNullOrEmpty($priorHash)) { $record[$name] = $priorHash }
+        }
+    }
+    foreach ($name in @('config', 'manifest')) {
+        if (-not $Sources.ContainsKey($name)) { continue }
+        $installed = Get-DefenseClawArtifactPath -Layout $Layout -Name $name
+        $copy = Get-DefenseClawApprovedPolicyPath -Layout $Layout -Name $name
+        $digest = (
+            Microsoft.PowerShell.Utility\Get-FileHash -LiteralPath $installed -Algorithm SHA256
+        ).Hash.ToLowerInvariant()
+        Install-DefenseClawFileAtomic -Source $installed -Destination $copy -ExpectedSHA256 $digest
+        Set-DefenseClawPathAcl -Path $copy -Kind AdminFile `
+            -GatewayServiceSID $script:AdministratorsSID
+        $record[$name] = $digest
+    }
+    return $record
+}
+
 function Assert-DefenseClawLifecycleSourcesCurrent {
     param([Parameter(Mandatory)][hashtable]$Sources)
     foreach ($name in @(
@@ -40875,6 +41054,13 @@ function Invoke-DefenseClawInstallLikeLifecycle {
             -ReplacedArtifacts $replaced `
             -Action $Action
     }
+    if ($Action -eq 'Repair' -and (Test-DefenseClawStandaloneProfile)) {
+        Invoke-DefenseClawRepairApprovedPolicyRecovery `
+            -Layout $Layout `
+            -Sources $Sources `
+            -Metadata $metadata `
+            -GatewayServiceName $GatewayServiceName
+    }
 
     $priorCodexTargetEnabled = $false
     if ($null -ne $metadata -and
@@ -41517,6 +41703,11 @@ function Invoke-DefenseClawInstallLikeLifecycle {
                 -TargetCount ([Convert]::ToInt64(
                     $targetRuntimePlan.target_count
                 ))
+        $approvedPolicySources = @{}
+        if (Test-DefenseClawStandaloneProfile) {
+            $approvedPolicySources = Publish-DefenseClawApprovedPolicySources `
+                -Layout $Layout -Sources $Sources -PriorMetadata $metadata
+        }
         $newMetadata = New-DefenseClawDeploymentMetadata `
             -Layout $Layout `
             -GatewayServiceName $GatewayServiceName `
@@ -41524,7 +41715,8 @@ function Invoke-DefenseClawInstallLikeLifecycle {
             -DeferredConfigPending:([bool](
                 $DeferredConfig -or $priorDeferredConfigPending
             )) `
-            -ManagedHooksActivation $managedHooksActivation
+            -ManagedHooksActivation $managedHooksActivation `
+            -ApprovedPolicySources $approvedPolicySources
         Write-DefenseClawJsonAtomic -Value $newMetadata -Path $Layout.MetadataPath
         Set-DefenseClawManagedAcls -Layout $Layout -GatewayServiceName $GatewayServiceName
         Set-DefenseClawStandaloneSecretsAcls `
