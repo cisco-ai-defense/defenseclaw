@@ -4662,6 +4662,7 @@ var exactFallbackContracts = map[string]exactFallbackContract{
 			return owner.prerequisite != nil && owner.prerequisite(facts)
 		},
 	},
+	// The write leg of every credential read rule (credentialFileWriteLegs).
 	// A code-owned lane, not a CEL rule: the shipped default keeps its
 	// semantic-rule budget for partner extensions.
 	"secrets.credential_file_write": {

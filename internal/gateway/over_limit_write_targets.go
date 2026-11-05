@@ -42,6 +42,7 @@ func appendTrustedWriteTargetFindings(
 	request trustedActionRequest,
 	facts actionfacts.Facts,
 ) []RuleFinding {
+	findings = appendTrustedCredentialLinkWriteFinding(findings, generation, request, facts)
 	if !actionfacts.LimitExceededWriteTool(request.Input, facts) {
 		return appendTrustedHomeResolvedSSHKeyWriteFinding(findings, generation, request, facts)
 	}

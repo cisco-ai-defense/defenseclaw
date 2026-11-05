@@ -3166,7 +3166,7 @@
                   "id": "secrets.credential_file_write",
                   "tool_call_only": true,
                   "pattern": "a^",
-                  "title": "Cloud, cluster or registry credential file write",
+                  "title": "Credential file write",
                   "severity": "HIGH",
                   "confidence": 0.92,
                   "tags": [
@@ -7146,7 +7146,7 @@
                   "id": "secrets.credential_file_write",
                   "tool_call_only": true,
                   "pattern": "a^",
-                  "title": "Cloud, cluster or registry credential file write",
+                  "title": "Credential file write",
                   "severity": "HIGH",
                   "confidence": 0.92,
                   "tags": [
@@ -10838,7 +10838,7 @@
                   "id": "secrets.credential_file_write",
                   "tool_call_only": true,
                   "pattern": "a^",
-                  "title": "Cloud, cluster or registry credential file write",
+                  "title": "Credential file write",
                   "severity": "HIGH",
                   "confidence": 0.92,
                   "tags": [
