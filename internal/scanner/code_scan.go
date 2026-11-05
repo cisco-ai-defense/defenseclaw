@@ -105,7 +105,7 @@ func ScanCode(ctx context.Context, target, rulesDir string) (*ScanResult, error)
 
 // cgExecNonEval is CG-EXEC-001's pattern without eval(), which the vuln
 // scanner already reports as CS-VLN-CODE-EVAL.
-var cgExecNonEval = lazyregexp.New(`(?i)(os\.system|subprocess\.call|exec\(|child_process\.exec|system\()`)
+var cgExecNonEval = lazyregexp.New(`(?i)` + cgExecCommandCalls)
 
 // dropEvalOnlyExecFindings removes a CodeGuard CG-EXEC-001 finding whose line
 // matched only because of eval() when CS-VLN-CODE-EVAL reports the same line
@@ -122,7 +122,7 @@ func dropEvalOnlyExecFindings(findings []Finding) []Finding {
 	}
 	kept := findings[:0]
 	for _, f := range findings {
-		if f.ID == "CG-EXEC-001" && evalLines[codeFindingLineKey(f.Location)] && !cgExecNonEval.MatchString(f.Description) {
+		if f.ID == "CG-EXEC-001" && evalLines[codeFindingLineKey(f.Location)] && !cgExecNonEval.MatchString(cgExecView(f.Description)) {
 			continue
 		}
 		kept = append(kept, f)
