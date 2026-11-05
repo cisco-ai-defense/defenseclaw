@@ -881,6 +881,57 @@ func windowsInstalledScannerRuntimeCheck(root, target string) error {
 	return managed.CheckScannerRuntimeAdmitted(root, target)
 }
 
+// windowsInstalledScannerRuntimeCheckPinned is
+// windowsInstalledScannerRuntimeCheck for an executable this run hashed
+// through pin (windowsScannerRuntimePinned) to got: the access control check
+// runs as always, then got is compared with the admission record while pin
+// still holds the very file target names, so the file is not read again.
+func windowsInstalledScannerRuntimeCheckPinned(root, target string, pin *os.File, got string) error {
+	if err := windowsScannerRuntimeACLCheck(root, target); err != nil {
+		return err
+	}
+	held, err := pin.Stat()
+	if err != nil {
+		return fmt.Errorf("read the held scanner runtime %s: %w", target, err)
+	}
+	named, err := os.Lstat(target)
+	if err != nil || !os.SameFile(held, named) {
+		return fmt.Errorf("%s is no longer the file this run hashed", target)
+	}
+	return managed.CheckScannerRuntimeAdmittedSHA256(root, target, got)
+}
+
+// windowsScannerRuntimePinned opens path for reading with read sharing only,
+// so until the returned file is closed nobody can write, replace, rename or
+// remove it, and returns its SHA-256. A reparse point or anything but a
+// regular file is refused. A seam for tests.
+var windowsScannerRuntimePinned = func(path string) (*os.File, string, error) {
+	pointer, err := winpath.UTF16Ptr(path)
+	if err != nil {
+		return nil, "", err
+	}
+	handle, err := windows.CreateFile(pointer, windows.GENERIC_READ, windows.FILE_SHARE_READ, nil,
+		windows.OPEN_EXISTING, windows.FILE_ATTRIBUTE_NORMAL|windows.FILE_FLAG_OPEN_REPARSE_POINT, 0)
+	if err != nil {
+		return nil, "", fmt.Errorf("open %s for hashing: %w", path, err)
+	}
+	file := os.NewFile(uintptr(handle), path)
+	info, err := file.Stat()
+	if err != nil || !info.Mode().IsRegular() {
+		_ = file.Close()
+		if err == nil {
+			err = errors.New("not a regular file")
+		}
+		return nil, "", fmt.Errorf("open %s for hashing: %w", path, err)
+	}
+	hasher := sha256.New()
+	if _, err := io.Copy(hasher, file); err != nil {
+		_ = file.Close()
+		return nil, "", fmt.Errorf("hash %s: %w", path, err)
+	}
+	return file, hex.EncodeToString(hasher.Sum(nil)), nil
+}
+
 // windowsScannerRuntimeServiceCheck checks the runtime the way the gateway
 // service runs it: the trust check every scan makes, and that the service
 // account can read the runtime folder and the security descriptors of its
@@ -1162,6 +1213,7 @@ func windowsScannerRuntimeLeftTo(owner windowsScannerRuntimeOwner, opts *windows
 // recreate the runtime after it; that is checked before the root is made and
 // again under the lock.
 func installWindowsScannerRuntime(source, action string, opts *windowsEnterpriseLifecycleOptions) error {
+	started := time.Now()
 	root, err := windowsScannerRuntimeDir()
 	if err != nil {
 		return err
@@ -1219,10 +1271,16 @@ func installWindowsScannerRuntime(source, action string, opts *windowsEnterprise
 		return err
 	}
 	target := filepath.Join(root, managed.StandaloneWindowsScannerRuntimeName)
-	want, err := windowsEnterpriseFileSHA256(source)
+	checksStarted := time.Now()
+	// The staged copy and the installed one are each hashed once, through a
+	// handle that shares only reading: neither can be written, replaced or
+	// removed while it is held, so the signature check and the installed
+	// check below are of the bytes that were hashed (GAP-0044).
+	sourcePin, want, err := windowsScannerRuntimePinned(source)
 	if err != nil {
 		return err
 	}
+	defer sourcePin.Close()
 	// The staged copy is admitted under the current trust policy even when
 	// the installed bytes match it: a signer restriction added since the
 	// last run applies to this run too (GAP-0919). The installed copy is
@@ -1234,11 +1292,21 @@ func installWindowsScannerRuntime(source, action string, opts *windowsEnterprise
 	if err != nil {
 		return err
 	}
-	got, gotErr := windowsEnterpriseFileSHA256(target)
+	targetPin, got, gotErr := windowsScannerRuntimePinned(target)
+	defer func() {
+		if targetPin != nil {
+			_ = targetPin.Close()
+		}
+	}()
 	admitted, _ := managed.ReadScannerRuntimeAdmission(root)
 	copied := false
 	if gotErr != nil || got != want || admitted != want {
 		if gotErr != nil || got != want {
+			// The copy replaces the file the pin holds.
+			if targetPin != nil {
+				_ = targetPin.Close()
+				targetPin = nil
+			}
 			if err := copyWindowsScannerRuntime(source, target, root, want); err != nil {
 				return err
 			}
@@ -1248,9 +1316,18 @@ func installWindowsScannerRuntime(source, action string, opts *windowsEnterprise
 			return fmt.Errorf("record the admitted scanner runtime: %w", err)
 		}
 	}
-	if err := windowsInstalledScannerRuntimeCheck(root, target); err != nil {
+	installedCheck := windowsInstalledScannerRuntimeCheck
+	if targetPin != nil {
+		// The digest is reused only while the pin holds the file at target.
+		installedCheck = func(root, target string) error {
+			return windowsInstalledScannerRuntimeCheckPinned(root, target, targetPin, got)
+		}
+	}
+	if err := installedCheck(root, target); err != nil {
 		return err
 	}
+	fmt.Fprintf(&windowsScannerLockedWriter{w: windowsScannerProgress}, "[scanners] checked the scanner runtime folder (%s) and the staged and installed executable (%s)\n",
+		checksStarted.Sub(started).Round(100*time.Millisecond), time.Since(checksStarted).Round(100*time.Millisecond))
 	// prepare checks every file of an unpacked runtime against the archive
 	// and compiles what is not compiled; prune drops the runtimes earlier
 	// builds left. A copy has just prepared the same bytes under their

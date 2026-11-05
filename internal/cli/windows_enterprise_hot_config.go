@@ -33,6 +33,7 @@ import (
 
 	"github.com/spf13/cobra"
 	"golang.org/x/sys/windows"
+	"golang.org/x/sys/windows/svc/mgr"
 	"gopkg.in/yaml.v3"
 
 	"github.com/defenseclaw/defenseclaw/internal/config"
@@ -246,9 +247,12 @@ func windowsBundleTakeOverPendingCommit(ctx context.Context, opts *windowsEnterp
 
 // windowsEnterpriseHotConfigApply applies the supplied config to the running
 // gateway and fills result from a verify of the host. For a signed bundle,
-// start-only keys restart only the gateway. It returns false after attempting
-// to restore the old config on failure; ordinary CONFIG= uses the upgrade transaction
-// for start-only keys.
+// start-only keys restart only the gateway. An ordinary CONFIG= change whose
+// start-only keys are all guardian-rendered machine policy
+// (windowsEnterpriseGuardianRestartPaths) restarts only the hook guardian and
+// then the gateway (GAP-0044); any other start-only key uses the upgrade
+// transaction. It returns false after attempting to restore the old config on
+// failure, with the start-only keys the transaction then applies.
 func windowsEnterpriseHotConfigApply(
 	ctx context.Context,
 	cmd *cobra.Command,
@@ -256,7 +260,7 @@ func windowsEnterpriseHotConfigApply(
 	script string,
 	status *windowsEnterpriseInstallerReport,
 	result *enterprisestatus.Result,
-) (bool, []string) {
+) (appliedHot bool, transactionKeys []string) {
 	// A signed bundle has no transaction fallback: the caller fails it with
 	// bundle_apply_failed. Each refusal of a bundle says why, so a failed
 	// first apply names its cause and a held lock is retried (GAP-0104).
@@ -375,8 +379,21 @@ func windowsEnterpriseHotConfigApply(
 	// A bundle rollback by the installed CLI has no payload for the upgrade
 	// transaction: it restarts only the gateway, as the bundle it undoes did.
 	gatewayOnlyRestart := bundleChange || payloadlessRollback
-	if len(startOnly) > 0 && !gatewayOnlyRestart {
+	// A plain config change whose start-only keys the hook guardian renders
+	// at machine scope restarts the guardian, then the gateway, instead of
+	// every service in the upgrade transaction (GAP-0044).
+	guardianRestart := !gatewayOnlyRestart && windowsEnterpriseGuardianRestartPaths(startOnly)
+	if len(startOnly) > 0 && !gatewayOnlyRestart && !guardianRestart {
 		return false, startOnly
+	}
+	if guardianRestart {
+		// A restart that does not complete leaves the keys to the upgrade
+		// transaction, which names them.
+		defer func() {
+			if !appliedHot && transactionKeys == nil {
+				transactionKeys = startOnly
+			}
+		}()
 	}
 
 	restoreEnvironment := setTemporaryEnvironment(windowsEnterpriseServicePins(layout))
@@ -439,6 +456,9 @@ func windowsEnterpriseHotConfigApply(
 	// exactly these back (GAP-0847).
 	var publishedBefore windowsHotConfigPublishedTargets
 	gatewayRestartAttempted := false
+	// The guardian rendered the candidate's machine policy once this is set:
+	// an undo restarts it on the restored config and proves that too.
+	guardianRestartAttempted := false
 	gatewayOnNewConfig := func() bool {
 		return gatewayRestartAttempted || (opts.bundle != nil && opts.bundle.gatewayRestarted)
 	}
@@ -489,7 +509,7 @@ func windowsEnterpriseHotConfigApply(
 				restoreErr = errors.New("the installed config does not hold the previous bytes after the restore")
 			}
 		}
-		var targetsErr, gatewayErr error
+		var targetsErr, gatewayErr, guardianErr error
 		targetsRepublished := false
 		// The previously enrolled targets the candidate's targets no longer
 		// enroll: the guardian may already have removed their hooks, and
@@ -526,6 +546,14 @@ func windowsEnterpriseHotConfigApply(
 					if err := windowsEnterpriseHotConfigTargetHooksProven(restoreCtx, layout, lost, windowsEnterpriseHotConfigRestartTimeout); err != nil {
 						targetsErr = fmt.Errorf("the previous targets were published again, but the hooks of the previously enrolled targets were not proven back: %w", err)
 					}
+				}
+			}
+			// A guardian this attempt restarted rendered the candidate's
+			// machine policy: it reconciles the restored config, and its
+			// targets are proven, before the gateway goes back (GAP-0044).
+			if targetsErr == nil && guardianRestartAttempted {
+				if err := windowsEnterpriseHotConfigGuardianReconcile(restoreCtx, layout, true); err != nil {
+					guardianErr = fmt.Errorf("the hook guardian did not prove the enrolled targets on the restored config: %w", err)
 				}
 			}
 			// The gateway goes back to the restored config: a restart for one
@@ -571,7 +599,7 @@ func windowsEnterpriseHotConfigApply(
 				}
 			}
 		}
-		if restoreErr == nil && targetsErr == nil && gatewayErr == nil {
+		if restoreErr == nil && targetsErr == nil && gatewayErr == nil && guardianErr == nil {
 			if !holding {
 				return
 			}
@@ -638,6 +666,10 @@ func windowsEnterpriseHotConfigApply(
 			result.AddError("targets_restore_failed", "the previous config is back, but the enrolled targets could not be published for it again: "+
 				windowsEnterpriseBoundedDiagnostic(targetsErr.Error())+"; "+installed+unprotected+"; "+gateway+". Next step: from an elevated PowerShell prompt run "+windowsEnterpriseAdminCommand("repair")+
 				" to enroll them again, then "+windowsEnterpriseAdminCommand("verify")+" before starting the gateway again")
+		case guardianErr != nil:
+			result.AddError("config_restore_failed", "the previous config is back at "+layout.ConfigPath+", but "+
+				windowsEnterpriseBoundedDiagnostic(guardianErr.Error())+"; "+installed+"; "+gateway+
+				". Next step: from an elevated PowerShell prompt run "+windowsEnterpriseAdminCommand("verify")+"; repair before starting the gateway again")
 		default:
 			result.AddError("config_restore_failed", "the previous config is back at "+layout.ConfigPath+", but "+gatewayErr.Error()+
 				"; "+installed+"; "+gateway+". Next step: from an elevated PowerShell prompt run "+windowsEnterpriseAdminCommand("verify")+"; repair before starting the gateway again")
@@ -674,6 +706,20 @@ func windowsEnterpriseHotConfigApply(
 		// request cannot bypass adoption confirmation.
 		if err := windowsEnterpriseHotBundleReload(ctx, layout); err != nil {
 			result.AddWarning("bundle_reload_request_failed", "the direct gateway reload request failed; waiting for the gateway's file watcher and checking its reported policy: "+windowsEnterpriseBoundedDiagnostic(err.Error()))
+		}
+	}
+	if guardianRestart {
+		// The guardian reads config.yaml before each reconcile; its restart
+		// starts one now, which writes the managed_hooks_only lock into the
+		// Claude Code drop-in at machine scope (GAP-0064) before any row. The
+		// gateway restarts only once every published target is proven with
+		// the new config, as the transaction starts the guardian first.
+		guardianRestartAttempted = true
+		if err := windowsEnterpriseHotConfigGuardianReconcile(ctx, layout, false); err != nil {
+			noteWindowsEnterpriseEnsure(cmd, opts, "[ensure] the hook guardian did not prove the enrolled targets on the new config ("+
+				windowsEnterpriseBoundedDiagnostic(err.Error())+"); the previous config goes back and the upgrade transaction applies the change")
+			undo()
+			return false, nil
 		}
 	}
 	if len(startOnly) > 0 {
@@ -799,9 +845,12 @@ func windowsEnterpriseHotConfigApply(
 	if refreshTargets {
 		warnWindowsEnterpriseHotAgentSessions(result, previous, next, connectorChangeStartedAt)
 	}
-	if len(startOnly) > 0 {
+	switch {
+	case guardianRestart:
+		result.Changes = append(result.Changes, "applied the config change after restarting the hook guardian and the gateway; the other services kept running")
+	case len(startOnly) > 0:
 		result.Changes = append(result.Changes, "applied the config change after restarting the gateway")
-	} else {
+	default:
 		result.Changes = append(result.Changes, "applied the config change in the running gateway; it was not restarted")
 	}
 	if kept != "" {
@@ -823,7 +872,9 @@ func windowsEnterpriseHotConfigApply(
 	case refreshTargets:
 		result.Changes = append(result.Changes, "refreshed the enrolled targets; the hook guardian registers and removes hooks for them without a restart")
 	}
-	if len(startOnly) > 0 {
+	if guardianRestart {
+		result.AddWarning(windowsEnterpriseGuardianRestartWarning(status.InstalledVersion, startOnly))
+	} else if len(startOnly) > 0 {
 		result.AddWarning("ensure_bundle_applied", "ensure applied the policy bundle after restarting the gateway: "+applied)
 	} else if bundleChange {
 		result.AddWarning("ensure_bundle_applied", "ensure applied the policy bundle in the running gateway: "+applied)
@@ -831,6 +882,66 @@ func windowsEnterpriseHotConfigApply(
 		result.AddWarning("ensure_config_applied", "ensure applied drift:config in the running gateway, without stopping any service: "+applied)
 	}
 	return true, nil
+}
+
+// windowsEnterpriseHotConfigGuardianReconcile restarts the hook guardian on
+// the installed config.yaml through the service manager and waits, bounded by
+// the restart timeout, until the installed gateway's readiness proves every
+// published target verified or pending with complete protected authorization
+// (windowsEnterpriseHotConfigTargetHooksProven). Readiness verifies each
+// target against the config it loads, so it passes once the guardian has
+// rendered that config's machine policy. The apply needs a running guardian
+// and never starts a stopped one. The undo (restore) puts the guardian back
+// as it was: one whose restart failed after its stop is started again, and
+// the proof then decides. A seam for tests.
+var windowsEnterpriseHotConfigGuardianReconcile = func(ctx context.Context, layout managed.StandaloneLayout, restore bool) error {
+	restarted, err := restartWindowsStandaloneGuardian(restore)
+	switch {
+	case err != nil:
+		return fmt.Errorf("restart the hook guardian: %w", err)
+	case !restarted && !restore:
+		return errors.New("the hook guardian service is not running")
+	}
+	targets, err := windowsEnterpriseHotConfigPublishedTargets(layout)
+	if err != nil {
+		return fmt.Errorf("read the published targets: %w", err)
+	}
+	return windowsEnterpriseHotConfigTargetHooksProven(ctx, layout, targets, windowsEnterpriseHotConfigRestartTimeout)
+}
+
+// restartWindowsStandaloneGuardian stops the running hook guardian service
+// and starts it again, as the gateway restart does; false when it was not
+// running. With startStopped a guardian that is stopped after that, or
+// whose restart failed, is started.
+func restartWindowsStandaloneGuardian(startStopped bool) (bool, error) {
+	manager, err := mgr.Connect()
+	if err != nil {
+		return false, err
+	}
+	defer manager.Disconnect()
+	service, err := manager.OpenService(windowsStandaloneGuardianService)
+	if err != nil {
+		return false, err
+	}
+	defer service.Close()
+	control := scmGatewayService{service}
+	restarted, err := restartWindowsGatewayServiceBeforeStop(control, windowsStandaloneGuardianService, 60*time.Second, 250*time.Millisecond, nil)
+	if startStopped && (err != nil || !restarted) {
+		return startWindowsGatewayServiceIfStopped(control, windowsStandaloneGuardianService, 60*time.Second, 250*time.Millisecond)
+	}
+	return restarted, err
+}
+
+// noteWindowsEnterpriseEnsure records a line for the lifecycle log of a JSON
+// run, whose stderr must stay quiet (GAP-1069), and prints it otherwise.
+func noteWindowsEnterpriseEnsure(cmd *cobra.Command, opts *windowsEnterpriseLifecycleOptions, line string) {
+	if !opts.jsonOutput {
+		fmt.Fprintln(cmd.ErrOrStderr(), line)
+		return
+	}
+	if len(opts.diagnostics) < windowsEnterpriseEnsureDiagnosticsLimit {
+		opts.diagnostics = append(opts.diagnostics, line)
+	}
 }
 
 // windowsEnterpriseHotConfigRenderTimeout bounds the wait for the hook

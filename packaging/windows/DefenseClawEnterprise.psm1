@@ -32868,7 +32868,33 @@ function Wait-DefenseClawFreshGuardianReconcile {
     $progress = $null
     $guardianGone = ''
     $lastStatus = 'guardian status report unavailable'
+    # Standalone: each status probe is a gateway process (about 0.4 s), and
+    # one every 0.25 s was about 230 processes in the 92 s budget (GAP-0044).
+    # The guardian publishes a reconcile by replacing its state file, so the
+    # loop reads that file's identity in process every 0.25 s and runs the
+    # status command when it changed, or 2 s after the last one. Secure
+    # Client keeps probing every pass.
+    $probeOnChange = Test-DefenseClawStandaloneProfile
+    $probedAt = [DateTime]::MinValue
+    $probedStateIdentity = $null
     while ($true) {
+        if ($probeOnChange) {
+            $now = [DateTime]::UtcNow
+            if ($now -lt $deadline -and ($now - $probedAt).TotalMilliseconds -lt 2000) {
+                # A read that fails here is left to the probe's own read.
+                $unchanged = $false
+                try {
+                    $unchanged = [string](Get-DefenseClawGuardianStateIdentity -Layout $Layout) -ceq $probedStateIdentity
+                }
+                catch {
+                    $unchanged = $false
+                }
+                if ($unchanged) {
+                    Microsoft.PowerShell.Utility\Start-Sleep -Milliseconds 250
+                    continue
+                }
+            }
+        }
         # One status command may not outlast the hard limit by more than
         # its own 30 s floor: with the command's 300 s default the 600 s
         # limit was not a bound (rel-1-0-2:GAP-0535).
@@ -32881,6 +32907,8 @@ function Wait-DefenseClawFreshGuardianReconcile {
         $currentStateIdentity = [string](
             Get-DefenseClawGuardianStateIdentity -Layout $Layout
         )
+        $probedAt = [DateTime]::UtcNow
+        $probedStateIdentity = $currentStateIdentity
         $coverage = Test-DefenseClawGuardianCoverageReport `
             -Report $report `
             -PriorReconcileID $priorReconcileID `
@@ -32933,6 +32961,7 @@ function Wait-DefenseClawFreshGuardianReconcile {
                 }
                 $finishedRead = $true
                 $deadline = $now.AddSeconds(2)
+                $probedAt = [DateTime]::MinValue
                 Microsoft.PowerShell.Utility\Start-Sleep -Milliseconds 250
                 continue
             }

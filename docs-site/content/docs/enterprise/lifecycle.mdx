@@ -732,6 +732,13 @@ key runs it too: `gateway.*`, `guardrail.hook_self_heal`, `enterprise.network`, 
 `enterprise` keys and the keys that [Source of truth](/docs/reference/source-of-truth) lists. The
 other `enterprise` keys include `enterprise.machine_policy` (for example `managed_hooks_only`):
 the gateway reads them only at start, so they need a restart.
+A change whose only such keys are `enterprise.machine_policy.default.managed_hooks_only` or
+`enterprise.machine_policy.connectors.claudecode.managed_hooks_only` restarts only the hook guardian and
+then the gateway. The other services keep running. `ensure` waits until every enrolled target
+verifies with the new setting before it restarts the gateway, and the setting is machine wide, so an
+enrolled account that is signed out does not block it. On the 1.0.8 test VM this took about 65 seconds.
+If the guardian or the gateway does not prove the change, the previous config goes back, and the
+lifecycle transaction below applies the change instead.
 The transaction is the one an upgrade runs, with the installed release's own payload: it stops
 every service, puts the same release back in place, starts the services and verifies the
 deployment. On the 1.0.8 test VM the `ensure` took about 110 seconds, against about a minute for a
