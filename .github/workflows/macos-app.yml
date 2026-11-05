@@ -127,20 +127,6 @@ jobs:
       # release build, so the target itself is not repeated here).
       - name: Run macOS app test scripts
         run: make macos-app-test-scripts
-      - name: Test connector onboarding
-        run: macos/DefenseClawMac/script/test_connector_onboarding.sh
-      - name: Test Cowork status row and setup command
-        run: macos/DefenseClawMac/script/test_cowork_status.sh
-      - name: Test installer download verification
-        run: macos/DefenseClawMac/script/test_update_checker_verification.sh
-      - name: Test main window lifecycle contract
-        run: macos/DefenseClawMac/script/test_main_window_lifecycle_contract.sh
-      # The per-user gateway runs as the account; the administrator helper
-      # only repairs a root-run gateway (r109-macapp-gw).
-      - name: Test gateway repair routing
-        run: macos/DefenseClawMac/script/test_gateway_administrator.sh
-      - name: Test gateway repair helper
-        run: macos/DefenseClawMac/script/test_gateway_admin_helper.sh
       - name: Build ad-hoc release artifacts
         run: |
           set -euo pipefail
