@@ -17,7 +17,6 @@
 // Copyright 2026 Cisco Systems, Inc. and its affiliates
 // SPDX-License-Identifier: Apache-2.0
 
-import AppKit
 import Foundation
 import Security
 import ServiceManagement
@@ -53,27 +52,32 @@ final class GatewayAdministratorOperation: @unchecked Sendable {
     }
 }
 
-enum GatewayAdministratorClient {
-    static let preferenceKey = "gatewayAdministratorMode"
+/// Root-owned gateway state in the selected per-user DefenseClaw home: the
+/// footprint of a gateway run as root for this home (the "Run gateway as
+/// administrator" switch of app versions up to 1.0.8, or sudo). The app runs
+/// as the login account, so a root owner on any of these fixed entries means
+/// the gateway serving this home ran as root. lstat only: nothing is opened
+/// or followed.
+enum GatewayRootState {
+    static let markers = [
+        ".", "gateway.pid", "watchdog.pid", "gateway-api.json", "hook_contract_lock.json",
+        "active_connector.json", "device.key", "hooks", "gateway.log", "config.yaml",
+    ]
 
-    static func selectedAction(binary: String, arguments: [String], enabled: Bool) -> GatewayAdminAction? {
-        guard enabled, binary == "defenseclaw-gateway", arguments.count == 1 else { return nil }
-        return GatewayAdminAction(rawValue: arguments[0])
-    }
-
-    @MainActor
-    static var serviceStatusDescription: String {
-        switch service.status {
-        case .enabled: "Administrator service is approved."
-        case .requiresApproval: "Approve DefenseClawMac in Login Items & Extensions, then start the gateway again."
-        case .notRegistered: "macOS will request permission when you first start the gateway as administrator."
-        case .notFound: bundledServiceAvailable
-            ? "Start or restart the gateway to set up its administrator service."
-            : "This app build does not include the administrator service."
-        @unknown default: "Administrator service status is unavailable."
+    static func rootOwnedMarkers(home: URL, accountUID: uid_t = getuid()) -> [String] {
+        guard accountUID != 0 else { return [] }
+        return markers.filter { name in
+            var metadata = stat()
+            let path = name == "." ? home.path : home.appendingPathComponent(name).path
+            return lstat(path, &metadata) == 0 && metadata.st_uid == 0
         }
     }
+}
 
+/// The per-user gateway always runs as the login account. This client only
+/// asks the bundled administrator helper to move a gateway that an earlier
+/// app version ran as root back to the account (GatewayAdminAction.repair).
+enum GatewayAdministratorClient {
     private static var bundledServiceAvailable: Bool {
         let root = Bundle.main.bundleURL
         return FileManager.default.isExecutableFile(atPath: root.appendingPathComponent(GatewayAdminPolicy.helperRelativePath).path)
@@ -90,28 +94,20 @@ enum GatewayAdministratorClient {
     }
 
     @MainActor
-    static func openFullDiskAccessSettings() {
-        if let url = URL(string: "x-apple.systempreferences:com.apple.preference.security?Privacy_AllFiles") {
-            NSWorkspace.shared.open(url)
-        }
-    }
-
-    @MainActor
     private static var service: SMAppService {
         SMAppService.daemon(plistName: GatewayAdminPolicy.serviceName + ".plist")
     }
 
-    static func run(
-        action: GatewayAdminAction,
+    static func repair(
         context: InstallationContext,
         operation: GatewayAdministratorOperation
     ) async -> CLIResult {
         guard context.permitsMutation else {
-            return CLIResult(exitCode: 77, output: "Administrator operation refused: this installation is read only.")
+            return CLIResult(exitCode: 77, output: "Gateway repair refused: this installation is read only.")
         }
         if operation.isCancelled { return cancelledResult }
         do {
-            try verifySignedAppAndHelper()
+            try verifySignedAppAndHelper(home: context.homeRoot.path)
             let registrationResult = await registerIfNeeded()
             if let registrationResult { return registrationResult }
             if operation.isCancelled { return cancelledResult }
@@ -123,12 +119,12 @@ enum GatewayAdministratorClient {
             defer { authorization.invalidate() }
             if operation.isCancelled { return cancelledResult }
             guard operation.beginDispatch() else { return cancelledResult }
-            return await perform(action: action, context: context, authorization: authorization.externalForm)
+            return await perform(context: context, authorization: authorization.externalForm)
         } catch let error as AdministratorError {
             if error.status == errAuthorizationCanceled || operation.isCancelled { return cancelledResult }
             return CLIResult(exitCode: 77, output: error.localizedDescription)
         } catch {
-            return CLIResult(exitCode: 77, output: "Administrator gateway action failed: \(error.localizedDescription)")
+            return CLIResult(exitCode: 77, output: "Gateway repair failed: \(error.localizedDescription)")
         }
     }
 
@@ -137,7 +133,7 @@ enum GatewayAdministratorClient {
     }
 
     private static var cancelledResult: CLIResult {
-        CLIResult(exitCode: 130, output: "Administrator authorization cancelled. No gateway action was sent.\n", cancelled: true)
+        CLIResult(exitCode: 130, output: "Administrator authorization cancelled. No gateway repair was sent.\n", cancelled: true)
     }
 
     @MainActor
@@ -150,7 +146,7 @@ enum GatewayAdministratorClient {
             case .enabled: return nil
             case .requiresApproval:
                 openServiceSettings()
-                return CLIResult(exitCode: 78, output: "Administrator service approval is required. In System Settings → General → Login Items & Extensions, allow DefenseClawMac, then start the gateway again. The gateway has not been started.\n")
+                return CLIResult(exitCode: 78, output: "Administrator service approval is required to repair a gateway an earlier version ran as administrator. In System Settings → General → Login Items & Extensions, allow DefenseClawMac, then start the gateway again. The gateway has not been started.\n")
             case .notFound, .notRegistered:
                 return CLIResult(exitCode: 78, output: "The administrator service is unavailable. Install the signed DefenseClawMac app in Applications, reopen it, and try again.\n")
             @unknown default:
@@ -165,21 +161,21 @@ enum GatewayAdministratorClient {
         }
     }
 
-    private static func verifySignedAppAndHelper() throws {
+    private static func verifySignedAppAndHelper(home: String) throws {
         var code: SecCode?
         var requirement: SecRequirement?
         guard SecCodeCopySelf([], &code) == errSecSuccess,
               SecRequirementCreateWithString(GatewayAdminPolicy.appRequirement as CFString, [], &requirement) == errSecSuccess,
               let code, let requirement,
               SecCodeCheckValidity(code, [], requirement) == errSecSuccess else {
-            throw AdministratorError(message: "Administrator gateway control requires a signed DefenseClawMac build. Ad-hoc development builds cannot use the administrator service.")
+            throw AdministratorError(message: "This installation has gateway files owned by root, and only a Developer ID signed DefenseClawMac build can repair them from the app. Repair it in Terminal, then start the gateway again: sudo defenseclaw-gateway stop && sudo chown -R \"$(id -un)\" '\(home)'\n")
         }
         guard bundledServiceAvailable else {
             throw AdministratorError(message: "This app build does not include its administrator helper. Install the complete signed DefenseClawMac build.")
         }
     }
 
-    private static func perform(action: GatewayAdminAction, context: InstallationContext, authorization: Data) async -> CLIResult {
+    private static func perform(context: InstallationContext, authorization: Data) async -> CLIResult {
         await withCheckedContinuation { continuation in
             let connection = NSXPCConnection(machServiceName: GatewayAdminPolicy.serviceName, options: .privileged)
             connection.remoteObjectInterface = NSXPCInterface(with: GatewayAdminProtocol.self)
@@ -198,15 +194,15 @@ enum GatewayAdministratorClient {
                 completion.finish(CLIResult(exitCode: 75, output: "Could not connect to the administrator gateway service.\n"))
                 return
             }
-            proxy.perform(action: action.rawValue, homePath: context.homeRoot.path,
+            proxy.perform(action: GatewayAdminAction.repair.rawValue, homePath: context.homeRoot.path,
                           configPath: context.configURL.path, authorization: authorization) { code, output in
                 completion.finish(resultForHelperReply(exitCode: code, output: output))
             }
             // The administrator prompt is answered before this point, so the
-            // budget covers only the helper: a restart is its 90 s stop plus
-            // 180 s start deadline, with a minute to spare.
-            DispatchQueue.global(qos: .utility).asyncAfter(deadline: .now() + 330) {
-                completion.finish(CLIResult(exitCode: 124, output: "Administrator gateway control timed out. The gateway may still be changing state; check its status before retrying.\n"))
+            // budget covers only the helper: its 90 s stop deadline plus the
+            // ownership walk, with time to spare.
+            DispatchQueue.global(qos: .utility).asyncAfter(deadline: .now() + 240) {
+                completion.finish(CLIResult(exitCode: 124, output: "The gateway repair timed out. The gateway may still be stopping; check its status before retrying.\n"))
             }
         }
     }
@@ -235,7 +231,7 @@ private final class AdministratorAuthorization: @unchecked Sendable {
             if status == errAuthorizationDenied || (status == errAuthorizationSuccess && !GatewayAdminPolicy.authorizationDefinitionIsSafe(definition)) {
                 let registered = AuthorizationRightSet(reference, GatewayAdminPolicy.authorizationRight,
                     GatewayAdminPolicy.authorizationDefinition as CFDictionary,
-                    "Run the installed DefenseClaw gateway as administrator" as CFString, nil, nil)
+                    "Repair a DefenseClaw gateway an earlier version ran as administrator" as CFString, nil, nil)
                 guard registered == errAuthorizationSuccess else {
                     throw AdministratorError(status: registered, message: "Could not set up the gateway authorization right (\(registered)).")
                 }
