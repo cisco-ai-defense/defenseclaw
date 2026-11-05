@@ -249,3 +249,22 @@ not-found answers.
     directories standard users cannot search. A single-link check added for
     any other file needs the same placement, or any user could make it
     fail.
+11. Claude Cowork is a surface of the Claude Code connector, and its
+    residuals follow the machine policy that covers Claude Code
+    ([R36 to R40](ENTERPRISE-THREAT-MODEL.md#residual-risks)). The surface
+    marker `CLAUDE_CODE_IS_COWORK=1` is set by the caller, so any process of
+    the user can send it; it is used for attribution, never for identity or a
+    verdict. With `managed_hooks_only: preserve`, hooks in Cowork plugins run
+    next to DefenseClaw's and can change a tool call's input after it was
+    inspected, and the foreign-hook guard does not read Cowork plugins
+    (measured on managed macOS); the default `enforce` writes
+    `allowManagedHooksOnly`. Claude Desktop keeps the engine in the user's
+    own data folder: DefenseClaw accepts a build only with a valid Anthropic
+    Developer ID signature (team `Q6L2SF6YDW`) and an `Info.plist` version
+    equal to the folder, and reports any other as `surface_unverified`.
+    Web fetch (Anthropic's side) and the Cowork VM's outbound traffic
+    (Anthropic's proxy) are outside the host's egress controls. A DefenseClaw
+    plugin a user uploaded to their Claude account stays after DefenseClaw is
+    removed and blocks Cowork tool calls while its hook script is gone
+    (GAP-0051); `setup cowork` refuses a managed computer, so this concerns a
+    plugin uploaded earlier.
