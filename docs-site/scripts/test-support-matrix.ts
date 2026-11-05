@@ -3,7 +3,7 @@ import { readFileSync } from 'node:fs';
 import { describe, it, test } from 'node:test';
 import contracts from '../../cli/defenseclaw/inventory/hook_contracts.json' with { type: 'json' };
 import { connectorById, supportMatrix, withUnlistedPreview } from '../data/support-matrix';
-import { HOME_CONNECTORS } from '../components/home/home-data';
+import { HOME_CONNECTORS, HOME_TILES, AGENT_COUNT } from '../components/home/home-data';
 
 describe('support matrix statuses kept outside the generated block', () => {
   it('turns not-offered cells into preview for an unlisted route', () => {
@@ -35,19 +35,35 @@ test('Kiro support matrix gives the hook floors and uncovered upgrade state', ()
   assert.match(kiro.versionNote ?? '', /earlier managed CLI enrollments keep their interactive hooks/i);
 });
 
-test('OpenCode V2 does not inherit V1 live certification on any displayed platform', () => {
+test('OpenCode V2 live certification reaches every displayed platform (GAP-0552)', () => {
   const opencode = connectorById('opencode');
   assert.ok(opencode);
   assert.equal(opencode.minVersion, '2.0.0');
   const home = HOME_CONNECTORS.find((connector) => connector.id === 'opencode');
   assert.ok(home);
   for (const os of ['linux', 'macos', 'windows'] as const) {
-    assert.equal(opencode.oss[os].status, 'preview');
-    assert.equal(opencode.oss[os].observability, 'preview');
-    assert.equal(opencode.enterprise[os].status, 'preview');
-    assert.equal(home.os[os], 'preview');
+    assert.equal(opencode.oss[os].status, 'supported');
+    assert.equal(opencode.oss[os].observability, 'supported');
+    assert.equal(opencode.enterprise[os].status, 'supported');
+    assert.equal(home.os[os], 'supported');
   }
-  assert.equal(connectorById('claudecode')?.oss.linux.status, 'supported');
+  assert.match(opencode.versionNote ?? '', /2\.2\.5.*Linux, macOS and native Windows.*per-user and managed/);
+  const connectorPage = readFileSync(new URL('../content/docs/connectors/opencode.mdx', import.meta.url), 'utf8');
+  const compatibilityPage = readFileSync(new URL('../content/docs/connectors/compatibility.mdx', import.meta.url), 'utf8');
+  assert.match(connectorPage, /\| macOS and Linux \| \*\*Supported\*\*/);
+  assert.match(connectorPage, /\| Native Windows x64 \| \*\*Supported\*\*/);
+  const opencodeContract = compatibilityPage.split('| <ConnectorLabel id="opencode" /> |')[1]?.split('\n')[0];
+  assert.ok(opencodeContract, 'OpenCode contract row');
+  assert.doesNotMatch(opencodeContract, /preview/i);
+});
+
+test('certified Claude Code cells remain supported (GAP-0552 benign twin)', () => {
+  const claudecode = connectorById('claudecode');
+  assert.ok(claudecode);
+  for (const os of ['linux', 'macos', 'windows'] as const) {
+    assert.equal(claudecode.oss[os].status, 'supported');
+    assert.equal(claudecode.enterprise[os].status, 'supported');
+  }
 });
 
 test('Kiro IDE floor and unknown Kiro versions read the same on every page', () => {
@@ -61,4 +77,28 @@ test('Kiro IDE floor and unknown Kiro versions read the same on every page', () 
     assert.match(source, /unknown\s+and\s+not\s+protected/i);
     assert.doesNotMatch(source, /per-user setup (still )?accepts an older IDE|older IDE in every profile/i);
   }
+});
+
+test('Claude Cowork support matrix labels every route on every OS', () => {
+  const page = readFileSync(new URL('../content/docs/support-matrix.mdx', import.meta.url), 'utf8');
+  const section = page.split('\n## Claude Cowork\n')[1]?.split('\n## ')[0];
+  assert.ok(section, 'Claude Cowork section');
+  assert.match(section, /^\| Route \| Linux \| macOS \| Windows \|$/m);
+  assert.match(section, /^\| Per user \(open source\)[^|]*\| Preview \| Supported \| Supported \|$/m);
+  assert.match(section, /^\| Managed computer \(enterprise standalone\)[^|]*\| Preview \| Supported \| Supported \|$/m);
+  assert.match(section, /Cowork on Linux is not certified/);
+});
+
+test('Landing connector grid has a Claude Cowork tile with the support matrix labels', () => {
+  const page = readFileSync(new URL('../content/docs/support-matrix.mdx', import.meta.url), 'utf8');
+  const section = page.split('\n## Claude Cowork\n')[1]?.split('\n## ')[0] ?? '';
+  const cells = (row: RegExp) => section.match(row)?.[1].split('|').map((cell) => cell.trim().toLowerCase());
+  const perUser = cells(/^\| Per user \(open source\)[^|]*\|([^\n]*)\|$/m);
+  assert.deepEqual(perUser, ['preview', 'supported', 'supported']);
+  const cowork = HOME_TILES.find((tile) => tile.id === 'cowork');
+  assert.ok(cowork, 'Claude Cowork tile');
+  assert.equal(cowork.label, 'Claude Cowork');
+  assert.deepEqual([cowork.os.linux, cowork.os.macos, cowork.os.windows], perUser);
+  assert.equal(AGENT_COUNT, HOME_CONNECTORS.length + 1);
+  assert.equal(AGENT_COUNT, 11);
 });

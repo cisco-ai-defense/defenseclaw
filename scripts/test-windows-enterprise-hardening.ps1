@@ -6501,8 +6501,11 @@ function Get-MachineRootIdentitySnapshot([string[]]$Paths) {
 
 function Get-DefenseClawServiceInventory {
     return @(
-        Get-CimInstance Win32_Service -ErrorAction Stop |
-            Where-Object { [string]$_.Name -like 'DefenseClaw*' } |
+        # Ask WMI for the DefenseClaw services only, not every service
+        # (GAP-0023: one unreadable third-party service must not fail it).
+        Get-CimInstance Win32_Service `
+            -Filter "Name LIKE 'DefenseClaw%'" `
+            -ErrorAction Stop |
             Sort-Object Name |
             ForEach-Object {
                 [pscustomobject]@{

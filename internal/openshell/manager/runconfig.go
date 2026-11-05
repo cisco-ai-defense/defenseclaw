@@ -280,7 +280,7 @@ func runFileChecks(files []connector.SandboxFile, how string, uid, gid int) []ve
 func withRunFileChecks(v *verifyRecord, uid, gid int, checks []verifyFile) *verifyRecord {
 	next := &verifyRecord{UID: uid, GID: gid}
 	if v != nil {
-		next.UID, next.GID, next.Files = v.UID, v.GID, slices.Clone(v.Files)
+		next.UID, next.GID, next.Files, next.LocalhostResolver = v.UID, v.GID, slices.Clone(v.Files), v.LocalhostResolver
 	}
 	replaced := map[string]bool{}
 	for _, c := range checks {

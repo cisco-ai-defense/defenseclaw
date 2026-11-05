@@ -54,7 +54,7 @@ var KeepOnDevice = []string{
 	// Local detail: services, machine policy, observability destinations,
 	// the audit store, scanners, API port holders, paths.
 	"services", "machine_policy", "destinations", "audit_store", "scanners", "api_port_holders",
-	"log_path", "dir", "path",
+	"log_path", "dir", "path", "package_path",
 	// Account ids: identity refresh failures[].user_id and the accounts of
 	// windows_token_groups_pending.
 	"user_id", "user_name", "windows_token_groups_pending",

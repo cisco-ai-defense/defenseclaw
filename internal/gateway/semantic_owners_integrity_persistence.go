@@ -19,6 +19,7 @@ package gateway
 import (
 	"encoding/base64"
 	"path"
+	"path/filepath"
 	"runtime"
 	"slices"
 	"strconv"
@@ -1512,6 +1513,18 @@ func appendTrustedHomeResolvedSSHKeyWriteFinding(
 			input.Command = command
 		}
 	}
+	if trustedNoDereferenceTouchSafe(input.Command, input.CWD, facts.ActiveHome,
+		request.ResolvedWriteTargets, request.ProtectedHomeHook) {
+		// A pattern in a complete entry-only touch can leave an earlier
+		// path finding that followed a link. Keep unrelated findings.
+		kept := findings[:0]
+		for _, finding := range findings {
+			if finding.RuleID != "persistence.ssh_authorized_keys_command" && finding.RuleID != "PATH-SSH-DIR" {
+				kept = append(kept, finding)
+			}
+		}
+		return kept
+	}
 	commandText := strings.ToLower(input.Command)
 	overBudget, unresolved := false, false
 	evidence := request
@@ -1707,6 +1720,9 @@ func trustedAuthorizedKeysWriteProof(input actionfacts.Input, facts actionfacts.
 // trustedAuthorizedKeysWriteProofWith is trustedAuthorizedKeysWriteProof
 // with the evaluation's file system answers (trustedActionRequest.targetMemo).
 func trustedAuthorizedKeysWriteProofWith(input actionfacts.Input, facts actionfacts.Facts, symlinkWrite bool, globFacts map[string]string, memo *hookpaths.TargetMemo) bool {
+	if trustedNoDereferenceTouchSafe(input.Command, input.CWD, facts.ActiveHome, globFacts, globFacts != nil) {
+		return false
+	}
 	if input.Command != "" &&
 		memo.ActionCommandDecisionWithDialectAndGlobFacts(input.Command, input.CWD, facts.ActiveHome, input.DialectHint, globFacts) == "protected-target" {
 		return true
@@ -1740,6 +1756,19 @@ func trustedAuthorizedKeysWriteProofWith(input actionfacts.Input, facts actionfa
 		trustedNamedOutFileAuthorizedKeysWrite(input) ||
 		trustedGitBashAuthorizedKeysWrite(input) ||
 		trustedNestedAuthorizedKeysWrite(input, facts)
+}
+
+func trustedNoDereferenceTouchSafe(command, cwd, home string, evidence map[string]string, managed bool) bool {
+	if managed && !filepath.IsAbs(cwd) {
+		cwd = evidence[hookpaths.CWDKey]
+	}
+	if !hookpaths.NoDereferenceTouchShape(command, cwd, home) {
+		return false
+	}
+	if managed {
+		return evidence[hookpaths.NoDereferenceTouchSafeKey] == "1"
+	}
+	return hookpaths.NoDereferenceTouchSafe(command, cwd, home)
 }
 
 // An unmodeled program's output option cannot prove a safe read. When that
@@ -2122,9 +2151,19 @@ func matchesActiveShellHistory(
 }
 
 func matchesSudoersCandidate(value string) bool {
-	value = strings.TrimPrefix(canonicalSemanticPath(value), "/private")
+	value = sudoersRootPath(value)
 	return value == "/etc/sudoers" ||
 		strings.Contains(value, "/etc/sudoers.d/")
+}
+
+// sudoersRootPath keeps a resolved Windows drive root in the same rule scope
+// as a rooted path spelling. Other directories retain their full path.
+func sudoersRootPath(value string) string {
+	value = canonicalSemanticPath(value)
+	if actionfacts.DriveSlashPath(value) {
+		value = value[2:]
+	}
+	return strings.TrimPrefix(value, "/private")
 }
 
 func matchesGlobalLDPreload(
@@ -2193,11 +2232,33 @@ func literalSharedObjectPath(content string) bool {
 }
 
 func matchesActiveSudoers(
-	_ actionfacts.Facts,
+	facts actionfacts.Facts,
 	candidate actionfacts.PathFact,
 ) bool {
+	value := canonicalSemanticPath(semanticPathValue(candidate))
+	if actionfacts.DriveSlashPath(value) {
+		windowsCWD := actionfacts.DriveSlashPath(strings.ReplaceAll(facts.CWD, `\`, "/"))
+		switch candidate.Flavor {
+		case actionfacts.PathFlavorWindows:
+			if runtime.GOOS != "windows" && !windowsCWD {
+				return false
+			}
+		case actionfacts.PathFlavorPOSIX:
+			// Git Bash retains POSIX flavor for an explicit drive path. Match
+			// only the literal Windows target, including after a shell cd.
+			if !windowsCWD || facts.Parse.Dialect != actionfacts.DialectPOSIX {
+				return false
+			}
+			hostPath, ok := windowsHostPathOfPOSIXOperand(candidate.Value, facts.CWD, facts.ActiveHome, true)
+			if !ok || canonicalSemanticPath(hostPath) != value {
+				return false
+			}
+		default:
+			return false
+		}
+	}
 	// /private/etc is the real path of /etc on macOS (rel-1-0-6:GAP-0398).
-	value := strings.TrimPrefix(canonicalSemanticPath(semanticPathValue(candidate)), "/private")
+	value = sudoersRootPath(value)
 	return value == "/etc/sudoers" ||
 		integritySingleChild(value, "/etc/sudoers.d")
 }

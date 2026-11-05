@@ -20,10 +20,9 @@ import (
 // decision. Per-user hooks count it from process start; managed native hooks
 // count it from gateway contact, within managedAnswerDeadlineCap. A restart
 // (gatewayRestartBudget), dial, accepted call without an answer, and resends
-// after a 429 or 401 all share the call's deadline. When it ends, a hook
-// outside Secure Client fails closed unless a proven outage and the installed
-// policy permit an administrator's open mode. A slow gateway cannot allow a
-// call without a decision (GAP-0155, GAP-0167, GAP-0139, GAP-0160).
+// after a 429 or 401 all share the call's deadline. Managed and strict hooks
+// close at the deadline; a per-user hook follows its configured outage mode
+// only for a proven gateway outage. A request with no decision stays closed.
 //
 // The agent may wait at most 5 s for DefenseClaw, and the deadline itself
 // runs late on a loaded host: the answer is written by a process that the
@@ -275,8 +274,8 @@ func awaitAnswerBy(ctx context.Context, deadline, ceiling time.Time, watch *answ
 	trace := &httptrace.ClientTrace{Got1xxResponse: func(code int, _ textproto.MIMEHeader) error {
 		if code == HookProgressStatus {
 			progressOnce.Do(func() {
-				close(progressed)
 				watch.progressed()
+				close(progressed)
 			})
 		}
 		return nil
@@ -314,18 +313,18 @@ func gatewayNoAnswer(ctx context.Context) bool {
 	return errors.Is(context.Cause(ctx), errGatewayNoAnswer)
 }
 
-// noAnswerFailMode keeps managed non-tool events, locally spent budgets and a
-// call the gateway answered with an HTTP error first (Options.answeredErrorStatus,
-// ManagedOutageFailsOpen) closed. No answer proves no gateway decision, so
-// every hook outside Secure Client closes. A stopped or late hook has no
-// confirmed outage and cannot turn a tool call into an unaudited allow.
-// failNoAnswer and renderNoAnswer both use it, so the decision and failure
-// row agree.
+// noAnswerFailMode keeps a call with no gateway decision closed. A proven
+// outage has its own answer path; socket contact alone does not prove one.
+// Secure Client retains its established fail-mode behavior unless the local
+// answer budget was spent or the gateway already returned an error status.
 func noAnswerFailMode(opts Options, failMode string) string {
-	if opts.answerSpentLocally || opts.answeredErrorStatus != 0 || opts.ManagedEnterprise || !opts.SecureClient {
+	if opts.answerSpentLocally || opts.answeredErrorStatus != 0 || opts.ManagedEnterprise {
 		return "closed"
 	}
-	return failMode
+	if opts.SecureClient {
+		return failMode
+	}
+	return "closed"
 }
 
 func failNoAnswer(opts Options, sp spec, failMode string) int {
@@ -335,6 +334,11 @@ func failNoAnswer(opts Options, sp spec, failMode string) int {
 	failMode = noAnswerFailMode(opts, failMode)
 	if opts.ManagedEnterprise {
 		return failUnreachable(opts, sp, failMode, managedNoAnswerReason(opts))
+	}
+	if !opts.SecureClient && opts.ManagedUnixSocket == "" {
+		opts = withPerUserOutage(opts)
+		// Use the mode read for this call in the answer and its failure row.
+		opts.OutageFailModeNow = func() string { return failMode }
 	}
 	return failUnreachable(opts, sp, failMode, noAnswerReason(opts))
 }

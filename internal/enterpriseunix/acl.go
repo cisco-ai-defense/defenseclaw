@@ -68,13 +68,14 @@ const aclListBatch = 200
 // that grants write to an account other than root or an administrator group;
 // elsewhere an entry that grants write.
 type aclTarget struct {
-	path          string
-	private       bool
-	publishedDir  bool
-	publishedFile bool
-	gatewayRead   bool
-	requireList   bool
-	ancestor      bool
+	path           string
+	private        bool
+	publishedDir   bool
+	publishedFile  bool
+	gatewayRead    bool
+	requireList    bool
+	requireListing bool
+	ancestor       bool
 	// serviceRead marks the administrator policy folder (policy_dir) and
 	// what is in it, which the gateway reads as its service account: an
 	// entry that denies that account a right it needs there is wrong, and
@@ -224,7 +225,7 @@ func (e *Env) aclTargets(files, connectors []string) []aclTarget {
 			targets = append(targets, aclTarget{path: dir, ancestor: true})
 		}
 	}
-	return targets
+	return mergeCoworkACLTargets(targets, e.coworkACLTargets(files))
 }
 
 // machinePolicyAncestors are the folders above the rooted vendor
@@ -313,7 +314,7 @@ func (e *Env) aclFindings(ctx context.Context, targets []aclTarget) ([]aclFindin
 		}
 		for _, target := range batch {
 			entries, ok := listed[target.path]
-			if !ok && target.ancestor {
+			if !ok && (target.ancestor || target.requireListing) {
 				// Fail closed: an unread folder above a policy folder is not trusted.
 				failure = fmt.Errorf("ls did not list the ACL of %s", target.path)
 				continue
@@ -337,10 +338,13 @@ func (e *Env) aclFindings(ctx context.Context, targets []aclTarget) ([]aclFindin
 					continue
 				}
 				if target.ancestor {
-					if entry.GrantsWrite() && !darwinACLAdminPrincipal(entry) {
+					write := entry.GrantsWrite() && !darwinACLAdminPrincipal(entry)
+					deny := target.publishedDir && entry.DeniesDirectoryAccess(false)
+					if write || deny {
 						finding.entries = append(finding.entries, entry.Text)
 						finding.indexes = append(finding.indexes, entry.Index)
-						finding.write = true
+						finding.write = finding.write || write
+						finding.deny = finding.deny || deny
 					}
 					continue
 				}
@@ -427,6 +431,11 @@ func (e *Env) aclProblems(ctx context.Context, record *Deployment) []string {
 // folder above a vendor machine-policy folder; the administrator removes
 // them, since DefenseClaw does not change system folders.
 func ancestorACLProblem(findings []aclFinding, rerun string) string {
+	for _, finding := range findings {
+		if finding.deny {
+			return fmt.Sprintf("macOS ACL entries grant unsafe write access or deny standard users traversal above the published Cowork VM sensor files: %s; remove those entries with `chmod -a \"<entry>\" <folder>` (DefenseClaw does not change system folders), then run `%s`", describeACLFindings(findings), rerun)
+		}
+	}
 	return fmt.Sprintf(
 		"macOS ACL entries let accounts other than root and administrators add or delete folders above the vendor machine-policy folders, so they could put a policy without DefenseClaw hooks in place of the published one: %s; remove those entries with `chmod -a \"<entry>\" <folder>` (DefenseClaw does not change system folders), then run `%s`",
 		describeACLFindings(findings), rerun)

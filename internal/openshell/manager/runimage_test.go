@@ -24,9 +24,9 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"errors"
-	"io"
 	"os"
 	"path/filepath"
+	"reflect"
 	"slices"
 	"strings"
 	"sync"
@@ -35,7 +35,6 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/config"
 	"github.com/defenseclaw/defenseclaw/internal/gateway/connector"
 	"github.com/defenseclaw/defenseclaw/internal/openshell"
-	"github.com/defenseclaw/defenseclaw/internal/openshell/harness"
 	"github.com/defenseclaw/defenseclaw/internal/openshell/image"
 	"github.com/defenseclaw/defenseclaw/internal/openshell/openshelltest"
 	"github.com/defenseclaw/defenseclaw/internal/openshell/sandboxapi"
@@ -155,6 +154,20 @@ func sha256Hex(data []byte) string {
 // driver_config, the record keeps what the workload check must find (root
 // 0644 files with their digests), and a second sandbox of the same posture
 // boots the same image.
+func TestR108OSMINCreateOnVMUsesHookVerifiedImage(t *testing.T) {
+	e := newVMEnv(t, nil)
+	e.images.rec.HookFireVerified = true
+	// Older records carried a separate MicroVM verdict. Keep the test
+	// runnable at the pinned parent, where that verdict blocks create.
+	if old := reflect.ValueOf(&e.images.rec).Elem().FieldByName("MicroVMVerified"); old.IsValid() {
+		old.SetBool(false)
+	}
+	sb := e.create(sandboxapi.CreateRequest{Name: "vm-hook-verified", Copy: true})
+	if sb.Phase != "ready" || e.boxOf(sb.Name).rec.Verify == nil {
+		t.Fatalf("created MicroVM = %+v", sb)
+	}
+}
+
 func TestCreateOnVMBakesRunFilesIntoARunImage(t *testing.T) {
 	e := newVMEnv(t, nil)
 	sb := e.create(sandboxapi.CreateRequest{Name: "vm-claude", Copy: true, LLM: anthropicLLM, Credentials: stripeCred})
@@ -260,126 +273,6 @@ func TestCreateRefusesRunFilesADriverCannotTake(t *testing.T) {
 	assertNothingLeft(t, e)
 }
 
-// AG-MAC-F2: a MicroVM gateway refuses, before anything is made, a harness
-// whose image did not pass the hook-fire probe's MicroVM scenario: one the
-// scenario found to resolve names on its own cannot start, with the
-// probe's reason; one whose scenario settled nothing, or never ran, is
-// not checked yet. Every refusal names the command that checks the image
-// again. A docker gateway, whose sandboxes get Docker's /etc/hosts, runs
-// the same image.
-func TestCreateOnVMRefusesAnImageThatCannotStartInAMicroVM(t *testing.T) {
-	const problem = `Antigravity cannot resolve localhost in an OpenShell MicroVM: it printed "Failed to start: listen tcp: lookup localhost on 127.0.0.53:53: server misbehaving"`
-	const inconclusive = "with the name resolution of an OpenShell MicroVM (an empty /etc/hosts, and a DNS relay that does not answer localhost), OpenCode exited 1"
-	const recheck = "`defenseclaw sandbox image build opencode --force`"
-	const unchecked = "OpenCode's image is not checked for an OpenShell MicroVM (the vm driver this gateway runs)"
-	for _, tc := range []struct{ name, problem, inconclusive, message, detail string }{
-		{"cannot resolve localhost", problem, "", "OpenCode cannot start in an OpenShell MicroVM (the vm driver this gateway runs)",
-			problem + ". A gateway on the docker driver (Linux), whose sandboxes get Docker's /etc/hosts, runs OpenCode; to check the image again: " + recheck},
-		{"settled nothing", "", inconclusive, unchecked,
-			"run " + recheck + " to check it again (a run without --no-build checks it first, too); its image "},
-		{"never probed", "", "", unchecked, "run " + recheck + " to check it; its image "},
-	} {
-		t.Run(tc.name, func(t *testing.T) {
-			e := newVMEnv(t, nil)
-			res := connector.ResolveSandboxHookContract("opencode", "2.1.4")
-			e.images.rec.HarnessVersion, e.images.rec.HookContract = "2.1.4", res.Contract.ContractID
-			e.images.rec.MicroVMVerified, e.images.rec.MicroVMProblem, e.images.rec.MicroVMInconclusive = false, tc.problem, tc.inconclusive
-			_, err := e.tryCreate(sandboxapi.CreateRequest{Name: "vm-no", Harness: "opencode", Copy: true})
-			apiErr := wantCode(t, err, sandboxapi.CodeImageUnavailable)
-			// Unless the harness cannot start at all, the command that checks the image again comes first (GAP-0274).
-			if apiErr.Message != tc.message || !strings.Contains(apiErr.Detail, tc.detail) || !strings.Contains(apiErr.Detail, recheck) ||
-				(tc.problem == "" && !strings.HasPrefix(apiErr.Detail, "run "+recheck)) {
-				t.Fatalf("refusal = %+v", apiErr)
-			}
-			if n := e.fake.Calls(openshelltest.MethodCreateSandbox); n != 0 || len(e.images.runCalls()) != 0 {
-				t.Fatalf("create calls %d, run images %d", n, len(e.images.runCalls()))
-			}
-			assertNothingLeft(t, e)
-		})
-	}
-	e := newEnv(t, nil)
-	e.images.rec.MicroVMVerified, e.images.rec.MicroVMProblem = false, problem
-	e.create(sandboxapi.CreateRequest{Name: "dk-ok", Copy: true})
-}
-
-// hookFireDocker answers the docker calls of an image's resolve: the tag
-// names id, and every hook-fire probe run fails at once (and is counted).
-type hookFireDocker struct {
-	mu   sync.Mutex
-	id   string
-	runs int
-}
-
-// Getenv implements image.Docker: the fake runs in an empty environment,
-// not the test's.
-func (*hookFireDocker) Getenv(string) string { return "" }
-
-func (d *hookFireDocker) Run(_ context.Context, _ io.Reader, stdout, _ io.Writer, args ...string) error {
-	d.mu.Lock()
-	defer d.mu.Unlock()
-	switch {
-	case len(args) > 1 && args[0] == "image" && args[1] == "inspect":
-		_, _ = io.WriteString(stdout, d.id+"\n")
-		return nil
-	case args[0] == "run":
-		d.runs++
-	case args[0] == "rm":
-		return nil
-	}
-	return &image.CommandError{Args: args, ExitCode: 1}
-}
-
-// The daemon checks an image for the MicroVM driver again, before a
-// sandbox on that driver boots it, when its last MicroVM run settled
-// nothing: one bad run does not block the harness for good. An image
-// verified for a MicroVM, or found to resolve localhost on its own, is
-// returned as it is, and so is any image when the create may not build
-// (it is then refused with the command that checks it).
-func TestResolveChecksAgainAnImageNotCheckedForAMicroVM(t *testing.T) {
-	for _, tc := range []struct {
-		name   string
-		edit   func(*image.Record)
-		build  bool
-		probed bool
-	}{
-		{"verified for a MicroVM", func(r *image.Record) { r.MicroVMVerified = true }, true, false},
-		{"cannot resolve localhost", func(r *image.Record) { r.MicroVMProblem = "OpenCode cannot resolve localhost in an OpenShell MicroVM" }, true, false},
-		{"settled nothing", func(r *image.Record) { r.MicroVMInconclusive = "the run timed out" }, true, true},
-		{"never checked", func(*image.Record) {}, true, true},
-		{"settled nothing, no build", func(r *image.Record) { r.MicroVMInconclusive = "the run timed out" }, false, false},
-	} {
-		t.Run(tc.name, func(t *testing.T) {
-			store := image.NewStore(t.TempDir())
-			docker := &hookFireDocker{id: "sha256:" + strings.Repeat("b", 64)}
-			b := &image.Builder{Docker: docker, Store: store, TempDir: t.TempDir()}
-			spec := image.BuildSpec{Harness: harness.ClaudeCode, UID: 1000, GID: 1000, IngressPort: 18971, DefenseClawVersion: "1.2.3", MicroVM: true}
-			c, err := b.Context(spec)
-			if err != nil {
-				t.Fatal(err)
-			}
-			rec := image.Record{Tag: c.Tag, ImageID: docker.id, ContentHash: c.ContentHash, Connector: "claudecode", HarnessVersion: c.HarnessVersion,
-				HookContract: c.Contract, BaseImage: c.Spec.BaseImage, UID: 1000, GID: 1000, IngressPort: 18971, DefenseClawVersion: "1.2.3",
-				FailMode: c.Spec.FailMode, Owner: c.Spec.Owner, MicroVM: true, HookFireVerified: true}
-			tc.edit(&rec)
-			if err := store.Put(rec); err != nil {
-				t.Fatal(err)
-			}
-			images := BuilderImages{Builder: b, Options: image.BuildOptions{HookFire: image.HookFireOptions{Network: image.HookFireNetworkRelay}}}
-			got, err := images.Resolve(context.Background(), spec, tc.build)
-			if probed := docker.runs > 0; probed != tc.probed {
-				t.Fatalf("probed %t (%d runs), want %t: %+v, %v", probed, docker.runs, tc.probed, got, err)
-			}
-			// The probe here fails at once, which a real resolve reports.
-			if !tc.probed && (err != nil || got.Tag != c.Tag) {
-				t.Fatalf("Resolve = %+v, %v", got, err)
-			}
-		})
-	}
-}
-
-// A sandbox boots the image built for its gateway's compute driver: a
-// MicroVM gateway's answers localhost itself (image.BuildSpec.MicroVM), a
-// docker gateway's is the image it always was.
 func TestCreateResolvesTheImageForTheGatewayDriver(t *testing.T) {
 	for _, tc := range []struct {
 		name    string
@@ -681,8 +574,8 @@ func TestCreateRefusesAFirstBootWithoutDiskRoom(t *testing.T) {
 	e.create(sandboxapi.CreateRequest{Name: "vm-cached", Copy: true, Project: e.otherProject("other")})
 	// After an in-place upgrade the gateway prepares its own disk: the one
 	// the release before prepared counts for neither.
-	e.fake.SetRelease("0.1.6")
-	e.gw.Version = "0.1.6"
+	e.fake.SetRelease("0.1.7")
+	e.gw.Version = "0.1.7"
 	if ex, err := e.m.Explain(t.Context(), sandboxapi.ExplainRequest{Harness: "claudecode", Copy: true, Project: e.project}); err != nil || !ex.VMFirstBoot {
 		t.Fatalf("Explain on the upgraded gateway = %+v, %v", ex, err)
 	}

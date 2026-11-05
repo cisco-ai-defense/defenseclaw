@@ -26,7 +26,7 @@ type perUserPeerProcess struct {
 
 // PerUserPeerRecord holds the process that owned the server end of the
 // first connection a per-user request was sent on (`hook-post`). The kernel
-// says which process holds that socket (Linux /proc, macOS lsof), so an
+// says which process holds that socket (Linux /proc, macOS proc_info), so an
 // agent cannot write it. Read in the background from the moment the
 // connection's owner is proven, while the connection is open.
 type PerUserPeerRecord struct {

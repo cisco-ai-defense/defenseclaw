@@ -102,7 +102,8 @@ func (a *APIServer) emitHookDecisionLogV8(
 	}
 	result := hookDecisionResult(env, panicked)
 	effectiveAction := normalizeHookActionLabel(resp.Action)
-	sandboxID, sandboxName := hookV8Sandbox(audit.EnvelopeFromContext(ctx))
+	auditEnvelope := audit.EnvelopeFromContext(ctx)
+	sandboxID, sandboxName := hookV8Sandbox(auditEnvelope)
 	classification := observability.ClassificationContext{
 		Bucket: observability.BucketGuardrailEvaluation, EventName: observability.EventName(observability.TelemetryEventHookDecision),
 		RawSeverity: string(severity.Severity), Enforced: env.Enforced,
@@ -162,11 +163,16 @@ func (a *APIServer) emitHookDecisionLogV8(
 		// when a later gateway process writes its record.
 		policy := req.pendingProvenance.decisionPolicyOr(ctx)
 		managed := policy.sandbox
+		var agentInstanceID observability.Optional[string]
+		if cfg := a.decisionConfig(ctx); cfg == nil || !cfg.SecureClientIntegration() {
+			agentInstanceID = hookV8OptionalIdentifier(auditEnvelope.AgentInstanceID)
+		}
 		identityInput := observability.LogCompatHookDecisionInput{
 			DefenseClawGuardrailProfileName: policy.profile.Name, DefenseClawGuardrailProfileDigest: policy.profile.Digest,
 			DefenseClawPolicyEffectiveDigest: policy.digest, DefenseClawPolicyGeneration: policy.generation,
 			DefenseClawGuardrailProfileMatch: policy.profile.Match, DefenseClawGuardrailProfileMatchedGroup: policy.profile.MatchedGroup,
 			DefenseClawUserEnrollment: policy.enrollment,
+			DefenseClawAgentSurface:   coworkSurfaceV8(ctx),
 			Envelope:                  envelope, Severity: observability.Present(severity.Severity),
 			LogLevel: logLevel, Outcome: hookDecisionV8Outcome(effectiveAction, result),
 			DefenseClawRequestID:                hookV8OptionalIdentifier(meta.RequestID),
@@ -178,6 +184,7 @@ func (a *APIServer) emitHookDecisionLogV8(
 			DefenseClawUserName:                 v8UserName(meta.UserName, hookV8OptionalIdentifier),
 			DefenseClawUserEmail:                v8UserEmail(meta.UserEmail),
 			DefenseClawAgentIdentityID:          agentIdentityV8FromContext(ctx),
+			DefenseClawAgentInstanceID:          agentInstanceID,
 			DefenseClawPolicyID:                 hookV8OptionalIdentifier(meta.PolicyID),
 			DefenseClawDestinationApp:           hookV8OptionalIdentifier(meta.DestinationApp),
 			GenAIConversationID:                 hookV8OptionalIdentifier(meta.SessionID),

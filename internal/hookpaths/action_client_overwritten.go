@@ -15,6 +15,9 @@ import (
 // a known ordinary value at its write. Keep unknown or control-dependent
 // targets for the managed gateway to judge conservatively.
 func actionClientProvedSafeVariableTargets(command, cwd, home string) bool {
+	if actionClientLoopCopySourceStartupUnknown() {
+		return false
+	}
 	file, ok := parseShell(command)
 	if !ok || !filepath.IsAbs(cwd) {
 		return false
@@ -228,11 +231,55 @@ func actionClientQuotedVariableTarget(word *syntax.Word) bool {
 	return quoted
 }
 
+// A shell startup file can install a DEBUG trap between a conditional and
+// a later alias assignment. The assigned value is then not a stable proof
+// of the redirect target, even when every written value in the command is
+// ordinary on its own.
+func actionStartupConditionalAliasRedirect(command string) bool {
+	if !strings.Contains(command, "if ") || !strings.Contains(command, ">") ||
+		!strings.Contains(command, "$") || !actionClientLoopCopySourceStartupUnknown() {
+		return false
+	}
+	file, ok := parseShell(command)
+	if !ok {
+		return false
+	}
+	conditional := false
+	aliases := map[string]bool{}
+	for _, stmt := range file.Stmts {
+		if _, ok := stmt.Cmd.(*syntax.IfClause); ok {
+			conditional = true
+		}
+		if !conditional {
+			continue
+		}
+		for _, redir := range stmt.Redirs {
+			if actionOutputRedirect(redir.Op) && redir.Word != nil && aliases[actionSoleParameter(redir.Word)] {
+				return true
+			}
+		}
+		call, ok := stmt.Cmd.(*syntax.CallExpr)
+		if !ok || len(call.Args) != 0 || len(call.Assigns) != 1 {
+			continue
+		}
+		assign := call.Assigns[0]
+		if assign.Name != nil && assign.Value != nil &&
+			!assign.Append && assign.Array == nil && assign.Index == nil &&
+			actionSoleParameter(assign.Value) != "" {
+			aliases[assign.Name.Value] = true
+		}
+	}
+	return false
+}
+
 // The broad target scan can see an assignment to a protected link even when
 // a later unconditional assignment replaces it before the sole write. Keep
 // that narrow proof out of the client's positive-only decision; the managed
 // gateway cannot otherwise distinguish the transient value from a write.
 func actionClientProvedOverwrittenRedirect(command, cwd, home string) bool {
+	if actionClientLoopCopySourceStartupUnknown() {
+		return false
+	}
 	file, ok := parseShell(command)
 	if !ok || len(file.Stmts) != 3 || !filepath.IsAbs(cwd) {
 		return false

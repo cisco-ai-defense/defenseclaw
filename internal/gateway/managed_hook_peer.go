@@ -742,9 +742,9 @@ func (a *APIServer) managedHookPeerAuth(authorizer *managedHookAuthorizer, next 
 			return
 		}
 		defer release()
-		if r.URL.Path == managedRefusalAuditPath || r.URL.Path == managed.OwnProfileExplainPath {
+		if r.URL.Path == managedRefusalAuditPath || r.URL.Path == managed.OwnProfileExplainPath || r.URL.Path == managed.OwnStatusPath {
 			// Any kernel-verified local account may report its own refused
-			// policy write, or read its own guardrail profile; the routes have
+			// policy write, or read its own guardrail profile or own status; the routes have
 			// no connector to enroll for.
 			next.ServeHTTP(w, r)
 			return
@@ -956,6 +956,7 @@ func (a *APIServer) managedHookSocketMux() http.Handler {
 	mux.HandleFunc("/api/v1/codex/notify", a.handleCodexNotify)
 	mux.HandleFunc(managedRefusalAuditPath, a.handleManagedRefusalAudit)
 	mux.HandleFunc(managed.OwnProfileExplainPath, a.handleOwnProfileExplain)
+	mux.HandleFunc(managed.OwnStatusPath, a.handleOwnStatus)
 	mux.HandleFunc(managedGuardianRepairAuditPath, a.handleManagedGuardianRepairAudit)
 	mux.HandleFunc(managed.LaunchCoverageReportPath, a.handleManagedLaunchCoverageAudit)
 	mux.HandleFunc(connector.UserScopedRotationProofPath, a.serveRotationListenerProof)

@@ -1906,11 +1906,6 @@ class OpenShellMCPConfig:
 
 
 @dataclass
-class OpenShellMiddlewareConfig:
-    enabled: bool = False
-
-
-@dataclass
 class OpenShellAdminConfig:
     """Administrator sandbox constraints (``openshell.admin``).
 
@@ -1993,6 +1988,20 @@ class EnterpriseOpenShellConfig:
 
 
 @dataclass
+class EnterpriseCoworkVMSensorConfig:
+    """Load-only mirror of the standalone Cowork host delivery block."""
+
+    mode: str = "off"
+    tenant: str = ""
+    device: str = ""
+    collector: str = ""
+    vendor: str = ""
+    source_dir: str = ""
+    package_sha256: str = ""
+    signature_sha256: str = ""
+
+
+@dataclass
 class OpenShellConfig:
     """The NVIDIA OpenShell 0.1.x sandbox integration (``openshell:``).
 
@@ -2031,7 +2040,6 @@ class OpenShellConfig:
     mcp: OpenShellMCPConfig = field(default_factory=OpenShellMCPConfig)
     upstream_telemetry: bool = False
     token_delivery: str = "provider"
-    middleware: OpenShellMiddlewareConfig = field(default_factory=OpenShellMiddlewareConfig)
     # A PEM file of CA certificates sandboxes trust besides the image's public
     # roots (a TLS-inspecting proxy's root): absolute or "~/...". Sandbox images
     # built while it is set carry them; nothing comes from the host's store.
@@ -2513,6 +2521,8 @@ class JudgeConfig:
     # ``JudgeConfig.MaxParallel``); 0 = no limit. With a limit, tool-call
     # judging goes ahead of prompt judging (#1395).
     max_parallel: int = 0
+    # Additional fields for an OpenAI-compatible judge request.
+    extra_body: dict[str, Any] = field(default_factory=dict)
     # Log judge prompts and responses (was DEFENSECLAW_JUDGE_TRACE).
     trace: bool = False
     # LLM overrides the top-level ``llm:`` block for the LLM judge.
@@ -3097,6 +3107,9 @@ class GuardrailConfig:
         lives in the gateway boot loop. Raises :class:`ValueError` with a
         named message on the first violation.
         """
+        from defenseclaw.observability.v8_config import validate_judge_extra_body
+
+        validate_judge_extra_body(self.judge.extra_body, "config.yaml")
         _validate_guardrail_level("guardrail.block_at", self.block_at)
         _validate_guardrail_level("guardrail.alert_at", self.alert_at)
         seen: dict[str, str] = {}
@@ -4346,6 +4359,9 @@ class Config:
     enterprise_openshell: EnterpriseOpenShellConfig = field(
         default_factory=EnterpriseOpenShellConfig, repr=False, compare=False
     )
+    enterprise_cowork_vm_sensor: EnterpriseCoworkVMSensorConfig = field(
+        default_factory=EnterpriseCoworkVMSensorConfig, repr=False, compare=False
+    )
     # enterprise.profile as loaded ("" when unset). Load only, like
     # enterprise_openshell; managed_outside_secure_client reads it.
     enterprise_profile: str = field(default="", repr=False, compare=False)
@@ -4909,6 +4925,9 @@ class Config:
             acp_document["default_profile"] = self.acp.default_profile
         if version >= CONFIG_VERSION_V9:
             _project_v9_modeled_keys(merged)
+            openshell = merged.get("openshell")
+            if isinstance(openshell, dict):
+                openshell.pop("middleware", None)
         return merged
 
 
@@ -5094,6 +5113,7 @@ def _config_to_dict(cfg: Config) -> dict[str, Any]:
     d.pop("_loaded_generation", None)
     d.pop("_loaded_v8_modeled_snapshot", None)
     d.pop("enterprise_openshell", None)
+    d.pop("enterprise_cowork_vm_sensor", None)
     gw = d.get("gateway")
     if gw and not gw.get("token"):
         gw.pop("token", None)
@@ -5157,6 +5177,8 @@ def _config_to_dict(cfg: Config) -> dict[str, Any]:
             judge.pop("hook_timeout", None)
         if not judge.get("max_parallel"):
             judge.pop("max_parallel", None)
+        if not judge.get("extra_body"):
+            judge.pop("extra_body", None)
     # Mirror Go's ``yaml:"connectors,omitempty"`` — drop the empty
     # per-connector overrides map so existing single-connector configs
     # stay byte-identical after a load/save round-trip. The block
@@ -6534,6 +6556,7 @@ def _merge_judge(raw: dict[str, Any] | None) -> JudgeConfig:
         hook_connectors=raw.get("hook_connectors", []),
         hook_timeout=raw.get("hook_timeout", 0.0),
         max_parallel=_judge_max_parallel(raw.get("max_parallel", 0)),
+        extra_body=raw.get("extra_body", {}),
         trace=raw.get("trace", False) is True,
         llm=_merge_llm(raw.get("llm")),
         model=raw.get("model", ""),
@@ -7240,7 +7263,6 @@ def _merge_openshell(raw: dict[str, Any] | None, data_dir: str = "") -> OpenShel
     image = _openshell_mapping(raw.get("image"))
     approvals = _openshell_mapping(raw.get("approvals"))
     mcp = _openshell_mapping(raw.get("mcp"))
-    middleware = _openshell_mapping(raw.get("middleware"))
     harness_versions = _openshell_mapping(image.get("harness_versions"))
     return OpenShellConfig(
         enabled=_coerce_bool(raw.get("enabled", False)),
@@ -7295,7 +7317,6 @@ def _merge_openshell(raw: dict[str, Any] | None, data_dir: str = "") -> OpenShel
         ),
         upstream_telemetry=_coerce_bool(raw.get("upstream_telemetry", False)),
         token_delivery=_openshell_str(raw.get("token_delivery")) or "provider",
-        middleware=OpenShellMiddlewareConfig(enabled=_coerce_bool(middleware.get("enabled", False))),
         admin=_merge_openshell_admin(raw.get("admin")),
     )
 
@@ -7348,6 +7369,83 @@ def _merge_enterprise_openshell(raw: Any) -> EnterpriseOpenShellConfig:
     """Parse ``enterprise.openshell`` (load only; Go validates it)."""
     section = _openshell_mapping(_openshell_mapping(raw).get("openshell"))
     return EnterpriseOpenShellConfig(driver=_openshell_str(section.get("driver")))
+
+
+def _merge_enterprise_cowork_vm_sensor(raw: Any) -> EnterpriseCoworkVMSensorConfig:
+    section = _openshell_mapping(_openshell_mapping(raw).get("cowork_vm_sensor"))
+    return EnterpriseCoworkVMSensorConfig(
+        mode=_openshell_str(section.get("mode"), "off"),
+        tenant=_openshell_str(section.get("tenant")),
+        device=_openshell_str(section.get("device")),
+        collector=_openshell_str(section.get("collector")),
+        vendor=_openshell_str(section.get("vendor")),
+        source_dir=_openshell_str(section.get("source_dir")),
+        package_sha256=_openshell_str(section.get("package_sha256")),
+        signature_sha256=_openshell_str(section.get("signature_sha256")),
+    )
+
+
+# Mirrors config.CoworkDerivedDeviceMaxLen.
+_COWORK_DERIVED_DEVICE_MAX_LEN = 64
+
+
+def _validate_enterprise_cowork_vm_sensor(raw: Mapping[str, Any]) -> None:
+    """Value-only mirror; the Go lifecycle owns all paths and delivery."""
+    enterprise = raw.get("enterprise")
+    if not isinstance(enterprise, Mapping) or "cowork_vm_sensor" not in enterprise:
+        return
+    prefix = "enterprise.cowork_vm_sensor"
+    if raw.get("deployment_mode") != "managed_enterprise" or enterprise.get("profile") != "standalone":
+        raise ValueError(f"{prefix} requires deployment_mode managed_enterprise and enterprise.profile standalone")
+    section = enterprise["cowork_vm_sensor"]
+    if not isinstance(section, Mapping):
+        raise ValueError(f"{prefix} must be an object")
+    fields = {"mode", "tenant", "device", "collector", "vendor", "source_dir", "package_sha256", "signature_sha256"}
+    if set(section) - fields:
+        raise ValueError(f"{prefix} contains an unknown setting")
+    if any(not isinstance(value, str) for value in section.values()):
+        raise ValueError(f"{prefix} values must be strings")
+    mode = section.get("mode", "off")
+    if mode not in {"off", "on"}:
+        raise ValueError(f"{prefix}.mode must be off or on")
+    patterns = {
+        "tenant": (r"[A-Za-z0-9][A-Za-z0-9._-]*", 128),
+        "device": (r"[A-Za-z0-9][A-Za-z0-9._-]*", 128),
+        "collector": (r"[A-Za-z0-9][A-Za-z0-9.-]*:[0-9]{1,5}", 253),
+        "vendor": (r"[a-z][a-z0-9_-]*", 64),
+        "package_sha256": (r"[0-9a-f]{64}", 64),
+        "signature_sha256": (r"[0-9a-f]{64}", 64),
+    }
+    for key, (pattern, limit) in patterns.items():
+        if key in section and (len(section[key]) > limit or re.fullmatch(pattern, section[key]) is None):
+            raise ValueError(f"{prefix}.{key} is invalid")
+    if "source_dir" in section and len(section["source_dir"]) > 4096:
+        raise ValueError(f"{prefix}.source_dir is too long")
+    if mode != "on":
+        return
+    # device is optional: unset, each host derives its own (macOS
+    # IOPlatformUUID, Windows MachineGuid; config.NormalizeCoworkDeviceID).
+    required = {"tenant", "collector", "vendor", "source_dir", "package_sha256"}
+    if required - section.keys():
+        raise ValueError(f"{prefix} requires tenant, collector, vendor, source_dir and package_sha256 while on")
+    source = section["source_dir"]
+    if source.startswith("/"):
+        absolute = source == "/" or all(part not in {"", ".", ".."} for part in source[1:].split("/"))
+    else:
+        absolute = bool(re.match(r"^[A-Za-z]:\\", source)) and not any(char in source[3:] for char in "/<>|?*:")
+        if absolute and len(source) > 3:
+            absolute = all(
+                part not in {"", ".", ".."} and part.rstrip(". ") == part for part in source[3:].split("\\")
+            )
+    if not absolute or source.strip() != source or any(char in source for char in '\x00\r\n"\t'):
+        raise ValueError(f"{prefix}.source_dir must be an absolute administrator-staged directory")
+    if not 1 <= int(section["collector"].rsplit(":", 1)[1]) <= 65535:
+        raise ValueError(f"{prefix}.collector port must be 1..65535")
+    # An unset device reserves the longest derived ID (CoworkDerivedDeviceMaxLen).
+    device = section.get("device") or "d" * _COWORK_DERIVED_DEVICE_MAX_LEN
+    arguments = f"tenant={section['tenant']},device={device},collector={section['collector']}"
+    if len(arguments) > 256:
+        raise ValueError(f"{prefix} arguments must match Anthropic's 1..256-byte ASCII format")
 
 
 def _serialize_openshell(d: dict[str, Any]) -> None:
@@ -7823,6 +7921,7 @@ def load(
     # rule; `defenseclaw migrate` persists it (see migrations.py).
     legacy_connector.migrate_raw_config(raw, cfg_file)
     _drop_retired_connector_settings(raw, cfg_file)
+    _validate_enterprise_cowork_vm_sensor(raw)
     if without_guardrail_profiles:
         raw = _without_guardrail_profiles(raw)
 
@@ -7930,6 +8029,7 @@ def load(
         update=_merge_update(raw.get("update")),
         decision_model=_merge_decision_model(raw.get("decision_model")),
         enterprise_openshell=_merge_enterprise_openshell(raw.get("enterprise")),
+        enterprise_cowork_vm_sensor=_merge_enterprise_cowork_vm_sensor(raw.get("enterprise")),
         enterprise_profile=str((raw.get("enterprise") or {}).get("profile") or "")
         if isinstance(raw.get("enterprise"), dict)
         else "",

@@ -16,6 +16,8 @@ import pytest
 from defenseclaw import agent_selection
 from defenseclaw.commands import cmd_setup
 
+from tests.os_view import os_view
+
 
 def test_codex_setup_rejects_versions_without_required_app_server_flag() -> None:
     # Upstream rust-v0.135.0 has only --listen stdio://; rust-v0.136.0
@@ -76,7 +78,7 @@ def test_windows_cmd_shim_refusal_names_native_install_not_trusted_paths(tmp_pat
     shim.write_text("@echo off\n", encoding="utf-8")
     monkeypatch.setattr(agent_selection, "_setup_agent_candidates", lambda *_args: (str(shim),))
     monkeypatch.setattr(agent_selection, "is_setup_trusted_binary", lambda *_args, **_kwargs: False)
-    monkeypatch.setattr(agent_selection.os, "name", "nt")
+    monkeypatch.setattr(agent_selection, "os", os_view("nt"))
 
     with pytest.raises(OSError, match="claude.cmd is a script wrapper") as raised:
         agent_selection._select_agent_executable(str(tmp_path / "state"), "claudecode")

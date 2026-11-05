@@ -387,10 +387,11 @@ func TestWindowsEnterpriseEnsureKeepsThePlanAfterRecoveringTheConfigGeneration(t
 		driftErr               error
 		action                 string // the installer action after Status; "" for a refusal
 		warning                string
+		code                   string // the action warning; ensure_<action> when empty
 	}{
 		{name: "1.0.2 to 1.0.4 upgrades", installed: "1.0.2", action: "Upgrade", warning: "older_version:1.0.2"},
 		{name: "1.0.3 to 1.0.4 upgrades", installed: "1.0.3", action: "Upgrade", warning: "older_version:1.0.3"},
-		{name: "same release with manifest drift reapplies it", installed: "1.0.4", drift: "manifest", action: "Upgrade", warning: "drift:manifest"},
+		{name: "same release with manifest drift reapplies it", installed: "1.0.4", drift: "manifest", action: "Upgrade", warning: "drift:manifest", code: "ensure_config_restart"},
 		{name: "same compliant release repairs", installed: "1.0.4", action: "Repair", warning: windowsEnterpriseGenerationRecoveryDetail},
 		{name: "planner refusal changes nothing", installed: "1.0.4", driftErr: errors.New("read the supplied guardian manifest: access denied")},
 	} {
@@ -460,9 +461,12 @@ func TestWindowsEnterpriseEnsureKeepsThePlanAfterRecoveringTheConfigGeneration(t
 			if got := argAfter(mutation, "-GatewayBinary"); got != `C:\stage\defenseclaw-gateway.exe` {
 				t.Fatalf("%s gateway source %q, want this run's payload", tc.action, got)
 			}
-			named := false
+			named, code := false, tc.code
+			if code == "" {
+				code = "ensure_" + strings.ToLower(tc.action)
+			}
 			for _, warning := range result.Warnings {
-				named = named || warning.Code == "ensure_"+strings.ToLower(tc.action) && strings.Contains(warning.Message, tc.warning)
+				named = named || warning.Code == code && strings.Contains(warning.Message, tc.warning)
 			}
 			if !result.OK || result.InstalledVersion != "1.0.4" || !named {
 				t.Fatalf("result ok=%v installed=%q warnings=%+v", result.OK, result.InstalledVersion, result.Warnings)

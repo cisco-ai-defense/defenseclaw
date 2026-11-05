@@ -78,3 +78,5 @@ defenseclaw uninstall --all --binaries --yes
 ```
 
 Without `--all` and `--binaries`, uninstall keeps your data and programs. Close agent sessions first. See [Uninstall](/docs/get-started/install#uninstall).
+
+If you set up Claude Cowork with `defenseclaw setup cowork`, uninstall cannot remove the plugin from your Claude account. In Claude Desktop, open **Customize > Plugins**, then the **...** menu on DefenseClaw, and choose **Remove**. Until you remove the plugin, Cowork tool calls are blocked. `defenseclaw reset` prints the same step. See [Remove the Cowork plugin](/docs/connectors/cowork#remove).

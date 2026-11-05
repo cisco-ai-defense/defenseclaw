@@ -141,6 +141,77 @@ func TestLinuxCredentialRootsCoverTheAgentSurfaces(t *testing.T) {
 	}
 }
 
+func TestLinuxCredentialRootsFollowNewSessionHomes(t *testing.T) {
+	parent := t.TempDir()
+	first := filepath.Join(parent, "first")
+	second := filepath.Join(parent, "second")
+	for _, path := range []string{first, filepath.Join(first, ".aws")} {
+		if err := os.Mkdir(path, 0o700); err != nil {
+			t.Fatal(err)
+		}
+	}
+	pattern := filepath.Join(parent, "*")
+	contains := func(roots []credentialRoot, path string) bool {
+		for _, root := range roots {
+			if root.path == path {
+				return true
+			}
+		}
+		return false
+	}
+	if roots := credentialRoots([]string{pattern}); !contains(roots, filepath.Join(first, ".aws")) ||
+		contains(roots, filepath.Join(second, ".aws")) {
+		t.Fatalf("initial homes: %+v", roots)
+	}
+	if err := os.Mkdir(second, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Mkdir(filepath.Join(second, ".aws"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if roots := credentialRoots([]string{pattern}); !contains(roots, filepath.Join(second, ".aws")) {
+		t.Fatalf("new session home was not discovered: %+v", roots)
+	}
+	if roots := credentialRoots([]string{first}); !contains(roots, filepath.Join(first, ".aws")) ||
+		contains(roots, filepath.Join(second, ".aws")) {
+		t.Fatalf("explicit-home twin changed scope: %+v", roots)
+	}
+}
+
+func TestLinuxFanotifyAddsNewHomeRootsWithoutRestart(t *testing.T) {
+	parent := t.TempDir()
+	first := filepath.Join(parent, "first")
+	if err := os.Mkdir(first, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Mkdir(filepath.Join(first, ".aws"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	marked := make(map[string]int)
+	source := &linuxSource{
+		homeDirs: []string{filepath.Join(parent, "*")},
+		markRoot: func(_ int, root credentialRoot) bool {
+			if _, err := os.Stat(root.path); err != nil {
+				return false
+			}
+			marked[root.path]++
+			return true
+		},
+	}
+	source.markCredentialRoots(0)
+	second := filepath.Join(parent, "second")
+	if err := os.Mkdir(second, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Mkdir(filepath.Join(second, ".aws"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	source.markCredentialRoots(0)
+	if marked[filepath.Join(first, ".aws")] != 1 || marked[filepath.Join(second, ".aws")] != 1 {
+		t.Fatalf("marks after adding a home: %+v", marked)
+	}
+}
+
 // TestLinuxHomeCredentialRootsDoNotFollowLinksOutOfTheHome pins that the
 // root helper never marks a location a home's owner redirected elsewhere:
 // marking /etc through ~/.kube would flood the shared event buffer with every

@@ -291,7 +291,7 @@ func TestInstallRefusals(t *testing.T) {
 // TestInstallExistingReleases: Install keeps a supported OpenShell
 // (openshell.SupportedMin or later) and refuses a newer minor. One older
 // than SupportedMin runs no sandbox, and Install upgrades it in place
-// (the owner's 0.1.5 floor): each legacy release DefenseClaw 1.0.0 to 1.0.3
+// (the owner's 0.1.6 floor): each legacy release DefenseClaw 1.0.0 to 1.0.3
 // left a host on (0.1.1 to 0.1.4), each prerelease of 0.1.5 however it is
 // reported, and the older releases the installer upgrades in place. Every
 // in-place upgrade runs PrepareUpgrade before the script, which restarts
@@ -306,13 +306,13 @@ func TestInstallExistingReleases(t *testing.T) {
 	rows := []row{
 		{name: "supported is kept", existing: "openshell " + openshell.SupportedMin},
 		{name: "a later supported release is kept", existing: "openshell 0.1.9"},
-		{name: "a prerelease of a later release is kept", existing: "openshell 0.1.6-pre.1"},
+		{name: "a prerelease of a later release is kept", existing: "openshell 0.1.7-pre.1"},
 		{name: "newer minor refused", existing: "openshell 0.2.0", unsupported: true},
 		{name: "0.1.0 upgraded in place", existing: "openshell 0.1.0", installed: true, downloads: 1},
 		// As doctor advises: 0.0.37 and later need no cleanup.
 		{name: "0.0.40 upgraded in place", existing: "openshell 0.0.40", installed: true, downloads: 1},
 	}
-	for _, legacy := range []string{"0.1.1", "0.1.2", "0.1.3", "0.1.4", "0.1.1-1", "0.1.5-pre.1", "0.1.5-pre.3", "0.1.5-pre.4", "0.1.5-dev.7+gabc"} {
+	for _, legacy := range []string{"0.1.1", "0.1.2", "0.1.3", "0.1.4", "0.1.5", "0.1.1-1", "0.1.5-pre.1", "0.1.5-pre.3", "0.1.5-pre.4", "0.1.5-dev.7+gabc"} {
 		rows = append(rows, row{name: "legacy " + legacy + " upgraded in place", existing: "openshell " + legacy, installed: true, downloads: 1})
 	}
 	for _, tc := range rows {

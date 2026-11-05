@@ -1503,14 +1503,16 @@ func (p *GuardrailProxy) handlePassthrough(w http.ResponseWriter, r *http.Reques
 	// surface carries the notification forward as either a system
 	// message or merged instructions string.
 	if p.notify != nil && !signedBody {
-		if sysMsg := p.notify.FormatSystemMessage(); sysMsg != "" {
+		if sysMsg, receipt := p.notify.PrepareSystemMessage(); sysMsg != "" {
 			if patched, site, err := injectNotificationForPassthrough(json.RawMessage(body), sysMsg, r.URL.Path); err == nil {
 				fmt.Fprintf(os.Stderr, "[guardrail] injecting security notification into passthrough request (site=%s path=%s)\n", site, r.URL.Path)
 				body = []byte(patched)
+				p.notify.CommitSystemMessage(receipt)
 				if p.logger != nil {
 					_ = p.logger.LogActionCtx(r.Context(), string(audit.ActionGuardrailNotifyInject), site, "injected security notification into passthrough LLM request")
 				}
 			} else {
+				p.notify.ReleaseSystemMessage(receipt)
 				// Not a failure: some provider surfaces (Anthropic,
 				// Gemini) aren't wired for passthrough injection yet.
 				// Log at debug-level stderr so operators notice drift
@@ -3025,7 +3027,7 @@ func (p *GuardrailProxy) handleChatCompletion(w http.ResponseWriter, r *http.Req
 
 	// --- Inject pending security notifications as a system message ---
 	if p.notify != nil {
-		if sysMsg := p.notify.FormatSystemMessage(); sysMsg != "" {
+		if sysMsg, receipt := p.notify.PrepareSystemMessage(); sysMsg != "" {
 			fmt.Fprintf(os.Stderr, "[guardrail] injecting security notification into LLM request\n")
 			notification := ChatMessage{Role: "system", Content: sysMsg}
 			if len(req.RawBody) > 0 {
@@ -3040,6 +3042,7 @@ func (p *GuardrailProxy) handleChatCompletion(w http.ResponseWriter, r *http.Req
 			} else {
 				req.Messages = append([]ChatMessage{notification}, req.Messages...)
 			}
+			p.notify.CommitSystemMessage(receipt)
 			if p.logger != nil {
 				_ = p.logger.LogActionCtx(r.Context(), string(audit.ActionGuardrailNotifyInject), "", "injected security notification into LLM request")
 			}

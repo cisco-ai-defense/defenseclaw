@@ -1465,14 +1465,26 @@
       ],
       "config_paths": [
         "~/Library/Application Support/Claude/claude_desktop_config.json",
+        "~/Library/Application Support/Claude-3p/claude_desktop_config.json",
         "~/.config/Claude/claude_desktop_config.json",
-        "$APPDATA/Claude/claude_desktop_config.json"
+        "~/.config/Claude-3p/claude_desktop_config.json",
+        "$APPDATA/Claude/claude_desktop_config.json",
+        "$LOCALAPPDATA/Claude-Data/claude_*/claude_desktop_config.json",
+        "$LOCALAPPDATA/Packages/Claude_*/LocalCache/Roaming/Claude/claude_desktop_config.json",
+        "$LOCALAPPDATA/Claude-3p/claude_desktop_config.json",
+        "$LOCALAPPDATA/Packages/Claude_*/LocalCache/Local/Claude-3p/claude_desktop_config.json"
       ],
       "extension_ids": [],
       "mcp_paths": [
         "~/Library/Application Support/Claude/claude_desktop_config.json",
+        "~/Library/Application Support/Claude-3p/claude_desktop_config.json",
         "~/.config/Claude/claude_desktop_config.json",
-        "$APPDATA/Claude/claude_desktop_config.json"
+        "~/.config/Claude-3p/claude_desktop_config.json",
+        "$APPDATA/Claude/claude_desktop_config.json",
+        "$LOCALAPPDATA/Claude-Data/claude_*/claude_desktop_config.json",
+        "$LOCALAPPDATA/Packages/Claude_*/LocalCache/Roaming/Claude/claude_desktop_config.json",
+        "$LOCALAPPDATA/Claude-3p/claude_desktop_config.json",
+        "$LOCALAPPDATA/Packages/Claude_*/LocalCache/Local/Claude-3p/claude_desktop_config.json"
       ],
       "package_names": [],
       "env_var_names": [],

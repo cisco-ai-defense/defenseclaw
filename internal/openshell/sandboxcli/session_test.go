@@ -2270,24 +2270,21 @@ func TestSessionSummary(t *testing.T) {
 			setup: func(ta *testApp) { noChanges(ta); ta.term.hooks, ta.term.code = nil, harness.LauncherRefusedExitCode },
 			want:  []string{"DefenseClaw refused to start OpenCode; see the launcher message above"},
 			not:   []string{"the harness itself failed", "hooks are not reaching"}},
-		// AG-MAC-F3: a harness that failed at start because localhost does
-		// not resolve is told apart, with what to do; the pull of a copy
-		// still runs, without its progress line.
-		{name: "localhost does not resolve in the sandbox", opts: claude, exit: 1, setup: failsAtStart("", "unresolved unlisted"),
-			want: []string{"✗ Claude Code exited with status 1 before any of its hooks reached DefenseClaw: localhost does not resolve in " + sbName +
-				": its /etc/hosts is empty, as OpenShell's MicroVM driver leaves it, and its image was built before DefenseClaw's images answered localhost themselves",
-				"→ a new sandbox boots a rebuilt image: delete this one (`defenseclaw sandbox delete " + sbName + "`) and run it again (`defenseclaw sandbox run claudecode`)"},
-			not: []string{"the harness itself failed"}},
+		// A harness that failed at start because localhost does not resolve
+		// is told apart, with what to check. The pull of a copy still runs.
+		{name: "localhost does not resolve in the sandbox", opts: claude, exit: 1, setup: failsAtStart("", "unresolved"),
+			want: []string{"✗ Claude Code exited with status 1 before any of its hooks reached DefenseClaw: localhost does not resolve in " + sbName,
+				"→ run `defenseclaw sandbox doctor` and check the sandbox's name resolution"},
+			not: []string{"the harness itself failed", "until OpenShell writes /etc/hosts"}},
 		{name: "a headless harness that looks localhost up itself", opts: RunOptions{Harness: "claude", Prompt: "fix it"}, exit: 1,
-			setup: failsAtStart(agyFailure, "resolves unlisted"),
+			setup: failsAtStart(agyFailure, "resolves"),
 			want: []string{"✗ Claude Code exited with status 1 before any of its hooks reached DefenseClaw: it could not resolve localhost (\"" + agyFailure +
-				"\"). This sandbox's /etc/hosts is empty, as OpenShell's MicroVM driver leaves it, and Claude Code does not use the system resolver, which answers localhost here",
-				"→ Claude Code cannot start in an OpenShell MicroVM until OpenShell writes /etc/hosts; a gateway on the docker driver (Linux) runs it"}},
+				"\")"}, not: []string{"until OpenShell writes /etc/hosts"}},
 		{name: "a headless harness whose sandbox resolves localhost", opts: RunOptions{Harness: "claude", Prompt: "fix it"}, exit: 1,
-			setup: failsAtStart("Error: invalid API key", "resolves listed"),
+			setup: failsAtStart("Error: invalid API key", "resolves"),
 			want:  []string{"before any of its hooks reached DefenseClaw: the harness itself failed (its output is above)"}, not: []string{"localhost", "a new sandbox"}},
 		{name: "a copy whose harness failed at start", input: "s\n", opts: RunOptions{Harness: "claude", Copy: true, Name: "copybox"}, exit: 1,
-			setup: failsAtStart("", "unresolved unlisted"), want: []string{"localhost does not resolve in copybox", "run it again", "Bring the changes back?"},
+			setup: failsAtStart("", "unresolved"), want: []string{"localhost does not resolve in copybox", "check the sandbox's name resolution", "Bring the changes back?"},
 			not: []string{"Pulling copybox's work"}, check: func(t *testing.T, ta *testApp) {
 				// What the harness wrote before it failed still comes back.
 				if !slices.Contains(ta.copy.steps, "pull copybox") {

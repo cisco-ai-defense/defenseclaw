@@ -12,10 +12,13 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"flag"
 	"fmt"
 	"io"
 	"os"
+	"os/exec"
+	"path/filepath"
 	"strconv"
 	"sync/atomic"
 	"time"
@@ -24,6 +27,8 @@ import (
 )
 
 const maxInput = hookexec.MaxPerUserPluginRequest
+
+const userGuardCapability = "defenseclaw-hook-post guard-user-hook v1\n"
 
 var (
 	version = "dev"
@@ -204,6 +209,32 @@ func main() {
 
 // runMain is main with its streams: the exit status of the request.
 func runMain(args []string, input io.Reader, output, errOutput io.Writer) int {
+	if len(args) == 1 && args[0] == "--guard-user-hook-capability" {
+		if _, err := io.WriteString(output, userGuardCapability); err != nil {
+			return 2
+		}
+		return 0
+	}
+	if len(args) == 0 {
+		// Cursor imports the Claude Code command without its arguments.
+		var event struct {
+			CursorVersion string `json:"cursor_version"`
+		}
+		if json.NewDecoder(io.LimitReader(input, hookexec.DefaultMaxBody+1)).Decode(&event) == nil &&
+			event.CursorVersion != "" {
+			return 0
+		}
+		fmt.Fprintln(errOutput, "DefenseClaw hook registration is invalid")
+		return 2
+	}
+	if args[0] == "guard-user-hook" {
+		self, err := os.Executable()
+		if err != nil {
+			fmt.Fprintln(errOutput, "DefenseClaw hook could not start")
+			return 2
+		}
+		return runUserHookGuardAt(self, args, input, output, errOutput)
+	}
 	// The process behind the socket the call is sent on, as the kernel names
 	// it when the call connects: a no-answer is the restart outage only when
 	// that process changed during the call (lead ruling on rel-1-0-6
@@ -232,8 +263,16 @@ func runMain(args []string, input io.Reader, output, errOutput io.Writer) int {
 		// Amp plugins send again (GAP-2083).
 		return hookexec.PerUserPostPeerUnverifiedExit
 	case hookexec.PerUserPostNoAnswer(err):
-		// No status before the deadline: the shell hook reads it as a
-		// timeout, or as the restart outage when this account's start lock
+		// A local deadline before the verified connection is not an
+		// unanswered gateway call. Keep it distinct from exit 9, which
+		// records verified contact without a decision.
+		select {
+		case <-peer.Connected():
+		default:
+			return 1
+		}
+		// No status after verified contact: the shell hook reads it as a
+		// no-answer, or as the restart outage when this account's start lock
 		// was held after the call reached its gateway and that gateway gave
 		// up the port during the call (rel-1-0-6 GAP-0498).
 		if startObservation.changed || hookexec.PerUserGatewayRestartProvenDuringCall(dataDir, peer, startObservation.start) ||
@@ -243,4 +282,49 @@ func runMain(args []string, input io.Reader, output, errOutput io.Writer) int {
 		return hookexec.PerUserPostNoAnswerExit
 	}
 	return 1
+}
+
+func runUserHookGuardAt(self string, args []string, input io.Reader, output, errOutput io.Writer) int {
+	valid := len(args) == 7 || len(args) == 9
+	if valid {
+		native, home := args[1], args[6]
+		account := filepath.Dir(home)
+		valid = args[0] == "guard-user-hook" && args[2] == "hook" &&
+			args[3] == "--connector" && args[4] == "claudecode" &&
+			args[5] == "--hook-home" && filepath.IsAbs(home) &&
+			filepath.Clean(home) == home && filepath.Base(home) == ".defenseclaw" &&
+			native == filepath.Join(account, ".local", "bin", "defenseclaw-hook-user") &&
+			userGuardExecutableMatches(self, filepath.Join(account, ".local", "bin", "defenseclaw-hook-post"))
+		if len(args) == 9 {
+			valid = valid && args[7] == "--api-addr"
+		}
+	}
+	if !valid {
+		fmt.Fprintln(errOutput, "DefenseClaw hook registration is invalid")
+		return 2
+	}
+	command := exec.Command(args[1], args[2:]...)
+	command.Stdin, command.Stdout, command.Stderr = input, output, errOutput
+	err := command.Run()
+	if err == nil {
+		return 0
+	}
+	var exitErr *exec.ExitError
+	if errors.As(err, &exitErr) && exitErr.ExitCode() == 2 {
+		return 2
+	}
+	fmt.Fprintln(errOutput, "DefenseClaw hook could not start")
+	return 2
+}
+
+func userGuardExecutableMatches(self, registered string) bool {
+	if self == registered {
+		return true
+	}
+	actual, err := os.Stat(self)
+	if err != nil || !actual.Mode().IsRegular() {
+		return false
+	}
+	expected, err := os.Stat(registered)
+	return err == nil && expected.Mode().IsRegular() && os.SameFile(actual, expected)
 }

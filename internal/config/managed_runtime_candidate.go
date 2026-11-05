@@ -6,7 +6,6 @@ package config
 import (
 	"context"
 	"errors"
-	"fmt"
 	"os"
 
 	"github.com/defenseclaw/defenseclaw/internal/managed"
@@ -35,6 +34,18 @@ func ValidateManagedStandaloneRuntimeContent(cfg *Config) error {
 	return validateManagedEnterpriseRuntime(cfg, false, false, true)
 }
 
+// ManagedDataDirTrustError is the managed load's refusal of a data_dir whose
+// access list a standard user could change. Setup re-stamps that list inside
+// its transaction; the Cowork source plan it reads before then tells this
+// refusal apart with errors.As. The message is unchanged.
+type ManagedDataDirTrustError struct{ Err error }
+
+func (e *ManagedDataDirTrustError) Error() string {
+	return "config: managed_enterprise data_dir trust check failed: " + e.Err.Error()
+}
+
+func (e *ManagedDataDirTrustError) Unwrap() error { return e.Err }
+
 func validateManagedEnterpriseRuntime(cfg *Config, checkPolicyInputs, checkDataDir, checkListener bool) error {
 	if checkDataDir {
 		if err := managed.ValidateTrustedServiceRuntimeDir(
@@ -43,7 +54,7 @@ func validateManagedEnterpriseRuntime(cfg *Config, checkPolicyInputs, checkDataD
 			if ReportConfigLoadError != nil {
 				ReportConfigLoadError(context.Background(), "managed_data_dir_untrusted")
 			}
-			return fmt.Errorf("config: managed_enterprise data_dir trust check failed: %w", err)
+			return &ManagedDataDirTrustError{Err: err}
 		}
 	}
 	if checkListener {

@@ -46,6 +46,9 @@ var (
 
 func main() {
 	initgc.Restore()
+	// An elevated per-user run creates its files as its user, as the CLI
+	// does (GAP-0063); before anything below writes or starts a process.
+	managed.UseCurrentUserAsWindowsDefaultOwner(os.Args[1:])
 	// The one-line install's Windows Claude Code PreToolUse handler runs this
 	// binary as its launcher guard, so a launcher removed in the middle of a
 	// turn blocks the next tool call. It runs before anything that could print

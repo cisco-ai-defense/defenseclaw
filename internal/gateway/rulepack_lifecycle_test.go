@@ -20,11 +20,13 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/audit"
 	"github.com/defenseclaw/defenseclaw/internal/config"
 	"github.com/defenseclaw/defenseclaw/internal/guardrail"
+	"github.com/defenseclaw/defenseclaw/internal/testenv"
 )
 
 func TestNewSidecarRejectsInvalidGlobalRulePackBeforeClientConstruction(t *testing.T) {
 	cfg := config.DefaultConfig()
 	cfg.ConfigVersion = config.ObservabilityV8ConfigVersion
+	cfg.Guardrail.Enabled = true
 	cfg.Guardrail.RulePackDir = invalidRulePackDir(t)
 	// If rule-pack preflight regresses behind client construction, this
 	// deliberately nonexistent key path will obscure the policy error.
@@ -37,6 +39,74 @@ func TestNewSidecarRejectsInvalidGlobalRulePackBeforeClientConstruction(t *testi
 	}
 	if !strings.Contains(err.Error(), "global rule pack") {
 		t.Fatalf("NewSidecar error = %v, want global rule-pack context", err)
+	}
+}
+
+func TestDisabledGuardrailStartsWithoutDefaultRulePackDirectory(t *testing.T) {
+	cfg := config.DefaultConfig()
+	cfg.ConfigVersion = config.ObservabilityV8ConfigVersion
+	cfg.DataDir = testenv.PrivateTempDir(t)
+	cfg.PolicyDir = filepath.Join(cfg.DataDir, "policies")
+	cfg.Guardrail.Enabled = false
+	cfg.Guardrail.RulePack = "default"
+	cfg.Gateway.DeviceKeyFile = filepath.Join(cfg.DataDir, "device.key")
+	restoreGatewayProcessPosture(t)
+
+	sidecar, err := NewSidecar(cfg, nil, nil)
+	if err != nil || sidecar == nil {
+		t.Fatalf("disabled guardrail with no default rule pack: sidecar=%p error=%v", sidecar, err)
+	}
+	t.Cleanup(func() {
+		if svc := sidecar.aiDiscoverySnapshot(); svc != nil {
+			_, _ = svc.CloseIfNeverStarted()
+		}
+		_ = shutdownJudgeStore(sidecar.judgeStore)
+		if sidecar.judgeBodyStore != nil {
+			_ = sidecar.judgeBodyStore.Close()
+		}
+		if sidecar.webhooks != nil {
+			sidecar.webhooks.Close()
+		}
+		sidecar.alertCancel()
+	})
+	if sidecar.activeRulePack() == nil {
+		t.Fatal("disabled guardrail has no embedded fallback")
+	}
+
+	cfg.Guardrail.Enabled = true
+	if _, _, _, err := loadInitialSidecarRulePack(cfg); err == nil ||
+		!strings.Contains(err.Error(), "directory_not_found") {
+		t.Fatalf("enabled guardrail with no default rule pack: error=%v", err)
+	}
+}
+
+func TestDisabledGuardrailKeepsConfiguredGlobalPack(t *testing.T) {
+	dir := meetRulePackDir(t, t.TempDir(), "COWORK108")
+	digest, err := guardrail.RulePackDigest(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg := config.DefaultConfig()
+	cfg.Guardrail.Enabled = false
+	cfg.Guardrail.RulePack = "operator"
+	cfg.Guardrail.CustomPacks = map[string]config.CustomRulePack{
+		"operator": {Path: dir, Digest: "sha256:" + digest},
+	}
+	pack, err := loadGlobalRulePack(guardrail.NewRulePackCache(), cfg, "global")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := pack.FilesDigest(); got != digest {
+		t.Fatalf("configured pack digest = %s, want %s", got, digest)
+	}
+
+	// A missing configured pack still reports its load error.
+	cfg.Guardrail.CustomPacks["operator"] = config.CustomRulePack{
+		Path: filepath.Join(t.TempDir(), "missing"), Digest: "sha256:" + digest,
+	}
+	if _, err := loadGlobalRulePack(guardrail.NewRulePackCache(), cfg, "global"); err == nil ||
+		!strings.Contains(err.Error(), "directory_not_found") {
+		t.Fatalf("missing configured pack: error=%v", err)
 	}
 }
 
@@ -499,5 +569,36 @@ func TestConnectorRosterOnlyReloadRetiresRemovedPreviousManualConnector(t *testi
 	}
 	if activeRouter.rulePack() != activeRouterPack {
 		t.Fatal("roster-only reload replaced the detached router rule pack")
+	}
+}
+
+// cowork-1-0-8 GAP-0014: with rule_pack unset the config defaults
+// rule_pack_dir to the default pack's place under policy_dir; a disabled
+// guardrail starts on the embedded pack when that folder is absent. A missing
+// operator directory, and the same config with guardrail on, still fail.
+func TestDisabledGuardrailUnsetRulePackStartsWithoutDefaultDirectory(t *testing.T) {
+	cfg := config.DefaultConfig()
+	cfg.ConfigVersion = config.ObservabilityV8ConfigVersion
+	cfg.DataDir = testenv.PrivateTempDir(t)
+	cfg.PolicyDir = filepath.Join(t.TempDir(), "vendor-policies")
+	cfg.Guardrail.Enabled = false
+	cfg.Guardrail.RulePack = ""
+	for _, dir := range []string{
+		filepath.Join(cfg.PolicyDir, "guardrail", "default"),
+		filepath.Join(cfg.DataDir, "policies", "guardrail", "default"),
+	} {
+		cfg.Guardrail.RulePackDir = dir
+		if pack, _, _, err := loadInitialSidecarRulePack(cfg); err != nil || pack == nil {
+			t.Fatalf("rule_pack unset, rule_pack_dir %s absent: pack=%p error=%v", dir, pack, err)
+		}
+	}
+	cfg.Guardrail.RulePackDir = filepath.Join(t.TempDir(), "operator-pack")
+	if _, _, _, err := loadInitialSidecarRulePack(cfg); err == nil || !strings.Contains(err.Error(), "directory_not_found") {
+		t.Fatalf("missing operator rule_pack_dir: error=%v", err)
+	}
+	cfg.Guardrail.RulePackDir = filepath.Join(cfg.PolicyDir, "guardrail", "default")
+	cfg.Guardrail.Enabled = true
+	if _, _, _, err := loadInitialSidecarRulePack(cfg); err == nil || !strings.Contains(err.Error(), "directory_not_found") {
+		t.Fatalf("enabled guardrail with no default rule pack: error=%v", err)
 	}
 }

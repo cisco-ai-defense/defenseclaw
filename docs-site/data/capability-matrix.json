@@ -194,7 +194,7 @@
     {
       "id": "opencode",
       "label": "OpenCode",
-      "windowsSupport": "preview",
+      "windowsSupport": "supported",
       "windowsNote": "Native Windows x64 uses the reviewed @opencode/cli V2 image or an admitted V2 WinGet CLI.",
       "summary": "Auto-loaded bridge plugin with tool-execution blocking.",
       "family": "hooks",
@@ -220,7 +220,7 @@
         "unverifiedReason": "V2-only image and bridge; previous V1 sandbox certification does not apply. A fresh V2 OpenShell ingress, block, and egress verification is required."
       },
       "hilt": "No native human-approval surface; blocks by throwing in the bridge plugin's tool.execute.before. confirm verdicts fall back to allow.",
-      "notes": "V2-only dependency-free plugin with a default id/setup definition. Awaited execute.before rejects blocked tool calls; execute.after and session subscriptions report outcomes. Native Windows uses the reviewed @opencode/cli image or a V2 WinGet executable. Live validation metadata remains empty; preview limits are documented on the connector page."
+      "notes": "V2-only dependency-free plugin with a default id/setup definition. Awaited execute.before rejects blocked tool calls; execute.after and session subscriptions report outcomes. Native Windows uses the reviewed @opencode/cli image or a V2 WinGet executable. OpenCode 2.2.5 was checked live in per-user and managed installs on Linux, macOS and native Windows."
     },
     {
       "id": "amp",

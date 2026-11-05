@@ -30,7 +30,9 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/defenseclaw/defenseclaw/internal/agentprobe"
 	"github.com/defenseclaw/defenseclaw/internal/lazyregexp"
+	"github.com/defenseclaw/defenseclaw/internal/processutil"
 	"github.com/defenseclaw/defenseclaw/internal/unixidentity"
 )
 
@@ -280,6 +282,19 @@ func nodeModulesPackage(prefix, pkg string) []string {
 // allowExec enables the `--version` fallback; callers set it only when
 // already running with the target user's credentials.
 func DiscoverUnixAgentVersion(ctx context.Context, home, connector string, allowExec bool) (string, string) {
+	return discoverUnixAgentVersion(ctx, home, connector, allowExec, true)
+}
+
+// DiscoverUnixAgentVersionInAccountHome runs a version command with the
+// account's normal state location. Managed discovery uses this for Hermes so
+// a running version command has the same home as an ordinary session. If its
+// state is busy or read-only, retry with isolated state before trusting an
+// install stamp that may describe an older CLI.
+func DiscoverUnixAgentVersionInAccountHome(ctx context.Context, home, connector string) (string, string) {
+	return discoverUnixAgentVersion(ctx, home, connector, true, false)
+}
+
+func discoverUnixAgentVersion(ctx context.Context, home, connector string, allowExec, isolateState bool) (string, string) {
 	connector = strings.ToLower(strings.TrimSpace(connector))
 	probe, ok := unixAgentProbes[connector]
 	if !ok {
@@ -327,6 +342,10 @@ func DiscoverUnixAgentVersion(ctx context.Context, home, connector string, allow
 		return "", fmt.Sprintf("no %s package metadata under this home", connector)
 	}
 	installedAt, installedNote := "", ""
+	stateEnv := probe.stateEnv
+	if !isolateState {
+		stateEnv = ""
+	}
 	for index, binary := range probe.binaries {
 		for _, candidate := range unixAgentBinaryCandidates(home, binary) {
 			// A CLI outside the home that another account can change is
@@ -334,8 +353,13 @@ func DiscoverUnixAgentVersion(ctx context.Context, home, connector string, allow
 			// every enrolled user on every enumeration cycle.
 			trusted := unixDiscoveryCandidateTrusted(home, candidate)
 			if trusted {
-				if version := execUnixAgentVersion(ctx, candidate, home, probe.stateEnv); version != "" {
+				if version := execUnixAgentVersion(ctx, candidate, home, stateEnv); version != "" {
 					return version, ""
+				}
+				if !isolateState && probe.stateEnv != "" && ctx.Err() == nil {
+					if version := execUnixAgentVersion(ctx, candidate, home, probe.stateEnv); version != "" {
+						return version, ""
+					}
 				}
 			}
 			// Only the connector's own CLI name counts as evidence of an
@@ -348,10 +372,11 @@ func DiscoverUnixAgentVersion(ctx context.Context, home, connector string, allow
 			}
 		}
 	}
-	// The install stamp names the release only when the CLI does not answer
-	// itself: only the installer rewrites the stamp, so a CLI upgraded
-	// another way leaves it naming the older release (GAP-1274).
-	if stampVersion != "" {
+	// A managed Hermes CLI whose live version could not be read cannot use
+	// the stamp as contract evidence: the installed CLI may have changed
+	// since the installer last wrote it (GAP-1274). Metadata remains useful
+	// when there is no CLI to query and for the existing isolated callers.
+	if stampVersion != "" && (installedAt == "" || isolateState) {
 		return stampVersion, ""
 	}
 	if installedAt != "" {
@@ -799,28 +824,46 @@ func rootOwnedChain(path string) bool {
 	}
 }
 
-// newestVersionDir returns the highest semver-named child of dir.
-func newestVersionDir(dir string) string {
-	entries, err := os.ReadDir(dir)
+// unixVersionDirsMax bounds the entries read from one version folder.
+const unixVersionDirsMax = 4096
+
+// unixVersionDirs returns the semver-named children of dir, newest first,
+// from at most unixVersionDirsMax entries. complete is false when dir holds
+// more entries than are read (a newer version may be among those left out)
+// or could not be listed for another reason than being absent or out of
+// the account's reach.
+func unixVersionDirs(dir string) (versions []string, complete bool) {
+	entries, err := readUnixDirBounded(dir, unixVersionDirsMax)
 	if err != nil {
-		return ""
+		return nil, unixEntryAbsent(err)
 	}
-	var versions []string
+	complete = len(entries) <= unixVersionDirsMax
+	if !complete {
+		entries = entries[:unixVersionDirsMax]
+	}
 	for _, entry := range entries {
-		name := entry.Name()
-		if validUnixAgentVersion(name) {
+		if name := entry.Name(); validUnixAgentVersion(name) {
 			versions = append(versions, name)
 		}
-		if len(versions) > 256 {
-			break
-		}
 	}
-	if len(versions) == 0 {
-		return ""
-	}
-	sort.Slice(versions, func(i, j int) bool { return compareUnixVersions(versions[i], versions[j]) < 0 })
-	return versions[len(versions)-1]
+	sort.SliceStable(versions, func(i, j int) bool { return compareUnixVersions(versions[i], versions[j]) > 0 })
+	return versions, complete
 }
+
+// newestVersionDir returns the highest semver-named child of dir among the
+// entries unixVersionDirs reads (the CLI version probe, whose folders hold
+// a handful of versions; the Claude Desktop surfaces, which decide
+// coverage, use unixVersionDirs and report a folder over the bound).
+func newestVersionDir(dir string) string {
+	if versions, _ := unixVersionDirs(dir); len(versions) != 0 {
+		return versions[0]
+	}
+	return ""
+}
+
+// CompareUnixAgentVersions orders two agent versions (ValidUnixAgentVersion)
+// as the enumerator does: by major, minor and patch, then by text.
+func CompareUnixAgentVersions(a, b string) int { return compareUnixVersions(a, b) }
 
 func compareUnixVersions(a, b string) int {
 	parse := func(v string) [3]int {
@@ -944,6 +987,9 @@ func runUnixAgentVersion(parent context.Context, candidate, home, stateEnv strin
 		}
 		defer os.RemoveAll(scratch)
 		cmd.Env = append(cmd.Env, stateEnv+"="+scratch, "TMPDIR="+scratch)
+		if stateEnv == "HERMES_HOME" {
+			cmd.Env = append(cmd.Env, agentprobe.EnvName+"="+agentprobe.Hermes)
+		}
 	}
 	out := &cappedBuffer{limit: unixAgentVersionOutput}
 	errOut := &cappedBuffer{limit: unixAgentVersionOutput}
@@ -951,9 +997,11 @@ func runUnixAgentVersion(parent context.Context, candidate, home, stateEnv strin
 	// Some agents (Hermes) print their version on stderr when stdout is
 	// not a terminal; read it only when stdout names no version.
 	cmd.Stderr = errOut
-	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 	cmd.WaitDelay = time.Second
-	_ = cmd.Run()
+	// The apply worker can end during an interrupted transaction. Keep the
+	// version command tied to that worker so it cannot survive as an
+	// unaccounted-for launch after its parent process disappears.
+	_ = processutil.RunTree(cmd)
 	first, _, _ := strings.Cut(out.buf.String(), "\n")
 	if version := ExtractUnixAgentVersion(first); version != "" {
 		return version, false

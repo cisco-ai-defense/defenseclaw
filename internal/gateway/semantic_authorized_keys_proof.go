@@ -1022,6 +1022,11 @@ func trustedSymlinkName(input actionfacts.Input, name string) string {
 }
 
 func trustedExistingAuthorizedKeysSymlinkWrite(request trustedActionRequest, facts actionfacts.Facts) bool {
+	if command, ok := trustedBashCommandInput(request.Input); ok &&
+		trustedNoDereferenceTouchSafe(command, request.Input.CWD, facts.ActiveHome,
+			request.ResolvedWriteTargets, request.ProtectedHomeHook) {
+		return false
+	}
 	if facts.ActiveHome == "" || !filepath.IsAbs(facts.ActiveHome) {
 		return false
 	}
@@ -1331,6 +1336,13 @@ func trustedExistingAuthorizedKeysSymlinkWrite(request trustedActionRequest, fac
 		decision = request.targetMemo.ActionCommandDecisionWithDialectAndGlobFacts(input.Command, input.CWD, facts.ActiveHome, input.DialectHint, globFacts)
 	}
 	if decision != "" {
+		return true
+	}
+	if !cannotResolveLocally && trustedPOSIXShellCall(input, facts) &&
+		strings.Contains(input.Command, "for") && strings.Contains(input.Command, "cp") &&
+		hookpaths.LoopCopyDestinationProtected(input.Command, input.CWD, facts.ActiveHome) {
+		// The per-user gateway can check the same fixed loop destination
+		// that a managed hook checks before ProtectHome hides the home.
 		return true
 	}
 	if request.ProtectedHomeHook && clientTargets[hookpaths.ActionDecisionKey] == hookpaths.ProtectedTargetDecision {

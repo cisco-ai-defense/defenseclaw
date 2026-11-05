@@ -41,8 +41,8 @@ This page assumes a standalone install with an admin-owned `config.yaml`. Policy
 | Item | Value |
 | --- | --- |
 | Supported range | `>=0.1.1 <0.2.0` |
-| Release `prerequisite` mode expects and `setup` installs | `0.1.5` |
-| Oldest release that runs sandboxes | `0.1.5` (a prerelease of 0.1.5 counts as older) |
+| Release `prerequisite` mode expects and `setup` installs | `0.1.6` |
+| Oldest release that runs sandboxes | `0.1.6` (a prerelease of 0.1.6 counts as older) |
 
 With the stock `0.1.1` rpm, the `driver: vm` checks fail because the release is too old; the package version wins over the CLI's when `ensure` compares them.
 
@@ -69,7 +69,7 @@ The words these settings take (`prerequisite`, `setup`, `docker`, `vm`, `auto`, 
 | `install` | `prerequisite` (default) or `setup`. |
 | `driver` | `docker`, `vm` or `auto`. The default is `vm` on macOS and `docker` on Linux. On Linux, `auto` chooses the MicroVM driver where the user's KVM probe passes and `docker` where it does not. On macOS, `auto` resolves to `vm`; an explicit `docker` uses Docker and does not need MicroVM `e2fsprogs`. `vm` or `auto` with `install: prerequisite` on Linux needs the driver binary, which the stock OpenShell rpm lacks. |
 | `driver_fallback` | Linux, `driver: vm` or `auto`. What a sandbox gets when KVM is not available for the user: `docker` (the default) or `none`. |
-| `version` | The OpenShell release. `setup` needs an exact version such as `"0.1.5"`; `prerequisite` also accepts a range inside `>=0.1.5 <0.2.0`. Sandboxes run only on 0.1.5 or later: `setup` installs 0.1.5 for an older exact pin, and in `prerequisite` mode an installed release older than 0.1.5 is a failed row, whatever the pin allows. |
+| `version` | The OpenShell release. `setup` needs an exact version such as `"0.1.6"`; `prerequisite` also accepts a range inside `>=0.1.6 <0.2.0`. Sandboxes run only on 0.1.6 or later: `setup` installs 0.1.6 for an older exact pin, and in `prerequisite` mode an installed release older than 0.1.6 is a failed row, whatever the pin allows. |
 | `gateway_port` | The OpenShell gateway's loopback port, 1024 to 65535, default 17670. It may not equal the API, hook, ingress or egress port. This is the administrator's key only: a per-user config has no `openshell.gateway_port`. |
 | `e2fsprogs_dir` | macOS only. Optional: an absolute root-owned e2fsprogs install prefix (`mke2fs` and `debugfs` in its `sbin` or `bin`) or the folder that holds both. A broken explicit value is refused with `openshell_prerequisite_missing`. When unset, an account's `~/.local/opt/e2fsprogs/sbin` build or the package tools are used. Another account's Homebrew keg is never a source. |
 | `openshell.image.base` | Admin config. The base image for every agent image, by digest: `name@sha256:<digest>`. For an image built on the computer, the digest is its image ID (`docker image inspect --format '{{.Id}}' name:tag`). A tag alone is refused. A base the engine already has is never pulled. |
@@ -178,12 +178,12 @@ Do this once per host, as root, and nothing per account.
 
 Nothing is installed per host by you. Each person's sandbox daemon installs the pinned OpenShell release at their first sandbox, as that person, with no sudo.
 
-1. **Pin an exact release.** Set `enterprise.openshell.version` to a release this build can install (`"0.1.5"`). A pin older than 0.1.5, such as the `"0.1.3"` DefenseClaw 1.0.3 installed, runs no sandbox (before 0.1.5 OpenShell's network broker could let a sandbox's connections bypass its policy, NVIDIA/OpenShell#4494), so DefenseClaw installs 0.1.5 for it instead: each person's OpenShell moves to 0.1.5 once none of their sandboxes runs, and the `sandbox openshell pin` row of `ensure`, `status` and `verify` says so until an `ensure` applies the pin `"0.1.5"`. A range, an empty value or an unknown release is a failed row in `ensure` that lists the releases it can install. NVIDIA publishes no tarballs for Intel Macs, so `setup` is refused there.
+1. **Pin an exact release.** Set `enterprise.openshell.version` to a release this build can install (`"0.1.6"`). A pin older than 0.1.6, such as the `"0.1.3"` DefenseClaw 1.0.3 installed, runs no sandbox, so DefenseClaw installs 0.1.6 for it instead: each person's OpenShell moves to 0.1.6 once none of their sandboxes runs, and the `sandbox openshell pin` row of `ensure`, `status` and `verify` says so until an `ensure` applies the pin `"0.1.6"`. A range, an empty value or an unknown release is a failed row in `ensure` that lists the releases it can install. NVIDIA publishes no tarballs for Intel Macs, so `setup` is refused there.
 2. **Prepare what OpenShell needs and DefenseClaw does not bring:** Docker for the agent images, and the `docker` and `kvm` groups plus `e2fsprogs` for the people who need them on Linux.
 3. **Allow the download.** The daemon downloads NVIDIA's tarballs and uses the proxy settings in `enterprise.network`. With no route it fails with a message that says so.
 4. **Run `ensure`** with the config. Until a user runs a first sandbox, `status` shows the version pin and no per-user row. After that, it lists each account's copy as "user-installed, unmanaged".
 
-A person sees the first-use step once: `Installing OpenShell 0.1.5 for your account and starting it (first run only)…`.
+A person sees the first-use step once: `Installing OpenShell 0.1.6 for your account and starting it (first run only)…`.
 
 ## Turn it on
 
@@ -223,7 +223,7 @@ enterprise:
     install: setup            # or prerequisite
     driver: auto              # docker, vm or auto; default: vm on macOS, docker on Linux
     driver_fallback: docker   # Linux, vm or auto: docker (default) or none where KVM is not available
-    version: "0.1.5"          # exact pin for setup; a range inside ">=0.1.5 <0.2.0" for prerequisite
+    version: "0.1.6"          # exact pin for setup; a range inside ">=0.1.6 <0.2.0" for prerequisite
     gateway_port: 17670       # OpenShell gateway, loopback only
 ```
 
@@ -549,7 +549,7 @@ When a directory lookup is cold, the create waits up to 10 seconds for it. If a 
 
 ## What users see
 
-Users get a `defenseclaw` command that offers only the `sandbox` commands, `help` and `--version`; anything else exits 2 with "This computer is managed; use `defenseclaw sandbox status` for your read-only status and `defenseclaw sandbox policy explain` for your policy. Other commands require an administrator." Administrator commands remain `defenseclaw-gateway enterprise ...`, run by its packaged path as root.
+Users get a `defenseclaw` command that offers only the `sandbox` commands, `status` (their own Claude Code and Cowork protection state), `guardrail profile explain`, `help` and `--version`; anything else exits 2 with "This computer is managed; use `defenseclaw status` for your protection state, `defenseclaw sandbox status` for your sandboxes and `defenseclaw sandbox policy explain` for your policy. Other commands require an administrator." Administrator commands remain `defenseclaw-gateway enterprise ...`, run by its packaged path as root.
 
 When your organization's directory cannot be reached (off VPN), a run first waits up to 10 seconds for your sandbox policy and says so, then starts as your organization's default profile allows.
 
@@ -595,7 +595,7 @@ Sandboxes on a computer serve one account at a time. While one person has a sand
 
 ### The managed `defenseclaw` command
 
-Users get a `defenseclaw` command that offers only the `sandbox` commands. Anything else prints "This computer is managed; use `defenseclaw sandbox status` for your read-only status and `defenseclaw sandbox policy explain` for your policy. Other commands require an administrator." and exits 2. The administrator commands remain `defenseclaw-gateway enterprise …`, which only root can use. Run it by its packaged path (`/opt/defenseclaw/bin/defenseclaw-gateway` on Linux, `/opt/cisco/defenseclaw/bin/defenseclaw-gateway` on macOS): the folder is not on the `PATH` of a fresh root login shell. `defenseclaw sandbox setup` is refused: there is nothing for the person to set up. `sandbox enable` records only the shell wrapper in the person's rc file.
+Users get a `defenseclaw` command that offers only the `sandbox` commands and `defenseclaw status`, which shows the person their own Claude Code and Cowork protection state and their own last Cowork event, never other accounts'. Anything else prints "This computer is managed; use `defenseclaw status` for your protection state, `defenseclaw sandbox status` for your sandboxes and `defenseclaw sandbox policy explain` for your policy. Other commands require an administrator." and exits 2. The administrator commands remain `defenseclaw-gateway enterprise …`, which only root can use. Run it by its packaged path (`/opt/defenseclaw/bin/defenseclaw-gateway` on Linux, `/opt/cisco/defenseclaw/bin/defenseclaw-gateway` on macOS): the folder is not on the `PATH` of a fresh root login shell. `defenseclaw sandbox setup` is refused: there is nothing for the person to set up. `sandbox enable` records only the shell wrapper in the person's rc file.
 
 ### The run banner
 
@@ -694,7 +694,7 @@ When a sandbox can't run for a person, the refusal says why in words and the rec
 | `no_kvm_group`, `no_kvm_access` | `driver_fallback: none` and the account can't open `/dev/kvm` | Add the person to the group the message names (`kvm`), or allow the Docker fallback |
 | `no_kvm` | `driver_fallback: none` and the CPU shows no virtualization or `/dev/kvm` is missing | Enable hardware (nested) virtualization, or allow the Docker fallback |
 | `driver_unsupported` | The organization's `driver` isn't one this computer can run | Set a driver the OS supports |
-| `prerequisite_missing` | OpenShell or Docker is missing or not set up, or the installed OpenShell is a release the host does not run sandboxes on; the sentence names the piece, and for an OpenShell release that runs no DefenseClaw sandbox it says so (`sandboxes are unavailable: OpenShell 0.1.3 runs no DefenseClaw sandbox: before 0.1.5 its network broker let a sandbox's connections bypass the sandbox policy ... ask your administrator to upgrade OpenShell`) | `status` and `verify` print the fix line (`openshell_prerequisite_missing`) |
+| `prerequisite_missing` | OpenShell or Docker is missing or not set up, or the installed OpenShell is a release the host does not run sandboxes on; the sentence names the piece, and for an OpenShell release that runs no DefenseClaw sandbox it says so (`sandboxes are unavailable: OpenShell 0.1.5 runs no DefenseClaw sandbox: OpenShell 0.1.6 or later is required; ask your administrator to upgrade OpenShell`) | `status` and `verify` print the fix line (`openshell_prerequisite_missing`) |
 | `account_busy` | Another account holds the sandbox ports | Clears when that account has no sandbox running |
 | `sandbox_port_busy` | An ordinary process holds the configured sandbox ingress or egress port | Free that port, or set a different `openshell.ingress_port` or `openshell.egress_port` in the admin config |
 

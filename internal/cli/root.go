@@ -516,22 +516,12 @@ func prepareObservabilityV8Startup(c *config.Config) (*observabilityV8Startup, e
 }
 
 func prepareCompiledObservabilityV8Startup(c *config.Config, loaded *loadedConfigV8File) (*observabilityV8Startup, error) {
-	if c == nil || loaded == nil || loaded.compiled == nil || loaded.compiled.Plan == nil {
+	if c == nil || loaded == nil {
 		return nil, fmt.Errorf("canonical compiler returned no effective plan")
 	}
-	snapshot := loaded.compiled.Plan.Snapshot()
-	if strings.TrimSpace(snapshot.Local.Path) == "" || strings.TrimSpace(snapshot.Local.JudgeBodiesPath) == "" {
-		return nil, fmt.Errorf("effective local store paths are incomplete")
-	}
-	if err := config.ApplyRuntimeV8DataDirDefaultsFromBytes(
-		c, loaded.source, loaded.raw, loaded.compiled.DataDir,
-	); err != nil {
+	if err := config.UseCompiledLocalStores(c, loaded.source, loaded.raw, loaded.compiled); err != nil {
 		return nil, err
 	}
-
-	c.DataDir = loaded.compiled.DataDir
-	c.AuditDB = snapshot.Local.Path
-	c.JudgeBodiesDB = snapshot.Local.JudgeBodiesPath
 	return &observabilityV8Startup{
 		sourceName: loaded.source,
 		// Reconciliation compares this with the exact file on disk. The

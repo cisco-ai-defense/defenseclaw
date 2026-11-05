@@ -31,6 +31,8 @@ from defenseclaw import migrations
 from defenseclaw.commands.cmd_migrate import migrate_cmd
 from defenseclaw.migrations import ConfigTooNewError, MigrationError, migrate
 
+from tests.os_view import os_view
+
 
 @pytest.fixture()
 def data_dir(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
@@ -587,7 +589,7 @@ def test_windows_agent_selection_keeps_the_agents_it_found(data_dir: Path, monke
         return found, ({} if requests[1:] else {"hermes": "not installed"})
 
     monkeypatch.setattr(agent_selection, "record_setup_agent_selections", record)
-    monkeypatch.setattr(os, "name", "nt")
+    monkeypatch.setattr(migrations, "os", os_view("nt"))
 
     migrations._select_windows_agents(str(data_dir))
 
@@ -620,13 +622,14 @@ def test_0x_windows_hook_credentials_get_a_private_dacl(tmp_path: Path, monkeypa
     sealed: list[str] = []
     monkeypatch.setattr(file_permissions, "windows_acl_custody_confidentiality_error", custody)
     monkeypatch.setattr(file_permissions, "protect_private_file", lambda path: sealed.append(os.path.basename(path)))
-    monkeypatch.setattr(os, "name", "nt")
+    monkeypatch.setattr(migrations, "os", os_view("nt"))
 
     migrations._seal_windows_hook_credentials(str(tmp_path))
 
     assert sealed == [".hook-openclaw.token", ".otlp-codex.token"]
     monkeypatch.setattr(cmd_setup, "windows_acl_custody_confidentiality_error", custody)
     monkeypatch.setattr(cmd_setup, "reject_reparse_path", lambda _path: None)
+    monkeypatch.setattr(cmd_setup, "os", os_view("nt"))
     with pytest.raises(click.ClickException) as refused:
         cmd_setup._rotate_token_hook_metadata(exposed)
     assert f"The connector hook credential {exposed} is not private (Windows DACL is inheritable)" in refused.value.message
@@ -675,7 +678,7 @@ def test_windows_agent_selection_reports_nothing_when_the_retry_fails(data_dir: 
         return found, ({"hermes": "not installed"} if len(calls) == 1 else {"codex": "changed while probing"})
 
     monkeypatch.setattr(agent_selection, "record_setup_agent_selections", record)
-    monkeypatch.setattr(os, "name", "nt")
+    monkeypatch.setattr(migrations, "os", os_view("nt"))
 
     migrations._select_windows_agents(str(data_dir))
 
@@ -696,7 +699,7 @@ def test_windows_agent_selection_writes_no_receipt_without_a_native_agent(data_d
         "record_setup_agent_selections",
         lambda *_args: pytest.fail("nothing to select, so no receipt"),
     )
-    monkeypatch.setattr(os, "name", "nt")
+    monkeypatch.setattr(migrations, "os", os_view("nt"))
 
     migrations._select_windows_agents(str(data_dir))
 
@@ -983,7 +986,7 @@ def _reselect_fixture(data_dir: Path, monkeypatch, *, mode: str = ""):
         return {"codex": SimpleNamespace(executable=str(exe), raw_version="codex-cli 0.165.0")}, {}
 
     monkeypatch.setattr(agent_selection, "record_setup_agent_selections", record)
-    monkeypatch.setattr(os, "name", "nt")
+    monkeypatch.setattr(migrations, "os", os_view("nt"))
     return exe, requests
 
 

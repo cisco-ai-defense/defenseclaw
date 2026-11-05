@@ -177,6 +177,13 @@ $script:TrustedInstallerSID = 'S-1-5-80-956008885-3418522649-1831038044-18532926
 $script:ServiceSDDL = 'D:P(A;;CCDCLCSWRPWPDTLOCRSDRCWDWO;;;SY)(A;;CCDCLCSWRPWPDTLOCRSDRCWDWO;;;BA)(A;;CCLCSWLORC;;;BU)'
 $script:ServiceDescription = 'Administrator-managed DefenseClaw service; standard users have query-only SCM access.'
 $script:ServiceFailureRestartQuiescenceSeconds = 65
+# GAP-0044 (cowork-1-0-8): the barrier (services_disabled_and_stopped_at, as
+# a UTC DateTime) of the transaction this process quiesced when every managed
+# service it stopped had run for the whole barrier and stopped cleanly
+# (Test-DefenseClawServiceStoppedCleanly), so no SCM failure restart can be
+# queued; $null otherwise. In-process only: a recovery in a new process never
+# has it and waits the whole barrier.
+$script:DefenseClawCleanQuiescenceBarrier = $null
 # Standalone: how long verify gives the hook guardian to activate a
 # targets.yaml the enumerator republished (it does within seconds), and how
 # recent the file must be for that wait (the gateway's catch-up window).
@@ -5594,6 +5601,108 @@ function Assert-DefenseClawTrustedSource {
     return $full
 }
 
+# cowork-1-0-8 GAP-0044: a standalone lifecycle source staged by Setup is
+# held open for reading, without write or delete sharing, from before its
+# digest and signature are read until this process exits. No process can
+# open it for writing, rename it or delete it while the pin is held, so its
+# bytes are the ones admitted. A later check of the same source (the
+# lifecycle checks every source before and after it takes lifecycle.lock, and
+# again before each copy) then reuses the admitted digest and signature
+# instead of hashing and verifying about 530 MB again, after the path,
+# ancestry and ACL checks and a file-identity match. Without a pin (another
+# path, a source not under a Setup staging folder, a pin refused because a
+# writer holds the file, a changed trust policy) every check reads the file
+# again, as before.
+$script:DefenseClawSourcePins = @{}
+
+function Get-DefenseClawSourcePinTrustPolicy {
+    return '{0}|{1}|{2}' -f [string]$script:DefenseClawTrustMode,
+        ((@($script:DefenseClawAllowedSignerSHA256) | Microsoft.PowerShell.Utility\Sort-Object) -join ','),
+        ((@($script:DefenseClawPinnedPayloadSHA256.GetEnumerator() |
+                Microsoft.PowerShell.Utility\Sort-Object -Property Key |
+                Microsoft.PowerShell.Core\ForEach-Object { '{0}={1}' -f $_.Key, $_.Value })) -join ',')
+}
+
+function Test-DefenseClawSourcePinEligible {
+    <#
+        A source the standalone Setup staged: a file directly in a
+        DefenseClaw-Enterprise-Setup-* folder under ProgramData or
+        ProgramData\Cisco. Installed artifacts are never pinned: the
+        lifecycle replaces or removes them.
+    #>
+    param([Parameter(Mandatory)][string]$Path)
+    if (-not (Test-DefenseClawStandaloneProfile)) {
+        return $false
+    }
+    $stage = [IO.Path]::GetDirectoryName($Path)
+    if ([string]::IsNullOrEmpty($stage) -or
+        -not ([IO.Path]::GetFileName($stage)).StartsWith(
+            'DefenseClaw-Enterprise-Setup-',
+            [StringComparison]::OrdinalIgnoreCase)) {
+        return $false
+    }
+    $parent = ([IO.Path]::GetDirectoryName($stage)).TrimEnd('\')
+    $programData = ([IO.Path]::GetFullPath([string]$script:ProgramData)).TrimEnd('\')
+    return [string]::Equals($parent, $programData, [StringComparison]::OrdinalIgnoreCase) -or
+        [string]::Equals($parent, $programData + '\Cisco', [StringComparison]::OrdinalIgnoreCase)
+}
+
+function Open-DefenseClawSourcePin {
+    <# Returns the read handle and the file identity it pins, or $null. #>
+    param([Parameter(Mandatory)][string]$Path)
+    if (-not (Test-DefenseClawSourcePinEligible -Path $Path)) {
+        return $null
+    }
+    $stream = $null
+    try {
+        $stream = [IO.FileStream]::new(
+            $Path,
+            [IO.FileMode]::Open,
+            [IO.FileAccess]::Read,
+            [IO.FileShare]::Read
+        )
+        return @{
+            stream = $stream
+            identity = (Get-DefenseClawFileIdentity -Path $Path)
+        }
+    }
+    catch {
+        if ($null -ne $stream) {
+            $stream.Dispose()
+        }
+        return $null
+    }
+}
+
+function Get-DefenseClawPinnedSourceDescriptor {
+    <#
+        The descriptor this process admitted for a pinned source, after the
+        same path, ancestry and ACL checks; $null when the source must be read
+        again.
+    #>
+    param([Parameter(Mandatory)][hashtable]$Source)
+    $key = ([string]$Source.path).ToLowerInvariant()
+    if (-not $script:DefenseClawSourcePins.ContainsKey($key)) {
+        return $null
+    }
+    $pin = $script:DefenseClawSourcePins[$key]
+    $cached = [hashtable]$pin.descriptor
+    if (-not $pin.stream.CanRead -or
+        [string]$pin.policy -cne (Get-DefenseClawSourcePinTrustPolicy) -or
+        [bool]$cached.authenticode -ne [bool]$Source.authenticode -or
+        [bool]$cached.allow_unsigned -ne [bool]$Source.allow_unsigned -or
+        [string]$cached.label -cne [string]$Source.label) {
+        return $null
+    }
+    $full = Resolve-DefenseClawFullPath -Path ([string]$Source.path) -MustExist -Leaf
+    [void](Assert-DefenseClawTrustedSource -Path $full -Label ([string]$Source.label))
+    if (-not [string]::Equals($full, [string]$cached.path, [StringComparison]::OrdinalIgnoreCase) -or
+        (Get-DefenseClawFileIdentity -Path $full) -cne [string]$pin.identity) {
+        return $null
+    }
+    return $cached.Clone()
+}
+
 function Get-DefenseClawSourceDescriptor {
     param(
         [Parameter(Mandatory)][string]$Path,
@@ -5603,39 +5712,61 @@ function Get-DefenseClawSourceDescriptor {
     )
     $full = Resolve-DefenseClawFullPath -Path $Path -MustExist -Leaf
     [void](Assert-DefenseClawTrustedSource -Path $full -Label $Label)
-    $full = Assert-DefenseClawRegularSource `
-        -Path $Path `
-        -Label $Label `
-        -Authenticode:$Authenticode `
-        -AllowUnsigned:$AllowUnsigned
-    $descriptor = @{
-        path = $full
-        label = $Label
-        authenticode = [bool]$Authenticode
-        allow_unsigned = [bool]$AllowUnsigned
-        sha256 = (Microsoft.PowerShell.Utility\Get-FileHash -LiteralPath $full -Algorithm SHA256).Hash
+    $key = $full.ToLowerInvariant()
+    $pin = $null
+    if (-not $script:DefenseClawSourcePins.ContainsKey($key)) {
+        # Pinned before the digest and the signature are read.
+        $pin = Open-DefenseClawSourcePin -Path $full
     }
-    if ($Authenticode) {
-        $signature = Microsoft.PowerShell.Security\Get-AuthenticodeSignature `
-            -LiteralPath $full
-        $descriptor['signature_status'] = [string]$signature.Status
-        $descriptor['signer_thumbprint'] = if ($null -eq $signature.SignerCertificate) {
-            ''
+    try {
+        $full = Assert-DefenseClawRegularSource `
+            -Path $Path `
+            -Label $Label `
+            -Authenticode:$Authenticode `
+            -AllowUnsigned:$AllowUnsigned
+        $descriptor = @{
+            path = $full
+            label = $Label
+            authenticode = [bool]$Authenticode
+            allow_unsigned = [bool]$AllowUnsigned
+            sha256 = (Microsoft.PowerShell.Utility\Get-FileHash -LiteralPath $full -Algorithm SHA256).Hash
         }
-        else {
-            ([string]$signature.SignerCertificate.Thumbprint).ToLowerInvariant()
+        if ($Authenticode) {
+            $signature = Microsoft.PowerShell.Security\Get-AuthenticodeSignature `
+                -LiteralPath $full
+            $descriptor['signature_status'] = [string]$signature.Status
+            $descriptor['signer_thumbprint'] = if ($null -eq $signature.SignerCertificate) {
+                ''
+            }
+            else {
+                ([string]$signature.SignerCertificate.Thumbprint).ToLowerInvariant()
+            }
+            $descriptor['signer_subject'] = if ($null -eq $signature.SignerCertificate) {
+                ''
+            }
+            else {
+                [string]$signature.SignerCertificate.Subject
+            }
+            $descriptor['file_version'] = [string](
+                Microsoft.PowerShell.Management\Get-Item `
+                    -LiteralPath $full `
+                    -Force
+            ).VersionInfo.FileVersion
         }
-        $descriptor['signer_subject'] = if ($null -eq $signature.SignerCertificate) {
-            ''
+        if ($null -ne $pin) {
+            $script:DefenseClawSourcePins[([string]$descriptor.path).ToLowerInvariant()] = @{
+                stream = $pin.stream
+                identity = $pin.identity
+                policy = (Get-DefenseClawSourcePinTrustPolicy)
+                descriptor = $descriptor.Clone()
+            }
         }
-        else {
-            [string]$signature.SignerCertificate.Subject
+    }
+    catch {
+        if ($null -ne $pin) {
+            $pin.stream.Dispose()
         }
-        $descriptor['file_version'] = [string](
-            Microsoft.PowerShell.Management\Get-Item `
-                -LiteralPath $full `
-                -Force
-        ).VersionInfo.FileVersion
+        throw
     }
     return $descriptor
 }
@@ -5653,11 +5784,14 @@ function Assert-DefenseClawSourceDescriptorCurrent {
             throw "lifecycle source descriptor is missing $required"
         }
     }
-    $current = Get-DefenseClawSourceDescriptor `
-        -Path ([string]$Source.path) `
-        -Label ([string]$Source.label) `
-        -Authenticode:([bool]$Source.authenticode) `
-        -AllowUnsigned:([bool]$Source.allow_unsigned)
+    $current = Get-DefenseClawPinnedSourceDescriptor -Source $Source
+    if ($null -eq $current) {
+        $current = Get-DefenseClawSourceDescriptor `
+            -Path ([string]$Source.path) `
+            -Label ([string]$Source.label) `
+            -Authenticode:([bool]$Source.authenticode) `
+            -AllowUnsigned:([bool]$Source.allow_unsigned)
+    }
     # Standalone keeps main's rule: a source that changed after
     # authorization is refused.
     $strict = (Test-DefenseClawTrustStrictAncestors) -or (Test-DefenseClawStandaloneProfile)
@@ -5724,7 +5858,11 @@ function Assert-DefenseClawSourceDescriptorCurrent {
 function Install-DefenseClawSourceDescriptor {
     param(
         [Parameter(Mandatory)][hashtable]$Source,
-        [Parameter(Mandatory)][string]$Destination
+        [Parameter(Mandatory)][string]$Destination,
+        # The installed file already has the source's bytes (both hashed
+        # here): it is kept instead of copied again. The checks below run on
+        # the destination either way.
+        [switch]$SkipIfContentMatches
     )
     $sourcePath = [string]$Source.path
     # Recheck mount-manager identity, ancestry, ACLs, digest, and signer
@@ -5740,7 +5878,8 @@ function Install-DefenseClawSourceDescriptor {
         Install-DefenseClawFileAtomic `
             -Source $sourcePath `
             -Destination $destinationPath `
-            -ExpectedSHA256 ([string]$current.sha256)
+            -ExpectedSHA256 ([string]$current.sha256) `
+            -SkipIfContentMatches:$SkipIfContentMatches
     }
     else {
         $actual = (Microsoft.PowerShell.Utility\Get-FileHash -LiteralPath $destinationPath -Algorithm SHA256).Hash
@@ -11827,11 +11966,102 @@ function Test-DefenseClawPathVanishedError {
     return $false
 }
 
+function Get-DefenseClawServiceExitState {
+    <#
+        GAP-0044: the SCM state and exit codes of service Name from
+        `sc.exe queryex` (state, win32_exit_code, service_exit_code), or $null
+        when the query fails or its output cannot be read.
+    #>
+    param([Parameter(Mandatory)][string]$Name)
+    Assert-DefenseClawServiceName -Name $Name
+    try {
+        $text = @(Invoke-DefenseClawNative -File $script:ScExe -Arguments @('queryex', $Name) -TimeoutSeconds 10 -Capture) -join "`n"
+    }
+    catch {
+        return $null
+    }
+    $state = [regex]::Match($text, '(?m)^\s*STATE\s*:\s*[0-9]+\s+([A-Z_]+)')
+    $win32 = [regex]::Match($text, '(?m)^\s*WIN32_EXIT_CODE\s*:\s*([0-9]+)')
+    $service = [regex]::Match($text, '(?m)^\s*SERVICE_EXIT_CODE\s*:\s*([0-9]+)')
+    if (-not ($state.Success -and $win32.Success -and $service.Success)) {
+        return $null
+    }
+    return [pscustomobject]@{
+        state = [string]$state.Groups[1].Value
+        win32_exit_code = [uint32]$win32.Groups[1].Value
+        service_exit_code = [uint32]$service.Groups[1].Value
+    }
+}
+
+function Test-DefenseClawServiceRanThroughBarrier {
+    <#
+        GAP-0044: whether Identity (Get-DefenseClawServiceProcessIdentity,
+        taken before the transaction disabled the service) is a process that
+        has run for at least the failure-restart barrier. SCM queues a failure
+        restart only when the service process ends unexpectedly (or, with the
+        non-crash failure flag, stops with an error), at most 60 seconds ahead;
+        a service that has run longer than that since its last start has no
+        restart queued from before it. No identity or no start time: $false.
+    #>
+    param([AllowNull()]$Identity)
+    if ($null -eq $Identity -or $null -eq $Identity.StartTime) {
+        return $false
+    }
+    $age = [DateTime]::UtcNow - ([DateTime]$Identity.StartTime).ToUniversalTime()
+    return $age.TotalSeconds -ge $script:ServiceFailureRestartQuiescenceSeconds
+}
+
+function Test-DefenseClawServiceStoppedCleanly {
+    <#
+        GAP-0044: whether service Name, which ran through the barrier
+        (Test-DefenseClawServiceRanThroughBarrier), is now stopped with
+        WIN32_EXIT_CODE and SERVICE_EXIT_CODE 0: it answered the stop
+        itself. A process that ended without reporting its stop (a crash, or
+        one Windows or the lifecycle ended) has exit code 1067 or another
+        error, and that is what queues an SCM failure restart.
+    #>
+    param([Parameter(Mandatory)][string]$Name)
+    $exit = Get-DefenseClawServiceExitState -Name $Name
+    return ($null -ne $exit -and
+        $exit.state -ceq 'STOPPED' -and
+        $exit.win32_exit_code -eq 0 -and
+        $exit.service_exit_code -eq 0)
+}
+
+function Test-DefenseClawCleanQuiescenceBarrier {
+    <#
+        GAP-0044: whether ServicesQuiescedAt is the barrier this process
+        proved clean when it quiesced the services (New-DefenseClawTransaction).
+    #>
+    param([Parameter(Mandatory)]$ServicesQuiescedAt)
+    if ($null -eq $script:DefenseClawCleanQuiescenceBarrier) {
+        return $false
+    }
+    try {
+        $barrier = ConvertFrom-DefenseClawServiceQuiescenceTimestamp -Value $ServicesQuiescedAt
+    }
+    catch {
+        return $false
+    }
+    return $barrier.Ticks -eq ([DateTime]$script:DefenseClawCleanQuiescenceBarrier).Ticks
+}
+
 function Wait-DefenseClawServiceFailureRestartQuiescence {
+    <#
+        Holds every managed service disabled for the canonical failure-restart
+        window from ServicesQuiescedAt (an SCM restart queued before the
+        quiesce then fires against a disabled service and drains), then
+        disables and stops them again. CleanStopProven (GAP-0044: every
+        service the quiesce stopped had run through the window and stopped
+        cleanly, so no restart can be queued) skips only the rest of the
+        wait; the disable and stop that follow it still run. A config-only
+        ensure spent the whole 65 seconds here with nothing to drain.
+    #>
     param(
         [Parameter(Mandatory)][string]$ServicesQuiescedAt,
         [Parameter(Mandatory)][string]$GatewayServiceName,
-        [Parameter(Mandatory)][string]$GuardianServiceName
+        [Parameter(Mandatory)][string]$GuardianServiceName,
+        [switch]$CleanStopProven
     )
     $quiescedAt = ConvertFrom-DefenseClawServiceQuiescenceTimestamp `
         -Value $ServicesQuiescedAt
@@ -11839,6 +12069,10 @@ function Wait-DefenseClawServiceFailureRestartQuiescence {
     $deadline = $quiescedAt.AddSeconds(
         $script:ServiceFailureRestartQuiescenceSeconds
     )
+    if ($CleanStopProven) {
+        Write-DefenseClawLifecyclePhase -Stage 'service failure restart quiescence: every service ran through the window and stopped cleanly, no restart can be queued'
+        $deadline = [DateTime]::UtcNow
+    }
     $remainingMilliseconds = [Math]::Min(
         $script:ServiceFailureRestartQuiescenceSeconds * 1000,
         [Math]::Max(
@@ -15749,6 +15983,7 @@ function New-DefenseClawTransaction {
         [switch]$RecoverLegacyManagedHooksLifecycleJournal,
         [switch]$InstallRootCreatedForTransaction,
         [switch]$StateRootCreatedForTransaction,
+        [switch]$CoworkRequested,
         # Uninstall/purge opens the transaction to delete the redaction
         # correlation key file, not to preserve its DACL through the
         # transaction. Capturing a preimage that only matters for
@@ -15934,6 +16169,28 @@ function New-DefenseClawTransaction {
                 -Intent $quiescingIntent `
                 -PriorDeploymentActive:$PriorDeploymentActive
         }
+        # GAP-0044: whether this quiesce can prove that no SCM failure
+        # restart is queued for any service it stops: each must run now,
+        # since before the barrier window, and stop cleanly below.
+        $script:DefenseClawCleanQuiescenceBarrier = $null
+        $cleanStop = $true
+        $terminatedBefore = @($script:DefenseClawTerminatedServiceProcesses).Count
+        $quiescedServices = [Collections.Generic.List[string]]::new()
+        foreach ($entry in $services) {
+            if (-not [bool]$entry.existed) {
+                continue
+            }
+            $quiescedServices.Add([string]$entry.name)
+            try {
+                $identity = Get-DefenseClawServiceProcessIdentity -Name ([string]$entry.name)
+            }
+            catch {
+                $identity = $null
+            }
+            if (-not (Test-DefenseClawServiceRanThroughBarrier -Identity $identity)) {
+                $cleanStop = $false
+            }
+        }
         Write-DefenseClawLifecyclePhase -Stage 'transaction quiesce disable services'
 
         # Disabled start neutralizes boot activation and any failure restart
@@ -16016,6 +16273,19 @@ function New-DefenseClawTransaction {
         }
         Write-DefenseClawLifecyclePhase -Stage 'transaction services stopped'
         $servicesQuiescedAt = [DateTime]::UtcNow.ToString('o')
+        if ($cleanStop -and
+            @($script:DefenseClawTerminatedServiceProcesses).Count -eq $terminatedBefore) {
+            foreach ($name in $quiescedServices) {
+                if (-not (Test-DefenseClawServiceStoppedCleanly -Name $name)) {
+                    $cleanStop = $false
+                    break
+                }
+            }
+            if ($cleanStop) {
+                $script:DefenseClawCleanQuiescenceBarrier =
+                    ConvertFrom-DefenseClawServiceQuiescenceTimestamp -Value $servicesQuiescedAt
+            }
+        }
         $quiescingIntent['services_disabled_and_stopped_at'] =
             $servicesQuiescedAt
         # This second durable intent is the only authority for amortizing the
@@ -16119,6 +16389,28 @@ function New-DefenseClawTransaction {
                 continue
             }
             $destinations.Add([string]$destination)
+        }
+    }
+    $coworkSnapshotNeeded = $false
+    if (Test-DefenseClawStandaloneProfile) {
+        $coworkPaths = Get-DefenseClawCoworkPaths -Layout $Layout
+        $coworkSnapshotNeeded = [bool]$CoworkRequested -or
+            (Microsoft.PowerShell.Management\Test-Path -LiteralPath $coworkPaths.Record)
+        if ($coworkSnapshotNeeded) {
+            # These exact five host files and the private ownership record
+            # participate in the same durable transaction as config and services.
+            $coworkRecord = Get-DefenseClawCoworkOwnership -Layout $Layout
+            foreach ($destination in @(Get-DefenseClawCoworkFilePaths -Layout $Layout)) {
+                if (Microsoft.PowerShell.Management\Test-Path -LiteralPath $destination) {
+                    Assert-DefenseClawCoworkPublicPath -Path $destination `
+                        -AllowReaderRepair:($coworkRecord.files.Contains($destination))
+                }
+                $destinations.Add([string]$destination)
+            }
+            $destinations.Add([string]$coworkPaths.Record)
+            foreach ($destination in @(Get-DefenseClawCoworkCacheFilePaths -Layout $Layout)) {
+                $destinations.Add([string]$destination)
+            }
         }
     }
     # Uninstall creates its teardown journal only after this transaction has
@@ -16238,12 +16530,15 @@ function New-DefenseClawTransaction {
                 [IO.Path]::GetFullPath($Layout.CodexManagedHooksStatePath).TrimEnd('\'),
                 [StringComparison]::OrdinalIgnoreCase
             )
-            if ($isSharedCodexFile) {
+            $isSharedCoworkFile = $coworkSnapshotNeeded -and
+                (Test-DefenseClawCoworkFilePath -Layout $Layout -Path $destination)
+            if ($isSharedCodexFile -or $isSharedCoworkFile) {
                 $item = Microsoft.PowerShell.Management\Get-Item `
                     -LiteralPath $destination `
                     -Force
-                if ([int64]$item.Length -gt 4194304) {
-                    throw "shared Codex enterprise file exceeds the 4194304-byte transaction limit: $destination"
+                $fileLimit = if ($isSharedCoworkFile) { 536870912 } else { 4194304 }
+                if ([int64]$item.Length -gt $fileLimit) {
+                    throw "shared enterprise file exceeds the $fileLimit-byte transaction limit: $destination"
                 }
                 try {
                     $securityDescriptor = (
@@ -16400,6 +16695,13 @@ function New-DefenseClawTransaction {
         services = $services
         created_shared_directories = @()
         created_target_runtime_roots = @()
+    }
+    if ($coworkSnapshotNeeded) {
+        $snapshot['cowork_registry'] = @(Get-DefenseClawCoworkRegistrySnapshot)
+        $snapshot['cowork_directories'] = @(Get-DefenseClawCoworkDirectorySnapshot -Layout $Layout)
+        $snapshot['cowork_created_directories'] = @()
+        $snapshot['cowork_cache_created'] = $false
+        $snapshot['cowork_cache_existed'] = [IO.Directory]::Exists($coworkPaths.Cache)
     }
     if ($RecoverLegacyManagedHooksLifecycleJournal -and
         $null -eq $legacyManagedHooksLifecyclePreimage) {
@@ -19032,6 +19334,16 @@ function Restore-DefenseClawTransaction {
                 }
         )
     }
+    $coworkSnapshotProperty = $snapshot.PSObject.Properties['cowork_registry']
+    $hasCoworkSnapshot = (Test-DefenseClawStandaloneProfile) -and $null -ne $coworkSnapshotProperty
+    if ($hasCoworkSnapshot) {
+        Restore-DefenseClawCoworkDirectories -Layout $Layout -Snapshot $snapshot
+        $coworkCache = (Get-DefenseClawCoworkPaths -Layout $Layout).Cache
+        $cachePreimage = $snapshot.PSObject.Properties['cowork_cache_existed']
+        if ($null -ne $cachePreimage -and [bool]$cachePreimage.Value -and -not [IO.Directory]::Exists($coworkCache)) {
+            [void](New-DefenseClawProtectedDirectory -Path $coworkCache)
+        }
+    }
     foreach ($file in $snapshot.files) {
         $destination = [IO.Path]::GetFullPath([string]$file.path)
         $isManagedHooksLifecycleJournal = [string]::Equals(
@@ -19061,7 +19373,9 @@ function Restore-DefenseClawTransaction {
             [StringComparison]::OrdinalIgnoreCase
         )
         $isSharedCodexFile = $isCodexMachinePolicy -or $isCodexManagedState
-        if (-not $inInstall -and -not $inState -and -not $isSharedCodexFile) {
+        $isSharedCoworkFile = $hasCoworkSnapshot -and
+            (Test-DefenseClawCoworkFilePath -Layout $Layout -Path $destination)
+        if (-not $inInstall -and -not $inState -and -not $isSharedCodexFile -and -not $isSharedCoworkFile) {
             throw "transaction contains path outside managed roots: $destination"
         }
         if ($transitionHookSHA256 -ne '' -and [string]::Equals(
@@ -19102,7 +19416,7 @@ function Restore-DefenseClawTransaction {
                         -ServiceName ([string]$snapshot.gateway_service))
             }
             $securityProperty = $file.PSObject.Properties['security_descriptor']
-            if ($isSharedCodexFile -and
+            if (($isSharedCodexFile -or $isSharedCoworkFile) -and
                 $null -ne $securityProperty -and
                 -not [string]::IsNullOrWhiteSpace([string]$securityProperty.Value)) {
                 $security = [Security.AccessControl.FileSecurity]::new()
@@ -19153,6 +19467,10 @@ function Restore-DefenseClawTransaction {
                 -Path $destination `
                 -InFreshInstallRoot:($inInstall -and $freshStandaloneInstallRoot)
         }
+    }
+    if ($hasCoworkSnapshot) {
+        Restore-DefenseClawCoworkRegistrySnapshot -Entries $coworkSnapshotProperty.Value
+        Restore-DefenseClawCoworkCreatedDirectories -Layout $Layout -Snapshot $snapshot
     }
     if (Test-DefenseClawStandaloneProfile) {
         Register-DefenseClawRestoredConfigGeneration `
@@ -27276,6 +27594,504 @@ function Get-DefenseClawManagedHooksLegacyActivationClassification {
     return [string]$classifiedProperty.Value
 }
 
+# Cowork VM host delivery. All mutation is called only inside the existing
+# standalone lifecycle transaction; MDM still owns the rest of Claude policy.
+# The two Claude Desktop machine values live in this key. Only the
+# Windows-native Cowork smoke points these at a temporary HKCU key.
+$script:CoworkPolicyHive = [Microsoft.Win32.RegistryHive]::LocalMachine
+$script:CoworkPolicyKey = 'SOFTWARE\Policies\Claude'
+function Get-DefenseClawCoworkPaths {
+    param([Parameter(Mandatory)][hashtable]$Layout)
+    $dir = [IO.Path]::Combine($script:ProgramFiles, 'Claude', 'edr-integration')
+    $osDrive = [IO.Path]::GetPathRoot([Environment]::SystemDirectory)
+    if (-not [string]::Equals([IO.Path]::GetPathRoot($dir), $osDrive,
+            [StringComparison]::OrdinalIgnoreCase)) {
+        throw 'Cowork files must be on the Windows OS drive'
+    }
+    return @{
+        Directory = $dir
+        Parent = [IO.Path]::GetDirectoryName($dir)
+        Record = [IO.Path]::Combine($Layout.InstallStateDirectory, 'cowork-host.json')
+        Cache = [IO.Path]::Combine($Layout.InstallStateDirectory, 'cowork-cache')
+        Arguments = [IO.Path]::Combine($dir, 'install.args')
+    }
+}
+
+function Get-DefenseClawCoworkFilePaths {
+    param([Parameter(Mandatory)][hashtable]$Layout)
+    $paths = Get-DefenseClawCoworkPaths -Layout $Layout
+    # Windows standalone is native x64 only, so x64 is the only package.
+    return @(
+        [IO.Path]::Combine($paths.Directory, 'defenseclaw-cowork-amd64.tar.gz'),
+        [IO.Path]::Combine($paths.Directory, 'defenseclaw-cowork-amd64.tar.gz.sig'),
+        $paths.Arguments
+    )
+}
+
+function Get-DefenseClawCoworkCacheFilePaths {
+    param([Parameter(Mandatory)][hashtable]$Layout)
+    $paths = Get-DefenseClawCoworkPaths -Layout $Layout
+    [IO.Path]::Combine($paths.Cache, 'defenseclaw-cowork-amd64.tar.gz')
+    [IO.Path]::Combine($paths.Cache, 'defenseclaw-cowork-amd64.tar.gz.sig')
+}
+
+function Test-DefenseClawCoworkFilePath {
+    param([Parameter(Mandatory)][hashtable]$Layout, [Parameter(Mandatory)][string]$Path)
+    foreach ($allowed in @(Get-DefenseClawCoworkFilePaths -Layout $Layout)) {
+        if ([string]::Equals([IO.Path]::GetFullPath($Path), $allowed,
+                [StringComparison]::OrdinalIgnoreCase)) { return $true }
+    }
+    return $false
+}
+
+function Assert-DefenseClawCoworkPublicPath {
+    param([Parameter(Mandatory)][string]$Path, [switch]$Directory, [switch]$AllowReaderRepair)
+    Assert-DefenseClawNoReparsePath -Path $Path
+    $ancestor = [IO.Path]::GetDirectoryName($Path)
+    while (-not [string]::IsNullOrWhiteSpace($ancestor)) {
+        Assert-DefenseClawTrustedAncestor -Path $ancestor -Strict
+        $ancestor = [IO.Path]::GetDirectoryName($ancestor)
+    }
+    $required = @{}
+    $required[$script:SystemSID] = [Security.AccessControl.FileSystemRights]::FullControl
+    $required[$script:AdministratorsSID] = [Security.AccessControl.FileSystemRights]::FullControl
+    if (-not $AllowReaderRepair) {
+        $required[$script:UsersSID] = [Security.AccessControl.FileSystemRights]::ReadAndExecute
+    }
+    Assert-DefenseClawPathAcl -Path $Path `
+        -AllowedWriterSIDs @($script:SystemSID, $script:AdministratorsSID, $script:TrustedInstallerSID) `
+        -AllowedReaderSIDs @($script:SystemSID, $script:AdministratorsSID, $script:TrustedInstallerSID, $script:UsersSID) `
+        -RequiredRights $required -AllowUsersRead -AllowInheritance -RejectUntrustedRead
+    $item = Microsoft.PowerShell.Management\Get-Item -LiteralPath $Path -Force
+    if ([bool]$item.PSIsContainer -ne [bool]$Directory) {
+        throw "Cowork path has the wrong type: $Path"
+    }
+}
+
+function Get-DefenseClawCoworkOwnership {
+    param([Parameter(Mandatory)][hashtable]$Layout)
+    $paths = Get-DefenseClawCoworkPaths -Layout $Layout
+    $record = @{schema_version = 1; files = @{}; cache_files = @{}; cache_directory_owned = $false; values = @(); directories = @()}
+    if (-not (Microsoft.PowerShell.Management\Test-Path -LiteralPath $paths.Record)) {
+        return $record
+    }
+    Assert-DefenseClawNoReparsePath -Path $paths.Record
+    Assert-DefenseClawPathAcl -Path $paths.Record `
+        -AllowedWriterSIDs @($script:SystemSID, $script:AdministratorsSID, $script:TrustedInstallerSID) `
+        -AllowedReaderSIDs @($script:SystemSID, $script:AdministratorsSID, $script:TrustedInstallerSID) `
+        -RequiredRights (New-DefenseClawRequiredRights -Kind Admin) -RejectUntrustedRead
+    if ((Microsoft.PowerShell.Management\Get-Item -LiteralPath $paths.Record).Length -gt 1048576) {
+        throw 'Cowork ownership record exceeds 1 MiB'
+    }
+    $record = Microsoft.PowerShell.Management\Get-Content -LiteralPath $paths.Record -Raw |
+        Microsoft.PowerShell.Utility\ConvertFrom-Json -AsHashtable
+    if ($record.schema_version -ne 1 -or $record.files -isnot [Collections.IDictionary]) {
+        throw 'invalid Cowork ownership record'
+    }
+    foreach ($entry in $record.files.GetEnumerator()) {
+        if (-not (Test-DefenseClawCoworkFilePath -Layout $Layout -Path ([string]$entry.Key)) -or
+            [string]$entry.Value -cnotmatch '^[0-9a-f]{64}$') {
+            throw 'invalid Cowork file ownership entry'
+        }
+    }
+    if (-not $record.Contains('cache_files')) { $record.cache_files = @{} }
+    if (-not $record.Contains('cache_directory_owned')) { $record.cache_directory_owned = $false }
+    if ($record.cache_directory_owned -isnot [bool]) { throw 'invalid Cowork cache directory ownership' }
+    if ($record.cache_files -isnot [Collections.IDictionary]) { throw 'invalid Cowork cache ownership record' }
+    foreach ($entry in $record.cache_files.GetEnumerator()) {
+        if ([string]$entry.Key -cnotin @(Get-DefenseClawCoworkCacheFilePaths -Layout $Layout) -or
+            [string]$entry.Value -cnotmatch '^[0-9a-f]{64}$') { throw 'invalid Cowork cache ownership entry' }
+    }
+    if (@($record.values).Count -gt 2) { throw 'invalid Cowork registry ownership record' }
+    foreach ($value in @($record.values)) {
+        if ([string]$value.name -cnotin @('coworkEDRIntegration', 'coworkEDRIntegrationVendor') -or
+            [int]$value.type -ne 1 -or $value.string -isnot [string]) {
+            throw 'invalid Cowork registry ownership entry'
+        }
+    }
+    foreach ($dir in @($record.directories)) {
+        if ([string]$dir -cnotin @($paths.Parent, $paths.Directory)) {
+            throw 'invalid Cowork directory ownership entry'
+        }
+    }
+    return $record
+}
+
+function Get-DefenseClawCoworkDirectorySnapshot {
+    param([Parameter(Mandatory)][hashtable]$Layout)
+    $paths = Get-DefenseClawCoworkPaths -Layout $Layout
+    $record = Get-DefenseClawCoworkOwnership -Layout $Layout
+    foreach ($dir in @($paths.Parent, $paths.Directory)) {
+        $exists = Microsoft.PowerShell.Management\Test-Path -LiteralPath $dir
+        $ours = @($record.directories) -ccontains $dir
+        $descriptor = ''
+        if ($exists) {
+            Assert-DefenseClawCoworkPublicPath -Path $dir -Directory -AllowReaderRepair:$ours
+            $descriptor = (Microsoft.PowerShell.Security\Get-Acl -LiteralPath $dir).GetSecurityDescriptorSddlForm(
+                [Security.AccessControl.AccessControlSections]::All)
+        }
+        [ordered]@{path = $dir; existed = [bool]$exists; security_descriptor = $descriptor; reader_repair_allowed = [bool]$ours}
+    }
+}
+
+function Restore-DefenseClawCoworkDirectories {
+    param([Parameter(Mandatory)][hashtable]$Layout, [Parameter(Mandatory)]$Snapshot)
+    $property = $Snapshot.PSObject.Properties['cowork_directories']
+    if ($null -eq $property -or @($property.Value).Count -ne 2) { throw 'invalid Cowork directory snapshot' }
+    $paths = Get-DefenseClawCoworkPaths -Layout $Layout
+    $seen = @{}
+    foreach ($entry in @($property.Value)) {
+        $dir = [string]$entry.path
+        if ($dir -cnotin @($paths.Parent, $paths.Directory) -or $seen.ContainsKey($dir)) { throw 'invalid Cowork directory snapshot path' }
+        $seen[$dir] = $true
+        if (-not [bool]$entry.existed) { continue }
+        if (-not [IO.Directory]::Exists($dir)) { [void](New-DefenseClawProtectedDirectory -Path $dir -AllowUsersRead) }
+        Assert-DefenseClawNoReparsePath -Path $dir
+        $security = [Security.AccessControl.DirectorySecurity]::new()
+        $security.SetSecurityDescriptorSddlForm([string]$entry.security_descriptor,
+            [Security.AccessControl.AccessControlSections]::All)
+        Microsoft.PowerShell.Security\Set-Acl -LiteralPath $dir -AclObject $security
+        Assert-DefenseClawCoworkPublicPath -Path $dir -Directory -AllowReaderRepair:([bool]$entry.reader_repair_allowed)
+    }
+}
+
+function Get-DefenseClawCoworkRegistrySnapshot {
+    $base = [Microsoft.Win32.RegistryKey]::OpenBaseKey(
+        $script:CoworkPolicyHive, [Microsoft.Win32.RegistryView]::Registry64)
+    try {
+        $key = $base.OpenSubKey($script:CoworkPolicyKey, $false)
+        try {
+            $entries = @()
+            foreach ($name in @('coworkEDRIntegration', 'coworkEDRIntegrationVendor')) {
+                $present = $null -ne $key -and @($key.GetValueNames()) -contains $name
+                $entry = [ordered]@{ name = $name; present = [bool]$present }
+                if ($present) {
+                    $entry['kind'] = [string]$key.GetValueKind($name)
+                    $entry['value'] = $key.GetValue($name, $null,
+                        [Microsoft.Win32.RegistryValueOptions]::DoNotExpandEnvironmentNames)
+                }
+                $entries += $entry
+            }
+            return $entries
+        }
+        finally { if ($null -ne $key) { $key.Dispose() } }
+    }
+    finally { $base.Dispose() }
+}
+
+function Restore-DefenseClawCoworkRegistrySnapshot {
+    param([Parameter(Mandatory)]$Entries)
+    if (@($Entries).Count -ne 2) { throw 'invalid Cowork registry transaction snapshot' }
+    $seen = @{}
+    $base = [Microsoft.Win32.RegistryKey]::OpenBaseKey(
+        $script:CoworkPolicyHive, [Microsoft.Win32.RegistryView]::Registry64)
+    try {
+        $key = $base.OpenSubKey($script:CoworkPolicyKey, $true)
+        try {
+            foreach ($entry in @($Entries)) {
+                $name = [string]$entry.name
+                if ($name -cnotin @('coworkEDRIntegration', 'coworkEDRIntegrationVendor') -or $seen.ContainsKey($name)) {
+                    throw 'Cowork transaction attempted to restore an unowned registry value'
+                }
+                $seen[$name] = $true
+                if (-not [bool]$entry.present) {
+                    if ($null -ne $key) { $key.DeleteValue($name, $false) }
+                    continue
+                }
+                if ($null -eq $key) { $key = $base.CreateSubKey($script:CoworkPolicyKey, $true) }
+                $kind = [Enum]::Parse([Microsoft.Win32.RegistryValueKind], [string]$entry.kind)
+                $value = switch ([string]$entry.kind) {
+                    'String' { [string]$entry.value }
+                    'ExpandString' { [string]$entry.value }
+                    'DWord' { [int]$entry.value }
+                    'QWord' { [long]$entry.value }
+                    'Binary' { ,([byte[]]$entry.value) }
+                    'None' { ,([byte[]]$entry.value) }
+                    'MultiString' { ,([string[]]$entry.value) }
+                    default { throw 'unsupported Cowork registry preimage type' }
+                }
+                $key.SetValue($name, $value, $kind)
+            }
+        }
+        finally { if ($null -ne $key) { $key.Dispose() } }
+    }
+    finally { $base.Dispose() }
+}
+
+function Get-DefenseClawCoworkPlan {
+    param([Parameter(Mandatory)][hashtable]$Layout,
+        [Parameter(Mandatory)][string]$GatewayServiceName,
+        [hashtable]$GatewaySource, [string]$ConfigPath,
+        [string]$CoworkPackagePath, [string]$CoworkSignaturePath, [switch]$BeforeAclRepair)
+    $args = @('enterprise', 'windows', 'inspect-cowork')
+    if (-not [string]::IsNullOrWhiteSpace($ConfigPath)) { $args += @('--config', $ConfigPath) }
+    # The lifecycle source plan runs before the transaction re-stamps the
+    # runtime ACL; delivery, after it, inspects without this switch (strict).
+    if ($BeforeAclRepair) { $args += @('--before-acl-repair') }
+    if (-not [string]::IsNullOrWhiteSpace($CoworkPackagePath)) { $args += @('--cowork-package', $CoworkPackagePath) }
+    if (-not [string]::IsNullOrWhiteSpace($CoworkSignaturePath)) { $args += @('--cowork-signature', $CoworkSignaturePath) }
+    $probe = Invoke-DefenseClawGatewayCommand -Layout $Layout `
+        -GatewayServiceName $GatewayServiceName -GatewaySource $GatewaySource `
+        -Arguments $args -Capture
+    $reports = @($probe.output | Microsoft.PowerShell.Core\Where-Object {
+        ([string]$_).Trim().StartsWith('{', [StringComparison]::Ordinal)
+    } | Microsoft.PowerShell.Core\ForEach-Object {
+        ([string]$_) | Microsoft.PowerShell.Utility\ConvertFrom-Json
+    })
+    if ($reports.Count -ne 1 -or $reports[0].enabled -isnot [bool]) {
+        throw 'Cowork inspection did not return exactly one valid plan'
+    }
+    if (-not [string]::IsNullOrWhiteSpace([string]$reports[0].registry_refusal)) {
+        throw ('Cowork machine policy refused: ' + [string]$reports[0].registry_refusal)
+    }
+    return $reports[0]
+}
+
+function Add-DefenseClawCoworkCreatedDirectory {
+    param([Parameter(Mandatory)][hashtable]$Layout,
+        [Parameter(Mandatory)][string]$SnapshotPath,
+        [Parameter(Mandatory)][string]$Path)
+    $paths = Get-DefenseClawCoworkPaths -Layout $Layout
+    if ($Path -cnotin @($paths.Parent, $paths.Directory)) { throw 'unowned Cowork directory' }
+    $snapshot = Microsoft.PowerShell.Management\Get-Content -LiteralPath $SnapshotPath -Raw |
+        Microsoft.PowerShell.Utility\ConvertFrom-Json
+    if ($null -eq $snapshot.PSObject.Properties['cowork_registry']) {
+        throw 'Cowork delivery was not included in the lifecycle snapshot'
+    }
+    $snapshot.cowork_created_directories = @($snapshot.cowork_created_directories) + @($Path)
+    Write-DefenseClawJsonAtomic -Value $snapshot -Path $SnapshotPath
+}
+
+function Remove-DefenseClawCoworkOwnedFile {
+    param([Parameter(Mandatory)][hashtable]$Layout,
+        [Parameter(Mandatory)][Collections.IDictionary]$Record,
+        [Parameter(Mandatory)][string]$Path)
+    if (-not (Test-DefenseClawCoworkFilePath -Layout $Layout -Path $Path)) { throw 'unowned Cowork file path' }
+    if (Microsoft.PowerShell.Management\Test-Path -LiteralPath $Path) {
+        Assert-DefenseClawCoworkPublicPath -Path ([IO.Path]::GetDirectoryName($Path)) -Directory -AllowReaderRepair
+        Assert-DefenseClawNoReparsePath -Path $Path
+        $item = Microsoft.PowerShell.Management\Get-Item -LiteralPath $Path -Force
+        if ($item.PSIsContainer) { throw "refusing to remove Cowork directory at file path: $Path" }
+        $digest = (Microsoft.PowerShell.Utility\Get-FileHash -LiteralPath $Path -Algorithm SHA256).Hash.ToLowerInvariant()
+        if ($digest -ceq [string]$Record.files[$Path]) {
+            Microsoft.PowerShell.Management\Remove-Item -LiteralPath $Path -Force
+        }
+        else { Microsoft.PowerShell.Utility\Write-Warning "Kept $Path because it changed after DefenseClaw wrote it" }
+    }
+    $Record.files.Remove($Path)
+}
+
+function Invoke-DefenseClawCoworkDelivery {
+    param([Parameter(Mandatory)][hashtable]$Layout,
+        [Parameter(Mandatory)][string]$GatewayServiceName,
+        [Parameter(Mandatory)][AllowEmptyString()][string]$SnapshotPath, [switch]$Remove,
+        [string]$CoworkPackagePath, [string]$CoworkSignaturePath,
+        [Collections.IDictionary]$OwnershipRecord, [switch]$PreservePrivateState)
+    if (-not (Test-DefenseClawStandaloneProfile)) { return }
+    if ($PreservePrivateState -and (-not $Remove -or -not [string]::IsNullOrEmpty($SnapshotPath) -or $null -eq $OwnershipRecord)) {
+        throw 'private-state preservation is only for forced remove using a previously authenticated ownership record'
+    }
+    $paths = Get-DefenseClawCoworkPaths -Layout $Layout
+    $record = if ($null -ne $OwnershipRecord) { $OwnershipRecord } else {
+        Get-DefenseClawCoworkOwnership -Layout $Layout
+    }
+    $plan = if ($Remove) { [pscustomobject]@{enabled = $false} } else {
+        Get-DefenseClawCoworkPlan -Layout $Layout -GatewayServiceName $GatewayServiceName `
+            -CoworkPackagePath $CoworkPackagePath -CoworkSignaturePath $CoworkSignaturePath
+    }
+    if (-not [bool]$plan.enabled -and $record.files.Count -eq 0 -and $record.cache_files.Count -eq 0 -and
+        @($record.values).Count -eq 0 -and @($record.directories).Count -eq 0) { return }
+    $want = @{}
+    if ([bool]$plan.enabled) {
+        if ([string]::IsNullOrWhiteSpace($SnapshotPath)) { throw 'enabled Cowork delivery requires the lifecycle snapshot' }
+        if (-not (Test-DefenseClawCoworkFilePath -Layout $Layout -Path ([string]$plan.package_path)) -or
+            [string]$plan.arguments_path -cne [string]$paths.Arguments) { throw 'Cowork plan escaped its fixed host paths' }
+        if (-not [string]::IsNullOrWhiteSpace([string]$plan.cache_directory)) {
+            if ([string]$plan.cache_directory -cne [string]$paths.Cache) { throw 'Cowork plan escaped its fixed cache' }
+            if (-not (Microsoft.PowerShell.Management\Test-Path -LiteralPath $paths.Cache)) {
+                $cacheSnapshot = Microsoft.PowerShell.Management\Get-Content -LiteralPath $SnapshotPath -Raw |
+                    Microsoft.PowerShell.Utility\ConvertFrom-Json
+                $cacheSnapshot.cowork_cache_created = $true
+                Write-DefenseClawJsonAtomic -Value $cacheSnapshot -Path $SnapshotPath
+                [void](New-DefenseClawProtectedDirectory -Path $paths.Cache)
+                $record.cache_directory_owned = $true
+            }
+            Assert-DefenseClawNoReparsePath -Path $paths.Cache
+            Assert-DefenseClawTrustedAncestor -Path $paths.Cache -Strict
+            Assert-DefenseClawPathAcl -Path $paths.Cache `
+                -AllowedWriterSIDs @($script:SystemSID, $script:AdministratorsSID, $script:TrustedInstallerSID) `
+                -AllowedReaderSIDs @($script:SystemSID, $script:AdministratorsSID, $script:TrustedInstallerSID) `
+                -RequiredRights (New-DefenseClawRequiredRights -Kind Admin) -RejectUntrustedRead
+            foreach ($asset in @(
+                @{source = [string]$plan.source_archive; sha256 = [string]$plan.package_sha256; suffix = ''},
+                @{source = [string]$plan.source_signature; sha256 = [string]$plan.signature_sha256; suffix = '.sig'}
+            )) {
+                if ([string]::IsNullOrWhiteSpace([string]$asset.source)) { continue }
+                $cachePath = [IO.Path]::Combine($paths.Cache, ([IO.Path]::GetFileName([string]$plan.package_path) + [string]$asset.suffix))
+                if ([IO.File]::Exists($cachePath) -and -not $record.cache_files.Contains($cachePath)) {
+                    if ((Microsoft.PowerShell.Utility\Get-FileHash -LiteralPath $cachePath -Algorithm SHA256).Hash.ToLowerInvariant() -cne [string]$asset.sha256) {
+                        throw "Cowork refuses to replace administrator cache file $cachePath"
+                    }
+                }
+                else {
+                    Install-DefenseClawFileAtomic -Source ([string]$asset.source) -Destination $cachePath `
+                        -ExpectedSHA256 ([string]$asset.sha256) -SkipIfContentMatches
+                    Set-DefenseClawPathAcl -Path $cachePath -Kind AdminFile -GatewayServiceSID $script:AdministratorsSID
+                    $record.cache_files[$cachePath] = [string]$asset.sha256
+                }
+            }
+        }
+        foreach ($dir in @($paths.Parent, $paths.Directory)) {
+            if (Microsoft.PowerShell.Management\Test-Path -LiteralPath $dir) {
+                $ours = @($record.directories) -ccontains $dir
+                Assert-DefenseClawCoworkPublicPath -Path $dir -Directory -AllowReaderRepair:$ours
+                if ($ours) {
+                    Set-DefenseClawPathAcl -Path $dir -Kind InstallDirectory -GatewayServiceSID $script:AdministratorsSID
+                    Assert-DefenseClawCoworkPublicPath -Path $dir -Directory
+                }
+            }
+            else {
+                Add-DefenseClawCoworkCreatedDirectory -Layout $Layout -SnapshotPath $SnapshotPath -Path $dir
+                $created = New-DefenseClawProtectedDirectory -Path $dir -AllowUsersRead
+                Assert-DefenseClawCoworkPublicPath -Path $dir -Directory
+                if ($created -and @($record.directories) -cnotcontains $dir) { $record.directories = @($record.directories) + @($dir) }
+            }
+        }
+        $staged = @(
+            @{path = [string]$plan.package_path; source = [string]$plan.source_archive; sha256 = [string]$plan.package_sha256}
+        )
+        if (-not [string]::IsNullOrWhiteSpace([string]$plan.source_signature)) {
+            $staged += @{path = ([string]$plan.package_path + '.sig'); source = [string]$plan.source_signature; sha256 = [string]$plan.signature_sha256}
+        }
+        $argsPath = [IO.Path]::Combine($Layout.InstallStateDirectory, ('cowork-args-' + [Guid]::NewGuid().ToString('N') + '.tmp'))
+        try {
+            # Encoding is explicitly ASCII, without BOM, newline or spaces.
+            [IO.File]::WriteAllText($argsPath, [string]$plan.arguments, [Text.ASCIIEncoding]::new())
+            Set-DefenseClawPathAcl -Path $argsPath -Kind AdminFile -GatewayServiceSID $script:AdministratorsSID
+            $argsDigest = (Microsoft.PowerShell.Utility\Get-FileHash -LiteralPath $argsPath -Algorithm SHA256).Hash.ToLowerInvariant()
+            $staged += @{path = $paths.Arguments; source = $argsPath; sha256 = $argsDigest}
+            foreach ($file in $staged) {
+                $path = [string]$file.path
+                $want[$path] = $true
+                $exists = Microsoft.PowerShell.Management\Test-Path -LiteralPath $path
+                if ($exists) {
+                    Assert-DefenseClawCoworkPublicPath -Path $path -AllowReaderRepair:($record.files.Contains($path))
+                    $current = (Microsoft.PowerShell.Utility\Get-FileHash -LiteralPath $path -Algorithm SHA256).Hash.ToLowerInvariant()
+                    if (-not $record.files.Contains($path)) {
+                        if ($current -cne [string]$file.sha256) { throw "Cowork refuses to replace administrator file $path" }
+                        continue # Existing matching admin asset stays unowned.
+                    }
+                }
+                Install-DefenseClawFileAtomic -Source ([string]$file.source) -Destination $path `
+                    -ExpectedSHA256 ([string]$file.sha256) -SkipIfContentMatches
+                Set-DefenseClawPathAcl -Path $path -Kind InstallFile -GatewayServiceSID $script:AdministratorsSID
+                Assert-DefenseClawCoworkPublicPath -Path $path
+                $record.files[$path] = [string]$file.sha256
+            }
+        }
+        finally { if ([IO.File]::Exists($argsPath)) { [IO.File]::Delete($argsPath) } }
+    }
+    foreach ($path in @($record.files.Keys)) {
+        if (-not $want.ContainsKey($path)) { Remove-DefenseClawCoworkOwnedFile -Layout $Layout -Record $record -Path $path }
+    }
+    foreach ($cachePath in @($record.cache_files.Keys)) {
+        if ($PreservePrivateState) { continue }
+        $retire = -not [bool]$plan.enabled -or
+            ([string]::IsNullOrWhiteSpace([string]$plan.signature_sha256) -and ([string]$cachePath).EndsWith('.sig', [StringComparison]::Ordinal))
+        if (-not $retire) { continue }
+        if ([IO.File]::Exists([string]$cachePath)) {
+            Assert-DefenseClawNoReparsePath -Path ([string]$cachePath)
+            $digest = (Microsoft.PowerShell.Utility\Get-FileHash -LiteralPath $cachePath -Algorithm SHA256).Hash.ToLowerInvariant()
+            if ($digest -ceq [string]$record.cache_files[$cachePath]) { [IO.File]::Delete([string]$cachePath) }
+            else { Microsoft.PowerShell.Utility\Write-Warning "Kept administrator replacement of Cowork cache file $cachePath" }
+        }
+        $record.cache_files.Remove($cachePath)
+    }
+    $base = [Microsoft.Win32.RegistryKey]::OpenBaseKey(
+        $script:CoworkPolicyHive, [Microsoft.Win32.RegistryView]::Registry64)
+    try {
+        $key = $base.OpenSubKey($script:CoworkPolicyKey, $true)
+        try {
+            $values = @()
+            if ([bool]$plan.enabled) {
+                if ($null -eq $key) { $key = $base.CreateSubKey($script:CoworkPolicyKey, $true) }
+                foreach ($entry in @(
+                    @{name = 'coworkEDRIntegration'; value = [string]$plan.package_path},
+                    @{name = 'coworkEDRIntegrationVendor'; value = [string]$plan.vendor}
+                )) {
+                    $present = @($key.GetValueNames()) -contains $entry.name
+                    $previous = @($record.values | Microsoft.PowerShell.Core\Where-Object { $_.name -ceq $entry.name })
+                    $current = if ($present) { $key.GetValue($entry.name, $null, [Microsoft.Win32.RegistryValueOptions]::DoNotExpandEnvironmentNames) } else { $null }
+                    $ours = $present -and $previous.Count -eq 1 -and $key.GetValueKind($entry.name) -eq [Microsoft.Win32.RegistryValueKind]::String -and
+                        [string]$current -ceq [string]$previous[0].string
+                    if ($present -and -not $ours) {
+                        if ($key.GetValueKind($entry.name) -ne [Microsoft.Win32.RegistryValueKind]::String -or [string]$current -cne [string]$entry.value) {
+                            throw ('Cowork refuses to replace administrator registry value ' + [string]$entry.name)
+                        }
+                        continue
+                    }
+                    $key.SetValue([string]$entry.name, [string]$entry.value, [Microsoft.Win32.RegistryValueKind]::String)
+                    $values += @{name = [string]$entry.name; type = 1; string = [string]$entry.value}
+                }
+            }
+            else {
+                foreach ($previous in @($record.values)) {
+                    if ($null -eq $key -or @($key.GetValueNames()) -notcontains [string]$previous.name) { continue }
+                    if ($key.GetValueKind([string]$previous.name) -eq [Microsoft.Win32.RegistryValueKind]::String -and
+                        [string]$key.GetValue([string]$previous.name, $null, [Microsoft.Win32.RegistryValueOptions]::DoNotExpandEnvironmentNames) -ceq [string]$previous.string) {
+                        $key.DeleteValue([string]$previous.name, $false)
+                    }
+                    else { Microsoft.PowerShell.Utility\Write-Warning ('Kept administrator replacement of Cowork registry value ' + [string]$previous.name) }
+                }
+            }
+            $record.values = $values
+        }
+        finally { if ($null -ne $key) { $key.Dispose() } }
+    }
+    finally { $base.Dispose() }
+    if (-not [bool]$plan.enabled) {
+        if (-not $PreservePrivateState -and [bool]$record.cache_directory_owned -and [IO.Directory]::Exists($paths.Cache)) {
+            Assert-DefenseClawNoReparsePath -Path $paths.Cache
+            if (@(Microsoft.PowerShell.Management\Get-ChildItem -LiteralPath $paths.Cache -Force).Count -eq 0) { [IO.Directory]::Delete($paths.Cache) }
+        }
+        $record.cache_directory_owned = $false
+        foreach ($dir in @($record.directories | Microsoft.PowerShell.Utility\Sort-Object -Descending)) {
+            if (-not [IO.Directory]::Exists([string]$dir)) { continue }
+            Assert-DefenseClawCoworkPublicPath -Path ([string]$dir) -Directory -AllowReaderRepair
+            if (@(Microsoft.PowerShell.Management\Get-ChildItem -LiteralPath $dir -Force).Count -eq 0) { [IO.Directory]::Delete([string]$dir) }
+        }
+        $record.directories = @()
+    }
+    if ($PreservePrivateState) { return }
+    if ($record.files.Count -eq 0 -and $record.cache_files.Count -eq 0 -and @($record.values).Count -eq 0 -and @($record.directories).Count -eq 0) {
+        if ([IO.File]::Exists($paths.Record)) { [IO.File]::Delete($paths.Record) }
+    }
+    else {
+        Write-DefenseClawJsonAtomic -Value $record -Path $paths.Record
+        Set-DefenseClawPathAcl -Path $paths.Record -Kind AdminFile -GatewayServiceSID $script:AdministratorsSID
+    }
+}
+
+function Restore-DefenseClawCoworkCreatedDirectories {
+    param([Parameter(Mandatory)][hashtable]$Layout, [Parameter(Mandatory)]$Snapshot)
+    $property = $Snapshot.PSObject.Properties['cowork_created_directories']
+    if ($null -eq $property) { return }
+    $paths = Get-DefenseClawCoworkPaths -Layout $Layout
+    $cacheCreated = $Snapshot.PSObject.Properties['cowork_cache_created']
+    if ($null -ne $cacheCreated -and [bool]$cacheCreated.Value -and [IO.Directory]::Exists($paths.Cache)) {
+        Assert-DefenseClawNoReparsePath -Path $paths.Cache
+        if (@(Microsoft.PowerShell.Management\Get-ChildItem -LiteralPath $paths.Cache -Force).Count -eq 0) { [IO.Directory]::Delete($paths.Cache) }
+    }
+    $dirs = @($property.Value)
+    for ($i = $dirs.Count - 1; $i -ge 0; $i--) {
+        $dir = [string]$dirs[$i]
+        if ($dir -cnotin @($paths.Parent, $paths.Directory)) { throw 'invalid Cowork rollback directory' }
+        if (-not [IO.Directory]::Exists($dir)) { continue }
+        Assert-DefenseClawCoworkPublicPath -Path $dir -Directory
+        if (@(Microsoft.PowerShell.Management\Get-ChildItem -LiteralPath $dir -Force).Count -eq 0) { [IO.Directory]::Delete($dir) }
+    }
+}
+
 function Get-DefenseClawConfigSidecarPaths {
     <#
         The files the Go config step writes beside config.yaml inside the
@@ -29355,9 +30171,10 @@ function Get-DefenseClawStandaloneManifestAdoption {
     if ($awaitingSignIn -gt 0) {
         $excused += $awaitingSignIn
     }
-    # A reconcile that fails only because each failed target's account is
-    # signed out stays failed until that account signs in, so a retry cannot
-    # help: name the accounts, and say what to do first.
+    $accountLinks = [Math]::Max([int64](& $count $report 'account_link_failures'), [int64]0)
+    $excused += $accountLinks
+    # A signed-out account remains pending until it signs in; name those
+    # accounts and the next step in the adoption result.
     $signedOut = [Collections.Generic.List[string]]::new()
     $otherFailure = $false
     # A signed-out account whose only failure is its DefenseClaw folder's
@@ -29374,6 +30191,7 @@ function Get-DefenseClawStandaloneManifestAdoption {
     # signed-out one: repair said to remove its profile and run again, which
     # could never pass because the profile was already gone (GAP-1657).
     $removedRows = [int64]0
+    $accountLinkRows = [int64]0
     foreach ($row in @(& $field $records.state 'results')) {
         if ($null -eq $row -or
             [bool](& $field $row 'ok') -or
@@ -29382,6 +30200,12 @@ function Get-DefenseClawStandaloneManifestAdoption {
         }
         if ([string](& $field $row 'error') -match 'no longer exists: the account was deleted or its profile folder removed') {
             $removedRows++
+            continue
+        }
+        if ([string](& $field $row 'error') -ceq
+            'enterprise hooks: the account''s own DefenseClaw folder link is pending repair' -and
+            $accountLinks -gt 0) {
+            $accountLinkRows++
             continue
         }
         if (([string](& $field $row 'error')).Trim().StartsWith(
@@ -29426,6 +30250,9 @@ function Get-DefenseClawStandaloneManifestAdoption {
             $signedOut.Add($account)
         }
     }
+    if ($accountLinkRows -ne $accountLinks) {
+        return & $result $false 'the guardian account-link count does not match its failed rows' -1
+    }
     if ($removedRows -gt 0) {
         # The gateway may already count them in removed_account_failures.
         $gatewayRemoved = [Math]::Max([int64](& $count $report 'removed_account_failures'), [int64]0)
@@ -29443,7 +30270,7 @@ function Get-DefenseClawStandaloneManifestAdoption {
     if ($folderRows -gt 0) {
         # Every failed row must be one of these, a waiting row or a removed
         # account's row; any other failure keeps the adoption refused.
-        $excused = $folderRows + $waitingRows + $removedRows
+        $excused = $folderRows + $waitingRows + $removedRows + $accountLinkRows
     }
     $nextStep = ''
     if ($signedOut.Count -gt 0 -and -not $otherFailure) {
@@ -29551,6 +30378,91 @@ function Test-DefenseClawInstalledGatewayRecorded {
     )
 }
 
+function Test-DefenseClawTombstoneTeardownArtifactsBindManifest {
+    <#
+        rel-1-0-6:GAP-0583. Whether every teardown artifact a committed
+        uninstall already wrote (the schema-6 teardown journal and the
+        managed-hook contract cleanup receipt) names the installed
+        targets.yaml and the tombstone's deployment generation. Only then may
+        the tombstone be rebound to that manifest: rebinding never makes an
+        artifact of another manifest or another deployment match. An
+        unreadable artifact keeps the tombstone as recorded, and the strict
+        checks that follow give their refusal.
+    #>
+    param(
+        [Parameter(Mandatory)][hashtable]$Layout,
+        [Parameter(Mandatory)][string]$ManifestSHA256,
+        [Parameter(Mandatory)][string]$DeploymentGenerationID
+    )
+    foreach ($path in @(
+            [string]$Layout.ManagedHooksTeardownJournalPath,
+            [string]$Layout.ManagedHookContractCleanupReceiptPath
+        )) {
+        if ([string]::IsNullOrWhiteSpace($path) -or
+            -not (Test-DefenseClawPathPresentNoFollow -Path $path)) {
+            continue
+        }
+        try {
+            Assert-DefenseClawNoReparsePath -Path $path
+            $artifact = Microsoft.PowerShell.Management\Get-Content `
+                -LiteralPath $path `
+                -Raw `
+                -ErrorAction Stop |
+                Microsoft.PowerShell.Utility\ConvertFrom-Json -ErrorAction Stop
+        }
+        catch {
+            return $false
+        }
+        if ($null -eq $artifact -or
+            [string]$artifact.manifest_sha256 -cne $ManifestSHA256 -or
+            [string]$artifact.deployment_generation_id -cne $DeploymentGenerationID) {
+            return $false
+        }
+    }
+    return $true
+}
+
+function Sync-DefenseClawStandaloneUninstallTombstoneBinding {
+    <#
+        Standalone only (rel-1-0-6:GAP-0583). A committed uninstall, its
+        retry, and the Install (Setup /ensure) that first finishes it, rebind
+        the inactive tombstone's activation evidence to the installed
+        targets.yaml when the guardian had adopted it: the enumerator pass
+        after a deleted enrolled account can publish it between the
+        uninstall's pre-commit check and its commit. The rule is the one
+        Sync-DefenseClawStandaloneManagedHooksActivationBinding applies to an
+        installed deployment (guardian adoption, the deployment generation
+        and state kept), plus Test-DefenseClawTombstoneTeardownArtifactsBindManifest.
+        When the drift cannot be proven it reports the reason and changes
+        nothing; the strict binding checks that follow still refuse. Returns
+        $true when it rebound: the caller reads the metadata again.
+    #>
+    param(
+        [Parameter(Mandatory)][hashtable]$Layout,
+        [Parameter(Mandatory)][string]$GatewayServiceName
+    )
+    if (-not (Test-DefenseClawStandaloneProfile)) {
+        return $false
+    }
+    try {
+        $rebound = Sync-DefenseClawStandaloneManagedHooksActivationBinding `
+            -Layout $Layout `
+            -GatewayServiceName $GatewayServiceName `
+            -AllowUninstallTombstone
+    }
+    catch {
+        Write-DefenseClawLifecyclePhase -Stage (
+            'hook targets changed after the uninstall committed, and the guardian has not adopted them: ' +
+            "the tombstone keeps its activation evidence ($($_.Exception.Message))"
+        )
+        return $false
+    }
+    if ($rebound) {
+        Write-DefenseClawLifecyclePhase -Stage 'hook targets changed after the uninstall committed (an enrolled account was deleted or changed): the tombstone activation evidence was rebound to the targets.yaml the guardian adopted'
+    }
+    return [bool]$rebound
+}
+
 function Sync-DefenseClawStandaloneManagedHooksActivationBinding {
     <#
         Standalone only. Runs under the lifecycle lock, after any pending
@@ -29567,11 +30479,15 @@ function Sync-DefenseClawStandaloneManagedHooksActivationBinding {
         Upgrade. Their transaction installs it, so it reads the guardian's
         records when the installed gateway is missing or is not the binary
         the deployment recorded (GAP-1417).
+        AllowUninstallTombstone (rel-1-0-6:GAP-0583) also rebinds the
+        inactive tombstone of a committed uninstall; see
+        Sync-DefenseClawStandaloneUninstallTombstoneBinding.
     #>
     param(
         [Parameter(Mandatory)][hashtable]$Layout,
         [Parameter(Mandatory)][string]$GatewayServiceName,
-        [hashtable]$GatewaySource
+        [hashtable]$GatewaySource,
+        [switch]$AllowUninstallTombstone
     )
     if (-not (Test-DefenseClawStandaloneProfile)) {
         return $false
@@ -29586,7 +30502,8 @@ function Sync-DefenseClawStandaloneManagedHooksActivationBinding {
         return $false
     }
     $metadata = Get-DefenseClawDeploymentMetadata -Layout $Layout -Required
-    if (-not (Test-DefenseClawMetadataInstalled -Metadata $metadata)) {
+    if (-not (Test-DefenseClawMetadataInstalled -Metadata $metadata) -and
+        -not $AllowUninstallTombstone) {
         return $false
     }
     $activationProperty = $metadata.PSObject.Properties['managed_hooks_activation']
@@ -29602,6 +30519,13 @@ function Sync-DefenseClawStandaloneManagedHooksActivationBinding {
             -Algorithm SHA256
     ).Hash.ToLowerInvariant()
     if ([string]$activation.manifest_sha256 -ceq $installedManifestSHA256) {
+        return $false
+    }
+    if (-not (Test-DefenseClawMetadataInstalled -Metadata $metadata) -and
+        -not (Test-DefenseClawTombstoneTeardownArtifactsBindManifest `
+            -Layout $Layout `
+            -ManifestSHA256 $installedManifestSHA256 `
+            -DeploymentGenerationID ([string]$activation.deployment_generation_id))) {
         return $false
     }
     $probeGatewaySource = $null
@@ -33788,6 +34712,11 @@ function Complete-DefenseClawCommittedManagedHooksFinalization {
         -GuardianServiceName $GuardianServiceName
     if (Test-DefenseClawMetadataInstalled -Metadata $metadata) {
         throw 'managed-hook finalization requires an uninstall tombstone'
+    }
+    if (Sync-DefenseClawStandaloneUninstallTombstoneBinding `
+            -Layout $Layout `
+            -GatewayServiceName $GatewayServiceName) {
+        $metadata = Get-DefenseClawDeploymentMetadata -Layout $Layout -Required
     }
     # The finalize removes the enrolled accounts' per-user data and binaries
     # when the uninstall asked for it. A recovery or retry replays the request
@@ -39492,6 +40421,13 @@ function Invoke-DefenseClawPreLayoutRecovery {
             # the only helper authorized to finalize its own journal. Cleanup
             # leaves the inactive metadata tombstone as the exact StateRoot
             # preimage that the new Install adopts transactionally later.
+            if (Sync-DefenseClawStandaloneUninstallTombstoneBinding `
+                    -Layout $Layout `
+                    -GatewayServiceName $GatewayServiceName) {
+                $committedMetadata = Get-DefenseClawDeploymentMetadata `
+                    -Layout $Layout `
+                    -Required
+            }
             $retiredContractReceipt =
                 Get-DefenseClawManagedHookContractCleanupReceipt `
                     -Layout $Layout `
@@ -39688,6 +40624,8 @@ function Invoke-DefenseClawInstallLikeLifecycle {
         [Parameter(Mandatory)][string]$Action,
         [Parameter(Mandatory)][hashtable]$Layout,
         [Parameter(Mandatory)][hashtable]$Sources,
+        [string]$CoworkPackagePath,
+        [string]$CoworkSignaturePath,
         [switch]$StandaloneFleetStateKnown,
         [switch]$StandaloneFleetEnabled,
         [Parameter(Mandatory)][string]$GatewayServiceName,
@@ -39954,12 +40892,24 @@ function Invoke-DefenseClawInstallLikeLifecycle {
     if ($Sources.ContainsKey('hook')) {
         $earlyHookSource = $Sources['hook']
     }
+    $coworkSourcePlan = $null
+    if (Test-DefenseClawStandaloneProfile) {
+        $coworkConfigSource = if ($Sources.ContainsKey('config')) {
+            [string]$Sources['config'].path
+        } else { [string]$Layout.ConfigPath }
+        $coworkSourcePlan = Get-DefenseClawCoworkPlan -Layout $Layout `
+            -GatewayServiceName $GatewayServiceName -GatewaySource $Sources['gateway'] `
+            -ConfigPath $coworkConfigSource `
+            -CoworkPackagePath $CoworkPackagePath -CoworkSignaturePath $CoworkSignaturePath `
+            -BeforeAclRepair
+    }
     $snapshot = New-DefenseClawTransaction `
         -Layout $Layout `
         -GatewayServiceName $GatewayServiceName `
         -GuardianServiceName $GuardianServiceName `
         -PriorDeploymentActive:$priorDeploymentActive `
         -EarlyHookSource $earlyHookSource `
+        -CoworkRequested:($null -ne $coworkSourcePlan -and [bool]$coworkSourcePlan.enabled) `
         -IncludeCodexMachineState:$priorCodexTargetEnabled `
         -RecoverLegacyManagedHooksLifecycleJournal:$recoverCommittedManagedHooksLifecycle `
         -InstallRootCreatedForTransaction:$InstallRootCreatedForTransaction `
@@ -40046,9 +40996,15 @@ function Invoke-DefenseClawInstallLikeLifecycle {
             $_ -notin $deferredPolicySources -and $_ -ne 'provider_library'
         })) {
             $destination = Get-DefenseClawArtifactPath -Layout $Layout -Name $name
+            # A release binary whose installed bytes are the source's is
+            # kept: a config-only ensure on the installed release copied
+            # and rescanned about 530 MB of identical binaries while the
+            # services were stopped (cowork-1-0-8 GAP-0044). A changed one is
+            # replaced as before; the snapshot above is unchanged.
             Install-DefenseClawSourceDescriptor `
                 -Source $Sources[$name] `
-                -Destination $destination
+                -Destination $destination `
+                -SkipIfContentMatches
             $publishedManifestReplacement = [bool](
                 $name -ceq 'manifest' -and
                 (Test-DefenseClawSourceDescriptorPublishesReplacement `
@@ -40401,6 +41357,11 @@ function Invoke-DefenseClawInstallLikeLifecycle {
         # Secure Client keeps its validate-only config check (issue #1092).
         Assert-DefenseClawInstalledConfig -Layout $Layout -GatewayServiceName $GatewayServiceName `
             -RecordLifecycle:(-not (Test-DefenseClawLayoutBrokerEnabled -Layout $Layout))
+        if (Test-DefenseClawStandaloneProfile) {
+            Invoke-DefenseClawCoworkDelivery -Layout $Layout `
+                -GatewayServiceName $GatewayServiceName -SnapshotPath $snapshot `
+                -CoworkPackagePath $CoworkPackagePath -CoworkSignaturePath $CoworkSignaturePath
+        }
 
         $deploymentGenerationID = $lifecycleTransactionID
         $managedHooksActivationState = if ($Action -eq 'Install') {
@@ -40510,7 +41471,9 @@ function Invoke-DefenseClawInstallLikeLifecycle {
                 Wait-DefenseClawServiceFailureRestartQuiescence `
                     -ServicesQuiescedAt $activationQuiescedAt `
                     -GatewayServiceName $GatewayServiceName `
-                    -GuardianServiceName $GuardianServiceName
+                    -GuardianServiceName $GuardianServiceName `
+                    -CleanStopProven:(Test-DefenseClawCleanQuiescenceBarrier `
+                        -ServicesQuiescedAt $activationQuiescedAt)
             }
             # The LocalSystem broker must be live before any restricted
             # gateway path can request a credential.
@@ -40857,6 +41820,11 @@ function Invoke-DefenseClawForcedUninstallPreparation {
             return $preparation
         }
         Assert-DefenseClawNoReparsePath -Path $preparation.state_root
+        $coworkForcedOwnership = $null
+        if (Test-DefenseClawStandaloneProfile) {
+            try { $coworkForcedOwnership = Get-DefenseClawCoworkOwnership -Layout $Layout }
+            catch { Microsoft.PowerShell.Utility\Write-Warning ('Cowork host artifacts were kept because ownership could not be proven: ' + $_.Exception.Message) }
+        }
         # The bundle.lock this uninstall holds (GAP-2438) is an open handle
         # inside StateRoot, and Windows refuses to move a folder with an open
         # file under it: the printed FORCE=1 failed 1603 'Access to the path
@@ -40887,6 +41855,17 @@ function Invoke-DefenseClawForcedUninstallPreparation {
                 'current folder is inside it, a log reader, a backup or anti-virus scan) and run Setup /uninstall FORCE=1 again.')
         }
         $preparation.moved_state_root = $moved
+        if ($null -ne $coworkForcedOwnership) {
+            try {
+                # FORCE deliberately has no rollback. Keep the private record
+                # in the renamed root for its normal forced-state cleanup, and
+                # retire only unchanged external files/settings proven by it.
+                Invoke-DefenseClawCoworkDelivery -Layout $Layout `
+                    -GatewayServiceName $GatewayServiceName -SnapshotPath '' -Remove `
+                    -OwnershipRecord $coworkForcedOwnership -PreservePrivateState
+            }
+            catch { Microsoft.PowerShell.Utility\Write-Warning ('Cowork host artifact removal did not finish; unproven or changed artifacts were kept: ' + $_.Exception.Message) }
+        }
         return $preparation
     }
     catch {
@@ -43525,6 +44504,10 @@ function Invoke-DefenseClawUninstallLifecycle {
             -PreserveManagedHooksTeardownJournal `
             -SkipRedactionKeySnapshot
         [void](Suspend-DefenseClawSensorHelperForServicing -Layout $Layout)
+        if (Test-DefenseClawStandaloneProfile) {
+            Invoke-DefenseClawCoworkDelivery -Layout $Layout `
+                -GatewayServiceName $GatewayServiceName -SnapshotPath $snapshot -Remove
+        }
         if ($useNativeInstallCleanup) {
             Assert-DefenseClawDescendant `
                 -Path $snapshot `
@@ -44820,6 +45803,8 @@ function Invoke-DefenseClawEnterpriseLifecycle {
         [string]$CLIBinary,
         [string]$NativeCleanupBinary,
         [string]$Config,
+        [string]$CoworkPackagePath,
+        [string]$CoworkSignaturePath,
         [string]$Manifest,
         [ValidateSet('SecureClient', 'Standalone')]
         [string]$EnterpriseProfile = 'SecureClient',
@@ -44869,6 +45854,12 @@ function Invoke-DefenseClawEnterpriseLifecycle {
     $script:FilePrivilegePrerequisitesReported = $false
     $script:MissingFilePrivileges = @()
     Set-DefenseClawEnterpriseProfile -EnterpriseProfile $EnterpriseProfile
+    if (-not [string]::IsNullOrWhiteSpace($CoworkPackagePath) -or
+        -not [string]::IsNullOrWhiteSpace($CoworkSignaturePath)) {
+        if (-not (Test-DefenseClawStandaloneProfile) -or $Action -notin @('Install', 'Upgrade', 'Repair')) {
+            throw 'Cowork artifact inputs require standalone Install, Upgrade or Repair'
+        }
+    }
     if ($Action -eq 'Recover' -and -not (Test-DefenseClawStandaloneProfile)) {
         throw 'Recover is available only to standalone Setup after a timed-out lifecycle'
     }
@@ -45837,6 +46828,7 @@ function Invoke-DefenseClawEnterpriseLifecycle {
                     -Action $Action `
                     -Layout $layout `
                     -Sources $sources `
+                    -CoworkPackagePath $CoworkPackagePath -CoworkSignaturePath $CoworkSignaturePath `
                     -StandaloneFleetStateKnown:$standaloneFleetStateKnown `
                     -StandaloneFleetEnabled:$standaloneFleetEnabled `
                     -GatewayServiceName $GatewayServiceName `

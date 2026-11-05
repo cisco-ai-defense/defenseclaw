@@ -198,8 +198,18 @@ func (c *ClaudeCodeConnector) SandboxArtifacts(target SandboxRenderTarget) (Sand
 //     mcp.project_servers: block): managed-mcp.json, Claude's exclusive MCP
 //     mode, plus allowManagedMcpServersOnly and allowedMcpServers.
 func renderClaudeCodeSandboxDropIn(rt resolvedSandboxTarget) ([]byte, error) {
-	hookCommand := path.Join(SandboxHookDir, "claude-code-hook.sh")
-	hooks, err := renderClaudeCodeManagedHookMatrix(hookCommand, nil, rt.opts)
+	return renderClaudeCodeSandboxDropInWithHook(rt, path.Join(SandboxHookDir, "claude-code-hook.sh"), nil)
+}
+
+// renderClaudeCodeSandboxRunHookDropIn replaces the image's managed hook
+// file for each run, including runs based on an already verified overlay.
+func renderClaudeCodeSandboxRunHookDropIn(rt resolvedSandboxTarget) ([]byte, error) {
+	hookCommand, hookArgs := claudeCodeSandboxHookInvocation()
+	return renderClaudeCodeSandboxDropInWithHook(rt, hookCommand, hookArgs)
+}
+
+func renderClaudeCodeSandboxDropInWithHook(rt resolvedSandboxTarget, hookCommand string, hookArgs []string) ([]byte, error) {
+	hooks, err := renderClaudeCodeManagedHookMatrix(hookCommand, hookArgs, rt.opts)
 	if err != nil {
 		return nil, err
 	}
@@ -223,6 +233,16 @@ func renderClaudeCodeSandboxDropIn(rt resolvedSandboxTarget) ([]byte, error) {
 		return nil, fmt.Errorf("marshal Claude Code sandbox managed settings: %w", err)
 	}
 	return append(body, '\n'), nil
+}
+
+// claudeCodeSandboxHookInvocation starts the managed hook through Bash's
+// privileged mode. Claude Code runs handlers with args directly, so the
+// inherited shell settings cannot change whether the hook command starts.
+// The fixed command also turns a missing image hook into a blocking result.
+func claudeCodeSandboxHookInvocation() (string, []string) {
+	hookPath := path.Join(SandboxHookDir, "claude-code-hook.sh")
+	const missingHook = "DefenseClaw blocked this: its sandbox hook could not start. Rebuild the sandbox image and retry."
+	return "/bin/bash", []string{"-p", "-c", claudeCodeMissingHookGuardWith(hookPath, missingHook)}
 }
 
 // claudeCodeSandboxManagedEnv reuses the connector's native OTLP spec with the

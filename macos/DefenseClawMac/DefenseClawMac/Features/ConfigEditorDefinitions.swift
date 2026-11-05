@@ -350,8 +350,6 @@ enum ConfigEditorCatalog {
                   hint: "Keep OpenShell's anonymous usage telemetry."),
             .init(label: "Token Delivery", key: "openshell.token_delivery", kind: .choice, options: ["provider", "env"],
                   hint: "How the sandbox token reaches hooks."),
-            .init(label: "Middleware (experimental)", key: "openshell.middleware.enabled", kind: .bool,
-                  hint: "Supervisor middleware; Phase 3."),
             .init(label: "Organization Policy", key: "openshell.admin", kind: .header,
                   headerValue: managed ? "Administrator-owned (managed_enterprise)" : "Edit config.yaml directly"),
         ]

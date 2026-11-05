@@ -6,6 +6,6 @@
 package hermespath
 
 // runningProcessEvidence reads the account's running processes from /proc.
-func runningProcessEvidence(uid int) ([]homeEvidence, error) {
-	return procProcessEvidence(uid)
+func runningProcessEvidence(uid int, userHome string) ([]homeEvidence, error) {
+	return procProcessEvidence(uid, userHome)
 }

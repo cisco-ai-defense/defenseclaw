@@ -99,6 +99,9 @@ func admitSurfaces(connectorName, policy string, surfaces []connector.AgentSurfa
 		}
 		resolution := connector.ResolveSurfaceHookContract(connectorName, surface.Surface, surface.EngineVersion)
 		ok, reason := resolution.Admitted(policy)
+		if !ok && surface.EngineVersion == "" && surface.EngineUnverified != "" {
+			reason = "the engine build was not identified: " + surface.EngineUnverified
+		}
 		if !ok {
 			out.rejected = append(out.rejected, surfaceRejection{surface: surface, reason: reason,
 				refused:      policy == connector.UnverifiedVersionsRefuse,

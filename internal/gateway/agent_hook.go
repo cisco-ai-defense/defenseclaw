@@ -753,9 +753,14 @@ func (a *APIServer) handleAgentHook(connectorName string) http.HandlerFunc {
 		ctx = withToolChainHookCapture(ctx, req.toolChain)
 		ctx = withSandboxCoverage(ctx)
 		ctx = withAgentHost(ctx, r.Header)
+		// Secure Client hook audit keeps the shape of main.
+		if coworkInspected(a.decisionConfig(ctx)) {
+			ctx = withCowork(ctx, r.Header, connectorName)
+		}
 		ctx = enrichAgentHookContext(ctx, req)
 		ctx = withHookToolCallCapture(ctx, &hookToolCallCapture{})
 		ctx = withHookPanicCapture(ctx)
+		ctx = withHookJudgeFallbackNote(ctx)
 		if shouldResetToolJudgeSession(req) {
 			sessionKey := sandboxSessionStateKey(ctx, req.SessionID)
 			for _, judge := range a.hookSessionJudges(ctx) {
@@ -836,10 +841,7 @@ func (a *APIServer) handleAgentHook(connectorName string) http.HandlerFunc {
 						enrichAgentHookSpanPanic(ctx)
 					}
 					if finalization.AuditPersisted {
-						if err := a.finalizeHookCorrelationReceipt(persistCtx, req.CorrelationReceipt); err != nil {
-							fmt.Fprintf(os.Stderr, "[gateway] hook receipt finalization failed connector=%s event=%s: %v\n",
-								connectorName, req.HookEventName, err)
-						}
+						a.finalizeHookCorrelationReceiptBounded(persistCtx, req.CorrelationReceipt, connectorName, req.HookEventName)
 					}
 					a.settlePendingHook(persistCtx, pending, finalization)
 					finalized = true
@@ -943,8 +945,6 @@ func (a *APIServer) handleAgentHook(connectorName string) http.HandlerFunc {
 		// per-profile evaluators (claudeCode / codex / generic) so
 		// they round-trip back to the HTTP response and onto the
 		// audit envelope without a second pass here.
-		// The judge fallback of this call, for its audit row and record (#1395).
-		ctx = withHookJudgeFallbackNote(ctx)
 		if cfg := a.decisionConfig(ctx); shellHookBoundsToolGate(connectorName, req.HookEventName, r) &&
 			(cfg == nil || !cfg.SecureClientIntegration()) {
 			ctx = withShellToolGateBound(ctx, r)
@@ -1070,6 +1070,9 @@ func (a *APIServer) handleAgentHook(connectorName string) http.HandlerFunc {
 		// local to that call) so finalizeAgentHookAnswer emits the
 		// hook_decision event + audit row under the same decision.
 		ctx = withRedactionDecision(ctx, resp.RedactionEnabled)
+		if telemetryPersistenceCtx != nil {
+			telemetryPersistenceCtx = withRedactionDecision(telemetryPersistenceCtx, resp.RedactionEnabled)
+		}
 
 		// Managed carve-out (see deferManagedHookEmit above): the directive
 		// from this event's evaluation is now on ctx, so emit the deferred
@@ -1093,6 +1096,7 @@ func (a *APIServer) handleAgentHook(connectorName string) http.HandlerFunc {
 		wireResp = resp
 		auditExtra := mergeHookEnvelopeExtra(hookRequestAuditExtra(ctx, profile), sandboxGate.auditExtra())
 		auditExtra = mergeHookEnvelopeExtra(auditExtra, hookActionCommandAuditExtra(req, hookActiveHome(ctx)))
+		auditExtra = mergeHookEnvelopeExtra(auditExtra, coworkCallAuditExtra(ctx, req.Payload, req.ToolName))
 		if payload["bounded_prefix_review"] == true {
 			auditExtra = mergeHookEnvelopeExtra(auditExtra, map[string]string{"bounded_prefix_review": "true"})
 		}
@@ -1239,10 +1243,7 @@ func (a *APIServer) handleAgentHook(connectorName string) http.HandlerFunc {
 				connectorName, req.HookEventName, err)
 		}
 		if finalization.AuditPersisted {
-			if err := a.finalizeHookCorrelationReceipt(persistCtx, req.CorrelationReceipt); err != nil {
-				fmt.Fprintf(os.Stderr, "[gateway] hook receipt finalization failed connector=%s event=%s: %v\n",
-					connectorName, req.HookEventName, err)
-			}
+			a.finalizeHookCorrelationReceiptBounded(persistCtx, req.CorrelationReceipt, connectorName, req.HookEventName)
 		}
 		a.settlePendingHook(persistCtx, pending, finalization)
 		// The decision is persisted: a panic in the notifier must not
@@ -1501,6 +1502,8 @@ func (a *APIServer) finalizeAgentHookAnswer(
 		RawEventIDs:  rawEventIDs,
 		EvaluationID: resp.EvaluationID,
 		RuleIDs:      resp.RuleIDs,
+		// The connected Cowork folders ride in their own path-class field.
+		WorkspaceHostPaths: coworkWorkspaceHostPaths(ctx),
 	}
 	if req.pendingOccurrenceID != "" {
 		env.occurrenceID = req.pendingOccurrenceID
@@ -1642,6 +1645,11 @@ func (a *APIServer) finalizeAgentHookAnswer(
 			return
 		}
 		a.health.RecordConnectorRequestFor(connectorName)
+		if _, cowork := coworkFromContext(ctx); cowork {
+			a.health.RecordConnectorSurfaceRequestFor(connectorName, connector.CoworkSurface, req.HookEventName)
+			// Kept across a gateway restart for status and doctor (GAP-0038).
+			persistCoworkActivity(a.configDataDir(), req.HookEventName, time.Now())
+		}
 		if connName(connectorName) == "opencode" {
 			loadProof, _ := req.Payload["load_heartbeat"].(bool)
 			if canonicalEvent(req.HookEventName) == "defenseclawpluginloaded" || loadProof {
@@ -1860,6 +1868,11 @@ func (a *APIServer) hookDecisionMeta(
 	meta.AgentType = firstNonEmpty(meta.AgentType, identity.AgentType)
 
 	correlation := audit.EnvelopeFromContext(ctx)
+	if strings.EqualFold(source, "hermes") && req.HookEventName == "transform_terminal_output" &&
+		req.SessionID == "" && identity.IdentityVerified && correlation.SessionID != "" {
+		meta.SessionID = correlation.SessionID
+		meta.AgentID = correlation.AgentID
+	}
 	meta.RunID = firstNonEmpty(meta.RunID, correlation.RunID)
 	meta.RequestID = firstNonEmpty(meta.RequestID, correlation.RequestID)
 	meta.PolicyID = firstNonEmpty(meta.PolicyID, correlation.PolicyID)
@@ -2707,6 +2720,19 @@ func enrichAgentHookContext(ctx context.Context, req agentHookRequest) context.C
 	ctx = ContextWithSessionID(ctx, req.SessionID)
 	identity := agentIdentityForGenericHook(ctx, req)
 	ctx = ContextWithAgentIdentity(ctx, identity)
+	var auditSessionID string
+	if strings.EqualFold(req.ConnectorName, "hermes") && req.SessionID == "" &&
+		audit.EnvelopeFromContext(ctx).SessionID == "" &&
+		req.HookEventName == "transform_terminal_output" && identity.IdentityVerified {
+		if reg := SharedAgentRegistry(); reg != nil {
+			if session, agent, instance := reg.hermesRecentSession(ctx, identity.IdentityID, time.Now()); session != "" {
+				auditSessionID = session
+				identity.AgentID = firstNonEmpty(identity.AgentID, agent)
+				identity.AgentInstanceID = instance
+				ctx = ContextWithAgentIdentity(ctx, identity)
+			}
+		}
+	}
 	// Refresh the audit correlation envelope with payload-derived
 	// correlation. CorrelationMiddleware snapshots the envelope
 	// from the HTTP headers BEFORE this handler runs; for hook
@@ -2722,6 +2748,9 @@ func enrichAgentHookContext(ctx context.Context, req agentHookRequest) context.C
 	// payload provides a more specific value, so a hook posted on
 	// a different session than the inbound header takes precedence.
 	ctx = refreshAuditEnvelopeFromHook(ctx, req, identity)
+	if auditSessionID != "" {
+		ctx = refreshAuditEnvelopeFromIdentity(ctx, auditSessionID, identity)
+	}
 	// Stamp the connector identity onto the audit envelope so every
 	// downstream surface (audit rows, canonical records, and routed exports) can filter by
 	// connector with the same identity. The hook payload's connector is
@@ -3819,10 +3848,18 @@ func agentHookTrustedActionTool(connectorName, toolName, platformName string) st
 	// no command facts at all: every command rule stayed an unproven
 	// candidate and a CRITICAL finding still returned raw_action=allow on
 	// every platform. This is a name alias, not a capability grant -- the
-	// argument schema is the same {"command": "..."} shell shape.
-	if strings.EqualFold(strings.TrimSpace(connectorName), "kiro") &&
-		strings.EqualFold(strings.TrimSpace(toolName), "execute_bash") {
-		return "shell"
+	// argument schema is the same {"command": "..."} shell shape. On
+	// Windows the kiro-cli --v3 engine (2.35.1) names the same tool
+	// execute_pwsh and runs its command in PowerShell; unmapped, the call
+	// had no command facts and a command-fact block rule was detection-only
+	// (rel-1-0-6:GAP-0589). As shell, the Windows dialect selection reads
+	// it as PowerShell when that reading is complete, as for Copilot's
+	// powershell tool.
+	if strings.EqualFold(strings.TrimSpace(connectorName), "kiro") {
+		switch strings.ToLower(strings.TrimSpace(toolName)) {
+		case "execute_bash", "execute_pwsh":
+			return "shell"
+		}
 	}
 	// Text sent to a running process is judged as shell input (see
 	// agentHookTrustedActionArgs): agy's send_command_input as run_command

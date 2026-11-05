@@ -22,6 +22,18 @@
     ],
     "replays": 0
   },
+  "connectors/cowork": {
+    "videos": [],
+    "images": [
+      "/images/cowork/block-in-cowork-windows.png",
+      "/images/cowork/managed-verify-windows.png",
+      "/images/cowork/setup-cowork-windows.png",
+      "/images/cowork/status-doctor-windows.png",
+      "/images/cowork/tui-overview-cowork-macos.png"
+    ],
+    "demos": [],
+    "replays": 0
+  },
   "connectors/openclaw": {
     "videos": [
       "openclaw",

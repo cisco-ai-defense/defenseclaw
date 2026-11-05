@@ -9,6 +9,18 @@
 # --require-healthy, runs verify) instead of trusting marker files a user
 # could create.
 #
+# --require-healthy also requires verify to report no errors and
+# coverage_complete true (the services are ready and no agent lacks a hook
+# contract or a complete install scan), and, when security_complete is false,
+# every reason verify names for it to be a host-hardening warning:
+# hook_process_fail_open (an agent runs a tool when its hook is killed),
+# unprivileged_user_namespaces and unprivileged_ptrace (routes a stock kernel
+# leaves open). A default install on a stock OS is therefore healthy and
+# detect.sh prints those warnings on stderr. Any other reason (sessions that
+# need a restart, a pending guardian repair, an unreadable enrolled home, an
+# unprotected agent, ...) or a reason list detect.sh cannot read reports
+# unhealthy. --require-security-complete also requires security_complete true.
+#
 # Output formats:
 #   exit (default)  exit 0 and print "DefenseClaw Enterprise <version>" when
 #                   installed (and new enough / healthy); otherwise exit 1 and
@@ -24,9 +36,10 @@
 # requires `enterprise linux tetragon verify --ready-for MODE` to pass; a host
 # that is not ready reports "tetragon-not-ready:<first failing check>".
 #
-# --require-bundle <bundle id | version> also requires a signed policy bundle
 # --require-sessions-protected fails while running agents need a restart to
 # load newly installed managed hooks.
+#
+# --require-bundle <bundle id | version> also requires a signed policy bundle
 # (`enterprise bundle status`): a bundle id (b-<ULID>) must be the current
 # confirmed bundle, a version number must be at most the current version,
 # and the running gateway must enforce the bundle's effective policy digest.
@@ -42,6 +55,7 @@
 # "none 0" when there is nothing to read.
 #
 # Usage: detect.sh [--min-version X.Y.Z] [--require-healthy]
+#                  [--require-security-complete]
 #                  [--require-tetragon consume|observe|enforce]
 #                  [--require-bundle ID|VERSION] [--require-sessions-protected]
 #                  [--format exit|value|jamf]
@@ -54,7 +68,11 @@ DC_SCRIPT_OS=darwin # linux | darwin - the only line that differs between the co
 # ---- MDM settings (flags override) -------------------------------------------
 DC_MIN_VERSION=""       # detect only this version or newer
 DC_MIN_VERSION_SET=0
-DC_REQUIRE_HEALTHY=0    # 1: also require `verify` to pass
+DC_REQUIRE_HEALTHY=0    # 1: also require `verify` to pass with coverage_complete
+DC_REQUIRE_SECURITY_COMPLETE=0 # 1: also require security_complete (implies DC_REQUIRE_HEALTHY)
+# The security_complete reasons that alone leave a host healthy (host
+# hardening a stock OS lacks); not a setting.
+DC_HARDENING_REASONS='hook_process_fail_open unprivileged_user_namespaces unprivileged_ptrace'
 DC_REQUIRE_TETRAGON=""  # consume | observe | enforce: also require Tetragon readiness (Linux)
 DC_REQUIRE_BUNDLE=""    # bundle id (b-<ULID>) or minimum version: also require that signed policy bundle
 DC_REQUIRE_SESSIONS_PROTECTED=0 # 1: no preexisting agent sessions without managed hooks
@@ -273,6 +291,53 @@ dc_json_object() {
         }'
 }
 
+# dc_incomplete_note <verify document> <fallback>: the message of verify's
+# security_incomplete warning, which names the warnings behind a false
+# security_complete or coverage_complete; the fallback when there is none.
+dc_incomplete_note() {
+    note=$(printf '%s' "$1" | awk '
+        BEGIN { RS = "\001" }
+        {
+            s = $0
+            if (!match(s, /"code"[ \t\r\n]*:[ \t\r\n]*"security_incomplete"/)) exit
+            s = substr(s, RSTART + RLENGTH)
+            if (!match(s, /"message"[ \t\r\n]*:[ \t\r\n]*"/)) exit
+            s = substr(s, RSTART + RLENGTH); out = ""
+            while (s != "") {
+                c = substr(s, 1, 1)
+                if (c == "\"") break
+                if (c == "\\") { d = substr(s, 2, 1); out = out (d == "u" ? "\\u" : d); s = substr(s, 3); continue }
+                out = out c; s = substr(s, 2)
+            }
+            sub(/; each warning above says what to do$/, "", out)
+            print out
+        }')
+    printf '%s\n' "${note:-$2}"
+}
+
+# dc_hardening_only <note>: succeed when the security_incomplete note is
+# exactly "security_complete is false because of: <reasons>; coverage_complete
+# is true" and every reason is in DC_HARDENING_REASONS. Anything else (another
+# reason, "and the errors above", the fallback text, more than one line) fails,
+# so --require-healthy fails closed on a note it cannot read.
+dc_hardening_only() {
+    printf '%s\n' "$1" | awk -v allowed="$DC_HARDENING_REASONS" '
+        BEGIN {
+            n = split(allowed, a, " "); for (i = 1; i <= n; i++) ok[a[i]] = 1
+            prefix = "security_complete is false because of: "; suffix = "; coverage_complete is true"; good = 0
+        }
+        NR == 1 {
+            s = $0
+            if (index(s, prefix) != 1) next
+            s = substr(s, length(prefix) + 1)
+            if (length(s) <= length(suffix) || substr(s, length(s) - length(suffix) + 1) != suffix) next
+            n = split(substr(s, 1, length(s) - length(suffix)), r, ", ")
+            good = (n > 0)
+            for (i = 1; i <= n; i++) if (!(r[i] in ok)) good = 0
+        }
+        END { exit (NR == 1 && good) ? 0 : 1 }'
+}
+
 # dc_bundle_line <line>: print the --bundle-status line in the format asked
 # for and exit 0.
 dc_bundle_line() {
@@ -408,6 +473,7 @@ while [ "$#" -gt 0 ]; do
     case "$1" in
         --min-version) DC_MIN_VERSION=${2:-}; DC_MIN_VERSION_SET=1; shift 2 ;;
         --require-healthy) DC_REQUIRE_HEALTHY=1; shift ;;
+        --require-security-complete) DC_REQUIRE_SECURITY_COMPLETE=1; shift ;;
         --require-tetragon) DC_REQUIRE_TETRAGON=${2:-}; shift 2 ;;
         --require-bundle) DC_REQUIRE_BUNDLE=${2:-}; [ -n "$DC_REQUIRE_BUNDLE" ] || DC_REQUIRE_BUNDLE=-; shift 2 ;;
         --require-sessions-protected) DC_REQUIRE_SESSIONS_PROTECTED=1; shift ;;
@@ -433,10 +499,12 @@ if [ -n "$DC_REQUIRE_BUNDLE" ] &&
     exit 2
 fi
 if [ "$DC_BUNDLE_STATUS" = 1 ] &&
-    { [ -n "$DC_MIN_VERSION$DC_REQUIRE_TETRAGON$DC_REQUIRE_BUNDLE" ] || [ "$DC_REQUIRE_HEALTHY" = 1 ] || [ "$DC_REQUIRE_SESSIONS_PROTECTED" = 1 ]; }; then
+    { [ -n "$DC_MIN_VERSION$DC_REQUIRE_TETRAGON$DC_REQUIRE_BUNDLE" ] || [ "$DC_REQUIRE_HEALTHY" = 1 ] ||
+      [ "$DC_REQUIRE_SECURITY_COMPLETE" = 1 ] || [ "$DC_REQUIRE_SESSIONS_PROTECTED" = 1 ]; }; then
     printf 'defenseclaw detect: --bundle-status takes no --min-version or --require-* option\n' >&2
     exit 2
 fi
+[ "$DC_REQUIRE_SECURITY_COMPLETE" = 0 ] || DC_REQUIRE_HEALTHY=1
 if [ -n "$DC_REQUIRE_TETRAGON" ] && [ "$DC_SCRIPT_OS" != linux ]; then
     printf 'defenseclaw detect: --require-tetragon is Linux only (Tetragon runs on Linux)\n' >&2
     exit 2
@@ -481,7 +549,23 @@ if [ "$DC_REQUIRE_HEALTHY" = 1 ]; then
     package_problem=$(dc_package_interrupted)
     [ -z "$package_problem" ] || dc_report 0 unhealthy "$package_problem"
     dc_json_true "$verify" ok || dc_report 0 unhealthy "verify reported problems; run: $gateway enterprise $group verify"
-    dc_json_true "$verify" security_complete || dc_report 0 unhealthy "verify reported incomplete security; run: $gateway enterprise $group verify"
+    # coverage_complete false: a service is not ready, or an installed agent
+    # has no hook contract or a complete install scan. security_complete adds
+    # host hardening a stock OS lacks; requiring it made every default Ubuntu
+    # 24.04 host read unhealthy, so an MDM reinstalled a correct deployment
+    # (GAP-0021). Only those hardening reasons are excused: sessions that need
+    # a restart, a pending guardian repair, an unreadable enrolled home or an
+    # unprotected agent leave coverage_complete true and are real problems.
+    dc_json_true "$verify" coverage_complete ||
+        dc_report 0 unhealthy "verify reported incomplete coverage ($(dc_incomplete_note "$verify" "coverage_complete is false")); run: $gateway enterprise $group verify"
+    if ! dc_json_true "$verify" security_complete; then
+        note=$(dc_incomplete_note "$verify" "security_complete is false")
+        [ "$DC_REQUIRE_SECURITY_COMPLETE" = 0 ] ||
+            dc_report 0 unhealthy "verify reported incomplete security ($note); run: $gateway enterprise $group verify"
+        dc_hardening_only "$note" ||
+            dc_report 0 unhealthy "verify reported incomplete security beyond host hardening ($note); run: $gateway enterprise $group verify"
+        printf 'defenseclaw detect: warning: %s; run: %s enterprise %s verify\n' "$note" "$gateway" "$group" >&2
+    fi
 fi
 [ -z "$DC_REQUIRE_TETRAGON" ] || dc_require_tetragon "$gateway" "$DC_REQUIRE_TETRAGON"
 [ -z "$DC_REQUIRE_BUNDLE" ] || dc_require_bundle "$gateway" "$DC_REQUIRE_BUNDLE"

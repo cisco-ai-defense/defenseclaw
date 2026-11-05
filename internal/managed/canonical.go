@@ -723,6 +723,11 @@ var sqliteSideFileSuffixes = []string{"-wal", "-shm", "-journal"}
 type managedDataTarget struct {
 	path string
 	kind ObjectKind
+	// content marks a file whose bytes a trust decision reads (config.yaml,
+	// the guardian manifest, the install records). On standalone such a file
+	// is never re-ACLed in place while an untrusted principal can write or
+	// owns it (RepairWindowsManagedInstall, GAP-0561).
+	content bool
 }
 
 // targets expands paths into the ordered, de-duplicated object list:

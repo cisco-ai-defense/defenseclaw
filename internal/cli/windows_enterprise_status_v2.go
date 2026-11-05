@@ -18,11 +18,13 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/accountjoin"
 	"os"
 	"sort"
+	"strings"
 
 	"gopkg.in/yaml.v3"
 
 	"github.com/defenseclaw/defenseclaw/internal/config"
 	"github.com/defenseclaw/defenseclaw/internal/enterprisehooks"
+	"github.com/defenseclaw/defenseclaw/internal/enterprisepolicy"
 	"github.com/defenseclaw/defenseclaw/internal/enterprisestatus"
 	"github.com/defenseclaw/defenseclaw/internal/gateway/connector"
 	"github.com/defenseclaw/defenseclaw/internal/managed"
@@ -38,16 +40,22 @@ import (
 
 // windowsEnterpriseStatusV2Inputs are the files the connectors block reads.
 type windowsEnterpriseStatusV2Inputs struct {
-	cfg            *config.Config
-	configErr      error
-	manifest       []enterprisestatus.ConnectorInstall
-	manifestErr    error
-	unprotected    []enterprisehooks.UnprotectedAgent
-	guardian       []enterprisestatus.ConnectorTarget
-	guardianKnown  bool
-	machinePolicy  func(connector string) bool
-	gatewayHealth  func() ([]byte, error)
-	knownConnector func(connector string) bool
+	cfg           *config.Config
+	configErr     error
+	manifest      []enterprisestatus.ConnectorInstall
+	manifestErr   error
+	unprotected   []enterprisehooks.UnprotectedAgent
+	guardian      []enterprisestatus.ConnectorTarget
+	guardianKnown bool
+	machinePolicy func(connector string) bool
+	// machinePolicyStates inspects, read-only, the vendor machine policy
+	// of the named connectors under the installed config (nil: not read).
+	machinePolicyStates func(installed *config.Config, names []string) (map[string]enterprisestatus.MachinePolicyState, error)
+	gatewayHealth       func() ([]byte, error)
+	knownConnector      func(connector string) bool
+	// auditStore resolves the audit store the gateway opens (nil: none);
+	// only the elevated Cowork lookup calls it.
+	auditStore func() (string, error)
 	// accountJoin computes the account join keys (nil: omitted); the
 	// result carries only their summary.
 	accountJoin func() *accountjoin.Report
@@ -65,8 +73,9 @@ var windowsManagedHermesCoverageAudit = func() error {
 
 func readWindowsEnterpriseStatusV2Inputs() windowsEnterpriseStatusV2Inputs {
 	in := windowsEnterpriseStatusV2Inputs{
-		machinePolicy: enterprisehooks.WindowsStandaloneMachinePolicyHook,
-		gatewayHealth: windowsStandaloneGatewayHealth,
+		machinePolicy:       enterprisehooks.WindowsStandaloneMachinePolicyHook,
+		machinePolicyStates: inspectWindowsEnterpriseMachinePolicy,
+		gatewayHealth:       windowsStandaloneGatewayHealth,
 	}
 	registry := connector.NewDefaultRegistry()
 	in.knownConnector = func(name string) bool {
@@ -80,6 +89,7 @@ func readWindowsEnterpriseStatusV2Inputs() windowsEnterpriseStatusV2Inputs {
 		return in
 	}
 	in.accountJoin = func() *accountjoin.Report { return windowsAccountJoinReport(in.cfg, layout) }
+	in.auditStore = func() (string, error) { return windowsEnterpriseAuditStore(layout) }
 	in.manifest, in.manifestErr = readWindowsEnterpriseStatusV2Manifest(layout.ManifestPath)
 	// An unreadable record is already reported by
 	// applyWindowsEnterpriseUnprotectedAgents.
@@ -129,7 +139,12 @@ func readWindowsEnterpriseStatusV2Manifest(path string) ([]enterprisestatus.Conn
 func applyWindowsEnterpriseStatusV2(result *enterprisestatus.Result) {
 	publish := result.Action == "status" || result.Action == "verify"
 	in := windowsEnterpriseStatusV2Read()
-	block := windowsEnterpriseConnectorsBlock(result, in, publish)
+	applyWindowsEnterpriseCoworkStatus(result, in.cfg)
+	var coverage map[string]string
+	if publish {
+		coverage = applyWindowsEnterpriseMachinePolicyEntries(result, in)
+	}
+	block := windowsEnterpriseConnectorsBlock(result, in, coverage, publish)
 	result.AddHookProcessFailureWarnings(block)
 	if !publish {
 		return
@@ -138,11 +153,13 @@ func applyWindowsEnterpriseStatusV2(result *enterprisestatus.Result) {
 	result.OpenShell = enterprisestatus.OpenShellUnsupportedCapability()
 	result.Connectors = block
 	result.Identity = enterprisestatus.IdentityGatewayNotReady()
+	var health []byte
 	if result.Readiness.Gateway && in.gatewayHealth != nil {
 		// A failed read is a gateway that did not report.
-		body, _ := in.gatewayHealth()
-		result.Identity = enterprisestatus.ParseIdentityHealth(body)
+		health, _ = in.gatewayHealth()
+		result.Identity = enterprisestatus.ParseIdentityHealth(health)
 	}
+	result.Cowork = windowsEnterpriseCoworkBlock(result, in.cfg, in.auditStore, block, health)
 	if in.accountJoin != nil {
 		if report := in.accountJoin(); report != nil {
 			summary := report.Summary()
@@ -155,9 +172,19 @@ func applyWindowsEnterpriseStatusV2(result *enterprisestatus.Result) {
 // the Windows hook renderer's (enterprisehooks.ManagedHookFailMode); a
 // connector's hook is in machine policy when the installer reported its
 // machine policy (Codex, Claude Code, Cursor) or it is a runtime-only row.
+// coverage is hooks_installed from each inspected machine policy, used for a
+// connector no account row is counted for (as on Linux and macOS): the one
+// machine-wide Claude Code drop-in is in place before any account enrolls.
+// It is used only once the guardian state was read: every Windows entry
+// whose hooks_installed is known carries targets (the lifecycle schema), and
+// a connector counted from its machine policy has zero of them.
 // Only a published block reports which of its details could not be read.
-func windowsEnterpriseConnectorsBlock(result *enterprisestatus.Result, in windowsEnterpriseStatusV2Inputs, publish bool) map[string]enterprisestatus.ConnectorState {
-	inputs := enterprisestatus.ConnectorInputs{Known: in.knownConnector, Guardian: in.guardian, GuardianKnown: in.guardianKnown}
+func windowsEnterpriseConnectorsBlock(result *enterprisestatus.Result, in windowsEnterpriseStatusV2Inputs, coverage map[string]string, publish bool) map[string]enterprisestatus.ConnectorState {
+	if !in.guardianKnown {
+		coverage = nil
+	}
+	inputs := enterprisestatus.ConnectorInputs{Known: in.knownConnector, Guardian: in.guardian, GuardianKnown: in.guardianKnown,
+		MachinePolicyCoverage: coverage}
 	cfg := in.cfg
 	switch {
 	case in.configErr == nil && cfg != nil:
@@ -196,6 +223,12 @@ func windowsEnterpriseConnectorsBlock(result *enterprisestatus.Result, in window
 		return enterprisehooks.ManagedStatusHookFailMode(cfg, name, "windows", machine[name])
 	}
 	block, hidden := enterprisestatus.BuildConnectors(inputs, failMode)
+	for name := range coverage {
+		if state, ok := block[name]; ok && state.Targets == nil && state.HooksInstalled != enterprisestatus.HooksInstalledUnknown {
+			state.Targets = &enterprisestatus.ConnectorTargets{}
+			block[name] = state
+		}
+	}
 	if state, ok := block["hermes"]; ok && state.Enabled &&
 		(state.Detected == nil || *state.Detected || state.Targets != nil && state.Targets.Total > 0) {
 		state.HooksInstalled = enterprisestatus.HooksInstalledUnknown
@@ -227,4 +260,95 @@ func windowsEnterpriseConnectorsBlock(result *enterprisestatus.Result, in window
 			"they are not plain version strings", hidden))
 	}
 	return block
+}
+
+// applyWindowsEnterpriseMachinePolicyEntries fills, for status and verify,
+// each machine_policy entry's owned_entries, foreign_entries,
+// higher_precedence and conflicts from a read-only inspection of its vendor
+// machine policy files (what `enterprise policy verify` reports), and
+// returns the hooks_installed value each inspected policy gives. The
+// installer's report says only whether a policy is attested in force, so
+// every Windows entry read owned_entries 0 since the entries were added, and
+// the Cowork block, which needs DefenseClaw's Claude Code drop-in in place,
+// said "not configured" beside a complete managed-settings.d
+// 90-defenseclaw.json (cowork-1-0-8 GAP-0028). effective_lock, ownership
+// and lock stay the installer's attestation and settings. A policy that was
+// not read is hooks_installed unknown, as on Linux and macOS
+// (machinePolicyCoverage), never none: the hooks may well be in place.
+func applyWindowsEnterpriseMachinePolicyEntries(result *enterprisestatus.Result, in windowsEnterpriseStatusV2Inputs) map[string]string {
+	if len(result.MachinePolicy) == 0 || in.machinePolicyStates == nil {
+		return nil
+	}
+	names := make([]string, 0, len(result.MachinePolicy))
+	for name := range result.MachinePolicy {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	var inspected map[string]enterprisestatus.MachinePolicyState
+	var err error
+	if in.cfg == nil {
+		err = errors.New("the installed config could not be loaded")
+	} else {
+		inspected, err = in.machinePolicyStates(in.cfg, names)
+	}
+	coverage := make(map[string]string, len(names))
+	var unread []string
+	for _, name := range names {
+		state, ok := inspected[name]
+		if !ok {
+			coverage[name] = enterprisestatus.HooksInstalledUnknown
+			unread = append(unread, name)
+			continue
+		}
+		entry := result.MachinePolicy[name]
+		entry.OwnedEntries, entry.ForeignEntries = state.OwnedEntries, state.ForeignEntries
+		entry.HigherPrecedence = append([]string(nil), state.HigherPrecedence...)
+		entry.Conflicts = append([]string(nil), state.Conflicts...)
+		result.MachinePolicy[name] = entry
+		coverage[name] = entry.HooksInstalled()
+	}
+	if len(unread) > 0 {
+		detail := "it was not inspected"
+		if err != nil {
+			detail = err.Error()
+		}
+		result.AddWarning(enterprisestatus.CodeStatusDetailUnavailable, fmt.Sprintf("machine_policy: the vendor machine policy of %s "+
+			"could not be read (%s), so its owned_entries and foreign_entries are not reported", strings.Join(unread, ", "), detail))
+	}
+	return coverage
+}
+
+// inspectWindowsEnterpriseMachinePolicy is the read-only machine policy
+// inspection of the installed standalone config, with the options the
+// guardian publishes from.
+func inspectWindowsEnterpriseMachinePolicy(installed *config.Config, names []string) (map[string]enterprisestatus.MachinePolicyState, error) {
+	opts, _, standalone, err := standaloneGuardianOptionsFor(installed)
+	if err != nil {
+		return nil, err
+	}
+	if !standalone {
+		return nil, errors.New("the installed config is not a standalone deployment's")
+	}
+	return windowsEnterpriseMachinePolicyStates(opts, names)
+}
+
+// windowsEnterpriseMachinePolicyStates verifies each connector on its own,
+// so one unreadable policy leaves the others reported; a connector whose
+// inspection failed is left out.
+func windowsEnterpriseMachinePolicyStates(opts enterprisepolicy.Options, names []string) (map[string]enterprisestatus.MachinePolicyState, error) {
+	states := make(map[string]enterprisestatus.MachinePolicyState, len(names))
+	var errs []error
+	for _, name := range names {
+		verified, err := enterprisepolicy.VerifyAll(opts, []string{name})
+		if err != nil {
+			errs = append(errs, err)
+			continue
+		}
+		for _, state := range verified.States {
+			if state.Connector == name && state.Route == enterprisepolicy.RouteMachinePolicy {
+				states[name] = state.ToStatus()
+			}
+		}
+	}
+	return states, errors.Join(errs...)
 }

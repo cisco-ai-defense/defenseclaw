@@ -203,6 +203,10 @@ OpenClaw does not run in an OpenShell sandbox. The legacy standalone sandbox tha
 - If you move OpenClaw's gateway port, run `defenseclaw setup openclaw` again.
 - OpenClaw does not run in an OpenShell sandbox. OpenShell support is pending in the [capability matrix](/docs/connectors/capability-matrix).
 
+## Troubleshooting
+
+If a prompt reports `Unknown model` for a still-installed provider after OpenClaw removes or disables another extension, wait for the plugin reload to finish and retry. If the error remains, run `openclaw models list --refresh --provider amazon-bedrock` (substitute your provider name) and retry.
+
 ## Disable
 
 For a per-user, single-connector install:

@@ -12,7 +12,6 @@ import (
 	"net"
 	"net/http"
 	"strconv"
-	"strings"
 	"sync/atomic"
 	"time"
 )
@@ -65,15 +64,6 @@ func parseConnectedLoopbackTuple(local, remote string) (*net.TCPAddr, *net.TCPAd
 	return client, server, nil
 }
 
-// connectedSocketNameMatches accepts lsof's optional protocol and state text
-// while requiring both TCP endpoint ports to match exactly. A prefix match
-// could mistake a different same-account connection for the accepted socket.
-func connectedSocketNameMatches(name, want string) bool {
-	name = strings.TrimPrefix(name, "TCP ")
-	tuple, _, _ := strings.Cut(strings.TrimSpace(name), " ")
-	return tuple == want
-}
-
 // PerUserHookReply is the bounded response sent back to an in-agent plugin.
 type PerUserHookReply struct {
 	Status     int    `json:"status"`
@@ -120,7 +110,22 @@ var errPerUserPeerCheckUnfinished = fmt.Errorf("%w: its owner was still being ch
 // listener's owner is not proven yet (verifiedPerUserHTTPClient). The dial
 // outlives a canceled request, so only this mark says the try had reached a
 // listener when connectBy ended it.
-type perUserPeerCheck struct{ pending atomic.Bool }
+//
+// ends is the proven connection's local and remote address, set once its
+// owner is proven: the restart-window proof of a call with no decision reads
+// which process holds it (perUserRestartWindowProof, rel-1-0-6 GAP-0295).
+type perUserPeerCheck struct {
+	pending atomic.Bool
+	ends    atomic.Pointer[perUserConnEnds]
+}
+
+// perUserConnEnds is the client and server address of one proven per-user
+// gateway connection, and when its owner was proven (the gateway had
+// accepted it).
+type perUserConnEnds struct {
+	local, remote net.Addr
+	at            time.Time
+}
 
 type perUserPeerCheckKey struct{}
 
@@ -146,10 +151,10 @@ const PerUserPostPeerUnverifiedExit = 8
 
 // PerUserPostNoAnswerExit is the exit status of `hook-post` for a call that
 // got no answer before its deadline and no HTTP status at all
-// (PerUserPostNoAnswer). The shell hooks read it as curl's timeout (28): a
-// call whose gateway refused it a moment before is the restart wait running
-// out of the call's budget, an outage (rel-1-0-6 GAP-0295); any other is the
-// hung-gateway refusal. An older shell hook reads it as any other failure.
+// (PerUserPostNoAnswer). The command emits it only after a verified
+// connection. A shell hook closes that no-status deadline, including after
+// a prior refusal.
+// An older shell hook reads it as any other failure.
 const PerUserPostNoAnswerExit = 9
 
 // PerUserPostRestartNoAnswerExit is the exit status of `hook-post` for such a
@@ -296,6 +301,7 @@ func verifiedPerUserHTTPClient(
 				}
 				if check != nil {
 					check.pending.Store(false)
+					check.ends.Store(&perUserConnEnds{local: conn.LocalAddr(), remote: conn.RemoteAddr(), at: time.Now()})
 				}
 				// hook-post reads the process behind the proven socket, for
 				// a no-answer during a restart (PerUserGatewayRestartProven).

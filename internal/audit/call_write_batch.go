@@ -298,8 +298,18 @@ func (s *Store) writeCallBatch(ctx context.Context, writes []*deferredCallWrite)
 		writeCtx = context.WithoutCancel(ctx)
 	}
 	call := &groupedWrite{ctx: writeCtx, run: func(ctx context.Context, tx *sql.Tx) error {
+		direct := groupedWriteDirect(ctx)
 		for _, write := range writes {
 			write.ran = false
+			if direct {
+				// The savepoint-free attempt: a failed write fails the
+				// attempt, which runs again with a savepoint per write.
+				if err := write.run(groupedWriteCtx{Context: ctx, values: write.ctx}, tx); err != nil {
+					return err
+				}
+				write.ran = true
+				continue
+			}
 			if _, err := tx.ExecContext(ctx, `SAVEPOINT call_write`); err != nil {
 				return groupedTxLost(err)
 			}
@@ -318,34 +328,12 @@ func (s *Store) writeCallBatch(ctx context.Context, writes []*deferredCallWrite)
 			write.ran = true
 		}
 		return nil
-	}, data: writes}
-	_ = s.callGroup.do(call, func(batch []*groupedWrite) {
-		release, err := s.acquireReady()
-		if err != nil {
-			for _, item := range batch {
-				item.err = err
-			}
-			return
+	}, committed: func() {
+		for _, write := range writes {
+			write.done = write.ran
 		}
-		defer release()
-		_ = s.runGroupedTx(batch, groupedTxHooks{
-			op: "hook_call_transaction",
-			begin: func(err error) error {
-				return fmt.Errorf("audit: begin hook call transaction: %w", err)
-			},
-			commit: func(_ context.Context, tx *sql.Tx, ran []*groupedWrite) error {
-				if err := tx.Commit(); err != nil {
-					return fmt.Errorf("audit: commit hook call transaction: %w", err)
-				}
-				for _, item := range ran {
-					for _, write := range item.data.([]*deferredCallWrite) {
-						write.done = write.ran
-					}
-				}
-				return nil
-			},
-		})
-	})
+	}}
+	_ = s.callGroup.do(call, s.runCallGroupBatch)
 	for _, write := range writes {
 		if write.done {
 			if write.committed != nil {
@@ -361,6 +349,50 @@ func (s *Store) writeCallBatch(ctx context.Context, writes []*deferredCallWrite)
 		write.outcome.record(err)
 		write.report.done(err)
 	}
+}
+
+// runCallGroupBatch runs one transaction of the hook-call write group: the
+// flushes of concurrent calls' write batches (writeCallBatch) and the other
+// writes a hook call makes before its answer (callGroupWrite). Every write in
+// it learns of the commit through its committed callback.
+func (s *Store) runCallGroupBatch(batch []*groupedWrite) {
+	release, err := s.acquireReady()
+	if err != nil {
+		for _, item := range batch {
+			item.err = err
+		}
+		return
+	}
+	defer release()
+	_ = s.runGroupedTx(batch, groupedTxHooks{
+		op: "hook_call_transaction",
+		begin: func(err error) error {
+			return fmt.Errorf("audit: begin hook call transaction: %w", err)
+		},
+		commit: func(_ context.Context, tx *sql.Tx, ran []*groupedWrite) error {
+			if err := tx.Commit(); err != nil {
+				return fmt.Errorf("audit: commit hook call transaction: %w", err)
+			}
+			for _, item := range ran {
+				if item.committed != nil {
+					item.committed()
+				}
+			}
+			return nil
+		},
+	})
+}
+
+// callGroupWrite runs one durable write of a hook call in the hook-call write
+// group, so concurrent calls' writes share a transaction instead of waiting
+// for the writer connection one commit at a time (r108 SWEEP-100). It returns
+// once run's statements are committed, or with run's error and nothing of it
+// stored. run may run more than once (a busy store, or the savepoint form of
+// a batch after another write failed), each time in a fresh transaction or
+// savepoint, so it must keep its results in variables it sets on every run.
+// Secure Client keeps its own transaction for each write (useGroup false).
+func (s *Store) callGroupWrite(ctx context.Context, run func(ctx context.Context, tx *sql.Tx) error) error {
+	return s.callGroup.do(&groupedWrite{ctx: ctx, run: run}, s.runCallGroupBatch)
 }
 
 // deferAppend queues one event-history append on ctx's open batch.

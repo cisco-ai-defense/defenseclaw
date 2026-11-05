@@ -496,6 +496,7 @@ func sandboxHookManagedV8(ctx context.Context) audit.SandboxManagedV8 {
 func hookRequestAuditExtra(ctx context.Context, profile connector.HookProfile) map[string]string {
 	extra := mergeHookEnvelopeExtra(hookCompatibilityExtra(profile), sandboxHookAuditExtra(ctx))
 	extra = mergeHookEnvelopeExtra(extra, agentHostExtra(ctx))
+	extra = mergeHookEnvelopeExtra(extra, coworkSurfaceAuditExtra(ctx))
 	if reason := resolvedWritesFromContext(ctx)[hookpaths.UnprovenReasonKey]; hookpaths.UnprovenWriteTitle(reason) != "" {
 		extra = mergeHookEnvelopeExtra(extra, map[string]string{"unresolved_command": reason})
 	}

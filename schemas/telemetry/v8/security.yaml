@@ -2350,6 +2350,8 @@ groups:
   attributes:
   - ref: defenseclaw.user.enrollment
     requirement_level: recommended
+  - ref: defenseclaw.agent.surface
+    requirement_level: optional
   body_fields:
   - ref: defenseclaw.hook.event
     requirement_level: required

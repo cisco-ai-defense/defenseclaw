@@ -1001,7 +1001,56 @@ func runEnterpriseHookReconcileOnceStandaloneUnix(ctx context.Context) (enterpri
 			}
 		}
 	}
-	outcomes := dispatchEnterpriseHookStandaloneJobs(ctx, jobs)
+	// A filesystem pass must not spend its worker slots repeating failures
+	// from unrelated accounts before it can repair the account named by the
+	// event. Keep each omitted row failed; its own event or retry still runs
+	// its worker. A changed manifest or an overflow gets a full pass.
+	cachedFailures := map[int]enterpriseHookStandaloneOutcome{}
+	jobsToRun := make(map[int]*enterpriseHookWorkerJob, len(jobs))
+	for uid, job := range jobs {
+		jobsToRun[uid] = job
+	}
+	if prior, ok := ctx.Value(enterpriseHookWatchPriorRunKey{}).(enterpriseHookReconcileRun); ok &&
+		prior.ManifestSHA256 == manifestSHA256 && !enterpriseHookReconcileRecheckAll {
+		priorFailures := map[string]string{}
+		for _, row := range prior.Rows {
+			if !row.OK && !row.Pending && row.Error != "" {
+				priorFailures[enterpriseHookProtectedTargetKey(row)] = row.Error
+			}
+		}
+		for uid, job := range jobs {
+			if recheckAccounts[uid] || enterpriseHookRecheckTouches(job.Account.Home) {
+				continue
+			}
+			failures := map[int]enterpriseHookStandaloneOutcome{}
+			for _, target := range job.Request.Targets {
+				if target.Mode != enterpriseHookWorkerModeVerifyOrRepair || target.Index >= len(rows) {
+					failures = nil
+					break
+				}
+				err := priorFailures[enterpriseHookProtectedTargetKey(rows[target.Index])]
+				if err == "" {
+					failures = nil
+					break
+				}
+				failures[target.Index] = enterpriseHookStandaloneOutcome{err: err}
+			}
+			if len(failures) == 0 {
+				continue
+			}
+			for index, outcome := range failures {
+				cachedFailures[index] = outcome
+			}
+			delete(jobsToRun, uid)
+		}
+	}
+	outcomes := dispatchEnterpriseHookStandaloneJobs(ctx, jobsToRun)
+	if err := ctx.Err(); err != nil {
+		return run, err
+	}
+	for index, outcome := range cachedFailures {
+		outcomes[index] = outcome
+	}
 	for _, index := range codexFeatureOnly {
 		if outcome := outcomes[index]; !outcome.ok && !outcome.pending {
 			fmt.Fprintf(enterpriseHookWorkerLog, "[hook-guardian] warn: codex: the user features.hooks preference was not removed: %s\n",

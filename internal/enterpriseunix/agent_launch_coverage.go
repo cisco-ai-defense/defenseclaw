@@ -16,7 +16,9 @@ import (
 	"strconv"
 	"strings"
 	"syscall"
+	"time"
 
+	"github.com/defenseclaw/defenseclaw/internal/agentprobe"
 	"github.com/defenseclaw/defenseclaw/internal/enterprisehooks"
 	"github.com/defenseclaw/defenseclaw/internal/enterprisestatus"
 	"github.com/defenseclaw/defenseclaw/internal/gateway/connector"
@@ -25,6 +27,8 @@ import (
 
 const codeManagedLaunchUninspected = "managed_launch_uninspected"
 const codeManagedLaunchAuditUnavailable = "managed_launch_audit_unavailable"
+
+var waitManagedHermesVersion = agentprobe.WaitManagedHermesVersion
 
 func pluginLaunchConnectorName(name string) string {
 	if name == "kiro-cli" {
@@ -88,6 +92,58 @@ func (l *lifecycle) describePluginLaunchCoverage(ctx context.Context, record *De
 		}
 		return
 	}
+	if env.GOOS == "linux" {
+		// An enumerator can start another version command while the previous
+		// one finishes. Give each observed command its own bounded wait, with
+		// a fixed cap for the complete verification pass.
+		deadline := time.Now().Add(2 * agentprobe.VersionProbeWait)
+		seen := map[int]bool{}
+	probeLoop:
+		for {
+			checked := false
+			unfinished := map[int]bool{}
+			for _, session := range sessions {
+				remaining := time.Until(deadline)
+				if session.Agent != "hermes" || !session.EnvKnown || seen[session.PID] ||
+					!strings.HasPrefix(filepath.Base(session.Env["HERMES_HOME"]), "dc-agent-probe-") ||
+					remaining <= 0 {
+					continue
+				}
+				seen[session.PID] = true
+				checked = true
+				_, home := env.pluginLaunchAccount(ctx, session.UID)
+				if home != "" {
+					remaining = time.Until(deadline)
+					if remaining > agentprobe.VersionProbeWait {
+						remaining = agentprobe.VersionProbeWait
+					}
+					if remaining > 0 {
+						if !waitManagedHermesVersion(env.P("/proc"), session.PID, home, remaining) {
+							unfinished[session.PID] = true
+						}
+					}
+				}
+			}
+			if !checked {
+				break
+			}
+			// A version command can finish as the next one starts. Classify
+			// only the snapshot after all newly seen candidates are checked.
+			sessions, err = env.linuxAgentSessionsWithError()
+			if err != nil {
+				result.AddError("managed_launch_scan_unknown", "could not rescan running agent launches: "+err.Error())
+				result.MarkCoverageIncomplete("managed_launch_scan_unknown")
+				return
+			}
+			for _, session := range sessions {
+				if unfinished[session.PID] {
+					// Keep a process that remained live after its own wait
+					// reportable, even if another probe also appeared.
+					break probeLoop
+				}
+			}
+		}
+	}
 	claudeParents := map[int]bool{}
 	for _, session := range sessions {
 		if session.Agent == "claude" && session.PPID > 0 {
@@ -118,9 +174,17 @@ func (l *lifecycle) describePluginLaunchCoverage(ctx context.Context, record *De
 func (l *lifecycle) describePluginLaunchSession(ctx context.Context, session agentSession, name string) {
 	env, result := l.env, l.result
 	who, home := env.pluginLaunchAccount(ctx, session.UID)
-	reason := ""
+	reason, detail := "", ""
 	if name == "claudecode" {
 		reason = claudeManagedLaunchCoverage(session.Args, session.Executable)
+		if reason == "claude_version_unverified" {
+			// Claude Desktop's engine build (Cowork, the Code tab) is in the
+			// user's own folder: it is identified by its code signature.
+			if engine, ok := claudeDesktopEngineBuild(env.GOOS, home, session.Executable); ok {
+				verdict := l.claudeDesktopVerdictFor(ctx, engine, session.UID)
+				reason, detail = verdict.reason, verdict.detail
+			}
+		}
 	} else {
 		reason = enterprisestatus.PluginLaunchCoverage(name, session.Args, session.Env, session.EnvKnown, home)
 	}
@@ -130,7 +194,27 @@ func (l *lifecycle) describePluginLaunchSession(ctx context.Context, session age
 	if reason == "" {
 		return
 	}
-	message := fmt.Sprintf("user %s runs %s (pid %d): %s; its managed hook or plugin load is not proven, so tool calls in this session may be uninspected. Close this session and restart without the bypass", who, name, session.PID, launchCoverageExplanation(reason))
+	explanation := launchCoverageExplanation(reason)
+	if detail != "" {
+		explanation += " (" + detail + ")"
+	}
+	message := fmt.Sprintf("user %s runs %s (pid %d): %s; its managed hook or plugin load is not proven, so tool calls in this session may be uninspected. Close this session and restart without the bypass", who, name, session.PID, explanation)
+	if env.GOOS == "linux" && name == "hermes" {
+		arg0 := ""
+		if len(session.Args) > 0 {
+			arg0 = filepath.Base(session.Args[0])
+			if len(arg0) > 80 {
+				arg0 = arg0[:80]
+			}
+		}
+		image := filepath.Base(session.Executable)
+		if session.Executable == "" {
+			image = "unknown"
+		}
+		versionArgument := len(session.Args) > 0 && session.Args[len(session.Args)-1] == "--version"
+		message += fmt.Sprintf(" Observed process identity: parent pid %d, started %s, image %q, argv0 %q, version argument %t.",
+			session.PPID, session.Started.UTC().Format(time.RFC3339Nano), image, arg0, versionArgument)
+	}
 	result.AddWarning(codeManagedLaunchUninspected, message)
 	result.MarkCoverageIncomplete(codeManagedLaunchUninspected)
 	if l.opts.Action == ActionVerify {
@@ -200,6 +284,12 @@ func launchCoverageExplanation(reason string) string {
 		return "the process arguments could not be verified"
 	case "claude_npm_launch_unverified":
 		return "the running Claude Code npm script has an unsupported or unreadable managed hook contract"
+	case reasonClaudeDesktopUnsigned:
+		return "the running Claude Desktop engine build (Cowork or the Code tab) is in the user's own folder, and its code signature does not verify as Anthropic's (Developer ID team Q6L2SF6YDW, identifier com.anthropic.claude-code), so it is an unidentified, user-writable engine"
+	case reasonClaudeDesktopLinuxUnsigned:
+		return "the running Claude Desktop engine build (Cowork or the Code tab) is in the user's own folder (~/.config/Claude/claude-code, or Claude-3p for third-party inference), and Linux builds carry no vendor code signature, so it is an unidentified, user-writable engine"
+	case reasonClaudeDesktopVersionMismatch:
+		return "the running Claude Desktop engine build's signed Info.plist does not name the version of the folder it runs from"
 	case "claude_version_unverified":
 		return "the running Claude Code build is not identified as a release with a verified managed hook contract (it is older, unrecognized, or was replaced on disk by an update after it started)"
 	default:

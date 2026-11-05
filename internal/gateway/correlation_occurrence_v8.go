@@ -591,6 +591,60 @@ func hookToolCorrelationTerminalStatus(
 	}
 }
 
+// hookReceiptFollowUpWait bounds how long a hook's answer waits for the
+// acceptance mark of its correlation receipt (finalizeHookCorrelationReceipt)
+// after its audit row committed. The mark only authorizes the suppression of
+// an exact replay; the decision and its audit row are durable before it. A
+// mark still waiting for the audit writer when the bound passes finishes in
+// the background within agentHookPersistGrace, and a replay that arrives
+// before it is evaluated and recorded again, as after a crash between the two
+// commits. Under a 100 calls/s flood the mark, one more write per call, held
+// answers behind the writer queue (r108 SWEEP-100). A var so tests can
+// shorten it.
+var hookReceiptFollowUpWait = 500 * time.Millisecond
+
+// finalizeHookCorrelationReceiptBounded marks the receipt accepted, waiting
+// at most hookReceiptFollowUpWait for it outside Secure Client, which keeps
+// waiting for the mark as before.
+func (a *APIServer) finalizeHookCorrelationReceiptBounded(
+	ctx context.Context,
+	receipt *audit.CorrelationReceiptLocator,
+	connectorName, event string,
+) {
+	if receipt == nil {
+		return
+	}
+	report := func(err error) {
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "[gateway] hook receipt finalization failed connector=%s event=%s: %v\n",
+				connectorName, event, err)
+		}
+	}
+	if cfg := a.decisionConfig(ctx); cfg != nil && cfg.SecureClientIntegration() {
+		report(a.finalizeHookCorrelationReceipt(ctx, receipt))
+		return
+	}
+	markCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), agentHookPersistGrace)
+	done := make(chan error, 1)
+	go func() {
+		defer cancel()
+		defer func() {
+			if recovered := recover(); recovered != nil {
+				done <- fmt.Errorf("receipt finalization panicked: %v", recovered)
+			}
+		}()
+		done <- a.finalizeHookCorrelationReceipt(markCtx, receipt)
+	}()
+	timer := time.NewTimer(hookReceiptFollowUpWait)
+	defer timer.Stop()
+	select {
+	case err := <-done:
+		report(err)
+	case <-timer.C:
+		go func() { report(<-done) }()
+	}
+}
+
 // finalizeHookCorrelationReceipt authorizes exact replay suppression only
 // after the handler's canonical local audit row has committed. Keeping this
 // marker separate from the occurrence transaction makes a crash between

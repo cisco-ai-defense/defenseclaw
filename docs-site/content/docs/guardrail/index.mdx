@@ -220,7 +220,7 @@ Human approval is off by default. Its default minimum severity is HIGH. Change t
 
 ### Fail mode
 
-The hook fail mode decides what happens when the gateway cannot answer (unreachable, bad response, authentication failure). On a per-user install with no saved mode, a gateway that is not running follows the policy tier: the default and permissive policies let the call run with a warning and a record, the strict policy blocks it; every other failure blocks. On a managed host the default is `closed` and an administrator can choose `open` for an outage only. See [Fail modes](/docs/reference/fail-modes#per-user-installs).
+The hook fail mode decides what happens when the gateway cannot answer (unreachable, bad response, authentication failure). On a per-user install with no saved mode, a gateway that is not running follows the policy tier: the default and permissive policies let the call run with a warning and a record, while the strict policy blocks it. A verified gateway that gives no final decision, an answered failure, or a local failure blocks. On a managed host the default is `closed` and an administrator can choose `open` for an outage only. See [Fail modes](/docs/reference/fail-modes#per-user-installs).
 
 ### Which agents can ask
 
@@ -338,6 +338,34 @@ Use `--judge-provider vertex_ai` with the `--judge-vertex-*` flags, or `--judge-
 </Tabs>
 
 ## A judge on a local model
+
+### Lemonade and Gemma 4
+
+For Gemma 4 served by Lemonade's OpenAI-compatible endpoint, the judge can
+disable the model's thinking mode so its bounded response contains the
+classification. Point `base_url` at your Lemonade server:
+
+```yaml
+guardrail:
+  judge:
+    enabled: true
+    llm:
+      provider: openai-compatible
+      model: gemma-4
+      base_url: http://127.0.0.1:8000/v1
+      api_key_env: LEMONADE_API_KEY
+    extra_body:
+      chat_template_kwargs:
+        enable_thinking: false
+```
+
+Set `LEMONADE_API_KEY` in the environment before starting the gateway;
+the OpenAI-compatible client needs a key value even if the local server
+does not use it. The option is also available through `defenseclaw config set
+guardrail.judge.extra_body --json '{"chat_template_kwargs":{"enable_thinking":false}}'`.
+Use `defenseclaw config get guardrail.judge.extra_body` to inspect it and
+`defenseclaw config validate` to check the saved configuration. It affects
+only the judge's OpenAI-compatible chat requests.
 
 A judge on a local model (Ollama, vLLM or LM Studio on your own machine)
 answers one call at a time, so judge calls queue behind each other. With the
@@ -812,6 +840,14 @@ The message reads `<connector>'s agent changed`.
 **Fix.** Restart the session.
 
 **Check.** The message no longer appears.
+
+### Cowork says "DefenseClaw blocked this: its Claude Code hook script is missing or cannot be run"
+
+**Cause.** The DefenseClaw plugin that `defenseclaw setup cowork` added to your Claude account is still installed, but the hook script it runs is gone: `defenseclaw uninstall --all`, `defenseclaw reset`, a deleted data folder or a moved home folder. The plugin blocks Cowork tool calls until the script is back or the plugin is removed. On Windows the notice names the hook launcher instead of the script.
+
+**Fix.** Either install DefenseClaw again and run `defenseclaw setup cowork`, then upload the new zip. Or remove the plugin: in Claude Desktop open **Customize > Plugins**, then the **...** menu on DefenseClaw, and choose **Remove**. See [Remove the Cowork plugin](/docs/connectors/cowork#remove).
+
+**Check.** A Cowork tool call runs, or `defenseclaw status` shows the **Cowork** row as protected.
 
 ### Every tool call is blocked while the gateway is down
 

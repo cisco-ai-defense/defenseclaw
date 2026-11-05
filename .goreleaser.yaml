@@ -81,6 +81,26 @@ builds:
     ldflags:
       - -s -w -buildid=defenseclaw-hook-post-{{.Commit}}-{{.Os}}-{{.Arch}} -X main.version={{.Version}} -X main.commit={{.Commit}} -X main.date={{.Date}}
 
+  - id: defenseclaw-hook-user-posix
+    main: ./cmd/defenseclaw-hook-user
+    binary: defenseclaw-hook-user
+    env:
+      - CGO_ENABLED=0
+    goos:
+      - linux
+      - darwin
+    goarch:
+      - amd64
+      - arm64
+    ignore:
+      - goos: darwin
+        goarch: amd64
+    flags:
+      - -trimpath
+      - -buildvcs=false
+    ldflags:
+      - -s -w -buildid=defenseclaw-hook-user-{{.Commit}}-{{.Os}}-{{.Arch}} -X main.version={{.Version}} -X main.commit={{.Commit}} -X main.date={{.Date}}
+
   - id: defenseclaw-hook
     main: ./cmd/defenseclaw-hook
     binary: defenseclaw-hook
@@ -243,6 +263,7 @@ archives:
     ids:
       - defenseclaw
       - defenseclaw-hook-post
+      - defenseclaw-hook-user-posix
       - defenseclaw-acp-posix
       - defenseclaw-sensor-helper-posix
     formats:

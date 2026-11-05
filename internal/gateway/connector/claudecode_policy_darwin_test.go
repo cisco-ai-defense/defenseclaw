@@ -6,6 +6,7 @@
 package connector
 
 import (
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
@@ -110,6 +111,53 @@ func TestLoadClaudeCodeDarwinManagedPreferencesMissingIsAbsent(t *testing.T) {
 	sources, err := loadClaudeCodeOSManagedSettings()
 	if err != nil || sources.admin != nil || sources.userFallback != nil {
 		t.Fatalf("missing managed preferences = (%#v, %v)", sources, err)
+	}
+}
+
+func TestGAP0326ManagedPreferenceConversionReusesUnchangedContent(t *testing.T) {
+	f := newManagedPreferencesFixture(t, "alice")
+	path := f.write(t, "com.anthropic.claudecode.plist", `{"allowManagedHooksOnly":true}`)
+	conversions := 0
+	managedPreferencesConverter = func(plist []byte) ([]byte, error) {
+		conversions++
+		return plist, nil
+	}
+	for range 2 {
+		sources, err := claudeCodeOSManagedSettingsLoader()
+		if err != nil || sources.admin == nil || sources.admin.settings["allowManagedHooksOnly"] != true {
+			t.Fatalf("unchanged policy = (%#v, %v)", sources, err)
+		}
+	}
+	if conversions != 1 {
+		t.Fatalf("unchanged policy conversions = %d, want 1", conversions)
+	}
+	if err := os.WriteFile(path, []byte(`{"allowManagedHooksOnly":false}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	sources, err := claudeCodeOSManagedSettingsLoader()
+	if err != nil || sources.admin == nil || sources.admin.settings["allowManagedHooksOnly"] != false || conversions != 2 {
+		t.Fatalf("changed policy = (%#v, %v), conversions = %d", sources, err, conversions)
+	}
+}
+
+func TestGAP0326FailedManagedPreferenceConversionRetries(t *testing.T) {
+	f := newManagedPreferencesFixture(t, "alice")
+	f.write(t, "com.anthropic.claudecode.plist", `{"allowManagedHooksOnly":true}`)
+	conversions := 0
+	managedPreferencesConverter = func(plist []byte) ([]byte, error) {
+		conversions++
+		if conversions == 1 {
+			return nil, errors.New("conversion unavailable")
+		}
+		return plist, nil
+	}
+	first, err := claudeCodeOSManagedSettingsLoader()
+	if err != nil || first.admin != nil {
+		t.Fatalf("first policy = (%#v, %v)", first, err)
+	}
+	second, err := claudeCodeOSManagedSettingsLoader()
+	if err != nil || second.admin == nil || second.admin.settings["allowManagedHooksOnly"] != true || conversions != 2 {
+		t.Fatalf("retried policy = (%#v, %v), conversions = %d", second, err, conversions)
 	}
 }
 

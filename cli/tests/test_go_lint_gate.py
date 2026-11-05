@@ -63,11 +63,16 @@ def test_go_lint_runs_vet_then_golangci_lint() -> None:
 
 def test_ci_go_lint_has_the_history_for_changed_lines() -> None:
     ci = yaml.safe_load((ROOT / ".github/workflows/ci.yml").read_text(encoding="utf-8"))
-    steps = ci["jobs"]["go-lint"]["steps"]
+    job = ci["jobs"]["go-lint"]
+    assert job["timeout-minutes"] == 15
+    steps = job["steps"]
     checkout = next(step for step in steps if str(step.get("uses", "")).startswith("actions/checkout@"))
-    assert checkout["with"]["fetch-depth"] == 0
+    assert checkout["with"]["fetch-depth"] == "${{ github.event_name == 'pull_request' && 2 || 0 }}"
+    assert checkout["with"]["persist-credentials"] is False
     lint = next(step for step in steps if step.get("run") == "make go-lint")
-    assert lint["env"] == {"GOLANGCI_LINT_BASE": "origin/${{ github.base_ref || 'main' }}"}
+    assert lint["env"] == {
+        "GOLANGCI_LINT_BASE": "${{ github.event_name == 'pull_request' && 'HEAD^1' || 'origin/main' }}"
+    }
 
 
 needs_make = pytest.mark.skipif(

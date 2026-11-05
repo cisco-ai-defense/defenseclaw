@@ -1022,6 +1022,30 @@
       "since": "0.7.0"
     },
     {
+      "name": "DEFENSECLAW_COWORK_NO_SYSTEMD",
+      "category": "test_fixture",
+      "purpose": "Makes the packaged Linux service installer start its helper and gateway as detached processes under a cgroup budget instead of systemd units, so the installer test covers that start path on a runner that does run systemd. The installer already uses this path on its own when /run/systemd/system is absent.",
+      "default": "unset",
+      "accepted_values": [
+        "1",
+        "unset"
+      ],
+      "security_impact": "none",
+      "surface_in_doctor": false,
+      "managed": "ignore",
+      "consumers": [
+        {
+          "location": "packaging/cowork-vm/install.sh",
+          "description": "Reads it when it chooses between systemd units and detached processes; only the value 1 selects detached processes"
+        },
+        {
+          "location": "packaging/cowork-vm/test-install.sh",
+          "description": "The installer test sets it to cover the no-systemd start"
+        }
+      ],
+      "since": "1.0.8"
+    },
+    {
       "name": "DEFENSECLAW_CURSOR_CONFIG_HOME",
       "category": "upgrade_internal",
       "purpose": "Carries the exact Cursor configuration home already captured and validated by the native Windows Setup transaction into its isolated connector maintenance child. The child converts it to the hidden --config-home binding; Cursor itself never reads this variable.",
@@ -2352,6 +2376,106 @@
       "since": "1.0.3"
     },
     {
+      "name": "DEFENSECLAW_HOOK_RATE_PROBE",
+      "category": "test_fixture",
+      "purpose": "Set to 1 to run TestHookRateProbe, the in-process open-loop SWEEP-100 hook rate probe; unset or any other value skips it.",
+      "default": "unset",
+      "accepted_values": [
+        "1",
+        "unset"
+      ],
+      "security_impact": "none",
+      "surface_in_doctor": false,
+      "managed": "ignore",
+      "consumers": [
+        {
+          "location": "internal/gateway/hook_rate_probe_test.go",
+          "description": "TestHookRateProbe reads it to configure the opt-in in-process hook rate probe (R109-PERF-WAL)."
+        }
+      ],
+      "since": "1.0.8"
+    },
+    {
+      "name": "DEFENSECLAW_HOOK_RATE",
+      "category": "test_fixture",
+      "purpose": "Offered benign Claude Code PreToolUse calls per second for TestHookRateProbe (default 100).",
+      "default": "unset",
+      "accepted_values": [
+        "positive integer",
+        "unset"
+      ],
+      "security_impact": "none",
+      "surface_in_doctor": false,
+      "managed": "ignore",
+      "consumers": [
+        {
+          "location": "internal/gateway/hook_rate_probe_test.go",
+          "description": "TestHookRateProbe reads it to configure the opt-in in-process hook rate probe (R109-PERF-WAL)."
+        }
+      ],
+      "since": "1.0.8"
+    },
+    {
+      "name": "DEFENSECLAW_HOOK_RATE_SECONDS",
+      "category": "test_fixture",
+      "purpose": "Length in seconds of the TestHookRateProbe window (default 120).",
+      "default": "unset",
+      "accepted_values": [
+        "positive integer",
+        "unset"
+      ],
+      "security_impact": "none",
+      "surface_in_doctor": false,
+      "managed": "ignore",
+      "consumers": [
+        {
+          "location": "internal/gateway/hook_rate_probe_test.go",
+          "description": "TestHookRateProbe reads it to configure the opt-in in-process hook rate probe (R109-PERF-WAL)."
+        }
+      ],
+      "since": "1.0.8"
+    },
+    {
+      "name": "DEFENSECLAW_HOOK_RATE_GROW_MIB",
+      "category": "test_fixture",
+      "purpose": "Grows the probe's audit.db to at least this many MiB before TestHookRateProbe starts (default 0).",
+      "default": "unset",
+      "accepted_values": [
+        "non-negative integer",
+        "unset"
+      ],
+      "security_impact": "none",
+      "surface_in_doctor": false,
+      "managed": "ignore",
+      "consumers": [
+        {
+          "location": "internal/gateway/hook_rate_probe_test.go",
+          "description": "TestHookRateProbe reads it to configure the opt-in in-process hook rate probe (R109-PERF-WAL)."
+        }
+      ],
+      "since": "1.0.8"
+    },
+    {
+      "name": "DEFENSECLAW_HOOK_RATE_OUT",
+      "category": "test_fixture",
+      "purpose": "Directory where TestHookRateProbe writes its cpu, block and mutex profiles.",
+      "default": "unset",
+      "accepted_values": [
+        "absolute path",
+        "unset"
+      ],
+      "security_impact": "none",
+      "surface_in_doctor": false,
+      "managed": "ignore",
+      "consumers": [
+        {
+          "location": "internal/gateway/hook_rate_probe_test.go",
+          "description": "TestHookRateProbe reads it to configure the opt-in in-process hook rate probe (R109-PERF-WAL)."
+        }
+      ],
+      "since": "1.0.8"
+    },
+    {
       "name": "DEFENSECLAW_HOOK_GUARDIAN_AUTH_DIR",
       "category": "runtime_path",
       "purpose": "Select the administrator-owned directory containing the hook guardian protected-target authorization ledger.",
@@ -2402,7 +2526,7 @@
     {
       "name": "DEFENSECLAW_HOOK_MAX_BODY",
       "category": "hook_internal",
-      "purpose": "Request-body cap (in bytes) for hooks; a per-user hook sends at most 921600 bytes (900 KiB) of a call to its own gateway and treats a larger call as oversized input. Default 1048576 (1 MiB).",
+      "purpose": "Request-body cap (in bytes) for per-user hooks: a value from 1 to 1048576 lowers it, anything else is ignored; a per-user hook sends at most 921600 bytes (900 KiB) of a call to its own gateway and treats a larger call as oversized input. Managed hooks ignore it and keep the fixed 1 MiB cap. Default 1048576 (1 MiB).",
       "default": "1048576",
       "accepted_values": [
         "positive integer"
@@ -2414,6 +2538,14 @@
         {
           "location": "internal/gateway/connector/hooks/_hardening.sh",
           "description": "Body-cap enforcement"
+        },
+        {
+          "location": "cmd/defenseclaw-hook-user/main.go",
+          "description": "Body-cap enforcement in the native per-user Claude Code hook"
+        },
+        {
+          "location": "internal/cli/hook.go",
+          "description": "Body-cap enforcement in the native hook command"
         }
       ],
       "since": "0.4.0"
@@ -4874,7 +5006,7 @@
     {
       "name": "DEFENSECLAW_SENSOR_HELPER_SOCKET",
       "category": "runtime_path",
-      "purpose": "Override the local UDS path the AI Discovery sensor helper listens on outside managed deployments. The helper holds the privilege the runtime planes need so the gateway does not have to; see internal/sensor/acquire. A gateway brokers through the helper only on a managed host, and managed-enterprise resolution deliberately ignores this variable, because in that mode the path is part of what the installer owns and letting the environment move it would let whoever controls the gateway's environment point it at a socket they serve.",
+      "purpose": "Override the local UDS path the AI Discovery sensor helper listens on outside managed deployments. The helper holds the privilege the runtime planes need so the gateway does not have to; see internal/sensor/acquire. A managed gateway brokers through the helper at the installer-owned path, and managed-enterprise resolution deliberately ignores this variable, because in that mode the path is part of what the installer owns and letting the environment move it would let whoever controls the gateway's environment point it at a socket they serve. Outside managed deployments a de-privileged gateway brokers only when its service environment sets this variable to an absolute path that it can trust as root's: the socket is root-owned and not writable by others, every folder from it to / is a real root-owned folder writable by root alone (no symbolic links), and the serving process is root. The folder checks run when the gateway starts; the serving process is checked as root at start and again on every connect. Otherwise the gateway reads directly and keeps its per-user process filter. Root sets the variable when it starts a helper for that gateway, as the Claude Cowork VM package does (packaging/cowork-vm/install.sh). On Windows an unmanaged gateway never brokers through it.",
       "default": "unset (managed_enterprise: Windows Secure Client uses <TrustedProgramFiles>\\Cisco\\Cisco Secure Client\\DefenseClaw\\ipc\\sensor-helper.sock and Windows standalone uses <TrustedProgramFiles>\\Cisco\\DefenseClaw\\ipc\\sensor-helper.sock; Linux uses /run/defenseclaw-sensor/sensor-helper.sock; macOS standalone uses /var/run/defenseclaw-sensor/sensor-helper.sock; macOS Secure Client keeps /var/run/defenseclaw/sensor-helper.sock. Other modes use <data_dir>/ipc/sensor-helper.sock)",
       "accepted_values": [
         "any-absolute-path",
@@ -4887,6 +5019,10 @@
         {
           "location": "internal/sensor/acquire/paths.go",
           "description": "DefaultSocketPath consults this outside managed deployments before falling back to the deployment-mode default"
+        },
+        {
+          "location": "internal/gateway/ai_runtime_helper_socket.go",
+          "description": "unmanagedHelperSocket: a de-privileged unmanaged gateway brokers its runtime planes through a root helper at this path, after acquire.CheckRootSocket and a uid 0 check of the serving process (acquire.NewRootHelper repeats it on every connect)"
         }
       ],
       "since": "0.8.11",

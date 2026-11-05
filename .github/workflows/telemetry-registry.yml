@@ -30,15 +30,14 @@ jobs:
       - if: ${{ github.event_name == 'pull_request' }}
         uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
         with:
-          fetch-depth: 0
+          # The PR merge commit contains both endpoint parents.
+          fetch-depth: 2
           persist-credentials: false
       - name: Select exhaustive suites
         id: detect
         shell: bash
         env:
           EVENT_NAME: ${{ github.event_name }}
-          BASE_SHA: ${{ github.event.pull_request.base.sha }}
-          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
         run: |
           set -euo pipefail
 
@@ -68,10 +67,10 @@ jobs:
             '.github/workflows/telemetry-registry.yml'
           )
 
-          git cat-file -e "${BASE_SHA}^{commit}"
-          git cat-file -e "${HEAD_SHA}^{commit}"
+          git cat-file -e "HEAD^1^{commit}"
+          git cat-file -e "HEAD^2^{commit}"
           set +e
-          git diff --quiet "$BASE_SHA" "$HEAD_SHA" -- "${telemetry_paths[@]}"
+          git diff --quiet HEAD^1 HEAD^2 -- "${telemetry_paths[@]}"
           diff_status=$?
           set -e
 

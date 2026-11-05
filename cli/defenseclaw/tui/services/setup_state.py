@@ -728,6 +728,8 @@ def is_python_modeled(cfg: object | Mapping[str, Any] | None, key: str) -> bool:
 
     if not key:
         return False
+    if key == "openshell.middleware" or key.startswith("openshell.middleware."):
+        return False
     if key.startswith(SPECIAL_WRITER_PREFIXES):
         return True
     root: Any = type(cfg) if dataclasses.is_dataclass(cfg) and not isinstance(cfg, type) else None
@@ -1217,7 +1219,6 @@ _OPENSHELL_BOOL_KEYS = frozenset(
     {
         "openshell.enabled",
         "openshell.upstream_telemetry",
-        "openshell.middleware.enabled",
         "openshell.keep_headless",
         "openshell.workdir.undo_ignored.enabled",
         "openshell.egress.block_large_uploads",

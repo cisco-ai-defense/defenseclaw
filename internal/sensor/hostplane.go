@@ -80,13 +80,31 @@ type hostPlane struct {
 	source     plane.Source
 	tracker    *agentchain.Tracker
 	indicators tactics.IndicatorSet
-	window     time.Duration
-	minStages  int
+	// clientChecksums reads the signed release checksums of a Claude Code
+	// version, which an exec's source-read image digest is compared with.
+	clientChecksums func(string) ([][32]byte, bool)
+	window          time.Duration
+	minStages       int
 	// hooks holds the managed hook decisions tool-call processes are joined
 	// against; nil where decisions are not joined (not a managed host).
 	hooks *hookRing
+	// wrapperHold is how long a transparent wrapper's record waits for its
+	// child's exec; zero records it at once.
+	wrapperHold time.Duration
+	// coldHold is how long a client exec's record waits for its release
+	// manifest, polled every coldPoll; zero records it at once.
+	coldHold, coldPoll time.Duration
 
 	mu sync.Mutex
+	// wrappers are the transparent wrapper records waiting for their
+	// child's exec, by the wrapper's pid (GAP-0055).
+	wrappers map[int]*heldWrapper
+	// coldClients are the client exec records waiting for the release
+	// manifest of their version, by pid (GAP-0065).
+	coldClients map[int]*heldWrapper
+	// linkedWrappers counts the wrapper records that wait with a held child
+	// record instead of in wrappers; they count against maxHeldWrappers.
+	linkedWrappers int
 	// sessions are keyed by the root process instance, not its pid: an agent
 	// that reuses an exited agent's pid starts its own session (GAP-1372).
 	sessions map[hostSessionKey]*agentchain.Session
@@ -175,7 +193,11 @@ func newHostPlane(
 ) *hostPlane {
 	return &hostPlane{
 		source: source, tracker: tracker, indicators: indicators,
-		window: window, minStages: minStages,
+		clientChecksums: claudeReleases.checksums,
+		wrapperHold:     wrapperHold,
+		coldHold:        coldClientHold,
+		coldPoll:        coldClientPoll,
+		window:          window, minStages: minStages,
 		sessions: make(map[hostSessionKey]*agentchain.Session),
 		meta:     make(map[hostSessionKey]*sessionMeta),
 		joins:    newToolJoins(maxToolJoins),
@@ -332,15 +354,42 @@ func (h *hostPlane) handle(event plane.Event) {
 		h.recordKernelEvent(event, lineage, attributed)
 	}
 
-	match, ok := tactics.Classify(tactics.Observation{
-		Kind:    string(event.Kind),
-		PID:     event.PID,
-		Name:    event.Name,
-		Cmdline: commandWordCmdline(event.Cmdline),
-		Path:    event.Path,
-		Detail:  event.Detail,
-	}, h.indicators)
+	cmdline := commandWordCmdline(event.Cmdline)
+	// The client identity comes from the exec event alone: the image digest
+	// its source read at exec time, checked against the signed release
+	// manifest. Nothing here reads the process, its image or its account,
+	// which an unprivileged gateway cannot and an exited process does not
+	// allow. The lineage gate runs first, and the manifest lookup never
+	// waits: an attributed client exec of a version not yet cached starts
+	// its fetch, and is classified as before until the manifest is in.
+	claudeClient, verifiedClient := false, false
+	if event.Kind == plane.KindExec && !h.indicators.KeepClientMCP && event.ImageVersion != "" && h.clientChecksums != nil {
+		if !looked {
+			lineage, attributed = h.tracker.Lineage(event.PID, event.ExecID)
+			looked = true
+		}
+		if attributed {
+			checksums, _ := h.clientChecksums(event.ImageVersion)
+			lower := strings.ToLower(cmdline)
+			verifiedClient = event.ImageSHA256 != "" && signedClaudeRelease(event.ImageSHA256, checksums)
+			claudeClient = verifiedClient &&
+				(strings.Contains(lower, "mcp") || strings.Contains(lower, "@modelcontextprotocol/"))
+		}
+	}
+	observation := tactics.Observation{
+		Kind:         string(event.Kind),
+		PID:          event.PID,
+		Name:         event.Name,
+		ClaudeClient: claudeClient,
+		Cmdline:      cmdline,
+		Path:         event.Path,
+		Detail:       event.Detail,
+	}
+	match, ok := tactics.Classify(observation, h.indicators)
 	if !ok {
+		h.mu.Lock()
+		h.settleWrappersLocked(event, verifiedClient, false, nil)
+		h.mu.Unlock()
 		return
 	}
 
@@ -350,18 +399,39 @@ func (h *hostPlane) handle(event plane.Event) {
 	if !attributed {
 		// The lineage gate. A developer running sudo produces nothing here.
 		h.mu.Lock()
+		h.settleWrappersLocked(event, verifiedClient, true, nil)
 		h.gated++
 		h.mu.Unlock()
 		return
 	}
 
 	instance := h.tracker.InstanceOfProcess(event.PID, event.ExecID)
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	// A held wrapper whose child is this exec waits with this exec's own
+	// hold: for its release manifest (GAP-0055 after a gateway start), or for
+	// its child when it is a wrapper too (a chain such as timeout 300 nice).
+	held := h.holdColdClientLocked(event, lineage, match, at, instance, observation)
+	if held == nil {
+		held = h.wrapperRecordLocked(event, lineage, match, at, instance)
+	}
+	h.settleWrappersLocked(event, verifiedClient, true, held)
+	switch {
+	case held == nil:
+		h.recordLocked(event, lineage, match, at, instance)
+	case held.level() > 0:
+		h.holdWrapperLocked(held)
+	}
+}
+
+// recordLocked adds one attributed observation to its agent's session.
+func (h *hostPlane) recordLocked(
+	event plane.Event, lineage agentchain.Lineage, match tactics.Match, at time.Time, instance agentchain.Instance,
+) {
 	user := ""
 	if event.UserSID != "" {
 		user = event.User
 	}
-	h.mu.Lock()
-	defer h.mu.Unlock()
 	h.classified++
 	root := hostSessionKey{
 		process:  procprobe.KeyOf(lineage.RootPID, lineage.RootKeyStart),

@@ -7,6 +7,7 @@ package gateway
 import (
 	"errors"
 	"fmt"
+	"io"
 	"io/fs"
 	"os"
 	"os/exec"
@@ -15,6 +16,7 @@ import (
 	"runtime"
 	"strings"
 
+	"github.com/defenseclaw/defenseclaw/internal/claudedesktop"
 	"github.com/defenseclaw/defenseclaw/internal/gateway/connector"
 	"github.com/defenseclaw/defenseclaw/internal/inventory"
 )
@@ -104,6 +106,12 @@ func agentBinaryMayExistNow(name string) bool {
 	}
 	home, err := os.UserHomeDir()
 	if err != nil {
+		return true
+	}
+	// Claude Desktop runs Claude Cowork with the Claude Code engine it keeps
+	// in its data folder, and that engine runs the claudecode hooks: an
+	// account with Claude Desktop and no claude CLI still has the agent.
+	if name == "claudecode" && claudeDesktopEngineMayExist(home) {
 		return true
 	}
 	dirs := []string{filepath.Join(home, ".local", "bin"), filepath.Join(home, "bin")}
@@ -280,4 +288,31 @@ func ampNPMInvokedTarget(line string) string {
 // gateway log.
 func agentNotInstalledRefusal(name, why string) string {
 	return fmt.Sprintf("the agent is not installed for this account (%s); reinstall it and run: defenseclaw-gateway restart, or remove the connector: defenseclaw setup remove %s", why, name)
+}
+
+// claudeDesktopEngineMayExist reports a Claude Desktop engine folder
+// (<data>/claude-code, for every deployment and install of this account:
+// internal/claudedesktop) that holds at least one entry. An unreadable
+// folder, or a data folder glob that left folders out, counts as present:
+// only positive absence lets the gateway skip the connector.
+func claudeDesktopEngineMayExist(home string) bool {
+	dirs, overflow := claudedesktop.EngineDirs(runtime.GOOS, claudedesktop.FoldersFromEnv(runtime.GOOS, home, os.Getenv))
+	if overflow {
+		return true
+	}
+	for _, engine := range dirs {
+		f, err := os.Open(engine.Path)
+		if err != nil {
+			if !errors.Is(err, fs.ErrNotExist) {
+				return true
+			}
+			continue
+		}
+		entries, readErr := f.ReadDir(1)
+		_ = f.Close()
+		if len(entries) > 0 || (readErr != nil && !errors.Is(readErr, io.EOF)) {
+			return true
+		}
+	}
+	return false
 }

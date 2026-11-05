@@ -80,7 +80,7 @@ func TestWindowsEnterpriseRemovedAccountRowCountsARemovedDomainProfile(t *testin
 		SID: "S-1-5-21-1111-2222-3333-1019", User: "dcw-std2", Connector: "hermes", UserHome: t.TempDir(),
 		Error: enterpriseHookAwaitingSignInPrefix + ": its exact active Windows session is unavailable",
 	}
-	removedCount, awaiting := enterpriseHookExcusedFailures(enterpriseHookGuardianState{
+	removedCount, awaiting, _ := enterpriseHookExcusedFailures(enterpriseHookGuardianState{
 		FailureCount: 2, Results: []enterpriseHookReconcileRow{removed, waiting},
 	})
 	if removedCount != 1 || awaiting != 1 {

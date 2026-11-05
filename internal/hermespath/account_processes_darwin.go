@@ -18,7 +18,7 @@ import (
 // in no file read. The kernel bounds the buffer (kern.argmax). A process
 // that exits or cannot be read is skipped, as on Linux; a caller that is neither root nor uid can read none, which
 // fails.
-func runningProcessEvidence(uid int) ([]homeEvidence, error) {
+func runningProcessEvidence(uid int, _ string) ([]homeEvidence, error) {
 	if err := canReadProcessesOf(uid); err != nil {
 		return nil, err
 	}

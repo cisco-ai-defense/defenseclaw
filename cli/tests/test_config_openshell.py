@@ -93,7 +93,6 @@ _FULL_SECTION = {
     "mcp": {"import": False, "host_ports": [5432]},
     "upstream_telemetry": True,
     "token_delivery": "env",
-    "middleware": {"enabled": True},
     "admin": {
         "required_pack": "strict",
         "required_pack_digest": "sha256:" + "0f" * 32,
@@ -183,7 +182,6 @@ class TestOpenShellMerge(unittest.TestCase):
         self.assertEqual(oc.mcp.host_ports, [5432])
         self.assertTrue(oc.upstream_telemetry)
         self.assertEqual(oc.token_delivery, "env")
-        self.assertTrue(oc.middleware.enabled)
         self.assertEqual(oc.admin.required_pack, "strict")
         self.assertEqual(oc.admin.required_pack_digest, "sha256:" + "0f" * 32)
         self.assertIs(oc.admin.allow_yolo, False)
@@ -402,6 +400,25 @@ class TestOpenShellSave(unittest.TestCase):
         with patch("defenseclaw.config.default_data_path") as mock_dp:
             mock_dp.return_value = Path(tmpdir)
             return load()
+
+    def test_retired_middleware_is_ignored_and_removed_on_save(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            path = os.path.join(tmpdir, "config.yaml")
+            with open(path, "w") as f:
+                yaml.safe_dump(
+                    {"config_version": 9, "data_dir": tmpdir,
+                     "openshell": {"middleware": {"enabled": True}, "token_delivery": "env"}},
+                    f,
+                )
+            load_validate_v8(Path(path).read_bytes(), source_name=path)
+            cfg = self._load(tmpdir)
+            self.assertFalse(hasattr(cfg.openshell, "middleware"))
+            self.assertEqual(cfg.openshell.token_delivery, "env")
+            cfg.save()
+            with open(path) as f:
+                section = yaml.safe_load(f)["openshell"]
+            self.assertNotIn("middleware", section)
+            self.assertEqual(section["token_delivery"], "env")
 
     def test_untouched_section_is_not_written(self):
         with tempfile.TemporaryDirectory() as tmpdir:

@@ -160,6 +160,7 @@ func windowsEnterpriseEnvironmentWith(base []string, pins map[string]string) []s
 // supplied config, and nothing else asked for.
 func windowsEnterpriseHotConfigCandidate(opts *windowsEnterpriseLifecycleOptions, status *windowsEnterpriseInstallerReport) bool {
 	return windowsEnterpriseIsElevated() &&
+		opts.coworkPackagePath == "" && opts.coworkSignaturePath == "" &&
 		windowsEnterpriseVerifyAcceptable(status) &&
 		strings.TrimSpace(opts.configPath) != "" &&
 		strings.TrimSpace(opts.manifestPath) == "" && strings.TrimSpace(opts.mode) == "" && strings.TrimSpace(opts.connector) == "" &&

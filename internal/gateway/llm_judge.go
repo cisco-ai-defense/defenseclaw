@@ -27,6 +27,8 @@ import (
 	"time"
 	"unicode/utf8"
 
+	"github.com/maximhq/bifrost/core/schemas"
+
 	"github.com/defenseclaw/defenseclaw/internal/config"
 	"github.com/defenseclaw/defenseclaw/internal/configs"
 	"github.com/defenseclaw/defenseclaw/internal/envvars"
@@ -773,13 +775,25 @@ func (j *LLMJudge) judgeChatRequest(messages []ChatMessage, maxTok int, kind str
 		zero := 0.0
 		temperature = &zero
 	}
+	extraParams := judgeExtraParams(j.model)
+	// Only the OpenAI adapter with an operator-supplied endpoint receives this
+	// option. Native providers and Secure Client retain their request shape.
+	if bp, ok := j.provider.(*bifrostProvider); ok && !j.secureClient &&
+		bp.providerKey == schemas.OpenAI && bp.baseURL != "" && len(j.cfg.ExtraBody) > 0 {
+		if extraParams == nil {
+			extraParams = make(map[string]any, len(j.cfg.ExtraBody))
+		}
+		for key, value := range j.cfg.ExtraBody {
+			extraParams[key] = value
+		}
+	}
 	return &ChatRequest{
 		Messages:       messages,
 		MaxTokens:      intPtr(maxTok),
 		Temperature:    temperature,
 		ResponseFormat: judgeResponseFormatFor(kind, judgeNeedsToolSafeSchemaKeys(j.providerName, j.model)),
 		Fallbacks:      j.cfg.Fallbacks,
-		ExtraParams:    judgeExtraParams(j.model),
+		ExtraParams:    extraParams,
 	}
 }
 

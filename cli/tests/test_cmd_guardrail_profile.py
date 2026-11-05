@@ -28,6 +28,8 @@ from defenseclaw.config import (
 )
 from defenseclaw.context import AppContext
 
+from tests.os_view import os_view
+
 
 def test_explain_asks_the_gateway_and_reports_the_match(monkeypatch):
     from defenseclaw.gateway import OrchestratorClient
@@ -142,7 +144,7 @@ def test_explain_on_windows_asks_for_the_token_sid(monkeypatch):
     app.cfg = default_config()
     app.logger = MagicMock()
     app.cfg.guardrail.profiles = {"entra": GuardrailProfile(mode="action")}
-    monkeypatch.setattr("defenseclaw.gateway.os.name", "nt")
+    monkeypatch.setattr("defenseclaw.gateway.os", os_view("nt"))
 
     explained = CliRunner().invoke(cmd_guardrail.guardrail, ["profile", "explain"], obj=app, catch_exceptions=False)
     mine = current_user_guardrail_profile(app.cfg)

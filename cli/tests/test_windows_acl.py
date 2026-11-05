@@ -27,6 +27,8 @@ import defenseclaw.windows_acl as windows_acl
 import pytest
 from defenseclaw.windows_acl import WindowsAclError, WindowsFileSecurity
 
+from tests.os_view import os_view
+
 
 def _sid(*subauthorities: int, authority: int = 5) -> bytes:
     return (
@@ -765,7 +767,7 @@ def test_windows_directory_chain_stays_held_across_handle_mutations(
 ) -> None:
     api = _FakeApi()
     monkeypatch.setattr(windows_acl, "_api", api)
-    monkeypatch.setattr(windows_acl.os, "name", "nt")
+    monkeypatch.setattr(windows_acl, "os", os_view("nt"))
 
     with windows_acl.hold_directory_chain(r"C:\Users\operator\.defenseclaw"):
         outer_handles = [value for event, value in api.events if event == "lease-validate"]
@@ -843,7 +845,7 @@ def test_windows_handoff_reuses_stronger_protected_ancestor_lease(
 ) -> None:
     api = _FakeApi()
     monkeypatch.setattr(windows_acl, "_api", api)
-    monkeypatch.setattr(windows_acl.os, "name", "nt")
+    monkeypatch.setattr(windows_acl, "os", os_view("nt"))
 
     with windows_acl.hold_directory(r"C:\state"):
         protected_ancestor_handle = next(
@@ -873,7 +875,7 @@ def test_windows_directory_handoff_restores_lease_after_mutation_failure(
 ) -> None:
     api = _FakeApi()
     monkeypatch.setattr(windows_acl, "_api", api)
-    monkeypatch.setattr(windows_acl.os, "name", "nt")
+    monkeypatch.setattr(windows_acl, "os", os_view("nt"))
 
     def fail_rename(
         handle: int,
@@ -921,7 +923,7 @@ def test_windows_directory_handoff_fails_closed_when_lease_restore_fails(
 ) -> None:
     api = _FakeApi()
     monkeypatch.setattr(windows_acl, "_api", api)
-    monkeypatch.setattr(windows_acl.os, "name", "nt")
+    monkeypatch.setattr(windows_acl, "os", os_view("nt"))
     mutation_completed = False
 
     original_rename = api._rename_open_regular_file
@@ -983,7 +985,7 @@ def test_windows_handle_mutations_freeze_absolute_paths_before_handoff(
         "retired.yaml": r"C:\frozen\retired.yaml",
     }
     monkeypatch.setattr(windows_acl, "_api", api)
-    monkeypatch.setattr(windows_acl.os, "name", "nt")
+    monkeypatch.setattr(windows_acl, "os", os_view("nt"))
     monkeypatch.setattr(windows_acl.ntpath, "abspath", resolved.__getitem__)
 
     windows_acl.replace_regular_file_by_handle("candidate.tmp", "active.yaml")
@@ -1299,7 +1301,7 @@ def test_shared_delete_claim_reader_closes_native_handle_when_crt_conversion_fai
         open_osfhandle=Mock(side_effect=OSError("conversion failed")),
     )
     monkeypatch.setattr(windows_acl, "_api", api)
-    monkeypatch.setattr(windows_acl.os, "name", "nt")
+    monkeypatch.setattr(windows_acl, "os", os_view("nt"))
     monkeypatch.setitem(sys.modules, "msvcrt", fake_msvcrt)
 
     with pytest.raises(OSError, match="conversion failed"):
@@ -1318,7 +1320,7 @@ def test_flush_descriptor_closes_native_handle_when_crt_conversion_fails(
         open_osfhandle=Mock(side_effect=OSError("conversion failed")),
     )
     monkeypatch.setattr(windows_acl, "_api", api)
-    monkeypatch.setattr(windows_acl.os, "name", "nt")
+    monkeypatch.setattr(windows_acl, "os", os_view("nt"))
     monkeypatch.setitem(sys.modules, "msvcrt", fake_msvcrt)
 
     with pytest.raises(OSError, match="conversion failed"):

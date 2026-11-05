@@ -230,7 +230,7 @@ Not covered yet:
 
 ## On a managed computer
 
-Set up, Check it and Turn it off on this page are per-user commands. On a computer with a standalone enterprise install they are refused: on Linux and macOS `defenseclaw` prints "This computer is managed; use `defenseclaw sandbox status` for your read-only status and `defenseclaw sandbox policy explain` for your policy. Other commands require an administrator." and exits 2; on native Windows `defenseclaw` is the administrator's command and refuses `setup copilot`. The administrator manages Copilot CLI in the managed `config.yaml` (`guardrail.connectors.copilot`) and applies it as in [Change the config](/docs/enterprise/lifecycle#change-the-config).
+Set up, Check it and Turn it off on this page are per-user commands. On a computer with a standalone enterprise install they are refused: on Linux and macOS `defenseclaw` prints "This computer is managed; use `defenseclaw status` for your protection state, `defenseclaw sandbox status` for your sandboxes and `defenseclaw sandbox policy explain` for your policy. Other commands require an administrator." and exits 2; on native Windows `defenseclaw` is the administrator's command and refuses `setup copilot`. The administrator manages Copilot CLI in the managed `config.yaml` (`guardrail.connectors.copilot`) and applies it as in [Change the config](/docs/enterprise/lifecycle#change-the-config).
 
 ## Disable
 

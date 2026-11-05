@@ -12,8 +12,15 @@ import (
 	"strings"
 	"unsafe"
 
+	"github.com/defenseclaw/defenseclaw/internal/winpath"
 	"golang.org/x/sys/windows"
+	"golang.org/x/sys/windows/registry"
 )
+
+// WindowsEnterpriseMarkerKey (HKLM) marks a computer with a machine-wide
+// managed deployment. The per-user installers refuse to install beside it,
+// and per-user processes leave their token alone when it is there.
+const WindowsEnterpriseMarkerKey = `SOFTWARE\Cisco\DefenseClaw\Enterprise`
 
 // windowsTokenOwnerSetter is the token half of
 // AdoptWindowsGatewayServiceFileOwner; tests substitute it.
@@ -203,4 +210,102 @@ func WindowsCurrentProcessOwnerSID() (*windows.SID, error) {
 // LocalSystem carrying that SID.
 func WindowsCurrentProcessRunsAsService(serviceSID *windows.SID) (bool, error) {
 	return windowsTokenRunsAsService(windowsCurrentProcessIdentityToken, serviceSID)
+}
+
+// UseCurrentUserAsWindowsDefaultOwner makes the token's own user the default
+// owner of what this per-user process creates, and reports whether it changed
+// the token (GAP-0063).
+//
+// An elevated administrator token (the built-in Administrator, a "Run as
+// administrator" app such as an elevated Claude Desktop, an elevated SSH
+// session) names BUILTIN\Administrators as the default owner. A hook it ran
+// created hooks\.outage-warnings and its marker owned by Administrators, with
+// only SYSTEM and OWNER RIGHTS in the inherited DACL, so the same account
+// without elevation could neither list nor remove them, and a per-user
+// uninstall left the data folder behind. The Python CLI (windows_owner.py,
+// GAP-0050) and install.ps1 make the same change; the hook, the per-user
+// gateway and the ACP guard now do it too, before they write anything, and
+// the processes they start inherit it.
+//
+// Only the default owner changes, only to the token's own user SID, which
+// Windows always accepts as an owner. No DACL changes and nothing is granted:
+// a file gets the owner a run without elevation gives it. A token that is not
+// elevated already names its user and is left as it is. Services and other
+// non-user accounts (the managed gateway service sets its own owner in
+// AdoptWindowsGatewayServiceFileOwner), `enterprise` commands, a process the
+// managed deployment pinned (DEFENSECLAW_DEPLOYMENT_MODE=managed_enterprise:
+// the children of Setup and of the managed service) and a computer with a
+// managed deployment of either profile are left alone: their elevated runs
+// write machine state whose checks expect an administrator owner. A failure
+// leaves the token as it was.
+func UseCurrentUserAsWindowsDefaultOwner(args []string) bool {
+	if len(args) > 0 && args[0] == "enterprise" {
+		return false
+	}
+	// A stray pin in a user's shell only keeps the token as it is.
+	if IsManagedEnterprise(os.Getenv(DeploymentModeEnv)) {
+		return false
+	}
+	token, closeToken, err := openWindowsProcessTokenOwner()
+	if err != nil {
+		return false
+	}
+	defer closeToken()
+	return useTokenUserAsDefaultOwner(token, windowsManagedDeploymentMarkerAbsent)
+}
+
+func useTokenUserAsDefaultOwner(token windowsTokenOwnerSetter, markerAbsent func() bool) bool {
+	user, err := token.GetTokenUser()
+	if err != nil || user == nil || user.User.Sid == nil ||
+		!winpath.IsInteractiveUserSID(user.User.Sid.String(), winpath.InteractiveUserSIDOptions{AllowEntraID: true}) {
+		return false
+	}
+	owner, err := token.defaultOwner()
+	if err != nil || owner.Equals(user.User.Sid) {
+		return false
+	}
+	// Read only for an elevated token: a hook call without elevation never
+	// opens the key.
+	if !markerAbsent() {
+		return false
+	}
+	return token.setDefaultOwner(user.User.Sid) == nil
+}
+
+// windowsManagedDeploymentMarkerAbsent reports a computer with no managed
+// deployment: no HKLM marker and no enterprise install root of either
+// profile. Only the standalone profile writes the marker; a Secure Client
+// deployment, or a first standalone install before its marker is written,
+// has only its install root. Anything that cannot be read counts as managed.
+var windowsManagedDeploymentMarkerAbsent = func() bool {
+	return managedDeploymentAbsent(openWindowsEnterpriseMarker, winpath.TrustedEnterpriseRoots, os.Lstat)
+}
+
+func openWindowsEnterpriseMarker() error {
+	key, err := registry.OpenKey(registry.LOCAL_MACHINE, WindowsEnterpriseMarkerKey, registry.QUERY_VALUE|registry.WOW64_64KEY)
+	if err == nil {
+		_ = key.Close()
+	}
+	return err
+}
+
+func managedDeploymentAbsent(
+	openMarker func() error,
+	trustedRoots func(profile string) (winpath.EnterpriseRoots, error),
+	lstat func(path string) (os.FileInfo, error),
+) bool {
+	err := openMarker()
+	if err == nil || (!errors.Is(err, windows.ERROR_FILE_NOT_FOUND) && !errors.Is(err, windows.ERROR_PATH_NOT_FOUND)) {
+		return false
+	}
+	for _, profile := range []string{winpath.EnterpriseProfileSecureClient, winpath.EnterpriseProfileStandalone} {
+		roots, err := trustedRoots(profile)
+		if err != nil {
+			return false
+		}
+		if _, err := lstat(roots.InstallRoot); !errors.Is(err, os.ErrNotExist) {
+			return false
+		}
+	}
+	return true
 }

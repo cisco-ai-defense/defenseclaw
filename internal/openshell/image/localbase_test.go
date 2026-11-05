@@ -95,13 +95,17 @@ func TestBuildRunsOnALocalBaseImage(t *testing.T) {
 	for _, tc := range []struct {
 		name       string
 		repoDigest string
+		microVM    bool
 	}{
-		{"classic store", ""},
-		{"containerd store", `"corp-base@` + baseID + `"`},
+		{"classic store", "", false},
+		{"containerd store", `"corp-base@` + baseID + `"`, false},
+		{"MicroVM classic store", "", true},
+		{"MicroVM containerd store", `"corp-base@` + baseID + `"`, true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			spec := testSpec(harness.Codex)
 			spec.BaseImage = "corp-base@" + baseID
+			spec.MicroVM = tc.microVM
 			c := mustContext(t, spec)
 			docker := localBaseDocker(t, c, baseID, tc.repoDigest, true)
 			b := &Builder{Docker: docker, Store: testStore(t)}
@@ -126,6 +130,28 @@ func TestBuildRunsOnALocalBaseImage(t *testing.T) {
 	}
 	if docker.count("image", "rm") != 1 {
 		t.Fatal("the image not built on the base was kept")
+	}
+}
+
+func TestMicroVMLocalBaseUsesFinalStage(t *testing.T) {
+	spec := testSpec(harness.Codex)
+	spec.MicroVM = true
+	c := mustContext(t, spec)
+	_, baseID, ok := strings.Cut(c.Spec.BaseImage, "@")
+	if !ok {
+		t.Fatal("the pinned base has no digest")
+	}
+	b := &Builder{Docker: localBaseDocker(t, c, baseID, "", true)}
+	files, _, local, err := b.localBase(context.Background(), c)
+	if err != nil || !local {
+		t.Fatalf("local base: %v, local %t", err, local)
+	}
+	file := string(files[0].Data)
+	alias := BaseAliasRepository + ":" + strings.TrimPrefix(baseID, "sha256:")
+	if !strings.Contains(file, "FROM "+c.Spec.BaseImage+" AS dc-localhost-tool\n") ||
+		!strings.Contains(file, "FROM "+alias+"\n") ||
+		strings.Contains(file, "FROM "+c.Spec.BaseImage+"\n") {
+		t.Fatalf("MicroVM base stages do not use the selected local base: %s", file[:300])
 	}
 }
 

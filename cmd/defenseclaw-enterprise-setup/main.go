@@ -127,9 +127,12 @@ func payloadFilesForFlavor(flavor string) []string {
 }
 
 type enterpriseSetupOptions struct {
-	Action                 string
-	Config                 string
-	Manifest               string
+	Action   string
+	Config   string
+	Manifest string
+	// Standalone-only release inputs; the config owns their SHA-256 pins.
+	CoworkPackage          string
+	CoworkSignature        string
 	InstallRoot            string
 	StateRoot              string
 	GatewayServiceName     string
@@ -395,6 +398,8 @@ func parseEnterpriseSetupOptionsForFlavor(arguments []string, standalone bool) (
 	flags.BoolVar(&opts.AttestClaudeEffectivePolicy, "attest-claude-effective-policy", false, "attest Claude managed-policy precedence")
 	flags.BoolVar(&opts.DeferredConfig, "deferred-config", false, "UCB-friendly install: --config and --manifest optional; services registered stopped")
 	if standalone {
+		flags.StringVar(&opts.CoworkPackage, "cowork-package", "", "standalone: local Cowork archive authenticated by the config pin")
+		flags.StringVar(&opts.CoworkSignature, "cowork-signature", "", "standalone: detached Cowork signature authenticated by the config pin")
 		flags.StringVar(&opts.AllowedSigners, "allowed-signers", "", "standalone: comma-separated SHA-256 thumbprints of accepted Authenticode signer certificates")
 		flags.BoolVar(&opts.Force, "force", false, "standalone /uninstall: remove the deployment without recovering a pending transaction (last resort)")
 		flags.StringVar(&opts.Bundle, "bundle", "", "standalone /ensure: signed policy bundle (.dcbundle) to apply")
@@ -498,6 +503,14 @@ func parseEnterpriseSetupOptionsForFlavor(arguments []string, standalone bool) (
 		// metadata later selects the special complete-Repair activation path.
 		return opts, false, errors.New("--deferred-config is valid only with install")
 	}
+	if opts.CoworkPackage != "" || opts.CoworkSignature != "" {
+		if opts.Action != "ensure" && opts.Action != "install" && opts.Action != "upgrade" && opts.Action != "repair" {
+			return opts, false, errors.New("the Cowork release inputs are valid only with /ensure, /install, /upgrade or /repair")
+		}
+		if opts.Bundle != "" {
+			return opts, false, errors.New("the Cowork release inputs cannot be combined with BUNDLE=; deliver them with an administrator config")
+		}
+	}
 	if opts.NoStart && !enterpriseSetupMutation(opts.Action, standalone) {
 		return opts, false, errors.New("--no-start is valid only with " + enterpriseSetupMutationList(standalone))
 	}
@@ -589,7 +602,7 @@ func captureStandaloneSetupErrorIntent(arguments []string, opts *enterpriseSetup
 
 // standalonePathNames are the standalone Setup's file properties, whose
 // values the path checks see as given.
-var standalonePathNames = map[string]bool{"config": true, "manifest": true, "bundle": true, "trustanchors": true}
+var standalonePathNames = map[string]bool{"config": true, "manifest": true, "bundle": true, "trustanchors": true, "coworkpackage": true, "coworksignature": true}
 
 func normalizeEnterpriseSetupArgumentsForFlavor(arguments []string, standalone bool) ([]string, bool, error) {
 	normalized := make([]string, 0, len(arguments))
@@ -615,7 +628,7 @@ func normalizeEnterpriseSetupArgumentsForFlavor(arguments []string, standalone b
 	}
 	if standalone {
 		// Only the standalone Setup has the ensure action and signer pins.
-		for name, canonical := range map[string]string{"allowedsigners": "allowed-signers", "bundle": "bundle", "trustanchors": "trust-anchors", "devicegroup": "device-group"} {
+		for name, canonical := range map[string]string{"allowedsigners": "allowed-signers", "bundle": "bundle", "trustanchors": "trust-anchors", "devicegroup": "device-group", "coworkpackage": "cowork-package", "coworksignature": "cowork-signature"} {
 			valueNames[name] = canonical
 		}
 		boolNames["force"] = "force"
@@ -1033,6 +1046,8 @@ func standaloneSetupRetryCommand(opts enterpriseSetupOptions, timeoutSeconds int
 	}
 	value("CONFIG", opts.Config)
 	value("MANIFEST", opts.Manifest)
+	value("COWORKPACKAGE", opts.CoworkPackage)
+	value("COWORKSIGNATURE", opts.CoworkSignature)
 	value("BUNDLE", opts.Bundle)
 	value("TRUSTANCHORS", opts.TrustAnchors)
 	value("DEVICEGROUP", opts.DeviceGroup)
@@ -1109,6 +1124,8 @@ func writeStandaloneSetupUsage(output io.Writer) {
 	fmt.Fprintln(output, "  Other actions: /install /upgrade /repair /reconcile /status /verify /uninstall")
 	fmt.Fprintln(output, "Properties (case-insensitive, dashes ignored):")
 	fmt.Fprintln(output, "  CONFIG=<path>                  administrator config; required for the first install")
+	fmt.Fprintln(output, "  COWORKPACKAGE=<path>           local Cowork archive; authenticated and cached by the standalone config's SHA-256 pin")
+	fmt.Fprintln(output, "  COWORKSIGNATURE=<path>         detached Cowork signature; with mutations only, not BUNDLE=")
 	fmt.Fprintln(output, "  MANIFEST=<path>                target manifest you publish yourself; required for /install")
 	fmt.Fprintln(output, "  BUNDLE=<path>                  with /ensure: apply this signed policy bundle; with CONFIG= on a new computer, the first install starts on the bundle")
 	fmt.Fprintln(output, "  TRUSTANCHORS=<path>            with /ensure BUNDLE=: install this administrator-only bundle trust anchor file with the bundle")

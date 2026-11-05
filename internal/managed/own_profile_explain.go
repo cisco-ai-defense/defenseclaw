@@ -41,6 +41,12 @@ func ExplainOwnProfile(ctx context.Context, socket, user, connector, agent strin
 	if len(query) > 0 {
 		target += "?" + query.Encode()
 	}
+	return getOwnHookRoute(ctx, socket, target)
+}
+
+// getOwnHookRoute GETs target on the hook socket, the way a standard user's
+// own-scope reads (profile explain, own status) reach the gateway.
+func getOwnHookRoute(ctx context.Context, socket, target string) (int, []byte, error) {
 	ctx, cancel := context.WithTimeout(ctx, ownProfileExplainTimeout)
 	defer cancel()
 	request, err := http.NewRequestWithContext(ctx, http.MethodGet, target, nil)

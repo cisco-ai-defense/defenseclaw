@@ -381,7 +381,7 @@ func TestClaudeManagedSettingsPrefixIsPinned(t *testing.T) {
 	}
 	details := strings.Join(state.Details, "\n")
 	for _, want := range []string{
-		"99-late.json sets env SHELLOPTS, which Claude Code passes to Bash tool commands",
+		"99-late.json sets env SHELLOPTS with noexec; managed exec-form hooks are unaffected",
 	} {
 		if !strings.Contains(details, want) {
 			t.Fatalf("details lack %q:\n%s", want, details)

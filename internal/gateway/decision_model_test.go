@@ -6,6 +6,7 @@ package gateway
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -192,16 +193,32 @@ func TestRunToolDecisionDecideBlockSkipsJudge(t *testing.T) {
 func TestRunToolDecisionRuleFloorKeepsTheJudge(t *testing.T) {
 	srv := fakeDecisionModel(t, "allow", 0.99, nil)
 	defer srv.Close()
-	j := &LLMJudge{cfg: &config.JudgeConfig{ToolInjection: true}, decision: testDecisionModel(t, srv.URL, "")}
+	judge := &countingJudgeProvider{}
+	j := &LLMJudge{cfg: &config.JudgeConfig{ToolInjection: true}, decision: testDecisionModel(t, srv.URL, ""), provider: judge}
 	ctx := withDecisionRuleFloor(context.Background(), rulesFlagged(&ToolInspectVerdict{Action: "alert", Severity: "HIGH", Findings: []string{"CMD-X"}}))
-	// provider is nil, so reaching the judge panics: the confident allow
-	// must not skip the judge when the rules flagged the call.
-	defer func() {
-		if recover() == nil {
-			t.Fatal("a rule-flagged call skipped the LLM judge")
-		}
-	}()
+	// The confident allow must not skip the judge when the rules flagged the
+	// call. The provider counts the call instead of being nil: reaching a nil
+	// provider was a hardware fault recovered in the test, which on Windows
+	// AMX hosts corrupts the heap below the goroutine stack
+	// (golang/go#81238, rel-1-0-6:GAP-0550).
 	j.runToolJudgeSample(ctx, "Bash", `{"command":"x"}`, "sample")
+	if judge.calls.Load() == 0 {
+		t.Fatal("a rule-flagged call skipped the LLM judge")
+	}
+}
+
+// countingJudgeProvider records that the judge asked its model and fails the
+// request, so a test can tell the judge ran without a real model.
+type countingJudgeProvider struct{ calls atomic.Int32 }
+
+func (p *countingJudgeProvider) ChatCompletion(context.Context, *ChatRequest) (*ChatResponse, error) {
+	p.calls.Add(1)
+	return nil, errors.New("counting judge provider: no model")
+}
+
+func (p *countingJudgeProvider) ChatCompletionStream(context.Context, *ChatRequest, func(StreamChunk)) (*ChatUsage, error) {
+	p.calls.Add(1)
+	return nil, errors.New("counting judge provider: no model")
 }
 
 func TestRulesFlagged(t *testing.T) {

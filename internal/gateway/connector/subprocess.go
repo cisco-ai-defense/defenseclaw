@@ -2672,7 +2672,7 @@ func resolveConnectorHookRender(opts SetupOpts, c Connector) connectorHookRender
 		render.foreignGuard = shellHookForeignGuard(binary)
 	}
 	if socket, serviceUID := managedPluginHookSocket(opts); socket != "" {
-		render.socketTransport = shellHookSocketTransport(socket, serviceUID, managedSessionFactsBinary(opts), render.foreignGuard)
+		render.socketTransport = shellHookSocketTransport(socket, serviceUID, managedSessionFactsBinary(opts), render.foreignGuard, c.Name(), runtime.GOOS)
 		if normalizeConnectorName(c.Name()) == "hermes" {
 			render.hermesNativeHook = managedSessionFactsBinary(opts)
 		}

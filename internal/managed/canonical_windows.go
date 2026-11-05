@@ -733,9 +733,16 @@ func WindowsAdminEquivalentPrincipal(sid *windows.SID) bool {
 // trusted entries, inheritance re-enabled, a missing gateway entry) is
 // accepted and logged once with MarkerAccept; the hook guardian repairs it.
 // Ancestor directories are walked drift-tolerantly for structure.
+//
+// A standalone process (windowsStandaloneTrustScope) keeps the strict
+// service runtime file check it used before 26.8.4, which allows the gateway
+// service as a writer and refuses every other drift (GAP-0561).
 func AcceptServiceRuntimeFileDrift(path, label, serviceAccount string) error {
 	if label == "" {
 		label = "managed runtime file"
+	}
+	if windowsStandaloneTrustScope() {
+		return ValidateTrustedServiceRuntimeFilePath(path, label, serviceAccount)
 	}
 	if err := ValidateTrustedRuntimeDirTolerant(filepath.Dir(path), label+" directory"); err != nil {
 		return err

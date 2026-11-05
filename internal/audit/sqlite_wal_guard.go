@@ -89,16 +89,31 @@ const walCatchUpFraction = 2
 // 0.7-0.9 of the one before and levelled out at about 100-150 ms. The rounds
 // end at walSettledSpan, after which the hold took 118-204 ms; a round that
 // does not shorten the span walSettleStalls times in a row, or
-// walSettleRounds rounds, end them without the writer. walSettledHoldCap
-// caps that hold a little under the gateway's 200 ms writer budget: the held
-// time also counts the ROLLBACK after the cap, so a 200 ms cap read 200-205 ms
-// and every capped hold logged as over the budget. Variables so tests can
+// walSettleRounds rounds, end them without the writer.
+//
+// walSettledHoldCap caps that hold while the log has headroom (at most
+// walSettledHeadroomQuarters quarters of the limit): a hook call waits for at
+// most that long, and a copy that does not finish inside it gives the writer
+// back and goes on without it, so the next pass has less to copy. At 100 hook
+// calls/s the hooks committed so often that a 180 ms hold queued a hundred
+// calls behind it (r108 SWEEP-100: 18.8-29.4 writer seconds in 120 s on
+// macOS); under 50 ms they wait about one group commit. Once the log is past
+// that headroom the hold may last walSettledNearBoundHoldCap, as before, a
+// little under the gateway's 200 ms writer budget (the held time also counts
+// the ROLLBACK after the cap, so a 200 ms cap read 200-205 ms and every capped
+// hold logged as over the budget), so a disk that cannot copy the tail in the
+// short hold still restarts the log before its bound. Variables so tests can
 // change them.
 var (
-	walSettleRounds   = 16
-	walSettledSpan    = 150 * time.Millisecond
-	walSettledHoldCap = 180 * time.Millisecond
+	walSettleRounds            = 16
+	walSettledSpan             = 150 * time.Millisecond
+	walSettledHoldCap          = 45 * time.Millisecond
+	walSettledNearBoundHoldCap = 180 * time.Millisecond
 )
+
+// walSettledHeadroomQuarters is how much of the limit, in quarters, the log
+// may use while the settled catch-up keeps to walSettledHoldCap.
+const walSettledHeadroomQuarters = 3
 
 const walSettleStalls = 2
 
@@ -218,7 +233,8 @@ type WALCheckpoint struct {
 //     Only once a round's span is within walSettledSpan does the pass take
 //     the writer, as soon as it is free, and hold it while one more PASSIVE
 //     copy on the checkpoint connection reaches the end; it gives the writer
-//     back at walCatchUpCap whether or not that copy finished. A backlog that
+//     back at walSettledHoldCap (walSettledNearBoundHoldCap once the log nears
+//     the limit) whether or not that copy finished. A backlog that
 //     does not settle is left to the next pass without the writer. The pass
 //     used to take the writer after one fast sync, then wait up to 500 ms for
 //     an idle gap of 20 ms while the hooks committed more, and hold it for a
@@ -322,7 +338,11 @@ func (s *Store) CheckpointWALIfLarge(ctx context.Context, limitBytes int64, writ
 				result.WriterDeferred = true
 				return result, nil
 			}
-			policy := walCatchUpPolicy{acquire: walSettledAcquireWait, hold: min(walSettledHoldCap, writerBudget)}
+			hold := walSettledHoldCap
+			if logBytes > limitBytes/4*walSettledHeadroomQuarters {
+				hold = max(hold, walSettledNearBoundHoldCap)
+			}
+			policy := walCatchUpPolicy{acquire: walSettledAcquireWait, hold: min(hold, writerBudget)}
 			result.Restarted, result.WriterHeld, result.WriterDeferred, err = s.catchUpWAL(ctx, db, policy)
 			return result, err
 		}

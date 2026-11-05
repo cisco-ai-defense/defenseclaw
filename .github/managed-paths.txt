@@ -24,6 +24,8 @@ internal/enterprisehooks/
 internal/enterprisepolicy/
 internal/enterprisestatus/
 internal/enterpriseunix/
+internal/codesig/
+internal/coworkaudit/
 internal/unixidentity/
 internal/setuppayload/
 internal/winsession/
@@ -46,6 +48,8 @@ internal/*managed*
 internal/*standalone*
 internal/*secure_client*
 internal/*secure-client*
+# Cowork host delivery uses a shared configuration package.
+internal/config/cowork_vm_sensor*.go
 cmd/*enterprise*
 cmd/*managed*
 cmd/*standalone*
@@ -83,11 +87,17 @@ cli/tests/*enterprise*
 cli/tests/*managed*
 cli/tests/*secure_client*
 cli/tests/test_mdm_*
+cli/tests/test_config_cowork_vm_sensor.py
 cli/tests/test_p0_mdm_docs.py
 
 [managed_impacting]
 # Shared code with managed branches inside, and the inputs managed packages
 # are built from. Add a shared file here when you add a managed branch to it.
+
+# Claude Desktop's data folder table: managed enrolment surfaces
+# (enterprisehooks), launch coverage and status (enterpriseunix) and the
+# hook surface refusal read it, as do the OSS gateway and inventory.
+internal/claudedesktop/
 
 # Python predicates that decide managed behavior.
 cli/defenseclaw/config.py
@@ -96,6 +106,8 @@ cli/defenseclaw/envvars.py
 cli/defenseclaw/upgrade_shim.py
 cli/defenseclaw/windows_acl.py
 cli/defenseclaw/commands/windows_uninstall_helper.py
+# Per-user first run: moves the files a removed managed Windows install left (GAP-0045).
+cli/defenseclaw/managed_leftovers.py
 
 # The enterprise Setup and packages embed the CLI and its locked dependencies.
 pyproject.toml

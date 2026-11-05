@@ -132,6 +132,10 @@ RULES: tuple[tuple[tuple[str, ...], frozenset[str]], ...] = (
     ((".claude/", ".agents/", ".devin/"), frozenset()),
 )
 
+# The release workflow builds and signs the Cowork VM packages, so a change to
+# it alone runs the Cowork VM install suite (ci.yml cowork-vm-package) too.
+COWORK_VM_PATHS = (".github/workflows/release.yaml",)
+
 PY_TEST_ROOT = "cli/tests"
 # This file and its test name many paths as data; they never pin them.
 SELF = "scripts/ci_changes.py"
@@ -241,7 +245,7 @@ def _read(path: str) -> str:
 
 
 def everything(reason: str) -> dict[str, object]:
-    return _outputs(set(EVERYTHING), [], [], reason, repro=True)
+    return _outputs(set(EVERYTHING), [], [], reason, repro=True, cowork_vm=True)
 
 
 def classify(
@@ -300,7 +304,8 @@ def classify(
         flags.add("pwsh")
 
     repro = any(_matches(path, pattern) for path in files for pattern in REPRO_PATHS)
-    return _outputs(flags, py_tests, go_tests, "pull request paths", repro=repro)
+    cowork_vm = any(_matches(path, pattern) for path in files for pattern in COWORK_VM_PATHS)
+    return _outputs(flags, py_tests, go_tests, "pull request paths", repro=repro, cowork_vm=cowork_vm)
 
 
 def _is_test_module(path: str) -> bool:
@@ -314,6 +319,7 @@ def _outputs(
     go_tests: list[dict[str, str]],
     reason: str,
     repro: bool = False,
+    cowork_vm: bool = False,
 ) -> dict[str, object]:
     def on(*names: str) -> bool:
         return any(name in flags for name in names)
@@ -338,6 +344,7 @@ def _outputs(
             "go_tests": json.dumps(go_tests, separators=(",", ":")),
             "checks": on("go", "python", "ts", "checks"),
             "install": on("go", "python", "packaging", "windows"),
+            "cowork_vm": cowork_vm or on("go", "python", "packaging", "windows"),
             "enterprise": managed or on("go", "packaging", "windows"),
             "windows_go": managed or on("go", "windows"),
             "windows_python": managed or on("python", "windows"),

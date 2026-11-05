@@ -808,13 +808,9 @@ func (m *Manager) sandboxReleaseRefusal(gw *Gateway) error {
 // (oldSupervisorLive): the owner's words for the state.
 const legacyUnprotected = sandboxapi.LegacyUnprotected
 
-// legacyContainment is what DefenseClaw does, and does not, about a live
-// legacy guest. Closing its egress proxy and withdrawing the network rules
-// and providers it added does not contain that supervisor's broker, which
-// falls through to the native call when it cannot inspect a socket
-// (GAP-0831), so the guest is never reported contained.
-const legacyContainment = "DefenseClaw closed its egress proxy and withdraws the network rules it added, but that does not contain the old broker, " +
-	"which passes a connection it cannot inspect straight to the host; DefenseClaw does not stop the sandbox for you, and until it is gone " +
+// legacyContainment describes a live session from before the current
+// supported release. It cannot be reported as protected by this release.
+const legacyContainment = "DefenseClaw closed its egress proxy and withdraws the network rules it added, but cannot verify the earlier supervisor under the current policy; DefenseClaw does not stop the sandbox for you, and until it is gone " +
 	"it creates and starts no sandbox and runs nothing in it"
 
 // legacyRulesKept opens the warning about a withdrawal of a live legacy
@@ -954,7 +950,7 @@ func legacyWayOn(name string, phase audit.SandboxPhase, driver string) string {
 	if !workloadEnded(phase) {
 		way := "save the work you need, then run `" + legacyStopCommand(name, phase) + "`"
 		if stopLosesWrites(driver) {
-			way += ", which syncs the VM's disk first (that release's stop does not flush it, so what the guest writes after the sync may be lost) " +
+			way += ", which syncs the VM's disk first (changes after the sync may be lost if stop fails) " +
 				"and, when that sync fails, asks before it stops the VM"
 		}
 		return way
@@ -987,7 +983,7 @@ func oldSupervisorWarning(name string, phase audit.SandboxPhase, driver string) 
 		what = "its MicroVM may still run background work on"
 	}
 	return legacyUnprotected + ": " + what + " the supervisor of an OpenShell release older than " + openshell.SupportedMin +
-		", whose network broker can let the sandbox's connections bypass its policy (NVIDIA/OpenShell#4494). " + legacyContainment + ": " +
+		". " + legacyContainment + ": " +
 		legacyWayOn(name, phase, driver)
 }
 
@@ -997,11 +993,10 @@ func oldSupervisorWarning(name string, phase audit.SandboxPhase, driver string) 
 // than openshell.SupportedMin. upgrade is the way on of a gateway that
 // starts no sandbox (Manager.upgradeWayOn).
 func oldSupervisorMessage(name, release string, phase audit.SandboxPhase, driver, upgrade string) string {
-	which := "its session started on OpenShell " + release + ", whose network broker can let the sandbox's connections bypass its policy " +
-		"(NVIDIA/OpenShell#4494), and it keeps that supervisor while it runs"
+	which := "its session started on OpenShell " + release + " and keeps that supervisor while it runs"
 	if release == "" {
 		which = "its session started before DefenseClaw kept the OpenShell release a session starts on, so it may run a supervisor older than " +
-			openshell.SupportedMin + ", whose network broker can let the sandbox's connections bypass its policy (NVIDIA/OpenShell#4494)"
+			openshell.SupportedMin
 	}
 	if phase != audit.SandboxPhaseReady {
 		which = "its MicroVM may still run background work; " + which
@@ -1078,8 +1073,7 @@ func (m *Manager) unprotectedRunRefusal(except string) error {
 	var why []string
 	if len(legacy) > 0 {
 		why = append(why, strings.Join(legacy, ", ")+" runs ("+legacyUnprotected+"): its session runs the supervisor "+
-			"of an OpenShell release older than "+openshell.SupportedMin+", whose network broker can let connections bypass sandbox policy "+
-			"(NVIDIA/OpenShell#4494), and DefenseClaw cannot contain it")
+			"of an OpenShell release older than "+openshell.SupportedMin+", which DefenseClaw cannot verify under the current policy")
 	}
 	if len(contained) > 0 {
 		why = append(why, strings.Join(contained, ", ")+" runs ("+containedUnprotected+"): DefenseClaw had to stop it, but its MicroVM's disk "+

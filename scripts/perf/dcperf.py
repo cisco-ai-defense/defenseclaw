@@ -8,9 +8,10 @@
 Measures one per-user install on the host it runs on and writes a JSON
 result plus a one-line summary:
 
-* hook latency of the installed Claude Code and Codex hooks (the command
-  the connector registered in ~/.claude/settings.json and ~/.codex/hooks.json),
-  benign PreToolUse calls: idle (sequential) and burst (32-way);
+* hook latency of the installed Claude Code and Codex hooks (the handlers
+  the connector registered in ~/.claude/settings.json and ~/.codex/hooks.json,
+  started as the agent starts them), benign PreToolUse calls: idle
+  (sequential) and burst (32-way);
 * processes spawned per hook call: Linux with strace on PATH; macOS from an
   `eslogger exec fork` log that root writes during the run (--eslogger-log),
   which also counts what the gateway itself starts while the hooks run;
@@ -58,6 +59,7 @@ import statistics
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 import urllib.error
 import urllib.request
@@ -431,8 +433,35 @@ def provision(assets: Path, home: Path) -> None:
 # ---------------------------------------------------------------- hooks
 
 
-def registered_hook(inst: Install, connector: str) -> str:
-    """The PreToolUse command the connector registered for DefenseClaw."""
+# The tool of the benign call each connector's payload carries (hook_payload).
+HOOK_TOOL = {"claudecode": "Read", "codex": "Bash"}
+
+
+def _matcher_selects(matcher, tool: str) -> bool:
+    """Whether a PreToolUse group's matcher selects tool, as the agents read it:
+    no matcher, "" and "*" select every tool, anything else is a regex."""
+    if matcher in (None, "", "*"):
+        return True
+    if not isinstance(matcher, str):
+        return False
+    try:
+        return re.fullmatch(matcher, tool) is not None
+    except re.error:
+        return matcher == tool
+
+
+def registered_hooks(inst: Install, connector: str) -> list[list[str]]:
+    """The argv of every DefenseClaw PreToolUse handler the agent runs for the
+    benign call, started as the agent starts it.
+
+    Claude Code runs all the handlers of every group whose matcher selects the
+    tool, in parallel. A handler with an args list is its exec form: Claude
+    Code spawns command with args directly, with no shell (the Linux per-user
+    install registers ~/.local/bin/defenseclaw-hook-post guard-user-hook ...
+    and its defenseclaw-hook-user fallback-guard-user-hook companion, GAP-0322).
+    A handler without args is a shell command line, run with /bin/sh -c.
+    Codex has only the shell form.
+    """
     if connector == "claudecode":
         path = inst.home / ".claude" / "settings.json"
         data = json.loads(path.read_text(encoding="utf-8"))
@@ -446,12 +475,53 @@ def registered_hook(inst: Install, connector: str) -> str:
         else:
             path = inst.home / ".codex" / "hooks.json"
             data = json.loads(path.read_text(encoding="utf-8"))
+    argvs = []
     for group in data.get("hooks", {}).get("PreToolUse", []):
+        if not _matcher_selects(group.get("matcher"), HOOK_TOOL[connector]):
+            continue
         for hook in group.get("hooks", []):
             command = hook.get("command", "")
-            if "defenseclaw" in command or str(inst.dc) in command:
-                return command
-    raise RuntimeError(f"no DefenseClaw PreToolUse hook registered in {path}")
+            if not isinstance(command, str) or not ("defenseclaw" in command or str(inst.dc) in command):
+                continue
+            args = hook.get("args")
+            if connector == "claudecode" and isinstance(args, list):
+                argvs.append([command] + [str(a) for a in args])
+            else:
+                argvs.append(["/bin/sh", "-c", command])
+    if not argvs:
+        raise RuntimeError(f"no DefenseClaw PreToolUse hook registered in {path}")
+    return argvs
+
+
+def run_handlers(
+    argvs: list[list[str]], data: bytes, env: dict, cwd: str, timeout: float = 60
+) -> list[tuple[int, bytes]]:
+    """Start every handler at once with the call on its stdin, as the agent
+    does, and wait for all of them: (exit code, stdout) per handler."""
+    procs = [
+        subprocess.Popen(argv, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE, env=env, cwd=cwd)
+        for argv in argvs
+    ]
+    outs: list[bytes | None] = [None] * len(procs)
+    errors: list[BaseException] = []
+
+    def talk(i: int) -> None:
+        try:
+            outs[i] = procs[i].communicate(data, timeout=timeout)[0]
+        except BaseException as exc:  # TimeoutExpired: stop the handler, fail the run below
+            procs[i].kill()
+            procs[i].communicate()
+            errors.append(exc)
+
+    threads = [threading.Thread(target=talk, args=(i,)) for i in range(1, len(procs))]
+    for thread in threads:
+        thread.start()
+    talk(0)
+    for thread in threads:
+        thread.join()
+    if errors:
+        raise errors[0]
+    return [(proc.returncode, out or b"") for proc, out in zip(procs, outs)]
 
 
 def hook_payload(connector: str, work: Path, session: str) -> bytes:
@@ -486,20 +556,22 @@ def hook_payload(connector: str, work: Path, session: str) -> bytes:
 DENY_RE = re.compile(rb'"(permissionDecision|decision)"\s*:\s*"(deny|block)"')
 
 
-def call_hook(inst: Install, env: dict, command: str, connector: str, session: str):
+def call_hook(inst: Install, env: dict, argvs: list[list[str]], connector: str, session: str):
+    """One benign call through every registered handler: the time until the
+    last one answered, the first non-zero exit code (0 when all exited 0) and
+    whether any handler denied the call."""
     data = hook_payload(connector, inst.work, session)
     start = time.perf_counter()
-    proc = subprocess.run(
-        ["/bin/sh", "-c", command], input=data, env=env, cwd=str(inst.work), capture_output=True, timeout=60
-    )
+    results = run_handlers(argvs, data, env, str(inst.work))
     elapsed = (time.perf_counter() - start) * 1000.0
-    denied = proc.returncode == 2 or bool(DENY_RE.search(proc.stdout))
-    return elapsed, proc.returncode, denied
+    rc = next((code for code, _ in results if code != 0), 0)
+    denied = any(code == 2 or bool(DENY_RE.search(out)) for code, out in results)
+    return elapsed, rc, denied
 
 
 def measure_hook(inst: Install, connector: str, prof: dict) -> dict:
     env = inst.env()
-    command = registered_hook(inst, connector)
+    command = registered_hooks(inst, connector)
     session = f"dcperf-{connector}-{uuid.uuid4().hex[:8]}"
     for _ in range(3):  # warm the gateway session state
         call_hook(inst, env, command, connector, session)
@@ -578,9 +650,10 @@ def count_execs(inst: Install, connector: str, calls: int, eslogger_log: Path | 
     or read from an eslogger log (macOS, count_execs_eslogger).
 
     Counts every successful execve and every new process (fork or non-thread
-    clone) in the hook's tree, including the /bin/sh the agent starts the
-    hook command with; by_program says which program each exec ran and
-    spawned_by which program started it.
+    clone) in the trees of all the handlers of one call (registered_hooks),
+    including the /bin/sh the agent starts a shell-form command with;
+    by_program says which program each exec ran and spawned_by which program
+    started it.
     """
     if platform.system() == "Darwin":
         return count_execs_eslogger(inst, connector, calls, eslogger_log) if eslogger_log else None
@@ -588,38 +661,35 @@ def count_execs(inst: Install, connector: str, calls: int, eslogger_log: Path | 
     if not strace or platform.system() != "Linux":
         return None
     env = inst.env()
-    command = registered_hook(inst, connector)
+    argvs = registered_hooks(inst, connector)
     session = f"dcperf-exec-{uuid.uuid4().hex[:8]}"
     names: dict[str, int] = {}
     spawned: dict[str, int] = {}
     forked: dict[str, int] = {}
     per_call, forks = [], []
     for _ in range(calls):
-        with tempfile.NamedTemporaryFile(prefix="dcperf-strace-", delete=False) as tmp:
-            trace = tmp.name
+        traces = []
         try:
-            subprocess.run(
+            for _ in argvs:
+                with tempfile.NamedTemporaryFile(prefix="dcperf-strace-", delete=False) as tmp:
+                    traces.append(tmp.name)
+            run_handlers(
                 [
-                    strace,
-                    "-f",
-                    "-qq",
-                    "-e",
-                    "trace=execve,clone,clone3,fork,vfork",
-                    "-o",
-                    trace,
-                    "/bin/sh",
-                    "-c",
-                    command,
+                    [strace, "-f", "-qq", "-e", "trace=execve,clone,clone3,fork,vfork", "-o", trace] + argv
+                    for trace, argv in zip(traces, argvs)
                 ],
-                input=hook_payload(connector, inst.work, session),
-                env=env,
-                cwd=str(inst.work),
-                capture_output=True,
-                timeout=60,
+                hook_payload(connector, inst.work, session),
+                env,
+                str(inst.work),
             )
-            parsed = parse_strace(Path(trace).read_text(errors="replace"))
+            parsed = {"execs": [], "forks": []}
+            for trace in traces:
+                one = parse_strace(Path(trace).read_text(errors="replace"))
+                parsed["execs"] += one["execs"]
+                parsed["forks"] += one["forks"]
         finally:
-            os.unlink(trace)
+            for trace in traces:
+                os.unlink(trace)
         per_call.append(len(parsed["execs"]))
         forks.append(len(parsed["forks"]))
         for by in parsed["forks"]:
@@ -651,14 +721,20 @@ def eslogger_time(text: str) -> float:
 
 
 def parse_eslogger(
-    lines: list[str], windows: list[tuple[float, float]], runner_pid: int, gateway_pid: int | None
+    lines: list[str],
+    windows: list[tuple[float, float]],
+    runner_pid: int,
+    gateway_pid: int | None,
+    roots: tuple[str, ...] = ("sh",),
 ) -> dict:
     """Execs and processes per hook call in an `eslogger exec fork` JSON log (macOS).
 
-    windows holds the wall-clock start and end of each traced call, which
-    runner_pid ran with /bin/sh. A call's tree is the /bin/sh that runner_pid
-    started in its window and every process forked below it there; on macOS
-    /bin/sh runs bash, so a call's own shell is two execs. Endpoint Security
+    windows holds the wall-clock start and end of each traced call, whose
+    handlers runner_pid started: /bin/sh for a shell-form command, the program
+    itself for an exec-form one (roots, the program names). A call's tree is
+    every handler runner_pid started in its window and every process forked
+    below them there; on macOS /bin/sh runs bash, so a call's own shell is two
+    execs. Endpoint Security
     drops events under load, so a call whose window has a gap in the seq_num
     of an event type is dropped rather than counted short. gateway_execs
     counts the execs of the gateway's descendants from the first call to the
@@ -693,11 +769,11 @@ def parse_eslogger(
         for kind in ("exec", "fork"):
             seqs = sorted(e[2][1] for e in window if e[1] == kind)
             gap = gap or bool(seqs and seqs[-1] - seqs[0] + 1 != len(seqs))
-        roots = [e for e in window if e[1] == "exec" and e[4] == runner_pid and e[5] == "sh"]
-        if gap or not roots:
+        started = [e for e in window if e[1] == "exec" and e[4] == runner_pid and e[5] in roots]
+        if gap or not started:
             dropped += 1
             continue
-        tree, links, grown = {roots[0][3]}, {e[3]: e[4] for e in window}, True
+        tree, links, grown = {e[3] for e in started}, {e[3]: e[4] for e in window}, True
         while grown:
             grown = False
             for pid, ppid in links.items():
@@ -777,20 +853,13 @@ def count_execs_eslogger(inst: Install, connector: str, calls: int, log: Path) -
     for events to show up.
     """
     env = inst.env()
-    command = registered_hook(inst, connector)
+    argvs = registered_hooks(inst, connector)
     session = f"dcperf-exec-{uuid.uuid4().hex[:8]}"
     offset = log.stat().st_size
     windows = []
     for _ in range(calls):
         start = time.time()
-        subprocess.run(
-            ["/bin/sh", "-c", command],
-            input=hook_payload(connector, inst.work, session),
-            env=env,
-            cwd=str(inst.work),
-            capture_output=True,
-            timeout=60,
-        )
+        run_handlers(argvs, hook_payload(connector, inst.work, session), env, str(inst.work))
         windows.append((start, time.time()))
         time.sleep(ESLOGGER_CALL_GAP_S)  # pacing: one call's events never fall in the next window
     return {
@@ -802,6 +871,7 @@ def count_execs_eslogger(inst: Install, connector: str, calls: int, log: Path) -
             "runner_pid": os.getpid(),
             "gateway_pid": inst.gateway_pid(),
             "windows": windows,
+            "roots": sorted({os.path.basename(argv[0]) for argv in argvs}),
         },
     }
 
@@ -868,7 +938,9 @@ def eslogger_parse(result: dict, eslogger_pid: int) -> dict:
                 f"eslogger-parse: {trace['log']} ends before the last traced call; "
                 "stop eslogger with SIGTERM (which flushes it) before parsing"
             )
-        parsed = parse_eslogger(lines, windows, int(trace["runner_pid"]), trace.get("gateway_pid"))
+        parsed = parse_eslogger(
+            lines, windows, int(trace["runner_pid"]), trace.get("gateway_pid"), tuple(trace.get("roots") or ("sh",))
+        )
         if not parsed["calls"]:
             raise SystemExit(f"eslogger-parse: no traced call in {trace['log']} ({parsed['calls_dropped']} dropped)")
         result.setdefault("metrics", {}).setdefault("hook_execs", {})[connector] = dict(parsed, tracer="eslogger")

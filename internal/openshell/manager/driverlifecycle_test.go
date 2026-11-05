@@ -225,6 +225,62 @@ func TestTheWorkloadCheckJudgesWhatTheMicroVMGot(t *testing.T) {
 	e.startBox("fits", sandboxapi.StartRequest{})
 }
 
+// The guest's own resolver is checked before either operation can expose a
+// runnable VM. The same response has no admission effect on the Docker driver.
+func TestMicroVMGuestResolverBeforeSession(t *testing.T) {
+	keep := func(*workloadAnswer) {}
+	for _, tc := range []struct {
+		name string
+		edit func(*workloadAnswer)
+		// direct is what the pinned caller's direct exec prints ("" the good report).
+		direct string
+	}{
+		{"no answer", func(a *workloadAnswer) { a.localhost = nil }, ""},
+		{"wrong address", func(a *workloadAnswer) { a.localhost = []string{"unspec 203.0.113.10", "loopback-only"} }, ""},
+		{"mixed addresses", func(a *workloadAnswer) {
+			a.localhost = []string{"unspec 127.0.0.1", "unspec 203.0.113.10", "inet 127.0.0.1", "loopback-only"}
+		}, ""},
+		{"command failure", func(a *workloadAnswer) { a.localhost, a.localhostFailed = nil, true }, ""},
+		{"timeout", func(a *workloadAnswer) { a.localhost, a.localhostFailed = nil, true }, ""},
+		{"truncated", func(a *workloadAnswer) { a.cut = true }, ""},
+		{"mixed family from the direct caller", keep, "unspec 127.0.0.1\nrefused nonloopback\n"},
+		{"preloaded code from the direct caller", keep, "refused preload\n"},
+		{"NSS module from the direct caller", keep, "refused nss\n"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			direct, code := goodResolverOutput, 0
+			if tc.direct != "" {
+				direct, code = tc.direct, 1
+			}
+			createEnv := newVMEnv(t, nil)
+			useOpenCode(t, createEnv)
+			createEnv.fake.HandleExec(withResolverAnswer(createEnv.workloadChecks(func(_ string, a *workloadAnswer) { tc.edit(a) }, nil), direct, code))
+			_, err := createEnv.tryCreate(sandboxapi.CreateRequest{Name: "unresolved", Harness: "opencode", Copy: true})
+			wantCode(t, err, sandboxapi.CodePolicyRejected)
+			if _, err := createEnv.client.GetSandbox(t.Context(), "unresolved"); !openshell.IsNotFound(err) {
+				t.Fatalf("refused create left a guest: %v", err)
+			}
+
+			startEnv := newVMEnv(t, nil)
+			useOpenCode(t, startEnv)
+			startEnv.create(sandboxapi.CreateRequest{Name: "restart", Harness: "opencode", Copy: true})
+			startEnv.stopBox("restart")
+			startEnv.fake.HandleExec(withResolverAnswer(startEnv.workloadChecks(func(_ string, a *workloadAnswer) { tc.edit(a) }, nil), direct, code))
+			_, err = startEnv.m.Start(t.Context(), "restart", sandboxapi.StartRequest{})
+			wantCode(t, err, sandboxapi.CodePolicyRejected)
+			if got, _ := startEnv.client.GetSandbox(t.Context(), "restart"); got.Status.Phase != openshell.PhaseStopped {
+				t.Fatalf("refused start left guest phase %s", got.Status.Phase)
+			}
+		})
+	}
+	docker := newEnv(t, nil)
+	useOpenCode(t, docker)
+	docker.fake.HandleExec(withResolverAnswer(docker.workloadChecks(func(_ string, a *workloadAnswer) {
+		a.localhost = []string{"unspec 203.0.113.10", "loopback-only"}
+	}, nil), "refused preload\n", 1))
+	docker.create(sandboxapi.CreateRequest{Name: "docker-twin", Harness: "opencode", Copy: true})
+}
+
 // The list and a sandbox's view warn about a MicroVM sandbox's resources
 // as its start judges them: by what every MicroVM gets now, not what the
 // record kept at create, and with the fix that works on the vm driver

@@ -19,9 +19,12 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"strconv"
 	"strings"
 	"syscall"
 
+	"github.com/defenseclaw/defenseclaw/internal/claudedesktop"
+	"github.com/defenseclaw/defenseclaw/internal/codesig"
 	"github.com/defenseclaw/defenseclaw/internal/gateway/connector"
 	"github.com/defenseclaw/defenseclaw/internal/lazyregexp"
 	"github.com/defenseclaw/defenseclaw/internal/legacyconnector"
@@ -75,9 +78,11 @@ type unixSurfaceProbe struct {
 // the home; others are absolute. goos limits it to "darwin" or "linux".
 type unixDesktopProbe struct {
 	goos, host string
-	// engineDirs hold version-named engine builds (Claude Desktop keeps
-	// the Claude Code build it runs as <dir>/<version>).
-	engineDirs []string
+	// claudeDesktopEngines: the app keeps the Claude Code builds it runs as
+	// claude-code/<version>/... in each of its data folders
+	// (internal/claudedesktop), and each data folder is reported as a
+	// surface of its own (discoverUnixClaudeDesktopEngines).
+	claudeDesktopEngines bool
 	// bundles are macOS app bundles; the host version is their
 	// CFBundleShortVersionString.
 	bundles []string
@@ -98,6 +103,12 @@ type unixDesktopProbe struct {
 	// engines are bundle- or appDir-relative engine CLIs that may be run
 	// with --version (live check).
 	engines []string
+	// engineSigner, on macOS, is the signer every Claude Desktop engine
+	// build must carry: the folder is the user's own, so its version is
+	// taken only from a build whose code signature verifies
+	// (verifyUnixDesktopEngine). Linux builds carry none and need an
+	// executable engine instead (claudedesktop.LinuxEngineExecutable).
+	engineSigner *codesig.Darwin
 }
 
 var unixSurfaceProbes = map[string]unixSurfaceProbe{
@@ -105,10 +116,21 @@ var unixSurfaceProbes = map[string]unixSurfaceProbe{
 		extension:             "anthropic.claude-code",
 		extensionEngineIsHost: true,
 		desktop: []unixDesktopProbe{
-			{goos: "darwin", host: "claude-desktop", engineDirs: []string{"~/Library/Application Support/Claude/claude-code"}, bundles: []string{"/Applications/Claude.app", "~/Applications/Claude.app"}},
-			// Linux Claude Desktop (Ubuntu 22.04+, Debian 12+,
-			// https://code.claude.com/docs/en/desktop-linux); live check.
-			{goos: "linux", host: "claude-desktop", engineDirs: []string{"~/.config/Claude/claude-code"}},
+			// Claude Desktop keeps the Claude Code build it runs for Cowork and
+			// the Code tab as claude-code/<version>/<build>/claude.app under
+			// its data folder, one per deployment (Claude, and Claude-3p on
+			// third-party inference: internal/claudedesktop), signed by
+			// Anthropic (measured on Claude Desktop 4.16336.0, engine 2.1.317).
+			{goos: "darwin", host: "claude-desktop", claudeDesktopEngines: true, bundles: []string{"/Applications/Claude.app", "~/Applications/Claude.app"},
+				engineSigner: &codesig.ClaudeCodeDarwin},
+			// Linux Claude Desktop (Ubuntu 22.04+, Debian 12+, Cowork included,
+			// https://code.claude.com/docs/en/desktop-linux). The folders are
+			// the app's data folders (~/.config/Claude, ~/.config/Claude-3p)
+			// plus claude-code, as on macOS and Windows; live check. Linux
+			// builds carry no vendor signature: a build counts when its
+			// folder holds an executable engine, and its folder name is the
+			// version, as before.
+			{goos: "linux", host: "claude-desktop", claudeDesktopEngines: true},
 		},
 	},
 	"codex": {
@@ -197,9 +219,9 @@ func DiscoverUnixAgentSurfaces(ctx context.Context, home, connectorName string, 
 		if desktop.goos != unixSurfaceGOOS {
 			continue
 		}
-		if surface, ok := discoverUnixDesktop(ctx, home, desktop, allowExec); ok {
-			out = append(out, surface)
-		}
+		surfaces, listed := discoverUnixDesktop(ctx, home, desktop, allowExec)
+		complete = complete && listed
+		out = append(out, surfaces...)
 	}
 	return out, complete
 }
@@ -211,15 +233,15 @@ func unixHomePath(home, path string) string {
 	return filepath.FromSlash(path)
 }
 
-func discoverUnixDesktop(ctx context.Context, home string, probe unixDesktopProbe, allowExec bool) (connector.AgentSurface, bool) {
+// discoverUnixDesktop reports one desktop app's surfaces: one per Claude
+// Desktop data folder that holds an engine build, else one for the app.
+// complete is false when an engine folder was not read in full.
+func discoverUnixDesktop(ctx context.Context, home string, probe unixDesktopProbe, allowExec bool) ([]connector.AgentSurface, bool) {
 	surface := connector.AgentSurface{Surface: connector.HostSurfaceDesktop, Host: probe.host}
-	found := false
-	for _, dir := range probe.engineDirs {
-		path := unixHomePath(home, dir)
-		if version := newestVersionDir(path); version != "" && unixDiscoveryCandidateTrusted(home, path) {
-			surface.EngineVersion, surface.Path, found = version, path, true
-			break
-		}
+	found, complete := false, true
+	var engines []connector.AgentSurface
+	if probe.claudeDesktopEngines {
+		engines, complete = discoverUnixClaudeDesktopEngines(ctx, home, probe)
 	}
 	for _, path := range probe.packageJSON {
 		path = unixHomePath(home, path)
@@ -263,7 +285,79 @@ func discoverUnixDesktop(ctx context.Context, home string, probe unixDesktopProb
 			break
 		}
 	}
-	return surface, found
+	if len(engines) != 0 {
+		for i := range engines {
+			engines[i].HostVersion = surface.HostVersion
+		}
+		return engines, complete
+	}
+	if !found {
+		return nil, complete
+	}
+	return []connector.AgentSurface{surface}, complete
+}
+
+// unixDesktopEngineCandidatesMax bounds the version folders of one data
+// folder that are checked, newest first, for a build that verifies.
+const unixDesktopEngineCandidatesMax = 4
+
+// discoverUnixClaudeDesktopEngines reports Claude Desktop's engine builds
+// under home, one surface per data folder (internal/claudedesktop; the
+// default folders of the account, as a service would read them): the
+// newest build there that verifies (macOS: its code signature; Linux: an
+// executable engine, which is never a signature), and, as a surface of its
+// own with EngineUnverified, the folder's newest build when that one does
+// not verify. A newer unsigned or half-written version folder therefore
+// never hides a genuine build of the same or another data folder, and
+// admitSurfaces sees the build of every folder, so the row follows the
+// oldest admitted one. complete is false when an engine folder holds more
+// entries than are read, or when its newest candidates all fail and older
+// ones were not checked.
+func discoverUnixClaudeDesktopEngines(ctx context.Context, home string, probe unixDesktopProbe) ([]connector.AgentSurface, bool) {
+	// macOS and Linux roots hold no "*", so the data folder list itself
+	// does not overflow.
+	dirs, overflow := claudedesktop.EngineDirs(probe.goos, claudedesktop.FoldersForHome(probe.goos, home))
+	complete := !overflow
+	var out []connector.AgentSurface
+	for _, dir := range dirs {
+		if !unixDiscoveryCandidateTrusted(home, dir.Path) {
+			continue
+		}
+		versions, listed := unixVersionDirs(dir.Path)
+		complete = complete && listed
+		var newestRejected *connector.AgentSurface
+		for i, version := range versions {
+			if i == unixDesktopEngineCandidatesMax {
+				complete = false
+				break
+			}
+			reason := unixDesktopEngineCheck(ctx, filepath.Join(dir.Path, version), version, probe)
+			if reason == "" {
+				out = append(out, connector.AgentSurface{Surface: connector.HostSurfaceDesktop, Host: probe.host, EngineVersion: version, Path: dir.Path})
+				break
+			}
+			if newestRejected == nil {
+				newestRejected = &connector.AgentSurface{Surface: connector.HostSurfaceDesktop, Host: probe.host, Path: dir.Path,
+					EngineUnverified: boundEngineUnverifiedReason("Claude Desktop engine " + version + ": " + reason)}
+			}
+		}
+		if newestRejected != nil {
+			out = append(out, *newestRejected)
+		}
+	}
+	return out, complete
+}
+
+// unixDesktopEngineCheck returns why the Claude Desktop engine build in
+// versionDir is not identified, or "".
+func unixDesktopEngineCheck(ctx context.Context, versionDir, version string, probe unixDesktopProbe) string {
+	if probe.engineSigner != nil {
+		return verifyUnixDesktopEngine(ctx, versionDir, version, *probe.engineSigner)
+	}
+	if claudedesktop.LinuxEngineExecutable(versionDir) == "" {
+		return "no executable claude engine in " + versionDir
+	}
+	return ""
 }
 
 // newestUnixExtensionDir returns the newest "<id>-<version>[-<platform>]"
@@ -409,6 +503,49 @@ func runUnixBundledEngine(ctx context.Context, home, dir string, patterns []stri
 	return ""
 }
 
+// verifyUnixDesktopBundle checks one engine bundle's code signature; tests
+// replace it.
+var verifyUnixDesktopBundle = codesig.VerifyDarwin
+
+// unixDesktopEngineBundlesMax bounds the bundles one version folder is
+// searched for.
+const unixDesktopEngineBundlesMax = 4
+
+// verifyUnixDesktopEngine returns why the engine build in versionDir is not
+// identified, or "" when one claude.app in it (<versionDir>/<build>/ or
+// <versionDir>/ itself) has a code signature of signer that verifies and a
+// sealed Info.plist that names version. It runs in the per-user worker, as
+// the user, and executes nothing from the folder.
+func verifyUnixDesktopEngine(ctx context.Context, versionDir, version string, signer codesig.Darwin) string {
+	bundles, _ := filepath.Glob(filepath.Join(versionDir, "*", "claude.app"))
+	sort.Strings(bundles)
+	bundles = append([]string{filepath.Join(versionDir, "claude.app")}, bundles...)
+	reason, checked := "", 0
+	for _, bundle := range bundles {
+		if info, err := os.Lstat(bundle); err != nil || !info.IsDir() {
+			continue
+		}
+		if checked++; checked > unixDesktopEngineBundlesMax {
+			break
+		}
+		plist := filepath.Join(bundle, "Contents", "Info.plist")
+		if named := readUnixBundleVersion(plist); named != version {
+			reason = "the build " + bundle + " runs from the " + version + " folder, but its Info.plist names " + strconv.Quote(named)
+			continue
+		}
+		result := verifyUnixDesktopBundle(ctx, bundle, signer,
+			codesig.DarwinOptions{Pin: []string{filepath.Join(bundle, "Contents", "MacOS", "claude"), plist}})
+		if result.Verified {
+			return ""
+		}
+		reason = result.Reason
+	}
+	if reason == "" {
+		return "no claude.app engine bundle in " + versionDir
+	}
+	return reason
+}
+
 // UnixAgentSurfacesMax bounds the surfaces the parent accepts per connector
 // from a per-user discovery worker.
 const UnixAgentSurfacesMax = 16
@@ -430,6 +567,9 @@ func ValidUnixAgentSurface(surface connector.AgentSurface) (connector.AgentSurfa
 		}
 	}
 	if surface.Path != "" && (!filepath.IsAbs(surface.Path) || len(surface.Path) > 4096) {
+		return connector.AgentSurface{}, false
+	}
+	if surface.EngineUnverified != "" && (surface.EngineVersion != "" || !ValidEngineUnverifiedReason(surface.EngineUnverified)) {
 		return connector.AgentSurface{}, false
 	}
 	return surface, true

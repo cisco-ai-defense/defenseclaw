@@ -32,6 +32,8 @@ from defenseclaw import gateway as gateway_module
 from defenseclaw.commands import cmd_doctor, cmd_setup
 from defenseclaw.gateway import gateway_api_client_host
 
+from tests.os_view import os_view
+
 
 def test_paths_same_uses_filesystem_identity_for_hard_link_aliases(tmp_path):
     original = tmp_path / "gateway"
@@ -388,7 +390,7 @@ def test_windows_system_powershell_checks_every_system_directory_ancestor(
 
     kernel32 = SimpleNamespace(GetSystemDirectoryW=StubGetSystemDirectory())
     inspected: list[str] = []
-    monkeypatch.setattr(cmd_doctor.os, "name", "nt")
+    monkeypatch.setattr(cmd_doctor, "os", os_view("nt"))
     monkeypatch.setattr(ctypes, "WinDLL", lambda *_args, **_kwargs: kernel32, raising=False)
     monkeypatch.setattr(file_permissions, "reject_reparse_path", lambda _path: None)
     monkeypatch.setattr(
@@ -419,7 +421,7 @@ def test_windows_pid_integrity_checks_every_replaceable_ancestor(
     pid_file.parent.mkdir(parents=True)
     pid_file.write_text("4242", encoding="ascii")
     info = pid_file.stat()
-    monkeypatch.setattr(cmd_doctor.os, "name", "nt")
+    monkeypatch.setattr(doctor_gateway, "os", os_view("nt"))
     inspected: list[str] = []
     monkeypatch.setattr(
         file_permissions,
@@ -473,7 +475,8 @@ def test_windows_pid_integrity_ignores_create_child_on_second_volume_ancestor(
             entries.append((permissions, 1, 0x02, "S-1-5-32-545"))
         return current_sid, False, entries
 
-    monkeypatch.setattr(cmd_doctor.os, "name", "nt")
+    monkeypatch.setattr(doctor_gateway, "os", os_view("nt"))
+    monkeypatch.setattr(file_permissions, "os", os_view("nt"))
     monkeypatch.setattr(file_permissions, "_windows_acl_snapshot", snapshot)
     monkeypatch.setattr(file_permissions, "_windows_current_user_sid", lambda: current_sid)
 
@@ -489,7 +492,7 @@ def test_windows_gateway_data_dir_requires_current_user_owned_custody(
     tmp_path,
 ):
     inspected: list[str] = []
-    monkeypatch.setattr(cmd_doctor.os, "name", "nt")
+    monkeypatch.setattr(cmd_doctor, "os", os_view("nt"))
     monkeypatch.setattr(
         file_permissions,
         "windows_acl_custody_write_error",

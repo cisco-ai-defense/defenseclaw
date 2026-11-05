@@ -29,7 +29,7 @@ This page is for a DefenseClaw you installed yourself. A managed computer (an
 enterprise package, MDM or Setup) has no TUI and no `defenseclaw init`. On
 Linux and macOS the user's `defenseclaw` offers only `sandbox` commands,
 `help` and `--version`, and answers `tui`, `init` and anything else with
-"This computer is managed; use `defenseclaw sandbox status` for your read-only status and `defenseclaw sandbox policy explain` for your policy. Other commands require an administrator."
+"This computer is managed; use `defenseclaw status` for your protection state, `defenseclaw sandbox status` for your sandboxes and `defenseclaw sandbox policy explain` for your policy. Other commands require an administrator."
 and exit `2`. On Windows the managed `defenseclaw.exe` is the
 administrator CLI. An administrator checks a managed computer as shown in
 [On a managed device](/docs/tui#on-a-managed-device).
@@ -50,7 +50,7 @@ AI Discovery. The quick-action row at the end of Overview lists both as
 line above the status line is not a key list on Overview: it shows the most
 urgent notice, for example `500 recent critical/high alert events need review.
 Press 2 for Alerts.`, and a rotating tip when there is none; press `?` for
-every key.
+every key. Under 32 rows the Overview cards are four rows tall and the title shares a row with the tagline, so the services and enforcement summaries are on the first screen at 80x24.
 
 Switch panels with the number/letter key shown, from any panel (only an open
 Setup form or a `/` search box types digits and letters), or cycle with `Tab` /
@@ -225,9 +225,17 @@ block NAME`, `defenseclaw mcp allow NAME` or `defenseclaw tool block NAME
 4. **Change protection.** On Policies, press `m` to switch a scope between observe and action. `b`, `a`, `h` and `p` set block level, alert level, human approval and rule pack.
 5. **Edit settings.** On Setup, press `c` for the config editor, then `S` to review and save.
 
-`?` opens the help overlay for the panel you are on. `Ctrl+C` quits. `q` only closes a drawer.
+`?` opens the help overlay for the panel you are on. `q` closes an open drawer, overlay or detail, and quits when nothing is open. `Ctrl+C` quits from anywhere.
 
 With two or more connectors, `m` filters most panels by connector.
+
+## Claude Cowork in the TUI
+
+Claude Cowork has no panel. It is a surface of the Claude Code connector, and the TUI shows it in three places.
+
+- **Overview.** Under **Configuration**, a **Cowork** row gives the state (`protected`, `not protected yet`, `not protected` or `not confirmed`) and the clock time of the last Cowork event, or `no Cowork event yet`. While Cowork is not protected, a **Cowork next** row gives the missing step. These are the rows `defenseclaw status` prints, so they show only on a per-user install where Claude Desktop is present or a plugin was built. With the Claude Code connector selected (`m`), the view shows the same rows, or, where there are none, how many Cowork events the gateway has seen since it started. A Cowork call counts as Claude Code traffic, so a Cowork-only user does not get the "0 hook events" note.
+- **Setup.** In the **Protect an agent** task, under **Get protected**, the **Protect Claude Cowork** goal runs `defenseclaw setup cowork --yes`. It builds the plugin zip and sets up the Claude Code connector if it is off. It does not open Claude Desktop and does not wait, so upload the zip as described in [Claude Cowork](/docs/connectors/cowork#set-up-for-one-user). The command palette has the same command as `setup cowork`.
+- **Alerts.** A finding from a Cowork call shows the target `cowork:PreToolUse` in the row and in the detail, and the detail has a `Surface: Cowork (Claude Code)` line. A Claude Code call from the terminal keeps `claudecode:PreToolUse`.
 
 ## Handy keys
 
@@ -243,7 +251,7 @@ With two or more connectors, `m` filters most panels by connector.
 | `Y` | Copy the last command's output (works on every panel) |
 | `Ctrl+S` | Save the last run to a log file |
 | `Ctrl+C` | Quit the TUI (it cancels a running command first) |
-| `q` | Close the open drawer or overlay; it does not quit |
+| `q` | Close the open drawer, overlay or detail; quit when nothing is open (it never cancels a running command) |
 | `b` | On Overview and Logs: turn desktop notifications on or off |
 | `e` | On Registries: require (or stop requiring) registry approval for the selected entry's type. Registry actions (sync, approve, reject, require) keep the Registries panel in front and report the result in the status bar; their full output is in Activity |
 
@@ -541,7 +549,7 @@ rather than a finished setup.
 | Harnesses (Claude Code, Codex, Amp, Antigravity, GitHub Copilot CLI, Cursor Agent, Devin CLI, Hermes Agent, Kiro CLI, OpenCode) | `--harness <name>` for each one on | The ones in `openshell.harnesses`, else Claude Code and Codex; only harnesses `openshell.admin.allowed_harnesses` allows are listed |
 | Credentials | none | Names the model key `defenseclaw sandbox run` would share with each harness, never its value. It follows `openshell.llm`, as a run without `--llm` does. Under `auto` (the default) that is `ANTHROPIC_API_KEY` or `CLAUDE_CODE_OAUTH_TOKEN` for Claude Code, and `OPENAI_API_KEY`, `CODEX_API_KEY` or the API key a `codex login --with-api-key` stored in `auth.json` (in `$CODEX_HOME`, else `~/.codex`) for Codex; each list ends with `AWS_BEARER_TOKEN_BEDROCK` for Amazon Bedrock. A ChatGPT login is not shared, so it is not counted. With `none` nothing is shared; with a provider only its key counts, and without it runs are refused |
 | This machine | none | Docker, Landlock, OpenShell and bind-mount status, one per line, from a `sandbox doctor` check that runs when the form opens. When the gateway runs (or is set to run) OpenShell's MicroVM driver, Landlock reads `Landlock (MicroVM)`, and the MicroVM driver's own check (e2fsprogs, the driver's signature) takes the place of the bind-mount line |
-| Install OpenShell | `--install-openshell` | On when OpenShell is missing, its gateway needs attention, or the MicroVM driver's check fails: NVIDIA's pinned, SHA-256-verified installer, which uses `sudo` on Linux and installs the `nvidia/openshell` Homebrew formula on macOS. On macOS it also lets setup install e2fsprogs, which the MicroVM driver needs. Off on OpenShell 0.1.1 to 0.1.4, whose hint offers the upgrade: on, setup upgrades it to 0.1.5 in place, which restarts the OpenShell gateway (on a Mac only once no MicroVM sandbox runs) |
+| Install OpenShell | `--install-openshell` | On when OpenShell is missing, its gateway needs attention, or the MicroVM driver's check fails: NVIDIA's pinned, SHA-256-verified installer, which uses `sudo` on Linux and installs the `nvidia/openshell` Homebrew formula on macOS. On macOS it also lets setup install e2fsprogs, which the MicroVM driver needs. Off on OpenShell 0.1.1 to 0.1.5, whose hint offers the upgrade: on, setup upgrades it to 0.1.6 in place, which restarts the OpenShell gateway (on a Mac only once no MicroVM sandbox runs) |
 | Mount Project Folder | `--no-mounts` when off | On: enables bind mounts on your local OpenShell gateway, and DefenseClaw mounts only the folder you launch from and the read-only settings Claude Code and Codex sandboxes need. Off: no Claude Code or Codex sandbox can start, and other harnesses run on a copy. Turning bind mounts on restarts the OpenShell gateway (see below). Not shown on macOS: setup runs sandboxes there in OpenShell MicroVMs, which mount no host folders, and the form says so under **MicroVMs** |
 | OpenShell Telemetry Off | `--upstream-telemetry` when off | On: setup turns OpenShell's anonymous usage telemetry off in `gateway.env` (on macOS `~/.config/openshell/gateway.env`, which the Homebrew service reads). Changing it restarts the OpenShell gateway (see below). Not shown for a Mac gateway that no Homebrew service runs: that gateway takes the setting from the environment it was started with |
 | Shell Wrappers | `--wrappers` or `--no-wrappers` | Off. On makes the chosen harnesses' commands (`claude`, `codex`, ...) run sandboxed when you type them |

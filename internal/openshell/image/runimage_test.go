@@ -244,7 +244,7 @@ func runBaseFor(t *testing.T, spec BuildSpec) (*Builder, *layerDaemon, Record) {
 	c := mustContext(t, spec)
 	base := recordFor(c, time.Date(2026, 9, 1, 0, 0, 0, 0, time.UTC), true)
 	if spec.MicroVM {
-		base.MicroVM, base.MicroVMVerified = true, true
+		base.MicroVM = true
 	}
 	daemon := newLayerDaemon(t)
 	labels := maps.Clone(c.Labels)
@@ -661,7 +661,7 @@ func TestPruneOnAMicroVMGatewaySupersedesTheDockerDriversImages(t *testing.T) {
 		spec.MicroVM = true
 		c := mustContext(t, spec)
 		vmRec := recordFor(c, dockerRec.BuiltAt.Add(time.Hour), true)
-		vmRec.ImageID, vmRec.MicroVM, vmRec.MicroVMVerified = "sha256:"+strings.Repeat("2", 64), true, true
+		vmRec.ImageID, vmRec.MicroVM = "sha256:"+strings.Repeat("2", 64), true
 		daemon.addBase(vmRec, c.Labels)
 		daemon.images[vmRec.ImageID] = fakeImage{layers: []string{"sha256:l1", "sha256:l2", "sha256:vm"}, labels: daemon.images[vmRec.ImageID].labels}
 		if err := b.Store.Put(vmRec); err != nil {

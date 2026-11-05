@@ -3643,6 +3643,15 @@ def _connector_setup_goals(cfg: object | Mapping[str, Any] | None) -> tuple[Wiza
             presets={"@Action": "remove"},
             fields=("Connector", "Action", "Restart Gateway", "Force Last Connector Removal"),
         ),
+        # Cowork runs Claude Desktop's Claude Code engine; status shows its
+        # row, so Setup offers the command that fixes it (GAP-0046).
+        WizardGoal(
+            "cowork",
+            "Protect Claude Cowork",
+            summary="Build the plugin to upload in Claude; turns on Claude Code hooks if off.",
+            presets={"@Action": "cowork"},
+            fields=("Action",),
+        ),
     )
 
 
@@ -6189,7 +6198,8 @@ def connector_setup_wizard_fields(
             "choice",
             value="setup",
             default="setup",
-            options=("setup", "batch", "remove"),
+            # cowork only under the Protect Claude Cowork goal.
+            options=("setup", "batch", "remove", *(("cowork",) if action == "cowork" else ())),
             hint="Set up/add one connector, choose the active connector set, or remove one.",
         ),
         WizardFormField(
@@ -7652,6 +7662,8 @@ def wizard_bool_value(fields: Sequence[WizardFormField], label: str, fallback: s
 def _build_connector_setup_args(fields: Sequence[WizardFormField]) -> tuple[str, ...]:
     connector = wizard_field_value(fields, "Connector")
     action = wizard_field_value(fields, "Action") or "setup"
+    if action == "cowork":
+        return ("setup", "cowork", "--yes")
     if action == "batch":
         out = ["setup", "--yes"]
         for name in split_csv(wizard_field_value(fields, "Connectors (CSV)")):
@@ -8742,7 +8754,6 @@ def _openshell_section(cfg: object | Mapping[str, Any] | None) -> ConfigSection:
         field("MCP Host Ports", "openshell.mcp.host_ports", hint="Localhost ports opened for host MCP servers, comma-separated."),
         field("Upstream Telemetry", "openshell.upstream_telemetry", "bool", hint="Keep OpenShell's anonymous usage telemetry."),
         field("Token Delivery", "openshell.token_delivery", "choice", ("provider", "env"), hint="How the sandbox token reaches hooks."),
-        field("Middleware (experimental)", "openshell.middleware.enabled", "bool", hint="Supervisor middleware; Phase 3."),
         _header(
             "Organization Policy",
             "openshell.admin",

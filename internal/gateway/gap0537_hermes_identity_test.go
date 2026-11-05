@@ -6,11 +6,99 @@ package gateway
 import (
 	"context"
 	"testing"
+	"time"
 
 	"github.com/defenseclaw/defenseclaw/internal/audit"
 	"github.com/defenseclaw/defenseclaw/internal/config"
 	"github.com/defenseclaw/defenseclaw/internal/gateway/connector"
 )
+
+func TestGAP0537HermesSessionlessTransformUsesOnlyRecentUniqueSession(t *testing.T) {
+	previousPosture := ManagedEnterpriseActive()
+	SetManagedEnterpriseActive(false)
+	t.Cleanup(func() { SetManagedEnterpriseActive(previousPosture) })
+	gap0537Registry(t)
+	peer := withManagedHookPeer(context.Background(), managedHookPeer{UID: 4242, Name: "alice", Home: t.TempDir()})
+	otherPeer := withManagedHookPeer(context.Background(), managedHookPeer{UID: 4343, Name: "bob", Home: t.TempDir()})
+	store, logger := testStoreAndLogger(t)
+	first := audit.EnvelopeFromContext(enrichAgentHookContext(peer, agentHookRequest{
+		ConnectorName: "hermes", HookEventName: "pre_tool_call", SessionID: "session-one", AgentID: "agent-main",
+	}))
+	if first.SessionID != "session-one" || first.AgentID != "agent-main" || first.AgentInstanceID == "" {
+		t.Fatalf("first session identity = %+v", first)
+	}
+	profile := connector.NewHermesConnector().HookProfile(connector.SetupOpts{})
+	transform := normalizeAgentHookRequestWithProfileEvent("hermes", map[string]interface{}{
+		"event": "transform_terminal_output", "output": "done",
+	}, profile, "transform_terminal_output")
+	if transform.HookEventName != "transform_terminal_output" || transform.SessionID != "" {
+		t.Fatalf("sessionless transform request = %+v", transform)
+	}
+	got := audit.EnvelopeFromContext(enrichAgentHookContext(peer, transform))
+	if got.SessionID != first.SessionID || got.AgentID != first.AgentID || got.AgentInstanceID != first.AgentInstanceID {
+		t.Fatalf("sessionless transform identity = %+v, want first session", got)
+	}
+	if err := logger.LogActionCtxSeverity(enrichAgentHookContext(peer, transform),
+		string(audit.ActionConnectorHook), "transform_terminal_output", "completed", "LOW"); err != nil {
+		t.Fatal(err)
+	}
+	rows, err := store.ListEvents(10)
+	if err != nil || len(rows) != 1 {
+		t.Fatalf("sessionless audit rows = %d, error = %v", len(rows), err)
+	}
+	if rows[0].SessionID != first.SessionID || rows[0].AgentID != first.AgentID || rows[0].AgentInstanceID != first.AgentInstanceID {
+		t.Fatalf("sessionless audit row identity = %+v, want first session", rows[0])
+	}
+	if other := audit.EnvelopeFromContext(enrichAgentHookContext(otherPeer, transform)); other.SessionID != "" || other.AgentID != "" || other.AgentInstanceID != "" {
+		t.Fatalf("another account inherited identity: %+v", other)
+	}
+	header := audit.ContextWithEnvelope(peer, audit.CorrelationEnvelope{SessionID: "header-session"})
+	if retained := audit.EnvelopeFromContext(enrichAgentHookContext(header, transform)); retained.SessionID != "header-session" {
+		t.Fatalf("sessionless transform replaced existing correlation: %+v", retained)
+	}
+	// Two recent sessions of one account cannot be distinguished by a
+	// sessionless event. Leave its audit fields empty.
+	_ = enrichAgentHookContext(peer, agentHookRequest{
+		ConnectorName: "hermes", HookEventName: "pre_tool_call", SessionID: "session-two", AgentID: "agent-two",
+	})
+	if ambiguous := audit.EnvelopeFromContext(enrichAgentHookContext(peer, transform)); ambiguous.SessionID != "" || ambiguous.AgentID != "" || ambiguous.AgentInstanceID != "" {
+		t.Fatalf("ambiguous transform inherited identity: %+v", ambiguous)
+	}
+	reg := SharedAgentRegistry()
+	reg.mu.Lock()
+	for key, entry := range reg.sessions {
+		entry.LastSeen = time.Now().Add(-10 * time.Second)
+		reg.sessions[key] = entry
+	}
+	reg.mu.Unlock()
+	if stale := audit.EnvelopeFromContext(enrichAgentHookContext(peer, transform)); stale.SessionID != "" || stale.AgentID != "" || stale.AgentInstanceID != "" {
+		t.Fatalf("stale transform inherited identity: %+v", stale)
+	}
+}
+
+func TestGAP0537BenignHermesToolStillAllowedAfterSessionlessTransform(t *testing.T) {
+	previousPosture := ManagedEnterpriseActive()
+	SetManagedEnterpriseActive(false)
+	t.Cleanup(func() { SetManagedEnterpriseActive(previousPosture) })
+	gap0537Registry(t)
+	peer := withManagedHookPeer(context.Background(), managedHookPeer{UID: 4242, Name: "alice", Home: t.TempDir()})
+	_ = enrichAgentHookContext(peer, agentHookRequest{
+		ConnectorName: "hermes", HookEventName: "pre_tool_call", SessionID: "benign-session", AgentID: "agent-main",
+	})
+	_ = enrichAgentHookContext(peer, agentHookRequest{ConnectorName: "hermes", HookEventName: "transform_terminal_output"})
+	store, logger := testStoreAndLogger(t)
+	cfg := &config.Config{}
+	cfg.Guardrail.Mode, cfg.Guardrail.Connector = "action", "hermes"
+	api := &APIServer{scannerCfg: cfg, store: store, logger: logger}
+	profile := connector.NewHermesConnector().HookProfile(connector.SetupOpts{})
+	req := normalizeAgentHookRequestWithProfile("hermes", map[string]interface{}{
+		"hook_event_name": "pre_tool_call", "session_id": "benign-session",
+		"tool_name": "terminal", "tool_input": map[string]interface{}{"command": "pwd"},
+	}, profile)
+	if answer := api.evaluateAgentHook(enrichAgentHookContext(peer, req), req); answer.Action != "allow" {
+		t.Fatalf("benign tool action = %q, want allow", answer.Action)
+	}
+}
 
 func gap0537Registry(t *testing.T) {
 	t.Helper()
@@ -93,5 +181,11 @@ func TestGAP0537SecureClientHermesIdentityBehaviorUnchanged(t *testing.T) {
 	second := audit.EnvelopeFromContext(enrichAgentHookContext(context.Background(), request))
 	if first.AgentID != "agent-reported" || second.AgentID != "" || first.AgentInstanceID != second.AgentInstanceID {
 		t.Fatalf("Secure Client identities = %+v / %+v", first, second)
+	}
+	sessionless := audit.EnvelopeFromContext(enrichAgentHookContext(context.Background(), agentHookRequest{
+		ConnectorName: "hermes", HookEventName: "transform_terminal_output",
+	}))
+	if sessionless.SessionID != "" || sessionless.AgentID != "" || sessionless.AgentInstanceID != "" {
+		t.Fatalf("Secure Client sessionless identity = %+v", sessionless)
 	}
 }

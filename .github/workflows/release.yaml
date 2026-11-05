@@ -32,6 +32,15 @@ name: Release
 # run's "release" artifact instead. It also proves the Authenticode path of the
 # Windows standalone Setup with a throwaway self-signed test certificate
 # (enterprise-windows-signing-proof); that Setup is never uploaded.
+#
+# The Claude Cowork VM sensor packages (defenseclaw-cowork-<arch>.tar.gz, job
+# cowork-vm) are signed only when the release environment holds the Cowork-only
+# OpenPGP key (COWORK_GPG_PRIVATE_KEY, optional COWORK_GPG_PASSPHRASE). Without
+# it the release ships them unsigned and its notes say so; operation cowork-sign
+# signs an already published release's packages later. With the key, the
+# release variable COWORK_GPG_FINGERPRINT must pin its primary fingerprint:
+# sign.sh refuses any other key, and cowork-sign refuses to replace signatures
+# a release already carries from a different key.
 on:
   workflow_dispatch:
     inputs:
@@ -50,12 +59,13 @@ on:
         type: boolean
         default: false
       operation:
-        description: "release, or legacy-channel to point 0.8.8-0.8.10 upgrades at an already published 1.x release (run once)"
+        description: "release; legacy-channel to point 0.8.8-0.8.10 upgrades at an already published 1.x release (run once); or cowork-sign to sign a published release's Cowork VM packages"
         required: false
         type: choice
         options:
           - release
           - legacy-channel
+          - cowork-sign
         default: release
       dry_run:
         description: "Build and check everything unsigned from any ref, upload the assets as workflow artifacts, publish nothing"
@@ -115,6 +125,13 @@ jobs:
           fi
           if [[ "$OPERATION" == legacy-channel ]]; then
             [[ "$latest" == "$VERSION" ]] || { echo "::error::$VERSION must be the published latest release (latest is $latest)"; exit 1; }
+          elif [[ "$OPERATION" == cowork-sign ]]; then
+            gh release view "$VERSION" --repo "$GITHUB_REPOSITORY" --json assets -q '.assets[].name' > assets.txt \
+              || { echo "::error::$VERSION is not a published release"; exit 1; }
+            for arch in amd64 arm64; do
+              grep -qx "defenseclaw-cowork-$arch.tar.gz" assets.txt \
+                || { echo "::error::$VERSION has no defenseclaw-cowork-$arch.tar.gz to sign"; exit 1; }
+            done
           else
             if gh api "repos/$GITHUB_REPOSITORY/git/ref/tags/$VERSION" >/dev/null 2>tag.err; then
               refuse "Tag $VERSION already exists; releases are immutable, use the next patch version"
@@ -271,6 +288,68 @@ jobs:
         with:
           name: assets
           path: assets/
+          if-no-files-found: error
+          retention-days: 7
+
+  # Claude Cowork VM sensor packages (packaging/cowork-vm), one per VM
+  # architecture, from the gateway and sensor helper of this release's
+  # enterprise Linux archives. Signed with the Cowork-only key when the release
+  # environment has it; otherwise they ship unsigned and the notes say so.
+  cowork-vm:
+    name: Build the Cowork VM sensor packages
+    if: inputs.operation == 'release'
+    needs: build
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    # A dry run has no environment and never reads the signing key.
+    environment: ${{ !inputs.dry_run && 'release' || '' }}
+    outputs:
+      signed: ${{ steps.sign.outputs.signed }}
+    steps:
+      - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: assets
+          path: assets
+      # The rule packs ship until the gateway starts without them when
+      # guardrails are off (R108-COWORK-4); then drop --policies.
+      - name: Build and check the packages
+        run: |
+          set -euo pipefail
+          SOURCE_DATE_EPOCH="$(git log -1 --format=%ct)"; export SOURCE_DATE_EPOCH
+          for arch in amd64 arm64; do
+            bin="$RUNNER_TEMP/cowork-bin/$arch"; mkdir -p "$bin"
+            tar -xzf "assets/defenseclaw-enterprise-$VERSION-linux-$arch.tar.gz" -C "$bin" \
+              defenseclaw-gateway defenseclaw-sensor-helper
+            packaging/cowork-vm/build.sh --arch "$arch" --version "$VERSION" --gateway "$bin/defenseclaw-gateway" \
+              --helper "$bin/defenseclaw-sensor-helper" --policies policies --out-dir cowork-vm
+          done
+      - name: Sign the packages with the Cowork key (optional)
+        id: sign
+        env:
+          COWORK_GPG_PRIVATE_KEY: ${{ !inputs.dry_run && secrets.COWORK_GPG_PRIVATE_KEY || '' }}
+          COWORK_GPG_PASSPHRASE: ${{ !inputs.dry_run && secrets.COWORK_GPG_PASSPHRASE || '' }}
+          COWORK_GPG_FINGERPRINT: ${{ !inputs.dry_run && vars.COWORK_GPG_FINGERPRINT || '' }}
+        run: |
+          set -euo pipefail
+          if [[ -z "${COWORK_GPG_PRIVATE_KEY:-}" ]]; then
+            echo "signed=false" >> "$GITHUB_OUTPUT"
+            echo "::notice title=Unsigned Cowork VM packages::COWORK_GPG_PRIVATE_KEY is not set; defenseclaw-cowork-*.tar.gz ship without .sig files. Sign them later with operation cowork-sign."
+            echo "defenseclaw-cowork-amd64.tar.gz and defenseclaw-cowork-arm64.tar.gz are UNSIGNED (no Cowork key); Claude Desktop installs only signed packages. Run the Release workflow with operation cowork-sign once the key is set." >> "$GITHUB_STEP_SUMMARY"
+            exit 0
+          fi
+          [[ -n "${COWORK_GPG_FINGERPRINT:-}" ]] \
+            || { echo "::error::COWORK_GPG_PRIVATE_KEY is set but the release variable COWORK_GPG_FINGERPRINT (the Cowork key's pinned fingerprint) is not"; exit 1; }
+          packaging/cowork-vm/sign.sh --expire 180d --public-key-out cowork-vm/defenseclaw-cowork-signing-key.asc \
+            cowork-vm/defenseclaw-cowork-amd64.tar.gz cowork-vm/defenseclaw-cowork-arm64.tar.gz
+          echo "signed=true" >> "$GITHUB_OUTPUT"
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: cowork-vm
+          path: cowork-vm/
           if-no-files-found: error
           retention-days: 7
 
@@ -476,7 +555,7 @@ jobs:
   sign:
     name: Checksum and sign
     if: ${{ !inputs.dry_run }}
-    needs: [build, macos-app, enterprise-windows, enterprise-macos]
+    needs: [build, cowork-vm, macos-app, enterprise-windows, enterprise-macos]
     runs-on: ubuntu-latest
     timeout-minutes: 10
     permissions:
@@ -516,7 +595,7 @@ jobs:
   dry-run-assets:
     name: Checksum the dry-run assets (unsigned)
     if: inputs.dry_run
-    needs: [build, macos-app, enterprise-windows, enterprise-windows-signing-proof, enterprise-macos]
+    needs: [build, cowork-vm, macos-app, enterprise-windows, enterprise-windows-signing-proof, enterprise-macos]
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
@@ -528,6 +607,7 @@ jobs:
         env:
           APP_VERIFICATION: ${{ needs.macos-app.outputs.verification }}
           PKG_SIGNED: ${{ needs.enterprise-macos.outputs.pkg_signed }}
+          COWORK_SIGNED: ${{ needs.cowork-vm.outputs.signed }}
         run: |
           set -euo pipefail
           cd release
@@ -538,7 +618,7 @@ jobs:
             echo "## dry run: nothing published"
             echo
             echo "Nothing was signed, released, tagged or pushed. The assets and an unsigned checksums.txt are this run's \`release\` artifact."
-            echo "macOS app: ${APP_VERIFICATION:-unknown}. macOS enterprise pkg signed: ${PKG_SIGNED:-unknown}."
+            echo "macOS app: ${APP_VERIFICATION:-unknown}. macOS enterprise pkg signed: ${PKG_SIGNED:-unknown}. Cowork VM packages signed: ${COWORK_SIGNED:-unknown}."
             echo
             echo '```'
             cat checksums.txt
@@ -767,8 +847,8 @@ jobs:
     if: >-
       ${{ !inputs.dry_run && !cancelled() && needs.sign.result == 'success' &&
       needs.install-gate.result == 'success' && needs.enterprise-upgrade-gate.result == 'success' &&
-      needs.enterprise-macos.result == 'success' }}
-    needs: [sign, install-gate, enterprise-upgrade-gate, enterprise-macos]
+      needs.enterprise-macos.result == 'success' && needs.cowork-vm.result == 'success' }}
+    needs: [sign, install-gate, enterprise-upgrade-gate, enterprise-macos, cowork-vm]
     runs-on: ubuntu-latest
     timeout-minutes: 10
     permissions:
@@ -776,6 +856,7 @@ jobs:
     env:
       GH_TOKEN: ${{ github.token }}
       PKG_SIGNED: ${{ needs.enterprise-macos.outputs.pkg_signed }}
+      COWORK_SIGNED: ${{ needs.cowork-vm.outputs.signed }}
     steps:
       - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
         with:
@@ -791,6 +872,12 @@ jobs:
             pkg="defenseclaw-enterprise-$VERSION-darwin-arm64.pkg"
             printf '%s\n\n' "**macOS enterprise package:** \`$pkg\` is unsigned (not Developer ID-signed or notarized). Verify the cosign signature on \`checksums.txt\`, then the pkg against its SHA-256 in \`checksums.txt\`." > notes.md
             echo "$pkg ships unsigned; the release notes say to verify it through the cosign-signed checksums.txt." >> "$GITHUB_STEP_SUMMARY"
+            notes=(--notes-file notes.md)
+          fi
+          if [[ "$COWORK_SIGNED" != true ]]; then
+            # cowork-sign replaces this paragraph, marker included, once it signs them.
+            printf '%s\n\n' "<!-- cowork-vm-unsigned -->**Claude Cowork VM sensor packages:** \`defenseclaw-cowork-amd64.tar.gz\` and \`defenseclaw-cowork-arm64.tar.gz\` are unsigned (no \`.sig\`). Claude Desktop installs only a package signed with the Cisco Cowork key, so do not deploy them until the \`.sig\` files are attached to this release." >> notes.md
+            echo "The Cowork VM packages ship unsigned; the release notes say so." >> "$GITHUB_STEP_SUMMARY"
             notes=(--notes-file notes.md)
           fi
           gh release create "$VERSION" --repo "$GITHUB_REPOSITORY" --target "$GITHUB_SHA" \
@@ -852,3 +939,78 @@ jobs:
           commit="$(gh api "repos/$GITHUB_REPOSITORY/commits/$VERSION" -q .sha)"
           RELEASE_TAG="$VERSION" RELEASE_COMMIT="$commit" RELEASE_CHECKSUMS="$GITHUB_WORKSPACE/target/checksums.txt" \
             bash legacy/scripts/publish-release-channel.sh
+
+  # Sign a published release's Cowork VM packages with the Cowork-only key
+  # (it arrives after the release). The packages are checked against the
+  # release's cosign-signed checksums.txt first; the .sig files and the public
+  # key are attached, and the unsigned paragraph leaves the notes.
+  cowork-sign:
+    name: Sign the Cowork VM packages of ${{ inputs.version }}
+    if: inputs.operation == 'cowork-sign' && !inputs.dry_run
+    needs: validate
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    # The job's own condition already skips dry runs; the guarded forms keep
+    # the release-secrets rule of every other job.
+    environment: ${{ !inputs.dry_run && 'release' || '' }}
+    permissions:
+      contents: write
+    env:
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
+        with:
+          persist-credentials: false
+      - uses: sigstore/cosign-installer@dc72c7d5c4d10cd6bcb8cf6e3fd625a9e5e537da # v3.7.0
+        with:
+          cosign-release: "v2.6.3"
+      - name: Fetch and verify the published packages
+        run: |
+          set -euo pipefail
+          mkdir cowork && cd cowork
+          gh release download "$VERSION" --repo "$GITHUB_REPOSITORY" -p checksums.txt -p checksums.txt.bundle \
+            -p defenseclaw-cowork-amd64.tar.gz -p defenseclaw-cowork-arm64.tar.gz
+          cosign verify-blob --bundle checksums.txt.bundle \
+            --certificate-identity "https://github.com/$GITHUB_REPOSITORY/.github/workflows/release.yaml@refs/heads/main" \
+            --certificate-oidc-issuer https://token.actions.githubusercontent.com checksums.txt
+          for arch in amd64 arm64; do
+            grep -E "  defenseclaw-cowork-$arch\.tar\.gz\$" checksums.txt | sha256sum --check -
+          done
+          for arch in amd64 arm64; do
+            python3 ../packaging/cowork-vm/check-package.py --arch "$arch" --version "$VERSION" "defenseclaw-cowork-$arch.tar.gz"
+          done
+      - name: Sign, verify and attach
+        env:
+          COWORK_GPG_PRIVATE_KEY: ${{ !inputs.dry_run && secrets.COWORK_GPG_PRIVATE_KEY || '' }}
+          COWORK_GPG_PASSPHRASE: ${{ !inputs.dry_run && secrets.COWORK_GPG_PASSPHRASE || '' }}
+          COWORK_GPG_FINGERPRINT: ${{ vars.COWORK_GPG_FINGERPRINT }}
+        run: |
+          set -euo pipefail
+          # The job's condition skips dry runs; this is the second guard.
+          [[ "$DRY_RUN" != true ]] || { echo "::error::cowork-sign never runs in a dry run"; exit 1; }
+          [[ -n "${COWORK_GPG_PRIVATE_KEY:-}" ]] || { echo "::error::COWORK_GPG_PRIVATE_KEY is not set in the release environment"; exit 1; }
+          [[ -n "${COWORK_GPG_FINGERPRINT:-}" ]] || { echo "::error::the release variable COWORK_GPG_FINGERPRINT (the Cowork key's pinned fingerprint) is not set"; exit 1; }
+          cd cowork
+          # --clobber below replaces signatures; a release already signed keeps its key.
+          gh release view "$VERSION" --repo "$GITHUB_REPOSITORY" --json assets -q '.assets[].name' > published.txt
+          published=()
+          if grep -qx defenseclaw-cowork-signing-key.asc published.txt; then
+            gh release download "$VERSION" --repo "$GITHUB_REPOSITORY" -p defenseclaw-cowork-signing-key.asc -O published-key.asc
+            published=(--published-key published-key.asc)
+          elif grep -qE '^defenseclaw-cowork-(amd64|arm64)\.tar\.gz\.sig$' published.txt; then
+            echo "::error::$VERSION has Cowork .sig files but no defenseclaw-cowork-signing-key.asc; refusing to replace them"; exit 1
+          fi
+          ../packaging/cowork-vm/sign.sh --expire 180d --public-key-out defenseclaw-cowork-signing-key.asc "${published[@]}" \
+            defenseclaw-cowork-amd64.tar.gz defenseclaw-cowork-arm64.tar.gz
+          gh release upload "$VERSION" --repo "$GITHUB_REPOSITORY" --clobber \
+            defenseclaw-cowork-amd64.tar.gz.sig defenseclaw-cowork-arm64.tar.gz.sig defenseclaw-cowork-signing-key.asc
+          gh release view "$VERSION" --repo "$GITHUB_REPOSITORY" --json body -q .body > notes.md
+          python3 - notes.md << 'EOF'
+          import re, sys
+          path = sys.argv[1]
+          text = open(path, encoding="utf-8").read()
+          text = re.sub(r"<!-- cowork-vm-unsigned -->[^\n]*\n*", "", text)
+          open(path, "w", encoding="utf-8").write(text)
+          EOF
+          gh release edit "$VERSION" --repo "$GITHUB_REPOSITORY" --notes-file notes.md
+          echo "Signed and attached the Cowork VM package signatures to $VERSION" >> "$GITHUB_STEP_SUMMARY"

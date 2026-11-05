@@ -43,50 +43,11 @@ func Send(ctx context.Context, report Report) error {
 	if err != nil {
 		return err
 	}
-	name, err := windows.UTF16PtrFromString(clientPipeName)
+	handle, err := dial(ctx, clientPipeName)
 	if err != nil {
 		return err
-	}
-	connectCtx, cancel := context.WithTimeout(ctx, clientConnectTimeout)
-	defer cancel()
-	var handle windows.Handle
-	for {
-		if err := connectCtx.Err(); err != nil {
-			return err
-		}
-		handle, err = windows.CreateFile(
-			name,
-			clientPipeAccess,
-			0,
-			nil,
-			windows.OPEN_EXISTING,
-			windows.SECURITY_SQOS_PRESENT|windows.SECURITY_IDENTIFICATION|windows.FILE_FLAG_OVERLAPPED,
-			0,
-		)
-		if err == nil {
-			break
-		}
-		if !errors.Is(err, windows.ERROR_PIPE_BUSY) && !errors.Is(err, windows.ERROR_FILE_NOT_FOUND) {
-			return err
-		}
-		select {
-		case <-connectCtx.Done():
-			return connectCtx.Err()
-		case <-time.After(clientRetryInterval):
-		}
 	}
 	defer windows.CloseHandle(handle)
-	var serverPID uint32
-	if err := windows.GetNamedPipeServerProcessId(handle, &serverPID); err != nil {
-		return err
-	}
-	expected, err := gatewayServerPID()
-	if err != nil {
-		return err
-	}
-	if serverPID == 0 || serverPID != expected {
-		return fmt.Errorf("refusal pipe server pid %d is not the gateway service (pid %d)", serverPID, expected)
-	}
 	// The server buffers a whole message (MaxMessageBytes), so the write
 	// completes without waiting for the server to read it.
 	written, err := overlapped(ctx, clientReceiptTimeout, handle, func(done *uint32, o *windows.Overlapped) error {
@@ -106,6 +67,59 @@ func Send(ctx context.Context, report Report) error {
 		return windows.ReadFile(handle, receipt, done, o)
 	})
 	return nil
+}
+
+// dial opens pipeName for one exchange, bounded by ctx and
+// clientConnectTimeout, and keeps the handle only when the pipe server is
+// the running gateway service process.
+func dial(ctx context.Context, pipeName string) (windows.Handle, error) {
+	name, err := windows.UTF16PtrFromString(pipeName)
+	if err != nil {
+		return 0, err
+	}
+	connectCtx, cancel := context.WithTimeout(ctx, clientConnectTimeout)
+	defer cancel()
+	var handle windows.Handle
+	for {
+		if err := connectCtx.Err(); err != nil {
+			return 0, err
+		}
+		handle, err = windows.CreateFile(
+			name,
+			clientPipeAccess,
+			0,
+			nil,
+			windows.OPEN_EXISTING,
+			windows.SECURITY_SQOS_PRESENT|windows.SECURITY_IDENTIFICATION|windows.FILE_FLAG_OVERLAPPED,
+			0,
+		)
+		if err == nil {
+			break
+		}
+		if !errors.Is(err, windows.ERROR_PIPE_BUSY) && !errors.Is(err, windows.ERROR_FILE_NOT_FOUND) {
+			return 0, err
+		}
+		select {
+		case <-connectCtx.Done():
+			return 0, connectCtx.Err()
+		case <-time.After(clientRetryInterval):
+		}
+	}
+	var serverPID uint32
+	if err := windows.GetNamedPipeServerProcessId(handle, &serverPID); err != nil {
+		_ = windows.CloseHandle(handle)
+		return 0, err
+	}
+	expected, err := gatewayServerPID()
+	if err != nil {
+		_ = windows.CloseHandle(handle)
+		return 0, err
+	}
+	if serverPID == 0 || serverPID != expected {
+		_ = windows.CloseHandle(handle)
+		return 0, fmt.Errorf("pipe %s server pid %d is not the gateway service (pid %d)", pipeName, serverPID, expected)
+	}
+	return handle, nil
 }
 
 // serviceProcessID returns the process ID of a running service.

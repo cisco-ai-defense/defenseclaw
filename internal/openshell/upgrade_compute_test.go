@@ -113,7 +113,7 @@ func TestStopWayOn(t *testing.T) {
 		del          = "`defenseclaw sandbox delete dc-x` (DefenseClaw sandbox) or `openshell sandbox delete dc-x` (raw OpenShell sandbox), which deletes it and its work"
 		oldEnded     = "save or sync any accessible guest work outside the guest first; OpenShell 0.1.3 cannot stop or start a completed or error-state MicroVM: " + del
 		unknownEnded = "save or sync any accessible guest work first; the gateway release is unknown and raw stop may not flush the guest, so save its work outside the guest before trying `openshell sandbox stop dc-x` (raw OpenShell sandbox); only if OpenShell refuses stop or still reports the VM running, " + del
-		ended        = "save or sync any accessible guest work first; nothing in OpenShell writes this MicroVM's disk back or stops it: on OpenShell 0.1.5 " +
+		ended        = "save or sync any accessible guest work first; nothing in OpenShell writes this MicroVM's disk back or stops it: on OpenShell " + openshell.SupportedMin + " " +
 			"its start (`defenseclaw sandbox start dc-x --end-vm` or `openshell sandbox start dc-x` too) fails with Conflict and leaves it starting, " +
 			"so keep it while you need what it holds (it keeps the OpenShell gateway); only then " + del
 	)
