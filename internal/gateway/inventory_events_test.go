@@ -1084,6 +1084,18 @@ func TestEndpointLocalMCPIdentityUsesCommandAndOrderedArguments(t *testing.T) {
 	}
 }
 
+func TestEndpointLocalMCPIdentityDistinguishesCollidingAliases(t *testing.T) {
+	key := []byte("0123456789abcdef0123456789abcdef")
+	servers := []config.MCPServerEntry{
+		{Name: "alpha", Command: "uvx", Args: []string{"notes-mcp"}},
+		{Name: "beta", Command: "uvx", Args: []string{"notes-mcp"}},
+	}
+	rows := endpointMCPComponentsFromServers(servers, key)
+	if len(rows) != 2 || rows[0].id == rows[1].id {
+		t.Fatalf("colliding endpoint MCP aliases share an ID: %+v", rows)
+	}
+}
+
 func TestPerConnectorMCPInventoryDistinguishesIdenticalCommandsWithDifferentAliases(t *testing.T) {
 	withManagedEnterprise(t, true)
 	home := t.TempDir()
@@ -1122,6 +1134,40 @@ func TestPerConnectorMCPInventoryDistinguishesIdenticalCommandsWithDifferentAlia
 	reordered := ids()
 	if !reflect.DeepEqual(initial, reordered) {
 		t.Fatalf("reordered config changed colliding IDs: %v / %v", initial, reordered)
+	}
+}
+
+func TestPerConnectorMCPInventoryCountsCollisionsAcrossClaudeFiles(t *testing.T) {
+	withManagedEnterprise(t, true)
+	t.Setenv("CLAUDE_CONFIG_DIR", "")
+	if err := os.Unsetenv("CLAUDE_CONFIG_DIR"); err != nil {
+		t.Fatal(err)
+	}
+	home := t.TempDir()
+	t.Setenv("HOME", t.TempDir())
+	for path, body := range map[string]string{
+		filepath.Join(home, ".claude.json"):             `{"mcpServers":{"alpha":{"command":"uvx","args":["notes-mcp"]}}}`,
+		filepath.Join(home, ".claude", "settings.json"): `{"mcpServers":{"beta":{"command":"uvx","args":["notes-mcp"]}}}`,
+		filepath.Join(home, ".mcp.json"):                `{"mcpServers":{"alpha":{"command":"uvx","args":["notes-mcp"]}}}`,
+	} {
+		if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(path, []byte(body), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	cfg := &config.Config{AIDiscovery: config.AIDiscoveryConfig{HomeDirs: []string{home}}, Gateway: config.GatewayConfig{Token: "test-identity-key"}}
+	registry := connector.NewRegistry()
+	if err := registry.RegisterPlugin(&endpointInventoryPluginConnector{name: "claudecode", description: "test"}); err != nil {
+		t.Fatal(err)
+	}
+	rows, partial := perConnectorMCPEntriesWithStatus(cfg, registry)
+	if partial || len(rows) != 2 {
+		t.Fatalf("Claude rows=%+v partial=%v, want two distinct aliases", rows, partial)
+	}
+	if rows[0].id == rows[1].id || rows[0].itemName == rows[1].itemName {
+		t.Fatalf("cross-file aliases lost distinct IDs: %+v", rows)
 	}
 }
 
