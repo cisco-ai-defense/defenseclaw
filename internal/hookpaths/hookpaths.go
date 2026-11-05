@@ -1196,9 +1196,6 @@ func ResolveConnector(connector, surface, event string, payload []byte) string {
 				if twin, _, isTwin := actionfacts.ActiveUserTildeTwin(command, home, clientLogin()); isTwin {
 					command = twin
 				}
-				if !isApplyPatchToolName(tool) && unprovenReason == "" {
-					unprovenReason = ActionCommandAuditReasonWithDialect(command, cwd, home, hookShellDialect(connector, tool))
-				}
 				if !isApplyPatchToolName(tool) && !protectedDecision {
 					protectedDecision = actionConcreteProtectedWriteOnWithOperands(command, cwd, home, false, nil, &concreteOperands)
 					if protectedDecision && actionClientProvedSafeVariableTargetsForHook(command, cwd, home) {
@@ -1216,13 +1213,18 @@ func ResolveConnector(connector, surface, event string, payload []byte) string {
 						protectedDecision = actionClientLoopCopyDestinationProtected(command, cwd, home)
 					}
 				}
+				if !isApplyPatchToolName(tool) && unprovenReason == "" && !concreteOperands.plainTouchSafe {
+					unprovenReason = ActionCommandAuditReasonWithDialect(command, cwd, home, hookShellDialect(connector, tool))
+				}
 				if !protectedDecision && NoDereferenceTouchShape(command, cwd, home) {
 					noDereferenceTouchSafe, protectedDecision = noDereferenceTouchStatus(command, cwd, home)
 				}
 				fallback := input
 				fallback.Tool, fallback.Args, fallback.Command = "Bash", nil, command
 				fallbackFacts := actionfacts.Analyze(fallback)
-				statementMoves, statementNoTarget = plainMoveDestinationsWithStatements(fallback, fallbackFacts)
+				if !concreteOperands.plainTouchSafe {
+					statementMoves, statementNoTarget = plainMoveDestinationsWithStatements(fallback, fallbackFacts)
+				}
 				facts.Paths = append(facts.Paths, fallbackFacts.Paths...)
 				truncated = truncated || fallbackFacts.Parse.Status == actionfacts.StatusLimitExceeded
 				// Past the ActionFacts limits, the client checks the whole
@@ -1252,7 +1254,9 @@ func ResolveConnector(connector, surface, event string, payload []byte) string {
 					boundedOperands, _ := BoundedShellWriteOperands(command, cwd, home)
 					literalOperands = append(literalOperands, boundedOperands...)
 				}
-				literalOperands = append(literalOperands, QuotedDynamicCopyDestinations(command, cwd, home)...)
+				if !concreteOperands.plainTouchSafe {
+					literalOperands = append(literalOperands, QuotedDynamicCopyDestinations(command, cwd, home)...)
+				}
 				if concreteOperands.ready {
 					literalOperands = append(literalOperands, concreteOperands.loop...)
 					literalOperands = append(literalOperands, concreteOperands.sourceGlob...)
@@ -1275,7 +1279,9 @@ func ResolveConnector(connector, surface, event string, payload []byte) string {
 				for key, value := range stateTreeNameFacts(fallbackFacts, home) {
 					sourceFacts[key] = value
 				}
-				directoryOperands, directoryUnknown = ShellDirectoryWriteOperands(command, cwd, home, sourceFacts, true, false)
+				if !concreteOperands.plainTouchSafe {
+					directoryOperands, directoryUnknown = ShellDirectoryWriteOperands(command, cwd, home, sourceFacts, true, false)
+				}
 				truncated = truncated || directoryUnknown
 				truncated = truncated || !parsed
 				// A runner or env prefix (setsid, stdbuf, flock FILE,
@@ -1317,7 +1323,7 @@ func ResolveConnector(connector, surface, event string, payload []byte) string {
 				// A link the command creates can make a later write a write
 				// to a protected file (GAP-1505). The command of an
 				// apply_patch tool is a patch envelope, not shell.
-				if !isApplyPatchToolName(tool) {
+				if !isApplyPatchToolName(tool) && !concreteOperands.plainTouchSafe {
 					links = commandLinksWithFacts(command, cwd, home, sourceFacts, true)
 					// The gateway also judges each simple command in the
 					// directory actionfacts places it in, which follows a

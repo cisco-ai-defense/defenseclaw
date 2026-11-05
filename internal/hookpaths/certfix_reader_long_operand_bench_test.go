@@ -6,6 +6,7 @@ package hookpaths
 import (
 	"encoding/json"
 	"fmt"
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -16,6 +17,9 @@ func BenchmarkCertfixGAP0483ResolveTouch2000(b *testing.B) {
 	home := b.TempDir()
 	b.Setenv("HOME", home)
 	project := filepath.Join(home, "project")
+	if err := os.Mkdir(project, 0o755); err != nil {
+		b.Fatal(err)
+	}
 	words := make([]string, 2001)
 	words[0] = "touch"
 	for i := 1; i < len(words); i++ {

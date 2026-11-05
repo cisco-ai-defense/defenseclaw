@@ -57,6 +57,11 @@ func actionProtectedTargetMentionIn(command, cwd, home string, depth int, stateO
 		return false
 	}
 	if depth == 0 {
+		if _, safe := plainTouchMissingLeaves(command, cwd, home, memo); safe {
+			return false
+		}
+	}
+	if depth == 0 {
 		globs = globs.forCommand(command)
 	}
 	if memo == nil {

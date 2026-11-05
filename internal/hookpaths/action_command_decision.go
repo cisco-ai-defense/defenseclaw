@@ -73,6 +73,9 @@ func (m *TargetMemo) ActionCommandDecisionInShell(command, cwd, home string, fac
 }
 
 func actionTargetDecision(command, cwd, home string, dialect actionfacts.Dialect, posixShell bool, facts map[string]string, memo *TargetMemo) string {
+	if _, safe := plainTouchMissingLeaves(command, cwd, home, memo); safe {
+		return ""
+	}
 	if safe, protected := noDereferenceTouchStatus(command, cwd, home); protected {
 		return "protected-target"
 	} else if safe {
@@ -180,10 +183,21 @@ func actionConcreteProtectedWriteOnWith(command, cwd, home string, windowsHome b
 type actionConcreteOperands struct {
 	literal, loop, sourceGlob, globLoop []string
 	shellParsed, ready                  bool
+	plainTouchSafe                      bool
 }
 
 func actionConcreteProtectedWriteOnWithOperands(command, cwd, home string, windowsHome bool, memo *TargetMemo, cache *actionConcreteOperands) bool {
 	if command == "" || home == "" || actionWindowsHome(home) && !windowsHome || !filepath.IsAbs(cwd) {
+		return false
+	}
+	if names, safe := plainTouchMissingLeaves(command, cwd, home, memo); safe {
+		if cache != nil {
+			cache.literal = make([]string, len(names))
+			for i, name := range names {
+				cache.literal[i] = OperandPath(name, cwd)
+			}
+			cache.shellParsed, cache.ready, cache.plainTouchSafe = true, true, true
+		}
 		return false
 	}
 	if NoDereferenceTouchSafe(command, cwd, home) {
