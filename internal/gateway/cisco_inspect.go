@@ -551,19 +551,39 @@ func (c *CiscoInspectClient) Inspect(ctx context.Context, messages []ChatMessage
 	}
 	var requestKey [32]byte
 	if canUseText {
-		// Include the endpoint, credential, and full structured payload. Keep
-		// only a digest in the process cache, never the request content.
-		if body, err := json.Marshal(payload); err == nil {
-			hash := sha256.New()
-			_, _ = hash.Write([]byte(c.endpoint))
-			_, _ = hash.Write([]byte{0})
-			_, _ = hash.Write([]byte(c.apiKey))
-			_, _ = hash.Write([]byte{0})
-			_, _ = hash.Write(body)
-			copy(requestKey[:], hash.Sum(nil))
-			if ciscoAPIKeyTextOnlyRequestKnown(requestKey) {
-				payload["messages"] = textMsgs
-				canUseText = false
+		// Tool-use IDs change on each invocation. Exclude only those IDs
+		// from the preference key; keep the tool, arguments, text, rules,
+		// endpoint, and credential so an unrelated request is still probed.
+		var calls []map[string]json.RawMessage
+		if err := json.Unmarshal(messages[0].ToolCalls, &calls); err == nil && len(calls) > 0 {
+			for _, call := range calls {
+				delete(call, "id")
+			}
+			if normalizedCalls, err := json.Marshal(calls); err == nil {
+				keyMessages := append([]map[string]interface{}(nil), chatMsgs...)
+				keyMessages[0] = map[string]interface{}{
+					"role":       messages[0].Role,
+					"content":    messages[0].Content,
+					"tool_calls": json.RawMessage(normalizedCalls),
+				}
+				keyPayload := make(map[string]interface{}, len(payload))
+				for name, value := range payload {
+					keyPayload[name] = value
+				}
+				keyPayload["messages"] = keyMessages
+				if body, err := json.Marshal(keyPayload); err == nil {
+					hash := sha256.New()
+					_, _ = hash.Write([]byte(c.endpoint))
+					_, _ = hash.Write([]byte{0})
+					_, _ = hash.Write([]byte(c.apiKey))
+					_, _ = hash.Write([]byte{0})
+					_, _ = hash.Write(body)
+					copy(requestKey[:], hash.Sum(nil))
+					if ciscoAPIKeyTextOnlyRequestKnown(requestKey) {
+						payload["messages"] = textMsgs
+						canUseText = false
+					}
+				}
 			}
 		}
 	}
