@@ -1,0 +1,35 @@
+{
+  "comment": "Cowork audit M1: the Target `defenseclaw alerts` prints for a Claude Cowork call, fed back to `alerts dismiss --target`, selects that Cowork alert and no Claude Code terminal alert. Rows are stored the way the gateway writes them. cli/tests/test_cmd_alerts_finding_rows.py checks that alerts prints `printed`, and internal/audit/cowork_alert_target_test.go checks that the gateway selects `selected` for it.",
+  "rows": [
+    {"id": "cowork-finding", "action": "scan-finding", "severity": "CRITICAL", "target": "claudecode:PreToolUse",
+     "connector": "claudecode", "request_id": "req-cowork", "details": "finding.observed",
+     "structured": {"defenseclaw.finding.rule_id": "SF2-MARKER-BLOCK", "defenseclaw.finding.title": "Certification marker command (block)",
+                    "defenseclaw.finding.target_ref": "claudecode:PreToolUse", "defenseclaw.scan.scanner": "hook-rules"}},
+    {"id": "cowork-hook", "action": "connector-hook", "severity": "INFO", "target": "PreToolUse",
+     "connector": "claudecode", "request_id": "req-cowork", "enforced": true,
+     "details": "connector=claudecode result=ok action=block raw_action=block mode=action cowork_session_id=local_1 surface=cowork",
+     "structured": {"connector": "claudecode", "event": "PreToolUse", "action": "block",
+                    "extra": {"surface": "cowork", "cowork_session_id": "local_1"}}},
+    {"id": "terminal-finding", "action": "scan-finding", "severity": "CRITICAL", "target": "claudecode:PreToolUse",
+     "connector": "claudecode", "request_id": "req-terminal", "details": "finding.observed",
+     "structured": {"defenseclaw.finding.rule_id": "SF2-MARKER-BLOCK", "defenseclaw.finding.title": "Certification marker command (block)",
+                    "defenseclaw.finding.target_ref": "claudecode:PreToolUse", "defenseclaw.scan.scanner": "hook-rules"}},
+    {"id": "terminal-hook", "action": "connector-hook", "severity": "INFO", "target": "PreToolUse",
+     "connector": "claudecode", "request_id": "req-terminal", "enforced": true,
+     "details": "connector=claudecode result=ok action=block raw_action=block mode=action",
+     "structured": {"connector": "claudecode", "event": "PreToolUse", "action": "block"}},
+    {"id": "lone-cowork-hook", "action": "connector-hook", "severity": "INFO", "target": "PreToolUse",
+     "connector": "claudecode", "request_id": "req-lone-cowork", "enforced": true,
+     "details": "connector=claudecode result=ok action=block raw_action=block mode=action cowork_session_id=local_2 surface=cowork",
+     "structured": {"connector": "claudecode", "event": "PreToolUse", "action": "block",
+                    "extra": {"surface": "cowork", "cowork_session_id": "local_2"}}},
+    {"id": "lone-terminal-hook", "action": "connector-hook", "severity": "INFO", "target": "PreToolUse",
+     "connector": "claudecode", "request_id": "req-lone-terminal", "enforced": true,
+     "details": "connector=claudecode result=ok action=block raw_action=block mode=action reason=surface=cowork-like-text details_json=\"{\\\"surface\\\":\\\"cowork\\\"}\"",
+     "structured": {"connector": "claudecode", "event": "PreToolUse", "action": "block"}}
+  ],
+  "selections": [
+    {"alert": "cowork-finding", "printed": "cowork:PreToolUse", "selected": ["cowork-finding"]},
+    {"alert": "lone-cowork-hook", "printed": "cowork PreToolUse", "selected": ["lone-cowork-hook"]}
+  ]
+}

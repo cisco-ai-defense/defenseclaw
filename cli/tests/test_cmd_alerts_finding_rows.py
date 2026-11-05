@@ -5,9 +5,11 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import sys
 import unittest
 from datetime import datetime, timedelta, timezone
+from pathlib import Path
 
 from click.testing import CliRunner
 
@@ -18,6 +20,12 @@ from defenseclaw.commands.cmd_alerts import _alert_selector, alerts
 from defenseclaw.models import Event
 
 from tests.helpers import cleanup_app, make_app_context
+
+# Rows the gateway writes for a Cowork and a terminal call, with the Target
+# alerts print for each Cowork alert (cowork audit M1).
+COWORK_TARGET_FIXTURE = (
+    Path(__file__).resolve().parents[2] / "internal" / "audit" / "testdata" / "cowork_alert_target.json"
+)
 
 FINDING = {
     "defenseclaw.finding.rule_id": "SF2-MARKER-BLOCK",
@@ -121,6 +129,66 @@ class AlertFindingRowsTests(unittest.TestCase):
         )}
         self.assertEqual(listed[cowork_id]["target"], "cowork:PreToolUse")
         self.assertEqual(listed[cli_id]["target"], "claudecode:PreToolUse")
+
+    def test_printed_cowork_target_round_trips_into_dismiss(self):
+        # Cowork audit M1: alerts print cowork:PreToolUse for a Cowork finding
+        # and "cowork PreToolUse" for a Cowork hook block. dismiss --target
+        # sends that Target unchanged; the gateway selects only the Cowork
+        # alert for it on the same rows (internal/audit/cowork_alert_target_test.go).
+        from unittest.mock import MagicMock, patch
+
+        from defenseclaw.config import default_config, prepare_fresh_v8_config
+
+        fixture = json.loads(COWORK_TARGET_FIXTURE.read_text())
+        store = self.app.store
+        columns = {row[1] for row in store.db.execute("PRAGMA table_info(audit_events)")}
+        base = datetime.now(timezone.utc)
+        for offset, row in enumerate(fixture["rows"]):
+            store.log_event(Event(
+                id=row["id"], action=row["action"], target=row["target"], severity=row["severity"],
+                connector=row["connector"], details=row["details"], structured=dict(row["structured"]),
+                timestamp=base - timedelta(seconds=offset),
+            ))
+            store.db.execute("UPDATE audit_events SET request_id=? WHERE id=?", (row["request_id"], row["id"]))
+            if "enforced" in columns and row.get("enforced"):
+                store.db.execute("UPDATE audit_events SET enforced=1 WHERE id=?", (row["id"],))
+        store.db.commit()
+
+        listed = [e.id for e in store.list_alerts(50)]
+        table = self.runner.invoke(alerts, ["-n", "50"], obj=self.app, catch_exceptions=False)
+        self.assertEqual(table.exit_code, 0, table.output)
+        cfg = prepare_fresh_v8_config(default_config())
+        cfg.audit_db = self.db_path
+        cfg.gateway.token = "test-alert-review-token"
+        for selection in fixture["selections"]:
+            alert_id, printed = selection["alert"], selection["printed"]
+            self.assertIn(alert_id, listed)
+            self.assertIn(printed, table.output)
+            shown = self.runner.invoke(
+                alerts, ["--show", str(listed.index(alert_id) + 1)], obj=self.app, catch_exceptions=False
+            ).output
+            self.assertRegex(shown, r"Target:\s+" + re.escape(printed) + r"\n")
+
+            client = MagicMock()
+            client.set_alert_disposition.return_value = {
+                "_http_status": 200,
+                "matched": len(selection["selected"]),
+                "selection_digest": "sha256:v1:" + "0" * 64,
+                "targets": [{"id": i, "projection_version": 0} for i in selection["selected"]],
+            }
+            saved, self.app.cfg = self.app.cfg, cfg
+            try:
+                with patch("defenseclaw.commands.cmd_alerts.OrchestratorClient", return_value=client):
+                    result = self.runner.invoke(
+                        alerts, ["dismiss", "--target", printed, "--dry-run"], obj=self.app, catch_exceptions=False
+                    )
+            finally:
+                self.app.cfg = saved
+            self.assertEqual(result.exit_code, 0, result.output)
+            self.assertEqual(client.set_alert_disposition.call_args.kwargs["selector"], {"target": printed})
+            self.assertEqual(selection["selected"], [alert_id])
+            self.assertIn(f"  {alert_id}\n", result.output)
+            self.assertIn("Preview: 1 alert(s) matched.", result.output)
 
     def test_judge_finding_names_the_judge_and_no_repeated_id(self):
         # GAP-1886: a judge finding read "Rule: JUDGE-EXFIL-FILE: JUDGE-EXFIL-FILE"
