@@ -44,6 +44,7 @@ foreach ($name in @(
         'Invoke-DefenseClawGuardianReadinessCommand',
         'Get-DefenseClawGuardianFailedTargets',
         'Test-DefenseClawGuardianFailedTargetsWithinSIDs',
+        'Get-DefenseClawAllowedFailedTargetSIDs',
         'Get-DefenseClawGuardianPendingTargets',
         'Write-DefenseClawGuardianDegradedTargets',
         'Get-DefenseClawVerifyFailedTargetKeys'
@@ -147,7 +148,29 @@ function Invoke-DefenseClawGatewayCommand { param($Layout, $GatewayServiceName, 
 function Get-DefenseClawGuardianStatusReport { param($Layout, $GatewayServiceName) $script:StatusReport }
 function Get-DefenseClawGuardianVerificationFailureDiagnostic { param($Probe) 'guardian not ready' }
 # The live-verify probe picks its verb by profile; this lane is Secure Client.
-function Test-DefenseClawStandaloneProfile { $false }
+$script:StandaloneProfile = $false
+function Test-DefenseClawStandaloneProfile { $script:StandaloneProfile }
+function Get-DefenseClawTargetRuntimeSkippedProfiles {
+    param($Plan)
+    return @($Plan.skipped_profiles)
+}
+$plan = [pscustomobject]@{
+    skipped_profiles = @([pscustomobject]@{ sid = $otherSID })
+}
+$secureClientSIDs = [string[]](Get-DefenseClawAllowedFailedTargetSIDs -Plan $plan)
+if ($secureClientSIDs.Count -ne 0 -or
+    -not [bool](Test-Coverage (New-Report -Failures 1 -ActivationDigest $digest) `
+        -Digest $digest -Allow -AllowedSIDs $secureClientSIDs).ok) {
+    throw 'Secure Client rejected an unrelated failed target after one skipped profile'
+}
+$script:StandaloneProfile = $true
+$standaloneSIDs = [string[]](Get-DefenseClawAllowedFailedTargetSIDs -Plan $plan)
+if ($standaloneSIDs.Count -ne 1 -or $standaloneSIDs[0] -cne $otherSID -or
+    [bool](Test-Coverage (New-Report -Failures 1 -ActivationDigest $digest) `
+        -Digest $digest -Allow -AllowedSIDs $standaloneSIDs).ok) {
+    throw 'standalone accepted a failure outside its skipped account'
+}
+$script:StandaloneProfile = $false
 $probeArgs = @{ Layout = @{ ManifestPath = 'C:\targets.yaml' }; GatewayServiceName = 'gw'; GuardianServiceName = 'guardian' }
 if (-not [bool](Get-DefenseClawGuardianReadinessProbe @probeArgs -AllowFailedTargets).ready) {
     throw 'rollback readiness rejected a complete degraded reconcile'

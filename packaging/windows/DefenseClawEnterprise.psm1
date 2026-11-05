@@ -32859,6 +32859,17 @@ function Test-DefenseClawGuardianFailedTargetsWithinSIDs {
     return $true
 }
 
+function Get-DefenseClawAllowedFailedTargetSIDs {
+    param([Parameter(Mandatory)]$Plan)
+    if (-not (Test-DefenseClawStandaloneProfile)) {
+        return , [string[]]@()
+    }
+    return , [string[]]@(
+        Get-DefenseClawTargetRuntimeSkippedProfiles -Plan $Plan |
+            Microsoft.PowerShell.Core\ForEach-Object { [string]$_.sid }
+    )
+}
+
 # Install and Upgrade succeed when the Guardian completed a fresh reconcile in
 # which some user targets failed: the deployment is live and every other user
 # is protected. Each failed target is recorded once as defenseclaw_degraded.
@@ -41276,9 +41287,8 @@ function Invoke-DefenseClawInstallLikeLifecycle {
                 $Action -eq 'Install' -and -not $reconcileInstall -and
                 $targetRuntimePreparationMode -ceq 'prepare'
             )
-        $allowedFailedTargetSIDs = [string[]]@(
-            Get-DefenseClawTargetRuntimeSkippedProfiles -Plan $targetRuntimePlan |
-                Microsoft.PowerShell.Core\ForEach-Object { [string]$_.sid }
+        $allowedFailedTargetSIDs = [string[]](
+            Get-DefenseClawAllowedFailedTargetSIDs -Plan $targetRuntimePlan
         )
         if ((Test-DefenseClawStandaloneProfile) -and
             $allowedFailedTargetSIDs.Count -gt 0) {
