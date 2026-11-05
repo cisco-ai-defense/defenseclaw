@@ -107,6 +107,7 @@ function makeScanResult(overrides?: Partial<ScanResult>): ScanResult {
 // --- Import the plugin (mock of definePluginEntry returns the raw callback) ---
 
 import pluginSetup from "../index.js";
+import { DaemonClient } from "../client.js";
 
 // --- Tests ---
 
@@ -475,5 +476,68 @@ describe("DefenseClaw OpenClaw Plugin", () => {
 
       expect(result.text).toContain("Usage");
     });
+  });
+});
+
+// OpenClaw gives the plugin its `plugins.entries.defenseclaw.config` as
+// `api.pluginConfig` (it has no getPluginConfig()); the `agent` section of that
+// object feeds the sidecar correlation identity (GAP-0598).
+describe("plugin agent identity from api.pluginConfig", () => {
+  type DaemonOpts = {
+    identityReady: Promise<unknown>;
+    getCorrelation: () => { agentId: string; agentName?: string; policyId?: string };
+  };
+
+  async function setupWith(pluginConfig: unknown): Promise<DaemonOpts> {
+    vi.clearAllMocks();
+    const api = {
+      config: {},
+      pluginConfig,
+      on: vi.fn(),
+      registerService: vi.fn(),
+      registerCommand: vi.fn(),
+    };
+    (pluginSetup as (api: unknown) => void)(api);
+    const calls = vi.mocked(DaemonClient).mock.calls;
+    const opts = calls[calls.length - 1][0] as unknown as DaemonOpts;
+    await opts.identityReady;
+    return opts;
+  }
+
+  beforeEach(() => {
+    delete process.env.DEFENSECLAW_AGENT_ID;
+    delete process.env.DEFENSECLAW_PLUGIN_AGENT_ID;
+  });
+
+  it("uses config.agent id, name and policyId", async () => {
+    const opts = await setupWith({
+      agent: { id: "  cfg-agent  ", name: "Build agent", policyId: "pol-1" },
+    });
+    expect(opts.getCorrelation()).toMatchObject({
+      agentId: "cfg-agent",
+      agentName: "Build agent",
+      policyId: "pol-1",
+    });
+  });
+
+  it("DEFENSECLAW_AGENT_ID still wins over config.agent.id", async () => {
+    process.env.DEFENSECLAW_AGENT_ID = "env-agent";
+    try {
+      const opts = await setupWith({ agent: { id: "cfg-agent" } });
+      expect(opts.getCorrelation().agentId).toBe("env-agent");
+    } finally {
+      delete process.env.DEFENSECLAW_AGENT_ID;
+    }
+  });
+
+  it("falls back to the stable id when config.agent is absent or not an object", async () => {
+    for (const cfg of [{}, undefined, null, { agent: "x" }, { agent: { id: 5, name: 7 } }]) {
+      const opts = await setupWith(cfg);
+      const c = opts.getCorrelation();
+      expect(c.agentId).toBeTruthy();
+      expect(c.agentId).not.toBe("cfg-agent");
+      expect(c.agentName).toBeUndefined();
+      expect(c.policyId).toBeUndefined();
+    }
   });
 });

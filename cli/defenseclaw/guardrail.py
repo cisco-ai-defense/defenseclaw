@@ -27,8 +27,7 @@ claw-agnostic plan split it into two focused modules:
   patching (``patch_openclaw_config``, ``restore_openclaw_config``,
   ``uninstall_openclaw_plugin``, ``record_pristine_backup``,
   ``pristine_backup_path``, ``detect_current_model``, plus the
-  internal ``_backup`` / ``_register_plugin_in_config`` /
-  ``_preserve_ownership`` helpers).
+  internal ``_backup`` / ``_preserve_ownership`` helpers).
 
 Existing call sites — ``cmd_setup``, ``cmd_doctor``,
 ``cmd_uninstall``, and ``tests/test_guardrail.py`` — continue to
@@ -62,7 +61,6 @@ from defenseclaw.openclaw_guardrail import (  # noqa: F401
     _expand,
     _preserve_ownership,
     _read_backup_index,
-    _register_plugin_in_config,
     _remove_from_plugins_allow,
     _unregister_plugin_from_config,
     _write_backup_index,
@@ -94,7 +92,6 @@ __all__ = [
     "_expand",
     "_preserve_ownership",
     "_read_backup_index",
-    "_register_plugin_in_config",
     "_remove_from_plugins_allow",
     "_unregister_plugin_from_config",
     "_write_backup_index",
