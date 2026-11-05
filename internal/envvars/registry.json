@@ -2376,6 +2376,106 @@
       "since": "1.0.3"
     },
     {
+      "name": "DEFENSECLAW_HOOK_RATE_PROBE",
+      "category": "test_fixture",
+      "purpose": "Set to 1 to run TestHookRateProbe, the in-process open-loop SWEEP-100 hook rate probe; unset or any other value skips it.",
+      "default": "unset",
+      "accepted_values": [
+        "1",
+        "unset"
+      ],
+      "security_impact": "none",
+      "surface_in_doctor": false,
+      "managed": "ignore",
+      "consumers": [
+        {
+          "location": "internal/gateway/hook_rate_probe_test.go",
+          "description": "TestHookRateProbe reads it to configure the opt-in in-process hook rate probe (R109-PERF-WAL)."
+        }
+      ],
+      "since": "1.0.8"
+    },
+    {
+      "name": "DEFENSECLAW_HOOK_RATE",
+      "category": "test_fixture",
+      "purpose": "Offered benign Claude Code PreToolUse calls per second for TestHookRateProbe (default 100).",
+      "default": "unset",
+      "accepted_values": [
+        "positive integer",
+        "unset"
+      ],
+      "security_impact": "none",
+      "surface_in_doctor": false,
+      "managed": "ignore",
+      "consumers": [
+        {
+          "location": "internal/gateway/hook_rate_probe_test.go",
+          "description": "TestHookRateProbe reads it to configure the opt-in in-process hook rate probe (R109-PERF-WAL)."
+        }
+      ],
+      "since": "1.0.8"
+    },
+    {
+      "name": "DEFENSECLAW_HOOK_RATE_SECONDS",
+      "category": "test_fixture",
+      "purpose": "Length in seconds of the TestHookRateProbe window (default 120).",
+      "default": "unset",
+      "accepted_values": [
+        "positive integer",
+        "unset"
+      ],
+      "security_impact": "none",
+      "surface_in_doctor": false,
+      "managed": "ignore",
+      "consumers": [
+        {
+          "location": "internal/gateway/hook_rate_probe_test.go",
+          "description": "TestHookRateProbe reads it to configure the opt-in in-process hook rate probe (R109-PERF-WAL)."
+        }
+      ],
+      "since": "1.0.8"
+    },
+    {
+      "name": "DEFENSECLAW_HOOK_RATE_GROW_MIB",
+      "category": "test_fixture",
+      "purpose": "Grows the probe's audit.db to at least this many MiB before TestHookRateProbe starts (default 0).",
+      "default": "unset",
+      "accepted_values": [
+        "non-negative integer",
+        "unset"
+      ],
+      "security_impact": "none",
+      "surface_in_doctor": false,
+      "managed": "ignore",
+      "consumers": [
+        {
+          "location": "internal/gateway/hook_rate_probe_test.go",
+          "description": "TestHookRateProbe reads it to configure the opt-in in-process hook rate probe (R109-PERF-WAL)."
+        }
+      ],
+      "since": "1.0.8"
+    },
+    {
+      "name": "DEFENSECLAW_HOOK_RATE_OUT",
+      "category": "test_fixture",
+      "purpose": "Directory where TestHookRateProbe writes its cpu, block and mutex profiles.",
+      "default": "unset",
+      "accepted_values": [
+        "absolute path",
+        "unset"
+      ],
+      "security_impact": "none",
+      "surface_in_doctor": false,
+      "managed": "ignore",
+      "consumers": [
+        {
+          "location": "internal/gateway/hook_rate_probe_test.go",
+          "description": "TestHookRateProbe reads it to configure the opt-in in-process hook rate probe (R109-PERF-WAL)."
+        }
+      ],
+      "since": "1.0.8"
+    },
+    {
       "name": "DEFENSECLAW_HOOK_GUARDIAN_AUTH_DIR",
       "category": "runtime_path",
       "purpose": "Select the administrator-owned directory containing the hook guardian protected-target authorization ledger.",

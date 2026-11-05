@@ -357,7 +357,7 @@ Fleet and Edge `DCLAW_*` variables marked `allow` are read by the Go or C servic
 These variables exist for DefenseClaw's own test suites. Do not set them on a real install.
 
 <Accordions type="single">
-<Accordion title="Show the 150 test-only variables">
+<Accordion title="Show the 155 test-only variables">
 
 | Variable | What it does |
 | --- | --- |
@@ -402,6 +402,11 @@ These variables exist for DefenseClaw's own test suites. Do not set them on a re
 | `DEFENSECLAW_HOOK_FLOOD_RATE`<br/>Default: `unset`<br/>Values: `non-negative integer`, `unset`<br/>Managed host: `ignore` | Sets hook calls per second in the probe.<br/>**Read by:** `internal/gateway/hook_flood_probe_test.go` |
 | `DEFENSECLAW_HOOK_POST_STARTUP_HELPER`<br/>Default: `unset`<br/>Values: `1`, `unset`<br/>Managed host: `ignore` | Marks the child process TestHookPostStartupInitBudget starts from its own test binary, so the child only reports package init cost (GODEBUG=inittrace=1) and does not start another child (GAP-1225, GAP-1283).<br/>**Read by:** `cmd/defenseclaw-hook-post/main_init_test.go` |
 | `DEFENSECLAW_HOOK_PREMAIN_HELPER`<br/>Default: `unset`<br/>Values: `1`, `panic`, `unset`<br/>Managed host: `ignore` | Selects the child-process mode of the defenseclaw-hook test binary (1 = stderr before main, panic = a recovered panic) so the parent test can assert nothing reaches the agent's stderr.<br/>**Read by:** `cmd/defenseclaw-hook/premain_stderr_test.go` |
+| `DEFENSECLAW_HOOK_RATE`<br/>Default: `unset`<br/>Values: `positive integer`, `unset`<br/>Managed host: `ignore` | Offered benign Claude Code PreToolUse calls per second for TestHookRateProbe (default 100).<br/>**Read by:** `internal/gateway/hook_rate_probe_test.go` |
+| `DEFENSECLAW_HOOK_RATE_GROW_MIB`<br/>Default: `unset`<br/>Values: `non-negative integer`, `unset`<br/>Managed host: `ignore` | Grows the probe's audit.db to at least this many MiB before TestHookRateProbe starts (default 0).<br/>**Read by:** `internal/gateway/hook_rate_probe_test.go` |
+| `DEFENSECLAW_HOOK_RATE_OUT`<br/>Default: `unset`<br/>Values: `absolute path`, `unset`<br/>Managed host: `ignore` | Directory where TestHookRateProbe writes its cpu, block and mutex profiles.<br/>**Read by:** `internal/gateway/hook_rate_probe_test.go` |
+| `DEFENSECLAW_HOOK_RATE_PROBE`<br/>Default: `unset`<br/>Values: `1`, `unset`<br/>Managed host: `ignore` | Set to 1 to run TestHookRateProbe, the in-process open-loop SWEEP-100 hook rate probe; unset or any other value skips it.<br/>**Read by:** `internal/gateway/hook_rate_probe_test.go` |
+| `DEFENSECLAW_HOOK_RATE_SECONDS`<br/>Default: `unset`<br/>Values: `positive integer`, `unset`<br/>Managed host: `ignore` | Length in seconds of the TestHookRateProbe window (default 120).<br/>**Read by:** `internal/gateway/hook_rate_probe_test.go` |
 | `DEFENSECLAW_HOOK_TOKEN_LOCK_HELPER`<br/>Default: `unset`<br/>Values: `1`, `unset`<br/>Managed host: `ignore` | Selects the connector hook-token cross-process lock fixture.<br/>**Read by:** `internal/gateway/connector/hook_api_token_test.go` |
 | `DEFENSECLAW_HOOK_TOKEN_LOCK_PATH`<br/>Default: `unset`<br/>Values: `absolute test lock path`, `unset`<br/>Managed host: `ignore` | Lock path passed to the connector hook-token cross-process fixture.<br/>**Read by:** `internal/gateway/connector/hook_api_token_test.go` |
 | `DEFENSECLAW_HOOK_TOKEN_LOCK_READY`<br/>Default: `unset`<br/>Values: `absolute test marker path`, `unset`<br/>Managed host: `ignore` | Ready-signal path shared with the connector hook-token cross-process fixture.<br/>**Read by:** `internal/gateway/connector/hook_api_token_test.go` |
