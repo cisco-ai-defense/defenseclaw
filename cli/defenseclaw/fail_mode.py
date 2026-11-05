@@ -9,6 +9,7 @@ import re
 import shutil
 import stat
 import subprocess
+import sys
 import tempfile
 import time
 from collections.abc import Iterator
@@ -131,6 +132,10 @@ _LEGACY_SHARED_HOOK_SCRIPTS = _SHARED_HOOK_SCRIPTS - {"_hardening.sh"}
 
 def _is_windows() -> bool:
     return os.name == "nt"
+
+
+def _is_linux() -> bool:
+    return sys.platform.startswith("linux")
 
 
 def normalize_fail_mode(value: object, *, default: str = "closed") -> str:
@@ -1571,6 +1576,13 @@ def _unix_registration_freshness(cfg: Any, connector: str) -> str | None:
     registration = _read_small_file(Path(paths[0]))
     if registration is None:
         return "registration-missing"
+    if connector == "claudecode":
+        # A packaged per-user Linux install registers the native handlers,
+        # which name no hook script: judging them by claude-code-hook.sh
+        # reported every fresh or upgraded install stale (rel-1-0-6 GAP-0569).
+        native = _claude_per_user_native_registration(cfg)
+        if native is not None:
+            return _claude_native_registration_problem(registration, native, str(cfg.data_dir))
     hook = Path(cfg.data_dir).expanduser() / "hooks" / script_name
     # Setup writes the data dir's own spelling; a HOME below a symlinked
     # directory resolves elsewhere, and either names this install's hook
@@ -1582,6 +1594,204 @@ def _unix_registration_freshness(cfg: Any, connector: str) -> str | None:
     if not any(candidate in registration for candidate in expected_forms):
         return "registration-command-stale"
     return None
+
+
+@dataclass(frozen=True)
+class _ClaudeNativeRegistration:
+    """The per-user Linux Claude Code handlers Setup writes on this host.
+
+    guard is defenseclaw-hook-post, or "" when it is not installed; native is
+    defenseclaw-hook-user; hook_args are the arguments after the launcher.
+    """
+
+    guard: str
+    native: str
+    hook_args: tuple[str, ...]
+
+
+# claudeCodeMissingHookGuardSeparator (internal/gateway/connector/claudecode.go).
+_CLAUDE_MISSING_HOOK_GUARD_SEPARATOR = " || { rc=$?; "
+
+
+def _claude_posix_word(value: str) -> str:
+    """posixHookCommandWord (internal/gateway/connector/helpers.go)."""
+
+    if value and all((ch.isascii() and ch.isalnum()) or ch in "/._-+=:,@%" for ch in value):
+        return value
+    return "'" + value.replace("'", "'\"'\"'") + "'"
+
+
+def _claude_loopback_api_addr(addr: str) -> bool:
+    """claudeCodeLoopbackGatewayEndpoint("http://" + addr) for a host:port address."""
+
+    if not addr or any(ch in addr for ch in "/?#@\\"):
+        return False
+    host, separator, port = addr.rpartition(":")
+    if not separator or not port.isascii() or not port.isdigit():
+        return False
+    if host.startswith("[") and host.endswith("]"):
+        host = host[1:-1]
+    return host in {"127.0.0.1", "localhost", "::1"}
+
+
+def _claude_owner_executable(path: str) -> bool:
+    try:
+        info = os.lstat(path)
+    except OSError:
+        return False
+    return stat.S_ISREG(info.st_mode) and info.st_mode & 0o111 != 0 and info.st_mode & 0o022 == 0
+
+
+def _claude_lstat_dir(path: str) -> bool:
+    try:
+        return stat.S_ISDIR(os.lstat(path).st_mode)
+    except OSError:
+        return False
+
+
+def _claude_per_user_native_registration(cfg: Any) -> _ClaudeNativeRegistration | None:
+    """The native per-user registration Setup writes here, or None for the shell form.
+
+    Mirrors claudeCodePerUserNativeHook, claudeCodePerUserNativeGuard and
+    claudeCodeHookInvocation (internal/gateway/connector/claudecode.go) with
+    the gateway's APIAddr (apiListenAddr): Linux, not managed, the account's
+    default data directory, a .gateway-helper record naming
+    ~/.local/bin/defenseclaw-gateway and an owner-only defenseclaw-hook-user
+    beside it. macOS, managed and custom data directories keep the shell hook.
+    """
+
+    if _is_windows() or not _is_linux():
+        return None
+    if str(getattr(cfg, "deployment_mode", "") or "").strip().lower() == "managed_enterprise":
+        return None
+    data_dir = str(getattr(cfg, "data_dir", "") or "")
+    if (
+        not os.path.isabs(data_dir)
+        or os.path.normpath(data_dir) != data_dir
+        or data_dir != os.path.join(str(Path.home()), ".defenseclaw")
+        or any(ch in data_dir for ch in "\x00\r\n")
+    ):
+        return None
+    gateway = getattr(cfg, "gateway", None)
+    try:
+        api_port = int(getattr(gateway, "api_port", 18970) or 0)
+    except (TypeError, ValueError):
+        return None
+    api_addr = f"{config_module.api_bind_host(cfg)}:{api_port}"
+    if not _claude_loopback_api_addr(api_addr):
+        return None
+    hooks_dir = os.path.join(data_dir, "hooks")
+    if not _claude_lstat_dir(data_dir) or not _claude_lstat_dir(hooks_dir):
+        return None
+    record = os.path.join(hooks_dir, ".gateway-helper")
+    try:
+        info = os.lstat(record)
+    except OSError:
+        return None
+    if not stat.S_ISREG(info.st_mode) or info.st_size > 4097 or info.st_mode & 0o022:
+        return None
+    text = _read_small_file(Path(record))
+    if text is None:
+        return None
+    helper = text[:-1] if text.endswith("\n") else text
+    if (
+        not os.path.isabs(helper)
+        or os.path.normpath(helper) != helper
+        or any(ch in helper for ch in "\x00\r\n")
+        or os.path.basename(helper) != "defenseclaw-gateway"
+        or os.path.basename(os.path.dirname(helper)) != "bin"
+        or os.path.basename(os.path.dirname(os.path.dirname(helper))) != ".local"
+    ):
+        return None
+    native = os.path.join(os.path.dirname(helper), "defenseclaw-hook-user")
+    if not _claude_owner_executable(native):
+        return None
+    guard = os.path.join(os.path.dirname(native), "defenseclaw-hook-post")
+    return _ClaudeNativeRegistration(
+        guard=guard if _claude_owner_executable(guard) else "",
+        native=native,
+        hook_args=("hook", "--connector", "claudecode", "--hook-home", data_dir, "--api-addr", api_addr),
+    )
+
+
+def _claude_owned_handler(handler: dict[str, Any], data_dir: str) -> bool:
+    words: list[Any] = [handler.get("command")]
+    args = handler.get("args")
+    if isinstance(args, list):
+        words.extend(args)
+    for word in words:
+        if not isinstance(word, str):
+            continue
+        lowered = word.lower()
+        if (
+            "claude-code-hook" in lowered
+            or "defenseclaw-hook" in lowered
+            or "/.defenseclaw/" in word
+            or data_dir in word
+        ):
+            return True
+    return False
+
+
+def _claude_native_registration_problem(
+    registration: str, expected: _ClaudeNativeRegistration, data_dir: str
+) -> str | None:
+    """Whether settings.json holds only the per-user native handlers Setup writes.
+
+    As appendClaudeCodeHookGroups renders them: with the guard installed each
+    event runs ``defenseclaw-hook-post guard-user-hook <hook-user> hook ...``
+    and, unless asynchronous, the companion ``defenseclaw-hook-user
+    fallback-guard-user-hook <hook-post> hook ...`` in the same group;
+    without the guard, the launcher's shell command behind the missing-hook
+    guard. Any other DefenseClaw handler is stale: a 1.0.7 shell entry left
+    behind, another binary or data directory, edited arguments or a missing
+    companion. Event coverage, matchers and timeouts are doctor's checks.
+    testdata/claudecode_linux_peruser_handlers.json pins this to the Go render.
+    """
+
+    stale = "registration-command-stale"
+    try:
+        settings = json.loads(registration)
+    except ValueError:
+        return stale
+    hooks = settings.get("hooks") if isinstance(settings, dict) else None
+    if not isinstance(hooks, dict):
+        return stale
+    primary_args = ["guard-user-hook", expected.native, *expected.hook_args]
+    companion_args = ["fallback-guard-user-hook", expected.guard, *expected.hook_args]
+    shell_prefix = (
+        " ".join(_claude_posix_word(word) for word in (expected.native, *expected.hook_args))
+        + _CLAUDE_MISSING_HOOK_GUARD_SEPARATOR
+    )
+    primaries = 0
+    for groups in hooks.values():
+        if not isinstance(groups, list):
+            continue
+        for group in groups:
+            handlers = group.get("hooks") if isinstance(group, dict) else None
+            if not isinstance(handlers, list):
+                continue
+            synchronous = companions = 0
+            for handler in handlers:
+                if not isinstance(handler, dict) or not _claude_owned_handler(handler, data_dir):
+                    continue
+                command, args = handler.get("command"), handler.get("args")
+                if handler.get("type") != "command":
+                    return stale
+                if not expected.guard:
+                    if args is not None or not isinstance(command, str) or not command.startswith(shell_prefix):
+                        return stale
+                    primaries += 1
+                elif command == expected.guard and args == primary_args:
+                    primaries += 1
+                    synchronous += handler.get("async") is not True
+                elif command == expected.native and args == companion_args:
+                    companions += 1
+                else:
+                    return stale
+            if companions != synchronous:
+                return stale
+    return None if primaries else stale
 
 
 def _read_small_file(path: Path) -> str | None:
