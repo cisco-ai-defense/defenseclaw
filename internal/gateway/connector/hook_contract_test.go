@@ -303,6 +303,41 @@ func TestClaudeCodeHookContractDirectoryAddedIsObservationOnly(t *testing.T) {
 	}
 }
 
+// Cowork audit P4-4: the claudecode contract that the measured Cowork engines
+// resolve to records the Claude Desktop engine as a hook host, the Cowork
+// plugin's events and the builds they were measured on.
+func TestClaudeCodeContractNotesRecordTheCoworkHost(t *testing.T) {
+	for _, engine := range []string{"2.1.309", "2.1.317"} {
+		if got := ResolveHookContract("claudecode", engine).Contract.ContractID; got != "claudecode-hooks-v2" {
+			t.Fatalf("engine %s resolves to %q, want claudecode-hooks-v2", engine, got)
+		}
+	}
+	contract, ok := hookContractByID("claudecode", "claudecode-hooks-v2")
+	if !ok {
+		t.Fatal("claudecode-hooks-v2 is not registered")
+	}
+	note := ""
+	for _, candidate := range contract.Notes {
+		if strings.Contains(candidate, "Claude Cowork") {
+			note = candidate
+		}
+	}
+	for _, want := range append([]string{"Claude Desktop", "4.4212.0", "2.1.309", "4.16336.0", "2.1.317"}, CoworkPluginHookEvents...) {
+		if !strings.Contains(note, want) {
+			t.Fatalf("claudecode-hooks-v2 Cowork note misses %q: %q", want, note)
+		}
+	}
+	events := map[string]bool{}
+	for _, event := range contract.Events {
+		events[event] = true
+	}
+	for _, event := range CoworkPluginHookEvents {
+		if !events[event] {
+			t.Fatalf("Cowork event %s is not in claudecode-hooks-v2", event)
+		}
+	}
+}
+
 func TestCodexHookContractVersionedEventMatrix(t *testing.T) {
 	tests := []struct {
 		version string
@@ -621,6 +656,7 @@ func TestHookContractsManifestMatchesRuntime(t *testing.T) {
 			Fields map[string]string `json:"fields"`
 		} `json:"content_envelope"`
 		ToolCallLifecycle ToolCallLifecycleContract `json:"tool_call_lifecycle"`
+		Notes             []string                  `json:"notes"`
 		Capabilities      struct {
 			CanBlock           bool     `json:"can_block"`
 			CanAskNative       bool     `json:"can_ask_native"`
@@ -849,6 +885,9 @@ func TestHookContractsManifestMatchesRuntime(t *testing.T) {
 			}
 			if manifestContract.Capabilities.Scope != runtime.Capabilities.Scope {
 				t.Fatalf("%s scope=%q want %q", runtime.ContractID, manifestContract.Capabilities.Scope, runtime.Capabilities.Scope)
+			}
+			if !reflect.DeepEqual(manifestContract.Notes, runtime.Notes) {
+				t.Fatalf("%s notes manifest/runtime drift:\nmanifest=%q\nruntime=%q", runtime.ContractID, manifestContract.Notes, runtime.Notes)
 			}
 		}
 	}
