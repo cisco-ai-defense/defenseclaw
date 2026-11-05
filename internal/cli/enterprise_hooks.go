@@ -273,7 +273,8 @@ var (
 	// On standalone a drifted manifest is refused with the strict verdict and
 	// never repaired in place (managed.StandaloneRefusesContentDrift): a
 	// repair restores the descriptor, not a roster an untrusted writer
-	// edited. Setup /repair rewrites it (GAP-0561).
+	// edited, and the guardian's layout self-heal leaves it unrepaired too.
+	// Setup /ensure writes a fresh one (GAP-0561).
 	enterpriseHookManifestFileTrustCheck = func(path string) error {
 		const label = "hook guardian manifest"
 		strictErr := managed.ValidateTrustedFilePath(path, label)

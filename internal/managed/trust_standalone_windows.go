@@ -101,10 +101,11 @@ var windowsStandaloneTrustScope = func() bool {
 // repair: true in the standalone scope. A repair restores the descriptor,
 // not the content an untrusted writer may have changed, and a handle opened
 // during the drift (write data or WRITE_DAC) keeps its authority after it.
-// Recovery is a trusted rewrite only: Setup /repair writes a fresh file
-// from the protected source under the admin-only descriptor and replaces
+// Recovery is a trusted rewrite only: Setup /ensure writes a fresh file
+// from the approved source under the admin-only descriptor and replaces
 // the old one, so a retained handle points at the replaced object (GAP-0561
-// reviews 1 to 3).
+// reviews 1 to 4). The guardian's layout self-heal and the enumerator leave
+// such a file unrepaired too.
 func StandaloneRefusesContentDrift() bool {
 	return windowsStandaloneTrustScope()
 }

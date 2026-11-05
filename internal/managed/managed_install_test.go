@@ -167,6 +167,20 @@ func TestManagedInstallLayoutTargets(t *testing.T) {
 	if strings.Join(got, "\n") != strings.Join(want, "\n") {
 		t.Fatalf("targets:\n%s\nwant:\n%s", strings.Join(got, "\n"), strings.Join(want, "\n"))
 	}
+	// GAP-0561: only the files whose bytes a trust decision reads are
+	// content files; folders, the install tree and the logs are not.
+	var content []string
+	for _, target := range targets {
+		if target.content {
+			content = append(content, filepath.Base(target.path))
+		}
+	}
+	wantContent := "config.yaml,targets.yaml,deployment.json,agent-application-control-attestation.json," +
+		"codex-requirements-ownership.json,codex-requirements-acl-backup.json," +
+		"managed-hooks-teardown-journal.json,managed-hooks-lifecycle-journal.json"
+	if strings.Join(content, ",") != wantContent {
+		t.Fatalf("content files = %s, want %s", strings.Join(content, ","), wantContent)
+	}
 	if got := (ManagedInstallLayout{StateRoot: state}).targets(); len(got) == 0 || got[0].kind != ObjectStateDirectory {
 		t.Fatalf("state-only layout targets = %+v", got)
 	}
