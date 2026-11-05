@@ -11788,6 +11788,36 @@ _INTERCEPTION_SELF_TEST_FRESHNESS = timedelta(minutes=3)
 _INTERCEPTION_FIRST_REPORT_WINDOW = timedelta(minutes=2)
 
 
+def _openclaw_plugin_host_is_loopback(host: str) -> bool:
+    """Mirror the OpenClaw plugin's loopback rule (listener-proof.ts isLoopbackHost)."""
+    value = str(host or "").strip().lower().strip("[]")
+    if value in ("localhost", "::1"):
+        return True
+    parts = value.split(".")
+    return len(parts) == 4 and parts[0] == "127" and all(p.isdigit() and int(p) <= 255 for p in parts[1:])
+
+
+def _check_openclaw_gateway_host(cfg, r: _DoctorResult) -> None:
+    """GAP-0594: the OpenClaw plugin sends its token only to a loopback
+    gateway.host. With any other host every tool check follows the plugin's
+    outage mode and every model call fails, so say it here."""
+    if "openclaw" not in _doctor_active_connectors(cfg) or not _connector_enabled(cfg, "openclaw"):
+        return
+    host = str(getattr(getattr(cfg, "gateway", None), "host", "") or "127.0.0.1")
+    if _openclaw_plugin_host_is_loopback(host):
+        return
+    _emit(
+        "fail",
+        "OpenClaw gateway.host",
+        f"{host} is not a loopback address: the OpenClaw plugin sends nothing to it, so tool checks "
+        "follow the outage mode and model calls fail",
+        r=r,
+        remediation=(
+            "defenseclaw config set gateway.host 127.0.0.1, then defenseclaw-gateway restart and restart OpenClaw"
+        ),
+    )
+
+
 def _check_proxy_interception(cfg, r: _DoctorResult, *, live_health: dict | None = None) -> None:
     """Fail closed when a proxy connector's :4000 listener is unused.
 
@@ -15100,6 +15130,7 @@ def doctor(
     _check_cowork(cfg, sidecar_health, r)
     _check_guardrail_proxy(cfg, r)
     _check_proxy_interception(cfg, r, live_health=sidecar_health)
+    _check_openclaw_gateway_host(cfg, r)
     _check_kernel_sensor(r)
     if not json_out:
         _doctor_subsection("Credentials")

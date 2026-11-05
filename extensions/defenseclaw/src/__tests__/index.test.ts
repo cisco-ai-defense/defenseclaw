@@ -25,6 +25,7 @@ const { mockDaemonClient, mockEnforcer, mockRunSkillScan, mockRunPluginScan, moc
   vi.hoisted(() => ({
     mockDaemonClient: {
       buildOutboundHeaders: vi.fn(async () => ({})),
+      postRaw: vi.fn(),
       applyStickyFromHttpResponse: vi.fn(),
       getStickyAgentInstanceId: vi.fn(() => undefined),
       getEchoedSidecarInstanceId: vi.fn(() => undefined),
@@ -62,6 +63,11 @@ vi.mock("../scanners/mcp-scanner.js", () => ({
 }));
 
 // --- Helpers ---
+
+/** A DaemonClient.postRaw answer: the tool check runs over its proven connection (GAP-0594). */
+function rawAnswer(body: string, init?: { status?: number; headers?: unknown }): { status: number; body: string } {
+  return { status: init?.status ?? 200, body };
+}
 
 type EventHandler = (...args: unknown[]) => Promise<unknown> | unknown;
 
@@ -150,8 +156,8 @@ describe("DefenseClaw OpenClaw Plugin", () => {
 
   describe("before_tool_call approvals", () => {
     it("an unanswered approval says where OpenClaw shows approvals (GAP-1958)", async () => {
-      globalThis.fetch = vi.fn().mockResolvedValue(
-        new Response(
+      mockDaemonClient.postRaw.mockResolvedValue(
+        rawAnswer(
           JSON.stringify({
             action: "confirm",
             raw_action: "confirm",
@@ -193,8 +199,8 @@ describe("DefenseClaw OpenClaw Plugin", () => {
     });
 
     it("returns native OpenClaw approval request when sidecar returns confirm", async () => {
-      const fetchMock = vi.fn().mockResolvedValue(
-        new Response(
+      const fetchMock = mockDaemonClient.postRaw.mockResolvedValue(
+        rawAnswer(
           JSON.stringify({
             action: "confirm",
             raw_action: "confirm",
@@ -206,8 +212,7 @@ describe("DefenseClaw OpenClaw Plugin", () => {
           { status: 200, headers: { "content-type": "application/json" } },
         ),
       );
-      globalThis.fetch = fetchMock;
-
+      
       const result = await listeners.before_tool_call(
         { toolName: "exec", params: { command: "printenv" } },
         { sessionKey: "agent:main:main", runId: "run-1", toolName: "exec" },
@@ -222,7 +227,8 @@ describe("DefenseClaw OpenClaw Plugin", () => {
         },
       });
       expect(fetchMock).toHaveBeenCalledTimes(1);
-      const body = JSON.parse(String(fetchMock.mock.calls[0][1].body));
+      expect(fetchMock.mock.calls[0][0]).toBe("/api/v1/inspect/tool");
+      const body = fetchMock.mock.calls[0][1];
       expect(body).toMatchObject({
         tool: "exec",
         session_id: "agent:main:main",
@@ -231,8 +237,8 @@ describe("DefenseClaw OpenClaw Plugin", () => {
     });
 
     it("does not request approval in observe mode", async () => {
-      globalThis.fetch = vi.fn().mockResolvedValue(
-        new Response(
+      mockDaemonClient.postRaw.mockResolvedValue(
+        rawAnswer(
           JSON.stringify({
             action: "allow",
             raw_action: "confirm",
@@ -253,8 +259,8 @@ describe("DefenseClaw OpenClaw Plugin", () => {
     });
 
     it("fails closed on structurally invalid allow JSON", async () => {
-      globalThis.fetch = vi.fn().mockImplementation(async () =>
-        new Response(JSON.stringify({ action: "allow" }), {
+      mockDaemonClient.postRaw.mockImplementation(async () =>
+        rawAnswer(JSON.stringify({ action: "allow" }), {
           status: 200,
           headers: { "content-type": "application/json" },
         }),
@@ -286,8 +292,8 @@ describe("DefenseClaw OpenClaw Plugin", () => {
 
     it("fails closed on malformed JSON even when fail-open is set", async () => {
       process.env.DEFENSECLAW_TOOL_INSPECT_FAIL_OPEN = "1";
-      globalThis.fetch = vi.fn().mockResolvedValue(
-        new Response("{not-json", {
+      mockDaemonClient.postRaw.mockResolvedValue(
+        rawAnswer("{not-json", {
           status: 200,
           headers: { "content-type": "application/json" },
         }),
@@ -306,15 +312,7 @@ describe("DefenseClaw OpenClaw Plugin", () => {
 
     it("fail-open treats aborted verdict bodies as unavailable", async () => {
       process.env.DEFENSECLAW_TOOL_INSPECT_FAIL_OPEN = "1";
-      globalThis.fetch = vi.fn().mockResolvedValue({
-        ok: true,
-        status: 200,
-        json: async () => {
-          const err = new Error("The operation was aborted");
-          err.name = "AbortError";
-          throw err;
-        },
-      });
+      mockDaemonClient.postRaw.mockResolvedValue({ status: 0, body: "", error: "The operation was aborted" });
 
       await expect(
         listeners.before_tool_call(
@@ -325,8 +323,8 @@ describe("DefenseClaw OpenClaw Plugin", () => {
     });
 
     it("fails closed on an unknown action enum", async () => {
-      globalThis.fetch = vi.fn().mockResolvedValue(
-        new Response(
+      mockDaemonClient.postRaw.mockResolvedValue(
+        rawAnswer(
           JSON.stringify({
             action: "pass",
             severity: "NONE",

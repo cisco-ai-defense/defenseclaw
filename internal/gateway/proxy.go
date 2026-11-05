@@ -214,7 +214,11 @@ func (p *GuardrailProxy) handleListenerProof(w http.ResponseWriter, r *http.Requ
 	if p.refreshedGatewayToken != nil {
 		refreshed = p.refreshedGatewayToken()
 	}
-	if ManagedEnterpriseActive() || !writeGatewayTokenListenerProof(w, r, p.gatewayToken, refreshed) {
+	secureClient := false
+	if cfg := proxyDecisionConfig(r.Context()); cfg != nil && cfg.SecureClientIntegration() {
+		secureClient = true
+	}
+	if secureClient || ManagedEnterpriseActive() || !writeGatewayTokenListenerProof(w, r, p.gatewayToken, refreshed) {
 		p.emitProxyAuthFailure(r, "listener_proof_refused")
 		writeJSONRefusal(w, `{"error":"unauthorized"}`, http.StatusUnauthorized)
 	}

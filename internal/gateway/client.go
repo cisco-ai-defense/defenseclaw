@@ -220,12 +220,13 @@ func (c *Client) Connect(ctx context.Context) error {
 var errOpenClawListenerUnverified = errors.New("the OpenClaw gateway listener does not belong to this account")
 
 // verifyOpenClawListener checks the account of the accepted server socket:
-// this account or the system account. Replaceable in tests.
+// on Linux this account or root, on macOS this account only (the socket
+// owner is read from this account's processes). Replaceable in tests.
 var verifyOpenClawListener = hookexec.VerifyLocalPeer
 
 // dialOpenClawListener opens the TCP connection of the OpenClaw WebSocket.
-// On Linux and macOS a loopback listener must belong to this account (or
-// the system account) before DefenseClaw writes any byte to it, so a process
+// On Linux a loopback listener must belong to this account or root, on macOS
+// to this account, before DefenseClaw writes any byte to it, so a process
 // of another account that holds the port while OpenClaw restarts never gets
 // the WebSocket upgrade, the gateway token or the device signature
 // (GAP-0594). A listener on another host is protected by TLS, not by this
