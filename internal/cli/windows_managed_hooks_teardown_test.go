@@ -374,8 +374,12 @@ func TestValidateWindowsManagedHooksTeardownActivationBindsManifest(t *testing.T
 	); err != nil {
 		t.Fatal(err)
 	}
-	// The enumerator republishing the manifest after the installer pinned
-	// it is logged and accepted, never a teardown failure.
+	previousStandalone := windowsManagedHooksTeardownStandaloneProcess
+	t.Cleanup(func() { windowsManagedHooksTeardownStandaloneProcess = previousStandalone })
+	// Secure Client (26.8.4): the enumerator republishing the manifest after
+	// the installer pinned it is logged and accepted, never a teardown
+	// failure.
+	windowsManagedHooksTeardownStandaloneProcess = func() bool { return false }
 	events := captureResilienceEvents(t)
 	if _, err := validateWindowsManagedHooksTeardownActivation(
 		&valid,
@@ -386,6 +390,29 @@ func TestValidateWindowsManagedHooksTeardownActivationBindsManifest(t *testing.T
 	}
 	if len(*events) != 1 || !strings.Contains((*events)[0], `pinned_sha256="`+manifestSHA256+`"`) {
 		t.Fatalf("events = %v", *events)
+	}
+	// rel-1-0-6:GAP-0583: standalone refuses the same drift with the
+	// catch-up refusal the uninstall pre-commit check waits on
+	// (Test-DefenseClawManifestCatchUpTeardownRefusal), so the tombstone never
+	// commits over activation evidence the PowerShell journal and receipt
+	// checks cannot authenticate. An exact binding still passes.
+	windowsManagedHooksTeardownStandaloneProcess = func() bool { return true }
+	for _, drift := range []struct {
+		name   string
+		digest string
+		count  int
+	}{
+		{name: "republished manifest", digest: strings.Repeat("c", 64), count: 3},
+		{name: "deleted account dropped a row", digest: strings.Repeat("c", 64), count: 2},
+		{name: "count only", digest: manifestSHA256, count: 2},
+	} {
+		_, err := validateWindowsManagedHooksTeardownActivation(&valid, drift.digest, drift.count)
+		if err == nil || err.Error() != "protected managed-hook activation evidence does not match the current manifest" {
+			t.Fatalf("standalone %s: error = %v, want the catch-up refusal", drift.name, err)
+		}
+	}
+	if _, err := validateWindowsManagedHooksTeardownActivation(&valid, manifestSHA256, 3); err != nil {
+		t.Fatalf("standalone exact binding rejected: %v", err)
 	}
 
 	tests := []struct {

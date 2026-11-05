@@ -12,6 +12,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -36,6 +37,58 @@ func PerUserGatewayFreshStartNoAnswer(dataDir string, peer *PerUserPeerRecord) b
 	}
 	answered, valid := perUserGatewayAnswerSeen(dataDir, current)
 	return valid && !answered
+}
+
+// perUserGatewayRecentlyStarted is the cheap first look of the native hook
+// (one lstat per call): this account's gateway record was written within
+// the fresh-start window, so a gateway may have started moments ago.
+func perUserGatewayRecentlyStarted(dataDir string) bool {
+	if dataDir == "" || !filepath.IsAbs(dataDir) {
+		return false
+	}
+	info, err := os.Lstat(filepath.Join(dataDir, "gateway.pid"))
+	if err != nil || !info.Mode().IsRegular() {
+		return false
+	}
+	age := time.Since(info.ModTime())
+	return age > -2*time.Second && age <= perUserFreshGatewayWindow+2*time.Second
+}
+
+// perUserFreshGatewayHoldsCall is the native hook's restart-window proof
+// (rel-1-0-6 GAP-0295): the server end of the call's proven connection
+// (check) is held by the gateway this account's record names, that process
+// started within perUserFreshGatewayWindow (kernel start time, executable and
+// start identity all match the record), and it has completed no hook answer
+// yet. A gateway that answered any call, an old gateway, an unknown holder
+// and an unreadable record are no proof.
+func perUserFreshGatewayHoldsCall(dataDir string, check *perUserPeerCheck) bool {
+	if check == nil {
+		return false
+	}
+	ends := check.ends.Load()
+	if ends == nil {
+		return false
+	}
+	client, okc := ends.local.(*net.TCPAddr)
+	server, oks := ends.remote.(*net.TCPAddr)
+	if !okc || !oks {
+		return false
+	}
+	current, ok := freshGatewayFromRecord(dataDir)
+	if !ok || !perUserProcessHoldsConnection(current.pid, client, server) {
+		return false
+	}
+	// The pid was not reused while its files were read.
+	if identity, ok := procidentity.Of(current.pid); !ok || identity != current.identity {
+		return false
+	}
+	// Calls that reach a restarted gateway together are answered in no
+	// set order: a sibling answered first does not make this one a call
+	// the serving gateway took and withheld. What counts is whether the
+	// gateway had completed any answer before this connection reached it
+	// (rel-1-0-6 GAP-0295, v108k).
+	before, valid := perUserGatewayAnsweredBefore(dataDir, current, ends.at)
+	return valid && !before
 }
 
 func verifiedFreshGatewayPeer(dataDir string, peer *PerUserPeerRecord) (perUserPeerProcess, bool) {
@@ -105,6 +158,27 @@ func freshGatewayFromRecord(dataDir string) (perUserPeerProcess, bool) {
 func perUserGatewayAnswerPath(dataDir string, peer perUserPeerProcess) string {
 	sum := sha256.Sum256([]byte(strconv.Itoa(peer.pid) + ":" + peer.identity))
 	return filepath.Join(dataDir, "gateway.answer."+fmt.Sprintf("%x", sum[:16]))
+}
+
+// perUserGatewayAnsweredBefore reports whether peer recorded its first
+// completed hook answer at or before at (the marker's modification time,
+// written once before that answer was sent). The kernel stamps it with a
+// coarse clock that can only lag, so an error makes an answer look earlier:
+// the call then stays closed. A zero at, or a marker that cannot be read, is
+// treated as answered before.
+func perUserGatewayAnsweredBefore(dataDir string, peer perUserPeerProcess, at time.Time) (before, valid bool) {
+	answered, valid := perUserGatewayAnswerSeen(dataDir, peer)
+	if !valid || !answered {
+		return answered, valid
+	}
+	if at.IsZero() {
+		return true, true
+	}
+	info, err := os.Lstat(perUserGatewayAnswerPath(dataDir, peer))
+	if err != nil || !info.Mode().IsRegular() {
+		return true, false
+	}
+	return !info.ModTime().After(at), true
 }
 
 func perUserGatewayAnswerSeen(dataDir string, peer perUserPeerProcess) (answered, valid bool) {

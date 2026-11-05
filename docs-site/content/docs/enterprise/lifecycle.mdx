@@ -216,7 +216,10 @@ packages and Windows Setup do.
 
 A failed action rolls itself back. You only need the steps below to go back to an older
 release on purpose. Try the rollback on one test host before the fleet. Every lifecycle
-refuses an older release unless you ask for the rollback (`downgrade_refused`). For an
+refuses an older release unless you ask for the rollback. Windows Setup stops with exit `1603`
+and the code `downgrade_refused`, and the macOS package records `downgrade_refused` in
+`last-package-result.json`. The Debian and RHEL packages print "refusing to downgrade ...
+Nothing was changed.", exit with `1` and record nothing. For an
 Intune Win32 deployment, remove the superseding **Required** assignment before assigning
 the older app; otherwise Intune can reapply the newer release.
 
@@ -871,7 +874,8 @@ machine state for a reinstall instead.
   one runs, and restores the files of any agent that DefenseClaw changed and still has backups for.
   It then removes all of `~/.defenseclaw` (hook scripts, hook credentials and
   `~/.defenseclaw/foreign-hooks-backup` included) and, from `~/.local/bin`, `defenseclaw-gateway`,
-  `defenseclaw-acp`, the launcher links, the `uv` the per-user installer added (when unchanged) and
+  `defenseclaw-acp`, the hook helpers (`defenseclaw-hook-post`, `defenseclaw-hook-user`
+  and, on Linux, `defenseclaw-sensor-helper`), the launcher links, the `uv` the per-user installer added (when unchanged) and
   its bookkeeping. A user enrolled only for machine-policy connectors loses `~/.defenseclaw` the same
   way when it holds no own install (only the session cache `~/.defenseclaw/session-facts.json` and
   what DefenseClaw wrote there, an earlier failed install's hook files and backups included). It follows no symlink there and removes only a file the user owns; the

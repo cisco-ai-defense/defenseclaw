@@ -43,6 +43,42 @@ func perUserConnectedPeerPID(client, server *net.TCPAddr) (int, bool) {
 	return holders[0], true
 }
 
+// perUserProcessHoldsConnection reports whether process pid holds the
+// accepted server socket of the connection client->server. It reads one
+// process's open files, not all of /proc.
+func perUserProcessHoldsConnection(pid int, client, server *net.TCPAddr) bool {
+	if pid <= 0 {
+		return false
+	}
+	serverKey, table, err := procTCPEndpoint(server)
+	if err != nil {
+		return false
+	}
+	clientKey, clientTable, err := procTCPEndpoint(client)
+	if err != nil || clientTable != table {
+		return false
+	}
+	inode := procSocketInode(table, "01", serverKey, clientKey)
+	if inode == "" && table == "tcp" {
+		inode = procSocketInode("tcp6", "01", mappedTCP6Endpoint(server), mappedTCP6Endpoint(client))
+	}
+	if inode == "" {
+		return false
+	}
+	want := "socket:[" + inode + "]"
+	fdDir := "/proc/" + strconv.Itoa(pid) + "/fd/"
+	fds, err := readDirNames(fdDir)
+	if err != nil {
+		return false
+	}
+	for _, fd := range fds {
+		if link, err := os.Readlink(fdDir + fd); err == nil && link == want {
+			return true
+		}
+	}
+	return false
+}
+
 // perUserListenerOwners is every process of this account that holds a
 // listener on server's address now (exact, or the wildcard of its family),
 // with its identity; false when there is none or the read did not finish.

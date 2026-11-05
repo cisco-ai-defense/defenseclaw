@@ -217,6 +217,12 @@ func run(home, addr string, stdin io.Reader, stdout, stderr io.Writer, startedAt
 		TraceParent:        firstNonEmpty(os.Getenv("DEFENSECLAW_TRACEPARENT"), os.Getenv("TRACEPARENT"), os.Getenv("OTEL_TRACEPARENT")),
 		TraceState:         firstNonEmpty(os.Getenv("DEFENSECLAW_TRACESTATE"), os.Getenv("TRACESTATE"), os.Getenv("OTEL_TRACESTATE")),
 	}
+	// DEFENSECLAW_HOOK_MAX_BODY can only lower the body cap, as in the shell
+	// hook this command replaces: a call over a cap lowered under the
+	// per-user transport's 900 KiB is refused (rel-1-0-6:GAP-0578).
+	if maxBody, ok := hookexec.LoweredMaxBody(os.Getenv("DEFENSECLAW_HOOK_MAX_BODY")); ok {
+		opts.MaxBody, opts.MaxBodyLowered = maxBody, maxBody < hookexec.DefaultMaxBody
+	}
 	if gateway != "" {
 		opts.OutageFailModeNow = func() string { return outageMode(gateway, hookDir) }
 		opts.GatewayRecovery = gatewayRecovery(gateway, home)

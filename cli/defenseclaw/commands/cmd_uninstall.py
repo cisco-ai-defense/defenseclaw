@@ -2143,6 +2143,8 @@ def _owned_binary_targets(platform_name: str) -> tuple[str, tuple[str, ...]]:
         names = (
             "defenseclaw-gateway",
             "defenseclaw-hook-post",
+            # The native Claude Code hook launcher, installed on Linux and macOS (1.0.8, GAP-0571).
+            "defenseclaw-hook-user",
             "defenseclaw-acp",
             "defenseclaw-sensor-helper",
             "defenseclaw",
@@ -3462,6 +3464,7 @@ def _validate_plan(plan: UninstallPlan) -> None:
             else {
                 "defenseclaw-gateway",
                 "defenseclaw-hook-post",
+                "defenseclaw-hook-user",
                 "defenseclaw-acp",
                 "defenseclaw-sensor-helper",
                 "defenseclaw",

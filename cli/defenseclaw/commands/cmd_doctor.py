@@ -7899,6 +7899,30 @@ def _emit_agent_hook_env_warnings(cfg, connector: str, label: str, r: _DoctorRes
         _emit("warn", label, str(warning), r=r, remediation=warning.repair)
 
 
+def _claude_missing_registration_problem(cfg, settings_path: str, settings):
+    """The first required Claude Code event whose rendered registration is missing, or "" (rel-1-0-2 GAP-0645).
+
+    The same check status reads (fail_mode.claude_missing_registration):
+    every event of the recorded contract needs the guard and, for a
+    synchronous event, its companion on a per-user Linux install, or the
+    hook script elsewhere. Counting handlers passed a file without PreToolUse.
+    """
+    from defenseclaw.fail_mode import claude_missing_registration
+    from defenseclaw.hook_guard_matrix import TOOL_GUARD_HOOKS
+    from defenseclaw.hook_integrity import HookProblem, setup_command, tool_inspection_hook_problem
+
+    missing = claude_missing_registration(cfg, settings)
+    if missing is None:
+        return ""
+    event, what = missing
+    if what == "hook is not registered" and event in TOOL_GUARD_HOOKS["claudecode"].events:
+        return tool_inspection_hook_problem("claudecode", event, settings_path)
+    return HookProblem(
+        f"the DefenseClaw {event} {what} in {settings_path}",
+        f"run `{setup_command('claudecode')} --yes`; it registers the missing hook",
+    )
+
+
 def _check_claudecode_hooks(
     cfg,
     r: _DoctorResult,
@@ -7976,10 +8000,14 @@ def _check_claudecode_hooks(
     switched_off = _agent_hook_switch_problem(cfg, "claudecode") if dc_hooks > 0 else ""
     edited = _edited_hook_problem(cfg, "claudecode") if dc_hooks > 0 else ""
     uninspected = _unguarded_tool_call_problem(cfg, "claudecode", settings_path, settings) if dc_hooks > 0 else ""
+    if dc_hooks > 0 and not uninspected:
+        uninspected = _claude_missing_registration_problem(cfg, settings_path, settings)
     if uninspected:
         # Counting hooks kept a settings file without PreToolUse, or with an
         # edited PreToolUse entry, passing while no tool call was inspected
-        # (GAP-0645, rel-1-0-4 GAP-0538).
+        # (GAP-0645, rel-1-0-4 GAP-0538). The per-user Linux native handlers
+        # name no hook script, so each required event is checked for the
+        # exact registration Setup renders (rel-1-0-2 GAP-0645).
         _emit(
             "fail",
             "Claude Code hooks",

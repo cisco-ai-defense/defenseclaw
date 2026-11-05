@@ -71,6 +71,28 @@ const defaultMaxBody int64 = 1 << 20
 // payload before Run (ArmAnswerWatchdog).
 const DefaultMaxBody = defaultMaxBody
 
+// LoweredMaxBody reads DEFENSECLAW_HOOK_MAX_BODY for a native per-user hook
+// as the shell hooks' _dc_stdin_cap does: a decimal number of one to seven
+// digits, from 1 to DefaultMaxBody, is the body cap. Any other value (empty,
+// signed, spaced, a longer number or above DefaultMaxBody) leaves the
+// built-in cap, so the variable can only lower it (rel-1-0-6:GAP-0578). Zero
+// is not a positive integer (the registry's type) and leaves it too.
+func LoweredMaxBody(value string) (int64, bool) {
+	if value == "" || len(value) > 7 {
+		return 0, false
+	}
+	for i := 0; i < len(value); i++ {
+		if value[i] < '0' || value[i] > '9' {
+			return 0, false
+		}
+	}
+	n, err := strconv.ParseInt(value, 10, 64)
+	if err != nil || n <= 0 || n > defaultMaxBody {
+		return 0, false
+	}
+	return n, true
+}
+
 const (
 	defaultHookRequestTimeout = 10 * time.Second
 	hookResponseGrace         = time.Second
@@ -1006,12 +1028,18 @@ func doRequest(ctx context.Context, opts Options, sp spec, failMode string, payl
 			connectDeadline = firstTryConnectDeadline(restartDeadline, time.Now())
 		}
 		retry := retryingAfterOutage
+		var check *perUserPeerCheck
 		onConnect := func() {
 			if retry {
 				opts.answerWatch.noDecisionPending()
 			}
+			// A gateway that only just started and has not answered any
+			// call yet may still be warming up: the deadline then follows
+			// the outage mode, as the shell hook does (GAP-0295).
+			opts.answerWatch.restartWindowContact(opts, sp, failMode, check)
 		}
 		tryCtx, release := connectBy(ctx, connectDeadline, onConnect)
+		check, _ = tryCtx.Value(perUserPeerCheckKey{}).(*perUserPeerCheck)
 		releases = append(releases, release)
 		resp, err := sendHookRequest(tryCtx, opts, sp, payload, token)
 		return resp, notConnectedError(tryCtx, err)
@@ -1191,6 +1219,12 @@ func doRequest(ctx context.Context, opts Options, sp spec, failMode string, payl
 	if err != nil {
 		if managedNativeDecision(opts) && opts.answeredErrorStatus != 0 {
 			return failAfterErrorStatus(opts, sp, "closed", opts.answeredErrorStatus)
+		}
+		if code, ok := failPerUserRestartWindow(ctx, opts, sp, failMode); ok {
+			// The connection reached a gateway that only just started and
+			// has answered nothing yet: its restart outage, not a decision
+			// it withheld (rel-1-0-6 GAP-0295).
+			return code
 		}
 		if !opts.SecureClient && opts.answerWatch.hasPendingDecision() {
 			// A connected retry or progress report still needs a final decision.

@@ -35,14 +35,21 @@ type ManagedInstallLayout struct {
 // these folders is touched.
 func (layout ManagedInstallLayout) targets() []managedDataTarget {
 	var targets []managedDataTarget
-	add := func(kind ObjectKind, parts ...string) {
+	addTarget := func(content bool, kind ObjectKind, parts ...string) {
 		for _, part := range parts {
 			if strings.TrimSpace(part) == "" {
 				return
 			}
 		}
-		targets = append(targets, managedDataTarget{path: filepath.Clean(filepath.Join(parts...)), kind: kind})
+		targets = append(targets, managedDataTarget{
+			path: filepath.Clean(filepath.Join(parts...)), kind: kind, content: content,
+		})
 	}
+	add := func(kind ObjectKind, parts ...string) { addTarget(false, kind, parts...) }
+	// addContent lists a file whose bytes a trust decision reads. The two
+	// logs are written by the services and never read as policy, so they
+	// keep the plain repair.
+	addContent := func(kind ObjectKind, parts ...string) { addTarget(true, kind, parts...) }
 	if root := layout.InstallRoot; strings.TrimSpace(root) != "" {
 		bin := filepath.Join(root, "bin")
 		libexec := filepath.Join(root, "libexec")
@@ -67,8 +74,8 @@ func (layout ManagedInstallLayout) targets() []managedDataTarget {
 		add(ObjectLogDirectory, root, "logs")
 		add(ObjectAdminDirectory, root, "logs", "guardian")
 		add(ObjectAdminDirectory, root, "logs", "cmid-broker")
-		add(ObjectConfigFile, root, "etc", "config.yaml")
-		add(ObjectAdminFile, root, "hook-guardian", "targets.yaml")
+		addContent(ObjectConfigFile, root, "etc", "config.yaml")
+		addContent(ObjectAdminFile, root, "hook-guardian", "targets.yaml")
 		for _, name := range []string{
 			"deployment.json",
 			"agent-application-control-attestation.json",
@@ -77,7 +84,7 @@ func (layout ManagedInstallLayout) targets() []managedDataTarget {
 			"managed-hooks-teardown-journal.json",
 			"managed-hooks-lifecycle-journal.json",
 		} {
-			add(ObjectAdminFile, root, "install", name)
+			addContent(ObjectAdminFile, root, "install", name)
 		}
 		add(ObjectAdminFile, root, "logs", "guardian", "hook-guardian.log")
 		add(ObjectAdminFile, root, "logs", "cmid-broker", "cmid-broker.log")
@@ -93,13 +100,29 @@ func (layout ManagedInstallLayout) targets() []managedDataTarget {
 // stops the others. Only a privileged component may call it; inside the
 // gateway service it degrades to a read-only assessment. On other platforms
 // every result is CanonicalUnsupported.
+//
+// On standalone (StandaloneRefusesContentDrift) a content file that an
+// untrusted principal can write or owns, or that the strict trust walk
+// refuses, is not repaired: it is reported as a boundary finding and left
+// as it is, so every reader keeps refusing it until Setup /ensure writes a
+// fresh file. A repair would restore the descriptor over bytes that account
+// may have changed (GAP-0561). ACL-only drift that gave no untrusted
+// principal write (an extra read entry, inheritance) is still repaired.
+// Secure Client keeps the repair.
 func RepairWindowsManagedInstall(layout ManagedInstallLayout, opts CanonicalOptions) []CanonicalResult {
 	targets := layout.targets()
 	if !windowsDescriptorPlatform() {
 		return unsupportedCanonicalResults(targets)
 	}
+	refuseContentDrift := managedInstallRefusesContentDrift()
 	results := make([]CanonicalResult, 0, len(targets))
 	for _, target := range targets {
+		if target.content && refuseContentDrift {
+			if refused, ok := refuseStandaloneContentRepair(target, opts); ok {
+				results = append(results, refused)
+				continue
+			}
+		}
 		result, err := EnsureCanonical(target.path, target.kind, opts)
 		if err == nil && result.Outcome != CanonicalBoundary && !target.kind.Directory() {
 			// ReadOnly, Hidden or System set by a user or a hardening tool
@@ -111,4 +134,44 @@ func RepairWindowsManagedInstall(layout ManagedInstallLayout, opts CanonicalOpti
 		results = append(results, result)
 	}
 	return results
+}
+
+// managedInstallRefusesContentDrift is StandaloneRefusesContentDrift; tests
+// replace it.
+var managedInstallRefusesContentDrift = StandaloneRefusesContentDrift
+
+// standaloneContentRepairRefusal is the recovery step logged with a refused
+// content file.
+const standaloneContentRepairRefusal = "not repaired in place on a standalone install, because an account " +
+	"that could write this file may have changed it: from an elevated prompt run Setup /ensure so Setup " +
+	"writes a fresh file, then Setup /verify (GAP-0561)"
+
+// refuseStandaloneContentRepair reads target's descriptor without writing.
+// When an untrusted principal can write or owns the file, or the strict
+// trust walk refuses it, it logs the boundary finding with the Setup step
+// and returns the result and true; the caller must then not repair it. A
+// missing, canonical or structurally bad object returns false and takes the
+// normal path, which reports it.
+func refuseStandaloneContentRepair(target managedDataTarget, opts CanonicalOptions) (CanonicalResult, bool) {
+	quiet := opts
+	quiet.Quiet = true
+	result, err := AssessCanonical(target.path, target.kind, quiet)
+	if err != nil {
+		return CanonicalResult{}, false
+	}
+	switch result.Outcome {
+	case CanonicalBoundary:
+		result.RepairError = standaloneContentRepairRefusal
+	case CanonicalAccepted:
+		strictErr := ValidateTrustedFilePath(target.path, string(target.kind))
+		if strictErr == nil {
+			return CanonicalResult{}, false
+		}
+		result.Outcome = CanonicalBoundary
+		result.RepairError = standaloneContentRepairRefusal + ": " + strictErr.Error()
+	default:
+		return CanonicalResult{}, false
+	}
+	reportCanonicalResult(result, opts)
+	return result, true
 }

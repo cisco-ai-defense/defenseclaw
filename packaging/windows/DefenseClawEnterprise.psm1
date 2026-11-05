@@ -30378,6 +30378,91 @@ function Test-DefenseClawInstalledGatewayRecorded {
     )
 }
 
+function Test-DefenseClawTombstoneTeardownArtifactsBindManifest {
+    <#
+        rel-1-0-6:GAP-0583. Whether every teardown artifact a committed
+        uninstall already wrote (the schema-6 teardown journal and the
+        managed-hook contract cleanup receipt) names the installed
+        targets.yaml and the tombstone's deployment generation. Only then may
+        the tombstone be rebound to that manifest: rebinding never makes an
+        artifact of another manifest or another deployment match. An
+        unreadable artifact keeps the tombstone as recorded, and the strict
+        checks that follow give their refusal.
+    #>
+    param(
+        [Parameter(Mandatory)][hashtable]$Layout,
+        [Parameter(Mandatory)][string]$ManifestSHA256,
+        [Parameter(Mandatory)][string]$DeploymentGenerationID
+    )
+    foreach ($path in @(
+            [string]$Layout.ManagedHooksTeardownJournalPath,
+            [string]$Layout.ManagedHookContractCleanupReceiptPath
+        )) {
+        if ([string]::IsNullOrWhiteSpace($path) -or
+            -not (Test-DefenseClawPathPresentNoFollow -Path $path)) {
+            continue
+        }
+        try {
+            Assert-DefenseClawNoReparsePath -Path $path
+            $artifact = Microsoft.PowerShell.Management\Get-Content `
+                -LiteralPath $path `
+                -Raw `
+                -ErrorAction Stop |
+                Microsoft.PowerShell.Utility\ConvertFrom-Json -ErrorAction Stop
+        }
+        catch {
+            return $false
+        }
+        if ($null -eq $artifact -or
+            [string]$artifact.manifest_sha256 -cne $ManifestSHA256 -or
+            [string]$artifact.deployment_generation_id -cne $DeploymentGenerationID) {
+            return $false
+        }
+    }
+    return $true
+}
+
+function Sync-DefenseClawStandaloneUninstallTombstoneBinding {
+    <#
+        Standalone only (rel-1-0-6:GAP-0583). A committed uninstall, its
+        retry, and the Install (Setup /ensure) that first finishes it, rebind
+        the inactive tombstone's activation evidence to the installed
+        targets.yaml when the guardian had adopted it: the enumerator pass
+        after a deleted enrolled account can publish it between the
+        uninstall's pre-commit check and its commit. The rule is the one
+        Sync-DefenseClawStandaloneManagedHooksActivationBinding applies to an
+        installed deployment (guardian adoption, the deployment generation
+        and state kept), plus Test-DefenseClawTombstoneTeardownArtifactsBindManifest.
+        When the drift cannot be proven it reports the reason and changes
+        nothing; the strict binding checks that follow still refuse. Returns
+        $true when it rebound: the caller reads the metadata again.
+    #>
+    param(
+        [Parameter(Mandatory)][hashtable]$Layout,
+        [Parameter(Mandatory)][string]$GatewayServiceName
+    )
+    if (-not (Test-DefenseClawStandaloneProfile)) {
+        return $false
+    }
+    try {
+        $rebound = Sync-DefenseClawStandaloneManagedHooksActivationBinding `
+            -Layout $Layout `
+            -GatewayServiceName $GatewayServiceName `
+            -AllowUninstallTombstone
+    }
+    catch {
+        Write-DefenseClawLifecyclePhase -Stage (
+            'hook targets changed after the uninstall committed, and the guardian has not adopted them: ' +
+            "the tombstone keeps its activation evidence ($($_.Exception.Message))"
+        )
+        return $false
+    }
+    if ($rebound) {
+        Write-DefenseClawLifecyclePhase -Stage 'hook targets changed after the uninstall committed (an enrolled account was deleted or changed): the tombstone activation evidence was rebound to the targets.yaml the guardian adopted'
+    }
+    return [bool]$rebound
+}
+
 function Sync-DefenseClawStandaloneManagedHooksActivationBinding {
     <#
         Standalone only. Runs under the lifecycle lock, after any pending
@@ -30394,11 +30479,15 @@ function Sync-DefenseClawStandaloneManagedHooksActivationBinding {
         Upgrade. Their transaction installs it, so it reads the guardian's
         records when the installed gateway is missing or is not the binary
         the deployment recorded (GAP-1417).
+        AllowUninstallTombstone (rel-1-0-6:GAP-0583) also rebinds the
+        inactive tombstone of a committed uninstall; see
+        Sync-DefenseClawStandaloneUninstallTombstoneBinding.
     #>
     param(
         [Parameter(Mandatory)][hashtable]$Layout,
         [Parameter(Mandatory)][string]$GatewayServiceName,
-        [hashtable]$GatewaySource
+        [hashtable]$GatewaySource,
+        [switch]$AllowUninstallTombstone
     )
     if (-not (Test-DefenseClawStandaloneProfile)) {
         return $false
@@ -30413,7 +30502,8 @@ function Sync-DefenseClawStandaloneManagedHooksActivationBinding {
         return $false
     }
     $metadata = Get-DefenseClawDeploymentMetadata -Layout $Layout -Required
-    if (-not (Test-DefenseClawMetadataInstalled -Metadata $metadata)) {
+    if (-not (Test-DefenseClawMetadataInstalled -Metadata $metadata) -and
+        -not $AllowUninstallTombstone) {
         return $false
     }
     $activationProperty = $metadata.PSObject.Properties['managed_hooks_activation']
@@ -30429,6 +30519,13 @@ function Sync-DefenseClawStandaloneManagedHooksActivationBinding {
             -Algorithm SHA256
     ).Hash.ToLowerInvariant()
     if ([string]$activation.manifest_sha256 -ceq $installedManifestSHA256) {
+        return $false
+    }
+    if (-not (Test-DefenseClawMetadataInstalled -Metadata $metadata) -and
+        -not (Test-DefenseClawTombstoneTeardownArtifactsBindManifest `
+            -Layout $Layout `
+            -ManifestSHA256 $installedManifestSHA256 `
+            -DeploymentGenerationID ([string]$activation.deployment_generation_id))) {
         return $false
     }
     $probeGatewaySource = $null
@@ -34644,6 +34741,11 @@ function Complete-DefenseClawCommittedManagedHooksFinalization {
         -GuardianServiceName $GuardianServiceName
     if (Test-DefenseClawMetadataInstalled -Metadata $metadata) {
         throw 'managed-hook finalization requires an uninstall tombstone'
+    }
+    if (Sync-DefenseClawStandaloneUninstallTombstoneBinding `
+            -Layout $Layout `
+            -GatewayServiceName $GatewayServiceName) {
+        $metadata = Get-DefenseClawDeploymentMetadata -Layout $Layout -Required
     }
     # The finalize removes the enrolled accounts' per-user data and binaries
     # when the uninstall asked for it. A recovery or retry replays the request
@@ -40348,6 +40450,13 @@ function Invoke-DefenseClawPreLayoutRecovery {
             # the only helper authorized to finalize its own journal. Cleanup
             # leaves the inactive metadata tombstone as the exact StateRoot
             # preimage that the new Install adopts transactionally later.
+            if (Sync-DefenseClawStandaloneUninstallTombstoneBinding `
+                    -Layout $Layout `
+                    -GatewayServiceName $GatewayServiceName) {
+                $committedMetadata = Get-DefenseClawDeploymentMetadata `
+                    -Layout $Layout `
+                    -Required
+            }
             $retiredContractReceipt =
                 Get-DefenseClawManagedHookContractCleanupReceipt `
                     -Layout $Layout `
