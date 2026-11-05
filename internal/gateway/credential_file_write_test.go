@@ -15,6 +15,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 
@@ -24,23 +25,52 @@ import (
 
 const credentialFileWriteRule = "secrets.credential_file_write"
 
-// credentialFileFixture is one account: home h with the four credential
-// files the agent's CLIs read (AWS credentials and config, kubeconfig,
-// Docker config), and the project p with look-alike fixtures.
+// credentialFileTargets is one file of every credential read rule, by its
+// path under the home, and the rule that owns its writes: every leg of
+// credentialFileWriteLegs, and the SSH private key, whose write leg is
+// PATH-SSH-DIR (gas-ux-r1:GAP-0052).
+var credentialFileTargets = []struct{ relative, rule string }{
+	{".aws/credentials", credentialFileWriteRule},
+	{".aws/config", credentialFileWriteRule},
+	{".kube/config", credentialFileWriteRule},
+	{".docker/config.json", credentialFileWriteRule},
+	{".npmrc", credentialFileWriteRule},
+	{".pypirc", credentialFileWriteRule},
+	{".git-credentials", credentialFileWriteRule},
+	{".netrc", credentialFileWriteRule},
+	{".pgpass", credentialFileWriteRule},
+	{".config/gcloud/application_default_credentials.json", credentialFileWriteRule},
+	{".config/gh/hosts.yml", credentialFileWriteRule},
+	{".azure/azureProfile.json", credentialFileWriteRule},
+	{".gnupg/gpg-agent.conf", credentialFileWriteRule},
+	{".ssh/id_ed25519", "PATH-SSH-DIR"},
+}
+
+// credentialFileFixture is one account: home h with every target file, and
+// the project p with ordinary files, look-alikes and a link to the AWS
+// credentials file.
 type credentialFileFixture struct{ home, project string }
 
 func newCredentialFileFixture(t *testing.T) credentialFileFixture {
 	t.Helper()
 	root := t.TempDir()
 	f := credentialFileFixture{home: filepath.Join(root, "home"), project: filepath.Join(root, "home", "proj")}
-	for _, dir := range []string{".aws", ".kube", ".docker", "proj/.aws", "proj/fixtures/.kube"} {
-		if err := os.MkdirAll(filepath.Join(f.home, dir), 0o700); err != nil {
+	files := []string{"proj/notes.txt", "proj/.aws/credentials", "proj/fixtures/.kube/config", "proj/docker/config.json",
+		"proj/.npmrc", ".aws/cli/cache/token.json", ".kube/cache/discovery.json", ".config/gcloud/configurations/config_default"}
+	for _, target := range credentialFileTargets {
+		files = append(files, target.relative)
+	}
+	for _, file := range files {
+		path := filepath.Join(f.home, file)
+		if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(path, []byte("# base\n"), 0o600); err != nil {
 			t.Fatal(err)
 		}
 	}
-	for _, file := range []string{".aws/credentials", ".aws/config", ".kube/config", ".docker/config.json",
-		"proj/notes.txt", "proj/.aws/credentials", "proj/fixtures/.kube/config"} {
-		if err := os.WriteFile(filepath.Join(f.home, file), []byte("# base\n"), 0o600); err != nil {
+	for link, target := range map[string]string{"creds-link": ".aws/credentials", "key-link": ".ssh/id_ed25519"} {
+		if err := os.Symlink(filepath.Join(f.home, target), filepath.Join(f.project, link)); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -54,81 +84,94 @@ func (f credentialFileFixture) path(template string) string {
 	return strings.NewReplacer("{H}", f.home, "{P}", f.project).Replace(template)
 }
 
-// credentialFileHookCall is one PreToolUse-equivalent call of a connector's
-// tool with its arguments.
+// credentialFileHookCall is one pre-call hook event of a connector's tool.
 type credentialFileHookCall struct {
 	connector, tool string
 	args            map[string]any
 }
 
-func (c credentialFileHookCall) body(t *testing.T, cwd string) string {
-	t.Helper()
-	return nativeWriteCall{connector: c.connector, tool: c.tool, args: func(string) map[string]any { return c.args }}.body(t, cwd, fmt.Sprint(c.args))
+func (c credentialFileHookCall) String() string {
+	return fmt.Sprintf("%s %s %v", c.connector, c.tool, c.args)
 }
 
-// postCredentialFileHook posts call to the connector's hook in action mode
-// on the profile pack, per-user or as a managed gateway that knows the
-// caller, and returns the decision (block, alert or allow) and the response.
-func postCredentialFileHook(t *testing.T, f credentialFileFixture, profile string, managed bool, call credentialFileHookCall) (string, string) {
+// credentialFileHook posts calls to the connectors' hooks in action mode on
+// one profile pack, per-user or as a managed gateway that knows the caller.
+type credentialFileHook struct {
+	f       credentialFileFixture
+	profile string
+	managed bool
+}
+
+func newCredentialFileHook(t *testing.T, f credentialFileFixture, profile string, managed bool) credentialFileHook {
 	t.Helper()
-	installToolCallCorpusProfileConnector(t, call.connector, profile)
-	body := call.body(t, f.project)
+	for _, connector := range []string{"claudecode", "codex", "copilot", "opencode"} {
+		installToolCallCorpusProfileConnector(t, connector, profile)
+	}
+	return credentialFileHook{f, profile, managed}
+}
+
+// post returns the decision (block, alert or allow) and the response.
+func (h credentialFileHook) post(t *testing.T, call credentialFileHookCall) (string, string) {
+	t.Helper()
+	body := nativeWriteCall{connector: call.connector, tool: call.tool,
+		args: func(string) map[string]any { return call.args }}.body(t, h.f.project, call.String())
 	cfg := &config.Config{}
 	cfg.Guardrail.Mode = "action"
 	cfg.Guardrail.Connector = call.connector
-	cfg.Guardrail.RulePackDir = filepath.Join(guardrailPoliciesRoot(t), profile)
+	cfg.Guardrail.RulePackDir = filepath.Join(guardrailPoliciesRoot(t), h.profile)
 	api := &APIServer{scannerCfg: cfg, health: NewSidecarHealth()}
 	req := httptest.NewRequest(http.MethodPost, "/api/v1/"+call.connector+"/hook", strings.NewReader(body))
 	req.Header.Set("Content-Type", "application/json")
+	event := "PreToolUse"
 	switch call.connector {
 	case "copilot":
-		req.Header.Set("X-DefenseClaw-Copilot-Event", "preToolUse")
-		req.Header.Set(hookpaths.Header, hookpaths.ResolveConnector("copilot", "", "preToolUse", []byte(body)))
-	default:
-		req.Header.Set(hookpaths.Header, hookpaths.ResolveConnector(call.connector, "", "PreToolUse", []byte(body)))
-	}
-	if call.connector == "codex" {
+		event = "preToolUse"
+		req.Header.Set("X-DefenseClaw-Copilot-Event", event)
+	case "codex":
 		setTestCodexHookBinding(req, "PreToolUse", defaultTestCodexHookContract)
 	}
-	if managed {
-		req = req.WithContext(withManagedHookPeer(req.Context(), managedHookPeer{Home: f.home}))
+	req.Header.Set(hookpaths.Header, hookpaths.ResolveConnector(call.connector, "", event, []byte(body)))
+	if h.managed {
+		req = req.WithContext(withManagedHookPeer(req.Context(), managedHookPeer{Home: h.f.home}))
 	}
 	recorder := httptest.NewRecorder()
 	api.handleAgentHook(call.connector).ServeHTTP(recorder, req)
 	out := recorder.Body.String()
 	if recorder.Code != http.StatusOK {
-		t.Fatalf("status %d: %.400s", recorder.Code, out)
+		t.Fatalf("%s: status %d: %.400s", call, recorder.Code, out)
 	}
 	var resp map[string]any
 	if err := json.Unmarshal([]byte(out), &resp); err != nil {
-		t.Fatalf("verdict %q: %v", out, err)
+		t.Fatalf("%s: verdict %q: %v", call, out, err)
 	}
 	action, _ := resp["action"].(string)
 	return action, out
 }
 
-// credentialFileTargets are the four files whose native and shell writes
-// the default pack let through with no finding (gas-ux-r1:GAP-0052).
-var credentialFileTargets = []string{"{H}/.aws/credentials", "{H}/.aws/config", "{H}/.kube/config", "{H}/.docker/config.json"}
-
-// credentialFileWriteCalls is every file-tool write of every connector
-// (Claude Code Write, Edit and MultiEdit, OpenCode write, edit and patch,
-// Codex and Copilot apply_patch, Copilot edit and create) and the shell
-// redirect, tee and delete forms of Claude Code and Codex Bash, for target.
-// Each file tool uses its reviewed argument schema.
-func credentialFileWriteCalls(target string) []credentialFileHookCall {
+// credentialFileWriteCalls is every way an agent changes the file at
+// relative under the home: each connector's file tools in their reviewed
+// argument schema (Claude Code Write, Edit and MultiEdit, OpenCode write,
+// edit and patch, Codex and Copilot apply_patch, Copilot edit and create),
+// and Claude Code and Codex Bash redirects, tee, cp and mv onto it, mv away,
+// rm, sed -i and truncate, with absolute, ~, $HOME and ${HOME} spellings.
+func credentialFileWriteCalls(f credentialFileFixture, relative string) []credentialFileHookCall {
+	absolute := filepath.Join(f.home, relative)
 	var calls []credentialFileHookCall
 	for _, call := range nativeWriteCalls() {
-		calls = append(calls, credentialFileHookCall{call.connector, call.tool, call.args(target)})
+		calls = append(calls, credentialFileHookCall{call.connector, call.tool, call.args(absolute)})
 	}
-	tilde := "~" + strings.TrimPrefix(target, os.Getenv("HOME"))
 	for _, connector := range []string{"claudecode", "codex"} {
 		for _, command := range []string{
-			"printf 'aws_access_key_id = x\\n' > " + target,
-			"printf 'x\\n' >> " + tilde,
-			"printf 'x\\n' | tee " + target,
-			"printf 'x\\n' | tee -a " + tilde,
-			"rm " + target,
+			"printf 'x\\n' > " + absolute,
+			"printf 'x\\n' >> ~/" + relative,
+			`printf 'x\n' | tee "$HOME/` + relative + `"`,
+			`printf 'x\n' | tee -a "${HOME}/` + relative + `"`,
+			"cp notes.txt ~/" + relative,
+			"mv notes.txt $HOME/" + relative,
+			"mv ~/" + relative + " moved.txt",
+			"rm " + absolute,
+			"sed -i s/a/b/ ~/" + relative,
+			"truncate -s 0 " + absolute,
 		} {
 			calls = append(calls, credentialFileHookCall{connector, "Bash", map[string]any{"command": command}})
 		}
@@ -143,24 +186,24 @@ func credentialFileTopology(managed bool) string {
 	return "per-user"
 }
 
-// TestCredentialFileWritesAlertInBalancedAndBlockInStrict: a write, append
-// or delete of ~/.aws/credentials, ~/.aws/config, ~/.kube/config or
-// ~/.docker/config.json through any connector's file tool or a shell
-// redirect, tee or rm is a HIGH secrets.credential_file_write finding. The
-// balanced default alerts and allows, so aws configure and kubectl config
-// keep working; strict, per-user and managed, blocks (gas-ux-r1:GAP-0052).
+// TestCredentialFileWritesAlertInBalancedAndBlockInStrict: every write,
+// append, truncation or delete of a credential file of the active home,
+// through any connector's file tool or the shell, and whatever the spelling,
+// is a HIGH finding of its write leg. The balanced default alerts and
+// allows, so aws configure and kubectl config keep working; strict blocks,
+// per-user and managed (gas-ux-r1:GAP-0052).
 func TestCredentialFileWritesAlertInBalancedAndBlockInStrict(t *testing.T) {
 	for _, profile := range []string{"default", "strict"} {
 		want := map[string]string{"default": "alert", "strict": "block"}[profile]
 		for _, managed := range []bool{false, true} {
 			for _, target := range credentialFileTargets {
-				t.Run(profile+"/"+credentialFileTopology(managed)+"/"+strings.TrimPrefix(target, "{H}/"), func(t *testing.T) {
+				t.Run(profile+"/"+credentialFileTopology(managed)+"/"+target.relative, func(t *testing.T) {
 					f := newCredentialFileFixture(t)
-					for i, call := range credentialFileWriteCalls(f.path(target)) {
-						got, out := postCredentialFileHook(t, f, profile, managed, call)
-						if got != want || !strings.Contains(out, credentialFileWriteRule) {
-							t.Errorf("%d %s %s %v: decision %s, want %s by %s: %.600s",
-								i, call.connector, call.tool, call.args, got, want, credentialFileWriteRule, out)
+					hook := newCredentialFileHook(t, f, profile, managed)
+					for _, call := range credentialFileWriteCalls(f, target.relative) {
+						got, out := hook.post(t, call)
+						if got != want || !strings.Contains(out, target.rule) {
+							t.Errorf("%s: decision %s, want %s by %s: %.500s", call, got, want, target.rule, out)
 						}
 					}
 				})
@@ -169,10 +212,40 @@ func TestCredentialFileWritesAlertInBalancedAndBlockInStrict(t *testing.T) {
 	}
 }
 
-// TestCredentialFileReadsAndOrdinaryWritesAreUnchanged: the new write rule
-// changes neither the verdict of a read of the same files (the read rules
-// keep their MEDIUM alert) nor any write of an ordinary or look-alike
-// project file, in either pack, per-user or managed.
+// TestCredentialFileWriteThroughALink: a write to a project link that
+// points at a credential file (the AWS credentials, an SSH private key) is
+// judged as a write of that file, per-user and managed.
+func TestCredentialFileWriteThroughALink(t *testing.T) {
+	for _, profile := range []string{"default", "strict"} {
+		want := map[string]string{"default": "alert", "strict": "block"}[profile]
+		for _, managed := range []bool{false, true} {
+			t.Run(profile+"/"+credentialFileTopology(managed), func(t *testing.T) {
+				f := newCredentialFileFixture(t)
+				hook := newCredentialFileHook(t, f, profile, managed)
+				for name, rule := range map[string]string{"creds-link": credentialFileWriteRule, "key-link": "PATH-SSH-DIR"} {
+					link := filepath.Join(f.project, name)
+					for _, call := range []credentialFileHookCall{
+						{"claudecode", "Write", map[string]any{"file_path": link, "content": "x\n"}},
+						{"opencode", "write", map[string]any{"path": link, "content": "x\n"}},
+						{"claudecode", "Bash", map[string]any{"command": "printf 'x\\n' > " + name}},
+						{"codex", "Bash", map[string]any{"command": "printf 'x\\n' | tee " + link}},
+					} {
+						got, out := hook.post(t, call)
+						if got != want || !strings.Contains(out, rule) {
+							t.Errorf("%s: decision %s, want %s by %s: %.500s", call, got, want, rule, out)
+						}
+					}
+				}
+			})
+		}
+	}
+}
+
+// TestCredentialFileReadsAndOrdinaryWritesAreUnchanged: the write legs
+// change neither a read of the same files (the read rules keep their MEDIUM
+// alert) nor any write of another file, a project look-alike or a CLI cache
+// next to the credential file, nor the aws, kubectl, docker and gh commands
+// that manage these files, in either pack, per-user or managed.
 func TestCredentialFileReadsAndOrdinaryWritesAreUnchanged(t *testing.T) {
 	reads := map[string]string{
 		"{H}/.aws/credentials":      "PATH-AWS-CREDS",
@@ -181,34 +254,95 @@ func TestCredentialFileReadsAndOrdinaryWritesAreUnchanged(t *testing.T) {
 		"~/.aws/credentials":        "PATH-AWS-CREDS",
 		"$HOME/.docker/config.json": "PATH-DOCKER",
 	}
-	ordinary := []string{"{P}/notes.txt", "{P}/.aws/credentials", "{P}/fixtures/.kube/config", "{P}/docker/config.json"}
+	ordinary := []string{"{P}/notes.txt", "{P}/.aws/credentials", "{P}/fixtures/.kube/config", "{P}/docker/config.json",
+		"{P}/.npmrc", "{H}/.aws/cli/cache/token.json", "{H}/.kube/cache/discovery.json",
+		"{H}/.config/gcloud/configurations/config_default"}
+	commands := []string{"aws configure set region us-east-1", "kubectl config use-context dev",
+		"docker login -u a --password-stdin", "gh auth status", "cp ~/.aws/credentials backup.txt",
+		"grep -c profile ~/.aws/config", "cat ~/.npmrc ~/.netrc"}
 	for _, profile := range []string{"default", "strict"} {
 		for _, managed := range []bool{false, true} {
 			t.Run(profile+"/"+credentialFileTopology(managed), func(t *testing.T) {
 				f := newCredentialFileFixture(t)
+				hook := newCredentialFileHook(t, f, profile, managed)
 				for target, rule := range reads {
+					absolute := strings.NewReplacer("~", f.home, "$HOME", f.home).Replace(f.path(target))
 					for _, call := range []credentialFileHookCall{
-						{"claudecode", "Read", map[string]any{"file_path": strings.NewReplacer("~", f.home, "$HOME", f.home).Replace(f.path(target))}},
+						{"claudecode", "Read", map[string]any{"file_path": absolute}},
+						{"opencode", "read", map[string]any{"path": absolute}},
 						{"claudecode", "Bash", map[string]any{"command": "cat " + f.path(target)}},
 						{"codex", "Bash", map[string]any{"command": "cat " + f.path(target)}},
 					} {
-						got, out := postCredentialFileHook(t, f, profile, managed, call)
+						got, out := hook.post(t, call)
 						if got != "alert" || !strings.Contains(out, rule) || strings.Contains(out, credentialFileWriteRule) {
-							t.Errorf("read %s %s %v: decision %s, want the %s alert and no write finding: %.600s",
-								call.connector, call.tool, call.args, got, rule, out)
+							t.Errorf("read %s: decision %s, want the %s alert and no write finding: %.500s", call, got, rule, out)
 						}
 					}
 				}
 				for _, target := range ordinary {
-					for _, call := range credentialFileWriteCalls(f.path(target)) {
-						got, out := postCredentialFileHook(t, f, profile, managed, call)
-						if got != "allow" || strings.Contains(out, credentialFileWriteRule) {
-							t.Errorf("ordinary %s %s %v: decision %s, want allow with no %s: %.600s",
-								call.connector, call.tool, call.args, got, credentialFileWriteRule, out)
+					relative, _ := filepath.Rel(f.home, f.path(target))
+					for _, call := range credentialFileWriteCalls(f, relative) {
+						got, out := hook.post(t, call)
+						if got == "block" || strings.Contains(out, credentialFileWriteRule) {
+							t.Errorf("ordinary %s: decision %s, want no block and no %s: %.500s", call, got, credentialFileWriteRule, out)
+						}
+					}
+				}
+				for _, command := range commands {
+					for _, connector := range []string{"claudecode", "codex"} {
+						call := credentialFileHookCall{connector, "Bash", map[string]any{"command": command}}
+						got, out := hook.post(t, call)
+						if strings.Contains(out, credentialFileWriteRule) || profile == "default" && got == "block" {
+							t.Errorf("command %s: decision %s with the write rule or a balanced block: %.500s", call, got, out)
 						}
 					}
 				}
 			})
+		}
+	}
+}
+
+// TestEveryCredentialReadRuleHasAWriteLeg keeps the class closed: every
+// credential-tagged rule of the shipped sensitive-path packs has a write leg
+// in credentialFileWriteLegs or a reason in
+// credentialReadRulesWithoutFileWriteLeg, and every leg names shipped rules.
+func TestEveryCredentialReadRuleHasAWriteLeg(t *testing.T) {
+	legs := map[string]bool{}
+	for _, leg := range credentialFileWriteLegs {
+		for _, id := range leg.readRules {
+			legs[id] = true
+		}
+	}
+	shipped := map[string]bool{}
+	check := func(where, id string) {
+		_, excluded := credentialReadRulesWithoutFileWriteLeg[id]
+		if legs[id] == excluded {
+			t.Errorf("%s %s: in a write leg %t, excluded %t; want exactly one", where, id, legs[id], excluded)
+		}
+	}
+	// The compiled-in Windows path rules are all credential or history rules.
+	for _, rule := range windowsSensitivePathRules {
+		shipped[rule.id] = true
+		check("windows", rule.id)
+	}
+	for _, profile := range []string{"default", "permissive", "strict"} {
+		pack := mustLoadRulePack(t, filepath.Join(guardrailPoliciesRoot(t), profile))
+		for _, file := range pack.RuleFiles {
+			if file.Category != "sensitive-path" {
+				continue
+			}
+			for _, rule := range file.Rules {
+				shipped[rule.ID] = true
+				if !slices.Contains(rule.Tags, "credential") {
+					continue
+				}
+				check(profile, rule.ID)
+			}
+		}
+	}
+	for id := range legs {
+		if !shipped[id] {
+			t.Errorf("write leg names %s, which no shipped pack has", id)
 		}
 	}
 }
