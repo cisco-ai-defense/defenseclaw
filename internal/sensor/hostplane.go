@@ -91,6 +91,9 @@ type hostPlane struct {
 	// wrapperHold is how long a transparent wrapper's record waits for its
 	// child's exec; zero records it at once.
 	wrapperHold time.Duration
+	// wrapperDirs are where the wrappers a Tetragon exec is matched with
+	// by image identity are installed (wrapperBinaryDirs).
+	wrapperDirs []string
 	// coldHold is how long a client exec's record waits for its release
 	// manifest, polled every coldPoll; zero records it at once.
 	coldHold, coldPoll time.Duration
@@ -198,6 +201,7 @@ func newHostPlane(
 		source: source, tracker: tracker, indicators: indicators,
 		clientChecksums: claudeReleases.checksums,
 		wrapperHold:     wrapperHold,
+		wrapperDirs:     wrapperBinaryDirs,
 		coldHold:        coldClientHold,
 		coldPoll:        coldClientPoll,
 		window:          window, minStages: minStages,
