@@ -161,6 +161,11 @@ type wireEvent struct {
 	// that is not root cannot read another account's image itself.
 	ImageSHA256  string `json:"image_sha256,omitempty"`
 	ImageVersion string `json:"image_version,omitempty"`
+	// ImageDigestState is plane.Event's (read, pending or failed),
+	// omitempty like the fields above: a gateway that predates it ignores
+	// it, and a helper that predates it sends none, which the host plane
+	// treats as no digest coming (cowork-1-0-8 GAP-0067).
+	ImageDigestState string `json:"image_digest_state,omitempty"`
 }
 
 func encodeEvent(event plane.Event) wireEvent {
@@ -178,6 +183,7 @@ func encodeEvent(event plane.Event) wireEvent {
 		KernelAction: event.KernelAction, PolicyMode: event.PolicyMode, PolicyTags: copyStrings(event.PolicyTags),
 		PolicyMessage: event.PolicyMessage, Target: event.Target, Count: event.Count,
 		ImageSHA256: event.ImageSHA256, ImageVersion: event.ImageVersion,
+		ImageDigestState: string(event.ImageDigestState),
 	}
 	if !event.At.IsZero() {
 		out.AtUnixNano = event.At.UnixNano()
@@ -200,6 +206,7 @@ func decodeEvent(event wireEvent) plane.Event {
 		KernelAction: event.KernelAction, PolicyMode: event.PolicyMode, PolicyTags: copyStrings(event.PolicyTags),
 		PolicyMessage: event.PolicyMessage, Target: event.Target, Count: event.Count,
 		ImageSHA256: event.ImageSHA256, ImageVersion: event.ImageVersion,
+		ImageDigestState: plane.DigestState(event.ImageDigestState),
 	}
 	if event.AtUnixNano != 0 {
 		out.At = time.Unix(0, event.AtUnixNano)

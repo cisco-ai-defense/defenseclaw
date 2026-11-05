@@ -295,6 +295,7 @@ func (s *darwinSource) translate(message esMessage) (Event, bool) {
 		var payload esEvent
 		if json.Unmarshal(message.Event, &payload) == nil && payload.Exec != nil {
 			event.ImageSHA256, event.ImageVersion = darwinClientImage(payload.Exec.Target.Executable, eventAccount(event))
+			event.ImageDigestState = digestStateOf(event.ImageSHA256, event.ImageVersion)
 		}
 	}
 	return event, ok

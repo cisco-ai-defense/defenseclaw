@@ -573,17 +573,34 @@ func (s *linuxSource) pushProcess(kind Kind, pid int, at time.Time, fromFork boo
 		}
 		version = ""
 	}
+	var delivery *digestDelivery
 	if identity {
+		delivery = newDigestDelivery(s.pushUnlessClosed, pid, at)
+		delivery.version = version
 		event.ImageVersion = version
-		event.ImageSHA256 = clientImages.digestOf(pinned, image, eventAccount(event))
+		event.ImageSHA256, event.ImageDigestState = clientImages.digestOf(
+			pinned, image, eventAccount(event), delivery.follow)
 		pinned = nil
 	} else if version != "" && !execed {
-		event.ImageVersion = version
+		event.ImageVersion, event.ImageDigestState = version, DigestFailed
 	}
 	if pinned != nil {
 		pinned.Close()
 	}
 	s.buffer.Push(event)
+	if delivery != nil {
+		delivery.execSent()
+	}
+}
+
+// pushUnlessClosed delivers an event from outside the readers (an image
+// digest read after its exec went out); nothing once the source is closed.
+func (s *linuxSource) pushUnlessClosed(event Event) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if !s.closed {
+		s.buffer.Push(event)
+	}
 }
 
 // procSnapshotHook runs between the steps of pushProcess's snapshot; tests

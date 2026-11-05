@@ -228,6 +228,7 @@ func (r *securityReader) pollOnce() {
 		if event, ok := translateSecurityRecord(record); ok {
 			if event.Kind == KindExec && r.image != nil {
 				event.ImageSHA256, event.ImageVersion = r.image(event.Exe, event.At, eventAccount(event))
+				event.ImageDigestState = digestStateOf(event.ImageSHA256, event.ImageVersion)
 			}
 			r.buffer.Push(event)
 		}

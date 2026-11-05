@@ -140,6 +140,8 @@ type hostPlane struct {
 	containerEvents atomic.Int64
 	ownEvents       atomic.Int64
 	hookUnexpected  atomic.Int64
+	// clientExecs counts the client exec events by digest state.
+	clientExecs clientExecCounts
 	// customer holds the events of the host's own Tetragon policies:
 	// attributed records, the latest of them and per-policy counts.
 	customer customerPlane
@@ -369,6 +371,7 @@ func (h *hostPlane) handle(event plane.Event) {
 			looked = true
 		}
 		if attributed {
+			h.clientExecs.seen[digestStateIndex(event.ImageDigestState)].Add(1)
 			checksums, _ := h.clientChecksums(event.ImageVersion)
 			lower := strings.ToLower(cmdline)
 			verifiedClient = event.ImageSHA256 != "" && signedClaudeRelease(event.ImageSHA256, checksums)
@@ -433,6 +436,9 @@ func (h *hostPlane) recordLocked(
 		user = event.User
 	}
 	h.classified++
+	if event.Kind == plane.KindExec && event.ImageVersion != "" {
+		h.clientExecs.reported[digestStateIndex(event.ImageDigestState)].Add(1)
+	}
 	root := hostSessionKey{
 		process:  procprobe.KeyOf(lineage.RootPID, lineage.RootKeyStart),
 		instance: lineage.RootInstance,

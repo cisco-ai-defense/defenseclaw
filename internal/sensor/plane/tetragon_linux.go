@@ -411,14 +411,30 @@ func (s *tetragonSource) handleBatch(batch KernelBatch) {
 		if event.Kind == KindExec && s.duplicateOfNative(event.PID, now) {
 			continue
 		}
+		var delivery *digestDelivery
 		if event.Kind == KindExec && event.Exe != "" {
 			// The helper reads the image while the event is fresh, only if
 			// the pid still runs the binary the event names.
-			event.ImageSHA256, event.ImageVersion = tetragonClientImage(event.PID, event.Exe, eventAccount(event))
+			delivery = newDigestDelivery(s.pushUnlessClosed, event.PID, event.At)
+			event.ImageSHA256, event.ImageVersion, event.ImageDigestState = tetragonClientImage(
+				event.PID, event.Exe, eventAccount(event), delivery)
 		}
 		if event.Kind == KindFileRead || event.Kind == KindFileWrite {
 			s.noteTetragonFile(event, now)
 		}
+		s.buffer.Push(event)
+		if delivery != nil {
+			delivery.execSent()
+		}
+	}
+}
+
+// pushUnlessClosed delivers an event from outside the feed (an image digest
+// read after its exec went out); nothing once the source is closed.
+func (s *tetragonSource) pushUnlessClosed(event Event) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if !s.closed {
 		s.buffer.Push(event)
 	}
 }

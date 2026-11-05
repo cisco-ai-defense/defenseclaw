@@ -4,6 +4,7 @@
 package sensor
 
 import (
+	"sync/atomic"
 	"time"
 
 	"github.com/defenseclaw/defenseclaw/internal/sensor/agentchain"
@@ -84,4 +85,48 @@ func (h *hostPlane) holdColdClientLocked(
 func (h *hostPlane) releaseColdClientLocked(pid int, held *heldWrapper) {
 	delete(h.coldClients, pid)
 	h.finishHeldLocked(held, true)
+}
+
+// clientExecCounts counts the attributed exec events of Claude release
+// images by the digest state they came with, the ones recorded, and the
+// records a later image digest dropped (GAP-0067). A live run reads them to
+// name the event behind a client record.
+type clientExecCounts struct {
+	seen, reported [4]atomic.Int64
+	digestDropped  atomic.Int64
+}
+
+var digestStateNames = [4]string{"read", "pending", "failed", "unstated"}
+
+func digestStateIndex(state plane.DigestState) int {
+	switch state {
+	case plane.DigestRead:
+		return 0
+	case plane.DigestPending:
+		return 1
+	case plane.DigestFailed:
+		return 2
+	}
+	return 3
+}
+
+// counts is the non-zero counters by name ("pending", "pending_reported",
+// "pending_dropped", ...), or nil.
+func (c *clientExecCounts) counts() map[string]int64 {
+	var counts map[string]int64
+	put := func(name string, value int64) {
+		if value == 0 {
+			return
+		}
+		if counts == nil {
+			counts = make(map[string]int64)
+		}
+		counts[name] = value
+	}
+	for i, name := range digestStateNames {
+		put(name, c.seen[i].Load())
+		put(name+"_reported", c.reported[i].Load())
+	}
+	put("pending_dropped", c.digestDropped.Load())
+	return counts
 }

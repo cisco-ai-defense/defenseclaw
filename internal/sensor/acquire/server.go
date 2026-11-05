@@ -256,22 +256,27 @@ func (s *Server) serveConnections(ctx context.Context, conn net.Conn, request Re
 }
 
 // eventStreamFrame is one frame on an OpEvents subscription: the coverage
-// header, a single event, or a single event of one of the host's own
-// Tetragon policies. That one has a member of its own so a gateway that
-// predates it skips it rather than reading it as a file or connect event of
-// DefenseClaw's.
+// header, a single event, a single event of one of the host's own Tetragon
+// policies, or the image digest of an earlier exec (plane.KindImageDigest).
+// The last two have members of their own so a gateway that predates them
+// skips them rather than reading them as events of DefenseClaw's: an image
+// digest read as an exec would be a second exec of the process.
 type eventStreamFrame struct {
 	Coverage    *wireCoverage `json:"coverage,omitempty"`
 	Event       *wireEvent    `json:"event,omitempty"`
 	PolicyEvent *wireEvent    `json:"policy_event,omitempty"`
+	ImageDigest *wireEvent    `json:"image_digest,omitempty"`
 	Error       string        `json:"error,omitempty"`
 }
 
 // eventFrame is the stream frame of one event.
 func eventFrame(event plane.Event) eventStreamFrame {
 	encoded := encodeEvent(event)
-	if event.PolicyOwner == plane.PolicyOwnerCustomer {
+	switch {
+	case event.PolicyOwner == plane.PolicyOwnerCustomer:
 		return eventStreamFrame{PolicyEvent: &encoded}
+	case event.Kind == plane.KindImageDigest:
+		return eventStreamFrame{ImageDigest: &encoded}
 	}
 	return eventStreamFrame{Event: &encoded}
 }

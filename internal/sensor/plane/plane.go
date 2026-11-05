@@ -73,6 +73,27 @@ const (
 	// and bounded in the helper. It never enters the classifier, a score,
 	// Plane B or the fanotify hand-off, which are DefenseClaw's.
 	KindPolicyEvent Kind = "policy_event"
+	// KindImageDigest is the image digest of an earlier exec whose event
+	// went out while the image was still being hashed (ImageDigestState
+	// pending): PID, At and ImageVersion are that exec event's, and
+	// ImageSHA256 and ImageDigestState (read or failed) say how the read
+	// ended. It is no process event of its own (cowork-1-0-8 GAP-0067).
+	KindImageDigest Kind = "image_digest"
+)
+
+// DigestState is how the image digest of an exec stands when its event is
+// delivered (Event.ImageDigestState).
+type DigestState string
+
+const (
+	// DigestRead is an event that carries the digest.
+	DigestRead DigestState = "read"
+	// DigestPending is an image being hashed: a KindImageDigest event for the
+	// same exec follows once the read ends.
+	DigestPending DigestState = "pending"
+	// DigestFailed is an image whose digest is not coming: it could not be
+	// pinned or read, hashing is off, or its hash could not be queued.
+	DigestFailed DigestState = "failed"
 )
 
 // Policy owners of a kprobe or LSM event (Event.PolicyOwner).
@@ -168,6 +189,10 @@ type Event struct {
 	// the image is no such layout or could not be read; the host plane then
 	// grants the image nothing.
 	ImageSHA256, ImageVersion string
+	// ImageDigestState is set with ImageVersion: whether this event carries
+	// the digest, a KindImageDigest event follows with it, or none is
+	// coming. Empty from a source that predates it.
+	ImageDigestState DigestState
 	// UID and AUID are the process's kernel uid and audit login uid. nil is
 	// "not observed": uid 0 is root, which is a value, not an absence.
 	UID  *int
