@@ -236,14 +236,15 @@ try {
 
             # Secure Client extends the wait the same way: a slow Secure Client
             # laptop rolled a healthy install back at the usual limit.
-            Set-DefenseClawEnterpriseProfile -EnterpriseProfile 'SecureClient'
-            $result = & $run -Name 'Secure Client'
-            & $expect $result 11.5 15.5 @("first reconcile is still running after", '3 of 10 targets done', $log)
-
-            # Strict Secure Client keeps its usual wait and its error.
             $strictName = 'DEFENSECLAW_MANAGED_TRUST_STRICT_ANCESTORS'
             $originalStrict = [Environment]::GetEnvironmentVariable($strictName, 'Process')
             try {
+                Set-DefenseClawEnterpriseProfile -EnterpriseProfile 'SecureClient'
+                [Environment]::SetEnvironmentVariable($strictName, $null, 'Process')
+                $result = & $run -Name 'Secure Client'
+                & $expect $result 11.5 15.5 @("first reconcile is still running after", '3 of 10 targets done', $log)
+
+                # Strict Secure Client keeps its usual wait and its error.
                 [Environment]::SetEnvironmentVariable($strictName, '1', 'Process')
                 $result = & $run -Name 'strict Secure Client'
                 & $expect $result 0.9 5.0 @('did not publish fresh required coverage within 1 seconds; last_status=') @($log)

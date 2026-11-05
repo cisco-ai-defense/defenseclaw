@@ -3027,6 +3027,18 @@ function Get-DefenseClawActiveSessionSIDs {
         $found = @($profiles | Microsoft.PowerShell.Core\Where-Object {
             [regex]::IsMatch([string]$_.Leaf, $pattern, [Text.RegularExpressions.RegexOptions]::IgnoreCase)
         })
+        # A folder whose SID resolves offline (every local account does) names
+        # a known account; unless that is this account, the folder is not its.
+        $found = @($found | Microsoft.PowerShell.Core\Where-Object {
+            try {
+                $owner = ([Security.Principal.SecurityIdentifier]::new([string]$_.SID)).Translate(
+                    [Security.Principal.NTAccount]).Value
+                return [string]::Equals($owner, [string]$account, [StringComparison]::OrdinalIgnoreCase)
+            }
+            catch {
+                return $true
+            }
+        })
         if ($found.Count -eq 1) {
             $sids.Add([string]$found[0].SID)
             Add-DefenseClawBootstrapResilienceEvent `
