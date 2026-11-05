@@ -276,6 +276,7 @@ def _running_gateway_record(data_dir: str, name: str) -> dict | None:
     from defenseclaw.file_permissions import (
         darwin_acl_confidentiality_error,
         read_regular_file_no_follow,
+        trusted_runtime_owner,
         windows_acl_custody_confidentiality_error,
     )
     from defenseclaw.process_liveness import pid_alive, read_pid_file
@@ -287,6 +288,10 @@ def _running_gateway_record(data_dir: str, name: str) -> dict | None:
     try:
         info = os.stat(path, follow_symlinks=False)
         if not stat.S_ISREG(info.st_mode) or (os.name != "nt" and stat.S_IMODE(info.st_mode) & 0o077):
+            return None
+        # Written by this account's gateway or by root (an administrator's
+        # gateway for this home), as read_pid_record requires of gateway.pid.
+        if os.name != "nt" and not trusted_runtime_owner(info.st_uid):
             return None
         if darwin_acl_confidentiality_error(path) or windows_acl_custody_confidentiality_error(path):
             return None

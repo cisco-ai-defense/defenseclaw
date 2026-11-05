@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+import stat
 import threading
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from types import SimpleNamespace
@@ -533,3 +534,133 @@ def test_doctor_binds_another_accounts_gateway_to_its_own_runtime_record(tmp_pat
         assert prove().code == "missing_listener"
     finally:
         listener.close()
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX account semantics")
+@pytest.mark.parametrize(
+    ("record_host", "target_host", "trusted"),
+    [
+        ("127.0.0.1", "127.0.0.1", True),
+        ("127.0.0.1", "[127.0.0.1]", True),
+        # localhost names no listener: it may resolve to the other loopback,
+        # where another account can listen on the same port.
+        ("localhost", "127.0.0.1", False),
+        ("127.0.0.1", "localhost", False),
+        ("localhost", "localhost", False),
+        ("::1", "127.0.0.1", False),
+        ("127.0.0.1", "::1", False),
+        ("127.0.0.2", "127.0.0.1", False),
+        ("[127.0.0.1]", "127.0.0.1", False),
+        ("192.0.2.10", "192.0.2.10", False),
+    ],
+)
+def test_doctor_probes_only_the_exact_ip_the_runtime_record_names(
+    tmp_path, monkeypatch, record_host, target_host, trusted
+) -> None:
+    """PR #1426 review N2: the listener proof for another account's gateway
+    connects to the IP literal gateway-api.json names, and only when the
+    target is that same IP.
+    """
+    import json
+    import socket
+    from types import SimpleNamespace
+
+    from defenseclaw import doctor_gateway as evidence_module
+    from defenseclaw.commands import cmd_doctor
+    from defenseclaw.file_permissions import protect_private_file
+
+    executable = "/Library/PrivilegedHelperTools/DefenseClawMacGatewayAdmin/uid-501/defenseclaw-gateway"
+    pid = os.getpid()
+    listener = socket.socket()
+    listener.bind(("127.0.0.1", 0))
+    listener.listen(1)
+    port = listener.getsockname()[1]
+    pid_file = tmp_path / "gateway.pid"
+    pid_file.write_text(
+        json.dumps(
+            {"pid": pid, "executable": executable, "data_dir": str(tmp_path), "start_identity": "1793776207.630838"}
+        ),
+        encoding="utf-8",
+    )
+    protect_private_file(pid_file)
+    record = tmp_path / "gateway-api.json"
+    record.write_text(json.dumps({"pid": pid, "host": record_host, "port": port}), encoding="utf-8")
+    protect_private_file(record)
+
+    class Evidence(evidence_module.GatewayEvidence):
+        def __init__(self) -> None:
+            super().__init__(platform_name="darwin")
+
+        def process(self, inspected_pid: int) -> evidence_module.ProcessEvidence:
+            return evidence_module.ProcessEvidence(
+                "ok", pid=inspected_pid, executable=executable, start_identity="1793776207.630838", uid=0
+            )
+
+    cfg = SimpleNamespace(data_dir=str(tmp_path), gateway=SimpleNamespace(api_bind=target_host, api_port=port))
+    monkeypatch.setattr(cmd_doctor, "_gateway_api_host", lambda _cfg: target_host)
+    monkeypatch.setattr(
+        cmd_doctor,
+        "_managed_gateway_listener_evidence",
+        lambda *_a, **_k: evidence_module.ListenerEvidence("missing", reason="no TCP listener"),
+    )
+    probed: list[tuple] = []
+    connect = socket.create_connection
+
+    def recording_connect(address, *args, **kwargs):
+        probed.append(tuple(address))
+        return connect(address, *args, **kwargs)
+
+    monkeypatch.setattr(cmd_doctor.socket, "create_connection", recording_connect)
+    try:
+        trust = cmd_doctor._trusted_gateway_listener(cfg, evidence=Evidence(), platform_name="darwin")
+    finally:
+        listener.close()
+    other_account_probes = [address for address in probed if address[1] == port]
+    if trusted:
+        assert (trust.code, trust.pid, trust.trusted) == ("trusted", pid, True)
+        assert other_account_probes == [("127.0.0.1", port)]
+    else:
+        assert trust.trusted is False
+        assert other_account_probes == []
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX account semantics")
+def test_runtime_record_is_read_only_when_this_account_or_root_owns_it(tmp_path, monkeypatch) -> None:
+    """PR #1426 review N5: like read_pid_record for gateway.pid, a runtime
+    record (gateway-api.json, gateway_running_token.json) counts only when
+    this account or root wrote it.
+    """
+    import json
+
+    from defenseclaw import logger
+    from defenseclaw.file_permissions import protect_private_file
+
+    pid = os.getpid()
+    (tmp_path / "gateway.pid").write_text(str(pid), encoding="utf-8")
+    record = tmp_path / "gateway-api.json"
+    record.write_text(json.dumps({"pid": pid, "host": "127.0.0.1", "port": 18970}), encoding="utf-8")
+    protect_private_file(record)
+    real_stat = os.stat
+    owner = {"uid": os.geteuid()}
+
+    def stat_with_owner(path, *args, **kwargs):
+        result = real_stat(path, *args, **kwargs)
+        if os.fspath(path) != str(record):
+            return result
+        fields = list(result[:10])
+        fields[stat.ST_UID] = owner["uid"]
+        return os.stat_result(fields)
+
+    monkeypatch.setattr(os, "stat", stat_with_owner)
+    another_account = next(uid for uid in range(54321, 54400) if uid not in {0, os.geteuid(), os.getuid()})
+
+    assert logger._running_gateway_record(str(tmp_path), "gateway-api.json") == {
+        "pid": pid,
+        "host": "127.0.0.1",
+        "port": 18970,
+    }
+    owner["uid"] = 0
+    assert logger._running_gateway_record(str(tmp_path), "gateway-api.json") is not None
+    owner["uid"] = another_account
+    assert logger._running_gateway_record(str(tmp_path), "gateway-api.json") is None
+    assert logger._running_gateway_address(str(tmp_path)) is None

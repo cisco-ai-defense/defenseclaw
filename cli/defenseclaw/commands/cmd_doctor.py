@@ -6206,23 +6206,24 @@ def _gateway_runs_as_another_account(trust: _GatewayTrust) -> bool:
     return isinstance(uid, int) and not isinstance(uid, bool) and uid >= 0 and uid != os.getuid()
 
 
-def _loopback_hosts_match(left: str, right: str) -> bool:
-    """Whether two loopback API hosts name the same listener (``localhost`` is any)."""
+def _loopback_ip_literal(
+    value: object, *, brackets: bool = False
+) -> ipaddress.IPv4Address | ipaddress.IPv6Address | None:
+    """The loopback IP ``value`` spells literally, or None.
 
-    def parse(value: str) -> ipaddress.IPv4Address | ipaddress.IPv6Address | None | bool:
-        value = str(value).strip().strip("[]")
-        if value.casefold() == "localhost":
-            return None
-        try:
-            address = ipaddress.ip_address(value)
-        except ValueError:
-            return False
-        return address if address.is_loopback else False
-
-    first, second = parse(left), parse(right)
-    if first is False or second is False:
-        return False
-    return first is None or second is None or first == second
+    A name (``localhost``) is no listener: it can resolve to either loopback,
+    where another account may listen on the same port.
+    """
+    if not isinstance(value, str):
+        return None
+    text = value.strip()
+    if brackets and text.startswith("[") and text.endswith("]"):
+        text = text[1:-1]
+    try:
+        address = ipaddress.ip_address(text)
+    except ValueError:
+        return None
+    return address if address.is_loopback else None
 
 
 def _other_account_gateway_listener_evidence(cfg, pid: int, host: str, api_port: int) -> ListenerEvidence | None:
@@ -6232,8 +6233,9 @@ def _other_account_gateway_listener_evidence(cfg, pid: int, host: str, api_port:
     gateway publishes its own listener beside gateway.pid (gateway-api.json,
     recordRuntimeAPIAddress): a private file in this home that names the
     verified PID and this exact loopback endpoint, with a listener answering
-    there, is the proof ``lsof`` cannot give. Anything less keeps the
-    listener unproven, and no token is sent.
+    there, is the proof ``lsof`` cannot give. The record and the target must
+    spell the same loopback IP, and the probe connects to that IP only.
+    Anything less keeps the listener unproven, and no token is sent.
     """
     from defenseclaw.logger import _running_gateway_record
 
@@ -6246,10 +6248,11 @@ def _other_account_gateway_listener_evidence(cfg, pid: int, host: str, api_port:
     record_host, record_port = record.get("host"), record.get("port")
     if type(record_port) is not int or record_port != api_port or not isinstance(record_host, str):
         return None
-    if not _loopback_hosts_match(record_host, host):
+    record_ip = _loopback_ip_literal(record_host)
+    if record_ip is None or record_ip != _loopback_ip_literal(host, brackets=True):
         return None
     try:
-        with socket.create_connection((str(host).strip("[]"), api_port), timeout=1):
+        with socket.create_connection((str(record_ip), api_port), timeout=1):
             pass
     except OSError:
         return None
