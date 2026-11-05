@@ -221,7 +221,9 @@ and the code `downgrade_refused`, and the macOS package records `downgrade_refus
 `last-package-result.json`. The Debian and RHEL packages start every refusal with its code
 (`defenseclaw-enterprise: downgrade_refused: ... refusing to downgrade to <version>. Nothing was changed.`)
 and exit with `1`; `rpm`, `dnf` and `apt` show that text only, and `last-package-result.json`
-keeps the result of the package that is applied. For an
+keeps the result of the package that is applied. `rpm` and `dnf` run the older package's own
+preinstall, so a package before 1.0.9 prints the same refusal without the code; the apt hook of
+the installed package names it for any older package. For an
 Intune Win32 deployment, remove the superseding **Required** assignment before assigning
 the older app; otherwise Intune can reapply the newer release.
 
