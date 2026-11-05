@@ -5567,10 +5567,18 @@ func copyPreservesLinks(args []string, static []bool) bool {
 	return cpOperands(args, static).preserves
 }
 
+// staticAt reports that argument i of an argv's static flags is in range
+// and static. The archive readers below read options by position; a word
+// past the end is not static, so a short argv is read as plain words and
+// never indexes out of range (gas-ux-r1 GAP-0055).
+func staticAt(static []bool, i int) bool {
+	return i >= 0 && i < len(static) && static[i]
+}
+
 func archiveCopiesLinks(program string, args []string, static []bool) bool {
 	if program == "rsync" {
 		for i, arg := range args {
-			if static[i] && (arg == "--links" || arg == "--archive" ||
+			if staticAt(static, i) && (arg == "--links" || arg == "--archive" ||
 				strings.HasPrefix(arg, "-") && !strings.HasPrefix(arg, "--") && strings.ContainsAny(arg[1:], "al")) {
 				return true
 			}
@@ -5578,7 +5586,7 @@ func archiveCopiesLinks(program string, args []string, static []bool) bool {
 	}
 	if program == "cpio" || program == "bsdcpio" || program == "pax" {
 		for i, arg := range args {
-			if static[i] && strings.HasPrefix(arg, "-") && !strings.HasPrefix(arg, "--") &&
+			if staticAt(static, i) && strings.HasPrefix(arg, "-") && !strings.HasPrefix(arg, "--") &&
 				(program == "pax" && strings.ContainsRune(arg, 'w') || strings.ContainsRune(arg, 'p')) {
 				return true
 			}
@@ -5591,7 +5599,7 @@ func archiveCopiesLinks(program string, args []string, static []bool) bool {
 func archiveMayLink(program string, args []string, static []bool) bool {
 	if program == "jar" {
 		for i, arg := range args {
-			if static[i] && (arg == "--extract" || arg == "-x" ||
+			if staticAt(static, i) && (arg == "--extract" || arg == "-x" ||
 				len(arg) > 0 && len(strings.TrimLeft(arg, "-")) > 0 &&
 					strings.HasPrefix(strings.TrimLeft(arg, "-"), "x")) {
 				return true
@@ -5601,7 +5609,7 @@ func archiveMayLink(program string, args []string, static []bool) bool {
 	}
 	if program == "ditto" {
 		for i, arg := range args {
-			if static[i] && (arg == "-x" || arg == "--extract") {
+			if staticAt(static, i) && (arg == "-x" || arg == "--extract") {
 				return true
 			}
 		}
@@ -5619,26 +5627,26 @@ func archiveMayLink(program string, args []string, static []bool) bool {
 			if len(args) == 0 {
 				return false
 			}
-			if static[0] && args[0] == "-v" &&
-				(len(args) == 1 || len(args) == 2 && static[1] && args[1] != "" && !strings.HasPrefix(args[1], "-")) {
+			if staticAt(static, 0) && args[0] == "-v" &&
+				(len(args) == 1 || len(args) == 2 && staticAt(static, 1) && args[1] != "" && !strings.HasPrefix(args[1], "-")) {
 				return false
 			}
 			for i, arg := range args {
-				if static[i] && (arg == "-l" || arg == "-t" || arg == "-Z") {
+				if staticAt(static, i) && (arg == "-l" || arg == "-t" || arg == "-Z") {
 					return false
 				}
 			}
 			return true
 		}
 		for i, arg := range args {
-			if static[i] && (arg == "x" || arg == "e") {
+			if staticAt(static, i) && (arg == "x" || arg == "e") {
 				return true
 			}
 		}
 		return false
 	}
 	for i, arg := range args {
-		if !static[i] {
+		if !staticAt(static, i) {
 			continue
 		}
 		if arg == "--" {
