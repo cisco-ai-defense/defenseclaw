@@ -259,7 +259,7 @@ type InstallWatcher struct {
 	// server is admitted once and its admission never waits for the scan of
 	// another server (GAP-0254).
 	mcpClaimMu sync.Mutex
-	mcpClaims  map[string]bool
+	mcpClaims  map[string]time.Time
 	// mcpStartup are the MCP servers the first rescan cycle listed: that
 	// cycle records their baselines, so discovery skips them until it ends
 	// and admits every other server at once (GAP-0254).
@@ -588,14 +588,24 @@ func (w *InstallWatcher) queueAddedMCP(name string) {
 func (w *InstallWatcher) claimMCP(path string) bool {
 	w.mcpClaimMu.Lock()
 	defer w.mcpClaimMu.Unlock()
-	if w.mcpClaims[path] {
+	if _, claimed := w.mcpClaims[path]; claimed {
 		return false
 	}
 	if w.mcpClaims == nil {
-		w.mcpClaims = map[string]bool{}
+		w.mcpClaims = map[string]time.Time{}
 	}
-	w.mcpClaims[path] = true
+	w.mcpClaims[path] = time.Now()
 	return true
+}
+
+func (w *InstallWatcher) mcpRetryAfter(path string) time.Duration {
+	w.mcpClaimMu.Lock()
+	started, claimed := w.mcpClaims[path]
+	w.mcpClaimMu.Unlock()
+	if !claimed {
+		return defaultScanTimeout
+	}
+	return max(time.Second, defaultScanTimeout-time.Since(started))
 }
 
 func (w *InstallWatcher) releaseMCP(path string) {
