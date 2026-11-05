@@ -2429,8 +2429,8 @@ def _check_hilt_support(
         _emit(
             "pass",
             "Human approval",
-            f"OpenClaw prompts supported at {min_sev}+ (Control UI and chat channels that "
-            "forward /approve; openclaw tui and local chat do not show them)",
+            f"OpenClaw prompts supported at {min_sev}+ (Control UI, chat channels that "
+            "forward /approve, and openclaw tui from OpenClaw 2026.10.9)",
             r=r,
         )
     elif connector == "claudecode":
