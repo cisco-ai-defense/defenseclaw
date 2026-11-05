@@ -3634,7 +3634,6 @@ func (s *Sidecar) proxySnapshot() *GuardrailProxy {
 func (s *Sidecar) runGatewayLoop(ctx context.Context) error {
 	// Keep the boot-versus-reconnect distinction across fleet disable/enable.
 	firstConnect := true
-	s.client.OnConnectError = s.publishGatewayConnectError
 	for {
 		for !gatewayShouldConnectForConfiguredConnector(s.currentConfig()) {
 			connName := configuredConnectorName(s.currentConfig())
@@ -3704,6 +3703,7 @@ func (s *Sidecar) runGatewayLoop(ctx context.Context) error {
 				cancelConnect()
 			}
 		}()
+		s.client.OnConnectError = s.publishGatewayConnectError
 		err := s.client.ConnectWithRetry(connectCtx)
 		close(connectDone)
 		<-watcherDone
