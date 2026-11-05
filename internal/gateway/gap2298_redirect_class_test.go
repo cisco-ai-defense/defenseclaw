@@ -112,8 +112,10 @@ func TestR105StaticRedirectTargetIsAWriteWhateverTheCommand(t *testing.T) {
 // GAP-0428 regression of the GAP-2298 class (PR #1427 CI, gateway shard 35):
 // the shell expands and opens a command's redirects before the command runs,
 // so what the command binds (printf %n or -v, an unknown printf format that
-// may hold %n, read) cannot move its own redirect target. An assignment-only
-// statement assigns first, so its target is read after the assignment.
+// may hold %n, read, export, declare, local) cannot move its own redirect
+// target. An assignment-only statement is read both ways: bash assigns
+// first, dash opens the redirect first. Nested sh -c and dash -c bodies are
+// read the same way.
 func TestGAP0428RedirectIsOpenedBeforeTheCommandBinds(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("POSIX shell grammar; the Windows readings have their own rows")
@@ -137,7 +139,33 @@ func TestGAP0428RedirectIsOpenedBeforeTheCommandBinds(t *testing.T) {
 		{`printf -v HOME x > "$HOME"/build.log`, false},
 		{`read HOME < /dev/null > "$HOME"/.defenseclaw/config.yaml`, true},
 		{`printf "$X"; echo > "$HOME"/build.log`, false},
-		{`HOME=/tmp/elsewhere > "$HOME"/.defenseclaw/config.yaml`, false},
+		{`HOME=/tmp/elsewhere > "$HOME"/.defenseclaw/config.yaml`, true},
+		{`A=1 HOME=/tmp/elsewhere > "$HOME"/.defenseclaw/config.yaml`, true},
+		{`HOME=/tmp/elsewhere >> "$HOME"/.defenseclaw/config.yaml`, true},
+		{`HOME=/tmp/elsewhere 2> "$HOME"/.defenseclaw/config.yaml`, true},
+		{`HOME=/tmp/elsewhere >| "$HOME"/.defenseclaw/config.yaml`, true},
+		{`> "$HOME"/.defenseclaw/config.yaml HOME=/tmp/elsewhere`, true},
+		{`sh -c 'HOME=/tmp/elsewhere > "$HOME"/.defenseclaw/config.yaml'`, true},
+		{`dash -c 'HOME=/tmp/elsewhere > "$HOME"/.defenseclaw/config.yaml'`, true},
+		{`export HOME=/tmp/elsewhere > "$HOME"/.defenseclaw/config.yaml`, true},
+		{`export HOME=/tmp/elsewhere >> "$HOME"/.defenseclaw/config.yaml`, true},
+		{`declare HOME=/tmp/elsewhere > "$HOME"/.defenseclaw/config.yaml`, true},
+		{`declare -x HOME=/tmp/elsewhere > "$HOME"/.defenseclaw/config.yaml`, true},
+		{`typeset HOME=/tmp/elsewhere > "$HOME"/.defenseclaw/config.yaml`, true},
+		{`readonly HOME=/tmp/elsewhere > "$HOME"/.defenseclaw/config.yaml`, true},
+		{`f() { local HOME=/tmp/elsewhere > "$HOME"/.defenseclaw/config.yaml; }; f`, true},
+		{`sh -c 'export HOME=/tmp/elsewhere > "$HOME"/.defenseclaw/config.yaml'`, true},
+		{`dash -c 'export HOME=/tmp/elsewhere > "$HOME"/.defenseclaw/config.yaml'`, true},
+		{`FOO=bar > out.log`, false},
+		{`X=1 > "$HOME"/build.log`, false},
+		{`HOME=/tmp/elsewhere > "$HOME"/build.log`, false},
+		{`sh -c 'FOO=bar > out.log'`, false},
+		{`dash -c 'X=1 > "$HOME"/build.log'`, false},
+		{`export PATH="$PATH:/x" > build.log`, false},
+		{`export HOME=/tmp/elsewhere > "$HOME"/build.log`, false},
+		{`declare -x FOO=bar > "$HOME"/build.log`, false},
+		{`f() { local x=1 > out.log; }; f`, false},
+		{`sh -c 'export PATH="$PATH:/x" > build.log'`, false},
 	}
 	for _, connectorName := range []string{"claudecode", "codex"} {
 		installDefaultProfileConnector(t, connectorName)
