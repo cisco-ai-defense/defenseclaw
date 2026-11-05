@@ -304,13 +304,24 @@ func (p *preparedFailureLog) appendFallback() bool {
 		return false
 	}
 	p.mu.Lock()
-	defer p.mu.Unlock()
-	if p.marker == nil || len(p.fallbackFrame) == 0 {
+	if p.closed || p.markerTaken || p.marker == nil || len(p.fallbackFrame) == 0 {
+		p.mu.Unlock()
 		return false
 	}
-	n, err := p.marker.Write(p.fallbackFrame)
-	p.fallbackSaved = err == nil && n == len(p.fallbackFrame)
-	return p.fallbackSaved
+	marker := p.marker
+	frame := append([]byte(nil), p.fallbackFrame...)
+	p.markerTaken = true
+	p.mu.Unlock()
+
+	// A stalled append must leave the ordinary logger free to record the
+	// answer. This writer owns the descriptor until its write completes.
+	n, err := marker.Write(frame)
+	_ = marker.Close()
+	saved := err == nil && n == len(frame)
+	p.mu.Lock()
+	p.fallbackSaved = saved
+	p.mu.Unlock()
+	return saved
 }
 
 // appendFallbackWithin leaves the hook free to answer when the local write
