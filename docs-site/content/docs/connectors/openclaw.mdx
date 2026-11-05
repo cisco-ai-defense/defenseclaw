@@ -216,7 +216,7 @@ Proxy connector: not gated by a hook contract version.
 ### What it can block or ask
 
 - The proxy can block a checked request, a checked response and a tool call.
-- OpenClaw is the connector with plugin-mediated approval. In action mode a confirm verdict on `before_tool_call` becomes OpenClaw's own approval request, which denies on timeout. Answer it in the OpenClaw Control UI (`openclaw dashboard`) or with `/approve` on a chat channel that forwards approvals. `openclaw tui` and local `openclaw chat` do not show the request, so the call there is denied when it times out, and the OpenClaw gateway log says where to answer.
+- OpenClaw is the connector with plugin-mediated approval. In action mode a confirm verdict on `before_tool_call` becomes OpenClaw's own approval request, which denies on timeout. Answer it in the OpenClaw Control UI (`openclaw dashboard`), with `/approve` on a chat channel that forwards approvals, or in `openclaw tui` from OpenClaw 2026.10.9, where **Allow once** works too. Where OpenClaw shows no request, the call is denied when it times out, and the OpenClaw gateway log says where to answer.
 - Only recognized model traffic is redirected. Other requests pass through unchecked.
 
 ### Verdict mapping
