@@ -393,6 +393,21 @@ private enum GatewayAdminHelperTests {
               "A root gateway started outside the helper is reported, not stopped")
         check(classify(.init(pid: 7), path: "/x/defenseclaw-gateway") == .other, "A legacy integer record matches by program name")
 
+        // REVIEW-2 NH-1: a record the account wrote (not root-owned, or hard-linked) never selects a process to signal.
+        check(GatewayAdminRootProcess.place(.helperStarted, trusted: true) == .helperStarted,
+              "A root-owned single-link record of the helper's gateway is signalled")
+        check(GatewayAdminRootProcess.place(.helperStarted, trusted: false) == .other,
+              "An untrusted record naming the helper's copy makes the repair refuse instead of signalling")
+        check(GatewayAdminRootProcess.place(.other, trusted: true) == .other, "A foreign root gateway is never signalled")
+        let forged = root.appendingPathComponent("forged-records", isDirectory: true)
+        try FileManager.default.createDirectory(at: forged, withIntermediateDirectories: false)
+        try Data(#"{"pid": 1, "start_identity": "1.000001"}"#.utf8).write(to: forged.appendingPathComponent("gateway.pid"))
+        let forgedDescriptor = open(forged.path, O_RDONLY | O_DIRECTORY | O_CLOEXEC)
+        defer { close(forgedDescriptor) }
+        let forgedRecord = GatewayAdminRootProcess.readRecord(in: forgedDescriptor, name: "gateway.pid")
+        check(forgedRecord?.record.pid == 1 && forgedRecord?.trusted == false,
+              "A PID record owned by the account is read but not trusted")
+
         let missing = root.appendingPathComponent("no-records", isDirectory: true)
         try FileManager.default.createDirectory(at: missing, withIntermediateDirectories: false)
         let descriptor = open(missing.path, O_RDONLY | O_DIRECTORY | O_CLOEXEC)

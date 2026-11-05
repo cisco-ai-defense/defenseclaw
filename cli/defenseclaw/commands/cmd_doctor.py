@@ -1874,9 +1874,9 @@ def _check_gateway_account(cfg, r: _DoctorResult) -> None:
         "on macOS open DefenseClawMac and choose Start Gateway: it stops the root gateway with "
         "administrator approval, returns its files to you and starts the gateway as you. "
         "Otherwise: sudo defenseclaw-gateway stop && sudo chown -R "
-        + getpass.getuser()
+        + shlex.quote(getpass.getuser())
         + " "
-        + data_dir
+        + shlex.quote(data_dir)
         + " && defenseclaw-gateway start"
     )
     _emit(
