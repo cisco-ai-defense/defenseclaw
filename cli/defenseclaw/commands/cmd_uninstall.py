@@ -402,6 +402,10 @@ def uninstall_cmd(
     opencode_binary = opencode_service.account_binary() if "opencode" in plan.connectors else ""
     gateway_ports = _configured_gateway_ports()
     _execute_plan(plan)
+    if cowork_plugin and plan.remove_data_dir:
+        from defenseclaw import cowork
+
+        cowork.mark_uninstalled(plan.data_dir)
     _remove_marked_native_otel_left(gateway_ports)
     if opencode_binary:
         # OpenCode V2's background server kept the plugin it loaded (rel-1-0-6 GAP-0026).
@@ -417,7 +421,7 @@ def uninstall_cmd(
 
 _COWORK_REMOVAL_STEP = (
     "remove it in Claude Desktop (Customize > Plugins, then the ... menu > Remove). "
-    "Until then Cowork tool calls are blocked."
+    "A plugin built with 1.0.9 lets Cowork calls run after the data folder is removed; older plugins may block."
 )
 
 
@@ -870,6 +874,11 @@ def _dispatch_native_windows_uninstall(
     if request is None:
         return False
 
+    data_dir = str(config_module.default_data_path())
+    from defenseclaw import cowork
+
+    cowork_plugin = os.path.exists(cowork.state_path(data_dir))
+
     ux.banner("DefenseClaw Uninstall")
     ux.echo(f"  {ux.dim('→')} authenticated native Windows installation")
     ux.echo(f"  {ux.dim('→')} Setup: {request.setup_path}")
@@ -883,6 +892,8 @@ def _dispatch_native_windows_uninstall(
             "and its user Path entry are removed too"
         )
     ux.echo(f"  {ux.dim('→')} a restart may be required to finish exact cleanup")
+    if cowork_plugin:
+        ux.echo(f"  • the Cowork plugin stays in your Claude account: {_COWORK_REMOVAL_STEP}")
 
     if dry_run:
         ux.subhead("(dry-run — nothing modified)")
@@ -891,7 +902,6 @@ def _dispatch_native_windows_uninstall(
         ux.subhead("Cancelled.")
         raise SystemExit(1)
 
-    data_dir = str(config_module.default_data_path())
     # until 1.1: read what a removed connector left before Setup runs: Setup
     # may delete the data folder, and with it the records that name the
     # agent configs outside it.
@@ -907,6 +917,10 @@ def _dispatch_native_windows_uninstall(
         _remove_marked_native_otel_left(gateway_ports)
         if binaries:
             _remove_script_install_after_native_setup(request.platform_name)
+        if wipe_data and cowork_plugin:
+            cowork.mark_uninstalled(data_dir)
+        if cowork_plugin:
+            ux.warn(f"DefenseClaw cannot remove its Cowork plugin from your Claude account: {_COWORK_REMOVAL_STEP}")
         return True
     if outcome.restart_required:
         ux.ok("Native Windows uninstall is armed; restart required (Windows exit code 3010).")
@@ -1007,6 +1021,10 @@ def reset_cmd(skip_sandbox_teardown: bool, yes: bool, stop_sandboxes: bool = Fal
         raise SystemExit(1)
 
     _execute_plan(plan)
+    if cowork_plugin:
+        from defenseclaw import cowork
+
+        cowork.mark_uninstalled(plan.data_dir)
     if cowork_plugin:
         ux.warn(f"DefenseClaw cannot remove its Cowork plugin from your Claude account: {_COWORK_REMOVAL_STEP}")
     ux.ok("Reset complete. Run 'defenseclaw quickstart' to reinstall.")
