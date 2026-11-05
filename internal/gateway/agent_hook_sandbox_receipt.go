@@ -88,7 +88,7 @@ func claimsSandboxHookReceipt(r *http.Request) bool {
 
 // Striped locks serialize receipt retries with journal recovery. Their fixed
 // size avoids an unbounded map of one lock per hook call.
-var sandboxReceiptLocks [64]sync.Mutex
+var sandboxReceiptLocks [1024]sync.Mutex
 
 func sandboxHookReceiptLock(id string) *sync.Mutex {
 	var hash uint32 = 2166136261
