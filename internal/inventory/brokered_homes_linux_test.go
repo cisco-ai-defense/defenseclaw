@@ -289,9 +289,11 @@ func writeBrokeredMembers(t *testing.T, path string, size int, head, tail string
 // (MemoryMax=300M): a 32 MiB ~/.claude.json of millions of tiny servers, or
 // of one huge value, is walked for its names, not decoded, and every other
 // shape is capped (1 MiB, 128 KiB for YAML and TOML) at a size its parser
-// builds within bounds. A config
-// with more servers than the evidence cap answers cap_exceeded with at most
-// maxEvidencePerSignal names (cowork-1-0-8 GAP-0008 F1).
+// builds within bounds. A config with more servers than the evidence cap
+// answers cap_exceeded with at most maxEvidencePerSignal names, and one
+// nested past json.Unmarshal's depth is a parse error (cowork-1-0-8 GAP-0008
+// F1, F2). Run it with the release toolchain too: before jsonv2,
+// json.Decoder.Token has no depth limit.
 func TestBrokeredHomeReadBoundsParseMemory(t *testing.T) {
 	catalog, err := LoadAISignatures()
 	if err != nil {
@@ -304,20 +306,24 @@ func TestBrokeredHomeReadBoundsParseMemory(t *testing.T) {
 		rel, head, tail string
 		size            int
 		member          func(int) string
-		capped          bool
+		// partial is the expected coverage reason: cap_exceeded comes with
+		// names, parse_error with none, and "" with exactly one.
+		partial string
 	}{
 		{".claude.json", `{"mcpServers":{`, `"z":0}}`, maxBrokeredClaudeStateBytes,
-			func(i int) string { return fmt.Sprintf(`"%06x":0,`, i) }, true},
+			func(i int) string { return fmt.Sprintf(`"%06x":0,`, i) }, CoverageReasonCapExceeded},
 		{".claude.json", `{"projects":{`, `"/z":{}}}`, maxBrokeredClaudeStateBytes,
-			func(i int) string { return fmt.Sprintf(`"/%06x":{"mcpServers":{"s%06x":0}},`, i, i) }, true},
+			func(i int) string { return fmt.Sprintf(`"/%06x":{"mcpServers":{"s%06x":0}},`, i, i) }, CoverageReasonCapExceeded},
 		{".claude.json", `{"mcpServers":{"alpha":{}},"pad":"`, `"}`, maxBrokeredClaudeStateBytes,
-			func(int) string { return strings.Repeat("x", 4096) }, false},
-		{".qwen/settings.json", `{"mcpServers":{`, `"z":{}}}`, maxBrokeredFileBytes, jsonMembers, true},
-		{".mcp.json", `{"mcpServers":{`, `"z":{}}}`, maxBrokeredFileBytes, jsonMembers, true},
+			func(int) string { return strings.Repeat("x", 4096) }, ""},
+		{".qwen/settings.json", `{"mcpServers":{`, `"z":{}}}`, maxBrokeredFileBytes, jsonMembers, CoverageReasonCapExceeded},
+		{".mcp.json", `{"mcpServers":{`, `"z":{}}}`, maxBrokeredFileBytes, jsonMembers, CoverageReasonCapExceeded},
 		{".hermes/config.yaml", "mcp_servers:\n", "", maxBrokeredYAMLTOMLBytes,
-			func(i int) string { return fmt.Sprintf("  s%06x: {}\n", i) }, true},
+			func(i int) string { return fmt.Sprintf("  s%06x: {}\n", i) }, CoverageReasonCapExceeded},
 		{".codex/config.toml", "", "", maxBrokeredYAMLTOMLBytes,
-			func(i int) string { return fmt.Sprintf("[mcp_servers.s%06x]\n", i) }, true},
+			func(i int) string { return fmt.Sprintf("[mcp_servers.s%06x]\n", i) }, CoverageReasonCapExceeded},
+		{".claude.json", `{"x":`, "", maxBrokeredClaudeStateBytes,
+			func(int) string { return strings.Repeat("[", 4096) }, CoverageReasonParseError},
 	} {
 		t.Run(tc.rel, func(t *testing.T) {
 			home := brokeredTestHome(t)
@@ -338,10 +344,11 @@ func TestBrokeredHomeReadBoundsParseMemory(t *testing.T) {
 				switch {
 				case len(cfg.Servers) > maxEvidencePerSignal:
 					t.Fatalf("%s %s: %d names", tc.rel, cfg.Shape, len(cfg.Servers))
-				case tc.capped && (cfg.Partial != CoverageReasonCapExceeded || len(cfg.Servers) == 0):
-					t.Fatalf("%s %s: partial %q with %d names, want cap_exceeded with names", tc.rel, cfg.Shape, cfg.Partial, len(cfg.Servers))
-				case !tc.capped && (cfg.Partial != "" || len(cfg.Servers) != 1):
-					t.Fatalf("%s %s: partial %q names %v", tc.rel, cfg.Shape, cfg.Partial, cfg.Servers)
+				case cfg.Partial != tc.partial,
+					tc.partial == CoverageReasonCapExceeded && len(cfg.Servers) == 0,
+					tc.partial == CoverageReasonParseError && len(cfg.Servers) != 0,
+					tc.partial == "" && len(cfg.Servers) != 1:
+					t.Fatalf("%s %s: partial %q with %d names, want %q", tc.rel, cfg.Shape, cfg.Partial, len(cfg.Servers), tc.partial)
 				}
 			}
 		})

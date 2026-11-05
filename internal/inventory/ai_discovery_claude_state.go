@@ -65,6 +65,14 @@ func parseClaudeDiscoveryState(raw []byte) (servers, projects []string, err erro
 // O(members).
 // Keys match as json.Unmarshal matches parseClaudeDiscoveryState's fields.
 func parseClaudeDiscoveryStateNames(raw []byte, limit int) (servers []string, truncated bool, err error) {
+	// json.Decoder.Token has no nesting limit before jsonv2 (Go 1.26, the
+	// release toolchain): its token stack grows 8 bytes a level, so 32 MiB of
+	// "[" costs about 500 MB. json.Valid's scanner stops at Unmarshal's
+	// depth of 10000 in constant memory, and keeps a syntax error a parse
+	// error after the name cap ends the walk early.
+	if !json.Valid(raw) {
+		return nil, false, errors.New("claude state: not valid JSON")
+	}
 	walk := claudeStateNameWalk{dec: json.NewDecoder(bytes.NewReader(raw)), limit: limit}
 	// Numbers stay text: a value is skipped, never converted.
 	walk.dec.UseNumber()
@@ -77,6 +85,10 @@ func parseClaudeDiscoveryStateNames(raw []byte, limit int) (servers []string, tr
 	sort.Strings(walk.servers)
 	return walk.servers, truncated, nil
 }
+
+// maxClaudeStateSkipDepth bounds the nesting skip walks, as json.Unmarshal
+// bounds it, should a caller ever pass bytes json.Valid has not checked.
+const maxClaudeStateSkipDepth = 10000
 
 // errClaudeStateNameCap ends a walk that reached its name cap.
 var errClaudeStateNameCap = errors.New("claude state: server name cap reached")
@@ -241,7 +253,9 @@ func (w *claudeStateNameWalk) skip() error {
 		}
 		if delim, ok := tok.(json.Delim); ok {
 			if delim == '{' || delim == '[' {
-				depth++
+				if depth++; depth > maxClaudeStateSkipDepth {
+					return errors.New("claude state: nested too deeply")
+				}
 			} else {
 				depth--
 			}
