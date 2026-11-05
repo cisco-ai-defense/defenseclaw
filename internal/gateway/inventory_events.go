@@ -379,11 +379,14 @@ func perConnectorMCPEntriesForOSWithHomeGuard(cfg *config.Config, reg *connector
 	appendServers := func(connectorName, homeScope, home string, servers []config.MCPServerEntry) {
 		slug := inventoryStableToken(connectorName, 128)
 		owner := ownerFor(connectorName, home)
-		identityCounts := make(map[string]int, len(servers))
+		identityAliases := make(map[string]map[string]struct{}, len(servers))
 		for _, server := range servers {
 			commandFingerprint, argumentsFingerprint := mcpInventoryLocalFingerprints(fingerprintKey, server)
 			if identity := mcpInventoryLocalIdentity(commandFingerprint, argumentsFingerprint); identity != "" && inventorySafeItemName(server.Name, 256) != "" {
-				identityCounts[identity]++
+				if identityAliases[identity] == nil {
+					identityAliases[identity] = make(map[string]struct{})
+				}
+				identityAliases[identity][server.Name] = struct{}{}
 			}
 		}
 		for _, server := range servers {
@@ -409,10 +412,10 @@ func perConnectorMCPEntriesForOSWithHomeGuard(cfg *config.Config, reg *connector
 			serverIdentity := mcpInventoryLocalIdentity(commandFingerprint, argumentsFingerprint)
 			if serverIdentity == "" {
 				serverIdentity = server.Name
-			} else if identityCounts[serverIdentity] > 1 {
+			} else if len(identityAliases[serverIdentity]) > 1 {
 				// Identical commands can be configured under distinct aliases.
 				// Use the alias only for this collision so both rows survive.
-				serverIdentity += "/" + name
+				serverIdentity += "/" + server.Name
 			}
 			identity := connectorName + "/" + homeScope + "/" + serverIdentity
 			if _, seen := seenComponent[identity]; seen {
@@ -486,9 +489,11 @@ func perConnectorMCPEntriesForOSWithHomeGuard(cfg *config.Config, reg *connector
 		for _, connectorName := range connectors {
 			groups, readPartial := readMCPServersUnderHomeForOSWithStatus(connectorName, home, goos)
 			partial = partial || readPartial
-			for _, servers := range groups {
-				appendServers(connectorName, homeScope, home, servers)
+			var servers []config.MCPServerEntry
+			for _, group := range groups {
+				servers = append(servers, group...)
 			}
+			appendServers(connectorName, homeScope, home, servers)
 		}
 	}
 	return components, partial
@@ -854,6 +859,16 @@ func endpointMCPComponents(cfg *config.Config) ([]endpointInventoryComponent, bo
 
 func endpointMCPComponentsFromServers(servers []config.MCPServerEntry, fingerprintKey []byte) []endpointInventoryComponent {
 	components := make([]endpointInventoryComponent, 0, len(servers))
+	identityAliases := make(map[string]map[string]struct{}, len(servers))
+	for _, server := range servers {
+		commandFingerprint, argumentsFingerprint := mcpInventoryLocalFingerprints(fingerprintKey, server)
+		if identity := mcpInventoryLocalIdentity(commandFingerprint, argumentsFingerprint); identity != "" && inventorySafeItemName(server.Name, 256) != "" {
+			if identityAliases[identity] == nil {
+				identityAliases[identity] = make(map[string]struct{})
+			}
+			identityAliases[identity][server.Name] = struct{}{}
+		}
+	}
 	for _, server := range servers {
 		command := inventorySafeBasename(server.Command)
 		commandFingerprint, argumentsFingerprint := mcpInventoryLocalFingerprints(fingerprintKey, server)
@@ -869,6 +884,8 @@ func endpointMCPComponentsFromServers(servers []config.MCPServerEntry, fingerpri
 		identity := mcpInventoryLocalIdentity(commandFingerprint, argumentsFingerprint)
 		if identity == "" {
 			identity = server.Name
+		} else if len(identityAliases[identity]) > 1 {
+			identity += "/" + server.Name
 		}
 		if strings.TrimSpace(identity) == "" {
 			identity = strings.Join([]string{command, host}, "\x00")
