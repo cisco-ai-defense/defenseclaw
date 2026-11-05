@@ -86,10 +86,6 @@ func parseClaudeDiscoveryStateNames(raw []byte, limit int) (servers []string, tr
 	return walk.servers, truncated, nil
 }
 
-// maxClaudeStateSkipDepth bounds the nesting skip walks, as json.Unmarshal
-// bounds it, should a caller ever pass bytes json.Valid has not checked.
-const maxClaudeStateSkipDepth = 10000
-
 // errClaudeStateNameCap ends a walk that reached its name cap.
 var errClaudeStateNameCap = errors.New("claude state: server name cap reached")
 
@@ -253,9 +249,7 @@ func (w *claudeStateNameWalk) skip() error {
 		}
 		if delim, ok := tok.(json.Delim); ok {
 			if delim == '{' || delim == '[' {
-				if depth++; depth > maxClaudeStateSkipDepth {
-					return errors.New("claude state: nested too deeply")
-				}
+				depth++
 			} else {
 				depth--
 			}

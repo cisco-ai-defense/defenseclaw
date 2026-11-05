@@ -336,6 +336,7 @@ start_systemd() {
   fi
   systemd-run --quiet --unit="$HELPER_UNIT" --slice="$SLICE" \
     --description="DefenseClaw Cowork VM sensor helper (root, no network)" \
+    -p SyslogIdentifier=defenseclaw-sensor-helper \
     -p Restart=always -p RestartSec=2 -p CapabilityBoundingSet="$HELPER_CAPS" -p AmbientCapabilities= \
     -p RestrictAddressFamilies="AF_UNIX AF_NETLINK AF_PACKET" -p IPAddressDeny=any -p RestrictNamespaces=yes \
     -p SystemCallFilter="$HELPER_SYSCALLS" \
