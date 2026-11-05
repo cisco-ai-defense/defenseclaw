@@ -216,16 +216,21 @@ func TestWindowsManagedRuntimeInstallPlanRestampsAReadOnlyGrant(t *testing.T) {
 	if got := windowsReadOnlyTestACECount(t, dataDir); got != canonicalCount+1 {
 		t.Fatalf("skipping the per-user install folder changed its DACL (%d ACEs)", got)
 	}
+	// Strict and standalone refuse the whole plan, never skip the user. The
+	// folder also carries this test's read-only grant, which they refuse
+	// first, so the refusal is asserted rather than its reason.
 	t.Setenv(managed.TrustStrictAncestorsEnv, "1")
-	if _, err := PlanWindowsManagedRuntimeRoots(manifest, manifestPath, digest); err == nil ||
-		!strings.Contains(err.Error(), dataDir+" holds config.yaml") {
-		t.Fatalf("strict install plan over a per-user install folder = %v, want the refusal", err)
+	if refused, err := PlanWindowsManagedRuntimeRoots(manifest, manifestPath, digest); err == nil ||
+		len(refused.SkippedProfiles) != 0 ||
+		!strings.Contains(err.Error(), "reject noncanonical managed runtime baseline") {
+		t.Fatalf("strict install plan over a per-user install folder = %+v, %v; want the refusal", refused, err)
 	}
 	t.Setenv(managed.TrustStrictAncestorsEnv, "")
 	windowsEnterpriseStandaloneProcess = func() bool { return true }
-	if _, err := PlanWindowsManagedRuntimeRoots(manifest, manifestPath, digest); err == nil ||
-		!strings.Contains(err.Error(), dataDir+" holds config.yaml") {
-		t.Fatalf("standalone install plan over a per-user install folder = %v, want the refusal", err)
+	if refused, err := PlanWindowsManagedRuntimeRoots(manifest, manifestPath, digest); err == nil ||
+		len(refused.SkippedProfiles) != 0 ||
+		!strings.Contains(err.Error(), "reject noncanonical managed runtime baseline") {
+		t.Fatalf("standalone install plan over a per-user install folder = %+v, %v; want the refusal", refused, err)
 	}
 	windowsEnterpriseStandaloneProcess = func() bool { return false }
 	if err := os.Remove(perUser); err != nil {
