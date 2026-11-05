@@ -1178,6 +1178,9 @@ func (stub *ensureStub) install(t *testing.T) {
 		windowsEnterpriseRepairDataDirBeforePlan = originalDataDir
 	})
 	windowsEnterpriseRepairDataDirBeforePlan = func() string { return "" }
+	originalGuardianRepairs := windowsEnterpriseGuardianRepairsSinceLastRun
+	t.Cleanup(func() { windowsEnterpriseGuardianRepairsSinceLastRun = originalGuardianRepairs })
+	windowsEnterpriseGuardianRepairsSinceLastRun = func() []string { return nil }
 	// The host's real Cowork check stays out of scripted ensures; the
 	// Cowork drift tests replace this after install.
 	windowsEnterpriseCoworkEnsureDrift = func() (string, string) { return "", "" }
@@ -1295,6 +1298,23 @@ func TestWindowsEnterpriseEnsureProbesCarryNoMutationInputs(t *testing.T) {
 	}
 	if !result.OK || result.Noop || result.NoopReason != "" || !strings.Contains(strings.Join(result.Changes, "\n"), `restored the access control of C:\ProgramData\Cisco\DefenseClaw\runtime`) {
 		t.Fatalf("runtime ACL repair: result %+v", result)
+	}
+	// The guardian put it back first: ensure names that repair.
+	stub = &ensureStub{t: t, replies: []map[string]any{installedStatus("status"), installedStatus("verify")}}
+	stub.install(t)
+	windowsEnterpriseGuardianRepairsSinceLastRun = func() []string {
+		return []string{`C:\ProgramData\Cisco\DefenseClaw\runtime at 2026-11-05T03:40:24Z (untrusted principal S-1-5-32-545 has write access)`}
+	}
+	stdout.Reset()
+	if err := runWindowsEnterpriseStandaloneEnsure(context.Background(), command, opts, `C:\stage\install-enterprise.ps1`); err != nil {
+		t.Fatalf("ensure after a guardian repair: %v\n%s", err, stdout.String())
+	}
+	result = enterprisestatus.Result{}
+	if err := json.Unmarshal(stdout.Bytes(), &result); err != nil {
+		t.Fatal(err)
+	}
+	if !result.OK || result.Noop || !strings.Contains(fmt.Sprint(result.Warnings), "guardian_repaired_drift") {
+		t.Fatalf("guardian repair: result %+v", result)
 	}
 }
 
