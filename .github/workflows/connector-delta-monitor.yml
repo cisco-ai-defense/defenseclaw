@@ -1,0 +1,106 @@
+# Copyright 2026 Cisco Systems, Inc. and its affiliates
+# Licensed under the Apache License, Version 2.0 (the "License").
+# SPDX-License-Identifier: Apache-2.0
+name: Connector Delta Monitor
+on:
+  pull_request:
+    paths: ['scripts/connector_delta_monitor.py', 'scripts/connector_delta/**', 'cli/tests/test_connector_delta.py', '.github/workflows/connector-delta-monitor.yml']
+  push:
+    branches: ['codex/claude-delta-monitor']
+  schedule:
+    - cron: '23 6 * * *'
+  workflow_dispatch:
+    inputs:
+      notify:
+        description: Send contributor notices (also requires the repository notification switch)
+        type: boolean
+        default: false
+permissions:
+  contents: read
+  actions: read
+concurrency:
+  group: connector-delta-${{ github.ref }}
+  cancel-in-progress: false
+jobs:
+  test:
+    if: ${{ github.event_name == 'pull_request' || github.event_name == 'push' }}
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          persist-credentials: false
+      - run: python3 -m unittest cli.tests.test_connector_delta -v
+  monitor:
+    if: ${{ github.ref == 'refs/heads/main' && (github.event_name == 'workflow_dispatch' || (github.event_name == 'schedule' && vars.CONNECTOR_DELTA_MONITOR_ENABLED == 'true')) }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    outputs:
+      ready: ${{ steps.bundle.outputs.ready }}
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          ref: main
+          persist-credentials: false
+      - name: Restore the last committed checkpoint from this main-only workflow
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          mkdir -p monitor
+          gh api "repos/${GITHUB_REPOSITORY}/actions/workflows/connector-delta-monitor.yml/runs?branch=main&status=completed&per_page=20" > monitor/runs.json
+          jq '[.workflow_runs[] | select((.event == "schedule" or .event == "workflow_dispatch") and .conclusion != "skipped")]' monitor/runs.json > monitor/prior.json
+          if [ "$(jq length monitor/prior.json)" = 0 ]; then exit 0; fi
+          while read -r run_id; do
+            found=$(gh api "repos/${GITHUB_REPOSITORY}/actions/runs/${run_id}/artifacts" --jq '[.artifacts[] | select(.name == "connector-delta-state-v2" and .expired == false)] | length')
+            if [ "$found" != 0 ]; then
+              gh run download "$run_id" --name connector-delta-state-v2 --dir monitor/checkpoint
+              test -s monitor/checkpoint/state.json
+              exit 0
+            fi
+          done < <(jq -r '.[].id' monitor/prior.json)
+          echo '::error::Prior monitor runs exist but no checkpoint is recoverable. Restore state; do not reset history.'
+          exit 1
+      - name: Compare unseen merged PRs with current DefenseClaw main
+        env:
+          GH_TOKEN: ${{ github.token }}
+          CONNECTOR_DELTA_AI_ENABLED: 'false' # Local LLM evaluation first; SRE will provision CI access.
+        run: python3 scripts/connector_delta_monitor.py analyze --state monitor/checkpoint/state.json --output monitor --limit 100
+      - name: Prepare metadata-only notices and candidate checkpoint
+        id: bundle
+        if: ${{ always() }}
+        run: |
+          if [ -s monitor/public/bundle.json ]; then echo 'ready=true' >> "$GITHUB_OUTPUT"; fi
+      - uses: actions/upload-artifact@b4b15b8c7c6ac21ea08fcf65892d2ee8f75cf882 # v4.4.3
+        if: ${{ always() && steps.bundle.outputs.ready == 'true' }}
+        with:
+          name: connector-delta-pending-v3
+          path: monitor/public/bundle.json
+          retention-days: 7
+          if-no-files-found: error
+  publish:
+    needs: monitor
+    if: ${{ always() && !cancelled() && github.ref == 'refs/heads/main' && needs.monitor.outputs.ready == 'true' }}
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      actions: read
+      issues: write
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          persist-credentials: false
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: connector-delta-pending-v3
+          path: monitor/public
+      - name: Optionally notify, then commit processed-PR progress
+        env:
+          GH_TOKEN: ${{ github.token }}
+          CONNECTOR_DELTA_NOTIFICATIONS_ENABLED: ${{ vars.CONNECTOR_DELTA_NOTIFICATIONS_ENABLED == 'true' && (github.event_name == 'schedule' || inputs.notify == true) }}
+        run: python3 scripts/connector_delta_monitor.py publish --output monitor
+      - uses: actions/upload-artifact@b4b15b8c7c6ac21ea08fcf65892d2ee8f75cf882 # v4.4.3
+        with:
+          name: connector-delta-state-v2
+          path: monitor/checkpoint/state.json
+          retention-days: 90
+          if-no-files-found: error

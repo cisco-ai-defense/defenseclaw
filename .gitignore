@@ -189,6 +189,10 @@ security_report/
 # Scratch only, not project source.
 outputs/
 
+# Public upstream snapshots, checkpoints and AI review packets are local run
+# evidence, not release inputs or source fixtures.
+/output/connector-delta-monitor/
+
 # Protoc-gen-* tool binaries used by `make proto` (pinned locally so
 # regeneration does not depend on the operator's global GOPATH/bin).
 .tools/
