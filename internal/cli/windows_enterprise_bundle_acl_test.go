@@ -20,6 +20,7 @@ func TestWindowsBundleCanonicalDescriptorsProtected(t *testing.T) {
 		"BundleReceipt":           windowsBundleReceiptSDDL(sid),
 		"AdminDirectory/receipts": windowsBundlePrivateSDDL(),
 		"AdminFile":               windowsBundleAdminFileSDDL(),
+		"ConfigFile":              windowsConfigFileSDDL(sid),
 	} {
 		if !strings.Contains(sddl, "D:P(") {
 			t.Errorf("%s has no protected DACL: %s", kind, sddl)

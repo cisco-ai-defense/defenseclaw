@@ -140,6 +140,7 @@ func newHotConfigHost(t *testing.T, previous, next string) (*hotConfigHost, *win
 	validateSeam, writeSeam := windowsEnterpriseHotConfigValidate, windowsEnterpriseHotConfigWrite
 	timeoutSeam, restartTimeoutSeam, pollSeam := windowsEnterpriseHotConfigTimeout, windowsEnterpriseHotConfigRestartTimeout, windowsEnterpriseHotConfigPoll
 	sourceSeam, refreshSeam := windowsEnterpriseHotConfigSourceCheck, windowsEnterpriseHotConfigRefreshTargets
+	leafDriftSeam, manifestSourceSeam, manifestStagerSeam := windowsEnterpriseInstalledLeafDrift, windowsEnterpriseManifestSourceCheck, windowsEnterpriseApprovedManifestStager
 	runtimeCandidateSeam := windowsEnterpriseStandaloneRuntimeCandidateCheck
 	recordSeam := windowsEnterpriseHotConfigTargetsRecord
 	hookProofSeam := windowsEnterpriseHotConfigTargetHooksProven
@@ -163,11 +164,18 @@ func newHotConfigHost(t *testing.T, previous, next string) (*hotConfigHost, *win
 		windowsEnterpriseHotConfigTimeout, windowsEnterpriseHotConfigPoll = timeoutSeam, pollSeam
 		windowsEnterpriseHotConfigRestartTimeout = restartTimeoutSeam
 		windowsEnterpriseHotConfigSourceCheck = sourceSeam
+		windowsEnterpriseInstalledLeafDrift, windowsEnterpriseManifestSourceCheck = leafDriftSeam, manifestSourceSeam
+		windowsEnterpriseApprovedManifestStager = manifestStagerSeam
 		windowsEnterpriseStandaloneRuntimeCandidateCheck = runtimeCandidateSeam
 		windowsEnterpriseHotBundleReload = reloadSeam
 	})
 	// The supplied file stands for an administrator-only staged config.
 	windowsEnterpriseHotConfigSourceCheck = func(string) error { return nil }
+	windowsEnterpriseInstalledLeafDrift = func(string, string) *managed.UntrustedPrincipalError { return nil }
+	windowsEnterpriseManifestSourceCheck = func(string) error { return nil }
+	windowsEnterpriseApprovedManifestStager = func(context.Context, enterprisehooks.EnumerationLogger, string) (string, func(), error) {
+		return "", nil, errors.New("no enumeration in this test")
+	}
 	windowsEnterpriseStandaloneRuntimeCandidateCheck = func(*config.Config) error { return nil }
 	windowsEnterpriseHotConfigLayout = func() (managed.StandaloneLayout, error) {
 		return managed.StandaloneLayout{ConfigPath: host.configPath, ConfigDir: filepath.Dir(host.configPath), DataDir: dir, ServiceUser: `NT SERVICE\DefenseClawGateway`}, nil
@@ -609,6 +617,264 @@ func TestWindowsEnterpriseEnsureInstallsTheSuppliedConfigOverAnUnparseableOne(t 
 	}
 }
 
+// GAP-0590: ensure over a managed content file that another account can
+// change (an untrusted entry on the file itself, GAP-0561) writes the
+// approved source as a new file with Setup's descriptor before the repair
+// transaction, and keeps the old bytes for the administrator. Before, for
+// config.yaml the transaction refused the ACL repair after it had stopped
+// the services, its rollback refused it again, and the gateway, guardian and
+// enumerator stayed stopped with the transaction pending; for targets.yaml
+// Repair put the AdminFile descriptor back over the drifted roster in place.
+// A handle the account opened on the old file cannot change the new one.
+// The sources are CONFIG= for config.yaml, and MANIFEST= or a manifest
+// enumerated from CONFIG= for targets.yaml. Twins leave everything to the
+// transaction's refusal: drift on a folder above the file, a supplied path
+// that is the installed file, a source a standard user can write, a pending
+// transaction, and manifest enrollment mode without MANIFEST=.
+func TestWindowsEnterpriseEnsureRewritesAContentFileAnotherAccountCanChange(t *testing.T) {
+	if !windows.GetCurrentProcessToken().IsElevated() {
+		t.Skip("Setup's managed descriptors are administrator-only; run elevated")
+	}
+	const drifted = "config_version: 9\nguardrail:\n  mode: observe\n"
+	next := strings.Replace(
+		strings.Replace(standaloneGatewayCheckConfig, "config_version: 8\n", "config_version: 9\n", 1),
+		`  rule_pack_dir: ""`+"\n", "", 1)
+	const roster = "version: 1\ntargets: []\n"
+	const driftedRoster = "version: 1\ntargets: []\n# an edit\n"
+	const usersWrite = "D:P(A;;FA;;;SY)(A;;FA;;;BA)(A;;FA;;;OW)(A;;FW;;;BU)"
+	gatewaySID := managed.WindowsServiceSIDString(managed.StandaloneWindowsGatewaySvc)
+	for _, tc := range []struct {
+		name         string
+		file         string // config.yaml or targets.yaml
+		owner        bool   // the drift is an untrusted owner, not a writer
+		folderDrift  bool   // the folder above the file is drifted, not the file
+		self         bool   // the supplied source is the installed file
+		sourceDrift  bool   // the supplied source is writable by a standard user
+		pending      bool
+		manifestFlag bool // MANIFEST= is supplied
+		manifestMode bool // enrollment mode manifest: nothing to enumerate
+		replaced     bool
+	}{
+		{name: "config.yaml writer", file: "config.yaml", replaced: true},
+		{name: "config.yaml owner", file: "config.yaml", owner: true, replaced: true},
+		{name: "config.yaml folder drift", file: "config.yaml", folderDrift: true},
+		{name: "config.yaml self source", file: "config.yaml", self: true},
+		{name: "config.yaml untrusted source", file: "config.yaml", sourceDrift: true},
+		{name: "config.yaml pending transaction", file: "config.yaml", pending: true},
+		{name: "targets.yaml from MANIFEST=", file: "targets.yaml", manifestFlag: true, replaced: true},
+		{name: "targets.yaml enumerated from CONFIG=", file: "targets.yaml", replaced: true},
+		{name: "targets.yaml owner", file: "targets.yaml", owner: true, replaced: true},
+		{name: "targets.yaml folder drift", file: "targets.yaml", folderDrift: true},
+		{name: "targets.yaml self source", file: "targets.yaml", manifestFlag: true, self: true},
+		{name: "targets.yaml untrusted MANIFEST=", file: "targets.yaml", manifestFlag: true, sourceDrift: true},
+		{name: "targets.yaml manifest mode without MANIFEST=", file: "targets.yaml", manifestMode: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			host, opts := newHotConfigHost(t, drifted, next)
+			manifestPath := filepath.Join(filepath.Dir(host.configPath), "targets.yaml")
+			if err := os.WriteFile(manifestPath, []byte(driftedRoster), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			layoutSeam := windowsEnterpriseHotConfigLayout
+			windowsEnterpriseHotConfigLayout = func() (managed.StandaloneLayout, error) {
+				layout, err := layoutSeam()
+				layout.ManifestPath = manifestPath
+				return layout, err
+			}
+			target, want, installed := host.configPath, next, drifted
+			if tc.file == "targets.yaml" {
+				target, want, installed = manifestPath, roster, driftedRoster
+				// config.yaml is the administrator's and stays as it is.
+				if err := os.WriteFile(host.configPath, []byte(next), 0o600); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if tc.manifestFlag {
+				opts.manifestPath = filepath.Join(t.TempDir(), "approved-targets.yaml")
+				if err := os.WriteFile(opts.manifestPath, []byte(roster), 0o600); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if tc.self && tc.file == "config.yaml" {
+				opts.configPath = host.configPath
+			}
+			if tc.self && tc.file == "targets.yaml" {
+				opts.manifestPath = manifestPath
+			}
+			stagedFrom := ""
+			windowsEnterpriseApprovedManifestStager = func(_ context.Context, _ enterprisehooks.EnumerationLogger, config string) (string, func(), error) {
+				if tc.manifestMode {
+					return "", nil, errWindowsEnterpriseEnsureManifestRequired
+				}
+				stagedFrom = config
+				staged := filepath.Join(t.TempDir(), "targets.yaml")
+				return staged, func() {}, os.WriteFile(staged, []byte(roster), 0o600)
+			}
+			untrustedSource := func(string) error { return errors.New("a standard user can write it") }
+			if tc.sourceDrift && tc.file == "config.yaml" {
+				windowsEnterpriseHotConfigSourceCheck = untrustedSource
+			}
+			if tc.sourceDrift && tc.file == "targets.yaml" {
+				windowsEnterpriseManifestSourceCheck = untrustedSource
+			}
+			if tc.pending {
+				// A transaction's protected recovery record, where the lifecycle keeps it.
+				pending := filepath.Join(filepath.Dir(filepath.Dir(host.configPath)), "install", "pending.json")
+				if err := os.MkdirAll(filepath.Dir(pending), 0o700); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.WriteFile(pending, []byte("{}"), 0o600); err != nil {
+					t.Fatal(err)
+				}
+			}
+			setHotConfigTestDACL(t, target, usersWrite)
+			originalLayout, originalSource := windowsEnterpriseStandaloneLayoutForPreflight, windowsEnterpriseStandaloneConfigSource
+			t.Cleanup(func() {
+				windowsEnterpriseStandaloneLayoutForPreflight, windowsEnterpriseStandaloneConfigSource = originalLayout, originalSource
+			})
+			windowsEnterpriseStandaloneLayoutForPreflight = windowsEnterpriseHotConfigLayout
+			windowsEnterpriseStandaloneConfigSource = func(string) error { return nil }
+			// The standalone walk's verdict, read from the file's real
+			// descriptor: a BUILTIN\Users entry is the untrusted writer (or,
+			// for the owner rows, stands for an untrusted owner).
+			windowsEnterpriseInstalledLeafDrift = func(path, _ string) *managed.UntrustedPrincipalError {
+				if tc.folderDrift || !windowsEnterpriseSamePath(path, target) || !strings.Contains(hotConfigTestDACL(t, path), ";;;BU)") {
+					return nil
+				}
+				return &managed.UntrustedPrincipalError{Path: path, SID: "S-1-5-32-545", Owner: tc.owner}
+			}
+			old := openHotConfigTestHandle(t, target)
+			failedVerify := installedStatus("Verify")
+			failedVerify["ok"] = false
+			failedVerify["errors"] = []string{"untrusted principal S-1-5-32-545 has write-like access to managed path: " + target}
+			stub := &ensureStub{t: t, replies: []map[string]any{installedStatus("status"), failedVerify, installedStatus("Repair")}}
+			stub.install(t)
+			// Nothing here reads or repairs the host's own Claude Code drop-in
+			// or Cursor migration record.
+			dropIn, cursor := windowsEnterpriseClaudeDropInDrift, windowsEnterpriseCursorMigrationRepairPending
+			t.Cleanup(func() {
+				windowsEnterpriseClaudeDropInDrift, windowsEnterpriseCursorMigrationRepairPending = dropIn, cursor
+			})
+			windowsEnterpriseClaudeDropInDrift = func() (string, bool) { return "", false }
+			windowsEnterpriseCursorMigrationRepairPending = func() (bool, error) { return false, nil }
+			command := &cobra.Command{}
+			var stdout bytes.Buffer
+			command.SetOut(&stdout)
+			command.SetErr(&bytes.Buffer{})
+			if err := runWindowsEnterpriseStandaloneEnsure(context.Background(), command, opts, `C:\stage\install-enterprise.ps1`); err != nil {
+				t.Fatalf("ensure: %v\n%s", err, stdout.String())
+			}
+			var result enterprisestatus.Result
+			if err := json.Unmarshal(stdout.Bytes(), &result); err != nil {
+				t.Fatal(err)
+			}
+			if !tc.pending && (len(stub.calls) != 3 || stub.calls[2][1] != "Repair") {
+				t.Fatalf("installer runs %q, want status, verify and the repair", stub.calls)
+			}
+			got, _ := os.ReadFile(target)
+			rejected := filepath.Join(filepath.Dir(host.configPath), "rejected-"+tc.file)
+			kept, keptErr := os.ReadFile(rejected)
+			changes := strings.Join(result.Changes, "\n")
+			if !tc.replaced {
+				if string(got) != installed || !strings.Contains(hotConfigTestDACL(t, target), ";;;BU)") ||
+					!errors.Is(keptErr, os.ErrNotExist) || strings.Contains(changes, "kept it as") {
+					t.Fatalf("%s %q (%s), %s %v, changes %q: want nothing replaced",
+						tc.file, got, hotConfigTestDACL(t, target), rejected, keptErr, changes)
+				}
+				return
+			}
+			if string(got) != want {
+				t.Fatalf("%s = %q, want the approved source", tc.file, got)
+			}
+			wantDACL := "D:P(A;;FA;;;SY)(A;;FA;;;BA)"
+			if tc.file == "config.yaml" {
+				wantDACL += "(A;;FR;;;" + gatewaySID + ")"
+			}
+			if dacl := hotConfigTestDACL(t, target); dacl != wantDACL {
+				t.Fatalf("%s DACL = %s, want Setup's descriptor %s", tc.file, dacl, wantDACL)
+			}
+			if string(kept) != installed {
+				t.Fatalf("%s = %q (%v), want the replaced file's bytes", rejected, kept, keptErr)
+			}
+			problem := "can be changed by S-1-5-32-545"
+			if tc.owner {
+				problem = "is owned by S-1-5-32-545"
+			}
+			if !strings.Contains(changes, "the installed "+tc.file+" "+problem) || !strings.Contains(changes, rejected) {
+				t.Fatalf("changes %q do not name %s, the account and the kept file", changes, tc.file)
+			}
+			if tc.file == "targets.yaml" && !tc.manifestFlag && !windowsEnterpriseSamePath(stagedFrom, opts.configPath) {
+				t.Fatalf("manifest enumerated from %q, want the approved CONFIG= %q", stagedFrom, opts.configPath)
+			}
+			if tc.file == "targets.yaml" {
+				if config, _ := os.ReadFile(host.configPath); string(config) != next {
+					t.Fatalf("a manifest rewrite changed config.yaml: %q", config)
+				}
+			}
+			for _, warning := range result.Warnings {
+				if warning.Code == "config_reverted" {
+					t.Fatalf("an access-list replacement is not a reverted edit: %+v", warning)
+				}
+			}
+			// The account's handle points at the replaced object.
+			var written uint32
+			if err := windows.WriteFile(old, []byte("late edit\n"), &written, nil); err != nil {
+				t.Fatalf("write through the old handle: %v", err)
+			}
+			if got, _ := os.ReadFile(target); string(got) != want {
+				t.Fatalf("an old handle changed the new %s: %q", tc.file, got)
+			}
+			if leftovers, _ := filepath.Glob(target + ".*"); len(leftovers) != 0 {
+				t.Fatalf("replacement left %q next to %s", leftovers, tc.file)
+			}
+		})
+	}
+}
+
+func setHotConfigTestDACL(t *testing.T, path, sddl string) {
+	t.Helper()
+	descriptor, err := windows.SecurityDescriptorFromString(sddl)
+	if err != nil {
+		t.Fatal(err)
+	}
+	dacl, _, err := descriptor.DACL()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := windows.SetNamedSecurityInfo(path, windows.SE_FILE_OBJECT,
+		windows.DACL_SECURITY_INFORMATION|windows.PROTECTED_DACL_SECURITY_INFORMATION, nil, nil, dacl, nil); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func hotConfigTestDACL(t *testing.T, path string) string {
+	t.Helper()
+	descriptor, err := windows.GetNamedSecurityInfo(path, windows.SE_FILE_OBJECT, windows.DACL_SECURITY_INFORMATION)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return descriptor.String()
+}
+
+// openHotConfigTestHandle opens path for writing with full sharing, as an
+// account holding a drift grant would, so a trusted rewrite can still
+// replace the name.
+func openHotConfigTestHandle(t *testing.T, path string) windows.Handle {
+	t.Helper()
+	name, err := windows.UTF16PtrFromString(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	handle, err := windows.CreateFile(name, windows.GENERIC_WRITE,
+		windows.FILE_SHARE_READ|windows.FILE_SHARE_WRITE|windows.FILE_SHARE_DELETE, nil,
+		windows.OPEN_EXISTING, windows.FILE_ATTRIBUTE_NORMAL, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = windows.CloseHandle(handle) })
+	return handle
+}
+
 // GAP-0994: a replacement whose YAML parses but whose rule-pack pin is
 // invalid must never become the transaction rollback snapshot.
 func TestWindowsEnterpriseRepairRefusesInvalidSuppliedConfigBeforeSnapshot(t *testing.T) {
@@ -637,7 +903,7 @@ func TestWindowsEnterpriseRepairRefusesInvalidSuppliedConfigBeforeSnapshot(t *te
 	windowsEnterpriseStandaloneRulePackTrust = func(string, string, string) error { return nil }
 	standaloneServiceCanReadTree = func(string, string, string) error { return nil }
 
-	kept, err := installWindowsEnterpriseSuppliedConfigOverUnparseable(opts.configPath)
+	kept, _, err := installWindowsEnterpriseSuppliedConfigOverRefused(opts.configPath)
 	if err == nil || !strings.Contains(err.Error(), "does not match guardrail.custom_packs.acme.digest") || kept != "" {
 		t.Fatalf("repair preflight = (%q, %v), want the bad pin refused before copying", kept, err)
 	}
