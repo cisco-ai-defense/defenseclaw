@@ -40,7 +40,6 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/managed"
 	"github.com/defenseclaw/defenseclaw/internal/pathidentity"
 	toml "github.com/pelletier/go-toml/v2"
-	yaml "gopkg.in/yaml.v3"
 )
 
 func tomlUnmarshal(data []byte, v any) error { return toml.Unmarshal(data, v) }
@@ -831,26 +830,6 @@ func parseMCPServersJSONArray(data []byte) ([]MCPServerEntry, error) {
 	return entries, nil
 }
 
-// ParseMCPServersJSON is the exported wrapper around parseMCPServersJSON
-// so packages outside `config` (e.g. inventory's AI-discovery scanner)
-// can enumerate the servers declared inside a matched `mcp.json` /
-// `.cursor/mcp.json` / claude-desktop config file without duplicating the
-// parser. The input is the raw file bytes; the output is one
-// MCPServerEntry per top-level key in the JSON object form
-// (`{"mcpServers": {...}}` callers must pass the inner `mcpServers`
-// object; plain-object callers pass their whole file). Callers that need
-// the array shape should use ParseMCPServersJSONArray.
-func ParseMCPServersJSON(data []byte) ([]MCPServerEntry, error) {
-	return parseMCPServersJSON(data)
-}
-
-// ParseMCPServersJSONArray is the exported wrapper around
-// parseMCPServersJSONArray for callers that need the alternate top-level
-// array form (`[{"name": "...", ...}, ...]`).
-func ParseMCPServersJSONArray(data []byte) ([]MCPServerEntry, error) {
-	return parseMCPServersJSONArray(data)
-}
-
 // ReadMCPFromDotMCPJSON is the exported wrapper around the internal
 // `.mcp.json` reader so AI-discovery / signature-catalog callers can
 // enumerate the servers declared inside a matched file without
@@ -875,11 +854,7 @@ func ReadMCPFromJSONCPaths(path string, paths ...[]string) ([]MCPServerEntry, er
 	if err != nil {
 		return nil, err
 	}
-	var doc map[string]any
-	if err := json.Unmarshal(jsonc.Strip(data), &doc); err != nil {
-		return nil, err
-	}
-	return readMCPFromAnyPaths(doc, paths...)
+	return ParseMCPFromJSONCPaths(data, paths...)
 }
 
 // ReadMCPFromCodexConfigTOML is the exported wrapper around the
@@ -1498,9 +1473,7 @@ type claudeJSONScopes struct {
 // parseClaudeJSONScopes unmarshals ~/.claude.json once and splits the two
 // MCP-server scopes out. `user` is the top-level mcpServers map (user scope);
 // `projects` is the flattened union of every projects.<path>.mcpServers block
-// (local scope). Callers that already have the raw bytes should prefer this
-// helper to the pair of ReadMCPFromClaudeSettings + ReadMCPFromClaudeJSONProjects
-// wrappers, which each open and decode the file independently.
+// (local scope), from one decode of the raw bytes.
 func parseClaudeJSONScopes(data []byte) (user, projects []MCPServerEntry, err error) {
 	var doc claudeJSONScopes
 	if err := json.Unmarshal(data, &doc); err != nil {
@@ -1534,19 +1507,13 @@ func parseClaudeJSONScopes(data []byte) (user, projects []MCPServerEntry, err er
 // ReadMCPFromClaudeJSONBothScopes is the exported single-read helper: it
 // opens ~/.claude.json once and returns the union of user-scope
 // (top-level mcpServers) and local-scope (projects.<path>.mcpServers)
-// entries. Callers that need both scopes should prefer this over pairing
-// ReadMCPFromClaudeSettings + ReadMCPFromClaudeJSONProjects, which would
-// each read and decode the (often multi-megabyte) conversation-state file.
+// entries, decoding the (often multi-megabyte) conversation-state file once.
 func ReadMCPFromClaudeJSONBothScopes(path string) ([]MCPServerEntry, error) {
 	data, err := readMCPConfigFile(path, maxClaudeJSONConfigBytes)
 	if err != nil {
 		return nil, err
 	}
-	user, projects, err := parseClaudeJSONScopes(data)
-	if err != nil {
-		return nil, err
-	}
-	return append(user, projects...), nil
+	return ParseMCPFromClaudeJSONBothScopes(data)
 }
 
 func readMCPServersCodex(workspaceDir string) ([]MCPServerEntry, error) {
@@ -1703,37 +1670,7 @@ func readMCPFromCodexConfigTOML(path string) ([]MCPServerEntry, error) {
 	if !ok {
 		return nil, fmt.Errorf("Codex MCP config is unavailable, unstable, unsafe, or exceeds %d bytes: %s", maxCodexInventoryConfigBytes, path) //nolint:staticcheck // Preserve the product or platform name in this operator diagnostic.
 	}
-	var doc struct {
-		MCPServers map[string]struct {
-			Command   string            `toml:"command"`
-			Args      []string          `toml:"args"`
-			Env       map[string]string `toml:"env"`
-			URL       string            `toml:"url"`
-			Transport string            `toml:"transport"`
-		} `toml:"mcp_servers"`
-	}
-	if err := gatewayconnector.ParseCodexTOML(data, &doc); err != nil {
-		return nil, err
-	}
-	var rawDoc struct {
-		MCPServers map[string]map[string]any `toml:"mcp_servers"`
-	}
-	if err := gatewayconnector.ParseCodexTOML(data, &rawDoc); err != nil {
-		return nil, err
-	}
-	out := make([]MCPServerEntry, 0, len(doc.MCPServers))
-	for name, cfg := range doc.MCPServers {
-		out = append(out, MCPServerEntry{
-			Name:              name,
-			Command:           cfg.Command,
-			Args:              cfg.Args,
-			Env:               cfg.Env,
-			URL:               cfg.URL,
-			Transport:         cfg.Transport,
-			codexBuiltinShape: isCodexBuiltinMCPShape(name, rawDoc.MCPServers[name]),
-		})
-	}
-	return out, nil
+	return ParseMCPFromCodexConfigTOML(data)
 }
 
 func isCodexBuiltinMCPShape(name string, raw map[string]any) bool {
@@ -1985,11 +1922,7 @@ func readMCPFromYAMLPath(path string, paths ...[]string) ([]MCPServerEntry, erro
 	if err != nil {
 		return nil, err
 	}
-	var doc map[string]any
-	if err := yaml.Unmarshal(data, &doc); err != nil {
-		return nil, err
-	}
-	return readMCPFromAnyPaths(doc, paths...)
+	return ParseMCPFromYAMLPaths(data, paths...)
 }
 
 func readMCPFromAnyPaths(doc any, paths ...[]string) ([]MCPServerEntry, error) {

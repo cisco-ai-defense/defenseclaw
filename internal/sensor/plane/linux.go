@@ -141,6 +141,12 @@ func credentialRoots(homeDirs []string) []credentialRoot {
 	return append(roots, credentialRoot{path: "/etc/shadow"}, credentialRoot{path: "/etc/sudoers.d"})
 }
 
+// ExpandHomes is homeDirs with each dynamic pattern (/sessions/*) expanded to
+// the home directories it matches now: the homes the Cowork VM helper's
+// discovery read covers (cowork-1-0-8 GAP-0008), the same ones Plane C
+// watches.
+func ExpandHomes(homeDirs []string) []string { return expandHomes(homeDirs) }
+
 // expandHomes is homeDirs with each dynamic pattern (/sessions/*) expanded to
 // the home directories it matches now.
 func expandHomes(homeDirs []string) []string {

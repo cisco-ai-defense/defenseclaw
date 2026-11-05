@@ -235,6 +235,11 @@ fi
 
 # What the running sensor was started with; /run is empty after every boot.
 helper_cmd=("$DEST/bin/defenseclaw-sensor-helper" --socket "$SOCKET" --service-account "$ACCOUNT" --home-dirs "$helper_homes")
+# GOMEMLIMIT holds the root helper's Go heap well inside its MemoryMax=300M:
+# near 200 MiB the runtime collects harder instead of letting garbage from a
+# large discovery read reach the cgroup limit (cowork-1-0-8 GAP-0008). Set on
+# the command, so the systemd unit and the start without systemd both get it.
+helper_cmd=(/usr/bin/env GOMEMLIMIT=200MiB "${helper_cmd[@]}")
 gw_env=("DEFENSECLAW_HOME=$CONF" "HOME=$DATA/home" "DEFENSECLAW_SENSOR_HELPER_SOCKET=$SOCKET")
 # install.sh itself is in it: the unit settings live here.
 self_digest="$(sha256sum < "$SRC/install.sh" | cut -d' ' -f1)"

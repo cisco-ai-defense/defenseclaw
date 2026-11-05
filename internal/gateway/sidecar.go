@@ -8710,6 +8710,11 @@ func (s *Sidecar) runAIDiscovery(ctx context.Context) error {
 	if !claimed || runDiscovery == nil {
 		return fmt.Errorf("ai discovery service is already running or retired")
 	}
+	// A de-privileged Cowork VM gateway reads the session homes through its
+	// root sensor helper (cowork-1-0-8 GAP-0008); nil everywhere else.
+	if reader := brokeredHomeReader(s.currentConfig()); reader != nil {
+		defer inventory.SetBrokeredHomeReader(reader)()
+	}
 	s.health.SetAIDiscovery(StateStarting, "", map[string]interface{}{
 		"mode":                      s.currentConfig().AIDiscovery.Mode,
 		"scan_interval_min":         s.currentConfig().AIDiscovery.ScanIntervalMin,

@@ -197,12 +197,7 @@ func ReadMCPFromOpenCodeConfig(path string) ([]MCPServerEntry, error) {
 	if !ok {
 		return nil, fmt.Errorf("config: read OpenCode config %s", path)
 	}
-	doc, err := parseOpenCodeJSONC(data)
-	if err != nil {
-		return nil, err
-	}
-	layer := openCodeConfigLayer{Source: path, Scope: "global", Data: doc}
-	return readMCPServersOpenCodeResolution(openCodeConfigResolution{Layers: []openCodeConfigLayer{layer}}), nil
+	return ParseMCPFromOpenCodeConfig(path, data)
 }
 
 func readMCPServersOpenCodeResolution(resolution openCodeConfigResolution) []MCPServerEntry {
