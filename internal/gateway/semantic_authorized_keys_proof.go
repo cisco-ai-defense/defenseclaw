@@ -1061,7 +1061,7 @@ func trustedExistingAuthorizedKeysSymlinkWrite(request trustedActionRequest, fac
 			if !filepath.IsAbs(cwd) {
 				cwd = clientTargets[hookpaths.CWDKey]
 			}
-			strictOpaque = !hookpaths.CommandLinksWithFacts(request.Input.Tool, command, cwd, facts.ActiveHome, clientTargets).Known()
+			strictOpaque = hookpaths.CommandLinksWithFacts(request.Input.Tool, command, cwd, facts.ActiveHome, clientTargets).Opaque()
 		}
 	}
 	incomplete := truncated || strictOpaque
@@ -1386,6 +1386,9 @@ func trustedExistingAuthorizedKeysSymlinkWrite(request trustedActionRequest, fac
 		links = hookpaths.CommandLinksWithFactsBalanced(request.Input.Tool, input.Command, input.CWD, facts.ActiveHome, request.ResolvedWriteTargets)
 	}
 	if links.ProtectedCopyDestination(facts.ActiveHome) {
+		return true
+	}
+	if cannotResolveLocally && hookpaths.UnverifiedClientResolution(clientTargets) {
 		return true
 	}
 	safeRedirects = hookpaths.SafeShellRedirectOccurrencesWithFacts(input.Command, input.CWD, facts.ActiveHome, request.ResolvedWriteTargets)
