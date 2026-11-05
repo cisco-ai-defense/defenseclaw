@@ -59,25 +59,74 @@ final class GatewayAdministratorOperation: @unchecked Sendable {
 /// the gateway serving this home ran as root. lstat only: nothing is opened
 /// or followed.
 enum GatewayRootState {
+    /// Every marker is one of the names the helper's repair returns
+    /// (GatewayAdminOwnershipRepair.ownedNames), so a repaired home has none.
     static let markers = [
         ".", "gateway.pid", "watchdog.pid", "gateway-api.json", "hook_contract_lock.json",
         "active_connector.json", "device.key", "hooks", "gateway.log", "config.yaml",
     ]
 
-    static func rootOwnedMarkers(home: URL, accountUID: uid_t = getuid()) -> [String] {
+    /// A root-owned marker and the identity of the object behind it, so the app
+    /// can tell an unchanged leftover from a new one.
+    struct Marker: Hashable, Sendable {
+        var name: String
+        var identity: String
+    }
+
+    static func rootOwnedMarkers(home: URL, accountUID: uid_t = getuid()) -> [Marker] {
         guard accountUID != 0 else { return [] }
-        return markers.filter { name in
+        return markers.compactMap { name in
             var metadata = stat()
             let path = name == "." ? home.path : home.appendingPathComponent(name).path
-            return lstat(path, &metadata) == 0 && metadata.st_uid == 0
+            guard lstat(path, &metadata) == 0, metadata.st_uid == 0 else { return nil }
+            return Marker(name: name, identity: "\(name):\(metadata.st_dev):\(metadata.st_ino):"
+                + "\(metadata.st_ctimespec.tv_sec).\(metadata.st_ctimespec.tv_nsec)")
         }
     }
+
+    static func fingerprint(_ markers: [Marker]) -> String {
+        markers.map(\.identity).sorted().joined(separator: "|")
+    }
+
+    /// What to do when a repair has run and these are still root-owned; the
+    /// app does not ask for administrator approval again until they change.
+    static func unresolvedMessage(_ markers: [Marker], home: URL) -> String {
+        "These DefenseClaw files are still owned by root: \(markers.map(\.name).joined(separator: ", ")). "
+            + "DefenseClawMac will not ask to repair them again until they change. If a gateway started with sudo "
+            + "is running, stop it first: sudo defenseclaw-gateway stop. Then return the files to your account "
+            + "in Terminal and start the gateway again: sudo chown -R \"$(id -un)\" '\(home.path)'\n"
+    }
+}
+
+/// The fingerprint of root-owned markers a repair could not clear, kept so a
+/// leftover the helper skips (a hard link, a special file, a sudo-run gateway)
+/// does not bring the administrator prompt back on every start.
+struct GatewayRepairMemory: Sendable {
+    static let key = "gatewayRootRepairUnresolved"
+
+    var load: @Sendable () -> String?
+    var save: @Sendable (String?) -> Void
+
+    static let standard = GatewayRepairMemory(
+        load: { UserDefaults.standard.string(forKey: GatewayRepairMemory.key) },
+        save: { value in
+            if let value { UserDefaults.standard.set(value, forKey: GatewayRepairMemory.key) } else { UserDefaults.standard.removeObject(forKey: GatewayRepairMemory.key) }
+        }
+    )
 }
 
 /// The per-user gateway always runs as the login account. This client only
 /// asks the bundled administrator helper to move a gateway that an earlier
 /// app version ran as root back to the account (GatewayAdminAction.repair).
 enum GatewayAdministratorClient {
+    /// The "Run gateway as administrator" switch of app versions up to 1.0.8.
+    /// Removed at launch; drop this cleanup with the repair (no earlier than 1.1).
+    static let retiredPreferenceKeys = ["gatewayAdministratorMode"]
+
+    static func removeRetiredPreferences(_ defaults: UserDefaults = .standard) {
+        for key in retiredPreferenceKeys { defaults.removeObject(forKey: key) }
+    }
+
     private static var bundledServiceAvailable: Bool {
         let root = Bundle.main.bundleURL
         return FileManager.default.isExecutableFile(atPath: root.appendingPathComponent(GatewayAdminPolicy.helperRelativePath).path)

@@ -29,6 +29,7 @@ struct DefenseClawApp: App {
 
     init() {
         CLIProcessGroupLauncher.execIfRequested()
+        GatewayAdministratorClient.removeRetiredPreferences()
         let state = AppState()
         _appState = State(initialValue: state)
         AppDelegate.startApplication = { [weak state] in state?.start() }

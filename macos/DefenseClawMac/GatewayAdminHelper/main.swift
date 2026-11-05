@@ -20,9 +20,10 @@
 // A per-user gateway always runs as its account (`defenseclaw-gateway start`,
 // run by the app or the CLI as the logged-in user). App versions up to 1.0.8
 // could run it as root through this helper; this helper now only undoes that:
-// it stops the root gateway it started for the calling account, returns the
-// root-owned files that gateway left in the account's DefenseClaw home, and
-// deletes its private gateway copy. It never starts a gateway.
+// it stops the root gateway it started for the calling account (by signalling
+// its verified PID; it runs no program), returns the root-owned DefenseClaw
+// files that gateway left in the account's DefenseClaw home, and deletes its
+// private gateway copy. It never starts a gateway.
 
 import Darwin
 import Foundation
@@ -161,18 +162,10 @@ enum GatewayAdminTrust {
         }, operation: operation)
     }
 
-    /// Reject every symlink and write-granting ACL on the selected installation.
-    /// Owner/root ownership is allowed because a root-run gateway may have left
-    /// either; group and other users must not control it.
-    static func validateInstallation(home: String, config: String, account: InvokingAccount) throws {
-        guard GatewayAdminPolicy.isStrictDescendant(home, of: account.home),
-              GatewayAdminPolicy.isStrictDescendant(config, of: home) else {
-            throw GatewayAdminFailure.refused("Gateway repair only supports a configuration inside your selected DefenseClaw home, within your own account home.")
-        }
-        try validatePath(home, permittedOwner: account.uid, finalIsDirectory: true)
-        try validatePath(config, permittedOwner: account.uid, finalIsDirectory: false)
-    }
-
+    /// Lexical and per-component checks for the helper's own fixed folders
+    /// under /Library (root-owned, so the account cannot race them). The
+    /// caller-selected DefenseClaw home is never trusted by path; see
+    /// GatewayAdminInstallation.
     static func validatePath(_ path: String, permittedOwner: uid_t?, finalIsDirectory: Bool) throws {
         guard GatewayAdminPolicy.isCanonicalAbsolutePath(path) else {
             throw GatewayAdminFailure.refused("A canonical absolute installation path is required.")
@@ -192,15 +185,24 @@ enum GatewayAdminTrust {
                   metadata.st_mode & 0o022 == 0 else {
                 throw GatewayAdminFailure.refused("Gateway repair refused a symlink, unexpected owner, or writable shared path.")
             }
-            try rejectWriteACL(at: current)
+            guard let acl = acl_get_file(current, ACL_TYPE_EXTENDED) else {
+                if errno == ENOENT || errno == ENOTSUP { continue }
+                throw GatewayAdminFailure.refused("Could not verify gateway repair path permissions.")
+            }
+            try rejectWriteACL(acl)
         }
     }
 
-    private static func rejectWriteACL(at path: String) throws {
-        guard let acl = acl_get_file(path, ACL_TYPE_EXTENDED) else {
+    static func rejectWriteACL(descriptor: Int32) throws {
+        guard let acl = acl_get_fd_np(descriptor, ACL_TYPE_EXTENDED) else {
+            // macOS reports ENOENT when an open file has no extended ACL.
             if errno == ENOENT || errno == ENOTSUP { return }
             throw GatewayAdminFailure.refused("Could not verify gateway repair path permissions.")
         }
+        try rejectWriteACL(acl)
+    }
+
+    private static func rejectWriteACL(_ acl: acl_t) throws {
         defer { acl_free(UnsafeMutableRawPointer(acl)) }
         var entry: acl_entry_t?
         var selector = ACL_FIRST_ENTRY
@@ -241,48 +243,15 @@ enum GatewayAdminTrust {
         try verifySignature(at: app, requirement: GatewayAdminPolicy.appRequirement)
     }
 
-    /// Only an immutable, code-signature-valid Mach-O copy is ever executed as
-    /// root, and only to stop the gateway it started.
-    static func verifyGatewayIntegrity(at path: String) throws {
-        let descriptor = open(path, O_RDONLY | O_NOFOLLOW | O_CLOEXEC)
-        guard descriptor >= 0 else { throw GatewayAdminFailure.refused("Could not read the private gateway copy.") }
-        defer { close(descriptor) }
-        var magic: UInt32 = 0
-        let count = withUnsafeMutableBytes(of: &magic) { Darwin.read(descriptor, $0.baseAddress, $0.count) }
-        let executableMagic: Set<UInt32> = [0xfeedfacf, 0xcffaedfe, 0xcafebabe, 0xbebafeca, 0xcafebabf, 0xbfbafeca]
-        guard count == MemoryLayout<UInt32>.size, executableMagic.contains(magic) else {
-            throw GatewayAdminFailure.refused("The private gateway copy must be a signed Mach-O executable.")
-        }
-        var code: SecStaticCode?
-        guard SecStaticCodeCreateWithPath(URL(fileURLWithPath: path) as CFURL, [], &code) == errSecSuccess,
-              let code,
-              SecStaticCodeCheckValidity(code, SecCSFlags(rawValue: kSecCSStrictValidate | kSecCSCheckAllArchitectures), nil) == errSecSuccess else {
-            throw GatewayAdminFailure.refused("The private gateway copy's code signature is invalid.")
-        }
-    }
-
-    /// The private copy an earlier app version started for this account, or
-    /// nil when it never ran one.
-    static func currentStagedGateway(account: InvokingAccount) throws -> String? {
-        let directory = stagingDirectory(uid: account.uid)
-        let gateway = directory + "/" + stagedGatewayName
-        var metadata = stat()
-        if lstat(gateway, &metadata) != 0 {
-            if errno == ENOENT || errno == ENOTDIR { return nil }
-            throw GatewayAdminFailure.refused("Could not inspect the private gateway copy.")
-        }
-        try validatePath(directory, permittedOwner: nil, finalIsDirectory: true)
-        var directoryMetadata = stat()
-        guard lstat(directory, &directoryMetadata) == 0,
-              directoryMetadata.st_mode & 0o077 == 0 else {
-            throw GatewayAdminFailure.refused("The private gateway directory is not private.")
-        }
-        try validatePath(gateway, permittedOwner: nil, finalIsDirectory: false)
-        guard metadata.st_mode & 0o111 != 0 else {
-            throw GatewayAdminFailure.refused("The private gateway copy is not executable.")
-        }
-        try verifyGatewayIntegrity(at: gateway)
-        return gateway
+    /// Executables a gateway the helper started can run from: this account's
+    /// private copy, and the shared copy that pre-import upstream app versions
+    /// used (no Cisco build wrote it; it is matched only so such a gateway is
+    /// stopped instead of being reported as foreign, and never deleted because
+    /// other accounts may still use it). Both live in root-only folders, so a
+    /// process running one of them was started by root.
+    static func stagedExecutables(uid: uid_t) -> Set<String> {
+        let paths = [stagingDirectory(uid: uid) + "/" + stagedGatewayName, stagingRoot + "/" + stagedGatewayName]
+        return Set(paths + paths.map { "/System/Volumes/Data" + $0 })
     }
 
     /// Delete this account's private copy and its fixed root-owned folder
@@ -295,7 +264,7 @@ enum GatewayAdminTrust {
             throw GatewayAdminFailure.refused("Could not inspect the private gateway directory.")
         }
         try validatePath(directory, permittedOwner: nil, finalIsDirectory: true)
-        let descriptor = open(directory, O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC)
+        let descriptor = open(directory, O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_NOFOLLOW_ANY | O_CLOEXEC)
         guard descriptor >= 0 else {
             throw GatewayAdminFailure.refused("Could not open the private gateway directory.")
         }
@@ -308,6 +277,77 @@ enum GatewayAdminTrust {
         }
         _ = rmdir(directory)
         _ = rmdir(stagingRoot)
+    }
+}
+
+/// The selected DefenseClaw home, opened by descriptor. The walk starts at the
+/// authenticated account home (opened with O_NOFOLLOW_ANY, so no component of
+/// its path may be a symlink) and opens every further component with openat
+/// and O_NOFOLLOW, checking each on its own descriptor: a real folder owned by
+/// root or the account, not writable by group or others, without a write ACL,
+/// on the account home's volume. A folder swapped for a symlink at any point
+/// is refused; one renamed away keeps the descriptor on the verified folder.
+/// Everything the repair reads or changes is reached from this descriptor.
+/// The home must hold a DefenseClaw config.yaml.
+final class GatewayAdminInstallation {
+    let descriptor: Int32
+    let device: dev_t
+
+    #if GATEWAY_ADMIN_HELPER_TESTING
+    static var componentOpenedForTesting: ((Int) -> Void)?
+    #endif
+
+    init(home: String, config: String, account: InvokingAccount) throws {
+        guard GatewayAdminPolicy.isStrictDescendant(home, of: account.home), config == home + "/config.yaml" else {
+            throw GatewayAdminFailure.refused("Gateway repair only changes a DefenseClaw home inside your own account home, with its config.yaml.")
+        }
+        var current = open(account.home, O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_NOFOLLOW_ANY | O_CLOEXEC)
+        guard current >= 0 else {
+            throw GatewayAdminFailure.refused("Could not open your account home without following a symbolic link.")
+        }
+        do {
+            let volume = try Self.verify(current, account: account, directory: true, device: nil)
+            let components = home.dropFirst(account.home.count + 1).split(separator: "/").map(String.init)
+            for (index, component) in components.enumerated() {
+                let next = openat(current, component, O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC)
+                guard next >= 0 else {
+                    throw GatewayAdminFailure.refused("The DefenseClaw home is missing, or a folder on its path is a symbolic link.")
+                }
+                close(current)
+                current = next
+                try Self.verify(current, account: account, directory: true, device: volume)
+                #if GATEWAY_ADMIN_HELPER_TESTING
+                componentOpenedForTesting?(index)
+                #endif
+            }
+            let marker = openat(current, "config.yaml", O_RDONLY | O_NOFOLLOW | O_NONBLOCK | O_NOCTTY | O_CLOEXEC)
+            guard marker >= 0 else {
+                throw GatewayAdminFailure.refused("This folder has no DefenseClaw config.yaml. Gateway repair only changes a DefenseClaw home.")
+            }
+            defer { close(marker) }
+            try Self.verify(marker, account: account, directory: false, device: volume)
+            descriptor = current
+            device = volume
+        } catch {
+            close(current)
+            throw error
+        }
+    }
+
+    deinit { close(descriptor) }
+
+    @discardableResult
+    static func verify(_ descriptor: Int32, account: InvokingAccount, directory: Bool, device: dev_t?) throws -> dev_t {
+        var metadata = stat()
+        guard fstat(descriptor, &metadata) == 0,
+              metadata.st_mode & S_IFMT == (directory ? S_IFDIR : S_IFREG),
+              metadata.st_uid == 0 || metadata.st_uid == account.uid,
+              metadata.st_mode & 0o022 == 0,
+              device.map({ metadata.st_dev == $0 }) ?? true else {
+            throw GatewayAdminFailure.refused("Gateway repair refused a folder or file on the DefenseClaw home path: unexpected owner or type, shared write access, or another volume.")
+        }
+        try GatewayAdminTrust.rejectWriteACL(descriptor: descriptor)
+        return metadata.st_dev
     }
 }
 
@@ -333,31 +373,68 @@ enum GatewayAdminDirectory {
     }
 }
 
-/// The gateway process this home's PID record names, when it is alive and
-/// runs as root. Read as root; nothing is signalled here.
+/// The root processes this home's PID records name, read as root through the
+/// home descriptor. A process counts only while it is root, its start identity
+/// matches the record (the Go daemon's "sec.usec" form) and its executable is
+/// the helper's copy or the recorded one, so a reused PID is never taken for
+/// the gateway.
 enum GatewayAdminRootProcess {
     static let maximumRecordBytes = 65_536
+    /// The watchdog first: it would start the gateway again.
+    static let recordNames = ["watchdog.pid", "gateway.pid"]
 
-    /// The PID and recorded executable of a `gateway.pid` record: the plain
-    /// integer format or the `{"pid": N, "executable": "..."}` envelope.
-    static func record(from data: Data) -> (pid: pid_t, executable: String)? {
+    struct Record: Equatable {
+        var pid: pid_t
+        var executable = ""
+        var startIdentity = ""
+    }
+
+    struct Live: Equatable {
+        var record: String
+        var pid: pid_t
+        var startIdentity: String
+    }
+
+    struct Found: Equatable {
+        var helperStarted: [Live] = []
+        var other: [Live] = []
+        var isEmpty: Bool { helperStarted.isEmpty && other.isEmpty }
+    }
+
+    /// The plain integer format or the `{"pid": N, "executable": "...",
+    /// "start_identity": "..."}` envelope of gateway.pid and watchdog.pid.
+    static func record(from data: Data) -> Record? {
         guard let text = String(data: data, encoding: .utf8)?.trimmingCharacters(in: .whitespacesAndNewlines),
               !text.isEmpty else { return nil }
-        if let pid = Int32(text), pid > 0 { return (pid, "") }
+        if let pid = Int32(text), pid > 0 { return Record(pid: pid) }
         guard let object = try? JSONSerialization.jsonObject(with: Data(text.utf8)) as? [String: Any],
               let number = object["pid"] as? NSNumber,
               CFNumberIsFloatType(number as CFNumber) == false,
               number.int64Value > 0, number.int64Value <= Int64(Int32.max) else { return nil }
-        return (pid_t(number.int64Value), object["executable"] as? String ?? "")
+        return Record(pid: pid_t(number.int64Value),
+                      executable: object["executable"] as? String ?? "",
+                      startIdentity: object["start_identity"] as? String ?? "")
     }
 
     static func owner(of pid: pid_t) -> uid_t? {
+        kinfo(pid).map { $0.kp_eproc.e_ucred.cr_uid }
+    }
+
+    /// The kernel start time in the Go daemon's start_identity form.
+    static func startIdentity(of pid: pid_t) -> String? {
+        kinfo(pid).map {
+            let start = $0.kp_proc.p_un.__p_starttime
+            return "\(start.tv_sec)." + String(format: "%06d", Int(start.tv_usec))
+        }
+    }
+
+    private static func kinfo(_ pid: pid_t) -> kinfo_proc? {
         var info = kinfo_proc()
         var size = MemoryLayout<kinfo_proc>.stride
         var name: [Int32] = [CTL_KERN, KERN_PROC, KERN_PROC_PID, pid]
-        guard sysctl(&name, u_int(name.count), &info, &size, nil, 0) == 0, size > 0,
+        guard pid > 0, sysctl(&name, u_int(name.count), &info, &size, nil, 0) == 0, size > 0,
               info.kp_proc.p_pid == pid else { return nil }
-        return info.kp_eproc.e_ucred.cr_uid
+        return info
     }
 
     static func executable(of pid: pid_t) -> String? {
@@ -366,20 +443,33 @@ enum GatewayAdminRootProcess {
         return String(cString: buffer)
     }
 
-    /// Whether a live root process is the gateway `record` names: its
-    /// executable must be the recorded one (or, for a record without one, a
-    /// program named defenseclaw-gateway), so a reused PID is not mistaken
-    /// for the gateway.
-    static func isRootGateway(_ record: (pid: pid_t, executable: String),
-                              owner: (pid_t) -> uid_t? = GatewayAdminRootProcess.owner(of:),
-                              executable: (pid_t) -> String? = GatewayAdminRootProcess.executable(of:)) -> Bool {
-        guard owner(record.pid) == 0, let path = executable(record.pid) else { return false }
-        if !record.executable.isEmpty { return path == record.executable }
-        return (path as NSString).lastPathComponent == GatewayAdminTrust.stagedGatewayName
+    /// A start identity is compared only in the current "sec.usec" form; an
+    /// older ps(1) lstart string cannot be compared and is ignored.
+    static func isComparableIdentity(_ value: String) -> Bool {
+        let parts = value.split(separator: ".", omittingEmptySubsequences: false)
+        return parts.count == 2 && parts.allSatisfy { part in
+            !part.isEmpty && part.unicodeScalars.allSatisfy { ("0"..."9").contains($0) }
+        }
     }
 
-    static func liveRootGateway(home: String) -> pid_t? {
-        let descriptor = open(home + "/gateway.pid", O_RDONLY | O_NOFOLLOW | O_NONBLOCK | O_CLOEXEC)
+    enum Kind { case helperStarted, other }
+
+    static func classify(_ record: Record, staged: Set<String>,
+                         owner: (pid_t) -> uid_t? = GatewayAdminRootProcess.owner(of:),
+                         executable: (pid_t) -> String? = GatewayAdminRootProcess.executable(of:),
+                         startIdentity: (pid_t) -> String? = GatewayAdminRootProcess.startIdentity(of:)) -> (Kind, String)? {
+        guard owner(record.pid) == 0, let path = executable(record.pid),
+              let started = startIdentity(record.pid) else { return nil }
+        if isComparableIdentity(record.startIdentity), record.startIdentity != started { return nil }
+        if staged.contains(path) { return (.helperStarted, started) }
+        let named = record.executable.isEmpty
+            ? (path as NSString).lastPathComponent == GatewayAdminTrust.stagedGatewayName
+            : path == record.executable
+        return named ? (.other, started) : nil
+    }
+
+    static func readRecord(in home: Int32, name: String) -> Record? {
+        let descriptor = openat(home, name, O_RDONLY | O_NOFOLLOW | O_NONBLOCK | O_NOCTTY | O_CLOEXEC)
         guard descriptor >= 0 else { return nil }
         defer { close(descriptor) }
         var metadata = stat()
@@ -387,23 +477,87 @@ enum GatewayAdminRootProcess {
               metadata.st_size > 0, metadata.st_size <= maximumRecordBytes else { return nil }
         var buffer = [UInt8](repeating: 0, count: Int(metadata.st_size))
         let count = buffer.withUnsafeMutableBytes { Darwin.read(descriptor, $0.baseAddress, $0.count) }
-        guard count > 0, let parsed = Self.record(from: Data(buffer.prefix(count))),
-              isRootGateway(parsed) else { return nil }
-        return parsed.pid
+        return count > 0 ? record(from: Data(buffer.prefix(count))) : nil
+    }
+
+    static func live(in home: Int32, uid: uid_t) -> Found {
+        let staged = GatewayAdminTrust.stagedExecutables(uid: uid)
+        var found = Found()
+        for name in recordNames {
+            guard let parsed = readRecord(in: home, name: name),
+                  let (kind, started) = classify(parsed, staged: staged) else { continue }
+            let process = Live(record: name, pid: parsed.pid, startIdentity: started)
+            if kind == .helperStarted { found.helperStarted.append(process) } else { found.other.append(process) }
+        }
+        return found
+    }
+
+    /// Still the same verified process: root, same start identity, and still
+    /// running one of the helper's own executables.
+    static func isSame(_ process: Live, staged: Set<String>) -> Bool {
+        owner(of: process.pid) == 0 && startIdentity(of: process.pid) == process.startIdentity
+            && executable(of: process.pid).map(staged.contains) == true
+    }
+}
+
+/// Stop a gateway the helper started by signalling its verified PID, as the
+/// Go daemon does (SIGTERM, then SIGKILL after a grace period). No program
+/// runs as root and nothing in the home is parsed beyond the PID records.
+/// Every signal is sent only while the process is still the verified one.
+enum GatewayAdminStop {
+    static func stop(_ processes: [GatewayAdminRootProcess.Live],
+                     isSame: (GatewayAdminRootProcess.Live) -> Bool,
+                     signal send: (pid_t, Int32) -> Int32 = { Darwin.kill($0, $1) },
+                     grace: Duration = .seconds(20), killGrace: Duration = .seconds(5)) -> Bool {
+        for process in processes {
+            guard isSame(process) else { continue }
+            _ = send(process.pid, SIGTERM)
+            if waitUntilGone(process, isSame: isSame, within: grace) { continue }
+            if isSame(process) { _ = send(process.pid, SIGKILL) }
+            guard waitUntilGone(process, isSame: isSame, within: killGrace) else { return false }
+        }
+        return true
+    }
+
+    private static func waitUntilGone(_ process: GatewayAdminRootProcess.Live,
+                                      isSame: (GatewayAdminRootProcess.Live) -> Bool,
+                                      within window: Duration) -> Bool {
+        let clock = ContinuousClock()
+        let deadline = clock.now.advanced(by: window)
+        while isSame(process) {
+            if clock.now >= deadline { return false }
+            usleep(100_000)
+        }
+        return true
     }
 }
 
 /// Return the root-owned folders and regular files a root-run gateway left in
-/// this account's DefenseClaw home to the account. The walk is bound to
-/// directory descriptors: no symlink is ever followed (O_NOFOLLOW at every
+/// this account's DefenseClaw home to the account. Only DefenseClaw's own
+/// names directly in the home are considered (ownedNames), and the folders
+/// among them are walked. The walk is bound to descriptors reached from the
+/// verified home descriptor: no symlink is ever followed (O_NOFOLLOW at every
 /// step), a file is changed only through its own open descriptor and only
 /// while it has a single link (a hard link to a file elsewhere is skipped),
-/// special files and other file systems are skipped, and the walk is bounded.
+/// special files and other volumes are skipped, and the walk is bounded.
 /// Modes are kept; only the owner and group change.
 enum GatewayAdminOwnershipRepair {
     static let maximumEntries = 250_000
     static let maximumDepth = 32
     static let listedPaths = 12
+    /// DefenseClaw's own files and folders directly in its home: the runtime
+    /// files a gateway writes, its state stores and its state folders. The
+    /// Python runtime (.venv) and anything else in the home are never touched.
+    static let ownedNames: Set<String> = [
+        "config.yaml", ".env", "gateway.pid", "watchdog.pid", "gateway-api.json", "gateway.log", "gateway.jsonl",
+        "hook_contract_lock.json", "hook_contract_lock.json.lock", "active_connector.json", "ai_discovery_state.json",
+        "application_protection_state.json", "redaction-correlation.key", "device.key", "device.key.provenance",
+        "audit.db", "audit.db-shm", "audit.db-wal", "judge.db", "judge.db-shm", "judge.db-wal", "judge_bodies.db",
+        "judge_bodies.db-shm", "judge_bodies.db-wal", "confidence_policy.yaml", "custom-providers.json",
+        "guardrail_runtime.json", "picked_connector", "doctor_cache.json",
+        "hooks", "acp", "cache", "logs", "policies", "quarantine", "receipts", "registries", "previous",
+        "installer", "reports", "exports", "tui",
+    ]
 
     struct Outcome: Equatable {
         var restored: [String] = []
@@ -431,15 +585,11 @@ enum GatewayAdminOwnershipRepair {
         }
     }
 
-    static func restore(home: String, from owner: uid_t = 0, to account: (uid: uid_t, gid: gid_t),
+    static func restore(home root: Int32, from owner: uid_t = 0, to account: (uid: uid_t, gid: gid_t),
+                        names allowed: Set<String> = GatewayAdminOwnershipRepair.ownedNames,
                         maximumEntries: Int = GatewayAdminOwnershipRepair.maximumEntries,
                         change: ((Int32, String) -> Int32)? = nil) throws -> Outcome {
         let apply = change ?? { descriptor, _ in fchown(descriptor, account.uid, account.gid) }
-        let root = open(home, O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC)
-        guard root >= 0 else {
-            throw GatewayAdminFailure.refused("Could not open the DefenseClaw home to return its files.")
-        }
-        defer { close(root) }
         var metadata = stat()
         guard fstat(root, &metadata) == 0, metadata.st_mode & S_IFMT == S_IFDIR else {
             throw GatewayAdminFailure.refused("The DefenseClaw home is not a folder.")
@@ -451,10 +601,11 @@ enum GatewayAdminOwnershipRepair {
         }
 
         func walk(_ directory: Int32, _ prefix: String, _ depth: Int) {
-            guard depth < maximumDepth, let names = GatewayAdminDirectory.names(of: directory) else {
+            guard depth < maximumDepth, let listed = GatewayAdminDirectory.names(of: directory) else {
                 outcome.incomplete = true
                 return
             }
+            let names = prefix.isEmpty ? listed.filter(allowed.contains) : listed
             for name in names.sorted() {
                 visited += 1
                 guard visited <= maximumEntries else {
@@ -510,9 +661,9 @@ enum GatewayAdminOwnershipRepair {
 }
 
 /// The repair order, with every effect injected so it is testable without
-/// root: stop first (only through the helper's own copy), never touch files
-/// while a root gateway still serves the home, then return files and delete
-/// the copy so no root gateway can run from it again.
+/// root: never touch anything while a root gateway the helper did not start
+/// serves the home; stop the helper-started processes by verified PID; return
+/// files only once none runs; then delete the private copy.
 enum GatewayAdminRepair {
     static let stillRunning = """
         A gateway is still running as root for this DefenseClaw home, and it was not started by DefenseClawMac \
@@ -522,102 +673,24 @@ enum GatewayAdminRepair {
         """
 
     static func perform(
-        stagedGateway: String?,
-        liveRootGateway: () -> pid_t?,
-        stop: (String) throws -> (Int32, String),
+        liveRootProcesses: () -> GatewayAdminRootProcess.Found,
+        stop: ([GatewayAdminRootProcess.Live]) -> Bool,
         restoreOwnership: () throws -> GatewayAdminOwnershipRepair.Outcome,
         removeStagedGateway: () throws -> Void
     ) throws -> (Int32, String) {
+        let found = liveRootProcesses()
+        guard found.other.isEmpty else { return (75, stillRunning) }
         var output = ""
-        if let stagedGateway {
-            let stopped = try stop(stagedGateway)
-            output += stopped.1
-        }
-        if liveRootGateway() != nil {
-            return (stagedGateway == nil ? 75 : 1, output + (stagedGateway == nil ? stillRunning
-                : "The root gateway did not stop. Nothing else was changed; check `defenseclaw-gateway status` and retry.\n"))
+        if !found.helperStarted.isEmpty {
+            guard stop(found.helperStarted), liveRootProcesses().isEmpty else {
+                return (1, "The gateway DefenseClawMac had run as administrator did not stop. Nothing else was changed; check `defenseclaw-gateway status` and retry.\n")
+            }
+            output += "Stopped the gateway DefenseClawMac had run as administrator.\n"
         }
         let outcome = try restoreOwnership()
         try removeStagedGateway()
-        output += (stagedGateway == nil ? "" : "Stopped the gateway DefenseClawMac had run as administrator.\n")
         output += outcome.summary
         return (outcome.incomplete ? 1 : 0, output)
-    }
-}
-
-private enum GatewayAdminExecution {
-    /// Stop the gateway the helper's private copy started, as root, against the
-    /// selected installation. This is the only program the helper runs.
-    static func stop(gateway: String, home: String, config: String, account: InvokingAccount) throws -> (Int32, String) {
-        let process = Process()
-        process.executableURL = URL(fileURLWithPath: gateway)
-        process.arguments = ["stop"]
-        process.currentDirectoryURL = URL(fileURLWithPath: "/", isDirectory: true)
-        process.environment = [
-            "PATH": "/usr/bin:/bin:/usr/sbin:/sbin",
-            "HOME": account.home,
-            "USER": account.name,
-            "LOGNAME": account.name,
-            "SUDO_UID": String(account.uid),
-            "SUDO_GID": String(account.gid),
-            "SUDO_USER": account.name,
-            "DEFENSECLAW_HOME": home,
-            "DEFENSECLAW_CONFIG": config,
-            "DEFENSECLAW_VENV": home + "/.venv",
-            "NO_COLOR": "1",
-        ]
-        let output = Pipe()
-        process.standardInput = FileHandle.nullDevice
-        process.standardOutput = output
-        process.standardError = output
-        try process.run()
-        try? output.fileHandleForWriting.close()
-        defer { try? output.fileHandleForReading.close() }
-        let descriptor = output.fileHandleForReading.fileDescriptor
-        _ = fcntl(descriptor, F_SETFL, O_NONBLOCK)
-        let clock = ContinuousClock()
-        let deadline = clock.now.advanced(by: .seconds(90))
-        var exitObserved: ContinuousClock.Instant?
-        var capture = Data()
-        var truncated = false
-        var timedOut = false
-        var buffer = [UInt8](repeating: 0, count: 16_384)
-        while true {
-            if !process.isRunning {
-                if exitObserved == nil { exitObserved = clock.now }
-                if clock.now - exitObserved! > .milliseconds(500) { break }
-            }
-            if clock.now >= deadline {
-                timedOut = true
-                if process.isRunning {
-                    process.terminate()
-                    let terminationDeadline = clock.now.advanced(by: .seconds(5))
-                    while process.isRunning, clock.now < terminationDeadline { usleep(50_000) }
-                    if process.isRunning { _ = Darwin.kill(process.processIdentifier, SIGKILL) }
-                    process.waitUntilExit()
-                }
-                break
-            }
-            var polling = pollfd(fd: descriptor, events: Int16(POLLIN | POLLHUP), revents: 0)
-            let polled = poll(&polling, 1, 100)
-            if polled < 0, errno == EINTR { continue }
-            if polled <= 0 { continue }
-            let count = buffer.withUnsafeMutableBytes { Darwin.read(descriptor, $0.baseAddress, $0.count) }
-            if count == 0, !process.isRunning { break }
-            if count > 0 {
-                let retained = min(count, GatewayAdminPolicy.maximumOutputBytes - capture.count)
-                if retained > 0 { capture.append(contentsOf: buffer.prefix(retained)) }
-                if retained < count { truncated = true }
-            }
-        }
-        var text = String(decoding: capture, as: UTF8.self)
-        if truncated { text += "\nCommand output exceeded its safe limit. Check gateway status before retrying.\n" }
-        if timedOut {
-            text += "\nStopping the root gateway timed out. Check gateway status before retrying.\n"
-            return (124, text)
-        }
-        process.waitUntilExit()
-        return (process.terminationStatus, text)
     }
 }
 
@@ -798,17 +871,18 @@ private final class GatewayAdminSession: NSObject, GatewayAdminProtocol {
                 }
                 let outcome = try GatewayAdminTrust.withAuthorization(authorization) {
                     let account = try InvokingAccount(uid: uid)
-                    try GatewayAdminTrust.validateInstallation(home: homePath, config: configPath, account: account)
                     try GatewayAdminTrust.validateHelperBundle()
+                    // Opened right before use: every later read and change
+                    // goes through this verified descriptor.
+                    let installation = try GatewayAdminInstallation(home: homePath, config: configPath, account: account)
+                    let staged = GatewayAdminTrust.stagedExecutables(uid: account.uid)
                     return try GatewayAdminRepair.perform(
-                        stagedGateway: GatewayAdminTrust.currentStagedGateway(account: account),
-                        liveRootGateway: { GatewayAdminRootProcess.liveRootGateway(home: homePath) },
-                        stop: { gateway in
-                            try GatewayAdminExecution.stop(gateway: gateway, home: homePath,
-                                                           config: configPath, account: account)
+                        liveRootProcesses: { GatewayAdminRootProcess.live(in: installation.descriptor, uid: account.uid) },
+                        stop: { processes in
+                            GatewayAdminStop.stop(processes, isSame: { GatewayAdminRootProcess.isSame($0, staged: staged) })
                         },
                         restoreOwnership: {
-                            try GatewayAdminOwnershipRepair.restore(home: homePath, to: (account.uid, account.gid))
+                            try GatewayAdminOwnershipRepair.restore(home: installation.descriptor, to: (account.uid, account.gid))
                         },
                         removeStagedGateway: { try GatewayAdminTrust.removeStagedGateway(account: account) }
                     )

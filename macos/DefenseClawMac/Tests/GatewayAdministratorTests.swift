@@ -54,6 +54,8 @@ struct GatewayAdministratorTests {
         await testRepairBindsInstallationAndStopEndsThere()
         await testStartContinuesAsAccountAfterRepair()
         await testFailedRepairStopsTheCommand()
+        await testUnresolvedRepairDoesNotPromptAgain()
+        testRetiredPreferenceRemoved()
         await testRefusalBeforeAuthorization()
         await testTaskCancellationAfterReservationRefusesDispatch()
         await testRebindCancelsPendingAuthorization()
@@ -71,7 +73,33 @@ struct GatewayAdministratorTests {
             fileExists: { _ in false }, readText: { _ in nil })
     }
 
-    private static let rootRunState: @Sendable (URL) -> [String] = { _ in ["gateway.pid", "hook_contract_lock.json"] }
+    /// Root-owned state a successful repair clears, and this runner's own
+    /// repair memory (never the app's UserDefaults).
+    final class RootStateFixture: @unchecked Sendable {
+        private let lock = NSLock()
+        private var markers = [GatewayRootState.Marker(name: "gateway.pid", identity: "gateway.pid:1"),
+                               GatewayRootState.Marker(name: "hook_contract_lock.json", identity: "hook_contract_lock.json:1")]
+        private var memory: String?
+
+        var current: [GatewayRootState.Marker] { lock.lock(); defer { lock.unlock() }; return markers }
+        var remembered: String? { lock.lock(); defer { lock.unlock() }; return memory }
+        func set(_ value: [GatewayRootState.Marker]) { lock.lock(); markers = value; lock.unlock() }
+        var repairMemory: GatewayRepairMemory {
+            GatewayRepairMemory(load: { [self] in lock.lock(); defer { lock.unlock() }; return memory },
+                                save: { [self] value in lock.lock(); memory = value; lock.unlock() })
+        }
+    }
+
+    private static func makeRunner(
+        _ context: InstallationContext, _ state: RootStateFixture, clearOnRepair: Bool = true,
+        repair: @escaping @Sendable (InstallationContext, GatewayAdministratorOperation) async -> CLIResult
+    ) -> CLIRunner {
+        CLIRunner(context: context, rootOwnedState: { _ in state.current }, administratorRepair: { context, operation in
+            let result = await repair(context, operation)
+            if clearOnRepair, result.succeeded { state.set([]) }
+            return result
+        }, repairMemory: state.repairMemory)
+    }
 
     private static func testRepairOnlyAction() {
         expect(GatewayAdminAction.allCases == [.repair], "the helper offers only the repair; the app never starts a gateway as root")
@@ -163,10 +191,13 @@ struct GatewayAdministratorTests {
     private static func testRepairRoutingDecision() {
         let home = URL(fileURLWithPath: "/Users/admin-test/.defenseclaw")
         var asked: [URL] = []
-        let state: (URL) -> [String] = { asked.append($0); return ["gateway.pid"] }
+        let state: (URL) -> [GatewayRootState.Marker] = {
+            asked.append($0)
+            return [GatewayRootState.Marker(name: "gateway.pid", identity: "gateway.pid:1")]
+        }
         for action in ["start", "stop", "restart"] {
             expect(CLIRunner.rootStateToRepair(binary: "defenseclaw-gateway", arguments: [action], home: home,
-                                               rootOwnedState: state) == ["gateway.pid"], "\(action) repairs root state first")
+                                               rootOwnedState: state).map(\.name) == ["gateway.pid"], "\(action) repairs root state first")
         }
         expect(asked == [home, home, home], "the selected installation's home is inspected")
         asked = []
@@ -184,7 +215,7 @@ struct GatewayAdministratorTests {
     private static func testRepairBindsInstallationAndStopEndsThere() async {
         let probe = InvocationProbe()
         let selected = context()
-        let runner = CLIRunner(context: selected, rootOwnedState: rootRunState, administratorRepair: { context, _ in
+        let runner = makeRunner(selected, RootStateFixture(), repair: { context, _ in
             await probe.record(context)
             return CLIResult(exitCode: 0, output: "repaired via helper")
         })
@@ -199,7 +230,7 @@ struct GatewayAdministratorTests {
     /// command continues past the repair without running a real gateway here.
     private static func testStartContinuesAsAccountAfterRepair() async {
         let probe = InvocationProbe()
-        let runner = CLIRunner(context: context(), rootOwnedState: rootRunState, administratorRepair: { context, _ in
+        let runner = makeRunner(context(), RootStateFixture(), repair: { context, _ in
             await probe.record(context)
             while !(await probe.isReleased()) { try? await Task.sleep(for: .milliseconds(10)) }
             return CLIResult(exitCode: 0, output: "repaired\n")
@@ -214,11 +245,57 @@ struct GatewayAdministratorTests {
     }
 
     private static func testFailedRepairStopsTheCommand() async {
-        let runner = CLIRunner(context: context(), rootOwnedState: rootRunState, administratorRepair: { _, _ in
+        let runner = makeRunner(context(), RootStateFixture(), repair: { _, _ in
             CLIResult(exitCode: 75, output: "still running as root")
         })
         let result = await runner.run(binary: "defenseclaw-gateway", arguments: ["restart"])
         expect(result.exitCode == 75 && result.output == "still running as root", "a failed repair is the result; nothing runs as root or as the account")
+    }
+
+    /// NH-4: when the helper ran and root-owned markers remain (a hard link or
+    /// special file it skips, a sudo-run gateway), the user gets the files and
+    /// the sudo chown command, and no new prompt until the leftovers change.
+    private static func testUnresolvedRepairDoesNotPromptAgain() async {
+        let probe = InvocationProbe()
+        let state = RootStateFixture()
+        let runner = makeRunner(context(), state, clearOnRepair: false, repair: { context, _ in
+            await probe.record(context)
+            return CLIResult(exitCode: 0, output: "Left 1 root-owned items unchanged\n")
+        })
+        let first = await runner.run(binary: "defenseclaw-gateway", arguments: ["start"])
+        expect(first.exitCode == 1 && first.output.contains("still owned by root: gateway.pid, hook_contract_lock.json")
+               && first.output.contains("sudo chown -R"), "the leftovers and the command are shown: \(first.output)")
+        expect(state.remembered == GatewayRootState.fingerprint(state.current), "the unresolved leftovers are remembered")
+        let second = await runner.run(binary: "defenseclaw-gateway", arguments: ["restart"])
+        var calls = await probe.count()
+        expect(second.exitCode == 77 && second.output.contains("will not ask") && calls == 1,
+               "unchanged leftovers do not bring the administrator prompt back")
+        state.set([GatewayRootState.Marker(name: "gateway.pid", identity: "gateway.pid:2")])
+        _ = await runner.run(binary: "defenseclaw-gateway", arguments: ["stop"])
+        calls = await probe.count()
+        expect(calls == 2, "a changed leftover is repaired again")
+
+        let cancelledState = RootStateFixture()
+        let cancelled = makeRunner(context(), cancelledState, repair: { _, _ in
+            CLIResult(exitCode: 130, output: "cancelled", cancelled: true)
+        })
+        _ = await cancelled.run(binary: "defenseclaw-gateway", arguments: ["start"])
+        expect(cancelledState.remembered == nil, "a cancelled prompt is not remembered; the next start asks again")
+        let clearedState = RootStateFixture()
+        let cleared = makeRunner(context(), clearedState, repair: { _, _ in CLIResult(exitCode: 0, output: "repaired") })
+        _ = await cleared.run(binary: "defenseclaw-gateway", arguments: ["stop"])
+        expect(clearedState.remembered == nil, "a home the repair cleared leaves nothing remembered")
+    }
+
+    /// NH-5: the switch of app versions up to 1.0.8 leaves no stale default.
+    private static func testRetiredPreferenceRemoved() {
+        guard let defaults = UserDefaults(suiteName: "defenseclaw-retired-preference-\(UUID().uuidString)") else {
+            expect(false, "test defaults available")
+            return
+        }
+        defaults.set(true, forKey: "gatewayAdministratorMode")
+        GatewayAdministratorClient.removeRetiredPreferences(defaults)
+        expect(defaults.object(forKey: "gatewayAdministratorMode") == nil, "the retired administrator switch is removed")
     }
 
     private static func testRefusalBeforeAuthorization() async {
@@ -227,10 +304,10 @@ struct GatewayAdministratorTests {
             await probe.record(context)
             return CLIResult(exitCode: 0, output: "unexpected")
         }
-        let readOnly = CLIRunner(context: context().reducingToInvalidReadOnly("managed fixture"), rootOwnedState: rootRunState, administratorRepair: execute)
+        let readOnly = makeRunner(context().reducingToInvalidReadOnly("managed fixture"), RootStateFixture(), repair: execute)
         let denied = await readOnly.run(binary: "defenseclaw-gateway", arguments: ["restart"], mutation: false)
         expect(denied.exitCode == 77, "read-only policy cannot be bypassed by mutation flag")
-        let runner = CLIRunner(context: context(), rootOwnedState: rootRunState, administratorRepair: execute)
+        let runner = makeRunner(context(), RootStateFixture(), repair: execute)
         let id = UUID()
         expect(awaitValue(await runner.reserve(runID: id)), "run reserved")
         _ = await runner.cancel(runID: id)
@@ -242,7 +319,7 @@ struct GatewayAdministratorTests {
 
     private static func testTaskCancellationAfterReservationRefusesDispatch() async {
         let probe = InvocationProbe()
-        let runner = CLIRunner(context: context(), rootOwnedState: rootRunState, administratorRepair: { context, _ in
+        let runner = makeRunner(context(), RootStateFixture(), repair: { context, _ in
             await probe.record(context)
             return CLIResult(exitCode: 0, output: "repaired via helper")
         })
@@ -283,7 +360,7 @@ struct GatewayAdministratorTests {
 
     private static func testRebindCancelsPendingAuthorization() async {
         let probe = InvocationProbe()
-        let runner = CLIRunner(context: context(), rootOwnedState: rootRunState, administratorRepair: { context, operation in
+        let runner = makeRunner(context(), RootStateFixture(), repair: { context, operation in
             await probe.record(context)
             while !(await probe.isReleased()) { try? await Task.sleep(for: .milliseconds(10)) }
             return CLIResult(exitCode: operation.beginDispatch() ? 0 : 130, output: "authorization completed", cancelled: operation.isCancelled)
@@ -298,7 +375,7 @@ struct GatewayAdministratorTests {
 
     private static func testCancellationAfterDispatchWaitsForResult() async {
         let probe = InvocationProbe()
-        let runner = CLIRunner(context: context(), rootOwnedState: rootRunState, administratorRepair: { context, operation in
+        let runner = makeRunner(context(), RootStateFixture(), repair: { context, operation in
             expect(operation.beginDispatch(), "dispatch succeeds")
             await probe.record(context)
             while !(await probe.isReleased()) { try? await Task.sleep(for: .milliseconds(10)) }
