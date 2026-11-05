@@ -53,8 +53,10 @@ func TestGAP0295FreshListenerHelper(t *testing.T) {
 
 // TestGAP0295FreshGatewayHoldsCallProof runs the real Linux proof: the
 // connection is held by the process the account's fresh gateway record
-// names, and that process has answered nothing. A recorded first answer, a
-// connection held by another process and a stale record are no proof.
+// names, and that process had answered nothing when the connection reached
+// it. A first answer recorded before the connection, a connection held by
+// another process and a stale record are no proof; a sibling call answered
+// after this connection was made does not end this call's window (v108k).
 func TestGAP0295FreshGatewayHoldsCallProof(t *testing.T) {
 	cmd := exec.Command(os.Args[0], "-test.run=^TestGAP0295FreshListenerHelper$")
 	cmd.Env = append(os.Environ(), freshListenerHelperEnv+"=1")
@@ -96,7 +98,7 @@ func TestGAP0295FreshGatewayHoldsCallProof(t *testing.T) {
 	}
 	checkFor := func(conn net.Conn) *perUserPeerCheck {
 		check := &perUserPeerCheck{}
-		check.ends.Store(&perUserConnEnds{local: conn.LocalAddr(), remote: conn.RemoteAddr()})
+		check.ends.Store(&perUserConnEnds{local: conn.LocalAddr(), remote: conn.RemoteAddr(), at: time.Now()})
 		return check
 	}
 	conn, err := net.Dial("tcp", addr)
@@ -154,12 +156,41 @@ func TestGAP0295FreshGatewayHoldsCallProof(t *testing.T) {
 		t.Fatal("a connection another process holds is proven")
 	}
 
-	// The gateway's first answer ends its window.
+	// A sibling call that reached the gateway with this one is answered
+	// first: this call, connected before that answer, stays in the window.
+	time.Sleep(50 * time.Millisecond)
 	if err := recordPerUserGatewayAnswer(dataDir, perUserPeerProcess{pid: pid, identity: identity}); err != nil {
 		t.Fatal(err)
 	}
-	if perUserFreshGatewayHoldsCall(dataDir, check) {
-		t.Fatal("a gateway that answered a call is proven fresh")
+	if !perUserFreshGatewayHoldsCall(dataDir, check) {
+		t.Fatal("a call connected before the gateway's first answer left the window")
+	}
+	// A connection without its proof time is no proof once an answer exists.
+	untimed := &perUserPeerCheck{}
+	untimed.ends.Store(&perUserConnEnds{local: conn.LocalAddr(), remote: conn.RemoteAddr()})
+	if perUserFreshGatewayHoldsCall(dataDir, untimed) {
+		t.Fatal("a connection with no proof time is proven after an answer")
+	}
+
+	// A call that reaches the gateway after its first answer met a serving
+	// gateway: no proof, the no-decision deny stands.
+	time.Sleep(50 * time.Millisecond)
+	late, err := net.Dial("tcp", addr)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer late.Close()
+	lateCheck := checkFor(late)
+	client, server := late.LocalAddr().(*net.TCPAddr), late.RemoteAddr().(*net.TCPAddr)
+	held := false
+	for end := time.Now().Add(5 * time.Second); time.Now().Before(end) && !held; time.Sleep(10 * time.Millisecond) {
+		held = perUserProcessHoldsConnection(pid, client, server)
+	}
+	if !held {
+		t.Fatal("the helper never accepted the late connection")
+	}
+	if perUserFreshGatewayHoldsCall(dataDir, lateCheck) {
+		t.Fatal("a call that reached the gateway after its first answer is proven fresh")
 	}
 }
 

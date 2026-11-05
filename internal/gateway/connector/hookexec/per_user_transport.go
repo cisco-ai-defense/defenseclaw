@@ -120,8 +120,12 @@ type perUserPeerCheck struct {
 }
 
 // perUserConnEnds is the client and server address of one proven per-user
-// gateway connection.
-type perUserConnEnds struct{ local, remote net.Addr }
+// gateway connection, and when its owner was proven (the gateway had
+// accepted it).
+type perUserConnEnds struct {
+	local, remote net.Addr
+	at            time.Time
+}
 
 type perUserPeerCheckKey struct{}
 
@@ -297,7 +301,7 @@ func verifiedPerUserHTTPClient(
 				}
 				if check != nil {
 					check.pending.Store(false)
-					check.ends.Store(&perUserConnEnds{local: conn.LocalAddr(), remote: conn.RemoteAddr()})
+					check.ends.Store(&perUserConnEnds{local: conn.LocalAddr(), remote: conn.RemoteAddr(), at: time.Now()})
 				}
 				// hook-post reads the process behind the proven socket, for
 				// a no-answer during a restart (PerUserGatewayRestartProven).
