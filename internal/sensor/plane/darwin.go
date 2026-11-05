@@ -114,7 +114,17 @@ func watchedPrefixes(homeDirs []string) []string {
 }
 
 func (s *darwinSource) Events() <-chan Event { return s.buffer.Events() }
-func (s *darwinSource) Coverage() Coverage   { return s.coverage }
+
+// Coverage is what Start found, plus the events the buffer dropped under
+// back-pressure after eslogger delivered them: counted, and never reported
+// before (cowork-1-0-8 GAP-0072, as GAP-0071 did for Linux).
+func (s *darwinSource) Coverage() Coverage {
+	coverage := s.coverage
+	if dropped := s.buffer.Dropped(); dropped > 0 {
+		coverage.Limitations = append(append([]string(nil), coverage.Limitations...), bufferDropLimitation(dropped))
+	}
+	return coverage
+}
 
 func (s *darwinSource) Start(ctx context.Context) error {
 	if _, err := os.Stat(esloggerPath); err != nil {

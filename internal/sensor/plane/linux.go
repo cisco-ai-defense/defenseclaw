@@ -263,13 +263,6 @@ func (s *linuxSource) bufferDropped() int64 {
 	return s.buffer.Dropped()
 }
 
-// bufferDropLimitation names the events a source's buffer dropped, as the
-// ENOBUFS loss is named: reduced coverage, never a silence (GAP-0071).
-func bufferDropLimitation(dropped int64) string {
-	return fmt.Sprintf("%d events were dropped from the sensor's event buffer under back-pressure "+
-		"(file events first; process events displaced the oldest)", dropped)
-}
-
 func (s *linuxSource) Start(ctx context.Context) error {
 	procErr := s.startProcessConnector()
 	fanErr := s.startFanotify()
