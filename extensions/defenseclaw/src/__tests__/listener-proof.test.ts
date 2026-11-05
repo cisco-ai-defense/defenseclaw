@@ -122,16 +122,46 @@ describe("listener proof (GAP-0594)", () => {
     expect(others).toEqual([]);
   });
 
-  it("fails a connection that never comes up within the proof bound", async () => {
+  it("fails a connection that never comes up at the shared deadline", async () => {
     const stalled = new Socket();
     const started = Date.now();
     const err = await new Promise<Error | null>((resolve) => {
-      provenCreateConnection("127.0.0.1", 9, TOKEN, () => stalled)({}, (e) => resolve(e));
+      provenCreateConnection("127.0.0.1", 9, TOKEN, () => stalled, 300)({}, (e) => resolve(e));
     });
     expect(err).toBeInstanceOf(ListenerProofError);
     expect(String(err?.message)).toContain("connect timed out");
-    expect(Date.now() - started).toBeLessThan(2_000);
+    expect(Date.now() - started).toBeLessThan(1_500);
     expect(stalled.destroyed).toBe(true);
+  });
+
+  it("keeps a proof whose answer arrives after a 700 ms event-loop stall (R3-M1)", async () => {
+    const { server, port, seen } = await listener(TOKEN);
+    servers.push(server);
+    const result = new Promise<Error | null>((resolve) => {
+      provenCreateConnection("127.0.0.1", port, TOKEN)({}, (e, socket) => {
+        socket?.destroy();
+        resolve(e);
+      });
+    });
+    // OpenClaw's main thread is busy (a large session, a GC pause).
+    const until = Date.now() + 700;
+    while (Date.now() < until) {
+      // block
+    }
+    expect(await result).toBeNull();
+    expect(seen.proofs).toBe(1);
+  });
+
+  it("keeps a fetch-path proof across a 700 ms event-loop stall", async () => {
+    const { server, port, seen } = await listener(TOKEN);
+    servers.push(server);
+    const proof = proveListener("127.0.0.1", port, TOKEN);
+    const until = Date.now() + 700;
+    while (Date.now() < until) {
+      // block
+    }
+    await expect(proof).resolves.toBeUndefined();
+    expect(seen.proofs).toBe(1);
   });
 
   it("reports a body cut off mid-response as no answer", async () => {

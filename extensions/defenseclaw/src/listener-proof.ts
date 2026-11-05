@@ -46,8 +46,37 @@ import { connect as netConnect, type Socket } from "node:net";
 export const LISTENER_PROOF_PATH = "/api/v1/hook-listener-proof";
 const LISTENER_PROOF_DOMAIN = "defenseclaw.listener-proof.v1";
 const LISTENER_PROOF_CONNECTOR = "openclaw";
-/** A proof on loopback takes well under a millisecond; it never uses a call's budget. */
-const LISTENER_PROOF_TIMEOUT_MS = 500;
+/**
+ * One deadline for connect + proof. On loopback both take well under a
+ * millisecond; the margin is for OpenClaw's own event loop, which can stall
+ * for a second or more (a large session stringify, a GC pause, plugin load),
+ * and must not turn a gateway that answered into a false block in the
+ * default tier. It stays separate from a call's own budget (the tool check
+ * starts counting once the connection is proven), and it still turns a
+ * listener that never accepts into a failure in about 2 s instead of the
+ * kernel's ~127 s connect timeout. Refused connections and a wrong or
+ * missing proof still fail at once.
+ */
+export const LISTENER_PROOF_DEADLINE_MS = 2_000;
+
+/**
+ * A deadline that expires only after pending I/O has had its turn: the
+ * timer schedules the expiry with setImmediate, which runs after the poll
+ * phase, so an event-loop stall cannot fire it ahead of a connect event or a
+ * proof answer already in the socket buffer. Unref'd. Returns the cancel.
+ */
+function deadlineTimer(ms: number, onExpire: () => void): () => void {
+  let immediate: ReturnType<typeof setImmediate> | undefined;
+  const timer = setTimeout(() => {
+    immediate = setImmediate(onExpire);
+    immediate.unref?.();
+  }, Math.max(0, ms));
+  timer.unref?.();
+  return () => {
+    clearTimeout(timer);
+    if (immediate !== undefined) clearImmediate(immediate);
+  };
+}
 const MAX_PROOF_RESPONSE_BYTES = 16 * 1024;
 
 export class ListenerProofError extends Error {
@@ -120,19 +149,20 @@ function proveOnce(host: string, port: number, token: string, requestImpl: Reque
         method: "GET",
         headers: proofHeaders(token, nonce),
         agent: false,
-        timeout: LISTENER_PROOF_TIMEOUT_MS,
       },
       (res) => {
+        cancel();
         res.resume();
         const proof = String(res.headers["x-defenseclaw-listener-proof"] || "");
         if (proofMatches(token, nonce, res.statusCode ?? 0, proof)) resolve();
         else reject(notProven(host, port));
       },
     );
-    req.on("timeout", () => req.destroy(notProven(host, port)));
-    req.on("error", (err) =>
-      reject(err instanceof ListenerProofError ? err : new ListenerProofError(`${notProven(host, port).message}: ${err.message}`)),
-    );
+    const cancel = deadlineTimer(LISTENER_PROOF_DEADLINE_MS, () => req.destroy(notProven(host, port)));
+    req.on("error", (err) => {
+      cancel();
+      reject(err instanceof ListenerProofError ? err : new ListenerProofError(`${notProven(host, port).message}: ${err.message}`));
+    });
     req.end();
   });
 }
@@ -179,15 +209,15 @@ export async function proveListener(
 }
 
 /** Prove an open socket by sending the proof request on it (HTTP/1.1 keep-alive). */
-function proveSocket(socket: Socket, host: string, port: number, token: string): Promise<void> {
+function proveSocket(socket: Socket, host: string, port: number, token: string, deadlineAt: number): Promise<void> {
   const nonce = randomBytes(32).toString("hex");
   const lines = [`GET ${LISTENER_PROOF_PATH} HTTP/1.1`, `Host: ${host}:${port}`, "Connection: keep-alive"];
   for (const [name, value] of Object.entries(proofHeaders(token, nonce))) lines.push(`${name}: ${value}`);
   return new Promise((resolve, reject) => {
     let buf = Buffer.alloc(0);
-    const timer = setTimeout(() => finish(notProven(host, port)), LISTENER_PROOF_TIMEOUT_MS);
+    const cancel = deadlineTimer(deadlineAt - Date.now(), () => finish(notProven(host, port)));
     const finish = (err?: Error) => {
-      clearTimeout(timer);
+      cancel();
       socket.removeListener("data", onData);
       socket.removeListener("error", onError);
       socket.removeListener("close", onClose);
@@ -231,17 +261,19 @@ type CreateConnection = (
 /**
  * A node:http createConnection that proves the TCP connection before the
  * request is written on it. node:http uses it only when the request has no
- * agent (agent undefined, not false). The connect is bounded by
- * LISTENER_PROOF_TIMEOUT_MS, as the proof is: a listener that never accepts
+ * agent (agent undefined, not false). Connect and proof share one
+ * LISTENER_PROOF_DEADLINE_MS deadline: a listener that never accepts
  * (a wedged gateway, a full accept queue, a squatter that never calls
  * accept) fails the request at once instead of after the kernel's connect
  * timeout of about two minutes. connectImpl is replaceable in tests.
+ * deadlineMs is replaceable in tests.
  */
 export function provenCreateConnection(
   host: string,
   port: number,
   token: string,
   connectImpl: (options: { host: string; port: number }) => Socket = netConnect,
+  deadlineMs: number = LISTENER_PROOF_DEADLINE_MS,
 ): CreateConnection {
   return (_options, oncreate) => {
     try {
@@ -257,22 +289,23 @@ export function provenCreateConnection(
       oncreate(err, socket);
     };
     const address = canonicalLoopbackHost(host);
+    const deadlineAt = Date.now() + deadlineMs;
     const socket = connectImpl({ host: address, port });
     const prove = proofOverride
       ? () => proofOverride!(host, port, token)
-      : () => proveSocket(socket, address, port, token);
-    const connectTimer = setTimeout(() => {
+      : () => proveSocket(socket, address, port, token, deadlineAt);
+    const cancelConnect = deadlineTimer(deadlineMs, () => {
       socket.removeListener("error", onConnectError);
       socket.destroy();
       once(new ListenerProofError(`${notProven(host, port).message}: connect timed out`));
-    }, LISTENER_PROOF_TIMEOUT_MS);
+    });
     const onConnectError = (err: Error) => {
-      clearTimeout(connectTimer);
+      cancelConnect();
       once(new ListenerProofError(`${notProven(host, port).message}: ${err.message}`));
     };
     socket.once("error", onConnectError);
     socket.once("connect", () => {
-      clearTimeout(connectTimer);
+      cancelConnect();
       socket.removeListener("error", onConnectError);
       prove().then(
         () => once(null, socket),
