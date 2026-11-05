@@ -6,23 +6,38 @@
 package cli
 
 import (
+	"encoding/hex"
+	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 	"testing"
 
 	"golang.org/x/sys/windows"
+	"golang.org/x/sys/windows/registry"
 
+	"github.com/defenseclaw/defenseclaw/internal/enterprisebundle"
+	"github.com/defenseclaw/defenseclaw/internal/enterprisehooks"
+	"github.com/defenseclaw/defenseclaw/internal/enterprisestatus"
 	"github.com/defenseclaw/defenseclaw/internal/gateway/connector"
 	"github.com/defenseclaw/defenseclaw/internal/managed"
 )
 
 // isolateTestHost keeps the package's tests off the computer's own managed
-// deployment. On a computer that is itself managed, the per-user gateway
-// guard read the real HKLM marker and refused every start, stop and restart
-// test that did not stub it; and a test that reached the scanner lifecycle
-// without its own runtime folder worked on the installed scanner runtime.
-// Tests that need a managed computer or a runtime folder set their own.
+// deployment, and makes them give the same answers whoever runs them. On a
+// computer that is itself managed, the per-user gateway guard read the real
+// HKLM marker and refused every start, stop and restart test that did not
+// stub it; and a test that reached the scanner lifecycle without its own
+// runtime folder worked on the installed scanner runtime. Tests that need a
+// managed computer or a runtime folder set their own.
+//
+// GAP-0079: the machine writers and the process identity are package
+// defaults too, not something each test must remember. A bundle test that did
+// not stub the marker sync wrote its fixture bundle to the real HKLM marker
+// of a managed computer, and a test that did not pin the identity gave
+// another answer as LocalSystem or as a standard user.
 func isolateTestHost() func() {
 	managedHostWindowsStandalone = func() (string, bool) { return "", false }
 	// GAP-2572: on a managed lane host the HKLM marker key exists, so the
@@ -31,18 +46,214 @@ func isolateTestHost() func() {
 	// other two machine signals the outage mode reads.
 	managedHostWindowsMarkerUncertain = func() bool { return false }
 	secureClientHost = func() bool { return false }
+	pinTestProcessIdentity()
 	dir, err := os.MkdirTemp("", "defenseclaw-cli-test-")
 	if err != nil {
 		windowsScannerRuntimeDir = func() (string, error) { return "", err }
 		managedHostDescriptorPath = func() string { return "" }
-		return func() {}
+		return isolateTestMachineWriters("")
 	}
 	missingDescriptor := filepath.Join(dir, "no-runtime-descriptor")
 	managedHostDescriptorPath = func() string { return missingDescriptor }
 	// Absent like on a computer without a deployment.
 	runtimeDir := filepath.Join(dir, "scanners")
 	windowsScannerRuntimeDir = func() (string, error) { return runtimeDir, nil }
-	return func() { _ = os.RemoveAll(dir) }
+	restoreMachine := isolateTestMachineWriters(filepath.Join(dir, "lifecycle-logs"))
+	return func() {
+		restoreMachine()
+		_ = os.RemoveAll(dir)
+	}
+}
+
+// testProcessIdentityNote says which identity the package's tests run as.
+const testProcessIdentityNote = "an elevated administrator that is not LocalSystem (the CI runner's identity)"
+
+// pinTestProcessIdentity makes every identity seam answer as the CI runner
+// does, an elevated administrator that is not LocalSystem, whatever token
+// runs the tests: a standard user, LocalSystem or an elevated administrator.
+// A test that needs another identity sets its own and restores it.
+func pinTestProcessIdentity() {
+	windowsEnterpriseIsElevated = func() bool { return true }
+	windowsSecretIsElevated = func() bool { return true }
+	windowsCoworkElevated = func() bool { return true }
+	windowsEnterpriseRunningAsLocalSystem = func() bool { return false }
+	windowsClaudeSettingsCheckerIsLocalSystem = func() bool { return false }
+	enterpriseHookWindowsUserCleanupIdentity = func() error { return enterprisehooks.ErrWindowsEnterpriseNotLocalSystem }
+}
+
+// isolateTestMachineWriters points every machine writer of the standalone
+// lifecycle at a sandbox: the registry root at a throwaway HKCU key, the
+// lifecycle log at logDir in the temp folder, the event log at a writer that
+// takes each event and keeps none, and the bundle marker sync, service
+// start-mode restore, runtime folder repair, production bin cleanup and
+// Program Files\Cisco removal at no-ops. The returned function removes the
+// sandbox key.
+func isolateTestMachineWriters(logDir string) func() {
+	windowsBundleSyncMarker = func(*enterprisebundle.Store) error { return nil }
+	windowsEnterpriseEventWriter = func(string, uint32, string, string) error { return nil }
+	windowsEnterpriseLogDirectory = func() (string, error) {
+		if logDir == "" {
+			return "", errors.New("the tests have no temp folder for the lifecycle log")
+		}
+		return logDir, nil
+	}
+	windowsEnterpriseLogDirectoryEnsurer = func(directory string) error { return os.MkdirAll(directory, 0o700) }
+	removeEmptyWindowsEnterpriseInstallParent = func() {}
+	windowsEnterpriseRestoreStartModes = func(*windowsEnterpriseInstallerReport) error { return nil }
+	windowsEnterpriseRepairDataDirBeforePlan = func() string { return "" }
+	windowsEnterpriseRemoveReplacementCopies = func() []string { return nil }
+	// The priority class is process state: a lifecycle test that lowered it
+	// left every later test, and cmd.exe and the other programs they start,
+	// below normal. TestWindowsLifecycleRunYieldsTheCPUToTheHooks checks the
+	// real yield in a child process.
+	windowsEnterpriseLifecycleYield = func() {}
+
+	path := testMachineRegistrySandboxPath()
+	key, _, err := registry.CreateKey(registry.CURRENT_USER, path, registry.ALL_ACCESS)
+	if err != nil {
+		// No sandbox: an invalid root makes every machine write fail rather
+		// than reach HKLM (TestPackageTestsDoNotReachTheInstalledDeployment
+		// reports it).
+		key = 0
+	}
+	windowsEnterpriseMachineRegistry = key
+	return func() {
+		windowsEnterpriseMachineRegistry = 0
+		if key != 0 {
+			_ = key.Close()
+		}
+		_ = deleteTestRegistryTree(registry.CURRENT_USER, path)
+	}
+}
+
+func testMachineRegistrySandboxPath() string {
+	return fmt.Sprintf(`Software\DefenseClaw-test-%d`, os.Getpid())
+}
+
+// deleteTestRegistryTree removes path and everything under it.
+func deleteTestRegistryTree(root registry.Key, path string) error {
+	if key, err := registry.OpenKey(root, path, registry.ENUMERATE_SUB_KEYS); err == nil {
+		names, _ := key.ReadSubKeyNames(-1)
+		_ = key.Close()
+		for _, name := range names {
+			_ = deleteTestRegistryTree(root, path+`\`+name)
+		}
+	}
+	if err := registry.DeleteKey(root, path); err != nil && !errors.Is(err, registry.ErrNotExist) {
+		return err
+	}
+	return nil
+}
+
+// testGuardedMachineKeys are the computer's own HKLM keys DefenseClaw
+// writes: the standalone marker and its parents, the self-update policy, the
+// Add/Remove Programs entry, the event log registration and the machine
+// policies of the agents. The DefenseClaw services' keys are added at
+// snapshot time.
+var testGuardedMachineKeys = []string{
+	`SOFTWARE\Cisco\DefenseClaw`,
+	`SOFTWARE\Policies\Cisco\DefenseClaw`,
+	`SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall\CiscoDefenseClawEnterprise`,
+	windowsEnterpriseEventLogParent + `\DefenseClaw`,
+	windowsEnterpriseEventLogParent + `\Application\` + windowsEnterpriseEventSrc,
+	`SOFTWARE\Policies\ClaudeCode`,
+	`SOFTWARE\Policies\Claude`,
+	`SOFTWARE\Policies\WSL`,
+}
+
+// snapshotTestMachineRegistry reads every value under the guarded HKLM keys
+// and the DefenseClaw* service keys, as "key\name" = "type:hex".
+func snapshotTestMachineRegistry() map[string]string {
+	snapshot := map[string]string{}
+	keys := append([]string(nil), testGuardedMachineKeys...)
+	if services, err := registry.OpenKey(registry.LOCAL_MACHINE, `SYSTEM\CurrentControlSet\Services`, registry.ENUMERATE_SUB_KEYS); err == nil {
+		names, _ := services.ReadSubKeyNames(-1)
+		_ = services.Close()
+		for _, name := range names {
+			if strings.HasPrefix(strings.ToLower(name), "defenseclaw") {
+				keys = append(keys, `SYSTEM\CurrentControlSet\Services\`+name)
+			}
+		}
+	}
+	for _, path := range keys {
+		snapshotTestRegistryKey(snapshot, path)
+	}
+	return snapshot
+}
+
+func snapshotTestRegistryKey(snapshot map[string]string, path string) {
+	key, err := registry.OpenKey(registry.LOCAL_MACHINE, path, registry.QUERY_VALUE|registry.ENUMERATE_SUB_KEYS|registry.WOW64_64KEY)
+	if errors.Is(err, registry.ErrNotExist) {
+		return
+	}
+	if err != nil {
+		snapshot[path] = "unreadable: " + err.Error()
+		return
+	}
+	defer key.Close()
+	snapshot[path] = "key"
+	names, _ := key.ReadValueNames(-1)
+	for _, name := range names {
+		size, kind, err := key.GetValue(name, nil)
+		if err != nil && !errors.Is(err, windows.ERROR_MORE_DATA) {
+			snapshot[path+`\`+name] = "unreadable: " + err.Error()
+			continue
+		}
+		buffer := make([]byte, size)
+		if _, _, err := key.GetValue(name, buffer); err != nil {
+			snapshot[path+`\`+name] = "unreadable: " + err.Error()
+			continue
+		}
+		snapshot[path+`\`+name] = fmt.Sprintf("%d:%s", kind, hex.EncodeToString(buffer))
+	}
+	subkeys, _ := key.ReadSubKeyNames(-1)
+	for _, name := range subkeys {
+		snapshotTestRegistryKey(snapshot, path+`\`+name)
+	}
+}
+
+// diffTestMachineRegistry lists what changed between two snapshots.
+func diffTestMachineRegistry(before, after map[string]string) []string {
+	var changes []string
+	for name, value := range before {
+		if now, ok := after[name]; !ok {
+			changes = append(changes, "removed "+name+" = "+value)
+		} else if now != value {
+			changes = append(changes, "changed "+name+" = "+value+" -> "+now)
+		}
+	}
+	for name, value := range after {
+		if _, ok := before[name]; !ok {
+			changes = append(changes, "added "+name+" = "+value)
+		}
+	}
+	sort.Strings(changes)
+	return changes
+}
+
+// guardTestMachine snapshots the computer's DefenseClaw machine registry
+// before the package runs. The returned check fails the run when any test
+// changed it (GAP-0079).
+func guardTestMachine() func() error {
+	before := snapshotTestMachineRegistry()
+	return func() error {
+		changes := diffTestMachineRegistry(before, snapshotTestMachineRegistry())
+		if len(changes) == 0 {
+			return nil
+		}
+		return fmt.Errorf("GAP-0079: the internal/cli tests changed the computer's own DefenseClaw machine registry "+
+			"(every machine writer must reach the test sandbox HKCU\\%s):\n  %s",
+			testMachineRegistrySandboxPath(), strings.Join(changes, "\n  "))
+	}
+}
+
+// testProcessPriority is the CPU priority class of the test binary.
+func testProcessPriority() string {
+	class, err := windows.GetPriorityClass(windows.CurrentProcess())
+	if err != nil {
+		return "unreadable: " + err.Error()
+	}
+	return fmt.Sprintf("%#x", class)
 }
 
 // isolateWindowsEnterpriseHostReaders makes the computer's own standalone
@@ -101,7 +312,8 @@ func testRunsAsLocalSystem() bool {
 }
 
 // The package runs with neither the computer's managed marker nor its
-// installed scanner runtime in reach, managed or not.
+// installed scanner runtime in reach, managed or not, with every machine
+// writer in the sandbox and the identity pinned.
 func TestPackageTestsDoNotReachTheInstalledDeployment(t *testing.T) {
 	if where, managed := managedHostWindowsStandalone(); managed {
 		t.Fatalf("the managed-host guard reads the real deployment (%s)", where)
@@ -124,5 +336,85 @@ func TestPackageTestsDoNotReachTheInstalledDeployment(t *testing.T) {
 	}
 	if rel, err := filepath.Rel(os.TempDir(), root); err != nil || strings.HasPrefix(rel, "..") {
 		t.Fatalf("scanner runtime %s is outside the temp folder %s", root, os.TempDir())
+	}
+
+	// GAP-0079: the machine writers.
+	if windowsEnterpriseMachineRegistry == registry.LOCAL_MACHINE || windowsEnterpriseMachineRegistry == 0 {
+		t.Fatalf("the standalone registration writes the real registry root (%#x), not the HKCU sandbox", windowsEnterpriseMachineRegistry)
+	}
+	logDir, err := windowsEnterpriseLogDirectory()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if rel, err := filepath.Rel(os.TempDir(), logDir); err != nil || strings.HasPrefix(rel, "..") {
+		t.Fatalf("the lifecycle log %s is outside the temp folder %s", logDir, os.TempDir())
+	}
+	// The no-op writers (bundle marker sync, start-mode restore, runtime
+	// folder repair, bin cleanup) are not called here: on a regression they
+	// would change the computer. The TestMain registry guard catches them.
+
+	// GAP-0079: the identity is pinned.
+	if !windowsEnterpriseIsElevated() || !windowsSecretIsElevated() || !windowsCoworkElevated() ||
+		windowsEnterpriseRunningAsLocalSystem() || windowsClaudeSettingsCheckerIsLocalSystem() ||
+		!errors.Is(enterpriseHookWindowsUserCleanupIdentity(), enterprisehooks.ErrWindowsEnterpriseNotLocalSystem) {
+		t.Fatalf("the package's tests do not run as %s", testProcessIdentityNote)
+	}
+}
+
+// GAP-0079: a successful install publishes the marker, the Add/Remove
+// Programs entry and the policy key, and the uninstall removes them, in the
+// test sandbox and never in HKLM.
+func TestStandaloneRegistrationWritesOnlyTheTestSandbox(t *testing.T) {
+	savedLayout := windowsBundleLayout
+	t.Cleanup(func() { windowsBundleLayout = savedLayout })
+	windowsBundleLayout = func() (managed.StandaloneLayout, error) { return managed.StandaloneLayout{}, os.ErrNotExist }
+	before := snapshotTestMachineRegistry()
+
+	install := &enterprisestatus.Result{Action: "install", OK: true, Installed: true, InstalledVersion: "1.0.9-sandbox"}
+	if err := updateWindowsEnterpriseRegistration(install, nil); err != nil {
+		t.Fatal(err)
+	}
+	for path, values := range map[string]map[string]string{
+		WindowsEnterpriseMarkerKey: {"Profile": managed.ProfileStandalone, "ProductVersion": "1.0.9-sandbox"},
+		windowsEnterpriseARPKey:    {"DisplayVersion": "1.0.9-sandbox", "DisplayName": "Cisco DefenseClaw Enterprise"},
+	} {
+		key, err := registry.OpenKey(windowsEnterpriseMachineRegistry, path, registry.QUERY_VALUE|registry.WOW64_64KEY)
+		if err != nil {
+			t.Fatalf("the sandbox has no %s: %v", path, err)
+		}
+		for name, want := range values {
+			if got, _, err := key.GetStringValue(name); err != nil || got != want {
+				t.Errorf("sandbox %s\\%s = %q (%v), want %q", path, name, got, err, want)
+			}
+		}
+		_ = key.Close()
+	}
+
+	uninstall := &enterprisestatus.Result{Action: "uninstall", OK: true}
+	if err := updateWindowsEnterpriseRegistration(uninstall, nil); err != nil {
+		t.Fatal(err)
+	}
+	for _, path := range []string{WindowsEnterpriseMarkerKey, windowsEnterpriseARPKey} {
+		if key, err := registry.OpenKey(windowsEnterpriseMachineRegistry, path, registry.QUERY_VALUE|registry.WOW64_64KEY); err == nil {
+			_ = key.Close()
+			t.Errorf("the uninstall left %s in the sandbox", path)
+		}
+	}
+	if changes := diffTestMachineRegistry(before, snapshotTestMachineRegistry()); len(changes) != 0 {
+		t.Fatalf("the registration changed HKLM:\n%s", strings.Join(changes, "\n"))
+	}
+}
+
+// The registry guard sees an added, a changed and a removed value.
+func TestTestMachineRegistryGuardReportsEveryChange(t *testing.T) {
+	before := map[string]string{`k\kept`: "1:00", `k\changed`: "1:00", `k\removed`: "1:00"}
+	after := map[string]string{`k\kept`: "1:00", `k\changed`: "1:01", `k\added`: "1:00"}
+	got := strings.Join(diffTestMachineRegistry(before, after), "\n")
+	want := "added k\\added = 1:00\nchanged k\\changed = 1:00 -> 1:01\nremoved k\\removed = 1:00"
+	if got != want {
+		t.Fatalf("diff =\n%s\nwant\n%s", got, want)
+	}
+	if changes := diffTestMachineRegistry(before, before); len(changes) != 0 {
+		t.Fatalf("an unchanged snapshot reported %v", changes)
 	}
 }

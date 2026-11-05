@@ -206,7 +206,7 @@ func syncWindowsBundleMarker(store *enterprisebundle.Store) error {
 	if err != nil || st.Current == nil {
 		return err
 	}
-	marker, err := registry.OpenKey(registry.LOCAL_MACHINE, WindowsEnterpriseMarkerKey,
+	marker, err := registry.OpenKey(windowsEnterpriseMachineRegistry, WindowsEnterpriseMarkerKey,
 		registry.SET_VALUE|registry.QUERY_VALUE|registry.WOW64_64KEY)
 	if err != nil {
 		return fmt.Errorf("open the enterprise marker to publish the confirmed bundle: %w", err)

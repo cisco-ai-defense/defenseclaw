@@ -540,7 +540,7 @@ func runWindowsEnterpriseLifecycle(
 	if windowsEnterpriseMutationAction(action) {
 		// The run and the installer it starts leave the CPU to the hooks
 		// that must answer each tool call in time (GAP-0155).
-		windowsLifecycleYieldToHooks()
+		windowsEnterpriseLifecycleYield()
 	}
 	if err := resolveWindowsEnterpriseLifecycleProfile(action, opts); err != nil {
 		recordWindowsAnchorsProfileRefusal(cmd, opts, err)
