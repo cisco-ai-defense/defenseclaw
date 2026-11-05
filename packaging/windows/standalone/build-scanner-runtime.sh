@@ -147,6 +147,14 @@ DC_WHEEL="$(ls "${WORK}"/dist/defenseclaw-*-py3-none-any.whl)"
 uv pip install --quiet --target "${SITE}" --python-version "${PYTHON_TARGET}" --python-platform windows \
     --only-binary :all: --no-deps "${DC_WHEEL}"
 
+echo "==> Windows x64 PEs only (Setup refuses any other; rel-1-0-6:GAP-0107)"
+# pip, which MCP Scanner pulls in through pip-audit, vendors distlib's script
+# launchers for every Windows architecture. Drop the reviewed non-x64 ones and
+# repair pip's RECORD, as the per-user builder does, after the last install
+# into site-packages; then refuse any non-x64 PE anywhere in the runtime.
+python3 -I "${REPO_ROOT}/scripts/windows_installer_artifacts.py" prune-foreign-pe --root "${SITE}"
+python3 -I "${REPO_ROOT}/scripts/windows_installer_artifacts.py" check-x64-pe --root "${RT}"
+
 echo "==> runtime.zip"
 python3 -I - "${RT}" "${OUT_DIR}" "${PYTHON_VERSION}" <<'PYCODE'
 import hashlib, json, pathlib, re, shutil, sys, zipfile
