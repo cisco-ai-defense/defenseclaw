@@ -41,9 +41,12 @@ import (
 //     must belong to the home's account, and a file must have a single link,
 //     so a hard link to another account's file is refused too.
 //   - Only regular files and folders count. Only MCP configs are read, within
-//     a per-file and a per-request byte cap, and only their server names leave
-//     the helper. Folders give their child names; everything else gives its
-//     presence and modification time.
+//     per-file, per-home and per-request byte caps, and only their server
+//     names leave the helper; ~/.claude.json is walked for its names, never
+//     decoded whole. Folders give their child names; everything else gives
+//     its presence and modification time. Past a home's or the request's
+//     share of the answer, an entry keeps its presence and drops its names
+//     (cap_exceeded), so the answer always fits the helper's frame.
 //
 // The gateway checks the answer against the same allowlist and builds the
 // signals with the detectors' own constructors (signalFromPath,
@@ -63,13 +66,30 @@ const (
 	brokeredHomeDetector = "sensor_helper"
 
 	maxBrokeredHomes = 256
-	// maxBrokeredFileBytes bounds one MCP config, and
-	// maxBrokeredClaudeStateBytes ~/.claude.json, which carries Claude
-	// Code's conversation state. maxBrokeredReadBytes bounds what one
-	// request reads in all; the helper runs under MemoryMax=300M.
-	maxBrokeredFileBytes        = 4 << 20
+	// The helper runs under MemoryMax=300M and parses one file at a time.
+	// maxBrokeredFileBytes bounds one JSON or JSONC MCP config: real ones are
+	// kilobytes, and the parsers build the whole document, so 1 MiB of tiny
+	// members peaks near 110 MB. maxBrokeredYAMLTOMLBytes bounds a YAML or
+	// TOML one: those parsers check duplicate keys in quadratic time, so 1
+	// MiB of tiny keys takes tens of seconds of the helper's one CPU, and 128
+	// KiB under a second. maxBrokeredClaudeStateBytes bounds
+	// ~/.claude.json, which carries Claude Code's conversation state; it is
+	// walked for names, not decoded (parseClaudeDiscoveryStateNames).
+	// maxBrokeredHomeReadBytes bounds what one home reads, so one account's
+	// files cannot leave the homes after it unread, and maxBrokeredReadBytes
+	// what one request reads in all.
+	maxBrokeredFileBytes        = 1 << 20
+	maxBrokeredYAMLTOMLBytes    = 128 << 10
 	maxBrokeredClaudeStateBytes = 32 << 20
+	maxBrokeredHomeReadBytes    = 40 << 20
 	maxBrokeredReadBytes        = 64 << 20
+	// maxBrokeredHomeReplyBytes and maxBrokeredReplyBytes bound the encoded
+	// entries one home, and one request, answer with in full. Past them an
+	// entry is answered without its names (brokeredReadBudget.fit), so the
+	// answer stays well inside the helper's 64 MiB frame (maxFrameBytes in
+	// internal/sensor/acquire).
+	maxBrokeredHomeReplyBytes = 1 << 20
+	maxBrokeredReplyBytes     = 16 << 20
 	// maxBrokeredChildren bounds the child names of one folder, enough for
 	// the detectors' own cap of maxEvidencePerSignal rows after filtering.
 	maxBrokeredChildren = 2 * maxEvidencePerSignal

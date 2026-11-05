@@ -2554,20 +2554,21 @@ func mcpConfigShape(path, connector string) string {
 }
 
 // parseMCPConfigBytesForNames is parseMCPConfigForNames, with
-// readMCPServerNamesWithErr's blank-file rule and readClaudeDiscoveryState's
-// mcpShapeClaudeState, for a config the caller already read: the sensor
-// helper reads it without following links (brokered_homes_read_linux.go).
-// source names the file for the OpenCode resolver; nothing is opened.
-func parseMCPConfigBytesForNames(shape, source string, data []byte) ([]string, error) {
+// readMCPServerNamesWithErr's blank-file rule, for a config the caller
+// already read: the sensor helper reads it without following links
+// (brokered_homes_read_linux.go). ~/.claude.json (mcpShapeClaudeState), up to
+// maxBrokeredClaudeStateBytes, is walked by parseClaudeDiscoveryStateNames,
+// which keeps at most limit names and reports truncated past them; the other
+// shapes, up to maxBrokeredFileBytes, give every name. source names the file
+// for the OpenCode resolver; nothing is opened.
+func parseMCPConfigBytesForNames(shape, source string, data []byte, limit int) (names []string, truncated bool, err error) {
 	if shape == mcpShapeClaudeState {
-		servers, _, err := parseClaudeDiscoveryState(data)
-		return servers, err
+		return parseClaudeDiscoveryStateNames(data, limit)
 	}
 	if len(data) <= 4096 && strings.TrimSpace(string(data)) == "" {
-		return nil, nil
+		return nil, false, nil
 	}
 	var entries []config.MCPServerEntry
-	var err error
 	switch shape {
 	case mcpShapeAmp:
 		entries, err = config.ParseMCPFromAmpSettings(data)
@@ -2588,18 +2589,18 @@ func parseMCPConfigBytesForNames(shape, source string, data []byte) ([]string, e
 	case mcpShapeDotMCP:
 		entries, err = config.ParseMCPFromDotMCPJSON(data)
 	default:
-		return nil, fmt.Errorf("unknown MCP config shape %q", shape)
+		return nil, false, fmt.Errorf("unknown MCP config shape %q", shape)
 	}
 	if err != nil {
-		return nil, err
+		return nil, false, err
 	}
-	names := make([]string, 0, len(entries))
+	names = make([]string, 0, len(entries))
 	for _, e := range entries {
 		if name := strings.TrimSpace(e.Name); name != "" {
 			names = append(names, name)
 		}
 	}
-	return names, nil
+	return names, false, nil
 }
 
 // dirHasEntry reports whether path exists AND, if it's a directory,

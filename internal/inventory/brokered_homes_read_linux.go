@@ -7,13 +7,13 @@ package inventory
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
 	"os"
 	"os/user"
 	"path/filepath"
-	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -28,7 +28,7 @@ import (
 // link.
 func ReadBrokeredHomes(ctx context.Context, homes []string, allow BrokeredHomeAllowlist) BrokeredHomeReport {
 	report := BrokeredHomeReport{Version: BrokeredHomeReportVersion}
-	budget := brokeredReadBudget{remaining: maxBrokeredReadBytes}
+	budget := brokeredReadBudget{remaining: maxBrokeredReadBytes, reply: maxBrokeredReplyBytes}
 	paths := allow.Paths()
 	seen := map[string]bool{}
 	for _, home := range homes {
@@ -54,10 +54,56 @@ func ReadBrokeredHomes(ctx context.Context, homes []string, allow BrokeredHomeAl
 	return report
 }
 
+// brokeredReadBudget is what a read may still take: remaining bytes of MCP
+// configs, and reply bytes of entries answered in full.
 type brokeredReadBudget struct {
 	remaining int64
+	reply     int64
 	files     int
 	truncated bool
+}
+
+// share is one home's part of the request's budget, at most
+// maxBrokeredHomeReadBytes and maxBrokeredHomeReplyBytes of what is left.
+func (b *brokeredReadBudget) share() brokeredReadBudget {
+	return brokeredReadBudget{
+		remaining: min(b.remaining, maxBrokeredHomeReadBytes),
+		reply:     min(b.reply, maxBrokeredHomeReplyBytes),
+	}
+}
+
+// charge takes from the request what a home used of its share, which
+// started as start.
+func (b *brokeredReadBudget) charge(start, used brokeredReadBudget) {
+	b.remaining -= start.remaining - used.remaining
+	b.reply -= start.reply - used.reply
+	b.files += used.files
+	b.truncated = b.truncated || used.truncated
+}
+
+// fit answers entry in full while the reply budget has room for it. Past
+// that the entry still says it is there, with its child and server names
+// left out and marked cap_exceeded: a partial answer, never a frame too
+// large to send. Such a bare entry is bounded by the allowlist, not the
+// budget.
+func (b *brokeredReadBudget) fit(entry BrokeredHomeEntry) BrokeredHomeEntry {
+	if raw, err := json.Marshal(entry); err == nil && int64(len(raw)) <= b.reply {
+		b.reply -= int64(len(raw))
+		return entry
+	}
+	b.truncated = true
+	if len(entry.Children) > 0 {
+		entry.Children, entry.ChildrenTruncated = nil, true
+	}
+	bare := make([]BrokeredMCPConfig, 0, len(entry.MCP))
+	for _, cfg := range entry.MCP {
+		if len(cfg.Servers) > 0 {
+			cfg = BrokeredMCPConfig{Shape: cfg.Shape, Partial: CoverageReasonCapExceeded}
+		}
+		bare = append(bare, cfg)
+	}
+	entry.MCP = bare
+	return entry
 }
 
 // brokeredHomeAccount names the account of uid and its passwd home. A seam
@@ -93,15 +139,20 @@ func readBrokeredHome(ctx context.Context, home string, paths []string, allow Br
 		return BrokeredHome{}, false
 	}
 	out := BrokeredHome{Home: home, UID: uid, User: name}
+	// The home reads and answers within its own share of the request's
+	// budget, so it cannot leave the homes after it unread.
+	start := budget.share()
+	share := start
+	defer func() { budget.charge(start, share) }()
 	for _, rel := range paths {
 		if ctx.Err() != nil {
-			budget.truncated = true
+			share.truncated = true
 			break
 		}
-		entry, outcome := readBrokeredEntry(fd, uid, rel, allow[rel], filepath.Join(home, rel), budget)
+		entry, outcome := readBrokeredEntry(fd, uid, rel, allow[rel], filepath.Join(home, rel), &share)
 		switch outcome {
 		case brokeredPresent:
-			out.Entries = append(out.Entries, entry)
+			out.Entries = append(out.Entries, share.fit(entry))
 		case brokeredRefused:
 			out.Refused++
 		}
@@ -237,12 +288,10 @@ func readBrokeredChildren(dirFD int, dir *os.File) ([]BrokeredHomeChild, bool) {
 }
 
 // readBrokeredMCP reads one MCP config within the per-file cap and the
-// request's byte budget and keeps only its server names, once per shape.
+// home's byte budget and keeps only its server names, at most
+// maxEvidencePerSignal per shape (cap_exceeded past them).
 func readBrokeredMCP(file *os.File, size int64, shapes []string, source string, budget *brokeredReadBudget) []BrokeredMCPConfig {
-	limit := int64(maxBrokeredFileBytes)
-	if slices.Contains(shapes, mcpShapeClaudeState) {
-		limit = maxBrokeredClaudeStateBytes
-	}
+	limit := brokeredFileLimit(shapes)
 	failed := func(reason string) []BrokeredMCPConfig {
 		out := make([]BrokeredMCPConfig, 0, len(shapes))
 		for _, shape := range shapes {
@@ -257,7 +306,7 @@ func readBrokeredMCP(file *os.File, size int64, shapes []string, source string, 
 		budget.truncated = true
 		return failed(CoverageReasonCapExceeded)
 	}
-	data, err := io.ReadAll(io.LimitReader(file, limit+1))
+	data, err := readBrokeredFile(file, size, limit)
 	if err != nil {
 		return failed(CoverageReasonParseError)
 	}
@@ -269,32 +318,73 @@ func readBrokeredMCP(file *os.File, size int64, shapes []string, source string, 
 	budget.files++
 	out := make([]BrokeredMCPConfig, 0, len(shapes))
 	for _, shape := range shapes {
-		names, err := parseBrokeredMCP(shape, source, data)
+		names, truncated, err := parseBrokeredMCP(shape, source, data)
 		if err != nil {
 			out = append(out, BrokeredMCPConfig{Shape: shape, Partial: CoverageReasonParseError})
 			continue
 		}
 		cfg := BrokeredMCPConfig{Shape: shape}
 		for _, name := range names {
+			if name = sanitizeBasenameValue(name); name == "" {
+				continue
+			}
 			if len(cfg.Servers) >= maxEvidencePerSignal {
+				truncated = true
 				break
 			}
-			if name = sanitizeBasenameValue(name); name != "" {
-				cfg.Servers = append(cfg.Servers, name)
-			}
+			cfg.Servers = append(cfg.Servers, name)
+		}
+		if truncated {
+			cfg.Partial = CoverageReasonCapExceeded
 		}
 		out = append(out, cfg)
 	}
 	return out
 }
 
+// brokeredFileLimit is the byte cap of a config read as shapes, the smallest
+// of theirs.
+func brokeredFileLimit(shapes []string) int64 {
+	limit := int64(maxBrokeredClaudeStateBytes)
+	for _, shape := range shapes {
+		switch shape {
+		case mcpShapeClaudeState:
+		case mcpShapeHermesYAML, mcpShapeCodexTOML:
+			limit = min(limit, maxBrokeredYAMLTOMLBytes)
+		default:
+			limit = min(limit, maxBrokeredFileBytes)
+		}
+	}
+	return limit
+}
+
+// readBrokeredFile reads a config that was size bytes when checked into a
+// buffer of that size, so a large one is not copied as it grows; one that
+// grew since is read on to limit+1 bytes, which the caller refuses.
+func readBrokeredFile(file *os.File, size, limit int64) ([]byte, error) {
+	data := make([]byte, size+1)
+	n, err := io.ReadFull(file, data)
+	data = data[:n]
+	switch {
+	case errors.Is(err, io.ErrUnexpectedEOF), errors.Is(err, io.EOF):
+		return data, nil
+	case err != nil:
+		return nil, err
+	}
+	more, err := io.ReadAll(io.LimitReader(file, limit+1-int64(n)))
+	if err != nil {
+		return nil, err
+	}
+	return append(data, more...), nil
+}
+
 // parseBrokeredMCP parses a config the home's account wrote. A parser
 // failure is a parse error, never a crash of the root helper.
-func parseBrokeredMCP(shape, source string, data []byte) (names []string, err error) {
+func parseBrokeredMCP(shape, source string, data []byte) (names []string, truncated bool, err error) {
 	defer func() {
 		if recovered := recover(); recovered != nil {
-			names, err = nil, fmt.Errorf("MCP config parser failed: %v", recovered)
+			names, truncated, err = nil, false, fmt.Errorf("MCP config parser failed: %v", recovered)
 		}
 	}()
-	return parseMCPConfigBytesForNames(shape, source, data)
+	return parseMCPConfigBytesForNames(shape, source, data, maxEvidencePerSignal)
 }
