@@ -130,7 +130,7 @@ defenseclaw guardrail enable  --connector codex
 
 `guardrail hilt`, `fail-mode`, `block-message`, `enable` and `disable` print what they will change and ask `Proceed? [Y/n]`; Enter applies it, and `--yes` skips the question in scripts. `mode`, `block-at` and `use-pack` apply at once.
 
-`--connector X` writes only that connector's override. `fail-mode --connector X` then refreshes and verifies that connector's hook registration (every hook connector, Kiro included); the proxy-backed OpenClaw and ZeptoClaw have none, so it is refused for them before anything changes. Unscoped writes are the broad path: `fail-mode`, `hilt` and `block-message` also reconcile active connector posture so an old override does not keep the old value. On a single-connector install `--connector` is rejected.
+`--connector X` writes only that connector's override. `fail-mode --connector X` then refreshes and verifies that connector's hook registration (every hook connector, Kiro included); the proxy-backed OpenClaw and ZeptoClaw have none, so for them it saves the outage mode of their PATH shims (`curl`, `wget`, `ssh`, `nc`, `pip`, `npm`) and refreshes the mode installed in the shims; their proxied requests stay blocked while the gateway is down ([fail modes](/docs/reference/fail-modes)). Unscoped writes are the broad path: `fail-mode`, `hilt` and `block-message` also reconcile active connector posture so an old override does not keep the old value. On a single-connector install `--connector` is rejected.
 
 ### CLI contract: read vs write
 
