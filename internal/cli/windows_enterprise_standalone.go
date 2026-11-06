@@ -41,6 +41,7 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/gateway"
 	"github.com/defenseclaw/defenseclaw/internal/lazyregexp"
 	"github.com/defenseclaw/defenseclaw/internal/managed"
+	"github.com/defenseclaw/defenseclaw/internal/processutil"
 	"github.com/defenseclaw/defenseclaw/internal/winpath"
 )
 
@@ -825,14 +826,14 @@ func runWindowsEnterpriseStandaloneAction(
 		// As ensure does: never load an installed config.yaml or manifest
 		// the transaction refuses before the approved source (GAP-0948,
 		// GAP-0590).
-		kept, untrusted, err := installWindowsEnterpriseSuppliedConfigOverRefused(opts.configPath)
-		if err == nil && kept != "" {
-			configReplaced = append(configReplaced, windowsEnterpriseReplacedFileChange("config.yaml", kept, untrusted, action))
+		replaced, err := installWindowsEnterpriseSuppliedConfigOverRefused(opts.configPath)
+		if err == nil && replaced.kept != "" {
+			configReplaced = append(configReplaced, windowsEnterpriseReplacedFileChange("config.yaml", replaced, action))
 		}
 		if err == nil {
-			kept, untrusted, err = installWindowsEnterpriseApprovedManifestOverDrift(ctx, windowsEnterpriseEnsureEnumerationLogger(cmd, opts), opts.configPath, opts.manifestPath)
-			if err == nil && kept != "" {
-				configReplaced = append(configReplaced, windowsEnterpriseReplacedFileChange("targets.yaml", kept, untrusted, action))
+			replaced, err = installWindowsEnterpriseApprovedManifestOverDrift(ctx, windowsEnterpriseEnsureEnumerationLogger(cmd, opts), opts.configPath, opts.manifestPath)
+			if err == nil && replaced.kept != "" {
+				configReplaced = append(configReplaced, windowsEnterpriseReplacedFileChange("targets.yaml", replaced, action))
 			}
 		}
 		if err != nil {
@@ -1245,25 +1246,31 @@ func writeWindowsEnterprisePolicyState(state *enterprisestatus.PolicyState) erro
 // "Object creator" default-owner policy the administrator who ran Setup owned
 // the new file, and the gateway's standalone walk and Setup's gate refuse
 // that owner (GAP-0590 review S2).
-func writeFreshFileWithDACL(path string, data []byte, sddl string) error {
+//
+// When another program holds the old file open without delete sharing, the
+// rename fails and the error names that program and the way out. When the
+// replaced object cannot be deleted after the new file took the name, it is
+// deleted at the next restart instead, and the returned note says so for the
+// result's changes (GAP-0590 review S6).
+func writeFreshFileWithDACL(path string, data []byte, sddl string) (string, error) {
 	descriptor, err := windows.SecurityDescriptorFromString(sddl)
 	if err != nil {
-		return err
+		return "", err
 	}
 	owner, _, err := descriptor.Owner()
 	if err != nil {
-		return err
+		return "", err
 	}
 	dacl, _, err := descriptor.DACL()
 	if err != nil {
-		return err
+		return "", err
 	}
 	if owner == nil || dacl == nil {
-		return fmt.Errorf("the descriptor %q for %s names no owner or no access list", sddl, path)
+		return "", fmt.Errorf("the descriptor %q for %s names no owner or no access list", sddl, path)
 	}
 	staging, err := os.CreateTemp(filepath.Dir(path), filepath.Base(path)+".*.tmp")
 	if err != nil {
-		return err
+		return "", err
 	}
 	temporary := staging.Name()
 	_, writeErr := staging.Write(data)
@@ -1280,14 +1287,14 @@ func writeFreshFileWithDACL(path string, data []byte, sddl string) error {
 	}
 	if writeErr != nil {
 		_ = os.Remove(temporary)
-		return writeErr
+		return "", writeErr
 	}
 	aside := temporary + ".replaced"
 	if err := os.Rename(path, aside); errors.Is(err, os.ErrNotExist) {
 		aside = ""
 	} else if err != nil {
 		_ = os.Remove(temporary)
-		return err
+		return "", windowsFreshFileHeldError(path, err)
 	}
 	if err := os.Rename(temporary, path); err != nil {
 		if aside != "" {
@@ -1296,15 +1303,50 @@ func writeFreshFileWithDACL(path string, data []byte, sddl string) error {
 			}
 		}
 		_ = os.Remove(temporary)
-		return err
+		return "", windowsFreshFileHeldError(path, err)
 	}
 	if aside == "" {
-		return nil
+		return "", nil
 	}
-	if err := os.Remove(aside); err != nil {
-		return fmt.Errorf("the new %s is in place, but the replaced file %s could not be deleted: %w", path, aside, err)
+	if err := windowsFreshFileRemove(aside); err != nil {
+		// The new file is in place; a handle on the replaced object keeps
+		// only the replaced bytes, which nothing reads under that name.
+		if delayErr := windowsFreshFileDeleteAtRestart(aside); delayErr != nil {
+			return "", fmt.Errorf("the new %s is in place, but the replaced file %s could not be deleted (%v) or set to be deleted at the next restart: %w",
+				path, aside, err, delayErr)
+		}
+		return "the replaced file " + aside + " is still open in another program and is deleted at the next restart", nil
 	}
-	return nil
+	return "", nil
+}
+
+// The two steps writeFreshFileWithDACL takes for a replaced object it
+// cannot delete at once; tests replace them.
+var (
+	windowsFreshFileRemove          = os.Remove
+	windowsFreshFileDeleteAtRestart = func(path string) error {
+		name, err := windows.UTF16PtrFromString(path)
+		if err != nil {
+			return err
+		}
+		return windows.MoveFileEx(name, nil, windows.MOVEFILE_DELAY_UNTIL_REBOOT)
+	}
+)
+
+// windowsFreshFileHeldError names the way out when another program holds
+// path open without delete sharing, so its name cannot move: stop that
+// program (by name and PID when Restart Manager can tell), or restart
+// Windows, then run Setup /ensure again (GAP-0590 review S6).
+func windowsFreshFileHeldError(path string, err error) error {
+	if !errors.Is(err, windows.ERROR_SHARING_VIOLATION) && !errors.Is(err, windows.ERROR_LOCK_VIOLATION) {
+		return err
+	}
+	holder := "another program"
+	if holders := processutil.FileHolders(path); len(holders) != 0 {
+		holder = strings.Join(holders, ", ")
+	}
+	return fmt.Errorf("%s is held open by %s, so Setup cannot put a new file in its place (%w): stop %s, or restart Windows, then run Setup /ensure again",
+		path, holder, err, holder)
 }
 
 // windowsStandaloneGatewayHealth reads /health of the standalone gateway on
@@ -4333,17 +4375,17 @@ func runWindowsEnterpriseStandaloneEnsureOnce(
 		// The transaction must not load an installed config.yaml that does
 		// not parse (GAP-0948), or a config.yaml or manifest another account
 		// could change (GAP-0590), before it uses the approved source.
-		kept, untrusted, err := installWindowsEnterpriseSuppliedConfigOverRefused(opts.configPath)
-		if err == nil && kept != "" {
-			if untrusted == nil {
-				keptConfig = kept
+		replaced, err := installWindowsEnterpriseSuppliedConfigOverRefused(opts.configPath)
+		if err == nil && replaced.kept != "" {
+			if replaced.untrusted == nil {
+				keptConfig = replaced.kept
 			}
-			result.Changes = append(result.Changes, windowsEnterpriseReplacedFileChange("config.yaml", kept, untrusted, plan.Action))
+			result.Changes = append(result.Changes, windowsEnterpriseReplacedFileChange("config.yaml", replaced, plan.Action))
 		}
 		if err == nil {
-			kept, untrusted, err = installWindowsEnterpriseApprovedManifestOverDrift(ctx, windowsEnterpriseEnsureEnumerationLogger(cmd, opts), opts.configPath, opts.manifestPath)
-			if err == nil && kept != "" {
-				result.Changes = append(result.Changes, windowsEnterpriseReplacedFileChange("targets.yaml", kept, untrusted, plan.Action))
+			replaced, err = installWindowsEnterpriseApprovedManifestOverDrift(ctx, windowsEnterpriseEnsureEnumerationLogger(cmd, opts), opts.configPath, opts.manifestPath)
+			if err == nil && replaced.kept != "" {
+				result.Changes = append(result.Changes, windowsEnterpriseReplacedFileChange("targets.yaml", replaced, plan.Action))
 			}
 		}
 		if err != nil {

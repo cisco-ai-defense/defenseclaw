@@ -619,6 +619,79 @@ func TestWindowsEnterpriseEnsureInstallsTheSuppliedConfigOverAnUnparseableOne(t 
 	}
 }
 
+// GAP-0590 review S6: a program that holds the old file open without delete
+// sharing makes the rename fail; the error names the file, the holder and the
+// way out (stop it, or restart Windows), and nothing changes. A replaced
+// object that cannot be deleted once the new file is in place is deleted at
+// the next restart, and the result says so as a change, not an error.
+func TestWriteFreshFileWithDACLNamesTheWayOutOfAHeldFile(t *testing.T) {
+	if !windows.GetCurrentProcessToken().IsElevated() {
+		t.Skip("setting Administrators as owner needs an elevated administrator or SYSTEM")
+	}
+	sddl := windowsBundleAdminFileSDDL()
+	dir := t.TempDir()
+	path := filepath.Join(dir, "targets.yaml")
+	if err := os.WriteFile(path, []byte("drifted\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	name, err := windows.UTF16PtrFromString(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	held, err := windows.CreateFile(name, windows.GENERIC_READ, windows.FILE_SHARE_READ|windows.FILE_SHARE_WRITE, nil,
+		windows.OPEN_EXISTING, windows.FILE_ATTRIBUTE_NORMAL, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	pending, err := writeFreshFileWithDACL(path, []byte("approved\n"), sddl)
+	_ = windows.CloseHandle(held)
+	if err == nil || pending != "" || !errors.Is(err, windows.ERROR_SHARING_VIOLATION) {
+		t.Fatalf("write over a held file = %q, %v; want a sharing violation", pending, err)
+	}
+	for _, want := range []string{path + " is held open by ", "stop ", "or restart Windows, then run Setup /ensure again"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Fatalf("error %q does not say %q", err, want)
+		}
+	}
+	if got, _ := os.ReadFile(path); string(got) != "drifted\n" {
+		t.Fatalf("a refused write changed the file: %q", got)
+	}
+	if leftovers, _ := filepath.Glob(path + ".*"); len(leftovers) != 0 {
+		t.Fatalf("a refused write left %q", leftovers)
+	}
+
+	// The replaced object cannot be deleted: it is deleted at the restart.
+	remove, delay := windowsFreshFileRemove, windowsFreshFileDeleteAtRestart
+	t.Cleanup(func() { windowsFreshFileRemove, windowsFreshFileDeleteAtRestart = remove, delay })
+	var scheduled []string
+	windowsFreshFileRemove = func(string) error { return windows.ERROR_ACCESS_DENIED }
+	windowsFreshFileDeleteAtRestart = func(aside string) error { scheduled = append(scheduled, aside); return nil }
+	pending, err = writeFreshFileWithDACL(path, []byte("approved\n"), sddl)
+	if err != nil || len(scheduled) != 1 || !strings.Contains(pending, scheduled[0]) ||
+		!strings.HasSuffix(pending, "is still open in another program and is deleted at the next restart") {
+		t.Fatalf("undeletable replaced object: note %q, err %v, scheduled %q", pending, err, scheduled)
+	}
+	if got, _ := os.ReadFile(path); string(got) != "approved\n" {
+		t.Fatalf("targets.yaml = %q, want the approved bytes in place", got)
+	}
+	_ = os.Remove(scheduled[0])
+	change := windowsEnterpriseReplacedFileChange("targets.yaml", windowsEnterpriseReplacedFile{
+		kept: filepath.Join(dir, "rejected-targets.yaml"), untrusted: &managed.UntrustedPrincipalError{SID: "S-1-5-32-545"}, pending: pending,
+	}, "repair")
+	if !strings.HasSuffix(change, "; "+pending) {
+		t.Fatalf("change %q does not carry the restart note", change)
+	}
+	// Neither works: an error that names both.
+	windowsFreshFileDeleteAtRestart = func(string) error { return windows.ERROR_ACCESS_DENIED }
+	if _, err := writeFreshFileWithDACL(path, []byte("again\n"), sddl); err == nil ||
+		!strings.Contains(err.Error(), "could not be deleted") || !strings.Contains(err.Error(), "next restart") {
+		t.Fatalf("an undeletable, unschedulable replaced object: %v", err)
+	}
+	for _, leftover := range func() []string { found, _ := filepath.Glob(path + ".*"); return found }() {
+		_ = os.Remove(leftover)
+	}
+}
+
 // GAP-0590 review S2: a file Setup writes new from the approved source is
 // owned by Administrators, whatever owner the token gives new files. Under the
 // "Object creator" default-owner policy the token's own account owned it, and
@@ -659,7 +732,7 @@ func TestWriteFreshFileWithDACLOwnerIsAdministratorsUnderObjectCreatorPolicy(t *
 	if err := windows.SetThreadToken(nil, thread); err != nil {
 		t.Fatal(err)
 	}
-	writeErr := writeFreshFileWithDACL(path, []byte("approved\n"), windowsConfigFileSDDL(managed.WindowsServiceSIDString(managed.StandaloneWindowsGatewaySvc)))
+	_, writeErr := writeFreshFileWithDACL(path, []byte("approved\n"), windowsConfigFileSDDL(managed.WindowsServiceSIDString(managed.StandaloneWindowsGatewaySvc)))
 	if err := windows.RevertToSelf(); err != nil {
 		t.Fatal(err)
 	}
@@ -985,7 +1058,8 @@ func TestWindowsEnterpriseRepairRefusesInvalidSuppliedConfigBeforeSnapshot(t *te
 	windowsEnterpriseStandaloneRulePackTrust = func(string, string, string) error { return nil }
 	standaloneServiceCanReadTree = func(string, string, string) error { return nil }
 
-	kept, _, err := installWindowsEnterpriseSuppliedConfigOverRefused(opts.configPath)
+	replaced, err := installWindowsEnterpriseSuppliedConfigOverRefused(opts.configPath)
+	kept := replaced.kept
 	if err == nil || !strings.Contains(err.Error(), "does not match guardrail.custom_packs.acme.digest") || kept != "" {
 		t.Fatalf("repair preflight = (%q, %v), want the bad pin refused before copying", kept, err)
 	}
