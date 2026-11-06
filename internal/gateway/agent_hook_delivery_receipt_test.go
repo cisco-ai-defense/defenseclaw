@@ -539,7 +539,8 @@ func TestManagedHookAndGatewayAuditTheAnswerTheAgentGot(t *testing.T) {
 	if code, out := run("hook-late"); code == 0 && !strings.Contains(out, "deny") {
 		t.Fatalf("late answer was taken: code=%d output=%q", code, out)
 	}
-	want := map[string]string{"hook-in-time": "allow", "hook-late": "unconfirmed/no_answer"}
+	// The late hook now reports its committed block on the receipt channel.
+	want := map[string]string{"hook-in-time": "allow", "hook-late": "block/no_answer"}
 	deadline := time.Now().Add(10 * time.Second)
 	for {
 		got := f.audited(t, "hook-in-time", "hook-late")
