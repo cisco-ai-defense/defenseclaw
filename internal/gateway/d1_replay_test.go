@@ -12,6 +12,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/defenseclaw/defenseclaw/internal/config"
 	"github.com/defenseclaw/defenseclaw/internal/hookpaths"
@@ -42,7 +43,8 @@ type d1PendingProductDecision struct {
 // pin peer-owned decisions until their product fixes reach this branch. A
 // changed result, including the intended result, requires removing the entry.
 // The archive cells belong to rel-1-0-6 GAP-0675 (gas-ux-r1 GAP-0054 was
-// folded into it); the lookup cells belong to gas-ux-r1 GAP-0055.
+// folded into it). The GAP-0055 lookup cells left the list when its fix
+// reached rel/1.0.9.
 func d1PendingProductDecisions() map[string]d1PendingProductDecision {
 	pending := make(map[string]d1PendingProductDecision)
 	for _, id := range []string{
@@ -65,12 +67,6 @@ func d1PendingProductDecisions() map[string]d1PendingProductDecision {
 			pending["d1-0081 "+cell] = d1PendingProductDecision{
 				Gap: "GAP-0675", Want: "allow",
 				Current: d1ReplayVerdict{Decision: "block", RuleID: "persistence.ssh_authorized_keys_command"},
-			}
-			for _, id := range []string{"d1-0084", "d1-0085", "d1-0299"} {
-				pending[id+" "+cell] = d1PendingProductDecision{
-					Gap: "GAP-0055", Want: "allow",
-					Current: d1ReplayVerdict{Decision: "error", RuleID: "-"},
-				}
 			}
 		}
 	}
@@ -225,6 +221,39 @@ func d1Evaluate(t *testing.T, api *APIServer, row d1ReplayRow, connector string,
 	return result
 }
 
+// d1CellLimit bounds one private replay cell (DC_D1_CELL_TIMEOUT, default
+// one minute), so a single evaluator that never returns (rel-1-0-6
+// GAP-0700) is recorded as a timeout cell instead of stopping the replay.
+func d1CellLimit(t *testing.T) time.Duration {
+	t.Helper()
+	text := os.Getenv("DC_D1_CELL_TIMEOUT")
+	if text == "" {
+		return time.Minute
+	}
+	limit, err := time.ParseDuration(text)
+	if err != nil || limit <= 0 {
+		t.Fatalf("invalid DC_D1_CELL_TIMEOUT %q", text)
+	}
+	return limit
+}
+
+// d1EvaluateBounded returns a timeout verdict when the evaluation outlives
+// limit. The evaluation keeps running in its goroutine until the test binary
+// exits; the replay fails on the timeout cell either way.
+func d1EvaluateBounded(t *testing.T, api *APIServer, row d1ReplayRow, connector string, managed bool, home, cwd string, limit time.Duration) d1ReplayVerdict {
+	t.Helper()
+	done := make(chan d1ReplayVerdict, 1)
+	go func() { done <- d1Evaluate(t, api, row, connector, managed, home, cwd) }()
+	timer := time.NewTimer(limit)
+	defer timer.Stop()
+	select {
+	case verdict := <-done:
+		return verdict
+	case <-timer.C:
+		return d1ReplayVerdict{Decision: "timeout", RuleID: "-"}
+	}
+}
+
 func d1Replay(t *testing.T, rows []d1ReplayRow, output *os.File, checkExpected bool) {
 	t.Helper()
 	home := t.TempDir()
@@ -239,6 +268,7 @@ func d1Replay(t *testing.T, rows []d1ReplayRow, output *os.File, checkExpected b
 	}
 	pending := d1PendingProductDecisions()
 	seenPending := make(map[string]bool)
+	cellLimit := d1CellLimit(t)
 	for _, row := range rows {
 		for _, connector := range []string{"claudecode", "codex"} {
 			for _, managed := range []bool{false, true} {
@@ -246,7 +276,12 @@ func d1Replay(t *testing.T, rows []d1ReplayRow, output *os.File, checkExpected b
 				if managed {
 					cell = connector + "/managed-balanced"
 				}
-				verdict := d1Evaluate(t, apis[connector], row, connector, managed, home, cwd)
+				var verdict d1ReplayVerdict
+				if checkExpected {
+					verdict = d1Evaluate(t, apis[connector], row, connector, managed, home, cwd)
+				} else {
+					verdict = d1EvaluateBounded(t, apis[connector], row, connector, managed, home, cwd, cellLimit)
+				}
 				if output != nil {
 					if _, err := fmt.Fprintf(output, "%s\t%s\t%s\t%s\n", row.ID, cell, verdict.Decision, verdict.RuleID); err != nil {
 						t.Fatal(err)
@@ -260,8 +295,8 @@ func d1Replay(t *testing.T, rows []d1ReplayRow, output *os.File, checkExpected b
 					if err := d1CheckPublicVerdict(row, cell, verdict, pending); err != nil {
 						t.Errorf("D1 %s %s: %v", row.ID, cell, err)
 					}
-				} else if verdict.Decision == "error" {
-					t.Errorf("D1 %s %s: evaluation error", row.ID, cell)
+				} else if verdict.Decision == "error" || verdict.Decision == "timeout" {
+					t.Errorf("D1 %s %s: evaluation %s", row.ID, cell, verdict.Decision)
 				}
 			}
 		}
