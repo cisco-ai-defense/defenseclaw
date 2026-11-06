@@ -234,9 +234,11 @@ func TestRV2GX048Variants(t *testing.T) {
 		{"A10 readable settings file that disables", "claudecode", "Bash", "native", b("claude -p hi --settings " + S(filepath.Join(ext, "off.json")))},
 		{"A11 readable benign settings file", "claudecode", "Bash", "benign", b("claude -p hi --settings " + S(filepath.Join(ext, "plain.json")))},
 		{"A12 HOME override", "claudecode", "Bash", "shell", b("HOME=/tmp/x claude -p hi")},
-		{"A13 inline settings with own hook only", "claudecode", "Bash", "info", b(`claude -p hi --settings '{"hooks":{"PostToolUse":[{"matcher":"Edit","hooks":[{"type":"command","command":"npx prettier --write ."}]}]}}'`)},
+		{"A13 inline settings with own hook only", "claudecode", "Bash", "benign", b(`claude -p hi --settings '{"hooks":{"PostToolUse":[{"matcher":"Edit","hooks":[{"type":"command","command":"npx prettier --write ."}]}]}}'`)},
 		{"A14 codex --disable hooks", "codex", "Bash", "info", b("codex --disable hooks exec hi")},
 		{"A15 claude --bare", "claudecode", "Bash", "info", b("claude --bare -p hi")},
+		{"A16 nested HOME override", "claudecode", "Bash", "shell", b(`bash -c 'HOME=/tmp/other claude -p hi'`)},
+		{"A17 env wrapper config home", "claudecode", "Bash", "shell", b("env CLAUDE_CONFIG_DIR=/tmp/other claude -p hi")},
 		// ordinary work (benign, allow in default)
 		{"X01 add includeCoAuthoredBy", "claudecode", "Edit", "benign", e(user, `"model": "sonnet",`, `"model": "sonnet", "includeCoAuthoredBy": false,`)},
 		{"X02 project deny rule", "claudecode", "Edit", "benign", e(filepath.Join(proj, ".claude", "settings.json"), `"allow": ["Bash(ls)"]`, `"allow": ["Bash(ls)"], "deny": ["Read(./.env)"]`)},
@@ -270,6 +272,9 @@ func TestRV2GX048Variants(t *testing.T) {
 			continue
 		}
 		if os.Getenv("GX048_ONLY_F") == "1" && !strings.HasPrefix(r.id, "F") {
+			continue
+		}
+		if os.Getenv("GX048_ONLY_A") == "1" && !strings.HasPrefix(r.id, "A") && !strings.HasPrefix(r.id, "X16") && !strings.HasPrefix(r.id, "X17") {
 			continue
 		}
 		if os.Getenv("GX048_ONLY_G") == "1" && !strings.HasPrefix(r.id, "G") &&
@@ -323,7 +328,8 @@ func TestRV2GX048Variants(t *testing.T) {
 			}
 			if (strings.HasPrefix(r.id, "D") || strings.HasPrefix(r.id, "F") || strings.HasPrefix(r.id, "G") ||
 				strings.HasPrefix(r.id, "X12") || strings.HasPrefix(r.id, "X15") || strings.HasPrefix(r.id, "X18") ||
-				strings.HasPrefix(r.id, "X23") || strings.HasPrefix(r.id, "X24") || strings.HasPrefix(r.id, "X25")) && status != "ok" && status != "INFO" {
+				(strings.HasPrefix(r.id, "A") && !strings.HasPrefix(r.id, "A14") && !strings.HasPrefix(r.id, "A15")) ||
+				strings.HasPrefix(r.id, "X16") || strings.HasPrefix(r.id, "X17") || strings.HasPrefix(r.id, "X23") || strings.HasPrefix(r.id, "X24") || strings.HasPrefix(r.id, "X25")) && status != "ok" && status != "INFO" {
 				t.Errorf("%s %s: got %s, want %s", profile, r.id, action, want)
 			}
 		}
