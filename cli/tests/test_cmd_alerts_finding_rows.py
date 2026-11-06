@@ -202,6 +202,21 @@ class AlertFindingRowsTests(unittest.TestCase):
         self.assertEqual(store.agent_facts_for_alerts([finding.id])[finding.id],
                          {"user": "alice", "agent_identity": "agt-openclaw"})
 
+    def test_alert_identity_keeps_finding_structured_identity(self):
+        now = datetime.now(timezone.utc)
+        store = self.app.store
+        columns = {row[1] for row in store.db.execute("PRAGMA table_info(audit_events)")}
+        if "agent_id" not in columns:
+            store.db.execute("ALTER TABLE audit_events ADD COLUMN agent_id TEXT")
+        finding = Event(action="scan-finding", severity="CRITICAL", connector="openclaw",
+                        structured={"user.id": "alice", "defenseclaw.agent.identity.id": "agt-openclaw",
+                                    **FINDING}, timestamp=now)
+        store.log_event(finding)
+        store.db.execute("UPDATE audit_events SET agent_id=? WHERE id=?", ("agt-other", finding.id))
+        store.db.commit()
+        self.assertEqual(store.agent_facts_for_alerts([finding.id])[finding.id],
+                         {"user": "alice", "agent_identity": "agt-openclaw"})
+
     def _finding(self, request_id: str, hook_details: str, at: datetime) -> str:
         store = self.app.store
         hook = Event(action="connector-hook", target="PreToolUse", severity="INFO",
