@@ -333,6 +333,7 @@ func withConnectorState(t *testing.T, dataDir string, conn string) func() {
 	origJSON := connectorFlagJSON
 	origDir := connectorFlagDataDir
 	origConfigHome := connectorFlagConfigHome
+	origRollbackBackupsDir := connectorRollbackBackupsDir
 	origExit := connectorExit
 	origCheckPlatformSupport := connectorCheckPlatformSupportOnHost
 
@@ -347,6 +348,7 @@ func withConnectorState(t *testing.T, dataDir string, conn string) func() {
 	connectorFlagJSON = false
 	connectorFlagDataDir = dataDir
 	connectorFlagConfigHome = ""
+	connectorRollbackBackupsDir = ""
 
 	return func() {
 		cfg = origCfg
@@ -354,6 +356,7 @@ func withConnectorState(t *testing.T, dataDir string, conn string) func() {
 		connectorFlagJSON = origJSON
 		connectorFlagDataDir = origDir
 		connectorFlagConfigHome = origConfigHome
+		connectorRollbackBackupsDir = origRollbackBackupsDir
 		connectorExit = origExit
 		connectorCheckPlatformSupportOnHost = origCheckPlatformSupport
 	}
@@ -376,7 +379,7 @@ func runConnectorCmd(t *testing.T, args ...string) (stdout, stderr string, exitC
 	sub := args[0]
 	tail := args[1:]
 
-	for _, candidate := range []string{"--connector", "--data-dir", "--config-home"} {
+	for _, candidate := range []string{"--connector", "--data-dir", "--config-home", "--rollback-backups-dir"} {
 		for i, a := range tail {
 			if a == candidate && i+1 < len(tail) {
 				switch candidate {
@@ -386,6 +389,8 @@ func runConnectorCmd(t *testing.T, args ...string) (stdout, stderr string, exitC
 					connectorFlagDataDir = tail[i+1]
 				case "--config-home":
 					connectorFlagConfigHome = tail[i+1]
+				case "--rollback-backups-dir":
+					connectorRollbackBackupsDir = tail[i+1]
 				}
 			}
 		}
