@@ -7,7 +7,7 @@ import (
 	"bytes"
 	"encoding/json"
 	"maps"
-	"path/filepath"
+	"path"
 	"slices"
 	"sort"
 	"strings"
@@ -204,7 +204,18 @@ func KnownExtraKeyPath(target, home string) string {
 	}
 	for _, prefix := range []string{"~/", "$HOME/", "${HOME}/"} {
 		if strings.HasPrefix(target, prefix) {
-			return filepath.Join(home, strings.TrimPrefix(target, prefix))
+			// Agent paths use the connector dialect, not the gateway host:
+			// ActiveHome is a slash path (/home/u) or a drive path (C:\Users\u),
+			// and both join with slashes. filepath.Join turned "/sandbox" into
+			// \sandbox on a Windows gateway, which then resolved under the cwd.
+			if normalized, ok := normalizeActiveHome(home); ok {
+				home = normalized
+			}
+			rest := strings.TrimPrefix(target, prefix)
+			if strings.HasPrefix(home, "//") { // a UNC home keeps its leading slashes
+				return strings.TrimRight(home, "/") + "/" + rest
+			}
+			return path.Join(home, rest)
 		}
 	}
 	return target
