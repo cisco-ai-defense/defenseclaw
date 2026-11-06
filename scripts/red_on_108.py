@@ -96,6 +96,9 @@ def classify_test_result(command: list[str], returncode: int, output: str) -> st
         "error at setup",
         "fixture '",
         "filenotfounderror",
+        "no such file or directory",
+        "file does not exist",
+        "missing fixture",
     )
     if any(marker in output.lower() for marker in infrastructure):
         return "COMPILE_ONLY"
@@ -106,6 +109,26 @@ def classify_test_result(command: list[str], returncode: int, output: str) -> st
     ):
         return "BEHAVIOR_RED"
     return "UNCLASSIFIED_FAIL"
+
+
+def overlay_new_go_fixtures(repo: Path, worktree: Path, commit: str, base: str, directory: str) -> None:
+    """Bring fixtures introduced after the release into the old test tree."""
+    names = git(repo, "ls-tree", "-r", "--name-only", commit, "--", f"{directory}/testdata")
+    for name in names.splitlines():
+        exists_on_base = (
+            subprocess.run(
+                ["git", "-C", str(repo), "cat-file", "-e", f"{base}:{name}"],
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+            ).returncode
+            == 0
+        )
+        if exists_on_base:
+            continue
+        content = subprocess.check_output(["git", "-C", str(repo), "show", f"{commit}:{name}"])
+        target = worktree / name
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_bytes(content)
 
 
 def run_one(repo: Path, worktree: Path, commit: str, files: list[str], tests: list[str], base: str) -> str:
@@ -133,6 +156,7 @@ def run_one(repo: Path, worktree: Path, commit: str, files: list[str], tests: li
             )
         ]
         if names:
+            overlay_new_go_fixtures(repo, worktree, commit, base, directory)
             commands.append(
                 [
                     "nice",

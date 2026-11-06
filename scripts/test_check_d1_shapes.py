@@ -10,13 +10,18 @@ import unittest
 from pathlib import Path
 from tempfile import TemporaryDirectory
 
-from scripts.check_d1_shapes import check
+from scripts.check_d1_shapes import check, synthetic_operands
 
 CORPUS = Path(__file__).resolve().parents[1] / "internal/gateway/testdata/d1-shapes.jsonl"
 NEARBY_COMMANDS = (
     "ssh sample-host-17",
     "chown sampleacct7 $HOME/proj/item.txt",
     "cat /srv/sample/item.txt",
+    "git clone ssh://sample-host-17/repo",
+    "git clone git@sample-host-17:repo",
+    "git remote add origin sample-host-17:repo",
+    "git config user.name sampleacct7",
+    "git -c user.email=sampleacct7@example.invalid status",
 )
 
 
@@ -25,6 +30,17 @@ def write_rows(path: Path, rows: list[dict]) -> None:
 
 
 class D1ShapeScrubTest(unittest.TestCase):
+    def test_synthetic_git_host_and_account_twins_are_allowed(self):
+        for command in (
+            "git clone ssh://git@example.invalid/repo",
+            "git clone git@example.invalid:repo",
+            "git remote add origin example.invalid:repo",
+            "git config user.name testuser",
+            "git -c user.email=testuser@example.invalid status",
+        ):
+            with self.subTest(command=command):
+                self.assertTrue(synthetic_operands({"command": command}))
+
     def test_reviewed_public_subset_passes_scrub(self):
         self.assertEqual(check(CORPUS), [])
 
