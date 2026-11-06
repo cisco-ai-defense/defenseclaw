@@ -4,7 +4,7 @@ on:
   schedule:
     - cron: '17 4 * * *'
   pull_request:
-    types: [labeled]
+    types: [opened, reopened, synchronize, labeled, ready_for_review]
   workflow_dispatch:
 
 permissions:
@@ -16,7 +16,7 @@ concurrency:
 
 jobs:
   replay:
-    if: ${{ vars.D1_CORPUS_RUNNER_READY == 'true' && (github.event_name != 'pull_request' || (github.event.label.name == 'hookpaths' && github.event.pull_request.head.repo.full_name == github.repository)) }}
+    if: ${{ vars.D1_CORPUS_RUNNER_READY == 'true' && (github.event_name != 'pull_request' || (contains(github.event.pull_request.labels.*.name, 'hookpaths') && github.event.pull_request.head.repo.full_name == github.repository)) }}
     runs-on: [self-hosted, Linux, X64, dc-build-1]
     timeout-minutes: 20
     strategy:
