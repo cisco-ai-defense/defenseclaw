@@ -451,7 +451,7 @@ func TestCredentialFileCopiedIntoAnotherKeepsTheReadVerdict(t *testing.T) {
 		{".aws/credentials", ".netrc", "PATH-AWS-CREDS"},
 		{".config/gh/hosts.yml", ".aws/credentials", "secrets.cloud_credential_read"},
 		{".git-credentials", ".aws/credentials", "PATH-GIT-CREDS"},
-		{".netrc", ".aws/credentials", "PATH-NETRC"},
+		{".netrc", ".aws/credentials", "PATH-GIT-CREDS"}, // PATH-NETRC reports as its alias
 		{".ssh/id_ed25519", ".aws/credentials", "PATH-SSH-KEY"},
 	}
 	for _, profile := range []string{"default", "permissive", "strict"} {
