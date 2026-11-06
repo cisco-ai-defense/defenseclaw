@@ -7034,10 +7034,21 @@ def _warn_openclaw_setup_advisories(
             "and openclaw.json names a Bedrock model without it, so OpenClaw model calls fail with "
             '"No API provider registered for api: bedrock-converse-stream".'
         )
-        ux.subhead(
-            f"Run: openclaw plugins install {OPENCLAW_BEDROCK_PLUGIN_PACKAGE} "
-            "(it adds amazon-bedrock to plugins.allow), then openclaw gateway restart."
-        )
+        ux.subhead(f"Run: openclaw plugins install {OPENCLAW_BEDROCK_PLUGIN_PACKAGE}")
+        ux.subhead("Then: openclaw plugins enable amazon-bedrock")
+        plugins = openclaw_config.get("plugins") if isinstance(openclaw_config, dict) else None
+        if isinstance(plugins, dict):
+            allowed = plugins.get("allow")
+            if isinstance(allowed, list) and "amazon-bedrock" not in allowed:
+                value = _json.dumps([*allowed, "amazon-bedrock"], separators=(",", ":"))
+                ux.subhead(f"Then: openclaw config set plugins.allow {shlex.quote(value)} --strict-json")
+            denied = plugins.get("deny")
+            if isinstance(denied, list) and "amazon-bedrock" in denied:
+                value = _json.dumps(
+                    [name for name in denied if name != "amazon-bedrock"], separators=(",", ":"),
+                )
+                ux.subhead(f"Then: openclaw config set plugins.deny {shlex.quote(value)} --strict-json")
+        ux.subhead("Then: openclaw gateway restart")
 
 
 def _hilt_support_note(connector: str) -> str:
