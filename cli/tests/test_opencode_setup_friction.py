@@ -529,3 +529,27 @@ def test_a_symlinked_folder_is_judged_by_its_target(monkeypatch, tmp_path, acl):
     assert file_permissions.other_accounts_can_write(str(link), os.stat(link)) is acl
     # An lstat of the link describes the link, not the folder: not judged private.
     assert file_permissions.owner_private_group(str(link), os.lstat(link)) is False
+
+
+@linux_only
+@pytest.mark.parametrize("private", [True, False])
+def test_the_service_port_is_written_into_a_private_group_folder(monkeypatch, tmp_path, private):
+    """Live on dc-rhel (r2): the private-file writer refused a 0775 ~/.config/opencode."""
+    host = _Host(monkeypatch, tmp_path)
+    service = host.login(monkeypatch, 1001)
+    folder = service.parent
+    folder.mkdir(parents=True)
+    for path in (folder.parent, folder):
+        path.chmod(0o775)
+        for name in ("system.posix_acl_access", "system.posix_acl_default"):
+            try:
+                os.removexattr(path, name)
+            except (AttributeError, OSError):
+                pass
+    gid = os.stat(folder).st_gid
+    _accounts(monkeypatch, tmp_path, gid, group_line="" if private else f"devs:x:{gid}:me,bob\n")
+    line = opencode_service.ensure_account_port()
+    if private:
+        assert "uses port 25001" in line and _port(service) == 25001
+    else:
+        assert line.startswith("!") and not service.exists()
