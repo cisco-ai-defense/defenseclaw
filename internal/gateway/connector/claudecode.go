@@ -1765,6 +1765,9 @@ func (c *ClaudeCodeConnector) patchClaudeCodeHooks(opts SetupOpts, hookScript st
 	// On Windows Claude Code's exec form invokes the native launcher directly,
 	// without Git Bash or PowerShell parsing an absolute path that may contain
 	// spaces. Older shell-form commands are still recognized during migration.
+	if err := EnsureClaudeCodeChain(opts); err != nil {
+		return err
+	}
 	hookCommand, hookArgs := claudeCodeHookInvocation(opts, hookScript)
 	settingsPath := claudeCodeSettingsPath()
 	return withFileLock(settingsPath, func() error {
