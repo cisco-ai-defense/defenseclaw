@@ -71,6 +71,11 @@ type policyTakeBack struct {
 	created []string
 	// notes describe the planted objects removed or moved aside.
 	notes []string
+	// left says which vendor folders a standalone install did not take
+	// over: DefenseClaw did not create them, they hold a file DefenseClaw
+	// recorded, and no standard user can delete or replace that file there
+	// (Windows, g582 review 6 M2, case c).
+	left []string
 }
 
 // takeBackPolicyPath reclaims the vendor directories of path that an
@@ -87,6 +92,9 @@ func takeBackPolicyPath(opts Options, path string, state *State) ([]string, erro
 		state.detail("took back %s: an unprivileged user created it before DefenseClaw; it now has DefenseClaw's owner and protected DACL", dir)
 	}
 	for _, note := range result.notes {
+		state.detail("%s", note)
+	}
+	for _, note := range result.left {
 		state.detail("%s", note)
 	}
 	if err != nil {
