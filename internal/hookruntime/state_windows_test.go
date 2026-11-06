@@ -92,12 +92,12 @@ func TestStableRuntimePublishDisableAndReinstall(t *testing.T) {
 	if string(launcherAfterUninstall) != string(launcherBeforeUninstall) {
 		t.Fatal("disable mutated the stable launcher")
 	}
-	// DELETEUSERDATA must not affect the launcher or its disabled state.
+	// Deleting the data folder must not affect the launcher or its disabled state.
 	if err := os.RemoveAll(firstDataRoot); err != nil {
 		t.Fatal(err)
 	}
 	if afterDelete, _, err := readTrustedAt(paths, paths.Launcher); err != nil || afterDelete.Active() {
-		t.Fatalf("DELETEUSERDATA changed disabled behavior: state=%+v err=%v", afterDelete, err)
+		t.Fatalf("data folder removal changed disabled behavior: state=%+v err=%v", afterDelete, err)
 	}
 
 	secondSource := writeRuntimeSource(t, "MZ-second-stable-hook")

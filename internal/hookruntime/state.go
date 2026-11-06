@@ -8,7 +8,6 @@
 package hookruntime
 
 import (
-	"context"
 	"crypto/rand"
 	"crypto/sha256"
 	"encoding/hex"
@@ -19,7 +18,6 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
-	"time"
 
 	"github.com/defenseclaw/defenseclaw/internal/pathidentity"
 	"github.com/defenseclaw/defenseclaw/internal/safefile"
@@ -39,9 +37,8 @@ const (
 	StatusActive     = "active"
 	StatusDisabled   = "disabled"
 
-	maxStateBytes            = 64 << 10
-	stateMutationLockTimeout = 2 * time.Minute
-	MaxHookLauncherBytes     = 8 << 20
+	maxStateBytes        = 64 << 10
+	MaxHookLauncherBytes = 8 << 20
 )
 
 // Paths are derived from the current user's LocalAppData Known Folder on
@@ -106,39 +103,6 @@ func (state State) ColdStartCapable() bool {
 	}
 	_, err := hex.DecodeString(state.GatewaySHA256)
 	return err == nil
-}
-
-// Publish atomically refreshes the stable launcher and activates it for the
-// committed native-setup transaction. The publishing state is made visible
-// before the executable changes, so a hook process can observe either a fully
-// verified old generation, an intentional no-op, or the fully verified new
-// generation -- never a new executable paired with stale activation data.
-func Publish(source, hookPath, gatewayPath, dataRoot, transactionID string) error {
-	paths, err := CurrentUserPaths()
-	if err != nil {
-		return err
-	}
-	ctx, cancel := context.WithTimeout(context.Background(), stateMutationLockTimeout)
-	defer cancel()
-	return WithGatewayStartLock(ctx, func() error {
-		return publishAt(paths, source, hookPath, gatewayPath, dataRoot, transactionID)
-	})
-}
-
-// Disable leaves the stable launcher in place for already-running Codex and
-// Claude clients while atomically turning every subsequent invocation into a
-// successful no-op. The runtime intentionally survives both data-preserving
-// and DELETEUSERDATA uninstall modes.
-func Disable(transactionID string) error {
-	paths, err := CurrentUserPaths()
-	if err != nil {
-		return err
-	}
-	ctx, cancel := context.WithTimeout(context.Background(), stateMutationLockTimeout)
-	defer cancel()
-	return WithGatewayStartLock(ctx, func() error {
-		return disableAt(paths, transactionID)
-	})
 }
 
 // Validate checks the serialized state contract without consulting mutable

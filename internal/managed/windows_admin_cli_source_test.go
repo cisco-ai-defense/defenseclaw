@@ -35,8 +35,6 @@ var managedWindowsBareCommandAllowed = map[string][]string{
 	// The per-user stable hook launcher (LocalAppData\DefenseClaw\HookRuntime);
 	// managed hooks run from the machine hook runtime instead.
 	"internal/hookruntime/unavailable_windows.go": {"Run `defenseclaw doctor`"},
-	// The per-user Setup wizard's last page.
-	"cmd/defenseclaw-setup/wizard_windows.go": {"Run defenseclaw to open the TUI", "run defenseclaw init"},
 }
 
 // managedWindowsCallAllowed lists, by path prefix below the module root,

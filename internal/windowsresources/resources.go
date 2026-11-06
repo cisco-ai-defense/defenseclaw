@@ -59,11 +59,9 @@ const (
 	ComponentHookGuard Component = "hook-guard"
 	ComponentLauncher  Component = "launcher"
 	ComponentStartup   Component = "startup"
-	ComponentSetup     Component = "setup"
-	// ComponentEnterpriseSetup is deliberately distinct from ComponentSetup.
-	// The ordinary Setup is a per-user, asInvoker application; the Secure
-	// Client enterprise bootstrap owns machine-wide services and ACLs and its
-	// manifest requires an elevated administrator token.
+	// ComponentEnterpriseSetup is the Secure Client enterprise bootstrap. It
+	// owns machine-wide services and ACLs, and its manifest requires an
+	// elevated administrator token.
 	ComponentEnterpriseSetup Component = "enterprise-setup"
 	// ComponentEnterpriseStandaloneSetup is the enterprise bootstrap built as
 	// the MDM-deployable standalone Setup
@@ -89,7 +87,6 @@ var AllComponents = []Component{
 	ComponentHookGuard,
 	ComponentLauncher,
 	ComponentStartup,
-	ComponentSetup,
 	ComponentEnterpriseSetup,
 	ComponentEnterpriseStandaloneSetup,
 }
@@ -201,14 +198,6 @@ var componentMetadataByName = map[Component]componentMetadata{
 		InternalName:     "defenseclaw-startup",
 		OriginalFilename: "defenseclaw-startup.exe",
 	},
-	ComponentSetup: {
-		AssemblyName:     "Cisco.DefenseClaw.Setup",
-		Description:      "DefenseClaw native Windows setup",
-		FileDescription:  "DefenseClaw Setup",
-		InternalName:     "DefenseClawSetup",
-		OriginalFilename: "DefenseClawSetup-x64.exe",
-		CommonControlsV6: true,
-	},
 	ComponentEnterpriseSetup: {
 		AssemblyName:         "Cisco.DefenseClaw.EnterpriseSetup",
 		Description:          "DefenseClaw managed-enterprise Windows setup",
@@ -230,8 +219,7 @@ var componentMetadataByName = map[Component]componentMetadata{
 
 // isSetup reports the AMD64-only Setup executables.
 func isSetup(component Component) bool {
-	return component == ComponentSetup || component == ComponentEnterpriseSetup ||
-		component == ComponentEnterpriseStandaloneSetup
+	return component == ComponentEnterpriseSetup || component == ComponentEnterpriseStandaloneSetup
 }
 
 // ParseComponent validates a command-line component value.
