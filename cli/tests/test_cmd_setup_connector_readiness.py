@@ -367,7 +367,14 @@ def test_hermes_pending_reload_is_not_setup_ready(monkeypatch, tmp_path: Path) -
         lambda *_args, **_kwargs: WindowsHookCheck(
             "pending-reload",
             "registration is on disk but live=false",
+            target="registered-hermes-hook.exe",
         ),
+    )
+    # On Windows the execution probe runs first (GAP-0586); this registration
+    # passes it, so the pending reload itself is what keeps setup not ready.
+    monkeypatch.setattr(
+        cmd_doctor, "_run_hermes_execution_probe",
+        lambda _argv: (0, cmd_doctor._HERMES_EXECUTION_PROBE_RESPONSE),
     )
     monkeypatch.setattr(fail_mode, "_platform_runtime_source", lambda *_args: ("hook-script", "open"))
     readiness = cmd_doctor.connector_setup_readiness(cfg, "hermes")
@@ -494,7 +501,7 @@ def test_hermes_running_host_warning_names_detected_pids(monkeypatch) -> None:
     detail, step = cmd_doctor._hermes_running_host_warning()
     assert "Hermes PID(s) 4242, 4243" in detail
     assert "a new Hermes session loads the current hooks" in detail
-    assert "kill 4242 4243" in step
+    assert ("Stop-Process -Id 4242, 4243" if os.name == "nt" else "kill 4242 4243") in step
 
 
 def test_windows_hermes_host_probe_collects_python_host_pid(monkeypatch) -> None:
