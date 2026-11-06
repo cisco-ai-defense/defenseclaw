@@ -179,7 +179,8 @@ func TestEnsureWindowsManagedPolicyDirectoryRecordsOnlyTheFoldersItCreated(t *te
 	if err := ensureWindowsManagedPolicyDirectory(leaf); err != nil {
 		t.Fatal(err)
 	}
-	if len(recorded) != 2 || !slices.Equal(recorded[0], []string{codex, leaf}) || len(recorded[1]) != 0 {
-		t.Fatalf("recorded = %q, want [[%s %s] []]", recorded, codex, leaf)
+	// The second call finds every folder present and records nothing.
+	if len(recorded) != 1 || !slices.Equal(recorded[0], []string{codex, leaf}) {
+		t.Fatalf("recorded = %q, want [[%s %s]]", recorded, codex, leaf)
 	}
 }
