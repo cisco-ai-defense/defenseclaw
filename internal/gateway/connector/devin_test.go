@@ -14,6 +14,20 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/legacyconnector"
 )
 
+func devinHookGroupReferences(raw interface{}, hookScripts ...string) bool {
+	group, ok := raw.(map[string]interface{})
+	if !ok {
+		return false
+	}
+	entries, _ := group["hooks"].([]interface{})
+	for _, rawEntry := range entries {
+		if devinHookEntryOwned(rawEntry, hookScripts...) {
+			return true
+		}
+	}
+	return false
+}
+
 func TestDevinPatchUserConfigAcceptsJSONCAndPreservesForeignHooks(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "config.json")
 	before := []byte(`{

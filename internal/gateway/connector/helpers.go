@@ -528,23 +528,22 @@ func hookCommandClaimsHookDir(command, hookScript string) bool {
 		return false
 	}
 	known := make(map[string]string)
-	for _, stmt := range file.Stmts {
-		call, ok := stmt.Cmd.(*syntax.CallExpr)
+	found := false
+	syntax.Walk(file, func(node syntax.Node) bool {
+		if found {
+			return false
+		}
+		if decl, ok := node.(*syntax.DeclClause); ok {
+			hookRecordKnownAssignments(decl.Args, known)
+			return true
+		}
+		call, ok := node.(*syntax.CallExpr)
 		if !ok {
-			continue
+			return true
 		}
 		if len(call.Args) == 0 {
-			for _, assign := range call.Assigns {
-				if assign.Name == nil || assign.Append || assign.Naked || assign.Index != nil || assign.Array != nil {
-					continue
-				}
-				if value, ok := literalHookWord(assign.Value); ok {
-					known[assign.Name.Value] = value
-				} else {
-					delete(known, assign.Name.Value)
-				}
-			}
-			continue
+			hookRecordKnownAssignments(call.Assigns, known)
+			return true
 		}
 		words := make([]string, 0, len(call.Args))
 		for _, word := range call.Args {
@@ -557,13 +556,83 @@ func hookCommandClaimsHookDir(command, hookScript string) bool {
 			}
 		}
 		if hookPathResolvesInHookDir(words[0], hookScript) {
-			return true
+			found = true
+			return false
 		}
 		if target, ok := hookCommandTarget(words); ok && hookPathResolvesInHookDir(target, hookScript) {
-			return true
+			found = true
+			return false
+		}
+		if shellText, ok := hookShellCommandText(words); ok && hookCommandClaimsHookDir(shellText, hookScript) {
+			found = true
+			return false
+		}
+		return true
+	})
+	return found
+}
+
+func hookRecordKnownAssignments(assigns []*syntax.Assign, known map[string]string) {
+	for _, assign := range assigns {
+		if assign.Name == nil || assign.Append || assign.Naked || assign.Index != nil || assign.Array != nil {
+			continue
+		}
+		if value, ok := literalHookWord(assign.Value); ok {
+			known[assign.Name.Value] = value
+		} else {
+			delete(known, assign.Name.Value)
 		}
 	}
-	return false
+}
+
+func hookShellCommandText(words []string) (string, bool) {
+	for len(words) > 0 && hookCommandWrapper(words[0]) == "env" {
+		words = words[1:]
+		for len(words) > 0 {
+			switch {
+			case words[0] == "-i" || words[0] == "--ignore-environment" || words[0] == "--" || strings.HasPrefix(words[0], "--unset="):
+				words = words[1:]
+			case words[0] == "-u" || words[0] == "--unset":
+				if len(words) < 2 {
+					return "", false
+				}
+				words = words[2:]
+			case strings.Contains(words[0], "=") && !strings.HasPrefix(words[0], "-"):
+				words = words[1:]
+			case strings.HasPrefix(words[0], "-"):
+				return "", false
+			default:
+				goto nextCommand
+			}
+		}
+	nextCommand:
+	}
+	if len(words) < 3 {
+		return "", false
+	}
+	switch hookCommandWrapper(words[0]) {
+	case "sh", "bash", "dash", "zsh", "ksh":
+	default:
+		return "", false
+	}
+	for i := 1; i < len(words)-1; i++ {
+		option := words[i]
+		if !strings.HasPrefix(option, "-") || len(option) < 2 {
+			return "", false
+		}
+		commandFlag := false
+		for _, flag := range option[1:] {
+			if flag == 'c' {
+				commandFlag = true
+			} else if !strings.ContainsRune("eufxvi", flag) {
+				return "", false
+			}
+		}
+		if commandFlag {
+			return words[i+1], words[i+1] != ""
+		}
+	}
+	return "", false
 }
 
 func hookWordVariable(word *syntax.Word) (string, bool) {

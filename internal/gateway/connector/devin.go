@@ -344,20 +344,6 @@ func replaceManagedDevinHooks(raw interface{}, ownedHookScripts []string, entry 
 // devinHookScriptName is the Devin hook script Setup generates on Unix.
 const devinHookScriptName = "devin-hook.sh"
 
-func devinHookGroupReferences(raw interface{}, hookScripts ...string) bool {
-	group, ok := raw.(map[string]interface{})
-	if !ok {
-		return false
-	}
-	entries, _ := group["hooks"].([]interface{})
-	for _, rawEntry := range entries {
-		if devinHookEntryOwned(rawEntry, hookScripts...) {
-			return true
-		}
-	}
-	return false
-}
-
 func devinHookEntryOwned(raw interface{}, hookScripts ...string) bool {
 	if editedDefenseClawHookHandler(raw, devinHookScriptName) {
 		return true
