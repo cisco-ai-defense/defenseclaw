@@ -107,6 +107,10 @@ const HookAnswerWithinHeader = "X-DefenseClaw-Hook-Answer-Within-Ms"
 // The hook sends the receipt only after committing the answer to the agent.
 const HookDeliveryReceiptHeader = "X-DefenseClaw-Hook-Delivery-Receipt"
 
+// HookDeliveryCapabilityHeader identifies a gateway that can keep an
+// admitted hook request open for its delivery receipt.
+const HookDeliveryCapabilityHeader = "X-DefenseClaw-Hook-Delivery-Capability"
+
 const HookDeliveryPayloadBytesHeader = "X-DefenseClaw-Hook-Payload-Bytes"
 
 const HookDeliveryRequiredHeader = "X-DefenseClaw-Hook-Delivery-Required"
