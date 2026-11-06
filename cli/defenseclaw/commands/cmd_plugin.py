@@ -223,7 +223,7 @@ def scan(
     # Route the unified LLM config (top-level ``llm:`` + any
     # ``scanners.plugin.llm:`` overrides) into the wrapper. The
     # wrapper layers per-call CLI flags on top before dispatching.
-    scanner = PluginScannerWrapper(llm=app.cfg.resolve_llm("scanners.plugin"))
+    scanner = PluginScannerWrapper(llm=app.cfg.resolve_llm("scanners.plugin"), data_dir=app.cfg.data_dir)
 
     matches: list[_PluginMatch] = []
     registry_cache: PluginRegistryCache = {}
@@ -1160,7 +1160,7 @@ def _scan_all_plugins(
         lenient,
         disable_vendor_identity,
     )
-    scanner = PluginScannerWrapper(llm=app.cfg.resolve_llm("scanners.plugin"))
+    scanner = PluginScannerWrapper(llm=app.cfg.resolve_llm("scanners.plugin"), data_dir=app.cfg.data_dir)
     pack_cache: RulePackOverlayCache = {}
 
     json_groups: list[dict[str, Any]] = []
@@ -1546,7 +1546,7 @@ def install(app: AppContext, name_or_path: str, force: bool, take_action: bool, 
         # a staging directory this install owns. Only a copy that stands is
         # swapped in; a refused or quarantined copy never touches the
         # installed plugin, and a rollback puts back only what was there.
-        scanner = PluginScannerWrapper(llm=app.cfg.resolve_llm("scanners.plugin"))
+        scanner = PluginScannerWrapper(llm=app.cfg.resolve_llm("scanners.plugin"), data_dir=app.cfg.data_dir)
         pack_cache: RulePackOverlayCache = {}
         scan_results: dict[str, Any] = {}
         try:
