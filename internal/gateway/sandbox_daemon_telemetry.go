@@ -35,7 +35,7 @@ import (
 // the fleet's Sandboxes board stayed empty for them (GAP-0003).
 //
 // daemonRelayTelemetry is the daemon manager's recorder: it relays the
-// lifecycle, egress, opt-in process and otherwise uncounted ask decisions
+// lifecycle, egress, opt-in process, finding and otherwise uncounted ask decisions
 // through POST sandbox/events. The gateway records them with its own recorder,
 // stamped with the registration's sandbox, profile and person as it verified them from the hook-socket peer
 // (emitSandboxTelemetryClaim). The daemon names no person: a record only
@@ -93,7 +93,7 @@ func newDaemonRelayTelemetry(relay sandboxrelay.Client, registration func(string
 }
 
 // sandboxTelemetryClaim is the payload of a sandbox_lifecycle,
-// sandbox_egress or sandbox_process record. Every field is the daemon's
+// sandbox_egress, sandbox_process or sandbox_finding record. Every field is the daemon's
 // claim about one of the caller's own sandboxes: the managed gateway takes the sandbox, its
 // registration, profile, policy and person from the registration and the
 // peer, bounds the severity (sandboxClaimSeverity) and strips control
@@ -148,6 +148,17 @@ type sandboxTelemetryClaim struct {
 	WorkingDirectory string   `json:"working_directory,omitempty"`
 	ProcessExitCode  *int     `json:"process_exit_code,omitempty"`
 	Lineage          []string `json:"lineage,omitempty"`
+
+	// The sandbox finding record's.
+	FindingKind audit.SandboxFindingKind `json:"kind,omitempty"`
+	FindingID   string                   `json:"finding_id,omitempty"`
+	RuleID      string                   `json:"rule_id,omitempty"`
+	Title       string                   `json:"title,omitempty"`
+	Description string                   `json:"description,omitempty"`
+	Evidence    string                   `json:"evidence,omitempty"`
+	Remediation string                   `json:"remediation,omitempty"`
+	TargetRef   string                   `json:"target_ref,omitempty"`
+	Confidence  float64                  `json:"confidence,omitempty"`
 }
 
 // sandboxConditionClaim is a lifecycle record's OpenShell condition.
@@ -190,6 +201,14 @@ func processClaim(e audit.SandboxProcessEvent) sandboxTelemetryClaim {
 	return c
 }
 
+func findingClaim(e audit.SandboxFindingEvent) sandboxTelemetryClaim {
+	c := claimOf(e.Sandbox)
+	c.FindingKind, c.FindingID, c.RuleID, c.Severity = e.Kind, e.FindingID, e.RuleID, e.Severity
+	c.Title, c.Description, c.Evidence = e.Title, e.Description, e.Evidence
+	c.Remediation, c.TargetRef, c.Confidence = e.Remediation, e.TargetRef, e.Confidence
+	return c
+}
+
 // RecordSandboxLifecycle queues a phase change for the managed gateway.
 func (t *daemonRelayTelemetry) RecordSandboxLifecycle(_ context.Context, e audit.SandboxLifecycleEvent) error {
 	t.queue(sandboxrelay.EventSandboxLifecycle, e.Timestamp, lifecycleClaim(e))
@@ -228,7 +247,8 @@ func (*daemonRelayTelemetry) RecordSandboxPolicy(context.Context, audit.SandboxP
 func (*daemonRelayTelemetry) RecordSandboxHealth(context.Context, audit.SandboxHealthEvent) error {
 	return nil
 }
-func (*daemonRelayTelemetry) RecordSandboxFinding(context.Context, audit.SandboxFindingEvent) error {
+func (t *daemonRelayTelemetry) RecordSandboxFinding(_ context.Context, e audit.SandboxFindingEvent) error {
+	t.queue(sandboxrelay.EventSandboxFinding, e.Timestamp, findingClaim(e))
 	return nil
 }
 func (*daemonRelayTelemetry) RecordSandboxWorkspace(context.Context, audit.SandboxWorkspaceEvent) error {
