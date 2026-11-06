@@ -266,9 +266,14 @@ func (d *hookDeliveryRequest) deadline(blocked bool) bool {
 		d.mu.Unlock()
 		return false
 	}
+	d.mu.Unlock()
 	select {
 	case <-d.ready:
-	default:
+	case <-time.After(answerWatchdogLogWait):
+		return false
+	}
+	d.mu.Lock()
+	if d.closed {
 		d.mu.Unlock()
 		return false
 	}

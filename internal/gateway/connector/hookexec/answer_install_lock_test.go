@@ -295,7 +295,7 @@ func TestPerUserOutageWatchdogChecksInstallStartedAfterRefusal(t *testing.T) {
 		t.Fatal("outage did not prepare a future install check")
 	}
 	mkdirInstallLock(t, home)
-	if !watchdog.installCheck() || !nativeAnswerBlocks(watchdog.installCode, string(watchdog.installOut)) {
+	if !watchdog.installCheck() || !nativeAnswerBlocks(watchdog.install.code, string(watchdog.install.out)) {
 		t.Fatal("an install started after a refusal did not close the deadline answer")
 	}
 }
