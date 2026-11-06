@@ -95,7 +95,10 @@ var claudeChainSource = func(launcher string) string {
 	}
 	candidates := []string{filepath.Join(filepath.Dir(launcher), windowsHookGuardBinaryName)}
 	if stable, installed := canonicalNativeWindowsHookBinary(), canonicalNativeWindowsInstalledHookBinary(); stable != "" && installed != "" && pathidentity.Same(launcher, stable) {
-		candidates = append(candidates, filepath.Join(filepath.Dir(installed), windowsHookGuardBinaryName))
+		// Packaged installs ship this distinct small program in their signed
+		// inventory. A spare file beside HookRuntime's stable launcher is not
+		// the installer source for this layout.
+		candidates = []string{filepath.Join(filepath.Dir(installed), windowsHookGuardBinaryName)}
 	}
 	for _, candidate := range candidates {
 		if info, err := os.Lstat(candidate); err == nil && info.Mode().IsRegular() && info.Size() <= claudeChainMaxGuardBytes {
@@ -154,16 +157,26 @@ func writeClaudeChainFile(path string, body []byte) error {
 // new chain becomes a registered command. Tests replace it with a fixture.
 var claudeChainProbe = func(program, dir string) error {
 	absent := filepath.Join(dir, "absent", windowsHookBinaryName)
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer cancel()
-	cmd := exec.CommandContext(ctx, program, hookguard.Subcommand, absent, "hook", "--connector", "claudecode")
-	cmd.Stdin = strings.NewReader(`{"hook_event_name":"PreToolUse"}`)
-	var stdout, stderr bytes.Buffer
-	cmd.Stdout, cmd.Stderr = &stdout, &stderr
-	err := cmd.Run()
-	if cmd.ProcessState == nil || cmd.ProcessState.ExitCode() != 2 || stdout.Len() != 0 ||
-		strings.TrimSpace(stderr.String()) != hookguard.MissingMessage {
-		return fmt.Errorf("guard did not give the expected unavailable answer: %v", err)
+	for _, check := range []struct {
+		args    []string
+		code    int
+		message string
+	}{
+		{claudeGuardEventArgs(absent, []string{"hook", "--connector", "claudecode"}, "PreToolUse", false), 2, hookguard.MissingMessage},
+		{claudeGuardEventArgs(absent, []string{"hook", "--connector", "claudecode"}, "UserPromptSubmit", true), 2, hookguard.MissingMessage},
+		{claudeGuardEventArgs(absent, []string{"hook", "--connector", "claudecode"}, "Stop", true), hookguard.WrappedExitBase + 1, hookguard.NonBlockingExitMessage},
+	} {
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		cmd := exec.CommandContext(ctx, program, check.args...)
+		cmd.Stdin = strings.NewReader(`{"hook_event_name":"PreToolUse"}`)
+		var stdout, stderr bytes.Buffer
+		cmd.Stdout, cmd.Stderr = &stdout, &stderr
+		err := cmd.Run()
+		cancel()
+		if cmd.ProcessState == nil || cmd.ProcessState.ExitCode() != check.code || stdout.Len() != 0 ||
+			strings.TrimSpace(stderr.String()) != check.message {
+			return fmt.Errorf("guard did not give the expected unavailable answer: %v", err)
+		}
 	}
 	return nil
 }
