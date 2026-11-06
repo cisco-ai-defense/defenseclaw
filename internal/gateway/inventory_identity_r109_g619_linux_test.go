@@ -95,3 +95,104 @@ func TestGAP0619PerUserLifecycleRecordsShareVerifiedIdentity(t *testing.T) {
 		t.Errorf("principal collection disabled: %v", body)
 	}
 }
+
+func TestReviewG619IDEPluginQualifiedAndReusedNameMutants(t *testing.T) {
+	const uid = "700004"
+	previousFacts, previousPrincipal := identityFactsEnabled.Load(), userPrincipalCollectionEnabled.Load()
+	oldDirectory, oldName := managedHookPeerDirectory, userScopedIdentityName
+	setIdentityFactsEnabled(true)
+	SetUserPrincipalCollectionEnabled(true)
+	managedHookPeerDirectory = func(id int, _ bool) (useridentity.DirectoryFacts, bool) {
+		if id != 700004 {
+			return useridentity.DirectoryFacts{}, false
+		}
+		return useridentity.DirectoryFacts{Directory: useridentity.DirectoryActiveDirectory,
+			Source: useridentity.SourceSSSDInfoPipe, Principal: "alice@corp.example", UPN: "alice@corp.example",
+			Domain: "corp.example", Assurance: useridentity.AssuranceVerified, ResolvedAt: time.Now()}, true
+	}
+	userScopedIdentityName = func(id string) string {
+		if id == uid {
+			return "alice@corp.example"
+		}
+		return ""
+	}
+	t.Cleanup(func() {
+		setIdentityFactsEnabled(previousFacts)
+		SetUserPrincipalCollectionEnabled(previousPrincipal)
+		managedHookPeerDirectory, userScopedIdentityName = oldDirectory, oldName
+	})
+	capture := &endpointInventoryCapture{}
+	adapter := &aiDiscoveryV8Adapter{runtime: capture}
+	summary := inventory.AIDiscoverySummary{ScanID: "review-ide", Source: "scheduled"}
+	for _, item := range []struct {
+		name, state   string
+		wantPrincipal bool
+	}{
+		{"alice@corp.example", inventory.AIStateNew, true},
+		{"ALICE@CORP.EXAMPLE", inventory.AIStateGone, true},
+		{"alice@other.example", inventory.AIStateGone, false},
+		{"alice", inventory.AIStateGone, false},
+	} {
+		err := adapter.emitIDEPluginLog(t.Context(), summary, inventory.IDEPlugin{
+			PluginID: "anthropic.claude-code", Product: "vscode", Enabled: "enabled", IsAI: true,
+			UserID: uid, UserName: item.name, State: item.state,
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		body := canonicalBody(t, capture.snapshot()[len(capture.snapshot())-1])
+		principal := body["defenseclaw.user.principal"]
+		if (principal != nil) != item.wantPrincipal {
+			t.Errorf("name=%q state=%q principal=%v, want present=%v", item.name, item.state, principal, item.wantPrincipal)
+		}
+	}
+}
+
+func TestReviewG619BackslashQualifiedPOSIXPluginKeepsDisplayAndPrincipal(t *testing.T) {
+	const uid = "700005"
+	previousFacts, previousPrincipal := identityFactsEnabled.Load(), userPrincipalCollectionEnabled.Load()
+	oldDirectory, oldName := managedHookPeerDirectory, userScopedIdentityName
+	setIdentityFactsEnabled(true)
+	SetUserPrincipalCollectionEnabled(true)
+	managedHookPeerDirectory = func(id int, _ bool) (useridentity.DirectoryFacts, bool) {
+		if id != 700005 {
+			return useridentity.DirectoryFacts{}, false
+		}
+		return useridentity.DirectoryFacts{Directory: useridentity.DirectoryActiveDirectory,
+			Source: useridentity.SourceWinbind, Principal: "alice@corp.example", UPN: "alice@corp.example",
+			Domain: "corp.example", Assurance: useridentity.AssuranceVerified, ResolvedAt: time.Now()}, true
+	}
+	userScopedIdentityName = func(id string) string {
+		if id == uid {
+			return `CORP\alice`
+		}
+		return ""
+	}
+	t.Cleanup(func() {
+		setIdentityFactsEnabled(previousFacts)
+		SetUserPrincipalCollectionEnabled(previousPrincipal)
+		managedHookPeerDirectory, userScopedIdentityName = oldDirectory, oldName
+	})
+	capture := &endpointInventoryCapture{}
+	adapter := &aiDiscoveryV8Adapter{runtime: capture}
+	err := adapter.emitIDEPluginLog(t.Context(), inventory.AIDiscoverySummary{ScanID: "review-ide", Source: "scheduled"},
+		inventory.IDEPlugin{PluginID: "anthropic.claude-code", Product: "vscode", Enabled: "enabled", IsAI: true,
+			UserID: uid, UserName: `CORP\alice`, State: inventory.AIStateNew})
+	if err != nil {
+		t.Fatal(err)
+	}
+	body := canonicalBody(t, capture.snapshot()[0])
+	if body["defenseclaw.user.principal"] != "alice@corp.example" || body["defenseclaw.user.name"] != "alice" {
+		t.Errorf("backslash-qualified POSIX plugin lost identity fields: principal=%v name=%v", body["defenseclaw.user.principal"], body["defenseclaw.user.name"])
+	}
+	setIdentityFactsEnabled(false)
+	err = adapter.emitIDEPluginLog(t.Context(), inventory.AIDiscoverySummary{ScanID: "review-ide", Source: "scheduled"},
+		inventory.IDEPlugin{PluginID: "anthropic.claude-code", Product: "vscode", Enabled: "enabled", IsAI: true,
+			UserID: uid, UserName: `CORP\alice`, State: inventory.AIStateGone})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if body := canonicalBody(t, capture.snapshot()[1]); body["defenseclaw.user.name"] != nil || body["defenseclaw.user.principal"] != nil {
+		t.Errorf("identity collection disabled: name=%v principal=%v", body["defenseclaw.user.name"], body["defenseclaw.user.principal"])
+	}
+}
