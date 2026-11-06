@@ -24,11 +24,12 @@ import (
 // missing launcher. Neutral lifecycle events get a warning and a nonblocking
 // status. A launcher that runs keeps its ordinary fail-mode decision.
 //
-// PreToolUse starts the small guard directly. Cursor imports Claude Code's
+// PreToolUse starts the installed full hook on a packaged install, or the
+// small guard on a one-line install, directly. Cursor imports Claude Code's
 // settings but starts this handler without arguments; a cmd.exe command there
 // interrupted ordinary Cursor tool calls. The guard gives that argument-free
-// start no answer. Its copy is kept outside the replaceable install tree and
-// the gateway repairs it from an approved copy during its hook audit. Managed
+// start no answer. The small guard copy is kept outside the replaceable install
+// tree and the gateway repairs the current copy during its hook audit. Managed
 // and Secure Client hook registrations retain their exec form.
 //
 // An older cmd.exe guard and a direct launcher guard remain recognizable for
@@ -304,6 +305,11 @@ func claudeCodeHandlerInvocation(eventType, command string, args []string) (stri
 	}
 	if guard, approved := claudeChainFor(launcher); guard != "" {
 		if eventType == "PreToolUse" {
+			// The installed full hook remains an independent start path on
+			// packaged installs. A lost chain copy must not weaken it.
+			if direct := claudeCodePreToolGuardExecutable(launcher); direct != "" {
+				return direct, claudeGuardEventArgs(launcher, hookArgs, eventType, false)
+			}
 			return guard, claudeGuardEventArgs(launcher, hookArgs, eventType, false)
 		}
 		return claudeCodeWindowsCommandProcessor(), claudeGuardWrapperArgs(guard, approved, launcher, eventType, hookArgs)
