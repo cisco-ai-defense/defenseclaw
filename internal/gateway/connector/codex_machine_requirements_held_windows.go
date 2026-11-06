@@ -54,6 +54,35 @@ func (e *WindowsCodexRequirementsHeldError) holder() string {
 	return strings.Join(e.Holders, ", ")
 }
 
+// WindowsCodexRequirementsHold reports, for status, whether another handle
+// holds the machine requirements.toml open so that DefenseClaw cannot
+// replace it, and names the holders where Restart Manager can tell. It
+// needs an elevated caller (the probe asks for delete access); for any other
+// caller, and for a missing file, it reports no hold.
+func WindowsCodexRequirementsHold() (path string, holders []string, held bool) {
+	programData, err := windowsCodexMachineProgramData()
+	if err != nil {
+		return "", nil, false
+	}
+	path = programData + `\OpenAI\Codex\requirements.toml`
+	if !windowsCodexRequirementsHeld(path) {
+		return path, nil, false
+	}
+	return path, windowsCodexRequirementsHolders(path), true
+}
+
+// WindowsCodexRequirementsHoldLine is the status line for a held
+// requirements.toml (GAP-0650, a documented Windows platform limit).
+func WindowsCodexRequirementsHoldLine(path string, holders []string) string {
+	holder := "another program"
+	if len(holders) != 0 {
+		holder = strings.Join(holders, ", ")
+	}
+	return fmt.Sprintf("%s is held open by %s; Codex policy updates wait until it is released, "+
+		"the enforced Codex policy stays in place, and DefenseClaw writes the update as soon as the file is released",
+		path, holder)
+}
+
 // windowsCodexRequirementsHeldBy is the holder a held error names, or "".
 func windowsCodexRequirementsHeldBy(err error) string {
 	var held *WindowsCodexRequirementsHeldError
