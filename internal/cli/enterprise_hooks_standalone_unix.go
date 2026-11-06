@@ -1172,11 +1172,11 @@ func runEnterpriseHookReconcileOnceStandaloneUnix(ctx context.Context) (enterpri
 // reconcile rendered from; a seam for tests, whose minter reads no key.
 var enterpriseHookCredentialKeyID = currentEnterpriseHookUserTokenKeyID
 
-// enterpriseHookPriorUserTokens returns a target's credentials from the key
+// enterpriseHookPriorUserTokens returns a target credentials from the key
 // of the held credential rotation that this run does not render from: the
 // committed key while a prepare renders the staged one, the staged key while
 // a rollback renders the committed one. They are the credentials the target
-// held when the rotation's previous step reached it, so a rewrite that only
+// held when the rotation previous step reached it, so a rewrite that only
 // replaces them is configuration, not repair. Nil without a rotation whose
 // recorded keys are both present.
 func enterpriseHookPriorUserTokens(dataDir, connectorName, identity string) *enterprisehooks.HookCredentials {
@@ -1184,19 +1184,15 @@ func enterpriseHookPriorUserTokens(dataDir, connectorName, identity string) *ent
 	if err != nil || transaction == nil {
 		return nil
 	}
-	path, err := connector.PendingUserScopedTokenKeyPath(dataDir)
-	if err != nil || validateEnterpriseHookTokenPathLocation(dataDir, path, "staged per-user credential key") != nil {
-		return nil
-	}
-	staged, err := connector.LoadPendingUserScopedTokenKey(dataDir)
-	if err != nil {
+	if validateEnterpriseHookUserTokenKeyLocation(dataDir) != nil {
 		return nil
 	}
 	committed, err := connector.LoadUserScopedTokenKey(dataDir)
 	if err != nil {
 		return nil
 	}
-	key := enterpriseHookPriorUserTokenKey(*transaction, committed, staged)
+	next := loadEnterpriseHookRotationNextKey(dataDir, *transaction)
+	key := enterpriseHookPriorUserTokenKey(*transaction, committed, next)
 	if key == "" {
 		return nil
 	}
@@ -1213,8 +1209,38 @@ func enterpriseHookPriorUserTokens(dataDir, connectorName, identity string) *ent
 	return prior
 }
 
+// loadEnterpriseHookRotationNextKey reads the transaction next key from
+// where its phase keeps it, with the committed key location and trust
+// checks and the transaction own fingerprint: the staged file while the
+// rotation prepares, and while it rolls back the retiring file the lifecycle
+// renames the staged one to (the staged file itself until that rename).
+// It returns "" when no such key matches the transaction.
+func loadEnterpriseHookRotationNextKey(dataDir string, transaction enterprisehooks.CredentialTransaction) string {
+	type source struct {
+		path func(string) (string, error)
+		load func(string) (string, error)
+	}
+	pending := source{connector.PendingUserScopedTokenKeyPath, connector.LoadPendingUserScopedTokenKey}
+	retiring := source{connector.RetiringUserScopedTokenKeyPath, connector.LoadRetiringUserScopedTokenKey}
+	sources := []source{pending}
+	if transaction.Phase == enterprisehooks.CredentialPhaseRollback {
+		sources = []source{retiring, pending}
+	}
+	for _, src := range sources {
+		path, err := src.path(dataDir)
+		if err != nil || validateEnterpriseHookTokenPathLocation(dataDir, path, "rotation per-user credential key") != nil {
+			continue
+		}
+		if key, err := src.load(dataDir); err == nil && key != "" &&
+			connector.UserScopedTokenKeyFingerprint(key) == transaction.NextKeyID {
+			return key
+		}
+	}
+	return ""
+}
+
 // enterpriseHookPriorUserTokenKey selects the rotation key a run does not
-// render from, or "" when the committed and staged keys are not the
+// render from, or "" when the committed and next keys are not the
 // transaction's two keys.
 func enterpriseHookPriorUserTokenKey(transaction enterprisehooks.CredentialTransaction, committed, staged string) string {
 	if committed == "" || staged == "" ||

@@ -7,6 +7,7 @@ package cli
 
 import (
 	"context"
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -16,6 +17,7 @@ import (
 
 	"github.com/defenseclaw/defenseclaw/internal/enterprisehooks"
 	"github.com/defenseclaw/defenseclaw/internal/gateway/connector"
+	"github.com/defenseclaw/defenseclaw/internal/managed"
 	"github.com/pelletier/go-toml/v2"
 )
 
@@ -507,6 +509,185 @@ func TestGAP0638GAP0642PriorCredentialKeyFollowsTheRotationPhase(t *testing.T) {
 	for _, keys := range [][2]string{{committed, ""}, {"", staged}, {other, staged}, {committed, other}, {staged, committed}} {
 		if got := enterpriseHookPriorUserTokenKey(transaction, keys[0], keys[1]); got != "" {
 			t.Fatalf("keys outside the transaction selected a prior key")
+		}
+	}
+}
+
+// gap0638RotationLayout lays out the guardian view of a credential rotation
+// under a managed data directory: the committed key, the staged key, and the
+// root-only transaction record in the given phase. For the rollback phase
+// afterRename moves the staged key aside as the retiring key, the step the
+// lifecycle performs before it moves the users back (retireStagedKey).
+func gap0638RotationLayout(t *testing.T, committed, staged, phase string, afterRename bool) string {
+	t.Helper()
+	stubEnterpriseHookAuthorizationTrustForTempDir(t)
+	dataDir := filepath.Join(t.TempDir(), "data")
+	hooks := filepath.Join(dataDir, "hooks")
+	authDir := managed.HookGuardianAuthorizationDir(dataDir)
+	for _, dir := range []string{dataDir, hooks, authDir} {
+		if err := os.MkdirAll(dir, 0o700); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := os.WriteFile(filepath.Join(hooks, ".user-scoped-token.key"), []byte(committed+"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	stagedPath := filepath.Join(hooks, ".user-scoped-token.key.next")
+	if err := os.WriteFile(stagedPath, []byte(staged+"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if afterRename {
+		retiring, err := connector.RetiringUserScopedTokenKeyPath(dataDir)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Rename(stagedPath, retiring); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if phase != "" {
+		record, err := json.Marshal(enterprisehooks.CredentialTransaction{
+			Version: enterprisehooks.CredentialTransactionVersion, OperationID: strings.Repeat("0", 32), Phase: phase,
+			ManifestSHA256: strings.Repeat("d", 64), PreviousKeyID: connector.UserScopedTokenKeyFingerprint(committed),
+			NextKeyID: connector.UserScopedTokenKeyFingerprint(staged),
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(authDir, managed.HookGuardianCredentialTransactionFile), record, 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	return dataDir
+}
+
+func gap0638KeyPair(t *testing.T, key, connectorName, identity string) enterprisehooks.HookCredentials {
+	t.Helper()
+	api, err := connector.UserScopedHookAPIToken(key, connectorName, identity)
+	if err != nil {
+		t.Fatal(err)
+	}
+	pair := enterprisehooks.HookCredentials{APIToken: api}
+	if scope, ok := connector.OTLPPathTokenScopeForConnector(connectorName); ok {
+		if pair.OTLPPathToken, err = connector.UserScopedOTLPPathToken(key, scope, identity); err != nil {
+			t.Fatal(err)
+		}
+	}
+	return pair
+}
+
+// The guardian reads the prior pair from the key files as the rotation
+// leaves them. A rollback renames the staged key to the retiring file before
+// the users are moved back, so the pair must be found there as well as at the
+// staged path; a key that is not the transaction next key, or a phase that
+// does not call for it, yields none.
+func TestGAP0638GAP0642PriorCredentialsAreReadFromWhereThePhaseKeepsTheKey(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("the key custody checks run as the account")
+	}
+	committed, staged, other := strings.Repeat("1a", 32), strings.Repeat("2b", 32), strings.Repeat("3c", 32)
+	identity := strconv.Itoa(os.Getuid())
+	for _, tc := range []struct {
+		name        string
+		phase       string
+		afterRename bool
+		nextOnDisk  string
+		wantKey     string
+	}{
+		{name: "prepare uses the committed key", phase: enterprisehooks.CredentialPhasePrepare, wantKey: committed},
+		{name: "rollback before the rename uses the staged key", phase: enterprisehooks.CredentialPhaseRollback, wantKey: staged},
+		{name: "rollback after the rename uses the retiring key", phase: enterprisehooks.CredentialPhaseRollback, afterRename: true, wantKey: staged},
+		{name: "prepare ignores a retiring key", phase: enterprisehooks.CredentialPhasePrepare, afterRename: true},
+		{name: "rollback ignores a retiring key that is not the transaction key", phase: enterprisehooks.CredentialPhaseRollback, afterRename: true, nextOnDisk: other},
+		{name: "no transaction supplies none", afterRename: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			dataDir := gap0638RotationLayout(t, committed, staged, tc.phase, tc.afterRename)
+			if tc.nextOnDisk != "" {
+				retiring, _ := connector.RetiringUserScopedTokenKeyPath(dataDir)
+				if err := os.WriteFile(retiring, []byte(tc.nextOnDisk+"\n"), 0o600); err != nil {
+					t.Fatal(err)
+				}
+			}
+			for _, connectorName := range []string{"codex", "claudecode"} {
+				got := enterpriseHookPriorUserTokens(dataDir, connectorName, identity)
+				if tc.wantKey == "" {
+					if got != nil {
+						t.Fatalf("%s: a prior pair was supplied", connectorName)
+					}
+					continue
+				}
+				if want := gap0638KeyPair(t, tc.wantKey, connectorName, identity); got == nil || *got != want {
+					t.Fatalf("%s: prior pair does not derive from the expected rotation key", connectorName)
+				}
+			}
+		})
+	}
+}
+
+// A rollback that reconciles a user already moved to the new key is
+// configuration, not repair, even though the lifecycle has already renamed
+// the staged key to the retiring file. The same rollback with a changed
+// DefenseClaw hook, or a retiring key that is not the transaction key, is
+// still a repair.
+func TestGAP0638GAP0642CredentialRotationRollbackIsNotReportedAsRepair(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("the standalone worker runs as the account")
+	}
+	previousStandalone := enterprisehooks.StandaloneUnix()
+	enterprisehooks.SetStandaloneUnix(true)
+	t.Cleanup(func() { enterprisehooks.SetStandaloneUnix(previousStandalone) })
+	committed, staged, other := strings.Repeat("1a", 32), strings.Repeat("2b", 32), strings.Repeat("3c", 32)
+	for _, connectorName := range []string{"codex", "claudecode"} {
+		for _, tc := range []struct {
+			name        string
+			afterRename bool
+			wrongKey    bool
+			changeHook  bool
+			wantRepair  bool
+		}{
+			{name: "staged key renamed to retiring", afterRename: true},
+			{name: "staged key not yet renamed"},
+			{name: "retiring key is not the transaction key", afterRename: true, wrongKey: true, wantRepair: true},
+			{name: "changed hook script during rollback", afterRename: true, changeHook: true, wantRepair: true},
+		} {
+			t.Run(connectorName+"/"+tc.name, func(t *testing.T) {
+				home, opts := gap0638CredentialFixture(t, connectorName)
+				identity := opts.HookCredentialIdentity
+				// The user was already moved to the new (staged) key.
+				moved := gap0638KeyPair(t, staged, connectorName, identity)
+				opts.APIToken, opts.OTLPPathToken = moved.APIToken, moved.OTLPPathToken
+				if _, err := enterprisehooks.Install(context.Background(), opts); err != nil {
+					t.Fatalf("install on the new key: %v", err)
+				}
+				if tc.changeHook {
+					conn, _ := connector.NewDefaultRegistry().Get(connectorName)
+					owner, ok := conn.(interface {
+						HookScriptNames(connector.SetupOpts) []string
+					})
+					if !ok || len(owner.HookScriptNames(connector.SetupOpts{})) == 0 {
+						t.Fatalf("connector %s has no hook script", connectorName)
+					}
+					script := filepath.Join(home, ".defenseclaw", "hooks", owner.HookScriptNames(connector.SetupOpts{})[0])
+					if err := os.WriteFile(script, []byte("changed hook\n"), 0o700); err != nil {
+						t.Fatal(err)
+					}
+				}
+				dataDir := gap0638RotationLayout(t, committed, staged, enterprisehooks.CredentialPhaseRollback, tc.afterRename)
+				if tc.wrongKey {
+					retiring, _ := connector.RetiringUserScopedTokenKeyPath(dataDir)
+					if err := os.WriteFile(retiring, []byte(other+"\n"), 0o600); err != nil {
+						t.Fatal(err)
+					}
+				}
+				prior := enterpriseHookPriorUserTokens(dataDir, connectorName, identity)
+				// The rollback renders the committed key again.
+				back := gap0638KeyPair(t, committed, connectorName, identity)
+				opts.APIToken, opts.OTLPPathToken = back.APIToken, back.OTLPPathToken
+				if got := gap0638Reconcile(t, opts, prior); got.Repaired != tc.wantRepair {
+					t.Fatalf("%s %s: repaired=%t, want %t", connectorName, tc.name, got.Repaired, tc.wantRepair)
+				}
+			})
 		}
 	}
 }
