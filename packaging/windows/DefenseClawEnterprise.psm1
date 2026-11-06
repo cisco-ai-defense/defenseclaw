@@ -24543,6 +24543,50 @@ function Remove-DefenseClawCommittedManagedHooksTeardownJournal {
     return $true
 }
 
+function Copy-DefenseClawHookPreimage {
+    <#
+        GAP-0656 review M2: copies the installed hook to Destination through
+        one read that shares read, write and delete, so a handle another
+        program holds open for writing does not stop the run, and returns the
+        SHA-256 of the bytes it copied. Publish-DefenseClawEarlyHook checks the
+        copy against it.
+    #>
+    param(
+        [Parameter(Mandatory)][string]$Path,
+        [Parameter(Mandatory)][string]$Destination
+    )
+    $sha = [Security.Cryptography.SHA256]::Create()
+    $source = [IO.File]::Open(
+        $Path,
+        [IO.FileMode]::Open,
+        [IO.FileAccess]::Read,
+        ([IO.FileShare]::ReadWrite -bor [IO.FileShare]::Delete))
+    try {
+        $target = [IO.File]::Open($Destination, [IO.FileMode]::Create, [IO.FileAccess]::Write, [IO.FileShare]::None)
+        try {
+            $buffer = [byte[]]::new(1048576)
+            while (($read = $source.Read($buffer, 0, $buffer.Length)) -gt 0) {
+                $target.Write($buffer, 0, $read)
+                [void]$sha.TransformBlock($buffer, 0, $read, $null, 0)
+            }
+            [void]$sha.TransformFinalBlock($buffer, 0, 0)
+            $target.Flush($true)
+        }
+        finally {
+            $target.Dispose()
+        }
+    }
+    finally {
+        $source.Dispose()
+    }
+    try {
+        return ([BitConverter]::ToString($sha.Hash) -replace '-', '')
+    }
+    finally {
+        $sha.Dispose()
+    }
+}
+
 function Publish-DefenseClawEarlyHook {
     <#
         GAP-0993: puts the replacement hook binary at the hook path before a
@@ -24565,9 +24609,14 @@ function Publish-DefenseClawEarlyHook {
     }
     Assert-DefenseClawNoReparsePath -Path $Layout.HookPath
     $preimage = Microsoft.PowerShell.Management\Join-Path $TransactionDirectory 'early-hook.bak'
-    Microsoft.PowerShell.Management\Copy-Item -LiteralPath $Layout.HookPath -Destination $preimage -Force
+    # GAP-0656 review M2: another program can hold the installed hook open
+    # for writing (sharing read and delete); every start of it then fails.
+    # Copy-Item and Get-FileHash refuse such a file, so the run that would
+    # replace it failed (1603) and left it in place. The preimage is read
+    # with read, write and delete sharing; the swap below then moves the
+    # name to a fresh object (Install-DefenseClawFileAtomic).
+    $liveHash = Copy-DefenseClawHookPreimage -Path $Layout.HookPath -Destination $preimage
     Assert-DefenseClawNoReparsePath -Path $preimage
-    $liveHash = (Microsoft.PowerShell.Utility\Get-FileHash -LiteralPath $Layout.HookPath -Algorithm SHA256).Hash
     $copiedHash = (Microsoft.PowerShell.Utility\Get-FileHash -LiteralPath $preimage -Algorithm SHA256).Hash
     if (-not [string]::Equals($liveHash, $copiedHash, [StringComparison]::OrdinalIgnoreCase)) {
         throw 'the installed hook changed while its preimage was copied'

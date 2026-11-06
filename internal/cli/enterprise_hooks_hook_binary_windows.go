@@ -296,6 +296,15 @@ func keepWindowsManagedFileCopy(target, copyPath, want string, refresh bool) (st
 		if damage != "" {
 			break
 		}
+		// GAP-0656 review M2: a handle another program holds open for
+		// writing (sharing read and delete) leaves the bytes and the single
+		// name intact, but Windows refuses every start of the image, so each
+		// tool call runs unchecked. The swap moves the name to a fresh
+		// object; the handle keeps the old one.
+		if held := windowsHookBinaryHeldForWriting(target); held != "" {
+			damage = held
+			break
+		}
 		windowsHookBinaryDigestRefusal = verdict.refusal
 		if !refresh {
 			return "", nil
@@ -397,6 +406,26 @@ func restoreWindowsNonRegularHookBinary(copyPath, target string) error {
 		return fmt.Errorf("move non-empty directory aside: %w", err)
 	}
 	return copyWindowsManagedFile(copyPath, target, windowsInstallFileSDDL, false, true)
+}
+
+// windowsHookBinaryHeldForWriting opens path for reading as a program start
+// does (sharing only read and delete) and reports a handle that has it open
+// for writing, or "".
+func windowsHookBinaryHeldForWriting(path string) string {
+	name, err := windows.UTF16PtrFromString(path)
+	if err != nil {
+		return ""
+	}
+	handle, err := windows.CreateFile(name, windows.GENERIC_READ,
+		windows.FILE_SHARE_READ|windows.FILE_SHARE_DELETE,
+		nil, windows.OPEN_EXISTING, windows.FILE_FLAG_OPEN_REPARSE_POINT, 0)
+	if errors.Is(err, windows.ERROR_SHARING_VIOLATION) {
+		return "held open for writing by another program, so no agent can start it"
+	}
+	if err == nil {
+		_ = windows.CloseHandle(handle)
+	}
+	return ""
 }
 
 // windowsHookBinaryStructuralDamage inspects the named file without opening

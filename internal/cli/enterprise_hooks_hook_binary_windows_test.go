@@ -244,6 +244,55 @@ func TestCopyWindowsManagedFileSwapsUnderConcurrentLaunches(t *testing.T) {
 	}
 }
 
+// GAP-0656 review M2: a standard user who once had Modify on the hook keeps
+// a write handle that shares read and delete. The bytes and the single name
+// stay right, but every start fails with a sharing violation. The guardian
+// moves the name to a fresh object; starts work again while the handle
+// still holds the old one.
+func TestKeepWindowsManagedFileCopyReplacesAHookHeldOpenForWriting(t *testing.T) {
+	requireAdministratorTestToken(t, "the product restore writes the hook binary with the install file descriptor (an Administrators owner)")
+	root := t.TempDir()
+	target := filepath.Join(root, "bin", "defenseclaw-hook.exe")
+	copyPath := filepath.Join(root, "hook-guardian", "payload", "defenseclaw-hook.exe")
+	if err := os.MkdirAll(filepath.Dir(target), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	writeWindowsSystemProgram(t, "HOSTNAME.EXE", target, nil)
+	want, err := windowsFileSHA256Hex(target)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if damage, err := keepWindowsManagedFileCopy(target, copyPath, want, true); err != nil || damage != "" {
+		t.Fatalf("keep copy: restored %q, %v", damage, err)
+	}
+	name, err := windows.UTF16PtrFromString(target)
+	if err != nil {
+		t.Fatal(err)
+	}
+	writer, err := windows.CreateFile(name, windows.GENERIC_READ|windows.GENERIC_WRITE,
+		windows.FILE_SHARE_READ|windows.FILE_SHARE_DELETE, nil, windows.OPEN_EXISTING, 0, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer windows.CloseHandle(writer)
+	if _, err := exec.Command(target).Output(); err == nil {
+		t.Fatal("a start succeeded while a writer held the hook; the fixture does not reproduce the failure")
+	}
+	damage, err := keepWindowsManagedFileCopy(target, copyPath, want, false)
+	if err != nil || !strings.Contains(damage, "held open for writing") {
+		t.Fatalf("restored %q, %v", damage, err)
+	}
+	if out, err := exec.Command(target).Output(); err != nil || len(strings.TrimSpace(string(out))) == 0 {
+		t.Fatalf("start after the restore, writer still open: %q, %v", out, err)
+	}
+	if got, err := windowsFileSHA256Hex(target); err != nil || got != want {
+		t.Fatalf("restored %s (%v), want %s", got, err, want)
+	}
+	if damage, err := keepWindowsManagedFileCopy(target, copyPath, want, false); err != nil || damage != "" {
+		t.Fatalf("the fresh object is reported again: %q, %v", damage, err)
+	}
+}
+
 // GAP-0656 review S1 (GAP-0369): on a volume or behind a filter driver that
 // refuses the backup hard link, the restore replaces the hook the older way
 // and the guardian says so once, instead of failing every check.

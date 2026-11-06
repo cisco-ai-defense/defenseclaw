@@ -113,6 +113,11 @@ def test_the_transaction_publishes_the_hook_before_it_stops_the_services() -> No
         "GetReadOpenWithoutWriteSharingError(path)",
     ):
         assert needle in kept, needle
+    # A writer handle on the installed hook refused Copy-Item and
+    # Get-FileHash, so the repair that would replace it failed (1603).
+    assert "$liveHash = Copy-DefenseClawHookPreimage -Path $Layout.HookPath -Destination $preimage" in publish_body
+    preimage = _function_body(module, "Copy-DefenseClawHookPreimage")
+    assert "([IO.FileShare]::ReadWrite -bor [IO.FileShare]::Delete))" in preimage
     probe = native[native.index("public static int GetReadOpenWithoutWriteSharingError(") :]
     probe = probe[: probe.index("\n        }\n")]
     assert "CreateFileW(path, GENERIC_READ,\n                FILE_SHARE_READ | FILE_SHARE_DELETE," in probe
@@ -156,7 +161,7 @@ $tokens = $null
 $errors = $null
 $ast = [Management.Automation.Language.Parser]::ParseFile($ModulePath, [ref]$tokens, [ref]$errors)
 if ($errors.Count -gt 0) { throw "module parse failed: $($errors[0].Message)" }
-foreach ($name in @('Publish-DefenseClawEarlyHook', 'Assert-DefenseClawEarlyHookPublished', 'Restore-DefenseClawEarlyHook', 'Get-DefenseClawEarlyHookField', 'Hold-DefenseClawEarlyHookGuard', 'Restore-DefenseClawSnapshotHookAfterActivation', 'Wait-DefenseClawPriorHookCalls', 'Get-DefenseClawPriorHookProcessIds', 'Assert-DefenseClawInstalledHookCallsEnded', 'Assert-DefenseClawHookNotHeld', 'Wait-DefenseClawServiceProcessExit', 'Test-DefenseClawProcessIdentityRunning', 'Format-DefenseClawSetupAction', 'Format-DefenseClawRerunStep')) {
+foreach ($name in @('Copy-DefenseClawHookPreimage', 'Publish-DefenseClawEarlyHook', 'Assert-DefenseClawEarlyHookPublished', 'Restore-DefenseClawEarlyHook', 'Get-DefenseClawEarlyHookField', 'Hold-DefenseClawEarlyHookGuard', 'Restore-DefenseClawSnapshotHookAfterActivation', 'Wait-DefenseClawPriorHookCalls', 'Get-DefenseClawPriorHookProcessIds', 'Assert-DefenseClawInstalledHookCallsEnded', 'Assert-DefenseClawHookNotHeld', 'Wait-DefenseClawServiceProcessExit', 'Test-DefenseClawProcessIdentityRunning', 'Format-DefenseClawSetupAction', 'Format-DefenseClawRerunStep')) {
     $definition = $ast.Find({
         param($node)
         $node -is [Management.Automation.Language.FunctionDefinitionAst] -and $node.Name -ceq $name
@@ -422,6 +427,7 @@ $errors = $null
 $ast = [Management.Automation.Language.Parser]::ParseFile($ModulePath, [ref]$tokens, [ref]$errors)
 if ($errors.Count -gt 0) { throw "module parse failed: $($errors[0].Message)" }
 foreach ($name in @(
+        'Copy-DefenseClawHookPreimage',
         'Publish-DefenseClawEarlyHook',
         'Assert-DefenseClawEarlyHookPublished',
         'Hold-DefenseClawEarlyHookGuard',
