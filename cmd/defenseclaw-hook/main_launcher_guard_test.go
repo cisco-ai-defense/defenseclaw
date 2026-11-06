@@ -32,6 +32,11 @@ func TestMain(m *testing.M) {
 const launcherMissingSentence = "DefenseClaw blocked this: its Claude Code hook launcher is missing. " +
 	"Run the DefenseClaw installer again to repair it."
 
+// launcherCannotStartSentence is what the guard prints when something is at
+// the launcher path but cannot start: a folder, a damaged file (GAP-0086).
+const launcherCannotStartSentence = "DefenseClaw blocked this: its Claude Code hook launcher cannot start. " +
+	"Run the DefenseClaw installer again to repair it."
+
 func fakeLauncher(t *testing.T) string {
 	t.Helper()
 	self, err := os.Executable()
@@ -95,16 +100,24 @@ func TestLauncherGuardBlocksWhenTheLauncherIsMissingOrCannotStart(t *testing.T) 
 	if err := os.MkdirAll(directory, 0o700); err != nil {
 		t.Fatal(err)
 	}
-	for name, launcher := range map[string]string{
-		"missing":     filepath.Join(dir, "gone", "defenseclaw-hook.exe"),
-		"a directory": directory,
+	notAProgram := filepath.Join(dir, "damaged", "defenseclaw-hook.exe")
+	if err := os.MkdirAll(filepath.Dir(notAProgram), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(notAProgram, []byte("this is not a program file\n"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	for name, tc := range map[string]struct{ launcher, sentence string }{
+		"missing":       {filepath.Join(dir, "gone", "defenseclaw-hook.exe"), launcherMissingSentence},
+		"a directory":   {directory, launcherCannotStartSentence},
+		"not a program": {notAProgram, launcherCannotStartSentence},
 	} {
 		t.Run(name, func(t *testing.T) {
 			code, stdout, stderr := runHookMain(t,
-				[]string{"launcher-guard", launcher, "hook", "--connector", "claudecode"},
+				[]string{"launcher-guard", tc.launcher, "hook", "--connector", "claudecode"},
 				`{"session_id":"s","hook_event_name":"PreToolUse","tool_name":"Bash","tool_input":{"command":"echo ok"}}`)
-			if code != 2 || stdout != "" || strings.TrimSpace(stderr) != launcherMissingSentence {
-				t.Fatalf("exit %d, stdout %q, stderr %q; want exit 2 with the guard sentence", code, stdout, stderr)
+			if code != 2 || stdout != "" || strings.TrimSpace(stderr) != tc.sentence {
+				t.Fatalf("exit %d, stdout %q, stderr %q; want exit 2 with %q", code, stdout, stderr, tc.sentence)
 			}
 		})
 	}
