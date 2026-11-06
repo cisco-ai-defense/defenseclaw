@@ -171,3 +171,21 @@ func TestReadOpenCodeServicePortAsUserFollowsFinalLink(t *testing.T) {
 		t.Fatalf("regular account file: %d %v", port, err)
 	}
 }
+
+func TestManagedWindowsOpenCodeClaimCanRetryAfterFileRefusal(t *testing.T) {
+	const first, second, third = "S-1-5-21-100-200-300-1001", "S-1-5-21-400-500-600-1002", "S-1-5-21-700-800-900-9001"
+	ids := map[string]uint64{first: 1001, second: 1002, third: 9001}
+	recorded := map[string]int{second: 25002}
+	imports := map[string]int{first: 25002}
+	claims := map[int]string{25001: first}
+	for pass := 0; pass < 3; pass++ {
+		plan := PlanOpenCodeServicePortsByAccountWithClaims(ids, []string{first, second}, imports, recorded, claims, true, nil)
+		if plan.Ports[first] != 25001 || plan.Ports[second] != 25002 || plan.Record[second] != 25002 {
+			t.Fatalf("pass %d could not retry its own reserved port: %+v", pass, plan)
+		}
+	}
+	plan := PlanOpenCodeServicePortsByAccountWithClaims(ids, []string{second, third}, nil, recorded, claims, true, nil)
+	if plan.Ports[third] == 25001 || plan.Record[second] != 25002 {
+		t.Fatalf("another account reused the pending claim: %+v", plan)
+	}
+}

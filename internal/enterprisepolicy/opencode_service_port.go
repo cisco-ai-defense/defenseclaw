@@ -209,6 +209,13 @@ type OpenCodePortPlan struct {
 // A record that pairs two uids with one port (written by an earlier build)
 // keeps the lower uid on it and rebinds the other, reported as a conflict.
 func PlanOpenCodeServicePorts(eligible []int, imports, recorded map[int]int, allowNew bool, unknown map[int]bool) OpenCodePortPlan {
+	return planOpenCodeServicePorts(eligible, imports, recorded, allowNew, unknown, nil)
+}
+
+// reserved keeps a per-user claim out of another account's allocation. A
+// matching claim may be retried by its owner after an account-file refusal;
+// neither kind of claim can move a binding in the protected record.
+func planOpenCodeServicePorts(eligible []int, imports, recorded map[int]int, allowNew bool, unknown map[int]bool, reserved map[int]int) OpenCodePortPlan {
 	plan := OpenCodePortPlan{Ports: map[int]int{}, Record: map[int]int{}}
 	holder := map[int]int{}
 	recordedUIDs := make([]int, 0, len(recorded))
@@ -244,7 +251,9 @@ func PlanOpenCodeServicePorts(eligible []int, imports, recorded map[int]int, all
 		start := OpenCodeAccountPort(uint64(uid))
 		for step := 0; step < OpenCodeAccountPortSpan; step++ {
 			port := OpenCodeAccountPortBase + (start-OpenCodeAccountPortBase+step)%OpenCodeAccountPortSpan
-			if _, taken := holder[port]; !taken && !contested[port] {
+			_, taken := holder[port]
+			owner, claimed := reserved[port]
+			if !taken && !contested[port] && (!claimed || owner == uid) {
 				holder[port] = uid
 				return port
 			}
@@ -301,6 +310,13 @@ func PlanOpenCodeServicePorts(eligible []int, imports, recorded map[int]int, all
 			continue
 		}
 		uid := claimants[0]
+		if owner, claimed := reserved[port]; claimed && owner != uid {
+			if owner > 0 {
+				plan.Conflicts = append(plan.Conflicts, OpenCodePortConflict{UID: uid, Holder: owner, Port: port})
+			}
+			needFresh = append(needFresh, uid)
+			continue
+		}
 		holder[port] = uid
 		plan.Ports[uid], plan.Record[uid] = port, port
 	}

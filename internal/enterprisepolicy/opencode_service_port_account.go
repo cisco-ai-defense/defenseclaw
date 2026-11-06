@@ -71,28 +71,21 @@ func PlanOpenCodeServicePortsByAccountWithClaims(ids map[string]uint64, eligible
 			unknownUIDs[uid] = true
 		}
 	}
-	// A claim is a reservation for allocation, never a competing owner of
-	// an existing record entry. A matching one-time import can use its own
-	// claim; an import with someone else's claim remains unavailable.
-	claimPorts := make([]int, 0, len(claims))
-	for port := range claims {
-		claimPorts = append(claimPorts, port)
-	}
-	sort.Ints(claimPorts)
-	claimUIDs := map[int]string{}
-	for _, port := range claimPorts {
+	// Claims reserve free ports from other SIDs but do not enter the
+	// protected record. Their owner can retry a claim after a file write
+	// refusal without accumulating a new claim on every guardian pass.
+	reserved := map[int]int{}
+	for port, owner := range claims {
 		if port <= 0 || port > 65535 || recordedPorts[port] {
 			continue
 		}
-		owner := claims[port]
-		if imports[owner] == port && !unknown[owner] {
-			continue
+		if uid, ok := uidFor[owner]; ok {
+			reserved[port] = uid
+		} else {
+			reserved[port] = -1
 		}
-		uid := (len(keys)+len(claimUIDs)+1)*OpenCodeAccountPortSpan + port%OpenCodeAccountPortSpan
-		recordUIDs[uid] = port
-		claimUIDs[uid] = owner
 	}
-	shared := PlanOpenCodeServicePorts(eligibleUIDs, importUIDs, recordUIDs, allowNew, unknownUIDs)
+	shared := planOpenCodeServicePorts(eligibleUIDs, importUIDs, recordUIDs, allowNew, unknownUIDs, reserved)
 	for uid, port := range shared.Ports {
 		if sid := sidFor[uid]; sid != "" {
 			plan.Ports[sid] = port
@@ -105,9 +98,6 @@ func PlanOpenCodeServicePortsByAccountWithClaims(ids map[string]uint64, eligible
 	}
 	for _, conflict := range shared.Conflicts {
 		holder := sidFor[conflict.Holder]
-		if holder == "" {
-			holder = claimUIDs[conflict.Holder]
-		}
 		plan.Conflicts = append(plan.Conflicts, OpenCodeAccountPortConflict{sidFor[conflict.UID], holder, conflict.Port})
 	}
 	for port, uids := range shared.Contested {
