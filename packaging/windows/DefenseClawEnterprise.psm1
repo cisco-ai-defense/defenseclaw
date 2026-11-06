@@ -218,6 +218,9 @@ $script:ResilienceMarkers = @(
     'defenseclaw_degraded'
 )
 $script:ResilienceEvents = [Collections.Generic.List[string]]::new()
+# The lines this action wrote to the hook-guardian log, kept so an Install
+# that clears leftover state and runs again can write them to the new log.
+$script:GuardianLogInstallerLines = [Collections.Generic.List[object]]::new()
 $script:SchemaVersion = 1
 # Prefix of the refusal for a deployment.json that is not a JSON object; the
 # CLI maps it to ensure_refused and Repair rebuilds the file (GAP-0629).
@@ -23948,21 +23951,56 @@ function Write-DefenseClawTargetRuntimeSkippedProfiles {
     }
     foreach ($line in $entries) {
         Microsoft.PowerShell.Utility\Write-Warning -Message $line
-        try {
-            $logPath = [string]$Layout.GuardianLogPath
-            if (-not [string]::IsNullOrWhiteSpace($logPath) -and
-                (Microsoft.PowerShell.Management\Test-Path -LiteralPath ([IO.Path]::GetDirectoryName($logPath)) -PathType Container)) {
-                [IO.File]::AppendAllText(
-                    $logPath,
-                    ('{0} [installer] {1}{2}' -f [DateTime]::UtcNow.ToString('yyyy-MM-ddTHH:mm:ssZ'), $line, [Environment]::NewLine)
-                )
+        # Each line reaches the log once per action; a retry after the Install
+        # auto-recovery has already written it back.
+        $logged = $false
+        foreach ($kept in $script:GuardianLogInstallerLines) {
+            if ([string]::Equals([string]$kept.line, $line, [StringComparison]::Ordinal)) {
+                $logged = $true
+                break
             }
         }
-        catch {
-            Microsoft.PowerShell.Utility\Write-Warning -Message (
-                "target_runtime_profile_skipped: could not record the skip in the hook-guardian log: $($_.Exception.Message)"
-            )
+        if ($logged) {
+            continue
         }
+        $entry = [pscustomobject]@{
+            line = $line
+            text = ('{0} [installer] {1}{2}' -f [DateTime]::UtcNow.ToString('yyyy-MM-ddTHH:mm:ssZ'), $line, [Environment]::NewLine)
+        }
+        if ($script:GuardianLogInstallerLines.Count -lt 4096) {
+            $script:GuardianLogInstallerLines.Add($entry)
+        }
+        Add-DefenseClawGuardianLogInstallerText -Layout $Layout -Text $entry.text
+    }
+}
+
+function Add-DefenseClawGuardianLogInstallerText {
+    param(
+        [Parameter(Mandatory)][hashtable]$Layout,
+        [Parameter(Mandatory)][string]$Text
+    )
+    try {
+        $logPath = [string]$Layout.GuardianLogPath
+        if (-not [string]::IsNullOrWhiteSpace($logPath) -and
+            (Microsoft.PowerShell.Management\Test-Path -LiteralPath ([IO.Path]::GetDirectoryName($logPath)) -PathType Container)) {
+            [IO.File]::AppendAllText($logPath, $Text)
+        }
+    }
+    catch {
+        Microsoft.PowerShell.Utility\Write-Warning -Message (
+            "target_runtime_profile_skipped: could not record the skip in the hook-guardian log: $($_.Exception.Message)"
+        )
+    }
+}
+
+# An Install that clears leftover state and runs again
+# (Invoke-DefenseClawInstallAutoRecovery) purges StateRoot, the hook-guardian
+# log included. The retry writes the first attempt's lines, with their
+# original times, to the new log.
+function Restore-DefenseClawGuardianLogInstallerLines {
+    param([Parameter(Mandatory)][hashtable]$Layout)
+    foreach ($entry in @($script:GuardianLogInstallerLines.ToArray())) {
+        Add-DefenseClawGuardianLogInstallerText -Layout $Layout -Text ([string]$entry.text)
     }
 }
 
@@ -45059,6 +45097,7 @@ function Invoke-DefenseClawEnterpriseLifecycle {
         [switch]$CollectRuntimeGenerations
     )
     $script:ResilienceEvents.Clear()
+    $script:GuardianLogInstallerLines.Clear()
     $script:FilePrivilegePrerequisitesReported = $false
     $script:MissingFilePrivileges = @()
     Set-DefenseClawEnterpriseProfile -EnterpriseProfile $EnterpriseProfile
@@ -45976,6 +46015,11 @@ function Invoke-DefenseClawEnterpriseLifecycle {
                             -RequiredBase $script:ProgramData
                     )
                     New-DefenseClawLayoutDirectories -Layout $layout
+                }
+                if ($installRecoveryAttempted) {
+                    # The recovery purge removed the hook-guardian log, and
+                    # with it the lines the first attempt wrote there.
+                    Restore-DefenseClawGuardianLogInstallerLines -Layout $layout
                 }
 
                 if ($Action -eq 'Install' -and (Test-DefenseClawStandaloneProfile) -and

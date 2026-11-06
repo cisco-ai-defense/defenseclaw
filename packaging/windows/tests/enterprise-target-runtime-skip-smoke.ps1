@@ -6,7 +6,8 @@
 # Every install-like action leaves out a user whose profile folder stays busy
 # and lists them in the target-runtime plan. The installer must accept only a well-formed
 # list and must record each skipped user, with the reason, as a warning and in
-# the hook-guardian log. The helpers are loaded from the module by AST.
+# the hook-guardian log, also after an Install auto-recovery purged that log.
+# The helpers are loaded from the module by AST.
 
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
@@ -19,7 +20,7 @@ $ast = [Management.Automation.Language.Parser]::ParseFile($modulePath, [ref]$nul
 if (@($parseErrors).Count -ne 0) {
     throw "module does not parse: $(@($parseErrors)[0])"
 }
-foreach ($name in @('Get-DefenseClawTargetRuntimeSkippedProfiles', 'Write-DefenseClawTargetRuntimeSkippedProfiles', 'ConvertTo-DefenseClawResilienceFieldValue', 'Format-DefenseClawResilienceEvent')) {
+foreach ($name in @('Get-DefenseClawTargetRuntimeSkippedProfiles', 'Write-DefenseClawTargetRuntimeSkippedProfiles', 'Add-DefenseClawGuardianLogInstallerText', 'Restore-DefenseClawGuardianLogInstallerLines', 'ConvertTo-DefenseClawResilienceFieldValue', 'Format-DefenseClawResilienceEvent')) {
     $definition = $ast.Find({
             param($node)
             $node -is [Management.Automation.Language.FunctionDefinitionAst] -and $node.Name -eq $name
@@ -32,6 +33,7 @@ foreach ($name in @('Get-DefenseClawTargetRuntimeSkippedProfiles', 'Write-Defens
 
 $script:ResilienceMarkers = @('defenseclaw_repair', 'defenseclaw_skip')
 $script:ResilienceEvents = [Collections.Generic.List[string]]::new()
+$script:GuardianLogInstallerLines = [Collections.Generic.List[object]]::new()
 
 function New-Plan($Skipped, $Repaired = $null) {
     $plan = [ordered]@{ schema_version = 1; roots = @() }
@@ -95,6 +97,32 @@ try {
         -not $warningText.Contains('unit="user S-1-5-21-111-222-333-1009"') -or
         -not $logged.Contains('[installer] defenseclaw_skip ')) {
         throw "skip is not logged with the shared marker: $warningText"
+    }
+}
+finally {
+    [IO.Directory]::Delete($logDirectory, $true)
+}
+
+# An Install auto-recovery purges StateRoot, this log with it, and runs again.
+# The retry writes the first attempt's lines to the new log, and the same skip
+# found again by the retry's plan is not logged twice.
+$script:GuardianLogInstallerLines.Clear()
+$logDirectory = [IO.Path]::Combine([IO.Path]::GetTempPath(), "dc-skip-retry-smoke-$([Guid]::NewGuid().ToString('N'))")
+[void][IO.Directory]::CreateDirectory($logDirectory)
+try {
+    $logPath = [IO.Path]::Combine($logDirectory, 'hook-guardian.log')
+    Write-DefenseClawTargetRuntimeSkippedProfiles -Plan (New-Plan @($busy)) -Layout @{ GuardianLogPath = $logPath } -WarningAction SilentlyContinue
+    [IO.Directory]::Delete($logDirectory, $true)
+    [void][IO.Directory]::CreateDirectory($logDirectory)
+    Restore-DefenseClawGuardianLogInstallerLines -Layout @{ GuardianLogPath = $logPath }
+    Write-DefenseClawTargetRuntimeSkippedProfiles -Plan (New-Plan @($busy)) -Layout @{ GuardianLogPath = $logPath } -WarningAction SilentlyContinue
+    $logged = [IO.File]::ReadAllText($logPath)
+    $count = [regex]::Matches($logged, [regex]::Escape('[installer] target_runtime_profile_skipped: user S-1-5-21-111-222-333-1009')).Count
+    if ($count -ne 1) {
+        throw "the retried Install's log records the skip $count times instead of once: $logged"
+    }
+    if (-not $logged.Contains('[installer] defenseclaw_skip ')) {
+        throw "the retried Install's log lost the shared skip marker: $logged"
     }
 }
 finally {
