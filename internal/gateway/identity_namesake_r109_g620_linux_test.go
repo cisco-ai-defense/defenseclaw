@@ -6,6 +6,7 @@
 package gateway
 
 import (
+	"context"
 	"slices"
 	"strings"
 	"testing"
@@ -114,7 +115,7 @@ func TestReviewG620ProvenConnectorAssignmentKeepsOrdinaryOSSWork(t *testing.T) {
 				!slices.Equal(got.Unproven, []string{"account:unknown"}) {
 				t.Errorf("OSS tier %q with %q assignment did not retain proven profile: %+v", pack, selected, got)
 			} else if warnings := profileExplainWarnings(set, got, &subject); !slices.ContainsFunc(warnings, func(note string) bool {
-				return strings.Contains(note, "account holder is unconfirmed") && strings.Contains(note, "proven connector assignment")
+				return strings.Contains(note, "account holder is unconfirmed") && strings.Contains(note, "proven assignment")
 			}) {
 				t.Errorf("OSS tier %q with %q assignment has no holder warning: %q", pack, selected, warnings)
 			}
@@ -146,5 +147,105 @@ func TestReviewG620UnprovenAssignmentMustKeepApprovalControl(t *testing.T) {
 	}, true)
 	if got := set.match(&subject, profileSubjectProcessOwner, "claudecode", ""); got.Refused == "" && got.Name == "base" {
 		t.Errorf("uncertain approval profile silently fell to base without HILT: %+v", got)
+	}
+}
+
+// Proven process facts must not turn an ordinary OSS hook
+// into an account-holder refusal when only a stronger threshold is possible.
+func TestReviewerG620ProvenProcessAssignmentStillAllowsOrdinaryOSS(t *testing.T) {
+	subject := profileSubjectFromVerified(VerifiedSubject{
+		UserID: "700002", IDKind: useridentity.KindPOSIXUID, UserName: "alice",
+		Directory: useridentity.DirectoryFacts{Source: useridentity.SourceProcessCredentials,
+			HolderUnproven: true, Groups: []string{"staff"},
+			Assurance: useridentity.AssuranceVerified, ResolvedAt: time.Now()},
+		Source: subjectSourceProcessOwner,
+	}, true)
+	for _, tc := range []struct {
+		name  string
+		match config.ProfileMatch
+	}{
+		{"proven group", config.ProfileMatch{Groups: []string{"staff"}}},
+		{"proven uid", config.ProfileMatch{Users: []string{"700002"}}},
+		{"proven connector and group", config.ProfileMatch{Connectors: []string{"claudecode"}, Groups: []string{"staff"}}},
+	} {
+		for _, pack := range []string{"", "permissive", "strict"} {
+			set := identityTestSet(t, identityTestPlatforms[0], "watch",
+				config.ProfileAssignment{Profile: "tooling", Match: tc.match},
+				config.ProfileAssignment{Profile: "strict", Match: config.ProfileMatch{Users: []string{"alice@corp.example"}}})
+			set.base.Guardrail.RulePack = pack
+			got := set.match(&subject, profileSubjectProcessOwner, "claudecode", "")
+			if pack == "strict" {
+				if got.Refused == "" {
+					t.Errorf("%s strict tier: unconfirmed holder unexpectedly allowed: %+v", tc.name, got)
+				}
+			} else if got.Refused != "" || got.Name != "tooling" || got.Assignment != 1 ||
+				!slices.Equal(got.Unproven, []string{"account:unknown"}) {
+				t.Errorf("%s OSS tier %q: ordinary hook refused despite proven process assignment: %+v", tc.name, pack, got)
+			}
+		}
+	}
+}
+
+// A warned hook allow must not hide a simultaneous inspect
+// refusal in the profile explanation.
+func TestReviewerG620ExplainNamesInspectionRefusal(t *testing.T) {
+	subject := profileSubjectFromVerified(VerifiedSubject{
+		UserID: "700002", IDKind: useridentity.KindPOSIXUID, UserName: "alice",
+		Directory: useridentity.DirectoryFacts{Source: useridentity.SourceProcessCredentials,
+			HolderUnproven: true, Groups: []string{"staff"},
+			Assurance: useridentity.AssuranceVerified, ResolvedAt: time.Now()},
+		Source: subjectSourceProcessOwner,
+	}, true)
+	set := identityTestSet(t, identityTestPlatforms[0], "watch",
+		config.ProfileAssignment{Profile: "strict", Match: config.ProfileMatch{Users: []string{"alice@corp.example"}}})
+	decide := func(path profilePath) profileDecision {
+		return set.selectProfile(&subject, resolveIdentity(&subject, nil), profileSubjectProcessOwner,
+			"claudecode", nil, path, "")
+	}
+	if hook, inspect := decide(profilePathHook), decide(profilePathInspect); hook.Refused != "" || inspect.Refused == "" {
+		t.Fatalf("fixture: hook=%+v inspect=%+v", hook, inspect)
+	}
+	decision, refusedOn, _ := set.explainOnRequestPaths("claudecode", decide)
+	if decision.Refused == "" || !slices.Contains(refusedOn, "inspect") {
+		t.Errorf("explain hid the inspect refusal: decision=%+v refusedOn=%v", decision, refusedOn)
+	}
+}
+
+// An uncertain local namesake still protects a literal
+// target and a target carried by a known shell variable.
+func TestReviewerG620UncertainNamesakeKeepsProtectedHookBlock(t *testing.T) {
+	subject := profileSubjectFromVerified(VerifiedSubject{
+		UserID: "700002", IDKind: useridentity.KindPOSIXUID, UserName: "alice",
+		Directory: useridentity.DirectoryFacts{Source: useridentity.SourceProcessCredentials,
+			HolderUnproven: true, Groups: []string{"staff"},
+			Assurance: useridentity.AssuranceVerified, ResolvedAt: time.Now()},
+		Source: subjectSourceProcessOwner,
+	}, true)
+	set := identityTestSet(t, identityTestPlatforms[0], "watch",
+		config.ProfileAssignment{Profile: "strict", Match: config.ProfileMatch{Users: []string{"alice@corp.example"}}})
+	set.base.Guardrail.Connector = "claudecode"
+	got := set.match(&subject, profileSubjectProcessOwner, "claudecode", "")
+	if got.Refused != "" || got.Name != "watch" {
+		t.Fatalf("fixture: %+v", got)
+	}
+	api := &APIServer{scannerCfg: set.base}
+	api.guardrailProfiles.set.Store(set)
+	ctx := context.WithValue(t.Context(), resolvedGuardrailProfileKey{}, &resolvedGuardrailProfile{
+		decision: got, set: set, derived: set.profileConfig(got.Name),
+	})
+	for _, tc := range []struct{ name, command, want string }{
+		{"direct", "printf marker >> ~/.ssh/authorized_keys", "block"},
+		{"known value", "P=~/.ssh/authorized_keys; printf marker >> $P", "block"},
+		{"ordinary", "printf marker >> notes.txt", "allow"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			args := []byte(`{"command":"` + tc.command + `"}`)
+			response := api.evaluateAgentHook(ctx, agentHookRequest{
+				ConnectorName: "claudecode", HookEventName: "PreToolUse", ToolName: "Bash", ToolArgs: args,
+			})
+			if response.Action != tc.want || (tc.want == "block" && response.RawAction != "block") {
+				t.Errorf("%s: action=%s raw=%s findings=%v; want %s", tc.name, response.Action, response.RawAction, response.Findings, tc.want)
+			}
+		})
 	}
 }

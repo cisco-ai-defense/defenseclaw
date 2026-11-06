@@ -211,6 +211,9 @@ type profileDecision struct {
 	// provenMembers keeps every proven assignment's rule and audit scope
 	// even when one profile covers the others for policy selection.
 	provenMembers []string
+	// holderFallback marks an OSS hook decision made with an unconfirmed
+	// account holder. Code-proven action findings still enforce on that path.
+	holderFallback bool
 }
 
 // guardrailProfileSet is every profile derived from one configuration.
