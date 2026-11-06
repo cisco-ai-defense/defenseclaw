@@ -907,13 +907,14 @@ func (w *answerWatchdog) watch(deadline time.Time) {
 	receiptDone := make(chan struct{})
 	if delivery := w.deadlineDelivery; delivery != nil && !w.secureClient {
 		blocked := w.fallback.blocked
+		done := receiptDone
 		// The transport remains open for the token after the answer timer
 		// ends. Close it at the same bounded exit window if the process is
 		// simulated rather than exited (as in tests).
 		time.AfterFunc(answerWatchdogLogWait, delivery.close)
 		go func() {
 			_ = delivery.deadline(blocked)
-			close(receiptDone)
+			close(done)
 		}()
 	} else {
 		close(receiptDone)
