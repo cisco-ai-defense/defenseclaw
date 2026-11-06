@@ -18,6 +18,7 @@ import (
 	"net"
 	"net/http"
 	"net/http/httptrace"
+	"strings"
 	"sync"
 	"syscall"
 	"time"
@@ -176,6 +177,11 @@ var (
 // arrives); release frees ctx. Off Linux, or outside the standalone
 // profile, ctx is returned unchanged.
 func watchManagedGatewayStarts(ctx context.Context, opts Options, deadline time.Time) (watched context.Context, stop, release func()) {
+	if running := managedGatewayServiceRunningNow; running != nil && opts.ManagedEnterprise && !opts.ManagedStandalone &&
+		!opts.SecureClient && !deadline.IsZero() && strings.TrimSpace(opts.ManagedGatewayServiceName) != "" {
+		name := opts.ManagedGatewayServiceName
+		return watchManagedGatewayService(ctx, func() (bool, bool) { return running(name) }, deadline, managedGatewayServiceWatchInterval)
+	}
 	probe := standaloneGatewayServiceProbe
 	if !opts.ManagedEnterprise || !opts.ManagedStandalone || probe == nil {
 		return ctx, func() {}, func() {}
@@ -242,6 +248,93 @@ func watchGatewayStarts(
 			next = min(interval, left)
 		}
 		timer.Reset(next)
+	}
+}
+
+// managedGatewayServiceRunningNow reads whether the managed Windows gateway
+// service is running (known false: the state could not be read); nil where
+// the managed gateway is no service-manager service the hook reads.
+// A variable for tests.
+var managedGatewayServiceRunningNow = platformManagedGatewayServiceRunning
+
+// managedGatewayServiceStateWait bounds one read of the gateway service's
+// state by the service watch: a read the service manager holds longer
+// proves nothing, and the call keeps its answer deadline.
+var managedGatewayServiceStateWait = 150 * time.Millisecond
+
+// managedGatewayServiceWatchInterval is how often, after the restart
+// budget, a managed Windows call still waiting for its answer reads the
+// gateway service's state again.
+var managedGatewayServiceWatchInterval = 250 * time.Millisecond
+
+// watchManagedGatewayService returns ctx, ended with errGatewayRestarting
+// once the managed Windows gateway service is read as not running at or
+// after deadline (the restart budget) while the call waits for its answer.
+// The first call into a stop connected to the running gateway before Setup
+// or an administrator stopped it; the stopping gateway took the call and
+// never answered it, so the call waited for the process cap (4 s) on every
+// connector at once, 4.5-7.3 s for the agent with its launch, while the
+// calls after it were blocked at the 3 s restart budget (rel-1-0-6
+// GAP-0648, GAP-0167, GAP-0171). That call is now blocked at the restart
+// budget too; errGatewayRestarting is closed in every fail mode. A running
+// gateway (a busy one, one that waits on a scanner) keeps the call's whole
+// answer budget, and a state that cannot be read in time proves nothing.
+// stop ends the watch (call it once the response arrives); release frees
+// ctx.
+func watchManagedGatewayService(ctx context.Context, running func() (bool, bool), deadline time.Time, interval time.Duration) (watched context.Context, stop, release func()) {
+	watched, cancel := context.WithCancelCause(ctx)
+	var mu sync.Mutex
+	stopped := false
+	done := make(chan struct{})
+	stop = func() {
+		mu.Lock()
+		defer mu.Unlock()
+		if !stopped {
+			stopped = true
+			close(done)
+		}
+	}
+	go func() {
+		timer := time.NewTimer(time.Until(deadline))
+		defer timer.Stop()
+		for {
+			select {
+			case <-watched.Done():
+				return
+			case <-done:
+				return
+			case <-timer.C:
+			}
+			if up, known := serviceRunningWithin(running, managedGatewayServiceStateWait); known && !up {
+				mu.Lock()
+				if !stopped {
+					cancel(errGatewayRestarting)
+				}
+				mu.Unlock()
+				return
+			}
+			timer.Reset(interval)
+		}
+	}()
+	return watched, stop, func() { stop(); cancel(nil) }
+}
+
+// serviceRunningWithin is running bounded by wait: a read that takes longer
+// is not known.
+func serviceRunningWithin(running func() (bool, bool), wait time.Duration) (up, known bool) {
+	type state struct{ up, known bool }
+	read := make(chan state, 1)
+	go func() {
+		up, known := running()
+		read <- state{up, known}
+	}()
+	timer := time.NewTimer(wait)
+	defer timer.Stop()
+	select {
+	case s := <-read:
+		return s.up, s.known
+	case <-timer.C:
+		return false, false
 	}
 }
 
