@@ -129,6 +129,7 @@ func guardrailActionForConnectorFindings(
 	findings []RuleFinding,
 	confirmable bool,
 ) string {
+	findings = readingBoundFindingsForTier(cfg, connector, findings)
 	return guardrailActionForFindings(findings, func(severity string) string {
 		return guardrailActionForConnector(cfg, connector, severity, confirmable)
 	})

@@ -88,6 +88,11 @@ type RuleFinding struct {
 	// only the in-process trusted-action boundary may use the proof to decide
 	// whether the finding can participate in a synchronous deny decision.
 	proof findingProof
+	// readingBoundUnread marks the over-limit finding of a call the readers
+	// did not finish whose text names no protected target
+	// (readingBoundUnreadFindings). It is private and value-free; the hook
+	// policy tier decides what it does (readingBoundFindingsForTier).
+	readingBoundUnread bool
 }
 
 type findingEnforcement uint8

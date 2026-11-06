@@ -27,8 +27,11 @@ func gap0677Nested(levels int, inner string) string {
 // MB) took 3 to 8.5 s through the hook client and the gateway, past the
 // hook answer window. It is past the reading bounds now: the hook client
 // sends incomplete evidence and the gateway takes the over-limit path at
-// once, for both connectors, whatever the target. A single bash -c script
-// of the same order of size is still read and allowed.
+// once, for both connectors. An ordinary target is marked for the policy
+// tier (readingBoundUnread: an alert in the default tier, a block in
+// strict, TestGAP0677NestedBodiesPastTheBoundAreGradedByTarget); a
+// protected one is not. A single bash -c script of the same order of size
+// is still read and allowed.
 func TestGAP0677NestedShellBodiesAreDecidedWithinTheHookWindow(t *testing.T) {
 	home := t.TempDir()
 	cwd := filepath.Join(home, "project")
@@ -69,6 +72,8 @@ func TestGAP0677NestedShellBodiesAreDecidedWithinTheHookWindow(t *testing.T) {
 				if ids := findingIDs(findings); len(ids) != 1 || ids[0] != "ACTION-COMPOUND-LIMIT" ||
 					buildVerdict(findings, "tool_call").Action != guardrailActionBlock {
 					t.Errorf("%s: %d nested bodies to %s: %s %v, want the over-limit block", connector, levels, target, buildVerdict(findings, "tool_call").Action, ids)
+				} else if unread := findings[0].readingBoundUnread; unread != (target == "~/project/output") {
+					t.Errorf("%s: %d nested bodies to %s: marked for the tier=%v", connector, levels, target, unread)
 				}
 			}
 		}
