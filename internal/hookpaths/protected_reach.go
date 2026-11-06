@@ -4,6 +4,7 @@
 package hookpaths
 
 import (
+	"io/fs"
 	"os"
 	"path/filepath"
 	"slices"
@@ -217,6 +218,18 @@ func (m *TargetMemo) ProtectedReach(target, home string) Grade {
 			unknownParents = unknownParents || match.unknown
 		}
 	}
+	if file.err == nil && file.info.Mode().IsRegular() && linkCount(target, file.info) > 1 {
+		// A hard link to a file inside a protected tree has no path relation
+		// to that tree. Check the complete tree when file identity matters;
+		// a bounded index cannot establish a negative result for this case.
+		matched, unknown := m.protectedTreeSameFile(file.info, names)
+		if matched {
+			return GradeNamed
+		}
+		if unknown {
+			return GradePossible
+		}
+	}
 
 	// The ordinary parent of a missing local file is a complete answer even
 	// when another, unrelated share is pending.
@@ -259,4 +272,56 @@ func (m *TargetMemo) ProtectedReach(target, home string) Grade {
 		return GradePossible
 	}
 	return GradeNone
+}
+
+func (m *TargetMemo) protectedTreeSameFile(target os.FileInfo, names reachNames) (bool, bool) {
+	seen := make(map[string]struct{}, len(names.trees))
+	unknown := false
+	for _, tree := range names.trees {
+		root, ok := m.resolveWriteTarget(tree)
+		if !ok {
+			if _, err := PathLstat(tree); err != nil && !os.IsNotExist(err) {
+				unknown = true
+			}
+			continue
+		}
+		if _, done := seen[root]; done {
+			continue
+		}
+		seen[root] = struct{}{}
+		matched := false
+		err := filepath.WalkDir(root, func(path string, entry fs.DirEntry, walkErr error) error {
+			if walkErr != nil {
+				if !os.IsNotExist(walkErr) {
+					unknown = true
+				}
+				return nil
+			}
+			if entry.IsDir() {
+				return nil
+			}
+			info, err := entry.Info()
+			if entry.Type()&os.ModeSymlink != 0 {
+				info, err = PathStat(path)
+			}
+			if err != nil {
+				if !os.IsNotExist(err) {
+					unknown = true
+				}
+				return nil
+			}
+			if info.Mode().IsRegular() && os.SameFile(target, info) {
+				matched = true
+				return fs.SkipAll
+			}
+			return nil
+		})
+		if matched {
+			return true, unknown
+		}
+		if err != nil && !os.IsNotExist(err) {
+			unknown = true
+		}
+	}
+	return false, unknown
 }

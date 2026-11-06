@@ -1963,38 +1963,11 @@ func resolveActiveStateHardlinkTargetResolved(resolved, home string) (string, bo
 	return "", false
 }
 
-// A truncated identity index cannot prove that a multiply linked target is
-// outside active state. This conservative result is used only after the
-// recovered-command proof bound is exhausted.
-func activeStateHardlinkReachResolved(resolved, home string) bool {
-	info, err := pathStat(resolved)
-	if err != nil || !info.Mode().IsRegular() || linkCount(resolved, info) < 2 {
-		return false
-	}
-	if _, same := resolveActiveStateHardlinkTargetResolved(resolved, home); same {
-		return true
-	}
-	root, ok := ResolveWriteTarget(filepath.Join(home, ".defenseclaw"))
-	if !ok || !activeStateIdentitySnapshot(root).truncated {
-		return false
-	}
-	rootInfo, err := pathStat(root)
-	if err != nil {
-		return false
-	}
-	targetID := fileIdentityForPath(resolved, info)
-	rootID := directoryIdentityForPath(root, rootInfo)
-	targetDevice, _, targetOK := strings.Cut(targetID, ":")
-	rootDevice, _, rootOK := strings.Cut(rootID, ":")
-	return targetOK && rootOK && targetDevice == rootDevice
-}
-
 // The identity index of one active state tree is built at most once per
 // activeStateIndexTTL and shared by every operand and request in that time,
 // so a command naming many ordinary hard links costs one bounded walk. The
 // walk stops after activeStateIndexEntries entries or activeStateIndexBudget.
-// The ordinary target mapper uses only confirmed entries; the exhausted
-// recovered-command path also records whether the walk was incomplete.
+// This target mapper uses only confirmed entries.
 var (
 	activeStateIndexEntries = 4096
 	activeStateIndexBudget  = 250 * time.Millisecond
@@ -2012,9 +1985,8 @@ type activeStateIdentity struct {
 }
 
 type activeStateIdentityIndex struct {
-	built     time.Time
-	files     []activeStateIdentity
-	truncated bool
+	built time.Time
+	files []activeStateIdentity
 }
 
 func activeStateIdentities(activeRoot string) []activeStateIdentity {
@@ -2036,17 +2008,16 @@ func activeStateIdentitySnapshot(activeRoot string) activeStateIdentityIndex {
 	if activeStateIndex.byRoot == nil {
 		activeStateIndex.byRoot = make(map[string]activeStateIdentityIndex)
 	}
-	files, truncated := walkActiveStateIdentities(activeRoot, now.Add(activeStateIndexBudget))
-	index := activeStateIdentityIndex{built: now, files: files, truncated: truncated}
+	files := walkActiveStateIdentities(activeRoot, now.Add(activeStateIndexBudget))
+	index := activeStateIdentityIndex{built: now, files: files}
 	activeStateIndex.byRoot[activeRoot] = index
 	return index
 }
 
-func walkActiveStateIdentities(activeRoot string, deadline time.Time) ([]activeStateIdentity, bool) {
+func walkActiveStateIdentities(activeRoot string, deadline time.Time) []activeStateIdentity {
 	activeStateIndexWalks.Add(1)
 	var files []activeStateIdentity
 	visited := 0
-	incomplete := false
 	exhausted := func() bool {
 		visited++
 		return visited > activeStateIndexEntries || time.Now().After(deadline)
@@ -2056,13 +2027,11 @@ func walkActiveStateIdentities(activeRoot string, deadline time.Time) ([]activeS
 			if info.Mode().IsRegular() {
 				files = append(files, activeStateIdentity{relative: relative, info: info})
 			}
-		} else if !os.IsNotExist(err) {
-			incomplete = true
 		}
 	}
 	for _, name := range activeStateFiles {
 		if exhausted() {
-			return files, true
+			return files
 		}
 		add(filepath.Join(activeRoot, name), name)
 	}
@@ -2074,9 +2043,6 @@ func walkActiveStateIdentities(activeRoot string, deadline time.Time) ([]activeS
 				return fs.SkipAll
 			}
 			if walkErr != nil {
-				if !os.IsNotExist(walkErr) {
-					incomplete = true
-				}
 				return nil
 			}
 			if entry.IsDir() {
@@ -2088,10 +2054,10 @@ func walkActiveStateIdentities(activeRoot string, deadline time.Time) ([]activeS
 			return nil
 		})
 		if stopped {
-			return files, true
+			return files
 		}
 	}
-	return files, incomplete
+	return files
 }
 
 // actionPosixNestedShellMention scans each static shell -c or env -S body as

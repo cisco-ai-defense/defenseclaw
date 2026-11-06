@@ -169,6 +169,58 @@ func TestGAP0534DenseStateHardlink(t *testing.T) {
 	}
 }
 
+func TestGAP0534DenseOrdinaryHardlink(t *testing.T) {
+	home := t.TempDir()
+	cwd := filepath.Join(home, "project")
+	state := filepath.Join(home, ".defenseclaw")
+	for _, dir := range []string{cwd, filepath.Join(state, "hooks")} {
+		if err := os.MkdirAll(dir, 0700); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for i := 0; i < 4100; i++ {
+		if err := os.WriteFile(filepath.Join(state, "hooks", fmt.Sprintf("entry-%04d", i)), []byte("x"), 0600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	ordinary := filepath.Join(cwd, "output")
+	if err := os.WriteFile(ordinary, []byte("x"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Link(ordinary, filepath.Join(home, "ordinary-hardlink")); err != nil {
+		t.Skipf("hard links unavailable: %v", err)
+	}
+	t.Setenv("HOME", home)
+	command := `Write-Output $(.\a[1]<#x#>); Set-Content -Path ~/ordinary-hardlink -Value x`
+	for _, connector := range []string{"claudecode", "codex"} {
+		t.Run(connector, func(t *testing.T) {
+			tool := "PowerShell"
+			if connector == "codex" {
+				tool = "exec_command"
+			}
+			payload, err := json.Marshal(map[string]any{"hook_event_name": "PreToolUse", "cwd": cwd, "tool_name": tool, "tool_input": map[string]string{"command": command}})
+			if err != nil {
+				t.Fatal(err)
+			}
+			targets, ok := hookpaths.Decode(hookpaths.Resolve(payload))
+			if !ok {
+				t.Fatal("missing write evidence")
+			}
+			ctx := context.WithValue(t.Context(), resolvedWritesContextKey{}, targets)
+			api := instructionProtectionTestAPI(t, connector, "action", "HIGH")
+			var action string
+			if connector == "claudecode" {
+				action = api.evaluateClaudeCodeHook(ctx, claudeCodeHookRequest{HookEventName: "PreToolUse", CWD: cwd, ToolName: tool, ToolInput: map[string]any{"command": command}}).Action
+			} else {
+				action = api.evaluateCodexHook(ctx, codexHookRequest{HookEventName: "PreToolUse", CWD: cwd, ToolName: tool, ToolInput: map[string]any{"cmd": command}}).Action
+			}
+			if action != "allow" {
+				t.Errorf("ordinary hardlink action = %s, want allow", action)
+			}
+		})
+	}
+}
+
 func TestGAP0534BroadLinkedRoot(t *testing.T) {
 	home := t.TempDir()
 	cwd := filepath.Join(home, "project")

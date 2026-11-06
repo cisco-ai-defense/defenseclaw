@@ -5,6 +5,7 @@ package hookpaths
 
 import (
 	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -96,6 +97,55 @@ func TestGAP0534ResolvedProtectedTreeReach(t *testing.T) {
 	}
 	if grade := ProtectedReach(ordinary, home, memo); grade != GradeNone {
 		t.Errorf("ordinary sibling has grade %s", grade)
+	}
+}
+
+func TestGAP0534CompleteTreeHardlinkIdentity(t *testing.T) {
+	home := t.TempDir()
+	state := filepath.Join(home, ".defenseclaw")
+	cwd := filepath.Join(home, "project")
+	for _, dir := range []string{filepath.Join(state, "hooks"), filepath.Join(state, "cache"), cwd} {
+		if err := os.MkdirAll(dir, 0o700); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for i := 0; i < 4100; i++ {
+		if err := os.WriteFile(filepath.Join(state, "hooks", fmt.Sprintf("entry-%04d", i)), []byte("x"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	protected := filepath.Join(state, "cache", "target")
+	ordinary := filepath.Join(cwd, "output")
+	for _, path := range []string{protected, ordinary} {
+		if err := os.WriteFile(path, []byte("x"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for source, target := range map[string]string{
+		protected: filepath.Join(home, "protected-link"),
+		ordinary:  filepath.Join(home, "ordinary-link"),
+	} {
+		if err := os.Link(source, target); err != nil {
+			t.Skipf("hard links unavailable: %v", err)
+		}
+	}
+	memo := NewTargetMemo()
+	for _, tc := range []struct {
+		name, path, wantReason string
+		wantGrade              Grade
+	}{
+		{"protected", filepath.Join(home, "protected-link"), "shell-parse-bound", GradeNamed},
+		{"ordinary", filepath.Join(home, "ordinary-link"), "shell-parse-unreached", GradeNone},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if grade := ProtectedReach(tc.path, home, memo); grade != tc.wantGrade {
+				t.Errorf("reach grade = %s, want %s", grade, tc.wantGrade)
+			}
+			command := `Write-Output $(.\a[1]<#x#>); Set-Content -Path ` + tc.path + ` -Value x`
+			if reason := UnprovenProtectedWrite(command, cwd, home); reason != tc.wantReason {
+				t.Errorf("recovered reason = %q, want %q", reason, tc.wantReason)
+			}
+		})
 	}
 }
 
