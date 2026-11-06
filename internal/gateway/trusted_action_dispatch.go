@@ -398,7 +398,7 @@ func dispatchTrustedAction(
 	// evaluation-limit finding, which the profile decides
 	// (guardrailActionForProfile).
 	clientBound := request.EnforcementCapable && request.ResolvedWriteTargets[hookpaths.UnprovenReasonKey] == "shell-parse-bound"
-	if clientBound && trustedReadingBoundMayNameProtected(request.Input) {
+	if clientBound && trustedReadingBoundMayNameProtected(request) {
 		return readingBoundProtectedFindings(true)
 	}
 	if clientBound {
@@ -414,7 +414,7 @@ func dispatchTrustedAction(
 		// name a protected target keeps the over-limit block in every
 		// profile; any other gets the evaluation-limit finding the profile
 		// decides.
-		if trustedReadingBoundMayNameProtected(request.Input) {
+		if trustedReadingBoundMayNameProtected(request) {
 			return readingBoundProtectedFindings(request.EnforcementCapable)
 		}
 		return trustedActionLimitFindings(request.EnforcementCapable)
@@ -422,7 +422,7 @@ func dispatchTrustedAction(
 		// The readers below read it, but past this weight they do not prove
 		// its protected targets: a call whose text may name one keeps the
 		// over-limit block in every profile.
-		if trustedReadingBoundMayNameProtected(request.Input) {
+		if trustedReadingBoundMayNameProtected(request) {
 			return readingBoundProtectedFindings(request.EnforcementCapable)
 		}
 	}

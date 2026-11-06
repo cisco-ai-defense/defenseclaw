@@ -1583,7 +1583,7 @@ func ResolveConnectorWatch(connector, surface, event string, payload []byte) (st
 func resolveConnector(connector, surface, event string, payload []byte, watch **PatchTargetWatch) string {
 	defer HookCall()()
 	if len(payload) > MaxPayloadBytes {
-		return incompleteEvidence("")
+		return oversizeEvidence(payload)
 	}
 	var envelope map[string]json.RawMessage
 	if json.Unmarshal(payload, &envelope) != nil {
@@ -1912,7 +1912,12 @@ func resolveConnector(connector, surface, event string, payload []byte, watch **
 				// (RV-p4-1).
 				if shellparse.PastReadingBounds(command) {
 					if !isApplyPatchToolName(tool) {
-						return incompleteEvidence(cwd)
+						// No reader describes it, but the user can see the
+						// links of the project: a word that reaches a
+						// protected file through one is sent as the
+						// protected-target decision, because the gateway
+						// cannot follow them behind ProtectHome (GAP-0677).
+						return incompleteEvidenceKeeping(cwd, BoundCallReachesProtectedLink(command, cwd, home))
 					}
 					// An apply_patch command is a patch envelope whose
 					// targets are read from the envelope below; deep text
@@ -1970,6 +1975,13 @@ func resolveConnector(connector, surface, event string, payload []byte, watch **
 				}
 				if !isApplyPatchToolName(tool) && unprovenReason == "" {
 					unprovenReason = ActionCommandAuditReasonWithDialect(command, cwd, home, hookShellDialect(connector, tool))
+				}
+				// A recovered parse the unproven-write reader stopped at is not
+				// read in full: a word of it that reaches a protected file
+				// through a link is the protected-target decision, as for a
+				// call past the reading bounds (GAP-0534).
+				if unprovenReason == "shell-parse-bound" && !protectedDecision && BoundCallReachesProtectedLink(command, cwd, home) {
+					protectedDecision = true
 				}
 				if !isApplyPatchToolName(tool) && !protectedDecision {
 					protectedDecision = actionConcreteProtectedWriteOnWithOperands(command, cwd, home, false, nil, &concreteOperands)
@@ -3189,6 +3201,40 @@ func resolveCopilotCalls(connector, surface, event string, envelope map[string]j
 		*watch = patchTargetWatchOf(merged, home)
 	}
 	return base64.RawURLEncoding.EncodeToString(encoded)
+}
+
+// maxOversizePayloadBytes is the largest payload over MaxPayloadBytes whose
+// command oversizeEvidence still looks the links of up.
+const maxOversizePayloadBytes = 8 * MaxPayloadBytes
+
+// oversizeEvidence is the map for a payload over MaxPayloadBytes: incomplete,
+// and no reader describes it. Its shell command is still looked up as the
+// user for a word that reaches a protected file through a link
+// (BoundCallReachesProtectedLink, one pass, bounded), so that a managed
+// gateway, which cannot follow the links, keeps the block for such a call
+// and not for an ordinary one (GAP-0677). A payload past
+// maxOversizePayloadBytes, or one that does not parse, carries no directory:
+// a managed gateway reads that as not looked up.
+func oversizeEvidence(payload []byte) string {
+	if len(payload) > maxOversizePayloadBytes {
+		return incompleteEvidence("")
+	}
+	var envelope struct {
+		CWD       string                     `json:"cwd"`
+		ToolInput map[string]json.RawMessage `json:"tool_input"`
+	}
+	home, err := os.UserHomeDir()
+	if json.Unmarshal(payload, &envelope) != nil || err != nil || !filepath.IsAbs(envelope.CWD) {
+		return incompleteEvidence("")
+	}
+	for _, key := range []string{"command", "cmd"} {
+		var command string
+		if json.Unmarshal(envelope.ToolInput[key], &command) == nil && command != "" &&
+			BoundCallReachesProtectedLink(command, envelope.CWD, home) {
+			return incompleteEvidenceKeeping(envelope.CWD, true)
+		}
+	}
+	return incompleteEvidence(envelope.CWD)
 }
 
 func incompleteEvidence(cwd string) string {

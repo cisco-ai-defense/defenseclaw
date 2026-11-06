@@ -46,6 +46,26 @@ func TestBoundCallMayNameProtected(t *testing.T) {
 		{`rm -rf *`, home, true},
 		{`rm -rf .`, home, true},
 
+		// Whole components: the protected names are named however they are
+		// spelled, and an ordinary name that only contains one is not.
+		{`echo x > settings.json`, project, true},
+		{`echo x > "set"tings.json`, project, true},
+		{`cat > .git/hooks/pre-commit`, project, true},
+		{`git -c core.hooksPath=/tmp/h commit`, project, true},
+		{`rm /etc/sudoers.d/x`, project, true},
+		{`echo x >> .bashrc`, project, true},
+		{`echo x > Microsoft.PowerShell_profile.ps1`, project, true},
+		{`type C:\Users\alice\AppData\Roaming\x`, project, true},
+		{`rm C:\Users\alice\.ssh\id_rsa`, project, true},
+		{`echo x > notes-settings.json`, project, false},
+		{`echo x > hooks.log`, project, false},
+		{`touch .config-cache`, project, false},
+		{`rm src/settings.json.bak`, project, false},
+		{`cp a.txt my_profile.txt`, project, false},
+		{`rm sudoers-review.txt`, project, false},
+		{`Remove-Item C:\Users\alice\project\hooks.log`, project, false},
+		{`echo x > ~/project/notes.txt`, project, false},
+
 		{`rm -rf ~/project/output`, project, false},
 		{`Write-Output $(.\a[1]<#x#>); Remove-Item -Recurse -Force ~/project/output`, project, false},
 		{"0`@A>`; Remove-Item -Recurse -Force output", project, false},

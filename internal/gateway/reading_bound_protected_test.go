@@ -46,6 +46,13 @@ type readingBoundRow struct {
 // user and as a managed peer, in the default and the strict tier.
 func readingBoundCells(t *testing.T, rows []readingBoundRow, window time.Duration) {
 	t.Helper()
+	readingBoundCellsIn(t, rows, window, nil)
+}
+
+// readingBoundCellsIn is readingBoundCells with setup, which lays out the
+// home and the project (links, files) before the first cell runs.
+func readingBoundCellsIn(t *testing.T, rows []readingBoundRow, window time.Duration, setup func(home, cwd string)) {
+	t.Helper()
 	homes := filepath.Join(t.TempDir(), "homes")
 	home := filepath.Join(homes, "alice")
 	cwd := filepath.Join(home, "project")
@@ -53,6 +60,9 @@ func readingBoundCells(t *testing.T, rows []readingBoundRow, window time.Duratio
 		t.Fatal(err)
 	}
 	t.Setenv("HOME", home)
+	if setup != nil {
+		setup(home, cwd)
+	}
 	for _, cell := range []struct {
 		connector, tier string
 		managed         bool
