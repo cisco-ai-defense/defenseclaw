@@ -153,6 +153,13 @@ class RedOn108Test(unittest.TestCase):
                 self.assertEqual((prior / "internal/example/testdata/new.json").read_text(), "new")
                 self.assertEqual((prior / "internal/example/testdata/existing.json").read_text(), "updated")
                 self.assertFalse((prior / "internal/example/testdata/removed.json").exists())
+                git("rm", "-qr", "internal/example/testdata")
+                git("commit", "-q", "-m", "fix(GAP-0607): remove old fixtures")
+                subprocess.run(
+                    ["git", "-C", str(prior), "reset", "--hard", base], check=True, stdout=subprocess.DEVNULL
+                )
+                overlay_go_fixtures(repo, prior, git("rev-parse", "HEAD"), "internal/example")
+                self.assertFalse((prior / "internal/example/testdata").exists())
             finally:
                 git("worktree", "remove", "--force", str(prior))
 

@@ -11,6 +11,7 @@ import csv
 import json
 import os
 import re
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -141,6 +142,10 @@ def overlay_go_fixtures(repo: Path, worktree: Path, commit: str, directory: str)
             check=True,
             stdout=subprocess.DEVNULL,
         )
+    else:
+        path = worktree / directory / "testdata"
+        if path.is_dir():
+            shutil.rmtree(path)
 
 
 def run_one(repo: Path, worktree: Path, commit: str, files: list[str], tests: list[str], base: str) -> str:
