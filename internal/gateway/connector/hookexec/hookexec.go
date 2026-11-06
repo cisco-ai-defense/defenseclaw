@@ -1398,7 +1398,9 @@ func doRequest(ctx context.Context, opts Options, sp spec, failMode string, payl
 		opts.answerWatch.setDeliveryReceipt(func(answered, localBlock bool) {
 			// finish calls this only after it writes the answer to the agent.
 			// The receipt shares the managed process deadline with the answer.
-			// A late healthy verdict still reaches the agent before this wait.
+			// On a managed call outside Secure Client a verdict read after
+			// that deadline never reaches the agent: the watchdog's closed
+			// answer does (lateAnswerDue).
 			stopAnswer()
 			if answered {
 				receiptWait := hookDeliveryReceiptTimeout
