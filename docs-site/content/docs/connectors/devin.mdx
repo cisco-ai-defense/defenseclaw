@@ -191,7 +191,7 @@ The image is **unverified**, so `defenseclaw sandbox run devin` refuses it. Devi
 ## Limits
 
 - Only exit code 2 blocks. Every other hook error lets the call run. Restricted Mode turns hooks off entirely.
-- On Windows, Devin starts `defenseclaw-hook.exe` itself. When that file is missing or cannot start, Devin runs the call. Run the DefenseClaw installer again to repair it.
+- On Windows, when `defenseclaw-hook.exe` is missing or cannot start (a folder, an empty or damaged file), a one-line install blocks each prompt, tool call and permission request in every fail mode, with `DefenseClaw blocked this: its Devin hook launcher is missing. Run the DefenseClaw installer again to repair it.` (or `cannot start`). On those events Devin starts the guard program `defenseclaw-hook-guard.exe`, which starts the launcher beside it. The other events, `Stop` included, start the launcher directly, so Devin runs them. If the guard program itself is missing or damaged, Devin runs the call; `defenseclaw doctor` and `defenseclaw status` report it. A managed Windows host starts the launcher directly on every event, and its guardian puts a missing launcher back.
 - Cloud Devin sessions run no local hooks and are not covered.
 - Devin Desktop before 3.9.19 runs the legacy Cascade agent, which DefenseClaw does not inspect. Keep Desktop at 3.9.19 or later. See [Cascade on older builds](#cascade-on-older-builds).
 - Devin Desktop coverage rests on vendor documentation. No live Devin Desktop run is recorded.
