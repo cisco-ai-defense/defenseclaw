@@ -289,6 +289,88 @@ try {
         Assert-DefenseClawStandaloneContentTrusted -Layout $gateLayout -GatewayServiceName DefenseClawGateway
         [IO.File]::Delete($temporary)
 
+        function Get-GateRefusal([string]$Scope = 'Lifecycle', [string[]]$Except = @()) {
+            try {
+                Assert-DefenseClawStandaloneContentTrusted -Layout $gateLayout -GatewayServiceName DefenseClawGateway `
+                    -Scope $Scope -Except $Except
+            }
+            catch {
+                return $_.Exception.Message
+            }
+            return ''
+        }
+        function Get-TestSddl([string]$Path) { return (Microsoft.PowerShell.Security\Get-Acl -LiteralPath $Path).Sddl }
+
+        # g582 review 2 S5: Setup's approved copies are judged before any
+        # re-stamp; a run that writes config.yaml new from CONFIG= publishes
+        # a fresh copy with it, so that copy is skipped with its file.
+        $approvedCopy = [IO.Path]::Combine($installState, 'approved-config.yaml')
+        [IO.File]::WriteAllText($approvedCopy, 'x')
+        Set-DefenseClawPathAcl -Path $approvedCopy -Kind AdminFile -GatewayServiceSID $script:AdministratorsSID
+        Assert-DefenseClawStandaloneContentTrusted -Layout $gateLayout -GatewayServiceName DefenseClawGateway
+        Add-UsersWrite -Path $approvedCopy -Rights Modify
+        $before = Get-TestSddl $approvedCopy
+        Assert-GateRefuses -Path $approvedCopy -Recovery 'Setup publishes a fresh copy of the approved source'
+        if ((Get-TestSddl $approvedCopy) -cne $before) { throw 'the content gate re-stamped an approved copy' }
+        if ((Get-GateRefusal -Except @('ConfigPath')) -ne '') {
+            throw 'the content gate refused the approved copy a CONFIG= run publishes fresh'
+        }
+        Set-DefenseClawPathAcl -Path $approvedCopy -Kind AdminFile -GatewayServiceSID $script:AdministratorsSID
+
+        # g582 review 2 S2: the walking re-stamps are judged. A runtime child
+        # the runtime adoption gives back to the gateway (every scope but
+        # Purge), and a state-root descendant a non-purge uninstall re-stamps
+        # administrator-only (Retain). A log stays out of class.
+        $runtimeFolder = [IO.Path]::Combine($runtime, 'state')
+        $runtimeChild = [IO.Path]::Combine($runtimeFolder, 'cache.db')
+        [void][IO.Directory]::CreateDirectory($runtimeFolder)
+        [IO.File]::WriteAllText($runtimeChild, 'x')
+        Set-DefenseClawPathAcl -Path $runtimeFolder -Kind RuntimeDirectory -GatewayServiceSID $sid
+        Set-DefenseClawPathAcl -Path $runtimeChild -Kind RuntimeFile -GatewayServiceSID $sid
+        Assert-DefenseClawStandaloneContentTrusted -Layout $gateLayout -GatewayServiceName DefenseClawGateway
+        Add-UsersWrite -Path $runtimeChild -Rights Modify
+        $before = Get-TestSddl $runtimeChild
+        Assert-GateRefuses -Path $runtimeChild -Recovery 'remove that entry, or give it back to Administrators'
+        $retained = Get-GateRefusal -Scope Retain
+        if (-not $retained.Contains($runtimeChild) -or (Get-TestSddl $runtimeChild) -cne $before) {
+            throw "the runtime walk did not judge a runtime child: '$retained'"
+        }
+        if ((Get-GateRefusal -Scope Purge) -ne '') { throw 'a purge was refused for a runtime child it deletes' }
+        Set-DefenseClawPathAcl -Path $runtimeChild -Kind RuntimeFile -GatewayServiceSID $sid
+        $generation = [IO.Path]::Combine($ConfigDirectory, 'config.generation.json')
+        [IO.File]::WriteAllText($generation, '{}')
+        Set-DefenseClawPathAcl -Path $generation -Kind AdminFile -GatewayServiceSID $script:AdministratorsSID
+        $logs = [IO.Path]::Combine($State, 'logs')
+        $logFile = [IO.Path]::Combine($logs, 'gateway.log')
+        [void][IO.Directory]::CreateDirectory($logs)
+        [IO.File]::WriteAllText($logFile, 'x')
+        $gateLayout.LogDirectory = $logs
+        Add-UsersWrite -Path $logFile -Rights Modify
+        if ((Get-GateRefusal -Scope Retain) -ne '') { throw 'a log was judged as content' }
+        Add-UsersWrite -Path $generation -Rights Modify
+        if ((Get-GateRefusal) -ne '') { throw 'the Lifecycle gate judged config.generation.json, which it does not re-stamp' }
+        $retained = Get-GateRefusal -Scope Retain
+        if (-not $retained.StartsWith('refusing to change the deployment') -or -not $retained.Contains($generation) -or
+            -not $retained.Contains('PURGE=1') -or $retained.Contains($logFile)) {
+            throw "a non-purge uninstall did not judge config.generation.json before it re-stamps it: '$retained'"
+        }
+        Set-DefenseClawPathAcl -Path $generation -Kind AdminFile -GatewayServiceSID $script:AdministratorsSID
+        [IO.File]::Delete($logFile)
+        [IO.Directory]::Delete($logs)
+        Assert-DefenseClawStandaloneContentTrusted -Layout $gateLayout -GatewayServiceName DefenseClawGateway -Scope Retain
+
+        # g582 review 2 S3: every refused path is named in one refusal.
+        Add-UsersWrite -Path $metadata -Rights Modify
+        Add-UsersWrite -Path $credential -Rights Modify
+        $both = Get-GateRefusal
+        if (-not $both.StartsWith('refusing to change the deployment') -or -not $both.Contains($metadata) -or
+            -not $both.Contains($credential) -or -not $both.Contains('(1 more)')) {
+            throw "the gate did not name every refused path in one run: '$both'"
+        }
+        Set-DefenseClawPathAcl -Path $metadata -Kind AdminFile -GatewayServiceSID $script:AdministratorsSID
+        & $canonical[$credential]
+        Assert-DefenseClawStandaloneContentTrusted -Layout $gateLayout -GatewayServiceName DefenseClawGateway
+
         # GAP-0590 review M3: the ACL drift repair, which every transaction
         # runs (uninstall included), judges what it would re-stamp before it
         # answers the read-only check and before any re-stamp.
