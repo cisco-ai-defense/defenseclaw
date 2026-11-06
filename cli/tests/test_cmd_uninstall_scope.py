@@ -32,7 +32,7 @@ from click.testing import CliRunner
 
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 
-from defenseclaw.commands import cmd_uninstall, windows_native_uninstall  # noqa: E402
+from defenseclaw.commands import cmd_uninstall  # noqa: E402
 
 posix_only = pytest.mark.skipif(sys.platform == "win32", reason="POSIX per-user install layout")
 
@@ -78,7 +78,6 @@ def per_user_install(tmp_path: Path):
     with (
         patch.dict(os.environ, {"HOME": str(home)}),
         patch.object(cmd_uninstall.config_module, "default_data_path", return_value=data_dir),
-        patch.object(windows_native_uninstall, "prepare_native_windows_uninstall", return_value=None),
         # Never touch the shared /tmp of the test host.
         patch.object(cmd_uninstall, "_legacy_custody_parents", return_value=[]),
         patch.object(cmd_uninstall, "_remove_empty_plugin_cache"),
@@ -281,25 +280,6 @@ def test_windows_binary_removal_drops_the_emptied_folder_and_its_path_entry(tmp_
     assert not root.exists()
     path_entry.assert_called_once_with(plan)
 
-
-def test_native_windows_setup_keeps_binaries_flag(tmp_path: Path) -> None:
-    request = SimpleNamespace(setup_path=str(tmp_path / "Setup.exe"), platform_name="win32")
-    outcome = windows_native_uninstall.NativeWindowsUninstallOutcome(0)
-    for argv, cleaned in ((["--all", "--binaries", "--yes"], True), (["--all", "--yes"], False)):
-        with (
-            patch.object(windows_native_uninstall, "prepare_native_windows_uninstall", return_value=request),
-            patch.object(windows_native_uninstall, "execute_native_windows_uninstall", return_value=outcome),
-            patch.object(cmd_uninstall, "_remove_script_install_after_native_setup") as after,
-            patch.object(cmd_uninstall, "_build_plan") as generic_plan,
-        ):
-            result = CliRunner().invoke(cmd_uninstall.uninstall_cmd, argv)
-        assert result.exit_code == 0, result.output
-        generic_plan.assert_not_called()
-        if cleaned:
-            after.assert_called_once_with("win32")
-            assert "%USERPROFILE%\\.local\\bin" in result.output
-        else:
-            after.assert_not_called()
 
 
 @posix_only
