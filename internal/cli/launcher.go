@@ -149,7 +149,7 @@ func prepareLauncherRoot(root *cobra.Command) {
 	root.Long = `Your organization manages DefenseClaw on this computer. Here defenseclaw runs
 your coding agents in sandboxes under the policy your organization set for you:
 
-  defenseclaw status                 show your managed connector protection state
+  defenseclaw status                 Show whether DefenseClaw protects your Claude Code and Cowork sessions and other managed connectors
   defenseclaw sandbox run claude     run Claude Code in a sandbox
   defenseclaw sandbox status         show your sandbox and managed policy state
   defenseclaw sandbox policy explain show the policy that applies to you
