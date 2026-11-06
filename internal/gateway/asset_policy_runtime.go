@@ -987,7 +987,8 @@ func (a *APIServer) unavailableRootDecision(
 		return config.AssetPolicyDecision{}, false
 	}
 	for _, issue := range a.rootCoverage() {
-		if issue.Kind != targetType || (issue.Connector != "" && issue.Connector != connector) {
+		if issue.Kind != targetType || (issue.Connector != "" && issue.Connector != connector &&
+			!slices.Contains(issue.Connectors, connector)) {
 			continue
 		}
 		root, rootErr := filepath.Abs(issue.Path)
