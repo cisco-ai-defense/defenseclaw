@@ -154,6 +154,9 @@ func actionPosixTargetMention(command, cwd, home string, depth int, stateOnly bo
 		if stateOnly {
 			return actionProtectedStatePath(operand, stateHome)
 		}
+		if len(command) > 8192 && memo.protectedReachOrdinaryMissing(operand, home) {
+			return false
+		}
 		if _, resolved := memo.resolveWriteTarget(operand); !resolved {
 			// A gateway behind ProtectHome cannot resolve the home: a word
 			// that names the .ssh directory itself (rel-1-0-6:GAP-0130) or
@@ -419,7 +422,13 @@ func actionPosixTargetMention(command, cwd, home string, depth int, stateOnly bo
 		text = actionBlankComments(text, command)
 	}
 	text = strings.ReplaceAll(strings.ReplaceAll(text, "${HOME}/", home+"/"), "$HOME/", home+"/")
-	for _, token := range actionMentionToken.FindAllString(text, -1) {
+	for offset := 0; offset < len(text); {
+		start, end := nextActionMentionToken(text, offset)
+		if start < 0 {
+			break
+		}
+		offset = end
+		token := text[start:end]
 		literalTilde := strings.HasPrefix(token, actionLiteralTilde)
 		token = strings.ReplaceAll(token, actionLiteralTilde, "~")
 		if strings.ContainsAny(token, "*?[]") && (parsed || !strings.ContainsAny(token, "/\\")) {
@@ -972,6 +981,26 @@ func patchCommandResolutionChange(line string) bool {
 const actionLiteralTilde = "\x1e"
 
 var actionMentionToken = lazyregexp.New(`[A-Za-z0-9_./~*?\[\]\x1e-]+`)
+
+// The action and recovered-text readers share the same path-token alphabet;
+// the action reader also carries its literal-tilde sentinel through masking.
+func actionMentionTokenByte(c byte) bool {
+	return c == '\x1e' || unprovenPathTokenByte(c)
+}
+
+func nextActionMentionToken(text string, offset int) (int, int) {
+	for offset < len(text) && !actionMentionTokenByte(text[offset]) {
+		offset++
+	}
+	if offset == len(text) {
+		return -1, -1
+	}
+	end := offset + 1
+	for end < len(text) && actionMentionTokenByte(text[end]) {
+		end++
+	}
+	return offset, end
+}
 
 func actionLiteralArgumentProgramsOnly(file *syntax.File, home string) bool {
 	literal := true
