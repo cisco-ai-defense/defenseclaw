@@ -1193,7 +1193,7 @@ func settleWindowsInterruptedBundles(settle *windowsBundleSettle, layout managed
 			settle.replacing = label
 			message += "this run re-installs the last good bundle"
 		default:
-			message += "run `enterprise windows ensure --profile standalone` to re-install the last good bundle"
+			message += "run " + windowsEnterpriseAdminCommand("ensure") + " from an elevated PowerShell prompt to re-install the last good bundle"
 		}
 		settle.warn(windowsBundleUnconfirmedWarning, message)
 	}
@@ -1221,7 +1221,7 @@ func finishWindowsInterruptedBundles(opts *windowsEnterpriseLifecycleOptions, re
 		}
 		if settle.deferred {
 			settle.warn(windowsBundleSettleDeferredWarning, "an install transaction is still pending, so the policy bundle receipts a killed run left were not settled; "+
-				"the current or last good bundle keeps enforcing: run `enterprise windows ensure --profile standalone` again")
+				"the current or last good bundle keeps enforcing: run "+windowsEnterpriseAdminCommand("ensure")+" again from an elevated PowerShell prompt")
 		}
 	}
 	for _, w := range settle.warnings {

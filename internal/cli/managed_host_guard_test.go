@@ -17,6 +17,7 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
+	"regexp"
 	"runtime"
 	"strings"
 	"testing"
@@ -533,7 +534,9 @@ func TestManagedWindowsStatusAnswerNamesTheStandardUserStatus(t *testing.T) {
 // defenseclaw-gateway.exe beside it or that has no arguments, an unbalanced
 // backtick, and a `& '...'` command in text that does not say PowerShell
 // (cmd.exe answers "& was unexpected at this time") or, when it says
-// elevated, not an elevated PowerShell prompt (cowork-1-0-8 GAP-0076).
+// elevated, not an elevated PowerShell prompt (cowork-1-0-8 GAP-0076), and
+// an instruction to run a subcommand that names no executable ("run
+// `enterprise windows ensure ...`", g072 review 2 M3).
 func managedWindowsCommandProblems(text string) []string {
 	cli := managedWindowsAdminCLI()
 	gateway := cli[:strings.LastIndexAny(cli, `/\`)+1] + "defenseclaw-gateway.exe"
@@ -550,6 +553,9 @@ func managedWindowsCommandProblems(text string) []string {
 			problems = append(problems, "an elevated prompt that is not named an elevated PowerShell prompt")
 		}
 	}
+	if managedWindowsVerbOnlyRun.MatchString(text) {
+		problems = append(problems, "a run instruction without the executable")
+	}
 	for index := 1; index < len(parts); index += 2 {
 		span := strings.TrimSpace(parts[index])
 		first := strings.TrimSuffix(strings.ToLower(strings.Fields(span + " -")[0]), ".exe")
@@ -565,6 +571,11 @@ func managedWindowsCommandProblems(text string) []string {
 	}
 	return problems
 }
+
+// managedWindowsVerbOnlyRun is an instruction to run a DefenseClaw
+// subcommand without the executable, the rule of
+// managed.TestManagedWindowsCommandsComeFromTheRenderer.
+var managedWindowsVerbOnlyRun = regexp.MustCompile("(?i)(\\b(?:re)?run:?\\s+[`'\"]?|\\b(?:with|by|or)\\s+`)enterprise\\s+[a-z]+\\s+[a-z]")
 
 // cowork-1-0-8 GAP-0076, as a class: every managed Windows answer names the
 // commands it hands on so they run as typed, and only the status answer,
@@ -604,6 +615,7 @@ func TestManagedWindowsRefusalsNameRunnableCommands(t *testing.T) {
 	answers["stopped service next step"] = windowsEnterpriseStoppedServiceNextStep([]enterprisestatus.Service{
 		{Name: "DefenseClawHookGuardian", Kind: "guardian", State: "stopped", Required: true}})
 	answers["not healthy"] = windowsEnterpriseNotHealthyMessage(nil, 1)
+	answers["claude attestation"] = windowsClaudeAttestationHint()
 	if text, ok := windowsEnterpriseInstallerBuildMismatchText("installer module SHA-256 does not match the pinned payload manifest", "uninstall", true); ok {
 		answers["build mismatch"] = text
 	}
@@ -656,17 +668,22 @@ func TestManagedWindowsRefusalsNameRunnableCommands(t *testing.T) {
 	// CLI and gateway in PowerShell are not.
 	gateway := strings.TrimSuffix(managedWindowsAdminCLI(), "defenseclaw.exe") + "defenseclaw-gateway.exe"
 	for text, want := range map[string]int{
-		"run `defenseclaw status`":                                                        1,
-		"run `defenseclaw-gateway.exe enterprise windows status`":                         1,
-		"in PowerShell run `& 'C:\\Tools\\defenseclaw.exe' status`":                       1,
-		"in PowerShell run `& '" + managedWindowsAdminCLI() + "'`":                        1,
-		"in PowerShell run `& '" + managedWindowsAdminCLI() + "' status`":                 0,
-		"in PowerShell run `& '" + gateway + "' enterprise windows sandbox list`":         0,
-		"run `& '" + managedWindowsAdminCLI() + "' status`":                               1,
-		"from an elevated prompt run `& '" + managedWindowsAdminCLI() + "' status`":       1,
-		"from an elevated PowerShell prompt run `& '" + managedWindowsAdminCLI() + "' x`": 0,
-		"so `status` has no per-user deployment":                                          0,
-		"an `unbalanced span":                                                             1,
+		"run `defenseclaw status`":                                                             1,
+		"run `defenseclaw-gateway.exe enterprise windows status`":                              1,
+		"in PowerShell run `& 'C:\\Tools\\defenseclaw.exe' status`":                            1,
+		"in PowerShell run `& '" + managedWindowsAdminCLI() + "'`":                             1,
+		"in PowerShell run `& '" + managedWindowsAdminCLI() + "' status`":                      0,
+		"in PowerShell run `& '" + gateway + "' enterprise windows sandbox list`":              0,
+		"run `& '" + managedWindowsAdminCLI() + "' status`":                                    1,
+		"from an elevated prompt run `& '" + managedWindowsAdminCLI() + "' status`":            1,
+		"from an elevated PowerShell prompt run `& '" + managedWindowsAdminCLI() + "' x`":      0,
+		"so `status` has no per-user deployment":                                               0,
+		"an `unbalanced span":                                                                  1,
+		"run `enterprise windows ensure --profile standalone` first":                           1,
+		"; run enterprise windows repair, or Setup /repair":                                    1,
+		"or `enterprise windows repair --profile standalone --attest-claude-effective-policy`": 1,
+		"store its key with `enterprise secret set`":                                           1,
+		"`enterprise windows status` reports the deployment":                                   0,
 	} {
 		if got := len(managedWindowsCommandProblems(text)); got != want {
 			t.Errorf("managedWindowsCommandProblems(%q) = %d problems, want %d", text, got, want)

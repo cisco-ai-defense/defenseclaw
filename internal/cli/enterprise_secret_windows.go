@@ -633,7 +633,8 @@ func requireWindowsSecretDeployment() error {
 		return secretFailed(string(enterprisebundle.CodeStateInvalid), windowsSecretExitFailure, err)
 	}
 	if !installed {
-		return secretFailed("not_installed", windowsSecretExitFailure, errors.New("no standalone managed deployment is installed; run `enterprise windows ensure --profile standalone` first"))
+		return secretFailed("not_installed", windowsSecretExitFailure, errors.New("no standalone managed deployment is installed; run "+
+			windowsEnterpriseAdminCommand("ensure")+" from an elevated PowerShell prompt first"))
 	}
 	return nil
 }

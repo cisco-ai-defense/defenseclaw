@@ -18,12 +18,16 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/enterprisestatus"
 )
 
-// claudeAttestationHint names the step that verifies Claude Code's machine
-// policy on Windows. Each install and upgrade replaces the hook binary, which
-// makes an earlier attestation stale.
-const claudeAttestationHint = " (it needs an administrator's attestation, and each upgrade makes the last one stale: " +
-	"confirm that an enrolled user's Claude Code runs DefenseClaw's hooks, then run Setup /repair ATTESTCLAUDEEFFECTIVEPOLICY=1, " +
-	"or `enterprise windows repair --profile standalone --attest-claude-effective-policy`)"
+// windowsClaudeAttestationHint names the step that verifies Claude Code's
+// machine policy on Windows. Each install and upgrade replaces the hook
+// binary, which makes an earlier attestation stale. The CLI form names the
+// installed CLI: it is not on PATH (g072 review 2 M3).
+func windowsClaudeAttestationHint() string {
+	return " (it needs an administrator's attestation, and each upgrade makes the last one stale: " +
+		"confirm that an enrolled user's Claude Code runs DefenseClaw's hooks, then run Setup /repair ATTESTCLAUDEEFFECTIVEPOLICY=1, " +
+		"or " + managedWindowsCommand("enterprise", "windows", "repair", "--profile", "standalone", "--attest-claude-effective-policy") +
+		" from an elevated PowerShell prompt)"
+}
 
 // windowsEnterpriseNoAgentTargetReason is why a Windows deployment that
 // enrolled nobody for Codex, Claude Code or Cursor is not security-complete.
@@ -114,7 +118,7 @@ func addEnterpriseSecurityIncompleteReasons(result *enterprisestatus.Result, tra
 		if state.Ownership != "off" && state.Lock == "enforce" && state.EffectiveLock != "enforce" {
 			reason := fmt.Sprintf("the %s machine policy is not verified in force", name)
 			if name == "claudecode" {
-				reason += claudeAttestationHint
+				reason += windowsClaudeAttestationHint()
 			}
 			reasons = append(reasons, reason)
 		}

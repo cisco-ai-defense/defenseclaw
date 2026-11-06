@@ -11,6 +11,7 @@ import (
 
 	"github.com/defenseclaw/defenseclaw/internal/enterprisebundle"
 	"github.com/defenseclaw/defenseclaw/internal/enterprisepolicy"
+	"github.com/defenseclaw/defenseclaw/internal/enterprisestatus"
 )
 
 // cowork-1-0-8 GAP-0076, as a class: the managed answers built only on
@@ -35,6 +36,10 @@ func TestManagedWindowsOnlyAnswersNameRunnableCommands(t *testing.T) {
 		"claude drop-in drift":  windowsEnterpriseClaudeDropInDriftMessage(`C:\Program Files\ClaudeCode\managed-settings.d\defenseclaw.json`, true),
 		"bundle pending":        windowsBundlePendingReportMessage(enterprisebundle.SettleReport{Pending: []string{"r-1"}}),
 		"service access repair": windowsEnterpriseRepairServiceAccess(),
+		// g072 review 2 M3: the scanner runtime and judge answers.
+		"scanner runtime damaged":      windowsScannerRuntimeUnavailable(&enterprisestatus.ScannerRuntime{State: "not_prepared", Problem: "missing python.exe"}),
+		"scanner runtime not prepared": windowsScannerRuntimeUnavailable(&enterprisestatus.ScannerRuntime{State: "not_prepared"}),
+		"scanner judge key":            "store its key with " + windowsScannerJudgeSecretCommand(),
 	}
 	for name, answer := range answers {
 		if problems := managedWindowsCommandProblems(answer); len(problems) > 0 {
