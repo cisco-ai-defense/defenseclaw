@@ -210,16 +210,6 @@ func UnknownKeyWriteOverflow(input Input, facts Facts) bool {
 	return overflow
 }
 
-// UnknownKeyTargetOverflow also covers reads: a target past the count or
-// nesting bound has Possible grade even when the first readings are ordinary.
-func UnknownKeyTargetOverflow(input Input, facts Facts) bool {
-	if !unknownKeyFileTool(input.Tool) {
-		return false
-	}
-	_, overflow := UnknownKeyTwins(input, facts)
-	return overflow
-}
-
 // PathShapedArgumentValues returns the path-shaped strings an argument
 // value holds, at any depth up to maxUnknownKeyValueDepth, once each, and
 // whether it holds more than maxUnknownKeyTargets of them (only that many
