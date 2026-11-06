@@ -64,7 +64,9 @@ func TestGAP0055CommandLookupFourCell(t *testing.T) {
 		{"xargs-env-S-then-copy", `ls *.zip | xargs env -S unzip; cp a.txt build/`, "block"},
 		{"lookup-piped-to-xargs-then-copy", `command -v unzip | xargs unzip; cp a.txt build/`, "block"},
 		{"xargs-overwrite-then-copy", `ls *.zip | xargs unzip -o; cp a.txt build/`, "block"},
-		{"xargs-list-then-copy", `ls *.zip | xargs unzip -l; cp a.txt build/`, "allow"},
+		// Round 5 (M3): a supplied list mode is a Possible scope, allowed
+		// in the default pack with a visible alert-only finding.
+		{"xargs-list-then-copy", `ls *.zip | xargs unzip -l; cp a.txt build/`, "alert"},
 		{"xargs-lookup", `ls | xargs command -v unzip`, "allow"},
 	}
 	if err := os.Chmod(f.homes, 0o700); err != nil {
@@ -86,8 +88,12 @@ func TestGAP0055CommandLookupFourCell(t *testing.T) {
 	}
 	f.answerAll(t, calls)
 	for i, call := range calls {
-		if want := rows[i/4].want; call.verdict != want {
-			t.Errorf("%s: verdict %s, want %s; body %.300s", call.name, call.verdict, want, call.body)
+		verdict := call.verdict
+		if strings.HasPrefix(call.body, `{"action":"alert"`) {
+			verdict = "alert"
+		}
+		if want := rows[i/4].want; verdict != want {
+			t.Errorf("%s: verdict %s, want %s; body %.300s", call.name, verdict, want, call.body)
 		}
 		if strings.Contains(call.body, "internal evaluator error") || strings.Contains(call.body, "panics.total") {
 			t.Errorf("%s: panic answer: %.300s", call.name, call.body)

@@ -311,8 +311,11 @@ var gap0055Suppliers = []string{
 // TestGAP0055SuppliedArgvMayExtract (review M1): the "no arguments, no
 // extraction" reading of unzip holds only for an argv the hook sees whole.
 // After an argument supplier an extracting archive call reads as one that
-// may link files, whatever its visible words, as it did on 1.0.6; a
-// visible list or test mode, and every lookup, still read as no extraction.
+// may link files, whatever its visible words, as it did on 1.0.6. A visible
+// list or test mode is not proved by the visible words either (round 5,
+// M3): the unseen reading may link, and only the visible reading
+// (wrappedMayLinkRead with visibleMode) reads it as no extraction. Every
+// lookup still reads as no extraction.
 func TestGAP0055SuppliedArgvMayExtract(t *testing.T) {
 	for _, supplier := range gap0055Suppliers {
 		for _, call := range []string{"unzip", "unzip {}", "unzip %", "unzip -o", "unzip -o {}", "unzip -q", "unzip -d out",
@@ -322,11 +325,18 @@ func TestGAP0055SuppliedArgvMayExtract(t *testing.T) {
 				t.Errorf("%s: wrappedMayLink = false, want true (the supplied names may be extracted)", command)
 			}
 		}
-		for _, call := range []string{"unzip -l", "unzip -t", "unzip -Z", "unzip -l {}", "tar -tf", "tar --list -f", "7z l", "jar tf", "echo"} {
+		for _, call := range []string{"unzip -l", "unzip -t", "unzip -Z", "unzip -l {}", "unzip -lv", "unzip -Z1", "tar -tf",
+			"tar --list -f", "7z l", "jar tf"} {
 			command := supplier + " " + call
-			if mayLink, _ := wrappedMayLink(command); mayLink {
-				t.Errorf("%s: wrappedMayLink = true, want false (a visible list or test mode)", command)
+			if mayLink, _ := wrappedMayLink(command); !mayLink {
+				t.Errorf("%s: wrappedMayLink = false, want true (the supplied words may change the mode)", command)
 			}
+			if mayLink, _ := wrappedMayLinkRead(command, true); mayLink {
+				t.Errorf("%s: visible reading may link, want a list or test mode", command)
+			}
+		}
+		if mayLink, _ := wrappedMayLink(supplier + " echo"); mayLink {
+			t.Errorf("%s echo: wrappedMayLink = true, want false", supplier)
 		}
 	}
 	for _, command := range []string{"unzip", "env unzip", "sudo -n unzip", "nice unzip", "command unzip", "exec -a x unzip",
@@ -337,12 +347,15 @@ func TestGAP0055SuppliedArgvMayExtract(t *testing.T) {
 	}
 	cwd, home := t.TempDir(), t.TempDir()
 	for _, command := range []string{"ls *.zip | xargs unzip", "find . -name '*.zip' | xargs -n1 unzip", "xargs unzip < list.txt",
-		"ls *.zip | xargs -I{} unzip {}", "command -v unzip | xargs unzip", "ls *.zip | xargs env -S unzip"} {
+		"ls *.zip | xargs -I{} unzip {}", "command -v unzip | xargs unzip", "ls *.zip | xargs env -S unzip",
+		"ls | xargs unzip -l", "ls | xargs tar -tf"} {
 		if links := commandLinks(command, cwd, home, nil, false, false); links.known {
 			t.Errorf("%s: known reading, want the opaque reading of an extraction", command)
 		}
 	}
-	for _, command := range []string{"xargs command -v unzip", "ls | xargs unzip -l"} {
+	// Round 5 (M3): ls | xargs unzip -l moved to the opaque reading above;
+	// the gateway grades it Possible through SuppliedArchiveModeTwin.
+	for _, command := range []string{"xargs command -v unzip", "ls | xargs echo unzip -l"} {
 		if links := commandLinks(command, cwd, home, nil, false, false); !links.known {
 			t.Errorf("%s: opaque reading, want a known reading", command)
 		}
