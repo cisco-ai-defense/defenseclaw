@@ -86,6 +86,11 @@ func init() {
 			if hookexec.PerUserPostPeerUnverified(err) {
 				// Nothing of the call was sent: the one failure the plugins
 				// may send again (GAP-2083).
+				if curlOutput {
+					if reason := hookexec.PerUserRootGatewayReason(apiAddr, os.Getenv("_DC_HOOK_POST_DATA_DIR")); reason != "" {
+						fmt.Fprint(cmd.OutOrStdout(), "DCPOSTROOT1:", reason)
+					}
+				}
 				fmt.Fprintf(cmd.ErrOrStderr(), "defenseclaw-gateway hook-post: %v\n", err)
 				hookProcessExit(hookexec.PerUserPostPeerUnverifiedExit)
 			}
