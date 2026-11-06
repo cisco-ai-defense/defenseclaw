@@ -92,6 +92,18 @@ class D1ShapeScrubTest(unittest.TestCase):
             write_rows(corpus, rows)
             self.assertTrue(any("unapproved public payload" in error for error in check(corpus)))
 
+    def test_new_literal_requires_review_even_with_updated_manifest(self):
+        from scripts.check_d1_shapes import payload_digest
+
+        rows = [json.loads(line) for line in CORPUS.read_text(encoding="utf-8").splitlines()]
+        rows[29]["command"] = "printf novelhostlabel"
+        with TemporaryDirectory() as temporary:
+            corpus = Path(temporary) / "d1.jsonl"
+            manifest = Path(temporary) / "approved.tsv"
+            write_rows(corpus, rows)
+            manifest.write_text("".join(f"{row['id']}\t{payload_digest(row)}\n" for row in rows), encoding="utf-8")
+            self.assertIn("unreviewed public vocabulary", check(corpus, manifest))
+
 
 if __name__ == "__main__":
     unittest.main()

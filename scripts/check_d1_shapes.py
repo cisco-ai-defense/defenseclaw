@@ -70,6 +70,10 @@ GIT_TRANSPORT = re.compile(
 )
 GIT_SCP_ENDPOINT = re.compile(r"(?<![\w./])(?:([A-Za-z][A-Za-z0-9_.+-]*)@)?([A-Za-z][A-Za-z0-9_.-]*):(?!//)[^\s;&|]+")
 HOST_ASSIGNMENT = re.compile(r"\b(?:host|hostname|server|remote|user|username|account)=([^\s;&|\"']+)", re.I)
+# The reviewed payload vocabulary is independent of the per-row digest
+# manifest. Adding a new literal identifier requires an explicit scrub review.
+TOKEN = re.compile(r"[A-Za-z_][A-Za-z0-9_.@+-]*")
+APPROVED_VOCAB_DIGEST = "b38598eb347081bc6fd2366407ede67c31618b8d0bf1b12409da455eb2d33d1c"
 BAD_TEXT = (
     re.compile(
         r"(?<![A-Za-z0-9])/(?:home|Users|root|tmp|var|workspace|mnt|opt|etc|usr|proc|run|private|app)(?:/|\b)", re.I
@@ -157,6 +161,7 @@ def synthetic_operands(row: dict) -> bool:
 def check(path: Path, approved_path: Path = APPROVED) -> list[str]:
     errors = []
     seen = set()
+    vocabulary: set[str] = set()
     try:
         approved = approved_payloads(approved_path)
     except (OSError, ValueError) as error:
@@ -184,6 +189,8 @@ def check(path: Path, approved_path: Path = APPROVED) -> list[str]:
         ):
             errors.append(f"line {number}: invalid expected decisions")
         text = json.dumps({k: v for k, v in row.items() if k in ("command", "args")}, ensure_ascii=False)
+        for value in strings({key: row.get(key) for key in ("command", "args")}):
+            vocabulary.update(TOKEN.findall(value))
         if any(pattern.search(text) for pattern in BAD_TEXT):
             errors.append(f"line {number}: unsanitized content")
         if not synthetic_operands(row):
@@ -194,6 +201,9 @@ def check(path: Path, approved_path: Path = APPROVED) -> list[str]:
         errors.append(f"public subset has only {len(seen)} rows")
     if seen != set(approved):
         errors.append("public subset differs from the approved row set")
+    digest = hashlib.sha256("\n".join(sorted(vocabulary)).encode("utf-8")).hexdigest()
+    if digest != APPROVED_VOCAB_DIGEST:
+        errors.append("unreviewed public vocabulary")
     return errors
 
 
