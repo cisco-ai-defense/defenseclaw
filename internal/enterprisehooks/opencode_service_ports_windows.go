@@ -9,6 +9,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"sort"
@@ -93,7 +94,7 @@ func LoadWindowsOpenCodeServicePortsFull(path string) (WindowsOpenCodeServicePor
 	if err := validateWindowsOpenCodeServicePortsFile(path); err != nil {
 		return state, err
 	}
-	data, err := readWindowsBoundedPlainFile(path, windowsOpenCodeServicePortsMaxBytes)
+	data, err := readWindowsOpenCodePortRecord(path)
 	if err != nil {
 		return state, err
 	}
@@ -170,7 +171,7 @@ func WriteWindowsOpenCodeServicePortsFull(path string, state WindowsOpenCodeServ
 		if err := validateWindowsOpenCodeServicePortsFile(path); err != nil {
 			return err
 		}
-		current, err := readWindowsBoundedPlainFile(path, windowsOpenCodeServicePortsMaxBytes)
+		current, err := readWindowsOpenCodePortRecord(path)
 		if err != nil {
 			return err
 		}
@@ -245,6 +246,16 @@ func validateWindowsOpenCodeContests(contested []WindowsOpenCodeContestedPort, h
 // ClearWindowsOpenCodeContestedPort clears only the named mark and keeps all
 // bindings. The operation is recorded in the SYSTEM-only record.
 func ClearWindowsOpenCodeContestedPort(path string, port int, by string, now time.Time) ([]string, error) {
+	var claimants []string
+	err := RunWithWindowsOwnerRestorePrivilege(func() error {
+		var clearErr error
+		claimants, clearErr = clearWindowsOpenCodeContestedPort(path, port, by, now)
+		return clearErr
+	})
+	return claimants, err
+}
+
+func clearWindowsOpenCodeContestedPort(path string, port int, by string, now time.Time) ([]string, error) {
 	state, err := LoadWindowsOpenCodeServicePortsFull(path)
 	if err != nil {
 		return nil, err
@@ -267,6 +278,23 @@ func ClearWindowsOpenCodeContestedPort(path string, port int, by string, now tim
 	state.Contested = kept
 	state.Cleared = append(state.Cleared, WindowsOpenCodeContestCleared{Port: port, SIDs: claimants, At: now.UTC().Format(time.RFC3339), By: by})
 	return claimants, WriteWindowsOpenCodeServicePortsFull(path, state)
+}
+
+func readWindowsOpenCodePortRecord(path string) ([]byte, error) {
+	handle, err := openWindowsTargetsManifestObjectWithBackup(path, false, windows.GENERIC_READ, true)
+	if err != nil {
+		return nil, err
+	}
+	file := os.NewFile(uintptr(handle), path)
+	defer file.Close()
+	data, err := io.ReadAll(io.LimitReader(file, windowsOpenCodeServicePortsMaxBytes+1))
+	if err != nil {
+		return nil, err
+	}
+	if len(data) > windowsOpenCodeServicePortsMaxBytes {
+		return nil, fmt.Errorf("enterprise hooks: %s exceeds the OpenCode port record limit", path)
+	}
+	return data, nil
 }
 
 func windowsOpenCodeServicePortsParent(path string) error {
@@ -313,7 +341,7 @@ func protectWindowsOpenCodeServicePortsFile(path string) error {
 }
 
 func validateWindowsOpenCodeServicePortsFile(path string) error {
-	handle, err := openWindowsTargetsManifestObject(path, false, windows.READ_CONTROL|windows.FILE_READ_ATTRIBUTES)
+	handle, err := openWindowsTargetsManifestObjectWithBackup(path, false, windows.READ_CONTROL|windows.FILE_READ_ATTRIBUTES, true)
 	if err != nil {
 		return err
 	}
