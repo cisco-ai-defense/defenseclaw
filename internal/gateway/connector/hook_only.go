@@ -4978,14 +4978,7 @@ func hermesOwnedHookCommand(command, hookScript string, recognizedCommands map[s
 		return true
 	}
 	return editedDefenseClawHookCommand(command, hermesHookScriptName) ||
-		hookCommandResolvesInHookDir(command, hookScript)
-}
-
-func hermesHookCommandClaimsManaged(command, hookScript string, recognizedCommands map[string]struct{}) bool {
-	if hermesOwnedHookCommand(command, hookScript, recognizedCommands) || hermesCommandClaimsDefenseClaw(command) {
-		return true
-	}
-	return hookCommandClaimsHookDir(command, hookScript)
+		hookCommandNamesHookDir(command, hookScript)
 }
 
 func hermesHooksHoldOwnedEntries(raw interface{}, hookScript string) bool {
@@ -4995,7 +4988,7 @@ func hermesHooksHoldOwnedEntries(raw interface{}, hookScript string) bool {
 		entries, _ := hermesHookList(event)
 		for _, entry := range entries {
 			command, ok := hermesHookEntryCommand(entry)
-			if ok && hermesHookCommandClaimsManaged(command, hookScript, recognized) {
+			if containsHookScript(entry, hookScript) || (ok && hermesOwnedHookCommand(command, hookScript, recognized)) {
 				return true
 			}
 		}
@@ -5065,7 +5058,7 @@ func reconcileHermesHookEntries(
 			}
 			continue
 		}
-		if hasCommand && hermesHookCommandClaimsManaged(command, hookScript, recognizedCommands) {
+		if hasCommand && hermesCommandClaimsDefenseClaw(command) {
 			return nil, fmt.Errorf("handler has a tampered DefenseClaw command; refusing non-exact repair")
 		}
 		out = append(out, item)
@@ -5091,7 +5084,7 @@ func removeStaleHermesHookEntries(
 		if hermesOwnedHookCommand(command, hookScript, recognizedCommands) {
 			continue
 		}
-		if hasCommand && hermesHookCommandClaimsManaged(command, hookScript, recognizedCommands) {
+		if hasCommand && hermesCommandClaimsDefenseClaw(command) {
 			return nil, fmt.Errorf("handler has a tampered DefenseClaw command; refusing non-exact repair")
 		}
 		out = append(out, item)
@@ -5286,9 +5279,7 @@ func patchCursorHooks(path, hookScript, legacyShellScript string, failClosed boo
 	if err != nil {
 		return err
 	}
-	if err := renderCursorHooks(cfg, hookScript, legacyShellScript, failClosed, len(secureClient) > 0 && secureClient[0]); err != nil {
-		return err
-	}
+	renderCursorHooks(cfg, hookScript, legacyShellScript, failClosed, len(secureClient) > 0 && secureClient[0])
 	return writeJSONObject(path, cfg)
 }
 
@@ -5308,9 +5299,7 @@ func patchCursorHooksLocked(path, stateDir, hookScript, legacyShellScript string
 			if err != nil {
 				return atomicTransformResult{}, err
 			}
-			if err := renderCursorHooks(cfg, hookScript, legacyShellScript, failClosed, len(secureClient) > 0 && secureClient[0]); err != nil {
-				return atomicTransformResult{}, err
-			}
+			renderCursorHooks(cfg, hookScript, legacyShellScript, failClosed, len(secureClient) > 0 && secureClient[0])
 			out, err := json.MarshalIndent(cfg, "", "  ")
 			if err != nil {
 				return atomicTransformResult{}, err
@@ -5320,12 +5309,9 @@ func patchCursorHooksLocked(path, stateDir, hookScript, legacyShellScript string
 	})
 }
 
-func renderCursorHooks(cfg map[string]interface{}, hookScript, legacyShellScript string, failClosed, secureClient bool) error {
+func renderCursorHooks(cfg map[string]interface{}, hookScript, legacyShellScript string, failClosed, secureClient bool) {
 	hooks := ensureJSONObject(cfg, "hooks")
 	ownedCommands := newCursorHookCommandMatcher(cursorManagedHookCommands(hookScript, legacyShellScript), !secureClient)
-	if cursorConfigHasReviewableClaim(hooks, ownedCommands) {
-		return errors.New("Cursor hook entry requires review before repair")
-	}
 	cfg["version"] = 1
 	for _, event := range cursorHookEvents {
 		entry := map[string]interface{}{
@@ -5344,7 +5330,6 @@ func renderCursorHooks(cfg map[string]interface{}, hookScript, legacyShellScript
 		// Entries not owned by DefenseClaw are preserved in their original order.
 		hooks[event] = replaceManagedCursorHooks(hooks[event], ownedCommands, filepath.Base(hookScript), entry)
 	}
-	return nil
 }
 
 // ownedCursorHookContractPresent validates the exact registration Setup writes
@@ -5424,9 +5409,6 @@ func cursorHookContractPresent(hooks map[string]interface{}, currentCommand stri
 		}
 		ownedCount := 0
 		for _, raw := range entries {
-			if ownedMatcher.claims(raw) && !ownedMatcher.matches(raw) {
-				return false
-			}
 			if !ownedMatcher.matches(raw) {
 				continue
 			}
@@ -5454,7 +5436,7 @@ func cursorHookContractPresent(hooks map[string]interface{}, currentCommand stri
 		}
 		entries, _ := raw.([]interface{})
 		for _, entry := range entries {
-			if ownedMatcher.claims(entry) {
+			if ownedMatcher.matches(entry) {
 				return false
 			}
 		}
@@ -5563,23 +5545,7 @@ func (matcher cursorHookCommandMatcher) matches(raw interface{}) bool {
 		if _, ok := matcher.exact[strings.TrimSpace(command)]; ok && strings.TrimSpace(command) != "" {
 			return true
 		}
-		if matcher.includeDirectory && matcher.hookScript != "" && hookCommandResolvesInHookDir(command, matcher.hookScript) {
-			return true
-		}
-	}
-	return false
-}
-
-func (matcher cursorHookCommandMatcher) claims(raw interface{}) bool {
-	if matcher.matches(raw) {
-		return true
-	}
-	if !matcher.includeDirectory || matcher.hookScript == "" {
-		return false
-	}
-	entry, _ := raw.(map[string]interface{})
-	for _, key := range []string{"command", "bash"} {
-		if command, _ := entry[key].(string); hookCommandClaimsHookDir(command, matcher.hookScript) {
+		if matcher.includeDirectory && matcher.hookScript != "" && hookCommandNamesHookDir(command, matcher.hookScript) {
 			return true
 		}
 	}
@@ -5595,32 +5561,11 @@ func cursorConfigClaimsManaged(raw interface{}, matcher cursorHookCommandMatcher
 			}
 		}
 	case map[string]interface{}:
-		if matcher.claims(value) {
+		if matcher.matches(value) {
 			return true
 		}
 		for _, item := range value {
 			if cursorConfigClaimsManaged(item, matcher) {
-				return true
-			}
-		}
-	}
-	return false
-}
-
-func cursorConfigHasReviewableClaim(raw interface{}, matcher cursorHookCommandMatcher) bool {
-	switch value := raw.(type) {
-	case []interface{}:
-		for _, item := range value {
-			if cursorConfigHasReviewableClaim(item, matcher) {
-				return true
-			}
-		}
-	case map[string]interface{}:
-		if matcher.claims(value) && !matcher.matches(value) {
-			return true
-		}
-		for _, item := range value {
-			if cursorConfigHasReviewableClaim(item, matcher) {
 				return true
 			}
 		}
@@ -6387,9 +6332,6 @@ func removeJSONHookReferencesWithMatcher(path string, secureClient bool, matcher
 	if secureClient {
 		pruned, _ = removeHookScriptReferencesLegacy(cfg, hookScripts...).(map[string]interface{})
 	} else {
-		if matcher != nil && cursorConfigHasReviewableClaim(cfg, *matcher) {
-			return fmt.Errorf("Cursor hook entry in %s requires review before removal", path)
-		}
 		pruned, _ = removeHookScriptReferencesWithMatcher(cfg, matcher, hookScripts...).(map[string]interface{})
 	}
 	if pruned == nil {

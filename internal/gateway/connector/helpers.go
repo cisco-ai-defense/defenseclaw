@@ -27,13 +27,13 @@ import (
 	"flag"
 	"fmt"
 	"io"
-	"maps"
 	"net"
 	"net/http"
 	"os"
 	"path"
 	"path/filepath"
 	"runtime"
+	"slices"
 	"strings"
 	"sync"
 	"time"
@@ -44,7 +44,6 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/managed"
 	"github.com/defenseclaw/defenseclaw/internal/pathidentity"
 	"github.com/defenseclaw/defenseclaw/internal/winpath"
-	"mvdan.cc/sh/v3/syntax"
 )
 
 var userHomeOverrideSessionMu sync.Mutex
@@ -330,455 +329,123 @@ func editedDefenseClawHookCommand(command, scriptName string) bool {
 	return copiedDefenseClawHookCommand(command, scriptName)
 }
 
-// hookCommandResolvesInHookDir recognizes a command whose executable is in
-// this installation's hook directory, including a file that is now missing.
-// The resolved location matters: a user hook outside the directory, or a
-// link from the directory to a user hook, is not owned by the installation.
-func hookCommandResolvesInHookDir(command, hookScript string) bool {
-	words, ok := literalHookCallWords(command)
-	if !ok {
+// hookCommandNamesHookDir reports whether a hook command names this
+// installation's hook script or hook directory (the directory of hookScript),
+// including a file there that is now missing. Setup records the commands it
+// writes; an entry that is not one of them but names the managed directory is
+// an edited DefenseClaw entry (GAP-0625): Setup replaces it, teardown removes
+// it, and teardown verification fails while one remains. The command text is
+// never evaluated as shell. Quotes and escapes are dropped, home prefixes are
+// expanded, and each path word is cleaned and resolved before comparison;
+// Windows compares with unified separators and without case.
+func hookCommandNamesHookDir(command, hookScript string) bool {
+	if strings.TrimSpace(command) == "" || !filepath.IsAbs(hookScript) {
 		return false
 	}
-	if hookPathResolvesInHookDir(words[0], hookScript) {
-		return true
+	fold := runtime.GOOS == "windows"
+	files := appendHookPathForms(nil, hookScript, fold)
+	var dirs []string
+	dir := filepath.Dir(hookScript)
+	if filepath.Base(dir) == "hooks" {
+		dirs = appendHookPathForms(nil, dir, fold)
 	}
-	target, ok := hookCommandTarget(words)
-	return ok && hookPathResolvesInHookDir(target, hookScript)
-}
-
-// literalHookCallWords accepts one call with literal words, including quoted
-// paths and arguments. Commands with another action remain reviewable.
-func literalHookCallWords(command string) ([]string, bool) {
-	file, err := syntax.NewParser(syntax.Variant(syntax.LangBash)).Parse(strings.NewReader(command), "")
-	if err != nil || len(file.Stmts) != 1 {
-		return nil, false
+	homes := []string{userHomeDir()}
+	if dataDir := filepath.Dir(dir); filepath.Base(dataDir) == ".defenseclaw" {
+		homes = append(homes, filepath.Dir(dataDir))
 	}
-	stmt := file.Stmts[0]
-	if stmt.Negated || stmt.Background || stmt.Coprocess || stmt.Disown ||
-		stmt.Semicolon.IsValid() || len(stmt.Redirs) != 0 {
-		return nil, false
-	}
-	call, ok := stmt.Cmd.(*syntax.CallExpr)
-	if !ok || len(call.Assigns) != 0 || len(call.Args) == 0 {
-		return nil, false
-	}
-	words := make([]string, 0, len(call.Args))
-	for _, word := range call.Args {
-		value, ok := literalHookWord(word)
-		if !ok {
-			return nil, false
+	for _, home := range homes {
+		if !filepath.IsAbs(strings.TrimSpace(home)) {
+			continue
 		}
-		words = append(words, value)
-	}
-	return words, true
-}
-
-func literalHookWord(word *syntax.Word) (string, bool) {
-	if word == nil {
-		return "", false
-	}
-	var value strings.Builder
-	for _, part := range word.Parts {
-		switch part := part.(type) {
-		case *syntax.Lit:
-			value.WriteString(part.Value)
-		case *syntax.SglQuoted:
-			value.WriteString(part.Value)
-		case *syntax.DblQuoted:
-			if part.Dollar {
-				return "", false
+		text := hookCommandPathText(command, normalizeHookPath(filepath.Clean(home), fold), fold)
+		for _, managed := range dirs {
+			if strings.Contains(text, managed+"/") {
+				return true
 			}
-			for _, nested := range part.Parts {
-				lit, ok := nested.(*syntax.Lit)
-				if !ok {
-					return "", false
+		}
+		for _, word := range strings.FieldsFunc(text, func(r rune) bool { return hookCommandPathDelimiter(r, fold) }) {
+			if !strings.HasPrefix(word, "/") && !(fold && len(word) > 2 && word[1] == ':') {
+				continue
+			}
+			for _, candidate := range appendHookPathForms(nil, filepath.FromSlash(word), fold) {
+				if slices.Contains(files, candidate) {
+					return true
 				}
-				value.WriteString(lit.Value)
-			}
-		default:
-			return "", false
-		}
-	}
-	return value.String(), true
-}
-
-// hookCommandTarget unwraps only forms that execute the following path.
-// Options that run command text or only inspect a path are excluded.
-func hookCommandTarget(words []string) (string, bool) {
-	for len(words) > 0 {
-		first := words[0]
-		if first == "" || (strings.Contains(first, "/") && !path.IsAbs(first)) {
-			return "", false
-		}
-		base := hookCommandWrapper(first)
-		words = words[1:]
-		switch base {
-		case "env":
-			for len(words) > 0 {
-				next := words[0]
-				switch {
-				case next == "-i" || next == "--ignore-environment" || next == "--":
-					words = words[1:]
-				case next == "-u" || next == "--unset":
-					if len(words) < 2 {
-						return "", false
-					}
-					words = words[2:]
-				case strings.HasPrefix(next, "--unset="):
-					words = words[1:]
-				case strings.Contains(next, "=") && !strings.HasPrefix(next, "-"):
-					words = words[1:]
-				case strings.HasPrefix(next, "-"):
-					return "", false
-				default:
-					goto nextWrapper
-				}
-			}
-		case "exec":
-			for len(words) > 0 {
-				if words[0] == "-a" && len(words) > 1 {
-					words = words[2:]
-				} else if words[0] == "-c" || words[0] == "-l" || words[0] == "--" {
-					words = words[1:]
-				} else if strings.HasPrefix(words[0], "-") {
-					return "", false
-				} else {
-					break
-				}
-			}
-		case "command":
-			for len(words) > 0 && (words[0] == "-p" || words[0] == "--") {
-				words = words[1:]
-			}
-			if len(words) > 0 && strings.HasPrefix(words[0], "-") {
-				return "", false
-			}
-		case "sh", "bash", "dash", "zsh", "ksh":
-			for len(words) > 0 {
-				if words[0] == "--" || words[0] == "--noprofile" || words[0] == "--norc" || words[0] == "--posix" ||
-					(base == "bash" && words[0] == "--login") || hookShellFlagsRunScript(words[0]) {
-					words = words[1:]
-					continue
-				}
-				if strings.HasPrefix(words[0], "-") {
-					return "", false
-				}
-				return words[0], true
-			}
-		default:
-			return first, true
-		}
-	nextWrapper:
-	}
-	return "", false
-}
-
-func hookCommandWrapper(word string) string {
-	base := path.Base(word)
-	if !strings.Contains(word, "/") {
-		return base
-	}
-	if !path.IsAbs(word) || strings.HasPrefix(word, "//") {
-		return ""
-	}
-	word = path.Clean(word)
-	switch base {
-	case "env", "sh", "bash", "dash", "zsh", "ksh":
-		switch path.Dir(word) {
-		case "/bin", "/usr/bin", "/usr/local/bin", "/opt/homebrew/bin":
-			return base
-		}
-	}
-	return ""
-}
-
-func hookShellFlagsRunScript(word string) bool {
-	if len(word) < 2 || (word[0] != '-' && word[0] != '+') {
-		return false
-	}
-	for _, flag := range word[1:] {
-		if !strings.ContainsRune("eufxvil", flag) {
-			return false
-		}
-	}
-	return true
-}
-
-func hookPathResolvesInHookDir(target, hookScript string) bool {
-	if runtime.GOOS == "windows" || !filepath.IsAbs(hookScript) {
-		return false
-	}
-	if !path.IsAbs(target) || strings.HasPrefix(target, "//") || strings.ContainsAny(target, "\x00\r\n") {
-		return false
-	}
-	dir, ok := resolveHookPathAllowMissing(filepath.Dir(hookScript))
-	if !ok {
-		return false
-	}
-	target, ok = resolveHookPathAllowMissing(target)
-	if !ok {
-		return false
-	}
-	relative, err := filepath.Rel(dir, target)
-	return err == nil && relative != "." && relative != ".." &&
-		!strings.HasPrefix(relative, ".."+string(filepath.Separator))
-}
-
-// hookCommandClaimsHookDir checks statically known executable values in
-// multi-statement commands. Child shells inherit values without changing the
-// parent's values, and function bodies are inspected when called. Commands
-// with more than one action are reported for review, never removed.
-func hookCommandClaimsHookDir(command, hookScript string) bool {
-	file, err := syntax.NewParser(syntax.Variant(syntax.LangBash)).Parse(strings.NewReader(command), "")
-	if err != nil {
-		return false
-	}
-	known := make(map[string]string)
-	functions := make(map[string]*syntax.FuncDecl)
-	activeFunctions := make(map[*syntax.FuncDecl]bool)
-	type scopeFrame struct {
-		known     map[string]string
-		functions map[string]*syntax.FuncDecl
-	}
-	type savedValue struct {
-		value   string
-		present bool
-	}
-	type functionScope struct {
-		depth  int
-		locals map[string]savedValue
-	}
-	var frames []scopeFrame
-	var functionScopes []functionScope
-	scopeDepth := 0
-	found := false
-	var visit func(syntax.Node) bool
-	visit = func(node syntax.Node) bool {
-		if node == nil {
-			frame := frames[len(frames)-1]
-			frames = frames[:len(frames)-1]
-			if frame.known != nil {
-				known, functions = frame.known, frame.functions
-				scopeDepth--
-			}
-			return true
-		}
-		if found {
-			return false
-		}
-		if decl, ok := node.(*syntax.FuncDecl); ok {
-			if decl.Name != nil {
-				functions[decl.Name.Value] = decl
-			}
-			for _, name := range decl.Names {
-				functions[name.Value] = decl
-			}
-			return false
-		}
-		if binary, ok := node.(*syntax.BinaryCmd); ok && (binary.Op == syntax.Pipe || binary.Op == syntax.PipeAll) {
-			parentKnown, parentFunctions := known, functions
-			scopeDepth++
-			known, functions = maps.Clone(parentKnown), maps.Clone(parentFunctions)
-			syntax.Walk(binary.X, visit)
-			known, functions = maps.Clone(parentKnown), maps.Clone(parentFunctions)
-			syntax.Walk(binary.Y, visit)
-			known, functions = parentKnown, parentFunctions
-			scopeDepth--
-			return false
-		}
-		frame := scopeFrame{}
-		switch n := node.(type) {
-		case *syntax.Subshell, *syntax.CmdSubst, *syntax.ProcSubst, *syntax.CoprocClause:
-			frame.known, frame.functions = known, functions
-			known, functions = maps.Clone(known), maps.Clone(functions)
-			scopeDepth++
-		case *syntax.Stmt:
-			if n.Background || n.Coprocess || n.Disown {
-				frame.known, frame.functions = known, functions
-				known, functions = maps.Clone(known), maps.Clone(functions)
-				scopeDepth++
-			}
-		}
-		frames = append(frames, frame)
-		if decl, ok := node.(*syntax.DeclClause); ok {
-			if len(functionScopes) > 0 && functionScopes[len(functionScopes)-1].depth == scopeDepth &&
-				hookFunctionLocalDeclaration(decl) {
-				locals := functionScopes[len(functionScopes)-1].locals
-				for _, assign := range decl.Args {
-					if assign.Name == nil {
-						continue
-					}
-					name := assign.Name.Value
-					if _, seen := locals[name]; !seen {
-						value, present := known[name]
-						locals[name] = savedValue{value, present}
+				for _, managed := range dirs {
+					if candidate == managed || strings.HasPrefix(candidate, managed+"/") {
+						return true
 					}
 				}
 			}
-			hookRecordKnownAssignments(decl.Args, known)
-			return true
 		}
-		call, ok := node.(*syntax.CallExpr)
-		if !ok {
-			return true
-		}
-		if len(call.Args) == 0 {
-			hookRecordKnownAssignments(call.Assigns, known)
-			return true
-		}
-		words := make([]string, 0, len(call.Args))
-		for _, word := range call.Args {
-			if value, ok := literalHookWord(word); ok {
-				words = append(words, value)
-			} else if name, ok := hookWordVariable(word); ok {
-				words = append(words, known[name])
-			} else {
-				words = append(words, "")
-			}
-		}
-		if hookPathResolvesInHookDir(words[0], hookScript) {
-			found = true
-			return true
-		}
-		if target, ok := hookCommandTarget(words); ok && hookPathResolvesInHookDir(target, hookScript) {
-			found = true
-			return true
-		}
-		if shellText, ok := hookShellCommandText(words); ok && hookCommandClaimsHookDir(shellText, hookScript) {
-			found = true
-			return true
-		}
-		if function := functions[words[0]]; function != nil && !activeFunctions[function] {
-			activeFunctions[function] = true
-			functionScopes = append(functionScopes, functionScope{scopeDepth, make(map[string]savedValue)})
-			syntax.Walk(function.Body, visit)
-			locals := functionScopes[len(functionScopes)-1].locals
-			functionScopes = functionScopes[:len(functionScopes)-1]
-			for name, prior := range locals {
-				if prior.present {
-					known[name] = prior.value
-				} else {
-					delete(known, name)
-				}
-			}
-			delete(activeFunctions, function)
-		}
-		return true
-	}
-	syntax.Walk(file, visit)
-	return found
-}
-
-func hookFunctionLocalDeclaration(decl *syntax.DeclClause) bool {
-	switch decl.Variant.Value {
-	case "local":
-		return true
-	case "declare", "typeset":
-		for _, assign := range decl.Args {
-			if option, ok := literalHookWord(assign.Value); ok && strings.HasPrefix(option, "-") && strings.Contains(option, "g") {
-				return false
-			}
-		}
-		return true
 	}
 	return false
 }
 
-func hookRecordKnownAssignments(assigns []*syntax.Assign, known map[string]string) {
-	for _, assign := range assigns {
-		if assign.Name == nil || assign.Append || assign.Naked || assign.Index != nil || assign.Array != nil {
+// appendHookPathForms appends the cleaned and the resolved form of name.
+func appendHookPathForms(forms []string, name string, fold bool) []string {
+	forms = append(forms, normalizeHookPath(filepath.Clean(name), fold))
+	if resolved, ok := resolveHookPathAllowMissing(name); ok {
+		forms = append(forms, normalizeHookPath(resolved, fold))
+	}
+	return forms
+}
+
+func normalizeHookPath(name string, fold bool) string {
+	name = filepath.ToSlash(name)
+	if fold {
+		name = strings.ToLower(name)
+	}
+	return name
+}
+
+// hookCommandPathText is command with quoting removed, home prefixes expanded
+// and repeated or "." path separators collapsed. It is only matched, never run.
+func hookCommandPathText(command, home string, fold bool) string {
+	var text strings.Builder
+	for _, r := range command {
+		switch r {
+		case '"', '\'', '`':
+			continue
+		case '\\':
+			if fold {
+				text.WriteRune('/')
+			}
 			continue
 		}
-		if value, ok := literalHookWord(assign.Value); ok {
-			known[assign.Name.Value] = value
-		} else {
-			delete(known, assign.Name.Value)
-		}
+		text.WriteRune(r)
 	}
+	value := text.String()
+	prefixes := []string{"${HOME}/", "$HOME/"}
+	if fold {
+		value = strings.ToLower(value)
+		prefixes = []string{"%userprofile%/", "${env:userprofile}/", "$env:userprofile/", "${home}/", "$home/"}
+	}
+	for _, prefix := range prefixes {
+		value = strings.ReplaceAll(value, prefix, home+"/")
+	}
+	var expanded strings.Builder
+	for i := 0; i < len(value); i++ {
+		if value[i] == '~' && i+1 < len(value) && value[i+1] == '/' &&
+			(i == 0 || hookCommandPathDelimiter(rune(value[i-1]), fold)) {
+			expanded.WriteString(home)
+			continue
+		}
+		expanded.WriteByte(value[i])
+	}
+	value = expanded.String()
+	for strings.Contains(value, "/./") || strings.Contains(value, "//") {
+		value = strings.ReplaceAll(strings.ReplaceAll(value, "/./", "/"), "//", "/")
+	}
+	return value
 }
 
-func hookShellCommandText(words []string) (string, bool) {
-	for len(words) > 0 && hookCommandWrapper(words[0]) == "env" {
-		words = words[1:]
-		for len(words) > 0 {
-			switch {
-			case words[0] == "-i" || words[0] == "--ignore-environment" || words[0] == "--" || strings.HasPrefix(words[0], "--unset="):
-				words = words[1:]
-			case words[0] == "-u" || words[0] == "--unset":
-				if len(words) < 2 {
-					return "", false
-				}
-				words = words[2:]
-			case strings.Contains(words[0], "=") && !strings.HasPrefix(words[0], "-"):
-				words = words[1:]
-			case strings.HasPrefix(words[0], "-"):
-				return "", false
-			default:
-				goto nextCommand
-			}
-		}
-	nextCommand:
+// hookCommandPathDelimiter separates path words in hook command text.
+func hookCommandPathDelimiter(r rune, fold bool) bool {
+	if unicode.IsSpace(r) || strings.ContainsRune(";|&()<>=,{}[]$", r) {
+		return true
 	}
-	if len(words) < 3 {
-		return "", false
-	}
-	shell := hookCommandWrapper(words[0])
-	switch shell {
-	case "sh", "bash", "dash", "zsh", "ksh":
-	default:
-		return "", false
-	}
-	for i := 1; i < len(words)-1; i++ {
-		option := words[i]
-		if shell == "bash" {
-			switch option {
-			case "--noprofile", "--norc", "--posix", "--login", "--restricted", "--verbose":
-				continue
-			case "--rcfile", "--init-file", "-o", "-O":
-				i++
-				continue
-			}
-		}
-		if !strings.HasPrefix(option, "-") || len(option) < 2 {
-			return "", false
-		}
-		commandFlag := false
-		allowed := "eufxvil"
-		if shell == "bash" {
-			allowed += "rps"
-		}
-		for _, flag := range option[1:] {
-			if flag == 'c' {
-				commandFlag = true
-			} else if !strings.ContainsRune(allowed, flag) {
-				return "", false
-			}
-		}
-		if commandFlag {
-			return words[i+1], words[i+1] != ""
-		}
-	}
-	return "", false
-}
-
-func hookWordVariable(word *syntax.Word) (string, bool) {
-	if word == nil || len(word.Parts) != 1 {
-		return "", false
-	}
-	part := word.Parts[0]
-	if quoted, ok := part.(*syntax.DblQuoted); ok {
-		if len(quoted.Parts) != 1 || quoted.Dollar {
-			return "", false
-		}
-		part = quoted.Parts[0]
-	}
-	param, ok := part.(*syntax.ParamExp)
-	if !ok || param.Param == nil || param.Excl || param.Length || param.Width || param.IsSet || param.Flags != nil ||
-		param.Exp != nil || param.NestedParam != nil || param.Index != nil || len(param.Modifiers) != 0 ||
-		param.Slice != nil || param.Repl != nil || param.Names != 0 {
-		return "", false
-	}
-	return param.Param.Value, true
+	return r == ':' && !fold
 }
 
 // resolveHookPathAllowMissing resolves existing ancestors so a removed hook

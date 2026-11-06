@@ -76,7 +76,7 @@ func TestGAP0625HermesLiteralFormsReconcileAndKeepUserHook(t *testing.T) {
 	}
 }
 
-func TestGAP0625HermesEvaluatedManagedCommandStaysReviewable(t *testing.T) {
+func TestGAP0625HermesEvaluatedManagedCommandIsRemoved(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("Unix script commands")
 	}
@@ -89,34 +89,31 @@ func TestGAP0625HermesEvaluatedManagedCommandStaysReviewable(t *testing.T) {
 			}
 			command := "HOOK=" + shellWord(target) + `; "$HOOK"`
 			gap0625SetHermesCommand(t, configPath, command)
-			before, err := os.ReadFile(configPath)
-			if err != nil {
-				t.Fatal(err)
-			}
 			verifyErr := conn.VerifyClean(opts)
-			teardownErr := conn.Teardown(context.Background(), opts)
+			if managed != (verifyErr != nil) {
+				t.Fatalf("VerifyClean before Teardown = %v; managed=%v", verifyErr, managed)
+			}
+			if err := conn.Teardown(context.Background(), opts); err != nil {
+				t.Fatalf("Teardown: %v", err)
+			}
+			want := []string{command, userHook}
 			if managed {
-				if verifyErr == nil || teardownErr == nil {
-					t.Fatalf("managed evaluated entry verified=%v teardown=%v; want review", verifyErr, teardownErr)
-				}
-				after, err := os.ReadFile(configPath)
-				if err != nil || string(after) != string(before) {
-					t.Fatalf("reviewable command changed: err=%v", err)
-				}
-			} else {
-				if verifyErr != nil || teardownErr != nil {
-					t.Fatalf("user command verified=%v teardown=%v", verifyErr, teardownErr)
-				}
-				commands := gap0625PreToolCommands(t, configPath)
-				if len(commands) != 2 || commands[0] != command || commands[1] != userHook {
-					t.Fatalf("user commands changed: %q", commands)
-				}
+				want = []string{userHook}
+			}
+			if commands := gap0625PreToolCommands(t, configPath); strings.Join(commands, "\n") != strings.Join(want, "\n") {
+				t.Fatalf("remaining commands = %q; want %q", commands, want)
+			}
+			if err := conn.VerifyClean(opts); err != nil {
+				t.Fatalf("VerifyClean after Teardown: %v", err)
 			}
 		})
 	}
 }
 
-func TestGAP0625ExternalProgramWithManagedArgumentStaysUserOwned(t *testing.T) {
+// A user program given the managed hook path as an argument names the
+// managed directory, so the entry is an edited DefenseClaw entry (lead
+// ruling r5 for GAP-0625: ownership is read from the text, not evaluated).
+func TestGAP0625ExternalProgramNamingHookDirIsRemoved(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("Unix script commands")
 	}
@@ -127,17 +124,15 @@ func TestGAP0625ExternalProgramWithManagedArgumentStaysUserOwned(t *testing.T) {
 			if err := os.WriteFile(program, []byte("#!/bin/sh\nexit 0\n"), 0o700); err != nil {
 				t.Fatal(err)
 			}
-			command := shellWord(program) + " " + shellWord(renamed)
-			gap0625SetHermesCommand(t, configPath, command)
-			if err := conn.VerifyClean(opts); err != nil {
-				t.Fatalf("user program read as managed: %v", err)
+			gap0625SetHermesCommand(t, configPath, shellWord(program)+" "+shellWord(renamed))
+			if err := conn.VerifyClean(opts); err == nil {
+				t.Fatal("VerifyClean accepted a remaining managed hook entry")
 			}
 			if err := conn.Teardown(context.Background(), opts); err != nil {
 				t.Fatalf("Teardown: %v", err)
 			}
-			commands := gap0625PreToolCommands(t, configPath)
-			if len(commands) != 2 || commands[0] != command || commands[1] != userHook {
-				t.Fatalf("user commands changed: %q", commands)
+			if commands := gap0625PreToolCommands(t, configPath); len(commands) != 1 || commands[0] != userHook {
+				t.Fatalf("remaining commands = %q; want the user hook", commands)
 			}
 		})
 	}
@@ -219,26 +214,30 @@ func TestGAP0625DevinRepairReplacesRenamedHookAndKeepsUserHook(t *testing.T) {
 	}
 }
 
-func TestGAP0625DevinEvaluatedManagedCommandStaysReviewable(t *testing.T) {
+func TestGAP0625DevinEvaluatedManagedCommandIsReplaced(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("Unix script commands")
 	}
 	root := testenv.PrivateTempDir(t)
 	script := filepath.Join(root, "hooks", "devin-hook.sh")
 	command := "HOOK=" + shellWord(filepath.Join(root, "hooks", "hookX")) + `; "$HOOK"`
-	path, _ := gap0625DevinConfig(t, command)
+	path, user := gap0625DevinConfig(t, command)
 	if present, err := devinConfigReferencesHook(path, script); err != nil || !present {
 		t.Fatalf("managed entry present=%v err=%v", present, err)
 	}
-	if err := removeDevinHookReferences(path, script); err == nil {
-		t.Fatal("removal accepted an evaluated managed command")
-	}
-	if err := patchDevinHooks(path, script); err == nil {
-		t.Fatal("repair accepted an evaluated managed command")
+	if err := patchDevinHooks(path, script); err != nil {
+		t.Fatalf("repair Devin hooks: %v", err)
 	}
 	commands := devinConfigCommands(t, path)
-	if len(commands) != 2 || commands[0] != "PreToolUse="+command {
-		t.Fatalf("reviewable command changed: %q", commands)
+	if len(commands) != len(devinHookEvents)+1 || strings.Contains(strings.Join(commands, "\n"), "$HOOK") ||
+		!strings.Contains(strings.Join(commands, "\n"), "PreToolUse="+user) {
+		t.Fatalf("repaired commands = %q", commands)
+	}
+	if err := removeDevinHookReferences(path, script); err != nil {
+		t.Fatalf("remove Devin entries: %v", err)
+	}
+	if commands := devinConfigCommands(t, path); len(commands) != 1 || commands[0] != "PreToolUse="+user {
+		t.Fatalf("remaining commands = %q; want the user hook", commands)
 	}
 }
 
@@ -383,27 +382,25 @@ func TestGAP0625CursorRepairReplacesRenamedHookAndKeepsUserHook(t *testing.T) {
 	}
 }
 
-func TestGAP0625CursorEvaluatedManagedCommandStaysReviewable(t *testing.T) {
+func TestGAP0625CursorEvaluatedManagedCommandIsReplaced(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("Unix script commands")
 	}
 	root := testenv.PrivateTempDir(t)
 	script := filepath.Join(root, "hooks", "cursor-hook.sh")
 	command := "HOOK=" + shellWord(filepath.Join(root, "hooks", "hookX")) + `; "$HOOK"`
-	path, _ := gap0625CursorConfig(t, command)
-	if err := removeCursorHookReferencesProfile(path, false, script); err == nil {
-		t.Fatal("removal accepted an evaluated managed command")
+	path, user := gap0625CursorConfig(t, command)
+	if err := patchCursorHooks(path, script, script, false); err != nil {
+		t.Fatalf("repair Cursor hooks: %v", err)
 	}
-	if err := patchCursorHooks(path, script, script, false); err == nil {
-		t.Fatal("repair accepted an evaluated managed command")
+	entries := gap0625CursorEntries(t, path)
+	if len(entries) != 2 || entries[0].(map[string]interface{})["command"] != user || entries[1].(map[string]interface{})["command"] != shellWord(script) {
+		t.Fatalf("repaired entries = %v; want user and current managed", entries)
 	}
-	cfg, err := readJSONObject(path)
-	if err != nil {
-		t.Fatal(err)
+	if err := removeCursorHookReferencesProfile(path, false, script); err != nil {
+		t.Fatalf("remove Cursor entries: %v", err)
 	}
-	hooks := cfg["hooks"].(map[string]interface{})
-	entries := hooks[cursorHookEvents[0]].([]interface{})
-	if len(entries) != 2 || entries[0].(map[string]interface{})["command"] != command {
-		t.Fatalf("reviewable entry changed: %v", entries)
+	if entries := gap0625CursorEntries(t, path); len(entries) != 1 || entries[0].(map[string]interface{})["command"] != user {
+		t.Fatalf("remaining entries = %v; want the user hook", entries)
 	}
 }
