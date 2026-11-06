@@ -129,6 +129,8 @@ func guardrailActionForConnectorFindings(
 	findings []RuleFinding,
 	confirmable bool,
 ) string {
+	findings = shellProtectedFileFindingsForPosture(findings,
+		cfg != nil && cfg.SecureClientIntegration(), rulePackPostureForConnector(cfg, connector))
 	return guardrailActionForFindings(findings, func(severity string) string {
 		return guardrailActionForConnector(cfg, connector, severity, confirmable)
 	})
@@ -240,6 +242,8 @@ func guardrailActionForGuardrailFindings(
 	findings []RuleFinding,
 	confirmable bool,
 ) string {
+	findings = shellProtectedFileFindingsForPosture(findings,
+		ManagedEnterpriseActive(), guardrailRulePackPosture(gc, connector))
 	return guardrailActionForFindings(findings, func(severity string) string {
 		return guardrailActionForGuardrailConnector(gc, connector, severity, confirmable)
 	})
