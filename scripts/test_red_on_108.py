@@ -8,7 +8,7 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
 
-from scripts.red_on_108 import candidates, mapped_python_files, overlay_new_go_fixtures, run_mapped_candidate, run_one
+from scripts.red_on_108 import candidates, mapped_python_files, overlay_go_fixtures, run_mapped_candidate, run_one
 from scripts.red_on_108 import tests_for_gap as select_tests_for_gap
 
 
@@ -120,7 +120,7 @@ class RedOn108Test(unittest.TestCase):
         self.assertEqual(classify_test_result(command, 1, assertion), "BEHAVIOR_RED")
         self.assertEqual(classify_test_result(command, 1, unclassified), "UNCLASSIFIED_FAIL")
 
-    def test_new_go_fixture_is_copied_to_prior_release_tree(self):
+    def test_go_fixtures_match_the_test_commit_on_prior_release(self):
         from tempfile import TemporaryDirectory
 
         with TemporaryDirectory() as temporary:
@@ -136,19 +136,25 @@ class RedOn108Test(unittest.TestCase):
             fixture = repo / "internal/example/testdata"
             fixture.mkdir(parents=True)
             (fixture / "existing.json").write_text("base", encoding="utf-8")
+            (fixture / "removed.json").write_text("removed", encoding="utf-8")
             git("add", ".")
             git("commit", "-q", "-m", "base")
             base = git("rev-parse", "HEAD")
+            (fixture / "existing.json").write_text("updated", encoding="utf-8")
             (fixture / "new.json").write_text("new", encoding="utf-8")
+            git("rm", "-q", "internal/example/testdata/removed.json")
             git("add", ".")
             git("commit", "-q", "-m", "fix(GAP-0607): add test fixture")
             commit = git("rev-parse", "HEAD")
             prior = Path(temporary) / "prior"
-            (prior / "internal/example/testdata").mkdir(parents=True)
-            (prior / "internal/example/testdata/existing.json").write_text("base", encoding="utf-8")
-            overlay_new_go_fixtures(repo, prior, commit, base, "internal/example")
-            self.assertEqual((prior / "internal/example/testdata/new.json").read_text(), "new")
-            self.assertEqual((prior / "internal/example/testdata/existing.json").read_text(), "base")
+            git("worktree", "add", "--quiet", "--detach", str(prior), base)
+            try:
+                overlay_go_fixtures(repo, prior, commit, "internal/example")
+                self.assertEqual((prior / "internal/example/testdata/new.json").read_text(), "new")
+                self.assertEqual((prior / "internal/example/testdata/existing.json").read_text(), "updated")
+                self.assertFalse((prior / "internal/example/testdata/removed.json").exists())
+            finally:
+                git("worktree", "remove", "--force", str(prior))
 
 
 if __name__ == "__main__":
