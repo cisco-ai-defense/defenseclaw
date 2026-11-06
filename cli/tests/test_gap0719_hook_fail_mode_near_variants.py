@@ -7,6 +7,7 @@ all take the default from GuardrailConfig.hook_fail_mode_resolution.
 from types import SimpleNamespace
 from unittest.mock import patch
 
+import pytest
 import yaml
 from click.testing import CliRunner
 from defenseclaw.commands import cmd_config
@@ -132,3 +133,47 @@ def test_saved_mode_is_shown_as_saved_in_the_section_view(tmp_path, monkeypatch)
         show=True,
     )
     assert yaml.safe_load(shown.stdout)["guardrail"]["hook_fail_mode"] == "closed"
+
+
+def _run_without_config_file(tmp_path, monkeypatch, args):
+    for key, value in isolated_home_env(tmp_path / "home").items():
+        monkeypatch.setenv(key, value)
+    monkeypatch.setenv("DEFENSECLAW_HOME", str(tmp_path))
+    monkeypatch.delenv("DEFENSECLAW_CONFIG", raising=False)
+    path = tmp_path / "config.yaml"
+    assert not path.exists()
+    with patch.object(cmd_config.config_module, "config_path", return_value=path):
+        result = CliRunner().invoke(cmd_config.config_cmd, args)
+    assert result.exit_code == 0, result.output
+    return result
+
+
+def test_no_file_show_section_reports_the_default_tier_mode(tmp_path, monkeypatch):
+    shown = _run_without_config_file(tmp_path, monkeypatch, ["show", "--section", "guardrail"])
+    assert yaml.safe_load(shown.stdout)["guardrail"]["hook_fail_mode"] == "open"
+
+
+def test_no_file_full_show_reports_the_default_tier_mode(tmp_path, monkeypatch):
+    shown = _run_without_config_file(tmp_path, monkeypatch, ["show"])
+    assert yaml.safe_load(shown.stdout)["guardrail"]["hook_fail_mode"] == "open"
+
+
+@pytest.mark.parametrize("alias", ["claude-code", "claude_code", "claudecode"])
+def test_auto_overlay_source_names_the_saved_connector_key(tmp_path, monkeypatch, alias):
+    config = (
+        "guardrail: {connector: openclaw}\n"
+        f"application_protection: {{enabled: true, connectors: {{{alias}: {{guardrail: {{hook_fail_mode: closed}}}}}}}}\n"
+    )
+    result = _run(tmp_path, monkeypatch, config, ["get", "guardrail.connectors.claudecode.hook_fail_mode"])
+    assert result.stdout == "closed\n"
+    assert f"config:application_protection.connectors.{alias}.guardrail.hook_fail_mode" in result.stderr
+
+
+@pytest.mark.parametrize("alias", ["claude-code", "claude_code", "claudecode"])
+def test_manual_connector_source_names_the_saved_connector_key(tmp_path, monkeypatch, alias):
+    config = f"guardrail: {{connectors: {{{alias}: {{hook_fail_mode: closed}}}}}}\n"
+    result = _run(
+        tmp_path, monkeypatch, config, ["get", "guardrail.connectors.claudecode.hook_fail_mode", "--effective"]
+    )
+    assert result.stdout == "closed\n"
+    assert f"config:guardrail.connectors.{alias}.hook_fail_mode" in result.stderr

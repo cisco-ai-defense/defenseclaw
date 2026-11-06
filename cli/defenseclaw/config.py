@@ -2897,15 +2897,21 @@ class GuardrailConfig:
         (e.g. ``"Claude-Code"``, ``"claude_code"``). Mirrors
         ``GuardrailConfig.connectorOverride`` in Go.
         """
+        key = self._connector_override_key(connector)
+        return self.connectors[key] if key is not None else None
+
+    def _connector_override_key(self, connector: str) -> str | None:
+        """The key ``connectors`` holds ``connector``'s override under, as
+        saved (an alias spelling stays the alias), so a reported source names
+        a key that exists in config.yaml."""
         if not connector or not self.connectors:
             return None
-        pc = self.connectors.get(connector)
-        if pc is not None:
-            return pc
+        if self.connectors.get(connector) is not None:
+            return connector
         want = connector_paths.normalize(connector)
         for name, entry in self.connectors.items():
-            if connector_paths.normalize(name) == want:
-                return entry
+            if entry is not None and connector_paths.normalize(name) == want:
+                return name
         return None
 
     def effective_mode(self, connector: str = "") -> str:
@@ -2993,20 +2999,20 @@ class GuardrailConfig:
         if owned and name:
             application = cfg.application_protection
             if application.enabled and name not in cfg.active_connectors():
-                override = application._connector_override(connector)
-                overlay = override.guardrail if override is not None else application.guardrail
+                saved = application._connector_override_key(connector)
+                overlay = application.connectors[saved].guardrail if saved is not None else application.guardrail
                 if overlay.hook_fail_mode.strip():
                     key = (
-                        f"application_protection.connectors.{name}.guardrail.hook_fail_mode"
-                        if override is not None
+                        f"application_protection.connectors.{saved}.guardrail.hook_fail_mode"
+                        if saved is not None
                         else "application_protection.guardrail.hook_fail_mode"
                     )
                     return _normalize_hook_fail_mode(overlay.hook_fail_mode), f"config:{key}"
-        pc = self._connector_override(connector)
-        if pc is not None and pc.hook_fail_mode.strip():
+        saved = self._connector_override_key(connector)
+        if saved is not None and self.connectors[saved].hook_fail_mode.strip():
             return (
-                _normalize_hook_fail_mode(pc.hook_fail_mode),
-                f"config:guardrail.connectors.{name}.hook_fail_mode",
+                _normalize_hook_fail_mode(self.connectors[saved].hook_fail_mode),
+                f"config:guardrail.connectors.{saved}.hook_fail_mode",
             )
         if getattr(self, "_hook_fail_mode_saved", False) and self.hook_fail_mode.strip():
             return _normalize_hook_fail_mode(self.hook_fail_mode), "config:guardrail.hook_fail_mode"
@@ -4217,15 +4223,19 @@ class ApplicationProtectionConfig:
         return any(_normalize_connector_key(c) == name for c in self.include_connectors)
 
     def _connector_override(self, connector: str) -> ApplicationProtectionConnectorConfig | None:
+        key = self._connector_override_key(connector)
+        return self.connectors[key] if key is not None else None
+
+    def _connector_override_key(self, connector: str) -> str | None:
+        """The key ``connectors`` holds ``connector``'s override under, as saved."""
         if not connector or not self.connectors:
             return None
-        pc = self.connectors.get(connector)
-        if pc is not None:
-            return pc
+        if self.connectors.get(connector) is not None:
+            return connector
         want = _normalize_connector_key(connector)
         for name, entry in self.connectors.items():
-            if _normalize_connector_key(name) == want:
-                return entry
+            if entry is not None and _normalize_connector_key(name) == want:
+                return name
         return None
 
     def validate(self) -> None:

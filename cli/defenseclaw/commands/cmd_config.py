@@ -1769,7 +1769,9 @@ def _show_data(app: AppContext, *, source: bool, effective: bool, provenance: bo
         # No config.yaml yet: show the defaults the CLI would run with.
         if source or effective or provenance:
             raise click.ClickException(f"config.yaml does not exist yet; {config_module.first_run_hint()}")
-        return _v8_defaults(app)
+        defaults = _v8_defaults(app)
+        _resolve_defaults(app, defaults, {})
+        return defaults
     resolved_only = effective or provenance
     masked: dict = {}
     if not resolved_only:
