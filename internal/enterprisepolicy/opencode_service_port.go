@@ -191,6 +191,16 @@ type OpenCodePortPlan struct {
 // allowNew false (the record could not be read) nobody gets a new port and
 // nobody is moved.
 func PlanOpenCodeServicePorts(eligible []int, filePorts, recorded map[int]int, allowNew bool) OpenCodePortPlan {
+	return PlanOpenCodeServicePortsHolding(eligible, filePorts, recorded, allowNew, nil)
+}
+
+// PlanOpenCodeServicePortsHolding is PlanOpenCodeServicePorts with accounts
+// whose file could not be read this pass (unknown, REVIEW-gx053-7): such an
+// account keeps its recorded port reserved and nothing changes for it (no
+// new port, no move); every other account is planned as usual from the pool
+// minus every recorded port. A port its file names away from its record is
+// settled on the next readable pass by the clash rule.
+func PlanOpenCodeServicePortsHolding(eligible []int, filePorts, recorded map[int]int, allowNew bool, unknown map[int]bool) OpenCodePortPlan {
 	plan := OpenCodePortPlan{Ports: map[int]int{}, Replace: map[int]int{}, Record: map[int]int{}}
 	sortedEligible := append([]int(nil), eligible...)
 	sort.Ints(sortedEligible)
@@ -235,16 +245,20 @@ func PlanOpenCodeServicePorts(eligible []int, filePorts, recorded map[int]int, a
 			}
 			continue
 		}
-		if isEligible[uid] {
+		switch {
+		case isEligible[uid] && unknown[uid]:
+			// Nothing changes for an unknown account: its entry stays.
+			plan.Record[uid] = port
+		case isEligible[uid]:
 			plan.Conflicts = append(plan.Conflicts, OpenCodePortConflict{UID: uid, Holder: holder[port], Port: port})
-		} else {
+		default:
 			superseded = append(superseded, uid)
 		}
 	}
 	// 3. File ports nobody above holds.
 	var fresh []int
 	for _, uid := range sortedEligible {
-		if _, placed := plan.Ports[uid]; placed {
+		if _, placed := plan.Ports[uid]; placed || unknown[uid] {
 			continue
 		}
 		port := filePorts[uid]
@@ -303,7 +317,9 @@ func PlanOpenCodeServicePorts(eligible []int, filePorts, recorded map[int]int, a
 		plan.Record[uid] = port
 	}
 	for uid, port := range plan.Ports {
-		plan.Record[uid] = port
+		if !unknown[uid] || plan.Record[uid] == 0 {
+			plan.Record[uid] = port
+		}
 	}
 	sort.Ints(plan.NoPort)
 	return plan

@@ -170,3 +170,63 @@ func TestOpenCodePortPlanWithoutRecordGivesNothingNew(t *testing.T) {
 		t.Fatalf("no-port %v", plan.NoPort)
 	}
 }
+
+// REVIEW-gx053-7: with random accounts unreadable each pass (their files
+// not seen and not written), every other account is still planned, no new
+// port is an unreadable account's recorded port, and no two accounts share
+// a port as long as unreadable files name their recorded port.
+func TestOpenCodePortInvariantWithUnreadableAccounts(t *testing.T) {
+	for seed := int64(1); seed <= 300; seed++ {
+		rng := rand.New(rand.NewSource(seed))
+		files, record := map[int]int{}, map[int]int{}
+		var eligible []int
+		for step := 0; step < 30; step++ {
+			eligible = append(eligible, 1000+rng.Intn(30000))
+			unknown := map[int]bool{}
+			seen := map[int]int{}
+			for _, uid := range eligible {
+				if rng.Intn(4) == 0 {
+					unknown[uid] = true
+					continue
+				}
+				if port := files[uid]; port > 0 {
+					seen[uid] = port
+				}
+			}
+			plan := PlanOpenCodeServicePortsHolding(eligible, seen, record, true, unknown)
+			for _, uid := range eligible {
+				if unknown[uid] {
+					if plan.Replace[uid] != 0 || (record[uid] == 0 && plan.Ports[uid] != 0) {
+						t.Fatalf("seed %d: unknown uid %d was changed: %+v", seed, uid, plan)
+					}
+					continue
+				}
+				if port := plan.Ports[uid]; port > 0 && files[uid] == 0 || plan.Replace[uid] == files[uid] && port > 0 {
+					files[uid] = port
+				}
+				if port := plan.Ports[uid]; port > 0 {
+					for other, held := range record {
+						if unknown[other] && other != uid && held == port {
+							t.Fatalf("seed %d: uid %d given unknown uid %d's recorded port %d", seed, uid, other, port)
+						}
+					}
+				}
+			}
+			record = plan.Record
+			holders := map[int]int{}
+			for _, uid := range eligible {
+				port := files[uid]
+				if unknown[uid] && record[uid] != 0 {
+					port = record[uid]
+				}
+				if port == 0 {
+					continue
+				}
+				if other, dup := holders[port]; dup && other != uid {
+					t.Fatalf("seed %d step %d: uids %d and %d share %d", seed, step, other, uid, port)
+				}
+				holders[port] = uid
+			}
+		}
+	}
+}

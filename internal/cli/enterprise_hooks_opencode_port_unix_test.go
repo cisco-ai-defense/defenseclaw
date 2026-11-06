@@ -544,8 +544,8 @@ func TestManagedGuardianOpenCodeRootUnreadableHome(t *testing.T) {
 }
 
 // A file the account cannot read either: its port is unknown, its recorded
-// port stays held, nobody gets a new port this pass (REVIEW-gx053-6: the
-// account may use any port), and the warning names the account.
+// port stays reserved and nothing changes for it; a new account still gets a
+// port, not that one (REVIEW-gx053-7), and the warning names the account.
 func TestManagedGuardianOpenCodeFileUnreadableEvenAsTheUser(t *testing.T) {
 	homes, record, setEligible := openCodePortGuardianWith(t, true, 1001)
 	runOpenCodePortPass(t)
@@ -553,8 +553,8 @@ func TestManagedGuardianOpenCodeFileUnreadableEvenAsTheUser(t *testing.T) {
 	openCodeUserCannotRead[1001] = true
 	setEligible(nil, 1001, 9001) // 9001 starts on 1001's port
 	log := runOpenCodePortPass(t)
-	if got := openCodePortIn(t, homes[9001]); got != 0 {
-		t.Fatalf("9001 got %d while 1001's port (recorded %d) is unknown\n%s", got, held, log)
+	if got := openCodePortIn(t, homes[9001]); got == 0 || got == held {
+		t.Fatalf("9001 got %d; 1001's recorded port is %d\n%s", got, held, log)
 	}
 	if (*record)[1001] != held {
 		t.Fatalf("the unreadable account lost its port: %v", *record)
@@ -586,40 +586,34 @@ func TestManagedGuardianOpenCodeWriteWorkerMovesAPortTheReadMissed(t *testing.T)
 	}
 }
 
-// REVIEW-gx053-6 MF1: alice's read worker fails. There is no root read: her
-// port is unknown this pass, so nobody gets a new port (bob, whose first
-// port is the 25002 alice's linked file names, waits), her recorded port
-// stays held, and the warning names her. Status names her too (the record).
+// REVIEW-gx053-6/7: alice's read worker fails. There is no root read: her
+// port is unknown this pass and nothing changes for her; bob is still given a
+// port (alice had no record, so her hand-set 25002 may be given away). On the
+// next readable pass the clash rule settles it: bob, the recorded holder,
+// keeps it, alice is moved, and the log names both.
 func TestManagedGuardianOpenCodeReadWorkerFails(t *testing.T) {
 	homes, record, setEligible := openCodePortGuardianWith(t, true, 1001)
-	alice := homes[1001]
-	_ = os.MkdirAll(filepath.Join(alice, "dotfiles", "opencode"), 0o700)
-	_ = os.MkdirAll(filepath.Join(alice, ".config"), 0o700)
-	if err := os.Symlink(filepath.Join(alice, "dotfiles", "opencode"), filepath.Join(alice, ".config", "opencode")); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(filepath.Join(alice, "dotfiles", "opencode", "service.json"), []byte(`{"port":25002}`), 0o600); err != nil {
-		t.Fatal(err)
-	}
+	writeOpenCodePortFile(t, homes[1001], 25002)
 	openCodeReadFails[1001] = true
 	setEligible(nil, 1001, 1002)
 	log := runOpenCodePortPass(t)
-	assertNoSharedOpenCodePort(t, homes, []int{1001, 1002}, log)
-	if got := openCodePortIn(t, homes[1002]); got != 0 {
-		t.Fatalf("bob got port %d while alice's port is unknown\n%s", got, log)
+	if got := openCodePortIn(t, homes[1002]); got == 0 {
+		t.Fatalf("bob got no port while alice's port is unknown\n%s", log)
 	}
-	if !strings.Contains(log, "ent1001's OpenCode service port is unknown this pass") {
-		t.Fatalf("the warning does not name alice:\n%s", log)
+	if !strings.Contains(log, "ent1001's OpenCode service port is unknown this pass") || !strings.Contains(log, "To clear it:") {
+		t.Fatalf("the warning does not name alice and the fix:\n%s", log)
 	}
-	if len(openCodeRecordUnknown) != 1 || openCodeRecordUnknown[0].UID != 1001 {
-		t.Fatalf("the record does not name the unknown account for status: %+v (%v)", openCodeRecordUnknown, *record)
+	if len(openCodeRecordUnknown) != 1 || openCodeRecordUnknown[0].UID != 1001 || openCodeRecordUnknown[0].Fix == "" {
+		t.Fatalf("the record does not name the unknown account and its fix for status: %+v (%v)", openCodeRecordUnknown, *record)
 	}
-	// The read works again: bob gets a port that is not alice's.
 	openCodeReadFails[1001] = false
 	log = runOpenCodePortPass(t)
 	got := assertNoSharedOpenCodePort(t, homes, []int{1001, 1002}, log)
-	if got[1001] != 25002 || got[1002] == 0 || len(openCodeRecordUnknown) != 0 {
+	if got[1001] == 0 || len(openCodeRecordUnknown) != 0 {
 		t.Fatalf("after recovery ports %v unknown %v\n%s", got, openCodeRecordUnknown, log)
+	}
+	if got[1002] == 25002 && !strings.Contains(log, "port 25002 of ent1001 (uid 1001) is held by ent1002 (uid 1002)") {
+		t.Fatalf("the clash is not logged with both accounts:\n%s", log)
 	}
 }
 
@@ -639,8 +633,8 @@ func TestManagedGuardianOpenCodeReadWorkerTimesOut(t *testing.T) {
 	case <-time.After(10 * time.Second):
 		t.Fatal("the pass hangs on a read that does not answer")
 	}
-	if got := openCodePortIn(t, homes[1002]); got != 0 {
-		t.Fatalf("bob got port %d while alice's read hung\n%s", got, log)
+	if got := openCodePortIn(t, homes[1002]); got == 0 {
+		t.Fatalf("bob got no port while alice's read hung: one account stopped the rest\n%s", log)
 	}
 	if !strings.Contains(log, "did not answer within") {
 		t.Fatalf("the timeout is not logged:\n%s", log)
@@ -666,5 +660,35 @@ func TestManagedGuardianOpenCodeHungAccountThenHealthyOne(t *testing.T) {
 	assertNoSharedOpenCodePort(t, homes, []int{1001, 1003}, log)
 	if (*record)[1003] != 25010 {
 		t.Fatalf("the healthy account was not processed: record %v\n%s", *record, log)
+	}
+}
+
+// REVIEW-gx053-7 MF1: a user's bad file (here, not JSON) affects nobody else:
+// with mallory unknown, a new account gets a port that is not mallory's
+// recorded one, and a clash between two readable accounts is still resolved.
+func TestManagedGuardianOpenCodeOneBadFileAffectsNobodyElse(t *testing.T) {
+	homes, record, setEligible := openCodePortGuardianWith(t, true, 1001)
+	runOpenCodePortPass(t)
+	malloryPort := (*record)[1001]
+	path := enterprisepolicy.OpenCodeServiceConfigPath(homes[1001])
+	if err := os.WriteFile(path, []byte("not json"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	setEligible(nil, 1001, 9001, 1003, 1004) // 9001 starts on mallory's port
+	writeOpenCodePortFile(t, homes[1003], 26000)
+	writeOpenCodePortFile(t, homes[1004], 26000) // a clash between readable accounts
+	log := runOpenCodePortPass(t)
+	if got := openCodePortIn(t, homes[9001]); got == 0 || got == malloryPort {
+		t.Fatalf("the new account got %d (mallory holds %d)\n%s", got, malloryPort, log)
+	}
+	got := assertNoSharedOpenCodePort(t, homes, []int{9001, 1003, 1004}, log)
+	if got[1003] != 26000 || got[1004] == 26000 || got[1004] == 0 {
+		t.Fatalf("the readable clash was not resolved: %v\n%s", got, log)
+	}
+	if (*record)[1001] != malloryPort {
+		t.Fatalf("mallory's reserved port changed: %v", *record)
+	}
+	if !strings.Contains(log, path) || !strings.Contains(log, "is not a JSON object") || !strings.Contains(log, "sudo -u ent1001 rm "+path) {
+		t.Fatalf("the warning does not name the path, the reason and the fix:\n%s", log)
 	}
 }
