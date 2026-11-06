@@ -130,14 +130,16 @@ func canonicalize(path string, kind ObjectKind, opts CanonicalOptions, repair bo
 	}
 
 	var desc objectDescriptor
-	if descriptorUnreadable {
+	if descriptorUnreadable && (repair || TrustStrictAncestors() || StandaloneRefusesContentDrift()) {
 		// Backup semantics with SeBackupPrivilege grant READ_CONTROL whatever
 		// the DACL says, so the owner is known before anything is adopted.
-		// The read-only assessment reads it the same way: an account that
-		// owns the object or holds WRITE_DAC on it can hide the descriptor
-		// from SYSTEM and Administrators, and every standalone refusal that
-		// asks AssessCanonical must judge the real owner and writers, not
-		// accept what it cannot see (g582 review 4 F1).
+		// On standalone and in strict mode the read-only assessment reads it
+		// the same way: an account that owns the object or holds WRITE_DAC
+		// on it can hide the descriptor from SYSTEM and Administrators, and
+		// every standalone refusal that asks AssessCanonical must judge the
+		// real owner and writers, not accept what it cannot see (g582 review
+		// 4 F1). Secure Client's assessment does not take the privileges, so
+		// its verdicts and events are as before (g582 review 5 M1).
 		if err := canonicalRunWithRepairPrivileges(func() error {
 			privileged, openErr := openCanonicalObject(clean, uint32(windows.READ_CONTROL|windows.FILE_READ_ATTRIBUTES))
 			if openErr != nil {
