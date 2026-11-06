@@ -54,11 +54,21 @@ func hookAPIValidateOwner(path string, info os.FileInfo) error {
 }
 
 func hookAPIValidateDirectory(path string) error {
+	return hookAPIValidateDirectoryWith(path, false)
+}
+
+// Agent-created connector directories may use a proven private primary group.
+// Hook token, data and socket directories keep the strict directory check.
+func hookAPIValidateAgentDirectory(path string) error {
+	return hookAPIValidateDirectoryWith(path, true)
+}
+
+func hookAPIValidateDirectoryWith(path string, agentDirectory bool) error {
 	if !filepath.IsAbs(path) {
 		return fmt.Errorf("hook API token directory must be absolute: %q", path)
 	}
 	clean := filepath.Clean(path)
-	if err := hookAPIValidateDirectoryChain(clean); err != nil {
+	if err := hookAPIValidateDirectoryChainWith(clean, agentDirectory); err != nil {
 		return err
 	}
 	resolved, err := filepath.EvalSymlinks(clean)
@@ -66,7 +76,7 @@ func hookAPIValidateDirectory(path string) error {
 		return err
 	}
 	if resolved != clean {
-		return hookAPIValidateDirectoryChain(resolved)
+		return hookAPIValidateDirectoryChainWith(resolved, agentDirectory)
 	}
 	return nil
 }
@@ -95,6 +105,10 @@ func hookAPIValidateDirectoryElement(path string) error {
 // binding its hook API. The named directory, every ancestor outside that tree,
 // and every structural failure anywhere stay fatal.
 func hookAPIValidateDirectoryChain(clean string) error {
+	return hookAPIValidateDirectoryChainWith(clean, false)
+}
+
+func hookAPIValidateDirectoryChainWith(clean string, agentDirectory bool) error {
 	for cur := clean; ; cur = filepath.Dir(cur) {
 		advisory := cur != clean && managed.AdvisoryAncestorPath(cur)
 		info, err := os.Lstat(cur)
@@ -120,7 +134,7 @@ func hookAPIValidateDirectoryChain(clean string) error {
 		if !info.IsDir() {
 			return fmt.Errorf("expected directory: %s", cur)
 		}
-		if err := hookAPIValidateDirectoryMetadata(cur, info, cur != clean, advisory); err != nil {
+		if err := hookAPIValidateDirectoryMetadataWith(cur, info, cur != clean, advisory, agentDirectory); err != nil {
 			return err
 		}
 		if cur == filepath.Dir(cur) {
@@ -160,12 +174,21 @@ func hookAPITrustedSystemSymlink(path string, info os.FileInfo) bool {
 // inspect the element at all stay fatal, as does an ACL helper that could not
 // read or parse the ACL (only its judgements are tagged as downgradable).
 func hookAPIValidateDirectoryMetadata(path string, info os.FileInfo, allowStickyAncestor, advisory bool) error {
+	return hookAPIValidateDirectoryMetadataWith(path, info, allowStickyAncestor, advisory, false)
+}
+
+func hookAPIValidateDirectoryMetadataWith(path string, info os.FileInfo, allowStickyAncestor, advisory, agentDirectory bool) error {
 	stat, ok := info.Sys().(*syscall.Stat_t)
 	if !ok {
 		return fmt.Errorf("cannot inspect directory owner: %s", path)
 	}
 	const label = "hook API token path"
-	if mode := info.Mode().Perm(); mode&0o022 != 0 &&
+	mode := info.Mode().Perm()
+	otherAccountsWritable := mode&0o022 != 0
+	if agentDirectory && mode&0o022 == 0o020 && ownerPrivateGroup(path, info) {
+		otherAccountsWritable = false
+	}
+	if otherAccountsWritable &&
 		((!(allowStickyAncestor) || info.Mode()&os.ModeSticky == 0) || stat.Uid != 0) {
 		if err := managed.RelaxAncestorTrustVerdict(advisory, path, label, fmt.Errorf(
 			"%s has group/other writable mode %04o", path, mode,
@@ -227,5 +250,5 @@ func hookAPIValidateOwnerFor(path string, info os.FileInfo, _ string) error {
 // hookAPIValidateDirectoryFor matches the Windows signature (see
 // hookAPIValidateOwnerFor).
 func hookAPIValidateDirectoryFor(path, _ string) error {
-	return hookAPIValidateDirectory(path)
+	return hookAPIValidateAgentDirectory(path)
 }

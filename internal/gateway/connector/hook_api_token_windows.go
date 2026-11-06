@@ -321,6 +321,11 @@ func hookAPIValidateDirectory(path string) error {
 	return nil
 }
 
+// Windows connector folders retain their existing owner and DACL check.
+func hookAPIValidateAgentDirectory(path string) error {
+	return hookAPIValidateDirectory(path)
+}
+
 // hookAPIValidateUserConfigDirectory validates an agent's per-user config
 // directory (~\.claude, ~\.codex) and its ancestors. Permission drift on the
 // directory itself (owned by the user or a trusted administrator principal)
