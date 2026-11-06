@@ -37,6 +37,21 @@ const Header = "X-DefenseClaw-Resolved-Writes"
 // prevents it from validating that directory locally.
 const CWDKey = "\x00cwd"
 
+// ProjectSkillRootUnverifiedPrefix carries an adverse project-root finding
+// made by the hook in the caller's filesystem view. It can only add a
+// refusal; its absence cannot authorize a skill.
+const ProjectSkillRootUnverifiedPrefix = "\x00project-skill-root:"
+
+// ProjectSkillSelectedPrefix names a selected skill folder under an
+// unverified project root. Its value is the skill name in the hook call.
+const ProjectSkillSelectedPrefix = "\x00project-skill-selected:"
+
+const (
+	ProjectSkillRootOutsideProfile = "outside-profile"
+	ProjectSkillRootSharedWritable = "shared-writable"
+	ProjectSkillRootUnreadable     = "unreadable"
+)
+
 // TruncatedKey means at least one static write target could not fit in the
 // bounded evidence. The gateway must not treat the remaining map as complete.
 const TruncatedKey = "\x00truncated"
@@ -1258,15 +1273,21 @@ func ResolveConnector(connector, surface, event string, payload []byte) string {
 		if err != nil {
 			return ""
 		}
+		facts := projectSkillRootFacts(connector, home, cwd)
 		files := StartupInstructionFiles(cwd, home)
-		if files == nil {
+		if files == nil && len(facts) == 0 {
 			return ""
 		}
 		listed, err := json.Marshal(files)
 		if err != nil || len(listed) > maxEncodedTargets {
 			return ""
 		}
-		facts := map[string]string{StartupFilesKey: string(listed)}
+		if facts == nil {
+			facts = map[string]string{}
+		}
+		if files != nil {
+			facts[StartupFilesKey] = string(listed)
+		}
 		// The directory the snapshot was read in, as the user: a managed
 		// gateway behind ProtectHome cannot resolve it itself (GAP-1462).
 		if filepath.IsAbs(cwd) && len(cwd) <= MaxWriteTargetPathBytes {
@@ -1343,6 +1364,31 @@ func ResolveConnector(connector, surface, event string, payload []byte) string {
 	}
 	// Describe the call under the tool name the gateway judges it as.
 	tool = ConnectorActionTool(connector, tool)
+	if runtime.GOOS == "windows" && strings.EqualFold(tool, "Skill") && !toolConflict && !argsConflict {
+		var cwd string
+		_ = json.Unmarshal(envelope["cwd"], &cwd)
+		if home, err := os.UserHomeDir(); err == nil {
+			if facts := projectSkillRootFacts(connector, home, cwd); len(facts) > 0 {
+				if name := projectSkillCallName(args); name != "" {
+					roots := make([]string, 0, len(facts))
+					for key := range facts {
+						roots = append(roots, strings.TrimPrefix(key, ProjectSkillRootUnverifiedPrefix))
+					}
+					for _, root := range roots {
+						for _, dir := range projectSkillSelectedFolders(root, name) {
+							facts[ProjectSkillSelectedPrefix+dir] = name
+						}
+					}
+				}
+				facts[CWDKey] = cwd
+				encoded, err := json.Marshal(facts)
+				if err == nil && len(encoded) <= maxEncodedTargets {
+					return base64.RawURLEncoding.EncodeToString(encoded)
+				}
+			}
+		}
+		return ""
+	}
 	if len(args) == 0 && !toolConflict && !argsConflict {
 		return ""
 	}
@@ -2409,6 +2455,23 @@ func Decode(value string) (map[string]string, bool) {
 		(targets[LinksStableKey] != "" && targets[LinksStableKey] != "1") ||
 		(targets[UnprovenReasonKey] != "" && UnprovenWriteTitle(targets[UnprovenReasonKey]) == "") {
 		return nil, false
+	}
+	for key, finding := range targets {
+		if strings.HasPrefix(key, ProjectSkillSelectedPrefix) {
+			dir := strings.TrimPrefix(key, ProjectSkillSelectedPrefix)
+			if !filepath.IsAbs(dir) || len(dir) > MaxWriteTargetPathBytes || projectSkillName(finding) == "" || finding != projectSkillName(finding) {
+				return nil, false
+			}
+			continue
+		}
+		if !strings.HasPrefix(key, ProjectSkillRootUnverifiedPrefix) {
+			continue
+		}
+		root := strings.TrimPrefix(key, ProjectSkillRootUnverifiedPrefix)
+		if !filepath.IsAbs(root) || len(root) > MaxWriteTargetPathBytes ||
+			(finding != ProjectSkillRootOutsideProfile && finding != ProjectSkillRootSharedWritable && finding != ProjectSkillRootUnreadable) {
+			return nil, false
+		}
 	}
 	if value, present := targets[InstructionIdentityKey]; present {
 		for _, identity := range strings.Split(value, "\x00") {
