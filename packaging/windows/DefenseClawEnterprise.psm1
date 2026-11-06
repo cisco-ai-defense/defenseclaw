@@ -26277,11 +26277,15 @@ function Recover-DefenseClawQuiescingIntent {
         # a user-writable config's ACL would turn its bytes into trusted
         # policy and start the gateway with them (GAP-1357). Refuse with
         # the services stopped and the intent left in place.
+        # The re-stamps below give the runtime folder, its children and the
+        # core folders a trusted access list back, so every path they cover
+        # is judged first, as before any other re-stamp (g582 review 2 S2).
         try {
             Assert-DefenseClawRepairableConfigAcl -Layout $Layout
+            Assert-DefenseClawStandaloneContentTrusted -Layout $Layout -GatewayServiceName $GatewayServiceName
         }
         catch {
-            throw "refusing to recover the pending lifecycle transaction: $($_.Exception.Message). The DefenseClaw services stay stopped and the transaction stays pending. Remove the non-administrator write access, check config.yaml, and run the repair again."
+            throw "refusing to recover the pending lifecycle transaction: $($_.Exception.Message). The DefenseClaw services stay stopped and the transaction stays pending. Remove the non-administrator write access, check the named files, and run the repair again."
         }
         $recoveryGatewaySID = Get-DefenseClawServiceSID -ServiceName $GatewayServiceName
         Set-DefenseClawRetainedRuntimeAcls `

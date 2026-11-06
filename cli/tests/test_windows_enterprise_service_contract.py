@@ -7214,6 +7214,18 @@ def test_every_walking_restamp_is_gated() -> None:
     assert _ungated_walk_restamps(planted) == {"Set-DefenseClawRetainedRuntimeAcls: <unmapped $other>"}
 
 
+def test_the_quiescing_recovery_gates_before_it_restamps() -> None:
+    """g582 review 2 S2: recovering a crashed transaction re-stamped the
+    runtime folder, its children and the core folders after a config check
+    only. The content gate now runs first, and a refusal leaves the services
+    stopped and the transaction pending, as the config refusal does."""
+
+    recovery = _function_text(read(MODULE).replace("\r\n", "\n"), "Recover-DefenseClawQuiescingIntent")
+    gate = recovery.index("Assert-DefenseClawStandaloneContentTrusted -Layout $Layout -GatewayServiceName $GatewayServiceName")
+    assert recovery.index("Assert-DefenseClawRepairableConfigAcl -Layout $Layout") < gate
+    assert gate < recovery.index("Set-DefenseClawRetainedRuntimeAcls `") < recovery.index("Set-DefenseClawManagedCoreAcls `")
+
+
 def test_the_content_gate_names_every_refused_path_once() -> None:
     """g582 review 2 S3: the gate threw on the first refused path, so after a
     broad change the admin fixed one path per run. It now collects every
