@@ -380,8 +380,8 @@ def uninstall_cmd(
     ux.banner("DefenseClaw Uninstall")
     _render_plan(plan, dry_run=dry_run)
     cowork_plugin = _cowork_plugin_built(plan)
-    if cowork_plugin and dry_run:
-        ux.echo(f"  • the Cowork plugin stays in your Claude account: {_COWORK_REMOVAL_STEP}")
+    if cowork_plugin:
+        ux.echo(f"  • {_COWORK_PLUGIN_STAYS}")
 
     if dry_run:
         refusal = _open_tui_refusal(plan) or _running_sandboxes_refusal(plan)
@@ -418,6 +418,14 @@ def uninstall_cmd(
         ux.warn(f"DefenseClaw cannot remove its Cowork plugin from your Claude account: {_COWORK_REMOVAL_STEP}")
     _render_kept_and_next_steps(plan)
 
+
+# The one reminder that always reaches the user: the in-chat notice after an
+# uninstall reaches only the model, and Claude Desktop shows no banner. Every
+# path (uninstall plan, dry run, native Windows uninstall, reset) prints this
+# constant (cowork-1-0-8 GAP-0084).
+_COWORK_PLUGIN_STAYS = (
+    "The DefenseClaw Cowork plugin stays in your Claude account. Remove it in Claude: Customize > Plugins."
+)
 
 _COWORK_REMOVAL_STEP = (
     "remove it in Claude Desktop (Customize > Plugins, then the ... menu > Remove). "
@@ -893,7 +901,7 @@ def _dispatch_native_windows_uninstall(
         )
     ux.echo(f"  {ux.dim('→')} a restart may be required to finish exact cleanup")
     if cowork_plugin:
-        ux.echo(f"  • the Cowork plugin stays in your Claude account: {_COWORK_REMOVAL_STEP}")
+        ux.echo(f"  • {_COWORK_PLUGIN_STAYS}")
 
     if dry_run:
         ux.subhead("(dry-run — nothing modified)")
@@ -1011,6 +1019,8 @@ def reset_cmd(skip_sandbox_teardown: bool, yes: bool, stop_sandboxes: bool = Fal
     _render_plan(plan, dry_run=False)
     # Read before the wipe: reset deletes the Cowork state this looks for.
     cowork_plugin = _cowork_plugin_built(plan)
+    if cowork_plugin:
+        ux.echo(f"  • {_COWORK_PLUGIN_STAYS}")
 
     _refuse_running_sandboxes(plan)
     if not yes and not click.confirm(
