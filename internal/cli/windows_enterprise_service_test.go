@@ -1262,6 +1262,7 @@ func TestPrepareWindowsEnterprisePowerShellTempUsesCurrentUserKnownFolderWithout
 	if windows.GetCurrentProcessToken().IsElevated() {
 		t.Skip("non-elevated branch requires a limited process token")
 	}
+	useTokenUserTempDirectory(t)
 	localAppData, err := winpath.CurrentUserKnownFolderPath(windows.FOLDERID_LocalAppData)
 	if err != nil {
 		t.Fatalf("resolve token-bound LocalAppData: %v", err)

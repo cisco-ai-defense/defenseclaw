@@ -132,6 +132,17 @@ func useTestTokenForStaging(t *testing.T) {
 	windowsEnterpriseStagingElevated = testTokenIsElevated
 }
 
+// useTokenUserTempDirectory makes the unelevated staging resolve the token's
+// own LocalAppData Temp folder again, for a test of that resolution itself
+// (g079 review 2 R2c). The unelevated PowerShell temp only resolves the
+// folder; it writes nothing there.
+func useTokenUserTempDirectory(t *testing.T) {
+	t.Helper()
+	saved := windowsEnterpriseUserTempDirectory
+	t.Cleanup(func() { windowsEnterpriseUserTempDirectory = saved })
+	windowsEnterpriseUserTempDirectory = trustedWindowsEnterpriseUserTempDirectory
+}
+
 // isolateTestMachineWriters points every machine writer of the standalone
 // lifecycle at a sandbox: the registry root at a throwaway HKCU key, the
 // lifecycle log at logDir in the temp folder, the event log at a writer that
