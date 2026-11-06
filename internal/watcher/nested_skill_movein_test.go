@@ -146,6 +146,7 @@ func TestWatcherLargeMovedCategoryReaderStall(t *testing.T) {
 	}
 	moved := filepath.Join(root, "drop")
 	quick := filepath.Join(root, "quick")
+	second := filepath.Join(root, "second")
 	watchProgress := make(chan struct{}, 1)
 	releaseWatch := make(chan struct{})
 	released := false
@@ -155,6 +156,7 @@ func TestWatcherLargeMovedCategoryReaderStall(t *testing.T) {
 		}
 	}()
 	quickRead := make(chan struct{}, 1)
+	secondRead := make(chan struct{}, 1)
 	admitted := make(chan AdmissionResult, 4)
 	watchEvents := &watcherTestRuntime{}
 	logger.SetRuntimeV8Emitter(watchEvents)
@@ -169,9 +171,18 @@ func TestWatcherLargeMovedCategoryReaderStall(t *testing.T) {
 		}
 	}
 	w.onReadEvent = func(event fsnotify.Event) {
-		if event.Name == quick {
+		if event.Op&fsnotify.Create == 0 {
+			return
+		}
+		switch event.Name {
+		case quick:
 			select {
 			case quickRead <- struct{}{}:
+			default:
+			}
+		case second:
+			select {
+			case secondRead <- struct{}{}:
 			default:
 			}
 		}
@@ -189,9 +200,11 @@ func TestWatcherLargeMovedCategoryReaderStall(t *testing.T) {
 	case <-time.After(5 * time.Second):
 		t.Fatal("large moved category watch did not reach 1,024 directories")
 	}
-	// Keep the traversal worker parked at directory 1,024. The reader must
-	// process an unrelated create before that worker can continue. A wall-clock
-	// measurement here includes runner scheduling and notification delivery.
+	// Keep the traversal worker parked at directory 1,024. Reading a second
+	// root event proves the reader finished handling the first one while the
+	// worker was held. The timeout is only a deadlock guard; a wall-clock
+	// measurement includes runner scheduling and notification delivery.
+	readerDeadline := time.After(100 * w.debounce)
 	if err := os.Mkdir(quick, 0o700); err != nil {
 		t.Fatal(err)
 	}
@@ -200,8 +213,16 @@ func TestWatcherLargeMovedCategoryReaderStall(t *testing.T) {
 	}
 	select {
 	case <-quickRead:
-	case <-time.After(100 * w.debounce):
-		t.Fatal("reader did not serve unrelated create while traversal was held")
+	case <-readerDeadline:
+		t.Fatal("reader did not read unrelated create while traversal was held")
+	}
+	if err := os.Mkdir(second, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case <-secondRead:
+	case <-readerDeadline:
+		t.Fatal("reader did not finish unrelated create while traversal was held")
 	}
 	close(releaseWatch)
 	released = true
