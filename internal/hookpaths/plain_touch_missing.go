@@ -185,3 +185,10 @@ func plainTouchTimestamp(value string) bool {
 	}
 	return true
 }
+
+// OrdinaryLongTouchMissingLeaves proves the bounded long-touch case for a
+// local no-answer decision. The same proof is used by the path resolver.
+func OrdinaryLongTouchMissingLeaves(command, cwd, home string) bool {
+	_, ok := plainTouchMissingLeaves(command, cwd, home, NewTargetMemo())
+	return ok
+}
