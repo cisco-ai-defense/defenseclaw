@@ -11,55 +11,12 @@ import (
 	"testing"
 )
 
-// gas-ux-r1 GAP-0053: every account on one computer gets its own OpenCode
-// service port, and keeps it.
-func TestAssignOpenCodeServicePortsNeverShares(t *testing.T) {
-	for _, tc := range []struct {
-		name string
-		ids  []int
-		kept map[int]int
-	}{
-		{name: "two accounts", ids: []int{1001, 1002}},
-		{name: "same id mod span", ids: []int{1001, 9001, 17001}},
-		{name: "kept port another id would take", ids: []int{1001, 1002}, kept: map[int]int{1002: OpenCodeAccountPort(1001)}},
-		{name: "kept ports collide", ids: []int{1001, 1002}, kept: map[int]int{1001: 25500, 1002: 25500}},
-		{name: "kept user port 49374", ids: []int{1001, 1002, 1003}, kept: map[int]int{1003: OpenCodeDefaultServicePort}},
-		{name: "many", ids: func() []int {
-			ids := []int{}
-			for i := 0; i < 300; i++ {
-				ids = append(ids, 1000+i*8000/7)
-			}
-			return ids
-		}()},
-	} {
-		t.Run(tc.name, func(t *testing.T) {
-			got := AssignOpenCodeServicePorts(tc.ids, tc.kept)
-			seen := map[int]int{}
-			for _, id := range tc.ids {
-				port, ok := got[id]
-				if !ok || port <= 0 {
-					t.Fatalf("id %d got no port: %v", id, got)
-				}
-				if other, dup := seen[port]; dup {
-					t.Fatalf("ids %d and %d share port %d", other, id, port)
-				}
-				seen[port] = id
-				if port == OpenCodeDefaultServicePort && tc.kept[id] != port {
-					t.Fatalf("id %d was given the shared default", id)
-				}
-			}
-			// Stable: a later pass with the result kept gives the same ports,
-			// also with a new account added.
-			again := AssignOpenCodeServicePorts(append(append([]int{}, tc.ids...), 999), got)
-			for _, id := range tc.ids {
-				if again[id] != got[id] {
-					t.Fatalf("id %d moved from %d to %d", id, got[id], again[id])
-				}
-			}
-		})
-	}
-	if got := AssignOpenCodeServicePorts([]int{1001, 1002}, nil); got[1001] != 25001 || got[1002] != 25002 {
-		t.Fatalf("ports not derived from the uid: %v", got)
+// gas-ux-r1 GAP-0053: ports derive from the account id (the class invariant
+// over every sequence is TestOpenCodePortInvariantOverRandomSequences).
+func TestPlanOpenCodeServicePortsDerivesFromTheUID(t *testing.T) {
+	plan := PlanOpenCodeServicePorts([]int{1001, 1002, 9001}, nil, nil, true)
+	if plan.Ports[1001] != 25001 || plan.Ports[1002] != 25002 || plan.Ports[9001] != 25003 {
+		t.Fatalf("ports %v", plan.Ports)
 	}
 }
 

@@ -9,6 +9,7 @@ package cli
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -38,9 +39,7 @@ func openCodePortGuardianWith(t *testing.T, governed bool, uids ...int) (map[int
 	previousManifest, previousMachinePolicy := enterpriseHookManifest, enterpriseHookStandaloneMachinePolicySet
 	previousLoad, previousCheck, previousRunner := enterpriseHookLoadEligibleAccounts, enterpriseHookCheckHome, enterpriseHookWorkerRunner
 	previousLoadPorts, previousWritePorts := enterpriseHookLoadOpenCodePorts, enterpriseHookWriteOpenCodePorts
-	previousHomeCheck := enterpriseHookCheckHome
 	t.Cleanup(func() {
-		enterpriseHookCheckHome = previousHomeCheck
 		enterpriseHookManifest, enterpriseHookStandaloneMachinePolicySet = previousManifest, previousMachinePolicy
 		enterpriseHookLoadEligibleAccounts, enterpriseHookCheckHome, enterpriseHookWorkerRunner = previousLoad, previousCheck, previousRunner
 		enterpriseHookLoadOpenCodePorts, enterpriseHookWriteOpenCodePorts = previousLoadPorts, previousWritePorts
@@ -86,9 +85,14 @@ func openCodePortGuardianWith(t *testing.T, governed bool, uids ...int) (map[int
 		}
 		accounts = nil
 		for _, uid := range eligible {
+			// homes[uid], when set before the call, is the account's home
+			// (a reused or new folder); otherwise it keeps the one it had.
 			account, ok := byUID[uid]
-			if !ok {
-				home := filepath.Join(root, fmt.Sprintf("ent%d", uid))
+			home := homes[uid]
+			if !ok || (home != "" && home != account.Home) {
+				if home == "" {
+					home = filepath.Join(root, fmt.Sprintf("ent%d", uid))
+				}
 				if err := os.MkdirAll(home, 0o700); err != nil {
 					t.Fatal(err)
 				}
@@ -99,11 +103,13 @@ func openCodePortGuardianWith(t *testing.T, governed bool, uids ...int) (map[int
 			accounts = append(accounts, account)
 		}
 	}
-	enterpriseHookCheckHome = func(string, int) enterprisehooks.HomeCheck {
-		return enterprisehooks.HomeCheck{State: enterprisehooks.HomeAvailable}
-	}
 	record := map[int]int{}
+	openCodeRecordUnreadable = nil
+	t.Cleanup(func() { openCodeRecordUnreadable = nil })
 	enterpriseHookLoadOpenCodePorts = func(string) (map[int]int, error) {
+		if openCodeRecordUnreadable != nil {
+			return nil, openCodeRecordUnreadable
+		}
 		out := map[int]int{}
 		for uid, port := range record {
 			out[uid] = port
@@ -111,6 +117,7 @@ func openCodePortGuardianWith(t *testing.T, governed bool, uids ...int) (map[int
 		return out, nil
 	}
 	enterpriseHookWriteOpenCodePorts = func(_ string, ports map[int]int, _ map[int]string) error {
+		openCodeRecordWrites++
 		record = map[int]int{}
 		for uid, port := range ports {
 			record[uid] = port
@@ -127,6 +134,13 @@ func openCodePortGuardianWith(t *testing.T, governed bool, uids ...int) (map[int
 	}
 	return homes, &record, setEligible
 }
+
+// openCodeRecordUnreadable makes the record load fail (corrupt, partial,
+// wrong owner, symlink, permission); openCodeRecordWrites counts writes.
+var (
+	openCodeRecordUnreadable error
+	openCodeRecordWrites     int
+)
 
 func openCodePortIn(t *testing.T, home string) int {
 	t.Helper()
@@ -337,5 +351,107 @@ func TestManagedGuardianOpenCodePortRangeExhausted(t *testing.T) {
 	}
 	if len(*record) != enterprisepolicy.OpenCodeAccountPortSpan {
 		t.Fatalf("record changed size: %d", len(*record))
+	}
+}
+
+func writeOpenCodePortFile(t *testing.T, home string, port int) {
+	t.Helper()
+	path := enterprisepolicy.OpenCodeServiceConfigPath(home)
+	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, []byte(fmt.Sprintf(`{"port":%d,"password":"p"}`, port)), 0o600); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func assertNoSharedOpenCodePort(t *testing.T, homes map[int]string, uids []int, log string) map[int]int {
+	t.Helper()
+	got, seen := map[int]int{}, map[int]int{}
+	for _, uid := range uids {
+		port := openCodePortIn(t, homes[uid])
+		if other, dup := seen[port]; dup && port != 0 {
+			t.Fatalf("uids %d and %d share port %d\n%s", other, uid, port, log)
+		}
+		seen[port], got[uid] = uid, port
+	}
+	return got
+}
+
+// REVIEW-gx053-4 MF1 repro 1: alice (1001) gets 25001 and is deleted with
+// her home kept; bob is created as uid 1001 with a fresh home, and alice comes
+// back as uid 1002 with her old home (its service.json still names 25001).
+// The earlier holder (uid 1001, in the record) keeps 25001; alice is moved,
+// and the conflict is logged naming both.
+func TestManagedGuardianOpenCodeHomeReusedByAReturningAccount(t *testing.T) {
+	homes, record, setEligible := openCodePortGuardianWith(t, true, 1001)
+	runOpenCodePortPass(t)
+	aliceHome := homes[1001]
+	homes[1001] = filepath.Join(filepath.Dir(aliceHome), "bob")
+	homes[1002] = aliceHome
+	setEligible(nil, 1001, 1002)
+	log := runOpenCodePortPass(t)
+	got := assertNoSharedOpenCodePort(t, homes, []int{1001, 1002}, log)
+	if got[1001] != 25001 || got[1002] == 0 {
+		t.Fatalf("ports %v record %v\n%s", got, *record, log)
+	}
+	if !strings.Contains(log, "port 25001 of ") || !strings.Contains(log, "(uid 1002) is held by") || !strings.Contains(log, "(uid 1001)") {
+		t.Fatalf("the conflict is not logged with both uids:\n%s", log)
+	}
+	// Stable: the next pass moves nothing and logs no conflict.
+	log = runOpenCodePortPass(t)
+	if again := assertNoSharedOpenCodePort(t, homes, []int{1001, 1002}, log); again[1001] != got[1001] || again[1002] != got[1002] || strings.Contains(log, "is held by") {
+		t.Fatalf("second pass moved %v -> %v\n%s", got, again, log)
+	}
+}
+
+// REVIEW-gx053-4 MF1 repro 2: two files name the same port (an admin's
+// /etc/skel service.json, a copied dotfiles repo). The lower uid keeps it;
+// the other is moved and the conflict is logged.
+func TestManagedGuardianOpenCodeTwoFilesNameOnePort(t *testing.T) {
+	homes, record, _ := openCodePortGuardianWith(t, true, 1001, 1002)
+	writeOpenCodePortFile(t, homes[1001], 26000)
+	writeOpenCodePortFile(t, homes[1002], 26000)
+	log := runOpenCodePortPass(t)
+	got := assertNoSharedOpenCodePort(t, homes, []int{1001, 1002}, log)
+	if got[1001] != 26000 || got[1002] == 26000 || (*record)[1002] != got[1002] {
+		t.Fatalf("ports %v record %v\n%s", got, *record, log)
+	}
+	if !strings.Contains(log, "port 26000 of ent1002 (uid 1002) is held by ent1001 (uid 1001)") {
+		t.Fatalf("the conflict is not logged:\n%s", log)
+	}
+}
+
+// REVIEW-gx053-4 MF2: while the record cannot be read no account gets a new
+// port and nobody is moved; ports already in files are kept, the record is
+// not rewritten, and the reason is logged.
+func TestManagedGuardianOpenCodeUnreadableRecordGivesNoNewPorts(t *testing.T) {
+	for _, reason := range []string{"corrupt", "partial", "wrong owner", "symlink", "permission"} {
+		t.Run(reason, func(t *testing.T) {
+			homes, record, setEligible := openCodePortGuardianWith(t, true, 1001)
+			runOpenCodePortPass(t)
+			held := openCodePortIn(t, homes[1001])
+			before := map[int]int{}
+			for uid, port := range *record {
+				before[uid] = port
+			}
+			openCodeRecordUnreadable = errors.New("enterprise hooks: OpenCode service ports record: " + reason)
+			openCodeRecordWrites = 0
+			setEligible(nil, 1002, 9001) // 1001 excluded; 9001 starts on 1001's port
+			writeOpenCodePortFile(t, homes[1002], 27000)
+			log := runOpenCodePortPass(t)
+			if port := openCodePortIn(t, homes[9001]); port != 0 {
+				t.Fatalf("9001 got port %d while the record could not be read (1001 holds %d)\n%s", port, held, log)
+			}
+			if openCodePortIn(t, homes[1002]) != 27000 {
+				t.Fatalf("a port already in a file was changed\n%s", log)
+			}
+			if openCodeRecordWrites != 0 || len(*record) != len(before) || (*record)[1001] != before[1001] {
+				t.Fatalf("the unreadable record was rewritten: %v -> %v", before, *record)
+			}
+			if !strings.Contains(log, "cannot be read") || !strings.Contains(log, "no account gets a new OpenCode port") || !strings.Contains(log, "sudo rm ") {
+				t.Fatalf("the reason is not logged:\n%s", log)
+			}
+		})
 	}
 }
