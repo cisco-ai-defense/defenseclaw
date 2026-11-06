@@ -74,3 +74,148 @@ func TestOpenClawOutageToolKeepsProtectedTargetsClosed(t *testing.T) {
 		})
 	}
 }
+
+func TestOpenClawOutageExecContextTargets(t *testing.T) {
+	home := t.TempDir()
+	old := outageAccountHome
+	outageAccountHome = func() string { return home }
+	t.Cleanup(func() { outageAccountHome = old })
+	dataDir := filepath.Join(home, ".defenseclaw")
+	if err := os.MkdirAll(dataDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	protected := filepath.Join(dataDir, "config.yaml")
+	if err := os.WriteFile(protected, []byte("guardrail: {}\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	other := t.TempDir()
+	for _, tc := range []struct {
+		name string
+		args map[string]interface{}
+		want string
+	}{
+		{"ordinary", map[string]interface{}{"command": "date"}, "open"},
+		{"unused environment path", map[string]interface{}{"command": "date", "env": map[string]interface{}{"OUT": protected}}, "open"},
+		{"literal environment spelling", map[string]interface{}{"command": "printf x >> '$OUT'", "env": map[string]interface{}{"OUT": protected}}, "open"},
+		{"direct", map[string]interface{}{"command": "printf x >> " + protected}, "protected"},
+		{"workdir", map[string]interface{}{"command": "printf x >> config.yaml", "workdir": dataDir}, "protected"},
+		{"home workdir", map[string]interface{}{"command": "printf x >> .defenseclaw/config.yaml", "workdir": "~"}, "protected"},
+		{"env", map[string]interface{}{"command": "printf x >> \"$OUT\"", "env": map[string]interface{}{"OUT": protected}}, "protected"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			blob, err := json.Marshal(outageToolPayload{Name: "exec", Args: tc.args, CWD: other})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if got := outageToolDecision(strings.NewReader(string(blob)), dataDir); got != tc.want {
+				t.Errorf("decision=%q want=%q", got, tc.want)
+			}
+		})
+	}
+}
+
+func TestOpenClawOutageApplyPatchTarget(t *testing.T) {
+	home := t.TempDir()
+	old := outageAccountHome
+	outageAccountHome = func() string { return home }
+	t.Cleanup(func() { outageAccountHome = old })
+	dataDir := filepath.Join(home, ".defenseclaw")
+	if err := os.MkdirAll(dataDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	protected := filepath.Join(dataDir, "config.yaml")
+	if err := os.WriteFile(protected, []byte("old\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	patch := "*** Begin Patch\n*** Update File: " + protected + "\n@@\n-old\n+new\n*** End Patch"
+	blob, err := json.Marshal(outageToolPayload{Name: "apply_patch", Args: map[string]interface{}{"input": patch}, CWD: home})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := outageToolDecision(strings.NewReader(string(blob)), dataDir); got != "protected" {
+		t.Errorf("apply_patch decision=%q want=protected", got)
+	}
+}
+
+func TestOpenClawOutageBenignVariants(t *testing.T) {
+	home := t.TempDir()
+	old := outageAccountHome
+	outageAccountHome = func() string { return home }
+	t.Cleanup(func() { outageAccountHome = old })
+	dataDir := filepath.Join(home, ".defenseclaw")
+	if err := os.MkdirAll(dataDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	other := t.TempDir()
+	for _, tc := range []struct {
+		name string
+		tool string
+		args map[string]interface{}
+	}{
+		{"date", "exec", map[string]interface{}{"command": "date"}},
+		{"pwd", "exec", map[string]interface{}{"command": "pwd"}},
+		{"project-write", "exec", map[string]interface{}{"command": "printf x >> notes.txt"}},
+		{"home-write", "exec", map[string]interface{}{"command": "printf x >> ~/notes.txt"}},
+		{"workdir-date", "exec", map[string]interface{}{"command": "date", "workdir": dataDir}},
+		{"write-path", "write", map[string]interface{}{"path": filepath.Join(home, "notes.txt"), "content": "hi"}},
+		{"patch", "apply_patch", map[string]interface{}{"input": "*** Begin Patch\n*** Add File: " + filepath.Join(home, "notes.txt") + "\n+hi\n*** End Patch"}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			blob, err := json.Marshal(outageToolPayload{Name: tc.tool, Args: tc.args, CWD: other})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if got := outageToolDecision(strings.NewReader(string(blob)), dataDir); got != "open" {
+				t.Errorf("decision=%q want=open", got)
+			}
+		})
+	}
+}
+
+func TestOpenClawOutageEnvLinkedTarget(t *testing.T) {
+	home := t.TempDir()
+	old := outageAccountHome
+	outageAccountHome = func() string { return home }
+	t.Cleanup(func() { outageAccountHome = old })
+	dataDir := filepath.Join(home, ".defenseclaw")
+	if err := os.MkdirAll(dataDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	protected := filepath.Join(dataDir, "config.yaml")
+	if err := os.WriteFile(protected, []byte("guardrail: {}\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	alias := filepath.Join(home, "state-link")
+	if err := os.Symlink(protected, alias); err != nil {
+		t.Fatal(err)
+	}
+	blob, err := json.Marshal(outageToolPayload{Name: "exec", Args: map[string]interface{}{"command": "printf x >> \"$OUT\"", "env": map[string]interface{}{"OUT": alias}}, CWD: home})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := outageToolDecision(strings.NewReader(string(blob)), dataDir); got != "protected" {
+		t.Errorf("known env link decision=%q want=protected", got)
+	}
+}
+
+func TestOpenClawOutageWorkdirFalseBlock(t *testing.T) {
+	home := t.TempDir()
+	old := outageAccountHome
+	outageAccountHome = func() string { return home }
+	t.Cleanup(func() { outageAccountHome = old })
+	dataDir := filepath.Join(home, ".defenseclaw")
+	if err := os.MkdirAll(dataDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dataDir, "config.yaml"), []byte("guardrail: {}\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	other := t.TempDir()
+	blob, err := json.Marshal(outageToolPayload{Name: "exec", Args: map[string]interface{}{"command": "printf x >> config.yaml", "workdir": other}, CWD: dataDir})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := outageToolDecision(strings.NewReader(string(blob)), dataDir); got != "open" {
+		t.Errorf("ordinary workdir write decision=%q want=open", got)
+	}
+}
