@@ -52,6 +52,11 @@ func AssessCanonical(path string, kind ObjectKind, opts CanonicalOptions) (Canon
 	return canonicalize(path, kind, opts, false)
 }
 
+// canonicalRunWithRepairPrivileges is RunWithWindowsRepairPrivileges; tests
+// replace it to stand for a caller whose privileges cannot read the
+// descriptor either.
+var canonicalRunWithRepairPrivileges = RunWithWindowsRepairPrivileges
+
 // valid reports whether kind is one of the managed object kinds; only
 // canonicalize, on Windows, needs it.
 func (kind ObjectKind) valid() bool {
@@ -125,10 +130,15 @@ func canonicalize(path string, kind ObjectKind, opts CanonicalOptions, repair bo
 	}
 
 	var desc objectDescriptor
-	if descriptorUnreadable && repair {
+	if descriptorUnreadable {
 		// Backup semantics with SeBackupPrivilege grant READ_CONTROL whatever
 		// the DACL says, so the owner is known before anything is adopted.
-		if err := RunWithWindowsRepairPrivileges(func() error {
+		// The read-only assessment reads it the same way: an account that
+		// owns the object or holds WRITE_DAC on it can hide the descriptor
+		// from SYSTEM and Administrators, and every standalone refusal that
+		// asks AssessCanonical must judge the real owner and writers, not
+		// accept what it cannot see (g582 review 4 F1).
+		if err := canonicalRunWithRepairPrivileges(func() error {
 			privileged, openErr := openCanonicalObject(clean, uint32(windows.READ_CONTROL|windows.FILE_READ_ATTRIBUTES))
 			if openErr != nil {
 				return openErr
@@ -163,8 +173,12 @@ func canonicalize(path string, kind ObjectKind, opts CanonicalOptions, repair bo
 	result.UntrustedWriters = assessment.UntrustedWriters
 	result.GatewayAccessMissing = assessment.GatewayAccessMissing
 	result.Outcome = assessment.outcome()
-	if descriptorUnreadable && TrustStrictAncestors() {
-		// Strict mode keeps an unverifiable owner and writer set fatal.
+	if descriptorUnreadable && (TrustStrictAncestors() || StandaloneRefusesContentDrift()) {
+		// Strict mode keeps an unverifiable owner and writer set fatal, and
+		// so does standalone: an object whose descriptor even backup
+		// semantics cannot read is never taken for trusted drift, so no
+		// standalone refusal lets it be re-stamped in place (g582 review 4
+		// F1).
 		result.Outcome = CanonicalBoundary
 		result.RepairError = "security descriptor is not readable"
 	}
