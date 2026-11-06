@@ -346,61 +346,70 @@ func actionPosixTargetMention(command, cwd, home string, depth int, stateOnly bo
 					if data := actionNodeInertDataWord(call, effectiveCWD, home); data != nil {
 						inert = append(inert, data)
 					}
-					if filepath.IsAbs(home) && filepath.IsAbs(effectiveCWD) && len(call.Args) > 0 {
+					if filepath.IsAbs(home) && filepath.IsAbs(effectiveCWD) && direct[stmt] &&
+						len(call.Args) > 1 && len(stmt.Redirs) == 1 {
 						if program, known := staticProgramWord(call.Args[0], home); known && program == "echo" {
-							// Echo's data operands do not name a write target. A
-							// resolved link or hard-link operand remains a named hit.
-							for _, word := range call.Args[1:] {
-								value, fixed := actionWordValue(word, values, effectiveCWD, home)
-								if fixed && !directKeyName(value, effectiveCWD) &&
-									protectedReachPath(OperandPath(value, effectiveCWD), protected, ssh) {
-									continue
-								}
-								inert = append(inert, word)
-								// A complete read-only substitution in display text is
-								// also data when every protected operand is the directly
-								// named key file. Link aliases keep their own hit.
-								syntax.Walk(word, func(part syntax.Node) bool {
-									sub, ok := part.(*syntax.CmdSubst)
-									if !ok {
-										return true
-									}
-									if len(sub.Stmts) != 1 {
-										return false
-									}
-									process, ok := sub.Stmts[0].Cmd.(*syntax.CallExpr)
-									if !ok || len(process.Assigns) != 0 {
-										return false
-									}
-									if !actionKnownReadOnlyShell(&syntax.File{Stmts: sub.Stmts}, home) {
-										return false
-									}
-									verified := true
-									for _, nested := range sub.Stmts {
-										syntax.Walk(nested, func(inner syntax.Node) bool {
-											arg, ok := inner.(*syntax.Word)
+							redir := stmt.Redirs[0]
+							switch redir.Op {
+							case syntax.RdrOut, syntax.AppOut, syntax.RdrClob, syntax.RdrAll, syntax.AppAll:
+								destination, fixed := actionWordValue(redir.Word, values, effectiveCWD, home)
+								if fixed && !strings.ContainsAny(destination, "*?[]") &&
+									!protectedReachPath(OperandPath(destination, effectiveCWD), protected, ssh) {
+									safe := true
+									var substitutions []*syntax.Stmt
+									for _, word := range call.Args[1:] {
+										value, fixed := actionWordValue(word, values, effectiveCWD, home)
+										if fixed && !directKeyName(value, effectiveCWD) &&
+											protectedReachPath(OperandPath(value, effectiveCWD), protected, ssh) {
+											safe = false
+											break
+										}
+										syntax.Walk(word, func(part syntax.Node) bool {
+											sub, ok := part.(*syntax.CmdSubst)
 											if !ok {
 												return true
 											}
-											text, fixed := actionWordValue(arg, values, effectiveCWD, home)
-											if !fixed || !directKeyName(text, effectiveCWD) &&
-												protectedReachPath(OperandPath(text, effectiveCWD), protected, ssh) {
-												verified = false
+											if len(sub.Stmts) != 1 {
+												safe = false
 												return false
 											}
-											return true
+											process, ok := sub.Stmts[0].Cmd.(*syntax.CallExpr)
+											if !ok || len(process.Assigns) != 0 ||
+												!actionKnownReadOnlyShell(&syntax.File{Stmts: sub.Stmts}, home) {
+												safe = false
+												return false
+											}
+											syntax.Walk(sub.Stmts[0], func(inner syntax.Node) bool {
+												arg, ok := inner.(*syntax.Word)
+												if !ok {
+													return true
+												}
+												text, fixed := actionWordValue(arg, values, effectiveCWD, home)
+												if !fixed || !directKeyName(text, effectiveCWD) &&
+													protectedReachPath(OperandPath(text, effectiveCWD), protected, ssh) {
+													safe = false
+													return false
+												}
+												return true
+											})
+											substitutions = append(substitutions, sub.Stmts[0])
+											return false
 										})
+										if !safe {
+											break
+										}
 									}
-									if verified {
-										for _, nested := range sub.Stmts {
+									if safe && len(substitutions) > 0 {
+										inert = append(inert, call.Args[1:]...)
+										for _, nested := range substitutions {
 											inertEchoSubs[nested] = true
 										}
 									}
-									return false
-								})
+								}
 							}
 						}
 					}
+
 				}
 				// mkdir or a tightening chmod of exactly the home's .ssh
 				// folder writes no keys file (rel-1-0-6:GAP-0298).
