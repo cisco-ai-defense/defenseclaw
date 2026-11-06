@@ -4354,6 +4354,16 @@ func requestGatewayToken(r *http.Request) string {
 // and never reaches next.
 func (a *APIServer) tokenAuth(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// The receipt capability is a transport property. Advertise it
+		// before credential and admission work can use the hook's short
+		// compatibility wait. Authentication still decides the final answer.
+		if r.Method == http.MethodPost && connector.IsLoopback(r) {
+			if _, ok := a.hookTokenScopeForPath(r.URL.Path); ok {
+				if delivery := a.beginHookDeliveryReceipt(w, r); delivery != nil {
+					r = withHookDeliveryReceipt(r, delivery)
+				}
+			}
+		}
 		if r.URL.Path == "/health" && r.Method == http.MethodGet {
 			next.ServeHTTP(w, r)
 			return
