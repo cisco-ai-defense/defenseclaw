@@ -43,6 +43,9 @@ type TargetMemo struct {
 	// resolved are the answers of resolveWriteTarget by the exact path: the
 	// scans of one call ask for the same operands again (GAP-0483).
 	resolved map[string]resolvedTarget
+	// The shared reach reader keeps complete names and per-parent answers.
+	reachNames   map[string]reachNames
+	reachParents map[reachParentKey]reachParentAnswer
 	// work counts the path components the memo walked on the file system
 	// and the candidate checks it computed (Work); candidates counts the
 	// Windows candidate checks among them (WorkParts).
