@@ -43,6 +43,7 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/managed"
 	"github.com/defenseclaw/defenseclaw/internal/pathidentity"
 	"github.com/defenseclaw/defenseclaw/internal/winpath"
+	"mvdan.cc/sh/v3/syntax"
 )
 
 var userHomeOverrideSessionMu sync.Mutex
@@ -333,8 +334,42 @@ func editedDefenseClawHookCommand(command, scriptName string) bool {
 // The resolved location matters: a user hook outside the directory, or a
 // link from the directory to a user hook, is not owned by the installation.
 func hookCommandResolvesInHookDir(command, hookScript string) bool {
-	rest, within := hookCommandPathInHookDir(command, hookScript)
-	return within && strings.TrimSpace(rest) == ""
+	_, within := hookCommandPathInHookDir(command, hookScript)
+	return within && hookCommandIsSingleLiteralCall(command)
+}
+
+// hookCommandIsSingleLiteralCall accepts plain arguments to a managed hook,
+// but leaves commands with another action or an evaluated argument for review.
+func hookCommandIsSingleLiteralCall(command string) bool {
+	file, err := syntax.NewParser(syntax.Variant(syntax.LangBash)).Parse(strings.NewReader(command), "")
+	if err != nil || len(file.Stmts) != 1 {
+		return false
+	}
+	stmt := file.Stmts[0]
+	if stmt.Negated || stmt.Background || stmt.Coprocess || stmt.Disown ||
+		stmt.Semicolon.IsValid() || len(stmt.Redirs) != 0 {
+		return false
+	}
+	call, ok := stmt.Cmd.(*syntax.CallExpr)
+	if !ok || len(call.Assigns) != 0 || len(call.Args) == 0 {
+		return false
+	}
+	for _, word := range call.Args {
+		for _, part := range word.Parts {
+			switch part := part.(type) {
+			case *syntax.Lit, *syntax.SglQuoted:
+			case *syntax.DblQuoted:
+				for _, nested := range part.Parts {
+					if _, ok := nested.(*syntax.Lit); !ok {
+						return false
+					}
+				}
+			default:
+				return false
+			}
+		}
+	}
+	return true
 }
 
 // hookCommandPathInHookDir returns the suffix after a command's first
