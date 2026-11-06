@@ -367,14 +367,20 @@ def test_r109_g610_active_openclaw_npm_prefix(tmp_path, monkeypatch) -> None:
     prefix = tmp_path / "npm"
     executable = prefix / "bin" / "openclaw"
     executable.parent.mkdir(parents=True)
-    executable.write_text("npm shim\n", encoding="utf-8")
-    executable.chmod(0o755)
     root = prefix / "lib" / "node_modules" / "openclaw"
-    root.mkdir(parents=True)
+    (root / "bin").mkdir(parents=True)
     (root / "package.json").write_text(
         json.dumps({"name": "openclaw", "description": "x" * (70 * 1024)}), encoding="utf-8",
     )
+    executable.write_text("npm shim\n", encoding="utf-8")
+    executable.chmod(0o755)
     monkeypatch.setattr(vendor_identity.shutil, "which", lambda name: str(executable))
+    assert vendor_identity._active_openclaw_root() is None
+    entry = root / "bin" / "openclaw"
+    entry.write_text("#!/bin/sh\n", encoding="utf-8")
+    entry.chmod(0o755)
+    executable.unlink()
+    executable.symlink_to(entry)
     assert vendor_identity._active_openclaw_root() == os.path.realpath(root)
 
 
@@ -520,14 +526,20 @@ def test_r109_g610_off_path_manager_peer_is_bound(tmp_path, monkeypatch, manager
         shim = home / ".local/share/pnpm/openclaw"
         root = home / ".local/share/pnpm/global/5/node_modules/openclaw"
     shim.parent.mkdir(parents=True)
-    shim.write_text("manager launcher\n", encoding="utf-8")
-    shim.chmod(0o755)
-    root.mkdir(parents=True)
+    (root / "bin").mkdir(parents=True)
     (root / "package.json").write_text('{"name":"openclaw"}', encoding="utf-8")
+    entry = root / "bin" / "openclaw"
+    entry.write_text("#!/bin/sh\n", encoding="utf-8")
+    entry.chmod(0o755)
+    shim.write_text("unbound launcher\n", encoding="utf-8")
+    shim.chmod(0o755)
     monkeypatch.setattr(Path, "home", lambda: home)
     monkeypatch.setattr(shutil, "which", lambda name: None)
 
     installed = _linked_provider(tmp_path, monkeypatch, root)
+    assert "SRC-EXEC" in _high_rules(installed)
+    shim.unlink()
+    shim.symlink_to(entry)
     for profile in ("default", "permissive"):
         assert not {f.rule_id for f in scan_plugin(
             str(installed), PluginScanOptions(policy=profile),
@@ -561,6 +573,75 @@ def test_r109_g610_private_active_root_still_blocks(
         assert "SRC-EXEC" in {f.rule_id for f in scan_plugin(
             str(installed), PluginScanOptions(policy=profile),
         ).findings if f.severity == "HIGH"}
+
+
+@pytest.mark.skipif(os.name == "nt", reason="Unix launcher permissions")
+@requires_symlink_privilege
+def test_r109_g610_recorded_wrapper_and_old_record_follow_selected_executable(
+    tmp_path, monkeypatch,
+) -> None:
+    home = tmp_path / "home"
+    active, active_shim = _nvm_openclaw(home, "v22")
+    old, old_shim = _nvm_openclaw(home, "v20")
+    foreign = home / ".local/lib/node_modules/openclaw"
+    foreign.mkdir(parents=True)
+    (foreign / "package.json").write_text('{"name":"openclaw"}', encoding="utf-8")
+    wrapper = home / ".local/bin/openclaw"
+    wrapper.parent.mkdir(parents=True)
+    wrapper.write_text(f'#!/bin/sh\nexec "{active_shim}" "$@"\n', encoding="utf-8")
+    wrapper.chmod(0o755)
+    data_dir = tmp_path / "data"
+    data_dir.mkdir()
+    monkeypatch.setattr(Path, "home", lambda: home)
+    monkeypatch.setattr(shutil, "which", lambda name: str(active_shim))
+
+    installed = {
+        label: _linked_provider(tmp_path / label, monkeypatch, target)
+        for label, target in (("active", active), ("foreign", foreign), ("old", old))
+    }
+    for recorded in (wrapper, old_shim):
+        (data_dir / "agent_discovery.json").write_text(json.dumps({
+            "version": 7, "ttl_seconds": 86_400,
+            "scanned_at": datetime.now(timezone.utc).isoformat(),
+            "agents": {"openclaw": {"installed": True, "binary_path": str(recorded)}},
+        }), encoding="utf-8")
+        assert vendor_identity._active_openclaw_root(data_dir=str(data_dir)) == os.path.realpath(active)
+        for label, tree in installed.items():
+            for profile in ("default", "permissive", "strict"):
+                high = _high_rules_with_options(tree, profile, str(data_dir))
+                assert ("SRC-EXEC" in high) is (label != "active" or profile == "strict")
+
+
+def _high_rules_with_options(root, profile: str, data_dir: str) -> set[str]:
+    return {f.rule_id for f in scan_plugin(
+        str(root), PluginScanOptions(policy=profile, data_dir=data_dir),
+    ).findings if f.severity == "HIGH"}
+
+
+@requires_symlink_privilege
+def test_r109_g610_private_alias_and_configured_state_root(tmp_path, monkeypatch) -> None:
+    physical = _active_peer(tmp_path, monkeypatch, "ordinary")
+    data_dir = tmp_path / "custom-state"
+    state_peer = data_dir / "node_modules/openclaw"
+    (state_peer / "bin").mkdir(parents=True)
+    (state_peer / "package.json").write_text('{"name":"openclaw"}', encoding="utf-8")
+    state_entry = state_peer / "bin/openclaw"
+    state_entry.write_text("#!/bin/sh\n", encoding="utf-8")
+    state_entry.chmod(0o755)
+    alias = tmp_path / "home" / ".SSH"
+    alias.parent.mkdir()
+    alias.symlink_to(physical.parent.parent, target_is_directory=True)
+
+    for label, target, selected in (
+        ("benign", physical, physical / "bin/openclaw"),
+        ("private-alias", alias / "node_modules/openclaw", physical / "bin/openclaw"),
+        ("configured-state", state_peer, state_entry),
+    ):
+        monkeypatch.setattr(shutil, "which", lambda name, path=selected: str(path))
+        installed = _linked_provider(tmp_path / label, monkeypatch, target)
+        for profile in ("default", "permissive", "strict"):
+            high = _high_rules_with_options(installed, profile, str(data_dir))
+            assert ("SRC-EXEC" in high) is (label != "benign" or profile == "strict")
 
 
 def test_r109_g501_contents_rehashed_after_metadata_stable_edit(tmp_path, monkeypatch) -> None:
