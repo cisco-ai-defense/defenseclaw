@@ -203,3 +203,41 @@ func TestGAP0667TunnelAuditKeepsOpeningActor(t *testing.T) {
 		t.Fatalf("unattributed tunnel gained an unrelated actor: %+v", unknown)
 	}
 }
+
+func TestGAP0667ForwardedFirstEventAuditActor(t *testing.T) {
+	for _, tc := range []struct {
+		name, method string
+		kind         egress.EventKind
+		category     egress.Category
+		blocked      bool
+	}{
+		{name: "upload cut before response", method: "POST", kind: egress.EventLargeUpload, category: egress.CategoryLargeUpload, blocked: true},
+		{name: "recheck before response", method: "GET", kind: egress.EventBlocked, category: egress.CategoryAdminBlock, blocked: true},
+		{name: "ordinary allowed response", method: "GET", kind: egress.EventAllowed},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			e := newEnv(t, nil)
+			e.run()
+			created := e.create(sandboxapi.CreateRequest{Name: "forward-first-event"})
+			_, advance := e.fakeClock(time.Now().UTC())
+			ctx := context.Background()
+			b := e.m.boxes[created.Name]
+			e.m.egressEvent(ctx, egress.Event{Kind: tc.kind, SandboxName: created.Name,
+				TunnelID: "forward-first", Time: e.m.now(), Host: "forward.example.org", Port: 80,
+				Method: tc.method, Category: tc.category,
+				Terminated: tc.kind == egress.EventLargeUpload}, 0)
+			advance(time.Second)
+			e.m.mu.Lock()
+			b.proxyOpens = append(b.proxyOpens, proxyOpen{binary: "/usr/bin/curl", pid: 61, at: e.m.now()})
+			e.m.mu.Unlock()
+			advance(proxyOpenWindow)
+			e.m.sink.flush(ctx)
+			got := where(&e.tel.mu, &e.tel.egress, func(ev audit.SandboxEgressEvent) bool {
+				return ev.Host == "forward.example.org"
+			})
+			if len(got) != 1 || got[0].Executable != "/usr/bin/curl" || got[0].PID != 61 || got[0].Blocked != tc.blocked {
+				t.Fatalf("forwarded audit row: %+v", got)
+			}
+		})
+	}
+}
