@@ -178,6 +178,7 @@ func runEnterpriseHookStandaloneForeignCleanup(ctx context.Context, stderr io.Wr
 	if cfg == nil || !cfg.StandaloneEnterprise() {
 		return 0
 	}
+	passStart := time.Now()
 	cleanups, vscode, err := enterpriseHookForeignCleanupConnectors()
 	if err != nil {
 		fmt.Fprintf(stderr, "defenseclaw: enterprise foreign-hook guard: %v\n", err)
@@ -268,6 +269,8 @@ func runEnterpriseHookStandaloneForeignCleanup(ctx context.Context, stderr io.Wr
 			fmt.Fprintf(stderr, "defenseclaw: enterprise hooks: OpenCode service ports record %s cannot be read (%v): no account gets a new OpenCode port until it can; ports already in service.json files are kept. To rebuild it from those files, remove it: sudo rm %s\n",
 				openCodePortsPath, openCodePortsErr, openCodePortsPath)
 			openCodeRecorded = map[int]int{}
+		} else {
+			sweepOpenCodePortsTemp(stderr, openCodePortsPath, passStart)
 		}
 	}
 	leftovers := func(user string) []string {
@@ -1045,6 +1048,24 @@ func enterpriseHookCopilotVSCodeHookFileDrift(accounts []enterprisehooks.UnixEli
 // beside the VS Code Local accounts record.
 func enterpriseHookOpenCodePortsPath(manifestPath string) string {
 	return filepath.Join(filepath.Dir(enterpriseHookCopilotVSCodeAccountsPath(manifestPath)), enterprisehooks.UnixOpenCodeServicePortsFileName)
+}
+
+// sweepOpenCodePortsTemp removes the temp files a killed record write left in
+// the record's folder (REVIEW-gx053-13 S2). It runs inside the reconcile pass,
+// which holds the guardian reconcile lock of the authorization folder, and
+// only when the record is in that folder, so the lock covers every writer of
+// the record. A file at or after the pass start is a live writer's and stays.
+func sweepOpenCodePortsTemp(stderr io.Writer, recordPath string, passStart time.Time) {
+	if cfg == nil || filepath.Dir(recordPath) != managed.HookGuardianAuthorizationDir(cfg.DataDir) {
+		return
+	}
+	removed, err := enterprisehooks.SweepUnixOpenCodeServicePortsTemp(recordPath, passStart)
+	if removed > 0 {
+		fmt.Fprintf(stderr, "defenseclaw: enterprise hooks: removed %d leftover temp file(s) of a killed OpenCode service ports record write from %s\n", removed, filepath.Dir(recordPath))
+	}
+	if err != nil {
+		fmt.Fprintf(stderr, "defenseclaw: enterprise hooks: sweeping leftover OpenCode service ports temp files in %s: %v\n", filepath.Dir(recordPath), err)
+	}
 }
 
 // nextOpenCodeServicePorts is the record after a pass: the plan's record
