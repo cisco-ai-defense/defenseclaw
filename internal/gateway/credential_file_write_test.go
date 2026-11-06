@@ -438,43 +438,58 @@ func TestCredentialFileWritesOutsideTheActiveHomeKeepTheirVerdict(t *testing.T) 
 	}
 }
 
-// credentialCrossCommandCopies are the ways an action reads credential file
-// from in one command and writes credential file to in another: a pipe,
-// &&, ;, ||, a subshell and a command substitution (gx052 review N1).
-func credentialCrossCommandCopies(from, to string) []string {
-	return []string{
-		"cat " + from + " | tee " + to,
-		"cat " + from + " | tee -a " + to,
-		"base64 " + from + " | tee " + to,
-		"cat " + from + " | base64 | base64 -d | tee " + to,
-		"cat " + from + " > /tmp/s && cp /tmp/s " + to,
-		"cat " + from + " > /tmp/s; cp /tmp/s " + to,
-		"cat " + from + " > /tmp/s || cp /tmp/s " + to,
-		"(cat " + from + ") | tee " + to,
-		"printf '%s' \"$(cat " + from + ")\" > " + to,
-	}
+// credentialCopyForm is one way an action reads credential file from and
+// writes credential file to, in one command or across commands of the same
+// action (a pipe, &&, ;, ||, a subshell, a command substitution), with what
+// base 38197e3501..77e412ee74 did with it (gx052 review M2, N1):
+//   - readRuleBlocks: when one read rule owns both files, its CRITICAL
+//     mutation proof blocks in every profile;
+//   - legSees: the write is a typed write the leg proves.
+type credentialCopyForm struct {
+	command        func(from, to string) string
+	readRuleBlocks bool
+	legSees        bool
+}
+
+var credentialCopyForms = []credentialCopyForm{
+	{func(a, b string) string { return "cat " + a + " | tee " + b }, true, true},
+	{func(a, b string) string { return "cat " + a + " | tee -a " + b }, true, true},
+	{func(a, b string) string { return "base64 " + a + " | tee " + b }, true, true},
+	{func(a, b string) string { return "cat " + a + " | base64 | base64 -d | tee " + b }, true, true},
+	{func(a, b string) string { return "cat " + a + " > /tmp/s && cp /tmp/s " + b }, true, true},
+	{func(a, b string) string { return "cat " + a + " > /tmp/s || cp /tmp/s " + b }, true, true},
+	// Base reads these statement by statement, so its read rule never
+	// sees the write: they alert on base, as on head; the leg adds strict.
+	{func(a, b string) string { return "cat " + a + " > /tmp/s; cp /tmp/s " + b }, false, true},
+	{func(a, b string) string { return "(cat " + a + ") | tee " + b }, false, true},
+	// A redirect whose words hold a command substitution is not a typed
+	// write: no write rule sees it, on base or head (detection, #1189).
+	{func(a, b string) string { return "printf '%s' \"$(cat " + a + ")\" > " + b }, false, false},
 }
 
 // TestCredentialFileCopiedIntoAnotherKeepsTheReadVerdict: an action that
 // reads one credential file and writes another keeps the read rule's
 // mutation proof, so the write leg never narrows what the read rule judged
-// before it existed (gx052 review M2, N1):
-//   - in one command (dd if=A of=B, absolute paths), base 38197e3501 alerts
-//     in balanced and strict and allows in permissive; head keeps the read
-//     finding, adds the leg, and alerts, alerts and blocks;
-//   - across commands of the same action (credentialCrossCommandCopies), and
-//     with ~ spellings, the CRITICAL read rule blocks in every profile, on
-//     base and head.
+// before it existed (gx052 review M2, N1). Each row states the floor it may
+// not fall below, base 38197e3501..77e412ee74 or better: a read rule that
+// blocked on base blocks in every profile; elsewhere the leg alerts in
+// balanced and permissive and blocks in strict (base: alert, allow, alert);
+// dd if=A of=B keeps the read finding of A. A read that blocks by itself
+// (an active SSH private key) may block any row.
 func TestCredentialFileCopiedIntoAnotherKeepsTheReadVerdict(t *testing.T) {
-	pairs := []struct{ from, to, rule string }{
-		{"{H}/.aws/credentials", "{H}/.git-credentials", "PATH-AWS-CREDS"},
-		{"{H}/.aws/credentials", "{H}/.netrc", "PATH-AWS-CREDS"},
-		{"{H}/.config/gh/hosts.yml", "{H}/.aws/credentials", "secrets.cloud_credential_read"},
-		{"{H}/.git-credentials", "{H}/.aws/credentials", "PATH-GIT-CREDS"},
-		{"{H}/.netrc", "{H}/.aws/credentials", "PATH-GIT-CREDS"}, // PATH-NETRC reports as its alias
-		{"{H}/.ssh/id_ed25519", "{H}/.aws/credentials", "PATH-SSH-KEY"},
-		{"~/.git-credentials", "~/.netrc", "PATH-GIT-CREDS"},
-		{"/home/bob/.aws/credentials", "~/.aws/credentials", "PATH-AWS-CREDS"},
+	pairs := []struct {
+		from, to, rule string
+		sameRule       bool // one read rule owns both files
+	}{
+		{"{H}/.aws/credentials", "{H}/.git-credentials", "PATH-AWS-CREDS", false},
+		{"{H}/.aws/credentials", "{H}/.netrc", "PATH-AWS-CREDS", false},
+		{"{H}/.config/gh/hosts.yml", "{H}/.aws/credentials", "secrets.cloud_credential_read", false},
+		{"{H}/.git-credentials", "{H}/.aws/credentials", "PATH-GIT-CREDS", false},
+		{"{H}/.netrc", "{H}/.aws/credentials", "PATH-GIT-CREDS", false}, // PATH-NETRC reports as its alias
+		{"{H}/.ssh/id_ed25519", "{H}/.aws/credentials", "PATH-SSH-KEY", false},
+		{"~/.git-credentials", "~/.netrc", "PATH-GIT-CREDS", true},
+		{"{H}/.git-credentials", "{H}/.netrc", "PATH-GIT-CREDS", true},
+		{"/home/bob/.aws/credentials", "~/.aws/credentials", "PATH-AWS-CREDS", true},
 	}
 	for _, profile := range []string{"default", "permissive", "strict"} {
 		for _, managed := range []bool{false, true} {
@@ -483,20 +498,28 @@ func TestCredentialFileCopiedIntoAnotherKeepsTheReadVerdict(t *testing.T) {
 				hook := newCredentialFileHook(t, f, profile, managed)
 				for _, pair := range pairs {
 					from, to := f.path(pair.from), f.path(pair.to)
-					commands := credentialCrossCommandCopies(from, to)
-					if strings.HasPrefix(from, f.home) && strings.HasPrefix(to, f.home) {
-						commands = append(commands, "dd if="+from+" of="+to)
-					}
-					for _, command := range commands {
-						want := "block"
-						if strings.HasPrefix(command, "dd ") {
+					type row struct{ command, want string }
+					var rows []row
+					for _, form := range credentialCopyForms {
+						want := map[string]string{"default": "alert", "permissive": "allow", "strict": "alert"}[profile]
+						switch {
+						case pair.sameRule && form.readRuleBlocks:
+							want = "block"
+						case form.legSees:
 							want = credentialFileVerdict(profile, "HIGH")
 						}
+						rows = append(rows, row{form.command(from, to), want})
+					}
+					if strings.HasPrefix(from, f.home) && strings.HasPrefix(to, f.home) {
+						rows = append(rows, row{"dd if=" + from + " of=" + to, credentialFileVerdict(profile, "HIGH")})
+					}
+					for _, r := range rows {
 						for _, connector := range []string{"claudecode", "codex"} {
-							call := credentialFileHookCall{connector, "Bash", map[string]any{"command": command}}
+							call := credentialFileHookCall{connector, "Bash", map[string]any{"command": r.command}}
 							got, out := hook.post(t, call)
-							if got != want || profile != "permissive" && !strings.Contains(out, pair.rule) {
-								t.Errorf("%s: decision %s, want %s with the %s read finding: %.400s", call, got, want, pair.rule, out)
+							rank := map[string]int{"allow": 0, "alert": 1, "block": 2}
+							if rank[got] < rank[r.want] || r.want != "allow" && profile != "permissive" && !strings.Contains(out, pair.rule) {
+								t.Errorf("%s: decision %s, want at least %s with the %s read finding: %.400s", call, got, r.want, pair.rule, out)
 							}
 						}
 					}
