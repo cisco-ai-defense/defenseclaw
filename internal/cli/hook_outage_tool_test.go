@@ -233,3 +233,61 @@ func TestOpenClawOutageWorkdirFalseBlock(t *testing.T) {
 		t.Errorf("ordinary workdir write decision=%q want=open", got)
 	}
 }
+
+func TestOpenClawOutageKnownEnvironmentShellVariants(t *testing.T) {
+	home := t.TempDir()
+	prior := outageAccountHome
+	outageAccountHome = func() string { return home }
+	t.Cleanup(func() { outageAccountHome = prior })
+	root := filepath.Join(home, ".defenseclaw")
+	if err := os.MkdirAll(root, 0700); err != nil {
+		t.Fatal(err)
+	}
+	protected := filepath.Join(root, "config.yaml")
+	if err := os.WriteFile(protected, []byte("guardrail: {}\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	ordinary := t.TempDir()
+	cases := []struct{ name, command, want string }{
+		{"nested direct control", `sh -c 'printf x >> "$OUT"'`, "protected"},
+		{"nested dynamic unused arg", `sh -c 'printf x >> "$OUT"' "$UNUSED"`, "protected"},
+		{"nested dynamic unused arg with dash", `sh -c 'printf x >> "$OUT"' -- "$UNUSED"`, "protected"},
+		{"env wrapped nested shell", `env sh -c 'printf x >> "$OUT"'`, "protected"},
+		{"command wrapped nested shell", `command sh -c 'printf x >> "$OUT"'`, "protected"},
+		{"exec wrapped nested shell", `exec sh -c 'printf x >> "$OUT"'`, "protected"},
+		{"grouped nested shell", `{ sh -c 'printf x >> "$OUT"'; }`, "protected"},
+		{"subshell nested shell", `(sh -c 'printf x >> "$OUT"')`, "protected"},
+		{"conditional nested shell", `if true; then sh -c 'printf x >> "$OUT"'; fi`, "protected"},
+		{"and-list nested shell", `true && sh -c 'printf x >> "$OUT"'`, "protected"},
+		{"nested unrelated local assignment", `sh -c 'OTHER=notes.txt; printf x >> "$OUT"'`, "protected"},
+		{"direct local override", `OUT=notes.txt; printf x >> "$OUT"`, "open"},
+		{"nested local override", `sh -c 'OUT=notes.txt; printf x >> "$OUT"'`, "open"},
+		{"nested environment assignment override", `OUT=notes.txt sh -c 'printf x >> "$OUT"'`, "open"},
+		{"argument expansion precedes invocation assignment", `OUT=notes.txt cp notes "$OUT"`, "protected"},
+		{"redirect expansion precedes invocation assignment", `OUT=notes.txt printf x >> "$OUT"`, "protected"},
+		{"unused protected env", `printf x >> notes.txt`, "open"},
+		{"known copy destination", `cp notes "$OUT"`, "protected"},
+		{"known copy source", `cp "$OUT" notes`, "open"},
+		{"nested copy destination", `env sh -c 'cp notes "$OUT"'`, "protected"},
+		{"env local override", `env OUT=notes.txt sh -c 'printf x >> "$OUT"'`, "open"},
+		{"env unset", `env -u OUT sh -c 'printf x >> "$OUT"'`, "open"},
+		{"command env override", `command env OUT=notes.txt sh -c 'printf x >> "$OUT"'`, "open"},
+		{"invocation value does not persist", `OUT=notes.txt sh -c 'date'; printf x >> "$OUT"`, "protected"},
+		{"env value does not persist", `env OUT=notes.txt sh -c 'date'; printf x >> "$OUT"`, "protected"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			blob, err := json.Marshal(outageToolPayload{Name: "exec", Args: map[string]interface{}{
+				"command": tc.command,
+				"env":     map[string]interface{}{"OUT": protected},
+			}, CWD: ordinary})
+			if err != nil {
+				t.Fatal(err)
+			}
+			got := outageToolDecision(strings.NewReader(string(blob)), root)
+			if got != tc.want {
+				t.Errorf("decision=%q want=%q for %s", got, tc.want, tc.command)
+			}
+		})
+	}
+}
