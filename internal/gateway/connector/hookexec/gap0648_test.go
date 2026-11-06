@@ -7,8 +7,12 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"io"
+	"net/http"
+	"net/http/httptrace"
 	"strings"
 	"sync/atomic"
+	"syscall"
 	"testing"
 	"time"
 )
@@ -42,6 +46,14 @@ func TestHookCallStartKeepsAStaleProcessStart(t *testing.T) {
 	managed := Options{Connector: "claudecode", Event: "PreToolUse", ManagedEnterprise: true}
 	if deadline := answerDeadline(managed, hookCallStart(now.Add(-73*time.Second), true, now)); deadline.After(now) {
 		t.Fatalf("a call started 73 s ago has its deadline %s from now, want it passed", deadline.Sub(now))
+	}
+}
+
+// gotConn tells the watch on ctx, if any, that the call has a connection to
+// the gateway, as the HTTP transport does.
+func gotConn(ctx context.Context) {
+	if trace := httptrace.ContextClientTrace(ctx); trace != nil && trace.GotConn != nil {
+		trace.GotConn(httptrace.GotConnInfo{})
 	}
 }
 
@@ -102,9 +114,44 @@ func TestManagedWindowsCallIntoAGatewayStopIsBlockedAtTheRestartBudget(t *testin
 	}
 }
 
+// GAP-0648 review F3: the service watch ends a call that waits for an
+// answer from the gateway, not the start of the installer-owned gateway. A
+// managed Windows call refused until its restart budget starts the gateway
+// then, while the service still reads stopped: the start and the call's one
+// retry run to the gateway's verdict.
+func TestManagedGatewayRecoveryRunsPastTheServiceWatch(t *testing.T) {
+	fastRestartRetries(t)
+	stubManagedLifecycle(t, func() bool { return false })
+	stubManagedServiceRunning(t, func(string) (bool, bool) { return false, true })
+	var started atomic.Bool
+	rt := &stubRT{onRequest: func(*stubRT, *http.Request) (*http.Response, error) {
+		if !started.Load() {
+			return nil, syscall.ECONNREFUSED
+		}
+		return &http.Response{StatusCode: http.StatusOK, Body: io.NopCloser(strings.NewReader(`{"action":"allow"}`)), Header: make(http.Header)}, nil
+	}}
+	var recoveries atomic.Int64
+	r := run(t, "codex", rt, func(opts *Options) {
+		managedWindowsStandalone(opts)
+		opts.ManagedGatewayServiceName = "DefenseClawGateway"
+		opts.StartedAt = time.Now().Add(-gatewayRestartBudget + 300*time.Millisecond)
+		opts.GatewayRecovery = func(context.Context, error) error {
+			recoveries.Add(1)
+			// The service manager still reads the service stopped meanwhile.
+			time.Sleep(200 * time.Millisecond)
+			started.Store(true)
+			return nil
+		}
+	})
+	if r.code != 0 || blocked(r) || recoveries.Load() != 1 {
+		t.Fatalf("code=%d recoveries=%d stdout=%q stderr=%q, want the started gateway's verdict", r.code, recoveries.Load(), r.stdout, r.stderr)
+	}
+}
+
 // The watch proves a stop only from a state read in time, and only for a
-// call still waiting: a running, unreadable or slow service, or a call that
-// has its response, keeps the call's own deadline.
+// call connected to the gateway and still waiting: a running, unreadable or
+// slow service, a call no gateway took, or a call that has its response,
+// keeps the call's own deadline.
 func TestManagedGatewayServiceWatchNeedsAProvenStop(t *testing.T) {
 	previousWait := managedGatewayServiceStateWait
 	managedGatewayServiceStateWait = 50 * time.Millisecond
@@ -117,6 +164,7 @@ func TestManagedGatewayServiceWatchNeedsAProvenStop(t *testing.T) {
 		known   bool
 		read    func() (bool, bool)
 		stopAt  time.Duration
+		refused bool // no connection to the gateway
 		restart bool
 	}{
 		{name: "stopped at the budget", states: []bool{false}, known: true, restart: true},
@@ -125,6 +173,7 @@ func TestManagedGatewayServiceWatchNeedsAProvenStop(t *testing.T) {
 		{name: "state not known", states: []bool{false}, known: false},
 		{name: "state read too slow", read: slow},
 		{name: "answered before the budget", states: []bool{false}, known: true, stopAt: 20 * time.Millisecond},
+		{name: "stopped, no connection", states: []bool{false}, known: true, refused: true},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			t.Parallel()
@@ -140,6 +189,9 @@ func TestManagedGatewayServiceWatchNeedsAProvenStop(t *testing.T) {
 			deadline := time.Now().Add(60 * time.Millisecond)
 			ctx, stop, release := watchManagedGatewayService(context.Background(), read, deadline, interval)
 			defer release()
+			if !test.refused {
+				gotConn(ctx)
+			}
 			if test.stopAt > 0 {
 				time.Sleep(test.stopAt)
 				stop()
@@ -186,6 +238,7 @@ func TestManagedGatewayServiceWatchScope(t *testing.T) {
 			t.Parallel()
 			ctx, _, release := watchManagedGatewayStarts(context.Background(), test.opts, deadline)
 			defer release()
+			gotConn(ctx)
 			wait := 300 * time.Millisecond
 			if !test.watched {
 				wait = 150 * time.Millisecond
