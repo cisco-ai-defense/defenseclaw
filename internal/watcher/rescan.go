@@ -2168,7 +2168,8 @@ func (w *InstallWatcher) snapshotForEvent(evt InstallEvent) (*TargetSnapshot, er
 		if _, err := os.Stat(path); err != nil {
 			return nil, err
 		}
-		return snapshotTarget(path, evt.Type == InstallPlugin)
+		return snapshotTarget(path, evt.Type == InstallPlugin &&
+			(w.cfg == nil || !w.cfg.SecureClientIntegration()))
 	}
 }
 

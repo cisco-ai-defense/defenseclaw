@@ -189,6 +189,12 @@ func snapshotTarget(root string, fullTree bool) (*TargetSnapshot, error) {
 		rel, _ := filepath.Rel(root, path)
 		base := filepath.Base(path)
 		ext := strings.ToLower(filepath.Ext(path))
+		if !info.Mode().IsRegular() {
+			// A special entry can wait for a peer when opened. Keep its mode
+			// in the snapshot so replacing it changes the plugin identity.
+			allHashes = append(allHashes, rel+":special:"+info.Mode().String())
+			return nil
+		}
 
 		h, hashErr := hashFile(path)
 		if hashErr != nil {
@@ -254,11 +260,18 @@ func snapshotUnderSkippedDir(rel string) bool {
 }
 
 func hashFile(path string) (string, error) {
-	f, err := os.Open(path)
+	f, err := openSnapshotFile(path)
 	if err != nil {
 		return "", err
 	}
 	defer f.Close()
+	info, err := f.Stat()
+	if err != nil {
+		return "", err
+	}
+	if !info.Mode().IsRegular() {
+		return "", fmt.Errorf("snapshot entry is not a regular file: %s", path)
+	}
 
 	h := sha256.New()
 	if _, err := io.Copy(h, f); err != nil {
@@ -268,14 +281,20 @@ func hashFile(path string) (string, error) {
 }
 
 func extractEndpoints(path string) []string {
-	data, err := os.ReadFile(path)
+	f, err := openSnapshotFile(path)
 	if err != nil {
+		return nil
+	}
+	defer f.Close()
+	info, err := f.Stat()
+	if err != nil || !info.Mode().IsRegular() {
 		return nil
 	}
 
 	const maxScanSize = 512 * 1024
-	if len(data) > maxScanSize {
-		data = data[:maxScanSize]
+	data, err := io.ReadAll(io.LimitReader(f, maxScanSize))
+	if err != nil {
+		return nil
 	}
 
 	matches := urlPattern.FindAllString(string(data), -1)
