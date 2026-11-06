@@ -1082,10 +1082,10 @@ func ResolveConnector(connector, surface, event string, payload []byte) string {
 		// The gateway judges the reduced call: list its targets.
 		facts = view
 	}
-	// A native write call with a key outside its reviewed schema stays
-	// partial, but the harness writes the file its target key names, and
-	// the gateway judges that target (actionfacts.UnknownKeyWriteTargetViews):
-	// list it.
+	// A file-tool call with a key outside its reviewed schema stays
+	// partial; the gateway judges each of its readings, the call without
+	// those keys and each path-shaped value they hold
+	// (actionfacts.UnknownKeyTwins): list the files they write.
 	for _, view := range actionfacts.UnknownKeyWriteTargetViews(input, facts) {
 		facts.Paths = append(facts.Paths, view.Paths...)
 	}

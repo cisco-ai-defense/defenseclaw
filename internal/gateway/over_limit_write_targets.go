@@ -42,6 +42,12 @@ func appendTrustedWriteTargetFindings(
 	request trustedActionRequest,
 	facts actionfacts.Facts,
 ) []RuleFinding {
+	if actionfacts.UnknownKeyWriteOverflow(request.Input, facts) {
+		// More possible targets in unknown argument keys than are judged
+		// (actionfacts.UnknownKeyTwins): the call cannot be read whole.
+		findings = appendTrustedHomeResolvedSSHKeyWriteFinding(findings, generation, request, facts)
+		return appendUnverifiedWriteTargetFinding(findings, generation, request, unknownKeyFileToolOverflowTitle)
+	}
 	if !actionfacts.LimitExceededWriteTool(request.Input, facts) {
 		return appendTrustedHomeResolvedSSHKeyWriteFinding(findings, generation, request, facts)
 	}
@@ -77,6 +83,21 @@ func appendTrustedWriteTargetFindings(
 			return findings
 		}
 	}
+	return appendUnverifiedWriteTargetFinding(findings, generation, request, overLimitUnverifiedWriteTitle)
+}
+
+// appendUnverifiedWriteTargetFinding adds the conservative block of the
+// persistence rule, with title, to an enforcement-capable write tool call
+// whose targets cannot all be read, unless a finding already enforces.
+func appendUnverifiedWriteTargetFinding(
+	findings []RuleFinding,
+	generation *compiledRulePackCategories,
+	request trustedActionRequest,
+	title string,
+) []RuleFinding {
+	if !request.EnforcementCapable {
+		return findings
+	}
 	for _, finding := range findings {
 		if finding.contributesToEnforcement() {
 			return findings
@@ -87,7 +108,7 @@ func appendTrustedWriteTargetFindings(
 		return findings
 	}
 	return append(findings, adjustConfidence(request.Input.Tool, RuleFinding{
-		RuleID: rule.ID, Title: overLimitUnverifiedWriteTitle, Severity: rule.Severity,
+		RuleID: rule.ID, Title: title, Severity: rule.Severity,
 		Confidence: rule.Confidence, Evidence: trustedActionInputText(request.Input, ""),
 		Tags: append([]string(nil), rule.Tags...), LineNumber: 1,
 		enforcement: findingEnforcementAllowed,

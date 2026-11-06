@@ -1745,7 +1745,6 @@ func trustedAuthorizedKeysWriteProofWith(input actionfacts.Input, facts actionfa
 		trustedUnknownOutputAuthorizedKeysWrite(facts) ||
 		trustedAwkOutputAuthorizedKeysWrite(facts) ||
 		trustedGitConfigEnvironmentAuthorizedKeysWrite(facts) ||
-		trustedUnknownKeyAuthorizedKeysWrite(input, facts) ||
 		homeResolvedTwinProves(input, facts, sshAuthorizedKeysCommandPrerequisite) ||
 		trustedStaticStatementAuthorizedKeysWrite(input) ||
 		trustedStaticRedirectAuthorizedKeysWrite(input, facts) ||
@@ -1856,22 +1855,6 @@ const unresolvedWriteTargetTitle = "A write target could not be resolved (unread
 // guidance never showed (GAP-1555).
 const archiveBeforeWriteTitle = "Archive extraction may create a link before a later write. " +
 	"Run the extraction and the write as separate commands"
-
-// trustedUnknownKeyAuthorizedKeysWrite judges the target of a native
-// file-write tool call (write, edit, multiedit, create) whose arguments
-// carry a key outside the tool's reviewed schema: the harness still writes
-// the file its target key names, so each such target is judged as the same
-// tool's structured write (actionfacts.UnknownKeyWriteTargetViews). Only a
-// match counts.
-func trustedUnknownKeyAuthorizedKeysWrite(input actionfacts.Input, facts actionfacts.Facts) bool {
-	for _, view := range actionfacts.UnknownKeyWriteTargetViews(input, facts) {
-		projected := view.EnforcementProjection()
-		if projected.EnforcementEligible() && sshAuthorizedKeysStructuredPrerequisite(projected) {
-			return true
-		}
-	}
-	return false
-}
 
 // trustedSandboxGuestAuthorizedKeysWrite judges a sandbox call once more in
 // the guest's own namespace. The request's working directory is the host
