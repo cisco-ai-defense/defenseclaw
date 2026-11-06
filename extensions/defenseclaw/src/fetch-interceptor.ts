@@ -1394,14 +1394,24 @@ export function createFetchInterceptor(
     return true;
   }
 
+  type NodeRequestOptions = Record<string, unknown>;
+  type CanonicalNodeRequest = {
+    url: string;
+    options: NodeRequestOptions;
+    headers: Record<string, string>;
+    body: Buffer[];
+    optionsOnly: boolean;
+  };
+
   function nodeRequestWithOutageFallback(
     req: NodeClientRequest,
+    original: CanonicalNodeRequest,
     directFactory: () => NodeClientRequest,
   ): NodeClientRequest {
     const emit = req.emit;
     const write = req.write;
     const end = req.end;
-    const chunks: Buffer[] = [];
+    const chunks = original.body;
     const maxReplayBytes = 16 << 20;
     let replayBytes = 0;
     let replayable = true;
@@ -1428,6 +1438,23 @@ export function createFetchInterceptor(
       }
       chunks.push(bytes);
     };
+
+    // Headers set after request() are still part of the caller's request.
+    // Keep the provider snapshot current without reading proxy-only headers.
+    if (typeof req.setHeader === "function") {
+      const setHeader = req.setHeader;
+      req.setHeader = function (this: NodeClientRequest, name: string, value: number | string | readonly string[]): NodeClientRequest {
+        original.headers[name.toLowerCase()] = value as unknown as string;
+        return setHeader.call(this, name, value);
+      } as NodeClientRequest["setHeader"];
+    }
+    if (typeof req.removeHeader === "function") {
+      const removeHeader = req.removeHeader;
+      req.removeHeader = function (this: NodeClientRequest, name: string): void {
+        delete original.headers[name.toLowerCase()];
+        removeHeader.call(this, name);
+      } as NodeClientRequest["removeHeader"];
+    }
 
     req.write = function (this: NodeClientRequest, ...args: Parameters<NodeClientRequest["write"]>): boolean {
       if (direct) return direct.write(...args);
@@ -1866,7 +1893,6 @@ export function createFetchInterceptor(
     originalHttpRequest = http.request.bind(http);
     originalHttpGet = http.get.bind(http);
 
-    type NodeRequestOptions = Record<string, unknown>;
     type NodeIncomingMessage = unknown;
 
     /**
@@ -1982,6 +2008,34 @@ export function createFetchInterceptor(
       return `${proto}//${hostPart}${path}`;
     }
 
+    // Capture every supported Node overload before constructing the proxy hop.
+    // The continuation uses only this provider request, including headers and
+    // option overlays, so proxy headers cannot become provider headers.
+    function canonicalNodeRequest(
+      urlOrOptions: string | URL | NodeRequestOptions,
+      secondArg: NodeRequestOptions | ((res: NodeIncomingMessage) => void) | undefined,
+    ): CanonicalNodeRequest {
+      const optionsOnly = typeof urlOrOptions === "object" && !(urlOrOptions instanceof URL);
+      const firstOptions = optionsOnly ? urlOrOptions as NodeRequestOptions : {};
+      const secondOptions = typeof secondArg === "object" && secondArg !== null
+        ? secondArg as NodeRequestOptions : {};
+      const options: NodeRequestOptions = { ...firstOptions, ...secondOptions };
+      const headers: Record<string, string> = {};
+      if (options.headers && typeof options.headers === "object") {
+        for (const [name, value] of Object.entries(options.headers as Record<string, string>)) {
+          headers[name.toLowerCase()] = value;
+        }
+      }
+      options.headers = headers;
+      return {
+        url: buildUrlStringFromArgs(urlOrOptions, secondArg),
+        options,
+        headers,
+        body: [],
+        optionsOnly,
+      };
+    }
+
     function patchedHttpsRequest(
       urlOrOptions: string | URL | NodeRequestOptions,
       optionsOrCallback?: NodeRequestOptions | ((res: NodeIncomingMessage) => void),
@@ -1990,7 +2044,8 @@ export function createFetchInterceptor(
       if (directModelRequest.getStore()) {
         return originalHttpsRequest!(urlOrOptions as string, optionsOrCallback as NodeRequestOptions, callback);
       }
-      const urlStr = buildUrlStringFromArgs(urlOrOptions, optionsOrCallback);
+      const original = canonicalNodeRequest(urlOrOptions, optionsOrCallback);
+      const urlStr = original.url;
 
       if (urlStr && shouldPassthroughChatGPTCodexResponseBackendUrl(urlStr)) {
         reportChatGPTCodexResponsePassthrough(urlStr);
@@ -2014,16 +2069,8 @@ export function createFetchInterceptor(
 
       if (urlStr && (knownForHTTPS || shapedForHTTPS)) {
         noteInterceptLayer("https.request", urlStr);
-        let opts: NodeRequestOptions = {};
-        let cb = callback;
-
-        if (typeof optionsOrCallback === "function") {
-          cb = optionsOrCallback;
-          opts = typeof urlOrOptions === "string" || urlOrOptions instanceof URL
-            ? {} : urlOrOptions as NodeRequestOptions;
-        } else if (optionsOrCallback && typeof optionsOrCallback === "object") {
-          opts = optionsOrCallback as NodeRequestOptions;
-        }
+        const opts = original.options;
+        const cb = typeof optionsOrCallback === "function" ? optionsOrCallback : callback;
 
         let originalUrl: URL;
         try {
@@ -2032,7 +2079,7 @@ export function createFetchInterceptor(
           return originalHttpsRequest!(urlOrOptions as string, optionsOrCallback as NodeRequestOptions, callback);
         }
 
-        const hdrs = opts.headers as Record<string, string> ?? {};
+        const hdrs = original.headers;
         const providerKey = extractProviderKeyFromRecord(hdrs);
         const proxyHdrs = buildProxyHeaders(
           originalUrl.origin,
@@ -2135,27 +2182,14 @@ export function createFetchInterceptor(
           cb as Parameters<typeof http.request>[1],
         );
         const directFactory = (): NodeClientRequest => {
-          const directOptions: NodeRequestOptions = typeof optionsOrCallback === "object" && optionsOrCallback !== null
-            ? { ...optionsOrCallback } : {};
-          if (typeof proxyRequest.getHeaders === "function") {
-            const headers = { ...proxyRequest.getHeaders() } as Record<string, unknown>;
-            for (const name of Object.keys(headers)) {
-              const lower = name.toLowerCase();
-              if (lower === "host" || lower === "x-ai-auth" || lower.startsWith("x-dc-") ||
-                  lower.startsWith("x-defenseclaw-")) delete headers[name];
-            }
-            directOptions.headers = headers;
-          }
           const request = originalUrl.protocol === "http:"
             ? originalHttpRequest! : originalHttpsRequest!;
-          if (typeof urlOrOptions === "object" && !(urlOrOptions instanceof URL)) {
-            // Node accepts request(options) and request(options, callback),
-            // but interprets a second options object as a callback.
-            return request({ ...urlOrOptions, ...directOptions });
+          if (original.optionsOnly) {
+            return request({ ...original.options, headers: { ...original.headers } });
           }
-          return request(urlOrOptions as string, directOptions);
+          return request(original.url, { ...original.options, headers: { ...original.headers } });
         };
-        return nodeRequestWithOutageFallback(proxyRequest, directFactory);
+        return nodeRequestWithOutageFallback(proxyRequest, original, directFactory);
       }
 
       // Non-intercepted https.request — report silent passthrough so
