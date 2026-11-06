@@ -107,3 +107,96 @@ func TestGAP0534RecoveredTargetsAndPolicy(t *testing.T) {
 		}
 	}
 }
+
+func TestGAP0534RecoveredStateAliases(t *testing.T) {
+	home := t.TempDir()
+	cwd := filepath.Join(home, "project")
+	physicalState := filepath.Join(home, "state-target")
+	for _, dir := range []string{cwd, physicalState} {
+		if err := os.MkdirAll(dir, 0o700); err != nil {
+			t.Fatal(err)
+		}
+	}
+	config := filepath.Join(physicalState, "config.yaml")
+	if err := os.WriteFile(config, []byte("enabled: true\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	for link, target := range map[string]string{
+		filepath.Join(home, ".defenseclaw"): physicalState,
+		filepath.Join(home, "state-link"):   config,
+	} {
+		if err := os.Symlink(target, link); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := os.Link(config, filepath.Join(home, "state-hardlink")); err != nil {
+		t.Fatal(err)
+	}
+	ordinary := filepath.Join(cwd, "output")
+	if err := os.WriteFile(ordinary, []byte("ordinary\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Link(ordinary, filepath.Join(home, "ordinary-hardlink")); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("HOME", home)
+	const prefix = `Write-Output $(.\a[1]<#x#>); Set-Content -Path `
+	for _, tc := range []struct {
+		name, target string
+		protected    bool
+	}{
+		{"state-root-link", `~/.defenseclaw/config.yaml`, true},
+		{"state-file-link", `~/state-link`, true},
+		{"physical-state-file", `~/state-target/config.yaml`, true},
+		{"state-hardlink", `~/state-hardlink`, true},
+		{"state-root-recursive", `~/.defenseclaw`, true},
+		{"ordinary-twin", `~/project/output`, false},
+		{"ordinary-hardlink", `~/ordinary-hardlink`, false},
+	} {
+		for _, connectorName := range []string{"claudecode", "codex"} {
+			t.Run(tc.name+"/"+connectorName, func(t *testing.T) {
+				tool := "PowerShell"
+				if connectorName == "codex" {
+					tool = "exec_command"
+				}
+				command := prefix + tc.target + ` -Value x`
+				if tc.name == "state-root-recursive" {
+					command = `Write-Output $(.\a[1]<#x#>); Remove-Item -Recurse -Force ~/.defenseclaw`
+				}
+				payload, err := json.Marshal(map[string]any{
+					"hook_event_name": "PreToolUse", "cwd": cwd, "tool_name": tool,
+					"tool_input": map[string]string{"command": command},
+				})
+				if err != nil {
+					t.Fatal(err)
+				}
+				targets, ok := hookpaths.Decode(hookpaths.Resolve(payload))
+				if !ok {
+					t.Fatal("missing write evidence")
+				}
+				ctx := context.WithValue(t.Context(), resolvedWritesContextKey{}, targets)
+				api := instructionProtectionTestAPI(t, connectorName, "action", "HIGH")
+				start := time.Now()
+				var action string
+				if connectorName == "claudecode" {
+					action = api.evaluateClaudeCodeHook(ctx, claudeCodeHookRequest{HookEventName: "PreToolUse", CWD: cwd,
+						ToolName: tool, ToolInput: map[string]any{"command": command}}).Action
+				} else {
+					action = api.evaluateCodexHook(ctx, codexHookRequest{HookEventName: "PreToolUse", CWD: cwd,
+						ToolName: tool, ToolInput: map[string]any{"cmd": command}}).Action
+				}
+				wantAction, wantReason := "allow", "shell-parse-unreached"
+				if tc.protected {
+					wantAction, wantReason = "block", "shell-parse-bound"
+				}
+				if action != wantAction || targets[hookpaths.UnprovenReasonKey] != wantReason {
+					t.Fatalf("action=%q reason=%q, want action=%q reason=%q", action,
+						targets[hookpaths.UnprovenReasonKey], wantAction, wantReason)
+				}
+				if elapsed := time.Since(start); elapsed > time.Second {
+					t.Fatalf("hook answer took %s", elapsed)
+				}
+			})
+		}
+	}
+}

@@ -1937,8 +1937,18 @@ func protectedReachTextPathWithState(path string, protected protectedFiles, ssh,
 	if !ok {
 		return false
 	}
+	// Resolve both sides of the comparison. The state root itself may be a
+	// directory link, and a regular file elsewhere may share a state file's
+	// identity through a hard link.
+	if stateRoot != "" {
+		if physicalRoot, ok := memo.resolveWriteTarget(stateRoot); ok && pathAtOrUnder(resolved, physicalRoot) {
+			return true
+		}
+		if _, same := ResolveActiveStateHardlinkTarget(resolved, filepath.Dir(stateRoot)); same {
+			return true
+		}
+	}
 	if samePathName(resolved, filepath.Dir(ssh)) ||
-		stateRoot != "" && pathAtOrUnder(resolved, stateRoot) ||
 		protected.has(resolved) || samePathName(resolved, ssh) {
 		return true
 	}
