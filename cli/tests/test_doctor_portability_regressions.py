@@ -724,7 +724,13 @@ def test_doctor_gateway_account_hint_quotes_the_home(monkeypatch, tmp_path) -> N
 @pytest.mark.parametrize("platform_name", ["linux", "darwin"])
 @pytest.mark.parametrize(
     "config_location",
-    ["default", "explicit_home", "explicit_external", "explicit_home_with_store_config"],
+    [
+        "default",
+        "default_with_store_config",
+        "explicit_home",
+        "explicit_external",
+        "explicit_home_with_store_config",
+    ],
 )
 def test_doctor_custom_store_root_gateway_uses_pid_record_home(
     monkeypatch, tmp_path, platform_name, config_location
@@ -748,7 +754,7 @@ def test_doctor_custom_store_root_gateway_uses_pid_record_home(
         monkeypatch.setenv("DEFENSECLAW_CONFIG", os.fspath(explicit_config))
     elif config_location.startswith("explicit_home"):
         monkeypatch.setenv("DEFENSECLAW_CONFIG", os.fspath(home_config))
-    if config_location == "explicit_home_with_store_config":
+    if config_location.endswith("with_store_config"):
         (store / "config.yaml").write_text("data_dir: /unrelated/store\n")
     monkeypatch.setattr(cmd_doctor, "sys", SimpleNamespace(platform=platform_name))
     binary = tmp_path / "local bin" / "defenseclaw-gateway"
