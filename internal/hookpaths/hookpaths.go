@@ -4831,7 +4831,7 @@ func (c *linkCopy) readDiskLinks(facts map[string]string, record bool) bool {
 // the disk. ok is false when path cannot be read, the walk fails or is over
 // its bounds, or a link names a missing entry or another link.
 func sourceDiskLinks(path string) ([]diskLink, bool) {
-	info, err := os.Lstat(path)
+	info, err := pathLstat(path)
 	if err != nil {
 		// The disk-link check read this source as one that may hold a
 		// link; a gateway behind ProtectHome sees ENOENT for it.
@@ -4839,7 +4839,7 @@ func sourceDiskLinks(path string) ([]diskLink, bool) {
 	}
 	var found []diskLink
 	add := func(name, rest string) bool {
-		text, err := os.Readlink(name)
+		text, err := pathReadlink(name)
 		if err != nil || text == "" || len(found) >= maxSourceLinks {
 			return false
 		}
@@ -4847,7 +4847,7 @@ func sourceDiskLinks(path string) ([]diskLink, bool) {
 		if !filepath.IsAbs(target) {
 			target = filepath.Join(filepath.Dir(name), text)
 		}
-		if hop, err := os.Lstat(target); err != nil || hop.Mode()&os.ModeSymlink != 0 {
+		if hop, err := pathLstat(target); err != nil || hop.Mode()&os.ModeSymlink != 0 {
 			return false
 		}
 		found = append(found, diskLink{rest: rest, text: text})
@@ -4860,7 +4860,7 @@ func sourceDiskLinks(path string) ([]diskLink, bool) {
 		return nil, true
 	}
 	seen, ok := 0, true
-	err = filepath.WalkDir(path, func(name string, entry fs.DirEntry, err error) error {
+	err = pathWalkDir(path, func(name string, entry fs.DirEntry, err error) error {
 		seen++
 		if err != nil || seen > 4096 {
 			ok = false
@@ -5111,7 +5111,7 @@ func cpDiskSymlink(args []string, static []bool, cwd, home string, facts map[str
 		return true
 	}
 	for _, source := range parsed.sources {
-		if diskSourceMayLink(source, cwd, home, facts, record, os.Lstat) {
+		if diskSourceMayLink(source, cwd, home, facts, record, pathLstat) {
 			return true
 		}
 	}
@@ -5142,7 +5142,7 @@ func archiveCopiesDiskSymlink(program string, args []string, static []bool, cwd,
 			// materialize a link at any name in the destination tree.
 			return true
 		}
-		if diskSourceMayLink(source, cwd, home, facts, record, os.Lstat) {
+		if diskSourceMayLink(source, cwd, home, facts, record, pathLstat) {
 			return true
 		}
 	}
@@ -5175,7 +5175,7 @@ func diskSourceMayLink(source, cwd, home string, facts map[string]string, record
 		return linked
 	}
 	if record {
-		if os.IsNotExist(err) {
+		if NotExist(err) {
 			facts[key] = "0"
 			return false
 		}
@@ -5187,7 +5187,7 @@ func diskSourceMayLink(source, cwd, home string, facts map[string]string, record
 	// home or temporary tree: a source missing from a directory the gateway
 	// can see is missing, so cd build; cp -r ../src out read where the shell
 	// stood when the cd fails is a plain copy (GAP-2574 checker R01).
-	if os.IsNotExist(err) && visibleSourceDirectory(filepath.Dir(path), lstat) {
+	if NotExist(err) && visibleSourceDirectory(filepath.Dir(path), lstat) {
 		return false
 	}
 	return runtime.GOOS == "linux" &&
@@ -5213,7 +5213,7 @@ func visibleSourceDirectory(dir string, lstat func(string) (os.FileInfo, error))
 // A tree that cannot be read or is larger than the bound counts as one.
 func treeHasSymlink(root string) bool {
 	seen, found := 0, false
-	err := filepath.WalkDir(root, func(_ string, entry fs.DirEntry, err error) error {
+	err := pathWalkDir(root, func(_ string, entry fs.DirEntry, err error) error {
 		seen++
 		if err != nil || seen > 4096 || entry.Type()&fs.ModeSymlink != 0 {
 			found = true

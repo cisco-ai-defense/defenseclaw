@@ -169,8 +169,8 @@ func windowsLocationAuthorizedKeys(target string, input actionfacts.Input) bool 
 		// On real Windows, file identity also covers an 8.3 or UNC spelling
 		// of an existing directory. Synthetic tests use the path comparison.
 		if runtime.GOOS == "windows" && path.Base(target) == name {
-			gotDir, err1 := os.Stat(filepath.FromSlash(path.Dir(target)))
-			homeDir, err2 := os.Stat(filepath.FromSlash(path.Dir(protected)))
+			gotDir, err1 := hookpaths.Stat(filepath.FromSlash(path.Dir(target)))
+			homeDir, err2 := hookpaths.Stat(filepath.FromSlash(path.Dir(protected)))
 			if err1 == nil && err2 == nil && os.SameFile(gotDir, homeDir) {
 				return true
 			}
