@@ -38,15 +38,17 @@ import (
 )
 
 func TestManagedWindowsPolicyEvaluatePinsAdministratorConfig(t *testing.T) {
-	withAuditExportManagedSeams(t, true, true)
+	layout := withAuditExportManagedSeams(t, true, true)
 	restore := managedHostWindowsStandalone
 	managedHostWindowsStandalone = func() (string, bool) { return `HKLM\SOFTWARE\Cisco\DefenseClaw\Enterprise`, true }
 	t.Cleanup(func() { managedHostWindowsStandalone = restore })
-	// The Linux test process cannot open a Windows installation path. The
-	// pre-run still has to pin that path before the attempted load.
+	// The deployment is absent (on Windows the layout is in the test's temp
+	// folder, GAP-0093), so the load fails. The pre-run still has to pin
+	// the administrator config before the attempted load.
 	_ = policyEvaluateCmd.PersistentPreRunE(policyEvaluateCmd, nil)
-	if got := os.Getenv(managed.ConfigPathEnv); got != `C:\ProgramData\Cisco\DefenseClaw\etc\config.yaml` {
-		t.Fatalf("managed policy evaluate read %q, want the administrator config", got)
+	if got := os.Getenv(managed.ConfigPathEnv); got != layout.ConfigPath ||
+		!strings.HasSuffix(got, `\Cisco\DefenseClaw\etc\config.yaml`) {
+		t.Fatalf("managed policy evaluate read %q, want the administrator config %q", got, layout.ConfigPath)
 	}
 }
 

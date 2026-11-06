@@ -14,7 +14,6 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
-	"sort"
 	"strings"
 	"testing"
 	"time"
@@ -382,16 +381,23 @@ func snapshotTestMachineRegistry() map[string]string {
 // %WINDIR%\Logs\DefenseClaw*, %ProgramFiles%\Cisco\DefenseClaw*, and the
 // token's own %LOCALAPPDATA%\DefenseClaw and lifecycle staging in its
 // %LOCALAPPDATA%\Temp. While a
-// DefenseClaw service runs, its data folder and the lifecycle log folder are
-// its own and are left out.
-func snapshotTestMachineState(snapshot map[string]string) {
+// DefenseClaw service runs, its data folder (its databases) and the
+// lifecycle log folder are its own and are left out, and the folders it
+// rewrites on its own schedule (testServiceOwnedFolders) are compared by
+// meaning instead, under every identity (GAP-0093,
+// testmachine_service_writes_test.go). before is the first snapshot, nil
+// when this is it.
+func snapshotTestMachineState(snapshot, before map[string]string) {
 	running := snapshotTestServices(snapshot)
 	var skip []string
+	service := testServiceFolders{before: before, runMarkers: testRunMarkers()}
 	if running {
 		if layout, err := managed.StandaloneWindowsLayout(); err == nil {
-			skip = append(skip, layout.DataDir)
+			service.roots = testServiceOwnedFolders(layout)
+			skip = append(append(skip, layout.DataDir), service.roots...)
 		}
 	}
+	defer fingerprintTestServiceFolders(snapshot, service)
 	stagingOrFixture := func(name string) bool {
 		lower := strings.ToLower(name)
 		return strings.HasPrefix(lower, "defenseclaw-") || strings.HasPrefix(lower, "dc-") && strings.Contains(lower, "-test-")
@@ -444,6 +450,32 @@ func snapshotTestMachineState(snapshot map[string]string) {
 				strings.HasPrefix(lower, strings.ToLower(managed.SetupPowerShellTempPrefix))
 		}, skip)
 	}
+}
+
+// testServiceOwnedFolders are the folders of the standalone layout the
+// running DefenseClaw services rewrite on their own schedule: the hook
+// guardian's state (its activation receipt and protected targets), the
+// guardian manifest folder (the unprotected-agent record), the
+// machine-policy records and the services' logs. An idle managed computer
+// changes every one of them within minutes, with no test running (GAP-0093).
+func testServiceOwnedFolders(layout managed.StandaloneLayout) []string {
+	return []string{
+		layout.GuardianAuthDir,
+		filepath.Dir(layout.ManifestPath),
+		filepath.Join(layout.LifecycleDir, "machine-policy"),
+		layout.LogDir,
+	}
+}
+
+// testRunMarkers name this test run in text it writes: its temp folder, its
+// HKCU registry sandbox and its executable. A service log line written
+// during the run that names one of them was written by a test.
+func testRunMarkers() []string {
+	markers := []string{os.TempDir(), testMachineRegistrySandbox}
+	if executable, err := os.Executable(); err == nil {
+		markers = append(markers, filepath.Base(executable))
+	}
+	return markers
 }
 
 // snapshotTestServices records each DefenseClaw service's state and process
@@ -569,24 +601,12 @@ func snapshotTestRegistryKey(snapshot map[string]string, path string) {
 	}
 }
 
-// diffTestMachineRegistry lists what changed between two snapshots.
-func diffTestMachineRegistry(before, after map[string]string) []string {
-	var changes []string
-	for name, value := range before {
-		if now, ok := after[name]; !ok {
-			changes = append(changes, "removed "+name+" = "+value)
-		} else if now != value {
-			changes = append(changes, "changed "+name+" = "+value+" -> "+now)
-		}
-	}
-	for name, value := range after {
-		if _, ok := before[name]; !ok {
-			changes = append(changes, "added "+name+" = "+value)
-		}
-	}
-	sort.Strings(changes)
-	return changes
-}
+// testMachineSettleAttempts and testMachineSettleDelay bound how long the
+// machine guard waits for a running service's writes to settle.
+const (
+	testMachineSettleAttempts = 3
+	testMachineSettleDelay    = 2 * time.Second
+)
 
 // guardTestMachine snapshots the computer's DefenseClaw machine registry
 // and, in the top-level run, its DefenseClaw services and machine folders
@@ -597,16 +617,23 @@ func diffTestMachineRegistry(before, after map[string]string) []string {
 // calls this before guardTestProcessState sets that variable.
 func guardTestMachine() func() error {
 	child := os.Getenv(testProcessGuardChildEnv) != ""
-	snapshot := func() map[string]string {
+	snapshot := func(before map[string]string) map[string]string {
 		state := snapshotTestMachineRegistry()
 		if !child {
-			snapshotTestMachineState(state)
+			snapshotTestMachineState(state, before)
 		}
 		return state
 	}
-	before := snapshot()
+	before := snapshot(nil)
 	return func() error {
-		changes := diffTestMachineRegistry(before, snapshot())
+		changes := diffTestMachineRegistry(before, snapshot(before))
+		// GAP-0093: a running service can be between the write and the
+		// rename of one of its records at the moment of the snapshot. Read
+		// again once its writes have settled; a test's write stays.
+		for attempt := 0; len(changes) != 0 && attempt < testMachineSettleAttempts; attempt++ {
+			time.Sleep(testMachineSettleDelay)
+			changes = diffTestMachineRegistry(before, snapshot(before))
+		}
 		if len(changes) == 0 {
 			return nil
 		}
@@ -710,6 +737,20 @@ func isolateTestDeploymentReaders(dir string) {
 	// that missed its spool stub wrote the real change spool as SYSTEM.
 	sandboxSeam("windowsBundleLayout", &windowsBundleLayout, func() (managed.StandaloneLayout, error) { return missing, nil })
 	sandboxSeam("windowsSecretLayout", &windowsSecretLayout, func() (managed.StandaloneLayout, error) { return missing, nil })
+	// GAP-0093: the other seams that resolve the computer's own standalone
+	// layout. The administrator pins (policy, audit export, enterprise
+	// policy and acp) set DEFENSECLAW_CONFIG and DEFENSECLAW_HOME from
+	// auditExportManagedLayout, and the command then loaded that config into
+	// the package cfg and its runtime .env into the process environment. On
+	// a managed computer that was the real deployment: every later test ran
+	// with the real standalone config (TestSignedOutOwnerRewrittenAccount-
+	// UpgradeNeedsReadableOlderLock read it), and the run ended with the
+	// deployment's DEFENSECLAW_GATEWAY_TOKEN in its environment. The scan,
+	// hot config and config validate layouts are the same kind of reader.
+	sandboxSeam("auditExportManagedLayout", &auditExportManagedLayout, func() (managed.StandaloneLayout, error) { return missing, nil })
+	sandboxSeam("managedScanWindowsLayout", &managedScanWindowsLayout, func() (managed.StandaloneLayout, error) { return missing, nil })
+	sandboxSeam("windowsEnterpriseHotConfigLayout", &windowsEnterpriseHotConfigLayout, func() (managed.StandaloneLayout, error) { return missing, nil })
+	sandboxSeam("configValidateLayout", &configValidateLayout, func() (managed.StandaloneLayout, error) { return missing, nil })
 	spool := filepath.Join(dir, "change-spool")
 	sandboxSeam("windowsChangeSpool", &windowsChangeSpool, func(managed.StandaloneLayout) (enterprisestatus.ChangeSpool, error) {
 		return enterprisestatus.ChangeSpool{Dir: filepath.Join(spool, enterprisestatus.ChangeEventsDirName), StateDir: spool}, nil
