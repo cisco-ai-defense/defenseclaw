@@ -1010,7 +1010,7 @@ func TestManagedGuardianOpenCodeContestedPortStaysContested(t *testing.T) {
 // A linked final service file is read in the only import pass. Its port is
 // held from a newcomer even though the account-side writer cannot replace it.
 func TestReviewLinkedServiceFileNeverGivesItsPortToNewcomer(t *testing.T) {
-	homes, record := openCodePortGuardian(t, true, 1001, 1002)
+	homes, record, setEligible := openCodePortGuardianWith(t, true, 1001, 1002)
 	target := filepath.Join(homes[1001], "actual-service.json")
 	if err := os.WriteFile(target, []byte(`{"port":25002}`), 0o600); err != nil {
 		t.Fatal(err)
@@ -1027,6 +1027,11 @@ func TestReviewLinkedServiceFileNeverGivesItsPortToNewcomer(t *testing.T) {
 		if got := openCodePortIn(t, homes[1002]); got == 25002 || (*record)[1002] == 25002 {
 			t.Fatalf("pass %d gave a linked file's port to another account: file=%d record=%v log=%s", pass, got, *record, log)
 		}
+	}
+	setEligible(nil, 1001, 1002, 9002)
+	log := runOpenCodePortPass(t)
+	if (*record)[9002] == 25002 || openCodePortIn(t, homes[9002]) == 25002 {
+		t.Fatalf("later newcomer received a linked file's live port: record=%v log=%s", *record, log)
 	}
 	if err := os.Remove(link); err != nil {
 		t.Fatal(err)

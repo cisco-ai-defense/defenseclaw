@@ -1608,6 +1608,12 @@ func (env *Env) warnOpenCodePortsRecord(r *enterprisestatus.Result) {
 		for _, uid := range entry.UIDs {
 			uids = append(uids, strconv.Itoa(uid))
 		}
+		if len(entry.UIDs) == 1 {
+			r.AddWarning("opencode_port_contested", fmt.Sprintf(
+				"OpenCode service port %d remains held because uid %s's file could not be replaced in the record's import pass; repair the account file, then release the held mark: sudo %s %d --yes",
+				entry.Port, uids[0], env.lifecycleCommand("opencode-port-clear"), entry.Port))
+			continue
+		}
 		r.AddWarning("opencode_port_contested", fmt.Sprintf(
 			"OpenCode service port %d was named by the files of uids %s when the guardian's record was built, so no account is given it; to release it: sudo %s %d --yes",
 			entry.Port, strings.Join(uids, ", "), env.lifecycleCommand("opencode-port-clear"), entry.Port))

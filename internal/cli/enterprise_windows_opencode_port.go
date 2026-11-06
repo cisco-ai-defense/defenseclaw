@@ -111,6 +111,10 @@ func appendWindowsOpenCodePortWarnings(result *enterprisestatus.Result) {
 		result.AddWarning("opencode_port_account_unknown", fmt.Sprintf("OpenCode service port for %s at %s could not be read or written as that account (%s); %s", item.SID, item.Path, item.Reason, item.Fix))
 	}
 	for _, mark := range state.Contested {
+		if len(mark.SIDs) == 1 {
+			result.AddWarning("opencode_port_contested", fmt.Sprintf("OpenCode service port %d remains held because %s's file could not be replaced in the import pass; repair the account file, then clear the held mark with %s", mark.Port, mark.SIDs[0], windowsOpenCodePortClearCommand(mark.Port)))
+			continue
+		}
 		result.AddWarning("opencode_port_contested", fmt.Sprintf("OpenCode service port %d is marked contested by %s; clear it with %s", mark.Port, strings.Join(mark.SIDs, ", "), windowsOpenCodePortClearCommand(mark.Port)))
 	}
 }

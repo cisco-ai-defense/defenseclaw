@@ -139,6 +139,7 @@ func enterpriseHookStandaloneOpenCodePorts(ctx context.Context, manifest enterpr
 	imports := map[string]int{}
 	unknown := map[string]bool{}
 	var unknownEntries []enterprisehooks.WindowsOpenCodePortUnknown
+	failedImports := map[int]string{}
 	var problems error
 	for _, profile := range profiles {
 		if err := ctx.Err(); err != nil {
@@ -234,6 +235,11 @@ func enterpriseHookStandaloneOpenCodePorts(ctx context.Context, manifest enterpr
 		if err != nil {
 			if _, bound := recorded[key]; !bound {
 				delete(resultRecord, key)
+				if !state.Exists {
+					if importPort := imports[key]; importPort > 0 && importPort != enterprisepolicy.OpenCodeDefaultServicePort && importPort != 49375 {
+						failedImports[importPort] = key
+					}
+				}
 			}
 			file := enterprisepolicy.OpenCodeServiceConfigPath(profile.UserHome)
 			unknownEntries = append(unknownEntries, enterprisehooks.WindowsOpenCodePortUnknown{SID: key, Path: file, Reason: err.Error(), Fix: "repair the account file or profile"})
@@ -241,6 +247,27 @@ func enterpriseHookStandaloneOpenCodePorts(ctx context.Context, manifest enterpr
 			continue
 		}
 		available[key] = port
+	}
+	// A file that still names an imported port after a refused replacement
+	// can remain live. Keep that port out of future fresh assignments after
+	// the one import window closes, until an administrator clears the mark.
+	for port, sid := range failedImports {
+		held := false
+		for _, mark := range state.Contested {
+			if mark.Port == port {
+				held = true
+				break
+			}
+		}
+		for _, bound := range resultRecord {
+			if bound == port {
+				held = true
+				break
+			}
+		}
+		if !held {
+			state.Contested = append(state.Contested, enterprisehooks.WindowsOpenCodeContestedPort{Port: port, SIDs: []string{sid}})
+		}
 	}
 	state.Ports, state.Unknown = resultRecord, unknownEntries
 	if err := enterpriseHookWindowsOpenCodePortsWrite(path, state); err != nil {

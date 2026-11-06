@@ -385,6 +385,20 @@ func TestManagedWindowsGuardianFinalServiceLinkDoesNotPublishClash(t *testing.T)
 	if err == nil || ports[openCodeSIDFirst] != 0 || ports[openCodeSIDSecond] == 25002 || f.record[openCodeSIDFirst] != 0 || f.record[openCodeSIDSecond] == 25002 || f.files[secondHome] == 25002 {
 		t.Fatalf("linked file port was published to another account: ports=%v files=%v record=%v err=%v", ports, f.files, f.record, err)
 	}
+	if len(f.contested) != 1 || f.contested[0].Port != 25002 || len(f.contested[0].SIDs) != 1 {
+		t.Fatalf("unwritten import port was not held: %+v", f.contested)
+	}
+	newSID := "S-1-5-21-700-800-900-9002"
+	f.add(t, newSID)
+	ports, err = f.run(t)
+	if err == nil || ports[newSID] == 25002 || f.record[newSID] == 25002 {
+		t.Fatalf("later newcomer received the linked file's port: ports=%v record=%v err=%v", ports, f.record, err)
+	}
+	delete(f.writeFailure, firstHome)
+	ports, err = f.run(t)
+	if err != nil || ports[openCodeSIDFirst] == 25002 || ports[openCodeSIDFirst] == 0 || f.files[firstHome] != ports[openCodeSIDFirst] {
+		t.Fatalf("ordinary recovery did not use a fresh port: ports=%v files=%v err=%v", ports, f.files, err)
+	}
 }
 
 func TestManagedWindowsOpenCodePortReadSeesFinalServiceLink(t *testing.T) {

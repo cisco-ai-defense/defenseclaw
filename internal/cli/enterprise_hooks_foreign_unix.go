@@ -355,12 +355,16 @@ func runEnterpriseHookStandaloneForeignCleanup(ctx context.Context, stderr io.Wr
 	// a uid with no record entry, when no other uid holds it.
 	var openCodePlan enterprisepolicy.OpenCodePortPlan
 	var openCodeUnknown []enterprisehooks.UnixOpenCodeServicePortUnknown
+	var openCodeImportPorts map[int]int
+	var openCodeImportWindow bool
+	failedImports := map[int]int{}
 	if openCodeGoverned {
 		// The single import window (REVIEW-gx053-11): users' files are read
 		// only in the pass that creates or rebuilds the record (no record
 		// file: a first install, an upgrade from a build without one, or an
 		// administrator's rebuild). After that pass no user file is input.
 		importWindow := openCodePortsErr == nil && !openCodeState.Exists
+		openCodeImportWindow = importWindow
 		var unrecorded []enterprisehooks.UnixEligibleAccount
 		uids := make([]int, 0, len(accounts))
 		for _, account := range accounts {
@@ -375,6 +379,7 @@ func runEnterpriseHookStandaloneForeignCleanup(ctx context.Context, stderr io.Wr
 		}
 		var imports map[int]int
 		imports, openCodeUnknown = enterpriseHookReadOpenCodePortsAsUsers(ctx, stderr, unrecorded)
+		openCodeImportPorts = imports
 		unknownUIDs := map[int]bool{}
 		for _, entry := range openCodeUnknown {
 			unknownUIDs[entry.UID] = true
@@ -658,6 +663,11 @@ func runEnterpriseHookStandaloneForeignCleanup(ctx context.Context, stderr io.Wr
 					// A binding this pass made but could not write is not
 					// recorded: nothing in the record changes.
 					delete(openCodePlan.Record, account.UID)
+					if openCodeImportWindow {
+						if port := openCodeImportPorts[account.UID]; port > 0 && port != enterprisepolicy.OpenCodeDefaultServicePort && port != 49375 {
+							failedImports[port] = account.UID
+						}
+					}
 					fmt.Fprintf(stderr, "defenseclaw: enterprise hooks: %s's OpenCode service port file %s %s; no binding is recorded for it. To clear it: %s\n",
 						user, path, reason, fix)
 				}
@@ -750,6 +760,27 @@ func runEnterpriseHookStandaloneForeignCleanup(ctx context.Context, stderr io.Wr
 		contested := append([]enterprisehooks.UnixOpenCodeContestedPort(nil), openCodeState.Contested...)
 		for port, claimants := range openCodePlan.Contested {
 			contested = append(contested, enterprisehooks.UnixOpenCodeContestedPort{Port: port, UIDs: claimants})
+		}
+		// A live port named by an unwritable import file must remain out of
+		// the fresh pool after the import window closes. The protected mark
+		// lasts until an administrator clears it, like a multi-file contest.
+		for port, uid := range failedImports {
+			claimed := false
+			for _, mark := range contested {
+				if mark.Port == port {
+					claimed = true
+					break
+				}
+			}
+			for _, bound := range next {
+				if bound == port {
+					claimed = true
+					break
+				}
+			}
+			if !claimed {
+				contested = append(contested, enterprisehooks.UnixOpenCodeContestedPort{Port: port, UIDs: []int{uid}})
+			}
 		}
 		// The window pass always writes, so the record exists and the window
 		// closes.

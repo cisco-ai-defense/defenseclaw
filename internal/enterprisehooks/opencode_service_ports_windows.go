@@ -226,7 +226,7 @@ func WriteWindowsOpenCodeServicePortsFull(path string, state WindowsOpenCodeServ
 func validateWindowsOpenCodeContests(contested []WindowsOpenCodeContestedPort, holders map[int]string) error {
 	seen := map[int]bool{}
 	for _, mark := range contested {
-		if mark.Port <= 0 || mark.Port > 65535 || seen[mark.Port] || holders[mark.Port] != "" || len(mark.SIDs) < 2 {
+		if mark.Port <= 0 || mark.Port > 65535 || seen[mark.Port] || holders[mark.Port] != "" || len(mark.SIDs) < 1 {
 			return fmt.Errorf("enterprise hooks: OpenCode service ports record has an invalid contested port")
 		}
 		seen[mark.Port] = true
