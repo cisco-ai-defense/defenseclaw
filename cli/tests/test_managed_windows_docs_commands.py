@@ -68,7 +68,20 @@ _BARE_RUN = re.compile(
     r"(defenseclaw-gateway|defenseclaw)(\.exe)?(?![\w-])",
     re.IGNORECASE,
 )
-_ELEVATED_TITLE = re.compile(r"""title\s*=\s*["'][^"']*\b(?:elevated|administrator)""", re.IGNORECASE)
+_ELEVATED_TITLE = re.compile(r"""title\s*=\s*["'][^"']*\b(?:elevated|administrator|admin\b)""", re.IGNORECASE)
+# A quote that opens a token holding the bare name ("defenseclaw.exe" status,
+# & 'defenseclaw.exe' status, Invoke-Expression 'defenseclaw.exe status'):
+# quoting the name does not put it on PATH (g072 review 3 S1). A quoted full
+# path keeps its quote, because the name follows a backslash there.
+_OPENING_QUOTE = re.compile(
+    r"""(^|[\s&=(|;,])['"](?=(?:defenseclaw-gateway|defenseclaw)(?:\.exe)?(?![\w-]))""", re.IGNORECASE
+)
+# The same quote where the elevated rule runs the name: after the call
+# operator, -FilePath, or first (cmd.exe). After = it is a string value
+# ($Task = 'DefenseClaw Setup as SYSTEM').
+_RUN_QUOTE = re.compile(
+    r"""(^|&\s*|-FilePath\s+)['"](?=(?:defenseclaw-gateway|defenseclaw)(?:\.exe)?(?![\w-]))""", re.IGNORECASE
+)
 
 
 def _doc_files() -> list[Path]:
@@ -111,12 +124,13 @@ def _bare_command(unit: str, elevated: bool = False) -> str | None:
     """Why ``unit`` is a bare managed-Windows command, or ``None``."""
     unit = _PROMPT.sub("", " ".join(unit.split()))
     if elevated and not unit.startswith(("#", "REM ", "rem ", "::")):
-        match = _BARE_RUN.search(unit)
+        match = _BARE_RUN.search(_RUN_QUOTE.sub(r"\1", unit))
         if match:
             return f"bare {match.group(1)}{match.group(2) or ''} in an elevated prompt block"
-    for match in _BARE.finditer(unit):
+    for match in _BARE.finditer(_OPENING_QUOTE.sub(r"\1", unit)):
         name, exe = match.group(1), match.group(2)
-        args = _SEPARATOR.split(match.group(3), maxsplit=1)[0].strip()
+        # The quote that closes a quoted name is not an argument.
+        args = _SEPARATOR.split(match.group(3).lstrip("'\""), maxsplit=1)[0].strip()
         if exe:
             if args and args.lower() != "enterprise windows":
                 return f"bare {name}{exe} with arguments"
@@ -185,6 +199,16 @@ def test_per_user_allowlist_has_no_stale_entries() -> None:
         ('C:\\> "C:\\Program Files\\Cisco\\DefenseClaw\\bin\\defenseclaw.exe" status', False),
         ("defenseclaw-hook.exe --version", False),
         ("defenseclaw.exe | Out-Null", False),
+        # g072 review 3 S1: a quote that opens the name does not make it a path.
+        ('& "defenseclaw.exe" enterprise windows status', True),
+        ("& 'defenseclaw.exe' status", True),
+        ('"defenseclaw.exe" status', True),
+        ("Start-Process -FilePath 'defenseclaw.exe' -ArgumentList status", True),
+        ("Invoke-Expression 'defenseclaw.exe status'", True),
+        ("& 'defenseclaw-gateway.exe' rulepack validate --dir X", True),
+        ('Get-Command "defenseclaw.exe"', False),
+        ("& 'C:\\Program Files\\Cisco\\DefenseClaw\\bin\\defenseclaw.exe' status", False),
+        ("'C:\\Program Files\\Cisco\\DefenseClaw\\bin\\defenseclaw.exe' status", False),
     ],
 )
 def test_the_matcher(unit: str, expected: bool) -> None:
@@ -210,6 +234,9 @@ def test_the_matcher(unit: str, expected: bool) -> None:
         ("Start-Process -FilePath defenseclaw -ArgumentList status", True),
         ("Get-Service DefenseClaw* | Format-Table Name, Status, StartType", False),
         ("Get-WinEvent -LogName DefenseClaw -MaxEvents 3", False),
+        ("& 'defenseclaw' status", True),
+        ('"defenseclaw" doctor', True),
+        ("$Task = 'DefenseClaw Setup as SYSTEM'", False),
     ],
 )
 def test_the_matcher_in_an_elevated_block(unit: str, expected: bool) -> None:
@@ -230,6 +257,12 @@ def test_units_read_the_fence_title_and_join_whitespace() -> None:
             "~~~bash title='Administrator prompt'",
             "defenseclaw-gateway status",
             "~~~",
+            '```ps1 title="Admin PowerShell"',
+            "defenseclaw doctor",
+            "```",
+            '```ps1 title="Badminton club"',
+            "defenseclaw doctor",
+            "```",
         ]
     )
     units = [(unit, elevated) for _, unit, elevated in _units(page)]
@@ -237,7 +270,9 @@ def test_units_read_the_fence_title_and_join_whitespace() -> None:
         ("defenseclaw agent discovery runtime selftest", True),
         ("defenseclaw status", False),
         ("defenseclaw-gateway status", True),
+        ("defenseclaw doctor", True),
+        ("defenseclaw doctor", False),
     ]
     # The block a review found: a per-user command under an elevated title.
     hits = [_bare_command(unit, elevated) for unit, elevated in units]
-    assert [hit is not None for hit in hits] == [True, False, True]
+    assert [hit is not None for hit in hits] == [True, False, True, True, False]
