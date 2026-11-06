@@ -151,7 +151,7 @@ func TestHookCallInsideAHookCallSharesItsWait(t *testing.T) {
 	t.Setenv("HOME", home)
 	t.Setenv("USERPROFILE", home)
 	var commands []string
-	for i := 1; i < shares; i++ {
+	for i := networkShareCallShares; i < shares; i++ {
 		commands = append(commands, fmt.Sprintf("echo ordinary > /dead%d.example/share/notes.txt", i))
 	}
 	payload, err := json.Marshal(map[string]any{
@@ -162,8 +162,10 @@ func TestHookCallInsideAHookCallSharesItsWait(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer HookCall()()
-	if !networkPathUnanswered("/dead0.example/share/notes.txt") {
-		t.Fatal("the share that does not answer answered")
+	for i := range networkShareCallShares {
+		if !networkPathUnanswered(fmt.Sprintf("/dead%d.example/share/notes.txt", i)) {
+			t.Fatal("the share that does not answer answered")
+		}
 	}
 	start := time.Now()
 	if _, ok := Decode(Resolve(payload)); !ok {
@@ -171,5 +173,48 @@ func TestHookCallInsideAHookCallSharesItsWait(t *testing.T) {
 	}
 	if took := time.Since(start); took > 400*time.Millisecond {
 		t.Fatalf("the target resolution inside a hook call that spent its wait waited %v more", took)
+	}
+}
+
+// rel-1-0-6:GAP-0482 (review 3): within one hook call, a share that does not
+// answer costs the call its own wait and no other share its chance. An
+// answering share asked after it is read, and a script there that writes
+// the local keys file is seen.
+func TestOneHookCallDeadShareDoesNotStarveAnAnsweringShare(t *testing.T) {
+	s := newHookCallShares(t)
+	defer HookCall()()
+	if !networkPathUnanswered(filepath.Join(s.dead, "notes.txt")) {
+		t.Fatal("the share that does not answer answered")
+	}
+	s.checkLiveRead(t)
+}
+
+// The bound of a call holds: shares that do not answer cost it no more than
+// networkShareCallShares waits, and the share asked after that reads as
+// unknown at once.
+func TestOneHookCallWaitIsBoundedAcrossDeadShares(t *testing.T) {
+	const shares = 6
+	release := make(chan struct{})
+	defer close(release)
+	fakeNetworkShare(t, "/dead0.example/share", 200*time.Millisecond, 5*time.Second, func(string) { <-release })
+	networkShareRootOf = func(path string) string {
+		for i := range shares {
+			root := fmt.Sprintf("/dead%d.example/share", i)
+			if strings.HasPrefix(filepath.ToSlash(path), root+"/") {
+				return root
+			}
+		}
+		return ""
+	}
+	defer HookCall()()
+	start := time.Now()
+	for i := range shares {
+		if !networkPathUnanswered(fmt.Sprintf("/dead%d.example/share/notes.txt", i)) {
+			t.Fatal("the share that does not answer answered")
+		}
+	}
+	bound := networkShareCallShares*200*time.Millisecond + 150*time.Millisecond
+	if took := time.Since(start); took > bound {
+		t.Fatalf("%d shares that do not answer held the call %v, want at most %v", shares, took, bound)
 	}
 }

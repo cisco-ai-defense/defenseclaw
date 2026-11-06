@@ -38,19 +38,23 @@ import (
 // still had no answer after networkShareDeadAfter stays unknown for
 // networkShareQuietFor without being asked again.
 //
-// The answer wait is given to the hook call, not to each share: one hook
+// The answer wait is bounded per hook call as well as per share: one hook
 // call may name many shares, one after another, and each fresh share given
-// its own wait would add up past the hook answer budget. A hook call (the
-// hook client resolving its targets, the gateway answering one hook
-// request: HookCall) waits networkShareAnswerWait for share answers in
-// all. A fresh share asked once its call has spent that wait reads as
-// unknown at once, as a share that did not answer within its wait reads,
-// and is read once it has answered. The wait is the call's own: no other
-// call, before it or alongside it in the same process, spends it
-// (rel-1-0-6:GAP-0482 review 2), so every call can read a share that
-// answers within the wait. The readers take no context, so a call is the
-// goroutine that runs it, from HookCall to its end; a read outside a hook
-// call waits for each share at most networkShareAnswerWait.
+// its own wait with no bound on the sum would add up past the hook answer
+// budget. A hook call (the hook client resolving its targets, the gateway
+// answering one hook request: HookCall) waits for share answers
+// networkShareCallShares times networkShareAnswerWait in all. A share that
+// does not answer costs the call its own wait and no other share its
+// chance: each of the first shares a call asks is waited for at most
+// networkShareAnswerWait, whatever the shares before it did, and a share
+// that answers within it is read (rel-1-0-6:GAP-0482 review 3). A fresh
+// share asked once the call has spent all of its wait reads as unknown at
+// once, as a share that did not answer within its wait reads, and is read
+// once it has answered. The wait belongs to the call alone: no other call,
+// before it or alongside it in the same process, spends it
+// (rel-1-0-6:GAP-0482 review 2). The readers take no context, so a call is
+// the goroutine that runs it, from HookCall to its end; a read outside a
+// hook call waits for each share at most networkShareAnswerWait.
 
 // errNetworkShareUnanswered is the error of a read below a network share
 // that has not answered. It is not fs.ErrNotExist: the path may exist.
@@ -73,6 +77,11 @@ var (
 	networkShareRootOf = networkShareRoot
 	probeNetworkShare  = func(root string) { _, _ = os.Stat(root) }
 )
+
+// networkShareCallShares is how many full answer waits one hook call may
+// spend in all: two shares that do not answer cost it 1.5 s, and the hook
+// answer budget (3.5 s) keeps room for the rest of the call.
+const networkShareCallShares = 2
 
 // networkShareProbeLimit bounds the shares remembered at once.
 const networkShareProbeLimit = 256
@@ -97,14 +106,15 @@ var hookCalls struct {
 }
 
 type hookCall struct {
-	// waitLeft is how long the call may still wait for share answers.
+	// waitLeft is how long the call may still wait for share answers
+	// (networkShareCallShares answer waits at its start).
 	waitLeft time.Duration
 }
 
 // HookCall begins a hook call on the calling goroutine and returns its end.
 // The reads of the goroutine until then wait for share answers
-// networkShareAnswerWait in all. Within a call it begins nothing more, so
-// the gateway's request and the target resolution it runs are one call.
+// networkShareCallShares answer waits in all. Within a call it begins
+// nothing more, so the gateway's request and the target resolution it runs are one call.
 func HookCall() (end func()) {
 	id := goroutineID()
 	if id == 0 {
@@ -118,7 +128,7 @@ func HookCall() (end func()) {
 	if hookCalls.calls == nil {
 		hookCalls.calls = make(map[uint64]*hookCall)
 	}
-	hookCalls.calls[id] = &hookCall{waitLeft: networkShareAnswerWait}
+	hookCalls.calls[id] = &hookCall{waitLeft: networkShareCallShares * networkShareAnswerWait}
 	return func() {
 		hookCalls.mu.Lock()
 		delete(hookCalls.calls, id)
