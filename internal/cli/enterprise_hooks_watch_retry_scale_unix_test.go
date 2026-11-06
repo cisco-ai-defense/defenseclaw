@@ -20,6 +20,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/defenseclaw/defenseclaw/internal/config"
 	"github.com/defenseclaw/defenseclaw/internal/enterprisehooks"
 	"github.com/defenseclaw/defenseclaw/internal/unixidentity"
 	"github.com/spf13/cobra"
@@ -28,6 +29,151 @@ import (
 type gap0523LogBuffer struct {
 	mu  sync.Mutex
 	buf bytes.Buffer
+}
+
+// A periodic pass can finish the restoration before the queued filesystem
+// event's debounce expires. Its own summary must name the owned file it put
+// back, even while another target remains in attention.
+func TestGAP0523AttentionIntervalNamesRestoredOwnedFile(t *testing.T) {
+	for _, tc := range []struct {
+		name, reason       string
+		damaged, attention bool
+	}{
+		{"attention_interval", "interval", true, true},
+		{"attention_retry", "retry", true, true},
+		{"healthy_fsnotify", "fsnotify", true, false},
+		{"healthy_unchanged", "interval", false, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			restoreEnterpriseHooksLifecycleTestState(t)
+			previousReconcile, previousPlatformWatch := enterpriseHookWatchReconcileOnce, enterpriseHookWatchPlatformWatch
+			previousTargetScoped, previousBefore := enterpriseHookWatchTargetScoped, enterpriseHookBeforeWatchReconcile
+			previousInterval, previousDebounce := enterpriseHookWatchInterval, enterpriseHookWatchDebounce
+			previousRetryMin, previousRetryMax := enterpriseHookWatchRepairRetryMin, enterpriseHookWatchRepairRetryMax
+			t.Cleanup(func() {
+				enterpriseHookWatchReconcileOnce, enterpriseHookWatchPlatformWatch = previousReconcile, previousPlatformWatch
+				enterpriseHookWatchTargetScoped, enterpriseHookBeforeWatchReconcile = previousTargetScoped, previousBefore
+				enterpriseHookWatchInterval, enterpriseHookWatchDebounce = previousInterval, previousDebounce
+				enterpriseHookWatchRepairRetryMin, enterpriseHookWatchRepairRetryMax = previousRetryMin, previousRetryMax
+			})
+			dir := t.TempDir()
+			token := filepath.Join(dir, ".hook-hermes.token")
+			const issued = "issued\n"
+			if err := os.WriteFile(token, []byte(issued), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			cfg = &config.Config{DataDir: dir}
+			enterpriseHookManifest = filepath.Join(dir, "targets.yaml")
+			enterpriseHookWatchInterval = 150 * time.Millisecond
+			enterpriseHookWatchDebounce = 3 * time.Second
+			enterpriseHookWatchRepairRetryMin, enterpriseHookWatchRepairRetryMax = 2*time.Second, 15*time.Second
+			if tc.reason == "retry" {
+				enterpriseHookWatchInterval = time.Minute
+				enterpriseHookWatchRepairRetryMin = 150 * time.Millisecond
+			}
+			if tc.reason == "fsnotify" {
+				enterpriseHookWatchInterval = time.Minute
+				enterpriseHookWatchDebounce = 50 * time.Millisecond
+			}
+			enterpriseHookBeforeWatchReconcile = func(io.Writer) {}
+			ready, release := make(chan struct{}), make(chan struct{})
+			enterpriseHookWatchPlatformWatch = func(context.Context, io.Writer) { close(ready); <-release }
+			enterpriseHookWatchTargetScoped = func() bool { return true }
+			calls := 0
+			enterpriseHookWatchReconcileOnce = func(context.Context) (enterpriseHookReconcileRun, error) {
+				calls++
+				if calls > 1 {
+					data, err := os.ReadFile(token)
+					if err != nil {
+						return enterpriseHookReconcileRun{}, err
+					}
+					if string(data) != issued {
+						if err := os.WriteFile(token, []byte(issued), 0o600); err != nil {
+							return enterpriseHookReconcileRun{}, err
+						}
+					}
+				}
+				healthy := enterpriseHookReconcileRow{User: "alice", Connector: "hermes", OK: true}
+				failed := enterpriseHookReconcileRow{User: "bob", Connector: "hermes", Error: "repair pending"}
+				rows := []enterpriseHookReconcileRow{healthy}
+				failures := 0
+				if tc.attention {
+					rows = append(rows, failed)
+					failures = 1
+				}
+				return enterpriseHookReconcileRun{
+					ManifestSHA256: "same", Rows: rows, Failures: failures,
+					WatchDirs: []string{dir}, WatchExclusiveFiles: []string{token},
+					WatchPathOwners: map[string][]string{token: {enterpriseHookProtectedTargetKey(healthy)}},
+				}, nil
+			}
+			ctx, cancel := context.WithCancel(context.Background())
+			cmd := &cobra.Command{}
+			cmd.SetContext(ctx)
+			var log gap0523LogBuffer
+			cmd.SetErr(&log)
+			done := make(chan struct{})
+			var watchErr error
+			go func() { watchErr = runEnterpriseHooksWatch(cmd, nil); close(done) }()
+			released := false
+			t.Cleanup(func() {
+				if !released {
+					close(release)
+				}
+				cancel()
+				select {
+				case <-done:
+					if watchErr != nil && !errors.Is(watchErr, context.Canceled) {
+						t.Errorf("watch exit: %v", watchErr)
+					}
+				case <-time.After(3 * time.Second):
+					t.Error("watch did not stop")
+				}
+			})
+			select {
+			case <-ready:
+			case <-done:
+				t.Fatalf("watch stopped before startup: %v", watchErr)
+			case <-time.After(3 * time.Second):
+				t.Fatal("watch did not reach startup")
+			}
+			if tc.damaged {
+				if err := os.WriteFile(token, []byte("changed\n"), 0o600); err != nil {
+					t.Fatal(err)
+				}
+			}
+			close(release)
+			released = true
+			status, targets, failures, repairs := "ok", 1, 0, 0
+			if tc.attention {
+				status, targets, failures = "attention", 2, 1
+			}
+			if tc.damaged {
+				repairs = 1
+			}
+			want := fmt.Sprintf("reconcile reason=%s status=%s targets=%d pending=0 failures=%d repairs=%d", tc.reason, status, targets, failures, repairs)
+			deadline := time.After(5 * time.Second)
+			poll := time.NewTicker(10 * time.Millisecond)
+			defer poll.Stop()
+			for {
+				got := log.String()
+				if strings.Contains(got, want) {
+					if tc.damaged && (!strings.Contains(got, "repair_path="+strconv.Quote(token)) || strings.Contains(got, "no_change=true repair_path=")) {
+						t.Fatalf("restoration was not named by the restoring pass: %s", got)
+					}
+					if !tc.damaged && strings.Contains(got, "repair_path=") {
+						t.Fatalf("unchanged owned file was counted as a repair: %s", got)
+					}
+					return
+				}
+				select {
+				case <-poll.C:
+				case <-deadline:
+					t.Fatalf("missing %q; log: %s", want, got)
+				}
+			}
+		})
+	}
 }
 
 func (b *gap0523LogBuffer) Write(p []byte) (int, error) {
