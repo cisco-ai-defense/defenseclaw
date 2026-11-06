@@ -193,7 +193,7 @@ func trustedGitBashAuthorizedKeysWrite(input actionfacts.Input) bool {
 // export of an earlier call in a persistent shell, a profile, a function
 // standing in for python3), and its own environment is not the shell's, so
 // no string of the program is proven inert.
-func trustedInlineAuthorizedKeysWrite(input actionfacts.Input, facts actionfacts.Facts) bool {
+func trustedInlineAuthorizedKeysWrite(input actionfacts.Input, facts actionfacts.Facts, strict bool) bool {
 	if len(facts.Commands) != 1 {
 		return false
 	}
@@ -209,7 +209,7 @@ func trustedInlineAuthorizedKeysWrite(input actionfacts.Input, facts actionfacts
 			(!command.ArgvComplete && !trustedPythonAssignedArgv(input, command.Argv)) {
 			return false
 		}
-		return trustedPathlibAuthorizedKeysWriteProof(command.Argv[2], facts.ActiveHome, facts.CWD) ||
+		return trustedPathlibAuthorizedKeysWriteProof(command.Argv[2], facts.ActiveHome, facts.CWD, strict) ||
 			trustedPythonPathAuthorizedKeysWriteProof(command.Argv[2]) ||
 			trustedInterpreterAuthorizedKeysWrite(command.Argv[2], facts.ActiveHome, "python")
 	case "perl":
@@ -259,7 +259,7 @@ func trustedPythonAssignedArgv(input actionfacts.Input, argv []string) bool {
 // f-string field, getattr or an agent-controlled sitecustomize or import can
 // run text that the Python lexer reads as data, so string position is not a
 // proof that the write cannot run.
-func trustedPathlibAuthorizedKeysWriteProof(code, home, cwd string) bool {
+func trustedPathlibAuthorizedKeysWriteProof(code, home, cwd string, strict bool) bool {
 	for _, assignment := range trustedPathlibAuthorizedKeysWrite.FindAllStringIndex(code, -1) {
 		for _, write := range trustedPathlibWriteText.FindAllStringIndex(code, -1) {
 			if write[0] < assignment[1] {
@@ -268,7 +268,7 @@ func trustedPathlibAuthorizedKeysWriteProof(code, home, cwd string) bool {
 			between := code[assignment[1]:write[0]]
 			if safe := trustedPathlibSafeReassignment.FindStringSubmatch(between); len(safe) == 2 &&
 				trustedPythonPathStablePrefix(code[:assignment[0]], filepath.IsAbs(safe[1])) &&
-				trustedOrdinaryPathReassignment(safe[1], home, cwd) {
+				trustedOrdinaryPathReassignment(safe[1], home, cwd, strict) {
 				continue
 			}
 			return true
@@ -351,7 +351,7 @@ func trustedPythonPathStablePrefix(prefix string, absolute bool) bool {
 	return true
 }
 
-func trustedOrdinaryPathReassignment(name, home, cwd string) bool {
+func trustedOrdinaryPathReassignment(name, home, cwd string, strict bool) bool {
 	if name == "" || strings.ContainsAny(name, "\x00\r\n$`*?[") {
 		return false
 	}
@@ -365,17 +365,22 @@ func trustedOrdinaryPathReassignment(name, home, cwd string) bool {
 	if !ok {
 		return false
 	}
-	entry, entryErr := os.Stat(resolved)
-	if entryErr != nil && !os.IsNotExist(entryErr) {
-		return false
-	}
 	for _, protected := range hookpaths.ProtectedAuthorizedKeysPaths(home) {
 		if canonicalSemanticPath(resolved) == canonicalSemanticPath(protected) {
 			return false
 		}
-		guarded, err := os.Stat(protected)
+	}
+	entry, entryErr := hookpaths.PathStat(resolved)
+	if entryErr != nil && !os.IsNotExist(entryErr) {
+		return !strict && hookpaths.ShareUnanswered(entryErr)
+	}
+	for _, protected := range hookpaths.ProtectedAuthorizedKeysPaths(home) {
+		guarded, err := hookpaths.PathStat(protected)
 		if err != nil && !os.IsNotExist(err) {
-			return false
+			if strict || !hookpaths.ShareUnanswered(err) {
+				return false
+			}
+			continue
 		}
 		if entryErr == nil && err == nil && os.SameFile(entry, guarded) {
 			return false
@@ -1160,7 +1165,7 @@ func trustedExistingAuthorizedKeysSymlinkWrite(request trustedActionRequest, fac
 		if cannotResolveLocally || runtime.GOOS != "windows" {
 			return false
 		}
-		if info, err := os.Lstat(target); err != nil || info.Mode()&(os.ModeSymlink|os.ModeIrregular) == 0 {
+		if info, err := hookpaths.PathLstat(target); err != nil || info.Mode()&(os.ModeSymlink|os.ModeIrregular) == 0 {
 			return false
 		}
 		if !windowsMovedRead {
@@ -1170,6 +1175,35 @@ func trustedExistingAuthorizedKeysSymlinkWrite(request trustedActionRequest, fac
 			}
 		}
 		return windowsMovedOntoLinks[hookpaths.WindowsMovedOntoLinkKey(target)]
+	}
+	ordinarySpelling := func(target string) bool {
+		return runtime.GOOS != "windows" || windowsLocationOrdinaryWriteTarget(target)
+	}
+	staticWordsRead, staticWordsKnown := false, false
+	possible := func(target string) bool {
+		if !ordinarySpelling(target) {
+			return true
+		}
+		if request.ProtectedHomeHook && links.DereferencedSourceLink(target) {
+			return true
+		}
+		if request.staticOperandReading || request.unresolvedSourceWords {
+			// A static projection is one reading of a runtime operand. It
+			// cannot clear the unresolved name in the original command.
+			return true
+		}
+		if !staticWordsRead {
+			staticWordsRead = true
+			staticWordsKnown = trustedCommandWordsStatic(request.Input, facts.ActiveHome)
+		}
+		if !staticWordsKnown {
+			// A runtime value can still name a reached disk link.
+			return true
+		}
+		if request.possibleTarget != nil {
+			*request.possibleTarget = true
+		}
+		return request.StrictPolicy
 	}
 	writeTarget := func(target string, safeRedirect, ownCopy bool) bool {
 		if !filepath.IsAbs(target) && (target == "" || !filepath.IsAbs(clientCWD)) {
@@ -1210,6 +1244,14 @@ func trustedExistingAuthorizedKeysSymlinkWrite(request trustedActionRequest, fac
 		if isProtected(target) {
 			return true
 		}
+		// Positive client and command-link answers take precedence over an
+		// opaque copy scope. The scope alone is only a possible write.
+		if isProtected(clientTargets[target]) {
+			return true
+		}
+		if linked, ok := links.Target(target); ok && isProtected(linked) {
+			return true
+		}
 		if moved := hookpaths.PlainMovePath(target); movedOntoLinks[moved] || windowsMovedOntoLink(moved) {
 			parent, ok := hookpaths.ResolveWriteTarget(filepath.Dir(moved))
 			return !ok || isProtected(filepath.Join(parent, filepath.Base(moved)))
@@ -1229,7 +1271,10 @@ func trustedExistingAuthorizedKeysSymlinkWrite(request trustedActionRequest, fac
 		// cannot walk the user's home (ProtectHome); the hook client's walk of
 		// the same operand replaces only that missing view (GAP-0278).
 		if !safeRedirect && links.OpaqueTargetWithFacts(target, ownCopy, opaqueFacts) {
-			if info, err := os.Lstat(target); err != nil || info.Mode()&os.ModeCharDevice == 0 {
+			// The scope is possible until a named client or local target
+			// below proves that it reaches the protected file.
+			info, err := hookpaths.PathLstat(target)
+			if (err != nil || info.Mode()&os.ModeCharDevice == 0) && possible(target) {
 				return true
 			}
 		}
@@ -1249,11 +1294,13 @@ func trustedExistingAuthorizedKeysSymlinkWrite(request trustedActionRequest, fac
 				// loop, a chain past the kernel limit or an unreadable
 				// component). Resolve it here, or fail closed.
 				if cannotResolveLocally {
-					unresolved := !windowsLocationOrdinaryWriteTarget(target)
+					unresolved := possible(target)
 					if unresolved && request.unresolvedTarget != nil {
 						*request.unresolvedTarget = true
 					}
-					return unresolved
+					if unresolved {
+						return true
+					}
 				}
 			case truncated && cannotResolveLocally:
 				// The bounded map omits this operand, which may be a link
@@ -1261,11 +1308,13 @@ func trustedExistingAuthorizedKeysSymlinkWrite(request trustedActionRequest, fac
 				// is unknown, so fail closed. An operand the client did list,
 				// which connector scoping removed, keeps the local checks.
 				if _, described := clientTargets[target]; !described {
-					omitted := !windowsLocationOrdinaryWriteTarget(target)
+					omitted := possible(target)
 					if omitted && request.overBudgetOmission != nil && clientTargets[hookpaths.BudgetKey] == "1" {
 						*request.overBudgetOmission = true
 					}
-					return omitted
+					if omitted {
+						return true
+					}
 				}
 			}
 		}
@@ -1275,14 +1324,11 @@ func trustedExistingAuthorizedKeysSymlinkWrite(request trustedActionRequest, fac
 		// A name that a link earlier in the command makes an alias of a
 		// protected file (GAP-1505).
 		if linked, ok := links.Target(target); !ok || isProtected(linked) {
-			// Behind ProtectHome the gateway cannot walk a link the command
-			// creates in the user's home. The managed hook client walked the
-			// same links as the user and keyed its answer by this operand; a
-			// resolved answer decides it, so an ordinary hard link is not a
-			// key write (GAP-1440). An empty answer stays unknown. Links unknown
-			// only inside copy scopes that cannot reach the operand are read
-			// by the client as known ones (GAP-2582).
-			if !ok && request.ProtectedHomeHook && links.KnownOutsideScopes(target, ownCopy, opaqueFacts) {
+			if ok {
+				return true
+			}
+			// A named client reading can still prove either disposition.
+			if request.ProtectedHomeHook && links.KnownOutsideScopes(target, ownCopy, opaqueFacts) {
 				if resolved := clientTargets[target]; resolved != "" {
 					return isProtected(resolved)
 				}
@@ -1290,31 +1336,57 @@ func trustedExistingAuthorizedKeysSymlinkWrite(request trustedActionRequest, fac
 					return isProtected(resolved)
 				}
 			}
-			return true
+			if possible(target) {
+				return true
+			}
 		}
-		info, err := os.Lstat(target)
+		if hookpaths.SharePath(target) {
+			if trustedShareKnownProtectedTarget(target, protectedPaths, isProtected) {
+				return true
+			}
+			return possible(target)
+		}
+		info, err := hookpaths.PathLstat(target)
 		if err != nil && !os.IsNotExist(err) {
 			return false
 		}
-		if err == nil && info.Mode()&os.ModeSymlink == 0 {
-			// A hard link names a protected file under another path.
-			if !info.Mode().IsRegular() {
-				return false
+		if err == nil {
+			// A reachable link and a hard link both name the protected file
+			// by identity.
+			identity, identityErr := info, error(nil)
+			if info.Mode()&os.ModeSymlink != 0 {
+				identity, identityErr = hookpaths.PathStat(target)
 			}
-			for _, path := range protectedPaths {
-				if file, err := os.Stat(path); err == nil && os.SameFile(info, file) {
-					return true
+			if identityErr == nil && identity.Mode().IsRegular() {
+				for _, path := range protectedPaths {
+					if file, err := hookpaths.PathStat(path); err == nil && os.SameFile(identity, file) {
+						return true
+					}
 				}
 			}
-			return false
+			if info.Mode()&os.ModeSymlink == 0 {
+				return false
+			}
+		}
+		// A known link entry names a protected file even if the final file
+		// does not exist yet.
+		if err == nil && info.Mode()&os.ModeSymlink != 0 {
+			if link, readErr := hookpaths.PathReadlink(target); readErr == nil {
+				if filepath.IsAbs(link) && isProtected(link) {
+					return true
+				}
+				if !filepath.IsAbs(link) {
+					parent, ok := hookpaths.ResolveWriteTarget(filepath.Dir(target))
+					if ok && isProtected(filepath.Join(parent, link)) {
+						return true
+					}
+				}
+			}
 		}
 		// Resolve as the hook client does, so a link to a missing final
 		// file that the redirect would create is covered as well.
 		resolved, ok := hookpaths.ResolveWriteTarget(target)
-		// An existing link whose target cannot be resolved is still a
-		// possible write into the protected home. The client and gateway
-		// must both fail closed on a linked component before "..".
-		return isProtected(resolved) || !ok && !windowsLocationOrdinaryWriteTarget(target)
+		return isProtected(resolved) || !ok && (err == nil && info.Mode()&(os.ModeSymlink|os.ModeIrregular) != 0 || possible(target))
 	}
 	// Partial command projections can omit a redirect PathFact. The shell AST
 	// still gives an exact write operand, which the user's hook resolved.
@@ -1655,6 +1727,78 @@ func trustedExistingAuthorizedKeysSymlinkWrite(request trustedActionRequest, fac
 		}
 	}
 	return false
+}
+
+// trustedShareKnownProtectedTarget checks reachable file and parent identity
+// while the share probe is pending. Each independent read can use the same
+// bounded answer window; a stalled file read does not hide a reachable parent.
+func trustedShareKnownProtectedTarget(target string, protectedPaths []string, isProtected func(string) bool) bool {
+	type answer struct {
+		info os.FileInfo
+		err  error
+	}
+	fileAnswer := make(chan answer, 1)
+	parentAnswer := make(chan answer, 1)
+	entryAnswer := make(chan answer, 1)
+	parent := filepath.Dir(target)
+	go func() {
+		info, err := hookpaths.PathStat(target)
+		fileAnswer <- answer{info, err}
+	}()
+	go func() {
+		info, err := hookpaths.PathStat(parent)
+		parentAnswer <- answer{info, err}
+	}()
+	go func() {
+		info, err := hookpaths.PathLstat(target)
+		entryAnswer <- answer{info, err}
+	}()
+	file, directory, entry := <-fileAnswer, <-parentAnswer, <-entryAnswer
+	for _, path := range protectedPaths {
+		if file.err == nil {
+			if protectedFile, err := hookpaths.PathStat(path); err == nil && os.SameFile(file.info, protectedFile) {
+				return true
+			}
+		}
+		if directory.err == nil && filepath.Base(target) == filepath.Base(path) {
+			if protectedDir, err := hookpaths.PathStat(filepath.Dir(path)); err == nil && os.SameFile(directory.info, protectedDir) {
+				return true
+			}
+		}
+	}
+	if entry.err == nil && entry.info.Mode()&os.ModeSymlink != 0 {
+		if link, err := hookpaths.PathReadlink(target); err == nil {
+			if filepath.IsAbs(link) && isProtected(link) || !filepath.IsAbs(link) && isProtected(filepath.Join(parent, link)) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// trustedCommandWordsStatic reports whether every word is fixed by the
+// command text and the known home. An unresolved word can name an existing
+// protected link, so its opaque scope keeps the closed verdict.
+func trustedCommandWordsStatic(input actionfacts.Input, home string) bool {
+	command, ok := trustedBashCommandInput(input)
+	if !ok {
+		return false
+	}
+	file, ok := shellparse.Parse(command)
+	if !ok {
+		return false
+	}
+	static := true
+	syntax.Walk(file, func(node syntax.Node) bool {
+		if word, ok := node.(*syntax.Word); ok {
+			if _, ok := hookpaths.StaticWord(word, home); !ok {
+				static = false
+				return false
+			}
+		}
+		return static
+	})
+	return static
 }
 
 // trustedPOSIXShellCall reports a call a POSIX shell runs (Bash tool,

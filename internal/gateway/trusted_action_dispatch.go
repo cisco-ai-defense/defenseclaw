@@ -178,6 +178,8 @@ type trustedActionRequest struct {
 	// StrictPolicy keeps uncertain path proofs closed for the strict rule pack.
 	// Secure Client uses the same conservative path behavior as before.
 	StrictPolicy bool
+	// possibleTarget records a write whose spelling is ordinary but identity is unknown.
+	possibleTarget *bool
 	// ManagedHookOverflowHold retains a bounded state reading on an
 	// authenticated managed Windows hook without changing path resolution.
 	ManagedHookOverflowHold bool
@@ -188,6 +190,9 @@ type trustedActionRequest struct {
 	// hook client map, the answer of the reading
 	// (hookpaths.ReadingTargetPrefix) decides (GAP-2477).
 	staticOperandReading bool
+	// unresolvedSourceWords keeps the original command's uncertain value
+	// when a simple-command projection replaces it with a concrete reading.
+	unresolvedSourceWords bool
 	// ResolvedWriteTargets comes from the hook running as the real user.
 	// A present empty map means the client inspected the action and found no
 	// static write target; nil denotes missing or invalid client evidence.
@@ -509,6 +514,7 @@ func dispatchTrustedActionWith(
 				simples = []actionfacts.SimpleCommand{{EvaluationFailure: "limit"}}
 			}
 			evidenceCWDs := trustedSimpleCommandEvidenceCWDs(request, simples)
+			sourceWordsRead, sourceWordsStatic := false, false
 			for index, simple := range simples {
 				if simple.EvaluationFailure != "" {
 					if simple.EvaluationFailure != "limit" {
@@ -524,6 +530,13 @@ func dispatchTrustedActionWith(
 				}
 				child := request
 				child.Input.Command = simple.Text
+				if !child.unresolvedSourceWords && simple.Text != wholeCommand {
+					if !sourceWordsRead {
+						sourceWordsRead = true
+						sourceWordsStatic = wholeCommandKnown && trustedCommandWordsStatic(request.Input, facts.ActiveHome)
+					}
+					child.unresolvedSourceWords = !sourceWordsStatic
+				}
 				child.Input.CWD = simple.CWD
 				// An earlier cd, pushd or env -C of the action moved a Git
 				// Bash shell to another native Windows directory: the
@@ -4198,7 +4211,7 @@ func stateDirectoryEntryTarget(
 		return "", false
 	}
 	entry := filepath.Join(parent, path.Base(filepath.ToSlash(value)))
-	if info, err := os.Stat(entry); err == nil && info.IsDir() && (moveDestination || windows) {
+	if info, err := hookpaths.PathStat(entry); err == nil && info.IsDir() && (moveDestination || windows) {
 		return "", false
 	}
 	if candidate.Flavor == actionfacts.PathFlavorPOSIX {
