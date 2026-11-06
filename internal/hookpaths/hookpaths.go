@@ -1023,6 +1023,8 @@ func ResolveConnector(connector, surface, event string, payload []byte) string {
 	if copilot {
 		tool = copilotargs.LocalActionTool(tool)
 	}
+	// Describe the call under the tool name the gateway judges it as.
+	tool = ConnectorActionTool(connector, tool)
 	if len(args) == 0 && !toolConflict && !argsConflict {
 		return ""
 	}
