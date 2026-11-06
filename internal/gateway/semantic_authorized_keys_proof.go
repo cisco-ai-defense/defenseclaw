@@ -1413,10 +1413,7 @@ func trustedExistingAuthorizedKeysSymlinkWrite(request trustedActionRequest, fac
 		// earlier mention of a replaced value is not a write target.
 		return false
 	}
-	decision := request.targetMemo.ActionCommandGradeInShell(input.Command, input.CWD, facts.ActiveHome, globFacts, trustedPOSIXShellCall(input, facts))
-	if input.DialectHint != "" {
-		decision = decision.Max(request.targetMemo.ActionCommandGradeWithDialectAndGlobFacts(input.Command, input.CWD, facts.ActiveHome, input.DialectHint, globFacts))
-	}
+	decision := sshKeyShellGrade(request.targetMemo, input, facts.ActiveHome, globFacts, trustedPOSIXShellCall(input, facts))
 	if decision == hookpaths.GradeNamed {
 		return named()
 	}

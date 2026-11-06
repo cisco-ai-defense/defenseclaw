@@ -34,6 +34,8 @@ func TestGAP236Round7ReaderGradeAndWriterRole(t *testing.T) {
 		{"copy known destination in branch", `$t="$HOME/.ssh/authorized_k*"; if ($true) { Copy-Item payload -Destination:$t }`, project, "block", hookpaths.GradeNamed, actionfacts.DialectPowerShell},
 		{"copy ordinary destination with extra switch", `$t="project/report*"; Copy-Item -Verbose -Path payload -Destination:$t`, project, "allow", hookpaths.GradePossible, actionfacts.DialectPowerShell},
 		{"copy source pattern", `Copy-Item "$HOME/.ssh/authorized_k*" project/report.txt`, project, "allow", hookpaths.GradePossible, actionfacts.DialectPowerShell},
+		{"comment after ordinary writer", `Set-Content notes.txt x # see ~/.ssh/authorized_keys`, project, "allow", hookpaths.GradePossible, actionfacts.DialectPowerShell},
+		{"comment before named writer", "# see ~/.ssh/authorized_keys\nSet-Content ~/.ssh/authorized_keys x", project, "block", hookpaths.GradeNamed, actionfacts.DialectPowerShell},
 		{"content writer words as output", `Write-Output 'Set-Content -Path $HOME/.ssh/authorized_k*'`, project, "allow", hookpaths.GradeNone, actionfacts.DialectPowerShell},
 		{"copy writer words as output", `Write-Output 'Copy-Item payload $HOME/.ssh/authorized_k*'`, project, "allow", hookpaths.GradeNone, actionfacts.DialectPowerShell},
 		{"listing then named writer", `ls */*; echo k >> .ssh/authorized_keys`, home, "block", hookpaths.GradeNamed, actionfacts.DialectPOSIX},

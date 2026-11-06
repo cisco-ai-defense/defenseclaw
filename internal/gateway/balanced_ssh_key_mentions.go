@@ -12,6 +12,24 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/hookpaths"
 )
 
+// sshKeyShellGrade keeps uncertainty from an unselected shell reading in
+// strict policy, while only a target named by the selected shell is Named.
+// The selected reader already combines the grammars that may execute there.
+func sshKeyShellGrade(memo *hookpaths.TargetMemo, input actionfacts.Input, home string, globFacts map[string]string, posixShell bool) hookpaths.Grade {
+	unknown := memo.ActionCommandGradeWithDialectAndGlobFacts(input.Command, input.CWD, home, "", globFacts)
+	if input.DialectHint == "" {
+		if posixShell {
+			unknown = unknown.Max(memo.ActionCommandGradeInShell(input.Command, input.CWD, home, globFacts, true))
+		}
+		return unknown
+	}
+	hinted := memo.ActionCommandGradeWithDialectAndGlobFacts(input.Command, input.CWD, home, input.DialectHint, globFacts)
+	if unknown != hookpaths.GradeNone {
+		hinted = hinted.Max(hookpaths.GradePossible)
+	}
+	return hinted
+}
+
 // A confirmed target from the client is stronger than an uncertain shell
 // reading. The gateway also checks concrete paths resolved on the user's host.
 func sshKeyMentionGrade(request trustedActionRequest) hookpaths.Grade {
@@ -69,13 +87,6 @@ func sshKeyMentionGrade(request trustedActionRequest) hookpaths.Grade {
 	if os.Getenv("BASH_ENV") != "" && strings.Contains(strings.ToLower(input.Command), "bash") {
 		return hookpaths.GradeNamed
 	}
-	for _, dialect := range []actionfacts.Dialect{"", actionfacts.DialectPOSIX, actionfacts.DialectPowerShell} {
-		hit := request.targetMemo.ActionCommandGradeWithDialectAndGlobFacts(
-			input.Command, input.CWD, input.ActiveHome, dialect, clientGlobFacts(request))
-		grade = grade.Max(hit)
-		if grade == hookpaths.GradeNamed {
-			return grade
-		}
-	}
-	return grade
+	hit := sshKeyShellGrade(request.targetMemo, input, input.ActiveHome, clientGlobFacts(request), input.DialectHint == actionfacts.DialectPOSIX)
+	return grade.Max(hit)
 }

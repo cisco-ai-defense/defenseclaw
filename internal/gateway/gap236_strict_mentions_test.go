@@ -42,6 +42,7 @@ func TestGAP236OrdinaryMentionsMoveToStrictProfile(t *testing.T) {
 		{"GAP-0496 conditional", `if true; then bash -c 'ls -d */* | head -3'; fi`, home, actionfacts.DialectPOSIX},
 		{"GAP-0236 after pwd", "$t = @'\n.ssh/authorized_k*\n'@; Write-Output $t; pwd", home, actionfacts.DialectPowerShell},
 		{"GAP-0236 pwd before print", "$t = @'\n.ssh/authorized_k*\n'@; pwd; Write-Output $t", home, actionfacts.DialectPowerShell},
+		{"GAP-0236 PowerShell comment", `Set-Content notes.txt x # see ~/.ssh/authorized_keys`, home + `\project`, actionfacts.DialectPowerShell},
 		{"GAP-0396 after pwd", `cp *.txt build/; pwd`, home + `\project`, actionfacts.DialectPOSIX},
 		{"GAP-0551 after pwd", `cp ~/.defenseclaw/conf*.yaml project/copy.yaml; pwd`, home, actionfacts.DialectPOSIX},
 		{"GAP-0548 after pwd", `Copy-Item -Recurse -Path .\src -Destination .\build; pwd`, home + `\project`, actionfacts.DialectPowerShell},
