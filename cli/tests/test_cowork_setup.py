@@ -664,7 +664,7 @@ def test_protection_survives_a_gateway_restart(app) -> None:
     assert next(c for c in r.checks if c.get("check_id") == "doctor.cowork")["status"] == "pass"
 
 
-def test_released_windows_cowork_plugin_requires_rebuild(app, monkeypatch) -> None:
+def test_released_windows_cowork_plugin_requires_rebuild(app, monkeypatch, tmp_path: Path) -> None:
     released = Path(__file__).resolve().parents[2] / (
         "internal/gateway/connector/testdata/released-carriers/1.0.8/cowork-plugin-hooks-windows.json"
     )
@@ -687,15 +687,11 @@ def test_released_windows_cowork_plugin_requires_rebuild(app, monkeypatch) -> No
     doctor_row = next(c for c in check.checks if c.get("check_id") == "doctor.cowork")
     assert doctor_row["status"] == "warn" and doctor_row["reason_code"] == "cowork_plugin_stale"
 
-    current = _windows_hooks_doc(
-        Path("C:/Programs/DefenseClaw/defenseclaw-hook-guard.exe"),
-        Path("C:/Users/Owner/.defenseclaw"),
-        Path("C:/Users/Owner/.local/bin/defenseclaw-hook.exe"),
-    )
-    for groups in current["hooks"].values():
-        groups[0]["hooks"][0]["command"] = "${CLAUDE_PLUGIN_ROOT}/hooks/defenseclaw-hook-guard.exe"
-    with zipfile.ZipFile(archive, "w") as zf:
-        zf.writestr("hooks/hooks.json", json.dumps(current))
+    source = tmp_path / "bin" / "defenseclaw-hook-guard.exe"
+    source.parent.mkdir()
+    source.write_bytes(b"MZ current guard")
+    current = _windows_hooks_doc(source, tmp_path / "account", tmp_path / "bin" / "defenseclaw-hook.exe")
+    archive.write_bytes(cowork.plugin_zip_bytes(current, "1.0.9-test", "1.0.9"))
     assert cowork.cowork_status(app.cfg, health, gateway_running=True).protected
 
 
