@@ -532,9 +532,8 @@ func (a *APIServer) handleAgentHook(connectorName string) http.HandlerFunc {
 					Action: "block", Reason: "Hermes hook event fields disagree",
 					HookOutput: map[string]interface{}{"action": "block", "message": "DefenseClaw blocked this tool call because its hook event could not be verified."},
 				}
-				if cfg := a.decisionConfig(r.Context()); cfg == nil || !cfg.SecureClientIntegration() {
-					resp = hermesBlockText(agentHookRequest{ConnectorName: "hermes", HookEventName: "pre_tool_call"}, resp)
-				}
+				resp = a.hermesWireBlockText(r.Context(), connectorName,
+					agentHookRequest{ConnectorName: "hermes", HookEventName: "pre_tool_call"}, resp)
 				a.writeJSON(w, http.StatusOK, map[string]interface{}{
 					"action": resp.Action, "reason": resp.Reason, "hook_output": resp.HookOutput,
 				})
@@ -582,7 +581,8 @@ func (a *APIServer) handleAgentHook(connectorName string) http.HandlerFunc {
 					}).Output
 				}
 				resp.RuleIDs = []string{"CONNECTOR-NOT-STARTED"}
-				a.writeHookAnswer(w, a.hookAnswerBody(r.Context(), profile, connectorName, req, resp, ""))
+				a.writeHookAnswer(w, a.hookAnswerBody(r.Context(), profile, connectorName, req,
+					a.hermesWireBlockText(r.Context(), connectorName, req, resp), ""))
 				return
 			}
 		}
@@ -697,7 +697,8 @@ func (a *APIServer) handleAgentHook(connectorName string) http.HandlerFunc {
 		if deduped && a.copilotDedupeReplayable(r.Context(), connectorName, req, requireSandboxSurface(r.Context(), r.Header), earlier) {
 			dedupedResp := copilotDedupedResponse(profile, req, earlier)
 			startVerdictBlocked, startVerdictReason = sessionStartVerdictBlocks(dedupedResp), dedupedResp.Reason
-			a.writeHookAnswer(w, a.hookAnswerBody(r.Context(), profile, connectorName, req, dedupedResp, ""))
+			a.writeHookAnswer(w, a.hookAnswerBody(r.Context(), profile, connectorName, req,
+				a.hermesWireBlockText(r.Context(), connectorName, req, dedupedResp), ""))
 			return
 		}
 		// From here on the hook is accepted. A managed native hook confirms
@@ -860,7 +861,8 @@ func (a *APIServer) handleAgentHook(connectorName string) http.HandlerFunc {
 					// the HTTP server's serving goroutine.
 					func() {
 						defer func() { _ = recover() }()
-						body := a.hookAnswerBody(ctx, profile, connectorName, req, resp, "")
+						body := a.hookAnswerBody(ctx, profile, connectorName, req,
+							a.hermesWireBlockText(ctx, connectorName, req, resp), "")
 						attemptedWrite = true
 						a.writeHookAnswer(w, body)
 					}()
@@ -1055,7 +1057,8 @@ func (a *APIServer) handleAgentHook(connectorName string) http.HandlerFunc {
 				if cfg := a.decisionConfig(ctx); cfg != nil {
 					secureClient = cfg.SecureClientIntegration()
 				}
-				resp = oversizeUninspectedHookResponse(profile, req, mode, resp, secureClient)
+				resp = oversizeUninspectedHookResponse(profile, req, mode, resp,
+					secureClient || sandboxHookForConnector(ctx, connectorName))
 			}
 		}
 		if payload["bounded_prefix_review"] == true && (resp.Action == "allow" || resp.Action == "alert") {
@@ -1160,7 +1163,8 @@ func (a *APIServer) handleAgentHook(connectorName string) http.HandlerFunc {
 				fmt.Fprintf(os.Stderr, "[gateway] sandbox tool-call chain finalization failed connector=%s event=%s: %v\n",
 					connectorName, req.HookEventName, err)
 			}
-			body := a.hookAnswerBody(ctx, profile, connectorName, req, wireResp, pending.ID)
+			body := a.hookAnswerBody(ctx, profile, connectorName, req,
+				a.hermesWireBlockText(ctx, connectorName, req, wireResp), pending.ID)
 			a.scheduleSandboxHookReceiptRecovery(pending.ID)
 			// The first request is done; a later authenticated receipt owns
 			// this journal row. The bounded recovery pass may now inspect it.
@@ -1179,7 +1183,8 @@ func (a *APIServer) handleAgentHook(connectorName string) http.HandlerFunc {
 		shellBridge := r.Header.Get(hookexec.HookShellBridgeHeader) == "shell"
 		if delivery != nil {
 			preKey, preNoted = a.notePreToolDecision(ctx, req, wireResp)
-			body := a.hookAnswerBody(ctx, profile, connectorName, req, wireResp, "")
+			body := a.hookAnswerBody(ctx, profile, connectorName, req,
+				a.hermesWireBlockText(ctx, connectorName, req, wireResp), "")
 			attemptedWrite = true
 			receipt := func() string {
 				resume := pauseHookRunSlot(ctx)
@@ -1275,7 +1280,8 @@ func (a *APIServer) handleAgentHook(connectorName string) http.HandlerFunc {
 		// connector → field-name mapping. hookAnswerBody cannot
 		// panic, so the native hook always gets the finalized answer.
 		if delivery == nil {
-			body := a.hookAnswerBody(ctx, profile, connectorName, req, wireResp, "")
+			body := a.hookAnswerBody(ctx, profile, connectorName, req,
+				a.hermesWireBlockText(ctx, connectorName, req, wireResp), "")
 			// Mark the write attempt BEFORE writing. A panic from the
 			// writer then signals "do not retry from the defer"; the
 			// response stream may already be partially written, and a
@@ -1298,9 +1304,6 @@ func (a *APIServer) handleAgentHook(connectorName string) http.HandlerFunc {
 func (a *APIServer) hookAnswerBody(ctx context.Context, profile connector.HookProfile, connectorName string, req agentHookRequest, resp agentHookResponse, receiptID string) []byte {
 	if req.ConnectorName == "" {
 		req.ConnectorName = connectorName
-	}
-	if cfg := a.decisionConfig(ctx); cfg == nil || !cfg.SecureClientIntegration() {
-		resp = hermesBlockText(req, resp)
 	}
 	resp = a.withHookAnswerAgentIDs(ctx, resp)
 	counted := false
@@ -3729,8 +3732,9 @@ func oversizeUninspectedPayload(payload map[string]any) bool {
 // in the connector's mode: observe warns and audits, action blocks. A
 // would-block finding the gateway made on the bounded review (observe mode)
 // stays in the answer and the audit row next to it.
-// The caller supplies the verified Secure Client setting when available.
-func oversizeUninspectedHookResponse(profile connector.HookProfile, req agentHookRequest, mode string, prior agentHookResponse, secureClient ...bool) agentHookResponse {
+// The caller suppresses Hermes display text for verified Secure Client and
+// sandbox routes, which keep their existing response contracts.
+func oversizeUninspectedHookResponse(profile connector.HookProfile, req agentHookRequest, mode string, prior agentHookResponse, suppressDisplayText ...bool) agentHookResponse {
 	action, wouldBlock := mapHookActionForProfile("block", mode, req.HookEventName, profile.Capabilities, profile, req.Payload)
 	findings, ruleIDs := []string{hookOversizeUninspectedRuleID}, []string{hookOversizeUninspectedRuleID}
 	if prior.WouldBlock || prior.RawAction == "block" {
@@ -3740,8 +3744,23 @@ func oversizeUninspectedHookResponse(profile connector.HookProfile, req agentHoo
 	resp := agentHookResponseForProfile(profile, req, action, "block", "HIGH", oversizeUninspectedReason,
 		findings, mode, wouldBlock, profile.Capabilities)
 	resp.RuleIDs = ruleIDs
-	if len(secureClient) > 0 && secureClient[0] {
+	if len(suppressDisplayText) > 0 && suppressDisplayText[0] {
 		return resp
+	}
+	return hermesBlockText(req, resp)
+}
+
+// hermesWireBlockText changes only the native model-facing field. The
+// canonical verdict reason remains the one used by audit and accounting.
+func (a *APIServer) hermesWireBlockText(ctx context.Context, connectorName string, req agentHookRequest, resp agentHookResponse) agentHookResponse {
+	if sandboxHookForConnector(ctx, connectorName) {
+		return resp
+	}
+	if cfg := a.decisionConfig(ctx); cfg != nil && cfg.SecureClientIntegration() {
+		return resp
+	}
+	if req.ConnectorName == "" {
+		req.ConnectorName = connectorName
 	}
 	return hermesBlockText(req, resp)
 }
@@ -3783,9 +3802,13 @@ func hermesBlockText(req agentHookRequest, resp agentHookResponse) agentHookResp
 	if !strings.HasPrefix(message, "DefenseClaw blocked this call: ") {
 		message = "DefenseClaw blocked this call: " + rule + ": " + message
 	}
-	resp.Reason = message
 	if resp.HookOutput != nil {
-		resp.HookOutput[field] = message
+		output := make(map[string]interface{}, len(resp.HookOutput)+1)
+		for key, value := range resp.HookOutput {
+			output[key] = value
+		}
+		output[field] = message
+		resp.HookOutput = output
 	}
 	return resp
 }

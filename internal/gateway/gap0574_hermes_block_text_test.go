@@ -49,8 +49,9 @@ func TestGAP0574HermesBlockTextStartsWithRuleAndReason(t *testing.T) {
 				len(strings.TrimPrefix(answer.HookOutput["reason"], want)) == 0 {
 				t.Fatalf("hook text=%q, want prefix %q and a reason", answer.HookOutput["reason"], want)
 			}
-			if answer.Reason != answer.HookOutput["reason"] {
-				t.Fatalf("response reason=%q, hook text=%q", answer.Reason, answer.HookOutput["reason"])
+			if answer.Reason == "" || strings.HasPrefix(answer.Reason, "DefenseClaw blocked this call: ") ||
+				!strings.Contains(answer.HookOutput["reason"], answer.Reason) {
+				t.Fatalf("canonical reason=%q, hook text=%q", answer.Reason, answer.HookOutput["reason"])
 			}
 		})
 	}
@@ -70,6 +71,9 @@ func TestGAP0574HermesBlockTextVariants(t *testing.T) {
 		message, _ := answer.HookOutput["reason"].(string)
 		if !strings.HasPrefix(message, "DefenseClaw blocked this call: "+hookOversizeUninspectedRuleID+": ") {
 			t.Fatalf("bounded-review block text=%q", message)
+		}
+		if answer.Reason != oversizeUninspectedReason {
+			t.Fatalf("bounded-review canonical reason changed: %q", answer.Reason)
 		}
 		secure := oversizeUninspectedHookResponse(profile, req, "action", agentHookResponse{Action: "allow", RawAction: "allow"}, true)
 		if secure.Reason != oversizeUninspectedReason || secure.HookOutput["reason"] != oversizeUninspectedReason {
