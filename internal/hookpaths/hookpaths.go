@@ -5851,12 +5851,53 @@ func suppliedListCall(call *syntax.CallExpr) bool {
 		switch {
 		case supplied && slices.Contains(archivePrograms, program):
 			return archiveListMode(program, words[i+1:], static[i+1:])
+		case supplied && posixShellProgram(program):
+			// xargs -I{} sh -c 'unzip -l {}': the body the supplier runs,
+			// graded as the same calls at top level (Rule G).
+			at, ok := shellCommandBodyIndex(words[i:])
+			return ok && staticAt(static, i+at) && listOnlyShellBody(words[i+at])
 		case slices.Contains(linkPrograms, program) || slices.Contains(copyPrograms, program):
 			return false
 		}
 		supplied = supplied || slices.Contains(argumentSuppliers, program)
 	}
 	return false
+}
+
+// listOnlyShellBody reports a shell body whose archive calls all show a list
+// or test mode (archiveListMode) and that runs no link, copy, multicall or
+// nested shell program, nor another supplier: the archive names come from
+// the supplier that runs the body.
+func listOnlyShellBody(body string) bool {
+	file, parsed := parseShell(body)
+	if !parsed {
+		return false
+	}
+	ok, found := true, false
+	syntax.Walk(file, func(node syntax.Node) bool {
+		call, isCall := node.(*syntax.CallExpr)
+		if !ok || !isCall || len(call.Args) == 0 {
+			return ok
+		}
+		words := make([]string, len(call.Args))
+		static := make([]bool, len(call.Args))
+		for i, arg := range call.Args {
+			words[i], static[i] = StaticWord(arg, "")
+		}
+		program := programBase(words[0])
+		switch {
+		case !static[0]:
+			ok = false
+		case slices.Contains(archivePrograms, program):
+			ok, found = archiveListMode(program, words[1:], static[1:]), true
+		case slices.Contains(linkPrograms, program) || slices.Contains(copyPrograms, program) ||
+			slices.Contains(multicallPrograms, program) || posixShellProgram(program) ||
+			slices.Contains(argumentSuppliers, program) || program == "eval":
+			ok = false
+		}
+		return ok
+	})
+	return ok && found
 }
 
 // archiveListMode reports an archive call whose visible words name only a
