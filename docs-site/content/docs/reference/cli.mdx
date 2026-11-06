@@ -1404,9 +1404,12 @@ Use `defenseclaw sandbox kernel-feed` rather than these.
 
 ### Lifecycle on Windows
 
-`& 'C:\Program Files\Cisco\DefenseClaw\bin\defenseclaw.exe' enterprise windows <action>` manages the Windows deployment
-for both profiles. Run it from an elevated PowerShell prompt. The standalone profile runs
-its transaction on PowerShell 7, which must be installed.
+`enterprise windows <action>` manages the Windows deployment for both profiles. Run the
+installed CLI by its path from an elevated PowerShell prompt: for the standalone profile
+`& 'C:\Program Files\Cisco\DefenseClaw\bin\defenseclaw.exe' enterprise windows <action>`, and for
+the Secure Client profile
+`& 'C:\Program Files\Cisco\Cisco Secure Client\DefenseClaw\bin\defenseclaw.exe' enterprise windows <action>`.
+The standalone profile runs its transaction on PowerShell 7, which must be installed.
 
 | Action | Profiles | Use it for |
 | --- | --- | --- |

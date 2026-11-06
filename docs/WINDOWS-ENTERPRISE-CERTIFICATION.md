@@ -362,7 +362,7 @@ first transaction, use `.\defenseclaw.exe enterprise windows install` from the s
 and the normal signed release inputs. Add
 `--attest-agent-application-control` only when WDAC or AppLocker has been
 independently deployed and tested. After the independent live Claude proof,
-use `& 'C:\Program Files\Cisco\DefenseClaw\bin\defenseclaw.exe' enterprise windows repair` from an elevated PowerShell prompt, with the same protected release
+use `& 'C:\Program Files\Cisco\Cisco Secure Client\DefenseClaw\bin\defenseclaw.exe' enterprise windows repair` (the Secure Client install root) from an elevated PowerShell prompt, with the same protected release
 inputs, repeat that optional application-control attestation if used, and add
 `--attest-claude-effective-policy`. Then require both
 `enterprise windows status --json` and `enterprise windows verify --json` to
