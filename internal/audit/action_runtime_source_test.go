@@ -65,3 +65,30 @@ func TestRuntimeSourceGoesWithItsRuntimeDisable(t *testing.T) {
 		t.Fatalf("released decision left its row: %+v", row)
 	}
 }
+
+// The block of an enrolled account MCP server lives under its own target type
+// and still counts as a blocked MCP server; an ordinary server twin counts
+// once as before.
+func TestGetCountsIncludesBlockedAccountMCPServers(t *testing.T) {
+	store, err := NewStore(filepath.Join(t.TempDir(), "audit.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+	if err := store.Init(); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.SetActionFieldForConnector("mcp", "plain", "claudecode", "install", "block", "scan"); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.SetActionFieldForConnector(AccountMCPActionType, "account-key", "claudecode", "install", "block", "scan"); err != nil {
+		t.Fatal(err)
+	}
+	counts, err := store.GetCounts()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if counts.BlockedMCPs != 2 || counts.AllowedMCPs != 0 {
+		t.Fatalf("counts = blocked %d, allowed %d; want 2, 0", counts.BlockedMCPs, counts.AllowedMCPs)
+	}
+}

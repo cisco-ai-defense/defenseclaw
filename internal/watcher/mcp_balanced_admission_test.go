@@ -32,7 +32,7 @@ func TestBalancedMCPHighAdmissionWarnsAndAudits(t *testing.T) {
 	if res.Verdict != VerdictWarning || res.MaxSeverity != "HIGH" {
 		t.Fatalf("balanced admission %+v, want HIGH warning", res)
 	}
-	if entry, err := store.GetActionForConnector("mcp", MCPJournalName(server), "claudecode"); err != nil || (entry != nil && !entry.Actions.IsEmpty()) {
+	if entry, err := store.GetActionForConnector(MCPJournalType(server), MCPJournalName(server), "claudecode"); err != nil || (entry != nil && !entry.Actions.IsEmpty()) {
 		t.Fatalf("balanced journal %+v (err %v), want server callable", entry, err)
 	}
 	if got := strings.Join(rows(), "\n"); !strings.Contains(got, "install-warning") || !strings.Contains(got, "severity=HIGH") {
@@ -44,7 +44,7 @@ func TestBalancedMCPHighAdmissionWarnsAndAudits(t *testing.T) {
 	if res.Verdict != VerdictRejected {
 		t.Fatalf("strict admission %+v, want rejection", res)
 	}
-	if entry, err := store.GetActionForConnector("mcp", MCPJournalName(server), "claudecode"); err != nil || entry == nil || entry.Actions.Runtime != "disable" {
+	if entry, err := store.GetActionForConnector(MCPJournalType(server), MCPJournalName(server), "claudecode"); err != nil || entry == nil || entry.Actions.Runtime != "disable" {
 		t.Fatalf("strict journal %+v (err %v), want disabled", entry, err)
 	}
 }
