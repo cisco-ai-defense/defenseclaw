@@ -54,6 +54,9 @@ func TestG288PendingShareReadKeepsOtherIdentityVisible(t *testing.T) {
 	oldRead := readPath
 	t.Cleanup(func() { readPath = oldRead })
 	fakeNetworkShare(t, root, 50*time.Millisecond, time.Second, func(string) {})
+	oldIdentityWait := networkShareIdentityAnswerWait
+	networkShareIdentityAnswerWait = 50 * time.Millisecond
+	t.Cleanup(func() { networkShareIdentityAnswerWait = oldIdentityWait })
 	readPath = func(name string, kind pathReadKind) pathReadResult {
 		if name == stalled {
 			time.Sleep(200 * time.Millisecond)
@@ -63,6 +66,7 @@ func TestG288PendingShareReadKeepsOtherIdentityVisible(t *testing.T) {
 	if _, err := PathStat(stalled); !ShareUnanswered(err) {
 		t.Fatalf("stalled path = %v, want unknown share", err)
 	}
+	networkShareIdentityAnswerWait = oldIdentityWait
 	aliasInfo, aliasErr := PathLstat(alias)
 	fileInfo, fileErr := PathStat(file)
 	if aliasErr != nil || fileErr != nil || !os.SameFile(aliasInfo, fileInfo) {
@@ -133,6 +137,9 @@ func TestG288ShareFileReadRecovers(t *testing.T) {
 	oldRead := readPath
 	t.Cleanup(func() { readPath = oldRead })
 	fakeNetworkShare(t, root, 50*time.Millisecond, time.Second, func(string) {})
+	oldIdentityWait := networkShareIdentityAnswerWait
+	networkShareIdentityAnswerWait = 50 * time.Millisecond
+	t.Cleanup(func() { networkShareIdentityAnswerWait = oldIdentityWait })
 	var reads atomic.Int32
 	readPath = func(name string, kind pathReadKind) pathReadResult {
 		if name == file && reads.Add(1) == 1 {
@@ -143,6 +150,7 @@ func TestG288ShareFileReadRecovers(t *testing.T) {
 	if _, err := PathStat(file); !ShareUnanswered(err) {
 		t.Fatalf("first read = %v, want unknown share", err)
 	}
+	networkShareIdentityAnswerWait = oldIdentityWait
 	time.Sleep(250 * time.Millisecond)
 	if info, err := PathStat(file); err != nil || info.Size() != 2 {
 		t.Fatalf("next read = %v, %v, want current file identity", info, err)
