@@ -3966,7 +3966,9 @@ func watcherConnectors(reg *connector.Registry, cfg *config.Config) []connector.
 // resolveWatcherDirsForConnectors is resolveWatcherDirs over every connector:
 // the union of their folders, each discovered folder tagged with the first
 // connector that lists it for events and every connector that loads it for
-// root coverage. Explicit gateway.watcher dirs apply once and are not tagged.
+// root coverage. Explicit gateway.watcher dirs apply once and keep the
+// primary connector for events, but they replace every connector's own
+// folders, so every configured connector is a consumer of each of them.
 func resolveWatcherDirsForConnectors(cfg *config.Config, conns []connector.Connector, wcfg config.GatewayWatcherConfig) (skillDirs, pluginDirs []string, roots map[string]string, src watcherDirSources, consumers []watcher.RootConsumer) {
 	if len(conns) == 0 {
 		skillDirs, pluginDirs, src = resolveWatcherDirs(cfg, nil, wcfg)
@@ -3976,9 +3978,7 @@ func resolveWatcherDirsForConnectors(cfg *config.Config, conns []connector.Conne
 	seenSkill, seenPlugin := map[string]bool{}, map[string]bool{}
 	add := func(out *[]string, seen map[string]bool, dirs []string, kind, owner string, tag bool) {
 		for _, dir := range dirs {
-			if tag {
-				consumers = append(consumers, watcher.RootConsumer{Kind: kind, Path: dir, Connector: owner})
-			}
+			consumers = append(consumers, watcher.RootConsumer{Kind: kind, Path: dir, Connector: owner})
 			key := filepath.Clean(dir)
 			if runtime.GOOS == "windows" {
 				key = strings.ToLower(key)
@@ -4003,6 +4003,21 @@ func resolveWatcherDirsForConnectors(cfg *config.Config, conns []connector.Conne
 		add(&pluginDirs, seenPlugin, plugins, "plugin", owner, connSrc.Plugin != watcherDirsFromConfig)
 	}
 	return skillDirs, pluginDirs, roots, src, consumers
+}
+
+// enrolledRootConsumers is every connector that loads each root an enrolled
+// watcher watches: the enrolled users' folders, plus the explicit
+// gateway.watcher dirs it keeps watching, which every configured connector
+// loads. The gateway's own connector folders are not watched there.
+func enrolledRootConsumers(enrolled *enrolledWatchSet, consumers []watcher.RootConsumer, src watcherDirSources) []watcher.RootConsumer {
+	out := slices.Clone(enrolled.consumers)
+	for _, consumer := range consumers {
+		if consumer.Kind == "skill" && src.Skill == watcherDirsFromConfig ||
+			consumer.Kind == "plugin" && src.Plugin == watcherDirsFromConfig {
+			out = append(out, consumer)
+		}
+	}
+	return out
 }
 
 // absoluteDirs returns dirs without its relative entries.
@@ -4422,7 +4437,7 @@ func (s *Sidecar) runWatcherOnce(ctx context.Context) (restart bool, err error) 
 	})
 	if enrolled != nil {
 		w.SetRootConnectors(enrolled.roots)
-		w.SetRootConsumers(enrolled.consumers)
+		w.SetRootConsumers(enrolledRootConsumers(enrolled, consumers, src))
 		w.SetAssetOwners(enrolled.owners)
 		publishScanAssetOwners(enrolled.owners)
 		w.SetMCPServerSource(enrolled.live.list)
