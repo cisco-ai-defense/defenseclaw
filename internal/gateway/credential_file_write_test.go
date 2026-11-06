@@ -19,6 +19,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/defenseclaw/defenseclaw/internal/actionfacts"
 	"github.com/defenseclaw/defenseclaw/internal/config"
 	"github.com/defenseclaw/defenseclaw/internal/hookpaths"
 )
@@ -344,5 +345,44 @@ func TestEveryCredentialReadRuleHasAWriteLeg(t *testing.T) {
 		if !shipped[id] {
 			t.Errorf("write leg names %s, which no shipped pack has", id)
 		}
+	}
+}
+
+// TestCredentialReadRulesLeaveWritesToTheirLeg: a read rule of a file that
+// has a write leg never takes a write of that file as its own mutation
+// proof, so a fallback match of a CRITICAL read rule on a write (a call with
+// a run-time redirect target) cannot block in balanced; the HIGH write leg
+// judges it, as it judges the same write with a static target.
+func TestCredentialReadRulesLeaveWritesToTheirLeg(t *testing.T) {
+	files := map[string]string{
+		"PATH-AWS-CREDS": ".aws/credentials", "PATH-AWS-CONFIG": ".aws/config", "PATH-KUBE": ".kube/config",
+		"PATH-DOCKER": ".docker/config.json", "PATH-NPMRC": ".npmrc", "PATH-PYPIRC": ".pypirc",
+		"PATH-GIT-CREDS": ".git-credentials", "PATH-NETRC": ".netrc",
+		"secrets.cloud_credential_read": ".config/gh/hosts.yml", "PATH-GNUPG": ".gnupg/gpg.conf",
+	}
+	for _, leg := range credentialFileWriteLegs {
+		for _, rule := range leg.readRules {
+			if !credentialFileWriteLegOwnsReadRule(rule) {
+				t.Errorf("%s: not owned by its write leg", rule)
+			}
+			relative, ok := files[rule]
+			if !ok {
+				continue
+			}
+			for _, command := range []string{"printf x > /home/alice/" + relative, "rm /home/alice/" + relative} {
+				facts := actionfacts.Analyze(sensitivePathShellInput(command))
+				if !credentialFileWritePrerequisite(facts) {
+					t.Errorf("%s %q: the write leg does not prove it", rule, command)
+				}
+				if trustedActionClassifySensitivePathRisk(facts, rule) == trustedActionSensitivePathMutation {
+					t.Errorf("%s %q: the read rule took the write as its mutation", rule, command)
+				}
+			}
+		}
+	}
+	// A read rule without a write leg keeps its mutation proof.
+	facts := actionfacts.Analyze(sensitivePathShellInput("rm /home/alice/.ssh/id_ed25519"))
+	if trustedActionClassifySensitivePathRisk(facts, "PATH-SSH-KEY") != trustedActionSensitivePathMutation {
+		t.Error("PATH-SSH-KEY lost its delete mutation proof")
 	}
 }

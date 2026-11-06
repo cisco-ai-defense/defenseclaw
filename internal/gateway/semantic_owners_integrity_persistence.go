@@ -2837,6 +2837,20 @@ func findingWithRuleID(findings []RuleFinding, ruleID string) bool {
 	return false
 }
 
+// credentialFileWriteLegOwnsReadRule reports a read rule whose writes its
+// leg in credentialFileWriteLegs judges, at the severity of the leg.
+func credentialFileWriteLegOwnsReadRule(ruleID string) bool {
+	ruleID = canonicalTrustedRuleID(ruleID)
+	for _, leg := range credentialFileWriteLegs {
+		for _, readRule := range leg.readRules {
+			if canonicalTrustedRuleID(readRule) == ruleID {
+				return true
+			}
+		}
+	}
+	return false
+}
+
 func matchesActiveCredentialFileWrite(
 	facts actionfacts.Facts,
 	candidate actionfacts.PathFact,
