@@ -32,7 +32,7 @@ func TestGAP0621SelectedSkillEvidenceIsNarrow(t *testing.T) {
 		{"skill_info": map[string]string{"name": "direct"}},
 	} {
 		raw, _ := json.Marshal(input)
-		if got := projectSkillCallName(raw); got != "direct" {
+		if got, _ := projectSkillCallSelection(nil, raw); got != "direct" {
 			t.Fatalf("input %s selected %q", raw, got)
 		}
 	}
