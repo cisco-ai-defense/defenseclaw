@@ -30,6 +30,7 @@ import (
 	"github.com/spf13/cobra"
 
 	"github.com/defenseclaw/defenseclaw/internal/config"
+	"github.com/defenseclaw/defenseclaw/internal/config/configwrite"
 	"github.com/defenseclaw/defenseclaw/internal/enterprisehooks"
 	"github.com/defenseclaw/defenseclaw/internal/enterprisepolicy"
 	"github.com/defenseclaw/defenseclaw/internal/gateway/connector"
@@ -291,6 +292,13 @@ func runEnterpriseHooksEnumerateCycle(
 	state *enterprisehooks.UnixEnumeratorState,
 ) (enterpriseHooksEnumerateReport, error) {
 	report := enterpriseHooksEnumerateReport{Manifest: manifestPath}
+	// Capture before loading the config. A lifecycle update during this
+	// cycle leaves its record on the older generation, so status waits for
+	// a later scan of the new inputs (GAP-0640).
+	var configGeneration uint64
+	if state, err := configwrite.ReadGenerationState(config.ConfigPath()); err == nil {
+		configGeneration = state.Generation
+	}
 	// Reload each cycle so an administrator's enrollment change applies
 	// without restarting the service.
 	current, err := enterpriseHooksEnumerateConfigLoader()
@@ -373,7 +381,7 @@ func runEnterpriseHooksEnumerateCycle(
 	}
 	// Status and verify report agents found installed but not enrollable,
 	// so an unprotected agent is never a silent gap.
-	if err := enterpriseHooksEnumerateUnprotectedWriter(enterprisehooks.UnprotectedAgentsPath(manifestPath), cycle.Unprotected); err != nil {
+	if err := enterpriseHooksEnumerateUnprotectedWriter(enterprisehooks.UnprotectedAgentsPath(manifestPath), cycle.Unprotected, configGeneration); err != nil {
 		fmt.Fprintf(stderr, "[hook-enumerator] warn: could not publish the unprotected agents: %v\n", err)
 	}
 	if !manifestMode {
@@ -407,7 +415,7 @@ func enterpriseHooksEnumerateDiscoveryBudget(interval time.Duration) time.Durati
 var (
 	enterpriseHooksEnumerateManifestWriter    = enterprisehooks.WriteUnixTargetsManifestAtomic
 	enterpriseHooksEnumerateEligibleWriter    = enterprisehooks.WriteUnixEnumeratorAccounts
-	enterpriseHooksEnumerateUnprotectedWriter = enterprisehooks.WriteUnixUnprotectedAgents
+	enterpriseHooksEnumerateUnprotectedWriter = enterprisehooks.WriteUnixUnprotectedAgentsForConfig
 	enterpriseHooksEnumerateRefusedWriter     = writeEnterpriseHookRefusedSurfaces
 )
 
