@@ -144,11 +144,15 @@ func (a *APIServer) deliveredHookDecision(connectorName string, resp agentHookRe
 		return failedClosedHookDelivery(resp, hookDeliveryRejectedReason)
 	case hookexec.HookDeliveryReceiptLate:
 		if a.scannerCfg.DeploymentMode == "per_user" {
-			return failedClosedHookDelivery(resp, "gateway did not answer in time")
+			return failedClosedHookDelivery(resp, hookexec.PerUserGatewayNoAnswerReason)
 		}
 		return failedClosedHookDelivery(resp, hookexec.ManagedGatewayNoAnswerReason)
 	case hookexec.HookDeliveryReceiptOpen:
-		return failedOpenHookDelivery(resp)
+		reason := hookexec.ManagedGatewayNoAnswerReason
+		if a.scannerCfg.DeploymentMode == "per_user" {
+			reason = hookexec.PerUserGatewayNoAnswerReason
+		}
+		return failedOpenHookDelivery(resp, reason)
 	}
 	if a.scannerCfg.EffectiveHookFailModeForConnector(connectorName) == "open" {
 		// An outage can allow even if the offered policy answer blocked.
@@ -161,13 +165,13 @@ func (a *APIServer) deliveredHookDecision(connectorName string, resp agentHookRe
 	return unconfirmedHookDelivery(resp)
 }
 
-func failedOpenHookDelivery(resp agentHookResponse) agentHookResponse {
+func failedOpenHookDelivery(resp agentHookResponse, reason string) agentHookResponse {
 	if resp.RawAction == "" {
 		resp.RawAction = resp.Action
 	}
 	resp.Action = "allow"
 	resp.Mode = "action"
-	resp.Reason = hookexec.ManagedGatewayNoAnswerReason
+	resp.Reason = reason
 	resp.SourceReason = resp.Reason
 	resp.WouldBlock = false
 	resp.HookOutput = nil
