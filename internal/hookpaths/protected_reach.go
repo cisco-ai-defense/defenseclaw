@@ -70,7 +70,7 @@ func (s *reachNames) has(path string) bool {
 		}
 	}
 	for _, dir := range s.directories {
-		if samePathName(path, dir) {
+		if pathAtOrUnder(path, dir) {
 			return true
 		}
 	}
@@ -158,8 +158,10 @@ func (m *TargetMemo) ProtectedReach(target, home string) Grade {
 	// while linked parents and protected names still receive the same grade.
 	entryInfo, entryErr := PathLstat(target)
 	if os.IsNotExist(entryErr) {
-		if resolved, ok := m.resolveWriteTarget(parent); ok &&
-			!names.has(filepath.Join(resolved, filepath.Base(target))) {
+		if resolved, ok := m.resolveWriteTarget(parent); ok {
+			if names.has(filepath.Join(resolved, filepath.Base(target))) {
+				return GradeNamed
+			}
 			return GradeNone
 		}
 	}

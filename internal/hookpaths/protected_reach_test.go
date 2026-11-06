@@ -74,6 +74,8 @@ func TestProtectedReachGradesNamedAndOrdinaryPaths(t *testing.T) {
 		{"relative-link", relative, GradeNamed},
 		{"parent-link", filepath.Join(parent, "authorized_keys"), GradeNamed},
 		{"parent-link-missing", filepath.Join(parent, "authorized_keys2"), GradeNamed},
+		{"parent-link-new-file", filepath.Join(parent, "new-file"), GradeNamed},
+		{"ssh-new-file", filepath.Join(home, ".ssh", "new-file"), GradeNamed},
 		{"hard-link", hard, GradeNamed},
 		{"private-hard-link", privateHard, GradeNamed},
 		{"long-chain", chain, GradeNamed},
