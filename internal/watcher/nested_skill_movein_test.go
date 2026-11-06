@@ -423,7 +423,7 @@ func TestRecursiveSkillDiscoveryRejectsLinkedCategory(t *testing.T) {
 	}
 }
 
-func TestSkillDiscoveryRejectsLinkedRoot(t *testing.T) {
+func TestSkillDiscoveryRejectsUntrustedLinkedRoot(t *testing.T) {
 	for _, tc := range []struct {
 		name, rootDir string
 	}{
@@ -456,6 +456,9 @@ func TestSkillDiscoveryRejectsLinkedRoot(t *testing.T) {
 				parent := filepath.Join(home, tc.rootDir)
 				root := filepath.Join(parent, "skills")
 				if linkParent {
+					if err := os.Chmod(home, 0o777); err != nil {
+						t.Fatal(err)
+					}
 					if err := os.Symlink(home, parent); err != nil {
 						t.Skipf("symlink unavailable: %v", err)
 					}
@@ -464,6 +467,9 @@ func TestSkillDiscoveryRejectsLinkedRoot(t *testing.T) {
 						t.Fatal(err)
 					}
 				} else {
+					if err := os.Chmod(outside, 0o777); err != nil {
+						t.Fatal(err)
+					}
 					if err := os.MkdirAll(parent, 0o700); err != nil {
 						t.Fatal(err)
 					}
@@ -537,8 +543,15 @@ func TestGAP0504DeniedParentStillWatchesAndRescansPlainRoot(t *testing.T) {
 	if err := unlinkedSkillTreePath(root, skill); err != nil {
 		t.Fatalf("plain subtree refused: %v", err)
 	}
+	unsafe := filepath.Join(home, "unsafe")
+	if err := os.MkdirAll(filepath.Join(unsafe, "skills"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(unsafe, 0o777); err != nil {
+		t.Fatal(err)
+	}
 	linked := filepath.Join(home, "linked")
-	if err := os.Symlink(filepath.Join(home, ".hermes"), linked); err == nil {
+	if err := os.Symlink(unsafe, linked); err == nil {
 		if err := unlinkedSkillTreePath(filepath.Join(linked, "skills"), filepath.Join(linked, "skills")); err == nil {
 			t.Fatal("linked parent accepted")
 		}

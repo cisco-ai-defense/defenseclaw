@@ -48,6 +48,7 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/pathidentity"
 	"github.com/defenseclaw/defenseclaw/internal/policy"
 	"github.com/defenseclaw/defenseclaw/internal/scanner"
+	"github.com/defenseclaw/defenseclaw/internal/skillrootsafe"
 )
 
 // InstallType distinguishes between skill and MCP install events.
@@ -127,9 +128,13 @@ type WebhookDispatcher interface {
 }
 
 type InstallWatcher struct {
-	cfg        *config.Config
-	skillDirs  []string
-	pluginDirs []string
+	cfg            *config.Config
+	skillDirs      []string
+	pluginDirs     []string
+	rootCoverageMu sync.RWMutex
+	rootNotifyMu   sync.Mutex
+	rootCoverage   map[string]RootCoverageIssue
+	onRootCoverage func([]RootCoverageIssue)
 	// managedArtifacts are exact connector-owned plugin files. They remain
 	// visible to connector lifecycle/Doctor, but ordinary plugin scanners must
 	// not inspect or quarantine DefenseClaw's own bridge artifact.
@@ -300,6 +305,69 @@ type InstallWatcher struct {
 	// first rescan cycle ended (mcpStartup applies until then).
 	pollMCP        bool
 	firstCycleDone atomic.Bool
+}
+
+// RootCoverageIssue is a configured asset root whose admission scan is off.
+// Health exposes only counts and connector names; the gateway log names paths.
+type RootCoverageIssue struct {
+	Kind, Path, Connector, Reason string
+}
+
+// SetRootCoverageHandler publishes changes to the gateway's watcher health.
+// Call before Run starts.
+func (w *InstallWatcher) SetRootCoverageHandler(handler func([]RootCoverageIssue)) {
+	w.onRootCoverage = handler
+}
+
+// RootCoverageIssues returns a snapshot for runtime admission checks.
+func (w *InstallWatcher) RootCoverageIssues() []RootCoverageIssue {
+	w.rootCoverageMu.RLock()
+	defer w.rootCoverageMu.RUnlock()
+	issues := make([]RootCoverageIssue, 0, len(w.rootCoverage))
+	for _, issue := range w.rootCoverage {
+		issues = append(issues, issue)
+	}
+	sort.Slice(issues, func(i, j int) bool { return issues[i].Path < issues[j].Path })
+	return issues
+}
+
+func (w *InstallWatcher) setRootCoverage(kind, path string, cause error) {
+	if w == nil || w.secureClientActive() {
+		return
+	}
+	w.rootNotifyMu.Lock()
+	defer w.rootNotifyMu.Unlock()
+	key := kind + "\x00" + filepath.Clean(path)
+	w.rootCoverageMu.Lock()
+	previous, hadPrevious := w.rootCoverage[key]
+	if cause == nil {
+		if hadPrevious {
+			delete(w.rootCoverage, key)
+		}
+	} else {
+		if w.rootCoverage == nil {
+			w.rootCoverage = make(map[string]RootCoverageIssue)
+		}
+		connector := w.connectorForPath(path)
+		if connector == "" && w.cfg != nil {
+			connector = w.cfg.Guardrail.Connector
+		}
+		w.rootCoverage[key] = RootCoverageIssue{Kind: kind, Path: path, Connector: connector, Reason: cause.Error()}
+	}
+	current := w.rootCoverage[key]
+	changed := hadPrevious != (cause != nil) || (cause != nil && previous != current)
+	w.rootCoverageMu.Unlock()
+	if !changed {
+		return
+	}
+	if cause != nil {
+		fmt.Fprintf(os.Stderr, "[watch] warning: %s admission scanning is off for connector %s root %s: %v\n", kind, current.Connector, path, cause)
+	} else {
+		fmt.Fprintf(os.Stderr, "[watch] %s admission scanning resumed for root %s\n", kind, path)
+	}
+	if w.onRootCoverage != nil {
+		w.onRootCoverage(w.RootCoverageIssues())
+	}
 }
 
 type rootConnector struct {
@@ -962,7 +1030,7 @@ func (w *InstallWatcher) Run(ctx context.Context) error {
 			for _, root := range w.skillDirs {
 				if watcherPathAtOrBelow(dir, root) {
 					if err := unlinkedSkillTreePath(root, dir); err != nil {
-						fmt.Fprintf(os.Stderr, "[watch] skill content directory %s: %v\n", dir, err)
+						w.setRootCoverage("skill", root, err)
 						return
 					}
 				}
@@ -1007,7 +1075,7 @@ func (w *InstallWatcher) Run(ctx context.Context) error {
 			return
 		}
 		if info, statErr := pathidentity.StatPinned(dir); statErr == nil {
-			roots[key] = watchedRoot{dir: dir, absolute: absolute, kind: kind, info: info}
+			roots[key] = watchedRoot{dir: dir, absolute: absolute, kind: kind, info: info, checked: time.Now()}
 		}
 	}
 	// rewatchRoot watches a root again once the folder at its path is not
@@ -1015,31 +1083,46 @@ func (w *InstallWatcher) Run(ctx context.Context) error {
 	rewatchRoot := func(key string, root watchedRoot) {
 		info, statErr := os.Stat(root.dir)
 		if statErr != nil || !info.IsDir() {
+			if statErr != nil && !errors.Is(statErr, fs.ErrNotExist) {
+				w.setRootCoverage(root.kind, root.dir, statErr)
+			}
 			return
 		}
 		_, watching := watchedDirs[key]
-		if os.SameFile(info, root.info) && (watching || root.failed) {
+		same := os.SameFile(info, root.info)
+		if same && watching && !root.failed && time.Since(root.checked) < time.Second {
+			return
+		}
+		if !w.secureClientActive() {
+			if err := unlinkedSkillTreePath(root.dir, root.dir); err != nil {
+				nestedMu.Lock()
+				forgetDirWatches(fsw, root.absolute, watchedDirs)
+				forgetNestedWatchKeys(root.absolute, nestedWatches)
+				nestedMu.Unlock()
+				root.info, root.failed, root.checked = info, true, time.Now()
+				roots[key] = root
+				w.setRootCoverage(root.kind, root.dir, err)
+				return
+			}
+		}
+		root.checked = time.Now()
+		if same && watching && !root.failed {
+			roots[key] = root
+			w.setRootCoverage(root.kind, root.dir, nil)
 			return
 		}
 		nestedMu.Lock()
 		forgetDirWatches(fsw, root.absolute, watchedDirs)
 		forgetNestedWatchKeys(root.absolute, nestedWatches)
 		nestedMu.Unlock()
-		if root.kind == "skill" {
-			if err := unlinkedSkillTreePath(root.dir, root.dir); err != nil {
-				root.info, root.failed = info, true
-				roots[key] = root
-				fmt.Fprintf(os.Stderr, "[watch] replaced skill root %s: %v (skipping)\n", root.dir, err)
-				return
-			}
-		}
 		root.info, root.failed = info, false
 		if addErr := fsw.Add(root.dir); addErr != nil {
 			root.failed = true
 			roots[key] = root
-			fmt.Fprintf(os.Stderr, "[watch] %s dir %s was replaced; watch it again: %v\n", root.kind, root.dir, addErr)
+			w.setRootCoverage(root.kind, root.dir, addErr)
 			return
 		}
+		w.setRootCoverage(root.kind, root.dir, nil)
 		roots[key] = root
 		watchedDirs[key] = struct{}{}
 		fmt.Printf("[watch] %s dir %s was replaced; watching it again and admitting what it holds\n", root.kind, root.dir)
@@ -1064,7 +1147,7 @@ func (w *InstallWatcher) Run(ctx context.Context) error {
 			return false
 		}
 		watchRoot := ensureAndWatchLegacy
-		if kind == "skill" && !w.secureClientActive() {
+		if !w.secureClientActive() {
 			watchRoot = ensureAndWatch
 		}
 		created, err := watchRoot(fsw, dir)
@@ -1076,19 +1159,18 @@ func (w *InstallWatcher) Run(ctx context.Context) error {
 			}
 		}
 		if err != nil {
+			w.setRootCoverage(kind, dir, err)
 			if errors.Is(err, errWatchDirNotCreated) {
 				missingDirs = append(missingDirs, [2]string{dir, kind})
-				fmt.Fprintf(os.Stderr, "[watch] %s dir %s: %v (watching it once it exists)\n", kind, dir, err)
 				return false
 			}
-			if kind == "skill" && !w.secureClientActive() {
+			if !w.secureClientActive() {
 				missingDirs = append(missingDirs, [2]string{dir, kind})
-				fmt.Fprintf(os.Stderr, "[watch] skill dir %s: %v (retrying when safe)\n", dir, err)
 				return false
 			}
-			fmt.Fprintf(os.Stderr, "[watch] %s dir %s: %v (skipping)\n", kind, dir, err)
 			return false
 		}
+		w.setRootCoverage(kind, dir, nil)
 		watchedDirs[key] = struct{}{}
 		rememberRoot(key, dir, absolute, kind)
 		watched++
@@ -1365,8 +1447,9 @@ func (w *InstallWatcher) Run(ctx context.Context) error {
 						missingDirs = append(missingDirs, entry)
 						continue
 					}
-					if entry[1] == "skill" && !w.secureClientActive() {
+					if !w.secureClientActive() {
 						if err := unlinkedSkillTreePath(entry[0], entry[0]); err != nil {
+							w.setRootCoverage(entry[1], entry[0], err)
 							missingDirs = append(missingDirs, entry)
 							continue
 						}
@@ -1418,6 +1501,7 @@ type watchedRoot struct {
 	dir, absolute, kind string
 	info                os.FileInfo
 	failed              bool // the folder now there could not be watched
+	checked             time.Time
 }
 
 // admitReplacedRoot watches the folders of a skill or plugin root that was
@@ -1671,7 +1755,7 @@ func (w *InstallWatcher) pendingInstallEvents(path string) []InstallEvent {
 		return nil
 	}
 	for _, root := range w.skillDirs {
-		discover, _ := hermesSkillsDiscover(root)
+		discover, _ := hermesSkillsDiscover(root, !w.secureClientActive())
 		if discover == nil || !watcherPathAtOrBelow(path, root) {
 			continue
 		}
@@ -1769,7 +1853,7 @@ func (w *InstallWatcher) watchIncompleteSkillFolders(root string) {
 	if _, _, recursive := w.recursiveSkillRoot(root); recursive {
 		return
 	}
-	if discover, _ := hermesSkillsDiscover(root); discover != nil {
+	if discover, _ := hermesSkillsDiscover(root, !w.secureClientActive()); discover != nil {
 		return
 	}
 	entries, err := os.ReadDir(root)
@@ -1832,7 +1916,7 @@ func (w *InstallWatcher) changedSkillFolder(path string) (string, bool) {
 			return "", false
 		}
 		skill := filepath.Join(rootAbs, parts[0])
-		discover, _ := hermesSkillsDiscover(root)
+		discover, _ := hermesSkillsDiscover(root, !w.secureClientActive())
 		if (recursive && sameWatcherPath(root, recursiveRoot)) ||
 			discover != nil {
 			// Recursive roots resolve the nearest marked skill, not the
@@ -3206,6 +3290,9 @@ func (w *InstallWatcher) quarantineAssetWith(ctx context.Context, evt InstallEve
 func (w *InstallWatcher) resolvedLinkedRoot(path string, roots []string) (string, []string) {
 	for _, root := range roots {
 		resolved, err := filepath.EvalSymlinks(root)
+		if !w.secureClientActive() {
+			resolved, err = skillrootsafe.Resolve(root, watcherEvalSymlinks)
+		}
 		if err != nil || sameWatcherPath(resolved, root) {
 			continue
 		}
@@ -4247,14 +4334,13 @@ func underVendorSystemRoot(absolute string) bool {
 // missing root (for example under a parent only an administrator may write).
 var errWatchDirNotCreated = errors.New("create dir")
 
-// ensureAndWatch creates and watches a skill root only when its existing
-// ancestors and the final root have no links. It returns folders it created.
+// ensureAndWatch creates and watches an asset root after validating any
+// account-owned links in its existing path. It returns folders it created.
 func ensureAndWatch(fsw *fsnotify.Watcher, dir string) ([]string, error) {
 	return ensureAndWatchWithCheck(fsw, dir, true)
 }
 
-// ensureAndWatchLegacy retains the existing watch behavior for plugins and
-// Secure Client. Skill roots outside Secure Client use ensureAndWatch.
+// ensureAndWatchLegacy retains the existing Secure Client watch behavior.
 func ensureAndWatchLegacy(fsw *fsnotify.Watcher, dir string) ([]string, error) {
 	return ensureAndWatchWithCheck(fsw, dir, false)
 }
@@ -4267,8 +4353,7 @@ func ensureAndWatchWithCheck(fsw *fsnotify.Watcher, dir string, checkLinks bool)
 	if checkLinks {
 		for current := filepath.Clean(dir); ; current = filepath.Dir(current) {
 			if _, err := os.Lstat(current); err == nil {
-				resolved, resolveErr := filepath.EvalSymlinks(current)
-				if resolveErr != nil || !sameWatcherPath(canonicalSkillSystemPath(current), resolved) {
+				if _, resolveErr := skillrootsafe.Resolve(current, watcherEvalSymlinks); resolveErr != nil {
 					return nil, fmt.Errorf("linked or unavailable skill root: %s", dir)
 				}
 				break

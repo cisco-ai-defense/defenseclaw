@@ -518,6 +518,7 @@ def status(app: AppContext, as_json: bool) -> None:
                 ux._style("running", fg="green") + ux.dim(_sidecar_running_detail(health, bind, cfg.gateway.api_port)),
             )
         _print_policy(health)
+        _print_watch_root_coverage(health)
         _print_audit_log_health(cfg, health)
         _print_retention_cap_warning(health)
         _print_agent_identity_ledger(health)
@@ -783,6 +784,18 @@ def _format_uptime(ms: object) -> str:
     if hours:
         return f"{hours}h {mins}m"
     return f"{mins}m" if mins else "<1m"
+
+
+def _print_watch_root_coverage(health: dict) -> None:
+    """Name connectors whose skill or plugin admission root is unavailable."""
+    watcher = health.get("watcher")
+    details = watcher.get("details") if isinstance(watcher, dict) else None
+    if not isinstance(details, dict) or not details.get("watch_roots_unavailable"):
+        return
+    names = details.get("admission_scanning_off")
+    connectors = ", ".join(name for name in names if isinstance(name, str)) if isinstance(names, list) else ""
+    suffix = f" for {connectors}" if connectors else ""
+    _status_row("Admission scan", ux._style(f"off{suffix}; see gateway log and defenseclaw doctor", fg="yellow"))
 
 
 def _sidecar_running_detail(health: dict, host: str, port: object) -> str:
