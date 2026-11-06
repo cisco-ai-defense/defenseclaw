@@ -33,6 +33,10 @@ type TargetMemo struct {
 	// words are the answers of actionWindowsWordNamesTarget's candidate
 	// check, which depend only on the key and the file system.
 	words map[memoWordKey]string
+	// windowsGrades reuses a grammar's grade when the same evaluation reads
+	// the command through more than one dialect. The dialect only decides
+	// afterward whether a read-only grammar contributes its hit.
+	windowsGrades map[windowsGradeKey]string
 	// homes resolves each home once (actionProtectedStatePath).
 	homes map[string]*actionStateHome
 	// keys lists each home's protected key files once
@@ -56,12 +60,39 @@ const maxTargetMemoEntries = 1 << 16
 // NewTargetMemo returns an empty memo for one evaluation.
 func NewTargetMemo() *TargetMemo {
 	return &TargetMemo{
-		prefixes: make(map[string]walkState),
-		words:    make(map[memoWordKey]string),
-		homes:    make(map[string]*actionStateHome),
-		keys:     make(map[string][]string),
-		files:    make(map[string]protectedFiles),
+		prefixes:      make(map[string]walkState),
+		words:         make(map[memoWordKey]string),
+		windowsGrades: make(map[windowsGradeKey]string),
+		homes:         make(map[string]*actionStateHome),
+		keys:          make(map[string][]string),
+		files:         make(map[string]protectedFiles),
 	}
+}
+
+type windowsGradeKey struct {
+	command, cwd, home string
+	depth              int
+	stateOnly          bool
+	grammar            actionWindowsGrammar
+}
+
+func (m *TargetMemo) windowsGrammarGrade(key windowsGradeKey, read func() string) string {
+	if m == nil {
+		return read()
+	}
+	m.mu.Lock()
+	hit, known := m.windowsGrades[key]
+	m.mu.Unlock()
+	if known {
+		return hit
+	}
+	hit = read()
+	m.mu.Lock()
+	if len(m.windowsGrades) < maxTargetMemoEntries {
+		m.windowsGrades[key] = hit
+	}
+	m.mu.Unlock()
+	return hit
 }
 
 // protectedFiles is newProtectedFiles of home, once per memo.

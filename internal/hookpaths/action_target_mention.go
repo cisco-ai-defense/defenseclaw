@@ -3051,7 +3051,11 @@ func actionWindowsTargetMentionGrade(command, cwd, home string, depth int, state
 		if grammar != 0 && (dialect == actionfacts.DialectPowerShell || dialect == actionfacts.DialectPOSIX) {
 			grammar |= actionWindowsPlainComments
 		}
-		hit := actionWindowsTargetMentionAsGrade(command, cwd, home, depth, stateOnly, grammar, memo)
+		key := windowsGradeKey{command: command, cwd: cwd, home: home, depth: depth,
+			stateOnly: stateOnly, grammar: grammar}
+		hit := memo.windowsGrammarGrade(key, func() string {
+			return actionWindowsTargetMentionAsGrade(command, cwd, home, depth, stateOnly, grammar, memo)
+		})
 		if hit == "" {
 			continue
 		}
