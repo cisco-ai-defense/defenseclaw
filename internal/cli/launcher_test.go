@@ -105,6 +105,26 @@ func TestLauncherNeedsTheDefenseclawNameAndATrustedManagedRecord(t *testing.T) {
 }
 
 // launcherTestRoot is a stand-in for the gateway's command tree.
+// executeLauncherInTest runs executeLauncher over a test root and puts back
+// the package state it changes: installUsageArgChecks installs once per
+// process, so a launcher test that ran first left rootCmd without its usage
+// checks (TestStrayArgumentsAreUsageErrors,
+// TestMistypedSubcommandSuggestsAndShowsUsage and
+// TestEnterpriseLeavesRejectAStrayArgumentAsUnexpected failed in a shuffled
+// run), and a rootCmd test that ran first left the launcher root without
+// them; and the sandbox app factory, which each run wraps again (GAP-0079).
+func executeLauncherInTest(t *testing.T, root *cobra.Command, args []string) int {
+	t.Helper()
+	installed, app := usageArgChecksInstalled, newSandboxApp
+	t.Cleanup(func() { usageArgChecksInstalled, newSandboxApp = installed, app })
+	usageArgChecksInstalled = false
+	if args == nil {
+		// nil makes cobra read the test binary's own command line.
+		args = []string{}
+	}
+	return executeLauncher(context.Background(), root, args)
+}
+
 func launcherTestRoot(ran *[]string) *cobra.Command {
 	root := &cobra.Command{
 		Use:          "defenseclaw-gateway",
@@ -144,7 +164,7 @@ func TestLauncherRefusesEveryCommandThatIsNotSandbox(t *testing.T) {
 		var stdout, stderr bytes.Buffer
 		root.SetOut(&stdout)
 		root.SetErr(&stderr)
-		if code := executeLauncher(context.Background(), root, args); code != 2 {
+		if code := executeLauncherInTest(t, root, args); code != 2 {
 			t.Errorf("%v: exit %d, want 2", args, code)
 		}
 		if got := strings.TrimSpace(stderr.String()); got != launcherRefusal {
@@ -168,7 +188,7 @@ func TestLauncherTUIPointsToTheManagedDailyView(t *testing.T) {
 			var stdout, stderr bytes.Buffer
 			root.SetOut(&stdout)
 			root.SetErr(&stderr)
-			if code := executeLauncher(context.Background(), root, []string{name}); code != 2 {
+			if code := executeLauncherInTest(t, root, []string{name}); code != 2 {
 				t.Fatalf("%s exit %d, want a bounded launcher refusal", name, code)
 			}
 			message := stderr.String()
@@ -191,7 +211,7 @@ func TestLauncherHelpShowsOnlySandbox(t *testing.T) {
 		var stdout, stderr bytes.Buffer
 		root.SetOut(&stdout)
 		root.SetErr(&stderr)
-		if code := executeLauncher(context.Background(), root, args); code != 0 {
+		if code := executeLauncherInTest(t, root, args); code != 0 {
 			t.Fatalf("%v: exit %d, stderr %q", args, code, stderr.String())
 		}
 		out := stdout.String()
@@ -276,7 +296,7 @@ func TestLauncherRunsSandboxCommandsWithoutTheGatewayBootstrap(t *testing.T) {
 	var stdout, stderr bytes.Buffer
 	root.SetOut(&stdout)
 	root.SetErr(&stderr)
-	if code := executeLauncher(context.Background(), root, []string{"sandbox", "list"}); code != 0 {
+	if code := executeLauncherInTest(t, root, []string{"sandbox", "list"}); code != 0 {
 		t.Fatalf("exit %d, stderr %q", code, stderr.String())
 	}
 	if !reflect.DeepEqual(ran, []string{"sandbox list"}) {
@@ -516,7 +536,7 @@ func TestLauncherReportsOnlyNamedManagedRefusals(t *testing.T) {
 	} {
 		root := &cobra.Command{Use: "defenseclaw"}
 		root.SetErr(&bytes.Buffer{})
-		if code := executeLauncher(context.Background(), root, args); code != 2 {
+		if code := executeLauncherInTest(t, root, args); code != 2 {
 			t.Fatalf("%v: exit %d, want refusal", args, code)
 		}
 	}
