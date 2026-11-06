@@ -142,8 +142,12 @@ func TestGAP0621SkillCallPathForms(t *testing.T) {
 		{`{"skill":"/tmp/sample/SKILL.md"}`, "sample", "/tmp/sample/SKILL.md"},
 		{`{"skill":"sample"}`, "sample", ""},
 	} {
-		name, got := projectSkillCallSelection(nil, json.RawMessage(tc.input))
-		if name != tc.name || got != tc.want {
+		name, sources := projectSkillCallSelection(nil, json.RawMessage(tc.input))
+		got := ""
+		if len(sources) == 1 {
+			got = sources[0]
+		}
+		if name != tc.name || got != tc.want || len(sources) > 1 {
 			t.Errorf("selection for %s = %q, %q, want %q, %q", tc.input, name, got, tc.name, tc.want)
 		}
 	}
