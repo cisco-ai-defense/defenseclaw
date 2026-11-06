@@ -13,7 +13,11 @@ import sys
 from pathlib import Path
 
 CELLS = {"claudecode/oss", "claudecode/managed-balanced", "codex/oss", "codex/managed-balanced"}
-DECISIONS = {"allow", "alert", "block", "ask", "confirm", "error"}
+DECISIONS = {"allow", "alert", "block", "ask", "confirm", "error", "timeout"}
+# An evaluator that failed or never returned (rel-1-0-6 GAP-0700) fails the
+# gate in every cell, inherited from the baseline or not, unless the owner
+# ratified that exact cell.
+UNFINISHED = {"error", "timeout"}
 
 
 def read_verdicts(
@@ -38,7 +42,7 @@ def read_verdicts(
     return rows
 
 
-def regressions(base: dict, head: dict, ratified: set[tuple[str, str]]) -> list[tuple[str, str, str, str]]:
+def regressions(base: dict, head: dict, ratified: set[tuple[str, str]]) -> list[tuple[str, str, str, str, str]]:
     if base.keys() != head.keys():
         missing = base.keys() - head.keys()
         added = head.keys() - base.keys()
@@ -47,9 +51,10 @@ def regressions(base: dict, head: dict, ratified: set[tuple[str, str]]) -> list[
     for key in sorted(base):
         before, _ = base[key]
         after, rule = head[key]
-        if after == "error" or (before in {"allow", "alert"} and after not in {"allow", "alert"}):
+        if after in UNFINISHED or (before in {"allow", "alert"} and after not in {"allow", "alert"}):
             if key not in ratified:
-                failures.append((*key, after, rule))
+                origin = "inherited" if before == after else "new"
+                failures.append((*key, after, rule, origin))
     return failures
 
 
@@ -75,8 +80,8 @@ def main() -> int:
             read_verdicts(args.head, args.shard_index, args.shard_count),
             approved,
         )
-        for row_id, cell, decision, rule_id in failures:
-            print(f"{row_id}\t{cell}\t{decision}\t{rule_id}")
+        for row_id, cell, decision, rule_id, origin in failures:
+            print(f"{row_id}\t{cell}\t{decision}\t{rule_id}\t{origin}")
         if failures:
             print(f"D1 benign regressions: {len(failures)}", file=sys.stderr)
             return 1
