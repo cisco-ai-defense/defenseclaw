@@ -50,6 +50,7 @@ func TestOwnStatusAnswersOnlyTheCaller(t *testing.T) {
 	cfg.Guardrail.Connector = "claudecode"
 	cfg.Guardrail.Profiles = map[string]config.GuardrailProfile{"secret-admin-profile": {Mode: "observe"}}
 	api := NewAPIServer("127.0.0.1:0", nil, nil, nil, nil, cfg)
+	api.managedPolicyView.Store(&managedPolicyView{connectors: map[string]managedPolicyViewConnector{"claudecode": {}}})
 	alice := &managedHookPeer{UID: 5001, Name: "alice"}
 	code, body, out := status(api, alice)
 	cowork, _ := out["cowork"].(map[string]any)
@@ -86,6 +87,98 @@ func TestOwnStatusAnswersOnlyTheCaller(t *testing.T) {
 	_, body, out = status(NewAPIServer("127.0.0.1:0", nil, nil, nil, nil, off), alice)
 	if out["cowork"].(map[string]any)["protected"] != false || out["claude_code"].(map[string]any)["protected"] != false {
 		t.Fatalf("own status without the Claude Code connector = %s; want not protected", body)
+	}
+}
+
+func TestManagedOwnStatusReportsConfiguredConnectorProof(t *testing.T) {
+	previousGuardian := ownStatusGuardianAuthorization
+	ownStatusGuardianAuthorization = func(string) (*managedGuardianAuthorization, string) { return nil, "unavailable" }
+	t.Cleanup(func() { ownStatusGuardianAuthorization = previousGuardian })
+	enabled := true
+	disabled := false
+	cfg := &config.Config{}
+	cfg.Guardrail.Mode = "action"
+	cfg.Guardrail.Connectors = map[string]config.PerConnectorGuardrailConfig{
+		"claudecode": {Enabled: &enabled},
+		"codex":      {Enabled: &enabled},
+		"opencode":   {Enabled: &enabled},
+		"hermes":     {Enabled: &enabled},
+		"copilot":    {Enabled: &disabled},
+	}
+	api := NewAPIServer("127.0.0.1:0", nil, nil, nil, nil, cfg)
+	api.managedPolicyView.Store(&managedPolicyView{connectors: map[string]managedPolicyViewConnector{
+		"claudecode": {}, "codex": {}, "opencode": {},
+	}})
+	read := func(uid, name string) map[string]any {
+		t.Helper()
+		return api.ownStatusAnswer(context.Background(), "uid", uid, name)
+	}
+	connectors, ok := read("5001", "alice")["connectors"].(map[string]any)
+	if !ok || len(connectors) != 4 {
+		t.Fatalf("own connector roster = %#v, want four enabled connectors", connectors)
+	}
+	for _, name := range []string{"claudecode", "codex", "opencode"} {
+		row, ok := connectors[name].(map[string]any)
+		if !ok || row["protected"] != true {
+			t.Fatalf("%s = %#v, want protected", name, connectors[name])
+		}
+	}
+	if _, listed := connectors["copilot"]; listed {
+		t.Fatal("disabled connector was listed as enrolled")
+	}
+	if row, ok := connectors["hermes"].(map[string]any); !ok || row["protected"] != false || row["state"] != "not confirmed" {
+		t.Fatalf("per-user connector without guardian proof = %#v", connectors["hermes"])
+	}
+	api.managedPolicyView.Store(&managedPolicyView{
+		connectors: map[string]managedPolicyViewConnector{"claudecode": {}, "codex": {}, "opencode": {}},
+		admitted:   map[string]bool{"claudecode": true, "opencode": true},
+	})
+	connectors = read("5001", "alice")["connectors"].(map[string]any)
+	if connectors["codex"].(map[string]any)["protected"] != false {
+		t.Fatalf("unadmitted connector was reported protected: %#v", connectors)
+	}
+
+	// A changed shared source or a caller-specific preference is never
+	// reported protected. Another account's preference does not affect mine.
+	api.managedPolicyView.Store(&managedPolicyView{connectors: map[string]managedPolicyViewConnector{
+		"claudecode": {},
+		"codex":      {shared: true},
+		"opencode":   {accounts: map[string]bool{"bob": true}},
+	}})
+	connectors = read("5001", "alice")["connectors"].(map[string]any)
+	if connectors["codex"].(map[string]any)["protected"] != false ||
+		connectors["opencode"].(map[string]any)["protected"] != true {
+		t.Fatalf("alice's connector proof = %#v", connectors)
+	}
+	connectors = read("5002", "bob")["connectors"].(map[string]any)
+	if connectors["opencode"].(map[string]any)["protected"] != false {
+		t.Fatalf("bob's connector proof = %#v", connectors)
+	}
+
+	// Per-user connectors use the guardian's current account target. Strict
+	// machine policy also requires the same caller's enrollment; a different
+	// account's target cannot make this caller appear protected.
+	ownStatusGuardianAuthorization = func(string) (*managedGuardianAuthorization, string) {
+		return &managedGuardianAuthorization{
+			TargetCount: 1, SuccessCount: 1,
+			ProtectedTargets: []managedGuardianAuthorizationTarget{{User: "alice", UID: 5001, Connector: "hermes", OK: true}},
+		}, ""
+	}
+	cfg.Enterprise.Enrollment.UnenrolledUsers = config.EnterpriseUnenrolledDeny
+	connectors = read("5001", "alice")["connectors"].(map[string]any)
+	if connectors["hermes"].(map[string]any)["protected"] != true ||
+		connectors["claudecode"].(map[string]any)["protected"] != true {
+		t.Fatalf("alice's enrolled connector proof = %#v", connectors)
+	}
+	connectors = read("5002", "bob")["connectors"].(map[string]any)
+	if connectors["hermes"].(map[string]any)["protected"] != false ||
+		connectors["claudecode"].(map[string]any)["protected"] != false {
+		t.Fatalf("bob's unenrolled connector proof = %#v", connectors)
+	}
+	cfg.Enterprise.Enrollment.ExemptUsers = []string{"bob"}
+	connectors = read("5002", "bob")["connectors"].(map[string]any)
+	if connectors["claudecode"].(map[string]any)["protected"] != true {
+		t.Fatalf("enrollment exemption still inspects Bob's machine-policy hooks: %#v", connectors)
 	}
 }
 

@@ -174,7 +174,14 @@ func TestLauncherRefusesEveryCommandThatIsNotSandbox(t *testing.T) {
 			t.Errorf("%v: ran %v and printed %q before refusing", args, ran, stdout.String())
 		}
 	}
-	const want = "This computer is managed; use `defenseclaw status` for your protection state, `defenseclaw sandbox status` for your sandboxes and `defenseclaw sandbox policy explain` for your policy. Other commands require an administrator."
+	want := "This computer is managed; use `defenseclaw status` for your protection state, `defenseclaw sandbox status` for your sandboxes and `defenseclaw sandbox policy explain` for your policy."
+	if runtime.GOOS == "linux" || runtime.GOOS == "darwin" {
+		platform, gateway := "linux", "/opt/defenseclaw/bin/defenseclaw-gateway"
+		if runtime.GOOS == "darwin" {
+			platform, gateway = "macos", "/opt/cisco/defenseclaw/bin/defenseclaw-gateway"
+		}
+		want += " For administrator views, run `sudo " + gateway + " enterprise " + platform + " status`, `sudo " + gateway + " enterprise " + platform + " verify`, or `sudo " + gateway + " audit export --since 2h`. The managed launcher does not offer doctor, alerts, or tui."
+	}
 	if launcherRefusal != want {
 		t.Fatalf("refusal text = %q, want %q", launcherRefusal, want)
 	}
@@ -199,6 +206,24 @@ func TestLauncherTUIPointsToTheManagedDailyView(t *testing.T) {
 				t.Fatalf("%s did not give the caller a read-only route: stderr=%q stdout=%q ran=%v", name, message, stdout.String(), ran)
 			}
 		})
+	}
+}
+
+func TestLauncherRefusalNamesAdministratorViews(t *testing.T) {
+	for _, args := range [][]string{{"doctor"}, {"alerts"}, {"tui"}} {
+		var ran []string
+		root := launcherTestRoot(&ran)
+		var stdout, stderr bytes.Buffer
+		root.SetOut(&stdout)
+		root.SetErr(&stderr)
+		if code := executeLauncherInTest(t, root, args); code != 2 || stdout.Len() != 0 || len(ran) != 0 {
+			t.Fatalf("%v: exit %d, stdout %q, ran %v", args, code, stdout.String(), ran)
+		}
+		for _, command := range []string{"defenseclaw-gateway enterprise", " status", " verify", "defenseclaw-gateway audit export"} {
+			if !strings.Contains(stderr.String(), command) {
+				t.Errorf("%v: refusal lacks %q: %s", args, command, stderr.String())
+			}
+		}
 	}
 }
 
