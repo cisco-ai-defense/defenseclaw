@@ -1100,6 +1100,70 @@ def _windows_process_evidence(pid: int) -> ProcessEvidence:  # pragma: no cover 
         close_handle(handle)
 
 
+def windows_process_user_sid(pid: int) -> str:  # pragma: no cover - native Windows only
+    """Read the listener process's token user SID, or return no proof."""
+    from ctypes import wintypes
+
+    if not 0 < pid <= MAX_PLATFORM_PID:
+        return ""
+    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    advapi32 = ctypes.WinDLL("advapi32", use_last_error=True)
+    open_process = kernel32.OpenProcess
+    open_process.argtypes = (wintypes.DWORD, wintypes.BOOL, wintypes.DWORD)
+    open_process.restype = wintypes.HANDLE
+    close_handle = kernel32.CloseHandle
+    close_handle.argtypes = (wintypes.HANDLE,)
+    close_handle.restype = wintypes.BOOL
+    open_token = advapi32.OpenProcessToken
+    open_token.argtypes = (wintypes.HANDLE, wintypes.DWORD, ctypes.POINTER(wintypes.HANDLE))
+    open_token.restype = wintypes.BOOL
+    get_token = advapi32.GetTokenInformation
+    get_token.argtypes = (
+        wintypes.HANDLE,
+        ctypes.c_int,
+        wintypes.LPVOID,
+        wintypes.DWORD,
+        ctypes.POINTER(wintypes.DWORD),
+    )
+    get_token.restype = wintypes.BOOL
+    sid_to_string = advapi32.ConvertSidToStringSidW
+    sid_to_string.argtypes = (ctypes.c_void_p, ctypes.POINTER(wintypes.LPWSTR))
+    sid_to_string.restype = wintypes.BOOL
+    local_free = kernel32.LocalFree
+    local_free.argtypes = (wintypes.HLOCAL,)
+    local_free.restype = wintypes.HLOCAL
+
+    process = open_process(0x1000, False, pid)  # PROCESS_QUERY_LIMITED_INFORMATION
+    if not process:
+        return ""
+    try:
+        token = wintypes.HANDLE()
+        if not open_token(process, 0x0008, ctypes.byref(token)):  # TOKEN_QUERY
+            return ""
+        try:
+            needed = wintypes.DWORD()
+            get_token(token, 1, None, 0, ctypes.byref(needed))  # TokenUser
+            if not needed.value or needed.value > 64 * 1024:
+                return ""
+            buffer = ctypes.create_string_buffer(needed.value)
+            if not get_token(token, 1, buffer, needed, ctypes.byref(needed)):
+                return ""
+            sid = ctypes.cast(buffer, ctypes.POINTER(ctypes.c_void_p)).contents.value
+            if not sid:
+                return ""
+            value = wintypes.LPWSTR()
+            if not sid_to_string(sid, ctypes.byref(value)):
+                return ""
+            try:
+                return value.value or ""
+            finally:
+                local_free(value)
+        finally:
+            close_handle(token)
+    finally:
+        close_handle(process)
+
+
 def _listener_address_matches(local_address: str, target_host: str) -> bool:
     """Return whether a bound address can receive a connection to target."""
     if not target_host:

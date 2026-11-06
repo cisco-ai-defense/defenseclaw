@@ -25,6 +25,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"strings"
@@ -327,6 +328,13 @@ func logHookFailureOf(opts Options, sp spec, reason, category, failMode string, 
 		Outcome:   outcome,
 		EventID:   eventID,
 	}
+	if reason == perUserGatewayNoAnswerReason && perUserRestartWindowCall(opts, sp) {
+		entry.RestartProof = opts.failureLog.getRestartReason()
+		if entry.RestartProof == "" {
+			entry.RestartProof = "no_verified_connection"
+		}
+		slog.Debug("per-user hook restart proof", "reason", entry.RestartProof)
+	}
 	line, err := json.Marshal(entry)
 	if err != nil {
 		return
@@ -444,6 +452,9 @@ type hookFailureEntry struct {
 	Category string `json:"category"`
 	FailMode string `json:"fail_mode"`
 	Outcome  string `json:"outcome"`
+	// RestartProof names why the per-user restart-window proof did not
+	// replace a no-answer refusal with the account's outage answer.
+	RestartProof string `json:"restart_proof,omitempty"`
 	// EventID names a managed call the hook blocked itself (the
 	// gateway, which writes the audit log, did not decide it); the
 	// hook's answer names the same id (managedLocalDenyEventID).

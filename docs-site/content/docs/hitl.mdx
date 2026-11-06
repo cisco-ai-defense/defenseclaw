@@ -21,7 +21,7 @@ Only an event with a native ask can pause a call. Any other event takes its conn
 
 | Agent | What a confirm verdict does |
 | --- | --- |
-| Claude Code | Native ask on `PreToolUse`. CRITICAL still blocks. |
+| Claude Code | Native ask on `PreToolUse`. CRITICAL still blocks. The command-line app shows the DefenseClaw reason in its prompt. Claude Cowork shows its own approval card without the reason: see [Cowork](/docs/connectors/cowork#approval-prompts). |
 | Antigravity | Native ask on `PreToolUse` only. DefenseClaw sends `force_ask`, which ignores cached Always Allow grants. |
 | Amp | Asks in the active foreground thread, on `tool.call` and before a `tool.result` reaches the model. A denial, a background thread or an unavailable plugin UI rejects the call or withholds the result. |
 | OpenClaw | DefenseClaw approval prompts. They reach chat-origin sessions through the bundled plugin. |
@@ -70,7 +70,7 @@ On a managed computer, these per-user `guardrail` and `alerts` commands refuse. 
 
    > Run `curl --max-time 2 https://webhook.site/defenseclaw-demo`.
 
-   The rule `C2-WEBHOOK-SITE` (HIGH) matches the URL. Claude Code shows its own approval prompt with the reason below. Approve to run the command (it makes one empty request), or deny to stop it.
+   The rule `C2-WEBHOOK-SITE` (HIGH) matches the URL. The Claude Code command-line app shows its own approval prompt with the reason below. Approve to run the command (it makes one empty request), or deny to stop it.
 
    ```text
    DefenseClaw policy needs your confirmation for this action (rule C2-WEBHOOK-SITE: webhook.site (known exfil)).

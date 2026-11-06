@@ -319,6 +319,10 @@ class WindowsHookCheck:
     target: str = ""
     raw_target: str = ""
     repair: str = ""
+    # Set only by the Hermes execution probe once the exact registered target
+    # ran and answered. A pending-reload Hermes registration is a warning only
+    # then; an unproven one stays a failure (GAP-0586, GAP-1298).
+    execution_proven: bool = False
 
     @property
     def healthy(self) -> bool:

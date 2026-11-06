@@ -35,6 +35,11 @@ const (
 var (
 	hookAPITokenMu      sync.Mutex
 	hookAPITokenScopeRE = lazyregexp.New(`^[a-z0-9][a-z0-9_-]*$`)
+	// ErrCredentialDisclosed marks a token file every local account could
+	// read (Windows, outside a verified Secure Client process and state
+	// tree). It is not permission drift: the gateway stops authenticating
+	// its cached copy and Ensure rotates the value (GAP-0566).
+	ErrCredentialDisclosed = errors.New("credential is readable by every local account")
 	// errHookAPITokenMalformed marks a trusted token file (location, owner and
 	// permissions checked) whose content is not a token.
 	errHookAPITokenMalformed = errors.New("malformed hook API token")
@@ -103,7 +108,10 @@ func ensureHookAPITokenFileLocked(dataDir, tokenPath string) (string, error) {
 		// A damaged credential in a trusted file is replaced with a fresh one,
 		// as if it were absent (GAP-1244): keeping it disabled the connector's
 		// scoped credential and left the hook with no token at all.
-		if !errors.Is(readErr, errHookAPITokenMalformed) {
+		// A credential every local account could read is rotated: the old
+		// value may already be copied (GAP-0566). Callers that render it
+		// into hook registrations read the new value from the return.
+		if !errors.Is(readErr, errHookAPITokenMalformed) && !errors.Is(readErr, ErrCredentialDisclosed) {
 			return "", fmt.Errorf("read hook API token %s: %w", tokenPath, readErr)
 		}
 	} else if !errors.Is(err, os.ErrNotExist) {
@@ -748,7 +756,7 @@ func readSecureHookAPITokenFile(dataDir, path string) (string, error) {
 	if !info.Mode().IsRegular() {
 		return "", fmt.Errorf("hook API token %s is not a regular file", path)
 	}
-	if err := otlpValidatePerm(path, info); err != nil {
+	if err := otlpValidateCredentialPerm(path, info); err != nil {
 		return "", err
 	}
 	if err := hookAPIValidateOwner(path, info); err != nil {

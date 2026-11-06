@@ -275,9 +275,20 @@ func runMain(args []string, input io.Reader, output, errOutput io.Writer) int {
 		// no-answer, or as the restart outage when this account's start lock
 		// was held after the call reached its gateway and that gateway gave
 		// up the port during the call (rel-1-0-6 GAP-0498).
-		if startObservation.changed || hookexec.PerUserGatewayRestartProvenDuringCall(dataDir, peer, startObservation.start) ||
-			hookexec.PerUserGatewayFreshStartNoAnswer(dataDir, peer) {
+		if startObservation.changed || hookexec.PerUserGatewayRestartProvenDuringCall(dataDir, peer, startObservation.start) {
 			return hookexec.PerUserPostRestartNoAnswerExit
+		}
+		if fresh, reason := hookexec.PerUserGatewayFreshStartNoAnswer(dataDir, peer); fresh {
+			return hookexec.PerUserPostRestartNoAnswerExit
+		} else {
+			// The shell consumes this fixed token only for exit 9. It never
+			// reaches the agent or changes the no-answer decision.
+			for _, arg := range args {
+				if arg == "--curl-output" {
+					_, _ = fmt.Fprint(output, "DCPOSTPROOF1:"+reason)
+					break
+				}
+			}
 		}
 		return hookexec.PerUserPostNoAnswerExit
 	}

@@ -1,0 +1,424 @@
+// Package schemas defines the core schemas and types used by the Bifrost system.
+package schemas
+
+import (
+	"context"
+	"strings"
+	"sync"
+)
+
+// PluginStatus constants
+const (
+	PluginStatusActive        = "active"
+	PluginStatusError         = "error"
+	PluginStatusDisabled      = "disabled"
+	PluginStatusLoading       = "loading"
+	PluginStatusUninitialized = "uninitialized"
+	PluginStatusUnloaded      = "unloaded"
+	PluginStatusLoaded        = "loaded"
+)
+
+// PluginStatus represents the status of a plugin.
+type PluginStatus struct {
+	Name   string       `json:"name"` // Display name of the plugin
+	Status string       `json:"status"`
+	Logs   []string     `json:"logs"`
+	Types  []PluginType `json:"types"` // Plugin types (LLM, MCP, HTTP)
+}
+
+// PluginType represents the type of plugin.
+type PluginType string
+
+const (
+	PluginTypeLLM  PluginType = "llm"
+	PluginTypeMCP  PluginType = "mcp"
+	PluginTypeHTTP PluginType = "http"
+)
+
+// HTTPRequest is a serializable representation of an HTTP request.
+// Used for plugin HTTP transport interception (supports both native .so and WASM plugins).
+// This type is pooled for allocation control - use AcquireHTTPRequest and ReleaseHTTPRequest.
+type HTTPRequest struct {
+	Method     string            `json:"method"`
+	Path       string            `json:"path"`
+	Headers    map[string]string `json:"headers"`
+	Query      map[string]string `json:"query"`
+	Body       []byte            `json:"body"`
+	PathParams map[string]string `json:"path_params"` // Path variables extracted from the URL pattern (e.g., {model})
+}
+
+// CaseInsensitiveHeaderLookup looks up a header key in a case-insensitive manner
+func (req *HTTPRequest) CaseInsensitiveHeaderLookup(key string) string {
+	return caseInsensitiveLookup(req.Headers, key)
+}
+
+// CaseInsensitiveQueryLookup looks up a query key in a case-insensitive manner
+func (req *HTTPRequest) CaseInsensitiveQueryLookup(key string) string {
+	return caseInsensitiveLookup(req.Query, key)
+}
+
+// CaseInsensitivePathParamLookup looks up a path parameter key in a case-insensitive manner
+func (req *HTTPRequest) CaseInsensitivePathParamLookup(key string) string {
+	return caseInsensitiveLookup(req.PathParams, key)
+}
+
+// CaseInsensitiveLookup looks up a key in a case-insensitive manner for a map of strings
+// Returns the value if found, otherwise an empty string
+func caseInsensitiveLookup(data map[string]string, key string) string {
+	if data == nil || key == "" {
+		return ""
+	}
+	// exact match
+	if v, ok := data[key]; ok {
+		return v
+	}
+	// lower key checks
+	lowerKey := strings.ToLower(key)
+	if v, ok := data[lowerKey]; ok {
+		return v
+	}
+	// case-insensitive iteration
+	for k, v := range data {
+		if strings.EqualFold(k, key) {
+			return v
+		}
+	}
+	return ""
+}
+
+// HTTPResponse is a serializable representation of an HTTP response.
+// Used for short-circuit responses in plugin HTTP transport interception.
+// This type is pooled for allocation control - use AcquireHTTPResponse and ReleaseHTTPResponse.
+type HTTPResponse struct {
+	StatusCode int               `json:"status_code"`
+	Headers    map[string]string `json:"headers"`
+	Body       []byte            `json:"body"`
+}
+
+// httpRequestPool is the pool for HTTPRequest objects to reduce allocations.
+var httpRequestPool = sync.Pool{
+	New: func() any {
+		return &HTTPRequest{
+			Headers:    make(map[string]string, 16),
+			Query:      make(map[string]string, 8),
+			PathParams: make(map[string]string, 4),
+		}
+	},
+}
+
+// AcquireHTTPRequest gets an HTTPRequest from the pool.
+// The returned HTTPRequest is ready to use with pre-allocated maps.
+// Call ReleaseHTTPRequest when done to return it to the pool.
+func AcquireHTTPRequest() *HTTPRequest {
+	return httpRequestPool.Get().(*HTTPRequest)
+}
+
+// ReleaseHTTPRequest returns an HTTPRequest to the pool.
+// The HTTPRequest is reset before being returned to the pool.
+// Do not use the HTTPRequest after calling this function.
+func ReleaseHTTPRequest(req *HTTPRequest) {
+	if req == nil {
+		return
+	}
+	// Clear the maps
+	clear(req.Headers)
+	clear(req.Query)
+	clear(req.PathParams)
+	// Reset fields
+	req.Method = ""
+	req.Path = ""
+	req.Body = nil
+	httpRequestPool.Put(req)
+}
+
+// httpResponsePool is the pool for HTTPResponse objects to reduce allocations.
+var httpResponsePool = sync.Pool{
+	New: func() any {
+		return &HTTPResponse{
+			Headers: make(map[string]string, 8),
+		}
+	},
+}
+
+// AcquireHTTPResponse gets an HTTPResponse from the pool.
+// The returned HTTPResponse is ready to use with a pre-allocated Headers map.
+// Call ReleaseHTTPResponse when done to return it to the pool.
+func AcquireHTTPResponse() *HTTPResponse {
+	return httpResponsePool.Get().(*HTTPResponse)
+}
+
+// ReleaseHTTPResponse returns an HTTPResponse to the pool.
+// The HTTPResponse is reset before being returned to the pool.
+// Do not use the HTTPResponse after calling this function.
+func ReleaseHTTPResponse(resp *HTTPResponse) {
+	if resp == nil {
+		return
+	}
+	// Clear the map
+	clear(resp.Headers)
+	// Reset fields
+	resp.StatusCode = 0
+	resp.Body = nil
+	httpResponsePool.Put(resp)
+}
+
+// Plugin defines the interface for Bifrost plugins.
+// Plugins can intercept and modify requests and responses at different stages
+// of the processing pipeline.
+// User can provide multiple plugins in the BifrostConfig.
+// PreHooks are executed in the order they are registered.
+// PostHooks are executed in the reverse order of PreHooks.
+//
+// Execution order:
+// 1. HTTPTransportPreHook (HTTP transport only, once per request, executed in registration order)
+// 2. PreRequestHook (once per request, executed in registration order)
+// 3. PreLLMHook (executed in registration order, runs again on each fallback attempt)
+// 4. Provider call
+// 5. PostLLMHook (executed in reverse order of PreHooks, runs on each fallback attempt)
+// 6. HTTPTransportPostHook (HTTP transport only, once per request, executed in reverse order)
+// 6a. HTTPTransportStreamChunkHook (for streaming responses, called per-chunk in reverse order)
+//
+// Per-request vs per-attempt phases:
+// - HTTPTransportPreHook, PreRequestHook, HTTPTransportPostHook run ONCE per top-level request.
+// - PreLLMHook, PostLLMHook run ONCE PER ATTEMPT: the primary provider call, plus once per
+//   fallback attempt. Mutations a PreLLMHook makes to the request only carry to later
+//   fallbacks where prepareFallbackRequest happens to share pointers (shallow copy) —
+//   visibility across fallbacks is incidental. PreRequestHook is the explicit phase whose
+//   mutations are committed to the request before any fan-out and are observed by every
+//   subsequent plugin, every PreLLMHook invocation, the provider call, and every fallback.
+//
+// Common use cases: rate limiting, caching, logging, monitoring, request transformation, governance.
+//
+// Plugin error handling:
+// - No Plugin errors are returned to the caller; they are logged as warnings by the Bifrost instance.
+// - PreLLMHook and PostLLMHook can both modify the request/response and the error. Plugins can recover from errors (set error to nil and provide a response), or invalidate a response (set response to nil and provide an error).
+// - PostLLMHook is always called with both the current response and error, and should handle either being nil.
+// - Only truly empty errors (no message, no error, no status code, no type) are treated as recoveries by the pipeline.
+// - If a PreLLMHook returns a LLMPluginShortCircuit, the provider call may be skipped and only the PostLLMHook methods of plugins that had their PreLLMHook executed are called in reverse order.
+// - The plugin pipeline ensures symmetry: for every PreLLMHook executed, the corresponding PostLLMHook will be called in reverse order.
+//
+// IMPORTANT: When returning BifrostError from PreLLMHook or PostLLMHook:
+// - You can set the AllowFallbacks field to control fallback behavior
+// - AllowFallbacks = &true: Allow Bifrost to try fallback providers
+// - AllowFallbacks = &false: Do not try fallbacks, return error immediately
+// - AllowFallbacks = nil: Treated as true by default (allow fallbacks for resilience)
+//
+// Plugin authors should ensure their hooks are robust to both response and error being nil, and should not assume either is always present.
+
+type BasePlugin interface {
+	// GetName returns the name of the plugin.
+	GetName() string
+
+	// Cleanup is called on bifrost shutdown.
+	// It allows plugins to clean up any resources they have allocated.
+	// Returns any error that occurred during cleanup, which will be logged as a warning by the Bifrost instance.
+	Cleanup() error
+}
+
+type HTTPTransportPlugin interface {
+	BasePlugin
+
+	// HTTPTransportPreHook is called at the HTTP transport layer before requests enter Bifrost core.
+	// It receives a serializable HTTPRequest and allows plugins to modify it in-place.
+	// Only invoked when using HTTP transport (bifrost-http), not when using Bifrost as a Go SDK directly.
+	// Works with both native .so plugins and WASM plugins due to serializable types.
+	//
+	// Return values:
+	// - (nil, nil): Continue to next plugin/handler, request modifications are applied
+	// - (*HTTPResponse, nil): Short-circuit with this response, skip remaining plugins and provider call
+	// - (nil, error): Short-circuit with error response
+	//
+	// Return nil for both values if the plugin doesn't need HTTP transport interception.
+	HTTPTransportPreHook(ctx *BifrostContext, req *HTTPRequest) (*HTTPResponse, error)
+
+	// HTTPTransportPostHook is called at the HTTP transport layer after requests exit Bifrost core.
+	// It receives a serializable HTTPRequest and HTTPResponse and allows plugins to modify it in-place.
+	// Only invoked when using HTTP transport (bifrost-http), not when using Bifrost as a Go SDK directly.
+	// Works with both native .so plugins and WASM plugins due to serializable types.
+	// NOTE: This hook is NOT called for streaming responses. Use HTTPTransportStreamChunkHook instead.
+	// NOTE: For large streamed responses (non-streaming APIs that switch to body streaming for memory safety),
+	// resp.Body may be nil by design while StatusCode and Headers remain populated.
+	//
+	// Return values:
+	// - nil: Continue to next plugin/handler, response modifications are applied
+	// - error: Short-circuit with error response and skip remaining plugins
+	//
+	// Return nil if the plugin doesn't need HTTP transport interception.
+	HTTPTransportPostHook(ctx *BifrostContext, req *HTTPRequest, resp *HTTPResponse) error
+
+	// HTTPTransportStreamChunkHook is called for each chunk during streaming responses.
+	// It receives the BifrostStreamChunk BEFORE they are written to the client.
+	// Only invoked for streaming responses when using HTTP transport (bifrost-http).
+	// Works with both native .so plugins and WASM plugins due to serializable types.
+	//
+	// Plugins can modify the chunk by returning a different BifrostStreamChunk.
+	// Return the original chunk unchanged if no modification is needed.
+	//
+	// Return values:
+	// - (*BifrostStreamChunk, nil): Continue with the (potentially modified) BifrostStreamChunk
+	// - (nil, nil): Skip this BifrostStreamChunk entirely (don't send to client)
+	// - (*BifrostStreamChunk, error): Log warning and continue with the BifrostStreamChunk
+	// - (nil, error): Send back error to the client and stop the streaming
+	//
+	// Return (*BifrostStreamChunk, nil) unchanged if the plugin doesn't need streaming chunk interception.
+	HTTPTransportStreamChunkHook(ctx *BifrostContext, req *HTTPRequest, chunk *BifrostStreamChunk) (*BifrostStreamChunk, error)
+}
+
+// StreamInterceptionError carries a structured client error when an HTTP stream plugin terminates a stream.
+type StreamInterceptionError struct {
+	BifrostError *BifrostError
+}
+
+// Error returns the best available client message for callers that only understand Go errors.
+func (e *StreamInterceptionError) Error() string {
+	if e != nil && e.BifrostError != nil && e.BifrostError.Error != nil && e.BifrostError.Error.Message != "" {
+		return e.BifrostError.Error.Message
+	}
+	return "stream interception failed"
+}
+
+type LLMPlugin interface {
+	BasePlugin
+
+	// PreRequestHook is called once per top-level request, after HTTPTransportPreHook and before
+	// PreLLMHook. It is the canonical phase for deciding which provider/model/fallbacks the
+	// request should be sent to. Plugins are free to mutate any field on req (Provider, Model,
+	// Fallbacks, Input, Params, Tools, ...) — unlike PreLLMHook, mutations made here are
+	// committed to the request and are observed by all subsequent plugins, the provider call,
+	// and every fallback attempt.
+	//
+	// Error semantics match PreLLMHook: a non-nil error is non-blocking — it is logged as a
+	// warning, the request continues, and the pipeline moves on to the next plugin. PreRequestHook
+	// CANNOT abort the request via error return. Plugins that need to gate or reject a request
+	// (e.g., authorization, content policy) must do so in HTTPTransportPreHook or via a
+	// short-circuit response in PreLLMHook — not by returning an error here.
+	//
+	// Plugins that don't participate in routing should return nil.
+	PreRequestHook(ctx *BifrostContext, req *BifrostRequest) error
+
+	PreLLMHook(ctx *BifrostContext, req *BifrostRequest) (*BifrostRequest, *LLMPluginShortCircuit, error)
+	PostLLMHook(ctx *BifrostContext, resp *BifrostResponse, bifrostErr *BifrostError) (*BifrostResponse, *BifrostError, error)
+}
+
+type MCPPlugin interface {
+	BasePlugin
+
+	PreMCPHook(ctx *BifrostContext, req *BifrostMCPRequest) (*BifrostMCPRequest, *MCPPluginShortCircuit, error)
+	PostMCPHook(ctx *BifrostContext, resp *BifrostMCPResponse, bifrostErr *BifrostError) (*BifrostMCPResponse, *BifrostError, error)
+}
+
+// MCPConnectionPlugin is an optional, typed extension interface for handling MCP
+// Connect events. Connect is morally separate from the other MCP lifecycle ops
+// (Ping/ListTools/ExecuteTool) — it establishes the transport before a usable
+// client exists, and carries transport-level inputs (URL, headers, stdio args)
+// that don't apply post-connection. Plugins implementing this interface receive
+// Connect events via the typed methods; their generic PreMCPHook/PostMCPHook
+// (if also implemented) is NOT called for Connect requests.
+//
+// Plugins registered via MCPPlugins must still satisfy MCPPlugin. To write a
+// plugin that only handles Connect events, embed MCPPluginNoOpHooks for free
+// no-op implementations of the generic Pre/PostMCPHook.
+//
+// NOTE (backwards compat): keeping the Connect hooks on a separate optional
+// interface — and the MCPPluginNoOpHooks helper — is purely a backwards-compat
+// shim so existing MCPPlugin implementations don't break with the addition of
+// Connect hooks. In a future major release these two methods will move onto
+// MCPPlugin directly and every MCP plugin will be required to implement them.
+type MCPConnectionPlugin interface {
+	MCPPlugin
+
+	PreMCPConnectionHook(ctx *BifrostContext, req *BifrostMCPConnectRequest) (*BifrostMCPConnectRequest, *MCPConnectionShortCircuit, error)
+	PostMCPConnectionHook(ctx *BifrostContext, resp *BifrostMCPConnectResponse, bifrostErr *BifrostError) (*BifrostMCPConnectResponse, *BifrostError, error)
+}
+
+// MCPPluginNoOpHooks provides no-op implementations of PreMCPHook and PostMCPHook.
+// Embed this in plugins that only want to implement an extension interface
+// (e.g. MCPConnectionPlugin) and don't need to observe the generic hook surface.
+//
+// The plugin must still provide its own GetName and Cleanup (from BasePlugin).
+type MCPPluginNoOpHooks struct{}
+
+// PreMCPHook returns the request unchanged with no short-circuit.
+func (MCPPluginNoOpHooks) PreMCPHook(_ *BifrostContext, req *BifrostMCPRequest) (*BifrostMCPRequest, *MCPPluginShortCircuit, error) {
+	return req, nil, nil
+}
+
+// PostMCPHook returns the response and error unchanged.
+func (MCPPluginNoOpHooks) PostMCPHook(_ *BifrostContext, resp *BifrostMCPResponse, bifrostErr *BifrostError) (*BifrostMCPResponse, *BifrostError, error) {
+	return resp, bifrostErr, nil
+}
+
+// Plugin placement constants control where custom plugins execute relative to built-in plugins.
+type PluginPlacement string
+
+const (
+	PluginPlacementPostBuiltin PluginPlacement = "post_builtin"
+	PluginPlacementPreBuiltin  PluginPlacement = "pre_builtin"
+	PluginPlacementBuiltin     PluginPlacement = "builtin"
+	PluginPlacementDefault     PluginPlacement = PluginPlacementPostBuiltin
+)
+
+// PluginConfig is the configuration for a plugin.
+// It contains the name of the plugin, whether it is enabled, and the configuration for the plugin.
+type PluginConfig struct {
+	Enabled   bool             `json:"enabled"`
+	Name      string           `json:"name"`
+	Path      *string          `json:"path,omitempty"`
+	Version   *int16           `json:"version,omitempty"`
+	Config    any              `json:"config,omitempty"`
+	Placement *PluginPlacement `json:"placement,omitempty"` // "pre_builtin" or "post_builtin". Default: "post_builtin"
+	Order     *int             `json:"order,omitempty"`     // Position within placement group. Lower = earlier. Default: 0
+}
+
+// ConfigMarshallerPlugin is optionally implemented by plugins that need custom
+// config serialization. If a loaded plugin implements this interface, the server
+// calls MarshalConfigForStorage before writing config to the DB, and RedactConfig
+// when building API responses. Plugins that don't implement it are passed through
+// unchanged — no registration or factory required.
+type ConfigMarshallerPlugin interface {
+	BasePlugin
+
+	// MarshalConfigForStorage converts the raw config map (as received from the API)
+	// into the canonical DB-storage format (e.g. *SecretVar fields as plain strings).
+	MarshalConfigForStorage(config map[string]any) (map[string]any, error)
+	// RedactConfig converts a stored config map into the API-response format,
+	// masking sensitive literal values.
+	// Returns an error if the config cannot be safely redacted; callers must not
+	// return the raw map on error (fail-closed).
+	RedactConfig(config map[string]any) (map[string]any, error)
+}
+
+// ObservabilityPlugin is an interface for plugins that receive completed traces
+// for forwarding to observability backends (e.g., OTEL collectors, Datadog, etc.)
+//
+// ObservabilityPlugins are called asynchronously after the HTTP response has been
+// written to the wire, ensuring they don't add latency to the client response.
+//
+// Plugins implementing this interface will:
+// 1. Continue to work as regular plugins via PreLLMHook/PostLLMHook
+// 2. Additionally receive completed traces via the Inject method
+//
+// Example backends: OpenTelemetry collectors, Datadog, Jaeger, Maxim, etc.
+//
+// Note: Go type assertion (plugin.(ObservabilityPlugin)) is used to identify
+// plugins implementing this interface - no marker method is needed.
+type ObservabilityPlugin interface {
+	BasePlugin
+
+	// Inject receives a completed trace for forwarding to observability backends.
+	// This method is called asynchronously after the response has been written to the client.
+	// The trace contains all spans that were added during request processing.
+	//
+	// Implementations should:
+	// - Convert the trace to their backend's format
+	// - Send the trace to the backend (can be async, but see retention note below)
+	// - Handle errors gracefully (log and continue)
+	//
+	// The context passed is a fresh background context, not the request context.
+	//
+	// Retention: implementations MUST NOT retain the *Trace pointer after Inject
+	// returns. The caller releases the underlying trace back to a sync.Pool
+	// immediately after Inject completes. If a plugin needs to forward the trace
+	// asynchronously, it must copy the data it needs before returning.
+	Inject(ctx context.Context, trace *Trace) error
+}

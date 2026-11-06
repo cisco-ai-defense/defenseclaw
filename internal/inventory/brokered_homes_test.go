@@ -4,6 +4,7 @@
 package inventory
 
 import (
+	"path"
 	"path/filepath"
 	"testing"
 	"time"
@@ -31,7 +32,7 @@ func TestBrokeredHomeAllowlistIsTheCatalogsHomePaths(t *testing.T) {
 		}
 	}
 	for rel := range allow {
-		if filepath.IsAbs(rel) || filepath.Clean(rel) != rel || rel == ".." || len(rel) > 2 && rel[:3] == "../" {
+		if path.IsAbs(rel) || path.Clean(rel) != rel || rel == ".." || len(rel) > 2 && rel[:3] == "../" {
 			t.Fatalf("allowlist path %q is not a clean relative path", rel)
 		}
 	}

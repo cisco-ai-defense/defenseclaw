@@ -13062,6 +13062,15 @@ function Set-DefenseClawManagedAcls {
     Invoke-DefenseClawBundleAclContract -Layout $Layout -GatewayServiceSID $gatewaySID -Repair
     Set-DefenseClawPathAcl -Path $Layout.ConfigPath -Kind ConfigFile -GatewayServiceSID $gatewaySID
     Set-DefenseClawPathAcl -Path $Layout.ManifestPath -Kind AdminFile -GatewayServiceSID $gatewaySID
+    if (Test-DefenseClawStandaloneProfile) {
+        foreach ($name in @('config', 'manifest')) {
+            $approvedPath = Get-DefenseClawApprovedPolicyPath -Layout $Layout -Name $name
+            if (Microsoft.PowerShell.Management\Test-Path -LiteralPath $approvedPath -PathType Leaf) {
+                Set-DefenseClawPathAcl -Path $approvedPath -Kind AdminFile `
+                    -GatewayServiceSID $script:AdministratorsSID
+            }
+        }
+    }
     Set-DefenseClawPathAcl -Path $Layout.RuntimeDirectory -Kind RuntimeDirectory -GatewayServiceSID $gatewaySID
     $runtimeEnv = [IO.Path]::Combine([string]$Layout.RuntimeDirectory, '.env')
     if ((Test-DefenseClawStandaloneProfile) -and
@@ -15288,7 +15297,8 @@ function New-DefenseClawDeploymentMetadata {
         [string]$InstallRootIdentity = '',
         [string]$StateRootIdentity = '',
         [bool]$UninstallPurgeRequested = $false,
-        [bool]$UninstallPurgeUserStateRequested = $false
+        [bool]$UninstallPurgeUserStateRequested = $false,
+        [hashtable]$ApprovedPolicySources = @{}
     )
     if ($Installed -and
         ($UninstallPurgeRequested -or $UninstallPurgeUserStateRequested)) {
@@ -15461,6 +15471,9 @@ function New-DefenseClawDeploymentMetadata {
         # Client metadata keeps its historical field set exactly.
         $metadata['broker_account'] = ''
         $metadata['profile'] = 'standalone'
+        if ($Installed -and $ApprovedPolicySources.Count -gt 0) {
+            $metadata['approved_policy_sources'] = $ApprovedPolicySources
+        }
         $metadata['trust_mode'] = if ([string]$script:DefenseClawTrustMode -ceq 'HashPinned') {
             'hash_pinned'
         }
@@ -16374,6 +16387,9 @@ function New-DefenseClawTransaction {
     }
     # Standalone only: the Secure Client snapshot is unchanged.
     if (Test-DefenseClawStandaloneProfile) {
+        foreach ($name in @('config', 'manifest')) {
+            $destinations.Add((Get-DefenseClawApprovedPolicyPath -Layout $Layout -Name $name))
+        }
         foreach ($destination in @(Get-DefenseClawConfigSidecarPaths -Layout $Layout)) {
             # An existing generation record is not snapshotted: the counter
             # never goes back, so a rollback leaves it and records the
@@ -24138,14 +24154,22 @@ function Get-DefenseClawTargetRuntimeSkippedProfiles {
 function Write-DefenseClawTargetRuntimeSkippedProfiles {
     param(
         [Parameter(Mandatory)]$Plan,
-        [Parameter(Mandatory)][hashtable]$Layout
+        [Parameter(Mandatory)][hashtable]$Layout,
+        [switch]$ValidationOnly
     )
     $entries = @()
     foreach ($profile in @(Get-DefenseClawTargetRuntimeSkippedProfiles -Plan $Plan)) {
-        $entries += ((
-            'target_runtime_profile_skipped: user {0} at {1} was left out of this install ' +
-            'and is not protected until the Guardian enrolls it after the folder is free: {2}'
-        ) -f [string]$profile.sid, [string]$profile.user_home, [string]$profile.reason)
+        $description = if ($ValidationOnly) {
+            'was left pending in this lifecycle run; its folder was not changed. ' +
+            'Correct the named account profile and run Setup /ensure to retry enrollment: {0}'
+        }
+        else {
+            'was left out of this install and is not protected until the Guardian ' +
+            'enrolls it after the folder is free: {0}'
+        }
+        $entries += ('target_runtime_profile_skipped: user {0} at {1} {2}' -f `
+            [string]$profile.sid, [string]$profile.user_home,
+            ($description -f [string]$profile.reason))
     }
     foreach ($profile in @(Get-DefenseClawTargetRuntimeSkippedProfiles -Plan $Plan -Repaired)) {
         $entries += ((
@@ -24568,7 +24592,7 @@ function Invoke-DefenseClawTargetRuntimePreparation {
         $ValidationOnly -and (Test-DefenseClawStandaloneProfile)
     )
     if ($standaloneValidation) {
-        $planArguments += '--validate-only'
+        $planArguments += @('--validate-only', '--skip-account-failures')
     }
     if ($AllowSkipBusyProfiles) {
         # Last, so the plan helper's argument shape stays fixed otherwise.
@@ -24595,7 +24619,7 @@ function Invoke-DefenseClawTargetRuntimePreparation {
     # cannot open in every mode, so Upgrade and Repair heal one user without
     # failing all of them. A skipped user keeps its manifest row and simply
     # has no root in this plan; each one is recorded.
-    Write-DefenseClawTargetRuntimeSkippedProfiles -Plan $plan -Layout $Layout
+    Write-DefenseClawTargetRuntimeSkippedProfiles -Plan $plan -Layout $Layout -ValidationOnly:$ValidationOnly
     if ($ValidationOnly) {
         # A standalone deferred account's pending root (absent, or created by
         # the account before enrollment) is the guardian's to create or adopt
@@ -28928,14 +28952,64 @@ function Assert-DefenseClawRepairRollbackConfig {
             -RepairRollback
     }
     catch {
+        $validationError = $_.Exception.Message
+        if (-not $Sources.ContainsKey('config')) {
+            try {
+                $metadata = Get-DefenseClawDeploymentMetadata -Layout $Layout
+                $approved = Get-DefenseClawRepairRollbackApprovedConfigSource `
+                    -Layout $Layout -Metadata $metadata
+                if ($null -ne $approved) {
+                    # Keep the installed path's directory for relative policy
+                    # paths and credential lookup. The candidate is checked
+                    # before Repair changes config.yaml or stops the gateway.
+                    $candidate = [IO.Path]::Combine(
+                        [string]$Layout.ConfigDirectory,
+                        "config.repair-rollback.$([Guid]::NewGuid().ToString('N')).yaml"
+                    )
+                    try {
+                        Install-DefenseClawFileAtomic `
+                            -Source ([string]$approved.path) `
+                            -Destination $candidate `
+                            -ExpectedSHA256 ([string]$approved.sha256)
+                        Set-DefenseClawPathAcl -Path $candidate -Kind ConfigFile `
+                            -GatewayServiceSID (Get-DefenseClawServiceSID -ServiceName $GatewayServiceName)
+                        $candidateLayout = $Layout.Clone()
+                        $candidateLayout.ConfigPath = $candidate
+                        Assert-DefenseClawInstalledConfig `
+                            -Layout $candidateLayout `
+                            -GatewayServiceName $GatewayServiceName `
+                            -GatewaySource $gatewaySource `
+                            -RepairRollback
+                        return
+                    }
+                    finally {
+                        if (Microsoft.PowerShell.Management\Test-Path -LiteralPath $candidate) {
+                            Microsoft.PowerShell.Management\Remove-Item -LiteralPath $candidate -Force
+                        }
+                    }
+                }
+            }
+            catch {
+                # Keep the installed config's reason: it names the setting
+                # the next step asks the administrator to fix. Unreadable
+                # metadata or an unusable approved copy only says why Repair
+                # could not check the recorded approved bytes instead.
+                $validationError = $validationError +
+                    ' The recorded approved config could not be used: ' +
+                    $_.Exception.Message
+            }
+        }
         throw (
             "Repair refused: the running gateway's installed config cannot " +
             'be validated for rollback (services and deployment metadata ' +
-            'were not changed): ' + $_.Exception.Message +
+            'were not changed): ' + $validationError +
             ' Next step: fix the named config setting or administrator-selected ' +
             'path permissions, restore an approved gateway-valid config.yaml ' +
             'if needed, and retry Setup /repair; or run Setup /ensure ' +
-            'CONFIG=<approved config> when deployment metadata is readable.'
+            'CONFIG=<approved config> when deployment metadata is readable. ' +
+            'For a signed-bundle deployment, run ' +
+            (Get-DefenseClawStandaloneBundleRepairCommand -Layout $Layout) +
+            ' from an elevated PowerShell prompt.'
         )
     }
 }
@@ -29216,7 +29290,8 @@ function Get-DefenseClawGuardianReadinessProbe {
         # As in Wait-DefenseClawFreshGuardianReconcile: a complete reconcile
         # whose only problem is failed targets is accepted (rollback restores it;
         # activation runs degraded). With -LiveVerify, only Guardian-failed targets.
-        [switch]$AllowFailedTargets
+        [switch]$AllowFailedTargets,
+        [string[]]$AllowedFailedTargetSIDs
     )
     $service = Microsoft.PowerShell.Management\Get-Service -Name $GuardianServiceName -ErrorAction SilentlyContinue
     if ($null -eq $service -or
@@ -29239,7 +29314,9 @@ function Get-DefenseClawGuardianReadinessProbe {
         $report = Get-DefenseClawGuardianStatusReport `
             -Layout $Layout `
             -GatewayServiceName $GatewayServiceName
-        if (Test-DefenseClawGuardianReportCompletedWithFailedTargets -Report $report) {
+        if ((Test-DefenseClawGuardianReportCompletedWithFailedTargets -Report $report) -and
+            (Test-DefenseClawGuardianFailedTargetsWithinSIDs `
+                -Report $report -AllowedSIDs $AllowedFailedTargetSIDs)) {
             $accepted = -not $LiveVerify
             if ($LiveVerify) {
                 # A live verify may fail only on the targets the Guardian
@@ -29299,14 +29376,16 @@ function Test-DefenseClawGuardianReady {
         [Parameter(Mandatory)][string]$GatewayServiceName,
         [Parameter(Mandatory)][string]$GuardianServiceName,
         [switch]$LiveVerify,
-        [switch]$AllowFailedTargets
+        [switch]$AllowFailedTargets,
+        [string[]]$AllowedFailedTargetSIDs
     )
     $readiness = Get-DefenseClawGuardianReadinessProbe `
         -Layout $Layout `
         -GatewayServiceName $GatewayServiceName `
         -GuardianServiceName $GuardianServiceName `
         -LiveVerify:$LiveVerify `
-        -AllowFailedTargets:$AllowFailedTargets
+        -AllowFailedTargets:$AllowFailedTargets `
+        -AllowedFailedTargetSIDs $AllowedFailedTargetSIDs
     return [bool]$readiness.ready
 }
 
@@ -29319,7 +29398,8 @@ function Wait-DefenseClawEnterpriseReadiness {
         [bool]$RequireEnumerator = $true,
         [int]$TimeoutSeconds = 90,
         # Rollback, recovery and activation; see Get-DefenseClawGuardianReadinessProbe.
-        [switch]$AllowFailedTargets
+        [switch]$AllowFailedTargets,
+        [string[]]$AllowedFailedTargetSIDs
     )
     $deadline = [DateTime]::UtcNow.AddSeconds($TimeoutSeconds)
     Write-DefenseClawLifecyclePhase -Stage 'enterprise readiness wait'
@@ -29350,7 +29430,8 @@ function Wait-DefenseClawEnterpriseReadiness {
                 -Layout $Layout `
                 -GatewayServiceName $GatewayServiceName `
                 -GuardianServiceName $GuardianServiceName `
-                -AllowFailedTargets:$AllowFailedTargets
+                -AllowFailedTargets:$AllowFailedTargets `
+                -AllowedFailedTargetSIDs $AllowedFailedTargetSIDs
         }
         $enumerator = Microsoft.PowerShell.Management\Get-Service `
             -Name $enumeratorServiceName `
@@ -30676,7 +30757,8 @@ function Assert-DefenseClawEnterpriseDeployment {
         # Install/Upgrade activation: live readiness accepts a completed
         # reconcile whose only failures are user targets the Guardian itself
         # reported failed (see Get-DefenseClawGuardianReadinessProbe).
-        [switch]$AcceptDegradedTargets
+        [switch]$AcceptDegradedTargets,
+        [string[]]$AllowedFailedTargetSIDs
     )
     if ($null -eq $ExpectedGatewayAccount -or $ExpectedGatewayAccount.Count -eq 0) {
         $ExpectedGatewayAccount = Get-DefenseClawAcceptedGatewayServiceAccounts `
@@ -31608,7 +31690,8 @@ function Assert-DefenseClawEnterpriseDeployment {
             -GatewayServiceName $GatewayServiceName `
             -GuardianServiceName $GuardianServiceName `
             -LiveVerify `
-            -AllowFailedTargets:$AcceptDegradedTargets
+            -AllowFailedTargets:$AcceptDegradedTargets `
+            -AllowedFailedTargetSIDs $AllowedFailedTargetSIDs
         if (-not [bool]$guardianReadiness.ready) {
             throw (
                 'guardian SCM process is running but protected target ' +
@@ -31926,6 +32009,214 @@ function Get-DefenseClawLifecycleSources {
     return $sources
 }
 
+function Get-DefenseClawApprovedPolicyPath {
+    param(
+        [Parameter(Mandatory)][hashtable]$Layout,
+        [Parameter(Mandatory)][ValidateSet('config', 'manifest')][string]$Name
+    )
+    $leaf = if ($Name -ceq 'config') { 'approved-config.yaml' } else { 'approved-targets.yaml' }
+    return [IO.Path]::Combine([string]$Layout.InstallStateDirectory, $leaf)
+}
+
+function Get-DefenseClawApprovedPolicyHash {
+    param(
+        [Parameter(Mandatory)]$Metadata,
+        [Parameter(Mandatory)][ValidateSet('config', 'manifest')][string]$Name
+    )
+    $record = $Metadata.PSObject.Properties['approved_policy_sources']
+    if ($null -eq $record) { return '' }
+    if ($record.Value -isnot [Management.Automation.PSCustomObject]) {
+        throw 'deployment metadata has an invalid approved policy source record'
+    }
+    foreach ($property in $record.Value.PSObject.Properties) {
+        if ($property.Name -notin @('config', 'manifest') -or
+            [string]$property.Value -cnotmatch '^[0-9a-f]{64}$') {
+            throw 'deployment metadata has an invalid approved policy source digest'
+        }
+    }
+    $entry = $record.Value.PSObject.Properties[$Name]
+    if ($null -eq $entry) { return '' }
+    return [string]$entry.Value
+}
+
+function Get-DefenseClawStandaloneBundleRepairCommand {
+    param([Parameter(Mandatory)][hashtable]$Layout)
+    $cli = [string]$Layout['CLIPath']
+    if ([string]::IsNullOrWhiteSpace($cli)) { $cli = 'defenseclaw.exe' }
+    return "& '$($cli.Replace("'", "''"))' enterprise windows repair --profile standalone --json"
+}
+
+function Get-DefenseClawApprovedPolicySource {
+    param(
+        [Parameter(Mandatory)][hashtable]$Layout,
+        [Parameter(Mandatory)]$Metadata,
+        [Parameter(Mandatory)][ValidateSet('config', 'manifest')][string]$Name
+    )
+    $bundleRepair = Get-DefenseClawStandaloneBundleRepairCommand -Layout $Layout
+    $inputName = if ($Name -ceq 'config') { 'CONFIG' } else { 'MANIFEST' }
+    $nextStep = "run Setup /ensure $inputName=<approved absolute path>, or $bundleRepair on a signed-bundle deployment"
+    $expected = Get-DefenseClawApprovedPolicyHash -Metadata $Metadata -Name $Name
+    if ([string]::IsNullOrEmpty($expected)) {
+        throw "Repair has no recorded approved $Name source; $nextStep"
+    }
+    $path = Get-DefenseClawApprovedPolicyPath -Layout $Layout -Name $Name
+    if (-not (Microsoft.PowerShell.Management\Test-Path -LiteralPath $path -PathType Leaf)) {
+        throw "Repair cannot read the recorded approved $Name source; $nextStep"
+    }
+    Assert-DefenseClawPathAcl `
+        -Path $path `
+        -AllowedWriterSIDs @($script:SystemSID, $script:AdministratorsSID, $script:TrustedInstallerSID) `
+        -AllowedReaderSIDs @($script:SystemSID, $script:AdministratorsSID, $script:TrustedInstallerSID) `
+        -RejectUntrustedRead `
+        -AllowInheritance `
+        -IgnoreCreatorTemplates
+    $source = Get-DefenseClawSourceDescriptor -Path $path -Label "approved $Name source"
+    if ([string]$source.sha256 -ne $expected) {
+        throw "Repair found a changed approved $Name source; $nextStep"
+    }
+    return $source
+}
+
+function Get-DefenseClawRecordedConfigGenerationHash {
+    param([Parameter(Mandatory)][hashtable]$Layout)
+    $generationPath = [IO.Path]::Combine([string]$Layout.ConfigDirectory, 'config.generation.json')
+    if (-not (Microsoft.PowerShell.Management\Test-Path -LiteralPath $generationPath -PathType Leaf)) {
+        return ''
+    }
+    Assert-DefenseClawPathAcl -Path $generationPath `
+        -AllowedWriterSIDs @($script:SystemSID, $script:AdministratorsSID, $script:TrustedInstallerSID) `
+        -AllowInheritance -IgnoreCreatorTemplates
+    $generation = Microsoft.PowerShell.Management\Get-Content `
+        -LiteralPath $generationPath -Raw |
+        Microsoft.PowerShell.Utility\ConvertFrom-Json
+    $activeHash = [string]$generation.config_sha256
+    if ($activeHash -cnotmatch '^[0-9a-f]{64}$') {
+        throw 'Repair cannot read the recorded config generation; run Setup /ensure CONFIG=<approved absolute config path>'
+    }
+    return $activeHash
+}
+
+function Get-DefenseClawRepairRollbackApprovedConfigSource {
+    param(
+        [Parameter(Mandatory)][hashtable]$Layout,
+        [Parameter(Mandatory)]$Metadata
+    )
+    $activeHash = Get-DefenseClawRecordedConfigGenerationHash -Layout $Layout
+    if ([string]::IsNullOrEmpty($activeHash)) { return $null }
+    Assert-DefenseClawNoReparsePath -Path $Layout.ConfigPath -AllowMissingLeaf
+    if (Microsoft.PowerShell.Management\Test-Path -LiteralPath $Layout.ConfigPath -PathType Leaf) {
+        $installedHash = (
+            Microsoft.PowerShell.Utility\Get-FileHash -LiteralPath $Layout.ConfigPath -Algorithm SHA256
+        ).Hash.ToLowerInvariant()
+        if ($installedHash -ceq $activeHash) { return $null }
+    }
+    $approved = Get-DefenseClawApprovedPolicySource -Layout $Layout -Metadata $Metadata -Name config
+    if (([string]$approved.sha256).ToLowerInvariant() -cne $activeHash) {
+        throw ('Repair cannot prove that the recorded approved config source is current; ' +
+            'run ' + (Get-DefenseClawStandaloneBundleRepairCommand -Layout $Layout) + ' ' +
+            'on a signed-bundle deployment, or Setup /ensure CONFIG=<approved absolute config path> otherwise')
+    }
+    return $approved
+}
+
+function Invoke-DefenseClawRepairApprovedPolicyRecovery {
+    param(
+        [Parameter(Mandatory)][hashtable]$Layout,
+        [Parameter(Mandatory)][hashtable]$Sources,
+        [Parameter(Mandatory)]$Metadata,
+        [Parameter(Mandatory)][string]$GatewayServiceName
+    )
+    $adminWriters = @($script:SystemSID, $script:AdministratorsSID, $script:TrustedInstallerSID)
+    foreach ($name in @('config', 'manifest')) {
+        if ($Sources.ContainsKey($name)) { continue }
+        $destination = Get-DefenseClawArtifactPath -Layout $Layout -Name $name
+        $directory = [IO.Path]::GetDirectoryName([string]$destination)
+        $parentPaths = @($Layout.StateRoot, $directory)
+        foreach ($parent in $parentPaths) {
+            Assert-DefenseClawPathAcl -Path ([string]$parent) `
+                -AllowedWriterSIDs $adminWriters -AllowInheritance -IgnoreCreatorTemplates
+        }
+        $needsRewrite = -not (Microsoft.PowerShell.Management\Test-Path `
+            -LiteralPath $destination -PathType Leaf)
+        if (-not $needsRewrite) {
+            try {
+                Assert-DefenseClawPathAcl -Path $destination `
+                    -AllowedWriterSIDs $adminWriters -AllowInheritance -IgnoreCreatorTemplates
+            }
+            catch {
+                $needsRewrite = $true
+            }
+        }
+        $activeHash = ''
+        if ($name -ceq 'config') {
+            $activeHash = Get-DefenseClawRecordedConfigGenerationHash -Layout $Layout
+        }
+        else {
+            $activeHash = [string]$Metadata.managed_hooks_activation.manifest_sha256
+        }
+        if (-not $needsRewrite -and -not [string]::IsNullOrEmpty($activeHash)) {
+            $installedHash = (
+                Microsoft.PowerShell.Utility\Get-FileHash -LiteralPath $destination -Algorithm SHA256
+            ).Hash.ToLowerInvariant()
+            if ($installedHash -ne $activeHash) {
+                if ($name -ceq 'config') {
+                    $needsRewrite = $true
+                }
+                else {
+                    $adoption = Get-DefenseClawStandaloneManifestAdoption `
+                        -Layout $Layout -GatewayServiceName $GatewayServiceName `
+                        -Activation $Metadata.managed_hooks_activation `
+                        -InstalledManifestSHA256 $installedHash
+                    $needsRewrite = -not [bool]$adoption.ok
+                }
+            }
+        }
+        if (-not $needsRewrite) { continue }
+        $approved = Get-DefenseClawApprovedPolicySource `
+            -Layout $Layout -Metadata $Metadata -Name $name
+        if ([string]::IsNullOrEmpty($activeHash) -or
+            [string]$approved.sha256 -ne $activeHash) {
+            $inputName = if ($name -ceq 'config') { 'CONFIG' } else { 'MANIFEST' }
+            throw ("Repair cannot prove that the recorded approved $name source is current; " +
+                "run Setup /ensure $inputName=<approved absolute path>, or " +
+                (Get-DefenseClawStandaloneBundleRepairCommand -Layout $Layout) +
+                ' on a signed-bundle deployment')
+        }
+        Install-DefenseClawSourceDescriptor -Source $approved -Destination $destination
+        $kind = if ($name -ceq 'config') { 'ConfigFile' } else { 'AdminFile' }
+        Set-DefenseClawPathAcl -Path $destination -Kind $kind `
+            -GatewayServiceSID (Get-DefenseClawServiceSID -ServiceName $GatewayServiceName)
+    }
+}
+
+function Publish-DefenseClawApprovedPolicySources {
+    param(
+        [Parameter(Mandatory)][hashtable]$Layout,
+        [Parameter(Mandatory)][hashtable]$Sources,
+        $PriorMetadata
+    )
+    $record = @{}
+    if ($null -ne $PriorMetadata) {
+        foreach ($name in @('config', 'manifest')) {
+            $priorHash = Get-DefenseClawApprovedPolicyHash -Metadata $PriorMetadata -Name $name
+            if (-not [string]::IsNullOrEmpty($priorHash)) { $record[$name] = $priorHash }
+        }
+    }
+    foreach ($name in @('config', 'manifest')) {
+        if (-not $Sources.ContainsKey($name)) { continue }
+        $installed = Get-DefenseClawArtifactPath -Layout $Layout -Name $name
+        $copy = Get-DefenseClawApprovedPolicyPath -Layout $Layout -Name $name
+        $digest = (
+            Microsoft.PowerShell.Utility\Get-FileHash -LiteralPath $installed -Algorithm SHA256
+        ).Hash.ToLowerInvariant()
+        Install-DefenseClawFileAtomic -Source $installed -Destination $copy -ExpectedSHA256 $digest
+        Set-DefenseClawPathAcl -Path $copy -Kind AdminFile `
+            -GatewayServiceSID $script:AdministratorsSID
+        $record[$name] = $digest
+    }
+    return $record
+}
+
 function Assert-DefenseClawLifecycleSourcesCurrent {
     param([Parameter(Mandatory)][hashtable]$Sources)
     foreach ($name in @(
@@ -32068,7 +32359,8 @@ function Get-DefenseClawLifecycleStatus {
         # The result of an activation that accepted a completed reconcile
         # with failed user targets: those targets are logged as
         # defenseclaw_degraded instead of failing the result.
-        [switch]$AcceptDegradedTargets
+        [switch]$AcceptDegradedTargets,
+        [string[]]$AllowedFailedTargetSIDs
     )
     $errors = [Collections.Generic.List[string]]::new()
     $metadata = $null
@@ -32142,14 +32434,17 @@ function Get-DefenseClawLifecycleStatus {
                 -Layout $Layout `
                 -GatewayServiceName $GatewayServiceName `
                 -GuardianServiceName $GuardianServiceName `
-                -AllowFailedTargets:$AcceptDegradedTargets
+                -AllowFailedTargets:$AcceptDegradedTargets `
+                -AllowedFailedTargetSIDs $AllowedFailedTargetSIDs
             $guardianReport = Get-DefenseClawGuardianStatusReport `
                 -Layout $Layout `
                 -GatewayServiceName $GatewayServiceName
             $generation = Get-DefenseClawGuardianGeneration -Report $guardianReport
             $guardianDegraded = [bool](
                 $AcceptDegradedTargets -and
-                (Test-DefenseClawGuardianReportCompletedWithFailedTargets -Report $guardianReport)
+                (Test-DefenseClawGuardianReportCompletedWithFailedTargets -Report $guardianReport) -and
+                (Test-DefenseClawGuardianFailedTargetsWithinSIDs `
+                    -Report $guardianReport -AllowedSIDs $AllowedFailedTargetSIDs)
             )
             if ($guardianDegraded) {
                 Write-DefenseClawGuardianDegradedTargets -Report $guardianReport
@@ -32422,7 +32717,8 @@ function Test-DefenseClawGuardianCoverageReport {
         [AllowEmptyString()][string]$CurrentStateIdentity,
         [AllowEmptyString()][string]$ExpectedManifestSHA256,
         [Parameter(Mandatory)][DateTime]$StartedAfter,
-        [switch]$AllowFailedTargets
+        [switch]$AllowFailedTargets,
+        [string[]]$AllowedFailedTargetSIDs
     )
     $reject = {
         param([string]$Reason)
@@ -32436,7 +32732,9 @@ function Test-DefenseClawGuardianCoverageReport {
     # A digest-bound activation still has to prove its exact activation
     # identity below; only the report's ok=false is excused.
     $degradedAccepted = $AllowFailedTargets -and
-        (Test-DefenseClawGuardianReportCompletedWithFailedTargets -Report $Report)
+        (Test-DefenseClawGuardianReportCompletedWithFailedTargets -Report $Report) -and
+        (Test-DefenseClawGuardianFailedTargetsWithinSIDs `
+            -Report $Report -AllowedSIDs $AllowedFailedTargetSIDs)
     if (-not $degradedAccepted -and
         ($null -eq $Report -or
         $null -eq $Report.PSObject.Properties['ok'] -or
@@ -32806,6 +33104,46 @@ function Get-DefenseClawGuardianFailedTargets {
     return @($failed.ToArray())
 }
 
+# An activation that skipped account roots may accept Guardian failures only
+# for those accounts. An empty list preserves the existing Secure Client and
+# rollback behavior, where any completed per-target failure is reported as
+# degraded. The caller must first validate the report as complete.
+function Test-DefenseClawGuardianFailedTargetsWithinSIDs {
+    param(
+        [Parameter(Mandatory)]$Report,
+        [string[]]$AllowedSIDs
+    )
+    if ($null -eq $AllowedSIDs -or $AllowedSIDs.Count -eq 0) {
+        return $true
+    }
+    $allowed = [Collections.Generic.HashSet[string]]::new(
+        [StringComparer]::OrdinalIgnoreCase
+    )
+    foreach ($sid in $AllowedSIDs) {
+        if ([string]::IsNullOrWhiteSpace($sid)) {
+            return $false
+        }
+        [void]$allowed.Add($sid)
+    }
+    foreach ($target in @(Get-DefenseClawGuardianFailedTargets -Report $Report)) {
+        if (-not $allowed.Contains([string]$target.sid)) {
+            return $false
+        }
+    }
+    return $true
+}
+
+function Get-DefenseClawAllowedFailedTargetSIDs {
+    param([Parameter(Mandatory)]$Plan)
+    if (-not (Test-DefenseClawStandaloneProfile)) {
+        return , [string[]]@()
+    }
+    return , [string[]]@(
+        Get-DefenseClawTargetRuntimeSkippedProfiles -Plan $Plan |
+            Microsoft.PowerShell.Core\ForEach-Object { [string]$_.sid }
+    )
+}
+
 # Install and Upgrade succeed when the Guardian completed a fresh reconcile in
 # which some user targets failed: the deployment is live and every other user
 # is protected. Each failed target is recorded once as defenseclaw_degraded.
@@ -32922,7 +33260,8 @@ function Wait-DefenseClawFreshGuardianReconcile {
         # Upgrade activation the deployment is live and degraded (each
         # failed target is logged). A reconcile that never completes, or a
         # status that is not fresh, still fails.
-        [switch]$AllowFailedTargets
+        [switch]$AllowFailedTargets,
+        [string[]]$AllowedFailedTargetSIDs
     )
     if (-not [string]::IsNullOrWhiteSpace($ExpectedManifestSHA256) -and
         $ExpectedManifestSHA256 -cnotmatch '^[0-9a-f]{64}$') {
@@ -33014,7 +33353,8 @@ function Wait-DefenseClawFreshGuardianReconcile {
             -CurrentStateIdentity $currentStateIdentity `
             -ExpectedManifestSHA256 $ExpectedManifestSHA256 `
             -StartedAfter $startedAfter `
-            -AllowFailedTargets:$AllowFailedTargets
+            -AllowFailedTargets:$AllowFailedTargets `
+            -AllowedFailedTargetSIDs $AllowedFailedTargetSIDs
         if ([bool]$coverage.ok) {
             if ($AllowFailedTargets) {
                 Write-DefenseClawGuardianDegradedTargets -Report $report
@@ -40809,6 +41149,13 @@ function Invoke-DefenseClawInstallLikeLifecycle {
             -ReplacedArtifacts $replaced `
             -Action $Action
     }
+    if ($Action -eq 'Repair' -and (Test-DefenseClawStandaloneProfile)) {
+        Invoke-DefenseClawRepairApprovedPolicyRecovery `
+            -Layout $Layout `
+            -Sources $Sources `
+            -Metadata $metadata `
+            -GatewayServiceName $GatewayServiceName
+    }
 
     $priorCodexTargetEnabled = $false
     if ($null -ne $metadata -and
@@ -41221,6 +41568,13 @@ function Invoke-DefenseClawInstallLikeLifecycle {
                 $Action -eq 'Install' -and -not $reconcileInstall -and
                 $targetRuntimePreparationMode -ceq 'prepare'
             )
+        $allowedFailedTargetSIDs = [string[]](
+            Get-DefenseClawAllowedFailedTargetSIDs -Plan $targetRuntimePlan
+        )
+        if ((Test-DefenseClawStandaloneProfile) -and
+            $allowedFailedTargetSIDs.Count -gt 0) {
+            $acceptDegradedTargets = $true
+        }
         $expectedGuardianManifestSHA256 = [string]$targetRuntimePlan.manifest_sha256
         if ($expectedGuardianManifestSHA256 -cnotmatch '^[0-9a-f]{64}$') {
             throw 'target runtime plan did not bind an exact manifest SHA-256'
@@ -41444,6 +41798,11 @@ function Invoke-DefenseClawInstallLikeLifecycle {
                 -TargetCount ([Convert]::ToInt64(
                     $targetRuntimePlan.target_count
                 ))
+        $approvedPolicySources = @{}
+        if (Test-DefenseClawStandaloneProfile) {
+            $approvedPolicySources = Publish-DefenseClawApprovedPolicySources `
+                -Layout $Layout -Sources $Sources -PriorMetadata $metadata
+        }
         $newMetadata = New-DefenseClawDeploymentMetadata `
             -Layout $Layout `
             -GatewayServiceName $GatewayServiceName `
@@ -41451,7 +41810,8 @@ function Invoke-DefenseClawInstallLikeLifecycle {
             -DeferredConfigPending:([bool](
                 $DeferredConfig -or $priorDeferredConfigPending
             )) `
-            -ManagedHooksActivation $managedHooksActivation
+            -ManagedHooksActivation $managedHooksActivation `
+            -ApprovedPolicySources $approvedPolicySources
         Write-DefenseClawJsonAtomic -Value $newMetadata -Path $Layout.MetadataPath
         Set-DefenseClawManagedAcls -Layout $Layout -GatewayServiceName $GatewayServiceName
         Set-DefenseClawStandaloneSecretsAcls `
@@ -41521,17 +41881,17 @@ function Invoke-DefenseClawInstallLikeLifecycle {
             Set-DefenseClawServiceStartMode `
                 -Name $GuardianServiceName `
                 -StartMode 3
-            # Secure Client: one user's failed target does not fail the
-            # deployment: a completed, fresh, digest-bound reconcile with
-            # failed targets activates degraded and logs each failed target.
-            # Standalone still requires every target to reconcile.
+            # A completed, fresh, digest-bound reconcile with failed targets
+            # activates degraded only for Secure Client or for accounts the
+            # standalone target runtime plan explicitly skipped.
             try {
                 [void](Wait-DefenseClawFreshGuardianReconcile `
                     -Layout $Layout `
                     -GatewayServiceName $GatewayServiceName `
                     -GuardianServiceName $GuardianServiceName `
                     -ExpectedManifestSHA256 $expectedGuardianManifestSHA256 `
-                    -AllowFailedTargets:$acceptDegradedTargets)
+                    -AllowFailedTargets:$acceptDegradedTargets `
+                    -AllowedFailedTargetSIDs $allowedFailedTargetSIDs)
             }
             finally {
                 if (Test-DefenseClawStandaloneProfile) {
@@ -41586,7 +41946,8 @@ function Invoke-DefenseClawInstallLikeLifecycle {
                 -Layout $Layout `
                 -GatewayServiceName $GatewayServiceName `
                 -GuardianServiceName $GuardianServiceName `
-                -AllowFailedTargets:$acceptDegradedTargets
+                -AllowFailedTargets:$acceptDegradedTargets `
+                -AllowedFailedTargetSIDs $allowedFailedTargetSIDs
             # Canonicalize dynamic logs/authorization after the service-created
             # files exist, then verify exact effective rights.
             Set-DefenseClawManagedAcls -Layout $Layout -GatewayServiceName $GatewayServiceName
@@ -41596,7 +41957,8 @@ function Invoke-DefenseClawInstallLikeLifecycle {
                 -GuardianServiceName $GuardianServiceName `
                 -RequireReadiness `
                 -PendingTransaction `
-                -AcceptDegradedTargets:$acceptDegradedTargets
+                -AcceptDegradedTargets:$acceptDegradedTargets `
+                -AllowedFailedTargetSIDs $allowedFailedTargetSIDs
             # Only fully verified live state may become boot-active. A crash
             # before pending cleanup can start only validated services.
             Set-DefenseClawServiceStartMode `
@@ -41626,7 +41988,8 @@ function Invoke-DefenseClawInstallLikeLifecycle {
                 -GatewayServiceName $GatewayServiceName `
                 -GuardianServiceName $GuardianServiceName `
                 -RequireReadiness `
-                -AcceptDegradedTargets:$acceptDegradedTargets
+                -AcceptDegradedTargets:$acceptDegradedTargets `
+                -AllowedFailedTargetSIDs $allowedFailedTargetSIDs
             if ($priorDeferredConfigPending) {
                 # Keep the authenticated activation marker set through every
                 # mutable policy/runtime step and the complete live readiness
@@ -41735,7 +42098,8 @@ function Invoke-DefenseClawInstallLikeLifecycle {
         -Layout $Layout `
         -GatewayServiceName $GatewayServiceName `
         -GuardianServiceName $GuardianServiceName `
-        -AcceptDegradedTargets:$acceptDegradedTargets
+        -AcceptDegradedTargets:$acceptDegradedTargets `
+        -AllowedFailedTargetSIDs $allowedFailedTargetSIDs
     if ($NoStart) {
         $result.ok = $true
     }

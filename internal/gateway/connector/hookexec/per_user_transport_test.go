@@ -63,6 +63,35 @@ func TestPerUserTransportVerifiesConnectedPeerBeforeSending(t *testing.T) {
 	}
 }
 
+// TestGAP0295VerifiedConnectionTimeFollowsOwnerProof pins the timestamp
+// used by the restart-window proof to the verified connection.
+func TestGAP0295VerifiedConnectionTimeFollowsOwnerProof(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	defer server.Close()
+	address := server.Listener.Addr().String()
+	var verifiedAt time.Time
+	client := verifiedPerUserHTTPClient(time.Second, address, (&net.Dialer{}).DialContext, func(net.Conn) error {
+		verifiedAt = time.Now()
+		return nil
+	})
+	ctx, check := withPerUserPeerCheck(context.Background())
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, server.URL, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	response, err := client.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_ = response.Body.Close()
+	ends := check.ends.Load()
+	if ends == nil || ends.at.IsZero() || ends.at.Before(verifiedAt) {
+		t.Fatalf("verified connection time = %v, owner proof returned at %v", ends, verifiedAt)
+	}
+}
+
 func TestPerUserGatewayClientCanUseARequestContextWithoutAnOverallTimeout(t *testing.T) {
 	client, err := NewPerUserGatewayHTTPClient(0, "127.0.0.1:18970")
 	if err != nil {

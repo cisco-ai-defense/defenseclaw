@@ -48,6 +48,47 @@ The agent appears under **Agents** with its mode. `defenseclaw doctor` reports n
 
 The sequence of a model call and a tool call, with approvals, is on the [OpenClaw integration page](/docs/connectors/openclaw-integration#end-to-end-flow).
 
+### Same user, own ports
+
+Run the DefenseClaw gateway and the OpenClaw gateway as the same OS user. The plugin runs inside OpenClaw and reads that user's `~/.defenseclaw`, and the DefenseClaw gateway connects to OpenClaw with that user's OpenClaw token.
+
+Use one OS account for each DefenseClaw and OpenClaw pair. On a shared machine, give each account its own ports: `gateway.api_port` and `guardrail.port` for DefenseClaw, `gateway.port` in `openclaw.json` for OpenClaw.
+
+DefenseClaw checks the listener before it sends a token. This protects against a process of another account that takes a port while a gateway restarts:
+
+- The plugin sends the DefenseClaw token and provider keys only to a loopback `gateway.host`. `localhost` means `127.0.0.1`. With any other host the plugin sends nothing, and `defenseclaw doctor` fails the **OpenClaw gateway.host** row.
+- The listener must prove it holds the same token (`/api/v1/hook-listener-proof`). The gateway answers that proof only to its own OS account. When the proof fails, nothing is sent: a tool check follows the plugin's outage mode, and a model call fails as in a gateway outage.
+- Tool checks and the plugin's other gateway calls prove the very connection that carries the token. Model calls, health checks and telemetry prove the listener right before each request. A process that takes the port in the gap between that proof and the request, well under a millisecond on loopback, could still receive that one request.
+- Before it connects to a loopback OpenClaw gateway port, the DefenseClaw gateway checks who owns the listener. On Linux it must be the same account or root; on macOS, the same account. Otherwise it sends nothing, keeps retrying, and `defenseclaw doctor` names the step.
+
+### Tested OpenClaw versions
+
+We test DefenseClaw with OpenClaw 2026.6.8, 2026.9.8 and 2026.10.9. We test against new OpenClaw releases as they come out.
+
+### Device pairing
+
+DefenseClaw connects to the OpenClaw gateway as an operator device named `gateway-client`. OpenClaw approves a new device on a loopback connection by itself, so a normal single-user install needs no step. DefenseClaw never writes OpenClaw's pairing files.
+
+OpenClaw asks you to approve the device when the connection is not loopback, when `gateway.nodes.pairing.autoApproveLocal` is `false`, or when a device asks for more scopes than OpenClaw approved. DefenseClaw then keeps retrying. `defenseclaw doctor` and `defenseclaw-gateway status` show the device ID and the step:
+
+```bash
+openclaw devices list
+openclaw devices approve REQUEST_ID
+```
+
+Replace `REQUEST_ID` with the request ID the list shows. Run `openclaw devices list` right before you approve: OpenClaw gives a new request ID when the device retries with changed details.
+
+### OpenClaw operator scopes
+
+DefenseClaw asks OpenClaw for these scopes:
+
+| Scope | What DefenseClaw uses it for |
+| --- | --- |
+| `operator.read` | Read the config, tool catalog and skill status, and receive session events (`sessions.subscribe`). |
+| `operator.write` | Send DefenseClaw security notices into a session (`sessions.send`). |
+| `operator.approvals` | Answer OpenClaw exec approvals (`exec.approval.resolve`). |
+| `operator.admin` | Change OpenClaw's config to disable a blocked skill, plugin or MCP server (`config.patch`, `skills.update`). |
+
 #### What this command sets vs. leaves at defaults
 
 `defenseclaw setup openclaw` is the dedicated alias. It delegates to the shared guardrail setup and exposes the common options, not every `setup guardrail` flag ([quick-alias reference](/docs/guardrail/aliases), [full guardrail setup](/docs/guardrail)). The flags above set the connector, mode, optional HITL and optional rule pack. Everything else uses the shipped defaults ([Defaults](/docs/policies/defaults)).
@@ -145,6 +186,8 @@ The plugin patches `globalThis.fetch`, Node `https.request`, `http.request` and 
 
 Raw sockets, custom transports and libraries that bypass every patched entry point are outside the boundary. An egress event proves the plugin observed a transport branch, not that the request was proxied and inspected.
 
+The plugin patches the main thread of the OpenClaw process. A model call made from a Node worker thread is not redirected and not inspected. The **OpenClaw interception** row of `defenseclaw doctor` fails when the latest model call took no proxy hop, so it reports such a call.
+
 OpenClaw `>=2026.6.8` is the range that first required the Undici dispatcher layers. `defenseclaw doctor` fails the **OpenClaw interception** row when the plugin's sentinel self-test, which never leaves the host, cannot prove a rewrite onto the guardrail proxy, even if `/health` returns 200. The gateway pairs each model call OpenClaw completes with a proxy hop of its own. Doctor fails the row when the latest call took no hop, and warns when an earlier one did not but the calls after it did. Counts restart when `defenseclaw-gateway` restarts. If turns succeed while doctor says traffic is not intercepted, restart OpenClaw so the plugin reloads, then rerun doctor. Confirm a real `INCOMING REQUEST` delta in `gateway.log` only when that log can grow.
 
 ## What the plugin does
@@ -175,7 +218,7 @@ Proxy connector: not gated by a hook contract version.
 ### What it can block or ask
 
 - The proxy can block a checked request, a checked response and a tool call.
-- OpenClaw is the connector with plugin-mediated approval. In action mode a confirm verdict on `before_tool_call` becomes OpenClaw's own approval request, which denies on timeout. Answer it in the OpenClaw Control UI (`openclaw dashboard`) or with `/approve` on a chat channel that forwards approvals. `openclaw tui` and local `openclaw chat` do not show the request, so the call there is denied when it times out, and the OpenClaw gateway log says where to answer.
+- OpenClaw is the connector with plugin-mediated approval. In action mode a confirm verdict on `before_tool_call` becomes OpenClaw's own approval request, which denies on timeout. Answer it in the OpenClaw Control UI (`openclaw dashboard`), with `/approve` on a chat channel that forwards approvals, or in `openclaw tui` from OpenClaw 2026.10.9, where **Allow once** works too. Where OpenClaw shows no request, the call is denied when it times out, and the OpenClaw gateway log says where to answer.
 - Only recognized model traffic is redirected. Other requests pass through unchecked.
 
 ### Verdict mapping
@@ -185,6 +228,8 @@ The gateway answers allow, alert, confirm or block. In action mode a block stops
 ### Fail mode
 
 OpenClaw is a proxy connector with no hooks. While the gateway is down, requests are blocked ([gateway outage table](/docs/connectors/capability-matrix#gateway-outage)). `guardrail fail-mode` lists it as `closed (proxy-backed, no hooks ...)`. See [Fail modes](/docs/reference/fail-modes).
+
+When the gateway cannot write the audit record of a tool check or a prompt, for example on a full disk, the strict policy blocks the call. The default and permissive policies allow it and say that DefenseClaw audit is degraded. Tool results and model responses keep their verdict.
 
 ## Subprocess policy
 
@@ -201,6 +246,8 @@ OpenClaw does not run in an OpenShell sandbox. The legacy standalone sandbox tha
 - OpenClaw 2026.5.12 and later load Amazon Bedrock from the external plugin `@openclaw/amazon-bedrock-provider`. Without it every model call fails with `No API provider registered for api: bedrock-converse-stream`, and setup warns. Run `openclaw plugins install @openclaw/amazon-bedrock-provider`, then `openclaw gateway restart`.
 - The install watcher disables an OpenClaw skill it blocks without naming a connector. `defenseclaw skill enable <name> --connector openclaw` re-enables the skill in OpenClaw and clears that record, so `skill info` and `skill list` stop saying disabled. Another connector-wide disable stays, and the command names it.
 - If you move OpenClaw's gateway port, run `defenseclaw setup openclaw` again.
+- Model calls made from Node worker threads are not intercepted (see [Transport coverage](#transport-coverage)).
+- The DefenseClaw gateway and OpenClaw must run as the same OS user, one account per pair.
 - OpenClaw does not run in an OpenShell sandbox. OpenShell support is pending in the [capability matrix](/docs/connectors/capability-matrix).
 
 ## Troubleshooting

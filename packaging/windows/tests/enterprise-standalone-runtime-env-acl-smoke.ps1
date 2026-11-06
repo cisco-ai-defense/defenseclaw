@@ -12,6 +12,12 @@ $begin = $source.IndexOf('function Set-DefenseClawManagedAcls {', [StringCompari
 $end = $source.IndexOf('function Set-DefenseClawRetainedRuntimeAcls {', $begin, [StringComparison]::Ordinal)
 if ($begin -lt 0 -or $end -le $begin) { throw 'managed ACL function was not found' }
 Invoke-Expression $source.Substring($begin, $end - $begin)
+# GAP-0568: the managed ACL pass also stamps the approved policy copies.
+$begin = $source.IndexOf('function Get-DefenseClawApprovedPolicyPath {', [StringComparison]::Ordinal)
+$end = $source.IndexOf("`nfunction ", $begin, [StringComparison]::Ordinal)
+if ($begin -lt 0 -or $end -le $begin) { throw 'approved policy path function was not found' }
+Invoke-Expression $source.Substring($begin, $end - $begin)
+$script:AdministratorsSID = 'S-1-5-32-544'
 
 function Get-DefenseClawServiceSID { 'S-1-5-80-1-2-3-4-5' }
 function Set-DefenseClawPathAcl {
@@ -80,12 +86,33 @@ try {
     if (@($script:Calls | Where-Object { $_.Path -ceq $envPath }).Count -ne 0) {
         throw 'repair tried to create an absent runtime .env'
     }
+    # GAP-0568: Repair rewrites drifted policy from the approved copies, so
+    # an existing copy is re-stamped admin-only (no gateway service read).
+    $installState = [IO.Path]::Combine($root, 'install-state')
+    [void][IO.Directory]::CreateDirectory($installState)
+    $approvedConfig = [IO.Path]::Combine($installState, 'approved-config.yaml')
+    $approvedManifest = [IO.Path]::Combine($installState, 'approved-targets.yaml')
+    [IO.File]::WriteAllText($approvedConfig, "config_version: 1`n")
+    $layout.InstallStateDirectory = $installState
+    $script:Calls = @()
+    Set-DefenseClawManagedAcls -Layout $layout -GatewayServiceName 'DefenseClawGateway'
+    $approvedCalls = @($script:Calls | Where-Object { $_.Path -ceq $approvedConfig })
+    if ($approvedCalls.Count -ne 1 -or $approvedCalls[0].Kind -cne 'AdminFile' -or
+        $approvedCalls[0].SID -cne $script:AdministratorsSID) {
+        throw "approved config copy was not stamped admin-only: $($approvedCalls | ConvertTo-Json -Compress)"
+    }
+    if (@($script:Calls | Where-Object { $_.Path -ceq $approvedManifest }).Count -ne 0) {
+        throw 'repair tried to stamp an absent approved manifest copy'
+    }
     [IO.File]::WriteAllText($envPath, "DC_TEST_TOKEN=fixture`n")
     $script:Standalone = $false
     $script:Calls = @()
     Set-DefenseClawManagedAcls -Layout $layout -GatewayServiceName 'DefenseClawGateway'
     if (@($script:Calls | Where-Object { $_.Path -ceq $envPath }).Count -ne 0) {
         throw 'Secure Client runtime .env was changed by standalone repair'
+    }
+    if (@($script:Calls | Where-Object { $_.Path -ceq $approvedConfig }).Count -ne 0) {
+        throw 'Secure Client repair stamped a standalone approved policy copy'
     }
     Write-Output 'enterprise-standalone-runtime-env-acl-smoke: OK'
 }
