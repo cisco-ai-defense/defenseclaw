@@ -966,13 +966,15 @@ def _dispatch_native_windows_uninstall(
         return True
     if outcome.restart_required:
         ux.ok("Native Windows uninstall is armed; restart required (Windows exit code 3010).")
-        # The restart removes the data; the guard honours the marker only once
-        # the records are gone. A refused marker keeps exit 3010 (cowork-1-0-8 GAP-0088).
-        if wipe_data and cowork_plugin and (cowork_problem := _record_cowork_removal(data_dir)):
+        # Setup removed the data before 3010; the restart only retires the disabled launcher.
+        # A refused marker keeps exit 3010 (cowork-1-0-8 GAP-0088).
+        cowork_problem = _record_cowork_removal(data_dir) if wipe_data and cowork_plugin else ""
+        if cowork_problem:
             _print_cowork_removal_not_recorded(cowork_problem)
         _relay_native_setup_removed_connector_leftovers(outcome.stdout, left_before, data_dir, wipe_data=wipe_data)
-        if cowork_plugin:
+        if cowork_plugin and not cowork_problem:
             # The uninstall succeeded and waits for a restart; the plugin step is the same (review N2).
+            # After a refused marker the lines above already say the plugin blocks; not both (review W1).
             ux.warn(f"DefenseClaw cannot remove its Cowork plugin from your Claude account: {_COWORK_REMOVAL_STEP}")
         raise SystemExit(outcome.returncode)
     if outcome.refused:

@@ -1235,9 +1235,11 @@ def test_native_setup_cowork_marker_refusal_reports_after_setup(
 def test_native_setup_restart_required_records_the_cowork_removal(
     tmp_path: Path, capsys: pytest.CaptureFixture[str], refused: bool, wipe_data: bool
 ) -> None:
-    # Setup exit 3010 removes the data at the restart, so the marker is written
-    # now, as on exit 0; a refused marker is reported and the exit code stays
-    # 3010 (cowork-1-0-8 GAP-0088).
+    # Setup removed the data before it returned 3010 (the restart only retires
+    # the disabled launcher), so the marker is written now, as on exit 0; a
+    # refused marker is reported and the exit code stays 3010 (cowork-1-0-8
+    # GAP-0088). The "it blocks every call" and "calls run" lines never appear
+    # together (review W1).
     from defenseclaw import cowork
 
     data = tmp_path / ".defenseclaw"
@@ -1266,16 +1268,33 @@ def test_native_setup_restart_required_records_the_cowork_removal(
     out = " ".join(capsys.readouterr().out.split())
     assert "restart required (Windows exit code 3010)" in out
     marker = Path(cowork.uninstalled_marker_path(str(data)))
+    step = "remove it in Claude Desktop (Customize > Plugins, then the ... menu > Remove)."
+    runs = "A plugin built with 1.0.9 lets Cowork calls run after the data folder is removed"
+    not_recorded = f"DefenseClaw could not record its removal for the Cowork plugin: {problem}"
+    blocks = (
+        "Until you remove the DefenseClaw plugin in Claude Desktop (Customize > Plugins, then the ... menu > "
+        "Remove), it blocks every Cowork tool call."
+    )
     if not wipe_data:
-        # Data kept: no removal to record, as on exit 0.
+        # Data kept: no removal to record, as on exit 0, and nothing blocks; the full step prints once.
         marked.assert_not_called()
         assert not marker.exists()
+        assert "could not record" not in out
+        assert blocks not in out
+        assert out.count(step) == 1
+        assert out.count(runs) == 1
         return
     marked.assert_called_once_with(str(data))
     if refused:
-        assert f"DefenseClaw could not record its removal for the Cowork plugin: {problem}" in out
-        assert "it blocks every Cowork tool call" in out
+        assert out.count(not_recorded) == 1
+        assert out.count(blocks) == 1
         assert not marker.exists()
+        # The full removal step says calls run; it must not follow the "blocks" line.
+        assert runs not in out
+        assert "lets Cowork calls run" not in out
     else:
         assert marker.read_text() == "removed\n"
         assert "could not record" not in out
+        assert blocks not in out
+        assert out.count(step) == 1
+        assert out.count(runs) == 1
