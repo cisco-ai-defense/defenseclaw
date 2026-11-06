@@ -867,6 +867,12 @@ func TestWindowsEnterpriseEnsureRewritesAContentFileAnotherAccountCanChange(t *t
 			if string(kept) != installed {
 				t.Fatalf("%s = %q (%v), want the replaced file's bytes", rejected, kept, keptErr)
 			}
+			// GAP-0590 review S3: the kept copy is administrator-only with
+			// Setup's own descriptor, never the drifted file's access list.
+			if control, aces, _ := strings.Cut(hotConfigTestDACL(t, rejected), "("); (control != "D:P" && control != "D:PAI") ||
+				"("+aces != "(A;;FA;;;SY)(A;;FA;;;BA)" {
+				t.Fatalf("%s DACL = %s, want administrators only", rejected, hotConfigTestDACL(t, rejected))
+			}
 			problem := "can be changed by S-1-5-32-545"
 			switch {
 			case tc.owner:
