@@ -99,6 +99,7 @@ describe("HealthMonitor", () => {
     expect(m.isUnprotected).toBe(true);
     await triggerCheck(m);
     expect(m.isUnprotected).toBe(false);
+    expect(m.isGatewayDown).toBe(false);
   });
 
   it("getWarningMessage returns message when unprotected", async () => {
@@ -111,17 +112,26 @@ describe("HealthMonitor", () => {
     expect(msg).toContain("DEFENSECLAW WARNING");
   });
 
-  it("says model calls are blocked, not unscanned, when the gateway is down", async () => {
+  it("says model calls are blocked in the saved closed mode when the gateway is down", async () => {
     // GAP-2428: with the gateway down every call through its proxy is
     // refused, so "NOT being scanned" was wrong.
     const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
     globalThis.fetch = vi.fn().mockRejectedValue(new Error("down"));
-    const m = new HealthMonitor({ statusUrl });
+    const m = new HealthMonitor({ statusUrl, getOutageMode: () => "closed" });
     await triggerCheck(m);
     const warning = String(warnSpy.mock.calls[0]?.[0]);
     expect(warning).toContain("model calls are blocked (fail-closed)");
     expect(warning).toContain("defenseclaw-gateway start");
     expect(warning).not.toContain("NOT being scanned");
+  });
+
+  it("describes continuation for an installed open outage mode", async () => {
+    const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
+    globalThis.fetch = vi.fn().mockRejectedValue(new Error("down"));
+    const m = new HealthMonitor({ statusUrl, getOutageMode: () => "open" });
+    await triggerCheck(m);
+    expect(m.isGatewayDown).toBe(true);
+    expect(String(warnSpy.mock.calls[0]?.[0])).toContain("continue without inspection");
   });
 
   it("marks unprotected when gateway state is not running", async () => {

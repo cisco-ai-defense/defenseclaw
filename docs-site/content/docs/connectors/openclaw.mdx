@@ -31,7 +31,7 @@ defenseclaw setup openclaw --mode observe --restart
 defenseclaw setup openclaw --mode action --human-approval --rule-pack default --restart
 ```
 
-The proxy is in the data path in both modes. Observe records policy findings without blocking on those findings; a gateway outage still stops proxied requests. Action enforces policy. Run `defenseclaw doctor` to check the result.
+The proxy is in the data path in both modes. Observe records policy findings without blocking on those findings. During a gateway outage, the saved outage mode decides whether a model request continues directly to its configured provider with a warning. Action enforces policy. Run `defenseclaw doctor` to check the result.
 
 ### Check it
 
@@ -184,7 +184,9 @@ The gateway answers allow, alert, confirm or block. In action mode a block stops
 
 ### Fail mode
 
-OpenClaw model requests use the proxy and are blocked while the gateway is down ([gateway outage table](/docs/connectors/capability-matrix#gateway-outage)). The plugin's tool-inspection call follows the saved guardrail outage mode: on a per-user default or permissive policy, an outage or timeout lets the tool run with a warning in its result; strict and managed policy blocks it. `DEFENSECLAW_TOOL_INSPECT_FAIL_OPEN` is ignored by the 1.0.9 plugin. See [Fail modes](/docs/reference/fail-modes).
+OpenClaw model requests use the proxy while the gateway is running. On a classified proxy outage, the per-user default and permissive policies continue the original request to its configured provider with an agent warning; strict and managed policies block. The plugin's tool-inspection call follows the same saved mode: a default or permissive outage lets an ordinary tool run with a warning in its result, while strict and managed block. Direct protected targets remain blocked. `DEFENSECLAW_TOOL_INSPECT_FAIL_OPEN` is ignored by the 1.0.9 plugin. See [Fail modes](/docs/reference/fail-modes).
+
+On OpenClaw 2026.4.24 and later, Setup grants the DefenseClaw prompt hook access so the model outage warning reaches the agent. If an operator disables prompt injection hooks, the warning still appears in the OpenClaw log.
 
 ## Subprocess policy
 

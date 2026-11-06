@@ -73,7 +73,7 @@ import type {
 import { compareSeverity, maxSeverity } from "./types.js";
 import { patchAwsSdkHttp1ForGuardrail } from "./aws-sdk-http1-for-guardrail.js";
 import { loadOpenClawOutageMode, loadSidecarConfig } from "./sidecar-config.js";
-import { createFetchInterceptor } from "./fetch-interceptor.js";
+import { createFetchInterceptor, MODEL_OUTAGE_WARNING } from "./fetch-interceptor.js";
 import { HealthMonitor } from "./health-monitor.js";
 
 const INSPECT_ACTIONS = new Set(["allow", "alert", "confirm", "block"]);
@@ -355,6 +355,7 @@ export default function (api: DefenseClawPluginHost) {
     onFetchResponse: (res) => daemonClient.applyStickyFromHttpResponse(res),
     logOutboundRequest,
     getLogAgentId: () => identityCache?.agentId ?? "unknown",
+    getOutageMode: () => loadOpenClawOutageMode(),
   });
 
   // Last-seen tool context, captured on every before_tool_call so the
@@ -421,9 +422,22 @@ export default function (api: DefenseClawPluginHost) {
   // ─── LLM fetch interceptor ───
   // Patches globalThis.fetch to redirect all outbound LLM API calls through
   // the guardrail proxy regardless of which provider/model OpenClaw uses.
+  let recentModelOutage = 0;
   const interceptor = createFetchInterceptor({
     guardrailPort: sidecarConfig.guardrailPort,
     getCorrelationHeaders: getFetchCorrelationHeaders,
+    getOutageMode: () => loadOpenClawOutageMode(),
+    onOutageWarning: () => { recentModelOutage = Date.now(); },
+  });
+  // OpenClaw includes this text in the agent's current prompt when the
+  // monitor has confirmed an outage and the saved tier permits continuation.
+  api.on("before_prompt_build", async () => {
+    if (loadOpenClawOutageMode() !== "open") return;
+    await healthMonitor.refresh();
+    if (!healthMonitor.isUnprotected) recentModelOutage = 0;
+    if (healthMonitor.isGatewayDown || Date.now() - recentModelOutage < 30_000) {
+      return { prependContext: healthMonitor.getWarningMessage() ?? MODEL_OUTAGE_WARNING };
+    }
   });
   // Start immediately so gateway model prewarm (before plugin services) also
   // routes through the guardrail when Bedrock is the primary model.
