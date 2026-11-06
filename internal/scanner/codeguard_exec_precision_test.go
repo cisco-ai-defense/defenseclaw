@@ -20,25 +20,36 @@ func TestCodeGuardExecMatchesInterpreterCallsOnly(t *testing.T) {
 			"__import__('os').system(cmd)", "importlib.import_module('os').system(c)",
 			"subprocess.call(cmd)", "subprocess.call('rm -rf ' + d)", "rc = subprocess.call(args.command)",
 			"subprocess.call(cmd, shell=True)", "subprocess.call(['sh', '-c', cmd], shell=True)", "subprocess.call(",
+			// Review 1 MF2, MF3: Unicode case folding (Python reads U+017F
+			// as "s"), a list that starts with a shell or passes inline
+			// code, a program chosen at run time, shell=True on the next line.
+			"os.\u017fystem(cmd)", "os.sy\u017ftem(cmd)", "\u017fubprocess.call(cmd)",
+			"subprocess.call(['sh', '-c', cmd])", "subprocess.call(['/bin/bash', '-c', user_cmd])",
+			"subprocess.call([sys.executable, '-c', code])", "subprocess.call([cmd])",
+			"rc = subprocess.call([gateway, 'restart'])", "subprocess.call([\"ls\", d],",
 		},
 		".js": {
 			"eval(userInput)", "const r = eval(req.body.code)", "  eval(atob(payload));", "if (x) eval(code)", "!eval(b)",
 			"window.eval(s)", "globalThis.eval(s)", "child_process.exec(cmd)", "child_process.execSync(cmd)",
 			"require('child_process').exec(cmd)", "cp.exec(cmd)", "childProcess.exec(cmd)", "require(\"node:child_process\").exec(cmd)", "exec(cmd, (err) => {})",
 			"const x = `${eval(input)}`", "// ${eval(input)}", "<p>{eval(input)}</p>",
+			// Review 1 MF4 and S1: ShellJS, jQuery and a private field.
+			"shell.exec(cmd)", "$.globalEval(src)", "  #x = eval(s);", "  #run = () => eval(this.src)",
 		},
 		".ts": {"eval(userInput)", "await exec(cmd)", "child_process.exec(`ls ${dir}`)", "system(cmd)"},
 		".rb": {
 			"system(params[:cmd])", "exec(cmd)", "eval(params[:code])", "Kernel.system(cmd)", "Kernel::system(cmd)",
 			"Kernel.exec(cmd)", "Kernel.eval(s)", "obj.instance_eval(code)", "Foo.class_eval(code)", "mod.module_eval(code)",
 			"x = `#{system(cmd)}`", "#{system(cmd)}",
+			// Review 1 MF4.
+			"Process.exec(cmd)", "binding.eval(code)", "TOPLEVEL_BINDING.eval(src)",
 		},
 		".php": {"system($cmd);", "exec($cmd);", "shell_exec($cmd);", "pcntl_exec($path);", "eval($code);", "@eval($_POST['x']);", "{${eval($x)}}"},
 	}
 	noMatch := map[string][]string{
 		".py": {
 			"subprocess.call(['make'])", `subprocess.call(["git", "status"])`, "subprocess.call( ['ls'] )",
-			"rc = subprocess.call([gateway, 'restart'])", "mock.patch('subprocess.call')",
+			"mock.patch('subprocess.call')",
 			"model.eval()", "net.eval()", "self.system(name)", "pool.exec(job)", "platform.system()",
 			"ast.literal_eval(value)", "proc = await asyncio.create_subprocess_exec(", "with runner.isolated_filesystem():",
 			"# eval(x) is not used here",

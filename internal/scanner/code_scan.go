@@ -122,12 +122,20 @@ func dropEvalOnlyExecFindings(findings []Finding) []Finding {
 	}
 	kept := findings[:0]
 	for _, f := range findings {
-		if f.ID == "CG-EXEC-001" && evalLines[codeFindingLineKey(f.Location)] && !cgExecNonEval.MatchString(cgExecView(f.Description)) {
+		if f.ID == "CG-EXEC-001" && evalLines[codeFindingLineKey(f.Location)] && !cgExecNonEval.MatchString(cgExecView(codeFindingExt(f.Location), f.Description)) {
 			continue
 		}
 		kept = append(kept, f)
 	}
 	return kept
+}
+
+// codeFindingExt is the file extension of a "path:line" finding location.
+func codeFindingExt(location string) string {
+	if colon := strings.LastIndexByte(location, ':'); colon >= 0 {
+		location = location[:colon]
+	}
+	return filepath.Ext(location)
 }
 
 // codeFindingLineKey normalizes "dir/calc.py:2" and "calc.py:2" to the same
