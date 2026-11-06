@@ -671,7 +671,6 @@ func TestProbeVersionPatterns(t *testing.T) {
 }
 
 func TestHarnessImageVersionChecksUsePinnedRelease(t *testing.T) {
-	sh := binSh(t)
 	for _, tc := range []struct {
 		spec    *Spec
 		display string
@@ -704,9 +703,7 @@ func TestHarnessImageVersionChecksUsePinnedRelease(t *testing.T) {
 				{tc.spec.DefaultVersion + ".1", false},
 				{"vv" + tc.spec.DefaultVersion, false},
 			} {
-				cmd := exec.Command(sh, "-c", `got="$VERSION_REPLY"; `+check)
-				cmd.Env = append(os.Environ(), "VERSION_REPLY="+sample.value)
-				out, err := cmd.CombinedOutput()
+				out, err := runPinnedVersionScript(t, `got="$VERSION_REPLY"; `+check, sample.value, nil)
 				if (err == nil) != sample.allow {
 					t.Errorf("version %q: allowed=%t, want %t: %s", sample.value, err == nil, sample.allow, out)
 				}
