@@ -9,6 +9,7 @@ from __future__ import annotations
 import hashlib
 import json
 import re
+import shlex
 import sys
 from pathlib import Path
 from urllib.parse import urlsplit
@@ -89,7 +90,7 @@ GIT_TRANSPORT = re.compile(
 GIT_SCP_ENDPOINT = re.compile(r"(?<![\w./])(?:([A-Za-z][A-Za-z0-9_.+-]*)@)?([A-Za-z][A-Za-z0-9_.-]*):(?!//)[^\s;&|]+")
 HOST_ASSIGNMENT = re.compile(r"\b(?:host|hostname|server|remote|user|username|account)=([^\s;&|\"']+)", re.I)
 NETWORK_CLIENT = re.compile(r"\b(?:curl|wget|fetch|ftp)\b([^\n;&|<>]*)", re.I)
-NETWORK_WORD = re.compile(r"[^\s;&|]+")
+SOCKET_CLIENT = re.compile(r"\b(?:nc|ncat|netcat|telnet)\b([^\n;&|<>]*)", re.I)
 NETWORK_ACCOUNT_OPTIONS = {"-u", "--user", "--proxy-user", "--http-user", "--ftp-user"}
 NETWORK_ENDPOINT_OPTIONS = {"-x", "--url", "--proxy", "--preproxy", "--doh-url", "--resolve", "--connect-to"}
 NETWORK_VALUE_OPTIONS = {
@@ -102,6 +103,7 @@ NETWORK_VALUE_OPTIONS = {
     "-e",
     "--output",
     "--header",
+    "--proxy-header",
     "--data",
     "--request",
     "--user-agent",
@@ -168,11 +170,73 @@ def synthetic_network_operands(value: str) -> bool:
         except ValueError:
             return False
 
+    def approved_header(header: str) -> bool:
+        if not header:
+            return False
+        if any(marker in header for marker in ("$(", "${", "`", "$'")) or re.search(
+            r"\\(?:x[0-9a-fA-F]{2}|[0-7]{3})", header
+        ):
+            return False
+        host_header = re.fullmatch(r"\s*(?:Host|:authority|X-Forwarded-Host)\s*:\s*(.+)", header, re.I)
+        return not host_header or approved_endpoint(host_header.group(1))
+
+    # Shell ANSI-C strings can construct an endpoint or header name from
+    # escaped bytes. The public corpus uses literal network identities.
+    if "$'" in value:
+        return False
+
+    for match in SOCKET_CLIENT.finditer(value):
+        try:
+            words = shlex.split(match.group(1))
+        except ValueError:
+            return False
+        listening = False
+        host_seen = False
+        index = 0
+        while index < len(words):
+            word = words[index]
+            if word in {"-c", "-e"}:
+                if index + 1 >= len(words) or not synthetic_network_operands(words[index + 1]):
+                    return False
+                index += 2
+                continue
+            if word == "-s":
+                if index + 1 >= len(words) or not approved_endpoint(words[index + 1]):
+                    return False
+                index += 2
+                continue
+            if word.startswith(("-s", "-x")) and len(word) > 2 and not word.startswith("--"):
+                if not approved_endpoint(word[2:]):
+                    return False
+                index += 1
+                continue
+            if word in {"-p", "-w", "-i", "-U"}:
+                if index + 1 >= len(words):
+                    return False
+                index += 2
+                continue
+            if word.startswith("-l"):
+                listening = True
+            if word.startswith("-"):
+                index += 1
+                continue
+            if word.isdecimal() and (host_seen or listening):
+                index += 1
+                continue
+            if not approved_endpoint(word):
+                return False
+            host_seen = True
+            index += 1
+
     for match in NETWORK_CLIENT.finditer(value):
+        client = match.group(0).split()[0].lower()
         fragment = match.group(1)
         if match.end() < len(value) and value[match.end()] in "<>":
             fragment = re.sub(r"\s+\d+$", "", fragment)
-        words = [word.strip("\"'()") for word in NETWORK_WORD.findall(fragment)]
+        try:
+            words = shlex.split(fragment)
+        except ValueError:
+            return False
         index = 0
         while index < len(words):
             word = words[index]
@@ -201,7 +265,19 @@ def synthetic_network_operands(value: str) -> bool:
                 index += 1 if separator else 2
                 continue
             if option in NETWORK_VALUE_OPTIONS:
+                if option == "-H" and client != "curl":
+                    index += 1
+                    continue
+                if option in {"-H", "--header", "--proxy-header"}:
+                    header = inline if separator else (words[index + 1] if index + 1 < len(words) else "")
+                    if not approved_header(header):
+                        return False
                 index += 1 if separator else 2
+                continue
+            if client == "curl" and word.startswith("-H") and len(word) > 2 and not word.startswith("--"):
+                if not approved_header(word[2:]):
+                    return False
+                index += 1
                 continue
             if word.startswith("-") or word in {"", "//"}:
                 index += 1
