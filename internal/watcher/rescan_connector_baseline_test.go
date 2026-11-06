@@ -161,3 +161,79 @@ func TestRescanAttributesBundledPluginFindingsAndKeepsFirstSightOutOfAlerts(t *t
 		t.Fatalf("clean user plugin admission = %s, want allowed", result.Verdict)
 	}
 }
+
+func TestRescanBundledPluginBaselineRequiresPhysicalTree(t *testing.T) {
+	for _, tc := range []struct {
+		name, layout string
+		baseline     bool
+	}{
+		{"shipped tree", "physical", true},
+		{"linked bundle root", "linked-root", false},
+		{"linked bundle parent", "linked-parent", false},
+		{"custom shipped tree", "custom-physical", true},
+		{"linked custom root", "custom-linked", false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Setenv("PATH", "")
+			t.Setenv("HERMES_BUNDLED_PLUGINS", "")
+			cfg, store, logger, _ := setupTestEnv(t)
+			cfg.Guardrail.Connector = "claudecode"
+			cfg.Watch.RescanContentGated = true
+			logger.SetRuntimeV8Emitter(&watcherTestRuntime{})
+
+			home := t.TempDir()
+			root := filepath.Join(home, ".hermes", "hermes-agent", "plugins")
+			if strings.HasPrefix(tc.layout, "custom-") {
+				root = filepath.Join(home, "vendor", "shipped")
+				t.Setenv("HERMES_BUNDLED_PLUGINS", root)
+			}
+			plugin := filepath.Join(root, "photon")
+			actual := plugin
+			switch tc.layout {
+			case "linked-root", "custom-linked":
+				actual = filepath.Join(home, "other-plugins", "photon")
+			case "linked-parent":
+				actual = filepath.Join(home, "other-agent", "plugins", "photon")
+			}
+			if err := os.MkdirAll(actual, 0o700); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(filepath.Join(actual, "plugin.yaml"), []byte("name: photon\n"), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			if actual != plugin {
+				link := root
+				target := filepath.Dir(actual)
+				if tc.layout == "linked-parent" {
+					link = filepath.Dir(root)
+					target = filepath.Dir(target)
+				}
+				if err := os.MkdirAll(filepath.Dir(link), 0o700); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.Symlink(target, link); err != nil {
+					t.Skipf("create test link: %v", err)
+				}
+			}
+
+			finding := scanner.Finding{ID: "review", RuleID: "PLUGIN-REVIEW", Severity: scanner.SeverityHigh, Title: "Review source"}
+			w := New(cfg, nil, []string{root}, store, logger, nil, nil)
+			w.SetRootConnectors(map[string]string{root: "hermes"})
+			w.scannerFactory = func(InstallEvent) scanner.Scanner {
+				return &pluginBaselineScanner{findings: map[string][]scanner.Finding{plugin: {finding}}}
+			}
+			w.runRescanCycle(context.Background())
+			row, err := store.GetTargetSnapshot("plugin", plugin)
+			if err != nil || row.ScanID == "" {
+				t.Fatalf("plugin snapshot = %#v, %v", row, err)
+			}
+			raw, err := store.GetScanRawJSON(row.ScanID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if tagged := strings.Contains(raw, scanner.FindingTagDetectionOnly); tagged != tc.baseline {
+				t.Errorf("baseline tag = %t, want %t", tagged, tc.baseline)
+			}
+		})
+	}
+}

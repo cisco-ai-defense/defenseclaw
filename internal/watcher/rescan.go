@@ -750,6 +750,15 @@ func (w *InstallWatcher) hermesBundledPlugin(evt InstallEvent) bool {
 		if err != nil || path == absRoot || !pathWithinRoot(path, absRoot) {
 			continue
 		}
+		// A bundle-shaped name can point through a link to an unrelated
+		// plugin tree. Only the physical shipped tree gets a baseline tag.
+		resolvedRoot, rootErr := filepath.EvalSymlinks(absRoot)
+		resolvedPath, pathErr := filepath.EvalSymlinks(path)
+		if rootErr != nil || pathErr != nil ||
+			!sameWatcherPath(canonicalSkillSystemPath(absRoot), resolvedRoot) ||
+			!sameWatcherPath(canonicalSkillSystemPath(path), resolvedPath) {
+			continue
+		}
 		if filepath.Base(absRoot) == "plugins" && filepath.Base(filepath.Dir(absRoot)) == "hermes-agent" ||
 			custom != "" && filepath.Clean(custom) == absRoot {
 			return true
