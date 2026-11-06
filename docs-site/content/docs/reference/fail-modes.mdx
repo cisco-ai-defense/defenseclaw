@@ -93,7 +93,7 @@ The hold stays under the hook's 3.5-second answer budget, so it does not block a
 
 ### A hook held past its time budget
 
-A hook's time budget counts from when the operating system started the hook process. Since 1.0.9, a hook the computer froze past its budget, for example during sleep, is blocked in every fail mode, never allowed. Before, a hook held for more than 30 seconds got a new budget and could still be allowed. Secure Client hooks are unchanged.
+A hook's time budget counts from when the operating system started the hook process. Since 1.0.9, a hook the computer held past its budget before it reached the gateway, for example a freeze or sleep while it started, is blocked in every fail mode. A managed hook whose verdict arrives after its budget gets a closed answer, and a freeze of the whole computer is covered the same way. A per-user hook that the computer held after it sent its call keeps the gateway verdict when it arrives late, and a sleep in the middle of a managed call can do the same. That verdict is the real answer of a gateway that decided, never an allow for an outage. Before 1.0.9, a hook held for more than 30 seconds got a new budget. Secure Client hooks are unchanged.
 
 ### Claude Cowork
 
