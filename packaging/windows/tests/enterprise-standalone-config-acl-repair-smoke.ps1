@@ -535,7 +535,7 @@ try {
         # Twins: a trusted owner with a deny entry is still repaired, and so
         # is Setup's own account as owner; Secure Client still repairs the
         # untrusted owner with a deny entry.
-        $twins = @(@($script:AdministratorsSID, $true))
+        $twins = @(, @($script:AdministratorsSID, $true))
         if ($self -notin $writers) { $twins += , @($self, $true) }
         $twins += , @($users, $false)
         foreach ($twin in $twins) {
