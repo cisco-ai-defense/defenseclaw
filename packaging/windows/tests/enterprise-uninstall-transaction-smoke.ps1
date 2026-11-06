@@ -1629,14 +1629,13 @@ targets:
                 # purge Purge, every other action the Lifecycle default.
                 [ValidateSet('Lifecycle', 'Retain', 'Purge')][string]$ContentGateScope = 'Lifecycle'
             )
-            $expectedContentGateScopes = if ([string]$script:HarnessState.operation -in @('uninstall', 'purge')) {
-                @('Retain', 'Purge')
+            $expectedContentGateScope = switch ([string]$script:HarnessState.operation) {
+                'uninstall' { if ([bool]$script:HarnessState['self_purge']) { 'Purge' } else { 'Retain' } }
+                'purge' { 'Purge' }
+                default { 'Lifecycle' }
             }
-            else {
-                @('Lifecycle')
-            }
-            if ($ContentGateScope -cnotin $expectedContentGateScopes) {
-                throw "transaction content gate scope $ContentGateScope, want one of $($expectedContentGateScopes -join ', ')"
+            if ($ContentGateScope -cne $expectedContentGateScope) {
+                throw "transaction content gate scope $ContentGateScope, want $expectedContentGateScope for $([string]$script:HarnessState.operation)"
             }
             if ($null -ne $EarlyHookSource -and
                 $script:HarnessState.operation -in @('uninstall', 'purge')) {
