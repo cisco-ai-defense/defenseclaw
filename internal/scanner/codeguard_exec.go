@@ -43,9 +43,22 @@ const (
 
 var cgExecPattern = regexp.MustCompile(cgExecBasePattern + `|` + cgExecRubyEvalForms)
 
-// cgExecReports reports whether the candidate at loc in line (the
-// cgExecView of a source line) is not proven benign.
-func cgExecReports(line string, loc []int) bool {
+// cgExecReportsLine reports whether any candidate at locs in line (the
+// cgExecView of a source line) is not proven benign. What is read once per
+// line is read here, so a line costs time linear in its length.
+func cgExecReportsLine(line string, locs [][]int) bool {
+	childProcess := len(locs) > 0 && cgExecChildProcessLine.MatchString(line)
+	for _, loc := range locs {
+		if cgExecReports(line, loc, childProcess) {
+			return true
+		}
+	}
+	return false
+}
+
+// cgExecReports reports whether the candidate at loc in line is not proven
+// benign; childProcess is whether the line names child_process or shelljs.
+func cgExecReports(line string, loc []int, childProcess bool) bool {
 	t := strings.ToLower(line[loc[0]:loc[1]])
 	switch {
 	case strings.HasPrefix(t, "os.system"), strings.HasPrefix(t, "child_process.exec"):
@@ -56,14 +69,16 @@ func cgExecReports(line string, loc []int) bool {
 		// A heredoc, a string, or "_eval (": a block is "_eval (&blk)".
 		return !(strings.HasSuffix(t, "(") && cgExecRubyBlockArgs(line[loc[1]:]))
 	}
-	return !cgExecBenignNameCall(line, loc[0], loc[1], t[:len(t)-1])
+	return !cgExecBenignNameCall(line, loc[0], loc[1], t[:len(t)-1], childProcess)
 }
 
 // cgExecReportsNonEval reports whether line holds a reported candidate other
 // than an eval: the vuln scanner reports eval() itself (GAP-1595).
 func cgExecReportsNonEval(line string) bool {
-	for _, loc := range cgExecPattern.FindAllStringIndex(line, -1) {
-		if !strings.Contains(strings.ToLower(line[loc[0]:loc[1]]), "eval") && cgExecReports(line, loc) {
+	locs := cgExecPattern.FindAllStringIndex(line, -1)
+	childProcess := len(locs) > 0 && cgExecChildProcessLine.MatchString(line)
+	for _, loc := range locs {
+		if !strings.Contains(strings.ToLower(line[loc[0]:loc[1]]), "eval") && cgExecReports(line, loc, childProcess) {
 			return true
 		}
 	}
@@ -108,7 +123,7 @@ var cgExecChildProcessLine = regexp.MustCompile(`(?i)child_process|shelljs`)
 
 // cgExecBenignNameCall reports whether the exec(, eval( or system( call
 // spelled name at line[start:end] is proven benign.
-func cgExecBenignNameCall(line string, start, end int, name string) bool {
+func cgExecBenignNameCall(line string, start, end int, name string, childProcess bool) bool {
 	j := start
 	for j > 0 && start-j < cgExecScanLimit && cgExecIdentByte(line[j-1]) {
 		j--
@@ -141,7 +156,7 @@ func cgExecBenignNameCall(line string, start, end int, name string) bool {
 	if strings.HasPrefix(strings.TrimLeft(line[end:], " \t"), ")") {
 		return true // a method call with nothing to run: model.eval()
 	}
-	if name == "exec" && cgExecRegexpLiteralEnd.MatchString(line[max(0, j-1-16):j-1]) && strings.Count(line[:j-1], "/") >= 2 {
+	if name == "exec" && cgExecRegexpLiteralEnd.MatchString(line[max(0, j-1-16):j-1]) && strings.Count(line[max(0, j-1-256):j-1], "/") >= 2 {
 		return true // RegExp.prototype.exec: /x/g.exec(s)
 	}
 	if j >= 2 && line[j-2] == '?' {
@@ -158,7 +173,7 @@ func cgExecBenignNameCall(line string, start, end int, name string) bool {
 	if k > 0 && strings.IndexByte(")]}'\"`/>:?\\", line[k-1]) >= 0 {
 		return false // a receiver expression: __import__('os').system(, frames[0].eval(
 	}
-	if name == "exec" && cgExecChildProcessLine.MatchString(line) {
+	if name == "exec" && childProcess {
 		return false // import('child_process').then(m => m.exec(cmd))
 	}
 	risky := cgExecRiskyReceivers[name]

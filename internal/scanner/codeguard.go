@@ -298,9 +298,10 @@ type rule struct {
 	// rule drops text that only mentions what it looks for (GAP-1226,
 	// GAP-1227).
 	view func(ext, line string) string
-	// reports, when set, keeps only the pattern matches it returns true for:
-	// CG-EXEC-001 drops the proven-benign ones (GAP-0056).
-	reports func(line string, loc []int) bool
+	// reports, when set, decides from the pattern matches on the line
+	// whether the rule fires: CG-EXEC-001 drops the proven-benign ones
+	// (GAP-0056).
+	reports func(line string, locs [][]int) bool
 }
 
 // matches reports whether the rule fires on line of a file with extension
@@ -312,12 +313,7 @@ func (r rule) matches(ext, line string) bool {
 	if r.reports == nil {
 		return r.pattern.MatchString(line)
 	}
-	for _, loc := range r.pattern.FindAllStringIndex(line, -1) {
-		if r.reports(line, loc) {
-			return true
-		}
-	}
-	return false
+	return r.reports(line, r.pattern.FindAllStringIndex(line, -1))
 }
 
 // pathTraversalModuleSpecifier is the quoted module path of an import,
@@ -454,7 +450,7 @@ var builtinRules = codeOwnedBuiltinRules([]rule{
 		remediation: "Use parameterized execution or an allowlist of commands",
 		extensions:  []string{".py", ".js", ".ts", ".rb", ".php"},
 		view:        cgExecView,
-		reports:     cgExecReports,
+		reports:     cgExecReportsLine,
 	},
 	{
 		id:          "CG-EXEC-002",
