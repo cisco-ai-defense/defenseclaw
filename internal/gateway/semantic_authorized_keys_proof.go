@@ -1297,9 +1297,14 @@ func trustedExistingAuthorizedKeysSymlinkWrite(request trustedActionRequest, fac
 		if !safeRedirect && links.OpaqueTargetWithFacts(target, ownCopy, opaqueFacts) {
 			// A target inside an archive or copy scope, or one for which
 			// client evidence is incomplete, has no complete ordinary
-			// answer. Positive link and client checks above still win.
+			// answer. A later write inside that scope must keep the closed
+			// verdict; only the copy's own destination can use a tier
+			// decision after the positive link and client checks above.
 			info, err := hookpaths.PathLstat(target)
 			if err != nil || info.Mode()&os.ModeCharDevice == 0 {
+				if !ownCopy {
+					return true
+				}
 				return possible(target)
 			}
 		}
