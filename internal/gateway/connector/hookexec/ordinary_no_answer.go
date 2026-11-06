@@ -41,17 +41,14 @@ func ordinaryNoAnswerPayloadInHome(body []byte, home string) bool {
 	}
 	switch call.Tool {
 	case "Bash":
-		var command string
-		if json.Unmarshal(input["command"], &command) != nil || strings.TrimSpace(command) == "" {
+		return ordinaryNoAnswerCommand(input["command"], call.CWD, home, len(body))
+	case "exec_command":
+		if len(input["command"]) != 0 {
 			return false
 		}
-		if len(body) > 4096 {
-			return hookpaths.OrdinaryLongTouchMissingLeaves(command, call.CWD, home)
-		}
-		return hookpaths.ActionCommandDecision(command, call.CWD, home) == "" &&
-			!hookpaths.ActionStateTargetMention(command, call.CWD, home) &&
-			!hookpaths.ActionPrivateKeyRead(command, call.CWD, home) &&
-			hookpaths.UnprovenProtectedWrite(command, call.CWD, home) == ""
+		return ordinaryNoAnswerCommand(input["cmd"], commandWorkdir(input, call.CWD), home, len(body))
+	case "shell", "shell_command":
+		return ordinaryNoAnswerCommand(input["command"], commandWorkdir(input, call.CWD), home, len(body))
 	case "Read":
 		if len(body) > 4096 {
 			return false
@@ -77,6 +74,10 @@ func ordinaryNoAnswerPayloadInHome(body []byte, home string) bool {
 		if err != nil || !info.Mode().IsRegular() {
 			return false
 		}
+		if hookpaths.CallMayReachProtected(path, home) ||
+			pathMayNameProtectedLink(path, resolved, home, info) {
+			return false
+		}
 		command := "cat " + path
 		return hookpaths.ActionCommandDecision(command, call.CWD, home) == "" &&
 			!hookpaths.ActionStateTargetMention(command, call.CWD, home) &&
@@ -84,4 +85,93 @@ func ordinaryNoAnswerPayloadInHome(body []byte, home string) bool {
 	default:
 		return false
 	}
+}
+
+func commandWorkdir(input map[string]json.RawMessage, cwd string) string {
+	if len(input["workdir"]) == 0 {
+		return cwd
+	}
+	var workdir string
+	if json.Unmarshal(input["workdir"], &workdir) != nil || !filepath.IsAbs(workdir) {
+		return ""
+	}
+	return workdir
+}
+
+func ordinaryNoAnswerCommand(raw json.RawMessage, cwd, home string, bodySize int) bool {
+	if !filepath.IsAbs(cwd) || len(raw) == 0 {
+		return false
+	}
+	var command string
+	if json.Unmarshal(raw, &command) != nil {
+		// Codex shell also sends a shell argv. Only an exact single shell
+		// command has the same meaning as the string form.
+		var argv []string
+		if json.Unmarshal(raw, &argv) != nil || len(argv) != 3 ||
+			(argv[0] != "bash" && argv[0] != "sh" && argv[0] != "zsh") ||
+			(argv[1] != "-c" && argv[1] != "-lc") {
+			return false
+		}
+		command = argv[2]
+	}
+	if strings.TrimSpace(command) == "" || hookpaths.CallMayReachProtected(command, home) {
+		return false
+	}
+	if hookpaths.OrdinaryLongTouchMissingLeaves(command, cwd, home) {
+		return true
+	}
+	if bodySize > 4096 || commandMayNameLink(command, cwd, home) {
+		return false
+	}
+	return hookpaths.ActionCommandDecision(command, cwd, home) == "" &&
+		!hookpaths.ActionStateTargetMention(command, cwd, home) &&
+		!hookpaths.ActionPrivateKeyRead(command, cwd, home) &&
+		hookpaths.UnprovenProtectedWrite(command, cwd, home) == ""
+}
+
+// commandMayNameLink closes an unresolved operand at a no-answer deadline.
+// It scans at most the small-call budget; large ordinary touch calls use the
+// missing-leaf proof above.
+func commandMayNameLink(command, cwd, home string) bool {
+	words := strings.Fields(command)
+	if len(words) > 128 {
+		return true
+	}
+	for _, word := range words[1:] {
+		word = strings.Trim(word, "'\";,()")
+		if word == "" || strings.HasPrefix(word, "-") || strings.ContainsAny(word, "|&<>=") {
+			continue
+		}
+		path := word
+		if !filepath.IsAbs(path) {
+			path = filepath.Join(cwd, path)
+		}
+		info, err := os.Lstat(path)
+		if err == nil && info.Mode()&os.ModeSymlink != 0 {
+			return true
+		}
+		if err != nil && !os.IsNotExist(err) {
+			return true
+		}
+		if err == nil {
+			resolved, resolveErr := filepath.EvalSymlinks(path)
+			if resolveErr != nil || pathMayNameProtectedLink(path, resolved, home, info) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+func pathMayNameProtectedLink(path, resolved, home string, info os.FileInfo) bool {
+	if resolved != filepath.Clean(path) || hookpaths.CallMayReachProtected(resolved, home) {
+		return true
+	}
+	for _, protected := range hookpaths.AuthorizedKeysPaths(home) {
+		other, err := os.Stat(protected)
+		if err == nil && os.SameFile(info, other) {
+			return true
+		}
+	}
+	return false
 }
