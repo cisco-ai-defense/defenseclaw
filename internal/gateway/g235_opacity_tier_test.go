@@ -100,6 +100,10 @@ func TestG235OpacityTierCells(t *testing.T) {
 		{"GAP-0507/printf-v-other-link", project, `f=disklink; printf -v other %s data; cp a.txt $f`, true, true, true},
 		{"GAP-0507/mapfile-default-protected", project, `MAPFILE=out2.txt; mapfile -t <<< disklink; cp a.txt $MAPFILE`, true, true, true},
 		{"GAP-0507/readarray-default-protected", project, `MAPFILE=out2.txt; readarray -t <<< disklink; cp a.txt $MAPFILE`, true, true, true},
+		{"GAP-0507/mapfile-offset-keeps-link", project, `MAPFILE=disklink; mapfile -O1 -t <<< out2.txt; cp a.txt $MAPFILE`, true, true, true},
+		{"GAP-0507/mapfile-zero-replaces-link", project, `MAPFILE=disklink; mapfile -O0 -t <<< out2.txt; cp a.txt $MAPFILE`, false, false, false},
+		{"GAP-0507/mapfile-input-old-link", project, `f=disklink; mapfile -t f <<< "$f"; cp a.txt $f`, true, true, true},
+		{"GAP-0507/mapfile-input-old-ordinary", project, `f=out2.txt; mapfile -t f <<< "$f"; cp a.txt $f`, false, false, false},
 		{"GAP-0507/declare-p-ordinary", project, `f=ordinary/n2; declare -p f; cp a.txt $f`, false, false, true},
 		{"GAP-0507/declare-p-link", project, `f=disklink; declare -p f; cp a.txt $f`, true, true, true},
 		{"GAP-0507/mapfile-other", project, `f=ordinary/n2; mapfile -t other <<< data; cp a.txt $f`, false, false, true},
@@ -204,6 +208,35 @@ func TestGAP0628PrintfAssignmentShellReadings(t *testing.T) {
 	for _, connector := range []string{"claudecode", "codex"} {
 		for _, managed := range []bool{false, true} {
 			for _, row := range rows {
+				t.Run(fmt.Sprintf("%s/%s/managed=%t", row.name, connector, managed), func(t *testing.T) {
+					t.Setenv("SHELL", row.shell)
+					want := `{"action":"allow"`
+					if row.block {
+						want = `{"action":"block"`
+					}
+					got := postDynamicWordParityCell(t, home, project, connector, managed, managed, false, row.command, nil)
+					if !strings.HasPrefix(got, want) {
+						t.Errorf("verdict %.300s, want %s", got, want)
+					}
+				})
+			}
+		}
+	}
+}
+
+func TestG235MapfileShellReadings(t *testing.T) {
+	home, project := dynamicWordParityProject(t)
+	for _, row := range []struct {
+		name, shell, command string
+		block                bool
+	}{
+		{"zsh/retained-link", "/bin/zsh", `f=disklink; mapfile -t f <<< out2.txt; echo marker >> "$f"`, true},
+		{"bash/replaced-link", "/bin/bash", `f=disklink; mapfile -t f <<< out2.txt; echo marker >> "$f"`, false},
+		{"unknown/retained-link", "", `f=disklink; mapfile -t f <<< out2.txt; echo marker >> "$f"`, true},
+		{"zsh/ordinary", "/bin/zsh", `f=out2.txt; mapfile -t f <<< a.txt; echo marker >> "$f"`, false},
+	} {
+		for _, connector := range []string{"claudecode", "codex"} {
+			for _, managed := range []bool{false, true} {
 				t.Run(fmt.Sprintf("%s/%s/managed=%t", row.name, connector, managed), func(t *testing.T) {
 					t.Setenv("SHELL", row.shell)
 					want := `{"action":"allow"`

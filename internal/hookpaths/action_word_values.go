@@ -33,7 +33,7 @@ func actionShellValueReadings(command string) []string {
 	case "zsh", "sh", "dash":
 		return []string{"zsh"}
 	default:
-		if strings.Contains(command, "printf") {
+		if strings.Contains(command, "printf") || strings.Contains(command, "mapfile") || strings.Contains(command, "readarray") {
 			return []string{"bash", "zsh"}
 		}
 		return []string{"bash"}
@@ -1586,16 +1586,22 @@ func actionUpdateValuesAs(stmt *syntax.Stmt, values actionValues, cwd, home stri
 		}
 		values[name] = result.String()
 	case "read", "mapfile", "readarray":
+		if values[actionShellValueKey] == "zsh" && program != "read" {
+			// These array readers are Bash builtins. An external command
+			// cannot replace a value in its parent shell.
+			return
+		}
 		names, known := shellBinderDestinations(call, home)
 		if !known {
 			return
 		}
+		if program != "read" && !actionMapfileReplacesZero(call, home) {
+			// -O starts at a later array index. The scalar reading of an
+			// existing array is element zero, which this call leaves intact.
+			return
+		}
 		if program == "read" && len(names) == 0 {
 			names = []string{"REPLY"}
-		}
-		for _, name := range names {
-			delete(values, name)
-			delete(values, name+"[0]")
 		}
 		var input string
 		found := false
@@ -1612,6 +1618,10 @@ func actionUpdateValuesAs(stmt *syntax.Stmt, values actionValues, cwd, home stri
 			case syntax.WordHdoc:
 				input, found = actionWordValue(redir.Word, values, cwd, home)
 			}
+		}
+		for _, name := range names {
+			delete(values, name)
+			delete(values, name+"[0]")
 		}
 		if !found {
 			return
@@ -1630,6 +1640,50 @@ func actionUpdateValuesAs(stmt *syntax.Stmt, values actionValues, cwd, home stri
 			values[names[0]+"[0]"] = first
 		}
 	}
+}
+
+// actionMapfileReplacesZero reads the option that selects the first array
+// index. An unresolved offset keeps the prior element-zero reading.
+func actionMapfileReplacesZero(call *syntax.CallExpr, home string) bool {
+	zero := true
+	for index := 1; index < len(call.Args); index++ {
+		word, fixed := StaticWord(call.Args[index], home)
+		if !fixed {
+			return false
+		}
+		if word == "--" || !strings.HasPrefix(word, "-") || word == "-" {
+			break
+		}
+		for at := 1; at < len(word); at++ {
+			option := word[at]
+			if option == 't' {
+				continue
+			}
+			if !strings.ContainsRune("cCdOnsu", rune(option)) {
+				return false
+			}
+			value := word[at+1:]
+			if value == "" {
+				index++
+				if index == len(call.Args) {
+					return false
+				}
+				value, fixed = StaticWord(call.Args[index], home)
+				if !fixed {
+					return false
+				}
+			}
+			if option == 'O' {
+				offset, err := strconv.ParseInt(value, 10, 64)
+				if err != nil {
+					return false
+				}
+				zero = offset == 0
+			}
+			break
+		}
+	}
+	return zero
 }
 
 // actionEvalAssignmentName reports a shell variable name: a letter or _,
