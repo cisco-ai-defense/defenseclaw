@@ -518,8 +518,8 @@ func TestNormalizeSkillRuntimeNameDocumentsPathBehavior(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.input, func(t *testing.T) {
-			if got := normalizeSkillRuntimeName(tc.input); got != tc.want {
-				t.Errorf("normalizeSkillRuntimeName(%q) = %q, want %q", tc.input, got, tc.want)
+			if got := assetfacts.SkillRuntimeName(tc.input); got != tc.want {
+				t.Errorf("SkillRuntimeName(%q) = %q, want %q", tc.input, got, tc.want)
 			}
 		})
 	}

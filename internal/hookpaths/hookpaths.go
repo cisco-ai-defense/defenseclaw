@@ -1081,25 +1081,7 @@ func ResolveConnector(connector, surface, event string, payload []byte) string {
 		_ = json.Unmarshal(envelope["cwd"], &cwd)
 		if home, err := os.UserHomeDir(); err == nil {
 			if facts := projectSkillRootFacts(connector, home, cwd); len(facts) > 0 {
-				if name := projectSkillCallName(args); name != "" {
-					source := projectSkillCallPath(payload)
-					if source == "" {
-						source = projectSkillCallPath(args)
-					}
-					roots := make([]string, 0, len(facts))
-					for key := range facts {
-						if strings.HasPrefix(key, ProjectSkillRootUnverifiedPrefix) {
-							roots = append(roots, strings.TrimPrefix(key, ProjectSkillRootUnverifiedPrefix))
-						}
-					}
-					for _, root := range roots {
-						for _, dir := range projectSkillSelectedFolders(root, name) {
-							if projectSkillSelectionMatchesPath(root, dir, source, cwd) {
-								facts[ProjectSkillSelectedPrefix+dir] = name
-							}
-						}
-					}
-				}
+				addProjectSkillSelectedFacts(facts, payload, args, cwd)
 				facts[CWDKey] = cwd
 				encoded, err := json.Marshal(facts)
 				if err == nil && len(encoded) <= maxEncodedTargets {
