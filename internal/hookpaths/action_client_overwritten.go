@@ -196,8 +196,8 @@ func actionClientProvedSafeVariableTargetsWithBindingsAs(command, cwd, home stri
 			}
 		}
 		// A dynamic printf option may change a later binding. Its own
-		// redirect expands before printf runs, while a later target cannot
-		// use the ordinary-target proof below.
+		// redirect expands before printf runs. The binder operand roles
+		// identify which later names actually lose their known values.
 		dynamicPrintf := false
 		if call, ok := stmt.Cmd.(*syntax.CallExpr); ok && len(call.Args) >= 2 {
 			if program, fixed := staticProgramWord(call.Args[0], home); fixed && programBase(program) == "printf" {
@@ -211,13 +211,15 @@ func actionClientProvedSafeVariableTargetsWithBindingsAs(command, cwd, home stri
 							}
 							continue
 						}
-						option, known := actionWordValue(call.Args[1], values, cwd, home)
-						if !known {
+						_, _, unknown := actionPrintfFormatBindings(call, values, cwd, home)
+						if unknown {
 							resolved = false
 							break
 						}
-						if strings.HasPrefix(option, "-v") {
-							if _, _, bound := actionPrintfBoundName(call, values, cwd, home); !bound {
+						option, known := actionWordValue(call.Args[1], values, cwd, home)
+						if known && strings.HasPrefix(option, "-v") &&
+							(values[actionShellValueKey] != "zsh" || option == "-v") {
+							if name, _, bound := actionPrintfBoundName(call, values, cwd, home); !bound && name == "" {
 								resolved = false
 								break
 							}

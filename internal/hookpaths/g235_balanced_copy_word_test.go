@@ -131,6 +131,7 @@ func TestG235BinderOperandRolesMatchBash(t *testing.T) {
 		"mapfile -t other", "readarray -t other", "mapfile -t f", "readarray -t f",
 		"printf -v other %s disklink", "printf -vother %s disklink",
 		"printf -v f %s disklink", "printf -vf %s disklink",
+		"printf -v 'g[1+0]' '%s%n' abc g", "printf -v 'f[0]' %s disklink",
 		"printf -v other '%n' f",
 		"getopts x other -x", "getopts x f -x",
 		"declare other=disklink", "typeset other=disklink", "export other=disklink", "readonly other=disklink",

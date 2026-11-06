@@ -136,7 +136,7 @@ func actionPrintfBoundName(call *syntax.CallExpr, values actionValues, cwd, home
 	if !fixed {
 		return "", 0, false
 	}
-	if values[actionShellValueKey] == "zsh" && strings.HasPrefix(option, "-v") {
+	if values[actionShellValueKey] == "zsh" && option != "-v" && strings.HasPrefix(option, "-v") {
 		return "", 0, false
 	}
 	if option == "-v" {
@@ -232,15 +232,32 @@ func actionPrintfFormatBindings(call *syntax.CallExpr, values actionValues, cwd,
 	}
 	option, known := actionWordValue(call.Args[index], values, cwd, home)
 	if !known {
-		// With no following format or data word, an unknown first word
-		// cannot provide both a -v destination and its format. A %n
-		// conversion has no variable name operand either.
-		if index+1 == len(call.Args) {
-			return nil, "", false
+		// An unknown format can assign through %n only to a name in a
+		// following data word. It can also be -v when a destination and a
+		// format follow. Neither reading can change an unrelated name.
+		var names []string
+		for at := index + 1; at < len(call.Args); at++ {
+			value, fixed := actionPrintfNameValue(call.Args[at], values, cwd, home)
+			if !fixed {
+				return nil, "", true
+			}
+			if actionEvalAssignmentName(value) {
+				names = append(names, value)
+			} else if at == index+1 && at+1 < len(call.Args) && values[actionShellValueKey] != "zsh" {
+				// This operand could be the -v destination. An indexed
+				// destination can change its scalar at index zero.
+				if name, _, _ := actionPrintfScalarName(value, 0); name != "" {
+					names = append(names, name)
+				} else if actionPrintfNameMaySplit(call.Args[at]) {
+					return nil, "", true
+				}
+			} else if actionPrintfNameMaySplit(call.Args[at]) {
+				return nil, "", true
+			}
 		}
-		return nil, "", true
+		return names, "", false
 	}
-	if values[actionShellValueKey] == "zsh" && strings.HasPrefix(option, "-v") {
+	if values[actionShellValueKey] == "zsh" && option != "-v" && strings.HasPrefix(option, "-v") {
 		return nil, "", false
 	}
 	if option == "-v" {

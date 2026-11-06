@@ -231,7 +231,7 @@ func TestG235MapfileShellReadings(t *testing.T) {
 		block                bool
 	}{
 		{"zsh/retained-link", "/bin/zsh", `f=disklink; mapfile -t f <<< out2.txt; echo marker >> "$f"`, true},
-		{"bash/replaced-link", "/bin/bash", `f=disklink; mapfile -t f <<< out2.txt; echo marker >> "$f"`, false},
+		{"bash/replaced-link", "/bin/bash", `f=disklink; mapfile -t f <<< out2.txt; echo marker >> "$f"`, true},
 		{"unknown/retained-link", "", `f=disklink; mapfile -t f <<< out2.txt; echo marker >> "$f"`, true},
 		{"zsh/ordinary", "/bin/zsh", `f=out2.txt; mapfile -t f <<< a.txt; echo marker >> "$f"`, false},
 	} {

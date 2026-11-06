@@ -6,6 +6,7 @@ package hookpaths
 import (
 	"strings"
 
+	"github.com/defenseclaw/defenseclaw/internal/actionfacts"
 	"mvdan.cc/sh/v3/syntax"
 )
 
@@ -13,7 +14,11 @@ import (
 // an ordinary link removed by rm. Use it as extra client evidence only for
 // a variable output redirect or a variable writer destination.
 func actionClientVariableWriteCandidate(command, home string) bool {
-	if !strings.ContainsRune(command, '$') {
+	return actionClientVariableWriteCandidateDepth(command, home, 0)
+}
+
+func actionClientVariableWriteCandidateDepth(command, home string, depth int) bool {
+	if depth >= 8 || !strings.ContainsRune(command, '$') {
 		return false
 	}
 	file, parsed := parseShell(command)
@@ -61,6 +66,35 @@ func actionClientVariableWriteCandidate(command, home string) bool {
 					break
 				}
 			}
+		default:
+			// A static shell -c body has its own variable write operands.
+			// Inspect it under the same candidate rule before the client
+			// decides whether to record the positive target answer.
+			base := programBase(program)
+			if base != "env" && !posixShellProgram(base) {
+				break
+			}
+			words := make([]string, len(call.Args))
+			fixedWords := make([]bool, len(call.Args))
+			for i, arg := range call.Args {
+				words[i], fixedWords[i] = StaticWord(arg, home)
+			}
+			start := 0
+			if base == "env" {
+				child, ok := actionfacts.StaticPrefixWrapperChild(words, fixedWords)
+				if !ok || child.DirUnknown || child.ChangesResolution {
+					break
+				}
+				start = child.Index
+			}
+			if start >= len(words) || !fixedWords[start] || !posixShellProgram(programBase(words[start])) {
+				break
+			}
+			body, ok := shellCommandBodyIndex(words[start:])
+			if !ok || start+body >= len(words) || !fixedWords[start+body] {
+				break
+			}
+			found = actionClientVariableWriteCandidateDepth(words[start+body], home, depth+1)
 		}
 		return !found
 	})

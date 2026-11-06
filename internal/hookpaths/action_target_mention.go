@@ -348,7 +348,15 @@ func actionPosixTargetMentionAs(command, cwd, home string, depth int, stateOnly 
 					found = true
 					return false
 				}
+				_, bindingWords, validBinder := shellBinderRoles(call, home)
+				if !validBinder {
+					bindingWords = nil
+				}
 				for _, word := range call.Args {
+					if bindingWords[word] {
+						judgedWords = append(judgedWords, word)
+						continue
+					}
 					if readsReplaced && actionReplacedEntryWord(word, values, effectiveCWD, home, replacedEntries) {
 						judgedWords = append(judgedWords, word)
 						continue
@@ -2085,7 +2093,7 @@ func actionPosixNestedShellMention(file *syntax.File, cwd, home string, depth in
 						continue
 					}
 					if child, childStatic := StaticWord(call.Args[j+1], home); childStatic {
-						if actionPosixShellBodyMention(child, cwd, home, depth+1, stateOnly, globs) {
+						if actionPosixShellBodyMention(child, cwd, home, depth+1, stateOnly, globs, "") {
 							found = true
 							return false
 						}
@@ -2127,7 +2135,7 @@ func actionPosixNestedShellMention(file *syntax.File, cwd, home string, depth in
 				if option == "-c" || len(option) > 2 && !strings.HasPrefix(option, "--") &&
 					!strings.ContainsAny(option, "=/") && strings.Contains(option[1:], "c") {
 					if child, static := StaticWord(call.Args[j+1], home); static {
-						if actionPosixShellBodyMention(child, cwd, home, depth+1, stateOnly, globs) {
+						if actionPosixShellBodyMention(child, cwd, home, depth+1, stateOnly, globs, base) {
 							found = true
 						} else {
 							bodies = append(bodies, call.Args[j+1])
@@ -2146,7 +2154,18 @@ func actionPosixNestedShellMention(file *syntax.File, cwd, home string, depth in
 // -S) the POSIX reading meets. On a native Windows host that shell is Git
 // Bash: a body the POSIX grammar reads alone is read with it, as the shell
 // runs it (GAP-1717); any other body keeps every reading.
-func actionPosixShellBodyMention(child, cwd, home string, depth int, stateOnly bool, globs *actionGlobs) bool {
+func actionPosixShellBodyMention(child, cwd, home string, depth int, stateOnly bool, globs *actionGlobs, shell string) bool {
+	// The command names the shell that reads its body. The login SHELL
+	// describes only an otherwise unqualified outer command.
+	if shell == "bash" || shell == "zsh" || shell == "sh" || shell == "dash" {
+		reading := shell
+		if shell == "sh" || shell == "dash" {
+			reading = "zsh"
+		}
+		if actionPosixTargetMentionAs(child, cwd, home, depth, stateOnly, globs, reading) {
+			return true
+		}
+	}
 	if depth < 8 && actionGitBashReadsAlone(child, home, actionfacts.DialectPOSIX) {
 		return actionPosixTargetMention(child, cwd, home, depth, stateOnly, globs)
 	}

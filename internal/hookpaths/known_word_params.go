@@ -677,8 +677,16 @@ var shellBinderSpecs = map[string]shellBinderSpec{
 // can write. builtin and command select the builtin directly; an option on
 // either wrapper is left unknown. This proof never changes the strict scan.
 func shellBinderDestinations(call *syntax.CallExpr, home string) ([]string, bool) {
+	names, _, ok := shellBinderRoles(call, home)
+	return names, ok
+}
+
+// shellBinderRoles also identifies the words that are variable names, not
+// path operands. The target walk uses the same option reading as the value
+// proof, so an indexed assignment name is never treated as a path pattern.
+func shellBinderRoles(call *syntax.CallExpr, home string) ([]string, map[*syntax.Word]bool, bool) {
 	if call == nil || len(call.Assigns) != 0 || len(call.Args) == 0 {
-		return nil, false
+		return nil, nil, false
 	}
 	args := call.Args
 	for len(args) > 1 {
@@ -690,28 +698,37 @@ func shellBinderDestinations(call *syntax.CallExpr, home string) ([]string, bool
 	}
 	program, fixed := literalProgramWord(args[0], home)
 	if !fixed {
-		return nil, false
+		return nil, nil, false
 	}
 	if program == "getopts" {
 		if len(args) < 3 {
-			return nil, false
+			return nil, nil, false
 		}
 		if _, fixed := StaticWord(args[1], home); !fixed {
-			return nil, false
+			return nil, nil, false
 		}
 		name, fixed := StaticWord(args[2], home)
-		return []string{name}, fixed && plainShellVariableName(name)
+		return []string{name}, map[*syntax.Word]bool{args[2]: true}, fixed && plainShellVariableName(name)
 	}
 	if program == "declare" || program == "typeset" || program == "local" ||
 		program == "export" || program == "readonly" {
-		return declarationWordDestinations(args[1:], home)
+		names, ok := declarationWordDestinations(args[1:], home)
+		roles := map[*syntax.Word]bool{}
+		for _, arg := range args[1:] {
+			if word, fixed := StaticWord(arg, home); fixed && plainShellVariableName(word) {
+				roles[arg] = true
+			}
+		}
+		return names, roles, ok
 	}
 	spec, found := shellBinderSpecs[program]
 	if !found {
-		return nil, false
+		return nil, nil, false
 	}
 	names := make([]string, 0, 2)
+	roles := map[*syntax.Word]bool{}
 	positional := make([]string, 0, len(args)-1)
+	positionalWords := make([]*syntax.Word, 0, len(args)-1)
 	formatIndex := -1
 	options := true
 	arrayDestination := false
@@ -730,7 +747,7 @@ func shellBinderDestinations(call *syntax.CallExpr, home string) ([]string, bool
 					continue
 				}
 			}
-			return nil, false
+			return nil, nil, false
 		}
 		if options && word == "--" {
 			options = false
@@ -740,30 +757,41 @@ func shellBinderDestinations(call *syntax.CallExpr, home string) ([]string, bool
 			for pos := 1; pos < len(word); pos++ {
 				option := word[pos]
 				if strings.ContainsRune(spec.reject, rune(option)) {
-					return nil, false
+					return nil, nil, false
 				}
 				if strings.ContainsRune(spec.flags, rune(option)) {
 					continue
 				}
 				if !strings.ContainsRune(spec.values, rune(option)) {
-					return nil, false
+					return nil, nil, false
 				}
 				value := word[pos+1:]
 				if value == "" {
 					index++
 					if index == len(args) {
-						return nil, false
+						return nil, nil, false
 					}
 					value, fixed = StaticWord(args[index], home)
 					if !fixed {
-						return nil, false
+						return nil, nil, false
 					}
 				}
 				if strings.ContainsRune(spec.destinations, rune(option)) {
-					if !plainShellVariableName(value) {
-						return nil, false
+					if program == "printf" {
+						name, _, valid := actionPrintfScalarName(value, 0)
+						if !valid {
+							return nil, nil, false
+						}
+						if name != "" {
+							names = append(names, name)
+						}
+					} else {
+						if !plainShellVariableName(value) {
+							return nil, nil, false
+						}
+						names = append(names, value)
 					}
-					names = append(names, value)
+					roles[args[index]] = true
 					arrayDestination = program == "read" && option == 'a'
 				}
 				break // the rest of this word is the option value
@@ -775,32 +803,37 @@ func shellBinderDestinations(call *syntax.CallExpr, home string) ([]string, bool
 			formatIndex = index
 		}
 		positional = append(positional, word)
+		positionalWords = append(positionalWords, args[index])
 	}
 	switch spec.position {
 	case binderAllPositions:
 		if !arrayDestination {
 			names = append(names, positional...)
+			for _, word := range positionalWords {
+				roles[word] = true
+			}
 		}
 	case binderFirstPosition:
 		if len(positional) > 0 {
 			names = append(names, positional[0])
+			roles[positionalWords[0]] = true
 		} else {
 			names = append(names, "MAPFILE")
 		}
 	}
 	for _, name := range names {
 		if !plainShellVariableName(name) {
-			return nil, false
+			return nil, nil, false
 		}
 	}
 	if program == "printf" {
 		formatNames, safe := printfFormatDestinations(args, formatIndex, home)
 		if !safe {
-			return nil, false
+			return nil, nil, false
 		}
 		names = append(names, formatNames...)
 	}
-	return names, true
+	return names, roles, true
 }
 
 func declarationWordDestinations(args []*syntax.Word, home string) ([]string, bool) {
