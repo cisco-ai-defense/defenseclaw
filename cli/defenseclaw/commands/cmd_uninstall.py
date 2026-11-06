@@ -388,6 +388,9 @@ def uninstall_cmd(
         if refusal:
             # The real run stops at plan validation (GAP-2585).
             ux.warn(f"a real run would stop before any change: {refusal}")
+        if cowork_plugin:
+            # The real run ends with this step; the dry run shows it too (GAP-0084 review F1).
+            ux.echo(f"  • DefenseClaw cannot remove its Cowork plugin from your Claude account: {_COWORK_REMOVAL_STEP}")
         ux.subhead("(dry-run — nothing modified)")
         return
 
@@ -929,6 +932,8 @@ def _dispatch_native_windows_uninstall(
         ux.echo(f"  • {_COWORK_PLUGIN_STAYS}")
 
     if dry_run:
+        if cowork_plugin:
+            ux.echo(f"  • DefenseClaw cannot remove its Cowork plugin from your Claude account: {_COWORK_REMOVAL_STEP}")
         ux.subhead("(dry-run — nothing modified)")
         return True
     if not yes and not click.confirm("  Proceed?", default=False):

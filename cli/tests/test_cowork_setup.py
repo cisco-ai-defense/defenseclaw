@@ -456,6 +456,8 @@ def test_uninstall_dry_run_names_the_cowork_removal_step(app) -> None:
         "The DefenseClaw Cowork plugin stays in your Claude account. Remove it in Claude: Customize > Plugins."
         in result.output
     )
+    assert "Customize > Plugins, then the ... menu > Remove" in result.output
+    assert "older plugins may block" in result.output
     execute.assert_not_called()
 
 
