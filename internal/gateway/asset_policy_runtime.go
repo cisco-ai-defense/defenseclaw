@@ -24,6 +24,7 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/enforce"
 	"github.com/defenseclaw/defenseclaw/internal/gateway/connector"
 	"github.com/defenseclaw/defenseclaw/internal/gateway/notifier"
+	"github.com/defenseclaw/defenseclaw/internal/managed/mcpasuser"
 	"github.com/defenseclaw/defenseclaw/internal/redaction"
 )
 
@@ -127,8 +128,9 @@ func (a *APIServer) claudeCodePluginMCPServerName(ctx context.Context, probe mcp
 }
 
 // mcpStateUnreadableDecision refuses an MCP tool call of an enrolled user
-// whose ~/.claude.json (Claude Code, GAP-0829) or ~/.kiro/settings/mcp.json
-// (Kiro, GAP-1468) the hook enumerator could not read or parse. The gateway
+// whose ~/.claude.json (Claude Code, GAP-0829), ~/.kiro/settings/mcp.json
+// (Kiro, GAP-1468) or Codex config.toml (GAP-0686) the hook enumerator
+// could not read or parse. The gateway
 // service cannot read that file itself, so it does not know the user's
 // servers and cannot admit one: a server changed while the file was
 // unreadable would otherwise run unscanned (fail closed). The refusal names
@@ -143,11 +145,12 @@ func (a *APIServer) mcpStateUnreadableDecision(ctx context.Context, connectorNam
 	if !ok {
 		return config.AssetPolicyDecision{}, false
 	}
-	label, source := "Claude Code", "claude-state-unreadable"
-	if connectorName == "kiro" {
-		label, source = "Kiro", "kiro-mcp-unreadable"
+	published, ok := mcpasuser.LookupPublished(connectorName)
+	if !ok {
+		return config.AssetPolicyDecision{}, false
 	}
-	reason := state.Blocked(label)
+	source := strings.ReplaceAll(published.Unreadable, "_", "-")
+	reason := state.Blocked(published.Label)
 	decision := runtimeAssetDisableBlockDecision("mcp", probe.ServerName, connectorName, "hook", reason, source)
 	decision.RegistryStatus = "unknown"
 	a.logAssetPolicyAudit(ctx, connectorName, "mcp:"+probe.ServerName, fmt.Sprintf(
@@ -250,6 +253,16 @@ func (a *APIServer) codexMCPAssetDecision(ctx context.Context, req codexHookRequ
 	}
 	probe := mcpProbeFromFields(a.codexMCPServerName(ctx, req), req.ToolName, req.ToolInput)
 	probe.WorkspaceDir = req.CWD
+	// A managed Windows gateway knows the enrolled users Codex servers only
+	// from the record the hook enumerator publishes: it is read again before
+	// a call about to run is decided, and an unreadable one refuses the call,
+	// as for Claude Code and Kiro (GAP-0686).
+	if decision, refused := a.mcpDefinitionRefreshDecision(ctx, "codex", req.HookEventName, probe); refused {
+		return decision, true
+	}
+	if decision, refused := a.mcpStateUnreadableDecision(ctx, "codex", req.HookEventName, probe); refused {
+		return decision, true
+	}
 	a.noteHookReportedMCPServer(ctx, "codex", req.HookEventName, probe)
 	if decision, refused := a.mcpAdmissionPendingDecision(ctx, "codex", req.HookEventName, probe); refused {
 		return decision, true

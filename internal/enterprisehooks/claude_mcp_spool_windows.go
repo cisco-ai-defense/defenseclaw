@@ -29,6 +29,9 @@ const maxClaudeProjectMCPBytes = 1 << 20
 // maxKiroMCPBytes bounds the ~/.kiro/settings/mcp.json read.
 const maxKiroMCPBytes = 1 << 20
 
+// maxCodexMCPBytes bounds the ~/.codex/config.toml read.
+const maxCodexMCPBytes = 1 << 20
+
 // windowsMCPSpoolSource is the MCP server file of one connector that the
 // enumerator publishes for each user it enrolls for that connector.
 type windowsMCPSpoolSource struct {
@@ -60,6 +63,77 @@ var windowsKiroMCPSpoolSource = windowsMCPSpoolSource{
 		return servers, "", nil
 	},
 }
+
+var windowsCodexMCPSpoolSource = windowsMCPSpoolSource{
+	connector: "codex", label: "Codex", tmpPattern: ".codex-mcp-*", file: `.codex\config.toml`,
+	read: windowsCodexUserServers,
+}
+
+// windowsMCPSpoolSources holds the source of every connector the enumerator
+// publishes (mcpasuser.PublishedConnectors).
+var windowsMCPSpoolSources = map[string]windowsMCPSpoolSource{
+	windowsClaudeMCPSpoolSource.connector: windowsClaudeMCPSpoolSource,
+	windowsKiroMCPSpoolSource.connector:   windowsKiroMCPSpoolSource,
+	windowsCodexMCPSpoolSource.connector:  windowsCodexMCPSpoolSource,
+}
+
+// WriteWindowsMCPSpool publishes, the same way as WriteWindowsClaudeMCPSpool,
+// the MCP servers of connector for every user the manifest enrolls for it,
+// in dir (MCPSpoolDir). A connector with no source publishes nothing and
+// fails, so the gateway refuses its enrolled users calls (fail closed).
+func WriteWindowsMCPSpool(dir, connector string, manifest Manifest, setOwnership func(string) error, logf func(string, ...any)) error {
+	source, ok := windowsMCPSpoolSources[connector]
+	if !ok {
+		return fmt.Errorf("the hook enumerator has no MCP server source for %s", connector)
+	}
+	return writeWindowsMCPSpool(dir, manifest, source, setOwnership, logf)
+}
+
+// windowsCodexUserServers reads the Codex user MCP servers of the account
+// whose profile is home: ~/.codex/config.toml, and the config.toml under the
+// account persistent CODEX_HOME (its own value over the machine one), which
+// Codex reads instead while it is set. Both are published, so a server is
+// admitted whichever of them a session of the account reads (GAP-0686). They
+// are read as the agent reads them, through a link or outside the profile
+// only when the account owns the file (readWindowsAccountFile). A missing
+// file adds no server; any other failure makes the account Codex servers
+// unknown, so none of them is admitted (fail closed).
+func windowsCodexUserServers(sid, home string, _ func(string, ...any)) ([]config.MCPServerEntry, string, error) {
+	account, err := windows.StringToSid(sid)
+	if err != nil {
+		return nil, filepath.Join(home, ".codex", "config.toml"), err
+	}
+	paths := []string{filepath.Join(home, ".codex", "config.toml")}
+	relocated, err := windowsAccountFolderVariable(account, home, "CODEX_HOME")
+	if err != nil {
+		return nil, paths[0], fmt.Errorf("resolve CODEX_HOME: %w", err)
+	}
+	if relocated != "" && !strings.EqualFold(filepath.Join(relocated, "config.toml"), paths[0]) {
+		paths = append(paths, filepath.Join(relocated, "config.toml"))
+	}
+	var out []config.MCPServerEntry
+	for _, path := range paths {
+		data, err := windowsCodexConfigRead(path, account, home)
+		if errors.Is(err, os.ErrNotExist) {
+			continue
+		}
+		if err == nil && len(data) > maxCodexMCPBytes {
+			err = fmt.Errorf("config.toml is larger than %d bytes", maxCodexMCPBytes)
+		}
+		if err != nil {
+			return nil, path, err
+		}
+		servers, err := config.ParseCodexUserMCPServers(data, path)
+		if err != nil {
+			return nil, path, fmt.Errorf("parse %s: %w", path, err)
+		}
+		out = append(out, servers...)
+	}
+	return out, "", nil
+}
+
+// windowsCodexConfigRead is readWindowsAccountFile; tests replace it.
+var windowsCodexConfigRead = readWindowsAccountFile
 
 // WriteWindowsClaudeMCPSpool publishes, for every user the manifest enrolls
 // for Claude Code, the MCP servers of that user (ClaudeMCPSpoolDirName). It

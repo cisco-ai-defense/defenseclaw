@@ -9,6 +9,7 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/enforce"
 	"github.com/defenseclaw/defenseclaw/internal/enterprisehooks"
 	"github.com/defenseclaw/defenseclaw/internal/enterprisestatus"
+	"github.com/defenseclaw/defenseclaw/internal/managed/mcpasuser"
 	"github.com/defenseclaw/defenseclaw/internal/watcher"
 )
 
@@ -28,16 +29,14 @@ func appendAdmissionIssueWarnings(result *enterprisestatus.Result, dataDir, guar
 		result.AddWarning("asset_removal_deferred", "the "+request.TargetType+" "+request.SourcePath+
 			" is in quarantine and blocked, but its original folder stays until the guardian can remove it: "+request.Deferred)
 	}
-	// An enrolled user whose ~/.claude.json the hook enumerator could not
-	// read: the gateway refuses that user's Claude Code MCP servers
-	// (GAP-0829).
-	for _, state := range enterprisehooks.ReadClaudeStateUnreadable(enterprisehooks.ClaudeMCPSpoolDir(guardianDir)) {
-		result.AddWarning("claude_state_unreadable", state.Blocked("Claude Code"))
-	}
-	// The same for an enrolled user whose ~/.kiro/settings/mcp.json it could
-	// not read (GAP-1468).
-	for _, state := range enterprisehooks.ReadClaudeStateUnreadable(enterprisehooks.KiroMCPSpoolDir(guardianDir)) {
-		result.AddWarning("kiro_mcp_unreadable", state.Blocked("Kiro"))
+	// An enrolled user whose MCP server file the hook enumerator could not
+	// read: the gateway refuses the MCP servers of that user and connector
+	// (~/.claude.json GAP-0829, ~/.kiro/settings/mcp.json GAP-1468, Codex
+	// config.toml GAP-0686).
+	for _, published := range mcpasuser.PublishedConnectors() {
+		for _, state := range enterprisehooks.ReadClaudeStateUnreadable(enterprisehooks.MCPSpoolDir(guardianDir, published.Connector)) {
+			result.AddWarning(published.Unreadable, state.Blocked(published.Label))
+		}
 	}
 	issues, err := watcher.ReadAdmissionIssues(dataDir)
 	if err != nil {

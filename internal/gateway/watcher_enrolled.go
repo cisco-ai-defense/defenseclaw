@@ -375,20 +375,14 @@ func gatewayMCPEntryOutsideProfiles(entry config.MCPServerEntry) bool {
 }
 
 // enrolledMCPSpoolDir is the folder where the enumerator publishes the MCP
-// servers of the connector's enrolled users, or "" for a connector whose
-// files the service reads itself. The service account cannot read
-// ~/.claude.json in the profile root, which holds the Claude Code user-scope
-// and local-scope servers (GAP-0424), nor ~/.kiro/settings/mcp.json, which
-// the guardian protects for a user enrolled for Kiro (GAP-1468).
+// servers of the connector enrolled users, or "" for a connector it does not
+// publish (mcpasuser.PublishedConnectors). The service account reads nothing
+// in a profile: ~/.claude.json holds the Claude Code user-scope and
+// local-scope servers (GAP-0424), the guardian protects
+// ~/.kiro/settings/mcp.json (GAP-1468), and Codex keeps its servers in
+// config.toml under ~/.codex or CODEX_HOME (GAP-0686).
 func enrolledMCPSpoolDir(cfg *config.Config, connectorName string) string {
-	authorizationDir := managed.HookGuardianAuthorizationDir(cfg.DataDir)
-	switch connectorName {
-	case "claudecode":
-		return enterprisehooks.ClaudeMCPSpoolDir(authorizationDir)
-	case "kiro":
-		return enterprisehooks.KiroMCPSpoolDir(authorizationDir)
-	}
-	return ""
+	return enterprisehooks.MCPSpoolDir(managed.HookGuardianAuthorizationDir(cfg.DataDir), connectorName)
 }
 
 // enrolledSpoolMCPServers are the MCP servers the enumerator published in
@@ -398,11 +392,7 @@ func enrolledMCPSpoolDir(cfg *config.Config, connectorName string) string {
 // has no file, so a missing record is unreadable state too: the publication
 // failed and the gateway does not know that user's servers (GAP-1298).
 func enrolledSpoolMCPServers(dir, connectorName, sid string) ([]config.MCPServerEntry, *enterprisehooks.ClaudeStateUnreadable) {
-	read := enterprisehooks.ReadClaudeMCPSpool
-	if connectorName == "kiro" {
-		read = enterprisehooks.ReadKiroMCPSpool
-	}
-	servers, unreadable, err := read(dir, sid, validateManagedGuardianAuthorization)
+	servers, unreadable, err := enterprisehooks.ReadMCPSpool(dir, sid, connectorName, validateManagedGuardianAuthorization)
 	if err != nil {
 		reason := err.Error()
 		if errors.Is(err, os.ErrNotExist) {
