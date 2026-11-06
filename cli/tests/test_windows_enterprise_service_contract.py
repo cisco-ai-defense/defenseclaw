@@ -7034,12 +7034,31 @@ def test_untrusted_config_acl_is_refused_before_the_transaction_stops_a_service(
     assert transaction.count("-ContentGateScope $ContentGateScope") == 3
     assert "[ValidateSet('Lifecycle', 'Retain', 'Purge')][string]$ContentGateScope = 'Lifecycle'" in transaction
     drift = _function_text(module, "Repair-DefenseClawDeploymentAclDrift")
-    assert "-GatewayServiceName $GatewayServiceName `\n            -Scope $ContentGateScope" in drift
+    # g582 review 3 M4: only the read-only check keeps the caller's scope;
+    # the re-stamps are judged with Lifecycle, and an uninstall whose
+    # re-stamp that refuses skips it (no throw, no re-stamp) and hands the
+    # refusal back.
+    assert "$gateScope = if ($CheckOnly) { $ContentGateScope } else { 'Lifecycle' }" in drift
+    assert "-GatewayServiceName $GatewayServiceName `\n                -Scope $gateScope" in drift
+    assert "-Scope $ContentGateScope" not in drift
+    skip = drift.index("if ($CheckOnly -or $ContentGateScope -ceq 'Lifecycle') {\n                throw\n            }")
+    assert skip < drift.index("$GateRefusal.Value = $_.Exception.Message") < drift.index(
+        "return $false\n        }\n    }\n    if ($CheckOnly) {\n        return $true"
+    ) < drift.index("Set-DefenseClawRetainedRuntimeAcls `")
+    # The snapshot-failure restart never runs on what the gate refused: the
+    # refusal throws inside the restart's try, before the services start,
+    # so the quiescing intent is retained.
+    failure = transaction[transaction.index("$restoreServices = $services") :]
+    refusal = failure.index("-GateRefusal ([ref]$gateRefusal))")
+    assert refusal < failure.index("if ($gateRefusal) {") < failure.index(
+        'throw "not restarting the services on paths the content gate refused: $gateRefusal"'
+    ) < failure.index("Start-DefenseClawTransactionServices `")
+    assert failure.index("Start-DefenseClawTransactionServices `") < failure.index("$restartErrors.Add($_.Exception.Message)")
     uninstall = _function_text(module, "Invoke-DefenseClawUninstallLifecycle")
     assert "-SkipRedactionKeySnapshot `\n            -ContentGateScope $(if ($Purge) { 'Purge' } else { 'Retain' })" in uninstall
     repair = _function_text(module, "Repair-DefenseClawDeploymentAclDrift")
     assert repair.index("Assert-DefenseClawRepairableConfigAcl -Layout $Layout") < repair.index(
-        "if ($CheckOnly) {"
+        "if ($CheckOnly) {\n        return $true"
     ) < repair.index("Set-DefenseClawRetainedRuntimeAcls")
     refusal = _function_text(module, "Assert-DefenseClawRepairableConfigAcl")
     assert "(remove that entry, then run Setup /ensure " in refusal
@@ -7387,7 +7406,7 @@ def test_every_restamping_lifecycle_runs_the_content_gate_first() -> None:
     repair = _function_text(module, "Repair-DefenseClawDeploymentAclDrift")
     gate = repair.index("Assert-DefenseClawStandaloneContentTrusted -Layout $Layout -GatewayServiceName $GatewayServiceName")
     assert repair.index("Assert-DefenseClawRepairableConfigAcl -Layout $Layout") < gate
-    assert gate < repair.index("if ($CheckOnly) {") < repair.index("Set-DefenseClawRetainedRuntimeAcls")
+    assert gate < repair.index("if ($CheckOnly) {\n        return $true") < repair.index("Set-DefenseClawRetainedRuntimeAcls")
 
     # Purge skips only what it deletes unread; Retain skips only the install
     # tree the uninstall removes.

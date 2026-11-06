@@ -422,6 +422,114 @@ try {
         }
         & $canonical[$credential]
 
+        # g582 review 3 M4: PURGE=1 with gateway-access drift and a
+        # user-writable runtime .env. The read-only check before the stop
+        # keeps the purge's scope and passes. The re-stamp after the stop
+        # gives the gateway back every runtime child, so it is judged with
+        # Lifecycle: it refuses, and the uninstall skips it without throwing,
+        # leaving .env's descriptor as it was and handing the refusal back.
+        # Every other caller (Lifecycle) is still refused.
+        Add-UsersWrite -Path $runtimeEnv -Rights Modify
+        $envBefore = (Microsoft.PowerShell.Security\Get-Acl -LiteralPath $runtimeEnv).Sddl
+        if (-not (Repair-DefenseClawDeploymentAclDrift `
+                -Layout $layout -GatewayServiceName 'DefenseClawGateway' `
+                -RedactionKeyClass trusted_drift -ContentGateScope Purge -CheckOnly)) {
+            throw "the purge's read-only drift check did not report the drift"
+        }
+        foreach ($scope in @('Purge', 'Retain')) {
+            $skipped = ''
+            $answer = Repair-DefenseClawDeploymentAclDrift `
+                -Layout $layout -GatewayServiceName 'DefenseClawGateway' `
+                -RedactionKeyClass trusted_drift -ContentGateScope $scope -GateRefusal ([ref]$skipped)
+            if ($answer -or -not $skipped.Contains($runtimeEnv) -or $script:repairCalls -ne 0 -or
+                (Microsoft.PowerShell.Security\Get-Acl -LiteralPath $runtimeEnv).Sddl -cne $envBefore) {
+                throw "the $scope uninstall's drift repair re-stamped a user-writable .env or did not hand the refusal back: answer=$answer refusal='$skipped' calls=$($script:repairCalls)"
+            }
+        }
+        $lifecycleError = ''
+        try {
+            [void](Repair-DefenseClawDeploymentAclDrift `
+                -Layout $layout -GatewayServiceName 'DefenseClawGateway' `
+                -RedactionKeyClass trusted_drift)
+        }
+        catch {
+            $lifecycleError = $_.Exception.Message
+        }
+        if (-not $lifecycleError.Contains($runtimeEnv) -or $script:repairCalls -ne 0) {
+            throw "the lifecycle drift repair did not refuse a user-writable .env: '$lifecycleError'"
+        }
+
+        # The same with a forced snapshot failure in the uninstall's
+        # transaction: the gateway is not started on the unjudged .env. The
+        # services stay stopped, the quiescing intent stays pending, and the
+        # refusal names .env.
+        & {
+            $txLayout = @{}
+            foreach ($key in $layout.Keys) { $txLayout[$key] = $layout[$key] }
+            $txLayout.TransactionsDirectory = [IO.Path]::Combine($State, 'transactions')
+            $txLayout.PendingPath = [IO.Path]::Combine($State, 'pending-g582r4.json')
+            $txLayout.InstallRoot = [IO.Path]::Combine($State, 'program')
+            $txLayout.HookPath = [IO.Path]::Combine($State, 'program', 'bin', 'defenseclaw-hook.exe')
+            $txLayout.RedactionCorrelationKeyPath = [IO.Path]::Combine($State, 'runtime', 'redaction.key')
+            $txLayout.ProviderLibraryPath = ''
+            $txLayout.CertificationCodexHome = ''
+            $txLayout.CoreHardeningCertification = $false
+            foreach ($key in @('BrokerPath', 'GatewayPath', 'ACPPath', 'SensorHelperPath', 'CLIPath', 'ManifestPath',
+                    'InstallerPath', 'ModulePath', 'BrokerAuthKeyPath', 'MetadataPath',
+                    'AgentApplicationControlAttestationPath', 'ManagedHooksLifecycleJournalPath')) {
+                if (-not $txLayout.ContainsKey($key)) { $txLayout[$key] = '' }
+            }
+            [void][IO.Directory]::CreateDirectory($txLayout.TransactionsDirectory)
+            $script:started = 0
+            $script:snapshotFailures = 0
+            function Assert-DefenseClawGatewayServiceAccess { throw 'the gateway lost its access to runtime' }
+            function Get-DefenseClawServiceChecked { return $null }
+            function Test-DefenseClawServiceExists { return $true }
+            function Set-DefenseClawServiceStartMode { }
+            function Stop-DefenseClawService { }
+            function Wait-DefenseClawServiceProcessExit { }
+            function Get-DefenseClawServiceProcessIdentity { return $null }
+            function Test-DefenseClawServiceRanThroughBarrier { return $true }
+            function Test-DefenseClawServiceStoppedCleanly { return $true }
+            function Remove-DefenseClawStaleReplacementBackups { }
+            function Publish-DefenseClawEarlyHook { return '' }
+            function Restore-DefenseClawEarlyHook { }
+            function Hold-DefenseClawEarlyHookGuard { }
+            function Write-DefenseClawLifecyclePhase { }
+            function Set-DefenseClawServiceActivationPhase { }
+            function Get-DefenseClawTransactionRedactionKeyGatewaySID { return $sid }
+            function Get-DefenseClawApprovedPolicyPath {
+                $script:snapshotFailures++
+                throw 'forced transaction snapshot failure'
+            }
+            function Start-DefenseClawTransactionServices { $script:started++ }
+            $transactionError = ''
+            try {
+                [void](New-DefenseClawTransaction `
+                    -Layout $txLayout `
+                    -GatewayServiceName 'DefenseClawGateway' `
+                    -GuardianServiceName 'DefenseClawHookGuardian' `
+                    -PriorDeploymentActive `
+                    -SkipRedactionKeySnapshot `
+                    -ContentGateScope Purge)
+            }
+            catch {
+                $transactionError = $_.Exception.Message
+            }
+            if ($script:snapshotFailures -ne 1 -or -not $transactionError.Contains('forced transaction snapshot failure')) {
+                throw "the transaction did not reach the forced snapshot failure: '$transactionError'"
+            }
+            if ($script:started -ne 0 -or $script:repairCalls -ne 0 -or
+                -not $transactionError.Contains('not restarting the services on paths the content gate refused') -or
+                -not $transactionError.Contains($runtimeEnv) -or
+                -not [IO.File]::Exists($txLayout.PendingPath) -or
+                (Microsoft.PowerShell.Security\Get-Acl -LiteralPath $runtimeEnv).Sddl -cne $envBefore) {
+                throw "a failed purge transaction restarted on or re-stamped an unjudged .env: starts=$($script:started) calls=$($script:repairCalls) '$transactionError'"
+            }
+            [IO.File]::Delete($txLayout.PendingPath)
+        }
+        & $canonical[$runtimeEnv]
+
         # GAP-0590 review M3: Repair, a reinstall over an uninstall's
         # tombstone and the uninstall itself reach the gate before they
         # consume a record or change anything. The lifecycle steps after the
