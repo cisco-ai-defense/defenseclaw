@@ -7121,7 +7121,98 @@ def _gated_managed_paths(gate: str) -> set[str]:
         names.add("CredentialFiles")
     if "Get-DefenseClawBundleAclItems -Layout $Layout" in gate:
         names.add("BundleTree")
+    if "Get-DefenseClawApprovedPolicyPath -Layout $Layout -Name $copy[0]" in gate:
+        names.add("ApprovedPolicyFiles")
+    walk = re.search(r"\$walkRoot = if \(\$Scope -ceq 'Retain'\) \{ '(\w+)' \} else \{ '(\w+)' \}", gate)
+    if walk and "Get-DefenseClawContentGateWalk -Root" in gate:
+        names |= {f"walk:{walk.group(1)}", f"walk:{walk.group(2)}"}
     return names
+
+
+# The walking re-stamps (g582 review 2 S2): the -Path of every re-stamp call
+# in each function, by what it holds. Set-DefenseClawPreservedStateAcls
+# re-stamps every state-root descendant on a non-purge uninstall and the root
+# and deployment.json on a purge; Set-DefenseClawRetainedRuntimeAcls adopts
+# every runtime child. A new call is unmapped and fails the contract.
+_WALK_RESTAMPS = {
+    "Set-DefenseClawPreservedStateAcls": {
+        "$Layout.StateRoot": "StateRoot",
+        "$Layout.MetadataPath": "MetadataPath",
+        "(Get-DefenseClawExactItemPath": "walk:StateRoot",
+    },
+    "Set-DefenseClawRetainedRuntimeAcls": {
+        "$directory": "walk:RuntimeDirectory",
+        "$path": "walk:RuntimeDirectory",
+    },
+}
+
+
+def _ungated_walk_restamps(module: str) -> set[str]:
+    gated = _gated_managed_paths(_function_text(module, "Assert-DefenseClawStandaloneContentTrusted"))
+    ungated: set[str] = set()
+    for function, mapping in _WALK_RESTAMPS.items():
+        targets = _RESTAMP_CALL.findall(_function_text(module, function))
+        assert targets, function
+        for target in targets:
+            name = mapping.get(target, f"<unmapped {target}>")
+            if name not in gated:
+                ungated.add(f"{function}: {name}")
+    return ungated
+
+
+def test_every_walking_restamp_is_gated() -> None:
+    """g582 review 2 S2: a non-purge uninstall re-stamps every retained item
+    administrator-only (Set-DefenseClawPreservedStateAcls) and the runtime
+    adoption gives every runtime child back to the gateway
+    (Set-DefenseClawRetainedRuntimeAcls), but the gate judged only a named
+    subset. The gate now walks what each re-stamps, in the scope it runs in,
+    and a re-stamp call it does not cover fails here."""
+
+    module = read(MODULE).replace("\r\n", "\n")
+    assert not _ungated_walk_restamps(module)
+    gate = _function_text(module, "Assert-DefenseClawStandaloneContentTrusted")
+    assert "$walkRoot = if ($Scope -ceq 'Retain') { 'StateRoot' } else { 'RuntimeDirectory' }" in gate
+    assert "if ($Scope -ne 'Purge') {\n        $walkRoot" in gate
+    assert "(& $under $full 'LogDirectory')" in gate
+    assert "(& $under $full 'RuntimeDirectory') -or (& $under $full 'ManagedIPCDirectory')" in gate
+    walk = _function_text(module, "Get-DefenseClawContentGateWalk")
+    assert "[IO.FileAttributes]::ReparsePoint" in walk and "Set-DefenseClawPathAcl" not in walk
+
+    # The other direction: without the walk, or with a new re-stamp call in
+    # either function, the contract fails.
+    without = module.replace(gate, gate.replace("Get-DefenseClawContentGateWalk -Root", "Get-Nothing -Root", 1), 1)
+    assert _ungated_walk_restamps(without) == {
+        "Set-DefenseClawPreservedStateAcls: walk:StateRoot",
+        "Set-DefenseClawRetainedRuntimeAcls: walk:RuntimeDirectory",
+    }
+    preserved = _function_text(module, "Set-DefenseClawPreservedStateAcls")
+    planted = module.replace(
+        preserved,
+        preserved.replace("    if ($Purge) {\n        Set-DefenseClawPathAcl", "    Set-DefenseClawPathAcl -Path $Layout.PolicyCachePath -Kind AdminFile\n    if ($Purge) {\n        Set-DefenseClawPathAcl", 1),
+        1,
+    )
+    assert planted != module
+    assert _ungated_walk_restamps(planted) == {"Set-DefenseClawPreservedStateAcls: <unmapped $Layout.PolicyCachePath>"}
+    runtime = _function_text(module, "Set-DefenseClawRetainedRuntimeAcls")
+    planted = module.replace(
+        runtime,
+        runtime.replace("    foreach ($file in $files) {", "    Set-DefenseClawPathAcl -Path $other -Kind RuntimeFile\n    foreach ($file in $files) {", 1),
+        1,
+    )
+    assert planted != module
+    assert _ungated_walk_restamps(planted) == {"Set-DefenseClawRetainedRuntimeAcls: <unmapped $other>"}
+
+
+def test_the_content_gate_names_every_refused_path_once() -> None:
+    """g582 review 2 S3: the gate threw on the first refused path, so after a
+    broad change the admin fixed one path per run. It now collects every
+    refusal and throws once, the first in the old form, the rest numbered,
+    capped at 20."""
+
+    gate = _function_text(read(MODULE).replace("\r\n", "\n"), "Assert-DefenseClawStandaloneContentTrusted")
+    assert "$refusals.Add(" in gate and gate.count("throw") == 1
+    assert "$shown = [Math]::Min($refusals.Count, 20)" in gate
+    assert "'refusing to change the deployment, and nothing was changed (DefenseClaw does not give a file '" in gate
 
 
 def _ungated_restamps(module: str) -> tuple[set[str], set[str], set[str]]:
