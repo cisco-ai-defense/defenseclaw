@@ -373,6 +373,9 @@ type hookAPITokenPublishSnapshot struct {
 func captureHookAPITokenPublishSnapshot(dataDir, tokenPath string) (hookAPITokenPublishSnapshot, error) {
 	snapshot := hookAPITokenPublishSnapshot{}
 	if err := validateHookAPITokenLocation(dataDir, tokenPath); err != nil {
+		if errors.Is(err, errHookAPITokenDirectoryAbsent) {
+			return snapshot, nil
+		}
 		return snapshot, err
 	}
 	pathInfo, err := pathidentity.LstatPinned(tokenPath)
@@ -853,6 +856,11 @@ func validateHookAPITokenLocation(dataDir, tokenPath string) error {
 	return validateHookAPITokenLocationWith(dataDir, tokenPath, hookAPIValidateDirectoryElement, hookAPIValidateDirectory)
 }
 
+// The data-directory chain was validated, but Setup has not created its
+// hooks directory yet. Snapshot callers may treat this as an empty prior
+// token; other missing or untrusted path elements remain errors.
+var errHookAPITokenDirectoryAbsent = fmt.Errorf("hook API token directory absent: %w", os.ErrNotExist)
+
 func validateHookAPITokenLocationWith(
 	dataDir, tokenPath string,
 	validateElement, validateDirectory func(string) error,
@@ -869,7 +877,7 @@ func validateHookAPITokenLocationWith(
 		if err := validateDirectory(dataDir); err != nil {
 			return fmt.Errorf("hook API token data dir %s is not trusted: %w", dataDir, err)
 		}
-		return os.ErrNotExist
+		return errHookAPITokenDirectoryAbsent
 	}
 	// Check dataDir as the named, protected directory. The hooks directory
 	// walk below includes its full ancestor chain, so walking all of those
