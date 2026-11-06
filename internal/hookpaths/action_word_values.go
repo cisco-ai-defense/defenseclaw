@@ -1190,6 +1190,16 @@ func actionKeptStatement(stmt *syntax.Stmt, values actionValues, cwd, home strin
 	}
 	switch command := stmt.Cmd.(type) {
 	case *syntax.CallExpr:
+		temporaryAssignments := false
+		if len(command.Assigns) > 0 && len(command.Args) > 0 {
+			if program, fixed := StaticWord(command.Args[0], home); fixed {
+				switch programBase(program) {
+				case "eval", "source", ".", "export", "readonly", "set", "unset", "declare", "local", "typeset":
+				default:
+					temporaryAssignments = true
+				}
+			}
+		}
 		if len(command.Assigns) == 0 {
 			if len(command.Args) == 0 {
 				return []actionValues{values}
@@ -1208,6 +1218,19 @@ func actionKeptStatement(stmt *syntax.Stmt, values actionValues, cwd, home strin
 		}
 		next := maps.Clone(values)
 		actionUpdateValuesAs(stmt, next, cwd, home, false)
+		if temporaryAssignments {
+			for _, assignment := range command.Assigns {
+				if assignment.Name == nil {
+					continue
+				}
+				name := assignment.Name.Value
+				if before, known := values[name]; known {
+					next[name] = before
+				} else {
+					delete(next, name)
+				}
+			}
+		}
 		return []actionValues{next}
 	case *syntax.FuncDecl:
 		next := maps.Clone(values)
@@ -1256,8 +1279,14 @@ func actionKeptStatement(stmt *syntax.Stmt, values actionValues, cwd, home strin
 		}
 		return actionAppendValueCandidates(condition, actionKeptStatements(command.Do, condition, cwd, home, steps))
 	case *syntax.ForClause:
+		if next, known := actionKeptFixedFor(command, values, cwd, home, steps); known {
+			return next
+		}
 		return actionAppendValueCandidates([]actionValues{values}, actionKeptStatements(command.Do, []actionValues{values}, cwd, home, steps))
 	case *syntax.CaseClause:
+		if next, known := actionKeptFixedCase(command, values, cwd, home, steps); known {
+			return next
+		}
 		next := []actionValues{values}
 		for _, item := range command.Items {
 			next = actionAppendValueCandidates(next, actionKeptStatements(item.Stmts, []actionValues{values}, cwd, home, steps))
@@ -1272,14 +1301,177 @@ func actionKeptStatement(stmt *syntax.Stmt, values actionValues, cwd, home strin
 	}
 }
 
+// A fixed, non-globbing for-list runs once per item. The shared value
+// tracker can then keep assignments made by that loop without retaining a
+// path that was overwritten before the next command.
+func actionKeptFixedFor(clause *syntax.ForClause, values actionValues, cwd, home string, steps *int) ([]actionValues, bool) {
+	loop, ok := clause.Loop.(*syntax.WordIter)
+	if !ok || clause.Select || loop.Name == nil || len(loop.Items) > 16 {
+		return nil, false
+	}
+	items := make([]string, 0, len(loop.Items))
+	for _, word := range loop.Items {
+		item, known := actionWordValue(word, values, cwd, home)
+		if !known || wordExpandsParameter(word) && strings.ContainsAny(item, " \t\n*?[") ||
+			!wordExpandsParameter(word) && strings.ContainsAny(item, "*?[") {
+			return nil, false
+		}
+		items = append(items, item)
+	}
+	if len(items) == 0 {
+		return []actionValues{values}, true
+	}
+	current := []actionValues{values}
+	for _, item := range items {
+		var next []actionValues
+		stop := false
+		for _, candidate := range current {
+			bound := maps.Clone(candidate)
+			bound[loop.Name.Value] = item
+			states := []actionValues{bound}
+			for _, stmt := range clause.Do {
+				if control := actionFixedLoopControl(stmt, home); control != "" {
+					stop = stop || control == "break"
+					break
+				}
+				states = actionUpdateValuesKept(stmt, states, cwd, home, steps)
+				if actionKeptSaturated(states) {
+					return states, true
+				}
+			}
+			next = actionAppendValueCandidates(next, states)
+			if actionKeptSaturated(next) {
+				return next, true
+			}
+		}
+		current = next
+		if stop {
+			break
+		}
+	}
+	return current, true
+}
+
+func actionFixedLoopControl(stmt *syntax.Stmt, home string) string {
+	if stmt == nil || stmt.Background || stmt.Negated || len(stmt.Redirs) != 0 {
+		return ""
+	}
+	call, ok := stmt.Cmd.(*syntax.CallExpr)
+	if !ok || len(call.Assigns) != 0 || len(call.Args) != 1 {
+		return ""
+	}
+	name, known := StaticWord(call.Args[0], home)
+	if known && (name == "break" || name == "continue") {
+		return name
+	}
+	return ""
+}
+
+// Resolve only simple, fixed case patterns. Other pattern forms retain the
+// existing conservative candidate reading.
+func actionKeptFixedCase(clause *syntax.CaseClause, values actionValues, cwd, home string, steps *int) ([]actionValues, bool) {
+	items, known := actionFixedCaseItems(clause, values, cwd, home)
+	if !known {
+		return nil, false
+	}
+	current := []actionValues{values}
+	for _, item := range items {
+		current = actionKeptStatements(item.Stmts, current, cwd, home, steps)
+		if actionKeptSaturated(current) {
+			return current, true
+		}
+	}
+	return current, true
+}
+
+func actionFixedCaseItems(clause *syntax.CaseClause, values actionValues, cwd, home string) ([]*syntax.CaseItem, bool) {
+	word, known := actionWordValue(clause.Word, values, cwd, home)
+	if !known || len(clause.Items) > 16 {
+		return nil, false
+	}
+	var selected []*syntax.CaseItem
+	falling := false
+	for _, item := range clause.Items {
+		if item.Op != syntax.Break && item.Op != syntax.Fallthrough && item.Op != syntax.Resume {
+			return nil, false
+		}
+		itemMatches := falling
+		if !falling {
+			for _, patternWord := range item.Patterns {
+				if len(patternWord.Parts) != 1 {
+					return nil, false
+				}
+				literal, ok := patternWord.Parts[0].(*syntax.Lit)
+				if !ok || !actionSimpleCasePattern(literal.Value) {
+					return nil, false
+				}
+				pattern := literal.Value
+				if pattern == "*" || strings.HasSuffix(pattern, "*") && strings.HasPrefix(word, strings.TrimSuffix(pattern, "*")) || pattern == word {
+					itemMatches = true
+				}
+			}
+		}
+		if !itemMatches {
+			continue
+		}
+		selected = append(selected, item)
+		falling = item.Op == syntax.Fallthrough
+		if item.Op == syntax.Break {
+			break
+		}
+	}
+	return selected, true
+}
+
+func actionSimpleCasePattern(pattern string) bool {
+	if pattern == "" {
+		return false
+	}
+	for i := 0; i < len(pattern); i++ {
+		char := pattern[i]
+		if char == '*' && (i == len(pattern)-1 || pattern == "*") {
+			continue
+		}
+		if char != '_' && char != '-' && (char < 'a' || char > 'z') && (char < 'A' || char > 'Z') && (char < '0' || char > '9') {
+			return false
+		}
+	}
+	return true
+}
+
 // 1 is true, -1 false, and 0 unknown. Only shell builtins whose result is
 // fixed without inspecting the environment narrow a branch here.
 func actionStaticCondition(stmt *syntax.Stmt, home string) int {
 	if stmt == nil {
 		return 0
 	}
+	if block, ok := stmt.Cmd.(*syntax.Block); ok && len(block.Stmts) == 1 && len(stmt.Redirs) == 0 && !stmt.Background && !stmt.Negated {
+		return actionStaticCondition(block.Stmts[0], home)
+	}
 	call, ok := stmt.Cmd.(*syntax.CallExpr)
-	if !ok || len(call.Args) != 1 || len(call.Assigns) != 0 || len(stmt.Redirs) != 0 {
+	if !ok || len(stmt.Redirs) != 0 {
+		return 0
+	}
+	if len(call.Args) == 0 && len(call.Assigns) > 0 {
+		for _, assignment := range call.Assigns {
+			if assignment.Value == nil {
+				continue
+			}
+			commandSubstitution := false
+			syntax.Walk(assignment.Value, func(node syntax.Node) bool {
+				switch node.(type) {
+				case *syntax.CmdSubst, *syntax.ProcSubst:
+					commandSubstitution = true
+				}
+				return !commandSubstitution
+			})
+			if commandSubstitution {
+				return 0
+			}
+		}
+		return 1
+	}
+	if len(call.Args) != 1 || len(call.Assigns) != 0 {
 		return 0
 	}
 	program, fixed := StaticWord(call.Args[0], home)
@@ -1439,6 +1631,29 @@ func actionUpdateValuesAs(stmt *syntax.Stmt, values actionValues, cwd, home stri
 			values[actionReadonlyValuePrefix+name] = "1"
 		}
 	case "eval":
+		if len(call.Args) == 2 {
+			if body, fixed := actionWordValue(call.Args[1], values, cwd, home); fixed && len(body) <= 4096 {
+				if parsed, ok := parseShell(body); ok && len(parsed.Stmts) > 0 && len(parsed.Stmts) <= 8 {
+					var assignments []*syntax.Assign
+					for _, nested := range parsed.Stmts {
+						plain, direct := nested.Cmd.(*syntax.CallExpr)
+						if !direct || nested.Background || nested.Negated || len(nested.Redirs) != 0 ||
+							len(plain.Args) != 0 || len(plain.Assigns) != 1 || plain.Assigns[0].Name == nil ||
+							!actionEvalAssignmentName(plain.Assigns[0].Name.Value) {
+							assignments = nil
+							break
+						}
+						assignments = append(assignments, plain.Assigns[0])
+					}
+					if len(assignments) == len(parsed.Stmts) {
+						for _, assignment := range assignments {
+							update(assignment)
+						}
+						return
+					}
+				}
+			}
+		}
 		// eval of static name=value words assigns them; any other eval
 		// may change every name (rel-1-0-2:GAP-0409, eval f=<link>).
 		assigned := map[string]string{}

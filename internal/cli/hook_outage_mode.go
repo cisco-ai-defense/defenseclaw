@@ -437,9 +437,9 @@ type outageToolPayload struct {
 	CWD  string                 `json:"cwd"`
 }
 
-// outageToolDecision checks named protected targets on the rare path where
+// outageToolDecision checks concrete protected targets on the rare path where
 // the gateway is unavailable. The saved tier chooses whether ordinary calls
-// may proceed; this check does not interpret the agent's environment.
+// may proceed.
 func outageToolDecision(input io.Reader, dataDir string) string {
 	const maxPayload = 256 << 10
 	raw, err := io.ReadAll(io.LimitReader(input, maxPayload+1))
@@ -492,23 +492,28 @@ func outageToolDecision(input io.Reader, dataDir string) string {
 
 func outagePayloadNamesProtected(args map[string]interface{}, cwd, home, dataDir string) bool {
 	type field struct {
-		key   string
-		value interface{}
+		key         string
+		value       interface{}
+		environment map[string]string
 	}
-	stack := []field{{value: args}}
+	stack := []field{{value: args, environment: map[string]string{"HOME": home, "DEFENSECLAW_HOME": dataDir}}}
 	for len(stack) != 0 {
 		current := stack[len(stack)-1]
 		stack = stack[:len(stack)-1]
 		switch item := current.value.(type) {
 		case map[string]interface{}:
+			environment := current.environment
+			if raw, ok := item["env"].(map[string]interface{}); ok {
+				environment = outageKnownEnvironment(raw, environment)
+			}
 			for key, value := range item {
 				if !strings.EqualFold(key, "env") {
-					stack = append(stack, field{key: key, value: value})
+					stack = append(stack, field{key: key, value: value, environment: environment})
 				}
 			}
 		case []interface{}:
 			for _, value := range item {
-				stack = append(stack, field{key: current.key, value: value})
+				stack = append(stack, field{key: current.key, value: value, environment: current.environment})
 			}
 		case string:
 			if item == "" {
@@ -516,7 +521,7 @@ func outagePayloadNamesProtected(args map[string]interface{}, cwd, home, dataDir
 			}
 			switch strings.ToLower(current.key) {
 			case "command", "cmd", "script", "command_line", "commandline":
-				if outageCommandNamesProtected(item, cwd, home, dataDir) {
+				if outageCommandNamesProtected(item, cwd, home, dataDir, current.environment) {
 					return true
 				}
 			case "path", "file", "filepath", "file_path", "target", "destination", "dest", "output", "output_path", "filename":
@@ -538,10 +543,42 @@ func outagePayloadNamesProtected(args map[string]interface{}, cwd, home, dataDir
 	return false
 }
 
-// The hook's ActionFacts reader supplies literal path operands. Each name
-// then goes through the same hookpaths protected-target check as a direct
-// file tool. Unknown shell state does not become a protected finding.
-func outageCommandNamesProtected(command, cwd, home, dataDir string) bool {
+func outageKnownEnvironment(raw map[string]interface{}, inherited map[string]string) map[string]string {
+	known := make(map[string]string, len(raw)+len(inherited))
+	for key, value := range inherited {
+		known[key] = value
+	}
+	for key, value := range raw {
+		if text, ok := value.(string); ok && outageEnvironmentName(key) && !strings.ContainsRune(text, 0) {
+			known[key] = text
+		}
+	}
+	return known
+}
+
+func outageEnvironmentName(name string) bool {
+	if name == "" {
+		return false
+	}
+	for i := 0; i < len(name); i++ {
+		char := name[i]
+		if char != '_' && (char < 'A' || char > 'Z') && (char < 'a' || char > 'z') &&
+			(i == 0 || char < '0' || char > '9') {
+			return false
+		}
+	}
+	return true
+}
+
+// The shared hookpaths writer returns known write targets, including values
+// from the tool environment. ActionFacts retains the named path reading for
+// commands that identify a protected file without a writer operand.
+func outageCommandNamesProtected(command, cwd, home, dataDir string, environment map[string]string) bool {
+	if hookpaths.KnownProtectedWriteTarget(command, cwd, home, environment, func(path string) bool {
+		return outagePathProtected(path, cwd, home, dataDir)
+	}) {
+		return true
+	}
 	facts := actionfacts.Analyze(actionfacts.Input{Tool: "exec", Command: command, CWD: cwd, ActiveHome: home})
 	for _, path := range facts.Paths {
 		target := path.Resolved
