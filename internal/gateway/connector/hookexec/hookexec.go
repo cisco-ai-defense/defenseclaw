@@ -1683,17 +1683,9 @@ func sendHookRequest(
 		}
 		req = req.WithContext(transportCtx)
 		gatewayStarting := hookDeliveryGatewayStarting
-		var currentGateway func(context.Context, net.Conn) bool
-		if !opts.ManagedEnterprise {
-			target := req.URL.String()
-			client := requestClient
-			currentGateway = func(ctx context.Context, postConn net.Conn) bool {
-				return hookDeliveryCurrentGateway(ctx, client, target, postConn)
-			}
-		}
 		req, delivery = prepareHookDeliveryRequest(req, payload, hookDeliveryWait(opts), func(ctx context.Context) bool {
 			return gatewayStarting(ctx, opts)
-		}, currentGateway)
+		}, !opts.ManagedEnterprise && req.Header.Get("Expect") == "100-continue")
 		delivery.setCancel(cancelTransport)
 		context.AfterFunc(ctx, func() {
 			select {
@@ -1710,9 +1702,6 @@ func sendHookRequest(
 	req = req.WithContext(httptrace.WithClientTrace(req.Context(), &httptrace.ClientTrace{
 		GotConn: func(info httptrace.GotConnInfo) {
 			connected.Store(true)
-			if delivery != nil {
-				delivery.setConnection(info.Conn)
-			}
 		},
 	}))
 	resp, err := requestClient.Do(req)
