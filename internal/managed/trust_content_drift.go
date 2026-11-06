@@ -41,12 +41,18 @@ func standaloneRecordDriftRecovery() string {
 
 // standaloneMachinePolicyDriftRecovery is the way out of a drifted Claude
 // Code, Codex or Cursor machine policy folder or DefenseClaw file in it,
-// which the hook guardian does not re-stamp (GAP-0633).
+// which the hook guardian does not re-stamp (GAP-0633). A file is deleted,
+// not fixed with icacls: an identical rewrite keeps the old object, and a
+// handle the account opened while it could write the file keeps working on
+// it (g582 review 3 S2).
 func standaloneMachinePolicyDriftRecovery() string {
 	return "the hook guardian leaves it as it is and every DefenseClaw reader keeps refusing it: " +
-		"from an elevated PowerShell prompt remove that entry (icacls \"<path>\" /remove:g *<SID>), or give it back to Administrators " +
-		"(icacls \"<path>\" /setowner *S-1-5-32-544), check the file, then run `" + WindowsSetupCommand("/ensure") + "` and `" +
-		WindowsAdminCommand("enterprise", "windows", "verify", "--profile", "standalone") + "`. " + WindowsSetupSource
+		"from an elevated PowerShell prompt delete the file (for the ownership record .defenseclaw-managed-hooks.state delete the " +
+		"DefenseClaw policy file beside it too, 90-defenseclaw.json or requirements.toml; for Cursor delete the record, " +
+		".defenseclaw-managed-hooks.receipt and defenseclaw-hook.ps1 together), then run `" + WindowsSetupCommand("/ensure") +
+		"`, which writes them new from Setup's own state, and `" + WindowsAdminCommand("enterprise", "windows", "verify", "--profile", "standalone") +
+		"`; for a folder remove that entry (icacls \"<path>\" /remove:g *<SID>), or give it back to Administrators " +
+		"(icacls \"<path>\" /setowner *S-1-5-32-544). " + WindowsSetupSource
 }
 
 func (e *StandaloneContentDriftError) Error() string {
