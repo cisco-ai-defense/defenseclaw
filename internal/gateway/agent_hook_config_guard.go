@@ -23,6 +23,7 @@ import (
 	gatewayconnector "github.com/defenseclaw/defenseclaw/internal/gateway/connector"
 	"github.com/defenseclaw/defenseclaw/internal/hermespath"
 	"github.com/defenseclaw/defenseclaw/internal/hookpaths"
+	"github.com/defenseclaw/defenseclaw/internal/safefile"
 	"gopkg.in/yaml.v3"
 )
 
@@ -320,6 +321,21 @@ func (g *agentHookConfigGuard) format(raw string) string {
 // read returns a target's current content, false when there is no regular
 // file to read.
 func (g *agentHookConfigGuard) read(raw string) ([]byte, bool) {
+	if ManagedEnterpriseActive() {
+		path := strings.TrimSpace(raw)
+		if path == "~" {
+			path = g.home
+		} else if strings.HasPrefix(path, "~/") {
+			path = filepath.Join(g.home, path[2:])
+		} else if !filepath.IsAbs(path) {
+			path = filepath.Join(g.cwd, path)
+		}
+		if path == "" || !filepath.IsAbs(path) {
+			return nil, false
+		}
+		body, err := safefile.ReadRegularFileBounded(filepath.Clean(path), agentHookConfigMaxBytes)
+		return body, err == nil
+	}
 	places := g.places(raw)
 	if len(places) == 0 {
 		return nil, false
@@ -910,9 +926,19 @@ func agentHookConfigTextMayDisable(text string) bool {
 // turns DefenseClaw off, the write rule for a shell write to a hook file.
 // A rule the active pack does not hold adds nothing.
 func agentHookConfigFindings(ctx context.Context, request trustedActionRequest, findings []RuleFinding) []RuleFinding {
-	if !request.EnforcementCapable || ManagedEnterpriseActive() ||
+	if !request.EnforcementCapable ||
 		request.SkipLocalFilesystemResolution || isSandboxHookRequest(ctx) {
 		return findings
+	}
+	managed := ManagedEnterpriseActive()
+	managedRaw := ""
+	if managed {
+		managedRaw = agentHookConfigRawShellCommand(request.Input)
+		if managedRaw == "" || (!strings.Contains(managedRaw, "=") && !strings.Contains(managedRaw, "--settings") &&
+			!strings.Contains(managedRaw, "--config") && !strings.Contains(managedRaw, " -c") &&
+			!strings.Contains(managedRaw, "--setting-sources")) {
+			return findings
+		}
 	}
 	generation := snapshotRulePackGenerationFor(ctx, request.Connector)
 	if generation == nil {
@@ -937,6 +963,22 @@ func agentHookConfigFindings(ctx context.Context, request trustedActionRequest, 
 			enforcement: findingEnforcementAllowed,
 			proof:       newExactFallbackFindingProof(rule.ID, true, true, true, true),
 		})
+	}
+	if managed {
+		// Managed installations keep their own file policy. A literal
+		// configuration change on the launched agent is still a proved
+		// disablement of this call's hooks.
+		guard := newAgentHookConfigGuard(request.Input.CWD, request.Input.ActiveHome)
+		facts := []actionfacts.Facts{actionfacts.Analyze(request.Input)}
+		for _, command := range facts[0].Commands {
+			if reason, target := agentHookConfigRunOverride(agentHookConfigExactWords(command), guard, facts); reason != "" {
+				add(agentHookConfigDisableRuleID, reason, target)
+			}
+		}
+		if reason, target := agentHookConfigPrefixOverride(managedRaw, facts, guard); reason != "" {
+			add(agentHookConfigDisableRuleID, reason, target)
+		}
+		return out
 	}
 	guard := newAgentHookConfigGuard(request.Input.CWD, request.Input.ActiveHome)
 	if changes, native := agentHookConfigFileChanges(request.Input.Tool, request.Input.Args); native {
@@ -1138,7 +1180,9 @@ func agentHookConfigFindings(ctx context.Context, request trustedActionRequest, 
 			}
 		}
 	}
-	if target := agentHookConfigPrefixOverride(agentHookConfigRawShellCommand(request.Input), shellFacts); target != "" {
+	if reason, target := agentHookConfigPrefixOverride(agentHookConfigRawShellCommand(request.Input), shellFacts, guard); reason != "" {
+		add(agentHookConfigDisableRuleID, reason, target)
+	} else if target != "" {
 		add(agentHookConfigWriteRuleID, "", target)
 	}
 	return out
@@ -1813,20 +1857,36 @@ func agentHookConfigRunOverride(argv []string, guard *agentHookConfigGuard, fact
 	}
 	program := strings.ToLower(filepath.Base(argv[0]))
 	if program == "env" {
-		override := false
+		var assignments []string
 		for index := 1; index < len(argv); index++ {
 			if argv[index] == "--" {
 				continue
 			}
 			if strings.HasPrefix(argv[index], "-") || strings.Contains(argv[index], "=") {
 				if agentHookConfigRunHomeAssignment(argv[index]) {
-					override = true
+					assignments = append(assignments, argv[index])
 				}
 				continue
 			}
 			reason, target = agentHookConfigRunOverride(argv[index:], guard, facts)
-			if reason == "" && target == "" && override && agentHookConfigRunAgent(argv[index:]) {
-				return "", argv[index]
+			if reason == "" && target == "" && agentHookConfigRunAgent(argv[index:]) {
+				for _, assignment := range assignments {
+					key, value, _ := strings.Cut(assignment, "=")
+					expected := agentHookConfigExpectedHome(key, argv[index], guard)
+					if expected == "" {
+						continue
+					}
+					if strings.HasPrefix(value, "~") {
+						return "", argv[index]
+					}
+					if path, literal := agentHookConfigLiteralHomePath(value, guard); literal && path == filepath.Clean(expected) {
+						continue
+					}
+					if why := agentHookConfigLiteralHomeOverride(key, value, guard, argv[index]); why != "" {
+						return why, argv[index]
+					}
+					return "", argv[index]
+				}
 			}
 			return reason, target
 		}
@@ -1835,13 +1895,23 @@ func agentHookConfigRunOverride(argv []string, guard *agentHookConfigGuard, fact
 	if program == "exec" || program == "command" || program == "nohup" {
 		return agentHookConfigRunOverride(argv[1:], guard, facts)
 	}
-	if program == "npx" || program == "npx.cmd" {
-		for index := 1; index < len(argv); index++ {
+	launcherStart := 0
+	if program == "npx" || program == "npx.cmd" || program == "bunx" || program == "bunx.cmd" {
+		launcherStart = 1
+	} else if program == "pnpm" && len(argv) > 1 && argv[1] == "dlx" {
+		launcherStart = 2
+	}
+	if launcherStart > 0 {
+		for index := launcherStart; index < len(argv); index++ {
 			if argv[index] == "-y" || argv[index] == "--yes" {
 				continue
 			}
-			switch argv[index] {
-			case "@anthropic-ai/claude-code":
+			packageName := argv[index]
+			if at := strings.LastIndex(packageName, "@"); at > 0 {
+				packageName = packageName[:at]
+			}
+			switch packageName {
+			case "@anthropic-ai/claude-code", "claude-code":
 				return agentHookConfigRunOverride(append([]string{"claude"}, argv[index+1:]...), guard, facts)
 			case "@openai/codex":
 				return agentHookConfigRunOverride(append([]string{"codex"}, argv[index+1:]...), guard, facts)
@@ -2018,6 +2088,56 @@ func agentHookConfigRunHomeAssignment(word string) bool {
 	return false
 }
 
+func agentHookConfigLiteralHomeOverride(key, value string, guard *agentHookConfigGuard, program string) string {
+	path, literal := agentHookConfigLiteralHomePath(value, guard)
+	if !literal {
+		return ""
+	}
+	expected := agentHookConfigExpectedHome(key, program, guard)
+	if expected == "" || path == filepath.Clean(expected) {
+		return ""
+	}
+	return "runs an agent with a different literal hook configuration directory"
+}
+
+func agentHookConfigLiteralHomePath(value string, guard *agentHookConfigGuard) (string, bool) {
+	if guard.home == "" || strings.ContainsAny(value, "$`*?[]{}") {
+		return "", false
+	}
+	if value == "~" {
+		return filepath.Clean(guard.home), true
+	}
+	if strings.HasPrefix(value, "~/") {
+		return filepath.Clean(filepath.Join(guard.home, value[2:])), true
+	}
+	if filepath.IsAbs(value) {
+		return filepath.Clean(value), true
+	}
+	return "", false
+}
+
+func agentHookConfigExpectedHome(key, program string, guard *agentHookConfigGuard) string {
+	if guard.home == "" {
+		return ""
+	}
+	agent := strings.ToLower(filepath.Base(program))
+	switch key {
+	case "CLAUDE_CONFIG_DIR":
+		if agent == "claude" || agent == "claude.exe" {
+			return filepath.Join(guard.home, ".claude")
+		}
+	case "CODEX_HOME":
+		if agent == "codex" || agent == "codex.exe" {
+			return filepath.Join(guard.home, ".codex")
+		}
+	case "HOME":
+		if agentHookConfigRunAgent([]string{program}) {
+			return guard.home
+		}
+	}
+	return ""
+}
+
 func agentHookConfigRunAgent(argv []string) bool {
 	if len(argv) == 0 {
 		return false
@@ -2051,43 +2171,57 @@ func agentHookConfigRunSettingsWritten(raw string, guard *agentHookConfigGuard, 
 // Prefix assignments belong to the launched process, not to the hook
 // request's environment. Parse the shell grammar so quoted text and comments
 // cannot be mistaken for a per-run home change.
-func agentHookConfigPrefixOverride(command string, facts []actionfacts.Facts) string {
-	if target := agentHookConfigPrefixOverrideOne(command); target != "" {
-		return target
+func agentHookConfigPrefixOverride(command string, facts []actionfacts.Facts, guard *agentHookConfigGuard) (reason, target string) {
+	if reason, target = agentHookConfigPrefixOverrideOne(command, guard); reason != "" || target != "" {
+		return reason, target
 	}
 	for _, fact := range facts {
 		for _, command := range fact.Commands {
-			if target := agentHookConfigPrefixOverrideOne(hookpaths.NestedShellBody(agentHookConfigExactWords(command))); target != "" {
-				return target
+			if reason, target = agentHookConfigPrefixOverrideOne(hookpaths.NestedShellBody(agentHookConfigExactWords(command)), guard); reason != "" || target != "" {
+				return reason, target
 			}
 		}
 	}
-	return ""
+	return "", ""
 }
 
-func agentHookConfigPrefixOverrideOne(command string) string {
+func agentHookConfigPrefixOverrideOne(command string, guard *agentHookConfigGuard) (reason, target string) {
 	if len(command) > 8192 {
-		return ""
+		return "", ""
 	}
 	file, err := syntax.NewParser().Parse(strings.NewReader(command), "")
 	if err != nil {
-		return ""
+		return "", ""
 	}
-	target := ""
 	syntax.Walk(file, func(node syntax.Node) bool {
 		call, ok := node.(*syntax.CallExpr)
 		if !ok || len(call.Args) == 0 || !agentHookConfigRunAgent([]string{agentHookConfigLiteralWord(call.Args[0])}) {
 			return true
 		}
+		program := agentHookConfigLiteralWord(call.Args[0])
 		for _, assignment := range call.Assigns {
 			if assignment.Name != nil && agentHookConfigRunHomeAssignment(assignment.Name.Value+"=x") {
-				target = agentHookConfigLiteralWord(call.Args[0])
-				break
+				if agentHookConfigExpectedHome(assignment.Name.Value, program, guard) == "" {
+					continue
+				}
+				value := agentHookConfigLiteralWord(assignment.Value)
+				if path, literal := agentHookConfigLiteralHomePath(value, guard); literal && path == filepath.Clean(agentHookConfigExpectedHome(assignment.Name.Value, program, guard)) {
+					continue
+				}
+				if value == "" {
+					target = program
+					continue
+				}
+				if why := agentHookConfigLiteralHomeOverride(assignment.Name.Value, value, guard, program); why != "" {
+					reason, target = why, program
+				} else if target == "" {
+					target = program
+				}
 			}
 		}
 		return true
 	})
-	return target
+	return reason, target
 }
 
 func agentHookConfigLiteralWord(word *syntax.Word) string {
