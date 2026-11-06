@@ -741,9 +741,9 @@ func hookShellCommandText(words []string) (string, bool) {
 			return "", false
 		}
 		commandFlag := false
-		allowed := "eufxvi"
+		allowed := "eufxvil"
 		if shell == "bash" {
-			allowed += "lrps"
+			allowed += "rps"
 		}
 		for _, flag := range option[1:] {
 			if flag == 'c' {
