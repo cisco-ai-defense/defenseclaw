@@ -74,7 +74,7 @@ func TestProtectHomeCommandOperandWriteThroughLinkUsesClientWalk(t *testing.T) {
 		{"gawk -i inplace {print} notes.txt", false},
 		{"uniq input.txt out.txt", false},
 		{"sort -o out.txt input.txt", false},
-		{"dd if=alias of=out.txt", false},
+		{"dd if=alias of=out.txt", true},
 		{"git config -f alias --get verifier.value", false},
 		{"uniq alias", false},
 		{"cat alias", false},

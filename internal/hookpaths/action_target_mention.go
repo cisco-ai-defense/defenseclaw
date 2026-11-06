@@ -333,6 +333,13 @@ func actionPosixTargetMention(command, cwd, home string, depth int, stateOnly bo
 					if data := actionNodeInertDataWord(call, effectiveCWD, home); data != nil {
 						inert = append(inert, data)
 					}
+					if len(call.Args) > 0 {
+						if program, known := staticProgramWord(call.Args[0], home); known && program == "echo" {
+							// Echo's arguments are data. The syntax walk still checks
+							// substitutions, and redirects were checked above.
+							inert = append(inert, call.Args[1:]...)
+						}
+					}
 				}
 				// mkdir or a tightening chmod of exactly the home's .ssh
 				// folder writes no keys file (rel-1-0-6:GAP-0298).
@@ -355,6 +362,12 @@ func actionPosixTargetMention(command, cwd, home string, depth int, stateOnly bo
 					return false
 				}
 				for _, word := range call.Args {
+					if readOnly {
+						// Grade this process's input words as reads. A later
+						// writer in the same action keeps its own target hit.
+						judgedWords = append(judgedWords, word)
+						continue
+					}
 					if readsReplaced && actionReplacedEntryWord(word, values, effectiveCWD, home, replacedEntries) {
 						judgedWords = append(judgedWords, word)
 						continue
@@ -445,7 +458,7 @@ func actionNodeInertDataWord(call *syntax.CallExpr, cwd, home string) *syntax.Wo
 		return nil
 	}
 	program, known := staticProgramWord(call.Args[0], home)
-	if !known || programBase(program) != "node" && programBase(program) != "nodejs" {
+	if !known || program != "node" && program != "nodejs" {
 		return nil
 	}
 	option, known := StaticWord(call.Args[1], home)
@@ -2479,6 +2492,9 @@ func actionEnvReaderOnly(words []string, home string) bool {
 	if index >= len(words) {
 		return false
 	}
+	if !actionBareReaderExecutable(words[index]) {
+		return false
+	}
 	for _, option := range words[index+1:] {
 		if actionReadOptionMayWrite(option) {
 			return false
@@ -2636,7 +2652,7 @@ func actionKnownReadOnlyShellDepth(file *syntax.File, home string, depth int) bo
 			return false
 		}
 		program, known := staticProgramWord(call.Args[0], home)
-		if !known {
+		if !known || !actionBareReaderExecutable(program) {
 			safe = false
 			return false
 		}
@@ -2666,6 +2682,9 @@ func actionKnownReadOnlyShellDepth(file *syntax.File, home string, depth int) bo
 			// resolved name; none has an output option.
 			"grep", "egrep", "fgrep", "wc", "du", "readlink", "realpath",
 			"cmp", "cut", "sha256sum", "sha512sum", "shasum":
+		case "md5sum", "b2sum", "sha1sum", "sha224sum", "sha384sum", "cksum", "sum", "sort", "file", "awk", "gawk", "mawk", "nawk":
+			words, known := actionStaticWords(call.Args, home)
+			safe = known && ProvedReadOnlyFileOperands(program, words)
 		case "sed", "gsed":
 			words, known := actionStaticWords(call.Args, home)
 			safe = known && actionSedDisplaysOnly(words[1:])

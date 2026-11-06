@@ -1039,6 +1039,13 @@ func trustedOrdinaryKeyOperandRolesDepth(request trustedActionRequest, input act
 		return false
 	}
 	for _, command := range facts.Commands {
+		if command.Executable == "" || strings.ContainsAny(command.Executable, `/\`) ||
+			strings.HasPrefix(command.Executable, ".") {
+			return false
+		}
+		if hookpaths.ProvedReadOnlyFileOperands(command.Executable, command.Argv) {
+			continue
+		}
 		switch command.Program {
 		case "", "echo", "printf", "diff", "cp", "cat", "head", "tail", "wc", "ls", "stat", "du", "readlink", "realpath", "grep", "egrep", "fgrep":
 		default:

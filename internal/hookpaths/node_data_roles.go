@@ -9,7 +9,10 @@ import (
 	"strings"
 )
 
-var nodeDirectFileWrite = regexp.MustCompile(`^require\(['"]fs['"]\)\.(?:writeFileSync|appendFileSync)\(`)
+var (
+	nodeDirectFileWrite = regexp.MustCompile(`^require\((?:'fs'|"fs"|'node:fs'|"node:fs")\)\.(?:writeFileSync|appendFileSync)\(`)
+	nodeBoundFS         = regexp.MustCompile(`^(?:const|let|var)[ \t]+([A-Za-z_$][A-Za-z0-9_$]*)[ \t]*=[ \t]*require\((?:'fs'|"fs"|'node:fs'|"node:fs")\)[ \t]*;[ \t]*`)
+)
 
 // nodeInertWriteData accepts a complete inline file write whose destination
 // is ordinary and whose second operand cannot execute code. It is shared by
@@ -19,16 +22,35 @@ func nodeInertWriteData(code, cwd, home string) bool {
 		return false
 	}
 	code = strings.TrimSpace(code)
-	location := nodeDirectFileWrite.FindStringIndex(code)
-	if location == nil || len(code) > 16<<10 {
+	if len(code) > 16<<10 {
 		return false
 	}
-	call, complete := literalBoundedCall(code, location[1]-1)
-	if !complete || strings.Trim(strings.TrimSpace(code[location[1]-1+len(call):]), "; ") != "" {
+	var open int
+	if location := nodeDirectFileWrite.FindStringIndex(code); location != nil {
+		open = location[1] - 1
+	} else if bound := nodeBoundFS.FindStringSubmatchIndex(code); bound != nil {
+		name := code[bound[2]:bound[3]]
+		body := code[bound[1]:]
+		for _, method := range []string{"writeFileSync", "appendFileSync"} {
+			prefix := name + "." + method + "("
+			if strings.HasPrefix(body, prefix) {
+				open = bound[1] + len(prefix) - 1
+				break
+			}
+		}
+		if open == 0 {
+			return false
+		}
+	} else {
+		return false
+	}
+	call, complete := nodeBoundedCall(code, open)
+	if !complete || strings.Trim(strings.TrimSpace(code[open+len(call):]), "; ") != "" {
 		return false
 	}
 	args, complete := nodeTopLevelArgs(call)
-	if !complete || len(args) != 2 || !nodeInertData(args[1]) {
+	if !complete || len(args) < 2 || len(args) > 3 || !nodeInertData(args[1]) ||
+		len(args) == 3 && !nodeInertOption(args[2]) {
 		return false
 	}
 	target, fixed := nodeStaticTarget(args[0], home)
@@ -49,14 +71,19 @@ func nodeStaticTarget(value, home string) (string, bool) {
 		return "", false
 	}
 	suffix, fixed := literalString(strings.TrimSpace(strings.TrimPrefix(value, prefix)))
-	if !fixed || !strings.HasPrefix(suffix, "/") || strings.Contains(suffix, "..") {
+	if !fixed || !strings.HasPrefix(suffix, "/") {
 		return "", false
+	}
+	for _, part := range strings.Split(suffix, "/") {
+		if part == ".." {
+			return "", false
+		}
 	}
 	return home + suffix, true
 }
 
 func nodeInertData(value string) bool {
-	if _, fixed := literalString(value); fixed {
+	if _, fixed := nodeLiteralString(value); fixed {
 		return true
 	}
 	value = strings.TrimSpace(value)
@@ -70,6 +97,62 @@ func nodeInertData(value string) bool {
 	}
 	json := nodeDataParser{text: strings.TrimSpace(call[1 : len(call)-1])}
 	return json.value(0) && json.end()
+}
+
+func nodeInertOption(value string) bool {
+	if _, fixed := nodeLiteralString(value); fixed {
+		return true
+	}
+	value = strings.TrimSpace(value)
+	if !strings.HasPrefix(value, "{") {
+		return false
+	}
+	option := nodeDataParser{text: value}
+	return option.value(0) && option.end()
+}
+
+func nodeLiteralString(value string) (string, bool) {
+	if text, fixed := literalString(value); fixed {
+		return text, true
+	}
+	value = strings.TrimSpace(value)
+	if len(value) < 2 || value[0] != '`' || value[len(value)-1] != '`' {
+		return "", false
+	}
+	text := value[1 : len(value)-1]
+	return text, !strings.ContainsAny(text, "`\\") && !strings.Contains(text, "${")
+}
+
+func nodeBoundedCall(code string, open int) (string, bool) {
+	if open < 0 || open >= len(code) || code[open] != '(' {
+		return "", false
+	}
+	depth := 0
+	var quote byte
+	for i := open; i < len(code); i++ {
+		c := code[i]
+		if quote != 0 {
+			if c == '\\' {
+				return "", false
+			}
+			if c == quote {
+				quote = 0
+			}
+			continue
+		}
+		switch c {
+		case '\'', '"', '`':
+			quote = c
+		case '(':
+			depth++
+		case ')':
+			depth--
+			if depth == 0 {
+				return code[open : i+1], true
+			}
+		}
+	}
+	return "", false
 }
 
 // nodeTopLevelArgs keeps commas in a data object or array inside one operand.
@@ -93,7 +176,7 @@ func nodeTopLevelArgs(call string) ([]string, bool) {
 			continue
 		}
 		switch c {
-		case '\'', '"':
+		case '\'', '"', '`':
 			quote = c
 		case '(', '{', '[':
 			stack = append(stack, c)
@@ -133,7 +216,7 @@ func (p *nodeDataParser) end() bool {
 
 func (p *nodeDataParser) string() bool {
 	p.space()
-	if p.pos >= len(p.text) || p.text[p.pos] != '\'' && p.text[p.pos] != '"' {
+	if p.pos >= len(p.text) || p.text[p.pos] != '\'' && p.text[p.pos] != '"' && p.text[p.pos] != '`' {
 		return false
 	}
 	quote := p.text[p.pos]
@@ -142,6 +225,9 @@ func (p *nodeDataParser) string() bool {
 		c := p.text[p.pos]
 		p.pos++
 		if c == '\\' {
+			return false
+		}
+		if quote == '`' && c == '$' && p.pos < len(p.text) && p.text[p.pos] == '{' {
 			return false
 		}
 		if c == quote {
@@ -160,7 +246,7 @@ func (p *nodeDataParser) value(depth int) bool {
 		return false
 	}
 	switch p.text[p.pos] {
-	case '\'', '"':
+	case '\'', '"', '`':
 		return p.string()
 	case '{', '[':
 		open := p.text[p.pos]
@@ -176,7 +262,7 @@ func (p *nodeDataParser) value(depth int) bool {
 		}
 		for {
 			if open == '{' {
-				if p.pos < len(p.text) && (p.text[p.pos] == '\'' || p.text[p.pos] == '"') {
+				if p.pos < len(p.text) && (p.text[p.pos] == '\'' || p.text[p.pos] == '"' || p.text[p.pos] == '`') {
 					if !p.string() {
 						return false
 					}

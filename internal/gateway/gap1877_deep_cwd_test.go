@@ -53,7 +53,7 @@ func TestR105DeepWorkingDirectoryRedirectIsDescribed(t *testing.T) {
 	for command, want := range map[string]bool{
 		"printf one > notes.txt":     false,
 		"printf one >> keylink":      true,
-		"cp keylink b && echo x > b": false,
+		"cp keylink b && echo x > b": true,
 	} {
 		t.Run(command, func(t *testing.T) {
 			if err := os.Chmod(homes, 0o700); err != nil {
