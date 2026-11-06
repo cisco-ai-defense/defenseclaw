@@ -767,6 +767,63 @@ func (w *InstallWatcher) hermesBundledPlugin(evt InstallEvent) bool {
 	return false
 }
 
+// bundledPluginScanState captures the physical directories and content used
+// to decide whether a first-sight scan belongs to a shipped plugin tree.
+// A path's final spelling alone cannot establish which tree the scanner read.
+type bundledPluginScanState struct {
+	directories []os.FileInfo
+	contentHash string
+}
+
+func pluginDirectoryChain(path string) []os.FileInfo {
+	path, err := filepath.Abs(path)
+	if err != nil {
+		return nil
+	}
+	var chain []os.FileInfo
+	for {
+		info, err := os.Stat(path)
+		if err != nil || !info.IsDir() {
+			return nil
+		}
+		chain = append(chain, info)
+		parent := filepath.Dir(path)
+		if parent == path {
+			return chain
+		}
+		path = parent
+	}
+}
+
+func samePluginDirectoryChain(before, after []os.FileInfo) bool {
+	if len(before) == 0 || len(before) != len(after) {
+		return false
+	}
+	for i := range before {
+		if !os.SameFile(before[i], after[i]) {
+			return false
+		}
+	}
+	return true
+}
+
+func (w *InstallWatcher) bundledPluginScanState(evt InstallEvent) *bundledPluginScanState {
+	if !w.hermesBundledPlugin(evt) {
+		return nil
+	}
+	before := pluginDirectoryChain(evt.Path)
+	if len(before) == 0 {
+		return nil
+	}
+	snap, err := w.snapshotForEvent(evt)
+	if err != nil || snap == nil || snap.ContentHash == "" ||
+		!w.hermesBundledPlugin(evt) ||
+		!samePluginDirectoryChain(before, pluginDirectoryChain(evt.Path)) {
+		return nil
+	}
+	return &bundledPluginScanState{directories: before, contentHash: snap.ContentHash}
+}
+
 func skipPluginChildDir(name string) bool {
 	if strings.HasPrefix(name, ".") {
 		return true
@@ -1517,6 +1574,10 @@ func (w *InstallWatcher) scanAndEmit(ctx context.Context, evt InstallEvent, init
 	if s == nil {
 		return nil, ""
 	}
+	var scannedTree *bundledPluginScanState
+	if initialBaseline && !w.secureClientActive() {
+		scannedTree = w.bundledPluginScanState(evt)
+	}
 
 	scanCtx, cancel := context.WithTimeout(ctx, w.scanTimeout(evt))
 	defer cancel()
@@ -1542,10 +1603,14 @@ func (w *InstallWatcher) scanAndEmit(ctx context.Context, evt InstallEvent, init
 	if result == nil {
 		return nil, ""
 	}
-	if initialBaseline && !w.secureClientActive() && w.hermesBundledPlugin(evt) {
-		for i := range result.Findings {
-			if !slices.Contains(result.Findings[i].Tags, scanner.FindingTagDetectionOnly) {
-				result.Findings[i].Tags = append(append([]string(nil), result.Findings[i].Tags...), scanner.FindingTagDetectionOnly)
+	if scannedTree != nil {
+		after := w.bundledPluginScanState(evt)
+		if after != nil && after.contentHash == scannedTree.contentHash &&
+			samePluginDirectoryChain(scannedTree.directories, after.directories) {
+			for i := range result.Findings {
+				if !slices.Contains(result.Findings[i].Tags, scanner.FindingTagDetectionOnly) {
+					result.Findings[i].Tags = append(append([]string(nil), result.Findings[i].Tags...), scanner.FindingTagDetectionOnly)
+				}
 			}
 		}
 	}

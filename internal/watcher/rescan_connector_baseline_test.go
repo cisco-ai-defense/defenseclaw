@@ -237,3 +237,106 @@ func TestRescanBundledPluginBaselineRequiresPhysicalTree(t *testing.T) {
 		})
 	}
 }
+
+// pluginTreeSwitchScanner records a finding from the tree it read and can
+// replace the registered root before returning the result.
+type pluginTreeSwitchScanner struct {
+	root, replacement, movedRoot string
+}
+
+func (s *pluginTreeSwitchScanner) Name() string               { return "plugin-scanner" }
+func (s *pluginTreeSwitchScanner) Version() string            { return "test-1" }
+func (s *pluginTreeSwitchScanner) SupportedTargets() []string { return []string{"plugin"} }
+func (s *pluginTreeSwitchScanner) Scan(_ context.Context, target string) (*scanner.ScanResult, error) {
+	if _, err := os.ReadFile(filepath.Join(target, "plugin.yaml")); err != nil {
+		return nil, err
+	}
+	if s.replacement != "" {
+		var err error
+		if s.movedRoot != "" {
+			err = os.Rename(s.root, s.movedRoot)
+		} else {
+			err = os.Remove(s.root)
+		}
+		if err != nil {
+			return nil, err
+		}
+		if err := os.Rename(s.replacement, s.root); err != nil {
+			return nil, err
+		}
+	}
+	return &scanner.ScanResult{
+		Scanner: "plugin-scanner", Target: target, TargetType: "plugin", Timestamp: time.Now().UTC(),
+		Findings: []scanner.Finding{{ID: "review", RuleID: "PLUGIN-REVIEW", Severity: scanner.SeverityHigh, Title: "Review source"}},
+	}, nil
+}
+
+func TestRescanBundledPluginBaselineTracksScannedTree(t *testing.T) {
+	for _, tc := range []struct {
+		name, layout string
+		baseline     bool
+	}{
+		{"stable shipped tree", "physical", true},
+		{"linked tree replaced during scan", "linked-then-physical", false},
+		{"physical tree replaced during scan", "physical-then-physical", false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Setenv("PATH", "")
+			t.Setenv("HERMES_BUNDLED_PLUGINS", "")
+			cfg, store, logger, _ := setupTestEnv(t)
+			cfg.Guardrail.Connector = "claudecode"
+			logger.SetRuntimeV8Emitter(&watcherTestRuntime{})
+			home := t.TempDir()
+			root := filepath.Join(home, ".hermes", "hermes-agent", "plugins")
+			actual := root
+			replacement := ""
+			if tc.layout != "physical" {
+				replacement = filepath.Join(home, "shipped-replacement")
+				if tc.layout == "linked-then-physical" {
+					actual = filepath.Join(home, "linked-source")
+				}
+			}
+			for _, dir := range []string{actual, replacement} {
+				if dir == "" {
+					continue
+				}
+				plugin := filepath.Join(dir, "photon")
+				if err := os.MkdirAll(plugin, 0o700); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.WriteFile(filepath.Join(plugin, "plugin.yaml"), []byte("name: photon\n"), 0o600); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if tc.layout == "linked-then-physical" {
+				if err := os.MkdirAll(filepath.Dir(root), 0o700); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.Symlink(actual, root); err != nil {
+					t.Skipf("create test link: %v", err)
+				}
+			}
+			w := New(cfg, nil, []string{root}, store, logger, nil, nil)
+			w.SetRootConnectors(map[string]string{root: "hermes"})
+			w.scannerFactory = func(InstallEvent) scanner.Scanner {
+				scan := &pluginTreeSwitchScanner{root: root, replacement: replacement}
+				if tc.layout == "physical-then-physical" {
+					scan.movedRoot = filepath.Join(home, "previous-root")
+				}
+				return scan
+			}
+			w.runRescanCycle(context.Background())
+			row, err := store.GetTargetSnapshot("plugin", filepath.Join(root, "photon"))
+			if err != nil || row.ScanID == "" {
+				t.Fatalf("plugin snapshot = %#v, %v", row, err)
+			}
+			raw, err := store.GetScanRawJSON(row.ScanID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if tagged := strings.Contains(raw, scanner.FindingTagDetectionOnly); tagged != tc.baseline {
+				t.Errorf("baseline tag = %t, want %t", tagged, tc.baseline)
+			}
+		})
+	}
+}
