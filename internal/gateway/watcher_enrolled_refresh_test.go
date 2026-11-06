@@ -44,8 +44,14 @@ func TestEnrolledMCPServersAreReadAgainBeforeAToolCall(t *testing.T) {
 	if err := s.refreshEnrolledMCPBeforeCall(ctx, "claudecode"); err != nil || !reflect.DeepEqual(steps, []string{"publish", "read"}) {
 		t.Fatalf("refresh = %v, steps %v; want the servers published, then read", err, steps)
 	}
+	// The enumerator publishes the enrolled users Codex servers too, so a
+	// Codex call is decided on the current definition (GAP-0686).
 	steps = nil
-	if err := s.refreshEnrolledMCPBeforeCall(ctx, "codex"); err != nil || len(steps) != 0 {
+	if err := s.refreshEnrolledMCPBeforeCall(ctx, "codex"); err != nil || !reflect.DeepEqual(steps, []string{"publish", "read"}) {
+		t.Fatalf("Codex refresh = %v, steps %v; want the servers published, then read", err, steps)
+	}
+	steps = nil
+	if err := s.refreshEnrolledMCPBeforeCall(ctx, "opencode"); err != nil || len(steps) != 0 {
 		t.Fatalf("a connector the enumerator does not publish refreshed: %v %v", err, steps)
 	}
 	failing = true

@@ -14,6 +14,7 @@ import (
 	"strings"
 
 	"github.com/defenseclaw/defenseclaw/internal/config"
+	"github.com/defenseclaw/defenseclaw/internal/managed/mcpasuser"
 )
 
 // ClaudeMCPSpoolDirName is the folder, beside the identity spool, where the
@@ -32,6 +33,14 @@ const ClaudeMCPSpoolDirName = "claude-mcp"
 // user and the inventory grant leaves it alone, so the gateway service cannot
 // read the file; the enumerator reads it as LocalSystem (GAP-1468).
 const KiroMCPSpoolDirName = "kiro-mcp"
+
+// CodexMCPSpoolDirName is the folder, beside ClaudeMCPSpoolDirName, where the
+// managed Windows enumerator publishes, in the same record format, the Codex
+// user MCP servers of each user it enrolls for Codex: config.toml under
+// ~/.codex and under the account persistent CODEX_HOME. The gateway service
+// reads nothing in a profile, so without the record it admitted none of
+// these servers and refused none of their tool calls (GAP-0686).
+const CodexMCPSpoolDirName = "codex-mcp"
 
 // ClaudeMCPSpoolRecordVersion is the record format version.
 const ClaudeMCPSpoolRecordVersion = 1
@@ -159,22 +168,27 @@ func MCPSpoolRecordFailures(err error) (records []*MCPSpoolRecordError, whole bo
 	return records, whole
 }
 
-// ClaudeMCPSpoolDir is the spool folder below the hook guardian
-// authorization folder.
-func ClaudeMCPSpoolDir(authorizationDir string) string {
-	if strings.TrimSpace(authorizationDir) == "" {
+// MCPSpoolDir is the folder below the hook guardian authorization folder
+// where the enumerator publishes the MCP servers of connector, "" for a
+// connector it does not publish (mcpasuser.PublishedConnectors).
+func MCPSpoolDir(authorizationDir, connector string) string {
+	published, ok := mcpasuser.LookupPublished(connector)
+	if !ok || strings.TrimSpace(authorizationDir) == "" {
 		return ""
 	}
-	return filepath.Join(authorizationDir, ClaudeMCPSpoolDirName)
+	return filepath.Join(authorizationDir, published.SpoolDir)
+}
+
+// ClaudeMCPSpoolDir is the Claude Code spool folder below the hook guardian
+// authorization folder.
+func ClaudeMCPSpoolDir(authorizationDir string) string {
+	return MCPSpoolDir(authorizationDir, "claudecode")
 }
 
 // KiroMCPSpoolDir is the Kiro spool folder below the hook guardian
 // authorization folder.
 func KiroMCPSpoolDir(authorizationDir string) string {
-	if strings.TrimSpace(authorizationDir) == "" {
-		return ""
-	}
-	return filepath.Join(authorizationDir, KiroMCPSpoolDirName)
+	return MCPSpoolDir(authorizationDir, "kiro")
 }
 
 // MarshalClaudeMCPSpoolRecord serializes the record of sid for servers.
@@ -200,17 +214,20 @@ func MarshalClaudeMCPSpoolUnreadable(sid string, unreadable ClaudeStateUnreadabl
 // tagged claudecode, after trust validates the record file, and the marker
 // of a state the enumerator could not read.
 func ReadClaudeMCPSpool(dir, sid string, trust func(path, label string) error) ([]config.MCPServerEntry, *ClaudeStateUnreadable, error) {
-	return readMCPSpool(dir, sid, "claudecode", trust)
+	return ReadMCPSpool(dir, sid, "claudecode", trust)
 }
 
 // ReadKiroMCPSpool returns the Kiro user MCP servers published for sid,
 // tagged kiro, after trust validates the record file, and the marker of a
 // mcp.json the enumerator could not read (GAP-1468).
 func ReadKiroMCPSpool(dir, sid string, trust func(path, label string) error) ([]config.MCPServerEntry, *ClaudeStateUnreadable, error) {
-	return readMCPSpool(dir, sid, "kiro", trust)
+	return ReadMCPSpool(dir, sid, "kiro", trust)
 }
 
-func readMCPSpool(dir, sid, connector string, trust func(path, label string) error) ([]config.MCPServerEntry, *ClaudeStateUnreadable, error) {
+// ReadMCPSpool returns the MCP servers published in dir for sid, tagged
+// connector, after trust validates the record file, and the marker of a
+// file the enumerator could not read.
+func ReadMCPSpool(dir, sid, connector string, trust func(path, label string) error) ([]config.MCPServerEntry, *ClaudeStateUnreadable, error) {
 	key := strings.ToUpper(strings.TrimSpace(sid))
 	if dir == "" || !strings.HasPrefix(key, "S-1-") || !validIdentitySpoolKey(key) {
 		return nil, nil, os.ErrNotExist

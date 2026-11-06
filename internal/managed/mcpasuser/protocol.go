@@ -67,13 +67,54 @@ const (
 // ErrProtocol marks a malformed frame or message.
 var ErrProtocol = errors.New("mcp as-user protocol violation")
 
-// Connectors whose servers the enumerator publishes, and so can start.
-var publishedConnectors = map[string]bool{"claudecode": true, "kiro": true}
+// Published is a connector whose enrolled users keep their MCP servers in a
+// file inside their profile, which the gateway service never reads: the
+// enumerator reads it, publishes the servers in SpoolDir below the hook
+// guardian authorization folder, and starts a published local server as its
+// user for the scan. This list is the one admission source for those files;
+// the enumerator, the gateway watcher, the hook and status all read it, so a
+// connector is published everywhere or nowhere (GAP-0686).
+type Published struct {
+	// Connector is the connector key.
+	Connector string
+	// Label names the connector in logs, status and refusals.
+	Label string
+	// SpoolDir is the folder name below the authorization folder.
+	SpoolDir string
+	// Unreadable is the status warning code (and, with hyphens, the hook
+	// refusal source) for a user whose file the enumerator could not read.
+	Unreadable string
+}
+
+// publishedConnectors: Claude Code ~/.claude.json (GAP-0424), Kiro
+// ~/.kiro/settings/mcp.json (GAP-1468) and Codex config.toml under ~/.codex
+// and the account CODEX_HOME (GAP-0686).
+var publishedConnectors = []Published{
+	{Connector: "claudecode", Label: "Claude Code", SpoolDir: "claude-mcp", Unreadable: "claude_state_unreadable"},
+	{Connector: "kiro", Label: "Kiro", SpoolDir: "kiro-mcp", Unreadable: "kiro_mcp_unreadable"},
+	{Connector: "codex", Label: "Codex", SpoolDir: "codex-mcp", Unreadable: "codex_mcp_unreadable"},
+}
+
+// PublishedConnectors lists every connector the enumerator publishes.
+func PublishedConnectors() []Published {
+	return append([]Published(nil), publishedConnectors...)
+}
+
+// LookupPublished returns the published connector named connector.
+func LookupPublished(connector string) (Published, bool) {
+	for _, published := range publishedConnectors {
+		if published.Connector == connector {
+			return published, true
+		}
+	}
+	return Published{}, false
+}
 
 // PublishedConnector reports whether the enumerator publishes the MCP
 // servers of connector, so a scan can start them as their user.
 func PublishedConnector(connector string) bool {
-	return publishedConnectors[connector]
+	_, ok := LookupPublished(connector)
+	return ok
 }
 
 var (
@@ -105,7 +146,7 @@ func (r Request) Validate() error {
 		return fmt.Errorf("%w: invalid gateway service name", ErrProtocol)
 	case !sidPattern.MatchString(strings.ToUpper(r.SID)):
 		return fmt.Errorf("%w: invalid account SID", ErrProtocol)
-	case !publishedConnectors[r.Connector]:
+	case !PublishedConnector(r.Connector):
 		return fmt.Errorf("%w: connector %q has no published MCP servers", ErrProtocol, r.Connector)
 	case !printable(r.Name, 256) || r.Name == "":
 		return fmt.Errorf("%w: invalid server name", ErrProtocol)
