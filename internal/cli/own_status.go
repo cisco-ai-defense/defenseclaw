@@ -102,8 +102,8 @@ func showOwnStatus(cmd *cobra.Command, asJSON bool) error {
 		}
 		fmt.Fprintf(out, "  Claude Code   %s\n", state)
 	} else if view.Connectors == nil {
-		// Older gateways and the Windows own-status pipe use the legacy
-		// Claude Code field and do not send a connector roster.
+		// Older gateways use the legacy Claude Code field and do not send
+		// a connector roster.
 		fmt.Fprintf(out, "  Claude Code   %s\n", protected(view.ClaudeCode.Protected))
 	}
 	names := make([]string, 0, len(view.Connectors))

@@ -96,9 +96,9 @@ func (a *APIServer) ownStatusAnswer(ctx context.Context, idKey, self, name strin
 			cfg.Enterprise.Enrollment.UnverifiedVersionsFor(enterprisepolicy.ConnectorClaudeCode))
 		auditDB = strings.TrimSpace(cfg.AuditDB)
 	}
-	// The Unix launcher lists every configured connector. The policy-view
-	// watcher supplies the same published vendor-source proof used to judge
-	// managed hook calls. A missing or changed view never claims protection.
+	// The launcher lists every configured connector. On Unix, the policy-view
+	// watcher supplies the published vendor-source proof used to judge managed
+	// hook calls. A missing or changed view never claims protection.
 	var connectors map[string]any
 	if idKey == "uid" && cfg != nil {
 		connectors = a.ownConnectorStates(cfg, self, name)
@@ -106,6 +106,8 @@ func (a *APIServer) ownStatusAnswer(ctx context.Context, idKey, self, name strin
 		if row, ok := connectors[enterprisepolicy.ConnectorClaudeCode].(map[string]any); ok {
 			claudeCode, _ = row["protected"].(bool)
 		}
+	} else if idKey == "sid" && cfg != nil {
+		connectors = ownWindowsConnectorStates(cfg, claudeCode)
 	}
 	cowork := map[string]any{}
 	if last, found := ownLastCoworkEvent(ctx, auditDB, self, name); found {
@@ -137,6 +139,23 @@ func (a *APIServer) ownStatusAnswer(ctx context.Context, idKey, self, name strin
 		answer["connectors"] = connectors
 	}
 	return answer
+}
+
+// ownWindowsConnectorStates keeps the Windows status roster aligned with the
+// managed configuration. The own-status pipe proves the caller's SID, but it
+// does not carry per-connector hook proof. Keep the existing Claude Code
+// status and report the other configured connectors as unconfirmed.
+func ownWindowsConnectorStates(cfg *config.Config, claudeCode bool) map[string]any {
+	states := make(map[string]any)
+	for _, connector := range enterprisepolicy.StandaloneConnectors(cfg) {
+		state := map[string]any{"protected": false, "state": "not confirmed"}
+		if connector == enterprisepolicy.ConnectorClaudeCode && claudeCode {
+			state["protected"] = true
+			state["state"] = "protected"
+		}
+		states[connector] = state
+	}
+	return states
 }
 
 // ownConnectorStates reports the caller's configured connector roster. The
