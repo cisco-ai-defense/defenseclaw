@@ -13,9 +13,11 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"sync"
 	"time"
 	"unsafe"
 
+	"github.com/defenseclaw/defenseclaw/internal/winmutex"
 	"github.com/defenseclaw/defenseclaw/internal/winpath"
 	"golang.org/x/sys/windows"
 )
@@ -27,11 +29,12 @@ const (
 )
 
 type windowsOpenCodeServicePortsFile struct {
-	Version   int                             `json:"version"`
-	Ports     []windowsOpenCodeServicePort    `json:"ports"`
-	Unknown   []WindowsOpenCodePortUnknown    `json:"unknown,omitempty"`
-	Contested []WindowsOpenCodeContestedPort  `json:"contested,omitempty"`
-	Cleared   []WindowsOpenCodeContestCleared `json:"contested_cleared,omitempty"`
+	Version    int                             `json:"version"`
+	Ports      []windowsOpenCodeServicePort    `json:"ports"`
+	Unknown    []WindowsOpenCodePortUnknown    `json:"unknown,omitempty"`
+	Contested  []WindowsOpenCodeContestedPort  `json:"contested,omitempty"`
+	Cleared    []WindowsOpenCodeContestCleared `json:"contested_cleared,omitempty"`
+	ImportDone bool                            `json:"import_done,omitempty"`
 }
 
 type WindowsOpenCodePortUnknown struct {
@@ -54,11 +57,12 @@ type WindowsOpenCodeContestCleared struct {
 }
 
 type WindowsOpenCodeServicePortsState struct {
-	Exists    bool
-	Ports     map[string]int
-	Unknown   []WindowsOpenCodePortUnknown
-	Contested []WindowsOpenCodeContestedPort
-	Cleared   []WindowsOpenCodeContestCleared
+	Exists     bool
+	ImportDone bool
+	Ports      map[string]int
+	Unknown    []WindowsOpenCodePortUnknown
+	Contested  []WindowsOpenCodeContestedPort
+	Cleared    []WindowsOpenCodeContestCleared
 }
 
 type windowsOpenCodeServicePort struct {
@@ -78,7 +82,8 @@ func LoadWindowsOpenCodeServicePorts(path string) (map[string]int, error) {
 }
 
 // LoadWindowsOpenCodeServicePortsFull reads bindings and the last pass's
-// warnings. Exists selects the one import pass after install or admin rebuild.
+// warnings. A missing record selects the one import pass after install or
+// administrator rebuild; a record from an earlier build counts as done.
 func LoadWindowsOpenCodeServicePortsFull(path string) (WindowsOpenCodeServicePortsState, error) {
 	state := WindowsOpenCodeServicePortsState{Ports: map[string]int{}}
 	if err := windowsOpenCodeServicePortsParent(path); err != nil {
@@ -90,6 +95,7 @@ func LoadWindowsOpenCodeServicePortsFull(path string) (WindowsOpenCodeServicePor
 		return state, err
 	}
 	state.Exists = true
+	state.ImportDone = true
 	if err := validateWindowsOpenCodeServicePortsFile(path); err != nil {
 		return state, err
 	}
@@ -158,6 +164,7 @@ func WriteWindowsOpenCodeServicePortsFull(path string, state WindowsOpenCodeServ
 	record.Contested = append(record.Contested, state.Contested...)
 	sort.Slice(record.Contested, func(i, j int) bool { return record.Contested[i].Port < record.Contested[j].Port })
 	record.Cleared = append(record.Cleared, state.Cleared...)
+	record.ImportDone = state.ImportDone
 	data, err := json.MarshalIndent(record, "", "  ")
 	if err != nil {
 		return err
@@ -224,12 +231,24 @@ func WriteWindowsOpenCodeServicePortsFull(path string, state WindowsOpenCodeServ
 	return validateWindowsOpenCodeServicePortsFile(path)
 }
 
-// A SYSTEM-only record cannot be opened by an administrator through
-// ReplaceFileW, even with SeRestorePrivilege: that API does not request backup
-// semantics. Rename the already protected staging file through a handle opened
-// with backup intent. The destination name changes in one operation and the
-// staging file's exact SYSTEM-only descriptor is retained.
+// The write-through move publishes the flushed, SYSTEM-only staging file.
+// An elevated administrator may need backup-intent replacement for an
+// existing SYSTEM-only destination; that path flushes the renamed handle.
 func replaceWindowsOpenCodePortRecord(stagedPath, path string) error {
+	from, err := windows.UTF16PtrFromString(stagedPath)
+	if err != nil {
+		return err
+	}
+	to, err := windows.UTF16PtrFromString(path)
+	if err != nil {
+		return err
+	}
+	if err := windows.MoveFileEx(from, to, windows.MOVEFILE_REPLACE_EXISTING|windows.MOVEFILE_WRITE_THROUGH); err == nil {
+		return nil
+	} else if !errors.Is(err, windows.ERROR_ACCESS_DENIED) &&
+		!errors.Is(err, windows.ERROR_SHARING_VIOLATION) && !errors.Is(err, windows.ERROR_LOCK_VIOLATION) {
+		return err
+	}
 	handle, err := openWindowsTargetsManifestObjectWithBackup(stagedPath, false, windows.DELETE|windows.SYNCHRONIZE, true)
 	if err != nil {
 		return err
@@ -259,7 +278,13 @@ func replaceWindowsOpenCodePortRecord(stagedPath, path string) error {
 			err = windows.SetFileInformationByHandle(handle, windows.FileRenameInfo, (*byte)(unsafe.Pointer(&buffer[0])), uint32(size))
 		}
 		if err == nil {
-			return nil
+			flush, openErr := openWindowsTargetsManifestObjectWithBackup(path, false, windows.GENERIC_WRITE, true)
+			if openErr != nil {
+				return openErr
+			}
+			flushErr := windows.FlushFileBuffers(flush)
+			closeErr := windows.CloseHandle(flush)
+			return errors.Join(flushErr, closeErr)
 		}
 		if !errors.Is(err, windows.ERROR_ACCESS_DENIED) && !errors.Is(err, windows.ERROR_SHARING_VIOLATION) && !errors.Is(err, windows.ERROR_LOCK_VIOLATION) {
 			return err
@@ -267,6 +292,35 @@ func replaceWindowsOpenCodePortRecord(stagedPath, path string) error {
 		time.Sleep(time.Millisecond)
 	}
 	return fmt.Errorf("enterprise hooks: replace OpenCode service ports record: %w", err)
+}
+
+const windowsOpenCodeReconcileLockWait = 2 * time.Minute
+const windowsOpenCodeReconcileLockSDDL = "D:P(A;;GA;;;SY)(A;;GA;;;BA)"
+
+var windowsOpenCodeReconcileLocal sync.Mutex
+
+// LockWindowsOpenCodeServicePorts holds one machine-wide reconcile lock for
+// the guardian's read, plan, commit and account rewrites, or for administrator
+// clear. The local lock also serializes goroutines in this process.
+func LockWindowsOpenCodeServicePorts() (func(), error) {
+	windowsOpenCodeReconcileLocal.Lock()
+	descriptor, err := windows.SecurityDescriptorFromString(windowsOpenCodeReconcileLockSDDL)
+	if err != nil {
+		windowsOpenCodeReconcileLocal.Unlock()
+		return nil, fmt.Errorf("enterprise hooks: build OpenCode port lock descriptor: %w", err)
+	}
+	attributes := &windows.SecurityAttributes{
+		Length: uint32(unsafe.Sizeof(windows.SecurityAttributes{})), SecurityDescriptor: descriptor,
+	}
+	release, _, err := winmutex.Acquire(`Global\Cisco.DefenseClaw.EnterpriseHooks.OpenCodePorts`, attributes, windowsOpenCodeReconcileLockWait)
+	if err != nil {
+		windowsOpenCodeReconcileLocal.Unlock()
+		return nil, fmt.Errorf("enterprise hooks: acquire OpenCode port reconcile lock: %w", err)
+	}
+	return func() {
+		_ = release()
+		windowsOpenCodeReconcileLocal.Unlock()
+	}, nil
 }
 
 func validateWindowsOpenCodeContests(contested []WindowsOpenCodeContestedPort, holders map[int]string) error {
@@ -291,8 +345,13 @@ func validateWindowsOpenCodeContests(contested []WindowsOpenCodeContestedPort, h
 // ClearWindowsOpenCodeContestedPort clears only the named mark and keeps all
 // bindings. The operation is recorded in the SYSTEM-only record.
 func ClearWindowsOpenCodeContestedPort(path string, port int, by string, now time.Time) ([]string, error) {
+	unlock, err := LockWindowsOpenCodeServicePorts()
+	if err != nil {
+		return nil, err
+	}
+	defer unlock()
 	var claimants []string
-	err := RunWithWindowsOwnerRestorePrivilege(func() error {
+	err = RunWithWindowsOwnerRestorePrivilege(func() error {
 		var clearErr error
 		claimants, clearErr = clearWindowsOpenCodeContestedPort(path, port, by, now)
 		return clearErr

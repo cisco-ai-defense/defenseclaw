@@ -9,6 +9,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -58,6 +59,34 @@ func TestManagedWindowsOpenCodePortRecordIsSystemOnly(t *testing.T) {
 	}
 	if err := WriteWindowsOpenCodeServicePorts(path, want); err == nil {
 		t.Fatal("writer adopted an ACL-drifted record")
+	}
+}
+
+func TestManagedWindowsOpenCodeRecordClosesImportWindow(t *testing.T) {
+	if err := requireWindowsEnterpriseLocalSystem(); err != nil {
+		t.Skip("the SYSTEM-only record requires a LocalSystem test token")
+	}
+	dir := prepareWindowsTargetsManifestTestDirectory(t)
+	path := WindowsOpenCodeServicePortsPath(filepath.Join(dir, "targets.yaml"))
+	state := WindowsOpenCodeServicePortsState{Ports: map[string]int{testLocalUserSID: 25001}, ImportDone: true}
+	if err := WriteWindowsOpenCodeServicePortsFull(path, state); err != nil {
+		t.Fatal(err)
+	}
+	data, err := readWindowsOpenCodePortRecord(path)
+	if err != nil || !strings.Contains(string(data), `"import_done": true`) {
+		t.Fatalf("committed import flag: %s, %v", data, err)
+	}
+	loaded, err := LoadWindowsOpenCodeServicePortsFull(path)
+	if err != nil || !loaded.ImportDone || loaded.Ports[testLocalUserSID] != 25001 {
+		t.Fatalf("committed record: %+v, %v", loaded, err)
+	}
+	state.ImportDone = false // a record an earlier build wrote is also done
+	if err := WriteWindowsOpenCodeServicePortsFull(path, state); err != nil {
+		t.Fatal(err)
+	}
+	loaded, err = LoadWindowsOpenCodeServicePortsFull(path)
+	if err != nil || !loaded.ImportDone {
+		t.Fatalf("older record reopened the import window: %+v, %v", loaded, err)
 	}
 }
 
@@ -132,5 +161,51 @@ func TestManagedWindowsOpenCodeContestedMarkCanBeClearedByElevatedAdministrator(
 		return validateWindowsOpenCodeServicePortsFile(path)
 	}); err != nil {
 		t.Fatalf("clear changed the SYSTEM-only ACL: %v", err)
+	}
+}
+
+func TestManagedWindowsOpenCodeClearWaitsForReconcileLock(t *testing.T) {
+	if err := requireWindowsEnterpriseLocalSystem(); err != nil {
+		t.Skip("the SYSTEM-only record requires a LocalSystem test token")
+	}
+	dir := prepareWindowsTargetsManifestTestDirectory(t)
+	path := WindowsOpenCodeServicePortsPath(filepath.Join(dir, "targets.yaml"))
+	state := WindowsOpenCodeServicePortsState{
+		Ports: map[string]int{testLocalUserSID: 25001}, ImportDone: true,
+		Contested: []WindowsOpenCodeContestedPort{{Port: 25002, SIDs: []string{testEntraUserSID}}},
+	}
+	if err := WriteWindowsOpenCodeServicePortsFull(path, state); err != nil {
+		t.Fatal(err)
+	}
+	unlock, err := LockWindowsOpenCodeServicePorts()
+	if err != nil {
+		t.Fatal(err)
+	}
+	done := make(chan error, 1)
+	started := make(chan struct{})
+	go func() {
+		close(started)
+		_, clearErr := ClearWindowsOpenCodeContestedPort(path, 25002, "administrator", time.Now())
+		done <- clearErr
+	}()
+	<-started
+	select {
+	case err := <-done:
+		unlock()
+		t.Fatalf("clear ran while the guardian lock was held: %v", err)
+	case <-time.After(100 * time.Millisecond):
+	}
+	unlock()
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatal(err)
+		}
+	case <-time.After(10 * time.Second):
+		t.Fatal("clear did not run after the guardian lock was released")
+	}
+	loaded, err := LoadWindowsOpenCodeServicePortsFull(path)
+	if err != nil || len(loaded.Contested) != 0 || len(loaded.Cleared) != 1 || loaded.Ports[testLocalUserSID] != 25001 {
+		t.Fatalf("clear lost its audit or binding: %+v, %v", loaded, err)
 	}
 }
