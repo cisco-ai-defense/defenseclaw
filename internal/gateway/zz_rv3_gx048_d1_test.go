@@ -7,11 +7,48 @@ package gateway
 import (
 	"bufio"
 	"encoding/json"
+	"net/http"
+	"net/http/httptest"
 	"os"
+	"path/filepath"
 	"regexp"
 	"strings"
 	"testing"
+
+	"github.com/defenseclaw/defenseclaw/internal/config"
+	"github.com/defenseclaw/defenseclaw/internal/hookpaths"
 )
+
+// rv3D1Judge keeps the same handler and audit store across the corpus. A
+// fresh store per cell consumes memory proportional to the number of calls
+// and makes the replay much slower than the guard it measures.
+func rv3D1Judge(t *testing.T, profile, cwd string) func(string, map[string]any) string {
+	t.Helper()
+	cfg := &config.Config{}
+	cfg.Guardrail.Mode = "action"
+	cfg.Guardrail.Connector = "claudecode"
+	if profile == "strict" {
+		installToolCallCorpusProfileConnector(t, "claudecode", "strict")
+		cfg.Guardrail.RulePackDir = filepath.Join(guardrailPoliciesRoot(t), "strict")
+	}
+	store, logger := testStoreAndLogger(t)
+	api := &APIServer{scannerCfg: cfg, health: NewSidecarHealth(), store: store, logger: logger}
+	handler := api.handleAgentHook("claudecode")
+	return func(tool string, input map[string]any) string {
+		payload := mustJSON(t, map[string]any{
+			"session_id": "rv3gx048", "hook_event_name": "PreToolUse",
+			"tool_name": tool, "cwd": cwd, "tool_input": input,
+		})
+		req := httptest.NewRequest(http.MethodPost, "/api/v1/claudecode/hook", strings.NewReader(string(payload)))
+		req.Header.Set("Content-Type", "application/json")
+		if header := hookpaths.ResolveConnector("claudecode", "", "PreToolUse", payload); header != "" {
+			req.Header.Set(hookpaths.Header, header)
+		}
+		rec := httptest.NewRecorder()
+		handler.ServeHTTP(rec, req)
+		return rec.Body.String()
+	}
+}
 
 func TestRV3GX048D1(t *testing.T) {
 	shellPath, filesPath := os.Getenv("RV3_D1_SHELL"), os.Getenv("RV3_D1_FILES")
@@ -21,6 +58,10 @@ func TestRV3GX048D1(t *testing.T) {
 	h := newGAP0048Home(t)
 	homeRe := regexp.MustCompile(`(/Users/[^/\\"' ]+|/home/[^/\\"' ]+|[A-Za-z]:\\\\Users\\\\[^\\"' ]+)`)
 	guard := newAgentHookConfigGuard(h.project, h.home)
+	judges := map[string]func(string, map[string]any) string{
+		"default": rv3D1Judge(t, "default", h.project),
+		"strict":  rv3D1Judge(t, "strict", h.project),
+	}
 	agents := []string{"git ", "claude ", "codex ", "opencode ", "amp ", "copilot ", "kiro-cli ", "hermes ", "cursor-agent ", "devin ", "gemini ", "npx "}
 	reach := func(text string) bool {
 		lower := strings.ToLower(text)
@@ -39,7 +80,7 @@ func TestRV3GX048D1(t *testing.T) {
 	run := func(id, tool string, in map[string]any) {
 		judged++
 		for _, profile := range []string{"default", "strict"} {
-			got := rv3Judge(t, "claudecode", profile, h.project, false, tool, in)
+			got := judges[profile](tool, in)
 			rule := "-"
 			if strings.Contains(got, agentHookConfigDisableRuleID) {
 				rule = "disable"
