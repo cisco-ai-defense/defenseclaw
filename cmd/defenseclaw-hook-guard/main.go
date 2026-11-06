@@ -1,8 +1,9 @@
 // Copyright 2026 Cisco Systems, Inc. and its affiliates
 // SPDX-License-Identifier: Apache-2.0
 
-// defenseclaw-hook-guard is the one-line Windows install's Claude Code
-// PreToolUse guard (internal/hookguard). Release builds link it with
+// defenseclaw-hook-guard is the one-line Windows install's launcher guard
+// (internal/hookguard) for Claude Code and, on the events Codex can block,
+// for Codex (launcher-guard-sibling, rel-1-0-6 GAP-0676). Release builds link it with
 // -H=windowsgui: the console gateway that was the guard before got a console
 // window of its own whenever a caller without a console started it, and
 // Windows Terminal showed it (GAP-2467). It is its own small file, not the
@@ -23,6 +24,10 @@ var (
 	date    = "unknown"
 )
 
+// guardExecutable is the path of this guard program; the Codex guard starts
+// the launcher beside it. Tests replace it.
+var guardExecutable = os.Executable
+
 func main() {
 	os.Exit(run(os.Args[1:], os.Stdin, os.Stdout, os.Stderr))
 }
@@ -30,6 +35,12 @@ func main() {
 func run(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 	if launcher, hookArgs, ok := hookguard.Argv(args); ok {
 		return hookguard.Run(launcher, hookArgs, stdin, stdout, stderr)
+	}
+	if hookArgs, event, contract, ok := hookguard.SiblingArgv(args); ok {
+		// A guard that cannot name its own folder starts nothing, which
+		// answers as a missing launcher.
+		self, _ := guardExecutable()
+		return hookguard.RunCodex(hookguard.SiblingLauncher(self), hookArgs, event, contract, stdin, stdout, stderr)
 	}
 	if dataDir, launcher, event, ok := hookguard.CoworkArgv(args); ok {
 		return hookguard.RunCowork(dataDir, launcher, event, stdin, stdout, stderr)
