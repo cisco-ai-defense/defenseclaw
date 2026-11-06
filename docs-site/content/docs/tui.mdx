@@ -401,8 +401,8 @@ sudo /opt/defenseclaw/bin/defenseclaw-gateway enterprise linux status --json
 sudo /opt/cisco/defenseclaw/bin/defenseclaw-gateway enterprise macos status --json
 ```
 
-On Windows, run `defenseclaw.exe enterprise windows status --json` from an elevated
-PowerShell. Change the administrator config through the
+On Windows, run `& 'C:\Program Files\Cisco\DefenseClaw\bin\defenseclaw.exe' enterprise windows status --json` from an elevated
+PowerShell prompt. Change the administrator config through the
 [managed lifecycle](/docs/enterprise/lifecycle#change-the-config).
 If a separately installed Python TUI reads a managed config, its writer refuses
 local saves with exit `3`; this does not make the TUI available in managed packages.

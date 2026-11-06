@@ -775,7 +775,7 @@ A standalone uninstall also removes the config, credentials, most machine state 
 | Debian and Ubuntu package | `sudo apt remove defenseclaw-enterprise` | Run the lifecycle `uninstall --purge --json` first, then `sudo apt purge defenseclaw-enterprise` |
 | RHEL package | `sudo dnf remove defenseclaw-enterprise` | Run the lifecycle `uninstall --purge --json` first, then `sudo dnf remove defenseclaw-enterprise` |
 | macOS | `sudo /opt/cisco/defenseclaw/bin/defenseclaw-gateway enterprise macos uninstall --json` | Add `--purge` |
-| Windows | Setup `/uninstall JSON=1`, or `defenseclaw.exe enterprise windows uninstall --profile standalone --json` | Setup `/uninstall JSON=1 PURGE=1`, or add `--purge` |
+| Windows | Setup `/uninstall JSON=1`, or `& 'C:\Program Files\Cisco\DefenseClaw\bin\defenseclaw.exe' enterprise windows uninstall --profile standalone --json` from an elevated PowerShell prompt | Setup `/uninstall JSON=1 PURGE=1`, or add `--purge` |
 
 Removing a Linux package runs the lifecycle `uninstall` first, without purge; run `uninstall --purge --json` before removing the package to remove per-user data too.
 

@@ -1187,10 +1187,10 @@ exit `0`. `config set` prints `This device is managed: change config.yaml in the
 administrator's next command: `skill`, `mcp`, `plugin` and `tool` name
 `policy show`, `setup` names `enterprise windows status --profile standalone`,
 and `sandbox` (sandboxes do not run on Windows, exit `3`) names
-`defenseclaw-gateway.exe enterprise windows sandbox list --user NAME`, each from
+`& 'C:\Program Files\Cisco\DefenseClaw\bin\defenseclaw-gateway.exe' enterprise windows sandbox list --user NAME`, each from
 an elevated PowerShell prompt. Its `guardrail` commands are
 refused with exit `3` like `config set` (`guardrail disable` prints `This device is managed: change config.yaml in the admin config (MDM or management plane); guardrail disable did not change it`).
-It has no `version` command (run `defenseclaw.exe --version`) and no `policy activate`
+It has no `version` command (run `& 'C:\Program Files\Cisco\DefenseClaw\bin\defenseclaw.exe' --version`) and no `policy activate`
 or `policy edit`: these return an unknown-command error and exit `2`. Its
 `policy` group has `digest`, `evaluate`, `reload`, `show`, `test` and `validate`.
 Commands that read a per-user gateway, such as `audit findings` and
@@ -1202,8 +1202,8 @@ state and its own last Cowork event (`--json` adds `deployment_mode:
 managed_enterprise`), which the gateway service answers for the account that
 asks; from an elevated prompt it gives the answer above. A standard account's
 `enterprise windows status` or `verify` only says that it needs an elevated
-prompt. The administrator runs `defenseclaw.exe enterprise ...` from an
-elevated PowerShell.
+prompt. The administrator runs `& 'C:\Program Files\Cisco\DefenseClaw\bin\defenseclaw.exe' enterprise ...` from an
+elevated PowerShell prompt. Setup puts no DefenseClaw command on `PATH`.
 
 The Windows package's `init` and `quickstart` are not shipped: they return an
 unknown-command error and exit `2`. Its `doctor` prints administrator guidance and exits `1`,
@@ -1404,8 +1404,8 @@ Use `defenseclaw sandbox kernel-feed` rather than these.
 
 ### Lifecycle on Windows
 
-`defenseclaw.exe enterprise windows <action>` manages the Windows deployment
-for both profiles. Run it from an elevated prompt. The standalone profile runs
+`& 'C:\Program Files\Cisco\DefenseClaw\bin\defenseclaw.exe' enterprise windows <action>` manages the Windows deployment
+for both profiles. Run it from an elevated PowerShell prompt. The standalone profile runs
 its transaction on PowerShell 7, which must be installed.
 
 | Action | Profiles | Use it for |
@@ -1545,7 +1545,7 @@ guardian's health.
 | `defenseclaw-gateway enterprise hooks watch` | Guardian service | Watch the manifest's targets and repair them, with a periodic reconcile (`--interval`, default `1m`) |
 | `defenseclaw-gateway enterprise hooks reconcile` | Guardian and lifecycle | Install or repair every enabled target once |
 | `defenseclaw-gateway enterprise hooks install`, `uninstall` | Root or a guardian on Linux and macOS; only the guardian on Windows | Install, repair, or remove one user's hook registration |
-| `defenseclaw-gateway enterprise hooks enumerate` | Enumerator service (Linux, macOS) | Publish the target manifest. The Windows enumerator service runs `defenseclaw-gateway.exe enterprise windows enumerate` |
+| `defenseclaw-gateway enterprise hooks enumerate` | Enumerator service (Linux, macOS) | Publish the target manifest. The Windows enumerator service runs `enterprise windows enumerate` of `defenseclaw-gateway.exe` |
 | `defenseclaw-gateway enterprise hooks scrub` | Uninstall scripts, or an administrator | Remove DefenseClaw's entries from one user's agent hook file (`--connector`, `--file`) |
 
 `remove-all` and `apply-target` are hidden internal commands that the

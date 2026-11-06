@@ -31,7 +31,7 @@ A guardrail profile is a named set of guardrail settings. You assign profiles to
 
 - The users are in a directory group or a local group on the host. Find the exact spelling: `id -Gn` on Linux, or `defenseclaw guardrail profile explain --user alice --json | jq .subject` run as alice (a per-user install explains only your own account).
 - On Windows, group profiles need the standalone enterprise install. Per-user installs have no group list.
-- Steps 1 to 3 are for a per-user install. A managed host (Linux, macOS or Windows) has no per-user `config.yaml` and no `defenseclaw guardrail` commands except `defenseclaw guardrail profile explain` on Linux and macOS, which shows a standard user their own profile: put the profiles in the machine config and check them as [Deliver it to managed hosts](#deliver-it-to-managed-hosts) shows. On Windows that is `defenseclaw.exe config validate FILE` and `defenseclaw.exe enterprise windows profile-explain --user CORP\alice`, from an elevated prompt.
+- Steps 1 to 3 are for a per-user install. A managed host (Linux, macOS or Windows) has no per-user `config.yaml` and no `defenseclaw guardrail` commands except `defenseclaw guardrail profile explain` on Linux and macOS, which shows a standard user their own profile: put the profiles in the machine config and check them as [Deliver it to managed hosts](#deliver-it-to-managed-hosts) shows. On Windows that is `& 'C:\Program Files\Cisco\DefenseClaw\bin\defenseclaw.exe' config validate FILE` and `& 'C:\Program Files\Cisco\DefenseClaw\bin\defenseclaw.exe' enterprise windows profile-explain --user CORP\alice`, from an elevated PowerShell prompt.
 
 ### Steps
 
@@ -719,8 +719,8 @@ the machine config, not in a user's home, and apply to every enrolled user.
    ```
 
    On a Mac use `/opt/cisco/defenseclaw/bin/defenseclaw-gateway enterprise
-   macos ...`. On Windows run `defenseclaw.exe enterprise windows
-   profile-explain --user CORP\alice` from an elevated prompt. The answer also
+   macos ...`. On Windows run `& 'C:\Program Files\Cisco\DefenseClaw\bin\defenseclaw.exe' enterprise windows profile-explain --user CORP\alice`
+   from an elevated PowerShell prompt. The answer also
    lists every configured profile and its digest under `profiles`. On Linux the
    command, run as root, resolves the account itself through NSS and passes
    those facts to the gateway, so a fresh local account does not stop at
