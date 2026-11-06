@@ -571,7 +571,9 @@ def is_setup_trusted_binary(candidate: str, data_dir: str, *, connector: str = "
         parent_info = os.stat(os.path.dirname(resolved))
     except OSError:
         return False
-    if binary_info.st_mode & 0o022:
+    # The binary file as well: npm and pip make it 0775 under umask 002, and
+    # group write by the owner's own private group is the owner's (GAP-0053).
+    if other_accounts_can_write(resolved, binary_info):
         return False
     if agent_discovery._trusted_prefix_dir_mode_error(os.path.dirname(resolved), parent_info) is not None:
         return False
@@ -598,11 +600,7 @@ def _posix_setup_chain_is_safe(executable: str, root: str) -> bool:
         reached_boundary = False
         while True:
             info = os.lstat(current)
-            writable = (
-                bool(info.st_mode & 0o022)
-                if leaf
-                else other_accounts_can_write(current, info)
-            )
+            writable = other_accounts_can_write(current, info)
             trusted_sticky_ancestor = (
                 not leaf
                 and stat.S_ISDIR(info.st_mode)

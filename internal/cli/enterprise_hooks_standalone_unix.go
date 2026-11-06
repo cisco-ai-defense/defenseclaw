@@ -162,32 +162,11 @@ func lockEnterpriseHookReconcile(ctx context.Context) (func(), error) {
 	if err := ensureEnterpriseHookStandaloneAuthDir(dir); err != nil {
 		return nil, err
 	}
-	path := filepath.Join(dir, enterpriseHookReconcileLockFile)
-	file, err := os.OpenFile(path, os.O_RDWR|os.O_CREATE|syscall.O_NOFOLLOW, 0o600)
+	unlock, err := enterprisehooks.LockUnixGuardianReconcile(ctx, dir, enterpriseHookReconcileLockWait)
 	if err != nil {
-		return nil, fmt.Errorf("enterprise hooks: open reconcile lock: %w", err)
+		return nil, fmt.Errorf("enterprise hooks: %w", err)
 	}
-	deadline := time.Now().Add(enterpriseHookReconcileLockWait)
-	for {
-		err = syscall.Flock(int(file.Fd()), syscall.LOCK_EX|syscall.LOCK_NB)
-		if err == nil {
-			break
-		}
-		if !errors.Is(err, syscall.EWOULDBLOCK) || time.Now().After(deadline) {
-			_ = file.Close()
-			return nil, fmt.Errorf("enterprise hooks: another reconcile holds %s: %w", path, err)
-		}
-		select {
-		case <-ctx.Done():
-			_ = file.Close()
-			return nil, ctx.Err()
-		case <-time.After(100 * time.Millisecond):
-		}
-	}
-	return func() {
-		_ = syscall.Flock(int(file.Fd()), syscall.LOCK_UN)
-		_ = file.Close()
-	}, nil
+	return unlock, nil
 }
 
 // ensureEnterpriseHookStandaloneAuthDir creates or re-hardens the
