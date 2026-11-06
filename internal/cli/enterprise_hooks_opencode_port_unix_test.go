@@ -932,32 +932,34 @@ func TestManagedGuardianOpenCodeDefaultPortIsNotImported(t *testing.T) {
 	}
 }
 
-// REVIEW-gx053-11 MF1 repro (bob): with no record, mallory copies bob's 25002
-// and makes her file unreadable for the import pass, so she is not a
-// claimant and bob imports 25002. On every later pass her file is readable,
-// but no file is input any more: she never gets 25002.
+// REVIEW-gx053-11 MF1 repros: with no record, the victim's port is named by
+// two accounts' files (a contest), and mallory, who copied it too, makes her
+// own file unreadable for that pass, so she is not a claimant. On the next
+// pass her file is readable and she would be the only claimant. She never
+// gets the port: no file is input after the pass that built the record, and
+// the contested port stays marked.
 func TestManagedGuardianOpenCodeAttackerSkipsTheImportPass(t *testing.T) {
 	for _, victim := range []struct {
 		name string
 		port int
 	}{{"bob", 25002}, {"carol", 25003}} {
 		t.Run(victim.name, func(t *testing.T) {
-			homes, record, _ := openCodePortGuardianWith(t, true, 1001, 1002)
-			writeOpenCodePortFile(t, homes[1002], victim.port) // the victim's own file
+			homes, record, _ := openCodePortGuardianWith(t, true, 1001, 1002, 1003)
+			writeOpenCodePortFile(t, homes[1002], victim.port) // the victim's file
+			writeOpenCodePortFile(t, homes[1003], victim.port) // another account names it too: a contest
 			writeOpenCodePortFile(t, homes[1001], victim.port) // mallory's copy
-			openCodeReadFails[1001] = true                     // linked, chmod 000, or a hung read
+			openCodeReadFails[1001] = true                    // linked, chmod 000, or a hung read
 			runOpenCodePortPass(t)
-			if (*record)[1002] != victim.port {
-				t.Fatalf("the uncontested victim was not imported: %v", *record)
-			}
 			openCodeReadFails[1001] = false
 			for pass := 2; pass <= 4; pass++ {
 				log := runOpenCodePortPass(t)
-				if got := (*record)[1001]; got == victim.port || got == 0 {
-					t.Fatalf("pass %d: mallory got %d (the victim holds %d)\n%s", pass, got, victim.port, log)
+				for uid, port := range *record {
+					if port == victim.port {
+						t.Fatalf("pass %d: uid %d was given the contested port %d\n%s", pass, uid, port, log)
+					}
 				}
-				if (*record)[1002] != victim.port || openCodePortIn(t, homes[1002]) != victim.port {
-					t.Fatalf("pass %d: the victim moved: %v", pass, *record)
+				if (*record)[1001] == 0 {
+					t.Fatalf("pass %d: mallory got no port at all: %v", pass, *record)
 				}
 			}
 		})
