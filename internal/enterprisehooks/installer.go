@@ -32,6 +32,11 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/version"
 )
 
+// installOwnedHooksPresent is the registration read-back used during Install.
+// Tests supply both execution-probe capabilities without depending on the
+// host's user namespace setting.
+var installOwnedHooksPresent = connector.OwnedHooksPresent
+
 // InstallOptions describes one explicit enterprise hook install/repair target.
 //
 // The gateway service itself is deliberately sandboxed away from user homes in
@@ -713,13 +718,6 @@ func Install(ctx context.Context, opts InstallOptions) (InstallResult, error) {
 			// Setup found the folders made above already there, so it did
 			// not record them for its teardown.
 			connector.RecordHookConfigParentDirs(conn.Name(), dataDir, createdHookConfigParents)
-			present, err := connector.OwnedHooksPresent(conn, setupOpts)
-			if err != nil {
-				return rollback(fmt.Errorf("enterprise hooks: connector %s hook verification failed: %w", conn.Name(), err))
-			}
-			if !present {
-				return rollback(fmt.Errorf("enterprise hooks: connector %s hook verification failed: %s", conn.Name(), ownedHookAbsentDetail(conn, setupOpts)))
-			}
 			if path, driftErr := connector.ManagedPluginArtifactDrift(conn, setupOpts); driftErr != nil {
 				return rollback(fmt.Errorf("enterprise hooks: inspect connector %s plugin %s: %w", conn.Name(), path, driftErr))
 			} else if path != "" {
@@ -740,6 +738,17 @@ func Install(ctx context.Context, opts InstallOptions) (InstallResult, error) {
 			lockWriteAttempted = true
 			if err := connector.SaveHookContractLockEntryForMode(dataDir, lockEntry, strictManagedRuntime); err != nil {
 				return rollback(fmt.Errorf("enterprise hooks: save hook contract lock: %w", err))
+			}
+			// Some hosts cannot run a contained Hermes execution probe. Their
+			// registration read-back requires the script digest sealed above.
+			// Apply the same order to every connector and restore the prior
+			// entry through rollback if read-back fails.
+			present, err := installOwnedHooksPresent(conn, setupOpts)
+			if err != nil {
+				return rollback(fmt.Errorf("enterprise hooks: connector %s hook verification failed: %w", conn.Name(), err))
+			}
+			if !present {
+				return rollback(fmt.Errorf("enterprise hooks: connector %s hook verification failed: %s", conn.Name(), ownedHookAbsentDetail(conn, setupOpts)))
 			}
 
 			if err := hardenInstallFootprint(
