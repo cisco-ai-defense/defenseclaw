@@ -16732,11 +16732,15 @@ function Get-DefenseClawContentGateWalk {
         gateway (an install over retained state, the ACL drift repair), and
         Set-DefenseClawPreservedStateAcls re-stamps every state-root
         descendant administrator-only on a non-purge uninstall. Read only,
-        and it never descends through a reparse point or into a folder this
-        account cannot list: the re-stamps refuse the first and adopt the
-        second top-down, as before.
+        and it never descends through a reparse point (the re-stamps refuse
+        it). A folder this account cannot list is added to Unlisted, never
+        skipped: the re-stamps would adopt its children unjudged, so the
+        gate refuses it by name (g582 review 3 S4).
     #>
-    param([string]$Root)
+    param(
+        [string]$Root,
+        [Collections.Generic.List[string]]$Unlisted
+    )
     $paths = [Collections.Generic.List[string]]::new()
     if ([string]::IsNullOrWhiteSpace($Root) -or
         -not (Microsoft.PowerShell.Management\Test-Path -LiteralPath $Root -PathType Container)) {
@@ -16746,7 +16750,15 @@ function Get-DefenseClawContentGateWalk {
     $pending.Push($Root)
     while ($pending.Count -gt 0) {
         $directory = $pending.Pop()
-        $children = @(Microsoft.PowerShell.Management\Get-ChildItem -LiteralPath $directory -Force -ErrorAction SilentlyContinue)
+        try {
+            $children = @(Microsoft.PowerShell.Management\Get-ChildItem -LiteralPath $directory -Force -ErrorAction Stop)
+        }
+        catch {
+            if ($null -ne $Unlisted) {
+                $Unlisted.Add([string]$directory)
+            }
+            continue
+        }
         foreach ($child in $children) {
             if (($child.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) {
                 continue
@@ -16922,6 +16934,7 @@ function Assert-DefenseClawStandaloneContentTrusted {
     # judged with its writer: the gateway in the runtime and IPC folders,
     # administrators elsewhere. Logs stay out of class (never read as policy
     # or as a record).
+    $unlisted = [Collections.Generic.List[string]]::new()
     if ($Scope -ne 'Purge') {
         $walkRoot = if ($Scope -ceq 'Retain') { 'StateRoot' } else { 'RuntimeDirectory' }
         $judged = [Collections.Generic.HashSet[string]]::new([StringComparer]::OrdinalIgnoreCase)
@@ -16938,7 +16951,8 @@ function Assert-DefenseClawStandaloneContentTrusted {
             return $Path.Equals($root, [StringComparison]::OrdinalIgnoreCase) -or
                 $Path.StartsWith($root + '\', [StringComparison]::OrdinalIgnoreCase)
         }
-        $walk = Get-DefenseClawContentGateWalk -Root ([string](Get-DefenseClawOptionalLayoutValue -Layout $Layout -Name $walkRoot))
+        $walk = Get-DefenseClawContentGateWalk -Root ([string](Get-DefenseClawOptionalLayoutValue -Layout $Layout -Name $walkRoot)) `
+            -Unlisted $unlisted
         foreach ($descendant in $walk) {
             $full = [IO.Path]::GetFullPath($descendant).TrimEnd('\')
             if (-not $judged.Add($full) -or (& $under $full 'LogDirectory')) {
@@ -16956,6 +16970,10 @@ function Assert-DefenseClawStandaloneContentTrusted {
     # Every refused path is named in one refusal, so one run shows the admin
     # the whole fix (g582 review 2 S3).
     $refusals = [Collections.Generic.List[string]]::new()
+    foreach ($folder in $unlisted) {
+        $refusals.Add("$state): Setup cannot list the managed folder $folder, so nothing in it was judged; give " +
+            "Administrators access to it again (icacls `"$folder`" /grant *S-1-5-32-544:(OI)(CI)(F)) and check what is in it")
+    }
     foreach ($entry in $entries) {
         $path = [string]$entry.Path
         if ([string]::IsNullOrWhiteSpace($path) -or
