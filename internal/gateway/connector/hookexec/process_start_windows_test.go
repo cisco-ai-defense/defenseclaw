@@ -131,6 +131,12 @@ for ($i=0; $i -lt 10; $i++) {
 
 // The registered -EncodedCommand bridge is a separate process for each call.
 // Its startup still counts against that call's cap after the script-driver fix.
+// The bridge waits with a .NET sleep, not Start-Sleep, so it loads no module:
+// Start-Sleep auto-loads Microsoft.PowerShell.Utility, and on a fresh Windows
+// CI image that first load ran PowerShell's "Preparing modules for first use"
+// step. The bridge then took 13 s instead of about 4 s, past
+// maxHookWrapperLead, so the hook rightly stopped counting it and the test
+// failed for a reason it does not pin.
 func TestWindowsOneCallPowerShellBridgeStillCountsItsStartup(t *testing.T) {
 	if os.Getenv("DC_CF517_BRIDGE_CHILD") == "1" {
 		own, err := processCreationTime(windows.CurrentProcess())
@@ -138,12 +144,17 @@ func TestWindowsOneCallPowerShellBridgeStillCountsItsStartup(t *testing.T) {
 			t.Fatal(err)
 		}
 		if lead := own.Sub(ProcessStartTime()); lead < 900*time.Millisecond {
-			t.Fatalf("PowerShell bridge startup %s was not counted", lead)
+			detail := "no launching process could be read"
+			if chain := hookWrapperChain(); len(chain) > 0 {
+				detail = fmt.Sprintf("%s started %s before this process (cap %s)",
+					chain[0].image, own.Sub(chain[0].created), maxHookWrapperLead)
+			}
+			t.Fatalf("PowerShell bridge startup %s was not counted: %s", lead, detail)
 		}
 		return
 	}
 	script := "$ErrorActionPreference='Stop'; $env:NoDefaultCurrentDirectoryInExePath='1'; " +
-		"Start-Sleep -Milliseconds 1200; " +
+		"[System.Threading.Thread]::Sleep(1200); " +
 		"$hookStart=[System.Diagnostics.ProcessStartInfo]::new('" + strings.ReplaceAll(os.Args[0], "'", "''") +
 		"','-test.run=^TestWindowsOneCallPowerShellBridgeStillCountsItsStartup$'); " +
 		"$hookStart.UseShellExecute=$false; " +
