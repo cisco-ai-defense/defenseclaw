@@ -23,7 +23,8 @@ func TestLauncherStatusShowsOwnState(t *testing.T) {
 	t.Cleanup(func() { ownProfileExplainSocket, ownStatusFetch = previousSocket, previousFetch })
 	ownProfileExplainSocket = func() string { return "/run/defenseclaw/hook.sock" }
 	answer := `{"own":true,"managed":true,"managed_by":"your organization","account":{"uid":"5001","name":"alice"},` +
-		`"claude_code":{"protected":true},"cowork":{"protected":true,"state":"protected: Cowork runs the Claude Code hooks your organization manages","last_event_at":"2026-11-04T09:00:00Z"}}`
+		`"claude_code":{"protected":true},"connectors":{"claudecode":{"protected":true},"codex":{"protected":true},"opencode":{"protected":false}},` +
+		`"cowork":{"protected":true,"state":"protected: Cowork runs the Claude Code hooks your organization manages","last_event_at":"2026-11-04T09:00:00Z"}}`
 	fetched := 0
 	ownStatusFetch = func(_ context.Context, socket string) (int, []byte, error) {
 		fetched++
@@ -47,15 +48,25 @@ func TestLauncherStatusShowsOwnState(t *testing.T) {
 	code, stdout, stderr := run("status")
 	if code != 0 || !strings.Contains(stdout, "This computer is managed by your organization.") ||
 		!strings.Contains(stdout, "alice (uid 5001)") || !strings.Contains(stdout, "Claude Code   protected") ||
-		!strings.Contains(stdout, "Cowork        protected") || strings.Contains(stdout, "none from you yet") {
+		!strings.Contains(stdout, "Cowork        protected") || !strings.Contains(stdout, "Codex         protected") ||
+		!strings.Contains(stdout, "OpenCode      not protected") || strings.Contains(stdout, "none from you yet") {
 		t.Fatalf("status = %d\nstdout %s\nstderr %s", code, stdout, stderr)
 	}
+	originalAnswer := answer
+	answer = `{"own":true,"managed":true,"account":{"uid":"5001","name":"alice"},` +
+		`"claude_code":{"protected":false},"connectors":{"codex":{"protected":true,"state":"protected"}},` +
+		`"cowork":{"protected":false,"state":"not protected"}}`
+	code, stdout, stderr = run("status")
+	if code != 0 || !strings.Contains(stdout, "Codex         protected") || strings.Contains(stdout, "Claude Code   ") {
+		t.Fatalf("Codex-only status = %d\nstdout %s\nstderr %s", code, stdout, stderr)
+	}
+	answer = originalAnswer
 	code, stdout, _ = run("status", "--json")
 	var out map[string]any
 	if code != 0 || json.Unmarshal([]byte(stdout), &out) != nil || out["deployment_mode"] != "managed_enterprise" || out["own"] != true {
 		t.Fatalf("status --json = %d %s", code, stdout)
 	}
-	if code, _, stderr := run("status", "--user", "bob"); code == 0 || fetched != 2 {
+	if code, _, stderr := run("status", "--user", "bob"); code == 0 || fetched != 3 {
 		t.Fatalf("status --user is not a launcher flag: exit %d %s", code, stderr)
 	}
 
