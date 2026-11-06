@@ -190,6 +190,9 @@ def test_gap0607_reviewer_corpora_and_d1_public_shapes_are_required_in_ci() -> N
     assert "-tags regressioncorpora -count=3 -timeout 14m" in workflow
     assert "TestD1PublicShapes" in (ROOT / "internal/gateway/d1_replay_test.go").read_text(encoding="utf-8")
     assert (ROOT / "internal/gateway/testdata/d1-shapes.jsonl").is_file()
+    guard = (ROOT / "internal/gateway/gap0607_replay_regression_guard_test.go").read_text(encoding="utf-8")
+    assert "func TestGAP0607ReplayRegressionGuards(" in guard
+    assert "//go:build" not in guard
     assert "python3 scripts/check_d1_shapes.py" in workflow
     assert "scripts.test_check_d1_shapes" in workflow
     assert "name: D1 Benign Replay" in (ROOT / ".github/workflows/d1-benign-replay.yml").read_text(encoding="utf-8")
