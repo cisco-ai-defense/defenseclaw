@@ -414,6 +414,21 @@ The first managed install fails with `api_port_held` (Linux and macOS) or `not_r
 
 **Check.** `enterprise <os> status` shows the gateway running.
 
+#### After a cut-off Windows upgrade, the installed CLI refuses with "module SHA-256 does not match"
+
+An upgrade that a restart, a power loss or a killed Setup cut off leaves files of two releases in `C:\Program Files\Cisco\DefenseClaw`. Setup copies the installer first, then the module, then the CLI, and records what it copies, so the installed CLI can roll the change back from almost any point. Two short windows remain:
+
+- the upgrade stopped after it copied the new installer and before the new module;
+- the rollback of that upgrade stopped after it put back the old installer and before the old module.
+
+The installed CLI (`enterprise windows status` and `verify`, `Remediate-Detect.ps1`, `Remediate-Fix.ps1` and the Add/Remove Programs uninstall) then refuses with exit `1603`. The error says "module SHA-256 does not match the pinned payload manifest" or "installer is not admitted by the standalone payload trust policy". Nothing loads the mismatched files, and the services stay stopped until the change is recovered.
+
+**Fix.** As LocalSystem, run the Setup of the release you were upgrading to with `/ensure` (the Intune Win32 app retries it). It brings its own installer and module, rolls the change back and upgrades. See [Recover a pending transaction](/docs/enterprise/windows#recover-a-pending-transaction).
+
+**Check.** `enterprise windows status` exits `0` and shows the new release.
+
+An Add/Remove Programs uninstall at any other point of a cut-off upgrade rolls the change back first and then stops: "uninstall rolled back an interrupted lifecycle change and restored the release it replaced; nothing was removed". Run the uninstall again; it uses the restored release's own installer.
+
 #### A Windows `ensure` with nothing to change takes more than a minute
 
 A Setup `/ensure` returns `noop: true` with `noop_reason: compliant`, but takes 1 to 2 minutes, or up to 5 minutes for the first one after an upgrade. This is expected: each `ensure` checks the SHA-256 of every scanner runtime file. See [No-op ensure time on managed Windows](/docs/support-matrix#no-op-ensure-time-on-managed-windows) for the measured times.

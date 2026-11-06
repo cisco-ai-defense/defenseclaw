@@ -783,6 +783,11 @@ may retry once with the gateway in the running Setup's payload, and reports
 `recovery_gateway_fallback`, `recovery_gateway_not_used` or
 `recovery_activation_deferred`. Do not edit DefenseClaw files by hand.
 
+The installed CLI can also refuse a cut-off upgrade outright, when it stopped
+between the installer and the module, forward or during its rollback ("module
+SHA-256 does not match the pinned payload manifest"). Run that release's Setup
+`/ensure`; see [the troubleshooting entry](/docs/enterprise/troubleshooting#after-a-cut-off-windows-upgrade-the-installed-cli-refuses-with-module-sha-256-does-not-match).
+
 If no recovery finishes, fix what its error names, then as the last resort remove
 the deployment without recovering the transaction and install again:
 
