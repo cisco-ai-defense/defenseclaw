@@ -1204,7 +1204,7 @@ func TestSkillScanFollowsScanS(t *testing.T) {
 		t.Fatalf("admission scan: calls=%d, time left=%s; want 1 call with about 15m", fake.calls, fake.remaining)
 	}
 	fake.remaining = 0
-	w.scanAndEmit(context.Background(), evt)
+	w.scanAndEmit(context.Background(), evt, false)
 	if fake.calls != 2 || fake.remaining < 14*time.Minute {
 		t.Fatalf("rescan: calls=%d, time left=%s; want 2 calls with about 15m", fake.calls, fake.remaining)
 	}

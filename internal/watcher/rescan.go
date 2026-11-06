@@ -578,6 +578,7 @@ func (w *InstallWatcher) enumerateTargets() []InstallEvent {
 						Type:      InstallSkill,
 						Name:      w.assetEventName(skill),
 						Path:      skill,
+						Connector: w.rescanConnectorForPath(skill),
 						Timestamp: time.Now().UTC(),
 					})
 				}
@@ -594,6 +595,7 @@ func (w *InstallWatcher) enumerateTargets() []InstallEvent {
 				Type:      InstallSkill,
 				Name:      e.Name(),
 				Path:      path,
+				Connector: w.rescanConnectorForPath(path),
 				Timestamp: time.Now().UTC(),
 			})
 		}
@@ -654,6 +656,7 @@ func (w *InstallWatcher) enumerateTargets() []InstallEvent {
 						Type:      InstallPlugin,
 						Name:      name,
 						Path:      childPath,
+						Connector: w.rescanConnectorForPath(childPath),
 						Timestamp: time.Now().UTC(),
 					})
 				}
@@ -666,6 +669,7 @@ func (w *InstallWatcher) enumerateTargets() []InstallEvent {
 				Type:      InstallPlugin,
 				Name:      e.Name(),
 				Path:      path,
+				Connector: w.rescanConnectorForPath(path),
 				Timestamp: time.Now().UTC(),
 			})
 		}
@@ -695,6 +699,15 @@ func (w *InstallWatcher) enumerateTargets() []InstallEvent {
 	return targets
 }
 
+// rescanConnectorForPath pins the registered root owner on an enumerated
+// asset. Secure Client keeps its existing event shape.
+func (w *InstallWatcher) rescanConnectorForPath(path string) string {
+	if w.secureClientActive() {
+		return ""
+	}
+	return w.connectorForPath(path)
+}
+
 // skipPluginChildDir reports whether a child of a plugin root is not a
 // plugin: a dot-dir, a Python bytecode cache or an npm dependency tree.
 // Hermes' plugins folder is a Python package, so it holds __pycache__; the
@@ -716,6 +729,33 @@ func (w *InstallWatcher) hermesBareCategory(dir, category string) bool {
 	}
 	bundled := strings.TrimSpace(os.Getenv("HERMES_BUNDLED_PLUGINS"))
 	return bundled != "" && filepath.Clean(bundled) == dir
+}
+
+// hermesBundledPlugin reports a plugin within a registered Hermes install's
+// shipped plugin root. User and project plugin roots remain ordinary assets.
+func (w *InstallWatcher) hermesBundledPlugin(evt InstallEvent) bool {
+	if evt.Type != InstallPlugin || w.eventConnector(evt) != "hermes" {
+		return false
+	}
+	path, err := filepath.Abs(evt.Path)
+	if err != nil {
+		return false
+	}
+	custom := strings.TrimSpace(os.Getenv("HERMES_BUNDLED_PLUGINS"))
+	for _, root := range w.pluginDirs {
+		if w.connectorForPath(root) != "hermes" {
+			continue
+		}
+		absRoot, err := filepath.Abs(root)
+		if err != nil || path == absRoot || !pathWithinRoot(path, absRoot) {
+			continue
+		}
+		if filepath.Base(absRoot) == "plugins" && filepath.Base(filepath.Dir(absRoot)) == "hermes-agent" ||
+			custom != "" && filepath.Clean(custom) == absRoot {
+			return true
+		}
+	}
+	return false
 }
 
 func skipPluginChildDir(name string) bool {
@@ -1033,7 +1073,7 @@ func (w *InstallWatcher) rescanTarget(ctx context.Context, evt InstallEvent, fpC
 			}
 			// First time we've seen this target: scan once to establish a
 			// baseline that future cycles can diff against.
-			result, scanID := w.scanAndEmit(ctx, evt)
+			result, scanID := w.scanAndEmit(ctx, evt, !w.startupRescanDone)
 			w.persistSnapshot(evt, currentSnap, scanID, fingerprint)
 			if result == nil {
 				return rescanSkipped
@@ -1134,7 +1174,7 @@ func (w *InstallWatcher) rescanTarget(ctx context.Context, evt InstallEvent, fpC
 
 	// Drift, fingerprint change, or recovery: run the scanner exactly once
 	// and diff its findings against the previous baseline scan.
-	result, scanID := w.scanAndEmit(ctx, evt)
+	result, scanID := w.scanAndEmit(ctx, evt, false)
 	deltas = append(deltas, w.findingDrift(baseline, result)...)
 
 	if len(deltas) > 0 {
@@ -1322,6 +1362,7 @@ func (w *InstallWatcher) readmitChanged(ctx context.Context, evt InstallEvent, b
 	fmt.Fprintf(os.Stderr, "[%s] %s %s needs admission; scanning\n", source, evt.Type, evt.Name)
 	res := w.runAdmission(ctx, evt)
 	w.notifyAdmission(res)
+	w.emitBundledPluginChange(ctx, evt, baseline, snap)
 	if res.ScanID != "" {
 		if current, err := w.loadScanResult(res.ScanID); err == nil {
 			deltas = append(deltas, w.findingDrift(baseline, current)...)
@@ -1366,6 +1407,29 @@ func (w *InstallWatcher) readmitChanged(ctx context.Context, evt InstallEvent, b
 		}
 	}
 	return rescanScanned
+}
+
+// emitBundledPluginChange makes a changed shipped plugin visible even when
+// its scanner findings match the first, baseline-only observation. The
+// snapshot's content digest identifies the changed version without storing
+// source bytes in the finding. The admission scan still decides enforcement.
+func (w *InstallWatcher) emitBundledPluginChange(ctx context.Context, evt InstallEvent, baseline *audit.SnapshotRow, snap *TargetSnapshot) {
+	if w.secureClientActive() || !w.hermesBundledPlugin(evt) || baseline == nil || snap == nil ||
+		baseline.ContentHash == "" || snap.ContentHash == "" || baseline.ContentHash == snap.ContentHash {
+		return
+	}
+	result := &scanner.ScanResult{
+		Scanner: "watcher", Target: w.addressableAssetPath(evt.Path), TargetType: "plugin",
+		Timestamp: time.Now().UTC(), Verdict: "warn",
+		Findings: []scanner.Finding{{
+			ID: "bundled-plugin-content", RuleID: "PLUGIN-BUNDLE-CHANGED",
+			Severity: scanner.SeverityMedium, Title: "Bundled plugin changed",
+			Description:     "Bundled plugin contents changed after the recorded baseline",
+			EvidenceSummary: "content_sha256=" + snap.ContentHash,
+			Scanner:         "watcher",
+		}},
+	}
+	w.emitRescanResult(ctx, evt, result)
 }
 
 // interruptedAdmissionMark ends the scanner fingerprint of a baseline that
@@ -1439,7 +1503,7 @@ func shouldRescan(baseline *audit.SnapshotRow, snap *TargetSnapshot, fingerprint
 // unified emission pipeline (one scan_results row + per-finding rows + events).
 // Returns the result and the generated scan ID, or (nil, "") when no scanner is
 // configured or the scan fails.
-func (w *InstallWatcher) scanAndEmit(ctx context.Context, evt InstallEvent) (*scanner.ScanResult, string) {
+func (w *InstallWatcher) scanAndEmit(ctx context.Context, evt InstallEvent, initialBaseline bool) (*scanner.ScanResult, string) {
 	s := w.newScanner(evt)
 	if s == nil {
 		return nil, ""
@@ -1469,10 +1533,17 @@ func (w *InstallWatcher) scanAndEmit(ctx context.Context, evt InstallEvent) (*sc
 	if result == nil {
 		return nil, ""
 	}
+	if initialBaseline && !w.secureClientActive() && w.hermesBundledPlugin(evt) {
+		for i := range result.Findings {
+			if !slices.Contains(result.Findings[i].Tags, scanner.FindingTagDetectionOnly) {
+				result.Findings[i].Tags = append(append([]string(nil), result.Findings[i].Tags...), scanner.FindingTagDetectionOnly)
+			}
+		}
+	}
 	w.rescanFailureMu.Lock()
 	delete(w.rescanFailureLogged, evt.Path)
 	w.rescanFailureMu.Unlock()
-	return result, w.emitRescanResult(scanCtx, result)
+	return result, w.emitRescanResult(scanCtx, evt, result)
 }
 
 // auditRescanFailure records, once per target until it scans again, that a
@@ -2104,6 +2175,9 @@ func (w *InstallWatcher) emitDriftAlerts(evt InstallEvent, deltas []DriftDelta) 
 		Details:   details,
 		Severity:  maxSev,
 	}
+	if !w.secureClientActive() {
+		event.Connector = w.eventConnector(evt)
+	}
 	if err := w.logger.LogEvent(event); err != nil {
 		fmt.Fprintf(os.Stderr, "[rescan] drift alert LogEvent failed for %s: %v\n", evt.Path, err)
 	}
@@ -2279,13 +2353,15 @@ func (w *InstallWatcher) scanTargetFor(evt InstallEvent) (string, error) {
 // the snapshot's baseline reference. On emission failure (writer or
 // persistence error) returns the empty string and lets the
 // snapshot store fall back to "" so callers don't see new failure modes.
-func (w *InstallWatcher) emitRescanResult(ctx context.Context, result *scanner.ScanResult) string {
+func (w *InstallWatcher) emitRescanResult(ctx context.Context, evt InstallEvent, result *scanner.ScanResult) string {
 	if w == nil || w.logger == nil || result == nil {
 		return ""
 	}
-	correlation := w.ownedScanCorrelation(watcherScanCorrelation(
-		ctx, rescanRunID(), watcherConnectorName(w.cfg),
-	), result)
+	connector := watcherConnectorName(w.cfg)
+	if !w.secureClientActive() {
+		connector = w.eventConnector(evt)
+	}
+	correlation := w.ownedScanCorrelation(watcherScanCorrelation(ctx, rescanRunID(), connector), result)
 	err := w.logger.LogScanWithCorrelation(ctx, result, result.Verdict, correlation)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "[rescan] emit scan result for %s: %v\n", result.Target, err)

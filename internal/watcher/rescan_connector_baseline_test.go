@@ -1,0 +1,163 @@
+// Copyright 2026 Cisco Systems, Inc. and its affiliates
+// SPDX-License-Identifier: Apache-2.0
+
+package watcher
+
+import (
+	"context"
+	"os"
+	"path/filepath"
+	"strings"
+	"testing"
+	"time"
+
+	"github.com/defenseclaw/defenseclaw/internal/observability"
+	"github.com/defenseclaw/defenseclaw/internal/scanner"
+)
+
+type pluginBaselineScanner struct {
+	findings map[string][]scanner.Finding
+}
+
+func (s *pluginBaselineScanner) Name() string               { return "plugin-scanner" }
+func (s *pluginBaselineScanner) Version() string            { return "test-1" }
+func (s *pluginBaselineScanner) SupportedTargets() []string { return []string{"plugin"} }
+func (s *pluginBaselineScanner) Scan(_ context.Context, target string) (*scanner.ScanResult, error) {
+	return &scanner.ScanResult{
+		Scanner: "plugin-scanner", Target: target, TargetType: "plugin", Timestamp: time.Now().UTC(),
+		Findings: append([]scanner.Finding(nil), s.findings[target]...),
+	}, nil
+}
+
+func TestRescanAttributesBundledPluginFindingsAndKeepsFirstSightOutOfAlerts(t *testing.T) {
+	t.Setenv("PATH", "")
+	t.Setenv("HERMES_BUNDLED_PLUGINS", "")
+	cfg, store, logger, _ := setupTestEnv(t)
+	cfg.Guardrail.Connector = "claudecode"
+	cfg.Watch.RescanContentGated = true
+	runtime := &watcherTestRuntime{}
+	logger.SetRuntimeV8Emitter(runtime)
+
+	home := t.TempDir()
+	bundledRoot := filepath.Join(home, ".hermes", "hermes-agent", "plugins")
+	userRoot := filepath.Join(home, ".hermes", "plugins")
+	makePlugin := func(root, name string) string {
+		t.Helper()
+		path := filepath.Join(root, name)
+		if err := os.MkdirAll(path, 0o700); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(path, "plugin.yaml"), []byte("name: "+name+"\n"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		return path
+	}
+	bundled := makePlugin(bundledRoot, "web/ddgs")
+	user := makePlugin(userRoot, "notes")
+	thirdParty := makePlugin(userRoot, "review")
+	findings := map[string][]scanner.Finding{
+		bundled:    {{ID: "bundled", RuleID: "PLUGIN-REVIEW", Severity: scanner.SeverityHigh, Title: "Review bundled source", Description: "first observation"}},
+		thirdParty: {{ID: "third-party", RuleID: "PLUGIN-REVIEW", Severity: scanner.SeverityHigh, Title: "Review third-party source", Description: "first observation"}},
+	}
+	scan := &pluginBaselineScanner{findings: findings}
+	w := New(cfg, nil, []string{bundledRoot, userRoot}, store, logger, nil, nil)
+	w.SetRootConnectors(map[string]string{bundledRoot: "hermes", userRoot: "hermes"})
+	w.scannerFactory = func(InstallEvent) scanner.Scanner { return scan }
+	w.runRescanCycle(context.Background())
+
+	for _, tc := range []struct {
+		path, connector string
+		baseline        bool
+	}{
+		{bundled, "hermes", true},
+		{user, "hermes", false},
+		{thirdParty, "hermes", false},
+	} {
+		row, err := store.GetTargetSnapshot("plugin", tc.path)
+		if err != nil || row.ScanID == "" {
+			t.Fatalf("snapshot %s: %#v, %v", tc.path, row, err)
+		}
+		raw, err := store.GetScanRawJSON(row.ScanID)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got := strings.Contains(raw, scanner.FindingTagDetectionOnly); got != tc.baseline {
+			t.Errorf("first scan %s detection-only=%t, want %t", tc.path, got, tc.baseline)
+		}
+	}
+	logs, _ := runtime.snapshot()
+	firstFindings := 0
+	for _, record := range logs {
+		if record.EventName() != observability.EventName(observability.TelemetryEventFindingObserved) {
+			continue
+		}
+		firstFindings++
+		if connector := record.Correlation().ConnectorID; connector != "hermes" {
+			t.Errorf("first-sight finding connector = %q, want hermes", connector)
+		}
+	}
+	if firstFindings != 2 {
+		t.Errorf("first-sight finding logs = %d, want bundled and user plugin", firstFindings)
+	}
+
+	// A content change is active even when the scanner returns the same finding.
+	// A clean user plugin remains allowed.
+	if err := os.WriteFile(filepath.Join(bundled, "plugin.yaml"), []byte("name: web/ddgs\nversion: 2\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	w.runRescanCycle(context.Background())
+	row, err := store.GetTargetSnapshot("plugin", bundled)
+	if err != nil {
+		t.Fatal(err)
+	}
+	raw, err := store.GetScanRawJSON(row.ScanID)
+	if err != nil || strings.Contains(raw, scanner.FindingTagDetectionOnly) {
+		t.Fatalf("changed bundled scan retained baseline tag: %v, %s", err, raw)
+	}
+	logs, _ = runtime.snapshot()
+	changed := 0
+	for _, record := range logs {
+		if record.EventName() == observability.EventName(observability.TelemetryEventFindingObserved) {
+			changed++
+			if connector := record.Correlation().ConnectorID; connector != "hermes" {
+				t.Errorf("changed finding connector = %q, want hermes", connector)
+			}
+		}
+	}
+	if changed <= firstFindings {
+		t.Fatal("changed bundled plugin did not emit a Hermes finding")
+	}
+	w.runRescanCycle(context.Background())
+	logs, _ = runtime.snapshot()
+	unchanged := 0
+	for _, record := range logs {
+		if record.EventName() == observability.EventName(observability.TelemetryEventFindingObserved) {
+			unchanged++
+		}
+	}
+	if unchanged != changed {
+		t.Errorf("unchanged bundled plugin emitted %d more findings", unchanged-changed)
+	}
+
+	// A plugin added to a previously covered bundle root is an installation,
+	// not part of that root's initial baseline.
+	added := makePlugin(bundledRoot, "web/new")
+	findings[added] = []scanner.Finding{{ID: "new", RuleID: "PLUGIN-REVIEW", Severity: scanner.SeverityHigh, Title: "Review new source"}}
+	var admitted []AdmissionResult
+	restarted := New(cfg, nil, []string{bundledRoot, userRoot}, store, logger, nil, func(result AdmissionResult) {
+		admitted = append(admitted, result)
+	})
+	restarted.SetRootConnectors(map[string]string{bundledRoot: "hermes", userRoot: "hermes"})
+	restarted.scannerFactory = func(InstallEvent) scanner.Scanner { return scan }
+	restarted.runRescanCycle(context.Background())
+	if len(admitted) != 1 || admitted[0].Event.Path != added || admitted[0].Event.Connector != "hermes" || admitted[0].ScanID == "" {
+		t.Fatalf("new plugin admissions = %#v, want one Hermes scan", admitted)
+	}
+	raw, err = store.GetScanRawJSON(admitted[0].ScanID)
+	if err != nil || strings.Contains(raw, scanner.FindingTagDetectionOnly) {
+		t.Fatalf("new plugin scan has baseline tag: %v, %s", err, raw)
+	}
+	if result := w.runAdmission(context.Background(), InstallEvent{Type: InstallPlugin, Name: "notes", Path: user, Connector: "hermes"}); result.Verdict == VerdictBlocked || result.Verdict == VerdictRejected {
+		t.Fatalf("clean user plugin admission = %s, want allowed", result.Verdict)
+	}
+}
