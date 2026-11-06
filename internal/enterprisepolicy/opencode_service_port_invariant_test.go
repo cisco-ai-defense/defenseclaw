@@ -277,7 +277,7 @@ func TestOpenCodePortInvariantWithUnwritableFiles(t *testing.T) {
 				if port == 0 {
 					continue
 				}
-				if other, dup := holders[port]; dup && other != u && !(unwritable[u] && unwritable[other]) {
+				if other, dup := holders[port]; dup && other != u && (!unwritable[u] || !unwritable[other]) {
 					t.Fatalf("seed %d step %d: uids %d and %d share %d (unwritable %v/%v)", seed, step, other, u, port, unwritable[other], unwritable[u])
 				}
 				holders[port] = u
