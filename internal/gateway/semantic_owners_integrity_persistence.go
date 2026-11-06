@@ -1589,7 +1589,24 @@ func appendTrustedHomeResolvedSSHKeyWriteFinding(
 				}
 			}
 			title := named.Title
-			if hookpaths.ArchiveBeforeWrite(input.Command, input.ActiveHome) {
+			clientNamedProtected := request.ResolvedWriteTargets[hookpaths.ActionDecisionKey] == hookpaths.ProtectedTargetDecision
+			if !clientNamedProtected && input.Command != "" {
+				for _, resolved := range request.ResolvedWriteTargets {
+					for _, protected := range request.targetMemo.ProtectedAuthorizedKeysPaths(facts.ActiveHome) {
+						if canonicalSemanticPath(resolved) == canonicalSemanticPath(protected) {
+							clientNamedProtected = true
+							break
+						}
+					}
+					if clientNamedProtected {
+						break
+					}
+				}
+			}
+			if hookpaths.ArchiveBeforeWrite(input.Command, input.ActiveHome) &&
+				!hookpaths.ProtectedArchiveMoveName(input.Command, input.CWD, input.ActiveHome) &&
+				!clientNamedProtected &&
+				!trustedAuthorizedKeysWriteProofWith(input, facts, false, clientGlobFacts(request), request.targetMemo) {
 				title = archiveBeforeWriteTitle
 			} else if symlinkWrite && unresolved && named.ID == rule.ID &&
 				!trustedAuthorizedKeysWriteProofWith(input, facts, false, clientGlobFacts(request), request.targetMemo) &&
