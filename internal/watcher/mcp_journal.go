@@ -35,22 +35,14 @@ func journalName(evt InstallEvent) string {
 	return evt.Name
 }
 
-// IsAccountMCPJournalName reports whether key is the event path of the MCP
-// server name of an enrolled account. Versioned keys carry a full tuple;
-// older journal rows keep their original spelling.
+// IsAccountMCPJournalName reports whether key is the versioned event path of
+// the MCP server name of an enrolled account.
 func IsAccountMCPJournalName(name, key string) bool {
 	if strings.TrimSpace(name) == "" {
 		return false
 	}
-	if identity, ok := decodeMCPEventPath(key); ok {
-		return identity.Name == name && identity.Connector != "" && identity.Home != ""
-	}
-	rest, ok := strings.CutPrefix(key, name+"@")
-	if !ok {
-		return false
-	}
-	connector, home, ok := strings.Cut(rest, ":")
-	return ok && connector != "" && !strings.ContainsAny(connector, "@#") && home != ""
+	identity, ok := decodeMCPEventPath(key)
+	return ok && identity.Name == name && identity.Connector != "" && identity.Home != ""
 }
 
 // MCPAccountJournalServes reports whether the account journal row key (an
@@ -59,107 +51,20 @@ func IsAccountMCPJournalName(name, key string) bool {
 // home and, for a project server, a project the agent works in. A caller
 // whose home is not known matches every account, and a call without a
 // working folder matches every project of the account: both refuse rather
-// than miss a block (fail closed).
+// than miss a block (fail closed). Old unstructured keys match nothing.
 func MCPAccountJournalServes(key string, q MCPAdmissionQuery) bool {
-	if identity, ok := decodeMCPEventPath(key); ok {
-		return identity.Connector != "" && identity.Home != "" && mcpServerServesQuery(identity.server(), q)
-	}
-	connector := strings.ToLower(strings.TrimSpace(q.Connector))
-	if connector == "" {
-		return false
-	}
-	marker := "@" + connector + ":"
-	i := strings.Index(key, marker)
-	if i <= 0 {
-		return false
-	}
-	name, rest := key[:i], key[i+len(marker):]
-	if !config.SameMCPToolServer(connector, name, q.Server) {
-		return false
-	}
-	home, project := rest, ""
-	if j := strings.Index(rest, "@"+connector+"#"); j >= 0 {
-		home, project = rest[:j], rest[j+len("@"+connector+"#"):]
-	}
-	if home == "" {
-		return false
-	}
-	if q.Home != "" && !sameMCPFolder(home, q.Home) {
-		return false
-	}
-	if project != "" && q.CWD != "" && !mcpFolderWithin(q.CWD, project) {
-		return false
-	}
-	return true
+	identity, ok := decodeMCPEventPath(key)
+	return ok && identity.Connector != "" && identity.Home != "" && mcpServerServesQuery(identity.server(), q)
 }
 
-// MCPAccountJournalServesSnapshot uses the identity bound to a stored
-// snapshot when an older journal key has more than one possible scope. The
-// path-only matcher cannot distinguish a project marker from literal home
-// text without that evidence.
+// MCPAccountJournalServesSnapshot requires the account key to have a matching
+// versioned snapshot identity. A literal old server name can spell a valid
+// tuple key, so the journal key alone is not provenance for an account row.
 func MCPAccountJournalServesSnapshot(key string, snapshot *audit.SnapshotRow, q MCPAdmissionQuery) bool {
-	if identity, ok := mcpStoredSnapshotIdentity(key, snapshot); ok {
-		return identity.Connector != "" && identity.Home != "" && mcpServerServesQuery(identity.server(), q)
-	}
-	if snapshot != nil {
-		if _, ok := decodeMCPEventPath(key); ok {
-			return config.SameMCPToolServer(q.Connector, key, q.Server)
-		}
+	if _, ok := mcpStoredSnapshotIdentity(key, snapshot); !ok {
+		return false
 	}
 	return MCPAccountJournalServes(key, q)
-}
-
-// migrateLegacyMCPJournal moves an account action before a versioned
-// admission writes its verdict. The old snapshot must identify the same
-// scope; otherwise the action stays on its old key. A current action is
-// also left intact rather than merging two independent decisions.
-func (w *InstallWatcher) migrateLegacyMCPJournal(evt InstallEvent) error {
-	if w == nil || w.store == nil || evt.Type != InstallMCP || w.secureClientActive() {
-		return nil
-	}
-	identity, ok := decodeMCPEventPath(evt.Path)
-	if !ok || identity.Name != evt.Name || identity.Connector == "" || identity.Home == "" ||
-		!strings.EqualFold(identity.Connector, evt.Connector) {
-		return nil
-	}
-	server := identity.server()
-	oldPath := legacyMCPEventPath(server)
-	oldSnapshot, err := w.store.GetTargetSnapshot(string(InstallMCP), oldPath)
-	if err != nil {
-		return nil
-	}
-	if !mcpLegacySnapshotCanMove(oldPath, oldSnapshot, server, "") {
-		full, err := w.lookupMCPServer(evt)
-		if err != nil {
-			return nil
-		}
-		hash, err := mcpDefinitionHash(*full)
-		if err != nil || !mcpLegacySnapshotCanMove(oldPath, oldSnapshot, *full, hash) {
-			return nil
-		}
-	}
-	scope := w.journalScope(w.eventConnector(evt))
-	old, err := w.store.GetActionForConnector(string(InstallMCP), oldPath, scope)
-	if err != nil {
-		return err
-	}
-	if old == nil || old.SourcePath != oldPath || old.Actions.IsEmpty() {
-		return nil
-	}
-	current, err := w.store.GetActionForConnector(string(InstallMCP), evt.Path, scope)
-	if err != nil {
-		return err
-	}
-	if current != nil {
-		if current.SourcePath == evt.Path && current.Actions == old.Actions && current.Reason == old.Reason {
-			return w.store.RemoveActionForConnector(string(InstallMCP), oldPath, scope)
-		}
-		return nil
-	}
-	if err := w.store.SetActionForConnector(string(InstallMCP), evt.Path, scope, evt.Path, old.Actions, old.Reason); err != nil {
-		return err
-	}
-	return w.store.RemoveActionForConnector(string(InstallMCP), oldPath, scope)
 }
 
 // MigrateAccountMCPJournal moves the MCP journal rows that earlier versions
@@ -169,9 +74,9 @@ func (w *InstallWatcher) migrateLegacyMCPJournal(evt InstallEvent) error {
 // path, so it names the account the verdict was for. The account row is
 // written before the bare row is removed, so the block holds at every
 // moment; fields an account row already has are kept, and missing ones are
-// added from the bare row. A bare row without an account source path (an
-// operator row, or one whose server cannot be told) stays as it is and
-// keeps refusing every account's server of that name (fail closed).
+// added from the bare row. An old row without a versioned source path stays
+// stored but is ignored by runtime policy until normal admission records a
+// new outcome. Explicit operator decisions come from asset_policy.
 func MigrateAccountMCPJournal(store *audit.Store) (moved, kept int, err error) {
 	if store == nil {
 		return 0, 0, nil
@@ -185,7 +90,9 @@ func MigrateAccountMCPJournal(store *audit.Store) (moved, kept int, err error) {
 			continue // a global row, or an account row already
 		}
 		if !IsAccountMCPJournalName(row.TargetName, row.SourcePath) {
-			if row.Actions.Runtime == "disable" || row.Actions.Install == "block" {
+			_, versioned := decodeMCPEventPath(row.SourcePath)
+			if (row.SourcePath == "" || versioned) &&
+				(row.Actions.Runtime == "disable" || row.Actions.Install == "block") {
 				kept++
 			}
 			continue
