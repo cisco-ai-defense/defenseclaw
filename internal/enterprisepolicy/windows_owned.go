@@ -147,10 +147,11 @@ func RemoveWindowsSecureClientCopilot(opts Options) (State, error) {
 		return State{Connector: copilotConnector, Route: RouteMachinePolicy}, err
 	}
 	target := copilotTarget{}
-	if err := takeBackWindowsGoOwnedForRemoval(opts, target); err != nil {
+	unprotected, err := takeBackWindowsGoOwnedForRemoval(opts, target)
+	if err != nil {
 		return State{}, fmt.Errorf("%s: %w", copilotConnector, err)
 	}
-	return removeTargetOwned(target, opts)
+	return removeTargetOwned(target, opts.removingFrom(unprotected))
 }
 
 // takeBackWindowsGoOwnedForRemoval takes back a target's vendor folders that
@@ -160,19 +161,55 @@ func RemoveWindowsSecureClientCopilot(opts Options) (State, error) {
 // Copilot was never configured, while the install had gone through
 // (GAP-0898); install and uninstall now treat the folder the same way. A
 // file a standard user left in Copilot's policy.d is moved aside too.
-func takeBackWindowsGoOwnedForRemoval(opts Options, target Target) error {
+//
+// On a standalone install a vendor folder DefenseClaw did not create that
+// holds a file DefenseClaw recorded (case c) is never taken over, and the
+// removal does not fail closed on one that does not protect that file
+// either: protecting nothing is all a refusal would buy once DefenseClaw no
+// longer claims the connector. Such folders are returned, and the removal
+// then strips DefenseClaw's entry only from a recorded file it can still
+// trust (restoreOrStripUnprotected). Every target walks each folder it
+// removes a recorded file from, so Devin, Windsurf, OpenCode and Copilot
+// behave the same (g582 review 7 S1).
+func takeBackWindowsGoOwnedForRemoval(opts Options, target Target) ([]unprotectedVendorFolder, error) {
 	paths, err := target.Paths(opts)
-	if err != nil || len(paths) == 0 || opts.linkKept(paths[0]) {
-		return nil
+	if err != nil || len(paths) == 0 {
+		return nil, nil
+	}
+	walk := paths[:1]
+	use := policyFolderUse{removal: true}
+	switch target.Name() {
+	case ConnectorCopilot:
+		use.siblings = copilotFolderUse.siblings
+	case ConnectorOpenCode:
+		use.siblings = opencodeFolderUse.siblings
+	case ConnectorDevinCascade:
+		// The pre-rename Windsurf file is removed as well when DefenseClaw
+		// recorded writing it.
+		if len(paths) > 1 {
+			if record, err := loadRecord(opts, devinCascadeLegacyRecord); err == nil && record != nil {
+				walk = paths[:2]
+			}
+		}
 	}
 	var state State
-	if _, err := takeBackPolicyPath(opts, paths[0], &state); err != nil {
-		return err
+	var unprotected []unprotectedVendorFolder
+	for index, path := range walk {
+		// A link kept at this path is not read, taken back or created
+		// behind (GAP-0758); Devin's other folder is still walked.
+		if opts.linkKept(path) {
+			continue
+		}
+		_, found, err := takeBackPolicyPathFor(opts, path, use, &state)
+		if err != nil {
+			return unprotected, err
+		}
+		unprotected = append(unprotected, found...)
+		if index == 0 && len(found) == 0 && target.Name() == ConnectorCopilot {
+			displaceUntrustedPolicyFiles(opts, platformPath(opts, dirFor(opts, path)), DefenseClawDropInName, &state)
+		}
 	}
-	if target.Name() == ConnectorCopilot {
-		displaceUntrustedPolicyFiles(opts, platformPath(opts, dirFor(opts, paths[0])), DefenseClawDropInName, &state)
-	}
-	return nil
+	return unprotected, nil
 }
 
 // keepLinkedGoOwnedForRemoval looks at every policy path of target. It clears
@@ -275,11 +312,12 @@ func RemoveWindowsGoOwned(opts Options) (Result, error) {
 		}
 		targetOpts := opts
 		targetOpts.keptLinks = kept
-		if err := takeBackWindowsGoOwnedForRemoval(targetOpts, target); err != nil {
+		unprotected, err := takeBackWindowsGoOwnedForRemoval(targetOpts, target)
+		if err != nil {
 			errs = append(errs, fmt.Errorf("%s: %w", name, err))
 			continue
 		}
-		state, err := removeTargetOwned(target, targetOpts)
+		state, err := removeTargetOwned(target, targetOpts.removingFrom(unprotected))
 		if err != nil {
 			errs = append(errs, fmt.Errorf("%s: %w", name, err))
 		} else if name == ConnectorOpenCode {

@@ -229,13 +229,21 @@ func ensurePolicyDir(opts Options, dir string) ([]string, error) {
 	return created, nil
 }
 
-// reclaimPolicyDirs, clearPolicyFileName, displaceUntrustedPolicyFiles and
+// reclaimPolicyDirsFor, clearPolicyFileName, displaceUntrustedPolicyFiles and
 // displaceUntrustedPolicyFile are Windows-only: every unix ancestor must already be root-owned and not
 // group/other-writable, so no unprivileged user can create or occupy a
 // vendor path and there is nothing to take back.
-func reclaimPolicyDirs(Options, string) (policyTakeBack, error) { return policyTakeBack{}, nil }
+func reclaimPolicyDirsFor(Options, string, policyFolderUse) (policyTakeBack, error) {
+	return policyTakeBack{}, nil
+}
 
 func clearPolicyFileName(Options, string) (string, error) { return "", nil }
+
+// readUnprotectedRecordedFile is Windows-only: no unix removal finds an
+// unprotected vendor folder.
+func readUnprotectedRecordedFile(Options, string) ([]byte, bool, string) {
+	return nil, false, "unprotected vendor folders are Windows-only"
+}
 
 func displaceUntrustedPolicyFiles(Options, string, string, *State) {}
 
