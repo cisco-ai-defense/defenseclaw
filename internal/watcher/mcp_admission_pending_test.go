@@ -6,6 +6,7 @@ package watcher
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"path/filepath"
 	"testing"
@@ -297,7 +298,11 @@ func TestGAP0034LegacyScopeRequiresCallerEvidence(t *testing.T) {
 	cfg, store, logger, _ := setupTestEnv(t)
 	cfg.Gateway.Watcher.MCP.TakeAction = true
 	other := config.MCPServerEntry{Name: "notes@claudecode#" + t.TempDir()}
-	if err := store.SetTargetSnapshot(string(InstallMCP), MCPEventPath(other), "hash", "{}", "{}", "[]", "", "fingerprint"+mcpScanFailedMark); err != nil {
+	hashes, err := json.Marshal(map[string]string{"mcp.servers." + other.Name: "hash"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.SetTargetSnapshot(string(InstallMCP), MCPEventPath(other), "hash", "{}", string(hashes), "[]", "", "fingerprint"+mcpScanFailedMark); err != nil {
 		t.Fatal(err)
 	}
 	cold := New(cfg, nil, nil, store, logger, nil, nil)
