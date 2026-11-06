@@ -37,8 +37,8 @@ type projectSkillRoots struct {
 	changed chan struct{}
 	// unverified holds, by root key, the project skill folders a managed
 	// Windows gateway could not verify (GAP-1356): they are not watched,
-	// and the watcher health names them. Guardian admission failures refuse
-	// the skill; caller-inspected profile roots follow the policy mode.
+	// and the watcher health names them. Guardian admission failures and
+	// caller-inspected adverse roots refuse the selected skill.
 	unverified map[string]projectSkillRootRefusal
 	// grant asks the hook guardian to let the gateway read a project skill
 	// folder; nil where no guardian grants reads.
@@ -169,19 +169,39 @@ func (p *projectSkillRoots) refuse(root, reason string, now time.Time) {
 	p.refuseWithPolicyMode(root, reason, now, false)
 }
 
-// refuseWithPolicyMode records a caller-inspected profile root. These roots
-// have no install admission path, so observe mode reports their finding while
-// action mode refuses the selected skill. Guardian refusals remain closed in
-// every mode because the required admission check could not complete.
+// refuseWithPolicyMode records a caller-inspected profile root. The boolean
+// distinguishes a caller finding from a guardian admission failure so a later
+// verified caller inspection cannot clear a guardian refusal.
 func (p *projectSkillRoots) refuseWithPolicyMode(root, reason string, now time.Time, policyModeAware bool) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	if p.unverified == nil {
 		p.unverified = map[string]projectSkillRootRefusal{}
 	}
-	p.unverified[projectRootKey(root)] = projectSkillRootRefusal{
+	key := projectRootKey(root)
+	if previous, ok := p.unverified[key]; ok && !previous.policyModeAware && policyModeAware {
+		return
+	}
+	p.unverified[key] = projectSkillRootRefusal{
 		path: filepath.Clean(root), reason: reason, at: now, policyModeAware: policyModeAware,
 	}
+}
+
+// clearCallerRefusal retires a caller finding only after a fresh inspection
+// verifies that root is an ordinary folder. Guardian refusals require their
+// own admission retry.
+func (p *projectSkillRoots) clearCallerRefusal(root string) bool {
+	if p == nil {
+		return false
+	}
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	key := projectRootKey(root)
+	if prior, ok := p.unverified[key]; ok && prior.policyModeAware {
+		delete(p.unverified, key)
+		return true
+	}
+	return false
 }
 
 // refusal returns why root could not be verified, and whether that was less
