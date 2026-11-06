@@ -2441,16 +2441,11 @@ func repairWindowsManagedPolicyFolder(path string, validate func(string) error) 
 // (managed.WindowsDefenseClawFolderMarker, g582 review 4 F2): an
 // administrator-only record outside the folder names it, or it holds a
 // DefenseClaw-named entry, a hook runtime file or the per-user enrollment
-// registry owned by SYSTEM, Administrators, TrustedInstaller or the owner
-// the policy writer stamps (windowsManagedPolicyOwnerSID, Administrators);
-// a folder it cannot list counts too. A marker a user planted does not
-// count, and deleting one does not turn a recorded folder into a takeover.
+// registry owned by SYSTEM, Administrators or TrustedInstaller; a folder it
+// cannot list counts too. A marker a user planted does not count, and
+// deleting one does not turn a recorded folder into a takeover.
 func windowsManagedPolicyFolderMarker(folder string) string {
-	owner, err := windowsManagedPolicyOwnerSID()
-	if err != nil {
-		owner = nil
-	}
-	return managed.WindowsDefenseClawFolderMarker(folder, owner, windowsPerUserManagedEnrollmentFile)
+	return managed.WindowsDefenseClawFolderMarker(folder, windowsPerUserManagedEnrollmentFile)
 }
 
 // refuseWindowsManagedPolicyFolderTakeover is the standalone refusal of a

@@ -215,9 +215,14 @@ func TestWindowsClaudeManagedPolicyReaderStandaloneNeverTakesOverAnUntrustedMana
 				windowsManagedPolicySelfHealRefusesContentDrift = previousStandalone
 			})
 			folder := filepath.Dir(fixture.policyPath)
-			if _, err := os.Lstat(filepath.Join(folder, windowsClaudeManagedStateFile)); err != nil {
+			state := filepath.Join(folder, windowsClaudeManagedStateFile)
+			if _, err := os.Lstat(state); err != nil {
 				t.Fatalf("fixture has no state record: %v", err)
 			}
+			// The fixture's policy writer stamps the test account as owner;
+			// in production it is Administrators, and only an Administrators,
+			// SYSTEM or TrustedInstaller owned marker counts (g582 review 5 S2).
+			stampGAP633SDDL(t, state, gap633CanonicalFile)
 			current := gap633Descriptor(t, folder)
 			stampGAP633SDDL(t, folder, current[:strings.Index(current, "D:")]+"G:SY"+
 				strings.Replace(current[strings.Index(current, "D:"):], ")", ")(A;OICI;0x1301bf;;;BU)", 1))

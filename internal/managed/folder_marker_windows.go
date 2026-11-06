@@ -35,21 +35,22 @@ var windowsManagedFolderLayout = StandaloneWindowsLayout
 // created before the first install), which keeps the takeover.
 //
 //   - An administrator-only record outside the folder decides first: the
-//     hook guardian ledger (protected_targets.json) names a target in the
-//     folder or the folder itself, or the Setup deployment record exists and
-//     the folder is the hook runtime folder or the vendor folder above it.
-//     Deleting a marker inside the folder therefore does not turn a refusal
-//     into a takeover.
+//     hook guardian ledger (protected_targets.json) names the folder itself
+//     or a target anywhere under it (g582 review 5 S1), or the Setup
+//     deployment record exists and the folder is the hook runtime folder,
+//     any folder under it (the per-connector enrollment folders, g582 review
+//     5 M2) or the vendor folder above it. Deleting a marker inside the
+//     folder, or the folder that held the recorded target, therefore does
+//     not turn a refusal into a takeover.
 //   - Otherwise an entry directly in the folder counts when its name has
 //     "defenseclaw" in it, is a hook runtime file (WindowsHookRuntimeMarkerFiles)
 //     or is one of extra, and it is owned by SYSTEM, Administrators or
-//     TrustedInstaller (or by owner, the owner the caller's own writer
-//     stamps, when not nil) and is a non-reparse directory or single-link
-//     regular file. A marker a user planted is owned by that user and does
-//     not count.
+//     TrustedInstaller and is a non-reparse directory or single-link regular
+//     file. A marker a user planted is owned by that user and does not
+//     count.
 //   - A folder that cannot be listed, or a candidate whose owner cannot be
 //     read even with backup semantics, counts as managed (fail closed).
-func WindowsDefenseClawFolderMarker(dir string, owner *windows.SID, extra ...string) string {
+func WindowsDefenseClawFolderMarker(dir string, extra ...string) string {
 	clean, err := filepath.Abs(dir)
 	if err != nil {
 		return "entries (the folder path cannot be resolved: " + err.Error() + ")"
@@ -69,7 +70,7 @@ func WindowsDefenseClawFolderMarker(dir string, owner *windows.SID, extra ...str
 		if !windowsDefenseClawEntryName(entry.Name(), extra) {
 			continue
 		}
-		if reason, counts := windowsTrustedFolderMarker(filepath.Join(clean, entry.Name()), owner); counts {
+		if reason, counts := windowsTrustedFolderMarker(filepath.Join(clean, entry.Name())); counts {
 			return reason
 		}
 	}
@@ -97,7 +98,7 @@ func windowsDefenseClawEntryName(name string, extra []string) bool {
 // windowsTrustedFolderMarker reports whether path counts as a DefenseClaw
 // marker: owned by a trusted principal, no reparse point, a directory or a
 // single-link regular file. An owner nobody can read counts.
-func windowsTrustedFolderMarker(path string, trustedOwner *windows.SID) (string, bool) {
+func windowsTrustedFolderMarker(path string) (string, bool) {
 	name := filepath.Base(path)
 	access := uint32(windows.READ_CONTROL | windows.FILE_READ_ATTRIBUTES)
 	handle, err := openCanonicalObject(path, access)
@@ -134,7 +135,7 @@ func windowsTrustedFolderMarker(path string, trustedOwner *windows.SID) (string,
 	if err != nil || owner == nil {
 		return name + " (its owner cannot be read)", true
 	}
-	if !IsWindowsTrustedAdminOwner(owner) && (trustedOwner == nil || !owner.Equals(trustedOwner)) {
+	if !IsWindowsTrustedAdminOwner(owner) {
 		return "", false
 	}
 	return name, true
@@ -158,7 +159,12 @@ func windowsManagedFolderRecorded(dir string) string {
 		return ""
 	}
 	runtimeDir := filepath.Clean(layout.HookRuntimeDir)
-	if !strings.EqualFold(dir, runtimeDir) && !strings.EqualFold(dir, filepath.Dir(runtimeDir)) {
+	// No MDM, vendor installer or user creates folders inside the hook
+	// runtime folder, so the record covers its whole subtree: a
+	// per-connector enrollment folder whose enrollment.json and lock were
+	// deleted is still DefenseClaw's (g582 review 5 M2).
+	if !strings.EqualFold(dir, runtimeDir) && !strings.EqualFold(dir, filepath.Dir(runtimeDir)) &&
+		!windowsPathUnder(dir, runtimeDir) {
 		return ""
 	}
 	record := filepath.Join(layout.LifecycleDir, "deployment.json")
@@ -166,6 +172,24 @@ func windowsManagedFolderRecorded(dir string) string {
 		return ""
 	}
 	return "folder (the Setup deployment record " + record + " names the hook runtime folder " + runtimeDir + ")"
+}
+
+// windowsPathUnder reports whether path lies strictly under dir, compared
+// case-insensitively on cleaned paths.
+func windowsPathUnder(path, dir string) bool {
+	dir = strings.ToLower(strings.TrimRight(filepath.Clean(dir), `\`))
+	return dir != "" && strings.HasPrefix(strings.ToLower(filepath.Clean(path)), dir+`\`)
+}
+
+// OverrideWindowsManagedFolderLayoutForTest makes the record decision of
+// WindowsDefenseClawFolderMarker read layout instead of the machine's
+// standalone layout, so a test can stand temporary folders in for the hook
+// runtime and lifecycle folders. Production code never calls it. restore
+// puts the machine layout back.
+func OverrideWindowsManagedFolderLayoutForTest(layout StandaloneLayout) (restore func()) {
+	previous := windowsManagedFolderLayout
+	windowsManagedFolderLayout = func() (StandaloneLayout, error) { return layout, nil }
+	return func() { windowsManagedFolderLayout = previous }
 }
 
 // windowsAdminOnlyRecord reports whether path is a regular file whose own
@@ -184,7 +208,9 @@ func windowsAdminOnlyRecord(path string) bool {
 }
 
 // windowsLedgerNamesFolder reports whether any string in the ledger is dir
-// itself or an absolute path directly in dir.
+// itself or an absolute path anywhere under dir: a vendor folder above a
+// recorded policy folder stays recorded after the policy folder is renamed
+// away (g582 review 5 S1).
 func windowsLedgerNamesFolder(ledger, dir string) bool {
 	file, err := os.Open(ledger)
 	if err != nil {
@@ -209,7 +235,7 @@ func windowsJSONNamesFolder(value any, dir string) bool {
 			return false
 		}
 		clean := filepath.Clean(typed)
-		return strings.EqualFold(clean, dir) || strings.EqualFold(filepath.Dir(clean), dir)
+		return strings.EqualFold(clean, dir) || windowsPathUnder(clean, dir)
 	case []any:
 		for _, item := range typed {
 			if windowsJSONNamesFolder(item, dir) {

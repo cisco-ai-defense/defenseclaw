@@ -1124,7 +1124,7 @@ func refuseStandaloneReclaim(dir string, trustErr error) error {
 // (managed.WindowsDefenseClawFolderMarker, g582 review 4 F2), the same one
 // the hook-side policy folder transactions use.
 func defenseClawEntryIn(dir string) string {
-	return managed.WindowsDefenseClawFolderMarker(dir, nil)
+	return managed.WindowsDefenseClawFolderMarker(dir)
 }
 
 const (
