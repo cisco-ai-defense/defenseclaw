@@ -4481,7 +4481,7 @@ func (a *APIServer) provenHookActionMustEnforce(ctx context.Context, verdict *To
 		}
 		switch finding.proof.kind {
 		case findingProofActionFactsSemantic, findingProofActionFactsSubgraph,
-			findingProofExactFallback, findingProofActiveStateMutation:
+			findingProofExactFallback, findingProofResolvedTarget, findingProofActiveStateMutation:
 			return true
 		}
 	}

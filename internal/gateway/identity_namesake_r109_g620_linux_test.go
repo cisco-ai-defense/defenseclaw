@@ -249,3 +249,97 @@ func TestReviewerG620UncertainNamesakeKeepsProtectedHookBlock(t *testing.T) {
 		})
 	}
 }
+
+func TestReviewerR4G620HolderFallbackPreservesVerifiedTarget(t *testing.T) {
+	subject := profileSubjectFromVerified(VerifiedSubject{
+		UserID: "700002", IDKind: useridentity.KindPOSIXUID, UserName: "alice",
+		Directory: useridentity.DirectoryFacts{Source: useridentity.SourceProcessCredentials,
+			HolderUnproven: true, Groups: []string{"staff"},
+			Assurance: useridentity.AssuranceVerified, ResolvedAt: time.Now()},
+		Source: subjectSourceProcessOwner,
+	}, true)
+	for _, route := range []struct {
+		name  string
+		match config.ProfileMatch
+	}{
+		{"default", config.ProfileMatch{}},
+		{"uid", config.ProfileMatch{Users: []string{"700002"}}},
+		{"group", config.ProfileMatch{Groups: []string{"staff"}}},
+		{"connector and group", config.ProfileMatch{Connectors: []string{"claudecode"}, Groups: []string{"staff"}}},
+	} {
+		for _, pack := range []string{"", "permissive", "strict"} {
+			t.Run(route.name+"/"+pack, func(t *testing.T) {
+				assignments := []config.ProfileAssignment{}
+				if route.name != "default" {
+					assignments = append(assignments, config.ProfileAssignment{Profile: "watch", Match: route.match})
+				}
+				assignments = append(assignments, config.ProfileAssignment{
+					Profile: "strict", Match: config.ProfileMatch{Users: []string{"alice@corp.example"}},
+				})
+				set := identityTestSet(t, identityTestPlatforms[0], "watch", assignments...)
+				set.base.Guardrail.RulePack = pack
+				set.base.Guardrail.Connector = "claudecode"
+				decision := set.match(&subject, profileSubjectProcessOwner, "claudecode", "")
+				if pack == "strict" {
+					if decision.Refused == "" {
+						t.Fatalf("strict tier requires holder proof: %+v", decision)
+					}
+					return
+				}
+				if decision.Refused != "" || decision.Name != "watch" ||
+					!slices.Equal(decision.Unproven, []string{"account:unknown"}) {
+					t.Fatalf("OSS decision = %+v; want warned selection", decision)
+				}
+				api := &APIServer{scannerCfg: set.base}
+				api.guardrailProfiles.set.Store(set)
+				ctx := context.WithValue(t.Context(), resolvedGuardrailProfileKey{}, &resolvedGuardrailProfile{
+					decision: decision, set: set, derived: set.profileConfig(decision.Name),
+				})
+				for _, tc := range []struct{ name, command, want string }{
+					{"direct target", "echo marker >> ~/.ssh/authorized_keys", "block"},
+					{"link target", "ln -s ~/.ssh/authorized_keys keylink; echo marker >> keylink", "block"},
+					{"ordinary file", "echo marker >> notes.txt", "allow"},
+					{"ordinary prefix", "echo marker >> authorized_keys.bak", "allow"},
+				} {
+					t.Run(tc.name, func(t *testing.T) {
+						response := api.evaluateAgentHook(ctx, agentHookRequest{
+							ConnectorName: "claudecode", HookEventName: "PreToolUse", ToolName: "Bash",
+							ToolArgs: []byte(`{"command":"` + tc.command + `"}`),
+						})
+						if response.Action != tc.want || (tc.want == "block" && response.RawAction != "block") {
+							t.Errorf("%s: action=%s raw=%s; want %s", tc.name, response.Action, response.RawAction, tc.want)
+						}
+					})
+				}
+			})
+		}
+	}
+}
+
+func TestReviewerR4G620UnscopedExplainMatchesConfiguredConnector(t *testing.T) {
+	subject := profileSubjectFromVerified(VerifiedSubject{
+		UserID: "700002", IDKind: useridentity.KindPOSIXUID, UserName: "alice",
+		Directory: useridentity.DirectoryFacts{Source: useridentity.SourceProcessCredentials,
+			HolderUnproven: true, Groups: []string{"staff"},
+			Assurance: useridentity.AssuranceVerified, ResolvedAt: time.Now()},
+		Source: subjectSourceProcessOwner,
+	}, true)
+	for _, pack := range []string{"", "permissive", "strict"} {
+		set := identityTestSet(t, identityTestPlatforms[0], "watch",
+			config.ProfileAssignment{Profile: "strict", Match: config.ProfileMatch{Users: []string{"alice@corp.example"}}})
+		set.base.Guardrail.RulePack = pack
+		set.base.Guardrail.Connector = "claudecode"
+		live := set.match(&subject, profileSubjectProcessOwner, "claudecode", "")
+		unscoped := set.match(&subject, profileSubjectLookup, "", "")
+		if pack == "strict" {
+			if live.Refused == "" || unscoped.Refused == "" {
+				t.Errorf("strict tier pack %q: live=%+v unscoped=%+v; want holder refusal", pack, live, unscoped)
+			}
+			continue
+		}
+		if live.Refused != "" || unscoped.Refused != "" || live.Name != "watch" ||
+			unscoped.Name != live.Name || !slices.Equal(unscoped.Unproven, []string{"account:unknown"}) {
+			t.Errorf("pack %q: live=%+v unscoped=%+v; want same warned default", pack, live, unscoped)
+		}
+	}
+}
