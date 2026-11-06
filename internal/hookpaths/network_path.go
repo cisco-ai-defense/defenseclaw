@@ -303,7 +303,7 @@ func boundedPathRead(name string, kind pathReadKind, identityRead bool) pathRead
 	}
 	wait := networkShareAnswerWait - time.Since(started)
 	if identityRead {
-		wait = min(networkShareIdentityAnswerWait, networkShareAnswerWait) - time.Since(started)
+		wait = networkShareIdentityAnswerWait - time.Since(started)
 		if pending {
 			wait = min(wait, networkShareIdentityAnswerWait-time.Since(pendingStarted))
 		}
@@ -355,6 +355,22 @@ func boundedPathRead(name string, kind pathReadKind, identityRead bool) pathRead
 		case rootUnanswered = <-rootReady:
 			rootDone = true
 			rootReady = nil
+			// A root that answered needs only the ordinary read bound. Keep
+			// the longer first-contact chance while the root is unanswered,
+			// so a reachable identity can still prove a named target.
+			if !rootUnanswered && identityRead && networkShareAnswerWait < networkShareIdentityAnswerWait {
+				remaining := networkShareAnswerWait - time.Since(started)
+				if remaining < 0 {
+					remaining = 0
+				}
+				if !timer.Stop() {
+					select {
+					case <-timer.C:
+					default:
+					}
+				}
+				timer.Reset(remaining)
+			}
 		case <-timer.C:
 			// A completed read wins a race with the timer. An Open that
 			// finishes after the deadline has no caller to own its handle.
