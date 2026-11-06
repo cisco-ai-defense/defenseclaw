@@ -1945,6 +1945,22 @@ func sameAliasValue(a, b json.RawMessage) bool {
 	return bytes.Equal(compactA.Bytes(), compactB.Bytes())
 }
 
+// PatchEvidenceChanged reports that a patch whose targets the hook attested
+// complete (PatchCompleteKey in evidence, the value the hook sent the gateway)
+// reads differently now. Behind ProtectHome the gateway cannot read a patch
+// target again, so the hook is the only party that can: it reads the same
+// call a second time once the gateway has answered, before the answer reaches
+// the agent. A target swapped for a link after the first reading changes the
+// map, and the call is refused whatever the gateway said. Evidence that does
+// not attest a complete patch is not rechecked here.
+func PatchEvidenceChanged(connector, surface, event string, payload []byte, evidence string) bool {
+	targets, ok := Decode(evidence)
+	if !ok || targets[PatchCompleteKey] != "1" {
+		return false
+	}
+	return ResolveConnector(connector, surface, event, payload) != evidence
+}
+
 // incompleteEvidence is the header for a tool call whose write operands
 // could not be listed. The gateway must not treat it as complete.
 // resolveCopilotCalls describes each call of a Copilot toolCalls envelope as
