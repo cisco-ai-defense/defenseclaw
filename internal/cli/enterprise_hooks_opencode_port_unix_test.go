@@ -919,3 +919,34 @@ func TestManagedGuardianOpenCodeDefaultPortIsNotImported(t *testing.T) {
 		t.Fatalf("the shared default was imported: %v", *record)
 	}
 }
+
+func TestReviewLinkedServiceFileNeverGivesItsPortToNewcomer(t *testing.T) {
+	homes, record := openCodePortGuardian(t, true, 1001, 1002)
+	target := filepath.Join(homes[1001], "actual-service.json")
+	if err := os.WriteFile(target, []byte(`{"port":25002}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	link := enterprisepolicy.OpenCodeServiceConfigPath(homes[1001])
+	if err := os.MkdirAll(filepath.Dir(link), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(target, link); err != nil {
+		t.Fatal(err)
+	}
+	for pass := 0; pass < 3; pass++ {
+		log := runOpenCodePortPass(t)
+		if got := openCodePortIn(t, homes[1002]); got == 25002 || (*record)[1002] == 25002 {
+			t.Fatalf("pass %d gave a linked file's port to another account: file=%d record=%v log=%s", pass, got, *record, log)
+		}
+	}
+	if err := os.Remove(link); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(link, []byte(`{"port":25002}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	runOpenCodePortPass(t)
+	if (*record)[1001] != 25002 || openCodePortIn(t, homes[1001]) != 25002 || (*record)[1002] == 25002 {
+		t.Fatalf("ordinary file recovery changed another binding: %v", *record)
+	}
+}
