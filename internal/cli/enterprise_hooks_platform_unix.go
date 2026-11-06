@@ -60,7 +60,7 @@ var enterpriseHookRemovedAccountRow = func(row enterpriseHookReconcileRow) bool 
 		!strings.HasSuffix(row.Error, ": "+errEnterpriseHookTargetNotFound.Error()) {
 		return false
 	}
-	return enterpriseHookGuardianTargetRemoved(context.Background(), enterprisehooks.ManifestTarget{User: user}, row, errEnterpriseHookTargetNotFound)
+	return enterpriseHookGuardianTargetRemoved(context.Background(), enterprisehooks.ManifestTarget{User: user, Connector: row.Connector}, row, errEnterpriseHookTargetNotFound)
 }
 
 // A fresh Open Directory read avoids the account cache held by a running
