@@ -2199,6 +2199,7 @@ func (a *APIServer) handleInspectTool(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	req.Connector = serverConnector
+	r = r.WithContext(openClawInspectIdentity(r.Context(), serverConnector))
 
 	scanTimeout := inspectScanTimeout
 	if a.inspectToolScanTimeout > 0 {
@@ -2481,6 +2482,11 @@ func (a *APIServer) inspectAuditEvent(r *http.Request, route, action, target, de
 		structured["connector"] = connectorName
 	}
 	auditCallerIdentity(ctx).addTo(structured)
+	if identityFactsEnabled.Load() {
+		if id, verified := agentIdentityFromContext(ctx); verified {
+			structured["defenseclaw.agent.identity.id"] = id
+		}
+	}
 	return audit.Event{
 		Action:     action,
 		Target:     target,

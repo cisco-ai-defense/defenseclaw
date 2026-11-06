@@ -1533,8 +1533,8 @@ class Store:
 
         The user, the agent identity (``agt-``), the agent instance (``ais-``),
         the session and the sub-agent depth come from the alert row and from
-        the hook-decision row of the same request; the alert row's own value
-        wins.
+        a hook-decision or direct-inspect row of the same request; the alert
+        row's own value wins.
         """
         ids = [alert_id for alert_id in alert_ids if alert_id]
         columns, _tables = self._audit_projection_schema()
@@ -1551,13 +1551,17 @@ class Store:
         width = 2 + len(self._ALERT_AGENT_KEYS)
         join, hook_cols = "", ", ".join(["NULL"] * width)
         if "request_id" in columns:
-            # Request IDs are client supplied. Borrow hook facts only when
-            # both records identify the same user independently of that ID.
+            # Request IDs are client supplied. Borrow hook or direct inspect
+            # facts only when both records identify the same user independently
+            # of that ID. OpenClaw tool checks have no hook_decision row.
             f_user = self._safe_json_extract(self._structured_sql("f"), '$."user.id"')
             h_user = self._safe_json_extract(self._structured_sql("h"), '$."user.id"')
             join = (
                 "LEFT JOIN audit_events AS h ON COALESCE(f.request_id, '') <> '' AND h.request_id = f.request_id "
-                "AND h.action IN ('hook_decision', 'action') AND h.id <> f.id "
+                "AND (h.action IN ('hook_decision', 'action') OR "
+                "(h.action IN ('inspect-tool-block', 'inspect-tool-confirm', "
+                "'inspect-tool-alert', 'inspect-tool-allow') AND h.connector = f.connector)) "
+                "AND h.id <> f.id "
                 f"AND COALESCE({f_user}, '') <> '' AND {f_user} = {h_user}"
             )
             hook_cols = row_facts("h")

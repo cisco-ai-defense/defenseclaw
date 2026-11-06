@@ -85,6 +85,55 @@ class AlertFindingRowsTests(unittest.TestCase):
         self.assertEqual(store.agent_facts_for_alerts([alert.id])[alert.id],
                          {"user": "alice", "agent_identity": "agt-alice"})
 
+    def test_openclaw_inspect_identity_joins_its_finding_for_alerts(self):
+        now = datetime.now(timezone.utc)
+        store = self.app.store
+        finding = Event(action="scan-finding", severity="CRITICAL", connector="openclaw",
+                        structured={"user.id": "alice", **FINDING}, timestamp=now)
+        inspect = Event(action="inspect-tool-block", severity="CRITICAL", connector="openclaw",
+                        structured={"user.id": "alice", "defenseclaw.agent.identity.id": "agt-openclaw"},
+                        timestamp=now)
+        store.log_event(finding)
+        store.log_event(inspect)
+        store.db.execute("UPDATE audit_events SET request_id=? WHERE id IN (?, ?)",
+                         ("openclaw-request", finding.id, inspect.id))
+        store.db.commit()
+        self.assertEqual(store.agent_facts_for_alerts([finding.id])[finding.id],
+                         {"user": "alice", "agent_identity": "agt-openclaw"})
+        shown = self.runner.invoke(alerts, ["--show", "1"], obj=self.app, catch_exceptions=False)
+        self.assertEqual(shown.exit_code, 0)
+        self.assertRegex(shown.output, r"Agent:\s+agt-openclaw")
+
+    def test_openclaw_inspect_identity_does_not_cross_users(self):
+        now = datetime.now(timezone.utc)
+        store = self.app.store
+        finding = Event(action="scan-finding", severity="CRITICAL", connector="openclaw",
+                        structured={"user.id": "alice", **FINDING}, timestamp=now)
+        inspect = Event(action="inspect-tool-block", severity="CRITICAL", connector="openclaw",
+                        structured={"user.id": "bob", "defenseclaw.agent.identity.id": "agt-bob"},
+                        timestamp=now)
+        store.log_event(finding)
+        store.log_event(inspect)
+        store.db.execute("UPDATE audit_events SET request_id=? WHERE id IN (?, ?)",
+                         ("shared-request", finding.id, inspect.id))
+        store.db.commit()
+        self.assertEqual(store.agent_facts_for_alerts([finding.id])[finding.id], {"user": "alice"})
+
+    def test_openclaw_inspect_identity_does_not_cross_connectors(self):
+        now = datetime.now(timezone.utc)
+        store = self.app.store
+        finding = Event(action="scan-finding", severity="CRITICAL", connector="openclaw",
+                        structured={"user.id": "alice", **FINDING}, timestamp=now)
+        inspect = Event(action="inspect-tool-block", severity="CRITICAL", connector="codex",
+                        structured={"user.id": "alice", "defenseclaw.agent.identity.id": "agt-codex"},
+                        timestamp=now)
+        store.log_event(finding)
+        store.log_event(inspect)
+        store.db.execute("UPDATE audit_events SET request_id=? WHERE id IN (?, ?)",
+                         ("shared-request", finding.id, inspect.id))
+        store.db.commit()
+        self.assertEqual(store.agent_facts_for_alerts([finding.id])[finding.id], {"user": "alice"})
+
     def _finding(self, request_id: str, hook_details: str, at: datetime) -> str:
         store = self.app.store
         hook = Event(action="connector-hook", target="PreToolUse", severity="INFO",
