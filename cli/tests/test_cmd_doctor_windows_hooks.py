@@ -2209,6 +2209,144 @@ class WindowsHookDoctorTests(unittest.TestCase):
                     continue
                 self.assertNotEqual(observed, (str(runtime), bound))
 
+    @staticmethod
+    def _devin_bash(program: Path | str, *args: str) -> str:
+        """windowsDevinBashHookCommand of program, and the guarded form's argv (rel-1-0-6 GAP-0676)."""
+        word = "'" + str(program).replace("\\", "/").replace("'", "'\\''") + "'"
+        return " ".join([word, *args, "hook", "--connector", "devin"])
+
+    def _devin_guarded_config(self, commands: dict[str, str] | None = None) -> tuple[Path, Path, Path]:
+        """A Devin config whose block events start the guard beside the launcher, as per-user Setup writes it."""
+        runtime = self._runtime()
+        guard = self._runtime("defenseclaw-hook-guard.exe")
+        events: dict[str, list[dict[str, object]]] = {}
+        for event in doctor_hooks._DEVIN_EVENTS:
+            if commands and event in commands:
+                command = commands[event]
+            elif event in {"PreToolUse", "PermissionRequest", "UserPromptSubmit"}:
+                command = self._devin_bash(guard, "launcher-guard-devin", event)
+            else:
+                command = self._devin_bash(runtime)
+            events[event] = [{"matcher": "", "hooks": [{"type": "command", "command": command, "timeout": 10}]}]
+        config = self.profile / ".devin" / "hooks.json"
+        config.parent.mkdir(parents=True, exist_ok=True)
+        config.write_text(json.dumps({"hooks": events}), encoding="utf-8")
+        self._lock("devin", config)
+        return config, runtime, guard
+
+    def test_devin_guarded_matrix_is_healthy_and_reads_as_the_launcher(self) -> None:
+        # rel-1-0-6 GAP-0676: PreToolUse, PermissionRequest and UserPromptSubmit
+        # start the guard beside the launcher the other events start.
+        config, runtime, guard = self._devin_guarded_config()
+        guarded = self._devin_bash(guard, "launcher-guard-devin", "PreToolUse")
+
+        check = self._validate("devin", config)
+
+        self.assertEqual(check.state, "healthy", check.detail)
+        self.assertIn("entries=8", check.detail)
+        self.assertEqual(check.command, self._devin_bash(runtime))
+        self.assertTrue(doctor_hooks._managed_hook_command(guarded, "devin"))
+        self.assertEqual(
+            doctor_hooks._command_target(guarded, "devin"),
+            (str(runtime), ["hook", "--connector", "devin"], "direct"),
+        )
+
+    def test_devin_guarded_matrix_refuses_other_events_tokens_folders_and_launchers(self) -> None:
+        other = self.install / "Other"
+        other.mkdir()
+        (other / "defenseclaw-hook.exe").write_bytes(b"MZfixture")
+        (other / "defenseclaw-hook-guard.exe").write_bytes(b"MZguard")
+        guard = self.install / "defenseclaw-hook-guard.exe"
+        for name, commands, expected in (
+            ("guard on Stop", {"Stop": self._devin_bash(guard, "launcher-guard-devin", "Stop")}, "Devin Stop starts"),
+            (
+                "event token",
+                {"PreToolUse": self._devin_bash(guard, "launcher-guard-devin", "PermissionRequest")},
+                "for event 'PermissionRequest'",
+            ),
+            (
+                "guard in another folder",
+                {
+                    "PreToolUse": self._devin_bash(
+                        other / "defenseclaw-hook-guard.exe", "launcher-guard-devin", "PreToolUse"
+                    )
+                },
+                "inconsistent commands",
+            ),
+            ("mixed launchers", {"Stop": self._devin_bash(other / "defenseclaw-hook.exe")}, "inconsistent commands"),
+        ):
+            with self.subTest(name=name):
+                config, _runtime, _guard = self._devin_guarded_config(commands)
+
+                check = self._validate("devin", config)
+
+                self.assertEqual(check.state, "stale", check.detail)
+                self.assertIn(expected, check.detail)
+
+    def _codex_guarded_config(self) -> tuple[Path, Path]:
+        guard = self._runtime("defenseclaw-hook-guard.exe")
+        self._runtime()
+        command = (
+            doctor_hooks._windows_system_cmd_path()
+            + " /d /v:off /c \""
+            + str(guard)
+            + '" launcher-guard-sibling hook --connector codex'
+        )
+        return self._config("codex", command, codex_features=False), guard
+
+    def test_unusable_hook_guard_of_a_guarded_entry_fails_doctor(self) -> None:
+        # rel-1-0-6 GAP-0676 S4: a missing, non-regular or altered guard lets
+        # the calls it starts run uninspected while doctor said healthy.
+        for connector in ("codex", "devin"):
+            with self.subTest(connector=connector, case="present"):
+                if connector == "codex":
+                    config, guard = self._codex_guarded_config()
+                else:
+                    config, _runtime, guard = self._devin_guarded_config()
+                check = self._validate(connector, config)
+                self.assertEqual(check.state, "healthy", check.detail)
+            shown = str(guard) if connector == "codex" else str(guard).replace("\\", "/")
+            agent = {"codex": "Codex", "devin": "Devin"}[connector]
+            record = self.data / "installer" / "binaries.sha256"
+            record.parent.mkdir(exist_ok=True)
+            with self.subTest(connector=connector, case="recorded digest"):
+                record.write_text(f"{hashlib.sha256(guard.read_bytes()).hexdigest()}  defenseclaw-hook-guard.exe\n")
+                self.assertEqual(self._validate(connector, config).state, "healthy")
+            with self.subTest(connector=connector, case="altered"):
+                record.write_text(f"{'0' * 64}  defenseclaw-gateway.exe\n{'ab' * 32}  defenseclaw-hook-guard.exe\n")
+                check = self._validate(connector, config)
+                self.assertEqual(check.state, "guard-unusable", check.detail)
+                self.assertIn(
+                    f"the DefenseClaw hook guard {shown} does not match the copy the installer recorded, "
+                    f"so {agent} prompts and tool calls may run without DefenseClaw",
+                    check.detail,
+                )
+                self.assertIn("installer again", check.repair)
+            record.unlink()
+            guard.unlink()
+            with self.subTest(connector=connector, case="missing"):
+                check = self._validate(connector, config)
+                self.assertEqual(check.state, "guard-unusable", check.detail)
+                self.assertIn(
+                    f"the DefenseClaw hook guard {shown} is missing, "
+                    f"so {agent} prompts and tool calls run without DefenseClaw",
+                    check.detail,
+                )
+                self.assertIn("defenseclaw-gateway restart", check.repair)
+                self.assertIn(f"defenseclaw setup {connector}", check.repair)
+                result = _DoctorResult(passive=True, quiet=True)
+                with patch.object(cmd_doctor, "_windows_native_hook_check", return_value=check):
+                    cmd_doctor._check_windows_native_hooks(self.cfg, connector, f"{agent} hooks", result)
+                self.assertEqual(result.checks[-1]["status"], "fail")
+                self.assertEqual(result.checks[-1]["remediation"], check.repair)
+            guard.mkdir()
+            with self.subTest(connector=connector, case="folder"):
+                check = self._validate(connector, config)
+                self.assertEqual(check.state, "guard-unusable", check.detail)
+                self.assertIn(f"the DefenseClaw hook guard {shown} is not a regular file", check.detail)
+                self.assertIn("installer again", check.repair)
+            guard.rmdir()
+
     def test_bridge_that_answers_a_launcher_that_cannot_start_is_owned_and_exact(self) -> None:
         # rel-1-0-6 GAP-0676: the per-user bridge answers a launcher that
         # cannot start with the agent's block; doctor accepts only the exact
