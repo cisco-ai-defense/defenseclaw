@@ -131,3 +131,12 @@ func TestGAP0370OrdinaryHookRequestStillReceivesAllow(t *testing.T) {
 		t.Fatalf("ordinary hook result: status=%d body=%q err=%v", resp.StatusCode, body, err)
 	}
 }
+
+func TestGAP0370HealthAdvertisesReceiptCapability(t *testing.T) {
+	f := newManagedHookAuditFixture(t, nil)
+	reply := httptest.NewRecorder()
+	f.api.handleHealth(reply, httptest.NewRequest(http.MethodGet, "/health", nil))
+	if reply.Code != http.StatusOK || reply.Header().Get(hookexec.HookDeliveryCapabilityHeader) != "1" {
+		t.Fatalf("health capability: status=%d header=%q", reply.Code, reply.Header().Get(hookexec.HookDeliveryCapabilityHeader))
+	}
+}
