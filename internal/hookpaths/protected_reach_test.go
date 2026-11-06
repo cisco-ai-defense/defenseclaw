@@ -186,7 +186,7 @@ func TestG288ProtectedDirectoryAliasClosure(t *testing.T) {
 }
 
 func TestG288ProtectedReachAnsweredShareDelay(t *testing.T) {
-	for _, delayMS := range []int{0, 40, 80, 120, 300, 700} {
+	for _, delayMS := range []int{0, 40, 80, 120, 300, 700, 760, 780} {
 		for _, kind := range []string{"hard", "link", "ordinary"} {
 			t.Run(strconv.Itoa(delayMS)+"ms/"+kind, func(t *testing.T) {
 				root := t.TempDir()
@@ -217,7 +217,7 @@ func TestG288ProtectedReachAnsweredShareDelay(t *testing.T) {
 						t.Fatal(err)
 					}
 				}
-				fakeNetworkShare(t, root, 750*time.Millisecond, 5*time.Second, func(string) {
+				fakeNetworkShare(t, root, networkShareAnswerWait, 5*time.Second, func(string) {
 					time.Sleep(2 * time.Second)
 				})
 				oldRead := readPath
@@ -237,5 +237,30 @@ func TestG288ProtectedReachAnsweredShareDelay(t *testing.T) {
 				}
 			})
 		}
+	}
+}
+
+func TestG288LinkSourceUsesPlacedDirectory(t *testing.T) {
+	root := t.TempDir()
+	home := filepath.Join(root, "home")
+	project := filepath.Join(home, "project")
+	for _, dir := range []string{filepath.Join(home, ".ssh"), project} {
+		if err := os.MkdirAll(dir, 0o700); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for _, row := range []struct {
+		name, source string
+		want         bool
+	}{
+		{"protected", ".ssh/authorized_keys", true},
+		{"ordinary", "notes.txt", false},
+	} {
+		t.Run(row.name, func(t *testing.T) {
+			links := CommandLinksWithFacts("Bash", "env -C ~ ln -s "+row.source+" project/link", project, home, nil)
+			if got := links.LinkNamesProtectedSource(home, NewTargetMemo()); got != row.want {
+				t.Fatalf("link source = %t, want %t", got, row.want)
+			}
+		})
 	}
 }
