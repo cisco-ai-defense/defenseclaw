@@ -2981,27 +2981,32 @@ class GuardrailConfig:
 
         The source is ``config:<key>`` for a saved value, ``managed-default``
         or ``secure-client-default`` for an unset one on those profiles, and
-        ``default:<tier>`` for an unset per-user one.
+        ``pack-default:<tier>`` for an unset per-user one.
         """
         owner = getattr(self, "_owner", None)
         cfg = owner() if callable(owner) else None
         owned = cfg is not None and getattr(cfg, "guardrail", None) is self
         standalone = owned and cfg.managed_outside_secure_client()
-        if owned:
+        name = connector_paths.normalize(connector)
+        # The global key (no connector) is no automatic-protection connector:
+        # only a named connector outside the active set takes that overlay.
+        if owned and name:
             application = cfg.application_protection
-            if application.enabled and connector_paths.normalize(connector) not in cfg.active_connectors():
+            if application.enabled and name not in cfg.active_connectors():
                 override = application._connector_override(connector)
                 overlay = override.guardrail if override is not None else application.guardrail
                 if overlay.hook_fail_mode.strip():
-                    return (
-                        _normalize_hook_fail_mode(overlay.hook_fail_mode),
-                        "config:application_protection.guardrail.hook_fail_mode",
+                    key = (
+                        f"application_protection.connectors.{name}.guardrail.hook_fail_mode"
+                        if override is not None
+                        else "application_protection.guardrail.hook_fail_mode"
                     )
+                    return _normalize_hook_fail_mode(overlay.hook_fail_mode), f"config:{key}"
         pc = self._connector_override(connector)
         if pc is not None and pc.hook_fail_mode.strip():
             return (
                 _normalize_hook_fail_mode(pc.hook_fail_mode),
-                f"config:guardrail.connectors.{connector_paths.normalize(connector)}.hook_fail_mode",
+                f"config:guardrail.connectors.{name}.hook_fail_mode",
             )
         if getattr(self, "_hook_fail_mode_saved", False) and self.hook_fail_mode.strip():
             return _normalize_hook_fail_mode(self.hook_fail_mode), "config:guardrail.hook_fail_mode"
@@ -6809,7 +6814,10 @@ def _apply_secure_client_hook_fail_default(cfg: Config, raw: dict[str, Any]) -> 
     guardrail_raw = raw.get("guardrail")
     configured = guardrail_raw.get("hook_fail_mode") if isinstance(guardrail_raw, dict) else None
     if not str(configured or "").strip():
-        cfg.guardrail.hook_fail_mode = "open"
+        # The value the document runs with, not one it saves: the tracked
+        # setter would make config.yaml look as if it set the mode, and every
+        # reader would report "configured: open" for an unset key (GAP-0719).
+        object.__setattr__(cfg.guardrail, "hook_fail_mode", "open")
 
 
 def _merge_hilt(raw: dict[str, Any] | None) -> HILTConfig:

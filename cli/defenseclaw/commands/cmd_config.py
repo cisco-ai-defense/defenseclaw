@@ -1709,7 +1709,7 @@ def _show_effective_scanner_settings(masked: dict) -> None:
 
 
 def _resolve_defaults(app: AppContext, view: dict, written: dict, *, profiles: bool = True) -> None:
-    """Replace the placeholders of admission and update with what the gateway runs with.
+    """Replace the placeholders of admission, update and the hook fail mode with what the gateway runs with.
 
     The dataclass dump shows an unset admission or update key as null or {}, which
     reads as "no policy". Each asset type shows its resolved policy, and update shows
@@ -1729,6 +1729,22 @@ def _resolve_defaults(app: AppContext, view: dict, written: dict, *, profiles: b
         view["admission"] = resolved
     if isinstance(view.get("update"), dict):
         view["update"] = _update_view(cfg)[0]
+    if isinstance(view.get("guardrail"), dict):
+        _resolve_hook_fail_modes(cfg, view["guardrail"], written.get("guardrail"))
+
+
+def _resolve_hook_fail_modes(cfg: object, guardrail: dict, written: object) -> None:
+    """Show the hook fail mode a key config.yaml leaves out as the mode the
+    deployment runs, from the resolver that config get, init, doctor and
+    status read, never as the model placeholder (GAP-0719)."""
+    saved = written if isinstance(written, dict) else {}
+    resolver = cfg.guardrail.hook_fail_mode_resolution  # type: ignore[attr-defined]
+    if not str(saved.get("hook_fail_mode") or "").strip():
+        guardrail["hook_fail_mode"] = resolver("")[0]
+    connectors = guardrail.get("connectors")
+    for name, entry in (connectors.items() if isinstance(connectors, dict) else ()):
+        if isinstance(entry, dict) and not str(entry.get("hook_fail_mode") or "").strip():
+            entry["hook_fail_mode"] = resolver(name)[0]
 
 
 def _merge_defaults(written: dict, defaults: dict) -> dict:
