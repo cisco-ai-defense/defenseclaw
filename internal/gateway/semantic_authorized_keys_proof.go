@@ -1327,6 +1327,11 @@ func trustedExistingAuthorizedKeysSymlinkWrite(request trustedActionRequest, fac
 			if !hookpaths.ShareUnanswered(err) {
 				return false
 			}
+			// Strict policy already closes an unanswered share. Do not spend
+			// another identity read on a verdict that cannot change.
+			if request.StrictPolicy {
+				return possible(target)
+			}
 			// A linked parent can name a protected final file even if that
 			// file does not exist yet. Its reachable parent is positive proof.
 			parent, ok, linked := hookpaths.ResolveWriteTargetIdentity(filepath.Dir(target))

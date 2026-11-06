@@ -310,11 +310,13 @@ func boundedPathRead(name string, kind pathReadKind, identityRead bool) pathRead
 			}
 		}
 		networkShares.mu.Unlock()
-		if wait < 50*time.Millisecond {
-			wait = 50 * time.Millisecond
+		// Give a reachable identity room to answer under load while keeping
+		// the caller's first-contact share verdict within one second.
+		if wait < 75*time.Millisecond {
+			wait = 75 * time.Millisecond
 		}
-		if pending && wait > 50*time.Millisecond {
-			wait = 50 * time.Millisecond
+		if pending && wait > 75*time.Millisecond {
+			wait = 75 * time.Millisecond
 		}
 	}
 	if wait <= 0 {
