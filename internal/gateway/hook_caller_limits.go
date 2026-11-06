@@ -81,9 +81,9 @@ const (
 	hookCallerInFlight = 32
 	// hookGlobalInFlightPerProc and hookGlobalInFlightMin bound the requests
 	// the gateway holds at once for all callers together: 16 per processor,
-	// at least four accounts' sandbox hook caps. A caller's share of it is a
+	// at least four accounts' largest sandbox class caps. A caller's share is a
 	// quarter, so on a small host the minimum lets one account hold the
-	// requests its sandbox rate bucket admits within an answer window while
+	// requests its sandbox rate bucket admits within its request window while
 	// leaving room for other accounts. It also lets one host account hold its
 	// full hookCallerInFlight: 10 calls a second for the 3.5 s answer budget.
 	// With a minimum of 32 a host of two processors let one account
@@ -94,7 +94,6 @@ const (
 	// hook gives up, so holding it costs nothing the answer budget does not
 	// already bound.
 	hookGlobalInFlightPerProc = 16
-	hookGlobalInFlightMin     = 4 * sandboxUserHookInFlight
 	// hookCallerIdle is how long an idle caller's budget is kept.
 	hookCallerIdle = 5 * time.Minute
 	// hookCallerLogInterval paces the refusal log line per caller.
@@ -103,6 +102,8 @@ const (
 	managedHookReasonRateLimited = "enterprise_managed_rate_limited"
 	managedHookReasonOverloaded  = "enterprise_managed_overloaded"
 )
+
+var hookGlobalInFlightMin = 4 * max(sandboxUserHookInFlight, sandboxUserReceiptInFlight)
 
 type hookCallerLimiter struct {
 	mu        sync.Mutex
