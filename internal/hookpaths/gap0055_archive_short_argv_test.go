@@ -348,3 +348,24 @@ func TestGAP0055SuppliedArgvMayExtract(t *testing.T) {
 		}
 	}
 }
+
+// TestGAP0055SuppliedArchiveModeTwin: the twin replaces exactly the supplied
+// archive calls that show a list or test mode; an unseen or extracting
+// supplied call, a direct call and a lookup have no twin.
+func TestGAP0055SuppliedArchiveModeTwin(t *testing.T) {
+	for command, want := range map[string]string{
+		"ls *.zip | xargs unzip -v; cp a.txt build/":        "ls *.zip | true; cp a.txt build/",
+		"xargs -I{} unzip -v {} && cp a b":                  "true && cp a b",
+		"ls | xargs sudo unzip -v; ls | xargs -n1 unzip -v": "ls | true; ls | true",
+	} {
+		if twin, ok := SuppliedArchiveModeTwin(command); !ok || twin != want {
+			t.Errorf("%s: twin %q %t, want %q", command, twin, ok, want)
+		}
+	}
+	for _, command := range []string{"ls | xargs unzip; cp a b", "ls | xargs unzip -o", "ls | xargs unzip -l", "unzip -v; cp a b",
+		"command -v unzip"} {
+		if twin, ok := SuppliedArchiveModeTwin(command); ok {
+			t.Errorf("%s: twin %q, want none", command, twin)
+		}
+	}
+}

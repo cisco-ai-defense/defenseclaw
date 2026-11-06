@@ -5715,6 +5715,14 @@ var argumentSuppliers = []string{"xargs", "parallel", "find"}
 // arguments may then extract, as on 1.0.6, while a visible list or test
 // mode (xargs unzip -l) still reads as one that does not.
 func wrappedMayLink(text string) (mayLink, copyWord bool) {
+	return wrappedMayLinkRead(text, false)
+}
+
+// wrappedMayLinkRead is wrappedMayLink; visibleMode reads an archive program
+// after an argument supplier by the words it shows when it shows any, so
+// that a visible list or test mode (xargs unzip -v) reads as the mode it
+// names. An archive program that shows no word keeps the unseen reading.
+func wrappedMayLinkRead(text string, visibleMode bool) (mayLink, copyWord bool) {
 	words := strings.FieldsFunc(text, func(r rune) bool {
 		return unicode.IsSpace(r) || strings.ContainsRune("\"'`;&|(){}<>=", r)
 	})
@@ -5733,7 +5741,7 @@ func wrappedMayLink(text string) (mayLink, copyWord bool) {
 			copyWord = true
 		case slices.Contains(archivePrograms, program):
 			static := makeStatic(len(rest))
-			if supplied {
+			if supplied && (!visibleMode || len(rest) == 0) {
 				rest, static = append(slices.Clip(rest), ""), append(static, false)
 			}
 			if archiveMayLink(program, rest, static) {
@@ -5743,6 +5751,52 @@ func wrappedMayLink(text string) (mayLink, copyWord bool) {
 		supplied = supplied || slices.Contains(argumentSuppliers, program)
 	}
 	return false, copyWord
+}
+
+// SuppliedArchiveModeTwin is command with each call whose only link reading
+// is an archive program after an argument supplier that shows a list or
+// test mode (ls *.zip | xargs unzip -v) replaced by true, and whether there
+// was one. The supplied words may still turn that call into an extraction,
+// so the call is a Possible opaque scope (ROOTCAUSE-CROSS-1 Rule G): the
+// gateway compares the command with its twin, blocks a later write the twin
+// still blocks (a Named target) everywhere, and the rest in strict only
+// (gas-ux-r1 GAP-0055 round 4).
+func SuppliedArchiveModeTwin(command string) (string, bool) {
+	file, parsed := parseShell(command)
+	if !parsed {
+		return "", false
+	}
+	type span struct{ from, to int }
+	var spans []span
+	syntax.Walk(file, func(node syntax.Node) bool {
+		call, ok := node.(*syntax.CallExpr)
+		if !ok || len(call.Args) == 0 {
+			return true
+		}
+		from, to := int(call.Pos().Offset()), int(call.End().Offset())
+		if from < 0 || to > len(command) || from >= to {
+			return true
+		}
+		text := command[from:to]
+		if !tactics.RunsProgram(text, archivePrograms...) {
+			return true
+		}
+		unseen, _ := wrappedMayLinkRead(text, false)
+		visible, _ := wrappedMayLinkRead(text, true)
+		if unseen && !visible {
+			spans = append(spans, span{from, to})
+			return false
+		}
+		return true
+	})
+	if len(spans) == 0 {
+		return "", false
+	}
+	twin := command
+	for i := len(spans) - 1; i >= 0; i-- {
+		twin = twin[:spans[i].from] + "true" + twin[spans[i].to:]
+	}
+	return twin, true
 }
 
 // programBase is a program's lowercased basename without ".exe".

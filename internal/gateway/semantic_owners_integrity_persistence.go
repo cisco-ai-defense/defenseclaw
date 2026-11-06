@@ -1513,6 +1513,11 @@ func appendTrustedHomeResolvedSSHKeyWriteFinding(
 			input.Command = command
 		}
 	}
+	if !request.StrictPolicy && !request.archiveModeGraded {
+		if twin, ok := hookpaths.SuppliedArchiveModeTwin(input.Command); ok {
+			return possibleSuppliedArchiveModeFindings(findings, generation, request, input, facts, twin)
+		}
+	}
 	if trustedNoDereferenceTouchSafe(input.Command, input.CWD, facts.ActiveHome,
 		request.ResolvedWriteTargets, request.ProtectedHomeHook) {
 		// A pattern in a complete entry-only touch can leave an earlier
@@ -1611,6 +1616,53 @@ func appendTrustedHomeResolvedSSHKeyWriteFinding(
 		appendTrustedSSHPrivateKeyWriteFinding(findings, generation, request, facts),
 		generation, request, input,
 	)
+}
+
+// possibleSupplierArchiveTitle names a write after an archive call whose
+// arguments come from xargs or another supplier and whose visible list or
+// test mode the supplied words may change: a Possible link scope.
+const possibleSupplierArchiveTitle = "Archive call with supplied arguments may create a link before a later write"
+
+// possibleSuppliedArchiveModeFindings grades a command with a supplied
+// archive call that shows a list or test mode (ls *.zip | xargs unzip -v;
+// cp a.txt build/) by ROOTCAUSE-CROSS-1 Rule G. The command is read as
+// written and as its twin without those calls. A block the twin keeps names
+// its target (Named) and stays; a block only the supplied call makes is
+// Possible, so outside strict and Secure Client it is lowered to a visible
+// alert-only finding of the same rule (gas-ux-r1 GAP-0055 round 4). The
+// twin keeps the hook client's evidence of the command as written, which
+// leaves the write targets after the supplied call unlisted; a twin block
+// that is only that unresolved target (unresolvedWriteTargetTitle) is the
+// same Possible scope, not a Named one.
+func possibleSuppliedArchiveModeFindings(
+	findings []RuleFinding,
+	generation *compiledRulePackCategories,
+	request trustedActionRequest,
+	input actionfacts.Input,
+	facts actionfacts.Facts,
+	twin string,
+) []RuleFinding {
+	request.archiveModeGraded = true
+	written := appendTrustedHomeResolvedSSHKeyWriteFinding(slices.Clone(findings), generation, request, facts)
+	twinRequest := request
+	twinRequest.Input = input
+	twinRequest.Input.Command = twin
+	twinFindings := appendTrustedHomeResolvedSSHKeyWriteFinding(slices.Clone(findings), generation, twinRequest,
+		actionfacts.Analyze(twinRequest.Input))
+	for i := range written {
+		if !written[i].contributesToEnforcement() ||
+			slices.ContainsFunc(twinFindings, func(f RuleFinding) bool {
+				return f.RuleID == written[i].RuleID && f.contributesToEnforcement() && f.Title != unresolvedWriteTargetTitle
+			}) ||
+			slices.ContainsFunc(findings, func(f RuleFinding) bool {
+				return f.RuleID == written[i].RuleID && f.contributesToEnforcement()
+			}) {
+			continue
+		}
+		written[i].enforcement = findingEnforcementAlertOnly
+		written[i].Title = possibleSupplierArchiveTitle
+	}
+	return written
 }
 
 // sshControlFileTitlePrefix opens the title of a block whose only SSH target

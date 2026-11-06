@@ -156,6 +156,13 @@ type trustedActionRequest struct {
 	LegacyText         string
 	Connector          string
 	EnforcementCapable bool
+	// StrictPolicy keeps uncertain path proofs closed in strict policy and
+	// preserves Secure Client's conservative path behavior.
+	StrictPolicy      bool
+	strictHookProfile bool
+	// archiveModeGraded marks the readings of a Possible supplied archive
+	// mode (hookpaths.SuppliedArchiveModeTwin), so they are graded once.
+	archiveModeGraded bool
 	// ArtifactBody is set when LegacyText and Input.Command are the whole
 	// body of a script the call runs (the artifact lane): its comments and
 	// data are not tool-call text, so a migrated literal rule must match a
