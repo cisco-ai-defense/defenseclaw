@@ -20,6 +20,7 @@ import (
 	"time"
 
 	"github.com/defenseclaw/defenseclaw/internal/audit"
+	"github.com/defenseclaw/defenseclaw/internal/gateway/connector"
 	"github.com/defenseclaw/defenseclaw/internal/sandboxauth"
 	"github.com/defenseclaw/defenseclaw/internal/sandboxrelay"
 	"github.com/google/uuid"
@@ -31,12 +32,16 @@ import (
 // ingress answers 429 by design), the way the sandbox hook sends them
 // (hooks/_sandbox.sh): the proposal and its receipt each carry an idempotency
 // key, and an attempt that gets no answer, or a 502, 503 or 504, is posted
-// once more with the same key. Each attempt here waits 3 s, a third of the
-// 9 s first attempt of the hook, so a race build on a small runner may need
-// the retry. Every call must still end in an allow, a receipt the gateway
-// acknowledges and exactly one audited verdict: a retry joins its first
-// attempt instead of evaluating the call again, so no call is offered twice
-// and no offered answer is left unacknowledged.
+// once more with the same key. On a normal build each attempt waits 3 s, a
+// third of the first attempt of the hook. A race build on a loaded runner is
+// several times slower, so there each attempt waits what the rendered hook
+// waits (connector.SandboxHookAttemptBudgets: 9 s, then 12 s). A retry after
+// a 502, 503 or 504 fails the test: the gateway answered with an error, the
+// SQLite-busy receipt failure GAP-0490 removed. Every call must still end in
+// an allow, a receipt the gateway acknowledges and exactly one audited
+// verdict: a retry joins its first attempt instead of evaluating the call
+// again, so no call is offered twice and no offered answer is left
+// unacknowledged.
 func TestGAP0490SandboxReceiptCapacity(t *testing.T) {
 	const calls, parallel = 400, 20
 	f := newManagedHookAuditFixture(t, nil)
@@ -63,19 +68,31 @@ func TestGAP0490SandboxReceiptCapacity(t *testing.T) {
 	}
 	srv := httptest.NewServer(handler)
 	defer srv.Close()
-	client := &http.Client{Timeout: 3 * time.Second}
-	var retried atomic.Int32
+	first, retry := 3*time.Second, 3*time.Second
+	if hookAnswerRaceBuild {
+		first, retry = connector.SandboxHookAttemptBudgets()
+	}
+	var retriedTimeout, retriedStatus atomic.Int32
 	// Proposals start at 80% of the production hook rate and half its burst,
 	// so a fast runner stays inside the budget the ingress enforces. A slow
 	// runner is limited by the gateway, not by this pace.
 	limits := sandboxauth.DefaultLimiterConfig()
 	pace := rate.NewLimiter(rate.Limit(limits.HookRPS*0.8), limits.HookBurst/2)
-	post := func(body []byte, receipt bool) (int, []byte, error) {
+	// post returns the final answer and the 5xx status that caused a retry
+	// (0 when none did).
+	post := func(body []byte, receipt bool) (int, []byte, int, error) {
 		key := uuid.NewString()
+		retriedAfter := 0
 		for attempt := 1; ; attempt++ {
-			req, err := http.NewRequest(http.MethodPost, srv.URL+"/api/v1/claude-code/hook", bytes.NewReader(body))
+			wait := first
+			if attempt > 1 {
+				wait = retry
+			}
+			ctx, cancel := context.WithTimeout(t.Context(), wait)
+			req, err := http.NewRequestWithContext(ctx, http.MethodPost, srv.URL+"/api/v1/claude-code/hook", bytes.NewReader(body))
 			if err != nil {
-				return 0, nil, err
+				cancel()
+				return 0, nil, retriedAfter, err
 			}
 			req.Header.Set("Authorization", "Bearer "+token)
 			req.Header.Set("Content-Type", "application/json")
@@ -86,18 +103,24 @@ func TestGAP0490SandboxReceiptCapacity(t *testing.T) {
 			}
 			var status int
 			var out []byte
-			resp, err := client.Do(req)
+			resp, err := http.DefaultClient.Do(req)
 			if err == nil {
 				status = resp.StatusCode
 				out, err = io.ReadAll(resp.Body)
 				_ = resp.Body.Close()
 			}
-			again := err != nil || status == http.StatusBadGateway ||
+			cancel()
+			serverError := status == http.StatusBadGateway ||
 				status == http.StatusServiceUnavailable || status == http.StatusGatewayTimeout
-			if !again || attempt == 2 {
-				return status, out, err
+			if (err == nil && !serverError) || attempt == 2 {
+				return status, out, retriedAfter, err
 			}
-			retried.Add(1)
+			if serverError {
+				retriedStatus.Add(1)
+				retriedAfter = status
+			} else {
+				retriedTimeout.Add(1)
+			}
 		}
 	}
 	jobs := make(chan int, calls)
@@ -121,7 +144,12 @@ func TestGAP0490SandboxReceiptCapacity(t *testing.T) {
 					mu.Unlock()
 					continue
 				}
-				status, out, err := post([]byte(managedHookBody(session, "PreToolUse")), false)
+				status, out, retriedAfter, err := post([]byte(managedHookBody(session, "PreToolUse")), false)
+				if retriedAfter != 0 {
+					mu.Lock()
+					problems[fmt.Sprintf("proposal retried after %d", retriedAfter)]++
+					mu.Unlock()
+				}
 				if err != nil || status != http.StatusOK {
 					mu.Lock()
 					problems[fmt.Sprintf("proposal %d %s %v", status, out, err)]++
@@ -145,7 +173,12 @@ func TestGAP0490SandboxReceiptCapacity(t *testing.T) {
 				receipts[answer.DeliveryReceipt] = session
 				mu.Unlock()
 				ack, _ := json.Marshal(map[string]string{"delivery_receipt": answer.DeliveryReceipt, "result": "ack"})
-				status, out, err = post(ack, true)
+				status, out, retriedAfter, err = post(ack, true)
+				if retriedAfter != 0 {
+					mu.Lock()
+					problems[fmt.Sprintf("receipt retried after %d", retriedAfter)]++
+					mu.Unlock()
+				}
 				var received struct {
 					Received bool `json:"received"`
 				}
@@ -158,7 +191,8 @@ func TestGAP0490SandboxReceiptCapacity(t *testing.T) {
 		}()
 	}
 	wg.Wait()
-	t.Logf("%d calls at %d parallel: %d attempts retried", calls, parallel, retried.Load())
+	t.Logf("%d calls at %d parallel, attempts of %v then %v: %d retried after no answer, %d after a 5xx",
+		calls, parallel, first, retry, retriedTimeout.Load(), retriedStatus.Load())
 	if len(problems) != 0 {
 		t.Fatalf("%d calls at %d parallel: %v", calls, parallel, problems)
 	}
