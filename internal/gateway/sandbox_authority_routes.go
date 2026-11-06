@@ -1685,7 +1685,7 @@ func (a *APIServer) handleSandboxEvents(w http.ResponseWriter, r *http.Request) 
 		switch ev.Kind {
 		case sandboxrelay.EventForeignSandbox, sandboxrelay.EventForeignRule, sandboxrelay.EventForeignContainer,
 			sandboxrelay.EventSettingsDrift, sandboxrelay.EventAccessRefused, sandboxrelay.EventAccountBusy,
-			sandboxrelay.EventSandboxLifecycle, sandboxrelay.EventSandboxEgress, sandboxrelay.EventSandboxAskDecision:
+			sandboxrelay.EventSandboxLifecycle, sandboxrelay.EventSandboxEgress, sandboxrelay.EventSandboxProcess, sandboxrelay.EventSandboxAskDecision:
 		default:
 			writeSandboxRefusal(w, http.StatusBadRequest, "invalid_request", sandboxTextBadRequest)
 			return
