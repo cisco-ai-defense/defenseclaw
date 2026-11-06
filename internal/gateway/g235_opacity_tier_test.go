@@ -101,7 +101,7 @@ func TestG235OpacityTierCells(t *testing.T) {
 		{"GAP-0507/mapfile-default-protected", project, `MAPFILE=out2.txt; mapfile -t <<< disklink; cp a.txt $MAPFILE`, true, true, true},
 		{"GAP-0507/readarray-default-protected", project, `MAPFILE=out2.txt; readarray -t <<< disklink; cp a.txt $MAPFILE`, true, true, true},
 		{"GAP-0507/mapfile-offset-keeps-link", project, `MAPFILE=disklink; mapfile -O1 -t <<< out2.txt; cp a.txt $MAPFILE`, true, true, true},
-		{"GAP-0507/mapfile-zero-replaces-link", project, `MAPFILE=disklink; mapfile -O0 -t <<< out2.txt; cp a.txt $MAPFILE`, false, false, false},
+		{"GAP-0507/mapfile-zero-named-link", project, `MAPFILE=disklink; mapfile -O0 -t <<< out2.txt; cp a.txt $MAPFILE`, true, true, true},
 		{"GAP-0507/mapfile-input-old-link", project, `f=disklink; mapfile -t f <<< "$f"; cp a.txt $f`, true, true, true},
 		{"GAP-0507/mapfile-input-old-ordinary", project, `f=out2.txt; mapfile -t f <<< "$f"; cp a.txt $f`, false, false, false},
 		{"GAP-0507/declare-p-ordinary", project, `f=ordinary/n2; declare -p f; cp a.txt $f`, false, false, true},

@@ -294,20 +294,10 @@ func actionPosixTargetMentionAs(command, cwd, home string, depth int, stateOnly 
 						return false
 					}
 				}
-				if len(call.Args) > 0 {
-					// A standalone assignment changes a shell value, not a
-					// file. Its later uses are checked with the updated value.
-					for _, assign := range call.Assigns {
-						if assign.Value != nil && checkWord(assign.Value) {
-							found = true
-							return false
-						}
-					}
-				} else {
-					for _, assign := range call.Assigns {
-						if assign.Value != nil {
-							judgedWords = append(judgedWords, assign.Value)
-						}
+				for _, assign := range call.Assigns {
+					if assign.Value != nil && checkWord(assign.Value) {
+						found = true
+						return false
 					}
 				}
 				var moved *syntax.Word
