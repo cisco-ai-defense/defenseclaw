@@ -291,3 +291,95 @@ func TestOpenClawOutageKnownEnvironmentShellVariants(t *testing.T) {
 		})
 	}
 }
+
+func TestOpenClawOutageKnownEnvironmentCompoundAndChildValues(t *testing.T) {
+	home := t.TempDir()
+	prior := outageAccountHome
+	outageAccountHome = func() string { return home }
+	t.Cleanup(func() { outageAccountHome = prior })
+	root := filepath.Join(home, ".defenseclaw")
+	if err := os.MkdirAll(root, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	protected := filepath.Join(root, "config.yaml")
+	if err := os.WriteFile(protected, []byte("guardrail: {}\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	ordinary := t.TempDir()
+	linked := filepath.Join(ordinary, "config-link")
+	if err := os.Symlink(protected, linked); err != nil {
+		t.Fatal(err)
+	}
+	cases := []struct {
+		name, command, initial, want string
+	}{
+		{"protected direct assignment", `OUT="$PROT"; printf x >> "$OUT"`, "notes.txt", "protected"},
+		{"protected and assignment", `OUT="$PROT" && true; printf x >> "$OUT"`, "notes.txt", "protected"},
+		{"protected or assignment", `OUT="$PROT" || true; printf x >> "$OUT"`, "notes.txt", "protected"},
+		{"protected if assignment", `if true; then OUT="$PROT"; fi; printf x >> "$OUT"`, "notes.txt", "protected"},
+		{"protected for assignment", `for x in 1; do OUT="$PROT"; done; printf x >> "$OUT"`, "notes.txt", "protected"},
+		{"protected quoted for value", `TARGET=notes.txt; for x in "$OUT"; do TARGET="$x"; done; printf x >> "$TARGET"`, protected, "protected"},
+		{"protected unquoted for value", `TARGET=notes.txt; for x in $OUT; do TARGET="$x"; done; printf x >> "$TARGET"`, protected, "protected"},
+		{"protected else assignment", `if false; then OUT=notes.txt; else OUT="$PROT"; fi; printf x >> "$OUT"`, "notes.txt", "protected"},
+		{"protected possible assignment", `if test -f marker; then OUT="$PROT"; fi; printf x >> "$OUT"`, "notes.txt", "protected"},
+		{"protected case assignment", `case word in word) OUT="$PROT";; *) OUT=notes.txt;; esac; printf x >> "$OUT"`, "notes.txt", "protected"},
+		{"ordinary direct assignment", `OUT=notes.txt; printf x >> "$OUT"`, protected, "open"},
+		{"ordinary and assignment", `OUT=notes.txt && true; printf x >> "$OUT"`, protected, "open"},
+		{"ordinary or assignment", `OUT=notes.txt || true; printf x >> "$OUT"`, protected, "open"},
+		{"ordinary and replacement", `OUT="$PROT" && OUT=notes.txt; printf x >> "$OUT"`, protected, "open"},
+		{"ordinary or skip", `OUT=notes.txt || OUT="$PROT"; printf x >> "$OUT"`, protected, "open"},
+		{"ordinary if assignment", `if true; then OUT=notes.txt; fi; printf x >> "$OUT"`, protected, "open"},
+		{"ordinary assignment condition", `if OUT=notes.txt; then true; else OUT="$PROT"; fi; printf x >> "$OUT"`, protected, "open"},
+		{"ordinary for assignment", `for x in 1; do OUT=notes.txt; done; printf x >> "$OUT"`, protected, "open"},
+		{"ordinary repeated for assignment", `for x in 1 2; do OUT=notes.txt; done; printf x >> "$OUT"`, protected, "open"},
+		{"ordinary quoted for value", `for x in "$OUT"; do TARGET="$x"; done; printf x >> "$TARGET"`, "notes.txt", "open"},
+		{"ordinary unquoted for value", `for x in $OUT; do TARGET="$x"; done; printf x >> "$TARGET"`, "notes.txt", "open"},
+		{"ordinary overridden home in for", `for x in "$HOME"; do OUT="$x/config.yaml"; done; printf x >> "$OUT"`, protected, "open"},
+		{"ordinary empty for", `for x in; do OUT="$PROT"; done; printf x >> "$OUT"`, "notes.txt", "open"},
+		{"ordinary skipped and branch", `false && OUT="$PROT"; printf x >> "$OUT"`, "notes.txt", "open"},
+		{"ordinary skipped or branch", `true || OUT="$PROT"; printf x >> "$OUT"`, "notes.txt", "open"},
+		{"ordinary false if branch", `if false; then OUT="$PROT"; fi; printf x >> "$OUT"`, "notes.txt", "open"},
+		{"ordinary else assignment", `if false; then OUT="$PROT"; else OUT=notes.txt; fi; printf x >> "$OUT"`, protected, "open"},
+		{"ordinary both possible assignments", `if test -f marker; then OUT=notes.txt; else OUT=other.txt; fi; printf x >> "$OUT"`, protected, "open"},
+		{"ordinary case wildcard", `case word in *) OUT=notes.txt;; esac; printf x >> "$OUT"`, protected, "open"},
+		{"ordinary case exact", `case word in word) OUT=notes.txt;; *) OUT="$PROT";; esac; printf x >> "$OUT"`, protected, "open"},
+		{"protected known program", `"$COPY" notes "$OUT"`, protected, "protected"},
+		{"ordinary known program", `"$COPY" notes "$OUT"`, "notes.txt", "open"},
+		{"protected local program", `COPY=cp; "$COPY" notes "$OUT"`, protected, "protected"},
+		{"ordinary local program", `COPY=cp; "$COPY" notes "$OUT"`, "notes.txt", "open"},
+		{"protected shell positional", `sh -c 'printf x >> "$1"' _ "$OUT"`, protected, "protected"},
+		{"ordinary shell positional", `sh -c 'printf x >> "$1"' _ "$OUT"`, "notes.txt", "open"},
+		{"protected shell positional zero", `sh -c 'printf x >> "$0"' "$OUT"`, protected, "protected"},
+		{"ordinary shell positional zero", `sh -c 'printf x >> "$0"' "$OUT"`, "notes.txt", "open"},
+		{"protected shell positional two", `sh -c 'printf x >> "$2"' _ skip "$OUT"`, protected, "protected"},
+		{"ordinary shell positional two", `sh -c 'printf x >> "$2"' _ skip "$OUT"`, "notes.txt", "open"},
+		{"protected wrapped positional", `env sh -c 'printf x >> "$1"' _ "$OUT"`, protected, "protected"},
+		{"ordinary wrapped positional", `env sh -c 'printf x >> "$1"' _ "$OUT"`, "notes.txt", "open"},
+		{"protected known shell", `"$SHELL" -c 'printf x >> "$OUT"'`, protected, "protected"},
+		{"ordinary known shell", `"$SHELL" -c 'printf x >> "$OUT"'`, "notes.txt", "open"},
+		{"protected known shell body", `sh -c "$CMD"`, protected, "protected"},
+		{"ordinary known shell body", `sh -c "$CMD"`, "notes.txt", "open"},
+		{"protected local shell body", `CMD='printf x >> "$OUT"'; sh -c "$CMD"`, protected, "protected"},
+		{"ordinary local shell body", `CMD='printf x >> "$OUT"'; sh -c "$CMD"`, "notes.txt", "open"},
+		{"protected known eval body", `eval "$CMD"`, protected, "protected"},
+		{"ordinary known eval body", `eval "$CMD"`, "notes.txt", "open"},
+		{"protected eval assignment", `CMD='OUT="$PROT"'; eval "$CMD"; printf x >> "$OUT"`, "notes.txt", "protected"},
+		{"ordinary eval assignment", `CMD='OUT=notes.txt'; eval "$CMD"; printf x >> "$OUT"`, protected, "open"},
+		{"protected known link", `printf x >> "$OUT"`, linked, "protected"},
+		{"protected nested known link", `sh -c 'printf x >> "$OUT"'`, linked, "protected"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			blob, err := json.Marshal(outageToolPayload{Name: "exec", Args: map[string]interface{}{
+				"command": tc.command,
+				"env":     map[string]interface{}{"OUT": tc.initial, "TARGET": protected, "PROT": protected, "HOME": ordinary, "COPY": "cp", "SHELL": "sh", "CMD": `printf x >> "$OUT"`},
+			}, CWD: ordinary})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if got := outageToolDecision(strings.NewReader(string(blob)), root); got != tc.want {
+				t.Errorf("decision=%q want=%q for %s", got, tc.want, tc.command)
+			}
+		})
+	}
+}

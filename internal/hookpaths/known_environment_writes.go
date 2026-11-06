@@ -7,6 +7,7 @@ import (
 	"maps"
 	"path/filepath"
 	"runtime"
+	"strconv"
 	"strings"
 
 	"github.com/defenseclaw/defenseclaw/internal/actionfacts"
@@ -37,12 +38,17 @@ func KnownEnvironmentWriteTargets(command, cwd, home string, environment map[str
 }
 
 func knownEnvironmentWriteTargets(command, cwd, home string, values actionValues, depth int) (targets []string, ok bool) {
+	targets, _, ok = knownEnvironmentWriteFlow(command, cwd, home, values, depth)
+	return targets, ok
+}
+
+func knownEnvironmentWriteFlow(command, cwd, home string, values actionValues, depth int) (targets []string, states []actionValues, ok bool) {
 	if depth >= 8 || len(command) > MaxPayloadBytes {
-		return nil, false
+		return nil, nil, false
 	}
 	file, parsed := parseShell(command)
 	if !parsed {
-		return nil, false
+		return nil, nil, false
 	}
 	seen := make(map[string]bool)
 	overflow := false
@@ -68,19 +74,71 @@ func knownEnvironmentWriteTargets(command, cwd, home string, values actionValues
 		}
 		return true
 	})
-	var visit func(*syntax.Stmt, actionValues, int) bool
-	var visitList func([]*syntax.Stmt, actionValues, int) bool
-	visitList = func(statements []*syntax.Stmt, current actionValues, nesting int) bool {
+	var visit func(*syntax.Stmt, actionValues, int) ([]actionValues, bool)
+	var visitList func([]*syntax.Stmt, []actionValues, int) ([]actionValues, bool)
+	var visitIf func(*syntax.IfClause, actionValues, int) ([]actionValues, bool)
+	visitList = func(statements []*syntax.Stmt, candidates []actionValues, nesting int) ([]actionValues, bool) {
 		for _, stmt := range statements {
-			if !visit(stmt, current, nesting) {
-				return false
+			var next []actionValues
+			for _, current := range candidates {
+				outcomes, valid := visit(stmt, current, nesting)
+				if !valid {
+					return nil, false
+				}
+				next = actionAppendValueCandidates(next, outcomes)
+				if actionKeptSaturated(next) {
+					return nil, false
+				}
+			}
+			candidates = next
+		}
+		return candidates, true
+	}
+	visitIf = func(clause *syntax.IfClause, current actionValues, nesting int) ([]actionValues, bool) {
+		if len(clause.Cond) == 0 {
+			return visitList(clause.Then, []actionValues{current}, nesting+1)
+		}
+		prior := maps.Clone(current)
+		condition, valid := visitList(clause.Cond, []actionValues{current}, nesting+1)
+		if !valid {
+			return nil, false
+		}
+		truth := knownEnvironmentCondition(clause.Cond[len(clause.Cond)-1], prior, home)
+		var outcomes []actionValues
+		for _, state := range condition {
+			if truth >= 0 {
+				branch, valid := visitList(clause.Then, []actionValues{maps.Clone(state)}, nesting+1)
+				if !valid {
+					return nil, false
+				}
+				outcomes = actionAppendValueCandidates(outcomes, branch)
+			}
+			if truth <= 0 {
+				if clause.Else == nil {
+					outcomes = actionAppendValueCandidates(outcomes, []actionValues{state})
+				} else {
+					branch, valid := visitIf(clause.Else, maps.Clone(state), nesting+1)
+					if !valid {
+						return nil, false
+					}
+					outcomes = actionAppendValueCandidates(outcomes, branch)
+				}
+			}
+			if actionKeptSaturated(outcomes) {
+				return nil, false
 			}
 		}
-		return true
+		return outcomes, true
 	}
-	visit = func(stmt *syntax.Stmt, current actionValues, nesting int) bool {
+	visit = func(stmt *syntax.Stmt, current actionValues, nesting int) ([]actionValues, bool) {
 		if stmt == nil || nesting >= 32 {
-			return false
+			return nil, false
+		}
+		if stmt.Background {
+			foreground := *stmt
+			foreground.Background = false
+			_, valid := visit(&foreground, maps.Clone(current), nesting+1)
+			return []actionValues{current}, valid
 		}
 		prior := maps.Clone(current)
 		call, isCall := stmt.Cmd.(*syntax.CallExpr)
@@ -102,14 +160,17 @@ func knownEnvironmentWriteTargets(command, cwd, home string, values actionValues
 			// tee, dd and other simple writers that the gateway uses. An
 			// unknown word keeps its argv position without naming a target.
 			words := make([]string, len(call.Args))
+			knownWords := make([]bool, len(call.Args))
 			for i, word := range call.Args {
 				value, known := actionWordValue(word, prior, cwd, home)
+				knownWords[i] = known
 				if !known {
 					value = "defenseclaw-unknown-operand"
 				}
 				words[i] = value
 			}
-			program, programKnown := StaticWord(call.Args[0], home)
+			program, programKnown := words[0], knownWords[0]
+			outcomes := []actionValues{current}
 			if programKnown {
 				var rendered strings.Builder
 				for i, word := range words {
@@ -132,21 +193,43 @@ func knownEnvironmentWriteTargets(command, cwd, home string, values actionValues
 					}
 				}
 				if body := functions[program]; body != nil {
-					if !visit(body, current, nesting+1) {
-						return false
+					var valid bool
+					outcomes, valid = visit(body, current, nesting+1)
+					if !valid {
+						return nil, false
+					}
+				}
+				if program == "eval" && len(words) > 1 {
+					bodyKnown := true
+					for _, known := range knownWords[1:] {
+						bodyKnown = bodyKnown && known
+					}
+					if bodyKnown {
+						// eval joins its expanded arguments and runs them in this shell.
+						// The shared value tracker applies invocation assignments
+						// before the nested body, then the body's values persist.
+						evalValues := maps.Clone(prior)
+						actionUpdateValuesAs(stmt, evalValues, cwd, home, false)
+						child, childStates, childOK := knownEnvironmentWriteFlow(strings.Join(words[1:], " "), cwd, home, evalValues, depth+1)
+						if !childOK {
+							return nil, false
+						}
+						for _, target := range child {
+							add(target)
+						}
+						outcomes = childStates
 					}
 				}
 				if programBase(program) == "env" || actionInterpreterWrappers[programBase(program)] ||
 					posixShellProgram(programBase(program)) {
-					for i, word := range call.Args {
-						shell, known := StaticWord(word, home)
-						if !known || !posixShellProgram(programBase(shell)) {
+					for i, shell := range words {
+						if !knownWords[i] || !posixShellProgram(programBase(shell)) {
 							continue
 						}
 						childValues := maps.Clone(current)
 						envIndex := -1
 						for j := 0; j < i; j++ {
-							if wrapped, fixed := StaticWord(call.Args[j], home); fixed && programBase(wrapped) == "env" {
+							if knownWords[j] && programBase(words[j]) == "env" {
 								envIndex = j
 								break
 							}
@@ -175,16 +258,28 @@ func knownEnvironmentWriteTargets(command, cwd, home string, values actionValues
 							}
 						}
 						for j := i + 1; j+1 < len(call.Args); j++ {
-							option, known := StaticWord(call.Args[j], home)
-							if !known || !strings.HasPrefix(option, "-") {
+							option := words[j]
+							if !knownWords[j] || !strings.HasPrefix(option, "-") {
 								break
 							}
 							if option == "-c" || len(option) > 2 && strings.Contains(option[1:], "c") && !strings.HasPrefix(option, "--") {
-								body, bodyKnown := StaticWord(call.Args[j+1], home)
-								if bodyKnown {
-									child, childOK := knownEnvironmentWriteTargets(body, cwd, home, childValues, depth+1)
+								if knownWords[j+1] {
+									// The first word after the body is $0; later words are
+									// positional parameters in the child shell.
+									for name := range childValues {
+										if _, err := strconv.Atoi(name); err == nil {
+											delete(childValues, name)
+										}
+									}
+									for position, value := range words[j+2:] {
+										name := strconv.Itoa(position)
+										if knownWords[j+2+position] {
+											childValues[name] = value
+										}
+									}
+									child, childOK := knownEnvironmentWriteTargets(words[j+1], cwd, home, childValues, depth+1)
 									if !childOK {
-										return false
+										return nil, false
 									}
 									for _, target := range child {
 										add(target)
@@ -199,59 +294,284 @@ func knownEnvironmentWriteTargets(command, cwd, home string, values actionValues
 			}
 			// Invocation assignments do not persist in the calling shell.
 			if len(call.Assigns) > 0 && (!programKnown || !knownEnvSpecialBuiltin(program)) {
-				for _, assignment := range call.Assigns {
-					if assignment.Name == nil {
-						continue
-					}
-					name := assignment.Name.Value
-					if value, present := prior[name]; present {
-						current[name] = value
-					} else {
-						delete(current, name)
+				for _, outcome := range outcomes {
+					for _, assignment := range call.Assigns {
+						if assignment.Name == nil {
+							continue
+						}
+						name := assignment.Name.Value
+						if value, present := prior[name]; present {
+							outcome[name] = value
+						} else {
+							delete(outcome, name)
+						}
 					}
 				}
 			}
-			return true
+			return outcomes, true
 		}
 		switch compound := stmt.Cmd.(type) {
 		case *syntax.Block:
-			return visitList(compound.Stmts, current, nesting+1)
+			return visitList(compound.Stmts, []actionValues{current}, nesting+1)
 		case *syntax.Subshell:
-			return visitList(compound.Stmts, maps.Clone(current), nesting+1)
+			_, valid := visitList(compound.Stmts, []actionValues{maps.Clone(current)}, nesting+1)
+			return []actionValues{current}, valid
 		case *syntax.BinaryCmd:
-			branch := maps.Clone(current)
-			return visit(compound.X, branch, nesting+1) && visit(compound.Y, branch, nesting+1)
+			if compound.Op == syntax.Pipe || compound.Op == syntax.PipeAll {
+				if _, valid := visit(compound.X, maps.Clone(current), nesting+1); !valid {
+					return nil, false
+				}
+				_, valid := visit(compound.Y, maps.Clone(current), nesting+1)
+				return []actionValues{current}, valid
+			}
+			leftPrior := maps.Clone(current)
+			left, valid := visit(compound.X, current, nesting+1)
+			if !valid {
+				return nil, false
+			}
+			truth := knownEnvironmentCondition(compound.X, leftPrior, home)
+			var outcomes []actionValues
+			for _, state := range left {
+				if truth == 0 || compound.Op == syntax.AndStmt && truth < 0 || compound.Op == syntax.OrStmt && truth > 0 {
+					outcomes = actionAppendValueCandidates(outcomes, []actionValues{state})
+				}
+				if truth == 0 || compound.Op == syntax.AndStmt && truth > 0 || compound.Op == syntax.OrStmt && truth < 0 {
+					right, valid := visit(compound.Y, maps.Clone(state), nesting+1)
+					if !valid {
+						return nil, false
+					}
+					outcomes = actionAppendValueCandidates(outcomes, right)
+				}
+				if actionKeptSaturated(outcomes) {
+					return nil, false
+				}
+			}
+			return outcomes, true
 		case *syntax.IfClause:
-			branch := maps.Clone(current)
-			if !visitList(compound.Cond, branch, nesting+1) || !visitList(compound.Then, branch, nesting+1) {
-				return false
-			}
-			for alternative := compound.Else; alternative != nil; alternative = alternative.Else {
-				if !visitList(alternative.Cond, maps.Clone(current), nesting+1) ||
-					!visitList(alternative.Then, maps.Clone(current), nesting+1) {
-					return false
-				}
-			}
+			return visitIf(compound, current, nesting+1)
 		case *syntax.WhileClause:
-			branch := maps.Clone(current)
-			return visitList(compound.Cond, branch, nesting+1) && visitList(compound.Do, branch, nesting+1)
-		case *syntax.ForClause:
-			return visitList(compound.Do, maps.Clone(current), nesting+1)
-		case *syntax.CaseClause:
-			for _, item := range compound.Items {
-				if !visitList(item.Stmts, maps.Clone(current), nesting+1) {
-					return false
+			prior := maps.Clone(current)
+			condition, valid := visitList(compound.Cond, []actionValues{current}, nesting+1)
+			if !valid {
+				return nil, false
+			}
+			truth := 0
+			if len(compound.Cond) > 0 {
+				truth = knownEnvironmentCondition(compound.Cond[len(compound.Cond)-1], prior, home)
+			}
+			if compound.Until {
+				truth = -truth
+			}
+			var outcomes []actionValues
+			for _, state := range condition {
+				if truth <= 0 {
+					outcomes = actionAppendValueCandidates(outcomes, []actionValues{state})
+				}
+				if truth >= 0 {
+					body, valid := visitList(compound.Do, []actionValues{maps.Clone(state)}, nesting+1)
+					if !valid {
+						return nil, false
+					}
+					outcomes = actionAppendValueCandidates(outcomes, body)
+				}
+				if actionKeptSaturated(outcomes) {
+					return nil, false
 				}
 			}
+			return outcomes, true
+		case *syntax.ForClause:
+			if iteration, ok := compound.Loop.(*syntax.WordIter); ok && !compound.Select && iteration.InPos.IsValid() {
+				items := make([]string, 0, len(iteration.Items))
+				fixed := true
+				for _, word := range iteration.Items {
+					item, known := knownEnvironmentForItem(word, current, cwd, home)
+					if !known {
+						fixed = false
+						break
+					}
+					items = append(items, item)
+				}
+				if fixed {
+					states := []actionValues{current}
+					for _, item := range items {
+						var next []actionValues
+						for _, state := range states {
+							state = maps.Clone(state)
+							state[iteration.Name.Value] = item
+							body, valid := visitList(compound.Do, []actionValues{state}, nesting+1)
+							if !valid {
+								return nil, false
+							}
+							next = actionAppendValueCandidates(next, body)
+						}
+						if actionKeptSaturated(next) {
+							return nil, false
+						}
+						states = next
+					}
+					return states, true
+				}
+			}
+			branch := maps.Clone(current)
+			if iteration, ok := compound.Loop.(*syntax.WordIter); ok && iteration.Name != nil {
+				delete(branch, iteration.Name.Value)
+			}
+			body, valid := visitList(compound.Do, []actionValues{branch}, nesting+1)
+			if !valid {
+				return nil, false
+			}
+			outcomes := actionAppendValueCandidates([]actionValues{current}, body)
+			return outcomes, !actionKeptSaturated(outcomes)
+		case *syntax.CaseClause:
+			selector, selectorKnown := actionWordValueWithGlob(compound.Word, current, cwd, home, true)
+			plainBranches := true
+			catchAll := false
+			for _, item := range compound.Items {
+				if item.Op != 0 && item.Op != syntax.Break {
+					plainBranches = false
+				}
+				for _, pattern := range item.Patterns {
+					if pattern.Lit() == "*" {
+						catchAll = true
+					}
+				}
+			}
+			if selectorKnown && plainBranches {
+				definite := true
+				for _, item := range compound.Items {
+					match := false
+					for _, pattern := range item.Patterns {
+						if pattern.Lit() == "*" {
+							match = true
+							break
+						}
+						value, known := actionWordValueWithGlob(pattern, current, cwd, home, true)
+						if !known || knownEnvironmentPatternGlobs(pattern) {
+							definite = false
+							break
+						}
+						if value == selector {
+							match = true
+							break
+						}
+					}
+					if !definite {
+						break
+					}
+					if match {
+						return visitList(item.Stmts, []actionValues{current}, nesting+1)
+					}
+				}
+				if definite {
+					return []actionValues{current}, true
+				}
+			}
+			var outcomes []actionValues
+			if !catchAll || !plainBranches {
+				outcomes = []actionValues{current}
+			}
+			for _, item := range compound.Items {
+				branch, valid := visitList(item.Stmts, []actionValues{maps.Clone(current)}, nesting+1)
+				if !valid {
+					return nil, false
+				}
+				outcomes = actionAppendValueCandidates(outcomes, branch)
+				if actionKeptSaturated(outcomes) {
+					return nil, false
+				}
+			}
+			return outcomes, true
 		}
-		return true
+		return []actionValues{current}, true
 	}
-	return targets, visitList(file.Stmts, values, 0) && !overflow
+	states, valid := visitList(file.Stmts, []actionValues{values}, 0)
+	return targets, states, valid && !overflow
 }
 
 func isKnownEnvDeclaration(command syntax.Command) bool {
 	_, ok := command.(*syntax.DeclClause)
 	return ok
+}
+
+// An assignment-only command succeeds when it has no command substitution or
+// known readonly destination. Its value persists even when a following branch
+// is skipped. Other conditions keep both possible paths.
+func knownEnvironmentCondition(stmt *syntax.Stmt, values actionValues, home string) int {
+	if truth := actionStaticCondition(stmt, home); truth != 0 {
+		return truth
+	}
+	if stmt == nil || stmt.Background || len(stmt.Redirs) != 0 {
+		return 0
+	}
+	call, ok := stmt.Cmd.(*syntax.CallExpr)
+	if !ok || len(call.Args) != 0 || len(call.Assigns) == 0 {
+		return 0
+	}
+	for _, assignment := range call.Assigns {
+		if assignment.Name == nil || values[actionReadonlyValuePrefix+assignment.Name.Value] != "" {
+			return 0
+		}
+		if assignment.Value != nil {
+			commandSubstitution := false
+			syntax.Walk(assignment.Value, func(node syntax.Node) bool {
+				if _, found := node.(*syntax.CmdSubst); found {
+					commandSubstitution = true
+					return false
+				}
+				return true
+			})
+			if commandSubstitution {
+				return 0
+			}
+		}
+	}
+	if stmt.Negated {
+		return -1
+	}
+	return 1
+}
+
+// A for-list item is one iteration only when its known expansion cannot be
+// split or globbed. Quoted values use the active shell bindings, including a
+// tool-supplied HOME, rather than the account home used for protection.
+func knownEnvironmentForItem(word *syntax.Word, values actionValues, cwd, home string) (string, bool) {
+	if word == nil {
+		return "", false
+	}
+	unquotedExpansion := false
+	for _, part := range word.Parts {
+		switch part := part.(type) {
+		case *syntax.Lit:
+			if strings.ContainsAny(part.Value, "*?[") {
+				return "", false
+			}
+		case *syntax.ParamExp, *syntax.CmdSubst, *syntax.ArithmExp:
+			unquotedExpansion = true
+		}
+	}
+	value, known := actionWordValueWithGlob(word, values, cwd, home, true)
+	if !known {
+		return "", false
+	}
+	if unquotedExpansion {
+		ifs, set := values["IFS"]
+		if !set {
+			ifs = " \t\n"
+		}
+		if value == "" || strings.ContainsAny(value, ifs+"*?[") {
+			return "", false
+		}
+	}
+	return value, true
+}
+
+func knownEnvironmentPatternGlobs(word *syntax.Word) bool {
+	for _, part := range word.Parts {
+		if literal, ok := part.(*syntax.Lit); ok && strings.ContainsAny(literal.Value, "*?[") {
+			return true
+		}
+	}
+	return false
 }
 
 func knownEnvSpecialBuiltin(program string) bool {
