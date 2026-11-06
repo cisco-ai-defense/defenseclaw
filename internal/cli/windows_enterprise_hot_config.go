@@ -1695,7 +1695,7 @@ func keepWindowsEnterpriseRejectedConfig(layout managed.StandaloneLayout, curren
 // kept copy could carry the very entry it was rejected for (GAP-0590 review
 // S3). It returns kept, or "" when it could not be kept.
 func keepWindowsEnterpriseRejectedFile(kept string, current []byte) string {
-	if err := writeFreshFileWithDACL(kept, current, windowsBundleAdminFileSDDL()); err != nil {
+	if _, err := writeFreshFileWithDACL(kept, current, windowsBundleAdminFileSDDL()); err != nil {
 		return ""
 	}
 	return kept
@@ -1723,6 +1723,14 @@ func windowsEnterpriseUntrustedProblem(untrusted *managed.UntrustedPrincipalErro
 	return "can be changed by " + untrusted.SID + ", which only SYSTEM, Administrators and TrustedInstaller may do"
 }
 
+// windowsEnterpriseReplacedFile is a managed content file Setup wrote new
+// before the lifecycle transaction; the zero value means nothing was written.
+type windowsEnterpriseReplacedFile struct {
+	kept      string                           // where the replaced bytes are kept, administrators only
+	untrusted *managed.UntrustedPrincipalError // why it was replaced; nil for a config.yaml that did not parse
+	pending   string                           // the replaced object is held open and is deleted at the next restart
+}
+
 // windowsEnterpriseFreshRewrite is a managed content file that Setup writes
 // again from an approved source when another account could change it.
 type windowsEnterpriseFreshRewrite struct {
@@ -1744,32 +1752,33 @@ type windowsEnterpriseFreshRewrite struct {
 // again there; it returns "" when there is nothing to do: the file is
 // trusted again, a transaction is pending (its recovery restores its own
 // preimage), or the lock is busy (the transaction then refuses the file).
-func rewriteWindowsEnterpriseDriftedFile(layout managed.StandaloneLayout, rewrite windowsEnterpriseFreshRewrite) (string, *managed.UntrustedPrincipalError, error) {
+func rewriteWindowsEnterpriseDriftedFile(layout managed.StandaloneLayout, rewrite windowsEnterpriseFreshRewrite) (windowsEnterpriseReplacedFile, error) {
 	roots, err := windowsManagedLayout.roots(managed.ProfileStandalone)
 	if err != nil {
-		return "", nil, nil
+		return windowsEnterpriseReplacedFile{}, nil
 	}
 	release, err := windowsEnterpriseHotConfigLock(filepath.Join(roots.LifecycleDir, "lifecycle.lock"))
 	if err != nil {
-		return "", nil, nil
+		return windowsEnterpriseReplacedFile{}, nil
 	}
 	defer release()
 	untrusted := windowsEnterpriseInstalledLeafDrift(rewrite.path, rewrite.label)
 	if untrusted == nil || windowsBundleInstallTransactionPending(layout) {
-		return "", nil, nil
+		return windowsEnterpriseReplacedFile{}, nil
 	}
 	current, err := readWindowsEnterpriseBoundedFile(rewrite.path, windowsEnterpriseHotConfigMaxBytes)
 	if err != nil {
-		return "", nil, fmt.Errorf("read the installed %s to keep it: %w", rewrite.path, err)
+		return windowsEnterpriseReplacedFile{}, fmt.Errorf("read the installed %s to keep it: %w", rewrite.path, err)
 	}
 	kept := keepWindowsEnterpriseRejectedFile(rewrite.kept, current)
 	if kept == "" {
-		return "", nil, fmt.Errorf("the installed %s %s and could not be kept as %s", rewrite.path, windowsEnterpriseUntrustedProblem(untrusted), rewrite.kept)
+		return windowsEnterpriseReplacedFile{}, fmt.Errorf("the installed %s %s and could not be kept as %s", rewrite.path, windowsEnterpriseUntrustedProblem(untrusted), rewrite.kept)
 	}
-	if err := writeFreshFileWithDACL(rewrite.path, rewrite.approved, rewrite.sddl); err != nil {
-		return "", nil, fmt.Errorf("write a new %s from the approved source: %w", rewrite.path, err)
+	pending, err := writeFreshFileWithDACL(rewrite.path, rewrite.approved, rewrite.sddl)
+	if err != nil {
+		return windowsEnterpriseReplacedFile{}, fmt.Errorf("write a new %s from the approved source: %w", rewrite.path, err)
 	}
-	return kept, untrusted, nil
+	return windowsEnterpriseReplacedFile{kept: kept, untrusted: untrusted, pending: pending}, nil
 }
 
 // installWindowsEnterpriseSuppliedConfigOverRefused puts the supplied config
@@ -1792,45 +1801,45 @@ func rewriteWindowsEnterpriseDriftedFile(layout managed.StandaloneLayout, rewrit
 // transaction accepts, a pending transaction, a supplied config that is the
 // installed file (a drifted file is never its own approved source), a source
 // a standard user can write (the transaction refuses it), or a busy lock.
-func installWindowsEnterpriseSuppliedConfigOverRefused(configPath string) (string, *managed.UntrustedPrincipalError, error) {
+func installWindowsEnterpriseSuppliedConfigOverRefused(configPath string) (windowsEnterpriseReplacedFile, error) {
 	supplied := strings.TrimSpace(configPath)
 	if supplied == "" || !windowsEnterpriseIsElevated() {
-		return "", nil, nil
+		return windowsEnterpriseReplacedFile{}, nil
 	}
 	layout, err := windowsEnterpriseHotConfigLayout()
 	if err != nil {
-		return "", nil, nil
+		return windowsEnterpriseReplacedFile{}, nil
 	}
 	current, err := readWindowsEnterpriseBoundedFile(layout.ConfigPath, windowsEnterpriseHotConfigMaxBytes)
 	if err != nil {
-		return "", nil, nil
+		return windowsEnterpriseReplacedFile{}, nil
 	}
 	untrusted := windowsEnterpriseInstalledLeafDrift(layout.ConfigPath, "managed config")
 	if (untrusted == nil && windowsEnterpriseConfigParses(current)) || windowsBundleInstallTransactionPending(layout) {
-		return "", nil, nil
+		return windowsEnterpriseReplacedFile{}, nil
 	}
 	if windowsEnterpriseSamePath(supplied, layout.ConfigPath) || windowsEnterpriseHotConfigSourceCheck(supplied) != nil {
-		return "", nil, nil
+		return windowsEnterpriseReplacedFile{}, nil
 	}
 	next, err := readWindowsEnterpriseBoundedFile(supplied, windowsEnterpriseHotConfigMaxBytes)
 	if err != nil {
-		return "", nil, fmt.Errorf("read the supplied config %s: %w", supplied, err)
+		return windowsEnterpriseReplacedFile{}, fmt.Errorf("read the supplied config %s: %w", supplied, err)
 	}
 	if !windowsEnterpriseConfigParses(next) {
 		if untrusted == nil {
-			return "", nil, fmt.Errorf("the installed %s does not parse, and neither does the supplied config %s: its root must be a YAML mapping", layout.ConfigPath, supplied)
+			return windowsEnterpriseReplacedFile{}, fmt.Errorf("the installed %s does not parse, and neither does the supplied config %s: its root must be a YAML mapping", layout.ConfigPath, supplied)
 		}
-		return "", nil, fmt.Errorf("the installed %s %s, and the supplied config %s does not parse: its root must be a YAML mapping", layout.ConfigPath, windowsEnterpriseUntrustedProblem(untrusted), supplied)
+		return windowsEnterpriseReplacedFile{}, fmt.Errorf("the installed %s %s, and the supplied config %s does not parse: its root must be a YAML mapping", layout.ConfigPath, windowsEnterpriseUntrustedProblem(untrusted), supplied)
 	}
 	// This file becomes the transaction snapshot. Check it with the same
 	// service pins and rule-pack compiler before replacing the refused file.
 	if err := windowsEnterpriseStandaloneConfigPreflight(supplied); err != nil {
-		return "", nil, err
+		return windowsEnterpriseReplacedFile{}, err
 	}
 	if untrusted != nil {
 		service, err := managed.WindowsServiceAccountSID(layout.ServiceUser)
 		if err != nil || service == nil {
-			return "", nil, fmt.Errorf("the installed %s %s, and the gateway service account %q to write a new one for cannot be resolved: %v",
+			return windowsEnterpriseReplacedFile{}, fmt.Errorf("the installed %s %s, and the gateway service account %q to write a new one for cannot be resolved: %v",
 				layout.ConfigPath, windowsEnterpriseUntrustedProblem(untrusted), layout.ServiceUser, err)
 		}
 		return rewriteWindowsEnterpriseDriftedFile(layout, windowsEnterpriseFreshRewrite{
@@ -1841,11 +1850,11 @@ func installWindowsEnterpriseSuppliedConfigOverRefused(configPath string) (strin
 	}
 	roots, err := windowsManagedLayout.roots(managed.ProfileStandalone)
 	if err != nil {
-		return "", nil, nil
+		return windowsEnterpriseReplacedFile{}, nil
 	}
 	release, err := windowsEnterpriseHotConfigLock(filepath.Join(roots.LifecycleDir, "lifecycle.lock"))
 	if err != nil {
-		return "", nil, nil
+		return windowsEnterpriseReplacedFile{}, nil
 	}
 	defer release()
 	// Another lifecycle run may have committed a config while the preflight
@@ -1855,18 +1864,18 @@ func installWindowsEnterpriseSuppliedConfigOverRefused(configPath string) (strin
 	// before (GAP-1177).
 	current, err = readWindowsEnterpriseBoundedFile(layout.ConfigPath, windowsEnterpriseHotConfigMaxBytes)
 	if err != nil || windowsEnterpriseConfigParses(current) || windowsBundleInstallTransactionPending(layout) {
-		return "", nil, nil
+		return windowsEnterpriseReplacedFile{}, nil
 	}
 	kept := keepWindowsEnterpriseRejectedConfig(layout, current)
 	if kept == "" {
-		return "", nil, fmt.Errorf("the installed %s does not parse and could not be kept as rejected-config.yaml", layout.ConfigPath)
+		return windowsEnterpriseReplacedFile{}, fmt.Errorf("the installed %s does not parse and could not be kept as rejected-config.yaml", layout.ConfigPath)
 	}
 	if err := recordWindowsEnterpriseLifecycleConfigWrite(layout.ConfigPath, next, windowsEnterpriseSuppliedConfigRecordReason, func() error {
 		return writeFileKeepingDACL(layout.ConfigPath, next, layout.ConfigPath)
 	}); err != nil {
-		return "", nil, fmt.Errorf("install the supplied config over the unparseable %s: %w", layout.ConfigPath, err)
+		return windowsEnterpriseReplacedFile{}, fmt.Errorf("install the supplied config over the unparseable %s: %w", layout.ConfigPath, err)
 	}
-	return kept, nil, nil
+	return windowsEnterpriseReplacedFile{kept: kept}, nil
 }
 
 // installWindowsEnterpriseApprovedManifestOverDrift writes the hook guardian
@@ -1882,44 +1891,44 @@ func installWindowsEnterpriseApprovedManifestOverDrift(
 	ctx context.Context,
 	logf enterprisehooks.EnumerationLogger,
 	configPath, manifestPath string,
-) (string, *managed.UntrustedPrincipalError, error) {
+) (windowsEnterpriseReplacedFile, error) {
 	if !windowsEnterpriseIsElevated() {
-		return "", nil, nil
+		return windowsEnterpriseReplacedFile{}, nil
 	}
 	layout, err := windowsEnterpriseHotConfigLayout()
 	if err != nil || strings.TrimSpace(layout.ManifestPath) == "" {
-		return "", nil, nil
+		return windowsEnterpriseReplacedFile{}, nil
 	}
 	const label = "hook guardian manifest"
 	if windowsEnterpriseInstalledLeafDrift(layout.ManifestPath, label) == nil || windowsBundleInstallTransactionPending(layout) {
-		return "", nil, nil
+		return windowsEnterpriseReplacedFile{}, nil
 	}
 	source := strings.TrimSpace(manifestPath)
 	if source != "" {
 		if windowsEnterpriseSamePath(source, layout.ManifestPath) || windowsEnterpriseManifestSourceCheck(source) != nil {
-			return "", nil, nil
+			return windowsEnterpriseReplacedFile{}, nil
 		}
 	} else {
 		approved := strings.TrimSpace(configPath)
 		if approved == "" || windowsEnterpriseSamePath(approved, layout.ConfigPath) || windowsEnterpriseHotConfigSourceCheck(approved) != nil {
-			return "", nil, nil
+			return windowsEnterpriseReplacedFile{}, nil
 		}
 		staged, cleanup, err := windowsEnterpriseApprovedManifestStager(ctx, logf, approved)
 		if errors.Is(err, errWindowsEnterpriseEnsureManifestRequired) {
-			return "", nil, nil
+			return windowsEnterpriseReplacedFile{}, nil
 		}
 		if err != nil {
-			return "", nil, fmt.Errorf("the installed %s needs a new manifest, and none could be enumerated from the supplied config %s: %w", layout.ManifestPath, approved, err)
+			return windowsEnterpriseReplacedFile{}, fmt.Errorf("the installed %s needs a new manifest, and none could be enumerated from the supplied config %s: %w", layout.ManifestPath, approved, err)
 		}
 		defer cleanup()
 		source = staged
 	}
 	if _, err := enterprisehooks.LoadManifest(source); err != nil {
-		return "", nil, fmt.Errorf("the hook guardian manifest %s to write over the installed %s does not load: %w", source, layout.ManifestPath, err)
+		return windowsEnterpriseReplacedFile{}, fmt.Errorf("the hook guardian manifest %s to write over the installed %s does not load: %w", source, layout.ManifestPath, err)
 	}
 	approved, err := readWindowsEnterpriseBoundedFile(source, windowsEnterpriseHotConfigMaxBytes)
 	if err != nil {
-		return "", nil, fmt.Errorf("read the hook guardian manifest %s: %w", source, err)
+		return windowsEnterpriseReplacedFile{}, fmt.Errorf("read the hook guardian manifest %s: %w", source, err)
 	}
 	return rewriteWindowsEnterpriseDriftedFile(layout, windowsEnterpriseFreshRewrite{
 		path: layout.ManifestPath, label: label,
@@ -1937,13 +1946,17 @@ func windowsEnterpriseSamePath(left, right string) bool {
 
 // windowsEnterpriseReplacedFileChange is the result line for a managed file
 // Setup replaced before the lifecycle transaction: name is config.yaml or
-// targets.yaml; untrusted is nil for a config.yaml that did not parse.
-func windowsEnterpriseReplacedFileChange(name, kept string, untrusted *managed.UntrustedPrincipalError, action string) string {
-	if untrusted == nil {
-		return "the installed " + name + " did not parse; kept it as " + kept + " and installed the supplied config before the " + action
+// targets.yaml.
+func windowsEnterpriseReplacedFileChange(name string, replaced windowsEnterpriseReplacedFile, action string) string {
+	if replaced.untrusted == nil {
+		return "the installed " + name + " did not parse; kept it as " + replaced.kept + " and installed the supplied config before the " + action
 	}
-	return "the installed " + name + " " + windowsEnterpriseUntrustedProblem(untrusted) + "; kept it as " + kept +
+	change := "the installed " + name + " " + windowsEnterpriseUntrustedProblem(replaced.untrusted) + "; kept it as " + replaced.kept +
 		" and wrote a new " + name + " from the approved source, with Setup's access list, before the " + action
+	if replaced.pending != "" {
+		change += "; " + replaced.pending
+	}
+	return change
 }
 
 // windowsEnterpriseSuppliedConfigRecordReason is the reason of the config
