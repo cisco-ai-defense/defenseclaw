@@ -156,57 +156,290 @@ func networkShareError(op, name string) error {
 	return &fs.PathError{Op: op, Path: name, Err: errNetworkShareUnanswered}
 }
 
+// Every file operation below a share uses one deadline measured from first
+// contact. A completed read is not cached: a later call must see current file
+// identity. The slot limit bounds outstanding operating-system reads.
+type pathReadKind uint8
+
+const (
+	readStat pathReadKind = iota
+	readLstat
+	readStatPinned
+	readOpen
+	readDir
+	readLink
+	readEvalSymlinks
+)
+
+type pathReadResult struct {
+	info    os.FileInfo
+	file    *os.File
+	entries []os.DirEntry
+	link    string
+	err     error
+}
+
+var networkReadSlots = make(chan struct{}, networkShareProbeLimit)
+
+// A file read that has exhausted the answer budget may still be held in the
+// operating system. Path scans use the same unknown answer until it returns.
+// Identity reads get one brief chance to resolve another reachable file.
+var pendingNetworkReads struct {
+	mu    sync.Mutex
+	roots map[string]*pendingNetworkRead
+}
+
+type pendingNetworkRead struct {
+	done       chan struct{}
+	lastAccess time.Time
+	quietFor   time.Duration
+}
+
+func networkReadPending(root string) bool {
+	pendingNetworkReads.mu.Lock()
+	defer pendingNetworkReads.mu.Unlock()
+	state := pendingNetworkReads.roots[root]
+	if state == nil {
+		return false
+	}
+	select {
+	case <-state.done:
+		// Consecutive reads in one decision share the unknown answer. A
+		// later read after a quiet interval retries the current identity.
+		if time.Since(state.lastAccess) >= state.quietFor {
+			delete(pendingNetworkReads.roots, root)
+			return false
+		}
+	default:
+	}
+	state.lastAccess = time.Now()
+	return true
+}
+
+func rememberPendingNetworkRead(root string, done chan struct{}) {
+	pendingNetworkReads.mu.Lock()
+	if pendingNetworkReads.roots == nil {
+		pendingNetworkReads.roots = make(map[string]*pendingNetworkRead)
+	}
+	state := &pendingNetworkRead{
+		done: done, lastAccess: time.Now(), quietFor: max(networkShareAnswerWait/3, time.Millisecond),
+	}
+	pendingNetworkReads.roots[root] = state
+	pendingNetworkReads.mu.Unlock()
+	go func() {
+		<-done
+		pendingNetworkReads.mu.Lock()
+		if pendingNetworkReads.roots[root] == state {
+			state.lastAccess = time.Now()
+		}
+		pendingNetworkReads.mu.Unlock()
+		for {
+			time.Sleep(state.quietFor)
+			pendingNetworkReads.mu.Lock()
+			if pendingNetworkReads.roots[root] != state {
+				pendingNetworkReads.mu.Unlock()
+				return
+			}
+			if time.Since(state.lastAccess) >= state.quietFor {
+				delete(pendingNetworkReads.roots, root)
+				pendingNetworkReads.mu.Unlock()
+				return
+			}
+			pendingNetworkReads.mu.Unlock()
+		}
+	}()
+}
+
+var readPath = func(name string, kind pathReadKind) (result pathReadResult) {
+	switch kind {
+	case readStat:
+		result.info, result.err = os.Stat(name)
+	case readLstat:
+		result.info, result.err = os.Lstat(name)
+	case readStatPinned:
+		result.info, result.err = pathidentity.StatPinned(name)
+	case readOpen:
+		result.file, result.err = os.Open(name)
+	case readDir:
+		result.entries, result.err = os.ReadDir(name)
+	case readLink:
+		result.link, result.err = os.Readlink(name)
+	case readEvalSymlinks:
+		result.link, result.err = filepath.EvalSymlinks(name)
+	}
+	return result
+}
+
+// identityRead lets the gateway accept a file identity that answers while its
+// share root probe is pending. An error still waits for the root answer, so a
+// missing path on an unanswered share is not mistaken for a missing file.
+func boundedPathRead(name string, kind pathReadKind, identityRead bool) pathReadResult {
+	root := networkShareRootOf(name)
+	if root == "" {
+		return readPath(name, kind)
+	}
+	root = strings.ToLower(filepath.ToSlash(root))
+	pending := networkReadPending(root)
+	if pending && !identityRead {
+		return pathReadResult{err: networkShareError("read", name)}
+	}
+	started := time.Now()
+	var rootReady <-chan bool
+	if identityRead {
+		ready := make(chan bool, 1)
+		rootReady = ready
+		go func() { ready <- networkPathUnanswered(name) }()
+	} else if networkPathUnanswered(name) {
+		return pathReadResult{err: networkShareError("read", name)}
+	}
+	wait := networkShareAnswerWait - time.Since(started)
+	if identityRead {
+		// A hook path scan may already have spent the root probe's
+		// answer budget. Give a reachable identity a brief chance to
+		// answer without charging another full budget to this call.
+		networkShares.mu.Lock()
+		probe := networkShares.probes[root]
+		if probe != nil {
+			select {
+			case <-probe.done:
+			default:
+				remaining := networkShareAnswerWait - time.Since(probe.started)
+				if remaining < wait {
+					wait = remaining
+				}
+			}
+		}
+		networkShares.mu.Unlock()
+		// Give a reachable identity room to answer under load while keeping
+		// the caller's first-contact share verdict within one second.
+		if wait < 150*time.Millisecond {
+			wait = 150 * time.Millisecond
+		}
+		if pending && wait > 150*time.Millisecond {
+			wait = 150 * time.Millisecond
+		}
+	}
+	if wait <= 0 {
+		return pathReadResult{err: networkShareError("read", name)}
+	}
+	select {
+	case networkReadSlots <- struct{}{}:
+	default:
+		return pathReadResult{err: networkShareError("read", name)}
+	}
+	readReady := make(chan pathReadResult, 1)
+	readFinished := make(chan struct{})
+	reader := readPath
+	go func() {
+		readReady <- reader(name, kind)
+		close(readFinished)
+		<-networkReadSlots
+	}()
+	timer := time.NewTimer(wait)
+	defer timer.Stop()
+	var result pathReadResult
+	readDone, rootDone, rootUnanswered := false, !identityRead, false
+	for {
+		if readDone && (result.err == nil || rootDone) {
+			if result.err != nil && rootUnanswered {
+				return pathReadResult{err: networkShareError("read", name)}
+			}
+			return result
+		}
+		select {
+		case result = <-readReady:
+			readDone = true
+			readReady = nil
+		case rootUnanswered = <-rootReady:
+			rootDone = true
+			rootReady = nil
+		case <-timer.C:
+			// A completed read wins a race with the timer. An Open that
+			// finishes after the deadline has no caller to own its handle.
+			if !readDone {
+				select {
+				case result = <-readReady:
+					readDone = true
+				default:
+				}
+			}
+			if readDone && result.err == nil {
+				return result
+			}
+			if !readDone && kind == readOpen {
+				go func() {
+					if late := <-readReady; late.file != nil {
+						_ = late.file.Close()
+					}
+				}()
+			}
+			if !readDone {
+				rememberPendingNetworkRead(root, readFinished)
+			}
+			return pathReadResult{err: networkShareError("read", name)}
+		}
+	}
+}
+
+// ShareUnanswered distinguishes an unknown network path from a missing one.
+func ShareUnanswered(err error) bool { return errors.Is(err, errNetworkShareUnanswered) }
+
+// SharePath reports a network-share spelling without reading the share.
+func SharePath(name string) bool { return networkShareRootOf(name) != "" }
+
 // The file system reads of the target scans and of the write-target walk.
 // Each reads a local path as the os function does, and a path below a
 // network share only once the share has answered (networkPathUnanswered).
 
 func pathStat(name string) (os.FileInfo, error) {
-	if networkPathUnanswered(name) {
-		return nil, networkShareError("stat", name)
-	}
-	return os.Stat(name)
+	result := boundedPathRead(name, readStat, false)
+	return result.info, result.err
 }
 
 // pathStatPinned is pathStat with the file identity read at once, for a
 // FileInfo that a later os.SameFile compares with the opened file.
 func pathStatPinned(name string) (os.FileInfo, error) {
-	if networkPathUnanswered(name) {
-		return nil, networkShareError("stat", name)
-	}
-	return pathidentity.StatPinned(name)
+	result := boundedPathRead(name, readStatPinned, false)
+	return result.info, result.err
 }
 
 func pathLstat(name string) (os.FileInfo, error) {
-	if networkPathUnanswered(name) {
-		return nil, networkShareError("lstat", name)
-	}
-	return os.Lstat(name)
+	result := boundedPathRead(name, readLstat, false)
+	return result.info, result.err
 }
 
 func pathOpen(name string) (*os.File, error) {
-	if networkPathUnanswered(name) {
-		return nil, networkShareError("open", name)
-	}
-	return os.Open(name)
+	result := boundedPathRead(name, readOpen, false)
+	return result.file, result.err
 }
 
 func pathReadDir(name string) ([]os.DirEntry, error) {
-	if networkPathUnanswered(name) {
-		return nil, networkShareError("readdir", name)
-	}
-	return os.ReadDir(name)
+	result := boundedPathRead(name, readDir, false)
+	return result.entries, result.err
 }
 
 func pathReadlink(name string) (string, error) {
-	if networkPathUnanswered(name) {
-		return "", networkShareError("readlink", name)
-	}
-	return os.Readlink(name)
+	result := boundedPathRead(name, readLink, false)
+	return result.link, result.err
 }
 
 func pathEvalSymlinks(name string) (string, error) {
-	if networkPathUnanswered(name) {
-		return "", networkShareError("evalsymlinks", name)
-	}
-	return filepath.EvalSymlinks(name)
+	result := boundedPathRead(name, readEvalSymlinks, false)
+	return result.link, result.err
+}
+
+// PathStat and PathLstat share the hook path reader and its network bound.
+func PathStat(name string) (os.FileInfo, error) {
+	result := boundedPathRead(name, readStat, true)
+	return result.info, result.err
+}
+func PathLstat(name string) (os.FileInfo, error) {
+	result := boundedPathRead(name, readLstat, true)
+	return result.info, result.err
+}
+
+// PathReadlink reads a known link entry within the shared share budget.
+func PathReadlink(name string) (string, error) {
+	result := boundedPathRead(name, readLink, true)
+	return result.link, result.err
 }

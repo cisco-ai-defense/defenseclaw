@@ -1526,10 +1526,11 @@ func appendTrustedHomeResolvedSSHKeyWriteFinding(
 		return kept
 	}
 	commandText := strings.ToLower(input.Command)
-	overBudget, unresolved := false, false
+	overBudget, unresolved, possible := false, false, false
 	evidence := request
 	evidence.overBudgetOmission = &overBudget
 	evidence.unresolvedTarget = &unresolved
+	evidence.possibleTarget = &possible
 	symlinkWrite := trustedExistingAuthorizedKeysSymlinkWrite(evidence, facts)
 	if !symlinkWrite && !request.ProtectedHomeHook && trustedPOSIXShellCall(input, facts) &&
 		(request.Connector == "claudecode" || request.Connector == "codex") &&
@@ -1550,6 +1551,18 @@ func appendTrustedHomeResolvedSSHKeyWriteFinding(
 		symlinkWrite = false
 		findings = withTrustedActionLimitFinding(findings, request.EnforcementCapable)
 	}
+	if possible && !symlinkWrite && !request.StrictPolicy {
+		// The ordinary spelling names no protected target. Keep a visible
+		// notice while the default policy allows the command.
+		if _, rule, ok := trustedActionCatalogRule(generation, "persistence.ssh_authorized_keys_command"); ok {
+			findings = append(findings, adjustConfidence(input.Tool, RuleFinding{
+				RuleID: rule.ID, Title: unresolvedWriteTargetTitle, Severity: rule.Severity,
+				Confidence: rule.Confidence, Evidence: trustedActionInputText(input, ""),
+				Tags: append([]string(nil), rule.Tags...), LineNumber: 1,
+				enforcement: findingEnforcementDetectionOnly,
+			}))
+		}
+	}
 	if commandText != "" && !strings.Contains(commandText, "authorized_k") &&
 		!strings.Contains(commandText, "administrators_authorized") &&
 		!strings.Contains(commandText, "base64") && !symlinkWrite &&
@@ -1566,7 +1579,7 @@ func appendTrustedHomeResolvedSSHKeyWriteFinding(
 		}
 	}
 	if request.EnforcementCapable &&
-		(trustedAuthorizedKeysWriteProofWith(input, facts, symlinkWrite, clientGlobFacts(request), request.targetMemo) ||
+		(trustedAuthorizedKeysWriteProofWith(input, facts, symlinkWrite, clientGlobFacts(request), request.targetMemo, request.StrictPolicy) ||
 			trustedSandboxGuestAuthorizedKeysWrite(request)) {
 		_, rule, ok := trustedActionCatalogRule(generation, "persistence.ssh_authorized_keys_command")
 		if ok {
@@ -1592,7 +1605,7 @@ func appendTrustedHomeResolvedSSHKeyWriteFinding(
 			if hookpaths.ArchiveBeforeWrite(input.Command, input.ActiveHome) {
 				title = archiveBeforeWriteTitle
 			} else if symlinkWrite && unresolved && named.ID == rule.ID &&
-				!trustedAuthorizedKeysWriteProofWith(input, facts, false, clientGlobFacts(request), request.targetMemo) &&
+				!trustedAuthorizedKeysWriteProofWith(input, facts, false, clientGlobFacts(request), request.targetMemo, request.StrictPolicy) &&
 				!trustedSandboxGuestAuthorizedKeysWrite(request) {
 				// The only write found is one the hook client and this
 				// gateway could not resolve: it still fails closed, named as
@@ -1725,12 +1738,12 @@ func trustedSudoersOnlyWrite(facts actionfacts.Facts) bool {
 // the command text of a shell tool filled in; globFacts is the managed hook
 // client's evidence (clientGlobFacts), nil for any other caller.
 func trustedAuthorizedKeysWriteProof(input actionfacts.Input, facts actionfacts.Facts, symlinkWrite bool, globFacts map[string]string) bool {
-	return trustedAuthorizedKeysWriteProofWith(input, facts, symlinkWrite, globFacts, nil)
+	return trustedAuthorizedKeysWriteProofWith(input, facts, symlinkWrite, globFacts, nil, true)
 }
 
 // trustedAuthorizedKeysWriteProofWith is trustedAuthorizedKeysWriteProof
 // with the evaluation's file system answers (trustedActionRequest.targetMemo).
-func trustedAuthorizedKeysWriteProofWith(input actionfacts.Input, facts actionfacts.Facts, symlinkWrite bool, globFacts map[string]string, memo *hookpaths.TargetMemo) bool {
+func trustedAuthorizedKeysWriteProofWith(input actionfacts.Input, facts actionfacts.Facts, symlinkWrite bool, globFacts map[string]string, memo *hookpaths.TargetMemo, strict bool) bool {
 	if trustedNoDereferenceTouchSafe(input.Command, input.CWD, facts.ActiveHome, globFacts, globFacts != nil) {
 		return false
 	}
@@ -1761,7 +1774,7 @@ func trustedAuthorizedKeysWriteProofWith(input actionfacts.Input, facts actionfa
 		trustedWindowsLocationAuthorizedKeysWriteWith(input, memo) ||
 		trustedShellWrapperAuthorizedKeysWrite(input, facts) ||
 		trustedBase64ShellAuthorizedKeysWrite(input, facts) ||
-		trustedInlineAuthorizedKeysWrite(input, facts) ||
+		trustedInlineAuthorizedKeysWrite(input, facts, strict) ||
 		trustedPOSIXPowerShellAuthorizedKeysWrite(input, facts) ||
 		trustedCMDAuthorizedKeysWrite(input) ||
 		trustedNamedOutFileAuthorizedKeysWrite(input) ||

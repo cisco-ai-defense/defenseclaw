@@ -28,6 +28,27 @@ func actionWindowsPathFromPOSIX(value, cwd, home string) (string, bool) {
 	return actionWindowsPathWithTrim(value, cwd, home, false)
 }
 
+// NormalizeWindowsDevicePrefix removes the file-path device prefix shared by
+// client and gateway path decisions. Other device namespaces stay unchanged.
+func NormalizeWindowsDevicePrefix(value string) string {
+	value = strings.ReplaceAll(value, `\`, "/")
+	lower := strings.ToLower(value)
+	for _, prefix := range []string{"//?/unc/", "//./unc/"} {
+		if strings.HasPrefix(lower, prefix) {
+			return "//" + value[len(prefix):]
+		}
+	}
+	for _, prefix := range []string{"//?/", "//./"} {
+		if strings.HasPrefix(lower, prefix) {
+			rest := value[len(prefix):]
+			if len(rest) >= 3 && rest[1] == ':' && rest[2] == '/' {
+				return rest
+			}
+		}
+	}
+	return value
+}
+
 func actionWindowsPathWithTrim(value, cwd, home string, trim bool) (string, bool) {
 	value = strings.ReplaceAll(value, `\`, "/")
 	if trim {
@@ -40,17 +61,12 @@ func actionWindowsPathWithTrim(value, cwd, home string, trim bool) (string, bool
 	for _, prefix := range []string{"%userprofile%", "%homedrive%%homepath%", "$env:userprofile", "${env:userprofile}", "$home", "${home}", "~"} {
 		if lower == prefix || strings.HasPrefix(lower, prefix+"/") {
 			value = strings.ReplaceAll(home, `\`, "/") + value[len(prefix):]
-			lower = strings.ToLower(value)
 			break
 		}
 	}
+	value = NormalizeWindowsDevicePrefix(value)
 	if strings.ContainsAny(value, "$%*?[]") {
 		return "", false
-	}
-	if strings.HasPrefix(lower, "//?/unc/") {
-		value = "//" + value[len("//?/unc/"):]
-	} else if strings.HasPrefix(lower, "//?/") {
-		value = value[len("//?/"):]
 	}
 	if strings.HasPrefix(strings.ToLower(value), "/cygdrive/") && len(value) >= 12 && value[11] == '/' {
 		value = value[10:11] + ":" + value[11:]
