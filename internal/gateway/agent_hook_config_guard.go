@@ -177,7 +177,9 @@ func (g *agentHookConfigGuard) shellTarget(raw string) bool {
 				continue
 			}
 			// Home and project roots are outside the connector's config tree.
-			if place == g.home || place == g.cwd || place == string(filepath.Separator) {
+			if place == g.home || place == g.cwd || place == string(filepath.Separator) ||
+				strings.HasPrefix(g.home, place+string(filepath.Separator)) ||
+				strings.HasPrefix(g.cwd, place+string(filepath.Separator)) {
 				continue
 			}
 			if info, err := os.Stat(place); err == nil && info.IsDir() {
@@ -805,7 +807,7 @@ func agentHookConfigTurnsOff(format string, before []byte, beforeExists bool, af
 		oldEnv, _ := old["env"].(map[string]any)
 		newEnv, _ := updated["env"].(map[string]any)
 		for key, value := range newEnv {
-			if agentHookConfigReservedEnv(key) && !reflect.DeepEqual(oldEnv[key], value) {
+			if agentHookConfigReservedEnvValue(key, value) && !reflect.DeepEqual(oldEnv[key], value) {
 				return "changes a reserved hook process environment variable"
 			}
 		}
@@ -828,8 +830,36 @@ func agentHookConfigReservedEnv(key string) bool {
 		return true
 	}
 	switch upper {
-	case "BASH_ENV", "ENV", "SHELLOPTS", "BASHOPTS", "NODE_OPTIONS":
+	case "BASH_ENV", "ENV", "SHELLOPTS", "BASHOPTS":
 		return true
+	}
+	return false
+}
+
+// agentHookConfigReservedEnvValue: NODE_OPTIONS is ordinary (memory, warnings)
+// unless it preloads code into the agent.
+func agentHookConfigReservedEnvValue(key string, value any) bool {
+	if agentHookConfigReservedEnv(key) {
+		return true
+	}
+	if strings.ToUpper(key) != "NODE_OPTIONS" {
+		return false
+	}
+	text, isString := value.(string)
+	if value != nil && !isString {
+		return true
+	}
+	words := strings.Fields(text)
+	for i, word := range words {
+		for _, flag := range []string{"--require", "--import", "--loader", "--experimental-loader", "-r"} {
+			if word == flag && i+1 < len(words) && !strings.HasPrefix(words[i+1], "-") {
+				return true
+			}
+			if strings.HasPrefix(word, flag+"=") && len(word) > len(flag)+1 ||
+				flag == "-r" && strings.HasPrefix(word, "-r") && !strings.HasPrefix(word, "--") && len(word) > 2 {
+				return true
+			}
+		}
 	}
 	return false
 }
@@ -936,8 +966,22 @@ func agentHookConfigFindings(ctx context.Context, request trustedActionRequest, 
 	// A shell call: its content is not read, so a write to a hook file is
 	// the write rule. The hook client's resolved targets carry links the
 	// command text does not name.
+	var receiverFacts *actionfacts.Facts
 	for operand, resolved := range request.ResolvedWriteTargets {
-		if !strings.HasPrefix(operand, "\x00") && filepath.IsAbs(resolved) && (guard.shellTarget(resolved) || guard.ownedFile(resolved)) {
+		if strings.HasPrefix(operand, "\x00") || !filepath.IsAbs(resolved) ||
+			!guard.shellTarget(resolved) && !guard.ownedFile(resolved) {
+			continue
+		}
+		if guard.format(resolved) == "" && !guard.ownedFile(resolved) {
+			if receiverFacts == nil {
+				facts := actionfacts.Analyze(request.Input)
+				receiverFacts = &facts
+			}
+			if agentHookConfigFolderOnlyReceives(operand, *receiverFacts, guard) {
+				continue
+			}
+		}
+		{
 			if guard.ownedFile(resolved) {
 				add(agentHookConfigDisableRuleID, "changes a registered DefenseClaw hook file", resolved)
 			} else {
@@ -947,14 +991,46 @@ func agentHookConfigFindings(ctx context.Context, request trustedActionRequest, 
 	}
 	text := strings.ToLower(request.LegacyText + "\n" + request.Input.Command + "\n" + string(request.Input.Args) + "\n" + strings.Join(request.Input.Argv, "\n"))
 	if !guard.shellMentionsRegistryPath(text) &&
-		!slices.ContainsFunc([]string{"git ", "claude ", "codex ", "opencode ", "amp ", "copilot ", "kiro-cli ", "hermes ", "cursor-agent ", "devin ", "gemini ", "npx "},
+		!slices.ContainsFunc([]string{"git ", "patch ", "claude ", "codex ", "opencode ", "amp ", "copilot ", "kiro-cli ", "hermes ", "cursor-agent ", "devin ", "gemini ", "npx "},
 			func(name string) bool { return strings.Contains(text, name) }) {
 		return out
 	}
-	shellFacts := agentHookConfigShellFacts(request.Input)
+	shellFacts := []actionfacts.Facts{actionfacts.Analyze(request.Input)}
+	// Read shell destinations with the same shared extractors used by the
+	// protected state write rule, including ordered values and placed cd.
+	if command := agentHookConfigRawShellCommand(request.Input); command != "" && guard.shellMentionsRegistryPath(text) {
+		for _, target := range agentHookConfigSharedShellTargets(command, guard, 0) {
+			if folder, ok := strings.CutPrefix(target, "\x00folder:"); ok {
+				if guard.shellTarget(folder) {
+					add(agentHookConfigWriteRuleID, "", folder)
+				}
+				continue
+			}
+			if guard.ownedFile(target) {
+				add(agentHookConfigDisableRuleID, "changes a registered DefenseClaw hook file", target)
+			} else if guard.format(target) != "" {
+				add(agentHookConfigWriteRuleID, "", target)
+			}
+		}
+	}
 	for _, facts := range shellFacts {
 		for _, command := range facts.Commands {
 			argv := agentHookConfigExactWords(command)
+			if len(argv) > 0 && filepath.Base(argv[0]) == "patch" {
+				for _, source := range facts.Paths {
+					if source.CommandID != command.ID || source.Access != actionfacts.PathAccessRead {
+						continue
+					}
+					path := firstNonEmpty(source.Resolved, source.Normalized, source.Value)
+					body, err := os.ReadFile(path)
+					if err != nil || len(body) > agentHookConfigMaxBytes {
+						continue
+					}
+					if target, _ := agentHookConfigPatchTarget(body, guard); target != "" {
+						add(agentHookConfigWriteRuleID, "", target)
+					}
+				}
+			}
 			if reason, target := agentHookConfigRunOverride(argv, guard, shellFacts); reason != "" {
 				add(agentHookConfigDisableRuleID, reason, target)
 			} else if target != "" {
@@ -1002,9 +1078,55 @@ func agentHookConfigFindings(ctx context.Context, request trustedActionRequest, 
 				}
 			}
 			candidate := firstNonEmpty(target.Resolved, target.Normalized, target.Value)
+			if strings.ContainsAny(target.Value, "*?[") {
+				for _, spelling := range guard.places(target.Value) {
+					matches, err := filepath.Glob(spelling)
+					if err != nil || len(matches) > 64 {
+						continue
+					}
+					for _, match := range matches {
+						if guard.ownedFile(match) {
+							add(agentHookConfigDisableRuleID, "changes a registered DefenseClaw hook file", match)
+						} else if guard.format(match) != "" {
+							add(agentHookConfigWriteRuleID, "", match)
+						}
+					}
+				}
+			}
 			if runtime.GOOS == "windows" && target.Flavor == actionfacts.PathFlavorPOSIX {
 				if host, ok := windowsHostPathOfPOSIXOperand(target.Value, request.Input.CWD, request.Input.ActiveHome, false); ok {
 					candidate = filepath.FromSlash(host)
+				}
+			}
+			if target.Access != actionfacts.PathAccessDelete && guard.format(filepath.FromSlash(candidate)) == "" &&
+				!guard.ownedFile(filepath.FromSlash(candidate)) {
+				if info, err := os.Stat(filepath.FromSlash(candidate)); err == nil && info.IsDir() {
+					receiver := false
+					for _, command := range facts.Commands {
+						if command.ID == target.CommandID && len(command.Argv) > 0 {
+							switch filepath.Base(command.Argv[0]) {
+							case "mv", "cp", "install", "ln":
+								receiver = true
+							}
+						}
+					}
+					if receiver {
+						continue
+					}
+				}
+			}
+			if guard.format(filepath.FromSlash(candidate)) == "" && !guard.ownedFile(filepath.FromSlash(candidate)) {
+				// A folder counts only when the command replaces or removes
+				// the folder itself; creating entries inside it is ordinary.
+				mutatesFolder := false
+				for _, command := range facts.Commands {
+					if command.ID == target.CommandID && agentHookConfigFolderCommandTarget(agentHookConfigExactWords(command), guard) != "" {
+						mutatesFolder = true
+						break
+					}
+				}
+				if !mutatesFolder {
+					continue
 				}
 			}
 			if guard.shellTarget(filepath.FromSlash(candidate)) || guard.ownedFile(filepath.FromSlash(candidate)) {
@@ -1039,25 +1161,83 @@ func agentHookConfigRawShellCommand(input actionfacts.Input) string {
 	return ""
 }
 
-// Each parsed shell body is judged as executable commands, including a body
-// passed to a nested shell. The bound keeps recursive launchers finite.
-func agentHookConfigShellFacts(input actionfacts.Input) []actionfacts.Facts {
-	facts := []actionfacts.Facts{actionfacts.Analyze(input)}
-	for index := 0; index < len(facts) && index < 8; index++ {
-		for _, command := range facts[index].Commands {
-			body := agentHookConfigNestedShellBody(agentHookConfigExactWords(command))
-			if body == "" || len(body) > 8192 || len(facts) >= 8 {
-				continue
+// agentHookConfigSharedShellTargets is the gx048 shell write leg. The
+// operand readers in hookpaths are shared with tamper.detector_state_write;
+// this replaces the earlier private argv-only target reading for shell
+// writes. Directory receivers are judged separately from file operands.
+func agentHookConfigSharedShellTargets(command string, guard *agentHookConfigGuard, depth int) []string {
+	if depth > 3 || len(command) > 8192 {
+		return nil
+	}
+	registered := make([]string, 0, len(guard.files))
+	seen := make(map[string]bool)
+	for _, file := range guard.files {
+		for path := filepath.Clean(file.Path); filepath.IsAbs(path); path = filepath.Dir(path) {
+			if path == guard.home || path == guard.cwd || path == string(filepath.Separator) ||
+				strings.HasPrefix(guard.home, path+string(filepath.Separator)) ||
+				strings.HasPrefix(guard.cwd, path+string(filepath.Separator)) {
+				break
 			}
-			nested := input
-			nested.Tool = "Bash"
-			nested.Args = nil
-			nested.Argv = nil
-			nested.Command = body
-			facts = append(facts, actionfacts.Analyze(nested))
+			if !seen[path] {
+				registered = append(registered, path)
+				seen[path] = true
+			}
+			if path == filepath.Dir(path) {
+				break
+			}
 		}
 	}
-	return facts
+	read := func(body, cwd string) []string {
+		out := hookpaths.LiteralWriteOperands(body, cwd, guard.home)
+		if redirects, ok, _ := hookpaths.ShellWriteOperands(body, cwd, guard.home); ok {
+			out = append(out, redirects...)
+		}
+		if bounded, _ := hookpaths.BoundedShellWriteOperands(body, cwd, guard.home); len(bounded) != 0 {
+			out = append(out, bounded...)
+		}
+		if hookpaths.ProtectedReach(body, cwd, guard.home, registered) {
+			for _, path := range registered {
+				if !hookpaths.ProtectedReach(body, cwd, guard.home, []string{path}) {
+					continue
+				}
+				if guard.format(path) == "" && !guard.ownedFile(path) {
+					out = append(out, "\x00folder:"+path)
+				} else {
+					out = append(out, path)
+				}
+			}
+		}
+		return out
+	}
+	out := read(command, guard.cwd)
+	if strings.Contains(command, "cd ") || strings.Contains(command, "cd\t") {
+		if statements, ok := hookpaths.TopLevelStatements(command, guard.cwd, guard.home); ok {
+			for _, statement := range statements {
+				out = append(out, read(statement.Command, statement.Dir)...)
+			}
+		}
+	}
+	if !strings.Contains(command, " -c") && !strings.Contains(command, " -lc") {
+		return out
+	}
+	input := actionfacts.Input{Tool: "Bash", Command: command, CWD: guard.cwd, ActiveHome: guard.home}
+	for _, fact := range actionfacts.Analyze(input).Commands {
+		words := agentHookConfigExactWords(fact)
+		if len(words) > 0 {
+			static := make([]bool, len(words))
+			for i := range static {
+				static[i] = words[i] != "" && (i >= len(fact.Arguments) || !fact.Arguments[i].Expands)
+			}
+			if run, ok := actionfacts.StaticPrefixWrapperChild(words, static); ok &&
+				!run.DirUnknown && run.Dir == "" && !run.ChangesResolution {
+				words = words[run.Index:]
+			}
+		}
+		if body := hookpaths.NestedShellBody(words); body != "" {
+			out = append(out, agentHookConfigSharedShellTargets(body, guard, depth+1)...)
+		}
+	}
+	return out
 }
 
 func agentHookConfigExactWords(command actionfacts.CommandFact) []string {
@@ -1074,32 +1254,41 @@ func agentHookConfigExactWords(command actionfacts.CommandFact) []string {
 	return words
 }
 
-func agentHookConfigNestedShellBody(argv []string) string {
-	if len(argv) < 3 {
-		return ""
-	}
-	switch filepath.Base(argv[0]) {
-	case "bash", "sh", "dash", "zsh":
-	default:
-		return ""
-	}
-	for index := 1; index+1 < len(argv); index++ {
-		flag := argv[index]
-		if flag == "-c" || (strings.HasPrefix(flag, "-") && !strings.HasPrefix(flag, "--") && strings.Contains(flag[1:], "c")) {
-			return argv[index+1]
-		}
-	}
-	return ""
-}
-
 func agentHookConfigFolderCommandTarget(argv []string, guard *agentHookConfigGuard) string {
 	if len(argv) < 2 {
 		return ""
 	}
 	switch filepath.Base(argv[0]) {
-	case "rm", "rmdir", "unlink", "mv":
+	case "rm", "rmdir", "unlink":
 		for _, arg := range argv[1:] {
 			if !strings.HasPrefix(arg, "-") && guard.shellTarget(arg) {
+				return arg
+			}
+		}
+	case "mv":
+		// A move removes its sources; the destination folder only receives.
+		var operands []string
+		targetDir := false
+		for index := 1; index < len(argv); index++ {
+			arg := argv[index]
+			if arg == "-t" || arg == "--target-directory" {
+				targetDir = true
+				index++
+				continue
+			}
+			if strings.HasPrefix(arg, "--target-directory=") {
+				targetDir = true
+				continue
+			}
+			if arg != "--" && !strings.HasPrefix(arg, "-") {
+				operands = append(operands, arg)
+			}
+		}
+		if !targetDir && len(operands) > 0 {
+			operands = operands[:len(operands)-1]
+		}
+		for _, arg := range operands {
+			if guard.shellTarget(arg) {
 				return arg
 			}
 		}
@@ -1219,8 +1408,85 @@ func agentHookConfigDirectoryCopyTarget(argv []string, guard *agentHookConfigGua
 		if base != "." && (guard.format(filepath.Join(destination, base)) != "" || guard.ownedFile(filepath.Join(destination, base))) {
 			return destination
 		}
+		// Recursive copy of a directory's contents can replace a registered
+		// file even though the destination operand names only its folder.
+		for _, place := range guard.places(source) {
+			info, err := os.Stat(place)
+			if err != nil || !info.IsDir() {
+				continue
+			}
+			for _, file := range guard.files {
+				for _, dest := range guard.places(destination) {
+					rel, err := filepath.Rel(dest, file.Path)
+					if err != nil || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
+						continue
+					}
+					if _, err := os.Stat(filepath.Join(place, rel)); err == nil {
+						return destination
+					}
+				}
+			}
+		}
 	}
 	return ""
+}
+
+// A client write fact can name the existing directory that merely receives
+// an ordinary entry. Only the receiving operand is excluded; the source of
+// a move and a directory copy that reaches a registration remain writes.
+func agentHookConfigFolderOnlyReceives(operand string, facts actionfacts.Facts, guard *agentHookConfigGuard) bool {
+	same := func(a, b string) bool {
+		pa, pb := guard.places(a), guard.places(b)
+		return len(pa) != 0 && len(pb) != 0 && pa[0] == pb[0]
+	}
+	for _, command := range facts.Commands {
+		argv := agentHookConfigExactWords(command)
+		if len(argv) == 0 {
+			continue
+		}
+		program := filepath.Base(argv[0])
+		switch program {
+		case "mkdir", "touch":
+			for _, arg := range argv[1:] {
+				if same(arg, operand) {
+					return true
+				}
+			}
+		case "mv", "cp", "install", "ln":
+			if program == "cp" && agentHookConfigDirectoryCopyTarget(argv, guard) != "" {
+				continue
+			}
+			if program == "ln" && slices.ContainsFunc(argv, func(arg string) bool {
+				return strings.HasPrefix(arg, "-") && strings.Contains(arg, "f") && strings.Contains(arg, "n")
+			}) {
+				continue
+			}
+			var operands []string
+			for _, arg := range argv[1:] {
+				if arg != "--" && !strings.HasPrefix(arg, "-") {
+					operands = append(operands, arg)
+				}
+			}
+			if len(operands) != 0 && same(operands[len(operands)-1], operand) {
+				return true
+			}
+		case "find":
+			for i := 1; i+3 < len(argv); i++ {
+				if argv[i] != "-exec" || filepath.Base(argv[i+1]) != "mv" {
+					continue
+				}
+				for j := i + 2; j < len(argv); j++ {
+					if argv[j] == ";" || argv[j] == "+" {
+						if j > i+2 && same(argv[j-1], operand) {
+							return true
+						}
+						break
+					}
+				}
+			}
+		}
+	}
+	return false
 }
 
 // gitGlobalSubcommand reads Git's global options before deciding whether a
@@ -1270,7 +1536,15 @@ func agentHookConfigGitGlobalSubcommand(argv []string, guard *agentHookConfigGua
 			return -1, ""
 		default:
 			if explicitWorktree != "" {
-				root = agentHookConfigGitJoin(root, explicitWorktree)
+				return index, agentHookConfigGitJoin(root, explicitWorktree)
+			}
+			for dir := root; ; dir = filepath.Dir(dir) {
+				if _, err := os.Lstat(filepath.Join(dir, ".git")); err == nil {
+					return index, dir
+				}
+				if dir == filepath.Dir(dir) {
+					break
+				}
 			}
 			return index, root
 		}
@@ -1309,8 +1583,29 @@ func agentHookConfigGitTarget(argv []string, guard *agentHookConfigGuard) string
 	}
 	sub := argv[index]
 	args := argv[index+1:]
+	// A command-local alias that expands to one known worktree writer has
+	// the same path scope as spelling that subcommand directly.
+	for i := 1; i < index; i++ {
+		var setting string
+		if argv[i] == "-c" && i+1 < index {
+			setting = argv[i+1]
+			i++
+		} else if strings.HasPrefix(argv[i], "-c") {
+			setting = strings.TrimPrefix(argv[i], "-c")
+		}
+		if value, ok := strings.CutPrefix(setting, "alias."+sub+"="); ok &&
+			(value == "restore" || value == "checkout" || value == "switch" || value == "reset" || value == "apply") {
+			sub = value
+		}
+	}
 	switch sub {
-	case "am", "cherry-pick", "merge", "pull", "rebase", "revert", "switch", "checkout", "restore", "reset", "stash", "apply":
+	case "am", "cherry-pick", "merge", "pull", "rebase", "revert", "switch", "checkout", "restore", "reset", "stash", "apply", "checkout-index":
+	case "read-tree":
+		if !slices.Contains(args, "-u") && !slices.ContainsFunc(args, func(arg string) bool {
+			return strings.HasPrefix(arg, "-") && !strings.HasPrefix(arg, "--") && strings.Contains(arg, "u")
+		}) {
+			return ""
+		}
 	default:
 		return ""
 	}
@@ -1373,6 +1668,45 @@ func agentHookConfigGitTarget(argv []string, guard *agentHookConfigGuard) string
 		}
 	}
 	// An explicit pathspec may name a file currently absent from this tree.
+	if sub == "restore" || (sub == "checkout" || sub == "reset") && slices.Contains(args, "--") {
+		start := sub == "restore"
+		saw := false
+		for i := 0; i < len(args); i++ {
+			arg := args[i]
+			if arg == "--" {
+				start = true
+				continue
+			}
+			if arg == "-s" || arg == "--source" || arg == "--conflict" || arg == "--pathspec-from-file" {
+				i++
+				continue
+			}
+			if !start || strings.HasPrefix(arg, "-") {
+				continue
+			}
+			saw = true
+			candidate := arg
+			if arg == ":/" {
+				candidate = worktree
+			} else if relative, ok := strings.CutPrefix(arg, ":(top)"); ok {
+				candidate = filepath.Join(worktree, relative)
+			} else if !filepath.IsAbs(arg) {
+				candidate = filepath.Join(guard.cwd, arg)
+			}
+			candidate = filepath.Clean(candidate)
+			if guard.shellTarget(candidate) || guard.ownedFile(candidate) {
+				return arg
+			}
+			for _, file := range guard.files {
+				if file.Path == candidate || strings.HasPrefix(file.Path, candidate+string(filepath.Separator)) {
+					return arg
+				}
+			}
+		}
+		if saw {
+			return ""
+		}
+	}
 	pathspec := sub == "restore"
 	for _, arg := range args {
 		if arg == "--" {
@@ -1381,6 +1715,41 @@ func agentHookConfigGitTarget(argv []string, guard *agentHookConfigGuard) string
 		}
 		if pathspec && !strings.HasPrefix(arg, "-") && guard.shellTarget(arg) {
 			return arg
+		}
+	}
+	// Explicit paths that exist and reach no registration file limit the
+	// rewrite to them (git checkout -- foo.c, git restore foo.c).
+	if sub == "checkout" || sub == "restore" || sub == "reset" {
+		named := false
+		for _, arg := range args {
+			if arg == "--" || strings.HasPrefix(arg, "-") {
+				continue
+			}
+			candidate := arg
+			if !filepath.IsAbs(candidate) {
+				candidate = filepath.Join(guard.cwd, candidate)
+			}
+			info, err := os.Lstat(candidate)
+			if err != nil {
+				continue
+			}
+			if guard.shellTarget(arg) || guard.ownedFile(arg) {
+				return arg
+			}
+			if info.IsDir() {
+				dir := filepath.Clean(candidate) + string(filepath.Separator)
+				for _, file := range guard.files {
+					if strings.HasPrefix(file.Path, dir) {
+						if _, err := os.Stat(file.Path); err == nil {
+							return arg
+						}
+					}
+				}
+			}
+			named = true
+		}
+		if named {
+			return ""
 		}
 	}
 	// A worktree rewrite can restore a tracked registration document.
@@ -1526,6 +1895,9 @@ func agentHookConfigRunOverride(argv []string, guard *agentHookConfigGuard, fact
 			if why := agentHookConfigInlineCodexOverride(value); why != "" {
 				return why, program
 			}
+			if why := agentHookConfigCodexOverrideOnConfig(value, guard); why != "" {
+				return why, program
+			}
 			continue
 		}
 		if strings.HasPrefix(strings.TrimSpace(value), "{") {
@@ -1573,6 +1945,65 @@ func agentHookConfigInlineCodexOverride(value string) string {
 		}
 	}
 	return ""
+}
+
+// agentHookConfigCodexOverrideOnConfig applies one -c key.path=value the way
+// Codex does (the value replaces whatever is at the path) to each readable
+// Codex config this call can reach, and judges the resulting document.
+func agentHookConfigCodexOverrideOnConfig(value string, guard *agentHookConfigGuard) string {
+	key, rhs, ok := strings.Cut(value, "=")
+	if !ok {
+		return ""
+	}
+	var path []string
+	for _, part := range strings.Split(strings.TrimSpace(key), ".") {
+		part = strings.Trim(strings.TrimSpace(part), `"'`)
+		if part == "" {
+			return ""
+		}
+		path = append(path, part)
+	}
+	var leaf any = strings.TrimSpace(rhs)
+	var parsed map[string]any
+	if toml.Unmarshal([]byte("v = "+strings.TrimSpace(rhs)), &parsed) == nil {
+		leaf = parsed["v"]
+	}
+	for _, file := range guard.files {
+		if file.Format != gatewayconnector.AgentHookConfigCodexTOML {
+			continue
+		}
+		before, ok := guard.read(file.Path)
+		if !ok {
+			continue
+		}
+		current := agentHookConfigDocument(gatewayconnector.AgentHookConfigCodexTOML, before)
+		if current == nil {
+			continue
+		}
+		after, err := toml.Marshal(agentHookConfigSetPath(current, path, leaf))
+		if err != nil {
+			continue
+		}
+		if why := agentHookConfigTurnsOff(gatewayconnector.AgentHookConfigCodexTOML, before, true, after, true); why != "" {
+			return why + " for a nested Codex run"
+		}
+	}
+	return ""
+}
+
+// agentHookConfigSetPath returns a copy of table with path set to value.
+func agentHookConfigSetPath(table map[string]any, path []string, value any) map[string]any {
+	out := make(map[string]any, len(table)+1)
+	for key, existing := range table {
+		out[key] = existing
+	}
+	if len(path) == 1 {
+		out[path[0]] = value
+		return out
+	}
+	child, _ := out[path[0]].(map[string]any)
+	out[path[0]] = agentHookConfigSetPath(child, path[1:], value)
+	return out
 }
 
 func agentHookConfigRunHomeAssignment(word string) bool {
@@ -1626,7 +2057,7 @@ func agentHookConfigPrefixOverride(command string, facts []actionfacts.Facts) st
 	}
 	for _, fact := range facts {
 		for _, command := range fact.Commands {
-			if target := agentHookConfigPrefixOverrideOne(agentHookConfigNestedShellBody(agentHookConfigExactWords(command))); target != "" {
+			if target := agentHookConfigPrefixOverrideOne(hookpaths.NestedShellBody(agentHookConfigExactWords(command))); target != "" {
 				return target
 			}
 		}
