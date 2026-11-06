@@ -8,12 +8,9 @@ from __future__ import annotations
 import json
 import os
 import re
-import shlex
-import shutil
 import stat
-from datetime import datetime, timedelta, timezone
-from itertools import islice
 from pathlib import Path
+from typing import NamedTuple
 
 from defenseclaw.hermes_skills import (
     _filesystem_identity,
@@ -37,7 +34,12 @@ _PRIVATE_INSTALL_COMPONENTS = frozenset({
 })
 
 
-def inspect_official_provider_tree(plugin_dir: str, *, data_dir: str = "") -> str | None:
+class ProviderIdentity(NamedTuple):
+    name: str
+    possible_peer: bool
+
+
+def inspect_official_provider_tree(plugin_dir: str, *, data_dir: str = "") -> ProviderIdentity | None:
     """Identify published bytes plus validated installer-created peer links."""
 
     manifest = _read_regular_file(
@@ -93,7 +95,10 @@ def inspect_official_provider_tree(plugin_dir: str, *, data_dir: str = "") -> st
                 return None
         if before_tree != _tree_entry_state(root):
             return None
-    return name
+    return ProviderIdentity(
+        name=name,
+        possible_peer=any(state[1] is not None for _, state in links.values()),
+    )
 
 
 def _tree_entry_state(root: str) -> tuple | None:
@@ -150,9 +155,8 @@ def _validated_peer_link(link: str, root: str, peer: str, data_dir: str) -> tupl
     destination = os.path.realpath(link)
     if os.path.commonpath((os.path.realpath(root), destination)) == os.path.realpath(root):
         raise ValueError("peer link points inside the package")
-    active_root = _active_openclaw_root(data_dir=data_dir) if peer == "openclaw" else None
-    if active_root is None or not os.path.samefile(destination, active_root):
-        raise ValueError("peer link points outside the active installation")
+    if peer != "openclaw":
+        raise ValueError("peer link is not the OpenClaw package")
     if not stat.S_ISDIR(os.stat(destination, follow_symlinks=False).st_mode):
         raise ValueError("peer link target is not a directory")
     manifest = _read_regular_file(
@@ -211,174 +215,3 @@ def _peer_path_uses_private_state(link: str, data_dir: str) -> bool:
                 current = os.path.dirname(current)
                 pending = list(target_parts) + pending
     return False
-
-
-def _named_openclaw_package(path: str) -> bool:
-    if (os.path.basename(path) != "openclaw"
-            or os.path.basename(os.path.dirname(path)) != "node_modules"):
-        return False
-    manifest = _read_regular_file(
-        os.path.join(path, "package.json"), max_bytes=1024 * 1024,
-    )
-    if manifest is None:
-        return False
-    try:
-        return json.loads(manifest).get("name") == "openclaw"
-    except (UnicodeDecodeError, ValueError, AttributeError):
-        return False
-
-
-def _openclaw_root_for_executable(executable: str) -> str | None:
-    """Bind a runnable launcher to its package, without running the launcher."""
-
-    seen: set[str] = set()
-    for _ in range(8):
-        try:
-            info = os.stat(executable)
-            if not stat.S_ISREG(info.st_mode) or (
-                os.name != "nt" and not os.access(executable, os.X_OK)
-            ):
-                return None
-            resolved = os.path.realpath(executable)
-        except OSError:
-            return None
-        if resolved in seen:
-            return None
-        seen.add(resolved)
-
-        directory = os.path.dirname(resolved)
-        for _ in range(16):
-            if _named_openclaw_package(directory):
-                return directory
-            parent = os.path.dirname(directory)
-            if parent == directory:
-                break
-            directory = parent
-        executable = _literal_shell_exec_target(resolved)
-        if executable is None:
-            return None
-
-    return None
-
-
-def _literal_shell_exec_target(path: str) -> str | None:
-    """Read a single-command shell wrapper as a path, without executing it."""
-
-    payload = _read_regular_file(path, max_bytes=16 * 1024)
-    if payload is None:
-        return None
-    try:
-        source = payload.decode("utf-8")
-    except UnicodeDecodeError:
-        return None
-    if "\x00" in source:
-        return None
-    lines = source.splitlines()
-    if not lines or lines[0] not in (
-        "#!/bin/sh", "#!/bin/bash", "#!/usr/bin/env sh", "#!/usr/bin/env bash",
-    ):
-        return None
-    commands = [line.strip() for line in lines[1:]
-                if line.strip() and not line.lstrip().startswith("#")]
-    if len(commands) != 1:
-        return None
-    try:
-        words = shlex.split(commands[0], posix=True)
-    except ValueError:
-        return None
-    if (len(words) not in (2, 3) or words[0] != "exec"
-            or (len(words) == 3 and words[2] != "$@")):
-        return None
-    target = words[1]
-    if (not os.path.isabs(target) or any(
-        char in target for char in "$`*?[]{};&|<>\r\n"
-    )):
-        return None
-    return target
-
-
-def _recorded_openclaw_executable(data_dir: str) -> str | None:
-    """Read the latest operator discovery pointer; revalidate it on disk."""
-
-    from defenseclaw.config import default_data_path
-
-    record = (Path(data_dir) if data_dir else default_data_path()) / "agent_discovery.json"
-    payload = _read_regular_file(str(record), max_bytes=1024 * 1024)
-    if payload is None:
-        return None
-    try:
-        document = json.loads(payload)
-        if document.get("version") != 7 or document.get("ttl_seconds") != 86_400:
-            return None
-        scanned_at = datetime.fromisoformat(document["scanned_at"].replace("Z", "+00:00"))
-        age = datetime.now(timezone.utc) - scanned_at.astimezone(timezone.utc)
-        if not timedelta(0) <= age <= timedelta(days=1):
-            return None
-        signal = document["agents"]["openclaw"]
-        executable = signal["binary_path"]
-        if signal.get("installed") and isinstance(executable, str) and os.path.isabs(executable):
-            return executable
-    except (UnicodeDecodeError, ValueError, TypeError, KeyError, AttributeError):
-        pass
-    return None
-
-
-def _discovered_openclaw_executables() -> list[str]:
-    """Enumerate bounded per-user npm and Node-manager launcher locations."""
-
-    home = Path.home()
-    candidates = [
-        home / ".npm-global/bin/openclaw",
-        home / ".local/bin/openclaw",
-        home / ".npm-packages/bin/openclaw",
-        home / ".config/yarn/global/node_modules/.bin/openclaw",
-        home / ".volta/bin/openclaw",
-        home / ".local/share/pnpm/openclaw",
-        home / "Library/pnpm/openclaw",
-        home / ".asdf/shims/openclaw",
-        home / ".local/share/mise/shims/openclaw",
-        home / ".local/share/fnm/aliases/default/bin/openclaw",
-        home / ".yarn/bin/openclaw",
-        home / ".bun/bin/openclaw",
-        home / "bin/openclaw",
-        home / ".linuxbrew/bin/openclaw",
-        Path("/home/linuxbrew/.linuxbrew/bin/openclaw"),
-        Path("/usr/local/bin/openclaw"),
-        Path("/opt/homebrew/bin/openclaw"),
-    ]
-    for pattern in (
-        ".nvm/versions/node/*/bin/openclaw",
-        ".local/share/fnm/node-versions/*/installation/bin/openclaw",
-        "Library/Application Support/fnm/node-versions/*/installation/bin/openclaw",
-        ".fnm/node-versions/*/installation/bin/openclaw",
-        ".asdf/installs/nodejs/*/bin/openclaw",
-        ".local/share/mise/installs/node/*/bin/openclaw",
-        ".local/share/pnpm/global/*/node_modules/.bin/openclaw",
-    ):
-        candidates.extend(islice(home.glob(pattern), 16))
-    npmrc = _read_regular_file(str(home / ".npmrc"), max_bytes=64 * 1024)
-    if npmrc is not None:
-        for line in npmrc.decode("utf-8", errors="replace").splitlines():
-            key, sep, value = line.partition("=")
-            if sep and key.strip().lower() == "prefix":
-                prefix = value.strip().strip('"\'').replace("${HOME}", str(home))
-                prefix = os.path.expanduser(prefix)
-                if os.path.isabs(prefix):
-                    candidates.append(Path(prefix) / "bin/openclaw")
-    return [str(candidate) for candidate in candidates]
-
-
-def _active_openclaw_root(*, data_dir: str = "") -> str | None:
-    """Find one active package from recorded, PATH, or discovered launchers."""
-
-    on_path = shutil.which("openclaw")
-    if on_path:
-        return _openclaw_root_for_executable(on_path)
-    recorded = _recorded_openclaw_executable(data_dir)
-    if recorded:
-        return _openclaw_root_for_executable(recorded)
-    roots = {
-        root for candidate in _discovered_openclaw_executables()
-        if (root := _openclaw_root_for_executable(candidate))
-    }
-    return next(iter(roots)) if len(roots) == 1 else None
