@@ -3,13 +3,13 @@
 from __future__ import annotations
 
 import base64
-import re
 import contextlib
 import hashlib
 import io
 import json
 import ntpath
 import os
+import re
 import shlex
 import subprocess
 import sys
