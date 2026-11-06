@@ -64,6 +64,41 @@ func TestGAP0534RecoveredParseFixedPoint(t *testing.T) {
 	}
 }
 
+func TestGAP0534ResolvedProtectedTreeReach(t *testing.T) {
+	home := t.TempDir()
+	state := filepath.Join(home, ".defenseclaw")
+	physical := filepath.Join(home, "outside")
+	project := filepath.Join(home, "project")
+	for _, dir := range []string{state, physical, project} {
+		if err := os.MkdirAll(dir, 0o700); err != nil {
+			t.Fatal(err)
+		}
+	}
+	protected := filepath.Join(physical, "rule.yaml")
+	ordinary := filepath.Join(project, "output")
+	for _, file := range []string{protected, ordinary} {
+		if err := os.WriteFile(file, []byte("x"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := os.Symlink(physical, filepath.Join(state, "policies")); err != nil {
+		t.Skipf("directory links unavailable: %v", err)
+	}
+	alias := filepath.Join(home, "rule-alias")
+	if err := os.Symlink(protected, alias); err != nil {
+		t.Skipf("file links unavailable: %v", err)
+	}
+	memo := NewTargetMemo()
+	for _, target := range []string{protected, alias} {
+		if grade := ProtectedReach(target, home, memo); grade != GradeNamed {
+			t.Errorf("protected tree target %s has grade %s", filepath.Base(target), grade)
+		}
+	}
+	if grade := ProtectedReach(ordinary, home, memo); grade != GradeNone {
+		t.Errorf("ordinary sibling has grade %s", grade)
+	}
+}
+
 var gap0534BenchmarkReason string
 
 func BenchmarkGAP0534RecoveredParse(b *testing.B) {

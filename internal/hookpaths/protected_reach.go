@@ -149,7 +149,6 @@ func (m *TargetMemo) ProtectedReach(target, home string) Grade {
 	if names.has(target) {
 		return GradeNamed
 	}
-
 	type answer struct {
 		info os.FileInfo
 		err  error
@@ -160,6 +159,14 @@ func (m *TargetMemo) ProtectedReach(target, home string) Grade {
 	go func() { info, err := PathStat(parent); parentReady <- answer{info, err} }()
 	go func() { info, err := PathLstat(target); entryReady <- answer{info, err} }()
 	file, directory, entry := <-fileReady, <-parentReady, <-entryReady
+	// An existing file can sit below a protected tree whose entry links
+	// outside the state root. Compare both resolved paths before matching
+	// exact file identities.
+	if file.err == nil {
+		if resolved, ok := m.resolveWriteTarget(target); ok && names.has(resolved) {
+			return GradeNamed
+		}
+	}
 
 	// A reached file can be a hard link; a reached parent can be a linked
 	// directory whose final child has not been created yet.

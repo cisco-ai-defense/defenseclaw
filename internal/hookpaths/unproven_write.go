@@ -5,13 +5,10 @@ package hookpaths
 
 import (
 	"io"
-	"os"
 	"path/filepath"
 	"regexp"
-	"slices"
 	"strconv"
 	"strings"
-	"time"
 
 	"github.com/defenseclaw/defenseclaw/internal/lazyregexp"
 	"github.com/defenseclaw/defenseclaw/internal/shellparse"
@@ -470,9 +467,10 @@ func unprovenShellParseWrite(command, cwd, home string, depth int, budget *unpro
 	}
 	protected := budget.memo.protectedFiles(home)
 	ssh := filepath.Join(home, ".ssh")
-	reach := protectedReachFromTextWithStatePrepared(command, cwd, home, filepath.Join(home, ".defenseclaw"), protected, ssh, budget.memo)
+	reach := protectedReachFromTextWithStatePrepared(command, cwd, home, filepath.Join(home, ".defenseclaw"), protected, ssh, budget.memo, false)
 	called := calledFunctionsWithBudget(file, home, budget)
 	if budget.bounded {
+		reach = reach || unprovenRecoveredProtectedReach(command, cwd, home, budget.memo)
 		return reach, reach
 	}
 	syntax.Walk(file, func(node syntax.Node) bool {
@@ -508,7 +506,8 @@ func unprovenShellParseWrite(command, cwd, home string, depth int, budget *unpro
 				// A resolved protected reach keeps the incomplete verdict;
 				// an ordinary target remains audit-only in balanced mode.
 				budget.bounded = true
-				if reach || prefix != command && protectedReachFromTextWithStatePrepared(prefix, cwd, home, filepath.Join(home, ".defenseclaw"), protected, ssh, budget.memo) {
+				if reach || unprovenRecoveredProtectedReach(command, cwd, home, budget.memo) ||
+					prefix != command && protectedReachFromTextWithStatePrepared(prefix, cwd, home, filepath.Join(home, ".defenseclaw"), protected, ssh, budget.memo, true) {
 					unknown = true
 					return false
 				}
@@ -567,6 +566,9 @@ func unprovenShellParseWrite(command, cwd, home string, depth int, budget *unpro
 		}
 		return !unknown
 	})
+	if budget.bounded && !reach {
+		reach = unprovenRecoveredProtectedReach(command, cwd, home, budget.memo)
+	}
 	return unknown || budget.bounded && reach, reach
 }
 
@@ -574,7 +576,7 @@ func unprovenShellParseWrite(command, cwd, home string, depth int, budget *unpro
 // checks resolved links into the active state tree without starting another
 // parser after the proof budget is exhausted.
 func unprovenRecoveredProtectedReach(command, cwd, home string, memo *TargetMemo) bool {
-	return protectedReachFromTextWithStatePrepared(command, cwd, home, filepath.Join(home, ".defenseclaw"), memo.protectedFiles(home), filepath.Join(home, ".ssh"), memo)
+	return protectedReachFromTextWithStatePrepared(command, cwd, home, filepath.Join(home, ".defenseclaw"), memo.protectedFiles(home), filepath.Join(home, ".ssh"), memo, true)
 }
 
 type unprovenBoundedWriter struct {
@@ -1816,10 +1818,10 @@ func protectedReachFromText(command, cwd, home string) bool {
 func protectedReachFromTextWithState(command, cwd, home, stateRoot string) bool {
 	protected := newProtectedFiles(home)
 	ssh := filepath.Join(home, ".ssh")
-	return protectedReachFromTextWithStatePrepared(command, cwd, home, stateRoot, protected, ssh, nil)
+	return protectedReachFromTextWithStatePrepared(command, cwd, home, stateRoot, protected, ssh, nil, false)
 }
 
-func protectedReachFromTextWithStatePrepared(command, cwd, home, stateRoot string, protected protectedFiles, ssh string, memo *TargetMemo) bool {
+func protectedReachFromTextWithStatePrepared(command, cwd, home, stateRoot string, protected protectedFiles, ssh string, memo *TargetMemo, exhausted bool) bool {
 	seen := map[string]bool{}
 	text := strings.ReplaceAll(strings.ReplaceAll(command, "${HOME}/", home+"/"), "$HOME/", home+"/")
 	for _, quoted := range unprovenQuotedPath {
@@ -1835,7 +1837,7 @@ func protectedReachFromTextWithStatePrepared(command, cwd, home, stateRoot strin
 			if candidate == "~" || strings.HasPrefix(candidate, "~/") {
 				candidate = filepath.Join(home, strings.TrimPrefix(strings.TrimPrefix(candidate, "~"), "/"))
 			}
-			if protectedReachTextPathWithState(OperandPath(candidate, cwd), protected, ssh, stateRoot, memo) {
+			if protectedReachTextPathWithState(OperandPath(candidate, cwd), protected, ssh, stateRoot, memo, exhausted) {
 				return true
 			}
 		}
@@ -1854,7 +1856,7 @@ func protectedReachFromTextWithStatePrepared(command, cwd, home, stateRoot strin
 		}
 		seen[token] = true
 		if strings.ContainsAny(token, "*?[]") {
-			if boundedProtectedGlobReachWithState(token, cwd, protected, ssh, stateRoot, memo) {
+			if boundedProtectedGlobReachWithState(token, cwd, protected, ssh, stateRoot, memo, exhausted) {
 				return true
 			}
 			continue
@@ -1863,7 +1865,7 @@ func protectedReachFromTextWithStatePrepared(command, cwd, home, stateRoot strin
 			// A bare ~ is the home itself (GAP-1093).
 			token = filepath.Join(home, strings.TrimPrefix(strings.TrimPrefix(token, "~"), "/"))
 		}
-		if protectedReachTextPathWithState(OperandPath(token, cwd), protected, ssh, stateRoot, memo) {
+		if protectedReachTextPathWithState(OperandPath(token, cwd), protected, ssh, stateRoot, memo, exhausted) {
 			return true
 		}
 	}
@@ -1886,10 +1888,10 @@ func recoveredTextOperandCandidate(before, token string) bool {
 }
 
 func boundedProtectedGlobReach(pattern, cwd string, protected protectedFiles, ssh string) bool {
-	return boundedProtectedGlobReachWithState(pattern, cwd, protected, ssh, "", nil)
+	return boundedProtectedGlobReachWithState(pattern, cwd, protected, ssh, "", nil, false)
 }
 
-func boundedProtectedGlobReachWithState(pattern, cwd string, protected protectedFiles, ssh, stateRoot string, memo *TargetMemo) bool {
+func boundedProtectedGlobReachWithState(pattern, cwd string, protected protectedFiles, ssh, stateRoot string, memo *TargetMemo, exhausted bool) bool {
 	parent, base := filepath.Dir(pattern), filepath.Base(pattern)
 	if _, err := filepath.Match(base, ""); err != nil {
 		return false // An incomplete URL bracket is not a shell glob.
@@ -1902,28 +1904,19 @@ func boundedProtectedGlobReachWithState(pattern, cwd string, protected protected
 		return false
 	}
 	defer directory.Close()
-	deadline := time.Now().Add(activeStateIndexBudget)
-	for {
-		names, readErr := directory.Readdirnames(4096)
-		if readErr != nil && readErr != io.EOF {
-			return true
-		}
-		for _, name := range names {
-			if time.Now().After(deadline) {
-				return true
-			}
-			if matched, _ := filepath.Match(base, name); matched &&
-				protectedReachTextPathWithState(OperandPath(name, OperandPath(parent, cwd)), protected, ssh, stateRoot, memo) {
-				return true
-			}
-		}
-		if readErr == io.EOF {
-			return false
-		}
-		if len(names) == 0 {
+	names, err := directory.Readdirnames(4097)
+	if err != nil && err != io.EOF || len(names) > 4096 {
+		// An incomplete expansion is Possible in recovered text: strict
+		// retains the proof-bound block, while balanced needs a named hit.
+		return stateRoot == ""
+	}
+	for _, name := range names {
+		if matched, _ := filepath.Match(base, name); matched &&
+			protectedReachTextPathWithState(OperandPath(name, OperandPath(parent, cwd)), protected, ssh, stateRoot, memo, exhausted) {
 			return true
 		}
 	}
+	return false
 }
 
 func protectedReachPath(path string, protected protectedFiles, ssh string) bool {
@@ -1950,151 +1943,30 @@ func protectedReachPathWith(path string, protected protectedFiles, ssh string, m
 // interpreter paths and shell state can enter its protected subdirectories.
 // Exact write destinations still use protectedReachPath, so a literal
 // ordinary child of home is not mistaken for the protected file.
-func protectedReachTextPathWithState(path string, protected protectedFiles, ssh, stateRoot string, memo *TargetMemo) bool {
+func protectedReachTextPathWithState(path string, protected protectedFiles, ssh, stateRoot string, memo *TargetMemo, exhausted bool) bool {
+	if stateRoot != "" && ProtectedReach(path, filepath.Dir(stateRoot), memo) == GradeNamed {
+		return true
+	}
 	resolved, ok := memo.resolveWriteTarget(path)
 	if !ok {
 		return false
 	}
 	if stateRoot != "" {
-		if activeStateReachPath(path, resolved, stateRoot, memo) {
+		physicalRoot, rootOK := memo.resolveWriteTarget(stateRoot)
+		if samePathName(path, stateRoot) || rootOK && samePathName(resolved, physicalRoot) ||
+			samePathName(resolved, filepath.Dir(ssh)) ||
+			exhausted && activeStateHardlinkReachResolved(resolved, filepath.Dir(stateRoot)) {
 			return true
 		}
-		if activeStateHardlinkReachResolved(resolved, filepath.Dir(stateRoot)) {
-			return true
-		}
+		return false
 	}
-	if samePathName(resolved, filepath.Dir(ssh)) ||
-		protected.has(resolved) || samePathName(resolved, ssh) {
+	if samePathName(resolved, filepath.Dir(ssh)) || protected.has(resolved) || samePathName(resolved, ssh) {
 		return true
 	}
 	if mapped, ok := protected.target(resolved); ok && protected.has(mapped) {
 		return true
 	}
 	return false
-}
-
-// A state root can be a link into a larger ordinary directory. Only the
-// listed state names are protected there. A listed file or tree can itself
-// link out of that directory, so compare its resolved target as well.
-type activeStateDirectory struct {
-	entries []os.DirEntry
-	err     error
-}
-
-func (m *TargetMemo) activeStateDirectory(root string) activeStateDirectory {
-	if m != nil {
-		m.mu.Lock()
-		cached, ok := m.stateDirs[root]
-		m.mu.Unlock()
-		if ok {
-			return cached
-		}
-	}
-	var result activeStateDirectory
-	directory, err := pathOpen(root)
-	if err != nil {
-		result.err = err
-	} else {
-		result.entries, result.err = directory.ReadDir(4097)
-		_ = directory.Close()
-	}
-	if m != nil {
-		m.mu.Lock()
-		m.stateDirs[root] = result
-		m.mu.Unlock()
-	}
-	return result
-}
-
-func activeStateReachPath(path, resolved, stateRoot string, memo *TargetMemo) bool {
-	if activeStateNamedPath(path, stateRoot) {
-		return true
-	}
-	if physicalRoot, ok := memo.resolveWriteTarget(stateRoot); ok &&
-		activeStateNamedPath(resolved, physicalRoot) {
-		return true
-	}
-	// The root itself can link to a project directory. Read its entries once
-	// and resolve only listed entries that link away from their named place.
-	directory := memo.activeStateDirectory(stateRoot)
-	if os.IsNotExist(directory.err) {
-		return false
-	}
-	if directory.err != nil && directory.err != io.EOF || len(directory.entries) > 4096 {
-		return activeStateReachByNamedLinks(resolved, stateRoot, memo)
-	}
-	for _, entry := range directory.entries {
-		name := entry.Name()
-		linked := entry.Type()&os.ModeSymlink != 0
-		if name == "previous" {
-			installer := filepath.Join(stateRoot, "previous", "installer")
-			if info, err := pathLstat(installer); err == nil &&
-				(linked || info.Mode()&os.ModeSymlink != 0) {
-				if target, ok := memo.resolveWriteTarget(installer); ok && pathAtOrUnder(resolved, target) {
-					return true
-				}
-			}
-		}
-		if !linked {
-			continue
-		}
-		if slices.Contains(activeStateFiles, name) {
-			if target, ok := memo.resolveWriteTarget(filepath.Join(stateRoot, name)); ok &&
-				samePathName(resolved, target) {
-				return true
-			}
-		}
-		if slices.Contains(activeStateTrees, name) {
-			if target, ok := memo.resolveWriteTarget(filepath.Join(stateRoot, name)); ok &&
-				pathAtOrUnder(resolved, target) {
-				return true
-			}
-		}
-	}
-	return false
-}
-
-// When a linked root has many ordinary entries, inspect the fixed list of
-// state names directly instead of treating the directory size as a target.
-func activeStateReachByNamedLinks(resolved, stateRoot string, memo *TargetMemo) bool {
-	for _, name := range activeStateFiles {
-		path := filepath.Join(stateRoot, name)
-		if info, err := pathLstat(path); err == nil && info.Mode()&os.ModeSymlink != 0 {
-			if target, ok := memo.resolveWriteTarget(path); ok && samePathName(resolved, target) {
-				return true
-			}
-		} else if err != nil && !os.IsNotExist(err) {
-			return true
-		}
-	}
-	for _, name := range activeStateTrees {
-		path := filepath.Join(stateRoot, filepath.FromSlash(name))
-		linkedParent := false
-		if name == "previous/installer" {
-			if parent, err := pathLstat(filepath.Join(stateRoot, "previous")); err == nil {
-				linkedParent = parent.Mode()&os.ModeSymlink != 0
-			}
-		}
-		if info, err := pathLstat(path); err == nil && (linkedParent || info.Mode()&os.ModeSymlink != 0) {
-			if target, ok := memo.resolveWriteTarget(path); ok && pathAtOrUnder(resolved, target) {
-				return true
-			}
-		} else if err != nil && !os.IsNotExist(err) {
-			return true
-		}
-	}
-	return false
-}
-
-func activeStateNamedPath(path, stateRoot string) bool {
-	if samePathName(path, stateRoot) {
-		return true
-	}
-	relative, err := filepath.Rel(stateRoot, path)
-	if err != nil || relative == ".." || strings.HasPrefix(relative, ".."+string(filepath.Separator)) {
-		return false
-	}
-	return actionProtectedStateRelative(filepath.ToSlash(filepath.Join(".defenseclaw", relative)))
 }
 
 func cdPathProtectedReach(call *syntax.CallExpr, file *syntax.File, cwd, home string) bool {

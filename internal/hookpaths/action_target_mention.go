@@ -1963,10 +1963,9 @@ func resolveActiveStateHardlinkTargetResolved(resolved, home string) (string, bo
 	return "", false
 }
 
-// The shared identity index is an acceleration, not a negative proof: its
-// entry and time bounds can leave an active file out. For a recovered write
-// target with multiple links, check a missed identity against the current
-// state tree. An incomplete live check remains reachable.
+// A truncated identity index cannot prove that a multiply linked target is
+// outside active state. This conservative result is used only after the
+// recovered-command proof bound is exhausted.
 func activeStateHardlinkReachResolved(resolved, home string) bool {
 	info, err := pathStat(resolved)
 	if err != nil || !info.Mode().IsRegular() || linkCount(resolved, info) < 2 {
@@ -1975,58 +1974,27 @@ func activeStateHardlinkReachResolved(resolved, home string) bool {
 	if _, same := resolveActiveStateHardlinkTargetResolved(resolved, home); same {
 		return true
 	}
-	root := filepath.Join(home, ".defenseclaw")
-	deadline := time.Now().Add(activeStateIndexBudget)
-	for _, name := range activeStateFiles {
-		if time.Now().After(deadline) {
-			return true
-		}
-		if current, err := pathStat(filepath.Join(root, name)); err == nil && os.SameFile(info, current) {
-			return true
-		}
+	root, ok := ResolveWriteTarget(filepath.Join(home, ".defenseclaw"))
+	if !ok || !activeStateIdentitySnapshot(root).truncated {
+		return false
 	}
-	for _, name := range activeStateTrees {
-		if time.Now().After(deadline) {
-			return true
-		}
-		tree, ok := ResolveWriteTarget(filepath.Join(root, filepath.FromSlash(name)))
-		if !ok {
-			return true
-		}
-		found, incomplete := false, false
-		err := filepath.WalkDir(tree, func(path string, entry fs.DirEntry, walkErr error) error {
-			if time.Now().After(deadline) {
-				incomplete = true
-				return fs.SkipAll
-			}
-			if walkErr != nil {
-				if !os.IsNotExist(walkErr) {
-					incomplete = true
-				}
-				return nil
-			}
-			if entry.IsDir() {
-				return nil
-			}
-			if current, err := pathStat(path); err == nil && os.SameFile(info, current) {
-				found = true
-				return fs.SkipAll
-			}
-			return nil
-		})
-		if found || incomplete || err != nil && !os.IsNotExist(err) {
-			return true
-		}
+	rootInfo, err := pathStat(root)
+	if err != nil {
+		return false
 	}
-	return false
+	targetID := fileIdentityForPath(resolved, info)
+	rootID := directoryIdentityForPath(root, rootInfo)
+	targetDevice, _, targetOK := strings.Cut(targetID, ":")
+	rootDevice, _, rootOK := strings.Cut(rootID, ":")
+	return targetOK && rootOK && targetDevice == rootDevice
 }
 
 // The identity index of one active state tree is built at most once per
 // activeStateIndexTTL and shared by every operand and request in that time,
 // so a command naming many ordinary hard links costs one bounded walk. The
-// walk stops after activeStateIndexEntries entries or activeStateIndexBudget,
-// well inside every hook deadline; a file it did not reach is not mapped (no
-// block), which never refuses ordinary work.
+// walk stops after activeStateIndexEntries entries or activeStateIndexBudget.
+// The ordinary target mapper uses only confirmed entries; the exhausted
+// recovered-command path also records whether the walk was incomplete.
 var (
 	activeStateIndexEntries = 4096
 	activeStateIndexBudget  = 250 * time.Millisecond
@@ -2044,16 +2012,21 @@ type activeStateIdentity struct {
 }
 
 type activeStateIdentityIndex struct {
-	built time.Time
-	files []activeStateIdentity
+	built     time.Time
+	files     []activeStateIdentity
+	truncated bool
 }
 
 func activeStateIdentities(activeRoot string) []activeStateIdentity {
+	return activeStateIdentitySnapshot(activeRoot).files
+}
+
+func activeStateIdentitySnapshot(activeRoot string) activeStateIdentityIndex {
 	activeStateIndex.Lock()
 	defer activeStateIndex.Unlock()
 	now := time.Now()
 	if index, ok := activeStateIndex.byRoot[activeRoot]; ok && now.Sub(index.built) < activeStateIndexTTL {
-		return index.files
+		return index
 	}
 	for root, index := range activeStateIndex.byRoot {
 		if now.Sub(index.built) >= activeStateIndexTTL {
@@ -2063,27 +2036,33 @@ func activeStateIdentities(activeRoot string) []activeStateIdentity {
 	if activeStateIndex.byRoot == nil {
 		activeStateIndex.byRoot = make(map[string]activeStateIdentityIndex)
 	}
-	files := walkActiveStateIdentities(activeRoot, now.Add(activeStateIndexBudget))
-	activeStateIndex.byRoot[activeRoot] = activeStateIdentityIndex{built: now, files: files}
-	return files
+	files, truncated := walkActiveStateIdentities(activeRoot, now.Add(activeStateIndexBudget))
+	index := activeStateIdentityIndex{built: now, files: files, truncated: truncated}
+	activeStateIndex.byRoot[activeRoot] = index
+	return index
 }
 
-func walkActiveStateIdentities(activeRoot string, deadline time.Time) []activeStateIdentity {
+func walkActiveStateIdentities(activeRoot string, deadline time.Time) ([]activeStateIdentity, bool) {
 	activeStateIndexWalks.Add(1)
 	var files []activeStateIdentity
 	visited := 0
+	incomplete := false
 	exhausted := func() bool {
 		visited++
 		return visited > activeStateIndexEntries || time.Now().After(deadline)
 	}
 	add := func(path, relative string) {
-		if info, err := pathStat(path); err == nil && info.Mode().IsRegular() {
-			files = append(files, activeStateIdentity{relative: relative, info: info})
+		if info, err := pathStat(path); err == nil {
+			if info.Mode().IsRegular() {
+				files = append(files, activeStateIdentity{relative: relative, info: info})
+			}
+		} else if !os.IsNotExist(err) {
+			incomplete = true
 		}
 	}
 	for _, name := range activeStateFiles {
 		if exhausted() {
-			return files
+			return files, true
 		}
 		add(filepath.Join(activeRoot, name), name)
 	}
@@ -2094,7 +2073,13 @@ func walkActiveStateIdentities(activeRoot string, deadline time.Time) []activeSt
 				stopped = true
 				return fs.SkipAll
 			}
-			if walkErr != nil || entry.IsDir() {
+			if walkErr != nil {
+				if !os.IsNotExist(walkErr) {
+					incomplete = true
+				}
+				return nil
+			}
+			if entry.IsDir() {
 				return nil
 			}
 			if relative, err := filepath.Rel(activeRoot, path); err == nil {
@@ -2103,10 +2088,10 @@ func walkActiveStateIdentities(activeRoot string, deadline time.Time) []activeSt
 			return nil
 		})
 		if stopped {
-			break
+			return files, true
 		}
 	}
-	return files
+	return files, incomplete
 }
 
 // actionPosixNestedShellMention scans each static shell -c or env -S body as
