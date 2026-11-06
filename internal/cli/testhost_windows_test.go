@@ -602,7 +602,11 @@ func snapshotTestServices(snapshot map[string]string) bool {
 
 // fingerprintTestTree records root and everything under it as
 // "file <path>" = "<kind> <size> <modified>", without following links;
-// an unreadable folder is recorded as such. A path in skip is left out.
+// an unreadable folder is recorded as such. A path in skip is left out. A
+// folder is "folder <modified>": the size Windows reports for a folder is
+// not its content, and it changed (0 -> 4096 on C:\Windows\Logs\DefenseClaw,
+// same modified time, no entry added or removed), so the package failed
+// GAP-0079 with nothing written; an added or removed entry is its own line.
 func fingerprintTestTree(snapshot map[string]string, root string, skip []string) {
 	_ = filepath.WalkDir(root, func(path string, entry fs.DirEntry, err error) error {
 		for _, left := range skip {
@@ -631,7 +635,12 @@ func fingerprintTestTree(snapshot map[string]string, root string, skip []string)
 		case !entry.Type().IsRegular():
 			kind = "other"
 		}
-		snapshot["file "+path] = fmt.Sprintf("%s %d %s", kind, info.Size(), info.ModTime().UTC().Format(time.RFC3339Nano))
+		modified := info.ModTime().UTC().Format(time.RFC3339Nano)
+		if kind == "folder" {
+			snapshot["file "+path] = kind + " " + modified
+			return nil
+		}
+		snapshot["file "+path] = fmt.Sprintf("%s %d %s", kind, info.Size(), modified)
 		return nil
 	})
 }
@@ -1456,5 +1465,37 @@ func TestTestMachineFolderFingerprintSeesEveryChange(t *testing.T) {
 	}
 	if strings.Contains(changes, "gateway.log") || strings.Contains(changes, "kept.json") {
 		t.Errorf("the fingerprint diff reports a skipped or unchanged file:\n%s", changes)
+	}
+}
+
+// A folder's fingerprint is its modified time, not the size Windows reports
+// for it, which is no content; a folder that gains an entry still shows.
+func TestTestMachineFolderFingerprintLeavesOutTheFolderSize(t *testing.T) {
+	root := t.TempDir()
+	logs := filepath.Join(root, "Logs")
+	if err := os.Mkdir(logs, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	fingerprint := func() map[string]string {
+		snapshot := map[string]string{}
+		fingerprintTestTree(snapshot, logs, nil)
+		return snapshot
+	}
+	info, err := os.Stat(logs)
+	if err != nil {
+		t.Fatal(err)
+	}
+	before := fingerprint()
+	if got, want := before["file "+logs], "folder "+info.ModTime().UTC().Format(time.RFC3339Nano); got != want {
+		t.Fatalf("folder fingerprint %q, want %q", got, want)
+	}
+	if changes := diffTestMachineRegistry(before, fingerprint()); len(changes) != 0 {
+		t.Fatalf("an unchanged folder is reported as a machine write: %v", changes)
+	}
+	if err := os.WriteFile(filepath.Join(logs, "written.log"), []byte("1"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if changes := strings.Join(diffTestMachineRegistry(before, fingerprint()), "\n"); !strings.Contains(changes, "added file "+filepath.Join(logs, "written.log")) {
+		t.Fatalf("a written entry is not reported:\n%s", changes)
 	}
 }
