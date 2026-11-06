@@ -23,18 +23,20 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/sandboxauth"
 	"github.com/defenseclaw/defenseclaw/internal/sandboxrelay"
 	"github.com/google/uuid"
+	"golang.org/x/time/rate"
 )
 
 // TestGAP0490SandboxReceiptCapacity sends 400 relayed tool calls, 20 at a
-// time, the way the sandbox hook sends them (hooks/_sandbox.sh): the proposal
-// and its receipt each carry an idempotency key, and an attempt that gets no
-// answer, or a 502, 503 or 504, is posted once more with the same key. Each
-// attempt here waits 3 s, a third of the 9 s first attempt of the hook, so a
-// race build on a small runner may need the retry. Every call must still end
-// in an allow, a receipt the gateway acknowledges and exactly one audited
-// verdict: a retry joins its first attempt instead of evaluating the call
-// again, so no call is offered twice and no offered answer is left
-// unacknowledged.
+// time and inside the documented per-binding hook rate (above that rate the
+// ingress answers 429 by design), the way the sandbox hook sends them
+// (hooks/_sandbox.sh): the proposal and its receipt each carry an idempotency
+// key, and an attempt that gets no answer, or a 502, 503 or 504, is posted
+// once more with the same key. Each attempt here waits 3 s, a third of the
+// 9 s first attempt of the hook, so a race build on a small runner may need
+// the retry. Every call must still end in an allow, a receipt the gateway
+// acknowledges and exactly one audited verdict: a retry joins its first
+// attempt instead of evaluating the call again, so no call is offered twice
+// and no offered answer is left unacknowledged.
 func TestGAP0490SandboxReceiptCapacity(t *testing.T) {
 	const calls, parallel = 400, 20
 	f := newManagedHookAuditFixture(t, nil)
@@ -63,6 +65,11 @@ func TestGAP0490SandboxReceiptCapacity(t *testing.T) {
 	defer srv.Close()
 	client := &http.Client{Timeout: 3 * time.Second}
 	var retried atomic.Int32
+	// Proposals start at 80% of the production hook rate and half its burst,
+	// so a fast runner stays inside the budget the ingress enforces. A slow
+	// runner is limited by the gateway, not by this pace.
+	limits := sandboxauth.DefaultLimiterConfig()
+	pace := rate.NewLimiter(rate.Limit(limits.HookRPS*0.8), limits.HookBurst/2)
 	post := func(body []byte, receipt bool) (int, []byte, error) {
 		key := uuid.NewString()
 		for attempt := 1; ; attempt++ {
@@ -108,6 +115,12 @@ func TestGAP0490SandboxReceiptCapacity(t *testing.T) {
 			defer wg.Done()
 			for i := range jobs {
 				session := fmt.Sprintf("g490-%d", i)
+				if err := pace.Wait(t.Context()); err != nil {
+					mu.Lock()
+					problems[fmt.Sprintf("pace %v", err)]++
+					mu.Unlock()
+					continue
+				}
 				status, out, err := post([]byte(managedHookBody(session, "PreToolUse")), false)
 				if err != nil || status != http.StatusOK {
 					mu.Lock()
