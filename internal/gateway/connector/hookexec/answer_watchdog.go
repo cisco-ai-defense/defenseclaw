@@ -6,6 +6,7 @@ package hookexec
 import (
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -105,6 +106,9 @@ type answerWatchdog struct {
 	// with that reason, so no later render replaces the answer, and the
 	// answer the agent gets names what the row names (rel-1-0-6 GAP-0294).
 	claimedAnswer bool
+	// managedOutagePrimed is an open answer backed by a stopped-service
+	// proof. A later connection or a different failure withdraws it.
+	managedOutagePrimed bool
 	// logHome is the background lookup of the invoking user's diagnostic
 	// directory of a managed call (cacheFailureLogHome).
 	logHome *failureLogHomeLookup
@@ -567,6 +571,80 @@ func (w *answerWatchdog) perUserOutageSeen(opts Options, sp spec, failMode strin
 		return
 	}
 	w.useRestartAnswerLocked(answer)
+}
+
+// managedOutageSeen preserves the administrator's open answer when a managed
+// hook has already proved that its gateway service is stopped. A later
+// connected try or a different failure restores the closed no-decision
+// answer; the stopped service alone cannot authorize a call the new gateway
+// has accepted. The lifecycle is checked again at the answer deadline.
+func (w *answerWatchdog) managedOutageSeen(opts Options, sp spec, failMode string, err error) {
+	if w == nil || !opts.ManagedEnterprise || opts.SecureClient {
+		return
+	}
+	if err == nil {
+		// A response supersedes an earlier stopped-service proof even when
+		// a test transport does not provide a GotConn trace.
+		if w.managedOutagePending() {
+			w.noDecisionPending()
+		}
+		return
+	}
+	outage := withManagedOutage(opts, err)
+	if outage.managedOutageOpen && !OrdinaryNoAnswerPayload(opts.failurePayload) {
+		outage.managedOutageOpen = false
+	}
+	if !outage.managedOutageOpen {
+		// The request's own deadline is not a later peer observation. The
+		// connect trace withdraws the proof if this retry reached a peer.
+		if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) ||
+			errors.Is(err, errGatewayNoAnswer) || errors.Is(err, errGatewayNotConnected) {
+			return
+		}
+		w.mu.Lock()
+		primed := w.managedOutagePrimed
+		w.mu.Unlock()
+		if primed {
+			w.noDecisionPending()
+		}
+		return
+	}
+	reason := managedPeerFailureReason(opts, err)
+	var out, errb bytes.Buffer
+	rendered := outage
+	rendered.Stdout, rendered.Stderr = &out, &errb
+	rendered.Home, rendered.FailureLogHome, rendered.HookDir, rendered.answerWatch = "", nil, "", nil
+	code := failUnreachable(rendered, sp, failMode, reason)
+	logged := outage
+	logged.answerWatch = nil
+	logged.Stderr = io.Discard
+	answer := watchdogAnswer{out: out.Bytes(), err: errb.Bytes(), code: code,
+		mode: failMode, reason: reason, category: "transport",
+		logFailure: func() { _ = failUnreachable(logged, sp, failMode, reason) },
+		frame:      localFailureFallbackFrame(outage, sp, reason, "transport", failMode, false)}
+	installCheck, install := renderInstallAnswer(outage, sp, failMode)
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	if w.fired || w.claimedAnswer || w.closedKnown || w.failureLogged || w.decisionPending {
+		return
+	}
+	w.fallback = answer
+	w.managedOutagePrimed = true
+	w.visibleOutage = func() ([]byte, []byte, int) {
+		return renderVisibleOutage(outage, sp, failMode, reason)
+	}
+	w.installCheck, w.install = installCheck, install
+}
+
+// managedOutagePending is the proof the request path can use if its context
+// ends just before the watchdog writes the same prepared answer.
+func (w *answerWatchdog) managedOutagePending() bool {
+	if w == nil {
+		return false
+	}
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	return w.managedOutagePrimed && !w.closedKnown && !w.decisionPending && !w.answeredStatus
 }
 
 // perUserRestartWindowCall reports a per-user call (not managed, socket or
@@ -1110,6 +1188,7 @@ func (w *answerWatchdog) noDecisionPending() {
 		return
 	}
 	w.decisionPending = true
+	w.managedOutagePrimed = false
 	if !w.fired && !w.claimedAnswer && !w.failureClosed {
 		w.closedKnown = true
 		w.fallback = w.noDecision
