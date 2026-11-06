@@ -480,7 +480,15 @@ func unprovenShellParseWrite(command, cwd, home string, depth int, budget *unpro
 		reached = budget.recoveredReach(command, cwd, home)
 		return strings.Contains(command, ">") || unprovenWriter.MatchString(command) && reached, reached
 	}
-	protected := budget.memo.protectedFiles(home)
+	var protected protectedFiles
+	protectedReady := false
+	protectedIndex := func() protectedFiles {
+		if !protectedReady {
+			protected = budget.memo.protectedFiles(home)
+			protectedReady = true
+		}
+		return protected
+	}
 	ssh := filepath.Join(home, ".ssh")
 	reach := budget.recoveredReach(command, cwd, home)
 	called := calledFunctionsWithBudget(file, home, budget)
@@ -522,7 +530,7 @@ func unprovenShellParseWrite(command, cwd, home string, depth int, budget *unpro
 				// an ordinary target remains audit-only in balanced mode.
 				budget.bounded = true
 				if reach || budget.recoveredReach(command, cwd, home) ||
-					prefix != command && protectedReachFromTextWithStatePrepared(prefix, cwd, home, filepath.Join(home, ".defenseclaw"), protected, ssh, budget.memo) {
+					prefix != command && protectedReachFromTextWithStatePrepared(prefix, cwd, home, filepath.Join(home, ".defenseclaw"), nil, ssh, budget.memo) {
 					unknown = true
 					return false
 				}
@@ -542,10 +550,12 @@ func unprovenShellParseWrite(command, cwd, home string, depth int, budget *unpro
 			if budget.bounded {
 				return true
 			}
-			for _, operand := range literalWriteOperandsDepth(prefix, cwd, home, depth+1) {
-				if protectedReachPath(operand, protected, ssh) {
-					unknown = true
-					return false
+			if operands := literalWriteOperandsDepth(prefix, cwd, home, depth+1); len(operands) != 0 {
+				for _, operand := range operands {
+					if protectedReachPath(operand, protectedIndex(), ssh) {
+						unknown = true
+						return false
+					}
 				}
 			}
 			words := make([]string, len(call.Args))
@@ -560,7 +570,7 @@ func unprovenShellParseWrite(command, cwd, home string, depth int, budget *unpro
 			// whole-command parse discarded that fact, so recover its call as
 			// a standalone command (the wrapped proof also extracts cp).
 			for _, operand := range literalProgramOperands(words, nil, cwd, home, 1, false) {
-				if protectedReachPath(operand, protected, ssh) {
+				if protectedReachPath(operand, protectedIndex(), ssh) {
 					unknown = true
 					return false
 				}
@@ -576,7 +586,7 @@ func unprovenShellParseWrite(command, cwd, home string, depth int, budget *unpro
 			return true
 		}
 		path, fixed := StaticWord(redirect.Word, home)
-		if !fixed || protectedReachPath(OperandPath(path, cwd), protected, ssh) {
+		if !fixed || protectedReachPath(OperandPath(path, cwd), protectedIndex(), ssh) {
 			unknown = true
 		}
 		return !unknown
