@@ -313,6 +313,87 @@ class CoworkPluginLineTests(unittest.TestCase):
             self.assertNotIn(self.LINE, output)
 
 
+class CoworkRemovalNotRecordedTests(unittest.TestCase):
+    """A refused Cowork marker never crashes uninstall or reset after the teardown (cowork-1-0-8 GAP-0085).
+
+    What is left of the work still runs; then the reason, which names the
+    folder owner, and the plugin removal step are printed and the exit is 1.
+    """
+
+    PROBLEM = (
+        "unsafe export parent C:\\Users\\a: owner SID S-1-5-21-1-2-3-1002 is not this account, SYSTEM, "
+        "BUILTIN Administrators or TrustedInstaller"
+    )
+
+    def setUp(self) -> None:
+        self._tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self._tmp.cleanup)
+        self._data = Path(self._tmp.name) / "data"
+        self._data.mkdir()
+        for target, value in (
+            ("defenseclaw.commands.windows_native_uninstall.prepare_native_windows_uninstall", None),
+            ("defenseclaw.commands.cmd_uninstall.config_module.default_data_path", self._data),
+        ):
+            patcher = patch(target, return_value=value)
+            patcher.start()
+            self.addCleanup(patcher.stop)
+        from defenseclaw import cowork
+
+        state = Path(cowork.state_path(str(self._data)))
+        state.parent.mkdir(parents=True, exist_ok=True)
+        state.write_text("{}")
+        self._marker = Path(cowork.uninstalled_marker_path(str(self._data)))
+
+    def _uninstall(self, refused: bool):
+        plan = cmd_uninstall.UninstallPlan(data_dir=str(self._data), remove_data_dir=True)
+        refusal = patch("defenseclaw.cowork.mark_uninstalled", side_effect=OSError(self.PROBLEM))
+        with (
+            patch.object(cmd_uninstall, "_build_plan", return_value=plan),
+            patch.object(cmd_uninstall, "_render_plan"),
+            patch.object(cmd_uninstall, "_execute_plan") as execute,
+            patch.object(cmd_uninstall, "_configured_gateway_ports", return_value=frozenset()),
+            patch.object(cmd_uninstall, "_remove_marked_native_otel_left") as otel,
+            patch.object(cmd_uninstall, "_render_kept_and_next_steps") as next_steps,
+            refusal if refused else contextlib.nullcontext(),
+        ):
+            result = CliRunner().invoke(cmd_uninstall.uninstall_cmd, ["--all", "--yes"])
+        execute.assert_called_once_with(plan)
+        otel.assert_called_once()
+        next_steps.assert_called_once_with(plan)
+        return result, " ".join(result.output.split())
+
+    def test_refused_marker_finishes_the_uninstall_then_exits_1_naming_the_owner(self):
+        result, flat = self._uninstall(refused=True)
+        self.assertEqual(result.exit_code, 1, msg=result.output)
+        self.assertIsInstance(result.exception, SystemExit)
+        self.assertIn(f"DefenseClaw could not record its removal for the Cowork plugin: {self.PROBLEM}", flat)
+        self.assertIn("it blocks every Cowork tool call", flat)
+        self.assertNotIn("lets Cowork calls run after the data folder is removed", flat)
+        self.assertFalse(self._marker.exists())
+
+    def test_written_marker_is_the_ordinary_uninstall(self):
+        result, flat = self._uninstall(refused=False)
+        self.assertEqual(result.exit_code, 0, msg=result.output)
+        self.assertEqual(self._marker.read_text(), "removed\n")
+        self.assertIn("lets Cowork calls run after the data folder is removed", flat)
+        self.assertNotIn("could not record", flat)
+
+    def test_refused_marker_finishes_the_reset_then_exits_1(self):
+        with (
+            patch.object(cmd_uninstall, "_execute_plan") as execute,
+            patch("defenseclaw.cowork.mark_uninstalled", side_effect=OSError(self.PROBLEM)),
+        ):
+            result = CliRunner().invoke(cmd_uninstall.reset_cmd, ["--yes"])
+        execute.assert_called_once()
+        flat = " ".join(result.output.split())
+        self.assertEqual(result.exit_code, 1, msg=result.output)
+        self.assertIsInstance(result.exception, SystemExit)
+        self.assertIn("Reset complete", flat)
+        self.assertIn(self.PROBLEM, flat)
+        self.assertLess(flat.index("Reset complete"), flat.index("could not record its removal"))
+        self.assertNotIn("lets Cowork calls run after the data folder is removed", flat)
+
+
 class KeptAndNextStepsTests(unittest.TestCase):
     """GAP-1093: a partial uninstall says what it kept and how to go on."""
 

@@ -402,10 +402,7 @@ def uninstall_cmd(
     opencode_binary = opencode_service.account_binary() if "opencode" in plan.connectors else ""
     gateway_ports = _configured_gateway_ports()
     _execute_plan(plan)
-    if cowork_plugin and plan.remove_data_dir:
-        from defenseclaw import cowork
-
-        cowork.mark_uninstalled(plan.data_dir)
+    cowork_problem = _record_cowork_removal(plan.data_dir) if cowork_plugin and plan.remove_data_dir else ""
     _remove_marked_native_otel_left(gateway_ports)
     if opencode_binary:
         # OpenCode V2's background server kept the plugin it loaded (rel-1-0-6 GAP-0026).
@@ -414,9 +411,11 @@ def uninstall_cmd(
     if plan.connectors:
         # The plan said so; the end says it again, once it is true (GAP-0255).
         ux.warn("Close any agent session still open: it runs without DefenseClaw's hooks now.")
-    if cowork_plugin:
+    if cowork_plugin and not cowork_problem:
         ux.warn(f"DefenseClaw cannot remove its Cowork plugin from your Claude account: {_COWORK_REMOVAL_STEP}")
     _render_kept_and_next_steps(plan)
+    if cowork_problem:
+        _report_cowork_removal_not_recorded(cowork_problem)
 
 
 # The one reminder that always reaches the user: the in-chat notice after an
@@ -438,6 +437,32 @@ def _cowork_plugin_built(plan: UninstallPlan) -> bool:
     from defenseclaw import cowork
 
     return bool(plan.data_dir) and os.path.exists(cowork.state_path(plan.data_dir))
+
+
+def _record_cowork_removal(data_dir: str) -> str:
+    """Write the Cowork removal marker; return why it could not, or "".
+
+    It runs after the teardown, so a refusal must not stop what is left of the
+    uninstall: the caller finishes, then reports it and exits 1
+    (cowork-1-0-8 GAP-0085). No marker means the plugin keeps blocking, never
+    that Cowork looks uninstalled.
+    """
+    from defenseclaw import cowork
+
+    try:
+        cowork.mark_uninstalled(data_dir)
+    except OSError as exc:
+        return str(exc)
+    return ""
+
+
+def _report_cowork_removal_not_recorded(problem: str) -> None:
+    ux.err(f"DefenseClaw could not record its removal for the Cowork plugin: {problem}")
+    ux.err(
+        "Until you remove the DefenseClaw plugin in Claude Desktop (Customize > Plugins, then the ... menu > "
+        "Remove), it blocks every Cowork tool call."
+    )
+    raise SystemExit(1)
 
 
 _NATIVE_OTEL_READ_LIMIT = 1024 * 1024
@@ -925,8 +950,8 @@ def _dispatch_native_windows_uninstall(
         _remove_marked_native_otel_left(gateway_ports)
         if binaries:
             _remove_script_install_after_native_setup(request.platform_name)
-        if wipe_data and cowork_plugin:
-            cowork.mark_uninstalled(data_dir)
+        if wipe_data and cowork_plugin and (cowork_problem := _record_cowork_removal(data_dir)):
+            _report_cowork_removal_not_recorded(cowork_problem)
         if cowork_plugin:
             ux.warn(f"DefenseClaw cannot remove its Cowork plugin from your Claude account: {_COWORK_REMOVAL_STEP}")
         return True
@@ -1031,13 +1056,12 @@ def reset_cmd(skip_sandbox_teardown: bool, yes: bool, stop_sandboxes: bool = Fal
         raise SystemExit(1)
 
     _execute_plan(plan)
-    if cowork_plugin:
-        from defenseclaw import cowork
-
-        cowork.mark_uninstalled(plan.data_dir)
-    if cowork_plugin:
+    cowork_problem = _record_cowork_removal(plan.data_dir) if cowork_plugin else ""
+    if cowork_plugin and not cowork_problem:
         ux.warn(f"DefenseClaw cannot remove its Cowork plugin from your Claude account: {_COWORK_REMOVAL_STEP}")
     ux.ok("Reset complete. Run 'defenseclaw quickstart' to reinstall.")
+    if cowork_problem:
+        _report_cowork_removal_not_recorded(cowork_problem)
 
 
 # ---------------------------------------------------------------------------

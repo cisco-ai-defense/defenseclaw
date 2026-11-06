@@ -1190,3 +1190,41 @@ def test_native_setup_without_leftovers_prints_none(tmp_path: Path, capsys: pyte
     ):
         assert cmd_uninstall._dispatch_native_windows_uninstall(wipe_data=True, dry_run=False, yes=True)
     assert "support was removed" not in capsys.readouterr().out
+
+
+@pytest.mark.parametrize("refused", [False, True])
+def test_native_setup_cowork_marker_refusal_reports_after_setup(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str], refused: bool
+) -> None:
+    # After Setup removed DefenseClaw, a refused Cowork marker exits 1 with the
+    # reason instead of a traceback (cowork-1-0-8 GAP-0085).
+    from defenseclaw import cowork
+
+    data = tmp_path / ".defenseclaw"
+    state = Path(cowork.state_path(str(data)))
+    state.parent.mkdir(parents=True)
+    state.write_text("{}", encoding="utf-8")
+    problem = "unsafe export parent C:\\Users\\a: owner SID S-1-5-21-1-2-3-1002 is not this account"
+    request = _request(tmp_path, wipe_data=True)
+    refusal = patch.object(cowork, "mark_uninstalled", side_effect=OSError(problem))
+    with (
+        patch.object(native, "prepare_native_windows_uninstall", return_value=request),
+        patch.object(native, "execute_native_windows_uninstall", return_value=native.NativeWindowsUninstallOutcome(0)),
+        patch.object(cmd_uninstall.config_module, "default_data_path", return_value=data),
+        refusal if refused else contextlib.nullcontext(),
+    ):
+        if refused:
+            with pytest.raises(SystemExit) as raised:
+                cmd_uninstall._dispatch_native_windows_uninstall(wipe_data=True, dry_run=False, yes=True)
+            assert raised.value.code == 1
+        else:
+            assert cmd_uninstall._dispatch_native_windows_uninstall(wipe_data=True, dry_run=False, yes=True)
+    out = " ".join(capsys.readouterr().out.split())
+    assert "Native Windows uninstall completed." in out
+    if refused:
+        assert f"DefenseClaw could not record its removal for the Cowork plugin: {problem}" in out
+        assert "it blocks every Cowork tool call" in out
+        assert not Path(cowork.uninstalled_marker_path(str(data))).exists()
+    else:
+        assert Path(cowork.uninstalled_marker_path(str(data))).read_text() == "removed\n"
+        assert "could not record" not in out
