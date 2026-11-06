@@ -157,13 +157,36 @@ func lateKnownStatement(stmt *syntax.Stmt, cwd, home string, depth int, compound
 		if len(cmd.Assigns) != 0 || len(cmd.Args) == 0 {
 			return nil, false
 		}
-		args, ok := lateUnwrapCall(cmd.Args, home)
+		args, wrappers, ok := lateUnwrapCall(cmd.Args, home)
 		if !ok {
 			return nil, false
 		}
+		for _, wrapper := range wrappers {
+			value, known := lateKnownWord(wrapper, cwd, home)
+			if !known {
+				return nil, false
+			}
+			if name, assigned, ok := strings.Cut(value, "="); ok && lateEnvName(name) {
+				value = assigned
+			}
+			calls = append(calls, []string{"", value})
+		}
 		program, fixed := StaticWord(args[0], home)
-		if !fixed || compound && lateChangesShellContext(program) {
+		displayCommand := false
+		if program == "command" && len(args) > 1 {
+			option, known := StaticWord(args[1], home)
+			displayCommand = known && (option == "-v" || option == "-V")
+		}
+		if !fixed || compound && lateChangesShellContext(program) && !displayCommand {
 			return nil, false
+		}
+		if len(args) == 1 && strings.ContainsAny(program, " \t") && lateHasSplitWrapper(wrappers, home) {
+			inner, ok := lateKnownCalls(program, cwd, home, depth+1)
+			if !ok {
+				return nil, false
+			}
+			calls = append(calls, inner...)
+			break
 		}
 		if program == "bash" || program == "sh" || program == "zsh" || program == "eval" {
 			if program == "eval" && len(args) != 2 || program != "eval" && len(args) != 3 {
@@ -219,13 +242,25 @@ func lateKnownStatement(stmt *syntax.Stmt, cwd, home string, depth int, compound
 	return calls, true
 }
 
+func lateHasSplitWrapper(wrappers []*syntax.Word, home string) bool {
+	for _, wrapper := range wrappers {
+		word, ok := StaticWord(wrapper, home)
+		if ok && (word == "-S" || word == "--split-string") {
+			return true
+		}
+	}
+	return false
+}
+
 // Prefix utilities execute their remaining words as a command. Keep that
 // command's operands together so a quoted shell body is read as a body.
-func lateUnwrapCall(args []*syntax.Word, home string) ([]*syntax.Word, bool) {
+func lateUnwrapCall(args []*syntax.Word, home string) ([]*syntax.Word, []*syntax.Word, bool) {
+	homeChanged := false
+	var wrappers []*syntax.Word
 	for wraps := 0; wraps < 8 && len(args) > 0; wraps++ {
 		program, known := StaticWord(args[0], home)
 		if !known {
-			return nil, false
+			return nil, nil, false
 		}
 		prefix := args[:1]
 		switch program {
@@ -234,7 +269,7 @@ func lateUnwrapCall(args []*syntax.Word, home string) ([]*syntax.Word, bool) {
 			for i < len(args) {
 				word, fixed := StaticWord(args[i], home)
 				if !fixed {
-					return nil, false
+					return nil, nil, false
 				}
 				if options && word == "--" {
 					options = false
@@ -245,46 +280,54 @@ func lateUnwrapCall(args []*syntax.Word, home string) ([]*syntax.Word, bool) {
 					i++
 					continue
 				}
+				if options && (word == "-S" || word == "--split-string") {
+					i++
+					continue
+				}
 				if options && (word == "-u" || word == "--unset") {
 					if i+1 >= len(args) {
-						return nil, false
+						return nil, nil, false
 					}
 					name, fixed := StaticWord(args[i+1], home)
 					if !fixed || name == "HOME" || name == "PWD" {
-						return nil, false
+						return nil, nil, false
 					}
 					i += 2
 					continue
 				}
 				if options && strings.HasPrefix(word, "--unset=") {
 					if name := strings.TrimPrefix(word, "--unset="); name == "HOME" || name == "PWD" || name == "" {
-						return nil, false
+						return nil, nil, false
 					}
 					i++
 					continue
 				}
 				if name, _, assigned := strings.Cut(word, "="); assigned && lateEnvName(name) {
-					if name == "HOME" || name == "PWD" {
-						return nil, false
+					if name == "PWD" {
+						return nil, nil, false
+					}
+					if name == "HOME" {
+						homeChanged = true
 					}
 					i++
 					continue
 				}
 				if options && strings.HasPrefix(word, "-") {
-					return nil, false
+					return nil, nil, false
 				}
 				break
 			}
+			wrappers = append(wrappers, args[1:i]...)
 			args = args[i:]
 			if len(args) == 0 {
-				return prefix, true
+				return prefix, wrappers, true
 			}
 		case "command", "exec":
 			i := 1
 			for i < len(args) {
 				word, fixed := StaticWord(args[i], home)
 				if !fixed {
-					return nil, false
+					return nil, nil, false
 				}
 				if word == "--" {
 					i++
@@ -294,20 +337,146 @@ func lateUnwrapCall(args []*syntax.Word, home string) ([]*syntax.Word, bool) {
 					i++
 					continue
 				}
+				if program == "command" && (word == "-v" || word == "-V") {
+					return args, wrappers, true
+				}
+				if program == "exec" && word == "-a" && i+1 < len(args) {
+					i += 2
+					continue
+				}
+				if program == "exec" && (word == "-c" || word == "-l") {
+					i++
+					continue
+				}
 				if strings.HasPrefix(word, "-") {
-					return nil, false
+					return nil, nil, false
 				}
 				break
 			}
+			wrappers = append(wrappers, args[1:i]...)
 			args = args[i:]
 			if len(args) == 0 {
-				return prefix, true
+				return prefix, wrappers, true
+			}
+		case "nice", "/usr/bin/nice", "/bin/nice":
+			i := 1
+			for i < len(args) {
+				word, fixed := StaticWord(args[i], home)
+				if !fixed {
+					return nil, nil, false
+				}
+				if word == "--" {
+					i++
+					break
+				}
+				if word == "-n" || word == "--adjustment" {
+					if i+1 >= len(args) {
+						return nil, nil, false
+					}
+					i += 2
+					continue
+				}
+				if strings.HasPrefix(word, "-n") && len(word) > 2 ||
+					strings.HasPrefix(word, "--adjustment=") || lateSignedInteger(word) {
+					i++
+					continue
+				}
+				if strings.HasPrefix(word, "-") {
+					return nil, nil, false
+				}
+				break
+			}
+			wrappers = append(wrappers, args[1:i]...)
+			args = args[i:]
+			if len(args) == 0 {
+				return prefix, wrappers, true
+			}
+		case "timeout", "/usr/bin/timeout", "/bin/timeout":
+			i := 1
+			for i < len(args) {
+				word, fixed := StaticWord(args[i], home)
+				if !fixed {
+					return nil, nil, false
+				}
+				if word == "--" {
+					i++
+					break
+				}
+				if word == "-k" || word == "--kill-after" || word == "-s" || word == "--signal" {
+					if i+1 >= len(args) {
+						return nil, nil, false
+					}
+					i += 2
+					continue
+				}
+				if word == "--foreground" || word == "--preserve-status" ||
+					strings.HasPrefix(word, "--kill-after=") || strings.HasPrefix(word, "--signal=") {
+					i++
+					continue
+				}
+				if strings.HasPrefix(word, "-") {
+					return nil, nil, false
+				}
+				break
+			}
+			if i >= len(args) {
+				return nil, nil, false
+			}
+			i++ // duration
+			wrappers = append(wrappers, args[1:i]...)
+			args = args[i:]
+			if len(args) == 0 {
+				return prefix, wrappers, true
+			}
+		case "nohup", "/usr/bin/nohup", "/bin/nohup":
+			i := 1
+			if i < len(args) {
+				word, fixed := StaticWord(args[i], home)
+				if !fixed {
+					return nil, nil, false
+				}
+				if word == "--" {
+					i++
+				} else if strings.HasPrefix(word, "-") {
+					return nil, nil, false
+				}
+			}
+			wrappers = append(wrappers, args[1:i]...)
+			args = args[i:]
+			if len(args) == 0 {
+				return prefix, wrappers, true
 			}
 		default:
-			return args, true
+			if homeChanged {
+				body := program
+				if (program == "bash" || program == "sh" || program == "zsh") && len(args) >= 3 {
+					var fixed bool
+					body, fixed = StaticWord(args[2], home)
+					if !fixed {
+						return nil, nil, false
+					}
+				}
+				if strings.Contains(body, "$HOME") || strings.Contains(body, "${HOME") ||
+					strings.Contains(body, "~") {
+					return nil, nil, false
+				}
+			}
+			return args, wrappers, true
 		}
 	}
-	return nil, false
+	return nil, nil, false
+}
+
+func lateSignedInteger(word string) bool {
+	if len(word) < 2 || word[0] != '-' && word[0] != '+' {
+		return false
+	}
+	for _, r := range word[1:] {
+		if r < '0' || r > '9' {
+			return false
+		}
+	}
+	return true
 }
 
 func lateEnvName(name string) bool {

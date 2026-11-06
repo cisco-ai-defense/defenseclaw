@@ -2069,16 +2069,32 @@ func walkActiveStateIdentities(activeRoot string, deadline time.Time) ([]activeS
 // bounded index above remains for broad mention scans; its missing entries
 // cannot establish that a particular hard link is ordinary. Follow listed
 // tree links so a relocated state tree has the same identity as a direct one.
+// An incomplete reach scan remains Possible for an ordinary alias.
+const activeStateReachEntries = 1 << 14
+
 func walkAllActiveStateIdentities(activeRoot string) ([]activeStateIdentity, bool) {
 	activeStateIndexWalks.Add(1)
 	var files []activeStateIdentity
 	complete := true
+	remaining := activeStateReachEntries
+	exhausted := false
+	step := func() bool {
+		if remaining == 0 {
+			complete, exhausted = false, true
+			return false
+		}
+		remaining--
+		return true
+	}
 	add := func(relative string, info os.FileInfo) {
 		if info.Mode().IsRegular() {
 			files = append(files, activeStateIdentity{relative: relative, info: info})
 		}
 	}
 	for _, name := range activeStateFiles {
+		if !step() {
+			return files, false
+		}
 		path := filepath.Join(activeRoot, name)
 		if info, err := pathStat(path); err == nil {
 			add(name, info)
@@ -2089,6 +2105,9 @@ func walkAllActiveStateIdentities(activeRoot string) ([]activeStateIdentity, boo
 	var visited []os.FileInfo
 	var walk func(string, string, int)
 	walk = func(path, relative string, depth int) {
+		if exhausted || !step() {
+			return
+		}
 		if depth > 40 {
 			complete = false
 			return
@@ -2110,13 +2129,27 @@ func walkAllActiveStateIdentities(activeRoot string) ([]activeStateIdentity, boo
 			}
 		}
 		visited = append(visited, info)
-		entries, err := os.ReadDir(path)
+		directory, err := pathOpen(path)
 		if err != nil {
 			complete = false
 			return
 		}
-		for _, entry := range entries {
-			walk(filepath.Join(path, entry.Name()), filepath.Join(relative, entry.Name()), depth+1)
+		defer directory.Close()
+		for !exhausted {
+			entries, err := directory.ReadDir(128)
+			if err != nil && err != io.EOF {
+				complete = false
+				return
+			}
+			for _, entry := range entries {
+				walk(filepath.Join(path, entry.Name()), filepath.Join(relative, entry.Name()), depth+1)
+				if exhausted {
+					return
+				}
+			}
+			if err == io.EOF {
+				return
+			}
 		}
 	}
 	for _, tree := range activeStateTrees {
