@@ -22,6 +22,15 @@ var transientRetryDelays = []time.Duration{
 
 var transientRetrySleep = time.Sleep
 
+// SetTransientRetrySleepForTest replaces the wait between attempts. Tests can
+// publish a file at that boundary without relying on scheduler timing.
+// Call restore after a test that uses it; concurrent use is unsupported.
+func SetTransientRetrySleepForTest(sleep func(time.Duration)) (restore func()) {
+	previous := transientRetrySleep
+	transientRetrySleep = sleep
+	return func() { transientRetrySleep = previous }
+}
+
 // RetryTransientRead runs read and repeats it, for about 50 ms at most, while
 // it fails because the file is missing from a folder that exists
 // (ERROR_FILE_NOT_FOUND: a rename replacing it at that moment) or because
