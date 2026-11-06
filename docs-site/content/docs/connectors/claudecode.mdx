@@ -176,7 +176,7 @@ rules:
     tags: [credential, file-sensitive]
 ```
 
-Validate and pin the pack as in [Start with a complete rule](/docs/policies/cel#start-with-a-complete-rule): `defenseclaw guardrail validate-pack` and `defenseclaw guardrail use-pack` on a per-user install, or `defenseclaw-gateway rulepack validate` and `rule_pack` with `custom_packs` in the admin config on a managed computer ([custom rule packs](/docs/enterprise/configuration)). In action mode the read is denied before the file is opened. In observe mode it is recorded as `would_block` and runs. A command the parser cannot read fully only matches the `pattern`, which records and never blocks. The same holds in Claude Cowork, which runs this engine and hook route.
+Validate and pin the pack as in [Start with a complete rule](/docs/policies/cel#start-with-a-complete-rule): `defenseclaw guardrail validate-pack` and `defenseclaw guardrail use-pack` on a per-user install, or `/opt/defenseclaw/bin/defenseclaw-gateway rulepack validate` (`/opt/cisco/defenseclaw/bin/defenseclaw-gateway` on macOS) and `rule_pack` with `custom_packs` in the admin config on a managed computer ([custom rule packs](/docs/enterprise/configuration)). In action mode the read is denied before the file is opened. In observe mode it is recorded as `would_block` and runs. A command the parser cannot read fully only matches the `pattern`, which records and never blocks. The same holds in Claude Cowork, which runs this engine and hook route.
 
 ### Native ask
 

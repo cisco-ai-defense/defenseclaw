@@ -68,8 +68,8 @@ func TestWindowsPolicyReasonsDoNotConditionPublicationOnEnrollment(t *testing.T)
 
 // cowork-1-0-8 GAP-0076: the details an administrator of a managed Windows
 // computer reads name the installed CLI as typed in an elevated PowerShell
-// prompt; Setup puts no DefenseClaw command on PATH. Linux and macOS keep
-// the gateway command.
+// prompt; Setup puts no DefenseClaw command on PATH. Linux and macOS name the
+// gateway by its absolute path.
 func TestWindowsPolicyDetailsNameTheInstalledCLI(t *testing.T) {
 	cli := "`" + managed.WindowsAdminCommand() + " "
 	if runtime.GOOS != "windows" && cli != "`& 'C:\\Program Files\\Cisco\\DefenseClaw\\bin\\defenseclaw.exe' " {
@@ -79,8 +79,13 @@ func TestWindowsPolicyDetailsNameTheInstalledCLI(t *testing.T) {
 		cli+"enterprise policy export --connector claudecode --format claude-hklm-json` (from an elevated PowerShell prompt)"; got != want {
 		t.Errorf("windows export = %s, want %s", got, want)
 	}
-	for _, goos := range []string{"linux", "darwin"} {
-		if got, want := policyExportCommand(goos, "--connector", "codex"), "`defenseclaw-gateway enterprise policy export --connector codex`"; got != want {
+	// The Linux and macOS packages put the gateway on no PATH either: the command
+	// names it by its absolute path (cowork-1-0-8 GAP-0081).
+	for goos, gateway := range map[string]string{
+		"linux":  "/opt/defenseclaw/bin/defenseclaw-gateway",
+		"darwin": "/opt/cisco/defenseclaw/bin/defenseclaw-gateway",
+	} {
+		if got, want := policyExportCommand(goos, "--connector", "codex"), "`"+gateway+" enterprise policy export --connector codex`"; got != want {
 			t.Errorf("%s export = %s, want %s", goos, got, want)
 		}
 	}

@@ -14,6 +14,7 @@ import (
 	"encoding/json"
 	"io"
 	"io/fs"
+	"strings"
 	"testing"
 
 	"github.com/defenseclaw/defenseclaw/internal/config"
@@ -95,5 +96,15 @@ func TestEnterpriseSecretCheckReportsTheKeyOutcome(t *testing.T) {
 	*euid = 1000
 	if doc, _, code = runSecretCheck(t, "--name", "ai-defense-api-key", "--json"); code != 1 || errorCode(doc) != "not_root" {
 		t.Fatalf("not root: exit %d %v", code, doc)
+	}
+}
+
+// The example runs the gateway by its absolute path: the packages put it on no
+// PATH (cowork-1-0-8 GAP-0081).
+func TestSecretCheckExampleNamesTheGatewayByItsFullPath(t *testing.T) {
+	example := newEnterpriseSecretCheckCommand().Example
+	want := "sudo " + managedHostGatewayCommand() + " enterprise secret check"
+	if !strings.Contains(example, want) || strings.Contains(example, "sudo defenseclaw-gateway") {
+		t.Fatalf("example = %q, want it to contain %q", example, want)
 	}
 }

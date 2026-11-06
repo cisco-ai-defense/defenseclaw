@@ -120,7 +120,7 @@ removed.
 ### Install, upgrade, ensure, uninstall
 
 1. An administrator, package script or MDM runs
-   `defenseclaw-gateway enterprise linux <action>` as root. Paths come from
+   `/opt/defenseclaw/bin/defenseclaw-gateway enterprise linux <action>` as root. Paths come from
    `managed.StandaloneLayoutFor("linux")`; the environment is not consulted.
 2. The lifecycle takes the lock in `/var/lib/defenseclaw-enterprise`, rolls
    back any interrupted transaction, records an intent, snapshots every file
@@ -137,7 +137,7 @@ removed.
 
 ### Secrets
 
-`defenseclaw-gateway enterprise secret set --name <name> --from-stdin` stores
+`/opt/defenseclaw/bin/defenseclaw-gateway enterprise secret set --name <name> --from-stdin` stores
 a value in `/etc/defenseclaw/secrets/<name>`. With systemd 247 or later the
 file is `root:root 0600` and reaches the gateway only through
 `LoadCredential=` under `/run/credentials/`; with older systemd it is

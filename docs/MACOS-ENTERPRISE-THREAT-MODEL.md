@@ -83,7 +83,7 @@ lifecycle creates `/opt/cisco/defenseclaw/run` (`0755`, owned by
 ### Install and lifecycle
 
 1. The MDM installs the standalone `.pkg` (or stages a payload) and runs
-   `defenseclaw-gateway enterprise macos ensure` as root. The postinstall
+   `/opt/cisco/defenseclaw/bin/defenseclaw-gateway enterprise macos ensure` as root. The postinstall
    calls the same lifecycle.
 2. The lifecycle creates the hidden `_defenseclaw` user and group with
    `dscl` if needed, lays out `/opt/cisco/defenseclaw` from

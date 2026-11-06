@@ -24,6 +24,7 @@ import (
 
 	"github.com/defenseclaw/defenseclaw/internal/hookpaths"
 	"github.com/defenseclaw/defenseclaw/internal/lazyregexp"
+	"github.com/defenseclaw/defenseclaw/internal/managed"
 	"github.com/defenseclaw/defenseclaw/internal/redaction"
 	"github.com/defenseclaw/defenseclaw/internal/scanner"
 )
@@ -598,7 +599,12 @@ func agentProjectSkillPendingSentence(reason string) string {
 		if reasonDisplayGOOS == "windows" {
 			return prefix + "Wait for the managed skill watcher to scan it, or ask your administrator to review the scan; then retry the skill."
 		}
-		return prefix + "Ask your administrator to run `defenseclaw-gateway scan skill PATH` for its folder; then retry the skill."
+		// The packages put the gateway on no PATH: name it by its absolute path.
+		gateway := "defenseclaw-gateway"
+		if layout, err := managed.StandaloneLayoutFor(reasonDisplayGOOS); err == nil {
+			gateway = layout.BinDir + "/" + gateway
+		}
+		return prefix + "Ask your administrator to run `" + gateway + " scan skill PATH` for its folder; then retry the skill."
 	}
 	return prefix + "Run `defenseclaw skill scan --path PATH` for its folder; then retry the skill."
 }

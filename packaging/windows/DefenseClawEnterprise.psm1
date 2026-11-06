@@ -32224,7 +32224,6 @@ function Get-DefenseClawApprovedPolicyHash {
 function Get-DefenseClawStandaloneBundleRepairCommand {
     param([Parameter(Mandatory)][hashtable]$Layout)
     $cli = [string]$Layout['CLIPath']
-    if ([string]::IsNullOrWhiteSpace($cli)) { $cli = 'defenseclaw.exe' }
     return "& '$($cli.Replace("'", "''"))' enterprise windows repair --profile standalone --json"
 }
 
