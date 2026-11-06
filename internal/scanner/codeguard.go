@@ -124,7 +124,7 @@ func (s *CodeGuardScanner) ScanContentWithProvenance(filename, content string) C
 			if len(r.extensions) > 0 && !extMatch(ext, r.extensions) {
 				continue
 			}
-			if r.matches(line) {
+			if r.matches(ext, line) {
 				ln := lineNum + 1
 				findings = append(findings, Finding{
 					ID:                  r.id,
@@ -296,13 +296,14 @@ type rule struct {
 	// view, when set, is the part of a line the pattern reads: a built-in
 	// rule drops text that only mentions what it looks for (GAP-1226,
 	// GAP-1227).
-	view func(line string) string
+	view func(ext, line string) string
 }
 
-// matches reports whether the rule fires on line.
-func (r rule) matches(line string) bool {
+// matches reports whether the rule fires on line of a file with extension
+// ext.
+func (r rule) matches(ext, line string) bool {
 	if r.view != nil {
-		line = r.view(line)
+		line = r.view(ext, line)
 	}
 	return r.pattern.MatchString(line)
 }
@@ -322,7 +323,7 @@ var pathTraversalProse = lazyregexp.New(`\.{3,}(?:\\[nrt"']|[^./\\]|$)`)
 // pathTraversalView is the part of a line CG-PATH-001 reads: what the code
 // does with a path, not an import of a sibling module or prose (GAP-1226,
 // GAP-1227).
-func pathTraversalView(line string) string {
+func pathTraversalView(_, line string) string {
 	line = pathTraversalModuleSpecifier.ReplaceAllString(line, " ")
 	return pathTraversalProse.ReplaceAllString(line, " ")
 }
@@ -330,26 +331,49 @@ func pathTraversalView(line string) string {
 // CG-EXEC-001 reads a call of a command or code interpreter, not a name that
 // ends in exec, eval or system (GAP-0056): a method of another object
 // (re.exec(s), model.eval()), a longer name (parseEval(, createFlysystem()
-// and an argument-list subprocess.call([...]) without shell=True run no
-// command string. The receivers (os, child_process and its usual handles cp
-// and childProcess), module expressions (__import__('os')
-// .system(, require('child_process').exec() and names that do are listed. A
-// call right after an escaped line break or tab of a string literal (\n, \r,
-// \t) is code in that string and still counts.
+// and an argument-list subprocess.call([...]) that names no shell run no
+// command string. A call right after an escaped line break or tab of a string
+// literal (\n, \r, \t) is code in that string and still counts.
+//
+// The method and name forms that do run a command or code string are named,
+// one for each kind of true positive the substring rule found: the os,
+// posix and nt modules; child_process and its usual handles (cp,
+// childProcess) and module expressions (__import__('os').system(,
+// require('child_process').exec(); ShellJS (shell.exec, shelljs.exec); Ruby
+// Kernel, Process, binding and TOPLEVEL_BINDING, and instance_/class_/
+// module_eval; Python builtins; JavaScript window, globalThis and global
+// eval and jQuery globalEval; PHP shell_exec and pcntl_exec. A PHP "->" or
+// "::" call still counts, as before.
 const (
 	// cgExecCommandCalls run a command string. CG-EXEC-002 also reports a
 	// subprocess shell=True call; this rule keeps it at its own severity.
-	cgExecCommandCalls = `os\.system|child_process\.exec|\b(?:cp|childprocess)\.exec\(|(?:__import__|import_module|require)\(\s*['"](?:os|(?:node:)?child_process)['"]\s*\)\.(?:system|exec)\(|(?:shell|pcntl)_exec\(|(?:kernel|(?:__)?builtins(?:__)?)\.(?:exec|system)\(|` +
-		`subprocess\.call\((?:\s*[^\s\[]|\s*$)|subprocess\.call\(.*shell\s*=\s*true|(?:^|[^.\w$]|\\[nrt])(?:exec|system)\(`
+	cgExecCommandCalls = `os\.system|\b(?:posix|nt)\.system\(|child_process\.exec|\b(?:cp|childprocess)\.exec\(|` +
+		`(?:__import__|import_module|require)\(\s*['"](?:os|(?:node:)?child_process|shelljs)['"]\s*\)\.(?:system|exec)\(|` +
+		`\bshell(?:js)?\.exec\(|(?:shell|pcntl)_exec\(|(?:kernel|\bprocess|(?:__)?builtins(?:__)?)\.(?:exec|system)\(|` +
+		// subprocess.call runs a command string, or a program chosen at run
+		// time, unless its first argument is a list that starts with a
+		// literal program name that is no shell, passes no inline code, and
+		// closes on this line without shell=True.
+		`subprocess\.call\((?:\s*[^\s\[]|\s*$|\s*\[\s*[^\s'"\]]|\s*\[[^\]]*$|\s*\[[^\]]*\]\s*,[^)]*$|` + cgExecShellListHead + `|` + cgExecInlineCodeList + `)|` +
+		`subprocess\.call\(.*shell\s*=\s*true|(?:^|[^.\w$]|\\[nrt])(?:exec|system)\(`
+	// cgExecShellListHead is an argument list whose first element is a
+	// shell or command interpreter (["sh", "-c", cmd], ["/bin/bash", ...]).
+	cgExecShellListHead = `\s*\[\s*['"](?:[^'"]*[/\\])?(?:sh|bash|zsh|dash|ksh|mksh|fish|csh|tcsh|ash|busybox|cmd|cmd\.exe|powershell|powershell\.exe|pwsh|pwsh\.exe)['"]`
+	// cgExecInlineCodeList is an argument list that passes inline code or a
+	// command string to an interpreter ([sys.executable, "-c", code],
+	// ["node", "-e", src], ["cmd", "/c", line], ["pwsh", "-Command", s]).
+	cgExecInlineCodeList = `\s*\[[^\]]*['"](?:-c|/c|-e|-command|-encodedcommand)['"]`
 	// cgExecEvalCalls evaluate source text.
-	cgExecEvalCalls = `(?:^|[^.\w$]|\\[nrt])eval\(|(?:instance|class|module)_eval\b|(?:__)?(?:builtins(?:__)?|kernel|window|globalthis)\.eval\(`
+	cgExecEvalCalls = `(?:^|[^.\w$]|\\[nrt])eval\(|(?:instance|class|module)_eval\b|globaleval\(|` +
+		`(?:__)?(?:builtins(?:__)?|kernel|binding|toplevel_binding|window|globalthis|global)\.eval\(`
 )
 
-// cgExecView is the part of a line CG-EXEC-001 reads. A line that starts
-// with "//" or "#" is a comment up to its first "{": from there it can be a
-// template, f-string, JSX or interpolated ("#{...}") expression that runs
-// (GAP-0056).
-func cgExecView(line string) string {
+// cgExecView is the part of a line of a file with extension ext that
+// CG-EXEC-001 reads. A line that starts with "//", or in Python, Ruby and
+// PHP with "#" (not a PHP "#[" attribute), is a comment up to its first "{":
+// from there it can be a template, f-string, JSX or interpolated ("#{...}")
+// expression that runs (GAP-0056). In JavaScript "#" starts a private field.
+func cgExecView(ext, line string) string {
 	// Every pattern names exec, eval, system or subprocess: a line without
 	// one is not read, which keeps the rule as fast as the substring rule
 	// it replaced.
@@ -357,7 +381,14 @@ func cgExecView(line string) string {
 		return ""
 	}
 	trimmed := strings.TrimLeft(line, " \t")
-	if !strings.HasPrefix(trimmed, "//") && !strings.HasPrefix(trimmed, "#") {
+	comment := strings.HasPrefix(trimmed, "//")
+	if !comment && strings.HasPrefix(trimmed, "#") && !strings.HasPrefix(trimmed, "#[") {
+		switch strings.ToLower(ext) {
+		case ".py", ".rb", ".php":
+			comment = true
+		}
+	}
+	if !comment {
 		return line
 	}
 	if brace := strings.IndexByte(trimmed, '{'); brace >= 0 {
@@ -367,10 +398,17 @@ func cgExecView(line string) string {
 }
 
 // cgExecHasNeedle reports whether line holds exec, eval, system or
-// subprocess in any ASCII case.
+// subprocess in any ASCII case, or any non-ASCII byte: the pattern is
+// case-insensitive, and Unicode folds letters such as U+017F (long s) to
+// ASCII ones that Python reads as the same identifier, so such a line is
+// left to the pattern.
 func cgExecHasNeedle(line string) bool {
-	for i := 0; i+4 <= len(line); i++ {
-		switch line[i] | 0x20 {
+	for i := 0; i < len(line); i++ {
+		c := line[i]
+		if c >= 0x80 {
+			return true
+		}
+		switch c | 0x20 {
 		case 'e':
 			if hasFoldASCII(line[i:], "exec") || hasFoldASCII(line[i:], "eval") {
 				return true
@@ -521,7 +559,7 @@ func scanFileWithRules(path string, rules []rule) ([]Finding, error) {
 			if len(r.extensions) > 0 && !extMatch(ext, r.extensions) {
 				continue
 			}
-			if r.matches(line) {
+			if r.matches(ext, line) {
 				ln := lineNum
 				findings = append(findings, Finding{
 					ID:                  r.id,
