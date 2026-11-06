@@ -80,17 +80,39 @@ func (d *hookDeliveryReceipt) offer(w http.ResponseWriter, answer func()) string
 	if err := controller.SetReadDeadline(time.Now().Add(5 * time.Second)); err != nil {
 		return ""
 	}
+	// Start the read before writing the proposal. The watchdog can commit its
+	// own answer at any point during evaluation or response delivery.
+	receiptReady := make(chan string, 1)
+	go func() {
+		line, err := bufio.NewReader(io.LimitReader(d.reader, int64(len(hookexec.HookDeliveryReceiptBlock)))).ReadString('\n')
+		if err != nil {
+			line = ""
+		}
+		receiptReady <- line
+	}()
+	var line string
+	received := false
+	select {
+	case line = <-receiptReady:
+		received = true
+		if line == hookexec.HookDeliveryReceiptLate || line == hookexec.HookDeliveryReceiptOpen {
+			return line
+		}
+	default:
+	}
 	w.Header().Set(hookexec.HookDeliveryRequiredHeader, "1")
 	answer()
-	if err := controller.Flush(); err != nil {
-		return ""
+	flushErr := controller.Flush()
+	if !received {
+		line = <-receiptReady
 	}
-	line, err := bufio.NewReader(io.LimitReader(d.reader, int64(len(hookexec.HookDeliveryReceiptBlock)))).ReadString('\n')
-	if err != nil {
+	if flushErr != nil && line != hookexec.HookDeliveryReceiptLate && line != hookexec.HookDeliveryReceiptOpen {
 		return ""
 	}
 	switch line {
 	case hookexec.HookDeliveryReleased:
+		return line
+	case hookexec.HookDeliveryReceiptLate, hookexec.HookDeliveryReceiptOpen:
 		return line
 	case hookexec.HookDeliveryReceiptAck, hookexec.HookDeliveryReceiptBlock:
 		_, _ = io.WriteString(w, hookexec.HookDeliveryConfirmed)
@@ -120,6 +142,13 @@ func (a *APIServer) deliveredHookDecision(connectorName string, resp agentHookRe
 		return resp
 	case hookexec.HookDeliveryReceiptBlock:
 		return failedClosedHookDelivery(resp, hookDeliveryRejectedReason)
+	case hookexec.HookDeliveryReceiptLate:
+		if a.scannerCfg.DeploymentMode == "per_user" {
+			return failedClosedHookDelivery(resp, "gateway did not answer in time")
+		}
+		return failedClosedHookDelivery(resp, hookexec.ManagedGatewayNoAnswerReason)
+	case hookexec.HookDeliveryReceiptOpen:
+		return failedOpenHookDelivery(resp)
 	}
 	if a.scannerCfg.EffectiveHookFailModeForConnector(connectorName) == "open" {
 		// An outage can allow even if the offered policy answer blocked.
@@ -130,6 +159,19 @@ func (a *APIServer) deliveredHookDecision(connectorName string, resp agentHookRe
 		return resp
 	}
 	return unconfirmedHookDelivery(resp)
+}
+
+func failedOpenHookDelivery(resp agentHookResponse) agentHookResponse {
+	if resp.RawAction == "" {
+		resp.RawAction = resp.Action
+	}
+	resp.Action = "allow"
+	resp.Mode = "action"
+	resp.Reason = hookexec.ManagedGatewayNoAnswerReason
+	resp.SourceReason = resp.Reason
+	resp.WouldBlock = false
+	resp.HookOutput = nil
+	return resp
 }
 
 // unreceiptedHookDecision is the decision of a standalone managed call that
