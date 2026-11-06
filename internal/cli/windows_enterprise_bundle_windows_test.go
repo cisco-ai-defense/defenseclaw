@@ -663,6 +663,8 @@ func stubWindowsBundleHost(t *testing.T) managed.StandaloneLayout {
 	savedPrivate, savedSeal, savedPublish, savedReceipt, savedEnsure := windowsBundlePrivateStage, windowsBundleSealVersion, windowsBundlePublishVersion, windowsBundlePublishReceipt, windowsBundleEnsureDirectory
 	savedEnsurePrivate, savedPublishPrivate := windowsBundleEnsurePrivateDirectory, windowsBundlePublishPrivateFile
 	savedEnsureStage, savedPublishStage := windowsBundleEnsureStageDirectory, windowsBundlePublishStageFile
+	savedSpool := windowsChangeSpool
+	t.Cleanup(func() { windowsChangeSpool = savedSpool })
 	t.Cleanup(func() {
 		windowsBundleLayout, windowsBundlePolicy, windowsBundleSleep, windowsBundleTrust, bundleAnchorTrust = savedLayout, savedPolicy, savedSleep, savedTrust, savedAnchorTrust
 		windowsBundlePrivateStage, windowsBundleSealVersion, windowsBundlePublishVersion = savedPrivate, savedSeal, savedPublish
@@ -700,6 +702,16 @@ func stubWindowsBundleHost(t *testing.T) managed.StandaloneLayout {
 	windowsBundlePublishStageFile = func(string) error { return nil }
 	windowsBundleEnsureDirectory = func(layout managed.StandaloneLayout) error {
 		return os.MkdirAll(filepath.Join(layout.ConfigDir, enterprisebundle.BundlesDirName), 0o700)
+	}
+	// The change spool of the layout, in plain folders like the store above:
+	// its protected folders need an Administrators owner, which only an
+	// elevated token can set, and the bundle tests are not about its ACL
+	// (TestWindowsChangeSpoolProtectsTheBundleParent and
+	// TestWindowsFirstChangeEventAndReservationKeepCanonicalACLs are).
+	// GAP-0079: as a standard user every bundle prepare failed here.
+	windowsChangeSpool = func(layout managed.StandaloneLayout) (enterprisestatus.ChangeSpool, error) {
+		return enterprisestatus.ChangeSpool{Dir: enterprisestatus.ChangeEventsDir(layout.ConfigDir), StateDir: layout.LifecycleDir,
+			Reported: func(id string) bool { return enterprisestatus.ChangeReported(layout.DataDir, id) }}, nil
 	}
 	bundleAnchorTrust = nil
 	return layout

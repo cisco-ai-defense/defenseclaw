@@ -14,10 +14,12 @@ import (
 	"sort"
 	"strings"
 	"testing"
+	"time"
 
 	"golang.org/x/sys/windows"
 	"golang.org/x/sys/windows/registry"
 
+	"github.com/defenseclaw/defenseclaw/internal/config"
 	"github.com/defenseclaw/defenseclaw/internal/enterprisebundle"
 	"github.com/defenseclaw/defenseclaw/internal/enterprisehooks"
 	"github.com/defenseclaw/defenseclaw/internal/enterprisestatus"
@@ -47,21 +49,15 @@ func isolateTestHost() func() {
 	// other two machine signals the outage mode reads.
 	managedHostWindowsMarkerUncertain = func() bool { return false }
 	secureClientHost = func() bool { return false }
-	// GAP-0079: the computer's own deployment record reads as absent, as on
-	// a build box. Every "is a standalone deployment installed" reader
-	// (secret and anchor change refusals, activation, bundle status) goes
-	// through it; on a managed computer a secret test recorded its refused
-	// change events in the real change spool.
-	windowsEnterpriseRecordInspector = func(profile string) (winpath.EnterpriseDeployment, error) {
-		return winpath.EnterpriseDeployment{Profile: profile, State: winpath.EnterpriseDeploymentAbsent}, nil
-	}
 	pinTestProcessIdentity()
 	dir, err := os.MkdirTemp("", "defenseclaw-cli-test-")
 	if err != nil {
 		windowsScannerRuntimeDir = func() (string, error) { return "", err }
 		managedHostDescriptorPath = func() string { return "" }
+		isolateTestDeploymentReaders(os.TempDir())
 		return isolateTestMachineWriters("")
 	}
+	isolateTestDeploymentReaders(dir)
 	missingDescriptor := filepath.Join(dir, "no-runtime-descriptor")
 	managedHostDescriptorPath = func() string { return missingDescriptor }
 	// Absent like on a computer without a deployment.
@@ -265,24 +261,46 @@ func testProcessPriority() string {
 	return fmt.Sprintf("%#x", class)
 }
 
-// isolateWindowsEnterpriseHostReaders makes the computer's own standalone
-// deployment state read as absent, as on a build box: its config and
-// manifest, the guardian's last pass and per-user cleanup ledger, its agent
-// config notices, the Amp machine folder and the discovery homes. On a
-// managed lane host these added the real accounts' warnings
+// isolateTestDeploymentReaders makes the computer's own standalone
+// deployment read as absent, as on a build box, for the whole package: its
+// deployment records, its installed config (and its enterprise.trust) and
+// manifest, the guardian's last pass, restores and per-user cleanup ledger,
+// the enrolled connectors and targets, the unprotected-agent record, its
+// agent config notices, the Amp machine folder and the discovery homes. On
+// a managed lane host these added the real accounts' warnings
 // (agent_settings_not_restored, guardian_repair_pending,
 // hook_process_fail_open) to results a test builds from a stubbed installer
-// report (GAP-2572). A test that needs one of them sets its own after this.
-func isolateWindowsEnterpriseHostReaders(t *testing.T) {
-	t.Helper()
-	oldV2, oldGuardian, oldCleanups := windowsEnterpriseStatusV2Read, windowsEnterpriseGuardianStateForStatus, windowsEnterpriseUserCleanupsForStatus
-	oldSettings, oldOTLP := windowsEnterpriseAgentSettingsNotices, windowsEnterpriseNativeOTLPNotices
-	oldAmp, oldHomes := windowsEnterpriseAmpMachineFolderProblems, windowsEnterpriseDiscoveryHomeDirs
-	t.Cleanup(func() {
-		windowsEnterpriseStatusV2Read, windowsEnterpriseGuardianStateForStatus, windowsEnterpriseUserCleanupsForStatus = oldV2, oldGuardian, oldCleanups
-		windowsEnterpriseAgentSettingsNotices, windowsEnterpriseNativeOTLPNotices = oldSettings, oldOTLP
-		windowsEnterpriseAmpMachineFolderProblems, windowsEnterpriseDiscoveryHomeDirs = oldAmp, oldHomes
-	})
+// report (GAP-2572), a secret test recorded its refused change events in the
+// real change spool (GAP-0079), and a standard user could not read them at
+// all. The readers that load a file read a missing one under dir, so they
+// fail as they do on a computer without a deployment. A test that needs one
+// of them sets its own.
+func isolateTestDeploymentReaders(dir string) {
+	windowsEnterpriseRecordInspector = func(profile string) (winpath.EnterpriseDeployment, error) {
+		return winpath.EnterpriseDeployment{Profile: profile, State: winpath.EnterpriseDeploymentAbsent}, nil
+	}
+	missing, err := managed.StandaloneWindowsLayoutForRoots(filepath.Join(dir, "no-program-files"), filepath.Join(dir, "no-program-data"))
+	if err != nil {
+		missing = managed.StandaloneLayout{ConfigPath: filepath.Join(dir, "no-config.yaml"),
+			ManifestPath: filepath.Join(dir, "no-manifest.json"), DataDir: filepath.Join(dir, "no-data")}
+	}
+	windowsEnterpriseInstalledConfigPath = func() (string, error) { return missing.ConfigPath, nil }
+	windowsEnterpriseInstalledConfigForStatus = func() (*config.Config, error) {
+		return loadWindowsEnterpriseStandaloneConfig(missing.ConfigPath)
+	}
+	windowsEnterpriseEnrolledConnectors = func() ([]string, error) { return windowsEnterpriseConfigConnectors(missing.ConfigPath) }
+	windowsEnterpriseEnrolledTargets = func() (map[string]bool, error) {
+		if _, err := enterprisehooks.LoadManifest(missing.ManifestPath); err != nil {
+			return nil, err
+		}
+		return map[string]bool{}, nil
+	}
+	windowsEnterpriseGuardianRestores = func() (map[string]time.Time, error) {
+		return readEnterpriseHookGuardianRestores(missing.DataDir)
+	}
+	windowsEnterpriseUnprotectedAgentsReader = func() ([]enterprisehooks.UnprotectedAgent, error) {
+		return enterprisehooks.ReadWindowsUnprotectedAgents(missing.ManifestPath)
+	}
 	registry := connector.NewDefaultRegistry()
 	windowsEnterpriseStatusV2Read = func() windowsEnterpriseStatusV2Inputs {
 		return windowsEnterpriseStatusV2Inputs{
