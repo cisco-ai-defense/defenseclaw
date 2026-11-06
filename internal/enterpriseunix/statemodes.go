@@ -217,6 +217,7 @@ func (e *Env) stateTrees(account Account) []stateTree {
 				return stateMode{mode: 0o750, owner: rootService}
 			case rel == managed.HookGuardianCredentialAttestationFile, rel == managed.HookGuardianCredentialTransactionFile,
 				rel == managed.HookGuardianReconcileLockFile, rel == enterprisehooks.UnixCopilotVSCodeAccountsFileName,
+				rel == enterprisehooks.UnixOpenCodeServicePortsFileName,
 				rel == "unix_target_bindings.json", rel == retainedMarkerName:
 				return stateMode{mode: 0o600, owner: rootService} // root-only guardian records
 			case rel == managed.HookGuardianAuthorizationFile:
