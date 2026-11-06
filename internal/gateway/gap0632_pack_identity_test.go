@@ -5,8 +5,10 @@ package gateway
 
 import (
 	"context"
+	"encoding/json"
 	"os"
 	"path/filepath"
+	"runtime"
 	"slices"
 	"testing"
 
@@ -166,5 +168,65 @@ func TestGAP0632StateProtectionSurvivesRulePackRemoval(t *testing.T) {
 	})
 	if finding := findingWithID(findings, "tamper.detector_state_write"); finding == nil || !finding.contributesToEnforcement() {
 		t.Fatalf("state protection missing after pack rule removal: %v", FindingStrings(findings))
+	}
+}
+
+func TestGAP0632StructuredStateProtectionSurvivesRulePackRemoval(t *testing.T) {
+	home := t.TempDir()
+	state := filepath.Join(home, ".defenseclaw", "config.yaml")
+	project := filepath.Join(home, "project")
+	for _, dir := range []string{filepath.Dir(state), project} {
+		if err := os.MkdirAll(dir, 0o700); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := os.WriteFile(state, []byte("guardrail: {}\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	link := filepath.Join(project, "state-link")
+	linkErr := os.Symlink(state, link)
+	if linkErr != nil && runtime.GOOS != "windows" {
+		t.Fatal(linkErr)
+	}
+	categories := cloneRuleCategories(defaultRuleCategories())
+	for index := range categories {
+		categories[index].Rules = slices.DeleteFunc(categories[index].Rules, func(rule PatternRule) bool {
+			return rule.ID == "tamper.detector_state_write"
+		})
+	}
+	generation := mustCompileRulePackGeneration(categories)
+	ordinary := filepath.Join(project, "notes.txt")
+	for _, row := range []struct {
+		name, tool, target string
+		args               func(string) map[string]string
+		block              bool
+	}{
+		{"patch state", "apply_patch", state, func(p string) map[string]string {
+			return map[string]string{"command": "*** Begin Patch\n*** Update File: " + p + "\n@@\n-old\n+new\n*** End Patch\n"}
+		}, true},
+		{"patch state link", "apply_patch", link, func(p string) map[string]string {
+			return map[string]string{"command": "*** Begin Patch\n*** Update File: " + p + "\n@@\n-old\n+new\n*** End Patch\n"}
+		}, true},
+		{"patch ordinary", "apply_patch", ordinary, func(p string) map[string]string {
+			return map[string]string{"command": "*** Begin Patch\n*** Update File: " + p + "\n@@\n-old\n+new\n*** End Patch\n"}
+		}, false},
+	} {
+		t.Run(row.name, func(t *testing.T) {
+			if row.target == link && linkErr != nil {
+				t.Skip("file links unavailable on this host")
+			}
+			args, err := json.Marshal(row.args(row.target))
+			if err != nil {
+				t.Fatal(err)
+			}
+			findings := dispatchTrustedAction(context.Background(), trustedActionRequest{
+				Input:     actionfacts.Input{Tool: row.tool, Args: args, CWD: project, ActiveHome: home},
+				Connector: "codex", EnforcementCapable: true, generation: generation,
+			})
+			finding := findingWithID(findings, "tamper.detector_state_write")
+			if got := finding != nil && finding.contributesToEnforcement(); got != row.block {
+				t.Fatalf("state finding = %t, want %t; findings=%v", got, row.block, FindingStrings(findings))
+			}
+		})
 	}
 }
