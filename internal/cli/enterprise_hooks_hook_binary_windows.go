@@ -32,7 +32,6 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/enterprisehooks"
 	"github.com/defenseclaw/defenseclaw/internal/lazyregexp"
 	"github.com/defenseclaw/defenseclaw/internal/managed"
-	"github.com/defenseclaw/defenseclaw/internal/safefile"
 	"github.com/defenseclaw/defenseclaw/internal/winpath"
 )
 
@@ -135,7 +134,12 @@ func removeWindowsReplacementCopies(dir string) []string {
 			continue
 		}
 		path := filepath.Join(dir, entry.Name())
+		if windowsImageBackupTooFresh(path) {
+			// The guardian's own swap made it a moment ago (GAP-0656).
+			continue
+		}
 		if err := os.Remove(path); err == nil {
+			forgetWindowsImageBackup(path)
 			removed = append(removed, path)
 		}
 	}
@@ -153,6 +157,11 @@ func keepWindowsStandaloneHookBinary(stderr io.Writer, onlyWhenDamaged bool) {
 	target := filepath.Join(roots.InstallRoot, "bin", "defenseclaw-hook.exe")
 	windowsHookBinaryMu.Lock()
 	defer windowsHookBinaryMu.Unlock()
+	// A backup an earlier swap kept goes at a later check, once no program
+	// runs it (GAP-0656).
+	for _, removed := range removeDueWindowsImageBackups() {
+		fmt.Fprintf(stderr, "[hook-guardian] removed %s, which no program runs any more\n", removed)
+	}
 	want, err := windowsRecordedArtifactHash(roots.MetadataPath, "hook")
 	if err != nil || want == "" {
 		return
@@ -160,6 +169,7 @@ func keepWindowsStandaloneHookBinary(stderr io.Writer, onlyWhenDamaged bool) {
 	copyPath := filepath.Join(roots.StateRoot, "hook-guardian", "payload", "defenseclaw-hook.exe")
 	damage, err := keepWindowsManagedFileCopy(target, copyPath, want, !onlyWhenDamaged)
 	reportWindowsHookBinaryDigestRefusal(stderr, target)
+	reportWindowsImageSwapLinkRefusal(stderr, target)
 	if err != nil {
 		if message := err.Error(); message != windowsHookBinaryLastErr {
 			windowsHookBinaryLastErr = message
@@ -171,6 +181,26 @@ func keepWindowsStandaloneHookBinary(stderr io.Writer, onlyWhenDamaged bool) {
 	if damage != "" {
 		fmt.Fprintf(stderr, "[hook-guardian] tamper: restored the hook binary %s, which was %s, from the guardian's protected copy (sha256 %s)\n", target, damage, want)
 	}
+}
+
+// windowsImageSwapLinkRefusal is set when a restore found the volume
+// refusing the swap's backup link and replaced the hook the older way;
+// windowsImageSwapLinkRefusalLogged keeps it to one line per refusal.
+var (
+	windowsImageSwapLinkRefusal       string
+	windowsImageSwapLinkRefusalLogged string
+)
+
+// reportWindowsImageSwapLinkRefusal logs, once, that the hook was restored
+// without the one-step swap: a start in that moment can fail (GAP-0369).
+func reportWindowsImageSwapLinkRefusal(stderr io.Writer, target string) {
+	refusal := windowsImageSwapLinkRefusal
+	windowsImageSwapLinkRefusal = ""
+	if refusal == "" || refusal == windowsImageSwapLinkRefusalLogged {
+		return
+	}
+	windowsImageSwapLinkRefusalLogged = refusal
+	fmt.Fprintf(stderr, "[hook-guardian] notice: restored the hook binary %s without the one-step swap: %s; an agent starting it in that moment can get an error (GAP-0369)\n", target, refusal)
 }
 
 // The guardian calls this while holding windowsHookBinaryMu, once after each
@@ -276,7 +306,8 @@ func keepWindowsManagedFileCopy(target, copyPath, want string, refresh bool) (st
 		if err := os.MkdirAll(filepath.Dir(copyPath), 0o700); err != nil {
 			return "", fmt.Errorf("keep a protected copy of %s: %w", target, err)
 		}
-		return "", copyWindowsManagedFile(target, copyPath, "", true)
+		// The copy is never started, so it needs no image swap.
+		return "", copyWindowsManagedFile(target, copyPath, "", true, false)
 	}
 	// The protected copy has no periodic reread of its own. It is never
 	// executed, and its bytes are checked afresh before every restore; a
@@ -295,7 +326,7 @@ func keepWindowsManagedFileCopy(target, copyPath, want string, refresh bool) (st
 	if !missing && info != nil && !info.Mode().IsRegular() {
 		restoreErr = restoreWindowsNonRegularHookBinary(copyPath, target)
 	} else {
-		restoreErr = copyWindowsManagedFile(copyPath, target, windowsInstallFileSDDL, !missing)
+		restoreErr = copyWindowsManagedFile(copyPath, target, windowsInstallFileSDDL, !missing, true)
 	}
 	if restoreErr != nil {
 		return "", fmt.Errorf("restore the hook binary %s, which is %s: %w", target, damage, restoreErr)
@@ -321,13 +352,13 @@ func keepWindowsManagedFileCopy(target, copyPath, want string, refresh bool) (st
 // entry with a file, so only then remove the link or empty directory entry.
 // A non-empty real directory is moved aside intact; its contents are never deleted.
 func restoreWindowsNonRegularHookBinary(copyPath, target string) error {
-	replaceErr := copyWindowsManagedFile(copyPath, target, windowsInstallFileSDDL, true)
+	replaceErr := copyWindowsManagedFile(copyPath, target, windowsInstallFileSDDL, true, true)
 	if replaceErr == nil {
 		return nil
 	}
 	info, err := os.Lstat(target)
 	if errors.Is(err, os.ErrNotExist) {
-		return copyWindowsManagedFile(copyPath, target, windowsInstallFileSDDL, false)
+		return copyWindowsManagedFile(copyPath, target, windowsInstallFileSDDL, false, true)
 	}
 	if err != nil {
 		return fmt.Errorf("inspect target after failed replacement: %w", err)
@@ -337,7 +368,7 @@ func restoreWindowsNonRegularHookBinary(copyPath, target string) error {
 	}
 	removeErr := os.Remove(target)
 	if removeErr == nil {
-		return copyWindowsManagedFile(copyPath, target, windowsInstallFileSDDL, false)
+		return copyWindowsManagedFile(copyPath, target, windowsInstallFileSDDL, false, true)
 	}
 	if !info.IsDir() || info.Mode()&os.ModeSymlink != 0 {
 		return fmt.Errorf("remove non-regular target after failed replacement: %w", removeErr)
@@ -365,7 +396,7 @@ func restoreWindowsNonRegularHookBinary(copyPath, target string) error {
 	if err := windows.MoveFileEx(name, to, windows.MOVEFILE_WRITE_THROUGH); err != nil {
 		return fmt.Errorf("move non-empty directory aside: %w", err)
 	}
-	return copyWindowsManagedFile(copyPath, target, windowsInstallFileSDDL, false)
+	return copyWindowsManagedFile(copyPath, target, windowsInstallFileSDDL, false, true)
 }
 
 // windowsHookBinaryStructuralDamage inspects the named file without opening
@@ -399,10 +430,14 @@ func windowsHookBinaryStructuralDamage(path string) (string, error) {
 // copyWindowsManagedFile copies source to destination through a temporary
 // sibling, with the protected access list sddl when it is not empty, and
 // renames it into place, replacing a file already there only with replace.
-// A regular file already there is replaced with
-// swapWindowsLaunchableFile, so an agent starting the hook meanwhile starts
-// the old program or the new one (GAP-0656).
-func copyWindowsManagedFile(source, destination, sddl string, replace bool) error {
+// With launchable (the hook binary agents start), a regular file already
+// there is replaced with swapWindowsProgramImage, so an agent starting the
+// hook meanwhile starts the old program or the new one; Windows refuses the
+// MoveFileEx replacement used before while any hook call runs the old image
+// (GAP-0656). The MoveFileEx rename serves a missing or non-regular
+// destination, the guardian's own copy (never started) and a volume that
+// refuses the swap's hard link (GAP-0369).
+func copyWindowsManagedFile(source, destination, sddl string, replace, launchable bool) error {
 	body, err := os.ReadFile(source)
 	if err != nil {
 		return err
@@ -439,13 +474,19 @@ func copyWindowsManagedFile(source, destination, sddl string, replace bool) erro
 		_ = os.Remove(temporary)
 		return err
 	}
-	if replace {
+	if replace && launchable {
 		if info, err := os.Lstat(destination); err == nil && info.Mode().IsRegular() {
-			if err := swapWindowsLaunchableFile(temporary, destination); err != nil {
+			backup, err := swapWindowsProgramImage(temporary, destination)
+			switch {
+			case err == nil:
+				deferWindowsImageBackupRemoval(backup)
+				return nil
+			case errors.Is(err, errWindowsImageSwapLinkRefused):
+				windowsImageSwapLinkRefusal = err.Error()
+			default:
 				_ = os.Remove(temporary)
 				return err
 			}
-			return nil
 		}
 	}
 	flags := uint32(windows.MOVEFILE_WRITE_THROUGH)
@@ -456,40 +497,6 @@ func copyWindowsManagedFile(source, destination, sddl string, replace bool) erro
 		_ = os.Remove(temporary)
 		return err
 	}
-	return nil
-}
-
-// swapWindowsLaunchableFile puts temporary at destination the way Setup
-// does (SwapLaunchableFile in the lifecycle module, GAP-0240): the old file
-// first gets a second name, <destination>.backup.<32 hex>, then one
-// POSIX-semantics rename replaces destination. Windows refuses to remove
-// the last name of a running program, so the MoveFileEx replacement used
-// before failed while any hook call ran, and a hook that could not start
-// let its tool call run unchecked (GAP-0656). The backup goes at once when
-// no program runs it, otherwise removeWindowsReplacementCopies or the next
-// Setup run deletes it.
-func swapWindowsLaunchableFile(temporary, destination string) error {
-	suffix := make([]byte, 16)
-	if _, err := rand.Read(suffix); err != nil {
-		return err
-	}
-	backup := destination + ".backup." + hex.EncodeToString(suffix)
-	from, err := windows.UTF16PtrFromString(destination)
-	if err != nil {
-		return err
-	}
-	link, err := windows.UTF16PtrFromString(backup)
-	if err != nil {
-		return err
-	}
-	if err := windows.CreateHardLink(link, from, 0); err != nil {
-		return fmt.Errorf("keep the old file as %s: %w", backup, err)
-	}
-	if err := safefile.ReplaceFileAtomically(temporary, destination); err != nil {
-		_ = os.Remove(backup)
-		return err
-	}
-	_ = os.Remove(backup)
 	return nil
 }
 

@@ -6,12 +6,16 @@
 package cli
 
 import (
+	"flag"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
+	"unsafe"
 
 	"golang.org/x/sys/windows"
 
@@ -112,34 +116,21 @@ func TestRemoveWindowsReplacementCopiesRemovesOnlyUnusedCopies(t *testing.T) {
 // GAP-0656: while a hook call runs the binary, Windows refuses to replace
 // its last name, so the guardian's MoveFileEx restore failed until no hook
 // ran. The one-step swap keeps the running program under a backup name,
-// puts the new file in place, and a start right after runs the new one.
+// puts the new file in place, and a start right after runs the new one. The
+// backup goes at a later guardian check, once no program runs it.
 func TestCopyWindowsManagedFileSwapsARunningProgram(t *testing.T) {
-	system := os.Getenv("SystemRoot")
-	if system == "" {
-		system = `C:\Windows`
-	}
 	dir := t.TempDir()
 	target := filepath.Join(dir, "defenseclaw-hook.exe")
 	source := filepath.Join(dir, "source.exe")
-	for from, to := range map[string]string{
-		filepath.Join(system, "System32", "PING.EXE"):     target,
-		filepath.Join(system, "System32", "HOSTNAME.EXE"): source,
-	} {
-		body, err := os.ReadFile(from)
-		if err != nil {
-			t.Skipf("system program unavailable: %v", err)
-		}
-		if err := os.WriteFile(to, body, 0o700); err != nil {
-			t.Fatal(err)
-		}
-	}
+	writeWindowsSystemProgram(t, "PING.EXE", target, nil)
+	writeWindowsSystemProgram(t, "HOSTNAME.EXE", source, nil)
 	running := exec.Command(target, "-n", "30", "127.0.0.1")
 	if err := running.Start(); err != nil {
 		t.Fatal(err)
 	}
 	defer func() { _ = running.Process.Kill(); _, _ = running.Process.Wait() }()
 	time.Sleep(200 * time.Millisecond)
-	if err := copyWindowsManagedFile(source, target, "", true); err != nil {
+	if err := copyWindowsManagedFile(source, target, "", true, true); err != nil {
 		t.Fatalf("replace the running program: %v", err)
 	}
 	want, err := windowsFileSHA256Hex(source)
@@ -159,6 +150,17 @@ func TestCopyWindowsManagedFileSwapsARunningProgram(t *testing.T) {
 	if err != nil || len(backups) != 1 || !windowsReplacementCopyPattern.MatchString(filepath.Base(backups[0])) {
 		t.Fatalf("backup of the running program: %q, %v", backups, err)
 	}
+	// The swap does not delete the old file in the instant after its
+	// rename, and the after-reconcile sweep leaves a backup the swap made
+	// a moment ago.
+	if removed := removeWindowsReplacementCopies(dir); len(removed) != 0 {
+		t.Fatalf("removed a backup the swap made a moment ago: %q", removed)
+	}
+	restoreAge := setWindowsImageBackupMinAgeForTest(0)
+	defer restoreAge()
+	if removed := removeDueWindowsImageBackups(); len(removed) != 0 {
+		t.Fatalf("removed the image a program still runs: %q", removed)
+	}
 	if removed := removeWindowsReplacementCopies(dir); len(removed) != 0 {
 		t.Fatalf("removed the image a program still runs: %q", removed)
 	}
@@ -166,8 +168,8 @@ func TestCopyWindowsManagedFileSwapsARunningProgram(t *testing.T) {
 	_, _ = running.Process.Wait()
 	deadline := time.Now().Add(5 * time.Second)
 	for {
-		removed := removeWindowsReplacementCopies(dir)
-		if len(removed) == 1 && removed[0] == backups[0] {
+		removed := removeDueWindowsImageBackups()
+		if len(removed) == 1 && strings.EqualFold(removed[0], backups[0]) {
 			break
 		}
 		if time.Now().After(deadline) {
@@ -175,10 +177,227 @@ func TestCopyWindowsManagedFileSwapsARunningProgram(t *testing.T) {
 		}
 		time.Sleep(50 * time.Millisecond)
 	}
-	if err := copyWindowsManagedFile(target, filepath.Join(dir, "missing.exe"), "", true); err != nil {
+	if err := copyWindowsManagedFile(target, filepath.Join(dir, "missing.exe"), "", true, true); err != nil {
 		t.Fatalf("a missing destination is still created: %v", err)
 	}
 	if left, _ := filepath.Glob(filepath.Join(dir, "*.backup.*")); len(left) != 0 {
 		t.Fatalf("leftover backups: %q", left)
 	}
+}
+
+// GAP-0656 review M1: agents start the hook while the guardian restores it.
+// Every start must succeed while restores alternate two builds of a program,
+// as in the review's probe: with the transacted safefile rename (g655 round
+// c) 6,316 of 7,193 starts failed with "Access is denied" or 6838. The
+// count can be raised natively with -g656-image-swaps.
+func TestCopyWindowsManagedFileSwapsUnderConcurrentLaunches(t *testing.T) {
+	swaps := *windowsImageSwapLaunchSwaps
+	if swaps <= 0 {
+		swaps = 300
+		if testing.Short() {
+			swaps = 60
+		}
+	}
+	dir := t.TempDir()
+	target := filepath.Join(dir, "defenseclaw-hook.exe")
+	builds := []string{filepath.Join(dir, "build-a.exe"), filepath.Join(dir, "build-b.exe")}
+	writeWindowsSystemProgram(t, "PING.EXE", builds[0], nil)
+	writeWindowsSystemProgram(t, "PING.EXE", builds[1], []byte("defenseclaw-g656-overlay"))
+	writeWindowsSystemProgram(t, "PING.EXE", target, nil)
+	failures, starts, restoreErrs := runWindowsImageSwapLaunches(t, target, builds, swaps, 8, 10*time.Millisecond)
+	t.Logf("swaps=%d starts=%d failed starts=%d restore errors=%d", swaps, starts, len(failures), restoreErrs)
+	if restoreErrs != 0 {
+		t.Fatalf("%d of %d restores failed", restoreErrs, swaps)
+	}
+	if starts < int64(swaps) {
+		t.Fatalf("only %d starts ran beside %d restores", starts, swaps)
+	}
+	if len(failures) != 0 {
+		t.Fatalf("%d of %d hook starts failed during the restores, first: %v", len(failures), starts, failures[:min(len(failures), 5)])
+	}
+	want, err := windowsFileSHA256Hex(builds[(swaps-1)%2])
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got, err := windowsFileSHA256Hex(target); err != nil || got != want {
+		t.Fatalf("target is %s (%v), want the last build %s", got, err, want)
+	}
+	if damage, err := windowsHookBinaryStructuralDamage(target); err != nil || damage != "" {
+		t.Fatalf("restored target: %q, %v", damage, err)
+	}
+	if left, _ := filepath.Glob(target + ".restore-*"); len(left) != 0 {
+		t.Fatalf("staging copies left: %q", left)
+	}
+	restoreAge := setWindowsImageBackupMinAgeForTest(0)
+	defer restoreAge()
+	deadline := time.Now().Add(10 * time.Second)
+	for {
+		_ = removeDueWindowsImageBackups()
+		left, _ := filepath.Glob(target + ".backup.*")
+		if len(left) == 0 {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("%d backups stayed after every start ended", len(left))
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+}
+
+// GAP-0656 review S1 (GAP-0369): on a volume or behind a filter driver that
+// refuses the backup hard link, the restore replaces the hook the older way
+// and the guardian says so once, instead of failing every check.
+func TestCopyWindowsManagedFileFallsBackWhenHardLinksAreRefused(t *testing.T) {
+	for _, code := range windowsImageSwapLinkRefusedCodes {
+		dir := t.TempDir()
+		target := filepath.Join(dir, "defenseclaw-hook.exe")
+		source := filepath.Join(dir, "source.exe")
+		if err := os.WriteFile(target, []byte("old"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(source, []byte("new"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		previous := windowsImageSwapLink
+		windowsImageSwapLink = func(string, string) error { return code }
+		err := copyWindowsManagedFile(source, target, "", true, true)
+		windowsImageSwapLink = previous
+		if err != nil {
+			t.Fatalf("code %d: restore failed: %v", code, err)
+		}
+		if body, err := os.ReadFile(target); err != nil || string(body) != "new" {
+			t.Fatalf("code %d: target %q, %v", code, body, err)
+		}
+		var log strings.Builder
+		reportWindowsImageSwapLinkRefusal(&log, target)
+		reportWindowsImageSwapLinkRefusal(&log, target)
+		if strings.Count(log.String(), "without the one-step swap") != 1 {
+			t.Fatalf("code %d: notice %q", code, log.String())
+		}
+		windowsImageSwapLinkRefusalLogged = ""
+		if left, _ := filepath.Glob(filepath.Join(dir, "*.*-*")); len(left) != 0 {
+			t.Fatalf("code %d: leftovers %q", code, left)
+		}
+	}
+	// Any other link failure still fails the restore with nothing changed.
+	dir := t.TempDir()
+	target := filepath.Join(dir, "defenseclaw-hook.exe")
+	source := filepath.Join(dir, "source.exe")
+	_ = os.WriteFile(target, []byte("old"), 0o600)
+	_ = os.WriteFile(source, []byte("new"), 0o600)
+	previous := windowsImageSwapLink
+	windowsImageSwapLink = func(string, string) error { return windows.ERROR_ACCESS_DENIED }
+	err := copyWindowsManagedFile(source, target, "", true, true)
+	windowsImageSwapLink = previous
+	if err == nil {
+		t.Fatal("an access-denied link was taken for a refused volume")
+	}
+	if body, _ := os.ReadFile(target); string(body) != "old" {
+		t.Fatalf("target changed: %q", body)
+	}
+}
+
+// The rename step fails with nothing changed: the backup link goes again.
+func TestSwapWindowsProgramImageRemovesItsBackupWhenTheRenameFails(t *testing.T) {
+	dir := t.TempDir()
+	target := filepath.Join(dir, "defenseclaw-hook.exe")
+	source := filepath.Join(dir, "source.exe")
+	_ = os.WriteFile(target, []byte("old"), 0o600)
+	_ = os.WriteFile(source, []byte("new"), 0o600)
+	previous := windowsImageSwapRename
+	windowsImageSwapRename = func(string, string) error { return windows.ERROR_SHARING_VIOLATION }
+	_, err := swapWindowsProgramImage(source, target)
+	windowsImageSwapRename = previous
+	if err == nil {
+		t.Fatal("swap reported success")
+	}
+	if left, _ := filepath.Glob(target + ".backup.*"); len(left) != 0 {
+		t.Fatalf("backup left: %q", left)
+	}
+	if damage, err := windowsHookBinaryStructuralDamage(target); err != nil || damage != "" {
+		t.Fatalf("target after a failed swap: %q, %v", damage, err)
+	}
+}
+
+var windowsImageSwapLaunchSwaps = flag.Int("g656-image-swaps", 0, "restores in TestCopyWindowsManagedFileSwapsUnderConcurrentLaunches (0: 300, or 60 with -short)")
+
+func setWindowsImageBackupMinAgeForTest(age time.Duration) (restore func()) {
+	previous := windowsImageBackupMinAge
+	windowsImageBackupMinAge = age
+	return func() { windowsImageBackupMinAge = previous }
+}
+
+func writeWindowsSystemProgram(t *testing.T, name, to string, overlay []byte) {
+	t.Helper()
+	system := os.Getenv("SystemRoot")
+	if system == "" {
+		system = `C:\Windows`
+	}
+	body, err := os.ReadFile(filepath.Join(system, "System32", name))
+	if err != nil {
+		t.Skipf("system program unavailable: %v", err)
+	}
+	if err := os.WriteFile(to, append(body, overlay...), 0o700); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// runWindowsImageSwapLaunches starts target from workers goroutines with
+// CreateProcess (suspended, then ended), as agents start the hook, while the
+// guardian restore alternates builds onto it swaps times, gap apart. It
+// returns the failed starts, the number of starts and of failed restores.
+func runWindowsImageSwapLaunches(t *testing.T, target string, builds []string, swaps, workers int, gap time.Duration) ([]error, int64, int) {
+	t.Helper()
+	application, err := windows.UTF16PtrFromString(target)
+	if err != nil {
+		t.Fatal(err)
+	}
+	commandLine := `"` + target + `" -n 1 127.0.0.1`
+	var starts atomic.Int64
+	var mu sync.Mutex
+	var failures []error
+	stop := make(chan struct{})
+	var wg sync.WaitGroup
+	for w := 0; w < workers; w++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for {
+				select {
+				case <-stop:
+					return
+				default:
+				}
+				command, _ := windows.UTF16PtrFromString(commandLine)
+				var startup windows.StartupInfo
+				startup.Cb = uint32(unsafe.Sizeof(startup))
+				var process windows.ProcessInformation
+				starts.Add(1)
+				if err := windows.CreateProcess(application, command, nil, nil, false,
+					windows.CREATE_SUSPENDED|windows.CREATE_NO_WINDOW, nil, nil, &startup, &process); err != nil {
+					mu.Lock()
+					failures = append(failures, err)
+					mu.Unlock()
+					continue
+				}
+				_ = windows.TerminateProcess(process.Process, 0)
+				_, _ = windows.WaitForSingleObject(process.Process, 5000)
+				_ = windows.CloseHandle(process.Thread)
+				_ = windows.CloseHandle(process.Process)
+			}
+		}()
+	}
+	restoreErrs := 0
+	for i := 0; i < swaps; i++ {
+		if err := copyWindowsManagedFile(builds[i%2], target, windowsInstallFileSDDL, true, true); err != nil {
+			restoreErrs++
+			if restoreErrs <= 3 {
+				t.Logf("restore %d: %v", i, err)
+			}
+		}
+		time.Sleep(gap)
+	}
+	close(stop)
+	wg.Wait()
+	return failures, starts.Load(), restoreErrs
 }
