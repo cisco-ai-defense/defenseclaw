@@ -530,6 +530,58 @@ try {
         }
         & $canonical[$runtimeEnv]
 
+        # g582 review 3 S4: a state-root folder Setup cannot list is refused
+        # by name (the non-purge uninstall's re-stamp would adopt its
+        # children unjudged), not skipped.
+        # An elevated SSH or SYSTEM token has backup and restore enabled and
+        # lists any folder; an elevated prompt has them disabled. The row
+        # disables them while the gate runs, as Setup's token has them.
+        Microsoft.PowerShell.Utility\Add-Type -TypeDefinition @'
+using System; using System.Runtime.InteropServices;
+public static class G582SmokePrivilege {
+    [StructLayout(LayoutKind.Sequential)] struct LUID { public uint Low; public int High; }
+    [StructLayout(LayoutKind.Sequential)] struct TOKEN_PRIVILEGES { public uint Count; public LUID Luid; public uint Attributes; }
+    [DllImport("advapi32.dll", SetLastError = true)] static extern bool OpenProcessToken(IntPtr process, uint access, out IntPtr token);
+    [DllImport("advapi32.dll", SetLastError = true, CharSet = CharSet.Unicode)] static extern bool LookupPrivilegeValue(string system, string name, out LUID luid);
+    [DllImport("advapi32.dll", SetLastError = true)] static extern bool AdjustTokenPrivileges(IntPtr token, bool disableAll, ref TOKEN_PRIVILEGES state, uint length, IntPtr previous, IntPtr returned);
+    [DllImport("kernel32.dll")] static extern IntPtr GetCurrentProcess();
+    [DllImport("kernel32.dll")] static extern bool CloseHandle(IntPtr handle);
+    public static void Set(string name, bool enable) {
+        IntPtr token;
+        if (!OpenProcessToken(GetCurrentProcess(), 0x28, out token)) { throw new System.ComponentModel.Win32Exception(); }
+        try {
+            LUID luid;
+            if (!LookupPrivilegeValue(null, name, out luid)) { throw new System.ComponentModel.Win32Exception(); }
+            TOKEN_PRIVILEGES state = new TOKEN_PRIVILEGES { Count = 1, Luid = luid, Attributes = enable ? 2u : 0u };
+            if (!AdjustTokenPrivileges(token, false, ref state, 0, IntPtr.Zero, IntPtr.Zero)) { throw new System.ComponentModel.Win32Exception(); }
+        } finally { CloseHandle(token); }
+    }
+}
+'@
+        $unlistable = [IO.Path]::Combine($State, 'unlistable-g582r4')
+        [void][IO.Directory]::CreateDirectory($unlistable)
+        [IO.File]::WriteAllText([IO.Path]::Combine($unlistable, 'child'), 'x')
+        Set-DefenseClawPathAcl -Path $unlistable -Kind AdminDirectory -GatewayServiceSID $sid
+        $denied = Microsoft.PowerShell.Security\Get-Acl -LiteralPath $unlistable
+        [void]$denied.AddAccessRule([Security.AccessControl.FileSystemAccessRule]::new(
+            [Security.Principal.SecurityIdentifier]::new('S-1-1-0'),
+            [Security.AccessControl.FileSystemRights]::ListDirectory,
+            [Security.AccessControl.AccessControlType]::Deny))
+        Microsoft.PowerShell.Security\Set-Acl -LiteralPath $unlistable -AclObject $denied
+        try {
+            foreach ($privilege in @('SeBackupPrivilege', 'SeRestorePrivilege')) { [G582SmokePrivilege]::Set($privilege, $false) }
+            $unlistedRefusal = Get-GateRefusal -Scope Retain
+        }
+        finally {
+            foreach ($privilege in @('SeBackupPrivilege', 'SeRestorePrivilege')) { [G582SmokePrivilege]::Set($privilege, $true) }
+            Set-DefenseClawPathAcl -Path $unlistable -Kind AdminDirectory -GatewayServiceSID $sid
+            Microsoft.PowerShell.Management\Remove-Item -LiteralPath $unlistable -Recurse -Force
+        }
+        if (-not $unlistedRefusal.StartsWith('refusing to change the deployment') -or
+            -not $unlistedRefusal.Contains("Setup cannot list the managed folder $unlistable")) {
+            throw "the Retain gate skipped a state-root folder it cannot list: '$unlistedRefusal'"
+        }
+
         # GAP-0590 review M3: Repair, a reinstall over an uninstall's
         # tombstone and the uninstall itself reach the gate before they
         # consume a record or change anything. The lifecycle steps after the
