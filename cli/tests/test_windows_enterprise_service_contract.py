@@ -7063,6 +7063,31 @@ def test_untrusted_config_acl_is_refused_before_the_transaction_stops_a_service(
     assert "-SelfHealKind" not in content and "Set-DefenseClawPathAcl" not in content
     assert "-AllowedOwnerSIDs @($adminWriters + @(Get-DefenseClawCurrentProcessUserSID))" in content
 
+def test_standalone_self_heal_restamps_only_when_every_verdict_is_repairable() -> None:
+    """GAP-0603 review M1: the standalone self-heal dropped only the untrusted
+    owner and the missing DACL from the verdicts it repairs, so any other
+    repairable verdict beside them (a deny entry, SYSTEM's or the gateway's
+    rights removed) still ran the re-stamp, which writes the owner and the
+    whole DACL, and the second reading found nothing left. On standalone the
+    re-stamp now runs only when every verdict is repairable; otherwise the path
+    is refused, named, and left as it is. Secure Client is unchanged."""
+
+    module = read(MODULE).replace("\r\n", "\n")
+    heal = _function_text(module, "Assert-DefenseClawPathAcl")
+    guard = heal.index("if ($standalone -and $repairable.Count -gt 0) {")
+    restamp = heal.index("if ($repairable.Count -gt 0) {", guard + 1)
+    refusal = heal[guard:restamp]
+    assert "$_.Kind -notin $repairableKinds -or" in refusal
+    assert "($_.Kind -eq 'Contract' -and $_.Severity -in $untrustedContract)" in refusal
+    assert "throw ('refusing to re-stamp a managed path in place" in refusal
+    assert refusal.rstrip().endswith('"/ensure again): $([string]$unrepairable[0].Reason)")\n            }\n        }')
+    assert restamp < heal.index("Set-DefenseClawPathAcl `")
+    # Standalone never counts an Access verdict (an untrusted writer, reader or
+    # a lost protected flag) as repairable; Secure Client still does.
+    assert "@('Contract', 'Rights', 'Advisory')" in heal
+    assert "@('Contract', 'Rights', 'Access')" in heal
+
+
 def test_constrained_language_guards_run_before_any_dotnet_use() -> None:
     installer = read(INSTALLER).replace("\r\n", "\n")
     module = read(MODULE).replace("\r\n", "\n")

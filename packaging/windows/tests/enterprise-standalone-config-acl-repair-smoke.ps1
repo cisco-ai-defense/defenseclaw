@@ -252,6 +252,77 @@ try {
                 throw "standalone self-heal refused Setup's own account as owner"
             }
         }
+        # GAP-0603 review M1: an untrusted owner or writer beside a verdict
+        # the re-stamp may repair (a deny entry the owner's WRITE_DAC planted,
+        # SYSTEM's or the gateway's rights removed) is refused, with the owner
+        # and the access list as they were. Before, the re-stamp healed both
+        # and the second reading accepted the file.
+        $required = New-DefenseClawRequiredRights -Kind Config -GatewayServiceSID $sid
+        function Remove-TestEntry([string]$Path, [string]$SID) {
+            $acl = Microsoft.PowerShell.Security\Get-Acl -LiteralPath $Path
+            foreach ($rule in @($acl.Access)) {
+                if ((ConvertTo-DefenseClawSID -Identity $rule.IdentityReference) -eq $SID) {
+                    [void]$acl.RemoveAccessRuleSpecific($rule)
+                }
+            }
+            Microsoft.PowerShell.Security\Set-Acl -LiteralPath $Path -AclObject $acl
+        }
+        function Add-TestDeny([string]$Path) {
+            $acl = Microsoft.PowerShell.Security\Get-Acl -LiteralPath $Path
+            [void]$acl.AddAccessRule([Security.AccessControl.FileSystemAccessRule]::new(
+                [Security.Principal.SecurityIdentifier]::new($script:UsersSID),
+                [Security.AccessControl.FileSystemRights]::Write,
+                [Security.AccessControl.AccessControlType]::Deny))
+            Microsoft.PowerShell.Security\Set-Acl -LiteralPath $Path -AclObject $acl
+        }
+        function Invoke-TestHeal {
+            Assert-DefenseClawPathAcl -Path $healed -AllowedWriterSIDs $writers -RequiredRights $required `
+                -SelfHealKind ConfigFile -SelfHealGatewayServiceSID $sid
+        }
+        $mixed = [ordered]@{
+            'an untrusted owner and a deny entry' = { Set-TestOwner -Path $healed -SID $users; Add-TestDeny -Path $healed }
+            "an untrusted owner without SYSTEM's rights" = {
+                Set-TestOwner -Path $healed -SID $users; Remove-TestEntry -Path $healed -SID $script:SystemSID
+            }
+            "an untrusted owner without the gateway's rights" = {
+                Set-TestOwner -Path $healed -SID $users; Remove-TestEntry -Path $healed -SID $sid
+            }
+            'an untrusted writer and a missing right' = {
+                Add-UsersWrite -Path $healed -Rights Modify; Remove-TestEntry -Path $healed -SID $sid
+            }
+        }
+        foreach ($name in @($mixed.Keys)) {
+            Set-DefenseClawPathAcl -Path $healed -Kind ConfigFile -GatewayServiceSID $sid
+            & $mixed[$name]
+            $before = (Microsoft.PowerShell.Security\Get-Acl -LiteralPath $healed).Sddl
+            $healError = ''
+            try { Invoke-TestHeal } catch { $healError = $_.Exception.Message }
+            if (-not $healError.StartsWith('refusing to re-stamp a managed path in place') -or
+                -not $healError.Contains($healed) -or
+                (Microsoft.PowerShell.Security\Get-Acl -LiteralPath $healed).Sddl -cne $before) {
+                throw "standalone self-heal re-stamped $name in place: '$healError'"
+            }
+        }
+        # Twins: a trusted owner with a deny entry is still repaired, and so
+        # is Setup's own account as owner; Secure Client still repairs the
+        # untrusted owner with a deny entry.
+        $twins = @(@($script:AdministratorsSID, $true))
+        if ($self -notin $writers) { $twins += , @($self, $true) }
+        $twins += , @($users, $false)
+        foreach ($twin in $twins) {
+            Set-DefenseClawPathAcl -Path $healed -Kind ConfigFile -GatewayServiceSID $sid
+            Set-TestOwner -Path $healed -SID $twin[0]
+            Add-TestDeny -Path $healed
+            if (-not $twin[1]) { function Test-DefenseClawStandaloneProfile { return $false } }
+            Invoke-TestHeal
+            function Test-DefenseClawStandaloneProfile { return $true }
+            if ((Get-OwnerSID -Path $healed) -ne $script:AdministratorsSID -or
+                @((Microsoft.PowerShell.Security\Get-Acl -LiteralPath $healed).Access | Microsoft.PowerShell.Core\Where-Object {
+                    $_.AccessControlType -eq [Security.AccessControl.AccessControlType]::Deny
+                }).Count) {
+                throw "self-heal did not repair a deny entry with owner $($twin[0]) (standalone $($twin[1]))"
+            }
+        }
         Add-UsersWrite -Path $Config
         $after = Microsoft.PowerShell.Security\Get-Acl -LiteralPath $Config
         if (-not @($after.Access | Microsoft.PowerShell.Core\Where-Object {
