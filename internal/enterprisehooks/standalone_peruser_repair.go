@@ -308,11 +308,19 @@ func standaloneRuntimeFileMetadataMatches(path string, mode os.FileMode, uid int
 	return info.Mode().IsRegular() && info.Mode().Perm() == mode && owned, nil
 }
 
+// HookCredentials are one target's per-user hook API and OTLP credentials.
+type HookCredentials struct {
+	APIToken      string `json:"api_token"`
+	OTLPPathToken string `json:"otlp_path_token,omitempty"`
+}
+
 // PreviousHookRuntimeIntactForConfigurationChange distinguishes a configuration
 // rerender from repair of a changed target. It verifies the installed runtime
 // against the prior recorded configuration; independent drift keeps the
-// ordinary repair classification.
-func PreviousHookRuntimeIntactForConfigurationChange(ctx context.Context, opts InstallOptions) bool {
+// ordinary repair classification. prior, when the guardian holds a credential
+// rotation, is the target's credential pair from the other key of that
+// rotation; nil otherwise.
+func PreviousHookRuntimeIntactForConfigurationChange(ctx context.Context, opts InstallOptions, prior *HookCredentials) bool {
 	if runtime.GOOS == "windows" || !standaloneProfileProcess() || os.Geteuid() == 0 {
 		return false
 	}
@@ -352,9 +360,24 @@ func PreviousHookRuntimeIntactForConfigurationChange(ctx context.Context, opts I
 		}
 		previous.APIToken = token
 	}
+	// The binding covers the API and OTLP credentials together, and a
+	// rotation replaces both. The OTLP credential need not be rendered
+	// anywhere the account can read, so the prior pair comes from the
+	// guardian, which derives it from the other key of the rotation it
+	// holds. It is used only when it explains both the installed API token
+	// and the recorded binding; any other installed credential fails below.
+	if prior != nil && previous.APIToken == prior.APIToken &&
+		!connector.HookCredentialDrifted(lock, connector.SetupOpts{
+			HookCredentialIdentity: previous.HookCredentialIdentity,
+			APIToken:               prior.APIToken,
+			OTLPPathToken:          prior.OTLPPathToken,
+		}) {
+		previous.OTLPPathToken = prior.OTLPPathToken
+	}
 	if strings.TrimSpace(previous.HookFailMode) == strings.TrimSpace(opts.HookFailMode) &&
 		strings.TrimSpace(previous.GuardrailMode) == strings.TrimSpace(opts.GuardrailMode) &&
 		previous.APIAddr == opts.APIAddr && previous.APIToken == opts.APIToken &&
+		previous.OTLPPathToken == opts.OTLPPathToken &&
 		previous.AgentVersion == opts.AgentVersion && previous.HookContractID == opts.HookContractID &&
 		previous.HILTEnabled == opts.HILTEnabled &&
 		previous.WorkspaceDir == opts.WorkspaceDir && previous.ManagedHookSocket == opts.ManagedHookSocket &&

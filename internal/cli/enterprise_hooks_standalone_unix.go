@@ -953,6 +953,7 @@ func runEnterpriseHookReconcileOnceStandaloneUnix(ctx context.Context) (enterpri
 			Mode:                enterpriseHookWorkerModeVerifyOrRepair,
 			PreviouslyProtected: previousProtection.PreviouslyProtected,
 			Options:             enterpriseHookWorkerOptionsFrom(opts),
+			PriorCredentials:    enterpriseHookPriorUserTokens(cfg.DataDir, target.Connector, identity),
 		})
 	}
 
@@ -1167,6 +1168,62 @@ func runEnterpriseHookReconcileOnceStandaloneUnix(ctx context.Context) (enterpri
 // enterpriseHookCredentialKeyID names the per-user credential key a
 // reconcile rendered from; a seam for tests, whose minter reads no key.
 var enterpriseHookCredentialKeyID = currentEnterpriseHookUserTokenKeyID
+
+// enterpriseHookPriorUserTokens returns a target's credentials from the key
+// of the held credential rotation that this run does not render from: the
+// committed key while a prepare renders the staged one, the staged key while
+// a rollback renders the committed one. They are the credentials the target
+// held when the rotation's previous step reached it, so a rewrite that only
+// replaces them is configuration, not repair. Nil without a rotation whose
+// recorded keys are both present.
+func enterpriseHookPriorUserTokens(dataDir, connectorName, identity string) *enterprisehooks.HookCredentials {
+	transaction, err := loadEnterpriseHookCredentialTransaction(dataDir)
+	if err != nil || transaction == nil {
+		return nil
+	}
+	path, err := connector.PendingUserScopedTokenKeyPath(dataDir)
+	if err != nil || validateEnterpriseHookTokenPathLocation(dataDir, path, "staged per-user credential key") != nil {
+		return nil
+	}
+	staged, err := connector.LoadPendingUserScopedTokenKey(dataDir)
+	if err != nil {
+		return nil
+	}
+	committed, err := connector.LoadUserScopedTokenKey(dataDir)
+	if err != nil {
+		return nil
+	}
+	key := enterpriseHookPriorUserTokenKey(*transaction, committed, staged)
+	if key == "" {
+		return nil
+	}
+	api, err := connector.UserScopedHookAPIToken(key, connectorName, identity)
+	if err != nil {
+		return nil
+	}
+	prior := &enterprisehooks.HookCredentials{APIToken: api}
+	if scope, ok := connector.OTLPPathTokenScopeForConnector(connectorName); ok {
+		if prior.OTLPPathToken, err = connector.UserScopedOTLPPathToken(key, scope, identity); err != nil {
+			return nil
+		}
+	}
+	return prior
+}
+
+// enterpriseHookPriorUserTokenKey selects the rotation key a run does not
+// render from, or "" when the committed and staged keys are not the
+// transaction's two keys.
+func enterpriseHookPriorUserTokenKey(transaction enterprisehooks.CredentialTransaction, committed, staged string) string {
+	if committed == "" || staged == "" ||
+		connector.UserScopedTokenKeyFingerprint(committed) != transaction.PreviousKeyID ||
+		connector.UserScopedTokenKeyFingerprint(staged) != transaction.NextKeyID {
+		return ""
+	}
+	if transaction.RendersNext(transaction.PreviousKeyID, transaction.NextKeyID) {
+		return committed
+	}
+	return staged
+}
 
 // writeEnterpriseHookCredentialAttestation publishes what this reconcile did
 // to each enabled target (enterprisehooks.CredentialAttestation), root-only

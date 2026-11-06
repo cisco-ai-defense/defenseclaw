@@ -10,11 +10,13 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"strconv"
 	"strings"
 	"testing"
 
 	"github.com/defenseclaw/defenseclaw/internal/enterprisehooks"
 	"github.com/defenseclaw/defenseclaw/internal/gateway/connector"
+	"github.com/pelletier/go-toml/v2"
 )
 
 // The Linux and macOS guardian workers share this path. A policy-only mode
@@ -235,5 +237,276 @@ func TestGAP0638GAP0642PluginEndpointChangeKeepsRepairClassification(t *testing.
 	response = runEnterpriseHookWorkerApply(context.Background(), request)
 	if len(response.Targets) != 1 || !response.Targets[0].OK || !response.Targets[0].Repaired {
 		t.Fatalf("changed Amp plugin was not reported as repair: %+v", response.Targets)
+	}
+}
+
+// gap0638CredentialFixture installs connectorName the way the standalone
+// Unix guardian does: socket transport, a numeric account identity and both
+// scoped credentials bound in the lock.
+func gap0638CredentialFixture(t *testing.T, connectorName string) (string, enterprisehooks.InstallOptions) {
+	t.Helper()
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("CODEX_HOME", "")
+	t.Setenv("CLAUDE_CONFIG_DIR", "")
+	opts := enterprisehooks.InstallOptions{
+		ConnectorName: connectorName, UserHome: home, OwnerUID: os.Getuid(), OwnerGID: os.Getgid(),
+		APIAddr: "127.0.0.1:18970", ProxyAddr: "127.0.0.1:4000",
+		APIToken: strings.Repeat("a", 64), OTLPPathToken: strings.Repeat("d", 64),
+		HookCredentialIdentity: strconv.Itoa(os.Getuid()),
+		GuardrailMode:          "observe", HookFailMode: "closed",
+		ManagedHookSocket: "/var/run/defenseclaw/hook.sock", ManagedServiceUID: 461,
+	}
+	switch connectorName {
+	case "codex":
+		opts.AgentVersion = "codex-cli 0.142.0"
+		if err := os.MkdirAll(filepath.Join(home, ".codex"), 0o700); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(home, ".codex", "config.toml"), []byte("model = \"gpt-5\"\n"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	case "claudecode":
+		opts.AgentVersion = "2.1.187 (Claude Code)"
+		if err := os.MkdirAll(filepath.Join(home, ".claude"), 0o700); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(home, ".claude", "settings.json"), []byte("{}\n"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if _, err := enterprisehooks.Install(context.Background(), opts); err != nil {
+		t.Fatalf("initial %s install: %v", connectorName, err)
+	}
+	if _, err := enterprisehooks.Verify(context.Background(), opts); err != nil {
+		t.Fatalf("initial %s runtime does not verify: %v", connectorName, err)
+	}
+	return home, opts
+}
+
+// gap0638Reconcile runs one guardian pass for opts. prior is what the
+// guardian passes while it holds a credential rotation.
+func gap0638Reconcile(t *testing.T, opts enterprisehooks.InstallOptions, prior *enterprisehooks.HookCredentials) enterpriseHookWorkerTargetResult {
+	t.Helper()
+	opts.AllowMissingHookConfigRepair = true
+	request := enterpriseHookWorkerRequest{
+		Operation: enterpriseHookWorkerOpApply, Standalone: true,
+		Targets: []enterpriseHookWorkerTarget{{Index: 0, Mode: enterpriseHookWorkerModeVerifyOrRepair,
+			PreviouslyProtected: true, Options: enterpriseHookWorkerOptionsFrom(opts), PriorCredentials: prior}},
+	}
+	response := runEnterpriseHookWorkerApply(context.Background(), request)
+	if len(response.Targets) != 1 || !response.Targets[0].OK {
+		t.Fatalf("reconciliation failed: %+v", response.Targets)
+	}
+	if _, err := enterprisehooks.Verify(context.Background(), opts); err != nil {
+		t.Fatalf("reconciled runtime does not verify: %v", err)
+	}
+	return response.Targets[0]
+}
+
+// The guardian rotates the per-user API and OTLP credentials together and
+// passes the prior pair while it holds the rotation. The prior state is
+// checked with both prior credentials: a rotation on its own is
+// configuration, while an independently changed DefenseClaw hook, installed
+// credential, or a pair the lock does not record stays a repair (the HIGH
+// connector-hook-repaired row).
+func TestGAP0638GAP0642CredentialRotationIsNotReportedAsRepair(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("the standalone worker runs as the account")
+	}
+	previousStandalone := enterprisehooks.StandaloneUnix()
+	enterprisehooks.SetStandaloneUnix(true)
+	t.Cleanup(func() { enterprisehooks.SetStandaloneUnix(previousStandalone) })
+	for _, connectorName := range []string{"codex", "claudecode"} {
+		for _, tc := range []struct {
+			name                                             string
+			api, otlp, mode, noPrior, wrongPrior, wantRepair bool
+			change                                           func(t *testing.T, dataDir, script string)
+		}{
+			{name: "both credentials rotate", api: true, otlp: true},
+			{name: "mode and both credentials rotate", api: true, otlp: true, mode: true},
+			{name: "API credential rotates", api: true},
+			{name: "OTLP credential rotates", otlp: true},
+			{name: "mode only", mode: true},
+			{name: "both credentials change without a held rotation", api: true, otlp: true, noPrior: true, wantRepair: true},
+			{name: "rotation whose prior pair the lock does not record", api: true, otlp: true, wrongPrior: true, wantRepair: true},
+			{name: "rotation and changed installed API credential", api: true, otlp: true, wantRepair: true,
+				change: func(t *testing.T, dataDir, _ string) {
+					path, err := connector.HookAPITokenFilePath(dataDir, connectorName)
+					if err != nil {
+						t.Fatal(err)
+					}
+					if err := os.WriteFile(path, []byte(strings.Repeat("c", 64)+"\n"), 0o600); err != nil {
+						t.Fatal(err)
+					}
+				}},
+			{name: "rotation and changed hook script", api: true, otlp: true, wantRepair: true,
+				change: func(t *testing.T, _, script string) {
+					if err := os.WriteFile(script, []byte("changed hook\n"), 0o700); err != nil {
+						t.Fatal(err)
+					}
+				}},
+			{name: "rotation and changed hook script mode", api: true, otlp: true, mode: true, wantRepair: true,
+				change: func(t *testing.T, _, script string) {
+					if err := os.Chmod(script, 0o744); err != nil {
+						t.Fatal(err)
+					}
+				}},
+		} {
+			t.Run(connectorName+"/"+tc.name, func(t *testing.T) {
+				home, opts := gap0638CredentialFixture(t, connectorName)
+				dataDir := filepath.Join(home, ".defenseclaw")
+				conn, ok := connector.NewDefaultRegistry().Get(connectorName)
+				if !ok {
+					t.Fatalf("connector %s is not registered", connectorName)
+				}
+				owner, ok := conn.(interface {
+					HookScriptNames(connector.SetupOpts) []string
+				})
+				if !ok || len(owner.HookScriptNames(connector.SetupOpts{})) == 0 {
+					t.Fatalf("connector %s has no hook script", connectorName)
+				}
+				script := filepath.Join(dataDir, "hooks", owner.HookScriptNames(connector.SetupOpts{})[0])
+				if tc.change != nil {
+					tc.change(t, dataDir, script)
+				}
+				prior := &enterprisehooks.HookCredentials{APIToken: opts.APIToken, OTLPPathToken: opts.OTLPPathToken}
+				if tc.wrongPrior {
+					prior.OTLPPathToken = strings.Repeat("f", 64)
+				}
+				if tc.noPrior {
+					prior = nil
+				}
+				if tc.api {
+					opts.APIToken = strings.Repeat("b", 64)
+				}
+				if tc.otlp {
+					opts.OTLPPathToken = strings.Repeat("e", 64)
+				}
+				if tc.mode {
+					opts.GuardrailMode = "action"
+				}
+				if got := gap0638Reconcile(t, opts, prior); got.Repaired != tc.wantRepair {
+					t.Fatalf("%s %s: repaired=%t, want %t", connectorName, tc.name, got.Repaired, tc.wantRepair)
+				}
+			})
+		}
+	}
+}
+
+// Only the DefenseClaw-owned parts of the Codex configuration decide a
+// repair. The model, an unrelated key and the vendor login are the user's;
+// a DefenseClaw hook entry that was removed or edited is a repair.
+func TestGAP0638GAP0642CodexVendorFieldsDoNotDecideRepair(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("the standalone worker runs as the account")
+	}
+	previousStandalone := enterprisehooks.StandaloneUnix()
+	enterprisehooks.SetStandaloneUnix(true)
+	t.Cleanup(func() { enterprisehooks.SetStandaloneUnix(previousStandalone) })
+	editConfig := func(t *testing.T, home string, edit func(cfg map[string]any)) {
+		t.Helper()
+		path := filepath.Join(home, ".codex", "config.toml")
+		raw, err := os.ReadFile(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		cfg := map[string]any{}
+		if err := toml.Unmarshal(raw, &cfg); err != nil {
+			t.Fatal(err)
+		}
+		edit(cfg)
+		out, err := toml.Marshal(cfg)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(path, out, 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	var replaceHookCommand func(v any) any
+	replaceHookCommand = func(v any) any {
+		switch value := v.(type) {
+		case string:
+			if strings.Contains(value, "codex-hook.sh") {
+				return "/bin/true"
+			}
+		case map[string]any:
+			for key, item := range value {
+				value[key] = replaceHookCommand(item)
+			}
+		case []any:
+			for i, item := range value {
+				value[i] = replaceHookCommand(item)
+			}
+		}
+		return v
+	}
+	for _, tc := range []struct {
+		name               string
+		rotate, wantRepair bool
+		change             func(t *testing.T, home string)
+	}{
+		{name: "model change", change: func(t *testing.T, home string) {
+			editConfig(t, home, func(cfg map[string]any) { cfg["model"] = "gpt-5.5" })
+		}},
+		{name: "model change with rotation", rotate: true, change: func(t *testing.T, home string) {
+			editConfig(t, home, func(cfg map[string]any) { cfg["model"] = "gpt-5.5" })
+		}},
+		{name: "unrelated key with rotation", rotate: true, change: func(t *testing.T, home string) {
+			editConfig(t, home, func(cfg map[string]any) { cfg["approval_policy"] = "on-request" })
+		}},
+		{name: "vendor login rotation with rotation", rotate: true, change: func(t *testing.T, home string) {
+			if err := os.WriteFile(filepath.Join(home, ".codex", "auth.json"), []byte("{\"OPENAI_API_KEY\":\"fixture-rotated\"}\n"), 0o600); err != nil {
+				t.Fatal(err)
+			}
+		}},
+		{name: "hook entry removed", wantRepair: true, change: func(t *testing.T, home string) {
+			editConfig(t, home, func(cfg map[string]any) { delete(cfg, "hooks") })
+		}},
+		{name: "hook entry removed with rotation", rotate: true, wantRepair: true, change: func(t *testing.T, home string) {
+			editConfig(t, home, func(cfg map[string]any) { delete(cfg, "hooks") })
+		}},
+		{name: "hook entry edited with rotation", rotate: true, wantRepair: true, change: func(t *testing.T, home string) {
+			editConfig(t, home, func(cfg map[string]any) { cfg["hooks"] = replaceHookCommand(cfg["hooks"]) })
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			home, opts := gap0638CredentialFixture(t, "codex")
+			tc.change(t, home)
+			opts.GuardrailMode = "action"
+			var prior *enterprisehooks.HookCredentials
+			if tc.rotate {
+				prior = &enterprisehooks.HookCredentials{APIToken: opts.APIToken, OTLPPathToken: opts.OTLPPathToken}
+				opts.APIToken, opts.OTLPPathToken = strings.Repeat("b", 64), strings.Repeat("e", 64)
+			}
+			if got := gap0638Reconcile(t, opts, prior); got.Repaired != tc.wantRepair {
+				t.Fatalf("Codex %s: repaired=%t, want %t", tc.name, got.Repaired, tc.wantRepair)
+			}
+		})
+	}
+}
+
+// The guardian passes the pair from the rotation key a run does not render
+// from, and none when the keys on disk are not the transaction's.
+func TestGAP0638GAP0642PriorCredentialKeyFollowsTheRotationPhase(t *testing.T) {
+	committed, staged := strings.Repeat("1", 64), strings.Repeat("2", 64)
+	transaction := enterprisehooks.CredentialTransaction{
+		Phase:         enterprisehooks.CredentialPhasePrepare,
+		PreviousKeyID: connector.UserScopedTokenKeyFingerprint(committed),
+		NextKeyID:     connector.UserScopedTokenKeyFingerprint(staged),
+	}
+	if got := enterpriseHookPriorUserTokenKey(transaction, committed, staged); got != committed {
+		t.Fatalf("prepare: prior key is not the committed key")
+	}
+	transaction.Phase = enterprisehooks.CredentialPhaseRollback
+	if got := enterpriseHookPriorUserTokenKey(transaction, committed, staged); got != staged {
+		t.Fatalf("rollback: prior key is not the staged key")
+	}
+	other := strings.Repeat("3", 64)
+	for _, keys := range [][2]string{{committed, ""}, {"", staged}, {other, staged}, {committed, other}, {staged, committed}} {
+		if got := enterpriseHookPriorUserTokenKey(transaction, keys[0], keys[1]); got != "" {
+			t.Fatalf("keys outside the transaction selected a prior key")
+		}
 	}
 }
