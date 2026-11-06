@@ -123,6 +123,11 @@ func (a *APIServer) hookProfileForRequest(ctx context.Context, name string) conn
 		// that harness's dialect (agent_hook_copilot_vscode.go).
 		return connector.CopilotVSCodeLocalProfile(profile)
 	}
+	if name == "copilot" {
+		if event := copilotCLISharedEventFromContext(ctx); event != "" {
+			return connector.CopilotCLISharedProfile(profile, event)
+		}
+	}
 	return profile
 }
 

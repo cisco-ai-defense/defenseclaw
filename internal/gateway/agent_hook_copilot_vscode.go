@@ -28,10 +28,12 @@ import (
 // --hook-surface vscode-local, which the hook forwards in
 // connector.HookDialectHeader. The request context records it so every
 // profile lookup for the request (hookProfileForRequest) gets the Local
-// dialect profile, connector.CopilotVSCodeLocalProfile. Requests without the
-// marker keep the Copilot CLI profile unchanged.
+// dialect profile, connector.CopilotVSCodeLocalProfile. The per-user default
+// and permissive CLI document uses a shared body decoder under its bound
+// CLI event.
 
 type copilotVSCodeLocalKey struct{}
+type copilotCLISharedEventKey struct{}
 
 func withCopilotVSCodeLocal(ctx context.Context) context.Context {
 	return context.WithValue(ctx, copilotVSCodeLocalKey{}, true)
@@ -39,6 +41,15 @@ func withCopilotVSCodeLocal(ctx context.Context) context.Context {
 
 func copilotVSCodeLocalFromContext(ctx context.Context) bool {
 	v, _ := ctx.Value(copilotVSCodeLocalKey{}).(bool)
+	return v
+}
+
+func withCopilotCLISharedEvent(ctx context.Context, event string) context.Context {
+	return context.WithValue(ctx, copilotCLISharedEventKey{}, event)
+}
+
+func copilotCLISharedEventFromContext(ctx context.Context) string {
+	v, _ := ctx.Value(copilotCLISharedEventKey{}).(string)
 	return v
 }
 
