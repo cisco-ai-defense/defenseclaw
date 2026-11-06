@@ -105,6 +105,10 @@ func TestResolveConnectorReadsTheGatewayProjection(t *testing.T) {
 		{"local body from the CLI hook file", "copilot", "", "preToolUse", localBody("b", nil), true, false},
 		{"local body from the CLI hook file with a CLI field", "copilot", "", "preToolUse",
 			localBody("b", map[string]any{"toolName": "view"}), true, true},
+		{"local body from the CLI hook file with CLI event", "copilot", "", "preToolUse",
+			localBody("b", map[string]any{"hookName": "preToolUse"}), true, true},
+		{"local body from the CLI hook file with null CLI event", "copilot", "", "preToolUse",
+			localBody("b", map[string]any{"hookName": nil}), true, true},
 		{"local body with a different bound event", "copilot", "", "postToolUse", localBody("b", nil), false, true},
 		// The vscode-local surface reads tool_name and tool_input: CLI-shaped
 		// decoys beside them neither hide the target nor become the call.

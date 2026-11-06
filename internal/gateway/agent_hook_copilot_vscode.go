@@ -21,6 +21,7 @@ import (
 	"net/http"
 	"strings"
 
+	"github.com/defenseclaw/defenseclaw/internal/copilotargs"
 	"github.com/defenseclaw/defenseclaw/internal/gateway/connector"
 )
 
@@ -51,6 +52,32 @@ func withCopilotCLISharedEvent(ctx context.Context, event string) context.Contex
 func copilotCLISharedEventFromContext(ctx context.Context) string {
 	v, _ := ctx.Value(copilotCLISharedEventKey{}).(string)
 	return v
+}
+
+func copilotCLIMixedLocalFields(payload map[string]interface{}) bool {
+	for key := range payload {
+		if copilotargs.CLIHookLocalForeignField(key) {
+			return true
+		}
+	}
+	return false
+}
+
+func copilotSharedLocalFileCall(ctx context.Context, req agentHookRequest) bool {
+	if req.ConnectorName != "copilot" {
+		return false
+	}
+	_, local := copilotargs.CLIHookLocalEvent(
+		copilotCLISharedEventFromContext(ctx), payloadString(req.Payload, "hook_event_name"))
+	if !local {
+		return false
+	}
+	switch copilotargs.LocalActionTool(req.ToolName) {
+	case "read_file", "create_file", "edit_file", "create", "edit":
+		return true
+	default:
+		return false
+	}
 }
 
 func copilotHookDialectFromHeaders(header http.Header) string {

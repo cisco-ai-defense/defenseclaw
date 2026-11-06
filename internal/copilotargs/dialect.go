@@ -52,3 +52,16 @@ func CLIHookLocalEvent(boundEvent, bodyEvent string) (string, bool) {
 	}
 	return local, local != "" && bodyEvent == local
 }
+
+// CLIHookLocalForeignField identifies a CLI-only envelope field. A Local body
+// delivered through the per-user CLI document cannot carry CLI fields beside
+// its Local shape, even when the extra value is null.
+func CLIHookLocalForeignField(key string) bool {
+	switch key {
+	case "hookName", "toolName", "toolArgs", "toolCalls", "toolInput",
+		"tool_args", "args", "arguments", "sessionId", "permissionSuggestions":
+		return true
+	default:
+		return false
+	}
+}

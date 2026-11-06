@@ -912,9 +912,10 @@ func hookShellDialect(connector, tool string) actionfacts.Dialect {
 // per-user CLI document's matching Local body: the CLI's toolName/toolArgs
 // (or native PermissionRequest toolInput), or the Local harness's
 // tool_name/tool_input, through the copilotargs projection. A body
-// that spells the tool name, or the tool arguments, twice with different
-// values is marked incomplete: no client sends one, and an operand this map
-// does not list fails closed where the gateway cannot place it.
+// that mixes CLI and Local fields is marked incomplete, as is a call that
+// spells the tool name or arguments twice with different values: no client
+// sends one, and an operand this map does not list fails closed where the
+// gateway cannot place it.
 //
 // A structured write call over the ActionFacts analysis limits is judged by
 // the gateway on its reduced call (actionfacts.OverLimitWriteTargetReduction),
@@ -1791,8 +1792,9 @@ func movedDirectorySightingPath(candidate actionfacts.PathFact, facts actionfact
 
 // copilotCall returns the tool name and the projected arguments of a Copilot
 // hook body as the gateway's profile for its dialect reads them
-// (copilotargs.LocalDialect and CLIHookLocalEvent), and whether another spelling of the tool name
-// or of the arguments carries a different value. A native PermissionRequest
+// (copilotargs.LocalDialect and CLIHookLocalEvent), and whether another spelling
+// of the tool name or arguments carries a different value. A Local body with
+// CLI-only fields is also incomplete. A native PermissionRequest
 // reads toolInput only when toolArgs is absent, through the projection the
 // gateway's profile uses (copilotargs.PermissionToolArgs): an edit whose
 // diff does not prove the declared target is incomplete. The other
@@ -1825,10 +1827,13 @@ func copilotCall(envelope map[string]json.RawMessage, surface, event string) (js
 	if local && (aliasSet(envelope["toolName"]) || aliasSet(envelope["toolArgs"])) {
 		toolConflict = true
 	}
-	if localFromCLI && (aliasSet(envelope["toolCalls"]) || aliasSet(envelope["toolInput"]) ||
-		aliasSet(envelope["tool_args"]) || aliasSet(envelope["args"]) ||
-		aliasSet(envelope["arguments"])) {
-		toolConflict = true
+	if localFromCLI {
+		for key := range envelope {
+			if copilotargs.CLIHookLocalForeignField(key) {
+				toolConflict = true
+				break
+			}
+		}
 	}
 	var tool string
 	_ = json.Unmarshal(toolRaw, &tool)

@@ -633,10 +633,7 @@ func (a *APIServer) handleAgentHook(connectorName string) http.HandlerFunc {
 				req.ToolCallUnparsed = true
 			}
 			if connectorName == "copilot" && copilotCLILocalBody &&
-				(payload["toolName"] != nil || payload["toolArgs"] != nil ||
-					payload["toolCalls"] != nil || payload["toolInput"] != nil ||
-					payload["tool_args"] != nil || payload["args"] != nil ||
-					payload["arguments"] != nil ||
+				(copilotCLIMixedLocalFields(payload) ||
 					payload["tool_name"] == nil || payload["tool_input"] == nil ||
 					req.ToolName == "" || req.ToolArgsProjectionUncertain) {
 				req.ToolCallUnparsed = true
@@ -3624,6 +3621,7 @@ func (a *APIServer) evaluateAgentHook(ctx context.Context, req agentHookRequest)
 			LegacyText:              string(req.ToolArgs),
 			conflictSource:          conflictSource,
 			Connector:               req.ConnectorName,
+			CopilotSharedLocalFile:  copilotSharedLocalFileCall(ctx, req),
 			EnforcementCapable:      enforcementCapable,
 			StrictPolicy:            a.strictPolicyTierForHook(ctx, req.ConnectorName),
 			ManagedHookOverflowHold: managedWindowsHookOverflowHold(ctx, a.scannerCfg, req.ConnectorName, runtime.GOOS),
