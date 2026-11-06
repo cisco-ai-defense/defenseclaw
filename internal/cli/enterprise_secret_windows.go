@@ -1024,6 +1024,11 @@ func ensureWindowsSecretsDir(store *windowsSecretStore, reader *windows.SID) err
 	if !store.exists() {
 		return fmt.Errorf("%s does not exist", store.dir)
 	}
+	// On standalone a secrets folder another account can write or owns is
+	// refused and named, never re-stamped in place (g582 round 4).
+	if refused := managed.RefuseStandaloneInPlaceRepair(store.dir, managed.ObjectAdminDirectory); refused != nil {
+		return fmt.Errorf("the secrets folder was not repaired: %w", refused)
+	}
 	// The credential write below proves the whole chain through the
 	// gateway reader check.
 	return applyWindowsSDDL(store.dir, windowsSecretDirectorySDDL(reader))

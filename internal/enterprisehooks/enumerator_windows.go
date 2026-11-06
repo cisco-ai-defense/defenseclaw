@@ -958,6 +958,10 @@ func clearWindowsTargetsManifestRestrictiveAttributes(path string) error {
 	return nil
 }
 
+// windowsTargetsManifestParentRefusal is managed.RefuseStandaloneInPlaceRepair;
+// tests replace it.
+var windowsTargetsManifestParentRefusal = managed.RefuseStandaloneInPlaceRepair
+
 // ensureWindowsTargetsManifestParentProtected is deliberately repair-on-drift,
 // not stamp-on-every-tick. AVC may replace the DefenseClaw-owned parent ACL
 // after installation; the LocalSystem enumerator can restore the exact
@@ -967,6 +971,11 @@ func ensureWindowsTargetsManifestParentProtected(path string) error {
 	driftErr := validateWindowsTargetsManifestObject(path, true)
 	if driftErr == nil {
 		return nil
+	}
+	// On standalone a hook-guardian folder another account can write or owns
+	// is refused and named, never re-stamped in place (g582 round 4).
+	if refused := windowsTargetsManifestParentRefusal(path, managed.ObjectAdminDirectory); refused != nil {
+		return fmt.Errorf("protected hook guardian manifest parent was not repaired: %w", errors.Join(driftErr, refused))
 	}
 
 	if err := windowsTargetsManifestProtect(path, true); err != nil {

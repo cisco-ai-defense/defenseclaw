@@ -83,6 +83,13 @@ func validateWindowsManagedHooksTrustedDir(path string, kind managed.ObjectKind,
 	if err == nil || managed.TrustStrictAncestors() {
 		return err
 	}
+	// On standalone a folder another account can write or owns is refused
+	// and named, never re-stamped in place (g582 round 4).
+	if kind != "" {
+		if refused := windowsManagedHooksInPlaceRefusal(path, kind); refused != nil {
+			return errors.Join(err, refused)
+		}
+	}
 	if repaired, ensureErr := repairWindowsManagedHooksObject(path, kind); ensureErr != nil {
 		return errors.Join(err, ensureErr)
 	} else if repaired && windowsManagedHooksStrictDirCheck(path, label) == nil {
@@ -90,6 +97,10 @@ func validateWindowsManagedHooksTrustedDir(path string, kind managed.ObjectKind,
 	}
 	return managed.ValidateTrustedRuntimeDirTolerant(path, label)
 }
+
+// windowsManagedHooksInPlaceRefusal is managed.RefuseStandaloneInPlaceRepair;
+// tests replace it.
+var windowsManagedHooksInPlaceRefusal = managed.RefuseStandaloneInPlaceRepair
 
 // repairWindowsManagedHooksObject stamps kind's canonical descriptor on path.
 // EnsureCanonical logs the outcome itself (MarkerRepair, MarkerAccept or
