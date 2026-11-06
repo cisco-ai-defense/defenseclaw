@@ -120,3 +120,35 @@ func TestGAP0613UnavailableRootRuntimePolicyMatrix(t *testing.T) {
 		})
 	}
 }
+
+func TestGAP0613StrictUnavailableRootRequiresProvenOutsidePath(t *testing.T) {
+	store, logger := newNativeSkillRuntimeTestStore(t)
+	root := filepath.Join(t.TempDir(), ".claude", "skills")
+	for _, tc := range []struct {
+		name, tier, source string
+		blocked            bool
+	}{
+		{"strict-root-itself", "strict", root, true},
+		{"strict-clean-inside", "strict", filepath.Join(root, "ordinary"), true},
+		{"strict-parent-inside", "strict", root + string(filepath.Separator) + ".." + string(filepath.Separator) + "skills" + string(filepath.Separator) + "ordinary", true},
+		{"strict-relative-unknown", "strict", filepath.Join("skills", "ordinary"), true},
+		{"strict-proven-outside", "strict", filepath.Join(t.TempDir(), "ordinary"), false},
+		{"balanced-relative", "default", filepath.Join("skills", "ordinary"), false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			cfg := config.DefaultConfig()
+			cfg.AssetPolicy = config.DefaultAssetPolicy()
+			cfg.Guardrail.RulePack = tc.tier
+			api := &APIServer{store: store, logger: logger, scannerCfg: cfg,
+				rootCoverage: func() []watcher.RootCoverageIssue {
+					return []watcher.RootCoverageIssue{{Kind: "skill", Path: root, Connector: "claudecode"}}
+				}}
+			decision, blocked := api.runtimeSkillAssetPolicyDecision(context.Background(), "claudecode", skillRuntimeProbe{
+				Matched: true, SkillName: "ordinary", SourcePath: tc.source,
+			})
+			if blocked != tc.blocked || blocked && decision.Action != "block" {
+				t.Fatalf("source=%q blocked=%v decision=%+v, want blocked=%v", tc.source, blocked, decision, tc.blocked)
+			}
+		})
+	}
+}
