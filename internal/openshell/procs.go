@@ -133,12 +133,22 @@ func (r *doctorRun) ownSandboxDaemonProcess(ctx context.Context, holder daemon.P
 	return r.GOOS == "darwin" && installedSandboxDaemonCopy(selfPath, path)
 }
 
-func installedSandboxDaemonCopy(canonical, candidate string) bool {
+func installedSandboxDaemonCopy(launcher, candidate string) bool {
+	// On macOS, os.Executable may name the symlink used to start the CLI.
+	// Check the resolved target before comparing it with the LaunchAgent copy.
+	canonical, err := filepath.EvalSymlinks(launcher)
+	if err != nil {
+		return false
+	}
 	if filepath.Base(canonical) != "defenseclaw-gateway" || filepath.Base(candidate) != filepath.Base(canonical) {
 		return false
 	}
 	canonicalInfo, err := os.Lstat(canonical)
 	if err != nil || !canonicalInfo.Mode().IsRegular() {
+		return false
+	}
+	launcherInfo, err := os.Stat(launcher)
+	if err != nil || !os.SameFile(launcherInfo, canonicalInfo) {
 		return false
 	}
 	digest, err := fileSHA256(canonical)
