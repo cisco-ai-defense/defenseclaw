@@ -208,6 +208,12 @@ func (a ActionState) Summary() string {
 	return strings.Join(parts, ", ")
 }
 
+// AccountMCPActionType is the target type of the actions rows that hold the
+// admission decision of an enrolled account MCP server. A server name is free
+// text, so these rows live under their own type rather than beside the rows
+// of account-less servers, which could otherwise share a row with them.
+const AccountMCPActionType = "mcp-account"
+
 // ActionEntry is the unified record for all enforcement actions on a target.
 type ActionEntry struct {
 	ID         string      `json:"id"`
@@ -4501,7 +4507,7 @@ func (s *Store) GetCounts() (Counts, error) {
 	}{
 		{`SELECT COUNT(*) FROM actions WHERE target_type = 'skill' AND json_extract(actions_json, '$.install') = 'block'`, nil, &c.BlockedSkills},
 		{`SELECT COUNT(*) FROM actions WHERE target_type = 'skill' AND json_extract(actions_json, '$.install') = 'allow'`, nil, &c.AllowedSkills},
-		{`SELECT COUNT(*) FROM actions WHERE target_type = 'mcp' AND json_extract(actions_json, '$.install') = 'block'`, nil, &c.BlockedMCPs},
+		{`SELECT COUNT(*) FROM actions WHERE target_type IN ('mcp', '` + AccountMCPActionType + `') AND json_extract(actions_json, '$.install') = 'block'`, nil, &c.BlockedMCPs},
 		{`SELECT COUNT(*) FROM actions WHERE target_type = 'mcp' AND json_extract(actions_json, '$.install') = 'allow'`, nil, &c.AllowedMCPs},
 		// ActiveAlerts is the unacknowledged actionable queue, not a count
 		// of every non-INFO audit row. Keep this IPC surface aligned with

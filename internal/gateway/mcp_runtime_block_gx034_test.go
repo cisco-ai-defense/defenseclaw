@@ -52,7 +52,7 @@ func TestGAP0034PreIdentityAccountActionWaitsForFreshAdmission(t *testing.T) {
 	if err := store.SetTargetSnapshot("mcp", key, "hash", "{}", string(hashes), "[]", "", "fingerprint|mcp-scan-failed"); err != nil {
 		t.Fatal(err)
 	}
-	if err := store.SetRuntimeDisableForConnector("mcp", key, failed.Connector, key, "fresh admission failed"); err != nil {
+	if err := store.SetRuntimeDisableForConnector(watcher.AccountMCPJournalType, key, failed.Connector, key, "fresh admission failed"); err != nil {
 		t.Fatal(err)
 	}
 	protected = call(failed.Home, t.TempDir())
@@ -131,7 +131,7 @@ func TestGAP0034LiteralVersionedSpellingDoesNotBecomeAccountAction(t *testing.T)
 	if got := call(); hasFinding(got.Findings, "MCP-BLOCK") {
 		t.Fatalf("a new snapshot adopted the literal old row: %+v", got)
 	}
-	if err := store.SetRuntimeDisableForConnector("mcp", key, "claudecode", key, "fresh admission failed"); err != nil {
+	if err := store.SetRuntimeDisableForConnector(watcher.AccountMCPJournalType, key, "claudecode", key, "fresh admission failed"); err != nil {
 		t.Fatal(err)
 	}
 	if got := call(); !hasFinding(got.Findings, "MCP-BLOCK") {
@@ -162,10 +162,10 @@ func TestGAP0034FreshFailedAccountActionBlocksBeforeSnapshot(t *testing.T) {
 			}
 		}
 		reason := "scanner failure (fail-closed): test"
-		if err := store.SetActionFieldForConnector("mcp", key, "claudecode", "install", "block", reason); err != nil {
+		if err := store.SetActionFieldForConnector(watcher.AccountMCPJournalType, key, "claudecode", "install", "block", reason); err != nil {
 			t.Fatal(err)
 		}
-		if err := store.SetRuntimeDisableForConnector("mcp", key, "claudecode", key, reason); err != nil {
+		if err := store.SetRuntimeDisableForConnector(watcher.AccountMCPJournalType, key, "claudecode", key, reason); err != nil {
 			t.Fatal(err)
 		}
 		call := func(callerHome string) *ToolInspectVerdict {
@@ -215,4 +215,55 @@ func TestGAP0034OldLiteralActionLeavesOrdinaryAccountAllowed(t *testing.T) {
 				oldSnapshot, got.Action, got.Findings)
 		}
 	}
+}
+
+// An account-less server may be named exactly like an enrolled account
+// server key (its versioned event path). Its failed scan is its own
+// decision: the failed account keeps its block before the account snapshot
+// exists, the literal server is refused for its own row, and an ordinary
+// account stays allowed (default rule pack).
+func TestGAP0034LiteralServerNamedLikeAccountKeyCannotUndoFailedAccount(t *testing.T) {
+	api, store := toolPolicyAPI(t, "action")
+	api.scannerCfg.Guardrail.RulePack = "default"
+	api.scannerCfg.AssetPolicy = config.DefaultAssetPolicy()
+	home := filepath.Join(t.TempDir(), "account")
+	account := config.MCPServerEntry{Name: "notes", Connector: "claudecode", Home: home}
+	key := watcher.MCPEventPath(account)
+	reason := "scanner failure (fail-closed): test"
+	if err := store.SetActionFieldForConnector(watcher.MCPJournalType(account), key, "claudecode", "install", "block", reason); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.SetRuntimeDisableForConnector(watcher.MCPJournalType(account), key, "claudecode", key, reason); err != nil {
+		t.Fatal(err)
+	}
+	call := func(server, callerHome string) *ToolInspectVerdict {
+		ctx := withManagedHookPeer(context.Background(), managedHookPeer{UID: 1001, Home: callerHome})
+		return api.inspectToolPolicyCtx(ctx, &ToolInspectRequest{Tool: "mcp__" + server + "__ping", Args: json.RawMessage(`{}`),
+			Direction: "tool_call", Connector: "claudecode"})
+	}
+	ordinaryHome := filepath.Join(t.TempDir(), "ordinary")
+	check := func(stage string, literalBlocked bool) {
+		t.Helper()
+		if got := call("notes", home); !hasFinding(got.Findings, "MCP-BLOCK") {
+			t.Fatalf("%s: the failed account was allowed: %s/%v", stage, got.Action, got.Findings)
+		}
+		if got := call("notes", ordinaryHome); hasFinding(got.Findings, "MCP-BLOCK") {
+			t.Fatalf("%s: an ordinary account was refused: %s/%v", stage, got.Action, got.Findings)
+		}
+		if got := call(key, ordinaryHome); hasFinding(got.Findings, "MCP-BLOCK") != literalBlocked {
+			t.Fatalf("%s: literal server blocked=%v, want %v: %s/%v", stage, hasFinding(got.Findings, "MCP-BLOCK"), literalBlocked, got.Action, got.Findings)
+		}
+	}
+	check("before the literal server is scanned", false)
+
+	// The scan of the literal server failed: its own row, its own path.
+	literal := config.MCPServerEntry{Name: key, Connector: "claudecode"}
+	literalPath := watcher.MCPEventPath(literal)
+	if err := store.SetActionFieldForConnector(watcher.MCPJournalType(literal), watcher.MCPJournalName(literal), "claudecode", "install", "block", reason); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.SetRuntimeDisableForConnector(watcher.MCPJournalType(literal), watcher.MCPJournalName(literal), "claudecode", literalPath, reason); err != nil {
+		t.Fatal(err)
+	}
+	check("after the failed scan of the literal server", true)
 }

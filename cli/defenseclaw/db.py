@@ -2234,12 +2234,16 @@ class Store:
 
         q_skill = "SELECT COUNT(*) FROM actions WHERE target_type='skill' AND json_extract(actions_json,'$.install')="
         q_mcp = "SELECT COUNT(*) FROM actions WHERE target_type='mcp' AND json_extract(actions_json,'$.install')="
+        q_blocked_mcp = (
+            "SELECT COUNT(*) FROM actions WHERE target_type IN ('mcp', 'mcp-account') "
+            "AND json_extract(actions_json,'$.install')='block'"
+        )
         alert_where = self._alert_where_clause(actionable=False)
         return self._with_operator_lists(
             Counts(
                 blocked_skills=_count(q_skill + "'block'"),
                 allowed_skills=_count(q_skill + "'allow'"),
-                blocked_mcps=_count(q_mcp + "'block'"),
+                blocked_mcps=_count(q_blocked_mcp),
                 allowed_mcps=_count(q_mcp + "'allow'"),
                 alerts=self._count_within(
                     f"SELECT COUNT(*) FROM audit_events WHERE {alert_where}", alert_count_seconds
@@ -2289,7 +2293,7 @@ class Store:
                         AND json_extract(actions_json, '$.install') = 'allow'
                        THEN 1 ELSE 0 END), 0),
                    COALESCE(SUM(CASE
-                       WHEN target_type = 'mcp'
+                       WHEN target_type IN ('mcp', 'mcp-account')
                         AND json_extract(actions_json, '$.install') = 'block'
                        THEN 1 ELSE 0 END), 0),
                    COALESCE(SUM(CASE
@@ -2297,7 +2301,7 @@ class Store:
                         AND json_extract(actions_json, '$.install') = 'allow'
                        THEN 1 ELSE 0 END), 0)
                FROM actions
-               WHERE target_type IN ('skill', 'mcp')"""
+               WHERE target_type IN ('skill', 'mcp', 'mcp-account')"""
         ).fetchone()
         blocked_skills, allowed_skills, blocked_mcps, allowed_mcps = (int(value or 0) for value in action_counts)
         return self._with_operator_lists(

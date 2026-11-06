@@ -348,7 +348,7 @@ func TestGAP0034FreshAccountDecisionCarriesItsProvenance(t *testing.T) {
 		ordinary := MCPAdmissionQuery{Connector: server.Connector, Server: server.Name, Home: filepath.Join(t.TempDir(), "ordinary")}
 		served := func(stage string) {
 			t.Helper()
-			row, err := store.GetActionForConnector(string(InstallMCP), MCPJournalName(server), "claudecode")
+			row, err := store.GetActionForConnector(MCPJournalType(server), MCPJournalName(server), "claudecode")
 			if err != nil || row == nil || row.SourcePath != key || !MCPAccountRuntimeDisabled(*row) ||
 				!MCPAccountJournalServes(row.TargetName, owner) || MCPAccountJournalServes(row.TargetName, ordinary) {
 				t.Fatalf("pre-identity snapshot %v, %s: decision not in force for its account only: row=%+v err=%v",
@@ -373,38 +373,114 @@ func TestGAP0034RuntimeDisableWithoutProvenanceIsNotAnAccountDecision(t *testing
 	key := MCPEventPath(config.MCPServerEntry{Name: "notes", Connector: "claudecode", Home: filepath.Join(t.TempDir(), "account")})
 	row := func() audit.ActionEntry {
 		t.Helper()
-		entry, err := store.GetActionForConnector(string(InstallMCP), key, "claudecode")
+		entry, err := store.GetActionForConnector(AccountMCPJournalType, key, "claudecode")
 		if err != nil || entry == nil {
 			t.Fatalf("row: %+v %v", entry, err)
 		}
 		return *entry
 	}
-	if err := store.SetActionFieldForConnector(string(InstallMCP), key, "claudecode", "runtime", "disable", "old literal server"); err != nil {
+	if err := store.SetActionFieldForConnector(AccountMCPJournalType, key, "claudecode", "runtime", "disable", "old literal server"); err != nil {
 		t.Fatal(err)
 	}
-	if err := store.SetSourcePathForConnector(string(InstallMCP), key, "claudecode", key); err != nil {
+	if err := store.SetSourcePathForConnector(AccountMCPJournalType, key, "claudecode", key); err != nil {
 		t.Fatal(err)
 	}
 	if MCPAccountRuntimeDisabled(row()) {
 		t.Fatal("a runtime disable without provenance was taken as the account decision")
 	}
-	if err := store.SetRuntimeDisableForConnector(string(InstallMCP), key, "claudecode", key, "fresh admission failed"); err != nil {
+	if err := store.SetRuntimeDisableForConnector(AccountMCPJournalType, key, "claudecode", key, "fresh admission failed"); err != nil {
 		t.Fatal(err)
 	}
 	if !MCPAccountRuntimeDisabled(row()) {
 		t.Fatal("the account decision lost its provenance")
 	}
-	if err := store.SetActionFieldForConnector(string(InstallMCP), key, "claudecode", "runtime", "disable", "plain write"); err != nil {
+	if err := store.SetActionFieldForConnector(AccountMCPJournalType, key, "claudecode", "runtime", "disable", "plain write"); err != nil {
 		t.Fatal(err)
 	}
 	if MCPAccountRuntimeDisabled(row()) {
 		t.Fatal("a later runtime write kept the provenance of an earlier one")
 	}
 	literal := MCPEventPath(config.MCPServerEntry{Name: key, Connector: "claudecode"})
-	if err := store.SetRuntimeDisableForConnector(string(InstallMCP), key, "claudecode", literal, "literal server failed"); err != nil {
+	if err := store.SetRuntimeDisableForConnector(AccountMCPJournalType, key, "claudecode", literal, "literal server failed"); err != nil {
 		t.Fatal(err)
 	}
 	if MCPAccountRuntimeDisabled(row()) {
 		t.Fatal("the decision of a server literally named like the key became the account decision")
+	}
+}
+
+// An account-less server named exactly like an enrolled account server key
+// (its versioned event path) shares no journal row with that account: its
+// failed scan does not replace the account decision and its clean scan does
+// not release it, whether or not the account snapshot exists yet. The
+// account own clean scan still releases the account row, and the literal
+// server own row follows its own scans.
+func TestGAP0034LiteralServerNamedLikeAccountKeyKeepsApartInBothDirections(t *testing.T) {
+	for _, withSnapshot := range []bool{false, true} {
+		cfg, store, logger, _ := setupTestEnv(t)
+		cfg.Gateway.Watcher.MCP.TakeAction = true
+		cfg.Scanners.MCPScanner.UnverifiedServer = "block"
+		account := config.MCPServerEntry{Name: "notes", Connector: "claudecode", Home: filepath.Join(t.TempDir(), "account"),
+			Command: "npx", Args: []string{"-y", "."}}
+		key := MCPEventPath(account)
+		literal := config.MCPServerEntry{Name: key, Connector: "claudecode", Command: "npx", Args: []string{"-y", "."}}
+		literalPath := MCPEventPath(literal)
+		verdict := map[string]string{key: "failed", literalPath: "failed"}
+		w := New(cfg, nil, nil, store, logger, nil, nil)
+		w.SetMCPServerSource(func() ([]config.MCPServerEntry, error) { return []config.MCPServerEntry{account, literal}, nil })
+		w.firstCycleDone.Store(true)
+		w.scannerFactory = func(evt InstallEvent) scanner.Scanner {
+			if verdict[evt.Path] == "failed" {
+				return &failingScanner{countingScanner{name: "mcp-scanner"}}
+			}
+			return &countingScanner{name: "mcp-scanner"}
+		}
+		accountEvt := InstallEvent{Type: InstallMCP, Name: account.Name, Path: key, Connector: account.Connector}
+		literalEvt := InstallEvent{Type: InstallMCP, Name: literal.Name, Path: literalPath, Connector: literal.Connector}
+		held := func(stage string) {
+			t.Helper()
+			row, err := store.GetActionForConnector(MCPJournalType(account), MCPJournalName(account), "claudecode")
+			if err != nil || row == nil || row.SourcePath != key || row.Actions.Install != "block" || !MCPAccountRuntimeDisabled(*row) {
+				t.Fatalf("snapshot %v, %s: the account decision is gone: row=%+v err=%v", withSnapshot, stage, row, err)
+			}
+		}
+		own := func() *audit.ActionEntry {
+			t.Helper()
+			row, err := store.GetActionForConnector(MCPJournalType(literal), MCPJournalName(literal), "claudecode")
+			if err != nil {
+				t.Fatal(err)
+			}
+			return row
+		}
+
+		w.runAdmission(context.Background(), accountEvt)
+		if withSnapshot {
+			current, err := w.snapshotForEvent(accountEvt)
+			if err != nil {
+				t.Fatal(err)
+			}
+			w.persistSnapshot(accountEvt, current, "", "fingerprint"+mcpScanFailedMark)
+		}
+		held("after the account admission")
+
+		w.runAdmission(context.Background(), literalEvt)
+		held("after the failed scan of the literal server")
+		if row := own(); row == nil || row.Actions.Runtime != "disable" || row.SourcePath != literalPath {
+			t.Fatalf("snapshot %v: the literal server failed scan left no row of its own: %+v", withSnapshot, row)
+		}
+
+		verdict[literalPath] = "clean"
+		w.runAdmission(context.Background(), literalEvt)
+		held("after the clean scan of the literal server")
+		if row := own(); row != nil && (row.Actions.Runtime != "" || row.Actions.Install != "") {
+			t.Fatalf("snapshot %v: the clean scan did not release the literal server: %+v", withSnapshot, row)
+		}
+
+		verdict[key] = "clean"
+		w.runAdmission(context.Background(), accountEvt)
+		row, err := store.GetActionForConnector(MCPJournalType(account), MCPJournalName(account), "claudecode")
+		if err != nil || (row != nil && (row.Actions.Runtime != "" || row.Actions.Install != "")) {
+			t.Fatalf("snapshot %v: the account own clean scan did not release it: %+v %v", withSnapshot, row, err)
+		}
 	}
 }
