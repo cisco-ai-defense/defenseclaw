@@ -64,6 +64,8 @@ func TestGAP0625ShellCommandTextOptions(t *testing.T) {
 		{"profile long flag", "bash --noprofile -c MANAGED", true},
 		{"environment wrapper", "env -i bash -lc MANAGED", true},
 		{"login long flag", "bash --login -c MANAGED", true},
+		{"sh login flag", "sh -lc MANAGED", true},
+		{"dash login flag", "dash -lc MANAGED", true},
 		{"login script", "bash -l MANAGED", true},
 		{"login long script", "bash --login MANAGED", true},
 		{"user command with managed argument", "bash -lc '/bin/printf %s MANAGED'", false},
