@@ -579,30 +579,13 @@ func orderedFacts(facts []string) []string {
 func (set *guardrailProfileSet) identityUncertaintyReason(subject *profileSubject, facts []string, connectorName, agent string) string {
 	why := make([]string, 0, len(facts))
 	for _, fact := range facts {
-		switch fact {
-		case "account:failed":
-			why = append(why, "the account holder is ambiguous")
-		case "account:ambiguous_short_name":
-			why = append(why, "a bare users entry may name accounts in more than one trusted domain; use a qualified name or uid")
-		case "account:unknown":
-			why = append(why, "the account holder is unconfirmed")
-		case "upn:unknown":
-			why = append(why, "this account's UPN is unconfirmed")
-		case "groups:unknown":
-			why = append(why, "group membership is unconfirmed")
-		case "agent:unknown":
-			why = append(why, "ownership of a pre-upgrade agent identity is unconfirmed")
-		case factAssignmentGroupSID:
-			why = append(why, "an assignment group SID is unconfirmed")
-		default:
-			why = append(why, "identity fact "+fact+" is unconfirmed")
-		}
+		why = append(why, identityFactClause(fact))
 	}
 	if subject != nil && subject.tokenGroupsCause != "" {
 		why = append(why, subject.tokenGroupsCause)
 	}
-	return "DefenseClaw refused this request: " + strings.Join(why, "; ") +
-		"; run `" + set.profileExplainCommand(subject, connectorName, agent, slices.Contains(facts, "agent:unknown")) + "`" + set.profileExplainPrompt() + " to inspect the identity decision"
+	return identityRefusalPrefix + strings.Join(why, "; ") +
+		"; run `" + set.profileExplainCommand(subject, connectorName, agent, slices.Contains(facts, "agent:unknown")) + "`" + set.profileExplainPrompt() + identityRefusalTail
 }
 
 // explainOnRequestPaths is explain's decision for connectorName's requests:
@@ -671,7 +654,7 @@ func sandboxRefusedWarning(connectorName, reason string) string {
 // GAP-0076).
 func (set *guardrailProfileSet) profileExplainPrompt() string {
 	if runtime.GOOS == "windows" && set.base != nil && set.base.StandaloneEnterprise() {
-		return " from an elevated PowerShell prompt"
+		return identityRefusalElevatedPrompt
 	}
 	return ""
 }
