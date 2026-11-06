@@ -81,10 +81,16 @@ func (s simpleShellState) clone() simpleShellState {
 // pass. Ordinary assignments and known home or local variable expansions
 // are resolved; a subshell or pipeline stage has its own shell state.
 func SimpleCommands(input Input, facts Facts) []SimpleCommand {
-	return simpleCommands(input, facts, 0, "")
+	return simpleCommands(input, facts, 0, "", false)
 }
 
-func simpleCommands(input Input, facts Facts, depth int, interpreter string) []SimpleCommand {
+// SimpleCommandsWithAssignments also retains assignment-only statements in
+// source order for readers that need shell export state across commands.
+func SimpleCommandsWithAssignments(input Input, facts Facts) []SimpleCommand {
+	return simpleCommands(input, facts, 0, "", true)
+}
+
+func simpleCommands(input Input, facts Facts, depth int, interpreter string, includeAssignments bool) []SimpleCommand {
 	if facts.Parse.Dialect == DialectPowerShell || facts.Parse.Dialect == DialectCMD {
 		return windowsSimpleCommands(input, facts)
 	}
@@ -225,6 +231,16 @@ func simpleCommands(input Input, facts Facts, depth int, interpreter string) []S
 			if call, ok := stmt.Cmd.(*syntax.CallExpr); ok && len(call.Args) == 0 && len(call.Assigns) != 0 && len(stmt.Redirs) == 0 {
 				updateSimpleVariables(state.vars, call.Assigns)
 				changed = true
+				if includeAssignments {
+					command := SimpleCommand{Text: part.text, CWD: state.cwd}
+					if !emitted[command] {
+						result = append(result, command)
+						emitted[command] = true
+						if len(result) > maxSimpleEvaluations {
+							return []SimpleCommand{{EvaluationFailure: "limit"}}
+						}
+					}
+				}
 				nextVariants = append(nextVariants, state)
 				continue
 			}
@@ -333,7 +349,7 @@ func simpleCommands(input Input, facts Facts, depth int, interpreter string) []S
 					if innerInterpreter == "" {
 						innerInterpreter = interpreter
 					}
-					inner := simpleCommands(innerInput, innerFacts, depth+1, innerInterpreter)
+					inner := simpleCommands(innerInput, innerFacts, depth+1, innerInterpreter, includeAssignments)
 					if len(inner) == 0 && strings.TrimSpace(innerInput.Command) != "" {
 						zshHistory := innerInterpreter == "zsh" && len(innerFacts.Commands) == 1 &&
 							innerFacts.Commands[0].Executable == "history"

@@ -20,7 +20,7 @@ func GitMaterializedWrite(input actionfacts.Input, facts actionfacts.Facts) Grad
 	if input.Command == "" || len(input.Command) > MaxPayloadBytes || !filepath.IsAbs(input.CWD) {
 		return GradeNone
 	}
-	commands := actionfacts.SimpleCommands(input, facts)
+	commands := actionfacts.SimpleCommandsWithAssignments(input, facts)
 	if len(commands) == 1 && commands[0].EvaluationFailure == "parse" {
 		// The ordered top-level reader can still place a static wrapper
 		// such as env -C even when the shell-state reader has no reduction.
@@ -63,12 +63,12 @@ func GitMaterializedWrite(input actionfacts.Input, facts actionfacts.Facts) Grad
 }
 
 // Git uses exported worktree settings from earlier statements in the same
-// shell. SimpleCommands preserves the order and resolves known values, but
-// omits those settings from the later Git command text. Retain their scope
-// effect until the shell removes the export or unsets the name.
+// shell. The ordered command reader retains assignments and declarations;
+// carry their export effect until the shell removes it or unsets the name.
 type gitWorktreeExports struct {
-	worktree bool
-	gitdir   bool
+	worktree  bool
+	gitdir    bool
+	allexport bool
 }
 
 func (s gitWorktreeExports) redirected() bool { return s.worktree || s.gitdir }
@@ -80,6 +80,13 @@ func (s *gitWorktreeExports) set(name string, exported bool) {
 	case "GIT_DIR":
 		s.gitdir = exported
 	}
+}
+
+func (s *gitWorktreeExports) assign(name string) {
+	if !s.allexport {
+		return
+	}
+	s.set(name, true)
 }
 
 func (s *gitWorktreeExports) update(command, home string) {
@@ -124,8 +131,38 @@ func (s *gitWorktreeExports) update(command, home string) {
 			}
 		}
 	case *syntax.CallExpr:
+		if len(cmd.Args) == 0 {
+			for _, assignment := range cmd.Assigns {
+				if assignment.Name != nil {
+					s.assign(assignment.Name.Value)
+				}
+			}
+			return
+		}
 		words, static := gitCallWords(cmd, home)
-		if len(words) == 0 || !static[0] || words[0] != "unset" {
+		if len(words) == 0 || !static[0] {
+			return
+		}
+		if words[0] == "set" {
+			for i := 1; i < len(words); i++ {
+				if !static[i] || words[i] == "--" {
+					break
+				}
+				option := words[i]
+				if (option == "-o" || option == "+o") && i+1 < len(words) && static[i+1] {
+					if words[i+1] == "allexport" {
+						s.allexport = option[0] == '-'
+					}
+					i++
+					continue
+				}
+				if len(option) > 1 && (option[0] == '-' || option[0] == '+') && strings.Contains(option[1:], "a") {
+					s.allexport = option[0] == '-'
+				}
+			}
+			return
+		}
+		if words[0] != "unset" {
 			return
 		}
 		functionOnly := false

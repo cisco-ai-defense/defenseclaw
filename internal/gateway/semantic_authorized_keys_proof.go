@@ -1292,13 +1292,11 @@ func trustedExistingAuthorizedKeysSymlinkWrite(request trustedActionRequest, fac
 			return named()
 		}
 		if !safeRedirect && links.OpaqueTargetWithFacts(target, ownCopy, opaqueFacts) {
-			// A target inside an archive or copy scope, or one for which
-			// bounded client evidence is missing, has no complete ordinary
-			// answer. Keep the scope's existing block after the positive
-			// link and client checks above.
+			// An archive or copy scope without named reach leaves a possible
+			// write. Named link and client evidence was checked above.
 			info, err := hookpaths.PathLstat(target)
 			if err != nil || info.Mode()&os.ModeCharDevice == 0 {
-				return true
+				return possible(target)
 			}
 		}
 		// On a static reading of a call with a runtime-expanded operand

@@ -33,7 +33,15 @@ func TestGAP0626GitMaterializedWritePosture(t *testing.T) {
 		{"clone then project append", `git clone source cloned && echo marker >> cloned/future`, true, false},
 		{"exported pull then parent append", `export GIT_WORK_TREE="$HOME"; git -C sub pull && echo marker >> ../future`, true, false},
 		{"exported checkout then parent append", `export GIT_WORK_TREE="$HOME"; git -C sub checkout -- future && echo marker >> ../future`, true, false},
+		{"auto exported worktree then parent append", `set -a; GIT_WORK_TREE="$HOME"; git -C sub pull && echo marker >> ../future`, true, false},
+		{"auto export retained after flag removal", `set -a; GIT_WORK_TREE="$HOME"; set +a; git -C sub pull && echo marker >> ../future`, true, false},
+		{"long auto export option", `set -o allexport; GIT_WORK_TREE="$HOME"; git -C sub pull && echo marker >> ../future`, true, false},
+		{"auto exported git directory", `set -a; GIT_DIR="$HOME/project/.git"; git -C sub pull && echo marker >> ../future`, true, false},
+		{"auto export in nested shell", `bash -lc 'set -a; GIT_WORK_TREE="$HOME"; git -C sub pull && echo marker >> ../future'`, true, false},
+		{"auto export in conditional body", `if true; then set -a; GIT_WORK_TREE="$HOME"; git -C sub pull; echo marker >> ../future; fi`, true, false},
 		{"removed export then parent append", `export GIT_WORK_TREE="$HOME"; unset GIT_WORK_TREE; git -C sub pull && echo marker >> ../future`, false, false},
+		{"removed auto export then parent append", `set -a; GIT_WORK_TREE="$HOME"; export -n GIT_WORK_TREE; git -C sub pull && echo marker >> ../future`, false, false},
+		{"auto export after materialization", `git -C sub pull; set -a; GIT_WORK_TREE="$HOME"; echo marker >> ../future`, false, false},
 		{"exported read only git then parent append", `export GIT_WORK_TREE="$HOME"; git -C sub show HEAD && echo marker >> ../future`, false, false},
 		{"known link after pull", `git -C sub pull && echo marker >> alias`, false, true},
 		{"named keys file after pull", `git -C sub pull && echo marker >> ~/.ssh/authorized_keys`, false, true},
@@ -115,6 +123,38 @@ func TestGAP0626CodexGitMaterializedWritePosture(t *testing.T) {
 				ToolInput: map[string]interface{}{"cmd": `git -C sub pull && echo marker >> future`},
 			})
 			if resp.Action != tc.want || !findingStringHasRuleID(resp.Findings, "persistence.ssh_authorized_keys_possible") {
+				t.Fatalf("home=%q action=%s findings=%v want=%s", home, resp.Action, resp.Findings, tc.want)
+			}
+		})
+	}
+}
+
+func TestGAP0626ArchiveScopeStaysProfileTiered(t *testing.T) {
+	home, repo := r104ReviewHome(t)
+	if err := os.WriteFile(filepath.Join(repo, "x.tgz"), []byte("fixture\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	for _, tc := range []struct {
+		profile, command, want string
+	}{
+		{"default", `cd /tmp && tar -xzf ~/project/x.tgz && mv src src-old`, "allow"},
+		{"permissive", `cd /tmp && tar -xzf ~/project/x.tgz && mv src src-old`, "allow"},
+		{"strict", `cd /tmp && tar -xzf ~/project/x.tgz && mv src src-old`, "block"},
+		{"default", `cd /tmp && tar -xzf ~/project/x.tgz && cp src ~/project/alias`, "block"},
+		{"strict", `cd /tmp && tar -xzf ~/project/x.tgz && cp src ~/project/alias`, "block"},
+	} {
+		t.Run(tc.profile+"/"+tc.command, func(t *testing.T) {
+			cfg := &config.Config{}
+			cfg.Guardrail.Mode = "action"
+			cfg.Guardrail.Connector = "claudecode"
+			cfg.Guardrail.RulePackDir = filepath.Join(guardrailPoliciesRoot(t), tc.profile)
+			api := &APIServer{scannerCfg: cfg, health: NewSidecarHealth()}
+			resp := api.evaluateClaudeCodeHook(t.Context(), claudeCodeHookRequest{
+				HookEventName: "PreToolUse", SessionID: "gap0626-archive", ToolName: "Bash", CWD: repo,
+				ToolInput: map[string]interface{}{"command": tc.command},
+				Payload:   map[string]interface{}{"tool_name": "Bash"},
+			})
+			if resp.Action != tc.want {
 				t.Fatalf("home=%q action=%s findings=%v want=%s", home, resp.Action, resp.Findings, tc.want)
 			}
 		})
