@@ -295,12 +295,6 @@ func patchDevinHooks(path, hookScript string, ownedHookScripts ...string) error 
 	hooks := devinHooksObject(path, cfg)
 	ownedHookScripts = uniqueNonEmptyStrings(append([]string{hookScript}, ownedHookScripts...))
 	for _, event := range devinHookEvents {
-		list, _ := hooks[event].([]interface{})
-		for _, item := range list {
-			if devinHookGroupHasReviewableClaim(item, ownedHookScripts...) {
-				return fmt.Errorf("Devin hook entry in %s requires review before repair", path)
-			}
-		}
 		entry := map[string]interface{}{
 			"matcher": "",
 			"hooks": []interface{}{
@@ -344,29 +338,18 @@ func replaceManagedDevinHooks(raw interface{}, ownedHookScripts []string, entry 
 // devinHookScriptName is the Devin hook script Setup generates on Unix.
 const devinHookScriptName = "devin-hook.sh"
 
+// devinHookEntryOwned reports whether a handler is DefenseClaw's: a command
+// Setup registers, an edited copy of its script, or a command that names the
+// managed hook directory (hookCommandNamesHookDir).
 func devinHookEntryOwned(raw interface{}, hookScripts ...string) bool {
 	if editedDefenseClawHookHandler(raw, devinHookScriptName) {
 		return true
 	}
 	entry, _ := raw.(map[string]interface{})
-	command := strings.TrimSpace(stringValue(entry["command"]))
-	for _, hookScript := range hookScripts {
-		if command != "" && (command == strings.TrimSpace(hookScript) || hookCommandResolvesInHookDir(command, hookScript)) {
-			return true
-		}
-	}
-	return false
-}
-
-func devinHookEntryClaimsManaged(raw interface{}, hookScripts ...string) bool {
-	if devinHookEntryOwned(raw, hookScripts...) {
-		return true
-	}
-	entry, _ := raw.(map[string]interface{})
 	for _, key := range []string{"command", "bash"} {
-		command := stringValue(entry[key])
+		command := strings.TrimSpace(stringValue(entry[key]))
 		for _, hookScript := range hookScripts {
-			if hookCommandClaimsHookDir(command, hookScript) {
+			if command != "" && (command == strings.TrimSpace(hookScript) || hookCommandNamesHookDir(command, hookScript)) {
 				return true
 			}
 		}
@@ -374,26 +357,8 @@ func devinHookEntryClaimsManaged(raw interface{}, hookScripts ...string) bool {
 	return false
 }
 
-func devinHookGroupClaimsManaged(raw interface{}, hookScripts ...string) bool {
-	group, _ := raw.(map[string]interface{})
-	entries, _ := group["hooks"].([]interface{})
-	for _, rawEntry := range entries {
-		if devinHookEntryClaimsManaged(rawEntry, hookScripts...) {
-			return true
-		}
-	}
-	return false
-}
-
-func devinHookGroupHasReviewableClaim(raw interface{}, hookScripts ...string) bool {
-	group, _ := raw.(map[string]interface{})
-	entries, _ := group["hooks"].([]interface{})
-	for _, rawEntry := range entries {
-		if devinHookEntryClaimsManaged(rawEntry, hookScripts...) && !devinHookEntryOwned(rawEntry, hookScripts...) {
-			return true
-		}
-	}
-	return false
+func devinHookGroupReferences(raw interface{}, hookScripts ...string) bool {
+	return devinHookGroupOwnedEntryCount(raw, hookScripts...) > 0
 }
 
 func devinHookGroupOwnedEntryCount(raw interface{}, hookScripts ...string) int {
@@ -461,11 +426,6 @@ func removeDevinHookReferences(path string, hookScripts ...string) error {
 	changed := false
 	for _, event := range devinHookEvents {
 		list, _ := hooks[event].([]interface{})
-		for _, item := range list {
-			if devinHookGroupHasReviewableClaim(item, hookScripts...) {
-				return fmt.Errorf("Devin hook entry in %s requires review before removal", path)
-			}
-		}
 		out := make([]interface{}, 0, len(list))
 		for _, item := range list {
 			if remaining, removed := stripManagedDevinHooks(item, hookScripts...); removed {
@@ -510,7 +470,7 @@ func devinConfigReferencesHook(path string, hookScripts ...string) (bool, error)
 	for _, event := range devinHookEvents {
 		list, _ := hooks[event].([]interface{})
 		for _, item := range list {
-			if devinHookGroupClaimsManaged(item, hookScripts...) {
+			if devinHookGroupReferences(item, hookScripts...) {
 				return true, nil
 			}
 		}
@@ -607,9 +567,8 @@ func devinOwnedHooksPresent(conn *hookOnlyConnector, opts SetupOpts) (bool, erro
 			list, _ := hooks[event].([]interface{})
 			managed := 0
 			for _, item := range list {
-				if devinHookGroupClaimsManaged(item, ownedCommands...) {
-					if devinHookGroupHasReviewableClaim(item, ownedCommands...) ||
-						devinHookGroupOwnedEntryCount(item, ownedCommands...) != 1 ||
+				if devinHookGroupReferences(item, ownedCommands...) {
+					if devinHookGroupOwnedEntryCount(item, ownedCommands...) != 1 ||
 						!devinHookGroupHasExactCommand(item, hookScript) {
 						return false, nil
 					}

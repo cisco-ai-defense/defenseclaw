@@ -121,7 +121,7 @@ func TestGAP0625HermesTeardownRemovesRenamedHookWithPlainArguments(t *testing.T)
 	}
 }
 
-func TestGAP0625HermesTeardownUsesResolvedDirectoryBoundary(t *testing.T) {
+func TestGAP0625HermesTeardownUsesNamedDirectoryBoundary(t *testing.T) {
 	conn, opts, configPath, _, userHook := gap0625HermesConfig(t, true)
 	hookDir := filepath.Join(opts.DataDir, "hooks")
 	if err := os.MkdirAll(hookDir, 0o700); err != nil {
@@ -163,32 +163,35 @@ func TestGAP0625HermesTeardownUsesResolvedDirectoryBoundary(t *testing.T) {
 		t.Fatalf("Teardown: %v", err)
 	}
 	got := gap0625PreToolCommands(t, configPath)
-	if len(got) != 3 || got[0] != insideLinkToUser || got[1] != adjacent || got[2] != userHook {
-		t.Fatalf("remaining commands = %q; want the three user locations", got)
+	// A path in the managed directory, or a link that resolves into it, is
+	// DefenseClaw's; a link in the managed directory names that directory.
+	if len(got) != 2 || got[0] != adjacent || got[1] != userHook {
+		t.Fatalf("remaining commands = %q; want the two user locations", got)
 	}
 }
 
-func TestGAP0625HermesCombinedCommandRemainsReviewable(t *testing.T) {
+func TestGAP0625HermesCombinedCommandIsDefenseClaws(t *testing.T) {
 	for _, suffix := range []string{" ; ", "; ", " --event pre_tool_call; "} {
 		t.Run(suffix, func(t *testing.T) {
 			conn, opts, configPath, renamed, userHook := gap0625HermesConfig(t, true)
-			data, err := os.ReadFile(configPath)
-			if err != nil {
-				t.Fatal(err)
-			}
 			combined := renamed + suffix + userHook
-			if err := os.WriteFile(configPath, []byte(strings.Replace(string(data), renamed, combined, 1)), 0o600); err != nil {
-				t.Fatal(err)
+			gap0625SetHermesCommand(t, configPath, combined)
+			if err := patchHermesHooks(configPath, conn.hookCommand(opts), ""); err != nil {
+				t.Fatalf("repair Hermes hooks: %v", err)
 			}
-			if err := patchHermesHooks(configPath, conn.hookCommand(opts), ""); err == nil {
-				t.Fatal("repair accepted an entry containing an independent command")
+			want := hermesConfiguredHookCommand(conn.hookCommand(opts), "")
+			if commands := gap0625PreToolCommands(t, configPath); len(commands) != 2 || commands[0] != want || commands[1] != userHook {
+				t.Fatalf("repaired commands = %q; want %q and the user hook", commands, want)
 			}
-			if err := conn.Teardown(context.Background(), opts); err == nil {
-				t.Fatal("teardown reported a combined entry as verified")
+			gap0625SetHermesCommand(t, configPath, combined)
+			if err := conn.VerifyClean(opts); err == nil {
+				t.Fatal("VerifyClean accepted a remaining managed hook entry")
 			}
-			commands := gap0625PreToolCommands(t, configPath)
-			if len(commands) != 2 || commands[0] != combined || commands[1] != userHook {
-				t.Fatalf("remaining commands = %q; want the combined entry and user hook for review", commands)
+			if err := conn.Teardown(context.Background(), opts); err != nil {
+				t.Fatalf("Teardown: %v", err)
+			}
+			if commands := gap0625PreToolCommands(t, configPath); len(commands) != 1 || commands[0] != userHook {
+				t.Fatalf("remaining commands = %q; want the user hook", commands)
 			}
 		})
 	}
