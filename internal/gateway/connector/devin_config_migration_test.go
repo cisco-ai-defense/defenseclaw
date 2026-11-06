@@ -102,6 +102,69 @@ func TestDevinSetupMigratesAReceiptBoundToTheOldMacOSConfigRoot(t *testing.T) {
 	}
 }
 
+func TestDevinTargetMoveDropsTheOldWorkspaceRestoreState(t *testing.T) {
+	for _, tc := range []struct {
+		name          string
+		dropReceipt   bool
+		dropOldNotice bool
+	}{
+		{name: "receipt present"},
+		{name: "receipt missing", dropReceipt: true},
+		{name: "copy only", dropReceipt: true, dropOldNotice: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			previous := DevinHooksPathOverride
+			DevinHooksPathOverride = ""
+			t.Cleanup(func() { DevinHooksPathOverride = previous })
+			home := t.TempDir()
+			dataDir := filepath.Join(home, ".defenseclaw")
+			workspace := filepath.Join(home, "old-project")
+			if err := os.MkdirAll(workspace, 0o700); err != nil {
+				t.Fatal(err)
+			}
+			conn := NewDevinConnector()
+			old := SetupOpts{DataDir: dataDir, APIAddr: "127.0.0.1:18970", APIToken: "tok-test", WorkspaceDir: workspace}
+			if err := conn.Setup(context.Background(), old); err != nil {
+				t.Fatalf("workspace Setup: %v", err)
+			}
+			oldPath := devinHooksPath(old)
+			spec, _ := agentConfigSpecFor("devin")
+			if err := spec.writeNotice(dataDir, agentConfigNotice{
+				Version: agentConfigCopyVersion, Path: oldPath, Source: AgentConfigHooksOnly,
+				SettingsLost: true, At: "2026-11-06T00:00:00Z",
+			}); err != nil {
+				t.Fatal(err)
+			}
+			if tc.dropReceipt {
+				discardManagedFileBackup(dataDir, "devin", "config")
+			}
+			if tc.dropOldNotice {
+				if err := os.Remove(spec.noticePath(dataDir)); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if err := os.RemoveAll(workspace); err != nil {
+				t.Fatal(err)
+			}
+			global := old
+			global.WorkspaceDir = ""
+			global.ConfigHome = filepath.Join(home, ".config", "devin")
+			if err := conn.Setup(context.Background(), global); err != nil {
+				t.Fatalf("global Setup: %v", err)
+			}
+			if _, err := os.Lstat(workspace); !os.IsNotExist(err) {
+				t.Fatalf("old project was recreated: %v", err)
+			}
+			if _, ok := spec.readNotice(dataDir); ok {
+				t.Fatal("old workspace restore notice survived the target move")
+			}
+			if copy, ok := spec.readCopy(dataDir, devinHooksPath(global)); !ok || copy.Path != devinHooksPath(global) {
+				t.Fatalf("global copy = %+v, valid=%t", copy, ok)
+			}
+		})
+	}
+}
+
 // RHEL-U3-03: `setup devin --workspace` pins claw.workspace_dir, which moves
 // Copilot's hooks from ~/.copilot/hooks to <workspace>/.github/hooks. The
 // gateway's Copilot Setup then failed with a backup target mismatch and Setup

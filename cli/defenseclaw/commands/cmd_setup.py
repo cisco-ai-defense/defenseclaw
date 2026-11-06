@@ -11766,6 +11766,7 @@ def _apply_hook_connector_setup(
                     connector=connector,
                     connectors=_guarded_connectors(cfg, _actives),
                     wait_for_connector_ready=True,
+                    notice_connectors=[connector],
                 )
         except Exception as exc:  # noqa: BLE001 — readiness failure triggers transaction rollback.
             with _temporary_codex_setup_marker(None) if connector == "codex" else nullcontext():
@@ -16393,6 +16394,7 @@ def _restart_services(
     summary_exclude: frozenset[str] = frozenset(),
     teardown: bool = False,
     required_connectors: frozenset[str] = frozenset(),
+    notice_connectors: list[str] | None = None,
 ) -> None:
     """Restart defenseclaw-gateway and, when OpenClaw is the selected
     connector, restart the OpenClaw gateway too so it picks up the
@@ -16419,7 +16421,9 @@ def _restart_services(
     ``summary_exclude`` names connectors left out of the closing roster line
     because they stay disabled (GAP-1809); the restart itself is unchanged.
     ``teardown`` marks a ``guardrail disable`` restart: the closing line says
-    the hooks were removed instead of announcing enforcement (GAP-1985)."""
+    the hooks were removed instead of announcing enforcement (GAP-1985).
+    ``notice_connectors`` limits restore notices to connectors selected by
+    this setup; a global setup reports notices for every active connector."""
     ux.section(title)
     ctx = click.get_current_context(silent=True)
     if ctx is not None:
@@ -16558,8 +16562,16 @@ def _restart_services(
     # time, also when the step did not wait for the connector runtime (a
     # `setup hermes` run said nothing then, GAP-0333).
     if hook_targets and not teardown:
-        agent_config_notice.wait_for_put_back(data_dir, hook_targets)
-        for note in agent_config_notice.put_back_notes(data_dir, hook_targets):
+        # A connector setup restarts the shared gateway, but its result is
+        # about the selected connector. A peer's earlier restore notice is
+        # reported when that peer is set up (or by a global setup).
+        notice_targets = (
+            sorted({normalize_connector(name) for name in notice_connectors} & set(hook_targets))
+            if notice_connectors is not None
+            else hook_targets
+        )
+        agent_config_notice.wait_for_put_back(data_dir, notice_targets)
+        for note in agent_config_notice.put_back_notes(data_dir, notice_targets):
             ux.warn(note)
 
     # Multi-connector global change: every active hook connector is affected
@@ -18494,6 +18506,7 @@ def _auto_restart_sidecar_after_setup(ctx: click.Context, *_args, **_kwargs) -> 
                     wait_for_connector_ready=True,
                     start_if_stopped=True,
                     required_connectors=frozenset(focus),
+                    notice_connectors=focus,
                 )
             for connector, audit_mode in batch_audits:
                 _log_setup_action(

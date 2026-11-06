@@ -216,3 +216,29 @@ func TestRecordHookConfigParentDirsListsEveryConnectorsFolders(t *testing.T) {
 		t.Fatalf("recorded %v, want %v", got, []string{dir})
 	}
 }
+
+func TestSetupRecordingCreatedDirsPrunesMissingEarlierFolders(t *testing.T) {
+	home := t.TempDir()
+	dataDir := filepath.Join(home, ".defenseclaw")
+	oldProject := filepath.Join(home, "old-project")
+	current := filepath.Join(home, ".config", "amp")
+	for _, dir := range []string{oldProject, current} {
+		if err := os.MkdirAll(dir, 0o700); err != nil {
+			t.Fatal(err)
+		}
+	}
+	recordPath := filepath.Join(dataDir, watcherCreatedDirsFile)
+	if err := recordCreatedDirs(recordPath, []string{oldProject, current}); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Remove(oldProject); err != nil {
+		t.Fatal(err)
+	}
+
+	// A later connector setup may create no folders of its own. It must
+	// still discard a prior project that is gone and retain live folders.
+	recordDirsNowPresent(dataDir, nil)
+	if got := readWatcherCreatedDirs(recordPath).Dirs; !slices.Equal(got, []string{current}) {
+		t.Fatalf("created-folder record = %v, want only %s", got, current)
+	}
+}
