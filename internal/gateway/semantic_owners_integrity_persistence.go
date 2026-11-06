@@ -1603,6 +1603,32 @@ func appendTrustedHomeResolvedSSHKeyWriteFinding(
 					}
 				}
 			}
+			// A managed gateway cannot inspect the user's home, but a
+			// concrete write operand under that user's SSH directory is
+			// still a named protected write for the rule title.
+			ssh := filepath.Join(facts.ActiveHome, ".ssh")
+			isNamedSSHWrite := func(name string) bool {
+				if name == "" {
+					return false
+				}
+				name = trustedSymlinkName(input, name)
+				return name == ssh || strings.HasPrefix(name, ssh+string(filepath.Separator))
+			}
+			for _, candidate := range facts.Paths {
+				if (candidate.Access == actionfacts.PathAccessWrite || candidate.Access == actionfacts.PathAccessAppend) &&
+					(isNamedSSHWrite(candidate.Value) || isNamedSSHWrite(candidate.Resolved)) {
+					clientNamedProtected = true
+				}
+			}
+			if input.Command != "" {
+				redirects, _, _ := hookpaths.ShellWriteOperands(input.Command, input.CWD, facts.ActiveHome)
+				for _, operand := range append(redirects, hookpaths.LiteralWriteOperands(input.Command, input.CWD, facts.ActiveHome)...) {
+					if isNamedSSHWrite(operand) {
+						clientNamedProtected = true
+					}
+				}
+				clientNamedProtected = clientNamedProtected || hookpaths.NamedSSHWriteOperand(input.Command, input.CWD, facts.ActiveHome)
+			}
 			if hookpaths.ArchiveBeforeWrite(input.Command, input.ActiveHome) &&
 				!hookpaths.ProtectedArchiveMoveName(input.Command, input.CWD, input.ActiveHome) &&
 				!clientNamedProtected &&

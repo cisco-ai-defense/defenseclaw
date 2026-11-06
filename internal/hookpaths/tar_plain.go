@@ -89,28 +89,89 @@ func tarArchiveHoldsNoLink(program string, args []string, static []bool, cwd, co
 }
 
 // tarArchiveLinkEvidence records or reads positive scope-retaining tar evidence.
-// The caller uses it only when earlier statements cannot rewrite the archive.
-func tarArchiveLinkEvidence(program string, args []string, static []bool, cwd, command string, facts map[string]string, record bool) bool {
+// Unlike a plain proof, a positive reading is useful in any command shape.
+func tarArchiveLinkEvidence(program string, args []string, static []bool, cwd string, facts map[string]string, record bool) bool {
 	if !strings.HasSuffix(program, "tar") || !filepath.IsAbs(cwd) {
 		return false
 	}
 	if _, _, extract, ok := tarScan(args, static, cwd); !ok || !extract {
 		return false
 	}
-	archive, ok := tarArchiveWord(args, static)
-	if !ok || archive == "" || archive == "-" || strings.ContainsAny(archive, "*?[$`") ||
-		strings.Count(command, filepath.Base(archive)) != 1 {
-		return false
+	for _, archive := range tarArchiveWords(args, static) {
+		if archive == "" || archive == "-" || strings.ContainsAny(archive, "*?[$`") {
+			continue
+		}
+		path := OperandPath(archive, cwd)
+		if !record && facts != nil && facts[TarLinkFactPrefix+path] == "1" {
+			return true
+		}
+		if tarArchiveKind(path) == 2 {
+			if record && facts != nil {
+				facts[TarLinkFactPrefix+path] = "1"
+			}
+			return true
+		}
 	}
-	path := OperandPath(archive, cwd)
-	if !record && facts != nil && facts[TarLinkFactPrefix+path] == "1" {
-		return true
+	return false
+}
+
+// tarArchiveWords collects static file options without requiring that the
+// call have only one such option. Dynamic operands cannot prove a link.
+func tarArchiveWords(args []string, static []bool) []string {
+	var archives []string
+	for i := 0; i < len(args); i++ {
+		if !static[i] {
+			continue
+		}
+		arg := args[i]
+		if arg == "--" {
+			break
+		}
+		if strings.HasPrefix(arg, "--") {
+			name, value, joined := strings.Cut(arg[2:], "=")
+			if option, unique := longOption(name, tarLongOptions); unique && option == "file" {
+				if !joined {
+					i++
+					if i >= len(args) {
+						break
+					}
+					value = args[i]
+				}
+				if static[i] {
+					archives = append(archives, value)
+				}
+			}
+			continue
+		}
+		oldStyle := i == 0 && !strings.HasPrefix(arg, "-")
+		if !oldStyle && !strings.HasPrefix(arg, "-") {
+			continue
+		}
+		cluster := strings.TrimPrefix(arg, "-")
+		for j := 0; j < len(cluster); j++ {
+			switch cluster[j] {
+			case 'f':
+				value := cluster[j+1:]
+				if oldStyle || value == "" {
+					i++
+					if i >= len(args) {
+						break
+					}
+					value = args[i]
+				}
+				if i < len(args) && static[i] {
+					archives = append(archives, value)
+				}
+				j = len(cluster)
+			case 'C', 'T', 'X', 'b', 'N', 'V', 'H', 'K', 'L':
+				if oldStyle || j+1 == len(cluster) {
+					i++
+				}
+				j = len(cluster)
+			}
+		}
 	}
-	linked := tarArchiveKind(path) == 2
-	if linked && record && facts != nil {
-		facts[TarLinkFactPrefix+path] = "1"
-	}
-	return linked
+	return archives
 }
 
 // tarArchivePriorLinkedRewrite finds a known link-bearing archive copied or

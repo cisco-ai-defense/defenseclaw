@@ -113,6 +113,12 @@ func TestGX054ProtectedMoveNamesAndToolMapping(t *testing.T) {
 		{"tar -xf missing.tar -C app && mv --suffix=_keys authorized app/pkg", true},
 		{"F=app/authorized_keys; tar -xf missing.tar -C app && mv \"$F\" app/pkg", true},
 		{"D=app/authorized_keys; tar -xf missing.tar -C app && mv app/pkg \"$D\"", true},
+		{"tar -xf missing.tar -C app && mv conf/config.sample conf/config", false},
+		{"tar -czf out.tar conf && mv conf/config.sample conf/config", false},
+		{"tar -tf out.tar && mv conf/rc.sample conf/rc", false},
+		{"tar -xf missing.tar -C app && mv conf/environment.sample conf/environment", false},
+		{"tar -xf missing.tar -C app && mv conf/config.sample ~/.ssh/config", true},
+		{"tar -xf missing.tar -C app && mv ~/.ssh/environment conf/environment", true},
 	} {
 		if got := ProtectedArchiveMoveName(row.command, "/home/test/project", "/home/test"); got != row.protected {
 			t.Errorf("%q: got %t", row.command, got)
@@ -125,5 +131,22 @@ func TestGX054ProtectedMoveNamesAndToolMapping(t *testing.T) {
 	}
 	if got := ConnectorActionTool("hermes", "patch"); got != "patch" {
 		t.Errorf("Hermes tool changed to %q", got)
+	}
+}
+
+func TestGX054NamedSSHWriteOperand(t *testing.T) {
+	for _, row := range []struct {
+		command string
+		want    bool
+	}{
+		{"unzip -q pkg.zip -d app && cp -r app/pkg/. ~/.ssh/", true},
+		{"unzip -q pkg.zip -d app && rsync -a app/pkg/ $HOME/.ssh/", true},
+		{"unzip -q pkg.zip -d ~/.ssh && echo ok > notes.txt", true},
+		{"tar -xf x.tar -C app && ln -s pkg app/current", false},
+		{"tar -xf x.tar -C app && mv conf/config.sample conf/config", false},
+	} {
+		if got := NamedSSHWriteOperand(row.command, "/home/test/project", "/home/test"); got != row.want {
+			t.Errorf("%q: got %t, want %t", row.command, got, row.want)
+		}
 	}
 }
