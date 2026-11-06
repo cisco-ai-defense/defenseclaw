@@ -507,10 +507,17 @@ func (a *APIServer) sessionStartCheck(connectorName string) func(context.Context
 const (
 	sessionStartBlockedPrefix = "DefenseClaw blocked this agent session when it started ("
 	sessionStartBlockedSuffix = "), so it blocks this call. Restart the agent."
+	// A start refused for an identity the directory had not confirmed
+	// stays blocked after the directory answers: the verdict belongs to the
+	// session, and only a new session is judged again (GAP-0718).
+	sessionStartBlockedIdentitySuffix = "), so it blocks this call: the session began before the identity could be confirmed, and a later answer does not reopen it. Restart the agent."
 )
 
 func sessionStartBlockedReason(reason string) string {
 	reason = strings.TrimSpace(reason)
+	if trustedIdentityRefusalReason(reason) {
+		return sessionStartBlockedPrefix + reason + sessionStartBlockedIdentitySuffix
+	}
 	if len(reason) > 400 {
 		reason = reason[:400]
 	}
@@ -523,9 +530,9 @@ func sessionStartBlockedReason(reason string) string {
 // trustedSessionStartGateReason reports a session-start gate refusal made
 // of DefenseClaw text only: the pending refusal, or the blocked-start
 // sentence around an unfinished check or a ship-authored start reason (a
-// Codex registration refusal after a Codex update, a catalog rule match).
-// A start reason with free-form text (a path, a scanner title) fails the
-// match and stays redacted (GAP-2643).
+// Codex registration refusal after a Codex update, a catalog rule match, an
+// identity refusal). A start reason with free-form text (a path, a scanner
+// title) fails the match and stays redacted (GAP-2643).
 func trustedSessionStartGateReason(reason string) bool {
 	if reason == sessionStartPendingReason {
 		return true
@@ -533,6 +540,9 @@ func trustedSessionStartGateReason(reason string) bool {
 	inner, ok := strings.CutPrefix(reason, sessionStartBlockedPrefix)
 	if !ok {
 		return false
+	}
+	if identity, ok := strings.CutSuffix(inner, sessionStartBlockedIdentitySuffix); ok {
+		return trustedIdentityRefusalReason(identity)
 	}
 	if inner, ok = strings.CutSuffix(inner, sessionStartBlockedSuffix); !ok {
 		return false
