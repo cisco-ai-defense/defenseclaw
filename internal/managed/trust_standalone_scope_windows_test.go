@@ -7,6 +7,7 @@ package managed
 
 import (
 	"errors"
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -319,6 +320,79 @@ func TestStandaloneFileLeafDriftOwnerEntryAndBoth(t *testing.T) {
 			}
 			if !strings.Contains(RefuseStandaloneContentDrift(got).Error(), "give the file back to Administrators") {
 				t.Fatalf("refusal %q does not name the owner fix", RefuseStandaloneContentDrift(got))
+			}
+		})
+	}
+}
+
+// GAP-0590 review S1: a null DACL, or an allow entry of a type the walk
+// cannot read, on the file itself is leaf drift too, so Setup rewrites
+// config.yaml and targets.yaml from the approved source. Before, only an
+// untrusted owner or writer counted, the gate refused with the CONFIG=
+// recovery, and that recovery wrote nothing, every time.
+func TestStandaloneFileLeafDriftNullDACLAndUnsupportedEntry(t *testing.T) {
+	leaf := `C:\ProgramData\Cisco\DefenseClaw\etc\config.yaml`
+	for name, tc := range map[string]struct {
+		verdict error
+		sid     string
+		acl     string
+	}{
+		"null DACL":         {&UntrustedDACLError{Path: leaf, Null: true, text: leaf + ": null Windows DACL is not trusted"}, "S-1-1-0", "null"},
+		"unsupported entry": {&UntrustedDACLError{Path: leaf, text: leaf + ": unsupported allow ACE type 0x5; refusing managed trust"}, "", "unsupported"},
+		"untrusted writer":  {&UntrustedPrincipalError{Path: leaf, SID: "S-1-5-32-545", text: "x"}, "S-1-5-32-545", ""},
+	} {
+		got := standaloneLeafVerdict(fmt.Errorf("wrapped: %w", tc.verdict))
+		if got == nil || got.Path != leaf || got.SID != tc.sid || got.ACL != tc.acl || got.Owner || got.Error() != tc.verdict.Error() {
+			t.Errorf("%s: leaf verdict = %+v, want %s on %s", name, got, tc.sid, leaf)
+		}
+		if refused := RefuseStandaloneContentDrift(tc.verdict).Error(); !strings.Contains(refused, standaloneConfigDriftRecovery) {
+			t.Errorf("%s: refusal %q does not name the config.yaml rewrite", name, refused)
+		}
+	}
+	for _, structural := range []error{nil, errors.New(leaf + ": reparse point"), fmt.Errorf("%s: inspect Windows DACL: %w", leaf, windows.ERROR_ACCESS_DENIED)} {
+		if got := standaloneLeafVerdict(structural); got != nil {
+			t.Errorf("leaf verdict for %v = %+v, want none", structural, got)
+		}
+	}
+
+	// On a real descriptor: the walk's own verdict is leaf drift.
+	t.Setenv(TrustStrictAncestorsEnv, "")
+	t.Setenv(ConfigPathEnv, "")
+	for name, set := range map[string]func(path string) error{
+		"null DACL": func(path string) error {
+			return windows.SetNamedSecurityInfo(path, windows.SE_FILE_OBJECT,
+				windows.DACL_SECURITY_INFORMATION|windows.PROTECTED_DACL_SECURITY_INFORMATION, nil, nil, nil, nil)
+		},
+		"unsupported entry": func(path string) error {
+			// (A;;FA;;;BU) with its type byte rewritten to an allow object entry.
+			dacl := testDACL(t, "D:P(A;;FA;;;SY)(A;;FA;;;BA)(A;;FA;;;BU)")
+			var ace *windows.ACCESS_ALLOWED_ACE
+			if err := windows.GetAce(dacl, 2, &ace); err != nil {
+				return err
+			}
+			ace.Header.AceType = 0x5
+			return windows.SetNamedSecurityInfo(path, windows.SE_FILE_OBJECT,
+				windows.DACL_SECURITY_INFORMATION|windows.PROTECTED_DACL_SECURITY_INFORMATION, nil, nil, dacl, nil)
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			path := filepath.Join(t.TempDir(), "config.yaml")
+			if err := os.WriteFile(path, []byte("ok"), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			setTestFileDACL(t, path, testDACL(t, canonicalTestDACL), true)
+			if err := exec.Command("icacls.exe", path, "/setowner", "*S-1-5-32-544").Run(); err != nil {
+				t.Skipf("icacls cannot set the owner here (needs an elevated administrator): %v", err)
+			}
+			if ValidateTrustedFilePathStandalone(path, "fixture") != nil {
+				t.Skip("the temp folders are not trusted by the standalone walk here")
+			}
+			if err := set(path); err != nil {
+				t.Skipf("NTFS does not take this descriptor here: %v", err)
+			}
+			got := StandaloneFileLeafDrift(path, "fixture")
+			if got == nil || !strings.EqualFold(got.Path, path) || got.ACL == "" {
+				t.Fatalf("leaf drift = %+v (walk: %v), want the access list of %s", got, ValidateTrustedFilePathStandalone(path, "fixture"), path)
 			}
 		})
 	}

@@ -118,20 +118,21 @@ func StandaloneRefusesContentDrift() bool {
 }
 
 // StandaloneFileLeafDrift returns the untrusted owner or write-like entry
-// of path itself when that is the standalone walk's only objection to it:
-// path fails the standalone check on its own descriptor, and every folder
-// above it passes. A trusted rewrite recovers exactly this drift: a fresh
-// file from the administrator's approved source, under the admin-only
-// descriptor, takes the name, and the old object moves aside (GAP-0561,
-// GAP-0590). It returns nil for a trusted path, a structural failure, and
-// drift on a folder above path, which a new file in that folder does not
-// recover.
+// of path itself, or a stand-in for its untrusted access list (a null DACL,
+// an allow entry the walk cannot read), when that is the standalone walk's
+// only objection to it: path fails the standalone check on its own
+// descriptor, and every folder above it passes. A trusted rewrite recovers
+// exactly this drift: a fresh file from the administrator's approved source,
+// under the admin-only descriptor, takes the name, and the old object moves
+// aside (GAP-0561, GAP-0590). It returns nil for a trusted path, a
+// structural failure, and drift on a folder above path, which a new file in
+// that folder does not recover.
 func StandaloneFileLeafDrift(path, label string) *UntrustedPrincipalError {
 	if label == "" {
 		label = "managed file"
 	}
-	var refused *UntrustedPrincipalError
-	if err := ValidateTrustedFilePathStandalone(path, label); err == nil || !errors.As(err, &refused) {
+	refused := standaloneLeafVerdict(ValidateTrustedFilePathStandalone(path, label))
+	if refused == nil {
 		return nil
 	}
 	clean, err := filepath.Abs(path)
@@ -148,13 +149,34 @@ func StandaloneFileLeafDrift(path, label string) *UntrustedPrincipalError {
 	}
 }
 
+// standaloneLeafVerdict is the principal of a standalone verdict that a
+// trusted rewrite recovers from: an untrusted owner or writer, or an access
+// list that is itself untrusted, which stands in as Everyone (a null DACL)
+// or as no account it can name (an entry the walk cannot read). Before, only
+// the first counted, so a null DACL or such an entry on config.yaml was
+// refused with a CONFIG= recovery that wrote nothing (GAP-0590 review S1).
+// It is nil for no verdict and for a structural failure.
+func standaloneLeafVerdict(err error) *UntrustedPrincipalError {
+	var principal *UntrustedPrincipalError
+	if errors.As(err, &principal) {
+		return principal
+	}
+	var dacl *UntrustedDACLError
+	if !errors.As(err, &dacl) {
+		return nil
+	}
+	if dacl.Null {
+		return &UntrustedPrincipalError{Path: dacl.Path, SID: "S-1-1-0", ACL: "null", text: dacl.text}
+	}
+	return &UntrustedPrincipalError{Path: dacl.Path, ACL: "unsupported", text: dacl.text}
+}
+
 // standaloneContentDriftRecovery is the recovery that works for the file
 // err refuses: Setup writes config.yaml and the guardian manifest new from
 // the approved source; every other content file is the administrator's to
 // check (GAP-0590).
 func standaloneContentDriftRecovery(err error) string {
-	var refused *UntrustedPrincipalError
-	if errors.As(err, &refused) {
+	if refused := standaloneLeafVerdict(err); refused != nil {
 		switch strings.ToLower(filepath.Base(refused.Path)) {
 		case "config.yaml":
 			return standaloneConfigDriftRecovery()
