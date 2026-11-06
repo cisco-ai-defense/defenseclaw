@@ -2648,10 +2648,23 @@ func (w *InstallWatcher) scannerFor(evt InstallEvent) scanner.Scanner {
 		plugin := scanner.NewPluginScanner(cfg.Scanners.PluginScanner)
 		plugin.Connector = w.eventConnector(evt)
 		plugin.LLM = cfg.ResolveLLM("scanners.plugin")
+		plugin.Policy = pluginScannerPolicy(cfg, plugin.Connector)
+		plugin.DisableVendorIdentity = cfg.SecureClientIntegration()
 		return plugin
 	default:
 		return nil
 	}
+}
+
+// pluginScannerPolicy carries the effective strict tier to the plugin scanner.
+func pluginScannerPolicy(cfg *config.Config, connector string) string {
+	if cfg == nil || cfg.SecureClientIntegration() {
+		return ""
+	}
+	if cfg.HookPolicyTierForConnector(connector) == "strict" {
+		return "strict"
+	}
+	return ""
 }
 
 // defaultScanTimeout bounds a plugin or MCP scan, which have no timeout key.

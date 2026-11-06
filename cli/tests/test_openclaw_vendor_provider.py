@@ -7,7 +7,10 @@ from __future__ import annotations
 
 import json
 import shutil
+from types import SimpleNamespace
 
+from defenseclaw.commands.cmd_plugin import _build_scan_options, _scan_options_for_connector
+from defenseclaw.enforce import asset_lists
 from defenseclaw.scanner.plugin_scanner import vendor_identity
 from defenseclaw.scanner.plugin_scanner.scanner import scan_plugin
 from defenseclaw.scanner.plugin_scanner.types import PluginScanOptions
@@ -91,6 +94,11 @@ def test_r109_g501_identity_matrix(tmp_path, monkeypatch) -> None:
     assert vendor_identity.inspect_official_provider_tree(str(source)) == "@openclaw/amazon-bedrock-provider"
     assert vendor_identity.inspect_official_provider_tree(str(installed)) == "@openclaw/amazon-bedrock-provider"
     assert "SRC-EXEC" not in _high_rules(installed)
+    assert "SRC-EXEC" in {
+        f.rule_id for f in scan_plugin(
+            str(installed), PluginScanOptions(disable_vendor_identity=True),
+        ).findings if f.severity == "HIGH"
+    }
     assert not {f.rule_id for f in scan_plugin(
         str(installed), PluginScanOptions(policy="permissive"),
     ).findings if f.severity == "HIGH"}
@@ -173,3 +181,59 @@ def test_r109_g501_identity_matrix(tmp_path, monkeypatch) -> None:
     )
     assert vendor_identity.inspect_official_provider_tree(str(source)) is not None
     assert "STRUCT-NATIVE-IN-SKIPDIR" in _high_rules(source)
+
+
+@requires_symlink_privilege
+def test_r109_g501_peer_link_revalidated_after_hash(tmp_path, monkeypatch) -> None:
+    published = tmp_path / "published"
+    published.mkdir()
+    (published / "package.json").write_text(json.dumps({
+        "name": "@openclaw/amazon-bedrock-provider",
+        "version": "2026.10.9",
+        "peerDependencies": {"openclaw": ">=2026.10.9"},
+    }), encoding="utf-8")
+    (published / "index.js").write_text(
+        "const match = /region/.exec(value);\n", encoding="utf-8",
+    )
+    (published / "node_modules").mkdir()
+    digest = vendor_identity._tree_sha256(str(published))
+    assert digest
+    monkeypatch.setitem(
+        vendor_identity.VENDOR_DIGESTS,
+        ("@openclaw/amazon-bedrock-provider", "2026.10.9"), digest,
+    )
+    installed = tmp_path / "installed"
+    shutil.copytree(published, installed)
+    peer = installed / "node_modules" / "openclaw"
+    wrong = tmp_path / "wrong-peer"
+    wrong.mkdir()
+    (wrong / "package.json").write_text('{"name":"other"}', encoding="utf-8")
+    original = vendor_identity._tree_sha256
+
+    def create_link_during_hash(path, **kwargs):
+        if path == str(installed):
+            peer.symlink_to(wrong, target_is_directory=True)
+        return original(path, **kwargs)
+
+    monkeypatch.setattr(vendor_identity, "_tree_sha256", create_link_during_hash)
+    assert "SRC-EXEC" in _high_rules(installed)
+
+
+def test_r109_g501_secure_client_scan_options(monkeypatch) -> None:
+    monkeypatch.setattr(asset_lists, "is_secure_client", lambda cfg: True)
+    app = SimpleNamespace(cfg=SimpleNamespace(
+        claw=SimpleNamespace(home_dir=""),
+        guardrail=SimpleNamespace(hook_policy_tier=lambda connector: "strict"),
+    ))
+    options = _build_scan_options(
+        app, "", None, None, "", "", 0, True, False, False, True,
+    )
+    assert options["disable_vendor_identity"] is True
+    assert _scan_options_for_connector(app, "openclaw", {}) == {
+        "disable_vendor_identity": True,
+    }
+
+    monkeypatch.setattr(asset_lists, "is_secure_client", lambda cfg: False)
+    assert _scan_options_for_connector(app, "openclaw", {}) == {
+        "policy": "strict", "profile": "strict",
+    }

@@ -49,7 +49,7 @@ def inspect_official_provider_tree(plugin_dir: str) -> str | None:
         return None
     root = os.path.realpath(plugin_dir)
     tolerated: set[str] = set()
-    links: list[tuple[str, str, os.stat_result]] = []
+    links: dict[str, tuple[str, tuple[os.stat_result, str, bytes] | None]] = {}
     for peer in peers:
         if not isinstance(peer, str) or not re.fullmatch(
             r"(?:@[a-z0-9._-]+/)?[a-z0-9._-]+", peer,
@@ -58,33 +58,44 @@ def inspect_official_provider_tree(plugin_dir: str) -> str | None:
         relative = "node_modules/" + peer
         link = os.path.join(plugin_dir, *relative.split("/"))
         tolerated.add(relative)
-        if not os.path.lexists(link):
-            continue
         try:
-            before = os.lstat(link)
-            if not stat.S_ISLNK(before.st_mode):
-                return None
-            destination = os.path.realpath(link)
-            if os.path.commonpath((root, destination)) == root:
-                return None
-            if not stat.S_ISDIR(os.stat(destination, follow_symlinks=False).st_mode):
-                return None
-            peer_manifest = _read_regular_file(
-                os.path.join(destination, "package.json"), max_bytes=1024 * 1024,
-            )
-            if peer_manifest is None or json.loads(peer_manifest).get("name") != peer:
-                return None
-            links.append((link, os.readlink(link), before))
+            links[peer] = (link, _validated_peer_link(link, root, peer))
         except (OSError, ValueError, TypeError, AttributeError):
             return None
 
     if _tree_sha256(plugin_dir, tolerated_links=frozenset(tolerated)) != want:
         return None
-    for link, destination, before in links:
+    for peer, (link, before) in links.items():
         try:
-            after = os.lstat(link)
-            if not os.path.samestat(before, after) or os.readlink(link) != destination:
+            after = _validated_peer_link(link, root, peer)
+            if (before is None) != (after is None):
                 return None
-        except OSError:
+            if before is not None and after is not None and (
+                not os.path.samestat(before[0], after[0]) or before[1:] != after[1:]
+            ):
+                return None
+        except (OSError, ValueError, TypeError, AttributeError):
             return None
     return name
+
+
+def _validated_peer_link(link: str, root: str, peer: str) -> tuple[os.stat_result, str, bytes] | None:
+    """Return a peer link's identity, or None when the optional link is absent."""
+
+    try:
+        info = os.lstat(link)
+    except FileNotFoundError:
+        return None
+    if not stat.S_ISLNK(info.st_mode):
+        raise ValueError("peer entry is not a link")
+    destination = os.path.realpath(link)
+    if os.path.commonpath((root, destination)) == root:
+        raise ValueError("peer link points inside the package")
+    if not stat.S_ISDIR(os.stat(destination, follow_symlinks=False).st_mode):
+        raise ValueError("peer link target is not a directory")
+    manifest = _read_regular_file(
+        os.path.join(destination, "package.json"), max_bytes=1024 * 1024,
+    )
+    if manifest is None or json.loads(manifest).get("name") != peer:
+        raise ValueError("peer link target has another package identity")
+    return info, os.readlink(link), manifest

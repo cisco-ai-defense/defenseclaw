@@ -121,7 +121,7 @@ def scan_plugin(
 
     if (profile in ("default", "permissive")
             and policy.profile in ("default", "permissive")
-            and not (options and options.include_self)):
+            and not (options and (options.include_self or options.disable_vendor_identity))):
         official_name = inspect_official_provider_tree(target)
         if official_name is not None:
             return build_result(
