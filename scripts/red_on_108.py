@@ -74,8 +74,9 @@ def mapped_python_files(worktree: Path, files: list[str], tests: list[str]) -> l
         if not name.startswith("cli/tests/") or not name.endswith(".py"):
             continue
         source = (worktree / name).read_text(encoding="utf-8", errors="replace")
-        if any(re.search(r"^\s*(?:async\s+)?def\s+" + re.escape(test) + r"\s*\(", source, re.MULTILINE)
-               for test in tests):
+        if any(
+            re.search(r"^\s*(?:async\s+)?def\s+" + re.escape(test) + r"\s*\(", source, re.MULTILINE) for test in tests
+        ):
             matched.append(name)
     return matched
 

@@ -63,7 +63,9 @@ def test_default_go_shards_leave_opt_in_corpora_for_their_own_jobs(tmp_path: Pat
         "//go:build !d1corpus\n\npackage sample\nfunc TestNegated(t *testing.T) {}\n"
     )
     assert [names for _, names in discover_test_files(tmp_path)] == [
-        ("TestAlternate",), ("TestNegated",), ("TestNormal",)
+        ("TestAlternate",),
+        ("TestNegated",),
+        ("TestNormal",),
     ]
 
 
@@ -340,7 +342,9 @@ def test_windows_hookexec_matrix_covers_each_test_once_with_time_headroom() -> N
 
     uv_step = next(step for step in job["steps"] if step.get("uses", "").startswith("astral-sh/setup-uv@"))
     assert "matrix.kind == 'hookexec'" in uv_step["if"]
-    run = next(step["run"] for step in job["steps"] if step.get("name") == "Full native Windows Go test, vet, and build")
+    run = next(
+        step["run"] for step in job["steps"] if step.get("name") == "Full native Windows Go test, vet, and build"
+    )
     hookexec = run.split("if ($suiteKind -eq 'hookexec') {", 1)[1].split("if ($suiteKind -eq 'packages') {", 1)[0]
     packages = run.split("if ($suiteKind -eq 'packages') {", 1)[1].split("if ($suiteKind -eq 'gateway'", 1)[0]
     assert "$hookexecTestShardCount = 5" in run
@@ -370,7 +374,10 @@ def test_windows_remaining_package_control_stays_covered() -> None:
     root = Path(__file__).resolve().parents[2]
     timings = json.loads((root / "scripts/test-timings/go-windows.json").read_text(encoding="utf-8"))
     prefix = "github.com/defenseclaw/defenseclaw/"
-    excluded = {prefix + path for path in ("internal/gateway", "internal/gateway/connector", "internal/gateway/connector/hookexec")}
+    excluded = {
+        prefix + path
+        for path in ("internal/gateway", "internal/gateway/connector", "internal/gateway/connector/hookexec")
+    }
     packages = sorted(set(timings["packages"]) - excluded)
     shards = partition_packages(packages, 6, timings, root=root)
     control = prefix + "internal/hookpaths"

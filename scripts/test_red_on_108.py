@@ -26,8 +26,9 @@ class RedOn108Test(unittest.TestCase):
     def test_multiple_commits_select_the_one_with_the_mapped_test(self):
         found = [("newer", ["newer_test.go"]), ("earlier", ["earlier_test.go"])]
         with patch("scripts.red_on_108.run_one", side_effect=["NO_MAPPED_TEST", "BEHAVIOR_RED"]) as run:
-            self.assertEqual(run_mapped_candidate(Path("."), Path("."), found, ["TestMapped"], "base"),
-                             ("earlier", "BEHAVIOR_RED"))
+            self.assertEqual(
+                run_mapped_candidate(Path("."), Path("."), found, ["TestMapped"], "base"), ("earlier", "BEHAVIOR_RED")
+            )
         self.assertEqual(run.call_count, 2)
 
     def test_python_candidate_requires_the_named_test(self):
