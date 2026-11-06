@@ -226,7 +226,17 @@ func actionPosixTargetMention(command, cwd, home string, depth int, stateOnly bo
 			vals actionValues
 		}
 		var pendingReads []pendingRead
+		inertEchoSubs := map[*syntax.Stmt]bool{}
 		direct := actionDirectStatements(file)
+		directKeyName := func(value, base string) bool {
+			placed := OperandPath(value, base)
+			for _, key := range AuthorizedKeysPaths(home) {
+				if samePathName(placed, key) {
+					return true
+				}
+			}
+			return false
+		}
 		checkWord := func(word *syntax.Word) bool {
 			value, known := actionWordValue(word, values, effectiveCWD, home)
 			activeGlob := actionWordHasUnquotedGlob(word, command)
@@ -248,6 +258,9 @@ func actionPosixTargetMention(command, cwd, home string, depth int, stateOnly bo
 		}
 		syntax.Walk(file, func(node syntax.Node) bool {
 			if found {
+				return false
+			}
+			if stmt, ok := node.(*syntax.Stmt); ok && inertEchoSubs[stmt] {
 				return false
 			}
 			if decl, ok := node.(*syntax.FuncDecl); ok && uncalled[decl] {
@@ -333,11 +346,59 @@ func actionPosixTargetMention(command, cwd, home string, depth int, stateOnly bo
 					if data := actionNodeInertDataWord(call, effectiveCWD, home); data != nil {
 						inert = append(inert, data)
 					}
-					if len(call.Args) > 0 {
+					if filepath.IsAbs(home) && filepath.IsAbs(effectiveCWD) && len(call.Args) > 0 {
 						if program, known := staticProgramWord(call.Args[0], home); known && program == "echo" {
-							// Echo's arguments are data. The syntax walk still checks
-							// substitutions, and redirects were checked above.
-							inert = append(inert, call.Args[1:]...)
+							// Echo's data operands do not name a write target. A
+							// resolved link or hard-link operand remains a named hit.
+							for _, word := range call.Args[1:] {
+								value, fixed := actionWordValue(word, values, effectiveCWD, home)
+								if fixed && !directKeyName(value, effectiveCWD) &&
+									protectedReachPath(OperandPath(value, effectiveCWD), protected, ssh) {
+									continue
+								}
+								inert = append(inert, word)
+								// A complete read-only substitution in display text is
+								// also data when every protected operand is the directly
+								// named key file. Link aliases keep their own hit.
+								syntax.Walk(word, func(part syntax.Node) bool {
+									sub, ok := part.(*syntax.CmdSubst)
+									if !ok {
+										return true
+									}
+									if len(sub.Stmts) != 1 {
+										return false
+									}
+									process, ok := sub.Stmts[0].Cmd.(*syntax.CallExpr)
+									if !ok || len(process.Assigns) != 0 {
+										return false
+									}
+									if !actionKnownReadOnlyShell(&syntax.File{Stmts: sub.Stmts}, home) {
+										return false
+									}
+									verified := true
+									for _, nested := range sub.Stmts {
+										syntax.Walk(nested, func(inner syntax.Node) bool {
+											arg, ok := inner.(*syntax.Word)
+											if !ok {
+												return true
+											}
+											text, fixed := actionWordValue(arg, values, effectiveCWD, home)
+											if !fixed || !directKeyName(text, effectiveCWD) &&
+												protectedReachPath(OperandPath(text, effectiveCWD), protected, ssh) {
+												verified = false
+												return false
+											}
+											return true
+										})
+									}
+									if verified {
+										for _, nested := range sub.Stmts {
+											inertEchoSubs[nested] = true
+										}
+									}
+									return false
+								})
+							}
 						}
 					}
 				}
@@ -362,12 +423,6 @@ func actionPosixTargetMention(command, cwd, home string, depth int, stateOnly bo
 					return false
 				}
 				for _, word := range call.Args {
-					if readOnly {
-						// Grade this process's input words as reads. A later
-						// writer in the same action keeps its own target hit.
-						judgedWords = append(judgedWords, word)
-						continue
-					}
 					if readsReplaced && actionReplacedEntryWord(word, values, effectiveCWD, home, replacedEntries) {
 						judgedWords = append(judgedWords, word)
 						continue
@@ -472,9 +527,9 @@ func actionNodeInertDataWord(call *syntax.CallExpr, cwd, home string) *syntax.Wo
 	return call.Args[2]
 }
 
-// ActionInlineSSHKeyDataMention reports a proved ordinary Node write whose
-// inert data text names an SSH keys path. The strict rule retains the text
-// mention while the default action decision uses the proved destination.
+// ActionInlineSSHKeyDataMention reports a proved ordinary inline-data or
+// display operand that names an SSH keys path. The strict rule retains the
+// text mention while the default action uses the proved operand role.
 func ActionInlineSSHKeyDataMention(command, cwd, home string) bool {
 	if !strings.Contains(command, "authorized_k") || !strings.Contains(command, ".ssh") {
 		return false
@@ -488,6 +543,17 @@ func ActionInlineSSHKeyDataMention(command, cwd, home string) bool {
 		call, ok := node.(*syntax.CallExpr)
 		if !ok {
 			return true
+		}
+		if len(call.Assigns) == 0 && len(call.Args) > 1 {
+			if program, fixed := staticProgramWord(call.Args[0], home); fixed && program == "echo" {
+				for _, word := range call.Args[1:] {
+					if value, fixed := StaticWord(word, home); fixed &&
+						actionInterpreterSSHName.MatchString(value) && actionInterpreterKeysName.MatchString(value) {
+						found = true
+						return false
+					}
+				}
+			}
 		}
 		word := actionNodeInertDataWord(call, cwd, home)
 		if word == nil {

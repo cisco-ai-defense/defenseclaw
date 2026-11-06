@@ -1039,7 +1039,13 @@ func trustedOrdinaryKeyOperandRolesDepth(request trustedActionRequest, input act
 		return false
 	}
 	for _, command := range facts.Commands {
-		if command.Executable == "" || strings.ContainsAny(command.Executable, `/\`) ||
+		if command.Executable == "" {
+			if command.Program != "" || len(command.Argv) != 0 || len(command.Redirects) != 0 {
+				return false
+			}
+			continue
+		}
+		if strings.ContainsAny(command.Executable, `/\`) ||
 			strings.HasPrefix(command.Executable, ".") {
 			return false
 		}
