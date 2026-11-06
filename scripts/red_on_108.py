@@ -81,6 +81,33 @@ def mapped_python_files(worktree: Path, files: list[str], tests: list[str]) -> l
     return matched
 
 
+def classify_test_result(command: list[str], returncode: int, output: str) -> str:
+    if returncode == 0 or "[no tests to run]" in output:
+        return "PASS_ON_108"
+    # A pytest summary can say FAILED even when the named test never reached an
+    # assertion. Treat dependency and collection failures as missing evidence.
+    infrastructure = (
+        "build failed",
+        "undefined:",
+        "syntaxerror",
+        "importerror",
+        "modulenotfounderror",
+        "error collecting",
+        "error at setup",
+        "fixture '",
+        "filenotfounderror",
+    )
+    if any(marker in output.lower() for marker in infrastructure):
+        return "COMPILE_ONLY"
+    if "go" in command and "--- FAIL:" in output:
+        return "BEHAVIOR_RED"
+    if "pytest" in command and (
+        "AssertionError" in output or "Failed: DID NOT RAISE" in output or re.search(r"(?m)^E\s+assert\b", output)
+    ):
+        return "BEHAVIOR_RED"
+    return "UNCLASSIFIED_FAIL"
+
+
 def run_one(repo: Path, worktree: Path, commit: str, files: list[str], tests: list[str], base: str) -> str:
     subprocess.run(["git", "-C", str(worktree), "reset", "--hard", base], check=True, stdout=subprocess.DEVNULL)
     subprocess.run(["git", "-C", str(worktree), "clean", "-fd"], check=True, stdout=subprocess.DEVNULL)
@@ -147,19 +174,7 @@ def run_one(repo: Path, worktree: Path, commit: str, files: list[str], tests: li
             statuses.append("TIMEOUT")
             continue
         output = run.stdout
-        if run.returncode == 0 or "[no tests to run]" in output:
-            statuses.append("PASS_ON_108")
-        elif "--- FAIL:" in output or "FAILED " in output:
-            statuses.append("BEHAVIOR_RED")
-        elif (
-            "build failed" in output.lower()
-            or "undefined:" in output
-            or "SyntaxError" in output
-            or "ImportError" in output
-        ):
-            statuses.append("COMPILE_ONLY")
-        else:
-            statuses.append("UNCLASSIFIED_FAIL")
+        statuses.append(classify_test_result(command, run.returncode, output))
     if "BEHAVIOR_RED" in statuses and all(s == "BEHAVIOR_RED" for s in statuses):
         return "BEHAVIOR_RED"
     if "COMPILE_ONLY" in statuses:

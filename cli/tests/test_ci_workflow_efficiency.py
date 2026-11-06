@@ -191,7 +191,18 @@ def test_gap0607_reviewer_corpora_and_d1_public_shapes_are_required_in_ci() -> N
     assert "TestD1PublicShapes" in (ROOT / "internal/gateway/d1_replay_test.go").read_text(encoding="utf-8")
     assert (ROOT / "internal/gateway/testdata/d1-shapes.jsonl").is_file()
     assert "python3 scripts/check_d1_shapes.py" in workflow
+    assert "scripts.test_check_d1_shapes" in workflow
     assert "name: D1 Benign Replay" in (ROOT / ".github/workflows/d1-benign-replay.yml").read_text(encoding="utf-8")
+
+
+def test_gap0607_private_replay_tracks_labeled_pr_pushes() -> None:
+    workflow = yaml.safe_load((ROOT / ".github/workflows/d1-benign-replay.yml").read_text(encoding="utf-8"))
+    triggers = workflow.get(True) or workflow.get("on")
+    events = set(triggers["pull_request"]["types"])
+    assert {"labeled", "synchronize", "reopened", "ready_for_review"} <= events
+    condition = workflow["jobs"]["replay"]["if"]
+    assert "contains(github.event.pull_request.labels.*.name, 'hookpaths')" in condition
+    assert "github.event.pull_request.head.repo.full_name == github.repository" in condition
 
 
 def test_release_validates_reviewed_macos_pin_without_freshness_block() -> None:

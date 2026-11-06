@@ -2,11 +2,13 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import subprocess
+import sys
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import patch
 
-from scripts.red_on_108 import candidates, mapped_python_files, run_mapped_candidate
+from scripts.red_on_108 import candidates, classify_test_result, mapped_python_files, run_mapped_candidate, run_one
 from scripts.red_on_108 import tests_for_gap as select_tests_for_gap
 
 
@@ -72,6 +74,35 @@ class RedOn108Test(unittest.TestCase):
             git("add", "revert_test.go")
             git("commit", "-q", "-m", "revert(GAP-0607): restore prior state")
             self.assertEqual(candidates(repo, "GAP-0607", base), [(fix, ["candidate_test.go"])])
+
+    def test_missing_dependency_inside_named_python_test_is_not_behavior_red(self):
+        from tempfile import TemporaryDirectory
+
+        with TemporaryDirectory() as temporary:
+            worktree = Path(temporary)
+            test_file = "cli/tests/test_gap0607_dependency.py"
+            source = b"def test_gap0607_dependency():\n    import absent_sample_module\n"
+            output = (
+                "FAILED cli/tests/test_gap0607_dependency.py::test_gap0607_dependency - "
+                "ModuleNotFoundError: No module named 'absent_sample_module'\n"
+            )
+
+            def run(command, **_kwargs):
+                if command[:3] == [sys.executable, "-m", "pytest"]:
+                    return SimpleNamespace(returncode=1, stdout=output)
+                return SimpleNamespace(returncode=0, stdout="")
+
+            with (
+                patch("scripts.red_on_108.subprocess.run", side_effect=run),
+                patch("scripts.red_on_108.subprocess.check_output", return_value=source),
+            ):
+                status = run_one(Path("."), worktree, "commit", [test_file], ["test_gap0607_dependency"], "base")
+            self.assertEqual(status, "COMPILE_ONLY")
+
+    def test_assertion_failure_remains_behavior_red(self):
+        command = [sys.executable, "-m", "pytest", "-q", "cli/tests/test_sample.py"]
+        output = "FAILED cli/tests/test_sample.py::test_sample - AssertionError: expected sample result\n"
+        self.assertEqual(classify_test_result(command, 1, output), "BEHAVIOR_RED")
 
 
 if __name__ == "__main__":

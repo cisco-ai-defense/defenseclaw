@@ -231,7 +231,7 @@ jobs:
       - uses: ./.github/actions/setup-go
       - name: Check corpus tooling
         if: matrix.shard == 'matrix-heavy'
-        run: python3 -m unittest scripts.test_check_reviewer_corpus scripts.test_d1diff scripts.test_red_on_108 -q
+        run: python3 -m unittest scripts.test_check_reviewer_corpus scripts.test_d1diff scripts.test_red_on_108 scripts.test_check_d1_shapes -q
       - name: Check reviewer matrix and Windows lexer verdicts
         env:
           CORPUS_SHARD: ${{ matrix.shard }}
