@@ -41465,11 +41465,13 @@ function Invoke-DefenseClawInstallLikeLifecycle {
         -GatewayServiceName $GatewayServiceName `
         -GuardianServiceName $GuardianServiceName `
         -SnapshotPath $snapshot)
-    Write-DefenseClawTransactionLifecyclePins `
-        -SnapshotPath $snapshot `
-        -Sources $Sources
     $committedLifecycleRecovery = $null
     try {
+        # Inside the rollback scope: a failed pins write rolls this
+        # transaction back in the same run (g649 review F5).
+        Write-DefenseClawTransactionLifecyclePins `
+            -SnapshotPath $snapshot `
+            -Sources $Sources
         if ($Action -eq 'Install' -and $null -ne $metadata -and
             -not $reconcileInstall) {
             # The inactive uninstall tombstone remains the authority for
