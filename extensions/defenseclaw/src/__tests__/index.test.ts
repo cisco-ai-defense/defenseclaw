@@ -19,6 +19,8 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
 import { readFileSync } from "node:fs";
 import type { ScanResult } from "../types.js";
+import { HealthMonitor } from "../health-monitor.js";
+import { MODEL_OUTAGE_WARNING } from "../fetch-interceptor.js";
 
 // --- Hoisted mocks (available before module-level vi.mock factories) ---
 
@@ -159,6 +161,25 @@ describe("DefenseClaw OpenClaw Plugin", () => {
       expect(commands["scan"]).toBeDefined();
       expect(commands["block"]).toBeDefined();
       expect(commands["allow"]).toBeDefined();
+    });
+
+    it("puts the saved open outage warning in the agent prompt", async () => {
+      const down = vi.spyOn(HealthMonitor.prototype, "isGatewayDown", "get").mockReturnValue(true);
+      const refresh = vi.spyOn(HealthMonitor.prototype, "refresh").mockResolvedValue();
+      const warning = vi.spyOn(HealthMonitor.prototype, "getWarningMessage")
+        .mockReturnValue("[DEFENSECLAW WARNING] Model calls continue without inspection.");
+      try {
+        mockOutageMode.mockReturnValue("open");
+        await expect(listeners.before_prompt_build()).resolves.toEqual({
+          prependContext: expect.stringContaining("continue without inspection"),
+        });
+        mockOutageMode.mockReturnValue("closed");
+        await expect(listeners.before_prompt_build()).resolves.toBeUndefined();
+      } finally {
+        down.mockRestore();
+        refresh.mockRestore();
+        warning.mockRestore();
+      }
     });
   });
 
