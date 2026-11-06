@@ -11,6 +11,7 @@ import json
 import re
 import sys
 from pathlib import Path
+from urllib.parse import urlsplit
 
 ALLOWED_KEYS = {"id", "kind", "tool_name", "cc_tool", "command", "args", "expected"}
 PAYLOAD_KEYS = ("kind", "tool_name", "cc_tool", "command", "args")
@@ -18,6 +19,7 @@ APPROVED = Path(__file__).resolve().parents[1] / "internal/gateway/testdata/d1-s
 EXPECTED_CELLS = {"claudecode/oss", "claudecode/managed-balanced", "codex/oss", "codex/managed-balanced"}
 ALLOWED_DECISIONS = {"allow", "alert", "block"}
 ALLOWED_ACCOUNTS = {"git:git", "testuser:testuser", "user:user"}
+ALLOWED_USERS = {"git", "testuser", "user"}
 ALLOWED_HOSTS = {"localhost", "example.invalid"}
 # All literal absolute paths in the reviewed public subset. New paths require an
 # explicit review of this list as well as the row payload manifest.
@@ -58,6 +60,11 @@ ABSOLUTE_PATH = re.compile(r"(?<![\w$./])/([A-Za-z0-9._~+*?-]+(?:/[A-Za-z0-9._~+
 ACCOUNT_OPERAND = re.compile(r"\b(?:chown|chgrp|su|runuser|useradd|usermod|passwd)\s+(?:-[A-Za-z]+\s+)*([^\s;&|]+)")
 SUDO_USER = re.compile(r"\bsudo\s+-u\s+([^\s;&|]+)")
 HOST_OPERAND = re.compile(r"\b(?:ssh|ssh-keyscan|scp|rsync|ping|nslookup|dig)\s+(?:-[A-Za-z]+\s+)*([^\s;&|]+)")
+URL = re.compile(r"\b[A-Za-z][A-Za-z0-9+.-]*://[^\s\"'<>]+")
+USER_AT_HOST = re.compile(r"\b([A-Za-z][A-Za-z0-9_.+-]*)@([A-Za-z][A-Za-z0-9_.-]*)")
+GIT_ACCOUNT = re.compile(r"\buser\.(?:name|email)\s*(?:=|\s)\s*([^\s;&|\"']+)")
+GIT_TRANSPORT = re.compile(r"\bgit\s+(?:clone|fetch|push|pull|ls-remote|remote\s+add\s+\S+)\s+([^\s;&|]+)")
+HOST_ASSIGNMENT = re.compile(r"\b(?:host|hostname|server|remote|user|username|account)=([^\s;&|\"']+)")
 BAD_TEXT = (
     re.compile(
         r"(?<![A-Za-z0-9])/(?:home|Users|root|tmp|var|workspace|mnt|opt|etc|usr|proc|run|private|app)(?:/|\b)", re.I
@@ -107,10 +114,37 @@ def synthetic_operands(row: dict) -> bool:
             if path not in ALLOWED_ABSOLUTE_PATHS:
                 return False
         for match in list(ACCOUNT_OPERAND.finditer(value)) + list(SUDO_USER.finditer(value)):
-            if match.group(1) not in ALLOWED_ACCOUNTS:
+            if match.group(1) not in ALLOWED_ACCOUNTS | ALLOWED_USERS:
                 return False
         for match in HOST_OPERAND.finditer(value):
             if match.group(1) not in ALLOWED_HOSTS:
+                return False
+        # Host and account syntax is checked wherever it appears, including Git
+        # transports and configuration, rather than only for a command allowlist.
+        for match in URL.finditer(value):
+            try:
+                parsed = urlsplit(match.group().rstrip(".,)"))
+                if parsed.hostname not in ALLOWED_HOSTS or (parsed.username and parsed.username not in ALLOWED_USERS):
+                    return False
+            except ValueError:
+                return False
+        for match in USER_AT_HOST.finditer(value):
+            if match.group(1) not in ALLOWED_USERS or match.group(2) not in ALLOWED_HOSTS:
+                return False
+        for match in GIT_ACCOUNT.finditer(value):
+            account = match.group(1)
+            if account not in ALLOWED_USERS and account not in {f"{user}@example.invalid" for user in ALLOWED_USERS}:
+                return False
+        for match in GIT_TRANSPORT.finditer(value):
+            endpoint = match.group(1).strip("\"'")
+            if ":" in endpoint and "://" not in endpoint:
+                host = endpoint.split(":", 1)[0]
+                if host not in ALLOWED_HOSTS and not USER_AT_HOST.fullmatch(host):
+                    return False
+        for match in HOST_ASSIGNMENT.finditer(value):
+            name = match.group(0).split("=", 1)[0]
+            allowed = ALLOWED_USERS if name in {"user", "username", "account"} else ALLOWED_HOSTS
+            if match.group(1) not in allowed:
                 return False
     return True
 

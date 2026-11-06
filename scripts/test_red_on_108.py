@@ -8,7 +8,7 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
 
-from scripts.red_on_108 import candidates, mapped_python_files, run_mapped_candidate, run_one
+from scripts.red_on_108 import candidates, mapped_python_files, overlay_new_go_fixtures, run_mapped_candidate, run_one
 from scripts.red_on_108 import tests_for_gap as select_tests_for_gap
 
 
@@ -105,6 +105,48 @@ class RedOn108Test(unittest.TestCase):
         command = [sys.executable, "-m", "pytest", "-q", "cli/tests/test_sample.py"]
         output = "FAILED cli/tests/test_sample.py::test_sample - AssertionError: expected sample result\n"
         self.assertEqual(classify_test_result(command, 1, output), "BEHAVIOR_RED")
+
+    def test_go_missing_fixture_is_not_behavior_red(self):
+        from scripts.red_on_108 import classify_test_result
+
+        command = ["nice", "-n", "15", "go", "test", "./internal/example"]
+        missing = (
+            "--- FAIL: TestGAP0607Sample (0.00s)\n"
+            "    sample_test.go:12: open testdata/sample.json: no such file or directory\n"
+        )
+        assertion = "--- FAIL: TestGAP0607Sample (0.00s)\n    sample_test.go:12: got allow, want block\n"
+        self.assertEqual(classify_test_result(command, 1, missing), "COMPILE_ONLY")
+        self.assertEqual(classify_test_result(command, 1, assertion), "BEHAVIOR_RED")
+
+    def test_new_go_fixture_is_copied_to_prior_release_tree(self):
+        from tempfile import TemporaryDirectory
+
+        with TemporaryDirectory() as temporary:
+            repo = Path(temporary) / "repo"
+            repo.mkdir()
+
+            def git(*args: str) -> str:
+                return subprocess.check_output(["git", "-C", str(repo), *args], text=True).strip()
+
+            git("init", "-q")
+            git("config", "user.name", "Test")
+            git("config", "user.email", "test@example.invalid")
+            fixture = repo / "internal/example/testdata"
+            fixture.mkdir(parents=True)
+            (fixture / "existing.json").write_text("base", encoding="utf-8")
+            git("add", ".")
+            git("commit", "-q", "-m", "base")
+            base = git("rev-parse", "HEAD")
+            (fixture / "new.json").write_text("new", encoding="utf-8")
+            git("add", ".")
+            git("commit", "-q", "-m", "fix(GAP-0607): add test fixture")
+            commit = git("rev-parse", "HEAD")
+            prior = Path(temporary) / "prior"
+            (prior / "internal/example/testdata").mkdir(parents=True)
+            (prior / "internal/example/testdata/existing.json").write_text("base", encoding="utf-8")
+            overlay_new_go_fixtures(repo, prior, commit, base, "internal/example")
+            self.assertEqual((prior / "internal/example/testdata/new.json").read_text(), "new")
+            self.assertEqual((prior / "internal/example/testdata/existing.json").read_text(), "base")
 
 
 if __name__ == "__main__":
