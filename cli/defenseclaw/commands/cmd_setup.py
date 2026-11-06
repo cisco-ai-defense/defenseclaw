@@ -8623,6 +8623,35 @@ def _windows_runtime_rollback(restart: bool) -> bool:
     return restart and platform_support.host_os() == "windows"
 
 
+def _windows_hook_launcher_setup_refusal(cfg, *, restart: bool) -> str:
+    """Refuse a per-user restart when its installed hook launcher is absent."""
+
+    if (
+        not restart
+        or platform_support.host_os() != "windows"
+        or str(getattr(cfg, "deployment_mode", "") or "").strip().lower() == "managed_enterprise"
+    ):
+        return ""
+    # The per-user gateway registers the installer's stable ~/.local/bin
+    # launcher, even when the gateway executable came from a different PATH.
+    from defenseclaw.gateway import canonical_install_path
+
+    launcher = os.path.join(os.path.dirname(canonical_install_path()), "defenseclaw-hook.exe")
+    try:
+        info = os.stat(launcher)
+        usable = stat.S_ISREG(info.st_mode) and info.st_size > 0
+    except OSError:
+        usable = False
+    if usable:
+        return ""
+    from defenseclaw.hook_integrity import LAUNCHER_REINSTALL_STEP
+
+    return (
+        "The DefenseClaw hook launcher (defenseclaw-hook.exe) is missing or unusable. "
+        f"No changes made; {LAUNCHER_REINSTALL_STEP}."
+    )
+
+
 _SETUP_SELECTION_PROOF_SEAL = object()
 
 
@@ -11733,6 +11762,10 @@ def _apply_hook_connector_setup(
     if connector == "opencode":
         _preflight_opencode_plugin_folder()
 
+    if refusal := _windows_hook_launcher_setup_refusal(app.cfg, restart=restart):
+        ux.echo(f"  ✗ {refusal}", err=True)
+        return False
+
     if refusal := _agent_settings_refusal(
         app.cfg, connector, workspace_dir=_setup_workspace_for_check(app.cfg, workspace_dir), will_restart=restart
     ):
@@ -13347,6 +13380,9 @@ def _apply_setup_batch(
     rather than per connector.
     """
     default_mode = "action" if (mode or "").strip().lower() == "action" else "observe"
+    if refusal := _windows_hook_launcher_setup_refusal(app.cfg, restart=restart):
+        raise click.ClickException(refusal)
+
     setup_snapshot = _prior_snapshot or _capture_setup_config_snapshot(
         app.cfg,
         capture_runtime=_windows_runtime_rollback(restart),
@@ -13667,6 +13703,9 @@ def _dispatch_bare_setup(
         if not targets:
             ux.echo("  Aborted — no connectors selected.")
             return
+
+    if refusal := _windows_hook_launcher_setup_refusal(app.cfg, restart=restart):
+        raise click.ClickException(refusal)
 
     setup_snapshot = _capture_setup_config_snapshot(
         app.cfg,
