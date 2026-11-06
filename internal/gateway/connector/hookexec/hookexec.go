@@ -4133,11 +4133,6 @@ func managedStandaloneFailClosedText(event, layer, reason string) string {
 	case layer == "response":
 		cause, advice = "the DefenseClaw gateway returned an answer DefenseClaw could not use",
 			"Try again; if this continues, contact your administrator."
-	case reason == managedHookInternalErrorReason:
-		// The hook itself stopped on an internal error (HookPanicExit),
-		// before or while it checked the call (GAP-0074).
-		cause, advice = "the DefenseClaw hook stopped on an internal error before it could finish checking it",
-			"Try again; if this continues, contact your administrator."
 	case reason == managedGatewayNotRunningReason:
 		cause, advice = "the DefenseClaw gateway service is not running on this computer",
 			// The service is also stopped while a lifecycle transaction is
