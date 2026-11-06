@@ -2053,7 +2053,7 @@ func isMCPPromptPlaceholder(value string) bool {
 
 func skillProbeFromFields(toolName string, toolInput, payload map[string]interface{}) skillRuntimeProbe {
 	toolName = strings.TrimSpace(toolName)
-	if name, sourcePath, rawName := skillFromMap(payload); name != "" {
+	if name, sourcePath, rawName := assetfacts.SkillSelection(payload); name != "" {
 		return skillRuntimeProbe{
 			SkillName:  name,
 			RawName:    rawName,
@@ -2063,7 +2063,7 @@ func skillProbeFromFields(toolName string, toolInput, payload map[string]interfa
 			Matched:    true,
 		}
 	}
-	if name, sourcePath, rawName := skillFromMap(toolInput); name != "" {
+	if name, sourcePath, rawName := assetfacts.SkillSelection(toolInput); name != "" {
 		return skillRuntimeProbe{
 			SkillName:  name,
 			RawName:    rawName,
@@ -2114,7 +2114,7 @@ func nativeSkillToolProbe(connector, toolName string, toolInput map[string]inter
 	if i := strings.LastIndex(bare, ":"); i >= 0 {
 		bare = bare[i+1:]
 	}
-	name := normalizeSkillRuntimeName(bare)
+	name := assetfacts.SkillRuntimeName(bare)
 	if name == "" {
 		return skillRuntimeProbe{}
 	}
@@ -2122,11 +2122,11 @@ func nativeSkillToolProbe(connector, toolName string, toolInput map[string]inter
 		TargetType: "skill",
 		SkillName:  name,
 		ToolName:   strings.TrimSpace(toolName),
-		RawName:    skillRawNameIfNormalized(raw, name),
+		RawName:    assetfacts.SkillRawNameIfNormalized(raw, name),
 		Surface:    "hook",
 		Matched:    true,
 	}
-	if qualified := normalizeSkillRuntimeName(raw); qualified != "" && !config.SameAssetName(qualified, name) {
+	if qualified := assetfacts.SkillRuntimeName(raw); qualified != "" && !config.SameAssetName(qualified, name) {
 		probe.DeclaredNames = []string{qualified}
 	}
 	return probe
@@ -2171,108 +2171,19 @@ func validNativeSkillSelectionName(name string) bool {
 	return true
 }
 
-// skillFromMap returns (normalizedName, sourcePath, rawName).
-// rawName is the original input string when normalization stripped a
-// path (e.g. "/path/to/foo/SKILL.md" -> "foo"); empty otherwise.
-// Callers propagate this so audit/OTel can show the agent's literal
-// input alongside the registry-matching name.
-func skillFromMap(values map[string]interface{}) (string, string, string) {
-	if values == nil {
-		return "", "", ""
-	}
-	sourcePath := firstMapString(values, "skill_path", "skillPath", "source_path", "sourcePath")
-	rawName := firstMapString(values, "skill_name", "skillName", "skill_key", "skillKey", "skill_id", "skillId")
-	if rawName != "" {
-		normalized := normalizeSkillRuntimeName(rawName)
-		return normalized, sourcePath, skillRawNameIfNormalized(rawName, normalized)
-	}
-	for _, key := range []string{"skill", "skill_info", "skillInfo", "source_skill", "sourceSkill"} {
-		if v, ok := values[key]; ok {
-			if nestedName, nestedPath, nestedRaw := skillFromValue(v); nestedName != "" {
-				if sourcePath == "" {
-					sourcePath = nestedPath
-				}
-				return nestedName, sourcePath, nestedRaw
-			}
-		}
-	}
-	if sourcePath != "" {
-		normalized := normalizeSkillRuntimeName(sourcePath)
-		return normalized, sourcePath, skillRawNameIfNormalized(sourcePath, normalized)
-	}
-	return "", "", ""
-}
-
-func skillFromValue(value interface{}) (string, string, string) {
-	switch v := value.(type) {
-	case string:
-		normalized := normalizeSkillRuntimeName(v)
-		return normalized, pathIfLooksLikePath(v), skillRawNameIfNormalized(v, normalized)
-	case map[string]interface{}:
-		sourcePath := firstMapString(v, "path", "source_path", "sourcePath", "skill_path", "skillPath")
-		raw := firstMapString(v, "name", "key", "id", "skill_name", "skillName", "skill_key", "skillKey", "skill_id", "skillId")
-		if raw == "" && sourcePath != "" {
-			raw = sourcePath
-		}
-		normalized := normalizeSkillRuntimeName(raw)
-		return normalized, sourcePath, skillRawNameIfNormalized(raw, normalized)
-	default:
-		return "", "", ""
-	}
-}
-
-// skillRawNameIfNormalized returns raw only when normalization changed
-// the input (path-stripping, quote-stripping, "@" prefix removal). The
-// caller uses a non-empty rawName to flag "agent supplied a value that
-// did not match the registry verbatim — audit may want to see the raw
-// form to detect allowlist-bypass attempts via crafted skill paths".
-func skillRawNameIfNormalized(raw, normalized string) string {
-	if strings.TrimSpace(raw) == "" {
-		return ""
-	}
-	if raw == normalized {
-		return ""
-	}
-	return raw
-}
-
 func skillFromToolName(toolName string) string {
 	toolName = strings.TrimSpace(toolName)
 	if strings.HasPrefix(toolName, "skill__") {
 		parts := strings.Split(toolName, "__")
 		if len(parts) >= 3 && strings.TrimSpace(parts[1]) != "" {
-			return normalizeSkillRuntimeName(parts[1])
+			return assetfacts.SkillRuntimeName(parts[1])
 		}
 	}
 	if strings.HasPrefix(toolName, "skill:") {
 		parts := strings.SplitN(toolName, ":", 3)
 		if len(parts) >= 2 && strings.TrimSpace(parts[1]) != "" {
-			return normalizeSkillRuntimeName(parts[1])
+			return assetfacts.SkillRuntimeName(parts[1])
 		}
-	}
-	return ""
-}
-
-func normalizeSkillRuntimeName(value string) string {
-	name := strings.Trim(strings.TrimSpace(value), `"'`)
-	if name == "" {
-		return ""
-	}
-	if strings.ContainsAny(name, `/\`) {
-		path := filepath.Clean(name)
-		if strings.EqualFold(filepath.Base(path), "SKILL.md") {
-			path = filepath.Dir(path)
-		}
-		name = filepath.Base(path)
-	}
-	name = strings.TrimPrefix(name, "@")
-	return strings.TrimSpace(name)
-}
-
-func pathIfLooksLikePath(value string) string {
-	value = strings.Trim(strings.TrimSpace(value), `"'`)
-	if strings.ContainsAny(value, `/\`) {
-		return value
 	}
 	return ""
 }
