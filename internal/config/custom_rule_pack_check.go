@@ -10,6 +10,7 @@ import (
 	"io/fs"
 	"maps"
 	"os"
+	"path/filepath"
 	"slices"
 	"strings"
 )
@@ -19,92 +20,228 @@ import (
 // pack also has (guardrail RulePack.FilesDigest). It proves no content.
 const EmptyRulePackFilesDigest = "sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
 
-// CustomRulePackError is the one check of guardrail.custom_packs.<name>
-// that the gateway, the standalone hook, the candidate check and status
-// share: its path is non-empty after trimming and names a readable folder,
-// and its digest does not pin an empty file set. nil for a name that is not
-// a custom_packs key. The gateway still compares the pin with the files it
-// loads; a valid entry is one that can be loaded, not one that matches.
+// RulePackValidator is the rule loader's verdict on one pack folder: the
+// FilesDigest pin ("sha256:...") of the files it loaded and the posture its
+// manifest names, or why the folder is not a loadable pack. The guardrail
+// package registers it (config cannot import it), so the gateway, the
+// standalone hook, the candidate check and status read one verdict made by
+// the loader the gateway itself uses.
+type RulePackValidator func(dir string) (digest, posture string, err error)
+
+var customRulePackValidator RulePackValidator
+
+// RegisterCustomRulePackValidator supplies the rule loader's validator. A
+// binary without it checks an entry's path and pin shape only, and keeps a
+// standalone pinned selection strict (HookPolicyTierForConnector).
+func RegisterCustomRulePackValidator(validate RulePackValidator) {
+	customRulePackValidator = validate
+}
+
+// customRulePackCheck is one guardrail.custom_packs entry as it was checked:
+// the entry and folder that were read, and the verdict. posture is the
+// manifest posture of a pack the loader accepted (validated).
+type customRulePackCheck struct {
+	pack      CustomRulePack
+	dir       string
+	posture   string
+	validated bool
+	err       error
+}
+
+// checkCustomRulePack is the one check of a guardrail.custom_packs entry whose
+// folder is dir (its path resolved against the config directory, or the
+// offline copy a bundle signer reads it from: UseOfflineVendorPolicies). The
+// path is non-empty after trimming and names a readable folder, the pin is
+// not the empty file set's, and, where the rule loader is linked, the folder
+// loads as a valid pack whose files hash to the pin (a missing pin matches
+// nothing). The gateway
+// still compares the pin with the files it loads for a generation.
+func checkCustomRulePack(name string, pack CustomRulePack, dir string) customRulePackCheck {
+	out := customRulePackCheck{pack: pack, dir: dir}
+	key := "guardrail.custom_packs." + name
+	pin := strings.TrimSpace(pack.Digest)
+	switch {
+	case strings.TrimSpace(pack.Path) == "" || dir == "":
+		out.err = fmt.Errorf("%s.path is empty", key)
+		return out
+	case strings.EqualFold(pin, EmptyRulePackFilesDigest):
+		out.err = fmt.Errorf("%s.digest pins an empty file set; pin the digest `defenseclaw-gateway rulepack validate --dir %s` prints", key, dir)
+		return out
+	}
+	folder, err := os.Open(dir)
+	if errors.Is(err, fs.ErrNotExist) {
+		out.err = fmt.Errorf("%s.path %q is not a folder", key, dir)
+		return out
+	} else if err != nil {
+		out.err = fmt.Errorf("%s.path cannot be read: %w", key, err)
+		return out
+	}
+	defer folder.Close()
+	if info, err := folder.Stat(); err != nil {
+		out.err = fmt.Errorf("%s.path cannot be read: %w", key, err)
+		return out
+	} else if !info.IsDir() {
+		out.err = fmt.Errorf("%s.path %q is not a folder", key, dir)
+		return out
+	}
+	if _, err := folder.Readdirnames(1); err != nil && !errors.Is(err, io.EOF) {
+		out.err = fmt.Errorf("%s.path cannot be read: %w", key, err)
+		return out
+	}
+	if customRulePackValidator == nil {
+		return out
+	}
+	digest, posture, err := customRulePackValidator(dir)
+	if err != nil {
+		out.err = fmt.Errorf("%s.path %q is not a valid rule pack: %w", key, dir, err)
+		return out
+	}
+	if !strings.EqualFold(pin, digest) {
+		out.err = fmt.Errorf("the files in %q hash to %s, which does not match %s.digest; review the pack, then pin that digest "+
+			"(`defenseclaw config set %s.digest %s` on a per-user install; `defenseclaw-gateway rulepack validate --dir %s` "+
+			"prints it on the \"custom_packs pin\" line)", dir, digest, key, key, digest, dir)
+		return out
+	}
+	out.validated, out.posture = true, posture
+	return out
+}
+
+// customPackPathIn is the folder a custom_packs path names: an absolute path
+// as written, a relative one against base, the directory of the config file
+// that declares it (never the process working directory).
+func customPackPathIn(base string, pack CustomRulePack) string {
+	path := strings.TrimSpace(pack.Path)
+	if path == "" || base == "" || filepath.IsAbs(path) {
+		return path
+	}
+	return filepath.Join(base, path)
+}
+
+// CustomRulePackPath is the folder custom_packs entry name loads from, ""
+// when it is not an entry.
+func (g *GuardrailConfig) CustomRulePackPath(name string) string {
+	if g == nil {
+		return ""
+	}
+	pack, ok := g.CustomPacks[name]
+	if !ok {
+		return ""
+	}
+	return customPackPathIn(g.customPackBase, pack)
+}
+
+// customRulePackCheck is the check of entry name. A configuration the loader
+// built answers from what it checked then, so every reader, and every copy of
+// the configuration, sees one verdict for the life of the load; an entry the
+// loader did not see as it is now (a configuration it did not build, an entry
+// added or edited since, a folder moved by offline) is checked now. offline
+// maps the folder to the one actually read (nil: as resolved); base is the
+// directory its relative path resolves against.
+func (g *GuardrailConfig) customRulePackCheck(name, base string, offline func(string) string) (customRulePackCheck, bool) {
+	if g == nil {
+		return customRulePackCheck{}, false
+	}
+	pack, ok := g.CustomPacks[name]
+	if !ok {
+		return customRulePackCheck{}, false
+	}
+	dir := customPackPathIn(base, pack)
+	if offline != nil {
+		dir = offline(dir)
+	}
+	if checked, ok := g.customRulePackChecks[name]; ok && checked.pack == pack && checked.dir == dir {
+		return checked, true
+	}
+	return checkCustomRulePack(name, pack, dir), true
+}
+
+// CustomRulePackError is the config error of custom_packs entry name, nil for
+// a usable entry and for a name that is not an entry. It is the verdict of
+// the configuration the entry was loaded with; Config.CustomRulePackError is
+// the same verdict where the Secure Client integration keeps its loader's own
+// refusals.
 func (g *GuardrailConfig) CustomRulePackError(name string) error {
 	if g == nil {
 		return nil
 	}
-	pack, ok := g.CustomPacks[name]
-	if !ok {
-		return nil
-	}
-	return checkCustomRulePack(name, pack, strings.TrimSpace(pack.Path))
+	checked, _ := g.customRulePackCheck(name, g.customPackBase, nil)
+	return checked.err
 }
 
-// checkCustomRulePack is CustomRulePackError of one entry whose folder is
-// dir: its configured path, or the offline copy a bundle signer reads it from
-// (UseOfflineVendorPolicies).
-func checkCustomRulePack(name string, pack CustomRulePack, dir string) error {
-	key := "guardrail.custom_packs." + name
-	if strings.TrimSpace(pack.Path) == "" || dir == "" {
-		return fmt.Errorf("%s.path is empty", key)
+// BuiltinRulePackFor is Config.BuiltinRulePackFor for a caller that holds
+// only the guardrail block.
+func (g *GuardrailConfig) BuiltinRulePackFor(name string) string {
+	if g == nil {
+		return ""
 	}
-	if strings.EqualFold(strings.TrimSpace(pack.Digest), EmptyRulePackFilesDigest) {
-		return fmt.Errorf("%s.digest pins an empty file set; pin the digest `defenseclaw-gateway rulepack validate --dir %s` prints", key, dir)
-	}
-	folder, err := os.Open(dir)
-	if errors.Is(err, fs.ErrNotExist) {
-		return fmt.Errorf("%s.path %q is not a folder", key, dir)
-	} else if err != nil {
-		return fmt.Errorf("%s.path cannot be read: %w", key, err)
-	}
-	defer folder.Close()
-	if info, err := folder.Stat(); err != nil {
-		return fmt.Errorf("%s.path cannot be read: %w", key, err)
-	} else if !info.IsDir() {
-		return fmt.Errorf("%s.path %q is not a folder", key, dir)
-	}
-	if _, err := folder.Readdirnames(1); err != nil && !errors.Is(err, io.EOF) {
-		return fmt.Errorf("%s.path cannot be read: %w", key, err)
-	}
-	return nil
+	_, registered := g.CustomPacks[name]
+	return builtinRulePackFallback(name, registered, g.CustomRulePackError(name) != nil)
 }
 
-// customRulePackCheck is one entry as the loader checked it.
-type customRulePackCheck struct {
-	pack CustomRulePack
-	dir  string
-	err  error
+// builtinRulePackFallback is the built-in pack a selected name loads when no
+// usable custom pack takes it: the name itself when built in (a broken custom
+// pack never shadows a built-in one), the default pack for a broken entry of
+// any other name, "" for a usable custom pack or an unknown name.
+func builtinRulePackFallback(name string, registered, broken bool) string {
+	switch {
+	case name == "" || (registered && !broken):
+		return ""
+	case IsBuiltinRulePack(name):
+		return name
+	case registered:
+		return "default"
+	}
+	return ""
 }
 
-// checkCustomRulePacks records every custom_packs entry's CustomRulePackError
-// once, when the config is loaded, so each reader of this configuration sees
-// the same entries as usable for its whole life.
-func (c *Config) checkCustomRulePacks() {
-	c.customRulePackChecks = make(map[string]customRulePackCheck, len(c.Guardrail.CustomPacks))
-	for name, pack := range c.Guardrail.CustomPacks {
-		dir := c.customRulePackDir(pack)
-		c.customRulePackChecks[name] = customRulePackCheck{pack: pack, dir: dir, err: checkCustomRulePack(name, pack, dir)}
+// CheckCustomRulePacks records every custom_packs entry's check once, with the
+// config directory its relative paths resolve against. The loader runs it as
+// the configuration is read, so each reader, and each copy of the
+// configuration (DeepCopy), sees one verdict for the life of the load; a
+// configuration built in code runs it to the same end. An entry that was not
+// recorded, or that has since been edited, is checked again at each read.
+func (c *Config) CheckCustomRulePacks() {
+	g := &c.Guardrail
+	g.customPackBase = ""
+	if strings.TrimSpace(c.ConfigFilePath) != "" {
+		g.customPackBase = filepath.Dir(c.ConfigFilePath)
+	}
+	g.customRulePackChecks = make(map[string]customRulePackCheck, len(g.CustomPacks))
+	for name, pack := range g.CustomPacks {
+		g.customRulePackChecks[name] = checkCustomRulePack(name, pack, c.customRulePackDir(pack))
 	}
 }
 
 // customRulePackDir is the folder pack loads from (ResolveRulePackDir).
 func (c *Config) customRulePackDir(pack CustomRulePack) string {
-	return c.offlineVendorPath(strings.TrimSpace(pack.Path))
+	return c.offlineVendorPath(customPackPathIn(c.customPackBase(), pack))
 }
 
-// CustomRulePackError is the config-load CustomRulePackError of name; an
-// entry the loader did not see as it is now (a configuration it did not
-// build, an entry added or edited since) is checked now. Secure Client keeps
-// its loader's own refusals: nil there.
+// customPackBase is the directory relative custom_packs paths resolve
+// against: the one recorded at load, else this configuration's file.
+func (c *Config) customPackBase() string {
+	if c.Guardrail.customPackBase != "" || strings.TrimSpace(c.ConfigFilePath) == "" {
+		return c.Guardrail.customPackBase
+	}
+	return filepath.Dir(c.ConfigFilePath)
+}
+
+// customRulePackCheck is the check of entry name, whatever the integration.
+func (c *Config) customRulePackCheck(name string) (customRulePackCheck, bool) {
+	if c == nil {
+		return customRulePackCheck{}, false
+	}
+	return c.Guardrail.customRulePackCheck(name, c.customPackBase(), c.offlineVendorPath)
+}
+
+// CustomRulePackError is the config-load CustomRulePackError of name. Secure
+// Client keeps its loader's own refusals: nil there.
 func (c *Config) CustomRulePackError(name string) error {
 	if c == nil || c.SecureClientIntegration() {
 		return nil
 	}
-	pack, ok := c.Guardrail.CustomPacks[name]
-	if !ok {
-		return nil
-	}
-	dir := c.customRulePackDir(pack)
-	if checked, ok := c.customRulePackChecks[name]; ok && checked.pack == pack && checked.dir == dir {
-		return checked.err
-	}
-	return checkCustomRulePack(name, pack, dir)
+	checked, _ := c.customRulePackCheck(name)
+	return checked.err
 }
 
 // CustomRulePackErrors lists the config error of every broken custom_packs
@@ -137,23 +274,13 @@ func (c *Config) UsableCustomRulePack(name string) (CustomRulePack, bool) {
 }
 
 // BuiltinRulePackFor is the built-in pack a selected name loads when no
-// usable custom pack takes it: the name itself when built in (a broken
-// custom pack never shadows a built-in one), the default pack for a broken
-// entry of any other name, "" for a usable custom pack or an unknown name.
+// usable custom pack takes it (builtinRulePackFallback).
 func (c *Config) BuiltinRulePackFor(name string) string {
-	if c == nil || name == "" {
+	if c == nil {
 		return ""
 	}
-	if _, usable := c.UsableCustomRulePack(name); usable {
-		return ""
-	}
-	if IsBuiltinRulePack(name) {
-		return name
-	}
-	if _, registered := c.Guardrail.CustomPacks[name]; registered {
-		return "default"
-	}
-	return ""
+	_, registered := c.Guardrail.CustomPacks[name]
+	return builtinRulePackFallback(name, registered, c.CustomRulePackError(name) != nil)
 }
 
 // brokenCustomRulePackSelected reports that ref selects a custom_packs entry

@@ -87,6 +87,8 @@ Doctor validates the pack every connector uses. It shows `FAIL` for an invalid p
 
 The pinned digest also covers the optional `defenseclaw-pack.json` posture file. Adding or editing that file changes the digest, so validate the pack again and pin the new digest, as for a rule file ([Thresholds](/docs/policies/thresholds#rule-pack-default-posture), [custom rule packs](/docs/enterprise/configuration#custom-rule-packs)).
 
+A `guardrail.custom_packs` entry is checked once, when the configuration is read, and every reader (the gateway, the hooks, `defenseclaw status` and `defenseclaw doctor`) uses that one result. An entry is a config error when its path is empty, is not a readable folder, or loads no valid pack, or when its `digest` is missing or does not match the pack's files digest (a pack with no files has no usable digest). A relative `path` is read against the folder that holds `config.yaml`, not the current directory, and `~` is not expanded. While an entry has a config error, a setting that selects it runs the built-in pack of that name (`default` for any other name), `status` and `doctor` name the error, and the hook's outage behaviour follows the strict tier, so it does not open. Fix the entry, then reload.
+
 DefenseClaw ships three rule packs: `permissive`, `default` and `strict`. A pack changes which rules run and the default block and alert levels.
 
 | Pack | Blocks | Alerts | Pick it when |

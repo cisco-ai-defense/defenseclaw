@@ -58,7 +58,7 @@ func TestGAP0632BrokenCustomPackFallsBackToBuiltinPack(t *testing.T) {
 					}
 					cfg.Guardrail.RulePack = name
 					cfg.Guardrail.CustomPacks = map[string]CustomRulePack{name: entry}
-					cfg.checkCustomRulePacks()
+					cfg.CheckCustomRulePacks()
 					problem := cfg.CustomRulePackError(name)
 					if problem == nil || !strings.Contains(problem.Error(), "guardrail.custom_packs."+name) {
 						t.Fatalf("config error = %v", problem)
@@ -98,7 +98,7 @@ func TestGAP0632BrokenCustomPackFallsBackToBuiltinPack(t *testing.T) {
 		cfg := &Config{PolicyDir: policyDir, DeploymentMode: managed.DeploymentModeManagedEnterprise}
 		cfg.Guardrail.RulePack = "strict"
 		cfg.Guardrail.CustomPacks = map[string]CustomRulePack{"strict": {Path: file, Digest: pin}}
-		cfg.checkCustomRulePacks()
+		cfg.CheckCustomRulePacks()
 		if !cfg.SecureClientIntegration() || cfg.CustomRulePackError("strict") != nil {
 			t.Fatal("Secure Client entry judged by the shared check")
 		}
@@ -112,7 +112,7 @@ func TestGAP0632BrokenCustomPackFallsBackToBuiltinPack(t *testing.T) {
 			cfg := &Config{PolicyDir: policyDir}
 			cfg.Guardrail.RulePack = name
 			cfg.Guardrail.CustomPacks = map[string]CustomRulePack{name: {Path: pack + "/", Digest: pin}}
-			cfg.checkCustomRulePacks()
+			cfg.CheckCustomRulePacks()
 			if err := cfg.CustomRulePackError(name); err != nil || len(cfg.CustomRulePackErrors()) != 0 {
 				t.Fatalf("%s: usable entry error = %v", name, err)
 			}
@@ -133,7 +133,7 @@ func TestGAP0632BrokenCustomPackFallsBackToBuiltinPack(t *testing.T) {
 		cfg := &Config{PolicyDir: policyDir}
 		cfg.Guardrail.RulePack = "operator"
 		cfg.Guardrail.CustomPacks = map[string]CustomRulePack{"operator": {Path: moving, Digest: pin}}
-		cfg.checkCustomRulePacks()
+		cfg.CheckCustomRulePacks()
 		if err := os.Remove(moving); err != nil {
 			t.Fatal(err)
 		}

@@ -300,9 +300,6 @@ type Config struct {
 	// guardrail.rule_pack_dir, so the standalone implicit rule pack default
 	// never rewrites an explicit value. Set only by the loader.
 	rulePackDirDeclared bool
-	// customRulePackChecks is each guardrail.custom_packs entry with its
-	// CustomRulePackError, recorded once by the loader.
-	customRulePackChecks map[string]customRulePackCheck
 	// openShellPackDirDeclared records that the config source sets
 	// openshell.pack_dir, which the standalone sandbox packs default never
 	// rewrites; legacyOpenShellPackDir is the pre-1.0.2 default folder a
@@ -1987,6 +1984,13 @@ type GuardrailConfig struct {
 	// derived configuration ("" when it inherits). ProfileModeForConnector
 	// reads it. Unexported like profileConnectors.
 	profileMode string
+	// customPackBase is the directory of the config file that declares
+	// custom_packs: the base of a relative custom_packs path. customRulePackChecks
+	// is each custom_packs entry as the loader checked it, once. Both are
+	// recorded by the loader and carried by every copy of the configuration
+	// (DeepCopy), so one load has one verdict for every reader.
+	customPackBase       string
+	customRulePackChecks map[string]customRulePackCheck
 }
 
 // PerConnectorGuardrailConfig carries the subset of guardrail policy
@@ -3179,7 +3183,7 @@ func loadConfigSourceCheckedWithLayout(
 	cfg.ConfigFilePath = configFile
 	cfg.offlineInspection = inspection
 	cfg.rulePackDirDeclared = viper.InConfig("guardrail.rule_pack_dir")
-	cfg.checkCustomRulePacks()
+	cfg.CheckCustomRulePacks()
 	cfg.openShellPackDirDeclared = viper.InConfig("openshell.pack_dir")
 	cfg.legacyConnectorRouteSelectors = legacyConnectorRouteSelectorPaths(viper.Get("observability.destinations"))
 	// Move retired connector IDs to their replacement before any connector

@@ -65,16 +65,6 @@ func (c *Config) EffectiveHookOutageFailModeForConnector(connector string) strin
 	return HookOutageFailMode(false, c.configuredHookFailModeForConnector(connector), c.HookPolicyTierForConnector(connector))
 }
 
-// pinnedRulePackPostureCheck is installed by the rule loader when linked.
-var pinnedRulePackPostureCheck func(dir, pin string) (string, bool)
-
-// RegisterPinnedRulePackPostureCheck supplies the rule loader's validity and
-// posture for a selected digest-pinned custom pack. A binary without the
-// loader keeps such a standalone selection closed.
-func RegisterPinnedRulePackPostureCheck(check func(dir, pin string) (string, bool)) {
-	pinnedRulePackPostureCheck = check
-}
-
 // HookPolicyTierForConnector is the policy tier of connector's guardrail rule
 // pack, as the gateway reads its posture (internal/gateway packPosture): the
 // generation's pinned manifest posture, else the legacy folder-name table.
@@ -103,21 +93,21 @@ func (c *Config) HookPolicyTierForConnector(connector string) string {
 		}
 		return packFolderPosture(dir)
 	}
-	if custom, selected := c.UsableCustomRulePack(ref.Name); selected && strings.TrimSpace(custom.Digest) != "" {
-		// A standalone hook has no rule generation. Require both a valid
-		// loaded pack and its selected content pin before its posture can
-		// set an outage tier.
-		if pinnedRulePackPostureCheck == nil {
+	if custom, selected := c.UsableCustomRulePack(ref.Name); selected {
+		// A standalone hook has no rule generation. Its posture comes from
+		// the one config-load verdict: a pack the rule loader accepted whose
+		// files hash to the selected pin. A binary without the loader cannot
+		// prove a pinned pack, so its posture never sets an outage tier.
+		checked, _ := c.customRulePackCheck(ref.Name)
+		if checked.validated {
+			if checked.posture != "" {
+				return checked.posture
+			}
+			return packFolderPosture(dir)
+		}
+		if strings.TrimSpace(custom.Digest) != "" {
 			return HookPolicyTierStrict
 		}
-		posture, valid := pinnedRulePackPostureCheck(dir, custom.Digest)
-		if !valid {
-			return HookPolicyTierStrict
-		}
-		if posture != "" {
-			return posture
-		}
-		return packFolderPosture(dir)
 	}
 	if posture := packManifestPosture(dir); posture != "" {
 		return posture

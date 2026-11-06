@@ -762,6 +762,9 @@ func (c *Config) DeepCopy() (*Config, error) {
 	out.offlineInspection = c.offlineInspection
 	out.openClawNotInstalled = c.openClawNotInstalled
 	out.offlineVendorPolicyDir, out.offlineVendorPolicyRoot = c.offlineVendorPolicyDir, c.offlineVendorPolicyRoot
+	// The custom_packs verdict the loader recorded belongs to the load, not to
+	// the copy: a copy never re-reads a folder that has changed since.
+	out.Guardrail.customPackBase, out.Guardrail.customRulePackChecks = c.Guardrail.customPackBase, maps.Clone(c.Guardrail.customRulePackChecks)
 	aid := c.CiscoAIDefense
 	out.CiscoAIDefense.protectedCredentialRequired = aid.protectedCredentialRequired
 	out.CiscoAIDefense.protectedCredential, out.CiscoAIDefense.protectedSecretsDir = aid.protectedCredential, aid.protectedSecretsDir

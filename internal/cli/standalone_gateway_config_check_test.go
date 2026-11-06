@@ -308,12 +308,20 @@ func TestStandaloneGatewayConfigCheckGrantsOnAnExistingFolder(t *testing.T) {
 // GAP-0039: a connector that inherits the selected custom pack is not the key
 // a refusal names, and a custom_packs entry nothing selects is not loaded.
 func TestStandaloneGatewayRulePackDirsNameTheKeysTheAdminWrote(t *testing.T) {
-	// A selected entry must be a readable folder (config.CustomRulePackError).
+	// A selected entry must be a valid pack its pin matches (config.CustomRulePackError).
 	acme, unused := t.TempDir(), t.TempDir()
+	suppressions := "version: 1\npre_judge_strips: []\nfinding_suppressions: []\ntool_suppressions: []\n"
+	if err := os.WriteFile(filepath.Join(acme, "suppressions.yaml"), []byte(suppressions), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	pin, err := guardrail.RulePackDigest(acme)
+	if err != nil {
+		t.Fatal(err)
+	}
 	cfg := &config.Config{}
 	cfg.Guardrail.RulePack = "acme"
 	cfg.Guardrail.CustomPacks = map[string]config.CustomRulePack{
-		"acme":   {Path: acme},
+		"acme":   {Path: acme, Digest: "sha256:" + pin},
 		"unused": {Path: unused},
 	}
 	cfg.Guardrail.Connectors = map[string]config.PerConnectorGuardrailConfig{"amp": {}, "codex": {}}

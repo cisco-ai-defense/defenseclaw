@@ -1622,17 +1622,21 @@ func safeJudgeName(name string) string {
 	return "component"
 }
 
-func init() { config.RegisterPinnedRulePackPostureCheck(pinnedRulePackPosture) }
+func init() { config.RegisterCustomRulePackValidator(validateCustomRulePack) }
 
-// pinnedRulePackPosture uses the same loader, validation, and digest that the
-// gateway uses for a selected pack. Standalone hooks can then trust the
-// posture of a pinned pack without maintaining another parser.
-func pinnedRulePackPosture(dir, pin string) (string, bool) {
+// validateCustomRulePack is the config-load verdict on a guardrail.custom_packs
+// folder, made with the loader and validation the gateway uses for a
+// generation: the digest of the files it loaded and the posture its manifest
+// names. config compares the digest with the entry's pin.
+func validateCustomRulePack(dir string) (digest, posture string, err error) {
 	pack, err := LoadRulePack(dir)
-	if err != nil || !strings.EqualFold(strings.TrimSpace(pin), "sha256:"+pack.FilesDigest()) {
-		return "", false
+	if err != nil {
+		return "", "", err
 	}
-	return pack.Posture(), true
+	if err := validateRulePack(pack); err != nil {
+		return "", "", err
+	}
+	return "sha256:" + pack.FilesDigest(), pack.Posture(), nil
 }
 
 // RulePackDigest is the FilesDigest of the valid pack in dir, the value
