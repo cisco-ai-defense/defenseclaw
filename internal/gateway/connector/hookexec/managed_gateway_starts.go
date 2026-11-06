@@ -20,6 +20,7 @@ import (
 	"net/http/httptrace"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"syscall"
 	"time"
 )
@@ -270,7 +271,8 @@ var managedGatewayServiceWatchInterval = 250 * time.Millisecond
 
 // watchManagedGatewayService returns ctx, ended with errGatewayRestarting
 // once the managed Windows gateway service is read as not running at or
-// after deadline (the restart budget) while the call waits for its answer.
+// after deadline (the restart budget) while the call, connected to the
+// gateway, waits for its answer.
 // The first call into a stop connected to the running gateway before Setup
 // or an administrator stopped it; the stopping gateway took the call and
 // never answered it, so the call waited for the process cap (4 s) on every
@@ -280,9 +282,14 @@ var managedGatewayServiceWatchInterval = 250 * time.Millisecond
 // budget too; errGatewayRestarting is closed in every fail mode. A running
 // gateway (a busy one, one that waits on a scanner) keeps the call's whole
 // answer budget, and a state that cannot be read in time proves nothing.
-// stop ends the watch (call it once the response arrives); release frees
-// ctx.
+// A call no gateway took (its dials were refused) is not ended: its retries
+// end at the restart budget on their own, and then it may start the
+// installer-owned gateway, which a stopped service reads as not running
+// until it runs (GAP-0648 review F3). stop ends the watch (call it once the
+// response arrives); release frees ctx.
 func watchManagedGatewayService(ctx context.Context, running func() (bool, bool), deadline time.Time, interval time.Duration) (watched context.Context, stop, release func()) {
+	var connected atomic.Bool
+	ctx = httptrace.WithClientTrace(ctx, &httptrace.ClientTrace{GotConn: func(httptrace.GotConnInfo) { connected.Store(true) }})
 	watched, cancel := context.WithCancelCause(ctx)
 	// Read once: the watch outlives the call by a moment after release.
 	wait := managedGatewayServiceStateWait
@@ -307,6 +314,10 @@ func watchManagedGatewayService(ctx context.Context, running func() (bool, bool)
 			case <-done:
 				return
 			case <-timer.C:
+			}
+			if !connected.Load() {
+				timer.Reset(interval)
+				continue
 			}
 			if up, known := serviceRunningWithin(running, wait); known && !up {
 				mu.Lock()

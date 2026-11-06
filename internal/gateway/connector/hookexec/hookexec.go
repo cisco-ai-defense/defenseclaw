@@ -1103,6 +1103,10 @@ func doRequest(ctx context.Context, opts Options, sp spec, failMode string, payl
 	// A managed Windows hook starts the installer-owned gateway after the
 	// restart budget; a per-user hook started its own gateway above.
 	if err != nil && opts.ManagedEnterprise && opts.GatewayRecovery != nil && connectionRefused(err) {
+		// The service watch is for a call a stopping gateway took: this one
+		// reached none, and the start reads the service as stopped until it
+		// runs (GAP-0648 review F3). The answer deadline still bounds it.
+		stopWatch()
 		if recoveryErr := opts.GatewayRecovery(ctx, err); recoveryErr == nil && ctx.Err() == nil {
 			// The initial request proved no listener was present. Recovery verifies
 			// and starts the exact installer-owned gateway, including authenticated
