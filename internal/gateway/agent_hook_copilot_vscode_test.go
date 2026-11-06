@@ -24,12 +24,16 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
+	"slices"
 	"strconv"
 	"strings"
 	"testing"
 
 	"github.com/defenseclaw/defenseclaw/internal/config"
 	"github.com/defenseclaw/defenseclaw/internal/gateway/connector"
+	"github.com/defenseclaw/defenseclaw/internal/hookpaths"
 )
 
 // TestCopilotVSCodeLocalHookDialect drives the VS Code Local harness
@@ -219,6 +223,98 @@ func TestGAP0691PerUserCopilotCLIRegistrationJudgesLocalToolCalls(t *testing.T) 
 	if body := post("create_file", map[string]any{"filePath": "/etc/shadow", "content": "example"}); !strings.Contains(body, `"action":"block"`) || strings.Contains(body, hookToolCallUnparsedRuleID) ||
 		!strings.Contains(body, `"PATH-ETC-SHADOW"`) {
 		t.Fatalf("protected file call: %s", body)
+	}
+}
+
+func TestGAP0691SharedLocalFileTargetsAndEnvelope(t *testing.T) {
+	installSandboxMarkerRules(t)
+	store, logger := testStoreAndLogger(t)
+	project := t.TempDir()
+	ordinary := filepath.Join(project, "notes.txt")
+	if err := os.WriteFile(ordinary, []byte("notes"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	linked := filepath.Join(project, "linked.txt")
+	if err := os.Symlink("/etc/shadow", linked); err != nil {
+		t.Fatal(err)
+	}
+	ordinaryLink := filepath.Join(project, "ordinary-link.txt")
+	if err := os.Symlink(ordinary, ordinaryLink); err != nil {
+		t.Fatal(err)
+	}
+	type call struct {
+		name, tool string
+		input      any
+		cliEvent   bool
+		protected  bool
+	}
+	calls := []call{
+		{"ordinary create", "create_file", map[string]any{"filePath": ordinary, "content": "notes"}, false, false},
+		{"ordinary read", "read_file", map[string]any{"filePath": ordinary}, false, false},
+		{"ordinary linked create", "create_file", map[string]any{"filePath": ordinaryLink, "content": "notes"}, false, false},
+		{"ordinary linked read", "read_file", map[string]any{"filePath": ordinaryLink}, false, false},
+		{"direct read", "read_file", map[string]any{"filePath": "/etc/shadow"}, false, true},
+		{"linked create", "create_file", map[string]any{"filePath": linked, "content": "notes"}, false, true},
+		{"linked replace", "replace_string_in_file", map[string]any{"filePath": linked, "oldString": "a", "newString": "b"}, false, true},
+		{"linked insert", "insert_edit_into_file", map[string]any{"filePath": linked, "code": "b"}, false, true},
+		{"linked read", "read_file", map[string]any{"filePath": linked}, false, true},
+		{"linked CLI write", "Write", map[string]any{"path": linked, "file_text": "notes"}, false, true},
+		{"mixed event field", "run_in_terminal", map[string]any{"command": "echo hello"}, true, true},
+	}
+	for _, tier := range []string{"implicit", "default", "permissive", "strict"} {
+		t.Run(tier, func(t *testing.T) {
+			cfg := &config.Config{}
+			cfg.Guardrail.Mode = "action"
+			cfg.Guardrail.Connector = "copilot"
+			if tier != "implicit" {
+				cfg.Guardrail.RulePack = tier
+			}
+			api := &APIServer{scannerCfg: cfg, store: store, logger: logger}
+			for index, tc := range calls {
+				t.Run(tc.name, func(t *testing.T) {
+					id := tier + "-" + strconv.Itoa(index)
+					body := map[string]any{
+						"hook_event_name": "PreToolUse", "session_id": id,
+						"tool_use_id": id, "cwd": project,
+						"tool_name": tc.tool, "tool_input": tc.input,
+					}
+					if tc.cliEvent {
+						body["hookName"] = "preToolUse"
+					}
+					raw, err := json.Marshal(body)
+					if err != nil {
+						t.Fatal(err)
+					}
+					evidence := hookpaths.ResolveConnector("copilot", "", "preToolUse", raw)
+					req := httptest.NewRequest(http.MethodPost, "/api/v1/copilot/hook", strings.NewReader(string(raw)))
+					req.Header.Set("Content-Type", "application/json")
+					req.Header.Set("X-DefenseClaw-Copilot-Event", "preToolUse")
+					req.Header.Set(hookpaths.Header, evidence)
+					w := httptest.NewRecorder()
+					api.handleAgentHook("copilot").ServeHTTP(w, req)
+					var answer struct {
+						Action  string   `json:"action"`
+						RuleIDs []string `json:"rule_ids"`
+					}
+					if err := json.Unmarshal(w.Body.Bytes(), &answer); err != nil || w.Code != http.StatusOK {
+						t.Fatalf("status=%d err=%v body=%s", w.Code, err, w.Body.String())
+					}
+					want := "allow"
+					if tc.protected || tier == "strict" {
+						want = "block"
+					}
+					if answer.Action != want {
+						t.Fatalf("action=%s, want %s; rules=%v", answer.Action, want, answer.RuleIDs)
+					}
+					if tc.protected && !tc.cliEvent && tier != "strict" && !slices.Contains(answer.RuleIDs, "PATH-ETC-SHADOW") {
+						t.Fatalf("protected file rule absent: %v", answer.RuleIDs)
+					}
+					if tc.cliEvent && !slices.Contains(answer.RuleIDs, hookToolCallUnparsedRuleID) {
+						t.Fatalf("mixed body was not refused: %v", answer.RuleIDs)
+					}
+				})
+			}
+		})
 	}
 }
 

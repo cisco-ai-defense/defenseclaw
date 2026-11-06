@@ -172,6 +172,10 @@ type trustedActionRequest struct {
 	DowngradeReadOnlyDataArgs bool
 	// A sandbox action may execute in a filesystem the gateway cannot see.
 	SkipLocalFilesystemResolution bool
+	// CopilotSharedLocalFile marks an exact file call decoded from a Local
+	// body in the per-user CLI document. Its link target and direct protected
+	// read have the same file-action authority as its lexical path.
+	CopilotSharedLocalFile bool
 	// ProtectedHomeHook is set only from a kernel-verified managed hook peer.
 	// Its gateway cannot inspect the caller's home when ProtectHome is active.
 	ProtectedHomeHook bool
@@ -408,6 +412,7 @@ func dispatchTrustedAction(
 		facts = actionfacts.Analyze(request.Input)
 		analyzed = true
 	}
+	facts = copilotSharedLocalFileFacts(facts, request)
 	// Only the Git hook rule uses the hook client's bounded directory. Parse
 	// that view when the action already names a possible active hook mutation;
 	// a text mention or an inactive .sample path needs no second reading.
@@ -943,6 +948,7 @@ func dispatchTrustedActionWith(
 		request.Input.Tool,
 		options,
 	)
+	scanned = append(scanned, copilotSharedLocalPathFindings(generation, request, facts, options)...)
 	fallbackLanes := func(
 		legacyFindings []RuleFinding,
 		facts actionfacts.Facts,
@@ -6349,7 +6355,7 @@ func finalizeTrustedActionFindings(
 	findings []RuleFinding,
 ) []RuleFinding {
 	findings = deduplicateTrustedActionFindings(findings)
-	findings = applyTrustedActionContextDisposition(generation, facts, findings)
+	findings = applyTrustedActionContextDisposition(generation, facts, findings, request.CopilotSharedLocalFile && request.Input.Tool == "read_file")
 	return applyTrustedActionProofBoundary(findings, request.EnforcementCapable)
 }
 
