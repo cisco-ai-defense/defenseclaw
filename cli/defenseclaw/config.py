@@ -589,35 +589,22 @@ def gateway_home_for_data_dir(data_dir: str | os.PathLike[str]) -> str:
     config write create a second config.yaml there, without the account ports
     (rel-1-0-6 GAP-0232), and setup read the default API port and found no
     gateway.pid, so it rolled the connector back while the gateway served
-    (GAP-0230). The Go hook runtime had the same gap (GAP-0224). A data_dir
-    holding any config.yaml entry stays its own home without an explicit
-    config path, so the default layout and a managed install are unchanged.
-    An explicit per-user config path can be outside the install home; its PID
-    record remains under ``DEFENSECLAW_HOME`` (or the default home), not next
-    to that config file. A managed config keeps its runtime PID home.
+    (GAP-0230). The Go hook runtime had the same gap (GAP-0224). The active
+    config's data_dir binding selects the PID-record home even if a moved
+    store still has an older config.yaml. An explicit per-user config path can
+    be outside the install home; its PID record remains under
+    ``DEFENSECLAW_HOME`` (or the default home). Unrelated stores and managed
+    runtimes keep their own PID home.
     """
     own = os.fspath(data_dir)
-    if os.environ.get(CONFIG_PATH_ENV):
-        try:
-            home = os.fspath(default_data_path())
-        except (OSError, KeyError, NotImplementedError):
-            return own
-        configured, managed = _home_config_binding(os.fspath(config_path()))
-        if managed or _is_managed_enterprise_mode(os.environ.get(DEPLOYMENT_MODE_ENV)):
-            return own
-        return home if configured and _same_folder(configured, own) else own
-    try:
-        os.lstat(os.path.join(own, CONFIG_FILE_NAME))
-        return own
-    except FileNotFoundError:
-        pass
-    except OSError:
-        return own
     try:
         home = os.fspath(default_data_path())
     except (OSError, KeyError, NotImplementedError):
         return own
-    configured, _ = _home_config_binding(os.path.join(home, CONFIG_FILE_NAME))
+    active_config = os.environ.get(CONFIG_PATH_ENV) or os.path.join(home, CONFIG_FILE_NAME)
+    configured, managed = _home_config_binding(active_config)
+    if managed or _is_managed_enterprise_mode(os.environ.get(DEPLOYMENT_MODE_ENV)):
+        return own
     if configured and _same_folder(configured, own):
         return home
     return own

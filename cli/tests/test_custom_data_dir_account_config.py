@@ -53,6 +53,16 @@ def test_a_custom_data_dir_reads_and_writes_the_account_config(tmp_path, monkeyp
     assert config_module.load(data_dir=str(data)).gateway.api_port == API_PORT
 
 
+def test_leftover_store_config_does_not_replace_active_home_config(tmp_path, monkeypatch) -> None:
+    home, data = _account(tmp_path, monkeypatch)
+    (data / "config.yaml").write_text("config_version: 9\ndata_dir: /unrelated/store\n")
+
+    assert config_module.load().gateway.api_port == API_PORT
+    assert config_module.config_path_for_data_dir(data) == home / "config.yaml"
+    assert config_module.gateway_pid_path(data) == str(home / "gateway.pid")
+    assert config_module.load(data_dir=data).gateway.api_port == API_PORT
+
+
 def test_default_and_unrelated_data_dirs_keep_their_own_config(tmp_path, monkeypatch) -> None:
     home, _ = _account(tmp_path, monkeypatch)
     other = tmp_path / "other"
