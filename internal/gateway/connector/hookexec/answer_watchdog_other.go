@@ -36,6 +36,12 @@ func (w *answerDeadlineWaiter) extendTo(t time.Time) {
 	}
 }
 
+// passed reports a deadline that is set and has come.
+func (w *answerDeadlineWaiter) passed() bool {
+	deadline := w.current()
+	return !deadline.IsZero() && !time.Now().Before(deadline)
+}
+
 func (w *answerDeadlineWaiter) current() time.Time {
 	w.mu.Lock()
 	defer w.mu.Unlock()

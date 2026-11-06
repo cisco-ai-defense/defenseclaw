@@ -119,6 +119,30 @@ type answerWatchdog struct {
 	failureLog     *preparedFailureLog
 	failureLogHome func() string
 	prepareLead    time.Duration
+
+	// closeLateAnswer is set for a managed call outside Secure Client: once
+	// its deadline has passed, the agent gets the watchdog's answer, never a
+	// verdict that came late (lateAnswerDue). watchDone is closed when watch
+	// returns.
+	closeLateAnswer bool
+	watchDone       chan struct{}
+	watchDoneOnce   sync.Once
+}
+
+// lateAnswerWait bounds how long a managed call's own answer, ready after
+// its deadline, waits for the watchdog's answer (watch is bounded by its own
+// waits: the restart proof, the install look and the log line).
+var lateAnswerWait = time.Second
+
+// lateAnswerDue reports a managed call whose deadline has passed while the
+// watchdog still owns its answer: the gateway's verdict, or the call's own
+// result, came too late, and the watchdog answers it. One deadline holds for
+// the whole call: before, a verdict read in the moment the watchdog's
+// thread woke at the deadline (the host had held the process) could stand
+// the watchdog down and reach the agent past it (rel-1-0-6 GAP-0648).
+// Per-user and Secure Client calls keep their answer.
+func (w *answerWatchdog) lateAnswerDue() bool {
+	return w.closeLateAnswer && w.waiter.passed()
 }
 
 // AnswerWatchdog is the answer watchdog of one tool call that the hook
@@ -183,6 +207,8 @@ func ArmAnswerWatchdog(opts Options, payload []byte) *AnswerWatchdog {
 // output; Run returns through finish.
 func startAnswerWatchdog(opts *Options, sp spec, failMode string, deadline, ceiling time.Time) *answerWatchdog {
 	w := prepareAnswerWatchdog(opts, sp, failMode, ceiling)
+	// The deadline holds from now, also before the watch goroutine runs.
+	w.waiter.extendTo(deadline)
 	go w.watch(deadline)
 	return w
 }
@@ -192,7 +218,8 @@ func startAnswerWatchdog(opts *Options, sp spec, failMode string, deadline, ceil
 // output.
 func prepareAnswerWatchdog(opts *Options, sp spec, failMode string, ceiling time.Time) *answerWatchdog {
 	w := &answerWatchdog{stdout: opts.Stdout, stderr: opts.Stderr, exit: opts.Exit, ceiling: ceiling, waiter: newAnswerDeadlineWaiter(), secureClient: opts.SecureClient,
-		failureLog: newPreparedFailureLog(), prepareLead: answerWatchdogLogPrepareLead}
+		failureLog: newPreparedFailureLog(), prepareLead: answerWatchdogLogPrepareLead,
+		closeLateAnswer: managedNativeDecision(*opts), watchDone: make(chan struct{})}
 	w.cacheFailureLogHome(opts)
 	opts.failureLog = w.failureLog
 	w.failureLogHome = failureLogHomeOf(*opts)
@@ -711,6 +738,9 @@ func (w *answerWatchdog) hold(opts *Options) {
 }
 
 func (w *answerWatchdog) watch(deadline time.Time) {
+	if w.watchDone != nil {
+		defer w.watchDoneOnce.Do(func() { close(w.watchDone) })
+	}
 	// A call still waiting answerWatchdogLogPrepareLead before its deadline
 	// opens its log now, so the line of the answer below is one append.
 	prepare := time.AfterFunc(time.Until(deadline.Add(-w.prepareLead)), func() {
@@ -859,7 +889,7 @@ func heldWithin(check func() bool, wait time.Duration) bool {
 // answered stands the watchdog down: the gateway's decision is in. Safe on
 // a nil watchdog.
 func (w *answerWatchdog) answered() {
-	if w != nil {
+	if w != nil && !w.lateAnswerDue() {
 		w.waiter.cancel()
 	}
 }
@@ -921,6 +951,14 @@ func (w *AnswerWatchdog) Finish(code int) int {
 // finish writes the call's own result unless the watchdog already answered,
 // and returns the exit status of the answer the agent got.
 func (w *answerWatchdog) finish(code int) int {
+	if w.lateAnswerDue() && w.watchDone != nil {
+		timer := time.NewTimer(lateAnswerWait)
+		select {
+		case <-w.watchDone:
+		case <-timer.C:
+		}
+		timer.Stop()
+	}
 	w.waiter.cancel()
 	w.mu.Lock()
 	defer w.mu.Unlock()
