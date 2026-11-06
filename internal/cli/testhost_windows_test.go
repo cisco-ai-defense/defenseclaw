@@ -112,6 +112,9 @@ func isolateTestMachineWriters(logDir string) func() {
 	// below normal. TestWindowsLifecycleRunYieldsTheCPUToTheHooks checks the
 	// real yield in a child process.
 	windowsEnterpriseLifecycleYield = func() {}
+	// The same for the sidecar, which raises its class to above normal
+	// (TestSidecarAnswersAtTheHookPriorityClass checks it in a child).
+	sidecarRaisePriority = func() {}
 
 	path := testMachineRegistrySandboxPath()
 	key, _, err := registry.CreateKey(registry.CURRENT_USER, path, registry.ALL_ACCESS)
