@@ -37,6 +37,9 @@ func withHookDeliveryReceipt(r *http.Request, delivery *hookDeliveryReceipt) *ht
 }
 
 func (a *APIServer) beginHookDeliveryReceipt(w http.ResponseWriter, r *http.Request) *hookDeliveryReceipt {
+	if delivery := hookDeliveryReceiptForRequest(r); delivery != nil {
+		return delivery
+	}
 	if a == nil || a.scannerCfg == nil || a.scannerCfg.SecureClientIntegration() ||
 		r.Header.Get(hookexec.HookDeliveryReceiptHeader) != "1" {
 		return nil
@@ -67,6 +70,12 @@ func (d *hookDeliveryReceipt) readPayload() ([]byte, error) {
 	body := make([]byte, length)
 	_, err = io.ReadFull(d.reader, body)
 	return body, err
+}
+
+// bindBody uses the body after API middleware has applied its size limit.
+// The capability can be advertised before that middleware runs.
+func (d *hookDeliveryReceipt) bindBody(body io.ReadCloser) {
+	d.reader = bufio.NewReader(body)
 }
 
 // offer writes one bounded JSON answer while the request remains open. The
