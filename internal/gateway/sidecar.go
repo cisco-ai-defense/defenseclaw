@@ -3965,17 +3965,20 @@ func watcherConnectors(reg *connector.Registry, cfg *config.Config) []connector.
 
 // resolveWatcherDirsForConnectors is resolveWatcherDirs over every connector:
 // the union of their folders, each discovered folder tagged with the first
-// connector that lists it (roots). Explicit gateway.watcher dirs apply once
-// and are not tagged.
-func resolveWatcherDirsForConnectors(cfg *config.Config, conns []connector.Connector, wcfg config.GatewayWatcherConfig) (skillDirs, pluginDirs []string, roots map[string]string, src watcherDirSources) {
+// connector that lists it for events and every connector that loads it for
+// root coverage. Explicit gateway.watcher dirs apply once and are not tagged.
+func resolveWatcherDirsForConnectors(cfg *config.Config, conns []connector.Connector, wcfg config.GatewayWatcherConfig) (skillDirs, pluginDirs []string, roots map[string]string, src watcherDirSources, consumers []watcher.RootConsumer) {
 	if len(conns) == 0 {
 		skillDirs, pluginDirs, src = resolveWatcherDirs(cfg, nil, wcfg)
-		return skillDirs, pluginDirs, nil, src
+		return skillDirs, pluginDirs, nil, src, nil
 	}
 	roots = map[string]string{}
 	seenSkill, seenPlugin := map[string]bool{}, map[string]bool{}
-	add := func(out *[]string, seen map[string]bool, dirs []string, owner string, tag bool) {
+	add := func(out *[]string, seen map[string]bool, dirs []string, kind, owner string, tag bool) {
 		for _, dir := range dirs {
+			if tag {
+				consumers = append(consumers, watcher.RootConsumer{Kind: kind, Path: dir, Connector: owner})
+			}
 			key := filepath.Clean(dir)
 			if runtime.GOOS == "windows" {
 				key = strings.ToLower(key)
@@ -3996,10 +3999,10 @@ func resolveWatcherDirsForConnectors(cfg *config.Config, conns []connector.Conne
 			src = connSrc
 		}
 		owner := strings.ToLower(strings.TrimSpace(conn.Name()))
-		add(&skillDirs, seenSkill, skills, owner, connSrc.Skill != watcherDirsFromConfig)
-		add(&pluginDirs, seenPlugin, plugins, owner, connSrc.Plugin != watcherDirsFromConfig)
+		add(&skillDirs, seenSkill, skills, "skill", owner, connSrc.Skill != watcherDirsFromConfig)
+		add(&pluginDirs, seenPlugin, plugins, "plugin", owner, connSrc.Plugin != watcherDirsFromConfig)
 	}
-	return skillDirs, pluginDirs, roots, src
+	return skillDirs, pluginDirs, roots, src, consumers
 }
 
 // absoluteDirs returns dirs without its relative entries.
@@ -4181,7 +4184,7 @@ func (s *Sidecar) runWatcherOnce(ctx context.Context) (restart bool, err error) 
 	// install has no connector paths to watch.
 	reg := connector.NewDefaultRegistry()
 	conns := watcherConnectors(reg, s.currentConfig())
-	skillDirs, pluginDirs, roots, src := resolveWatcherDirsForConnectors(s.currentConfig(), conns, wcfg)
+	skillDirs, pluginDirs, roots, src, consumers := resolveWatcherDirsForConnectors(s.currentConfig(), conns, wcfg)
 	skippedProfileRoots := false
 	watchPathAllowed := func(path string) bool {
 		if path == "" {
@@ -4266,12 +4269,16 @@ func (s *Sidecar) runWatcherOnce(ctx context.Context) (restart bool, err error) 
 	freshProjectRoots = filterWatchDirs(freshProjectRoots)
 	var enrolledProjectRoots []projectSkillRoot
 	for _, root := range projectRoots {
+		if enrolled != nil {
+			enrolledProjectRoots = append(enrolledProjectRoots, root)
+		} else {
+			consumers = append(consumers, watcher.RootConsumer{Kind: "skill", Path: root.Path, Connector: root.Connector})
+		}
 		if slices.ContainsFunc(skillDirs, func(dir string) bool { return projectRootKey(dir) == projectRootKey(root.Path) }) {
 			continue
 		}
 		skillDirs = append(append([]string(nil), skillDirs...), root.Path)
 		if enrolled != nil {
-			enrolledProjectRoots = append(enrolledProjectRoots, root)
 			continue
 		}
 		if roots == nil {
@@ -4415,6 +4422,7 @@ func (s *Sidecar) runWatcherOnce(ctx context.Context) (restart bool, err error) 
 	})
 	if enrolled != nil {
 		w.SetRootConnectors(enrolled.roots)
+		w.SetRootConsumers(enrolled.consumers)
 		w.SetAssetOwners(enrolled.owners)
 		publishScanAssetOwners(enrolled.owners)
 		w.SetMCPServerSource(enrolled.live.list)
@@ -4429,6 +4437,7 @@ func (s *Sidecar) runWatcherOnce(ctx context.Context) (restart bool, err error) 
 		// Retries a server whose admission could not run at the poll.
 		w.SetMCPDiscoveryPoll(true)
 	} else {
+		w.SetRootConsumers(consumers)
 		if len(conns) > 1 || len(projectRoots) > 0 {
 			// Each folder belongs to the connector that lists it, so its
 			// events, rule pack and enforcement are that connector's
@@ -4515,8 +4524,11 @@ func (s *Sidecar) runWatcherOnce(ctx context.Context) (restart bool, err error) 
 		}
 		connectors := make(map[string]bool)
 		for _, issue := range issues {
-			if issue.Connector != "" {
+			if len(issue.Connectors) == 0 && issue.Connector != "" {
 				connectors[issue.Connector] = true
+			}
+			for _, name := range issue.Connectors {
+				connectors[name] = true
 			}
 		}
 		names := make([]string, 0, len(connectors))

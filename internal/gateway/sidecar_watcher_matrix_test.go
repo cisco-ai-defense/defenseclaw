@@ -703,7 +703,7 @@ func TestResolveWatcherDirsForConnectors_EveryConfiguredConnector(t *testing.T) 
 	wcfg.Skill.Enabled, wcfg.Plugin.Enabled = true, true
 
 	conns := watcherConnectors(connector.NewDefaultRegistry(), cfg)
-	skillDirs, _, roots, _ := resolveWatcherDirsForConnectors(cfg, conns, wcfg)
+	skillDirs, _, roots, _, _ := resolveWatcherDirsForConnectors(cfg, conns, wcfg)
 	for dir, owner := range map[string]string{
 		filepath.Join(home, ".claude", "skills"): "claudecode",
 		filepath.Join(home, ".agents", "skills"): "codex",
