@@ -14,7 +14,10 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"io/fs"
+	"os"
 	"path/filepath"
 	"runtime"
 	"slices"
@@ -760,21 +763,18 @@ func (a *APIServer) unavailableRootDecision(
 			continue
 		}
 		root, rootErr := filepath.Abs(issue.Path)
-		resolvedRoot, resolvedErr := filepath.EvalSymlinks(issue.Path)
-		provenOutside := rootErr == nil
+		resolvedRoot, rootResolved := "", false
+		if rootErr == nil {
+			resolvedRoot, rootResolved = unavailableRootCanonicalPath(root)
+		}
+		provenOutside := rootResolved
 		for _, path := range paths {
 			path = strings.TrimSpace(path)
 			if path == "" {
 				provenOutside = false
-				continue
-			}
-			if !filepath.IsAbs(path) {
-				provenOutside = false
 				break
 			}
-			clean := filepath.Clean(path)
-			if rootErr == nil && unavailableRootContainsPath(root, clean) ||
-				resolvedErr == nil && unavailableRootContainsPath(resolvedRoot, clean) {
+			if !filepath.IsAbs(path) {
 				provenOutside = false
 				break
 			}
@@ -783,6 +783,12 @@ func (a *APIServer) unavailableRootDecision(
 			if hasParentElement(path) || runtime.GOOS == "windows" &&
 				(strings.HasPrefix(path, `\\?\`) || strings.HasPrefix(path, `\\.\`) ||
 					strings.Contains(path[len(filepath.VolumeName(path)):], ":")) {
+				provenOutside = false
+				break
+			}
+			resolvedPath, pathResolved := unavailableRootCanonicalPath(path)
+			if !pathResolved || rootErr == nil && unavailableRootContainsPath(root, path) ||
+				rootResolved && unavailableRootContainsPath(resolvedRoot, resolvedPath) {
 				provenOutside = false
 				break
 			}
@@ -795,6 +801,31 @@ func (a *APIServer) unavailableRootDecision(
 			"watch-root-unavailable"), true
 	}
 	return config.AssetPolicyDecision{}, false
+}
+
+// unavailableRootCanonicalPath resolves each existing component. A missing
+// suffix can be appended to a resolved parent, but a dangling link or any
+// other unresolved component cannot prove a source is outside the root.
+func unavailableRootCanonicalPath(path string) (string, bool) {
+	for candidate := filepath.Clean(path); ; candidate = filepath.Dir(candidate) {
+		resolved, err := filepath.EvalSymlinks(candidate)
+		if err == nil {
+			suffix, err := filepath.Rel(candidate, path)
+			if err != nil {
+				return "", false
+			}
+			return filepath.Join(resolved, suffix), true
+		}
+		if !errors.Is(err, fs.ErrNotExist) {
+			return "", false
+		}
+		if _, err := os.Lstat(candidate); err == nil || !errors.Is(err, fs.ErrNotExist) {
+			return "", false
+		}
+		if parent := filepath.Dir(candidate); parent == candidate {
+			return "", false
+		}
+	}
 }
 
 func unavailableRootContainsPath(root, path string) bool {
