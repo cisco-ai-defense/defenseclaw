@@ -878,7 +878,7 @@ def test_doctor_warns_when_per_user_gateway_runs_as_root(monkeypatch, tmp_path) 
     assert "running as root" in check["detail"]
     assert check["reason_code"] == "per-user-gateway-runs-as-root"
     assert "DefenseClawMac" in check["remediation"]
-    assert "sudo defenseclaw-gateway stop" in check["remediation"]
+    assert "sudo env DEFENSECLAW_HOME=" in check["remediation"]
 
 
 @pytest.mark.skipif(os.name == "nt" or os.geteuid() == 0, reason="POSIX per-user gateway account")
@@ -889,7 +889,58 @@ def test_doctor_gateway_account_hint_quotes_the_home(monkeypatch, tmp_path) -> N
 
     remediation = result.checks[-1]["remediation"]
     assert shlex.quote(os.fspath(home)) in remediation
-    assert shlex.split(remediation.split("Otherwise: ", 1)[1])[8] == os.fspath(home)
+    tokens = shlex.split(remediation.split("Otherwise: ", 1)[1])
+    assert tokens[:5] == ["sudo", "env", f"DEFENSECLAW_HOME={home}", "defenseclaw-gateway", "stop"]
+    assert tokens[10] == os.fspath(home)
+
+
+@pytest.mark.skipif(os.name == "nt" or os.geteuid() == 0, reason="POSIX per-user gateway account")
+@pytest.mark.parametrize("listener_code", ["missing_listener", "unavailable", "ambiguous_listener"])
+def test_doctor_warns_for_live_root_gateway_before_listener_is_inspectable(
+    monkeypatch, tmp_path, listener_code
+) -> None:
+    from defenseclaw.doctor_gateway import PIDRecord
+
+    home = os.fspath(tmp_path)
+    record = PIDRecord(
+        "ok", pid=4242, executable="/usr/local/bin/defenseclaw-gateway",
+        data_dir=home, start_identity="kernel-generation",
+    )
+    trust = cmd_doctor._GatewayTrust(listener_code, "listener pending", pid=4242, home_bound=True, record=record)
+    monkeypatch.setattr(cmd_doctor, "_trusted_gateway_listener", lambda _cfg: trust)
+    monkeypatch.setattr(cmd_doctor, "pid_alive", lambda _pid: True)
+    monkeypatch.setattr(cmd_doctor, "_process_uid", lambda _pid: 0)
+    result = cmd_doctor._DoctorResult(quiet=True)
+    cmd_doctor._check_gateway_account(SimpleNamespace(data_dir=home, deployment_mode=""), result)
+    assert [(check["label"], check["status"]) for check in result.checks] == [("Gateway account", "warn")]
+
+    process = doctor_gateway.ProcessEvidence(
+        "ok", pid=4242, executable=record.executable,
+        start_identity=record.start_identity, uid=0,
+    )
+    monkeypatch.setattr(cmd_doctor, "_trusted_gateway_listener", lambda _cfg: cmd_doctor._GatewayTrust(
+        listener_code, "listener pending", pid=4242, home_bound=True, record=record, process=process,
+    ))
+    monkeypatch.setattr(cmd_doctor, "_process_uid", lambda _pid: None)
+    result = cmd_doctor._DoctorResult(quiet=True)
+    cmd_doctor._check_gateway_account(SimpleNamespace(data_dir=home, deployment_mode=""), result)
+    assert [(check["label"], check["status"]) for check in result.checks] == [("Gateway account", "warn")]
+
+    changed_generation = doctor_gateway.ProcessEvidence(
+        "ok", pid=4242, executable=record.executable, start_identity="different", uid=0,
+    )
+    monkeypatch.setattr(cmd_doctor, "_trusted_gateway_listener", lambda _cfg: cmd_doctor._GatewayTrust(
+        listener_code, "listener pending", pid=4242, home_bound=True, record=record, process=changed_generation,
+    ))
+    result = cmd_doctor._DoctorResult(quiet=True)
+    cmd_doctor._check_gateway_account(SimpleNamespace(data_dir=home, deployment_mode=""), result)
+    assert result.checks == []
+
+    monkeypatch.setattr(cmd_doctor, "_trusted_gateway_listener", lambda _cfg: trust)
+    monkeypatch.setattr(cmd_doctor, "_process_uid", lambda _pid: 1000)
+    result = cmd_doctor._DoctorResult(quiet=True)
+    cmd_doctor._check_gateway_account(SimpleNamespace(data_dir=home, deployment_mode=""), result)
+    assert result.checks == []
 
 
 @pytest.mark.skipif(os.name == "nt" or os.geteuid() == 0, reason="POSIX per-user gateway account")

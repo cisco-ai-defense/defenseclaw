@@ -7,6 +7,7 @@ package cli
 
 import (
 	"encoding/json"
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
@@ -69,11 +70,63 @@ func TestGAP0605RootListenerHasAccountRemedy(t *testing.T) {
 	if problem := foreignGatewayListener(cfg); problem != "Your DefenseClaw gateway is running as root." {
 		t.Fatalf("same-home root listener = %q", problem)
 	}
-	if remedy := foreignGatewayListenerFix(cfg); !strings.Contains(remedy, "sudo defenseclaw-gateway stop") || strings.Contains(remedy, "--api-port") {
+	if remedy := foreignGatewayListenerFix(cfg); !strings.Contains(remedy, "sudo env DEFENSECLAW_HOME=") || strings.Contains(remedy, "--api-port") {
 		t.Fatalf("same-home root listener remedy = %q", remedy)
 	}
 	write("different")
 	if problem := foreignGatewayListener(cfg); !strings.Contains(problem, "another account") {
 		t.Fatalf("stale record misclassified: %q", problem)
+	}
+}
+
+// An unlisted own-account process leaves the independent connected-peer
+// check to decide whether the answering socket is safe for a token.
+func TestUnlistedOwnGatewayReachesConnectedPeerCheck(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("DEFENSECLAW_HOME", home)
+	executable, err := os.Executable()
+	if err != nil {
+		t.Fatal(err)
+	}
+	stat, err := os.ReadFile(filepath.Join("/proc", "self", "stat"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	end := strings.LastIndexByte(string(stat), ')')
+	if end < 0 {
+		t.Fatal("process stat is malformed")
+	}
+	fields := strings.Fields(string(stat[end+1:]))
+	if len(fields) < 20 {
+		t.Fatal("process stat is incomplete")
+	}
+	record, err := json.Marshal(map[string]any{
+		"pid": os.Getpid(), "executable": executable,
+		"data_dir": home, "start_identity": fields[19],
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(home, "gateway.pid"), record, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	oldHolder, oldAnswers, oldState := gatewayPortHolder, gatewayPortAnswers, gatewayManagedState
+	t.Cleanup(func() { gatewayPortHolder, gatewayPortAnswers, gatewayManagedState = oldHolder, oldAnswers, oldState })
+	gatewayPortHolder = func(string, int) (daemon.PortHolder, error) {
+		return daemon.PortHolder{UID: -1}, errors.New("listener listing unavailable")
+	}
+	gatewayPortAnswers = func(string) bool { return true }
+	gatewayManagedState = func() (bool, int) { return true, os.Getpid() }
+	cfg := config.DefaultConfig()
+	cfg.Gateway.APIBind = "127.0.0.1"
+	cfg.Gateway.APIPort = 18970
+	if problem := foreignGatewayListener(cfg); problem != "" {
+		t.Fatalf("preflight refused an unlisted own-account process: %q", problem)
+	}
+	if err := os.Remove(filepath.Join(home, "gateway.pid")); err != nil {
+		t.Fatal(err)
+	}
+	if problem := foreignGatewayListener(cfg); problem == "" {
+		t.Fatal("unlisted process without a strong account record passed preflight")
 	}
 }

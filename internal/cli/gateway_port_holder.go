@@ -32,9 +32,11 @@ var (
 // is not the gateway this account started with `defenseclaw-gateway start`
 // for this DefenseClaw home: a gateway left running by another home or test
 // run, another account's process, or any other program. It returns "" when
-// the port is free or held by the managed gateway.
+// the port is free, the managed gateway owns it, or the connected-peer check
+// must decide ownership of an unlisted process from this account.
 //
-// It never sends the gateway token to the listener. Managed deployments run
+// An unlisted account process reaches the separate connected-peer check;
+// this diagnosis never sends a gateway token. Managed deployments run
 // the gateway as a service, so they keep their own checks. On Windows the
 // holder is named by PID and program (GAP-1344): status showed another
 // account's gateway on this account's port as this account's, rc 0.
@@ -68,7 +70,7 @@ func foreignGatewayListenerAt(cfg *config.Config, host string, port int) string 
 	if class == daemon.PerUserListenerOwnGatewayRunAsRoot {
 		return daemon.RootGatewayListenerReason
 	}
-	if class == daemon.PerUserListenerOwnGateway {
+	if class == daemon.PerUserListenerOwnGateway || class == daemon.PerUserListenerUnlistedOwnProcess {
 		return ""
 	}
 	running, managedPID := gatewayManagedState()
@@ -172,7 +174,7 @@ func foreignGatewayListenerFixAt(host string, apiPort int) string {
 	}
 	if gatewayListenerClass(host, apiPort, config.DefaultDataPath(), holder, err,
 		err != nil && gatewayPortAnswers(net.JoinHostPort(host, strconv.Itoa(apiPort)))) == daemon.PerUserListenerOwnGatewayRunAsRoot {
-		return daemon.RootGatewayListenerRemedy
+		return daemon.RootGatewayListenerRemedy(config.DefaultDataPath())
 	}
 	port := "<free port>"
 	if free := freeGatewayAPIPort(host, apiPort); free > 0 {

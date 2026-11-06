@@ -150,8 +150,47 @@ def test_doctor_sidecar_root_listener_uses_root_remedy(monkeypatch) -> None:
     assert holder == cmd_doctor.ROOT_GATEWAY_REASON
     detail = cmd_doctor._foreign_gateway_port_detail(cfg, holder)
     remedy = cmd_doctor._foreign_gateway_port_remediation(cfg, holder=holder)
-    assert "sudo defenseclaw-gateway stop" in detail and remedy in detail
+    assert "sudo env DEFENSECLAW_HOME=" in detail and remedy in detail
     assert "--api-port" not in detail
+
+
+def test_doctor_names_visible_root_listener_from_trust_evidence(monkeypatch) -> None:
+    from defenseclaw.commands import cmd_doctor
+
+    cfg = SimpleNamespace(gateway=SimpleNamespace(api_port=18970), data_dir="/tmp/defenseclaw-account-home")
+    monkeypatch.setattr(cmd_doctor.sys, "platform", "darwin")
+    monkeypatch.setattr(cmd_doctor, "_gateway_port_holder", lambda _cfg: "PID 4242 (defenseclaw-gateway)")
+    monkeypatch.setattr(
+        cmd_doctor, "_trusted_gateway_listener",
+        lambda _cfg: cmd_doctor._GatewayTrust("root_gateway", "root listener", pid=4242),
+    )
+    assert cmd_doctor._foreign_gateway_port_holder(cfg) == cmd_doctor.ROOT_GATEWAY_REASON
+
+    monkeypatch.setattr(
+        cmd_doctor, "_trusted_gateway_listener",
+        lambda _cfg: cmd_doctor._GatewayTrust("trusted", "own listener", pid=4242),
+    )
+    assert cmd_doctor._foreign_gateway_port_holder(cfg) == ""
+
+
+def test_doctor_names_unlisted_linux_root_listener_without_an_extra_probe(monkeypatch) -> None:
+    from defenseclaw.commands import cmd_doctor
+
+    cfg = SimpleNamespace(gateway=SimpleNamespace(api_port=18970), data_dir="/tmp/defenseclaw-account-home")
+    monkeypatch.setattr(cmd_doctor.sys, "platform", "linux")
+    monkeypatch.setattr(cmd_doctor, "_gateway_port_holder", lambda _cfg: "")
+    monkeypatch.setattr(cmd_doctor, "_gateway_api_host", lambda _cfg: "127.0.0.1")
+    monkeypatch.setattr(
+        cmd_doctor, "_trusted_gateway_listener",
+        lambda _cfg: pytest.fail("an unlisted listener must use the existing connected-peer diagnosis"),
+    )
+    monkeypatch.setattr(
+        gateway, "foreign_loopback_listener",
+        lambda *_args: cmd_doctor.ROOT_GATEWAY_REASON + " " + cmd_doctor._root_gateway_remedy(cfg),
+    )
+    assert cmd_doctor._foreign_gateway_port_holder(cfg) == cmd_doctor.ROOT_GATEWAY_REASON
+    monkeypatch.setattr(gateway, "foreign_loopback_listener", lambda *_args: "")
+    assert cmd_doctor._foreign_gateway_port_holder(cfg) == ""
 
 
 _HEADER = "  sl  local_address rem_address   st tx_queue rx_queue tr tm->when retrnsmt   uid  timeout inode\n"
@@ -419,17 +458,19 @@ def test_root_listener_names_the_remedy_and_keeps_the_token_withheld(monkeypatch
     from defenseclaw import upgrade_shim
     from defenseclaw.commands import cmd_doctor
 
+    cfg = SimpleNamespace(data_dir="/tmp/defenseclaw-account-home")
+
     monkeypatch.setattr(upgrade_shim, "managed_descriptor", lambda: None)
     monkeypatch.setattr(
         gateway, "_foreign_loopback_listener_uncached", lambda port, *_a, **_k: "a process of another account"
     )
     monkeypatch.setattr(
         gateway, "_root_gateway_listener_reason",
-        lambda port: cmd_doctor.ROOT_GATEWAY_REASON + " " + cmd_doctor.ROOT_GATEWAY_REMEDY if port == 18970 else "",
+        lambda port: cmd_doctor.ROOT_GATEWAY_REASON + " " + cmd_doctor._root_gateway_remedy(cfg) if port == 18970 else "",
     )
     problem = gateway.foreign_loopback_listener("127.0.0.1", 18970)
     assert cmd_doctor.ROOT_GATEWAY_REASON in problem
-    assert "sudo defenseclaw-gateway stop" in problem
+    assert "sudo env DEFENSECLAW_HOME=" in problem
     assert "--api-port" not in problem
     assert "another account" in gateway.foreign_loopback_listener("127.0.0.1", 18980)
 
@@ -481,7 +522,7 @@ def test_trusted_listener_reclassifies_root_without_trusting_its_token(monkeypat
     root = cmd_doctor._trusted_gateway_listener(cfg, evidence=object(), platform_name="linux")
     assert root.code == "root_gateway"
     assert not root.trusted
-    assert "sudo defenseclaw-gateway stop" in root.detail
+    assert "sudo env DEFENSECLAW_HOME=" in root.detail
 
     for name, changed in (
         ("own UID", dict(process=SimpleNamespace(uid=os.getuid()))),

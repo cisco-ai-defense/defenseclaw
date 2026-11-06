@@ -272,7 +272,7 @@ func TestRootGatewayListenerUsesRootRemedyAcrossStatusAndStart(t *testing.T) {
 		fix := foreignGatewayListenerFix(c)
 		switch kind {
 		case daemon.PerUserListenerOwnGatewayRunAsRoot:
-			if problem != daemon.RootGatewayListenerReason || fix != daemon.RootGatewayListenerRemedy {
+			if problem != daemon.RootGatewayListenerReason || fix != daemon.RootGatewayListenerRemedy(config.DefaultDataPath()) {
 				t.Fatalf("root listener = (%q, %q)", problem, fix)
 			}
 			if label := foreignGatewayStatusLabel(problem); label != "Sidecar Status: RUNNING AS ROOT" ||

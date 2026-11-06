@@ -6,6 +6,7 @@ package daemon
 import (
 	"net"
 	"os"
+	"path/filepath"
 	"runtime"
 	"strings"
 )
@@ -19,10 +20,26 @@ const (
 	PerUserListenerOwnGateway
 	PerUserListenerOwnGatewayRunAsRoot
 	PerUserListenerForeign
+	// This home's PID record names a live process of this account, but listener
+	// ownership is unavailable. The connected-peer check decides before use.
+	PerUserListenerUnlistedOwnProcess
 )
 
 const RootGatewayListenerReason = "Your DefenseClaw gateway is running as root."
-const RootGatewayListenerRemedy = "Stop it with sudo defenseclaw-gateway stop, then start it as yourself (defenseclaw-gateway start). On macOS, use DefenseClawMac to repair root-owned gateway files."
+
+// RootGatewayListenerRemedy names the data home explicitly because sudo can
+// reset HOME and discard DEFENSECLAW_HOME before the stop command starts.
+func RootGatewayListenerRemedy(dataDir string) string {
+	return "Stop it with " + rootGatewayStopCommand(dataDir) + ", then start it as yourself (defenseclaw-gateway start). On macOS, use DefenseClawMac to repair root-owned gateway files."
+}
+
+func rootGatewayStopCommand(dataDir string) string {
+	if absolute, err := filepath.Abs(dataDir); err == nil {
+		dataDir = absolute
+	}
+	quotedHome := "'" + strings.ReplaceAll(dataDir, "'", "'\\''") + "'"
+	return "sudo env DEFENSECLAW_HOME=" + quotedHome + " defenseclaw-gateway stop"
+}
 
 // ClassifyPerUserListener combines the observed endpoint owner with the PID
 // record for this home. The result is diagnostic only:
@@ -46,13 +63,28 @@ func ClassifyPerUserListener(host string, port int, dataDir string, holder PortH
 		}
 		return PerUserListenerUnknown
 	}
-	if ownUID != 0 && (holderErr != nil || holder.UID == 0) {
+	if holderErr != nil || (ownUID != 0 && holder.UID == 0) {
 		info, err := d.readPIDInfo()
 		if err == nil && info.PID > 0 && d.recordBindsThisHome(info) &&
 			d.HasManagedProcessIdentity(info.PID) {
 			uid, uidErr := gatewayProcessUID(info.PID)
-			if uidErr == nil && uid == 0 && (holder.PID == 0 || holder.PID == info.PID) {
-				return PerUserListenerOwnGatewayRunAsRoot
+			if uidErr == nil && (holder.PID == 0 || holder.PID == info.PID) {
+				if ownUID != 0 && uid == 0 {
+					return PerUserListenerOwnGatewayRunAsRoot
+				}
+				if holderErr != nil && uid == ownUID {
+					return PerUserListenerUnlistedOwnProcess
+				}
+			}
+		}
+	}
+	if holderErr != nil {
+		// A gateway left running during an upgrade can have an older PID record.
+		// It can reach the connected-peer verifier when it still runs as this
+		// account; the record alone never authorizes the answering socket.
+		if running, pid := d.IsRunning(); running && pid > 0 {
+			if uid, err := gatewayProcessUID(pid); err == nil && uid == ownUID {
+				return PerUserListenerUnlistedOwnProcess
 			}
 		}
 	}
