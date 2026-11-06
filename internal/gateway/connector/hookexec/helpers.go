@@ -372,13 +372,6 @@ func logHookFailureOf(opts Options, sp spec, reason, category, failMode string, 
 		n, writeErr := marker.Write(frame)
 		return writeErr == nil && n == len(frame)
 	}
-	if opts.failureLog.wantsFallback() {
-		if !appendMarker() {
-			fmt.Fprintln(os.Stderr, "defenseclaw: local failure record could not be appended")
-			noteUnrecordedLocalDeny(opts, eventID, "the account's hook-failure log cannot be written")
-		}
-		return
-	}
 	// The prepared descriptor avoids a second open on the deadline path.
 	f := opts.failureLog.take(home)
 	if f == nil {

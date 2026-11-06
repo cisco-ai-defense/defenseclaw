@@ -164,6 +164,9 @@ func ManagedGatewayNoAnswer(err error) bool {
 // whose gateway gave no decision within hookAnswerBudget.
 const perUserGatewayNoAnswerReason = "gateway did not answer in time"
 
+// PerUserGatewayNoAnswerReason is the recorded reason of a per-user deadline.
+const PerUserGatewayNoAnswerReason = perUserGatewayNoAnswerReason
+
 // answerDeadline bounds hooks that hold an agent call waiting for a verdict.
 // Managed Codex also gates prompt submission and delivery of tool results;
 // both need the same bounded answer and canonical no-answer reason as a
@@ -351,10 +354,16 @@ func lateOrdinaryCheck(opts Options, payload []byte) func() bool {
 }
 
 func failNoAnswer(opts Options, sp spec, failMode string) int {
+	mode, _, _ := lateAnswerOutcome(opts, sp, failMode)
+	return failNoAnswerInMode(opts, sp, mode)
+}
+
+// failNoAnswerInMode renders the already selected answer mode. The watchdog
+// uses the mode of its single pending outcome for both output and record.
+func failNoAnswerInMode(opts Options, sp spec, failMode string) int {
 	if managedNativeDecision(opts) && opts.answeredErrorStatus != 0 {
 		return failAfterErrorStatus(opts, sp, "closed", opts.answeredErrorStatus)
 	}
-	failMode = noAnswerFailMode(opts, failMode)
 	if opts.ManagedEnterprise {
 		return failUnreachable(opts, sp, failMode, managedNoAnswerReason(opts))
 	}
