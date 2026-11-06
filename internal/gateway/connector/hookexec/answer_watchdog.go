@@ -136,6 +136,10 @@ type answerWatchdog struct {
 	// closed already.
 	installCheck func() bool
 	install      watchdogAnswer
+	// lookGen numbers the ordinary looks (startOrdinaryLook): only the look
+	// of the latest rendering may open its answer.
+	lookGen  int
+	ordinary *ordinaryAnswer
 
 	ceiling         time.Time
 	waiter          *answerDeadlineWaiter
@@ -258,7 +262,103 @@ func startAnswerWatchdog(opts *Options, sp spec, failMode string, deadline, ceil
 	// The deadline holds from now, also before the watch goroutine runs.
 	w.waiter.extendTo(deadline)
 	go w.watch(deadline)
+	w.mu.Lock()
+	w.lookGen++
+	gen := w.lookGen
+	w.mu.Unlock()
+	w.startOrdinaryLook(gen, *opts, sp, failMode)
 	return w
+}
+
+// ordinaryAnswer is the open no-answer answer of a per-user call whose
+// payload the shared reader proved ordinary (startOrdinaryLook); it is
+// given only if the account tier read at the deadline is open.
+type ordinaryAnswer struct {
+	answer       watchdogAnswer
+	tier         func() string
+	installCheck func() bool
+	install      watchdogAnswer
+}
+
+// lateOrdinaryTierWait bounds the tier read at the deadline: a read that
+// stalls past it leaves the closed answer.
+var lateOrdinaryTierWait = 250 * time.Millisecond
+
+// startOrdinaryLook reads the payload's protected reach once the deadline
+// is armed and, for an ordinary call, renders its open answer. The account
+// tier is read only when the watchdog answers (watch), never for a call the
+// gateway answers. Until both prove the open tier the prepared closed answer
+// stands, so a stalled read gives the closed answer at the deadline and
+// never holds it (GAP-0641 review 7). Only the look of the latest rendering
+// (gen) counts.
+func (w *answerWatchdog) startOrdinaryLook(gen int, opts Options, sp spec, failMode string) {
+	if !lateOrdinaryLookCall(opts) {
+		return
+	}
+	go func() {
+		if !OrdinaryNoAnswerPayload(opts.failurePayload) {
+			return
+		}
+		opts.lateOrdinaryOpen = true
+		answer := renderNoAnswer(opts, sp, failMode)
+		if answer.mode != "open" {
+			return
+		}
+		installCheck, install := renderInstallAnswer(opts, sp, answer.mode)
+		w.mu.Lock()
+		defer w.mu.Unlock()
+		if gen == w.lookGen {
+			w.ordinary = &ordinaryAnswer{answer: answer, tier: opts.OutageFailModeNow, installCheck: installCheck, install: install}
+		}
+	}()
+}
+
+// ordinaryOwedLocked reports a watchdog still due to give its prepared
+// no-decision answer, which an ordinary open answer may then replace.
+func (w *answerWatchdog) ordinaryOwedLocked() bool {
+	return !w.fired && !w.finished && !w.answeredInTime.Load() && !w.claimedAnswer &&
+		!w.failureClosed && !w.failureLogged && !w.answeredStatus && sameWatchdogAnswer(w.fallback, w.noDecision)
+}
+
+// useOrdinaryAtDeadline gives the ordinary open answer when the account
+// tier, read now within lateOrdinaryTierWait, is open.
+func (w *answerWatchdog) useOrdinaryAtDeadline() {
+	w.mu.Lock()
+	ordinary := w.ordinary
+	owed := ordinary != nil && ordinary.tier != nil && w.ordinaryOwedLocked()
+	w.mu.Unlock()
+	if !owed {
+		return
+	}
+	tier := make(chan string, 1)
+	go func() { tier <- ordinary.tier() }()
+	timer := time.NewTimer(lateOrdinaryTierWait)
+	defer timer.Stop()
+	select {
+	case mode := <-tier:
+		if normalizeFailMode(mode) != "open" {
+			return
+		}
+	case <-timer.C:
+		return
+	}
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	if w.ordinary != ordinary || !w.ordinaryOwedLocked() {
+		return
+	}
+	w.fallback, w.noDecision = ordinary.answer, ordinary.answer
+	if w.failureLog.markerEnabled {
+		w.failureLog.replaceFallbackFrame(ordinary.answer.frame)
+	}
+	w.installCheck, w.install = ordinary.installCheck, ordinary.install
+}
+
+// sameWatchdogAnswer reports whether a is the rendering b itself, not
+// another answer: an assignment shares the rendered buffers.
+func sameWatchdogAnswer(a, b watchdogAnswer) bool {
+	same := func(x, y []byte) bool { return len(x) == len(y) && (len(x) == 0 || &x[0] == &y[0]) }
+	return a.code == b.code && a.mode == b.mode && same(a.out, b.out) && same(a.err, b.err)
 }
 
 // prepareAnswerWatchdog is startAnswerWatchdog without the wait for the
@@ -401,8 +501,8 @@ func (w *answerWatchdog) adopt(opts *Options, sp spec, failMode string) {
 	answer := renderNoAnswer(*opts, sp, failMode)
 	installCheck, installAnswer := renderInstallAnswer(*opts, sp, failMode)
 	w.mu.Lock()
-	defer w.mu.Unlock()
 	if w.fired || w.claimedAnswer || (w.closedKnown && !closed) {
+		w.mu.Unlock()
 		return
 	}
 	w.fallback, w.noDecision = answer, answer
@@ -411,6 +511,11 @@ func (w *answerWatchdog) adopt(opts *Options, sp spec, failMode string) {
 	}
 	w.visibleOutage = nil
 	w.installCheck, w.install = installCheck, installAnswer
+	w.lookGen++
+	w.ordinary = nil
+	gen := w.lookGen
+	w.mu.Unlock()
+	w.startOrdinaryLook(gen, *opts, sp, failMode)
 }
 
 // closeForAnsweredError makes the watchdog's answer the closed response of a
@@ -960,6 +1065,7 @@ func (w *answerWatchdog) watch(deadline time.Time) {
 	} else {
 		w.failureLog.setRestartReason(result.reason)
 	}
+	w.useOrdinaryAtDeadline()
 	w.mu.Lock()
 	installCheck := w.installCheck
 	w.mu.Unlock()
