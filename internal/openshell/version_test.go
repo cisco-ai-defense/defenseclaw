@@ -133,29 +133,31 @@ func TestAPrereleaseComesBeforeItsRelease(t *testing.T) {
 	}
 }
 
-// TestManagedSetupPinMigratesTheOldPin: the hosts DefenseClaw 1.0.3 set up
-// with enterprise.openshell.version "0.1.3" in setup mode move to
-// InstallerVersion in place; every other pin is judged as it is.
-func TestManagedSetupPinMigratesTheOldPin(t *testing.T) {
+// TestManagedVersionPinFloor covers exact pins and ranges in both managed
+// install modes. A range ending at the floor has no usable release.
+func TestManagedVersionPinFloor(t *testing.T) {
 	for _, tc := range []struct {
-		setup  bool
-		pin    string
-		want   string
-		raised bool
+		pin      string
+		want     string
+		raised   bool
+		possible bool
 	}{
-		{true, "0.1.3", InstallerVersion, true},
-		{true, "0.1.1", InstallerVersion, true},
-		{true, "0.1.5", InstallerVersion, true},
+		{"0.1.3", InstallerVersion, true, true},
+		{"0.1.1", InstallerVersion, true, true},
+		{"0.1.5", InstallerVersion, true, true},
+		{"0.01.5", InstallerVersion, true, true},
 		// A prerelease of SupportedMin runs no sandbox either.
-		{true, "0.1.5-pre.3", InstallerVersion, true},
-		{true, "0.1.6-pre.1", InstallerVersion, true},
-		{true, "0.1.6", "0.1.6", false},
-		{true, "", "", false},
-		{true, ">=0.1.1 <0.2.0", ">=0.1.1 <0.2.0", false},
-		{false, "0.1.3", "0.1.3", false},
+		{"0.1.5-pre.3", InstallerVersion, true, true},
+		{"0.1.6-pre.1", InstallerVersion, true, true},
+		{"0.1.6", "0.1.6", false, true},
+		{"0.1.7", "0.1.7", false, true},
+		{"", "", false, true},
+		{">=0.1.1 <0.2.0", ">=0.1.6 <0.2.0", true, true},
+		{">=0.1.6 <0.2.0", ">=0.1.6 <0.2.0", false, true},
+		{">=0.1.1 <0.1.6", ">=0.1.1 <0.1.6", false, false},
 	} {
-		if got, raised := ManagedSetupPin(tc.setup, tc.pin); got != tc.want || raised != tc.raised {
-			t.Errorf("ManagedSetupPin(%v, %q) = %q, %v; want %q, %v", tc.setup, tc.pin, got, raised, tc.want, tc.raised)
+		if got, raised, possible := ManagedVersionPin(tc.pin); got != tc.want || raised != tc.raised || possible != tc.possible {
+			t.Errorf("ManagedVersionPin(%q) = %q, %v, %v; want %q, %v, %v", tc.pin, got, raised, possible, tc.want, tc.raised, tc.possible)
 		}
 	}
 }

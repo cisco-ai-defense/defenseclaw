@@ -82,6 +82,7 @@ import (
 const (
 	codeOpenShell             = "openshell_failed"
 	codeOpenShellPrerequisite = "openshell_prerequisite_missing"
+	codeOpenShellPinRaised    = "openshell_pin_raised"
 	codeLauncherConflict      = "openshell_launcher_conflict"
 	codeSandboxGroups         = "sandbox_user_groups"
 	codeSandboxPending        = "sandbox_pending_restart"
@@ -124,14 +125,13 @@ type openshellSettings struct {
 	// (enterprise.openshell.driver_fallback tightened by openshell.admin):
 	// docker, none, or "" where none applies (macOS, the docker driver).
 	Fallback string
-	// Version is enterprise.openshell.version: an exact version, a range or
-	// "" (any release the DefenseClaw build supports). In setup mode an
-	// exact pin older than openshell.SupportedMin is raised to the release
-	// this build installs, and RaisedFrom keeps the pin
-	// (openshell.ManagedSetupPin).
+	// Version is the effective enterprise.openshell.version: an exact version,
+	// a range or "" (any supported release). RaisedFrom keeps a lower pin.
 	Version, RaisedFrom string
-	GatewayPort         int
-	E2fsprogsDir        string
+	// FloorConflict says the configured range ends at or below the floor.
+	FloorConflict bool
+	GatewayPort   int
+	E2fsprogsDir  string
 	// TelemetryAllowed is openshell.admin.allow_upstream_telemetry.
 	TelemetryAllowed bool
 	// RequiredFor says openshell.admin or a profile's sandbox section sets
@@ -156,8 +156,10 @@ func openshellSettingsOf(goos string, cfg *config.Config) openshellSettings {
 	s.Driver = o.SandboxDriver(goos)
 	s.Fallback = o.SandboxDriverFallback(goos, cfg.OpenShell.Admin)
 	s.Version = strings.TrimSpace(o.Version)
-	if v, raised := openshell.ManagedSetupPin(s.Install == config.EnterpriseOpenShellInstallSetup, s.Version); raised {
+	if v, raised, possible := openshell.ManagedVersionPin(s.Version); raised {
 		s.Version, s.RaisedFrom = v, s.Version
+	} else if !possible {
+		s.FloorConflict = true
 	}
 	s.GatewayPort = o.GatewayPort
 	if s.GatewayPort == 0 {
@@ -491,6 +493,10 @@ func (l *lifecycle) planOpenShell(p *plan) error {
 		}
 		return nil
 	}
+	if settings.FloorConflict {
+		return fmt.Errorf("enterprise.openshell.version %q has no release at or above the OpenShell %s floor; set a range that includes %s or later",
+			settings.Version, openshell.SupportedMin, openshell.SupportedMin)
+	}
 
 	// An enabled setup needs a release this build can install. Older releases
 	// refused an enabled setup without that pin too.
@@ -797,10 +803,13 @@ func (a *openshellApplied) switchKey() string {
 	}
 	version := a.Version
 	if a.Install != config.EnterpriseOpenShellInstallSetup {
-		// In prerequisite mode the pin checks the administrator's OpenShell
-		// (a verify row); changing it replaces nothing in an account
-		// (GAP-0244).
+		// Supported prerequisite pin changes replace nothing in an account.
+		// Moving an old exact pin across the floor does require a switch;
+		// keep a running legacy sandbox until OpenShell reports it stopped.
 		version = ""
+		if v, err := openshell.ParseVersion(a.Version); err == nil && openshell.CheckSandboxRelease(v) != nil {
+			version = "below-floor"
+		}
 	}
 	key := strings.Join([]string{a.Install, a.Driver, version, strconv.Itoa(a.GatewayPort)}, "|")
 	if a.Fallback != "" {
