@@ -38,7 +38,32 @@ var managedWindowsBareCommandAllowed = map[string][]string{
 	"cmd/defenseclaw-setup/wizard_windows.go": {"Run defenseclaw to open the TUI", "run defenseclaw init"},
 }
 
+// managedWindowsCallAllowed lists, by path prefix below the module root,
+// the sources that build a PowerShell call operator (`& `) themselves, with
+// the reason. Each writes or reads an agent's hook command, which is not text
+// for a person, and has its own golden tests; an entry no literal uses fails
+// the test.
+var managedWindowsCallAllowed = map[string]string{
+	"internal/gateway/connector/":                   "the connector hook-command builders and their ownership parsers write and read agent configs",
+	"internal/legacyconnector/":                     "the retired desktop connector's hook-command builder and teardown matcher",
+	"internal/cli/windows_managed_hook_settings.go": "reads registered hook commands: strips the call operator before the ownership check",
+	"internal/gateway/agent_not_installed.go":       "reads a cmd.exe shim prefix, where & is cmd's command separator",
+}
+
 var (
+	// managedWindowsCall is PowerShell's call operator before a quoted path,
+	// or at the end of a literal that a path is appended to: a command built
+	// by hand. && and >& are POSIX shell syntax.
+	managedWindowsCall = regexp.MustCompile(`(^|[^&>])& (['"]|$)`)
+	// managedWindowsVerbOnly is an instruction to run a DefenseClaw
+	// subcommand that names no executable ("run `enterprise windows ensure
+	// ...`", "with enterprise secret set"): a managed Windows computer has no
+	// DefenseClaw command on PATH, so it does not run as typed. A reference
+	// to the command ("`enterprise windows status` reports ...") is not an
+	// instruction and stays allowed.
+	// "with", "by" and "or" count only before a backticked command: "--purge
+	// is valid only with enterprise windows uninstall" describes a flag.
+	managedWindowsVerbOnly = regexp.MustCompile("(?i)(\\b(?:re)?run:?\\s+[`'\"]?|\\b(?:with|by|or)\\s+`)enterprise\\s+[a-z]+\\s+[a-z]")
 	// managedWindowsBareAnywhere is a bare executable with a subcommand, or
 	// a bare Windows-only subcommand: neither is on PATH on any computer.
 	managedWindowsBareAnywhere = regexp.MustCompile(`(^|[^\\/\w.-])defenseclaw(-gateway)?(\.exe)? enterprise windows|(^|[^\\/\w.-])defenseclaw(-gateway)?\.exe [a-z-]`)
@@ -49,7 +74,8 @@ var (
 	// managed Windows answers use for where a command runs. "Windows" alone
 	// is not one: per-user help names Windows paths beside the per-user
 	// commands, which are on PATH.
-	managedWindowsContext = regexp.MustCompile(`(?i)elevated|powershell|administrator prompt`)
+	// Setup's /switches are Windows-only too.
+	managedWindowsContext = regexp.MustCompile(`(?i)elevated|powershell|administrator prompt|\bSetup /[a-z]|DefenseClawSetup`)
 )
 
 // cowork-1-0-8 GAP-0076, as a source check: the behavioural tables list
@@ -57,7 +83,8 @@ var (
 // a managed Windows command that does not run as typed. Every string literal
 // of the module's code under internal/ and cmd/ is checked, whatever its
 // build tags:
-//   - a `& ...` PowerShell call is built only here (WindowsCommandLine);
+//   - a `& ...` PowerShell call is built only here (WindowsCommandLine),
+//     except by the hook-command builders (managedWindowsCallAllowed);
 //   - a hard-coded install path names C:\Program Files instead of
 //     %ProgramFiles%, so it is built only here too;
 //   - a bare defenseclaw.exe or defenseclaw-gateway.exe with a subcommand,
@@ -65,7 +92,12 @@ var (
 //   - a windows-only file, or a sentence that names an elevated prompt,
 //     PowerShell or an Administrator prompt, names no bare `defenseclaw ...`
 //     command, except to a per-user install
-//     (managedWindowsBareCommandAllowed).
+//     (managedWindowsBareCommandAllowed), and no instruction to run a
+//     subcommand without its executable (managedWindowsVerbOnly).
+//
+// A sentence built with + is checked whole as well, with %s for each part
+// that is not a literal: the Windows words and the command were often in
+// different literals of one sentence.
 func TestManagedWindowsCommandsComeFromTheRenderer(t *testing.T) {
 	root := moduleRoot(t)
 	fset := token.NewFileSet()
@@ -96,7 +128,15 @@ func TestManagedWindowsCommandsComeFromTheRenderer(t *testing.T) {
 			}
 			files++
 			windowsOnly := windowsOnlySource(t, path)
+			chained := map[*ast.BinaryExpr]bool{}
 			ast.Inspect(file, func(node ast.Node) bool {
+				if sum, ok := node.(*ast.BinaryExpr); ok && sum.Op == token.ADD && !chained[sum] {
+					joined, parts := managedWindowsSentence(sum, chained)
+					for _, problem := range managedWindowsSentenceProblems(rel, joined, parts, windowsOnly) {
+						t.Errorf("%s: %s: %q", fset.Position(sum.Pos()), problem, joined)
+					}
+					return true
+				}
 				lit, ok := node.(*ast.BasicLit)
 				if !ok || lit.Kind != token.STRING {
 					return true
@@ -127,6 +167,11 @@ func TestManagedWindowsCommandsComeFromTheRenderer(t *testing.T) {
 			}
 		}
 	}
+	for prefix := range managedWindowsCallAllowed {
+		if !used["call\x00"+prefix] {
+			t.Errorf("managedWindowsCallAllowed lists %q, where no literal builds a PowerShell call", prefix)
+		}
+	}
 }
 
 // managedWindowsLiteralProblems lists what is wrong with one string literal
@@ -137,6 +182,12 @@ func managedWindowsLiteralProblems(rel, value string, windowsOnly bool, used map
 	renderer := strings.HasPrefix(rel, "internal/managed/")
 	if !renderer && strings.Contains(value, "`& ") {
 		problems = append(problems, "a PowerShell call built by hand: use managed.WindowsAdminCommand or WindowsGatewayCommand")
+	} else if !renderer && managedWindowsCall.MatchString(value) {
+		if prefix, ok := managedWindowsCallPrefix(rel); ok {
+			used["call\x00"+prefix] = true
+		} else {
+			problems = append(problems, "a PowerShell call built by hand: use managed.WindowsCommandLine, and say PowerShell")
+		}
 	}
 	if !renderer && strings.Contains(value, `Cisco\DefenseClaw\bin\defenseclaw`) {
 		problems = append(problems, "a hard-coded install path: use managed.WindowsAdminCommand or WindowsStandaloneAdminCLI")
@@ -147,6 +198,9 @@ func managedWindowsLiteralProblems(rel, value string, windowsOnly bool, used map
 	}
 	if !windowsOnly && !managedWindowsContext.MatchString(value) {
 		return problems
+	}
+	if managedWindowsVerbOnly.MatchString(value) {
+		problems = append(problems, "an instruction to run a subcommand without its executable: use managed.WindowsAdminCommand (windowsEnterpriseAdminCommand in internal/cli)")
 	}
 	rest := value
 	for _, words := range managedWindowsBareCommandAllowed[rel] {
@@ -159,6 +213,69 @@ func managedWindowsLiteralProblems(rel, value string, windowsOnly bool, used map
 		problems = append(problems, "names a bare `defenseclaw` command in Windows text, which is not on PATH on a managed computer")
 	}
 	return problems
+}
+
+// managedWindowsSentence is the + chain sum as one string, with %s for each
+// operand that is not a string literal, and the literals it joined. It marks
+// the chain's inner sums in chained, so a chain is joined once.
+func managedWindowsSentence(sum *ast.BinaryExpr, chained map[*ast.BinaryExpr]bool) (string, []string) {
+	var joined strings.Builder
+	var parts []string
+	var walk func(ast.Expr)
+	walk = func(expr ast.Expr) {
+		switch e := expr.(type) {
+		case *ast.BinaryExpr:
+			if e.Op == token.ADD {
+				chained[e] = true
+				walk(e.X)
+				walk(e.Y)
+				return
+			}
+		case *ast.BasicLit:
+			if e.Kind == token.STRING {
+				if value, err := strconv.Unquote(e.Value); err == nil {
+					joined.WriteString(value)
+					parts = append(parts, value)
+					return
+				}
+			}
+		}
+		joined.WriteString("%s")
+	}
+	walk(sum)
+	return joined.String(), parts
+}
+
+// managedWindowsSentenceProblems lists the problems of a joined sentence
+// (managedWindowsSentence) that none of its literals has alone.
+func managedWindowsSentenceProblems(rel, joined string, parts []string, windowsOnly bool) []string {
+	if len(parts) < 2 {
+		return nil
+	}
+	alone := map[string]bool{}
+	for _, part := range parts {
+		for _, problem := range managedWindowsLiteralProblems(rel, part, windowsOnly, map[string]bool{}) {
+			alone[problem] = true
+		}
+	}
+	var problems []string
+	for _, problem := range managedWindowsLiteralProblems(rel, joined, windowsOnly, map[string]bool{}) {
+		if !alone[problem] {
+			problems = append(problems, "in the joined sentence, "+problem)
+		}
+	}
+	return problems
+}
+
+// managedWindowsCallPrefix is the managedWindowsCallAllowed entry that
+// covers file rel.
+func managedWindowsCallPrefix(rel string) (string, bool) {
+	for prefix := range managedWindowsCallAllowed {
+		if rel == prefix || strings.HasSuffix(prefix, "/") && strings.HasPrefix(rel, prefix) {
+			return prefix, true
+		}
+	}
+	return "", false
 }
 
 // windowsOnlySource reports whether path builds for windows and for neither
@@ -197,6 +314,38 @@ func moduleRoot(t *testing.T) string {
 	}
 }
 
+// The joined-sentence check (g072 review 2 M3): a + chain is checked whole,
+// with %s for each part that is not a literal, and reports only what no
+// literal of it has alone.
+func TestManagedWindowsSentenceProblems(t *testing.T) {
+	for _, row := range []struct {
+		name, expr  string
+		windowsOnly bool
+		want        int
+	}{
+		{"instruction split from its command", "\"run \" + \"`enterprise windows ensure`\"", true, 1},
+		{"Windows words in another literal", "\"run Setup /repair X=1, \" + \"or `enterprise windows repair --profile standalone`)\"", false, 1},
+		{"the renderer's command", "\"run \" + windowsEnterpriseAdminCommand(\"ensure\") + \" from an elevated PowerShell prompt\"", true, 0},
+		{"found in one literal already", "\"run `enterprise windows ensure`\" + \" now\"", true, 0},
+		{"bare command after Windows words", "\"from an elevated PowerShell prompt, \" + \"run `defenseclaw doctor`\"", false, 1},
+		{"one literal", "\"run \" + x", true, 0},
+		{"portable prose", "\"run \" + \"`enterprise secret set`\"", false, 0},
+	} {
+		expr, err := parser.ParseExpr(row.expr)
+		if err != nil {
+			t.Fatalf("%s: %v", row.name, err)
+		}
+		sum, ok := expr.(*ast.BinaryExpr)
+		if !ok {
+			t.Fatalf("%s: not a sum", row.name)
+		}
+		joined, parts := managedWindowsSentence(sum, map[*ast.BinaryExpr]bool{})
+		if got := len(managedWindowsSentenceProblems("internal/cli/x.go", joined, parts, row.windowsOnly)); got != row.want {
+			t.Errorf("%s: %d problems in %q, want %d", row.name, got, joined, row.want)
+		}
+	}
+}
+
 // The source check itself: each rule fires, and the renderer, a per-user
 // command of an allowed file and plain prose do not.
 func TestManagedWindowsLiteralProblems(t *testing.T) {
@@ -208,7 +357,7 @@ func TestManagedWindowsLiteralProblems(t *testing.T) {
 		{"hand-built call", "internal/cli/x.go", "run `& '", false, 1},
 		{"hand-built call, quoted path", "internal/gateway/api.go", "then `& ", false, 1},
 		{"the renderer", "internal/managed/windows_admin_cli.go", "`& '", false, 0},
-		{"hard-coded path", "internal/gateway/x.go", `& 'C:\Program Files\Cisco\DefenseClaw\bin\defenseclaw.exe' status`, false, 1},
+		{"hard-coded path", "internal/gateway/x.go", `& 'C:\Program Files\Cisco\DefenseClaw\bin\defenseclaw.exe' status`, false, 2},
 		{"bare exe", "internal/cli/x.go", "with `defenseclaw.exe enterprise secret set`", false, 1},
 		{"bare exe, unquoted", "internal/cli/x.go", "run defenseclaw.exe enterprise windows ensure", false, 1},
 		{"bare gateway exe", "cmd/x/main.go", "with `defenseclaw-gateway.exe status`", false, 1},
@@ -226,6 +375,35 @@ func TestManagedWindowsLiteralProblems(t *testing.T) {
 		{"allowed file, a second bare command", "internal/cli/windows_enterprise_port_holder.go", "run `defenseclaw uninstall --all --binaries --yes`, then `defenseclaw doctor`", true, 1},
 		{"per-user uninstall, other file", "internal/cli/x_windows.go", "run `defenseclaw uninstall --all --binaries --yes`", true, 1},
 		{"prose", "internal/cli/x_windows.go", "DefenseClaw is managed by your organization", true, 0},
+		// g072 review 2 M3: a run instruction without the executable.
+		{"verb-only run, backticked", "internal/cli/x_windows.go", "run `enterprise windows ensure --profile standalone` first", true, 1},
+		{"verb-only run, unquoted", "internal/cli/x_windows.go", "; run enterprise windows repair, or DefenseClawSetup-Enterprise-Standalone-x64.exe /repair", true, 1},
+		{"verb-only run, capitalised", "internal/cli/x_windows.go", "Run enterprise windows repair to unpack it", true, 1},
+		{"verb-only rerun", "internal/cli/x_windows.go", "rerun 'enterprise windows ensure'", true, 1},
+		{"verb-only Run:", "internal/cli/x_windows.go", "Run: enterprise acp setup --client zed", true, 1},
+		{"verb-only with", "internal/cli/x_windows.go", "store its key with `enterprise secret set`", true, 1},
+		{"verb-only by", "internal/cli/x_windows.go", "its key stored by `enterprise secret set`", true, 1},
+		{"verb-only or", "internal/cli/x.go", "run Setup /repair ATTESTCLAUDEEFFECTIVEPOLICY=1, or `enterprise windows repair --profile standalone`", false, 1},
+		{"a flag's rule is not an instruction", "internal/cli/x_windows.go", "--purge is valid only with enterprise windows uninstall", true, 0},
+		{"verb-only, two spaces", "internal/cli/x_windows.go", "run  enterprise  windows  ensure", true, 1},
+		{"verb-only run in elevated text of a portable file", "internal/cli/x.go",
+			"run `enterprise windows repair --profile standalone --json` from an elevated administrator or SYSTEM session", false, 1},
+		{"verb-only in a portable file without Windows words", "internal/config/x.go", "store the key with `enterprise secret set --name <name>`", false, 0},
+		{"a reference to the command", "internal/cli/x_windows.go", "`enterprise windows status` reports the deployment", true, 0},
+		{"the renderer's command", "internal/cli/x_windows.go", "run %s from an elevated PowerShell prompt", true, 0},
+		// g072 review 2 M4: a call operator built outside the renderer.
+		{"call operator before a single-quoted path", "internal/cli/enterprise_acp.go", "& '", false, 1},
+		{"call operator alone", "internal/cli/enterprise_acp_setup.go", "& ", false, 1},
+		{"call operator after a pipe", "internal/cli/x.go", "$payload | & ", false, 1},
+		{"call operator before a double-quoted path", "cmd/defenseclaw-acp/main.go", `& "`, false, 1},
+		{"call operator in a sentence", "internal/cli/x.go", "as that user, run: & 'C:\\x\\defenseclaw.exe' enterprise acp setup", false, 1},
+		{"connector hook-command builder", "internal/gateway/connector/helpers.go", "& ", false, 0},
+		{"connector hook-command builder, subpackage", "internal/gateway/connector/hookexec/process_start_windows.go", "$payload | & ", true, 0},
+		{"legacy connector hook-command builder", "internal/legacyconnector/legacyconnector.go", "& ", false, 0},
+		{"allowed file name is not a prefix", "internal/cli/windows_managed_hook_settings_extra.go", "& ", false, 1},
+		{"POSIX and", "internal/firewall/iptables/iptables.go", "sudo iptables -F OUTPUT && ", false, 0},
+		{"POSIX redirect", "internal/actionfacts/x.go", " -i >& ", false, 0},
+		{"the renderer builds the call", "internal/managed/windows_admin_cli.go", "& ", false, 0},
 	} {
 		if got := len(managedWindowsLiteralProblems(row.rel, row.value, row.windowsOnly, map[string]bool{})); got != row.want {
 			t.Errorf("%s: %d problems, want %d", row.name, got, row.want)
