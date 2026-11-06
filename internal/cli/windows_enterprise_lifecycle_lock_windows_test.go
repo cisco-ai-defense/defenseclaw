@@ -15,6 +15,14 @@ import (
 	"golang.org/x/sys/windows"
 )
 
+// The production lifecycle.lock seams, read at package initialization,
+// before the test sandbox (isolateTestRunFolders) points them at a missing
+// lock, so the test below checks what ships.
+var (
+	productionWindowsSecretLifecycleLock     = windowsSecretLifecycleLock
+	productionWindowsEnterpriseHotConfigLock = windowsEnterpriseHotConfigLock
+)
+
 // GAP-0646 review 2: only the hot-config seam (Setup's pre-step, hot apply,
 // bundle restore, generation repair) waits for a held lifecycle.lock. The
 // guardian's per-user Claude transaction-folder cleanup and the secret
@@ -51,7 +59,7 @@ func TestOnlyTheHotConfigSeamWaitsForLifecycleLock(t *testing.T) {
 	}
 
 	start = time.Now()
-	if unlock, err := windowsSecretLifecycleLock(lockPath); !errors.Is(err, windows.ERROR_SHARING_VIOLATION) {
+	if unlock, err := productionWindowsSecretLifecycleLock(lockPath); !errors.Is(err, windows.ERROR_SHARING_VIOLATION) {
 		if unlock != nil {
 			unlock()
 		}
@@ -63,7 +71,7 @@ func TestOnlyTheHotConfigSeamWaitsForLifecycleLock(t *testing.T) {
 
 	windowsEnterpriseLifecycleLockWait = 300 * time.Millisecond
 	start = time.Now()
-	if unlock, err := windowsEnterpriseHotConfigLock(lockPath); !errors.Is(err, windows.ERROR_SHARING_VIOLATION) {
+	if unlock, err := productionWindowsEnterpriseHotConfigLock(lockPath); !errors.Is(err, windows.ERROR_SHARING_VIOLATION) {
 		if unlock != nil {
 			unlock()
 		}
