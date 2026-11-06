@@ -134,6 +134,74 @@ class AlertFindingRowsTests(unittest.TestCase):
         store.db.commit()
         self.assertEqual(store.agent_facts_for_alerts([finding.id])[finding.id], {"user": "alice"})
 
+    def test_openclaw_alert_identity_ignores_other_connector_decisions(self):
+        now = datetime.now(timezone.utc)
+        store = self.app.store
+        for action in ("hook_decision", "action"):
+            for order in (("other", "finding", "inspect"),
+                          ("inspect", "finding", "other"),
+                          ("finding", "other", "inspect"),
+                          ("finding", "inspect", "other")):
+                with self.subTest(action=action, order=order):
+                    events = {
+                        "finding": Event(action="scan-finding", severity="CRITICAL",
+                                         connector="openclaw", structured={"user.id": "alice", **FINDING},
+                                         timestamp=now),
+                        "inspect": Event(action="inspect-tool-block", severity="CRITICAL",
+                                         connector="openclaw",
+                                         structured={"user.id": "alice",
+                                                     "defenseclaw.agent.identity.id": "agt-openclaw"},
+                                         timestamp=now),
+                        "other": Event(action=action, severity="INFO", connector="codex",
+                                       structured={"user.id": "alice",
+                                                   "defenseclaw.agent.identity.id": "agt-codex"},
+                                       timestamp=now),
+                    }
+                    for name in order:
+                        store.log_event(events[name])
+                    request_id = f"shared-{action}-{'-'.join(order)}"
+                    store.db.execute("UPDATE audit_events SET request_id=? WHERE id IN (?, ?, ?)",
+                                     (request_id, *(event.id for event in events.values())))
+                    store.db.commit()
+                    self.assertEqual(store.agent_facts_for_alerts([events["finding"].id])[events["finding"].id],
+                                     {"user": "alice", "agent_identity": "agt-openclaw"})
+
+    def test_alert_identity_does_not_borrow_from_other_connector_decision(self):
+        now = datetime.now(timezone.utc)
+        store = self.app.store
+        finding = Event(action="scan-finding", severity="CRITICAL", connector="openclaw",
+                        structured={"user.id": "alice", **FINDING}, timestamp=now)
+        other = Event(action="hook_decision", severity="INFO", connector="codex",
+                      structured={"user.id": "alice", "defenseclaw.agent.identity.id": "agt-codex"},
+                      timestamp=now)
+        store.log_event(finding)
+        store.log_event(other)
+        store.db.execute("UPDATE audit_events SET request_id=? WHERE id IN (?, ?)",
+                         ("shared-without-inspect", finding.id, other.id))
+        store.db.commit()
+        self.assertEqual(store.agent_facts_for_alerts([finding.id])[finding.id], {"user": "alice"})
+
+    def test_alert_identity_prefers_finding_verified_agent_id(self):
+        now = datetime.now(timezone.utc)
+        store = self.app.store
+        columns = {row[1] for row in store.db.execute("PRAGMA table_info(audit_events)")}
+        if "agent_id" not in columns:
+            store.db.execute("ALTER TABLE audit_events ADD COLUMN agent_id TEXT")
+        finding = Event(action="scan-finding", severity="CRITICAL", connector="openclaw",
+                        structured={"user.id": "alice", **FINDING}, timestamp=now)
+        other = Event(action="inspect-tool-block", severity="CRITICAL", connector="openclaw",
+                      structured={"user.id": "alice", "defenseclaw.agent.identity.id": "agt-other"},
+                      timestamp=now)
+        store.log_event(finding)
+        store.log_event(other)
+        store.db.execute("UPDATE audit_events SET request_id=?, agent_id=? WHERE id=?",
+                         ("shared-same-connector", "agt-openclaw", finding.id))
+        store.db.execute("UPDATE audit_events SET request_id=? WHERE id=?",
+                         ("shared-same-connector", other.id))
+        store.db.commit()
+        self.assertEqual(store.agent_facts_for_alerts([finding.id])[finding.id],
+                         {"user": "alice", "agent_identity": "agt-openclaw"})
+
     def _finding(self, request_id: str, hook_details: str, at: datetime) -> str:
         store = self.app.store
         hook = Event(action="connector-hook", target="PreToolUse", severity="INFO",
