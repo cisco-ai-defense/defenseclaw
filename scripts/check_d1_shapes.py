@@ -73,7 +73,7 @@ HOST_ASSIGNMENT = re.compile(r"\b(?:host|hostname|server|remote|user|username|ac
 # The reviewed payload vocabulary is independent of the per-row digest
 # manifest. Adding a new literal identifier requires an explicit scrub review.
 TOKEN = re.compile(r"[A-Za-z_][A-Za-z0-9_.@+-]*")
-APPROVED_VOCAB_DIGEST = "b38598eb347081bc6fd2366407ede67c31618b8d0bf1b12409da455eb2d33d1c"
+APPROVED_VOCAB_DIGEST = "ac352a8206e7d72b06b3da62d9a5fdf5845dc50ddd617c1ce17836a233bb5513"
 BAD_TEXT = (
     re.compile(
         r"(?<![A-Za-z0-9])/(?:home|Users|root|tmp|var|workspace|mnt|opt|etc|usr|proc|run|private|app)(?:/|\b)", re.I
@@ -108,7 +108,8 @@ def strings(value: object):
     if isinstance(value, str):
         yield value
     elif isinstance(value, dict):
-        for item in value.values():
+        for key, item in value.items():
+            yield from strings(key)
             yield from strings(item)
     elif isinstance(value, list):
         for item in value:
