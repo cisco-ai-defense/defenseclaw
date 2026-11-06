@@ -192,7 +192,9 @@ func watchManagedGatewayStarts(ctx context.Context, opts Options, deadline time.
 	done := make(chan struct{})
 	var once sync.Once
 	stop = func() { once.Do(func() { close(done) }) }
-	go watchGatewayStarts(watched, done, cancel, probe, gatewayStartWatchInterval, deadline)
+	// The intervals are read now: the watch outlives the call by a moment
+	// (GAP-0680).
+	go watchGatewayStarts(watched, done, cancel, probe, gatewayStartWatchInterval, gatewayRunningWatchInterval, deadline)
 	return watched, stop, func() { stop(); cancel(nil) }
 }
 
@@ -208,7 +210,7 @@ func watchGatewayStarts(
 	done <-chan struct{},
 	cancel context.CancelCauseFunc,
 	probe func(context.Context) (gatewayServiceState, error),
-	interval time.Duration,
+	interval, runningInterval time.Duration,
 	deadline time.Time,
 ) {
 	timer := time.NewTimer(interval)
@@ -239,7 +241,7 @@ func watchGatewayStarts(
 			cancel(errGatewayStartFailing)
 			return
 		case state.Active == "active":
-			next = max(interval, gatewayRunningWatchInterval)
+			next = max(interval, runningInterval)
 		case !deadline.IsZero():
 			// Stopping, starting or stopped: the call waits in the socket.
 			left := time.Until(deadline)
