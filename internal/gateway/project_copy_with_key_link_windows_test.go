@@ -48,9 +48,13 @@ func TestGAP0288ManagedWindowsCodexProjectCopy(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
+	if err := os.Symlink(filepath.Join(home, ".ssh", "authorized_keys"), filepath.Join(home, "project-destlink")); err != nil {
+		t.Fatal(err)
+	}
 	t.Setenv("HOME", home)
 	t.Setenv("USERPROFILE", home)
 	strictCopyRows := map[string]bool{"B11": true, "V1": true, "V2": true, "V5": true, "V7": true, "V10": true, "V11": true, "V12": true, "V13": true, "V14": true, "V15": true}
+	managedOnlyRows := map[string]bool{"K07": true}
 	for _, row := range []struct {
 		name, cwd, command string
 		want               string
@@ -75,6 +79,9 @@ func TestGAP0288ManagedWindowsCodexProjectCopy(t *testing.T) {
 		{"K00", project, `echo key >> ` + filepath.ToSlash(filepath.Join(home, ".ssh", "authorized_keys")), "block", nil},
 		{"K05", project, `env -C ~ cp -r project .ssh/project-bak`, "block", nil},
 		{"K06", project, `env -C ~/project ln -sf ../.ssh/authorized_keys ln3; cp a.txt ln3`, "block", []string{"claudecode"}},
+		{"K07", home, `env -C ~ cp -R -L project project-L-bak`, "block", nil},
+		{"K08", home, `env -C ~ cp project/a.txt project-destlink`, "block", nil},
+		{"K09", home, `Copy-Item project/a.txt project-destlink`, "block", nil},
 	} {
 		connectors := row.connectors
 		if connectors == nil {
@@ -88,6 +95,9 @@ func TestGAP0288ManagedWindowsCodexProjectCopy(t *testing.T) {
 			}
 			for _, tool := range tools {
 				for _, managed := range []bool{false, true} {
+					if managedOnlyRows[row.name] && !managed {
+						continue
+					}
 					for _, profile := range []string{"default", "strict"} {
 						t.Run(row.name+"/"+connector+"/"+tool+"/"+profile, func(t *testing.T) {
 							t.Setenv("HOME", home)

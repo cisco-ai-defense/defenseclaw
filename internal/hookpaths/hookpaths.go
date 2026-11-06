@@ -2294,10 +2294,11 @@ type shellLinks struct {
 	cdDirs []string
 	// scopedMoves: destinations of plain mv calls that land directly in an
 	// opaque scope and can only rename an entry there (scopedMoveSafe).
-	scopedMoves            map[string]bool
-	opaqueScopes           []opaqueScope
-	copyDestinations       []string
-	placedCopyDestinations []string // copy destinations placed by the statement walk
+	scopedMoves             map[string]bool
+	opaqueScopes            []opaqueScope
+	copyDestinations        []string
+	placedCopyDestinations  []string // copy destinations placed by the statement walk
+	dereferencedSourceLinks []string // copy destinations whose source may contain a followed link
 	// copyEnds: the end offset of the copy call that wrote a destination,
 	// when that call is a plain top-level statement of a ; / && / || list
 	// (runs once, in order), else -1. globalCopyAt: the offsets of the copy
@@ -2346,6 +2347,7 @@ func (l *shellLinks) merge(inner shellLinks) {
 	l.opaqueScopes = append(l.opaqueScopes, inner.opaqueScopes...)
 	l.copyDestinations = append(l.copyDestinations, inner.copyDestinations...)
 	l.placedCopyDestinations = append(l.placedCopyDestinations, inner.placedCopyDestinations...)
+	l.dereferencedSourceLinks = append(l.dereferencedSourceLinks, inner.dereferencedSourceLinks...)
 	for _, destination := range inner.copyDestinations {
 		l.noteCopyEnd(destination, -1)
 	}
@@ -3095,6 +3097,9 @@ func commandLinksRead(command, cwd, home string, facts map[string]string, record
 					readable = readable && !option && !dynamic && !nested && movedDir == "" && len(callDirs) == 1
 					diskRead := false
 					if diskLink {
+						if cpOperands(words[1:], static[1:]).dereference && destination != "" {
+							links.dereferencedSourceLinks = append(links.dereferencedSourceLinks, destination)
+						}
 						// A copy of links already on disk whose texts the
 						// hook client read is read at the end as the same
 						// links at the copy's names (rel-1-0-6:GAP-0274).
@@ -4180,6 +4185,13 @@ func (l Links) PlacedCopyDestinations(word string) []string {
 // the statement walk places its call.
 func (l Links) IsCopyDestination(path string) bool {
 	return slices.Contains(l.links.copyDestinations, linksDrivePath(path))
+}
+
+// DereferencedSourceLink reports an existing source link that this copy
+// follows. The source fact comes from the same client or local walk as the
+// ordinary copy-scope proof.
+func (l Links) DereferencedSourceLink(path string) bool {
+	return slices.Contains(l.links.dereferencedSourceLinks, linksDrivePath(path))
 }
 
 // linksDrivePath spells a Windows drive path as the link reading records its

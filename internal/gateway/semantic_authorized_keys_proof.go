@@ -1184,6 +1184,9 @@ func trustedExistingAuthorizedKeysSymlinkWrite(request trustedActionRequest, fac
 		if !ordinarySpelling(target) {
 			return true
 		}
+		if request.ProtectedHomeHook && links.DereferencedSourceLink(target) {
+			return true
+		}
 		if request.staticOperandReading || request.unresolvedSourceWords {
 			// A static projection is one reading of a runtime operand. It
 			// cannot clear the unresolved name in the original command.
