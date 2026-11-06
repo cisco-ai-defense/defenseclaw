@@ -41,6 +41,10 @@ const CWDKey = "\x00cwd"
 // refusal; its absence cannot authorize a skill.
 const ProjectSkillRootUnverifiedPrefix = "\x00project-skill-root:"
 
+// ProjectSkillRootVerifiedPrefix records a present root that the calling
+// user's hook freshly inspected as an ordinary project skill folder.
+const ProjectSkillRootVerifiedPrefix = "\x00project-skill-root-verified:"
+
 // ProjectSkillSelectedPrefix names a selected skill folder under an
 // unverified project root. Its value is the skill name in the hook call.
 const ProjectSkillSelectedPrefix = "\x00project-skill-selected:"
@@ -999,6 +1003,32 @@ func ResolveConnector(connector, surface, event string, payload []byte) string {
 		}
 		return base64.RawURLEncoding.EncodeToString(encoded)
 	}
+	if runtime.GOOS == "windows" && strings.EqualFold(strings.TrimSpace(connector), "codex") && startEvent == "UserPromptSubmit" {
+		var cwd, prompt string
+		_ = json.Unmarshal(envelope["cwd"], &cwd)
+		_ = json.Unmarshal(envelope["prompt"], &prompt)
+		name := CodexSelectedSkillName(prompt)
+		if name != "" {
+			if home, err := os.UserHomeDir(); err == nil {
+				facts := projectSkillRootFacts(connector, home, cwd)
+				for key := range facts {
+					if !strings.HasPrefix(key, ProjectSkillRootUnverifiedPrefix) {
+						continue
+					}
+					root := strings.TrimPrefix(key, ProjectSkillRootUnverifiedPrefix)
+					for _, dir := range projectSkillSelectedFolders(root, name) {
+						facts[ProjectSkillSelectedPrefix+dir] = name
+					}
+				}
+				if len(facts) > 0 {
+					facts[CWDKey] = cwd
+					if encoded, err := json.Marshal(facts); err == nil && len(encoded) <= maxEncodedTargets {
+						return base64.RawURLEncoding.EncodeToString(encoded)
+					}
+				}
+			}
+		}
+	}
 	copilot := strings.EqualFold(strings.TrimSpace(connector), "copilot")
 	if !copilot {
 		if evidence := instructionLoadEvidence(envelope); evidence != "" {
@@ -1051,7 +1081,9 @@ func ResolveConnector(connector, surface, event string, payload []byte) string {
 				if name := projectSkillCallName(args); name != "" {
 					roots := make([]string, 0, len(facts))
 					for key := range facts {
-						roots = append(roots, strings.TrimPrefix(key, ProjectSkillRootUnverifiedPrefix))
+						if strings.HasPrefix(key, ProjectSkillRootUnverifiedPrefix) {
+							roots = append(roots, strings.TrimPrefix(key, ProjectSkillRootUnverifiedPrefix))
+						}
 					}
 					for _, root := range roots {
 						for _, dir := range projectSkillSelectedFolders(root, name) {
@@ -2076,6 +2108,13 @@ func Decode(value string) (map[string]string, bool) {
 		return nil, false
 	}
 	for key, finding := range targets {
+		if strings.HasPrefix(key, ProjectSkillRootVerifiedPrefix) {
+			root := strings.TrimPrefix(key, ProjectSkillRootVerifiedPrefix)
+			if !filepath.IsAbs(root) || len(root) > MaxWriteTargetPathBytes || finding != "1" {
+				return nil, false
+			}
+			continue
+		}
 		if strings.HasPrefix(key, ProjectSkillSelectedPrefix) {
 			dir := strings.TrimPrefix(key, ProjectSkillSelectedPrefix)
 			if !filepath.IsAbs(dir) || len(dir) > MaxWriteTargetPathBytes || projectSkillName(finding) == "" || finding != projectSkillName(finding) {

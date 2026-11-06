@@ -87,10 +87,10 @@ func appendStandaloneGatewayWarnings(result *enterprisestatus.Result, body, stat
 			"; inspect `defenseclaw-gateway status` or gateway /health telemetry details")
 	}
 	// A project skill folder the hook or hook guardian could not verify is
-	// not watched. /health gives only the number; the hook policy mode and
-	// admission source determine the skill decision.
+	// not watched. /health gives only the number; a selected skill under
+	// one of these roots is refused until a fresh inspection verifies it.
 	if n := health.Watcher.Details.ProjectSkillRootsUnverified; n > 0 {
 		result.AddWarning("project_skill_root_unverified", fmt.Sprintf("%d project skill folder(s) could not be verified: "+
-			"they are not watched and their skills may be refused or warned; the gateway log names each folder and the reason", n))
+			"they are not watched and their skills are refused; the gateway log names each folder and the reason", n))
 	}
 }

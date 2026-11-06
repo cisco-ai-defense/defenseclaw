@@ -73,7 +73,7 @@ func TestGAP0621ProfileExcludedProjectSkillRootIsReportedAndDecided(t *testing.T
 	}
 	api.scannerCfg.AssetPolicy.Mode = config.AssetPolicyModeObserve
 	decision, matched = api.projectSkillScanPending("skill", "claudecode", "hook", paths)
-	if !matched || decision.Action != "allow" || !decision.WouldBlock || decision.Source != "project-skill-unverified" {
+	if !matched || decision.Action != "block" || decision.Source != "project-skill-unverified" {
 		t.Fatalf("observe decision = %+v, matched=%v", decision, matched)
 	}
 	guardianRoot := filepath.Join(home, "guardian", ".claude", "skills")
