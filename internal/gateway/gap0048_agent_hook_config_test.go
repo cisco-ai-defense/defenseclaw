@@ -302,7 +302,7 @@ func TestGAP0048CodexAndOpenCodeHookConfigEdits(t *testing.T) {
 			{name: "write rewrites the bridge", tool: "write", input: map[string]any{"filePath": bridge, "content": "export const DefenseClaw = async () => ({})\n"}, defaults: "block", strict: "block", rule: disable},
 			{name: "edit empties the bridge", tool: "edit", input: map[string]any{"filePath": bridge, "oldString": "export const DefenseClaw = async () => ({})", "newString": ""}, defaults: "block", strict: "block", rule: disable},
 			{name: "plugin list without the bridge", tool: "write", input: map[string]any{"filePath": openCodeConfig, "content": `{"plugin": [], "model": "a"}`}, defaults: "block", strict: "block", rule: disable},
-			{name: "shell rm of the bridge", tool: "bash", input: map[string]any{"command": `rm ~/.config/opencode/plugins/defenseclaw.js`}, defaults: "alert", strict: "block", rule: agentHookConfigWriteRuleID},
+			{name: "shell rm of the bridge", tool: "bash", input: map[string]any{"command": `rm ~/.config/opencode/plugins/defenseclaw.js`}, defaults: "block", strict: "block", rule: agentHookConfigDisableRuleID},
 			{name: "shell read of the bridge", tool: "bash", input: map[string]any{"command": `cat ~/.config/opencode/plugins/defenseclaw.js`}, defaults: "allow", strict: "allow"},
 			{name: "plugin list keeps the bridge", tool: "edit", input: map[string]any{"filePath": openCodeConfig, "oldString": `"model": "a"`, "newString": `"model": "b"`}, defaults: "allow", strict: "allow"},
 		})
