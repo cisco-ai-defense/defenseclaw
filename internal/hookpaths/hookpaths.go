@@ -1082,6 +1082,135 @@ func walkWritePathMemo(base, path string, linkDepth int, collect, patchTarget bo
 	return filepath.Clean(current), forms, linkDepth, true
 }
 
+func walkWritePathMemoWithReaders(base, path string, linkDepth int, collect, patchTarget bool, memo *TargetMemo,
+	lstat func(string) (os.FileInfo, error), readlink func(string) (string, error),
+) (string, []string, int, bool) {
+	if linkDepth > maxWriteTargetLinkDepth {
+		return "", nil, linkDepth, false
+	}
+	current := base
+	absolute := filepath.IsAbs(path)
+	if absolute {
+		current = filepath.VolumeName(path) + string(filepath.Separator)
+		path = strings.TrimPrefix(path, filepath.VolumeName(path))
+	} else if !filepath.IsAbs(base) {
+		return "", nil, linkDepth, false
+	}
+	if memo != nil && (base != "" || linkDepth != 0 || collect || patchTarget || !absolute) {
+		memo = nil
+	}
+	var forms []string
+	if collect && absolute {
+		forms = append(forms, current)
+	}
+	add := func(form string) bool {
+		if collect {
+			forms = append(forms, form)
+			return len(forms) <= maxOpaquePathForms
+		}
+		return true
+	}
+	// The stack records whether a component added after base is missing.
+	// A resolved link is a physical directory, so ".." ascends from its
+	// target. A missing component cannot be crossed: it may become a link
+	// before the command executes.
+	var crossed []bool
+	parts := strings.Split(filepath.ToSlash(path), "/")
+	start := 0
+	// key is the memo key of parts[:i+1]: the volume root and the
+	// components as written.
+	var key string
+	if memo != nil {
+		key = current
+		for i, part := range parts {
+			next := key + "\x00" + part
+			state, ok := memo.prefix(next)
+			if !ok {
+				break
+			}
+			if state.failed {
+				return "", nil, state.linkDepth, false
+			}
+			key, start = next, i+1
+			current, crossed, linkDepth = state.current, append([]bool(nil), state.crossed...), state.linkDepth
+		}
+	}
+	fail := func() (string, []string, int, bool) {
+		if memo != nil {
+			memo.storePrefix(key, walkState{linkDepth: linkDepth, failed: true})
+		}
+		return "", nil, linkDepth, false
+	}
+	for _, part := range parts[start:] {
+		if memo != nil {
+			key += "\x00" + part
+		}
+		switch part {
+		case "", ".":
+		case "..":
+			if len(crossed) > 0 {
+				if crossed[len(crossed)-1] {
+					return fail()
+				}
+				crossed = crossed[:len(crossed)-1]
+			}
+			current = filepath.Dir(current)
+			if !add(current) {
+				return fail()
+			}
+		default:
+			candidate := filepath.Join(current, part)
+			if !add(candidate) {
+				return fail()
+			}
+			memo.noteWork()
+			info, err := lstat(candidate)
+			if err != nil && !os.IsNotExist(err) {
+				return fail()
+			}
+			unknown := os.IsNotExist(err)
+			if err == nil && (info.Mode()&os.ModeSymlink != 0 || windowsMountPointLink(candidate, info)) {
+				// The cwd proc link is interpreted by the process opening the
+				// operand. Resolving it in the hook would prove a different path.
+				if ProcCWDWriteOperand(candidate) {
+					return fail()
+				}
+				link, err := readlink(candidate)
+				if err != nil {
+					return fail()
+				}
+				// A patch tool may reinterpret a link target with line breaks
+				// as multiple file directives. Ordinary file opens use the
+				// literal kernel path and retain their normal proof.
+				if patchTarget && strings.ContainsAny(link, "\r\n") {
+					return fail()
+				}
+				var extra []string
+				var nextDepth int
+				var ok bool
+				current, extra, nextDepth, ok = walkWritePathMemoWithReaders(current, link, linkDepth+1, collect, patchTarget, nil, lstat, readlink)
+				if !ok || collect && len(forms)+len(extra) > maxOpaquePathForms {
+					return fail()
+				}
+				linkDepth = nextDepth
+				forms = append(forms, extra...)
+				_, err = lstat(current)
+				if err != nil && !os.IsNotExist(err) {
+					return fail()
+				}
+				crossed = append(crossed, os.IsNotExist(err))
+			} else {
+				current = candidate
+				crossed = append(crossed, unknown)
+			}
+		}
+		if memo != nil {
+			memo.storePrefix(key, walkState{current: current, crossed: crossed, linkDepth: linkDepth})
+		}
+	}
+	return filepath.Clean(current), forms, linkDepth, true
+}
+
 // AuthorizedKeysFiles names the user's authorized-keys files under ~/.ssh:
 // the sshd default AuthorizedKeysFile (.ssh/authorized_keys and
 // .ssh/authorized_keys2), the same set the direct-write rule
