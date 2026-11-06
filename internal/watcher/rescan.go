@@ -645,7 +645,7 @@ func (w *InstallWatcher) enumerateTargets() []InstallEvent {
 				bare := w.hermesBareCategory(dir, e.Name())
 				for _, child := range children {
 					childPath := filepath.Join(path, child)
-					if w.isOwnPlugin(childPath) {
+					if w.isOwnPlugin(childPath) || w.hermesVendorPlugin(dir, childPath) {
 						continue
 					}
 					name := e.Name() + "/" + child
@@ -664,6 +664,9 @@ func (w *InstallWatcher) enumerateTargets() []InstallEvent {
 			}
 			if w.hermesCategoryFolder(path) {
 				continue // a Hermes category folder with no plugins yet (GAP-2471)
+			}
+			if w.hermesVendorPlugin(dir, path) {
+				continue // a digest-pinned Hermes shipped plugin (GAP-0645)
 			}
 			targets = append(targets, InstallEvent{
 				Type:      InstallPlugin,
@@ -720,108 +723,7 @@ func (w *InstallWatcher) rescanConnectorForPath(path string) string {
 // names them the same way (GAP-2439). The user plugin root (~/.hermes/plugins)
 // keeps category/name, as "plugin list" does.
 func (w *InstallWatcher) hermesBareCategory(dir, category string) bool {
-	if category != "platforms" || w.connectorForPath(dir) != "hermes" {
-		return false
-	}
-	dir = filepath.Clean(dir)
-	if filepath.Base(dir) == "plugins" && filepath.Base(filepath.Dir(dir)) == "hermes-agent" {
-		return true
-	}
-	bundled := strings.TrimSpace(os.Getenv("HERMES_BUNDLED_PLUGINS"))
-	return bundled != "" && filepath.Clean(bundled) == dir
-}
-
-// hermesBundledPlugin reports a plugin within a registered Hermes install's
-// shipped plugin root. User and project plugin roots remain ordinary assets.
-func (w *InstallWatcher) hermesBundledPlugin(evt InstallEvent) bool {
-	if evt.Type != InstallPlugin || w.eventConnector(evt) != "hermes" {
-		return false
-	}
-	path, err := filepath.Abs(evt.Path)
-	if err != nil {
-		return false
-	}
-	custom := strings.TrimSpace(os.Getenv("HERMES_BUNDLED_PLUGINS"))
-	for _, root := range w.pluginDirs {
-		if w.connectorForPath(root) != "hermes" {
-			continue
-		}
-		absRoot, err := filepath.Abs(root)
-		if err != nil || path == absRoot || !pathWithinRoot(path, absRoot) {
-			continue
-		}
-		// A bundle-shaped name can point through a link to an unrelated
-		// plugin tree. Only the physical shipped tree gets a baseline tag.
-		resolvedRoot, rootErr := filepath.EvalSymlinks(absRoot)
-		resolvedPath, pathErr := filepath.EvalSymlinks(path)
-		if rootErr != nil || pathErr != nil ||
-			!sameWatcherPath(canonicalSkillSystemPath(absRoot), resolvedRoot) ||
-			!sameWatcherPath(canonicalSkillSystemPath(path), resolvedPath) {
-			continue
-		}
-		if filepath.Base(absRoot) == "plugins" && filepath.Base(filepath.Dir(absRoot)) == "hermes-agent" ||
-			custom != "" && filepath.Clean(custom) == absRoot {
-			return true
-		}
-	}
-	return false
-}
-
-// bundledPluginScanState captures the physical directories and content used
-// to decide whether a first-sight scan belongs to a shipped plugin tree.
-// A path's final spelling alone cannot establish which tree the scanner read.
-type bundledPluginScanState struct {
-	directories []os.FileInfo
-	treeHash    string
-}
-
-func pluginDirectoryChain(path string) []os.FileInfo {
-	path, err := filepath.Abs(path)
-	if err != nil {
-		return nil
-	}
-	var chain []os.FileInfo
-	for {
-		info, err := os.Stat(path)
-		if err != nil || !info.IsDir() {
-			return nil
-		}
-		chain = append(chain, info)
-		parent := filepath.Dir(path)
-		if parent == path {
-			return chain
-		}
-		path = parent
-	}
-}
-
-func samePluginDirectoryChain(before, after []os.FileInfo) bool {
-	if len(before) == 0 || len(before) != len(after) {
-		return false
-	}
-	for i := range before {
-		if !os.SameFile(before[i], after[i]) {
-			return false
-		}
-	}
-	return true
-}
-
-func (w *InstallWatcher) bundledPluginScanState(evt InstallEvent) *bundledPluginScanState {
-	if !w.hermesBundledPlugin(evt) {
-		return nil
-	}
-	before := pluginDirectoryChain(evt.Path)
-	if len(before) == 0 {
-		return nil
-	}
-	treeHash, err := fingerprintBundledTree(evt.Path, before[0])
-	if err != nil || treeHash == "" ||
-		!w.hermesBundledPlugin(evt) ||
-		!samePluginDirectoryChain(before, pluginDirectoryChain(evt.Path)) {
-		return nil
-	}
-	return &bundledPluginScanState{directories: before, treeHash: treeHash}
+	return category == "platforms" && w.connectorForPath(dir) == "hermes" && hermesBundledPluginRoot(dir)
 }
 
 func skipPluginChildDir(name string) bool {
@@ -1139,7 +1041,7 @@ func (w *InstallWatcher) rescanTarget(ctx context.Context, evt InstallEvent, fpC
 			}
 			// First time we've seen this target: scan once to establish a
 			// baseline that future cycles can diff against.
-			result, scanID := w.scanAndEmit(ctx, evt, !w.startupRescanDone)
+			result, scanID := w.scanAndEmit(ctx, evt)
 			w.persistSnapshot(evt, currentSnap, scanID, fingerprint)
 			if result == nil {
 				return rescanSkipped
@@ -1240,7 +1142,7 @@ func (w *InstallWatcher) rescanTarget(ctx context.Context, evt InstallEvent, fpC
 
 	// Drift, fingerprint change, or recovery: run the scanner exactly once
 	// and diff its findings against the previous baseline scan.
-	result, scanID := w.scanAndEmit(ctx, evt, false)
+	result, scanID := w.scanAndEmit(ctx, evt)
 	deltas = append(deltas, w.findingDrift(baseline, result)...)
 
 	if len(deltas) > 0 {
@@ -1428,7 +1330,6 @@ func (w *InstallWatcher) readmitChanged(ctx context.Context, evt InstallEvent, b
 	fmt.Fprintf(os.Stderr, "[%s] %s %s needs admission; scanning\n", source, evt.Type, evt.Name)
 	res := w.runAdmission(ctx, evt)
 	w.notifyAdmission(res)
-	w.emitBundledPluginChange(ctx, evt, baseline, snap)
 	if res.ScanID != "" {
 		if current, err := w.loadScanResult(res.ScanID); err == nil {
 			deltas = append(deltas, w.findingDrift(baseline, current)...)
@@ -1473,29 +1374,6 @@ func (w *InstallWatcher) readmitChanged(ctx context.Context, evt InstallEvent, b
 		}
 	}
 	return rescanScanned
-}
-
-// emitBundledPluginChange makes a changed shipped plugin visible even when
-// its scanner findings match the first, baseline-only observation. The
-// snapshot's content digest identifies the changed version without storing
-// source bytes in the finding. The admission scan still decides enforcement.
-func (w *InstallWatcher) emitBundledPluginChange(ctx context.Context, evt InstallEvent, baseline *audit.SnapshotRow, snap *TargetSnapshot) {
-	if w.secureClientActive() || !w.hermesBundledPlugin(evt) || baseline == nil || snap == nil ||
-		baseline.ContentHash == "" || snap.ContentHash == "" || baseline.ContentHash == snap.ContentHash {
-		return
-	}
-	result := &scanner.ScanResult{
-		Scanner: "watcher", Target: w.addressableAssetPath(evt.Path), TargetType: "plugin",
-		Timestamp: time.Now().UTC(), Verdict: "warn",
-		Findings: []scanner.Finding{{
-			ID: "bundled-plugin-content", RuleID: "PLUGIN-BUNDLE-CHANGED",
-			Severity: scanner.SeverityMedium, Title: "Bundled plugin changed",
-			Description:     "Bundled plugin contents changed after the recorded baseline",
-			EvidenceSummary: "content_sha256=" + snap.ContentHash,
-			Scanner:         "watcher",
-		}},
-	}
-	w.emitRescanResult(ctx, evt, result)
 }
 
 // interruptedAdmissionMark ends the scanner fingerprint of a baseline that
@@ -1569,14 +1447,10 @@ func shouldRescan(baseline *audit.SnapshotRow, snap *TargetSnapshot, fingerprint
 // unified emission pipeline (one scan_results row + per-finding rows + events).
 // Returns the result and the generated scan ID, or (nil, "") when no scanner is
 // configured or the scan fails.
-func (w *InstallWatcher) scanAndEmit(ctx context.Context, evt InstallEvent, initialBaseline bool) (*scanner.ScanResult, string) {
+func (w *InstallWatcher) scanAndEmit(ctx context.Context, evt InstallEvent) (*scanner.ScanResult, string) {
 	s := w.newScanner(evt)
 	if s == nil {
 		return nil, ""
-	}
-	var scannedTree *bundledPluginScanState
-	if initialBaseline && !w.secureClientActive() {
-		scannedTree = w.bundledPluginScanState(evt)
 	}
 
 	scanCtx, cancel := context.WithTimeout(ctx, w.scanTimeout(evt))
@@ -1585,15 +1459,7 @@ func (w *InstallWatcher) scanAndEmit(ctx context.Context, evt InstallEvent, init
 	target, err := w.scanTargetFor(evt)
 	var result *scanner.ScanResult
 	if err == nil {
-		if scannedTree != nil {
-			var pinned bool
-			result, pinned, err = scanBundledPluginBaseline(scanCtx, s, target, scannedTree)
-			if !pinned {
-				scannedTree = nil
-			}
-		} else {
-			result, err = s.Scan(scanCtx, target)
-		}
+		result, err = s.Scan(scanCtx, target)
 	}
 	if err == nil && !w.secureClientActive() {
 		// A scan without its judge is incomplete: it never becomes the
@@ -1610,17 +1476,6 @@ func (w *InstallWatcher) scanAndEmit(ctx context.Context, evt InstallEvent, init
 	}
 	if result == nil {
 		return nil, ""
-	}
-	if scannedTree != nil {
-		after := w.bundledPluginScanState(evt)
-		if after != nil && after.treeHash == scannedTree.treeHash &&
-			samePluginDirectoryChain(scannedTree.directories, after.directories) {
-			for i := range result.Findings {
-				if !slices.Contains(result.Findings[i].Tags, scanner.FindingTagDetectionOnly) {
-					result.Findings[i].Tags = append(append([]string(nil), result.Findings[i].Tags...), scanner.FindingTagDetectionOnly)
-				}
-			}
-		}
 	}
 	w.rescanFailureMu.Lock()
 	delete(w.rescanFailureLogged, evt.Path)

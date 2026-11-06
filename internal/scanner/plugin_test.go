@@ -339,7 +339,7 @@ func TestParsePluginOutput_AllSuppressed(t *testing.T) {
 
 func TestPluginScanCommand(t *testing.T) {
 	t.Run("default cli path uses plugin subcommand", func(t *testing.T) {
-		s := &PluginScanner{BinaryPath: "", Connector: "hermes"}
+		s := &PluginScanner{BinaryPath: ""}
 		binary, args := s.pluginScanCommand("/tmp/plugin")
 		if binary != "defenseclaw" {
 			t.Fatalf("binary = %q, want defenseclaw", binary)
@@ -393,39 +393,4 @@ func TestPluginScanCommand(t *testing.T) {
 			}
 		}
 	})
-}
-
-func TestPluginScannerScanBaselineUsesPinnedPath(t *testing.T) {
-	original := filepath.Join(t.TempDir(), "installed", "photon")
-	copyPath := filepath.Join(t.TempDir(), "copy")
-	if err := os.MkdirAll(copyPath, 0o700); err != nil {
-		t.Fatal(err)
-	}
-	previousRun := runScannerCommand
-	t.Cleanup(func() { runScannerCommand = previousRun })
-	runScannerCommand = func(cmd *exec.Cmd) error {
-		seenCopy, seenConnector := false, false
-		for i, arg := range cmd.Args {
-			seenCopy = seenCopy || arg == copyPath
-			seenConnector = seenConnector || arg == "--connector" && i+1 < len(cmd.Args) && cmd.Args[i+1] == "hermes"
-		}
-		if !seenCopy || !seenConnector {
-			return fmt.Errorf("scanner arguments do not bind the copied target and connector: %v", cmd.Args)
-		}
-		_, err := fmt.Fprintf(cmd.Stdout, `{"findings":[{"id":"plugin-1","rule_id":"PLUGIN-REVIEW","severity":"HIGH","title":"Review source","location":%q,"description":%q,"evidence":%q,"remediation":%q}]}`,
-			filepath.Join(copyPath, "plugin.yaml"), copyPath, copyPath, copyPath)
-		return err
-	}
-	result, err := (&PluginScanner{BinaryPath: "defenseclaw", Connector: "hermes"}).ScanBaseline(context.Background(), original, copyPath)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if result.Target != original || len(result.Findings) != 1 {
-		t.Fatalf("baseline result = %#v", result)
-	}
-	finding := result.Findings[0]
-	if finding.Location != filepath.Join(original, "plugin.yaml") ||
-		finding.Description != original || finding.EvidenceSummary != original || finding.Remediation != original {
-		t.Errorf("baseline finding paths were not restored: %#v", finding)
-	}
 }

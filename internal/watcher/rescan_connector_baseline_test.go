@@ -7,38 +7,69 @@ import (
 	"context"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
+	"github.com/defenseclaw/defenseclaw/internal/audit"
+	"github.com/defenseclaw/defenseclaw/internal/config"
 	"github.com/defenseclaw/defenseclaw/internal/observability"
 	"github.com/defenseclaw/defenseclaw/internal/scanner"
 )
 
+// pluginBaselineScanner returns the findings fixed for each target and
+// records the targets it was asked to read. onScan runs before it returns.
 type pluginBaselineScanner struct {
+	mu       sync.Mutex
 	findings map[string][]scanner.Finding
+	scanned  []string
+	onScan   func(target string)
 }
 
 func (s *pluginBaselineScanner) Name() string               { return "plugin-scanner" }
 func (s *pluginBaselineScanner) Version() string            { return "test-1" }
 func (s *pluginBaselineScanner) SupportedTargets() []string { return []string{"plugin"} }
 func (s *pluginBaselineScanner) Scan(_ context.Context, target string) (*scanner.ScanResult, error) {
+	s.mu.Lock()
+	s.scanned = append(s.scanned, target)
+	findings := append([]scanner.Finding(nil), s.findings[target]...)
+	onScan := s.onScan
+	s.mu.Unlock()
+	if onScan != nil {
+		onScan(target)
+	}
 	return &scanner.ScanResult{
 		Scanner: "plugin-scanner", Target: target, TargetType: "plugin", Timestamp: time.Now().UTC(),
-		Findings: append([]scanner.Finding(nil), s.findings[target]...),
+		Findings: findings,
 	}, nil
 }
 
-// The fixture's findings are keyed by the installed path; the pinned copy is
-// checked for the same manifest before returning that path's scan result.
-func (s *pluginBaselineScanner) ScanBaseline(ctx context.Context, target, copyPath string) (*scanner.ScanResult, error) {
-	if _, err := os.ReadFile(filepath.Join(copyPath, "plugin.yaml")); err != nil {
-		return nil, err
+func (s *pluginBaselineScanner) scans(target string) int {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	n := 0
+	for _, scanned := range s.scanned {
+		if scanned == target {
+			n++
+		}
 	}
-	return s.Scan(ctx, target)
+	return n
 }
 
-func TestRescanAttributesBundledPluginFindingsAndKeepsFirstSightOutOfAlerts(t *testing.T) {
+type hermesPluginFixture struct {
+	t                     *testing.T
+	cfg                   *config.Config
+	store                 *audit.Store
+	runtime               *watcherTestRuntime
+	bundledRoot, userRoot string
+	scan                  *pluginBaselineScanner
+	w                     *InstallWatcher
+}
+
+func newHermesPluginFixture(t *testing.T) *hermesPluginFixture {
+	t.Helper()
 	t.Setenv("PATH", "")
 	t.Setenv("HERMES_BUNDLED_PLUGINS", "")
 	cfg, store, logger, _ := setupTestEnv(t)
@@ -46,460 +77,305 @@ func TestRescanAttributesBundledPluginFindingsAndKeepsFirstSightOutOfAlerts(t *t
 	cfg.Watch.RescanContentGated = true
 	runtime := &watcherTestRuntime{}
 	logger.SetRuntimeV8Emitter(runtime)
-
 	home := t.TempDir()
-	bundledRoot := filepath.Join(home, ".hermes", "hermes-agent", "plugins")
-	userRoot := filepath.Join(home, ".hermes", "plugins")
-	makePlugin := func(root, name string) string {
-		t.Helper()
-		path := filepath.Join(root, name)
-		if err := os.MkdirAll(path, 0o700); err != nil {
-			t.Fatal(err)
-		}
-		if err := os.WriteFile(filepath.Join(path, "plugin.yaml"), []byte("name: "+name+"\n"), 0o600); err != nil {
-			t.Fatal(err)
-		}
-		return path
+	f := &hermesPluginFixture{
+		t: t, cfg: cfg, store: store, runtime: runtime,
+		bundledRoot: filepath.Join(home, ".hermes", "hermes-agent", "plugins"),
+		userRoot:    filepath.Join(home, ".hermes", "plugins"),
+		scan:        &pluginBaselineScanner{findings: map[string][]scanner.Finding{}},
 	}
-	bundled := makePlugin(bundledRoot, "web/ddgs")
-	user := makePlugin(userRoot, "notes")
-	thirdParty := makePlugin(userRoot, "review")
-	findings := map[string][]scanner.Finding{
-		bundled:    {{ID: "bundled", RuleID: "PLUGIN-REVIEW", Severity: scanner.SeverityHigh, Title: "Review bundled source", Description: "first observation"}},
-		thirdParty: {{ID: "third-party", RuleID: "PLUGIN-REVIEW", Severity: scanner.SeverityHigh, Title: "Review third-party source", Description: "first observation"}},
-	}
-	scan := &pluginBaselineScanner{findings: findings}
-	w := New(cfg, nil, []string{bundledRoot, userRoot}, store, logger, nil, nil)
-	w.SetRootConnectors(map[string]string{bundledRoot: "hermes", userRoot: "hermes"})
-	w.scannerFactory = func(InstallEvent) scanner.Scanner { return scan }
-	w.runRescanCycle(context.Background())
+	f.w = New(cfg, nil, []string{f.bundledRoot, f.userRoot}, store, logger, nil, nil)
+	f.w.SetRootConnectors(map[string]string{f.bundledRoot: "hermes", f.userRoot: "hermes"})
+	f.w.scannerFactory = func(InstallEvent) scanner.Scanner { return f.scan }
+	return f
+}
 
-	for _, tc := range []struct {
-		path, connector string
-		baseline        bool
-	}{
-		{bundled, "hermes", true},
-		{user, "hermes", false},
-		{thirdParty, "hermes", false},
-	} {
-		row, err := store.GetTargetSnapshot("plugin", tc.path)
-		if err != nil || row.ScanID == "" {
-			t.Fatalf("snapshot %s: %#v, %v", tc.path, row, err)
-		}
-		raw, err := store.GetScanRawJSON(row.ScanID)
-		if err != nil {
-			t.Fatal(err)
-		}
-		if got := strings.Contains(raw, scanner.FindingTagDetectionOnly); got != tc.baseline {
-			t.Errorf("first scan %s detection-only=%t, want %t", tc.path, got, tc.baseline)
-		}
-	}
-	logs, _ := runtime.snapshot()
-	firstFindings := 0
-	for _, record := range logs {
-		if record.EventName() != observability.EventName(observability.TelemetryEventFindingObserved) {
-			continue
-		}
-		firstFindings++
-		if connector := record.Correlation().ConnectorID; connector != "hermes" {
-			t.Errorf("first-sight finding connector = %q, want hermes", connector)
-		}
-	}
-	if firstFindings != 2 {
-		t.Errorf("first-sight finding logs = %d, want bundled and user plugin", firstFindings)
-	}
-
-	// A content change is active even when the scanner returns the same finding.
-	// A clean user plugin remains allowed.
-	if err := os.WriteFile(filepath.Join(bundled, "plugin.yaml"), []byte("name: web/ddgs\nversion: 2\n"), 0o600); err != nil {
+func writePluginFile(t *testing.T, path, text string) {
+	t.Helper()
+	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
 		t.Fatal(err)
 	}
-	w.runRescanCycle(context.Background())
-	row, err := store.GetTargetSnapshot("plugin", bundled)
+	if err := os.WriteFile(path, []byte(text), 0o600); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// plugin writes a plugin and gives it a HIGH finding whenever it is scanned.
+func (f *hermesPluginFixture) plugin(root, name string) string {
+	path := filepath.Join(root, name)
+	writePluginFile(f.t, filepath.Join(path, "plugin.yaml"), "name: "+name+"\n")
+	writePluginFile(f.t, filepath.Join(path, "provider.py"), "VENDOR = True\n")
+	f.scan.findings[path] = []scanner.Finding{{
+		ID: "review-" + strings.ReplaceAll(name, "/", "-"), RuleID: "PLUGIN-REVIEW",
+		Severity: scanner.SeverityHigh, Title: "Review plugin source",
+	}}
+	return path
+}
+
+// pinVendor records the current bytes of a plugin as the vendor digest.
+func (f *hermesPluginFixture) pinVendor(name, path string) {
+	f.t.Helper()
+	digest, err := hermesPluginTreeDigest(path)
 	if err != nil {
-		t.Fatal(err)
+		f.t.Fatal(err)
 	}
-	raw, err := store.GetScanRawJSON(row.ScanID)
-	if err != nil || strings.Contains(raw, scanner.FindingTagDetectionOnly) {
-		t.Fatalf("changed bundled scan retained baseline tag: %v, %s", err, raw)
-	}
-	logs, _ = runtime.snapshot()
-	changed := 0
+	previous, existed := hermesPluginVendorDigests[name]
+	hermesPluginVendorDigests[name] = digest
+	f.t.Cleanup(func() {
+		if existed {
+			hermesPluginVendorDigests[name] = previous
+		} else {
+			delete(hermesPluginVendorDigests, name)
+		}
+	})
+}
+
+// findingConnectors lists the connector of every finding log so far.
+func (f *hermesPluginFixture) findingConnectors() []string {
+	logs, _ := f.runtime.snapshot()
+	var connectors []string
 	for _, record := range logs {
 		if record.EventName() == observability.EventName(observability.TelemetryEventFindingObserved) {
-			changed++
-			if connector := record.Correlation().ConnectorID; connector != "hermes" {
-				t.Errorf("changed finding connector = %q, want hermes", connector)
-			}
+			connectors = append(connectors, record.Correlation().ConnectorID)
 		}
 	}
-	if changed <= firstFindings {
-		t.Fatal("changed bundled plugin did not emit a Hermes finding")
+	return connectors
+}
+
+// activeScan requires a stored scan of path whose findings are not marked
+// detection-only.
+func (f *hermesPluginFixture) activeScan(path string) {
+	f.t.Helper()
+	row, err := f.store.GetTargetSnapshot("plugin", path)
+	if err != nil || row == nil || row.ScanID == "" {
+		f.t.Fatalf("snapshot %s: %#v, %v", path, row, err)
 	}
-	w.runRescanCycle(context.Background())
-	logs, _ = runtime.snapshot()
-	unchanged := 0
-	for _, record := range logs {
-		if record.EventName() == observability.EventName(observability.TelemetryEventFindingObserved) {
-			unchanged++
+	raw, err := f.store.GetScanRawJSON(row.ScanID)
+	if err != nil {
+		f.t.Fatal(err)
+	}
+	if !strings.Contains(raw, "PLUGIN-REVIEW") || strings.Contains(raw, scanner.FindingTagDetectionOnly) {
+		f.t.Fatalf("scan of %s is not an active finding: %s", path, raw)
+	}
+}
+
+func onlyHermes(t *testing.T, connectors []string) {
+	t.Helper()
+	for _, connector := range connectors {
+		if connector != "hermes" {
+			t.Fatalf("finding connectors = %q, want hermes only", connectors)
 		}
 	}
-	if unchanged != changed {
-		t.Errorf("unchanged bundled plugin emitted %d more findings", unchanged-changed)
+}
+
+// GAP-0645: a Hermes shipped plugin whose bytes match the pinned vendor
+// digest is not scanned or alerted on a fresh account; every scanned Hermes
+// plugin is attributed to hermes, and a changed shipped plugin is scanned
+// and alerted as any other.
+func TestRescanAttributesBundledPluginFindingsAndKeepsFirstSightOutOfAlerts(t *testing.T) {
+	f := newHermesPluginFixture(t)
+	vendor := f.plugin(f.bundledRoot, "web/ddgs")
+	f.pinVendor("web/ddgs", vendor)
+	platform := f.plugin(f.bundledRoot, "platforms/photon")
+	f.pinVendor("platforms/photon", platform)
+	edited := f.plugin(f.bundledRoot, "kanban")
+	f.pinVendor("kanban", edited)
+	writePluginFile(t, filepath.Join(edited, "provider.py"), "VENDOR = False\n")
+	unknown := f.plugin(f.bundledRoot, "web/unlisted")
+	user := f.plugin(f.userRoot, "notes")
+	delete(f.scan.findings, user)
+	thirdParty := f.plugin(f.userRoot, "review")
+
+	f.w.runRescanCycle(context.Background())
+	for _, path := range []string{vendor, platform} {
+		if n := f.scan.scans(path); n != 0 {
+			t.Errorf("vendor plugin %s scanned %d times", path, n)
+		}
+		if row, _ := f.store.GetTargetSnapshot("plugin", path); row != nil {
+			t.Errorf("vendor plugin %s has a rescan baseline: %#v", path, row)
+		}
+	}
+	for _, path := range []string{edited, unknown, thirdParty} {
+		f.activeScan(path)
+	}
+	if f.scan.scans(user) != 1 {
+		t.Errorf("user plugin scans = %d, want 1", f.scan.scans(user))
+	}
+	first := f.findingConnectors()
+	onlyHermes(t, first)
+	if len(first) != 3 {
+		t.Fatalf("first-sight findings = %d, want edited, unlisted and third-party", len(first))
 	}
 
-	// A plugin added to a previously covered bundle root is an installation,
-	// not part of that root's initial baseline.
-	added := makePlugin(bundledRoot, "web/new")
-	findings[added] = []scanner.Finding{{ID: "new", RuleID: "PLUGIN-REVIEW", Severity: scanner.SeverityHigh, Title: "Review new source"}}
-	var admitted []AdmissionResult
-	restarted := New(cfg, nil, []string{bundledRoot, userRoot}, store, logger, nil, func(result AdmissionResult) {
-		admitted = append(admitted, result)
-	})
-	restarted.SetRootConnectors(map[string]string{bundledRoot: "hermes", userRoot: "hermes"})
-	restarted.scannerFactory = func(InstallEvent) scanner.Scanner { return scan }
-	restarted.runRescanCycle(context.Background())
-	if len(admitted) != 1 || admitted[0].Event.Path != added || admitted[0].Event.Connector != "hermes" || admitted[0].ScanID == "" {
-		t.Fatalf("new plugin admissions = %#v, want one Hermes scan", admitted)
+	// A shipped plugin first seen after startup is vendor code as well.
+	late := f.plugin(f.bundledRoot, "web/late")
+	f.pinVendor("web/late", late)
+	f.w.runRescanCycle(context.Background())
+	if n := f.scan.scans(late); n != 0 {
+		t.Fatalf("vendor plugin seen after startup scanned %d times", n)
 	}
-	raw, err = store.GetScanRawJSON(admitted[0].ScanID)
-	if err != nil || strings.Contains(raw, scanner.FindingTagDetectionOnly) {
-		t.Fatalf("new plugin scan has baseline tag: %v, %s", err, raw)
+
+	// A bytecode cache Hermes writes at run time leaves the plugin vendor code.
+	writePluginFile(t, filepath.Join(vendor, "__pycache__", "provider.cpython-312.pyc"), "cache")
+	f.w.runRescanCycle(context.Background())
+	if n := f.scan.scans(vendor); n != 0 {
+		t.Fatalf("vendor plugin with a bytecode cache scanned %d times", n)
 	}
-	if result := w.runAdmission(context.Background(), InstallEvent{Type: InstallPlugin, Name: "notes", Path: user, Connector: "hermes"}); result.Verdict == VerdictBlocked || result.Verdict == VerdictRejected {
+
+	// A change to shipped bytes, an added file or a link is not vendor code.
+	writePluginFile(t, filepath.Join(vendor, "provider.py"), "VENDOR = False\n")
+	writePluginFile(t, filepath.Join(platform, "extra.py"), "EXTRA = True\n")
+	f.w.runRescanCycle(context.Background())
+	for _, path := range []string{vendor, platform} {
+		if f.scan.scans(path) != 1 {
+			t.Fatalf("changed shipped plugin %s scans = %d, want 1", path, f.scan.scans(path))
+		}
+		f.activeScan(path)
+	}
+	changed := f.findingConnectors()
+	onlyHermes(t, changed)
+	if len(changed) != len(first)+2 {
+		t.Fatalf("changed shipped plugins logged %d findings, want 2", len(changed)-len(first))
+	}
+
+	// Unchanged plugins do not log again, and a clean user plugin is allowed.
+	f.w.runRescanCycle(context.Background())
+	if again := f.findingConnectors(); len(again) != len(changed) {
+		t.Errorf("unchanged plugins logged %d more findings", len(again)-len(changed))
+	}
+	if result := f.w.runAdmission(context.Background(), InstallEvent{Type: InstallPlugin, Name: "notes", Path: user, Connector: "hermes"}); result.Verdict == VerdictBlocked || result.Verdict == VerdictRejected {
 		t.Fatalf("clean user plugin admission = %s, want allowed", result.Verdict)
 	}
 }
 
-func TestRescanBundledPluginBaselineRequiresPhysicalTree(t *testing.T) {
-	for _, tc := range []struct {
-		name, layout string
-		baseline     bool
-	}{
-		{"shipped tree", "physical", true},
-		{"linked bundle root", "linked-root", false},
-		{"linked bundle parent", "linked-parent", false},
-		{"custom shipped tree", "custom-physical", true},
-		{"linked custom root", "custom-linked", false},
-	} {
-		t.Run(tc.name, func(t *testing.T) {
-			t.Setenv("PATH", "")
-			t.Setenv("HERMES_BUNDLED_PLUGINS", "")
-			cfg, store, logger, _ := setupTestEnv(t)
-			cfg.Guardrail.Connector = "claudecode"
-			cfg.Watch.RescanContentGated = true
-			logger.SetRuntimeV8Emitter(&watcherTestRuntime{})
+// GAP-0645 review 4: the vendor decision is made from the bytes read once.
+// A replacement present when the tree is read is scanned and alerted even
+// when it is restored while the scanner runs; no rescan finding is ever
+// marked detection-only.
+func TestRescanHermesVendorPluginDecisionUsesBytesRead(t *testing.T) {
+	f := newHermesPluginFixture(t)
+	shipped := f.plugin(f.bundledRoot, "platforms/photon")
+	f.pinVendor("platforms/photon", shipped)
+	linked := f.plugin(f.bundledRoot, "platforms/telegram")
+	f.pinVendor("platforms/telegram", linked)
+	sibling := f.plugin(f.userRoot, "review")
+	source := filepath.Join(shipped, "provider.py")
 
-			home := t.TempDir()
-			root := filepath.Join(home, ".hermes", "hermes-agent", "plugins")
-			if strings.HasPrefix(tc.layout, "custom-") {
-				root = filepath.Join(home, "vendor", "shipped")
-				t.Setenv("HERMES_BUNDLED_PLUGINS", root)
-			}
-			plugin := filepath.Join(root, "photon")
-			actual := plugin
-			switch tc.layout {
-			case "linked-root", "custom-linked":
-				actual = filepath.Join(home, "other-plugins", "photon")
-			case "linked-parent":
-				actual = filepath.Join(home, "other-agent", "plugins", "photon")
-			}
-			if err := os.MkdirAll(actual, 0o700); err != nil {
-				t.Fatal(err)
-			}
-			if err := os.WriteFile(filepath.Join(actual, "plugin.yaml"), []byte("name: photon\n"), 0o600); err != nil {
-				t.Fatal(err)
-			}
-			if actual != plugin {
-				link := root
-				target := filepath.Dir(actual)
-				if tc.layout == "linked-parent" {
-					link = filepath.Dir(root)
-					target = filepath.Dir(target)
-				}
-				if err := os.MkdirAll(filepath.Dir(link), 0o700); err != nil {
-					t.Fatal(err)
-				}
-				if err := os.Symlink(target, link); err != nil {
-					t.Skipf("create test link: %v", err)
-				}
-			}
-
-			finding := scanner.Finding{ID: "review", RuleID: "PLUGIN-REVIEW", Severity: scanner.SeverityHigh, Title: "Review source"}
-			w := New(cfg, nil, []string{root}, store, logger, nil, nil)
-			w.SetRootConnectors(map[string]string{root: "hermes"})
-			w.scannerFactory = func(InstallEvent) scanner.Scanner {
-				return &pluginBaselineScanner{findings: map[string][]scanner.Finding{plugin: {finding}}}
-			}
-			w.runRescanCycle(context.Background())
-			row, err := store.GetTargetSnapshot("plugin", plugin)
-			if err != nil || row.ScanID == "" {
-				t.Fatalf("plugin snapshot = %#v, %v", row, err)
-			}
-			raw, err := store.GetScanRawJSON(row.ScanID)
-			if err != nil {
-				t.Fatal(err)
-			}
-			if tagged := strings.Contains(raw, scanner.FindingTagDetectionOnly); tagged != tc.baseline {
-				t.Errorf("baseline tag = %t, want %t", tagged, tc.baseline)
-			}
-		})
-	}
-}
-
-// pluginTreeSwitchScanner records a finding from the tree it read and can
-// replace the registered root before returning the result.
-type pluginTreeSwitchScanner struct {
-	root, replacement, movedRoot string
-}
-
-func (s *pluginTreeSwitchScanner) Name() string               { return "plugin-scanner" }
-func (s *pluginTreeSwitchScanner) Version() string            { return "test-1" }
-func (s *pluginTreeSwitchScanner) SupportedTargets() []string { return []string{"plugin"} }
-func (s *pluginTreeSwitchScanner) Scan(_ context.Context, target string) (*scanner.ScanResult, error) {
-	if _, err := os.ReadFile(filepath.Join(target, "plugin.yaml")); err != nil {
-		return nil, err
-	}
-	if s.replacement != "" {
-		var err error
-		if s.movedRoot != "" {
-			err = os.Rename(s.root, s.movedRoot)
-		} else {
-			err = os.Remove(s.root)
-		}
-		if err != nil {
-			return nil, err
-		}
-		if err := os.Rename(s.replacement, s.root); err != nil {
-			return nil, err
+	// Replaced before the read and restored during the scan.
+	writePluginFile(t, source, "VENDOR = False\n")
+	f.scan.onScan = func(target string) {
+		if target == shipped {
+			writePluginFile(t, source, "VENDOR = True\n")
 		}
 	}
-	return &scanner.ScanResult{
-		Scanner: "plugin-scanner", Target: target, TargetType: "plugin", Timestamp: time.Now().UTC(),
-		Findings: []scanner.Finding{{ID: "review", RuleID: "PLUGIN-REVIEW", Severity: scanner.SeverityHigh, Title: "Review source"}},
-	}, nil
-}
-
-func (s *pluginTreeSwitchScanner) ScanBaseline(ctx context.Context, target, _ string) (*scanner.ScanResult, error) {
-	return s.Scan(ctx, target)
-}
-
-func TestRescanBundledPluginBaselineTracksScannedTree(t *testing.T) {
-	for _, tc := range []struct {
-		name, layout string
-		baseline     bool
-	}{
-		{"stable shipped tree", "physical", true},
-		{"linked tree replaced during scan", "linked-then-physical", false},
-		{"physical tree replaced during scan", "physical-then-physical", false},
-	} {
-		t.Run(tc.name, func(t *testing.T) {
-			t.Setenv("PATH", "")
-			t.Setenv("HERMES_BUNDLED_PLUGINS", "")
-			cfg, store, logger, _ := setupTestEnv(t)
-			cfg.Guardrail.Connector = "claudecode"
-			logger.SetRuntimeV8Emitter(&watcherTestRuntime{})
-			home := t.TempDir()
-			root := filepath.Join(home, ".hermes", "hermes-agent", "plugins")
-			actual := root
-			replacement := ""
-			if tc.layout != "physical" {
-				replacement = filepath.Join(home, "shipped-replacement")
-				if tc.layout == "linked-then-physical" {
-					actual = filepath.Join(home, "linked-source")
-				}
-			}
-			for _, dir := range []string{actual, replacement} {
-				if dir == "" {
-					continue
-				}
-				plugin := filepath.Join(dir, "photon")
-				if err := os.MkdirAll(plugin, 0o700); err != nil {
-					t.Fatal(err)
-				}
-				if err := os.WriteFile(filepath.Join(plugin, "plugin.yaml"), []byte("name: photon\n"), 0o600); err != nil {
-					t.Fatal(err)
-				}
-			}
-			if tc.layout == "linked-then-physical" {
-				if err := os.MkdirAll(filepath.Dir(root), 0o700); err != nil {
-					t.Fatal(err)
-				}
-				if err := os.Symlink(actual, root); err != nil {
-					t.Skipf("create test link: %v", err)
-				}
-			}
-			w := New(cfg, nil, []string{root}, store, logger, nil, nil)
-			w.SetRootConnectors(map[string]string{root: "hermes"})
-			w.scannerFactory = func(InstallEvent) scanner.Scanner {
-				scan := &pluginTreeSwitchScanner{root: root, replacement: replacement}
-				if tc.layout == "physical-then-physical" {
-					scan.movedRoot = filepath.Join(home, "previous-root")
-				}
-				return scan
-			}
-			w.runRescanCycle(context.Background())
-			row, err := store.GetTargetSnapshot("plugin", filepath.Join(root, "photon"))
-			if err != nil || row.ScanID == "" {
-				t.Fatalf("plugin snapshot = %#v, %v", row, err)
-			}
-			raw, err := store.GetScanRawJSON(row.ScanID)
-			if err != nil {
-				t.Fatal(err)
-			}
-			if tagged := strings.Contains(raw, scanner.FindingTagDetectionOnly); tagged != tc.baseline {
-				t.Errorf("baseline tag = %t, want %t", tagged, tc.baseline)
-			}
-		})
-	}
-}
-
-// transientPluginScanner observes the live pathname while it refers to a
-// second tree, then restores the original name before returning.
-type transientPluginScanner struct {
-	root, parked, other string
-}
-
-func (s *transientPluginScanner) Name() string               { return "plugin-scanner" }
-func (s *transientPluginScanner) Version() string            { return "test-1" }
-func (s *transientPluginScanner) SupportedTargets() []string { return []string{"plugin"} }
-func (s *transientPluginScanner) Scan(_ context.Context, target string) (*scanner.ScanResult, error) {
-	if err := os.Rename(s.root, s.parked); err != nil {
-		return nil, err
-	}
-	if err := os.Symlink(s.other, s.root); err != nil {
-		_ = os.Rename(s.parked, s.root)
-		return nil, err
-	}
-	manifest, readErr := os.ReadFile(filepath.Join(target, "plugin.yaml"))
-	removeErr := os.Remove(s.root)
-	restoreErr := os.Rename(s.parked, s.root)
-	if readErr != nil {
-		return nil, readErr
-	}
-	if removeErr != nil {
-		return nil, removeErr
-	}
-	if restoreErr != nil {
-		return nil, restoreErr
-	}
-	id := "shipped"
-	if strings.Contains(string(manifest), "other") {
-		id = "other"
-	}
-	return &scanner.ScanResult{
-		Scanner: "plugin-scanner", Target: target, TargetType: "plugin", Timestamp: time.Now().UTC(),
-		Findings: []scanner.Finding{{ID: id, RuleID: "PLUGIN-REVIEW", Severity: scanner.SeverityHigh, Title: "Review source"}},
-	}, nil
-}
-
-// pinnedPluginScanner uses the copied tree for the baseline scan. Its live
-// scan is retained to show the result if the scanner cannot pin its input.
-type pinnedPluginScanner struct{ transientPluginScanner }
-
-func (s *pinnedPluginScanner) ScanBaseline(ctx context.Context, target, copyPath string) (*scanner.ScanResult, error) {
-	return s.transientPluginScanner.Scan(ctx, copyPath)
-}
-
-func TestRescanBundledPluginBaselineUsesPinnedInput(t *testing.T) {
-	for _, tc := range []struct {
-		name, wantID string
-		pinned       bool
-		baseline     bool
-	}{
-		{"unverified scan remains active", "other", false, false},
-		{"pinned shipped scan remains baseline", "shipped", true, true},
-	} {
-		t.Run(tc.name, func(t *testing.T) {
-			t.Setenv("PATH", "")
-			t.Setenv("HERMES_BUNDLED_PLUGINS", "")
-			cfg, store, logger, _ := setupTestEnv(t)
-			cfg.Guardrail.Connector = "claudecode"
-			logger.SetRuntimeV8Emitter(&watcherTestRuntime{})
-			home := t.TempDir()
-			root := filepath.Join(home, ".hermes", "hermes-agent", "plugins")
-			other := filepath.Join(home, "other")
-			for _, item := range []struct{ dir, manifest string }{
-				{filepath.Join(root, "photon"), "name: shipped\n"},
-				{filepath.Join(other, "photon"), "name: other\n"},
-			} {
-				if err := os.MkdirAll(item.dir, 0o700); err != nil {
-					t.Fatal(err)
-				}
-				if err := os.WriteFile(filepath.Join(item.dir, "plugin.yaml"), []byte(item.manifest), 0o600); err != nil {
-					t.Fatal(err)
-				}
-				src := filepath.Join(item.dir, "src")
-				if err := os.Mkdir(src, 0o755); err != nil {
-					t.Fatal(err)
-				}
-				if err := os.WriteFile(filepath.Join(src, "index.py"), []byte("pass\n"), 0o644); err != nil {
-					t.Fatal(err)
-				}
-			}
-			w := New(cfg, nil, []string{root}, store, logger, nil, nil)
-			w.SetRootConnectors(map[string]string{root: "hermes"})
-			swap := transientPluginScanner{root: root, parked: filepath.Join(home, "parked"), other: other}
-			w.scannerFactory = func(InstallEvent) scanner.Scanner {
-				if tc.pinned {
-					return &pinnedPluginScanner{transientPluginScanner: swap}
-				}
-				return &swap
-			}
-			w.runRescanCycle(context.Background())
-			row, err := store.GetTargetSnapshot("plugin", filepath.Join(root, "photon"))
-			if err != nil || row.ScanID == "" {
-				t.Fatalf("plugin snapshot = %#v, %v", row, err)
-			}
-			raw, err := store.GetScanRawJSON(row.ScanID)
-			if err != nil {
-				t.Fatal(err)
-			}
-			if !strings.Contains(raw, `"id": "`+tc.wantID+`"`) ||
-				strings.Contains(raw, scanner.FindingTagDetectionOnly) != tc.baseline {
-				t.Errorf("scan result does not match pinned input: %s", raw)
-			}
-		})
-	}
-}
-
-func TestRescanBundledPluginBaselineKeepsLinkedFileFindingActive(t *testing.T) {
-	t.Setenv("PATH", "")
-	t.Setenv("HERMES_BUNDLED_PLUGINS", "")
-	cfg, store, logger, _ := setupTestEnv(t)
-	cfg.Guardrail.Connector = "claudecode"
-	logger.SetRuntimeV8Emitter(&watcherTestRuntime{})
-	home := t.TempDir()
-	root := filepath.Join(home, ".hermes", "hermes-agent", "plugins")
-	plugin := filepath.Join(root, "photon")
-	if err := os.MkdirAll(plugin, 0o700); err != nil {
+	// A link to identical bytes is never vendor code.
+	outside := filepath.Join(t.TempDir(), "provider.py")
+	writePluginFile(t, outside, "VENDOR = True\n")
+	if err := os.Remove(filepath.Join(linked, "provider.py")); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(filepath.Join(plugin, "plugin.yaml"), []byte("name: photon\n"), 0o600); err != nil {
+	if err := os.Symlink(outside, filepath.Join(linked, "provider.py")); err != nil {
+		t.Skipf("symlink: %v", err)
+	}
+	f.w.runRescanCycle(context.Background())
+	f.activeScan(shipped)
+	f.activeScan(linked)
+	onlyHermes(t, f.findingConnectors())
+
+	// Replaced after the read, while another plugin is scanned, and left in
+	// place: the next cycle reads the new bytes and scans them.
+	if err := os.Remove(filepath.Join(linked, "provider.py")); err != nil {
 		t.Fatal(err)
 	}
-	outside := filepath.Join(home, "outside.py")
-	if err := os.WriteFile(outside, []byte("pass\n"), 0o600); err != nil {
+	writePluginFile(t, filepath.Join(linked, "provider.py"), "VENDOR = True\n")
+	if err := f.store.DeleteTargetSnapshot("plugin", linked); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.Symlink(outside, filepath.Join(plugin, "linked.py")); err != nil {
-		t.Skipf("symlink unavailable: %v", err)
+	before := f.scan.scans(linked)
+	f.scan.onScan = func(target string) {
+		if target == sibling {
+			writePluginFile(t, filepath.Join(linked, "provider.py"), "VENDOR = False\n")
+		}
 	}
-	w := New(cfg, nil, []string{root}, store, logger, nil, nil)
-	w.SetRootConnectors(map[string]string{root: "hermes"})
-	w.scannerFactory = func(InstallEvent) scanner.Scanner {
-		return &pluginBaselineScanner{findings: map[string][]scanner.Finding{plugin: {{ID: "linked", RuleID: "STRUCT-SYMLINK-ESCAPE", Severity: scanner.SeverityHigh, Title: "Linked file"}}}}
+	if err := f.store.DeleteTargetSnapshot("plugin", sibling); err != nil {
+		t.Fatal(err)
 	}
-	w.runRescanCycle(context.Background())
-	row, err := store.GetTargetSnapshot("plugin", plugin)
-	if err != nil || row.ScanID == "" {
-		t.Fatalf("plugin snapshot = %#v, %v", row, err)
+	f.w.runRescanCycle(context.Background())
+	if f.scan.scans(linked) != before {
+		t.Fatalf("restored vendor plugin scanned in the cycle that read vendor bytes")
 	}
-	raw, err := store.GetScanRawJSON(row.ScanID)
+	f.scan.onScan = nil
+	f.w.runRescanCycle(context.Background())
+	if f.scan.scans(linked) != before+1 {
+		t.Fatalf("plugin left changed after the read was not scanned next cycle")
+	}
+	f.activeScan(linked)
+	onlyHermes(t, f.findingConnectors())
+	for _, path := range []string{shipped, linked, sibling} {
+		row, err := f.store.GetTargetSnapshot("plugin", path)
+		if err != nil || row == nil {
+			continue
+		}
+		raw, _ := f.store.GetScanRawJSON(row.ScanID)
+		if strings.Contains(raw, scanner.FindingTagDetectionOnly) {
+			t.Fatalf("rescan of %s marked detection-only: %s", path, raw)
+		}
+	}
+}
+
+func TestHermesPluginTreeDigestCoversEveryReadByte(t *testing.T) {
+	dir := t.TempDir()
+	writePluginFile(t, filepath.Join(dir, "plugin.yaml"), "name: a\n")
+	writePluginFile(t, filepath.Join(dir, "lib", "a.py"), "A = 1\n")
+	base, err := hermesPluginTreeDigest(dir)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if strings.Contains(raw, scanner.FindingTagDetectionOnly) {
-		t.Errorf("linked file finding entered shipped baseline: %s", raw)
+	seen := []string{base}
+	for _, change := range []func(){
+		func() { writePluginFile(t, filepath.Join(dir, "lib", "a.py"), "A = 2\n") },
+		func() { writePluginFile(t, filepath.Join(dir, "lib", "b.py"), "") },
+		func() { writePluginFile(t, filepath.Join(dir, ".hidden"), "") },
+		func() { writePluginFile(t, filepath.Join(dir, "node_modules", "x.js"), "") },
+	} {
+		change()
+		got, err := hermesPluginTreeDigest(dir)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if slices.Contains(seen, got) {
+			t.Fatalf("digest did not change: %s", got)
+		}
+		seen = append(seen, got)
 	}
+	writePluginFile(t, filepath.Join(dir, "lib", "__pycache__", "a.pyc"), "cache")
+	if got, err := hermesPluginTreeDigest(dir); err != nil || got != seen[len(seen)-1] {
+		t.Fatalf("bytecode cache changed the digest: %s, %v", got, err)
+	}
+	if err := os.Symlink(filepath.Join(dir, "plugin.yaml"), filepath.Join(dir, "link.yaml")); err != nil {
+		t.Skipf("symlink: %v", err)
+	}
+	if _, err := hermesPluginTreeDigest(dir); err == nil {
+		t.Fatal("a linked entry produced a vendor digest")
+	}
+}
+
+// HERMES_BUNDLED_PLUGINS names the shipped root of a custom Hermes install;
+// the same digest rule applies there and nowhere else.
+func TestRescanHermesVendorPluginCustomBundledRoot(t *testing.T) {
+	f := newHermesPluginFixture(t)
+	custom := filepath.Join(t.TempDir(), "bundle")
+	t.Setenv("HERMES_BUNDLED_PLUGINS", custom)
+	f.w = New(f.cfg, nil, []string{custom, f.userRoot}, f.store, f.w.logger, nil, nil)
+	f.w.SetRootConnectors(map[string]string{custom: "hermes", f.userRoot: "hermes"})
+	f.w.scannerFactory = func(InstallEvent) scanner.Scanner { return f.scan }
+	shipped := f.plugin(custom, "photon")
+	f.pinVendor("photon", shipped)
+	copied := f.plugin(f.userRoot, "photon")
+	f.w.runRescanCycle(context.Background())
+	if n := f.scan.scans(shipped); n != 0 {
+		t.Fatalf("vendor plugin in custom root scanned %d times", n)
+	}
+	f.activeScan(copied)
+	onlyHermes(t, f.findingConnectors())
 }
