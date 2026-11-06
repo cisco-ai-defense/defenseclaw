@@ -287,6 +287,23 @@ func loadExistingWindowsCorrelationKey(dataDir string, hooks keyStoreHooks) (Cor
 	if err != nil {
 		return CorrelationKey{}, false, err
 	}
+	if windowsCorrelationStandaloneRotates() {
+		// On standalone a key another account could read is rotated, not
+		// re-stamped or accepted: the material may already have been read,
+		// and anyone holding it can compute the correlation identifiers
+		// (g582 review 4 S1).
+		readers, err := windowsCorrelationHandleUntrustedReaders(handle)
+		if err != nil {
+			return CorrelationKey{}, false, err
+		}
+		if len(readers) > 0 {
+			identity, infoErr := windowsCorrelationHandleInformation(handle)
+			if infoErr != nil {
+				return CorrelationKey{}, false, infoErr
+			}
+			return CorrelationKey{}, false, &windowsCorrelationRotation{owner: strings.Join(readers, ","), identity: identity}
+		}
+	}
 	validate := validateWindowsCorrelationKeyHandle
 	if needsHardening {
 		untrustedOwner, err := windowsCorrelationUntrustedOwner(handle)
@@ -396,6 +413,24 @@ func windowsCorrelationHandleUntrustedWriters(handle windows.Handle) ([]string, 
 		return nil, err
 	}
 	return windowsCorrelationUntrustedWriters(dacl, expectedOwner), nil
+}
+
+// windowsCorrelationHandleUntrustedReaders returns the principals outside the
+// trusted set that the key's DACL lets read it.
+func windowsCorrelationHandleUntrustedReaders(handle windows.Handle) ([]string, error) {
+	descriptor, err := windows.GetSecurityInfo(handle, windows.SE_FILE_OBJECT, windows.DACL_SECURITY_INFORMATION)
+	if err != nil || descriptor == nil {
+		return nil, keyStoreError(KeyStoreErrorUnavailable)
+	}
+	dacl, _, err := descriptor.DACL()
+	if err != nil || dacl == nil {
+		return nil, keyStoreError(KeyStoreErrorUnsafePermissions)
+	}
+	expectedOwner, err := windowsCorrelationExpectedOwnerSID()
+	if err != nil {
+		return nil, err
+	}
+	return windowsCorrelationUntrustedReaders(dacl, expectedOwner), nil
 }
 
 // windowsCorrelationUntrustedOwner returns the key's owner when it is neither
