@@ -51,6 +51,11 @@ foreach ($name in @(
     'Get-DefenseClawNuclearRecordField',
     'Write-DefenseClawNuclearFileContent',
     'Get-DefenseClawNuclearConnectorOwner',
+    'Get-DefenseClawCodexManagedHooksStateCommittedPath',
+    'Resolve-DefenseClawCodexManagedHooksStateCopy',
+    'Get-DefenseClawCodexManagedHooksStateCopies',
+    'Remove-DefenseClawCodexManagedHooksStateCopies',
+    'Sync-DefenseClawCodexManagedHooksStateCopy',
     'Invoke-DefenseClawNuclearCodexRequirements',
     'Restore-DefenseClawForcedUninstallCodexPolicy',
     'Complete-DefenseClawForcedUninstall'
@@ -103,6 +108,16 @@ function Remove-DefenseClawManagedTree {
     param([string]$Path, [string]$RequiredBase, [string]$Label)
     $script:removedTrees.Add($Path)
     Microsoft.PowerShell.Management\Remove-Item -LiteralPath $Path -Recurse -Force
+}
+# Stand-ins for the access list and event writers the Codex state copy sync
+# calls; the smoke checks the bytes and the names, not the access list.
+$script:stampedPaths = [Collections.Generic.List[string]]::new()
+function Set-DefenseClawPathAcl {
+    param([string]$Path, [string]$Kind, [string]$GatewayServiceSID)
+    $script:stampedPaths.Add("${Kind}:$Path")
+}
+function Write-DefenseClawResilienceEvent {
+    param([string]$Marker, [hashtable]$Fields)
 }
 function ConvertTo-DefenseClawBoundedDiagnostic {
     param($Value, [int]$MaxLength = 512)
@@ -273,6 +288,62 @@ try {
     Assert-Smoke (-not (Remove-DefenseClawNuclearPath -Path $linkedLock -Remaining $remaining)) 'a path below a junction was reported removed'
     Assert-Smoke ([IO.File]::Exists([IO.Path]::Combine($elsewhere, 'Codex', '.defenseclaw-managed-hooks.lock'))) 'a junction above the Codex folder redirected the removal'
     Assert-Smoke (@($remaining | Microsoft.PowerShell.Core\Where-Object { $_ -like '*reparse points are not allowed*' }).Count -eq 1) "the refused link is not named: $($remaining -join ' | ')"
+
+    # GAP-0650: once a writer of this release ran, the Codex state is the copy
+    # the writer lock counter (its size) names, beside the writer copy. The
+    # forced uninstall reads the owner from that copy, not from an older one
+    # still on disk, and removes every copy with the lock.
+    & $newForcedCase $postimage
+    [IO.File]::Delete($codexState)
+    [IO.File]::WriteAllBytes($codexLockPath, [byte[]]::new(4))
+    $codexCopy = $codexState + '.4'
+    $codexStaleCopy = $codexState + '.2'
+    $codexCommitted = $codexState + '.committed'
+    Write-SmokeJson -Path $codexCopy -Value @{ schema_version = 1; hook_executable = $standaloneHook }
+    Write-SmokeJson -Path $codexStaleCopy -Value @{ schema_version = 1; hook_executable = $otherHook }
+    Write-SmokeJson -Path $codexCommitted -Value @{ schema_version = 1; hook_executable = $standaloneHook }
+    $result = Complete-DefenseClawForcedUninstall -Result ([pscustomobject]@{ ok = $true }) `
+        -MovedStateRoot $moved -MovedInstallReceipt '' -Layout $forcedLayout
+    Assert-Smoke (Test-SmokeSameBytes -Path $codexPolicy -Expected $adminCodex) 'the forced uninstall did not judge the owner from the state copy the counter names'
+    Assert-Smoke (-not [IO.File]::Exists($codexCopy) -and -not [IO.File]::Exists($codexStaleCopy) -and -not [IO.File]::Exists($codexCommitted) -and -not [IO.File]::Exists($codexLockPath)) 'the forced uninstall left a copy of the DefenseClaw Codex state or its lock'
+
+    # The resolver: the fixed name without a writer lock or with an unused
+    # one, the copy of an even counter, and the copy a running or stopped
+    # transaction ends with.
+    Reset-SmokeTree
+    New-SmokeFile -Path $codexState -Text '{}'
+    Assert-Smoke ((Resolve-DefenseClawCodexManagedHooksStateCopy -Path $codexState) -ceq $codexState) 'no writer lock must resolve to the fixed name'
+    foreach ($case in @(@(0, $codexState), @(6, ($codexState + '.6')), @(7, ($codexState + '.8')))) {
+        [IO.File]::WriteAllBytes($codexLockPath, [byte[]]::new([int]$case[0]))
+        $resolved = Resolve-DefenseClawCodexManagedHooksStateCopy -Path $codexState
+        Assert-Smoke ($resolved -ceq [string]$case[1]) "counter $($case[0]) resolved to $resolved, want $($case[1])"
+    }
+    foreach ($leaf in @('.defenseclaw-managed-hooks.state.12', '.defenseclaw-managed-hooks.state.committed', '.defenseclaw-managed-hooks.state.012', '.defenseclaw-managed-hooks.state.bak')) {
+        New-SmokeFile -Path ([IO.Path]::Combine($codexDir, $leaf)) -Text '{}'
+    }
+    $copies = @(Get-DefenseClawCodexManagedHooksStateCopies -Directory $codexDir | Microsoft.PowerShell.Core\ForEach-Object { [IO.Path]::GetFileName($_) } | Microsoft.PowerShell.Utility\Sort-Object)
+    Assert-Smoke (($copies -join ',') -ceq '.defenseclaw-managed-hooks.state.12,.defenseclaw-managed-hooks.state.committed') "state copies listed: $($copies -join ',')"
+
+    # A rollback put the writer copy back: the hook copies of the state go,
+    # and the copy the counter names holds the restored state.
+    Reset-SmokeTree
+    $script:stampedPaths.Clear()
+    $restored = [Text.Encoding]::UTF8.GetBytes('{"schema_version":1,"hook_executable":"restored"}')
+    [void][IO.Directory]::CreateDirectory($codexDir)
+    [IO.File]::WriteAllBytes($codexCommitted, $restored)
+    [IO.File]::WriteAllBytes($codexLockPath, [byte[]]::new(6))
+    New-SmokeFile -Path ($codexState + '.4') -Text '{"hook_executable":"older"}'
+    New-SmokeFile -Path ($codexState + '.6') -Text '{"hook_executable":"undone"}'
+    $syncLayout = @{ CodexManagedHooksStatePath = $codexState }
+    Sync-DefenseClawCodexManagedHooksStateCopy -Layout $syncLayout -GatewayServiceSID 'S-1-5-32-544'
+    Assert-Smoke (-not [IO.File]::Exists($codexState + '.4')) 'the rollback sync kept an older hook copy'
+    Assert-Smoke (Test-SmokeSameBytes -Path ($codexState + '.6') -Expected $restored) 'the hook copy the counter names does not hold the restored state'
+    Assert-Smoke (Test-SmokeSameBytes -Path $codexCommitted -Expected $restored) 'the rollback sync changed the writer copy'
+    Assert-Smoke (($script:stampedPaths -join '|') -ceq ("MachinePolicyFile:" + $codexState + '.6')) "the new hook copy was not given the machine policy file access list: $($script:stampedPaths -join '|')"
+    # An empty writer copy (no state) leaves no hook copy.
+    [IO.File]::WriteAllBytes($codexCommitted, [byte[]]::new(0))
+    Sync-DefenseClawCodexManagedHooksStateCopy -Layout $syncLayout -GatewayServiceSID 'S-1-5-32-544'
+    Assert-Smoke (-not [IO.File]::Exists($codexState + '.6')) 'an empty writer copy left a hook copy of the state'
 
     # No Codex record: the moved StateRoot goes as before.
     Reset-SmokeTree

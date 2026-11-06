@@ -13796,13 +13796,15 @@ function Set-DefenseClawManagedAcls {
             -Kind MachinePolicyFile `
             -GatewayServiceSID $gatewaySID
     }
+    $codexStateCopy = Resolve-DefenseClawCodexManagedHooksStateCopy `
+        -Path $Layout.CodexManagedHooksStatePath
     if (-not $SkipCodexMachineState -and
         [bool]$Layout.CodexTargetEnabled -and
         (Microsoft.PowerShell.Management\Test-Path `
-            -LiteralPath $Layout.CodexManagedHooksStatePath `
+            -LiteralPath $codexStateCopy `
             -PathType Leaf)) {
         Set-DefenseClawPathAcl `
-            -Path $Layout.CodexManagedHooksStatePath `
+            -Path $codexStateCopy `
             -Kind MachinePolicyFile `
             -GatewayServiceSID $gatewaySID
     }
@@ -16121,7 +16123,7 @@ function New-DefenseClawDeploymentMetadata {
         if ([bool]$Layout.CodexTargetEnabled) {
             foreach ($entry in @(
                 @($Layout.CodexMachinePolicyPath, 'policy'),
-                @($Layout.CodexManagedHooksStatePath, 'managed hooks state')
+                @((Resolve-DefenseClawCodexManagedHooksStateCopy -Path $Layout.CodexManagedHooksStatePath), 'managed hooks state')
             )) {
                 if (-not (Microsoft.PowerShell.Management\Test-Path `
                     -LiteralPath $entry[0] `
@@ -16878,8 +16880,14 @@ function Assert-DefenseClawStandaloneContentTrusted {
     $entries = [Collections.Generic.List[object]]::new()
     foreach ($row in $rows) {
         if ($Scope -in $row[2] -and $row[0] -notin $Except) {
+            $entryPath = [string](Get-DefenseClawOptionalLayoutValue -Layout $Layout -Name ([string]$row[0]))
+            if ([string]$row[0] -ceq 'CodexManagedHooksStatePath' -and
+                -not [string]::IsNullOrWhiteSpace($entryPath)) {
+                # The copy of the Codex state the hook reads (GAP-0650).
+                $entryPath = Resolve-DefenseClawCodexManagedHooksStateCopy -Path $entryPath
+            }
             $entries.Add([pscustomobject]@{
-                Path     = [string](Get-DefenseClawOptionalLayoutValue -Layout $Layout -Name ([string]$row[0]))
+                Path     = $entryPath
                 Writer   = 'Admin'
                 Recovery = [string]$row[1]
             })
@@ -17642,6 +17650,7 @@ function New-DefenseClawTransaction {
         foreach ($destination in @(
             $Layout.CodexMachinePolicyPath,
             $Layout.CodexManagedHooksStatePath,
+            (Get-DefenseClawCodexManagedHooksStateCommittedPath -Layout $Layout),
             $Layout.CodexRequirementsOwnershipPath,
             $Layout.CodexRequirementsAclBackupPath
         )) {
@@ -17750,6 +17759,10 @@ function New-DefenseClawTransaction {
             ) -or [string]::Equals(
                 [IO.Path]::GetFullPath($destination).TrimEnd('\'),
                 [IO.Path]::GetFullPath($Layout.CodexManagedHooksStatePath).TrimEnd('\'),
+                [StringComparison]::OrdinalIgnoreCase
+            ) -or [string]::Equals(
+                [IO.Path]::GetFullPath($destination).TrimEnd('\'),
+                [IO.Path]::GetFullPath((Get-DefenseClawCodexManagedHooksStateCommittedPath -Layout $Layout)).TrimEnd('\'),
                 [StringComparison]::OrdinalIgnoreCase
             )
             $isSharedCoworkFile = $coworkSnapshotNeeded -and
@@ -18255,6 +18268,7 @@ function Add-DefenseClawCodexTransactionSnapshot {
     foreach ($destination in @(
         $Layout.CodexMachinePolicyPath,
         $Layout.CodexManagedHooksStatePath,
+        (Get-DefenseClawCodexManagedHooksStateCommittedPath -Layout $Layout),
         $Layout.CodexRequirementsOwnershipPath,
         $Layout.CodexRequirementsAclBackupPath
     )) {
@@ -18277,7 +18291,8 @@ function Add-DefenseClawCodexTransactionSnapshot {
             }
             if ($full -in @(
                 [IO.Path]::GetFullPath($Layout.CodexMachinePolicyPath).TrimEnd('\'),
-                [IO.Path]::GetFullPath($Layout.CodexManagedHooksStatePath).TrimEnd('\')
+                [IO.Path]::GetFullPath($Layout.CodexManagedHooksStatePath).TrimEnd('\'),
+                [IO.Path]::GetFullPath((Get-DefenseClawCodexManagedHooksStateCommittedPath -Layout $Layout)).TrimEnd('\')
             )) {
                 $securityDescriptor = (
                     Microsoft.PowerShell.Security\Get-Acl -LiteralPath $full
@@ -18547,6 +18562,143 @@ function Assert-DefenseClawCodexMachinePolicyFile {
         -HealOnlyUntrusted
 }
 
+function Get-DefenseClawCodexManagedHooksStateCommittedPath {
+    <#
+        The writer copy of the Codex managed runtime state (GAP-0650). Only
+        Administrators and SYSTEM can open it, so no standard user can hold
+        it; the Codex writer starts every transaction from it.
+    #>
+    param([Parameter(Mandatory)][hashtable]$Layout)
+    return ([string]$Layout.CodexManagedHooksStatePath + '.committed')
+}
+
+function Resolve-DefenseClawCodexManagedHooksStateCopy {
+    <#
+        The Codex managed runtime state the hook reads (GAP-0650). $Path, the
+        fixed name, is the logical identity. Once a writer of this release
+        has run, the state is the copy "<Path>.<n>", where n is the even
+        transaction counter the writer lock carries as its size; a running
+        or stopped transaction (odd n) ends with the copy n + 1. With no
+        writer lock, or one no transaction has used yet (size 0), the state
+        is the fixed name, as 1.0.8 wrote it.
+    #>
+    param([Parameter(Mandatory)][string]$Path)
+    $lock = [IO.Path]::Combine(
+        [IO.Path]::GetDirectoryName($Path),
+        '.defenseclaw-managed-hooks.writer.lock'
+    )
+    $info = [IO.FileInfo]::new($lock)
+    if (-not $info.Exists -or $info.Length -le 0) {
+        return $Path
+    }
+    $counter = [int64]$info.Length
+    if (($counter % 2) -ne 0) {
+        $counter++
+    }
+    return ('{0}.{1}' -f $Path, $counter)
+}
+
+function Get-DefenseClawCodexManagedHooksStateCopies {
+    <#
+        Every copy of the Codex managed runtime state in $Directory: the
+        writer copy and each hook copy .defenseclaw-managed-hooks.state.<n>
+        (GAP-0650). The fixed name is not one of them.
+    #>
+    param([Parameter(Mandatory)][string]$Directory)
+    if (-not [IO.Directory]::Exists($Directory)) {
+        return @()
+    }
+    $copies = [Collections.Generic.List[string]]::new()
+    foreach ($entry in [IO.Directory]::GetFiles($Directory, '.defenseclaw-managed-hooks.state.*')) {
+        $leaf = [IO.Path]::GetFileName($entry)
+        if ($leaf -match '^\.defenseclaw-managed-hooks\.state\.(committed|[1-9][0-9]{0,7})$') {
+            $copies.Add($entry)
+        }
+    }
+    return @($copies.ToArray())
+}
+
+function Remove-DefenseClawCodexManagedHooksStateCopies {
+    <#
+        Removes every copy of the Codex managed runtime state in $Directory
+        but those in $Keep, best effort, and returns the copies left: a copy
+        another process holds open stays until a later transaction or purge.
+    #>
+    param(
+        [Parameter(Mandatory)][string]$Directory,
+        [string[]]$Keep = @()
+    )
+    $left = [Collections.Generic.List[string]]::new()
+    foreach ($copy in @(Get-DefenseClawCodexManagedHooksStateCopies -Directory $Directory)) {
+        if ($Keep -contains $copy) {
+            continue
+        }
+        try {
+            [IO.File]::Delete($copy)
+        }
+        catch {
+            $left.Add($copy)
+        }
+    }
+    return @($left.ToArray())
+}
+
+function Sync-DefenseClawCodexManagedHooksStateCopy {
+    <#
+        After a rollback put the writer copy of the Codex managed runtime
+        state back (GAP-0650), the hook copy the writer lock counter names
+        must hold the same state, or the hook would read a state the rollback
+        undid. Every hook copy is removed, and the restored state, when there
+        is one, is written new as the copy of the current counter. A copy
+        another process holds open stays; the next Codex transaction writes
+        the state again.
+    #>
+    param(
+        [Parameter(Mandatory)][hashtable]$Layout,
+        [Parameter(Mandatory)][string]$GatewayServiceSID
+    )
+    $statePath = [string]$Layout.CodexManagedHooksStatePath
+    $directory = [IO.Path]::GetDirectoryName($statePath)
+    if (-not [IO.Directory]::Exists($directory)) {
+        return
+    }
+    $committed = Get-DefenseClawCodexManagedHooksStateCommittedPath -Layout $Layout
+    $current = Resolve-DefenseClawCodexManagedHooksStateCopy -Path $statePath
+    $left = @(Remove-DefenseClawCodexManagedHooksStateCopies -Directory $directory -Keep @($committed))
+    foreach ($copy in $left) {
+        Write-DefenseClawResilienceEvent -Marker defenseclaw_accept -Fields @{
+            path   = $copy
+            reason = 'a copy of the Codex managed runtime state is held open; the next Codex transaction removes it'
+        }
+    }
+    if ([string]::Equals($current, $statePath, [StringComparison]::OrdinalIgnoreCase) -or
+        -not [IO.File]::Exists($committed) -or
+        $left -contains $current) {
+        return
+    }
+    $bytes = [IO.File]::ReadAllBytes($committed)
+    if ($bytes.Length -eq 0) {
+        return
+    }
+    $stream = [IO.FileStream]::new(
+        $current,
+        [IO.FileMode]::CreateNew,
+        [IO.FileAccess]::Write,
+        [IO.FileShare]::None
+    )
+    try {
+        $stream.Write($bytes, 0, $bytes.Length)
+        $stream.Flush($true)
+    }
+    finally {
+        $stream.Dispose()
+    }
+    Set-DefenseClawPathAcl `
+        -Path $current `
+        -Kind MachinePolicyFile `
+        -GatewayServiceSID $GatewayServiceSID
+}
+
 function Assert-DefenseClawCodexManagedHooksStateFilePreflight {
     param([Parameter(Mandatory)][hashtable]$Layout)
     $path = [IO.Path]::GetFullPath(
@@ -18567,42 +18719,74 @@ function Assert-DefenseClawCodexManagedHooksStateFilePreflight {
     )) {
         throw "DefenseClaw Codex managed-hooks state path is not exact: $path"
     }
-    if (-not (Microsoft.PowerShell.Management\Test-Path -LiteralPath $path)) {
-        return
+    # The state the hook reads (the copy the writer lock counter names, or
+    # the fixed name of 1.0.8), a fixed name an earlier release left, and
+    # the writer copy (GAP-0650).
+    $copies = [Collections.Generic.List[string]]::new()
+    foreach ($candidate in @($path, (Resolve-DefenseClawCodexManagedHooksStateCopy -Path $path))) {
+        if (-not $copies.Contains($candidate) -and
+            (Microsoft.PowerShell.Management\Test-Path -LiteralPath $candidate)) {
+            $copies.Add($candidate)
+        }
     }
-    if (-not (Microsoft.PowerShell.Management\Test-Path -LiteralPath $path -PathType Leaf)) {
-        throw "DefenseClaw Codex managed-hooks state is not a regular file: $path"
+    foreach ($copy in $copies) {
+        if (-not (Microsoft.PowerShell.Management\Test-Path -LiteralPath $copy -PathType Leaf)) {
+            throw "DefenseClaw Codex managed-hooks state is not a regular file: $copy"
+        }
+        Assert-DefenseClawNoReparsePath -Path $copy
+        $item = Microsoft.PowerShell.Management\Get-Item -LiteralPath $copy -Force
+        if ([int64]$item.Length -gt 4194304) {
+            throw "DefenseClaw Codex managed-hooks state exceeds the 4194304-byte limit: $copy"
+        }
+        # DefenseClaw writes this file, so drift on it is repaired, not judged.
+        Assert-DefenseClawPathAcl `
+            -Path $copy `
+            -AllowedWriterSIDs @(
+                $script:SystemSID,
+                $script:AdministratorsSID,
+                $script:TrustedInstallerSID
+            ) `
+            -AllowUsersRead `
+            -AllowInheritance `
+            -SelfHealKind MachinePolicyFile `
+            -SelfHealGatewayServiceSID $script:AdministratorsSID
     }
-    Assert-DefenseClawNoReparsePath -Path $path
-    $item = Microsoft.PowerShell.Management\Get-Item -LiteralPath $path -Force
-    if ([int64]$item.Length -gt 4194304) {
-        throw "DefenseClaw Codex managed-hooks state exceeds the 4194304-byte limit: $path"
+    $committed = Get-DefenseClawCodexManagedHooksStateCommittedPath -Layout $Layout
+    if (Microsoft.PowerShell.Management\Test-Path -LiteralPath $committed) {
+        if (-not (Microsoft.PowerShell.Management\Test-Path -LiteralPath $committed -PathType Leaf)) {
+            throw "DefenseClaw Codex managed-hooks state writer copy is not a regular file: $committed"
+        }
+        Assert-DefenseClawNoReparsePath -Path $committed
+        $item = Microsoft.PowerShell.Management\Get-Item -LiteralPath $committed -Force
+        if ([int64]$item.Length -gt 4194304) {
+            throw "DefenseClaw Codex managed-hooks state writer copy exceeds the 4194304-byte limit: $committed"
+        }
+        # No self-heal here: the machine policy file access list would give
+        # BUILTIN\Users the read that lets them hold the copy. The Codex
+        # writer puts its own access list back.
+        Assert-DefenseClawPathAcl `
+            -Path $committed `
+            -AllowedWriterSIDs @(
+                $script:SystemSID,
+                $script:AdministratorsSID,
+                $script:TrustedInstallerSID
+            )
     }
-    # DefenseClaw writes this file, so drift on it is repaired, not judged.
-    Assert-DefenseClawPathAcl `
-        -Path $path `
-        -AllowedWriterSIDs @(
-            $script:SystemSID,
-            $script:AdministratorsSID,
-            $script:TrustedInstallerSID
-        ) `
-        -AllowUsersRead `
-        -AllowInheritance `
-        -SelfHealKind MachinePolicyFile `
-        -SelfHealGatewayServiceSID $script:AdministratorsSID
 }
 
 function Assert-DefenseClawCodexManagedHooksStateFile {
     param([Parameter(Mandatory)][hashtable]$Layout)
     Assert-DefenseClawCodexManagedHooksStateFilePreflight -Layout $Layout
+    $stateCopy = Resolve-DefenseClawCodexManagedHooksStateCopy `
+        -Path $Layout.CodexManagedHooksStatePath
     if (-not (Microsoft.PowerShell.Management\Test-Path `
-        -LiteralPath $Layout.CodexManagedHooksStatePath `
+        -LiteralPath $stateCopy `
         -PathType Leaf)) {
-        throw "DefenseClaw Codex managed-hooks state is missing: $($Layout.CodexManagedHooksStatePath)"
+        throw "DefenseClaw Codex managed-hooks state is missing: $stateCopy"
     }
     $required = New-DefenseClawRequiredRights -Kind MachinePolicy
     Assert-DefenseClawPathAcl `
-        -Path $Layout.CodexManagedHooksStatePath `
+        -Path $stateCopy `
         -AllowedWriterSIDs @(
             $script:SystemSID,
             $script:AdministratorsSID,
@@ -22151,6 +22335,10 @@ function Restore-DefenseClawTransaction {
             $destination.TrimEnd('\'),
             [IO.Path]::GetFullPath($Layout.CodexManagedHooksStatePath).TrimEnd('\'),
             [StringComparison]::OrdinalIgnoreCase
+        ) -or [string]::Equals(
+            $destination.TrimEnd('\'),
+            [IO.Path]::GetFullPath((Get-DefenseClawCodexManagedHooksStateCommittedPath -Layout $Layout)).TrimEnd('\'),
+            [StringComparison]::OrdinalIgnoreCase
         )
         $isSharedCodexFile = $isCodexMachinePolicy -or $isCodexManagedState
         $isSharedCoworkFile = $hasCoworkSnapshot -and
@@ -22246,6 +22434,25 @@ function Restore-DefenseClawTransaction {
             Remove-DefenseClawTransactionCreatedFile `
                 -Path $destination `
                 -InFreshInstallRoot:($inInstall -and $freshStandaloneInstallRoot)
+        }
+    }
+    $codexIncludedProperty = $snapshot.PSObject.Properties['codex_machine_state_included']
+    if ($null -ne $codexIncludedProperty -and
+        $codexIncludedProperty.Value -is [bool] -and
+        [bool]$codexIncludedProperty.Value) {
+        # The writer copy of the Codex state is back; the hook copy the
+        # counter names must say the same (GAP-0650).
+        try {
+            Sync-DefenseClawCodexManagedHooksStateCopy `
+                -Layout $Layout `
+                -GatewayServiceSID (Get-DefenseClawDeterministicServiceSID `
+                    -ServiceName ([string]$snapshot.gateway_service))
+        }
+        catch {
+            Write-DefenseClawResilienceEvent -Marker defenseclaw_degraded -Fields @{
+                path   = [string]$Layout.CodexManagedHooksStatePath
+                reason = "the restored Codex managed runtime state could not be written for the hook: $($_.Exception.Message); the next Codex transaction writes it"
+            }
         }
     }
     if ($hasCoworkSnapshot) {
@@ -27989,7 +28196,7 @@ function Get-DefenseClawSharedManagedHookOwners {
     $specifications = @(
         @{
             name = 'Codex'
-            state = [string]$Layout.CodexManagedHooksStatePath
+            state = [string](Resolve-DefenseClawCodexManagedHooksStateCopy -Path $Layout.CodexManagedHooksStatePath)
             limit = 4194304
             bindings = @(@{
                 path = [string]$Layout.CodexMachinePolicyPath
@@ -28808,8 +29015,13 @@ function Complete-DefenseClawCodexRequirementsRemoval {
         -LiteralPath $Layout.CodexRequirementsOwnershipPath) {
         throw 'Codex requirements ownership record remains after managed removal'
     }
-    if (Microsoft.PowerShell.Management\Test-Path `
-        -LiteralPath $Layout.CodexManagedHooksStatePath) {
+    # Only the state the hook would read counts, and a writer copy that still
+    # holds state; an older copy held open is harmless and purge removes it
+    # (GAP-0650).
+    $committedState = Get-DefenseClawCodexManagedHooksStateCommittedPath -Layout $Layout
+    if ((Microsoft.PowerShell.Management\Test-Path `
+        -LiteralPath (Resolve-DefenseClawCodexManagedHooksStateCopy -Path $Layout.CodexManagedHooksStatePath)) -or
+        ([IO.File]::Exists($committedState) -and [IO.FileInfo]::new($committedState).Length -gt 0)) {
         throw 'DefenseClaw Codex managed-hooks state remains after managed removal'
     }
 
@@ -46207,7 +46419,7 @@ function Restore-DefenseClawForcedUninstallCodexPolicy {
     }
     $folder = [IO.Path]::Combine($script:ProgramData, 'OpenAI', 'Codex')
     $owner = Get-DefenseClawNuclearConnectorOwner `
-        -StatePath ([IO.Path]::Combine($folder, '.defenseclaw-managed-hooks.state')) `
+        -StatePath (Resolve-DefenseClawCodexManagedHooksStateCopy -Path ([IO.Path]::Combine($folder, '.defenseclaw-managed-hooks.state'))) `
         -InstallRoot $installRoot
     if ($owner.Owner -cin @('foreign', 'unknown')) {
         return "the Codex machine policy in $folder is not this deployment's to restore ($($owner.Owner): $($owner.Detail))"
@@ -46221,7 +46433,8 @@ function Restore-DefenseClawForcedUninstallCodexPolicy {
     if ($outcome -ceq 'kept') {
         return ($warnings -join '; ')
     }
-    foreach ($leaf in @('.defenseclaw-managed-hooks.state', '.defenseclaw-managed-hooks.writer.lock', '.defenseclaw-managed-hooks.lock')) {
+    $stateCopies = @(Get-DefenseClawCodexManagedHooksStateCopies -Directory $folder | Microsoft.PowerShell.Core\ForEach-Object { [IO.Path]::GetFileName($_) })
+    foreach ($leaf in @(@('.defenseclaw-managed-hooks.state') + $stateCopies + @('.defenseclaw-managed-hooks.writer.lock', '.defenseclaw-managed-hooks.lock'))) {
         $remaining = [Collections.Generic.List[string]]::new()
         [void](Remove-DefenseClawNuclearPath -Path ([IO.Path]::Combine($folder, $leaf)) -Remaining $remaining)
     }
@@ -48261,6 +48474,8 @@ function Invoke-DefenseClawNuclearUninstall {
         [IO.Path]::Combine($copilotManaged, 'policy.d', '90-defenseclaw.json'),
         [IO.Path]::Combine($copilotManaged, 'DefenseClaw')
     )
+    # The writer copy and the hook copies of the Codex state (GAP-0650).
+    $sidecars = @($sidecars) + @(Get-DefenseClawCodexManagedHooksStateCopies -Directory $codexManaged)
     foreach ($fixedPath in $sidecars) {
         $leftover = Remove-DefenseClawNuclearPath `
             -Path $fixedPath `
