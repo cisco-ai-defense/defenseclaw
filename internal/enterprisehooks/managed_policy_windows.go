@@ -2514,7 +2514,7 @@ func writeWindowsManagedFile(path string, data []byte, userReadable bool) error 
 	}
 	// Publish the protected stage with one rename. The unchanged-content
 	// check above avoids replacing a stable name during an ordinary ensure.
-	if err := safefile.ReplaceDataFileAtomically(tempPath, path); err != nil {
+	if err := safefile.ReplaceFileAtomically(tempPath, path); err != nil {
 		return fmt.Errorf("enterprise hooks: publish managed policy %s: %w", path, err)
 	}
 	if err := setWindowsManagedPolicyProtection(path, false, userReadable); err != nil {

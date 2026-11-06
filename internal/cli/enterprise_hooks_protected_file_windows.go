@@ -70,7 +70,7 @@ func writeEnterpriseHookProtectedFile(path string, data []byte) error {
 	if err := enterpriseHookAuthorizationOwnershipSetter(tmpPath); err != nil {
 		return fmt.Errorf("protect machine file temp: %w", err)
 	}
-	if err := safefile.ReplaceDataFile(tmpPath, path); err != nil {
+	if err := safefile.ReplaceFile(tmpPath, path); err != nil {
 		return fmt.Errorf("publish protected machine file: %w", err)
 	}
 	persisted, err := os.ReadFile(path)
@@ -148,7 +148,7 @@ func writeEnterpriseHookAdminOnlyFile(path string, data []byte) error {
 	if err := enterprisehooks.ProtectWindowsManagedRuntimeAdminFile(tmpPath); err != nil {
 		return fmt.Errorf("protect admin-only file temp: %w", err)
 	}
-	if err := safefile.ReplaceDataFile(tmpPath, path); err != nil {
+	if err := safefile.ReplaceFile(tmpPath, path); err != nil {
 		return fmt.Errorf("publish admin-only file: %w", err)
 	}
 	// If the destination existed with a different (broader) ACL,

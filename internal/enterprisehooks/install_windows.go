@@ -3301,7 +3301,7 @@ func writeWindowsRuntimeRollbackFile(path string, data []byte) error {
 	if err := file.Close(); err != nil {
 		return err
 	}
-	if err := safefile.ReplaceDataFile(tempPath, path); err != nil {
+	if err := safefile.ReplaceFile(tempPath, path); err != nil {
 		return err
 	}
 	removeTemp = false

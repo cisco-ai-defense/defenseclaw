@@ -17,7 +17,6 @@ import (
 	"unsafe"
 
 	"github.com/defenseclaw/defenseclaw/internal/managed"
-	"github.com/defenseclaw/defenseclaw/internal/safefile"
 	"github.com/defenseclaw/defenseclaw/internal/winpath"
 	"golang.org/x/sys/windows"
 )
@@ -62,23 +61,21 @@ func replaceAtomicTransformV2ExistingFile(targetPath, stagePath, backupPath stri
 	if err != nil {
 		return err
 	}
-	return safefile.InDataFileTransaction(stagePath, targetPath, func() error {
-		result, _, callErr := atomicTransformV2ReplaceFileW.Call(
-			uintptr(unsafe.Pointer(target)),
-			uintptr(unsafe.Pointer(stage)),
-			uintptr(unsafe.Pointer(backup)),
-			0, // REPLACEFILE_WRITE_THROUGH is documented as unsupported.
-			0,
-			0,
-		)
-		if result != 0 {
-			return nil
-		}
-		if callErr == nil || callErr == syscall.Errno(0) {
-			return syscall.EINVAL
-		}
-		return callErr
-	})
+	result, _, callErr := atomicTransformV2ReplaceFileW.Call(
+		uintptr(unsafe.Pointer(target)),
+		uintptr(unsafe.Pointer(stage)),
+		uintptr(unsafe.Pointer(backup)),
+		0, // REPLACEFILE_WRITE_THROUGH is documented as unsupported.
+		0,
+		0,
+	)
+	if result != 0 {
+		return nil
+	}
+	if callErr == nil || callErr == syscall.Errno(0) {
+		return syscall.EINVAL
+	}
+	return callErr
 }
 
 // A ReplaceFileW return code is only a hint. Microsoft documents partial

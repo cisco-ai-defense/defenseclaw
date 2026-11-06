@@ -1245,58 +1245,6 @@ namespace $nativeNamespace
         [return: MarshalAs(UnmanagedType.Bool)]
         private static extern bool CloseHandle(IntPtr handle);
 
-        [DllImport("ktmw32.dll", SetLastError = true)]
-        private static extern IntPtr CreateTransaction(
-            IntPtr attributes, IntPtr unitOfWork, uint options, uint isolationLevel,
-            uint isolationFlags, uint timeout, [MarshalAs(UnmanagedType.LPWStr)] string description);
-
-        [DllImport("ktmw32.dll", SetLastError = true)]
-        [return: MarshalAs(UnmanagedType.Bool)]
-        private static extern bool CommitTransaction(IntPtr transaction);
-
-        [DllImport("ktmw32.dll", SetLastError = true)]
-        [return: MarshalAs(UnmanagedType.Bool)]
-        private static extern bool RollbackTransaction(IntPtr transaction);
-
-        [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true, EntryPoint = "MoveFileTransactedW")]
-        [return: MarshalAs(UnmanagedType.Bool)]
-        private static extern bool MoveDataFileTransacted(
-            string source, string destination, IntPtr progressRoutine, IntPtr data,
-            uint flags, IntPtr transaction);
-
-        // Publishes a staged data file at its stable name. The caller handles
-        // an unavailable transaction with the existing plain publication.
-        public static string ReplaceDataFileInTransaction(string source, string destination)
-        {
-            const uint MOVEFILE_REPLACE_EXISTING = 0x00000001;
-            IntPtr transaction = CreateTransaction(IntPtr.Zero, IntPtr.Zero, 0, 0, 0, 30000, null);
-            if (transaction == IntPtr.Zero || transaction == new IntPtr(-1))
-            {
-                return "transaction:" + Marshal.GetLastWin32Error();
-            }
-            try
-            {
-                if (!MoveDataFileTransacted(source, destination, IntPtr.Zero, IntPtr.Zero,
-                    MOVEFILE_REPLACE_EXISTING, transaction))
-                {
-                    int moveError = Marshal.GetLastWin32Error();
-                    RollbackTransaction(transaction);
-                    return "move:" + moveError;
-                }
-                if (!CommitTransaction(transaction))
-                {
-                    int commitError = Marshal.GetLastWin32Error();
-                    RollbackTransaction(transaction);
-                    return "commit:" + commitError;
-                }
-                return "";
-            }
-            finally
-            {
-                CloseHandle(transaction);
-            }
-        }
-
         [DllImport("kernel32.dll", SetLastError = true)]
         private static extern IntPtr OpenProcess(
             uint desiredAccess,
@@ -9949,38 +9897,6 @@ function Assert-DefenseClawStandaloneInstallTreeNotInUse {
     }
 }
 
-function Move-DefenseClawDataFileReplacing {
-    param(
-        [Parameter(Mandatory)][string]$Source,
-        [Parameter(Mandatory)][string]$Destination
-    )
-    $deadline = [DateTime]::UtcNow.AddSeconds(3)
-    while ($true) {
-        $failure = 'native:unavailable'
-        try {
-            $native = Initialize-DefenseClawNativeSecurity
-            $failure = [string]$native::ReplaceDataFileInTransaction($Source, $Destination)
-        }
-        catch {
-            $failure = 'native:' + $_.Exception.Message
-        }
-        if ($failure -ceq '') {
-            return
-        }
-        if ($failure.StartsWith('commit:', [StringComparison]::Ordinal)) {
-            throw "data file transaction commit failed: $Destination ($failure)"
-        }
-        if ($failure -notin @('move:5', 'move:32', 'move:33', 'move:6800')) {
-            break
-        }
-        if ([DateTime]::UtcNow -ge $deadline) {
-            throw "data file replacement remained busy: $Destination ($failure)"
-        }
-        Microsoft.PowerShell.Utility\Start-Sleep -Milliseconds 10
-    }
-    Microsoft.PowerShell.Management\Move-Item -LiteralPath $Source -Destination $Destination -Force
-}
-
 function Write-DefenseClawJsonAtomic {
     param(
         [Parameter(Mandatory)]$Value,
@@ -10001,12 +9917,7 @@ function Write-DefenseClawJsonAtomic {
         # A ReadOnly, Hidden or System attribute on the file being replaced
         # makes the replacing move fail with access denied.
         [void](Clear-DefenseClawRestrictiveFileAttributes -Path $Path)
-        if (Test-DefenseClawStandaloneProfile) {
-            Move-DefenseClawDataFileReplacing -Source $temporary -Destination $Path
-        }
-        else {
-            Microsoft.PowerShell.Management\Move-Item -LiteralPath $temporary -Destination $Path -Force
-        }
+        Microsoft.PowerShell.Management\Move-Item -LiteralPath $temporary -Destination $Path -Force
     }
     finally {
         if (Microsoft.PowerShell.Management\Test-Path -LiteralPath $temporary) {
@@ -26110,7 +26021,7 @@ function Write-DefenseClawDeploymentMetadataBytes {
             -Path $temporary `
             -Kind AdminFile `
             -GatewayServiceSID $script:AdministratorsSID
-        Move-DefenseClawDataFileReplacing -Source $temporary -Destination $Path
+        Microsoft.PowerShell.Management\Move-Item -LiteralPath $temporary -Destination $Path -Force
     }
     finally {
         if (Microsoft.PowerShell.Management\Test-Path -LiteralPath $temporary) {

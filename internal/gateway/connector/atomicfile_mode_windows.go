@@ -87,18 +87,16 @@ var atomicFileBeforePrivatePublish func(string) error
 
 func atomicFilePublish(source, destination string, stagedInfo os.FileInfo, perm os.FileMode) error {
 	if perm.Perm()&0o077 != 0 {
-		return safefile.ReplaceDataFile(source, destination)
+		return safefile.ReplaceFile(source, destination)
 	}
-	return safefile.InDataFileTransaction(source, destination, func() error {
-		return atomicFilePublishPrivateBound(
-			source,
-			destination,
-			stagedInfo,
-			validateAtomicTransformBoundFilePrivatePlatform,
-			false,
-			true,
-		)
-	})
+	return atomicFilePublishPrivateBound(
+		source,
+		destination,
+		stagedInfo,
+		validateAtomicTransformBoundFilePrivatePlatform,
+		false,
+		true,
+	)
 }
 
 func atomicFilePublishHookAPIToken(
@@ -109,16 +107,14 @@ func atomicFilePublishHookAPIToken(
 	if perm.Perm()&0o077 != 0 {
 		return fmt.Errorf("hook API token publication requires a private file mode")
 	}
-	return safefile.InDataFileTransaction(source, destination, func() error {
-		return atomicFilePublishPrivateBound(
-			source,
-			destination,
-			stagedInfo,
-			validateHookAPITokenBoundFileCustodyPlatform,
-			true,
-			true,
-		)
-	})
+	return atomicFilePublishPrivateBound(
+		source,
+		destination,
+		stagedInfo,
+		validateHookAPITokenBoundFileCustodyPlatform,
+		true,
+		true,
+	)
 }
 
 func atomicFilePublishPrivateBound(

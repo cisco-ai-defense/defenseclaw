@@ -77,24 +77,6 @@ func ReplaceFile(source, destination string) error {
 	return replaceFile(source, destination)
 }
 
-// ReplaceDataFile publishes a staged non-image file with the existing
-// metadata-preserving replacement behavior. On Windows file systems that
-// support file transactions, the existing name remains available through the
-// commit.
-func ReplaceDataFile(source, destination string) error {
-	return InDataFileTransaction(source, destination, func() error {
-		return ReplaceFile(source, destination)
-	})
-}
-
-// ReplaceDataFileAtomically publishes a staged non-image file with the
-// one-step rename contract of ReplaceFileAtomically.
-func ReplaceDataFileAtomically(source, destination string) error {
-	return InDataFileTransaction(source, destination, func() error {
-		return ReplaceFileAtomically(source, destination)
-	})
-}
-
 // WritePrivate protects the managed parent directory and holds it against
 // replacement while atomically writing a sensitive state file.
 func WritePrivate(path string, data []byte) error {

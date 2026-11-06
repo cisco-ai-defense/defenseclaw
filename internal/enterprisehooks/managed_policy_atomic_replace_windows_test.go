@@ -9,7 +9,6 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
-	"strconv"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -45,7 +44,7 @@ func requireManagedPolicyWriterKeepsTheFile(t *testing.T, refused bool) {
 	if err := writeWindowsManagedFile(path, []byte("version 0\r\n"), true); err != nil {
 		t.Fatal(err)
 	}
-	var reads, missing, refusedOpens atomic.Int64
+	var reads, missing atomic.Int64
 	stop := make(chan struct{})
 	var readers sync.WaitGroup
 	for range 2 {
@@ -58,44 +57,28 @@ func requireManagedPolicyWriterKeepsTheFile(t *testing.T, refused bool) {
 					return
 				default:
 				}
-				reads.Add(1)
-				if _, exists, err := sharedfiletest.ReadShared(path); err != nil {
-					refusedOpens.Add(1)
-				} else if !exists {
-					missing.Add(1)
+				if _, exists, err := sharedfiletest.ReadShared(path); err == nil {
+					reads.Add(1)
+					if !exists {
+						missing.Add(1)
+					}
 				}
 			}
 		}()
 	}
-	minimumReads := int64(0)
-	if value := os.Getenv("GAP0655_OPEN_MIN"); value != "" {
-		var err error
-		minimumReads, err = strconv.ParseInt(value, 10, 64)
-		if err != nil || minimumReads < 1 {
-			t.Fatalf("invalid GAP0655_OPEN_MIN: %q", value)
-		}
-	}
-	maxWrites := 400
-	if minimumReads > 0 {
-		maxWrites = 100000
-	}
-	writes := 0
+	const writes = 400
 	var writeErr error
-	for i := 1; i <= maxWrites && writeErr == nil; i++ {
+	for i := 1; i <= writes && writeErr == nil; i++ {
 		writeErr = writeWindowsManagedFile(path, []byte(fmt.Sprintf("version %d\r\n", i)), true)
-		writes = i
-		if i >= 400 && reads.Load() >= minimumReads {
-			break
-		}
 	}
 	close(stop)
 	readers.Wait()
 	if writeErr != nil {
 		t.Fatalf("%v\n%s", writeErr, managedPolicyWriterRunnerHints(filepath.Dir(path), refused, runSystemTool))
 	}
-	if reads.Load() < minimumReads || missing.Load() != 0 || refusedOpens.Load() != 0 {
-		t.Fatalf("concurrent opens of %s: %d missing, %d refused in %d attempts during %d replacements\n%s",
-			path, missing.Load(), refusedOpens.Load(), reads.Load(), writes,
+	if missing.Load() != 0 {
+		t.Fatalf("a reader found %s missing %d times in %d reads while it was replaced %d times\n%s",
+			path, missing.Load(), reads.Load(), writes,
 			managedPolicyWriterRunnerHints(filepath.Dir(path), refused, runSystemTool))
 	}
 	if reads.Load() == 0 {

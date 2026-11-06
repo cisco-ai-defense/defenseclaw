@@ -41,7 +41,6 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/gateway"
 	"github.com/defenseclaw/defenseclaw/internal/lazyregexp"
 	"github.com/defenseclaw/defenseclaw/internal/managed"
-	"github.com/defenseclaw/defenseclaw/internal/safefile"
 	"github.com/defenseclaw/defenseclaw/internal/winpath"
 )
 
@@ -1224,9 +1223,7 @@ func writeFileKeepingDACL(path string, data []byte, sibling string) error {
 		_ = os.Remove(temporary)
 		return err
 	}
-	if err := safefile.InDataFileTransaction(temporary, path, func() error {
-		return os.Rename(temporary, path)
-	}); err != nil {
+	if err := os.Rename(temporary, path); err != nil {
 		_ = os.Remove(temporary)
 		return err
 	}
