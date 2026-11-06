@@ -386,3 +386,93 @@ func TestCredentialReadRulesLeaveWritesToTheirLeg(t *testing.T) {
 		t.Error("PATH-SSH-KEY lost its delete mutation proof")
 	}
 }
+
+// credentialFileVerdict is the decision a finding of severity gives in a
+// profile pack: CRITICAL blocks in every pack, HIGH alerts in balanced and
+// permissive and blocks in strict.
+func credentialFileVerdict(profile, severity string) string {
+	if severity == "CRITICAL" || profile == "strict" {
+		return "block"
+	}
+	return "alert"
+}
+
+// TestCredentialFileWritesOutsideTheActiveHomeKeepTheirVerdict: the write
+// leg covers the active home only, so a write, copy, dd, tee, rm or move of a
+// credential file in another account's home or in /root keeps the read
+// rule's own verdict, as before the leg existed: CRITICAL files block in
+// every profile, the kubeconfig alerts in balanced and permissive and blocks
+// in strict (gx052 review M1).
+func TestCredentialFileWritesOutsideTheActiveHomeKeepTheirVerdict(t *testing.T) {
+	targets := []struct{ path, rule, severity string }{
+		{"/home/bob/.aws/credentials", "PATH-AWS-CREDS", "CRITICAL"},
+		{"/root/.aws/credentials", "PATH-AWS-CREDS", "CRITICAL"},
+		{"/home/bob/.git-credentials", "PATH-GIT-CREDS", "CRITICAL"},
+		{"/home/bob/.netrc", "PATH-NETRC", "CRITICAL"},
+		{"/root/.git-credentials", "PATH-GIT-CREDS", "CRITICAL"},
+		{"/home/bob/.kube/config", "PATH-KUBE", "HIGH"},
+	}
+	for _, profile := range []string{"default", "permissive", "strict"} {
+		for _, managed := range []bool{false, true} {
+			t.Run(profile+"/"+credentialFileTopology(managed), func(t *testing.T) {
+				f := newCredentialFileFixture(t)
+				hook := newCredentialFileHook(t, f, profile, managed)
+				for _, target := range targets {
+					want := credentialFileVerdict(profile, target.severity)
+					for _, command := range []string{
+						"printf x > " + target.path, "printf x >> " + target.path, "printf x | tee " + target.path,
+						"cp notes.txt " + target.path, "dd if=notes.txt of=" + target.path, "rm " + target.path,
+						"mv " + target.path + " moved.txt",
+					} {
+						for _, connector := range []string{"claudecode", "codex"} {
+							call := credentialFileHookCall{connector, "Bash", map[string]any{"command": command}}
+							got, out := hook.post(t, call)
+							if got != want || !strings.Contains(out, target.rule) {
+								t.Errorf("%s: decision %s, want %s by %s: %.400s", call, got, want, target.rule, out)
+							}
+						}
+					}
+				}
+			})
+		}
+	}
+}
+
+// TestCredentialFileCopiedIntoAnotherKeepsTheReadVerdict: a command that
+// reads one credential file and writes it into another (dd if=A of=B) keeps
+// the read rule's finding of A, and the write of B is the write leg's: it
+// alerts in balanced and permissive and blocks in strict. It is never weaker
+// than base 38197e3501, which alerts in balanced and strict and allows in
+// permissive (gx052 review M2; on the older base d37eafc351 these blocked
+// in balanced through the read rule taking B as its mutation).
+func TestCredentialFileCopiedIntoAnotherKeepsTheReadVerdict(t *testing.T) {
+	pairs := []struct{ from, to, rule string }{
+		{".aws/credentials", ".git-credentials", "PATH-AWS-CREDS"},
+		{".aws/credentials", ".netrc", "PATH-AWS-CREDS"},
+		{".config/gh/hosts.yml", ".aws/credentials", "secrets.cloud_credential_read"},
+		{".git-credentials", ".aws/credentials", "PATH-GIT-CREDS"},
+		{".netrc", ".aws/credentials", "PATH-NETRC"},
+		{".ssh/id_ed25519", ".aws/credentials", "PATH-SSH-KEY"},
+	}
+	for _, profile := range []string{"default", "permissive", "strict"} {
+		for _, managed := range []bool{false, true} {
+			t.Run(profile+"/"+credentialFileTopology(managed), func(t *testing.T) {
+				f := newCredentialFileFixture(t)
+				hook := newCredentialFileHook(t, f, profile, managed)
+				for _, pair := range pairs {
+					from, to := filepath.Join(f.home, pair.from), filepath.Join(f.home, pair.to)
+					for _, connector := range []string{"claudecode", "codex"} {
+						call := credentialFileHookCall{connector, "Bash", map[string]any{"command": "dd if=" + from + " of=" + to}}
+						got, out := hook.post(t, call)
+						want := credentialFileVerdict(profile, "HIGH")
+						if got != want || !strings.Contains(out, credentialFileWriteRule) ||
+							profile != "permissive" && !strings.Contains(out, pair.rule) {
+							t.Errorf("%s: decision %s, want %s with %s and the %s read finding: %.400s",
+								call, got, want, credentialFileWriteRule, pair.rule, out)
+						}
+					}
+				}
+			})
+		}
+	}
+}

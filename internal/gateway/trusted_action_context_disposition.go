@@ -466,10 +466,12 @@ func trustedActionClassifySensitivePathRisk(
 		case actionfacts.PathAccessWrite,
 			actionfacts.PathAccessAppend,
 			actionfacts.PathAccessDelete:
-			// A credential read rule judges reads; its write leg,
-			// secrets.credential_file_write, judges the writes (GAP-0052).
-			// A fallback match of the read rule on a write is a reference.
-			if credentialFileWriteLegOwnsReadRule(ruleID) {
+			// A pure write of a file the credential write leg judges is
+			// the leg's (secrets.credential_file_write, GAP-0052). Any other
+			// write keeps the read rule's mutation proof: a path the leg
+			// does not cover (another account's home, /root), and a
+			// command that also reads a credential file (dd if=A of=B).
+			if credentialFileWriteLegJudgesWrite(facts, candidate, ruleID) {
 				continue
 			}
 			if trustedActionExecutingCommand(facts, candidate.CommandID) {
