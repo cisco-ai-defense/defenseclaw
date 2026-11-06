@@ -4,6 +4,7 @@
 package hookpaths
 
 import (
+	"maps"
 	"path/filepath"
 	"strconv"
 	"strings"
@@ -51,22 +52,37 @@ func simpleShellParameter(word *syntax.Word) string {
 // literalProgramOperands descends only through launchers with known argument
 // positions. An unknown option does not turn an option value into a program.
 func literalProgramOperands(words []string, stmt *syntax.Stmt, cwd, home string, depth int, allowFileRead bool) []string {
+	return literalProgramOperandsKnown(words, stmt, cwd, home, depth, allowFileRead, nil, nil)
+}
+
+func literalProgramOperandsKnown(words []string, stmt *syntax.Stmt, cwd, home string, depth int, allowFileRead bool, environment actionValues, include func(string) bool) []string {
 	for wrapper := 0; wrapper < 8 && len(words) > 0; wrapper++ {
 		program := programBase(words[0])
 		switch program {
 		case "env":
 			index := 1
+			environment = maps.Clone(environment)
 			for index < len(words) {
 				word := words[index]
 				switch {
 				case word == "--":
 					index++
 					goto nextProgram
-				case word == "-i" || word == "--ignore-environment" || word == "-v" || word == "--debug":
+				case word == "-i" || word == "--ignore-environment":
+					environment = nil
+					index++
+				case word == "-v" || word == "--debug":
 					index++
 				case word == "-u" || word == "--unset":
+					if index+1 < len(words) {
+						delete(environment, words[index+1])
+					}
 					index += 2
-				case strings.HasPrefix(word, "--unset=") || strings.HasPrefix(word, "-u") && len(word) > 2:
+				case strings.HasPrefix(word, "--unset="):
+					delete(environment, strings.TrimPrefix(word, "--unset="))
+					index++
+				case strings.HasPrefix(word, "-u") && len(word) > 2:
+					delete(environment, word[2:])
 					index++
 				case word == "-C" || word == "--chdir":
 					if index+1 >= len(words) {
@@ -81,6 +97,11 @@ func literalProgramOperands(words []string, stmt *syntax.Stmt, cwd, home string,
 					cwd = OperandPath(word[2:], cwd)
 					index++
 				case strings.Contains(word, "=") && !strings.HasPrefix(word, "-"):
+					name, value, _ := strings.Cut(word, "=")
+					if environment == nil {
+						environment = actionValues{}
+					}
+					environment[name] = value
 					index++
 				case strings.HasPrefix(word, "-"):
 					return nil
@@ -176,9 +197,10 @@ func literalProgramOperands(words []string, stmt *syntax.Stmt, cwd, home string,
 				if redirects, parsed, _ := ShellWriteOperands(words[body], cwd, home); parsed {
 					operands = append(operands, redirects...)
 				}
-				operands = append(operands, literalWriteOperandsDepth(words[body], cwd, home, depth+1)...)
-				if len(words) >= body+3 {
-					operands = append(operands, literalPositionalShellRedirects(words[body], words[body+2], cwd, home)...)
+				writes, _ := literalWriteOperandsWithParsedKnown(words[body], cwd, home, depth+1, nil, environment, include)
+				operands = append(operands, writes...)
+				if len(words) >= body+2 {
+					operands = append(operands, literalPositionalShellRedirects(words[body], words[body+1:], cwd, home)...)
 				}
 				return operands
 			}
@@ -188,6 +210,13 @@ func literalProgramOperands(words []string, stmt *syntax.Stmt, cwd, home string,
 				}
 			}
 			return nil
+		case "eval":
+			if include == nil || len(words) < 2 || len(words) > 8 {
+				return nil
+			}
+			body := strings.Join(words[1:], " ")
+			writes, _ := literalWriteOperandsWithParsedKnown(body, cwd, home, depth+1, nil, environment, include)
+			return writes
 		case "find":
 			return literalFindOperands(words, cwd, home, depth)
 		case ".", "source":
@@ -665,9 +694,9 @@ func literalFindOperands(words []string, cwd, home string, depth int) []string {
 	return nil
 }
 
-func literalPositionalShellRedirects(command, value, cwd, home string) []string {
+func literalPositionalShellRedirects(command string, arguments []string, cwd, home string) []string {
 	file, ok := parseShell(command)
-	if !ok || value == "" || strings.HasPrefix(value, "-") {
+	if !ok {
 		return nil
 	}
 	var operands []string
@@ -676,12 +705,16 @@ func literalPositionalShellRedirects(command, value, cwd, home string) []string 
 			return false
 		}
 		redirect, ok := node.(*syntax.Redirect)
-		if !ok || redirect.Word == nil || simpleShellParameter(redirect.Word) != "1" {
+		if !ok || redirect.Word == nil {
+			return true
+		}
+		index, err := strconv.Atoi(simpleShellParameter(redirect.Word))
+		if err != nil || index < 0 || index >= len(arguments) || arguments[index] == "" || strings.HasPrefix(arguments[index], "-") {
 			return true
 		}
 		switch redirect.Op {
 		case syntax.RdrOut, syntax.AppOut, syntax.RdrClob, syntax.RdrAll, syntax.AppAll, syntax.RdrInOut:
-			operands = append(operands, OperandPath(value, cwd))
+			operands = append(operands, OperandPath(arguments[index], cwd))
 		}
 		return true
 	})
