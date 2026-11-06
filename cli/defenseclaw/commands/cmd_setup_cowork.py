@@ -246,7 +246,14 @@ def setup_cowork(
     started = datetime.now(timezone.utc)
     build, version = cowork.next_version(state, started, data_dir)
     try:
-        path, digest = cowork.write_plugin_zip(data_dir, cowork.plugin_zip_bytes(hooks_doc, version, __version__))
+        archive = cowork.plugin_zip_bytes(hooks_doc, version, __version__)
+    except (OSError, ValueError) as exc:
+        raise click.ClickException(
+            f"The Cowork plugin could not copy its installed Windows guard ({exc}). "
+            "Run the DefenseClaw installer, then defenseclaw setup cowork again."
+        ) from exc
+    try:
+        path, digest = cowork.write_plugin_zip(data_dir, archive)
     except OSError as exc:
         # No traceback: name the folder, the cause and the fix (GAP-0054).
         raise click.ClickException(cowork.plugin_write_refusal(data_dir, exc)) from exc

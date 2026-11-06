@@ -172,22 +172,25 @@ func coworkWindowsHookInvocation(dataDir, launcher, event string) (string, []str
 	return coworkWindowsGuardExecutable(launcher), []string{hookguard.CoworkSubcommand, dataDir, launcher, event}
 }
 
-// The guard is an installed executable separate from the stable launcher.
-// Its path is passed to CreateProcess directly, so supported account paths
-// need no command-processor quoting or character restrictions.
+// Setup copies this small installed guard into the Cowork plugin. The plugin
+// keeps running it after installed binaries are removed, while it continues
+// to run the live launcher for installed accounts.
 func coworkWindowsGuardExecutable(launcher string) string {
-	if stable, installed := canonicalNativeWindowsHookBinary(), canonicalNativeWindowsInstalledHookBinary(); stable != "" && installed != "" && pathidentity.Same(launcher, stable) &&
+	return coworkWindowsGuardFor(launcher, canonicalNativeWindowsHookBinary(), canonicalNativeWindowsInstalledHookBinary())
+}
+
+func coworkWindowsGuardFor(launcher, stable, installed string) string {
+	if stable != "" && installed != "" && pathidentity.Same(launcher, stable) &&
 		!pathidentity.Same(installed, stable) && hookguard.AbsoluteHookExecutable(installed) {
-		if info, err := os.Lstat(installed); err == nil && info.Mode().IsRegular() {
-			return installed
-		}
-	}
-	for _, name := range []string{windowsHookGuardBinaryName, windowsGatewayBinaryName} {
-		guard := filepath.Join(filepath.Dir(launcher), name)
-		if info, err := os.Lstat(guard); err == nil && info.Mode().IsRegular() &&
-			filepath.IsAbs(guard) && !pathidentity.Same(guard, launcher) {
+		guard := filepath.Join(filepath.Dir(installed), windowsHookGuardBinaryName)
+		if info, err := os.Lstat(guard); err == nil && info.Mode().IsRegular() {
 			return guard
 		}
+	}
+	guard := filepath.Join(filepath.Dir(launcher), windowsHookGuardBinaryName)
+	if info, err := os.Lstat(guard); err == nil && info.Mode().IsRegular() &&
+		filepath.IsAbs(guard) && !pathidentity.Same(guard, launcher) {
+		return guard
 	}
 	return ""
 }
