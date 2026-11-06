@@ -664,6 +664,41 @@ def test_protection_survives_a_gateway_restart(app) -> None:
     assert next(c for c in r.checks if c.get("check_id") == "doctor.cowork")["status"] == "pass"
 
 
+def test_released_windows_cowork_plugin_requires_rebuild(app, monkeypatch) -> None:
+    released = Path(__file__).resolve().parents[2] / (
+        "internal/gateway/connector/testdata/released-carriers/1.0.8/cowork-plugin-hooks-windows.json"
+    )
+    archive = Path(cowork.zip_path(_data_dir(app)))
+    archive.parent.mkdir(parents=True, exist_ok=True)
+    with zipfile.ZipFile(archive, "w") as zf:
+        zf.write(released, "hooks/hooks.json")
+    cowork.save_state(_data_dir(app), {"build": 8, "version": "1.0.8", "built_at": _now(-600)})
+    _write_gateway_activity(app, _now(-300))
+    monkeypatch.setattr(cowork.sys, "platform", "win32")
+    health = {"connectors": [{"name": "claudecode"}]}
+
+    row = cowork.cowork_status(app.cfg, health, gateway_running=True)
+    assert row is not None and not row.protected
+    assert row.reason_code == "cowork_plugin_stale"
+    assert row.step == "defenseclaw setup cowork"
+    check = cmd_doctor._DoctorResult()
+    with patch.object(cmd_doctor, "_authenticated_gateway_health", return_value=(health, "", True)):
+        cmd_doctor._check_cowork(app.cfg, {"gateway": {}}, check)
+    doctor_row = next(c for c in check.checks if c.get("check_id") == "doctor.cowork")
+    assert doctor_row["status"] == "warn" and doctor_row["reason_code"] == "cowork_plugin_stale"
+
+    current = _windows_hooks_doc(
+        Path("C:/Programs/DefenseClaw/defenseclaw-hook-guard.exe"),
+        Path("C:/Users/Owner/.defenseclaw"),
+        Path("C:/Users/Owner/.local/bin/defenseclaw-hook.exe"),
+    )
+    for groups in current["hooks"].values():
+        groups[0]["hooks"][0]["command"] = "${CLAUDE_PLUGIN_ROOT}/hooks/defenseclaw-hook-guard.exe"
+    with zipfile.ZipFile(archive, "w") as zf:
+        zf.writestr("hooks/hooks.json", json.dumps(current))
+    assert cowork.cowork_status(app.cfg, health, gateway_running=True).protected
+
+
 def test_gateway_activity_before_the_build_is_not_protection(app) -> None:
     cowork.save_state(_data_dir(app), {"build": 4, "version": "1.0.4", "built_at": _now(-60)})
     _write_gateway_activity(app, _now(-600))
