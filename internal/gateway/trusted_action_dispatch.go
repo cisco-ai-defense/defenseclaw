@@ -299,7 +299,7 @@ func dispatchTrustedAction(
 	// readers below, and the bound adds a finding the policy tier decides
 	// (readingBoundUnread).
 	clientBound := request.EnforcementCapable && request.ResolvedWriteTargets[hookpaths.UnprovenReasonKey] == "shell-parse-bound"
-	if clientBound && trustedReadingBoundMayNameProtected(request.Input) {
+	if clientBound && trustedReadingBoundMayNameProtected(request) {
 		return trustedActionLimitFindings(true)
 	}
 	switch trustedActionCommandBound(request.Input) {
@@ -311,7 +311,7 @@ func dispatchTrustedAction(
 		// No reader below reads it either (GAP-0677). A call whose text may
 		// name a protected target keeps the over-limit block; for any other
 		// the policy tier decides the bound (readingBoundUnread).
-		if trustedReadingBoundMayNameProtected(request.Input) {
+		if trustedReadingBoundMayNameProtected(request) {
 			return trustedActionLimitFindings(request.EnforcementCapable)
 		}
 		return readingBoundUnreadFindings(request.EnforcementCapable)
@@ -319,7 +319,7 @@ func dispatchTrustedAction(
 		// The readers below read it, but past this weight they do not prove
 		// its protected targets: a call whose text may name one keeps the
 		// over-limit block.
-		if trustedReadingBoundMayNameProtected(request.Input) {
+		if trustedReadingBoundMayNameProtected(request) {
 			return trustedActionLimitFindings(request.EnforcementCapable)
 		}
 	}

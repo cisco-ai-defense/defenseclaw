@@ -7,7 +7,6 @@ import (
 	"slices"
 	"strings"
 
-	"github.com/defenseclaw/defenseclaw/internal/actionfacts"
 	"github.com/defenseclaw/defenseclaw/internal/config"
 	"github.com/defenseclaw/defenseclaw/internal/hookpaths"
 )
@@ -32,16 +31,35 @@ import (
 // protected target keeps the over-limit block.
 
 // trustedReadingBoundMayNameProtected reports whether the text of input
-// may name a protected target (hookpaths.BoundCallMayNameProtected): its
-// command, argv, top-level command argument and tool arguments.
-func trustedReadingBoundMayNameProtected(input actionfacts.Input) bool {
+// may name a protected target (hookpaths.BoundCallMayNameProtected, or a
+// link to one): its command, argv, top-level command argument and tool
+// arguments.
+func trustedReadingBoundMayNameProtected(request trustedActionRequest) bool {
+	input, clientTargets := request.Input, request.ResolvedWriteTargets
 	text := input.Command + "\n" + strings.Join(input.Argv, "\n") + "\n" + string(input.Args)
 	if command, present, valid := trustedTopLevelCommandField(input.Args); valid && present {
 		// The decoded value: in the JSON text a word ends at a quote or a
 		// brace that is not part of it.
 		text += "\n" + command
 	}
-	return hookpaths.BoundCallMayNameProtected(text, input.CWD, input.ActiveHome)
+	if hookpaths.BoundCallMayNameProtected(text, input.CWD, input.ActiveHome) {
+		return true
+	}
+	// A word that reaches a protected file through a link of the project
+	// (hookpaths.BoundCallReachesProtectedLink): the hook client looked the
+	// words up as the user and sent the decision, which a gateway behind
+	// ProtectHome cannot repeat; a per-user gateway looks them up itself.
+	if clientTargets[hookpaths.ActionDecisionKey] == hookpaths.ProtectedTargetDecision {
+		return true
+	}
+	// Behind ProtectHome, a map that says only "incomplete", with no
+	// directory, is the hook client giving up on a payload over its size
+	// bound: nobody could look the words up, so the call is not shown to
+	// reach nothing.
+	if request.ProtectedHomeHook && clientTargets[hookpaths.TruncatedKey] == "1" && clientTargets[hookpaths.CWDKey] == "" {
+		return true
+	}
+	return hookpaths.BoundCallReachesProtectedLink(text, input.CWD, input.ActiveHome)
 }
 
 // readingBoundUnreadFindings is the over-limit finding of a call past a
