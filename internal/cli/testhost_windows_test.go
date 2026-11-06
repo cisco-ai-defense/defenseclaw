@@ -6,11 +6,13 @@
 package cli
 
 import (
+	"context"
 	"encoding/hex"
 	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
+	"reflect"
 	"sort"
 	"strings"
 	"testing"
@@ -156,6 +158,14 @@ func isolateTestMachineWriters(logDir string) func() {
 	// The same for the sidecar, which raises its class to above normal
 	// (TestSidecarAnswersAtTheHookPriorityClass checks it in a child).
 	sidecarRaisePriority = func() {}
+	// g079 review F1: service control of the DefenseClaw gateway and hook
+	// guardian fails in tests.
+	windowsEnterpriseHotConfigRestart = func() (bool, error) { return false, errTestSandboxNoServiceControl }
+	windowsEnterpriseHotConfigRecover = func() (bool, error) { return false, errTestSandboxNoServiceControl }
+	windowsEnterpriseHotConfigFailClosed = func() error { return errTestSandboxNoServiceControl }
+	windowsEnterpriseHotConfigGuardianReconcile = testSandboxGuardianReconcile
+	windowsSecretRestartGateway = func(func() error) (bool, error) { return false, errTestSandboxNoServiceControl }
+	windowsSecretSpawnRecovery = func() (windowsSecretRecoveryControl, error) { return nil, errTestSandboxNoServiceControl }
 
 	// One sandbox per run: the test binary's helper children (daemon probes,
 	// re-executed helpers) use their parent's, which the parent removes. A
@@ -381,7 +391,39 @@ func isolateTestDeploymentReaders(dir string) {
 	windowsEnterpriseNativeOTLPNotices = func() []string { return nil }
 	windowsEnterpriseAmpMachineFolderProblems = func() []string { return nil }
 	windowsEnterpriseDiscoveryHomeDirs = func() ([]string, error) { return nil, nil }
+	// g079 review F1: the bundle store, the protected credentials and the
+	// change spool of the computer's own layout, the uninstall footprint
+	// (SCM services and machine roots), the Claude Code machine policy and
+	// the gateway service's process. On a managed computer a secret test
+	// that missed its spool stub wrote the real change spool as SYSTEM.
+	windowsBundleLayout = func() (managed.StandaloneLayout, error) { return missing, nil }
+	windowsSecretLayout = func() (managed.StandaloneLayout, error) { return missing, nil }
+	spool := filepath.Join(dir, "change-spool")
+	windowsChangeSpool = func(managed.StandaloneLayout) (enterprisestatus.ChangeSpool, error) {
+		return enterprisestatus.ChangeSpool{Dir: filepath.Join(spool, enterprisestatus.ChangeEventsDirName), StateDir: spool}, nil
+	}
+	windowsEnterpriseStandaloneFootprint = func() (bool, error) { return false, nil }
+	windowsEnterpriseClaudeRegistryPolicyValue = func() (string, error) { return "", nil }
+	windowsBundleRestoreGatewayRunning = func() bool { return false }
+	windowsStandaloneGatewayPID = func() uint32 { return 0 }
+	windowsSecretGatewayLive = func() (bool, error) { return false, nil }
 }
+
+// errTestSandboxNoServiceControl is what the gateway and guardian service
+// control answers in the package's tests: a test that reaches a real stop,
+// start or restart without its own stub fails, loudly, rather than acting on
+// the computer's services (g079 review F1).
+func testSandboxGuardianReconcile(context.Context, managed.StandaloneLayout, bool) error {
+	return errTestSandboxNoServiceControl
+}
+
+// sameTestFunc reports whether two func values are the same function.
+func sameTestFunc(a, b any) bool { return reflect.ValueOf(a).Pointer() == reflect.ValueOf(b).Pointer() }
+
+// second is the error of a two-result call.
+func second[T any](_ T, err error) error { return err }
+
+var errTestSandboxNoServiceControl = errors.New("test sandbox: no service control (the test must stub the gateway or guardian service seam it reaches)")
 
 // testTokenIsElevated reports whether the test binary's own token is
 // elevated. A fixture that needs a privilege (an Administrators owner) asks
@@ -453,6 +495,74 @@ func TestPackageTestsDoNotReachTheInstalledDeployment(t *testing.T) {
 	}
 	if rel, err := filepath.Rel(os.TempDir(), logDir); err != nil || strings.HasPrefix(rel, "..") {
 		t.Fatalf("the lifecycle log %s is outside the temp folder %s", logDir, os.TempDir())
+	}
+
+	// g079 review F1: the bundle store, the credentials and the change
+	// spool are in the temp folder; the footprint, the Claude Code policy and
+	// the gateway process read as absent.
+	inTemp := func(what, path string) {
+		t.Helper()
+		if rel, err := filepath.Rel(os.TempDir(), path); path == "" || err != nil || strings.HasPrefix(rel, "..") {
+			t.Fatalf("%s %q is outside the temp folder %s", what, path, os.TempDir())
+		}
+	}
+	for name, read := range map[string]func() (managed.StandaloneLayout, error){
+		"windowsBundleLayout": windowsBundleLayout, "windowsSecretLayout": windowsSecretLayout,
+	} {
+		layout, err := read()
+		if err != nil {
+			t.Fatalf("%s: %v", name, err)
+		}
+		for _, path := range []string{layout.ConfigDir, layout.DataDir, layout.SecretsDir, layout.LifecycleDir} {
+			inTemp(name, path)
+		}
+		spool, err := windowsChangeSpool(layout)
+		if err != nil {
+			t.Fatal(err)
+		}
+		inTemp("the change spool", spool.Dir)
+		inTemp("the change spool state", spool.StateDir)
+	}
+	if present, err := windowsEnterpriseStandaloneFootprint(); present || err != nil {
+		t.Fatalf("the uninstall reads the computer's own footprint: %v %v", present, err)
+	}
+	if value, err := windowsEnterpriseClaudeRegistryPolicyValue(); value != "" || err != nil {
+		t.Fatalf("the Claude Code machine policy of the computer is read: %q %v", value, err)
+	}
+	if windowsBundleRestoreGatewayRunning() || windowsStandaloneGatewayPID() != 0 {
+		t.Fatal("the gateway service's process of the computer is read")
+	}
+	if live, err := windowsSecretGatewayLive(); live || err != nil {
+		t.Fatalf("the gateway service's state of the computer is read: %v %v", live, err)
+	}
+	// Service control: first that no seam is its production function (one
+	// would stop or start the computer's own gateway), then that each fails.
+	for name, seam := range map[string][2]any{
+		"windowsEnterpriseHotConfigRestart":           {windowsEnterpriseHotConfigRestart, restartWindowsStandaloneGateway},
+		"windowsEnterpriseHotConfigRecover":           {windowsEnterpriseHotConfigRecover, startWindowsStandaloneGatewayIfStopped},
+		"windowsEnterpriseHotConfigFailClosed":        {windowsEnterpriseHotConfigFailClosed, stopWindowsStandaloneGatewayFailClosed},
+		"windowsEnterpriseHotConfigGuardianReconcile": {windowsEnterpriseHotConfigGuardianReconcile, nil},
+		"windowsSecretRestartGateway":                 {windowsSecretRestartGateway, restartWindowsStandaloneGatewayBeforeStop},
+		"windowsSecretSpawnRecovery":                  {windowsSecretSpawnRecovery, spawnWindowsSecretGatewayRecovery},
+	} {
+		if seam[1] != nil && reflect.ValueOf(seam[0]).Pointer() == reflect.ValueOf(seam[1]).Pointer() {
+			t.Fatalf("%s is the production service control", name)
+		}
+	}
+	if !sameTestFunc(windowsEnterpriseHotConfigGuardianReconcile, testSandboxGuardianReconcile) {
+		t.Fatal("windowsEnterpriseHotConfigGuardianReconcile is not the sandbox's")
+	}
+	for name, err := range map[string]error{
+		"windowsEnterpriseHotConfigRestart":           second(windowsEnterpriseHotConfigRestart()),
+		"windowsEnterpriseHotConfigRecover":           second(windowsEnterpriseHotConfigRecover()),
+		"windowsEnterpriseHotConfigFailClosed":        windowsEnterpriseHotConfigFailClosed(),
+		"windowsEnterpriseHotConfigGuardianReconcile": windowsEnterpriseHotConfigGuardianReconcile(context.Background(), managed.StandaloneLayout{}, false),
+		"windowsSecretRestartGateway":                 second(windowsSecretRestartGateway(func() error { return nil })),
+		"windowsSecretSpawnRecovery":                  second(windowsSecretSpawnRecovery()),
+	} {
+		if !errors.Is(err, errTestSandboxNoServiceControl) {
+			t.Fatalf("%s does not fail in the sandbox: %v", name, err)
+		}
 	}
 	// The no-op writers (bundle marker sync, start-mode restore, runtime
 	// folder repair, bin cleanup) are not called here: on a regression they

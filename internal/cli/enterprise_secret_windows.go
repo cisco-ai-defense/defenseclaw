@@ -151,6 +151,30 @@ func reportWindowsSecretFailure(cmd *cobra.Command, action string, opts *enterpr
 	return err
 }
 
+// windowsSecretRecordsChange says whether a credential run records its
+// change event. A run that changed a credential, or reserved room for its
+// event, passed the deployment check under the locks and always records. A
+// refusal before that records only from an elevated caller on a proven
+// installed standalone deployment, as an early refusal does
+// (recordWindowsChangeRefusal). Before, an elevated refusal on a computer
+// without a deployment created the protected change spool in ProgramData
+// and wrote its event there (g079 review F1).
+func windowsSecretRecordsChange(cmd *cobra.Command, change windowsSecretChange) bool {
+	if change.changed || change.reservation != nil {
+		return true
+	}
+	if !windowsSecretIsElevated() {
+		// recordWindowsChange records nothing for this caller either.
+		return false
+	}
+	installed, err := windowsSecretDeploymentInstalled()
+	if err != nil {
+		warnChangeUnrecorded(cmd.ErrOrStderr(), err)
+		return false
+	}
+	return installed
+}
+
 // runEnterpriseSecret implements `enterprise secret` on Windows.
 func runEnterpriseSecret(cmd *cobra.Command, action string, opts *enterpriseSecretOptions) error {
 	if action == "status" {
@@ -164,7 +188,7 @@ func runEnterpriseSecret(cmd *cobra.Command, action string, opts *enterpriseSecr
 	}
 	change, err := changeWindowsSecret(cmd, action, opts)
 	defer func() { _ = change.reservation.Release() }()
-	if ev, ok := secretChangeEvent(action, opts.name, change.changed, secretFailureCode(err, windowsSecretExitInvalid), err, false); ok {
+	if ev, ok := secretChangeEvent(action, opts.name, change.changed, secretFailureCode(err, windowsSecretExitInvalid), err, false); ok && windowsSecretRecordsChange(cmd, change) {
 		// The success document (secret-result.schema.json) has no warnings.
 		layout, layoutErr := windowsSecretLayout()
 		if layoutErr == nil {
@@ -1488,8 +1512,11 @@ func stopWindowsStandaloneGatewayFailClosed() error {
 // windowsStandaloneGatewayPID observes the SCM process identity around an
 // installer transaction. A bundle receipt records a restart only when the
 // gateway process actually changed. A starting gateway has a process
-// (windowsServiceProcessLive), so it counts as running.
-func windowsStandaloneGatewayPID() uint32 {
+// (windowsServiceProcessLive), so it counts as running. The package's
+// tests replace it.
+var windowsStandaloneGatewayPID = scmWindowsStandaloneGatewayPID
+
+func scmWindowsStandaloneGatewayPID() uint32 {
 	manager, err := mgr.Connect()
 	if err != nil {
 		return 0
