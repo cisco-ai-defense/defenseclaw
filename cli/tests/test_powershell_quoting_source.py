@@ -53,9 +53,19 @@ _READER_CALLS = {"startswith", "endswith", "find", "index", "count", "partition"
 # since g072 review 4 M2 also a %-format or str.format field ("& %s",
 # "& {}", "& {0!r}"), and a no-break space, which PowerShell reads as a
 # blank. A scriptblock ("& { $input | ... }") is not a format field.
+# Since g072 review 5 S1 a %-format mapping key ("& %(p)s") and %a count too.
+#
+# Documented limits, which no source in the package uses (g072 review 5 N1;
+# the Go rule in windows_admin_cli_source_test.go keeps the same kind of list):
+# "&{} x".format(v) and "&{0}" with no blank (the twin of Go's &%s); a nested
+# format spec ("& {0:{1}}"); a quote doubled with a new value that is not a
+# literal (v.replace("'", "'" * 2), v.replace("'", Q + Q)); re.sub with a group
+# backreference (re.sub(r"(')", r"\1\1", v)); string.Template("& $p"); and a
+# "run" + winquote join that goes through a variable or a .format() call
+# instead of a + chain or an f-string.
 _CALL_OPERATOR = re.compile(
     r"(?:^|[^&>\w])&(?:[ \t\u00a0]*['\u2018-\u201b]|[ \t\u00a0]*\x00"
-    r"|[ \t\u00a0]+(?:%[-+# 0-9.*]*[sqr]|\{[\w.\[\]]*(?:![rsa])?(?::[^{}\s]*)?\}|$))"
+    r"|[ \t\u00a0]+(?:%(?:\([^)]*\))?[-+# 0-9.*]*[sqra]|\{[\w.\[\]]*(?:![rsa])?(?::[^{}\s]*)?\}|$))"
 )
 # A quote doubled by hand: x * 2 if x in "'...", or x + x if x == "'".
 _DOUBLED_BY_HAND = re.compile(r"(?:\*\s*2|\b(\w+)\s*\+\s*\1)\s+if\s+\w+\s+(?:in|==)\s+(?:[rbuf]*[\"']{1,3}['\u2018-\u201b]|SINGLE_QUOTES)")
@@ -86,6 +96,34 @@ def _part(part: ast.AST) -> str:
     return "\x00"
 
 
+def _is_renderer_call(node: ast.AST) -> bool:
+    func = node.func if isinstance(node, ast.Call) else None
+    name = func.id if isinstance(func, ast.Name) else func.attr if isinstance(func, ast.Attribute) else ""
+    return name in _RENDERERS
+
+
+def _is_top_concat(node: ast.AST, parent: ast.AST | None) -> bool:
+    """The outermost node of a "a" + "b" + ... chain."""
+    return (
+        isinstance(node, ast.BinOp)
+        and isinstance(node.op, ast.Add)
+        and not (isinstance(parent, ast.BinOp) and isinstance(parent.op, ast.Add))
+    )
+
+
+def _concat_text(node: ast.AST) -> str:
+    """The text of a + chain: literals as written, a winquote render as "L", any other value as NUL.
+
+    A "Run " + powershell_command_line(...) join says what an f-string does
+    (g072 review 5 S1), so the run-instruction rule reads both.
+    """
+    if isinstance(node, ast.BinOp) and isinstance(node.op, ast.Add):
+        return _concat_text(node.left) + _concat_text(node.right)
+    if _is_renderer_call(node):
+        return "L"
+    return _text(node) or "\x00"
+
+
 def _is_reader_use(node: ast.AST, parent: ast.AST | None) -> bool:
     """A literal compared with, a docstring, or an argument of startswith and the like."""
     if isinstance(parent, (ast.Compare, ast.Expr)):
@@ -96,6 +134,12 @@ def _is_reader_use(node: ast.AST, parent: ast.AST | None) -> bool:
         and parent.func.attr in _READER_CALLS
         and node in parent.args
     )
+
+
+def _ancestors(node: ast.AST, parents: dict[ast.AST, ast.AST]):
+    while node in parents:
+        node = parents[node]
+        yield node
 
 
 def _function(node: ast.AST, parents: dict[ast.AST, ast.AST]) -> str:
@@ -217,8 +261,25 @@ def problems(source: str, name: str = "<probe>", used: set[tuple[str, str]] | No
     for node in ast.walk(tree):
         if _is_quote_replace(node):
             found.append(f"{node.lineno}: a PowerShell quote doubled by hand (use winquote)")
-        text = _text(node)
         parent = parents.get(node)
+        if _is_top_concat(node, parent) and not _is_reader_use(node, parent):
+            joined = _concat_text(node)
+            if (
+                _RUN_WITHOUT_SHELL.search(joined)
+                and "powershell" not in joined.lower()
+                and not _in_run_instruction(node, parents)
+                and not any(_is_regex_call(up) for up in _ancestors(node, parents))
+            ):
+                key = (name, _function(node, parents))
+                if key in _ALLOWED_FUNCTIONS:
+                    if used is not None:
+                        used.add(key)
+                else:
+                    found.append(
+                        f"{node.lineno}: a PowerShell line in a run instruction that does not say PowerShell"
+                        " (use winquote.run_instruction)"
+                    )
+        text = _text(node)
         if text is None or isinstance(parent, (ast.JoinedStr, ast.FormattedValue)) or _is_reader_use(node, parent):
             continue
         ancestor, regex = parents.get(node), False
@@ -298,6 +359,12 @@ def test_the_python_cli_renders_powershell_through_winquote() -> None:
         "x = \"\".join(c + c if c in \"'\" else c for c in v)",
         "x = \"&\\u00a0'\" + v",
         "x = f\"run {powershell_command_line(exe, 'status')}\"",
+        # g072 review 5 S1.
+        "x = \"& %(p)s status\" % {\"p\": lit}",
+        "x = \"& %a status\" % lit",
+        "x = \"Run \" + powershell_command_line(a)",
+        "x = \"run: \" + powershell_command_line(a)",
+        "x = \"Run \" + winquote.powershell_command_line(a) + \" now\"",
     ],
 )
 def test_the_check_catches_hand_built_quoting(source: str) -> None:
@@ -323,6 +390,11 @@ def test_the_check_catches_hand_built_quoting(source: str) -> None:
         "x = run_instruction(f\"{powershell_command_line(exe, 'status')}\")",
         "x = f\"Get-Content -Raw | & {{ $input | & {powershell_literal(path)} }}\"",
         "x = value.replace(\"'\", \"\\\\'\")",
+        # g072 review 5 S1.
+        "x = \"In PowerShell, run \" + powershell_command_line(a)",
+        "x = run_instruction(\"\" + powershell_command_line(a))",
+        "x = \"Run \" + name",
+        "x = \"%d%% done\" % n",
     ],
 )
 def test_the_check_passes_its_benign_twins(source: str) -> None:
