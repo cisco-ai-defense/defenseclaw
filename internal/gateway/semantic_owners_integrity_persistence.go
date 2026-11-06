@@ -1531,6 +1531,22 @@ func appendTrustedHomeResolvedSSHKeyWriteFinding(
 	evidence.overBudgetOmission = &overBudget
 	evidence.unresolvedTarget = &unresolved
 	symlinkWrite := trustedExistingAuthorizedKeysSymlinkWrite(evidence, facts)
+	if request.balancedArchiveScope && !symlinkWrite && request.EnforcementCapable &&
+		hookpaths.ArchiveBeforeWrite(input.Command, facts.ActiveHome) &&
+		!trustedAuthorizedKeysWriteProofWith(input, facts, false, clientGlobFacts(request), request.targetMemo) {
+		strict := evidence
+		strict.balancedArchiveScope = false
+		if trustedExistingAuthorizedKeysSymlinkWrite(strict, facts) {
+			if _, rule, ok := trustedActionCatalogRule(generation, "persistence.ssh_authorized_keys_command"); ok {
+				findings = append(findings, adjustConfidence(input.Tool, RuleFinding{
+					RuleID: rule.ID, Title: possibleArchiveWriteTitle,
+					Severity: rule.Severity, Confidence: rule.Confidence,
+					Evidence: trustedActionInputText(input, ""), Tags: append([]string(nil), rule.Tags...),
+					LineNumber: 1, enforcement: findingEnforcementAlertOnly,
+				}))
+			}
+		}
+	}
 	if !symlinkWrite && !request.ProtectedHomeHook && trustedPOSIXShellCall(input, facts) &&
 		(request.Connector == "claudecode" || request.Connector == "codex") &&
 		hookpaths.ProvedOrdinaryVariableTargets(input.Command, input.CWD, facts.ActiveHome) {
@@ -1630,7 +1646,7 @@ func appendTrustedHomeResolvedSSHKeyWriteFinding(
 				clientNamedProtected = clientNamedProtected || hookpaths.NamedSSHWriteOperand(input.Command, input.CWD, facts.ActiveHome)
 			}
 			if hookpaths.ArchiveBeforeWrite(input.Command, input.ActiveHome) &&
-				!hookpaths.ProtectedArchiveMoveName(input.Command, input.CWD, input.ActiveHome) &&
+				!hookpaths.ProtectedArchiveMoveName(input.Command, input.CWD, input.ActiveHome, request.ResolvedWriteTargets) &&
 				!clientNamedProtected &&
 				!trustedAuthorizedKeysWriteProofWith(input, facts, false, clientGlobFacts(request), request.targetMemo) {
 				title = archiveBeforeWriteTitle
@@ -1899,6 +1915,8 @@ const unresolvedWriteTargetTitle = "A write target could not be resolved (unread
 // guidance never showed (GAP-1555).
 const archiveBeforeWriteTitle = "Archive extraction may create a link before a later write. " +
 	"Run the extraction and the write as separate commands"
+
+const possibleArchiveWriteTitle = "Archive extraction has an unverified link scope for a later write"
 
 // trustedUnknownKeyAuthorizedKeysWrite judges the target of a native
 // file-write tool call (write, edit, multiedit, create) whose arguments

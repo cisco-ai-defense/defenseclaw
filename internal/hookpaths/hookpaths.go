@@ -81,6 +81,10 @@ const TarPlainFactPrefix = "\x00tar-plain:"
 // that evidence behind ProtectHome.
 const TarLinkFactPrefix = "\x00tar-link:"
 
+// TarProtectedMemberFactPrefix identifies a link member whose extracted
+// target reaches this user's SSH directory. The value is the resolved target.
+const TarProtectedMemberFactPrefix = "\x00tar-protected-member:"
+
 // UnreadArchiveTargetPrefix is the client's positive disk reading of an
 // operand under an unread extraction scope. The ordinary target map keeps
 // its historical unresolved answer for the strict tier.
@@ -1339,7 +1343,8 @@ func ResolveConnector(connector, surface, event string, payload []byte) string {
 					// of its path list. The link walk has already placed these
 					// operands; describe them when an unread extraction is the
 					// only source of uncertainty, including their disk reading.
-					if HomeSpelledRename(command) {
+					if HomeSpelledWriter(command) {
+						literalOperands = append(literalOperands, HomeSpelledWriteOperands(command, cwd, home)...)
 						for _, rename := range links.renameOps {
 							for _, path := range append(append([]string(nil), rename.sources...), rename.dest) {
 								if links.onlyUnreadArchiveAt(path, nil) {
@@ -1461,6 +1466,7 @@ func ResolveConnector(connector, surface, event string, payload []byte) string {
 				unreadTargets[UnreadArchiveTargetPrefix+path] = diskTarget
 			}
 		}
+
 		// A plain archive can leave no client-side opaque scope even when
 		// the managed gateway cannot read it. Preserve the copy's own-write
 		// fact independently so that gateway can exempt only this destination.
@@ -2115,6 +2121,10 @@ func Decode(value string) (map[string]string, bool) {
 		}
 		if strings.HasPrefix(key, TarLinkFactPrefix) &&
 			(value != "1" || !filepath.IsAbs(strings.TrimPrefix(key, TarLinkFactPrefix))) {
+			return nil, false
+		}
+		if strings.HasPrefix(key, TarProtectedMemberFactPrefix) &&
+			(!filepath.IsAbs(strings.TrimPrefix(key, TarProtectedMemberFactPrefix)) || !filepath.IsAbs(value)) {
 			return nil, false
 		}
 		if strings.HasPrefix(key, UnreadArchiveTargetPrefix) &&
@@ -3224,7 +3234,7 @@ func commandLinksRead(command, cwd, home string, facts map[string]string, record
 				unplacedScopes = true
 			}
 			for _, dir := range callDirs { // As for a copy (GAP-2551).
-				if slices.Contains(static[1:], false) {
+				if archiveDynamicOptionPossible(program, words[1:], static[1:]) {
 					// An option supplied at runtime may select extraction.
 					links.unknownIn(archiveDestination(program, words[1:], static[1:], dir))
 				}
@@ -3233,7 +3243,7 @@ func commandLinksRead(command, cwd, home string, facts map[string]string, record
 					// command. Positive evidence is independent of that proof.
 					plain := onlyDirectoryStatementsBefore(file, call, home) &&
 						tarArchiveHoldsNoLink(program, words[1:], static[1:], dir, command, facts, record)
-					linked := !plain && tarArchiveLinkEvidence(program, words[1:], static[1:], dir, facts, record)
+					linked := !plain && tarArchiveLinkEvidence(program, words[1:], static[1:], dir, file, call, home, facts, record)
 					if tarArchivePriorLinkedRewrite(file, call, words[1:], static[1:], dir, home) ||
 						(program != "cpio" && program != "bsdcpio" && program != "pax" &&
 							archiveNamesEscape(program, words[1:], static[1:])) ||
@@ -4176,6 +4186,43 @@ func ArchiveBeforeWrite(command, home string) bool {
 	return false
 }
 
+// UnverifiableArchiveDestinationBeforeWrite retains strict's possible
+// extraction scope when a later write follows an archive whose destination
+// cannot be placed from the command and known home. Both hook connectors use
+// this same shell reading, including for environment-valued path operands.
+func UnverifiableArchiveDestinationBeforeWrite(command, cwd, home string) bool {
+	if !ArchiveBeforeWrite(command, home) {
+		return false
+	}
+	file, ok := parseShell(command)
+	if !ok {
+		return false
+	}
+	unverifiable := false
+	syntax.Walk(file, func(node syntax.Node) bool {
+		call, ok := node.(*syntax.CallExpr)
+		if !ok || len(call.Args) == 0 || unverifiable {
+			return !unverifiable
+		}
+		program, fixed := StaticWord(call.Args[0], home)
+		if !fixed || !slices.Contains(archivePrograms, programBase(program)) {
+			return true
+		}
+		args := make([]string, 0, len(call.Args)-1)
+		static := make([]bool, 0, len(call.Args)-1)
+		for _, word := range call.Args[1:] {
+			value, known := StaticWord(word, home)
+			args, static = append(args, value), append(static, known)
+		}
+		if archiveMayLink(programBase(program), args, static) &&
+			archiveDestination(programBase(program), args, static, cwd) == "" {
+			unverifiable = true
+		}
+		return !unverifiable
+	})
+	return unverifiable
+}
+
 // Links are the links one shell command creates, read as Resolve reads them.
 type Links struct {
 	links                shellLinks
@@ -4250,10 +4297,9 @@ func (l Links) UnreadArchiveRenameOperands(facts map[string]string) []string {
 	return paths
 }
 
-// HomeSpelledRename identifies a rename operand that the shell expands from
-// the active user's home. ActionFacts can omit these operands even when the
-// shell link walk places them, so the client describes that reading itself.
-func HomeSpelledRename(command string) bool {
+// HomeSpelledWriter identifies a write operand that the shell expands from
+// the active user's home. All copiers use the same absolute operand reading.
+func HomeSpelledWriter(command string) bool {
 	file, ok := parseShell(command)
 	if !ok {
 		return false
@@ -4265,7 +4311,9 @@ func HomeSpelledRename(command string) bool {
 			return !found
 		}
 		program, fixed := StaticWord(call.Args[0], "")
-		if !fixed || !slices.Contains(renamePrograms, programBase(program)) {
+		if !fixed || !slices.Contains(renamePrograms, programBase(program)) &&
+			!slices.Contains(copyPrograms, programBase(program)) &&
+			!slices.Contains([]string{"install", "rsync", "ditto", "pax", "cpio", "bsdcpio"}, programBase(program)) {
 			return true
 		}
 		for _, word := range call.Args[1:] {
@@ -4280,10 +4328,88 @@ func HomeSpelledRename(command string) bool {
 	return found
 }
 
-// ProtectedArchiveMoveName reports a protected entry name in a move after
-// extraction. This lexical control does not depend on gateway filesystem
-// access or the policy tier.
-func ProtectedArchiveMoveName(command, cwd, home string) bool {
+// HomeSpelledWriteOperands gives every copier the same home expansion used
+// by the shell link walk. Only destination operands are sent as write facts.
+func HomeSpelledWriteOperands(command, cwd, home string) []string {
+	file, ok := parseShell(command)
+	if !ok || !filepath.IsAbs(cwd) || !filepath.IsAbs(home) {
+		return nil
+	}
+	var destinations []string
+	syntax.Walk(file, func(node syntax.Node) bool {
+		call, ok := node.(*syntax.CallExpr)
+		if !ok || len(call.Args) < 3 {
+			return true
+		}
+		program, fixed := StaticWord(call.Args[0], home)
+		if !fixed {
+			return true
+		}
+		program = programBase(program)
+		if !slices.Contains(renamePrograms, program) && !slices.Contains(copyPrograms, program) &&
+			!slices.Contains([]string{"install", "rsync", "ditto", "pax", "cpio", "bsdcpio"}, program) {
+			return true
+		}
+		args := make([]string, 0, len(call.Args)-1)
+		static := make([]bool, 0, len(call.Args)-1)
+		for _, word := range call.Args[1:] {
+			value, known := StaticWord(word, home)
+			args, static = append(args, value), append(static, known)
+		}
+		var destination string
+		switch {
+		case slices.Contains(renamePrograms, program):
+			if op, ok := parseRename(args, cwd); ok {
+				destination = op.dest
+				if op.targetDir != "" {
+					destination = op.targetDir
+				}
+			}
+		case slices.Contains(copyPrograms, program):
+			destination = cpDestination(args, static, cwd)
+		case program == "rsync" || program == "ditto" || program == "pax" || program == "cpio" || program == "bsdcpio":
+			destination = archiveCopyDestination(args, static, cwd)
+			if destination == "" && static[len(args)-1] {
+				destination = OperandPath(args[len(args)-1], cwd)
+			}
+		case program == "install":
+			for i, arg := range args {
+				if !static[i] {
+					continue
+				}
+				if (arg == "-t" || arg == "--target-directory") && i+1 < len(args) && static[i+1] {
+					destination = OperandPath(args[i+1], cwd)
+				}
+				if strings.HasPrefix(arg, "--target-directory=") {
+					destination = OperandPath(strings.TrimPrefix(arg, "--target-directory="), cwd)
+				}
+			}
+			if destination == "" && len(args) >= 2 && static[len(args)-1] {
+				destination = OperandPath(args[len(args)-1], cwd)
+			}
+		default:
+			if len(args) >= 2 && static[len(args)-1] {
+				destination = OperandPath(args[len(args)-1], cwd)
+			}
+		}
+		if destination == "" {
+			return true
+		}
+		for _, word := range call.Args[1:] {
+			raw := command[word.Pos().Offset():word.End().Offset()]
+			if strings.Contains(raw, "~/") || strings.Contains(raw, "$HOME/") || strings.Contains(raw, "${HOME}/") {
+				destinations = append(destinations, OperandPath(destination, cwd))
+				break
+			}
+		}
+		return true
+	})
+	return destinations
+}
+
+// ProtectedArchiveMoveName reports a move into the user's SSH tree or through
+// a proved protected link member of an earlier extraction.
+func ProtectedArchiveMoveName(command, cwd, home string, facts map[string]string) bool {
 	if !strings.Contains(command, "mv") {
 		return false
 	}
@@ -4291,35 +4417,33 @@ func ProtectedArchiveMoveName(command, cwd, home string) bool {
 	if !parsed {
 		return false
 	}
-	protectedName := func(path string) bool {
-		name := strings.TrimRight(filepath.Base(path), ". ")
-		if strings.EqualFold(name, ".ssh") {
-			return true
-		}
-		for _, protected := range AuthorizedKeysFiles {
-			if strings.EqualFold(name, protected) {
-				return true
-			}
-		}
-		parent := filepath.Dir(filepath.Clean(path))
-		protectedParent := strings.EqualFold(filepath.Base(parent), ".ssh")
-		if !protectedParent && cwd != "" {
-			if physical, ok := ResolveWriteTarget(OperandPath(parent, cwd)); ok {
-				protectedParent = strings.EqualFold(filepath.Base(physical), ".ssh") &&
-					filepath.Clean(physical) == filepath.Join(home, ".ssh")
-			}
-		}
-		if !protectedParent {
+	protectedName := func(path string, members map[string]string) bool {
+		if path == "" {
 			return false
 		}
-		for _, protected := range SSHControlFiles {
-			if strings.EqualFold(name, protected) {
+		operand := OperandPath(path, cwd)
+		ssh := filepath.Join(home, ".ssh")
+		if resolved, ok := ResolveWriteTarget(operand); ok &&
+			(resolved == ssh || strings.HasPrefix(resolved, ssh+string(filepath.Separator))) {
+			return true
+		}
+		if operand == ssh || strings.HasPrefix(operand, ssh+string(filepath.Separator)) {
+			return true
+		}
+		for member := range members {
+			if operand == member || strings.HasPrefix(operand, member+string(filepath.Separator)) {
 				return true
 			}
 		}
 		return false
 	}
 	seenArchive, named := false, false
+	members := make(map[string]string)
+	for key, value := range facts {
+		if strings.HasPrefix(key, TarProtectedMemberFactPrefix) && value != "" {
+			members[strings.TrimPrefix(key, TarProtectedMemberFactPrefix)] = value
+		}
+	}
 	values := actionValues{"HOME": home, "PWD": cwd}
 	var visit func(*syntax.Stmt)
 	visit = func(stmt *syntax.Stmt) {
@@ -4348,7 +4472,14 @@ func ProtectedArchiveMoveName(command, cwd, home string) bool {
 					value, fixed := StaticWord(word, home)
 					args, static = append(args, value), append(static, fixed)
 				}
-				seenArchive = seenArchive || archiveMayLink(program, args, static) && !archiveCopiesLinks(program, args, static)
+				if archiveMayLink(program, args, static) && !archiveCopiesLinks(program, args, static) {
+					seenArchive = true
+					for _, archive := range tarArchiveSources(args, static, file, call, home) {
+						for member, target := range tarProtectedLinkMembers(OperandPath(archive, cwd), archiveDestination(program, args, static, cwd), home) {
+							members[member] = target
+						}
+					}
+				}
 				return true
 			}
 			if !seenArchive || !slices.Contains(renamePrograms, program) {
@@ -4369,11 +4500,11 @@ func ProtectedArchiveMoveName(command, cwd, home string) bool {
 			if !ok {
 				return true
 			}
-			if protectedName(op.dest) || protectedName(op.targetDir) {
+			if protectedName(op.dest, members) || protectedName(op.targetDir, members) {
 				named = true
 			}
 			for _, source := range op.sources {
-				if protectedName(source) || op.backup && op.suffix != "" && protectedName(source+op.suffix) {
+				if protectedName(source, members) || op.backup && op.suffix != "" && protectedName(source+op.suffix, members) {
 					named = true
 				}
 			}
@@ -5894,6 +6025,12 @@ func archiveNamesEscape(program string, args []string, static []bool) bool {
 	tar := strings.HasSuffix(program, "tar")
 	for i, arg := range args {
 		if !static[i] {
+			// A path value consumed by tar's file or directory option is
+			// unable to select -P. Its unknown contents remain an unread
+			// archive scope rather than a proved escaping extraction.
+			if archivePathValueOperand(program, args, static, i) {
+				continue
+			}
 			return true
 		}
 		if arg == "--" {
@@ -5905,6 +6042,33 @@ func archiveNamesEscape(program string, args []string, static []bool) bool {
 			i == 0 && !strings.HasPrefix(arg, "-") && strings.ContainsRune(arg, 'P')),
 			program == "unzip" && short && strings.ContainsRune(arg, ':'),
 			strings.HasPrefix(program, "7z") && strings.HasPrefix(arg, "-spf"):
+			return true
+		}
+	}
+	return false
+}
+
+func archivePathValueOperand(program string, args []string, static []bool, i int) bool {
+	if !strings.HasSuffix(program, "tar") || i == 0 || !static[i-1] {
+		return false
+	}
+	switch args[i-1] {
+	case "-C", "--directory", "-f", "--file":
+		return true
+	}
+	previous := args[i-1]
+	if strings.HasPrefix(previous, "-") && !strings.HasPrefix(previous, "--") {
+		return strings.HasSuffix(previous, "C") || strings.HasSuffix(previous, "f")
+	}
+	if i == 1 && previous != "" && !strings.HasPrefix(previous, "-") {
+		return strings.HasSuffix(previous, "C") || strings.HasSuffix(previous, "f")
+	}
+	return false
+}
+
+func archiveDynamicOptionPossible(program string, args []string, static []bool) bool {
+	for i := range args {
+		if !static[i] && !archivePathValueOperand(program, args, static, i) {
 			return true
 		}
 	}
