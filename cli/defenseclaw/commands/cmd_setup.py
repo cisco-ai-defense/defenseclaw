@@ -8630,7 +8630,11 @@ def _windows_hook_launcher_setup_refusal(cfg, *, restart: bool, connectors: Iter
         not restart
         or platform_support.host_os() != "windows"
         or str(getattr(cfg, "deployment_mode", "") or "").strip().lower() == "managed_enterprise"
-        or not any(normalize_connector(name) not in {"amp", "opencode"} for name in connectors)
+        or not any(
+            normalized in _HOOK_ENFORCED_CONNECTORS and normalized not in {"amp", "opencode"}
+            for name in connectors
+            if (normalized := normalize_connector(name))
+        )
     ):
         return ""
     # The per-user gateway registers the installer's stable ~/.local/bin

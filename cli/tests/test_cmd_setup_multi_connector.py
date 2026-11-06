@@ -237,15 +237,18 @@ def test_windows_hook_launcher_preflight_skips_offline_and_managed_setups(restar
     canonical.assert_not_called()
 
 
-@pytest.mark.parametrize("connector", ["amp", "opencode"])
-def test_windows_plugin_setup_does_not_require_native_hook_launcher(connector):
+@pytest.mark.parametrize(
+    "connectors",
+    [("amp",), ("opencode",), ("amp", "openclaw"), ("opencode", "zeptoclaw")],
+)
+def test_windows_plugin_setup_does_not_require_native_hook_launcher(connectors):
     cfg = SimpleNamespace(deployment_mode="")
     with (
         patch("defenseclaw.commands.cmd_setup.platform_support.host_os", return_value="windows"),
         patch("defenseclaw.gateway.canonical_install_path") as canonical,
     ):
         assert cmd_setup._windows_hook_launcher_setup_refusal(
-            cfg, restart=True, connectors=(connector,)
+            cfg, restart=True, connectors=connectors
         ) == ""
     canonical.assert_not_called()
 
