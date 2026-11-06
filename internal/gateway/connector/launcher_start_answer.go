@@ -54,10 +54,13 @@ func (a *launcherStartAnswer) sentence() string {
 }
 
 // powershell renders the answer as PowerShell statements that also run in
-// Constrained Language mode: a refused [Console] call is caught, and the
-// block is written as pipeline output, which reaches stdout in both modes.
+// Constrained Language mode, which refuses the [Console] call: there the
+// sentence goes to stderr through Write-Error. The block is written as
+// pipeline output, which reaches stdout in both modes.
 func (a *launcherStartAnswer) powershell() string {
-	statements := "try { [Console]::Error.WriteLine(" + powershellQuoteLiteral(a.sentence()) + ") } catch { }; "
+	sentence := powershellQuoteLiteral(a.sentence())
+	statements := "try { [Console]::Error.WriteLine(" + sentence + ") } catch { Microsoft.PowerShell.Utility\\Write-Error -Message " +
+		sentence + " -ErrorAction Continue }; "
 	if a.stdout != "" {
 		statements += powershellQuoteLiteral(a.stdout) + "; "
 	}

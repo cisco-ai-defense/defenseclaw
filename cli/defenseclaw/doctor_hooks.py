@@ -605,7 +605,11 @@ def _launcher_start_answer(connector: str, event: str, contract: str) -> str | N
         stdout = json.dumps(block, separators=(",", ":"), sort_keys=True)
     else:
         return None
-    text = "try { [Console]::Error.WriteLine(" + powershell_literal(_launcher_start_message(agent)) + ") } catch { }; "
+    sentence = powershell_literal(_launcher_start_message(agent))
+    text = (
+        "try { [Console]::Error.WriteLine(" + sentence + ") } catch { "
+        "Microsoft.PowerShell.Utility\\Write-Error -Message " + sentence + " -ErrorAction Continue }; "
+    )
     if stdout:
         text += powershell_literal(stdout) + "; "
     return text + f"exit {code}"
@@ -1878,7 +1882,8 @@ def _awaited_hook_bridge_match(script: str, connector: str) -> re.Match[str] | N
         + r" \| Microsoft\.PowerShell\.Core\\Out-Host; "
         r"(?:(?P<fail_closed>if \(\$null -eq \$LASTEXITCODE\) \{ exit 1 \}; )"
         r"|if \(\$null -eq \$LASTEXITCODE -or \$LASTEXITCODE -lt 0\) \{ (?P<answer>try \{ \[Console\]::Error\.WriteLine\('[^']*'\) \} "
-        r"catch \{ \}; (?:'[^']*'; )?exit [02]) \}; )?"
+        r"catch \{ Microsoft\.PowerShell\.Utility\\Write-Error -Message '[^']*' -ErrorAction Continue \}; "
+        r"(?:'[^']*'; )?exit [02]) \}; )?"
         r"exit \$LASTEXITCODE \}; "
         r"\$hookStart=\[System\.Diagnostics\.ProcessStartInfo\]::new\('(?P=target)','(?P<arguments>[^']*)'\); "
         r"\$hookStart\.UseShellExecute=\$false; "

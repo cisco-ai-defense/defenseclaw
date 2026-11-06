@@ -2235,12 +2235,33 @@ class WindowsHookDoctorTests(unittest.TestCase):
                 with self.assertRaises(_InspectionError) as raised:
                     doctor_hooks._command_target(edited, connector)
                 self.assertEqual(raised.exception.state, "malformed")
+        # The answer Go Setup renders (the shared Antigravity/Devin golden) is
+        # the one doctor expects, byte for byte.
+        golden = json.loads(
+            (
+                Path(__file__).resolve().parents[2]
+                / "internal"
+                / "gateway"
+                / "connector"
+                / "testdata"
+                / "antigravity_devin_hooks.json"
+            ).read_text(encoding="utf-8")
+        )
+        hooks = golden["files"]["antigravity_windows"]["healthy"]
+        rendered = hooks["defenseclaw-antigravity-pretooluse"]["PreToolUse"][0]["hooks"][0]["command"]
+        encoded = rendered.rsplit(" ", 1)[1]
+        script = base64.b64decode(encoded).decode("utf-16-le")
+        match = doctor_hooks._awaited_hook_bridge_match(script, "antigravity")
+        self.assertIsNotNone(match, script)
+        self.assertEqual(match.group("answer"), doctor_hooks._launcher_start_answer("antigravity", "PreToolUse", ""))
         self.assertIsNone(doctor_hooks._launcher_start_answer("codex", "Stop", "codex-hooks-v4"))
         self.assertIsNone(doctor_hooks._launcher_start_answer("antigravity", "Stop", ""))
         self.assertEqual(
             doctor_hooks._launcher_start_answer("kiro", "", ""),
             "try { [Console]::Error.WriteLine('DefenseClaw blocked this: its Kiro hook launcher cannot start. "
-            "Run the DefenseClaw installer again to repair it.') } catch { }; exit 2",
+            "Run the DefenseClaw installer again to repair it.') } catch { Microsoft.PowerShell.Utility\\Write-Error "
+            "-Message 'DefenseClaw blocked this: its Kiro hook launcher cannot start. "
+            "Run the DefenseClaw installer again to repair it.' -ErrorAction Continue }; exit 2",
         )
 
     @unittest.skipUnless(os.name == "nt", "Windows Codex registration root proof")
