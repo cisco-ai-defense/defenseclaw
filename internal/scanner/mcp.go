@@ -344,7 +344,7 @@ var mcpAsUserRelayExecutable = os.Executable
 func (s *MCPScanner) asUserRelay() ([]string, error) {
 	entry := s.ServerEntry
 	if !mcpasuser.PublishedConnector(entry.Connector) {
-		return nil, fmt.Errorf("scanner: MCP server %q of %s: only Claude Code and Kiro servers can be started as their user", entry.Name, entry.Connector)
+		return nil, fmt.Errorf("scanner: MCP server %q of %s: its connector has no published servers to start as their user", entry.Name, entry.Connector)
 	}
 	service := strings.TrimSpace(os.Getenv(mcpasuser.GatewayServiceEnv))
 	if service == "" {

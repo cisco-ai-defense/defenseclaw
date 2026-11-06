@@ -595,11 +595,13 @@ on an asset in an enrolled user's folder name that user (`user.id`,
   or `uvx` is installed for all users in a folder only administrators can change
   (for example `C:\Program Files\nodejs`). A launcher in a profile fails the scan
   (`MCPStdioLaunchError ... untrusted Windows path`).
-- **Claude Code and Kiro state files.** The hook enumerator reads
-  `.claude.json`, each project's `.mcp.json` and `.kiro\settings\mcp.json` under
-  the user's own token and publishes their servers to the gateway every 30
-  seconds. If it cannot read or parse the file, the user's MCP tool calls are
-  refused and `status` warns `claude_state_unreadable` or `kiro_mcp_unreadable`.
+- **Claude Code, Kiro and Codex state files.** The hook enumerator reads
+  `.claude.json`, each project's `.mcp.json`, `.kiro\settings\mcp.json`, and
+  Codex `.codex\config.toml` and the `config.toml` under the user's persistent
+  `CODEX_HOME`, and publishes their servers to the gateway every 30 seconds and
+  before each MCP tool call. If it cannot read or parse the file, the user's MCP
+  tool calls are refused and `status` warns `claude_state_unreadable`,
+  `kiro_mcp_unreadable` or `codex_mcp_unreadable`.
   A project's `.mcp.json` is opened with the enrolled user's token, from the signed-in
   session, which can be a disconnected one. A project that user cannot open (access
   denied) is skipped and its servers are not published; the other projects are
@@ -656,8 +658,9 @@ its verdict. Only the server's own process runs as the user:
 
 A user who is not signed in has no session token: their servers stay blocked until
 they sign in, and are scanned again within about 30 seconds. If `seclogon` is
-disabled, set it back to Manual. MCP servers of other connectors in a profile
-(Codex `config.toml`, for example) are not published and get no install scan.
+disabled, set it back to Manual. MCP servers of other connectors in a profile,
+and Codex project `.codex\config.toml` files, are not published and get no
+install scan.
 
 ### Release a blocked or quarantined skill
 

@@ -1652,11 +1652,27 @@ func ReadMCPFromCodexUserConfigTOML(path string) ([]MCPServerEntry, error) {
 	if err != nil {
 		return nil, err
 	}
+	return annotateCodexUserMCPEntries(entries, path), nil
+}
+
+// ParseCodexUserMCPServers parses the Codex user config.toml at path, which
+// the caller read: the managed Windows enumerator reads it as LocalSystem,
+// since the gateway service reads nothing in a profile (GAP-0686). It
+// annotates the entries as ReadMCPFromCodexUserConfigTOML does.
+func ParseCodexUserMCPServers(data []byte, path string) ([]MCPServerEntry, error) {
+	entries, err := ParseMCPFromCodexConfigTOML(data)
+	if err != nil {
+		return nil, err
+	}
+	return annotateCodexUserMCPEntries(entries, path), nil
+}
+
+func annotateCodexUserMCPEntries(entries []MCPServerEntry, path string) []MCPServerEntry {
 	entries = annotateCodexMCPEntries(entries, path, "user", false)
 	for index := range entries {
 		entries[index].Bundled = entries[index].codexBuiltinShape
 	}
-	return entries, nil
+	return entries
 }
 
 const maxCodexInventoryConfigBytes = 1 << 20

@@ -358,9 +358,9 @@ func TestMCPAsUserServerFailsClosedOutsideTheRuntime(t *testing.T) {
 		t.Fatalf("missing gateway service name: %v", err)
 	}
 	t.Setenv(mcpasuser.GatewayServiceEnv, "DefenseClawGateway")
-	codex := *entry
-	codex.Connector = "codex"
-	if _, err := (&MCPScanner{ServerEntry: &codex}).runtimeInput(); err == nil || !strings.Contains(err.Error(), "only Claude Code and Kiro") {
+	unpublished := *entry
+	unpublished.Connector = "opencode"
+	if _, err := (&MCPScanner{ServerEntry: &unpublished}).runtimeInput(); err == nil || !strings.Contains(err.Error(), "no published servers") {
 		t.Fatalf("unpublished connector: %v", err)
 	}
 	remote := *entry
