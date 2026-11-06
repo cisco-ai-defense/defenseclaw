@@ -93,3 +93,38 @@ func TestR106CommentNamingKeysIsNotAKeysWrite(t *testing.T) {
 		}
 	}
 }
+
+func TestGAP0288KnownValueCopyDestination(t *testing.T) {
+	for _, command := range []string{
+		`env -C ~ cp -r project project-bak`,
+		`true; env -C ~ cp -r project project-bak`,
+		`env -C ~ cp -r project project-bak; true`,
+		`echo "$(date)"; env -C ~ cp -r project project-bak`,
+		`env -C ~ cp -R -H project project-H-bak`,
+		`env -C ~ cp -R -L -P project project-P-bak`,
+		`dest=project-bak; env -C ~ cp -r project "$dest"`,
+		`dest='project backup'; env -C ~ cp -r project "$dest"`,
+	} {
+		t.Run(command, func(t *testing.T) {
+			perUser, managed := r106Verdicts(t, "codex", command)
+			if perUser != "allow" || managed != "allow" {
+				t.Errorf("ordinary project copy %q: per-user=%s managed=%s, want allow", command, perUser, managed)
+			}
+		})
+	}
+}
+
+func TestGAP0288KnownValueProtectedCopy(t *testing.T) {
+	for _, command := range []string{
+		`dest=keylink; cp README.md "$dest"`,
+		`dest=../.ssh/authorized_keys; cp README.md "$dest"`,
+		`echo ordinary > notes.txt; dest=keylink; cp README.md "$dest"`,
+	} {
+		t.Run(command, func(t *testing.T) {
+			perUser, managed := r106Verdicts(t, "codex", command)
+			if perUser != "block" || managed != "block" {
+				t.Errorf("protected destination %q: per-user=%s managed=%s, want block", command, perUser, managed)
+			}
+		})
+	}
+}

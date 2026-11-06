@@ -114,8 +114,12 @@ func TestGAP0482ReviewSlowHomeLocalPythonReassignment(t *testing.T) {
 	if got := r106PerUserVerdict(t, "claudecode", payload, ""); got != "allow" {
 		t.Fatalf("local Python reassignment = %s, want allow", got)
 	}
-	if got := gap0482ProfileVerdict(t, payload, "strict"); got != "allow" {
-		t.Fatalf("strict local Python reassignment = %s, want allow", got)
+	wantStrict := "allow"
+	if os.Getenv("R482_OVERLAY") == "1" {
+		wantStrict = "block"
+	}
+	if got := gap0482ProfileVerdict(t, payload, "strict"); got != wantStrict {
+		t.Fatalf("strict local Python reassignment = %s, want %s", got, wantStrict)
 	}
 }
 
@@ -446,7 +450,7 @@ func TestGAP0482PendingShareIdentityDelayInvariant(t *testing.T) {
 	if os.Getenv("R482_OVERLAY") != "1" {
 		t.Skip("requires the slow-share overlay")
 	}
-	for _, delay := range []int{0, 40, 80, 120, 300, 700} {
+	for _, delay := range []int{0, 40, 80, 120, 300, 700, 760, 780} {
 		for _, kind := range []string{"symlink", "hardlink"} {
 			t.Run(kind+"-"+strconv.Itoa(delay)+"ms", func(t *testing.T) {
 				root := t.TempDir()
@@ -486,5 +490,68 @@ func TestGAP0482PendingShareIdentityDelayInvariant(t *testing.T) {
 				}
 			})
 		}
+	}
+}
+
+func TestReviewG288BothShareIdentityDelay(t *testing.T) {
+	for _, row := range []struct {
+		kind      string
+		delay     int
+		protected bool
+	}{
+		{"hardlink", 120, true},
+		{"hardlink", 180, true},
+		{"symlink", 120, true},
+		{"symlink", 180, true},
+		{"ordinary", 180, false},
+	} {
+		t.Run(row.kind+"-"+strconv.Itoa(row.delay), func(t *testing.T) {
+			root := t.TempDir()
+			home, project := filepath.Join(root, "home"), filepath.Join(root, "project")
+			for _, dir := range []string{filepath.Join(home, ".ssh"), project} {
+				if err := os.MkdirAll(dir, 0700); err != nil {
+					t.Fatal(err)
+				}
+			}
+			keys := filepath.Join(home, ".ssh", "authorized_keys")
+			if err := os.WriteFile(keys, []byte("key\n"), 0600); err != nil {
+				t.Fatal(err)
+			}
+			alias := filepath.Join(project, "ordinary.txt")
+			switch row.kind {
+			case "hardlink":
+				if err := os.Link(keys, alias); err != nil {
+					t.Skipf("hardlink: %v", err)
+				}
+			case "symlink":
+				if err := os.Symlink(keys, alias); err != nil {
+					t.Skipf("symlink: %v", err)
+				}
+			default:
+				if err := os.WriteFile(alias, []byte("notes\n"), 0600); err != nil {
+					t.Fatal(err)
+				}
+			}
+			t.Setenv("R482_FAKE_SHARE", root)
+			t.Setenv("R482_FAKE_SHARE_DELAY_MS", strconv.Itoa(row.delay))
+			t.Setenv("HOME", home)
+			t.Setenv("USERPROFILE", home)
+			payload := mustJSON(t, map[string]any{
+				"session_id": "review-g288-both", "hook_event_name": "PreToolUse",
+				"tool_name": "Bash", "tool_use_id": "toolu_review_g288_both",
+				"cwd": project, "permission_mode": "default",
+				"tool_input": map[string]any{"command": "echo marker >> ordinary.txt"},
+			})
+			started := time.Now()
+			got := gap0482ProfileVerdict(t, payload, "default")
+			want := "allow"
+			if row.protected {
+				want = "block"
+			}
+			t.Logf("verdict=%s want=%s elapsed=%v", got, want, time.Since(started))
+			if got != want {
+				t.Errorf("both-share %s delay=%d = %s, want %s", row.kind, row.delay, got, want)
+			}
+		})
 	}
 }
