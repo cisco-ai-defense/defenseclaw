@@ -162,6 +162,9 @@ func TestStandaloneHiddenDescriptorIsRefusedNotRestamped(t *testing.T) {
 				t.Fatalf("the read-only assessment changed the descriptor: %s -> %s", before, after)
 			}
 			if !tc.standalone {
+				if assessed.Outcome != CanonicalAccepted {
+					t.Fatalf("Secure Client assessment = %+v, want Accepted as on the base (g582 review 5 M1)", assessed)
+				}
 				if refusal != nil {
 					t.Fatalf("Secure Client refused: %v", refusal)
 				}
