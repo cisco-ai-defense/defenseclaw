@@ -7,7 +7,6 @@ package enterprisepolicy
 import (
 	"encoding/json"
 	"fmt"
-	"os"
 	"path/filepath"
 	"sort"
 	"strings"
@@ -41,40 +40,6 @@ func OpenCodeServiceConfigPath(home string) string {
 // RID of a Windows SID).
 func OpenCodeAccountPort(id uint64) int {
 	return OpenCodeAccountPortBase + int(id%OpenCodeAccountPortSpan)
-}
-
-// ReadOpenCodeServicePort is the port the service.json under home names, or 0
-// (no file, a link, not a regular file, no port, unreadable). The guardian
-// reads it as root before it assigns ports, so a new port never takes one
-// an account set itself; it never writes as root.
-func ReadOpenCodeServicePort(home string) int {
-	home = strings.TrimSpace(home)
-	if home == "" || !filepath.IsAbs(home) {
-		return 0
-	}
-	home = filepath.Clean(home)
-	// Read through real folders only: a link the account put in place of
-	// ~/.config or ~/.config/opencode would point the root read elsewhere.
-	for _, dir := range []string{filepath.Join(home, ".config"), filepath.Join(home, ".config", "opencode")} {
-		if info, err := os.Lstat(dir); err != nil || !info.IsDir() || info.Mode()&os.ModeSymlink != 0 {
-			return 0
-		}
-	}
-	data, exists, regular, err := readUserFile(OpenCodeServiceConfigPath(home), openCodeServiceConfigLimit)
-	if err != nil || !exists || !regular {
-		return 0
-	}
-	var doc struct {
-		Port json.RawMessage `json:"port"`
-	}
-	if json.Unmarshal(data, &doc) != nil || len(doc.Port) == 0 {
-		return 0
-	}
-	var port int
-	if json.Unmarshal(doc.Port, &port) != nil || port <= 0 || port > 65535 {
-		return 0
-	}
-	return port
 }
 
 // ReadOpenCodeServicePortAsUser is the port the service.json under home names

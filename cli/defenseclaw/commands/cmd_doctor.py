@@ -1657,7 +1657,11 @@ def _managed_install_scan_pending() -> tuple[str, str]:
     )
 
 
-_OPENCODE_PORT_RECORD_CODES = ("opencode_port_record_unreadable", "opencode_port_record_unchecked")
+_OPENCODE_PORT_RECORD_CODES = (
+    "opencode_port_record_unreadable",
+    "opencode_port_record_unchecked",
+    "opencode_port_account_unknown",
+)
 
 
 def _managed_opencode_port_record_problem() -> tuple[str, str]:

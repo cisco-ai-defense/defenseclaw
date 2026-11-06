@@ -561,7 +561,13 @@ def test_the_service_port_is_written_into_a_private_group_folder(monkeypatch, tm
 @posix_only
 @pytest.mark.parametrize(
     ("code", "shown"),
-    [("opencode_port_record_unreadable", True), ("opencode_port_record_unchecked", True), ("other_warning", False), (None, False)],
+    [
+        ("opencode_port_record_unreadable", True),
+        ("opencode_port_record_unchecked", True),
+        ("opencode_port_account_unknown", True),
+        ("other_warning", False),
+        (None, False),
+    ],
 )
 def test_managed_doctor_shows_the_opencode_ports_record_warning(monkeypatch, code, shown):
     """REVIEW-gx053-5 MF2: doctor on a managed host shows what status says, root or not."""
