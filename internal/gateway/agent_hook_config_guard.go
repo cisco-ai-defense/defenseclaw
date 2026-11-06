@@ -1201,38 +1201,128 @@ func agentHookConfigDirectoryCopyTarget(argv []string, guard *agentHookConfigGua
 	return ""
 }
 
-func agentHookConfigGitTarget(argv []string, guard *agentHookConfigGuard) string {
+// gitGlobalSubcommand reads Git's global options before deciding whether a
+// subcommand can update the worktree. The returned root follows -C and
+// --work-tree, rather than assuming that the hook's cwd is the Git worktree.
+func agentHookConfigGitGlobalSubcommand(argv []string, guard *agentHookConfigGuard) (int, string) {
 	if len(argv) < 2 || filepath.Base(argv[0]) != "git" {
-		return ""
+		return -1, ""
 	}
-	index := 1
-	for index < len(argv) && argv[index] == "-C" && index+1 < len(argv) {
-		index += 2
+	root := guard.cwd
+	explicitWorktree := ""
+	for index := 1; index < len(argv); {
+		arg := argv[index]
+		switch {
+		case arg == "-C" || arg == "-c" || arg == "--git-dir" || arg == "--work-tree" ||
+			arg == "--namespace" || arg == "--super-prefix" || arg == "--config-env" || arg == "--exec-path":
+			if index+1 >= len(argv) {
+				return -1, ""
+			}
+			value := argv[index+1]
+			if arg == "-C" {
+				root = agentHookConfigGitJoin(root, value)
+			}
+			if arg == "--work-tree" {
+				explicitWorktree = value
+			}
+			index += 2
+		case strings.HasPrefix(arg, "-C") && len(arg) > 2:
+			root = agentHookConfigGitJoin(root, arg[2:])
+			index++
+		case strings.HasPrefix(arg, "-c") && len(arg) > 2:
+			index++
+		case strings.HasPrefix(arg, "--work-tree="):
+			explicitWorktree = strings.TrimPrefix(arg, "--work-tree=")
+			index++
+		case strings.HasPrefix(arg, "--git-dir=") || strings.HasPrefix(arg, "--namespace=") ||
+			strings.HasPrefix(arg, "--super-prefix=") || strings.HasPrefix(arg, "--config-env=") ||
+			strings.HasPrefix(arg, "--exec-path="):
+			index++
+		case arg == "--no-pager" || arg == "--paginate" || arg == "--bare" ||
+			arg == "--no-optional-locks" || arg == "--no-replace-objects" || arg == "--literal-pathspecs" ||
+			arg == "--glob-pathspecs" || arg == "--noglob-pathspecs" || arg == "--icase-pathspecs":
+			index++
+		case arg == "--":
+			index++
+		case strings.HasPrefix(arg, "-"):
+			return -1, ""
+		default:
+			if explicitWorktree != "" {
+				root = agentHookConfigGitJoin(root, explicitWorktree)
+			}
+			return index, root
+		}
 	}
-	if index >= len(argv) {
+	return -1, ""
+}
+
+func agentHookConfigGitJoin(root, value string) string {
+	if filepath.IsAbs(value) {
+		return filepath.Clean(value)
+	}
+	return filepath.Clean(filepath.Join(root, value))
+}
+
+func agentHookConfigGitNewBranchOnly(sub string, args []string) bool {
+	for index, arg := range args {
+		branchFlag := sub == "checkout" && (arg == "-b" || arg == "-B" || arg == "--orphan") ||
+			sub == "switch" && (arg == "-c" || arg == "-C" || arg == "--create" || arg == "--force-create")
+		if !branchFlag || index+1 >= len(args) {
+			continue
+		}
+		for _, rest := range args[index+2:] {
+			if rest == "--" || !strings.HasPrefix(rest, "-") {
+				return false
+			}
+		}
+		return true
+	}
+	return false
+}
+
+func agentHookConfigGitTarget(argv []string, guard *agentHookConfigGuard) string {
+	index, worktree := agentHookConfigGitGlobalSubcommand(argv, guard)
+	if index < 0 {
 		return ""
 	}
 	sub := argv[index]
+	args := argv[index+1:]
 	switch sub {
-	case "restore", "checkout", "reset", "stash", "apply":
+	case "am", "cherry-pick", "merge", "pull", "rebase", "revert", "switch", "checkout", "restore", "reset", "stash", "apply":
 	default:
 		return ""
 	}
-	if sub == "stash" && !slices.Contains(argv, "pop") && !slices.Contains(argv, "apply") {
+	if (sub == "checkout" || sub == "switch") && agentHookConfigGitNewBranchOnly(sub, args) {
 		return ""
 	}
-	if sub == "reset" && !slices.Contains(argv, "--hard") && !slices.Contains(argv, "--merge") {
+	if sub == "stash" {
+		operation := "push"
+		for _, arg := range args {
+			if !strings.HasPrefix(arg, "-") {
+				operation = arg
+				break
+			}
+		}
+		switch operation {
+		case "pop", "apply", "branch":
+		default:
+			return ""
+		}
+	}
+	if sub == "reset" && !slices.Contains(args, "--hard") && !slices.Contains(args, "--merge") && !slices.Contains(args, "--keep") {
 		return ""
 	}
-	if sub == "restore" && slices.Contains(argv, "--staged") && !slices.Contains(argv, "--worktree") {
-		return ""
-	}
-	if sub == "apply" && (slices.Contains(argv, "--check") || slices.Contains(argv, "--cached") || slices.Contains(argv, "--stat")) {
+	if sub == "restore" && slices.Contains(args, "--staged") && !slices.Contains(args, "--worktree") {
 		return ""
 	}
 	if sub == "apply" {
+		for _, option := range []string{"--check", "--cached", "--stat", "--numstat", "--summary"} {
+			if slices.Contains(args, option) {
+				return ""
+			}
+		}
 		readAny, unknown := false, false
-		for _, arg := range argv[index+1:] {
+		for _, arg := range args {
 			if strings.HasPrefix(arg, "-") {
 				continue
 			}
@@ -1257,12 +1347,12 @@ func agentHookConfigGitTarget(argv []string, guard *agentHookConfigGuard) string
 			readAny = true
 		}
 		if readAny && !unknown {
-			return "" // Every readable patch names only other files.
+			return ""
 		}
 	}
-	// Explicit pathspecs are write operands for restore and checkout.
+	// An explicit pathspec may name a file currently absent from this tree.
 	pathspec := sub == "restore"
-	for _, arg := range argv[index+1:] {
+	for _, arg := range args {
 		if arg == "--" {
 			pathspec = true
 			continue
@@ -1271,12 +1361,19 @@ func agentHookConfigGitTarget(argv []string, guard *agentHookConfigGuard) string
 			return arg
 		}
 	}
-	// A whole-worktree rewrite can replace any tracked hook document.
+	// A worktree rewrite can restore a tracked registration document.
 	for _, file := range guard.files {
-		if strings.HasPrefix(file.Path, guard.cwd+string(filepath.Separator)) {
+		relative, err := filepath.Rel(worktree, file.Path)
+		if err == nil && relative != ".." && !strings.HasPrefix(relative, ".."+string(filepath.Separator)) {
 			if _, err := os.Stat(file.Path); err == nil {
 				return file.Path
 			}
+		}
+	}
+	for _, file := range agentHookConfigProjectFiles {
+		path := filepath.Join(worktree, filepath.FromSlash(strings.TrimPrefix(file.suffix, "/")))
+		if _, err := os.Stat(path); err == nil {
+			return path
 		}
 	}
 	return ""
