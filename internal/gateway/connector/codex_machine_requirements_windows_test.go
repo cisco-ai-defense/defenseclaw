@@ -331,7 +331,8 @@ func TestWindowsCodexMachineGuardArtifactRepairTable(t *testing.T) {
 			}
 		}},
 		{name: "registry stale", keepsTargets: true, pinOnly: true, apply: func(t *testing.T, opts WindowsCodexMachineRequirementsOptions) {
-			data, err := os.ReadFile(opts.ManagedStatePath)
+			// The writer copy is where every transaction starts (GAP-0650).
+			data, err := os.ReadFile(windowsCodexStateCommittedPathForTest(opts))
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -344,14 +345,12 @@ func TestWindowsCodexMachineGuardArtifactRepairTable(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			if err := os.WriteFile(opts.ManagedStatePath, body, 0o600); err != nil {
+			if err := os.WriteFile(windowsCodexStateCommittedPathForTest(opts), body, 0o600); err != nil {
 				t.Fatal(err)
 			}
 		}},
 		{name: "registry missing", apply: func(t *testing.T, opts WindowsCodexMachineRequirementsOptions) {
-			if err := os.Remove(opts.ManagedStatePath); err != nil {
-				t.Fatal(err)
-			}
+			removeWindowsCodexStateForTest(t, opts)
 		}},
 	}
 	for _, enrolled := range []bool{false, true} {

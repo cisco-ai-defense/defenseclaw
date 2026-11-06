@@ -160,7 +160,7 @@ func TestWindowsCodexRepairKeepsAnAdministratorNarrowedSessionStart(t *testing.T
 		if err := os.WriteFile(opts.OwnershipPath, body, 0o600); err != nil {
 			t.Fatal(err)
 		}
-		runtimeRaw, err := os.ReadFile(opts.ManagedStatePath)
+		runtimeRaw, err := os.ReadFile(windowsCodexStateCommittedPathForTest(opts))
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -172,7 +172,7 @@ func TestWindowsCodexRepairKeepsAnAdministratorNarrowedSessionStart(t *testing.T
 		if body, err = marshalWindowsCodexManagedRuntimeState(runtime); err != nil {
 			t.Fatal(err)
 		}
-		if err := os.WriteFile(opts.ManagedStatePath, body, 0o600); err != nil {
+		if err := os.WriteFile(windowsCodexStateCommittedPathForTest(opts), body, 0o600); err != nil {
 			t.Fatal(err)
 		}
 		if report, err := ReconcileWindowsCodexMachineRequirements(opts); err != nil || !report.OK {

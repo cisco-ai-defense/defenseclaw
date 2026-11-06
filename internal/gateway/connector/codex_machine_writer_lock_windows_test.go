@@ -255,7 +255,7 @@ func TestWindowsCodexStableReaderAcceptsOnlyAnUnchangedEvenCounter(t *testing.T)
 			windowsCodexReaderWait = 150 * time.Millisecond
 			scriptedWindowsCodexCounterForTest(t, tc.counters...)
 			resolves := 0
-			result, err := resolveWindowsCodexManagedRuntimeRegistryStable(`C:\x\lock`, func() (WindowsCodexManagedRuntimeRegistry, error) {
+			result, err := resolveWindowsCodexManagedRuntimeRegistryStable(`C:\x\lock`, func(string) (WindowsCodexManagedRuntimeRegistry, error) {
 				resolves++
 				label := "first"
 				if resolves > 1 {
@@ -304,7 +304,8 @@ func TestWindowsCodexReaderIsNeverInactiveWhileStateExistsOrATransactionRuns(t *
 	t.Run("state without requirements, no transaction", func(t *testing.T) {
 		_, policyDir, hook := newWindowsCodexReaderFixture(t)
 		windowsCodexLockSizeForTest(t, filepath.Join(policyDir, WindowsCodexManagedWriterLockFile), 2)
-		if err := os.WriteFile(filepath.Join(policyDir, windowsCodexManagedStateFile), []byte("{}\n"), 0o600); err != nil {
+		// The hook copy the counter names (GAP-0650).
+		if err := os.WriteFile(windowsCodexManagedStateGenerationPath(policyDir, 2), []byte("{}\n"), 0o600); err != nil {
 			t.Fatal(err)
 		}
 		registry, err := ResolveWindowsCodexManagedRuntimeRegistry(hook)
@@ -336,11 +337,12 @@ func TestWindowsCodexReaderIsNeverInactiveWhileStateExistsOrATransactionRuns(t *
 		windowsCodexTransactionCounterRead = func(path string) (uint64, error) {
 			reads++
 			if reads == 2 {
-				// A writer ran between the reader's two counter reads and
-				// published the state file.
-				if err := os.WriteFile(filepath.Join(policyDir, windowsCodexManagedStateFile), []byte("{}\n"), 0o600); err != nil {
+				// A writer ran between the two counter reads of the reader and
+				// published the hook copy of the state its end value names.
+				if err := os.WriteFile(windowsCodexManagedStateGenerationPath(policyDir, 4), []byte("{}\n"), 0o600); err != nil {
 					return 0, err
 				}
+				windowsCodexLockSizeForTest(t, lock, 4)
 				return 4, nil
 			}
 			return readWindowsCodexTransactionCounter(path)
