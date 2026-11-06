@@ -230,6 +230,23 @@ func ShellWriteOperands(command, cwd, home string) (operands []string, ok, dynam
 		operands = append(operands, OperandPath(name, cwd))
 		return true
 	})
+	// The gateway proves a redirect onto the DefenseClaw state from the
+	// targets its own reader names (actionfacts.ShellRedirectTargets, read
+	// by provenShellRedirectStateWrite), which also spells the home as
+	// <parent>/$USER and <parent>/$LOGNAME. Behind ProtectHome it finds the
+	// file each of them opens only in the hook client map, which lists
+	// these operands: list the targets of that reader too, so a statement
+	// that leaves the other readers here without those values cannot leave
+	// a target out (rel-1-0-6:GAP-0630, GAP-0601).
+	if strings.HasPrefix(home, "/") && strings.Contains(command, ">") && MayNameState(command) {
+		if targets, found := actionfacts.ShellRedirectTargets(command, home); found {
+			for _, target := range targets {
+				if !slices.Contains(operands, target) {
+					operands = append(operands, target)
+				}
+			}
+		}
+	}
 	return operands, true, dynamic
 }
 
