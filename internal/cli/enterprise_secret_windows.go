@@ -1017,6 +1017,10 @@ func windowsSecretStored(dir, name string) bool {
 	return !errors.Is(err, os.ErrNotExist)
 }
 
+// windowsSecretsDirStandaloneStamp is managed.StampStandaloneTrustedObject;
+// tests replace it.
+var windowsSecretsDirStandaloneStamp = managed.StampStandaloneTrustedObject
+
 func ensureWindowsSecretsDir(store *windowsSecretStore, reader *windows.SID) error {
 	if reader == nil {
 		return errors.New("the secrets directory needs the gateway service SID")
@@ -1031,6 +1035,14 @@ func ensureWindowsSecretsDir(store *windowsSecretStore, reader *windows.SID) err
 	}
 	// The credential write below proves the whole chain through the
 	// gateway reader check.
+	if managed.StandaloneRefusesContentDrift() {
+		// The refusal above is a read-only check; the stamp judges the
+		// folder again on the handle it writes (g582 review 6 S1).
+		if err := windowsSecretsDirStandaloneStamp(store.dir, managed.ObjectAdminDirectory, windowsSecretDirectorySDDL(reader)); err != nil {
+			return fmt.Errorf("the secrets folder was not repaired: %w", err)
+		}
+		return nil
+	}
 	return applyWindowsSDDL(store.dir, windowsSecretDirectorySDDL(reader))
 }
 
