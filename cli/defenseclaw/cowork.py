@@ -36,6 +36,7 @@ import glob
 import hashlib
 import io
 import json
+import ntpath
 import os
 import stat
 import subprocess
@@ -546,6 +547,47 @@ def _utc_text(stamp: datetime) -> str:
     return stamp.astimezone(timezone.utc).strftime("%Y-%m-%d %H:%M:%SZ")
 
 
+def windows_plugin_hooks_need_rebuild(zip_file: str) -> bool:
+    """Whether a readable Windows plugin archive lacks the current guard form."""
+    if sys.platform != "win32":
+        return False
+    try:
+        with zipfile.ZipFile(zip_file) as zf, zf.open("hooks/hooks.json") as entry:
+            raw = entry.read(256 * 1024 + 1)
+        if len(raw) > 256 * 1024:
+            return True
+        doc = json.loads(raw)
+    except (OSError, KeyError, ValueError, zipfile.BadZipFile):
+        return False
+    hooks = doc.get("hooks") if isinstance(doc, dict) else None
+    if not isinstance(hooks, dict) or set(hooks) != COWORK_EVENTS:
+        return True
+    for event, groups in hooks.items():
+        if not isinstance(groups, list) or not groups:
+            return True
+        for group in groups:
+            handlers = group.get("hooks") if isinstance(group, dict) else None
+            if not isinstance(handlers, list) or not handlers:
+                return True
+            for handler in handlers:
+                if not isinstance(handler, dict):
+                    return True
+                args = handler.get("args")
+                if (
+                    handler.get("command") != _BUNDLED_GUARD_COMMAND
+                    or not isinstance(args, list)
+                    or len(args) != 4
+                    or args[0] != "cowork-guard"
+                    or not all(isinstance(arg, str) for arg in args)
+                    or not ntpath.isabs(args[1])
+                    or not ntpath.isabs(args[2])
+                    or ntpath.basename(args[2]).lower() != "defenseclaw-hook.exe"
+                    or args[3] != event
+                ):
+                    return True
+    return False
+
+
 def cowork_status(
     cfg: Any,
     health: Any,
@@ -638,6 +680,14 @@ def cowork_status(
             + confirmed,
             "defenseclaw-gateway status",
             "cowork_health_unavailable",
+            **common,
+        )
+    if windows_plugin_hooks_need_rebuild(zip_file):
+        return CoworkStatus(
+            False,
+            f"plugin {version} uses an older Windows hook command; rebuild and upload the Cowork plugin",
+            "defenseclaw setup cowork",
+            "cowork_plugin_stale",
             **common,
         )
     if last is None:
