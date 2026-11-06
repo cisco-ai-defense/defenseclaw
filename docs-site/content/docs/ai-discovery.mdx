@@ -1401,9 +1401,10 @@ instead of the `&` form):
 ```powershell title="Elevated PowerShell prompt"
 Get-Service DefenseClawSensorHelper, DefenseClawGateway
 & 'C:\Program Files\Cisco\DefenseClaw\bin\defenseclaw.exe' enterprise windows status --json
-defenseclaw agent discovery runtime permissions
-defenseclaw agent discovery runtime selftest
 ```
+
+`agent discovery runtime permissions` and `agent discovery runtime selftest`
+are commands of the per-user CLI; a managed computer does not have them.
 
 If the helper is absent, stopped, or its protected socket cannot be opened,
 runtime coverage reports degraded rather than silently falling back to a

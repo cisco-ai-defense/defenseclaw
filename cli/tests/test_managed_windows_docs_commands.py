@@ -20,11 +20,18 @@ span, and fails on a command that starts with the bare name:
   family, named as a reference), are not commands to run.
 * ``defenseclaw`` or ``defenseclaw-gateway`` followed by ``enterprise windows
   <verb>``: that family exists only on managed Windows.
+* In a fence titled for an elevated or Administrator prompt, any bare
+  ``defenseclaw`` or ``defenseclaw-gateway`` (with or without ``.exe``) on a
+  line that is not a comment: such a block is for a managed computer.
 
-The full-path form (``& '...'``, ``& $Cli``, ``"..." status``) does not start
-with the bare name, so it passes. A per-user Windows page puts the CLI on
-``PATH`` and may type it bare; those pages go in ``PER_USER_PAGES`` with the
-reason.
+Windows is case-insensitive and PowerShell joins whitespace, so the match
+ignores case and runs of whitespace, and finds the bare name anywhere in a
+unit (``$r = defenseclaw.exe ...``, ``cmd /c defenseclaw.exe ...``,
+``Start-Process defenseclaw.exe``), after a prompt (``PS>``, ``C:\\>``) too.
+A name after a path separator, a quote or a ``$`` is not bare, so the
+full-path forms (``& '...'``, ``& $Cli``, ``"..." status``) pass. A per-user
+Windows page puts the CLI on ``PATH`` and may type it bare; those pages go in
+``PER_USER_PAGES`` with the reason (g072 review 2 M2).
 """
 
 from __future__ import annotations
@@ -44,10 +51,24 @@ DOCS = ROOT / "docs"
 # matches a command fails the test, so the list cannot go stale.
 PER_USER_PAGES: dict[str, str] = {}
 
-_FENCE = re.compile(r"^(\s*)(`{3,}|~{3,})\s*([^\s`]*)")
+_FENCE = re.compile(r"^(\s*)(`{3,}|~{3,})\s*([^\s`]*)(.*)$")
 _SPAN = re.compile(r"(?<!`)`([^`]+)`(?!`)")
-_PROMPT = re.compile(r"^(?:\$ |PS> |PS [^>]*> |> )")
-_BARE = re.compile(r"^(defenseclaw|defenseclaw-gateway)(\.exe)?(?:\s+(.*))?$", re.DOTALL)
+# A shell prompt: POSIX, PowerShell (PS>, PS C:\x>) and cmd.exe (C:\>, C:\Users\x>).
+_PROMPT = re.compile(r"^(?:\$ |PS> |PS [^>]*> |> |[A-Za-z]:\\[^>]*> ?)")
+# The bare name anywhere: not after a path separator, a word character, a dot,
+# a quote, a $ or a dash, and not followed by more of a name.
+_BARE = re.compile(r"(?<![\\/\w.'\"$-])(defenseclaw-gateway|defenseclaw)(\.exe)?(?![\w-])(.*)$", re.IGNORECASE)
+# The end of one command's arguments.
+_SEPARATOR = re.compile(r"\s*(?:\||;|&&|\)|$)")
+# The bare name where a shell runs it: first, after = ( | ; & or &&, or as
+# the program of cmd /c or Start-Process. Elsewhere it is an argument
+# (Get-Service DefenseClaw*, -LogName DefenseClaw).
+_BARE_RUN = re.compile(
+    r"(?:^|[=(|;&]\s*|\b(?:cmd(?:\.exe)?\s+/c|Start-Process(?:\s+-FilePath)?)\s+)"
+    r"(defenseclaw-gateway|defenseclaw)(\.exe)?(?![\w-])",
+    re.IGNORECASE,
+)
+_ELEVATED_TITLE = re.compile(r"""title\s*=\s*["'][^"']*\b(?:elevated|administrator)""", re.IGNORECASE)
 
 
 def _doc_files() -> list[Path]:
@@ -55,19 +76,25 @@ def _doc_files() -> list[Path]:
 
 
 def _units(text: str):
-    """Yield ``(line number, text)`` for each code line and inline span."""
+    """Yield ``(line number, text, elevated)`` for each code line and inline span.
+
+    ``elevated`` is true for a line of a fence titled for an elevated or
+    Administrator prompt. Whitespace runs are one space.
+    """
     fence: str | None = None
+    elevated = False
     prose: list[tuple[int, str]] = []
     for number, line in enumerate(text.splitlines(), 1):
         match = _FENCE.match(line)
         if fence is None and match:
             fence = match.group(2)[0]
+            elevated = bool(_ELEVATED_TITLE.search(match.group(4)))
             continue
         if fence is not None:
-            if match and match.group(2)[0] == fence and not match.group(3):
+            if match and match.group(2)[0] == fence and not match.group(3) and not match.group(4).strip():
                 fence = None
                 continue
-            yield number, line.strip()
+            yield number, " ".join(line.split()), elevated
             continue
         prose.append((number, line))
     # Inline spans may wrap across lines inside a paragraph.
@@ -77,22 +104,24 @@ def _units(text: str):
         starts.append(starts[-1] + len(line) + 1)
     for found in _SPAN.finditer(joined):
         index = max(i for i, offset in enumerate(starts[:-1]) if offset <= found.start())
-        yield prose[index][0], " ".join(found.group(1).split())
+        yield prose[index][0], " ".join(found.group(1).split()), False
 
 
-def _bare_command(unit: str) -> str | None:
+def _bare_command(unit: str, elevated: bool = False) -> str | None:
     """Why ``unit`` is a bare managed-Windows command, or ``None``."""
-    unit = _PROMPT.sub("", unit.strip())
-    match = _BARE.match(unit)
-    if not match:
-        return None
-    name, exe, args = match.group(1), match.group(2), (match.group(3) or "").strip()
-    if exe:
-        if args and args != "enterprise windows":
-            return f"bare {name}{exe} with arguments"
-        return None
-    if re.match(r"enterprise windows [a-z]", args):
-        return f"bare {name} enterprise windows <verb>"
+    unit = _PROMPT.sub("", " ".join(unit.split()))
+    if elevated and not unit.startswith(("#", "REM ", "rem ", "::")):
+        match = _BARE_RUN.search(unit)
+        if match:
+            return f"bare {match.group(1)}{match.group(2) or ''} in an elevated prompt block"
+    for match in _BARE.finditer(unit):
+        name, exe = match.group(1), match.group(2)
+        args = _SEPARATOR.split(match.group(3), maxsplit=1)[0].strip()
+        if exe:
+            if args and args.lower() != "enterprise windows":
+                return f"bare {name}{exe} with arguments"
+        elif re.match(r"enterprise windows [a-z]", args, re.IGNORECASE):
+            return f"bare {name} enterprise windows <verb>"
     return None
 
 
@@ -100,8 +129,8 @@ def _findings() -> list[tuple[str, int, str, str]]:
     found = []
     for path in _doc_files():
         rel = path.relative_to(ROOT).as_posix()
-        for number, unit in _units(path.read_text(encoding="utf-8")):
-            why = _bare_command(unit)
+        for number, unit, elevated in _units(path.read_text(encoding="utf-8")):
+            why = _bare_command(unit, elevated)
             if why:
                 found.append((rel, number, why, unit))
     return found
@@ -138,7 +167,77 @@ def test_per_user_allowlist_has_no_stale_entries() -> None:
         ("& $Cli enterprise windows status", False),
         ("defenseclaw status", False),
         ("defenseclaw-gateway enterprise linux status", False),
+        # g072 review 2 M2: the near variants.
+        ("C:\\> defenseclaw.exe enterprise windows status", True),
+        ("C:\\Users\\dcadmin> defenseclaw.exe status", True),
+        ("$r = defenseclaw.exe enterprise windows status --json | ConvertFrom-Json", True),
+        ("cmd /c defenseclaw.exe status", True),
+        ("Start-Process defenseclaw.exe -ArgumentList status", True),
+        ("Start-Process defenseclaw.exe", False),
+        ("DefenseClaw.exe status", True),
+        ("DEFENSECLAW-GATEWAY.EXE rulepack validate --dir X", True),
+        ("defenseclaw  enterprise  windows status", True),
+        ("defenseclaw\tenterprise windows status", True),
+        ("DefenseClaw Enterprise Windows Status", True),
+        ("(defenseclaw.exe status)", True),
+        ("Get-Service DefenseClawSensorHelper, DefenseClawGateway", False),
+        ("& 'C:\\Program Files\\Cisco\\DefenseClaw\\bin\\defenseclaw.exe' enterprise windows status --json", False),
+        ('C:\\> "C:\\Program Files\\Cisco\\DefenseClaw\\bin\\defenseclaw.exe" status', False),
+        ("defenseclaw-hook.exe --version", False),
+        ("defenseclaw.exe | Out-Null", False),
     ],
 )
 def test_the_matcher(unit: str, expected: bool) -> None:
     assert (_bare_command(unit) is not None) is expected
+
+
+@pytest.mark.parametrize(
+    "unit, expected",
+    [
+        # Any bare command in a block for an elevated or Administrator prompt,
+        # with or without .exe: such a block is for a managed computer.
+        ("defenseclaw agent discovery runtime selftest", True),
+        ("defenseclaw agent discovery runtime permissions", True),
+        ("PS> defenseclaw status", True),
+        ("defenseclaw-gateway status", True),
+        ("defenseclaw", True),
+        ("$x = defenseclaw status", True),
+        ("& 'C:\\Program Files\\Cisco\\DefenseClaw\\bin\\defenseclaw.exe' enterprise windows status --json", False),
+        ("Get-Service DefenseClawSensorHelper, DefenseClawGateway", False),
+        ("# defenseclaw is not on PATH here", False),
+        ("& defenseclaw status", True),
+        ("cmd /c defenseclaw status", True),
+        ("Start-Process -FilePath defenseclaw -ArgumentList status", True),
+        ("Get-Service DefenseClaw* | Format-Table Name, Status, StartType", False),
+        ("Get-WinEvent -LogName DefenseClaw -MaxEvents 3", False),
+    ],
+)
+def test_the_matcher_in_an_elevated_block(unit: str, expected: bool) -> None:
+    assert (_bare_command(unit, elevated=True) is not None) is expected
+    if expected and "enterprise windows" not in unit and ".exe" not in unit:
+        assert _bare_command(unit) is None, "outside an elevated block a per-user command may be bare"
+
+
+def test_units_read_the_fence_title_and_join_whitespace() -> None:
+    page = "\n".join(
+        [
+            '```powershell title="Elevated PowerShell prompt"',
+            "defenseclaw   agent discovery runtime selftest",
+            "```",
+            '```powershell title="Per-user PowerShell"',
+            "defenseclaw status",
+            "```",
+            "~~~bash title='Administrator prompt'",
+            "defenseclaw-gateway status",
+            "~~~",
+        ]
+    )
+    units = [(unit, elevated) for _, unit, elevated in _units(page)]
+    assert units == [
+        ("defenseclaw agent discovery runtime selftest", True),
+        ("defenseclaw status", False),
+        ("defenseclaw-gateway status", True),
+    ]
+    # The block a review found: a per-user command under an elevated title.
+    hits = [_bare_command(unit, elevated) for unit, elevated in units]
+    assert [hit is not None for hit in hits] == [True, False, True]
