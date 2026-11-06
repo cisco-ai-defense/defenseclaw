@@ -1181,6 +1181,69 @@ func trustedOrdinaryKeyOperandRolesDepth(request trustedActionRequest, input act
 	return true
 }
 
+func trustedAuthorizedKeysSourcePath(source string, protected []string) bool {
+	if relative, account := liveHomeRelative(source); account && authorizedKeysRelative(relative) {
+		return true
+	}
+	for _, key := range protected {
+		if source == canonicalSemanticPath(key) {
+			return true
+		}
+	}
+	return false
+}
+
+// A copy source is a protected operand even when its destination is ordinary.
+// Managed calls use the authenticated user-side link walk for a source the
+// gateway cannot resolve under ProtectHome.
+func trustedProtectedCopySource(request trustedActionRequest, facts actionfacts.Facts) bool {
+	if !filepath.IsAbs(facts.ActiveHome) {
+		return false
+	}
+	copies := make(map[int64]bool)
+	hasCopy := false
+	for _, command := range facts.Commands {
+		copies[command.ID] = slices.Contains(command.Operations, actionfacts.OperationCopy) ||
+			strings.ToLower(filepath.Base(command.Program)) == "dd"
+		hasCopy = hasCopy || copies[command.ID]
+	}
+	if !hasCopy {
+		return false
+	}
+	protected := hookpaths.AuthorizedKeysPaths(facts.ActiveHome)
+	if !request.ProtectedHomeHook {
+		for _, key := range slices.Clone(protected) {
+			if resolved, ok := hookpaths.ResolveWriteTarget(key); ok && resolved != key {
+				protected = append(protected, resolved)
+			}
+		}
+	}
+	ssh := canonicalSemanticPath(filepath.Join(facts.ActiveHome, ".ssh"))
+	isProtected := func(value string) bool {
+		value = canonicalSemanticPath(value)
+		return value == ssh || trustedAuthorizedKeysSourcePath(value, protected)
+	}
+	for _, candidate := range facts.Paths {
+		if !copies[candidate.CommandID] || candidate.Access != actionfacts.PathAccessRead || candidate.Resolved == "" {
+			continue
+		}
+		if isProtected(candidate.Resolved) {
+			return true
+		}
+		var target string
+		var known bool
+		if request.ProtectedHomeHook {
+			target, known = hookpaths.WalkFactTarget(request.ResolvedWriteTargets, candidate.Resolved)
+		} else {
+			target, known = hookpaths.ResolveWriteTarget(candidate.Resolved)
+		}
+		if known && isProtected(target) {
+			return true
+		}
+	}
+	return false
+}
+
 // The role proof accepts only redirect shapes whose operands ActionFacts can
 // associate with a file target. A descriptor-to-word redirect may name an FD
 // or a file; brace expansion can name a different file than its first word.

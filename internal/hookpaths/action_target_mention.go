@@ -329,6 +329,11 @@ func actionPosixTargetMention(command, cwd, home string, depth int, stateOnly bo
 				// An --eval text that only defines rules make does not run
 				// is not a target of the call (GAP-2169).
 				inert := actionInertMakeEvals(call, effectiveCWD, home)
+				if !stateOnly {
+					if data := actionNodeInertDataWord(call, effectiveCWD, home); data != nil {
+						inert = append(inert, data)
+					}
+				}
 				// mkdir or a tightening chmod of exactly the home's .ssh
 				// folder writes no keys file (rel-1-0-6:GAP-0298).
 				if !stateOnly {
@@ -432,6 +437,146 @@ func actionPosixTargetMention(command, cwd, home string, depth int, stateOnly bo
 	return false
 }
 
+// actionNodeInertDataWord is the code operand of a complete inline write to
+// an ordinary destination. Its data strings are not shell path operands;
+// the destination was checked by the same bounded interpreter role proof.
+func actionNodeInertDataWord(call *syntax.CallExpr, cwd, home string) *syntax.Word {
+	if len(call.Assigns) != 0 || len(call.Args) != 3 {
+		return nil
+	}
+	program, known := staticProgramWord(call.Args[0], home)
+	if !known || programBase(program) != "node" && programBase(program) != "nodejs" {
+		return nil
+	}
+	option, known := StaticWord(call.Args[1], home)
+	if !known || option != "-e" && option != "--eval" {
+		return nil
+	}
+	code, known := StaticWord(call.Args[2], home)
+	if !known || !nodeInertWriteData(code, cwd, home) {
+		return nil
+	}
+	return call.Args[2]
+}
+
+// ActionInlineSSHKeyDataMention reports a proved ordinary Node write whose
+// inert data text names an SSH keys path. The strict rule retains the text
+// mention while the default action decision uses the proved destination.
+func ActionInlineSSHKeyDataMention(command, cwd, home string) bool {
+	if !strings.Contains(command, "authorized_k") || !strings.Contains(command, ".ssh") {
+		return false
+	}
+	file, parsed := parseShell(command)
+	if !parsed {
+		return false
+	}
+	found := false
+	syntax.Walk(file, func(node syntax.Node) bool {
+		call, ok := node.(*syntax.CallExpr)
+		if !ok {
+			return true
+		}
+		word := actionNodeInertDataWord(call, cwd, home)
+		if word == nil {
+			return true
+		}
+		code, known := StaticWord(word, home)
+		found = known && actionInterpreterSSHName.MatchString(code) && actionInterpreterKeysName.MatchString(code)
+		return !found
+	})
+	return found
+}
+
+// A copy source that the user-side hook can place on an authorized-keys
+// file stays protected when the managed gateway cannot read the home.
+func actionCopyProtectedKeysSource(facts actionfacts.Facts, command, cwd, home string) bool {
+	if !filepath.IsAbs(home) || !filepath.IsAbs(cwd) {
+		return false
+	}
+	copies := make(map[int64]bool)
+	hasCopy := false
+	for _, process := range facts.Commands {
+		copies[process.ID] = slices.Contains(process.Operations, actionfacts.OperationCopy) ||
+			programBase(process.Program) == "dd"
+		hasCopy = hasCopy || copies[process.ID]
+	}
+	if !hasCopy {
+		return false
+	}
+	keys := AuthorizedKeysPaths(home)
+	for _, key := range slices.Clone(keys) {
+		if resolved, ok := ResolveWriteTarget(key); ok && resolved != key {
+			keys = append(keys, resolved)
+		}
+	}
+	ssh := filepath.Join(home, ".ssh")
+	isProtected := func(path string) bool {
+		if !filepath.IsAbs(path) {
+			return false
+		}
+		source, ok := ResolveWriteTarget(path)
+		if !ok {
+			return false
+		}
+		if samePathName(source, ssh) {
+			return true
+		}
+		for _, key := range keys {
+			if samePathName(source, key) {
+				return true
+			}
+		}
+		return false
+	}
+	for _, candidate := range facts.Paths {
+		if copies[candidate.CommandID] && candidate.Access == actionfacts.PathAccessRead &&
+			isProtected(candidate.Resolved) {
+			return true
+		}
+	}
+	if !mayHaveKnownCopyWord(command) {
+		return false
+	}
+	file, parsed := parseShell(command)
+	if !parsed {
+		return false
+	}
+	values := knownWordParameterValues(command, file, home)
+	if len(values) == 0 {
+		return false
+	}
+	found := false
+	syntax.Walk(file, func(node syntax.Node) bool {
+		call, ok := node.(*syntax.CallExpr)
+		if !ok || len(call.Args) < 3 {
+			return true
+		}
+		program, static := StaticWord(call.Args[0], home)
+		if !static || !slices.Contains(copyPrograms, programBase(program)) {
+			return true
+		}
+		words := make([]string, len(call.Args)-1)
+		known := make([]bool, len(words))
+		for i, word := range call.Args[1:] {
+			words[i], known[i] = StaticWord(word, home)
+			if !known[i] {
+				words[i], known[i] = values[word]
+			}
+		}
+		operands := cpOperands(words, known)
+		if operands.ok {
+			for _, source := range operands.sources {
+				if isProtected(OperandPath(source, cwd)) {
+					found = true
+					return false
+				}
+			}
+		}
+		return true
+	})
+	return found
+}
+
 // actionInterpreterSSHName and actionInterpreterKeysName match the two
 // protected names of an authorized-keys path in inline interpreter code.
 // Code that names both and has an executable writer is a protected target
@@ -505,7 +650,8 @@ func actionInterpreterBuildsKeyPath(file *syntax.File, cwd, home string) bool {
 // binding rules place every write of home-call code on an ordinary path.
 func actionInterpreterKeyPathCode(code, language, cwd, home string) bool {
 	return actionInterpreterSSHName.MatchString(code) && actionInterpreterKeysName.MatchString(code) &&
-		actionInterpreterCodeWrites(code, language) && !actionInterpreterHomeWriteProved(code, language, cwd, home)
+		actionInterpreterCodeWrites(code, language) && !actionInterpreterHomeWriteProved(code, language, cwd, home) &&
+		!(language == "node" && nodeInertWriteData(code, cwd, home))
 }
 
 // actionInterpreterKind names the interpreter family of a program word:
@@ -2320,6 +2466,112 @@ func actionKnownReadOnlyShell(file *syntax.File, home string) bool {
 	return actionKnownReadOnlyShellDepth(file, home, 0)
 }
 
+// These readers consume file operands and have no file output in the proved
+// forms. Their options are checked together with redirects in the caller.
+func actionEnvReaderOnly(words []string, home string) bool {
+	if len(words) < 3 || words[1] != "-i" && words[1] != "--ignore-environment" {
+		return false
+	}
+	index := 2
+	if words[index] == "--" {
+		index++
+	}
+	if index >= len(words) {
+		return false
+	}
+	for _, option := range words[index+1:] {
+		if actionReadOptionMayWrite(option) {
+			return false
+		}
+	}
+	switch programBase(words[index]) {
+	case "cat", "head", "tail", "ls", "dir", "stat", "grep", "egrep", "fgrep",
+		"wc", "du", "readlink", "realpath", "cmp", "cut", "sha256sum", "sha512sum", "shasum":
+		return true
+	case "sed", "gsed":
+		return actionSedDisplaysOnly(words[index+1:])
+	case "git":
+		return actionGitDiffDisplaysOnly(words[index:], home)
+	}
+	return false
+}
+
+func actionSedDisplaysOnly(args []string) bool {
+	if len(args) == 0 {
+		return false
+	}
+	script, hasScript := "", false
+	for i := 0; i < len(args); i++ {
+		arg := args[i]
+		switch arg {
+		case "-n", "--quiet", "--silent", "-E", "-r":
+			continue
+		case "-e", "--expression":
+			i++
+			if i >= len(args) || !actionSedReadScript(args[i]) {
+				return false
+			}
+			hasScript = true
+			continue
+		case "--":
+			if i+1 >= len(args) {
+				return false
+			}
+			if !hasScript {
+				script = args[i+1]
+				hasScript = true
+			}
+			i = len(args)
+			continue
+		}
+		if strings.HasPrefix(arg, "-") {
+			return false
+		}
+		if !hasScript {
+			script = arg
+			hasScript = true
+		}
+	}
+	return hasScript && (script == "" || actionSedReadScript(script))
+}
+
+// A sed display script consists of addresses and print, delete or quit
+// commands. Other verbs can write a file or run a command.
+func actionSedReadScript(script string) bool {
+	if script == "" {
+		return false
+	}
+	for _, c := range script {
+		if !strings.ContainsRune("0123456789,$; \t\npPdDqQnNl=", c) {
+			return false
+		}
+	}
+	return true
+}
+
+func actionGitDiffDisplaysOnly(words []string, home string) bool {
+	if len(words) < 4 || programBase(words[0]) != "git" {
+		return false
+	}
+	index := 1
+	for index < len(words) && (words[index] == "--no-pager" || words[index] == "--no-optional-locks") {
+		index++
+	}
+	if index >= len(words) || words[index] != "diff" || actionGitDecision(words, home, home, 0, true) != "" {
+		return false
+	}
+	paths := 0
+	for _, word := range words[index+1:] {
+		if actionReadOptionMayWrite(word) || word == "--ext-diff" || word == "--textconv" {
+			return false
+		}
+		if !strings.HasPrefix(word, "-") {
+			paths++
+		}
+	}
+	return paths >= 2
+}
+
 func actionKnownReadOnlyShellDepth(file *syntax.File, home string, depth int) bool {
 	if depth >= 8 {
 		return false
@@ -2412,7 +2664,17 @@ func actionKnownReadOnlyShellDepth(file *syntax.File, home string, depth int) bo
 			// decision 2, TGT-0194; GAP-2168). So do the size and path
 			// readers: du reports sizes, readlink and realpath print a
 			// resolved name; none has an output option.
-			"grep", "egrep", "fgrep", "wc", "du", "readlink", "realpath":
+			"grep", "egrep", "fgrep", "wc", "du", "readlink", "realpath",
+			"cmp", "cut", "sha256sum", "sha512sum", "shasum":
+		case "sed", "gsed":
+			words, known := actionStaticWords(call.Args, home)
+			safe = known && actionSedDisplaysOnly(words[1:])
+		case "git":
+			words, known := actionStaticWords(call.Args, home)
+			safe = known && actionGitDiffDisplaysOnly(words, home)
+		case "env":
+			words, known := actionStaticWords(call.Args, home)
+			safe = known && actionEnvReaderOnly(words, home)
 		case "echo":
 			// The literal */* operand prints expanded names. Every other
 			// statement remains subject to the same read-only walk.

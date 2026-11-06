@@ -1222,6 +1222,9 @@ func ResolveConnector(connector, surface, event string, payload []byte) string {
 				fallback := input
 				fallback.Tool, fallback.Args, fallback.Command = "Bash", nil, command
 				fallbackFacts := actionfacts.Analyze(fallback)
+				if !protectedDecision {
+					protectedDecision = actionCopyProtectedKeysSource(fallbackFacts, command, cwd, home)
+				}
 				statementMoves, statementNoTarget = plainMoveDestinationsWithStatements(fallback, fallbackFacts)
 				facts.Paths = append(facts.Paths, fallbackFacts.Paths...)
 				truncated = truncated || fallbackFacts.Parse.Status == actionfacts.StatusLimitExceeded

@@ -1526,7 +1526,10 @@ func appendTrustedHomeResolvedSSHKeyWriteFinding(
 		return kept
 	}
 	commandText := strings.ToLower(input.Command)
+	protectedCopySource := trustedProtectedCopySource(request, facts)
 	request.OrdinaryKeyOperands = !request.StrictPolicy &&
+		request.ResolvedWriteTargets[hookpaths.ActionDecisionKey] != hookpaths.ProtectedTargetDecision &&
+		!protectedCopySource &&
 		(trustedOrdinaryKeyOperandRoles(request, input, facts) ||
 			trustedOrdinaryPatternRedirectRoles(request, input, facts))
 	overBudget, unresolved := false, false
@@ -1555,7 +1558,7 @@ func appendTrustedHomeResolvedSSHKeyWriteFinding(
 	}
 	if commandText != "" && !strings.Contains(commandText, "authorized_k") &&
 		!strings.Contains(commandText, "administrators_authorized") &&
-		!strings.Contains(commandText, "base64") && !symlinkWrite &&
+		!strings.Contains(commandText, "base64") && !symlinkWrite && !protectedCopySource &&
 		!trustedWindowsLocationAuthorizedKeysWriteWith(input, request.targetMemo) {
 		return appendTrustedCMDPrivateKeyReadFinding(
 			appendTrustedSSHPrivateKeyWriteFinding(findings, generation, request, facts),
@@ -1570,6 +1573,8 @@ func appendTrustedHomeResolvedSSHKeyWriteFinding(
 	}
 	if request.EnforcementCapable &&
 		(trustedAuthorizedKeysWriteProofWith(input, facts, symlinkWrite, clientGlobFacts(request), request.targetMemo, request.OrdinaryKeyOperands) ||
+			protectedCopySource ||
+			request.StrictPolicy && hookpaths.ActionInlineSSHKeyDataMention(input.Command, input.CWD, facts.ActiveHome) ||
 			trustedSandboxGuestAuthorizedKeysWrite(request)) {
 		_, rule, ok := trustedActionCatalogRule(generation, "persistence.ssh_authorized_keys_command")
 		if ok {

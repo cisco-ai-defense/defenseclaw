@@ -512,7 +512,10 @@ func TestHomeSpelledAuthorizedKeysWriteBlocks(t *testing.T) {
 		}
 		// These input and display roles are ordinary in the default pack.
 		// Keep their conservative mention finding in the strict pack.
-		strictOnly := slices.Contains([]string{"diff", "local copy", "mention", "echo path to report"}, test.name)
+		strictOnly := slices.Contains([]string{
+			"diff", "mention", "echo path to report",
+			"node write data path", "node append log text",
+		}, test.name)
 		if strictOnly {
 			balanced := dispatchTrustedAction(t.Context(), trustedActionRequest{
 				Input: input, LegacyText: string(args), Connector: connector,

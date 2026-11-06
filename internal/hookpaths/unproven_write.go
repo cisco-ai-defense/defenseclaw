@@ -60,7 +60,6 @@ var (
 	unprovenWriter          = lazyregexp.New(`\b(?:open|openSync|sysopen|FileIO|writeFile\w*|appendFile\w*|File\.write|File\.binwrite|IO\.write|write_text|write_bytes|copy\w*|createWriteStream|truncate|rename|replace|move|unlink|remove)\s*\(`)
 	safeNodeRead            = lazyregexp.New(`^require\(['"]fs['"]\)\.readFile(?:Sync)?\(['"][^'"]+['"](?:,\s*\(\)=>\{\})?\)$`)
 	safeNodeCopy            = lazyregexp.New(`^require\(['"]fs['"]\)\.copyFile(?:Sync)?\(['"][^'"]+['"],\s*['"]([^'"]+)['"](?:,\s*\(\)=>\{\})?\)$`)
-	safeNodeWriteData       = lazyregexp.New(`^require\(['"]fs['"]\)\.(?:writeFileSync|appendFileSync)\((['"][^'"]+['"]),\s*(['"][^'"]+['"])\)$`)
 	safePythonRead          = lazyregexp.New(`^(?:import io;\s*)?(?:io\.)?(?:FileIO|open)\(['"][^'"]+['"],\s*['"]r['"]\)\.read\(\)$`)
 	safePythonOSRead        = lazyregexp.New(`^import os;\s*os\.open\((['"][^'"]+['"]),\s*os\.O_RDONLY\)$`)
 	safePythonOpenWrite     = lazyregexp.New(`^open\(`)
@@ -1120,11 +1119,7 @@ func interpreterProtectedUseSafe(code, language, cwd, home string) bool {
 		if match := safeNodeCopy.FindStringSubmatch(code); match != nil {
 			return !protectedReachPath(OperandPath(match[1], cwd), newProtectedFiles(home), filepath.Join(home, ".ssh"))
 		}
-		if match := safeNodeWriteData.FindStringSubmatch(code); match != nil {
-			destination, ok := literalString(match[1])
-			_, dataOK := literalString(match[2])
-			return ok && dataOK && !protectedReachPath(OperandPath(destination, cwd), newProtectedFiles(home), filepath.Join(home, ".ssh"))
-		}
+		return nodeInertWriteData(code, cwd, home)
 	case "ruby":
 		return safeRubyRead.MatchString(code) || safeRubyOpenRead.MatchString(code)
 	case "perl":

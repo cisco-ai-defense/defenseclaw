@@ -72,7 +72,7 @@ var hp4Rows = []struct{ name, command, want string }{
 	{"0314-allow-ls-dirlink", "ls -l sshlink/", "allow"},
 	{"0314-allow-cat-link", "cat keylink", "allow"},
 	{"0314-allow-read-link-to-file", "cat keylink > out.txt", ""},
-	{"0314-allow-cp-from-link", "cp keylink out.txt", ""},
+	{"0314-cp-from-link", "cp keylink out.txt", "block"},
 	// GAP-0315: a brace word past the field cap.
 	{"0315-brace-cap-touch", "touch ../.ssh/authorized_key{s,{1..300}}", "block"},
 	{"0315-brace-cap-touch-home", "touch ~/.ssh/authorized_key{s,{1..300}}", "block"},
@@ -106,9 +106,10 @@ func TestGAP0311To0315KeysWritesEveryMode(t *testing.T) {
 				t.Fatal(err)
 			}
 			call.verdict, call.body = f.serve(call)
-			t.Logf("HP4ROW %s | %s | want %s", call.name, call.verdict, row.want)
-			if row.want != "" && call.verdict != row.want {
-				t.Errorf("%s: verdict %s, want %s; body %.160s", call.name, call.verdict, row.want, call.body)
+			want := row.want
+			t.Logf("HP4ROW %s | %s | want %s", call.name, call.verdict, want)
+			if want != "" && call.verdict != want {
+				t.Errorf("%s: verdict %s, want %s; body %.160s", call.name, call.verdict, want, call.body)
 			}
 		}
 		if err := os.Chmod(f.homes, 0o700); err != nil {
