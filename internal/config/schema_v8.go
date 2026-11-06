@@ -63,6 +63,20 @@ type V8SchemaError struct {
 	// schema's order, so a message can name them (GAP-0498).
 	Missing []string
 	Version int
+	// RetiredVersion and RetiredReplacement identify a key an earlier config
+	// migration moved. They are set only for an undeclared key at its exact path.
+	RetiredVersion     int
+	RetiredReplacement string
+}
+
+// RetiredKeyMessage names the earlier version and replacement for a retired
+// key. It is empty for an undeclared key the migrations do not recognize.
+func (e *V8SchemaError) RetiredKeyMessage() (string, bool) {
+	if e == nil || e.Keyword != "additionalProperties" || e.RetiredVersion == 0 || e.RetiredReplacement == "" {
+		return "", false
+	}
+	return fmt.Sprintf("%s was retired in config_version %d; use %s",
+		strings.TrimPrefix(e.Path, "$."), e.RetiredVersion, e.RetiredReplacement), true
 }
 
 // EnumChoices returns the values an enum violation allows, in the schema's
@@ -100,7 +114,11 @@ func (e *V8SchemaError) Error() string {
 			source += ":" + strconv.Itoa(e.Column)
 		}
 	}
+	retired, isRetired := e.RetiredKeyMessage()
 	if e.Version >= 9 {
+		if isRetired {
+			return fmt.Sprintf("config_version %d: %s; see defenseclaw config reference --format json-schema.", e.Version, retired)
+		}
 		key := strings.TrimPrefix(e.Path, "$.")
 		key = regexp.MustCompile(`\[[^]]+\]`).ReplaceAllString(key, "")
 		if key == "" || key == "$" {
@@ -114,6 +132,9 @@ func (e *V8SchemaError) Error() string {
 			message += "; did you mean " + e.Suggestion + "?"
 		}
 		return message + "; see defenseclaw config reference --format json-schema."
+	}
+	if isRetired {
+		return source + ": [config_schema_invalid] " + retired
 	}
 	message := fmt.Sprintf("%s: [config_schema_invalid]", source)
 	if e.Path != "" {
@@ -187,7 +208,15 @@ func validateV8Schema(source string, document *V8YAMLDocument) error {
 			path = v8YAMLChildPath(path, unknown)
 		}
 		node := v8SchemaYAMLNode(document.Document, leaf.InstanceLocation, unknown)
-		expected, suggestion := v8SchemaExpectation(leaf, unknown)
+		retiredReplacement := ""
+		if unknown != "" && keyword == "additionalProperties" {
+			parts := append(v8SchemaPointerSegments(leaf.InstanceLocation), unknown)
+			retiredReplacement = legacyV7RetiredReplacement(parts)
+		}
+		expected, suggestion := "", ""
+		if retiredReplacement == "" {
+			expected, suggestion = v8SchemaExpectation(leaf, unknown)
+		}
 		if v8SchemaDocumentVersion(document) >= 9 && expected == "the canonical v8 field contract" {
 			expected = "a valid value for this setting"
 		}
@@ -205,6 +234,10 @@ func validateV8Schema(source string, document *V8YAMLDocument) error {
 			Summary:       "configuration violates the " + keyword + " constraint",
 			Action:        action,
 			Version:       v8SchemaDocumentVersion(document),
+		}
+		if retiredReplacement != "" {
+			result.RetiredVersion = 8
+			result.RetiredReplacement = retiredReplacement
 		}
 		if key := v8SchemaUnknownKeyNode(document.Document, leaf.InstanceLocation, unknown); key != nil {
 			// The line of the key itself: an unknown section's value
@@ -484,38 +517,7 @@ func v8SchemaExpectation(validation *jsonschema.ValidationError, unknown string)
 		location = validation.KeywordLocation
 	}
 	properties := v8SchemaSiblingProperties(location)
-	if home, removed := v8RemovedTopLevelPathKeys[unknown]; removed && len(v8SchemaPointerSegments(validation.InstanceLocation)) == 0 {
-		return "a declared field name (" + v8MovedKeyNote + ")", home
-	}
 	return "a declared field name", v8SchemaNearestName(unknown, properties)
-}
-
-// v8RemovedTopLevelPathKeys are the 0.8.x (config_version 7) store paths that
-// config_version 8 moved under observability.local. The schema refuses them
-// at the top level; the refusal names where the path now goes.
-var v8RemovedTopLevelPathKeys = map[string]string{
-	"audit_db":        "observability.local.path",
-	"judge_bodies_db": "observability.local.judge_bodies_path",
-}
-
-const v8MovedKeyNote = "config_version 8 moved this key"
-
-// MovedKeyHint is what every refusal of a top-level 0.8.x store-path key
-// (audit_db, judge_bodies_db) adds after "is an unknown setting": the key that
-// replaced it. config validate and config migrate name it through Error()
-// ("did you mean ..."), and the managed ensure and validate refusals on
-// Linux, macOS and Windows add this hint, so every path names the same key
-// (rel-1-0-6 GAP-0188). ok is false for any other error, including a nested
-// key of the same name.
-func (e *V8SchemaError) MovedKeyHint() (hint string, ok bool) {
-	if e == nil || e.Keyword != "additionalProperties" {
-		return "", false
-	}
-	home, removed := v8RemovedTopLevelPathKeys[strings.TrimPrefix(e.Path, "$.")]
-	if !removed || e.Suggestion != home {
-		return "", false
-	}
-	return "it moved to " + home, true
 }
 
 // v8SchemaKeywordValue is the value of the schema keyword validation failed
