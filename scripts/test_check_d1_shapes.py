@@ -104,6 +104,18 @@ class D1ShapeScrubTest(unittest.TestCase):
             manifest.write_text("".join(f"{row['id']}\t{payload_digest(row)}\n" for row in rows), encoding="utf-8")
             self.assertIn("unreviewed public vocabulary", check(corpus, manifest))
 
+    def test_new_tool_argument_name_requires_review(self):
+        from scripts.check_d1_shapes import payload_digest
+
+        rows = [json.loads(line) for line in CORPUS.read_text(encoding="utf-8").splitlines()]
+        rows[0]["args"]["novelhostlabel"] = "sample"
+        with TemporaryDirectory() as temporary:
+            corpus = Path(temporary) / "d1.jsonl"
+            manifest = Path(temporary) / "approved.tsv"
+            write_rows(corpus, rows)
+            manifest.write_text("".join(f"{row['id']}\t{payload_digest(row)}\n" for row in rows), encoding="utf-8")
+            self.assertIn("unreviewed public vocabulary", check(corpus, manifest))
+
 
 if __name__ == "__main__":
     unittest.main()
