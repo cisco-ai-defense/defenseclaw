@@ -7,6 +7,7 @@
 package enterprisehooks
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -16,6 +17,8 @@ import (
 	"strings"
 	"syscall"
 	"time"
+
+	"github.com/defenseclaw/defenseclaw/internal/managed"
 )
 
 // UnixOpenCodeServicePortsFileName is the guardian's root-only record of the
@@ -41,6 +44,12 @@ type unixOpenCodeServicePortsFile struct {
 	Contested []UnixOpenCodeContestedPort `json:"contested,omitempty"`
 	// Cleared logs every administrator clear of a contested mark.
 	Cleared []UnixOpenCodeContestCleared `json:"contested_cleared,omitempty"`
+	// ImportDone records that the import pass committed this record
+	// (REVIEW-gx053-12): the record, bindings and marks are committed before
+	// any user file is rewritten, so a record that exists never reopens the
+	// import window. A record an earlier round wrote has no flag and counts
+	// as done.
+	ImportDone bool `json:"import_done,omitempty"`
 }
 
 // UnixOpenCodeServicePortUnknown is one account the last pass could not read
@@ -81,12 +90,15 @@ type UnixOpenCodeServicePort struct {
 // build without one, or an administrator's rebuild): only that pass imports
 // ports from users' files.
 type UnixOpenCodeServicePortsState struct {
-	Exists    bool
-	Ports     map[int]int
-	Users     map[int]string
-	Unknown   []UnixOpenCodeServicePortUnknown
-	Contested []UnixOpenCodeContestedPort
-	Cleared   []UnixOpenCodeContestCleared
+	Exists bool
+	// ImportDone: the record was committed by an import pass (or an earlier
+	// build: a record that exists is done).
+	ImportDone bool
+	Ports      map[int]int
+	Users      map[int]string
+	Unknown    []UnixOpenCodeServicePortUnknown
+	Contested  []UnixOpenCodeContestedPort
+	Cleared    []UnixOpenCodeContestCleared
 }
 
 // LoadUnixOpenCodeServicePorts reads the record at path (none: empty).
@@ -143,6 +155,7 @@ func LoadUnixOpenCodeServicePortsFull(path string) (UnixOpenCodeServicePortsStat
 		}
 	}
 	state.Unknown, state.Cleared = record.Unknown, record.Cleared
+	state.ImportDone = true // the flag, or a record an earlier round wrote
 	for _, entry := range record.Contested {
 		if entry.Port > 0 && entry.Port <= 65535 {
 			state.Contested = append(state.Contested, entry)
@@ -164,7 +177,7 @@ func WriteUnixOpenCodeServicePortsFull(path string, state UnixOpenCodeServicePor
 	if !filepath.IsAbs(path) {
 		return fmt.Errorf("enterprise hooks: OpenCode service ports path must be absolute: %s", path)
 	}
-	record := unixOpenCodeServicePortsFile{Version: 1, Ports: []UnixOpenCodeServicePort{}}
+	record := unixOpenCodeServicePortsFile{Version: 1, Ports: []UnixOpenCodeServicePort{}, ImportDone: true}
 	for uid, port := range state.Ports {
 		record.Ports = append(record.Ports, UnixOpenCodeServicePort{UID: uid, User: state.Users[uid], Port: port})
 	}
@@ -178,7 +191,69 @@ func WriteUnixOpenCodeServicePortsFull(path string, state UnixOpenCodeServicePor
 	if err != nil {
 		return err
 	}
-	return writeUnixRootOnlyRecord(path, append(data, '\n'), ".defenseclaw-opencode-ports-*.new", unixOpenCodeServicePortsMaxBytes)
+	// Atomic commit: a temp file in the same folder, fsync, rename
+	// (writeUnixRootOnlyRecord), then fsync the folder so the rename is on
+	// disk before any user file is rewritten.
+	if err := writeUnixRootOnlyRecord(path, append(data, '\n'), ".defenseclaw-opencode-ports-*.new", unixOpenCodeServicePortsMaxBytes); err != nil {
+		return err
+	}
+	return syncUnixDir(filepath.Dir(path))
+}
+
+func syncUnixDir(dir string) error {
+	f, err := os.Open(dir)
+	if err != nil {
+		return err
+	}
+	defer f.Close()
+	return f.Sync()
+}
+
+// LockUnixGuardianReconcile takes the hook guardian's reconcile lock
+// (managed.HookGuardianReconcileLockFile in dir, the folder of the record), an
+// exclusive flock, waiting up to wait. A guardian pass holds it for its whole
+// read, plan, commit and rewrite; an administrator's change to the record
+// takes the same lock, so the two never interleave (REVIEW-gx053-12 MF2).
+func LockUnixGuardianReconcile(ctx context.Context, dir string, wait time.Duration) (func(), error) {
+	path := filepath.Join(dir, managed.HookGuardianReconcileLockFile)
+	file, err := os.OpenFile(path, os.O_RDWR|os.O_CREATE|syscall.O_NOFOLLOW, 0o600)
+	if err != nil {
+		return nil, fmt.Errorf("open the hook guardian reconcile lock %s: %w", path, err)
+	}
+	deadline := time.Now().Add(wait)
+	for {
+		err := syscall.Flock(int(file.Fd()), syscall.LOCK_EX|syscall.LOCK_NB)
+		if err == nil {
+			break
+		}
+		if !errors.Is(err, syscall.EWOULDBLOCK) || time.Now().After(deadline) {
+			_ = file.Close()
+			return nil, fmt.Errorf("another reconcile holds %s: %w", path, err)
+		}
+		select {
+		case <-ctx.Done():
+			_ = file.Close()
+			return nil, ctx.Err()
+		case <-time.After(20 * time.Millisecond):
+		}
+	}
+	return func() {
+		_ = syscall.Flock(int(file.Fd()), syscall.LOCK_UN)
+		_ = file.Close()
+	}, nil
+}
+
+// ClearUnixOpenCodeContestedPortLocked is ClearUnixOpenCodeContestedPort
+// under the guardian's reconcile lock: the read, the change, the atomic
+// commit and the log entry happen while no guardian pass runs, so a pass
+// never undoes the clear (REVIEW-gx053-12 MF2).
+func ClearUnixOpenCodeContestedPortLocked(path string, port int, by string, now time.Time, wait time.Duration) ([]int, error) {
+	unlock, err := LockUnixGuardianReconcile(context.Background(), filepath.Dir(filepath.Clean(path)), wait)
+	if err != nil {
+		return nil, err
+	}
+	defer unlock()
+	return ClearUnixOpenCodeContestedPort(path, port, by, now)
 }
 
 // ClearUnixOpenCodeContestedPort removes the contested mark of port from the
