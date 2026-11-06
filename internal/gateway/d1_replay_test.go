@@ -229,8 +229,9 @@ func TestD1StrictArchiveShape(t *testing.T) {
 		cfg.Guardrail.RulePack = "strict"
 		api := &APIServer{scannerCfg: cfg, health: NewSidecarHealth()}
 		for _, managed := range []bool{false, true} {
-			if got := d1Evaluate(t, api, row, connector, managed, home, cwd); got.Decision != "block" {
-				t.Errorf("D1 strict %s managed=%t: got %s, want block", connector, managed, got.Decision)
+			got := d1Evaluate(t, api, row, connector, managed, home, cwd)
+			if got.Decision != "block" || got.RuleID != "persistence.ssh_authorized_keys_command" {
+				t.Errorf("D1 strict %s managed=%t: got %s (%s), want the archive block", connector, managed, got.Decision, got.RuleID)
 			}
 		}
 	}
