@@ -249,7 +249,6 @@ def test_config_set_refuses_enabled_proxy_in_final_multi_roster(
         ("kiro", "  connector: kiro\n  connectors:\n    kiro: {}\n", "guardrail.connectors.kiro.hook_fail_mode", "closed"),
         ("openclaw", "  connector: openclaw\n  connectors:\n    openclaw: {}\n", "guardrail.connectors.openclaw.hook_fail_mode", "closed"),
         ("kiro", "  connector: kiro\n  connectors:\n    kiro: {}\n", "guardrail.connectors.openclaw.enabled", "false"),
-        ("openclaw", "  connector: openclaw\n  connectors:\n    openclaw:\n      enabled: false\n", "guardrail.connectors.kiro.hook_fail_mode", "closed"),
     ],
 )
 def test_config_set_valid_roster_remains_allowed(
@@ -397,6 +396,75 @@ def test_config_unset_keeps_primary_with_existing_roster(tmp_path: Path) -> None
     assert result.exit_code != 0
     assert "connector selection requires setup" in result.output
     assert after == before
+
+
+@pytest.mark.parametrize(
+    ("roster", "keys"),
+    [
+        (
+            "  connector: kiro\n  connectors:\n    kiro: {}\n    codex:\n      enabled: false\n",
+            ("guardrail.connectors.kiro", "guardrail.connectors.codex.enabled"),
+        ),
+        (
+            "  connector: kiro\n  connectors:\n    codex:\n      enabled: false\n",
+            ("guardrail.connector",),
+        ),
+        (
+            "  connector: codex\n  connectors:\n    codex:\n      enabled: false\n",
+            ("guardrail.connectors.codex.enabled",),
+        ),
+    ],
+)
+def test_config_unset_rejects_selection_or_enable_change_without_retained_enabled_entry(
+    tmp_path: Path, roster: str, keys: tuple[str, ...]
+) -> None:
+    app = _app(tmp_path, ["kiro"])
+    result, before, after = _unset_in_file(tmp_path, app, roster, *keys)
+    assert result.exit_code != 0
+    assert "connector selection requires setup" in result.output
+    assert after == before
+
+
+@pytest.mark.parametrize(
+    ("roster", "key", "value"),
+    [
+        (
+            "  connectors:\n    kiro:\n      enabled: false\n",
+            "guardrail.connectors.codex.hook_fail_mode", "closed",
+        ),
+        (
+            "  connector: openclaw\n  connectors:\n    openclaw:\n      enabled: false\n",
+            "guardrail.connectors.kiro.hook_fail_mode", "closed",
+        ),
+        (
+            "  connector: claudecode\n  connectors:\n    claudecode: {}\n",
+            "guardrail.connector", "claude",
+        ),
+        (
+            "  connector: claudecode\n  connectors:\n    claudecode: {}\n",
+            "guardrail.connectors.claude.hook_fail_mode", "closed",
+        ),
+    ],
+)
+def test_config_set_uses_runtime_connector_names_and_selection(
+    tmp_path: Path, roster: str, key: str, value: str
+) -> None:
+    app = _app(tmp_path, ["kiro"])
+    result, before, after = _set_in_file(tmp_path, app, roster, key, value)
+    assert result.exit_code != 0
+    assert "connector selection requires setup" in result.output
+    assert after == before
+
+
+def test_config_unset_removed_disabled_entry_keeps_selection(tmp_path: Path) -> None:
+    app = _app(tmp_path, ["kiro"])
+    roster = (
+        "  connector: kiro\n  connectors:\n    kiro: {}\n"
+        "    codex:\n      enabled: false\n"
+    )
+    result, before, after = _unset_in_file(tmp_path, app, roster, "guardrail.connectors.codex")
+    assert result.exit_code == 0, result.output
+    assert after != before
 
 
 def test_config_unset_disabled_hook_setting_stays_available(tmp_path: Path) -> None:
