@@ -647,6 +647,8 @@ type actionWindowsResolvedSpan struct {
 func actionWindowsResolvedSpans(words []string, cwd, home string) []actionWindowsResolvedSpan {
 	values := make(map[string]string)
 	var spans []actionWindowsResolvedSpan
+	effectiveCWD := cwd
+	var directoryStack []string
 	for start := 0; start < len(words); {
 		end := start
 		for end < len(words) && words[end] != ";" && words[end] != "|" && words[end] != "||" && words[end] != "&" && words[end] != "&&" {
@@ -654,6 +656,32 @@ func actionWindowsResolvedSpans(words []string, cwd, home string) []actionWindow
 		}
 		if end > start {
 			statement := words[start:end]
+			// PowerShell accepts an assignment with no blanks around '='.
+			// The word scanner keeps that spelling in one token.
+			name, value, attached := strings.Cut(statement[0], "=")
+			if attached && strings.HasPrefix(name, "$") &&
+				actionWindowsEnvAssignment(strings.TrimPrefix(name, "$")+"=x") {
+				if len(statement) == 1 && value != "" && !strings.ContainsAny(value, "$%`") {
+					values[strings.ToLower(name)] = value
+					start = end + 1
+					continue
+				}
+				if len(statement) == 3 && strings.EqualFold(value, "Join-Path") {
+					parent := statement[1]
+					if known, ok := values[strings.ToLower(parent)]; ok {
+						parent = known
+					}
+					child := statement[2]
+					if !strings.HasPrefix(child, "/") && !actionWindowsHome(child) &&
+						!strings.ContainsAny(child, "$%`*?[]") {
+						if joined, ok := actionWindowsPath(parent+"/"+child, effectiveCWD, home); ok {
+							values[strings.ToLower(name)] = joined
+						}
+					}
+					start = end + 1
+					continue
+				}
+			}
 			if len(statement) == 3 && strings.HasPrefix(statement[0], "$") && statement[1] == "=" &&
 				!strings.ContainsAny(statement[2], "$%`") {
 				values[strings.ToLower(statement[0])] = statement[2]
@@ -671,7 +699,7 @@ func actionWindowsResolvedSpans(words []string, cwd, home string) []actionWindow
 				child := statement[4]
 				if !strings.HasPrefix(child, "/") && !actionWindowsHome(child) &&
 					!strings.ContainsAny(child, "$%`*?[]") {
-					if joined, known := actionWindowsPath(parent+"/"+child, cwd, home); known {
+					if joined, known := actionWindowsPath(parent+"/"+child, effectiveCWD, home); known {
 						values[key] = joined
 					}
 				}
@@ -684,6 +712,7 @@ func actionWindowsResolvedSpans(words []string, cwd, home string) []actionWindow
 				}
 			}
 			spans = append(spans, actionWindowsResolvedSpan{words: statement, start: start, end: end})
+			actionWindowsAdvanceDirectory(statement, home, &effectiveCWD, &directoryStack)
 		}
 		start = end + 1
 	}

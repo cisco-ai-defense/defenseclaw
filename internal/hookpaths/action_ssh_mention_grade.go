@@ -51,7 +51,7 @@ func sshKeyMentionGrade(command, cwd, home string, depth int, context *actionSSH
 func sshKeyMentionGradeUncached(command, cwd, home string, depth int, context *actionSSHGradeContext) string {
 	possible := actionPOSIXCopyMayVary(command, home)
 	displayOnly := ProvedDisplayOnlyHereString(command) || actionReadOnlyNestedShellPattern(command, home) ||
-		ProvedReadOnlyPOSIXCommand(command, home)
+		ProvedReadOnlyPOSIXCommand(command, home) || actionGradeReadOnlyPOSIXCommand(command, home)
 	memo := context.memo
 	if actionNamedPOSIXWrite(command, cwd, home, depth, context) {
 		return ProtectedTargetDecision
@@ -97,7 +97,7 @@ func sshKeyMentionGradeUncached(command, cwd, home string, depth int, context *a
 				}
 			}
 		}
-		if actionWindowsInvokedTextMention(scan.words, cwd, home, 0, false, memo) {
+		if !displayOnly && actionWindowsInvokedTextMention(scan.words, cwd, home, 0, false, memo) {
 			return ProtectedTargetDecision
 		}
 		check := func(word, dir string, consumed, readOnly bool) bool {
@@ -172,10 +172,15 @@ func sshKeyMentionGradeUncached(command, cwd, home string, depth int, context *a
 // Follow a fixed shell body with the same bounded grade reader. The Windows
 // word scanner keeps the body as one word, including its own separators.
 func actionFixedPOSIXShellBody(words []string) (string, bool) {
-	if len(words) == 4 && programBase(words[0]) == "env" {
-		words = words[1:]
+	if len(words) > 0 && programBase(words[0]) == "env" {
+		index := 1
+		for index < len(words) && (words[index] == "-i" || words[index] == "--ignore-environment" || words[index] == "--") {
+			index++
+		}
+		words = words[index:]
 	}
-	if len(words) != 3 || !posixShellProgram(programBase(words[0])) || words[1] != "-c" ||
+	if len(words) != 3 || !posixShellProgram(programBase(words[0])) ||
+		words[1] != "-c" && words[1] != "-lc" ||
 		strings.ContainsAny(words[2], "\x00\r\n") {
 		return "", false
 	}
@@ -185,25 +190,122 @@ func actionFixedPOSIXShellBody(words []string) (string, bool) {
 // A child shell whose fixed body is entirely read-only contributes only a
 // possible path mention. Each surrounding statement is graded separately.
 func actionReadOnlyFixedPOSIXShellBody(words []string, home string) bool {
+	return actionReadOnlyFixedPOSIXShellBodyAtDepth(words, home, 0)
+}
+
+func actionReadOnlyFixedPOSIXShellBodyAtDepth(words []string, home string, depth int) bool {
 	if os.Getenv("BASH_ENV") != "" {
 		return false
 	}
 	body, ok := actionFixedPOSIXShellBody(words)
-	if len(words) == 4 && programBase(words[0]) == "env" {
-		words = words[1:]
+	if len(words) > 0 && programBase(words[0]) == "env" {
+		index := 1
+		for index < len(words) && (words[index] == "-i" || words[index] == "--ignore-environment" || words[index] == "--") {
+			index++
+		}
+		words = words[index:]
 	}
-	if !ok || programBase(words[0]) != "bash" || body == "" ||
+	if !ok || programBase(words[0]) != "bash" || words[1] != "-c" || body == "" ||
 		strings.ContainsAny(body, "$`\\%!^'\r\n") {
 		return false
 	}
 	child, parsed := parseShell(body)
-	return parsed && actionKnownReadOnlyShell(child, home)
+	return parsed && actionGradeReadOnlyPOSIXFile(child, home, depth+1)
+}
+
+// Keep the display proof bounded and structural. A fixed child body may be
+// surrounded by shell control statements, but every reached command must
+// still be a known reader before the whole command is display-only.
+func actionGradeReadOnlyPOSIXCommand(command, home string) bool {
+	if os.Getenv("BASH_ENV") != "" || !strings.Contains(command, "*/*") {
+		return false
+	}
+	file, parsed := parseShell(command)
+	return parsed && actionGradeReadOnlyPOSIXFile(file, home, 0)
+}
+
+func actionGradeReadOnlyPOSIXFile(file *syntax.File, home string, depth int) bool {
+	if depth >= 8 || len(file.Stmts) == 0 || len(file.Stmts) > 128 {
+		return false
+	}
+	var walk func(*syntax.Stmt, int) bool
+	var walkList func([]*syntax.Stmt, int) bool
+	walkList = func(stmts []*syntax.Stmt, level int) bool {
+		for _, stmt := range stmts {
+			if !walk(stmt, level) {
+				return false
+			}
+		}
+		return true
+	}
+	walk = func(stmt *syntax.Stmt, level int) bool {
+		if stmt == nil || level >= 8 || stmt.Background || stmt.Coprocess || stmt.Negated {
+			return false
+		}
+		for _, redirect := range stmt.Redirs {
+			if !actionDiscardRedirect(redirect, home) {
+				return false
+			}
+		}
+		switch cmd := stmt.Cmd.(type) {
+		case *syntax.CallExpr:
+			if len(cmd.Assigns) != 0 || len(cmd.Args) == 0 {
+				return false
+			}
+			if actionKnownReadOnlyShell(&syntax.File{Stmts: []*syntax.Stmt{stmt}}, home) {
+				return true
+			}
+			program, known := StaticWord(cmd.Args[0], home)
+			if !known {
+				return false
+			}
+			if programBase(program) == "bash" || programBase(program) == "env" {
+				words := make([]string, 0, len(cmd.Args))
+				for _, arg := range cmd.Args {
+					word, fixed := StaticWord(arg, home)
+					if !fixed {
+						return false
+					}
+					words = append(words, word)
+				}
+				return actionReadOnlyFixedPOSIXShellBodyAtDepth(words, home, level)
+			}
+			switch programBase(program) {
+			case "pwd", "true", ":":
+				return len(cmd.Args) == 1
+			case "cd":
+				if len(cmd.Args) == 2 {
+					destination, fixed := StaticWord(cmd.Args[1], home)
+					return fixed && destination == "."
+				}
+			}
+		case *syntax.BinaryCmd:
+			return walk(cmd.X, level+1) && walk(cmd.Y, level+1)
+		case *syntax.Subshell:
+			return walkList(cmd.Stmts, level+1)
+		case *syntax.Block:
+			return walkList(cmd.Stmts, level+1)
+		case *syntax.IfClause:
+			if !walkList(cmd.Cond, level+1) || !walkList(cmd.Then, level+1) {
+				return false
+			}
+			for next := cmd.Else; next != nil; next = next.Else {
+				if !walkList(next.Cond, level+1) || !walkList(next.Then, level+1) {
+					return false
+				}
+			}
+			return true
+		}
+		return false
+	}
+	return walkList(file.Stmts, depth)
 }
 
 // Resolve fixed write targets across POSIX statement bodies while retaining
 // scalar and directory state. Uncertain operands keep the possible grade.
 func actionNamedPOSIXWrite(command, cwd, home string, depth int, context *actionSSHGradeContext) bool {
-	if !strings.Contains(command, ">") && !strings.Contains(command, "-c") {
+	if !strings.Contains(command, ">") && !strings.Contains(command, "-c") &&
+		!strings.Contains(strings.ToLower(command), "cp") {
 		return false
 	}
 	file, parsed := parseShell(command)
@@ -246,6 +348,10 @@ func actionNamedPOSIXWrite(command, cwd, home string, depth int, context *action
 		case *syntax.CallExpr:
 			current.values["PWD"] = current.cwd
 			actionUpdateValues(stmt, current.values, current.cwd, home)
+			if target, known := actionKnownPOSIXCopyCallTarget(cmd, current.values, current.cwd, home); known &&
+				actionNamedSSHKeyPath(target, current.cwd, home, context.memo) {
+				return true
+			}
 			if body, ok := actionPOSIXShellCallBody(cmd, current.values, current.cwd, home); ok &&
 				sshKeyMentionGrade(body, current.cwd, home, depth+1, context) == ProtectedTargetDecision {
 				return true
@@ -262,6 +368,15 @@ func actionNamedPOSIXWrite(command, cwd, home string, depth int, context *action
 			return walkList(cmd.Stmts, &child, level+1)
 		case *syntax.Block:
 			return walkList(cmd.Stmts, current, level+1)
+		case *syntax.IfClause:
+			if walkList(cmd.Cond, current, level+1) || walkList(cmd.Then, current, level+1) {
+				return true
+			}
+			for next := cmd.Else; next != nil; next = next.Else {
+				if walkList(next.Cond, current, level+1) || walkList(next.Then, current, level+1) {
+					return true
+				}
+			}
 		}
 		return false
 	}
@@ -294,12 +409,19 @@ func actionNamedSSHKeyPath(target, cwd, home string, memo *TargetMemo) bool {
 
 func actionPOSIXShellCallBody(call *syntax.CallExpr, values actionValues, cwd, home string) (string, bool) {
 	args := call.Args
-	if len(args) == 4 {
+	if len(args) > 0 {
 		program, known := actionWordValue(args[0], values, cwd, home)
-		if !known || programBase(program) != "env" {
-			return "", false
+		if known && programBase(program) == "env" {
+			index := 1
+			for index < len(args) {
+				option, fixed := StaticWord(args[index], home)
+				if !fixed || option != "-i" && option != "--ignore-environment" && option != "--" {
+					break
+				}
+				index++
+			}
+			args = args[index:]
 		}
-		args = args[1:]
 	}
 	if len(args) != 3 {
 		return "", false
@@ -309,10 +431,33 @@ func actionPOSIXShellCallBody(call *syntax.CallExpr, values actionValues, cwd, h
 		return "", false
 	}
 	option, known := StaticWord(args[1], home)
-	if !known || option != "-c" {
+	if !known || option != "-c" && option != "-lc" {
 		return "", false
 	}
 	return actionWordValue(args[2], values, cwd, home)
+}
+
+func actionKnownPOSIXCopyCallTarget(call *syntax.CallExpr, values actionValues, cwd, home string) (string, bool) {
+	if len(call.Args) < 2 || len(call.Assigns) != 0 {
+		return "", false
+	}
+	program, known := StaticWord(call.Args[0], home)
+	if !known || programBase(program) != "cp" && programBase(program) != "gcp" {
+		return "", false
+	}
+	if target, known := actionPosixCopyVariableTarget(call, values, cwd, home); known {
+		return target, true
+	}
+	args := make([]string, 0, len(call.Args)-1)
+	for _, word := range call.Args[1:] {
+		value, known := actionWordValue(word, values, cwd, home)
+		if !known || strings.ContainsAny(value, "\x00 \t\n") {
+			return "", false
+		}
+		args = append(args, value)
+	}
+	parsed := cpOperands(args, makeStatic(len(args)))
+	return parsed.destination, parsed.ok
 }
 
 // The grade reader uses Windows lexical paths even when its POSIX reading
