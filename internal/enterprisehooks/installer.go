@@ -651,6 +651,7 @@ func Install(ctx context.Context, opts InstallOptions) (InstallResult, error) {
 			previousLockEntry := connector.LoadHookContractLockEntry(dataDir, conn.Name())
 			var beforeSetup dataDirSnapshot
 			var beforeHookConfigs hookConfigSnapshot
+			var beforeToken *connector.HookAPITokenInstallSnapshot
 			rollback := func(cause error) error {
 				failures := []error{cause}
 				// A Secure Client macOS target that was protected keeps its
@@ -671,11 +672,19 @@ func Install(ctx context.Context, opts InstallOptions) (InstallResult, error) {
 				// Setup that failed on an unparseable config, whose
 				// teardown fails the same way).
 				if teardownErr == nil || beforeHookConfigs.unchanged() {
-					if residueErr := beforeSetup.removeAdded(); residueErr != nil {
+					if tokenErr := beforeToken.RestoreIfPublished(); tokenErr != nil {
+						failures = append(failures, fmt.Errorf("enterprise hooks: connector %s rollback token restore failed: %w", conn.Name(), tokenErr))
+					} else if residueErr := beforeSetup.removeAdded(); residueErr != nil {
 						failures = append(failures, fmt.Errorf("enterprise hooks: connector %s rollback left files in %s: %w", conn.Name(), dataDir, residueErr))
 					}
 				}
 				return errors.Join(failures...)
+			}
+			if requiresScopedHookToken && !secureClient {
+				beforeToken, err = connector.SnapshotHookAPITokenForInstall(dataDir, conn.Name(), setupOpts.HookAPIToken)
+				if err != nil {
+					return fmt.Errorf("enterprise hooks: snapshot connector-scoped hook token: %w", err)
+				}
 			}
 			// A rollback removes what Setup adds below the data directory
 			// (GAP-0509).
@@ -695,6 +704,9 @@ func Install(ctx context.Context, opts InstallOptions) (InstallResult, error) {
 					// It registered nothing, so no teardown: one would take
 					// back a previous install's registration and the shims
 					// every connector shares. The files it added go.
+					if tokenErr := beforeToken.RestoreIfPublished(); tokenErr != nil {
+						return errors.Join(cause, fmt.Errorf("enterprise hooks: connector %s rollback token restore failed: %w", conn.Name(), tokenErr))
+					}
 					if residueErr := beforeSetup.removeAdded(); residueErr != nil {
 						return errors.Join(cause, fmt.Errorf("enterprise hooks: connector %s rollback left files in %s: %w", conn.Name(), dataDir, residueErr))
 					}

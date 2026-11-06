@@ -233,3 +233,59 @@ func TestGAP0083FailedLockWriteBeforePublicationRollsBack(t *testing.T) {
 		t.Fatalf("recovery Verify: %v", err)
 	}
 }
+
+func TestGAP0083FailedRepairRestoresExistingScopedToken(t *testing.T) {
+	requireEnterpriseHookInstaller(t)
+	skipIfRoot(t)
+	setStandaloneProfileForTest(t, true)
+	home := newTestHome(t)
+	opts := standaloneOptions(home, "amp", "observe", "0.0.1785334225")
+	if _, err := Install(context.Background(), opts); err != nil {
+		t.Fatalf("initial Amp install: %v", err)
+	}
+	dataDir := filepath.Join(home, ".defenseclaw")
+	previousToken, err := connector.LoadHookAPIToken(dataDir, "amp")
+	if err != nil || previousToken != opts.APIToken {
+		t.Fatalf("initial Amp token missing: %v", err)
+	}
+	lockPath := filepath.Join(dataDir, "hook_contract_lock.json")
+	previousLock, err := os.ReadFile(lockPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	opts.APIToken = strings.Repeat("b", 64)
+	previousSave := installSaveHookContractLockEntry
+	t.Cleanup(func() { installSaveHookContractLockEntry = previousSave })
+	installSaveHookContractLockEntry = func(string, connector.HookContractLockEntry, bool) error {
+		return errors.New("injected prepublication lock error")
+	}
+	if _, err := Install(context.Background(), opts); err == nil || !strings.Contains(err.Error(), "injected prepublication lock error") {
+		t.Fatalf("Amp repair = %v, want lock error", err)
+	}
+	if token, err := connector.LoadHookAPIToken(dataDir, "amp"); err != nil || token != previousToken {
+		t.Fatalf("failed repair did not restore previous Amp token: present=%t err=%v", token == previousToken, err)
+	}
+	if lock, err := os.ReadFile(lockPath); err != nil || string(lock) != string(previousLock) {
+		t.Fatalf("failed repair changed the previous lock: equal=%t err=%v", string(lock) == string(previousLock), err)
+	}
+	installSaveHookContractLockEntry = previousSave
+	if _, err := Install(context.Background(), opts); err != nil {
+		t.Fatalf("successful Amp repair: %v", err)
+	}
+	if token, err := connector.LoadHookAPIToken(dataDir, "amp"); err != nil || token != opts.APIToken {
+		t.Fatalf("successful repair did not publish the requested token: present=%t err=%v", token == opts.APIToken, err)
+	}
+	opts.APIToken = strings.Repeat("c", 64)
+	installSaveHookContractLockEntry = func(dataDir string, entry connector.HookContractLockEntry, managed bool) error {
+		if err := previousSave(dataDir, entry, managed); err != nil {
+			return err
+		}
+		return errors.New("injected postpublication lock error")
+	}
+	if _, err := Install(context.Background(), opts); err == nil || !strings.Contains(err.Error(), "injected postpublication lock error") {
+		t.Fatalf("uncertain Amp repair = %v, want lock error", err)
+	}
+	if token, err := connector.LoadHookAPIToken(dataDir, "amp"); err != nil || token != opts.APIToken {
+		t.Fatalf("published lock did not retain the matching Amp token: present=%t err=%v", token == opts.APIToken, err)
+	}
+}
