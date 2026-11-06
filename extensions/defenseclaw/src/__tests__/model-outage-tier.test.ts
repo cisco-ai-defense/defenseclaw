@@ -5,6 +5,7 @@
 
 import { EventEmitter } from "node:events";
 import { createRequire } from "node:module";
+import { Readable } from "node:stream";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { createFetchInterceptor, GATEWAY_DOWN_MESSAGE, MODEL_OUTAGE_WARNING } from "../fetch-interceptor.js";
 import { ListenerProofError, _setListenerProofForTest } from "../listener-proof.js";
@@ -152,6 +153,26 @@ describe("saved model outage tier", () => {
     req.emit("error", refused());
     expect(httpCall).toHaveBeenCalledTimes(2);
     expect(httpCall.mock.calls[1][0]).toMatchObject({ protocol: "http:", port: 11434 });
+    expect(httpCall.mock.calls[1][1]).toBeUndefined();
+    expect(direct.write).toHaveBeenCalledWith(Buffer.from("request-body"));
+  });
+
+  it("preserves the Node HTTPS options-object request shape on continuation", () => {
+    const proxy = requestStub();
+    const direct = requestStub();
+    http.request = vi.fn(() => proxy) as unknown as typeof http.request;
+    const directCall = vi.fn((_target: unknown, _callback?: unknown) => direct);
+    https.request = directCall as unknown as typeof https.request;
+    globalThis.fetch = vi.fn(async () => { throw refused(); }) as typeof fetch;
+    interceptor = createFetchInterceptor({ guardrailPort: 14010, getOutageMode: () => "open" });
+    interceptor.start();
+
+    const req = https.request({ hostname: "api.openai.com", path: "/v1/chat/completions", method: "POST" });
+    req.end("request-body");
+    req.emit("error", refused());
+    expect(directCall).toHaveBeenCalledTimes(1);
+    expect(directCall.mock.calls[0][0]).toMatchObject({ hostname: "api.openai.com", path: "/v1/chat/completions" });
+    expect(directCall.mock.calls[0][1]).toBeUndefined();
     expect(direct.write).toHaveBeenCalledWith(Buffer.from("request-body"));
   });
 
@@ -182,6 +203,40 @@ describe("saved model outage tier", () => {
     expect(origins).toEqual(["http://127.0.0.1:14010", "https://api.openai.com"]);
     expect(directHeaders[0]).toEqual({ Authorization: "Bearer provider-token" });
     expect(handler.onError).not.toHaveBeenCalled();
+  });
+
+  it("replays a streamed undici body after the proxy consumes it", async () => {
+    const bodies: string[] = [];
+    let finish!: () => void;
+    const completed = new Promise<void>((resolve) => { finish = resolve; });
+    const base = {
+      dispatch: vi.fn((opts: { origin: string; body: AsyncIterable<Uint8Array | string> }, handler: { onError?: (err: Error) => void }) => {
+        void (async () => {
+          let body = "";
+          for await (const chunk of opts.body) body += chunk.toString();
+          bodies.push(body);
+          if (String(opts.origin).startsWith("http://127.0.0.1:14010")) handler.onError?.(refused());
+          else finish();
+        })();
+        return true;
+      }),
+      close: async () => undefined,
+      destroy: async () => undefined,
+    };
+    undici.setGlobalDispatcher(base);
+    http.request = vi.fn(() => requestStub()) as unknown as typeof http.request;
+    globalThis.fetch = vi.fn(async () => { throw refused(); }) as typeof fetch;
+    interceptor = createFetchInterceptor({ guardrailPort: 14010, getOutageMode: () => "open" });
+    interceptor.start();
+    const dispatcher = undici.getGlobalDispatcher() as {
+      dispatch: (opts: { origin: string; path: string; body: Readable }, handler: object) => boolean;
+    };
+    dispatcher.dispatch({
+      origin: "https://api.openai.com", path: "/v1/chat/completions",
+      body: Readable.from(["request", "-body"]),
+    }, { onError: vi.fn() });
+    await completed;
+    expect(bodies).toEqual(["request-body", "request-body"]);
   });
 
   it("keeps an undici request closed when the saved mode is closed", async () => {

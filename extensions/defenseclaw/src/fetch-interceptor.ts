@@ -161,6 +161,92 @@ type UndiciDispatchOptions = {
 };
 type UndiciDispatchFn = (opts: UndiciDispatchOptions, handler: unknown) => boolean;
 
+// A dispatcher consumes stream bodies as it writes to the proxy. Keep the
+// bytes it consumed and retain the source iterator so an outage continuation
+// can send the complete body, including any unread suffix, to the provider.
+function replayUndiciStreamBody(body: unknown): {
+  proxyBody: AsyncIterable<unknown>;
+  directBody: AsyncIterable<unknown>;
+  canRetry: () => boolean;
+  abandon: () => void;
+} | null {
+  if (!body || typeof body !== "object" || !(Symbol.asyncIterator in body)) return null;
+  const iterator = (body as AsyncIterable<unknown>)[Symbol.asyncIterator]();
+  const chunks: unknown[] = [];
+  const maxReplayBytes = 32 << 20;
+  let bytes = 0;
+  let complete = false;
+  let replayable = true;
+  let abandoned = false;
+  let pending: Promise<IteratorResult<unknown>> | undefined;
+  const abandon = (): void => {
+    if (abandoned) return;
+    abandoned = true;
+    replayable = false;
+    chunks.length = 0;
+    if (!complete && iterator.return) {
+      try { void iterator.return().catch(() => undefined); } catch { /* source already closed */ }
+    }
+  };
+  const proxyBody: AsyncIterable<unknown> = {
+    [Symbol.asyncIterator]() {
+      return {
+        async next() {
+          const read = iterator.next();
+          pending = read;
+          try {
+            const result = await read;
+            if (result.done) {
+              complete = true;
+            } else if (replayable) {
+              const chunk = result.value;
+              const size = typeof chunk === "string" ? Buffer.byteLength(chunk) :
+                chunk instanceof Uint8Array ? chunk.byteLength : maxReplayBytes + 1;
+              bytes += size;
+              if (bytes > maxReplayBytes) {
+                replayable = false;
+                chunks.length = 0;
+              } else {
+                chunks.push(chunk instanceof Uint8Array ? Buffer.from(chunk) : chunk);
+              }
+            }
+            return result;
+          } catch (error) {
+            replayable = false;
+            throw error;
+          } finally {
+            if (pending === read) pending = undefined;
+          }
+        },
+        // Do not close the source on a proxy transport error. The provider
+        // continuation may still need the portion the proxy did not read.
+        async return() { return { done: true, value: undefined }; },
+      };
+    },
+  };
+  const directBody: AsyncIterable<unknown> = {
+    async *[Symbol.asyncIterator]() {
+      try {
+        if (pending) await pending;
+        for (const chunk of chunks) yield chunk;
+        if (!complete) {
+          for (;;) {
+            const result = await iterator.next();
+            if (result.done) {
+              complete = true;
+              break;
+            }
+            yield result.value;
+          }
+        }
+      } finally {
+        if (!complete && iterator.return) await iterator.return();
+      }
+    },
+  };
+  return { proxyBody, directBody, canRetry: () => replayable, abandon };
+}
+
 /**
  * Apply a merged provider registry from the Go sidecar. Additive
  * only — we never drop a built-in domain or port because the
@@ -1588,7 +1674,12 @@ export function createFetchInterceptor(
       !isKnownSafeDomain(urlStr) &&
       (isLLMUrl(urlStr, guardrailPort) || hasLLMPathSuffix(urlStr))
     ) {
-      const directOpts = { ...opts, origin: opts.origin, headers: opts.headers };
+      const directOpts: UndiciDispatchOptions = { ...opts, origin: opts.origin, headers: opts.headers };
+      const bodyReplay = replayUndiciStreamBody(opts.body);
+      if (bodyReplay) {
+        opts.body = bodyReplay.proxyBody;
+        directOpts.body = bodyReplay.directBody;
+      }
       opts.origin = proxyBase;
       const existingHeaders = undiciHeadersToRecord(opts.headers);
       const providerKey = extractProviderKeyFromRecord(existingHeaders);
@@ -1634,12 +1725,14 @@ export function createFetchInterceptor(
             if ((property === "onHeaders" || property === "onResponseStart") && typeof method === "function") {
               return (...args: unknown[]) => {
                 proxyResponseStarted = true;
+                bodyReplay?.abandon();
                 return method.apply(target, args);
               };
             }
             if (property === "onError") {
               return (err: Error) => {
-                if (!retried && !proxyResponseStarted && isProxyOutage(err) && openModelOutage()) {
+                if (!retried && !proxyResponseStarted && isProxyOutage(err) &&
+                    (!bodyReplay || bodyReplay.canRetry()) && openModelOutage()) {
                   retried = true;
                   try {
                     next(directOpts, target);
@@ -1649,6 +1742,7 @@ export function createFetchInterceptor(
                     throw directErr;
                   }
                 }
+                bodyReplay?.abandon();
                 if (typeof method === "function") return method.call(target, err);
               };
             }
@@ -1673,6 +1767,7 @@ export function createFetchInterceptor(
             }
             return;
           }
+          bodyReplay?.abandon();
           completeUndiciGatewayDown(handler);
         },
       );
@@ -2237,12 +2332,14 @@ export function createFetchInterceptor(
             }
             directOptions.headers = headers;
           }
-          const target = typeof urlOrOptions === "object" && !(urlOrOptions instanceof URL)
-            ? { ...urlOrOptions, ...directOptions }
-            : urlOrOptions;
-          return originalUrl.protocol === "http:"
-            ? nativeHttpRequest(target as string, directOptions)
-            : nativeHttpsRequest(target as string, directOptions);
+          const request = originalUrl.protocol === "http:"
+            ? nativeHttpRequest : nativeHttpsRequest;
+          if (typeof urlOrOptions === "object" && !(urlOrOptions instanceof URL)) {
+            // Node accepts request(options) and request(options, callback),
+            // but interprets a second options object as a callback.
+            return request({ ...urlOrOptions, ...directOptions });
+          }
+          return request(urlOrOptions as string, directOptions);
         };
         return nodeRequestWithOutageFallback(proxyRequest, directFactory);
       }
