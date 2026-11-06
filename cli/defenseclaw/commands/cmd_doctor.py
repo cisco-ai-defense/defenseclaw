@@ -1858,24 +1858,65 @@ ROOT_GATEWAY_REASON = "Your DefenseClaw gateway is running as root."
 
 
 def _root_gateway_remedy(cfg) -> str:
-    """Name this account's data home in the privileged stop command."""
+    """The next step for a root-run gateway, in the words of this OS (GAP-0706).
+
+    Same table as ``daemon.RootGatewayListenerRemedy``. A root run leaves
+    root-owned files in the home, so the Unix remedy is one sequence that stops
+    the root gateway, returns the home and starts it as this account
+    (GAP-0711, GAP-0713). DefenseClawMac exists only on macOS. No final period:
+    callers end the sentence themselves.
+    """
+    return _root_gateway_remedy_for(sys.platform, cfg)
+
+
+def _root_gateway_remedy_for(platform_name: str, cfg) -> str:
+    if platform_name.startswith("win"):
+        return (
+            "Stop it from an administrator prompt (defenseclaw-gateway stop), "
+            "then start it as yourself (defenseclaw-gateway start)"
+        )
+    if platform_name == "darwin":
+        return (
+            "Open DefenseClawMac and choose Start Gateway: it stops the root gateway with "
+            "administrator approval, returns its files to you and starts the gateway as you. "
+            "Without the app, run: " + _root_gateway_recovery_command(cfg)
+        )
     return (
-        f"Stop it with {_root_gateway_stop_command(cfg)}, "
-        "then start it as yourself (defenseclaw-gateway start). "
-        "On macOS, use DefenseClawMac to repair root-owned gateway files."
+        "Stop it, return its files to your account and start it as yourself with: "
+        + _root_gateway_recovery_command(cfg)
     )
+
+
+def _root_gateway_recovery_command(cfg) -> str:
+    """Stop the root gateway, return the home and the store, start as this account."""
+    data_dir = _configured_gateway_data_dir(cfg)
+    homes = [_root_gateway_install_home(cfg)]
+    if data_dir and data_dir not in homes:
+        homes.append(data_dir)
+    return (
+        _root_gateway_stop_command(cfg)
+        + ' && sudo chown -R "$(id -un)" '
+        + " ".join(shlex.quote(home) for home in homes)
+        + " && defenseclaw-gateway start"
+    )
+
+
+def _root_gateway_install_home(cfg) -> str:
+    """The PID-record home that the root gateway was started for."""
+    from defenseclaw.config import default_data_path
+
+    data_dir = _configured_gateway_data_dir(cfg) or os.fspath(default_data_path())
+    try:
+        return gateway_home_for_data_dir(data_dir)
+    except (OSError, TypeError, ValueError):
+        return data_dir
 
 
 def _root_gateway_stop_command(cfg) -> str:
     """Use the PID-record home and resolve the binary before sudo resets PATH."""
-    from defenseclaw.config import default_data_path
     from defenseclaw.gateway import resolve_gateway_binary
 
-    data_dir = _configured_gateway_data_dir(cfg) or os.fspath(default_data_path())
-    try:
-        install_home = gateway_home_for_data_dir(data_dir)
-    except (OSError, TypeError, ValueError):
-        install_home = data_dir
+    install_home = _root_gateway_install_home(cfg)
     binary = resolve_gateway_binary()
     if binary and os.path.isabs(binary) and os.path.isfile(binary) and os.access(binary, os.X_OK):
         executable = shlex.quote(binary)
@@ -1933,19 +1974,7 @@ def _check_gateway_account(cfg, r: _DoctorResult) -> None:
     trust = _trusted_gateway_listener(cfg)
     if trust.code != "root_gateway" and not _root_gateway_record_without_listener(cfg, trust):
         return
-    data_dir = _configured_gateway_data_dir(cfg)
-    remediation = (
-        _root_gateway_remedy(cfg) + " "
-        "on macOS open DefenseClawMac and choose Start Gateway: it stops the root gateway with "
-        "administrator approval, returns its files to you and starts the gateway as you. "
-        "Otherwise: "
-        + _root_gateway_stop_command(cfg)
-        + " && sudo chown -R "
-        + shlex.quote(getpass.getuser())
-        + " "
-        + shlex.quote(data_dir)
-        + " && defenseclaw-gateway start"
-    )
+    remediation = _root_gateway_remedy(cfg)
     _emit(
         "warn",
         "Gateway account",

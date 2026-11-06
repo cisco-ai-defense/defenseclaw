@@ -127,7 +127,7 @@ func runGatewayScan(cmd *cobra.Command, kind, target string) error {
 	// A scan carries both gateway token headers. Check the configured listener
 	// before sending either header, as policy reload does.
 	if problem := foreignGatewayListener(cfg); problem != "" {
-		return fmt.Errorf("scan %s: %s; the gateway token was not sent. %s", kind, problem, foreignGatewayListenerFix(cfg))
+		return fmt.Errorf("scan %s: %s; the gateway token was not sent. %s", kind, problemClause(problem), foreignGatewayListenerFix(cfg))
 	}
 	body, _ := json.Marshal(map[string]string{"target": target})
 	request, err := http.NewRequest(http.MethodPost, base+"/v1/"+kind+"/scan", bytes.NewReader(body))
