@@ -1007,6 +1007,11 @@ def _print_agents(
     if sidecar_root and enabled_count:
         header = ux._style(f"{enabled_count} configured; hooks refuse the root-run gateway", fg="yellow")
     _status_row("Agents", header)
+    if "openclaw" in actives and _is_enabled("openclaw"):
+        from defenseclaw.openclaw_plugin_config import configured_openclaw_plugin_config_issue
+
+        if issue := configured_openclaw_plugin_config_issue(cfg):
+            ux.warn(f"{issue}; OpenClaw may skip reload. Run defenseclaw setup openclaw.")
     if guardrail_off:
         ux.echo(" " * 16 + ux.dim("Turn protection back on: defenseclaw setup guardrail"))
     if sidecar_down and enabled_count and not sidecar_unread and not sidecar_unchecked:
@@ -2479,6 +2484,11 @@ def _status_payload(app) -> dict:
     if (policy := _policy_status(health)) is not None:
         payload["policy"] = policy
     payload["connectors"] = _connector_roster(cfg, health=health)
+    if any(row.get("name") == "openclaw" and row.get("enabled") for row in payload["connectors"]):
+        from defenseclaw.openclaw_plugin_config import configured_openclaw_plugin_config_issue
+
+        if issue := configured_openclaw_plugin_config_issue(cfg):
+            payload["openclaw_plugin_config_issue"] = issue
     if (
         not skip_live_health
         and (cowork_row := _cowork_status(cfg, health, gateway_running=health is not None or bool(live_pid)))
