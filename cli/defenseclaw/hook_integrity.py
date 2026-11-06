@@ -692,12 +692,28 @@ def _registers_defenseclaw_hooks(cfg: Any, connector: str, path: Path, *, strict
     raw = path.read_bytes()
     if path.suffix.lower() not in _STRUCTURED_SUFFIXES:
         return "defenseclaw" in raw.decode("utf-8", errors="replace").lower()
+    native = None
+    if connector == "claudecode" and strict:
+        from defenseclaw.fail_mode import _claude_per_user_native_registration
+
+        native = _claude_per_user_native_registration(cfg)
     try:
         document = _load_agent_document(path, raw)
     except ValueError:
         # A file the parser cannot read is reported by the agent itself;
         # never call it unregistered on that ground alone.
-        return "defenseclaw" in raw.decode("utf-8", errors="replace").lower()
+        return native is None and "defenseclaw" in raw.decode("utf-8", errors="replace").lower()
+    if native is not None:
+        # The native Linux registration has no hooks/ script path. Use the
+        # verifier shared with Doctor and fail-mode, which checks the exact
+        # executable, argv, required events and synchronous companions.
+        from defenseclaw.fail_mode import _claude_native_registration_problem, claude_missing_registration
+
+        return (
+            _claude_native_registration_problem(raw.decode("utf-8", errors="replace"), native, str(cfg.data_dir))
+            is None
+            and claude_missing_registration(cfg, document) is None
+        )
     section = _hook_section(document, path)
     if section is None:
         return False
