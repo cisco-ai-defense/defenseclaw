@@ -44,6 +44,7 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/daemon"
 	"github.com/defenseclaw/defenseclaw/internal/enforce"
 	"github.com/defenseclaw/defenseclaw/internal/enterprisehooks"
+	"github.com/defenseclaw/defenseclaw/internal/enterprisepolicy"
 	"github.com/defenseclaw/defenseclaw/internal/envvars"
 	"github.com/defenseclaw/defenseclaw/internal/fleet"
 	fleetmanager "github.com/defenseclaw/defenseclaw/internal/fleet/manager"
@@ -4002,7 +4003,40 @@ func resolveWatcherDirsForConnectors(cfg *config.Config, conns []connector.Conne
 		add(&skillDirs, seenSkill, skills, "skill", owner, connSrc.Skill != watcherDirsFromConfig)
 		add(&pluginDirs, seenPlugin, plugins, "plugin", owner, connSrc.Plugin != watcherDirsFromConfig)
 	}
+	// A connector the standalone machine policy protects without running it
+	// as an active connector still loads the explicit folders, so it is a
+	// consumer of each of them too.
+	have := map[string]bool{}
+	for _, conn := range conns {
+		have[strings.ToLower(strings.TrimSpace(conn.Name()))] = true
+	}
+	for _, name := range protectedConnectorNames(cfg) {
+		if have[name] {
+			continue
+		}
+		have[name] = true
+		if src.Skill == watcherDirsFromConfig {
+			for _, dir := range skillDirs {
+				consumers = append(consumers, watcher.RootConsumer{Kind: "skill", Path: dir, Connector: name})
+			}
+		}
+		if src.Plugin == watcherDirsFromConfig {
+			for _, dir := range pluginDirs {
+				consumers = append(consumers, watcher.RootConsumer{Kind: "plugin", Path: dir, Connector: name})
+			}
+		}
+	}
 	return skillDirs, pluginDirs, roots, src, consumers
+}
+
+// protectedConnectorNames is the connectors a standalone managed gateway
+// protects, which is wider than the active ones: it adds those named only
+// under enterprise.machine_policy.connectors. None outside that profile.
+func protectedConnectorNames(cfg *config.Config) []string {
+	if cfg == nil || !cfg.StandaloneEnterprise() {
+		return nil
+	}
+	return enterprisepolicy.StandaloneConnectors(cfg)
 }
 
 // enrolledRootConsumers is every connector that loads each root an enrolled
@@ -4011,10 +4045,25 @@ func resolveWatcherDirsForConnectors(cfg *config.Config, conns []connector.Conne
 // loads. The gateway's own connector folders are not watched there.
 func enrolledRootConsumers(enrolled *enrolledWatchSet, consumers []watcher.RootConsumer, src watcherDirSources) []watcher.RootConsumer {
 	out := slices.Clone(enrolled.consumers)
+	var explicit []watcher.RootConsumer
+	have := map[watcher.RootConsumer]bool{}
 	for _, consumer := range consumers {
 		if consumer.Kind == "skill" && src.Skill == watcherDirsFromConfig ||
 			consumer.Kind == "plugin" && src.Plugin == watcherDirsFromConfig {
-			out = append(out, consumer)
+			explicit = append(explicit, consumer)
+			have[consumer] = true
+		}
+	}
+	out = append(out, explicit...)
+	// Every enrolled connector loads the explicit folders as well, whether
+	// or not the gateway config lists it.
+	for _, consumer := range explicit {
+		for _, name := range enrolled.connectors {
+			extra := watcher.RootConsumer{Kind: consumer.Kind, Path: consumer.Path, Connector: name}
+			if !have[extra] {
+				have[extra] = true
+				out = append(out, extra)
+			}
 		}
 	}
 	return out
