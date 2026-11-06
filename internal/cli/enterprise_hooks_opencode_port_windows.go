@@ -15,6 +15,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/defenseclaw/defenseclaw/internal/config"
@@ -39,6 +40,13 @@ var (
 // A profile read can wait on an unavailable redirected home. Only a bounded
 // number of timed-out readers may remain while Windows completes their I/O.
 var enterpriseHookWindowsOpenCodeReadSlots = make(chan struct{}, 4)
+
+// The first pass with an unknown account pauses allocation. A later pass
+// retains its recorded and claimed ports while known accounts continue.
+var enterpriseHookWindowsOpenCodeUnknown = struct {
+	sync.Mutex
+	seen map[string]bool
+}{seen: map[string]bool{}}
 
 func readWindowsOpenCodePortAsAccount(ctx context.Context, profile enterprisehooks.TargetCredentials) (int, error) {
 	select {
@@ -68,8 +76,18 @@ func readWindowsOpenCodePortAsAccount(ctx context.Context, profile enterprisehoo
 	case result := <-done:
 		return result.port, result.err
 	case <-timer.C:
+		select {
+		case result := <-done:
+			return result.port, result.err
+		default:
+		}
 		return 0, fmt.Errorf("account read timed out")
 	case <-ctx.Done():
+		select {
+		case result := <-done:
+			return result.port, result.err
+		default:
+		}
 		return 0, ctx.Err()
 	}
 }
@@ -123,12 +141,32 @@ func enterpriseHookStandaloneOpenCodePorts(ctx context.Context, manifest enterpr
 	ids := map[string]uint64{}
 	filePorts := map[string]int{}
 	eligible := map[string]enterprisehooks.TargetCredentials{}
+	present := map[string]bool{}
+	unreadable := map[string]bool{}
+	firstUnknown := false
+	var problems error
+	markUnknown := func(key string, reason error) {
+		enterpriseHookWindowsOpenCodeUnknown.Lock()
+		if !enterpriseHookWindowsOpenCodeUnknown.seen[key] {
+			firstUnknown = true
+		}
+		enterpriseHookWindowsOpenCodeUnknown.seen[key] = true
+		enterpriseHookWindowsOpenCodeUnknown.Unlock()
+		unreadable[key] = true
+		problems = errors.Join(problems, fmt.Errorf("OpenCode service port for %s is unknown: %w; check the account profile or exclude it from managed targets", key, reason))
+	}
+	clearUnknown := func(key string) {
+		enterpriseHookWindowsOpenCodeUnknown.Lock()
+		delete(enterpriseHookWindowsOpenCodeUnknown.seen, key)
+		enterpriseHookWindowsOpenCodeUnknown.Unlock()
+	}
 	for raw, port := range recorded {
 		sid, err := windows.StringToSid(raw)
 		if err != nil {
 			return nil, fmt.Errorf("OpenCode service ports: invalid recorded SID")
 		}
 		key := sid.String()
+		present[key] = true
 		ids[key] = uint64(sid.SubAuthority(uint32(sid.SubAuthorityCount() - 1)))
 		if port <= 0 || port > 65535 {
 			return nil, fmt.Errorf("OpenCode service ports: invalid recorded port")
@@ -145,21 +183,50 @@ func enterpriseHookStandaloneOpenCodePorts(ctx context.Context, manifest enterpr
 		key := sid.String()
 		ids[key] = uint64(sid.SubAuthority(uint32(sid.SubAuthorityCount() - 1)))
 		profile.SID = key
-		eligible[key] = profile
 		if strings.TrimSpace(profile.UserHome) == "" {
-			return nil, fmt.Errorf("OpenCode service port for %s is unknown: no home; no assignments changed", key)
+			markUnknown(key, fmt.Errorf("home is unavailable"))
+			continue
 		}
 		port, err := readWindowsOpenCodePortAsAccount(ctx, profile)
 		if err != nil {
-			return nil, fmt.Errorf("OpenCode service port for %s is unknown: %w; no assignments changed", key, err)
+			if errors.Is(err, enterprisepolicy.ErrOpenCodeServicePortContent) {
+				clearUnknown(key)
+				unreadable[key] = true
+				problems = errors.Join(problems, fmt.Errorf("OpenCode service port for %s needs an account file correction: %w; as that account, fix or remove .config/opencode/service.json", key, err))
+			} else {
+				markUnknown(key, err)
+			}
+			continue
 		}
+		clearUnknown(key)
+		eligible[key] = profile
 		if port > 0 {
 			filePorts[key] = port
 		}
 	}
+	enterpriseHookWindowsOpenCodeUnknown.Lock()
+	for key := range enterpriseHookWindowsOpenCodeUnknown.seen {
+		if !present[key] {
+			delete(enterpriseHookWindowsOpenCodeUnknown.seen, key)
+		}
+	}
+	enterpriseHookWindowsOpenCodeUnknown.Unlock()
+	if firstUnknown {
+		return nil, errors.Join(problems, fmt.Errorf("OpenCode service ports: new assignments paused for one pass while account state is unknown"))
+	}
 	claims, err := enterpriseHookWindowsOpenCodeClaims()
 	if err != nil {
-		return nil, fmt.Errorf("OpenCode service port claims: %w", err)
+		return nil, errors.Join(problems, fmt.Errorf("OpenCode service port claims: %w", err))
+	}
+	if claims == nil {
+		claims = map[int]string{}
+	}
+	// An unreadable account cannot be moved this pass. Its earlier record
+	// remains held even if a different account currently names that port.
+	for key := range unreadable {
+		if port := recorded[key]; port > 0 {
+			claims[port] = key
+		}
 	}
 	keys := make([]string, 0, len(eligible))
 	for key := range eligible {
@@ -168,7 +235,7 @@ func enterpriseHookStandaloneOpenCodePorts(ctx context.Context, manifest enterpr
 	sort.Strings(keys)
 	plan := enterprisepolicy.PlanOpenCodeServicePortsByAccountWithClaims(ids, keys, filePorts, recorded, claims, true)
 	resultRecord := plan.Record
-	unavailable := map[string]bool{}
+	unavailable := unreadable
 	// A failed account still has the port in its previous record or file.
 	// Do not publish that port for a different SID in this pass, even when
 	// that SID's claim is already present; the next pass will retry the move.
@@ -203,7 +270,6 @@ func enterpriseHookStandaloneOpenCodePorts(ctx context.Context, manifest enterpr
 			}
 		}
 	}
-	var problems error
 	for _, key := range plan.NoPort {
 		keepPreviousRecord(key)
 		problems = errors.Join(problems, fmt.Errorf("OpenCode service ports: no port is available for %s", key))

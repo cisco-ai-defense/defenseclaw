@@ -6,10 +6,31 @@ package enterprisepolicy
 
 import (
 	"encoding/json"
+	"errors"
 	"os"
 	"path/filepath"
 	"testing"
 )
+
+func TestOpenCodeServicePortReadDistinguishesContentFromUnavailableFile(t *testing.T) {
+	home := t.TempDir()
+	path := OpenCodeServiceConfigPath(home)
+	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, []byte(`{"port":"invalid"}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if port, err := ReadOpenCodeServicePortAsUser(home); port != 0 || !errors.Is(err, ErrOpenCodeServicePortContent) {
+		t.Fatalf("invalid content classification: port=%d err=%v", port, err)
+	}
+	if err := os.WriteFile(path, []byte(`{"port":25001}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if port, err := ReadOpenCodeServicePortAsUser(home); port != 25001 || err != nil {
+		t.Fatalf("valid account file: port=%d err=%v", port, err)
+	}
+}
 
 // gas-ux-r1 GAP-0053: ports derive from the account id (the class invariant
 // over every sequence is TestOpenCodePortInvariantOverRandomSequences).

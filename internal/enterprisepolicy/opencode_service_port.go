@@ -6,11 +6,16 @@ package enterprisepolicy
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"path/filepath"
 	"sort"
 	"strings"
 )
+
+// ErrOpenCodeServicePortContent means the account could read service.json,
+// but its content cannot provide a usable port to the guardian.
+var ErrOpenCodeServicePortContent = errors.New("OpenCode service port content is invalid")
 
 // OpenCode V2 runs a background server per account on 127.0.0.1. On the
 // release channel its port is 49374 for every account, so on a computer with
@@ -60,14 +65,14 @@ func ReadOpenCodeServicePortAsUser(home string) (int, error) {
 		return 0, nil
 	}
 	if !regular {
-		return 0, fmt.Errorf("%s is not a regular file", path)
+		return 0, fmt.Errorf("%w: %s is not a regular file", ErrOpenCodeServicePortContent, path)
 	}
 	var doc map[string]json.RawMessage
 	if len(strings.TrimSpace(string(data))) == 0 {
 		return 0, nil
 	}
 	if err := json.Unmarshal(data, &doc); err != nil || doc == nil {
-		return 0, fmt.Errorf("%s is not a JSON object", path)
+		return 0, fmt.Errorf("%w: %s is not a JSON object", ErrOpenCodeServicePortContent, path)
 	}
 	raw, ok := doc["port"]
 	if !ok {
@@ -75,7 +80,7 @@ func ReadOpenCodeServicePortAsUser(home string) (int, error) {
 	}
 	var port int
 	if err := json.Unmarshal(raw, &port); err != nil || port <= 0 || port > 65535 {
-		return 0, fmt.Errorf("%s names a port that is not a number", path)
+		return 0, fmt.Errorf("%w: %s names a port that is not a number", ErrOpenCodeServicePortContent, path)
 	}
 	return port, nil
 }
