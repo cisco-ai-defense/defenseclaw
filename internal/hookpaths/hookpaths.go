@@ -47,7 +47,9 @@ const ProjectSkillRootUnverifiedPrefix = "\x00project-skill-root:"
 const ProjectSkillRootVerifiedPrefix = "\x00project-skill-root-verified:"
 
 // ProjectSkillSelectedPrefix names a selected skill folder under an
-// unverified project root. Its value is the skill name in the hook call.
+// unverified project root. For an explicit Skill path, the caller verifies
+// that it names this folder before sending the fact. Its value is the skill
+// name in the hook call.
 const ProjectSkillSelectedPrefix = "\x00project-skill-selected:"
 
 const (
@@ -1413,6 +1415,10 @@ func resolveConnector(connector, surface, event string, payload []byte, watch **
 		if home, err := os.UserHomeDir(); err == nil {
 			if facts := projectSkillRootFacts(connector, home, cwd); len(facts) > 0 {
 				if name := projectSkillCallName(args); name != "" {
+					source := projectSkillCallPath(payload)
+					if source == "" {
+						source = projectSkillCallPath(args)
+					}
 					roots := make([]string, 0, len(facts))
 					for key := range facts {
 						if strings.HasPrefix(key, ProjectSkillRootUnverifiedPrefix) {
@@ -1421,7 +1427,9 @@ func resolveConnector(connector, surface, event string, payload []byte, watch **
 					}
 					for _, root := range roots {
 						for _, dir := range projectSkillSelectedFolders(root, name) {
-							facts[ProjectSkillSelectedPrefix+dir] = name
+							if projectSkillSelectionMatchesPath(root, dir, source, cwd) {
+								facts[ProjectSkillSelectedPrefix+dir] = name
+							}
 						}
 					}
 				}
