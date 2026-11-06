@@ -2272,6 +2272,9 @@ def _plain_v8_issue(raw: bytes | None, field_path: str, reason: str) -> str:
         hint = f' (did you mean "{suggestion.group(1).strip()}"?)' if suggestion else ""
         return f"{where}{field}: unknown field{hint}. All fields: {_ALL_FIELDS_COMMAND}"
 
+    if code == "config_schema_invalid" and text.startswith(f"{field} was retired in config_version "):
+        return f"{where}{text}"
+
     if (code == "maxLength" or "maxLength constraint" in text) and isinstance(node, yaml.ScalarNode):
         # The gateway's limit for this field ("a string of at most 512
         # characters"), not one fixed number (GAP-0181).
