@@ -16943,6 +16943,13 @@ function Repair-DefenseClawDeploymentAclDrift {
         return $false
     }
     Assert-DefenseClawRepairableConfigAcl -Layout $Layout
+    # Every caller reaches this: the transaction's read-only check before the
+    # stop (uninstall included), the repair after it, and the rollback. The
+    # config check above keeps its CONFIG= wording; the gate judges the rest of
+    # what the re-stamps below would re-trust (GAP-0590 review M3).
+    if (Test-DefenseClawStandaloneProfile) {
+        Assert-DefenseClawStandaloneContentTrusted -Layout $Layout -GatewayServiceName $GatewayServiceName
+    }
     if ($CheckOnly) {
         return $true
     }
@@ -44470,6 +44477,15 @@ function Invoke-DefenseClawInstallLikeLifecycle {
             -GatewayServiceName $GatewayServiceName `
             -GuardianServiceName $GuardianServiceName
     }
+    if (Test-DefenseClawStandaloneProfile) {
+        # Before any record is consumed or any service stops: Repair re-stamps
+        # these paths, and every action re-stamps the credential store, which
+        # must never re-trust content another account could change (GAP-0590).
+        # A fresh install or a reinstall over an uninstall's tombstone is
+        # judged too: missing paths are skipped, and the state a non-purge
+        # uninstall kept is adopted by this install (GAP-0590 review M3).
+        Assert-DefenseClawStandaloneContentTrusted -Layout $Layout -GatewayServiceName $GatewayServiceName
+    }
     # Idempotent-Install contract: AVC's Windows installer runs -Action Install
     # unconditionally after its own preinstall has removed the machine-wide
     # state. Refusing on an active deployment aborted a legitimate reinstall
@@ -44689,11 +44705,6 @@ function Invoke-DefenseClawInstallLikeLifecycle {
             -ConfigPath $coworkConfigSource `
             -CoworkPackagePath $CoworkPackagePath -CoworkSignaturePath $CoworkSignaturePath `
             -BeforeAclRepair
-    }
-    if ((Test-DefenseClawStandaloneProfile) -and $priorDeploymentActive) {
-        # Before any service stops: Repair below re-stamps these paths, which
-        # must never re-trust content another account could change (GAP-0590).
-        Assert-DefenseClawStandaloneContentTrusted -Layout $Layout -GatewayServiceName $GatewayServiceName
     }
     $snapshot = New-DefenseClawTransaction `
         -Layout $Layout `
@@ -48193,6 +48204,17 @@ function Invoke-DefenseClawUninstallLifecycle {
             -GuardianServiceName $GuardianServiceName `
             -SelfUninstallCallerPID $SelfUninstallCallerPID
     }
+    if (Test-DefenseClawStandaloneProfile) {
+        # A refusal with no state change too. A non-purge uninstall re-stamps
+        # every retained item administrator-only
+        # (Set-DefenseClawPreservedStateAcls), and the next install adopts
+        # them; a purge restores the Codex records and reads the guardian
+        # records before it deletes the state (GAP-0590 review M3).
+        Assert-DefenseClawStandaloneContentTrusted `
+            -Layout $Layout `
+            -GatewayServiceName $GatewayServiceName `
+            -Scope $(if ($Purge) { 'Purge' } else { 'Retain' })
+    }
     # The holder checks are refusals with no state change. Old replacement
     # backups are installation state, so retire them only afterward.
     Remove-DefenseClawStandaloneInstallTreeReplacementBackups -Layout $Layout
@@ -48852,6 +48874,9 @@ function Invoke-DefenseClawReconcileLifecycle {
             -Layout $Layout `
             -GatewayServiceName $GatewayServiceName `
             -Action inspect)
+    }
+    if (Test-DefenseClawStandaloneProfile) {
+        Assert-DefenseClawStandaloneContentTrusted -Layout $Layout -GatewayServiceName $GatewayServiceName
     }
     Set-DefenseClawManagedAcls `
         -Layout $Layout `

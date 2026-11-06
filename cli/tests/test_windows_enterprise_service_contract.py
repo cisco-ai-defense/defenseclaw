@@ -7049,7 +7049,9 @@ def test_untrusted_config_acl_is_refused_before_the_transaction_stops_a_service(
     gate = lifecycle.index("Assert-DefenseClawStandaloneContentTrusted -Layout $Layout")
     assert gate < lifecycle.index("$snapshot = New-DefenseClawTransaction")
     assert gate < lifecycle.index("Set-DefenseClawManagedAcls `")
-    assert "if ((Test-DefenseClawStandaloneProfile) -and $priorDeploymentActive) {" in lifecycle[gate - 400 : gate]
+    # GAP-0590 review M3: a fresh install and a reinstall over a tombstone too.
+    guard = lifecycle.rindex("if (", 0, gate)
+    assert lifecycle[guard : lifecycle.index("\n", guard)] == "if (Test-DefenseClawStandaloneProfile) {"
     content = _function_text(module, "Assert-DefenseClawStandaloneContentTrusted")
     restamped = _function_text(module, "Set-DefenseClawManagedAcls")
     for path in (
@@ -7168,6 +7170,71 @@ def test_every_restamped_path_is_gated_or_named_out_of_class() -> None:
     lifecycle = _function_text(module, "Invoke-DefenseClawInstallLikeLifecycle")
     gated = lifecycle.index("Assert-DefenseClawStandaloneContentTrusted -Layout $Layout")
     assert gated < lifecycle.index("Set-DefenseClawStandaloneSecretsAcls `")
+
+
+def test_every_restamping_lifecycle_runs_the_content_gate_first() -> None:
+    """GAP-0590 review M3: uninstall re-stamped in place after its stop (the
+    ACL drift repair) and, without a purge, every retained item
+    (Set-DefenseClawPreservedStateAcls); the next install took that state over
+    a tombstone, where the gate was skipped because no deployment was active.
+    The gate now runs first in every action that re-stamps or consumes
+    managed content: the install-like lifecycle (fresh and over a tombstone
+    too), the uninstall (Retain or Purge scope), reconcile, and the ACL drift
+    repair itself, before its read-only answer."""
+
+    module = read(MODULE).replace("\r\n", "\n")
+    lifecycle = _function_text(module, "Invoke-DefenseClawInstallLikeLifecycle")
+    gate = lifecycle.index("Assert-DefenseClawStandaloneContentTrusted -Layout $Layout -GatewayServiceName $GatewayServiceName")
+    assert lifecycle.count("Assert-DefenseClawStandaloneContentTrusted") == 1
+    for consumer in (
+        "Remove-DefenseClawUnclaimedInstallPreparationIntent `",
+        "Remove-DefenseClawCommittedManagedHooksTeardownJournal `",
+        "Invoke-DefenseClawManagedHooksLifecycleSnapshotCommand `",
+        "Invoke-DefenseClawCommittedManagedHooksLifecycleRetire `",
+        "$snapshot = New-DefenseClawTransaction `",
+        "Set-DefenseClawManagedAcls `",
+        "Set-DefenseClawStandaloneSecretsAcls `",
+    ):
+        assert gate < lifecycle.index(consumer), consumer
+    assert "$priorDeploymentActive" not in lifecycle[lifecycle.rindex("\n    if (", 0, gate) : gate]
+
+    uninstall = _function_text(module, "Invoke-DefenseClawUninstallLifecycle")
+    gate = uninstall.index("Assert-DefenseClawStandaloneContentTrusted `")
+    assert "-Scope $(if ($Purge) { 'Purge' } else { 'Retain' })" in uninstall[gate : gate + 200]
+    assert uninstall[uninstall.rindex("\n    if (", 0, gate) :].startswith("\n    if (Test-DefenseClawStandaloneProfile) {")
+    for consumer in (
+        "Remove-DefenseClawStandaloneInstallTreeReplacementBackups -Layout $Layout",
+        "Remove-DefenseClawUninstallStateTreeLinks -Layout $Layout",
+        "Invoke-DefenseClawUninstallPrecommitHookCheck `",
+        "Invoke-DefenseClawCommittedManagedHooksLifecycleRetire `",
+        "$snapshot = New-DefenseClawTransaction `",
+        "Set-DefenseClawPreservedStateAcls `",
+    ):
+        assert gate < uninstall.index(consumer), consumer
+    for holder in ("Assert-DefenseClawStandaloneInstallRootNotHeld `", "Assert-DefenseClawStandaloneStateFilesNotInUse `"):
+        assert uninstall.index(holder) < gate, holder
+
+    reconcile = _function_text(module, "Invoke-DefenseClawReconcileLifecycle")
+    gate = reconcile.index("Assert-DefenseClawStandaloneContentTrusted -Layout $Layout -GatewayServiceName $GatewayServiceName")
+    assert gate < reconcile.index("Set-DefenseClawManagedAcls `") < reconcile.index("Set-DefenseClawStandaloneSecretsAcls `")
+
+    repair = _function_text(module, "Repair-DefenseClawDeploymentAclDrift")
+    gate = repair.index("Assert-DefenseClawStandaloneContentTrusted -Layout $Layout -GatewayServiceName $GatewayServiceName")
+    assert repair.index("Assert-DefenseClawRepairableConfigAcl -Layout $Layout") < gate
+    assert gate < repair.index("if ($CheckOnly) {") < repair.index("Set-DefenseClawRetainedRuntimeAcls")
+
+    # Purge skips only what it deletes unread; Retain skips only the install
+    # tree the uninstall removes.
+    content = _function_text(module, "Assert-DefenseClawStandaloneContentTrusted")
+    assert "[ValidateSet('Lifecycle', 'Retain', 'Purge')][string]$Scope = 'Lifecycle'" in content
+    for name in ("InstallRoot", "BinDirectory", "LibexecDirectory", "CompilerLibDirectory", "CompilerDirectory"):
+        assert f"@('{name}', $folder, @('Lifecycle'))," in content or f"@('{name}', $folder, @('Lifecycle'))\n" in content, name
+    assert "@('BrokerStateDirectory', $state, $kept)," in content
+    assert "if ($Scope -ne 'Purge') {" in content
+    assert content.index("if ($Scope -ne 'Purge') {") < content.index("$runtimeDirectory = ") < content.index(
+        "Combine($stateRoot, 'secrets')") < content.index("Get-DefenseClawBundleAclItems -Layout $Layout")
+    for name in ("CodexRequirementsOwnershipPath", "CodexRequirementsAclBackupPath", "ManagedHooksTeardownJournalPath", "AuthorizationLedgerPath"):
+        assert f"@('{name}', $record, $every)," in content, name
 
 
 def test_standalone_self_heal_restamps_only_when_every_verdict_is_repairable() -> None:
