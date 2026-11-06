@@ -11,15 +11,14 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
-	"syscall"
-	"unsafe"
 
 	"golang.org/x/sys/unix"
 
 	"github.com/defenseclaw/defenseclaw/internal/config"
+	"github.com/defenseclaw/defenseclaw/internal/enterpriseunix"
 )
 
-// sameHomeGatewayProcessDarwin diagnoses an account-owned foreground gateway
+// sameHomeGatewayProcessPlatform diagnoses an account-owned foreground gateway
 // without a PID record. The caller has already checked the listener UID; this
 // result never authorizes a token or process control.
 func sameHomeGatewayProcessPlatform(pid int, home, executable string) bool {
@@ -27,7 +26,7 @@ func sameHomeGatewayProcessPlatform(pid int, home, executable string) bool {
 	if err != nil || before == nil || before.Proc.P_pid != int32(pid) || int(before.Eproc.Ucred.Uid) != os.Getuid() {
 		return false
 	}
-	image, err := darwinForegroundProcessImage(pid)
+	image, err := enterpriseunix.ProcessImagePath(pid)
 	if err != nil || !sameForegroundFile(image, executable) {
 		return false
 	}
@@ -51,34 +50,6 @@ func sameForegroundFile(left, right string) bool {
 	leftInfo, leftErr := os.Stat(left)
 	rightInfo, rightErr := os.Stat(right)
 	return leftErr == nil && rightErr == nil && os.SameFile(leftInfo, rightInfo)
-}
-
-// darwinForegroundProcessImage mirrors proc_pidpath without linking cgo.
-func darwinForegroundProcessImage(pid int) (string, error) {
-	const (
-		sysProcInfo           = 336
-		procInfoCallPIDInfo   = 2
-		procPIDPathInfo       = 11
-		procPIDPathInfoMaxLen = 4096
-	)
-	buf := make([]byte, procPIDPathInfoMaxLen)
-	n, _, errno := syscall.Syscall6(sysProcInfo, procInfoCallPIDInfo, uintptr(pid), procPIDPathInfo, 0,
-		uintptr(unsafe.Pointer(&buf[0])), uintptr(len(buf)))
-	if errno != 0 {
-		return "", errno
-	}
-	if n == 0 || int(n) > len(buf) {
-		return "", syscall.EINVAL
-	}
-	if end := bytes.IndexByte(buf[:n], 0); end >= 0 {
-		buf = buf[:end]
-	} else {
-		buf = buf[:n]
-	}
-	if len(buf) == 0 {
-		return "", syscall.EINVAL
-	}
-	return string(buf), nil
 }
 
 // darwinForegroundProcessHome reads only the launch home from kern.procargs2.

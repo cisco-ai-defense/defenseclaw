@@ -65,6 +65,17 @@ func TestGAP0629DarwinForegroundGatewayUsesOwnerImageAndHome(t *testing.T) {
 	if sameHomeGatewayProcess(child.Process.Pid, t.TempDir()) {
 		t.Fatal("different home matched the foreground gateway")
 	}
+	data, err := os.ReadFile(self)
+	if err != nil {
+		t.Fatal(err)
+	}
+	otherImage := filepath.Join(t.TempDir(), "defenseclaw-gateway")
+	if err := os.WriteFile(otherImage, data, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if sameHomeGatewayProcessPlatform(child.Process.Pid, home, otherImage) {
+		t.Fatal("a different gateway image matched the foreground gateway")
+	}
 	gatewayPortHolder = func(string, int) (daemon.PortHolder, error) {
 		return daemon.PortHolder{PID: child.Process.Pid, UID: os.Getuid() + 1}, nil
 	}
