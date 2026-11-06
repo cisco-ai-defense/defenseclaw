@@ -226,6 +226,66 @@ class AlertFindingRowsTests(unittest.TestCase):
         self.assertEqual(store.agent_facts_for_alerts([finding.id])[finding.id],
                          {"user": "alice", "agent_identity": "agt-openclaw"})
 
+    def test_alert_identity_survives_request_id_reuse_by_a_later_inspect(self):
+        """GAP-0647: a later inspect call that reuses the client request ID
+        cannot change an earlier finding's verified Agent; a reused ID whose
+        rows disagree on the Agent shows none rather than either one."""
+        store = self.app.store
+        columns = {row[1] for row in store.db.execute("PRAGMA table_info(audit_events)")}
+        for name in ("session_id", "agent_instance_id", "agent_id"):
+            if name not in columns:
+                store.db.execute(f"ALTER TABLE audit_events ADD COLUMN {name} TEXT")
+        current, later = "agt-0000000000000002", "agt-0000000000000001"
+        cases = (
+            # (label, later row's session and instance, expected Agent)
+            ("other-session", ("session-later", "ais-later"), current),
+            ("no-session-facts", ("", ""), None),
+            ("no-later-row", None, current),
+        )
+        orders = (("finding", "current", "later"), ("later", "finding", "current"),
+                  ("current", "finding", "later"), ("finding", "later", "current"))
+        for label, later_context, expected in cases:
+            for order in orders:
+                with self.subTest(label=label, order=order):
+                    now = datetime.now(timezone.utc)
+                    rows = {
+                        "finding": (Event(action="scan-finding", severity="CRITICAL", connector="openclaw",
+                                          run_id="run-1", structured={"user.id": "alice", **FINDING},
+                                          timestamp=now), ("session-current", "ais-current")),
+                        "current": (Event(action="inspect-tool-block", severity="CRITICAL", connector="openclaw",
+                                          run_id="run-1",
+                                          structured={"user.id": "alice", "defenseclaw.agent.identity.id": current},
+                                          timestamp=now), ("session-current", "ais-current")),
+                    }
+                    if later_context is not None:
+                        rows["later"] = (Event(action="inspect-tool-block", severity="CRITICAL",
+                                               connector="openclaw", run_id="run-1",
+                                               structured={"user.id": "alice",
+                                                           "defenseclaw.agent.identity.id": later},
+                                               timestamp=now + timedelta(seconds=1)), later_context)
+                    request_id = f"reused-{label}-{'-'.join(order)}"
+                    for name in order:
+                        if name not in rows:
+                            continue
+                        event, (session, instance) = rows[name]
+                        store.log_event(event)
+                        store.db.execute(
+                            "UPDATE audit_events SET request_id=?, session_id=?, agent_instance_id=?, agent_id=? "
+                            "WHERE id=?",
+                            (request_id, session or None, instance or None, "client-session-agent", event.id))
+                    store.db.commit()
+                    finding = rows["finding"][0]
+                    facts = store.agent_facts_for_alerts([finding.id])[finding.id]
+                    self.assertEqual(facts.get("agent_identity"), expected)
+                    self.assertEqual(facts.get("agent_instance"), "ais-current")
+                    listed = [e.id for e in store.list_alerts(50)]
+                    shown = self.runner.invoke(alerts, ["--show", str(listed.index(finding.id) + 1)],
+                                               obj=self.app, catch_exceptions=False)
+                    self.assertEqual(shown.exit_code, 0, shown.output)
+                    self.assertNotRegex(shown.output, rf"Agent:\s+{later}")
+                    if expected:
+                        self.assertRegex(shown.output, rf"Agent:\s+{expected}")
+
     def _finding(self, request_id: str, hook_details: str, at: datetime) -> str:
         store = self.app.store
         hook = Event(action="connector-hook", target="PreToolUse", severity="INFO",
