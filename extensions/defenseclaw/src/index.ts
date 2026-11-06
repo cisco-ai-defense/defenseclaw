@@ -145,8 +145,13 @@ function failClosedVerdict(reason: string): InspectVerdict {
 }
 
 // Only a classified outage or timeout can use the account's saved mode.
-function unavailableVerdict(reason: string): InspectVerdict {
-  if (loadOpenClawOutageMode() === "open") {
+function unavailableVerdict(reason: string, payload: Record<string, unknown>): InspectVerdict {
+  const tool = typeof payload.tool === "string" ? payload.tool : "";
+  const args = payload.args && typeof payload.args === "object" && !Array.isArray(payload.args)
+    ? payload.args as Record<string, unknown> : {};
+  const mode = loadOpenClawOutageMode({ name: tool, args, cwd: process.cwd() });
+  if (mode === "protected") return failClosedVerdict("tool targets protected state");
+  if (mode === "open") {
     const warning = `DefenseClaw warning: ${reason}; tool call is running without inspection.`;
     console.warn(warning);
     return {
@@ -508,7 +513,7 @@ export default function (api: DefenseClawPluginHost) {
         }
         const msg = err instanceof Error ? err.message : String(err);
         return isOutageOrTimeout(err)
-          ? unavailableVerdict(`sidecar body unavailable: ${msg}`)
+          ? unavailableVerdict(`sidecar body unavailable: ${msg}`, payload)
           : failClosedVerdict(`sidecar body unavailable: ${msg}`);
       }
     } catch (err) {
@@ -522,7 +527,7 @@ export default function (api: DefenseClawPluginHost) {
       });
       const msg = err instanceof Error ? err.message : String(err);
       return isOutageOrTimeout(err)
-        ? unavailableVerdict(`sidecar unreachable: ${msg}`)
+        ? unavailableVerdict(`sidecar unreachable: ${msg}`, payload)
         : failClosedVerdict(`sidecar request failed: ${msg}`);
     } finally {
       clearTimeout(timer);

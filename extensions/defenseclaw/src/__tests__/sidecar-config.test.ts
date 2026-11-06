@@ -61,6 +61,25 @@ describe("loadOpenClawOutageMode", () => {
     expect(loadOpenClawOutageMode()).toBe("closed");
   });
 
+  it("binds the answer to the active custom data root in both tier orientations", () => {
+    const previous = process.env.DEFENSECLAW_HOME;
+    process.env.DEFENSECLAW_HOME = "/active-root";
+    try {
+      for (const answer of ["open\n", "closed\n"]) {
+        mockExecFileSync.mockReturnValue(answer);
+        expect(loadOpenClawOutageMode()).toBe(answer.trim());
+        expect(mockExecFileSync).toHaveBeenLastCalledWith(
+          "/mock-home/.local/bin/defenseclaw-gateway",
+          ["hook-outage-mode", "--connector", "openclaw", "--hook-dir", "/active-root/hooks"],
+          expect.objectContaining({ env: expect.objectContaining({ DEFENSECLAW_HOME: "/active-root" }) }),
+        );
+      }
+    } finally {
+      if (previous === undefined) delete process.env.DEFENSECLAW_HOME;
+      else process.env.DEFENSECLAW_HOME = previous;
+    }
+  });
+
   it("uses the saved resolver for a per-user Windows install", () => {
     const previous = Object.getOwnPropertyDescriptor(process, "platform");
     Object.defineProperty(process, "platform", { value: "win32", configurable: true });

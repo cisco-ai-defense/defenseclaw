@@ -223,7 +223,7 @@ export function _resetSidecarConfigCache(): void {
 }
 
 /** Ask the installed gateway binary for the saved OpenClaw outage mode. */
-export function loadOpenClawOutageMode(): "open" | "closed" {
+export function loadOpenClawOutageMode(tool?: { name: string; args: Record<string, unknown>; cwd: string }): "open" | "closed" | "protected" {
   try {
     // The account home comes from the OS, not the agent's HOME or
     // DEFENSECLAW_HOME. The helper reads the account's saved config and
@@ -232,20 +232,26 @@ export function loadOpenClawOutageMode(): "open" | "closed" {
     if (!isAbsolute(accountHome)) return "closed";
     const binary = join(accountHome, ".local", "bin",
       process.platform === "win32" ? "defenseclaw-gateway.exe" : "defenseclaw-gateway");
-    const hookDir = join(accountHome, ".defenseclaw", "hooks");
+    const activeHome = resolveDefenseClawHome();
+    const hookDir = join(activeHome, "hooks");
+    const activeRootEnv = process.env.DEFENSECLAW_HOME
+      ? { DEFENSECLAW_HOME: activeHome } : {};
     const env = process.platform === "win32"
       ? { HOME: accountHome, USERPROFILE: accountHome,
           SystemRoot: process.env.SystemRoot || "C:\\Windows",
-          PATH: join(process.env.SystemRoot || "C:\\Windows", "System32") }
-      : { HOME: accountHome, PATH: "/usr/bin:/bin" };
+          PATH: join(process.env.SystemRoot || "C:\\Windows", "System32"), ...activeRootEnv }
+      : { HOME: accountHome, PATH: "/usr/bin:/bin", ...activeRootEnv };
     const answer = execFileSync(binary, [
       "hook-outage-mode", "--connector", "openclaw", "--hook-dir", hookDir,
+      ...(tool ? ["--tool-payload-stdin"] : []),
     ], {
       encoding: "utf8", timeout: 3000, maxBuffer: 64,
+      ...(tool ? { input: JSON.stringify(tool) } : {}),
       env,
-      stdio: ["ignore", "pipe", "ignore"],
+      stdio: [tool ? "pipe" : "ignore", "pipe", "ignore"],
     });
-    return answer.trim() === "open" ? "open" : "closed";
+    const mode = answer.trim();
+    return mode === "open" || mode === "protected" ? mode : "closed";
   } catch {
     return "closed";
   }
