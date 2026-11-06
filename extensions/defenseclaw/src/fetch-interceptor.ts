@@ -31,6 +31,7 @@ import { realpathSync } from "node:fs";
 import { createRequire } from "node:module";
 import { createEgressReporter, type EgressReporter } from "./egress-telemetry.js";
 import { loadSidecarConfig } from "./sidecar-config.js";
+import { proveListener, provenCreateConnection } from "./listener-proof.js";
 import {
   HEADER_DEFENSECLAW_AGENT_ID,
   HEADER_DEFENSECLAW_AGENT_INSTANCE_ID,
@@ -222,6 +223,11 @@ export async function bootstrapProviderOverlay(
   const ctrl = new AbortController();
   const timer = setTimeout(() => ctrl.abort(), timeoutMs);
   try {
+    if (options?.token) {
+      // The token goes only to a listener that proves it is this account's
+      // gateway (GAP-0594).
+      await proveListener("127.0.0.1", guardrailPort, options.token);
+    }
     const res = await doFetch(
       `http://127.0.0.1:${guardrailPort}/v1/config/providers`,
       {
@@ -1204,6 +1210,67 @@ function completeUndiciProbe(handler: unknown): boolean {
   }
 }
 
+/**
+ * Answer an undici handler with the provider-shaped 503 of a gateway outage
+ * (gatewayDownResponse), for a proxy hop whose listener did not prove it is
+ * this account's gateway: nothing was sent (GAP-0594).
+ */
+function completeUndiciGatewayDown(handler: unknown): void {
+  const sink = handler as {
+    onRequestStart?: (controller: unknown, context?: unknown) => void;
+    onResponseStart?: (controller: unknown, status: number, headers: Record<string, string>, statusText?: string) => void;
+    onResponseData?: (controller: unknown, chunk: Buffer) => void;
+    onResponseEnd?: (controller: unknown, trailers: Record<string, string>) => void;
+    onConnect?: (abort: () => void) => void;
+    onHeaders?: (status: number, headers: Buffer[], resume: () => void, statusText?: string) => boolean | void;
+    onData?: (chunk: Buffer) => boolean | void;
+    onComplete?: (trailers: Buffer[]) => void;
+    onError?: (err: Error) => void;
+  };
+  const body = Buffer.from(
+    JSON.stringify({ type: "error", error: { type: "defenseclaw_gateway_down", message: GATEWAY_DOWN_MESSAGE } }),
+  );
+  try {
+    if (typeof sink.onResponseStart === "function") {
+      const controller = {
+        abort: () => undefined, pause: () => undefined, resume: () => undefined,
+        paused: false, aborted: false, reason: null, rawHeaders: [],
+      };
+      sink.onRequestStart?.(controller, {});
+      sink.onResponseStart(controller, 503, { "content-type": "application/json", "x-should-retry": "false" }, "Service Unavailable");
+      sink.onResponseData?.(controller, body);
+      sink.onResponseEnd?.(controller, {});
+      return;
+    }
+    sink.onConnect?.(() => undefined);
+    sink.onHeaders?.(
+      503,
+      [Buffer.from("content-type"), Buffer.from("application/json"), Buffer.from("x-should-retry"), Buffer.from("false")],
+      () => undefined,
+      "Service Unavailable",
+    );
+    sink.onData?.(body);
+    sink.onComplete?.([]);
+  } catch (err) {
+    sink.onError?.(err instanceof Error ? err : new Error(String(err)));
+  }
+}
+
+/** Report err to an undici handler whose deferred dispatch threw (GAP-0594). */
+function failUndiciHandler(handler: unknown, err: unknown): void {
+  const sink = handler as { onResponseError?: (controller: unknown, err: Error) => void; onError?: (err: Error) => void };
+  const error = err instanceof Error ? err : new Error(String(err));
+  try {
+    if (typeof sink.onResponseError === "function") {
+      sink.onResponseError({ abort: () => undefined }, error);
+    } else {
+      sink.onError?.(error);
+    }
+  } catch {
+    // The handler cannot be told; never let it escape as an unhandled rejection.
+  }
+}
+
 /** The undici copy the host application ships, as far as the interceptor needs it. */
 type HostUndici = {
   Agent: (new () => { close?: () => Promise<void> }) & { prototype: object };
@@ -1399,6 +1466,7 @@ export function createFetchInterceptor(
       // carries the origin only, as on the fetch and https layers (GAP-0242).
       const proxyHdrs = buildProxyHeaders(new URL(origin).origin, providerKey, getCorrelationHeaders);
       opts.headers = { ...existingHeaders, ...proxyHdrs };
+      const isProbe = readUndiciHeader(opts.headers, INTERCEPTION_PROBE_HEADER) === "1";
 
       noteInterceptLayer(layer === "host" ? "undici-host" : "undici", urlStr);
       egressReporter?.report({
@@ -1410,7 +1478,7 @@ export function createFetchInterceptor(
         decision: "intercept",
         reason: layer === "host" ? "undici-host-dispatcher" : "undici-dispatcher",
       });
-      if (readUndiciHeader(opts.headers, INTERCEPTION_PROBE_HEADER) === "1") {
+      if (isProbe) {
         // Either layer proves a probe was rewritten: OpenClaw swaps the global
         // dispatcher for its own after the first agent run, and the host layer
         // keeps intercepting.
@@ -1419,6 +1487,23 @@ export function createFetchInterceptor(
         if (layer === "host") lastHostProbeDestination = destination;
         return completeUndiciProbe(handler);
       }
+      // The provider key and token go only to a guardrail listener that
+      // proves it is this account's gateway right before this request
+      // (GAP-0594). Dispatch once the proof is in; a failed proof, or no
+      // token to prove with, answers as a gateway outage and sends nothing.
+      proveListener("127.0.0.1", guardrailPort, loadSidecarConfig().token).then(
+        () => {
+          try {
+            next(opts, handler);
+          } catch (err) {
+            failUndiciHandler(handler, err);
+          }
+        },
+        () => {
+          completeUndiciGatewayDown(handler);
+        },
+      );
+      return true;
     }
 
     return next(opts, handler);
@@ -1525,6 +1610,16 @@ export function createFetchInterceptor(
           status: 200,
           headers: { "content-type": "application/json", [INTERCEPTION_PROBE_HEADER]: "1" },
         });
+      }
+
+      // The provider key and token go only to a guardrail listener that
+      // proved it is this account's gateway (GAP-0594); a failed proof
+      // answers as a gateway outage and sends nothing.
+      // No token to prove with sends nothing either.
+      try {
+        await proveListener("127.0.0.1", guardrailPort, loadSidecarConfig().token);
+      } catch {
+        return gatewayDownResponse();
       }
 
       // Merge effective headers (Request + init overrides) and add
@@ -1871,9 +1966,17 @@ export function createFetchInterceptor(
           protocol: "http:",
           path: `${originalUrl.pathname}${originalUrl.search}`,
           headers: { ...hdrs, ...proxyHdrs },
-          // Force Node to pick a default http.Agent for this request. Leaving
-          // the caller's https.Agent in place would throw at socket allocation.
-          agent: false,
+          // The caller's https.Agent is dropped: left in place it would throw
+          // at socket allocation. The hop's own connection proves it reaches this account's gateway
+          // before the provider key and token are written on it (GAP-0594);
+          // with no token the connection fails and nothing is written.
+          // node:http uses createConnection only without an agent.
+          agent: undefined,
+          createConnection: provenCreateConnection(
+            "127.0.0.1",
+            guardrailPort,
+            loadSidecarConfig().token,
+          ) as unknown as NodeRequestOptions["createConnection"],
         };
 
         if (!knownForHTTPS && shapedForHTTPS) {
@@ -2157,6 +2260,7 @@ export function createFetchInterceptor(
     const headers: Record<string, string> = { "Content-Type": "application/json" };
     if (token) headers[DC_AUTH_HEADER] = `Bearer ${token}`;
     try {
+      if (token) await proveListener("127.0.0.1", guardrailPort, token);
       const controller = new AbortController();
       const timeout = setTimeout(() => controller.abort(), 2_000);
       await originalFetch(`http://127.0.0.1:${guardrailPort}/v1/events/egress`, {

@@ -2074,6 +2074,9 @@ func buildSharedJudge(cfg *config.Config, rp *guardrail.RulePack, providers *gen
 		return nil, unavailable, nil
 	}
 	judge.secureClient = cfg.SecureClientIntegration()
+	if judge.secureClient && !cfg.Guardrail.Judge.MaxParallelExplicit && cfg.Guardrail.Judge.MaxParallel == 0 {
+		judge.calls = nil
+	}
 	if !judge.secureClient {
 		judge.decision = newDecisionModel(cfg, dotenvPath)
 		if judge.decision != nil {
@@ -3703,6 +3706,7 @@ func (s *Sidecar) runGatewayLoop(ctx context.Context) error {
 				cancelConnect()
 			}
 		}()
+		s.client.OnConnectError = s.publishGatewayConnectError
 		err := s.client.ConnectWithRetry(connectCtx)
 		close(connectDone)
 		<-watcherDone
@@ -3792,6 +3796,21 @@ func (s *Sidecar) runGatewayLoop(ctx context.Context) error {
 			}
 		}
 	}
+}
+
+// publishGatewayConnectError puts an OpenClaw pairing or token rejection,
+// with the operator step that fixes it, on the gateway subsystem in /health
+// while the client keeps retrying (GAP-0592). `defenseclaw-gateway status`
+// prints the error and hint, and `defenseclaw doctor` gives the hint as its
+// next step. Other connect failures keep the plain reconnecting state.
+func (s *Sidecar) publishGatewayConnectError(err error, hint string) {
+	if err == nil || hint == "" {
+		return
+	}
+	s.health.SetGateway(StateReconnecting, err.Error(), map[string]interface{}{
+		"reason": "openclaw_operator_action_required",
+		"hint":   hint,
+	})
 }
 
 // watcherDirSource tags where each dir came from for telemetry / logs.

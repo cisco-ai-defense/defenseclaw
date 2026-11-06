@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import ctypes
 import os
+import shlex
 import stat
 import subprocess
 import sys
@@ -671,6 +672,63 @@ def test_doctor_names_sudo_runtime_leftovers(monkeypatch, tmp_path) -> None:
     assert "guided ownership repair" in check["detail"]
     assert "descriptor-bound" in check["remediation"]
     assert check["reason_code"] == "sudo-runtime-leftovers"
+
+
+def _gateway_account_fixture(monkeypatch, tmp_path, *, process_uid, deployment_mode=""):
+    pid_path = os.path.join(os.fspath(tmp_path), "gateway.pid")
+    monkeypatch.setattr(
+        cmd_doctor,
+        "read_pid_record",
+        lambda path: (
+            doctor_gateway.PIDRecord("ok", pid=4242) if path == pid_path else doctor_gateway.PIDRecord("missing")
+        ),
+    )
+    monkeypatch.setattr(cmd_doctor, "pid_alive", lambda pid: pid == 4242)
+    monkeypatch.setattr(cmd_doctor, "_process_uid", lambda pid: process_uid if pid == 4242 else None)
+    result = cmd_doctor._DoctorResult(quiet=True)
+    cmd_doctor._check_gateway_account(
+        SimpleNamespace(data_dir=os.fspath(tmp_path), deployment_mode=deployment_mode),
+        result,
+    )
+    return result
+
+
+@pytest.mark.skipif(os.name == "nt" or os.geteuid() == 0, reason="POSIX per-user gateway account")
+def test_doctor_warns_when_per_user_gateway_runs_as_root(monkeypatch, tmp_path) -> None:
+    result = _gateway_account_fixture(monkeypatch, tmp_path, process_uid=0)
+
+    check = result.checks[-1]
+    assert check["status"] == "warn"
+    assert check["label"] == "Gateway account"
+    assert "runs as root" in check["detail"]
+    assert check["reason_code"] == "per-user-gateway-runs-as-root"
+    assert "DefenseClawMac" in check["remediation"]
+    assert "sudo defenseclaw-gateway stop" in check["remediation"]
+
+
+@pytest.mark.skipif(os.name == "nt" or os.geteuid() == 0, reason="POSIX per-user gateway account")
+def test_doctor_gateway_account_hint_quotes_the_home(monkeypatch, tmp_path) -> None:
+    home = tmp_path / "my home; touch pwned"
+    home.mkdir()
+    result = _gateway_account_fixture(monkeypatch, home, process_uid=0)
+
+    remediation = result.checks[-1]["remediation"]
+    assert shlex.quote(os.fspath(home)) in remediation
+    assert shlex.split(remediation.split("Otherwise: ", 1)[1])[8] == os.fspath(home)
+
+
+@pytest.mark.skipif(os.name == "nt" or os.geteuid() == 0, reason="POSIX per-user gateway account")
+def test_doctor_gateway_account_quiet_for_own_or_managed_gateway(monkeypatch, tmp_path) -> None:
+    assert _gateway_account_fixture(monkeypatch, tmp_path, process_uid=os.geteuid()).checks == []
+    assert _gateway_account_fixture(monkeypatch, tmp_path, process_uid=None).checks == []
+    managed = _gateway_account_fixture(monkeypatch, tmp_path, process_uid=0, deployment_mode="managed_enterprise")
+    assert managed.checks == []
+
+
+@pytest.mark.skipif(not sys.platform.startswith(("linux", "darwin")), reason="kernel process owner")
+def test_process_uid_reads_this_process_owner() -> None:
+    assert cmd_doctor._process_uid(os.getpid()) == os.getuid()
+    assert cmd_doctor._process_uid(0) is None
 
 
 @pytest.mark.skipif(os.name == "nt", reason="POSIX sudo leftover naming")

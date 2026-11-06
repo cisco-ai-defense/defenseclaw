@@ -30,13 +30,31 @@ const perUserFreshGatewayWindow = 12 * time.Second
 // PerUserGatewayFreshStartNoAnswer recognizes a no-status call sent to a
 // recently started gateway recorded for this account. The connected peer,
 // record, executable and kernel start identity must all name one process.
-func PerUserGatewayFreshStartNoAnswer(dataDir string, peer *PerUserPeerRecord) bool {
-	current, ok := verifiedFreshGatewayPeer(dataDir, peer)
-	if !ok {
-		return false
+// An answer counts only if it finished before this connection was proven.
+// The second result names the bounded reason when the proof is unavailable.
+func PerUserGatewayFreshStartNoAnswer(dataDir string, peer *PerUserPeerRecord) (bool, string) {
+	if dataDir == "" || !filepath.IsAbs(dataDir) || peer == nil {
+		return false, "no_verified_connection"
 	}
-	answered, valid := perUserGatewayAnswerSeen(dataDir, current)
-	return valid && !answered
+	connected, ok := peer.wait(50 * time.Millisecond)
+	if !ok || connected.pid <= 0 || connected.identity == "" {
+		return false, "no_holder"
+	}
+	current, ok := freshGatewayFromRecord(dataDir)
+	if !ok {
+		return false, "not_fresh"
+	}
+	if current.pid != connected.pid || current.identity != connected.identity {
+		return false, "no_holder"
+	}
+	before, valid := perUserGatewayAnsweredBefore(dataDir, current, peer.at)
+	if !valid {
+		return false, "answer_record_unavailable"
+	}
+	if before {
+		return false, "answered_before"
+	}
+	return true, ""
 }
 
 // perUserGatewayRecentlyStarted is the cheap first look of the native hook
@@ -54,33 +72,47 @@ func perUserGatewayRecentlyStarted(dataDir string) bool {
 	return age > -2*time.Second && age <= perUserFreshGatewayWindow+2*time.Second
 }
 
-// perUserFreshGatewayHoldsCall is the native hook's restart-window proof
+// perUserFreshGatewayProof is the native hook's restart-window proof
 // (rel-1-0-6 GAP-0295): the server end of the call's proven connection
-// (check) is held by the gateway this account's record names, that process
+// (check) was held by the gateway this account's record names when the
+// connection was open, or is still held at the deadline. That process
 // started within perUserFreshGatewayWindow (kernel start time, executable and
-// start identity all match the record), and it has completed no hook answer
-// yet. A gateway that answered any call, an old gateway, an unknown holder
-// and an unreadable record are no proof.
-func perUserFreshGatewayHoldsCall(dataDir string, check *perUserPeerCheck) bool {
+// start identity all match the record), and it had completed no hook answer
+// before the connection. An old gateway, an unknown holder and an unreadable
+// record are no proof.
+func perUserFreshGatewayProof(dataDir string, check *perUserPeerCheck) restartProofResult {
 	if check == nil {
-		return false
+		return restartProofResult{reason: "no_verified_connection"}
 	}
 	ends := check.ends.Load()
 	if ends == nil {
-		return false
+		return restartProofResult{reason: "no_verified_connection"}
 	}
 	client, okc := ends.local.(*net.TCPAddr)
 	server, oks := ends.remote.(*net.TCPAddr)
 	if !okc || !oks {
-		return false
+		return restartProofResult{reason: "no_verified_connection"}
 	}
 	current, ok := freshGatewayFromRecord(dataDir)
-	if !ok || !perUserProcessHoldsConnection(current.pid, client, server) {
-		return false
+	if !ok {
+		return restartProofResult{reason: "not_fresh"}
+	}
+	if owner := check.owner.Load(); owner != nil {
+		if owner.pid != current.pid || owner.identity != current.identity {
+			return restartProofResult{reason: "no_holder"}
+		}
+	} else {
+		// The accepted socket must have exactly one holder, as on the
+		// shell helper's connection proof. A capture taken earlier also
+		// preserves this fact if the socket closed at the deadline.
+		holder, unique := perUserConnectedPeerPID(client, server)
+		if !unique || holder != current.pid {
+			return restartProofResult{reason: "no_holder"}
+		}
 	}
 	// The pid was not reused while its files were read.
 	if identity, ok := procidentity.Of(current.pid); !ok || identity != current.identity {
-		return false
+		return restartProofResult{reason: "not_fresh"}
 	}
 	// Calls that reach a restarted gateway together are answered in no
 	// set order: a sibling answered first does not make this one a call
@@ -88,19 +120,44 @@ func perUserFreshGatewayHoldsCall(dataDir string, check *perUserPeerCheck) bool 
 	// gateway had completed any answer before this connection reached it
 	// (rel-1-0-6 GAP-0295, v108k).
 	before, valid := perUserGatewayAnsweredBefore(dataDir, current, ends.at)
-	return valid && !before
+	if !valid {
+		return restartProofResult{reason: "answer_record_unavailable"}
+	}
+	if before {
+		return restartProofResult{reason: "answered_before"}
+	}
+	return restartProofResult{ok: true}
 }
 
-func verifiedFreshGatewayPeer(dataDir string, peer *PerUserPeerRecord) (perUserPeerProcess, bool) {
-	if dataDir == "" || !filepath.IsAbs(dataDir) || peer == nil {
-		return perUserPeerProcess{}, false
+// perUserCaptureFreshGatewayOwner records the sole holder while the call's
+// verified connection is open. A canceled request can close that socket at
+// the answer deadline before the proof runs. Capture runs only for a recent
+// gateway record and never delays the request.
+func perUserCaptureFreshGatewayOwner(check *perUserPeerCheck) {
+	if check == nil {
+		return
 	}
-	before, ok := peer.wait(50 * time.Millisecond)
-	if !ok || before.pid <= 0 || before.identity == "" {
-		return perUserPeerProcess{}, false
+	ends := check.ends.Load()
+	if ends == nil {
+		return
 	}
-	current, ok := freshGatewayFromRecord(dataDir)
-	return current, ok && current.pid == before.pid && current.identity == before.identity
+	client, okc := ends.local.(*net.TCPAddr)
+	server, oks := ends.remote.(*net.TCPAddr)
+	if !okc || !oks {
+		return
+	}
+	go func() {
+		ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+		defer cancel()
+		pid, ok := perUserConnectedPeerPIDWithin(ctx, client, server)
+		if !ok {
+			return
+		}
+		identity, ok := procidentity.Of(pid)
+		if ok && identity != "" && ctx.Err() == nil {
+			check.owner.Store(&perUserPeerProcess{pid: pid, identity: identity})
+		}
+	}()
 }
 
 func freshGatewayFromRecord(dataDir string) (perUserPeerProcess, bool) {

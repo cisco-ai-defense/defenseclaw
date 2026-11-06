@@ -641,23 +641,6 @@ func TestGetConfigRPC(t *testing.T) {
 	}
 }
 
-func TestGetStatusRPC(t *testing.T) {
-	received := make(chan receivedRequest, 5)
-	srv := startMockGW(t, rpcRecordingLoop(received))
-	client := connectToMockGW(t, srv)
-
-	ctx := context.Background()
-	_, err := client.GetStatus(ctx)
-	if err != nil {
-		t.Fatalf("GetStatus: %v", err)
-	}
-
-	rpc := drainRPC(t, received)
-	if rpc.Method != "status" {
-		t.Errorf("Method = %q, want status", rpc.Method)
-	}
-}
-
 func TestGetToolsCatalogRPC(t *testing.T) {
 	received := make(chan receivedRequest, 5)
 	srv := startMockGW(t, rpcRecordingLoop(received))

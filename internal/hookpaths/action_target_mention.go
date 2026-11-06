@@ -267,9 +267,34 @@ func actionPosixTargetMention(command, cwd, home string, depth int, stateOnly bo
 				return true
 			}
 			values["PWD"] = effectiveCWD
+			// The shell expands and opens a statement's redirects before the
+			// command runs, so what the command itself binds (printf -v and
+			// %n, read, cd, export, declare, local) cannot move them. The
+			// values from before the statement are read too (GAP-0428
+			// regression of the GAP-2298 class: printf "$X" >
+			// "$HOME"/.defenseclaw/config.yaml). An assignment-only statement
+			// gets both readings: bash assigns first, dash opens the redirect
+			// first, and the hook cannot tell which shell runs it.
+			var before actionValues
+			if len(stmt.Redirs) > 0 {
+				before = maps.Clone(values)
+			}
 			actionUpdateValues(stmt, values, effectiveCWD, home)
+			redirectMentions := func(redir *syntax.Redirect) bool {
+				return actionExpandedWordGlob(redir.Word, values, effectiveCWD, home, check) || checkBraceFields(redir.Word, true) || checkWord(redir.Word)
+			}
 			for _, redir := range stmt.Redirs {
-				if redir.Word != nil && (actionExpandedWordGlob(redir.Word, values, effectiveCWD, home, check) || checkBraceFields(redir.Word, true) || checkWord(redir.Word)) {
+				if redir.Word == nil {
+					continue
+				}
+				hit := redirectMentions(redir)
+				if !hit && before != nil {
+					after := values
+					values = before
+					hit = redirectMentions(redir)
+					values = after
+				}
+				if hit {
 					found = true
 					return false
 				}

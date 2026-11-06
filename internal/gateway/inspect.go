@@ -1997,20 +1997,28 @@ func (a *APIServer) runHookJudgeSingle(ctx context.Context, strategyDirection, j
 		return hookJudgeLaneVerdict(cfg, connector, strategyDirection, v)
 	}
 
-	// A bounded hook fails closed when its answer is late (GAP-2625). The
-	// judge runs apart from the answer and records its verdict (the judge
-	// event) when it arrives. In observe mode the answer does not wait for
-	// it: nothing is enforced, and a benign call must never be denied for a
-	// slow judge. In action mode the answer waits for the judge only up to
-	// hookJudgeAnswerWindow, then keeps the rule/AID verdict: a rule block
-	// stays a block, and a judge that is late cannot make one.
+	// A bounded action hook cancels the model request when its answer
+	// window closes. An observe hook returns immediately while its judge
+	// runs until that same window; it still records an answer in time.
+	observe := sandboxHookMode(ctx, connector, cfg.HookModeForConnector(connector)) != "action"
+	var callCtx context.Context
+	var cancel context.CancelFunc
+	if observe {
+		callCtx, cancel = context.WithDeadline(context.WithoutCancel(ctx), answerEnd)
+	} else {
+		callCtx, cancel = context.WithCancel(ctx)
+		defer cancel()
+	}
 	done := make(chan *ScanVerdict, 1)
 	go func() {
 		defer func() { <-a.hookJudgeSem }()
-		done <- call(context.WithoutCancel(ctx))
+		if observe {
+			defer cancel()
+		}
+		done <- call(callCtx)
 	}()
-	if sandboxHookMode(ctx, connector, cfg.HookModeForConnector(connector)) != "action" {
-		fmt.Fprintf(os.Stderr, "[inspect] hook judge runs after the answer (observe) connector=%s direction=%s; its verdict is recorded when it arrives\n",
+	if observe {
+		fmt.Fprintf(os.Stderr, "[inspect] hook judge does not hold the answer (observe) connector=%s direction=%s\n",
 			connector, strategyDirection)
 		return nil
 	}
@@ -2031,7 +2039,7 @@ func (a *APIServer) runHookJudgeSingle(ctx context.Context, strategyDirection, j
 	case <-wait.C:
 	case <-ctx.Done():
 	}
-	fmt.Fprintf(os.Stderr, "[inspect] hook judge late (over the %s hook answer window) connector=%s direction=%s; keeping regex/AID verdict, the judge verdict is recorded when it arrives\n",
+	fmt.Fprintf(os.Stderr, "[inspect] hook judge late (over the %s hook answer window) connector=%s direction=%s; keeping regex/AID verdict\n",
 		hookJudgeAnswerWindow, connector, strategyDirection)
 	fallback(judgeFallbackLate)
 	return nil
@@ -2366,7 +2374,26 @@ func (a *APIServer) handleInspectTool(w http.ResponseWriter, r *http.Request) {
 		// A block, confirm or alert row carries the verdict's severity.
 		toolEvent.Severity = verdict.Severity
 	}
-	_ = a.logger.LogEventCtx(r.Context(), toolEvent)
+	// A server built without an audit logger (the deterministic benchmark
+	// harness and unit servers; a running gateway always has one) has no
+	// audit record to lose, so its verdict stands: the hook routes skip
+	// errHookAuditNotConfigured and a proxy without an observability
+	// runtime reports no evaluation-log error, for the same reason.
+	var auditErr error
+	if a.logger != nil {
+		auditErr = a.logger.LogEventCtx(r.Context(), toolEvent)
+	}
+	if auditErr != nil {
+		// The tier rule of the hook routes (GAP-0593): strict, managed and
+		// sandbox calls fail closed; a default or permissive allow stays
+		// allowed with the degraded-audit warning.
+		denied := a.inspectAuditFailureVerdict(r.Context(), serverConnector, &req, verdict)
+		if denied && a.recordsConnectorHealth(r.Context()) {
+			a.health.RecordToolBlockFor(serverConnector)
+		}
+		fmt.Fprintf(os.Stderr, "[inspect] inspect audit persistence failed tool=%q action=%s denied_for_audit=%t: %v\n",
+			req.Tool, verdict.Action, denied, auditErr)
+	}
 
 	a.emitCodeGuardTelemetry(r.Context(), &req, verdict, elapsed)
 

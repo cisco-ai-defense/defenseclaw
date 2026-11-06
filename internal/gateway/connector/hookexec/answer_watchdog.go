@@ -110,10 +110,10 @@ type answerWatchdog struct {
 	// restart is the outage answer of a per-user call that met its own
 	// gateway's restart (perUserOutageSeen) or reached a gateway that only
 	// just started (restartWindowContact). restartProof says, at the
-	// deadline, whether the call's connection is held by a gateway that
-	// started moments ago and has answered no call yet (GAP-0295).
+	// deadline, whether the call's connection was held by a gateway that
+	// started moments ago and had answered no call before it (GAP-0295).
 	restart      *perUserRestartAnswer
-	restartProof func() bool
+	restartProof func() restartProofResult
 	// failureLog is the call's hook-failure log, opened
 	// answerWatchdogLogPrepareLead before the deadline (watch).
 	failureLog     *preparedFailureLog
@@ -528,10 +528,14 @@ func (w *answerWatchdog) restartWindowContact(opts Options, sp spec, failMode st
 	}
 	home := opts.Home
 	w.mu.Lock()
-	w.restartProof = func() bool { return perUserRestartWindowProof(home, check) }
+	w.restartProof = func() restartProofResult { return perUserRestartWindowProof(home, check) }
 	prepared := w.restart != nil
 	w.mu.Unlock()
-	if prepared || !perUserGatewayRecentlyStarted(home) {
+	if !perUserGatewayRecentlyStarted(home) {
+		return
+	}
+	perUserCaptureFreshGatewayOwner(check)
+	if prepared {
 		return
 	}
 	go func() {
@@ -545,9 +549,14 @@ func (w *answerWatchdog) restartWindowContact(opts Options, sp spec, failMode st
 }
 
 // perUserRestartWindowProof reports whether the connection of check is held
-// by this account's gateway that started moments ago and has answered no
-// hook call yet; tests replace it.
-var perUserRestartWindowProof = perUserFreshGatewayHoldsCall
+// by this account's gateway that started moments ago and had answered no
+// hook call before the connection; tests replace it.
+var perUserRestartWindowProof = perUserFreshGatewayProof
+
+type restartProofResult struct {
+	ok     bool
+	reason string
+}
 
 // restartProofWait bounds the restart-window proof at the deadline: a proof
 // not done by then is no proof, and the call stays closed.
@@ -556,12 +565,25 @@ var restartProofWait = 250 * time.Millisecond
 // restartWindowCandidate is the proof to run when the call's answer could
 // still be the restart outage: an outage answer is ready, and the gateway
 // sent no status or progress and the call logged no failure. w.mu is held.
-func (w *answerWatchdog) restartWindowCandidateLocked() func() bool {
+func (w *answerWatchdog) restartWindowCandidateLocked() func() restartProofResult {
 	if w.secureClient || w.restart == nil || w.restartProof == nil || w.answeredStatus || w.progressSeen ||
 		w.failureClosed || w.claimedAnswer || w.failureLogged || w.fired {
 		return nil
 	}
 	return w.restartProof
+}
+
+func (w *answerWatchdog) restartWindowSkipReasonLocked() string {
+	switch {
+	case w.restartProof == nil:
+		return "no_verified_connection"
+	case w.restart == nil:
+		return "outage_mode_not_ready"
+	case w.answeredStatus || w.progressSeen:
+		return "answer_started"
+	default:
+		return "proof_not_applicable"
+	}
 }
 
 // restartWindowProven runs the restart-window proof for the call's own
@@ -573,29 +595,40 @@ func (w *answerWatchdog) restartWindowProven() (string, bool) {
 	}
 	w.mu.Lock()
 	proof := w.restartWindowCandidateLocked()
+	skipReason := w.restartWindowSkipReasonLocked()
 	w.mu.Unlock()
-	if proof == nil || !provenWithin(proof, restartProofWait) {
+	if proof == nil {
+		w.failureLog.setRestartReason(skipReason)
+		return "", false
+	}
+	result := provenWithin(proof, restartProofWait)
+	if !result.ok {
+		w.failureLog.setRestartReason(result.reason)
 		return "", false
 	}
 	w.mu.Lock()
 	defer w.mu.Unlock()
 	if w.restartWindowCandidateLocked() == nil {
+		w.failureLog.setRestartReason(w.restartWindowSkipReasonLocked())
 		return "", false
 	}
 	return w.restart.mode, true
 }
 
 // provenWithin runs proof bounded by wait: a proof that takes longer is none.
-func provenWithin(proof func() bool, wait time.Duration) bool {
-	proven := make(chan bool, 1)
+func provenWithin(proof func() restartProofResult, wait time.Duration) restartProofResult {
+	proven := make(chan restartProofResult, 1)
 	go func() { proven <- proof() }()
 	timer := time.NewTimer(wait)
 	defer timer.Stop()
 	select {
 	case ok := <-proven:
+		if !ok.ok && ok.reason == "" {
+			ok.reason = "proof_rejected"
+		}
 		return ok
 	case <-timer.C:
-		return false
+		return restartProofResult{reason: "proof_timeout"}
 	}
 }
 
@@ -690,18 +723,25 @@ func (w *answerWatchdog) watch(deadline time.Time) {
 	}
 	w.mu.Lock()
 	proof := w.restartWindowCandidateLocked()
+	skipReason := w.restartWindowSkipReasonLocked()
 	w.mu.Unlock()
 	// Outside the lock: Run must still be able to finish meanwhile. A call
 	// whose connection a gateway that only just started holds, with no
 	// answer from it yet, is in that gateway's restart window: it gets the
 	// outage answer, not the closed no-decision one (GAP-0295).
-	if proof != nil && provenWithin(proof, restartProofWait) {
+	if proof == nil {
+		w.failureLog.setRestartReason(skipReason)
+	} else if result := provenWithin(proof, restartProofWait); result.ok {
 		w.mu.Lock()
 		if w.restartWindowCandidateLocked() != nil {
 			w.closedKnown = false
 			w.useRestartAnswerLocked(w.restart)
+		} else {
+			w.failureLog.setRestartReason(w.restartWindowSkipReasonLocked())
 		}
 		w.mu.Unlock()
+	} else {
+		w.failureLog.setRestartReason(result.reason)
 	}
 	w.mu.Lock()
 	installCheck := w.installCheck

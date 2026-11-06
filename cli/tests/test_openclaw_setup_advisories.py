@@ -10,9 +10,9 @@
 
 """OpenClaw setup advisories.
 
-GAP-1958: OpenClaw shows a DefenseClaw approval only in its Control UI and on
-chat channels that forward /approve; openclaw tui and local chat do not, so
-the call is denied when the request times out. Setup with human approval, the
+GAP-1958: OpenClaw shows a DefenseClaw approval in its Control UI, on chat
+channels that forward /approve and, from 2026.10.9, in openclaw tui (GAP-0597);
+elsewhere the call is denied when the request times out. Setup with human approval, the
 interactive HILT note and doctor's Human approval row now say where to answer.
 
 GAP-1959: from OpenClaw 2026.5.12 Amazon Bedrock is the external plugin

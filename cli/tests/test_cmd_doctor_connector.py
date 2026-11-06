@@ -2413,8 +2413,9 @@ class TestCheckHookHealth(unittest.TestCase):
 
     def test_proven_hermes_registration_with_a_running_host_names_the_close_step(self) -> None:
         # The registration is proven (execution probe passes): a running host
-        # may still hold the old hooks, so doctor cannot verify them and says
-        # to close every host; with no host running the check passes.
+        # may still hold the old hooks, so doctor warns that it cannot verify
+        # them and says to close the host (GAP-0579); with no host running the
+        # check passes.
         with tempfile.TemporaryDirectory() as tmp:
             hook = os.path.join(tmp, "config.yaml")
             with open(hook, "w", encoding="utf-8") as fh:
@@ -2424,11 +2425,13 @@ class TestCheckHookHealth(unittest.TestCase):
                 r = _DoctorResult()
                 with patch("defenseclaw.commands.cmd_doctor.hermes_config_path", return_value=hook), patch(
                     "defenseclaw.commands.cmd_doctor._hermes_host_running", return_value=running
-                ), patch("defenseclaw.commands.cmd_doctor._hermes_registered_execution_problem", return_value=""):
+                ), patch("defenseclaw.commands.cmd_doctor._hermes_registered_execution_problem", return_value=""), patch(
+                    "defenseclaw.commands.cmd_doctor._hermes_execution_proof_unavailable", return_value=""
+                ):
                     _check_hook_health(self._cfg(tmp, "hermes", [hook]), "hermes", r)
                 results[running] = r.checks[-1]
-        self.assertEqual(results[True]["status"], "fail", results[True])
-        self.assertIn("cannot verify", results[True]["detail"])
+        self.assertEqual(results[True]["status"], "warn", results[True])
+        self.assertIn("loaded hooks cannot be verified", results[True]["detail"])
         self.assertIn("live=false", results[True]["detail"])
         self.assertIn("close", results[True]["remediation"].lower())
         self.assertIn("defenseclaw doctor", results[True]["remediation"])

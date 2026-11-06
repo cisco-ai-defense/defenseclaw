@@ -6,12 +6,29 @@
 package enterprisehooks
 
 import (
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
 
 	"golang.org/x/sys/windows"
 )
+
+func TestWindowsAccountOwnedRootDataDirLinkExcludesChildLink(t *testing.T) {
+	target := deferredPendingProofFixture(t, true)
+	sid := currentWindowsTestSID(t)
+	dataDir := filepath.Join(target.UserHome, ".defenseclaw")
+	if err := os.MkdirAll(dataDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	outside, canary := outsideDataDirTree(t, target.UserHome)
+	plantWindowsAccountJunction(t, filepath.Join(dataDir, "hooks"), outside, sid)
+	if !WindowsAccountOwnedDataDirLink(target.UserHome, sid.String()) ||
+		WindowsAccountOwnedRootDataDirLink(target.UserHome, sid.String()) {
+		t.Fatal("a child link was classified as a root link")
+	}
+	requireOutsideDataDirTreeUnchanged(t, outside, canary)
+}
 
 func planValidationRootsForTarget(target ManifestTarget) (WindowsManagedRuntimePlan, error) {
 	return PlanWindowsManagedRuntimeRootsForValidation(
@@ -42,6 +59,9 @@ func TestStandaloneSignedOutAccountOwnDataDirLinkStaysPending(t *testing.T) {
 	}
 	if !WindowsAccountOwnedDataDirLink(target.UserHome, sid.String()) {
 		t.Fatal("status does not name the account's own link")
+	}
+	if !WindowsAccountOwnedRootDataDirLink(target.UserHome, sid.String()) {
+		t.Fatal("the root link was not identified")
 	}
 	if WindowsAccountCreatedDataDir(target.UserHome, sid.String()) {
 		t.Fatal("the account's junction reads as an account-created folder the guardian would adopt")
@@ -107,10 +127,39 @@ func TestStandaloneForeignOwnedDataDirLinkStaysRefused(t *testing.T) {
 	if WindowsAccountOwnedDataDirLink(target.UserHome, currentWindowsTestSID(t).String()) {
 		t.Fatal("status names a junction the account does not own as its own")
 	}
+	if WindowsAccountOwnedRootDataDirLink(target.UserHome, currentWindowsTestSID(t).String()) {
+		t.Fatal("the root link was attributed to a different account")
+	}
 	if !windowsEnterpriseStandaloneProcess() || windowsEnterpriseStandaloneDeferredDataDirAccountLink(target.UserHome, dataDir, currentWindowsTestSID(t)) {
 		t.Fatal("the retire would skip a junction the account does not own")
 	}
 	requireOutsideDataDirTreeUnchanged(t, outside, canary)
+}
+
+func TestStandaloneLifecycleValidationSkipsAdministratorOwnedDataDirLink(t *testing.T) {
+	target := deferredPendingProofFixture(t, true)
+	dataDir := filepath.Join(target.UserHome, ".defenseclaw")
+	outside, canary := outsideDataDirTree(t, target.UserHome)
+	admin, err := windows.CreateWellKnownSid(windows.WinBuiltinAdministratorsSid)
+	if err != nil {
+		t.Fatal(err)
+	}
+	plantWindowsAccountJunction(t, dataDir, outside, admin)
+	manifest := Manifest{Version: 1, Targets: []ManifestTarget{target}}
+	plan, err := PlanWindowsManagedRuntimeRootsForValidationSkippingAccountFailures(
+		manifest, `C:\ProgramData\DefenseClaw\etc\targets.yaml`, strings.Repeat("a", 64))
+	if err != nil || len(plan.Roots) != 0 || len(plan.SkippedProfiles) != 1 ||
+		plan.SkippedProfiles[0].SID != target.SID ||
+		!strings.Contains(plan.SkippedProfiles[0].Reason, "reject noncanonical managed runtime baseline") {
+		t.Fatalf("lifecycle validation plan = %+v, %v; want one account left pending", plan, err)
+	}
+	if pendingErr := RequireWindowsEnterpriseDeferredTargetPending(target); pendingErr == nil {
+		t.Fatal("the account's foreign-owned folder became trusted")
+	}
+	requireOutsideDataDirTreeUnchanged(t, outside, canary)
+	if owner, err := windowsPathOwnerNoFollow(dataDir); err != nil || owner == nil || !owner.Equals(admin) {
+		t.Fatalf("junction owner changed: %v, %v", owner, err)
+	}
 }
 
 func TestSecureClientDeferredOwnDataDirLinkStaysRefused(t *testing.T) {

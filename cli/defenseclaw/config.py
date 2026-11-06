@@ -2523,6 +2523,8 @@ class JudgeConfig:
     max_parallel: int = 0
     # Additional fields for an OpenAI-compatible judge request.
     extra_body: dict[str, Any] = field(default_factory=dict)
+    # Preserve an operator's explicit unlimited setting across load/save.
+    _max_parallel_explicit_zero: bool = False
     # Log judge prompts and responses (was DEFENSECLAW_JUDGE_TRACE).
     trace: bool = False
     # LLM overrides the top-level ``llm:`` block for the LLM judge.
@@ -5175,7 +5177,8 @@ def _config_to_dict(cfg: Config) -> dict[str, Any]:
             judge.pop("hook_connectors", None)
         if not judge.get("hook_timeout"):
             judge.pop("hook_timeout", None)
-        if not judge.get("max_parallel"):
+        judge.pop("_max_parallel_explicit_zero", None)
+        if not judge.get("max_parallel") and not cfg.guardrail.judge._max_parallel_explicit_zero:
             judge.pop("max_parallel", None)
         if not judge.get("extra_body"):
             judge.pop("extra_body", None)
@@ -6557,6 +6560,7 @@ def _merge_judge(raw: dict[str, Any] | None) -> JudgeConfig:
         hook_timeout=raw.get("hook_timeout", 0.0),
         max_parallel=_judge_max_parallel(raw.get("max_parallel", 0)),
         extra_body=raw.get("extra_body", {}),
+        _max_parallel_explicit_zero=type(raw.get("max_parallel")) is int and raw["max_parallel"] == 0,
         trace=raw.get("trace", False) is True,
         llm=_merge_llm(raw.get("llm")),
         model=raw.get("model", ""),

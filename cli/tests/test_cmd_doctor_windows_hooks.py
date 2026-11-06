@@ -3085,19 +3085,22 @@ class WindowsHookDoctorTests(unittest.TestCase):
         )
         result = _DoctorResult()
 
+        paths = {
+            "platform_name": "nt",
+            "config_path": str(config),
+            "install_root": str(self.install),
+            "search_path": str(self.install),
+            "pathext": ".EXE;.CMD",
+        }
+
         # A Hermes host that may be running keeps the pending-reload state;
-        # an idle Hermes is healthy (GAP-1298).
-        with patch.object(cmd_doctor, "_hermes_host_running", return_value=None):
-            _check_hook_contract_lock(
-                self.cfg,
-                "hermes",
-                result,
-                platform_name="nt",
-                config_path=str(config),
-                install_root=str(self.install),
-                search_path=str(self.install),
-                pathext=".EXE;.CMD",
-            )
+        # an idle Hermes is healthy (GAP-1298). Without an execution probe
+        # that proves the registered hook runs, that state stays a failure.
+        with (
+            patch.object(cmd_doctor, "_hermes_host_running", return_value=None),
+            patch.object(cmd_doctor, "_hermes_windows_execution_probe", side_effect=lambda check: check),
+        ):
+            _check_hook_contract_lock(self.cfg, "hermes", result, **paths)
 
         self.assertEqual(result.checks[-1]["status"], "fail", result.checks[-1])
         self.assertIn("pending-reload", result.checks[-1]["detail"])
@@ -3105,6 +3108,35 @@ class WindowsHookDoctorTests(unittest.TestCase):
         self.assertIn("close every Hermes", result.checks[-1]["remediation"])
         self.assertIn(f"agent_executable={executable}", result.checks[-1]["detail"])
         self.assertNotIn("99.0.0", result.checks[-1]["detail"])
+
+        # Once the probe proves the registered hook runs, the running host is
+        # a warning that names it (GAP-0586); a failed probe stays a failure.
+        class WindowsOS:
+            name = "nt"
+
+            def __getattr__(self, key):
+                return getattr(os, key)
+
+        host = ("Hermes PID(s) 4300; loaded hooks cannot be verified; live=false", "close Hermes PID 4300")
+        outcomes = {}
+        for label, answer in (("proven", (0, cmd_doctor._HERMES_EXECUTION_PROBE_RESPONSE)), ("failed", (1, b""))):
+            outcomes[label] = _DoctorResult()
+            with (
+                patch.object(cmd_doctor, "os", WindowsOS()),
+                patch.object(cmd_doctor, "_hermes_host_running", return_value=None),
+                patch.object(cmd_doctor, "_run_hermes_execution_probe", return_value=answer),
+                patch.object(cmd_doctor, "_hermes_running_host_warning", return_value=host),
+            ):
+                _check_hook_contract_lock(self.cfg, "hermes", outcomes[label], **paths)
+
+        proven = outcomes["proven"].checks[-1]
+        self.assertEqual(proven["status"], "warn", proven)
+        self.assertIn("pending-reload", proven["detail"])
+        self.assertIn("Hermes PID(s) 4300", proven["detail"])
+        self.assertIn(f"agent_executable={executable}", proven["detail"])
+        self.assertNotIn("99.0.0", proven["detail"])
+        self.assertIn("close Hermes PID 4300", proven["remediation"])
+        self.assertEqual(outcomes["failed"].checks[-1]["status"], "fail", outcomes["failed"].checks[-1])
 
     def test_windows_hermes_pending_reload_is_a_passive_warning(self) -> None:
         # --passive does not list processes, so a Hermes that may be idle is
@@ -3119,7 +3151,14 @@ class WindowsHookDoctorTests(unittest.TestCase):
             "pathext": ".EXE;.CMD",
         }
 
-        with patch.object(cmd_doctor, "_hermes_host_running", side_effect=AssertionError("listed processes")):
+        # On Windows the execution probe runs first; this registration passes it.
+        with (
+            patch.object(cmd_doctor, "_hermes_host_running", side_effect=AssertionError("listed processes")),
+            patch.object(
+                cmd_doctor, "_run_hermes_execution_probe",
+                return_value=(0, cmd_doctor._HERMES_EXECUTION_PROBE_RESPONSE),
+            ),
+        ):
             _check_hook_contract_lock(self.cfg, "hermes", result, platform_name="nt", **paths)
             cmd_doctor._check_windows_native_hooks(self.cfg, "hermes", "Hermes hooks", result, **paths)
 
