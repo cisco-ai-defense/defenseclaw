@@ -488,10 +488,7 @@ type Doctor struct {
 	// (default daemon.FindPortHolder): what holds the gateway's port when
 	// the gateway service does not run.
 	PortHolder func(host string, port int) (daemon.PortHolder, error)
-	// DaemonProcessPath is the kernel-reported executable path for a macOS
-	// process (default: a bounded call to /bin/ps). Tests may substitute it.
-	DaemonProcessPath func(context.Context, int) (string, error)
-	Geteuid           func() int
+	Geteuid    func() int
 	// Getegid is the user's group, which with Geteuid the MicroVM driver
 	// must run sandboxes as (DefenseClaw's images are built for them).
 	Getegid       func() int
@@ -574,9 +571,6 @@ func (d *Doctor) defaults() {
 	}
 	if d.PortHolder == nil {
 		d.PortHolder = daemon.FindPortHolder
-	}
-	if d.DaemonProcessPath == nil {
-		d.DaemonProcessPath = sandboxDaemonProcessPath
 	}
 	if d.Geteuid == nil {
 		d.Geteuid = os.Geteuid
