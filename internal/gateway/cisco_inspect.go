@@ -116,8 +116,9 @@ type inspectCall struct {
 	setAuth        func(req *http.Request)    // set auth header on each attempt
 	onUnauthorized func(context.Context) bool // nil: 401 is terminal (opensource default)
 	// onValidationError switches an API-key tool-call request to its text
-	// form. Managed callers leave it nil.
-	onValidationError func()
+	// form, or returns an already inspected text verdict. Managed callers
+	// leave it nil.
+	onValidationError func() *ScanVerdict
 	// onOutcome receives the call's final outcome: nil for a verdict, the
 	// failure otherwise. nil: nothing is reported (every client but the
 	// standalone AI Defense client, whose outcomes feed /health).
@@ -263,9 +264,13 @@ func doInspectHTTP(ctx context.Context, runtime hookLifecycleMetricV8Runtime, ca
 		}
 		if (resp.StatusCode == http.StatusBadRequest || resp.StatusCode == http.StatusUnprocessableEntity) &&
 			call.onValidationError != nil && !retriedAsText && attempt+1 < maxAttempts {
-			call.onValidationError()
-			retriedAsText = true
+			fallbackVerdict := call.onValidationError()
 			recordCiscoInspectV8(ctx, runtime, elapsed, observability.OutcomeRejected, "")
+			if fallbackVerdict != nil {
+				report(nil)
+				return fallbackVerdict
+			}
+			retriedAsText = true
 			continue
 		}
 
@@ -352,38 +357,58 @@ type CiscoInspectClient struct {
 }
 
 // A validation response can apply to one request rather than every tool call
-// at an endpoint. Remember only successful text retries for identical API-key
-// requests across client reloads. Secure Client never uses this cache.
-var ciscoAPIKeyTextOnlyRequests = struct {
-	sync.Mutex
-	keys  map[[32]byte]struct{}
-	order [1024][32]byte
-	next  int
-	size  int
-}{keys: make(map[[32]byte]struct{})}
-var ciscoAPIKeyTextOnlyLogOnce sync.Once
+// at an endpoint. A blocking text retry can be reused briefly for an identical
+// API-key request. Non-blocking results recheck the structured form because
+// endpoint capabilities and policies can change. Secure Client does not use
+// this preference.
+const ciscoAPIKeyTextPreferenceLifetime = 30 * time.Second
 
-func ciscoAPIKeyTextOnlyRequestKnown(key [32]byte) bool {
-	ciscoAPIKeyTextOnlyRequests.Lock()
-	defer ciscoAPIKeyTextOnlyRequests.Unlock()
-	_, known := ciscoAPIKeyTextOnlyRequests.keys[key]
-	return known
+type ciscoAPIKeyTextPreference struct {
+	key     [32]byte
+	expires time.Time
 }
 
-func ciscoRememberAPIKeyTextOnlyRequest(key [32]byte) bool {
+var ciscoAPIKeyTextOnlyRequests = struct {
+	sync.Mutex
+	keys  map[[32]byte]*ciscoAPIKeyTextPreference
+	order [1024]*ciscoAPIKeyTextPreference
+	next  int
+	size  int
+}{keys: make(map[[32]byte]*ciscoAPIKeyTextPreference)}
+var ciscoAPIKeyTextOnlyLogOnce sync.Once
+
+func ciscoAPIKeyTextOnlyRequestKnown(key [32]byte, now time.Time) bool {
 	ciscoAPIKeyTextOnlyRequests.Lock()
 	defer ciscoAPIKeyTextOnlyRequests.Unlock()
-	if _, known := ciscoAPIKeyTextOnlyRequests.keys[key]; known {
+	entry := ciscoAPIKeyTextOnlyRequests.keys[key]
+	if entry == nil {
+		return false
+	}
+	if !now.Before(entry.expires) {
+		delete(ciscoAPIKeyTextOnlyRequests.keys, key)
+		return false
+	}
+	return true
+}
+
+func ciscoRememberAPIKeyTextOnlyRequest(key [32]byte, now time.Time) bool {
+	ciscoAPIKeyTextOnlyRequests.Lock()
+	defer ciscoAPIKeyTextOnlyRequests.Unlock()
+	if entry := ciscoAPIKeyTextOnlyRequests.keys[key]; entry != nil && now.Before(entry.expires) {
 		return false
 	}
 	if ciscoAPIKeyTextOnlyRequests.size == len(ciscoAPIKeyTextOnlyRequests.order) {
-		delete(ciscoAPIKeyTextOnlyRequests.keys, ciscoAPIKeyTextOnlyRequests.order[ciscoAPIKeyTextOnlyRequests.next])
+		old := ciscoAPIKeyTextOnlyRequests.order[ciscoAPIKeyTextOnlyRequests.next]
+		if ciscoAPIKeyTextOnlyRequests.keys[old.key] == old {
+			delete(ciscoAPIKeyTextOnlyRequests.keys, old.key)
+		}
 	} else {
 		ciscoAPIKeyTextOnlyRequests.size++
 	}
-	ciscoAPIKeyTextOnlyRequests.order[ciscoAPIKeyTextOnlyRequests.next] = key
+	entry := &ciscoAPIKeyTextPreference{key: key, expires: now.Add(ciscoAPIKeyTextPreferenceLifetime)}
+	ciscoAPIKeyTextOnlyRequests.order[ciscoAPIKeyTextOnlyRequests.next] = entry
 	ciscoAPIKeyTextOnlyRequests.next = (ciscoAPIKeyTextOnlyRequests.next + 1) % len(ciscoAPIKeyTextOnlyRequests.order)
-	ciscoAPIKeyTextOnlyRequests.keys[key] = struct{}{}
+	ciscoAPIKeyTextOnlyRequests.keys[key] = entry
 	return true
 }
 
@@ -550,6 +575,7 @@ func (c *CiscoInspectClient) Inspect(ctx context.Context, messages []ChatMessage
 		payload["config"] = map[string]interface{}{"enabled_rules": c.enabledRules}
 	}
 	var requestKey [32]byte
+	preferredText := false
 	if canUseText {
 		// Tool-use IDs change on each invocation. Exclude only those IDs
 		// from the preference key; keep the tool, arguments, text, rules,
@@ -579,9 +605,10 @@ func (c *CiscoInspectClient) Inspect(ctx context.Context, messages []ChatMessage
 					_, _ = hash.Write([]byte{0})
 					_, _ = hash.Write(body)
 					copy(requestKey[:], hash.Sum(nil))
-					if ciscoAPIKeyTextOnlyRequestKnown(requestKey) {
+					if ciscoAPIKeyTextOnlyRequestKnown(requestKey, time.Now()) {
 						payload["messages"] = textMsgs
 						canUseText = false
+						preferredText = true
 					}
 				}
 			}
@@ -590,7 +617,7 @@ func (c *CiscoInspectClient) Inspect(ctx context.Context, messages []ChatMessage
 
 	// A retry shares the original request's configured time budget. The
 	// client's per-attempt timeout alone would otherwise allow two budgets.
-	if canUseText && c.timeout > 0 {
+	if (canUseText || preferredText) && c.timeout > 0 {
 		var cancel context.CancelFunc
 		ctx, cancel = context.WithTimeout(ctx, c.timeout)
 		defer cancel()
@@ -606,17 +633,30 @@ func (c *CiscoInspectClient) Inspect(ctx context.Context, messages []ChatMessage
 		},
 		onOutcome: c.availabilityCallback(),
 	}
+	if preferredText {
+		textVerdict := doInspectHTTP(ctx, runtime, call)
+		if textVerdict != nil && textVerdict.Action == "block" {
+			return textVerdict
+		}
+		payload["messages"] = chatMsgs
+		if textVerdict != nil {
+			call.onValidationError = func() *ScanVerdict { return textVerdict }
+		} else {
+			canUseText = true
+		}
+	}
 	if canUseText {
-		call.onValidationError = func() {
+		call.onValidationError = func() *ScanVerdict {
 			payload["messages"] = textMsgs
 			retriedAsText = true
+			return nil
 		}
 	}
 	verdict := doInspectHTTP(ctx, runtime, call)
-	if retriedAsText && verdict != nil && requestKey != ([32]byte{}) {
-		if ciscoRememberAPIKeyTextOnlyRequest(requestKey) {
+	if retriedAsText && verdict != nil && verdict.Action == "block" && requestKey != ([32]byte{}) {
+		if ciscoRememberAPIKeyTextOnlyRequest(requestKey, time.Now()) {
 			ciscoAPIKeyTextOnlyLogOnce.Do(func() {
-				fmt.Fprintln(defaultLogWriter, "  [cisco-ai-defense] API-key endpoint accepted \"text-only\" for a request; remembering that format for identical requests")
+				fmt.Fprintln(defaultLogWriter, "  [cisco-ai-defense] API-key endpoint accepted a text retry; briefly remembering that format for identical blocked requests")
 			})
 		}
 	}
