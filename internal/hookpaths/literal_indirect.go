@@ -28,7 +28,7 @@ func readIndirectSource(name, cwd string) (string, bool) {
 		}
 		relative = strings.TrimPrefix(name, prefix)
 	}
-	root, err := os.OpenRoot(cwd)
+	root, err := pathOpenRoot(cwd)
 	if err != nil {
 		return "", false
 	}
