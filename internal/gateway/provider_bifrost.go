@@ -673,6 +673,32 @@ func newBifrostRequestContext(ctx context.Context, req *ChatRequest) *schemas.Bi
 	return bCtx
 }
 
+// openAIWireProviders speak the OpenAI Chat Completions schema natively, so
+// unmodelled request fields (chat_template_kwargs, seed, user, ...) are
+// forwarded to them verbatim, exactly as a direct call would send them.
+var openAIWireProviders = map[schemas.ModelProvider]bool{
+	schemas.OpenAI: true, schemas.Azure: true, schemas.VLLM: true,
+	schemas.SGL: true, schemas.Ollama: true, schemas.OpenRouter: true,
+}
+
+// translatedProviderExtraKeys are the only extension fields forwarded to
+// providers whose request Bifrost translates (Anthropic, Bedrock, Gemini,
+// ...): OpenAI-only keys merged into those bodies would be rejected.
+var translatedProviderExtraKeys = []string{"extra_body", "google", "anthropic", "amazon"}
+
+func extraParamsForProvider(provider schemas.ModelProvider, extra map[string]any) map[string]any {
+	if len(extra) == 0 || openAIWireProviders[provider] {
+		return extra
+	}
+	out := map[string]any{}
+	for _, k := range translatedProviderExtraKeys {
+		if v, ok := extra[k]; ok {
+			out[k] = v
+		}
+	}
+	return out
+}
+
 func toBifrostChatRequest(provider schemas.ModelProvider, model string, req *ChatRequest) *schemas.BifrostChatRequest {
 	bReq := &schemas.BifrostChatRequest{
 		Provider: provider,
@@ -719,8 +745,14 @@ func toBifrostChatRequest(provider schemas.ModelProvider, model string, req *Cha
 			bReq.Params.ToolChoice = &tc
 		}
 	}
-	if len(req.ExtraParams) > 0 {
-		bReq.Params.ExtraParams = req.ExtraParams
+	if req.ReasoningEffort != nil {
+		bReq.Params.Reasoning = &schemas.ChatReasoning{Effort: req.ReasoningEffort}
+	}
+	if req.ParallelToolCalls != nil {
+		bReq.Params.ParallelToolCalls = req.ParallelToolCalls
+	}
+	if extra := extraParamsForProvider(provider, req.ExtraParams); len(extra) > 0 {
+		bReq.Params.ExtraParams = extra
 	}
 
 	if len(req.Fallbacks) > 0 {
@@ -767,6 +799,13 @@ func toBifrostMessages(msgs []ChatMessage) []schemas.ChatMessage {
 			if err := json.Unmarshal(m.ToolCalls, &tcs); err == nil && len(tcs) > 0 {
 				bm.ChatAssistantMessage = &schemas.ChatAssistantMessage{ToolCalls: tcs}
 			}
+		}
+		if m.ReasoningContent != nil {
+			if bm.ChatAssistantMessage == nil {
+				bm.ChatAssistantMessage = &schemas.ChatAssistantMessage{}
+			}
+			rc := *m.ReasoningContent
+			bm.ChatAssistantMessage.Reasoning = &rc
 		}
 		out[i] = bm
 	}

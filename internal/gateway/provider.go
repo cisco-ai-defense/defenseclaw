@@ -32,16 +32,20 @@ type ChatMessage struct {
 	ToolCallID   string          `json:"tool_call_id,omitempty"`
 	Name         string          `json:"name,omitempty"`
 	ExtraContent json.RawMessage `json:"extra_content,omitempty"`
+	// ReasoningContent is the prior assistant turn's reasoning, which
+	// reasoning models (e.g. Beam) require back on continuations.
+	ReasoningContent *string `json:"reasoning_content,omitempty"`
 }
 
 func (m *ChatMessage) UnmarshalJSON(data []byte) error {
 	type plain struct {
-		Role         string          `json:"role"`
-		Content      json.RawMessage `json:"content,omitempty"`
-		ToolCalls    json.RawMessage `json:"tool_calls,omitempty"`
-		ToolCallID   string          `json:"tool_call_id,omitempty"`
-		Name         string          `json:"name,omitempty"`
-		ExtraContent json.RawMessage `json:"extra_content,omitempty"`
+		Role             string          `json:"role"`
+		Content          json.RawMessage `json:"content,omitempty"`
+		ToolCalls        json.RawMessage `json:"tool_calls,omitempty"`
+		ToolCallID       string          `json:"tool_call_id,omitempty"`
+		Name             string          `json:"name,omitempty"`
+		ExtraContent     json.RawMessage `json:"extra_content,omitempty"`
+		ReasoningContent *string         `json:"reasoning_content,omitempty"`
 	}
 	var p plain
 	if err := json.Unmarshal(data, &p); err != nil {
@@ -53,6 +57,7 @@ func (m *ChatMessage) UnmarshalJSON(data []byte) error {
 	m.ToolCallID = p.ToolCallID
 	m.Name = p.Name
 	m.ExtraContent = p.ExtraContent
+	m.ReasoningContent = p.ReasoningContent
 
 	if len(p.Content) == 0 {
 		return nil
@@ -94,19 +99,21 @@ func (m *ChatMessage) UnmarshalJSON(data []byte) error {
 
 func (m ChatMessage) MarshalJSON() ([]byte, error) {
 	type alias struct {
-		Role         string          `json:"role,omitempty"`
-		Content      json.RawMessage `json:"content,omitempty"`
-		ToolCalls    json.RawMessage `json:"tool_calls,omitempty"`
-		ToolCallID   string          `json:"tool_call_id,omitempty"`
-		Name         string          `json:"name,omitempty"`
-		ExtraContent json.RawMessage `json:"extra_content,omitempty"`
+		Role             string          `json:"role,omitempty"`
+		Content          json.RawMessage `json:"content,omitempty"`
+		ToolCalls        json.RawMessage `json:"tool_calls,omitempty"`
+		ToolCallID       string          `json:"tool_call_id,omitempty"`
+		Name             string          `json:"name,omitempty"`
+		ExtraContent     json.RawMessage `json:"extra_content,omitempty"`
+		ReasoningContent *string         `json:"reasoning_content,omitempty"`
 	}
 	a := alias{
-		Role:         m.Role,
-		ToolCalls:    m.ToolCalls,
-		ToolCallID:   m.ToolCallID,
-		Name:         m.Name,
-		ExtraContent: m.ExtraContent,
+		Role:             m.Role,
+		ToolCalls:        m.ToolCalls,
+		ToolCallID:       m.ToolCallID,
+		Name:             m.Name,
+		ExtraContent:     m.ExtraContent,
+		ReasoningContent: m.ReasoningContent,
 	}
 	if m.RawContent != nil {
 		a.Content = m.RawContent
@@ -122,23 +129,25 @@ func (m ChatMessage) MarshalJSON() ([]byte, error) {
 // Everything else is pass-through. RawBody carries the original JSON so
 // the OpenAI provider can forward unknown fields verbatim.
 type ChatRequest struct {
-	Model            string          `json:"model"`
-	Messages         []ChatMessage   `json:"messages"`
-	MaxTokens        *int            `json:"max_tokens,omitempty"`
-	Temperature      *float64        `json:"temperature,omitempty"`
-	TopP             *float64        `json:"top_p,omitempty"`
-	FrequencyPenalty *float64        `json:"frequency_penalty,omitempty"`
-	PresencePenalty  *float64        `json:"presence_penalty,omitempty"`
-	Stream           bool            `json:"stream,omitempty"`
-	Stop             json.RawMessage `json:"stop,omitempty"`
-	Tools            json.RawMessage `json:"tools,omitempty"`
-	ToolChoice       json.RawMessage `json:"tool_choice,omitempty"`
-	Fallbacks        []string        `json:"fallbacks,omitempty"` // gateway failover models (e.g. Bifrost)
-	ExtraParams      map[string]any  `json:"-"`                   // provider-specific request fields forwarded through Bifrost
-	RawBody          json.RawMessage `json:"-"`
-	TargetURL        string          `json:"-"` // from X-DC-Target-URL header, set by fetch interceptor (origin only)
-	TargetPath       string          `json:"-"` // incoming request path; combined with TargetURL for provider matching
-	TargetAPIKey     string          `json:"-"` // from Authorization header, forwarded to upstream
+	Model             string          `json:"model"`
+	Messages          []ChatMessage   `json:"messages"`
+	MaxTokens         *int            `json:"max_tokens,omitempty"`
+	Temperature       *float64        `json:"temperature,omitempty"`
+	TopP              *float64        `json:"top_p,omitempty"`
+	FrequencyPenalty  *float64        `json:"frequency_penalty,omitempty"`
+	PresencePenalty   *float64        `json:"presence_penalty,omitempty"`
+	Stream            bool            `json:"stream,omitempty"`
+	Stop              json.RawMessage `json:"stop,omitempty"`
+	Tools             json.RawMessage `json:"tools,omitempty"`
+	ToolChoice        json.RawMessage `json:"tool_choice,omitempty"`
+	ReasoningEffort   *string         `json:"reasoning_effort,omitempty"`
+	ParallelToolCalls *bool           `json:"parallel_tool_calls,omitempty"`
+	Fallbacks         []string        `json:"fallbacks,omitempty"` // gateway failover models (e.g. Bifrost)
+	ExtraParams       map[string]any  `json:"-"`                   // provider-specific request fields forwarded through Bifrost
+	RawBody           json.RawMessage `json:"-"`
+	TargetURL         string          `json:"-"` // from X-DC-Target-URL header, set by fetch interceptor (origin only)
+	TargetPath        string          `json:"-"` // incoming request path; combined with TargetURL for provider matching
+	TargetAPIKey      string          `json:"-"` // from Authorization header, forwarded to upstream
 }
 
 // ChatChoice is a single choice in an OpenAI chat completion response.
