@@ -9071,6 +9071,15 @@ function Get-DefenseClawPathAclVerdicts {
     return $verdicts.ToArray()
 }
 
+# The Severity of a verdict, or '' for one that carries none.
+function Get-DefenseClawPathAclVerdictSeverity {
+    param([Parameter(Mandatory)]$Verdict)
+    if ($null -ne $Verdict.PSObject.Properties['Severity']) {
+        return [string]$Verdict.Severity
+    }
+    return ''
+}
+
 # The SID of the account this process runs as (Setup's own account).
 function Get-DefenseClawCurrentProcessUserSID {
     return [string][Security.Principal.WindowsIdentity]::GetCurrent().User.Value
@@ -9160,9 +9169,11 @@ function Assert-DefenseClawPathAcl {
         else {
             @('Contract', 'Rights', 'Access')
         }
+        # A Contract verdict without a Severity (none is read from disk without
+        # one) counts as untrusted on standalone too.
         $untrustedContract = @()
         if ($standalone) {
-            $untrustedContract = @('Dacl')
+            $untrustedContract = @('Dacl', '')
             $currentOwner = Get-DefenseClawAclOwnerSID -Acl (Microsoft.PowerShell.Security\Get-Acl -LiteralPath $Path)
             if ([string]$currentOwner -cne [string](Get-DefenseClawCurrentProcessUserSID)) {
                 $untrustedContract += 'Owner'
@@ -9172,7 +9183,7 @@ function Assert-DefenseClawPathAcl {
             $verdicts |
                 Microsoft.PowerShell.Core\Where-Object { $_.Kind -in $repairableKinds } |
                 Microsoft.PowerShell.Core\Where-Object {
-                    -not ($_.Kind -eq 'Contract' -and $_.Severity -in $untrustedContract)
+                    -not ($_.Kind -eq 'Contract' -and (Get-DefenseClawPathAclVerdictSeverity -Verdict $_) -in $untrustedContract)
                 } |
                 Microsoft.PowerShell.Core\Where-Object {
                     $standalone -or -not $HealOnlyUntrusted -or
@@ -9194,7 +9205,7 @@ function Assert-DefenseClawPathAcl {
                 $verdicts |
                     Microsoft.PowerShell.Core\Where-Object {
                         $_.Kind -notin $repairableKinds -or
-                        ($_.Kind -eq 'Contract' -and $_.Severity -in $untrustedContract)
+                        ($_.Kind -eq 'Contract' -and (Get-DefenseClawPathAclVerdictSeverity -Verdict $_) -in $untrustedContract)
                     }
             )
             if ($unrepairable.Count -gt 0) {
