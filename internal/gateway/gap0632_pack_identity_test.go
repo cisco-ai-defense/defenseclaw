@@ -10,6 +10,7 @@ import (
 	"path/filepath"
 	"runtime"
 	"slices"
+	"strings"
 	"testing"
 
 	"github.com/defenseclaw/defenseclaw/internal/actionfacts"
@@ -209,6 +210,15 @@ func TestGAP0632StructuredStateProtectionSurvivesRulePackRemoval(t *testing.T) {
 		}, true},
 		{"patch ordinary", "apply_patch", ordinary, func(p string) map[string]string {
 			return map[string]string{"command": "*** Begin Patch\n*** Update File: " + p + "\n@@\n-old\n+new\n*** End Patch\n"}
+		}, false},
+		{"large write state", "Write", state, func(p string) map[string]string {
+			return map[string]string{"file_path": p, "content": strings.Repeat("x", 65<<10)}
+		}, true},
+		{"large write state link", "Write", link, func(p string) map[string]string {
+			return map[string]string{"file_path": p, "content": strings.Repeat("x", 65<<10)}
+		}, true},
+		{"large write ordinary", "Write", ordinary, func(p string) map[string]string {
+			return map[string]string{"file_path": p, "content": strings.Repeat("x", 65<<10)}
 		}, false},
 	} {
 		t.Run(row.name, func(t *testing.T) {

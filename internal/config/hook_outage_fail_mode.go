@@ -86,6 +86,19 @@ func (c *Config) HookPolicyTierForConnector(connector string) string {
 		}
 		return packFolderPosture(dir)
 	}
+	if custom, selected := c.Guardrail.CustomPacks[ref.Name]; selected && strings.TrimSpace(custom.Digest) != "" {
+		// A standalone hook has no rule generation. Before its current
+		// manifest can set an outage tier, require the same content pin the
+		// gateway requires when it loads a selected custom pack.
+		posture, valid := rulePackPinnedPosture(dir, custom.Digest)
+		if !valid {
+			return HookPolicyTierStrict
+		}
+		if posture != "" {
+			return posture
+		}
+		return packFolderPosture(dir)
+	}
 	if posture := packManifestPosture(dir); posture != "" {
 		return posture
 	}
