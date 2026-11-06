@@ -1008,8 +1008,10 @@ func (a *APIServer) inspectTrustedToolPolicyCtx(
 	// Secure Client path keeps its pre-1.0 live policy source (issue #1092).
 	policyConfig := a.decisionConfig(ctx)
 	if policyConfig != nil {
-		action.StrictProofBound = policyConfig.HookPolicyTierForConnector(req.Connector) == config.HookPolicyTierStrict ||
-			managed.IsManagedEnterprise(policyConfig.DeploymentMode) || policyConfig.SecureClientIntegration()
+		strictTier := policyConfig.HookPolicyTierForConnector(req.Connector) == config.HookPolicyTierStrict
+		action.StrictProofBound = strictTier || managed.IsManagedEnterprise(policyConfig.DeploymentMode) ||
+			policyConfig.SecureClientIntegration()
+		action.StrictPolicy = strictTier || policyConfig.SecureClientIntegration()
 	}
 	policySource := func() *config.Config { return policyConfig }
 	if a.scannerCfg != nil && a.scannerCfg.SecureClientIntegration() {

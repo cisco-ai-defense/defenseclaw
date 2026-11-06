@@ -42,6 +42,8 @@ type TargetMemo struct {
 	// (newProtectedFiles).
 	keys  map[string][]string
 	files map[string]protectedFiles
+	// reachNames stores both lexical and resolved protected names.
+	reachNames map[string]reachNames
 	// work counts the path components the memo walked on the file system
 	// and the candidate checks it computed (Work); candidates counts the
 	// Windows candidate checks among them (WorkParts).
