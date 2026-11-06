@@ -56,15 +56,30 @@ func TestNestedBodiesOverBudget(t *testing.T) {
 		{"flat echo of 500 KB", "echo '" + strings.Repeat("ab cd; ef ", 50000) + "'", false},
 		{"here-document of 300 KB", "cat > notes.txt <<'EOF'\n" + strings.Repeat("some text (with) a b c; d | e\n", 10000) + "EOF", false},
 		{"three nested of 7 KB", `bash -c 'ssh host "sh -c '\''printf %s ` + strings.Repeat("a b ", 1800) + `'\''"'`, false},
-		{"three nested of 12 KB", `bash -c 'ssh host "sh -c '\''printf %s ` + strings.Repeat("a b ", 3000) + `'\''"'`, true},
+		{"three nested of 12 KB", `bash -c 'ssh host "sh -c '\''printf %s ` + strings.Repeat("a b ", 3000) + `'\''"'`, false},
+		{"three nested of 20 KB", `bash -c 'ssh host "sh -c '\''printf %s ` + strings.Repeat("a b ", 5000) + `'\''"'`, true},
 		{"bash -c x8", nestedSingleQuoted(8, "bash -c", "rm -rf ~/project/output"), false},
-		{"bash -c x9", nestedSingleQuoted(9, "bash -c", "rm -rf ~/project/output"), true},
+		{"bash -c x9", nestedSingleQuoted(9, "bash -c", "rm -rf ~/project/output"), false},
+		{"bash -c x10", nestedSingleQuoted(10, "bash -c", "rm -rf ~/project/output"), true},
 	} {
 		if got := NestedBodiesOverBudget(row.command); got != row.over {
 			t.Errorf("%s (%d bytes): over=%v, want %v", row.name, len(row.command), got, row.over)
 		}
 		if got := PastReadingBounds(row.command); got != row.over {
 			t.Errorf("%s: PastReadingBounds=%v, want %v", row.name, got, row.over)
+		}
+	}
+	for _, row := range []struct {
+		name     string
+		command  string
+		min, max int
+	}{
+		{"bash -c x8", nestedSingleQuoted(8, "bash -c", "rm -rf ~/project/output"), 0, MaxNestedBodyProofBytes},
+		{"bash -c x9", nestedSingleQuoted(9, "bash -c", "rm -rf ~/project/output"), MaxNestedBodyProofBytes + 1, MaxNestedBodyBytes},
+		{"short", "bash -c 'rm -rf output'", 0, 0},
+	} {
+		if got := NestedBodyWeight(row.command); got < row.min || got > row.max {
+			t.Errorf("%s: NestedBodyWeight=%d, want %d..%d", row.name, got, row.min, row.max)
 		}
 	}
 	if !PastReadingBounds(strings.Repeat("(", MaxNestingDepth+1)) {

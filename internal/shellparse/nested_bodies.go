@@ -20,10 +20,19 @@ import (
 // bytes, because each further level is read again by more readers: the
 // bodies of the call itself (depth 1) and theirs (depth 2) count nothing,
 // so a bash -c script of any size, and the -c programs it runs, stay under
-// the bound, and so does a third-level body of up to 8 KiB. Eight nested
-// bash -c bodies of a short command (10 KB) stay under it; nine (30 KB)
-// and more do not.
-const MaxNestedBodyBytes = 8 << 10
+// the bound, and so does a third-level body of up to 16 KiB. Nine nested
+// bash -c bodies of a short command (30 KB, read in about 1 s on a loaded
+// build host) stay under it; ten (89 KB, about 2.4 s) and more do not. A
+// call past the bound is not read; the gateway grades it by its text
+// (readingBoundProtectedFindings in the gateway).
+const MaxNestedBodyBytes = 16 << 10
+
+// MaxNestedBodyProofBytes is the nested-body weight (NestedBodyWeight) past
+// which the readers no longer prove a protected target of the call: nine
+// nested bash -c bodies of a protected write (9 KiB) were read in full and
+// allowed. Past it the gateway keeps the over-limit block for a call whose
+// text may name a protected target, and reads any other in full.
+const MaxNestedBodyProofBytes = 8 << 10
 
 // nestedBodyMinCommand is the command size below which the nested-body
 // measure is skipped: a command this short cannot hold enough nested text
@@ -52,8 +61,15 @@ func PastReadingBounds(command string) bool {
 // descend into more programs than one list would name. A body that does
 // not parse is counted but not descended.
 func NestedBodiesOverBudget(command string) bool {
+	return NestedBodyWeight(command) > MaxNestedBodyBytes
+}
+
+// NestedBodyWeight is the weight of the nested shell bodies of command, as
+// MaxNestedBodyBytes defines it. The measure stops once the weight passes
+// MaxNestedBodyBytes, so the result is exact up to that bound.
+func NestedBodyWeight(command string) int {
 	if len(command) < nestedBodyMinCommand {
-		return false
+		return 0
 	}
 	work := 0
 	var visit func(text string, depth int) bool
@@ -94,7 +110,8 @@ func NestedBodiesOverBudget(command string) bool {
 		})
 		return over
 	}
-	return visit(command, 0)
+	visit(command, 0)
+	return work
 }
 
 // staticBodyWord is the shell value of a word made only of literal and
