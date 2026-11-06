@@ -125,4 +125,13 @@ func TestHookPolicyTierOfACustomPack(t *testing.T) {
 			t.Errorf("%s: outage mode = %q, want %q", tc.dir, got, tc.outage)
 		}
 	}
+	cfg := &Config{}
+	cfg.Guardrail.RulePack = "strict"
+	cfg.Guardrail.CustomPacks = map[string]CustomRulePack{"strict": {Path: plain}}
+	if got := cfg.HookPolicyTierForConnector("claudecode"); got != "default" {
+		t.Errorf("custom pack named strict in a plain folder: tier = %q, want default", got)
+	}
+	if got := cfg.EffectiveHookOutageFailModeForConnector("claudecode"); got != "open" {
+		t.Errorf("custom pack named strict in a plain folder: outage = %q, want open", got)
+	}
 }

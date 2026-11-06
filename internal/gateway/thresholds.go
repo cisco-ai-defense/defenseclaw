@@ -94,21 +94,18 @@ func packPostureFor(cfg *config.Config, ref config.RulePackRef, dir string) stri
 			key = strings.TrimSpace(ref.Dir)
 		}
 		if raw, ok := postures[key]; ok {
-			return postureFromManifest(ref, key, raw)
+			return postureFromManifest(key, raw)
 		}
 	}
 	return packPosture(ref, dir)
 }
 
-// postureFromManifest is the posture of ref's pack at dir whose manifest
-// posture is raw ("" for none): raw, else a built-in pack's own name, else
-// the folder-name table.
-func postureFromManifest(ref config.RulePackRef, dir, raw string) string {
+// postureFromManifest is the posture of the loaded content at dir: its
+// manifest value, else the legacy folder-name table. A custom pack may use
+// a built-in name, so the selected name cannot determine its posture.
+func postureFromManifest(dir, raw string) string {
 	if raw != "" {
 		return raw
-	}
-	if ref.Name != "" && config.IsBuiltinRulePack(ref.Name) {
-		return ref.Name
 	}
 	return guardrailProfileForDir(dir)
 }
@@ -137,8 +134,7 @@ func publishPackPostures() {
 
 // packPosture returns the posture of ref's pack at dir (its resolved
 // directory; "" uses ref.Dir): the manifest posture a generation recorded
-// for that directory, a built-in pack's own name, else the folder-name
-// table (guardrailProfileForDir).
+// for that directory, else the legacy folder-name table.
 func packPosture(ref config.RulePackRef, dir string) string {
 	if dir = strings.TrimSpace(dir); dir == "" {
 		dir = strings.TrimSpace(ref.Dir)
@@ -149,12 +145,11 @@ func packPosture(ref config.RulePackRef, dir string) string {
 			raw = v.(string)
 		}
 	}
-	return postureFromManifest(ref, dir, raw)
+	return postureFromManifest(dir, raw)
 }
 
 // guardrailRulePackDir is the directory of ref for a caller that holds only
-// the guardrail block: a custom_packs entry's path, else ref.Dir (a built-in
-// name needs policy_dir and keeps its own posture).
+// the guardrail block: a custom_packs entry's path, else ref.Dir.
 func guardrailRulePackDir(gc *config.GuardrailConfig, ref config.RulePackRef) string {
 	if gc != nil && ref.Name != "" {
 		if custom, ok := gc.CustomPacks[ref.Name]; ok {
@@ -201,7 +196,7 @@ func (b buildingPackPostures) posture(ref config.RulePackRef, dir string) string
 		dir = strings.TrimSpace(ref.Dir)
 	}
 	if dir == "" {
-		return postureFromManifest(ref, dir, "")
+		return postureFromManifest(dir, "")
 	}
 	raw, seen := b[dir]
 	if !seen {
@@ -212,7 +207,7 @@ func (b buildingPackPostures) posture(ref config.RulePackRef, dir string) string
 		}
 		b[dir] = raw
 	}
-	return postureFromManifest(ref, dir, raw)
+	return postureFromManifest(dir, raw)
 }
 
 // ConfigThresholds is resolveThresholds for a caller outside the gateway

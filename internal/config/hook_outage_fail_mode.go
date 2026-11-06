@@ -67,8 +67,9 @@ func (c *Config) EffectiveHookOutageFailModeForConnector(connector string) strin
 
 // HookPolicyTierForConnector is the policy tier of connector's guardrail rule
 // pack, as the gateway reads its posture (internal/gateway packPosture): the
-// pack manifest's posture, else a built-in pack's own name, else the folder
-// name (strict and permissive keep theirs, anything else is default).
+// pack manifest's posture, else the legacy folder-name table. A real built-in
+// selection keeps its tier when no policy directory has been resolved; a
+// custom pack may use the same name and takes its own content or folder tier.
 func (c *Config) HookPolicyTierForConnector(connector string) string {
 	if c == nil {
 		return HookPolicyTierDefault
@@ -81,8 +82,10 @@ func (c *Config) HookPolicyTierForConnector(connector string) string {
 	if posture := packManifestPosture(dir); posture != "" {
 		return posture
 	}
-	if ref.Name != "" && IsBuiltinRulePack(ref.Name) {
-		return ref.Name
+	if dir == "" && IsBuiltinRulePack(ref.Name) {
+		if _, custom := c.Guardrail.CustomPacks[ref.Name]; !custom {
+			return ref.Name
+		}
 	}
 	return packFolderPosture(dir)
 }
