@@ -133,7 +133,7 @@ Options:
 | `--wait` / `--no-wait` | Waits for the first Cowork event. The default is to wait |
 | `--timeout SECONDS` | How long to wait. Default 900, from 10 to 3600 |
 
-What the plugin contains: `.claude-plugin/plugin.json` and `hooks/hooks.json`, nothing else. It has no `bin/` folder, because Cowork refuses a plugin that has one. The hooks call the DefenseClaw hook that the Claude Code connector already installed, with the same matchers and timeouts, for the ten events above. Its version is `1.0.` followed by the build time, and it rises on every run.
+What the plugin contains: `.claude-plugin/plugin.json` and `hooks/hooks.json`; on Windows it also contains a small guard at `hooks/defenseclaw-hook-guard.exe`. It has no `bin/` folder, because Cowork refuses a plugin that has one. The guard stays with the plugin after DefenseClaw is removed. While DefenseClaw is installed, it runs the Claude Code hook that the connector installed. The hooks use the same matchers and timeouts for the ten events above. Its version is `1.0.` followed by the build time, and it rises on every run.
 
 ### Check it
 
