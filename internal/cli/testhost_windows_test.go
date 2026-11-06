@@ -15,6 +15,7 @@ import (
 	"strings"
 	"testing"
 	"time"
+	"unsafe"
 
 	"golang.org/x/sys/windows"
 	"golang.org/x/sys/windows/registry"
@@ -50,6 +51,7 @@ func isolateTestHost() func() {
 	managedHostWindowsMarkerUncertain = func() bool { return false }
 	secureClientHost = func() bool { return false }
 	pinTestProcessIdentity()
+	normalizeTestTokenDefaultOwner()
 	dir, err := os.MkdirTemp("", "defenseclaw-cli-test-")
 	if err != nil {
 		windowsScannerRuntimeDir = func() (string, error) { return "", err }
@@ -72,6 +74,29 @@ func isolateTestHost() func() {
 
 // testProcessIdentityNote says which identity the package's tests run as.
 const testProcessIdentityNote = "an elevated administrator that is not LocalSystem (the CI runner's identity)"
+
+// normalizeTestTokenDefaultOwner makes the test binary's own account the
+// owner of everything it creates, as the CI harness does for its elevated
+// runner (scripts/windows-native-ci.ps1 Set-CurrentUserAsDefaultOwner). An
+// elevated administrator's token defaults to BUILTIN\Administrators as the
+// owner, so outside that harness every t.TempDir() looked foreign to the
+// product's ownership checks ("safefile: refusing foreign-owned directory")
+// and the watchdog, daemon and audit tests failed when an administrator ran
+// the package from an elevated prompt (GAP-0079). A standard user's and
+// LocalSystem's tokens already default to their own account.
+func normalizeTestTokenDefaultOwner() {
+	var token windows.Token
+	if err := windows.OpenProcessToken(windows.CurrentProcess(), windows.TOKEN_QUERY|windows.TOKEN_ADJUST_DEFAULT, &token); err != nil {
+		return
+	}
+	defer token.Close()
+	user, err := token.GetTokenUser()
+	if err != nil || user == nil || user.User.Sid == nil {
+		return
+	}
+	owner := struct{ Owner *windows.SID }{Owner: user.User.Sid}
+	_ = windows.SetTokenInformation(token, windows.TokenOwner, (*byte)(unsafe.Pointer(&owner)), uint32(unsafe.Sizeof(owner)))
+}
 
 // pinTestProcessIdentity makes every identity seam answer as the CI runner
 // does, an elevated administrator that is not LocalSystem, whatever token
@@ -394,6 +419,16 @@ func TestPackageTestsDoNotReachTheInstalledDeployment(t *testing.T) {
 		if deployment, err := windowsEnterpriseDeploymentInspector(profile); err != nil || deployment.State != winpath.EnterpriseDeploymentAbsent {
 			t.Fatalf("the %s deployment record of the computer is read: %+v %v", profile, deployment, err)
 		}
+	}
+
+	// GAP-0079: what the tests create is owned by the test account.
+	probe := t.TempDir()
+	if sd, err := windows.GetNamedSecurityInfo(probe, windows.SE_FILE_OBJECT, windows.OWNER_SECURITY_INFORMATION); err != nil {
+		t.Fatal(err)
+	} else if owner, _, err := sd.Owner(); err != nil {
+		t.Fatal(err)
+	} else if user, err := windows.GetCurrentProcessToken().GetTokenUser(); err != nil || !owner.Equals(user.User.Sid) {
+		t.Fatalf("a test folder is owned by %v, not the test account", owner)
 	}
 
 	// GAP-0079: the identity is pinned.

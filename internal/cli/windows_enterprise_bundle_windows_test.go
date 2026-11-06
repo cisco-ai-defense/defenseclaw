@@ -646,7 +646,20 @@ func TestWindowsBundleStageDirectoryRepeatedCreationRepairsExactACL(t *testing.T
 // layout whose gateway enforces windowsBundleTestDigest.
 func stubWindowsBundleHost(t *testing.T) managed.StandaloneLayout {
 	t.Helper()
-	root := t.TempDir()
+	// A short root, not t.TempDir(): the bundle fixture's config names
+	// paths under it (ai_discovery.signature_packs allows 256 characters),
+	// and t.TempDir() adds the test's name. Under a standard user's profile
+	// temp folder the longest names went over the limit and every prepare
+	// failed with config_invalid (GAP-0079).
+	root, err := os.MkdirTemp("", "dcb")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		if err := os.RemoveAll(root); err != nil {
+			t.Errorf("remove the bundle host root: %v", err)
+		}
+	})
 	layout, err := managed.StandaloneWindowsLayoutForRoots(filepath.Join(root, "pf"), filepath.Join(root, "pd"))
 	if err != nil {
 		t.Fatal(err)
