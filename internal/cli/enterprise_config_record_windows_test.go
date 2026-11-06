@@ -180,7 +180,7 @@ func TestTheGuardianKeepsAnEditBehindALifecycleLockItCannotOpen(t *testing.T) {
 			if strings.Count(log.String(), "retried each cycle") != 1 {
 				t.Fatalf("log = %q, want one line", log.String())
 			}
-			if note, kept := readManagedConfigDeferredEdit(path); !kept || note.ConfigSHA256 != configwrite.SHA256Hex(edit) {
+			if note, kept := readManagedConfigHandEdit(path); !kept || note.ConfigSHA256 != configwrite.SHA256Hex(edit) {
 				t.Fatalf("kept edit = %+v, %t", note, kept)
 			}
 
@@ -191,8 +191,8 @@ func TestTheGuardianKeepsAnEditBehindALifecycleLockItCannotOpen(t *testing.T) {
 			if err != nil || state.Generation != 2 || state.Actor != configwrite.ActorUnattributedHandEdit || state.ConfigSHA256 != configwrite.SHA256Hex(edit) {
 				t.Fatalf("record once lifecycle.lock opens = %+v, %v\n%s", state, err, log.String())
 			}
-			if _, err := os.Lstat(managedConfigDeferredEditPath(path)); !os.IsNotExist(err) {
-				t.Fatalf("the kept edit outlived its record: %v", err)
+			if note, kept := readManagedConfigHandEdit(path); !kept || note.ConfigSHA256 != configwrite.SHA256Hex(edit) {
+				t.Fatalf("the recorded hand edit is not kept: %+v, %t", note, kept)
 			}
 			if again, err := tryWindowsEnterpriseLifecycleLock(lock); err != nil {
 				t.Fatalf("the guardian kept lifecycle.lock: %v", err)

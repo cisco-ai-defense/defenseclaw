@@ -100,8 +100,8 @@ func TestRecordUnrecordedManagedConfigLeavesALifecycleRunsWriteToIt(t *testing.T
 	if err != nil || state.Generation != 1 || state.Actor != configwrite.ActorUnattributedHandEdit || releases != 1 {
 		t.Fatalf("edit outside a lifecycle run: %+v, %v, releases %d\n%s", state, err, releases, log.String())
 	}
-	if _, err := os.Lstat(managedConfigDeferredEditPath(path)); !os.IsNotExist(err) {
-		t.Fatalf("the kept edit outlived its record: %v", err)
+	if note, kept := readManagedConfigHandEdit(path); !kept || note.ConfigSHA256 != state.ConfigSHA256 {
+		t.Fatalf("the recorded hand edit is not kept: %+v, %t", note, kept)
 	}
 	claims = 0
 	recordUnrecordedManagedConfig(path, &log, busy)
@@ -154,7 +154,7 @@ func TestRecordUnrecordedManagedConfigBoundsItsLifecycleHoldOnABusyWriterLock(t 
 // GAP-0646 review L2 (REVIEW-g646 #5): when the guardian cannot record an
 // administrator's edit (it cannot tell whether a lifecycle run owns
 // config.yaml, or a run holds lifecycle.lock), it records nothing, keeps the
-// bytes it saw in config.unrecorded-edit.json and retries each cycle. Every
+// bytes it saw in config.hand-edit.json and retries each cycle. Every
 // later record of exactly those bytes names the hand edit: the guardian's own
 // once the condition clears, a lifecycle config step's that did not install
 // them from its approved source, and a rollback's. Only the bytes this run
@@ -262,7 +262,7 @@ func TestAnUnrecordedEditTheGuardianCannotRecordIsNeverRecordedWithAFalseOwner(t
 			if state, err := configwrite.ReadGenerationState(path); tc.recorded && !tc.brokenRecord && (err != nil || state.Generation != 1) {
 				t.Fatalf("the guardian recorded while it could not claim config.yaml: %+v, %v", state, err)
 			}
-			note, kept := readManagedConfigDeferredEdit(path)
+			note, kept := readManagedConfigHandEdit(path)
 			if kept != tc.kept || kept && (note.ConfigSHA256 != configwrite.SHA256Hex(edit) || note.Reason != tc.owner.reason) {
 				t.Fatalf("kept edit = %+v, %t; want kept %t", note, kept, tc.kept)
 			}
@@ -281,20 +281,98 @@ func TestAnUnrecordedEditTheGuardianCannotRecordIsNeverRecordedWithAFalseOwner(t
 			if configwrite.IsHandEditActor(state.Actor) && !strings.Contains(state.Reason, "edited outside the lifecycle") {
 				t.Fatalf("hand-edit reason = %q", state.Reason)
 			}
-			// Once a record names the bytes on disk, the next cycle drops what it kept.
+			// The next cycle keeps a recorded hand edit, forgets an edit a run
+			// installed from its approved source, and leaves an edit of other
+			// bytes kept (the evidence for a rollback that puts them back).
 			recordUnrecordedManagedConfig(path, &strings.Builder{}, func() managedConfigOwnership { return cannotTell })
-			if _, err := os.Lstat(managedConfigDeferredEditPath(path)); !os.IsNotExist(err) {
-				t.Fatalf("the kept edit outlived the record of the bytes on disk: %v", err)
+			note, kept = readManagedConfigHandEdit(path)
+			switch {
+			case configwrite.IsHandEditActor(state.Actor):
+				if !kept || note.ConfigSHA256 != configwrite.SHA256Hex(raw) {
+					t.Fatalf("a recorded hand edit is not kept: %+v, %t", note, kept)
+				}
+			case string(raw) == string(edit):
+				if kept {
+					t.Fatalf("an edit a run installed from its approved source is still kept: %+v", note)
+				}
+			case kept != tc.kept || kept && note.ConfigSHA256 != configwrite.SHA256Hex(edit):
+				t.Fatalf("kept edit after a record of other bytes = %+v, %t; want kept %t", note, kept, tc.kept)
 			}
 		})
 	}
 }
 
-// A config.unrecorded-edit.json that is not a regular file, does not decode
+// GAP-0646 review L2: a hand edit the guardian recorded stays a hand edit
+// when a Setup run records its own config and a rollback then puts the
+// edit back. It was recorded as `lifecycle` ("enterprise windows rollback"),
+// and the gateway started on an administrator's unapproved bytes. A run that
+// installs exactly those bytes from its approved source approves them.
+func TestARecordedHandEditARollbackPutsBackStaysAHandEdit(t *testing.T) {
+	t.Setenv("DEFENSECLAW_DEPLOYMENT_MODE", "")
+	t.Setenv("DEFENSECLAW_ENTERPRISE_PROFILE", "")
+	t.Cleanup(func() { managedConfigRecordDeferredTo = "" })
+	path := filepath.Join(t.TempDir(), "config.yaml")
+	installed := []byte("config_version: 9\nobservability: {}\n")
+	edit := []byte("config_version: 9\nobservability: {}\n# an administrator's edit\n")
+	approved := []byte("config_version: 9\nobservability: {}\n# the approved config\n")
+	record := func(want string, generation uint64) configwrite.GenerationState {
+		t.Helper()
+		state, err := configwrite.ReadGenerationState(path)
+		if err != nil || state.Actor != want || state.Generation != generation {
+			t.Fatalf("record = %+v, %v; want generation %d by %s", state, err, generation, want)
+		}
+		return state
+	}
+	free := func() managedConfigOwnership { return managedConfigOwnership{release: func() {}} }
+	writeTestFile(t, path, installed)
+	if _, err := configwrite.Locked(context.Background(), path, configwrite.Options{Actor: configwrite.ActorLifecycle, Reason: "test install"},
+		func() (bool, error) { return true, nil }); err != nil {
+		t.Fatal(err)
+	}
+	writeTestFile(t, path, edit)
+	recordUnrecordedManagedConfig(path, &strings.Builder{}, free)
+	record(configwrite.ActorUnattributedHandEdit, 2)
+
+	// ensure CONFIG=<approved>: the transaction installs and records it, then fails.
+	writeTestFile(t, path, approved)
+	migrateForTest(t, path, configwrite.SHA256Hex(approved))
+	record(configwrite.ActorLifecycle, 3)
+	if note, kept := readManagedConfigHandEdit(path); !kept || note.ConfigSHA256 != configwrite.SHA256Hex(edit) {
+		t.Fatalf("the run's own record dropped the kept hand edit: %+v, %t", note, kept)
+	}
+	// The rollback puts the edit back and records it.
+	writeTestFile(t, path, edit)
+	if err := recordRestoredManagedStandaloneConfig(context.Background(), path); err != nil {
+		t.Fatal(err)
+	}
+	if state := record(configwrite.ActorUnattributedHandEdit, 4); !strings.Contains(state.Reason, "rollback") {
+		t.Fatalf("reason = %q", state.Reason)
+	}
+	recordUnrecordedManagedConfig(path, &strings.Builder{}, free)
+	record(configwrite.ActorUnattributedHandEdit, 4)
+
+	// ensure CONFIG=<the edited bytes>: the administrator approves them.
+	migrateForTest(t, path, configwrite.SHA256Hex(edit))
+	record(configwrite.ActorLifecycle, 5)
+	if note, kept := readManagedConfigHandEdit(path); kept {
+		t.Fatalf("approved bytes are still kept as a hand edit: %+v", note)
+	}
+	// A later run and its rollback put the approved bytes back as the lifecycle's.
+	writeTestFile(t, path, approved)
+	migrateForTest(t, path, configwrite.SHA256Hex(approved))
+	record(configwrite.ActorLifecycle, 6)
+	writeTestFile(t, path, edit)
+	if err := recordRestoredManagedStandaloneConfig(context.Background(), path); err != nil {
+		t.Fatal(err)
+	}
+	record(configwrite.ActorLifecycle, 7)
+}
+
+// A config.hand-edit.json that is not a regular file, does not decode
 // or names no sha256 is no evidence: the config step adopts as before.
 func TestAKeptEditThatIsNotAPlainRecordIsNoEvidence(t *testing.T) {
 	raw := []byte("config_version: 9\nobservability: {}\n")
-	valid, err := json.Marshal(managedConfigDeferredEdit{ConfigSHA256: configwrite.SHA256Hex(raw), Reason: "test"})
+	valid, err := json.Marshal(managedConfigHandEdit{ConfigSHA256: configwrite.SHA256Hex(raw), Reason: "test"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -327,8 +405,8 @@ func TestAKeptEditThatIsNotAPlainRecordIsNoEvidence(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			path := filepath.Join(t.TempDir(), "config.yaml")
 			writeTestFile(t, path, raw)
-			tc.write(t, managedConfigDeferredEditPath(path))
-			if _, kept := managedConfigDeferredEditOptions(path, raw, "", "test"); kept != tc.kept {
+			tc.write(t, managedConfigHandEditPath(path))
+			if _, kept := managedConfigHandEditOptions(path, raw, "", "test"); kept != tc.kept {
 				t.Fatalf("kept = %t, want %t", kept, tc.kept)
 			}
 		})

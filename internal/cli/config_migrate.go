@@ -353,11 +353,10 @@ func migrateManagedStandaloneConfig(ctx context.Context, path, approvedSHA256 st
 		// recorded as that hand edit first, so this step goes on exactly as
 		// if the guardian had recorded them, and never adopts them as the
 		// lifecycle's (GAP-0646 review L2, REVIEW-g646 #5).
-		if handEdit, ok := managedConfigDeferredEditOptions(path, raw, approvedSHA256, "the Windows lifecycle config step"); ok {
+		if handEdit, ok := managedConfigHandEditOptions(path, raw, approvedSHA256, "the Windows lifecycle config step"); ok {
 			if _, err := configwrite.Locked(ctx, path, handEdit, func() (bool, error) { return true, nil }); err != nil {
 				return err
 			}
-			removeManagedConfigDeferredEdit(path)
 		}
 		if repaired, err := repairManagedStandaloneCursorFailMode(ctx, path, raw, opt); err != nil {
 			return err
@@ -383,6 +382,11 @@ func migrateManagedStandaloneConfig(ctx context.Context, path, approvedSHA256 st
 	managedStandaloneConfigBeforeRecord(path)
 	if _, err := configwrite.Locked(ctx, path, opt, func() (bool, error) { return true, nil }); err != nil {
 		return err
+	}
+	if opt.RecordSHA256 != "" {
+		// This run installed exactly these bytes from its approved source:
+		// a hand edit kept for them is approved now.
+		forgetManagedConfigHandEdit(path, raw)
 	}
 	return restoreACL(written...)
 }
@@ -511,18 +515,14 @@ func recordRestoredManagedStandaloneConfig(ctx context.Context, path string) err
 		return fmt.Errorf("read the access control list of %s: %w", path, err)
 	}
 	opt := configwrite.Options{Actor: configwrite.ActorLifecycle, Reason: "enterprise windows rollback"}
-	// A restored config the hook guardian kept as an edit it could not
-	// record is recorded as that edit, not as the rollback's (GAP-0646
-	// review L2).
-	handEdit, kept := managedConfigDeferredEditOptions(path, raw, "", "an enterprise windows rollback")
-	if kept {
+	// A restored config the hook guardian kept as a hand edit (recorded as
+	// one before this run recorded its own, or one it could not record) is
+	// recorded as that edit again, not as the rollback's (GAP-0646 review L2).
+	if handEdit, kept := managedConfigHandEditOptions(path, raw, "", "an enterprise windows rollback"); kept {
 		opt = handEdit
 	}
 	if _, err := configwrite.Locked(ctx, path, opt, func() (bool, error) { return true, nil }); err != nil {
 		return err
-	}
-	if kept {
-		removeManagedConfigDeferredEdit(path)
 	}
 	return restoreACL(configwrite.GenerationPath(path))
 }

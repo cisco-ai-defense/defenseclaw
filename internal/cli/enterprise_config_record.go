@@ -78,11 +78,14 @@ type managedConfigOwnership struct {
 // only for bytes the record does not name. A lifecycle run records its own
 // write as its generation with the write, so the guardian never records
 // bytes while a run may own the file, or while it cannot tell. It then keeps
-// them (keepManagedConfigDeferredEdit) and retries each cycle, and a
-// lifecycle step that finds exactly those bytes, and did not install them
-// from its approved source, records them as this hand edit, never as its own
-// generation (GAP-0646 review L2, REVIEW-g646 #5). nil claims nothing
-// (tests, and callers with no lifecycle).
+// them as a hand edit (keepManagedConfigHandEdit) and retries each cycle. It
+// keeps the bytes it records as a hand edit the same way, until a lifecycle
+// run installs exactly those bytes from its approved source. A lifecycle step
+// that finds kept bytes unrecorded (the transaction's config step, a
+// rollback that puts them back) and did not install them from its approved
+// source records them as the hand edit, never as its own generation
+// (GAP-0646 review L2, REVIEW-g646 #5). nil claims nothing (tests, and
+// callers with no lifecycle).
 func recordUnrecordedManagedConfig(path string, w io.Writer, claim func() managedConfigOwnership) {
 	path = strings.TrimSpace(path)
 	if path == "" {
@@ -95,7 +98,11 @@ func recordUnrecordedManagedConfig(path string, w io.Writer, claim func() manage
 	if state, err := configwrite.ReadGenerationState(path); err == nil &&
 		strings.EqualFold(strings.TrimPrefix(state.ConfigSHA256, "sha256:"), configwrite.SHA256Hex(raw)) {
 		managedConfigRecordDeferredTo = ""
-		removeManagedConfigDeferredEdit(path)
+		if configwrite.IsHandEditActor(state.Actor) {
+			_ = keepManagedConfigHandEdit(path, raw, "it was recorded as a hand edit")
+		} else {
+			forgetManagedConfigHandEdit(path, raw)
+		}
 		return
 	}
 	if claim != nil {
@@ -103,7 +110,7 @@ func recordUnrecordedManagedConfig(path string, w io.Writer, claim func() manage
 		if owner.release == nil {
 			var keepErr error
 			if !owner.restored {
-				keepErr = keepManagedConfigDeferredEdit(path, raw, owner.reason)
+				keepErr = keepManagedConfigHandEdit(path, raw, owner.reason)
 			}
 			if owner.reason != managedConfigRecordDeferredTo {
 				if owner.restored {
@@ -132,42 +139,46 @@ func recordUnrecordedManagedConfig(path string, w io.Writer, claim func() manage
 	case err != nil:
 		fmt.Fprintf(w, "[hook-guardian] could not record the config generation of the edited config.yaml: %v\n", err)
 	case recorded:
-		removeManagedConfigDeferredEdit(path)
+		_ = keepManagedConfigHandEdit(path, raw, "it was recorded as a hand edit")
 		if state, err := configwrite.ReadGenerationState(path); err == nil {
 			fmt.Fprintf(w, "[hook-guardian] config.yaml was edited outside the lifecycle; recorded as config generation %d\n", state.Generation)
 		}
 	}
 }
 
-// managedConfigDeferredEdit is config.unrecorded-edit.json beside config.yaml:
-// bytes the hook guardian found that config.generation.json does not record,
-// and could not record then. It is the only evidence, once a lifecycle step
-// finds those bytes, that they are an edit and not a lifecycle write.
-type managedConfigDeferredEdit struct {
+// managedConfigHandEdit is config.hand-edit.json beside config.yaml: the
+// last config.yaml the hook guardian found that no lifecycle run wrote (an
+// administrator's edit), whether it could record it then or not. Once
+// config.generation.json no longer names those bytes (the guardian could not
+// record them, or a later run recorded its own config and a rollback put
+// them back) it is the only evidence that they are an edit and not a
+// lifecycle write.
+type managedConfigHandEdit struct {
 	ConfigSHA256 string `json:"config_sha256"`
 	Reason       string `json:"reason"`
 	SeenAt       string `json:"seen_at"`
 }
 
-// managedConfigDeferredEditMaxBytes bounds a config.unrecorded-edit.json read,
-// and managedConfigDeferredEditReasonMax the reason a record repeats.
+// managedConfigHandEditMaxBytes bounds a config.hand-edit.json read,
+// and managedConfigHandEditReasonMax the reason a record repeats.
 const (
-	managedConfigDeferredEditMaxBytes  = 4 << 10
-	managedConfigDeferredEditReasonMax = 240
+	managedConfigHandEditMaxBytes  = 4 << 10
+	managedConfigHandEditReasonMax = 240
 )
 
-func managedConfigDeferredEditPath(path string) string {
-	return filepath.Join(filepath.Dir(path), "config.unrecorded-edit.json")
+func managedConfigHandEditPath(path string) string {
+	return filepath.Join(filepath.Dir(path), "config.hand-edit.json")
 }
 
-// keepManagedConfigDeferredEdit writes config.unrecorded-edit.json for raw
-// under config.yaml.lock, only while config.yaml still holds raw and the
-// record still does not name it, so a writer between its write and its
-// record is never taken for an edit. An unreadable record proves nothing
-// (GAP-0236) and keeps nothing. The file gets config.yaml's DACL.
-func keepManagedConfigDeferredEdit(path string, raw []byte, reason string) error {
+// keepManagedConfigHandEdit writes config.hand-edit.json for raw under
+// config.yaml.lock, only while config.yaml still holds raw and the record
+// does not name it, or names it as a hand edit, so a writer between its
+// write and its record is never taken for an edit. An unreadable record
+// proves nothing (GAP-0236) and keeps nothing. The file gets config.yaml's
+// DACL.
+func keepManagedConfigHandEdit(path string, raw []byte, reason string) error {
 	sum := configwrite.SHA256Hex(raw)
-	if kept, ok := readManagedConfigDeferredEdit(path); ok && kept.ConfigSHA256 == sum {
+	if kept, ok := readManagedConfigHandEdit(path); ok && kept.ConfigSHA256 == sum {
 		return nil
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), managedConfigRecordHold)
@@ -182,83 +193,87 @@ func keepManagedConfigDeferredEdit(path string, raw []byte, reason string) error
 			return false, err
 		}
 		state, err := configwrite.ReadGenerationState(path)
-		if err == nil && strings.EqualFold(strings.TrimPrefix(state.ConfigSHA256, "sha256:"), sum) {
+		if err == nil && strings.EqualFold(strings.TrimPrefix(state.ConfigSHA256, "sha256:"), sum) && !configwrite.IsHandEditActor(state.Actor) {
 			return false, nil
 		}
 		if err != nil && !errors.Is(err, fs.ErrNotExist) {
 			return false, nil
 		}
-		data, err := json.Marshal(managedConfigDeferredEdit{ConfigSHA256: sum, Reason: boundedDeferredEditReason(reason),
+		data, err := json.Marshal(managedConfigHandEdit{ConfigSHA256: sum, Reason: boundedHandEditReason(reason),
 			SeenAt: time.Now().UTC().Format(time.RFC3339)})
 		if err != nil {
 			return false, err
 		}
-		return false, writeFileKeepingDACL(managedConfigDeferredEditPath(path), append(data, '\n'), path)
+		return false, writeFileKeepingDACL(managedConfigHandEditPath(path), append(data, '\n'), path)
 	})
 	return err
 }
 
-// readManagedConfigDeferredEdit reads config.unrecorded-edit.json; ok only
+// readManagedConfigHandEdit reads config.hand-edit.json; ok only
 // for a regular file (not a link) that decodes with a lowercase sha256.
-func readManagedConfigDeferredEdit(path string) (managedConfigDeferredEdit, bool) {
-	notePath := managedConfigDeferredEditPath(path)
+func readManagedConfigHandEdit(path string) (managedConfigHandEdit, bool) {
+	notePath := managedConfigHandEditPath(path)
 	if info, err := os.Lstat(notePath); err != nil || !info.Mode().IsRegular() {
-		return managedConfigDeferredEdit{}, false
+		return managedConfigHandEdit{}, false
 	}
-	raw, err := readBoundedConfigFile(notePath, managedConfigDeferredEditMaxBytes)
+	raw, err := readBoundedConfigFile(notePath, managedConfigHandEditMaxBytes)
 	if err != nil {
-		return managedConfigDeferredEdit{}, false
+		return managedConfigHandEdit{}, false
 	}
-	var note managedConfigDeferredEdit
+	var note managedConfigHandEdit
 	if err := json.Unmarshal(raw, &note); err != nil || !managedConfigSHA256Pattern.MatchString(note.ConfigSHA256) {
-		return managedConfigDeferredEdit{}, false
+		return managedConfigHandEdit{}, false
 	}
-	note.Reason = boundedDeferredEditReason(note.Reason)
+	note.Reason = boundedHandEditReason(note.Reason)
 	return note, true
 }
 
 var managedConfigSHA256Pattern = regexp.MustCompile(`^[0-9a-f]{64}$`)
 
-// boundedDeferredEditReason is reason on one line, at most
-// managedConfigDeferredEditReasonMax bytes.
-func boundedDeferredEditReason(reason string) string {
+// boundedHandEditReason is reason on one line, at most
+// managedConfigHandEditReasonMax bytes.
+func boundedHandEditReason(reason string) string {
 	reason = strings.Map(func(r rune) rune {
 		if unicode.IsControl(r) {
 			return ' '
 		}
 		return r
 	}, strings.TrimSpace(reason))
-	if len(reason) > managedConfigDeferredEditReasonMax {
-		reason = strings.ToValidUTF8(reason[:managedConfigDeferredEditReasonMax], "")
+	if len(reason) > managedConfigHandEditReasonMax {
+		reason = strings.ToValidUTF8(reason[:managedConfigHandEditReasonMax], "")
 	}
 	return reason
 }
 
-// removeManagedConfigDeferredEdit removes config.unrecorded-edit.json once the
-// record names the bytes on disk: what it kept is recorded or gone.
-func removeManagedConfigDeferredEdit(path string) {
-	_ = os.Remove(managedConfigDeferredEditPath(path))
+// forgetManagedConfigHandEdit removes config.hand-edit.json when it names
+// raw and a lifecycle run has recorded raw as its own (installed from its
+// approved source): those bytes are approved now. A file that names other
+// bytes stays, as the evidence for a rollback that puts them back.
+func forgetManagedConfigHandEdit(path string, raw []byte) {
+	if kept, ok := readManagedConfigHandEdit(path); ok && kept.ConfigSHA256 == configwrite.SHA256Hex(raw) {
+		_ = os.Remove(managedConfigHandEditPath(path))
+	}
 }
 
-// managedConfigDeferredEditOptions is how a lifecycle step (the transaction's
+// managedConfigHandEditOptions is how a lifecycle step (the transaction's
 // config step, a rollback's record) records raw, a config.yaml it found
 // unrecorded and did not install from its approved source: as the hand edit
 // the hook guardian kept for exactly these bytes (ok), bound to them, with a
-// reason that names step. Bytes the guardian never kept keep the step's own
+// reason that names step. The file stays: it names the hand edit. Bytes the guardian never kept keep the step's own
 // options: an upgrade still adopts a config an earlier build left
 // unrecorded.
-func managedConfigDeferredEditOptions(path string, raw []byte, approvedSHA256, step string) (configwrite.Options, bool) {
+func managedConfigHandEditOptions(path string, raw []byte, approvedSHA256, step string) (configwrite.Options, bool) {
 	sum := configwrite.SHA256Hex(raw)
 	if strings.EqualFold(approvedSHA256, sum) {
 		return configwrite.Options{}, false
 	}
-	note, ok := readManagedConfigDeferredEdit(path)
+	note, ok := readManagedConfigHandEdit(path)
 	if !ok || note.ConfigSHA256 != sum {
 		return configwrite.Options{}, false
 	}
 	return configwrite.Options{
 		Actor:        configwrite.ActorUnattributedHandEdit,
-		Reason:       "config.yaml edited outside the lifecycle, found unrecorded by the hook guardian while " + note.Reason + "; recorded by " + step,
+		Reason:       "config.yaml edited outside the lifecycle, kept by the hook guardian when " + note.Reason + "; recorded by " + step,
 		RecordSHA256: sum,
 	}, true
 }
