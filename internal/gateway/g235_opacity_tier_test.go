@@ -64,6 +64,8 @@ func TestG235OpacityTierCells(t *testing.T) {
 		{"GAP-0507/printf-redirect-link", project, `f=disklink; printf %s hello > ordinary/n3; cp a.txt $f`, true, true, true},
 		{"GAP-0507/printf", project, `f=ordinary/n2; printf %s hello; cp a.txt $f`, false, false, true},
 		{"GAP-0507/printf-link", project, `f=disklink; printf %s hello; cp a.txt $f`, true, true, true},
+		{"GAP-0507/printf-nested-data", project, `f=ordinary/n2; printf %s "$(cp a.txt $f)"`, false, false, true},
+		{"GAP-0507/printf-nested-data-link", project, `f=disklink; printf %s "$(cp a.txt $f)"`, true, true, true},
 		{"GAP-0507/printf-options", project, `f=ordinary/n2; printf -- %s hello; cp a.txt $f`, false, false, true},
 		{"GAP-0507/printf-options-link", project, `f=disklink; printf -- %s hello; cp a.txt $f`, true, true, true},
 		{"GAP-0507/printf-empty", project, `f=ordinary/n2; printf ''; cp a.txt $f`, false, false, true},

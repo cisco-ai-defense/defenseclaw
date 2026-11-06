@@ -666,9 +666,15 @@ func shellBinderDestinations(call *syntax.CallExpr, home string) ([]string, bool
 	}
 	names := make([]string, 0, 2)
 	positional := make([]string, 0, len(args)-1)
+	formatIndex := -1
 	options := true
 	arrayDestination := false
 	for index := 1; index < len(args); index++ {
+		if program == "printf" && formatIndex >= 0 {
+			// After the fixed format, operands are print data. A nested
+			// command or expansion in one is visited by the syntax walk.
+			break
+		}
 		word, fixed := StaticWord(args[index], home)
 		if !fixed {
 			return nil, false
@@ -712,6 +718,9 @@ func shellBinderDestinations(call *syntax.CallExpr, home string) ([]string, bool
 			continue
 		}
 		options = false
+		if program == "printf" {
+			formatIndex = index
+		}
 		positional = append(positional, word)
 	}
 	switch spec.position {
@@ -730,8 +739,7 @@ func shellBinderDestinations(call *syntax.CallExpr, home string) ([]string, bool
 		}
 	}
 	if program == "printf" {
-		formatAt := len(args) - len(positional)
-		if len(positional) == 0 || !printfFormatDoesNotBind(args, formatAt, home) {
+		if formatIndex < 0 || !printfFormatDoesNotBind(args, formatIndex, home) {
 			return nil, false
 		}
 	}
