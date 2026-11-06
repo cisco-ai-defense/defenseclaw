@@ -516,7 +516,7 @@ func TestWithRetiredBufferDrops(t *testing.T) {
 	}
 	got := WithRetiredBufferDrops(current, 3)
 	if got.BufferDropped != 5 || len(got.Limitations) != 3 ||
-		got.Limitations[2] != "3 events were dropped under back-pressure before the sensor's event stream last restarted" {
+		got.Limitations[2] != "3 events were dropped under back-pressure in earlier event streams of the sensor" {
 		t.Fatalf("retired drops = %+v", got)
 	}
 	if len(current.Limitations) != 2 || len(start.Limitations) != 1 {

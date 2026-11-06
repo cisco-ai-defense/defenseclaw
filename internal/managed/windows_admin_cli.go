@@ -129,6 +129,12 @@ const powerShellSingleQuotes = "'\u2018\u2019\u201a\u201b"
 // powerShellArgument is arg as PowerShell passes it to a native command:
 // unchanged when it is a plain word (a subcommand, a flag, a connector name)
 // or a <placeholder> the reader replaces, a literal otherwise.
+//
+// Two Windows PowerShell 5.1 limits of native-command arguments, which no
+// caller reaches (g072 review 2 N1): it drops an empty argument, which 7.3
+// and later pass (an unknown account is the <account> placeholder), and it
+// passes an argument that holds a space and ends in a backslash as "...\",
+// which the program reads with a stray quote (no path argument ends in one).
 func powerShellArgument(arg string) string {
 	if len(arg) > 2 && arg[0] == '<' && arg[len(arg)-1] == '>' && !strings.ContainsAny(arg[1:len(arg)-1], "<>'\"`$\u2018\u2019\u201a\u201b") {
 		return arg

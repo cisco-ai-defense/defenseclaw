@@ -626,7 +626,7 @@ func WithBufferDrops(coverage Coverage, dropped int64, buffer string) Coverage {
 func WithRetiredBufferDrops(coverage Coverage, retired int64) Coverage {
 	if retired > 0 {
 		coverage.Limitations = append(append([]string(nil), coverage.Limitations...), fmt.Sprintf(
-			"%d events were dropped under back-pressure before the sensor's event stream last restarted", retired))
+			"%d events were dropped under back-pressure in earlier event streams of the sensor", retired))
 		coverage.BufferDropped += retired
 	}
 	return coverage

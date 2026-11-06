@@ -285,22 +285,32 @@ func (h *hostPlane) ended() bool {
 // counters and the lineage tracker carry over (GAP-1418), and so do the
 // events the ended source's buffers dropped: its final coverage stands until
 // the next source starts, which then names them (cowork-1-0-8 GAP-0080).
+// The final coverage is read before the swap, and the swap is one step, so
+// stats never shows the ended source's start coverage without its drops; a
+// source that never started (its start failed) leaves the coverage before
+// it standing (g072 review 2 N3).
 func (h *hostPlane) replaceSource(next plane.Source) {
 	h.mu.Lock()
 	previous := h.source
+	h.mu.Unlock()
+	var final plane.Coverage
+	if previous != nil {
+		final = previous.Coverage()
+	}
+	h.mu.Lock()
+	if previous != nil {
+		if h.started {
+			h.coverage = final
+		}
+		h.pendingRetired += final.BufferDropped
+	}
 	h.source = next
 	h.started = false
 	h.done = nil
 	h.mu.Unlock()
-	if previous == nil {
-		return
+	if previous != nil {
+		_ = previous.Close()
 	}
-	final := previous.Coverage()
-	h.mu.Lock()
-	h.coverage = final
-	h.pendingRetired += final.BufferDropped
-	h.mu.Unlock()
-	_ = previous.Close()
 }
 
 func (h *hostPlane) handle(event plane.Event) {
