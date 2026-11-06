@@ -7,12 +7,14 @@ package gateway
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -81,7 +83,7 @@ func TestGAP0490SandboxReceiptCapacity(t *testing.T) {
 				status, out, err := post([]byte(managedHookBody(fmt.Sprintf("g490-%d", i), "PreToolUse")), false)
 				if err != nil || status != http.StatusOK {
 					mu.Lock()
-					problems[fmt.Sprintf("proposal %d %v", status, err)]++
+					problems[fmt.Sprintf("proposal %d %s %v", status, out, err)]++
 					mu.Unlock()
 					continue
 				}
@@ -96,10 +98,10 @@ func TestGAP0490SandboxReceiptCapacity(t *testing.T) {
 					continue
 				}
 				ack, _ := json.Marshal(map[string]string{"delivery_receipt": answer.DeliveryReceipt, "result": "ack"})
-				status, _, err = post(ack, true)
+				status, out, err = post(ack, true)
 				if err != nil || status != http.StatusOK {
 					mu.Lock()
-					problems[fmt.Sprintf("receipt %d %v", status, err)]++
+					problems[fmt.Sprintf("receipt %d %s %v", status, out, err)]++
 					mu.Unlock()
 				}
 			}
@@ -108,5 +110,59 @@ func TestGAP0490SandboxReceiptCapacity(t *testing.T) {
 	wg.Wait()
 	if len(problems) != 0 {
 		t.Fatalf("400 calls at 20 parallel: %v", problems)
+	}
+}
+
+func TestGAP0490CanceledRelayFreesBindingAdmission(t *testing.T) {
+	entered := make(chan struct{})
+	finish := make(chan struct{})
+	var calls atomic.Int32
+	f := newSandboxIngressFixture(t, func(cfg *SandboxIngressConfig) {
+		cfg.Limiter = sandboxauth.NewLimiter(sandboxauth.LimiterConfig{
+			HookRPS: 1000, HookBurst: 1000, MaxInFlight: 1,
+		})
+		cfg.OnRequest = func(_ sandboxauth.Binding, route sandboxauth.Route) {
+			if route == sandboxauth.RouteHook && calls.Add(1) == 1 {
+				close(entered)
+				<-finish
+			}
+		}
+	})
+	ctx, cancel := context.WithCancel(t.Context())
+	defer cancel()
+	first := httptest.NewRequest(http.MethodPost, "/api/v1/claude-code/hook", bytes.NewBufferString(`{}`)).WithContext(ctx)
+	first.RemoteAddr = "127.0.0.1:43210"
+	first.Header.Set("Authorization", "Bearer "+f.claudeTok)
+	first.Header.Set("Content-Type", "application/json")
+	first.Header.Set("X-DefenseClaw-Client", "sandbox-hook/1.0")
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		f.handler.ServeHTTP(httptest.NewRecorder(), first)
+	}()
+	select {
+	case <-entered:
+	case <-time.After(3 * time.Second):
+		close(finish)
+		t.Fatal("first request was not admitted")
+	}
+	cancel()
+	deadline := time.Now().Add(time.Second)
+	for {
+		second := f.do(t, http.MethodPost, "/api/v1/claude-code/hook", f.claudeTok, `{}`)
+		if second.Code != http.StatusTooManyRequests {
+			break
+		}
+		if time.Now().After(deadline) {
+			close(finish)
+			t.Fatal("canceled relay retained the binding admission slot")
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	close(finish)
+	select {
+	case <-done:
+	case <-time.After(3 * time.Second):
+		t.Fatal("first handler did not finish")
 	}
 }

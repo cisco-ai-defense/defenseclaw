@@ -204,6 +204,8 @@ func (a *APIServer) handleSandboxHookReceipt(w http.ResponseWriter, r *http.Requ
 		a.writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": "sandbox hook receipt expired or closed"})
 		return
 	}
+	a.sandboxReceiptWriteMu.Lock()
+	defer a.sandboxReceiptWriteMu.Unlock()
 	req := p.request()
 	req.sandboxReceiptAcknowledgment = true
 	req.pendingSandboxCallRef = p.SandboxReceipt.CallRef
