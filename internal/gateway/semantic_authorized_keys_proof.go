@@ -1400,16 +1400,16 @@ func trustedExistingAuthorizedKeysSymlinkWrite(request trustedActionRequest, fac
 		// earlier mention of a replaced value is not a write target.
 		return false
 	}
-	decision := request.targetMemo.ActionCommandDecisionInShell(input.Command, input.CWD, facts.ActiveHome, globFacts, trustedPOSIXShellCall(input, facts))
+	decision := request.targetMemo.ActionCommandGradeInShell(input.Command, input.CWD, facts.ActiveHome, globFacts, trustedPOSIXShellCall(input, facts))
 	if input.DialectHint != "" {
-		decision = request.targetMemo.ActionCommandDecisionWithDialectAndGlobFacts(input.Command, input.CWD, facts.ActiveHome, input.DialectHint, globFacts)
+		decision = request.targetMemo.ActionCommandGradeWithDialectAndGlobFacts(input.Command, input.CWD, facts.ActiveHome, input.DialectHint, globFacts)
 	}
-	if decision == hookpaths.ProtectedTargetDecision {
+	if decision == hookpaths.GradeNamed {
 		return named()
 	}
 	// A possible hit cannot end this proof: a later write operand or
 	// command-created link in the same call may still give a named answer.
-	decisionPossible := decision != ""
+	decisionPossible := decision == hookpaths.GradePossible
 	if decisionPossible && request.possibleTarget != nil {
 		*request.possibleTarget = true
 	}

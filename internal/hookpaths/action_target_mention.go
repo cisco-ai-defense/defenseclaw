@@ -371,6 +371,24 @@ func actionPosixTargetMentionGrade(command, cwd, home string, depth int, stateOn
 				// A read-only call after a plain mv replaced a link reads the
 				// moved file under that name (rel-1-0-6:GAP-0217).
 				readOnly := !stateOnly && actionKnownReadOnlyShell(&syntax.File{Stmts: []*syntax.Stmt{stmt}}, home)
+				// A Windows home also receives the POSIX reading. A recognized
+				// PowerShell reader's path operands are reads in that reading;
+				// its redirects and nested calls are still judged separately.
+				windowsReadOnly := false
+				if !stateOnly && (actionWindowsHome(home) || actionPosixWindowsHome(home)) && len(call.Args) > 0 {
+					if program, static := staticProgramWord(call.Args[0], home); static {
+						words := make([]string, 1, len(call.Args))
+						words[0] = program
+						for _, arg := range call.Args[1:] {
+							value, known := StaticWord(arg, home)
+							if !known {
+								value = actionWordLiteralText(arg)
+							}
+							words = append(words, value)
+						}
+						windowsReadOnly = actionKnownReadOnlyWindowsStatement(words)
+					}
+				}
 				readsReplaced := len(replacedEntries) > 0 && readOnly
 				var quick func([]string) bool
 				if !stateOnly {
@@ -383,6 +401,10 @@ func actionPosixTargetMentionGrade(command, cwd, home string, depth int, stateOn
 					return false
 				}
 				for _, word := range call.Args {
+					if windowsReadOnly {
+						judgedWords = append(judgedWords, word)
+						continue
+					}
 					if readsReplaced && actionReplacedEntryWord(word, values, effectiveCWD, home, replacedEntries) {
 						judgedWords = append(judgedWords, word)
 						continue
@@ -3051,6 +3073,14 @@ func actionWindowsTargetMentionGrade(command, cwd, home string, depth int, state
 		if grammar != 0 && (dialect == actionfacts.DialectPowerShell || dialect == actionfacts.DialectPOSIX) {
 			grammar |= actionWindowsPlainComments
 		}
+		// These grammar flags have no effect when their triggering byte is
+		// absent. Share that reading across the gateway's dialect checks.
+		if !strings.Contains(command, "#") {
+			grammar &^= actionWindowsPlainComments
+		}
+		if !strings.Contains(command, `\`) {
+			grammar &^= actionWindowsBackslashEscapes
+		}
 		key := windowsGradeKey{command: command, cwd: cwd, home: home, depth: depth,
 			stateOnly: stateOnly, grammar: grammar}
 		hit := memo.windowsGrammarGrade(key, func() string {
@@ -3249,7 +3279,7 @@ func actionWindowsTargetMentionAsGrade(command, cwd, home string, depth int, sta
 		if len(statement) >= 3 && strings.HasPrefix(statement[0], "$") && statement[1] == "=" {
 			name := strings.ToLower(statement[0])
 			value := strings.TrimSpace(actionWindowsHereStringBody(statement[2]))
-			if len(statement) == 3 && strings.ContainsAny(value, "*?[") && !strings.ContainsAny(value, "`$") {
+			if len(statement) == 3 && strings.ContainsAny(value, "*?[") && !strings.ContainsAny(value, "`") {
 				boundPatterns[name] = value
 			} else {
 				delete(boundPatterns, name)
@@ -3259,7 +3289,7 @@ func actionWindowsTargetMentionAsGrade(command, cwd, home string, depth int, sta
 			if attached {
 				name = strings.ToLower(name)
 				value = strings.TrimSpace(actionWindowsHereStringBody(value))
-				if strings.ContainsAny(value, "*?[") && !strings.ContainsAny(value, "`$") {
+				if strings.ContainsAny(value, "*?[") && !strings.ContainsAny(value, "`") {
 					boundPatterns[name] = value
 				} else {
 					delete(boundPatterns, name)
@@ -3270,9 +3300,14 @@ func actionWindowsTargetMentionAsGrade(command, cwd, home string, depth int, sta
 			for i, word := range resolved {
 				if value, known := boundPatterns[strings.ToLower(word)]; known {
 					resolved[i] = value
+				} else if option, operand, attached := strings.Cut(word, ":"); attached && strings.HasPrefix(option, "-") {
+					if value, known := boundPatterns[strings.ToLower(operand)]; known {
+						resolved[i] = option + ":" + value
+					}
 				}
 			}
-			if actionWindowsNamedContentWritePattern(resolved, assignmentCWD, home) {
+			if actionWindowsNamedContentWritePattern(resolved, assignmentCWD, home) ||
+				actionWindowsNamedCopyDestinationPattern(resolved, assignmentCWD, home, grammar&actionWindowsPlainGrammar == 0) {
 				return ProtectedTargetDecision
 			}
 		}
@@ -3401,7 +3436,8 @@ func actionWindowsTargetMentionAsGrade(command, cwd, home string, depth int, sta
 	spans := actionWindowsResolvedSpans(words, cwd, home)
 	copySourceWords := make(map[int]bool)
 	for _, span := range spans {
-		if !stateOnly && actionWindowsNamedContentWritePattern(span.words, effectiveCWD, home) {
+		if !stateOnly && (actionWindowsNamedContentWritePattern(span.words, effectiveCWD, home) ||
+			actionWindowsNamedCopyDestinationPattern(span.words, effectiveCWD, home, powerShell)) {
 			return ProtectedTargetDecision
 		}
 		if len(span.words) == 1 && actionWindowsEnvAssignment(span.words[0]) {
@@ -3555,14 +3591,32 @@ func actionWindowsCopySourceIsSSHDirectory(word, cwd, home string) bool {
 // A resolved PowerShell value in a content writer's path operand retains its
 // role after assignment substitution. Value and encoding operands are text.
 func actionWindowsNamedContentWritePattern(words []string, cwd, home string) bool {
-	if len(words) < 2 {
-		return false
+	for start := 0; start < len(words); start++ {
+		if !actionWindowsCommandPosition(words, start) {
+			continue
+		}
+		switch programBase(words[start]) {
+		case "add-content", "set-content", "clear-content", "out-file", "set-item":
+		default:
+			continue
+		}
+		end := start + 1
+		for end < len(words) {
+			switch words[end] {
+			case ";", "|", "||", "&", "&&", "{", "}":
+				goto check
+			}
+			end++
+		}
+	check:
+		if actionWindowsNamedContentWritePatternCall(words[start:end], cwd, home) {
+			return true
+		}
 	}
-	switch programBase(words[0]) {
-	case "add-content", "set-content", "clear-content", "out-file", "set-item":
-	default:
-		return false
-	}
+	return false
+}
+
+func actionWindowsNamedContentWritePatternCall(words []string, cwd, home string) bool {
 	pathOption := false
 	for i := 1; i < len(words); i++ {
 		word := words[i]
@@ -3594,6 +3648,98 @@ func actionWindowsNamedContentWritePattern(words []string, cwd, home string) boo
 func actionWindowsNamedContentPattern(word, cwd, home string) bool {
 	word = strings.TrimSpace(actionWindowsHereStringBody(word))
 	return strings.ContainsAny(word, "*?[") && actionWindowsProtectedGlobReach(word, cwd, home)
+}
+
+// A copy source is read. Only a destination whose role is explicit or whose
+// positional role is complete can raise a protected pattern to Named.
+func actionWindowsNamedCopyDestinationPattern(words []string, cwd, home string, powerShell bool) bool {
+	for start := 0; start < len(words); start++ {
+		if !actionWindowsCommandPosition(words, start) {
+			continue
+		}
+		switch programBase(words[start]) {
+		case "copy-item", "cpi":
+		case "copy", "cp":
+			if !powerShell {
+				continue
+			}
+		default:
+			continue
+		}
+		end := start + 1
+		for end < len(words) {
+			switch words[end] {
+			case ";", "|", "||", "&", "&&", "{", "}":
+				goto checkCopy
+			}
+			end++
+		}
+	checkCopy:
+		if actionWindowsNamedCopyDestinationPatternCall(words[start:end], cwd, home) {
+			return true
+		}
+	}
+	return false
+}
+
+func actionWindowsCommandPosition(words []string, index int) bool {
+	if index == 0 {
+		return true
+	}
+	switch words[index-1] {
+	case ";", "|", "||", "&", "&&", "{", "}":
+		return true
+	}
+	return false
+}
+
+func actionWindowsNamedCopyDestinationPatternCall(words []string, cwd, home string) bool {
+	if len(words) < 3 {
+		return false
+	}
+	var positional []string
+	destination := ""
+	sourceOption := false
+	for i := 1; i < len(words); i++ {
+		word := words[i]
+		if word == "" {
+			return false
+		}
+		name, attached, hasAttached := strings.Cut(word, ":")
+		switch strings.ToLower(name) {
+		case "-destination":
+			if hasAttached {
+				destination = attached
+			} else if i+1 < len(words) {
+				i++
+				destination = words[i]
+			}
+		case "-path", "-literalpath":
+			sourceOption = true
+			if !hasAttached && i+1 < len(words) {
+				i++
+			}
+		case "-filter", "-include", "-exclude", "-credential", "-fromsession", "-tosession":
+			if !hasAttached && i+1 < len(words) {
+				i++
+			}
+		case "-recurse", "-container", "-force", "-passthru", "-whatif", "-confirm":
+		default:
+			if strings.HasPrefix(word, "-") {
+				return false
+			}
+			positional = append(positional, word)
+		}
+	}
+	if destination == "" {
+		switch {
+		case sourceOption && len(positional) == 1:
+			destination = positional[0]
+		case !sourceOption && len(positional) == 2:
+			destination = positional[1]
+		}
+	}
+	return actionWindowsNamedContentPattern(destination, cwd, home)
 }
 
 // actionWindowsPrintOnlyCommandBody reports a pwsh/powershell -Command body

@@ -56,13 +56,22 @@ func ActionCommandDecisionWithDialectAndGlobFacts(command, cwd, home string, dia
 // ActionCommandDecisionWithDialectAndGlobFacts is the package function of
 // that name, with the file system answers of the evaluation m (nil: none).
 func (m *TargetMemo) ActionCommandDecisionWithDialectAndGlobFacts(command, cwd, home string, dialect actionfacts.Dialect, facts map[string]string) string {
-	return actionDecisionFromGrade(actionTargetDecision(command, cwd, home, dialect, dialect == actionfacts.DialectPOSIX, facts, m))
+	return actionDecisionFromGrade(m.actionTargetDecision(command, cwd, home, dialect, dialect == actionfacts.DialectPOSIX, facts))
 }
 
 // ActionCommandGradeWithDialectAndGlobFacts returns the maximum certainty
 // produced by the target readers, retaining possible hits for policy tiers.
 func (m *TargetMemo) ActionCommandGradeWithDialectAndGlobFacts(command, cwd, home string, dialect actionfacts.Dialect, facts map[string]string) Grade {
-	grade := actionTargetDecision(command, cwd, home, dialect, dialect == actionfacts.DialectPOSIX, facts, m)
+	return actionGradeFromDecision(m.actionTargetDecision(command, cwd, home, dialect, dialect == actionfacts.DialectPOSIX, facts))
+}
+
+// ActionCommandGradeInShell preserves the no-dialect POSIX reading while
+// retaining the certainty of each target hit for the policy tier.
+func (m *TargetMemo) ActionCommandGradeInShell(command, cwd, home string, facts map[string]string, posixShell bool) Grade {
+	return actionGradeFromDecision(m.actionTargetDecision(command, cwd, home, "", posixShell, facts))
+}
+
+func actionGradeFromDecision(grade string) Grade {
 	if grade == ProtectedTargetDecision {
 		return GradeNamed
 	}
@@ -82,7 +91,33 @@ func ActionCommandDecisionInShell(command, cwd, home string, facts map[string]st
 // ActionCommandDecisionInShell is the package function of that name, with
 // the file system answers of the evaluation m (nil: none).
 func (m *TargetMemo) ActionCommandDecisionInShell(command, cwd, home string, facts map[string]string, posixShell bool) string {
-	return actionDecisionFromGrade(actionTargetDecision(command, cwd, home, "", posixShell, facts, m))
+	return actionDecisionFromGrade(m.actionTargetDecision(command, cwd, home, "", posixShell, facts))
+}
+
+type actionDecisionKey struct {
+	command, cwd, home string
+	dialect            actionfacts.Dialect
+	posixShell         bool
+}
+
+func (m *TargetMemo) actionTargetDecision(command, cwd, home string, dialect actionfacts.Dialect, posixShell bool, facts map[string]string) string {
+	if m == nil || facts != nil {
+		return actionTargetDecision(command, cwd, home, dialect, posixShell, facts, m)
+	}
+	key := actionDecisionKey{command: command, cwd: cwd, home: home, dialect: dialect, posixShell: posixShell}
+	m.mu.Lock()
+	grade, known := m.decisions[key]
+	m.mu.Unlock()
+	if known {
+		return grade
+	}
+	grade = actionTargetDecision(command, cwd, home, dialect, posixShell, nil, m)
+	m.mu.Lock()
+	if len(m.decisions) < 16 {
+		m.decisions[key] = grade
+	}
+	m.mu.Unlock()
+	return grade
 }
 
 // The historical decision API remains conservative for its client callers.

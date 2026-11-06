@@ -37,6 +37,9 @@ type TargetMemo struct {
 	// the command through more than one dialect. The dialect only decides
 	// afterward whether a read-only grammar contributes its hit.
 	windowsGrades map[windowsGradeKey]string
+	// decisions reuse a complete command reading across gateway proofs.
+	// Client glob facts have their own scope and are never cached here.
+	decisions map[actionDecisionKey]string
 	// homes resolves each home once (actionProtectedStatePath).
 	homes map[string]*actionStateHome
 	// keys lists each home's protected key files once
@@ -63,6 +66,7 @@ func NewTargetMemo() *TargetMemo {
 		prefixes:      make(map[string]walkState),
 		words:         make(map[memoWordKey]string),
 		windowsGrades: make(map[windowsGradeKey]string),
+		decisions:     make(map[actionDecisionKey]string),
 		homes:         make(map[string]*actionStateHome),
 		keys:          make(map[string][]string),
 		files:         make(map[string]protectedFiles),
