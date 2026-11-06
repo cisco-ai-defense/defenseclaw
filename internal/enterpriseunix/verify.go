@@ -176,6 +176,7 @@ func (l *lifecycle) readOnly(ctx context.Context) int {
 			}
 		}
 	}
+	env.warnOpenCodePortsRecord(r)
 	if failure := env.lastPackageInstallFailure(); failure != "" {
 		// A package reinstall or upgrade the lifecycle refused (a full disk,
 		// a config it rejected) printed Complete and left status and verify
@@ -1571,4 +1572,20 @@ func auditWriteFailureRecovered(lastFailureAt string, now time.Time) bool {
 		return false
 	}
 	return now.Sub(at) > auditWriteFailureWindow
+}
+
+// warnOpenCodePortsRecord reports a guardian OpenCode service ports record
+// that cannot be read: the guardian then gives no account a new OpenCode
+// port (REVIEW-gx053-4 MF2). Removing it rebuilds it from the accounts'
+// service.json files on the next pass.
+func (env *Env) warnOpenCodePortsRecord(r *enterprisestatus.Result) {
+	path := filepath.Join(env.Layout.GuardianAuthDir, enterprisehooks.UnixOpenCodeServicePortsFileName)
+	if _, err := os.Lstat(env.P(path)); err != nil {
+		return
+	}
+	if _, err := enterprisehooks.LoadUnixOpenCodeServicePorts(env.P(path)); err != nil {
+		r.AddWarning("opencode_port_record_unreadable", fmt.Sprintf(
+			"the guardian's OpenCode service ports record %s cannot be read (%v), so no account gets a new OpenCode port; ports already in service.json files are kept. Remove it to rebuild it on the next pass: sudo rm %s",
+			path, err, path))
+	}
 }

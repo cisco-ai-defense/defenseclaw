@@ -262,6 +262,10 @@ type enterpriseHookWorkerRequest struct {
 	// account's OpenCode background server this port when its service.json
 	// names none (gas-ux-r1 GAP-0053; enterprisepolicy.EnsureOpenCodeServicePort).
 	OpenCodeServicePort int `json:"opencode_service_port,omitempty"`
+	// OpenCodeServicePortReplace is a port the account's service.json names
+	// that another account holds: the worker replaces it with
+	// OpenCodeServicePort (enterprisepolicy.ReplaceOpenCodeServicePort).
+	OpenCodeServicePortReplace int `json:"opencode_service_port_replace,omitempty"`
 	// TimeoutSeconds replaces enterpriseHookWorkerTimeout for this worker
 	// (remove-all's retry of a worker that timed out).
 	TimeoutSeconds int `json:"timeout_seconds,omitempty"`
