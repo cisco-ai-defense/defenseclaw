@@ -40,7 +40,11 @@ func TestUnprotectedRecordFromAnEarlierInstallIsPending(t *testing.T) {
 				data := []byte(tc.record)
 				if tc.record == "" {
 					var err error
-					if data, err = enterprisehooks.MarshalUnprotectedAgents(nil); err != nil {
+					current, generationErr := configwrite.ReadGenerationState(h.env.P(h.env.Layout.ConfigPath))
+					if generationErr != nil || current.Generation == 0 {
+						t.Fatalf("read current config generation: %+v, %v", current, generationErr)
+					}
+					if data, err = enterprisehooks.MarshalUnprotectedAgentsForConfig(nil, current.Generation); err != nil {
 						t.Fatal(err)
 					}
 				}
@@ -131,6 +135,28 @@ func TestUnprotectedRecordPredatingConfigGenerationIsPending(t *testing.T) {
 				if result.CoverageComplete || result.SecurityComplete || !strings.Contains(warnings, "NOT COVERED (scan pending)") ||
 					!strings.Contains(warnings, "different config generation") {
 					t.Fatalf("%s with an earlier scan: coverage=%t security=%t warnings=%+v", action, result.CoverageComplete, result.SecurityComplete, result.Warnings)
+				}
+			}
+			writeRecord(0)
+			for _, action := range []string{ActionStatus, ActionVerify} {
+				result := h.run(Options{Action: action})
+				warnings := messagesOf(result.Warnings, enterprisehooks.UnprotectedCodeInstallScanIncomplete)
+				if result.CoverageComplete || result.SecurityComplete || !strings.Contains(warnings, "different config generation") {
+					t.Fatalf("%s with an unstamped scan: coverage=%t security=%t warnings=%+v", action, result.CoverageComplete, result.SecurityComplete, result.Warnings)
+				}
+			}
+			legacy, err := enterprisehooks.MarshalUnprotectedAgents(nil)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(recordPath, legacy, 0o600); err != nil {
+				t.Fatal(err)
+			}
+			for _, action := range []string{ActionStatus, ActionVerify} {
+				result := h.run(Options{Action: action})
+				warnings := messagesOf(result.Warnings, enterprisehooks.UnprotectedCodeInstallScanIncomplete)
+				if result.CoverageComplete || result.SecurityComplete || !strings.Contains(warnings, "different config generation") {
+					t.Fatalf("%s with a missing scan stamp: coverage=%t security=%t warnings=%+v", action, result.CoverageComplete, result.SecurityComplete, result.Warnings)
 				}
 			}
 			writeRecord(current.Generation)
