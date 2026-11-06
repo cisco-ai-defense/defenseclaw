@@ -63,7 +63,8 @@ func TestGAP0055ShellCommandCallReader(t *testing.T) {
 			t.Errorf("%s: shellCommandBodyIndex reads -- as the body", line)
 		}
 	}
-	for _, line := range []string{"sh script.sh", "sh -- -c BODY", "sh -c", "sh -c --", "bash -z -c BODY", "env -S x sh -c BODY",
+	// --rcfile and --init-file run a startup file first: no exact body.
+	for _, line := range []string{"bash --rcfile config -c BODY", "bash --init-file x -c BODY", "sh script.sh", "sh -- -c BODY", "sh -c", "sh -c --", "bash -z -c BODY", "env -S x sh -c BODY",
 		"sudo -l sh -c BODY", "sudo -e sh -c BODY", "command -v sh -c BODY", "python -c BODY", "xargs sh -c BODY", "sh -s BODY"} {
 		if _, at, ok := shellCommandCall(strings.Fields(line)); ok {
 			t.Errorf("%s: read body %d, want no shell -c call", line, at)

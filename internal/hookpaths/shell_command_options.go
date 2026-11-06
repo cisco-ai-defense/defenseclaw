@@ -26,9 +26,6 @@ func shellCommandBodyIndex(words []string) (int, bool) {
 		case option == "--login" || option == "--noprofile" || option == "--norc" || option == "--posix" ||
 			option == "--restricted" || option == "--noediting" || option == "--verbose":
 			continue
-		case option == "--rcfile" || option == "--init-file":
-			i++
-			continue
 		case strings.HasPrefix(option, "--") || len(option) < 2 || option[0] != '-' && option[0] != '+':
 			// The first operand: the body of a -c call.
 			if !command {
