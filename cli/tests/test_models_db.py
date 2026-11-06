@@ -148,6 +148,15 @@ class ModelsDbTests(unittest.TestCase):
         self.store.clear_action_field("mcp", "key", "runtime", connector="claudecode")
         self.assertEqual(stored(), {"install": "allow"})
 
+    def test_counts_include_blocked_account_mcp_rows(self):
+        # An enrolled account MCP server keeps its decision under its own
+        # target type; it is still a blocked MCP server.
+        self.store.set_action_field("mcp", "plain", "install", "block", "scan")
+        self.store.set_action_field("mcp-account", "account-key", "install", "block", "scan")
+
+        for counts in (self.store.get_counts(), self.store.get_enforcement_counts()):
+            self.assertEqual((counts.blocked_mcps, counts.allowed_mcps), (2, 0))
+
     def test_counts_include_the_operator_lists_of_asset_policy(self):
         from defenseclaw.config import AssetPolicyRule, default_config
 

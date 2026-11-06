@@ -446,7 +446,7 @@ func TestChangedMCPServerDefinitionIsPendingUntilReadmitted(t *testing.T) {
 	}
 	runtime := func(server config.MCPServerEntry) string {
 		t.Helper()
-		entry, err := store.GetActionForConnector("mcp", MCPJournalName(server), "claudecode")
+		entry, err := store.GetActionForConnector(MCPJournalType(server), MCPJournalName(server), "claudecode")
 		if err != nil {
 			t.Fatal(err)
 		}
