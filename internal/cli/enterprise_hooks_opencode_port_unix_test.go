@@ -16,12 +16,15 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
 	"github.com/defenseclaw/defenseclaw/internal/config"
 	"github.com/defenseclaw/defenseclaw/internal/enterprisehooks"
 	"github.com/defenseclaw/defenseclaw/internal/enterprisepolicy"
+	"github.com/defenseclaw/defenseclaw/internal/managed"
 )
 
 // openCodePortGuardian is a standalone guardian with the given eligible
@@ -42,9 +45,13 @@ func openCodePortGuardianWith(t *testing.T, governed bool, uids ...int) (map[int
 	previousLoad, previousCheck, previousRunner := enterpriseHookLoadEligibleAccounts, enterpriseHookCheckHome, enterpriseHookWorkerRunner
 	previousLoadPorts, previousWritePorts := enterpriseHookLoadOpenCodePorts, enterpriseHookWriteOpenCodePorts
 	previousReadTimeout := enterpriseHookOpenCodeReadTimeout
+	openCodeOnCommit, openCodeAfterRewrite = nil, nil
+	openCodeCrashed.Store(false)
 	openCodeUserCannotRead, openCodeReadFails, openCodeReadHangs = map[int]bool{}, map[int]bool{}, map[int]chan struct{}{}
 	t.Cleanup(func() {
 		enterpriseHookOpenCodeReadTimeout = previousReadTimeout
+		openCodeOnCommit, openCodeAfterRewrite = nil, nil
+		openCodeCrashed.Store(false)
 		for _, release := range openCodeReadHangs {
 			close(release)
 		}
@@ -126,10 +133,19 @@ func openCodePortGuardianWith(t *testing.T, governed bool, uids ...int) (map[int
 			state.Ports[uid] = port
 		}
 		state.Exists = openCodeRecordExists || len(record) > 0
+		state.ImportDone = state.Exists
 		state.Unknown, state.Contested = openCodeRecordUnknown, openCodeRecordContested
 		return state, nil
 	}
 	enterpriseHookWriteOpenCodePorts = func(_ string, state enterprisehooks.UnixOpenCodeServicePortsState) error {
+		if openCodeCrashed.Load() {
+			return nil // the guardian is gone: nothing more reaches the disk
+		}
+		if openCodeOnCommit != nil {
+			if err := openCodeOnCommit(state); err != nil {
+				return err
+			}
+		}
 		openCodeRecordUnknown, openCodeRecordContested = state.Unknown, state.Contested
 		openCodeRecordWrites++
 		openCodeRecordExists = true
@@ -163,12 +179,23 @@ func openCodePortGuardianWith(t *testing.T, governed bool, uids ...int) (map[int
 			}
 			return response, nil
 		}
+		if request.OpenCodeServicePort > 0 {
+			// One rewrite at a time, so a crash lands between two of them.
+			openCodeRewriteMu.Lock()
+			defer openCodeRewriteMu.Unlock()
+		}
+		if request.OpenCodeServicePort > 0 && openCodeCrashed.Load() {
+			return response, errors.New("the guardian crashed")
+		}
 		if request.OpenCodeServicePort > 0 && openCodeUserCannotRead[account.UID] {
 			response.OpenCodeServicePort = &enterpriseHookWorkerOpenCodePortReport{Error: "permission denied"}
 			return response, nil
 		}
 		if request.OpenCodeServicePort > 0 {
 			response.OpenCodeServicePort = runEnterpriseHookWorkerOpenCodePort(request)
+			if openCodeAfterRewrite != nil {
+				openCodeAfterRewrite(account.UID)
+			}
 		}
 		return response, nil
 	}
@@ -183,6 +210,14 @@ var (
 	openCodeRecordUnknown    []enterprisehooks.UnixOpenCodeServicePortUnknown
 	openCodeRecordContested  []enterprisehooks.UnixOpenCodeContestedPort
 	openCodeRecordExists     bool
+	// Fault injection (REVIEW-gx053-12 MF1): openCodeOnCommit runs at each
+	// record commit and can fail it; openCodeAfterRewrite runs after each
+	// user-file rewrite; once openCodeCrashed is set no rewrite and no
+	// commit happens any more (the guardian died).
+	openCodeOnCommit     func(enterprisehooks.UnixOpenCodeServicePortsState) error
+	openCodeAfterRewrite func(uid int)
+	openCodeCrashed      atomic.Bool
+	openCodeRewriteMu    sync.Mutex
 	// openCodeUserCannotRead are the uids whose service.json the account
 	// itself cannot read; openCodeReadFails the uids whose read worker fails;
 	// openCodeReadHangs the uids whose read never answers (until released).
@@ -679,8 +714,10 @@ func TestManagedGuardianOpenCodeImportCollisionCannotBeWritten(t *testing.T) {
 	setEligible(nil, 1001, 1002)
 	linkOpenCodeConfig(t, homes[1002], 26000)
 	log := runOpenCodePortPass(t)
-	if len(*record) != 0 {
-		t.Fatalf("a contested port, or a binding that could not be written, was recorded: %v\n%s", *record, log)
+	// Write-ahead (REVIEW-gx053-12): the fresh bindings are committed before
+	// the writes; a write that fails keeps them and the next pass retries.
+	if len(*record) != 2 || (*record)[1001] == 26000 || (*record)[1002] == 26000 || (*record)[1001] == (*record)[1002] {
+		t.Fatalf("the contested port was recorded, or the fresh bindings were not: %v\n%s", *record, log)
 	}
 	if len(openCodeRecordUnknown) != 2 || !strings.Contains(openCodeRecordUnknown[0].Fix, "opencode service set port") {
 		t.Fatalf("not warned with the admin step: %+v\n%s", openCodeRecordUnknown, log)
@@ -1007,8 +1044,35 @@ func TestManagedGuardianOpenCodeContestedPortStaysContested(t *testing.T) {
 	}
 }
 
-// A linked final service file is read in the only import pass. Its port is
-// held from a newcomer even though the account-side writer cannot replace it.
+// assertOpenCodeContestKept: the mark on port stays, no account is recorded
+// with it, no two share a port, and every file names its recorded port.
+func assertOpenCodeContestKept(t *testing.T, homes map[int]string, record map[int]int, port int, log string) {
+	t.Helper()
+	marked := false
+	for _, entry := range openCodeRecordContested {
+		marked = marked || entry.Port == port
+	}
+	if !marked {
+		t.Fatalf("the contested mark on %d was lost: %+v\n%s", port, openCodeRecordContested, log)
+	}
+	seen := map[int]int{}
+	for uid, home := range homes {
+		got := record[uid]
+		if got == 0 || got == port {
+			t.Fatalf("uid %d is recorded with %d (the contested port is %d): %v\n%s", uid, got, port, record, log)
+		}
+		if other, shared := seen[got]; shared {
+			t.Fatalf("uids %d and %d share port %d: %v\n%s", other, uid, got, record, log)
+		}
+		seen[got] = uid
+		if file := openCodePortIn(t, home); file != got {
+			t.Fatalf("uid %d's service.json names %d, the record %d\n%s", uid, file, got, log)
+		}
+	}
+}
+
+// A linked service file is read in the import pass. Its recorded binding
+// remains reserved when the account-side replacement refuses the link.
 func TestReviewLinkedServiceFileNeverGivesItsPortToNewcomer(t *testing.T) {
 	homes, record, setEligible := openCodePortGuardianWith(t, true, 1001, 1002)
 	target := filepath.Join(homes[1001], "actual-service.json")
@@ -1024,14 +1088,14 @@ func TestReviewLinkedServiceFileNeverGivesItsPortToNewcomer(t *testing.T) {
 	}
 	for pass := 0; pass < 3; pass++ {
 		log := runOpenCodePortPass(t)
-		if got := openCodePortIn(t, homes[1002]); got == 25002 || (*record)[1002] == 25002 {
-			t.Fatalf("pass %d gave a linked file's port to another account: file=%d record=%v log=%s", pass, got, *record, log)
+		if (*record)[1001] != 25002 || (*record)[1002] == 25002 || openCodePortIn(t, homes[1002]) == 25002 {
+			t.Fatalf("pass %d lost a recorded port: record=%v log=%s", pass, *record, log)
 		}
 	}
 	setEligible(nil, 1001, 1002, 9002)
 	log := runOpenCodePortPass(t)
 	if (*record)[9002] == 25002 || openCodePortIn(t, homes[9002]) == 25002 {
-		t.Fatalf("later newcomer received a linked file's live port: record=%v log=%s", *record, log)
+		t.Fatalf("later newcomer received a recorded port: record=%v log=%s", *record, log)
 	}
 	if err := os.Remove(link); err != nil {
 		t.Fatal(err)
@@ -1040,7 +1104,113 @@ func TestReviewLinkedServiceFileNeverGivesItsPortToNewcomer(t *testing.T) {
 		t.Fatal(err)
 	}
 	runOpenCodePortPass(t)
-	if got := (*record)[1001]; got == 0 || got == 25002 || openCodePortIn(t, homes[1001]) != got || (*record)[1002] == 25002 {
-		t.Fatalf("ordinary file recovery did not take a fresh port: %v", *record)
+	if (*record)[1001] != 25002 || openCodePortIn(t, homes[1001]) != 25002 {
+		t.Fatalf("ordinary file recovery lost its binding: %v", *record)
+	}
+}
+
+// REVIEW-gx053-12 MF1: the record is committed before any user file is
+// rewritten. A commit that fails rewrites no file, and the next pass is the
+// same import pass over the same files, with the same result.
+func TestManagedGuardianOpenCodeCommitFailureRewritesNoFile(t *testing.T) {
+	homes, record, _ := openCodePortGuardianWith(t, true, 1001, 1002, 1003)
+	writeOpenCodePortFile(t, homes[1001], 25003)
+	writeOpenCodePortFile(t, homes[1002], 25003)
+	openCodeOnCommit = func(enterprisehooks.UnixOpenCodeServicePortsState) error {
+		return errors.New("no space left on device")
+	}
+	log := runOpenCodePortPass(t)
+	for uid, want := range map[int]int{1001: 25003, 1002: 25003, 1003: 0} {
+		if got := openCodePortIn(t, homes[uid]); got != want {
+			t.Fatalf("uid %d's file was rewritten to %d although the record was not committed\n%s", uid, got, log)
+		}
+	}
+	if len(*record) != 0 || openCodeRecordExists || !strings.Contains(log, "no account's OpenCode service.json is rewritten this pass") {
+		t.Fatalf("the failed commit is not reported, or something was recorded: %v\n%s", *record, log)
+	}
+	openCodeOnCommit = nil
+	log = runOpenCodePortPass(t)
+	assertOpenCodeContestKept(t, homes, *record, 25003, log)
+}
+
+// A crash right after the commit, before any file is rewritten: the next
+// pass is a normal pass, the record wins and the files are rewritten.
+func TestManagedGuardianOpenCodeCrashBetweenCommitAndRewrites(t *testing.T) {
+	homes, record, _ := openCodePortGuardianWith(t, true, 1001, 1002, 1003)
+	writeOpenCodePortFile(t, homes[1001], 25003)
+	writeOpenCodePortFile(t, homes[1002], 25003)
+	var early []string
+	openCodeOnCommit = func(enterprisehooks.UnixOpenCodeServicePortsState) error {
+		for uid, want := range map[int]int{1001: 25003, 1002: 25003, 1003: 0} {
+			if got := openCodePortIn(t, homes[uid]); got != want {
+				early = append(early, fmt.Sprintf("uid %d's file names %d", uid, got))
+			}
+		}
+		openCodeCrashed.Store(true) // the guardian dies right after this commit
+		return nil
+	}
+	log := runOpenCodePortPass(t)
+	if len(early) > 0 {
+		t.Fatalf("user files were rewritten before the record was committed: %v\n%s", early, log)
+	}
+	if len(*record) != 3 || !openCodeRecordExists || len(openCodeRecordContested) != 1 {
+		t.Fatalf("the commit is not whole: %v %+v\n%s", *record, openCodeRecordContested, log)
+	}
+	openCodeOnCommit = nil
+	openCodeCrashed.Store(false)
+	for pass := 2; pass <= 3; pass++ {
+		log = runOpenCodePortPass(t)
+		assertOpenCodeContestKept(t, homes, *record, 25003, log)
+	}
+}
+
+// A crash in the middle of the rewrites (one file written, the other not):
+// the committed marks and bindings decide the next passes, so the account
+// whose file still names the contested port does not get it, nor does a new
+// account whose first port it is.
+func TestManagedGuardianOpenCodeCrashMidRewrites(t *testing.T) {
+	homes, record, setEligible := openCodePortGuardianWith(t, true, 1001, 1002)
+	writeOpenCodePortFile(t, homes[1001], 25003)
+	writeOpenCodePortFile(t, homes[1002], 25003)
+	openCodeAfterRewrite = func(int) { openCodeCrashed.Store(true) } // dies after the first file
+	log := runOpenCodePortPass(t)
+	if a, b := openCodePortIn(t, homes[1001]), openCodePortIn(t, homes[1002]); (a == 25003) == (b == 25003) {
+		t.Fatalf("not a crash between two rewrites: files name %d and %d\n%s", a, b, log)
+	}
+	openCodeAfterRewrite = nil
+	openCodeCrashed.Store(false)
+	setEligible(nil, 1001, 1002, 1003) // uid 1003's first port is 25003
+	for pass := 2; pass <= 3; pass++ {
+		log = runOpenCodePortPass(t)
+		assertOpenCodeContestKept(t, homes, *record, 25003, log)
+	}
+}
+
+// REVIEW-gx053-12 MF2: opencode-port-clear takes the guardian's reconcile
+// lock, so it waits while a guardian pass holds it (the pass's read, plan,
+// commit and rewrites) and never interleaves with one.
+func TestOpenCodePortClearWaitsForTheGuardianPass(t *testing.T) {
+	_ = newStandaloneFixture(t, standaloneTestResolver{})
+	unlock, err := lockEnterpriseHookReconcile(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(managed.HookGuardianAuthorizationDir(cfg.DataDir), enterprisehooks.UnixOpenCodeServicePortsFileName)
+	done := make(chan error, 1)
+	go func() {
+		_, err := openCodePortClear(path, 25003, "admin", time.Now())
+		done <- err
+	}()
+	select {
+	case err := <-done:
+		unlock()
+		t.Fatalf("the clear ran while a guardian pass held the reconcile lock: %v", err)
+	case <-time.After(400 * time.Millisecond):
+	}
+	unlock()
+	select {
+	case <-done:
+	case <-time.After(10 * time.Second):
+		t.Fatal("the clear did not run after the guardian pass released the lock")
 	}
 }

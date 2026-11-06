@@ -25,7 +25,9 @@ import (
 // openCodePortClearGeteuid and openCodePortClearRecordPath are seams for
 // tests.
 var (
-	openCodePortClear           = enterprisehooks.ClearUnixOpenCodeContestedPort
+	openCodePortClear = func(path string, port int, by string, now time.Time) ([]int, error) {
+		return enterprisehooks.ClearUnixOpenCodeContestedPortLocked(path, port, by, now, 2*time.Minute)
+	}
 	openCodePortClearGeteuid    = os.Geteuid
 	openCodePortClearRecordPath = func(goos string) (string, error) {
 		layout, err := managed.StandaloneLayoutFor(goos)

@@ -7,8 +7,11 @@
 package enterprisehooks
 
 import (
+	"context"
 	"os"
 	"path/filepath"
+	"strings"
+	"sync"
 	"testing"
 	"time"
 )
@@ -75,5 +78,98 @@ func TestClearUnixOpenCodeContestedPort(t *testing.T) {
 	}
 	if len(got.Cleared) != 1 || got.Cleared[0].Port != 25003 || got.Cleared[0].By != "admin" || got.Users[1001] != "a" {
 		t.Fatalf("the clear is not logged: %+v", got.Cleared)
+	}
+}
+
+// REVIEW-gx053-12 MF1: the commit carries the import-done flag; a record an
+// earlier round wrote (no flag) counts as done, so it never reopens the
+// import window.
+func TestUnixOpenCodeServicePortsImportDone(t *testing.T) {
+	root := trustedTestDir(t)
+	current := uint32(os.Getuid())
+	previous := unixManifestTestOwnerAllowed
+	unixManifestTestOwnerAllowed = func(uid uint32) bool { return uid == current }
+	t.Cleanup(func() { unixManifestTestOwnerAllowed = previous })
+	if err := validateRootOwnedDirChain(root); err != nil {
+		t.Skipf("test directory chain cannot hold the record: %v", err)
+	}
+	path := filepath.Join(root, UnixOpenCodeServicePortsFileName)
+	if got, err := LoadUnixOpenCodeServicePortsFull(path); err != nil || got.Exists || got.ImportDone {
+		t.Fatalf("no record is the import window: %+v %v", got, err)
+	}
+	if err := WriteUnixOpenCodeServicePortsFull(path, UnixOpenCodeServicePortsState{Ports: map[int]int{1001: 25001}}); err != nil {
+		t.Fatal(err)
+	}
+	data, err := os.ReadFile(path)
+	if err != nil || !strings.Contains(string(data), `"import_done": true`) {
+		t.Fatalf("the commit has no import-done flag: %s %v", data, err)
+	}
+	if err := os.WriteFile(path, []byte(`{"version":1,"ports":[{"uid":1001,"port":25001}]}`+"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if got, err := LoadUnixOpenCodeServicePortsFull(path); err != nil || !got.Exists || !got.ImportDone || got.Ports[1001] != 25001 {
+		t.Fatalf("an earlier round's record is not done: %+v %v", got, err)
+	}
+}
+
+// REVIEW-gx053-12 MF2: an administrator's clear racing a guardian pass (the
+// pass's read, plan and commit under the reconcile lock) is never lost, and
+// the pass's own change is kept too.
+func TestClearUnixOpenCodeContestedPortRacingAGuardianPass(t *testing.T) {
+	root := trustedTestDir(t)
+	current := uint32(os.Getuid())
+	previous := unixManifestTestOwnerAllowed
+	unixManifestTestOwnerAllowed = func(uid uint32) bool { return uid == current }
+	t.Cleanup(func() { unixManifestTestOwnerAllowed = previous })
+	if err := validateRootOwnedDirChain(root); err != nil {
+		t.Skipf("test directory chain cannot hold the record: %v", err)
+	}
+	path := filepath.Join(root, UnixOpenCodeServicePortsFileName)
+	pass := func(uid int) error {
+		unlock, err := LockUnixGuardianReconcile(context.Background(), root, 10*time.Second)
+		if err != nil {
+			return err
+		}
+		defer unlock()
+		state, err := LoadUnixOpenCodeServicePortsFull(path)
+		if err != nil {
+			return err
+		}
+		time.Sleep(2 * time.Millisecond) // the plan
+		state.Ports[uid] = 20000 + uid
+		state.ImportDone = true
+		return WriteUnixOpenCodeServicePortsFull(path, state)
+	}
+	for i := 0; i < 40; i++ {
+		start := UnixOpenCodeServicePortsState{Ports: map[int]int{1001: 25001, 1002: 25002},
+			Contested: []UnixOpenCodeContestedPort{{Port: 25003, UIDs: []int{1001, 1002}}}}
+		if err := WriteUnixOpenCodeServicePortsFull(path, start); err != nil {
+			t.Fatal(err)
+		}
+		var wg sync.WaitGroup
+		var passErr, clearErr error
+		wg.Add(2)
+		go func() { defer wg.Done(); passErr = pass(3000 + i) }()
+		go func() {
+			defer wg.Done()
+			if i%2 == 0 {
+				time.Sleep(time.Millisecond) // the clear lands while the pass plans
+			}
+			_, clearErr = ClearUnixOpenCodeContestedPortLocked(path, 25003, "admin", time.Unix(int64(i+1), 0), 10*time.Second)
+		}()
+		wg.Wait()
+		if passErr != nil || clearErr != nil {
+			t.Fatalf("round %d: pass %v, clear %v", i, passErr, clearErr)
+		}
+		got, err := LoadUnixOpenCodeServicePortsFull(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(got.Contested) != 0 || len(got.Cleared) != 1 || got.Cleared[0].Port != 25003 {
+			t.Fatalf("round %d: the clear was lost: contested %+v, cleared %+v", i, got.Contested, got.Cleared)
+		}
+		if got.Ports[3000+i] != 23000+i {
+			t.Fatalf("round %d: the pass's change was lost: %v", i, got.Ports)
+		}
 	}
 }
