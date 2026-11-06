@@ -297,3 +297,24 @@ func TestGAP0083FailedRepairRestoresExistingScopedToken(t *testing.T) {
 		t.Fatalf("published lock did not retain the matching Amp token: present=%t err=%v", token == opts.APIToken, err)
 	}
 }
+
+func TestGAP0083ExistingDataDirectoryWithoutHooksAllowsAmpInstall(t *testing.T) {
+	requireEnterpriseHookInstaller(t)
+	skipIfRoot(t)
+	setStandaloneProfileForTest(t, true)
+	home := newTestHome(t)
+	dataDir := filepath.Join(home, ".defenseclaw")
+	if err := os.Mkdir(dataDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Lstat(filepath.Join(dataDir, "hooks")); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("expected no hook directory before install: %v", err)
+	}
+	opts := standaloneOptions(home, "amp", "observe", "0.0.1785334225")
+	if _, err := Install(context.Background(), opts); err != nil {
+		t.Fatalf("fresh Amp install in an existing data directory: %v", err)
+	}
+	if _, err := Verify(context.Background(), opts); err != nil {
+		t.Fatalf("fresh Amp verification: %v", err)
+	}
+}
