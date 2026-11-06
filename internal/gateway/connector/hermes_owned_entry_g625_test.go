@@ -5,6 +5,7 @@
 package connector
 
 import (
+	"bytes"
 	"context"
 	"os"
 	"path/filepath"
@@ -194,5 +195,51 @@ func TestGAP0625HermesCombinedCommandIsDefenseClaws(t *testing.T) {
 				t.Fatalf("remaining commands = %q; want the user hook", commands)
 			}
 		})
+	}
+}
+
+func TestGAP0625HermesTeardownKeepsCopyAndReportsEditedEntry(t *testing.T) {
+	conn, opts, configPath, _, userHook := gap0625HermesConfig(t, true)
+	before, err := os.ReadFile(configPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var notice bytes.Buffer
+	previous := hermesSetupWarningOutput
+	hermesSetupWarningOutput = &notice
+	t.Cleanup(func() { hermesSetupWarningOutput = previous })
+	if err := conn.Teardown(context.Background(), opts); err != nil {
+		t.Fatalf("Teardown: %v", err)
+	}
+	if commands := gap0625PreToolCommands(t, configPath); len(commands) != 1 || commands[0] != userHook {
+		t.Fatalf("remaining commands = %q; want the user hook", commands)
+	}
+	kept, err := os.ReadFile(configPath + hermesEditedHooksBackupSuffix)
+	if err != nil || !bytes.Equal(kept, before) {
+		t.Fatalf("copy of the previous file: err=%v equal=%v", err, bytes.Equal(kept, before))
+	}
+	if lines := strings.Count(notice.String(), "\n"); lines != 1 || !strings.Contains(notice.String(), "removed 1 edited DefenseClaw hook entries") {
+		t.Fatalf("notice = %q; want one line", notice.String())
+	}
+}
+
+func TestGAP0625HermesRecordedEntryRemovalWritesNoCopy(t *testing.T) {
+	conn, opts, configPath, _, userHook := gap0625HermesConfig(t, true)
+	gap0625SetHermesCommand(t, configPath, hermesConfiguredHookCommand(conn.hookCommand(opts), ""))
+	var notice bytes.Buffer
+	previous := hermesSetupWarningOutput
+	hermesSetupWarningOutput = &notice
+	t.Cleanup(func() { hermesSetupWarningOutput = previous })
+	if err := removeHermesHooks(configPath, conn.hookCommand(opts), nil); err != nil {
+		t.Fatalf("remove Hermes hooks: %v", err)
+	}
+	if commands := gap0625PreToolCommands(t, configPath); len(commands) != 1 || commands[0] != userHook {
+		t.Fatalf("remaining commands = %q; want the user hook", commands)
+	}
+	if _, err := os.Stat(configPath + hermesEditedHooksBackupSuffix); !os.IsNotExist(err) {
+		t.Fatalf("copy written for a recorded entry: %v", err)
+	}
+	if notice.Len() != 0 {
+		t.Fatalf("notice for a recorded entry: %q", notice.String())
 	}
 }
