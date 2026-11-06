@@ -211,6 +211,39 @@ func (p *projectSkillRoots) refusal(root string, now time.Time) (reason string, 
 	return reason, recent
 }
 
+// refusalForPath checks descendants of an unverified root. A selected path
+// may use another link, so compare resolved paths when they are readable.
+func (p *projectSkillRoots) refusalForPath(path string) (root, reason string) {
+	if p == nil || !filepath.IsAbs(path) {
+		return "", ""
+	}
+	p.mu.Lock()
+	refusals := make([]projectSkillRootRefusal, 0, len(p.unverified))
+	for _, refusal := range p.unverified {
+		refusals = append(refusals, refusal)
+	}
+	p.mu.Unlock()
+	if len(refusals) == 0 {
+		return "", ""
+	}
+	for _, refusal := range refusals {
+		if insideHome(refusal.path, path) {
+			return refusal.path, refusal.reason
+		}
+	}
+	resolvedPath, err := filepath.EvalSymlinks(path)
+	if err != nil {
+		return "", ""
+	}
+	for _, refusal := range refusals {
+		resolvedRoot, err := filepath.EvalSymlinks(refusal.path)
+		if err == nil && insideHome(resolvedRoot, resolvedPath) {
+			return refusal.path, refusal.reason
+		}
+	}
+	return "", ""
+}
+
 func (p *projectSkillRoots) refusalWithPolicyMode(root string, now time.Time) (reason string, recent bool, policyModeAware bool) {
 	if p == nil {
 		return "", false, false
