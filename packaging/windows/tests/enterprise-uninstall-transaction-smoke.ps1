@@ -1623,8 +1623,21 @@ targets:
                 # before the services stop (GAP-0993). Production types it
                 # [hashtable]; this harness's sources are plain strings, so
                 # the stub keeps it untyped and records what it was given.
-                [object]$EarlyHookSource
+                [object]$EarlyHookSource,
+                # The content gate scope of the transaction's ACL drift
+                # repair (g582 review 2 S1): an uninstall passes Retain, a
+                # purge Purge, every other action the Lifecycle default.
+                [ValidateSet('Lifecycle', 'Retain', 'Purge')][string]$ContentGateScope = 'Lifecycle'
             )
+            $expectedContentGateScopes = if ([string]$script:HarnessState.operation -in @('uninstall', 'purge')) {
+                @('Retain', 'Purge')
+            }
+            else {
+                @('Lifecycle')
+            }
+            if ($ContentGateScope -cnotin $expectedContentGateScopes) {
+                throw "transaction content gate scope $ContentGateScope, want one of $($expectedContentGateScopes -join ', ')"
+            }
             if ($null -ne $EarlyHookSource -and
                 $script:HarnessState.operation -in @('uninstall', 'purge')) {
                 throw (
