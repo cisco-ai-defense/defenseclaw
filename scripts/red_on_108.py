@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import argparse
 import csv
+import hashlib
 import json
 import os
 import re
@@ -21,29 +22,73 @@ TEST_NAME = re.compile(r"\b(Test[A-Z][A-Za-z0-9_]*|test_[a-z0-9_]+)\b")
 GAP = re.compile(r"\bGAP-\d{4}\b")
 
 
-# Test-preparation words. They are matched without regard to the comparison
-# vocabulary, so a setup line cannot become behaviour evidence by using a
-# different comparison phrase.
-SETUP_CONTEXT = re.compile(
-    r"\b(?:pre-?conditions?|fixtures?|set[ -]?up|setups?|initiali[sz](?:e|ed|es|ing|ation)|testmain|testdata"
-    r"|goldens?|seed(?:s|ed|ing)?|prepar(?:e|ed|es|ing|ation)|harness(?:es)?|helpers?|scaffold(?:s|ed|ing)?"
-    r"|bootstrap(?:s|ped|ping)?|temp ?dirs?|mkdir(?:all)?|chdir)\b",
-    re.IGNORECASE,
-)
-ASSERTIONS = (
-    r"\bgot\b[^\n]{0,240}\bwant\b",
-    r"\bwant\b[^\n]{0,240}\bgot\b",
-    r"\bexpected\b[^\n]{0,240}\b(?:got|observed|actual)\b",
-    r"\b(?:got|observed|actual)\b[^\n]{0,240}\bexpected\b",
-)
+# Failure text alone never certifies a product verdict: a setup or fixture
+# comparison reads like a product comparison. A failure is behaviour
+# evidence only when a reviewer has read it and recorded its exact failing
+# lines in the evidence file (--evidence); every other assertion failure is
+# reported for review.
+GO_FAILURE_LINE = re.compile(r"(?m)^\s+([^\s:]+\.go:\d+:\s+.+?)\s*$")
+PY_FAILURE_LINE = re.compile(r"(?m)^E\s+(.+?)\s*$")
 
 
-def is_assertion(line: str) -> bool:
-    return any(re.search(pattern, line, re.IGNORECASE) for pattern in ASSERTIONS)
+def failing_lines(command: list[str], output: str) -> list[str]:
+    if "go" in command:
+        return GO_FAILURE_LINE.findall(output)
+    if "pytest" in command:
+        return PY_FAILURE_LINE.findall(output)
+    return []
 
 
 def git(repo: Path, *args: str) -> str:
     return subprocess.check_output(["git", "-C", str(repo), *args], text=True, stderr=subprocess.DEVNULL).strip()
+
+
+def tree_entries(repo: Path, commit: str, *paths: str) -> dict[str, tuple[str, str]]:
+    """Path -> (mode, object id) of the blobs and links under paths at commit."""
+    output = subprocess.check_output(["git", "-C", str(repo), "ls-tree", "-r", "-z", commit, "--", *paths])
+    entries = {}
+    for record in output.split(b"\0"):
+        if not record:
+            continue
+        meta, _, name = record.partition(b"\t")
+        mode, kind, object_id = meta.decode().split()
+        if kind != "blob":
+            raise ValueError(f"unsupported tree entry {kind} at {name.decode(errors='replace')}")
+        entries[os.fsdecode(name)] = (mode, object_id)
+    return entries
+
+
+def blob_id(data: bytes, algorithm: str) -> str:
+    digest = hashlib.new(algorithm)
+    digest.update(b"blob %d\0" % len(data) + data)
+    return digest.hexdigest()
+
+
+def disk_entry(path: Path, algorithm: str) -> tuple[str, str]:
+    """The (mode, object id) Git would record for path."""
+    if path.is_symlink():
+        return "120000", blob_id(os.fsencode(os.readlink(path)), algorithm)
+    mode = "100755" if path.stat().st_mode & 0o100 else "100644"
+    return mode, blob_id(path.read_bytes(), algorithm)
+
+
+def write_entry(repo: Path, worktree: Path, name: str, entry: tuple[str, str]) -> None:
+    """Write one tree entry with its Git type, content and executable bit."""
+    mode, object_id = entry
+    target = worktree / name
+    if not target.parent.resolve(strict=False).is_relative_to(worktree.resolve()):
+        raise ValueError(f"path escapes audit worktree: {name}")
+    if target.is_symlink() or target.is_file():
+        target.unlink()
+    target.parent.mkdir(parents=True, exist_ok=True)
+    data = subprocess.check_output(["git", "-C", str(repo), "cat-file", "blob", object_id])
+    if mode == "120000":
+        target.symlink_to(os.fsdecode(data))
+        return
+    if mode not in ("100644", "100755"):
+        raise ValueError(f"unsupported mode {mode} at {name}")
+    target.write_bytes(data)
+    target.chmod(0o755 if mode == "100755" else 0o644)
 
 
 def handoff_tests(handoff: Path, fallback: list[str]) -> list[str]:
@@ -103,7 +148,7 @@ def mapped_python_files(worktree: Path, files: list[str], tests: list[str]) -> l
     return matched
 
 
-def classify_test_result(command: list[str], returncode: int, output: str) -> str:
+def classify_test_result(command: list[str], returncode: int, output: str, evidence: list[str] | None = None) -> str:
     if returncode == 0 or "[no tests to run]" in output:
         return "PASS_ON_108"
     # A pytest summary can say FAILED even when the named test never reached an
@@ -124,33 +169,18 @@ def classify_test_result(command: list[str], returncode: int, output: str) -> st
     )
     if any(marker in output.lower() for marker in infrastructure):
         return "COMPILE_ONLY"
-    if "go" in command and "--- FAIL:" in output:
-        # A Go FAIL marker also follows setup errors inside a test. Setup
-        # context is matched on its own, independent of the comparison words,
-        # anywhere in the failing test output: a line about test preparation
-        # is never behaviour evidence, whatever else it says.
-        messages = re.findall(r"(?m)^\s+([^\s:]+\.go):\d+:\s+(.+)$", output)
-        if any(SETUP_CONTEXT.search(text) for _, text in messages):
-            return "COMPILE_ONLY"
-        # A verdict assertion must be emitted from a test source line, and
-        # every failing test source line must be a comparison.
-        source_lines = [text for name, text in messages if name.endswith("_test.go")]
-        if source_lines and all(is_assertion(line) for line in source_lines):
-            return "BEHAVIOR_RED"
-        return "UNCLASSIFIED_FAIL"
-    if "pytest" in command:
-        messages = re.findall(r"(?m)^E\s+(.+)$", output)
-        messages += re.findall(r"(?m)^FAILED \S+ - (.+)$", output)
-        if any(SETUP_CONTEXT.search(text) for text in messages):
-            return "COMPILE_ONLY"
-        if "AssertionError" in output or "Failed: DID NOT RAISE" in output or re.search(r"(?m)^E\s+assert\b", output):
-            return "BEHAVIOR_RED"
+    # Certified only when the failing lines are exactly the reviewed ones: an
+    # extra or a missing line is a different failure and needs a new reading.
+    lines = failing_lines(command, output)
+    if evidence and lines and sorted(set(lines)) == sorted(set(evidence)):
+        return "BEHAVIOR_RED"
     return "UNCLASSIFIED_FAIL"
 
 
 def overlay_go_fixtures(repo: Path, worktree: Path, commit: str, directory: str) -> None:
     """Use the test commit's package fixtures with the old product sources."""
-    current = set(git(repo, "ls-tree", "-r", "--name-only", commit, "--", directory).splitlines())
+    entries = tree_entries(repo, commit, directory)
+    current = set(entries)
     prior = set(git(worktree, "ls-tree", "-r", "--name-only", "HEAD", "--", directory).splitlines())
     fixture_dirs = {"testdata", "fixtures", "testfixtures", "test_fixtures", "golden", "goldens"}
     source_suffixes = {".go", ".py", ".sh", ".js", ".ts", ".ps1", ".c", ".h", ".s"}
@@ -195,18 +225,16 @@ def overlay_go_fixtures(repo: Path, worktree: Path, commit: str, directory: str)
         if fixture_root(name) is None and Path(name).suffix in source_suffixes:
             continue
         target = worktree / name
-        if not target.resolve(strict=False).is_relative_to(worktree.resolve()) or target.is_symlink():
-            raise ValueError(f"fixture path escapes audit worktree: {name}")
-        if target.is_dir():
+        if target.is_dir() and not target.is_symlink():
             if any(path.is_file() or path.is_symlink() for path in target.rglob("*")):
                 raise ValueError(f"fixture path is a directory on the prior release: {name}")
             shutil.rmtree(target)
-        target.parent.mkdir(parents=True, exist_ok=True)
-        target.write_bytes(subprocess.check_output(["git", "-C", str(repo), "show", f"{commit}:{name}"]))
+        write_entry(repo, worktree, name, entries[name])
 
     # Git records no empty directory, so a directory a deletion left empty is
     # absent from the tree of the test commit. Then require the overlaid
-    # package to hold exactly the test-owned files of that commit.
+    # package to hold exactly the test-owned entries of that commit, by path,
+    # Git type, content and executable bit.
     package = worktree / directory
     for path in sorted(package.rglob("*"), key=lambda item: len(item.parts), reverse=True):
         if path.is_dir() and not path.is_symlink() and not any(path.iterdir()):
@@ -215,26 +243,35 @@ def overlay_go_fixtures(repo: Path, worktree: Path, commit: str, directory: str)
     def managed(name: str) -> bool:
         return in_package(name) and not (fixture_root(name) is None and Path(name).suffix in source_suffixes)
 
-    present = set()
+    algorithm = git(repo, "rev-parse", "--show-object-format")
+    present = {}
     for path in package.rglob("*"):
         if path.is_file() or path.is_symlink():
             name = path.relative_to(worktree).as_posix()
             if managed(name):
-                present.add(name)
-    expected = {name for name in current if managed(name)}
+                present[name] = disk_entry(path, algorithm)
+    expected = {name: entry for name, entry in entries.items() if managed(name)}
     if present != expected:
-        difference = sorted(present ^ expected)[:5]
-        raise ValueError(f"fixture overlay differs from the test commit: {difference}")
+        difference = sorted(
+            name for name in present.keys() | expected.keys() if present.get(name) != expected.get(name)
+        )
+        raise ValueError(f"fixture overlay differs from the test commit: {difference[:5]}")
 
 
-def run_one(repo: Path, worktree: Path, commit: str, files: list[str], tests: list[str], base: str) -> str:
+def run_one(
+    repo: Path,
+    worktree: Path,
+    commit: str,
+    files: list[str],
+    tests: list[str],
+    base: str,
+    evidence: list[str] | None = None,
+) -> str:
     subprocess.run(["git", "-C", str(worktree), "reset", "--hard", base], check=True, stdout=subprocess.DEVNULL)
     subprocess.run(["git", "-C", str(worktree), "clean", "-fd"], check=True, stdout=subprocess.DEVNULL)
+    test_entries = tree_entries(repo, commit, *files)
     for name in files:
-        content = subprocess.check_output(["git", "-C", str(repo), "show", f"{commit}:{name}"])
-        target = worktree / name
-        target.parent.mkdir(parents=True, exist_ok=True)
-        target.write_bytes(content)
+        write_entry(repo, worktree, name, test_entries[name])
     go_tests = [name for name in tests if name.startswith("Test")]
     py_tests = [name for name in tests if name.startswith("test_")]
     commands = []
@@ -297,7 +334,7 @@ def run_one(repo: Path, worktree: Path, commit: str, files: list[str], tests: li
             statuses.append("TIMEOUT")
             continue
         output = run.stdout
-        statuses.append(classify_test_result(command, run.returncode, output))
+        statuses.append(classify_test_result(command, run.returncode, output, evidence))
     if "BEHAVIOR_RED" in statuses and all(s == "BEHAVIOR_RED" for s in statuses):
         return "BEHAVIOR_RED"
     if "COMPILE_ONLY" in statuses:
@@ -310,10 +347,15 @@ def run_one(repo: Path, worktree: Path, commit: str, files: list[str], tests: li
 
 
 def run_mapped_candidate(
-    repo: Path, worktree: Path, found: list[tuple[str, list[str]]], tests: list[str], base: str
+    repo: Path,
+    worktree: Path,
+    found: list[tuple[str, list[str]]],
+    tests: list[str],
+    base: str,
+    evidence: list[str] | None = None,
 ) -> tuple[str, str]:
     for commit, files in found:
-        status = run_one(repo, worktree, commit, files, tests, base)
+        status = run_one(repo, worktree, commit, files, tests, base, evidence)
         if status != "NO_MAPPED_TEST":
             return commit, status
     return "-", "NO_MAPPED_TEST"
@@ -326,10 +368,16 @@ def main() -> int:
     parser.add_argument("--output", type=Path, required=True)
     parser.add_argument("--base", default="1.0.8")
     parser.add_argument("--only", action="append", help="Limit to a pod key or gap ID")
+    parser.add_argument(
+        "--evidence",
+        type=Path,
+        help="JSON object: gap ID -> the exact failing lines a reviewer read as the product verdict",
+    )
     args = parser.parse_args()
     repo = Path.cwd()
     base = git(repo, "rev-parse", args.base + "^{commit}")
     mapping = json.loads(args.map.read_text(encoding="utf-8"))
+    evidence = json.loads(args.evidence.read_text(encoding="utf-8")) if args.evidence else {}
     rows = []
     with tempfile.TemporaryDirectory(prefix="red-on-108-") as temporary:
         worktree = Path(temporary) / "base"
@@ -356,7 +404,7 @@ def main() -> int:
                     elif not found:
                         rows.append((pod, gap, "-", "COMMIT_UNRESOLVED", ",".join(gap_tests)))
                     else:
-                        commit, status = run_mapped_candidate(repo, worktree, found, gap_tests, base)
+                        commit, status = run_mapped_candidate(repo, worktree, found, gap_tests, base, evidence.get(gap))
                         rows.append((pod, gap, commit[:12] if commit != "-" else "-", status, ",".join(gap_tests)))
                     print(f"{pod} {gap} {rows[-1][3]}", flush=True)
         finally:
