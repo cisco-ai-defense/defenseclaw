@@ -49,6 +49,23 @@ func TestGAP0055CommandLookupFourCell(t *testing.T) {
 		{"lookup-then-protected-write", `command -v unzip && echo hi > keylink`, "block"},
 		{"command-extract-then-copy", `command unzip x.zip; cp a.txt build/`, "block"},
 		{"env-extract-then-copy", `env unzip x.zip; cp a.txt build/`, "block"},
+		// Review M1: xargs supplies the archive names, so the argv the hook
+		// sees is not the one unzip gets; the extraction keeps its opaque
+		// scope, as on 1.0.6. A visible list mode stays allowed.
+		{"xargs-then-copy", `ls *.zip | xargs unzip; cp a.txt build/`, "block"},
+		{"xargs-n1-then-copy", `find . -name '*.zip' | xargs -n1 unzip; cp a.txt build/`, "block"},
+		{"xargs-0-then-copy", `find . -name '*.zip' -print0 | xargs -0 unzip && cp a.txt build/`, "block"},
+		{"xargs-a-then-copy", `xargs -a list.txt unzip; cp a.txt build/`, "block"},
+		{"xargs-stdin-file-then-copy", `xargs unzip < list.txt; cp a.txt build/`, "block"},
+		{"xargs-replace-then-copy", `ls *.zip | xargs -I{} unzip {}; cp a.txt build/`, "block"},
+		{"xargs-sudo-then-copy", `ls *.zip | xargs sudo unzip; cp a.txt build/`, "block"},
+		{"xargs-env-then-copy", `ls *.zip | xargs env unzip; cp a.txt build/`, "block"},
+		{"xargs-command-then-copy", `ls *.zip | xargs command unzip; cp a.txt build/`, "block"},
+		{"xargs-env-S-then-copy", `ls *.zip | xargs env -S unzip; cp a.txt build/`, "block"},
+		{"lookup-piped-to-xargs-then-copy", `command -v unzip | xargs unzip; cp a.txt build/`, "block"},
+		{"xargs-overwrite-then-copy", `ls *.zip | xargs unzip -o; cp a.txt build/`, "block"},
+		{"xargs-list-then-copy", `ls *.zip | xargs unzip -l; cp a.txt build/`, "allow"},
+		{"xargs-lookup", `ls | xargs command -v unzip`, "allow"},
 	}
 	if err := os.Chmod(f.homes, 0o700); err != nil {
 		t.Fatal(err)

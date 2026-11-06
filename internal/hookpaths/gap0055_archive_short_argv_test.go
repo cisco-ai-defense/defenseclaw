@@ -296,3 +296,55 @@ func FuzzGAP0055CommandLinksRead(f *testing.F) {
 		Resolve(payload)
 	})
 }
+
+// gap0055Suppliers are the argument-supplying wrapper forms of the GAP-0055
+// review (M1): xargs with each kind of option, parallel, and either of them
+// behind or in front of the plain wrappers. The program they run gets
+// arguments the hook cannot see.
+var gap0055Suppliers = []string{
+	"xargs", "xargs -n1", "xargs -n 1", "xargs -0", "xargs -r", "xargs -P4", "xargs -L1", "xargs -a list.txt",
+	"xargs -d ,", "xargs -I{}", "xargs -I {}", "xargs -I%", "xargs -i", "xargs -J %", "xargs --null", "xargs -t",
+	"parallel", "parallel -j4", "xargs sudo", "xargs sudo -n", "xargs env", "xargs env -S", "xargs command",
+	"xargs nice", "xargs -n1 sudo -n", "sudo xargs", "env xargs", "nice xargs -0", "command xargs",
+}
+
+// TestGAP0055SuppliedArgvMayExtract (review M1): the "no arguments, no
+// extraction" reading of unzip holds only for an argv the hook sees whole.
+// After an argument supplier an extracting archive call reads as one that
+// may link files, whatever its visible words, as it did on 1.0.6; a
+// visible list or test mode, and every lookup, still read as no extraction.
+func TestGAP0055SuppliedArgvMayExtract(t *testing.T) {
+	for _, supplier := range gap0055Suppliers {
+		for _, call := range []string{"unzip", "unzip {}", "unzip %", "unzip -o", "unzip -o {}", "unzip -q", "unzip -d out",
+			"unzip -n", "/usr/bin/unzip", "tar -xf", "tar xf {}", "bsdtar -x", "7z x", "jar xf", "ditto -x", "cpio -id", "rsync -H"} {
+			command := supplier + " " + call
+			if mayLink, _ := wrappedMayLink(command); !mayLink {
+				t.Errorf("%s: wrappedMayLink = false, want true (the supplied names may be extracted)", command)
+			}
+		}
+		for _, call := range []string{"unzip -l", "unzip -t", "unzip -Z", "unzip -l {}", "tar -tf", "tar --list -f", "7z l", "jar tf", "echo"} {
+			command := supplier + " " + call
+			if mayLink, _ := wrappedMayLink(command); mayLink {
+				t.Errorf("%s: wrappedMayLink = true, want false (a visible list or test mode)", command)
+			}
+		}
+	}
+	for _, command := range []string{"unzip", "env unzip", "sudo -n unzip", "nice unzip", "command unzip", "exec -a x unzip",
+		"command -v unzip", "command -V unzip", "sudo command -v unzip", "xargs command -v unzip", "xargs type unzip"} {
+		if mayLink, _ := wrappedMayLink(command); mayLink && !strings.HasPrefix(command, "xargs") {
+			t.Errorf("%s: wrappedMayLink = true, want false (a whole argv with no arguments)", command)
+		}
+	}
+	cwd, home := t.TempDir(), t.TempDir()
+	for _, command := range []string{"ls *.zip | xargs unzip", "find . -name '*.zip' | xargs -n1 unzip", "xargs unzip < list.txt",
+		"ls *.zip | xargs -I{} unzip {}", "command -v unzip | xargs unzip", "ls *.zip | xargs env -S unzip"} {
+		if links := commandLinks(command, cwd, home, nil, false, false); links.known {
+			t.Errorf("%s: known reading, want the opaque reading of an extraction", command)
+		}
+	}
+	for _, command := range []string{"xargs command -v unzip", "ls | xargs unzip -l"} {
+		if links := commandLinks(command, cwd, home, nil, false, false); !links.known {
+			t.Errorf("%s: opaque reading, want a known reading", command)
+		}
+	}
+}
