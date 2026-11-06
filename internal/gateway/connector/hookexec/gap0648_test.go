@@ -59,6 +59,12 @@ func stubManagedServiceRunning(t *testing.T, running func(string) (bool, bool)) 
 // gateway service is read as not running at the restart budget is blocked
 // then, closed; a running gateway keeps the call's answer budget.
 func TestManagedWindowsCallIntoAGatewayStopIsBlockedAtTheRestartBudget(t *testing.T) {
+	// The call starts this long before its restart budget ends, as one the
+	// agent launched late (the budgets are constants), so the test does not
+	// wait them out. Both cases start alike.
+	const lead = 300 * time.Millisecond
+	// A running gateway keeps its answer window, cut by the process cap.
+	capAt := managedAnswerDeadlineCap - gatewayRestartBudget + lead
 	stubManagedLifecycle(t, func() bool { return false })
 	previousStopped := managedGatewayServiceStopped
 	managedGatewayServiceStopped = func(string) bool { return false }
@@ -69,9 +75,8 @@ func TestManagedWindowsCallIntoAGatewayStopIsBlockedAtTheRestartBudget(t *testin
 		reason         string
 		atLeast, below time.Duration
 	}{
-		{"service stopping", false, managedGatewayRestartingReason, gatewayRestartBudget - 100*time.Millisecond, hookAnswerBudget - 200*time.Millisecond},
-		// A running gateway keeps its answer window (contact + hookAnswerBudget, within the process cap).
-		{"service running", true, managedGatewayNoAnswerReason, hookAnswerBudget - 100*time.Millisecond, managedAnswerDeadlineCap + time.Second},
+		{"service stopping", false, managedGatewayRestartingReason, lead - 50*time.Millisecond, lead + 400*time.Millisecond},
+		{"service running", true, managedGatewayNoAnswerReason, capAt - 100*time.Millisecond, capAt + time.Second},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			stubManagedServiceRunning(t, func(name string) (bool, bool) { return test.running, name == "DefenseClawGateway" })
@@ -81,6 +86,7 @@ func TestManagedWindowsCallIntoAGatewayStopIsBlockedAtTheRestartBudget(t *testin
 				opts.ManagedGatewayServiceName = "DefenseClawGateway"
 				opts.FailureLogHome = userLogHome(home)
 				opts.Stdin = strings.NewReader(`{"hook_event_name":"PreToolUse","tool_name":"Bash","tool_input":{"command":"echo ok"}}`)
+				opts.StartedAt = opts.StartedAt.Add(-gatewayRestartBudget + lead)
 			})
 			if !blocked(result) {
 				t.Fatalf("after %s code=%d stdout=%q stderr=%q, want a block", elapsed, result.code, result.stdout, result.stderr)
@@ -121,6 +127,7 @@ func TestManagedGatewayServiceWatchNeedsAProvenStop(t *testing.T) {
 		{name: "answered before the budget", states: []bool{false}, known: true, stopAt: 20 * time.Millisecond},
 	} {
 		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
 			// A read past the bound keeps running while the next one starts.
 			var reads atomic.Int32
 			read := test.read
@@ -137,6 +144,12 @@ func TestManagedGatewayServiceWatchNeedsAProvenStop(t *testing.T) {
 				time.Sleep(test.stopAt)
 				stop()
 			}
+			// A call that must keep waiting is watched for 200 ms: the
+			// deadline (60 ms) and 5 reads after it.
+			wait := 400 * time.Millisecond
+			if !test.restart {
+				wait = 200 * time.Millisecond
+			}
 			select {
 			case <-ctx.Done():
 				if !test.restart || !errors.Is(context.Cause(ctx), errGatewayRestarting) {
@@ -145,7 +158,7 @@ func TestManagedGatewayServiceWatchNeedsAProvenStop(t *testing.T) {
 				if time.Now().Before(deadline) {
 					t.Fatal("the call was ended before the restart budget")
 				}
-			case <-time.After(400 * time.Millisecond):
+			case <-time.After(wait):
 				if test.restart {
 					t.Fatal("the call into a stopped service was not ended")
 				}
@@ -170,14 +183,19 @@ func TestManagedGatewayServiceWatchScope(t *testing.T) {
 		{"no service", Options{ManagedEnterprise: true}, false},
 	} {
 		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
 			ctx, _, release := watchManagedGatewayStarts(context.Background(), test.opts, deadline)
 			defer release()
+			wait := 300 * time.Millisecond
+			if !test.watched {
+				wait = 150 * time.Millisecond
+			}
 			select {
 			case <-ctx.Done():
 				if !test.watched {
 					t.Fatalf("call ended with %v, want no watch", context.Cause(ctx))
 				}
-			case <-time.After(300 * time.Millisecond):
+			case <-time.After(wait):
 				if test.watched {
 					t.Fatal("the managed Windows call was not watched")
 				}
