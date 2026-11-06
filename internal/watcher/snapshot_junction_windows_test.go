@@ -94,3 +94,22 @@ func TestR109G501BPluginSnapshotRecordsJunctionTarget(t *testing.T) {
 		t.Fatal("restoring the ordinary junction did not restore the plugin snapshot")
 	}
 }
+
+// A junction peer whose target directory is replaced at the same path, with
+// the same manifest, rescans; the unchanged target does not.
+func TestR109G610PluginSnapshotBindsJunctionPeerFileIdentity(t *testing.T) {
+	base := t.TempDir()
+	plugin := filepath.Join(base, "provider")
+	target := filepath.Join(base, "peer")
+	for _, dir := range []string{filepath.Join(plugin, "node_modules"), target} {
+		if err := os.MkdirAll(dir, 0o700); err != nil {
+			t.Fatal(err)
+		}
+	}
+	manifest := []byte(`{"name":"openclaw"}`)
+	if err := os.WriteFile(filepath.Join(target, "package.json"), manifest, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	makeSnapshotTestJunction(t, filepath.Join(plugin, "node_modules", "openclaw"), target)
+	assertPeerFileIdentityBound(t, plugin, target, manifest)
+}
