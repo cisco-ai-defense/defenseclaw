@@ -356,7 +356,7 @@ func migrateManagedStandaloneConfig(ctx context.Context, path, approvedSHA256 st
 	}
 	if state, err := configwrite.ReadGenerationState(path); err == nil &&
 		state.ConfigSHA256 == configwrite.SHA256Hex(raw) &&
-		!(configwrite.IsHandEditActor(state.Actor) && strings.EqualFold(approvedSHA256, configwrite.SHA256Hex(raw))) &&
+		(!configwrite.IsHandEditActor(state.Actor) || !strings.EqualFold(approvedSHA256, configwrite.SHA256Hex(raw))) &&
 		(opt.Bundle.ID == "" || managedStandaloneGenerationMatches(state, raw, opt)) {
 		// Already recorded, but the record still takes the DACL of the
 		// config: an uninstall that keeps state leaves it administrator-only,
