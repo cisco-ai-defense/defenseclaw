@@ -41,14 +41,14 @@ func ordinaryNoAnswerPayloadInHome(body []byte, home string) bool {
 	}
 	switch call.Tool {
 	case "Bash":
-		return ordinaryNoAnswerCommand(input["command"], call.CWD, home, len(body))
+		return ordinaryNoAnswerCommand(input["command"], call.CWD, home)
 	case "exec_command":
 		if len(input["command"]) != 0 {
 			return false
 		}
-		return ordinaryNoAnswerCommand(input["cmd"], commandWorkdir(input, call.CWD), home, len(body))
+		return ordinaryNoAnswerCommand(input["cmd"], commandWorkdir(input, call.CWD), home)
 	case "shell", "shell_command":
-		return ordinaryNoAnswerCommand(input["command"], commandWorkdir(input, call.CWD), home, len(body))
+		return ordinaryNoAnswerCommand(input["command"], commandWorkdir(input, call.CWD), home)
 	case "Read":
 		if len(body) > 4096 {
 			return false
@@ -98,7 +98,7 @@ func commandWorkdir(input map[string]json.RawMessage, cwd string) string {
 	return workdir
 }
 
-func ordinaryNoAnswerCommand(raw json.RawMessage, cwd, home string, bodySize int) bool {
+func ordinaryNoAnswerCommand(raw json.RawMessage, cwd, home string) bool {
 	if !filepath.IsAbs(cwd) || len(raw) == 0 {
 		return false
 	}
@@ -120,7 +120,7 @@ func ordinaryNoAnswerCommand(raw json.RawMessage, cwd, home string, bodySize int
 	if hookpaths.OrdinaryLongTouchMissingLeaves(command, cwd, home) {
 		return true
 	}
-	if bodySize > 4096 || commandMayNameLink(command, cwd, home) {
+	if commandMayNameLink(command, cwd, home) {
 		return false
 	}
 	return hookpaths.ActionCommandDecision(command, cwd, home) == "" &&
@@ -137,12 +137,7 @@ func commandMayNameLink(command, cwd, home string) bool {
 	if !known {
 		return true
 	}
-	wordCount := 0
 	for _, words := range calls {
-		wordCount += len(words)
-		if wordCount > 128 {
-			return true
-		}
 		if commandWordsMayNameLink(words, cwd, home) {
 			return true
 		}
@@ -208,15 +203,21 @@ func pathWordMayNameLink(word, cwd, home string, display bool) bool {
 		return true
 	}
 	info, err := os.Lstat(path)
-	if err == nil && info.Mode()&os.ModeSymlink != 0 {
-		return true
-	}
 	if err != nil && !os.IsNotExist(err) {
 		return true
 	}
 	if err == nil {
 		resolved, resolveErr := filepath.EvalSymlinks(path)
-		if resolveErr != nil || pathMayNameProtectedIdentity(resolved, home, info) {
+		if resolveErr != nil {
+			return true
+		}
+		if info.Mode()&os.ModeSymlink != 0 {
+			info, err = os.Stat(path)
+			if err != nil {
+				return true
+			}
+		}
+		if pathMayNameProtectedIdentity(resolved, home, info) {
 			return true
 		}
 	}

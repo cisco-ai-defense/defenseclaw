@@ -79,9 +79,6 @@ func lateKnownCalls(command, cwd, home string, depth int) ([][]string, bool) {
 			return nil, false
 		}
 		calls = append(calls, part...)
-		if len(calls) > 32 {
-			return nil, false
-		}
 	}
 	return calls, true
 }
