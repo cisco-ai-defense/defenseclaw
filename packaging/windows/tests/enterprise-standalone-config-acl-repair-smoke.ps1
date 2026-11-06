@@ -308,6 +308,36 @@ try {
                 throw "the ACL drift repair (CheckOnly $checkOnly) re-stamped a user-writable credential: '$driftError'"
             }
         }
+        # g582 review 2 S1: the uninstall's transaction runs the drift repair
+        # with the uninstall's own scope. A purge deletes the credential store
+        # unread, so it is not refused for it; a non-purge uninstall keeps it
+        # and is refused, naming PURGE=1.
+        $purgeError = ''
+        try {
+            if (-not (Repair-DefenseClawDeploymentAclDrift `
+                    -Layout $layout -GatewayServiceName 'DefenseClawGateway' `
+                    -RedactionKeyClass trusted_drift -ContentGateScope Purge -CheckOnly)) {
+                $purgeError = 'the purge drift check did not report the drift'
+            }
+        }
+        catch {
+            $purgeError = $_.Exception.Message
+        }
+        if ($purgeError -ne '' -or $script:repairCalls -ne 0) {
+            throw "the purge's ACL drift check refused a credential the purge deletes: '$purgeError'"
+        }
+        $retainError = ''
+        try {
+            [void](Repair-DefenseClawDeploymentAclDrift `
+                -Layout $layout -GatewayServiceName 'DefenseClawGateway' `
+                -RedactionKeyClass trusted_drift -ContentGateScope Retain -CheckOnly)
+        }
+        catch {
+            $retainError = $_.Exception.Message
+        }
+        if (-not $retainError.Contains($credential) -or -not $retainError.Contains('PURGE=1')) {
+            throw "a non-purge uninstall's ACL drift check kept a user-writable credential or named no PURGE=1: '$retainError'"
+        }
         & $canonical[$credential]
 
         # GAP-0590 review M3: Repair, a reinstall over an uninstall's
