@@ -529,7 +529,7 @@ def status(app: AppContext, as_json: bool) -> None:
         _print_llm_judge(health, cfg)
         _print_decision_model(cfg)
         _print_hook_guardian(cfg)
-        _print_fleet_health(cfg, client)
+        _print_fleet_health(cfg, _fleet_status_client(client, health))
         hint(
             "Dashboard:     defenseclaw alerts",
             "Health check:  defenseclaw doctor",
@@ -598,7 +598,7 @@ def status(app: AppContext, as_json: bool) -> None:
         _print_application_protection(cfg)
         _print_semantic_routing(cfg)
         _print_hook_guardian(cfg)
-        _print_fleet_health(cfg, None if isinstance(health, _PublicForegroundHealth) else client)
+        _print_fleet_health(cfg, _fleet_status_client(client, health))
         if holder:
             first_hint = (
                 "Free the port:  stop that process, or run: defenseclaw setup gateway --api-port "
@@ -1091,6 +1091,11 @@ def _print_agents(
 
 class _PublicForegroundHealth(dict):
     """Public health used for display without authorizing token-bearing calls."""
+
+
+def _fleet_status_client(client, health):
+    """Use Fleet credentials only after authenticated gateway health."""
+    return None if isinstance(health, _PublicForegroundHealth) else client
 
 
 def _fetch_runtime_bound_health(client, cfg) -> dict | None:
@@ -2420,7 +2425,7 @@ def _status_payload(app) -> dict:
     payload["application_protection"] = _application_protection_status(cfg, health=health)
     payload["semantic_routing"] = _semantic_routing_status(cfg, health=health)
     payload["hook_guardian"] = _hook_guardian_status(cfg)
-    payload["fleet"] = _fleet_health_payload(cfg, None if isinstance(health, _PublicForegroundHealth) else client)
+    payload["fleet"] = _fleet_health_payload(cfg, _fleet_status_client(client, health))
     payload["native_otlp_delivery"] = _native_delivery_summary(cfg).as_json()
 
     return payload

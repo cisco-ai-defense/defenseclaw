@@ -6323,6 +6323,52 @@ def _loopback_ip_literal(
     return address if address.is_loopback else None
 
 
+def _foreground_loopback_endpoints(
+    host: str, port: int
+) -> tuple[ipaddress.IPv4Address | ipaddress.IPv6Address, ...]:
+    """Resolve a connect host once to concrete loopback endpoints."""
+    literal = _loopback_ip_literal(host, brackets=True)
+    if literal is not None:
+        return (literal,)
+    try:
+        rows = socket.getaddrinfo(host, port, type=socket.SOCK_STREAM, proto=socket.IPPROTO_TCP)
+    except (OSError, ValueError, UnicodeError):
+        return ()
+    endpoints: dict[ipaddress.IPv4Address | ipaddress.IPv6Address, None] = {}
+    for family, _, _, _, sockaddr in rows:
+        if family not in {socket.AF_INET, socket.AF_INET6}:
+            return ()
+        try:
+            address = ipaddress.ip_address(sockaddr[0])
+        except (IndexError, TypeError, ValueError):
+            return ()
+        if family == socket.AF_INET6 and (address.version != 6 or len(sockaddr) < 4 or sockaddr[3] != 0):
+            return ()
+        if family == socket.AF_INET and address.version != 4:
+            return ()
+        if not address.is_loopback:
+            return ()
+        endpoints[address] = None
+    return tuple(endpoints)
+
+
+def _foreground_endpoint_closed(address: ipaddress.IPv4Address | ipaddress.IPv6Address, port: int) -> bool:
+    """Confirm an alternate resolved endpoint cannot accept a TCP connection."""
+    try:
+        with socket.create_connection((str(address), port), timeout=0.3):
+            return False
+    except ConnectionRefusedError:
+        return True
+    except OSError as exc:
+        return exc.errno in {
+            errno.EAFNOSUPPORT,
+            errno.EPROTONOSUPPORT,
+            errno.ENETUNREACH,
+            errno.EHOSTUNREACH,
+            errno.EADDRNOTAVAIL,
+        }
+
+
 def _other_account_gateway_listener_evidence(cfg, pid: int, host: str, api_port: int) -> ListenerEvidence | None:
     """Bind another account's verified gateway to ``host:api_port``, or None.
 
@@ -6431,17 +6477,50 @@ def _foreground_gateway_status_health(
         return None
     port = _gateway_api_port(cfg)
     host = _gateway_api_host(cfg)
-    target_ip = _loopback_ip_literal(host, brackets=True)
+    endpoints = _foreground_loopback_endpoints(host, port) if port else ()
     data_dir = str(getattr(cfg, "data_dir", "") or "")
-    if not port or target_ip is None or not os.path.isabs(data_dir):
+    if not endpoints or not os.path.isabs(data_dir):
         return None
     evidence = evidence or GatewayEvidence(platform_name=platform_name)
     if _managed_gateway_process_trust(cfg, evidence=evidence, platform_name=platform_name).code != "missing":
         return None
 
-    listener = _managed_gateway_listener_evidence(port, host=host, platform_name=platform_name, evidence=evidence)
-    if listener.status != "ok" or listener.pid <= 0:
+    def endpoint_listeners() -> dict[ipaddress.IPv4Address | ipaddress.IPv6Address, ListenerEvidence] | None:
+        found: dict[ipaddress.IPv4Address | ipaddress.IPv6Address, ListenerEvidence] = {}
+        for address in endpoints:
+            listener = _managed_gateway_listener_evidence(
+                port, host=str(address), platform_name=platform_name, evidence=evidence
+            )
+            if listener.status == "ok" and listener.pid > 0:
+                found[address] = listener
+                continue
+            if listener.status == "missing" and _foreground_endpoint_closed(address, port):
+                continue
+            return None
+        return found if len({listener.pid for listener in found.values()}) == 1 else None
+
+    before = endpoint_listeners()
+    if before is None:
         return None
+    listener_pid = next(iter(before.values())).pid
+    # The private record selects one numeric endpoint. Listener inspection and
+    # the public request both use that endpoint, never a fresh name lookup.
+    record = _running_gateway_record(data_dir, "gateway-api.json", expected_pid=listener_pid)
+    if not isinstance(record, dict) or type(record.get("port")) is not int or record["port"] != port:
+        return None
+    target_ip = _loopback_ip_literal(record.get("host"))
+    if target_ip not in before:
+        return None
+    listener = before[target_ip]
+
+    def runtime_record_matches() -> bool:
+        record = _running_gateway_record(data_dir, "gateway-api.json", expected_pid=listener_pid)
+        return (
+            isinstance(record, dict)
+            and type(record.get("port")) is int
+            and record["port"] == port
+            and _loopback_ip_literal(record.get("host")) == target_ip
+        )
     process = evidence.process(listener.pid)
     if process.status != "ok" or not process.start_identity:
         return None
@@ -6465,19 +6544,13 @@ def _foreground_gateway_status_health(
     except (OSError, ValueError):
         return None
 
-    def runtime_record_matches() -> bool:
-        record = _running_gateway_record(data_dir, "gateway-api.json", expected_pid=listener.pid)
-        if not isinstance(record, dict) or type(record.get("port")) is not int or record["port"] != port:
-            return False
-        return _loopback_ip_literal(record.get("host")) == target_ip
-
     if not runtime_record_matches():
         return None
     peer = _GatewayTrust(
         "trusted", "foreground gateway status only", listener.pid, home_bound=True, process=process
     )
     code, body = _http_probe(
-        _gateway_api_url(cfg, "/health"),
+        f"http://[{target_ip}]:{port}/health" if target_ip.version == 6 else f"http://{target_ip}:{port}/health",
         timeout=3.0,
         response_limit=2 << 20,
         allow_truncation=False,
@@ -6491,11 +6564,12 @@ def _foreground_gateway_status_health(
         return None
     if not isinstance(health, dict) or not isinstance(health.get("gateway"), dict):
         return None
-    after = _managed_gateway_listener_evidence(port, host=host, platform_name=platform_name, evidence=evidence)
+    after = endpoint_listeners()
     current = evidence.process(listener.pid)
     if (
-        after.status != "ok"
-        or after.pid != listener.pid
+        after is None
+        or target_ip not in after
+        or after[target_ip].pid != listener.pid
         or current.status != "ok"
         or current.executable != process.executable
         or current.start_identity != process.start_identity
