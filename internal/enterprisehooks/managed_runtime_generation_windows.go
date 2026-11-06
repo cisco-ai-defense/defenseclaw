@@ -3071,7 +3071,12 @@ func restampWindowsManagedMachineFile(
 		return false, err
 	}
 	if !lock {
-		if refused := windowsManagedPolicySelfHealRefusal(path, managed.ObjectInstallFile, nil); refused != nil {
+		// The refusal also runs the trust walk every reader of the file runs
+		// (fail closed on a descriptor it cannot read), as the self-heal
+		// does, so no file a reader refuses is re-stamped (g582 review 4 F1).
+		if refused := windowsManagedPolicySelfHealRefusal(
+			path, managed.ObjectInstallFile, windowsManagedPolicyFileTrustCheck,
+		); refused != nil {
 			return false, errors.Join(drift, refused)
 		}
 	}

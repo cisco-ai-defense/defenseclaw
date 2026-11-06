@@ -2449,11 +2449,18 @@ var windowsManagedPolicyFolderMarkers = []string{
 }
 
 // windowsManagedPolicyFolderMarker returns the first DefenseClaw marker file
-// directly in folder, or "".
+// directly in folder, or "". A marker that cannot be inspected for any reason
+// but its absence counts as present: an account that can hide a folder's
+// entries from SYSTEM and Administrators must not turn the refusal into a
+// takeover (g582 review 4 F1).
 func windowsManagedPolicyFolderMarker(folder string) string {
 	for _, name := range windowsManagedPolicyFolderMarkers {
-		if _, err := os.Lstat(filepath.Join(folder, name)); err == nil {
+		_, err := os.Lstat(filepath.Join(folder, name))
+		if err == nil {
 			return name
+		}
+		if !errors.Is(err, os.ErrNotExist) {
+			return name + " (it cannot be inspected: " + err.Error() + ")"
 		}
 	}
 	return ""

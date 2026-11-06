@@ -1121,11 +1121,17 @@ func refuseStandaloneReclaim(dir string, trustErr error) error {
 
 // defenseClawEntryIn returns the first entry directly in dir that DefenseClaw
 // writes (a name with "defenseclaw" in it, or the machine policy summary), or
-// "".
+// "". A folder that cannot be listed for any reason but its absence counts as
+// holding one: an account that denies SYSTEM and Administrators
+// FILE_LIST_DIRECTORY must not turn the refusal into a takeover (g582 review
+// 4 F1).
 func defenseClawEntryIn(dir string) string {
 	entries, err := os.ReadDir(dir)
-	if err != nil {
+	if errors.Is(err, os.ErrNotExist) {
 		return ""
+	}
+	if err != nil {
+		return "entries (the folder cannot be listed: " + err.Error() + ")"
 	}
 	for _, entry := range entries {
 		name := strings.ToLower(entry.Name())
