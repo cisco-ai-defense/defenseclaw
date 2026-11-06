@@ -108,6 +108,9 @@ type hookOnlyConnector struct {
 	scriptName  string
 	configPath  func(SetupOpts) string
 	capability  func(SetupOpts) HookCapability
+	// Some hosts identify registrations by an owned top-level key, even
+	// when a later release changes the command stored below it.
+	ownedRegistrationKeyPrefixes []string
 
 	// pluginArtifact connectors are governed by a host-agent plugin FILE
 	// that DefenseClaw writes (and the agent auto-loads) rather than a
@@ -400,11 +403,12 @@ func NewCopilotConnector() *hookOnlyConnector {
 // registration is deterministic and is not duplicated per workspace.
 func NewAntigravityConnector() *hookOnlyConnector {
 	return &hookOnlyConnector{
-		name:        "antigravity",
-		description: "Antigravity (agy) lifecycle hooks with synchronous PreToolUse ask/deny decisions",
-		apiPath:     "/api/v1/antigravity/hook",
-		scriptName:  "antigravity-hook.sh",
-		configPath:  antigravityHooksPath,
+		name:                         "antigravity",
+		description:                  "Antigravity (agy) lifecycle hooks with synchronous PreToolUse ask/deny decisions",
+		apiPath:                      "/api/v1/antigravity/hook",
+		scriptName:                   "antigravity-hook.sh",
+		configPath:                   antigravityHooksPath,
+		ownedRegistrationKeyPrefixes: []string{antigravityOwnedHookKeyPrefix},
 		capability: func(opts SetupOpts) HookCapability {
 			return HookCapability{
 				CanBlock:           true,
@@ -417,6 +421,10 @@ func NewAntigravityConnector() *hookOnlyConnector {
 			}
 		},
 	}
+}
+
+func (c *hookOnlyConnector) orphanedRegistrationKeyPrefixes() []string {
+	return c.ownedRegistrationKeyPrefixes
 }
 
 func (c *hookOnlyConnector) Name() string        { return c.name }

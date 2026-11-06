@@ -101,6 +101,96 @@ func TestConnectorPruneOrphansRemovesHooksOfAConnectorRolledBackAway(t *testing.
 	}
 }
 
+func TestConnectorPruneOrphansRestoresAntigravityAfterRollback(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		initial []byte
+		edited  bool
+	}{
+		{"empty file", []byte("{}\n"), false},
+		{"operator content", []byte("{\n  \"operator\": \"keep\"\n}\n"), false},
+		{"absent file", nil, false},
+		{"operator edit after setup", []byte("{}\n"), true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			root := testenv.PrivateTempDir(t)
+			t.Setenv("HOME", root)
+			t.Setenv("USERPROFILE", root)
+			dataDir := filepath.Join(root, ".defenseclaw")
+			defer withConnectorState(t, dataDir, "codex")()
+			path := filepath.Join(root, ".gemini", "config", "hooks.json")
+			if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+				t.Fatal(err)
+			}
+			previous := connector.AntigravityHooksPathOverride
+			connector.AntigravityHooksPathOverride = path
+			t.Cleanup(func() { connector.AntigravityHooksPathOverride = previous })
+			if tc.initial != nil {
+				if err := os.WriteFile(path, tc.initial, 0o600); err != nil {
+					t.Fatal(err)
+				}
+			}
+			conn := connector.NewAntigravityConnector()
+			if err := conn.Setup(context.Background(), connector.SetupOpts{
+				DataDir: dataDir, APIAddr: "127.0.0.1:18970", APIToken: "test-token",
+			}); err != nil {
+				t.Fatalf("antigravity setup: %v", err)
+			}
+			installed, err := os.ReadFile(path)
+			if err != nil || !bytes.Contains(installed, []byte("defenseclaw-antigravity-stop")) {
+				t.Fatalf("antigravity registration = %q, %v", installed, err)
+			}
+			if tc.edited {
+				var doc map[string]any
+				if err := json.Unmarshal(installed, &doc); err != nil {
+					t.Fatal(err)
+				}
+				doc["operator"] = "later"
+				edited, err := json.Marshal(doc)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if err := os.WriteFile(path, edited, 0o600); err != nil {
+					t.Fatal(err)
+				}
+			}
+			// Rollback swaps the data folder; the vendor file stays outside it.
+			saved := filepath.Join(root, "saved")
+			if err := os.Rename(dataDir, saved); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.MkdirAll(filepath.Join(dataDir, "previous"), 0o700); err != nil {
+				t.Fatal(err)
+			}
+			saved = filepath.Join(dataDir, "previous", "data")
+			if err := os.Rename(filepath.Join(root, "saved"), saved); err != nil {
+				t.Fatal(err)
+			}
+			stdout, stderr, exitCode := runConnectorCmd(t, "prune-orphans", "--connector", "antigravity", "--rollback-backups-dir", saved)
+			wantAction := "restored the previous vendor file"
+			if tc.edited {
+				wantAction = "antigravity is not configured: removed"
+			}
+			if exitCode != 0 || strings.TrimSpace(stderr) != "" || !strings.Contains(stdout, wantAction) {
+				t.Fatalf("prune-orphans: exit=%d stdout=%q stderr=%q", exitCode, stdout, stderr)
+			}
+			after, err := os.ReadFile(path)
+			if tc.edited {
+				var doc map[string]any
+				if err != nil || json.Unmarshal(after, &doc) != nil || len(doc) != 1 || doc["operator"] != "later" {
+					t.Fatalf("edited hooks.json after rollback = %q, %v", after, err)
+				}
+			} else if tc.initial == nil {
+				if !os.IsNotExist(err) {
+					t.Fatalf("hooks.json after rollback = %q, %v; want absent", after, err)
+				}
+			} else if err != nil || !bytes.Equal(after, tc.initial) {
+				t.Fatalf("hooks.json after rollback = %q, %v; want %q", after, err, tc.initial)
+			}
+		})
+	}
+}
+
 // A connector that config.yaml or the runtime connector state names is never
 // an orphan, even while its hook script is missing (doctor reports that).
 func TestConnectorPruneOrphansKeepsConfiguredConnectors(t *testing.T) {

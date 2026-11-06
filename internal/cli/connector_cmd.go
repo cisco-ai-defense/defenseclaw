@@ -67,13 +67,14 @@ config.yaml. 'defenseclaw guardrail status' lists the connector names.
 }
 
 var (
-	connectorFlagName          string
-	connectorFlagJSON          bool
-	connectorFlagDataDir       string
-	connectorFlagConfigHome    string
-	connectorFlagHookExe       string
-	connectorRollbackRestore   bool
-	connectorRollbackToVersion string
+	connectorFlagName           string
+	connectorFlagJSON           bool
+	connectorFlagDataDir        string
+	connectorFlagConfigHome     string
+	connectorFlagHookExe        string
+	connectorRollbackRestore    bool
+	connectorRollbackToVersion  string
+	connectorRollbackBackupsDir string
 )
 
 // connectorExit is the indirection used in place of os.Exit so tests can
@@ -228,6 +229,8 @@ func init() {
 		"Restore authenticated current-release hooks after an aborted rollback")
 	connectorPrepareRollbackCmd.Flags().StringVar(&connectorRollbackToVersion, "to-version", "",
 		"The release the rollback goes to: before 1.0.5, the OpenHands and OmniGent files this release removed come back")
+	connectorPruneOrphansCmd.Flags().StringVar(&connectorRollbackBackupsDir, "rollback-backups-dir", "",
+		"Use the saved newer install's connector backups to restore unchanged vendor files")
 	connectorCmd.PersistentFlags().StringVar(&connectorFlagName, "connector", "",
 		"Connector name (default: the active connector; 'defenseclaw guardrail status' lists them)")
 	connectorCmd.PersistentFlags().BoolVar(&connectorFlagJSON, "json", false,
@@ -1120,6 +1123,17 @@ func runConnectorPruneOrphans(cmd *cobra.Command, _ []string) error {
 	}
 	removed := map[string][]string{}
 	failed := map[string]string{}
+	var restored, kept []string
+	var restoreErr error
+	if connectorRollbackBackupsDir != "" {
+		home, err := os.UserHomeDir()
+		if err != nil {
+			return fmt.Errorf("connector prune-orphans: find the account home: %w", err)
+		}
+		restored, kept, restoreErr = connector.RestoreManagedFileBackupsForRollback(
+			connectorRollbackBackupsDir, dataDir, home, configured, strings.ToLower(strings.TrimSpace(connectorFlagName)),
+		)
+	}
 	for _, name := range names {
 		if configured[name] {
 			continue
@@ -1135,14 +1149,27 @@ func runConnectorPruneOrphans(cmd *cobra.Command, _ []string) error {
 	if connectorFlagJSON {
 		payload := map[string]any{
 			"action":  "prune-orphans",
-			"ok":      len(failed) == 0,
+			"ok":      len(failed) == 0 && restoreErr == nil,
 			"removed": removed,
 			"failed":  failed,
+		}
+		if connectorRollbackBackupsDir != "" {
+			payload["restored_vendor_files"] = restored
+			payload["kept_vendor_files"] = kept
+			if restoreErr != nil {
+				payload["restore_error"] = restoreErr.Error()
+			}
 		}
 		if err := json.NewEncoder(cmd.OutOrStdout()).Encode(payload); err != nil {
 			return err
 		}
 	} else {
+		for _, path := range restored {
+			fmt.Fprintf(cmd.OutOrStdout(), "  %s restored the previous vendor file %s\n", Style(glyph("✓", "OK"), "fg=green", "bold"), path)
+		}
+		if restoreErr != nil {
+			fmt.Fprintf(cmd.ErrOrStderr(), "  %v\n", restoreErr)
+		}
 		for _, name := range names {
 			if paths := removed[name]; len(paths) > 0 {
 				fmt.Fprintf(cmd.OutOrStdout(), "  %s %s is not configured: removed its DefenseClaw hook entries from %s\n",
@@ -1162,6 +1189,9 @@ func runConnectorPruneOrphans(cmd *cobra.Command, _ []string) error {
 		}
 		return fmt.Errorf("connector prune-orphans: could not remove the hook entries of %s",
 			strings.Join(failedNames, ", "))
+	}
+	if restoreErr != nil {
+		return fmt.Errorf("connector prune-orphans: some vendor files could not be restored")
 	}
 	return nil
 }
