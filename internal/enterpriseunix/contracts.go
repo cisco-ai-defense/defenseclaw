@@ -532,16 +532,28 @@ func (l *lifecycle) describeUnprotectedAgents() {
 		l.reportInstallScanPending(reason)
 	} else {
 		// The build and age can match after a connector or policy change.
-		// A readable lifecycle generation and a matching scan stamp are both
-		// required to establish coverage for those inputs (GAP-0640).
-		current, err := configwrite.ReadGenerationState(env.P(env.Layout.ConfigPath))
-		if err != nil || current.Generation == 0 {
-			message := "NOT COVERED (scan pending): the enumerator's scan cannot be matched to the installed config generation"
-			if err != nil {
-				message += ": " + err.Error()
-			} else {
-				message += ": generation is zero"
+		// The scan stamp must name a generation bound to the installed config
+		// bytes; a restored or incomplete generation record is not proof.
+		configPath := env.P(env.Layout.ConfigPath)
+		current, err := configwrite.ReadGenerationState(configPath)
+		reason := ""
+		switch {
+		case err != nil:
+			reason = err.Error()
+		case current.Generation == 0:
+			reason = "generation is zero"
+		case current.ConfigSHA256 == "":
+			reason = "config digest is missing"
+		default:
+			installed, readErr := readBounded(configPath, maxInputBytes)
+			if readErr != nil {
+				reason = "config.yaml cannot be read: " + readErr.Error()
+			} else if sha256Bytes(installed) != current.ConfigSHA256 {
+				reason = "config digest differs from config.yaml"
 			}
+		}
+		if reason != "" {
+			message := "NOT COVERED (scan pending): the enumerator's scan cannot be matched to the installed config generation: " + reason
 			if l.opts.Action == ActionVerify {
 				r.AddError(enterprisehooks.UnprotectedCodeInstallScanIncomplete, message)
 			} else {
