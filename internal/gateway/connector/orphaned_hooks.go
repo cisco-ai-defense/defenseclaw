@@ -215,13 +215,12 @@ func (c *hookOnlyConnector) orphanedOtherHermesHomes(opts SetupOpts) ([]string, 
 		return nil, err
 	}
 	hookScript := c.hookCommand(opts)
-	command := hermesConfiguredHookCommand(hookScript, opts.HookExecutable)
 	var found []string
 	for _, other := range []string{bound, profileDefault} {
 		if other == "" {
 			continue
 		}
-		hooks, approvals, err := hermesHomeHoldsOwnedEntries(other, hookScript, command)
+		hooks, approvals, err := hermesHomeHoldsOwnedEntries(other, hookScript)
 		if err != nil {
 			return nil, err
 		}

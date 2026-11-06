@@ -328,6 +328,92 @@ func editedDefenseClawHookCommand(command, scriptName string) bool {
 	return copiedDefenseClawHookCommand(command, scriptName)
 }
 
+// hookCommandResolvesInHookDir recognizes a command whose executable is in
+// this installation's hook directory, including a file that is now missing.
+// The resolved location matters: a user hook outside the directory, or a
+// link from the directory to a user hook, is not owned by the installation.
+func hookCommandResolvesInHookDir(command, hookScript string) bool {
+	rest, within := hookCommandPathInHookDir(command, hookScript)
+	return within && strings.TrimSpace(rest) == ""
+}
+
+// hookCommandPathInHookDir returns the suffix after a command's first
+// executable word. Callers can refuse a combined command without removing
+// an independent action that follows an owned path.
+func hookCommandPathInHookDir(command, hookScript string) (string, bool) {
+	if runtime.GOOS == "windows" || !filepath.IsAbs(hookScript) {
+		return "", false
+	}
+	word, rest, ok := hookScriptWordAfterWrapper(strings.TrimSpace(command))
+	if !ok || !path.IsAbs(word) || strings.HasPrefix(word, "//") || strings.ContainsAny(word, "\x00\r\n") {
+		return "", false
+	}
+	dir, ok := resolveHookPathAllowMissing(filepath.Dir(hookScript))
+	if !ok {
+		return "", false
+	}
+	target, ok := resolveHookPathAllowMissing(word)
+	if !ok {
+		return "", false
+	}
+	relative, err := filepath.Rel(dir, target)
+	return rest, err == nil && relative != "." && relative != ".." &&
+		!strings.HasPrefix(relative, ".."+string(filepath.Separator))
+}
+
+// resolveHookPathAllowMissing resolves existing ancestors so a removed hook
+// file can still be classified by its directory. A dangling link is not a
+// missing file in that directory and cannot establish ownership.
+func resolveHookPathAllowMissing(name string) (string, bool) {
+	return resolveHookPathAllowMissingDepth(name, 0)
+}
+
+func resolveHookPathAllowMissingDepth(name string, depth int) (string, bool) {
+	if depth > 16 {
+		return "", false
+	}
+	name = filepath.Clean(name)
+	var missing []string
+	for {
+		resolved, err := filepath.EvalSymlinks(name)
+		if err == nil {
+			for i := len(missing) - 1; i >= 0; i-- {
+				resolved = filepath.Join(resolved, missing[i])
+			}
+			return filepath.Clean(resolved), true
+		}
+		if !os.IsNotExist(err) {
+			return "", false
+		}
+		if info, statErr := os.Lstat(name); statErr == nil && info.Mode()&os.ModeSymlink != 0 {
+			target, readErr := os.Readlink(name)
+			if readErr != nil {
+				return "", false
+			}
+			if !filepath.IsAbs(target) {
+				target = filepath.Join(filepath.Dir(name), target)
+			}
+			resolved, valid := resolveHookPathAllowMissingDepth(target, depth+1)
+			if !valid {
+				return "", false
+			}
+			for i := len(missing) - 1; i >= 0; i-- {
+				resolved = filepath.Join(resolved, missing[i])
+			}
+			return filepath.Clean(resolved), true
+		}
+		parent := filepath.Dir(name)
+		if parent == name {
+			return "", false
+		}
+		missing = append(missing, filepath.Base(name))
+		if len(missing) > 64 {
+			return "", false
+		}
+		name = parent
+	}
+}
+
 // defenseClawHookBinding reports whether rest, the text after a hook
 // command's script word, starts with DefenseClaw's --event or
 // --hook-surface binding.
