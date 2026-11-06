@@ -1239,15 +1239,26 @@ func writeWindowsEnterprisePolicyState(state *enterprisestatus.PolicyState) erro
 // the old file is renamed aside before the new one takes the name, so a
 // handle another account opened on it while it could write it keeps pointing
 // at the replaced object, which is then deleted (GAP-0561, GAP-0590). A
-// failed rename puts the old file back.
+// failed rename puts the old file back. The owner is the one sddl names
+// (Administrators), whatever owner the token gives new files: under the
+// "Object creator" default-owner policy the administrator who ran Setup owned
+// the new file, and the gateway's standalone walk and Setup's gate refuse
+// that owner (GAP-0590 review S2).
 func writeFreshFileWithDACL(path string, data []byte, sddl string) error {
 	descriptor, err := windows.SecurityDescriptorFromString(sddl)
+	if err != nil {
+		return err
+	}
+	owner, _, err := descriptor.Owner()
 	if err != nil {
 		return err
 	}
 	dacl, _, err := descriptor.DACL()
 	if err != nil {
 		return err
+	}
+	if owner == nil || dacl == nil {
+		return fmt.Errorf("the descriptor %q for %s names no owner or no access list", sddl, path)
 	}
 	staging, err := os.CreateTemp(filepath.Dir(path), filepath.Base(path)+".*.tmp")
 	if err != nil {
@@ -1262,7 +1273,8 @@ func writeFreshFileWithDACL(path string, data []byte, sddl string) error {
 		var extended string
 		if extended, writeErr = winpath.Extended(temporary); writeErr == nil {
 			writeErr = windows.SetNamedSecurityInfo(extended, windows.SE_FILE_OBJECT,
-				windows.DACL_SECURITY_INFORMATION|windows.PROTECTED_DACL_SECURITY_INFORMATION, nil, nil, dacl, nil)
+				windows.OWNER_SECURITY_INFORMATION|windows.DACL_SECURITY_INFORMATION|windows.PROTECTED_DACL_SECURITY_INFORMATION,
+				owner, nil, dacl, nil)
 		}
 	}
 	if writeErr != nil {
