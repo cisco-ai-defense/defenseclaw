@@ -31,6 +31,10 @@ func TestProtectedReachGradesNamedAndOrdinaryPaths(t *testing.T) {
 	if err := os.WriteFile(ordinary, []byte("notes\n"), 0600); err != nil {
 		t.Fatal(err)
 	}
+	knownHosts := filepath.Join(home, ".ssh", "known_hosts")
+	if err := os.WriteFile(knownHosts, []byte("fixture\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
 	direct := filepath.Join(project, "direct")
 	relative := filepath.Join(project, "relative")
 	parent := filepath.Join(project, "linked-dir")
@@ -97,6 +101,7 @@ func TestProtectedReachGradesNamedAndOrdinaryPaths(t *testing.T) {
 		{"ordinary-file", ordinary, GradeNone},
 		{"ordinary-missing", filepath.Join(project, "new.txt"), GradeNone},
 		{"ordinary-parent-link", filepath.Join(ordinaryParent, "new.txt"), GradeNone},
+		{"ordinary-ssh-file", knownHosts, GradeNone},
 		{"ordinary-ssh-sibling", filepath.Join(home, ".ssh", "notes.txt"), GradeNone},
 		{"ordinary-state-sibling", filepath.Join(home, ".defenseclaw", "notes.txt"), GradeNone},
 	} {

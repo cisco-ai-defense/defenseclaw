@@ -43,6 +43,12 @@ if read_old in original:
         if os.Getenv("R482_DELAY_TARGET") == name {
             time.Sleep(2 * time.Second)
         }
+        if delay := os.Getenv("R482_FAKE_SHARE_DELAY_MS"); delay != "" && root != "" &&
+            (name == root || strings.HasPrefix(name, root+string(filepath.Separator))) {
+            if duration, err := time.ParseDuration(delay + "ms"); err == nil {
+                time.Sleep(duration)
+            }
+        }
         if os.Getenv("R482_FAKE_SHARE_DELAY120") == "1" && root != "" &&
             (name == root || strings.HasPrefix(name, root+string(filepath.Separator))) {
             time.Sleep(120 * time.Millisecond)

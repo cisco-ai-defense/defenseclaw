@@ -1124,6 +1124,9 @@ func trustedExistingAuthorizedKeysSymlinkWrite(request trustedActionRequest, fac
 	// the command is known, before the first writeTarget call.
 	var links hookpaths.Links
 	var safeRedirects []hookpaths.RedirectOccurrence
+	// Read a static write on a share before the broad command-word scan
+	// spends the share's first-contact window on a non-write word.
+	var preReach map[string]hookpaths.Grade
 	// A plain mv onto an existing link to a file replaces the link entry
 	// and writes neither file (GAP-2559); a gateway that reads the file
 	// system judges that destination by its entry. Behind ProtectHome the
@@ -1225,6 +1228,14 @@ func trustedExistingAuthorizedKeysSymlinkWrite(request trustedActionRequest, fac
 		if isProtected(clientTargets[target]) {
 			return true
 		}
+		localReach := hookpaths.GradeNone
+		if !cannotResolveLocally {
+			var warmed bool
+			localReach, warmed = preReach[target]
+			if !warmed {
+				localReach = hookpaths.ProtectedReach(target, facts.ActiveHome, request.targetMemo)
+			}
+		}
 		if linked, ok := links.Target(target); ok && isProtected(linked) {
 			return true
 		}
@@ -1294,7 +1305,7 @@ func trustedExistingAuthorizedKeysSymlinkWrite(request trustedActionRequest, fac
 				}
 			}
 		}
-		if request.SkipLocalFilesystemResolution {
+		if cannotResolveLocally {
 			return false
 		}
 		// A name that a link earlier in the command makes an alias of a
@@ -1316,7 +1327,7 @@ func trustedExistingAuthorizedKeysSymlinkWrite(request trustedActionRequest, fac
 				return true
 			}
 		}
-		switch hookpaths.ProtectedReach(target, facts.ActiveHome, request.targetMemo) {
+		switch localReach {
 		case hookpaths.GradeNamed:
 			return true
 		case hookpaths.GradePossible:
@@ -1338,6 +1349,20 @@ func trustedExistingAuthorizedKeysSymlinkWrite(request trustedActionRequest, fac
 		}
 		if json.Unmarshal(input.Args, &args) == nil {
 			input.Command = args.Cmd
+		}
+	}
+	if !cannotResolveLocally && input.Command != "" {
+		if writes, parsed, _ := hookpaths.ShellWriteOperands(input.Command, input.CWD, facts.ActiveHome); parsed {
+			for _, target := range writes {
+				if hookpaths.SharePath(target) {
+					if preReach == nil {
+						preReach = make(map[string]hookpaths.Grade)
+					}
+					if _, read := preReach[target]; !read {
+						preReach[target] = hookpaths.ProtectedReach(target, facts.ActiveHome, request.targetMemo)
+					}
+				}
+			}
 		}
 	}
 	if !request.ProtectedHomeHook && trustedPOSIXShellCall(input, facts) &&
