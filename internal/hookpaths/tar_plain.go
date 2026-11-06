@@ -88,6 +88,31 @@ func tarArchiveHoldsNoLink(program string, args []string, static []bool, cwd, co
 	return plain
 }
 
+// tarArchiveLinkEvidence records or reads positive scope-retaining tar evidence.
+// The caller uses it only when earlier statements cannot rewrite the archive.
+func tarArchiveLinkEvidence(program string, args []string, static []bool, cwd, command string, facts map[string]string, record bool) bool {
+	if !strings.HasSuffix(program, "tar") || !filepath.IsAbs(cwd) {
+		return false
+	}
+	if _, _, extract, ok := tarScan(args, static, cwd); !ok || !extract {
+		return false
+	}
+	archive, ok := tarArchiveWord(args, static)
+	if !ok || archive == "" || archive == "-" || strings.ContainsAny(archive, "*?[$`") ||
+		strings.Count(command, filepath.Base(archive)) != 1 {
+		return false
+	}
+	path := OperandPath(archive, cwd)
+	if !record && facts != nil && facts[TarLinkFactPrefix+path] == "1" {
+		return true
+	}
+	linked := tarArchiveKind(path) == 2
+	if linked && record && facts != nil {
+		facts[TarLinkFactPrefix+path] = "1"
+	}
+	return linked
+}
+
 // tarArchiveWord returns the one archive operand of a tar call: -f FILE,
 // -fFILE, a cluster ending in f followed by FILE, --file FILE, --file=FILE,
 // or an old-style cluster (xf FILE). ok is false for none or more than one.
@@ -150,13 +175,22 @@ func tarArchiveWord(args []string, static []bool) (string, bool) {
 // is a regular file or a directory with a relative name and no ..
 // component, within the bounds.
 func tarArchivePlain(path string) bool {
+	return tarArchiveKind(path) == 1
+}
+
+// tarArchiveKind is unknown (0), plain (1), or positive reason to retain the
+// conservative scope (2): a non-plain member, unsafe name, or exceeded bound.
+func tarArchiveKind(path string) int {
 	info, err := os.Stat(path)
-	if err != nil || !info.Mode().IsRegular() || info.Size() > maxTarPlainBytes {
-		return false
+	if err != nil || !info.Mode().IsRegular() {
+		return 0
+	}
+	if info.Size() > maxTarPlainBytes {
+		return 2
 	}
 	file, err := os.Open(path)
 	if err != nil {
-		return false
+		return 0
 	}
 	defer file.Close()
 	buffered := bufio.NewReader(io.LimitReader(file, maxTarPlainBytes))
@@ -166,7 +200,7 @@ func tarArchivePlain(path string) bool {
 	case len(magic) >= 2 && magic[0] == 0x1f && magic[1] == 0x8b:
 		zipped, err := gzip.NewReader(buffered)
 		if err != nil {
-			return false
+			return 0
 		}
 		defer zipped.Close()
 		stream = zipped
@@ -175,29 +209,42 @@ func tarArchivePlain(path string) bool {
 	}
 	reader := tar.NewReader(&boundedReader{r: stream, n: maxTarPlainBytes})
 	members := 0
+	nonPlain := false
 	for {
 		header, err := reader.Next()
 		if err == io.EOF {
-			return members > 0
+			if members == 0 {
+				return 0
+			}
+			if nonPlain {
+				return 2
+			}
+			return 1
 		}
 		if err != nil {
-			return false
+			if errors.Is(err, errTarPlainBound) {
+				return 2
+			}
+			if nonPlain {
+				return 2
+			}
+			return 0
 		}
 		if members++; members > maxTarPlainMembers {
-			return false
+			return 2
 		}
 		switch header.Typeflag {
 		case tar.TypeReg, tar.TypeDir:
 		default:
-			return false
+			nonPlain = true
 		}
 		name := filepath.ToSlash(header.Name)
 		if name == "" || strings.HasPrefix(name, "/") || filepath.IsAbs(header.Name) || strings.Contains(name, "\\") {
-			return false
+			return 2
 		}
 		for _, part := range strings.Split(name, "/") {
 			if part == ".." {
-				return false
+				return 2
 			}
 		}
 	}
