@@ -445,9 +445,9 @@ func TestWindowsEnterpriseUnparseableRescueRecordsTheSuppliedConfigAsTheLifecycl
 	if err := os.WriteFile(host.configPath, []byte(broken), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	kept, err := installWindowsEnterpriseSuppliedConfigOverUnparseable(opts.configPath)
-	if err != nil || kept == "" {
-		t.Fatalf("rescue = (%q, %v), want the broken config kept", kept, err)
+	replaced, err := installWindowsEnterpriseSuppliedConfigOverRefused(opts.configPath)
+	if err != nil || replaced.kept == "" {
+		t.Fatalf("rescue = (%+v, %v), want the broken config kept", replaced, err)
 	}
 	state, err := configwrite.ReadGenerationState(host.configPath)
 	if err != nil || state.Actor != configwrite.ActorLifecycle || state.ConfigSHA256 != configwrite.SHA256Hex([]byte(candidate)) ||
